@@ -1,0 +1,20 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "connect_count": 2,
+  "device_id": "<device_id>",
+  "disconnect_count": 1,
+  "event": "connection_stability",
+  "is_shutdown": false,
+  "klippy_error_count": 1,
+  "klippy_shutdown_count": 0,
+  "longest_disconnect_sec": 5,
+  "schema_version": 3,
+  "session_duration_sec": 0,
+  "snapshot_seq": 0,
+  "timestamp": "<timestamp>",
+  "total_connected_sec": 30,
+  "total_disconnected_sec": 5
+}

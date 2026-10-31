@@ -91,7 +91,7 @@ uint32_t resolved(const GCodeLayerRenderer& renderer, int tool) {
 /// A viewer with a real canvas: the fallback reads the widget's coords for the
 /// renderer's canvas size, and auto_fit() divides by them.
 lv_obj_t* make_viewer(lv_obj_t* parent) {
-    lv_obj_t* viewer = ui_gcode_viewer_create(parent);
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
     lv_obj_set_size(viewer, 400, 300);
     lv_obj_update_layout(viewer);
@@ -139,7 +139,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "the budget 2D fallback keeps the AMS tool col
     // Applied before any renderer exists, which is the ordering the fallback has
     // to survive: the viewer holds the lane colours and hands them to whatever
     // renderer it creates next.
-    ui_gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
+    helix::ui::gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
     REQUIRE(helix::test_access::gcode_viewer_tool_colors(viewer) ==
             std::vector<uint32_t>{kLaneT0, kLaneT1});
 
@@ -171,7 +171,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "the budget 2D fallback takes the viewer's fra
         GCodeLayerRenderer fresh;
         REQUIRE(GCodeLayerRendererTestAccess::framing(fresh) == FitFraming::STANDARD);
     }
-    ui_gcode_viewer_set_thumbnail_parity(viewer, true);
+    helix::ui::gcode_viewer_set_thumbnail_parity(viewer, true);
 
     const GCodeLayerRenderer* renderer = gcode_viewer_budget_force_2d(viewer, make_two_tool_file());
     REQUIRE(renderer != nullptr);

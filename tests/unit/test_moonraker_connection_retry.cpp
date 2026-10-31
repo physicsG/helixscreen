@@ -32,7 +32,7 @@ using namespace std::chrono;
  */
 
 // Test constants
-static constexpr uint32_t TEST_TIMEOUT_MS = 1000; // 1 second for fast tests
+static constexpr uint32_t kTestTimeoutMs = 1000; // 1 second for fast tests
 static constexpr const char* INVALID_URL = "ws://192.0.2.1:7125/websocket"; // RFC 5737 TEST-NET-1
 
 /**
@@ -48,8 +48,8 @@ class MoonrakerConnectionRetryFixture {
         client_ = std::make_unique<MoonrakerClient>(loop_thread_->loop());
 
         // Configure short timeouts for faster testing
-        client_->set_connection_timeout(TEST_TIMEOUT_MS);
-        client_->set_default_request_timeout(TEST_TIMEOUT_MS);
+        client_->set_connection_timeout(kTestTimeoutMs);
+        client_->set_default_request_timeout(kTestTimeoutMs);
 
         // Disable auto-reconnect for manual retry testing
         client_->setReconnect(nullptr);
@@ -101,8 +101,8 @@ TEST_CASE("Moonraker connection retries work correctly", "[connection][eventloop
         auto duration = duration_cast<milliseconds>(steady_clock::now() - start).count();
 
         REQUIRE(disconnected);
-        CHECK(duration >= TEST_TIMEOUT_MS - 500); // Within 500ms tolerance
-        CHECK(duration < TEST_TIMEOUT_MS * 2);    // Should not exceed 2x configured value
+        CHECK(duration >= kTestTimeoutMs - 500); // Within 500ms tolerance
+        CHECK(duration < kTestTimeoutMs * 2);    // Should not exceed 2x configured value
     }
 
     SECTION("Second connection attempt also respects timeout (not instant failure)") {
@@ -154,12 +154,12 @@ TEST_CASE("Moonraker connection retries work correctly", "[connection][eventloop
         for (size_t i = 0; i < durations.size(); i++) {
             INFO("Attempt " << (i + 1) << " took " << durations[i].count() << "ms");
             CHECK(durations[i].count() >= 100); // Should NOT fail instantly
-            CHECK(durations[i].count() < TEST_TIMEOUT_MS * 2);
+            CHECK(durations[i].count() < kTestTimeoutMs * 2);
         }
     }
 
     SECTION("Multiple rapid retries all work correctly") {
-        constexpr int NUM_RETRIES = 5;
+        constexpr int kNumRetries = 5;
         std::atomic<int> attempt{0};
         std::mutex durations_mutex;
         std::vector<milliseconds> durations;
@@ -183,7 +183,7 @@ TEST_CASE("Moonraker connection retries work correctly", "[connection][eventloop
                         durations.push_back(duration);
                     }
 
-                    if (current_attempt < NUM_RETRIES) {
+                    if (current_attempt < kNumRetries) {
                         // Immediate retry (no delay) - tests the bug fix
                         do_attempt();
                     } else {
@@ -200,7 +200,7 @@ TEST_CASE("Moonraker connection retries work correctly", "[connection][eventloop
         }
 
         std::lock_guard<std::mutex> lock(durations_mutex);
-        REQUIRE(durations.size() == NUM_RETRIES);
+        REQUIRE(durations.size() == kNumRetries);
 
         // All attempts should take approximately the timeout duration
         for (size_t i = 0; i < durations.size(); i++) {

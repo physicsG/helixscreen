@@ -53,7 +53,7 @@ void count_delete(lv_event_t* e) {
 /// Seed NavigationManager the way the app does: panel_stack_[0] holds the
 /// active root panel, which push_overlay() reads beneath each overlay.
 void seed_nav_panels() {
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());

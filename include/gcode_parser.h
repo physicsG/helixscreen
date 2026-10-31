@@ -488,7 +488,7 @@ class GCodeParser {
      * Extracts movement commands, coordinate changes, and object metadata.
      * Automatically detects layer changes (Z-axis movement).
      */
-    void parse_line(const std::string& line);
+    void parse_line(std::string_view line);
 
     /**
      * @brief Finalize parsing and return complete data structure
@@ -664,17 +664,17 @@ class GCodeParser {
      * @param line Trimmed G-code line
      * @return true if parsed successfully
      */
-    bool parse_movement_command(const std::string& line);
+    bool parse_movement_command(std::string_view line);
 
     /**
      * @brief Parse G92 (set position) command
      */
-    void parse_set_position_command(const std::string& line);
+    void parse_set_position_command(std::string_view line);
 
     /**
      * @brief Parse G2/G3 arc command, linearizing into short line segments
      */
-    void parse_arc_command(const std::string& line, bool clockwise);
+    void parse_arc_command(std::string_view line, bool clockwise);
 
     /**
      * @brief Parse EXCLUDE_OBJECT_* command
@@ -735,7 +735,7 @@ class GCodeParser {
      * @param out_value Output value
      * @return true if parameter found
      */
-    bool extract_param(const std::string& line, char param, float& out_value);
+    bool extract_param(std::string_view line, char param, float& out_value);
 
     /**
      * @brief Extract string parameter value
@@ -785,15 +785,22 @@ class GCodeParser {
     /**
      * @brief Trim whitespace and comments from line
      * @param line Raw line
-     * @return Trimmed line
+     * @return Trimmed line, a view into @p line
      */
-    std::string trim_line(const std::string& line);
+    static std::string_view trim_line(std::string_view line);
 
     // Parser state
     glm::vec3 current_position_{0.0f, 0.0f, 0.0f}; ///< Current XYZ position
     float current_e_{0.0f};                        ///< Current E (extruder) position
     std::string current_object_;       ///< Current object name (from EXCLUDE_OBJECT_START)
     int16_t current_object_index_{-1}; ///< Current object name index for segments
+    /// objects_ entry for current_object_, or null when it has none. Refreshed
+    /// wherever either changes (refresh_current_object_entry()), so a segment
+    /// never pays a string-keyed lookup.
+    GCodeObject* current_object_entry_{nullptr};
+    /// Interned index of the wipe tower's special name, -1 until first used.
+    int16_t wipe_tower_name_index_{-1};
+    void refresh_current_object_entry();
     std::unordered_map<std::string, int16_t> object_name_lookup_; ///< O(1) name → index
     std::vector<std::string> object_name_table_;                  ///< Accumulated string table
     bool is_absolute_positioning_{true}; ///< G90 (absolute) vs G91 (relative)
@@ -990,9 +997,12 @@ std::set<int> scan_tools_used_from_content(const std::string& content,
  *
  * The single T-parse shared by every scan in the tree: the full parser, the
  * streaming layer index, the tools-used scans and the tool remapper. Strip a
- * trailing `;` comment, trim surrounding whitespace, then require exactly `T`
- * followed by one or more digits. `  T2 ; change` is a tool change; `T0 X1`,
- * `TURN_OFF_HEATERS` and a `Tn` inside a comment are not. Scans disagreeing
+ * trailing `;` comment, trim surrounding whitespace, then require `T` followed
+ * by one or more digits, optionally followed by whitespace-separated Klipper
+ * macro parameters (`KEY=VALUE`, KEY of letters, digits and `_`, VALUE
+ * non-empty). `  T2 ; change` and `T0 PURGE_LENGTH=121.4 NEW_EXTRUDER_TEMP=222`
+ * are tool changes; `T0 X1`, `T0X1`, `TURN_OFF_HEATERS` and a `Tn` inside a
+ * comment are not. Scans disagreeing
  * about what a tool change is put the streamed and full-load previews on
  * different tool sets, and leave a remapped file on the original tool.
  *
@@ -1001,10 +1011,27 @@ std::set<int> scan_tools_used_from_content(const std::string& content,
  *
  * @param raw One raw G-code line, with or without a trailing `\r`.
  * @param digits When non-null and @p raw is a tool change, receives the
- *        [begin, end) offsets of the tool number within @p raw.
+ *        [begin, end) offsets of the tool number within @p raw; any
+ *        parameters after it lie outside that span.
  * @return Tool index >= 0, or -1 if @p raw is not a standalone tool change.
  */
 int tool_index_for_line(const std::string& raw, std::pair<size_t, size_t>* digits = nullptr);
+
+/// Largest gap allowed between a linearized G2/G3 arc and its chords, in mm.
+/// Below a pixel at any zoom the viewers reach, so the chords draw as the arc.
+inline constexpr float kArcChordToleranceMm = 0.02f;
+
+/// Most chords one arc is split into, whatever its size.
+inline constexpr int kMaxArcSegments = 128;
+
+/**
+ * @brief How many chords an arc of @p radius_mm sweeping @p sweep_rad needs.
+ *
+ * The fewest whose deviation from the arc stays within kArcChordToleranceMm,
+ * clamped to [1, kMaxArcSegments]. A sliced fillet a fraction of a millimetre
+ * across needs two or three; an arc no larger than the tolerance needs one.
+ */
+int arc_segment_count(float radius_mm, float sweep_rad);
 
 /**
  * @brief Streaming, memory-safe variant of scan_tools_used_from_content() that
@@ -1022,10 +1049,14 @@ int tool_index_for_line(const std::string& raw, std::pair<size_t, size_t>* digit
  *        (get_used_tool_info() filters to palette indices), so a missed
  *        beyond-palette tool is invisible. Empty set => scan whole file
  *        (back-compat).
+ * @param opened When given, set to whether the file could be opened, so an
+ *        empty result from a missing file is not mistaken for a file with
+ *        no tool changes.
  * @return Distinct tool indices seen (empty if the file can't be opened).
  */
 std::set<int> scan_tools_used_from_file(const std::string& filepath,
-                                        std::set<int> early_exit_full_set = {});
+                                        std::set<int> early_exit_full_set = {},
+                                        bool* opened = nullptr);
 
 } // namespace gcode
 } // namespace helix

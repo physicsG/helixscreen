@@ -56,54 +56,54 @@ namespace helix::widget_size {
 
 /// font_body px per tier, the ladder the bands are scaled against. Mirrors the
 /// font_body_<tier> tokens in ui_xml/globals.xml.
-inline constexpr int FONT_BODY_PX[] = {12, 12, 14, 18, 20, 24, 32};
-static_assert(std::size(FONT_BODY_PX) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
+inline constexpr int kFontBodyPx[] = {12, 12, 14, 18, 20, 24, 32};
+static_assert(std::size(kFontBodyPx) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
               "FONT_BODY_PX must carry one font size per UiBreakpoint tier");
 
 /// The tier the four base values were measured on. Its ladder entry is the
 /// divisor, so the Small rung of every band is the measured value unchanged.
-inline constexpr UiBreakpoint BASE_TIER = UiBreakpoint::Small;
-inline constexpr int BASE_FONT_BODY_PX = FONT_BODY_PX[static_cast<size_t>(to_int(BASE_TIER))];
+inline constexpr UiBreakpoint kBaseTier = UiBreakpoint::Small;
+inline constexpr int kBaseFontBodyPx = kFontBodyPx[static_cast<size_t>(to_int(kBaseTier))];
 
 /// One base value spread across the tiers, rounded to whole pixels.
-constexpr std::array<int, std::size(FONT_BODY_PX)> band_ladder(int base_px) {
-    std::array<int, std::size(FONT_BODY_PX)> out{};
+constexpr std::array<int, std::size(kFontBodyPx)> band_ladder(int base_px) {
+    std::array<int, std::size(kFontBodyPx)> out{};
     for (size_t i = 0; i < out.size(); ++i) {
-        out[i] = (base_px * FONT_BODY_PX[i] + BASE_FONT_BODY_PX / 2) / BASE_FONT_BODY_PX;
+        out[i] = (base_px * kFontBodyPx[i] + kBaseFontBodyPx / 2) / kBaseFontBodyPx;
     }
     return out;
 }
 
 /// Smallest measured 2-column width (Small span2). -> 116 116 135 174 193 231 309
-inline constexpr auto W_NORMAL_PX = band_ladder(135);
+inline constexpr auto kWNormalPx = band_ladder(135);
 /// Smallest measured 3-column width (Small span3). -> 176 176 205 264 293 351 469
-inline constexpr auto W_WIDE_PX = band_ladder(205);
+inline constexpr auto kWWidePx = band_ladder(205);
 /// Smallest measured 2-row height (Micro row2). -> 112 112 131 168 187 225 299
-inline constexpr auto H_TALL_PX = band_ladder(131);
+inline constexpr auto kHTallPx = band_ladder(131);
 /// Smallest measured 3-row height (Micro row3, 197.5 truncated to 197 at
 /// runtime - already the `>=` value). -> 169 169 197 253 281 338 450
-inline constexpr auto H_TALLER_PX = band_ladder(197);
+inline constexpr auto kHTallerPx = band_ladder(197);
 
-static_assert(std::size(W_NORMAL_PX) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
+static_assert(std::size(kWNormalPx) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
               "W_NORMAL_PX must carry one width per UiBreakpoint tier");
-static_assert(std::size(W_WIDE_PX) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
+static_assert(std::size(kWWidePx) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
               "W_WIDE_PX must carry one width per UiBreakpoint tier");
-static_assert(std::size(H_TALL_PX) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
+static_assert(std::size(kHTallPx) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
               "H_TALL_PX must carry one height per UiBreakpoint tier");
-static_assert(std::size(H_TALLER_PX) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
+static_assert(std::size(kHTallerPx) == static_cast<size_t>(to_int(UiBreakpoint::XXLarge)) + 1,
               "H_TALLER_PX must carry one height per UiBreakpoint tier");
 
 // The Small rung is the measured value itself, so a change to the rounding
 // cannot silently move the tier the numbers were calibrated on.
-static_assert(W_NORMAL_PX[static_cast<size_t>(to_int(BASE_TIER))] == 135);
-static_assert(W_WIDE_PX[static_cast<size_t>(to_int(BASE_TIER))] == 205);
-static_assert(H_TALL_PX[static_cast<size_t>(to_int(BASE_TIER))] == 131);
-static_assert(H_TALLER_PX[static_cast<size_t>(to_int(BASE_TIER))] == 197);
+static_assert(kWNormalPx[static_cast<size_t>(to_int(kBaseTier))] == 135);
+static_assert(kWWidePx[static_cast<size_t>(to_int(kBaseTier))] == 205);
+static_assert(kHTallPx[static_cast<size_t>(to_int(kBaseTier))] == 131);
+static_assert(kHTallerPx[static_cast<size_t>(to_int(kBaseTier))] == 197);
 
 namespace detail {
 /// Clamped table read. A tier out of range would otherwise index off the end
 /// of a seven-entry table with whatever int a caller happened to hold.
-constexpr int band_at(const std::array<int, std::size(FONT_BODY_PX)>& table, UiBreakpoint bp) {
+constexpr int band_at(const std::array<int, std::size(kFontBodyPx)>& table, UiBreakpoint bp) {
     int32_t i = to_int(bp);
     if (i < to_int(UiBreakpoint::Micro)) {
         i = to_int(UiBreakpoint::Micro);
@@ -131,7 +131,7 @@ constexpr int band_at(const std::array<int, std::size(FONT_BODY_PX)>& table, UiB
 /// at every scale — the scale-axis counterpart of what the font_body ladder
 /// does across tiers. active_scale() is 1.0 on every shipping printer (all sit
 /// inside the DPI deadband), which makes this an exact no-op there.
-inline int scaled_band(const std::array<int, std::size(FONT_BODY_PX)>& table, UiBreakpoint bp) {
+inline int scaled_band(const std::array<int, std::size(kFontBodyPx)>& table, UiBreakpoint bp) {
     return DisplayMetrics::scaled_px(band_at(table, bp), DisplayMetrics::active_scale());
 }
 } // namespace detail
@@ -158,16 +158,16 @@ inline UiBreakpoint current_breakpoint() {
 /// than per-tier, so these carry it too: a caller naming a tier is choosing
 /// which type ladder to measure against, not opting out of the panel's scale.
 inline int w_normal(UiBreakpoint bp) {
-    return detail::scaled_band(W_NORMAL_PX, bp);
+    return detail::scaled_band(kWNormalPx, bp);
 }
 inline int w_wide(UiBreakpoint bp) {
-    return detail::scaled_band(W_WIDE_PX, bp);
+    return detail::scaled_band(kWWidePx, bp);
 }
 inline int h_tall(UiBreakpoint bp) {
-    return detail::scaled_band(H_TALL_PX, bp);
+    return detail::scaled_band(kHTallPx, bp);
 }
 inline int h_taller(UiBreakpoint bp) {
-    return detail::scaled_band(H_TALLER_PX, bp);
+    return detail::scaled_band(kHTallerPx, bp);
 }
 
 /// Band for the tier now on screen. What a widget's on_size_changed() wants:

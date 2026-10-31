@@ -135,7 +135,7 @@ class BackgroundGhostBuilder {
     // UI yielding: timestamp of last user navigation (nanoseconds since steady_clock epoch)
     // Stored as int64_t because GCC 7 doesn't support atomic<time_point>
     std::atomic<int64_t> last_user_request_ns_{0};
-    static constexpr std::chrono::milliseconds YIELD_DURATION{50};
+    static constexpr std::chrono::milliseconds kYieldDuration{50};
 };
 
 /**
@@ -170,10 +170,10 @@ class BackgroundGhostBuilder {
 class GCodeStreamingController {
   public:
     /// Default prefetch radius (layers around current view to preload)
-    static constexpr size_t DEFAULT_PREFETCH_RADIUS = 3;
+    static constexpr size_t kDefaultPrefetchRadius = 3;
 
     /// Minimum cache budget (1MB)
-    static constexpr size_t MIN_CACHE_BUDGET = 1 * 1024 * 1024;
+    static constexpr size_t kMinCacheBudget = 1 * 1024 * 1024;
 
     /**
      * @brief Construct controller with default settings
@@ -232,6 +232,14 @@ class GCodeStreamingController {
      * @return true if successful
      */
     bool open_source(std::unique_ptr<GCodeDataSource> source);
+
+    /// Build the next open's index from the HelixPrint plugin's layer index
+    /// sidecar (GCodeLayerIndex::build_from_sidecar) instead of a pass over
+    /// the file. Set before open_file*() / open_source(); a sidecar that does
+    /// not index the opened file falls back to the pass. That open consumes it.
+    void set_layer_index_sidecar(std::string sidecar) {
+        layer_index_sidecar_ = std::move(sidecar);
+    }
 
     /// Test seam: when set, the async index worker calls it as its first
     /// statement, before build_index() runs. Lets a test park the worker in
@@ -345,7 +353,7 @@ class GCodeStreamingController {
      * @param center_layer Center layer index
      * @param radius Number of layers on each side (default: 3)
      */
-    void prefetch_around(size_t center_layer, size_t radius = DEFAULT_PREFETCH_RADIUS);
+    void prefetch_around(size_t center_layer, size_t radius = kDefaultPrefetchRadius);
 
     /**
      * @brief Block until the prefetch worker has no queued or in-flight work
@@ -377,6 +385,30 @@ class GCodeStreamingController {
     float get_layer_z(size_t layer_index) const;
 
     /**
+     * @brief G-code lines the index counted in a layer's byte range
+     *
+     * A load whose read fails returns an empty segment list, which is also
+     * what a genuinely empty layer looks like. A layer the index counted lines
+     * in but that loaded no segments at all is the read failure.
+     *
+     * @param layer_index Zero-based layer index
+     * @return Line count, or 0 if invalid
+     */
+    uint32_t get_layer_line_count(size_t layer_index) const;
+
+    /**
+     * @brief Drop a layer from the cache so the next access reads it again
+     *
+     * A failed read is cached as an empty layer like any other result; a
+     * caller that recognises one (see get_layer_line_count()) evicts it to
+     * retry the read.
+     *
+     * @param layer_index Zero-based layer index
+     * @return true if the layer was cached
+     */
+    bool evict_layer(size_t layer_index);
+
+    /**
      * @brief Find layer closest to Z height
      * @param z Z coordinate
      * @return Layer index, or -1 if no layers
@@ -394,6 +426,46 @@ class GCodeStreamingController {
      * @return File size in bytes, or 0 if not open
      */
     size_t get_file_size() const;
+
+    /**
+     * @brief How fast this board scanned the open file's layer index, in MB of
+     *        G-code per CPU second of the scanning thread.
+     *
+     * A direct measure of the CPU the preview runs on, from a finished scan or
+     * one the cost guard stopped (over the share it read). 0 before any scan,
+     * for an index read from the plugin's sidecar (no scan ran), and for a scan
+     * shorter than kMinRateSampleBytes and kMinRateSampleCpuS, which is mostly
+     * fixed cost.
+     */
+    static constexpr uint64_t kMinRateSampleBytes = 8ull * 1024 * 1024;
+    static constexpr double kMinRateSampleCpuS = 0.25;
+
+    double index_throughput_mb_per_cpu_s() const {
+        return index_mb_per_cpu_s_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Consulted as the index scan progresses: return false to stop it.
+     *
+     * Receives the share of the file scanned and the scanning thread's CPU
+     * seconds so far. Set before open_file()/open_file_async(); it runs on the
+     * scanning thread, so it must read nothing the main thread writes. A scan it
+     * stops fails like any other, and index_abandoned_for_cost() says why.
+     */
+    using IndexCostGuard = std::function<bool(float fraction, double cpu_s)>;
+    void set_index_cost_guard(IndexCostGuard guard) {
+        index_cost_guard_ = std::move(guard);
+    }
+
+    /// True when the last scan was stopped by the cost guard.
+    bool index_abandoned_for_cost() const {
+        return index_abandoned_for_cost_.load(std::memory_order_relaxed);
+    }
+
+    /// Test seam: stand in for a measured index throughput.
+    void set_index_throughput_for_test(double mb_per_cpu_s) {
+        index_mb_per_cpu_s_.store(mb_per_cpu_s, std::memory_order_relaxed);
+    }
 
     // =========================================================================
     // Cache Management
@@ -532,12 +604,17 @@ class GCodeStreamingController {
     // Components (order matters for destruction)
     std::unique_ptr<GCodeDataSource> data_source_;
     GCodeLayerIndex index_;
+    /// Read only by build_index(), which an open starts after it is set.
+    std::string layer_index_sidecar_;
     GCodeLayerCache cache_;
 
     // Async indexing
     std::future<bool> index_future_;
     std::atomic<bool> indexing_{false};
     std::atomic<float> index_progress_{0.0f};
+    std::atomic<double> index_mb_per_cpu_s_{0.0}; ///< See index_throughput_mb_per_cpu_s()
+    IndexCostGuard index_cost_guard_;             ///< Set before the scan starts
+    std::atomic<bool> index_abandoned_for_cost_{false};
     // Set by close()/destructor before joining index_future_: the progress
     // callback withdraws consent and the scan unwinds, so the join costs one
     // progress interval instead of the rest of the build. Cleared when a new
@@ -554,7 +631,7 @@ class GCodeStreamingController {
 
     // State
     std::atomic<bool> is_open_{false};
-    size_t prefetch_radius_{DEFAULT_PREFETCH_RADIUS};
+    size_t prefetch_radius_{kDefaultPrefetchRadius};
 
     // Merged object name string table (accumulated from all parsed layers)
     mutable std::mutex name_table_mutex_;

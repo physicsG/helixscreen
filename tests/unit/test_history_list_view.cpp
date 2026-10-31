@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_format_utils.h"
 #include "ui_history_list_view.h"
 #include "ui_nav_manager.h"
 #include "ui_panel_history_list.h"
@@ -160,6 +161,43 @@ TEST_CASE_METHOD(LVGLUITestFixture, "HistoryListPanel - the detail status reads 
     REQUIRE(status != nullptr);
     REQUIRE(std::string(lv_subject_get_string(status)) == lv_tr("Failed"));
     REQUIRE(std::string(lv_tr("Failed")) != "Failed");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "HistoryListPanel - the detail start and end split into date and time",
+                 "[history]") {
+    HistoryListPanel panel;
+    panel.init_subjects();
+
+    const time_t start = 1740700200;
+    const time_t end = start + 4 * 3600;
+    PrintHistoryJob job;
+    job.filename = "benchy.gcode";
+    job.status = PrintJobStatus::COMPLETED;
+    job.start_time = static_cast<double>(start);
+    job.end_time = static_cast<double>(end);
+    helix::ui::HistoryListPanelTestAccess::update_detail_subjects(panel, job);
+
+    auto subject_text = [](const char* name) {
+        lv_subject_t* subject = lv_xml_get_subject(nullptr, name);
+        REQUIRE(subject != nullptr);
+        return std::string(lv_subject_get_string(subject));
+    };
+    // The two halves together read as the one-line modified date.
+    CHECK(subject_text("history_detail_start_date") + " " +
+              subject_text("history_detail_start_time") ==
+          format_modified_date(start));
+    CHECK(subject_text("history_detail_end_date") + " " + subject_text("history_detail_end_time") ==
+          format_modified_date(end));
+
+    // Moonraker leaves end_time 0 on a job still running.
+    job.end_time = 0;
+    helix::ui::HistoryListPanelTestAccess::update_detail_subjects(panel, job);
+    CHECK(subject_text("history_detail_end_date") == "-");
+    CHECK(subject_text("history_detail_end_time").empty());
+    CHECK(subject_text("history_detail_start_date") + " " +
+              subject_text("history_detail_start_time") ==
+          format_modified_date(start));
 }
 
 TEST_CASE_METHOD(

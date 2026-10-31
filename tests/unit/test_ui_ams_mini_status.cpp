@@ -144,7 +144,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: all slots present incl
     ui_ams_mini_status_init();
     lv_obj_t* w = ui_ams_mini_status_create(test_screen(), 60);
     helix::ui::UpdateQueue::instance().drain();
-    ui_ams_mini_status_set_slot_count(w, 12); // > MAX_VISIBLE(8): uncapped vector
+    ui_ams_mini_status_set_slot_count(w, 12); // > kMaxVisible(8): uncapped vector
     for (int i = 0; i < 12; ++i)
         ui_ams_mini_status_set_slot_label(w, i, "PLA", 50);
     ui_ams_mini_status_set_width(w, 520);

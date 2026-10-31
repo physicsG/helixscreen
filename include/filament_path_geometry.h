@@ -50,9 +50,9 @@ struct PathSeg {
 };
 
 struct FilamentPath {
-    static constexpr int MAX_SEGS = 16;
+    static constexpr int kMaxSegs = 16;
 
-    PathSeg segs[MAX_SEGS];
+    PathSeg segs[kMaxSegs];
     int count = 0;
 
     /// Append a straight segment. Zero-length lines are skipped.

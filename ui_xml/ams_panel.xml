@@ -5,18 +5,43 @@
   <!-- All ams_* responsive tokens live in ui_xml/ams_tokens.xml (feature-scoped,
        same pattern as fan_tokens.xml). Referenced here via the bare base name
        e.g. #ams_right_col_w — theme_manager picks the per-breakpoint value. -->
+  <!-- One tree, restyled for portrait (ui_is_portrait): landscape is a row, the
+       diagram beside a full-height right column; portrait is a column, the diagram
+       full width on top with its tube run capped (ams_portrait_path_h), the right
+       column's sidebar filling the rest below it. -->
+  <styles>
+    <style name="panel_row" layout="flex" flex_flow="row"/>
+    <style name="panel_column" layout="flex" flex_flow="column"/>
+    <style name="content_landscape" height="100%" flex_grow="3"/>
+    <style name="content_portrait" width="100%" height="content" flex_grow="0"/>
+    <style name="left_landscape" flex_grow="1"/>
+    <style name="left_portrait" height="content" flex_grow="0"/>
+    <!-- The canvas tucks under the spool box's front edge, where the lanes enter it;
+         deeper in portrait, where every pixel of height goes to the sidebar. -->
+    <style name="path_landscape" flex_grow="1" margin_top="-8"/>
+    <style name="path_portrait" height="#ams_portrait_path_h" flex_grow="0" margin_top="-12"/>
+    <!-- The header names the system: the logo and the name centred on one axis in
+         the header's height. -->
+    <style name="name_centered" height="#ams_header_name_line_h"/>
+    <style name="suffix_centered" flex_track_place="center"/>
+    <style name="right_landscape" width="#ams_right_col_w" height="100%" flex_grow="0" pad_all="#space_sm"/>
+    <style name="right_portrait"
+           width="100%" height="0" flex_grow="1" pad_left="#space_sm" pad_right="#space_sm" pad_top="0" pad_bottom="0"/>
+  </styles>
   <!-- Overlay panel - right-aligned, row layout so right column spans full height -->
   <view name="ams_panel"
         extends="lv_obj" width="#overlay_width_transient" height="100%" align="right_mid" style_pad_all="0"
-        style_border_width="0" style_bg_opa="255" style_bg_color="#card_bg" scrollable="false" flex_flow="row"
-        style_pad_gap="0">
+        style_border_width="0" style_bg_opa="255" style_bg_color="#card_bg" scrollable="false" style_pad_gap="0">
+    <bind_style_if_eq name="panel_row" subject="ui_is_portrait" ref_value="0"/>
+    <bind_style_if_eq name="panel_column" subject="ui_is_portrait" ref_value="1"/>
     <!-- Left section: header + content (column) -->
-    <lv_obj name="overlay_content"
-            height="100%" flex_grow="3" style_pad_all="0" style_pad_gap="0" flex_flow="column" scrollable="false">
+    <lv_obj name="overlay_content" style_pad_all="0" style_pad_gap="0" flex_flow="column" scrollable="false">
+      <bind_style_if_eq name="content_landscape" subject="ui_is_portrait" ref_value="0"/>
+      <bind_style_if_eq name="content_portrait" subject="ui_is_portrait" ref_value="1"/>
       <!-- Header Bar - left-column width only, with system logo + name -->
       <lv_obj name="overlay_header"
               width="100%" height="#header_height" style_pad_left="#space_xs" style_pad_right="#space_sm"
-              style_pad_top="#space_xs" style_pad_bottom="#space_xs" flex_flow="row" style_flex_main_place="start"
+              style_pad_top="0" style_pad_bottom="0" flex_flow="row" style_flex_main_place="start"
               style_flex_cross_place="center" style_flex_track_place="center" scrollable="false">
         <!-- Back button: flex_grow region covers arrow + title = large touch target -->
         <lv_obj name="back_button"
@@ -25,41 +50,47 @@
                 style_flex_track_place="center" flex_flow="row" style_pad_gap="#space_xs">
           <event_cb trigger="clicked" callback="on_header_back_clicked"/>
           <icon src="back" size="lg" variant="text" clickable="false" event_bubble="true"/>
-          <!-- Title: "Multi-Filament" (colon lives with the backend suffix so it
-               can be hidden together at MICRO/TINY) -->
-          <text_heading name="header_title"
-                        text="Multi-Filament" text_transform="uppercase" long_mode="dots" style_max_width="100%"
-                        style_text_align="left" clickable="false" event_bubble="true" scrollable="false"/>
-          <!-- Backend suffix (":" + logo + name) — hidden at MICRO/TINY where
-               horizontal room is tight. -->
-          <!-- width="1"+flex_grow: the suffix takes what the title and the chip leave,
-               and its name ellipsizes inside that, so the title keeps priority. -->
+          <!-- The title is the system: [back] [logo] NAME. width="1"+flex_grow: it takes
+               what the chip leaves, and the name ellipsizes inside that. -->
           <lv_obj name="header_backend_suffix"
                   width="1" height="100%" flex_grow="1" style_pad_all="0" flex_flow="row"
                   style_flex_cross_place="center" style_pad_gap="#space_xs" scrollable="false" clickable="false"
                   event_bubble="true">
-            <bind_flag_if_lt subject="ui_breakpoint" flag="hidden" ref_value="2"/>
-            <text_heading text=":" clickable="false" event_bubble="true" scrollable="false"/>
-            <!-- System logo (bound to ams_system_logo subject). The logos are white
-                 marks, recolored to the heading text so they read in both modes. -->
+            <style name="suffix_centered"/>
+            <!-- System logo (bound to ams_system_logo subject). Mono logos are white marks,
+                 recolored to the heading text so they read in both modes; a full-color
+                 logo (ams_system_logo_color 1) is drawn as is. -->
             <lv_image name="system_logo"
                       width="#ams_header_logo_size" height="#ams_header_logo_size" bind_src="ams_system_logo"
-                      inner_align="contain" clickable="false" event_bubble="true" style_image_recolor="#text"
-                      style_image_recolor_opa="255"/>
+                      inner_align="contain" clickable="false" event_bubble="true">
+              <bind_flag_if_eq subject="ams_system_has_logo" flag="hidden" ref_value="0"/>
+              <bind_style_if_eq name="styles.ams_logo_mono" subject="ams_system_logo_color" ref_value="0"/>
+            </lv_image>
             <!-- System name (bound to ams_system_name subject) -->
             <text_heading name="system_name_label"
                           width="1" flex_grow="1" bind_text="ams_system_name" text_transform="uppercase"
-                          long_mode="dots" style_max_height="100%" clickable="false" event_bubble="true"
-                          scrollable="false"/>
+                          long_mode="dots" clickable="false" event_bubble="true" scrollable="false">
+              <style name="name_centered"/>
+            </text_heading>
           </lv_obj>
         </lv_obj>
         <!-- Outside the back button so a long system name cannot push it off the header -->
         <ams_disconnected_chip name="system_disconnected_chip" disconnected="ams_all_units_disconnected"/>
       </lv_obj>
+      <!-- Portrait: the loaded strip and the status line stand here, above the diagram.
+           AmsOperationSidebar moves them in from the sidebar and back on rotation. -->
+      <lv_obj name="portrait_summary_slot"
+              width="100%" height="content" style_pad_left="#space_sm" style_pad_right="#space_sm" style_pad_top="0"
+              style_pad_bottom="#space_xxs" style_pad_row="#space_xxs" flex_flow="column"
+              style_flex_cross_place="center" scrollable="false">
+        <bind_flag_if_eq subject="ui_is_portrait" flag="hidden" ref_value="0"/>
+      </lv_obj>
       <!-- Left column content (unit visualization + path canvas) -->
       <lv_obj name="left_column"
-              width="100%" flex_grow="1" style_pad_all="#space_sm" style_pad_top="0" style_pad_gap="#space_xs"
-              flex_flow="column" style_flex_main_place="start" style_flex_cross_place="center" scrollable="false">
+              width="100%" style_pad_all="#space_sm" style_pad_top="0" style_pad_gap="#space_xs" flex_flow="column"
+              style_flex_main_place="start" style_flex_cross_place="center" scrollable="false">
+        <bind_style_if_eq name="left_landscape" subject="ui_is_portrait" ref_value="0"/>
+        <bind_style_if_eq name="left_portrait" subject="ui_is_portrait" ref_value="1"/>
         <!-- Disable content when printer not connected or klippy not ready -->
         <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
         <!-- Backend selector (hidden by default, shown when multiple backends present) -->
@@ -92,8 +123,10 @@
         <!-- Path Canvas - shows routing from slots to nozzle (no card border)
              Uses flex_grow="1" to fill remaining vertical space in left column -->
         <lv_obj name="path_container"
-                width="100%" flex_grow="1" style_pad_all="0" style_margin_top="-8" flex_flow="column"
-                overflow_visible="true" style_flex_main_place="start" style_flex_cross_place="center" scrollable="false">
+                width="100%" style_pad_all="0" flex_flow="column" overflow_visible="true" style_flex_main_place="start"
+                style_flex_cross_place="center" scrollable="false">
+          <bind_style_if_eq name="path_landscape" subject="ui_is_portrait" ref_value="0"/>
+          <bind_style_if_eq name="path_portrait" subject="ui_is_portrait" ref_value="1"/>
           <!-- Filament Path Canvas
                Shows schematic view of filament routing:
                - Slots at top (entry points)
@@ -119,10 +152,13 @@
         <ams_endless_status name="endless_status" hide_when_healthy="1"/>
       </lv_obj>
     </lv_obj>
-    <!-- Right column (status + action buttons) - spans full panel height -->
+    <!-- Right column (status + action buttons): full panel height beside the diagram
+         in landscape, the full-width bottom section in portrait -->
     <lv_obj name="right_column"
-            width="#ams_right_col_w" height="100%" style_pad_all="#space_sm" style_pad_gap="#space_sm"
-            flex_flow="column" style_flex_main_place="start" style_flex_cross_place="start" scrollable="false">
+            style_pad_gap="#space_sm" flex_flow="column" style_flex_main_place="start" style_flex_cross_place="start"
+            scrollable="false">
+      <bind_style_if_eq name="right_landscape" subject="ui_is_portrait" ref_value="0"/>
+      <bind_style_if_eq name="right_portrait" subject="ui_is_portrait" ref_value="1"/>
       <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
       <ams_sidebar name="ams_operation_sidebar"/>
     </lv_obj>

@@ -8,6 +8,7 @@
 #include "filament_slot_override_store.h"
 #include "test_helpers/seeded_override.h"
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -60,14 +61,28 @@ class AceTestAccess {
         b.system_info_.filament_loaded = loaded;
     }
 
+    /// Append a unit of @p slot_count slots after the existing ones, numbered
+    /// as the next unit_index.
+    static void append_unit(AmsBackendAce& b, int slot_count) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        AmsUnit unit;
+        unit.unit_index = static_cast<int>(b.system_info_.units.size());
+        unit.first_slot_global_index = b.system_info_.total_slots;
+        unit.slot_count = slot_count;
+        unit.slots.resize(static_cast<size_t>(slot_count));
+        b.system_info_.units.push_back(unit);
+        b.system_info_.total_slots += slot_count;
+    }
+
     /// Seed a running dry cycle so an update has elapsed time to preserve.
     static void set_dryer_run(AmsBackendAce& b, float target_c, int duration_min,
                               int remaining_min) {
         std::lock_guard<std::mutex> lock(b.mutex_);
-        b.dryer_info_.active = true;
-        b.dryer_info_.target_temp_c = target_c;
-        b.dryer_info_.duration_min = duration_min;
-        b.dryer_info_.remaining_min = remaining_min;
+        DryerInfo& dryer = b.dryer_locked(0);
+        dryer.active = true;
+        dryer.target_temp_c = target_c;
+        dryer.duration_min = duration_min;
+        dryer.remaining_min = remaining_min;
     }
     static std::optional<helix::ams::FilamentSlotOverride> get_override(const AmsBackendAce& b,
                                                                         int slot_index) {
@@ -118,6 +133,39 @@ class AceTestAccess {
     }
     static void poll_slots(AmsBackendAce& b) {
         b.poll_slots();
+    }
+
+    // Runs only the startup store load: a null client makes on_started return
+    // right after it.
+    static void start_load(AmsBackendAce& b) {
+        b.on_started();
+    }
+
+    // --- HelixPrint plugin vendor push ---
+    /// Take the REST bridge path without starting its polling thread.
+    static void set_rest_fallback(AmsBackendAce& b, bool on) {
+        b.use_rest_fallback_ = on;
+    }
+    static void on_vendor_state(AmsBackendAce& b, const nlohmann::json& payload) {
+        b.on_vendor_state(payload);
+    }
+    static void handle_status(AmsBackendAce& b, const nlohmann::json& status) {
+        b.handle_status(status);
+    }
+    static bool vendor_pushing(const AmsBackendAce& b) {
+        return b.vendor_push_.pushing();
+    }
+    static int data_fetch_failures(const AmsBackendAce& b) {
+        return b.data_fetch_failures_.load();
+    }
+    static bool rest_data_poll_due(bool pushing, std::chrono::steady_clock::duration since_last) {
+        return AmsBackendAce::rest_data_poll_due(pushing, since_last);
+    }
+    static int rest_data_polls(const AmsBackendAce& b) {
+        return b.rest_data_polls_.load();
+    }
+    static void on_stopping(AmsBackendAce& b) {
+        b.on_stopping();
     }
 };
 } // namespace helix

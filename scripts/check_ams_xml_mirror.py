@@ -21,7 +21,7 @@ registration is reduced to a (name, subject) pair:
   * lv_xml_register_subject(nullptr, name_buf, &subject[i]) - the name is the
     format of the nearest snprintf(name_buf, ...) before it, keyed with the
     bound of the enclosing `for (int i = 0; i < BOUND; ...)` loop, so
-    "ams_slot_%d_color" under MAX_SLOTS and under MAX_UNITS differ.
+    "ams_slot_%d_color" under kMaxSlots and under kMaxUnits differ.
 
 The gate fails closed: a registration call it cannot reduce, a missing
 function, or a function yielding no pairs is a failure, never a pass.
@@ -174,7 +174,7 @@ def extract(body: str) -> tuple[set[tuple[str, str]], list[str]]:
                 unrecognized.append(what)
             else:
                 pairs.add((f"{fmts[-1].group(1)}[{bound}]", subj))
-        elif re.fullmatch(r"[A-Z][A-Z0-9_]*", name_arg):
+        elif re.fullmatch(r"k[A-Z][A-Za-z0-9]*|[A-Z][A-Z0-9_]*", name_arg):
             pairs.add((name_arg, subj))
         else:
             unrecognized.append(what)

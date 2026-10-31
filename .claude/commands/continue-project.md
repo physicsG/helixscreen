@@ -45,7 +45,7 @@ With `--defaults`, use the defaults below without asking. Otherwise ask with
 AskUserQuestion and wait for the answer:
 
 1. **Execution** (header "Execution"): "Subagent-driven (Recommended)" - a fresh
-   subagent per task, two-stage review; or "Batched with checkpoints" - human review
+   subagent per task, each running its own tags, with one review of the phase at the end; or "Batched with checkpoints" - human review
    between batches of 3.
 2. **Overrides** (header "Overrides", multiSelect): "None - use defaults",
    "Skip TDD for this phase", "Extra review rigor".
@@ -56,8 +56,9 @@ Subagent-driven uses `superpowers:subagent-driven-development`; batched uses
 implement the phase itself. If the skill is not installed, stop and tell the user.
 
 ## 8. Verify
-Run the plan's verification steps, and `superpowers:requesting-code-review` for any
-code change.
+Once per phase, at its end, per root `CLAUDE.md` § Verification Cadence: one review of the
+phase, `mutate-diff` scoped to the phase's tags, and one `land-gate` before it lands. While
+the phase is in progress, tasks run only their own tags.
 
 ## 9. Record
 - Commit: `feat(scope): phase N desc`
@@ -68,5 +69,5 @@ More phases: back to step 6, keeping `--defaults` if it was given. Otherwise fin
 with `superpowers:finishing-a-development-branch`.
 
 ## Defaults
-Subagent-driven execution; TDD for backend work, not for UI; review for every code
-change; one commit per phase.
+Subagent-driven execution; TDD for backend work, not for UI; one review per phase at
+its end; one commit per phase.

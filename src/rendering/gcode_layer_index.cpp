@@ -6,6 +6,9 @@
 #include "gcode_layer_index.h"
 
 #include "gcode_color_metadata.h"
+#include "hv/sha1.h"
+#include "json_utils.h"
+#include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
@@ -17,18 +20,20 @@
 #include <fstream>
 #include <limits>
 
+#include "hv/json.hpp"
+
 namespace helix {
 namespace gcode {
 
 namespace {
 
 // Layer detection tolerance for Z changes
-constexpr float Z_EPSILON = 0.001f;
+constexpr float kZEpsilon = 0.001f;
 
 // Minimum E delta that counts as extrusion rather than a travel/retract.
 // Matches the threshold GCodeParser::parse_movement_command() uses so the index
 // and the full-file parser agree on what "extruding" means.
-constexpr float EXTRUSION_EPSILON = 0.00001f;
+constexpr float kExtrusionEpsilon = 0.00001f;
 
 // Extract a single-letter float parameter (case-insensitive) from a G-code line.
 // Returns true if found. Skips over coordinates embedded inside identifier
@@ -49,9 +54,9 @@ size_t gcode_code_len(const char* line, size_t len) {
 
 /// Powers of ten that are EXACTLY representable in a double, so scaling by one
 /// of them introduces a single rounding rather than compounding error.
-constexpr double POW10_EXACT[] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8, 1e9,
+constexpr double kPow10Exact[] = {1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8, 1e9,
                                   1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18};
-constexpr int POW10_MAX_DIGITS = 18;
+constexpr int kPow10MaxDigits = 18;
 
 /**
  * @brief Parse the plain decimal form G-code axis words actually use.
@@ -95,7 +100,7 @@ bool parse_axis_value_fast(const char* p, const char* limit, float& out, const c
     bool saw_digit = false;
 
     while (s < limit && *s >= '0' && *s <= '9') {
-        if (digits >= POW10_MAX_DIGITS) {
+        if (digits >= kPow10MaxDigits) {
             return false; // more precision than this path promises — strtof it
         }
         mantissa = mantissa * 10 + static_cast<uint64_t>(*s - '0');
@@ -107,7 +112,7 @@ bool parse_axis_value_fast(const char* p, const char* limit, float& out, const c
     if (s < limit && *s == '.') {
         ++s;
         while (s < limit && *s >= '0' && *s <= '9') {
-            if (digits >= POW10_MAX_DIGITS) {
+            if (digits >= kPow10MaxDigits) {
                 return false;
             }
             mantissa = mantissa * 10 + static_cast<uint64_t>(*s - '0');
@@ -126,7 +131,7 @@ bool parse_axis_value_fast(const char* p, const char* limit, float& out, const c
         return false;
     }
 
-    const double value = static_cast<double>(mantissa) / POW10_EXACT[frac_digits];
+    const double value = static_cast<double>(mantissa) / kPow10Exact[frac_digits];
     out = static_cast<float>(negative ? -value : value);
     *endp = s;
     return true;
@@ -297,12 +302,15 @@ namespace {
 /// on a minute-long scan is real, the syscall reduction matters more on slow
 /// flash than on a desktop, and this is the natural place to sample progress.
 /// 1MB is well under the smallest device's headroom (the AD5M runs in ~47MB).
-constexpr size_t INDEX_READ_BLOCK_BYTES = 1024 * 1024;
+constexpr size_t kIndexReadBlockBytes = 1024 * 1024;
 
-/// Report progress at most this often. Coarse on purpose: the callback crosses
-/// to an atomic the UI polls, and a 5M-line file would otherwise call it 5M
-/// times to move a bar 100 steps.
-constexpr size_t INDEX_PROGRESS_LINE_INTERVAL = 20000;
+/// Report progress, and ask whether to stop, this often. The callback is also
+/// where a cancel and the preview's cost guard are answered, and the UI thread
+/// joins the scan on cancel: the scan runs at nice 19, so on a CPU Klipper has
+/// saturated every line between checks stretches that join. 2000 lines is a few
+/// milliseconds of scanning on a Cortex-A7, and still 2500 calls, not 5M, for a
+/// 5M-line file.
+constexpr size_t kIndexProgressLineInterval = 2000;
 
 /**
  * @brief Feeds whole lines out of a block-buffered file read.
@@ -317,7 +325,7 @@ constexpr size_t INDEX_PROGRESS_LINE_INTERVAL = 20000;
 class BlockLineReader {
   public:
     explicit BlockLineReader(std::istream& in) : in_(in) {
-        buf_.resize(INDEX_READ_BLOCK_BYTES);
+        buf_.resize(kIndexReadBlockBytes);
     }
 
     /// Fill @p line with the next line (newline stripped). False at EOF.
@@ -460,7 +468,7 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
         const size_t code_len = gcode_code_len(line.c_str(), line_len);
         stats_.total_lines++;
 
-        if (on_progress && (stats_.total_lines % INDEX_PROGRESS_LINE_INTERVAL) == 0) {
+        if (on_progress && (stats_.total_lines % kIndexProgressLineInterval) == 0) {
             if (!on_progress(
                     static_cast<float>(static_cast<double>(current_offset) / total_for_progress))) {
                 spdlog::info("[LayerIndex] Build cancelled at line {} ({:.0f}%)",
@@ -576,7 +584,7 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
                     }
                 } else {
                     // Use Z-change based layer detection
-                    if (z > current_z + Z_EPSILON) {
+                    if (z > current_z + kZEpsilon) {
                         is_new_layer = true;
                     }
                 }
@@ -629,7 +637,7 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
                 e_delta = new_e - current_e;
                 current_e = new_e;
             }
-            const bool is_extruding = e_delta > EXTRUSION_EPSILON;
+            const bool is_extruding = e_delta > kExtrusionEpsilon;
 
             // Update running X/Y from this move (for the next layer's snapshot),
             // and grow the model bounds over extruding moves only. Both the
@@ -706,8 +714,7 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
 
     stats_.total_layers = entries_.size();
     uses_layer_markers_ = use_layer_markers;
-    stats_.scheduled_pauses = pause_scan.pauses();
-    stats_.has_m73 = pause_scan.has_m73();
+    stats_.pause_scan = pause_scan.take_shared();
 
     // Release the slack left by the reserve(100) growth doubling. A 1200-layer
     // print reserves 1600 entries; handing 400 × 40 bytes back matters on a
@@ -746,6 +753,209 @@ bool GCodeLayerIndex::build_from_file(const std::string& filepath,
                   entries_.empty() ? 0 : memory_usage_bytes() / entries_.size());
 
     return !entries_.empty();
+}
+
+namespace {
+
+using json = nlohmann::json;
+
+/// The sidecar format build_from_sidecar() reads (helix_gcode_reader.LAYER_INDEX_FORMAT).
+constexpr int kSidecarFormat = 1;
+
+/// layer_index_file_hash() reads this much from each end (HASH_SPAN_BYTES).
+constexpr uint64_t kHashSpanBytes = 64 * 1024;
+
+double vec_at(const json& state, const char* key, size_t i) {
+    const json* v = json_util::find_member(state, key);
+    if (v == nullptr || !v->is_array() || v->size() <= i) {
+        return 0.0;
+    }
+    return json_util::as_double((*v)[i], 0.0);
+}
+
+/// A layer start's seed: the modal state at its offset, in the G-code frame
+/// the per-layer parser reads coordinates in.
+StreamingLayerEntry entry_from_start(const json& start, float print_z) {
+    const json* found = json_util::find_member(start, "state");
+    const json& state = found != nullptr ? *found : json::object();
+    StreamingLayerEntry entry{};
+    entry.file_offset = json_util::safe_uint64(start, "offset", 0);
+    entry.z_height = print_z;
+    entry.line_count = 1;
+    entry.flags = json_util::safe_bool(state, "absolute_extrude", true)
+                      ? StreamingLayerEntry::FLAG_ABSOLUTE_EXTRUSION
+                      : uint16_t{0};
+    entry.start_x =
+        static_cast<float>(vec_at(state, "last_position", 0) - vec_at(state, "base_position", 0));
+    entry.start_y =
+        static_cast<float>(vec_at(state, "last_position", 1) - vec_at(state, "base_position", 1));
+    entry.start_z =
+        static_cast<float>(vec_at(state, "last_position", 2) - vec_at(state, "base_position", 2));
+    double factor = json_util::safe_double(state, "extrude_factor", 1.0);
+    if (factor <= 0.0) {
+        factor = 1.0;
+    }
+    entry.start_e = static_cast<float>(
+        (vec_at(state, "last_position", 3) - vec_at(state, "base_position", 3)) / factor);
+    const int tool = json_util::safe_int(state, "active_tool", -1);
+    entry.start_tool =
+        static_cast<int16_t>(tool >= 0 && tool <= std::numeric_limits<int16_t>::max() ? tool : -1);
+    entry.start_feature_type =
+        GCodeParser::parse_feature_type_value(json_util::safe_string(start, "feature"));
+    return entry;
+}
+
+} // namespace
+
+std::string layer_index_file_hash(const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) {
+        return {};
+    }
+    const auto size = static_cast<uint64_t>(in.tellg());
+    std::string bytes;
+    auto read = [&in, &bytes](uint64_t offset, uint64_t length) {
+        const size_t at = bytes.size();
+        bytes.resize(at + static_cast<size_t>(length));
+        in.seekg(static_cast<std::streamoff>(offset));
+        in.read(bytes.data() + at, static_cast<std::streamsize>(length));
+        return static_cast<uint64_t>(in.gcount()) == length;
+    };
+    if (!read(0, std::min(size, kHashSpanBytes))) {
+        return {};
+    }
+    if (size > kHashSpanBytes) {
+        const uint64_t from = std::max(kHashSpanBytes, size - kHashSpanBytes);
+        if (!read(from, size - from)) {
+            return {};
+        }
+    }
+    char hex[41] = {};
+    hv_sha1_hex(reinterpret_cast<unsigned char*>(bytes.data()), static_cast<uint32_t>(bytes.size()),
+                hex, sizeof(hex));
+    return std::string(hex);
+}
+
+bool GCodeLayerIndex::build_from_sidecar(std::string_view sidecar, uint64_t file_size,
+                                         std::string_view file_hash,
+                                         const std::string& source_path) {
+    auto start_time = std::chrono::high_resolution_clock::now();
+    clear();
+
+    bool have_header = false;
+    bool complete = false;
+    uint64_t end_offset = file_size;
+    json summary;
+    std::vector<std::pair<uint64_t, std::string>> progress_lines;
+    for (std::string_view line : text_io::lines(sidecar)) {
+        json record = json::parse(line.begin(), line.end(), nullptr, false);
+        if (record.is_discarded() || !record.is_object()) {
+            continue; // a write cut short, or a blank line
+        }
+        if (!have_header) {
+            if (json_util::safe_int(record, "format", 0) != kSidecarFormat ||
+                json_util::safe_uint64(record, "file_size", 0) != file_size || file_hash.empty() ||
+                json_util::safe_string(record, "file_hash") != file_hash) {
+                spdlog::debug("[LayerIndex] Sidecar is for another file version");
+                return false;
+            }
+            have_header = true;
+            continue;
+        }
+        if (json_util::safe_bool(record, "complete", false)) {
+            // Anything after the close is a late writer's appends, never part of the index.
+            complete = true;
+            end_offset = json_util::safe_uint64(record, "end_offset", file_size);
+            break;
+        } else if (const json* lines = json_util::find_member(record, "progress_lines")) {
+            if (lines->is_array()) {
+                for (const auto& entry : *lines) {
+                    if (entry.is_array() && entry.size() >= 2 && entry[1].is_string()) {
+                        progress_lines.emplace_back(json_util::as_uint64(entry[0], 0),
+                                                    entry[1].get<std::string>());
+                    }
+                }
+            }
+        } else if (const json* s = json_util::find_member(record, "summary")) {
+            summary = *s;
+        } else if (const json* z = json_util::find_member(record, "print_z");
+                   z != nullptr && z->is_number() && json_util::find_member(record, "offset")) {
+            // A layer start with no extruding move draws nothing.
+            entries_.push_back(entry_from_start(record, json_util::as_float(*z, 0.0f)));
+        }
+    }
+    if (!complete || entries_.empty() || end_offset > file_size) {
+        clear();
+        return false;
+    }
+
+    std::sort(entries_.begin(), entries_.end(),
+              [](const StreamingLayerEntry& a, const StreamingLayerEntry& b) {
+                  return a.file_offset < b.file_offset;
+              });
+    for (size_t i = 0; i < entries_.size(); ++i) {
+        const uint64_t next = i + 1 < entries_.size() ? entries_[i + 1].file_offset : end_offset;
+        if (next <= entries_[i].file_offset ||
+            next - entries_[i].file_offset > std::numeric_limits<uint32_t>::max()) {
+            clear();
+            return false;
+        }
+        entries_[i].byte_length = static_cast<uint32_t>(next - entries_[i].file_offset);
+    }
+
+    source_path_ = source_path;
+    stats_.total_bytes = static_cast<size_t>(file_size);
+    stats_.total_layers = entries_.size();
+    if (const json* box = json_util::find_member(summary, "model_box")) {
+        const json* lo = json_util::find_member(*box, "min");
+        const json* hi = json_util::find_member(*box, "max");
+        if (lo != nullptr && hi != nullptr && lo->is_array() && hi->is_array() && lo->size() == 3 &&
+            hi->size() == 3) {
+            stats_.min_x = json_util::as_float((*lo)[0], stats_.min_x);
+            stats_.min_y = json_util::as_float((*lo)[1], stats_.min_y);
+            stats_.max_x = json_util::as_float((*hi)[0], stats_.max_x);
+            stats_.max_y = json_util::as_float((*hi)[1], stats_.max_y);
+            stats_.min_z = json_util::as_float((*lo)[2], stats_.min_z);
+            stats_.max_z = json_util::as_float((*hi)[2], stats_.max_z);
+        }
+    }
+    if (const json* palette = json_util::find_member(summary, "palette");
+        palette != nullptr && palette->is_array()) {
+        for (const auto& c : *palette) {
+            stats_.filament_palette.push_back(json_util::as_string(c));
+        }
+        if (const std::string* first = first_named_color(stats_.filament_palette)) {
+            stats_.filament_color = *first;
+        }
+    }
+    stats_.initial_tool_index = json_util::safe_int(summary, "initial_tool", -1);
+    if (const json* tools = json_util::find_member(summary, "tools");
+        tools != nullptr && tools->is_array()) {
+        for (const auto& t : *tools) {
+            if (t.is_number_integer()) {
+                stats_.tools_used.insert(json_util::as_int(t));
+            }
+        }
+    }
+
+    PauseScan pause_scan;
+    pause_scan.begin(static_cast<size_t>(file_size));
+    for (const auto& [offset, text] : progress_lines) {
+        const auto after = std::upper_bound(
+            entries_.begin(), entries_.end(), offset,
+            [](uint64_t off, const StreamingLayerEntry& e) { return off < e.file_offset; });
+        const auto layer = static_cast<int32_t>(after - entries_.begin()) - 1;
+        pause_scan.feed_line(text, offset, layer);
+    }
+    stats_.pause_scan = pause_scan.take_shared();
+    uses_layer_markers_ = true;
+
+    stats_.build_time_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::high_resolution_clock::now() - start_time)
+                               .count();
+    spdlog::info("[LayerIndex] Built index from the plugin's sidecar: {} layers, {:.1f}ms",
+                 entries_.size(), stats_.build_time_ms);
+    return true;
 }
 
 StreamingLayerEntry GCodeLayerIndex::get_entry(size_t layer_index) const {

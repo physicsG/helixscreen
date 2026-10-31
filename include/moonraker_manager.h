@@ -30,7 +30,8 @@ class PrinterState;
 class PrintStartCollector;
 namespace helix {
 class MoonrakerManagerTestAccess;
-}
+class PrintStopReasonTracker;
+} // namespace helix
 
 // Need full enum definition for inline helper function
 #include "printer_state.h"
@@ -156,6 +157,10 @@ class MoonrakerManager {
 
     /// Detach and drop the print start collector, if there is one.
     void release_print_start_collector();
+
+    /// Start tracking why a print ends (print_stop_reason.h), replacing any
+    /// previous tracker. Call before connect(), after the subjects exist.
+    void init_print_stop_reason();
 
     /**
      * @brief The pre-print detection collector, if one exists yet
@@ -350,11 +355,16 @@ class MoonrakerManager {
      * @param seen_layer_zero Whether the collector has observed current_layer==0
      *        since the current print started (arms the layer-1 edge). Ignored on
      *        the non-reporting fallback path.
+     * @param in_live_preprint_step Whether the printer reports a pre-print step
+     *        still under way (PrintStartCollector::in_live_preprint_step()). It
+     *        holds only the first-extrusion fallback: a purge or priming line
+     *        extrudes before the print, a real first layer does not.
      * @return true if the pre-print phase should be marked COMPLETE
      */
     static inline bool should_complete_preprint(bool printer_reports_layers, int current_layer,
                                                 int print_duration, bool seen_layer_zero,
-                                                bool layer_advanced = false) {
+                                                bool layer_advanced = false,
+                                                bool in_live_preprint_step = false) {
         if (printer_reports_layers) {
             // Authoritative: layer data proven to belong to THIS print, plus a
             // layer >= 1. Two ways to prove it, because either alone hangs:
@@ -379,7 +389,7 @@ class MoonrakerManager {
         // first-extrusion signal so genuine non-reporters still complete.
         // current_layer is only a progress-derived estimate here, so
         // seen_layer_zero is irrelevant.
-        return print_duration > 0;
+        return print_duration > 0 && !in_live_preprint_step;
     }
 
   private:
@@ -414,6 +424,7 @@ class MoonrakerManager {
 
     // Print start collector (monitors PRINT_START macro progress)
     std::shared_ptr<PrintStartCollector> m_print_start_collector;
+    std::unique_ptr<helix::PrintStopReasonTracker> m_print_stop_reason;
     ObserverGuard m_preparing_epoch_observer;
     ObserverGuard m_print_start_observer;
     ObserverGuard m_print_start_phase_observer;

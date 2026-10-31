@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Fail when printer_database.json names a printer image that does not exist.
 
+Both an entry's `image` and every `image_variants` entry's `image` are checked.
+
 A missing image is silent at runtime: get_prerendered_printer_path() falls through to
 generic-corexy, so the user just sees a CoreXY frame for their bed-slinger and nothing
 is logged above debug. Twenty entries had drifted that way before anyone noticed.
@@ -32,16 +34,21 @@ IMG_DIR = REPO_ROOT / "assets" / "images" / "printers"
 KNOWN_MISSING: set[str] = set()
 
 
+def referenced_images(entry):
+    """Every image an entry can show: its own, then each image_variants entry's."""
+    images = [entry.get("image", "")]
+    images += [v.get("image", "") for v in entry.get("image_variants", []) if isinstance(v, dict)]
+    return [img for img in images if img]
+
+
 def unresolved():
-    """[(printer_id, image)] for every entry whose image is not on disk."""
+    """[(printer_id, image)] for every image an entry names that is not on disk."""
     db = json.loads(DB.read_text(encoding="utf-8"))
     out = []
     for entry in db.get("printers", []):
-        image = entry.get("image", "")
-        if not image:
-            continue
-        if not (IMG_DIR / image).exists():
-            out.append((entry.get("id", "<no id>"), image))
+        for image in referenced_images(entry):
+            if not (IMG_DIR / image).exists():
+                out.append((entry.get("id", "<no id>"), image))
     return out
 
 

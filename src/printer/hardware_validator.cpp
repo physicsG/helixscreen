@@ -8,7 +8,10 @@
 #include "ui_toast_manager.h"
 
 #include "config.h"
+#include "filament_sensor_manager.h"
+#include "hardware_object_table.h"
 #include "hardware_role_registry.h"
+#include "i18n_plural.h"
 #include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_discovery.h"
@@ -71,10 +74,10 @@ std::vector<std::string> configured_led_strips(Config* config) {
         v.erase(std::remove_if(v.begin(), v.end(), [](const std::string& n) { return n.empty(); }),
                 v.end());
     };
-    strips = config->get_string_array(config->df() + helix::wizard::LED_AUTO_STATE_STRIPS);
+    strips = config->get_string_array(config->df() + helix::wizard::kLedAutoStateStrips);
     prune_empty(strips);
     if (strips.empty()) {
-        strips = config->get_string_array(config->df() + helix::wizard::LED_SELECTED_STRIPS);
+        strips = config->get_string_array(config->df() + helix::wizard::kLedSelectedStrips);
         prune_empty(strips);
     }
     if (strips.empty()) {
@@ -135,6 +138,15 @@ HardwareSnapshot HardwareSnapshot::from_json(const json& j) {
         return HardwareSnapshot{};
     }
 
+    // A stored list can name an object discovery does not count as a heater;
+    // kept, it would read as removed hardware on the next comparison.
+    snapshot.heaters.erase(std::remove_if(snapshot.heaters.begin(), snapshot.heaters.end(),
+                                          [](const std::string& name) {
+                                              return !helix::hw::is_heater(
+                                                  helix::hw::classify_object(name).kind);
+                                          }),
+                           snapshot.heaters.end());
+
     return snapshot;
 }
 
@@ -187,6 +199,15 @@ std::vector<std::string> HardwareSnapshot::get_added(const HardwareSnapshot& cur
 // =============================================================================
 // HardwareValidator Implementation
 // =============================================================================
+
+namespace {
+
+// Validation judges what discovery found. A backend can report its hardware
+// absent only after its first status frame, which comes before a reconnect's
+// validation but after a cold boot's, so the claim is taken as discovered.
+constexpr bool kFilamentHardwareAbsent = false;
+
+} // namespace
 
 HardwareValidationResult HardwareValidator::validate(Config* config,
                                                      const helix::PrinterDiscovery& hardware) {
@@ -248,15 +269,18 @@ void HardwareValidator::notify_user(const HardwareValidationResult& result) {
             message = fmt::format(lv_tr("Critical hardware missing: {}"),
                                   result.critical_missing[0].hardware_name);
         } else {
-            message =
-                fmt::format(lv_tr("{} critical hardware issues"), result.critical_missing.size());
+            const size_t critical = result.critical_missing.size();
+            message = fmt::format(fmt::runtime(helix::ui::tr_plural(
+                                      nullptr, "{} critical hardware issues", critical)),
+                                  critical);
         }
         severity = ToastSeverity::ERROR;
     } else if (!result.expected_missing.empty() || !result.changed_from_last_session.empty()) {
         size_t count = result.expected_missing.size() + result.changed_from_last_session.size();
-        message = fmt::format(count == 1 ? lv_tr("{} configured item not found")
-                                         : lv_tr("{} configured items not found"),
-                              count);
+        message =
+            fmt::format(fmt::runtime(helix::ui::tr_plural("{} configured item not found",
+                                                          "{} configured items not found", count)),
+                        count);
         severity = ToastSeverity::WARNING;
     } else {
         // Build intelligent message based on hardware types
@@ -272,15 +296,20 @@ void HardwareValidator::notify_user(const HardwareValidationResult& result) {
         }
 
         if (led_count > 0 && sensor_count == 0 && other_count == 0) {
-            message = led_count == 1 ? lv_tr("LED strip available for lighting control")
-                                     : fmt::format(lv_tr("{} LED strips available"), led_count);
+            message = fmt::format(
+                fmt::runtime(helix::ui::tr_plural("LED strip available for lighting control",
+                                                  "{} LED strips available", led_count)),
+                led_count);
         } else if (sensor_count > 0 && led_count == 0 && other_count == 0) {
-            message = sensor_count == 1
-                          ? lv_tr("Filament sensor available for runout detection")
-                          : fmt::format(lv_tr("{} filament sensors available"), sensor_count);
+            message = fmt::format(
+                fmt::runtime(helix::ui::tr_plural("Filament sensor available for runout detection",
+                                                  "{} filament sensors available", sensor_count)),
+                sensor_count);
         } else {
-            message =
-                fmt::format(lv_tr("{} new hardware available"), result.newly_discovered.size());
+            const size_t discovered = result.newly_discovered.size();
+            message = fmt::format(fmt::runtime(helix::ui::tr_plural(
+                                      nullptr, "{} new hardware available", discovered)),
+                                  discovered);
         }
         severity = ToastSeverity::INFO;
     }
@@ -430,7 +459,7 @@ size_t HardwareValidator::acknowledge_discovered_hardware(Config* config,
         names.push_back(led);
     }
     for (const auto& sensor : hardware.filament_sensor_names()) {
-        if (PrinterHardware::is_ams_sensor(sensor, hardware)) {
+        if (PrinterHardware::is_ams_sensor(sensor, hardware, kFilamentHardwareAbsent)) {
             continue;
         }
         names.push_back(sensor);
@@ -586,25 +615,12 @@ void HardwareValidator::validate_configured_hardware(Config* config,
     }
 
     // Check configured filament sensors
-    {
-        const json* sensors_config =
-            config->try_get_json(config->df() + "filament_sensors/sensors");
-        if (sensors_config != nullptr && sensors_config->is_array()) {
-            for (const auto& sensor : *sensors_config) {
-                if (!sensor.is_object()) {
-                    continue;
-                }
-                const std::string sensor_name = json_string_member(sensor, "name");
-                if (sensor_name.empty()) {
-                    continue;
-                }
-                if (!contains_name(filament_sensors, sensor_name) &&
-                    !is_hardware_optional(config, sensor_name)) {
-                    result.expected_missing.push_back(
-                        HardwareIssue::warning(sensor_name, HardwareType::FILAMENT_SENSOR,
-                                               TR_NOOP("Configured filament sensor not found")));
-                }
-            }
+    for (const auto& sensor_name : FilamentSensorManager::instance().saved_sensor_names()) {
+        if (!contains_name(filament_sensors, sensor_name) &&
+            !is_hardware_optional(config, sensor_name)) {
+            result.expected_missing.push_back(
+                HardwareIssue::warning(sensor_name, HardwareType::FILAMENT_SENSOR,
+                                       TR_NOOP("Configured filament sensor not found")));
         }
     }
 
@@ -616,24 +632,11 @@ void HardwareValidator::validate_configured_hardware(Config* config,
                 if (hw_name.empty())
                     continue;
 
-                // Check if this is AMS/MMU hardware (uses capability flags)
-                bool is_ams_hardware = (hw_name == "AFC" || hw_name == "mmu" ||
-                                        hw_name == "toolchanger" || hw_name == "ace");
-
-                if (is_ams_hardware) {
-                    bool found = false;
-
-                    if (hw_name == "mmu" && hardware.has_mmu()) {
-                        found = true;
-                    } else if (hw_name == "AFC" && hardware.mmu_type() == AmsType::AFC) {
-                        found = true;
-                    } else if (hw_name == "toolchanger" && hardware.has_tool_changer()) {
-                        found = true;
-                    } else if (hw_name == "ace" && hardware.mmu_type() == AmsType::ACE) {
-                        found = true;
-                    }
-
-                    if (!found && !is_hardware_optional(config, hw_name)) {
+                // A filament system's entry must find that system detected.
+                const AmsType ams_type = ams_type_for_expected_hardware(hw_name);
+                if (ams_type != AmsType::NONE) {
+                    if (!hardware.has_filament_system(ams_type) &&
+                        !is_hardware_optional(config, hw_name)) {
                         result.expected_missing.push_back(HardwareIssue::warning(
                             hw_name, HardwareType::OTHER, TR_NOOP("AMS/MMU system not detected")));
                         spdlog::debug("[HardwareValidator] Expected AMS hardware '{}' not found",
@@ -715,23 +718,8 @@ void HardwareValidator::validate_new_hardware(Config* config,
 
     // Check for filament sensors not in config
     const auto& discovered_sensors = hardware.filament_sensor_names();
-    std::vector<std::string> configured_names;
-
-    if (config) {
-        const json* sensors_config =
-            config->try_get_json(config->df() + "filament_sensors/sensors");
-        if (sensors_config != nullptr && sensors_config->is_array()) {
-            for (const auto& sensor : *sensors_config) {
-                if (!sensor.is_object()) {
-                    continue;
-                }
-                std::string klipper_name = json_string_member(sensor, "klipper_name");
-                if (!klipper_name.empty()) {
-                    configured_names.push_back(std::move(klipper_name));
-                }
-            }
-        }
-    }
+    const std::vector<std::string> configured_names =
+        FilamentSensorManager::instance().saved_sensor_names();
 
     // Find sensors in discovery but not in config
     for (const auto& sensor : discovered_sensors) {
@@ -739,7 +727,7 @@ void HardwareValidator::validate_new_hardware(Config* config,
         // Discovery-aware: when HH or AFC is detected, also suppress the
         // backend's conventionally-named sensors (extruder/toolhead/
         // tool_start/<lane>_prep/...) so a fresh install doesn't toast.
-        if (PrinterHardware::is_ams_sensor(sensor, hardware)) {
+        if (PrinterHardware::is_ams_sensor(sensor, hardware, kFilamentHardwareAbsent)) {
             spdlog::debug("[HardwareValidator] Skipping AMS sensor: {}", sensor);
             continue;
         }

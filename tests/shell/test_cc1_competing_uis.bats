@@ -96,6 +96,7 @@ EOF
 
     unset _HELIX_COMPETING_UIS_SOURCED
     # shellcheck disable=SC1090
+    . "$WORKTREE_ROOT/scripts/lib/installer/common.sh"
     . "$patched"
 }
 

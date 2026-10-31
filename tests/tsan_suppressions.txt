@@ -34,10 +34,12 @@ race:lv_thread_sync_signal
 # having our mocks let libhv bind its own listen fd instead of handing one over
 # changed nothing.
 #
-# What does work is sharding, so `make test-tsan` now runs Catch2 shards: the
-# abort needs a loop from an earlier test to tear down during a later one, and
-# separate processes break that pairing. Measured 0 aborts across 32 shards
-# against 3 in 4 unsharded runs. See prestonbrown/helixscreen#1293.
+# What contains it is sharding: the abort needs a loop from an earlier test to
+# tear down during a later one, and separate processes break most of those
+# pairings. A shard whose fixed composition still holds one aborts on every run,
+# so `make test-tsan` re-runs an aborting shard split into smaller pieces
+# (scripts/tsan_resplit_shard.sh), and only the pieces that still abort go
+# unchecked. See prestonbrown/helixscreen#1293.
 
 # spdlog default-logger swap while background threads log.
 #

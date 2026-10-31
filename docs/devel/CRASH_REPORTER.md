@@ -241,6 +241,19 @@ Reports from independently compiled binaries do arrive (#1240: a `v0.1.4` report
 from a Pi, a value `VERSION.txt` has never held, with a 27 MB text segment that
 matches no release build).
 
+### Platform Gate
+
+The worker also refuses a report whose `platform` is not in `KNOWN_PLATFORMS`
+(`server/crash-worker/src/index.ts#"export function isKnownPlatform"`): every key `current_key()` can return,
+plus retired keys (`k1`, `ad5x`) that deployed binaries still report. A new platform is
+therefore two changes, the list and a **deploy**: until the worker is redeployed, that
+platform's crashes are dropped. `tests/shell/test_update_platform_coverage.bats` fails when
+`current_key()` names a key the list lacks.
+
+Deploy from `server/crash-worker/` with `npm ci && npx vitest run && npx wrangler deploy`,
+on a machine logged in to the Cloudflare account (`npx wrangler whoami`). Wrangler 4 needs
+Node 20 or newer.
+
 ### Deduplication
 
 Before filing, the worker looks for an open `crash`-labelled issue whose body

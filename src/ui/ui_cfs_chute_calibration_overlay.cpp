@@ -192,7 +192,7 @@ void CfsChuteCalibrationOverlay::handle_jog(double delta_mm) {
     if (result.warn) {
         NOTIFY_INFO(lv_tr("Y axis limit reached"));
     }
-    if (std::abs(delta) <= helix::AxisMove::EPSILON_MM) {
+    if (std::abs(delta) <= helix::AxisMove::kEpsilonMm) {
         return;
     }
     backend->jog_chute_y(static_cast<float>(delta));

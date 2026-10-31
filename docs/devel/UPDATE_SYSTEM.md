@@ -53,7 +53,7 @@ Key safety rules:
   Joining there froze the touchscreen until the transfer ended. `shutdown()` and the destructor
   wait a bounded time and then **detach** for the same reason — see `reap_download_thread()`.
 - **Downloads are blocked** while a print is in progress (`PrintJobState::PRINTING` or `PAUSED`).
-- **Rate limited** to one check per `MIN_CHECK_INTERVAL` (10 minutes). A manual tap inside that
+- **Rate limited** to one check per `kMinCheckInterval` (10 minutes). A manual tap inside that
   window returns the cached result and logs only at `debug`, so it looks like nothing happened.
 
 ---
@@ -219,7 +219,7 @@ A downgrade is deliberately quieter than an update:
 
 **Config compatibility.** An older build loading a config written by a newer one
 leaves it entirely alone — `run_versioned_migrations()` returns early when
-`config_version > CURRENT_CONFIG_VERSION` rather than stamping it down. Migration
+`config_version > kCurrentConfigVersion` rather than stamping it down. Migration
 gates are all `version < N` so none would fire anyway; an unconditional stamp would make
 the newer build re-run already-applied migrations
 on its next boot. Unknown keys survive because `Config::save()` serializes the
@@ -362,12 +362,14 @@ warning.
 }
 ```
 
-Default: `https://releases.helixscreen.org` (compiled as `DEFAULT_R2_BASE_URL`).
+Default: `https://releases.helixscreen.org` (compiled as `kDefaultR2BaseUrl`).
 
 **Where the state dir lives.** `/var/lib/helixscreen` on every platform - Pi, K1,
-K2, AD5M, AD5X, CC1 and U1 all resolve the same compile-time `STATE_DIR_DEFAULT`
+K2, AD5M, AD5X, CC1 and U1 all resolve the same compile-time `kStateDirDefault`
 (`include/app_constants.h`); no platform falls back to `~/.helixscreen` for this
-file. systemd units create it via `StateDirectory=helixscreen`
+file. The Android app is the exception: it has no `/var/lib`, so
+`android_configure_backup_dirs()` points the state dir at `files/state` in app storage
+(`docs/devel/ANDROID_ASSETS.md`). systemd units create it via `StateDirectory=helixscreen`
 (`StateDirectoryMode=0700`), and the SysV init script (`config/helixscreen.init`)
 `mkdir -p`s it at boot. On a device where neither has run yet:
 
@@ -396,15 +398,22 @@ R2 manifests may have sparse release notes. After a successful R2 fetch, the che
 
 ## Platform Detection
 
-The platform key is determined at compile time via preprocessor defines:
+The platform key is determined at compile time via preprocessor defines, in
+`helix::platform::current_key()` (`src/system/platform_table.cpp#current_key`):
 
 | Define | Platform Key | Devices |
 |--------|-------------|---------|
 | `HELIX_PLATFORM_AD5M` | `ad5m` | Flashforge Adventurer 5M |
-| `HELIX_PLATFORM_MIPS` | `k1` or `ad5x` | MIPS32 devices (Creality K1, FlashForge AD5X). Runtime detection via `/usr/prog` presence. |
-| `HELIX_PLATFORM_K2` | `k2` | Creality K2 series. **Note:** K2 is supported in the UpdateChecker code but is not yet included in `generate-manifest.sh`. R2 manifests do not currently include K2 binaries. |
+| `HELIX_PLATFORM_CC1` | `cc1` | Elegoo Centauri Carbon |
+| `HELIX_PLATFORM_MIPS` | `mips` | The unified MIPS build: Creality K1 series, FlashForge AD5X, Creator 5 and Creator 5 Pro. A release cut before that build has no `mips` asset, so `release_asset_keys(key, board)` also tries the resolved board's pre-unification asset (`board::info(board).legacy_release_asset`: `k1` or `ad5x`); a Creator 5 has none and answers to `mips` alone. A newer or older release with no asset for this board is refused (`decide_check_outcome()` reports `Error` with the release attached; the main thread renders `no_build_message()` with the board's display name). Stable stays selectable; only the message changes |
+| `HELIX_PLATFORM_K1` | `k1` | The `k1-dynamic` variant |
+| `HELIX_PLATFORM_K2` | `k2` | Creality K2 series |
+| `HELIX_PLATFORM_X86` | `x86` | x86_64 kiosk (DRM/fbdev) |
+| `HELIX_PLATFORM_X86_DESKTOP` | `x86-desktop` | x86_64 Linux desktop window (SDL). Announces updates but never installs them: see [Builds that open the release page](#builds-that-open-the-release-page) |
+| `HELIX_PLATFORM_SNAPMAKER_U1` | `snapmaker-u1` | Snapmaker U1 |
 | `HELIX_PLATFORM_PI32` | `pi32` | Raspberry Pi (32-bit) |
-| (default) | `pi` | Raspberry Pi (64-bit) |
+| `HELIX_PLATFORM_ESP32` | `esp32` | BTT K-Touch firmware (no tarball updater) |
+| (default) | `pi` | Raspberry Pi (64-bit), and native dev builds |
 
 Asset name format: `helixscreen-{platform}.zip` (preferred, e.g., `helixscreen-pi.zip`). The legacy `helixscreen-{platform}-{tag}.tar.gz` form is still published during the bridge release for backwards compatibility with older installed versions.
 
@@ -494,7 +503,7 @@ HelixScreen registers itself with Moonraker's `update_manager` for updates via M
 
 ### Configuration Block
 
-The installer appends this to `moonraker.conf`:
+The installer appends this to `moonraker.conf`, unless moonraker.conf or a file it pulls in with `[include]` already holds one:
 
 ```ini
 [update_manager helixscreen]
@@ -506,15 +515,15 @@ path: /opt/helixscreen
 
 Key points:
 - `type: web` -- Moonraker downloads ZIP assets from GitHub releases (workaround for mainsail-crew/mainsail#2444 where `type: zip` always shows UP-TO-DATE)
-- `type: web` does **not** support `install_script`, `managed_services`, or `persistent_files` -- do not add these options (Moonraker will warn about unparsed config)
-- User config files live in `printer_data/config/helixscreen/` (outside the managed path), so they survive Moonraker's `shutil.rmtree` without needing `persistent_files`
+- Do not add `install_script` or `managed_services`: a `type: web` stanza does not read them and Moonraker warns about unparsed config. Do not add `persistent_files` either: it is read, but it matches top-level names of `path:` only and the release zip ships a top-level `config/`, so it cannot preserve anything useful (listing `config` restores it to `config/config`, nested entries never match)
+- User config files live in `printer_data/config/helixscreen/` (outside the managed path) and `$INSTALL_DIR/config/<file>` are symlinks into it, so the targets survive Moonraker's `shutil.rmtree`; `config/restore-user-config.sh` re-creates the symlinks after extraction (run by `refresh-service-units.sh` on systemd and by `helixscreen.init` `start` elsewhere)
 - release_info.json -- Written to the install directory so Moonraker can detect the installed version
 - A systemd path unit (`helixscreen-update.path`) watches release_info.json and restarts the service after Moonraker extracts an update
 - As a self-healing fallback, `helixscreen.service` runs `refresh-service-units.sh` on every start to re-template systemd units and install missing watcher units
 
 #### Keeping `channel:` in sync
 
-Mainsail and Fluidd offer whatever release the stanza's `channel:` names, so a stanza that disagrees with the app offers a beta install a "stable" downgrade. The installer sets it (`update_manager_web_channel()` / `sync_update_manager_channel()` in `scripts/lib/installer/moonraker.sh`), and the app keeps it in sync after that: `UpdateChecker::sync_moonraker_channel()` runs on every Moonraker discovery (the `moonraker_update_channel` step in `src/application/discovery_steps.cpp`), on a channel change (`UpdateChecker::on_channel_changed()`), and when the beta-features toggle moves a stored Dev channel. It runs only when Moonraker is on this host (`helix::is_moonraker_on_same_host()`) and the stanza's `path:` resolves to this running install's directory (`app_get_install_root()`), so a remote screen or a second instance never imposes its channel on someone else's stanza. It maps the effective channel the same way the installer does (Dev rides `beta`, and Dev without beta features is Stable), downloads `config/moonraker.conf` through the file API and rewrites the line with `MoonrakerConfigManager::set_existing_value()`. Like the installer, it touches only an existing `channel:` line inside a single `[update_manager helixscreen]`: no stanza (AD5M, an unsupported Moonraker), duplicate stanzas, or a hand-written one without the line means nothing is written. Only the value changes; an inline comment, CRLF line endings and a missing final newline are kept.
+Mainsail and Fluidd offer whatever release the stanza's `channel:` names, so a stanza that disagrees with the app offers a beta install a "stable" downgrade. The installer sets it (`update_manager_web_channel()` / `sync_update_manager_channel()` in `scripts/lib/installer/moonraker.sh`), and the app keeps it in sync after that: `UpdateChecker::sync_moonraker_channel()` runs on every Moonraker discovery (the `moonraker_update_channel` step in `src/application/discovery_steps.cpp`), on a channel change (`UpdateChecker::on_channel_changed()`), and when the beta-features toggle moves a stored Dev channel. It runs only when Moonraker is on this host (`helix::is_moonraker_on_same_host()`) and the stanza's `path:` resolves to this running install's directory (`app_get_install_root()`), so a remote screen or a second instance never imposes its channel on someone else's stanza. It maps the effective channel the same way the installer does (Dev rides `beta`, and Dev without beta features is Stable), and finds the stanza the way Moonraker reads it: it lists the `config` root, downloads `moonraker.conf` and every file its `[include]` lines reach (`helix::system::download_config_include_graph()`; patterns resolve against the including file's directory and may be globs), and `MoonrakerConfigManager::find_section_file()` names the file Moonraker reads the stanza from last, whose options win when several files define it. Each download is issued from the main thread and abandoned once the printer changes, so a walk never reaches a torn-down API. A download that fails abandons the sync: a config missing one of its files cannot say which stanza wins. The line is rewritten in that file with `MoonrakerConfigManager::set_existing_value()` and uploaded back to it. Like the installer, it touches only an existing `channel:` line: no stanza anywhere (AD5M, an unsupported Moonraker), a file defining the stanza twice, or a hand-written one without the line means nothing is written. Only the value changes; an inline comment, CRLF line endings and a missing final newline are kept.
 
 A rewrite is followed by a Moonraker restart, since Moonraker reads its config only at startup. While a job holds the machine (printing or paused), or `machine.update.status` reports `busy` (or cannot be read), the file is still written but the restart is skipped, so the channel takes effect at Moonraker's next start. `UpdateChecker::detach()`, which runs on every printer teardown, bumps a generation that every hop of the sync checks, so a sync in flight across a printer switch is dropped. The restart drops the app's websocket; the reconnect's discovery runs the sync again, finds the stanza matching and writes nothing, so there is no restart loop.
 
@@ -534,7 +543,7 @@ The installer also adds `helixscreen` to `moonraker.asvc` (the service managemen
 
 ### Migration
 
-The installer detects and migrates old `type: git_repo` and `type: zip` configurations to `type: web`, cleaning up any leftover sparse clone directories. Existing `type: web` sections are cleaned of unsupported options (`persistent_files`, `managed_services`, `install_script`) that cause Moonraker warnings.
+The installer detects and migrates old `type: git_repo` and `type: zip` configurations to `type: web`, cleaning up any leftover sparse clone directories. Existing `type: web` sections are stripped of `managed_services` and `install_script` (unread, so Moonraker warns) and of `persistent_files` (read, but unable to match our layout).
 
 ### Platform Scope
 
@@ -563,6 +572,23 @@ Shown automatically by auto-check when an update is found:
 - Header with version info
 - "View Changelog" toggle button that reveals a scrollable markdown area (`ui_markdown` bound to `update_release_notes`)
 - "Ignore" button (dismisses this version) and "Install" button (opens download modal)
+
+### Builds that open the release page
+
+Two builds never run the tarball updater. Every install intent, the Updates overlay's Install
+Update row and the notification's Install button alike, reaches
+`UpdatesSettingsOverlay::show_update_download_modal()`, which on these builds opens a page with
+`SDL_OpenURL` instead of the download modal:
+
+| Build | Opens |
+|-------|-------|
+| Android | The Play listing for a Play install, else the GitHub release page (`helix::android::update_url`) |
+| `x86-desktop` | The GitHub release page for the offered release (`helix::release_page_url`, `include/system/release_page.h`); a toast says so when no browser opens. The user installs with `install.sh --update` |
+
+`release_page_url()` falls back to the latest release when the channel is not on GitHub (dev)
+or the manifest's version is not a safe tag. On `x86-desktop`, `UpdateChecker::start_download()`
+also refuses outright, so no future path into it can run the installer, which would treat an
+in-app update as the kiosk flavour.
 
 ### Download Modal (`update_download_modal.xml`)
 
@@ -614,11 +640,21 @@ overrides live in the root-owned `/var/lib/helixscreen/update_urls.json` (see
 
 ### Adding a New Platform
 
-1. Add a `HELIX_PLATFORM_*` define and update `current_key()` and add a row in `src/system/platform_table.cpp`
-2. Add the platform to the `PLATFORMS` array in `scripts/generate-manifest.sh`
-3. Add a build job in `.github/workflows/release.yml`
-4. Add a `release-{platform}` target in the Makefile
-5. Update `write_release_info()` in `scripts/lib/installer/moonraker.sh`
+1. `mk/cross.mk`: the `PLATFORM_TARGET` block (with a `HELIX_PLATFORM_*` define in its
+   `TARGET_CFLAGS`), a `<platform>-docker` target, `REL_LABEL.<platform>`, and
+   `release-<platform>` / `package-<platform>` targets
+2. `src/system/platform_table.cpp`: an `#elif` in `current_key()` and a row in `kPlatforms`; then
+   the known-platform lists in `tests/unit/test_update_checker.cpp`
+3. `assets/config/platforms.json`: the platform's entry (`scripts/check_platform_manifest.py --strict`
+   cross-checks it against the package targets)
+4. `.github/workflows/release.yml`: an entry in the build matrix. `scripts/generate-manifest.sh`
+   discovers platforms from the uploaded file names, so it needs nothing
+5. `server/crash-worker/src/index.ts`: `KNOWN_PLATFORMS` (and its test), then **deploy the
+   worker**, or it refuses the new platform's crash reports
+   (`tests/shell/test_update_platform_coverage.bats` fails until the list matches)
+6. The installer: `detect_platform` / `get_download_platform` in `scripts/lib/installer/platform.sh`
+   if the installer should pick it, and `validate_tarball`'s ELF expectation in `release.sh`
+7. `firmware/helixscreen-esp32/components/helixapp/app_srcs_excluded.txt` for any new source file
 
 ### Testing Update Checks
 
@@ -749,7 +785,6 @@ rerun it after the watchdog brings the new binary up.
 ### Unit Tests
 
 - `tests/unit/test_update_checker.cpp` — Version comparison, JSON parsing, status enums, lifecycle, subjects, dismissed versions, auto-check timer
-- `tests/unit/test_update_channel.cpp` — Beta channel array parsing, dev manifest parsing, platform asset selection, channel config mapping, R2 URL resolution
 
 Run with:
 
@@ -777,7 +812,7 @@ Run with:
 
 - Check network connectivity from the device
 - R2 CDN may be down -- the checker automatically falls back to GitHub API
-- GitHub API has rate limits (60 requests/hour unauthenticated). `MIN_CHECK_INTERVAL` caps a single
+- GitHub API has rate limits (60 requests/hour unauthenticated). `kMinCheckInterval` caps a single
   running instance at 6 checks/hour, but the limiter is in-process only -- rapid restarts reset it
   and can exhaust the quota.
 - Check logs: `./build/bin/helix-screen --test -vv` and look for `[UpdateChecker]` messages
@@ -818,7 +853,7 @@ Run with:
 
 **Symptom**: HelixScreen doesn't appear in Moonraker's update manager
 
-- Check that `[update_manager helixscreen]` exists in `moonraker.conf`
+- Check that `[update_manager helixscreen]` exists in `moonraker.conf` or a file it `[include]`s
 - Check that `helixscreen` is listed in `moonraker.asvc`
 - Check that release_info.json exists in the install directory
 - Restart Moonraker after config changes
@@ -855,4 +890,3 @@ Or for deployed installations, set `HELIX_LOG_LEVEL=debug` in `~/helixscreen/con
 | `scripts/lib/installer/moonraker.sh` | Moonraker update_manager configuration |
 | `.github/workflows/release.yml` | CI: build, release, R2 upload |
 | `tests/unit/test_update_checker.cpp` | UpdateChecker unit tests |
-| `tests/unit/test_update_channel.cpp` | Channel/manifest parsing tests |

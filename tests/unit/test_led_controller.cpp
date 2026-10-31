@@ -1955,7 +1955,7 @@ TEST_CASE_METHOD(LedControllerFixture, "LedController: draft macro is not a sele
     // A bare "macro:" chip would render as an unnamed button that dispatches
     // nothing when tapped.
     for (const auto& strip : ctrl.all_selectable_strips()) {
-        CHECK(strip.id != helix::led::MACRO_STRIP_PREFIX);
+        CHECK(strip.id != helix::led::kMacroStripPrefix);
         CHECK(!strip.name.empty());
     }
     REQUIRE(ctrl.all_selectable_strips().empty());
@@ -2404,6 +2404,33 @@ TEST_CASE_METHOD(LedControllerFixture,
     // A chain is white-capable only when every LED in it has W.
     CHECK(page("neopixel chain").white == helix::led::WhiteMode::Mixed);
     CHECK(page("dotstar star").white == helix::led::WhiteMode::Mixed);
+    ctrl.deinit();
+}
+
+TEST_CASE_METHOD(LedControllerFixture,
+                 "LedController: an addressable chip name with no instance is not a strip type",
+                 "[led][controller][configfile]") {
+    auto& ctrl = helix::led::LedController::instance();
+    ctrl.deinit();
+    ctrl.init(nullptr, nullptr);
+
+    // Only "<chip> <name>" is an addressable strip. A bare chip, or one whose name is empty,
+    // keeps the fail-closed white-only default and learns nothing from color_order.
+    ctrl.apply_configfile({{"neopixel ", {{"pin", "PA1"}, {"color_order", "GRBW"}}},
+                           {"dotstar ", {{"data_pin", "PA2"}, {"clock_pin", "PA3"}}}});
+    helix::PrinterDiscovery discovery;
+    discovery.parse_objects(
+        nlohmann::json::array({"neopixel ", "dotstar ", "neopixel", "dotstar"}));
+    ctrl.discover_from_hardware(discovery);
+
+    const auto& strips = ctrl.native().strips();
+    REQUIRE(strips.size() == 4);
+    for (const auto& strip : strips) {
+        INFO("strip id: '" << strip.id << "'");
+        CHECK_FALSE(strip.supports_color);
+        CHECK_FALSE(strip.supports_white);
+        CHECK_FALSE(strip.pin_config_known);
+    }
     ctrl.deinit();
 }
 

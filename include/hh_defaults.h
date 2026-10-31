@@ -5,6 +5,8 @@
 
 #include "ams_types.h"
 
+#include <string_view>
+#include <utility>
 #include <vector>
 
 /**
@@ -34,5 +36,8 @@ std::vector<DeviceSection> hh_default_sections();
  * Real backend overlays dynamic values from MMU state.
  */
 std::vector<DeviceAction> hh_default_actions();
+
+/// The {min, max} of default action @p id, or a range wide enough to accept any value.
+std::pair<float, float> hh_default_action_range(std::string_view id);
 
 } // namespace helix::printer

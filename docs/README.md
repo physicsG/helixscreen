@@ -16,7 +16,7 @@ Welcome to the HelixScreen documentation. Choose your path:
 | [**Troubleshooting**](user/TROUBLESHOOTING.md) | Solutions to common problems |
 | [**FAQ**](user/FAQ.md) | Quick answers to common questions |
 | [**Telemetry**](user/TELEMETRY.md) | What telemetry collects, privacy controls, opt-in/out |
-| [**Feature Guides**](user/guide/) | 30 guides: per-feature (printing, calibration, filament, sensors, camera, and more) plus per-printer install guides (K1C, K2, AD5M, AD5X, CC1, Sonic Pad, U1) |
+| [**Feature Guides**](user/guide/) | 39 guides: per-feature (printing, calibration, filament, sensors, camera, the HelixPrint plugin, and more) plus per-platform install guides (K1C, K2, AD5M, AD5X, CC1, Sonic Pad, U1, K-Touch, Linux desktop window) |
 
 ---
 
@@ -53,6 +53,7 @@ Welcome to the HelixScreen documentation. Choose your path:
 | [**Moonraker Architecture**](devel/MOONRAKER_ARCHITECTURE.md) | Moonraker integration details |
 | [**RPC Error Ownership**](devel/RPC_ERROR_OWNERSHIP.md) | Which surface reports a failed JSON-RPC call — caller UI, generic fallback, or the `!!` router |
 | [**Theme System**](devel/THEME_SYSTEM.md) | Reactive theming, color tokens, responsive sizing |
+| [**Colour Swatches**](devel/COLOR_SWATCHES.md) | The one swatch painter: shape, edge, selection, multi-colour split, filament finishes |
 | [**Theme Contributor Guide**](devel/THEME_CONTRIBUTOR_GUIDE.md) | For people creating themes — JSON schema, palette design, no C++ needed |
 | [**Layout System**](devel/LAYOUT_SYSTEM.md) | Alternative layouts, auto-detection, CLI override, home widget grid |
 | [**Home Edit Mode**](devel/HOME_EDIT_MODE.md) | Rearranging the home grid: grab and click rules, gesture end, cross-page drag, page lifecycle |
@@ -70,22 +71,25 @@ Welcome to the HelixScreen documentation. Choose your path:
 |----------|-------------|
 | [**Label Printer System**](devel/LABEL_PRINTER_SYSTEM.md) | Brother QL, Phomemo, Niimbot, MakeID; USB/TCP/Bluetooth |
 | [**Filament Management**](devel/FILAMENT_MANAGEMENT.md) | Shared filament-system architecture: multi-backend, dispatch ladder, slot metadata, endless spool, dryer, device ops |
-| **Filament Backend Leaves** | Per-backend docs: [AFC](devel/FILAMENT_BACKEND_AFC.md), [Happy Hare](devel/FILAMENT_BACKEND_HAPPY_HARE.md), [ACE](devel/FILAMENT_BACKEND_ACE.md), [Tool Changer](devel/FILAMENT_BACKEND_TOOLCHANGER.md), [AD5X IFS](devel/FILAMENT_BACKEND_AD5X_IFS.md), [CFS](devel/FILAMENT_BACKEND_CFS.md), [QIDI Box](devel/FILAMENT_BACKEND_QIDI_BOX.md), [Snapmaker U1](devel/FILAMENT_BACKEND_SNAPMAKER_U1.md), [MedusaHC](devel/FILAMENT_BACKEND_MEDUSAHC.md) |
+| **Filament Backend Leaves** | Per-backend docs: [AFC](devel/FILAMENT_BACKEND_AFC.md), [Happy Hare](devel/FILAMENT_BACKEND_HAPPY_HARE.md), [ACE](devel/FILAMENT_BACKEND_ACE.md), [Tool Changer](devel/FILAMENT_BACKEND_TOOLCHANGER.md), [AD5X IFS](devel/FILAMENT_BACKEND_AD5X_IFS.md), [CFS](devel/FILAMENT_BACKEND_CFS.md), [QIDI Box](devel/FILAMENT_BACKEND_QIDI_BOX.md), [Snapmaker U1](devel/FILAMENT_BACKEND_SNAPMAKER_U1.md), [multiACE](devel/FILAMENT_BACKEND_MULTIACE.md), [INDX](devel/FILAMENT_BACKEND_INDX.md), [MedusaHC](devel/FILAMENT_BACKEND_MEDUSAHC.md) |
 | [**Filament Slot Metadata (internal)**](devel/FILAMENT_SLOT_METADATA.md) | `FilamentSlotOverrideStore` implementation: per-backend hooks, hardware-event clearing, cache, migration |
 | [**Creality CFS Internals (K1)**](devel/printer-research/CREALITY_CFS_K1_INTERNALS.md) | K1-family CFS box-wrapper RE reference: `BOX_*` semantics, the printer-side tn_data.json userdata, deferred-failure/resume traps |
 | [**Creality CFS Internals (K2)**](devel/printer-research/CREALITY_CFS_K2_INTERNALS.md) | K2 CFS module RE reference: `box` schema variants, command surface, error codes, runout, the community Kalico port |
+| [**Creator 5 Stock Firmware**](devel/printer-research/FLASHFORGE_CREATOR5_FIRMWARE.md) | Creator 5 stock firmware RE: package decryption, the 2.0.0 layout and features, Klipper deltas, stock features against HelixScreen |
 | [**Filament Slots Spec (public)**](specs/filament_slots.md) | Wire-format convention for the `lane_data` Moonraker DB namespace — readable by any third party |
 | [**Input Shaper & PID**](devel/INPUT_SHAPER.md) | Calibration, frequency response charts, CSV parser |
-| [**Belt Tension**](devel/BELT_TENSION.md) | Resonance-sweep belt path comparison: gate, collector, provisional verdicts, mock knobs |
+| [**Pressure Advance Tuning**](devel/PRESSURE_ADVANCE_TUNING.md) | Tune K by eye on a live test print; Spoolman and Moonraker persistence |
+| [**Belt Tension**](devel/BELT_TENSION.md) | Resonance-sweep belt path comparison and guided tuning loop: gate, collector, settling laps, provisional verdicts, mock knobs |
 | [**Preprint Prediction**](devel/PREPRINT_PREDICTION.md) | ETA prediction engine, phase timing, history |
 | [**Exclude Objects**](devel/EXCLUDE_OBJECTS.md) | Object exclusion, thumbnails, slicer setup |
 | [**Print Start Profiles**](devel/PRINT_START_PROFILES.md) | Print start phase detection, developer guide: pipeline, signal sources, evidence kinds, profiles |
 | [**Print Start Integration**](devel/PRINT_START_INTEGRATION.md) | User-facing macro setup guide |
 | [**Update System**](devel/UPDATE_SYSTEM.md) | Channels, R2 CDN, downloads, Moonraker updater |
 | [**Sound System**](devel/SOUND_SYSTEM.md) | Audio architecture, JSON themes, backends |
+| [**Built-in Screen Server**](devel/REMOTE_SCREEN.md) | The screen as a Mainsail/Fluidd webcam, remote touch, pairing and the nginx route |
 | [**Screensavers**](devel/SCREENSAVERS.md) | Registry, shared parts, CPU gate and stored levels, adding a saver |
 | [**LED Control**](devel/LED_CONTROL.md) | LED system: 5 backends, auto-state lighting, overlays |
-| [**Sensor Management**](devel/SENSOR_MANAGEMENT.md) | Sensor managers (filament, temperature, humidity, probe, accel, width, load cell): discovery, subjects, runout handling |
+| [**Sensor Management**](devel/SENSOR_MANAGEMENT.md) | The hardware object table and the `SensorManager` base (filament, temperature, humidity, probe, accel, width, load cell, input): discovery, subjects, Settings rows, runout handling |
 | [**Action Prompts**](devel/ACTION_PROMPTS.md) | Klipper `action:prompt_*` macros: parser, state machine, modal, button gcode |
 | [**Bluetooth System**](devel/BLUETOOTH_SYSTEM.md) | Runtime-loaded BT plugin: C ABI, bus thread, discovery, pairing, RFCOMM/BLE |
 | [**USB Management**](devel/USB_MANAGEMENT.md) | USB drives, the fallback automounter, print-select USB source, USB label printers, HID scanners |
@@ -94,7 +98,8 @@ Welcome to the HelixScreen documentation. Choose your path:
 | [**Printer Manager**](devel/PRINTER_MANAGER.md) | Printer overlay, custom images, inline editing |
 | [**Timelapse**](devel/TIMELAPSE.md) | Moonraker timelapse plugin integration |
 | [**Crash Reporter**](devel/CRASH_REPORTER.md) | Crash detection, delivery pipeline, CF Worker |
-| [**HelixPrint Plugin**](../moonraker-plugin/README.md) | Print attribution Moonraker plugin (server/helix/print_modified + server/helix/status) |
+| [**HelixPrint Plugin**](devel/HELIXPRINT_PLUGIN.md) | The Moonraker plugin and the app: feature framework, plugin-vs-fallback decisions, settings placement, the Lua allowlist, file analysis, fit check, print hooks, server edits, filament accounting, event journal, photos, storage, config edit, vendor push |
+| [**HelixPrint Plugin API**](../moonraker-plugin/README.md) | Plugin reference: install, configuration, every server/helix endpoint and record |
 
 ### Platform Support
 
@@ -157,7 +162,7 @@ docs/
 │   ├── CONFIGURATION.md      # Settings reference
 │   ├── TROUBLESHOOTING.md    # Common problems
 │   ├── FAQ.md                # Frequently asked questions
-│   └── guide/                # 30 guides: per-feature + per-printer install (+ guide/settings/)
+│   └── guide/                # 39 guides: per-feature + per-platform install (+ guide/settings/)
 │
 ├── devel/                    # DEVELOPER DOCUMENTATION
 │   ├── CLAUDE.md             # Full developer doc index
@@ -171,7 +176,7 @@ docs/
 │   ├── printer-research/     # Reverse-engineering notes + printer status matrix
 │   └── ...                   # 70+ more dev docs (index: devel/CLAUDE.md)
 │
-├── specs/                    # PUBLIC, VENDOR-NEUTRAL CONVENTION SPECS
+├── specs/                    # PUBLIC, VENDOR-NEUTRAL CONVENTION kSpecs
 │   ├── CLAUDE.md             # Specs subtree routing
 │   └── filament_slots.md     # lane_data Moonraker DB convention
 │

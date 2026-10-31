@@ -10,13 +10,16 @@
  * under the same name; if both entries survived, shutdown would run a callback
  * closed over the destroyed instance alongside the live one.
  *
- * Uses deinit_one() rather than deinit_all() so the case never touches the other
- * entries the process-wide registry is holding for the rest of the suite.
+ * Cases use deinit_one() rather than deinit_all() so they never touch the other
+ * entries the process-wide registry is holding for the rest of the suite; the
+ * one deinit_all() case runs against an isolated registry.
  */
 
 #include "../helix_test_fixture.h"
+#include "../test_helpers/scoped_subject_registry_isolation.h"
 #include "static_subject_registry.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -88,4 +91,91 @@ TEST_CASE_METHOD(HelixTestFixture, "StaticSubjectRegistry re-registration keeps 
 
     REQUIRE(registry.deinit_one(kMiddle));
     REQUIRE(registry.deinit_one(kLate));
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "StaticSubjectRegistry printer switch honours each entry's lifetime",
+                 "[core][subjects]") {
+    // A switch only re-runs init on the rebuild path, so it must leave alone what
+    // boot-time registration owns and still release per-widget state that observes
+    // printer subjects. Exit runs everything.
+    using Lifetime = StaticSubjectRegistry::Lifetime;
+    using Scope = StaticSubjectRegistry::Scope;
+    auto& registry = StaticSubjectRegistry::instance();
+    static constexpr const char* kPrinter = "StaticSubjectRegistryLifetimePrinter";
+    static constexpr const char* kProcess = "StaticSubjectRegistryLifetimeProcess";
+    static constexpr const char* kRerun = "StaticSubjectRegistryLifetimeRerun";
+
+    auto registered = [&registry](const char* name) {
+        const std::vector<std::string> names = registry.names();
+        return std::find(names.begin(), names.end(), name) != names.end();
+    };
+
+    std::vector<std::string> ran;
+    registry.register_deinit(kPrinter, [&ran]() { ran.emplace_back("printer"); });
+    registry.register_deinit(
+        kProcess, [&ran]() { ran.emplace_back("process"); }, Lifetime::Process);
+    registry.register_deinit(
+        kRerun, [&ran]() { ran.emplace_back("rerun"); }, Lifetime::ProcessRunOnSwitch);
+
+    REQUIRE(registry.deinit_one(kPrinter, Scope::PrinterSwitch));
+    REQUIRE(registry.deinit_one(kProcess, Scope::PrinterSwitch));
+    REQUIRE(registry.deinit_one(kRerun, Scope::PrinterSwitch));
+    CHECK(ran == std::vector<std::string>{"printer", "rerun"});
+
+    // The printer entry is gone and free to come back from the rebuild path.
+    CHECK_FALSE(registered(kPrinter));
+    CHECK(registered(kProcess));
+    CHECK(registered(kRerun));
+    registry.register_deinit(kPrinter, [&ran]() { ran.emplace_back("printer:rebuilt"); });
+
+    // A second switch re-runs the run-on-switch cleanup; exit then runs every entry once.
+    ran.clear();
+    REQUIRE(registry.deinit_one(kRerun, Scope::PrinterSwitch));
+    REQUIRE(registry.deinit_one(kPrinter, Scope::ProcessExit));
+    REQUIRE(registry.deinit_one(kProcess, Scope::ProcessExit));
+    REQUIRE(registry.deinit_one(kRerun, Scope::ProcessExit));
+    CHECK(ran == std::vector<std::string>{"rerun", "printer:rebuilt", "process", "rerun"});
+    CHECK_FALSE(registered(kPrinter));
+    CHECK_FALSE(registered(kProcess));
+    CHECK_FALSE(registered(kRerun));
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "StaticSubjectRegistry deinit_all at a printer switch keeps what the rebuild "
+                 "does not re-register",
+                 "[core][subjects]") {
+    // The one case here that fires deinit_all(): it walks an isolated registry, so only
+    // this case's entries run and the process-wide ones come back afterwards.
+    using Lifetime = StaticSubjectRegistry::Lifetime;
+    using Scope = StaticSubjectRegistry::Scope;
+    ScopedSubjectRegistryIsolation isolated;
+    auto& registry = StaticSubjectRegistry::instance();
+
+    std::vector<std::string> ran;
+    registry.register_deinit("Printer", [&ran]() { ran.emplace_back("printer"); });
+    registry.register_deinit(
+        "Process", [&ran]() { ran.emplace_back("process"); }, Lifetime::Process);
+    registry.register_deinit(
+        "Rerun", [&ran]() { ran.emplace_back("rerun"); }, Lifetime::ProcessRunOnSwitch);
+    // A callback that re-registers a kept entry and adds a new one mid-walk.
+    registry.register_deinit("Rebuilder", [&ran, &registry]() {
+        ran.emplace_back("rebuilder");
+        registry.register_deinit(
+            "Process", [&ran]() { ran.emplace_back("process:new"); }, Lifetime::Process);
+        registry.register_deinit("Fresh", [&ran]() { ran.emplace_back("fresh"); });
+    });
+
+    registry.deinit_all(Scope::PrinterSwitch);
+
+    // Reverse order, and the Process entry is neither run nor dropped.
+    CHECK(ran == std::vector<std::string>{"rebuilder", "rerun", "printer"});
+    // Survivors keep their slots ahead of what the walk registered.
+    CHECK(registry.names() == std::vector<std::string>{"Process", "Rerun", "Fresh"});
+
+    // Exit runs everything left, and the re-registered callback is the one that runs.
+    ran.clear();
+    registry.deinit_all(Scope::ProcessExit);
+    CHECK(ran == std::vector<std::string>{"fresh", "rerun", "process:new"});
+    CHECK(registry.count() == 0);
 }

@@ -32,9 +32,14 @@ struct AdvancedPanelTestAccess {
         panel.moonraker_restarter_ = std::move(restarter);
     }
 
-    /// What the install modal reports once the script has exited.
-    static void finish_install(AdvancedPanel& panel, bool success) {
-        panel.on_helix_plugin_install_finished(success);
+    /// What a tap on row_helix_plugin_install dispatches to.
+    static void tap_install_row(AdvancedPanel& panel) {
+        panel.handle_helix_plugin_install_clicked();
+    }
+
+    /// The installer the rows run, for pointing it at a stub install.sh.
+    static helix::HelixPluginInstaller& plugin_installer(AdvancedPanel& panel) {
+        return panel.plugin_installer_;
     }
 
     /// What taps on the helper-macro rows dispatch to.

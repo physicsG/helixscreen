@@ -189,7 +189,7 @@ class ConsolePanel : public OverlayBase {
     // Data
     std::deque<GcodeEntry> entries_;           ///< History buffer
     static constexpr size_t MAX_ENTRIES = 200; ///< Maximum entries to display
-    static constexpr int FETCH_COUNT = 100;    ///< Number of entries to fetch
+    static constexpr int kFetchCount = 100;    ///< Number of entries to fetch
     /// Source of GcodeEntry::id. Starts at 1 so 0 stays reserved for "unassigned".
     /// Deliberately never reset, including across clear_entries().
     uint64_t next_entry_id_ = 1;
@@ -198,7 +198,7 @@ class ConsolePanel : public OverlayBase {
     std::deque<std::string> command_history_; ///< Previously sent commands (newest first)
     int history_index_ = -1;                  ///< -1 = not browsing, 0 = most recent
     std::string saved_input_;                 ///< In-progress text saved when browsing history
-    static constexpr size_t MAX_HISTORY = 20; ///< Maximum commands to remember
+    static constexpr size_t kMaxHistory = 20; ///< Maximum commands to remember
 
     // Real-time subscription state
     std::string gcode_handler_name_; ///< Unique handler name for callback registration

@@ -11,6 +11,7 @@
 #include "ui_ams_loading_error_modal.h"
 #include "ui_dialog.h"
 #include "ui_error_reporting.h"
+#include "ui_guided_load_modal.h"
 #include "ui_lock_screen.h"
 #include "ui_modal.h"
 #include "ui_notification.h"
@@ -22,6 +23,7 @@
 #include "ui_runout_guidance_modal.h"
 #include "ui_spaghetti_detection_modal.h"
 
+#include "action_prompt_manager.h"
 #include "action_prompt_modal.h"
 #include "ams_error.h"
 #include "ams_types.h"
@@ -30,9 +32,12 @@
 #include "camera_stream.h"
 #include "color_utils.h"
 #include "data_root_resolver.h"
+#include "demo_prompt_lines.h"
+#include "filament_macro_profiles.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "led/ui_led_control_overlay.h"
 #include "preflight_validator.h"
+#include "recovery_fault_modal.h"
 
 #include <spdlog/spdlog.h>
 
@@ -43,22 +48,75 @@
 // application.cpp's include path, so forward-declare rather than including the
 // header (same pattern as ui_settings_hardware.cpp).
 namespace helix {
-void open_standalone_camera_fullscreen(lv_obj_t* parent_screen);
+bool open_standalone_camera_fullscreen(lv_obj_t* parent_screen);
 }
 #endif
 
 using namespace helix;
 
+namespace {
+helix::TypeMismatchDemo& type_mismatch_demo() {
+    static helix::TypeMismatchDemo demo;
+    return demo;
+}
+} // namespace
+
+void helix::set_type_mismatch_demo(TypeMismatchDemo demo) {
+    type_mismatch_demo() = std::move(demo);
+}
+
 #ifdef HELIX_ENABLE_REMOTE_CONTROL
 namespace helix {
+
+namespace {
+
+/// Feed a prompt's `// action:` lines through the app's ActionPromptManager,
+/// the path a printer's response takes.
+bool feed_prompt_lines(const std::string& name, const std::vector<std::string>& lines,
+                       std::string* error) {
+    auto* manager = helix::ActionPromptManager::instance();
+    if (manager == nullptr) {
+        const std::string reason =
+            name + ": no ActionPromptManager is registered (no printer session)";
+        spdlog::warn("[Demo] {}", reason);
+        if (error != nullptr) {
+            *error = reason;
+        }
+        return false;
+    }
+    for (const std::string& line : lines) {
+        manager->process_line(line);
+    }
+    return true;
+}
+
+} // namespace
 
 // Bring up a demo overlay/modal with representative sample data. These screens
 // only appear in response to a real printer event (pre-print check, runout,
 // active print) or configured state (lock PIN), so mock-mode navigation can't
 // reach them — the remote-control `demo` command uses this to capture them for
 // screenshots with the real widget lifecycle. Must run on the UI thread.
-bool show_demo_overlay(const std::string& name) {
+bool show_demo_overlay(const std::string& name, std::string* error) {
     lv_obj_t* screen = lv_screen_active();
+
+    if (name == "preflight-material") {
+        // A seated slot with no material set while a calibration that needs
+        // it is on: the block, and the one-tap fix from the file's material.
+        helix::PreflightResult pf;
+        helix::ToolCheck unset;
+        unset.tool_index = 0;
+        unset.intended_material = "PLA";
+        unset.intended_color = 0xF5A623;
+        unset.mapped_slot = 1;
+        unset.slot_present = true;
+        unset.severity = helix::ToolCheck::Severity::UnknownMaterial;
+        pf.checks = {unset};
+        auto modal = std::make_unique<helix::ui::PreflightCheckModal>();
+        modal->set_checks(pf);
+        Modal::show_owned(std::move(modal), screen);
+        return true;
+    }
 
     if (name == "preflight-check") {
         // Representative pre-print filament check: one matching tool, one color
@@ -146,7 +204,7 @@ bool show_demo_overlay(const std::string& name) {
         lv_xml_register_component_from_file(
             helix::asset_component_uri("ui_xml/ams_loading_error_modal.xml").c_str());
 
-        lv_subject_t* seg = lv_xml_get_subject(nullptr, "afc_fault_segment");
+        lv_subject_t* seg = lv_xml_get_subject(nullptr, "fault_path_segment");
         if (seg != nullptr) {
             lv_subject_set_int(seg, static_cast<int>(PathSegment::HUB));
         }
@@ -170,6 +228,37 @@ bool show_demo_overlay(const std::string& name) {
         return true;
     }
 
+    if (name == "recovery-fault-afc" || name == "recovery-fault-hh") {
+        // The dialog RecoveryModalPresenter raises for a filament system fault.
+        // Unreachable in mock mode: AmsBackendMock classifies no `!!` line as its
+        // own fault. The AFC one carries a lane fault, so the position diagram
+        // shows; the Happy Hare one fills all four button slots.
+        const bool afc = name == "recovery-fault-afc";
+        const std::string title = afc ? "Filament System Error" : "Filament runout";
+        const std::string detail =
+            afc ? "lane1 filament failed to trigger pre extruder gear toolhead sensor, "
+                  "CHECK FILAMENT PATH"
+                : "Runout detected on gate 2. Load filament into the gate and resume.";
+        std::vector<helix::RecoveryAction> actions;
+        if (afc) {
+            actions = {{"Resume", "RESUME", "afc::resume", "primary", true},
+                       {"Unload", "TOOL_UNLOAD", "afc::tool_unload", "", true},
+                       {"Recover", "AFC_RESET", "afc::reset", "danger"}};
+        } else {
+            actions = {{"Resume", "RESUME", "hh::resume", "primary", true},
+                       {"Recover", "MMU_RECOVER", "hh::recover", ""},
+                       {"Unload", "MMU_UNLOAD", "hh::unload", "", true},
+                       {"Unlock", "MMU_UNLOCK", "hh::unlock", "danger"}};
+        }
+        auto modal = std::make_unique<helix::ui::RecoveryFaultModal>();
+        // The stack frees the demo instance when the dialog closes.
+        if (modal->show_fault(screen, title, detail, actions)) {
+            lv_obj_t* backdrop = modal->backdrop();
+            ModalStack::instance().assume_ownership(backdrop, std::move(modal));
+        }
+        return true;
+    }
+
     if (name == "action-prompt-worst") {
         // Worst case for action_prompt_modal's chrome budget (#1277). This modal
         // carries MORE pinned chrome than ams_loading_error_modal: the AFC
@@ -178,15 +267,13 @@ bool show_demo_overlay(const std::string& name) {
         // it sits below the scroll area, so it is the shape most likely to
         // overrun the 85% card cap. Unreachable in mock mode — it needs a live
         // Klipper `action:prompt_begin` — so this is the only way to measure it.
-        lv_subject_t* seg = lv_xml_get_subject(nullptr, "afc_fault_segment");
-        if (seg != nullptr) {
-            lv_subject_set_int(seg, static_cast<int>(PathSegment::HUB));
-        }
+        // The modal places the diagram from its own text, so the first line is
+        // AFC's hub fault sentence.
         helix::PromptData data;
         data.title = "Filament Runout Detected";
         data.severity = "error";
         data.text_lines = {
-            "Lane 1 ran out of filament during the print.",
+            "lane1 filament did not trigger hub sensor, CHECK FILAMENT PATH",
             "The toolhead has been parked and the print is paused.",
             "Load a new spool into lane 1, then choose how to continue.",
         };
@@ -224,6 +311,22 @@ bool show_demo_overlay(const std::string& name) {
         return true;
     }
 
+    if (name == "action-prompt-hex") {
+        // Hex-colored buttons and a swatch grid, through the real parser.
+        return feed_prompt_lines(name, helix::demo::hex_color_prompt_lines(), error);
+    }
+
+    if (name == "action-prompt-afc-cal") {
+        // AFC_CALIBRATION's unit picker on a six-unit AFC: more buttons than one
+        // row holds, a two-button footer, and a long text line.
+        return feed_prompt_lines(name, helix::demo::afc_calibration_lines(), error);
+    }
+
+    if (name == "action-prompt-zmod") {
+        // Exactly what Z-Mod's color-picker macro shows.
+        return feed_prompt_lines(name, helix::demo::zmod_color_picker_lines(), error);
+    }
+
     if (name == "lock-screen") {
         helix::ui::LockScreenOverlay::instance().show();
         return true;
@@ -239,6 +342,7 @@ bool show_demo_overlay(const std::string& name) {
         // detection does. The mock publishes no reachable webcam, so
         // HELIX_DEMO_SNAPSHOT_URL names a snapshot to fetch instead.
         auto sources = helix::live_camera_sources();
+#if HELIX_HAS_CAMERA
         if (const char* url = std::getenv("HELIX_DEMO_SNAPSHOT_URL"); url && *url) {
             sources.stream_frame = nullptr;
             sources.snapshot = [u = std::string(url)] {
@@ -248,10 +352,29 @@ bool show_demo_overlay(const std::string& name) {
                                              }};
             };
         }
+#endif
         auto modal = std::make_unique<SpaghettiDetectionModal>();
         modal->set_detection("Spaghetti detected (78%)");
         modal->request_camera_frame(sources);
         return Modal::show_owned(std::move(modal), screen);
+    }
+
+    if (name == "bed-check") {
+        // The modal a printer's bed check raises. Left unbound: the presenter
+        // binds it to the paused job, and a mock with no paused job would
+        // close it at once.
+        return Modal::show_owned(std::make_unique<helix::detection::BedCheckModal>(), screen);
+    }
+
+    if (name == "guided-load" || name == "guided-load-confirm") {
+        // Only a load on firmware whose stock macro is a wizard reaches this, and
+        // no mock persona ships one. "guided-load" opens on the hand-push step,
+        // "guided-load-confirm" on the question the older firmware opens with.
+        auto steps = helix::filament_macros::guided_load_example();
+        if (!steps) {
+            return false;
+        }
+        return helix::ui::GuidedLoadModal::show_owned(*steps, name == "guided-load");
     }
 
     if (name == "ams-error-toast") {
@@ -261,6 +384,25 @@ bool show_demo_overlay(const std::string& name) {
         // gate — so this is the only way to check the two-line toast against a
         // real 480x272 panel instead of arithmetic on a font table.
         helix::ui::notify_ams_error(AmsErrorHelper::print_active(/*is_paused=*/true));
+        return true;
+    }
+
+    if (name == "type-mismatch-toast" || name == "type-mismatch-toast-model" ||
+        name == "type-mismatch-review") {
+        // The mock never raises this warning: a mock persona's identity says
+        // nothing about real hardware, so detection is skipped. The variant case
+        // uses the longest base name a variant entry has; -model shows the
+        // two-printers wording.
+        const auto& demo = type_mismatch_demo();
+        if (!demo) {
+            if (error) {
+                *error = "no printer session to raise the warning";
+            }
+            return false;
+        }
+        const bool model = name == "type-mismatch-toast-model";
+        demo(model ? "Creality K1 Max" : "FlashForge Adventurer 5M Pro (ForgeX)", 92,
+             "FlashForge Adventurer 5M Pro", name == "type-mismatch-review");
         return true;
     }
 

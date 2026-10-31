@@ -27,11 +27,17 @@
  * - Global singleton getter for backwards compatibility
  */
 
+namespace helix::ui {
+struct WizardAmsIdentifyStepTestAccess; // test-only friend (tests/test_helpers/)
+} // namespace helix::ui
+
 /**
  * @class WizardAmsIdentifyStep
  * @brief AMS identification step for the first-run wizard
  */
 class WizardAmsIdentifyStep : public helix::wizard::Step {
+    friend struct helix::ui::WizardAmsIdentifyStepTestAccess;
+
   public:
     // helix::wizard::Step interface
     helix::wizard::StepId id() const override {
@@ -112,6 +118,7 @@ class WizardAmsIdentifyStep : public helix::wizard::Step {
     // Subjects for reactive XML binding
     lv_subject_t wizard_ams_type_{};
     lv_subject_t wizard_ams_details_{};
+    lv_subject_t wizard_ams_logo_color_{}; ///< 1 for full-color logo art, 0 for a tinted mono mark
     static char ams_type_buffer_[64];
     static char ams_details_buffer_[128];
     bool subjects_initialized_{false};

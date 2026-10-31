@@ -22,6 +22,7 @@
 #include "power_device_state.h"
 #include "power_device_widget.h"
 #include "theme_manager.h"
+#include "widget_resolution.h"
 
 #include <cstring>
 #include <memory>
@@ -29,7 +30,7 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-using helix::test::has_clicked_handler;
+using helix::has_own_click_handler;
 using helix::test::paints_press_wash;
 using helix::test::row_with_label;
 
@@ -89,14 +90,14 @@ TEST_CASE_METHOD(LVGLUITestFixture, "A job queue row starts its job and its tras
 
     lv_obj_t* row = create_row(test_screen(), "job_queue_row");
     REQUIRE(row != nullptr);
-    CHECK(has_clicked_handler(row, start));
+    CHECK(has_own_click_handler(row, start));
 
     // The trash icon reads its job from the row it sits directly in, and stops
     // its own tap so removing a job never also starts it.
     lv_obj_t* trash = lv_obj_find_by_name(row, "job_delete");
     REQUIRE(trash != nullptr);
     CHECK(lv_obj_get_parent(trash) == row);
-    CHECK(has_clicked_handler(trash, remove));
+    CHECK(has_own_click_handler(trash, remove));
     CHECK(lv_obj_has_flag(trash, LV_OBJ_FLAG_CLICKABLE));
     CHECK_FALSE(lv_obj_has_flag(trash, LV_OBJ_FLAG_EVENT_BUBBLE));
 }

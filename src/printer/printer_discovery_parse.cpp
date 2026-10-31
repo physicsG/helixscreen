@@ -2,11 +2,14 @@
 
 // Out-of-line PrinterDiscovery members: the object-list scan and config parsers.
 
-#include "chamber_heater_backend.h"  // chamber::match, chamber::keyword_confidence
-#include "display_numbering.h"       // helix::ui::tool_label
+#include "ace_vocabulary.h"         // ace::kInstanceObjectPrefix
+#include "chamber_heater_backend.h" // chamber::match, chamber::keyword_confidence
+#include "display_numbering.h"      // helix::ui::tool_label
+#include "json_utils.h"
 #include "klipper_extruder_naming.h" // count_extruder_names
 #include "macro_patterns.h"
 #include "printer_discovery.h"
+#include "start_macro_injection.h"
 #include "text_io.h"
 #include "toolchanger_addon.h" // zmod_c5_present
 
@@ -61,8 +64,8 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
     int best_chamber_sensor_conf = 0;
     int best_chamber_cooling_fan_conf = 0;
 
-    constexpr int CHAMBER_HEATER_GENERIC_WEIGHT = 2;  // settable heater — preferred
-    constexpr int CHAMBER_TEMPERATURE_FAN_WEIGHT = 1; // fan — only wins if no heater_generic
+    constexpr int kChamberHeaterGenericWeight = 2;  // settable heater — preferred
+    constexpr int kChamberTemperatureFanWeight = 1; // fan — only wins if no heater_generic
 
     // Promote the current object to the best chamber heater if its keyword
     // confidence (plus object-type tiebreak) exceeds the running best.
@@ -132,126 +135,74 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
 
         std::string upper_name = helix::text_io::to_upper(name);
 
-        // ================================================================
-        // Steppers (stepper_x, stepper_y, stepper_z, stepper_z1, etc.)
-        // ================================================================
-        if (name.rfind("stepper_", 0) == 0) {
-            steppers_.push_back(name);
-        }
-        // ================================================================
-        // Heaters: extruders, heater_bed, heater_generic
-        // ================================================================
-        // Match "extruder", "extruder1", etc., but NOT "extruder_stepper"
-        else if (name.rfind("extruder", 0) == 0 && name.rfind("extruder_stepper", 0) != 0) {
-            heaters_.push_back(name);
-        }
-        // Heated bed
-        else if (name == "heater_bed") {
-            heaters_.push_back(name);
-            has_heater_bed_ = true;
-        }
-        // Generic heaters (e.g., "heater_generic chamber")
-        else if (name.rfind("heater_generic ", 0) == 0) {
-            heaters_.push_back(name);
-            std::string heater_name = name.substr(15); // Remove "heater_generic " prefix
-            try_set_chamber_heater(name, heater_name, CHAMBER_HEATER_GENERIC_WEIGHT);
-        }
-        // ================================================================
-        // Load cells: load_cell
-        // ================================================================
-        else if (name.rfind("load_cell ", 0) == 0 || name == "load_cell") {
-            load_cells_.push_back(name);
-        }
-        // ================================================================
-        // Sensors: temperature_sensor, temperature_fan (dual-purpose)
-        // ================================================================
-        else if (name.rfind("temperature_sensor ", 0) == 0) {
-            sensors_.push_back(name);
-            std::string sensor_name = name.substr(19); // Remove "temperature_sensor " prefix
-            try_set_chamber_sensor(name, sensor_name);
-        }
-        // Temperature-controlled fans (also act as sensors). A chamber-named
-        // temperature_fan is the heater equivalent — it actively drives air
-        // temperature, unlike a passive temperature_sensor.
-        else if (name.rfind("temperature_fan ", 0) == 0) {
-            sensors_.push_back(name);
-            fans_.push_back(name);                  // Also add to fans for control
-            std::string fan_name = name.substr(16); // Remove "temperature_fan " prefix
-            try_set_chamber_heater(name, fan_name, CHAMBER_TEMPERATURE_FAN_WEIGHT);
-            try_set_chamber_cooling_fan(name, fan_name);
-        }
-        // TMC stepper drivers with built-in temperature (tmc2240, tmc5160)
-        else if (name.rfind("tmc2240 ", 0) == 0 || name.rfind("tmc5160 ", 0) == 0) {
-            sensors_.push_back(name);
-        }
-        // ================================================================
-        // Fans: fan, heater_fan, fan_generic, controller_fan
-        // ================================================================
-        else if (name == "fan") {
-            fans_.push_back(name);
-        } else if (name.rfind("heater_fan ", 0) == 0) {
-            fans_.push_back(name);
-        } else if (name.rfind("fan_generic ", 0) == 0) {
-            fans_.push_back(name);
-        } else if (name.rfind("controller_fan ", 0) == 0) {
-            fans_.push_back(name);
-        }
-        // ================================================================
-        // LEDs: led_effect (must be before "led "), neopixel, dotstar, led
-        // ================================================================
-        // led_effect MUST be checked before "led " to avoid false match
-        else if (name.rfind("led_effect ", 0) == 0) {
-            led_effects_.push_back(name);
+        // One classification per object. The bucket lists are rebuilt from it
+        // after the loop; the switch records what a kind implies beyond that.
+        const hw::ObjectClass cls = hw::classify_object(name);
+        objects_.push_back({name, cls});
+        switch (cls.kind) {
+        case hw::ObjectKind::Heater:
+            if (name == "heater_bed") {
+                has_heater_bed_ = true;
+            }
+            break;
+        case hw::ObjectKind::GenericHeater:
+            try_set_chamber_heater(name, cls.instance, kChamberHeaterGenericWeight);
+            break;
+        case hw::ObjectKind::TemperatureSensor:
+            try_set_chamber_sensor(name, cls.instance);
+            break;
+        // A chamber-named temperature_fan is the heater equivalent: it actively
+        // drives air temperature, unlike a passive temperature_sensor.
+        case hw::ObjectKind::TemperatureFan:
+            try_set_chamber_heater(name, cls.instance, kChamberTemperatureFanWeight);
+            try_set_chamber_cooling_fan(name, cls.instance);
+            break;
+        case hw::ObjectKind::Led:
+        case hw::ObjectKind::OutputPinLed:
+            has_led_ = true;
+            break;
+        case hw::ObjectKind::LedEffect:
             has_led_effects_ = true;
-        } else if (name.rfind("neopixel ", 0) == 0 || name == "neopixel") {
-            leds_.push_back(name);
-            has_led_ = true;
-        } else if (name.rfind("dotstar ", 0) == 0 || name == "dotstar") {
-            leds_.push_back(name);
-            has_led_ = true;
-        } else if (name.rfind("led ", 0) == 0) {
-            leds_.push_back(name);
-            has_led_ = true;
-        }
-        // Output pins - classify as fan, LED, or speaker based on name
-        else if (name == "fan_feedback") {
+            break;
+        case hw::ObjectKind::Speaker:
+            has_speaker_ = true;
+            break;
+        case hw::ObjectKind::FanFeedback:
             has_fan_feedback_ = true;
-        } else if (name.rfind("output_pin ", 0) == 0) {
-            std::string pin_name = name.substr(11); // Remove "output_pin " prefix
-            std::string upper_pin = helix::text_io::to_upper(pin_name);
-
-            // Fan detection: name starts with "FAN" (e.g., fan0, fan1, fan2)
-            if (upper_pin.rfind("FAN", 0) == 0) {
-                fans_.push_back(name);
+            break;
+        case hw::ObjectKind::Probe:
+            has_probe_ = true;
+            break;
+        // AD5X IFS detection via ZMOD firmware sensors. Three sensor names
+        // trigger it:
+        //   1. lessWaste plugin:  "filament_switch_sensor _ifs_port_sensor_N"
+        //   2. Native ZMOD (old): "filament_motion_sensor _ifs_motion_sensor_N"
+        //   3. Native ZMOD:       "filament_motion_sensor ifs_motion_sensor"
+        case hw::ObjectKind::FilamentSwitch:
+        case hw::ObjectKind::FilamentMotion:
+            if (!has_mmu_ && (name.rfind("filament_switch_sensor _ifs_port_sensor_", 0) == 0 ||
+                              name.rfind("filament_motion_sensor _ifs_motion_sensor_", 0) == 0 ||
+                              name == "filament_motion_sensor ifs_motion_sensor")) {
+                has_mmu_ = true;
+                mmu_type_ = AmsType::AD5X_IFS;
             }
-            // LED detection
-            else if (upper_pin.find("LIGHT") != std::string::npos ||
-                     upper_pin.find("LED") != std::string::npos ||
-                     upper_pin.find("LAMP") != std::string::npos) {
-                leds_.push_back(name);
-                has_led_ = true;
-            }
-            // Speaker/buzzer detection for M300 support
-            if (upper_pin.find("BEEPER") != std::string::npos ||
-                upper_pin.find("BUZZER") != std::string::npos ||
-                upper_pin.find("SPEAKER") != std::string::npos) {
-                has_speaker_ = true;
-            }
+            break;
+        default:
+            break;
         }
+        if (cls.kind != hw::ObjectKind::Unknown) {
+            continue;
+        }
+
         // ================================================================
         // Capability flags
         // ================================================================
-        else if (name == "quad_gantry_level") {
+        if (name == "quad_gantry_level") {
             has_qgl_ = true;
         } else if (name == "z_tilt") {
             has_z_tilt_ = true;
         } else if (name == "bed_mesh") {
             has_bed_mesh_ = true;
-        } else if (name == "probe" || name == "bltouch" || name == "smart_effector" ||
-                   name == "cartographer" || name == "beacon") {
-            has_probe_ = true;
-        } else if (name.rfind("probe_eddy_current ", 0) == 0) {
-            has_probe_ = true;
         } else if (name == "firmware_retraction") {
             has_firmware_retraction_ = true;
         } else if (name == "timelapse") {
@@ -329,17 +280,18 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
         // (as shipped by Rinkhals firmware) registers the status object as
         // `filament_hub` even though the config section is `[ace]`. The
         // community drivers (ValgACE/BunnyACE/DuckACE) register it as `ace`.
-        // The Anycubic Kobra S1 "mainline-Python ACE fork" registers each
-        // unit as `ace_instance_N` (has get_status()) and exposes NO
-        // top-level `ace`/`filament_hub` object — its config is `[ace]`
-        // with `ace_count`, but only `ace_instance_N` appears in
-        // objects.list (#1107). Match all three forms.
+        // The ACEPRO driver (github.com/Kobra-S1/ACEPRO) registers each unit
+        // as `ace_instance_N` (has get_status()) beside a manager `ace`
+        // object; a build whose manager does not appear in objects.list
+        // still shows its `ace_instance_N` objects (#1107). Match all three
+        // forms.
         //
         // Collect EVERY matched ACE object name (the discovery sequence
         // subscribes the real object names), but only the first ACE match
         // flips has_mmu_/mmu_type_ — with multiple `ace_instance_N` objects
         // the name-collection must NOT be gated behind the !has_mmu_ guard.
-        else if (name == "ace" || name == "filament_hub" || name.rfind("ace_instance", 0) == 0) {
+        else if (name == "ace" || name == "filament_hub" ||
+                 name.rfind(helix::ace::kInstanceObjectPrefix, 0) == 0) {
             ace_object_names_.push_back(name);
             if (!has_mmu_) {
                 has_mmu_ = true;
@@ -347,12 +299,6 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
                 spdlog::info("[PrinterDiscovery] Detected ACE (Anycubic ACE Pro) via '{}' object",
                              name);
             }
-        }
-        // multiACE ships these two extras alongside its `ace` object and the
-        // Anycubic stacks have no equivalent, so either one is a positive
-        // multiACE marker. Its own installer always installs both.
-        else if (name == "ace_bg_swap" || name == "ace_tipform") {
-            has_multiace_markers_ = true;
         }
         // MMU encoder discovery (Happy Hare)
         else if (name.rfind("mmu_encoder ", 0) == 0) {
@@ -381,6 +327,13 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
             std::string hub_name = name.substr(8); // Remove "AFC_hub " prefix
             if (!hub_name.empty()) {
                 afc_hub_names_.push_back(hub_name);
+            }
+        }
+        // AFC extruder discovery (owns the <name>_tool_start/_tool_end sensors)
+        else if (name.rfind("AFC_extruder ", 0) == 0) {
+            std::string extruder_name = name.substr(13); // Remove "AFC_extruder " prefix
+            if (!extruder_name.empty()) {
+                afc_extruder_names_.push_back(extruder_name);
             }
         }
         // AFC_lane discovery (authoritative lane source for Vivid, OpenAMS, etc.)
@@ -413,26 +366,9 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
                 afc_buffer_names_.push_back(buffer_name);
             }
         }
-        // AD5X IFS detection via ZMOD firmware sensors
-        // Three sensor name patterns trigger detection:
-        //   1. lessWaste plugin:  "filament_switch_sensor _ifs_port_sensor_N"
-        //   2. Native ZMOD (old): "filament_motion_sensor _ifs_motion_sensor_N"
-        //   3. Native ZMOD:       "filament_motion_sensor ifs_motion_sensor"
-        //   4. Standalone IFS module (the Forge-X drop-in): the `ifs` /
-        //      `ifs_materials` get_status objects themselves. Its sensors
-        //      register under stock filament_switch_sensor names the
-        //      client-side bucketing already subscribes ("lane1".."lane4",
-        //      "toolhead"), so no sensor pattern is needed for it - and
-        //      these two names must NOT go into filament_sensor_names_,
-        //      which FilamentSensorManager reads as sensors.
-        else if (!has_mmu_ && (name.rfind("filament_switch_sensor _ifs_port_sensor_", 0) == 0 ||
-                               name.rfind("filament_motion_sensor _ifs_motion_sensor_", 0) == 0 ||
-                               name == "filament_motion_sensor ifs_motion_sensor")) {
-            has_mmu_ = true;
-            mmu_type_ = AmsType::AD5X_IFS;
-            filament_sensor_names_.push_back(name);
-        }
-        // The standalone module's objects, on their own: an [ifs] section
+        // Standalone IFS module (the Forge-X drop-in): its sensors register under
+        // stock filament_switch_sensor names, so no sensor pattern is needed and
+        // these two names are not sensors. The module's objects, on their own: an [ifs] section
         // with no sensors configured, or [ifs_materials] on a machine whose
         // IFS board is unplugged (deliberately readable without the board -
         // the UI should still show the slot registry and report
@@ -463,6 +399,7 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
         // Tool changer detection
         else if (name == "toolchanger") {
             has_tool_changer_ = true;
+            coexisting_systems_.push_back(AmsType::TOOL_CHANGER);
         }
         // pin_watch: a dock-sensor extra (not stock Klipper). Recorded as a
         // plain object fact, like toolchanger above. What it MEANS is
@@ -475,14 +412,21 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
             pin_watch_object_name_ = name;
         }
         // [medusahc]: a hotend changer's own extra, recorded as the same
-        // kind of plain object fact as pin_watch above. Upstream ships it
-        // ALONGSIDE pin_watch and klipper-toolchanger; one fork folds the
-        // dock sensing into it and ships neither, and there this object is
-        // the only thing left to see. Matched exactly - [medusahc_calibrate]
-        // is a sibling object, not this one.
+        // kind of plain object fact as pin_watch above. It ships alongside
+        // pin_watch, with or without klipper-toolchanger. Matched exactly -
+        // [medusahc_calibrate] is a sibling object, not this one.
         else if (name == "medusahc" || name.rfind("medusahc ", 0) == 0) {
             has_medusahc_ = true;
             medusahc_object_name_ = name;
+        }
+        // [indx]: Bondtech INDX's toolboard host module (mainline
+        // indx_klipper lists it; Kalico's may not, see parse_config_keys()).
+        else if (name == "indx") {
+            has_indx_ = true;
+        } else if (name == "save_variables") {
+            has_save_variables_ = true;
+        } else if (name == "spoollink") {
+            has_spoollink_ = true;
         }
         // Tool object discovery
         else if (name.rfind("tool ", 0) == 0) {
@@ -490,20 +434,6 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
             if (!tool_name.empty()) {
                 tool_names_.push_back(tool_name);
             }
-        }
-        // ================================================================
-        // Width sensors (filament diameter measurement)
-        // ================================================================
-        else if (name == "hall_filament_width_sensor" ||
-                 name == "tsl1401cl_filament_width_sensor") {
-            width_sensor_objects_.push_back(name);
-        }
-        // ================================================================
-        // Filament sensors
-        // ================================================================
-        else if (name.rfind("filament_switch_sensor ", 0) == 0 ||
-                 name.rfind("filament_motion_sensor ", 0) == 0) {
-            filament_sensor_names_.push_back(name);
         }
         // ================================================================
         // Macro detection
@@ -613,6 +543,8 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
         }
     }
 
+    rebuild_buckets();
+
     // AFC_stepper objects can be lanes (Box Turtle: "AFC_stepper lane0") or motor
     // components (Vivid: "AFC_stepper Vivid_1_drive"/"Vivid_1_selector").
     // When no AFC_lane objects exist, treat all steppers as lanes (pure Box Turtle).
@@ -637,10 +569,14 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
     if (!afc_buffer_names_.empty()) {
         natural_sort(afc_buffer_names_);
     }
+    if (!afc_extruder_names_.empty()) {
+        natural_sort(afc_extruder_names_);
+    }
 
-    // Sort tool names for consistent ordering
+    // Name order until the toolchanger's status says how Klipper numbers them
+    // (order_tools_by_number). Natural, so T10 follows T9 rather than T1.
     if (!tool_names_.empty()) {
-        std::sort(tool_names_.begin(), tool_names_.end());
+        natural_sort(tool_names_);
     }
 
     // A chamber heater measures its own chamber, so it supplies the reading
@@ -680,38 +616,24 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
         }
     }
 
-    // Two stacks register a Klipper object named exactly `ace`: the Anycubic
-    // community drivers (ValgACE/BunnyACE/DuckACE), a real ACE hub, and
-    // decay71/multiACE, which hangs 1-4 ACE units off a Snapmaker U1's four
-    // toolheads. multiACE publishes its slots per unit under `aces[]`, not in
-    // the top-level `slots` array AmsBackendAce requires, so an ACE backend
-    // would attach and read nothing. objects.list carries names without
-    // status, so the discriminator is co-presence: either multiACE marker
-    // object, or filament_detect, which U1 firmware alone publishes and no
-    // Anycubic printer has. AmsBackendMultiAce derives from the Snapmaker
-    // backend, so the four heads keep their native handling and the ACE units
-    // are added beside them.
-    const bool has_bare_ace_object = std::find(ace_object_names_.begin(), ace_object_names_.end(),
-                                               "ace") != ace_object_names_.end();
-    if (has_mmu_ && mmu_type_ == AmsType::ACE && has_bare_ace_object &&
-        (has_multiace_markers_ || has_snapmaker_)) {
-        mmu_type_ = AmsType::MULTIACE;
-        spdlog::info("[PrinterDiscovery] Detected multiACE (markers={}, snapmaker={}): U1 heads "
-                     "plus ACE units",
-                     has_multiace_markers_, has_snapmaker_);
-    }
-
-    // Any other ACE object beside filament_detect is an ACE stack on a U1 that
-    // none of the ACE backends can read. Yielding the printer back to the
-    // Snapmaker backend costs the ACE-specific affordances and keeps filament
-    // management (prestonbrown/helixscreen#1426). The object names stay
-    // recorded: the hardware really does carry them, and nothing subscribes
-    // them once the type is no longer ACE.
+    // multiACE hangs ACE Pro units off a Snapmaker U1's four toolheads and
+    // registers a plain `ace` object, so it matches ACE detection above and
+    // outranks the U1 fallback below. Its slots live per unit under
+    // `aces[]`, not in the top-level `slots` array AmsBackendAce requires,
+    // so an ACE backend would attach and read nothing while the Snapmaker
+    // backend that drives those toolheads stayed suppressed. objects.list
+    // carries names without status, so the discriminator is co-presence:
+    // filament_detect is published by U1 firmware alone, and no ACE stack
+    // this chain matches runs on an unmodded U1. Yielding the printer back
+    // costs the ACE-specific affordances and keeps filament management
+    // (prestonbrown/helixscreen#1426). The object names stay recorded: the
+    // hardware really does carry them, and nothing subscribes them once the
+    // type is no longer ACE.
     if (has_mmu_ && mmu_type_ == AmsType::ACE && has_snapmaker_) {
         has_mmu_ = false;
-        spdlog::info("[PrinterDiscovery] ACE object alongside filament_detect on a Snapmaker "
-                     "U1. Its slot shape is unreadable, so the Snapmaker backend keeps the "
-                     "printer.");
+        spdlog::info("[PrinterDiscovery] ACE object alongside filament_detect: multiACE on a "
+                     "Snapmaker U1. Its slot shape is unreadable, so the Snapmaker backend "
+                     "keeps the printer.");
     }
 
     // PAXX's AFC-Lite is a status-only stub that impersonates AFC so Fluidd
@@ -750,6 +672,70 @@ void PrinterDiscovery::parse_objects(const nlohmann::json& objects) {
     register_detected_ams_systems();
 }
 
+namespace {
+
+bool kind_in(hw::ObjectKind kind, const std::vector<hw::ObjectKind>& kinds) {
+    return std::find(kinds.begin(), kinds.end(), kind) != kinds.end();
+}
+
+} // namespace
+
+std::vector<std::string>
+PrinterDiscovery::objects_of(const std::vector<hw::ObjectKind>& kinds) const {
+    std::vector<std::string> out;
+    for (const auto& o : objects_) {
+        if (kind_in(o.cls.kind, kinds)) {
+            out.push_back(o.name);
+        }
+    }
+    return out;
+}
+
+std::vector<std::pair<std::string, hw::ObjectKind>> PrinterDiscovery::object_kinds() const {
+    std::vector<std::pair<std::string, hw::ObjectKind>> out;
+    out.reserve(objects_.size());
+    for (const auto& o : objects_) {
+        out.emplace_back(o.name, o.cls.kind);
+    }
+    return out;
+}
+
+std::vector<std::string>
+PrinterDiscovery::sections_of(const std::vector<hw::ObjectKind>& kinds) const {
+    std::vector<std::string> out;
+    for (const auto& s : sections_) {
+        if (kind_in(s.cls.kind, kinds)) {
+            out.push_back(s.name);
+        }
+    }
+    return out;
+}
+
+const nlohmann::json* PrinterDiscovery::section(std::string_view name) const {
+    for (const auto& s : sections_) {
+        if (s.name == name) {
+            return &s.body;
+        }
+    }
+    return nullptr;
+}
+
+void PrinterDiscovery::rebuild_buckets() {
+    using hw::ObjectKind;
+    heaters_ = objects_of({ObjectKind::Heater, ObjectKind::GenericHeater});
+    fans_ =
+        objects_of({ObjectKind::Fan, ObjectKind::HeaterFan, ObjectKind::ControllerFan,
+                    ObjectKind::GenericFan, ObjectKind::TemperatureFan, ObjectKind::OutputPinFan});
+    sensors_ = objects_of({ObjectKind::TemperatureSensor, ObjectKind::TemperatureFan,
+                           ObjectKind::DriverTemperature, ObjectKind::HumidityChip});
+    leds_ = objects_of({ObjectKind::Led, ObjectKind::OutputPinLed});
+    led_effects_ = objects_of({ObjectKind::LedEffect});
+    load_cells_ = objects_of({ObjectKind::LoadCell});
+    steppers_ = objects_of({ObjectKind::Stepper});
+    width_sensor_objects_ = objects_of({ObjectKind::WidthSensor});
+    filament_sensor_names_ = objects_of({ObjectKind::FilamentSwitch, ObjectKind::FilamentMotion});
+}
+
 void PrinterDiscovery::settle_status_claims(const nlohmann::json& status) {
     if (!has_openams_manager_ || has_mmu_) {
         return;
@@ -775,32 +761,18 @@ void PrinterDiscovery::register_detected_ams_systems() {
     // MMU is one we cannot read. Toolchanger alone only handles tool
     // switching, not filament management.
     if (has_mmu_) {
-        if (mmu_type_ == AmsType::HAPPY_HARE) {
-            detected_ams_systems_.push_back({AmsType::HAPPY_HARE, "Happy Hare"});
-        } else if (mmu_type_ == AmsType::AFC) {
-            detected_ams_systems_.push_back({AmsType::AFC, "AFC"});
-        } else if (mmu_type_ == AmsType::AD5X_IFS) {
-            detected_ams_systems_.push_back({AmsType::AD5X_IFS, "AD5X IFS"});
-        } else if (mmu_type_ == AmsType::CFS) {
-            detected_ams_systems_.push_back({AmsType::CFS, "CFS"});
-        } else if (mmu_type_ == AmsType::ACE) {
-            detected_ams_systems_.push_back({AmsType::ACE, "ACE"});
-        } else if (mmu_type_ == AmsType::QIDI_BOX) {
-            // i18n: do not translate - product name
-            detected_ams_systems_.push_back({AmsType::QIDI_BOX, "QIDI Box"});
-        } else if (mmu_type_ == AmsType::OPENAMS) {
-            // i18n: do not translate - product name
-            detected_ams_systems_.push_back({AmsType::OPENAMS, "OpenAMS"});
-        } else if (mmu_type_ == AmsType::MULTIACE) {
-            // multiACE claims has_mmu_, which skips the has_snapmaker_ fallback
-            // below, so without this arm no system is registered at all.
-            // i18n: do not translate - product name
-            detected_ams_systems_.push_back({AmsType::MULTIACE, "multiACE"});
+        if (mmu_type_ != AmsType::NONE) {
+            detected_ams_systems_.push_back({mmu_type_, ams_type_to_string(mmu_type_)});
         }
     } else if (has_snapmaker_) {
         // Native Snapmaker filament system (no aftermarket MMU)
-        detected_ams_systems_.push_back({AmsType::SNAPMAKER, "Snapmaker"});
         mmu_type_ = AmsType::SNAPMAKER;
+        detected_ams_systems_.push_back({mmu_type_, ams_type_to_string(mmu_type_)});
+    } else if (has_indx_) {
+        // Docked passive nozzles on one extruder: never the tool-changer arm
+        // below, which needs several extruders or klipper-toolchanger.
+        mmu_type_ = AmsType::INDX;
+        detected_ams_systems_.push_back({mmu_type_, ams_type_to_string(mmu_type_)});
     } else if (!tool_names_.empty() && (has_tool_changer_ || tool_names_.size() > 1)) {
         // More than one hot end, and no filament system managing them:
         // parallel topology, one slot per tool. Registering it is what gives
@@ -809,8 +781,8 @@ void PrinterDiscovery::register_detected_ams_systems() {
         // (prestonbrown/helixscreen#1350). klipper-toolchanger is a changer
         // on its own word even with a single tool declared.
         // Still last in the chain, so a real MMU always keeps its backend.
-        detected_ams_systems_.push_back({AmsType::TOOL_CHANGER, "Tool Changer"});
         mmu_type_ = AmsType::TOOL_CHANGER;
+        detected_ams_systems_.push_back({mmu_type_, ams_type_to_string(mmu_type_)});
     }
 }
 
@@ -830,39 +802,11 @@ void PrinterDiscovery::parse_config_keys(const nlohmann::json& config) {
         }
     }
 
+    sections_.clear();
     for (const auto& [key, value] : config.items()) {
-        if (key == "adxl345" || key.rfind("adxl345 ", 0) == 0 || key == "lis2dw" ||
-            key.rfind("lis2dw ", 0) == 0 || key == "mpu9250" || key.rfind("mpu9250 ", 0) == 0 ||
-            key == "lis3dh" || key.rfind("lis3dh ", 0) == 0 || key == "icm20948" ||
-            key.rfind("icm20948 ", 0) == 0 || key == "resonance_tester") {
-            has_accelerometer_ = true;
-            spdlog::debug("[PrinterDiscovery] Accelerometer detected from config: {}", key);
-        }
-
-        // Beacon RevH has an onboard LIS2DW accelerometer.
-        // Detect from accel-specific config fields in the [beacon] section.
-        if (key == "beacon" && value.is_object()) {
-            if (value.contains("accel_scale") || value.contains("accel_axes_map")) {
-                has_accelerometer_ = true;
-                spdlog::debug(
-                    "[PrinterDiscovery] Beacon onboard accelerometer detected from config");
-            }
-        }
-
-        // Also detect accelerometers referenced by resonance_tester
-        // (e.g., accel_chip: beacon for Beacon RevH probes)
-        if (key == "resonance_tester" && value.is_object()) {
-            for (const auto& field : {"accel_chip", "accel_chip_x", "accel_chip_y"}) {
-                if (value.contains(field) && value[field].is_string()) {
-                    const auto& chip = value[field].get<std::string>();
-                    if (chip == "beacon" || chip.rfind("beacon ", 0) == 0) {
-                        has_accelerometer_ = true;
-                        spdlog::debug("[PrinterDiscovery] Beacon accelerometer detected via "
-                                      "resonance_tester {}",
-                                      field);
-                    }
-                }
-            }
+        const hw::ObjectClass cls = hw::classify_section(key, value);
+        if (cls.kind != hw::ObjectKind::Unknown) {
+            sections_.push_back({key, cls, value});
         }
 
         // screws_tilt_adjust doesn't implement get_status() in Klipper,
@@ -879,6 +823,20 @@ void PrinterDiscovery::parse_config_keys(const nlohmann::json& config) {
             has_snapmaker_auto_screws_tilt_ = true;
             spdlog::debug("[PrinterDiscovery] auto_screws_tilt_adjust detected from config");
         }
+    }
+
+    has_accelerometer_ = !sections_of({hw::ObjectKind::Accelerometer}).empty();
+
+    if (config.contains("spoollink")) {
+        has_spoollink_ = true;
+    }
+    // [indx] on Kalico may have no get_status(), so the configfile section is
+    // the only sign of it, and it arrives after parse_objects() registered the
+    // filament systems.
+    if (!has_indx_ && config.contains("indx")) {
+        has_indx_ = true;
+        spdlog::debug("[PrinterDiscovery] INDX detected from config");
+        register_detected_ams_systems();
     }
 }
 
@@ -979,7 +937,54 @@ bool PrinterDiscovery::parse_build_volume(const nlohmann::json& settings) {
     return true;
 }
 
+void PrinterDiscovery::parse_probe_xy_offset(const nlohmann::json& settings) {
+    probe_xy_offset_.reset();
+    if (!settings.is_object()) {
+        return;
+    }
+    // Klipper allows one Z probe, so the first probe section present is the
+    // one PROBE_CALIBRATE uses. Section names arrive lowercased. The name alone
+    // decides: a RevH [beacon] also carries its onboard accelerometer, which its
+    // body classifies as, and it is still the probe.
+    static const nlohmann::json kNameOnly = nlohmann::json::object();
+    const nlohmann::json* section = nullptr;
+    for (const auto& [name, value] : settings.items()) {
+        if (value.is_object() &&
+            hw::classify_section(name, kNameOnly).kind == hw::ObjectKind::Probe) {
+            section = &value;
+            break;
+        }
+    }
+    if (!section) {
+        return;
+    }
+    ProbeXYOffset offset;
+    const auto x = section->find("x_offset");
+    if (x != section->end() && x->is_number()) {
+        offset.x = x->get<double>();
+    }
+    const auto y = section->find("y_offset");
+    if (y != section->end() && y->is_number()) {
+        offset.y = y->get<double>();
+    }
+    probe_xy_offset_ = offset;
+}
+
+void PrinterDiscovery::parse_start_macro_injection(const nlohmann::json& settings) {
+    firmware_runs_start_macro_before_file_ = helix::firmware_runs_start_macro_before_file(settings);
+}
+
+void PrinterDiscovery::apply_printer_info(const nlohmann::json& result) {
+    software_version_ = json_util::safe_string(result, "software_version", "unknown");
+    if (json_util::safe_string(result, "app") == "Kalico") {
+        is_kalico_ = true;
+    }
+}
+
 void PrinterDiscovery::clear() {
+    objects_.clear();
+    sections_.clear();
+
     // Hardware lists
     heaters_.clear();
     fans_.clear();
@@ -993,6 +998,7 @@ void PrinterDiscovery::clear() {
     afc_hub_names_.clear();
     afc_unit_object_names_.clear();
     afc_buffer_names_.clear();
+    afc_extruder_names_.clear();
     tool_names_.clear();
     filament_sensor_names_.clear();
     width_sensor_objects_.clear();
@@ -1009,6 +1015,7 @@ void PrinterDiscovery::clear() {
     skip_wrappable_.clear();
     skip_active_.clear();
     sensor_toggle_command_.clear();
+    screws_tilt_builtin_.clear();
     helix_macros_.clear();
     nozzle_clean_macro_.clear();
     purge_line_macro_.clear();
@@ -1022,15 +1029,18 @@ void PrinterDiscovery::clear() {
     has_heater_bed_ = false;
     has_mmu_ = false;
     has_openams_manager_ = false;
-    has_multiace_markers_ = false;
     has_snapmaker_ = false;
     has_afc_lite_ = false;
     has_zmod_afclite_ = false;
     has_tool_changer_ = false;
+    coexisting_systems_.clear();
     has_pin_watch_ = false;
     pin_watch_object_name_.clear();
     has_medusahc_ = false;
     medusahc_object_name_.clear();
+    has_indx_ = false;
+    has_save_variables_ = false;
+    has_spoollink_ = false;
     has_chamber_heater_ = false;
     has_chamber_sensor_ = false;
     chamber_sensor_name_.clear();
@@ -1041,8 +1051,12 @@ void PrinterDiscovery::clear() {
     chamber_filter_fan_pin_.clear();
     chamber_cooling_fan_name_.clear();
     chamber_fan_resting_deci_ = 0;
-    filament_diameter_mm_ = filament::DEFAULT_DIAMETER_MM;
+    filament_diameter_mm_ = filament::kDefaultDiameterMm;
+    nozzle_diameter_mm_ = kDefaultNozzleDiameterMm;
+    fit_machine_.reset();
     leveling_probe_points_.clear();
+    probe_xy_offset_.reset();
+    firmware_runs_start_macro_before_file_ = false;
     fan_max_power_.clear();
     has_led_ = false;
     led_effects_.clear();
@@ -1078,17 +1092,80 @@ void PrinterDiscovery::clear() {
     objects_reported_ = false;
 }
 
-bool PrinterDiscovery::parse_sensor_toggle_command(const nlohmann::json& settings) {
-    const auto wrapper = settings.find("gcode_macro set_filament_sensor");
+namespace {
+
+/// The name a [gcode_macro <section>] wrapper gave the builtin it replaced
+/// (rename_existing), or empty when nothing wraps it. @p section is the
+/// lowercase configfile key.
+std::string renamed_builtin(const nlohmann::json& settings, const char* section) {
+    const auto wrapper = settings.find(section);
     if (wrapper == settings.end() || !wrapper->is_object()) {
-        return false;
+        return {};
     }
     const auto renamed = wrapper->find("rename_existing");
-    if (renamed == wrapper->end() || !renamed->is_string() || renamed->get<std::string>().empty()) {
+    if (renamed == wrapper->end() || !renamed->is_string()) {
+        return {};
+    }
+    return renamed->get<std::string>();
+}
+
+} // namespace
+
+bool PrinterDiscovery::parse_sensor_toggle_command(const nlohmann::json& settings) {
+    std::string builtin = renamed_builtin(settings, "gcode_macro set_filament_sensor");
+    if (builtin.empty()) {
         return false;
     }
-    sensor_toggle_command_ = renamed->get<std::string>();
+    sensor_toggle_command_ = std::move(builtin);
     return true;
+}
+
+bool PrinterDiscovery::parse_screws_tilt_builtin(const nlohmann::json& settings) {
+    screws_tilt_builtin_ = renamed_builtin(settings, "gcode_macro screws_tilt_calculate");
+    return !screws_tilt_builtin_.empty();
+}
+
+void PrinterDiscovery::order_tools_by_number(const nlohmann::json& toolchanger_status) {
+    if (!toolchanger_status.is_object()) {
+        return;
+    }
+    const auto listed = toolchanger_status.find("tool_names");
+    if (listed == toolchanger_status.end() || !listed->is_array()) {
+        return;
+    }
+
+    // klipper-toolchanger names each tool by its config section, "tool Left".
+    static constexpr std::string_view kSectionPrefix = "tool ";
+    std::vector<std::string> ordered;
+    ordered.reserve(tool_names_.size());
+    for (const auto& entry : *listed) {
+        if (!entry.is_string()) {
+            continue;
+        }
+        std::string name = entry.get<std::string>();
+        if (name.rfind(kSectionPrefix, 0) == 0) {
+            name.erase(0, kSectionPrefix.size());
+        }
+        const bool discovered =
+            std::find(tool_names_.begin(), tool_names_.end(), name) != tool_names_.end();
+        if (discovered && std::find(ordered.begin(), ordered.end(), name) == ordered.end()) {
+            ordered.push_back(std::move(name));
+        }
+    }
+    for (const auto& name : tool_names_) {
+        if (std::find(ordered.begin(), ordered.end(), name) == ordered.end()) {
+            ordered.push_back(name);
+        }
+    }
+
+    if (ordered != tool_names_) {
+        std::string joined;
+        for (const auto& name : ordered) {
+            joined += joined.empty() ? name : ", " + name;
+        }
+        spdlog::info("[PrinterDiscovery] Tools ordered by Klipper tool number: {}", joined);
+        tool_names_ = std::move(ordered);
+    }
 }
 
 void PrinterDiscovery::natural_sort(std::vector<std::string>& names) {

@@ -3,21 +3,32 @@
 
 #include "ams_backend_toolchanger.h"
 
+#include "ui_toast_manager.h"
+
+#include "ams_device_action_value.h"
+#include "ams_device_sections.h"
 #include "ams_error.h"
 #include "ams_fault_event.h"
 #include "ams_state.h"
 #include "ams_tool_map_sync.h"
+#include "app_constants.h"
 #include "color_utils.h"
+#include "display_numbering.h"
+#include "filament_op_slot_resolver.h"
 #include "i_moonraker_api.h"
 #include "json_utils.h"
 #include "lane_legacy_migration.h"
 #include "lane_source_store.h"
+#include "lane_translation.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "printer_state.h"
 #include "settings_manager.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,6 +60,14 @@ void AmsBackendToolChanger::set_discovery(const helix::PrinterDiscovery& discove
                                      helix::SettingsManager::instance().get_feeder_close_macro()));
     set_tool_sensor(addon::resolve_tool_sensor(discovery));
     set_tool_commands(addon::resolve_tool_commands(discovery));
+    set_tool_feed(addon::resolve_tool_feed(discovery));
+    set_mounts_to_feed(addon::feeds_through_mount(discovery));
+    set_resume_rule(addon::resume_rule(discovery));
+    set_clean_nozzle_gcode(addon::clean_nozzle_gcode(discovery));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        purge_mm_ = helix::SettingsManager::instance().get_mount_feed_purge_mm();
+    }
     set_material_source(addon::resolve_material_source(discovery));
     tinfo_macro_present_ = discovery.has_macro("T_INFO");
 }
@@ -90,6 +109,8 @@ void AmsBackendToolChanger::on_started() {
     // startup, not just the tests. on_started() runs after start() releases the
     // lock, which is why AmsBackendSnapmaker loads from here too.
     //
+    register_mount_feed_listener();
+
     // Per-slot spool metadata. On this backend the store is the ONLY source of
     // filament identity - klipper-toolchanger reports none - so without it a
     // user's colour and material are lost the moment initialize_tools() runs
@@ -109,6 +130,7 @@ void AmsBackendToolChanger::on_started() {
         std::lock_guard<std::mutex> lock(mutex_);
         override_store_ = std::move(loaded.store);
         overrides_ = std::move(loaded.overrides);
+        seed_lane_records_seen_locked();
         // set_discovered_tools() built the slots before start() ran, so they
         // predate everything just loaded. Layer it on now rather than leaving
         // the panel grey until the first status frame arrives.
@@ -146,6 +168,15 @@ void AmsBackendToolChanger::query_zmod_tool_state() {
 
 void AmsBackendToolChanger::on_stopping() {
     unregister_zmod_marker_listener();
+    unregister_mount_feed_listener();
+}
+
+void AmsBackendToolChanger::on_stopped() {
+    // Losing the client under a live run strands a hot nozzle: the cleanup
+    // goes out while the connection may still carry it, and the run resets.
+    // Here and not in on_stopping(): the unwind takes mutex_ and emits, and
+    // stop() holds mutex_ across on_stopping().
+    abandon_feed_run_after_disconnect();
 }
 
 void AmsBackendToolChanger::register_zmod_marker_listener() {
@@ -309,6 +340,28 @@ bool AmsBackendToolChanger::slot_is_mounted_locked(int slot_index) const {
     return system_info_.current_slot >= 0 && slot_index == system_info_.current_slot;
 }
 
+std::optional<bool> AmsBackendToolChanger::head_has_filament(int head) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (head >= 0 && static_cast<size_t>(head) < fed_heads_.size() &&
+        fed_heads_[static_cast<size_t>(head)]) {
+        return true;
+    }
+    return std::nullopt;
+}
+
+void AmsBackendToolChanger::record_fed_heads(const helix::mount_feed::Run& run) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& head : run.request().heads) {
+        if (head.head < 0) {
+            continue;
+        }
+        if (static_cast<size_t>(head.head) >= fed_heads_.size()) {
+            fed_heads_.resize(static_cast<size_t>(head.head) + 1, false);
+        }
+        fed_heads_[static_cast<size_t>(head.head)] = run.request().load;
+    }
+}
+
 bool AmsBackendToolChanger::can_unload_from_toolhead(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return slot_is_mounted_locked(slot_index);
@@ -321,6 +374,12 @@ bool AmsBackendToolChanger::slot_is_actively_loaded(int slot_index) const {
     // the two are combined with OR, so an answer computed independently here
     // would put the Unmount button back the moment it disagreed. See the header.
     return slot_is_mounted_locked(slot_index);
+}
+
+bool AmsBackendToolChanger::slot_filament_parked_in_toolhead(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return mounts_to_feed_ && !sensor_error_ && slot_index >= 0 &&
+           slot_index < system_info_.total_slots;
 }
 
 std::string AmsBackendToolChanger::unload_blocked_reason(int slot_index) const {
@@ -368,10 +427,9 @@ enum class TcStep { Release, Dock, Pick, Change, Grip };
 
 /// Steps this machine can actually drive, in order.
 ///
-/// `has_feeder`      - reports `feeder_open` (both MedusaHC controllers do)
-/// `names_direction` - phase word distinguishes picking from dropping (only the
-///                     Irbis3D controller's `operation`; topi314's `state` says
-///                     just "changing")
+/// `has_feeder`      - reports `feeder_open` ([medusahc] does)
+/// `names_direction` - a phase word distinguishing picking from dropping has
+///                     been seen
 ///
 /// Empty means the machine reports no phases at all - plain klipper-toolchanger,
 /// or a MedusaHC running the stock macros with no Python extra - and the caller
@@ -429,9 +487,50 @@ AmsAction tc_step_action(TcStep step) {
 
 AmsBackend::OperationStepModel
 AmsBackendToolChanger::get_operation_step_model(StepOperationType op) const {
+    // A run of several tools (main thread, like every feed_run_ access) gets a
+    // bar with one stride per tool, so the highlight walks forward through the
+    // whole batch instead of restarting at each tool.
+    std::vector<int> run_heads;
+    if (feed_run_ && feed_run_->request().heads.size() > 1 &&
+        ((op != StepOperationType::UNLOAD) == feed_run_->request().load)) {
+        for (const auto& head : feed_run_->request().heads) {
+            run_heads.push_back(head.head);
+        }
+    }
+    const size_t run_tools = run_heads.size();
+
     std::lock_guard<std::mutex> lock(mutex_);
 
     OperationStepModel model;
+    // A load or unload through the carriage has its own stages. Mount and
+    // Restore are skipped when the tool is already on the carriage.
+    if (mounts_to_feed_ && op != StepOperationType::LOAD_SWAP) {
+        const bool load = op != StepOperationType::UNLOAD;
+        // Each row names the real tool it works and where it falls in the
+        // run: "Tool 3 (2/3): Purge" while the second of heads {0, 2, 4} purges.
+        const auto tool_label = [this, &run_heads](int tool) {
+            if (run_heads.size() < 2 || tool < 0 || static_cast<size_t>(tool) >= run_heads.size()) {
+                return std::string();
+            }
+            return fmt::format(
+                "{} ({}/{}): ",
+                helix::ui::lane_label(lane_noun(), run_heads[static_cast<size_t>(tool)]), tool + 1,
+                run_heads.size());
+        };
+        int index = 0;
+        for (const auto& row : helix::mount_feed::bar_rows(load, run_tools)) {
+            using helix::mount_feed::Step;
+            // The first tool may already be mounted, and the carriage may need
+            // no putting back.
+            const bool optional =
+                (row.step == Step::Mount && row.tool == 0) || row.step == Step::Restore;
+            model.steps.push_back(
+                {tool_label(row.tool) + lv_tr(helix::mount_feed::step_label(row.step)), index++,
+                 optional,
+                 /*live_temp=*/row.step == Step::Heat, helix::mount_feed::step_action(row.step)});
+        }
+        return model;
+    }
     // Snapshot the latches this model is built from: resolve_step_locked()
     // must resolve every frame's index against this SAME sequence, not
     // whatever the latches read by the time a later frame arrives.
@@ -453,13 +552,38 @@ AmsBackendToolChanger::get_operation_step_model(StepOperationType op) const {
 
 lv_subject_t* AmsBackendToolChanger::get_operation_step_index_subject(StepOperationType /*op*/) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!feeder_state_reported_ && !direction_reported_) {
+    if (!mounts_to_feed_ && !feeder_state_reported_ && !direction_reported_) {
         return nullptr;
     }
     // Same route the U1 uses: apply_tool_sensor_locked() writes the step index
     // into system_info_.operation_phase and AmsState mirrors it onto this
     // subject. Static singleton, so the sidebar's member ObserverGuard is right.
     return AmsState::instance().get_ams_operation_phase_subject();
+}
+
+std::optional<StepOperationType> AmsBackendToolChanger::running_step_operation() const {
+    // Main thread, like every feed_run_ access.
+    if (!feed_run_) {
+        return std::nullopt;
+    }
+    return feed_run_->request().load ? StepOperationType::LOAD_FRESH : StepOperationType::UNLOAD;
+}
+
+std::string AmsBackendToolChanger::step_heater(int step_index) const {
+    if (!feed_run_ || step_index < 0) {
+        return {};
+    }
+    // The same rows get_operation_step_model() lays out for this run.
+    const auto& heads = feed_run_->request().heads;
+    const auto rows = helix::mount_feed::bar_rows(feed_run_->request().load, heads.size());
+    if (step_index >= static_cast<int>(rows.size())) {
+        return {};
+    }
+    const int tool = rows[static_cast<size_t>(step_index)].tool;
+    if (tool < 0 || tool >= static_cast<int>(heads.size())) {
+        return {};
+    }
+    return helix::mount_feed::heater_name(heads[static_cast<size_t>(tool)].head);
 }
 
 AmsBackendToolChanger::ResolvedStep
@@ -489,8 +613,11 @@ AmsBackendToolChanger::resolve_step_locked(const std::string& operation, bool mi
     } else if (operation == "picking") {
         wanted = TcStep::Pick;
     } else if (operation == "changing") {
-        wanted = TcStep::Change;
-    } else if (operation == "idle" || operation == "ready") {
+        // A controller that names the direction says `changing` first, before
+        // it docks or picks: that is the swap's opening step, not a step of
+        // its own.
+        wanted = names_direction ? sequence.front() : TcStep::Change;
+    } else if (operation == "idle") {
         // Both ends of a swap read idle, and the gripper is the only thing that
         // separates them: open is the release that OPENS an operation, closed is
         // the grip that CLOSES it. A machine that never reports the gripper
@@ -598,11 +725,16 @@ std::optional<helix::ErrorEvent> AmsBackendToolChanger::current_error() const {
     // klipper-toolchanger's own status and reads correctly in the generic
     // dialog, so it stays there.
     if (sensor_error_) {
-        // Same sentence unload_blocked_reason() returns, so the dialog and the
-        // greyed-out Unmount beside it explain the fault in one wording.
-        return helix::make_ams_fault_event(
-            helix::ErrorSource::TOOLCHANGER, lv_tr("Dock sensors disagree"),
-            lv_tr("Dock sensors cannot tell which tool is mounted"), build_recovery_actions());
+        // The controller's own words when it reported the failure: they name
+        // the operation and the tool. Otherwise the sentence unload_blocked_reason()
+        // returns, so the dialog and the greyed-out Unmount agree.
+        const std::string detail =
+            sensor_fault_reported_ && !controller_failure_.empty()
+                ? controller_failure_text_locked()
+                : std::string(lv_tr("Dock sensors cannot tell which tool is mounted"));
+        return helix::make_ams_fault_event(helix::ErrorSource::TOOLCHANGER,
+                                           lv_tr("Dock sensors disagree"), detail,
+                                           build_recovery_actions());
     }
     if (!afclite_fault_message_.empty()) {
         // The shim's own fault, with the firmware's own wording: a message the
@@ -630,8 +762,102 @@ PathSegment AmsBackendToolChanger::infer_error_segment() const {
 // Moonraker Status Update Handling
 // ============================================================================
 
+namespace {
+
+/// Whether @p failure is the one already told as @p noticed. A gcode error
+/// reply can carry the controller's message with framing around it, so either
+/// containing the other counts.
+bool failure_already_noticed(const std::string& failure, const std::string& noticed) {
+    if (noticed.empty()) {
+        return false;
+    }
+    return failure.find(noticed) != std::string::npos || noticed.find(failure) != std::string::npos;
+}
+
+} // namespace
+
+std::string AmsBackendToolChanger::controller_failure_text_locked() const {
+    const int target = controller_target_tool_;
+    if (target >= 0 && target < static_cast<int>(tool_names_.size())) {
+        const std::string tool = target_tool_label_locked(target);
+        std::string text = controller_op_is_park_
+                               ? fmt::format(fmt::runtime(lv_tr("Parking {} failed: {}")), tool,
+                                             controller_failure_)
+                               : fmt::format(fmt::runtime(lv_tr("Tool change to {} failed: {}")),
+                                             tool, controller_failure_);
+        // The controller paused the print; its RESUME re-picks this tool.
+        if (recovery_target_locked() == target && print_holds_printer()) {
+            text +=
+                ". " + fmt::format(fmt::runtime(lv_tr(
+                                       "Seat the hot ends, heat {} above {}°C, then tap Resume.")),
+                                   tool, resume_rule_.min_nozzle_c);
+        }
+        return text;
+    }
+    return fmt::format(fmt::runtime(lv_tr("Tool change failed: {}")), controller_failure_);
+}
+
+int AmsBackendToolChanger::recovery_target_locked() const {
+    const int target = controller_target_tool_;
+    if (resume_rule_.min_nozzle_c <= 0 || target < 0 ||
+        target >= static_cast<int>(tool_names_.size())) {
+        return -1;
+    }
+    // The controller's own test: a failed swap, or another tool mounted.
+    const int mounted = sensor_tool_reading_.value_or(system_info_.current_tool);
+    if (!controller_failure_latched_ && mounted == target) {
+        return -1;
+    }
+    return helix::toolchanger_addon::resume_rule_in_force(resume_rule_) ? target : -1;
+}
+
+std::string AmsBackendToolChanger::target_tool_label_locked(int target) const {
+    return helix::ui::tool_label_in_form(lane_noun(), tool_names_[static_cast<size_t>(target)],
+                                         target, helix::ui::ToolLabelForm::Full);
+}
+
+void AmsBackendToolChanger::prepare_for_resume(int /*slot_index*/, ResumeReadyCallback on_ready) {
+    int target = -1;
+    int min_c = 0;
+    std::string tool;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target = recovery_target_locked();
+        min_c = resume_rule_.min_nozzle_c;
+        if (target >= 0) {
+            tool = target_tool_label_locked(target);
+        }
+    }
+    // The machine's RESUME re-picks the target and refuses below its floor;
+    // asking first turns a console error into a sentence the screen can show.
+    // A heater this side cannot read is left to that refusal.
+    if (target >= 0 && api_) {
+        const auto& extruders = api_->printer_state().temperature_state().extruders();
+        const auto it = extruders.find(helix::mount_feed::heater_name(target));
+        if (it != extruders.end() && it->second.temperature <= static_cast<float>(min_c)) {
+            spdlog::warn("{} Resume refused: {} reads {:.0f}C, the controller wants above {}C",
+                         backend_log_tag(), it->first, it->second.temperature, min_c);
+            if (on_ready) {
+                on_ready(
+                    AmsError(AmsResult::WRONG_STATE,
+                             fmt::format("{} at {:.0f}C, at or below {}C", it->first,
+                                         it->second.temperature, min_c),
+                             fmt::format(fmt::runtime(lv_tr("Heat {} above {}°C before resuming")),
+                                         tool, min_c)));
+            }
+            return;
+        }
+    }
+    if (on_ready) {
+        on_ready(AmsErrorHelper::success());
+    }
+}
+
 void AmsBackendToolChanger::handle_status(const nlohmann::json& params) {
     bool state_changed = false;
+    bool sensor_fault = false;
+    std::string failure_toast;
+    ToastSeverity failure_severity = ToastSeverity::WARNING;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -665,6 +891,11 @@ void AmsBackendToolChanger::handle_status(const nlohmann::json& params) {
                 apply_material_reading_locked(*reading);
                 state_changed = true;
             }
+            // The C5 row also watches each afclite lane's spool. Any other
+            // tool changer with AFC lanes owes no lane_data re-read for them.
+            if (auto spools = helix::toolchanger_addon::read_afc_lane_spools(params)) {
+                apply_afc_lane_spools_locked(*spools);
+            }
         }
 
         // Z-Mod's afclite shim: the firmware's own fault flag (a boolean, not a
@@ -697,7 +928,38 @@ void AmsBackendToolChanger::handle_status(const nlohmann::json& params) {
                 apply_resolved_lane(slots[i], static_cast<int>(i));
             }
         }
+
+        // A mount-to-feed run owns the published operation: the swap frames its
+        // mount and restore stages raise must not end it or move its step.
+        if (feed_active_) {
+            publish_feed_state_locked();
+        }
+        sensor_fault = std::exchange(feed_sensor_fault_, false);
+        failure_toast = std::exchange(pending_failure_toast_, std::string());
+        failure_severity = pending_failure_severity_;
     }
+
+    if (!failure_toast.empty()) {
+        show_feed_toast(failure_toast, failure_severity);
+    }
+
+    // The run reacts to the frame once it is applied: a fault stops it, and a
+    // swap waiting on the sensors may now be confirmed.
+    if (sensor_fault) {
+        on_feed_sensor_fault();
+    } else if (feed_swap_check_) {
+        recheck_swap();
+    }
+    // A status frame comes only from a ready Klippy: what a run stopped by a
+    // lost connection owes its heaters can go out, once the frames have said
+    // whether a print holds the printer.
+    if (auto ps = params.find("print_stats"); ps != params.end() && ps->is_object()) {
+        if (auto st = ps->find("state"); st != ps->end() && st->is_string()) {
+            frame_print_state_ = st->get<std::string>();
+            frame_print_state_current_ = true;
+        }
+    }
+    flush_owed_heaters_off();
 
     // Emit event OUTSIDE the lock to avoid deadlock if the callback
     // queries backend state (e.g., calls get_system_info() which acquires mutex_)
@@ -706,8 +968,31 @@ void AmsBackendToolChanger::handle_status(const nlohmann::json& params) {
     }
 }
 
+int AmsBackendToolChanger::slot_for_tool_locked(int tool) const {
+    // A dock reading counts physical docks, and slot i is physical tool i. The
+    // G-code tool map does not apply: ASSIGN_TOOL moves a T<n> number, never a
+    // hot end.
+    if (tool < 0 || tool >= static_cast<int>(tool_names_.size())) {
+        return -1;
+    }
+    return tool;
+}
+
+bool AmsBackendToolChanger::raw_sensor_fault_locked() const {
+    return sensor_fault_reported_ || sensor_tool_reading_ == -2;
+}
+
 void AmsBackendToolChanger::apply_tool_sensor_locked(
-    const helix::toolchanger_addon::ToolReading& reading) {
+    const helix::toolchanger_addon::ToolReading& raw_reading) {
+    // A tool past the discovered set names no slot. It is read as a frame that
+    // did not name the carriage, so the last known tool stands.
+    helix::toolchanger_addon::ToolReading reading = raw_reading;
+    if (reading.current_tool && *reading.current_tool >= 0 && !tool_names_.empty() &&
+        *reading.current_tool >= static_cast<int>(tool_names_.size())) {
+        spdlog::warn("{} Dock sensors report tool {}, outside the {} discovered; ignored",
+                     backend_log_tag(), *reading.current_tool, tool_names_.size());
+        reading.current_tool.reset();
+    }
     // Captured BEFORE the phase branches below overwrite the action. The closing
     // grip of a swap and the resting closed gripper are the same wire state, and
     // the only thing separating them is whether an operation was running.
@@ -715,18 +1000,59 @@ void AmsBackendToolChanger::apply_tool_sensor_locked(
     const bool was_mid_operation = pending_dispatch_action_.has_value() ||
                                    system_info_.action == AmsAction::SELECTING ||
                                    system_info_.action == AmsAction::UNLOADING;
+    // A mount-to-feed run publishes its own action (LOADING/UNLOADING) over the
+    // swap a stage sends, so a stage that swaps counts as a swap on its own.
+    // Only for the fault rule: the run republishes the action, phase and step
+    // after every frame, so nothing else here decides what it shows.
+    // The prompt stage tolerates the same transient: the operator is pushing a
+    // strand into a docked hot end, which can jostle a dock switch. A -2 that
+    // outlasts it is caught when the Mount is confirmed.
+    const bool feed_swap_in_flight = feed_active_ && (feed_swap_in_flight_ || feed_prompt_up_);
+
+    if (reading.current_tool.has_value()) {
+        sensor_tool_reading_ = reading.current_tool;
+    }
+    // Which readings are faults at all is sensor_error_is_fault()'s rule, not
+    // this function's. The stored latch follows the same answer: a flag at rest
+    // beside a definite carriage is a past failure, and keeping it would make
+    // every later raw_sensor_fault_locked() check disagree with the screen.
+    const bool fault = helix::toolchanger_addon::sensor_error_is_fault(
+        reading, was_mid_operation || feed_swap_in_flight);
+    if (reading.last_error) {
+        controller_failure_ = *reading.last_error;
+        if (controller_failure_.empty()) {
+            controller_failure_noticed_.clear();
+        }
+    }
+    if (reading.target_tool) {
+        controller_target_tool_ = *reading.target_tool;
+    }
+    if (reading.sensor_error_named) {
+        controller_failure_latched_ = reading.sensor_error_reported;
+        sensor_fault_reported_ = reading.sensor_error_reported && fault;
+    } else if (reading.current_tool.has_value() && *reading.current_tool >= -1) {
+        // The controller's flag latches the last operation and is republished
+        // only when the next one clears it. A definite carriage reading that
+        // arrives after it is the sensors agreeing again: someone docked or
+        // mounted a tool by hand.
+        sensor_fault_reported_ = false;
+    }
 
     // -2 means the sensors cannot tell, which is NOT "no tool". Reporting -1
     // would invite a tool change against an unknown carriage state, so hold the
-    // last known tool and let the error surface instead. Which -2 readings are
-    // faults at all is sensor_error_is_fault()'s rule, not this function's.
-    if (helix::toolchanger_addon::sensor_error_is_fault(reading, was_mid_operation)) {
+    // last known tool and let the error surface instead.
+    if (fault) {
         if (!sensor_error_) {
             spdlog::warn("{} Dock sensors cannot identify the mounted tool", backend_log_tag());
         }
         sensor_error_ = true;
         system_info_.action = AmsAction::ERROR;
         system_info_.operation_detail = "sensor error";
+        // A run can no longer trust the carriage. It stops once this frame is
+        // applied, outside mutex_.
+        if (feed_active_) {
+            feed_sensor_fault_ = true;
+        }
         // Returns WITHOUT touching current_tool/current_slot: holding the last
         // known tool is the point. Nothing downstream may infer the fault from
         // those fields, because they still name a perfectly plausible tool.
@@ -734,12 +1060,35 @@ void AmsBackendToolChanger::apply_tool_sensor_locked(
     }
     // The fault this function raised is withdrawn once the sensors agree again.
     // A changer that publishes no phase word (Z-Mod) has nothing else to end it.
-    if (sensor_error_ && system_info_.action == AmsAction::ERROR &&
-        system_info_.operation_detail == "sensor error") {
-        system_info_.action = AmsAction::IDLE;
-        system_info_.operation_detail.clear();
+    // A frame silent about the carriage is not the sensors agreeing: the last
+    // reading they gave still stands.
+    if (!(sensor_error_ && raw_sensor_fault_locked())) {
+        if (sensor_error_ && system_info_.action == AmsAction::ERROR &&
+            system_info_.operation_detail == "sensor error") {
+            system_info_.action = AmsAction::IDLE;
+            system_info_.operation_detail.clear();
+        }
+        sensor_error_ = false;
     }
-    sensor_error_ = false;
+
+    // A failure the controller reported but the screen is not showing as a
+    // fault - the docks agreed again, or it predates this connection - would
+    // otherwise leave no trace of why the tool change did not happen.
+    if (!sensor_error_ && controller_failure_latched_ && !controller_failure_.empty() &&
+        !failure_already_noticed(controller_failure_, controller_failure_noticed_)) {
+        controller_failure_noticed_ = controller_failure_;
+        pending_failure_toast_ = controller_failure_text_locked();
+        pending_failure_severity_ = ToastSeverity::WARNING;
+    }
+    // A message with no failed operation behind it (the controller's own
+    // startup failing) is about the controller, not a tool change.
+    if (!controller_failure_latched_ && !controller_failure_.empty() &&
+        !failure_already_noticed(controller_failure_, controller_failure_noticed_)) {
+        controller_failure_noticed_ = controller_failure_;
+        pending_failure_toast_ =
+            fmt::format(fmt::runtime(lv_tr("Tool changer error: {}")), controller_failure_);
+        pending_failure_severity_ = ToastSeverity::ERROR;
+    }
 
     // Only when the frame named the carriage. A delta carrying just the gripper
     // or the phase says nothing about which tool is on the head, and answering
@@ -752,16 +1101,7 @@ void AmsBackendToolChanger::apply_tool_sensor_locked(
                          tool, system_info_.current_tool);
         }
         system_info_.current_tool = tool;
-        int seated_slot = -1;
-        if (tool >= 0) {
-            seated_slot = tool < static_cast<int>(system_info_.tool_to_slot_map.size())
-                              ? system_info_.tool_to_slot_map[static_cast<size_t>(tool)]
-                              : -1;
-            if (seated_slot < 0) {
-                seated_slot = tool;
-            }
-        }
-        system_info_.current_slot = seated_slot;
+        system_info_.current_slot = slot_for_tool_locked(tool);
         system_info_.filament_loaded = (tool >= 0);
     }
 
@@ -794,32 +1134,29 @@ void AmsBackendToolChanger::apply_tool_sensor_locked(
         direction_reported_ = true;
     }
 
-    // The two controllers do not share a phase vocabulary. Irbis3D's `operation`
-    // names the direction; topi314's `state` only ever says "changing", so a
-    // swap there is one undifferentiated phase - on that fork there is no
-    // [toolchanger] object either, so nothing else sets the action and only our
-    // own optimistic dispatch does.
-
     // Set by the idle branch below, consumed after the phase is computed.
     bool operation_ended = false;
 
     const std::string& op = reading.operation;
-    if (op == "picking") {
-        system_info_.action = AmsAction::SELECTING;
+    if (!op.empty()) {
+        // An operation's first busy word says what it is: MHC_SET opens on
+        // `changing`, MHC_DROP goes straight to `dropping`. A park this backend
+        // dispatched already said so.
+        const bool opens = operation_word_action(op).has_value() &&
+                           !operation_word_action(last_operation_word_).has_value();
+        if (opens && !pending_dispatch_action_.has_value()) {
+            controller_op_is_park_ = op == "dropping";
+        }
+        last_operation_word_ = op;
+        if (op == "idle") {
+            operation_idle_reported_ = true;
+        }
+    }
+    if (const auto busy = operation_word_action(op)) {
+        system_info_.action = *busy;
         system_info_.operation_detail = op;
         operation_confirmed_ = true;
-    } else if (op == "dropping") {
-        system_info_.action = AmsAction::UNLOADING;
-        system_info_.operation_detail = op;
-        operation_confirmed_ = true;
-    } else if (op == "changing") {
-        // Direction unknown on this controller. SELECTING is the honest generic
-        // "a swap is running": every caller treats it as busy, and the only
-        // thing that wants the direction is the step bar, which asks separately.
-        system_info_.action = AmsAction::SELECTING;
-        system_info_.operation_detail = op;
-        operation_confirmed_ = true;
-    } else if (op == "idle" || op == "ready") {
+    } else if (op == "idle") {
         // A swap RELEASES the filament before it moves, so its first frame is
         // idle-with-the-gripper-open. Reporting IDLE there ends the operation in
         // the UI the instant it starts: the step bar is torn down on step 0 and
@@ -881,11 +1218,24 @@ void AmsBackendToolChanger::apply_material_reading_locked(
     }
     firmware_slots_seen_ = true;
     bool filament_changed = false;
+    bool restated = false;
     for (size_t i = 0; i < reading.slots->size(); ++i) {
         const auto& slot = (*reading.slots)[i];
         if (!slot) {
             continue;
         }
+        // A head whose material or colour the firmware now states differently
+        // was changed by something; its lane record may have changed with it.
+        // The first statement is the boot state, not a change.
+        if (i >= firmware_slot_values_.size()) {
+            firmware_slot_values_.resize(i + 1);
+        }
+        std::pair<std::string, std::uint32_t> value{slot->material, slot->rgb.value_or(0)};
+        auto& seen = firmware_slot_values_[i];
+        if (seen && *seen != value) {
+            restated = true;
+        }
+        seen = std::move(value);
         // The firmware's statement of what this head holds, replaced whole each
         // time the frame carries it.
         helix::ams::Observation vendor(helix::ams::ObservationSource::VendorCache);
@@ -906,6 +1256,26 @@ void AmsBackendToolChanger::apply_material_reading_locked(
     }
     if (filament_changed) {
         refresh_slot_statuses_locked();
+    }
+    if (restated) {
+        schedule_lane_record_reread();
+    }
+}
+
+void AmsBackendToolChanger::apply_afc_lane_spools_locked(
+    const std::vector<helix::toolchanger_addon::AfcLaneSpool>& spools) {
+    bool changed = false;
+    for (const auto& spool : spools) {
+        auto it = afc_lane_spool_seen_.find(spool.lane);
+        if (it == afc_lane_spool_seen_.end()) {
+            afc_lane_spool_seen_.emplace(spool.lane, spool.spool_id);
+        } else if (it->second != spool.spool_id) {
+            it->second = spool.spool_id;
+            changed = true;
+        }
+    }
+    if (changed) {
+        schedule_lane_record_reread();
     }
 }
 
@@ -976,8 +1346,13 @@ void AmsBackendToolChanger::parse_toolchanger_state(const nlohmann::json& tc_dat
     // Values: "ready", "changing", "error", "uninitialized"
     if (tc_data.contains("status") && tc_data["status"].is_string()) {
         std::string status_str = tc_data["status"].get<std::string>();
-        system_info_.action = status_to_action(status_str);
-        system_info_.operation_detail = status_str;
+        const AmsAction status_action = status_to_action(status_str);
+        // klipper-toolchanger knows nothing of the docks, so its "ready" says
+        // nothing about a dock-sensor fault: only the sensors agreeing ends it.
+        if (!(sensor_error_ && status_action == AmsAction::IDLE)) {
+            system_info_.action = status_action;
+            system_info_.operation_detail = status_str;
+        }
         spdlog::trace("[AMS ToolChanger] Status: {} -> {}", status_str,
                       ams_action_to_string(system_info_.action));
 
@@ -1000,7 +1375,12 @@ void AmsBackendToolChanger::parse_toolchanger_state(const nlohmann::json& tc_dat
 
     // Parse current tool: toolchanger.tool_number
     // -1 = no tool selected
-    if (tc_data.contains("tool_number") && tc_data["tool_number"].is_number_integer()) {
+    //
+    // With dock sensors this is only what SELECT_TOOL last set, and Moonraker
+    // sends it in deltas of its own, so it never names the carriage: the
+    // sensors do (apply_tool_sensor_locked()).
+    if (!tool_sensor_.present && tc_data.contains("tool_number") &&
+        tc_data["tool_number"].is_number_integer()) {
         int tool_num = tc_data["tool_number"].get<int>();
         system_info_.current_tool = tool_num;
         // toolchanger.tool_number is the ASSIGNED G-code number of the carriage
@@ -1123,6 +1503,24 @@ void AmsBackendToolChanger::refresh_slot_statuses_locked() {
     }
 }
 
+std::optional<AmsAction>
+AmsBackendToolChanger::operation_word_action(const std::string& operation) {
+    if (operation == "picking") {
+        return AmsAction::SELECTING;
+    }
+    if (operation == "dropping") {
+        return AmsAction::UNLOADING;
+    }
+    // The swap's opening phase (MHC_SET homes before it reads the docks),
+    // before the direction is named. SELECTING is the honest generic "a swap
+    // is running": every caller treats it as busy, and the only thing that
+    // wants the direction is the step bar, which asks separately.
+    if (operation == "changing") {
+        return AmsAction::SELECTING;
+    }
+    return std::nullopt;
+}
+
 AmsAction AmsBackendToolChanger::status_to_action(const std::string& status) {
     if (status == "ready") {
         return AmsAction::IDLE;
@@ -1133,31 +1531,18 @@ AmsAction AmsBackendToolChanger::status_to_action(const std::string& status) {
     if (status == "error") {
         return AmsAction::ERROR;
     }
-    // klipper-toolchanger's own initialize sequence -- it homes and moves the
-    // carriage, so this is genuinely busy. Unmapped until now, which meant it
-    // fell through to IDLE and a tap could land mid-initialization.
+    // klipper-toolchanger's own initialize sequence: it homes and moves the
+    // carriage, so a tap must not land mid-initialization.
     if (status == "initializing") {
         return AmsAction::RESETTING;
     }
-    // 'uninitialized' stays busy, which refuses the tap at the gate.
-    //
-    // That refusal is imperfect: on the default initialize_on: first-use,
-    // select_tool() would have auto-initialized, so the tap is what would have
-    // cleared the state. But letting it through is worse. On initialize_on:
-    // manual (what MedusaHC ships) Klipper raises "Cannot select tool,
-    // toolchanger status is uninitialized", and that rejection reaches the
-    // error callback of execute_gcode(), which only logs -- it never fires
-    // on_complete and never unwinds the optimistic SELECTING that
-    // dispatch_operation() already stamped. execute_gcode() also returns
-    // success(), so the `if (!result)` net does not catch it either. The action
-    // would latch on SELECTING, is_busy() would refuse every later op, and
-    // Moonraker only republishes CHANGED fields, so no second 'uninitialized'
-    // frame ever arrives to reset it (the #1183 shape, one state over).
-    //
-    // Refusing is recoverable -- the Reset button sends INITIALIZE_TOOLCHANGER.
-    // A latched SELECTING is not. Fixing this properly means unwinding the
-    // dispatch from the gcode error callback, which is shared with AFC/HH/CFS
-    // and wants its own change.
+    // 'uninitialized' reads busy, which refuses the tap at the gate. On the
+    // default initialize_on: first-use select_tool() would have auto-
+    // initialized, so the tap could have cleared the state itself; on
+    // initialize_on: manual Klipper rejects it ("Cannot select tool,
+    // toolchanger status is uninitialized"), and dispatch_operation()'s error
+    // callback unwinds the optimistic SELECTING (#1183). The Reset button,
+    // which sends INITIALIZE_TOOLCHANGER, is the way out either way.
     if (status == "uninitialized") {
         return AmsAction::RESETTING;
     }
@@ -1186,7 +1571,7 @@ void AmsBackendToolChanger::initialize_tools() {
         slot.slot_index = i;
         slot.global_index = i;
         slot.status = SlotStatus::AVAILABLE; // Tools start as available (docked)
-        slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+        slot.color_rgb = kAmsDefaultSlotColor;
         slot.spool_name = tool_names_[i]; // Use tool name as placeholder
 
         unit.slots.push_back(slot);
@@ -1253,6 +1638,7 @@ uint64_t AmsBackendToolChanger::begin_dispatch_locked(AmsAction action) {
     // drops it, so it can never resolve the operation now running.
     const uint64_t generation = ++dispatch_generation_;
     pending_dispatch_action_ = action;
+    controller_op_is_park_ = action == AmsAction::UNLOADING;
 
     // A prior swap can reach IDLE without ever passing through the idle/ready
     // branch of apply_tool_sensor_locked() - e.g. a frame carrying only
@@ -1292,8 +1678,23 @@ void AmsBackendToolChanger::abandon_dispatch(uint64_t generation) {
             return;
         }
         pending_dispatch_action_.reset();
-        system_info_.action = AmsAction::IDLE;
-        system_info_.operation_detail.clear();
+        // A fault a frame raised meanwhile is the machine's answer and stays.
+        if (ams_action_holds_system(system_info_.action)) {
+            // A swap the controller reports running is someone else's (the
+            // rejection is often its "MedusaHC is busy"), and its own idle
+            // frame ends it. A source that never says idle cannot end one, so
+            // its last word is no evidence of anything still running.
+            const auto running = operation_idle_reported_
+                                     ? operation_word_action(last_operation_word_)
+                                     : std::nullopt;
+            if (running) {
+                system_info_.action = *running;
+                system_info_.operation_detail = last_operation_word_;
+            } else {
+                system_info_.action = AmsAction::IDLE;
+                system_info_.operation_detail.clear();
+            }
+        }
     }
     emit_event(EVENT_STATE_CHANGED);
 }
@@ -1337,7 +1738,8 @@ void AmsBackendToolChanger::finalize_dispatch_after_macro(uint64_t generation) {
     }
 }
 
-AmsError AmsBackendToolChanger::dispatch_operation(std::string gcode, AmsAction action) {
+AmsError AmsBackendToolChanger::dispatch_operation(std::string gcode, AmsAction action,
+                                                   uint32_t timeout_ms) {
     uint64_t generation;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1349,13 +1751,21 @@ AmsError AmsBackendToolChanger::dispatch_operation(std::string gcode, AmsAction 
     // state (get_current_action() takes mutex_).
     emit_event(EVENT_STATE_CHANGED);
 
-    auto token = lifetime_.token();
-    AmsError result = ensure_homed_then(std::move(gcode), [this, token, generation]() {
-        // L081 Mechanism C: the gcode ack lands on a background thread and the
-        // handler writes system_info_ under mutex_. Marshal to main.
-        token.defer("AmsBackendToolChanger::dispatch_macro_complete",
-                    [this, generation]() { finalize_dispatch_after_macro(generation); });
-    });
+    // A rejected command (the controller's "MedusaHC is busy", a failed swap
+    // raised as a gcode error) ends the operation it was meant to start. A reply
+    // timeout does not: the macro may still be running, and its frames end it.
+    // The `!!` line Klipper broadcasts is what the user sees, so this callback
+    // only unwinds.
+    AmsError result = ensure_homed_then(
+        std::move(gcode), [this, generation]() { finalize_dispatch_after_macro(generation); },
+        [this, generation](const MoonrakerError& err) {
+            if (err.type == MoonrakerErrorType::TIMEOUT) {
+                return;
+            }
+            spdlog::warn("[AMS ToolChanger] Dispatch #{} rejected: {}", generation, err.message);
+            abandon_dispatch(generation);
+        },
+        timeout_ms, /*skip_homing=*/false, /*silent=*/true, /*caller_surfaces_errors=*/false);
 
     if (!result) {
         // The gcode never left: no IMoonrakerAPI, or the send was refused. No ack
@@ -1371,49 +1781,880 @@ AmsError AmsBackendToolChanger::dispatch_operation(std::string gcode, AmsAction 
 
 // ============================================================================
 
+// ============================================================================
+// Mount-to-feed
+// ============================================================================
+
+bool AmsBackendToolChanger::needs_mount_to_feed(int /*head*/) const {
+    return mounts_to_feed_;
+}
+
+helix::mount_feed::Request AmsBackendToolChanger::build_feed_request(const std::vector<int>& heads,
+                                                                     bool load) {
+    namespace mf = helix::mount_feed;
+    mf::Request req;
+    req.load = load;
+    req.heads.reserve(heads.size());
+    const int first = heads.front();
+    SlotInfo slot;
+    int mounted = -1;
+    // The next-tool preheat must never lower a heater's target, so each
+    // head's current target rides the request. Null API (unit tests) reads 0.
+    std::unordered_map<std::string, float> targets;
+    if (api_) {
+        for (const auto& [name, info] : api_->printer_state().temperature_state().extruders()) {
+            targets[name] = info.target;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mounted = system_info_.current_slot;
+        for (int head : heads) {
+            mf::HeadRequest hr;
+            hr.head = head;
+            // Only the first tool can already be on the carriage: the run
+            // mounts the previous tool before it reaches any later one.
+            if (head != mounted || head != first) {
+                hr.mount_gcode = mount_gcode(head);
+            }
+            if (const SlotInfo* lane = system_info_.get_slot_global(head)) {
+                slot = *lane;
+            } else {
+                slot = SlotInfo{};
+            }
+            hr.temp_c = helix::ui::resolve_load_preheat_material(head, &slot, nullptr)
+                            .value_or(helix::ui::PreheatTarget{
+                                app_constants::ams::kDefaultLoadPreheatTemp, ""})
+                            .temp_c;
+            const auto target = targets.find(mf::heater_name(head));
+            hr.heater_target_c = target != targets.end() ? static_cast<int>(target->second) : 0;
+            req.heads.push_back(std::move(hr));
+        }
+        // The carriage goes back to whatever the run found on it. A run of one
+        // tool that starts mounted leaves it there; several tools always
+        // displace the first one, so they always restore.
+        if (mounted < 0) {
+            req.restore_gcode = park_gcode();
+        } else if (mounted != first || heads.size() > 1) {
+            req.restore_gcode = mount_gcode(mounted);
+        }
+        req.restore_head = mounted;
+        req.purge_mm = purge_mm_;
+    }
+    // The prompt is the one part of the run every client of the printer sees,
+    // so it is English whatever this screen's language is.
+    // The prompt comes before any mount, so a tool it names is still in its
+    // dock unless it started on the carriage. A docked strand goes into the
+    // hot end; a mounted one in through the extruder.
+    req.prompt_title = load ? "Load filament" : "Unload filament";
+    std::vector<int> docked;
+    std::vector<int> on_carriage;
+    for (const mf::HeadRequest& hr : req.heads) {
+        (hr.mount_gcode.empty() ? on_carriage : docked).push_back(hr.head + 1);
+    }
+    const auto numbers = [](const std::vector<int>& tools) {
+        std::string list;
+        for (int tool : tools) {
+            if (!list.empty()) {
+                list += ", ";
+            }
+            list += std::to_string(tool);
+        }
+        return list;
+    };
+    const auto docked_phrase = [&]() {
+        return docked.size() == 1
+                   ? fmt::format("the hot end of Tool {} while it is docked", docked.front())
+                   : fmt::format("the hot ends of Tools {} while they are docked", numbers(docked));
+    };
+    if (on_carriage.empty()) {
+        req.prompt_text =
+            docked.size() == 1
+                ? fmt::format("Insert filament into {}, then tap Continue", docked_phrase())
+                : fmt::format("Insert filament into {}, as far as it goes, then tap "
+                              "Continue",
+                              docked_phrase());
+    } else if (docked.empty()) {
+        req.prompt_text =
+            on_carriage.size() == 1
+                ? fmt::format("Insert filament into Tool {}, then tap Continue",
+                              on_carriage.front())
+                : fmt::format("Insert filament into Tools {} as far as it goes, then tap Continue",
+                              numbers(on_carriage));
+    } else {
+        req.prompt_text =
+            fmt::format("Insert filament into Tool{} {} as far as it goes, and into "
+                        "{}, then tap Continue",
+                        on_carriage.size() == 1 ? "" : "s", numbers(on_carriage), docked_phrase());
+    }
+    req.continue_label = "Continue";
+    req.cancel_label = "Cancel";
+    return req;
+}
+
+AmsError AmsBackendToolChanger::start_mount_feed(const std::vector<int>& heads, bool load) {
+    namespace mf = helix::mount_feed;
+    if (feed_run_) {
+        return AmsErrorHelper::busy(load ? "Loading" : "Unloading");
+    }
+    if (heads.empty()) {
+        return AmsErrorHelper::invalid_parameter("mount-to-feed with no head");
+    }
+    // Ahead of this run's own heating, so Klipper turns an earlier run's
+    // heaters off before this one sets any.
+    flush_owed_heaters_off();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sensor_error_) {
+            // Restoring the carriage needs to know what was on it.
+            return AmsError(AmsResult::WRONG_STATE, "Mount-to-feed refused: dock sensor fault",
+                            lv_tr("Dock sensors cannot tell which tool is mounted"), "");
+        }
+    }
+
+    mf::Request req = build_feed_request(heads, load);
+    spdlog::info("[AMS ToolChanger] {} {} tool(s) through the carriage (restore='{}')",
+                 load ? "Loading" : "Unloading", heads.size(), req.restore_gcode);
+    feed_run_.emplace(std::move(req));
+    ++feed_generation_;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        feed_active_ = true;
+        feed_action_ = load ? AmsAction::LOADING : AmsAction::UNLOADING;
+        // A fault flagged with no run to stop (another path applies readings
+        // too) must not stop this one on its first frame.
+        feed_sensor_fault_ = false;
+    }
+    send_feed_stage();
+    return AmsErrorHelper::success();
+}
+
+void AmsBackendToolChanger::publish_feed_state_locked() {
+    system_info_.action = feed_action_;
+    // The status line shows operation_detail ahead of the action, and a frame
+    // writes the controller's own phase word there ("idle" between the run's
+    // swaps). The run has no detail of its own: the step under way says it.
+    system_info_.operation_detail.clear();
+    system_info_.operation_phase = feed_phase_;
+    step_action_ = feed_step_action_;
+}
+
+void AmsBackendToolChanger::send_feed_stage() {
+    namespace mf = helix::mount_feed;
+    if (!feed_run_) {
+        return;
+    }
+    set_wait_watchdog(false);
+    const std::optional<std::string> gcode = feed_run_->current_gcode();
+    if (!gcode) {
+        if (feed_run_->awaiting_operator()) {
+            // The prompt is up: the run moves again on the operator's reply,
+            // or on its timeout.
+            set_wait_watchdog(true);
+            emit_event(EVENT_STATE_CHANGED);
+            return;
+        }
+        spdlog::info("[AMS ToolChanger] Mount-to-feed run {}",
+                     feed_run_->aborted() ? "cleaned up" : "complete");
+        if (!feed_run_->aborted()) {
+            record_fed_heads(*feed_run_);
+        }
+        if (!feed_run_->aborted() && !feed_run_->request().load) {
+            toast_unload_complete();
+        }
+        reset_feed_run();
+        return;
+    }
+
+    // A print holds the printer: no swap, move or heater target of this run's
+    // may reach it, the cleanup's included.
+    if (!refuse_motion_if_printing().success()) {
+        stop_feed_run_for_print();
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        feed_phase_ = feed_run_->phase_index();
+        feed_step_action_ = mf::step_action(feed_run_->current_step());
+        const mf::Stage* stage = feed_run_->current_stage();
+        feed_swap_in_flight_ = stage != nullptr && stage->swaps;
+        feed_prompt_up_ = stage != nullptr && stage->awaits_operator;
+        publish_feed_state_locked();
+    }
+    emit_event(EVENT_STATE_CHANGED);
+
+    const uint64_t generation = feed_generation_;
+    auto token = lifetime_.token();
+    // Each stage ends on its own ack. The prompt stage acks once the prompt is
+    // up; the wait for the operator is not a stage.
+    AmsError sent = ensure_homed_then(
+        *gcode, [this, generation]() { on_feed_stage_acked(generation); },
+        [this, token, generation](const MoonrakerError& err) {
+            const bool lost = err.type == MoonrakerErrorType::CONNECTION_LOST;
+            token.defer("AmsBackendToolChanger::feed_stage_failed",
+                        [this, generation, message = err.message, lost]() {
+                            on_feed_stage_failed(generation, message, lost);
+                        });
+        },
+        IMoonrakerAPI::kAmsOperationTimeoutMs, /*skip_homing=*/false, /*silent=*/true,
+        /*caller_surfaces_errors=*/false, /*on_predispatch_error=*/nullptr,
+        // Every stage waits on its answer, and a swap leaves idle_timeout
+        // reading "Printing": the API's busy gate would send a heater-only
+        // stage fire-and-forget and drop that answer.
+        /*bypass_busy_gate=*/true);
+    if (!sent.success()) {
+        on_feed_stage_failed(generation, sent.technical_msg);
+    }
+}
+
+void AmsBackendToolChanger::on_feed_stage_acked(uint64_t generation) {
+    if (!feed_run_ || generation != feed_generation_) {
+        return;
+    }
+    if (const std::optional<int> expected = swap_to_confirm()) {
+        bool confirmed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            confirmed = swap_confirmed_locked(*expected);
+        }
+        if (!confirmed) {
+            // The ack can lead the frame that reports the finished swap.
+            feed_swap_check_ = SwapCheck{generation, *expected};
+            set_swap_watchdog(true);
+            return;
+        }
+    }
+    advance_feed_run();
+}
+
+void AmsBackendToolChanger::advance_feed_run() {
+    feed_swap_check_.reset();
+    set_swap_watchdog(false);
+    feed_run_->stage_done();
+    ++feed_generation_;
+    // A Cancel held for this swap takes effect now it has settled. A run with
+    // nothing left (the restore was the swap) simply completes.
+    if (std::exchange(feed_cancel_after_swap_, false) && !feed_run_->aborted() &&
+        !feed_run_->finished()) {
+        spdlog::info("[AMS ToolChanger] The swap under Cancel settled; unwinding the run");
+        toast_partial_run(FeedStopReason::CancelledAfterSwap, feed_run_->completed_heads(),
+                          /*carriage_restored=*/false);
+        feed_run_->abort(/*restore_carriage=*/false);
+    }
+    send_feed_stage();
+}
+
+std::optional<int> AmsBackendToolChanger::swap_to_confirm() const {
+    namespace mf = helix::mount_feed;
+    if (!feed_run_ || feed_run_->aborted() || !tool_sensor_.present) {
+        return std::nullopt;
+    }
+    const mf::Stage* stage = feed_run_->current_stage();
+    if (stage == nullptr || !stage->swaps) {
+        return std::nullopt;
+    }
+    if (stage->step == mf::Step::Restore) {
+        return feed_run_->request().restore_head;
+    }
+    const auto& heads = feed_run_->request().heads;
+    if (stage->tool_index < 0 || static_cast<size_t>(stage->tool_index) >= heads.size()) {
+        return std::nullopt;
+    }
+    return heads[static_cast<size_t>(stage->tool_index)].head;
+}
+
+bool AmsBackendToolChanger::swap_confirmed_locked(int expected_slot) const {
+    if (raw_sensor_fault_locked() || !sensor_tool_reading_) {
+        return false;
+    }
+    return slot_for_tool_locked(*sensor_tool_reading_) == expected_slot;
+}
+
+void AmsBackendToolChanger::recheck_swap() {
+    if (!feed_swap_check_ || !feed_run_ || feed_swap_check_->generation != feed_generation_) {
+        feed_swap_check_.reset();
+        set_swap_watchdog(false);
+        return;
+    }
+    bool confirmed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        confirmed = swap_confirmed_locked(feed_swap_check_->expected_slot);
+    }
+    if (confirmed) {
+        advance_feed_run();
+    }
+}
+
+void AmsBackendToolChanger::handle_swap_check_elapsed() {
+    if (!feed_swap_check_) {
+        return;
+    }
+    spdlog::warn("[AMS ToolChanger] Dock sensors never confirmed the swap to slot {}",
+                 feed_swap_check_->expected_slot);
+    on_feed_sensor_fault();
+}
+
+bool AmsBackendToolChanger::carriage_trusted_for_restore() const {
+    if (!tool_sensor_.present) {
+        return true;
+    }
+    if (feed_swap_check_) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !feed_swap_in_flight_ && !raw_sensor_fault_locked();
+}
+
+void AmsBackendToolChanger::on_feed_sensor_fault() {
+    feed_swap_check_.reset();
+    set_swap_watchdog(false);
+    if (!feed_run_ || feed_run_->aborted()) {
+        return;
+    }
+    spdlog::warn("[AMS ToolChanger] Mount-to-feed run stopped: the dock sensors cannot vouch for "
+                 "the carriage, so it is left where it is");
+    toast_partial_run(FeedStopReason::SensorFault, feed_run_->completed_heads(),
+                      /*carriage_restored=*/false);
+    feed_run_->abort(/*restore_carriage=*/false);
+    ++feed_generation_;
+    send_feed_stage();
+}
+
+void AmsBackendToolChanger::set_swap_watchdog(bool armed) {
+    if (!armed) {
+        feed_swap_timer_.reset();
+        return;
+    }
+    if (!lv_is_initialized()) {
+        return;
+    }
+    feed_swap_timer_.reset(lv_timer_create(
+        [](lv_timer_t* timer) {
+            static_cast<AmsBackendToolChanger*>(lv_timer_get_user_data(timer))
+                ->handle_swap_check_elapsed();
+        },
+        kSwapConfirmGraceMs, this));
+}
+
+void AmsBackendToolChanger::on_feed_stage_failed(uint64_t generation, const std::string& message,
+                                                 bool connection_lost) {
+    if (!feed_run_ || generation != feed_generation_) {
+        return;
+    }
+    if (connection_lost) {
+        // Dropped with the connection, not refused: a cleanup sent now would
+        // be dropped the same way.
+        spdlog::warn("[AMS ToolChanger] Mount-to-feed stage lost with the connection ({})",
+                     message);
+        stop_feed_run_unreachable();
+        return;
+    }
+    if (feed_run_->aborted()) {
+        // The CLEANUP itself failed to leave: no repeat of the run's toast -
+        // the run already accounted for itself. What is new is that a nozzle
+        // may still be hot, and nothing further this side can do about it. A
+        // cleanup that only closes the prompt heated nothing, so its failure
+        // adds nothing to tell.
+        const helix::mount_feed::Stage* cleanup = feed_run_->current_stage();
+        if (cleanup != nullptr && cleanup->heaters_off) {
+            spdlog::error("[AMS ToolChanger] Mount-to-feed cleanup failed to send ({})", message);
+            show_feed_toast(lv_tr("Could not turn the heaters off"), ToastSeverity::ERROR);
+        } else {
+            spdlog::warn("[AMS ToolChanger] Mount-to-feed prompt close failed ({})", message);
+        }
+        feed_run_->abort(); // already unwinding: this only ends the run
+        ++feed_generation_;
+        send_feed_stage();
+        return;
+    }
+    // Klipper's own `!!` line reports the failure; this only unwinds. A
+    // failure inside the cleanup ends the run where it stands.
+    spdlog::warn("[AMS ToolChanger] Mount-to-feed stage failed ({}); cleaning up", message);
+    {
+        // The error a failed swap stage carries is the controller's own
+        // last_error, which the status frame then repeats: this toast tells it.
+        std::lock_guard<std::mutex> lock(mutex_);
+        controller_failure_noticed_ = message;
+    }
+    const bool restore = carriage_trusted_for_restore();
+    toast_partial_run(FeedStopReason::Failed, feed_run_->completed_heads(), restore);
+    feed_run_->abort(restore);
+    ++feed_generation_;
+    send_feed_stage();
+}
+
+void AmsBackendToolChanger::on_feed_reply(helix::mount_feed::Reply reply) {
+    if (reply == helix::mount_feed::Reply::Continue) {
+        on_feed_signal(helix::mount_feed::ConsoleSignal::Continue);
+    } else if (reply == helix::mount_feed::Reply::Cancel) {
+        on_feed_signal(helix::mount_feed::ConsoleSignal::Cancel);
+    }
+}
+
+void AmsBackendToolChanger::on_feed_signal(helix::mount_feed::ConsoleSignal signal) {
+    if (!feed_run_ || !feed_run_->awaiting_operator()) {
+        return;
+    }
+    if (signal == helix::mount_feed::ConsoleSignal::Continue) {
+        spdlog::info("[AMS ToolChanger] Operator confirmed the filament feed");
+        feed_run_->operator_reply(helix::mount_feed::Reply::Continue);
+    } else {
+        // Cancel, and a dismissal: once the prompt is gone from the console
+        // the operator can no longer answer it, so both unwind the run.
+        spdlog::info("[AMS ToolChanger] Operator {} the filament feed",
+                     signal == helix::mount_feed::ConsoleSignal::Dismissed ? "dismissed"
+                                                                           : "cancelled");
+        toast_partial_run(FeedStopReason::Cancelled, feed_run_->completed_heads());
+        feed_run_->operator_reply(helix::mount_feed::Reply::Cancel);
+    }
+    ++feed_generation_;
+    send_feed_stage();
+}
+
+void AmsBackendToolChanger::handle_wait_elapsed(uint32_t elapsed_ms) {
+    if (!feed_run_) {
+        return;
+    }
+    // The list is read before the wait aborts the run: abort() collapses the
+    // stage list the answer is derived from.
+    const std::vector<int> completed = feed_run_->completed_heads();
+    if (feed_run_->advance_wait(elapsed_ms) != helix::mount_feed::Run::WaitResult::Expired) {
+        return;
+    }
+    spdlog::warn("[AMS ToolChanger] Operator never inserted the filament; cleaning up");
+    toast_partial_run(FeedStopReason::TimedOut, completed);
+    ++feed_generation_;
+    send_feed_stage();
+}
+
+void AmsBackendToolChanger::toast_partial_run(FeedStopReason why, const std::vector<int>& completed,
+                                              bool carriage_restored,
+                                              const std::vector<int>& left_heating) {
+    if (!feed_run_) {
+        return;
+    }
+    const auto& req = feed_run_->request();
+    const bool several = req.heads.size() > 1;
+    // The carriage is left wherever the stop found it, mid-swap perhaps, when
+    // the run moved anything and had a restore planned that is not going out.
+    const bool carriage_left = !carriage_restored && feed_run_->started() &&
+                               !req.restore_gcode.empty() && why != FeedStopReason::SensorFault &&
+                               why != FeedStopReason::CancelledAfterSwap;
+    if (why == FeedStopReason::Cancelled && !several && !carriage_left) {
+        // A single tool's Cancel is the operator's own act, said on the prompt
+        // they tapped; only a multi-tool run stops with accounting due.
+        return;
+    }
+    std::vector<std::string> sentences;
+    if (why == FeedStopReason::TimedOut) {
+        // The prompt is the run's first stage: nothing has heated or moved.
+        sentences.emplace_back(lv_tr("No filament was inserted in time"));
+    } else if (several) {
+        sentences.emplace_back(req.load ? lv_tr("Load all stopped") : lv_tr("Unload all stopped"));
+    } else {
+        // One tool never was an "all": the toast is about its own load.
+        sentences.emplace_back(req.load ? lv_tr("Load stopped") : lv_tr("Unload stopped"));
+    }
+    if (why == FeedStopReason::SensorFault) {
+        sentences.emplace_back(lv_tr("Dock sensors cannot tell which tool is mounted"));
+    } else if (why == FeedStopReason::Unreachable) {
+        sentences.emplace_back(lv_tr("The connection to Klipper was lost"));
+    } else if (why == FeedStopReason::PrintStarted) {
+        sentences.emplace_back(lv_tr("A print started"));
+    } else if (why == FeedStopReason::CancelledAfterSwap) {
+        // The sensors confirmed the swap, so which tool is mounted is known.
+        sentences.emplace_back(
+            req.restore_head >= 0
+                ? fmt::format(fmt::runtime(lv_tr("The tool change under way finished, and {} "
+                                                 "was not put back on the carriage")),
+                              helix::ui::lane_label(lane_noun(), req.restore_head))
+                : std::string(lv_tr("The tool change under way finished, and the tool was not "
+                                    "parked")));
+    }
+    if (carriage_left) {
+        sentences.emplace_back(lv_tr("The carriage was not put back: check which tool is mounted"));
+    }
+    if (const std::string heating = still_heating_sentence(left_heating); !heating.empty()) {
+        sentences.push_back(heating);
+    }
+    const std::string list = feed_lane_list(completed);
+    if (!list.empty()) {
+        sentences.push_back(fmt::format(fmt::runtime(lv_tr("Completed: {}")), list));
+    }
+    std::string text;
+    for (const std::string& sentence : sentences) {
+        text += (text.empty() ? "" : " ") + sentence + ".";
+    }
+    // A Cancel the run carried out as asked is no error.
+    show_feed_toast(text, why == FeedStopReason::CancelledAfterSwap ? ToastSeverity::WARNING
+                                                                    : ToastSeverity::ERROR);
+}
+
+std::string AmsBackendToolChanger::still_heating_sentence(const std::vector<int>& heads) const {
+    if (heads.empty()) {
+        return {};
+    }
+    if (heads.size() == 1) {
+        return fmt::format(fmt::runtime(lv_tr("{}'s nozzle is still heating")),
+                           feed_lane_list(heads));
+    }
+    return fmt::format(fmt::runtime(lv_tr("Nozzles still heating: {}")), feed_lane_list(heads));
+}
+
+void AmsBackendToolChanger::toast_unload_complete() {
+    if (!feed_run_) {
+        return;
+    }
+    std::vector<int> heads;
+    for (const auto& head : feed_run_->request().heads) {
+        heads.push_back(head.head);
+    }
+    show_feed_toast(
+        fmt::format(fmt::runtime(lv_tr("Unload complete. Pull the filament out of {}.")),
+                    feed_lane_list(heads)),
+        ToastSeverity::SUCCESS);
+}
+
+std::string AmsBackendToolChanger::feed_lane_list(const std::vector<int>& heads) const {
+    std::string list;
+    for (int head : heads) {
+        if (!list.empty()) {
+            list += ", ";
+        }
+        list += helix::ui::lane_label(lane_noun(), head);
+    }
+    return list;
+}
+
+void AmsBackendToolChanger::show_feed_toast(const std::string& message, ToastSeverity severity) {
+    // Recorded before the guard: unit tests pin the wording without a display.
+    feed_last_toast_ = message;
+    feed_last_toast_severity_ = severity;
+    if (!lv_is_initialized()) {
+        return;
+    }
+    ToastManager::instance().show(severity, message.c_str());
+}
+
+void AmsBackendToolChanger::abandon_feed_run_after_disconnect() {
+    if (!feed_run_) {
+        return;
+    }
+    // No ack can arrive for the stage in flight, and the operator prompt
+    // stays up on every other client. Send the whole cleanup best effort and
+    // reset the run now, rather than leaving a hot nozzle behind bookkeeping.
+    spdlog::warn("[AMS ToolChanger] Backend stopping under a mount-to-feed run; sending the "
+                 "cleanup and resetting the run");
+    feed_run_->abort(carriage_trusted_for_restore());
+    const std::optional<std::string> cleanup = feed_run_->current_gcode();
+    reset_feed_run();
+    if (cleanup) {
+        execute_gcode(*cleanup);
+    }
+}
+
+void AmsBackendToolChanger::stop_feed_run_unreachable() {
+    if (!feed_run_) {
+        return;
+    }
+    spdlog::warn("[AMS ToolChanger] The printer cannot take the mount-to-feed run's gcode; "
+                 "ending the run, its heaters-off owed until Klippy is ready");
+    if (!feed_run_->aborted()) {
+        toast_partial_run(FeedStopReason::Unreachable, feed_run_->completed_heads(),
+                          /*carriage_restored=*/false);
+    }
+    owe_heaters_off(feed_run_->heater_heads());
+    reset_feed_run();
+}
+
+void AmsBackendToolChanger::stop_feed_run_for_print() {
+    if (!feed_run_) {
+        return;
+    }
+    spdlog::warn("[AMS ToolChanger] A print holds the printer; ending the mount-to-feed run "
+                 "without its cleanup");
+    const helix::mount_feed::Stage* stage = feed_run_->current_stage();
+    const bool prompt_open = stage != nullptr && stage->closes_prompt;
+    // Nothing goes out to turn them off: the print may be using them. The
+    // operator is told which, so they can turn the others off themselves.
+    const std::vector<int> heating = feed_run_->heads_left_heating();
+    if (!feed_run_->aborted()) {
+        toast_partial_run(FeedStopReason::PrintStarted, feed_run_->completed_heads(),
+                          /*carriage_restored=*/false, heating);
+    } else if (const std::string sentence = still_heating_sentence(heating); !sentence.empty()) {
+        // The run already said why it stopped; what is new is the heat.
+        show_feed_toast(sentence + ".", ToastSeverity::WARNING);
+    }
+    reset_feed_run();
+    if (prompt_open) {
+        // The operator answered, but the dialog stays up on every client until
+        // it is closed; a RESPOND line moves nothing.
+        execute_gcode(helix::mount_feed::prompt_end_gcode());
+    }
+}
+
+void AmsBackendToolChanger::flush_owed_heaters_off() {
+    if (owed_heaters_off_.empty()) {
+        return;
+    }
+    if (!frame_print_state_current_) {
+        // Not yet known whether the reconnect found a print running: sending
+        // now could zero a new job's heaters.
+        return;
+    }
+    // A print owns the heaters it finds: zeroing one now would cool a nozzle
+    // the job is using. What the run owed is the print's to set from here, so
+    // the operator is told which were left set.
+    const bool print_holds = frame_print_state_.empty() ? print_holds_printer()
+                                                        : frame_print_state_ == "printing" ||
+                                                              frame_print_state_ == "paused";
+    if (print_holds) {
+        spdlog::info("[AMS ToolChanger] A print holds the printer; dropping the heaters-off a "
+                     "stopped mount-to-feed run owed");
+        const std::vector<int> heads = std::exchange(owed_heaters_off_, {});
+        show_feed_toast(still_heating_sentence(heads) + ".", ToastSeverity::WARNING);
+        return;
+    }
+    std::vector<int> heads = std::exchange(owed_heaters_off_, {});
+    spdlog::info("[AMS ToolChanger] Turning off {} heater(s) a stopped mount-to-feed run left on",
+                 heads.size());
+    auto token = lifetime_.token();
+    const AmsError sent = execute_gcode(
+        helix::mount_feed::heaters_off_gcode(heads), nullptr,
+        [this, token, heads](const MoonrakerError& err) {
+            if (err.type != MoonrakerErrorType::CONNECTION_LOST) {
+                spdlog::error("[AMS ToolChanger] Heaters-off after a stopped run refused: {}",
+                              err.message);
+                return;
+            }
+            // Dropped again: owed until the printer is back, beside whatever
+            // another stopped run came to owe meanwhile.
+            token.defer("AmsBackendToolChanger::owed_heaters_off_lost",
+                        [this, heads]() { owe_heaters_off(heads); });
+        },
+        /*silent=*/true);
+    if (!sent.success()) {
+        owe_heaters_off(heads);
+    }
+}
+
+void AmsBackendToolChanger::owe_heaters_off(const std::vector<int>& heads) {
+    for (int head : heads) {
+        if (std::find(owed_heaters_off_.begin(), owed_heaters_off_.end(), head) ==
+            owed_heaters_off_.end()) {
+            owed_heaters_off_.push_back(head);
+        }
+    }
+}
+
+void AmsBackendToolChanger::reset_feed_run() {
+    feed_run_.reset();
+    feed_swap_check_.reset();
+    feed_cancel_after_swap_ = false;
+    set_swap_watchdog(false);
+    set_wait_watchdog(false);
+    ++feed_generation_;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        feed_active_ = false;
+        feed_swap_in_flight_ = false;
+        feed_prompt_up_ = false;
+        feed_sensor_fault_ = false;
+        feed_phase_ = -1;
+        feed_step_action_.reset();
+        system_info_.action = AmsAction::IDLE;
+        system_info_.operation_phase = -1;
+        step_action_.reset();
+        // The run held the published state through a sensor fault; once it is
+        // over, a fault the sensors still report is what shows.
+        if (tool_sensor_.present && raw_sensor_fault_locked()) {
+            sensor_error_ = true;
+            system_info_.action = AmsAction::ERROR;
+            system_info_.operation_detail = "sensor error";
+        }
+    }
+    emit_event(EVENT_STATE_CHANGED);
+}
+
+void AmsBackendToolChanger::set_wait_watchdog(bool armed) {
+    if (!armed) {
+        feed_wait_timer_.reset();
+        return;
+    }
+    feed_wait_last_tick_ = feed_clock_();
+    if (!lv_is_initialized()) {
+        return;
+    }
+    feed_wait_timer_.reset(lv_timer_create(
+        [](lv_timer_t* timer) {
+            static_cast<AmsBackendToolChanger*>(lv_timer_get_user_data(timer))->feed_wait_tick();
+        },
+        /*period_ms=*/1000, this));
+}
+
+void AmsBackendToolChanger::feed_wait_tick() {
+    if (!feed_run_ || !feed_run_->awaiting_operator()) {
+        feed_wait_timer_.reset();
+        return;
+    }
+    // The run sums what it is handed, so each tick passes only its own share.
+    const auto now = feed_clock_();
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - feed_wait_last_tick_);
+    feed_wait_last_tick_ = now;
+    handle_wait_elapsed(static_cast<uint32_t>(std::max<int64_t>(elapsed.count(), 0)));
+}
+
+void AmsBackendToolChanger::register_mount_feed_listener() {
+    if (!client_ || !mounts_to_feed_) {
+        return;
+    }
+    static const std::string handler_name = "toolchanger_mount_feed_watcher";
+    auto token = lifetime_.token();
+    client_->register_method_callback(
+        "notify_gcode_response", handler_name, [this, token](const json& msg) {
+            // BG THREAD: extract the line into a local; no `this` access here.
+            std::string line;
+            if (msg.contains("params") && msg["params"].is_array() && !msg["params"].empty() &&
+                msg["params"][0].is_string()) {
+                line = msg["params"][0].get<std::string>();
+            } else if (msg.is_array() && !msg.empty() && msg[0].is_string()) {
+                line = msg[0].get<std::string>();
+            }
+            if (!helix::mount_feed::may_be_prompt_signal(line)) {
+                return;
+            }
+            const auto signal = helix::mount_feed::parse_console(line);
+            if (signal == helix::mount_feed::ConsoleSignal::None) {
+                return;
+            }
+            token.defer("AmsBackendToolChanger::feed_reply",
+                        [this, signal]() { on_feed_signal(signal); });
+        });
+}
+
+void AmsBackendToolChanger::unregister_mount_feed_listener() {
+    if (!client_) {
+        return;
+    }
+    client_->unregister_method_callback("notify_gcode_response", "toolchanger_mount_feed_watcher");
+}
+
+HeadFilamentOps AmsBackendToolChanger::head_ops_for(bool feeds_head, bool cut_to_unload) {
+    HeadFilamentOps ops;
+    const char* by_hand = lv_tr("Load and unload filament at the tool by hand");
+    if (!feeds_head) {
+        ops.load = FilamentOpSupport::Manual;
+        ops.load_reason = by_hand;
+    }
+    ops.unload = FilamentOpSupport::Manual;
+    ops.unload_reason = cut_to_unload ? lv_tr("This printer has no automatic unload. Cut the "
+                                              "filament at the head and pull it out by hand.")
+                                      : by_hand;
+    return ops;
+}
+
+HeadFilamentOps AmsBackendToolChanger::head_filament_ops(int head) const {
+    if (mounts_to_feed_) {
+        return {}; // Automatic both ways: the op mounts the tool itself
+    }
+    const bool feeds = tool_feed_.present && head >= 0 &&
+                       static_cast<size_t>(head) < tool_feed_.head_gcode.size() &&
+                       !tool_feed_.head_gcode[static_cast<size_t>(head)].empty();
+    return head_ops_for(feeds, unload_is_manual());
+}
+
 AmsError AmsBackendToolChanger::do_load_filament(int slot_index) {
-    // For tool changers, "load filament" means "mount tool"
-    return do_change_tool(slot_index);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        AmsError slot_valid = validate_slot_index_locked(slot_index);
+        if (!slot_valid) {
+            return slot_valid;
+        }
+    }
+    if (mounts_to_feed_) {
+        return start_mount_feed({slot_index}, /*load=*/true);
+    }
+    // Only a feed the printer published is sent. A load never mounts a tool:
+    // the toolhead tap does that.
+    const auto head = static_cast<size_t>(slot_index);
+    if (!tool_feed_.present || head >= tool_feed_.head_gcode.size() ||
+        tool_feed_.head_gcode[head].empty()) {
+        return AmsError(AmsResult::NOT_SUPPORTED, "No filament feed for this tool",
+                        head_filament_ops(slot_index).load_reason, "");
+    }
+    // The firmware feeds the head itself, and heats it.
+    std::string cmd = tool_feed_.head_gcode[head];
+    spdlog::info("[AMS ToolChanger] Feeding tool {} via {}: {}", slot_index,
+                 tool_feed_.provider_name, cmd);
+    return dispatch_operation(std::move(cmd), AmsAction::LOADING);
 }
 
 AmsError AmsBackendToolChanger::do_unload_filament(int slot_index) {
-    // For tool changers, "unload" means unmount a specific tool (or current if -1)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        if (slot_index >= 0) {
-            AmsError slot_valid = validate_slot_index_locked(slot_index);
+    if (mounts_to_feed_) {
+        int head = slot_index;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (head < 0) {
+                head = system_info_.current_slot;
+            }
+            if (head < 0) {
+                return AmsErrorHelper::not_loaded();
+            }
+            AmsError slot_valid = validate_slot_index_locked(head);
             if (!slot_valid) {
                 return slot_valid;
             }
-        } else if (system_info_.current_tool < 0) {
+        }
+        return start_mount_feed({head}, /*load=*/false);
+    }
+    // Without a feed nothing reverses on a tool changer: taking filament out is
+    // the user's job, and an unload never unmounts a tool (park_active_tool() does).
+    return AmsError(AmsResult::NOT_SUPPORTED, "No filament unload on this tool changer",
+                    head_filament_ops(std::max(slot_index, 0)).unload_reason, "");
+}
+
+AmsError AmsBackendToolChanger::do_filament_batch(const std::vector<int>& slots, bool load) {
+    if (!mounts_to_feed_) {
+        return AmsErrorHelper::not_supported("Batch filament ops");
+    }
+    if (slots.empty()) {
+        return AmsErrorHelper::invalid_parameter("batch filament op with no slots");
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (int slot : slots) {
+            AmsError slot_valid = validate_slot_index_locked(slot);
+            if (!slot_valid) {
+                return slot_valid;
+            }
+        }
+    }
+    return start_mount_feed(slots, load);
+}
+
+AmsError AmsBackendToolChanger::do_park_active_tool() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sensor_error_) {
+            return sensor_fault_refusal("Unmount");
+        }
+        if (system_info_.current_tool < 0) {
             return AmsErrorHelper::not_loaded();
         }
     }
 
-    // A changer whose own extra does the swapping has no UNSELECT_TOOL at all;
-    // its unmount takes no tool argument, because there is only ever one tool on
-    // the head to drop.
-    if (tool_commands_.present) {
-        if (tool_commands_.unselect.empty()) {
-            return AmsErrorHelper::not_supported("unmount");
-        }
-        spdlog::info("[AMS ToolChanger] Unmounting via {}: {}", tool_commands_.provider_name,
-                     tool_commands_.unselect);
-        return dispatch_operation(tool_commands_.unselect, AmsAction::UNLOADING);
+    std::string cmd = park_gcode();
+    if (cmd.empty()) {
+        return AmsErrorHelper::not_supported("unmount");
     }
-
     // UNSELECT_TOOL has the same no-op shortcut as SELECT_TOOL — unmounting when
     // nothing is on the carriage returns without touching toolchanger.status —
     // so it needs the same optimistic-set + ack-resolution treatment (#1183).
-    if (slot_index >= 0) {
-        std::string cmd = "UNSELECT_TOOL T=" + std::to_string(slot_index);
-        spdlog::info("[AMS ToolChanger] Unmounting tool {}: {}", slot_index, cmd);
-        return dispatch_operation(std::move(cmd), AmsAction::UNLOADING);
-    }
-
-    spdlog::info("[AMS ToolChanger] Unmounting current tool");
-    return dispatch_operation("UNSELECT_TOOL", AmsAction::UNLOADING);
+    spdlog::info("[AMS ToolChanger] Parking the current tool: {}", cmd);
+    return dispatch_operation(std::move(cmd), AmsAction::UNLOADING);
 }
 
 AmsError AmsBackendToolChanger::do_select_slot(int slot_index) {
@@ -1422,6 +2663,7 @@ AmsError AmsBackendToolChanger::do_select_slot(int slot_index) {
 }
 
 AmsError AmsBackendToolChanger::do_change_tool(int tool_number) {
+    std::string cmd;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -1429,12 +2671,15 @@ AmsError AmsBackendToolChanger::do_change_tool(int tool_number) {
         if (!slot_valid) {
             return slot_valid;
         }
+        // A swap plans its moves from what is on the carriage.
+        if (sensor_error_) {
+            return sensor_fault_refusal("Tool change");
+        }
+        cmd = mount_gcode(tool_number);
     }
 
-    // Use SELECT_TOOL T={n} to select by tool number via the toolchanger's
-    // internal lookup, bypassing any ASSIGN_TOOL T-command remapping.
-    // This ensures we mount the physical tool the user tapped, not whatever
-    // the slicer's T{n} command was remapped to.
+    // mount_gcode() names the physical tool, so the swap mounts the tool the
+    // user tapped whatever the slicer's T<n> was assigned to.
     //
     // dispatch_operation() sets SELECTING before the send — which also closes
     // the race window where a second tap could arrive before Klipper's status
@@ -1443,18 +2688,59 @@ AmsError AmsBackendToolChanger::do_change_tool(int tool_number) {
     // Without klipper-toolchanger there is no SELECT_TOOL: the extra registers
     // its own T<n> commands and those ARE the swap. ASSIGN_TOOL does not exist
     // on such a machine either, so the remap concern above cannot arise.
-    std::string cmd = tool_commands_.present
-                          ? tool_commands_.select_prefix + std::to_string(tool_number)
-                          : "SELECT_TOOL T=" + std::to_string(tool_number);
     spdlog::info("[AMS ToolChanger] Mounting tool {}: {}", tool_number, cmd);
     return dispatch_operation(std::move(cmd), AmsAction::SELECTING);
+}
+
+std::string AmsBackendToolChanger::mount_gcode(int slot_index) const {
+    if (tool_commands_.present) {
+        return tool_commands_.select_prefix + std::to_string(slot_index);
+    }
+    // TOOL= names the [tool ...] object, a physical tool. T= is a tool NUMBER,
+    // which ASSIGN_TOOL can point at any other hot end.
+    if (slot_index >= 0 && slot_index < static_cast<int>(tool_names_.size())) {
+        return "SELECT_TOOL TOOL=" + tool_object_arg(tool_names_[static_cast<size_t>(slot_index)]);
+    }
+    return "SELECT_TOOL T=" + std::to_string(slot_index);
+}
+
+std::string AmsBackendToolChanger::tool_object_arg(const std::string& tool_name) {
+    // klipper-toolchanger looks a TOOL= argument up by the tool's full object
+    // name, which has a space in it; Klipper reads quoted parameter values.
+    return fmt::format("\"tool {}\"", tool_name);
+}
+
+AmsError AmsBackendToolChanger::sensor_fault_refusal(const char* operation) {
+    return AmsError(AmsResult::WRONG_STATE,
+                    std::string(operation) + " refused: dock sensors cannot identify the tool",
+                    lv_tr("Dock sensors cannot tell which tool is mounted"), "");
+}
+
+std::string AmsBackendToolChanger::park_gcode() const {
+    // A changer whose own extra does the swapping has no UNSELECT_TOOL; its
+    // unmount takes no tool argument, because there is only ever one tool on
+    // the head to drop. Empty when it has none.
+    return tool_commands_.present ? tool_commands_.unselect : std::string("UNSELECT_TOOL");
 }
 
 // ============================================================================
 // Recovery Operations
 // ============================================================================
 
+bool AmsBackendToolChanger::reset_available() const {
+    // INITIALIZE_TOOLCHANGER is klipper-toolchanger's; a changer driving its
+    // own T<n> without it has nothing to reinitialize from here.
+    return !tool_commands_.present || tool_commands_.initialize_available;
+}
+
+bool AmsBackendToolChanger::recover_available() const {
+    return reset_available();
+}
+
 AmsError AmsBackendToolChanger::recover() {
+    if (!recover_available()) {
+        return AmsErrorHelper::not_supported("Recover");
+    }
     spdlog::info("[AMS ToolChanger] Attempting recovery");
     // klipper-toolchanger doesn't have a dedicated recovery command
     // Try to reinitialize the toolchanger
@@ -1462,42 +2748,85 @@ AmsError AmsBackendToolChanger::recover() {
 }
 
 AmsError AmsBackendToolChanger::reset() {
+    if (!reset_available()) {
+        return AmsErrorHelper::not_supported("Reset");
+    }
     spdlog::info("[AMS ToolChanger] Resetting toolchanger");
     return execute_gcode("INITIALIZE_TOOLCHANGER");
 }
 
+void AmsBackendToolChanger::on_klipper_restarted() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_dispatch_action_.reset();
+        ++dispatch_generation_;
+        // Whatever the controller was doing died with it.
+        last_operation_word_.clear();
+    }
+    // Everything the run had queued died with the restart. Klippy is ready
+    // again, so what the run owes its heaters can go out now.
+    stop_feed_run_unreachable();
+    flush_owed_heaters_off();
+    AmsSubscriptionBackend::on_klipper_restarted();
+}
+
+void AmsBackendToolChanger::on_connection_lost() {
+    {
+        // A phase word from before the drop says nothing about the printer
+        // the reconnect finds.
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_operation_word_.clear();
+    }
+    frame_print_state_current_ = false;
+    stop_feed_run_unreachable();
+}
+
 AmsError AmsBackendToolChanger::cancel() {
-    spdlog::info("[AMS ToolChanger] Cancel requested (not implemented for tool changers)");
+    if (feed_run_ && feed_cancel_after_swap_) {
+        // Already asked: the run ends once the swap settles.
+        return AmsErrorHelper::success();
+    }
+    if (can_cancel_operation()) {
+        // Only the dock sensors make a swap something to wait out: without
+        // them the cleanup queues behind it in Klipper and restores as usual.
+        bool swap_under_way = tool_sensor_.present && feed_swap_check_.has_value();
+        if (tool_sensor_.present) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            swap_under_way = swap_under_way || feed_swap_in_flight_;
+        }
+        if (swap_under_way) {
+            // Klipper finishes the swap whatever this side does, and a cleanup
+            // sent now would end the run while the carriage still moves. The
+            // run stays busy until the swap settles, then unwinds.
+            spdlog::info("[AMS ToolChanger] Cancel: ending the mount-to-feed run once the swap "
+                         "under way settles");
+            feed_cancel_after_swap_ = true;
+            emit_event(EVENT_STATE_CHANGED);
+            return AmsErrorHelper::success();
+        }
+        spdlog::info("[AMS ToolChanger] Cancel: unwinding the mount-to-feed run");
+        const bool restore = carriage_trusted_for_restore();
+        toast_partial_run(FeedStopReason::Cancelled, feed_run_->completed_heads(), restore);
+        feed_run_->abort(restore);
+        // An ack still in flight belongs to the stage being dropped. Klipper
+        // queues the cleanup behind it, so the heater goes off once it is done.
+        ++feed_generation_;
+        send_feed_stage();
+        return AmsErrorHelper::success();
+    }
+    spdlog::info("[AMS ToolChanger] Cancel requested (not implemented for tool changes)");
     // Tool changes typically can't be cancelled mid-operation
     return AmsErrorHelper::not_supported("Cancel");
+}
+
+bool AmsBackendToolChanger::can_cancel_operation() const {
+    // Main thread, like every feed_run_ access.
+    return feed_run_ && !feed_run_->aborted() && !feed_cancel_after_swap_;
 }
 
 // ============================================================================
 // Configuration Operations
 // ============================================================================
-
-namespace {
-
-/// Put @p info's filament fields on @p slot, so get_slot_info returns them at
-/// once.
-void write_filament_fields(SlotInfo& slot, const SlotInfo& info) {
-    slot.color_rgb = info.color_rgb;
-    slot.color_name = info.color_name;
-    slot.material = info.material;
-    slot.brand = info.brand;
-    // Carry the catalog product identity through a sync too: one that dropped
-    // it would make the editor snap back to a different variant on the next
-    // get_slot_info().
-    slot.catalog_id = info.catalog_id;
-    slot.product_name = info.product_name;
-    slot.spoolman_id = info.spoolman_id;
-    slot.spoolman_filament_id = info.spoolman_filament_id;
-    slot.spool_name = info.spool_name;
-    slot.remaining_weight_g = info.remaining_weight_g;
-    slot.total_weight_g = info.total_weight_g;
-}
-
-} // namespace
 
 AmsError AmsBackendToolChanger::apply_user_edit(int slot_index, const SlotInfo& info,
                                                 const helix::ams::Observation& declared) {
@@ -1506,6 +2835,7 @@ AmsError AmsBackendToolChanger::apply_user_edit(int slot_index, const SlotInfo& 
     std::vector<std::pair<int, std::uint32_t>> palette;
     std::string (*write_gcode)(int, const std::string&, std::uint32_t) = nullptr;
     std::string firmware_type;
+    bool remap_refused = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -1553,14 +2883,18 @@ AmsError AmsBackendToolChanger::apply_user_edit(int slot_index, const SlotInfo& 
             slot_index < static_cast<int>(system_info_.units[0].slots.size())) {
             auto& slot = system_info_.units[0].slots[slot_index];
             const int old_mapped_tool = slot.mapped_tool;
-            write_filament_fields(slot, info);
+            slot.assign_filament_fields(info);
 
             // Tool mapping change: persist via ASSIGN_TOOL outside the lock.
             // slot.mapped_tool stores "which G-code tool number activates this physical
             // tool"; the gcode says "T<info.mapped_tool> now activates tool_names_[slot]".
-            if (info.mapped_tool != old_mapped_tool && info.mapped_tool >= 0 &&
-                info.mapped_tool < static_cast<int>(system_info_.tool_to_slot_map.size()) &&
-                slot_index < static_cast<int>(tool_names_.size())) {
+            if (info.mapped_tool != old_mapped_tool && tool_commands_.present) {
+                // No ASSIGN_TOOL on this machine: the filament half of the edit
+                // lands and the tool number stays where the firmware has it.
+                remap_refused = true;
+            } else if (info.mapped_tool != old_mapped_tool && info.mapped_tool >= 0 &&
+                       info.mapped_tool < static_cast<int>(system_info_.tool_to_slot_map.size()) &&
+                       slot_index < static_cast<int>(tool_names_.size())) {
                 // One pass for both directions, and it EVICTS: the tool being
                 // moved leaves its old lane unmapped, and whatever tool this
                 // lane previously answered to gives it up. Writing the two
@@ -1586,7 +2920,7 @@ AmsError AmsBackendToolChanger::apply_user_edit(int slot_index, const SlotInfo& 
 
     // Emit OUTSIDE the lock to avoid deadlock with callbacks, and ahead of the
     // remap's return so an edit that also moves a tool number is announced too.
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 
     if (firmware_edit) {
         // The colour is snapped to the firmware's own palette; the type was
@@ -1611,6 +2945,12 @@ AmsError AmsBackendToolChanger::apply_user_edit(int slot_index, const SlotInfo& 
         }
     }
 
+    if (remap_refused) {
+        AmsError refused = AmsErrorHelper::not_supported("Tool remapping");
+        refused.partially_applied = true;
+        return refused;
+    }
+
     if (!physical_tool_name.empty()) {
         spdlog::info("[AMS ToolChanger] Remap via slot edit: T{} -> physical {} (slot {})",
                      info.mapped_tool, physical_tool_name, slot_index);
@@ -1625,13 +2965,13 @@ void AmsBackendToolChanger::clear_slot_override(int slot_index) {
         std::lock_guard<std::mutex> lock(mutex_);
         clear_override_locked(slot_index, system_info_.get_slot_global(slot_index));
     }
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 }
 
 void AmsBackendToolChanger::clear_override_fields(SlotInfo& slot) const {
     AmsSubscriptionBackend::clear_override_fields(slot);
     slot.material.clear();
-    slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+    slot.color_rgb = kAmsDefaultSlotColor;
     slot.multi_color_hexes.clear();
 }
 
@@ -1648,12 +2988,12 @@ AmsError AmsBackendToolChanger::sync_external_identity(int slot_index, const Slo
         // the tool map, and moving it sends ASSIGN_TOOL.
         if (!system_info_.units.empty() &&
             slot_index < static_cast<int>(system_info_.units[0].slots.size())) {
-            write_filament_fields(system_info_.units[0].slots[slot_index], info);
+            system_info_.units[0].slots[slot_index].assign_filament_fields(info);
         }
     }
 
     // Emit OUTSIDE the lock to avoid deadlock with callbacks
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
     return AmsErrorHelper::success();
 }
 
@@ -1685,7 +3025,8 @@ AmsError AmsBackendToolChanger::assign_tool(const std::string& physical_tool_nam
                      tool_commands_.provider_name, tool_number, physical_tool_name);
         return AmsErrorHelper::not_supported("Tool remapping");
     }
-    return execute_gcode(fmt::format("ASSIGN_TOOL TOOL={} N={}", physical_tool_name, tool_number));
+    return execute_gcode(
+        fmt::format("ASSIGN_TOOL TOOL={} N={}", tool_object_arg(physical_tool_name), tool_number));
 }
 
 AmsError AmsBackendToolChanger::can_set_tool_mapping(int tool_number, int slot_index) const {
@@ -1709,7 +3050,7 @@ AmsError AmsBackendToolChanger::set_tool_mapping_impl(int tool_number, int slot_
     // ASSIGN_TOOL command. This makes Klipper's T<tool_number> command activate the
     // physical tool at slot_index instead of tool_number.
     //
-    // Example: set_tool_mapping(0, 2) sends "ASSIGN_TOOL TOOL=T2 N=0"
+    // Example: set_tool_mapping(0, 2) sends ASSIGN_TOOL TOOL="tool T2" N=0
     //   → G-code "T0" now activates physical tool T2
     std::string physical_tool_name;
     {
@@ -1717,6 +3058,10 @@ AmsError AmsBackendToolChanger::set_tool_mapping_impl(int tool_number, int slot_
 
         if (auto err = can_set_tool_mapping_locked(tool_number, slot_index); !err.success()) {
             return err;
+        }
+        // No ASSIGN_TOOL to send, so the table stays as the firmware has it.
+        if (tool_commands_.present) {
+            return AmsErrorHelper::not_supported("Tool remapping");
         }
 
         // The physical tool to assign (slot_index maps to tool_names_[slot_index])
@@ -1802,27 +3147,69 @@ bool AmsBackendToolChanger::is_bypass_active() const {
 }
 
 // ============================================================================
-// Device Actions (stub - not applicable for tool changers)
+// Device Actions
 // ============================================================================
 
 std::vector<helix::printer::DeviceSection> AmsBackendToolChanger::get_device_sections() const {
-    // A toolhead changer carries its own extruder and has nothing to expose.
-    // Only a machine with a frame-side feeder gets a section.
-    if (!feeder_.present) {
-        return {};
+    // A toolhead changer carries its own extruder: only a frame-side feeder, or
+    // a load this screen runs itself, has anything to expose.
+    std::vector<helix::printer::DeviceSection> sections;
+    if (feeder_.present) {
+        sections.push_back(helix::printer::device_section(
+            "feeder", 0, TR_NOOP("Release or grip the filament by hand")));
     }
-    using DS = helix::printer::DeviceSection;
-    return {
-        DS{"feeder", "Filament feeder", 0, "Release or grip the filament by hand"},
-    };
+    if (mounts_to_feed_) {
+        sections.push_back(helix::printer::device_section(
+            "purge", 1, TR_NOOP("How much a load pushes through the nozzle")));
+    }
+    bool can_clean = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        can_clean = !clean_nozzle_gcode_.empty();
+    }
+    if (can_clean) {
+        sections.push_back(helix::printer::device_section(
+            "maintenance", 2, TR_NOOP("Brush the mounted tool's nozzle clean")));
+    }
+    return sections;
 }
 
 std::vector<helix::printer::DeviceAction> AmsBackendToolChanger::get_device_actions() const {
+    using DA = helix::printer::DeviceAction;
     std::vector<helix::printer::DeviceAction> actions;
+    bool can_clean = false;
+    bool tool_mounted = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        can_clean = !clean_nozzle_gcode_.empty();
+        tool_mounted = system_info_.current_tool >= 0;
+    }
+    if (can_clean) {
+        // The command brushes whatever is on the carriage and does nothing
+        // without a tool there.
+        auto clean = DA::button("clean_nozzle", "Clean nozzle", "maintenance", "nozzle",
+                                "Wipe the mounted nozzle on the brush")
+                         .with_machine_motion();
+        clean.enabled = tool_mounted;
+        if (!tool_mounted) {
+            clean.disable_reason = "No tool is mounted";
+        }
+        actions.push_back(std::move(clean));
+    }
+    if (mounts_to_feed_) {
+        int purge = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            purge = purge_mm_;
+        }
+        actions.push_back(DA::slider("purge_length", "Purge Length", "purge",
+                                     static_cast<float>(purge), 0.0f,
+                                     static_cast<float>(helix::mount_feed::kMaxPurgeMm), "mm",
+                                     "ruler", "Extruded past the nozzle after each load"));
+    }
     if (!feeder_.present) {
         return actions;
     }
-    using DA = helix::printer::DeviceAction;
     actions.push_back(
         DA::button("open_feeder", "Open feeder", "feeder", "lock_open", "Release the filament"));
     actions.push_back(
@@ -1845,47 +3232,102 @@ std::vector<helix::printer::DeviceAction> AmsBackendToolChanger::get_device_acti
     return actions;
 }
 
-AmsError AmsBackendToolChanger::execute_device_action(const std::string& action_id,
-                                                      const std::any& value) {
-    (void)value;
-    if (feeder_.present && (action_id == "open_feeder" || action_id == "close_feeder")) {
-        // On a hotend changer the feeder gripper is the only thing holding the
-        // filament, so opening it mid-print drops the strand and kills the job.
-        // The device-operations overlay calls straight through with no gate of
-        // its own, so this is the only place that can refuse. requires_toolhead
-        // _motion=true also covers the mid-tool-change window, since the AMS is
-        // busy for its duration.
-        if (auto refused = check_preconditions(/*requires_toolhead_motion=*/true); !refused) {
-            return refused;
+AmsError AmsBackendToolChanger::set_feeder_open(bool open) {
+    if (!feeder_.present) {
+        return AmsErrorHelper::not_supported("Feeder");
+    }
+    // On a hotend changer the feeder gripper is the only thing holding the
+    // filament, so opening it mid-print drops the strand and kills the job.
+    // Callers reach this with no gate of their own (the device-operations
+    // overlay calls straight through), so this is the one place that refuses.
+    // requires_toolhead_motion=true also covers the mid-tool-change window,
+    // since the AMS is busy for its duration.
+    if (auto refused = check_preconditions(/*requires_toolhead_motion=*/true); !refused) {
+        return refused;
+    }
+    std::string gcode;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        gcode = open ? feeder_.open_gcode : feeder_.close_gcode;
+    }
+    return execute_gcode(gcode);
+}
+
+AmsError AmsBackendToolChanger::clean_nozzle() {
+    std::string gcode;
+    bool tool_mounted = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        gcode = clean_nozzle_gcode_;
+        tool_mounted = system_info_.current_tool >= 0;
+    }
+    if (gcode.empty()) {
+        return AmsErrorHelper::not_supported("Clean nozzle");
+    }
+    // It moves the toolhead to the brush: never under a print or a swap.
+    if (auto refused = check_preconditions(/*requires_toolhead_motion=*/true); !refused) {
+        return refused;
+    }
+    if (!tool_mounted) {
+        return AmsError(AmsResult::WRONG_STATE, "Clean nozzle refused: no tool mounted",
+                        lv_tr("No tool is mounted"), "");
+    }
+    spdlog::info("{} Cleaning the mounted nozzle: {}", backend_log_tag(), gcode);
+    return execute_gcode(gcode);
+}
+
+bool AmsBackendToolChanger::feeder_open() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return feeder_open_;
+}
+
+AmsError AmsBackendToolChanger::do_execute_device_action(const std::string& action_id,
+                                                         const std::any& value) {
+    if (mounts_to_feed_ && action_id == "purge_length") {
+        const auto [mm, value_err] = printer::device_action_value<float>(value, "purge length");
+        if (!value_err) {
+            return value_err;
         }
-        return execute_gcode(action_id == "open_feeder" ? feeder_.open_gcode : feeder_.close_gcode);
+        const int purge =
+            std::clamp(static_cast<int>(std::lround(mm)), 0, helix::mount_feed::kMaxPurgeMm);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            purge_mm_ = purge;
+        }
+        helix::SettingsManager::instance().set_mount_feed_purge_mm(purge);
+        spdlog::info("{} Load purge set to {}mm", backend_log_tag(), purge);
+        return AmsErrorHelper::success();
+    }
+    if (feeder_.present && (action_id == "open_feeder" || action_id == "close_feeder")) {
+        return set_feeder_open(action_id == "open_feeder");
+    }
+    if (action_id == "clean_nozzle") {
+        return clean_nozzle();
     }
     if (feeder_.present &&
         (action_id == "feeder_open_macro" || action_id == "feeder_close_macro")) {
-        const auto* chosen = std::any_cast<std::string>(&value);
-        if (!chosen || chosen->empty()) {
-            return AmsErrorHelper::invalid_parameter("No macro selected");
+        const auto [chosen, err] = printer::device_action_macro_choice(value);
+        if (!err) {
+            return err;
         }
         const bool is_open = (action_id == "feeder_open_macro");
-        // "auto" is a sentinel, not a macro: it restores whatever the add-on
-        // detected for this machine, so a user who migrates later picks up the
-        // new native command without touching this again.
-        const std::string resolved =
-            (*chosen == helix::toolchanger_addon::kAutoMacro)
-                ? (is_open ? feeder_.detected_open : feeder_.detected_close)
-                : *chosen;
+        // "auto" restores whatever the add-on detected for this machine, so a
+        // user who migrates later picks up the new native command without
+        // touching this again.
+        const std::string resolved = helix::resolve_macro_choice(
+            chosen, is_open ? feeder_.detected_open : feeder_.detected_close);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             (is_open ? feeder_.open_gcode : feeder_.close_gcode) = resolved;
-            (is_open ? feeder_.open_choice : feeder_.close_choice) = *chosen;
+            (is_open ? feeder_.open_choice : feeder_.close_choice) = chosen;
         }
         if (is_open) {
-            helix::SettingsManager::instance().set_feeder_open_macro(*chosen);
+            helix::SettingsManager::instance().set_feeder_open_macro(chosen);
         } else {
-            helix::SettingsManager::instance().set_feeder_close_macro(*chosen);
+            helix::SettingsManager::instance().set_feeder_close_macro(chosen);
         }
         spdlog::info("{} Feeder {} macro set to {} (sends {})", backend_log_tag(),
-                     is_open ? "open" : "close", *chosen, resolved);
+                     is_open ? "open" : "close", chosen, resolved);
         return AmsErrorHelper::success();
     }
     return AmsErrorHelper::not_supported("Device action: " + action_id);

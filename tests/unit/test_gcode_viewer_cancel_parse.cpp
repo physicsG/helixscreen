@@ -50,13 +50,13 @@ struct LargeGCode {
         // vacuously. On a desktop should_use_gcode_streaming() is false (its
         // threshold scales with available RAM), so these take the full-load
         // path, which is the one with the cancellable getline loop.
-        static const char* CANDIDATES[] = {
+        static const char* kCandidates[] = {
             "assets/test_gcodes/Night Spirit_v1_2_og.gcode",
             "assets/test_gcodes/vaso_voronoi_V2_abajo.gcode",
             "assets/test_gcodes/Low poly vase v1.1 flat top.gcode",
             "assets/test_gcodes/Benchbin_MK4_MMU3.gcode",
         };
-        for (const char* c : CANDIDATES) {
+        for (const char* c : kCandidates) {
             std::error_code ec;
             if (fs::exists(c, ec)) {
                 path = c;
@@ -135,17 +135,17 @@ TEST_CASE_METHOD(LVGLTestFixture, "gcode viewer cancels an in-flight parse promp
     LargeGCode big;
     TinyGCode tiny;
 
-    lv_obj_t* viewer = ui_gcode_viewer_create(lv_screen_active());
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(lv_screen_active());
     REQUIRE(viewer != nullptr);
 
     g_loads_finished.store(0);
-    ui_gcode_viewer_set_load_callback(viewer, on_load_done, nullptr);
+    helix::ui::gcode_viewer_set_load_callback(viewer, on_load_done, nullptr);
 
     // --- Calibrate: how long does a FULL load of this file take? -------------
     // Derived, not hardcoded: the threshold below is a fraction of the measured
     // parse so the test stays meaningful on a fast desktop and a slow ARM box.
     const auto full_start = steady_clock::now();
-    ui_gcode_viewer_load_file(viewer, big.path.string().c_str());
+    helix::ui::gcode_viewer_load_file(viewer, big.path.string().c_str());
 
     // The completion callback is delivered on the main thread, so pump until it
     // lands. Bounded so a hang fails the test instead of wedging the suite.
@@ -162,10 +162,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "gcode viewer cancels an in-flight parse promp
     REQUIRE(full_ms > 300);
 
     // --- Now start that same large parse and interrupt it -------------------
-    ui_gcode_viewer_clear(viewer);
+    helix::ui::gcode_viewer_clear(viewer);
     g_loads_finished.store(0);
 
-    ui_gcode_viewer_load_file(viewer, big.path.string().c_str());
+    helix::ui::gcode_viewer_load_file(viewer, big.path.string().c_str());
 
     // Let the worker get properly into the getline loop. Deliberately short
     // relative to full_ms so the parse is certainly still running.
@@ -173,9 +173,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "gcode viewer cancels an in-flight parse promp
 
     // This is the measurement: load_file -> start_build -> cancel_build -> join.
     // With no in-loop cancellation check the join waits out the rest of the
-    // large parse; with it, the worker notices within CANCEL_POLL_LINES.
+    // large parse; with it, the worker notices within kCancelPollLines.
     const auto cancel_start = steady_clock::now();
-    ui_gcode_viewer_load_file(viewer, tiny.path.string().c_str());
+    helix::ui::gcode_viewer_load_file(viewer, tiny.path.string().c_str());
     const auto cancel_ms = duration_cast<milliseconds>(steady_clock::now() - cancel_start).count();
 
     INFO("cancel took " << cancel_ms << "ms vs full parse " << full_ms << "ms");
@@ -186,9 +186,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "gcode viewer cancels an in-flight parse promp
 
     // And the viewer is left usable, holding the file we actually asked for.
     CHECK(pump_until(*this, [] { return g_loads_finished.load() > 0; }, milliseconds(20000)));
-    CHECK(ui_gcode_viewer_has_content(viewer));
+    CHECK(helix::ui::gcode_viewer_has_content(viewer));
 
-    ui_gcode_viewer_clear(viewer);
+    helix::ui::gcode_viewer_clear(viewer);
     lv_obj_delete(viewer);
     process_lvgl(50);
 }

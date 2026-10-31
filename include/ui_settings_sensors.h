@@ -3,88 +3,130 @@
 
 /**
  * @file ui_settings_sensors.h
- * @brief Sensor Settings overlay - configure all sensor types
+ * @brief Settings > Sensors: one section per sensor manager, every row a sensor_row
  *
- * This overlay allows users to configure sensors across multiple categories:
- * - Switch sensors (filament runout/motion) with master enable toggle
- * - Probe sensors (Z probes, BLTouch, etc.)
- * - Width sensors (filament diameter)
- * - Humidity sensors (chamber/dryer)
- * - Accelerometer sensors (input shaper)
+ * Each SensorManager with a settings_section() gets a section in
+ * sensors_overlay.xml. The section is a `<repeat count="sensor_<slug>_row_count">`
+ * of sensor_row, bound to row subjects a SensorRowSection fills from the
+ * manager's row(i). Rows stay live while the overlay is shown: each section
+ * refills when its manager's revision subject moves.
  *
- * Each sensor type has its own section, hidden when no sensors of that type exist.
+ * Extras beside the rows: the filament master toggle, the input door-check
+ * toggle and the chamber assignment dropdowns (which write SettingsManager).
  *
- * @pattern Overlay (lazy init, dynamic row creation)
+ * @pattern Overlay (lazy init, declarative rows)
  * @threading Main thread only
- *
- * @see FilamentSensorManager, ProbeSensorManager, WidthSensorManager, etc.
- * @see Config for persistence
  */
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
+#include "sensor_manager.h"
 #include "static_panel_registry.h"
+#include "subject_managed_panel.h"
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
-
-// Forward declarations - avoid including all sensor headers
-namespace helix {
-struct FilamentSensorConfig;
-}
-
-namespace helix::sensors {
-struct ProbeSensorConfig;
-struct WidthSensorConfig;
-struct HumiditySensorConfig;
-struct AccelSensorConfig;
-struct TemperatureSensorConfig;
-} // namespace helix::sensors
 
 namespace helix::settings {
 
 /**
+ * @brief The row subjects of one Settings > Sensors section.
+ *
+ * Owns sensor_<slug>_row_<field>_<i> for every row it has ever shown, plus
+ * sensor_<slug>_row_count. Subjects grow on demand and are never shrunk while
+ * the section lives, so a `<repeat>` rebuild never binds a dead subject; they
+ * register with the SubjectManager passed in and deinit with it, which must
+ * therefore be destroyed before this section.
+ *
+ * Edits arrive from sensor_row's callbacks with user_data "<slug>:<i>" and go to
+ * the section of that slug: a role pick maps the option index through the
+ * manager's offered_roles(), never by enum value.
+ */
+class SensorRowSection {
+  public:
+    SensorRowSection(sensors::SensorManager& manager, SubjectManager& subjects);
+    ~SensorRowSection();
+    SensorRowSection(const SensorRowSection&) = delete;
+    SensorRowSection& operator=(const SensorRowSection&) = delete;
+
+    [[nodiscard]] const std::string& slug() const {
+        return slug_;
+    }
+    [[nodiscard]] sensors::SensorManager& manager() const {
+        return *manager_;
+    }
+
+    /// Write every listed sensor of @p manager into the row subjects, growing
+    /// them first, then set the row count.
+    void fill(const sensors::SensorManager& manager);
+
+    /// Rows the last fill() listed.
+    [[nodiscard]] size_t row_count() const {
+        return slots_.size();
+    }
+
+    /// The user picked option @p option in row @p row's role dropdown.
+    void pick_role(size_t row, int option);
+    /// The user flipped row @p row's toggle (Enabled or Invert, per the row).
+    void set_toggle(size_t row, bool on);
+
+    /// Refill on every revision of the manager, then call @p after_fill;
+    /// stop() ends it.
+    void watch(std::function<void()> after_fill);
+    void stop();
+
+    /// The live section for @p slug, or nullptr.
+    [[nodiscard]] static SensorRowSection* find(const std::string& slug);
+
+  private:
+    struct Row;
+    struct Slot {
+        std::string klipper_name;
+        sensors::RowToggle toggle = sensors::RowToggle::None;
+    };
+
+    void grow(size_t rows);
+    /// Whether a revision can have changed what the rows show: always for a
+    /// manager whose rows show readings, else only when its entries changed.
+    [[nodiscard]] bool rows_may_have_changed() const;
+
+    sensors::SensorManager* manager_;
+    SubjectManager& subjects_;
+    std::string slug_;
+    std::string count_id_;
+    lv_subject_t count_{};
+    std::vector<std::unique_ptr<Row>> rows_;
+    std::vector<Slot> slots_;
+    std::vector<sensors::SensorEntry> filled_entries_; ///< entries the last fill() read
+    ObserverGuard revision_observer_;
+    std::function<void()> after_fill_;
+};
+
+/**
  * @class SensorSettingsOverlay
- * @brief Overlay for configuring all sensor types
- *
- * This overlay provides sections for each sensor category:
- * - Switch sensors: Master toggle + per-sensor role dropdown + enable toggle
- * - Probe sensors: Display-only (role assigned via wizard)
- * - Width sensors: Role dropdown for flow compensation
- * - Humidity sensors: Role dropdown for chamber/dryer
- * - Accelerometers: Display-only status
- *
- * ## State Management:
- *
- * Configuration is managed by respective sensor manager singletons.
- * Changes are immediately persisted via mgr.save_config().
- *
- * ## Usage:
+ * @brief Overlay listing every sensor manager's sensors
  *
  * @code
  * auto& overlay = helix::settings::get_sensor_settings_overlay();
- * overlay.show(parent_screen);  // Creates overlay if needed, populates lists, shows
+ * overlay.show(parent_screen);
  * @endcode
- *
- * ## Note on Dynamic Row Creation:
- *
- * Unlike declarative XML callbacks, sensor rows are created dynamically at runtime
- * using lv_xml_create(). This requires using lv_obj_add_event_cb() for the
- * dropdown and toggle callbacks, which is an acceptable exception to the
- * declarative UI rule.
  */
 class SensorSettingsOverlay : public OverlayBase {
   public:
-    /**
-     * @brief Register event callbacks with lv_xml system
-     *
-     * Registers callbacks for:
-     * - on_switch_master_toggle_changed (switch sensor master enable)
-     * - on_chamber_heater_changed / on_chamber_sensor_changed (chamber assignment)
-     */
+    ~SensorSettingsOverlay() override;
+
+    /// Row, master-toggle, door-check and chamber assignment callbacks.
     void register_callbacks() override;
+
+    /// One SensorRowSection per manager with a settings section, plus
+    /// sensor_total_count.
+    void init_subjects() override;
 
     const char* get_name() const override {
         return "Sensors";
@@ -93,139 +135,38 @@ class SensorSettingsOverlay : public OverlayBase {
         return "sensors_overlay";
     }
 
-    /**
-     * @brief Called when overlay becomes visible
-     *
-     * Calls OverlayBase::on_activate() then populates all sensor lists.
-     */
+    /// Fills every section before the XML is built, so the first expansion
+    /// binds filled rows.
+    lv_obj_t* create(lv_obj_t* parent) override;
+
+    /// Refills every section and starts the live refresh.
     void on_activate() override;
 
-    //
-    // === Event Handlers (public for static callbacks) ===
-    //
-
-    /**
-     * @brief Handle switch sensor master enable toggle change
-     * @param enabled New master enable state
-     */
     void handle_switch_master_toggle_changed(bool enabled);
 
+    /// The section for @p slug, or nullptr (tests).
+    [[nodiscard]] SensorRowSection* section(const std::string& slug) const;
+
   protected:
-    /// Refreshes the section count badges on every open.
-    void before_show() override;
+    void on_deactivating(DeactivateReason reason) override;
 
   private:
-    //
-    // === Internal Methods - Switch Sensors ===
-    //
+    void refill_all();
+    /// sensor_total_count: every section's sensor count, summed (no-sensors placeholder).
+    void update_total();
 
-    /**
-     * @brief Populate switch sensor list from FilamentSensorManager
-     *
-     * Creates a filament_sensor_row component for each discovered sensor.
-     * Clears existing rows first to allow refresh.
-     */
-    void populate_switch_sensors();
-
-    /**
-     * @brief Update switch sensor count label
-     */
-    void update_switch_sensor_count();
-
-    /**
-     * @brief Get switch sensors excluding AMS/multi-material types
-     * @return Vector of standalone sensors only
-     */
-    [[nodiscard]] std::vector<helix::FilamentSensorConfig> get_standalone_switch_sensors() const;
-
-    //
-    // === Internal Methods - Other Sensor Types ===
-    //
-
-    /**
-     * @brief Populate probe sensor list from ProbeSensorManager
-     */
-    void populate_probe_sensors();
-
-    /**
-     * @brief Update probe sensor count label
-     */
-    void update_probe_sensor_count();
-
-    /**
-     * @brief Populate width sensor list from WidthSensorManager
-     */
-    void populate_width_sensors();
-
-    /**
-     * @brief Update width sensor count label
-     */
-    void update_width_sensor_count();
-
-    /**
-     * @brief Populate humidity sensor list from HumiditySensorManager
-     */
-    void populate_humidity_sensors();
-
-    /**
-     * @brief Update humidity sensor count label
-     */
-    void update_humidity_sensor_count();
-
-    /**
-     * @brief Populate accelerometer list from AccelSensorManager
-     */
-    void populate_accel_sensors();
-
-    /**
-     * @brief Update accelerometer count label
-     */
-    void update_accel_sensor_count();
-
-    /**
-     * @brief Populate chamber assignment dropdowns from PrinterDiscovery
-     */
+    /// Populate chamber assignment dropdowns from PrinterDiscovery
     void populate_chamber_assignment();
-
-    /**
-     * @brief Populate load cell list from LoadCellManager
-     */
-    void populate_load_cells();
-
-    /**
-     * @brief Update load cell count label
-     */
-    void update_load_cell_count();
-
-    /**
-     * @brief Populate temperature sensor list from TemperatureSensorManager
-     */
-    void populate_temperature_sensors();
-
-    /**
-     * @brief Update temperature sensor count label
-     */
-    void update_temperature_sensor_count();
-
-    /**
-     * @brief Populate all sensor lists
-     */
-    void populate_all_sensors();
-
-    /**
-     * @brief Update all sensor count labels
-     */
-    void update_all_sensor_counts();
-
-    //
-    // === State ===
-    //
-    // Note: overlay_root_ and parent_screen_ are inherited from OverlayBase
 
     /// Klipper object behind each chamber dropdown's option index i + 1, rebuilt
     /// with the options on every populate.
     std::vector<std::string> chamber_heater_names_;
     std::vector<std::string> chamber_sensor_names_;
+
+    std::vector<std::unique_ptr<SensorRowSection>> sections_;
+    lv_subject_t total_count_{};
+    /// Declared after sections_ so it deinits their subjects before they are freed.
+    SubjectManager subjects_;
 };
 
 inline SensorSettingsOverlay& get_sensor_settings_overlay() {

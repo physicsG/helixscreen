@@ -25,6 +25,7 @@
 #include "../test_fixtures.h"
 #include "../test_helpers/layout_manager_test_access.h"
 #include "../test_helpers/scoped_widget_factory.h"
+#include "../test_helpers/scoped_xml_component_stub.h"
 #include "config.h"
 #include "grid_layout.h"
 #include "helix-xml/src/xml/lv_xml.h"
@@ -154,9 +155,6 @@ void register_spy_component() {
     lv_xml_register_component_from_data(
         "test_span_spy_widget",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    lv_xml_register_component_from_data(
-        "panel_widget_firmware_restart",
-        "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
 }
 
 /// Build a two-page layout whose page 1 (a secondary page — no registry-default
@@ -217,6 +215,10 @@ class PortraitSpanFixture : public XMLTestFixture {
     ~PortraitSpanFixture() override {
         LayoutManagerTestAccess::reset(helix::LayoutManager::instance());
     }
+
+    // populate_widgets() injects the firmware_restart tile while Klipper is not
+    // READY; a quiet stand-in keeps that build path free of its dependencies.
+    helix::test::ScopedXmlComponentStub firmware_restart_stub_{"panel_widget_firmware_restart"};
 };
 
 // The core data-loss regression: a widget whose DEFAULT colspan exceeds the grid

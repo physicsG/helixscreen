@@ -232,7 +232,7 @@ void ALSASoundBackend::set_tone(float freq_hz, float amplitude, float duty_cycle
 }
 
 void ALSASoundBackend::silence() {
-    for (int v = 0; v < MAX_VOICES; ++v) {
+    for (int v = 0; v < kMaxVoices; ++v) {
         voice_slots_[v].edit([](NoteEvent& ev) { ev.velocity = 0; }, true);
     }
 }
@@ -242,7 +242,7 @@ void ALSASoundBackend::set_waveform(Waveform w) {
 }
 
 void ALSASoundBackend::set_voice(int slot, float freq_hz, float amplitude, float duty_cycle) {
-    if (slot < 0 || slot >= MAX_VOICES)
+    if (slot < 0 || slot >= kMaxVoices)
         return;
     voice_slots_[slot].edit(
         [&](NoteEvent& ev) {
@@ -254,19 +254,19 @@ void ALSASoundBackend::set_voice(int slot, float freq_hz, float amplitude, float
 }
 
 void ALSASoundBackend::set_voice_waveform(int slot, Waveform w) {
-    if (slot < 0 || slot >= MAX_VOICES)
+    if (slot < 0 || slot >= kMaxVoices)
         return;
     voice_slots_[slot].edit([w](NoteEvent& ev) { ev.wave = w; }, false);
 }
 
 void ALSASoundBackend::silence_voice(int slot) {
-    if (slot < 0 || slot >= MAX_VOICES)
+    if (slot < 0 || slot >= kMaxVoices)
         return;
     voice_slots_[slot].edit([](NoteEvent& ev) { ev.velocity = 0; }, true);
 }
 
 void ALSASoundBackend::publish_note(int slot, const NoteEvent& event) {
-    if (slot < 0 || slot >= MAX_VOICES)
+    if (slot < 0 || slot >= kMaxVoices)
         return;
     voice_slots_[slot].publish(event);
 }
@@ -429,7 +429,7 @@ void ALSASoundBackend::render_loop() {
         // Mix synth voices using VoiceSlot per-sample rendering
         float sr = static_cast<float>(sample_rate_);
         int num_samples = static_cast<int>(frames);
-        for (int v = 0; v < MAX_VOICES; ++v) {
+        for (int v = 0; v < kMaxVoices; ++v) {
             auto& slot = voice_slots_[v];
 
             slot.start_pending_note(sr);

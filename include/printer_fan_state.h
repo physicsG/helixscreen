@@ -30,6 +30,25 @@ enum class FanType {
     OUTPUT_PIN_FAN   ///< Creality-style output_pin fan (controllable via M106 P<index>)
 };
 
+/// A fan's role on the printer: what the wizard assigns, and the slot a
+/// fan display shows.
+enum class FanRole { Part, Hotend, Chamber, Exhaust, Aux };
+
+/// How much room a fan's name has.
+enum class FanLabelLength {
+    Chip, ///< a chip pill: "Part", "HE", "Aux"
+    Word, ///< a row label: "Part", "Hotend", "Aux"
+    Full, ///< the role's name: "Part Fan", "Hotend Fan", "Aux Fan"
+};
+
+/// Untranslated i18n key of a role's name at the given length: the one
+/// spelling of a fan role everywhere it is printed.
+[[nodiscard]] const char* fan_role_label(FanRole role, FanLabelLength length);
+
+/// Untranslated i18n key of a fan type's short name for a type pill. The part
+/// and heater types read as the roles they fill ("Part", "HE").
+[[nodiscard]] const char* fan_type_label(FanType type);
+
 /**
  * @brief Wizard-configured fan role assignments
  *
@@ -88,6 +107,16 @@ struct PrimaryFans {
     bool operator!=(const PrimaryFans& o) const {
         return !(*this == o);
     }
+};
+
+/// Which primary slots this printer's fans can ever fill, whichever fan holds
+/// each now. classify_primary_fans() can move a fan between slots mid-print
+/// (a commandable fan that runs takes the part slot from an idle [fan]); this
+/// answer does not move with it.
+struct PrimaryFanSlots {
+    bool part = false;
+    bool hotend = false;
+    bool aux = false;
 };
 
 /**
@@ -216,18 +245,29 @@ class PrinterFanState {
     /// Pick first fan of each primary role from the discovered list.
     /// Returns empty strings for roles with no detected fan.
     PrimaryFans classify_primary_fans() const;
+    /// The slots classify_primary_fans() can fill on this fan set.
+    PrimaryFanSlots possible_primary_fan_slots() const;
 
-  private:
-    friend class PrinterFanStateTestAccess;
-
-    /// Classify fan type from object name (considers configured part fan)
-    FanType classify_fan_type(const std::string& object_name) const;
+    /// Classify a fan object by name. @p configured_part_fan, when set, is the
+    /// object the user assigned the part cooling role.
+    static FanType classify_fan_type(const std::string& object_name,
+                                     const std::string& configured_part_fan);
 
     /// Check if fan type is user-controllable, i.e. M106-commandable and thus
     /// eligible to be the part cooling fan: PART_COOLING, GENERIC_FAN,
     /// OUTPUT_PIN_FAN. Auto-controlled fans (heater/controller/temperature) are
     /// excluded — they can never be driven as a part fan.
     static bool is_fan_controllable(FanType type);
+
+    /// Fans in @p fan_objects the user can control besides part cooling.
+    static int count_extra_controllable_fans(const std::vector<std::string>& fan_objects,
+                                             const std::string& configured_part_fan = {});
+
+  private:
+    friend class PrinterFanStateTestAccess;
+
+    /// Classify fan type from object name (considers configured part fan)
+    FanType classify_fan_type(const std::string& object_name) const;
 
     /// Check if fan type belongs in the aux slot (anything that isn't the part
     /// cooling or hotend fan): CONTROLLER_FAN, TEMPERATURE_FAN, GENERIC_FAN,

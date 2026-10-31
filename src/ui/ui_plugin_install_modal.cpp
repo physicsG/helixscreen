@@ -3,9 +3,14 @@
 
 #include "ui_plugin_install_modal.h"
 
+#include "ui_error_reporting.h"
 #include "ui_event_safety.h"
+#include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
+#include "i_moonraker_api.h"
+#include "print_lifecycle_state.h"
+#include "printer_state.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -23,8 +28,39 @@ void PluginInstallModal::set_installer(helix::HelixPluginInstaller* installer) {
     installer_ = installer;
 }
 
-void PluginInstallModal::set_on_install_complete(InstallCompleteCallback cb) {
-    on_install_complete_cb_ = std::move(cb);
+void PluginInstallModal::set_moonraker_restarter(MoonrakerRestarter restarter) {
+    moonraker_restarter_ = std::move(restarter);
+}
+
+void PluginInstallModal::set_job_gate(JobGate gate) {
+    job_gate_ = std::move(gate);
+}
+
+bool helix::ui::refuse_plugin_change_during_job(helix::PrinterState& printer_state) {
+    if (!job_holds_machine(printer_state.print_state().get_print_lifecycle())) {
+        return false;
+    }
+    NOTIFY_WARNING(lv_tr("Cannot change the HelixPrint plugin while printing"));
+    return true;
+}
+
+bool helix::ui::request_moonraker_restart_for_plugin(helix::IMoonrakerAPI* api) {
+    if (!api) {
+        spdlog::warn("[Plugin Install] No Moonraker API - cannot restart Moonraker for the plugin");
+        return false;
+    }
+    api->restart_moonraker(
+        []() { spdlog::info("[Plugin Install] Moonraker restart requested for the plugin"); },
+        [](const MoonrakerError& error) {
+            spdlog::warn("[Plugin Install] Moonraker restart for the plugin failed: {}",
+                         error.message);
+            helix::ui::queue_update("PluginInstall::restart_failed", []() {
+                ToastManager::instance().show(
+                    ToastSeverity::WARNING, lv_tr("Restart Moonraker to finish the plugin change"),
+                    5000);
+            });
+        });
+    return true;
 }
 
 // Static member initialization
@@ -230,6 +266,11 @@ void PluginInstallModal::on_install_clicked() {
         return;
     }
 
+    if (job_gate_ && job_gate_()) {
+        spdlog::info("[Plugin Install] Install refused: a job holds the machine");
+        return;
+    }
+
     spdlog::info("[Plugin Install] Starting local installation");
     show_installing_state();
 
@@ -247,12 +288,15 @@ void PluginInstallModal::on_install_clicked() {
     spdlog::info("[Plugin Install] Installation {}: {}",
                  install_result.success ? "succeeded" : "failed", install_result.message);
 
-    show_result_state(install_result.success, install_result.message);
-    check_dont_ask_preference();
-
-    if (on_install_complete_cb_) {
-        on_install_complete_cb_(install_result.success);
+    std::string message = install_result.message;
+    if (install_result.success) {
+        const bool restarting = moonraker_restarter_ && moonraker_restarter_();
+        message = restarting ? lv_tr("Plugin installed successfully. Moonraker is restarting...")
+                             : lv_tr("Restart Moonraker to finish the plugin change");
     }
+
+    show_result_state(install_result.success, message);
+    check_dont_ask_preference();
 }
 
 void PluginInstallModal::on_copy_clicked() {

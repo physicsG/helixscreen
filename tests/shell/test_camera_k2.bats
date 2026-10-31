@@ -47,9 +47,12 @@ setup() {
         "$INSTALL_DIR/config/helixscreen-ustreamer-k2.sh"
 
     # Reset source guards and source the module + the framework bits it needs.
-    unset _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _HELIX_COMPETING_UIS_SOURCED _HELIX_CAMERA_SOURCED
+    unset _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _HELIX_COMPETING_UIS_SOURCED _HELIX_CAMERA_SOURCED \
+        _HELIX_PRINT_CONF_SOURCED _HELIX_MOONRAKER_SOURCED
     . "$WORKTREE_ROOT/scripts/lib/installer/common.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/host_profile.sh"
+    . "$WORKTREE_ROOT/scripts/lib/installer/helix_print_conf.sh"  # installer_moonraker_url's
+    . "$WORKTREE_ROOT/scripts/lib/installer/moonraker.sh"         # installer_moonraker_url, restart_moonraker
     . "$WORKTREE_ROOT/scripts/lib/installer/competing_uis.sh"  # record_disabled_service
     . "$WORKTREE_ROOT/scripts/lib/installer/camera.sh"
 
@@ -484,9 +487,20 @@ teardown() {
     [ "$status" -eq 1 ]
 }
 
+# The K2's Moonraker as restart_moonraker finds it: an init script in the
+# fake init.d and a systemctl, each touching $BATS_TEST_TMPDIR/mr_restarted,
+# which nothing may run, and Moonraker's HTTP API (mock_moonraker_http),
+# logging every request to $BATS_TEST_TMPDIR/mr-http/log.
+stage_moonraker_restart() {
+    mock_command_script "systemctl" "touch '$BATS_TEST_TMPDIR/mr_restarted'"
+    printf '#!/bin/sh\ntouch "%s"\n' "$BATS_TEST_TMPDIR/mr_restarted" > "$HELIX_INITD_DIR/moonraker"
+    chmod +x "$HELIX_INITD_DIR/moonraker"
+    mock_moonraker_http "$BATS_TEST_TMPDIR/mr-http"
+}
+
 @test "_disable_k2cam_webcam: comments the [webcam Default] block and is idempotent" {
-    # Stub the Moonraker restart so we don't touch the host init system.
-    _restart_moonraker() { :; }
+    # Moonraker is asked to restart itself; no service manager is touched.
+    stage_moonraker_restart
 
     local mr_dir="$BATS_TEST_TMPDIR/usr/share/moonraker"
     mkdir -p "$mr_dir"
@@ -519,6 +533,9 @@ EOF
 
     # Marker records the affected conf path.
     grep -qF "$conf" "$(_k2cam_marker_file)"
+    grep -q "^POST $MOONRAKER_URL/server/restart\$" "$BATS_TEST_TMPDIR/mr-http/log" ||
+        fail "Moonraker was not asked to restart itself: $(cat "$BATS_TEST_TMPDIR/mr-http/log" 2>/dev/null)"
+    [ ! -f "$BATS_TEST_TMPDIR/mr_restarted" ] || fail "a service manager was run"
 
     # Idempotent: a second pass must not double-comment.
     _disable_k2cam_webcam
@@ -529,7 +546,7 @@ EOF
 }
 
 @test "uninstall: un-comments the K2-Camera-main [webcam Default] block (round-trip)" {
-    _restart_moonraker() { :; }
+    stage_moonraker_restart
 
     local mr_dir="$BATS_TEST_TMPDIR/usr/share/moonraker"
     mkdir -p "$mr_dir"
@@ -557,8 +574,12 @@ EOF
     # No prior ustreamer install state — only the k2cam marker matters here.
     rm -f "$CAMERA_MARKER" "$WEBCAM_BACKUP"
 
+    rm -f "$BATS_TEST_TMPDIR/mr_restarted" "$BATS_TEST_TMPDIR/mr-http/log"
     run uninstall_camera_k2 "k2"
     [ "$status" -eq 0 ]
+    grep -q "^POST $MOONRAKER_URL/server/restart\$" "$BATS_TEST_TMPDIR/mr-http/log" ||
+        fail "uninstall did not restart Moonraker"
+    [ ! -f "$BATS_TEST_TMPDIR/mr_restarted" ] || fail "a service manager was run"
 
     # The disable prefix is gone; content matches the original.
     refute grep -q 'helix-k2cam-disabled' "$conf"
@@ -568,7 +589,7 @@ EOF
 }
 
 @test "install_camera_k2: detects the mod and disables its [webcam Default] entry" {
-    _restart_moonraker() { :; }
+    stage_moonraker_restart
 
     # Mod signature present (source dir).
     export HELIX_K2CAM_DIR="$BATS_TEST_TMPDIR/K2-Camera-main"
@@ -649,6 +670,47 @@ EOF
     [ ! -f "$WEBCAM_BACKUP" ]
     [ ! -f "$CAMERA_MARKER" ]
     [ ! -f "$HELIX_INITD_DIR/ustreamer" ]
+}
+
+@test "install: leaves a k2-improvements Creality WebRTC camera running and says why" {
+    skip_if_no_python
+    # k2-improvements' patched Fluidd plays Creality's own WebRTC stream; taking
+    # the camera device would leave its webcam entry pointing at a dead server.
+    start_fake_moonraker '[{"name":"Front","service":"webrtc-crealityk2rtc","stream_url":"http://10.0.0.5:8000/"}]'
+    printf '#!/bin/sh\n' > "$INSTALL_DIR/bin/ustreamer"; chmod +x "$INSTALL_DIR/bin/ustreamer"
+    make_fake_webrtc webrtc >/dev/null
+
+    run install_camera_k2 "k2"
+    [ "$status" -eq 0 ]
+    contains "webrtc-crealityk2rtc" "$output"
+    contains "re-run" "$output"
+    refute grep -q 'POST /server/webcams/item' "$MR_REQUESTS"
+    refute grep -q 'DELETE /server/webcams/item' "$MR_REQUESTS"
+    [ ! -f "$DISABLED_SERVICES_FILE" ]
+    [ ! -f "$HELIX_INITD_DIR/ustreamer" ]
+    [ -x "$FAKE_INITD/webrtc" ]
+}
+
+@test "install: converges OUR camera even when a Creality WebRTC entry is also present" {
+    skip_if_no_python
+    # A box that already ran our takeover keeps it on upgrade.
+    start_fake_moonraker '[{"name":"Front","service":"webrtc-crealityk2rtc","stream_url":"http://10.0.0.5:8000/"},{"name":"HelixScreen Camera","service":"mjpegstreamer","stream_url":"/webcam/?action=stream"}]'
+    printf '#!/bin/sh\n' > "$INSTALL_DIR/bin/ustreamer"; chmod +x "$INSTALL_DIR/bin/ustreamer"
+
+    run install_camera_k2 "k2"
+    [ "$status" -eq 0 ]
+    [ -f "$HELIX_INITD_DIR/ustreamer" ]
+}
+
+@test "install: explains the stock camera takeover and what it costs" {
+    skip_if_no_python
+    start_fake_moonraker '[]'
+    printf '#!/bin/sh\n' > "$INSTALL_DIR/bin/ustreamer"; chmod +x "$INSTALL_DIR/bin/ustreamer"
+
+    run install_camera_k2 "k2"
+    [ "$status" -eq 0 ]
+    contains "Creality Print" "$output"
+    contains "uninstall" "$output"
 }
 
 @test "install: init script is overwritten when an existing one differs" {

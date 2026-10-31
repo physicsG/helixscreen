@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The dotted leader from a print status chip to its part on the picture;
+     the owner's callout layout sets its points. Hidden in the modes without
+     lines (ps_callout_mode 0 ImageOnly, 2 Docked), when line_subject is 0, or
+     while its chip (shown_subject) is off. -->
+<component>
+  <api>
+    <prop name="line_subject" type="string" default=""/>
+    <prop name="shown_subject" type="string" default=""/>
+  </api>
+  <view extends="leader_line" style_line_width="1" style_line_color="#text_muted">
+    <style name="styles.leader_dotted"/>
+    <bind_flag_if cond="ps_callout_mode eq 0 or ps_callout_mode eq 2 or ${line_subject} eq 0 or ${shown_subject} eq 0"
+                  flag="hidden"/>
+  </view>
+</component>

@@ -4,6 +4,7 @@
 
 #include "moonraker_client.h"
 
+#include <chrono>
 #include <shared_mutex>
 
 namespace helix {
@@ -49,6 +50,21 @@ class MoonrakerClientTestAccess {
         c.on_ws_close();
     }
 
+    // Run one health-timer tick, as the libhv timer does every 5s.
+    static void health_tick(MoonrakerClient& c) {
+        c.on_health_tick();
+    }
+
+    static bool klippy_state_polling(const MoonrakerClient& c) {
+        return c.klippy_state_poll_->started_at.load() != 0;
+    }
+
+    // Move the running poll's start @p ms into the past, as that much time passing would.
+    static void age_klippy_state_poll(MoonrakerClient& c, std::chrono::milliseconds ms) {
+        c.klippy_state_poll_->started_at -=
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(ms).count();
+    }
+
     // Take the shared lock a WebSocket trampoline holds for as long as its callback
     // runs. A test holding it stands in for a callback that has not returned, which
     // is what disconnect()'s bounded drain is waiting on. Acquire it from a thread
@@ -66,7 +82,7 @@ class MoonrakerClientTestAccess {
     // marshal member access to the main thread via token.defer()).
     static void fire_method_callbacks(MoonrakerClient& c, const std::string& method,
                                       const nlohmann::json& msg) {
-        std::vector<std::function<void(const nlohmann::json&)>> cbs;
+        std::vector<helix::SharedCallback<void(const nlohmann::json&)>> cbs;
         {
             std::lock_guard<std::mutex> lock(c.callbacks_mutex_);
             auto it = c.method_callbacks_.find(method);

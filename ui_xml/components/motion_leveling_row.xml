@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- QGL and Z-Tilt for the alternative Jog-tab layouts, each shown only on a
+       printer that has it; the row collapses on a printer with neither, so
+       its siblings take the room. -->
+  <view name="motion_leveling_row"
+        extends="lv_obj" width="100%" height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0"
+        scrollable="false" flex_flow="row" style_pad_gap="#space_xs">
+    <bind_flag_if cond="printer_has_qgl eq 0 and printer_has_z_tilt eq 0" flag="hidden"/>
+    <ui_button name="leveling_qgl"
+               width="0" height="100%" flex_grow="1" style_min_width="0" text="QGL" variant="secondary" hidden="true"
+               moves_machine="true">
+      <bind_flag_if_eq subject="printer_has_qgl" flag="hidden" ref_value="0"/>
+      <bind_state_if_eq subject="controls_operation_in_progress" state="disabled" ref_value="1"/>
+      <event_cb trigger="clicked" callback="on_motion_qgl"/>
+    </ui_button>
+    <ui_button name="leveling_z_tilt"
+               width="0" height="100%" flex_grow="1" style_min_width="0" text="Z-Tilt" variant="secondary" hidden="true"
+               moves_machine="true">
+      <bind_flag_if_eq subject="printer_has_z_tilt" flag="hidden" ref_value="0"/>
+      <bind_state_if_eq subject="controls_operation_in_progress" state="disabled" ref_value="1"/>
+      <event_cb trigger="clicked" callback="on_motion_z_tilt"/>
+    </ui_button>
+  </view>
+</component>

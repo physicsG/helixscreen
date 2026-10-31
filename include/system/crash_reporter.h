@@ -78,6 +78,9 @@ class CrashReporter {
         std::string signal_name;
         std::string app_version;
         std::string timestamp;
+        /// "watchdog" when the supervisor wrote the record because the app could not;
+        /// empty for the app's own handler.
+        std::string recorded_by;
         int uptime_sec = 0;
         std::vector<std::string> backtrace;
 
@@ -184,9 +187,11 @@ class CrashReporter {
         std::string display_info;
         int ram_total_mb = 0;
         int cpu_cores = 0;
-        // Which firmware population this is: one platform key ("mips") serves
-        // the K1 series and both AD5X firmwares, which only mod_flavor splits.
+        // Which FlashForge mod tree this is ("none", "ZMOD" or "Forge-X"). One
+        // platform key ("mips") serves several boards; `board` names the board,
+        // this names the mod's filesystem layout.
         std::string mod_flavor;
+        std::string board; ///< helix::board::current_info().key
         // Resolved layout: where the config this process read and the cache it
         // would have used actually live, and which cascade rung won the cache.
         std::string config_dir;
@@ -270,7 +275,7 @@ class CrashReporter {
     std::string get_log_tail(int num_lines = 500);
 
     /// Worker endpoint for auto-send
-    static constexpr const char* CRASH_WORKER_URL = "https://crash.helixscreen.org/v1/report";
+    static constexpr const char* kCrashWorkerUrl = "https://crash.helixscreen.org/v1/report";
 
     /// GitHub repo for issue URL generation
     static constexpr const char* GITHUB_REPO = "prestonbrown/helixscreen";

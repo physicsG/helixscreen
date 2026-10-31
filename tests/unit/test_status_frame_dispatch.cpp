@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/discovery_of_objects.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "config.h"
@@ -48,7 +49,7 @@ TEST_CASE_METHOD(DispatchFixture, "dispatch_status_frame reaches every status co
 
     auto& sensors = helix::sensors::TemperatureSensorManager::instance();
     sensors.init_subjects();
-    sensors.discover({"temperature_sensor cabinet"});
+    sensors.discover(helix::test::discovery_of({"temperature_sensor cabinet"}));
 
     const nlohmann::json status = {
         {"heater_bed", {{"temperature", 61.5}}},

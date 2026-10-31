@@ -11,6 +11,7 @@
 #include "locale_formats.h"
 #include "moonraker_api_internal.h"
 #include "print_history_parse.h"
+#include "print_photos.h"
 #include "try_reserve.h"
 
 #include <spdlog/spdlog.h>
@@ -82,6 +83,7 @@ PrintHistoryJob helix::parse_history_job(const nlohmann::json& job_json) {
         job.filament_type = moonraker_internal::json_string_list_or(meta, "filament_type");
         job.layer_count = moonraker_internal::json_count_or_zero(meta, "layer_count");
         job.layer_height = helix::json_util::safe_double(meta, "layer_height");
+        job.object_height = helix::json_util::safe_double(meta, "object_height");
         job.nozzle_temp = helix::json_util::safe_double(meta, "first_layer_extr_temp");
         job.bed_temp = helix::json_util::safe_double(meta, "first_layer_bed_temp");
 
@@ -109,6 +111,10 @@ PrintHistoryJob helix::parse_history_job(const nlohmann::json& job_json) {
         // re-slice under the same filename outdated the cached render. Absent
         // means 0, which every consumer reads as "skip freshness validation".
         job.modified = helix::json_util::safe_double(meta, "modified");
+    }
+
+    if (const nlohmann::json* aux = helix::json_util::find_member(job_json, "auxiliary_data")) {
+        job.photos = helix::parse_photo_aux(*aux);
     }
 
     // Pre-format display strings

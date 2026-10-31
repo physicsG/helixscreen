@@ -165,13 +165,22 @@ void safety_limits_step(DiscoveryContext& ctx) {
 
 // Detect helix_print plugin during discovery (not UI-initiated) so plugin status is known
 // early for UI gating.
+// The plugin's self-report, applied to PrinterState. An empty info is an absent plugin.
+void apply_helix_plugin_info(const helix::HelixPluginInfo& info) {
+    get_printer_state().set_helix_plugin_link_dir(info.symlink_dir);
+    get_printer_state().set_helix_plugin_version(info.version);
+    get_printer_state().set_helix_plugin_features(info.features);
+    // A plugin set to enabled: False serves nothing: it reads as not installed.
+    get_printer_state().set_helix_plugin_disabled(info.present && !info.available);
+    get_printer_state().set_helix_plugin_installed(info.available);
+}
+
 void helix_plugin_check_step(DiscoveryContext& ctx) {
     ctx.api.job().check_helix_plugin(
-        [](bool available) { get_printer_state().set_helix_plugin_installed(available); },
-        [](const MoonrakerError&) {
-            // Silently treat errors as "plugin not installed"
-            get_printer_state().set_helix_plugin_installed(false);
-        });
+        apply_helix_plugin_info,
+        // IJobAPI::check_helix_plugin answers an absent plugin through on_result; an error
+        // here reads the same way.
+        [](const MoonrakerError&) { apply_helix_plugin_info(helix::HelixPluginInfo{}); });
 }
 
 // Fetch job queue now that WebSocket is actually connected.

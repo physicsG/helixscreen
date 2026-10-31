@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Screen Sharing Settings Overlay -->
+<!-- Per printer: share this screen with a browser, list it among the printer's webcams, let the browser control it, and the pairing that guards control -->
+<component>
+  <view name="settings_screen_sharing_overlay" extends="overlay_panel" title="Screen Sharing" bg_color="#screen_bg">
+    <!-- Content Area - no padding, rows handle their own -->
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" style_pad_top="0" style_pad_left="0" style_pad_right="0"
+            style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
+      <setting_group name="group_screen_sharing">
+        <setting_toggle_row name="row_remote_screen"
+                            label="Share Screen" icon="eye" description="Show this screen in a web browser"
+                            subject="settings_remote_screen_enabled" callback="on_remote_screen_changed"/>
+        <setting_toggle_row name="row_remote_webcam"
+                            label="Add to Mainsail/Fluidd Webcams" icon="webcam"
+                            description="List the shared screen with this printer's webcams"
+                            subject="settings_remote_screen_webcam" callback="on_remote_webcam_changed"
+                            disabled="settings_remote_screen_enabled" disabled_ref_value="0"/>
+        <setting_toggle_row name="row_remote_control"
+                            label="Allow Remote Control" icon="remote_desktop"
+                            description="Let a browser tap and drag on this screen"
+                            subject="settings_remote_screen_control" callback="on_remote_control_changed"
+                            disabled="settings_remote_screen_enabled" disabled_ref_value="0"/>
+        <!-- Pairing: only when the server faces the LAN with nothing in front of it -->
+        <lv_obj name="container_remote_pairing" width="100%" style_pad_all="0" scrollable="false" flex_flow="column">
+          <bind_flag_if cond="remote_screen_lan_mode eq 0 or settings_remote_screen_control eq 0" flag="hidden"/>
+          <setting_info_row name="row_remote_pair_code"
+                            label="Pairing Code" icon="link" bind_value="remote_screen_pair_code"/>
+          <setting_action_row name="row_remote_forget"
+                              label="Forget Paired Browsers" icon="close_circle"
+                              description="Every browser needs a new code to control this screen"
+                              callback="on_remote_forget_clicked"/>
+        </lv_obj>
+      </setting_group>
+    </lv_obj>
+  </view>
+</component>

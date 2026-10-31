@@ -225,6 +225,30 @@ inline std::string_view trim(std::string_view s) {
     return s.substr(first, s.find_last_not_of(ws) - first + 1);
 }
 
+/// The longest prefix of `s` that fits in @p max_bytes without ending inside a
+/// multi-byte UTF-8 codepoint. The view points into `s`.
+inline std::string_view utf8_prefix(std::string_view s, size_t max_bytes) {
+    if (s.size() <= max_bytes) {
+        return s;
+    }
+    size_t end = max_bytes;
+    while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    return s.substr(0, end);
+}
+
+/// The first UTF-8 codepoint of `s`, its length read from the lead byte; ""
+/// when `s` is empty. The view points into `s`.
+inline std::string_view utf8_first_codepoint(std::string_view s) {
+    if (s.empty()) {
+        return {};
+    }
+    const auto lead = static_cast<unsigned char>(s.front());
+    const size_t length = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+    return s.substr(0, length);
+}
+
 /// ASCII-only case mapping: bytes outside A-Z / a-z pass through untouched,
 /// whatever the process locale.
 inline std::string to_lower(std::string_view s) {
@@ -235,6 +259,53 @@ inline std::string to_lower(std::string_view s) {
         }
     }
     return out;
+}
+
+namespace detail {
+inline char ascii_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+} // namespace detail
+
+// Case-insensitive matching folds A-Z/a-z only, like to_lower(): every other
+// byte, UTF-8 included, must match exactly, whatever the process locale.
+// These are the only case-insensitive comparisons app code should use.
+
+/// Whether @p a and @p b are the same text under to_lower(). Two empty
+/// strings are equal.
+inline bool equals_ignore_case(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (detail::ascii_lower(a[i]) != detail::ascii_lower(b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether @p haystack contains @p needle under to_lower().
+///
+/// An empty needle matches NOTHING, not everything as std::string::find's
+/// "found at 0" would have it: a caller searching for an unset or blank term
+/// must not see every string match. A caller that wants "empty filter shows
+/// all" says so before calling.
+inline bool contains_ignore_case(std::string_view haystack, std::string_view needle) {
+    if (needle.empty() || needle.size() > haystack.size()) {
+        return false;
+    }
+    for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+        size_t j = 0;
+        while (j < needle.size() &&
+               detail::ascii_lower(haystack[i + j]) == detail::ascii_lower(needle[j])) {
+            ++j;
+        }
+        if (j == needle.size()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 inline std::string to_upper(std::string_view s) {
@@ -274,6 +345,13 @@ template <typename T = long long> std::optional<T> parse_int(std::string_view s,
 /// A decimal floating-point number ("1.5", "-2e3", "inf", "nan"). nullopt on
 /// empty input, trailing characters or out-of-range magnitude.
 std::optional<double> parse_double(std::string_view s);
+
+namespace detail {
+/// parse_double's contract read through strtod. It is parse_double wherever the
+/// standard library has no floating-point from_chars, and on the ESP32, where
+/// libstdc++'s from_chars links about 20KB of tables the image has no room for.
+std::optional<double> parse_double_strtod(std::string_view s);
+} // namespace detail
 
 // ---------------------------------------------------------------------------
 // Numbers by std::sto* rules: leading whitespace skipped, the number read up to

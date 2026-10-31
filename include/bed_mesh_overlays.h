@@ -34,9 +34,25 @@ struct BedExtent {
     double coord_scale;                            ///< World units per mm
     double half_width, half_height;                ///< Bed half-size in world units
     WallBounds walls;                              ///< Floor/ceiling at the current z_scale
+    bool circular;                                 ///< Round bed: the inscribed circle
 };
 
 BedExtent compute_bed_extent(const bed_mesh_renderer_t* renderer);
+
+/**
+ * @brief Where the reference grids stand, in printer mm
+ *
+ * Grid lines and tick labels fall on multiples of the grid spacing inside the
+ * bed. A rectangular bed's floor and walls end on the outermost of those lines;
+ * a round bed's walls stand at the bed edges, tangent to its circle, so the
+ * circle never pokes out past them.
+ */
+struct ReferenceGridFrame {
+    double edge_x_min, edge_x_max, edge_y_min, edge_y_max; ///< Floor rectangle / wall positions
+    double line_x_first, line_x_last, line_y_first, line_y_last; ///< First and last grid multiple
+};
+
+ReferenceGridFrame reference_grid_frame(const BedExtent& ext);
 
 /**
  * @brief Cell layout of the 2D heatmap within the canvas (canvas-local pixels)

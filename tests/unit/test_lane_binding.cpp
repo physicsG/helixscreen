@@ -444,7 +444,7 @@ TEST_CASE_METHOD(HelixTestFixture, "dropping a source leaves every other source 
 TEST_CASE_METHOD(HelixTestFixture, "a drop that names no lane writes no lane", "[lane][binding]") {
     // The funnels refuse an id the scheme does not assign; a drop must not
     // create the entry they refused to write.
-    drop_lane_source(helix::ams::INVALID_LANE_ID, ObservationSource::Spoolman);
+    drop_lane_source(helix::ams::kInvalidLaneId, ObservationSource::Spoolman);
     drop_lane_source(helix::ams::lane_id_for(0, 9), ObservationSource::Spoolman);
 
     CHECK(helix::ams::known_lanes().empty());

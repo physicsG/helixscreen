@@ -13,7 +13,6 @@
 #include <lvgl.h>
 #include <optional>
 #include <string>
-#include <vector>
 
 // Forward declaration
 namespace helix {
@@ -31,10 +30,10 @@ namespace helix::ui {
  * edit, or assign a Spoolman spool. Automatically positions itself
  * relative to the target slot widget.
  *
- * Extends the generic ContextMenu with AMS-specific features:
- * - Slot loaded/can-load subjects for button states
- * - Tool mapping dropdown
- * - Endless spool backup dropdown
+ * Extends the generic ContextMenu with AMS-specific features: slot
+ * loaded/can-load subjects for button states. The menu is actions only; a
+ * lane's Assigned Tool and Endless Spool backup are edited in the spool editor
+ * (AmsEditOverlay, through helix::ui::lane_settings).
  *
  * ## Usage:
  * @code
@@ -54,23 +53,7 @@ class AmsContextMenu : public ContextMenu {
     HELIX_CONTEXT_MENU_KIND(AmsContextMenu)
 
   public:
-    /// Answers "may slot `candidate` stand in for slot `slot`?"
-    ///
-    /// Always AmsBackend::endless_spool_backup_eligibility() in production. Taken
-    /// as a parameter by the two pure functions below purely so they are testable
-    /// without a backend; the production call sites bind it to the virtual and to
-    /// nothing else.
-    using BackupEligibleFn =
-        std::function<helix::printer::BackupEligibility(int slot, int candidate)>;
-
-    /// The spool number a slot's badge shows, which is not slot+1 once a unit
-    /// re-uses another's identity: on multiACE an ACE-fed head and the ACE bay
-    /// behind it share one number. Injected for the same reason as
-    /// BackupEligibleFn — always AmsBackend::spool_display_number() in
-    /// production, a parameter only so the builder stays testable.
-    using SlotDisplayNumberFn = std::function<int(int slot)>;
-
-    /// Init and publish the XML subjects this menu's layout binds. Idempotent,
+    /// Init and publish the two XML subjects this menu's layout binds. Idempotent,
     /// and called from the constructor, so production never needs it. Public for
     /// tests that build ams_context_menu.xml without a menu instance: the names
     /// must resolve before lv_xml_create(), or the state bindings are silently
@@ -86,7 +69,6 @@ class AmsContextMenu : public ContextMenu {
         UNLOAD,           ///< Unload filament from toolhead
         EJECT,            ///< Eject filament from lane (release spool)
         RECOVER_POSITION, ///< Retract filament stranded past the hub back into the lane
-        SELECT_GATE,      ///< Select this gate as the active gate (Happy Hare)
         CHECK_GATE,       ///< Check filament state of this gate (Happy Hare)
         PRELOAD,          ///< Park this lane's filament ready for a later load
         EDIT,             ///< Edit slot properties
@@ -95,7 +77,8 @@ class AmsContextMenu : public ContextMenu {
         SCAN_QR,          ///< Scan QR code to assign spool
         PURGE,            ///< Purge the current filament through the nozzle
         TOGGLE_BYPASS,    ///< Engage or disengage bypass (external spool only)
-        OPEN_SOURCE_UNIT  ///< Jump to the unit that owns this slot's spool identity
+        MOUNT,            ///< Mount the tool this slot feeds
+        PARK              ///< Put the mounted tool back in its dock
     };
 
     using ActionCallback = std::function<void(MenuAction action, int slot_index)>;
@@ -107,12 +90,9 @@ class AmsContextMenu : public ContextMenu {
     AmsContextMenu(const AmsContextMenu&) = delete;
     AmsContextMenu& operator=(const AmsContextMenu&) = delete;
 
-    // Non-movable. Every owner (AmsPanel, AmsOverviewPanel, the external-spool
-    // menu) holds this in a unique_ptr and nothing moves it; the move bodies
-    // existed only to hand per-instance subjects from one object to another,
-    // and the subjects are the class's now.
-    AmsContextMenu(AmsContextMenu&&) = delete;
-    AmsContextMenu& operator=(AmsContextMenu&&) = delete;
+    // Movable
+    AmsContextMenu(AmsContextMenu&& other) noexcept;
+    AmsContextMenu& operator=(AmsContextMenu&& other) noexcept;
 
     /**
      * @brief Show context menu near a slot widget
@@ -120,7 +100,7 @@ class AmsContextMenu : public ContextMenu {
      * @param slot_index Slot this menu is for (0-based)
      * @param near_widget Widget to position menu near (typically slot widget)
      * @param is_loaded True if the slot is loaded/active (enables Unload, suppresses Load)
-     * @param backend Optional backend pointer for tool mapping/endless spool features
+     * @param backend Optional backend the actions are gated on
      * @return true if menu was shown successfully
      */
     bool show_near_widget(lv_obj_t* parent, int slot_index, lv_obj_t* near_widget,
@@ -130,8 +110,8 @@ class AmsContextMenu : public ContextMenu {
      * @brief Show context menu for external spool (bypass/direct feed)
      *
      * Shows the bypass spool's own actions: the bypass toggle, Load, Unload and
-     * Purge against EXTERNAL_SPOOL_SLOT, plus the spool bookkeeping. The lane
-     * dropdowns and the cold lane ops do not apply and stay hidden.
+     * Purge against kExternalSpoolSlot, plus the spool bookkeeping. The cold
+     * lane ops do not apply and stay hidden.
      *
      * @param parent Parent screen for the menu
      * @param anchor_widget Widget to position menu near (for click point)
@@ -155,6 +135,15 @@ class AmsContextMenu : public ContextMenu {
      */
     void set_action_callback(ActionCallback callback);
 
+    // Pure: whether "Clear Spool" is offered for this slot, by the lane menus and
+    // by the slot editor.
+    //
+    // Deliberately independent of whether filament is physically present: a
+    // loaded spool's stale assignment is the one that does damage, since its
+    // metadata is printed with and an edit aims a Spoolman write at the previous
+    // spool. An empty lane's stale metadata is cosmetic.
+    static bool should_show_clear_spool(const SlotInfo& slot);
+
   protected:
     const char* xml_component_name() const override {
         return "ams_context_menu";
@@ -175,30 +164,34 @@ class AmsContextMenu : public ContextMenu {
 
     // === Subjects for button enable/disable states ===
     //
-    // ONE set for the class, not one per instance. The XML binds these by fixed
-    // name, and three owners each construct their own menu (AmsPanel, the
-    // overview, the external-spool menu): per-instance subjects registered
-    // under the same names would leave the last registrant owning them, every
-    // other instance writing to subjects no card is bound to, and the registry
-    // pointing at reclaimed storage once an owner is destroyed. One menu is on
-    // screen at a time and the values are set in on_created() immediately
-    // before it is shown, so one shared set is exactly what the XML needs.
+    // Static, like BufferStatusModal's, and for the same two reasons. The XML
+    // registry is keyed by name for the whole process, so per-instance storage
+    // cannot work here: three owners construct an AmsContextMenu (AmsPanel,
+    // AmsOverviewPanel, ExternalSpoolMenu) and all three publish the same two
+    // names, so the last registration wins and the first owner to be destroyed
+    // withdraws — or worse, silently outlives — a name the others still serve.
+    // Before this was static, a destroyed menu left "ams_slot_can_load" pointing
+    // into freed storage, and the next lv_xml_create() binding it wrote an
+    // observer through a reused allocation (nightly ASan, 2026-08-16).
     //
-    // Torn down through StaticSubjectRegistry at shutdown, never in the
-    // destructor, for the same reason.
+    // Sharing the values across the three owners is correct rather than merely
+    // tolerable: only one context menu is on screen at a time, and both values
+    // are set in on_created() immediately before the menu is shown.
     static lv_subject_t slot_is_loaded_subject_; ///< 1 = loaded (Unload enabled), 0 = not loaded
     static lv_subject_t slot_can_load_subject_;  ///< 1 = has filament (Load enabled), 0 = empty
     /// 1 = Purge enabled. External-spool menu only; the lane menu has no Purge
     /// entry, so nothing binds this there.
     static lv_subject_t slot_can_purge_subject_;
-    /// 1 = this backend's load/unload mount and unmount a tool, so the menu
-    /// shows the tool wording instead of the filament wording.
-    static lv_subject_t slot_mounts_tool_subject_;
     /// One-line reason the unload is unavailable, and whether to show it.
     /// Text and visibility are separate because bind_flag needs an int.
     static lv_subject_t slot_unload_hint_subject_;
     static lv_subject_t slot_unload_hint_visible_subject_;
     static char slot_unload_hint_buf_[128];
+    /// One-line reason Eject is unavailable (AmsBackend::eject_unavailable_reason), and
+    /// whether to show it.
+    static lv_subject_t slot_eject_hint_subject_;
+    static lv_subject_t slot_eject_hint_visible_subject_;
+    static char slot_eject_hint_buf_[128];
     /// 1 = Clear Spool enabled, 0 = the lane feeds the active print, so the
     /// clear must wait (clear_spool_blocked_by_print()). The reason rides the
     /// hint pair below, same shape as the unload hint.
@@ -210,25 +203,18 @@ class AmsContextMenu : public ContextMenu {
     /// disabled (busy, filament loaded, or a print blocks filament ops),
     /// 2 = enabled.
     static lv_subject_t slot_preload_subject_;
-    /// 1 = another unit owns this slot's filament identity (multiACE: an
-    /// ACE-fed U1 head). Bound in XML so the edit actions hide and the
-    /// "open the owner" action appears, without adding imperative visibility.
-    static lv_subject_t slot_source_external_subject_;
+    // Why this head's Load is unavailable, from decide_slot_actions().
+    static lv_subject_t slot_load_hint_subject_;
+    static lv_subject_t slot_load_hint_visible_subject_;
+    static char slot_load_hint_buf_[192];
+    // Mount and Park for a head whose filament is all by hand: 0 hidden,
+    // 1 disabled, 2 enabled.
+    static lv_subject_t slot_mount_subject_;
+    static lv_subject_t slot_park_subject_;
     static bool subjects_initialized_;
-    static void deinit_subjects();
-    /// Unit that owns this slot's identity, or -1. Held so OPEN_SOURCE_UNIT can
-    /// name it without re-querying a backend that may have changed.
-    int source_owner_unit_ = -1;
 
-    // === Backend reference for dropdown operations ===
+    // === Backend the menu's actions are gated on ===
     AmsBackend* backend_ = nullptr;
-    int total_slots_ = 0;
-    /// Slot indices that are bays some unit reported, ascending.
-    std::vector<int> bays_;
-
-    // === Dropdown widget pointers ===
-    lv_obj_t* tool_dropdown_ = nullptr;
-    lv_obj_t* backup_dropdown_ = nullptr;
 
     // === Pending state for on_created ===
     // True when the slot is loaded/active per backend->can_unload_from_toolhead().
@@ -253,98 +239,26 @@ class AmsContextMenu : public ContextMenu {
     // === Event Handlers ===
     void handle_load();
     void handle_unload();
-    void handle_gate_select();
     void handle_gate_check();
     void handle_preload();
+    void handle_mount();
+    void handle_park();
     void handle_edit();
     void handle_clear_spool();
     void handle_purge();
     void handle_bypass_toggle();
     void handle_spoolman();
-    /// "Open in <unit>" — the slot's spool is described by another unit.
-    void handle_open_source();
     void handle_scan_qr();
-    void handle_tool_changed();
-    void handle_backup_changed();
 
-    // === Dropdown Configuration ===
-    void configure_dropdowns();
-    void populate_tool_dropdown();
-    void populate_backup_dropdown();
-    std::string build_tool_options() const;
-    std::string build_backup_options() const;
-    /// backend_->endless_spool_backup_eligibility() as a callable, or an
-    /// always-eligible stub when there is no backend (matching the old code,
-    /// which skipped every compatibility check in that case).
-    BackupEligibleFn backend_eligible_fn() const;
-    /// backend_->spool_display_number() as a callable, or the plain 1-based
-    /// position with no backend.
-    SlotDisplayNumberFn backend_display_number_fn() const;
     /// The word this menu spells a position with. The backend the menu was
     /// shown for owns the answer; with none, the active printer's does.
     LaneNoun menu_lane_noun() const;
-    int get_current_tool_for_slot() const;
-    int get_current_backup_for_slot() const;
+    /// Plugin items for the slot, in their own column beside Filament and Spool. A
+    /// lane menu only: the external spool takes no plugin items.
+    void append_slot_plugin_rows(lv_obj_t* menu_obj, int slot_index);
 
     // === Static Callback Registration ===
     static void register_callbacks();
-    // Pure: whether the context menu should offer "Clear Spool" for this slot.
-    //
-    // Deliberately independent of whether filament is physically present. The
-    // affordance was previously gated on an EMPTY slot, so it disappeared as soon
-    // as a spool went in — exactly when a stale assignment does damage, since that
-    // is when the wrong metadata is printed with and when an edit aims a Spoolman
-    // write at the previous spool. An empty lane's stale metadata is cosmetic.
-    static bool should_show_clear_spool(const SlotInfo& slot);
-
-    // Pure: should this slot's endless-spool backup row be shown at all?
-    //
-    // Availability alone is not enough. A read-only backend still earns the row
-    // (greyed out) so the user can SEE the backup the firmware is using - but
-    // only on a slot that actually has one. A read-only row on a slot with no
-    // edge could only ever read "None", which is indistinguishable from "no
-    // backup configured": stock CFS has no per-slot mapping at all, and the CFS
-    // fork publishes one edge, for the loaded slot only.
-    //
-    // @param caps The backend's capabilities.
-    // @param cfg  The backend's get_endless_spool_config().
-    // @param slot The slot this menu is for.
-    static bool decide_show_backup_row(const helix::printer::EndlessSpoolCapabilities& caps,
-                                       const helix::printer::EndlessSpoolConfig& cfg, int slot);
-
-    // Pure: the backup dropdown's option list, "(incompatible)"-tagged.
-    //
-    // The eligibility rule is the BACKEND's, reached through
-    // AmsBackend::endless_spool_backup_eligibility(). This used to call
-    // filament::are_materials_compatible() directly, which meant AD5X IFS's
-    // stricter firmware rule (exact material AND exact colour AND port present)
-    // could never reach the label, and no backend had any say. The base virtual
-    // IS the old material-compatibility rule, so AFC / Happy Hare / CFS options
-    // are byte-identical to before.
-    //
-    // @param noun        The word this backend spells a position with.
-    // @param candidates  The slots to offer, from backup_candidates_for().
-    // @param item_index  The slot the menu is open on.
-    // @param eligible    The backend's rule.
-    // @return Newline-separated dropdown options, starting with "None".
-    // @param display_number  The 1-based number each candidate's badge shows;
-    //                        empty numbers candidates by position.
-    static std::string build_backup_options_for(LaneNoun noun, const std::vector<int>& candidates,
-                                                int item_index, const BackupEligibleFn& eligible,
-                                                const SlotDisplayNumberFn& display_number = {});
-
-    // The backup dropdown's slots after "None", in order: every bay that
-    // exists except the one the menu is open on. The option labels, the
-    // preselection and the change handler all index this one list.
-    static std::vector<int> backup_candidates_for(const std::vector<int>& bays, int item_index);
-
-    // Pure: should the change-handler refuse this selection?
-    //
-    // Same rule as the option label, so a tagged option and a refused write can
-    // never disagree. "None" (backup < 0) is always allowed - clearing a backup
-    // needs no compatibility.
-    static bool decide_backup_refused(int item_index, int backup_slot,
-                                      const BackupEligibleFn& eligible);
 
     /// One slot's Load/Unload decision, in the terms the menu renders from.
     struct SlotOpDecision {
@@ -356,7 +270,6 @@ class AmsContextMenu : public ContextMenu {
         UnloadMode unload_mode = UnloadMode::Unavailable;
         bool unload_enabled = false;
         bool can_load = false;
-        bool source_external = false; ///< slot_identity_owner_unit() names another unit
     };
 
     // Pure: the whole per-slot Load/Unload decision, from the backend's accessors.
@@ -426,16 +339,9 @@ class AmsContextMenu : public ContextMenu {
     // directions — offering what will be refused strands a runout-paused user
     // (bundle JX2FVRB9), and refusing what the backend accepts hides the
     // pause-then-swap recovery Klipper just told them to perform.
-    //
-    // `source_external` is slot_identity_owner_unit().has_value(): the position
-    // is fed from ANOTHER unit rather than holding a spool of its own. Load is
-    // meaningless there and is withdrawn outright — an ACE-fed U1 head is
-    // loaded with `ACE_LOAD_HEAD HEAD=n ACE=a SLOT=s`, which names a specific
-    // bay, so the choice belongs to the bay's own menu. Unload is unaffected:
-    // `ACE_UNLOAD_HEAD HEAD=n` needs no bay and is exactly what the head can do.
     static bool decide_can_load(bool system_busy, bool toolhead_unload,
                                 std::optional<bool> slot_has_filament, bool print_blocks_op,
-                                bool source_external = false);
+                                bool load_feeds_filament = false);
 
     // Pure: whether the Unload button is offered for the open slot.
     //
@@ -466,18 +372,16 @@ class AmsContextMenu : public ContextMenu {
     static AmsContextMenu* get_active_instance();
     static void on_load_cb(lv_event_t* e);
     static void on_unload_cb(lv_event_t* e);
-    static void on_gate_select_cb(lv_event_t* e);
     static void on_gate_check_cb(lv_event_t* e);
     static void on_preload_cb(lv_event_t* e);
+    static void on_mount_cb(lv_event_t* e);
+    static void on_park_cb(lv_event_t* e);
     static void on_edit_cb(lv_event_t* e);
     static void on_clear_spool_cb(lv_event_t* e);
     static void on_purge_cb(lv_event_t* e);
     static void on_bypass_toggle_cb(lv_event_t* e);
     static void on_spoolman_cb(lv_event_t* e);
-    static void on_open_source_cb(lv_event_t* e);
     static void on_scan_qr_cb(lv_event_t* e);
-    static void on_tool_changed_cb(lv_event_t* e);
-    static void on_backup_changed_cb(lv_event_t* e);
 };
 
 class AmsOperationSidebar;
@@ -491,14 +395,10 @@ struct SlotMenuHost {
     const char* log_tag = "[AMS]";
     std::function<lv_obj_t*()> path_canvas;
     std::function<AmsOperationSidebar*()> sidebar;
-    /// Show the unit that owns a slot's spool identity (OPEN_SOURCE_UNIT). Takes
-    /// the owning unit's index. Unset = the action does nothing.
-    std::function<void(int owner_unit)> open_source_unit;
 };
 
 /// Wire @p menu's action callback to the shared slot actions (LOAD, UNLOAD, EDIT,
-/// SPOOLMAN, SCAN_QR, OPEN_SOURCE_UNIT plus the backend-only ones) and show it at
-/// @p near_widget.
+/// SPOOLMAN, SCAN_QR plus the backend-only ones) and show it at @p near_widget.
 /// AmsPanel and AmsOverviewPanel both open slot menus through this.
 void open_slot_context_menu(AmsContextMenu& menu, const SlotMenuHost& host, int slot_index,
                             lv_obj_t* near_widget, lv_point_t click_pt);

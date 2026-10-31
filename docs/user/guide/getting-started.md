@@ -148,7 +148,8 @@ Later WiFi changes happen in **Settings > Connection > Network Settings** (see [
 Enter your Moonraker connection details:
 
 - **Hostname or IP**: Your printer's address (e.g., `voron.local` or `192.168.1.100`)
-- **Port**: Defaults to `7125` (auto-filled when you tap **Test Connection** if left empty)
+- **Discovered Printers**: while this step is open, HelixScreen looks for Moonraker on your local network (every address of your /24, on ports `7125` and `80`, plus any printer that advertises itself) and lists what it finds. Picking one fills in the host and port. A printer on another network segment will not appear; type its address instead.
+- **Port**: Defaults to `7125` (auto-filled when you tap **Test Connection** if left empty). If nothing answers on the default port, the test also tries port `80`, where Moonraker answers behind a web server, and switches the field to `80` when that works. A port you type yourself is the only one tried.
 - **API Key**: Only needed if Moonraker requires authentication
 
 If Moonraker is running locally — or your screen is attached directly to the printer — HelixScreen connects automatically, and you usually won't need to change anything here. Otherwise, enter the host and tap **Test Connection** to verify before continuing. If the port field is empty, it auto-fills with the default port `7125`.
@@ -171,7 +172,7 @@ The keyboard appears automatically for text input:
 
 ### Long-press characters
 
-Every letter key has a second character on it, shown as a small grey glyph in the key's top-right corner. **Hold the key** to type it — you don't need to switch to the symbol layers.
+Every letter key has a second character on it, shown as a small gray glyph in the key's top-right corner. **Hold the key** to type it — you don't need to switch to the symbol layers.
 
 | Hold | Get | Hold | Get | Hold | Get |
 |------|-----|------|-----|------|-----|
@@ -193,7 +194,7 @@ The two punctuation keys beside the spacebar carry **three** characters each:
 | `,` | `=` | `<` and `>` |
 | `.` | `/` | `[` and `]` |
 
-If you write Klipper macros, the ones worth memorising are **hold `f` for `_`**, **hold `h` for `-`**, **hold `j` for `+`**, and **hold `,` for `=`**. Those four cover most of what macro names and parameters need, and each is much faster than switching to `?123` and then `#+=`.
+If you write Klipper macros, the ones worth memorizing are **hold `f` for `_`**, **hold `h` for `-`**, **hold `j` for `+`**, and **hold `,` for `=`**. Those four cover most of what macro names and parameters need, and each is much faster than switching to `?123` and then `#+=`.
 
 While you're holding a key, its alternate characters pop up above it. You can **slide your finger onto one** to pick it, or just lift your finger where it is to get the first one. Slide well away from the key before lifting to cancel without typing anything.
 
@@ -222,9 +223,9 @@ To find your device path, run `cat /proc/bus/input/devices` and look for your de
 
 ---
 
-## Simulator Shortcuts
+## Desktop Shortcuts
 
-When using the SDL2 desktop simulator:
+When HelixScreen runs in a window on a desktop PC (see [Run HelixScreen in a Window on a Linux Desktop](install-linux-desktop.md)), these keys work while no text field is selected:
 
 | Key | Action |
 |-----|--------|

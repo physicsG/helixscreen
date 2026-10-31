@@ -60,6 +60,8 @@ enum class ResonanceCsvError {
  */
 struct ResonanceCsvData {
     BeltCurve curve; ///< (freq, psd_xyz), empty unless error == NONE
+    /// (freq, psd_x + psd_y) on curve's bins; empty unless both columns exist
+    BeltCurve in_plane;
     ResonanceCsvError error = ResonanceCsvError::NONE;
 };
 

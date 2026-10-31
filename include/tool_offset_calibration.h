@@ -12,9 +12,14 @@
 // wait for a SAVE_CONFIG, which is exactly what the per-tool offset save path
 // (helix::tool_offsets, ToolState's dirty tracking) already handles.
 //
-// This module is the ONLY place that knows the macro's name. The panel asks
-// these questions and never names the firmware. There is no per-tool entry point: the macro is
-// all-or-nothing, so this module offers exactly one gcode.
+// This module is the ONLY place that decides which printers calibrate their
+// tool offsets and how. resolve_procedure() walks one table of procedures, in
+// precedence order: a printer's own multi-step guided flow (a Snapmaker U1's
+// measurement, an INDX's seat-by-hand), the macro above run by the tool offset
+// panel, and a changer firmware's macro that only opens a printer-side
+// action:prompt, which the entry sends without opening the panel. Callers ask
+// that one question and never name the firmware. There is no per-tool entry
+// point: every procedure is all-or-nothing.
 //
 // Nothing is parsed off the console. Everything the screen needs is already in
 // subscribed status: which tool is on the carriage (`toolchanger`.tool_number,
@@ -33,20 +38,35 @@ class PrinterDiscovery;
 
 namespace helix::tool_offset_calibration {
 
-/// The macro's command name. klipper-toolchanger's example config defines it
-/// as [gcode_macro CALIBRATE_TOOL_OFFSETS]; its presence is the capability.
-inline constexpr const char* kMacro = "CALIBRATE_TOOL_OFFSETS";
+/// What the Tool Offsets entry does on a printer.
+enum class ProcedureKind {
+    None,          ///< No automatic calibration: the entry is hidden
+    Panel,         ///< The tool offset panel runs a blocking macro (gcode)
+    GuidedFlow,    ///< A guided device flow runs (flow_id; ui_guided_device_flow.h)
+    PrinterPrompt, ///< gcode opens the printer's own action:prompt, which confirms
+                   ///< and runs the measurement; its rpc answers before anything
+                   ///< moves, so nothing on this side can follow the run
+};
 
-/// Whether this printer can calibrate its tool offsets automatically: a tool
-/// changer that defines the macro. False on every single-toolhead printer and
-/// on a tool changer whose config never adopted the example macro.
+struct Procedure {
+    ProcedureKind kind = ProcedureKind::None;
+    /// Which row matched, for logs. Empty when none did.
+    const char* name = "";
+    /// Panel: the blocking macro, its completion the run's. PrinterPrompt: the
+    /// prompt-opening macro. Empty otherwise.
+    std::string gcode;
+    /// GuidedFlow: the flow to start. A printer's own flow may be a setup step
+    /// its offsets depend on rather than a measurement (an INDX seats a tool by
+    /// hand for its first Z home).
+    std::string flow_id;
+    /// What the entry does, untranslated (pass it through lv_tr()).
+    const char* entry_description = "";
+};
+
+/// The procedure the Tool Offsets entry runs on this printer.
+Procedure resolve_procedure(const PrinterDiscovery& hw);
+
+/// Whether the printer offers any tool offset calibration.
 bool supported(const PrinterDiscovery& hw);
-
-/// Gcode that calibrates every tool, or an empty string when the printer has
-/// no such procedure. Blocking on the printer: Moonraker's printer.gcode.script
-/// answers when the macro finishes, so the rpc's completion IS the run's.
-/// That completion is the only progress followed: which tool is under the
-/// probe, and in what order, is the macro's business.
-std::string calibrate_all_gcode(const PrinterDiscovery& hw);
 
 } // namespace helix::tool_offset_calibration

@@ -72,11 +72,11 @@ struct KeycapStyle {
 };
 
 /// Default skirt depth in px, used when the theme leaves shadow_intensity at 0.
-inline constexpr int32_t KEYCAP_DEFAULT_SKIRT_PX = 2;
+inline constexpr int32_t kKeycapDefaultSkirtPx = 2;
 
 /// Deepest skirt a theme can ask for. Past this the rim stops reading as a key
 /// edge and starts eating the gap between rows.
-inline constexpr int32_t KEYCAP_MAX_SKIRT_PX = 3;
+inline constexpr int32_t kKeycapMaxSkirtPx = 3;
 
 /**
  * @brief Pick the depth treatment for this platform.

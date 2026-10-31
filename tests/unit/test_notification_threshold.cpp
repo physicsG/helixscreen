@@ -40,14 +40,14 @@ namespace {
 constexpr int INFO = 0;
 constexpr int SUCCESS = 1;
 constexpr int WARNING = 2;
-constexpr int ERROR_SEV = 3;
+constexpr int kErrorSev = 3;
 } // namespace
 
 TEST_CASE("setting index maps to a minimum severity threshold", "[notifications][1213]") {
     using helix::ui::notifications::min_toast_severity_for_index;
     CHECK(min_toast_severity_for_index(0) == INFO);      // "All"
     CHECK(min_toast_severity_for_index(1) == WARNING);   // "Warnings & errors"
-    CHECK(min_toast_severity_for_index(2) == ERROR_SEV); // "Errors only"
+    CHECK(min_toast_severity_for_index(2) == kErrorSev); // "Errors only"
 }
 
 TEST_CASE("an out-of-range setting index never silently suppresses errors",
@@ -62,7 +62,7 @@ TEST_CASE("an out-of-range setting index never silently suppresses errors",
 
 TEST_CASE("'All' shows every severity", "[notifications][1213]") {
     using helix::ui::notifications::severity_meets_threshold;
-    for (int sev : {INFO, SUCCESS, WARNING, ERROR_SEV}) {
+    for (int sev : {INFO, SUCCESS, WARNING, kErrorSev}) {
         CHECK(severity_meets_threshold(sev, 0));
     }
 }
@@ -72,7 +72,7 @@ TEST_CASE("'Warnings & errors' suppresses INFO and SUCCESS (info-tier)", "[notif
     CHECK_FALSE(severity_meets_threshold(INFO, 1));
     CHECK_FALSE(severity_meets_threshold(SUCCESS, 1)); // info-tier, suppressed
     CHECK(severity_meets_threshold(WARNING, 1));
-    CHECK(severity_meets_threshold(ERROR_SEV, 1));
+    CHECK(severity_meets_threshold(kErrorSev, 1));
 }
 
 TEST_CASE("'Errors only' shows only ERROR", "[notifications][1213]") {
@@ -80,7 +80,7 @@ TEST_CASE("'Errors only' shows only ERROR", "[notifications][1213]") {
     CHECK_FALSE(severity_meets_threshold(INFO, 2));
     CHECK_FALSE(severity_meets_threshold(SUCCESS, 2));
     CHECK_FALSE(severity_meets_threshold(WARNING, 2));
-    CHECK(severity_meets_threshold(ERROR_SEV, 2));
+    CHECK(severity_meets_threshold(kErrorSev, 2));
 }
 
 TEST_CASE("transient success toast honours init and the minimum severity",

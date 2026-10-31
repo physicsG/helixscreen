@@ -22,6 +22,10 @@
  * a 5s undo toast, and a red object in the viewer for an EXCLUDE_OBJECT Klipper
  * will ignore.
  *
+ * Then the confirmation itself: every way it closes other than Confirm
+ * (Cancel, ESC, backdrop tap, hot-reload rebuild, programmatic hide) clears the
+ * pending guard, so guard 4 never outlives the dialog it protects.
+ *
  * The confirmation/undo/RPC half of the flow — awaiting-confirmation bookkeeping,
  * status-subscription promotion, the print-state watchdog — is covered in
  * test_print_exclude_object_manager.cpp.
@@ -165,4 +169,89 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a second long-press does not displace the p
     process_lvgl(20);
 
     CHECK(h.manager->get_pending_object() == "Part_1");
+}
+
+// ============================================================================
+// Every way the confirmation closes resolves the pending guard
+// ============================================================================
+
+namespace {
+
+lv_obj_t* open_dialog() {
+    return Modal::get_top();
+}
+
+void click(lv_obj_t* obj) {
+    REQUIRE(obj != nullptr);
+    lv_obj_send_event(obj, LV_EVENT_CLICKED, nullptr);
+}
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture, "a dismissed exclude confirm does not lock exclusion",
+                 "[exclude_object][long_press][dismiss]") {
+    LongPressHarness h(*this);
+    h.define_objects({"Part_1", "Part_2"});
+
+    h.manager->handle_object_long_press("Part_1");
+    process_lvgl(20);
+    lv_obj_t* first = open_dialog();
+    REQUIRE(first != nullptr);
+    REQUIRE(h.manager->get_pending_object() == "Part_1");
+    // The allocator may hand the next dialog the freed one's address, so its
+    // deletion is what proves the second confirmation is a new one. Static, so
+    // a dialog that outlives the case still has a flag to write to.
+    static bool first_deleted;
+    first_deleted = false;
+    lv_obj_add_event_cb(
+        first, [](lv_event_t* e) { *static_cast<bool*>(lv_event_get_user_data(e)) = true; },
+        LV_EVENT_DELETE, &first_deleted);
+
+    SECTION("backdrop tap") {
+        click(ModalStack::instance().backdrop_for(first));
+    }
+    SECTION("ESC key") {
+        uint32_t key = LV_KEY_ESC;
+        lv_obj_send_event(ModalStack::instance().backdrop_for(first), LV_EVENT_KEY, &key);
+    }
+    SECTION("programmatic hide") {
+        Modal::hide(first);
+    }
+    SECTION("hot-reload rebuild") {
+        Modal::rebuild_top();
+    }
+    SECTION("Cancel button") {
+        click(lv_obj_find_by_name(first, "btn_secondary"));
+    }
+    process_lvgl(400);
+
+    CHECK(h.manager->get_pending_object().empty());
+    CHECK_FALSE(h.manager->has_pending_timer());
+
+    // The next request reaches a fresh confirmation.
+    h.manager->handle_object_long_press("Part_2");
+    process_lvgl(20);
+    CHECK(h.manager->get_pending_object() == "Part_2");
+    lv_obj_t* second = open_dialog();
+    REQUIRE(second != nullptr);
+    CHECK(first_deleted);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "confirming the exclude still starts the undo window",
+                 "[exclude_object][long_press][dismiss]") {
+    LongPressHarness h(*this);
+    h.define_objects({"Part_1", "Part_2"});
+
+    h.manager->handle_object_long_press("Part_1");
+    process_lvgl(20);
+    lv_obj_t* dialog = open_dialog();
+    REQUIRE(dialog != nullptr);
+
+    click(lv_obj_find_by_name(dialog, "btn_primary"));
+    process_lvgl(400);
+
+    // The close that follows Confirm must not be read as a cancel.
+    CHECK(h.manager->get_pending_object() == "Part_1");
+    CHECK(h.manager->has_pending_timer());
+    CHECK_FALSE(Modal::any_visible());
 }

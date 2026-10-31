@@ -297,3 +297,31 @@ TEST_CASE("UsbScannerMonitor: construct and destroy without starting", "[usb_sca
     UsbScannerMonitor monitor;
     CHECK_FALSE(monitor.is_running());
 }
+
+TEST_CASE("UsbScannerMonitor: only a present configured scanner replaces the camera",
+          "[usb_scanner][scanner_choice]") {
+    const std::string usb_id = "1a2c:4c5e";
+    const std::string bt_mac = "AA:BB:CC:DD:EE:FF";
+
+    SECTION("nothing configured uses the camera even with a keyboard attached") {
+        // Presence flags describe only configured devices; an auto-detected
+        // keyboard can never make them true when nothing is configured.
+        CHECK_FALSE(UsbScannerMonitor::use_configured_scanner("", "", false, false));
+        CHECK_FALSE(UsbScannerMonitor::use_configured_scanner("", "", true, true));
+    }
+    SECTION("configured USB scanner present skips the camera") {
+        CHECK(UsbScannerMonitor::use_configured_scanner(usb_id, "", true, false));
+    }
+    SECTION("configured USB scanner absent uses the camera") {
+        CHECK_FALSE(UsbScannerMonitor::use_configured_scanner(usb_id, "", false, false));
+    }
+    SECTION("configured BT scanner present skips the camera") {
+        CHECK(UsbScannerMonitor::use_configured_scanner("", bt_mac, false, true));
+    }
+    SECTION("configured BT absent but configured USB present skips the camera") {
+        CHECK(UsbScannerMonitor::use_configured_scanner(usb_id, bt_mac, true, false));
+    }
+    SECTION("both configured and both absent uses the camera") {
+        CHECK_FALSE(UsbScannerMonitor::use_configured_scanner(usb_id, bt_mac, false, false));
+    }
+}

@@ -51,3 +51,45 @@ YML
     run python3 "$GATE" --src "$d/src" --trans "$d/trans"
     [ "$status" -eq 0 ]
 }
+
+# tr_plural("1 lane", "%d lanes", n) hands back either key, or any of the
+# plural key's per-category forms, for the same arguments.
+plural_fixture() {
+    # $1: ru.yml body (indented under translations:)
+    local d="${BATS_TEST_TMPDIR}/p"
+    mkdir -p "$d/src" "$d/trans"
+    printf '%s\n' 'void f(int n) { char b[64]; snprintf(b, sizeof(b), helix::ui::tr_plural("1 lane", "%d lanes", n), n); }' > "$d/src/a.cpp"
+    printf 'translations:\n%s\n' "$1" > "$d/trans/ru.yml"
+    printf '%s' "$d"
+}
+
+@test "a tr_plural format is checked through the call" {
+    local d
+    d="$(plural_fixture "  '%d lanes': '%s каналов'")"
+    run python3 "$GATE" --src "$d/src" --trans "$d/trans"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"%d lanes"* ]]
+}
+
+@test "a placeholder-swapped plural form fails" {
+    local d
+    d="$(plural_fixture "  '%d lanes':
+    one: '%d канал'
+    few: '%s канала'
+    many: '%d каналов'
+    other: '%d канала'")"
+    run python3 "$GATE" --src "$d/src" --trans "$d/trans"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"%s канала"* ]]
+}
+
+@test "matching plural forms pass" {
+    local d
+    d="$(plural_fixture "  '%d lanes':
+    one: '%d канал'
+    few: '%d канала'
+    many: '%d каналов'
+    other: '%d канала'")"
+    run python3 "$GATE" --src "$d/src" --trans "$d/trans"
+    [ "$status" -eq 0 ]
+}

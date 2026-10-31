@@ -100,10 +100,12 @@ DEFAULT_LINK_BASELINE = REPO_ROOT / "scripts/esp32_link_baseline.txt"
 LINK_CEILING_KEY = "max-edges"
 SRC_SUFFIXES = (".cpp", ".c")
 
-# The exact shape CMake's `REGEX "^[^#].*\.(cpp|c)$"` accepts AND that yields a
-# usable path: no leading whitespace (which CMake keeps, producing `<repo>/ src/…`),
-# nothing after the suffix (which makes the regex miss the line entirely).
-CMAKE_MANIFEST_LINE = re.compile(r"^[^#\s].*\.(?:cpp|c)$")
+# The lines components/helixapp/app_srcs.cmake keeps: one .cpp/.c path, optional
+# surrounding whitespace, optional trailing '# comment'. It strips the comment and the
+# whitespace, so the path is what is left.
+CMAKE_MANIFEST_LINE = re.compile(r"^[ \t]*[^# \t][^#]*\.(?:cpp|c)[ \t]*(?:#.*)?$")
+# CMake list syntax: on a kept line it splits or merges the entry.
+CMAKE_LIST_CHARS = re.compile(r"[;\[\]]")
 
 DEFAULT_FILE_REASON = "not in the v1 Core+AMS cut"
 
@@ -181,6 +183,14 @@ def firmware_defines(cmake_text: str, repo: Path | None = None) -> dict[str, str
     if repo is not None:
         defines.update(dict.fromkeys(native_only_flags(repo, cmake_text)))
     defines.update(FIRMWARE_TOOLCHAIN_DEFINES)
+    if repo is not None:
+        # Every feature gate's default, which the CMake definitions below override:
+        # lvgl_pch.h brings include/helix_features.h into every firmware source.
+        features = repo / "include" / "helix_features.h"
+        if features.is_file():
+            for gate, value in re.findall(r"^#define (HELIX_HAS_\w+) (\d+)$",
+                                          features.read_text(errors="replace"), re.M):
+                defines[gate] = value
     m = re.search(r"target_compile_definitions\(\$\{COMPONENT_LIB\} PRIVATE(.*?)\)\s*$",
                   cmake_text, re.S | re.M)
     if m:
@@ -348,20 +358,20 @@ class Findings:
                     or self.aborting_calls or self.exception_constructs)
 
 
+def manifest_path(line: str) -> str:
+    """The path a kept manifest line names, as app_srcs.cmake extracts it."""
+    return line.split("#", 1)[0].strip()
+
+
 def why_cmake_drops(line: str) -> str:
     """Human-readable reason a manifest line is not CMake-consumable."""
-    stripped = line.strip()
-    if line != line.lstrip():
-        return ("leading whitespace — CMake keeps it and builds the path "
-                "'<repo>/ " + stripped + "'")
-    if "#" in line:
-        return ("trailing '#' comment — CMake's REGEX requires the line to END in "
-                ".cpp/.c, so this line is silently DROPPED from the build")
-    if line != line.rstrip():
-        return ("trailing whitespace — CMake's REGEX requires the line to END in "
-                ".cpp/.c, so this line is silently DROPPED from the build")
-    return ("does not end in .cpp/.c — CMake's REGEX skips it, so it is silently "
-            "DROPPED from the build")
+    if CMAKE_LIST_CHARS.search(line):
+        return ("contains ';', '[' or ']', which CMake reads as list syntax and so "
+                "splits or merges the entry")
+    if re.search(r"\s", manifest_path(line)):
+        return "the path contains whitespace, so CMake builds a path that does not exist"
+    return ("does not name one .cpp/.c path — app_srcs.cmake skips it, so it is "
+            "silently DROPPED from the build")
 
 
 def load_manifest(path: Path) -> tuple[set[str], list[tuple[int, str, str]]]:
@@ -379,8 +389,10 @@ def load_manifest(path: Path) -> tuple[set[str], list[tuple[int, str, str]]]:
         line = raw.rstrip("\r")
         if not line.strip() or line.strip().startswith("#"):
             continue  # blank, or a comment line (CMake's ^[^#] rejects those)
-        if CMAKE_MANIFEST_LINE.match(line):
-            included.add(line)
+        path = manifest_path(line)
+        if (CMAKE_MANIFEST_LINE.match(line) and not CMAKE_LIST_CHARS.search(line)
+                and not re.search(r"\s", path)):
+            included.add(path)
         else:
             malformed.append((lineno, line, why_cmake_drops(line)))
     return included, malformed

@@ -6,7 +6,6 @@
 #include "ui_next_tick.h"
 #include "ui_timer_guard.h"
 #include "ui_toast_manager.h"
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 #include "ui_widget_catalog_overlay.h"
 
@@ -35,8 +34,8 @@ namespace helix {
 // child of the page dirties the page's grid layout, which lays out the whole
 // screen on the next refresh. A bar on the top layer repaints only its strip
 // and lays out only the top layer.
-static constexpr int SNAP_PREVIEW_WIDTH = 3;
-static constexpr int RESIZE_OUTLINE_WIDTH = 2;
+static constexpr int kSnapPreviewWidth = 3;
+static constexpr int kResizeOutlineWidth = 2;
 
 /// Create the four bars of an outline on the top layer, if they do not exist.
 static void ensure_outline(std::array<lv_obj_t*, 4>& bars, lv_obj_t* screen_obj) {
@@ -88,10 +87,10 @@ static void delete_outline(std::array<lv_obj_t*, 4>& bars) {
 // Resize edge detection. The grab band is derived from the grid's cell size in
 // edge_hit_band_for_cell() so the target scales with the panel. The fallback
 // applies before a grid exists, when no cell size is known.
-static constexpr int EDGE_HIT_FALLBACK = 18;
-static constexpr int EDGE_HIT_MIN = 14;
-static constexpr int EDGE_HIT_MAX = 32;
-static constexpr float EDGE_HIT_CELL_DIVISOR = 6.0f;
+static constexpr int kEdgeHitFallback = 18;
+static constexpr int kEdgeHitMin = 14;
+static constexpr int kEdgeHitMax = 32;
+static constexpr float kEdgeHitCellDivisor = 6.0f;
 
 // disable_widget_clicks_recursive() is in ui_utils.h (helix::ui namespace)
 using helix::ui::disable_widget_clicks_recursive;
@@ -176,7 +175,7 @@ void GridEditMode::start_crossing_flip(int dir) {
     }
     crossing_flip_dir_ = dir;
     crossing_flip_timer_ =
-        lv_timer_create(crossing_flip_cb, helix::CROSS_PAGE_CROSSING_DELAY_MS, this);
+        lv_timer_create(crossing_flip_cb, helix::kCrossPageCrossingDelayMs, this);
     lv_timer_set_repeat_count(crossing_flip_timer_, 1);
 }
 
@@ -188,7 +187,7 @@ void GridEditMode::restart_dwell_flip(int dir) {
     if (dir == 0) {
         return;
     }
-    dwell_flip_timer_ = lv_timer_create(dwell_flip_cb, helix::CROSS_PAGE_DWELL_MS, this);
+    dwell_flip_timer_ = lv_timer_create(dwell_flip_cb, helix::kCrossPageDwellMs, this);
     lv_timer_set_repeat_count(dwell_flip_timer_, 1);
 }
 
@@ -275,6 +274,9 @@ bool GridEditMode::enter(lv_obj_t* container, PanelWidgetConfig* config, int pag
     active_ = true;
     container_ = container;
     config_ = config;
+    if (config_) {
+        config_->set_edit_session_open(true);
+    }
     page_index_ = page_index;
     lv_subject_set_int(&get_home_edit_mode_subject(), 1);
     // Called inside a pointer gesture, that gesture is the hold entering edit
@@ -424,6 +426,7 @@ void GridEditMode::exit() {
     // placement, the entry's position sync) asked for a save once edits
     // settle; the session ending is the latest that save can wait.
     if (config_) {
+        config_->set_edit_session_open(false);
         config_->flush_pending_save();
     }
     if (rebuild) {
@@ -596,8 +599,8 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
     lv_obj_set_style_radius(selection_overlay_, radius, 0);
     lv_obj_set_style_pad_all(selection_overlay_, 0, 0);
     // Corner bracket styling: two bars per corner forming a square L-bracket
-    constexpr int BAR_LEN = 16;
-    constexpr int BAR_THICK = 3;
+    constexpr int kBarLen = 16;
+    constexpr int kBarThick = 3;
 
     int bar_count = 0;
     auto make_bar = [&](int x, int y, int w, int h) {
@@ -615,22 +618,22 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
     };
 
     // Top-left
-    make_bar(0, 0, BAR_LEN, BAR_THICK);
-    make_bar(0, 0, BAR_THICK, BAR_LEN);
+    make_bar(0, 0, kBarLen, kBarThick);
+    make_bar(0, 0, kBarThick, kBarLen);
     // Top-right
-    make_bar(widget_w - BAR_LEN, 0, BAR_LEN, BAR_THICK);
-    make_bar(widget_w - BAR_THICK, 0, BAR_THICK, BAR_LEN);
+    make_bar(widget_w - kBarLen, 0, kBarLen, kBarThick);
+    make_bar(widget_w - kBarThick, 0, kBarThick, kBarLen);
     // Bottom-left
-    make_bar(0, widget_h - BAR_THICK, BAR_LEN, BAR_THICK);
-    make_bar(0, widget_h - BAR_LEN, BAR_THICK, BAR_LEN);
+    make_bar(0, widget_h - kBarThick, kBarLen, kBarThick);
+    make_bar(0, widget_h - kBarLen, kBarThick, kBarLen);
     // Bottom-right
-    make_bar(widget_w - BAR_LEN, widget_h - BAR_THICK, BAR_LEN, BAR_THICK);
-    make_bar(widget_w - BAR_THICK, widget_h - BAR_LEN, BAR_THICK, BAR_LEN);
+    make_bar(widget_w - kBarLen, widget_h - kBarThick, kBarLen, kBarThick);
+    make_bar(widget_w - kBarThick, widget_h - kBarLen, kBarThick, kBarLen);
 
     // Add resize edge handles for scalable widgets: thinner, lower opacity than corners
     if (is_selected_widget_resizable()) {
-        constexpr int EDGE_THICK = 1;
-        constexpr int HANDLE_INSET = BAR_LEN + 4; // Start after corner brackets
+        constexpr int kEdgeThick = 1;
+        constexpr int kHandleInset = kBarLen + 4; // Start after corner brackets
 
         auto make_edge_bar = [&](int x, int y, int w, int h) {
             lv_obj_t* bar = lv_obj_create(selection_overlay_);
@@ -647,31 +650,31 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
         };
 
         // Right edge handle
-        if (widget_h > 2 * HANDLE_INSET) {
-            make_edge_bar(widget_w - EDGE_THICK, HANDLE_INSET, EDGE_THICK,
-                          widget_h - 2 * HANDLE_INSET);
+        if (widget_h > 2 * kHandleInset) {
+            make_edge_bar(widget_w - kEdgeThick, kHandleInset, kEdgeThick,
+                          widget_h - 2 * kHandleInset);
         }
 
         // Left edge handle
-        if (widget_h > 2 * HANDLE_INSET) {
-            make_edge_bar(0, HANDLE_INSET, EDGE_THICK, widget_h - 2 * HANDLE_INSET);
+        if (widget_h > 2 * kHandleInset) {
+            make_edge_bar(0, kHandleInset, kEdgeThick, widget_h - 2 * kHandleInset);
         }
 
         // Bottom edge handle
-        if (widget_w > 2 * HANDLE_INSET) {
-            make_edge_bar(HANDLE_INSET, widget_h - EDGE_THICK, widget_w - 2 * HANDLE_INSET,
-                          EDGE_THICK);
+        if (widget_w > 2 * kHandleInset) {
+            make_edge_bar(kHandleInset, widget_h - kEdgeThick, widget_w - 2 * kHandleInset,
+                          kEdgeThick);
         }
 
         // Top edge handle
-        if (widget_w > 2 * HANDLE_INSET) {
-            make_edge_bar(HANDLE_INSET, 0, widget_w - 2 * HANDLE_INSET, EDGE_THICK);
+        if (widget_w > 2 * kHandleInset) {
+            make_edge_bar(kHandleInset, 0, widget_w - 2 * kHandleInset, kEdgeThick);
         }
     }
 
     // Pulse animation on corner brackets ONLY (not edge bars) when animations enabled.
     // Corner brackets are the first children (2 bars x 4 corners).
-    static constexpr uint32_t CORNER_BAR_COUNT = 8;
+    static constexpr uint32_t kCornerBarCount = 8;
     if (DisplaySettingsManager::instance().get_animations_enabled()) {
         lv_anim_t anim;
         lv_anim_init(&anim);
@@ -683,7 +686,7 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
         lv_anim_set_exec_cb(&anim, [](void* obj, int32_t val) {
             auto* overlay = static_cast<lv_obj_t*>(obj);
             // Only pulse the corner brackets, skip edge bars
-            uint32_t count = std::min(lv_obj_get_child_count(overlay), CORNER_BAR_COUNT);
+            uint32_t count = std::min(lv_obj_get_child_count(overlay), kCornerBarCount);
             for (uint32_t i = 0; i < count; ++i) {
                 lv_obj_t* child = lv_obj_get_child(overlay, static_cast<int32_t>(i));
                 lv_obj_set_style_bg_opa(child, static_cast<lv_opa_t>(val), 0);
@@ -732,7 +735,7 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
         chrome_icon_font = &mdi_icons_32;
         break;
     }
-    const int BTN_OVERHANG = BTN_SIZE / 4; // 25% shift outside widget bounds
+    const int kBtnOverhang = BTN_SIZE / 4; // 25% shift outside widget bounds
     // The pills are text-colour fills at half opacity that float out over the
     // grid container, so the icon colour is contrasted against that composite
     // over the screen background, not against the raw fill. In the shipped
@@ -770,8 +773,8 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
         return btn;
     };
 
-    remove_btn_ = make_chrome_pill(rel_x1 + widget_w - BTN_SIZE + BTN_OVERHANG,
-                                   rel_y1 - BTN_OVERHANG, ICON_TRASH);
+    remove_btn_ = make_chrome_pill(rel_x1 + widget_w - BTN_SIZE + kBtnOverhang,
+                                   rel_y1 - kBtnOverhang, ICON_TRASH);
     lv_obj_add_event_cb(
         remove_btn_,
         [](lv_event_t* ev) {
@@ -787,7 +790,7 @@ void GridEditMode::create_selection_chrome(lv_obj_t* widget) {
         auto* pw = raw ? static_cast<PanelWidget*>(raw) : nullptr;
         if (pw && pw->has_edit_configure()) {
             configure_btn_ =
-                make_chrome_pill(rel_x1 - BTN_OVERHANG, rel_y1 - BTN_OVERHANG, ICON_SETTINGS);
+                make_chrome_pill(rel_x1 - kBtnOverhang, rel_y1 - kBtnOverhang, ICON_SETTINGS);
             lv_obj_add_event_cb(
                 configure_btn_,
                 [](lv_event_t* ev) {
@@ -803,8 +806,6 @@ void GridEditMode::destroy_selection_chrome() {
     if (!configure_btn_ && !remove_btn_ && !selection_overlay_) {
         return;
     }
-    auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-    helix::ui::UpdateQueue::instance().drain();
     // Reparent to lv_layer_top() + async delete.  This is called during
     // input event processing where synchronous lv_obj_delete corrupts
     // LVGL's child iteration.  Reparenting ensures lv_obj_clean(container_)
@@ -1186,10 +1187,9 @@ std::pair<int, int> GridEditMode::clamp_span(const std::string& widget_id, int d
 
 int GridEditMode::edge_hit_band_for_cell(float cell_px) {
     if (!(cell_px > 0.0f)) {
-        return EDGE_HIT_FALLBACK;
+        return kEdgeHitFallback;
     }
-    return std::clamp(static_cast<int>(cell_px / EDGE_HIT_CELL_DIVISOR), EDGE_HIT_MIN,
-                      EDGE_HIT_MAX);
+    return std::clamp(static_cast<int>(cell_px / kEdgeHitCellDivisor), kEdgeHitMin, kEdgeHitMax);
 }
 
 int GridEditMode::edge_hit_band() const {
@@ -1483,7 +1483,7 @@ void GridEditMode::handle_pressing(lv_event_t* e) {
     if (press_armed_ && selected_) {
         int dx = pt.x - press_origin_.x;
         int dy = pt.y - press_origin_.y;
-        if (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
+        if (dx * dx + dy * dy > kDragThresholdPx * kDragThresholdPx) {
             press_armed_ = false;
             handle_drag_start(e);
             // After the call: its guard rejections return with nothing armed,
@@ -1703,7 +1703,7 @@ void GridEditMode::handle_drag_move(lv_event_t* /*e*/) {
 
     // Both flips wait on timers, since both are deadlines: the dwell runs out
     // while the pointer may rest, and a crossing flips only if the finger is
-    // still down when CROSS_PAGE_CROSSING_DELAY_MS runs out.
+    // still down when kCrossPageCrossingDelayMs runs out.
     if (step.flip_dir != 0) {
         start_crossing_flip(step.flip_dir);
     }
@@ -2130,8 +2130,8 @@ void GridEditMode::handle_resize_move(lv_event_t* /*e*/) {
             selected_ ? static_cast<PanelWidget*>(lv_obj_get_user_data(selected_)) : nullptr) {
         const auto [fit_c, fit_r] = grow_span_to_fit(
             [live](int w, int h) { return live->fits_at(w, h); }, result.colspan, result.rowspan,
-            clamp_span(resize_id, GridLayout::MAX_TRACKS, GridLayout::MAX_TRACKS).first,
-            clamp_span(resize_id, GridLayout::MAX_TRACKS, GridLayout::MAX_TRACKS).second, col_step,
+            clamp_span(resize_id, GridLayout::kMaxTracks, GridLayout::kMaxTracks).first,
+            clamp_span(resize_id, GridLayout::kMaxTracks, GridLayout::kMaxTracks).second, col_step,
             row_step, m);
         if (fit_c != result.colspan || fit_r != result.rowspan) {
             at_limit = true;
@@ -2275,7 +2275,7 @@ void GridEditMode::update_resize_preview_px(int x, int y, int w, int h, bool val
     lv_obj_get_content_coords(container_, &content);
     const int sx = content.x1 + x;
     const int sy = content.y1 + y;
-    place_outline(resize_outline_, RESIZE_OUTLINE_WIDTH, sx, sy, w, h);
+    place_outline(resize_outline_, kResizeOutlineWidth, sx, sy, w, h);
     lv_area_set(&resize_outline_box_, sx, sy, sx + w - 1, sy + h - 1);
     color_outline(resize_outline_,
                   valid ? theme_get_accent_color() : ThemeManager::instance().get_color("danger"),
@@ -2368,7 +2368,7 @@ void GridEditMode::commit_resize_with_snap(const ResizeResult& result) {
             int y = d->start_y + (d->target_y - d->start_y) * t / 255;
             int w = d->start_w + (d->target_w - d->start_w) * t / 255;
             int h = d->start_h + (d->target_h - d->start_h) * t / 255;
-            place_outline(d->outline, RESIZE_OUTLINE_WIDTH, x, y, w, h);
+            place_outline(d->outline, kResizeOutlineWidth, x, y, w, h);
         });
         // Frees SnapData on EVERY exit path. anim_completed_handler() and
         // remove_anim() both call deleted_cb (lib/lvgl/src/misc/lv_anim.c), so
@@ -2449,7 +2449,7 @@ void GridEditMode::update_snap_preview(int col, int row, int colspan, int rowspa
     const int ph = static_cast<int>(grid_track_extent(m.cell_h, m.gutter, rowspan));
 
     ensure_outline(snap_preview_, container_);
-    place_outline(snap_preview_, SNAP_PREVIEW_WIDTH, px, py, pw, ph);
+    place_outline(snap_preview_, kSnapPreviewWidth, px, py, pw, ph);
     color_outline(snap_preview_,
                   valid ? theme_get_accent_color() : ThemeManager::instance().get_color("danger"),
                   valid ? LV_OPA_70 : LV_OPA_50);
@@ -2457,8 +2457,6 @@ void GridEditMode::update_snap_preview(int col, int row, int colspan, int rowspa
 
 void GridEditMode::destroy_snap_preview() {
     if (snap_preview_[0]) {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
         delete_outline(snap_preview_);
     }
     snap_preview_col_ = -1;
@@ -2581,8 +2579,8 @@ struct GridLatticeSpec {
 
 namespace {
 
-constexpr int DOT_SIZE_MAJOR = 4;
-constexpr int DOT_SIZE_MINOR = 3;
+constexpr int kDotSizeMajor = 4;
+constexpr int kDotSizeMinor = 3;
 
 /// Draw the lattice on the shield. One draw hook rather than an object per dot:
 /// a fine lattice is a hundred-odd dots, which a slow board takes ~200 ms to
@@ -2628,12 +2626,12 @@ void draw_lattice(lv_event_t* e) {
     // finer, secondary lattice rather than a change to the base grid.
     for (int r = 0; r <= spec->nrows; r += spec->row_step) {
         const int cy = content.y1 + track_y(r);
-        if (cy + DOT_SIZE_MAJOR < clip.y1 || cy - DOT_SIZE_MAJOR > clip.y2) {
+        if (cy + kDotSizeMajor < clip.y1 || cy - kDotSizeMajor > clip.y2) {
             continue;
         }
         for (int c = 0; c <= spec->ncols; c += spec->col_step) {
             const bool major = (c % cell == 0) && (r % cell == 0);
-            const int size = major ? DOT_SIZE_MAJOR : DOT_SIZE_MINOR;
+            const int size = major ? kDotSizeMajor : kDotSizeMinor;
             const int x = content.x1 + track_x(c) - size / 2;
             const int y = cy - size / 2;
             lv_area_t dot = {x, y, x + size - 1, y + size - 1};
@@ -2790,19 +2788,17 @@ void GridEditMode::rebuild_lattice() {
     // press target, so replacing it mid-gesture is indev-neutral by LVGL's own
     // rules.
     if (delete_page_btn_) {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
         helix::ui::safe_delete_deferred(delete_page_btn_);
     }
 
     // Create "Delete Page" button — hidden for the main page, shown for secondary pages
     delete_page_btn_ = nullptr;
     if (show_delete_page) {
-        constexpr int DEL_BTN_SIZE = 40;
-        constexpr int DEL_BTN_MARGIN = 8;
+        constexpr int kDelBtnSize = 40;
+        constexpr int kDelBtnMargin = 8;
 
         delete_page_btn_ = lv_obj_create(shield_);
-        lv_obj_set_size(delete_page_btn_, DEL_BTN_SIZE, DEL_BTN_SIZE);
+        lv_obj_set_size(delete_page_btn_, kDelBtnSize, kDelBtnSize);
         lv_obj_set_style_radius(delete_page_btn_, LV_RADIUS_CIRCLE, 0);
         const lv_color_t del_bg = ThemeManager::instance().current_palette().danger;
         lv_obj_set_style_bg_color(delete_page_btn_, del_bg, 0);
@@ -2811,7 +2807,7 @@ void GridEditMode::rebuild_lattice() {
         lv_obj_set_style_pad_all(delete_page_btn_, 0, 0);
         lv_obj_add_flag(delete_page_btn_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_flag(delete_page_btn_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_pos(delete_page_btn_, w - DEL_BTN_SIZE - DEL_BTN_MARGIN, DEL_BTN_MARGIN);
+        lv_obj_set_pos(delete_page_btn_, w - kDelBtnSize - kDelBtnMargin, kDelBtnMargin);
 
         // Trash icon label: contrasted against the danger fill composited over
         // the screen background at the pill's opacity

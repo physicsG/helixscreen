@@ -28,6 +28,8 @@ Solutions to common problems with HelixScreen.
 
 ## Quick Debugging Guide
 
+**First, look at what the printer reported.** Tap the **Notifications** widget on the Home screen, then **Printer Events**. It lists Klipper shutdowns with their reason, lost MCU connections, pauses and what caused them, printer error messages and how each print ended, with times. A shutdown reason such as "Timer too close" or "Lost communication with MCU" often answers the question on its own. See [Printer Events](guide/advanced.md#printer-events).
+
 **Before troubleshooting anything, increase log verbosity. Three taps, no SSH:**
 
 1. **Settings → System → Log Level → Debug** (or Trace for the deepest detail)
@@ -297,12 +299,45 @@ curl http://localhost:7125/printer/info
 ```
 Should return JSON with printer info.
 
+**Moonraker behind a web server:** some printers serve Moonraker only on port 80, through the same web address a slicer uses, and leave 7125 closed. With the port left at its default 7125, **Test Connection** tries port 80 too and switches to it when Moonraker answers there; the failure message says when both were tried. If you typed 7125 yourself, enter `80` instead. `curl http://PRINTER_IP/server/info` answering while `curl http://PRINTER_IP:7125/server/info` does not confirms this case.
+
 **Check firewall:**
 ```bash
 sudo ufw status
 # If active, allow Moonraker:
 sudo ufw allow 7125/tcp
 ```
+
+### "Unauthorized" everywhere: Moonraker requires a login
+
+**Symptoms:**
+- A **Login Required** message saying the printer's Moonraker requires a login, or that it rejected the API key
+- HelixScreen connects but shows no files, no history and no printer status
+- In the setup wizard, Test Connection reports that Moonraker requires an API key
+- `moonraker.log` lists requests from HelixScreen refused with `401 ... Unauthorized, Force Logins Enabled`
+
+**Cause:** Moonraker has `force_logins: True` in its `[authorization]` section and at least one user account exists. Moonraker then refuses every request that carries no credential, including requests from the printer itself, even though `trusted_clients` lists it.
+
+**Solutions:**
+
+Give HelixScreen the printer's Moonraker API key. Moonraker accepts it whether or not logins are forced.
+
+1. Get the key. With logins forced, you must log in first. Run this on the printer, using your Moonraker user name and password:
+   ```bash
+   TOKEN=$(curl -s -X POST http://localhost:7125/access/login \
+     -H 'Content-Type: application/json' \
+     -d '{"username": "YOUR_USER", "password": "YOUR_PASSWORD"}' \
+     | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["token"])')
+   curl -s -H "Authorization: Bearer $TOKEN" http://localhost:7125/access/api_key
+   ```
+   The key is the 32-character value in `result`. A password or a shortened key does not work: Moonraker refuses a wrong key outright, even from a trusted address.
+2. Enter it on the screen: **Settings > Connection > API Key** (or the **Enter API Key** button on the Login Required message) opens the printer's host, port and key together. Type or paste the key, press **Test Connection**, then **Save**; HelixScreen reconnects with it at once. In the setup wizard, the key field appears beside the address as soon as Test Connection finds a printer that requires one.
+
+   Without the screen, put it in HelixScreen's `settings.json` instead, in your printer's entry, as `"moonraker_api_key": "THE_KEY"` (see [`moonraker_api_key`](CONFIGURATION.md#moonraker_api_key)), and restart HelixScreen.
+
+HelixScreen sends the key only to that printer's Moonraker address and port, never to a webcam, Spoolman or any other server. It is kept with that printer's entry, masked on screen until you reveal it, and left out of logs and debug bundles.
+
+If you do not need logins, the alternative is to remove `force_logins` from Moonraker's configuration and restart Moonraker.
 
 ---
 
@@ -381,6 +416,44 @@ sudo nmcli device wifi connect "HiddenSSID" password "Password" hidden yes
 
 > **Note:** Older guides may reference `wpa_supplicant` directly, but MainsailOS and most modern systems use NetworkManager. Use `nmcli` commands instead.
 
+### "WiFi isn't responding"
+
+**Symptoms:**
+- A **WiFi isn't responding** message pops up after you tap a network, **Disconnect**, **Forget** or the WiFi switch
+- **Settings > Connection > Network Settings** shows **WiFi isn't responding** under the WiFi details
+- The list of networks stops updating, even when you tap **Refresh**
+
+**What it means:** The printer's own WiFi service (NetworkManager or wpa_supplicant) has stopped answering. This usually means the WiFi driver or adapter has hung. HelixScreen itself is fine: the screen keeps working and your printer stays usable.
+
+**What HelixScreen does meanwhile:**
+- Shows the last WiFi details and network list it got, instead of blanking them
+- Stops scanning for networks, so it doesn't pile more requests onto the stuck service
+- Checks the service again after about 15 seconds, then less often, up to every 2 minutes
+- As soon as the service answers, the message goes away and scanning starts again on its own. You don't need to do anything.
+
+Before HelixScreen notices the service is stuck, an action can take up to about 45 seconds to show the message. After that, tapping a network, **Disconnect**, **Forget** or the WiFi switch shows **WiFi isn't responding** right away. Nothing is sent to the WiFi service, so nothing changes.
+
+**What to try:**
+
+1. **Wait a minute, then try again.** A service that was only busy recovers by itself, and the message clears.
+2. **Check the WiFi service from a computer** (over SSH):
+   ```bash
+   # For NetworkManager systems:
+   sudo systemctl status NetworkManager
+   nmcli device wifi list
+
+   # For wpa_supplicant systems:
+   sudo wpa_cli status
+   ```
+   If these commands also hang or report errors, the problem is in the WiFi service or driver, not in HelixScreen.
+3. **Restart the WiFi service** (NetworkManager systems):
+   ```bash
+   sudo systemctl restart NetworkManager
+   ```
+   This drops the WiFi connection for a moment. If you are connected over WiFi, your SSH session will close.
+4. **Reboot the printer.** If a reboot doesn't help, turn it off at the power switch, wait ten seconds, and turn it back on. A hung WiFi adapter sometimes needs a full power cycle.
+5. **If it keeps coming back,** send a debug bundle from **Settings > Help & About > Upload Debug Bundle** and mention "WiFi isn't responding" in your report.
+
 ### WiFi permission denied
 
 **Symptoms:**
@@ -403,10 +476,13 @@ curl -fsSL https://releases.helixscreen.org/install.sh | bash
 
 **Verify polkit rules are installed:**
 ```bash
-# Check for HelixScreen polkit rules (one of these should exist)
-ls -la /etc/polkit-1/rules.d/50-helixscreen-network.rules
+# Check for HelixScreen polkit rules (one of these should exist;
+# older installs may have 50-helixscreen-network.rules instead of 49-)
+ls -la /etc/polkit-1/rules.d/49-helixscreen-network.rules
 ls -la /etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla
 ```
+
+HelixScreen also installs a second polkit rule, `49-helixscreen-power.rules` (or `helixscreen-power.pkla` on older systems), which lets the screen shut down and reboot its own computer. See [Screen Shutdown/Reboot is not permitted](#screen-shutdownreboot-is-not-permitted).
 
 **Check NetworkManager permissions:**
 ```bash
@@ -430,6 +506,34 @@ sudo systemctl restart helixscreen
 > **Note:** The manual fix disables permission checks for all users. The installer method is preferred as it only grants access to the HelixScreen service user.
 
 ---
+
+### Screen Shutdown/Reboot is not permitted
+
+**Symptoms:**
+- Shutting down or rebooting the screen shows "Screen is not permitted to shut down or reboot. Restart HelixScreen to fix it."
+- The log shows `Interactive authentication required` from `[SystemPower]`
+
+**Cause:**
+When HelixScreen runs as a normal user (as on a Raspberry Pi), the system only lets it power off or reboot the computer if a polkit rule allows it. HelixScreen installs that rule itself, and reinstalls it every time it starts:
+- `/etc/polkit-1/rules.d/49-helixscreen-power.rules` (polkit 0.106 and newer, Debian 12+)
+- `/etc/polkit-1/localauthority/50-local.d/helixscreen-power.pkla` (older polkit, Debian 11)
+
+The rule allows power off and reboot only. It does not override a shutdown block held by another program, such as a package upgrade in progress.
+
+**Solutions:**
+
+**Restart HelixScreen**, which installs the rule:
+```bash
+sudo systemctl restart helixscreen
+ls -la /etc/polkit-1/rules.d/49-helixscreen-power.rules
+```
+
+**Check that it works** without powering anything off (replace `pi` with the user HelixScreen runs as):
+```bash
+sudo systemd-run --uid=pi --pipe --wait busctl call org.freedesktop.login1 \
+  /org/freedesktop/login1 org.freedesktop.login1.Manager CanPowerOff
+```
+`s "yes"` means the rule is working; `s "challenge"` means it is missing.
 
 ### SSL/TLS certificate errors
 
@@ -475,6 +579,10 @@ If Klipper shuts down, hits an error, or loses contact with the printer's contro
 | **Dismiss** | Closes the dialog without doing anything. The printer stays exactly as it was — still shut down, errored, or disconnected. | When you want to read logs, check wiring, or fix a config file first, and you'll restart afterward. Dismiss does **not** fix anything on its own. |
 
 > **Note:** When the printer is fully disconnected, HelixScreen can't send restart commands to it, so only **Dismiss** is available. Once the connection comes back, the restart buttons return.
+
+**If Klipper fails to start again.** Whenever Klipper goes away, after a restart or for any other reason, HelixScreen keeps checking for up to two minutes until Klipper reports ready. If Klipper stops at a startup error instead (a mistake in `printer.cfg`, say, or a control board it can't reach), the dialog changes to **Printer Error** and shows Klipper's own message, so you can see what to fix without opening the log. On printers where HelixScreen installed a recovery script for the platform (such as the Creality K2 and the Snapmaker U1), it runs that script once when a restart alone doesn't bring Klipper back.
+
+**When a HelixScreen save is what broke it.** Saving an input shaper result, switching a heater between PID and MPC, or changing a probe setting writes to your Klipper config and restarts the firmware. Before writing, HelixScreen copies each file it changes into a hidden folder named `.helix_backups` inside your config folder, under the same name. If Klipper does not come back within a few seconds of that restart, HelixScreen puts the copy back, restarts again and tells you the change was undone. With the [HelixPrint plugin](guide/helixprint-plugin.md) installed, the plugin writes the change instead and keeps the five most recent copies of each file, named with the date and time (`printer.cfg.helixbak-20261022-101500`), so you can put an older one back by hand. Mainsail and Fluidd hide folders whose name starts with a dot until you turn on hidden files in their file manager.
 
 **Common causes:**
 
@@ -710,7 +818,7 @@ If your dashboard is full and you want a specific widget back, make room for it:
 
 1. **Long-press the widget grid** to enter Edit Mode
 2. **Long-press an empty area** of the grid — the Widget Catalog opens
-3. Tap the widget you want. Widgets already on your dashboard are dimmed and labelled "Placed"; the ones you lost will not be
+3. Tap the widget you want. Widgets already on your dashboard are dimmed and labeled "Placed"; the ones you lost will not be
 4. Tap **Done** to leave Edit Mode
 
 **Fix — put back everything at once:**
@@ -877,7 +985,7 @@ To confirm the setting was picked up, look for this line in the log after the re
 If it says `false (config override)`, your display driver has no way to power the panel down, and this setting cannot help on your hardware.
 
 **If it makes things worse:**
-On some screens, a full power-down causes flashing colours, edges that glow white, a colour test pattern, or a screen that does not come back when touched. If you see any of these, SSH in, set `"panel_power_off": -1` (automatic) or remove the line, and restart HelixScreen. Screen sleep in **Settings → Display** can also be set to **Never** as a fallback.
+On some screens, a full power-down causes flashing colors, edges that glow white, a color test pattern, or a screen that does not come back when touched. If you see any of these, SSH in, set `"panel_power_off": -1` (automatic) or remove the line, and restart HelixScreen. Screen sleep in **Settings → Display** can also be set to **Never** as a fallback.
 
 **Helping us fix it:**
 If `panel_power_off: 1` works for you, please tell us your printer and screen model (or send a debug bundle from **Settings → Help & About → Upload Debug Bundle**). We can then turn it on automatically for that hardware.
@@ -1106,6 +1214,22 @@ Both live under `input` in `settings.json` (path varies by platform - see [Confi
 Or set it from the printer itself: **Settings → Touch & Input → Scroll Engage Distance**.
 
 Raising it too far makes real scrolls feel unresponsive, so move in steps of a few pixels.
+
+### The Toolhead plate or Bed tab won't move the toolhead
+
+**Symptoms:**
+- Tapping the plate of the home screen's Toolhead widget opens the Motion screen instead of placing a target
+- The Bed tab's plate is grayed out and ignores taps and drags
+- The Move tab's positions and **Park** are grayed out
+
+**Cause:** These controls only move the toolhead when it is safe and you asked for it. They stay inert while:
+
+- **Any axis is not homed.** Nothing on the plate or the Move tab homes by itself. Tap **Home All** on the Toolhead widget, or the home button on the Motion screen's Jog or Bed tab.
+- **A print is running or paused.** The plate shows the live toolhead over the print instead.
+- **The printer is not ready**, or another operation (homing, leveling, a filament load) is using the toolhead.
+- **You are in Edit Mode** on the home screen. Tap **Done** first.
+
+**If a move is refused with "The part on the bed is too tall to clear":** HelixScreen thinks your last print is still on the bed and the nozzle cannot rise above it. Remove the part and tap **Cleared** on the plate. See [A print on the bed](guide/motion.md#a-print-on-the-bed).
 
 ### Unintended Clicks While Scrolling
 
@@ -1361,7 +1485,12 @@ During this window the Print Status panel and the home panel's print card show t
 
 **Check the printer is actually working.** Look at the machine — is the toolhead moving, the bed heating? Or open a web interface's console and watch for ongoing output. Motion and messages mean it's working, not stuck.
 
-**Not willing to wait? Cancel — it's clean.** Cancel is always available during preparation, and cancelling there is a clean cancel, not a failed print: the print never starts, and if the printer is mid-way through a motion it finishes that move first. Then start again with the slow step switched off — see [Pre-Print Options](guide/printing.md#pre-print-options).
+**Not willing to wait? Cancel.** Cancel is always available during preparation, and it ends as a canceled start, not a failed print: the print never starts. When it takes effect depends on where the work is running:
+
+- If HelixScreen has not handed the job to the printer yet, the cancel is immediate. A move already under way finishes first.
+- If the printer is already running its start sequence (its `PRINT_START` macro), Klipper cannot interrupt that macro. HelixScreen sends the cancel to the printer and tells you so; the printer finishes its start sequence (homing, heating, probing) and stops before the first print move. The job shows as canceled once the printer confirms it. If you need it to stop right now, use the E-Stop.
+
+Then start again with the slow step switched off — see [Pre-Print Options](guide/printing.md#pre-print-options).
 
 **If the printer has gone quiet** — no motion, no console output, for a good while — it may genuinely be stuck. Collect a [debug bundle](#collecting-logs) and check the Klipper log for the macro that was running.
 
@@ -1390,6 +1519,24 @@ curl -X POST http://localhost:7125/printer/print/cancel
 
 ---
 
+### Snapmaker U1: Resume shows "Filament not set"
+
+**Symptoms:**
+- After a pause (a runout, say), tapping Resume shows **Filament not set**: "Slot 2 has no filament type set, so the printer will not resume."
+- The print stays paused
+
+**What's going on:**
+The U1 will not resume while a toolhead the print uses has no material recorded for it. Snapmaker RFID spools fill that in by themselves; a spool without a tag leaves it empty. When you have set that slot's material in HelixScreen, HelixScreen writes it into the printer's record before resuming, except after a runout, when you may have loaded a different spool. So this message means either the print paused on a runout or neither the printer nor HelixScreen knows what is loaded there.
+
+**Solution:**
+1. Open the filament system screen and tap the slot the message names
+2. Tap **Edit Spool** and set the material (and color, if you like), then save
+3. Tap **Resume** again
+
+If the printer refuses the resume for some other reason, HelixScreen shows the printer's own message as "Failed to resume: ..." instead.
+
+---
+
 ### Power cut out during a print
 
 **Symptoms:**
@@ -1403,7 +1550,7 @@ On printers whose firmware saves recovery data when power drops mid-print — th
 
 | Choice | What happens |
 |--------|--------------|
-| **Resume** | The printer continues the interrupted print from where its firmware saved its progress. On Creality, check the first resumed layer before walking away — it can sit a millimetre or two off. |
+| **Resume** | The printer continues the interrupted print from where its firmware saved its progress. On Creality, check the first resumed layer before walking away — it can sit a millimeter or two off. |
 | **Discard** | The recovery data is cleared and nothing is printed. The printer is back to a clean slate; start whatever you like. |
 | Dismiss the dialog (tap outside it) | Nothing is decided: the recovery data is kept, and you are asked again the next time HelixScreen connects. |
 
@@ -1439,6 +1586,8 @@ Re-slice your file after adding these — the commands are baked into the G-code
 > **Cura users:** Cura doesn't expose these layer placeholders directly and needs a post-processing script to inject `SET_PRINT_STATS_INFO`. See the Klipper community docs and forums for a Cura post-processing plugin that adds it.
 
 > **Note:** Some noise in the layer count during the print-start phase (bed mesh, purge/prime line, Z-hop) is normal. HelixScreen holds the layer at 0 until real printing begins, so it will not jump ahead before the first layer. The estimate only matters mid-print when the slicer macros above are missing.
+
+> **Z-hops do not move the estimate.** When the layer is worked out from the nozzle height, a new layer shows only once the nozzle has stayed at that height for about a second and a half of printing, so the quick lift of a Z-hop on every travel move does not bump the count up and back. The counter steps to each new layer that much after the layer change.
 
 ### Time remaining is inaccurate or slow to settle
 
@@ -1496,7 +1645,7 @@ sudo systemctl restart helixscreen
 **Symptoms:**
 - The filament panel opens but the CFS is empty — no bays, no spools
 - Your CFS is populated and works fine in Fluidd or Mainsail
-- The home screen's multi-filament widget is greyed out or missing
+- The home screen's multi-filament widget is grayed out or missing
 
 **Cause:** you're most likely running **community firmware** whose CFS module was rewritten from scratch. It reports the CFS in a completely different format than Creality's, and HelixScreen 0.99.106 and earlier only understood Creality's.
 
@@ -1511,6 +1660,23 @@ curl -s 'http://localhost:7125/printer/objects/query?box' | grep -o 'slots\|T1'
 Once updated, the community format is fully supported — display, loading, unloading and filament changes all work, with nothing to configure.
 
 > **If your firmware installed HelixScreen for you**, its installer may pin an older version than the one that added this support. Updating HelixScreen through Fluidd or Mainsail (rather than reinstalling the firmware) picks up the newer release.
+
+### OrcaSlicer doesn't pick up your slot colors or materials
+
+**Symptoms:**
+- Slots show the right color and material in HelixScreen, but OrcaSlicer's filament panel stays on its defaults
+- OrcaSlicer can upload and start prints on the printer, so the connection itself looks fine
+
+**Causes and fixes:**
+
+1. **OrcaSlicer 2.4 with a blank API key.** OrcaSlicer 2.4 (reported on 2.4.2) sends a placeholder API key when the field is empty. A Moonraker that relies on `trusted_clients` rejects it with `401 Invalid API Key`, and the filament sync fails without saying so. Either upgrade to OrcaSlicer 2.5, which sends no key when the field is empty, or put your real Moonraker API key in OrcaSlicer's printer connection settings. Run this from a machine Moonraker already trusts to print the key:
+   ```bash
+   curl -s http://<printer-ip>:7125/access/api_key
+   ```
+2. **OrcaSlicer older than 2.3.2.** Older releases don't read slot info from the printer at all. Upgrade.
+3. **The slot has no spool info yet.** OrcaSlicer only gets what HelixScreen has. Set the material and color under the slot's **Edit Spool** first.
+
+A material OrcaSlicer has no preset for comes across with its color and temperatures but no preset selected. That's expected; see [Syncing with OrcaSlicer](guide/filament.md#syncing-with-orcaslicer-232-and-later).
 
 ### Load/Unload fails
 
@@ -1574,6 +1740,19 @@ Navigate away from and back to the AMS panel to trigger refresh.
 ```bash
 sudo journalctl -u moonraker | grep -i spoolman
 ```
+
+### Spoolman didn't deduct a print (multi-filament systems)
+
+**Symptoms:**
+- A print finished but the spool's remaining weight in Spoolman did not change
+- Mainsail or Fluidd shows no active spool, or a different one
+
+**Check, in order:**
+1. **Was the slot linked before the print started?** Usage is only recorded while a spool is active, and HelixScreen makes a slot's spool active when the slot loads or when you link a spool to the loaded slot. A print that ran before the link is not deducted afterwards.
+2. **Is the right spool linked to that slot?** Open the slot's **Edit Spool** editor: a linked slot shows the Spoolman icon and spool number in its title. Names don't matter; only the link does.
+3. **Does your filament system set the spool itself?** AFC, Happy Hare (with its Spoolman support on) and INDX do, and HelixScreen leaves it to them.
+
+Details: [Which spool Spoolman charges](guide/filament-tracking.md#which-spool-spoolman-charges-on-a-multi-filament-system).
 
 ### Color set on the printer's own screen reverts (AD5X with Spoolman)
 
@@ -1647,6 +1826,8 @@ Should return acceleration values, not an error.
 - Bed gets worse after adjustments
 
 **Solutions:**
+
+**Check the turn direction.** Turn one screw the way its arrow points and re-probe. If that corner moves further from the reference, the `screw_thread` in your `[screws_tilt_adjust]` section names the wrong direction for your knobs: switch it between `CW-M3` and `CCW-M3` (or the M4/M5 equivalents). Tighten/Loosen does not depend on this setting; it always comes from the probed heights.
 
 **Verify screw positions** in `printer.cfg`:
 ```ini
@@ -1761,7 +1942,7 @@ max_job_count: 100
 3. Pick your model from the list (Voron 2.4, Voron 0.2, Voron Trident, and Voron Switchwire are all in the database)
 4. The new type applies immediately — name, image, and all the type-driven features follow it
 
-**Let HelixScreen catch it for you.** If you'd rather not hunt through the list, just connect the printer and wait: when detection is confident the saved type is wrong, a **Printer type mismatch** dialog names both models and offers **Choose Model** (opens the model picker from the setup wizard's identity step) or **Keep current** — the right answer for a heavily modified printer that legitimately differs from its stock sibling. Picking **Keep current** is remembered for that type; the prompt won't nag on every boot.
+**Let HelixScreen catch it for you.** If you'd rather not hunt through the list, just connect the printer and wait: when detection is confident the saved type is wrong, a warning names both models. Tap **Review** on it to open the **Printer type mismatch** dialog, which offers **Choose Model** (opens the model picker from the setup wizard's identity step) or **Keep current**, the right answer for a heavily modified printer that legitimately differs from its stock sibling. Closing the warning with its **X** counts as **Keep current** too. Either way the answer is remembered for that type, so the warning won't come back on every boot. When the two are the same printer with and without a firmware mod or add-on (ForgeX, k2-improvements, CFS), the warning names that difference instead, for example "Your Creality K2 Plus looks like it has k2-improvements".
 
 Re-adding the printer through **Printer Manager > Manage Printers > + Add Printer** (then deleting the old entry) and **Settings > System > Factory Reset** remain as last resorts — the factory reset re-runs the full wizard but wipes all HelixScreen settings, so use it only if you want a clean start anyway.
 
@@ -1862,6 +2043,52 @@ Auto-detection only commits to a model when it is confident enough. Below that b
 **After setup:** if the wrong model got saved, correct it from Printer Manager — tap the printer image on the Home Panel, then the **printer model** row underneath the printer name, and pick the right model. It applies immediately, with nothing wiped. On the next connect, HelixScreen may also flag the mismatch itself and offer **Choose Model** — see [Wrong printer model identified](#wrong-printer-model-identified) above for that flow.
 
 ---
+
+### A feature is missing for hardware my printer has
+
+**Symptoms:**
+- A screen or button you expect (Bed Mesh, Input Shaper, LED controls, filament sensors, a probe calibration) never appears
+- A feature shows the wrong hardware, such as the wrong probe type
+
+**Check what HelixScreen detected:**
+
+1. Tap the **printer image** on the Home Panel to open the Printer Manager
+2. Scroll to **Capabilities**. It lists everything HelixScreen found, with details such as the probe type, kinematics and number of tools
+
+If the item is missing there, HelixScreen did not detect it, and the screens that depend on it stay hidden. Common causes:
+
+- The Klipper section is missing or commented out in `printer.cfg`, or Klipper failed to load it. Check that Klipper is running without errors in Mainsail or Fluidd
+- The hardware is set up under a section name HelixScreen does not recognize yet. Please [report it](#getting-help) with your config section so it can be added
+- A few capabilities (bed mesh, QGL, Z-tilt, nozzle clean, heat soak, speaker) can be turned on or off by hand with a [capability override](CONFIGURATION.md#capability-overrides). An override set to `disable` hides the feature even when the hardware is present
+
+If the detail is wrong (for example **Probe · BLTouch** on a Beacon), include a screenshot of the Capabilities section in your report.
+
+### Mainsail or Fluidd shows an old `helix_print` update
+
+**Symptoms:**
+- The update manager in Mainsail (Machine page) or Fluidd (Settings > Software Updates) lists a `helix_print` row with a version like `v1.1.0-beta.9-461-g...`
+- That row offers an update, or says it is up to date while HelixScreen itself is newer
+
+**Why:** the HelixPrint plugin was installed with the old one-line installer, which downloaded a separate copy of the plugin into `~/helix_print` and added that row so Moonraker could update it. Current HelixScreen loads the plugin it ships with instead, and updating HelixScreen updates the plugin. The old row only tracks the separate copy, which is no longer used.
+
+**Do not click Update on that row.** It downloads unreleased development code into the old copy and restarts Moonraker for nothing.
+
+**Fix:** restart HelixScreen. When it starts, it switches the plugin over and removes the old row (it keeps a backup of each config file it edits next to that file, for example `moonraker.conf.bak.helix.<date>`). The row disappears after Moonraker's next restart. To do it by hand instead, run the plugin installer that came with HelixScreen:
+
+```bash
+# Use your actual install path: ~/helixscreen on most systems,
+# /opt/helixscreen or /usr/data/helixscreen on some printers
+~/helixscreen/moonraker-plugin/install.sh --auto
+```
+
+**Removing the old copy:** check where Moonraker loads the plugin from first:
+
+```bash
+# Moonraker's folder varies by platform too (~/moonraker on most systems)
+readlink -f ~/moonraker/moonraker/components/helix_print.py
+```
+
+If the result points inside your HelixScreen folder and not into `~/helix_print`, the old copy is unused and you can delete it with `rm -rf ~/helix_print`. If it still points into `~/helix_print`, leave the folder alone and run the installer command above first.
 
 ### Reset HelixScreen or re-run the setup wizard
 

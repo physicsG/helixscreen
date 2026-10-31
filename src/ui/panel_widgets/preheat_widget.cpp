@@ -12,6 +12,7 @@
 #include "app_globals.h"
 #include "config.h"
 #include "filament_database.h"
+#include "i18n_plural.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "macro_executor.h"
@@ -27,6 +28,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstdio>
+#include <memory>
 #include <set>
 #include <utility>
 
@@ -35,7 +37,7 @@
 // what made this widget show/apply PLA while the filament panel — which reads
 // the user's configured presets — showed the material the user actually
 // assigned to the slot.
-static constexpr int PRESET_COUNT = helix::presets::PRESET_COUNT;
+static constexpr int kPresetCount = helix::presets::kPresetCount;
 
 // Static instance for callback dispatch (one preheat widget at a time)
 static helix::PreheatWidget* s_active_instance = nullptr;
@@ -66,7 +68,7 @@ void PreheatWidget::set_config(const nlohmann::json& config) {
     config_ = config;
     if (config_.contains("material_index") && config_["material_index"].is_number_integer()) {
         selected_material_ = config_["material_index"].get<int>();
-        if (selected_material_ < 0 || selected_material_ >= PRESET_COUNT) {
+        if (selected_material_ < 0 || selected_material_ >= kPresetCount) {
             selected_material_ = 0;
         }
     }
@@ -87,7 +89,7 @@ void PreheatWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     // Clamp tool_target_ to prevent a stale index when the printer's extruder
     // count changes between sessions. PanelWidget instances are recycled across
     // home-panel rebuilds, so tool_target_ outlives any one attach.
-    if (tool_target_ >= ToolState::instance().extruder_count()) {
+    if (tool_target_ >= static_cast<int>(ToolState::instance().heated_heads().size())) {
         tool_target_ = -1; // Reset to "all" if stale
     }
 
@@ -259,8 +261,8 @@ void PreheatWidget::update_tool_target_label() {
         // collapse, not the lane count.
         std::snprintf(label, sizeof(label), "%s (%d)", lv_tr("All"),
                       ToolState::instance().extruder_count());
-    } else if (tool_target_ >= 0 && tool_target_ < static_cast<int>(tools.size())) {
-        std::snprintf(label, sizeof(label), "%s", tools[tool_target_].display_label.c_str());
+    } else if (const int tool = target_tool_index(); tool >= 0) {
+        std::snprintf(label, sizeof(label), "%s", tools[tool].display_label.c_str());
     } else {
         label[0] = '\0';
     }
@@ -272,7 +274,7 @@ void PreheatWidget::handle_selection_changed() {
         return;
 
     uint32_t idx = ui_split_button_get_selected(split_btn_);
-    if (idx < static_cast<uint32_t>(PRESET_COUNT)) {
+    if (idx < static_cast<uint32_t>(kPresetCount)) {
         selected_material_ = static_cast<int>(idx);
         update_button_label();
 
@@ -406,8 +408,13 @@ void PreheatWidget::set_temperatures_multi(int nozzle, int bed) {
     if (!c)
         return;
     const auto& tools = ToolState::instance().tools();
-    auto heaters = collect_preheat_heaters(tools, tool_target_);
+    const int target_tool = target_tool_index();
+    auto heaters = collect_preheat_heaters(tools, target_tool);
 
+    // A refusal (the filament system will not heat the nozzle now) reports
+    // through on_error before set_target() returns, so the summary below can
+    // tell it from a send that went out.
+    auto refused = std::make_shared<bool>(false);
     for (const auto& heater : heaters) {
         spdlog::debug("[PreheatWidget] Setting {} to {}°C", heater, nozzle);
         c->set_target(heater, static_cast<double>(nozzle),
@@ -418,7 +425,8 @@ void PreheatWidget::set_temperatures_multi(int nozzle, int bed) {
                                             nozzle);
                            },
                        .on_error =
-                           [heater](const MoonrakerError& error) {
+                           [heater, refused](const MoonrakerError& error) {
+                               *refused = true;
                                helix::ui::notify_error_tr(TR_NOOP("Failed to set {} temp: {}"),
                                                           heater, error);
                            }});
@@ -429,19 +437,35 @@ void PreheatWidget::set_temperatures_multi(int nozzle, int bed) {
                        NOTIFY_SUCCESS(lv_tr("Bed target set to {}°C"), bed);
                    }});
 
+    if (*refused) {
+        return;
+    }
     int tool_count = static_cast<int>(heaters.size());
     if (tool_target_ == -1) {
-        NOTIFY_SUCCESS(lv_tr("Preheat: all {} tools + bed set"), tool_count);
-    } else if (tool_target_ < static_cast<int>(ToolState::instance().tools().size())) {
-        NOTIFY_SUCCESS(lv_tr("Preheat: {} + bed set"),
-                       ToolState::instance().tools()[tool_target_].display_label);
+        NOTIFY_SUCCESS(fmt::runtime(helix::ui::tr_plural(nullptr, "Preheat: all {} tools + bed set",
+                                                         static_cast<uint64_t>(tool_count))),
+                       tool_count);
+    } else if (target_tool >= 0) {
+        NOTIFY_SUCCESS(lv_tr("Preheat: {} + bed set"), tools[target_tool].display_label);
     }
 }
 
+int PreheatWidget::target_tool_index() const {
+    if (tool_target_ < 0)
+        return -1;
+    const auto heads = ToolState::instance().heated_heads();
+    if (tool_target_ >= static_cast<int>(heads.size()))
+        return -1;
+    // The same tool a tap on the head in the tool switcher sends, so a hub-fed
+    // head heats and announces through the lane it holds.
+    return heads[static_cast<size_t>(tool_target_)].representative_tool(
+        ToolState::instance().active_tool_index());
+}
+
 void PreheatWidget::cycle_tool_target() {
-    // Cycles over nozzles, not lanes: tool_target_ indexes ToolState's tool
-    // list, whose first extruder_count() entries carry the distinct extruders.
-    int tool_count = ToolState::instance().extruder_count();
+    // Cycles over heated nozzles, not lanes: tool_target_ indexes the heads a
+    // heater target can be aimed at.
+    int tool_count = static_cast<int>(ToolState::instance().heated_heads().size());
     if (tool_count <= 1) {
         tool_target_ = -1; // Single nozzle, always "all"
         return;

@@ -30,7 +30,7 @@ namespace wizard {
 // Printer identification
 constexpr const char* PRINTER_NAME = "printer_name";
 // The hostname the printer's Klipper reports; how mDNS re-finds it at a new address
-constexpr const char* HOSTNAME = "hostname";
+constexpr const char* kHostname = "hostname";
 constexpr const char* PRINTER_TYPE = "type";
 // Which saved printer type the one-time saved-vs-detected mismatch warning
 // (HardwareSetupPrompter::maybe_warn_type_mismatch) was last shown for. Changing the
@@ -50,7 +50,7 @@ constexpr const char* HOTEND_FAN = "fans/hotend";
 constexpr const char* PART_FAN = "fans/part";
 constexpr const char* CHAMBER_FAN = "fans/chamber";
 constexpr const char* EXHAUST_FAN = "fans/exhaust";
-constexpr const char* AUX_FAN = "fans/aux";
+constexpr const char* kAuxFan = "fans/aux";
 
 // Chamber hardware (sensor and heater — distinct from chamber_fan above)
 constexpr const char* CHAMBER_SENSOR = "temp_sensors/chamber";
@@ -61,22 +61,25 @@ constexpr const char* CHAMBER_HEATER = "heaters/chamber";
 // on one network can be mid-migration and expose different command names.
 constexpr const char* FEEDER_OPEN_MACRO = "toolchanger/feeder_open_macro";
 constexpr const char* FEEDER_CLOSE_MACRO = "toolchanger/feeder_close_macro";
+// How far a mount-to-feed load purges past the nozzle, in mm. Per-printer: it
+// follows that machine's hot ends.
+constexpr const char* kMountFeedPurgeMm = "toolchanger/purge_length_mm";
 
 // ACE bypass macros. The ACE Pro has no bypass command, so the master switch
 // that disables its filament path is thrown by macros. "auto" detects the
 // conventional names; a printer exposing neither reports no bypass. Per-printer,
 // because the wrapper macros are the owner's own and differ between machines.
-constexpr const char* ACE_BYPASS_ON_MACRO = "ams/ace_bypass_on_macro";
-constexpr const char* ACE_BYPASS_OFF_MACRO = "ams/ace_bypass_off_macro";
+constexpr const char* kAceBypassOnMacro = "ams/ace_bypass_on_macro";
+constexpr const char* kAceBypassOffMacro = "ams/ace_bypass_off_macro";
 
-// LED hardware. LED_AUTO_STATE_STRIPS holds the devices the user chose (the wizard's
-// LED step stages its pick there). LED_SELECTED_STRIPS is the older selection
+// LED hardware. kLedAutoStateStrips holds the devices the user chose (the wizard's
+// LED step stages its pick there). kLedSelectedStrips is the older selection
 // LedController still reads. LED_STRIP is the wizard's own record of the user's pick
 // (written by the LED step, read by the summary) and LED_SELECTED its array form.
 // None are kept in step, so hardware_validator.cpp asks each in that order before
 // deciding no LED is configured.
-constexpr const char* LED_AUTO_STATE_STRIPS = "leds/auto_state/strips";
-constexpr const char* LED_SELECTED_STRIPS = "leds/selected_strips";
+constexpr const char* kLedAutoStateStrips = "leds/auto_state/strips";
+constexpr const char* kLedSelectedStrips = "leds/selected_strips";
 constexpr const char* LED_STRIP = "leds/strip";
 constexpr const char* LED_SELECTED = "leds/selected";
 

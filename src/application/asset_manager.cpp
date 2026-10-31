@@ -296,8 +296,6 @@ void AssetManager::register_images() {
     // Printer and UI images
     reg_img("A:assets/images/printer_400.png", "assets/images/printer_400.png");
     reg_img("filament_spool", "assets/images/filament_spool.png");
-    // Tintable Spoolman mark (AMS editor identity chip)
-    reg_img("spoolman_mark", "assets/images/ams/spoolman_24.png");
     reg_img("A:assets/images/placeholder_thumb_centered.png",
             "assets/images/placeholder_thumb_centered.png");
     reg_img("A:assets/images/thumbnail-gradient-bg.png", "assets/images/thumbnail-gradient-bg.png");

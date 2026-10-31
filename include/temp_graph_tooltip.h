@@ -25,7 +25,7 @@ namespace helix::temp_graph_internal {
 /// Tap radius in pixels. Trades "hard to hit a 2px line with a fingertip"
 /// against "hard to dismiss because nothing is ever a miss". Tune on a real
 /// 480x272 panel.
-constexpr int32_t TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX = 28;
+constexpr int32_t kTempGraphTooltipHitRadiusPx = 28;
 
 /// A resolved tap: one plotted sample of one visible series.
 struct TempGraphHit {
@@ -73,7 +73,7 @@ int16_t target_deci_at(const ui_temp_series_meta_t* meta, int point_count, int l
  * to the lowest series index, then the lowest logical index, so results are
  * deterministic under test.
  *
- * @return nullopt when nothing lies within TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX.
+ * @return nullopt when nothing lies within kTempGraphTooltipHitRadiusPx.
  *         That is also the caller's signal to dismiss an open caption.
  */
 std::optional<TempGraphHit> tooltip_hit_test(ui_temp_graph_t* graph, int32_t x, int32_t y);

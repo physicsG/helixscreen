@@ -6,14 +6,18 @@
 #include "ui_insert_notice.h"
 #include "ui_update_queue.h"
 
+#include "ams_device_action_value.h"
+#include "ams_device_sections.h"
 #include "ams_error.h"
 #include "color_utils.h"
 #include "display_numbering.h"
+#include "filament_macro_profiles.h"
 #include "lane_apply.h"
 #include "lane_legacy_migration.h"
 #include "lane_source_store.h"
 #include "lane_translation.h"
 #include "macro_param_cache.h"
+#include "printer_discovery.h"
 #include "settings_manager.h"
 #include "slot_registry.h"
 #include "text_io.h"
@@ -24,6 +28,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <optional>
@@ -35,80 +40,22 @@
 // save_variables onto AmsSystemInfo; write-path (load/unload/change_tool)
 // is still not implemented pending field-test access (issue #954 brought
 // the protocol reference; hardware validation still gated on Sib6019).
-//
-// TODO(qidi-box): drop a `qidi_box_64.png` (and matching .svg / `_512.png`
-// if other backends carry them) into assets/images/ams/ to match the logo
-// convention used by afc_64.png, box_turtle_64.png, happy_hare_64.png, etc.
-// The QIDI wordmark / box silhouette is fine — no in-app scaling required.
 
 namespace helix {
 
 namespace tio = helix::text_io;
 
 namespace {
-// Parse `"slot<N>"` into N when valid and within [0, slot_count).
-// Returns nullopt for the box_extras.py sentinel `"slot-1"` (nothing
-// loaded) and for any other malformed input. Used to decode the
-// `value_t<T>` and `last_load_slot` save_variables, both of which carry
-// slot references in this format.
-std::optional<int> parse_slot_name(const std::string& val, int slot_count) {
-    if (val.rfind("slot", 0) != 0) {
-        return std::nullopt;
-    }
-    // A malformed slot suffix reads as no slot at all.
-    const auto idx = tio::parse_leading<int>(val.substr(4));
-    if (idx && *idx >= 0 && *idx < slot_count) {
-        return idx;
-    }
-    return std::nullopt;
-}
-
-// Read a slot's palette row id (filament_slot<N> / color_slot<N> /
-// vendor_slot<N>) from a save_variables value. The firmware and HelixScreen
-// write bare ints, but a SAVE_VARIABLE spelled with a quoted VALUE - Qidi
-// Studio emits VALUE="5" - is stored as a string, because save_variables.py
-// evaluates the literal before saving it. Accept a non-negative integer, or a
-// string holding nothing but a non-negative integer (surrounding whitespace
-// tolerated) - zero IS an id: it is the Box stating the field is unset. Any
-// other value is a writer the ids have no meaning for: logged and ignored,
-// leaving the previously stated id in place.
-std::optional<int> read_slot_id(const nlohmann::json& val, const std::string& key) {
-    if (val.is_number_integer()) {
-        const int id = val.get<int>();
-        // A negative id has no palette row; the digits-only string branch
-        // already refuses one, so the two spellings of the same write agree.
-        if (id >= 0) {
-            return id;
-        }
-    }
-    if (val.is_string()) {
-        std::string s = val.get<std::string>();
-        const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
-        s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-        s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-        const auto is_digit = [](unsigned char c) { return std::isdigit(c) != 0; };
-        if (!s.empty() && std::all_of(s.begin(), s.end(), is_digit)) {
-            // More digits than an int holds - no palette row is that big.
-            if (const auto id = tio::parse_leading<int>(s)) {
-                return id;
-            }
-        }
-    }
-    spdlog::debug("AmsBackendQidi save_variables {} holds a non-integer or negative value; ignored",
-                  key);
-    return std::nullopt;
-}
-
-constexpr int QIDI_SLOTS_PER_BOX = 4;
-constexpr int QIDI_MAX_BOXES = 4;
+constexpr int kQidiSlotsPerBox = qidi::kSlotsPerBox;
+constexpr int kQidiMaxBoxes = qidi::kMaxBoxes;
 
 AmsUnit make_qidi_unit(int unit_index) {
     AmsUnit unit;
     unit.unit_index = unit_index;
     unit.name = fmt::format("QIDI Box {}", helix::ui::lane_number(unit_index));
     unit.display_name = unit.name;
-    unit.slot_count = QIDI_SLOTS_PER_BOX;
-    unit.first_slot_global_index = unit_index * QIDI_SLOTS_PER_BOX;
+    unit.slot_count = kQidiSlotsPerBox;
+    unit.first_slot_global_index = unit_index * kQidiSlotsPerBox;
     // Connected until enable_box says otherwise: a box that has not reported
     // yet must not read as switched off.
     unit.connected = true;
@@ -117,7 +64,7 @@ AmsUnit make_qidi_unit(int unit_index) {
     // The box publishes no toolhead filament sensor, and none is subscribed.
     unit.has_toolhead_sensor = false;
 
-    for (int local = 0; local < QIDI_SLOTS_PER_BOX; ++local) {
+    for (int local = 0; local < kQidiSlotsPerBox; ++local) {
         const int global = unit.first_slot_global_index + local;
         SlotInfo slot;
         slot.slot_index = local;
@@ -164,7 +111,7 @@ const AmsUnit* find_old_unit(const std::vector<AmsUnit>& units, int unit_index) 
 }
 
 void resize_qidi_units(AmsSystemInfo& info, int box_count) {
-    box_count = std::clamp(box_count, 0, QIDI_MAX_BOXES);
+    box_count = std::clamp(box_count, 0, kQidiMaxBoxes);
     const auto old_units = info.units;
 
     std::vector<AmsUnit> units;
@@ -190,19 +137,7 @@ void resize_qidi_units(AmsSystemInfo& info, int box_count) {
     }
 
     info.units = std::move(units);
-    info.total_slots = box_count * QIDI_SLOTS_PER_BOX;
-}
-
-std::optional<int> parse_box_unit_index(const std::string& key) {
-    const size_t pos = key.rfind("box");
-    if (pos == std::string::npos) {
-        return std::nullopt;
-    }
-    const auto box = tio::parse_leading<int>(key.substr(pos + 3));
-    if (box && *box >= 1 && *box <= QIDI_MAX_BOXES) {
-        return *box - 1;
-    }
-    return std::nullopt;
+    info.total_slots = box_count * kQidiSlotsPerBox;
 }
 
 // Hotend temperature to heat to before driving EXTRUDER_LOAD / M603. Klipper
@@ -211,7 +146,7 @@ std::optional<int> parse_box_unit_index(const std::string& key) {
 // material's upper bound (matches the stock QIDI flow Camden verified — ABS at
 // 280) and fall back to a safe universal load temperature when no profile is
 // known.
-constexpr int QIDI_DEFAULT_LOAD_TEMP_C = 250;
+constexpr int kQidiDefaultLoadTempC = 250;
 
 // Task 15 R2: cap for the officiall_filas_list.cfg fetch below. The file is a
 // small generated INI (fila<N>/colordict/vendor_list sections); this is
@@ -219,14 +154,8 @@ constexpr int QIDI_DEFAULT_LOAD_TEMP_C = 250;
 // fails loud on an over-cap response rather than silently truncating (see
 // esp_http_lane.cpp on ESP32), so an oversized file degrades exactly like any
 // other fetch failure here — non-fatal, temps stay at defaults.
-constexpr size_t QIDI_FILAS_LIST_CAP_BYTES = 32 * 1024;
+constexpr size_t kQidiFilasListCapBytes = 32 * 1024;
 
-// Manual lane-eject via FORCE_MOVE on the box_stepper (#1041). Distance/velocity
-// from the QIDI Discord (xenon) + Camden's Q2 measurement: 878 mm fully ejects,
-// ~100 mm/s matches the stock feel. These are now user-configurable via
-// SettingsManager (settings_qidi_eject_distance / settings_qidi_eject_velocity);
-// the defaults below match the historic hardcoded values. May need refining for
-// Plus 4 / Max 4 boxes.
 int load_temp_for_slot(const SlotInfo& slot) {
     if (slot.nozzle_temp_max > 0) {
         return slot.nozzle_temp_max;
@@ -234,9 +163,54 @@ int load_temp_for_slot(const SlotInfo& slot) {
     if (slot.nozzle_temp_min > 0) {
         return slot.nozzle_temp_min;
     }
-    return QIDI_DEFAULT_LOAD_TEMP_C;
+    return kQidiDefaultLoadTempC;
+}
+
+// Manual lane-eject via FORCE_MOVE on the box_stepper (#1041). Distance/velocity
+// from the QIDI Discord (xenon) + Camden's Q2 measurement: 878 mm fully ejects,
+// ~100 mm/s matches the stock feel. Both are the user's, through the eject
+// sliders (get_device_actions()) stored in SettingsManager, which stores 0 until
+// the user picks a value. May need refining for Plus 4 / Max 4 boxes.
+constexpr int kDefaultEjectDistanceMm = 878;
+constexpr int kMinEjectDistanceMm = 100;
+constexpr int kMaxEjectDistanceMm = 2000;
+constexpr int kDefaultEjectVelocityMmS = 100;
+constexpr int kMinEjectVelocityMmS = 10;
+constexpr int kMaxEjectVelocityMmS = 300;
+
+/// A stored eject setting, or the box's default when none is stored. A FORCE_MOVE
+/// with VELOCITY=0/DISTANCE=0 is a degenerate no-op Klipper rejects, so the eject
+/// always carries a real number.
+int stored_or_default(int stored, int fallback, int lo, int hi) {
+    return stored <= 0 ? fallback : std::clamp(stored, lo, hi);
+}
+
+int eject_distance_mm() {
+    return stored_or_default(helix::SettingsManager::instance().get_ams_eject_distance(),
+                             kDefaultEjectDistanceMm, kMinEjectDistanceMm, kMaxEjectDistanceMm);
+}
+
+int eject_velocity_mm_s() {
+    return stored_or_default(helix::SettingsManager::instance().get_ams_eject_velocity(),
+                             kDefaultEjectVelocityMmS, kMinEjectVelocityMmS, kMaxEjectVelocityMmS);
 }
 } // namespace
+
+nlohmann::json AmsBackendQidi::required_status_objects(const helix::PrinterDiscovery& hw) {
+    nlohmann::json objects = nlohmann::json::object();
+    if (hw.mmu_type() == AmsType::QIDI_BOX) {
+        // box_extras carries box_drying_state.box<N>.{dry_state, end_time} for the
+        // dryer countdown; save_variables carries slot/box state. Subscribing keeps
+        // both pushing live to handle_status().
+        objects["box_extras"] = nullptr;
+        objects["save_variables"] = nullptr;
+        // Each slot's firmware-resolved filament info, the only resolution
+        // for a string product id. Only the "box" field: the rest of the
+        // controller is load-state chatter.
+        objects["multi_color_controller"] = nlohmann::json::array({"box"});
+    }
+    return objects;
+}
 
 AmsBackendQidi::AmsBackendQidi(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
     : AmsSubscriptionBackend(api, client) {
@@ -244,7 +218,7 @@ AmsBackendQidi::AmsBackendQidi(IMoonrakerAPI* api, helix::IMoonrakerClient* clie
     // empty-but-initialised snapshot even before any status update arrives.
     system_info_.type = AmsType::QIDI_BOX;
     system_info_.type_name = "QIDI Box"; // i18n: do not translate - product name
-    system_info_.total_slots = NUM_SLOTS;
+    system_info_.total_slots = kNumSlots;
     system_info_.supports_bypass = false;
     system_info_.supports_purge = false;
     system_info_.tip_method = TipMethod::CUT;
@@ -255,7 +229,7 @@ AmsBackendQidi::AmsBackendQidi(IMoonrakerAPI* api, helix::IMoonrakerClient* clie
     // self-consistent in both directions. No lock: nothing else can observe
     // this instance until the constructor returns.
     rebuild_tool_map_locked();
-    slot_rfid_.resize(NUM_SLOTS);
+    slot_rfid_.resize(kNumSlots);
 
     // Box PTC dryer capabilities (issue #1019). max_temp_c is the settable ceiling
     // (target_max_temp_heater_generic=90); refined from configfile in on_started().
@@ -264,18 +238,32 @@ AmsBackendQidi::AmsBackendQidi(IMoonrakerAPI* api, helix::IMoonrakerClient* clie
     dry_end_epoch_.assign(system_info_.units.size(), 0);
 
     spdlog::debug("{} Backend constructed ({} slots, write-path always on)", backend_log_tag(),
-                  NUM_SLOTS);
+                  kNumSlots);
 }
 
 AmsBackendQidi::~AmsBackendQidi() = default;
 
 // --- Lifecycle hooks ---
 
+std::optional<helix::ams::TagReading> AmsBackendQidi::tag_reading(int slot_index) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = tag_readings_.find(slot_index);
+    if (it == tag_readings_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
 void AmsBackendQidi::on_started() {
     // Load persisted per-slot overrides before any parse can run, so the
     // fingerprint baseline and a staged clear agree about what the user had.
     // Call with NO lock held: the DB round-trip blocks, and the parse path
     // takes this mutex.
+    {
+        // A start is a new session: the tag readings described the last one.
+        std::lock_guard<std::mutex> lock(mutex_);
+        tag_readings_.clear();
+    }
     if (api_) {
         auto loaded =
             helix::ams::make_loaded_override_store(api_, "qidi", get_type(), backend_log_tag());
@@ -315,8 +303,11 @@ void AmsBackendQidi::on_started() {
     // objects. A machine may have 0..4 physical boxes; missing objects are
     // harmless in Moonraker's query response, and save_variables.box_count gates
     // which units are actually modeled.
-    auto objects = nlohmann::json::object({{"save_variables", nullptr}, {"box_extras", nullptr}});
-    for (int box = 1; box <= QIDI_MAX_BOXES; ++box) {
+    auto objects =
+        nlohmann::json::object({{"save_variables", nullptr},
+                                {"box_extras", nullptr},
+                                {"multi_color_controller", nlohmann::json::array({"box"})}});
+    for (int box = 1; box <= kQidiMaxBoxes; ++box) {
         objects[fmt::format("heater_generic heater_box{}", box)] = nullptr;
         objects[fmt::format("aht20_f heater_box{}", box)] = nullptr;
         objects[fmt::format("temperature_sensor heater_temp_a_box{}", box)] = nullptr;
@@ -379,7 +370,7 @@ void AmsBackendQidi::on_started() {
     if (api_) {
         auto fila_token = lifetime_.token();
         api_->transfers().download_file_partial(
-            "config", "officiall_filas_list.cfg", QIDI_FILAS_LIST_CAP_BYTES,
+            "config", "officiall_filas_list.cfg", kQidiFilasListCapBytes,
             [this, fila_token](const std::string& body) {
                 // [L081] Defer apply onto main thread — apply_filas_list
                 // touches member state under mutex_.
@@ -410,14 +401,36 @@ void AmsBackendQidi::apply_query_response(const nlohmann::json& response) {
 }
 
 void AmsBackendQidi::handle_status(const nlohmann::json& notification) {
+    // Controller info first, so a save_variables frame in the same
+    // notification resolves its string ids against it.
+    bool controller_changed = false;
+    if (auto mcc_it = notification.find("multi_color_controller");
+        mcc_it != notification.end() && mcc_it->is_object()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        controller_changed = apply_controller_status_locked(*mcc_it);
+    }
+
     // Moonraker delivers save_variables changes as
     // `{"save_variables": {"variables": {...}}}`. Unwrap and feed the inner
     // variables payload to parse_save_variables.
+    bool parsed_variables = false;
     auto sv_it = notification.find("save_variables");
     if (sv_it != notification.end() && sv_it->is_object()) {
         auto vars_it = sv_it->find("variables");
         if (vars_it != sv_it->end() && vars_it->is_object()) {
             parse_save_variables(*vars_it);
+            parsed_variables = true;
+        }
+    }
+    if (controller_changed && !parsed_variables) {
+        // The ids have not moved, so this pass is one more poll of them.
+        nlohmann::json replay;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            replay = identity_vars_;
+        }
+        if (!replay.empty()) {
+            parse_save_variables(replay);
         }
     }
 
@@ -435,9 +448,44 @@ void AmsBackendQidi::handle_status(const nlohmann::json& notification) {
     }
 }
 
+bool AmsBackendQidi::apply_controller_status_locked(const nlohmann::json& controller) {
+    bool changed = false;
+    for (const auto& [slot, delta] : qidi::parse_controller_status(controller)) {
+        const size_t global = static_cast<size_t>(slot);
+        if (controller_slots_.size() <= global) {
+            controller_slots_.resize(static_cast<size_t>(kQidiMaxBoxes * kQidiSlotsPerBox));
+        }
+        ControllerSlotInfo& info = controller_slots_[global];
+        const ControllerSlotInfo before = info;
+        if (delta.filament_id) {
+            info.filament_id = *delta.filament_id;
+        }
+        if (delta.filament_type) {
+            info.filament_type = *delta.filament_type;
+        }
+        if (delta.vendor) {
+            info.vendor = *delta.vendor;
+        }
+        if (delta.min_temp) {
+            info.min_temp = *delta.min_temp;
+        }
+        if (delta.max_temp) {
+            info.max_temp = *delta.max_temp;
+        }
+        changed |= !(info == before);
+        // Paired only from a delta that carried both fields: one carrying either
+        // alone may pair the new spool's half with the previous spool's other half.
+        if (delta.filament_id && delta.filament_type && !info.filament_id.empty() &&
+            !info.filament_type.empty()) {
+            product_types_[info.filament_id] = info.filament_type;
+        }
+    }
+    return changed;
+}
+
 void AmsBackendQidi::apply_box_extras(const nlohmann::json& box_extras) {
-    auto ds_it = box_extras.find("box_drying_state");
-    if (ds_it == box_extras.end() || !ds_it->is_object()) {
+    const auto drying = qidi::parse_box_drying_state(box_extras);
+    if (!drying) {
         return;
     }
     std::lock_guard<std::mutex> lock(mutex_);
@@ -450,19 +498,12 @@ void AmsBackendQidi::apply_box_extras(const nlohmann::json& box_extras) {
         d.supports_live_duration = false;
     }
     const std::time_t now = now_fn_();
-    for (auto it = ds_it->begin(); it != ds_it->end(); ++it) {
-        if (!it->is_object()) {
+    for (const auto& [unit_index, end_time] : *drying) {
+        if (unit_index >= static_cast<int>(dryer_info_.size())) {
             continue;
         }
-        auto unit_index = parse_box_unit_index(it.key()); // "box1" -> 0
-        if (!unit_index || *unit_index >= static_cast<int>(dryer_info_.size())) {
-            continue;
-        }
-        const size_t u = static_cast<size_t>(*unit_index);
-        std::time_t end = 0;
-        if (auto et = it->find("end_time"); et != it->end() && et->is_number()) {
-            end = et->get<std::int64_t>();
-        }
+        const size_t u = static_cast<size_t>(unit_index);
+        const std::time_t end = static_cast<std::time_t>(end_time);
         // A drying cycle started outside HelixScreen (e.g. the QIDI stock UI) carries
         // no commanded duration, so the progress ring would be inert. When a NEW
         // end_time appears, derive the total from the first observed remaining so the
@@ -477,111 +518,32 @@ void AmsBackendQidi::apply_box_extras(const nlohmann::json& box_extras) {
 }
 
 void AmsBackendQidi::apply_config_settings(const nlohmann::json& settings) {
-    std::optional<float> settable_max;
-    bool has_multi_color = false;
-    for (auto it = settings.begin(); it != settings.end(); ++it) {
-        const std::string& key = it.key();
-        // Max 4 dialect marker: a "[multi_color_controller]" section (bare or
-        // instanced, e.g. "multi_color_controller box0") is Max 4-only. #1083
-        if (key == "multi_color_controller" || key.rfind("multi_color_controller ", 0) == 0) {
-            has_multi_color = true;
-        }
-        if (!it->is_object()) {
-            continue;
-        }
-        if (key.rfind("heater_generic heater_box", 0) == 0) {
-            if (auto m = it->find("max_temp"); m != it->end() && m->is_number()) {
-                settable_max = m->get<float>();
-            }
-        } else if (key.rfind("box_config box", 0) == 0) {
-            if (auto m = it->find("target_max_temp_heater_generic");
-                m != it->end() && m->is_number()) {
-                settable_max = m->get<float>();
-            }
-        }
-    }
-    if (settable_max) {
+    const qidi::ConfigSettings config = qidi::parse_config_settings(settings);
+    if (config.dryer_max_temp) {
         std::lock_guard<std::mutex> lock(mutex_);
         // All boxes share the same settable ceiling.
         for (auto& d : dryer_info_) {
-            d.max_temp_c = *settable_max;
+            d.max_temp_c = *config.dryer_max_temp;
         }
-        spdlog::info("{} Box dryer max temp from config: {}°C", backend_log_tag(), *settable_max);
+        spdlog::info("{} Box dryer max temp from config: {}°C", backend_log_tag(),
+                     *config.dryer_max_temp);
     }
 
     // Lane eject (#1041) is a FORCE_MOVE on the box_stepper, which Klipper rejects
     // unless [force_move] enable_force_move: True. Gate supports_lane_eject() on it
     // so we never offer an eject button that would just error.
-    bool force_move = false;
-    if (auto fm = settings.find("force_move"); fm != settings.end() && fm->is_object()) {
-        if (auto en = fm->find("enable_force_move"); en != fm->end() && en->is_boolean()) {
-            force_move = en->get<bool>();
-        }
-    }
+    const bool force_move = config.force_move;
+    const bool has_multi_color = config.has_multi_color;
     fw_force_move_enabled_ = force_move;
     box_uses_multi_color_ = has_multi_color;
     spdlog::info("{} Lane eject {} (multi_color_controller {}, force_move {})", backend_log_tag(),
                  (has_multi_color || force_move) ? "available" : "unavailable",
-                 has_multi_color ? "present -> Max 4 dialect" : "absent",
+                 has_multi_color ? "present -> controller dialect" : "absent",
                  force_move ? "enabled" : "disabled/absent");
 }
 
 void AmsBackendQidi::apply_heater_status(const nlohmann::json& notification) {
-    constexpr std::string_view HEATER_PREFIX = "heater_generic heater_box";
-    constexpr std::string_view AHT20_PREFIX = "aht20_f heater_box";
-    constexpr std::string_view BOX_TEMP_SENSOR_PREFIX = "temperature_sensor heater_temp_";
-
-    struct BoxReading {
-        std::optional<float> temp;
-        std::optional<float> humidity;
-        std::optional<float> target;
-    };
-    std::array<BoxReading, QIDI_MAX_BOXES> readings;
-
-    for (auto it = notification.begin(); it != notification.end(); ++it) {
-        if (!it->is_object()) {
-            continue;
-        }
-        const std::string& key = it.key();
-        const bool is_heater = key.rfind(HEATER_PREFIX, 0) == 0;
-        const bool is_aht = key.rfind(AHT20_PREFIX, 0) == 0;
-        const bool is_box_temp_sensor =
-            key.rfind(BOX_TEMP_SENSOR_PREFIX, 0) == 0 && key.find("_box") != std::string::npos;
-        if (!is_heater && !is_aht && !is_box_temp_sensor) {
-            continue;
-        }
-        auto unit_index = parse_box_unit_index(key);
-        if (!unit_index) {
-            continue;
-        }
-        auto& reading = readings[static_cast<size_t>(*unit_index)];
-
-        // Box temperature is sourced from the heater object and the ambient
-        // aht20 object. The heater_temp_*_box thermistors mirror the heater
-        // element and are deliberately excluded from displayed temperature.
-        if (is_heater || is_aht) {
-            if (auto t_it = it->find("temperature"); t_it != it->end() && t_it->is_number()) {
-                const float v = t_it->get<float>();
-                if (!reading.temp || v > *reading.temp) {
-                    reading.temp = v;
-                }
-            }
-        }
-        if (is_heater) {
-            if (auto tgt_it = it->find("target"); tgt_it != it->end() && tgt_it->is_number()) {
-                const float v = tgt_it->get<float>();
-                if (!reading.target || v > *reading.target) {
-                    reading.target = v;
-                }
-            }
-        }
-        if (auto h_it = it->find("humidity"); h_it != it->end() && h_it->is_number()) {
-            const float v = h_it->get<float>();
-            if (!reading.humidity || v > *reading.humidity) {
-                reading.humidity = v;
-            }
-        }
-    }
+    const auto readings = qidi::parse_heater_status(notification);
 
     bool any_env = false;
     for (const auto& r : readings) {
@@ -664,11 +626,19 @@ void AmsBackendQidi::rebuild_tool_map_locked() {
 // own vendor table, not something the spool carries, so a supplier change
 // alone is not a new spool. All-zero ids state nothing, which the tracker
 // reads as no signal rather than a fingerprint.
-static std::string qidi_slot_fingerprint(int filament_id, int color_id) {
-    if (filament_id <= 0 && color_id <= 0) {
+static std::string qidi_slot_fingerprint(const std::string& filament, const std::string& color) {
+    if (filament == "0" && color == "0") {
         return "";
     }
-    return fmt::format("{}|{}", filament_id, color_id);
+    return fmt::format("{}|{}", filament, color);
+}
+
+std::string AmsBackendQidi::QidiSlotRfid::filament_token() const {
+    return filament_code.empty() ? std::to_string(filament_id) : filament_code;
+}
+
+std::string AmsBackendQidi::QidiSlotRfid::color_token() const {
+    return color_rgb ? fmt::format("#{:06X}", *color_rgb) : std::to_string(color_id);
 }
 
 std::string AmsBackendQidi::normalize_legacy_fingerprint(const std::string& stored) {
@@ -696,49 +666,51 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
     }
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto box_count_it = variables.find("box_count");
-    if (box_count_it != variables.end() && box_count_it->is_number_integer()) {
-        const int box_count = box_count_it->get<int>();
-        if (box_count >= 0 && box_count <= QIDI_MAX_BOXES) {
-            resize_qidi_units(system_info_, box_count);
-            slot_rfid_.resize(static_cast<size_t>(system_info_.total_slots));
-            // Keep the per-unit dryer vectors sized to the box count, preserving
-            // existing state and seeding new boxes with capability defaults.
-            if (dryer_info_.size() != system_info_.units.size()) {
-                dryer_info_.resize(system_info_.units.size(), make_qidi_dryer());
-                dry_end_epoch_.resize(system_info_.units.size(), 0);
-            }
+    for (auto it = variables.begin(); it != variables.end(); ++it) {
+        const std::string& key = it.key();
+        if (key.rfind("filament_slot", 0) == 0 || key.rfind("color_slot", 0) == 0 ||
+            key.rfind("vendor_slot", 0) == 0) {
+            identity_vars_[key] = it.value();
         }
     }
 
-    auto enable_it = variables.find("enable_box");
-    if (enable_it != variables.end() && enable_it->is_number_integer()) {
-        const bool connected = enable_it->get<int>() != 0;
+    const qidi::SaveVariables parsed =
+        qidi::parse_save_variables(variables, system_info_.total_slots);
+    for (const auto& key : parsed.ignored_id_keys) {
+        spdlog::debug(
+            "AmsBackendQidi save_variables {} holds a non-integer or negative value; ignored", key);
+    }
+
+    if (parsed.box_count) {
+        resize_qidi_units(system_info_, *parsed.box_count);
+        slot_rfid_.resize(static_cast<size_t>(system_info_.total_slots));
+        // Keep the per-unit dryer vectors sized to the box count, preserving
+        // existing state and seeding new boxes with capability defaults.
+        if (dryer_info_.size() != system_info_.units.size()) {
+            dryer_info_.resize(system_info_.units.size(), make_qidi_dryer());
+            dry_end_epoch_.resize(system_info_.units.size(), 0);
+        }
+    }
+
+    if (parsed.enable_box) {
         for (auto& unit : system_info_.units) {
-            unit.connected = connected;
+            unit.connected = *parsed.enable_box;
         }
     }
 
     const int slot_count = system_info_.total_slots;
 
     // value_t<N> = "slot<M>" — tool N prints from global slot M.
-    for (int t = 0; t < slot_count; ++t) {
-        const std::string key = "value_t" + std::to_string(t);
-        auto vt_it = variables.find(key);
-        if (vt_it == variables.end() || !vt_it->is_string()) {
-            continue;
-        }
-        if (auto idx = parse_slot_name(vt_it->get<std::string>(), slot_count)) {
-            for (auto& unit : system_info_.units) {
-                for (auto& slot : unit.slots) {
-                    if (slot.mapped_tool == t) {
-                        slot.mapped_tool = -1;
-                    }
+    for (const auto& [t, idx] : parsed.tool_slots) {
+        for (auto& unit : system_info_.units) {
+            for (auto& slot : unit.slots) {
+                if (slot.mapped_tool == t) {
+                    slot.mapped_tool = -1;
                 }
             }
-            if (auto* slot = system_info_.get_slot_global(*idx)) {
-                slot->mapped_tool = t;
-            }
+        }
+        if (auto* slot = system_info_.get_slot_global(idx)) {
+            slot->mapped_tool = t;
         }
     }
 
@@ -748,11 +720,11 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
     // resizes the slot vector and the map has to follow it.
     rebuild_tool_map_locked();
 
-    bool stated_slot[QIDI_MAX_BOXES * QIDI_SLOTS_PER_BOX] = {};
+    bool stated_slot[kQidiMaxBoxes * kQidiSlotsPerBox] = {};
     // Captured before the loop below rewrites them: a slot whose standing
     // status was EMPTY and whose state word now reports filament just
     // received a spool, which is the insert edge the notice below keys on.
-    bool was_empty[QIDI_MAX_BOXES * QIDI_SLOTS_PER_BOX] = {};
+    bool was_empty[kQidiMaxBoxes * kQidiSlotsPerBox] = {};
     for (int i = 0; i < slot_count; ++i) {
         if (const auto* standing = system_info_.get_slot_global(i)) {
             was_empty[i] = standing->status == SlotStatus::EMPTY;
@@ -763,13 +735,12 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
         if (!slot) {
             continue;
         }
-        const std::string key = "slot" + std::to_string(i);
-        auto slot_it = variables.find(key);
-        if (slot_it == variables.end() || !slot_it->is_number_integer()) {
+        const auto stated = parsed.slot_state[static_cast<size_t>(i)];
+        if (!stated) {
             continue;
         }
         stated_slot[i] = true;
-        const int state = slot_it->get<int>();
+        const int state = *stated;
         switch (state) {
         case 0:
             slot->status = SlotStatus::EMPTY;
@@ -787,20 +758,7 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
         }
     }
 
-    auto tool_change_it = variables.find("is_tool_change");
-    const bool has_slot_or_action_key = [&]() {
-        if (tool_change_it != variables.end()) {
-            return true;
-        }
-        for (int i = 0; i < slot_count; ++i) {
-            if (variables.find("slot" + std::to_string(i)) != variables.end()) {
-                return true;
-            }
-        }
-        return false;
-    }();
-
-    if (has_slot_or_action_key) {
+    if (parsed.has_slot_or_action_key) {
         bool any_blocked = false;
         for (const auto& unit : system_info_.units) {
             any_blocked = any_blocked ||
@@ -808,17 +766,13 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
                               return s.status == SlotStatus::BLOCKED;
                           });
         }
-        const bool is_loading = tool_change_it != variables.end() &&
-                                tool_change_it->is_number_integer() &&
-                                tool_change_it->get<int>() != 0;
-        system_info_.action =
-            any_blocked ? AmsAction::ERROR : (is_loading ? AmsAction::LOADING : AmsAction::IDLE);
+        system_info_.action = any_blocked
+                                  ? AmsAction::ERROR
+                                  : (parsed.tool_change ? AmsAction::LOADING : AmsAction::IDLE);
     }
 
-    auto load_it = variables.find("last_load_slot");
-    if (load_it != variables.end() && load_it->is_string()) {
-        const std::string val = load_it->get<std::string>();
-        if (val == "slot-1") {
+    if (parsed.last_load_slot) {
+        if (*parsed.last_load_slot < 0) {
             for (auto& unit : system_info_.units) {
                 for (auto& slot : unit.slots) {
                     if (slot.status == SlotStatus::LOADED) {
@@ -829,10 +783,11 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
             system_info_.current_slot = -1;
             system_info_.current_tool = -1;
             system_info_.filament_loaded = false;
-        } else if (auto idx = parse_slot_name(val, slot_count)) {
-            if (auto* slot = system_info_.get_slot_global(*idx)) {
+        } else {
+            const int idx = *parsed.last_load_slot;
+            if (auto* slot = system_info_.get_slot_global(idx)) {
                 slot->status = SlotStatus::LOADED;
-                system_info_.current_slot = *idx;
+                system_info_.current_slot = idx;
                 system_info_.current_tool = slot->mapped_tool;
                 system_info_.filament_loaded = true;
             }
@@ -847,27 +802,29 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
         if (!slot) {
             continue;
         }
-        const std::string suffix = std::to_string(i);
-        const auto read_slot_var = [&variables](const std::string& key) -> std::optional<int> {
-            const auto it = variables.find(key);
-            if (it == variables.end()) {
-                return std::nullopt;
-            }
-            return read_slot_id(*it, key);
-        };
+        const auto& stated_ids = parsed.ids[static_cast<size_t>(i)];
         auto& ids = slot_rfid_[static_cast<size_t>(i)];
-        if (const auto id = read_slot_var("filament_slot" + suffix)) {
-            ids.filament_id = *id;
+        if (stated_ids.filament_code) {
+            ids.filament_code = *stated_ids.filament_code;
+            ids.filament_id = 0;
+        } else if (stated_ids.filament_id) {
+            ids.filament_id = *stated_ids.filament_id;
+            ids.filament_code.clear();
         }
-        if (const auto id = read_slot_var("color_slot" + suffix)) {
-            ids.color_id = *id;
+        if (stated_ids.color_list) {
+            ids.color_rgb = stated_ids.color_rgb;
+            ids.color_id = 0;
+        } else if (stated_ids.color_id) {
+            ids.color_id = *stated_ids.color_id;
+            ids.color_rgb.reset();
         }
-        if (const auto id = read_slot_var("vendor_slot" + suffix)) {
-            ids.vendor_id = *id;
+        if (stated_ids.vendor_id) {
+            ids.vendor_id = *stated_ids.vendor_id;
         }
 
         const auto& rfid = slot_rfid_[static_cast<size_t>(i)];
-        const std::string fingerprint = qidi_slot_fingerprint(rfid.filament_id, rfid.color_id);
+        const std::string fingerprint =
+            qidi_slot_fingerprint(rfid.filament_token(), rfid.color_token());
 
         // A fingerprint change the Box did not hear from us is judged by the
         // insert rule: ids decoding to a different spool outrank edits made
@@ -875,7 +832,13 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
         // shows the new tag's identity in this same pass. The verdict feeds
         // the insert notice below, so it is computed here and read there.
         helix::ams::InsertVerdict verdict = helix::ams::InsertVerdict::NoEvidence;
-        check_hardware_event_clear(*slot, i, fingerprint, &verdict);
+        // A product id nothing has described yet cannot be judged against
+        // the last spool: the judgment waits for the controller to describe
+        // it, and the replay that info triggers makes it. Our own writes are
+        // numeric, so no echo of ours waits here.
+        if (rfid.filament_code.empty() || product_types_.count(rfid.filament_code) != 0) {
+            check_hardware_event_clear(*slot, i, fingerprint, &verdict);
+        }
 
         // The saved ids name rows in the Box's own tables, which makes a row
         // that resolves the reading and an id that resolves against nothing no
@@ -890,11 +853,49 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
         // lands would linger forever, the > 0 gates below having nothing to
         // overwrite.
         helix::ams::Observation cache(helix::ams::ObservationSource::VendorCache);
-        if (rfid.filament_id > 0) {
+        std::optional<int> profile_nozzle_min;
+        std::optional<int> profile_nozzle_max;
+        // A string product id names no table row: the firmware resolves it
+        // and publishes the result as the slot's controller info.
+        // Info naming another product id describes the previous spool: the
+        // new id landed before the controller restated the slot.
+        const ControllerSlotInfo* controller =
+            !rfid.filament_code.empty() && static_cast<size_t>(i) < controller_slots_.size()
+                ? &controller_slots_[static_cast<size_t>(i)]
+                : nullptr;
+        if (controller && !controller->filament_id.empty() &&
+            controller->filament_id != rfid.filament_code) {
+            controller = nullptr;
+        }
+        if (!rfid.filament_code.empty()) {
+            slot->material.clear();
+            slot->nozzle_temp_min = 0;
+            slot->nozzle_temp_max = 0;
+            if (controller) {
+                slot->nozzle_temp_min = controller->min_temp;
+                slot->nozzle_temp_max = controller->max_temp;
+                if (controller->min_temp > 0) {
+                    profile_nozzle_min = controller->min_temp;
+                }
+                if (controller->max_temp > 0) {
+                    profile_nozzle_max = controller->max_temp;
+                }
+                if (!controller->filament_type.empty()) {
+                    slot->material = controller->filament_type;
+                    cache.material = controller->filament_type;
+                }
+            }
+        } else if (rfid.filament_id > 0) {
             auto p = fila_profiles_.find(rfid.filament_id);
             if (p != fila_profiles_.end()) {
                 slot->nozzle_temp_min = p->second.nozzle_min;
                 slot->nozzle_temp_max = p->second.nozzle_max;
+                if (p->second.nozzle_min > 0) {
+                    profile_nozzle_min = p->second.nozzle_min;
+                }
+                if (p->second.nozzle_max > 0) {
+                    profile_nozzle_max = p->second.nozzle_max;
+                }
                 if (!p->second.type.empty()) {
                     slot->material = p->second.type;
                     cache.material = p->second.type;
@@ -905,7 +906,12 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
             slot->nozzle_temp_min = 0;
             slot->nozzle_temp_max = 0;
         }
-        if (rfid.color_id > 0) {
+        if (rfid.color_rgb) {
+            slot->color_rgb = *rfid.color_rgb;
+            if (helix::ams::is_declarable_color(*rfid.color_rgb)) {
+                cache.color_rgb = *rfid.color_rgb;
+            }
+        } else if (rfid.color_id > 0) {
             auto c = color_palette_.find(rfid.color_id);
             if (c != color_palette_.end()) {
                 slot->color_rgb = c->second;
@@ -918,7 +924,15 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
         } else {
             slot->color_rgb = 0;
         }
-        if (rfid.vendor_id > 0) {
+        if (!rfid.filament_code.empty()) {
+            // The stock screen leaves vendor_slot<N> as it was when it saves a
+            // product id, so only the controller's resolved vendor names it.
+            slot->brand.clear();
+            if (controller && !controller->vendor.empty()) {
+                slot->brand = controller->vendor;
+                cache.brand = controller->vendor;
+            }
+        } else if (rfid.vendor_id > 0) {
             auto v = vendor_names_.find(rfid.vendor_id);
             if (v != vendor_names_.end() && !v->second.empty()) {
                 slot->brand = v->second;
@@ -936,8 +950,12 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
         // no id keys restates the write the same way and is judged the same
         // way. A key carried with 0 never reaches here armed: it moves the
         // fingerprint first, and the clear that follows drops the guard.
+        const helix::ams::Observation stated = cache;
         own_write_echoes_.withhold(i, std::string{}, cache);
         helix::ams::ingest(lane_id(i), cache);
+        // The temperatures are the filament profile's for the same id.
+        helix::ams::fold_tag_frame_into(tag_readings_, i, stated, cache, profile_nozzle_min,
+                                        profile_nozzle_max);
 
         // An insert the ids did not vouch for: the table rows are the Box's
         // memory of the last spool, so a spool that goes in without moving
@@ -1007,151 +1025,13 @@ void AmsBackendQidi::parse_save_variables(const nlohmann::json& variables) {
 }
 
 void AmsBackendQidi::apply_filas_list(const std::string& content) {
-    // Minimal ConfigParser-compatible INI: `[section]` headers, `key = value`
-    // lines, `#` or `;` comments. Three section kinds are honoured:
-    //   [fila<N>]     → FilaProfile (name, type, nozzle + box temps)
-    //   [colordict]   → integer id → 0xRRGGBB
-    //   [vendor_list] → integer id → vendor name
-    // Everything else is silently ignored. Trailing `#`/`;` tail content on a
-    // value is dropped. All three maps are built into locals and swapped under
-    // mutex_ at the end so a reload replaces atomically.
-    auto trim = [](std::string s) {
-        const auto not_space = [](unsigned char c) { return !std::isspace(c); };
-        s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-        s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-        return s;
-    };
-    // Drop inline `;` / `#` tail then trim. ConfigParser keeps `#` inside a
-    // value unless preceded by whitespace, but the stock file never relies on
-    // that, so the simpler "strip at first comment char" rule is fine here.
-    auto strip_tail = [&](const std::string& v) {
-        std::string body = v;
-        for (char ch : {';', '#'}) {
-            // A leading '#' is a color literal, not a comment — only strip a
-            // '#' that is not at the very start of the trimmed value.
-            auto pos = body.find(ch);
-            if (ch == '#' && pos == 0) {
-                continue;
-            }
-            if (pos != std::string::npos) {
-                body.erase(pos);
-            }
-        }
-        return trim(body);
-    };
-    auto parse_int_field = [&](const std::string& v, int& out) {
-        if (const auto parsed = tio::parse_leading<int>(strip_tail(v))) {
-            out = *parsed;
-            return true;
-        }
-        return false;
-    };
-    enum class Section { None, Fila, Color, Vendor };
+    qidi::FilasList list = qidi::parse_filas_list(content);
 
-    std::map<int, FilaProfile> next_profiles;
-    std::map<int, std::uint32_t> next_colors;
-    std::map<int, std::string> next_vendors;
-
-    Section section = Section::None;
-    std::optional<int> current_id;
-    FilaProfile current;
-
-    auto flush_fila = [&]() {
-        if (section == Section::Fila && current_id) {
-            next_profiles[*current_id] = current;
-        }
-        current_id.reset();
-        current = FilaProfile{};
-    };
-
-    for (std::string_view sv : tio::lines(content)) {
-        std::string line(sv);
-        std::string t = trim(line);
-        if (t.empty() || t.front() == '#' || t.front() == ';') {
-            continue;
-        }
-        if (t.front() == '[' && t.back() == ']') {
-            flush_fila();
-            std::string name = trim(t.substr(1, t.size() - 2));
-            if (name == "colordict") {
-                section = Section::Color;
-            } else if (name == "vendor_list") {
-                section = Section::Vendor;
-            } else if (name.rfind("fila", 0) == 0) {
-                section = Section::Fila;
-                const auto id = tio::parse_leading<int>(name.substr(4));
-                if (!id) {
-                    // Malformed `fila<N>` — treat as no current section.
-                    section = Section::None;
-                } else if (*id > 0) {
-                    current_id = *id;
-                }
-            } else {
-                section = Section::None;
-            }
-            continue;
-        }
-        auto eq = t.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-        std::string key = trim(t.substr(0, eq));
-        std::string val = t.substr(eq + 1);
-
-        switch (section) {
-        case Section::Fila: {
-            if (!current_id) {
-                break;
-            }
-            if (key == "filament") {
-                current.name = strip_tail(val);
-            } else if (key == "type") {
-                current.type = strip_tail(val);
-            } else if (key == "min_temp") {
-                parse_int_field(val, current.nozzle_min);
-            } else if (key == "max_temp") {
-                parse_int_field(val, current.nozzle_max);
-            } else if (key == "box_min_temp") {
-                parse_int_field(val, current.box_min);
-            } else if (key == "box_max_temp") {
-                parse_int_field(val, current.box_max);
-            }
-            break;
-        }
-        case Section::Color: {
-            // A non-integer key in [colordict] names no row to store.
-            if (const auto id = tio::parse_leading<int>(trim(key))) {
-                // A colordict row is a lane-shaped colour value like any other
-                // producer's, so the tree's one hex grammar reads it: `#RGB`,
-                // a bare `RRGGBB`, an `0x` prefix and the 8-digit `#RRGGBBAA`
-                // all mean here what they mean everywhere else. Only a row
-                // stating a colour becomes a palette entry; a blank row states
-                // that the id names none, which is not a colour to resolve
-                // against.
-                const auto reading = helix::ams::read_lane_color(val);
-                if (reading.kind == helix::ams::ColorReadingKind::Observed) {
-                    next_colors[*id] = reading.rgb;
-                }
-            }
-            break;
-        }
-        case Section::Vendor: {
-            // A non-integer key in [vendor_list] names no row to store.
-            if (const auto id = tio::parse_leading<int>(trim(key))) {
-                next_vendors[*id] = strip_tail(val);
-            }
-            break;
-        }
-        case Section::None:
-            break;
-        }
-    }
-    flush_fila();
-
+    // A reload replaces all three tables at once.
     std::lock_guard<std::mutex> lock(mutex_);
-    fila_profiles_ = std::move(next_profiles);
-    color_palette_ = std::move(next_colors);
-    vendor_names_ = std::move(next_vendors);
+    fila_profiles_ = std::move(list.profiles);
+    color_palette_ = std::move(list.colors);
+    vendor_names_ = std::move(list.vendors);
     spdlog::info("{} Loaded {} fila profile(s), {} color(s), {} vendor(s) from "
                  "officiall_filas_list.cfg",
                  backend_log_tag(), fila_profiles_.size(), color_palette_.size(),
@@ -1229,7 +1109,12 @@ void AmsBackendQidi::detect_firmware_capabilities() {
 
 std::string AmsBackendQidi::build_unload_gcode(int slot_index, int temp) const {
     if (fw_has_m603_) {
-        return "M603 S" + std::to_string(temp);
+        std::string g = "M603 S" + std::to_string(temp);
+        if (const std::string restore = helix::filament_macros::restore_after("M603");
+            !restore.empty()) {
+            g += "\n" + restore;
+        }
+        return g;
     }
     // Fallback for firmware without M603: drive the box_stepper primitive that
     // UNLOAD_T<n> wraps. Needs the hotend hot like the load path does.
@@ -1243,9 +1128,9 @@ std::string AmsBackendQidi::build_unload_gcode(int slot_index, int temp) const {
 
 AmsError AmsBackendQidi::do_load_filament(int slot_index) {
     spdlog::info("{} load_filament(slot={})", backend_log_tag(), slot_index);
-    int load_temp = QIDI_DEFAULT_LOAD_TEMP_C;
+    int load_temp = kQidiDefaultLoadTempC;
     int loaded_other = -1; // slot in the extruder that must be retracted first
-    int unload_temp = QIDI_DEFAULT_LOAD_TEMP_C;
+    int unload_temp = kQidiDefaultLoadTempC;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (auto err = validate_slot_index_locked(slot_index); !err.success()) {
@@ -1273,6 +1158,12 @@ AmsError AmsBackendQidi::do_load_filament(int slot_index) {
                 break;
             }
         }
+    }
+
+    // The multi_color_controller owns the whole load: it heats, swaps out a
+    // seated slot, feeds and wipes, the way the stock screen drives it.
+    if (box_uses_multi_color_) {
+        return execute_gcode("MULTI_COLOR_LOAD SLOT=slot" + std::to_string(slot_index));
     }
 
     // The stock T<n> macros don't exist for the box's own slots on Q2 firmware
@@ -1304,7 +1195,7 @@ AmsError AmsBackendQidi::do_load_filament(int slot_index) {
 
 AmsError AmsBackendQidi::do_unload_filament(int slot_index) {
     spdlog::info("{} unload_filament(slot={})", backend_log_tag(), slot_index);
-    int unload_temp = QIDI_DEFAULT_LOAD_TEMP_C;
+    int unload_temp = kQidiDefaultLoadTempC;
     int target_slot = slot_index; // for the EXTRUDER_UNLOAD fallback
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1335,6 +1226,10 @@ AmsError AmsBackendQidi::do_unload_filament(int slot_index) {
             return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
                                                 slot_index_bound_locked() - 1);
         }
+    }
+
+    if (box_uses_multi_color_) {
+        return execute_gcode("MULTI_COLOR_UNLOAD SLOT=slot" + std::to_string(target_slot));
     }
 
     // M603 is the stock "unload" the QIDI screen runs — it heats, retracts to
@@ -1433,6 +1328,15 @@ std::optional<helix::ErrorEvent> AmsBackendQidi::current_error() const {
     return e;
 }
 
+std::string AmsBackendQidi::eject_unavailable_reason(int slot_index) const {
+    if (supports_lane_eject() || !get_slot_info(slot_index).is_present()) {
+        return {};
+    }
+    // Translated here: the extractor reads literals, and lv_tr() on a runtime string would
+    // leave this untranslatable.
+    return lv_tr("Eject needs [force_move] enabled in printer config");
+}
+
 AmsError AmsBackendQidi::eject_lane(int slot_index) {
     spdlog::info("{} eject_lane(slot={})", backend_log_tag(), slot_index);
     {
@@ -1441,7 +1345,7 @@ AmsError AmsBackendQidi::eject_lane(int slot_index) {
             return err;
         }
     }
-    // Max 4 dialect: the multi_color_controller state machine owns filament ops and
+    // Controller dialect: the multi_color_controller state machine owns filament ops and
     // rejects the Q2 box_stepper FORCE_MOVE with "Invalid pin value". Eject via the
     // public MULTI_COLOR_BOX_UNLOAD command instead — no [force_move] required, and it
     // must win over the FORCE_MOVE path even if force_move happens to be enabled. #1083
@@ -1456,22 +1360,10 @@ AmsError AmsBackendQidi::eject_lane(int slot_index) {
     // side (#1041, QIDI Discord / xenon). Offered only for non-loaded lanes (the
     // context menu gates on !loaded), so no pre-unload is needed here — for a
     // loaded lane the caller runs the unload stack first to park at the hub.
-    // Distance is stored as a positive magnitude in settings; negate it here to
-    // keep the existing "push back into the box" direction. Fall back to the
-    // historic defaults (878 mm / 100 mm/s) if SettingsManager hasn't been
-    // initialized — a FORCE_MOVE with VELOCITY=0/DISTANCE=0 is a degenerate no-op
-    // that Klipper rejects, so the eject must always carry real numbers.
-    int eject_velocity = helix::SettingsManager::instance().get_qidi_eject_velocity();
-    int eject_distance_mm = helix::SettingsManager::instance().get_qidi_eject_distance();
-    if (eject_velocity <= 0) {
-        eject_velocity = 100;
-    }
-    if (eject_distance_mm <= 0) {
-        eject_distance_mm = 878;
-    }
+    // Distance is a positive magnitude; negate it here to push back into the box.
     return execute_gcode("FORCE_MOVE STEPPER=\"box_stepper slot" + std::to_string(slot_index) +
-                         "\" VELOCITY=" + std::to_string(eject_velocity) +
-                         " DISTANCE=" + std::to_string(-eject_distance_mm));
+                         "\" VELOCITY=" + std::to_string(eject_velocity_mm_s()) +
+                         " DISTANCE=" + std::to_string(-eject_distance_mm()));
 }
 
 // --- Configuration ---
@@ -1561,8 +1453,10 @@ AmsError AmsBackendQidi::apply_user_edit(int slot_index, const SlotInfo& info,
             vendor_id = resolve_vendor_id(vendor_names_, info.brand);
         }
         const size_t idx = static_cast<size_t>(slot_index);
-        const int old_fila = idx < slot_rfid_.size() ? slot_rfid_[idx].filament_id : 0;
-        const int old_color = idx < slot_rfid_.size() ? slot_rfid_[idx].color_id : 0;
+        const std::string old_fila =
+            idx < slot_rfid_.size() ? slot_rfid_[idx].filament_token() : std::string("0");
+        const std::string old_color =
+            idx < slot_rfid_.size() ? slot_rfid_[idx].color_token() : std::string("0");
 
         // The write per field: a resolved row id, an explicit zero when the
         // user cleared a field the Box still holds an id for, or no write at
@@ -1571,13 +1465,13 @@ AmsError AmsBackendQidi::apply_user_edit(int slot_index, const SlotInfo& info,
         // so the clear never reaches the variables the Box reads back.
         if (fila_id > 0) {
             fila_write = fila_id;
-        } else if (info.material.empty() && old_fila != 0) {
+        } else if (info.material.empty() && old_fila != "0") {
             fila_write = 0;
         }
         if (have_palette) {
             if (color_id > 0) {
                 color_write = color_id;
-            } else if (color_cleared && old_color != 0) {
+            } else if (color_cleared && old_color != "0") {
                 color_write = 0;
             }
         }
@@ -1596,13 +1490,13 @@ AmsError AmsBackendQidi::apply_user_edit(int slot_index, const SlotInfo& info,
         // With no baseline yet there is nothing to guard: the first
         // observation is a baseline and never fires a clear.
         if (const auto base = rfid_tracker_.baseline(slot_index)) {
-            std::vector<int> fila_vals{old_fila};
-            std::vector<int> color_vals{old_color};
-            if (fila_write >= 0 && fila_write != old_fila) {
-                fila_vals.push_back(fila_write);
+            std::vector<std::string> fila_vals{old_fila};
+            std::vector<std::string> color_vals{old_color};
+            if (fila_write >= 0 && std::to_string(fila_write) != old_fila) {
+                fila_vals.push_back(std::to_string(fila_write));
             }
-            if (color_write >= 0 && color_write != old_color) {
-                color_vals.push_back(color_write);
+            if (color_write >= 0 && std::to_string(color_write) != old_color) {
+                color_vals.push_back(std::to_string(color_write));
             }
             staged_echoes =
                 expect_own_write_echoes_locked(slot_index, *base, fila_vals, color_vals);
@@ -1767,10 +1661,12 @@ void AmsBackendQidi::clear_slot_override(int slot_index) {
         // no expectation of its own.
         if (const auto base = rfid_tracker_.baseline(slot_index)) {
             const size_t idx = static_cast<size_t>(slot_index);
-            const int old_fila = idx < slot_rfid_.size() ? slot_rfid_[idx].filament_id : 0;
-            const int old_color = idx < slot_rfid_.size() ? slot_rfid_[idx].color_id : 0;
-            staged_echoes =
-                expect_own_write_echoes_locked(slot_index, *base, {old_fila, 0}, {old_color, 0});
+            const std::string old_fila =
+                idx < slot_rfid_.size() ? slot_rfid_[idx].filament_token() : std::string("0");
+            const std::string old_color =
+                idx < slot_rfid_.size() ? slot_rfid_[idx].color_token() : std::string("0");
+            staged_echoes = expect_own_write_echoes_locked(slot_index, *base, {old_fila, "0"},
+                                                           {old_color, "0"});
         }
     }
 
@@ -1796,7 +1692,7 @@ void AmsBackendQidi::clear_slot_override(int slot_index) {
         rfid_tracker_.forget_expected(slot_index, staged_echoes);
     }
 
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 }
 
 bool AmsBackendQidi::check_hardware_event_clear(SlotInfo& slot, int slot_index,
@@ -1874,38 +1770,54 @@ AmsBackendQidi::fingerprint_evidence_locked(const std::string& fingerprint) cons
     if (sep == std::string::npos) {
         return evidence;
     }
-    int fila_id = 0;
-    int color_id = 0;
-    const auto fila = tio::parse_leading<int>(fingerprint.substr(0, sep));
-    const auto color = tio::parse_leading<int>(fingerprint.substr(sep + 1));
-    if (!fila || !color) {
-        // A component that is not an integer states nothing decodable.
+    // Each component is a table row id, or what the Box saved in its place:
+    // a string product id for the filament, a "#RRGGBB" list colour.
+    const std::string fila_token = fingerprint.substr(0, sep);
+    const std::string color_token = fingerprint.substr(sep + 1);
+    const bool fila_is_row = qidi::is_all_digits(fila_token);
+    const bool fila_is_code = !fila_is_row && qidi::read_filament_code(nlohmann::json(fila_token));
+    const bool color_is_row = qidi::is_all_digits(color_token);
+    std::optional<std::uint32_t> listed_color;
+    if (!color_is_row && color_token.size() == 7 && color_token.front() == '#') {
+        listed_color = helix::parse_hex_color(color_token);
+    }
+    if ((!fila_is_row && !fila_is_code) || (!color_is_row && !listed_color)) {
+        // A component in no form the Box saves states nothing decodable.
         return evidence;
     }
-    fila_id = *fila;
-    color_id = *color;
+    const int fila_id = fila_is_row ? tio::parse_leading<int>(fila_token).value_or(0) : 0;
+    const int color_id = color_is_row ? tio::parse_leading<int>(color_token).value_or(0) : 0;
     // The composite is the Box's own read, so the spool carries no UID-capable
     // tag rather than one not read yet, and the material/colour fields decide.
     evidence.tag_read_complete = true;
     const auto fila_row = fila_profiles_.find(fila_id);
     const auto color_row = color_palette_.find(color_id);
-    const bool fila_decoded = fila_row != fila_profiles_.end() && !fila_row->second.type.empty();
-    const bool color_decoded =
-        color_row != color_palette_.end() && helix::ams::is_declarable_color(color_row->second);
+    const auto product = fila_is_code ? product_types_.find(fila_token) : product_types_.end();
+    const bool product_decoded = product != product_types_.end() && !product->second.empty();
+    const bool fila_decoded =
+        product_decoded || (fila_row != fila_profiles_.end() && !fila_row->second.type.empty());
+    const bool color_decoded = listed_color
+                                   ? helix::ams::is_declarable_color(*listed_color)
+                                   : color_row != color_palette_.end() &&
+                                         helix::ams::is_declarable_color(color_row->second);
     // The tables come from an async officiall_filas_list.cfg fetch that can
-    // land late or fail. An id the tables cannot decode is still a stable
-    // identity the Box chose, so fall back to the raw ids: a differing
-    // composite stays a swap instead of decoding to empty on both sides and
-    // reading as no evidence, which would keep the override forever.
-    if ((fila_id > 0 && !fila_decoded) || (color_id > 0 && !color_decoded)) {
-        evidence.tag_uid = fmt::format("fila#{}|color#{}", fila_id, color_id);
+    // land late or fail, and a product id decodes only once the controller has
+    // described it. An id nothing here decodes is still a stable identity the
+    // Box chose, so fall back to the raw tokens: a differing composite stays a
+    // swap instead of decoding to empty on both sides and reading as no
+    // evidence, which would keep the override forever.
+    if ((fila_is_code && !product_decoded) || (fila_id > 0 && !fila_decoded) ||
+        ((color_id > 0 || listed_color) && !color_decoded)) {
+        evidence.tag_uid = fmt::format("fila#{}|color#{}", fila_token, color_token);
         return evidence;
     }
-    if (fila_decoded) {
+    if (product_decoded) {
+        evidence.material = product->second;
+    } else if (fila_decoded) {
         evidence.material = fila_row->second.type;
     }
     if (color_decoded) {
-        evidence.color_rgb = color_row->second;
+        evidence.color_rgb = listed_color ? *listed_color : color_row->second;
     }
     return evidence;
 }
@@ -1920,11 +1832,11 @@ void AmsBackendQidi::clear_override_fields(SlotInfo& slot) const {
 
 std::vector<std::string>
 AmsBackendQidi::expect_own_write_echoes_locked(int slot_index, const std::string& base,
-                                               const std::vector<int>& fila_vals,
-                                               const std::vector<int>& color_vals) {
+                                               const std::vector<std::string>& fila_tokens,
+                                               const std::vector<std::string>& color_tokens) {
     std::vector<std::string> expected;
-    for (const int f : fila_vals) {
-        for (const int c : color_vals) {
+    for (const auto& f : fila_tokens) {
+        for (const auto& c : color_tokens) {
             const std::string fp = qidi_slot_fingerprint(f, c);
             if (!fp.empty() && fp != base) {
                 expected.push_back(fp);
@@ -2041,6 +1953,50 @@ AmsError AmsBackendQidi::stop_drying(int unit) {
     }
     return execute_gcode("SET_HEATER_TEMPERATURE HEATER=heater_box" + std::to_string(box) +
                          " TARGET=0");
+}
+
+// ============================================================================
+// Device actions: lane eject distance and speed
+// ============================================================================
+
+std::vector<helix::printer::DeviceSection> AmsBackendQidi::get_device_sections() const {
+    return {helix::printer::device_section("filament_control", 0,
+                                           TR_NOOP("How far and how fast a lane ejects"))};
+}
+
+std::vector<helix::printer::DeviceAction> AmsBackendQidi::get_device_actions() const {
+    using helix::printer::DeviceAction;
+    return {
+        DeviceAction::slider("eject_distance", "Eject Distance", "filament_control",
+                             static_cast<float>(eject_distance_mm()), kMinEjectDistanceMm,
+                             kMaxEjectDistanceMm, "mm", "filament",
+                             "How far filament is pushed back into the box on eject"),
+        DeviceAction::slider("eject_velocity", "Eject Speed", "filament_control",
+                             static_cast<float>(eject_velocity_mm_s()), kMinEjectVelocityMmS,
+                             kMaxEjectVelocityMmS, "mm/s", "speed",
+                             "How fast filament is pushed back on eject"),
+    };
+}
+
+AmsError AmsBackendQidi::do_execute_device_action(const std::string& action_id,
+                                                  const std::any& value) {
+    const bool distance = action_id == "eject_distance";
+    if (!distance && action_id != "eject_velocity") {
+        return AmsErrorHelper::not_supported("Unknown action: " + action_id);
+    }
+    const auto [number, err] = helix::printer::device_action_value<float>(
+        value, distance ? "eject distance" : "eject speed");
+    if (!err) {
+        return err;
+    }
+    auto& settings = helix::SettingsManager::instance();
+    const int rounded = static_cast<int>(std::lround(number));
+    if (distance) {
+        settings.set_ams_eject_distance(rounded);
+    } else {
+        settings.set_ams_eject_velocity(rounded);
+    }
+    return AmsErrorHelper::success();
 }
 
 } // namespace helix

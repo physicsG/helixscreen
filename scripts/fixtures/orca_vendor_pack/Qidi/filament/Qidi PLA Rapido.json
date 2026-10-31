@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Qidi PLA Rapido",
+    "instantiation": "true",
+    "filament_vendor": [
+        "Qidi"
+    ],
+    "filament_type": [
+        "PLA"
+    ],
+    "nozzle_temperature": [
+        "220"
+    ]
+}

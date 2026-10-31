@@ -115,15 +115,15 @@ void PrintSelectListView::init_pool() {
         return;
     }
 
-    spdlog::debug("[PrintSelectListView] Creating {} row widgets", POOL_SIZE);
+    spdlog::debug("[PrintSelectListView] Creating {} row widgets", kPoolSize);
 
     // Reserve storage
-    list_pool_.reserve(POOL_SIZE);
-    list_pool_indices_.resize(POOL_SIZE, -1);
-    list_data_pool_.reserve(POOL_SIZE);
+    list_pool_.reserve(kPoolSize);
+    list_pool_indices_.resize(kPoolSize, -1);
+    list_data_pool_.reserve(kPoolSize);
 
     // Create pool rows (initially hidden)
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < kPoolSize; i++) {
         const char* attrs[] = {"filename", "",           "file_size", "",  "modified_date",
                                "",         "print_time", "",          NULL};
 
@@ -363,7 +363,7 @@ void PrintSelectListView::update_visible(const std::vector<PrintFileData>& file_
     int row_stride = row_height + cached_row_gap_;
 
     const VirtualWindow win =
-        compute_window(scroll_y, viewport_height, row_stride, total_rows, BUFFER_ROWS);
+        compute_window(scroll_y, viewport_height, row_stride, total_rows, kBufferRows);
     const int first_visible = win.first;
     const int last_visible = win.last;
 
@@ -437,7 +437,7 @@ void PrintSelectListView::animate_entrance() {
     }
 
     size_t animated_count = 0;
-    for (size_t i = 0; i < list_pool_.size() && animated_count < MAX_ANIMATED_ROWS; i++) {
+    for (size_t i = 0; i < list_pool_.size() && animated_count < kMaxAnimatedRows; i++) {
         lv_obj_t* row = list_pool_[i];
 
         if (lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN)) {
@@ -445,17 +445,17 @@ void PrintSelectListView::animate_entrance() {
         }
 
         // Start row below final position and transparent
-        lv_obj_set_style_translate_y(row, SLIDE_OFFSET_Y, LV_PART_MAIN);
+        lv_obj_set_style_translate_y(row, kSlideOffsetY, LV_PART_MAIN);
         lv_obj_set_style_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
 
-        int32_t delay = static_cast<int32_t>(animated_count) * STAGGER_DELAY_MS;
+        int32_t delay = static_cast<int32_t>(animated_count) * kStaggerDelayMs;
 
         // Slide up animation
         lv_anim_t slide_anim;
         lv_anim_init(&slide_anim);
         lv_anim_set_var(&slide_anim, row);
-        lv_anim_set_values(&slide_anim, SLIDE_OFFSET_Y, 0);
-        lv_anim_set_duration(&slide_anim, ENTRANCE_DURATION_MS);
+        lv_anim_set_values(&slide_anim, kSlideOffsetY, 0);
+        lv_anim_set_duration(&slide_anim, kEntranceDurationMs);
         lv_anim_set_delay(&slide_anim, delay);
         lv_anim_set_path_cb(&slide_anim, lv_anim_path_ease_out);
         lv_anim_set_exec_cb(&slide_anim, [](void* obj, int32_t value) {
@@ -468,7 +468,7 @@ void PrintSelectListView::animate_entrance() {
         lv_anim_init(&fade_anim);
         lv_anim_set_var(&fade_anim, row);
         lv_anim_set_values(&fade_anim, LV_OPA_TRANSP, LV_OPA_COVER);
-        lv_anim_set_duration(&fade_anim, ENTRANCE_DURATION_MS);
+        lv_anim_set_duration(&fade_anim, kEntranceDurationMs);
         lv_anim_set_delay(&fade_anim, delay);
         lv_anim_set_path_cb(&fade_anim, lv_anim_path_ease_out);
         lv_anim_set_exec_cb(&fade_anim, [](void* obj, int32_t value) {

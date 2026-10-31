@@ -21,6 +21,7 @@
 #include "moonraker_api_mock.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
+#include "storage_report.h"
 #include "usb_backend_mock.h"
 #include "usb_manager.h"
 
@@ -113,9 +114,10 @@ class UsbPrintFixture : private helix::PrintSelectGlobalStateReset,
                            int error_code = 0) {
         helix::MoonrakerClientMockTestAccess::set_method_handler(
             mock_client_, "server.files.list",
-            [entries, error_code](MoonrakerClientMock*, const json&,
-                                  std::function<void(const json&)> success_cb,
-                                  std::function<void(const MoonrakerError&)> error_cb) -> bool {
+            [entries,
+             error_code](MoonrakerClientMock*, const json&,
+                         helix::SharedCallback<void(const json&)> success_cb,
+                         helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
                 if (error_code != 0) {
                     MoonrakerError err =
                         MoonrakerError::unknown("listing refused", "server.files.list");
@@ -182,6 +184,33 @@ TEST_CASE_METHOD(UsbPrintFixture, "a failed USB copy says so and starts nothing"
     drain();
     CHECK(transfers().path_uploads().size() == 2);
     CHECK(PrintSelectPanelTestAccess::controller_file(*panel_).first == "part.gcode");
+}
+
+TEST_CASE_METHOD(UsbPrintFixture, "a USB copy the printer has no room for is not started",
+                 "[usb][usb_print][plugin_storage]") {
+    ErrorLog errors;
+    helix::MoonrakerClientMockTestAccess::report_full_disk(mock_client_);
+    panel_->start_print(/*force=*/true);
+    drain();
+
+    CHECK(errors.messages == std::vector<std::string>{helix::storage::kNoUploadSpaceMessage});
+    CHECK(transfers().path_uploads().empty());
+    CHECK(PrintSelectPanelTestAccess::controller_file(*panel_).first.empty());
+
+    // The refusal releases the in-flight guard: with room, a retry copies.
+    helix::MoonrakerClientMockTestAccess::set_method_handler(
+        mock_client_, "server.files.get_directory",
+        [](MoonrakerClientMock*, const json&, helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)>) -> bool {
+            success_cb(json{{"result",
+                             {{"dirs", json::array()},
+                              {"files", json::array()},
+                              {"disk_usage", {{"total", 1ULL << 40}, {"free", 1ULL << 40}}}}}});
+            return true;
+        });
+    panel_->start_print(/*force=*/true);
+    drain();
+    CHECK(transfers().path_uploads().size() == 1);
 }
 
 TEST_CASE_METHOD(UsbPrintFixture, "a USB print keeps what was selected when Print was tapped",

@@ -28,6 +28,8 @@ namespace {
 lv_obj_t* box(lv_obj_t* parent, int w, int h) {
     lv_obj_t* obj = lv_obj_create(parent);
     lv_obj_set_size(obj, w, h);
+    // The theme's default padding would leave a 24px-wide box no content area to draw into.
+    lv_obj_set_style_pad_all(obj, 0, 0);
     return obj;
 }
 } // namespace

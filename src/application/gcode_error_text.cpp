@@ -6,6 +6,7 @@
 // error-routing web (toasts, modals, RPC correlation) that gcode_error_router
 // .cpp drags along — the same seam-driven split as moonraker_api_power.cpp.
 
+#include "firmware_error_envelope.h"
 #include "gcode_error_router.h"
 #include "klipper_error_table.h"
 #include "lvgl.h"
@@ -14,101 +15,64 @@
 
 namespace helix {
 
-void GcodeErrorRouter::clean_error_text(std::string& text, std::string& out_code) {
+void GcodeErrorRouter::clean_error_text(std::string& text, std::string& out_code,
+                                        FirmwareCodeScheme* out_scheme) {
     out_code.clear();
+    if (out_scheme) {
+        *out_scheme = FirmwareCodeScheme::Opaque;
+    }
 
-    // K2's Klipper builds emit errors in two shapes:
-    //   1. Pure JSON:     `{"code":"key849","msg":"...","values":[...]}`
-    //   2. Embedded JSON: `Internal error during connect: !{"code":"key298",...}`
-    //      (observed K2 Plus 2026-05-24 when klipper_mcu shutdown)
-    // Scan for the first `{"code":` anywhere in the line. If found, parse
-    // from there; otherwise fall through to the heuristic rewrites.
-    auto json_start = text.find("{\"code\"");
-    if (json_start != std::string::npos) {
-        // Brace-balance forward from json_start to find the matching close
-        // brace, ignoring `{`/`}` inside string literals. nlohmann::parse
-        // requires whole-input -- it won't ignore trailing garbage -- so we
-        // extract just [json_start, obj_end) before parsing.
-        size_t i = json_start;
-        int depth = 0;
-        bool in_string = false;
-        bool escape = false;
-        size_t obj_end = std::string::npos;
-        for (; i < text.size(); ++i) {
-            char c = text[i];
-            if (in_string) {
-                if (escape) {
-                    escape = false;
-                } else if (c == '\\') {
-                    escape = true;
-                } else if (c == '"') {
-                    in_string = false;
-                }
-                continue;
-            }
-            if (c == '"') {
-                in_string = true;
-            } else if (c == '{') {
-                ++depth;
-            } else if (c == '}') {
-                if (--depth == 0) {
-                    obj_end = i + 1;
-                    break;
-                }
-            }
+    // A firmware JSON envelope, whole or spliced into Klipper prose: the code
+    // moves out to the caller and the message takes the object's place, so the
+    // prose around it (Klipper's restart footer) survives.
+    if (const auto env = find_firmware_error_envelope(text)) {
+        out_code = env->code;
+        if (out_scheme) {
+            *out_scheme = env->scheme;
         }
-
-        if (obj_end != std::string::npos) {
-            std::string json_str = text.substr(json_start, obj_end - json_start);
+        // Not behind HELIX_HAS_CFS: key111/key298/key585 are Klipper-layer
+        // faults a machine reports with no filament hardware, and a build
+        // without CFS still has to translate them rather than show the raw
+        // firmware string.
+        const printer::KlipperErrorEntry* entry = env->scheme == FirmwareCodeScheme::ErrorTable
+                                                      ? printer::klipper_error_lookup(env->code)
+                                                      : nullptr;
+        if (entry) {
 #if defined(__cpp_exceptions)
             try {
 #else
             {
 #endif
-                auto j = nlohmann::json::parse(json_str, nullptr, false);
-                if (!j.is_discarded()) {
-                    // Read the firmware's msg once: table entries that prefer it
-                    // (key843: one code, several causes) decode with the real
-                    // wording, and the uncoded fallback below reuses it.
-                    std::string fw_msg;
-                    if (j.contains("msg") && j["msg"].is_string()) {
-                        fw_msg = j["msg"].get<std::string>();
+                // Table entries that prefer it (key843: one code, several
+                // causes) decode with the firmware's real wording.
+                std::string message = (entry->prefer_fw_msg && !env->msg.empty())
+                                          ? env->msg
+                                          : std::string(lv_tr(entry->message));
+                if (entry->format_values) {
+                    auto values = nlohmann::json::array();
+                    if (!env->values_json.empty()) {
+                        values = nlohmann::json::parse(env->values_json, nullptr, false);
                     }
-                    if (j.contains("code") && j["code"].is_string()) {
-                        out_code = j["code"].get<std::string>();
-                        nlohmann::json values = nlohmann::json::array();
-                        if (j.contains("values")) {
-                            values = j["values"];
-                        }
-                        // Not behind HELIX_HAS_CFS: key111/key298/key585 are
-                        // Klipper-layer faults a machine reports with no filament
-                        // hardware, and a build without CFS still has to translate
-                        // them rather than show the raw firmware string.
-                        if (const printer::KlipperErrorEntry* entry =
-                                printer::klipper_error_lookup(out_code)) {
-                            std::string message = (entry->prefer_fw_msg && !fw_msg.empty())
-                                                      ? fw_msg
-                                                      : std::string(lv_tr(entry->message));
-                            if (entry->format_values) {
-                                message += entry->format_values(values);
-                            }
-                            text = message + ". " + lv_tr(entry->hint);
-                            return;
-                        }
-                    }
-                    if (!fw_msg.empty()) {
-                        text = fw_msg;
-                    }
+                    message += entry->format_values(values);
                 }
+                // The curated wording replaces the whole text: spliced into
+                // the firmware's prose it would mix languages, and a toast's
+                // truncation could cut the hint.
+                text = message + ". " + lv_tr(entry->hint);
+                return;
 #if defined(__cpp_exceptions)
             } catch (...) {
                 // A throw from the error-table formatters (fmt::runtime over a
-                // translated format string) -- leave text untouched and fall
-                // through to heuristic patterns.
+                // translated format string) leaves the firmware's own msg.
             }
 #else
             }
 #endif
+        }
+        // The firmware's own msg in the object's place, keeping the prose
+        // around it. With no msg there is nothing to put there.
+        if (!env->msg.empty()) {
+            text = env->text();
         }
     }
 

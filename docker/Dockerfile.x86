@@ -5,9 +5,10 @@
 # Build: docker build -t helixscreen/toolchain-x86 -f Dockerfile.x86 .
 # Usage: docker run --rm -v $(pwd):/src -w /src helixscreen/toolchain-x86
 #
-# Target: x86_64 SBCs running Klipper (Debian Bullseye or Bookworm, amd64)
+# Target: x86_64 SBCs running Klipper (Debian Bullseye or Bookworm, amd64),
+#   and x86_64 Linux desktops (PLATFORM_TARGET=x86-desktop, an SDL window)
 #   - CPU: x86_64 (any modern x86-64 processor)
-#   - Display: DRM/KMS (libdrm + libinput)
+#   - Display: DRM/KMS (libdrm + libinput); SDL2 for x86-desktop
 #   - C Library: glibc 2.31 (Debian Bullseye)
 #
 # Strategy: Build against Bullseye (oldest supported) for maximum compatibility.
@@ -85,6 +86,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnl-3-dev \
     libnl-genl-3-dev \
     libasound2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Headers for the x86-desktop target's static SDL2 (lib/sdl2). SDL dlopens each
+# of these at runtime rather than linking them, so the desktop binary picks up
+# whichever of X11, Wayland, PulseAudio and ALSA the user's machine has.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libx11-dev \
+    libxext-dev \
+    libxrandr-dev \
+    libxcursor-dev \
+    libxi-dev \
+    libxss-dev \
+    libxfixes-dev \
+    libxkbcommon-dev \
+    libwayland-dev \
+    wayland-protocols \
+    libpulse-dev \
+    libdbus-1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================

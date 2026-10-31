@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "sound_backend.h"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -48,10 +50,19 @@ struct PluginBackend {
     std::function<std::function<void()>(const std::string& notify_method,
                                         std::function<void(const json& msg)>)>
         on_notify;
+    /// Registers a handler for every notify_status_update the app's own status parsers
+    /// receive: the live deltas and the client's whole-object snapshots (discovery after a
+    /// connect or Klipper restart, subscription refreshes), which carry
+    /// helix::kWholeObjectsMarker. Runs on whichever thread dispatched it. Returns the
+    /// function that unregisters it.
+    std::function<std::function<void()>(std::function<void(const json& notification)>)> on_status;
     /// Publishes `objects`, the plugin's merged printer.objects.subscribe map (object name
     /// to null for every field or an array of field names). An empty object clears the
     /// plugin's set. Main thread only.
     std::function<void(const std::string& plugin_id, const json& objects)> set_plugin_objects;
+    /// Plays a named cue of the active sound theme through the app's sound manager, which
+    /// applies the user's sound settings. Main thread only.
+    std::function<void(const std::string& name, SoundPriority priority)> play_sound;
 };
 
 PluginBackend make_app_backend();

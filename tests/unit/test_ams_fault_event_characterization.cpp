@@ -24,6 +24,8 @@
  * that does not override.
  */
 
+#include "ui_update_queue.h"
+
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
 #include "ams_backend_mock.h"
@@ -121,6 +123,11 @@ namespace helix {
 
 class AfcFaultEventCharHelper : public AmsBackendAfc {
   public:
+    // A message frame queues its toast decision for the main thread.
+    ~AfcFaultEventCharHelper() override {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
     AfcFaultEventCharHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2", "lane3", "lane4"};
         AfcTestAccess::initialize_slots(*this, names);

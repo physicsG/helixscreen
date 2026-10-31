@@ -59,7 +59,7 @@ json first_status_param(const json& notification) {
     return (*params)[0];
 }
 
-constexpr const char* TRIO_ENV =
+constexpr const char* kTrioEnv =
     "heater_generic dragonbreath dragonbreath output_pin dragonbreath_filter";
 
 bool object_list_contains(const json& response, const std::string& object) {
@@ -80,7 +80,7 @@ json query_object_list(MoonrakerClientMock& client) {
 } // namespace
 
 TEST_CASE_METHOD(HelixTestFixture, "mock materializes dragonbreath trio", "[chamber][mock]") {
-    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", TRIO_ENV);
+    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", kTrioEnv);
     MoonrakerClientMock client;
 
     SECTION("object list contains exactly the three parsed objects") {
@@ -227,7 +227,7 @@ TEST_CASE_METHOD(HelixTestFixture, "mock materializes dragonbreath trio", "[cham
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "mock dragonbreath fault hook", "[chamber][mock]") {
-    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", TRIO_ENV);
+    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", kTrioEnv);
     ScopedEnv fault_env("HELIX_MOCK_DRAGONBREATH_FAULT", "1");
     MoonrakerClientMock client;
 
@@ -245,7 +245,7 @@ TEST_CASE_METHOD(HelixTestFixture, "mock dragonbreath fault hook", "[chamber][mo
 // every synthesized frame reports connected: false instead of true. One client
 // crosses the transition through the test-access setter.
 TEST_CASE_METHOD(HelixTestFixture, "mock dragonbreath offline hook", "[chamber][mock]") {
-    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", TRIO_ENV);
+    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", kTrioEnv);
     MoonrakerClientMock client;
 
     json frame;
@@ -290,7 +290,7 @@ TEST_CASE_METHOD(HelixTestFixture, "HELIX_MOCK_OBJECTS legacy shapes still parse
 // ============================================================================
 
 namespace {
-constexpr const char* STOCK_PAIR_ENV = "heater_generic panda_breath panda_breath";
+constexpr const char* kStockPairEnv = "heater_generic panda_breath panda_breath";
 
 /// The stock diagnostics object out of the first synthesized status frame.
 json first_stock_diagnostics(MoonrakerClientMock& client) {
@@ -307,7 +307,7 @@ json first_stock_diagnostics(MoonrakerClientMock& client) {
 
 TEST_CASE_METHOD(HelixTestFixture, "mock materializes the stock panda_breath pair",
                  "[chamber][mock][1290]") {
-    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", STOCK_PAIR_ENV);
+    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", kStockPairEnv);
     MoonrakerClientMock client;
 
     SECTION("discovery resolves the heater and its diagnostics, and no filter pin") {
@@ -345,7 +345,7 @@ TEST_CASE_METHOD(HelixTestFixture, "mock materializes the stock panda_breath pai
 // the state the rig sits in at rest, and the only one that raises External.
 TEST_CASE_METHOD(HelixTestFixture, "HELIX_MOCK_PANDA_BREATH_AUTO drives the device's own loop",
                  "[chamber][mock][1290]") {
-    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", STOCK_PAIR_ENV);
+    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", kStockPairEnv);
     ScopedEnv auto_env("HELIX_MOCK_PANDA_BREATH_AUTO", "1");
     MoonrakerClientMock client;
 
@@ -363,7 +363,7 @@ TEST_CASE_METHOD(HelixTestFixture, "HELIX_MOCK_PANDA_BREATH_AUTO drives the devi
 // heater section it owns.
 TEST_CASE_METHOD(HelixTestFixture, "HELIX_MOCK_PANDA_BREATH_OFFLINE drops the link",
                  "[chamber][mock][1290]") {
-    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", STOCK_PAIR_ENV);
+    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", kStockPairEnv);
     ScopedEnv offline_env("HELIX_MOCK_PANDA_BREATH_OFFLINE", "1");
     MoonrakerClientMock client;
 
@@ -379,7 +379,7 @@ TEST_CASE_METHOD(HelixTestFixture, "HELIX_MOCK_PANDA_BREATH_OFFLINE drops the li
 // requested target and length and a countdown, DRY_STOP ends it (#1299).
 TEST_CASE_METHOD(HelixTestFixture, "mock runs the stock drying cycle",
                  "[chamber][mock][dryer][1299]") {
-    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", STOCK_PAIR_ENV);
+    ScopedEnv objects_env("HELIX_MOCK_OBJECTS", kStockPairEnv);
     MoonrakerClientMock client;
 
     REQUIRE(client.gcode_script("PANDA_BREATH_DRY_START TEMP=55 HOURS=4") == 0);
@@ -418,4 +418,80 @@ TEST_CASE_METHOD(HelixTestFixture, "mock simulates a non-chamber heater_generic"
     REQUIRE(client.gcode_script("SET_HEATER_TEMPERATURE HEATER=filament_dryer TARGET=55") == 0);
     REQUIRE(frame.contains("heater_generic filament_dryer"));
     CHECK(frame["heater_generic filament_dryer"].at("target").get<double>() == 55.0);
+}
+
+// The K2 Plus integrated chamber: beside the heater_generic the persona carries
+// the M141 thermostat pair's `temperature_fan chamber_fan`, parked at its
+// configured resting target (35C, the stock configfile value) with the heater
+// at 0 — the wire shape a Gcode CHAMBER_TEMP of 35 leaves the printer in, and
+// the only frame that reads as Resting rather than Off or Maintaining.
+TEST_CASE_METHOD(HelixTestFixture, "mock materializes the K2 Plus chamber thermostat pair",
+                 "[chamber][mock]") {
+    MoonrakerClientMock client(MoonrakerClientMock::PrinterType::CREALITY_K2_PLUS);
+
+    SECTION("object list carries both chamber objects") {
+        const json response = query_object_list(client);
+        REQUIRE(object_list_contains(response, "heater_generic chamber_heater"));
+        REQUIRE(object_list_contains(response, "temperature_fan chamber_fan"));
+    }
+
+    SECTION("status parks the thermostat at its resting target") {
+        json frame;
+        client.register_notify_update(
+            [&frame](const json& notification) { frame = first_status_param(notification); });
+        MoonrakerClientMockTestAccess::dispatch_initial_state(client);
+        REQUIRE(frame.contains("temperature_fan chamber_fan"));
+        const json& fan = frame["temperature_fan chamber_fan"];
+        CHECK(fan.at("target").get<double>() == 35.0);
+        CHECK(fan.contains("temperature"));
+        CHECK(fan.contains("speed"));
+        REQUIRE(frame.contains("heater_generic chamber_heater"));
+        CHECK(frame["heater_generic chamber_heater"].at("target").get<double>() == 0.0);
+    }
+
+    SECTION("configfile publishes the fan's resting target_temp") {
+        json response;
+        client.send_jsonrpc(
+            "printer.objects.query",
+            json{{"objects", json::object({{"configfile", json::array({"config"})}})}},
+            [&response](const json& r) { response = r; });
+        REQUIRE(response.contains("result"));
+        const json& config = response["result"]["status"]["configfile"]["config"];
+        REQUIRE(config.contains("temperature_fan chamber_fan"));
+        CHECK(config.at("temperature_fan chamber_fan")["target_temp"].get<double>() == 35.0);
+    }
+
+    SECTION("every pushed frame parks the thermostat at its resting target") {
+        // connect() pushes the historical burst, the initial state, then one
+        // live frame per simulation tick; the thermostat must read its resting
+        // 35C in all three shapes, the way a real K2 reports it at idle.
+        MoonrakerClientMock live(MoonrakerClientMock::PrinterType::CREALITY_K2_PLUS);
+        std::mutex mu;
+        std::vector<json> frames;
+        const auto sub = live.register_notify_update([&](const json& notification) {
+            std::lock_guard<std::mutex> lock(mu);
+            frames.push_back(first_status_param(notification));
+        });
+        live.connect("ws://mock/websocket", [] {}, [] {});
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (MoonrakerClientMockTestAccess::tick_count(live) < 2 &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        REQUIRE(MoonrakerClientMockTestAccess::tick_count(live) >= 2);
+        live.unsubscribe_notify_update(sub);
+
+        std::lock_guard<std::mutex> lock(mu);
+        size_t fan_frames = 0;
+        for (size_t i = 0; i < frames.size(); i++) {
+            INFO("frame " << i << " of " << frames.size());
+            if (frames[i].contains("temperature_fan chamber_fan")) {
+                fan_frames++;
+                CHECK(frames[i].at("temperature_fan chamber_fan").at("target").get<double>() ==
+                      35.0);
+            }
+        }
+        // At least one frame of each shape (historical, initial, live).
+        REQUIRE(fan_frames >= 3);
+    }
 }

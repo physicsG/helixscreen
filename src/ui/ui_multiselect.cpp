@@ -17,7 +17,7 @@ UiMultiselect::~UiMultiselect() {
 
 UiMultiselect::UiMultiselect(UiMultiselect&& other) noexcept
     : container_(other.container_), rows_(std::move(other.rows_)),
-      on_change_(std::move(other.on_change_)) {
+      on_change_(std::move(other.on_change_)), max_selected_(other.max_selected_) {
     other.container_ = nullptr;
     // Update back-pointers
     for (auto& row : rows_) {
@@ -31,6 +31,7 @@ UiMultiselect& UiMultiselect::operator=(UiMultiselect&& other) noexcept {
         container_ = other.container_;
         rows_ = std::move(other.rows_);
         on_change_ = std::move(other.on_change_);
+        max_selected_ = other.max_selected_;
         other.container_ = nullptr;
         for (auto& row : rows_) {
             row->owner = this;
@@ -76,7 +77,8 @@ lv_obj_t* UiMultiselect::create_row(const MultiSelectItem& item) {
     auto data = std::make_unique<RowData>();
     data->key = item.key.empty() ? item.label : item.key;
     data->label = item.label;
-    data->selected = item.selected;
+    data->selected = item.selected && item.enabled;
+    data->enabled = item.enabled;
     data->owner = this;
 
     // Row container: flex row, full width, content height
@@ -105,7 +107,8 @@ lv_obj_t* UiMultiselect::create_row(const MultiSelectItem& item) {
     lv_label_set_text(label, item.label.c_str());
     lv_obj_set_flex_grow(label, 1);
     lv_obj_set_style_text_font(label, theme_manager_get_font("font_body"), 0);
-    lv_obj_set_style_text_color(label, theme_manager_get_color("text"), 0);
+    lv_obj_set_style_text_color(label,
+                                theme_manager_get_color(item.enabled ? "text" : "text_muted"), 0);
 
     // Checkbox: right-aligned, empty text, not directly clickable
     lv_obj_t* cb = lv_checkbox_create(row);
@@ -114,8 +117,12 @@ lv_obj_t* UiMultiselect::create_row(const MultiSelectItem& item) {
     lv_obj_remove_flag(cb, LV_OBJ_FLAG_CLICKABLE);
 
     // Set initial state
-    if (item.selected) {
+    if (data->selected) {
         lv_obj_add_state(cb, LV_STATE_CHECKED);
+    }
+    if (!item.enabled) {
+        lv_obj_add_state(cb, LV_STATE_DISABLED);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
     }
 
     data->row = row;
@@ -137,6 +144,23 @@ void UiMultiselect::on_row_clicked(lv_event_t* e) {
     auto* data = static_cast<RowData*>(lv_obj_get_user_data(row));
     if (!data || !data->owner)
         return;
+
+    if (!data->enabled)
+        return;
+    UiMultiselect* owner = data->owner;
+    if (!data->selected && owner->max_selected_ > 0 &&
+        owner->get_selected_count() >= owner->max_selected_) {
+        if (owner->max_selected_ > 1)
+            return;
+        for (auto& other : owner->rows_) {
+            if (other.get() != data && other->selected) {
+                other->selected = false;
+                owner->update_checkbox_visual(other.get());
+                if (owner->on_change_)
+                    owner->on_change_(other->key, false);
+            }
+        }
+    }
 
     // Toggle selection
     data->selected = !data->selected;
@@ -170,7 +194,7 @@ std::vector<MultiSelectItem> UiMultiselect::get_items() const {
     std::vector<MultiSelectItem> items;
     items.reserve(rows_.size());
     for (const auto& row : rows_) {
-        items.push_back({row->key, row->label, row->selected});
+        items.push_back({row->key, row->label, row->selected, row->enabled});
     }
     return items;
 }
@@ -196,7 +220,7 @@ size_t UiMultiselect::get_selected_count() const {
 
 void UiMultiselect::select_all() {
     for (auto& row : rows_) {
-        if (!row->selected) {
+        if (!row->selected && row->enabled) {
             row->selected = true;
             update_checkbox_visual(row.get());
             if (on_change_)

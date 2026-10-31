@@ -29,7 +29,9 @@ detect_moonraker_integration detect_kiauh probe_release usage uninstall
 log_info log_warn log_error log_note log_success plan_set plan_count_steps
 print_banner print_plan plan_missing_libs plan_adds_line plan_printer_line
 parse_json_string_field display_path tty_confirm _has_no_new_privs step
-step_done _plan_sep confirm_clean_install"
+step_done _plan_sep confirm_clean_install resolve_x86_flavour
+x86_flavour_plan_text detect_package_beside_installer settle_package_beside_installer
+_progress_emit"
 
 # Names called in main() between its opening line and confirm_point, and in
 # confirm_point up to its mkdir of TMP_DIR.

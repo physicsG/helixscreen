@@ -203,7 +203,21 @@ inside that instance:
 `header_bar` does this with its `header_content` strip (between the title
 region and the action buttons). A slot widget should be `width="content"` and
 not clickable, so an unfilled slot costs its container no layout and steals no
-taps.
+taps. The slot centres its flex track, so a child shorter than the header sits
+on the title's centre line.
+
+After the title and the slot, `header_bar` lays out its actions left to right:
+`action_icon`, an icon-only round button (`#button_height_sm` square, drawn by
+`styles.header_icon_button`, hidden unless `hide_action_icon="false"`, with
+`action_icon_hidden_cond` for a breakpoint gate); `action_button_2`, the
+labelled secondary; and `action_button`, the primary (Save, Done).
+Every one is capped at `#header_button_height` so it fits inside the bar. A
+screen whose only header action is a glyph (Motion's cog, Print Status's
+folder, Printer Manager's portrait button) uses `action_icon`; a screen with
+several glyph actions (the spool editor's Spoolman and Scan QR) puts its own
+`ui_button`s in `header_content` with `<style name="styles.header_icon_button"/>`,
+so every round header button has one definition. `action_button_height` sizes
+the text buttons only.
 
 ### 2. Subjects (Reactive Data)
 
@@ -724,7 +738,7 @@ static void on_delete(lv_event_t* e) {
     if (data->target_label)
         lv_obj_remove_from_subject(data->target_label, nullptr);
 
-    // 2. NOW safe to deinit owned subjects
+    // 2. kNow safe to deinit owned subjects
     lv_subject_deinit(&data->owned_subject);
 }
 ```
@@ -865,7 +879,46 @@ shape; the other `setting_*_row.xml` components are the three-attribute shape.
 
 Reach for `long_mode="dots"` instead when the row must stay exactly one line
 (filenames, spool names) — then a determinate width is still required, and the
-string ellipsizes rather than wrapping.
+string ellipsizes rather than wrapping. See "One-line labels: `long_mode="dots"`"
+below.
+
+#### One-line labels: `long_mode="dots"`
+
+LVGL's DOTS mode ellipsizes only when the wrapped text is taller than the label.
+A content-height label grows to fit whatever it wraps to, so on a bare
+`lv_label` dots never fire: the text wraps onto two or three lines and pushes
+its siblings. HelixScreen closes that gap in one place:
+
+- **`text_*` and `ui_button` hold a dotted, content-height label to one line**
+  of its own font (plus its top/bottom padding and border). Leaving the height
+  unset or writing `height="content"` both qualify. The height follows a later
+  font or padding change (`helix::ui::label_hold_one_line`, `include/ui_text.h`).
+- **An explicit height opts out.** A px or % `height`, or `style_max_height`,
+  leaves the label alone, which is how a deliberately multi-line dotted label is
+  written (`panel_widget_tips.xml`: `style_max_height="100%"` inside a fixed cell).
+- **`max_lines="N"` wraps first, then dots.** On a `text_*` widget with
+  `long_mode="dots"`, the label wraps to at most N lines of its own font and
+  ellipsizes the last one; shorter text keeps its own height. The cap follows
+  font and padding changes like the one-line hold, a value below 1 counts as 1,
+  and an explicit `height` or `style_max_height` opts out the same way
+  (`helix::ui::label_hold_lines`; `printer_manager_overlay.xml`'s printer name).
+  `text_button` honours it too, but only when given: without it a dotted
+  `text_button` keeps its own sizing.
+- **The label still needs a width bound.** `width="100%"`, or `flex_grow="1"`
+  (with `width="1"`/`width="0"`) in a row. With no width, or `width="content"`
+  and no `style_max_width`, the text never wraps, so there is nothing to
+  ellipsize: it runs past its parent and is clipped.
+- **A bare `<lv_label>` gets none of this.** Use a `text_*` widget for a dotted
+  label in XML.
+- **C++ labels call the helper.** A label built with `lv_label_create()` and set
+  to `LV_LABEL_LONG_MODE_DOTS` calls `helix::ui::label_hold_one_line(label)`.
+- **Text meant to wrap must not use dots.** A sentence (a note, a banner
+  message) takes `long_mode="wrap"` or no long mode.
+- **DOTS writes the ellipsis into the label's text.** Once it fires,
+  `lv_label_get_text()` returns the shortened string, so read the source value
+  (the subject or the string you set), not the label.
+
+Regression cover: `tests/unit/test_label_one_line.cpp`.
 
 Regression cover: `tests/unit/test_setting_row_description_wrap.cpp` asserts the
 wrapped label is taller than one line and never wider than the row.
@@ -1013,6 +1066,11 @@ An inline `style_text_font` attribute still outranks both.
 3. Add to `scripts/regen_mdi_fonts.sh`
 4. Run `make regen-fonts`
 
+A mark MDI does not have (a brand logo such as Spoolman's) is drawn as a single-path
+24x24 SVG in `assets/fonts/custom_icons/`, compiled into `assets/fonts/helix-custom-icons.ttf`
+by `scripts/build_custom_icon_font.py`, and listed in `CUSTOM_ICONS` instead of `MDI_ICONS`.
+It then lands in the same faces and is used like any other `<icon src="...">`.
+
 ### Semantic Typography
 
 **ALWAYS use semantic text components instead of `<lv_label>` with hardcoded fonts.**
@@ -1093,6 +1151,8 @@ Semantic button with variant-based styling and auto-contrast text.
 
 **Built-in defaults:** Responsive `button_height` (48/52/72px), `border_radius`, auto-contrast text color
 
+**XML children:** A `ui_button` with no `icon`, no `text` and no layout of its own takes its children from XML and centres them on every axis, so a `flex_flow` row of icon plus caption lines up with a text button beside it. `style_flex_*` attributes on the button override the centring.
+
 **Reactive text with subject binding:**
 
 `ui_button` supports two ways to bind text to a subject:
@@ -1130,10 +1190,27 @@ button outgrows a small panel. Both need the button to carry an icon and a label
 | Attr | Effect |
 |------|--------|
 | `stacked_if_bp_lte="N"` | While `ui_breakpoint <= N`, restacks the button icon-over-label - the create-time `icon_position="top"` recipe - and sets its height to 100% of its parent, so a stacked button fills the growable row it lives in. Above `N` the button returns to the row layout and fixed `button_height` it declared at create time. |
+| `stacked_subject="S"` + `stacked_if_eq="N"` | Stacks the button as above while int subject `S` equals `N`, and returns it to the row layout otherwise, following `S` live. The subject spelling of `stacked_if_bp_lte`, for a condition the breakpoint alone does not express: point it at a `<subject_expr>`. An empty `S` installs no binding. From ui_xml/components/ams_sidebar.xml, whose `ams_actions_stacked` stacks the action buttons in landscape and in narrow portrait cells and lays them icon-beside-label in a portrait 2x2 cell. |
 | `label_hidden_if_bp_eq="N"` | Hides the button's label while `ui_breakpoint == N`, collapsing it to icon-only; every other rung shows the label. The `ui_breakpoint` spelling of the pair below. |
 | `label_hidden_subject="S"` + `label_hidden_if_eq="N"` | Hides the label while int subject `S` equals `N`. An empty `S` installs no binding. From ui_xml/components/panel_widget_control_buttons.xml, where the widget folds the breakpoint rule into its own measured subject. |
+| `label_hidden_cond="EXPR"` | Hides the label while the expression is nonzero, e.g. `ui_is_portrait eq 1 and ui_breakpoint lt 4`. Names resolve in the button's own scope, so globals like `ui_breakpoint` work from inside a nested component. The header bar's secondary button forwards it as `action_button_2_label_hidden_cond`. Use one label-hiding form per button: each binding writes the same label flag, so with two the most recent change wins. |
 
-Give each label one writer: a widget that measures whether its label fits should fold the breakpoint rule into its own subject rather than set both attributes.
+Give each label one writer: a widget that measures whether its label fits should fold the breakpoint rule into its own subject rather than set both attributes. The same holds for stacking: set `stacked_if_bp_lte` or `stacked_subject`, never both, or the two observers fight over the layout.
+
+#### responsive_grid
+
+Equal-width columns, as many as fit: `min_col_width`, `max_col_width`, `max_cols`,
+`fit_items`, with `style_pad_column` / `style_pad_row` as the gaps. Children are
+stretched to the column width. The canonical way to lay a list out in columns; see
+`UI_CONTRIBUTOR_GUIDE.md` § "Equal columns, as many as fit".
+
+```xml
+<responsive_grid min_col_width="#belt_layout_choice_min" max_cols="2"
+                 style_pad_row="#space_xs" style_pad_column="#space_xs">
+  <ui_button text="A left, B right"/>
+  <ui_button text="A right, B left"/>
+</responsive_grid>
+```
 
 #### divider_vertical / divider_horizontal
 
@@ -1250,7 +1327,7 @@ The widget is registered via `ui_markdown_init()` in `xml_registration.cpp`. Thi
 
 #### home_action_tile
 
-One centred icon over one label, filling its cell (`ui_xml/components/home_action_tile.xml`). The home action tiles and every cell of the Controls panel's Calibration & Tools card, plus Motors Off on its Position card, are built from it, so a row of them aligns by construction. Extend its props rather than hand-building a look-alike cell.
+One centred icon over one label, filling its cell (`ui_xml/components/home_action_tile.xml`). The home action tiles and every cell of the Controls panel's Calibration & Tools card (through `calib_tile.xml`, which sizes the cell), plus Motors Off on its Position card, are built from it, so a row of them aligns by construction. Extend its props rather than hand-building a look-alike cell.
 
 | Prop | Default | Purpose |
 |------|---------|---------|
@@ -1266,7 +1343,7 @@ One centred icon over one label, filling its cell (`ui_xml/components/home_actio
 
 #### option_tile
 
-One pre-print option as a checkable tile: an icon and a two-line label in an outline, with a corner check tab that appears only while checked (`ui_xml/components/option_tile.xml`). The whole tile is the tap target. Its view sets `state_trickle`, so the tile's checked state reaches the children and each child styles itself with a `-checked` state style (the border turns `#primary`, the icon tints, the tab's `style_opa` goes 255). You do not instantiate it from XML: `PrePrintOptionsRenderer` creates one tile per option and binds the option's subject to the tile's checked state (`src/ui/ui_pre_print_options_renderer.cpp`). The tile height and the tab's negative lift come from the `option_tile_height_*` / `option_tile_tab_lift_*` token ladders in `ui_xml/globals.xml`.
+One pre-print option as a toggle pill: an icon and a label of up to two lines (`max_lines="2"`, word-wrapped, then ellipsized), with no check box (`ui_xml/components/option_tile.xml`). The whole pill is the tap target. Off, it wears `styles.chip_idle` (an outline, label muted); on, `styles.chip_active` (the primary-tinted fill and outline the LED chips use), and a check replaces the icon in the same slot so the label never moves. Its view sets `state_trickle`, so the pill's checked state reaches the children and each child styles itself with a `-checked` state style. You do not instantiate it from XML: `PrePrintOptionsRenderer` creates one pill per option and binds the option's subject to the pill's checked state (`src/ui/ui_pre_print_options_renderer.cpp`). The pill height comes from the `option_tile_height_*` token ladder in `ui_xml/globals.xml`.
 
 | Prop | Default | Purpose |
 |------|---------|---------|
@@ -1625,13 +1702,67 @@ lv_xml_register_event_cb(nullptr, "on_slider_changed", [](lv_event_t* e) {
 
 | Trigger | When Fired |
 |---------|------------|
-| `clicked` | Button click (press + release) |
+| `clicked` | Every release on the object that no scroll took, **including the release that ends a long press** |
+| `short_clicked` | A release that ends a press with no long press. Never a tap's trigger: see "Tap and hold" |
 | `value_changed` | Slider, dropdown, switch |
 | `pressed` | Object pressed down |
 | `released` | Object released |
-| `long_pressed` | Long press detected |
+| `long_pressed` | Long press detected, while the finger is still down |
 | `focused` | Object gains focus |
 | `ready` | Text area complete |
+
+### Tap and hold
+
+**A tap always binds `clicked`. A hold handler that acts ends the press with
+`helix::ui::end_press(e)` (`include/ui_utils.h`); a hold handler that declines leaves the
+press alone.**
+
+LVGL sends `clicked` on every release that no scroll took, the one ending a long press
+included (`indev_proc_release()` in `lib/lvgl/src/indev/lv_indev.c`). It starts the long
+press on time alone, so only the hold handler knows whether the hold meant something.
+`end_press()` wraps `lv_indev_wait_release()`: the release then sends `press_lost` in
+place of `released` and `clicked`, and the rest of the press scrolls and drags nothing.
+A handler that declines (an edit mode that is switched off, a locked screen, a finger
+that drifted, a folder card with no hold action) does not call it, so the press still
+ends in its tap. A slow tap on such a widget works.
+
+```xml
+<lv_obj name="row">
+    <event_cb trigger="clicked" callback="on_row_tapped"/>
+    <event_cb trigger="long_pressed" callback="on_row_held"/>
+</lv_obj>
+```
+
+```cpp
+lv_xml_register_event_cb(nullptr, "on_row_held", [](lv_event_t* e) {
+    if (get_global_rows().handle_hold())   // true when the hold acted
+        helix::ui::end_press(e);
+});
+```
+
+This also holds across a bubbling tree. The home grid sets `EVENT_BUBBLE` on every
+descendant of a page (`helix::ui::set_event_bubble_recursive`), so a hold on a child
+reaches the grid and a tap on a child reaches the widget's own tap: a hold that ends the
+press leaves every ancestor's `clicked` unfired, which is why a reset hold on the Speed /
+Flow value never also opens Tune.
+
+Do not use `short_clicked` for a tap. LVGL skips it after any press that ran past the
+long-press time, whether or not a hold handler acted, so a slow tap does nothing. Do not
+suppress the tap with a flag the hold handler sets either: a press that ends in
+`press_lost`, or a modal that takes the release, leaves the flag set and eats the next
+real tap. And do not `lv_indev_reset()` from a hold handler: the next read finds the
+object again and carries on a press the handler meant to end.
+
+Gesture state machines that need the release keep it, and say so with
+`// HOLD_DECLINES_OK: <reason>` in the handler: the keyboard's long-press alternates pick
+their character on the release. The home grid's grab, a hold inside edit mode, also keeps
+the press, because the drag that follows is the rest of it.
+
+Two gates hold this: `tests/shell/test_code_lint.bats` fails any `short_clicked` tap, and
+`scripts/check_hold_ends_press.py` (`qc_hold_ends_press`) fails a `long_pressed` handler
+whose body, or a function it hands its event to, neither calls `end_press()` nor carries
+`HOLD_DECLINES_OK`. `helix-screen ctl click` sends `short_clicked` then `clicked`, as a
+real quick tap does.
 
 ---
 

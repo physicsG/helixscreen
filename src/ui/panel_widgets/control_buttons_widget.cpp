@@ -97,7 +97,7 @@ int ControlButtonsWidget::button_need_px() const {
     // every label print_control_view can give it, translated or not; the stop
     // button's is whatever its label says now.
     std::vector<const char*> primary_labels;
-    for (const char* text : ui::CONTROL_PRIMARY_LABELS) {
+    for (const char* text : ui::kControlPrimaryLabels) {
         primary_labels.push_back(text);
         primary_labels.push_back(lv_tr(text));
     }

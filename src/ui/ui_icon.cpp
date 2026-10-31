@@ -5,6 +5,9 @@
 
 #include "ui_fonts.h"
 #include "ui_icon_codepoints.h"
+#if HELIX_HAS_PLUGINS
+#include "ui_icon_image.h"
+#endif
 #include "ui_variant.h"
 
 #include "helix-xml/src/xml/lv_xml.h"
@@ -135,6 +138,12 @@ void invalidate_font_cache() {
  */
 static void apply_size(lv_obj_t* obj, IconSize size) {
     const lv_font_t* font = get_font_for_size(size);
+#if HELIX_HAS_PLUGINS
+    // An image icon keeps its image at the new size.
+    const lv_font_t* current = lv_obj_get_style_text_font(obj, LV_PART_MAIN);
+    if (image_icon_base_font(current))
+        font = image_icon_rebase(current, font);
+#endif
 
     // The face rides a shared ADDED style so a style bound from XML can
     // override it; written locally it would outrank every bound style. Both
@@ -151,6 +160,20 @@ static void apply_source(lv_obj_t* obj, const char* src) {
     if (!src || strlen(src) == 0) {
         src = "image_broken_variant"; // Default icon (broken image)
     }
+
+#if HELIX_HAS_PLUGINS
+    // An image icon draws through its own glyph font, sized from the current MDI face;
+    // any other source draws in that MDI face.
+    const lv_font_t* current = lv_obj_get_style_text_font(obj, LV_PART_MAIN);
+    const ImageIconGlyph image = image_icon_glyph(src, current);
+    if (image.font) {
+        helix::ui::apply_font_style(obj, image.font);
+        lv_label_set_text(obj, image.text);
+        return;
+    }
+    if (const lv_font_t* base = image_icon_base_font(current))
+        helix::ui::apply_font_style(obj, base);
+#endif
 
     // Try direct lookup first
     const char* codepoint = lookup_codepoint(src);
@@ -273,6 +296,10 @@ void set_source(lv_obj_t* icon, const char* icon_name) {
     spdlog::trace("[Icon] Changed icon source to '{}'", icon_name);
 }
 
+const lv_font_t* font_for_size(const char* size_str) {
+    return get_font_for_size(parse_size(size_str));
+}
+
 void set_size(lv_obj_t* icon, const char* size_str) {
     if (!icon || !size_str) {
         spdlog::error("[Icon] Invalid parameters to set_size");
@@ -290,6 +317,9 @@ void set_variant(lv_obj_t* icon, const char* variant_str) {
         return;
     }
 
+    // A colour from set_color() is a local style, which would outrank the
+    // variant's shared style and keep the icon in that colour.
+    lv_obj_remove_local_style_prop(icon, LV_STYLE_TEXT_COLOR, LV_PART_MAIN);
     auto variant = helix::ui::parse_variant(variant_str);
     helix::ui::apply_variant_text_style(icon, variant);
     spdlog::trace("[Icon] Changed icon variant to '{}'", variant_str);

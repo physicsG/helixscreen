@@ -6,11 +6,11 @@ Your printer's touchscreen should show you more than temperatures and a progress
 
 - **A real dashboard** — Drag-and-drop widgets across multiple pages. Temperature graphs, fan controls, camera feeds, power toggles, favorite macros. You decide what's on screen, not the developer.
 - **3D visualization** — Rotate your bed mesh with your finger. Preview G-code layers before printing. See input shaper frequency response charts right on the screen.
-- **Multi-material that works** — AFC, Happy Hare, ACE, CFS, AD5X IFS, Snapmaker U1, tool changers. Seven backends, tested on real hardware. Per-box drying controls and humidity monitoring, Spoolman integration.
+- **Multi-material that works** — 10 filament systems: AFC, Happy Hare, ACE, CFS, AD5X IFS, Snapmaker U1, QIDI Box, OpenAMS, Bondtech INDX (early support), and tool changers. Per-box drying controls and humidity monitoring, Spoolman integration.
 - **Exclude objects** — Tap the failing part on an overhead map to exclude it mid-print. No more scrapping an entire plate for one bad object.
 - **Runs on hardware you already own** — ~15MB RAM on embedded targets (a few times more on 64-bit Pi, still well under what other touchscreen UIs need). No X11, no browser, no desktop environment. Directly on the framebuffer. From a Creality K1 to a Pi Zero 2 W to a random mini-ITX box with an HDMI touchscreen.
-- **Looks good** — 17 theme presets with a live editor, responsive layouts from 480x320 to 1024x600, GPU-accelerated blur. Light and dark modes. (Ultrawide and portrait screens are alpha — see [Which displays are supported?](FAQ.md#which-displays-are-supported).)
-- **Smart setup** — A first-run wizard auto-detects your printer from a database of 90+ models and configures everything. 9 languages.
+- **Looks good** — 18 theme presets with a live editor, responsive layouts from 480x320 to 1024x600, GPU-accelerated blur. Light and dark modes. (Ultrawide and portrait screens are alpha — see [Which displays are supported?](FAQ.md#which-displays-are-supported).)
+- **Smart setup** — A first-run wizard auto-detects your printer from a database of over 100 models and configures everything. 9 languages.
 
 ![Home Panel](../images/screenshot-home-panel.png)
 
@@ -35,6 +35,9 @@ Navigation basics, touch gestures, connection status, first-time setup wizard, W
 
 ![Setup Wizard](../images/user/wizard-wifi.png)
 
+### [Run in a Window on a Linux Desktop](guide/install-linux-desktop.md)
+Run HelixScreen as an app window on your Linux PC or laptop, connected to your printer over the network. No sudo, nothing installed on the printer.
+
 ### [Supported Printers](guide/supported-printers.md)
 Which printers get deep, model-specific integration — and exactly what works on each. Covers the FlashForge Adventurer 5M/5X (IFS), Creality K1/K2 (CFS), QIDI Box, Snapmaker U1, Anycubic ACE, and how every other Klipper printer is auto-detected.
 
@@ -42,7 +45,7 @@ Which printers get deep, model-specific integration — and exactly what works o
 Your printer dashboard: status area, configurable home widgets (temperature, network, LED, AMS, power, notifications, and more), active tool badge for toolchanger printers, emergency stop, and the Printer Manager with custom images. Long-press the widget grid to enter Edit Mode, where you can add, move, resize, and configure widgets across up to 8 pages; the Add page tile one swipe past your last page gives you a new one with a tap, or drag a widget past either edge of your pages. Each Light button picks its own light, or All lights, from the gear icon in Edit Mode; tap to toggle, or use its arrow (or the separate LED Controls widget) for full color, brightness, and effects in the LEDs overlay.
 
 ### [Printing](guide/printing.md)
-The full printing workflow — file selection, preview, pre-print options, monitoring active prints, tune overlay, Z-offset baby steps, pressure advance, exclude object, and post-print summary.
+The full printing workflow — file selection, preview, pre-print options, monitoring active prints, tune overlay, Z-offset baby steps, pressure advance, exclude object, post-print summary, and resuming after a power loss.
 
 ![Print File Detail](../images/user/print-detail.png)
 
@@ -53,7 +56,7 @@ The pre-print filament check that catches an empty slot before a multi-color pri
 Nozzle and bed temperature panels, multi-extruder selector for printers with multiple extruders, material presets, and live temperature graphs.
 
 ### [Motion & Positioning](guide/motion.md)
-Jog, Move and Bed tabs, tap-to-move coordinates, bed position grid, tap-the-plate bed map, park, homing, distance increments, and emergency stop.
+Jog, Move and Bed tabs, tap-to-move coordinates, bed position grid, tap-the-plate bed map, lifting clear of a print left on the bed, park, homing, distance increments, and emergency stop.
 
 ![Motion Controls](../images/screenshot-motion-panel.png)
 
@@ -75,7 +78,7 @@ Print spool labels to Brother QL, Phomemo, Niimbot, or MakeID thermal printers v
 Set up a USB or Bluetooth barcode scanner to read Spoolman QR codes. Includes the `ClassicBondedOnly=false` fix for Bluetooth HID scanners that fail the "bonded device" check.
 
 ### [Calibration & Tuning](guide/calibration.md)
-Bed mesh visualization, screws tilt adjust, input shaper resonance testing, Z-offset calibration, pressure advance measurement, and PID tuning.
+Bed mesh visualization, screws tilt adjust, input shaper resonance testing with a live chart, Z-offset calibration, tool offsets, belt tension checking and tuning, pressure advance measurement, and PID tuning.
 
 ![Bed Mesh](../images/screenshot-bed-mesh-panel.png)
 
@@ -94,10 +97,13 @@ Discovered fans grouped by controllable vs. automatic, fan types, live speed con
 Getting a BIGTREETECH Panda Breath working with Klipper so HelixScreen can see it — putting it on the network, choosing between stock and DragonBreath firmware, the module and config each one needs, the Snapmaker U1 one-menu shortcut, and what to do when it goes offline.
 
 ### [Sensors](guide/sensors.md)
-Filament switch and motion sensors with per-sensor role assignment (None, Runout, Toolhead, Entry), read-only probe/width/humidity/accelerometer/color/temperature sensors, and chamber heater/sensor assignment.
+Filament switch and motion sensors with per-sensor role assignment (None, Runout, Toolhead, Entry), door and button inputs with the door-open warning, read-only probe/width/humidity/accelerometer/color/temperature sensors, and chamber heater/sensor assignment.
 
 ### [Security & Screen Lock](guide/security.md)
 Set, change, or remove a PIN screen lock, auto-lock tied to the display sleep timeout, the lock-screen keypad with emergency-stop access, and what a factory reset clears.
+
+### [Screen Sharing and Remote Control](guide/screen-sharing.md)
+See and use the printer's screen from any browser, or as a webcam in Mainsail and Fluidd: turning it on, pairing a browser with a code, which printers need one, the on-screen remote-control icon, and troubleshooting.
 
 ### [Camera](guide/camera.md)
 Webcam viewing via the home widget and standalone fullscreen viewer, rotation and flip configuration, stream status states, and performance throttling.
@@ -106,7 +112,10 @@ Webcam viewing via the home widget and standalone fullscreen viewer, rotation an
 History dashboard with time-range statistics and trend charts, searchable/filterable/sortable job list, per-job details, and reprinting a previous job.
 
 ### [Advanced Features](guide/advanced.md)
-Console, macro execution, power device control (with home panel quick-toggle and device selection), print history, notification history, and timelapse settings.
+Console, macro execution, power device control (with home panel quick-toggle and device selection), print history, notification history with the Printer Events log, and timelapse settings.
+
+### [HelixPrint Plugin](guide/helixprint-plugin.md)
+The optional add-on for your printer's Moonraker: installing it, what it adds (thumbnails and faster previews, checking that a file fits the printer, start options for prints from other apps, faster edited prints, switching spools at each tool change, Printer Events, print photos, a storage report and cleanup, safer config saves, faster AD5X and ACE updates, power-loss recovery), and how each works without it on an attached or a remote screen.
 
 ### [Beta Features](guide/beta-features.md)
 How to enable beta features, the full beta feature list, and update channel selection.

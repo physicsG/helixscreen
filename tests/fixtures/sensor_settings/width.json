@@ -1,0 +1,16 @@
+{
+  "sensors": [
+    {
+      "enabled": true,
+      "klipper_name": "tsl1401cl_filament_width_sensor",
+      "role": "flow_compensation",
+      "type": "tsl1401cl"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "hall_filament_width_sensor",
+      "role": "none",
+      "type": "hall"
+    }
+  ]
+}

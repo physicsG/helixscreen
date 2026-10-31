@@ -19,7 +19,7 @@ namespace helix {
 /// runout never refills. Anything shorter than a swap reports every tool change
 /// as a runout. Detection and the runout subjects still fire on the edge; only
 /// the toast waits.
-constexpr std::chrono::seconds RUNOUT_TOAST_DWELL{45};
+constexpr std::chrono::seconds kRunoutToastDwell{45};
 
 /**
  * @brief Role that a filament sensor can be assigned to.
@@ -34,7 +34,6 @@ enum class FilamentSensorRole {
     RUNOUT = 1,   ///< Primary runout detection sensor
     TOOLHEAD = 2, ///< Toolhead/nozzle proximity sensor
     ENTRY = 3,    ///< Entry point detection sensor
-    Z_PROBE = 10  ///< Z probing sensor (maps to Klipper "probe" object)
 };
 
 /**
@@ -50,9 +49,7 @@ enum class FilamentSensorType {
 };
 
 /**
- * @brief User configuration for a single filament sensor.
- *
- * Stored in settings.json and loaded at startup.
+ * @brief One filament sensor as FilamentSensorManager::get_sensors() reports it.
  */
 struct FilamentSensorConfig {
     std::string klipper_name; ///< Full Klipper object name, e.g. "filament_switch_sensor fsensor"
@@ -76,7 +73,9 @@ struct FilamentSensorConfig {
 /**
  * @brief Current runtime state of a filament sensor.
  *
- * Updated from Moonraker WebSocket notifications.
+ * Updated from Moonraker status frames. Kept for a sensor missing from a later
+ * discovery (marked unavailable), so a reconnect that brings it back resumes
+ * from its last reading.
  */
 struct FilamentSensorState {
     bool filament_detected; ///< Whether filament is currently detected
@@ -93,12 +92,24 @@ struct FilamentSensorState {
     // status frame, which must never read as a runout.
 };
 
+/**
+ * @brief The filament motion sensor the clog meter reads, and its reading.
+ *
+ * Klipper reports only `enabled` and `filament_detected` for a
+ * filament_motion_sensor; the latter goes false when the encoder has not seen
+ * movement within its detection length, which is a jam (#1823).
+ */
+struct ClogMotionSensor {
+    std::string sensor_name;     ///< Short name, e.g. "encoder"
+    bool armed = true;           ///< Klipper-level `enabled`
+    bool filament_moving = true; ///< Klipper `filament_detected`
+};
+
 inline constexpr sensors::EnumName<FilamentSensorRole> kFilamentSensorRoles[] = {
     {FilamentSensorRole::NONE, "none", "Unassigned"},
     {FilamentSensorRole::RUNOUT, "runout", "Runout Sensor"},
     {FilamentSensorRole::TOOLHEAD, "toolhead", "Toolhead Sensor"},
     {FilamentSensorRole::ENTRY, "entry", "Entry Sensor"},
-    {FilamentSensorRole::Z_PROBE, "z_probe", "Z Probe"},
 };
 
 inline constexpr sensors::EnumName<FilamentSensorType> kFilamentSensorTypes[] = {

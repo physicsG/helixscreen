@@ -1,13 +1,37 @@
 import { useAuthStore } from '@/stores/auth'
 import { router } from '@/router'
+import type { HealthPayload } from '../../../telemetry-worker/src/health'
+import type { DeviceList, DevicePage } from '../../../telemetry-worker/src/devices'
+import type { NotApplicable } from '../../../telemetry-worker/src/schema'
+import type { WeeklyReport } from '../../../telemetry-worker/src/loop/report'
+import type { RetentionCohort } from '../../../telemetry-worker/src/retention'
+import { withNotApplicable, type WireNotApplicable } from '@/utils/notApplicable'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'https://telemetry.helixscreen.org'
+
+// Null-valued fields:
+// - A crash rate is null when the filters exclude every crash or session row
+//   (a model filter matches no crash), rendered "n/a".
+// - A value aggregated from delta point kinds (panel usage, overlay and widget
+//   use, connection stability) is null until a device on a delta-era client
+//   has reported; `delta_era_devices` says how many have.
+
+export type FilterKey = 'platform' | 'version' | 'model' | 'board'
+
+// Returned by every endpoint that reads delta kinds. `filter_not_applicable`
+// names an active filter none of those kinds carry (no panel or connection row
+// has a printer model), so their values are "not reported per <filter>" rather
+// than waiting on the rollout.
+export interface DeltaEra {
+  delta_era_devices: number
+  filter_not_applicable: FilterKey | null
+}
 
 export interface OverviewData {
   active_devices: number
   total_events: number
-  crash_rate: number
-  print_success_rate: number
+  crash_rate: number | null
+  print_success_rate: number | null
   events_over_time: { date: string; count: number }[]
   daily_active_devices: { date: string; devices: number }[]
   cumulative_devices: { date: string; total: number }[]
@@ -24,17 +48,21 @@ export interface AdoptionData {
   versions: { name: string; count: number }[]
   printer_models: { name: string; count: number }[]
   kinematics: { name: string; count: number }[]
+  boards: { name: string; count: number }[]
 }
 
 export interface PrintsData {
   success_rate_over_time: { date: string; rate: number; total: number }[]
   by_filament: { type: string; success_rate: number; count: number }[]
   avg_duration_sec: number
+  by_model: { model: string; successes: number; total: number; rate: number | null }[]
+  by_version: { version: string; successes: number; total: number; rate: number | null }[]
   start_context?: PrintStartData
+  not_applicable: NotApplicable<'prints'>
 }
 
 export interface CrashesData {
-  by_version: { version: string; crash_count: number; session_count: number; rate: number }[]
+  by_version: { version: string; crash_count: number; session_count: number; rate: number | null }[]
   by_signal: { signal: string; count: number }[]
   avg_uptime_sec: number
   by_platform?: {
@@ -43,42 +71,45 @@ export interface CrashesData {
     session_count: number
     crashing_devices: number
     session_devices: number
-    rate: number
+    rate: number | null
   }[]
   trailing_14d?: {
     crash_count: number
     session_count: number
-    rate: number
+    rate: number | null
     by_platform: {
       platform: string
       crash_count: number
       session_count: number
-      rate: number
+      rate: number | null
     }[]
   }
-}
-
-export interface CrashListData {
-  crashes: {
-    timestamp: string
-    device_id: string
-    version: string
-    signal: string
-    platform: string
-    uptime_sec: number
-    occurrences: number
-  }[]
 }
 
 export interface ReleasesData {
   versions: {
     version: string
     active_devices: number
-    crash_rate: number
-    print_success_rate: number
+    crash_rate: number | null
+    crash_free_devices: number | null
+    p95_frame_ms: number | null
+    p95_rss_kb: number | null
+    print_success_rate: number | null
     total_sessions: number
     total_crashes: number
+    update_failures: number
+    update_successes: number
+    update_failure_rate: number | null
   }[]
+  adoption: { date: string; version: string; devices: number }[]
+  not_applicable: NotApplicable<'crashes' | 'prints' | 'updates' | 'performance'>
+}
+
+export type HealthData = HealthPayload
+export type DevicePageData = DevicePage
+export type DeviceListData = DeviceList
+export interface RetentionData {
+  cohorts: RetentionCohort[]
 }
 
 export interface MemoryData {
@@ -125,7 +156,8 @@ export interface HardwareData {
   moonraker_locality: { local: number; remote: number; reported: number }
 }
 
-export interface EngagementData {
+export interface EngagementData extends DeltaEra {
+  avg_session_sec: number | null
   panel_time: { panel: string; total_time_sec: number }[]
   panel_visits: { panel: string; total_visits: number }[]
   session_duration_trend: { date: string; avg_session_sec: number }[]
@@ -138,10 +170,10 @@ export interface EngagementData {
   overlay_visits: { overlay: string; total_visits: number }[]
 }
 
-export interface ReliabilityData {
+export interface ReliabilityData extends DeltaEra {
   uptime_trend: { date: string; avg_uptime_pct: number }[]
   disconnect_trend: { date: string; avg_disconnects: number }[]
-  max_disconnect_sec: number
+  max_disconnect_sec: number | null
   error_categories: { category: string; count: number }[]
   error_codes: { category: string; code: string; count: number }[]
 }
@@ -154,9 +186,9 @@ export interface DisplayAnomalyData {
   recent: { timestamp: string; device_id: string; version: string; platform: string; code: string; context: string; uptime_sec: number }[]
 }
 
-export interface StabilityData {
-  crash_rate_trend: { date: string; crashes: number; sessions: number; rate: number }[]
-  by_version: { version: string; crash_count: number; session_count: number; rate: number }[]
+export interface StabilityData extends DeltaEra {
+  crash_rate_trend: { date: string; crashes: number; sessions: number; rate: number | null }[]
+  by_version: { version: string; crash_count: number; session_count: number; rate: number | null }[]
   by_signal: { signal: string; count: number }[]
   avg_uptime_sec: number
   klippy_trend: { date: string; errors: number; shutdowns: number }[]
@@ -164,7 +196,13 @@ export interface StabilityData {
   error_categories: { category: string; count: number }[]
   error_codes: { category: string; code: string; count: number }[]
   recent_crashes: { timestamp: string; device_id: string; version: string; signal: string; platform: string; uptime_sec: number; occurrences: number }[]
+  /** Crashes grouped by signal, fault code, version and board over the range; sample-weighted count, largest first. */
+  crash_clusters: { signal: string; fault_code: string; version: string; board: string; count: number; devices: number }[]
+  /** Error reports per category, code and version over the range; sample-weighted count, largest first. */
+  errors_by_version: { category: string; code: string; version: string; count: number; devices: number }[]
   display_anomalies?: DisplayAnomalyData
+  /** Crash and error blocks a filter leaves unreported; `filter_not_applicable` covers only the delta kinds. */
+  not_applicable: NotApplicable<'crashes' | 'errors'>
 }
 
 export interface PrintStartData {
@@ -185,16 +223,27 @@ export interface PerformanceData {
   drop_rate_by_platform: { platform: string; rate: number; dropped: number; total: number }[]
   drop_rate_by_version: { date: string; version: string; rate: number }[]
   jankiest_panels: { panel: string; times_worst: number; avg_p95_ms: number }[]
+  by_platform_version: {
+    platform: string
+    version: string
+    p95_frame_ms: number
+    avg_rss_kb: number | null
+    devices: number
+  }[]
+  jankiest_by_platform: { platform: string; panel: string; times_worst: number; avg_p95_ms: number }[]
 }
 
-export interface FeaturesData {
-  total_devices: number
-  features: { name: string; adoption_rate: number }[]
-  by_version: { version: string; devices: number; macros: number; camera: number; bed_mesh: number }[]
+// Adoption derived from overlay and widget use: `devices` used the overlay or
+// widget `id` at least once in the range, out of `delta_era_devices`. Empty
+// until a delta-era device has reported.
+export interface FeaturesData extends DeltaEra {
+  features: { id: string; devices: number; adoption_rate: number }[]
+  /** Settings flags: devices with it on over devices reporting it; null rate before any report. */
+  configured: { id: string; devices: number; reported: number; adoption_rate: number | null }[]
 }
 
-export interface UxInsightsData {
-  avg_session_sec: number
+export interface UxInsightsData extends DeltaEra {
+  avg_session_sec: number | null
   most_visited_panel: string
   least_visited_panel: string
   settings_change_rate_per_device_per_week: number
@@ -202,6 +251,12 @@ export interface UxInsightsData {
   panel_visits: { panel: string; total_visits: number; visits_per_device: number }[]
   settings_changes: { setting: string; change_count: number }[]
   settings_defaults: { setting: string; pct_changed: number; devices_changed: number }[]
+}
+
+export class ApiError extends Error {
+  constructor(readonly status: number, statusText: string) {
+    super(`API error: ${status} ${statusText}`)
+  }
 }
 
 async function apiFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
@@ -224,11 +279,18 @@ async function apiFetch<T>(path: string, params?: Record<string, string>): Promi
   }
 
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`)
+    throw new ApiError(res.status, res.statusText)
   }
 
   return res.json() as Promise<T>
 }
+
+// Each endpoint's not_applicable blocks; the normalized return types require every one.
+const PRINTS_BLOCKS = ['prints'] as const
+const RELEASES_BLOCKS = ['crashes', 'prints', 'updates', 'performance'] as const
+const HEALTH_BLOCKS = ['crashes', 'errors', 'prints', 'updates'] as const
+const STABILITY_BLOCKS = ['crashes', 'errors'] as const
+const DEVICES_BLOCKS = ['crashes', 'prints'] as const
 
 export const api = {
   getOverview(queryString: string): Promise<OverviewData> {
@@ -239,21 +301,51 @@ export const api = {
     return apiFetch(`/v1/dashboard/adoption?${queryString}`)
   },
 
-  getPrints(queryString: string): Promise<PrintsData> {
-    return apiFetch(`/v1/dashboard/prints?${queryString}`)
+  async getPrints(queryString: string): Promise<PrintsData> {
+    const wire = await apiFetch<WireNotApplicable<PrintsData>>(`/v1/dashboard/prints?${queryString}`)
+    return withNotApplicable(wire, PRINTS_BLOCKS)
   },
 
   getCrashes(queryString: string): Promise<CrashesData> {
     return apiFetch(`/v1/dashboard/crashes?${queryString}`)
   },
 
-  getCrashList(queryString: string, limit = 50): Promise<CrashListData> {
-    return apiFetch(`/v1/dashboard/crash-list?${queryString}&limit=${limit}`)
+  // Without `versions` the worker picks the most active releases itself.
+  async getReleases(queryString: string, versions?: string[]): Promise<ReleasesData> {
+    const list = versions ? `&versions=${versions.map(v => encodeURIComponent(v)).join(',')}` : ''
+    const wire = await apiFetch<WireNotApplicable<ReleasesData>>(`/v1/dashboard/releases?${queryString}${list}`)
+    return withNotApplicable(wire, RELEASES_BLOCKS)
   },
 
-  getReleases(versions: string[]): Promise<ReleasesData> {
-    const params = `versions=${versions.map(v => encodeURIComponent(v)).join(',')}`
-    return apiFetch(`/v1/dashboard/releases?${params}`)
+  async getHealth(queryString: string): Promise<HealthData> {
+    const wire = await apiFetch<WireNotApplicable<HealthData>>(`/v1/dashboard/health?${queryString}`)
+    return withNotApplicable(wire, HEALTH_BLOCKS)
+  },
+
+  async getReports(): Promise<string[]> {
+    return (await apiFetch<{ weeks: string[] }>('/v1/dashboard/reports')).weeks
+  },
+
+  // A stored report may predate a not_applicable block, so its health part is normalized like the live one.
+  async getReport(week: string): Promise<WeeklyReport> {
+    const wire = await apiFetch<Omit<WeeklyReport, 'health'> & { health: WireNotApplicable<HealthData> }>(
+      `/v1/dashboard/reports/${encodeURIComponent(week)}`
+    )
+    return { ...wire, health: withNotApplicable(wire.health, HEALTH_BLOCKS) }
+  },
+
+  async getDevices(queryString: string): Promise<DeviceListData> {
+    const wire = await apiFetch<WireNotApplicable<DeviceListData>>(`/v1/dashboard/devices?${queryString}`)
+    return withNotApplicable(wire, DEVICES_BLOCKS)
+  },
+
+  // One device over a fixed 90 days: no filters apply.
+  getDevice(id: string): Promise<DevicePageData> {
+    return apiFetch(`/v1/dashboard/device/${encodeURIComponent(id)}`)
+  },
+
+  getRetention(queryString: string): Promise<RetentionData> {
+    return apiFetch(`/v1/dashboard/fleet/retention?${queryString}`)
   },
 
   getMemory(queryString: string): Promise<MemoryData> {
@@ -276,8 +368,9 @@ export const api = {
     return apiFetch(`/v1/dashboard/reliability?${queryString}`)
   },
 
-  getStability(queryString: string): Promise<StabilityData> {
-    return apiFetch(`/v1/dashboard/stability?${queryString}`)
+  async getStability(queryString: string): Promise<StabilityData> {
+    const wire = await apiFetch<WireNotApplicable<StabilityData>>(`/v1/dashboard/stability?${queryString}`)
+    return withNotApplicable(wire, STABILITY_BLOCKS)
   },
 
   getPerformance(queryString: string): Promise<PerformanceData> {

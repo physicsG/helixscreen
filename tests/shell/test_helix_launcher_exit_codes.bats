@@ -5,10 +5,9 @@
 #
 # Two behaviours are covered:
 #
-#  1. Exit code 42 is helix-watchdog's RESTART_LOOP_EXIT_CODE — a deliberate
-#     "stop, this will not fix itself" signal. _is_crash_exit() used to accept
-#     any 1..127, so on dual-binary Pi builds a 42 triggered a whole second
-#     watchdog run against the fbdev binary: the exact opposite of the
+#  1. Exit code 42 is helix-watchdog's kRestartLoopExitCode — a deliberate
+#     "stop, this will not fix itself" signal. A 42 must not start a second
+#     watchdog run on the fbdev rung, which is the exact opposite of the
 #     constant's intent.
 #
 #  2. Every launcher log line carries a wall-clock timestamp. On platforms
@@ -30,6 +29,10 @@ setup() {
     mkdir -p "$MOCK_INSTALL/bin" "$MOCK_INSTALL/config"
 
     cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
+
+    # No DRM card, so the launcher never probes the mock binaries for a rung.
+    export HELIX_DRI_DIR="$BATS_TEST_TMPDIR/dri"
+    mkdir -p "$HELIX_DRI_DIR"
 }
 
 # Extract _is_crash_exit() from the launcher and expose it to a POSIX sh probe,
@@ -47,9 +50,9 @@ _probe_is_crash_exit() {
     sh "$probe" "$code"
 }
 
-# Build a dual-binary (Pi-style) install: primary helix-screen + fbdev fallback
-# + a watchdog. Watchdog exits with $1; each binary run appends to a log.
-_install_dual_binary() {
+# Build an install with helix-screen and a watchdog. Watchdog exits with $1;
+# each watchdog run appends to a log.
+_install_with_watchdog() {
     local watchdog_exit="$1"
 
     cat > "$MOCK_INSTALL/bin/helix-watchdog" <<EOF
@@ -58,10 +61,7 @@ echo "watchdog \$*" >> "$MOCK_INSTALL/runs.txt"
 exit ${watchdog_exit}
 EOF
     printf '#!/bin/sh\nexit 0\n' > "$MOCK_INSTALL/bin/helix-screen"
-    printf '#!/bin/sh\nexit 0\n' > "$MOCK_INSTALL/bin/helix-screen-fbdev"
-    chmod +x "$MOCK_INSTALL/bin/helix-watchdog" \
-             "$MOCK_INSTALL/bin/helix-screen" \
-             "$MOCK_INSTALL/bin/helix-screen-fbdev"
+    chmod +x "$MOCK_INSTALL/bin/helix-watchdog" "$MOCK_INSTALL/bin/helix-screen"
     rm -f "$MOCK_INSTALL/runs.txt"
 }
 
@@ -78,11 +78,18 @@ _watchdog_runs() {
     [ "$output" = "NOTCRASH" ]
 }
 
-@test "_is_crash_exit: real crash signals still retryable" {
-    for code in 134 136 138 139; do
-        run _probe_is_crash_exit "$code"
-        [ "$output" = "CRASH" ]
+@test "_is_crash_exit: every crash signal is retryable, by this host's numbering" {
+    for sig in ILL TRAP ABRT BUS FPE SEGV SYS; do
+        num=$(kill -l "$sig")
+        run _probe_is_crash_exit "$((128 + num))"
+        [ "$output" = "CRASH" ] || { echo "SIG$sig ($((128 + num))) not retryable"; false; }
     done
+}
+
+@test "_is_crash_exit: a non-crash signal at a crash signal's number elsewhere is not retryable" {
+    # SIGUSR1 has SIGBUS's MIPS number (10) on ARM and x86; only the name decides.
+    run _probe_is_crash_exit "$((128 + $(kill -l USR1)))"
+    [ "$output" = "NOTCRASH" ]
 }
 
 @test "_is_crash_exit: ordinary non-signal failures still retryable" {
@@ -101,9 +108,10 @@ _watchdog_runs() {
 }
 
 @test "watchdog exit 42 does not trigger the fbdev fallback run" {
-    _install_dual_binary 42
+    _install_with_watchdog 42
 
-    run env MOCK_INSTALL="$MOCK_INSTALL" sh "$MOCK_INSTALL/bin/helix-launcher.sh"
+    run env MOCK_INSTALL="$MOCK_INSTALL" HELIX_DISPLAY_BACKEND=drm \
+        sh "$MOCK_INSTALL/bin/helix-launcher.sh"
 
     # Exactly one watchdog invocation: the fallback must not have been tried.
     [ "$(_watchdog_runs)" -eq 1 ]
@@ -113,15 +121,16 @@ _watchdog_runs() {
 
 @test "watchdog exit 139 (SEGV) still triggers the fbdev fallback run" {
     # Guard against over-correcting: the fallback path must survive.
-    _install_dual_binary 139
+    _install_with_watchdog 139
 
-    run env MOCK_INSTALL="$MOCK_INSTALL" sh "$MOCK_INSTALL/bin/helix-launcher.sh"
+    run env MOCK_INSTALL="$MOCK_INSTALL" HELIX_DISPLAY_BACKEND=drm \
+        sh "$MOCK_INSTALL/bin/helix-launcher.sh"
 
     [ "$(_watchdog_runs)" -eq 2 ]
 }
 
 @test "every launcher log line carries a timestamp" {
-    _install_dual_binary 0
+    _install_with_watchdog 0
 
     run env MOCK_INSTALL="$MOCK_INSTALL" sh "$MOCK_INSTALL/bin/helix-launcher.sh"
 

@@ -12,6 +12,7 @@
 #include "ui_toast_manager.h"
 #include "ui_utils.h"
 
+#include "i18n_plural.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "system/telemetry_manager.h"
 #include "theme_manager.h"
@@ -77,10 +78,9 @@ void TelemetryDataOverlay::update_status() {
     // Update detail text with event count
     if (count == 0) {
         lv_subject_copy_string(&detail_subject_, lv_tr("No events queued"));
-    } else if (count == 1) {
-        lv_subject_copy_string(&detail_subject_, lv_tr("1 event queued"));
     } else {
-        snprintf(detail_buf_, sizeof(detail_buf_), lv_tr("%zu events queued"), count);
+        snprintf(detail_buf_, sizeof(detail_buf_),
+                 helix::ui::tr_plural("1 event queued", "%zu events queued", count), count);
         lv_subject_copy_string(&detail_subject_, detail_buf_);
     }
 
@@ -288,8 +288,9 @@ void TelemetryDataOverlay::populate_events() {
                     int ext = p["extruder_count"].get<int>();
                     if (!mcu_line.empty())
                         mcu_line += " | ";
-                    mcu_line += std::to_string(ext) + " " +
-                                (ext != 1 ? lv_tr("extruders") : lv_tr("extruder"));
+                    mcu_line +=
+                        std::to_string(ext) + " " +
+                        helix::ui::tr_plural("extruder", "extruders", static_cast<uint64_t>(ext));
                 }
                 if (!mcu_line.empty()) {
                     make_label(card, mcu_line, "text_subtle");
@@ -378,8 +379,11 @@ void TelemetryDataOverlay::populate_events() {
             add_field_str("app_version", lv_tr("Version"));
             add_field_num("uptime_sec", lv_tr("Uptime"), "s");
             if (event.contains("backtrace") && event["backtrace"].is_array()) {
+                const size_t frames = event["backtrace"].size();
                 make_label(card,
-                           fmt::format(lv_tr("Backtrace: {} frames"), event["backtrace"].size()),
+                           fmt::format(fmt::runtime(helix::ui::tr_plural(
+                                           nullptr, "Backtrace: {} frames", frames)),
+                                       frames),
                            "text_subtle");
             }
 

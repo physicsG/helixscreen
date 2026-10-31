@@ -151,6 +151,46 @@ forgex_record_prev_display() {
     return 0
 }
 
+# The probe for a live (uncommented) `display = ...` line in variables.cfg.
+# Every read and rewrite of the display key goes through it, so a hand-left
+# `#display = '...'` comment never answers for the mode.
+FORGEX_DISPLAY_KEY_RE="^[[:space:]]*display[[:space:]]*="
+
+# Set `$2 = $3` in the Klipper save_variables file $1, in the format Forge-X
+# writes: one `key = value` line under `[Variables]`. A live line for the key
+# is rewritten in place; otherwise the line goes directly under the header,
+# and a file with no header (empty, or never written by Klipper) gets one.
+# Klipper's [Variables] block is the only valid home for the key. Returns
+# non-zero, with the file untouched, when the write does not land.
+forgex_vars_set_key() {
+    vk_file="$1"
+    vk_line="$2 = $3"
+
+    if grep -q "^[[:space:]]*$2[[:space:]]*=" "$vk_file" 2>/dev/null; then
+        $SUDO sed -i "s/^[[:space:]]*$2[[:space:]]*=.*/$vk_line/" "$vk_file" || return 1
+    else
+        vk_tmp="${vk_file}.tmp"
+        if grep -q '^\[Variables\]' "$vk_file" 2>/dev/null; then
+            # awk terminates every record it prints, so a last line with no
+            # newline cannot glue the header to the new key.
+            awk -v line="$vk_line" '
+                /^\[Variables\]/ && !done { print; print line; done = 1; next }
+                { print }
+            ' "$vk_file" > "$vk_tmp" 2>/dev/null || { rm -f "$vk_tmp" 2>/dev/null; return 1; }
+        else
+            # Lines above the first header belong to no section, so the
+            # header goes first, ahead of whatever the file already holds.
+            { printf '[Variables]\n%s\n' "$vk_line"; cat "$vk_file"; } > "$vk_tmp" 2>/dev/null \
+                || { rm -f "$vk_tmp" 2>/dev/null; return 1; }
+        fi
+        if ! grep -qxF "$vk_line" "$vk_tmp" || ! $SUDO mv "$vk_tmp" "$vk_file"; then
+            rm -f "$vk_tmp" 2>/dev/null
+            return 1
+        fi
+    fi
+    grep -qxF "$vk_line" "$vk_file"
+}
+
 # Configure ForgeX display settings for HelixScreen.
 #
 # HEADLESS is the slot DrA1ex asked custom screens to occupy (DrA1ex/ff5m#74).
@@ -175,15 +215,40 @@ configure_forgex_display() {
     display_set=false
     record_failed=false
     drift_refused=false
+    key_absent=false
 
     if [ -f "$var_file" ]; then
+        probe_modes="$FORGEX_DISPLAY_MODES HEADLESS"
+        if ! grep -q "$FORGEX_DISPLAY_KEY_RE" "$var_file"; then
+            # Forge-X saves a mod setting only when it differs from the
+            # default, so a file with no display key (a fresh install's is a
+            # bare `[Variables]` header) runs this version's default: STOCK on
+            # 1.4.0/1.4.1, FEATHER on 1.4.2. printer.cfg's include is then the
+            # only evidence of the mode. HEADLESS is never a default, so an
+            # include naming it is a SET_MOD back to the default still waiting
+            # on a reboot, and refuses like any other drift. A pending switch
+            # between STOCK and FEATHER cannot be told apart from no change
+            # without knowing the version's default, and is taken at the
+            # include's word.
+            key_absent=true
+            probe_modes="$(forgex_running_display_mode)"
+            if [ "$probe_modes" = "HEADLESS" ]; then
+                log_error "ForgeX display state disagrees: variables.cfg names no mode (the firmware default), printer.cfg runs HEADLESS"
+                log_error "Reboot the printer (its boot tooling reconciles the two files) and re-run the install"
+                drift_refused=true
+                probe_modes=""
+            fi
+        fi
+
         # HEADLESS closes the list as an arrival state: a printer already on
         # it (a prior HelixScreen install, or DrA1ex's slot for custom
         # screens) must be recorded as such, or uninstall "restores" it to
         # GUPPY - a mode that printer never had, and one that starts a UI the
         # operator had turned off.
-        for mode in $FORGEX_DISPLAY_MODES HEADLESS; do
-            grep -q "display[[:space:]]*=[[:space:]]*'$mode'" "$var_file" || continue
+        for mode in $probe_modes; do
+            if [ "$key_absent" != true ]; then
+                grep -q "${FORGEX_DISPLAY_KEY_RE}[[:space:]]*'$mode'" "$var_file" || continue
+            fi
 
             # The record must name the mode the machine RUNS, and at a first
             # takeover that is confirmed against printer.cfg's include: the
@@ -228,13 +293,21 @@ configure_forgex_display() {
             fi
 
             log_info "Setting ForgeX display mode to HEADLESS (was $mode)..."
-            $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'$mode'/display = 'HEADLESS'/" "$var_file"
+            if ! forgex_vars_set_key "$var_file" display "'HEADLESS'"; then
+                log_error "Could not write the ForgeX display mode to ${var_file}"
+                display_set=false
+                break
+            fi
             changed=true
             break
         done
 
         if [ "$display_set" != true ] && [ "$record_failed" != true ] && [ "$drift_refused" != true ]; then
-            log_warn "ForgeX display mode in ${var_file} was not recognized - left unchanged"
+            if [ "$key_absent" = true ]; then
+                log_warn "ForgeX ${var_file} names no display mode and $(forgex_printer_cfg) has no display include - left unchanged"
+            else
+                log_warn "ForgeX display mode in ${var_file} was not recognized - left unchanged"
+            fi
         fi
     else
         log_warn "ForgeX variables.cfg not found (${var_file}) - display mode cannot be taken over"
@@ -323,30 +396,11 @@ dismiss_forgex_feather_promo() {
     fi
 
     log_info "Dismissing ForgeX Feather display offer..."
-    tmp_file="${var_file}.tmp"
-
-    if grep -qE "^[[:space:]]*show_feather_promo[[:space:]]*=" "$var_file"; then
-        sed "s/^[[:space:]]*show_feather_promo[[:space:]]*=.*/show_feather_promo = 0/" \
-            "$var_file" > "$tmp_file"
-    else
-        # Klipper's [Variables] block is the only valid home for the key.
-        awk '
-        /^\[Variables\]/ && !done { print; print "show_feather_promo = 0"; done = 1; next }
-        { print }
-        ' "$var_file" > "$tmp_file"
-    fi
-
-    if [ -s "$tmp_file" ] && \
-       grep -qE "^show_feather_promo = 0$" "$tmp_file" 2>/dev/null; then
-        # A deliberate non-site of forgex_apply_patch: variables.cfg is a
-        # Klipper config, not a shell script, so bash -n is the wrong
-        # validator here. The grep above IS this write's postcondition.
-        $SUDO mv "$tmp_file" "$var_file"
+    if forgex_vars_set_key "$var_file" show_feather_promo 0; then
         log_success "ForgeX Feather display offer dismissed"
         return 0
     fi
 
-    rm -f "$tmp_file"
     log_warn "Failed to dismiss ForgeX Feather display offer"
     return 1
 }
@@ -804,9 +858,9 @@ uninstall_forgex() {
     fi
 
     if [ -f "$var_file" ]; then
-        if grep -q "display[[:space:]]*=[[:space:]]*'HEADLESS'" "$var_file"; then
+        if grep -q "${FORGEX_DISPLAY_KEY_RE}[[:space:]]*'HEADLESS'" "$var_file"; then
             log_info "Restoring ForgeX display mode to ${restore_mode}..."
-            if $SUDO sed -i "s/display[[:space:]]*=[[:space:]]*'HEADLESS'/display = '${restore_mode}'/" "$var_file"; then
+            if forgex_vars_set_key "$var_file" display "'${restore_mode}'"; then
                 mode_restored=true
                 # The record dies only with the restore that consumed it.
                 $SUDO rm -f "$record_f"

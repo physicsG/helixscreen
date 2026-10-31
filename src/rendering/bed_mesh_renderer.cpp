@@ -5,6 +5,7 @@
 
 #include "bed_mesh_renderer.h"
 
+#include "bed_grid.h"
 #include "bed_mesh_buffer.h"
 #include "bed_mesh_coordinate_transform.h"
 #include "bed_mesh_geometry.h"
@@ -39,8 +40,8 @@ namespace {
 // This ensures consistency between the renderer and any code that reads those constants
 
 // Canvas rendering
-constexpr double CANVAS_PADDING_FACTOR = 0.98; // Margin for axis labels and tick marks at edges
-constexpr double INITIAL_FOV_SCALE = 150.0;    // Starting point for auto-scale (gets adjusted)
+constexpr double kCanvasPaddingFactor = 0.98; // Margin for axis labels and tick marks at edges
+constexpr double kInitialFovScale = 150.0;    // Starting point for auto-scale (gets adjusted)
 
 } // anonymous namespace
 
@@ -125,12 +126,13 @@ bed_mesh_renderer_t* bed_mesh_renderer_create(void) {
     renderer->bed_center_y = 0.0;
     renderer->coord_scale = 1.0;
     renderer->geometry_computed = false;
+    renderer->circular_bed = false;
 
     // Default view state (Mainsail-style: looking from front-right toward back-left)
     renderer->view_state.angle_x = BED_MESH_DEFAULT_ANGLE_X;
     renderer->view_state.angle_z = BED_MESH_DEFAULT_ANGLE_Z;
     renderer->view_state.z_scale = BED_MESH_DEFAULT_Z_SCALE;
-    renderer->view_state.fov_scale = INITIAL_FOV_SCALE;
+    renderer->view_state.fov_scale = kInitialFovScale;
     renderer->view_state.camera_distance = 1000.0; // Default, recomputed when mesh data is set
     renderer->view_state.is_dragging = false;
 
@@ -286,10 +288,12 @@ void bed_mesh_renderer_apply_two_finger(bed_mesh_renderer_t* renderer, double pa
 
 void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_min, double bed_x_max,
                                   double bed_y_min, double bed_y_max, double mesh_x_min,
-                                  double mesh_x_max, double mesh_y_min, double mesh_y_max) {
+                                  double mesh_x_max, double mesh_y_min, double mesh_y_max,
+                                  bool circular_bed) {
     if (!renderer) {
         return;
     }
+    renderer->circular_bed = circular_bed;
 
     // Set bed bounds (full print bed area - used for grid/walls)
     renderer->bed_min_x = bed_x_min;
@@ -310,12 +314,12 @@ void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_mi
 
     // Compute scale factor: normalize larger bed dimension to target world size
     // Target world size matches the old BED_MESH_SCALE-based sizing (~200 world units)
-    constexpr double TARGET_WORLD_SIZE = 200.0;
+    constexpr double kTargetWorldSize = 200.0;
     double bed_size_x = bed_x_max - bed_x_min;
     double bed_size_y = bed_y_max - bed_y_min;
     double larger_dimension = std::max(bed_size_x, bed_size_y);
     renderer->coord_scale =
-        helix::mesh::compute_bed_scale_factor(larger_dimension, TARGET_WORLD_SIZE);
+        helix::mesh::compute_bed_scale_factor(larger_dimension, kTargetWorldSize);
     renderer->geometry_computed = true;
 
     spdlog::debug("[Bed Mesh Renderer] Set bounds: bed [{:.1f}, {:.1f}] x [{:.1f}, {:.1f}], mesh "
@@ -330,7 +334,7 @@ void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_mi
 
     // Reset FOV scale and centering to trigger auto-calibration on next render
     // This ensures the view zooms to fit the new bed bounds
-    renderer->view_state.fov_scale = INITIAL_FOV_SCALE;
+    renderer->view_state.fov_scale = kInitialFovScale;
     renderer->view_state.center_offset_x = 0;
     renderer->view_state.center_offset_y = 0;
     renderer->initial_centering_computed = false;
@@ -746,7 +750,7 @@ static void compute_centering_offset(int mesh_min_x, int mesh_max_x, int mesh_mi
  *
  * Computes a scale factor that ensures the projected mesh and reference walls
  * fit within the canvas with appropriate padding. Only runs on first render
- * (when fov_scale equals INITIAL_FOV_SCALE).
+ * (when fov_scale equals kInitialFovScale).
  *
  * @param renderer Renderer instance with mesh data
  * @param canvas_width Canvas width in pixels
@@ -807,19 +811,19 @@ static void calibrate_fov_scale(bed_mesh_renderer_t* renderer, int canvas_width,
     // Calculate scale needed to fit projected bounds into canvas
     int projected_width = max_x - min_x;
     int projected_height = max_y - min_y;
-    double scale_x = (canvas_width * CANVAS_PADDING_FACTOR) / projected_width;
-    double scale_y = (canvas_height * CANVAS_PADDING_FACTOR) / projected_height;
+    double scale_x = (canvas_width * kCanvasPaddingFactor) / projected_width;
+    double scale_y = (canvas_height * kCanvasPaddingFactor) / projected_height;
     double scale_factor = std::min(scale_x, scale_y);
 
     spdlog::info("[Bed Mesh Renderer] [FOV] Canvas: {}x{}, Projected (incl walls): {}x{}, "
                  "Padding: {:.2f}, Scale: {:.2f}",
                  canvas_width, canvas_height, projected_width, projected_height,
-                 CANVAS_PADDING_FACTOR, scale_factor);
+                 kCanvasPaddingFactor, scale_factor);
 
     // Apply scale (only once, not every frame)
     renderer->view_state.fov_scale *= scale_factor;
     spdlog::info("[Bed Mesh Renderer] [FOV] Final fov_scale: {:.2f} (initial {} * scale {:.2f})",
-                 renderer->view_state.fov_scale, INITIAL_FOV_SCALE, scale_factor);
+                 renderer->view_state.fov_scale, kInitialFovScale, scale_factor);
 }
 
 /**
@@ -898,7 +902,7 @@ static void prepare_render_frame(bed_mesh_renderer_t* renderer, int canvas_width
 
     // Compute FOV scale ONCE on first render (when fov_scale is still at default)
     // This prevents grow/shrink effect when rotating - scale stays constant
-    if (renderer->view_state.fov_scale == INITIAL_FOV_SCALE) {
+    if (renderer->view_state.fov_scale == kInitialFovScale) {
         calibrate_fov_scale(renderer, canvas_width, canvas_height);
     }
 
@@ -1054,6 +1058,42 @@ static bool is_fps_below_threshold(const bed_mesh_renderer_t* renderer, float mi
  * The border and touch tooltip are drawn on the main thread
  * (helix::mesh::render_heatmap_overlay).
  */
+namespace {
+
+/// Heatmap pixels <-> printer mm over the mesh area, for a round bed's circle.
+struct HeatmapBedMap {
+    const bed_mesh_renderer_t* r;
+    const helix::mesh::HeatmapLayout& l;
+    double mm_per_px_x() const {
+        return (r->mesh_area_max_x - r->mesh_area_min_x) / (l.cells_x * l.cell_w);
+    }
+    double mm_per_px_y() const {
+        return (r->mesh_area_max_y - r->mesh_area_min_y) / (l.cells_y * l.cell_h);
+    }
+    helix::BedPoint to_mm(double px, double py) const {
+        return {r->mesh_area_min_x + (px - l.grid_x) * mm_per_px_x(),
+                r->mesh_area_min_y + (py - l.grid_y) * mm_per_px_y()};
+    }
+    std::pair<int, int> to_px(const helix::BedPoint& p) const {
+        return {
+            static_cast<int>(std::lround(l.grid_x + (p.x - r->mesh_area_min_x) / mm_per_px_x())),
+            static_cast<int>(std::lround(l.grid_y + (p.y - r->mesh_area_min_y) / mm_per_px_y()))};
+    }
+    helix::RoundBed circle() const {
+        return helix::inscribed_round_bed(r->mesh_area_min_x, r->mesh_area_max_x,
+                                          r->mesh_area_min_y, r->mesh_area_max_y);
+    }
+};
+
+/// The 2D heatmap shows a round bed's mesh only inside its circle.
+bool heatmap_is_round(const bed_mesh_renderer_t* renderer) {
+    return renderer->circular_bed && renderer->has_mesh_bounds &&
+           renderer->mesh_area_max_x > renderer->mesh_area_min_x &&
+           renderer->mesh_area_max_y > renderer->mesh_area_min_y;
+}
+
+} // namespace
+
 static void render_2d_heatmap_to_buffer(helix::mesh::PixelBuffer& buf,
                                         const bed_mesh_renderer_t* renderer) {
     const auto l = helix::mesh::compute_heatmap_layout(renderer->rows, renderer->cols, buf.width(),
@@ -1070,6 +1110,24 @@ static void render_2d_heatmap_to_buffer(helix::mesh::PixelBuffer& buf,
     auto blend = [](lv_color_t c1, lv_color_t c2, lv_color_t c3) -> lv_color_t {
         return lv_color_make((c1.red + c2.red + c3.red) / 3, (c1.green + c2.green + c3.green) / 3,
                              (c1.blue + c2.blue + c3.blue) / 3);
+    };
+
+    const bool round = heatmap_is_round(renderer);
+    const HeatmapBedMap map{renderer, l};
+    const helix::RoundBed circle = round ? map.circle() : helix::RoundBed{};
+    auto fill = [&](int x1, int y1, int x2, int y2, int x3, int y3, lv_color_t color) {
+        if (!round) {
+            helix::mesh::fill_triangle_solid(buf, x1, y1, x2, y2, x3, y3, color);
+            return;
+        }
+        const auto poly = helix::clip_to_round_bed(
+            {map.to_mm(x1, y1), map.to_mm(x2, y2), map.to_mm(x3, y3)}, circle);
+        for (size_t i = 1; i + 1 < poly.size(); i++) {
+            const auto [ax, ay] = map.to_px(poly[0]);
+            const auto [bx, by] = map.to_px(poly[i]);
+            const auto [cx, cy] = map.to_px(poly[i + 1]);
+            helix::mesh::fill_triangle_solid(buf, ax, ay, bx, by, cx, cy, color);
+        }
     };
 
     for (int row = 0; row < l.cells_y; row++) {
@@ -1094,14 +1152,10 @@ static void render_2d_heatmap_to_buffer(helix::mesh::PixelBuffer& buf,
             int x_mid = (x_left + x_right) / 2;
             int y_mid = (y_top + y_bottom) / 2;
 
-            helix::mesh::fill_triangle_solid(buf, x_left, y_top, x_right, y_top, x_mid, y_mid,
-                                             blend(c_tl, c_tr, c_center));
-            helix::mesh::fill_triangle_solid(buf, x_right, y_top, x_right, y_bottom, x_mid, y_mid,
-                                             blend(c_tr, c_br, c_center));
-            helix::mesh::fill_triangle_solid(buf, x_right, y_bottom, x_left, y_bottom, x_mid, y_mid,
-                                             blend(c_br, c_bl, c_center));
-            helix::mesh::fill_triangle_solid(buf, x_left, y_bottom, x_left, y_top, x_mid, y_mid,
-                                             blend(c_bl, c_tl, c_center));
+            fill(x_left, y_top, x_right, y_top, x_mid, y_mid, blend(c_tl, c_tr, c_center));
+            fill(x_right, y_top, x_right, y_bottom, x_mid, y_mid, blend(c_tr, c_br, c_center));
+            fill(x_right, y_bottom, x_left, y_bottom, x_mid, y_mid, blend(c_br, c_bl, c_center));
+            fill(x_left, y_bottom, x_left, y_top, x_mid, y_mid, blend(c_bl, c_tl, c_center));
         }
     }
 }
@@ -1192,6 +1246,17 @@ bool bed_mesh_renderer_handle_touch(bed_mesh_renderer_t* renderer, int touch_x, 
         col >= renderer->cols) {
         renderer->touch_valid = false;
         return false;
+    }
+
+    // A round bed has no reading outside its circle.
+    if (heatmap_is_round(renderer)) {
+        const HeatmapBedMap map{renderer, l};
+        const auto p = map.to_mm(touch_x, touch_y);
+        const auto c = map.circle();
+        if (std::hypot(p.x - c.cx, p.y - c.cy) > c.r) {
+            renderer->touch_valid = false;
+            return false;
+        }
     }
 
     // Store touched cell info

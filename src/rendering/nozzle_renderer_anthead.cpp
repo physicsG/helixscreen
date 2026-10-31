@@ -37,10 +37,10 @@ const lv_draw_buf_t* anthead_image() {
 }
 
 // Source image dimensions and visual center (measured from content bounds)
-static constexpr int32_t IMG_W = 100;
-static constexpr int32_t IMG_H = 163;
-static constexpr int32_t IMG_CENTER_X = 50; // horizontal center of content
-static constexpr int32_t IMG_CENTER_Y = 81; // vertical center of main body
+static constexpr int32_t kImgW = 100;
+static constexpr int32_t kImgH = 163;
+static constexpr int32_t kImgCenterX = 50; // horizontal center of content
+static constexpr int32_t kImgCenterY = 81; // vertical center of main body
 
 void draw_nozzle_anthead(lv_layer_t* layer, int32_t cx, int32_t cy,
                          std::optional<lv_color_t> filament, int32_t scale_unit, lv_opa_t opa) {
@@ -49,7 +49,7 @@ void draw_nozzle_anthead(lv_layer_t* layer, int32_t cx, int32_t cy,
     // Scale to match other toolhead renderers' visual footprint
     int32_t render_height = (scale_unit * 65) / 10;
     // LV_SCALE_NONE (256) = 1:1.  Scale maps source height to desired rendered height.
-    int32_t scale = 256 * render_height / IMG_H;
+    int32_t scale = 256 * render_height / kImgH;
     const lv_draw_buf_t* img = anthead_image();
     if (scale <= 0 || !img)
         return;
@@ -62,17 +62,17 @@ void draw_nozzle_anthead(lv_layer_t* layer, int32_t cx, int32_t cy,
     dsc.opa = opa;
     dsc.scale_x = scale;
     dsc.scale_y = scale;
-    dsc.pivot.x = IMG_CENTER_X;
-    dsc.pivot.y = IMG_CENTER_Y;
+    dsc.pivot.x = kImgCenterX;
+    dsc.pivot.y = kImgCenterY;
 
     // coords defines where the ORIGINAL (unscaled) image top-left goes.
     // The pivot stays at (coords.x1 + pivot.x, coords.y1 + pivot.y) after scaling,
     // so we offset to place the pivot at (cx, cy).
     lv_area_t coords;
-    coords.x1 = cx - IMG_CENTER_X;
-    coords.y1 = cy - IMG_CENTER_Y;
-    coords.x2 = coords.x1 + IMG_W - 1;
-    coords.y2 = coords.y1 + IMG_H - 1;
+    coords.x1 = cx - kImgCenterX;
+    coords.y1 = cy - kImgCenterY;
+    coords.x2 = coords.x1 + kImgW - 1;
+    coords.y2 = coords.y1 + kImgH - 1;
 
     lv_draw_image(layer, &dsc, &coords);
 }

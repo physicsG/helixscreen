@@ -116,6 +116,11 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         std::string text = lv_label_get_text(explain);
         CHECK(text.find("T2") != std::string::npos);
         CHECK(text.find("Tool 2") == std::string::npos);
+        // No lane feeds the tool at all, whether the printer assigns it none or
+        // auto-matching found no compatible loaded lane: the missing piece is
+        // the assignment, not a spool.
+        CHECK(text.find("has no lane assigned") != std::string::npos);
+        CHECK(text.find("no filament loaded") == std::string::npos);
 
         modal->hide();
         process_lvgl(50);
@@ -148,10 +153,11 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 TEST_CASE_METHOD(LVGLUITestFixture,
                  "PreflightCheckModal explanation names a multi-unit lane within its own unit",
                  "[preflight][modal][ui]") {
-    // Box Turtle 1 (global 0-3) + Night Owl (global 4-5): global slot 5 is
-    // Night Owl's second lane, local index 1 - "Night Owl · Lane 2" on every
-    // other surface (mapping chip, remap modal). The explanation must agree,
-    // not spell it "Lane 6" from the global index.
+    // Turtle 1 (global 0-3) + Night Owl 1 (global 4-5): global slot 5 is
+    // Night Owl 1's second lane, local index 1 - "Night Owl 1 · Lane 2" on every
+    // other surface (unit card, mapping chip, remap modal). The explanation must
+    // agree, not spell it "Lane 6" from the global index, nor show AFC's raw
+    // instance name "Night_Owl_1".
     auto& ams = helix::AmsState::instance();
     ams.init_subjects(false);
     auto owned_backend = std::make_unique<helix::AmsBackendMock>();
@@ -173,7 +179,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     lv_obj_t* explain = lv_obj_find_by_name(test_screen(), "preflight_explanation");
     REQUIRE(explain != nullptr);
     std::string text = lv_label_get_text(explain);
-    CHECK(text.find("Night Owl") != std::string::npos);
+    CHECK(text.find("Night Owl 1") != std::string::npos);
+    CHECK(text.find("Night_Owl") == std::string::npos);
     CHECK(text.find("Lane 2") != std::string::npos);
     CHECK(text.find("Lane 6") == std::string::npos);
 
@@ -272,5 +279,65 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         REQUIRE(ams.backend->get_remap_strategy() != helix::AmsBackend::RemapStrategy::None);
         REQUIRE_FALSE(helix::printer::can_remap(*ams.backend));
         CHECK_FALSE(remap_button_offered(test_screen(), pump));
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PreflightCheckModal sets an unset slot to the material the file names",
+                 "[preflight][modal][ui][material_fix]") {
+    ScopedAmsBackend ams(4);
+    auto pump = [this]() {
+        process_lvgl(50);
+        lv_obj_update_layout(test_screen());
+    };
+    auto show = [&](const helix::PreflightResult& pf) {
+        auto owned = std::make_unique<helix::ui::PreflightCheckModal>();
+        auto* modal = owned.get();
+        modal->set_checks(pf);
+        REQUIRE(Modal::show_owned(std::move(owned), test_screen()));
+        pump();
+        return modal;
+    };
+
+    SECTION("the file names one: the button offers it and writes it") {
+        REQUIRE(ams.backend->get_slot_info(1).material != "PETG");
+        // A head with nothing set holds an unlinked spool; a Spoolman-linked
+        // slot takes its material from Spoolman and refuses the edit.
+        helix::SlotInfo unlinked = ams.backend->get_slot_info(1);
+        unlinked.spoolman_id = 0;
+        REQUIRE(ams.backend->sync_external_identity(1, unlinked).success());
+        helix::PreflightResult pf;
+        pf.checks = {
+            make_check(0, 0xF5A623, "PETG", 1, true, helix::ToolCheck::Severity::UnknownMaterial)};
+        show(pf);
+
+        lv_obj_t* row = lv_obj_find_by_name(test_screen(), "preflight_material_fix_row");
+        REQUIRE(row != nullptr);
+        REQUIRE_FALSE(lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN));
+        lv_obj_t* btn = lv_obj_find_by_name(row, "btn_set_material");
+        REQUIRE(btn != nullptr);
+        const std::string label =
+            lv_subject_get_string(lv_xml_get_subject(nullptr, "preflight_material_fix_text"));
+        CHECK(label.rfind("Set ", 0) == 0);
+        CHECK(label.find("2 to PETG") != std::string::npos);
+        CHECK(label.find("PETG") != std::string::npos);
+
+        lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+        helix::ui::UpdateQueue::instance().drain();
+        pump();
+        CHECK(ams.backend->get_slot_info(1).material == "PETG");
+        CHECK(lv_obj_find_by_name(test_screen(), "btn_set_material") == nullptr);
+    }
+
+    SECTION("the file names none: no button") {
+        helix::PreflightResult pf;
+        pf.checks = {
+            make_check(0, 0xF5A623, "", 1, true, helix::ToolCheck::Severity::UnknownMaterial)};
+        auto* modal = show(pf);
+        lv_obj_t* row = lv_obj_find_by_name(test_screen(), "preflight_material_fix_row");
+        REQUIRE(row != nullptr);
+        CHECK(lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN));
+        modal->hide();
+        pump();
     }
 }

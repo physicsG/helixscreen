@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-#include "ui_heater_config.h" // helix::HeaterType, HEATER_TYPE_COUNT
+#include "ui_heater_config.h" // helix::HeaterType, kHeaterTypeCount
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include "hv/json.hpp"
+
 namespace helix {
 class PrinterState;
 struct DryerInfo;
@@ -22,9 +24,9 @@ namespace chamber {
 class ChamberHeaterBackend;
 }
 } // namespace helix
-class IMoonrakerAPI;
 
 namespace helix {
+class IMoonrakerAPI;
 
 // HeaterPresets lives in ui_heater_config.h (included above) so heater_config_t
 // and this controller share one definition instead of two parallel copies.
@@ -36,7 +38,7 @@ namespace helix {
  *  - Nozzle / Bed: derived from the filament database entry for that slot's
  *    material (user MaterialSettingsManager overrides already folded in).
  *  - Chamber: a documented, slot-indexed enclosure ladder that is deliberately
- *    NOT material-derived — see CHAMBER_PRESET_LADDER_C in the .cpp for why.
+ *    NOT material-derived — see kChamberPresetLadderC in the .cpp for why.
  *
  * Free function so callers without a controller instance (TemperatureService
  * construction) share one derivation instead of duplicating the lookups.
@@ -59,6 +61,28 @@ struct SendOptions {
     std::function<void()> on_success = nullptr;
     std::function<void(const MoonrakerError&)> on_error = nullptr;
 };
+
+/// What a chamber backend's set-target route answered. Superseded: a newer
+/// target replaced this one, which then governs. Pending: the device has not
+/// answered yet and the route is still trying. Unavailable: no route, or the
+/// request never reached it.
+enum class ChamberRouteOutcome {
+    Accepted,
+    Pending,
+    Superseded,
+    Refused,
+    PrinterShutdown,
+    Unavailable
+};
+
+struct ChamberRouteReply {
+    ChamberRouteOutcome outcome = ChamberRouteOutcome::Unavailable;
+    std::string reason; ///< the route's reason code, or the transport error
+};
+
+/// Read the route's reply, {"accepted": true|false|null, "pending": bool,
+/// "reason": str|null, ...}, with or without the JSON-RPC "result" wrapper.
+ChamberRouteReply parse_chamber_route_reply(const nlohmann::json& resp);
 
 struct KeypadRange {
     float min = 0.0f;
@@ -127,9 +151,28 @@ class TemperatureController {
 
     /// Backend-provided chamber action surface (issue #1290). Wired by
     /// PrinterState when the resolved chamber heater is the discovery pick;
-    /// empty strings / 0 disable each capability.
+    /// empty strings / 0 disable each capability. @p set_target_method is the
+    /// backend's JSON-RPC route around the gcode queue ("" = none): chamber
+    /// targets go through it while it answers, and through gcode once the
+    /// printer reports it does not exist.
     void set_chamber_actions(std::string reset_gcode, std::string filter_fan_pin,
-                             double conservative_max);
+                             double conservative_max, std::string set_target_method = {});
+
+    /// The chamber target can be set while the gcode queue is blocked, as it
+    /// is during a wait on that same heater.
+    [[nodiscard]] bool chamber_has_direct_route() const;
+
+    /// Send a chamber target only by the route around the gcode queue. A gcode
+    /// fallback would queue behind the wait it is meant to release, so with no
+    /// route this fails through @p opts instead of sending anything.
+    void retry_chamber_target(double celsius,
+                              std::function<void(const ChamberRouteReply&)> done = nullptr);
+
+    /// The last nonzero chamber target sent through this controller, °C; 0
+    /// when none has been.
+    [[nodiscard]] double last_chamber_target_c() const {
+        return last_chamber_target_c_;
+    }
 
     /// Clear a latched chamber-heater fault (backend gcode). No-op when the
     /// backend has no reset gcode or the api is gone.
@@ -176,6 +219,14 @@ class TemperatureController {
   private:
     friend struct TemperatureControllerTestAccess;
     void set_configured_max(HeaterType type, int deg);
+    void send_gcode_target(const std::string& klipper_name, double celsius, SendOptions opts);
+    /// @p gcode_fallback resends through gcode when the printer reports the
+    /// route does not exist.
+    /// @p on_reply, when given, hears every outcome on the main thread.
+    void
+    send_chamber_target_direct(const std::string& klipper_name, double celsius, SendOptions opts,
+                               bool gcode_fallback,
+                               std::function<void(const ChamberRouteReply&)> on_reply = nullptr);
 
     struct HeaterModel {
         float keypad_min = 0.0f;
@@ -183,7 +234,7 @@ class TemperatureController {
         int configured_max = 0;          // °C from configfile, 0 = unknown
         HeaterPresets presets{};
     };
-    std::array<HeaterModel, HEATER_TYPE_COUNT> model_{};
+    std::array<HeaterModel, kHeaterTypeCount> model_{};
     AsyncLifetimeGuard lifetime_;
 
     static int idx(HeaterType t) {
@@ -195,6 +246,9 @@ class TemperatureController {
 
     std::string chamber_reset_gcode_;
     std::string chamber_filter_fan_pin_;
+    std::string chamber_set_target_method_;
+    bool chamber_route_absent_ = false; ///< the printer answered "no such method"
+    double last_chamber_target_c_ = 0;
     double conservative_chamber_max_ = 0;
     const chamber::ChamberHeaterBackend* chamber_dryer_backend_ = nullptr;
     bool chamber_dryer_has_bed_ = false;

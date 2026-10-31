@@ -9,13 +9,13 @@
 #include "ui_observer_guard.h"
 #include "ui_panel_ams.h"
 #include "ui_panel_ams_overview.h"
+#include "ui_text.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "ams_backend.h"
 #include "ams_lane_state.h"
 #include "ams_state.h"
-#include "config.h"
 #include "display_numbering.h"
 #include "helix-xml/src/xml/lv_xml_parser.h"
 #include "helix-xml/src/xml/lv_xml_utils.h"
@@ -24,6 +24,7 @@
 #include "panel_widget_size.h"
 #include "theme_manager.h"
 #include "ui/ams_drawing_utils.h"
+#include "widget_data_registry.h"
 
 #include <spdlog/spdlog.h>
 
@@ -32,7 +33,6 @@
 #include <cstring>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 // ============================================================================
@@ -40,20 +40,20 @@
 // ============================================================================
 
 /** Minimum bar width in pixels (prevents bars from becoming invisible) */
-static constexpr int32_t MIN_BAR_WIDTH_PX = 3;
+static constexpr int32_t kMinBarWidthPx = 3;
 
 /** Maximum bar width in pixels (prevents bars from becoming too wide) */
-static constexpr int32_t MAX_BAR_WIDTH_PX = 24;
+static constexpr int32_t kMaxBarWidthPx = 24;
 
 /** Bar width cap when the caller never reported a width (non-home callers) */
-static constexpr int32_t DEFAULT_MAX_BAR_WIDTH_PX = 16;
+static constexpr int32_t kDefaultMaxBarWidthPx = 16;
 
 /**
  * Cell width per unit of bar width cap. Four lanes then span about half the
  * cell, and the cap scales with the tier instead of stepping at fixed pixel
  * widths. More lanes shrink below the cap through calc_bar_width().
  */
-static constexpr int32_t BAR_WIDTH_DIVISOR = 8;
+static constexpr int32_t kBarWidthDivisor = 8;
 
 /**
  * Smallest spool graphic the wide view will draw (px).
@@ -63,7 +63,7 @@ static constexpr int32_t BAR_WIDTH_DIVISOR = 8;
  * font ladder is doing. Deliberately not derived from a spacing or font token -
  * see min_spool_cell_w() for what IS derived from it.
  */
-static constexpr int MIN_SPOOL_IMG_PX = 24;
+static constexpr int kMinSpoolImgPx = 24;
 
 /**
  * Largest spool graphic the wide view will draw (px).
@@ -76,7 +76,7 @@ static constexpr int MIN_SPOOL_IMG_PX = 24;
  * so adopting it would shrink the graphic on the three cramped tiers and grow
  * it on the rest for reasons unrelated to fitting anything.
  */
-static constexpr int MAX_SPOOL_IMG_PX = 56;
+static constexpr int kMaxSpoolImgPx = 56;
 
 /**
  * Minimum width of one spool cell in the wide spool view (px), and the divisor
@@ -97,7 +97,7 @@ static constexpr int MAX_SPOOL_IMG_PX = 56;
  * per line. Sharing one `min_text` makes that disagreement unrepresentable.
  */
 static int min_spool_cell_w(int min_text, int gap) {
-    return MIN_SPOOL_IMG_PX + helix::ui::AMS_LANE_SPOOL_BADGE_MARGIN_PX + gap + min_text;
+    return kMinSpoolImgPx + helix::ui::kAmsLaneSpoolBadgeMarginPx + gap + min_text;
 }
 
 // ============================================================================
@@ -105,7 +105,7 @@ static int min_spool_cell_w(int min_text, int gap) {
 // ============================================================================
 
 /** Magic number to identify ams_mini_status widgets ("AMS1" as ASCII) */
-static constexpr uint32_t AMS_MINI_STATUS_MAGIC = 0x414D5331;
+static constexpr uint32_t kAmsMiniStatusMagic = 0x414D5331;
 
 /** Render mode: narrow bars vs. wide spool cells (selected by width_px) */
 enum class AmsMiniMode { BAR, SPOOL };
@@ -144,7 +144,7 @@ struct UnitRowInfo {
  * @brief User data stored on each ams_mini_status widget
  */
 struct AmsMiniStatusData {
-    uint32_t magic = AMS_MINI_STATUS_MAGIC;
+    uint32_t magic = kAmsMiniStatusMagic;
     int32_t height = 32;
     int slot_count = 0;
     int max_visible = AMS_MINI_STATUS_MAX_VISIBLE;
@@ -190,11 +190,9 @@ struct AmsMiniStatusData {
     int spools_built_h = 0;
     std::vector<int> spool_cell_obj_slots; // slot each pooled cell was built for
 
-    // Slots that get no bar and no cell, and are not counted in the "+N"
-    // overflow: those inside an absent unit (a box that is not on the bus), and
-    // those fed from another unit, which show that unit's spool and would draw
-    // one physical spool twice. See slot_gets_no_bar().
-    std::vector<int> undrawn_slots;
+    // Slots inside an absent unit (a box that is not on the bus): neither drawn
+    // nor counted in the "+N" overflow.
+    std::vector<int> absent_slots;
 
     // Auto-binding observer (observe AmsState slots_version subject)
     // Uses ObserverGuard for RAII lifecycle management
@@ -210,11 +208,10 @@ struct AmsMiniStatusData {
 };
 
 // Static registry for safe cleanup
-static std::unordered_map<lv_obj_t*, AmsMiniStatusData*> s_registry;
+static helix::WidgetDataRegistry<AmsMiniStatusData> s_registry;
 
 static AmsMiniStatusData* get_data(lv_obj_t* obj) {
-    auto it = s_registry.find(obj);
-    return (it != s_registry.end()) ? it->second : nullptr;
+    return s_registry.get(obj);
 }
 
 // Forward declarations for internal functions
@@ -256,8 +253,8 @@ static int32_t effective_max_bar_width(const AmsMiniStatusData* data) {
     // has ever run - set_slot_count()/set_slot_label() can trigger a rebuild in
     // that state, and callers outside the home grid never set it.
     if (data->width_px <= 0)
-        return DEFAULT_MAX_BAR_WIDTH_PX;
-    return std::clamp(data->width_px / BAR_WIDTH_DIVISOR, MIN_BAR_WIDTH_PX, MAX_BAR_WIDTH_PX);
+        return kDefaultMaxBarWidthPx;
+    return std::clamp(data->width_px / kBarWidthDivisor, kMinBarWidthPx, kMaxBarWidthPx);
 }
 
 /**
@@ -291,31 +288,6 @@ static lv_obj_t* create_lane_bar(lv_obj_t* parent, int slot_index, int32_t bar_w
     if (!bar)
         spdlog::error("[AmsMiniStatus] ams_lane_bar creation failed for slot {}", slot_index);
     return bar;
-}
-
-/// Whether @p slot gets no bar: its unit is not on the bus, or another unit
-/// owns its spool identity, so the spool is already drawn in that unit's row.
-static bool slot_gets_no_bar(const helix::AmsBackend& backend, const helix::AmsSystemInfo& info,
-                             int slot) {
-    return info.slot_absent(slot) || backend.slot_identity_owner_unit(slot).has_value();
-}
-
-/// The last sync's answer to slot_gets_no_bar() for @p slot.
-static bool slot_undrawn(const AmsMiniStatusData* data, int slot) {
-    return std::find(data->undrawn_slots.begin(), data->undrawn_slots.end(), slot) !=
-           data->undrawn_slots.end();
-}
-
-/// How many of unit row @p u's slots get a bar, before the width cap.
-static int drawable_row_slots(const AmsMiniStatusData* data, int u) {
-    const UnitRowInfo& row = data->unit_rows[u];
-    int n = 0;
-    for (int s = 0; s < row.slot_count; ++s) {
-        if (!slot_undrawn(data, row.first_slot + s)) {
-            ++n;
-        }
-    }
-    return n;
 }
 
 /** Rebuild the bars based on slot_count, max_visible, and unit_count */
@@ -355,28 +327,10 @@ static void rebuild_bars(AmsMiniStatusData* data) {
     int max_vis = effective_max_visible(data);
     int visible_count = std::min(data->slot_count, max_vis);
     int overflow_count = 0;
-    // Bars each stacked unit row draws: the row's drawable slots, capped by the
-    // width heuristic and by what is left of the bar pool.
-    int row_bars[8] = {};
-    if (data->unit_count > 1) {
-        // Stacked rows: max_vis is a WIDTH heuristic ("this many bars fit
-        // across"), so it caps each row rather than their sum. The "+N" badge
-        // counts against what the row loop below actually draws.
-        int drawable = 0;
-        visible_count = 0;
-        for (int u = 0; u < data->unit_count && u < 8; ++u) {
-            const int row_drawable = drawable_row_slots(data, u);
-            drawable += row_drawable;
-            row_bars[u] =
-                std::min({row_drawable, max_vis, AMS_MINI_STATUS_MAX_VISIBLE - visible_count});
-            visible_count += row_bars[u];
-        }
-        overflow_count = drawable - visible_count;
-    } else {
-        for (int i = visible_count; i < data->slot_count; ++i) {
-            if (!slot_undrawn(data, i)) {
-                ++overflow_count;
-            }
+    for (int i = visible_count; i < data->slot_count; ++i) {
+        if (std::find(data->absent_slots.begin(), data->absent_slots.end(), i) ==
+            data->absent_slots.end()) {
+            ++overflow_count;
         }
     }
 
@@ -453,7 +407,9 @@ static void rebuild_bars(AmsMiniStatusData* data) {
         // Count visible rows (units with bars within max visible)
         int visible_rows = 0;
         for (int u = 0; u < data->unit_count && u < 8; ++u) {
-            if (row_bars[u] > 0)
+            int row_slots =
+                std::min(data->unit_rows[u].slot_count, max_vis - data->unit_rows[u].first_slot);
+            if (row_slots > 0)
                 ++visible_rows;
         }
         if (visible_rows < 1)
@@ -467,7 +423,7 @@ static void rebuild_bars(AmsMiniStatusData* data) {
             per_row_height = 12; // Minimum per-row height
 
         int32_t bar_height =
-            per_row_height - ams_draw::STATUS_LINE_HEIGHT_PX - ams_draw::STATUS_LINE_GAP_PX;
+            per_row_height - ams_draw::kStatusLineHeightPx - ams_draw::kStatusLineGapPx;
         if (bar_height < 6)
             bar_height = 6;
 
@@ -480,58 +436,47 @@ static void rebuild_bars(AmsMiniStatusData* data) {
         }
 
         // Process each unit row
-        int pool_next = 0;
         for (int u = 0; u < data->unit_count && u < 8; ++u) {
             UnitRowInfo* row_info = &data->unit_rows[u];
             lv_obj_t* row = ensure_unit_row(data, u);
 
-            // The width cap belongs to each row, not to the rows' sum: a row is
-            // not charged for the bars of the rows above it.
-            const int row_slots = row_bars[u];
-            int drawn = 0;
+            // Calculate bar width for this row based on its slot count
+            int row_slots = std::min(row_info->slot_count, max_vis - row_info->first_slot);
+            if (row_slots < 0)
+                row_slots = 0;
 
             int32_t max_bw = effective_max_bar_width(data);
             int32_t bar_width = ams_draw::calc_bar_width(container_width, row_slots, gap,
-                                                         MIN_BAR_WIDTH_PX, max_bw, 90);
+                                                         kMinBarWidthPx, max_bw, 90);
 
-            // Create/update slots in this unit row. The pool is filled in draw
-            // order, not by slot index: slots that get no bar would otherwise
-            // hold pool entries the drawn ones need, and a unit past the pool's
-            // size could never show a bar.
-            for (int s = 0; s < row_info->slot_count && drawn < row_slots; ++s) {
+            // Create/update slots in this unit row
+            for (int s = 0; s < row_info->slot_count; ++s) {
                 int global_idx = row_info->first_slot + s;
-                if (slot_undrawn(data, global_idx))
-                    continue;
+                if (global_idx >= AMS_MINI_STATUS_MAX_VISIBLE)
+                    break;
 
-                lv_obj_t*& bar = data->lane_bars[pool_next++];
-                // A bar binds its slot's subjects when it is created, so a pool
-                // entry built for another slot is replaced, not repointed.
-                if (bar && helix::ui::ams_lane_bar_slot_index(bar) != global_idx) {
-                    lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
-                    lv_obj_delete_async(bar);
-                    bar = nullptr;
-                }
-                if (!bar) {
-                    bar = create_lane_bar(row, global_idx, bar_width, bar_height);
-                    if (!bar)
-                        continue;
-                } else {
-                    if (lv_obj_get_parent(bar) != row) {
-                        // Reparent the pooled bar into its unit row
-                        lv_obj_set_parent(bar, row);
+                lv_obj_t* bar = data->lane_bars[global_idx];
+
+                if (global_idx < visible_count) {
+                    if (!bar) {
+                        bar = create_lane_bar(row, global_idx, bar_width, bar_height);
+                        data->lane_bars[global_idx] = bar;
+                    } else {
+                        if (lv_obj_get_parent(bar) != row) {
+                            // Reparent the pooled bar into its unit row
+                            lv_obj_set_parent(bar, row);
+                        }
+                        helix::ui::ams_lane_bar_resize(bar, bar_width, bar_height);
                     }
-                    helix::ui::ams_lane_bar_resize(bar, bar_width, bar_height);
+
+                    // Override to fill row height (multi-unit responsive mode)
+                    lv_obj_set_height(bar, LV_PCT(100));
+                    lv_obj_set_style_flex_grow(lv_obj_find_by_name(bar, "bar_bg"), 1, LV_PART_MAIN);
+
+                    lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
+                } else if (bar) {
+                    lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
                 }
-                // Child order is draw order, whichever of the three ways the
-                // bar arrived in this row.
-                lv_obj_move_to_index(bar, drawn);
-                ++drawn;
-
-                // Override to fill row height (multi-unit responsive mode)
-                lv_obj_set_height(bar, LV_PCT(100));
-                lv_obj_set_style_flex_grow(lv_obj_find_by_name(bar, "bar_bg"), 1, LV_PART_MAIN);
-
-                lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
             }
 
             // Condemn row if no visible bars (hidden rows still consume flex gap)
@@ -539,12 +484,6 @@ static void rebuild_bars(AmsMiniStatusData* data) {
                 condemn_row(row);
                 data->unit_rows[u].row_container = nullptr;
             }
-        }
-
-        // Pool entries no row claimed this time.
-        for (int k = pool_next; k < AMS_MINI_STATUS_MAX_VISIBLE; ++k) {
-            if (data->lane_bars[k])
-                lv_obj_add_flag(data->lane_bars[k], LV_OBJ_FLAG_HIDDEN);
         }
 
         spdlog::debug("[AmsMiniStatus] Multi-unit layout: {} units, {} total slots",
@@ -569,24 +508,16 @@ static void rebuild_bars(AmsMiniStatusData* data) {
         lv_obj_set_style_pad_row(data->bars_container, 0, LV_PART_MAIN);
 
         int32_t bar_height =
-            effective_height - ams_draw::STATUS_LINE_HEIGHT_PX - ams_draw::STATUS_LINE_GAP_PX;
+            effective_height - ams_draw::kStatusLineHeightPx - ams_draw::kStatusLineGapPx;
 
         // Use 90% of container width for bars (leave 10% margin for centering)
         int32_t max_bw = effective_max_bar_width(data);
         int32_t bar_width = ams_draw::calc_bar_width(container_width, visible_count, gap,
-                                                     MIN_BAR_WIDTH_PX, max_bw, 90);
+                                                     kMinBarWidthPx, max_bw, 90);
 
         // Create/update bars
         for (int i = 0; i < AMS_MINI_STATUS_MAX_VISIBLE; i++) {
             lv_obj_t* bar = data->lane_bars[i];
-            // The stacked layout pools bars in draw order, so an entry it left
-            // here can be bound to another slot; a bar is bound at creation.
-            if (bar && i < visible_count && helix::ui::ams_lane_bar_slot_index(bar) != i) {
-                lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_delete_async(bar);
-                bar = nullptr;
-                data->lane_bars[i] = nullptr;
-            }
 
             if (i < visible_count) {
                 if (!bar) {
@@ -788,9 +719,9 @@ static lv_obj_t* create_spool_cell(lv_obj_t* parent, int slot_index, int spool_s
     if (!lspool)
         spdlog::error("[AmsMiniStatus] ams_lane_spool creation failed for slot {}", slot_index);
 
-    // Numbered as the slot's own badge is: among the positions holding a spool
-    // of their own, so the cells skipped as undrawn leave no gap in the count.
-    const helix::AmsBackend* badge_backend = helix::AmsState::instance().get_backend();
+    // The lane's spool number, so a lane sharing another's spool wears that
+    // spool's number; the plain 1-based lane number when no backend answers.
+    helix::AmsBackend* badge_backend = helix::AmsState::instance().get_backend();
     const int badge_number = badge_backend ? badge_backend->spool_display_number(slot_index)
                                            : helix::ui::lane_number(slot_index);
     lv_obj_t* badge = ams_draw::create_lane_badge(wrap, badge_number, spool_size * 2 / 5, false);
@@ -871,9 +802,7 @@ static void rebuild_spools(AmsMiniStatusData* data) {
         }
     } rg{data};
 
-    // Resolve the current spool style once (matches ams_draw's /ams/spool_style read).
-    const bool cur_3d =
-        helix::Config::get_instance()->get<std::string>("/ams/spool_style", "3d") == "3d";
+    const bool cur_3d = helix::ui::ams_spool_style_3d();
 
     if (!data->spools_container) {
         lv_obj_t* sc = lv_obj_create(data->container);
@@ -914,7 +843,7 @@ static void rebuild_spools(AmsMiniStatusData* data) {
     int gap = theme_manager_get_spacing("space_xxs");
     // What the ams_lane_spool widget adds around the graphic for the lane
     // badge, so a cell is this much wider than the spool size asked for.
-    const int badge_margin = helix::ui::AMS_LANE_SPOOL_BADGE_MARGIN_PX;
+    const int badge_margin = helix::ui::kAmsLaneSpoolBadgeMarginPx;
     const int lanes = std::max(1, data->slot_count);
     // The widest material string this render will draw, in the font that will
     // draw it. Both the cell count and the text reservation come from it, so the
@@ -923,7 +852,7 @@ static void rebuild_spools(AmsMiniStatusData* data) {
     const int min_text = measure_widest_material(data, sc);
     const int min_cell = min_spool_cell_w(min_text, gap);
     // Below a spool and its badge a cell no longer identifies its lane.
-    const int floor_cell = MIN_SPOOL_IMG_PX + badge_margin;
+    const int floor_cell = kMinSpoolImgPx + badge_margin;
     // Every lane's equal share of the row. -2px so sub-pixel rounding cannot
     // tip a row that fits into a spurious scrollbar.
     const int share = (avail_w - (lanes - 1) * gap - 2) / lanes;
@@ -938,11 +867,11 @@ static void rebuild_spools(AmsMiniStatusData* data) {
     const int pct_h = pct_font ? static_cast<int>(lv_font_get_line_height(pct_font)) : 12;
     // The spool's wrap is badge_margin taller than the spool, and the cell
     // spaces the wrap and the text block by one gap.
-    const int floor_h = MIN_SPOOL_IMG_PX + badge_margin + gap;
-    const int row_spool = std::min(avail_h - 4, MAX_SPOOL_IMG_PX); // square spool fits the row
+    const int floor_h = kMinSpoolImgPx + badge_margin + gap;
+    const int row_spool = std::min(avail_h - 4, kMaxSpoolImgPx); // square spool fits the row
     const int stacked_cell = std::max(share, floor_cell);
     auto stacked_spool_with = [&](int text_block) {
-        return std::min({avail_h - badge_margin - text_block - gap, MAX_SPOOL_IMG_PX,
+        return std::min({avail_h - badge_margin - text_block - gap, kMaxSpoolImgPx,
                          stacked_cell - badge_margin});
     };
     // The spool already draws how full it is, so the percent line under the
@@ -969,7 +898,7 @@ static void rebuild_spools(AmsMiniStatusData* data) {
         // Beside the spool, every lane, the name shortened into what is left
         // next to the spool or dropped when too little is left to read.
         cell_px = share;
-        spool_size = std::max(std::min(spool_size, cell_px - badge_margin), MIN_SPOOL_IMG_PX);
+        spool_size = std::max(std::min(spool_size, cell_px - badge_margin), kMinSpoolImgPx);
         const int leftover = cell_px - (spool_size + badge_margin) - gap;
         if (leftover >= min_readable_text_w(sc)) {
             text_w = leftover;
@@ -982,10 +911,10 @@ static void rebuild_spools(AmsMiniStatusData* data) {
         // overflow the cell and a long name wraps inside it.
         cell_px = std::max(share, min_cell);
         spool_size = std::min(spool_size, cell_px - badge_margin - gap - min_text);
-        text_w = std::max(cell_px - (std::max(spool_size, MIN_SPOOL_IMG_PX) + badge_margin) - gap,
+        text_w = std::max(cell_px - (std::max(spool_size, kMinSpoolImgPx) + badge_margin) - gap,
                           min_text);
     }
-    spool_size = std::max(spool_size, MIN_SPOOL_IMG_PX);
+    spool_size = std::max(spool_size, kMinSpoolImgPx);
 
     const int n = static_cast<int>(data->spool_cells.size());
     if (n <= 0) {
@@ -1075,7 +1004,7 @@ static void rebuild_spools(AmsMiniStatusData* data) {
         const bool show_text = text_w > 0;
         const bool show_pct = !stacked || stacked_pct;
         const lv_opa_t text_opa =
-            cd.lane_state == helix::ui::LaneState::Ghosted ? ams_draw::GHOST_OPA : LV_OPA_COVER;
+            cd.lane_state == helix::ui::LaneState::Ghosted ? ams_draw::kGhostOpa : LV_OPA_COVER;
         lv_obj_t* col = cell_part(cell, "spool_text_%d", slot);
         if (col) {
             lv_obj_set_width(col, text_w);
@@ -1092,16 +1021,11 @@ static void rebuild_spools(AmsMiniStatusData* data) {
         if (mat) {
             lv_obj_set_width(mat, text_w);
             // A squeezed column is sized for a shortened name, not the widest one,
-            // so it ellipsizes rather than wrapping a name across lines the row has
-            // no height for. LV_LABEL_LONG_DOT only cuts a line once the label's
-            // height stops it wrapping, so the height has to be pinned to one line
-            // for the dots to ever appear.
+            // so it ellipsizes on one line rather than wrapping a name across lines
+            // the row has no height for.
             lv_label_set_long_mode(mat, ellipsize ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_WRAP);
-            if (ellipsize) {
-                const lv_font_t* mf = theme_manager_get_font("font_small");
-                if (mf)
-                    lv_obj_set_height(mat, lv_font_get_line_height(mf));
-            }
+            if (ellipsize)
+                helix::ui::label_hold_one_line(mat);
             lv_obj_set_style_text_opa(mat, text_opa, LV_PART_MAIN);
             // Same helper measure_widest_material() sized text_w from, so the
             // string drawn here is the one the column was reserved for.
@@ -1161,15 +1085,14 @@ static void rebuild(AmsMiniStatusData* data) {
 /** Cleanup callback when widget is deleted */
 static void on_delete(lv_event_t* e) {
     lv_obj_t* obj = lv_event_get_target_obj(e);
-    auto it = s_registry.find(obj);
-    if (it != s_registry.end()) {
-        std::unique_ptr<AmsMiniStatusData> data(it->second);
+    if (AmsMiniStatusData* registered = s_registry.get(obj)) {
+        std::unique_ptr<AmsMiniStatusData> data(registered);
         if (data) {
             data->slots_version_observer.reset();
             data->current_slot_observer.reset();
         }
         // data automatically freed when unique_ptr goes out of scope
-        s_registry.erase(it);
+        s_registry.take(obj);
     }
 }
 
@@ -1248,7 +1171,7 @@ lv_obj_t* ui_ams_mini_status_create(lv_obj_t* parent, int32_t height) {
 
     // Register and set up cleanup
     AmsMiniStatusData* data = data_ptr.release();
-    s_registry[container] = data;
+    s_registry.set(container, data);
     lv_obj_add_event_cb(container, on_delete, LV_EVENT_DELETE, nullptr);
     lv_obj_add_event_cb(container, on_size_changed, LV_EVENT_SIZE_CHANGED, nullptr);
 
@@ -1415,7 +1338,7 @@ void ui_ams_mini_status_set_width(lv_obj_t* obj, int width_px) {
 
 bool ui_ams_mini_status_is_valid(lv_obj_t* obj) {
     auto* data = get_data(obj);
-    return data && data->magic == AMS_MINI_STATUS_MAGIC;
+    return data && data->magic == kAmsMiniStatusMagic;
 }
 
 // ============================================================================
@@ -1454,9 +1377,10 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
     data->slot_count = slot_count;
 
     // Get multi-unit info from system info
-    helix::AmsSystemInfo info = backend->get_system_info();
+    const auto snapshot = helix::AmsState::instance().system_info();
+    const helix::AmsSystemInfo& info = *snapshot;
     data->unit_count = static_cast<int>(info.units.size());
-    data->undrawn_slots.clear();
+    data->absent_slots.clear();
     for (int u = 0; u < data->unit_count && u < 8; ++u) {
         data->unit_rows[u].first_slot = info.units[u].first_slot_global_index;
         // An absent unit's bays are not drawn: the row is condemned for having
@@ -1464,8 +1388,8 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
         data->unit_rows[u].slot_count = info.units[u].absent ? 0 : info.units[u].slot_count;
     }
     for (int i = 0; i < slot_count; ++i) {
-        if (slot_gets_no_bar(*backend, info, i)) {
-            data->undrawn_slots.push_back(i);
+        if (info.slot_absent(i)) {
+            data->absent_slots.push_back(i);
         }
     }
     // Clear any stale unit rows beyond current count
@@ -1485,7 +1409,7 @@ static void sync_from_ams_state(AmsMiniStatusData* data) {
     data->spool_cells.clear();
     data->spool_cells.reserve(static_cast<size_t>(slot_count));
     for (int i = 0; i < slot_count; ++i) {
-        if (slot_undrawn(data, i)) {
+        if (info.slot_absent(i)) {
             continue;
         }
         helix::SlotInfo slot = backend->get_slot_info(i);
@@ -1586,7 +1510,7 @@ static void* ui_ams_mini_status_xml_create(lv_xml_parser_state_t* state, const c
 
     // Register and set up cleanup
     AmsMiniStatusData* data = data_ptr.release();
-    s_registry[container] = data;
+    s_registry.set(container, data);
     lv_obj_add_event_cb(container, on_delete, LV_EVENT_DELETE, nullptr);
     lv_obj_add_event_cb(container, on_size_changed, LV_EVENT_SIZE_CHANGED, nullptr);
 

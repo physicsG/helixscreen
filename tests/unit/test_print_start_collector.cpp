@@ -11,14 +11,18 @@
  */
 
 #include "../test_helpers/print_start_collector_test_access.h"
+#include "moonraker_manager.h"
 #include "print_start_profile.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <regex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -125,6 +129,18 @@ TEST_CASE("PrintStart: RESPOND completion detection", "[core][print][respond]") 
         REQUIRE(!is_respond_completion("print complete"));
         // Unrelated with both words far apart in different context
         REQUIRE(!is_respond_completion("start heating the print bed"));
+    }
+
+    SECTION("A host prompt asking to start the print is not a print that started") {
+        // Z-Mod's material picker footer, emitted before any print exists
+        REQUIRE(!is_respond_completion(
+            "// action:prompt_footer_button Start print|PRINT_ZCOLOR LEVELING=0 "
+            "FILENAME=\"Button_PETG_6m32s.gcode\" ALLOWED_TOOL_COUNT=1"));
+        REQUIRE(!is_respond_completion("// action:prompt_button Start print|START_PRINT"));
+        REQUIRE(!is_respond_completion("// action:prompt_text Print starting soon"));
+        REQUIRE(!is_respond_completion("  // action:prompt_begin Start print?"));
+        // An action line that is not a prompt still carries a message
+        REQUIRE(is_respond_completion("// action:notification Print started"));
     }
 }
 
@@ -267,6 +283,24 @@ TEST_CASE("PrintStart: Z_TILT phase detection", "[print][leveling]") {
 
     // Should NOT match
     REQUIRE(default_phase("QUAD_GANTRY_LEVEL") == PrintStartPhase::QGL);
+}
+
+TEST_CASE("PrintStart: motor sync phase detection", "[print][motor_sync]") {
+    // motors-sync's cmd_SYNC_MOTORS announces a sync through respond_info,
+    // which reaches the console with Klipper's "// " prefix.
+    REQUIRE(default_phase("// Motors synchronization started") == PrintStartPhase::MOTOR_SYNC);
+    REQUIRE(default_phase("Motors synchronization started") == PrintStartPhase::MOTOR_SYNC);
+
+    // RESTORE_SYNC=1 only reapplies the stored phase offsets and returns
+    // before that line, so neither its command nor its reply is a sync.
+    REQUIRE(default_phase("SYNC_MOTORS RESTORE_SYNC=1") == PrintStartPhase::IDLE);
+    REQUIRE(default_phase("// Motors sync position already restored or nothing to restore") ==
+            PrintStartPhase::IDLE);
+
+    // The per-axis progress lines a running sync prints name no other phase.
+    REQUIRE(default_phase("// x-Initial magnitude: 2045") == PrintStartPhase::IDLE);
+    REQUIRE(default_phase("// x-Motors adjusted by 3/16 step, magnitude 2045 --> 120") ==
+            PrintStartPhase::IDLE);
 }
 
 // ============================================================================
@@ -507,14 +541,19 @@ TEST_CASE("PrintStart: typical noise lines should not match phases", "[print][ne
 // - HELIX:PHASE:COMPLETE -> sets COMPLETE phase
 // - Various phase transitions
 
+#include "ui_print_preparation_manager.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/archive_transfers.h"
+#include "../test_helpers/log_capture.h"
 #include "../test_helpers/preprint_config_scope.h"
 #include "../test_helpers/print_start_collector_test_access.h"
 #include "../test_helpers/print_start_profile_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "app_globals.h"
 #include "moonraker_client_mock.h"
+#include "print_start_analyzer.h"
 #include "print_start_collector.h"
 #include "print_start_profile.h"
 #include "simulated_clock.h"
@@ -535,10 +574,10 @@ using namespace helix::ui;
  * when the signal is not recognized.
  */
 static std::pair<PrintStartPhase, std::string> parse_helix_phase_signal(const std::string& line) {
-    static const char* HELIX_PHASE_PREFIX = "HELIX:PHASE:";
+    static const char* kHelixPhasePrefix = "HELIX:PHASE:";
     constexpr size_t PREFIX_LEN = 12;
 
-    size_t pos = line.find(HELIX_PHASE_PREFIX);
+    size_t pos = line.find(kHelixPhasePrefix);
     if (pos == std::string::npos) {
         return {PrintStartPhase::IDLE, ""};
     }
@@ -554,7 +593,7 @@ static std::pair<PrintStartPhase, std::string> parse_helix_phase_signal(const st
         return {PrintStartPhase::IDLE, ""};
     }
 
-    static const std::map<PrintStartPhase, std::string> MESSAGES = {
+    static const std::map<PrintStartPhase, std::string> kMessages = {
         {PrintStartPhase::INITIALIZING, "Preparing Print..."},
         {PrintStartPhase::HOMING, "Homing..."},
         {PrintStartPhase::HEATING_BED, "Heating Bed..."},
@@ -567,8 +606,8 @@ static std::pair<PrintStartPhase, std::string> parse_helix_phase_signal(const st
         {PrintStartPhase::PURGING, "Purging..."},
         {PrintStartPhase::COMPLETE, "Starting Print..."},
     };
-    auto it = MESSAGES.find(*phase);
-    return {*phase, it != MESSAGES.end() ? it->second : ""};
+    auto it = kMessages.find(*phase);
+    return {*phase, it != kMessages.end() ? it->second : ""};
 }
 
 /**
@@ -584,7 +623,7 @@ class PrintStartCollectorHeaterFixture : public LVGLTestFixture {
         // Mark print as active so set_print_start_state() accepts phase updates
         lv_subject_set_int(state_.print_state().get_print_active_subject(), 1);
         client_ = std::make_unique<MoonrakerClientMock>();
-        collector_ = std::make_shared<PrintStartCollector>(*client_, state_);
+        collector_ = PrintStartCollector::create(*client_, state_);
         collector_->set_profile(PrintStartProfile::load_default());
     }
 
@@ -847,6 +886,34 @@ TEST_CASE("HELIX:PHASE individual phases set correctly", "[print][collector][hel
     }
 }
 
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "PrintStartCollector: each HELIX:PHASE signal shows its phase's banner",
+                 "[print][collector][helix_phase]") {
+    collector().start();
+    drain_async_updates();
+    drain_async_updates();
+
+    const std::pair<const char*, const char*> signals[] = {
+        {"HOMING", "Homing..."},
+        {"HEATING_BED", "Heating Bed..."},
+        {"SOAKING", "Heat Soaking..."},
+        {"HEATING_NOZZLE", "Heating Nozzle..."},
+        {"QGL", "Leveling Gantry..."},
+        {"Z_TILT", "Z Tilt Adjust..."},
+        {"BED_MESH", "Loading Bed Mesh..."},
+        {"CLEANING", "Cleaning Nozzle..."},
+        {"PURGING", "Purging..."},
+        {"COMPLETE", "Starting Print..."},
+    };
+    for (const auto& [name, banner] : signals) {
+        CAPTURE(name);
+        send_gcode_response(std::string("HELIX:PHASE:") + name);
+        drain_async_updates();
+        drain_async_updates();
+        CHECK(get_current_message() == banner);
+    }
+}
+
 // ============================================================================
 // Malformed HELIX:PHASE Signal Tests
 // ============================================================================
@@ -987,6 +1054,57 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
 }
 
 // ============================================================================
+// Lifetime: the last reference may drop on a network thread
+// ============================================================================
+
+namespace {
+/// Live LVGL timers whose user_data is @p p. Compares pointers only, so it is
+/// safe to ask about an object already destroyed.
+int lvgl_timers_pointing_at(const void* p) {
+    int n = 0;
+    for (lv_timer_t* t = lv_timer_get_next(nullptr); t != nullptr; t = lv_timer_get_next(t)) {
+        if (lv_timer_get_user_data(t) == p) {
+            n++;
+        }
+    }
+    return n;
+}
+} // namespace
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "PrintStartCollector: a last reference dropped off the main thread is "
+                 "destroyed on the main thread",
+                 "[print][collector][lifetime]") {
+    auto collector = PrintStartCollector::create(client(), state());
+    collector->set_profile(PrintStartProfile::load_default());
+    collector->start();
+    drain_async_updates();
+    const void* addr = collector.get();
+    const int armed = lvgl_timers_pointing_at(addr);
+    REQUIRE(armed >= 1);
+
+    // A network callback's capture is the only reference left when it runs.
+    PrintStartCollectorTestAccess::drop_client_references(*collector);
+    std::weak_ptr<PrintStartCollector> watch = collector;
+    std::thread network([held = std::move(collector)]() mutable { held.reset(); });
+    network.join();
+    REQUIRE(watch.expired());
+
+    // The ETA timer is untouched off the main thread: it is still armed, and
+    // firing it before the destruction runs reaches nothing freed.
+    CHECK(lvgl_timers_pointing_at(addr) == armed);
+    for (lv_timer_t* t = lv_timer_get_next(nullptr); t != nullptr; t = lv_timer_get_next(t)) {
+        if (lv_timer_get_user_data(t) == addr) {
+            lv_timer_ready(t);
+        }
+    }
+    lv_timer_handler();
+
+    drain_async_updates();
+    CHECK(lvgl_timers_pointing_at(addr) == armed - 1);
+}
+
+// ============================================================================
 // Writer Independence (subject ownership)
 // ============================================================================
 
@@ -1045,6 +1163,68 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
     display("Purging");
     REQUIRE(get_current_phase() == PrintStartPhase::PURGING);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "PrintStartCollector: a motor sync after homing shows its own phase",
+                 "[print][collector][motor_sync]") {
+    collector().start();
+    drain_async_updates();
+    drain_async_updates();
+
+    send_gcode_response("PRINT_START");
+    send_gcode_response("G28");
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+
+    send_gcode_response("// Motors synchronization started");
+    REQUIRE(get_current_phase() == PrintStartPhase::MOTOR_SYNC);
+    REQUIRE(get_current_message() == "Syncing Motors...");
+
+    send_gcode_response("// x-Initial magnitude: 2045");
+    send_gcode_response("// Motors magnitudes are in tolerance: x: 100.0, y: 100.0");
+    REQUIRE(get_current_phase() == PrintStartPhase::MOTOR_SYNC);
+
+    send_gcode_response("M190 S60");
+    REQUIRE(get_current_phase() == PrintStartPhase::HEATING_BED);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "PrintStartCollector: a motor sync run after heating still shows",
+                 "[print][collector][motor_sync]") {
+    // MOTOR_SYNC sits before the heating phases, but a macro may sync once the
+    // bed is warm. The first explicit line of a phase is entered whatever its
+    // place in the order.
+    collector().start();
+    drain_async_updates();
+    drain_async_updates();
+
+    send_gcode_response("PRINT_START");
+    send_gcode_response("G28");
+    send_gcode_response("M190 S60");
+    send_gcode_response("M109 S210");
+    REQUIRE(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+
+    send_gcode_response("// Motors synchronization started");
+    REQUIRE(get_current_phase() == PrintStartPhase::MOTOR_SYNC);
+
+    send_gcode_response("QUAD_GANTRY_LEVEL");
+    REQUIRE(get_current_phase() == PrintStartPhase::QGL);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "PrintStartCollector: SYNC_MOTORS RESTORE_SYNC=1 enters no motor sync phase",
+                 "[print][collector][motor_sync]") {
+    collector().start();
+    drain_async_updates();
+    drain_async_updates();
+
+    send_gcode_response("PRINT_START");
+    send_gcode_response("G28");
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+
+    send_gcode_response("SYNC_MOTORS RESTORE_SYNC=1");
+    send_gcode_response("// Motors sync position already restored or nothing to restore");
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
 }
 
 // ============================================================================
@@ -1318,7 +1498,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     }
 
     SECTION("Bed at target (within tolerance), nozzle heating") {
-        // TEMP_TOLERANCE_DECIDEGREES = 50 (5C)
+        // kTempToleranceDecidegrees = 50 (5C)
         // Bed at 58C/60C (within 5C tolerance = at target)
         // Nozzle at 100C/210C
         set_all_temps(580, 600, 1000, 2100);
@@ -1340,7 +1520,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
 }
 
 // ============================================================================
-// Temperature Tolerance Edge Cases (TEMP_TOLERANCE_DECIDEGREES = 50)
+// Temperature Tolerance Edge Cases (kTempToleranceDecidegrees = 50)
 // ============================================================================
 
 TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
@@ -1800,10 +1980,146 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
 // HEATING after bed mesh probing).
 // ============================================================================
 
+/// A sequential profile narrated by "// State:" lines, with a phase object
+/// matched on its bare state and two position rules. The engine's
+/// sequential-progress, unqualified phase-object and status-signal behaviour
+/// is pinned against it.
+static const char* const kSequentialStateProfile = R"JSON(
+{
+  "name": "Sequential states",
+  "description": "Sequential test profile",
+  "progress_mode": "sequential",
+  "signal_formats": [
+    {
+      "prefix": "// State: ",
+      "mappings": {
+        "PREPARING...":         { "phase": "INITIALIZING",    "message": "Preparing...",             "progress": 3 },
+        "MD5 CHECK":            { "phase": "INITIALIZING",    "message": "Verifying file...",        "progress": 5 },
+        "HOMING...":            { "phase": "HOMING",          "message": "Homing axes...",           "progress": 10 },
+        "PREPARE CLEANING...":  { "phase": "CLEANING",        "message": "Preparing to clean...",    "progress": 15 },
+        "HEATING...":           { "phase": "HEATING_BED",     "message": "Heating...",               "progress": 25 },
+        "CLEANING START SOON":  { "phase": "CLEANING",        "message": "Starting nozzle clean...", "progress": 30 },
+        "CLEANING...":          { "phase": "CLEANING",        "message": "Cleaning nozzle...",       "progress": 38 },
+        "COOLING DOWN...":      { "phase": "CLEANING",        "message": "Cooling for probing...",   "progress": 45 },
+        "FINISHING CLEANING...":{ "phase": "CLEANING",        "message": "Finishing clean...",        "progress": 55 },
+        "DONE!":                { "phase": "CLEANING",        "message": "Nozzle clean complete",    "progress": 57 },
+        "KAMP LEVELING...":     { "phase": "BED_MESH",        "message": "Creating bed mesh...",     "progress": 60 },
+        "WAIT FOR TEMPERATURE...": { "phase": "HEATING_NOZZLE", "message": "Reheating...",           "progress": 82 },
+        "KAMP PRIMING...":      { "phase": "PURGING",         "message": "Priming nozzle...",        "progress": 90 },
+        "PRINTING...":          { "phase": "COMPLETE",         "message": "Starting print...",        "progress": 100 }
+      }
+    }
+  ],
+  "response_patterns": [
+    {
+      "pattern": "// Wait bed temperature to reach (\\d+)",
+      "phase": "HEATING_BED",
+      "message": "Heating bed to $1\u00b0C...",
+      "weight": 15
+    },
+    {
+      "pattern": "// Wait extruder temperature to reach (\\d+)",
+      "phase": "HEATING_NOZZLE",
+      "message": "Heating nozzle to $1\u00b0C...",
+      "weight": 15
+    }
+  ],
+  "phase_object": {
+    "object": "operation_context",
+    "field": "current_state"
+  },
+  "state_patterns": [
+    {
+      "pattern": "HOMING",
+      "phase": "HOMING",
+      "message": "Homing...",
+      "weight": 5
+    },
+    {
+      "pattern": "HEATING",
+      "phase": "HEATING_BED",
+      "message": "Heating Bed...",
+      "weight": 15
+    },
+    {
+      "pattern": "CLEANING",
+      "phase": "CLEANING",
+      "message": "Cleaning Nozzle...",
+      "weight": 20
+    },
+    {
+      "pattern": "LEVELING",
+      "phase": "BED_MESH",
+      "message": "Bed Mesh...",
+      "weight": 25
+    },
+    {
+      "pattern": "MESHING",
+      "phase": "BED_MESH",
+      "message": "Bed Mesh...",
+      "weight": 25
+    },
+    {
+      "pattern": "PARKING",
+      "phase": "INITIALIZING",
+      "message": "Preparing...",
+      "weight": 5
+    },
+    {
+      "pattern": "PRIMING",
+      "phase": "PURGING",
+      "message": "Priming nozzle...",
+      "weight": 10
+    },
+    {
+      "pattern": "PURGING",
+      "phase": "PURGING",
+      "message": "Priming nozzle...",
+      "weight": 10
+    },
+    {
+      "pattern": "PRINTING",
+      "phase": "COMPLETE",
+      "message": "Starting print...",
+      "weight": 100
+    },
+    {
+      "pattern": "FINISHING",
+      "phase": "COMPLETE",
+      "message": "Starting print...",
+      "weight": 100
+    }
+  ],
+  "status_signals": [
+    {
+      "name": "at_cutter",
+      "object": "toolhead",
+      "when": [
+        { "field": "position", "index": 0, "op": "lt", "value": 0.0 },
+        { "field": "position", "index": 1, "op": "lt", "value": 0.0 }
+      ],
+      "phase": "PURGING",
+      "message": "Changing filament...",
+      "weight": 30
+    },
+    {
+      "name": "at_chute",
+      "object": "toolhead",
+      "when": [
+        { "field": "position", "index": 1, "op": "gt", "value": 225.0 }
+      ],
+      "phase": "PURGING",
+      "message": "Purging...",
+      "weight": 20
+    }
+  ]
+}
+)JSON";
+
 /**
- * @brief Test fixture for sequential profile (Forge-X) progress tests
+ * @brief Test fixture for sequential-profile progress tests
  *
- * Loads forge_x profile and provides helpers for dispatching G-code
+ * Loads kSequentialStateProfile and provides helpers for dispatching G-code
  * responses and reading progress values.
  */
 class PrintStartCollectorSequentialFixture : public LVGLTestFixture {
@@ -1813,8 +2129,11 @@ class PrintStartCollectorSequentialFixture : public LVGLTestFixture {
         // Mark print as active so set_print_start_state() accepts phase updates
         lv_subject_set_int(state_.print_state().get_print_active_subject(), 1);
         client_ = std::make_unique<MoonrakerClientMock>();
-        collector_ = std::make_shared<PrintStartCollector>(*client_, state_);
-        collector_->set_profile(PrintStartProfile::load("forge_x"));
+        collector_ = PrintStartCollector::create(*client_, state_);
+        auto profile =
+            PrintStartProfileTestAccess::parse(nlohmann::json::parse(kSequentialStateProfile));
+        REQUIRE(profile != nullptr);
+        collector_->set_profile(std::move(profile));
     }
 
     ~PrintStartCollectorSequentialFixture() override {
@@ -2037,6 +2356,68 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     drain_async_updates();
     const int settled = lv_subject_get_int(state().print_state().get_preprint_remaining_subject());
     REQUIRE(settled <= corrected);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "Print details estimate and the countdown total agree",
+                 "[print][collector][eta][estimate]") {
+    // Same printer, same temperatures, same targets: the number the details
+    // screen shows before Print is the total the countdown starts from.
+    PreprintConfigScope config;
+    auto& rates = ThermalRateManager::instance();
+    rates.reset();
+    rates.get_model("extruder").set_default_rate(0.5f);
+    rates.get_model("heater_bed").set_default_rate(2.0f);
+
+    set_all_temps(250, 600, 250, 2200); // bed 25/60C, nozzle 25/220C
+    PrintPreparationManager details;
+    details.set_dependencies(nullptr, &state());
+    FileMetadata file;
+    file.first_layer_bed_temp = 60.0;
+    file.first_layer_extr_temp = 220.0;
+    details.recalculate_estimate(&file, "countdown.gcode");
+    const int shown = lv_subject_get_int(details.get_preprint_estimate_subject());
+
+    collector().start();
+    const float countdown_total = PrintStartCollectorTestAccess::get_predicted_total(collector());
+
+    REQUIRE(shown > 300);
+    REQUIRE(shown == static_cast<int>(countdown_total));
+    rates.reset();
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "With a phase toggled off, print details and the countdown still agree",
+                 "[print][collector][eta][estimate]") {
+    PreprintConfigScope config;
+    const int mesh = static_cast<int>(PrintStartPhase::BED_MESH);
+    for (int64_t stamp : {1000, 2000}) {
+        helix::PreprintEntry e;
+        e.total_seconds = 400;
+        e.timestamp = stamp;
+        e.temp_bucket = 1;
+        e.window = helix::PreprintWindow::PrinterEdge;
+        e.phase_durations = {{static_cast<int>(PrintStartPhase::HOMING), 20}, {mesh, 150}};
+        helix::PreprintPredictor::append_to_config(e);
+    }
+
+    set_all_temps(250, 600, 250, 2200); // bed 25/60C, nozzle 25/220C
+    PrintPreparationManager details;
+    details.set_dependencies(nullptr, &state());
+    details.set_option_state_provider(
+        [](const std::string& id) { return id == "bed_mesh" ? 0 : -1; });
+    FileMetadata file;
+    file.first_layer_bed_temp = 60.0;
+    file.first_layer_extr_temp = 220.0;
+    details.recalculate_estimate(&file, "countdown.gcode");
+    const int shown = lv_subject_get_int(details.get_preprint_estimate_subject());
+    REQUIRE(shown == 400 - 150);
+
+    collector().start();
+    REQUIRE(PrintStartCollectorTestAccess::get_predicted_total(collector()) == 400.0f);
+    collector().note_phase_overrides({{mesh, false}});
+    CHECK(static_cast<int>(PrintStartCollectorTestAccess::get_predicted_total(collector())) ==
+          shown);
 }
 
 TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
@@ -2541,12 +2922,12 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     reset_collector_to_idle();
     collector().enable_fallbacks();
 
-    // Force no predictions so FALLBACK_TIMEOUT (300s) applies directly
+    // Force no predictions so kFallbackTimeout (300s) applies directly
     PrintStartCollectorTestAccess::set_predicted_total(collector(), 0.0f);
 
     // Bed at target (105°C), nozzle target = 0 (M109 not issued yet)
     set_all_temps(1050, 1050, 500, 0);
-    // Simulate 400s elapsed (well past FALLBACK_TIMEOUT of 300s)
+    // Simulate 400s elapsed (well past kFallbackTimeout of 300s)
     PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 400);
 
     collector().check_fallback_completion();
@@ -2566,12 +2947,12 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     collector().enable_fallbacks();
     REQUIRE(collector().is_active());
 
-    // Force no predictions so FALLBACK_TIMEOUT (300s) applies directly
+    // Force no predictions so kFallbackTimeout (300s) applies directly
     PrintStartCollectorTestAccess::set_predicted_total(collector(), 0.0f);
 
     // Both heaters at their targets (within 2°C)
     set_all_temps(1050, 1050, 2640, 2650);
-    // Simulate 310s elapsed (past FALLBACK_TIMEOUT of 300s)
+    // Simulate 310s elapsed (past kFallbackTimeout of 300s)
     PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 310);
 
     collector().check_fallback_completion();
@@ -2596,7 +2977,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     set_all_temps(1050, 1050, 2650, 2650);
 
     SECTION("Does not fire before adaptive timeout") {
-        // 400s elapsed — past FALLBACK_TIMEOUT but before adaptive (750s)
+        // 400s elapsed — past kFallbackTimeout but before adaptive (750s)
         PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 400);
         collector().check_fallback_completion();
         drain_async_updates();
@@ -2655,10 +3036,10 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture, "Absolute max timeout fires w
     reset_collector_to_idle();
     collector().enable_fallbacks();
 
-    // Force no predictions — FALLBACK_TIMEOUT (300s) applies
+    // Force no predictions — kFallbackTimeout (300s) applies
     PrintStartCollectorTestAccess::set_predicted_total(collector(), 0.0f);
 
-    // Nozzle target = 0 — temps_near stays false, FALLBACK_TIMEOUT won't fire
+    // Nozzle target = 0 — temps_near stays false, kFallbackTimeout won't fire
     set_all_temps(1050, 1050, 500, 0);
 
     SECTION("FALLBACK_TIMEOUT does not fire with unknown nozzle target") {
@@ -2709,7 +3090,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     reset_collector_to_idle();
     collector().enable_fallbacks();
 
-    // Force no predictions so FALLBACK_TIMEOUT (300s) applies directly
+    // Force no predictions so kFallbackTimeout (300s) applies directly
     PrintStartCollectorTestAccess::set_predicted_total(collector(), 0.0f);
 
     // Nozzle at 264°C with target 265°C: inside the 2°C at-target band.
@@ -3200,17 +3581,15 @@ TEST_CASE("PreprintPredictor has_predictions reflects actual entries", "[print][
 }
 
 // ============================================================================
-// K2/CFS-specific gcode tag stream — folded in from the deleted
-// PrintPhaseTracker. Opted-in profiles (cfs_signals) consume these matchers;
-// every other printer falls through them.
+// K2 gcode tag stream, matched by the K2 profile's tag_patterns; every
+// other printer's profile lacks them and falls through.
 // ============================================================================
 
 /**
  * @brief The K2 tag stream run under the profile that declares it
  *
- * creality_k2.json sets cfs_signals, which is what admits the purge-percent
- * and box-load tag matchers. The base sequential fixture's forge_x profile
- * deliberately does not.
+ * creality_k2.json carries the purge-percent and box-load tag_patterns.
+ * The base sequential fixture's profile deliberately does not.
  */
 class K2TagStreamFixture : public PrintStartCollectorSequentialFixture {
   public:
@@ -3622,61 +4001,60 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
 }
 
 // ============================================================================
-// Snapmaker U1: the real bed mesh runs AFTER "Detecting plate" with no action
-// code of its own — only the bed_mesh.py "// z offset:" line (emitted at mesh
-// start) and "// z_mesh_complete:" (at the end) reach gcode_response. Without a
-// mesh-start signal the "Detecting plate" label persisted through the entire
-// real mesh (device-observed bug). "// z offset:" must relabel BED_MESH to
-// "Bed mesh" and reset the probe counter, so probes count "(1)".."(n)" under
-// the correct label. Real lines captured 2026-06-18 (gcode_store 20:21:26 /
-// 20:21:30):  "// z offset: -0.05"  then  "// probe at x: 129.915, y: 125.560
-// is z=299.043333".
+// Snapmaker U1: the mesh announces itself in three action codes, a 60 s bed
+// soak (BED_PREHEATING), four corner probes (BED_PRESCANNING), then the mesh
+// (BED_LEVELING). G28 Z prints "// z offset:" 1 ms after BED_LEVELING; that
+// Z touch must not drag the display back to homing, and the corner probes must
+// not count as mesh points. Lines from the console of a U1 print on 2026-10-16
+// (gcode_store 21:54:52.876 .. 21:55:39.041).
 // ============================================================================
 
 TEST_CASE_METHOD(SnapmakerCollectorFixture,
-                 "Snapmaker U1: z offset relabels Detecting plate -> Bed mesh and resets counter",
+                 "Snapmaker U1: BED_LEVELING restarts the count the corner pre-scan used",
                  "[print][collector][snapmaker][bed_mesh]") {
     collector().start();
     drain_async_updates();
 
-    // Plate detect runs first, counting its own probes.
-    feed_gcode("// Success: Set action code DETECT_PLATE");
-    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
-    feed_gcode("// probe at x: 13.000, y: 220.000 is z=-0.321667");
-    feed_gcode("// probe at x: 13.000, y: 233.000 is z=-0.369167");
-    {
-        std::string msg = get_current_message();
-        INFO("During plate detect: " << msg);
-        REQUIRE(msg.find("Detecting") != std::string::npos);
-        REQUIRE(msg.find("(2") != std::string::npos);
-    }
-
-    // The real mesh starts: "// z offset:" must switch the label to "Bed mesh"
-    // (NOT stay on "Detecting plate") even though BED_MESH was already detected.
+    feed_gcode("// trigger_mcu_pos: {'stepper_x': -34502, 'stepper_y': -35786}");
     feed_gcode("// z offset: -0.05");
-    {
-        std::string msg = get_current_message();
-        INFO("After z offset: " << msg);
-        REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
-        REQUIRE(msg.find("Bed mesh") != std::string::npos);
-        REQUIRE(msg.find("Detecting") == std::string::npos);
-    }
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+    REQUIRE(get_current_message() == "Probing Z...");
 
-    // Mesh probes now count from 1 under "Bed mesh" (counter reset on the
-    // sub-phase message change — must NOT carry the 2 plate-detect probes).
-    feed_gcode("// probe at x: 129.915, y: 125.560 is z=299.043333");
-    {
-        std::string msg = get_current_message();
-        INFO("First mesh probe: " << msg);
-        REQUIRE(msg.find("Bed mesh") != std::string::npos);
-        REQUIRE(msg.find("(1") != std::string::npos);
-        REQUIRE(msg.find("(3") == std::string::npos);
-    }
+    feed_gcode("// Success: Set action code BED_PREHEATING");
+    REQUIRE(get_current_phase() == PrintStartPhase::SOAKING);
+    REQUIRE(get_current_message() == "Heat Soaking...");
+    feed_gcode("// Bed preheating: 59s left");
+    REQUIRE(get_current_phase() == PrintStartPhase::SOAKING);
 
-    // z_mesh_complete keeps the label on "Bed mesh".
-    feed_gcode("// z_mesh_complete: -0.02573436601557052");
+    feed_gcode("// Success: Set action code BED_PRESCANNING");
     REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
-    REQUIRE(get_current_message().find("Bed mesh") != std::string::npos);
+    for (const char* line : {"// probe at x: 14.999, y: 15.001 is z=-0.053333",
+                             "// probe at x: 14.999, y: 15.001 is z=-0.055833",
+                             "// probe at x: 254.999, y: 15.001 is z=-0.648333",
+                             "// probe at x: 254.999, y: 15.001 is z=-0.649167",
+                             "// probe at x: 254.999, y: 255.001 is z=-0.152500",
+                             "// probe at x: 254.999, y: 255.001 is z=-0.157500",
+                             "// probe at x: 14.999, y: 255.001 is z=-0.100000",
+                             "// probe at x: 14.999, y: 255.001 is z=-0.097500"}) {
+        feed_gcode(line);
+    }
+    REQUIRE(get_current_message() == "Validating bed mesh (4)");
+
+    feed_gcode("// Success: Set action code BED_LEVELING");
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+    REQUIRE(get_current_message() == "Bed mesh...");
+    REQUIRE(PrintStartCollectorTestAccess::get_mesh_probe_current(collector()) == 0);
+
+    // G28 Z re-bases the mesh; the label stays on the mesh.
+    feed_gcode("// z offset: -0.05");
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+    REQUIRE(get_current_message() == "Bed mesh...");
+
+    feed_gcode("// probe at x: 33.742, y: 28.487 is z=-0.085000");
+    feed_gcode("// probe at x: 33.742, y: 28.487 is z=-0.080000");
+    REQUIRE(get_current_message() == "Bed mesh (1)");
+    feed_gcode("// probe at x: 74.442, y: 28.487 is z=-0.063333");
+    REQUIRE(get_current_message() == "Bed mesh (2)");
 }
 
 // ============================================================================
@@ -3689,6 +4067,28 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
 // ============================================================================
 
 namespace {
+/// The print's file behind a ranged-read transfers API, as the wait-line
+/// reads see it, for as long as this lives.
+class ServedPrint {
+  public:
+    ServedPrint(MoonrakerClientMock& client, PrinterState& state, const std::string& filename)
+        : transfers{client, ""}, api_{client, state, transfers}, previous_(get_moonraker_api()) {
+        set_moonraker_api(&api_);
+        lv_subject_copy_string(state.print_state().get_print_filename_subject(), filename.c_str());
+    }
+    ~ServedPrint() {
+        set_moonraker_api(previous_);
+    }
+    ServedPrint(const ServedPrint&) = delete;
+    ServedPrint& operator=(const ServedPrint&) = delete;
+
+    ArchiveTransfers transfers;
+
+  private:
+    ArchiveMoonrakerAPIMock api_;
+    IMoonrakerAPI* previous_;
+};
+
 class SnapmakerHeaterWaitFixture : public SnapmakerCollectorFixture {
   public:
     SnapmakerHeaterWaitFixture() {
@@ -3708,6 +4108,30 @@ class SnapmakerHeaterWaitFixture : public SnapmakerCollectorFixture {
         lv_subject_set_int(state().temperature_state().get_chamber_temp_subject(), temp_decideg);
         lv_subject_set_int(state().temperature_state().get_chamber_target_subject(),
                            target_decideg);
+    }
+
+    /// A chamber heater whose backend reports refusals and its own waits.
+    void use_appliance_chamber() {
+        auto& temps = state().temperature_state();
+        temps.set_chamber_heater_name("heater_generic dragonbreath");
+        temps.set_chamber_diagnostics_source("dragonbreath", "dragonbreath", "");
+    }
+    void refuse_chamber_target() {
+        state().temperature_state().update_from_status({{"dragonbreath",
+                                                         {{"protocol_error_code", "countermanded"},
+                                                          {"protocol_error_seq", 1},
+                                                          {"protocol_error_target", 60.0}}}});
+    }
+    void report_for(int seconds) {
+        for (int t = 0; t < seconds; ++t) {
+            clock_.advance(std::chrono::seconds(1));
+            feed_gcode("B:100.0 /100.0 T0:210.0 /210.0");
+            tick();
+        }
+    }
+
+    int chamber_wait_flag() {
+        return lv_subject_get_int(state().print_state().get_print_start_chamber_wait_subject());
     }
 
     helix::sim::SimulatedClock::ManualScope clock_{helix::sim::SimSpeed::of(1.0)};
@@ -3736,10 +4160,10 @@ TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
     tick();
     REQUIRE(get_current_phase() == PrintStartPhase::HEATING_BED);
 
-    SECTION("the mesh starting after the wait relabels as it would without one") {
+    SECTION("a Z touch after the wait takes the label") {
         feed_gcode("// z offset: -0.05");
-        REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
-        REQUIRE(get_current_message().find("Bed mesh") != std::string::npos);
+        REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+        REQUIRE(get_current_message() == "Probing Z...");
     }
 
     SECTION("a stray line keeps the wait; the first tick after the reports stop ends it") {
@@ -3874,11 +4298,372 @@ TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
     feed_gcode("B:100.0 /100.0 T0:210.0 /210.0");
     tick();
     REQUIRE(get_current_phase() == PrintStartPhase::SOAKING);
-    REQUIRE(get_current_message() == "Heating chamber...");
+    REQUIRE(get_current_message() == "Waiting for chamber 30 / 60°C");
+    CHECK(chamber_wait_flag() == 1);
 
     clock_.advance(std::chrono::seconds(5));
     tick();
     REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+    CHECK(chamber_wait_flag() == 0);
+}
+
+// The U1 sequence behind the chamber prompt: M109 waits for the nozzle, then
+// the slicer's TEMPERATURE_WAIT SENSOR="heater_generic dragonbreath"
+// MINIMUM=35 waits on a chamber whose heater target the box zeroed. The
+// reports never name the chamber, and nothing sets a chamber target.
+TEST_CASE_METHOD(
+    SnapmakerHeaterWaitFixture,
+    "Snapmaker U1: a chamber wait with the heater off shows the chamber and not the nozzle",
+    "[print][collector][snapmaker][heater_wait][chamber_wait]") {
+    use_appliance_chamber();
+    refuse_chamber_target();
+    set_chamber(280, 0);
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 1500, 2100);
+    for (int t = 0; t < 3; ++t) {
+        clock_.advance(std::chrono::seconds(1));
+        feed_gcode("B:100.0 /100.0 T0:150.0 /210.0");
+        tick();
+    }
+    REQUIRE(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+
+    // The nozzle arrives; M109 settles and the chamber wait takes over the
+    // same once-a-second report.
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    for (int t = 0; t < 3; ++t) {
+        clock_.advance(std::chrono::seconds(1));
+        feed_gcode("B:100.0 /100.0 T0:210.0 /210.0");
+        tick();
+    }
+    INFO("message=" << get_current_message());
+    CHECK(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+    CHECK(chamber_wait_flag() == 0);
+
+    for (int t = 0; t < 4; ++t) {
+        clock_.advance(std::chrono::seconds(1));
+        feed_gcode("B:100.0 /100.0 T0:210.0 /210.0");
+        tick();
+    }
+    REQUIRE(get_current_phase() == PrintStartPhase::SOAKING);
+    CHECK(get_current_message() == "Waiting for chamber 28°C");
+    CHECK(chamber_wait_flag() == 1);
+
+    SECTION("the label follows the chamber") {
+        set_chamber(291, 0);
+        clock_.advance(std::chrono::seconds(1));
+        feed_gcode("B:100.0 /100.0 T0:210.0 /210.0");
+        tick();
+        CHECK(get_current_message() == "Waiting for chamber 29°C");
+        CHECK(get_current_phase() == PrintStartPhase::SOAKING);
+    }
+
+    SECTION("the reports stopping gives the announced phase back") {
+        clock_.advance(std::chrono::seconds(5));
+        tick();
+        CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+        CHECK(chamber_wait_flag() == 0);
+    }
+}
+
+TEST_CASE_METHOD(
+    SnapmakerHeaterWaitFixture,
+    "Snapmaker U1: a wait past the nozzle and bed on a printer with no chamber is not one",
+    "[print][collector][snapmaker][heater_wait][chamber_wait]") {
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    for (int t = 0; t < 10; ++t) {
+        clock_.advance(std::chrono::seconds(1));
+        feed_gcode("B:100.0 /100.0 T0:210.0 /210.0");
+        tick();
+    }
+    CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+    CHECK(chamber_wait_flag() == 0);
+}
+
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
+                 "a sensor-only chamber soak is a wait and never the chamber heater's",
+                 "[print][collector][heater_wait][chamber_wait]") {
+    // A Voron heat soak: TEMPERATURE_WAIT SENSOR="temperature_sensor chamber"
+    // MINIMUM=40 with no chamber heater at all.
+    state().temperature_state().set_chamber_sensor_name("temperature_sensor chamber");
+    set_chamber(300, 0);
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    report_for(15);
+    CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+    CHECK(chamber_wait_flag() == 0);
+}
+
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
+                 "another wait on a printer with a healthy chamber heater is not the chamber's",
+                 "[print][collector][heater_wait][chamber_wait]") {
+    // A probe coil warming (TEMPERATURE_WAIT on the probe's sensor) while the
+    // chamber heater sits idle with nothing refused.
+    use_appliance_chamber();
+    set_chamber(300, 0);
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    report_for(15);
+    CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+    CHECK(chamber_wait_flag() == 0);
+}
+
+// A slicer that sends no M141, or a glue that reports no refusal: the heater
+// sits at 0 and TEMPERATURE_WAIT SENSOR="heater_generic dragonbreath" waits.
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
+                 "a TEMPERATURE_WAIT on the chamber heater at target 0 is a chamber stall",
+                 "[print][collector][heater_wait][chamber_wait]") {
+    use_appliance_chamber();
+    set_chamber(280, 0);
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    report_for(6);
+    CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+
+    SECTION("the line names the chamber heater") {
+        PrintStartCollectorTestAccess::answer_wait_line(
+            collector(), helix::classify_wait_line(
+                             "TEMPERATURE_WAIT SENSOR=\"heater_generic dragonbreath\" MINIMUM=35"));
+        report_for(2);
+        CHECK(get_current_phase() == PrintStartPhase::SOAKING);
+        CHECK(get_current_message() == "Waiting for chamber 28°C");
+        CHECK(chamber_wait_flag() == 1);
+    }
+
+    SECTION("a passive soak on a separate chamber sensor is not a heater stall") {
+        state().temperature_state().set_chamber_sensor_name("temperature_sensor chamber");
+        PrintStartCollectorTestAccess::answer_wait_line(
+            collector(), helix::classify_wait_line(
+                             "TEMPERATURE_WAIT SENSOR=\"temperature_sensor chamber\" MINIMUM=40"));
+        report_for(2);
+        CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+        CHECK(chamber_wait_flag() == 0);
+    }
+
+    SECTION("a probe coil's wait is not the chamber's") {
+        PrintStartCollectorTestAccess::answer_wait_line(
+            collector(),
+            helix::classify_wait_line(
+                "TEMPERATURE_WAIT SENSOR=\"temperature_probe beacon_coil\" MINIMUM=40"));
+        report_for(2);
+        CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+        CHECK(chamber_wait_flag() == 0);
+    }
+}
+
+// The read goes through the real query and ranged download. Klipper reports
+// file_position at the START of a line until its command returns, so the
+// waiting line is the one that starts there, not the one that ends there.
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
+                 "the chamber wait line is read at the print position, not before it",
+                 "[print][collector][heater_wait][chamber_wait][wait_line]") {
+    const std::string file = "G28\nM106 S0\n"
+                             "TEMPERATURE_WAIT SENSOR=\"heater_generic dragonbreath\" MINIMUM=35 "
+                             "; comment\nG90\n";
+    const size_t pos = file.find("TEMPERATURE_WAIT");
+    ArchiveTransfers transfers{client(), ""};
+    transfers.put("u1_print.gcode", file);
+    ArchiveMoonrakerAPIMock api{client(), state(), transfers};
+    IMoonrakerAPI* const previous_api = get_moonraker_api();
+    set_moonraker_api(&api);
+    struct RestoreApi {
+        IMoonrakerAPI* api;
+        ~RestoreApi() {
+            set_moonraker_api(api);
+        }
+    } restore{previous_api};
+    lv_subject_copy_string(state().print_state().get_print_filename_subject(), "u1_print.gcode");
+    client().set_object_status("virtual_sdcard", {{"file_position", pos}});
+
+    use_appliance_chamber();
+    set_chamber(280, 0);
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    report_for(6);
+    REQUIRE(transfers.ranges == 1);
+    report_for(2);
+    CHECK(get_current_phase() == PrintStartPhase::SOAKING);
+    CHECK(chamber_wait_flag() == 1);
+}
+
+// The nozzle sits inside the at-target band while the bed is far short, so a
+// guess says bed. The command at the print position says otherwise when it
+// can be read, and only then.
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
+                 "a heater wait shows the heater its command names, else the guess",
+                 "[print][collector][heater_wait][wait_line]") {
+    ServedPrint print{client(), state(), "u1_print.gcode"};
+    ArchiveTransfers& transfers = print.transfers;
+    set_all_temps(/*bed*/ 450, 1000, /*ext*/ 2090, 2100);
+
+    const auto wait_on = [&](const std::string& command) {
+        const std::string file = "G28\n" + command + "\nG90\n";
+        transfers.put("u1_print.gcode", file);
+        client().set_object_status("virtual_sdcard", {{"file_position", file.find(command)}});
+        report_for(2);
+    };
+
+    SECTION("M109 is the nozzle") {
+        wait_on("M109 S210");
+        REQUIRE(transfers.ranges == 1);
+        CHECK(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+    }
+    SECTION("a TEMPERATURE_WAIT on an extruder is the nozzle") {
+        wait_on("TEMPERATURE_WAIT SENSOR=extruder MINIMUM=205");
+        CHECK(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+    }
+    SECTION("a command that is no wait leaves the guess") {
+        wait_on("G4 P1000");
+        REQUIRE(transfers.ranges == 1);
+        CHECK(get_current_phase() == PrintStartPhase::HEATING_BED);
+    }
+    SECTION("a failed read leaves the guess, and the wait stops asking") {
+        transfers.fail_ranges = true;
+        wait_on("M109 S210");
+        REQUIRE(transfers.ranges == 1);
+        CHECK(get_current_phase() == PrintStartPhase::HEATING_BED);
+        const int queries = client().call_count("printer.objects.query");
+        report_for(3);
+        CHECK(client().call_count("printer.objects.query") == queries);
+        CHECK(get_current_phase() == PrintStartPhase::HEATING_BED);
+    }
+    SECTION("a transfers API without ranged reads is never asked where the print is") {
+        transfers.ranged = false;
+        const int queries = client().call_count("printer.objects.query");
+        wait_on("M109 S210");
+        CHECK(client().call_count("printer.objects.query") == queries);
+        CHECK(transfers.ranges == 0);
+        CHECK(get_current_phase() == PrintStartPhase::HEATING_BED);
+    }
+    SECTION("the position moving mid-wait reads the next command") {
+        const std::string file = "M109 S170\nM190 S100\nG90\n";
+        transfers.put("u1_print.gcode", file);
+        set_all_temps(/*bed*/ 450, 1000, /*ext*/ 1990, 1700);
+        client().set_object_status("virtual_sdcard", {{"file_position", 0}});
+        report_for(2);
+        REQUIRE(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+        // The reports go on without a gap; one tick reads the move, the next shows it.
+        set_all_temps(/*bed*/ 450, 1000, /*ext*/ 1700, 1700);
+        client().set_object_status("virtual_sdcard", {{"file_position", file.find("M190")}});
+        report_for(2);
+        CHECK(transfers.ranges == 2);
+        CHECK(get_current_phase() == PrintStartPhase::HEATING_BED);
+    }
+}
+
+// A Voron-style printer with a chamber sensor and no chamber heater, whose
+// [gcode_macro M191] waits on that sensor. M191 there names no heater, so the
+// wait is no chamber-heater stall.
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
+                 "M191 on a printer with no chamber heater is not a chamber wait",
+                 "[print][collector][heater_wait][chamber_wait][wait_line]") {
+    ServedPrint print{client(), state(), "u1_print.gcode"};
+    state().temperature_state().set_chamber_sensor_name("temperature_sensor chamber");
+    REQUIRE(state().temperature_state().chamber_heater_name().empty());
+    const std::string file = "G28\nM191 S45\nG90\n";
+    print.transfers.put("u1_print.gcode", file);
+    client().set_object_status("virtual_sdcard", {{"file_position", file.find("M191")}});
+    set_chamber(300, 0);
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    report_for(10);
+    REQUIRE(PrintStartCollectorTestAccess::wait_line_kind(collector()) == helix::WaitKind::M191);
+    CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+    CHECK(chamber_wait_flag() == 0);
+}
+
+// An answer for a wait that has ended, or for the previous print, describes
+// a command no longer running. Both reads are async, so either can land late.
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture, "a wait line answered after its wait ended is dropped",
+                 "[print][collector][heater_wait][wait_line]") {
+    ServedPrint print{client(), state(), "u1_print.gcode"};
+    const std::string file = "M109 S210\nG4 P1000\nG90\n";
+    print.transfers.put("u1_print.gcode", file);
+    set_all_temps(/*bed*/ 450, 1000, /*ext*/ 2090, 2100);
+    const auto kind = [&]() { return PrintStartCollectorTestAccess::wait_line_kind(collector()); };
+    const auto end_wait = [&]() {
+        clock_.advance(std::chrono::seconds(5));
+        tick();
+    };
+
+    SECTION("a ranged read still out when the wait ends") {
+        print.transfers.hold_from = 1;
+        client().set_object_status("virtual_sdcard", {{"file_position", 0}});
+        report_for(1);
+        REQUIRE(print.transfers.held.size() == 1);
+        end_wait();
+        print.transfers.release_held();
+        drain_async_updates();
+        CHECK_FALSE(kind());
+    }
+
+    SECTION("a ranged read still out when the next print starts") {
+        print.transfers.hold_from = 1;
+        client().set_object_status("virtual_sdcard", {{"file_position", 0}});
+        report_for(1);
+        REQUIRE(print.transfers.held.size() == 1);
+        collector().stop();
+        collector().start();
+        drain_async_updates();
+        print.transfers.release_held();
+        drain_async_updates();
+        CHECK_FALSE(kind());
+    }
+
+    SECTION("a position query still out when the wait ends") {
+        client().set_object_status("virtual_sdcard", {{"file_position", 0}});
+        client().defer_next("printer.objects.query");
+        clock_.advance(std::chrono::seconds(1));
+        feed_gcode("B:45.0 /100.0 T0:209.0 /210.0");
+        REQUIRE_FALSE(kind());
+        end_wait();
+        // The next wait stands at G4. The held answer, fired now, says M109.
+        client().set_object_status("virtual_sdcard", {{"file_position", file.find("G4")}});
+        report_for(1);
+        REQUIRE(kind() == helix::WaitKind::Other);
+        client().set_object_status("virtual_sdcard", {{"file_position", 0}});
+        client().fire_deferred("printer.objects.query");
+        drain_async_updates();
+        CHECK(kind() == helix::WaitKind::Other);
+    }
+}
+
+TEST_CASE("the heater a wait command names", "[print][collector][wait_line]") {
+    using helix::classify_wait_line;
+    const std::string heater = "heater_generic dragonbreath";
+    const auto named = [&](const char* line) {
+        return PrintStartCollector::heater_waited_on(classify_wait_line(line), heater);
+    };
+    CHECK(named("M109 S210") == PrintStartPhase::HEATING_NOZZLE);
+    CHECK(named("M109 S170 T2") == PrintStartPhase::HEATING_NOZZLE);
+    CHECK(named("M190 S100") == PrintStartPhase::HEATING_BED);
+    CHECK(named("M191 S60") == PrintStartPhase::SOAKING);
+    CHECK_FALSE(PrintStartCollector::heater_waited_on(classify_wait_line("M191 S60"), ""));
+    CHECK(named("TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=95") == PrintStartPhase::HEATING_BED);
+    CHECK(named("TEMPERATURE_WAIT SENSOR=extruder2 MINIMUM=200") ==
+          PrintStartPhase::HEATING_NOZZLE);
+    CHECK(named("TEMPERATURE_WAIT SENSOR=\"heater_generic dragonbreath\" MINIMUM=35") ==
+          PrintStartPhase::SOAKING);
+    CHECK_FALSE(named("TEMPERATURE_WAIT SENSOR=\"temperature_sensor chamber\" MINIMUM=40"));
+    CHECK_FALSE(named("TEMPERATURE_WAIT SENSOR=\"temperature_probe beacon_coil\" MINIMUM=40"));
+    CHECK_FALSE(named("G4 P1000"));
+    CHECK_FALSE(PrintStartCollector::heater_waited_on(
+        classify_wait_line("TEMPERATURE_WAIT SENSOR=\"heater_generic dragonbreath\" MINIMUM=35"),
+        ""));
+}
+
+TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
+                 "the chamber device's own wait labels the chamber and ends with it",
+                 "[print][collector][heater_wait][chamber_wait]") {
+    use_appliance_chamber();
+    set_chamber(280, 0);
+    set_all_temps(/*bed*/ 1000, 1000, /*ext*/ 2100, 2100);
+    state().temperature_state().update_from_status(
+        {{"dragonbreath", {{"wait_active", true}, {"wait_target", 60.0}}}});
+    report_for(2);
+    REQUIRE(get_current_phase() == PrintStartPhase::SOAKING);
+    CHECK(get_current_message() == "Waiting for chamber 28 / 60°C");
+    CHECK(chamber_wait_flag() == 1);
+
+    // The wait ends (the chamber got hot, or the target was cleared) while
+    // the next wait goes on reporting: the chamber is no longer why.
+    state().temperature_state().update_from_status(
+        {{"dragonbreath", {{"wait_active", false}, {"wait_target", nullptr}}}});
+    report_for(1);
+    CHECK(chamber_wait_flag() == 0);
 }
 
 TEST_CASE_METHOD(SnapmakerHeaterWaitFixture,
@@ -4052,9 +4837,8 @@ TEST_CASE_METHOD(ArtilleryHeaterWaitFixture,
 // blocking waits report once a second: M109 S170 during the switch check,
 // M109 S210 after plate detect, then M109 S170 (a cool-down) straight into
 // M190 S100 until the shutdown. The bed is far below 100C through all of them
-// and the active tool is T2. A wait shows the nozzle while it is short of its
-// target, else the bed; a nozzle cooling to its target is not short, so the
-// cool-down into M190 reads as the bed.
+// and the active tool is T2. Each wait shows the heater its command names, the
+// cool-down included.
 // ============================================================================
 
 namespace {
@@ -4066,103 +4850,676 @@ std::string collector_fixture_dir() {
     }
     return "tests/fixtures/";
 }
-} // namespace
 
-TEST_CASE_METHOD(SnapmakerCollectorFixture,
-                 "Snapmaker U1: real heater waits show the bed heating between firmware phases",
-                 "[print][collector][snapmaker][heater_wait][integration]") {
-    const std::string path = collector_fixture_dir() + "u1_heater_wait_console.txt";
-    std::ifstream f(path);
-    INFO("fixture: " << path);
+/// The U1 start G-code, file lines 80-230 at their real byte offsets
+/// (tests/fixtures/u1_tool_probe_clean_start.gcode begins at byte 4342; the
+/// bytes before it are blank lines here). The waits stand at: M109 T2 S170
+/// 6204, M109 S210 6453, M109 S170 6732, M190 S100 6742, M109 S260 7281,
+/// TEMPERATURE_WAIT 7342, M109 S260 T2 7738.
+std::string u1_start_file() {
+    std::ifstream f(collector_fixture_dir() + "u1_tool_probe_clean_start.gcode", std::ios::binary);
     REQUIRE(f.is_open());
+    std::string block((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return std::string(4342, '\n') + block;
+}
 
-    struct Line {
-        int ms;
-        std::string text;
+/// Replays a U1 console capture ("HH:MM:SS.mmm line") at its real timestamps,
+/// with the fallback tick on the ETA timer's 5 s cadence. Heater state comes
+/// from the wait reports themselves (bed and the active tool T2), seeded with
+/// the given values until the first report.
+///
+/// serve() puts the printed file behind a ranged-read transfers API, and
+/// position_at() scripts virtual_sdcard.file_position: from a time on, the
+/// print stands at that byte.
+class SnapmakerReplayFixture : public SnapmakerCollectorFixture {
+  public:
+    struct Shown {
+        int ms; ///< since the first line
+        PrintStartPhase phase;
+        std::string message;
+        int probes;
     };
-    std::vector<Line> lines;
-    for (std::string raw; std::getline(f, raw);) {
-        int h = 0, m = 0;
-        double s = 0.0;
-        REQUIRE(std::sscanf(raw.c_str(), "%d:%d:%lf", &h, &m, &s) == 3);
-        lines.push_back({static_cast<int>((h * 3600 + m * 60 + s) * 1000), raw.substr(13)});
+
+    void serve(const std::string& filename, std::string bytes) {
+        print_.emplace(client(), state(), filename);
+        print_->transfers.put(filename, std::move(bytes));
     }
-    REQUIRE(lines.size() > 200);
+    int ranged_reads() const {
+        return print_ ? print_->transfers.ranges : 0;
+    }
+    ServedPrint& served() {
+        REQUIRE(print_);
+        return *print_;
+    }
+    void position_at(int ms, uint64_t pos) {
+        positions_.push_back({ms, pos});
+    }
+    /// Also deliver each position as a subscribed virtual_sdcard.file_position
+    /// frame, from a track of "seconds byte" lines the way a 1 Hz poll saw them.
+    void stream_positions(const std::string& track) {
+        std::ifstream f(collector_fixture_dir() + track);
+        REQUIRE(f.is_open());
+        double sec = 0.0;
+        uint64_t pos = 0;
+        while (f >> sec >> pos) {
+            position_at(static_cast<int>(std::lround(sec * 1000)), pos);
+        }
+        REQUIRE(positions_.size() > 10);
+        stream_positions_ = true;
+    }
 
-    helix::sim::SimulatedClock::ManualScope clock(helix::sim::SimSpeed::of(1.0));
-    set_all_temps(/*bed*/ 460, 1000, /*ext*/ 1488, 1700);
-    collector().start();
-    drain_async_updates();
-    collector().enable_fallbacks();
+    /// @p tool is the active extruder's id in the wait reports ("T2").
+    std::vector<Shown> replay(const std::string& file, int bed, int bed_target, int ext,
+                              int ext_target, const std::string& tool = "T2") {
+        const std::string path = collector_fixture_dir() + file;
+        std::ifstream f(path);
+        INFO("fixture: " << path);
+        REQUIRE(f.is_open());
 
-    const int t0 = lines.front().ms;
-    int now = t0;
-    int next_tick = t0 + 5000; // the ETA timer's cadence
-    std::string trace;
-    PrintStartPhase shown = PrintStartPhase::IDLE;
-    const auto note_phase = [&]() {
+        struct Line {
+            int ms;
+            std::string text;
+        };
+        std::vector<Line> lines;
+        for (std::string raw; std::getline(f, raw);) {
+            int h = 0, m = 0;
+            double sec = 0.0;
+            REQUIRE(std::sscanf(raw.c_str(), "%d:%d:%lf", &h, &m, &sec) == 3);
+            lines.push_back({static_cast<int>((h * 3600 + m * 60 + sec) * 1000), raw.substr(13)});
+        }
+        REQUIRE(lines.size() > 200);
+
+        helix::sim::SimulatedClock::ManualScope clock(helix::sim::SimSpeed::of(1.0));
+        set_all_temps(bed, bed_target, ext, ext_target);
+        collector().start();
         drain_async_updates();
-        drain_async_updates();
-        const PrintStartPhase phase = get_current_phase();
-        if (phase == shown) {
-            return;
-        }
-        shown = phase;
-        if (!trace.empty()) {
-            trace += ' ';
-        }
-        trace +=
-            std::to_string((now - t0) / 1000) + ":" + std::string(print_start_phase_name(phase));
-    };
-    const auto tick = [&]() {
-        collector().check_fallback_completion();
-        note_phase();
-    };
+        collector().enable_fallbacks();
 
-    const std::regex reading(R"((\w+):(-?\d+\.\d) /(-?\d+\.\d))");
-    int bed = 460, bed_target = 1000, ext = 1488, ext_target = 1700;
-    for (const Line& line : lines) {
-        while (next_tick <= line.ms) {
-            clock.advance(std::chrono::milliseconds(next_tick - now));
-            now = next_tick;
-            tick();
-            next_tick += 5000;
-        }
-        clock.advance(std::chrono::milliseconds(line.ms - now));
-        now = line.ms;
+        const int t0 = lines.front().ms;
+        int now = t0;
+        int next_tick = t0 + 5000;
+        std::vector<Shown> shown;
+        const auto note = [&]() {
+            drain_async_updates();
+            drain_async_updates();
+            Shown cur{now - t0, get_current_phase(), get_current_message(),
+                      PrintStartCollectorTestAccess::get_mesh_probe_current(collector())};
+            if (shown.empty() || cur.phase != shown.back().phase ||
+                cur.message != shown.back().message) {
+                shown.push_back(std::move(cur));
+            }
+        };
+        const auto tick = [&]() {
+            collector().check_fallback_completion();
+            note();
+        };
 
-        bool target_changed = false;
-        for (std::sregex_iterator it(line.text.begin(), line.text.end(), reading), end; it != end;
-             ++it) {
-            const std::string id = (*it)[1];
-            const int temp = static_cast<int>(std::lround(std::stod((*it)[2]) * 10));
-            const int target = static_cast<int>(std::lround(std::stod((*it)[3]) * 10));
-            if (id == "B") {
-                target_changed |= target != bed_target;
-                bed = temp;
-                bed_target = target;
-            } else if (id == "T2") {
-                target_changed |= target != ext_target;
-                ext = temp;
-                ext_target = target;
+        const std::regex reading(R"((\w+):(-?\d+\.\d) /(-?\d+\.\d))");
+        size_t next_position = 0;
+        // Each position from its own time on, up to @p at.
+        const auto stand_at = [&](int at) {
+            while (next_position < positions_.size() &&
+                   positions_[next_position].first <= at - t0) {
+                const int moved = t0 + positions_[next_position].first;
+                if (moved > now) {
+                    clock.advance(std::chrono::milliseconds(moved - now));
+                    now = moved;
+                }
+                client().set_object_status("virtual_sdcard",
+                                           {{"file_position", positions_[next_position].second}});
+                if (stream_positions_) {
+                    client().dispatch_status_update(
+                        {{"virtual_sdcard",
+                          {{"file_position", positions_[next_position].second}}}});
+                    note();
+                }
+                ++next_position;
+            }
+        };
+        for (const Line& line : lines) {
+            while (next_tick <= line.ms) {
+                stand_at(next_tick);
+                clock.advance(std::chrono::milliseconds(next_tick - now));
+                now = next_tick;
+                tick();
+                next_tick += 5000;
+            }
+            stand_at(line.ms);
+            clock.advance(std::chrono::milliseconds(line.ms - now));
+            now = line.ms;
+
+            bool target_changed = false;
+            for (std::sregex_iterator it(line.text.begin(), line.text.end(), reading), end;
+                 it != end; ++it) {
+                const std::string id = (*it)[1];
+                const int temp = static_cast<int>(std::lround(std::stod((*it)[2]) * 10));
+                const int target = static_cast<int>(std::lround(std::stod((*it)[3]) * 10));
+                if (id == "B") {
+                    target_changed |= target != bed_target;
+                    bed = temp;
+                    bed_target = target;
+                } else if (id == tool) {
+                    target_changed |= target != ext_target;
+                    ext = temp;
+                    ext_target = target;
+                }
+            }
+            set_all_temps(bed, bed_target, ext, ext_target);
+            feed_gcode(line.text);
+            note();
+            if (target_changed) {
+                tick(); // the target observers run the fallback check
             }
         }
-        set_all_temps(bed, bed_target, ext, ext_target);
-        feed_gcode(line.text);
-        note_phase();
-        if (target_changed) {
-            tick(); // the target observers run the fallback check
-        }
+        return shown;
     }
 
-    // Each wait takes the label on its first report (or the next tick). The
-    // z offset line ends the first wait by starting the mesh; the second ends
-    // at the first tick after its reports stop, giving "Detecting plate" back
-    // until the last wait runs into the shutdown.
-    CAPTURE(trace);
-    REQUIRE(trace == "0:INITIALIZING 5:HEATING_NOZZLE 13:BED_MESH 42:HEATING_NOZZLE 60:BED_MESH "
-                     "68:HEATING_BED");
+    /// "seconds:PHASE" for each phase change, the way a reader scans the bar.
+    static std::string phase_trace(const std::vector<Shown>& shown) {
+        std::string trace;
+        PrintStartPhase last = PrintStartPhase::IDLE;
+        for (const Shown& s : shown) {
+            if (s.phase == last) {
+                continue;
+            }
+            last = s.phase;
+            if (!trace.empty()) {
+                trace += ' ';
+            }
+            trace +=
+                std::to_string(s.ms / 1000) + ":" + std::string(print_start_phase_name(s.phase));
+        }
+        return trace;
+    }
+
+    static std::string full_trace(const std::vector<Shown>& shown) {
+        std::string trace;
+        char buf[160];
+        for (const Shown& s : shown) {
+            const std::string_view name = print_start_phase_name(s.phase);
+            std::snprintf(buf, sizeof(buf), "%.1f %.*s \"%s\" n=%d\n", s.ms / 1000.0,
+                          static_cast<int>(name.size()), name.data(), s.message.c_str(), s.probes);
+            trace += buf;
+        }
+        return trace;
+    }
+
+  private:
+    std::optional<ServedPrint> print_;
+    std::vector<std::pair<int, uint64_t>> positions_;
+    bool stream_positions_ = false;
+};
+} // namespace
+
+// ============================================================================
+// Snapmaker U1 replay with the print position: a one-head print's console from
+// file open to its first layer (tests/fixtures/u1_bmcu_console.txt, 2026-10-17),
+// virtual_sdcard.file_position as a 1 Hz poll saw it (u1_bmcu_positions.txt,
+// "seconds byte"), and the file's start block at its real offsets
+// (u1_bmcu_start.gcode, from byte 12744). The head reports as T1. The
+// firmware's print_task_config skipped BED_MESH_CALIBRATE ("does not do
+// auto-leveling"), so the position jumps from G28 Z straight to M109 S260.
+// ============================================================================
+
+namespace {
+std::string u1_bmcu_file() {
+    std::ifstream f(collector_fixture_dir() + "u1_bmcu_start.gcode", std::ios::binary);
+    REQUIRE(f.is_open());
+    std::string block((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return std::string(12744, '\n') + block;
+}
+} // namespace
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: the print position shows the cleans, Z probes and prime line",
+                 "[print][collector][snapmaker][start_block][integration]") {
+    serve("u1_bmcu.gcode", u1_bmcu_file());
+    stream_positions("u1_bmcu_positions.txt");
+    const auto shown = replay("u1_bmcu_console.txt", /*bed*/ 230, 0, /*ext*/ 250, 0, "T1");
+    CAPTURE(full_trace(shown));
+
+    // The firmware's action codes name the bed inspect, the extruder check,
+    // the feed and the plate detect; the heater waits name their heater. The
+    // position adds the rest: G28 X Y, each clean, each G28 Z and the prime
+    // line, each from the moment the print reaches its line. The skipped mesh
+    // never shows.
+    REQUIRE(phase_trace(shown) ==
+            "0:INITIALIZING 0:HOMING 26:BED_MESH 87:INITIALIZING 94:HEATING_NOZZLE "
+            "115:INITIALIZING 145:HEATING_NOZZLE 186:CLEANING 190:HOMING 210:BED_MESH "
+            "224:HEATING_NOZZLE 234:CLEANING 249:HEATING_NOZZLE 270:HEATING_BED 319:HOMING "
+            "340:HEATING_NOZZLE 359:PURGING");
+    const auto message_at = [&](int s) {
+        const auto it = std::find_if(shown.begin(), shown.end(),
+                                     [&](const Shown& x) { return x.ms / 1000 == s; });
+        REQUIRE(it != shown.end());
+        return it->message;
+    };
+    CHECK(message_at(0) == "Preparing Print...");
+    CHECK(shown[1].message == "Homing axes...");
+    CHECK(message_at(190) == "Probing Z...");
+    CHECK(message_at(319) == "Probing Z...");
+    CHECK(message_at(186) == "Cleaning Nozzle...");
+    CHECK(message_at(359) == "Purging...");
+    for (const Shown& s : shown) {
+        CHECK(s.message != "Bed mesh...");
+    }
+    // One head read; every other ranged read is a wait line's.
+    const auto& reads = served().transfers.range_requests;
+    CHECK(std::count(reads.begin(), reads.end(),
+                     std::pair<uint64_t, size_t>{0, helix::kStartBlockHeadBytes}) == 1);
+
+    // Each phase's history entry is the time it showed, over every visit:
+    // HOMING three times, CLEANING and BED_MESH twice.
+    collector().complete_from_external_signal("first layer");
+    drain_async_updates();
+    const int end_ms = shown.back().ms + 17400; // the last line, 377.3 s
+    std::map<int, int> shown_ms;
+    for (size_t i = 0; i < shown.size(); ++i) {
+        const int until = i + 1 < shown.size() ? shown[i + 1].ms : end_ms;
+        shown_ms[static_cast<int>(shown[i].phase)] += until - shown[i].ms;
+    }
+    const auto entries = collector().predictor().get_entries();
+    REQUIRE_FALSE(entries.empty());
+    const auto& durations = entries.back().phase_durations;
+    CAPTURE(durations.size());
+    for (const PrintStartPhase phase : {PrintStartPhase::HOMING, PrintStartPhase::BED_MESH,
+                                        PrintStartPhase::CLEANING, PrintStartPhase::PURGING}) {
+        const int p = static_cast<int>(phase);
+        CAPTURE(print_start_phase_name(phase));
+        REQUIRE(durations.count(p) == 1);
+        CHECK(durations.at(p) == Catch::Approx(shown_ms[p] / 1000).margin(1));
+    }
+    CHECK(durations.count(static_cast<int>(PrintStartPhase::CLEANING)) == 1);
+    CHECK(durations.at(static_cast<int>(PrintStartPhase::CLEANING)) < 25);
+    // Nothing showed SOAKING, and INITIALIZING and the heating phases are not
+    // recorded as phases.
+    CHECK(durations.count(static_cast<int>(PrintStartPhase::SOAKING)) == 0);
+    CHECK(durations.count(static_cast<int>(PrintStartPhase::INITIALIZING)) == 0);
+    CHECK(durations.count(static_cast<int>(PrintStartPhase::HEATING_BED)) == 0);
+}
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: a firmware code on a step's line is not overwritten by the step",
+                 "[print][collector][snapmaker][start_block]") {
+    // BED_MESH_CALIBRATE announces its 60 s soak first thing, and its status
+    // frame, batched, arrives after that console line.
+    std::string file = u1_bmcu_file();
+    serve("u1_bmcu.gcode", file);
+    helix::sim::SimulatedClock::ManualScope clock(helix::sim::SimSpeed::of(1.0));
+    collector().start();
+    drain_async_updates();
+    const auto at = [&](uint64_t pos) {
+        client().dispatch_status_update({{"virtual_sdcard", {{"file_position", pos}}}});
+        drain_async_updates();
+        drain_async_updates();
+    };
+    at(14316); // G28 Z: the first position reads the head
+    at(14316);
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+    REQUIRE(get_current_message() == "Probing Z...");
+
+    clock.advance(std::chrono::seconds(20));
+    feed_gcode("// Success: Set action code BED_PREHEATING");
+    REQUIRE(get_current_phase() == PrintStartPhase::SOAKING);
+    clock.advance(std::chrono::milliseconds(250));
+    at(14559);
+    CHECK(get_current_phase() == PrintStartPhase::SOAKING);
+    CHECK(get_current_message() == "Heat Soaking...");
+    // The mesh command prints that code itself, so the step is not held for
+    // later either.
+    clock.advance(std::chrono::seconds(2));
+    at(14559);
+    CHECK(get_current_message() == "Heat Soaking...");
+
+    // A step with no console line ahead of it shows.
+    clock.advance(std::chrono::seconds(60));
+    at(14840);
+    CHECK(get_current_phase() == PrintStartPhase::PURGING);
+}
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: a start-block step from another run or after COMPLETE is dropped",
+                 "[print][collector][snapmaker][start_block]") {
+    serve("u1_bmcu.gcode", u1_bmcu_file());
+    collector().start();
+    drain_async_updates();
+    const uint64_t run = PrintStartCollectorTestAccess::run_generation(collector());
+    const helix::StartBlockStep clean{14002, helix::StartBlockStepKind::CleanNozzle, false, ""};
+
+    PrintStartCollectorTestAccess::apply_start_block_step(collector(), clean, run - 1);
+    drain_async_updates();
+    CHECK(get_current_phase() == PrintStartPhase::INITIALIZING);
+    // The same step from this run shows, so the drop above is the run's doing.
+    PrintStartCollectorTestAccess::apply_start_block_step(
+        collector(), {13756, helix::StartBlockStepKind::HomeAxes, true, ""}, run);
+    drain_async_updates();
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+
+    collector().complete_from_external_signal("first layer");
+    drain_async_updates();
+    REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+    PrintStartCollectorTestAccess::apply_start_block_step(collector(), clean, run);
+    drain_async_updates();
+    CHECK(get_current_phase() == PrintStartPhase::COMPLETE);
+}
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: stopping the collector cancels the head read in flight",
+                 "[print][collector][snapmaker][start_block]") {
+    serve("u1_bmcu.gcode", u1_bmcu_file());
+    served().transfers.hold_from = 1;
+    collector().start();
+    drain_async_updates();
+    client().dispatch_status_update({{"virtual_sdcard", {{"file_position", 14002}}}});
+    drain_async_updates();
+    REQUIRE(served().transfers.ranges == 1);
+    REQUIRE(served().transfers.last_cancel);
+    CHECK_FALSE(served().transfers.last_cancel->load());
+
+    collector().stop();
+    CHECK(served().transfers.last_cancel->load());
+    served().transfers.release_held();
+    drain_async_updates();
+}
+
+namespace {
+/// A started U1 collector serving the BMCU file, with position frames.
+class SnapmakerStartBlockFixture : public SnapmakerReplayFixture {
+  public:
+    SnapmakerStartBlockFixture() {
+        serve("u1_bmcu.gcode", u1_bmcu_file());
+        collector().start();
+        drain_async_updates();
+    }
+    void at(uint64_t pos) {
+        client().dispatch_status_update({{"virtual_sdcard", {{"file_position", pos}}}});
+        drain_async_updates();
+        drain_async_updates();
+    }
+    helix::sim::SimulatedClock::ManualScope clock{helix::sim::SimSpeed::of(1.0)};
+};
+} // namespace
+
+TEST_CASE_METHOD(SnapmakerStartBlockFixture,
+                 "Snapmaker U1: a step after the previous command's last code shows once the "
+                 "grace passes",
+                 "[print][collector][snapmaker][start_block]") {
+    at(13824); // G28 Z I140 J140: the first position reads the head
+    at(13824);
+    REQUIRE(get_current_message() == "Probing Z...");
+
+    clock.advance(std::chrono::seconds(10));
+    feed_gcode("// Success: Set action code DETECT_PLATE");
+    REQUIRE(get_current_message() == "Detecting plate...");
+    // The position passes ROUGHLY_CLEAN_NOZZLE: no command of the block prints
+    // DETECT_PLATE for a clean, so the code was the plate detect's last word.
+    clock.advance(std::chrono::milliseconds(300));
+    at(14023);
+    CHECK(get_current_message() == "Detecting plate...");
+
+    SECTION("it shows once the grace passes") {
+        clock.advance(std::chrono::seconds(1));
+        at(14023);
+        CHECK(get_current_phase() == PrintStartPhase::CLEANING);
+        CHECK(get_current_message() == "Cleaning Nozzle...");
+    }
+    SECTION("a console change after it cancels it") {
+        clock.advance(std::chrono::milliseconds(300));
+        feed_gcode("// Success: Set action code PRINT_SWITCH_CHECKING");
+        REQUIRE(get_current_message() == "Checking extruders...");
+        clock.advance(std::chrono::seconds(2));
+        at(14023);
+        CHECK(get_current_message() == "Checking extruders...");
+    }
+}
+
+TEST_CASE_METHOD(SnapmakerStartBlockFixture,
+                 "Snapmaker U1: a held step shows at the ETA tick when no position follows",
+                 "[print][collector][snapmaker][start_block]") {
+    at(13824);
+    at(13824);
+    clock.advance(std::chrono::seconds(10));
+    feed_gcode("// Success: Set action code DETECT_PLATE");
+    clock.advance(std::chrono::milliseconds(300));
+    at(14023); // past ROUGHLY_CLEAN_NOZZLE: held behind the plate detect's code
+    REQUIRE(get_current_message() == "Detecting plate...");
+
+    // The clean's moves keep the position on its line: no frame comes, and
+    // only the collector's periodic timer is left to show the step.
+    clock.advance(std::chrono::seconds(1));
+    PrintStartCollectorTestAccess::fire_eta_timer(collector());
+    drain_async_updates();
+    drain_async_updates();
+    CHECK(get_current_phase() == PrintStartPhase::CLEANING);
+}
+
+TEST_CASE_METHOD(SnapmakerStartBlockFixture,
+                 "Snapmaker U1: a repeated action code that changes nothing does not hold a step",
+                 "[print][collector][snapmaker][start_block]") {
+    at(13824);
+    at(13824);
+    clock.advance(std::chrono::seconds(10));
+    feed_gcode("// Success: Set action code DETECT_PLATE");
+    clock.advance(std::chrono::seconds(5));
+    feed_gcode("// Success: Set action code DETECT_PLATE");
+    clock.advance(std::chrono::milliseconds(300));
+    at(14023);
+    CHECK(get_current_phase() == PrintStartPhase::CLEANING);
+}
+
+TEST_CASE_METHOD(SnapmakerStartBlockFixture,
+                 "Snapmaker U1: a heater wait reads its line at the subscribed position",
+                 "[print][collector][snapmaker][start_block][wait_line]") {
+    collector().enable_fallbacks();
+    at(14271); // M109 S170, a cool-down; no virtual_sdcard query is answered
+    at(14271);
+    set_all_temps(/*bed*/ 870, 1000, /*ext*/ 1900, 1700);
+    feed_gcode("B:87.0 /100.0 T1:190.0 /170.0");
+    for (int i = 0; i < 2; ++i) {
+        collector().check_fallback_completion();
+        drain_async_updates();
+        drain_async_updates();
+    }
+    // The nozzle above its target reads as arrived, so a guess says the bed.
+    CHECK(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+}
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: a head read answered after a new start shows nothing",
+                 "[print][collector][snapmaker][start_block]") {
+    serve("u1_bmcu.gcode", u1_bmcu_file());
+    served().transfers.hold_from = 1;
+    collector().start();
+    drain_async_updates();
+    client().dispatch_status_update({{"virtual_sdcard", {{"file_position", 14023}}}});
+    drain_async_updates();
+    REQUIRE(served().transfers.ranges == 1);
+
+    // The next print's file has no steps; its frames name it.
+    collector().stop();
+    served().transfers.put("other.gcode", std::string(14100, '\n') + "M104 S0\n");
+    collector().start();
+    drain_async_updates();
+    client().dispatch_status_update({{"print_stats", {{"filename", "other.gcode"}}},
+                                     {"virtual_sdcard", {{"file_position", 14023}}}});
+    drain_async_updates();
+    REQUIRE(served().transfers.ranges == 2);
+    served().transfers.release_held();
+    drain_async_updates();
+    drain_async_updates();
+    CHECK(get_current_phase() == PrintStartPhase::INITIALIZING);
+}
+
+TEST_CASE_METHOD(SnapmakerCollectorFixture,
+                 "A profile without a scripted start does not read the print's head",
+                 "[print][collector][start_block]") {
+    collector().set_profile(PrintStartProfile::load_default());
+    ServedPrint print(client(), state(), "plain.gcode");
+    print.transfers.put("plain.gcode", "G28\nCLEAN_NOZZLE\nG1 X10 E5\n");
+    collector().start();
+    drain_async_updates();
+    client().dispatch_status_update({{"virtual_sdcard", {{"file_position", 4}}}});
+    drain_async_updates();
+    client().dispatch_status_update({{"virtual_sdcard", {{"file_position", 4}}}});
+    drain_async_updates();
+    CHECK(print.transfers.ranges == 0);
+    CHECK(get_current_phase() != PrintStartPhase::CLEANING);
+}
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: real heater waits show the bed heating between firmware phases",
+                 "[print][collector][snapmaker][heater_wait][integration]") {
+    // That print's file is not in the repo; it ran the same start block, so
+    // its waits stand where the 2026-10-16 print's do, each from its first
+    // report. The cool-down hands to M190 at approximately the first report
+    // with T2 within 1C of 170 (Klipper's settle band), with no gap in the
+    // reports.
+    serve("u1_print.gcode", u1_start_file());
+    position_at(3065, 6204);
+    position_at(42926, 6453);
+    position_at(68869, 6732);
+    position_at(83877, 6742);
+    const auto shown = replay("u1_heater_wait_console.txt", /*bed*/ 460, 1000, /*ext*/ 1488, 1700);
+
+    // The cool-down shows the nozzle from its first report. The M190 that
+    // follows is read at the first tick after the position moves (85 s) and
+    // shown at the next.
+    const std::string trace = phase_trace(shown);
+    CAPTURE(full_trace(shown));
+    REQUIRE(trace == "0:INITIALIZING 5:HEATING_NOZZLE 13:HOMING 28:BED_MESH 42:HEATING_NOZZLE "
+                     "60:BED_MESH 68:HEATING_NOZZLE 90:HEATING_BED");
     REQUIRE(get_current_message() == "Heating Bed...");
+}
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: each real wait shows the heater its command waits on",
+                 "[print][collector][snapmaker][heater_wait][wait_line][integration]") {
+    // The capture has no file_position track, so these times are inferred
+    // from the reports: each wait from its first report, and M190 from the
+    // first report with T2 within 1C of 170. Klipper's M109 also waits for
+    // the temperature to stop moving, so the real hand-off is likely a few
+    // seconds later; nothing below pins the hand-off tick.
+    serve("u1_tool_probe_clean.gcode", u1_start_file());
+    position_at(45400, 6204);
+    position_at(84638, 6453);
+    position_at(112782, 6732);
+    position_at(129793, 6742);
+    position_at(529619, 7281);
+    position_at(568504, 7738);
+    const auto shown =
+        replay("u1_tool_probe_clean_console.txt", /*bed*/ 352, 1000, /*ext*/ 1567, 1700);
+    CAPTURE(full_trace(shown));
+
+    // What the display showed at `ms`.
+    const auto at = [&](int ms) {
+        auto it =
+            std::find_if(shown.rbegin(), shown.rend(), [&](const Shown& s) { return s.ms <= ms; });
+        REQUIRE(it != shown.rend());
+        return it->phase;
+    };
+    const auto never_between = [&](int from, int to, PrintStartPhase phase) {
+        CAPTURE(from, to, print_start_phase_name(phase));
+        REQUIRE(at(from) != phase);
+        for (const Shown& s : shown) {
+            if (s.ms > from && s.ms <= to) {
+                CAPTURE(s.ms);
+                REQUIRE(s.phase != phase);
+            }
+        }
+    };
+
+    // Three nozzle waits: M109 T2 S170 ends in the band where the nozzle is
+    // no longer "short", M109 S210 likewise, and M109 S170 cools from 196.
+    // Each is the nozzle at every tick, and never the bed.
+    for (const auto& [from, to] : {std::pair{45400, 51403}, {84638, 96646}, {112782, 129793}}) {
+        CAPTURE(from);
+        REQUIRE(at(to) == PrintStartPhase::HEATING_NOZZLE);
+        never_between(from, to, PrintStartPhase::HEATING_BED);
+    }
+    REQUIRE(at(50000) == PrintStartPhase::HEATING_NOZZLE);
+
+    // M190 S100 follows with no gap in the reports: the bed from a few ticks
+    // after the hand-off until G28 Z at 324.9 s, its settling tail included.
+    for (int ms = 145000; ms < 324904; ms += 5000) {
+        CAPTURE(ms);
+        REQUIRE(at(ms) == PrintStartPhase::HEATING_BED);
+    }
+    never_between(319000, 325000, PrintStartPhase::SOAKING);
+
+    REQUIRE(shown.back().phase == PrintStartPhase::HEATING_NOZZLE);
+    REQUIRE(ranged_reads() == 6);
+}
+
+// ============================================================================
+// Snapmaker U1 replay: a 3-tool print's console from file open to the nozzle
+// heating for the prime line (tests/fixtures/u1_tool_probe_clean_console.txt,
+// 2026-10-16, t=0 at 21:48:13.136). Each G28 Z, after a tool pick or before the
+// mesh, prints "// z offset:" and touches one point; the mesh is announced by
+// BED_PREHEATING (a 60 s soak), BED_PRESCANNING (four corners) and
+// BED_LEVELING (36 points). Which heater a wait shows is not asserted here.
+// ============================================================================
+
+TEST_CASE_METHOD(SnapmakerReplayFixture,
+                 "Snapmaker U1: real tool Z touches and the announced mesh replay in order",
+                 "[print][collector][snapmaker][integration]") {
+    const auto shown =
+        replay("u1_tool_probe_clean_console.txt", /*bed*/ 352, 1000, /*ext*/ 1567, 1700);
+    CAPTURE(full_trace(shown));
+
+    // The display change that starts within 1 ms of `ms`.
+    const auto at = [&](int ms) -> const Shown& {
+        const auto it = std::find_if(shown.begin(), shown.end(),
+                                     [&](const Shown& s) { return std::abs(s.ms - ms) <= 1; });
+        INFO("no display change at " << ms << " ms");
+        REQUIRE(it != shown.end());
+        return *it;
+    };
+    const auto shows = [&](int ms, PrintStartPhase phase, const char* message) {
+        const Shown& s = at(ms);
+        CAPTURE(ms, s.message);
+        REQUIRE(s.phase == phase);
+        REQUIRE(s.message == message);
+    };
+
+    shows(26516, PrintStartPhase::BED_MESH, "Inspecting bed...");
+    shows(36155, PrintStartPhase::INITIALIZING, "Checking extruders...");
+
+    // The tool picked by the switch check touches the bed centre.
+    shows(55829, PrintStartPhase::HOMING, "Probing Z...");
+    for (const Shown& s : shown) {
+        if (s.ms > 55829 && s.ms < 69787) {
+            CAPTURE(s.ms, s.message);
+            REQUIRE(s.phase != PrintStartPhase::BED_MESH);
+        }
+    }
+    shows(69787, PrintStartPhase::BED_MESH, "Detecting plate...");
+
+    // G28 Z before the mesh, then the announced mesh steps.
+    shows(324904, PrintStartPhase::HOMING, "Probing Z...");
+    shows(339703, PrintStartPhase::SOAKING, "Heat Soaking...");
+    shows(399740, PrintStartPhase::BED_MESH, "Validating bed mesh...");
+
+    // BED_LEVELING restarts the count, and its G28 Z 1 ms later moves nothing.
+    shows(433454, PrintStartPhase::BED_MESH, "Bed mesh...");
+    const auto leveling = std::find_if(shown.begin(), shown.end(),
+                                       [](const Shown& s) { return s.message == "Bed mesh..."; });
+    REQUIRE(std::prev(leveling)->message == "Validating bed mesh (4)");
+    REQUIRE(leveling->probes == 0);
+    REQUIRE(std::next(leveling)->message == "Bed mesh (1)");
+    for (auto it = leveling; it != shown.end(); ++it) {
+        REQUIRE(it->phase != PrintStartPhase::HOMING);
+    }
+
+    // 36 mesh points, none of the corners.
+    const auto last_mesh = std::find_if(shown.rbegin(), shown.rend(), [](const Shown& s) {
+        return s.phase == PrintStartPhase::BED_MESH;
+    });
+    REQUIRE(last_mesh->message == "Bed mesh (36)");
+
+    // The nozzle heats for the prime line once the mesh ends.
+    REQUIRE(shown.back().phase == PrintStartPhase::HEATING_NOZZLE);
+    REQUIRE(shown.back().ms >= 529565);
+    REQUIRE(shown.back().ms <= 530000);
 }
 
 TEST_CASE("heater wait report lines", "[print][collector][heater_wait]") {
@@ -4194,7 +5551,7 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
     REQUIRE(get_current_message().find("Homing axes") != std::string::npos);
 
     // Same HOMING enum, different message: the label refines in place.
-    feed_gcode("// probe_start_x: 110.0");
+    feed_gcode("// z offset: -0.05");
     REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
     REQUIRE(get_current_message().find("Probing Z") != std::string::npos);
 
@@ -4203,7 +5560,7 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
     REQUIRE(get_current_message().find("Inspecting bed") != std::string::npos);
 
     // A late repeat of an earlier enum must not drag the phase back.
-    feed_gcode("// probe_start_x: 110.0");
+    feed_gcode("// z offset: -0.05");
     REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
     REQUIRE(get_current_message().find("Inspecting bed") != std::string::npos);
 }
@@ -4211,7 +5568,7 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
 // ============================================================================
 // Full U1 pre-print replay at the device's real pace (one print, klippy.log
 // timestamps): homing, Z touch, bed inspect, extruder switch check, auto-feed,
-// Z calibration mesh, plate detect + 4 probes — then ~129s of true silence
+// the new tool's Z touch, plate detect + 4 probes — then ~129s of true silence
 // while klippy-internal flow calibration and nozzle clean run (no
 // gcode_response exists for them) — then the real bed mesh (~14s), then ~39s
 // of quiet prime line before layer 1. Nothing narrates the silent prime line,
@@ -4247,7 +5604,7 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
     REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
     REQUIRE(get_current_message().find("Homing axes") != std::string::npos);
 
-    feed_gcode("// probe_start_x: 110.0");
+    feed_gcode("// z offset: -0.05");
     REQUIRE(get_current_message().find("Probing Z") != std::string::npos);
 
     feed_gcode("// Success: Set action code PRINT_BED_DETECTING");
@@ -4264,14 +5621,17 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
     REQUIRE(get_current_message().find("Loading filament") != std::string::npos);
     REQUIRE(tick().find("Loading filament") != std::string::npos);
 
-    // Z calibration mesh.
+    // The picked tool touches the bed centre (G28 Z I140 J140): one point,
+    // sampled repeatedly, is not a mesh.
     feed_gcode("// z offset: -0.05");
-    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
-    REQUIRE(get_current_message().find("Bed mesh") != std::string::npos);
-    feed_gcode("// probe at 10.000,10.000 is z=-0.100000");
-    feed_gcode("// probe at 50.000,10.000 is z=-0.105000");
-    REQUIRE(tick().find("Bed mesh") != std::string::npos);
-    feed_gcode("// z_mesh_complete: -0.02573436601557052");
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+    REQUIRE(get_current_message().find("Probing Z") != std::string::npos);
+    feed_gcode("// probe at x: 140.000, y: 140.000 is z=302.521667");
+    feed_gcode("// probe at x: 140.000, y: 140.000 is z=302.522500");
+    feed_gcode("// probe at x: 140.000, y: 140.000 is z=302.510833");
+    REQUIRE(tick().find("Probing Z") != std::string::npos);
+    feed_gcode("// z_mesh_complete: 0.2980673660155705");
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
 
     // Plate detect and its four probes: the last narrated pre-mesh step.
     feed_gcode("// Success: Set action code DETECT_PLATE");
@@ -4288,13 +5648,14 @@ TEST_CASE_METHOD(SnapmakerCollectorFixture,
     quiet_ticks(129, "Detecting plate");
     REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
 
-    // The real bed mesh (~14s end to end).
-    feed_gcode("// z offset: -0.06");
+    // The real bed mesh, announced by its action code; G28 Z follows 1 ms later.
+    feed_gcode("// Success: Set action code BED_LEVELING");
+    feed_gcode("// z offset: -0.05");
     REQUIRE(get_current_message().find("Bed mesh") != std::string::npos);
-    feed_gcode("// probe at 20.000,20.000 is z=-0.300000");
-    feed_gcode("// probe at 60.000,20.000 is z=-0.305000");
+    feed_gcode("// probe at x: 33.742, y: 28.487 is z=-0.085000");
+    feed_gcode("// probe at x: 74.442, y: 28.487 is z=-0.063333");
     REQUIRE(tick().find("Bed mesh") != std::string::npos);
-    feed_gcode("// z_mesh_complete: -0.03000000000000000");
+    feed_gcode("// Mesh Bed Leveling Complete");
 
     // ~39s of quiet prime line before layer 1: the prime is not narrated, so
     // the mesh label holds until the layer edge completes the pre-print.
@@ -4345,6 +5706,40 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
         feed("// probe at 10.000,10.000 is z=-0.100000");
         feed("// Bed preheating: 30s left");
         REQUIRE(PrintStartCollectorTestAccess::get_mesh_probe_total(collector()) == 16);
+    }
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "Adapted probe count outranks the configured grid when it precedes the mesh",
+                 "[print][collector][bed_mesh][adapted]") {
+    // Klipper prints the adapted grid inside BED_MESH_CALIBRATE, which can be
+    // before the collector enters BED_MESH; entry then asks Moonraker for the
+    // configured 6x6 grid.
+    client().set_config_bed_mesh_probe_count(6, 6);
+    client().gcode_script("BED_MESH_CLEAR");
+    collector().start();
+    drain_async_updates();
+
+    SECTION("Without an adapted line the configured grid is the total") {
+        enter_mesh_via_markers(*this);
+        drain_async_updates();
+        drain_async_updates();
+        REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+        CHECK(PrintStartCollectorTestAccess::get_mesh_probe_total(collector()) == 36);
+    }
+
+    SECTION("The adapted grid survives mesh entry and the configfile answer") {
+        send_gcode_response("G28");
+        send_gcode_response("// Adapted probe count: (5,5)");
+        send_gcode_response("BED_MESH_CALIBRATE");
+        drain_async_updates();
+        drain_async_updates();
+        REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+        CHECK(PrintStartCollectorTestAccess::get_mesh_probe_total(collector()) == 25);
+
+        send_gcode_response("// probe at 10.000,10.000 is z=0.100000");
+        drain_async_updates();
+        CHECK(get_current_message().find("(1/25)") != std::string::npos);
     }
 }
 
@@ -4681,9 +6076,9 @@ TEST_CASE_METHOD(K1CPrintStartReplayFixture,
 }
 
 TEST_CASE_METHOD(K1CPrintStartReplayFixture,
-                 "K2 purge-percent and box tags are ignored without cfs_signals",
+                 "K2 purge-percent and box tags are ignored without the K2 tag patterns",
                  "[print][collector][k2][negative]") {
-    // The creality_k1 profile does not declare cfs_signals: on a K1/K1C the
+    // The creality_k1 profile carries no tag_patterns: on a K1/K1C the
     // tag stream never appears, and these matchers must not fire on lines
     // that merely happen to contain their vocabulary.
     collector().start();
@@ -5114,6 +6509,389 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
 }
 
 // ============================================================================
+// CONTEXT-QUALIFIED PHASE OBJECT
+//
+// Forge-X publishes operation_context: a stack of nested steps (context_types,
+// outermost first) and current_state, the innermost step's state. One state
+// string means different things in different steps, so the profile matches
+// "<innermost type>/<state>". Moonraker sends only the fields that changed.
+// ============================================================================
+
+class ForgeXCollectorFixture : public PrintStartCollectorHeaterFixture {
+  public:
+    ForgeXCollectorFixture() {
+        auto profile = PrintStartProfile::load("forge_x");
+        REQUIRE(profile->name() == "Forge-X Mod");
+        collector().set_profile(std::move(profile));
+    }
+
+    /// One operation_context delta frame through notify_status_update.
+    void context(const json& fields) {
+        client().dispatch_status_update({{"operation_context", fields}});
+        drain_async_updates();
+    }
+};
+
+TEST_CASE_METHOD(ForgeXCollectorFixture, "A context-qualified state names the step it belongs to",
+                 "[print][collector][phase_object][forge_x]") {
+    collector().start();
+    drain_async_updates();
+
+    // The print context's LEVELING only decides how to level.
+    context({{"context_types", {"print"}}, {"current_state", "LEVELING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::INITIALIZING);
+
+    // KAMP's own LEVELING is the mesh.
+    context({{"context_types", {"print", "kamp"}}, {"current_state", "LEVELING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+    REQUIRE(get_current_message() == "Creating bed mesh...");
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture,
+                 "Phase-object delta frames re-match the cached state and context",
+                 "[print][collector][phase_object][forge_x]") {
+    collector().start();
+    drain_async_updates();
+
+    context({{"context_types", {"print", "kamp", "nozzle_clean"}}, {"current_state", nullptr}});
+    REQUIRE(get_current_phase() == PrintStartPhase::INITIALIZING);
+
+    // A frame carrying only the state pairs it with the cached context.
+    context({{"current_state", "COOLING NOZZLE"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    REQUIRE(get_current_message() == "Cooling for probing...");
+
+    // FINISHING ends the nested clean, not the pre-print.
+    context({{"current_state", "FINISHING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    REQUIRE(get_current_message() == "Finishing clean...");
+
+    // A frame carrying only the context pairs it with the cached state:
+    // kamp/FINISHING names nothing, so the display holds.
+    context({{"context_types", {"print", "kamp"}}});
+    REQUIRE(get_current_message() == "Finishing clean...");
+
+    context({{"current_state", "LEVELING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+
+    // A frame carrying neither field changes nothing.
+    context({{"revision", 41}});
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+
+    context({{"context_types", {"print"}}, {"current_state", "PRINTING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture,
+                 "A null state when a nested step begins is not the outer step's state",
+                 "[print][collector][phase_object][forge_x]") {
+    collector().start();
+    drain_async_updates();
+
+    context({{"context_types", {"print"}}, {"current_state", "LEVELING"}});
+    // KAMP opens with no state of its own. Pairing kamp with the print's
+    // LEVELING would claim the mesh ten minutes before it starts.
+    context({{"context_types", {"print", "kamp"}}, {"current_state", nullptr}});
+    REQUIRE(get_current_phase() == PrintStartPhase::INITIALIZING);
+    context({{"context_types", {"print", "kamp", "nozzle_clean"}}});
+    REQUIRE(get_current_phase() == PrintStartPhase::INITIALIZING);
+
+    context({{"current_state", "HEATING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::HEATING_BED);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture,
+                 "A live state may move the display back to an earlier phase",
+                 "[print][collector][phase_object][forge_x]") {
+    collector().start();
+    drain_async_updates();
+
+    context(
+        {{"context_types", {"print", "kamp", "nozzle_clean"}}, {"current_state", "HEATING BED"}});
+    context({{"current_state", "HEATING NOZZLE"}});
+    context({{"current_state", "CLEANING"}});
+    context({{"context_types", {"print", "kamp"}}, {"current_state", "LEVELING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+
+    // After the mesh the print parks and reheats the nozzle the clean cooled.
+    context({{"context_types", {"print"}}, {"current_state", "PARKING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+    REQUIRE(get_current_message() == "Preparing...");
+    context({{"current_state", "HEATING NOZZLE"}});
+    REQUIRE(get_current_message() == "Heating Nozzle...");
+
+    // A console line is an event, not a state: it still cannot drag the
+    // display back to a phase already passed.
+    send_gcode_response("// Wait bed temperature to reach 105 Cº");
+    REQUIRE(get_current_phase() == PrintStartPhase::HEATING_NOZZLE);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture, "The phase-object cache does not outlive the run",
+                 "[print][collector][phase_object][forge_x]") {
+    collector().start();
+    drain_async_updates();
+    context({{"context_types", {"print", "kamp"}}, {"current_state", "HEATING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::HEATING_BED);
+    collector().stop();
+
+    collector().start();
+    drain_async_updates();
+    // The last run's kamp context must not qualify this run's first state.
+    context({{"current_state", "LEVELING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::INITIALIZING);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture,
+                 "A context opened before the collector armed qualifies its states",
+                 "[print][collector][phase_object][forge_x]") {
+    // The print context begins in the same breath as print_stats goes to
+    // printing, so its frame can pass before start(), and with no nested
+    // step it never changes again.
+    client().set_object_status("operation_context",
+                               {{"context_types", {"print"}}, {"current_state", "CHECKING FILE"}});
+    collector().start();
+    drain_async_updates();
+    REQUIRE(get_current_message() == "Verifying file...");
+
+    context({{"current_state", "PRIMING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::PURGING);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture,
+                 "The start-up query fills only fields no frame has delivered",
+                 "[print][collector][phase_object][forge_x]") {
+    collector().start();
+    drain_async_updates();
+
+    context({{"context_types", {"print", "kamp"}}});
+    // A late answer to the start-up query still says the print context; the
+    // frame is newer and keeps kamp.
+    PrintStartCollectorTestAccess::feed_phase_object_seed(
+        collector(),
+        {{"operation_context", {{"context_types", {"print"}}, {"current_state", "LEVELING"}}}});
+    drain_async_updates();
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture,
+                 "The last print's leftover PRINTING does not complete the next one",
+                 "[print][collector][phase_object][forge_x]") {
+    // A file without an end macro leaves its print context standing at
+    // PRINTING; the collector arms a moment before the next START_PRINT
+    // pushes its own context, so the start-up query answers with the old one.
+    client().set_object_status("operation_context",
+                               {{"context_types", {"print"}}, {"current_state", "PRINTING"}});
+    collector().start();
+    drain_async_updates();
+    REQUIRE(get_current_phase() == PrintStartPhase::INITIALIZING);
+    REQUIRE_FALSE(collector().in_live_preprint_step());
+
+    context({{"context_types", {"print", "print"}}, {"current_state", nullptr}});
+    context({{"current_state", "CHECKING FILE"}});
+    REQUIRE(get_current_message() == "Verifying file...");
+
+    // The new print's own PRINTING still completes it.
+    context({{"current_state", "PRINTING"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture,
+                 "A late start-up answer from an earlier run does not seed the next",
+                 "[print][collector][phase_object][forge_x]") {
+    const json answer = {
+        {"result",
+         {{"status",
+           {{"operation_context",
+             {{"context_types", {"print", "kamp"}}, {"current_state", "LEVELING"}}}}}}}};
+    collector().start();
+    drain_async_updates();
+    const uint64_t first_run = PrintStartCollectorTestAccess::run_generation(collector());
+    collector().stop();
+    collector().start();
+    drain_async_updates();
+
+    PrintStartCollectorTestAccess::answer_phase_object_query(collector(), answer, first_run);
+    drain_async_updates();
+    REQUIRE(get_current_phase() == PrintStartPhase::INITIALIZING);
+
+    PrintStartCollectorTestAccess::answer_phase_object_query(
+        collector(), answer, PrintStartCollectorTestAccess::run_generation(collector()));
+    drain_async_updates();
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture, "Bed mesh validation names no point count",
+                 "[print][collector][phase_object][forge_x][mesh]") {
+    // _CHECK_BED_MESH probes five points against the loaded 25-point mesh,
+    // so a count would read "(5/25)" and end there.
+    client().set_config_bed_mesh_probe_count(5, 5);
+    collector().start();
+    drain_async_updates();
+
+    context({{"context_types", {"print", "mesh_validation"}}, {"current_state", "CHECKING MESH"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+    const double points[][2] = {{-110, 60}, {-110, -110}, {60, -110}, {110, -110}, {110, 60}};
+    for (const auto& p : points) {
+        for (int sample = 0; sample < 3; ++sample) {
+            char line[96];
+            std::snprintf(line, sizeof(line), "// probe at %.3f,%.3f is z=-2.100000", p[0], p[1]);
+            send_gcode_response(line);
+        }
+    }
+    drain_async_updates();
+    CHECK(get_current_message() == "Validating bed mesh...");
+    CHECK(PrintStartCollectorTestAccess::get_mesh_probe_total(collector()) == 0);
+    CHECK(PrintStartCollectorTestAccess::get_mesh_probe_current(collector()) == 0);
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture, "A KAMP mesh counts its points against the total",
+                 "[print][collector][phase_object][forge_x][mesh]") {
+    client().set_config_bed_mesh_probe_count(5, 5);
+    client().gcode_script("BED_MESH_CLEAR");
+    collector().start();
+    drain_async_updates();
+    context({{"context_types", {"print", "kamp"}}, {"current_state", "LEVELING"}});
+    send_gcode_response("// probe at -105.000,-105.000 is z=-2.025000");
+    drain_async_updates();
+    CHECK(get_current_message() == "Creating bed mesh (1/25)");
+}
+
+TEST_CASE_METHOD(ForgeXCollectorFixture, "A live pre-print step holds the deadline timeouts",
+                 "[print][collector][phase_object][forge_x][timeout]") {
+    // Heaters at target, the printer silent past the quiet gate and the
+    // deadline: everything a timeout waits for, except that the printer says
+    // it is still cooling the nozzle inside the clean.
+    set_all_temps(1050, 1050, 1200, 1200);
+    collector().start();
+    drain_async_updates();
+    collector().enable_fallbacks();
+    context({{"context_types", {"print", "kamp", "nozzle_clean"}},
+             {"current_state", "COOLING NOZZLE"}});
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    PrintStartCollectorTestAccess::set_predicted_total(collector(), 180.0f);
+
+    SECTION("the adaptive and flat timeouts wait") {
+        PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 600);
+        tick_fallbacks();
+        REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+        PrintStartCollectorTestAccess::set_predicted_total(collector(), 0.0f);
+        tick_fallbacks();
+        REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    }
+
+    SECTION("the ceiling still ends it") {
+        PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 1850);
+        tick_fallbacks();
+        REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+    }
+
+    SECTION("a state that names no step does not release the hold") {
+        context({{"context_types", {"print", "kamp"}}, {"current_state", nullptr}});
+        PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 600);
+        tick_fallbacks();
+        REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    }
+
+    SECTION("an empty context stack releases the hold") {
+        // Every context ended (an error or a restart reset the stack): no
+        // step is under way any more.
+        context({{"context_types", json::array()}, {"current_state", nullptr}});
+        REQUIRE_FALSE(collector().in_live_preprint_step());
+        PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 600);
+        tick_fallbacks();
+        REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+    }
+
+    SECTION("the same step pushed again after the stack emptied holds again") {
+        context({{"context_types", json::array()}, {"current_state", nullptr}});
+        REQUIRE_FALSE(collector().in_live_preprint_step());
+        context({{"context_types", {"print", "kamp", "nozzle_clean"}},
+                 {"current_state", "COOLING NOZZLE"}});
+        REQUIRE(collector().in_live_preprint_step());
+        PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 600);
+        tick_fallbacks();
+        REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    }
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "A bare phase-object state does not hold the timeouts",
+                 "[print][collector][phase_object][timeout]") {
+    // A state with no context is a label that may stay up long after its
+    // step ended (display_status keeps the last SET_DISPLAY_TEXT), so it
+    // leaves the timeouts as they were.
+    auto profile = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+        R"({"name":"bare","phase_object":{"object":"operation_context","field":"current_state"},)"
+        R"("state_patterns":[{"pattern":"COOLING","phase":"CLEANING","message":"Cooling for probing..."}]})"));
+    REQUIRE(profile != nullptr);
+    collector().set_profile(std::move(profile));
+    set_all_temps(1050, 1050, 1200, 1200);
+    collector().start();
+    drain_async_updates();
+    collector().enable_fallbacks();
+    client().dispatch_status_update({{"operation_context", {{"current_state", "COOLING"}}}});
+    drain_async_updates();
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+
+    PrintStartCollectorTestAccess::set_predicted_total(collector(), 180.0f);
+    PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 600);
+    tick_fallbacks();
+    REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "A heater cooling toward its target is not at target",
+                 "[print][collector][timeout]") {
+    // M109 down to a probing temperature blocks the queue for minutes with
+    // nothing on the console; the nozzle reads above its target the whole time.
+    const auto tick_at = [this](int ext_decideg, int elapsed_s) {
+        set_all_temps(1050, 1050, ext_decideg, 1200);
+        collector().start();
+        drain_async_updates();
+        reset_collector_to_idle();
+        collector().enable_fallbacks();
+        PrintStartCollectorTestAccess::set_predicted_total(collector(), 180.0f);
+        PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), elapsed_s);
+        tick_fallbacks();
+        tick_fallbacks();
+    };
+
+    SECTION("a nozzle at 141 cooling to 120 waits") {
+        tick_at(1410, 600);
+        REQUIRE(get_current_phase() != PrintStartPhase::COMPLETE);
+    }
+
+    SECTION("a nozzle within 5C above its target has arrived") {
+        tick_at(1240, 600);
+        REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+    }
+
+    SECTION("a nozzle that never cools completes at the ceiling") {
+        tick_at(1410, 1850);
+        REQUIRE(get_current_phase() == PrintStartPhase::COMPLETE);
+    }
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "A signal-format line counts as activity for the timeouts",
+                 "[print][collector][timeout][sequential]") {
+    auto profile =
+        PrintStartProfileTestAccess::parse(nlohmann::json::parse(kSequentialStateProfile));
+    REQUIRE(profile != nullptr);
+    collector().set_profile(std::move(profile));
+    set_all_temps(1050, 1050, 2200, 2200);
+    collector().start();
+    drain_async_updates();
+    collector().enable_fallbacks();
+    PrintStartCollectorTestAccess::set_predicted_total(collector(), 180.0f);
+    PrintStartCollectorTestAccess::set_elapsed_seconds(collector(), 600);
+
+    send_gcode_response("// State: CLEANING...");
+    tick_fallbacks();
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+}
+
+// ============================================================================
 // STATUS-SIGNAL RULE TESTS
 //
 // Profiles may declare physical phase-inference rules ("status_signals"):
@@ -5231,7 +7009,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
     collector().start();
     drain_async_updates();
 
-    // The exact frame that fires forge_x's at_cutter rule does nothing here:
+    // The exact frame that fires the sequential fixture's at_cutter rule does nothing here:
     // an absent declaration is exactly the previous behavior, pinned.
     client().dispatch_status_update({{"toolhead", {{"position", {-2.0, -3.0, 10.0}}}}});
     drain_async_updates();
@@ -5360,7 +7138,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
                  "PrintStartCollector: the stuck-pre-print ceiling is simulated seconds too",
                  "[print][collector][simclock][timeout]") {
     // Elapsed and the timeout constants must share one unit, or a fast-forwarded
-    // run either never gives up or gives up instantly. FALLBACK_TIMEOUT is 300
+    // run either never gives up or gives up instantly. kFallbackTimeout is 300
     // simulated seconds; the boundary is walked from both sides so the negative
     // half cannot pass by the collector simply not running.
     helix::sim::SimulatedClock::ManualScope clock(helix::sim::SimSpeed::of(1.0));
@@ -5372,7 +7150,7 @@ TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
 
     // Temps at target and nothing being said: the quiet path. The first call
     // recomputes weights off the freshly-set targets, so the predicted total is
-    // cleared afterwards to reach FALLBACK_TIMEOUT rather than the adaptive
+    // cleared afterwards to reach kFallbackTimeout rather than the adaptive
     // ceiling derived from it.
     set_all_temps(600, 600, 2100, 2100);
     collector().check_fallback_completion();
@@ -5555,7 +7333,7 @@ class CosmosPrintStartReplayFixture : public PrintStartCollectorHeaterFixture {
             int bed, bed_target, ext, ext_target; // decidegrees
         };
         // clang-format off
-        static constexpr Sample SAMPLES[] = {
+        static constexpr Sample kSamples[] = {
         {0, 245, 0, 266, 0}, {5, 250, 1050, 384, 1400}, {10, 261, 1050, 628, 1400}, {15, 274, 1050, 830, 1400},
         {20, 289, 1050, 1027, 1400}, {25, 304, 1050, 1210, 1400}, {30, 320, 1050, 1358, 1400}, {35, 332, 1050, 1404, 1400},
         {40, 347, 1050, 1412, 1400}, {45, 359, 1050, 1423, 1400}, {50, 373, 1050, 1403, 1400}, {55, 385, 1050, 1403, 1400},
@@ -5598,14 +7376,14 @@ class CosmosPrintStartReplayFixture : public PrintStartCollectorHeaterFixture {
         };
         // The recorded soak narrates at 484.4s and holds the heaters through the
         // 540s sample; a longer soak moves everything after it later.
-        constexpr int SOAK_NARRATION_MS = 484400;
-        constexpr int SOAK_HELD_THROUGH_S = 540;
+        constexpr int kSoakNarrationMs = 484400;
+        constexpr int kSoakHeldThroughS = 540;
         const int extra_s =
             static_cast<int>(std::lround((std::stod(variant.heatsoak_minutes) - 1.0) * 60.0));
         const int extra_ms = extra_s * 1000;
         const std::string soak = std::string("Heatsoak: ") + variant.heatsoak_minutes + "m";
         std::vector<Narration> narration = {
-            {SOAK_NARRATION_MS, "// " + soak, soak},
+            {kSoakNarrationMs, "// " + soak, soak},
             {542500 + extra_ms, "// Using default bed mesh", "Using default bed mesh"},
             {542600 + extra_ms, "// Smart Park location: 41.0714,33.0046.", ""},
             {605600 + extra_ms,
@@ -5631,13 +7409,13 @@ class CosmosPrintStartReplayFixture : public PrintStartCollectorHeaterFixture {
         }
         // Through the extra soak time the heaters read what they read at 540s.
         std::vector<Sample> timeline;
-        for (const Sample& s : SAMPLES) {
-            if (s.t_s > SOAK_HELD_THROUGH_S) {
+        for (const Sample& s : kSamples) {
+            if (s.t_s > kSoakHeldThroughS) {
                 timeline.push_back({s.t_s + extra_s, s.bed, s.bed_target, s.ext, s.ext_target});
                 continue;
             }
             timeline.push_back(s);
-            if (s.t_s == SOAK_HELD_THROUGH_S) {
+            if (s.t_s == kSoakHeldThroughS) {
                 for (int t = s.t_s + 5; t <= s.t_s + extra_s; t += 5) {
                     timeline.push_back({t, s.bed, s.bed_target, s.ext, s.ext_target});
                 }
@@ -5645,7 +7423,7 @@ class CosmosPrintStartReplayFixture : public PrintStartCollectorHeaterFixture {
         }
         // The M190 wait releases just before the heat soak narration; M109
         // starts with the smart park and reports until the nozzle arrives.
-        constexpr int BED_WAIT_END_MS = 484400;
+        constexpr int kBedWaitEndMs = 484400;
         const int nozzle_wait_start_ms = 543600 + extra_ms;
         const int nozzle_wait_end_ms = 587600 + extra_ms;
 
@@ -5674,7 +7452,7 @@ class CosmosPrintStartReplayFixture : public PrintStartCollectorHeaterFixture {
             }
         };
 
-        const Sample& first = SAMPLES[0];
+        const Sample& first = kSamples[0];
         set_all_temps(first.bed, first.bed_target, first.ext, first.ext_target);
         collector().start();
         collector().enable_fallbacks();
@@ -5697,7 +7475,7 @@ class CosmosPrintStartReplayFixture : public PrintStartCollectorHeaterFixture {
 
             advance_to(s.t_s * 1000);
             set_all_temps(s.bed, s.bed_target, s.ext, s.ext_target);
-            const bool waiting = (s.bed_target > 0 && now_ms < BED_WAIT_END_MS) ||
+            const bool waiting = (s.bed_target > 0 && now_ms < kBedWaitEndMs) ||
                                  (now_ms >= nozzle_wait_start_ms && now_ms <= nozzle_wait_end_ms);
             if (waiting) {
                 char report[64];
@@ -5728,18 +7506,17 @@ TEST_CASE_METHOD(CosmosPrintStartReplayFixture,
                  "[print][collector][cosmos][integration]") {
     REQUIRE(have_profile_);
     // bed_x_max 256 reads as a medium bed to the size guess.
-    constexpr float BED_X_MAX = 256.0f;
+    constexpr float kBedXMax = 256.0f;
     float min_prediction_s = 0.0f;
 
     SECTION("with the size-guess heating rates") {
         // 1.5 s/C predicts about a third of the real pre-print, so every
         // elapsed-time threshold short of the ceiling is spent before the bed
         // nears its target.
-        ThermalRateManager::instance().apply_archetype_defaults(BED_X_MAX, "");
+        ThermalRateManager::instance().apply_archetype_defaults(kBedXMax, "");
     }
     SECTION("with the heating rates from the printer database") {
-        ThermalRateManager::instance().apply_archetype_defaults(BED_X_MAX,
-                                                                "Elegoo Centauri Carbon");
+        ThermalRateManager::instance().apply_archetype_defaults(kBedXMax, "Elegoo Centauri Carbon");
         // The first print is predicted within 10% of the 618s it took.
         min_prediction_s = 618.0f * 0.9f;
     }
@@ -5812,6 +7589,362 @@ TEST_CASE_METHOD(CosmosPrintStartReplayFixture,
     CAPTURE(result.trace);
     REQUIRE(result.trace == "0:INITIALIZING 5:HEATING_BED 484:SOAKING 542:BED_MESH "
                             "545:HEATING_NOZZLE 618:COMPLETE");
+}
+
+// ============================================================================
+// REAL FORGE-X 1.4.2 PRE-PRINT REPLAY
+//
+// An AD5M Pro on Forge-X 1.4.2 (2026-10-15, KAMP, ABS 105/265): the console
+// (tests/fixtures/forgex_142_console.txt), the heaters every 5s
+// (tests/fixtures/forgex_142_heaters.txt) and the operation_context frames,
+// at their real times. 1.4.2 prints no "// State:" lines; it narrates through
+// operation_context, which the capture did not record. kForgeXContextFrames
+// rebuilds it from the macros (base.cfg START_PRINT, KAMP, CLEAR_NOZZLE,
+// _WAIT_TEMPERATURE) against the console, as the deltas Moonraker sends.
+// ============================================================================
+
+namespace {
+struct ForgeXFrame {
+    const char* at; ///< HH:MM:SS.mmm
+    const char* fields;
+};
+
+// clang-format off
+const ForgeXFrame kForgeXContextFrames[] = {
+    {"16:19:29.110", R"({"context_types":["print"],"current_state":null})"},
+    {"16:19:31.730", R"({"current_state":"CHECKING FILE"})"},
+    {"16:19:33.000", R"({"current_state":"HOMING"})"},
+    {"16:19:37.400", R"({"current_state":"LEVELING"})"},
+    {"16:19:37.440", R"({"context_types":["print","kamp"],"current_state":null})"},
+    {"16:19:37.444", R"({"context_types":["print","kamp","nozzle_clean"]})"},
+    {"16:19:37.600", R"({"current_state":"HEATING"})"},
+    {"16:19:45.640", R"({"current_state":"HEATING BED"})"},
+    {"16:27:12.290", R"({"current_state":"HEATING NOZZLE"})"},
+    {"16:28:01.640", R"({"current_state":"PREPARING TO CLEAN"})"},
+    {"16:28:15.950", R"({"current_state":"CLEANING"})"},
+    {"16:28:24.440", R"({"current_state":"COOLING NOZZLE"})"},
+    {"16:30:16.120", R"({"current_state":"FINISHING"})"},
+    {"16:30:17.400", R"({"context_types":["print","kamp"],"current_state":"LEVELING"})"},
+    {"16:32:44.605", R"({"context_types":["print"],"current_state":"PARKING"})"},
+    {"16:32:46.690", R"({"current_state":"HEATING NOZZLE"})"},
+    {"16:33:22.920", R"({"current_state":"PARKING"})"},
+    {"16:33:23.120", R"({"current_state":"PRIMING"})"},
+    {"16:33:37.500", R"({"current_state":"PRINTING"})"},
+};
+// clang-format on
+
+int forgex_clock_ms(const std::string& hhmmss) {
+    int h = 0, m = 0;
+    double sec = 0.0;
+    if (std::sscanf(hhmmss.c_str(), "%d:%d:%lf", &h, &m, &sec) != 3) {
+        return -1;
+    }
+    return static_cast<int>(std::lround((h * 3600 + m * 60 + sec) * 1000.0));
+}
+
+/// Fixture lines "HH:MM:SS.mmm rest", '#' lines skipped.
+std::vector<std::pair<int, std::string>> read_forgex_fixture(const std::string& name) {
+    std::vector<std::pair<int, std::string>> rows;
+    std::ifstream f(collector_fixture_dir() + name);
+    for (std::string raw; std::getline(f, raw);) {
+        if (raw.empty() || raw[0] == '#') {
+            continue;
+        }
+        rows.emplace_back(forgex_clock_ms(raw.substr(0, 12)), raw.substr(13));
+    }
+    return rows;
+}
+} // namespace
+
+class ForgeXPrintStartReplayFixture : public ForgeXCollectorFixture {
+  public:
+    struct Result {
+        std::string trace;          ///< "second:PHASE" for every phase change
+        int completed_at_ms{-1};    ///< timeline position of COMPLETE, -1 if never
+        int mesh_entered_at_ms{-1}; ///< first BED_MESH, -1 if never
+        int mesh_probes_at_entry{-1};
+        int mesh_probe_current{0}; ///< when the mesh ended
+        int mesh_probe_total{0};
+        std::string mesh_message;    ///< the last mesh label
+        float first_prediction_s{0}; ///< prediction once the bed target is set
+        float cooldown_prediction_s{0};
+        float max_prediction_s{0};        ///< highest prediction once the bed target is set
+        float min_prediction_s{1.0e9f};   ///< lowest prediction once the bed target is set
+        bool live_step_at_priming{false}; ///< in_live_preprint_step() once priming starts
+        bool live_step_at_complete{true};
+        std::string predictions; ///< "second:total" at every heater sample
+    };
+
+    ForgeXPrintStartReplayFixture() {
+        ThermalRateManager::instance().reset();
+        // What the printer answered: the clean cleared the live mesh, so the
+        // denominator comes from [bed_mesh] probe_count.
+        client().set_config_bed_mesh_probe_count(5, 5);
+        client().gcode_script("BED_MESH_CLEAR");
+    }
+
+    ~ForgeXPrintStartReplayFixture() override {
+        ThermalRateManager::instance().reset();
+    }
+
+    /// @param history_total_s Seconds of one saved pre-print, or 0 for none.
+    Result replay(int history_total_s = 0) {
+        struct Event {
+            int ms;
+            enum Kind { CONSOLE, HEATERS, FRAME } kind;
+            std::string text;
+        };
+        std::vector<Event> events;
+        for (auto& [ms, text] : read_forgex_fixture("forgex_142_console.txt")) {
+            std::string line;
+            for (size_t i = 0; i < text.size(); ++i) {
+                if (text[i] == '\\' && i + 1 < text.size()) {
+                    line += text[i + 1] == 'n' ? '\n' : text[i + 1];
+                    ++i;
+                } else {
+                    line += text[i];
+                }
+            }
+            events.push_back({ms, Event::CONSOLE, line});
+        }
+        for (auto& [ms, text] : read_forgex_fixture("forgex_142_heaters.txt")) {
+            events.push_back({ms, Event::HEATERS, text});
+        }
+        for (const ForgeXFrame& f : kForgeXContextFrames) {
+            events.push_back({forgex_clock_ms(f.at), Event::FRAME, f.fields});
+        }
+        REQUIRE(events.size() == 159 + 172 + std::size(kForgeXContextFrames));
+        std::stable_sort(events.begin(), events.end(),
+                         [](const Event& a, const Event& b) { return a.ms < b.ms; });
+
+        const int t0 = forgex_clock_ms("16:19:28.442"); // SDCARD_PRINT_FILE
+        // The priming line's first extrusion: print_duration starts counting.
+        const int priming_ms = forgex_clock_ms("16:33:23.130") - t0;
+        bool priming_seen = false;
+        const int cooldown_ms = forgex_clock_ms("16:29:30.000") - t0;
+        Result result;
+        int now_ms = 0;
+        PrintStartPhase shown = PrintStartPhase::IDLE;
+        const auto note_phase = [&]() {
+            drain_async_updates();
+            drain_async_updates();
+            const PrintStartPhase phase = get_current_phase();
+            if (phase == PrintStartPhase::BED_MESH) {
+                result.mesh_message = get_current_message();
+                result.mesh_probe_current =
+                    PrintStartCollectorTestAccess::get_mesh_probe_current(collector());
+                result.mesh_probe_total =
+                    PrintStartCollectorTestAccess::get_mesh_probe_total(collector());
+            }
+            if (phase == shown) {
+                return;
+            }
+            shown = phase;
+            if (!result.trace.empty()) {
+                result.trace += ' ';
+            }
+            result.trace +=
+                std::to_string(now_ms / 1000) + ":" + std::string(print_start_phase_name(phase));
+            if (phase == PrintStartPhase::COMPLETE) {
+                result.completed_at_ms = now_ms;
+            }
+            if (phase == PrintStartPhase::BED_MESH && result.mesh_entered_at_ms < 0) {
+                result.mesh_entered_at_ms = now_ms;
+                result.mesh_probes_at_entry = result.mesh_probe_current;
+            }
+        };
+
+        set_all_temps(275, 0, 348, 0);
+        collector().start();
+        collector().enable_fallbacks();
+        if (history_total_s > 0) {
+            helix::PreprintEntry entry{};
+            entry.total_seconds = history_total_s;
+            entry.timestamp = 1;
+            entry.phase_durations = {{static_cast<int>(PrintStartPhase::CLEANING), 120}};
+            entry.temp_bucket = 1;
+            entry.window = helix::PreprintWindow::PrinterEdge;
+            PrintStartCollectorTestAccess::load_prediction_entries(collector(), {entry});
+        }
+        note_phase();
+
+        for (const Event& e : events) {
+            const int at = e.ms - t0;
+            clock_.advance(std::chrono::milliseconds(at - now_ms));
+            now_ms = at;
+            switch (e.kind) {
+            case Event::CONSOLE:
+                send_gcode_response(e.text);
+                break;
+            case Event::FRAME:
+                context(json::parse(e.text));
+                break;
+            case Event::HEATERS: {
+                float bed = 0, ext = 0;
+                int bed_target = 0, ext_target = 0;
+                REQUIRE(std::sscanf(e.text.c_str(), "%f %d %f %d", &bed, &bed_target, &ext,
+                                    &ext_target) == 4);
+                set_all_temps(static_cast<int>(std::lround(bed * 10)), bed_target * 10,
+                              static_cast<int>(std::lround(ext * 10)), ext_target * 10);
+                collector().check_fallback_completion();
+                if (bed_target > 0 && result.first_prediction_s == 0.0f) {
+                    result.first_prediction_s =
+                        PrintStartCollectorTestAccess::get_predicted_total(collector());
+                }
+                const float predicted =
+                    PrintStartCollectorTestAccess::get_predicted_total(collector());
+                if (now_ms >= cooldown_ms && result.cooldown_prediction_s == 0.0f) {
+                    result.cooldown_prediction_s = predicted;
+                }
+                if (bed_target > 0) {
+                    result.max_prediction_s = std::max(result.max_prediction_s, predicted);
+                    result.min_prediction_s = std::min(result.min_prediction_s, predicted);
+                }
+                result.predictions += std::to_string(now_ms / 1000) + ":" +
+                                      std::to_string(static_cast<int>(predicted)) + " ";
+                PrintStartCollectorTestAccess::run_eta_update(collector());
+                break;
+            }
+            }
+            note_phase();
+            if (!priming_seen && now_ms >= priming_ms) {
+                priming_seen = true;
+                result.live_step_at_priming = collector().in_live_preprint_step();
+            }
+            if (result.completed_at_ms >= 0) {
+                result.live_step_at_complete = collector().in_live_preprint_step();
+                break;
+            }
+        }
+        return result;
+    }
+
+  private:
+    PreprintConfigScope config_{"FlashForge Adventurer 5M Pro (ForgeX)"};
+    helix::sim::SimulatedClock::ManualScope clock_{helix::sim::SimSpeed::of(1.0)};
+};
+
+TEST_CASE_METHOD(ForgeXPrintStartReplayFixture,
+                 "PrintStartCollector: real Forge-X 1.4.2 pre-print completes at PRINTING",
+                 "[print][collector][forge_x][integration]") {
+    constexpr float kBedXMax = 220.0f;
+    int history_total_s = 0;
+    float min_prediction_s = 0.0f;
+    float max_prediction_s = 1.0e6f;
+    float max_whole_run_s = 849.0f * 1.3f;
+
+    SECTION("with the size-guess heating rates") {
+        ThermalRateManager::instance().apply_archetype_defaults(kBedXMax, "");
+    }
+    SECTION("with the heating rates from the printer database") {
+        ThermalRateManager::instance().apply_archetype_defaults(
+            kBedXMax, "FlashForge Adventurer 5M Pro (ForgeX)");
+        // The first print is predicted within 15% of the 849s it took.
+        min_prediction_s = 849.0f * 0.85f;
+        max_prediction_s = 849.0f * 1.15f;
+    }
+    SECTION("with a history shorter than this pre-print") {
+        // A saved pre-print a timeout cut short, recording no heating: the
+        // start pays at least its own heating, so the short history cannot
+        // pull the deadline in front of the silent nozzle cool-down.
+        ThermalRateManager::instance().apply_archetype_defaults(kBedXMax, "");
+        history_total_s = 380;
+    }
+
+    const Result result = replay(history_total_s);
+    CAPTURE(result.trace, result.first_prediction_s, result.cooldown_prediction_s,
+            result.mesh_message);
+    if (history_total_s > 0) {
+        // The trace heats from HEATING_BED (9s) to CLEANING (513s).
+        constexpr float kTraceHeatingS = 513.0f - 9.0f;
+        REQUIRE(result.cooldown_prediction_s > static_cast<float>(history_total_s));
+        REQUIRE(result.cooldown_prediction_s >= kTraceHeatingS);
+    }
+
+    // The pre-print ends at print/PRINTING (849.1s), not at the clean's
+    // FINISHING (647.7s) or any timeout before it.
+    REQUIRE(result.completed_at_ms == 849058);
+    REQUIRE(result.trace == "0:INITIALIZING 4:HOMING 9:HEATING_BED 463:HEATING_NOZZLE "
+                            "513:CLEANING 648:BED_MESH 796:HEATING_NOZZLE 834:PURGING "
+                            "849:COMPLETE");
+
+    // The mesh starts at kamp/LEVELING (648.96s), not at the print's LEVELING
+    // (8.96s), and the two cleaning probes are not its first points.
+    REQUIRE(result.mesh_entered_at_ms == 648958);
+    REQUIRE(result.mesh_probes_at_entry == 0);
+    REQUIRE(result.mesh_probe_total == 25);
+    REQUIRE(result.mesh_probe_current == 25);
+    REQUIRE(result.mesh_message == "Creating bed mesh (25/25)");
+
+    // The priming line starts print_duration 14s before PRINTING. This printer
+    // reports layers, so only layer 1 completes; one that did not would fall
+    // back to first extrusion, which the priming step holds.
+    REQUIRE(result.live_step_at_priming);
+    REQUIRE_FALSE(MoonrakerManager::should_complete_preprint(
+        /*printer_reports_layers=*/false, /*current_layer=*/0, /*print_duration=*/1,
+        /*seen_layer_zero=*/false, /*layer_advanced=*/false, result.live_step_at_priming));
+    REQUIRE_FALSE(result.live_step_at_complete);
+
+    REQUIRE(result.first_prediction_s >= min_prediction_s);
+    REQUIRE(result.first_prediction_s <= max_prediction_s);
+    // With the database rates the bed's fast first degrees do not drag the
+    // estimate down while it climbs.
+    REQUIRE(result.min_prediction_s >= min_prediction_s);
+    // The prediction holds near the real length through the whole pre-print,
+    // the slow last degrees of the bed included.
+    INFO(result.predictions);
+    REQUIRE(result.max_prediction_s <= max_whole_run_s);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "A bed's slow last degrees do not inflate the predicted pre-print",
+                 "[print][collector][eta][thermal_rate]") {
+    // A generic printer: the bed heats from cold toward 100C the way a bed
+    // does, fast then crawling (100 - 75*e^(-t/150)), and only once it is
+    // within 2C does the macro set the nozzle target. The predicted total is
+    // recomputed then, with the bed deep in its tail.
+    helix::sim::SimulatedClock::ManualScope clock(helix::sim::SimSpeed::of(1.0));
+    PreprintConfigScope config{""};
+    ThermalRateManager::instance().reset();
+    ThermalRateManager::instance().apply_archetype_defaults(235.0f, "");
+
+    set_all_temps(250, 0, 250, 0);
+    collector().start();
+    drain_async_updates();
+    collector().enable_fallbacks();
+
+    float max_prediction = 0.0f;
+    int nozzle_set_at = -1;
+    int done_at = -1;
+    float ext = 25.0f;
+    for (int t = 1; t <= 900 && done_at < 0; ++t) {
+        clock.advance(std::chrono::seconds(1));
+        const float bed = 100.0f - 75.0f * std::exp(-static_cast<float>(t) / 150.0f);
+        if (nozzle_set_at < 0 && bed >= 98.0f) {
+            nozzle_set_at = t;
+        }
+        if (nozzle_set_at >= 0) {
+            ext = std::min(220.0f, ext + 4.0f);
+            if (ext >= 220.0f) {
+                done_at = t;
+            }
+        }
+        set_all_temps(static_cast<int>(bed * 10), 1000, static_cast<int>(ext * 10),
+                      nozzle_set_at >= 0 ? 2200 : 0);
+        collector().check_fallback_completion();
+        PrintStartCollectorTestAccess::run_eta_update(collector());
+        drain_async_updates();
+        if (t >= 5) {
+            max_prediction = std::max(
+                max_prediction, PrintStartCollectorTestAccess::get_predicted_total(collector()));
+        }
+    }
+    REQUIRE(done_at > 0);
+    CAPTURE(nozzle_set_at, done_at, max_prediction);
+    // The generic default phases (homing, mesh, QGL, Z tilt, clean, purge:
+    // 260s) count toward the total whether or not this start runs them.
+    constexpr float kGenericDefaultPhasesS = 260.0f;
+    REQUIRE(max_prediction <= 1.3f * static_cast<float>(done_at) + kGenericDefaultPhasesS);
 }
 
 TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
@@ -5892,12 +8025,12 @@ class SilentVoronReplayFixture : public PrintStartCollectorHeaterFixture {
         int progress{0};
     };
 
-    static constexpr int BED_TARGET_S = 15;     // 22:48:30
-    static constexpr int BED_AT_TARGET_S = 350; // 22:54:05
-    static constexpr int EXT_TARGET_S = 352;    // 22:54:07
-    static constexpr int EXT_AT_TARGET_S = 406; // 22:55:01
-    static constexpr int PURGE_START_S = 407;   // 22:55:02
-    static constexpr int FIRST_LAYER_S = 415;   // 22:55:10
+    static constexpr int kBedTargetS = 15;    // 22:48:30
+    static constexpr int kBedAtTargetS = 350; // 22:54:05
+    static constexpr int kExtTargetS = 352;   // 22:54:07
+    static constexpr int kExtAtTargetS = 406; // 22:55:01
+    static constexpr int kPurgeStartS = 407;  // 22:55:02
+    static constexpr int kFirstLayerS = 415;  // 22:55:10
 
     SilentVoronReplayFixture() {
         ThermalRateManager::instance().reset();
@@ -5931,7 +8064,7 @@ class SilentVoronReplayFixture : public PrintStartCollectorHeaterFixture {
 
     /// Runs the capture to layer 1 and returns what the panel showed each second.
     std::vector<Snapshot> replay() {
-        std::vector<Snapshot> shown(FIRST_LAYER_S + 1);
+        std::vector<Snapshot> shown(kFirstLayerS + 1);
         const auto lerp = [](int t, int t0, int t1, double v0, double v1) {
             if (t <= t0) {
                 return v0;
@@ -5949,14 +8082,14 @@ class SilentVoronReplayFixture : public PrintStartCollectorHeaterFixture {
         collector().note_current_layer(0);
         settle();
 
-        for (int t = 0; t <= FIRST_LAYER_S; ++t) {
+        for (int t = 0; t <= kFirstLayerS; ++t) {
             if (t > 0) {
                 clock_.advance(std::chrono::seconds(1));
             }
-            const double bed = lerp(t, BED_TARGET_S, BED_AT_TARGET_S, 30.0, 90.0);
-            const double ext = lerp(t, EXT_TARGET_S, EXT_AT_TARGET_S, 32.0, 270.0);
-            const int bed_target = t >= BED_TARGET_S ? 90 : 0;
-            const int ext_target = t >= EXT_TARGET_S ? 270 : 0;
+            const double bed = lerp(t, kBedTargetS, kBedAtTargetS, 30.0, 90.0);
+            const double ext = lerp(t, kExtTargetS, kExtAtTargetS, 32.0, 270.0);
+            const int bed_target = t >= kBedTargetS ? 90 : 0;
+            const int ext_target = t >= kExtTargetS ? 270 : 0;
 
             if (t == 3) {
                 set_homed("xy");
@@ -5964,7 +8097,7 @@ class SilentVoronReplayFixture : public PrintStartCollectorHeaterFixture {
                 set_homed("xyz");
             } else if (t == 12) {
                 display("Bed: 90c");
-            } else if (t == EXT_TARGET_S - 1) {
+            } else if (t == kExtTargetS - 1) {
                 display("Hotend: 270c");
             }
 
@@ -5973,26 +8106,26 @@ class SilentVoronReplayFixture : public PrintStartCollectorHeaterFixture {
             client().dispatch_status_update(
                 {{"heater_bed", {{"temperature", bed}, {"target", bed_target}}},
                  {"extruder", {{"temperature", ext}, {"target", ext_target}}}});
-            const bool bed_wait = t >= BED_TARGET_S && t <= BED_AT_TARGET_S;
-            const bool ext_wait = t >= EXT_TARGET_S && t <= EXT_AT_TARGET_S;
+            const bool bed_wait = t >= kBedTargetS && t <= kBedAtTargetS;
+            const bool ext_wait = t >= kExtTargetS && t <= kExtAtTargetS;
             if (bed_wait || ext_wait) {
                 char report[64];
                 std::snprintf(report, sizeof(report), "B:%.1f /%d.0 T0:%.1f /%d.0", bed, bed_target,
                               ext, ext_target);
                 send_gcode_response(report);
             }
-            if (t >= PURGE_START_S && t < FIRST_LAYER_S) {
+            if (t >= kPurgeStartS && t < kFirstLayerS) {
                 client().dispatch_status_update(
                     {{"motion_report",
                       {{"live_extruder_velocity", 2.5}, {"live_velocity", 50.0}}}});
-            } else if (t == FIRST_LAYER_S) {
+            } else if (t == kFirstLayerS) {
                 client().dispatch_status_update(
                     {{"motion_report", {{"live_extruder_velocity", 0.0}}}});
             }
             settle();
 
             // The heater-target observers run the fallback check on a new target.
-            if (t == BED_TARGET_S || t == EXT_TARGET_S) {
+            if (t == kBedTargetS || t == kExtTargetS) {
                 tick_fallbacks();
             }
             if (t % 5 == 0) {
@@ -6000,7 +8133,7 @@ class SilentVoronReplayFixture : public PrintStartCollectorHeaterFixture {
                 tick_fallbacks();
             }
 
-            if (t == FIRST_LAYER_S) {
+            if (t == kFirstLayerS) {
                 collector().note_current_layer(1);
                 collector().complete_from_external_signal("first layer");
                 settle();
@@ -6030,25 +8163,25 @@ TEST_CASE_METHOD(SilentVoronReplayFixture,
 
     // At 22:51 the bed has about 3 minutes left and the nozzle another minute:
     // the countdown follows the bed's measured rate, not the size guess.
-    const int actual_remaining_at_165 = FIRST_LAYER_S - 165;
+    const int actual_remaining_at_165 = kFirstLayerS - 165;
     CHECK(shown[165].phase == PrintStartPhase::HEATING_BED);
     CHECK(shown[165].remaining >= actual_remaining_at_165 * 9 / 10);
     CHECK(shown[165].remaining <= actual_remaining_at_165 * 3 / 2);
 
-    CHECK(shown[EXT_TARGET_S - 1].phase == PrintStartPhase::HEATING_NOZZLE);
+    CHECK(shown[kExtTargetS - 1].phase == PrintStartPhase::HEATING_NOZZLE);
 
     // Once the nozzle is at temperature only the purge is left, and the bar
     // credits the mesh and cleaning this macro never ran.
-    CHECK(shown[PURGE_START_S + 3].phase == PrintStartPhase::PURGING);
-    CHECK(shown[PURGE_START_S + 3].remaining <= 15);
-    CHECK(shown[PURGE_START_S + 3].progress >= 90);
+    CHECK(shown[kPurgeStartS + 3].phase == PrintStartPhase::PURGING);
+    CHECK(shown[kPurgeStartS + 3].remaining <= 15);
+    CHECK(shown[kPurgeStartS + 3].progress >= 90);
 
-    REQUIRE(shown[FIRST_LAYER_S].phase == PrintStartPhase::COMPLETE);
+    REQUIRE(shown[kFirstLayerS].phase == PrintStartPhase::COMPLETE);
 
     // The finished start is history, and the bed's measured rate is saved.
     const auto entries = helix::PreprintPredictor::load_entries_from_config();
     REQUIRE(entries.size() == 1);
-    CHECK(entries[0].total_seconds == FIRST_LAYER_S);
+    CHECK(entries[0].total_seconds == kFirstLayerS);
     helix::Config* cfg = helix::Config::get_instance();
     CHECK(cfg->get<float>("/thermal/rates/heater_bed/heat_rate", 0.0f) ==
           Catch::Approx(5.6f).margin(0.6f));
@@ -6062,7 +8195,7 @@ TEST_CASE_METHOD(SilentVoronReplayFixture,
     PrintStartCollectorTestAccess::run_eta_update(collector());
     settle();
     CHECK(PrintStartCollectorTestAccess::get_predicted_total(collector()) ==
-          Catch::Approx(FIRST_LAYER_S).margin(10));
+          Catch::Approx(kFirstLayerS).margin(10));
     CHECK(remaining() >= 6 * 60);
 }
 
@@ -6093,6 +8226,65 @@ TEST_CASE_METHOD(SilentVoronReplayFixture,
     helix::Config* cfg = helix::Config::get_instance();
     CHECK(cfg->get<float>("/thermal/rates/heater_bed/heat_rate", 0.0f) ==
           Catch::Approx(5.0f).margin(0.5f));
+}
+
+TEST_CASE_METHOD(SilentVoronReplayFixture,
+                 "PrintStartCollector: the history entry records the phases its start skipped",
+                 "[print][collector][preprint][silent_voron]") {
+    const int mesh = static_cast<int>(PrintStartPhase::BED_MESH);
+    const auto run = [&](const std::optional<helix::PreprintPhaseOverrides>& told) {
+        set_all_temps(300, 900, 320, 0);
+        collector().start();
+        collector().enable_fallbacks();
+        if (told) {
+            collector().note_phase_overrides(*told);
+        }
+        settle();
+        clock_.advance(std::chrono::seconds(60));
+        tick_fallbacks();
+        settle();
+        collector().complete_from_external_signal("first layer");
+        settle();
+        collector().stop();
+        settle();
+    };
+
+    run(helix::PreprintPhaseOverrides{{mesh, false},
+                                      {static_cast<int>(PrintStartPhase::QGL), true}});
+    run(std::nullopt); // a start nothing told: the last run's list does not carry over
+
+    const auto entries = helix::PreprintPredictor::load_entries_from_config();
+    REQUIRE(entries.size() == 2);
+    REQUIRE(entries[0].skipped_phases.has_value());
+    CHECK(*entries[0].skipped_phases == std::set<int>{mesh});
+    CHECK_FALSE(entries[1].skipped_phases.has_value());
+}
+
+TEST_CASE_METHOD(SilentVoronReplayFixture,
+                 "PrintStartCollector: a start with hot heaters records zero heating",
+                 "[print][collector][preprint][silent_voron]") {
+    const auto run = [&](int ext_target) {
+        set_all_temps(600, 600, 2200, ext_target);
+        collector().start();
+        collector().enable_fallbacks();
+        settle();
+        clock_.advance(std::chrono::seconds(60));
+        tick_fallbacks();
+        settle();
+        collector().complete_from_external_signal("first layer");
+        settle();
+        collector().stop();
+        settle();
+    };
+
+    run(2200); // both heaters already at target: priced, and the price is 0
+    run(0);    // no nozzle target: the heating was never priced
+
+    const auto entries = helix::PreprintPredictor::load_entries_from_config();
+    REQUIRE(entries.size() == 2);
+    REQUIRE(entries[0].heating_seconds.has_value());
+    CHECK(*entries[0].heating_seconds == 0);
+    CHECK_FALSE(entries[1].heating_seconds.has_value());
 }
 
 TEST_CASE_METHOD(SilentVoronReplayFixture,
@@ -6633,4 +8825,284 @@ TEST_CASE_METHOD(PurgeShapeFixture,
         eta_tick();
     }
     CHECK(get_current_phase() == PrintStartPhase::BED_MESH);
+}
+
+// ============================================================================
+// K2 nozzle clear owns its own purge
+//
+// With the bed-mesh pre-print option on, a K2 heats the bed to print
+// temperature and the nozzle to 140, runs NOZZLE_CLEAR (prtouch_v3), homes Z,
+// meshes, and only then heats to print temperature and purges. NOZZLE_CLEAR
+// parks at the CFS extrude position and pushes filament to check flow before
+// it wipes, so its BOX_GO_TO_EXTRUDE_POS echo and its stationary extrusion
+// look exactly like the real purge.
+// ============================================================================
+
+namespace {
+
+class K2NozzleClearFixture : public PurgeShapeFixture {
+  public:
+    K2NozzleClearFixture() {
+        auto profile = PrintStartProfile::load("creality_k2");
+        REQUIRE(profile != nullptr);
+        REQUIRE(profile->name().find("K2") != std::string::npos);
+        collector().set_profile(std::move(profile));
+    }
+
+    /// Bed at print temperature, nozzle at the mesh's 140.
+    void start_mesh_heated() {
+        set_all_temps(600, 600, 1400, 1400);
+        collector().start();
+        drain_async_updates();
+        collector().enable_fallbacks();
+        client().dispatch_status_update(
+            {{"heater_bed", {{"temperature", 60.0}, {"target", 60.0}}},
+             {"extruder", {{"temperature", 140.0}, {"target", 140.0}}}});
+        drain_async_updates();
+    }
+
+    /// The clear's flow check over the chute: the head holds still while the
+    /// extruder pushes forward for longer than a purge needs to show.
+    void flow_check_at_chute() {
+        head(133, 378, 10);
+        extruder(4.0);
+        eta_tick();
+        extruder(0.0);
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(K2NozzleClearFixture,
+                 "K2: the nozzle clear's purge position and flow check are not the purge",
+                 "[print][collector][k2][purge]") {
+    start_mesh_heated();
+
+    send_gcode_response("// [NOZZLE_CLEAR] START NOZZLE_CLEAR COUNT:0");
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+
+    SECTION("echoed park at the extrude position") {
+        send_gcode_response("// [GCODE]BOX_GO_TO_EXTRUDE_POS");
+    }
+    SECTION("silent flow check over the chute") {
+        flow_check_at_chute();
+    }
+    SECTION("box extrude progress") {
+        send_gcode_response("// num: 0, velocity: 575.000000, percent 1.000000");
+    }
+    SECTION("the clear heats for its wipe in between") {
+        send_gcode_response("// [GCODE]TEMPERATURE_WAIT SENSOR=extruder MINIMUM=175 MAXIMUM=185");
+        send_gcode_response("// [GCODE]BOX_GO_TO_EXTRUDE_POS");
+        flow_check_at_chute();
+    }
+    CHECK(get_current_phase() != PrintStartPhase::PURGING);
+    send_gcode_response("// [NOZZLE_CLEAR] FINISH NOZZLE_CLEAR");
+
+    // NEXT_HOMEZ_NACCU + G28 Z, then the mesh.
+    send_gcode_response("// [DEBUG]_handle_home_rails_begin");
+    REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+    send_gcode_response("// exist_points[81], config_points[81]");
+    REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+
+    // START_PRINT: print temperatures, then the real purge position.
+    send_gcode_response("// [GCODE]BOX_GO_TO_EXTRUDE_POS");
+    CHECK(get_current_phase() == PrintStartPhase::PURGING);
+
+    // The checklist reads clean, homing, mesh, then the purge running now.
+    const auto in = collector().checklist_input();
+    CHECK(in.current == PrintStartPhase::PURGING);
+    const auto& done = in.done_in_order;
+    const auto at = [&](PrintStartPhase p) { return std::find(done.begin(), done.end(), p); };
+    CHECK(at(PrintStartPhase::PURGING) == done.end());
+    REQUIRE(at(PrintStartPhase::CLEANING) != done.end());
+    REQUIRE(at(PrintStartPhase::HOMING) != done.end());
+    REQUIRE(at(PrintStartPhase::BED_MESH) != done.end());
+    CHECK(at(PrintStartPhase::CLEANING) < at(PrintStartPhase::HOMING));
+    CHECK(at(PrintStartPhase::HOMING) < at(PrintStartPhase::BED_MESH));
+}
+
+TEST_CASE_METHOD(K2NozzleClearFixture, "K2: the next step ends the clear's hold on purge",
+                 "[print][collector][k2][purge]") {
+    start_mesh_heated();
+    send_gcode_response("// [NOZZLE_CLEAR] START NOZZLE_CLEAR COUNT:0");
+    SECTION("homing, with no finish line") {
+        // START_PRINT without the mesh option: G28 Z, then the purge position.
+        send_gcode_response("// [DEBUG]_handle_home_rails_begin");
+        REQUIRE(get_current_phase() == PrintStartPhase::HOMING);
+    }
+    SECTION("a mesh entered from its probe lines alone") {
+        for (int i = 0; i < 6; ++i) {
+            char line[128];
+            std::snprintf(line, sizeof(line), "// probe at %.3f,50.000 is z=-0.031000",
+                          20.0 + i * 30.0);
+            send_gcode_response(line);
+        }
+        drain_async_updates();
+        REQUIRE(get_current_phase() == PrintStartPhase::BED_MESH);
+    }
+    flow_check_at_chute();
+    CHECK(get_current_phase() == PrintStartPhase::PURGING);
+}
+
+TEST_CASE_METHOD(K2NozzleClearFixture, "K2: a clear left running does not outlive its run",
+                 "[print][collector][k2][purge]") {
+    start_mesh_heated();
+    send_gcode_response("// [NOZZLE_CLEAR] START NOZZLE_CLEAR COUNT:0");
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    SECTION("reset") {
+        collector().reset();
+        drain_async_updates();
+    }
+    SECTION("a new start") {
+        collector().stop();
+        start_mesh_heated();
+    }
+    REQUIRE(get_current_phase() != PrintStartPhase::CLEANING);
+    flow_check_at_chute();
+    CHECK(get_current_phase() == PrintStartPhase::PURGING);
+}
+
+TEST_CASE_METHOD(K2NozzleClearFixture, "K2: the clear's flow check is not logged as a purge",
+                 "[print][collector][k2][purge]") {
+    // Debug bundles are how a K2 checklist report gets triaged, so a purge the
+    // display absorbs must not reach the log either.
+    start_mesh_heated();
+    send_gcode_response("// [NOZZLE_CLEAR] START NOZZLE_CLEAR COUNT:0");
+    {
+        helix::TextLogCapture log;
+        flow_check_at_chute();
+        CHECK_FALSE(log.contains("stationary purge"));
+    }
+    send_gcode_response("// [DEBUG]_handle_home_rails_begin");
+    helix::TextLogCapture log;
+    flow_check_at_chute();
+    CHECK(log.contains("stationary purge"));
+}
+
+TEST_CASE_METHOD(K2NozzleClearFixture,
+                 "K2: the box nozzle clean owns nothing, so the purge after it shows",
+                 "[print][collector][k2][purge]") {
+    start_mesh_heated();
+    send_gcode_response("// [GCODE]BOX_NOZZLE_CLEAN");
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    send_gcode_response("// [GCODE]BOX_GO_TO_EXTRUDE_POS");
+    CHECK(get_current_phase() == PrintStartPhase::PURGING);
+}
+
+TEST_CASE_METHOD(PurgeShapeFixture,
+                 "Purge shape: a blob purge right after a brush wipe still shows PURGING",
+                 "[print][collector][purge]") {
+    // The default profile declares no owning step, so a clean followed by a
+    // stationary purge reads as the purge it is.
+    start_hot();
+    send_gcode_response("CLEAN_NOZZLE");
+    REQUIRE(get_current_phase() == PrintStartPhase::CLEANING);
+    head(4, 10, 2.0);
+    extruder(3.0);
+    for (int i = 1; i <= 8; ++i) {
+        wait(500);
+        head(4, 10, 2.0 + 0.2 * i);
+    }
+    CHECK(get_current_phase() == PrintStartPhase::PURGING);
+}
+
+// ============================================================================
+// checklist_input
+// ============================================================================
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture, "checklist_input orders done phases by entry",
+                 "[print][collector][checklist_input]") {
+    helix::sim::SimulatedClock::ManualScope clock(helix::sim::SimSpeed::of(1.0));
+    collector().start();
+    collector().enable_fallbacks();
+
+    send_gcode_response("G28");
+    clock.advance(std::chrono::seconds(12));
+    send_gcode_response("QUAD_GANTRY_LEVEL");
+    clock.advance(std::chrono::seconds(30));
+    send_gcode_response("BED_MESH_CALIBRATE");
+
+    auto in = collector().checklist_input();
+    REQUIRE(in.done_in_order.size() == 2);
+    CHECK(in.done_in_order[0] == PrintStartPhase::HOMING);
+    CHECK(in.done_in_order[1] == PrintStartPhase::QGL);
+    CHECK(in.current == PrintStartPhase::BED_MESH);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "checklist_input of a new print lists none of the last print's phases",
+                 "[print][collector][checklist_input]") {
+    collector().start();
+    collector().enable_fallbacks();
+    send_gcode_response("G28");
+    send_gcode_response("QUAD_GANTRY_LEVEL");
+    send_gcode_response("BED_MESH_CALIBRATE");
+    REQUIRE(collector().checklist_input().done_in_order.size() == 2);
+    collector().stop();
+
+    collector().start();
+
+    CHECK(collector().checklist_input().done_in_order.empty());
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "checklist_input actual seconds match time spent",
+                 "[print][collector][checklist_input]") {
+    helix::sim::SimulatedClock::ManualScope clock(helix::sim::SimSpeed::of(1.0));
+    collector().start();
+    collector().enable_fallbacks();
+
+    send_gcode_response("G28");
+    clock.advance(std::chrono::seconds(12));
+    send_gcode_response("QUAD_GANTRY_LEVEL");
+    clock.advance(std::chrono::seconds(30));
+
+    auto in = collector().checklist_input();
+    REQUIRE(in.actual_seconds.count(static_cast<int>(PrintStartPhase::HOMING)) == 1);
+    CHECK(in.actual_seconds.at(static_cast<int>(PrintStartPhase::HOMING)) == 12);
+    CHECK(in.current_elapsed_seconds == 30);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "checklist_input takes expected order from the start block",
+                 "[print][collector][checklist_input]") {
+    collector().start();
+    PrintStartCollectorTestAccess::set_start_block_steps(
+        collector(), {{100, helix::StartBlockStepKind::HomeAxes, true, "G28"},
+                      {200, helix::StartBlockStepKind::TiltZ, true, "Z_TILT_ADJUST"},
+                      {300, helix::StartBlockStepKind::BedMesh, true, "BED_MESH_CALIBRATE"}});
+    // The macro analysis is only the fallback.
+    helix::PrintStartAnalysis analysis;
+    analysis.operations.push_back({"QUAD_GANTRY_LEVEL", helix::OperationCategory::QGL});
+    collector().set_macro_analysis(analysis);
+
+    auto in = collector().checklist_input();
+    REQUIRE(in.expected_order.size() == 3);
+    CHECK(in.expected_order[0] == PrintStartPhase::HOMING);
+    CHECK(in.expected_order[1] == PrintStartPhase::Z_TILT);
+    CHECK(in.expected_order[2] == PrintStartPhase::BED_MESH);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "checklist_input falls back to the macro analysis, in macro order",
+                 "[print][collector][checklist_input]") {
+    helix::PrintStartAnalysis analysis;
+    analysis.operations.push_back({"G28", helix::OperationCategory::HOMING});
+    analysis.operations.push_back({"PRINT_START", helix::OperationCategory::START_PRINT});
+    analysis.operations.push_back({"QUAD_GANTRY_LEVEL", helix::OperationCategory::QGL});
+    analysis.operations.push_back({"G28", helix::OperationCategory::HOMING});
+    collector().set_macro_analysis(analysis);
+    collector().start();
+
+    auto in = collector().checklist_input();
+    REQUIRE(in.expected_order.size() == 2);
+    CHECK(in.expected_order[0] == PrintStartPhase::HOMING);
+    CHECK(in.expected_order[1] == PrintStartPhase::QGL);
+}
+
+TEST_CASE_METHOD(PrintStartCollectorHeaterFixture,
+                 "checklist_input with no start block and no analysis has empty expected order",
+                 "[print][collector][checklist_input]") {
+    collector().start();
+    CHECK(collector().checklist_input().expected_order.empty());
 }

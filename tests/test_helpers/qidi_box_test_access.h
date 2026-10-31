@@ -28,6 +28,9 @@ class QidiBoxTestAccess {
     static void parse_vars(AmsBackendQidi& b, const json& v) {
         b.parse_save_variables(v);
     }
+    static void set_force_move(AmsBackendQidi& b, bool enabled) {
+        b.fw_force_move_enabled_ = enabled;
+    }
     /// Feeds @p status the way the subscription delivers it: inside the
     /// notify_status_update envelope.
     static void handle_status(AmsBackendQidi& b, const json& status) {
@@ -59,12 +62,6 @@ class QidiBoxTestAccess {
     static std::optional<uint32_t> get_color(const AmsBackendQidi& b, int color_id) {
         auto it = b.color_palette_.find(color_id);
         if (it == b.color_palette_.end())
-            return std::nullopt;
-        return it->second;
-    }
-    static std::optional<std::string> get_vendor(const AmsBackendQidi& b, int vendor_id) {
-        auto it = b.vendor_names_.find(vendor_id);
-        if (it == b.vendor_names_.end())
             return std::nullopt;
         return it->second;
     }

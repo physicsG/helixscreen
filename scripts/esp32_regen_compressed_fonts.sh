@@ -19,7 +19,7 @@
 #   (firmware/helixscreen-esp32/components/helixcore/CMakeLists.txt) at these
 #   files instead of the desktop assets/fonts/*.c originals.
 #
-# Symbol names, glyph sets, sizes, and bpp are IDENTICAL to the desktop
+# Symbol names, glyph sets (bar the ranges noted below), sizes, and bpp match the desktop
 # originals so the firmware externs/aliases resolve unchanged. Const-ness of
 # the top-level `lv_font_t <name>` symbol is also matched to the desktop
 # originals AND to the firmware externs in
@@ -59,6 +59,7 @@ FONT_MONO=assets/fonts/SourceCodePro-Regular.ttf
 FONT_CJK_SC=assets/fonts/NotoSansCJKsc-Regular.otf
 FONT_CJK_JP=assets/fonts/NotoSansCJKjp-Regular.otf
 FONT_MDI=assets/fonts/materialdesignicons-webfont.ttf
+FONT_CUSTOM=assets/fonts/helix-custom-icons.ttf
 
 # CJK font download URLs (Google Noto CJK releases) - matches regen_text_fonts.sh
 CJK_SC_URL="https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
@@ -90,6 +91,8 @@ if [ ! -f "$FONT_CJK_SC" ] || [ ! -f "$FONT_CJK_JP" ]; then
 fi
 
 # --- Ranges (verbatim from regen_text_fonts.sh / regen_mdi_fonts.sh) ---------
+# Except the eighth fractions (0x215B-0x215E): only the Belt Tension panel
+# draws them, and the firmware does not build it.
 
 # Wizard welcome page CJK codepoints - always compiled into the .c fonts.
 # 欢迎！中文ようこそ！日本語
@@ -114,6 +117,11 @@ UNICODE_RANGES+=",0x2122"        # Trademark
 MDI_ICONS="$(sed -n 's/^MDI_ICONS+\?="\([^"]*\)".*/\1/p' scripts/regen_mdi_fonts.sh | tr -d '\n')"
 if [ -z "$MDI_ICONS" ]; then
     echo "ERROR: no MDI_ICONS read from scripts/regen_mdi_fonts.sh" >&2
+    exit 1
+fi
+CUSTOM_ICONS="$(sed -n 's/^CUSTOM_ICONS+\?="\([^"]*\)".*/\1/p' scripts/regen_mdi_fonts.sh | tr -d '\n')"
+if [ -z "$CUSTOM_ICONS" ]; then
+    echo "ERROR: no CUSTOM_ICONS read from scripts/regen_mdi_fonts.sh" >&2
     exit 1
 fi
 
@@ -194,6 +202,7 @@ gen_mdi() { # <size> [bin]
     lv_font_conv \
         --font "$FONT_MDI" --size "$size" --bpp 4 --format lvgl \
         --range "$MDI_ICONS" \
+        --font "$FONT_CUSTOM" --range "$CUSTOM_ICONS" \
         -o "$out"
     sed -i 's/^const lv_font_t /lv_font_t /' "$out"
     if [ "$emit_bin" = "bin" ]; then
@@ -201,6 +210,7 @@ gen_mdi() { # <size> [bin]
         lv_font_conv \
             --font "$FONT_MDI" --size "$size" --bpp 4 --format bin \
             --range "$MDI_ICONS" \
+            --font "$FONT_CUSTOM" --range "$CUSTOM_ICONS" \
             -o "$OUT_DIR/mdi_icons_$size.bin"
     fi
 }

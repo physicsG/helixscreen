@@ -28,7 +28,7 @@ namespace {
 // A panel no dashboard has, so on_ok()'s write to PanelWidgetManager finds
 // no widget entry and touches nothing on disk; the on_save callback carries
 // the config the modal built.
-constexpr const char* TEST_PANEL = "camera_config_modal_test";
+constexpr const char* kTestPanel = "camera_config_modal_test";
 
 WebcamInfo cam(const std::string& name, const std::string& service = "mjpegstreamer") {
     WebcamInfo c;
@@ -44,7 +44,7 @@ WebcamInfo cam(const std::string& name, const std::string& service = "mjpegstrea
 TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: save carries source through",
                  "[camera][modal][webcam]") {
     nlohmann::json saved;
-    CameraConfigModal modal("camera", TEST_PANEL,
+    CameraConfigModal modal("camera", kTestPanel,
                             [&saved](const nlohmann::json& config) { saved = config; });
 
     Access::load_config(modal, {{"source", "Bed"}, {"rotation", 90}, {"flip_h", true}});
@@ -64,7 +64,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: save carries source throug
 TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: picking a row writes its name",
                  "[camera][modal][webcam]") {
     nlohmann::json saved;
-    CameraConfigModal modal("camera", TEST_PANEL,
+    CameraConfigModal modal("camera", kTestPanel,
                             [&saved](const nlohmann::json& config) { saved = config; });
 
     Access::load_config(modal, nlohmann::json::object());
@@ -85,7 +85,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: picking a row writes its n
 TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: Automatic removes the source key",
                  "[camera][modal][webcam]") {
     nlohmann::json saved;
-    CameraConfigModal modal("camera", TEST_PANEL,
+    CameraConfigModal modal("camera", kTestPanel,
                             [&saved](const nlohmann::json& config) { saved = config; });
 
     Access::load_config(modal, {{"source", "Nozzle"}});
@@ -103,7 +103,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: Automatic removes the sour
 
 TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: rows mirror the named webcams",
                  "[camera][modal][webcam]") {
-    CameraConfigModal modal("camera", TEST_PANEL);
+    CameraConfigModal modal("camera", kTestPanel);
     Access::load_config(modal, nlohmann::json::object());
 
     WebcamInfo local; // discovery's loopback probe result: unnamed, not pickable
@@ -132,7 +132,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: rows mirror the named webc
 TEST_CASE_METHOD(LVGLTestFixture, "CameraConfigModal: destroying the modal withdraws its XML names",
                  "[camera][modal][xml_name]") {
     {
-        CameraConfigModal modal("camera", TEST_PANEL, [](const nlohmann::json&) {});
+        CameraConfigModal modal("camera", kTestPanel, [](const nlohmann::json&) {});
         REQUIRE(lv_xml_get_subject(nullptr, "cam_rot_0_active") != nullptr);
         REQUIRE(lv_xml_get_subject(nullptr, "cam_source_0_name") != nullptr);
     }
@@ -144,8 +144,8 @@ TEST_CASE_METHOD(LVGLTestFixture,
                  "CameraConfigModal: reopening before the old modal is freed keeps the new names",
                  "[camera][modal][xml_name]") {
     auto first =
-        std::make_unique<CameraConfigModal>("camera", TEST_PANEL, [](const nlohmann::json&) {});
-    CameraConfigModal second("camera", TEST_PANEL, [](const nlohmann::json&) {});
+        std::make_unique<CameraConfigModal>("camera", kTestPanel, [](const nlohmann::json&) {});
+    CameraConfigModal second("camera", kTestPanel, [](const nlohmann::json&) {});
     lv_subject_t* rot = lv_xml_get_subject(nullptr, "cam_rot_0_active");
     REQUIRE(rot != nullptr);
 

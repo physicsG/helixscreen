@@ -128,6 +128,33 @@ TEST_CASE_METHOD(LVGLTestFixture,
     REQUIRE_FALSE(lv_obj_is_valid(root));
 }
 
+// destroy_overlay_ui() names the overlay as the teardown's owner, so an overlay
+// freed by the work its own teardown drains stops the teardown there: a
+// contract breach, fatal under strict UI checks, logged and survived without.
+TEST_CASE_METHOD(LVGLTestFixture, "destroy_overlay_ui stops when its drain frees the overlay",
+                 "[overlay_base][overlay_teardown][drain_reentrancy]") {
+    const bool strict = helix::ui::strict_ui_checks();
+    helix::ui::set_strict_ui_checks(false);
+
+    auto overlay = std::make_unique<TestOverlay>();
+    lv_obj_t* const root = overlay->create(test_screen());
+    REQUIRE(root != nullptr);
+    lv_obj_t* cached = root;
+    TestOverlay* const raw = overlay.get();
+    helix::ui::UpdateQueue::instance().queue("test::free_overlay_in_teardown",
+                                             [&overlay]() { overlay.reset(); });
+
+    raw->destroy_overlay_ui(cached);
+
+    // Stopped before the null-out, the free and the after hook.
+    CHECK(cached == root);
+    process_async_timers();
+    CHECK(lv_obj_is_valid(root));
+
+    helix::ui::set_strict_ui_checks(strict);
+    lv_obj_delete(root);
+}
+
 // ============================================================================
 // show(): the lazy create + register + push contract
 // ============================================================================
@@ -191,7 +218,7 @@ class ShowFixture : public LVGLUITestFixture {
 
     ShowFixture() {
         base_ = lv_obj_create(test_screen());
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(helix::PanelId::Home)] = base_;
         NavigationManager::instance().set_panels(panels);
     }

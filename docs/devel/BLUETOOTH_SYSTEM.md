@@ -25,7 +25,7 @@ How HelixScreen talks to Bluetooth: the runtime-loaded plugin and its C ABI, the
                                                         ├─ BusThread  ── owns every sd_bus_* call
                                                         ├─ BlueZ Agent1 at /helix/bt/agent
                                                         ├─ tracked RFCOMM fds
-                                                        └─ BLE connections (handles tagged BLE_HANDLE_TAG)
+                                                        └─ BLE connections (handles tagged kBleHandleTag)
 ```
 
 The main binary never links libsystemd or libbluetooth for Bluetooth. Everything that touches BlueZ lives in the plugin, and the app reaches it only through the function pointers that `BluetoothLoader` resolves. A device without Bluetooth hardware, or a build without the plugin, gets `is_available() == false` and no library is loaded.
@@ -48,7 +48,7 @@ The main binary never links libsystemd or libbluetooth for Bluetooth. Everything
 | `src/bluetooth/bt_sdp.cpp` | `helix_bt_sdp_find_rfcomm_channel`: SDP lookup of the RFCOMM channel for a UUID16 |
 | `src/bluetooth/bt_ble.cpp` | BLE GATT connect, chunked write, notification read, and the unified `helix_bt_disconnect` |
 | `src/bluetooth/bt_lzo.cpp` | `helix_bt_lzo_compress`: miniLZO wrapper for the MakeID protocol |
-| `include/bt_discovery_utils.h` | Printer brand table (`KNOWN_BRANDS`), printer UUID prefixes, `name_suggests_ble()` |
+| `include/bt_discovery_utils.h` | Printer brand table (`kKnownBrands`), printer UUID prefixes, `name_suggests_ble()` |
 | `include/bt_scanner_discovery_utils.h` | HID scanner classification (`0x1124` classic HID, `0x1812` HID-over-GATT, brand names) and `classify_device()`, the printer/scanner traits discovery reports |
 | `include/bt_discovery_run.h` / `src/system/bt_discovery_run.cpp` | `SharedContext` (a plugin context co-owned by an overlay and its workers) and `DiscoveryRun` (one scan on a worker, reported on the UI thread) |
 | `include/bt_print_utils.h` / `src/system/bt_print_utils.cpp` | `rfcomm_send()`, `rfcomm_send_receive()`, `resolve_label_printer_channel()` |
@@ -104,7 +104,7 @@ Return conventions across the ABI:
 |------|------------|
 | Actions (`discover`, `pair`, `remove_device`, `ble_write`, `sdp_find_rfcomm_channel`) | `0` on success, negative errno on failure |
 | Queries (`is_paired`, `is_bonded`, `is_connected`) | `1` / `0`, or negative errno |
-| Connects | RFCOMM returns the socket fd; BLE returns a handle with `BLE_HANDLE_TAG` (`0x40000000`) set. `connect_rfcomm` refuses an fd carrying that bit, so the two can never collide |
+| Connects | RFCOMM returns the socket fd; BLE returns a handle with `kBleHandleTag` (`0x40000000`) set. `connect_rfcomm` refuses an fd carrying that bit, so the two can never collide |
 | Errors | Every failure path stores a string in `ctx->last_error`; read it with `last_error(ctx)` |
 
 Strings handed to a discovery callback (`helix_bt_device::mac`, `name`, `service_uuid`) point into plugin-owned temporaries and are only valid for the duration of the callback. Copy them, as both settings overlays do.
@@ -224,7 +224,7 @@ The barcode scanner overlay seeds its list from `enumerate_known()` the same way
 | Reason | Test |
 |--------|------|
 | Printer UUID | `is_label_printer_uuid()`: SPP `00001101`, Phomemo `0000ff00`, Niimbot `e7810a71`, MakeID `0000abf0` prefixes |
-| Printer name | `is_likely_label_printer()` against the brand table `KNOWN_BRANDS` (`include/bt_discovery_utils.h#"KNOWN_BRANDS[]"`) |
+| Printer name | `is_likely_label_printer()` against the brand table `kKnownBrands` (`include/bt_discovery_utils.h#"kKnownBrands[]"`) |
 | Already paired | `Paired` is true and the device has a real name |
 | Scanner | A HID UUID (`0x1124` or `0x1812`, `include/bt_scanner_discovery_utils.h#is_hid_scanner_uuid`) or `is_likely_bt_scanner()` on the name |
 
@@ -307,11 +307,11 @@ if (channel_was_cached && attempt == 0) {
 2. Poll `ServicesResolved` for up to 10 s.
 3. Find the characteristic whose UUID matches `write_uuid`, then try `AcquireWrite` (a raw fd plus the negotiated MTU). Without it, read the device MTU and fall back to one `WriteValue` D-Bus call per chunk.
 4. Try `AcquireNotify` for responses. Without an fd, `StartNotify` plus a `PropertiesChanged` match feeds the connection's receive queue from the bus thread.
-5. Store the `BleConnection` in the first free slot of the table and return `BLE_HANDLE_TAG | slot`. Slots hold `shared_ptr`, so a read or write that looked a connection up keeps it alive while a disconnect frees the slot.
+5. Store the `BleConnection` in the first free slot of the table and return `kBleHandleTag | slot`. Slots hold `shared_ptr`, so a read or write that looked a connection up keeps it alive while a disconnect frees the slot.
 
 `ble_write()` splits data into `MTU - 3` byte chunks with a 10 ms gap between them. `ble_read()` waits up to `timeout_ms` on the receive queue, then does a zero-timeout poll of the notify fd; it returns the byte count, `0` on timeout, or a negative errno. A disconnect wakes a blocked reader, which returns `-ENOTCONN`.
 
-`helix_bt_disconnect(ctx, handle)` (`src/bluetooth/bt_ble.cpp#"helix_bt_disconnect(helix_bt_context* ctx, int handle)"`) dispatches on the handle value: one carrying `BLE_HANDLE_TAG` is a BLE connection (mark inactive and wake readers, close fds, unref the signal match, `Device1.Disconnect`, free the slot for the next connection), anything else is a tracked RFCOMM fd.
+`helix_bt_disconnect(ctx, handle)` (`src/bluetooth/bt_ble.cpp#"helix_bt_disconnect(helix_bt_context* ctx, int handle)"`) dispatches on the handle value: one carrying `kBleHandleTag` is a BLE connection (mark inactive and wake readers, close fds, unref the signal match, `Device1.Disconnect`, free the slot for the next connection), anything else is a tracked RFCOMM fd.
 
 ### LZO
 
@@ -383,11 +383,11 @@ Anything that touches BlueZ (discovery, pairing, BLE connect) has to be verified
 
 ### Teaching discovery a new printer brand
 
-Add a row to `KNOWN_BRANDS` in `include/bt_discovery_utils.h` with the name prefix and the BLE-only flag. If the brand advertises its own service UUID, add the prefix to `is_label_printer_uuid()` and, for a BLE service, to `uuid_is_ble()`. Add cases to `test_bt_discovery_utils.cpp`. The protocol backend itself is a LABEL_PRINTER_SYSTEM.md job.
+Add a row to `kKnownBrands` in `include/bt_discovery_utils.h` with the name prefix and the BLE-only flag. If the brand advertises its own service UUID, add the prefix to `is_label_printer_uuid()` and, for a BLE service, to `uuid_is_ble()`. Add cases to `test_bt_discovery_utils.cpp`. The protocol backend itself is a LABEL_PRINTER_SYSTEM.md job.
 
 ### Teaching discovery a new scanner brand
 
-Add the name prefix to `KNOWN_SCANNER_BRANDS` in `include/bt_scanner_discovery_utils.h` and a case to `test_bt_scanner_discovery_utils.cpp`. Brand names only matter for scanners that do not advertise a HID UUID.
+Add the name prefix to `kKnownScannerBrands` in `include/bt_scanner_discovery_utils.h` and a case to `test_bt_scanner_discovery_utils.cpp`. Brand names only matter for scanners that do not advertise a HID UUID.
 
 ### Writing a new consumer
 

@@ -16,6 +16,7 @@
 #include "ui_settings_about.h"
 
 #include "first_run_tour.h"
+#include "helix_version.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 
 #include <spdlog/spdlog.h>
@@ -53,16 +54,30 @@ void HelpSettingsOverlay::register_callbacks() {
                  .url_text = "discord.gg/RZCT2StKhr",
              });
          }},
-        {"on_docs_clicked",
+        {"on_getting_started_clicked",
          [](lv_event_t*) {
-             spdlog::info("[HelpSettingsOverlay] Documentation clicked");
+             spdlog::info("[HelpSettingsOverlay] Getting Started clicked");
+             const std::string url = helix::docs_url("guide/getting-started/");
+             helix::ui::InfoQrModal::show_owned({
+                 .icon = "lightbulb_outline",
+                 .title = lv_tr("Getting Started"),
+                 .message = lv_tr("Learn the basics: the setup wizard, moving around the "
+                                  "screens, and touch gestures."),
+                 .url = url,
+                 .url_text = helix::docs_url_text(url),
+             });
+         }},
+        {"on_user_guide_clicked",
+         [](lv_event_t*) {
+             spdlog::info("[HelpSettingsOverlay] User Guide clicked");
+             const std::string url = helix::docs_url("guide/");
              helix::ui::InfoQrModal::show_owned({
                  .icon = "book",
-                 .title = lv_tr("Documentation"),
+                 .title = lv_tr("User Guide"),
                  .message = lv_tr("Browse guides, configuration references, and troubleshooting "
                                   "resources for HelixScreen."),
-                 .url = "https://helixscreen.org/docs/guide/getting-started/",
-                 .url_text = "helixscreen.org/docs",
+                 .url = url,
+                 .url_text = helix::docs_url_text(url),
              });
          }},
         {"on_about_clicked",

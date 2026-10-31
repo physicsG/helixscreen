@@ -230,10 +230,13 @@ bool bed_mesh_renderer_has_data(const bed_mesh_renderer_t* renderer);
  * @param mesh_x_max Mesh probe area maximum X coordinate
  * @param mesh_y_min Mesh probe area minimum Y coordinate
  * @param mesh_y_max Mesh probe area maximum Y coordinate
+ * @param circular_bed Round bed (a delta's): the floor is the circle inscribed
+ *        in the bed bounds, and the walls stand at the bed edges
  */
 void bed_mesh_renderer_set_bounds(bed_mesh_renderer_t* renderer, double bed_x_min, double bed_x_max,
                                   double bed_y_min, double bed_y_max, double mesh_x_min,
-                                  double mesh_x_max, double mesh_y_min, double mesh_y_max);
+                                  double mesh_x_max, double mesh_y_min, double mesh_y_max,
+                                  bool circular_bed = false);
 
 /**
  * @brief Set camera rotation angles

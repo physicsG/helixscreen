@@ -52,7 +52,7 @@ using helix::PrintStatusWidgetTestAccess;
 namespace {
 
 /// Gcode the tier-3 load fallback must contain (filament_load_fallback_gcode()).
-constexpr const char* LOAD_FALLBACK_MARKER = "G1 E56";
+constexpr const char* kLoadFallbackMarker = "G1 E56";
 
 bool s_widget_subjects_ready = false;
 
@@ -133,7 +133,7 @@ class IdleRunoutDispatchFixture : public LVGLTestFixture {
     MacroExecuteCallback pending_execute;
 
   private:
-    IMoonrakerAPI* previous_api_ = nullptr;
+    helix::IMoonrakerAPI* previous_api_ = nullptr;
 };
 
 } // namespace
@@ -181,5 +181,5 @@ TEST_CASE_METHOD(IdleRunoutDispatchFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     CHECK(prompt_count == 0);
-    CHECK(gcode_sent_containing(LOAD_FALLBACK_MARKER));
+    CHECK(gcode_sent_containing(kLoadFallbackMarker));
 }

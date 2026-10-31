@@ -3,6 +3,8 @@
 
 #include "../test_helpers/config_test_access.h"
 #include "../test_helpers/printer_capture.h"
+#include "../test_helpers/scoped_env.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "config.h"
 #include "data_root_resolver.h"
@@ -40,7 +42,7 @@ using namespace helix::test;
 namespace {
 
 // Heuristic-class scores stay under this test-chosen bar, below the
-// production autosave bar AUTOSAVE_MIN_CONFIDENCE = 85 (#1284).
+// production autosave bar kAutosaveMinConfidence = 85 (#1284).
 constexpr int kHeuristicClassCeiling = 70;
 
 /// The hardware -> expected model rows in tests/fixtures/printers/detection_cases.json,
@@ -169,7 +171,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: corpus rows detect th
 
             REQUIRE(result.detected());
             REQUIRE(result.type_name == row.at("expect").get<std::string>());
-            REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+            REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
             if (row.value("autosave", false)) {
                 REQUIRE(PrinterDetector::meets_autosave_threshold(result));
             }
@@ -198,7 +200,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: Detect Voron V2 by be
     REQUIRE(result.detected());
     // bed_fans + exhaust fan combo is Voron evidence the other families lack
     REQUIRE(result.type_name == "Voron 2.4");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     // Reason should mention fans or Voron enclosed signature
     bool has_voron_reason = (result.reason.find("fan") != std::string::npos ||
                              result.reason.find("Voron") != std::string::npos);
@@ -404,7 +406,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: Real FlashForge AD5M 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Adventurer 5M Pro");
     // tvocValue + LED + hostname separate the Pro from every other machine
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     REQUIRE(PrinterDetector::meets_autosave_threshold(result));
 }
 
@@ -511,7 +513,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
             first.runner_up_confidence, first.margin(), first.tied_count);
     REQUIRE(first.detected());
     REQUIRE(first.type_name == "Creality K2 Plus");
-    REQUIRE(first.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(first.margin() >= PrinterDetector::kDetectMinMargin);
 
     // Simulate what auto_detect_and_save() does after every detection: compact the
     // shared database. This is the event that broke detection of the next printer.
@@ -636,7 +638,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "Creality K2 Plus");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     }
 
     SECTION("K2 Pro (~300mm, k2pro hostname)") {
@@ -648,7 +650,95 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "Creality K2 Pro");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
+    }
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: a K2 on k2-improvements is named by its bed",
+                 "[printer][build_volume][k2][k2improvements]") {
+    // _START_PRINT_VARS excludes every stock K2 entry, so the mod entries are the
+    // only candidates on a modded K2; the declared bed picks the model among them.
+    // A neutral hostname leaves the bed as the only model evidence.
+    PrinterHardwareData hardware{
+        .heaters = {"extruder", "heater_bed", "heater_generic chamber_heater"},
+        .sensors = {"chamber_temp"},
+        .fans = {"chamber_fan"},
+        .leds = {},
+        .hostname = "creality-k2",
+        .printer_objects = {"box", "motor_control", "fan_feedback", "load_ai", "filament_rack",
+                            "heater_generic chamber_heater", "prtouch_v3",
+                            "gcode_macro _START_PRINT_VARS", "gcode_macro START_PRINT"},
+        .steppers = {},
+        .kinematics = "corexy",
+        .build_volume = {}};
+
+    auto detect_on_bed = [&hardware](float size) {
+        hardware.build_volume = {.declared_bed_x = size, .declared_bed_y = size};
+        return PrinterDetector::detect(hardware);
+    };
+
+    SECTION("a 300mm bed is the K2 Pro") {
+        const auto result = detect_on_bed(300);
+        CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+                result.runner_up_confidence, result.margin());
+        CHECK(result.type_name == "Creality K2 Pro (k2-improvements)");
+        CHECK(result.margin() >= PrinterDetector::kDetectMinMargin);
+        CHECK(PrinterDetector::meets_autosave_threshold(result));
+    }
+    SECTION("a 350mm bed is the K2 Plus") {
+        const auto result = detect_on_bed(350);
+        CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+                result.runner_up_confidence, result.margin());
+        CHECK(result.type_name == "Creality K2 Plus (k2-improvements)");
+        CHECK(result.margin() >= PrinterDetector::kDetectMinMargin);
+        CHECK(PrinterDetector::meets_autosave_threshold(result));
+    }
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: a stock K2 without the mod's macros is its stock entry",
+                 "[printer][build_volume][k2][k2improvements]") {
+    // The mod entries score every other heuristic a stock K2 matches, so only
+    // their missing-_START_PRINT_VARS exclusion keeps them out of the tie, which
+    // database order would otherwise settle. Absence counts only once the
+    // objects list has been reported.
+    PrinterHardwareData hardware{
+        .heaters = {"extruder", "heater_bed", "heater_generic chamber_heater"},
+        .sensors = {"chamber_temp"},
+        .fans = {"chamber_fan"},
+        .leds = {},
+        .hostname = "creality-k2",
+        .printer_objects = {"box", "motor_control", "fan_feedback", "load_ai", "filament_rack",
+                            "heater_generic chamber_heater", "prtouch_v3"},
+        .steppers = {},
+        .kinematics = "corexy",
+        .build_volume = {}};
+
+    hardware.objects_reported = true;
+
+    auto detect_on_bed = [&hardware](float size) {
+        hardware.build_volume = {.declared_bed_x = size, .declared_bed_y = size};
+        return PrinterDetector::detect(hardware);
+    };
+
+    SECTION("a 300mm bed is the stock K2 Pro") {
+        const auto result = detect_on_bed(300);
+        CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+                result.runner_up_confidence, result.margin(), result.tied_count);
+        CHECK(result.type_name == "Creality K2 Pro");
+        CHECK(result.margin() >= PrinterDetector::kDetectMinMargin);
+        // The three stock K2 entries, and neither k2-improvements entry.
+        CHECK(result.tied_count == 3);
+    }
+    SECTION("a 350mm bed is the stock K2 Plus") {
+        const auto result = detect_on_bed(350);
+        CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+                result.runner_up_confidence, result.margin(), result.tied_count);
+        CHECK(result.type_name == "Creality K2 Plus");
+        CHECK(result.margin() >= PrinterDetector::kDetectMinMargin);
+        // The three stock K2 entries, and neither k2-improvements entry.
+        CHECK(result.tied_count == 3);
     }
 }
 
@@ -676,7 +766,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "Qidi Max 4");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     }
 
     SECTION("cartesian machine with same footprint is never a Qidi Max 4") {
@@ -959,7 +1049,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "FLSUN V400");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     }
 }
@@ -997,7 +1087,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: FLSUN S1 / S1 Pro",
         CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.type_name == "FLSUN S1 / S1 Pro");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     };
 
@@ -1180,7 +1270,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     CAPTURE(early.type_name, early.confidence, early.runner_up_type_name,
             early.runner_up_confidence, early.margin(), early.tied_count);
     CHECK(early.type_name == "FlashForge Adventurer 5M Pro");
-    CHECK(early.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    CHECK(early.margin() >= PrinterDetector::kDetectMinMargin);
 
     // The same machine once the list has been reported and really has no
     // light is a plain 5M with a Pro-shaped hostname.
@@ -1190,7 +1280,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     CAPTURE(late.type_name, late.confidence, late.runner_up_type_name, late.runner_up_confidence,
             late.margin(), late.tied_count);
     CHECK(late.type_name == "FlashForge Adventurer 5M");
-    CHECK(late.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    CHECK(late.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -1357,7 +1447,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
             result.runner_up_confidence, result.margin(), result.tied_count);
     REQUIRE(result.type_name != "RatRig V-Core 3");
     REQUIRE(result.type_name == "RatRig V-Core 4");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 // ============================================================================
@@ -1393,7 +1483,7 @@ TEST_CASE_METHOD(
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "Sovol SV06 Plus ACE");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -1490,7 +1580,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "Sovol SV07");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     REQUIRE(result.type_name != "Sovol SV06 ACE");
 }
 
@@ -1906,7 +1996,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     auto identified_hw = qidi_q2_hardware();
     identified_hw.hostname = "QIDI@Q2";
     const auto identified = PrinterDetector::detect(identified_hw);
-    REQUIRE(identified.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(identified.margin() >= PrinterDetector::kDetectMinMargin);
     CHECK(PrinterDetector::classify_type_mismatch("Qidi Max 4", identified, "") ==
           PrinterDetector::MismatchDecision::Warn);
 
@@ -1930,6 +2020,86 @@ TEST_CASE("PrinterDetector: every decline reason names itself in a bundle",
     }
 }
 
+TEST_CASE("PrinterDetector: relate_types names the variant between two entries for one machine",
+          "[detector][mismatch][type-mismatch]") {
+    using Relation = PrinterDetector::TypeRelation;
+    const std::vector<PrinterDetector::VariantEntry> entries = {
+        {"k2", "K2 Plus", "", ""},
+        {"k2_mod", "K2 Plus (mod)", "k2", "mod"},
+        {"k2_cfs", "K2 Plus (CFS)", "k2", "CFS"},
+        {"voron", "Voron 2.4", "", ""},
+        {"orphan", "Orphan (mod)", "no_such_id", "mod"},
+        {"unlabeled", "K2 Plus (unlabeled)", "k2", ""},
+    };
+
+    SECTION("detected is a variant of the saved base") {
+        const auto r = PrinterDetector::relate_types(entries, "K2 Plus", "K2 Plus (mod)");
+        CHECK(r.relation == Relation::DetectedVariant);
+        CHECK(r.base == "K2 Plus");
+        CHECK(r.detected_label == "mod");
+        CHECK(r.saved_label.empty());
+    }
+    SECTION("saved is a variant and the hardware looks like its base") {
+        const auto r = PrinterDetector::relate_types(entries, "K2 Plus (CFS)", "K2 Plus");
+        CHECK(r.relation == Relation::SavedVariant);
+        CHECK(r.base == "K2 Plus");
+        CHECK(r.saved_label == "CFS");
+        CHECK(r.detected_label.empty());
+    }
+    SECTION("both are variants of one base") {
+        const auto r = PrinterDetector::relate_types(entries, "K2 Plus (CFS)", "K2 Plus (mod)");
+        CHECK(r.relation == Relation::SiblingVariants);
+        CHECK(r.base == "K2 Plus");
+        CHECK(r.saved_label == "CFS");
+        CHECK(r.detected_label == "mod");
+    }
+    SECTION("unrelated models, either way round") {
+        for (const auto& [saved, detected] :
+             {std::pair{"Voron 2.4", "K2 Plus (mod)"}, std::pair{"K2 Plus", "Voron 2.4"},
+              std::pair{"K2 Plus (mod)", "Voron 2.4"}}) {
+            INFO(saved << " vs " << detected);
+            const auto r = PrinterDetector::relate_types(entries, saved, detected);
+            CHECK(r.relation == Relation::DifferentModel);
+            CHECK(r.base.empty());
+            CHECK(r.saved_label.empty());
+            CHECK(r.detected_label.empty());
+        }
+    }
+    SECTION("a variant_of naming no entry is a model of its own") {
+        CHECK(PrinterDetector::relate_types(entries, "K2 Plus", "Orphan (mod)").relation ==
+              Relation::DifferentModel);
+        CHECK(PrinterDetector::relate_types(entries, "Orphan (mod)", "K2 Plus (mod)").relation ==
+              Relation::DifferentModel);
+    }
+    SECTION("a variant without a label is a model of its own") {
+        CHECK(PrinterDetector::relate_types(entries, "K2 Plus", "K2 Plus (unlabeled)").relation ==
+              Relation::DifferentModel);
+    }
+    SECTION("a name outside the entries relates to nothing") {
+        CHECK(PrinterDetector::relate_types(entries, "My Custom Rig", "K2 Plus").relation ==
+              Relation::DifferentModel);
+    }
+}
+
+TEST_CASE("PrinterDetector: the bundled database relates its firmware and add-on variants",
+          "[detector][mismatch][type-mismatch]") {
+    using Relation = PrinterDetector::TypeRelation;
+    const auto mod =
+        PrinterDetector::relate_types("Creality K2 Plus", "Creality K2 Plus (k2-improvements)");
+    CHECK(mod.relation == Relation::DetectedVariant);
+    CHECK(mod.base == "Creality K2 Plus");
+    CHECK(mod.detected_label == "k2-improvements");
+
+    const auto stock = PrinterDetector::relate_types("FlashForge Adventurer 5M Pro (ForgeX)",
+                                                     "FlashForge Adventurer 5M Pro");
+    CHECK(stock.relation == Relation::SavedVariant);
+    CHECK(stock.base == "FlashForge Adventurer 5M Pro");
+    CHECK(stock.saved_label == "ForgeX");
+
+    CHECK(PrinterDetector::relate_types("Creality K1 (with CFS)", "Creality K1 Max").relation ==
+          Relation::DifferentModel);
+}
+
 TEST_CASE_METHOD(PrinterDetectorFixture,
                  "PrinterDetector: a Q2 that reports its model string is identified outright",
                  "[printer][real_world][qidi][q2]") {
@@ -1951,7 +2121,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     // while the Q2 takes a higher one.
     CAPTURE(result.confidence, result.runner_up_type_name, result.runner_up_confidence,
             result.margin());
-    CHECK(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    CHECK(result.margin() >= PrinterDetector::kDetectMinMargin);
     CHECK(PrinterDetector::meets_autosave_threshold(result));
 }
 
@@ -1993,7 +2163,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
             result.runner_up_confidence, result.margin());
     CHECK(result.type_name == "Elegoo Centauri Carbon");
-    CHECK(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    CHECK(result.margin() >= PrinterDetector::kDetectMinMargin);
     CHECK(PrinterDetector::meets_autosave_threshold(result));
 }
 
@@ -2020,6 +2190,43 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
     CAPTURE(full.confidence, without.confidence, without.type_name);
     CHECK(full.confidence > without.confidence);
+}
+
+// ============================================================================
+// A real FLSUN T1 Pro on stock FLSUN OS
+// ============================================================================
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: a stock FLSUN T1 Pro identifies as itself",
+                 "[printer][real_world][flsun]") {
+    auto result = PrinterDetector::detect(printer_capture("flsun_t1_pro"));
+
+    REQUIRE(result.detected());
+    CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+            result.runner_up_confidence, result.margin());
+    CHECK(result.type_name == "FLSUN T1 Pro");
+    CHECK(result.margin() >= PrinterDetector::kDetectMinMargin);
+    CHECK(PrinterDetector::meets_autosave_threshold(result));
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: _START_PRINT_VARS off corexy is not a k2-improvements K2",
+                 "[printer][real_world][flsun][k2][macros]") {
+    // The T1 Pro's macros.cfg carries a user _START_PRINT_VARS, the macro the
+    // k2-improvements entry reads as definitive. A neutral hostname leaves only the
+    // macro and the hardware to decide.
+    auto hardware = printer_capture("flsun_t1_pro");
+    hardware.hostname = "mainsailos";
+    REQUIRE(std::find(hardware.printer_objects.begin(), hardware.printer_objects.end(),
+                      "gcode_macro _START_PRINT_VARS") != hardware.printer_objects.end());
+
+    for (const char* kinematics : {"delta", "cartesian"}) {
+        hardware.kinematics = kinematics;
+        auto result = PrinterDetector::detect(hardware);
+        CAPTURE(kinematics, result.type_name, result.confidence, result.runner_up_type_name);
+        CHECK(result.type_name.find("k2-improvements") == std::string::npos);
+        CHECK(result.runner_up_type_name.find("k2-improvements") == std::string::npos);
+    }
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -2234,25 +2441,25 @@ TEST_CASE("PrinterDetector: telling a user their saved type is wrong needs at le
 
     // A saved printer type is a statement the user made. Overriding it is a
     // stronger claim than filling in a blank, so it cannot be the cheaper one.
-    CHECK(PrinterDetector::MISMATCH_MIN_CONFIDENCE >= PrinterDetector::AUTOSAVE_MIN_CONFIDENCE);
+    CHECK(PrinterDetector::kMismatchMinConfidence >= PrinterDetector::kAutosaveMinConfidence);
 
-    for (int confidence = PrinterDetector::MISMATCH_MIN_CONFIDENCE;
-         confidence < PrinterDetector::AUTOSAVE_MIN_CONFIDENCE; ++confidence) {
+    for (int confidence = PrinterDetector::kMismatchMinConfidence;
+         confidence < PrinterDetector::kAutosaveMinConfidence; ++confidence) {
         INFO("confidence " << confidence);
         // Too weak to be written into an empty config, so too weak to tell
         // someone the type they chose is wrong.
         CHECK(PrinterDetector::classify_type_mismatch("Voron 2.4", "Qidi Plus 4", confidence, "",
-                                                      PrinterDetector::DETECT_MIN_MARGIN) ==
+                                                      PrinterDetector::kDetectMinMargin) ==
               MD::ConfidenceTooLow);
     }
 
     // The bar moving up must not silence the warning altogether: a detection
     // strong enough to be persisted is strong enough to be raised.
     CHECK(PrinterDetector::classify_type_mismatch("Voron 2.4", "Qidi Plus 4",
-                                                  PrinterDetector::AUTOSAVE_MIN_CONFIDENCE, "",
-                                                  PrinterDetector::DETECT_MIN_MARGIN) == MD::Warn);
+                                                  PrinterDetector::kAutosaveMinConfidence, "",
+                                                  PrinterDetector::kDetectMinMargin) == MD::Warn);
     CHECK(PrinterDetector::classify_type_mismatch("Voron 2.4", "Qidi Plus 4", 100, "",
-                                                  PrinterDetector::DETECT_MIN_MARGIN) == MD::Warn);
+                                                  PrinterDetector::kDetectMinMargin) == MD::Warn);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -2271,8 +2478,53 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     // that the shared objects do not drag the machine to the Artillery M1 Pro.
     REQUIRE(result.type_name == "Qidi Max 4");
     REQUIRE(result.type_name != "Artillery M1 Pro");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     REQUIRE(PrinterDetector::meets_autosave_threshold(result));
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: stock Plus 5 fingerprint detects as the Qidi Plus 5",
+                 "[printer][qidi][plus5]") {
+    auto hardware = printer_capture("qidi_plus5");
+
+    auto result = PrinterDetector::detect(hardware);
+    CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+            result.runner_up_confidence, result.margin(), result.tied_count);
+
+    REQUIRE(result.detected());
+    // Nothing in the capture names the model, so the ~333x345 travel identifies
+    // the Plus 5 (Q2 ~275, Max 4 ~390). The QIDI Chamber_Thermal_Protection
+    // sensor is what lets that bed-size match stand.
+    REQUIRE(result.type_name == "Qidi Plus 5");
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
+    REQUIRE(PrinterDetector::meets_autosave_threshold(result));
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: nameless corexy at the Plus 5 bed size is not saved as a Plus 5",
+                 "[printer][qidi][plus5][regression]") {
+    // A bare corexy carrying the Plus 5's ~333x345 stepper travel but none of
+    // the QIDI family hardware (no chamber thermal protection sensor) must not
+    // be saved as a Plus 5: the entry's sensor_required excludes it, so bed
+    // size never identifies a machine on its own.
+    PrinterHardwareData hardware{
+        .heaters = {"extruder", "heater_bed"},
+        .sensors = {},
+        .fans = {},
+        .leds = {},
+        .hostname = "",
+        .printer_objects = {},
+        .steppers = {"stepper_x", "stepper_y", "stepper_z", "stepper_z1"},
+        .kinematics = "corexy",
+        .build_volume = {.x_min = -7, .x_max = 326, .y_min = -5, .y_max = 340, .z_max = 300}};
+    hardware.objects_reported = true;
+
+    auto result = PrinterDetector::detect(hardware);
+    CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+            result.runner_up_confidence, result.margin(), result.tied_count);
+
+    REQUIRE(result.type_name != "Qidi Plus 5");
+    REQUIRE_FALSE(PrinterDetector::meets_autosave_threshold(result));
 }
 
 // ============================================================================
@@ -2317,7 +2569,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     // corroborates without identifying. That is why the floor here sits lower
     // than the bed size alone would have scored: the discriminator is worth less
     // on its own than the shared measurement was, and it is the honest number.
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     // The point of the test: it out-scores the look-alike rather than tying it.
     REQUIRE(result.confidence > result.runner_up_confidence);
 }
@@ -2676,7 +2928,7 @@ TEST_CASE("PrinterDetector: Combined scoring rewards multiple matches",
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "Doron Velta");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     // Should have multiple matches: kinematics, delta_calibrate, stepper_a, hostname doron,
     // hostname velta
     REQUIRE(result.match_count >= 4);
@@ -2716,7 +2968,7 @@ TEST_CASE("PrinterDetector: Specific printer wins over generic with same confide
 
     // Doron Velta should match itself with hostname bonus
     REQUIRE(doron_result.type_name == "Doron Velta");
-    REQUIRE(doron_result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(doron_result.margin() >= PrinterDetector::kDetectMinMargin);
 
     // Doron Velta has more matching heuristics (hostname matches)
     REQUIRE(doron_result.match_count > generic_result.match_count);
@@ -3083,7 +3335,7 @@ TEST_CASE_METHOD(
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Adventurer 5X");
     // The IFS objects are AD5X-exclusive hardware
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3143,7 +3395,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Creator 5 Pro");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3178,7 +3430,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Creator 5 Pro");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3196,17 +3448,32 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
                  "fan_generic chamber_loop_fan", "fan_generic chamber_cool_fan"},
         .leds = {"led chamber_led"},
         .hostname = "creator5pro",
-        .printer_objects = {"zmod", "zmod_color", "zmod_afclite", "AFC", "AFC_lane E0",
-                            "AFC_lane E1", "AFC_lane E2", "AFC_lane E3", "AFC_unit C5",
+        .printer_objects = {"zmod",
+                            "zmod_color",
+                            "zmod_afclite",
+                            "AFC",
+                            "AFC_lane E0",
+                            "AFC_lane E1",
+                            "AFC_lane E2",
+                            "AFC_lane E3",
+                            "AFC_unit C5",
                             "heater_generic chamber_heater",
-                            "gcode_button extruder_pos1", "gcode_button extruder_grab1",
-                            "gcode_button extruder_pos2", "gcode_button extruder_grab2",
-                            "gcode_button extruder_pos3", "gcode_button extruder_grab3",
-                            "gcode_button extruder_pos4", "gcode_button extruder_grab4",
-                            "filament_switch_sensor fd_ex0", "filament_switch_sensor fd_ex1",
-                            "filament_switch_sensor fd_ex2", "filament_switch_sensor fd_ex3",
-                            "filament_motion_sensor fm_ex0", "filament_motion_sensor fm_ex1",
-                            "filament_motion_sensor fm_ex2", "filament_motion_sensor fm_ex3"},
+                            "gcode_button extruder_pos1",
+                            "gcode_button extruder_grab1",
+                            "gcode_button extruder_pos2",
+                            "gcode_button extruder_grab2",
+                            "gcode_button extruder_pos3",
+                            "gcode_button extruder_grab3",
+                            "gcode_button extruder_pos4",
+                            "gcode_button extruder_grab4",
+                            "filament_switch_sensor fd_ex0",
+                            "filament_switch_sensor fd_ex1",
+                            "filament_switch_sensor fd_ex2",
+                            "filament_switch_sensor fd_ex3",
+                            "filament_motion_sensor fm_ex0",
+                            "filament_motion_sensor fm_ex1",
+                            "filament_motion_sensor fm_ex2",
+                            "filament_motion_sensor fm_ex3"},
         .steppers = {},
         .kinematics = "corexy",
         .cpu_arch = "mips",
@@ -3218,7 +3485,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Creator 5 Pro");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3250,7 +3517,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Creator 5");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3282,7 +3549,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Creator 5");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3317,7 +3584,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     // entries as winner and as runner-up.
     REQUIRE(result.type_name.find("Creator 5") == std::string::npos);
     REQUIRE(result.runner_up_type_name.find("Creator 5") == std::string::npos);
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3351,7 +3618,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "FlashForge Creator 5");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     }
 
     SECTION("Generic hostname, no FlashForge signals at all") {
@@ -3372,7 +3639,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
 
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "FlashForge Creator 5");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     }
 
     SECTION("One extruder keeps FlashForge generics off the Creator 5") {
@@ -3464,7 +3731,7 @@ TEST_CASE_METHOD(
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Adventurer 5X");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -3501,7 +3768,63 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "FlashForge Adventurer 5X");
     // The [zmod_ifs] section and private _IFS_* macros are AD5X-exclusive
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
+}
+
+// ============================================================================
+// Creality Nebula Pad host
+// ============================================================================
+
+namespace {
+bool names_flashforge(const std::string& type_name) {
+    return type_name.rfind("FlashForge", 0) == 0;
+}
+} // namespace
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: Nebula Pad retrofit lands on the Ender family, never an AD5X",
+                 "[printer][detector][nebula][cpu_arch_match][creality]") {
+    // A MIPS Ingenic host is shared by FlashForge and the Creality Nebula Pad;
+    // the pad's own evidence must outvote the bare-cartesian field without
+    // naming which Ender it drives, since it ships on several.
+    const PrinterHardwareData hardware = printer_capture("creality_ender3_pro_nebula_pad");
+    auto result = PrinterDetector::detect(hardware);
+    CAPTURE(result.type_name, result.confidence, result.uncapped_confidence,
+            result.runner_up_type_name, result.runner_up_confidence, result.margin(),
+            result.tied_count, result.contenders);
+
+    REQUIRE(result.detected());
+    REQUIRE_FALSE(names_flashforge(result.type_name));
+    REQUIRE_FALSE(names_flashforge(result.runner_up_type_name));
+    REQUIRE(result.type_name.rfind("Creality Ender", 0) == 0);
+    REQUIRE(result.runner_up_type_name.rfind("Creality Ender", 0) == 0);
+    REQUIRE_FALSE(PrinterDetector::meets_autosave_threshold(result));
+}
+
+TEST_CASE_METHOD(PrinterDetectorFixture,
+                 "PrinterDetector: a CoreXY Pi named nebula keeps Creality out of contention",
+                 "[printer][detector][nebula][hostname_match]") {
+    PrinterHardwareData hardware{
+        .heaters = {"extruder", "heater_bed"},
+        .sensors = {"temperature_sensor chamber"},
+        .fans = {"fan", "heater_fan hotend_fan"},
+        .leds = {},
+        .hostname = "nebula",
+        .printer_objects = {"z_tilt", "bed_mesh"},
+        .steppers = {"stepper_x", "stepper_y", "stepper_z", "stepper_z1", "stepper_z2"},
+        .kinematics = "corexy",
+        .mcu = "stm32f446xx",
+        .build_volume = {.x_min = 0, .x_max = 255, .y_min = 0, .y_max = 255, .z_max = 260},
+        .cpu_arch = "aarch64"};
+    auto result = PrinterDetector::detect(hardware);
+    CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
+            result.runner_up_confidence, result.margin());
+
+    // The hostname alone is family-level evidence: a CoreXY machine with its own
+    // fingerprint must not even have a Creality entry as its nearest rival.
+    REQUIRE(result.detected());
+    REQUIRE(result.type_name.find("Creality") == std::string::npos);
+    REQUIRE(result.runner_up_type_name.find("Creality") == std::string::npos);
 }
 
 // ============================================================================
@@ -3598,6 +3921,23 @@ TEST_CASE("Z-offset calibration strategy lookup", "[printer_detector]") {
     }
 }
 
+TEST_CASE("Z-offset persistence flags lookup", "[printer_detector][zoffset]") {
+    SECTION("Snapmaker U1 keeps a babystep only until a tool change or the print ends") {
+        CHECK_FALSE(PrinterDetector::z_offset_persists("Snapmaker U1"));
+        CHECK(PrinterDetector::tool_change_resets_z_offset("Snapmaker U1"));
+    }
+
+    SECTION("an entry that says nothing persists and keeps its offset across tool changes") {
+        CHECK(PrinterDetector::z_offset_persists("FlashForge Adventurer 5X"));
+        CHECK_FALSE(PrinterDetector::tool_change_resets_z_offset("FlashForge Adventurer 5X"));
+    }
+
+    SECTION("an unknown printer takes the same defaults") {
+        CHECK(PrinterDetector::z_offset_persists("Some Random Printer"));
+        CHECK_FALSE(PrinterDetector::tool_change_resets_z_offset("Some Random Printer"));
+    }
+}
+
 // ============================================================================
 // Bed Mesh Calibration Gcode Override
 // ============================================================================
@@ -3638,6 +3978,24 @@ TEST_CASE("Bed mesh calibration gcode override", "[printer_detector]") {
     SECTION("Case insensitive lookup") {
         std::string gcode = PrinterDetector::get_bed_mesh_calibrate_gcode("elegoo centauri carbon");
         REQUIRE(gcode.find("BED_TEMP={bed_temp}") != std::string::npos);
+    }
+}
+
+TEST_CASE("Screws tilt shipped sequence", "[printer_detector][screws_tilt]") {
+    PrinterDetector::reload();
+
+    SECTION("the Centauri Carbon bypasses COSMOS's wrapper and prepares itself") {
+        const std::string gcode = PrinterDetector::get_screws_tilt_gcode("elegoo centauri carbon");
+        CHECK(gcode.find("{screws_tilt_builtin}") != std::string::npos);
+        CHECK(gcode.find("LOAD_CELL_CALIBRATE TARE=TRUE") != std::string::npos);
+        CHECK(PrinterDetector::get_screws_tilt_self_prepares("Elegoo Centauri Carbon"));
+    }
+
+    SECTION("an entry without a sequence, or no entry, ships nothing") {
+        CHECK(PrinterDetector::get_screws_tilt_gcode("FlashForge Adventurer 5M").empty());
+        CHECK(PrinterDetector::get_screws_tilt_gcode("Some Random Printer").empty());
+        CHECK_FALSE(PrinterDetector::get_screws_tilt_self_prepares("FlashForge Adventurer 5M"));
+        CHECK_FALSE(PrinterDetector::get_screws_tilt_self_prepares(""));
     }
 }
 
@@ -3809,45 +4167,6 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     REQUIRE(result.type_name == "Venture Delta");
 }
 
-TEST_CASE("PrinterDetector::screws_tilt_direction_override reads DB field",
-          "[printer_detector][screws_tilt]") {
-    auto* config = Config::get_instance();
-    std::string type_path = config->df() + "type";
-
-    SECTION("FlashForge Adventurer 5M reports ccw override") {
-        config->set<std::string>(type_path, "FlashForge Adventurer 5M");
-        REQUIRE(PrinterDetector::screws_tilt_direction_override() == "ccw");
-    }
-
-    SECTION("FlashForge Adventurer 5M Pro reports ccw override") {
-        config->set<std::string>(type_path, "FlashForge Adventurer 5M Pro");
-        REQUIRE(PrinterDetector::screws_tilt_direction_override() == "ccw");
-    }
-
-    SECTION("FlashForge Adventurer 5M (ForgeX) reports ccw override") {
-        config->set<std::string>(type_path, "FlashForge Adventurer 5M (ForgeX)");
-        REQUIRE(PrinterDetector::screws_tilt_direction_override() == "ccw");
-    }
-
-    SECTION("Printers without the field return empty string") {
-        config->set<std::string>(type_path, "Creality K1");
-        REQUIRE(PrinterDetector::screws_tilt_direction_override().empty());
-    }
-
-    SECTION("Unknown printer name returns empty string") {
-        config->set<std::string>(type_path, "Nonexistent Printer Model 9000");
-        REQUIRE(PrinterDetector::screws_tilt_direction_override().empty());
-    }
-
-    SECTION("Empty printer type returns empty string") {
-        config->set<std::string>(type_path, "");
-        REQUIRE(PrinterDetector::screws_tilt_direction_override().empty());
-    }
-
-    // Clean up
-    config->set<std::string>(type_path, "");
-}
-
 TEST_CASE("Creality K1 printer detection", "[printer_detector]") {
     auto* config = Config::get_instance();
     // printer_type_contains() uses config->df() + wizard::PRINTER_TYPE which
@@ -3920,7 +4239,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: Detect Snapmaker U1 w
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "Snapmaker U1");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     REQUIRE(result.preset == "snapmaker_u1");
 }
 
@@ -3934,7 +4253,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: Detect Creality K1 wi
     REQUIRE(result.detected());
     // K1 Max matches due to hostname "k1-max"
     REQUIRE(result.type_name == "Creality K1 Max");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     REQUIRE(result.preset == "k1");
 }
 
@@ -3947,7 +4266,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: Generic printer has e
 
     REQUIRE(result.detected());
     REQUIRE(result.type_name == "Voron 2.4");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     // Voron has no preset in the database
     REQUIRE(result.preset.empty());
 }
@@ -3957,27 +4276,6 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: Generic printer has e
 // ============================================================================
 
 namespace {
-
-/// RAII guard that restores an env var on destruction.
-struct EnvGuard {
-    std::string name;
-    std::string original;
-    bool was_set;
-
-    explicit EnvGuard(const char* n) : name(n) {
-        const char* v = std::getenv(n);
-        was_set = (v != nullptr);
-        if (was_set)
-            original = v;
-        unsetenv(n);
-    }
-    ~EnvGuard() {
-        if (was_set)
-            setenv(name.c_str(), original.c_str(), 1);
-        else
-            unsetenv(name.c_str());
-    }
-};
 
 /// Restores cwd on destruction so failed/early-exiting tests don't pollute.
 struct CwdGuard {
@@ -4005,8 +4303,8 @@ TEST_CASE("PrinterDetector: loads printer_database.json from HELIX_DATA_DIR/asse
     // Use a nested scope so guards (cwd + env) restore BEFORE the final
     // reload that puts the singleton back to its real-database state.
     {
-        EnvGuard data_g("HELIX_DATA_DIR");
-        EnvGuard config_g("HELIX_CONFIG_DIR");
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
         CwdGuard cwd_g;
 
         fs::remove_all(temp_root);
@@ -4057,7 +4355,7 @@ TEST_CASE("PrinterDetector: loads printer_database.json from HELIX_DATA_DIR/asse
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "Seed Test Printer");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     }
 
     // Guards restored: env unset, cwd back at project root. Reload puts
@@ -4075,8 +4373,8 @@ TEST_CASE("PrinterDetector: preset_default survives database array order, not ju
         fs::temp_directory_path() / ("test_printer_detector_order_" + std::to_string(getpid()));
 
     {
-        EnvGuard data_g("HELIX_DATA_DIR");
-        EnvGuard config_g("HELIX_CONFIG_DIR");
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
         CwdGuard cwd_g;
 
         fs::remove_all(temp_root);
@@ -4137,8 +4435,8 @@ TEST_CASE("PrinterDetector: hide_manual_z_calibration reads the database field",
         fs::temp_directory_path() / ("test_printer_detector_toolcal_" + std::to_string(getpid()));
 
     {
-        EnvGuard data_g("HELIX_DATA_DIR");
-        EnvGuard config_g("HELIX_CONFIG_DIR");
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
         CwdGuard cwd_g;
 
         fs::remove_all(temp_root);
@@ -4217,8 +4515,8 @@ TEST_CASE("PrinterDetector: pre-print lookups share one entry, and rates name kn
         }
     } restore{temp_root};
     {
-        EnvGuard data_g("HELIX_DATA_DIR");
-        EnvGuard config_g("HELIX_CONFIG_DIR");
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
         CwdGuard cwd_g;
 
         fs::remove_all(temp_root);
@@ -4301,8 +4599,8 @@ TEST_CASE("PrinterDetector: a malformed database degrades without throwing",
     }
 
     {
-        EnvGuard data_g("HELIX_DATA_DIR");
-        EnvGuard config_g("HELIX_CONFIG_DIR");
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
         CwdGuard cwd_g;
 
         fs::remove_all(temp_root);
@@ -4335,8 +4633,8 @@ TEST_CASE("PrinterDetector: an unchanged broken database is read once, not once 
         }
     } restore{temp_root};
     {
-        EnvGuard data_g("HELIX_DATA_DIR");
-        EnvGuard config_g("HELIX_CONFIG_DIR");
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
         CwdGuard cwd_g;
 
         fs::remove_all(temp_root);
@@ -4377,8 +4675,8 @@ TEST_CASE("PrinterDetector: wrong-typed entry fields read as absent", "[printer]
         }
     } restore{temp_root};
     {
-        EnvGuard data_g("HELIX_DATA_DIR");
-        EnvGuard config_g("HELIX_CONFIG_DIR");
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
         CwdGuard cwd_g;
 
         fs::remove_all(temp_root);
@@ -4394,8 +4692,10 @@ TEST_CASE("PrinterDetector: wrong-typed entry fields read as absent", "[printer]
                         "calibration": "none", "thermal_rates": [1],
                         "print_start_default_phases": { "HOMING": "slow" },
                         "console_filters": "noise", "console_filter_patterns": [3],
-                        "aliases": 9
-                    }
+                        "aliases": 9, "belt_tensioner": 3,
+                        "variant_of": 4, "variant_label": ["x"]
+                    },
+                    { "id": "4", "name": "Base Printer" }
                 ]
             })";
         setenv("HELIX_DATA_DIR", temp_root.c_str(), 1);
@@ -4411,6 +4711,8 @@ TEST_CASE("PrinterDetector: wrong-typed entry fields read as absent", "[printer]
         REQUIRE(PrinterDetector::get_toolhead_style(name).empty());
         REQUIRE(PrinterDetector::get_preset_for_name(name).empty());
         REQUIRE_FALSE(PrinterDetector::is_enclosed(name));
+        REQUIRE(PrinterDetector::get_belt_tensioner(name) ==
+                helix::calibration::BeltTensionerKind::UNKNOWN);
         REQUIRE(PrinterDetector::get_bed_mesh_calibrate_gcode(name).empty());
         REQUIRE_FALSE(PrinterDetector::get_bed_mesh_self_prepares(name));
         REQUIRE(PrinterDetector::get_thermal_rates(name).empty());
@@ -4418,6 +4720,64 @@ TEST_CASE("PrinterDetector: wrong-typed entry fields read as absent", "[printer]
         REQUIRE(PrinterDetector::get_console_filter_patterns(name).empty());
         REQUIRE(PrinterDetector::canonical_type_name("Old Name") == "Old Name");
         REQUIRE(PrinterDetector::get_name_for_preset("5").empty());
+        REQUIRE(PrinterDetector::relate_types(name, "Base Printer").relation ==
+                PrinterDetector::TypeRelation::DifferentModel);
+    }
+}
+
+TEST_CASE("PrinterDetector: belt_tensioner maps the database string to a kind",
+          "[printer][belt_tension]") {
+    using helix::calibration::BeltTensionerKind;
+
+    SECTION("Voron 2.4 and Trident are screw-tensioned") {
+        REQUIRE(PrinterDetector::get_belt_tensioner("Voron 2.4") == BeltTensionerKind::SCREW);
+        REQUIRE(PrinterDetector::get_belt_tensioner("Voron Trident") == BeltTensionerKind::SCREW);
+    }
+
+    SECTION("a printer with no belt_tensioner entry is UNKNOWN") {
+        REQUIRE(PrinterDetector::get_belt_tensioner("Creality K1C") == BeltTensionerKind::UNKNOWN);
+    }
+
+    SECTION("an unknown printer name is UNKNOWN") {
+        REQUIRE(PrinterDetector::get_belt_tensioner("Not A Real Printer") ==
+                BeltTensionerKind::UNKNOWN);
+    }
+
+    SECTION("screw, spring, empty and unrecognised strings") {
+        namespace fs = std::filesystem;
+        auto temp_root =
+            fs::temp_directory_path() / ("test_printer_detector_belt_" + std::to_string(getpid()));
+        struct RestoreDatabase {
+            fs::path root;
+            ~RestoreDatabase() {
+                PrinterDetector::reload();
+                fs::remove_all(root);
+            }
+        } restore{temp_root};
+        helix::ScopedEnv data_g("HELIX_DATA_DIR", nullptr);
+        helix::ScopedEnv config_g("HELIX_CONFIG_DIR", nullptr);
+        CwdGuard cwd_g;
+
+        fs::remove_all(temp_root);
+        fs::create_directories(temp_root / "assets" / "config");
+        fs::create_directories(temp_root / "config_dir");
+        std::ofstream(temp_root / "assets" / "config" / "printer_database.json") << R"({
+                "printers": [
+                    { "id": "a", "name": "Screw Printer", "belt_tensioner": "screw" },
+                    { "id": "b", "name": "Spring Printer", "belt_tensioner": "spring" },
+                    { "id": "c", "name": "Empty Printer", "belt_tensioner": "" },
+                    { "id": "d", "name": "Odd Printer", "belt_tensioner": "cam" }
+                ]
+            })";
+        setenv("HELIX_DATA_DIR", temp_root.c_str(), 1);
+        setenv("HELIX_CONFIG_DIR", (temp_root / "config_dir").c_str(), 1);
+        REQUIRE(chdir(temp_root.c_str()) == 0);
+        PrinterDetector::reload();
+
+        REQUIRE(PrinterDetector::get_belt_tensioner("Screw Printer") == BeltTensionerKind::SCREW);
+        REQUIRE(PrinterDetector::get_belt_tensioner("Spring Printer") == BeltTensionerKind::SPRING);
+        REQUIRE(PrinterDetector::get_belt_tensioner("Empty Printer") == BeltTensionerKind::UNKNOWN);
+        REQUIRE(PrinterDetector::get_belt_tensioner("Odd Printer") == BeltTensionerKind::UNKNOWN);
     }
 }
 
@@ -4573,6 +4933,7 @@ class VariantPresetFixture {
     }
 
     void TearDown() {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
         std::filesystem::remove_all(temp_dir);
         if (had_config_dir_)
             setenv("HELIX_CONFIG_DIR", saved_config_dir_.c_str(), 1);
@@ -4705,7 +5066,7 @@ namespace {
 bool warns_when_separated(const std::string& saved, const std::string& detected, int confidence,
                           const std::string& flag) {
     return PrinterDetector::classify_type_mismatch(saved, detected, confidence, flag,
-                                                   PrinterDetector::DETECT_MIN_MARGIN) ==
+                                                   PrinterDetector::kDetectMinMargin) ==
            PrinterDetector::MismatchDecision::Warn;
 }
 } // namespace
@@ -4723,8 +5084,8 @@ TEST_CASE("classify_type_mismatch warn table", "[detector][mismatch]") {
         // Read from the constant, not spelled out: the warning bar is derived
         // from the auto-save bar so the two cannot land in an order where
         // contradicting a user costs less evidence than filling a blank.
-        REQUIRE(warns_when_separated(ad5m, trident, PD::MISMATCH_MIN_CONFIDENCE, none));
-        REQUIRE_FALSE(warns_when_separated(ad5m, trident, PD::MISMATCH_MIN_CONFIDENCE - 1, none));
+        REQUIRE(warns_when_separated(ad5m, trident, PD::kMismatchMinConfidence, none));
+        REQUIRE_FALSE(warns_when_separated(ad5m, trident, PD::kMismatchMinConfidence - 1, none));
     }
     SECTION("same type never warns") {
         REQUIRE_FALSE(warns_when_separated(ad5m, ad5m, 95, none));
@@ -4826,7 +5187,7 @@ TEST_CASE_METHOD(
     // The unambiguous Voron hardware (QGL + 4x Z steppers) must win, not the
     // LED-name substring match.
     REQUIRE(result.type_name == "Voron 2.4");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -4881,13 +5242,13 @@ TEST_CASE("meets_autosave_threshold table", "[detector][autosave]") {
         // The runner-up is the best candidate offering a DIFFERENT outcome, so
         // a gap here is a gap between two answers the user would tell apart.
         REQUIRE(PD::meets_autosave_threshold(res(100, 91)));
-        REQUIRE(PD::meets_autosave_threshold(res(100, 100 - PD::DETECT_MIN_MARGIN)));
+        REQUIRE(PD::meets_autosave_threshold(res(100, 100 - PD::kDetectMinMargin)));
     }
     SECTION("a rival outcome inside the margin blocks the save") {
         // Writing either name into the config makes a coin flip permanent: a
         // non-empty printer type short-circuits every later detection attempt.
         REQUIRE_FALSE(PD::meets_autosave_threshold(res(100, 100)));
-        REQUIRE_FALSE(PD::meets_autosave_threshold(res(100, 101 - PD::DETECT_MIN_MARGIN)));
+        REQUIRE_FALSE(PD::meets_autosave_threshold(res(100, 101 - PD::kDetectMinMargin)));
     }
     SECTION("undetected never saves") {
         REQUIRE_FALSE(PD::meets_autosave_threshold(res(0, 0)));
@@ -4977,7 +5338,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     CAPTURE(result.confidence, result.runner_up_type_name, result.runner_up_confidence,
             result.reason);
     REQUIRE(result.type_name == "Voron 2.4");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 TEST_CASE_METHOD(PrinterDetectorFixture,
@@ -5108,7 +5469,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
         // leads its sibling by a margin, and the detection may persist.
         REQUIRE(result.type_name == "Creality K2 Pro");
         REQUIRE(result.runner_up_type_name == "Creality K2 Plus");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     }
 
@@ -5128,7 +5489,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "Creality K2");
         REQUIRE(result.runner_up_type_name == "Creality K2 Plus");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     }
 
@@ -5147,7 +5508,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
         REQUIRE(result.detected());
         REQUIRE(result.type_name == "Creality K2 Plus");
         REQUIRE(result.runner_up_type_name == "Creality K2 Pro");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
         // A separated detection leaves nothing to choose between.
         CHECK(result.contenders == std::vector<std::string>{"Creality K2 Plus"});
@@ -5230,7 +5591,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
         // separator opt-in does not fire. The detection stays under the
         // autosave bar a real match would clear.
         REQUIRE(result.margin() == 0);
-        REQUIRE(result.confidence < PrinterDetector::AUTOSAVE_MIN_CONFIDENCE);
+        REQUIRE(result.confidence < PrinterDetector::kAutosaveMinConfidence);
         REQUIRE_FALSE(PrinterDetector::meets_autosave_threshold(result));
     }
 }
@@ -5250,7 +5611,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
         CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.type_name == "Creality K2 Plus");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     }
 
@@ -5267,7 +5628,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.type_name == "Creality K2 Plus");
         REQUIRE(result.runner_up_type_name == "Creality K2 Pro");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     }
 
@@ -5278,7 +5639,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
         CAPTURE(result.type_name, result.confidence, result.runner_up_type_name,
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.type_name == "Creality K2 Pro");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     }
 
@@ -5294,7 +5655,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
                 result.runner_up_confidence, result.margin(), result.tied_count);
         REQUIRE(result.type_name == "Creality K2 Pro");
         REQUIRE(result.runner_up_type_name == "Creality K2 Plus");
-        REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+        REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
         REQUIRE(PrinterDetector::meets_autosave_threshold(result));
     }
 
@@ -5386,7 +5747,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: a 500mm Geralkom keep
     auto result = PrinterDetector::detect(hardware);
     CAPTURE(result.confidence, result.runner_up_type_name, result.runner_up_confidence);
     REQUIRE(result.type_name == "Geralkom X500 HT");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
 }
 
 // ============================================================================
@@ -5416,7 +5777,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture,
     CAPTURE(result.type_name, result.confidence, result.reason);
 
     REQUIRE(result.type_name == "Voron 0.2");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     // The Qidi entries can still corroborate, but none of them may lead.
     REQUIRE(result.type_name.find("Qidi") == std::string::npos);
     // Well clear of the runner-up rather than a coin toss.
@@ -5489,7 +5850,7 @@ TEST_CASE_METHOD(PrinterDetectorFixture, "PrinterDetector: a real Qidi X-Max 3 i
     auto result = PrinterDetector::detect(hardware);
     CAPTURE(result.type_name, result.confidence);
     REQUIRE(result.type_name == "Qidi X-Max 3");
-    REQUIRE(result.margin() >= PrinterDetector::DETECT_MIN_MARGIN);
+    REQUIRE(result.margin() >= PrinterDetector::kDetectMinMargin);
     REQUIRE(PrinterDetector::meets_autosave_threshold(result));
 }
 
@@ -5507,20 +5868,20 @@ TEST_CASE("PrinterDetector: type mismatch decline reasons are distinguishable", 
     SECTION("A high-confidence contradiction warns") {
         REQUIRE(PrinterDetector::classify_type_mismatch(
                     "Voron Trident", "FlashForge Adventurer 5M Pro", 90, "",
-                    PrinterDetector::DETECT_MIN_MARGIN) == MD::Warn);
+                    PrinterDetector::kDetectMinMargin) == MD::Warn);
     }
 
     SECTION("No detected type reports NoDetection, not a low score") {
         REQUIRE(PrinterDetector::classify_type_mismatch("Voron Trident", "", 0, "",
-                                                        PrinterDetector::DETECT_MIN_MARGIN) ==
+                                                        PrinterDetector::kDetectMinMargin) ==
                 MD::NoDetection);
     }
 
     SECTION("A near-miss reports ConfidenceTooLow and names the gap it missed") {
-        REQUIRE(PrinterDetector::classify_type_mismatch(
-                    "Voron Trident", "Creality K2 Plus",
-                    PrinterDetector::MISMATCH_MIN_CONFIDENCE - 1, "",
-                    PrinterDetector::DETECT_MIN_MARGIN) == MD::ConfidenceTooLow);
+        REQUIRE(PrinterDetector::classify_type_mismatch("Voron Trident", "Creality K2 Plus",
+                                                        PrinterDetector::kMismatchMinConfidence - 1,
+                                                        "", PrinterDetector::kDetectMinMargin) ==
+                MD::ConfidenceTooLow);
     }
 
     SECTION("A model that only tied its rivals reports Ambiguous, not a low score") {
@@ -5532,26 +5893,26 @@ TEST_CASE("PrinterDetector: type mismatch decline reasons are distinguishable", 
 
     SECTION("Agreement reports MatchesSavedType") {
         REQUIRE(PrinterDetector::classify_type_mismatch("Voron Trident", "Voron Trident", 95, "",
-                                                        PrinterDetector::DETECT_MIN_MARGIN) ==
+                                                        PrinterDetector::kDetectMinMargin) ==
                 MD::MatchesSavedType);
     }
 
     SECTION("An unset or deliberately generic saved type reports SavedTypeNotSpecific") {
         REQUIRE(PrinterDetector::classify_type_mismatch("", "Creality K2 Plus", 95, "",
-                                                        PrinterDetector::DETECT_MIN_MARGIN) ==
+                                                        PrinterDetector::kDetectMinMargin) ==
                 MD::SavedTypeNotSpecific);
         REQUIRE(PrinterDetector::classify_type_mismatch("Custom/Other", "Creality K2 Plus", 95, "",
-                                                        PrinterDetector::DETECT_MIN_MARGIN) ==
+                                                        PrinterDetector::kDetectMinMargin) ==
                 MD::SavedTypeNotSpecific);
         REQUIRE(PrinterDetector::classify_type_mismatch("Unknown", "Creality K2 Plus", 95, "",
-                                                        PrinterDetector::DETECT_MIN_MARGIN) ==
+                                                        PrinterDetector::kDetectMinMargin) ==
                 MD::SavedTypeNotSpecific);
     }
 
     SECTION("A previously answered prompt reports AlreadyDismissed") {
         REQUIRE(PrinterDetector::classify_type_mismatch(
                     "Voron Trident", "Creality K2 Plus", 95, "Voron Trident",
-                    PrinterDetector::DETECT_MIN_MARGIN) == MD::AlreadyDismissed);
+                    PrinterDetector::kDetectMinMargin) == MD::AlreadyDismissed);
     }
 
     SECTION("Every decision has its own log tag") {

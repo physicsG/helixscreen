@@ -1,0 +1,56 @@
+diff --git a/http/client/HttpClient.cpp b/http/client/HttpClient.cpp
+index 0960b68..b1aeb05 100644
+--- a/http/client/HttpClient.cpp
++++ b/http/client/HttpClient.cpp
+@@ -1,5 +1,6 @@
+ #include "HttpClient.h"
+ 
++#include <atomic>
+ #include <mutex>
+ 
+ #ifdef WITH_CURL
+@@ -164,6 +165,13 @@ int http_client_add_no_proxy(http_client_t* cli, const char* host) {
+     return 0;
+ }
+ 
++// PATCH NOTE(helixscreen): set once by the host, read from any sending thread.
++static std::atomic<hv_http_request_hook_t> s_http_request_hook{NULL};
++
++void hv_set_http_request_hook(hv_http_request_hook_t hook) {
++    s_http_request_hook.store(hook, std::memory_order_release);
++}
++
+ static int http_client_make_request(http_client_t* cli, HttpRequest* req) {
+     if (req->url.empty() || *req->url.c_str() == '/') {
+         req->scheme = cli->https ? "https" : "http";
+@@ -202,6 +210,11 @@ static int http_client_make_request(http_client_t* cli, HttpRequest* req) {
+         }
+     }
+ 
++    hv_http_request_hook_t hook = s_http_request_hook.load(std::memory_order_acquire);
++    if (hook) {
++        hook(req);
++    }
++
+     return 0;
+ }
+ 
+diff --git a/http/client/HttpClient.h b/http/client/HttpClient.h
+index 4891bb6..5f0e8a5 100644
+--- a/http/client/HttpClient.h
++++ b/http/client/HttpClient.h
+@@ -68,6 +68,14 @@ HV_EXPORT int http_client_send(HttpRequest* req, HttpResponse* resp);
+ // http_client_send_async(&default_async_client, ...)
+ HV_EXPORT int http_client_send_async(HttpRequestPtr req, HttpResponseCallback resp_cb = NULL);
+ 
++// PATCH NOTE(helixscreen): one hook sees every client request once its URL is
++// parsed and before it is sent, so the host can attach a credential to the
++// requests bound for one server without every call site doing it. Covers
++// http_client_send, http_client_send_async and hv::HttpClient. NULL, the
++// default, does nothing.
++typedef void (*hv_http_request_hook_t)(HttpRequest* req);
++HV_EXPORT void hv_set_http_request_hook(hv_http_request_hook_t hook);
++
+ // low-level api
+ // @retval >=0 connfd, <0 error
+ HV_EXPORT int http_client_connect(http_client_t* cli, const char* host, int port, int https, int timeout);

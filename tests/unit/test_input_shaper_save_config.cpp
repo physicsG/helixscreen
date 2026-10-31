@@ -17,18 +17,19 @@
  *    monitor safe_multi_edit() runs after FIRMWARE_RESTART polls is_connected()
  *    every 500ms; a mock that never reports a disconnect makes Phase 1 run to
  *    the restart timeout and then take the "fast restart" success path.
- *  - A short restart timeout, injected through InputShaperPanelTestAccess. The
- *    panel's own 30s default would make every case a 30s wait.
+ *  - A 1ms restart timeout, injected through InputShaperPanelTestAccess, so
+ *    each phase ends after its first poll. The panel's own 30s default would
+ *    make every case a 30s wait.
  *
  * The health monitor runs on HttpExecutor::fast() and captures the panel's
  * config_editor_ and this fixture's MoonrakerAPIMock by reference, so no case
  * may return while it is still in flight. settle() is the join, and the fixture
  * destructor repeats it unconditionally.
  *
- * That poll costs each async case about 1.5s of real time. Deliberately NOT
+ * That one poll costs each async case 500ms of real time. Deliberately NOT
  * tagged [slow]: `make test-run` filters [slow] out, and a path that rewrites
  * the user's printer config should not be absent from the default run to save
- * a second and a half.
+ * half a second.
  */
 
 #include "ui_panel_input_shaper.h"
@@ -37,6 +38,7 @@
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/input_shaper_panel_test_access.h"
 #include "../test_helpers/moonraker_client_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "http_executor.h"
 #include "moonraker_api.h"
@@ -161,6 +163,7 @@ class SaveConfigFixture : public LVGLTestFixture {
         panel_.init_subjects();
         panel_.set_api(&client_, &api_);
         ::InputShaperPanelTestAccess::set_save_restart_timeout_ms(panel_, kRestartTimeoutMs);
+        ::InputShaperPanelTestAccess::set_restart_poll_interval(panel_, kRestartPollInterval);
         ::InputShaperPanelTestAccess::clear_results(panel_);
         UpdateQueue::instance().drain();
     }
@@ -187,6 +190,9 @@ class SaveConfigFixture : public LVGLTestFixture {
     /// budget, which every case asserts on rather than reading a half-written
     /// config.
     bool settle() {
+        // The config walk downloads from the main thread, so the queue runs it
+        // up to the write and the restart before there is a worker to join.
+        UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
         bool joined = join_worker(kJoinTimeoutMs);
         UpdateQueue::instance().drain();
         return joined;
@@ -203,10 +209,12 @@ class SaveConfigFixture : public LVGLTestFixture {
     InputShaperPanel& panel_;
 
   private:
-    /// Phase 1 of the health monitor polls for kRestartTimeoutMs before it
-    /// concludes "fast restart", so the join budget has to clear that with room
-    /// for a loaded CI box.
-    static constexpr uint32_t kRestartTimeoutMs = 1200;
+    /// Phase 1 of the health monitor checks the connection, sleeps one poll
+    /// interval, and only then sees the timeout, so 1ms is one poll there. The
+    /// revert case also polls once in Phase 2, whose timeout counts from the
+    /// same start. The join budget clears that with room for a loaded CI box.
+    static constexpr uint32_t kRestartTimeoutMs = 1;
+    static constexpr std::chrono::milliseconds kRestartPollInterval{1};
     static constexpr uint32_t kJoinTimeoutMs = 20000;
 
     bool join_worker(uint32_t timeout_ms) {

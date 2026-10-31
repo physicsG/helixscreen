@@ -32,22 +32,22 @@ json zmod_rule(const char* id = "zmod_tare", const char* macro = "LOAD_CELL_TARE
     };
 }
 
-const std::unordered_set<std::string> ZMOD_MACROS = {"LOAD_CELL_TARE", "BED_LEVEL_SCREWS_TUNE",
+const std::unordered_set<std::string> kZmodMacros = {"LOAD_CELL_TARE", "BED_LEVEL_SCREWS_TUNE",
                                                      "SCREWS_TILT_CALCULATE"};
-const std::unordered_set<std::string> STOCK_MACROS = {"SCREWS_TILT_CALCULATE", "G28"};
+const std::unordered_set<std::string> kStockMacros = {"SCREWS_TILT_CALCULATE", "G28"};
 
 } // namespace
 
 TEST_CASE("No rules means send nothing", "[calibration][probe_prep]") {
     SECTION("empty array") {
-        REQUIRE(resolve_from_rules(json::array(), ZMOD_MACROS, {}, Operation::ScrewsTilt).empty());
+        REQUIRE(resolve_from_rules(json::array(), kZmodMacros, {}, Operation::ScrewsTilt).empty());
     }
     SECTION("null - the key is absent from the database") {
-        REQUIRE(resolve_from_rules(json(), ZMOD_MACROS, {}, Operation::ScrewsTilt).empty());
+        REQUIRE(resolve_from_rules(json(), kZmodMacros, {}, Operation::ScrewsTilt).empty());
     }
     SECTION("wrong type entirely") {
         REQUIRE(
-            resolve_from_rules(json("nonsense"), ZMOD_MACROS, {}, Operation::ScrewsTilt).empty());
+            resolve_from_rules(json("nonsense"), kZmodMacros, {}, Operation::ScrewsTilt).empty());
     }
 }
 
@@ -55,7 +55,7 @@ TEST_CASE("A rule fires only when its predicate holds", "[calibration][probe_pre
     const json rules = json::array({zmod_rule()});
 
     SECTION("macro present - fires") {
-        const Preparation p = resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt);
+        const Preparation p = resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt);
         REQUIRE_FALSE(p.empty());
         REQUIRE(p.gcode == "LOAD_CELL_TARE");
         REQUIRE(p.label == "Zeroing load cell");
@@ -64,7 +64,7 @@ TEST_CASE("A rule fires only when its predicate holds", "[calibration][probe_pre
     }
 
     SECTION("macro absent - stays silent instead of sending Unknown command") {
-        REQUIRE(resolve_from_rules(rules, STOCK_MACROS, {}, Operation::ScrewsTilt).empty());
+        REQUIRE(resolve_from_rules(rules, kStockMacros, {}, Operation::ScrewsTilt).empty());
     }
 }
 
@@ -73,9 +73,9 @@ TEST_CASE("Operations gate which probes get prepared", "[calibration][probe_prep
     rule["operations"] = json::array({"bed_mesh"});
     const json rules = json::array({rule});
 
-    REQUIRE_FALSE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::BedMesh).empty());
-    REQUIRE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt).empty());
-    REQUIRE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ProbeAccuracy).empty());
+    REQUIRE_FALSE(resolve_from_rules(rules, kZmodMacros, {}, Operation::BedMesh).empty());
+    REQUIRE(resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt).empty());
+    REQUIRE(resolve_from_rules(rules, kZmodMacros, {}, Operation::ProbeAccuracy).empty());
 }
 
 TEST_CASE("Multiple when entries are ANDed", "[calibration][probe_prep]") {
@@ -87,10 +87,10 @@ TEST_CASE("Multiple when entries are ANDed", "[calibration][probe_prep]") {
     const json rules = json::array({rule});
 
     SECTION("one of two present - does NOT fire") {
-        REQUIRE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt).empty());
+        REQUIRE(resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt).empty());
     }
     SECTION("both present - fires") {
-        std::unordered_set<std::string> macros = ZMOD_MACROS;
+        std::unordered_set<std::string> macros = kZmodMacros;
         macros.insert("SOME_OTHER_MACRO");
         REQUIRE_FALSE(resolve_from_rules(rules, macros, {}, Operation::ScrewsTilt).empty());
     }
@@ -114,12 +114,12 @@ TEST_CASE("First matching rule wins, so a rename ships as a second rule",
         REQUIRE(p.gcode == "LOAD_CELL_ZERO");
     }
     SECTION("old firmware picks the old name") {
-        const Preparation p = resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt);
+        const Preparation p = resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt);
         REQUIRE(p.rule_id == "zmod_tare_v1");
         REQUIRE(p.gcode == "LOAD_CELL_TARE");
     }
     SECTION("neither present - nothing is sent") {
-        REQUIRE(resolve_from_rules(rules, STOCK_MACROS, {}, Operation::ScrewsTilt).empty());
+        REQUIRE(resolve_from_rules(rules, kStockMacros, {}, Operation::ScrewsTilt).empty());
     }
 }
 
@@ -128,14 +128,14 @@ TEST_CASE("gcode accepts a bare string or an array", "[calibration][probe_prep]"
         json rule = zmod_rule();
         rule["gcode"] = "LOAD_CELL_TARE";
         REQUIRE(
-            resolve_from_rules(json::array({rule}), ZMOD_MACROS, {}, Operation::ScrewsTilt).gcode ==
+            resolve_from_rules(json::array({rule}), kZmodMacros, {}, Operation::ScrewsTilt).gcode ==
             "LOAD_CELL_TARE");
     }
     SECTION("multi-command array joins with newlines") {
         json rule = zmod_rule();
         rule["gcode"] = json::array({"M104 S130", "M140 S80", "LOAD_CELL_TARE"});
         REQUIRE(
-            resolve_from_rules(json::array({rule}), ZMOD_MACROS, {}, Operation::ScrewsTilt).gcode ==
+            resolve_from_rules(json::array({rule}), kZmodMacros, {}, Operation::ScrewsTilt).gcode ==
             "M104 S130\nM140 S80\nLOAD_CELL_TARE");
     }
 }
@@ -149,7 +149,7 @@ TEST_CASE("Unrecognised predicates fail closed", "[calibration][probe_prep]") {
     SECTION("unknown predicate type does NOT match") {
         json rule = zmod_rule();
         rule["when"] = json::array({json{{"type", "phase_of_moon"}, {"pattern", "waxing"}}});
-        REQUIRE(resolve_from_rules(json::array({rule}), ZMOD_MACROS, {}, Operation::ScrewsTilt)
+        REQUIRE(resolve_from_rules(json::array({rule}), kZmodMacros, {}, Operation::ScrewsTilt)
                     .empty());
     }
     SECTION("a known predicate alongside an unknown one still fails") {
@@ -158,13 +158,13 @@ TEST_CASE("Unrecognised predicates fail closed", "[calibration][probe_prep]") {
             json{{"type", "macro_match"}, {"field", "macros"}, {"pattern", "LOAD_CELL_TARE"}},
             json{{"type", "phase_of_moon"}, {"pattern", "waxing"}},
         });
-        REQUIRE(resolve_from_rules(json::array({rule}), ZMOD_MACROS, {}, Operation::ScrewsTilt)
+        REQUIRE(resolve_from_rules(json::array({rule}), kZmodMacros, {}, Operation::ScrewsTilt)
                     .empty());
     }
     SECTION("a rule with no when clause at all does NOT match everything") {
         json rule = zmod_rule();
         rule.erase("when");
-        REQUIRE(resolve_from_rules(json::array({rule}), ZMOD_MACROS, {}, Operation::ScrewsTilt)
+        REQUIRE(resolve_from_rules(json::array({rule}), kZmodMacros, {}, Operation::ScrewsTilt)
                     .empty());
     }
 }
@@ -185,7 +185,7 @@ TEST_CASE("Malformed rules are skipped without taking the list down", "[calibrat
     });
 
     Preparation p;
-    REQUIRE_NOTHROW(p = resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt));
+    REQUIRE_NOTHROW(p = resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt));
     REQUIRE(p.rule_id == "good_rule");
 }
 
@@ -193,7 +193,7 @@ TEST_CASE("A rule can be disabled by a drop-in", "[calibration][probe_prep]") {
     json rule = zmod_rule();
     rule["enabled"] = false;
     REQUIRE(
-        resolve_from_rules(json::array({rule}), ZMOD_MACROS, {}, Operation::ScrewsTilt).empty());
+        resolve_from_rules(json::array({rule}), kZmodMacros, {}, Operation::ScrewsTilt).empty());
 }
 
 /**
@@ -207,22 +207,22 @@ TEST_CASE("skip_if_macro_in stands down for a self-preparing macro", "[calibrati
     const json rules = json::array({rule});
 
     SECTION("bare command - preparation still applies") {
-        REQUIRE_FALSE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt,
+        REQUIRE_FALSE(resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt,
                                          "SCREWS_TILT_CALCULATE")
                           .empty());
     }
     SECTION("self-preparing macro - preparation stands down") {
-        REQUIRE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt,
+        REQUIRE(resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt,
                                    "BED_LEVEL_SCREWS_TUNE")
                     .empty());
     }
     SECTION("case-insensitive, since macro names round-trip through config") {
-        REQUIRE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::ScrewsTilt,
+        REQUIRE(resolve_from_rules(rules, kZmodMacros, {}, Operation::ScrewsTilt,
                                    "bed_level_screws_tune")
                     .empty());
     }
     SECTION("only affects the named macro, not other operations") {
-        REQUIRE_FALSE(resolve_from_rules(rules, ZMOD_MACROS, {}, Operation::BedMesh, "").empty());
+        REQUIRE_FALSE(resolve_from_rules(rules, kZmodMacros, {}, Operation::BedMesh, "").empty());
     }
 }
 
@@ -249,28 +249,28 @@ TEST_CASE("object_exists keys a rule off the module object, not the command name
 
     SECTION("object present - fires") {
         const Preparation p =
-            resolve_from_rules(rules, STOCK_MACROS, {"load_cell_probe"}, Operation::ScrewsTilt);
+            resolve_from_rules(rules, kStockMacros, {"load_cell_probe"}, Operation::ScrewsTilt);
         REQUIRE(p.rule_id == "obj_tare");
         REQUIRE(p.gcode == "LOAD_CELL_TARE");
     }
     SECTION("object absent - stays silent") {
         REQUIRE(
-            resolve_from_rules(rules, STOCK_MACROS, {"toolhead"}, Operation::ScrewsTilt).empty());
+            resolve_from_rules(rules, kStockMacros, {"toolhead"}, Operation::ScrewsTilt).empty());
     }
     SECTION("case-insensitive, like the detection heuristic") {
         REQUIRE_FALSE(
-            resolve_from_rules(rules, STOCK_MACROS, {"LOAD_CELL_PROBE"}, Operation::ScrewsTilt)
+            resolve_from_rules(rules, kStockMacros, {"LOAD_CELL_PROBE"}, Operation::ScrewsTilt)
                 .empty());
     }
     SECTION("anchors pin the whole name") {
         json anchored = rule;
         anchored["when"] = json::array({json{{"type", "object_exists"}, {"pattern", "^box$"}}});
         const json anchored_rules = json::array({anchored});
-        REQUIRE(resolve_from_rules(anchored_rules, STOCK_MACROS, {"gcode_macro BOX_UNLOAD"},
+        REQUIRE(resolve_from_rules(anchored_rules, kStockMacros, {"gcode_macro BOX_UNLOAD"},
                                    Operation::ScrewsTilt)
                     .empty());
         REQUIRE_FALSE(
-            resolve_from_rules(anchored_rules, STOCK_MACROS, {"box"}, Operation::ScrewsTilt)
+            resolve_from_rules(anchored_rules, kStockMacros, {"box"}, Operation::ScrewsTilt)
                 .empty());
     }
 }
@@ -305,10 +305,17 @@ TEST_CASE("Shipped rules: COSMOS tares via its object, the ZMOD via its macro",
         REQUIRE(p.rule_id == "cosmos_load_cell_tare");
         REQUIRE(p.gcode == "LOAD_CELL_TARE");
     }
-    SECTION("COSMOS: screws tilt is left alone") {
-        // COSMOS's SCREWS_TILT_CALCULATE tares the load cell itself.
-        REQUIRE(resolve_from_rules(rules, cosmos_macros, cosmos_objects, Operation::ScrewsTilt)
-                    .empty());
+    SECTION("COSMOS: screws tilt gets the tare too") {
+        // Only a self-preparing shipped sequence skips it, and that never reaches the rules.
+        const Preparation p =
+            resolve_from_rules(rules, cosmos_macros, cosmos_objects, Operation::ScrewsTilt);
+        REQUIRE(p.rule_id == "cosmos_load_cell_tare");
+        REQUIRE(p.gcode == "LOAD_CELL_TARE");
+    }
+    SECTION("COSMOS: bed mesh is left alone") {
+        // COSMOS's BED_MESH_CALIBRATE tares the load cell itself.
+        REQUIRE(
+            resolve_from_rules(rules, cosmos_macros, cosmos_objects, Operation::BedMesh).empty());
     }
     SECTION("load_cell_probe without _COSMOS_SETTINGS stays silent") {
         const std::unordered_set<std::string> other_macros = {"SCREWS_TILT_CALCULATE", "G28"};

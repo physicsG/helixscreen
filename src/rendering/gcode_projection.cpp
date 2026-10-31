@@ -33,12 +33,12 @@ glm::ivec2 project(const ProjectionParams& params, float x, float y, float z) {
         float dz = z - params.offset_z;
 
         // Horizontal rotation (around Z axis)
-        float rx = dx * COS_H - dy * SIN_H;
-        float ry = dx * SIN_H + dy * COS_H;
+        float rx = dx * kCosH - dy * kSinH;
+        float ry = dx * kSinH + dy * kCosH;
 
         // Elevation (tilt camera down)
         sx = rx * params.scale + half_w;
-        sy = half_h - (dz * COS_E + ry * SIN_E) * params.scale;
+        sy = half_h - (dz * kCosE + ry * kSinE) * params.scale;
         break;
     }
 
@@ -47,8 +47,8 @@ glm::ivec2 project(const ProjectionParams& params, float x, float y, float z) {
         float dx = x - params.offset_x;
         float dy = y - params.offset_y;
 
-        float iso_x = (dx - dy) * ISO_ANGLE;
-        float iso_y = (dx + dy) * ISO_ANGLE * ISO_Y_SCALE;
+        float iso_x = (dx - dy) * kIsoAngle;
+        float iso_y = (dx + dy) * kIsoAngle * kIsoYScale;
 
         sx = iso_x * params.scale + half_w;
         sy = half_h - iso_y * params.scale;
@@ -108,11 +108,11 @@ float parity_content_offset_y(int canvas_width_px, int canvas_height_px) {
     const float canvas_h = static_cast<float>(canvas_height_px);
     const float side = std::min(canvas_w, canvas_h);
     const float frame_top =
-        (canvas_h - side) * 0.5f - projection::thumbnail_parity::LIFT * canvas_h;
+        (canvas_h - side) * 0.5f - projection::thumbnail_parity::kLift * canvas_h;
 
     // Pin the model's centre, not its edges: the measured thumbnails put the
     // model centre at ~55% of the frame whatever the model fills.
-    const float model_center_y = frame_top + projection::thumbnail_parity::CENTER_Y * side;
+    const float model_center_y = frame_top + projection::thumbnail_parity::kCenterY * side;
 
     // project() adds this to the canvas-centred Y, so express it as the shift
     // from centre rather than as an absolute position.
@@ -155,11 +155,11 @@ AutoFitResult compute_auto_fit(const AABB& raw_bb, ViewMode view_mode, int canva
         float z_range = bb.max.z - bb.min.z;
 
         // Horizontal extent after 45° rotation (cos(-45°) = cos(45°) = 0.7071)
-        range_x = (xy_range_x + xy_range_y) * COS_H;
+        range_x = (xy_range_x + xy_range_y) * kCosH;
 
         // Vertical extent: Z * cos(45°) + Y_depth * sin(45°)
-        float y_depth = (xy_range_x + xy_range_y) * COS_H;
-        range_y = z_range * COS_E + y_depth * SIN_E;
+        float y_depth = (xy_range_x + xy_range_y) * kCosH;
+        range_y = z_range * kCosE + y_depth * kSinE;
 
         result.offset_z = (bb.min.z + bb.max.z) / 2.0f;
         break;
@@ -168,8 +168,8 @@ AutoFitResult compute_auto_fit(const AABB& raw_bb, ViewMode view_mode, int canva
     case ViewMode::ISOMETRIC: {
         float xy_range_x = bb.max.x - bb.min.x;
         float xy_range_y = bb.max.y - bb.min.y;
-        range_x = (xy_range_x + xy_range_y) * ISO_ANGLE;
-        range_y = (xy_range_x + xy_range_y) * ISO_ANGLE * ISO_Y_SCALE;
+        range_x = (xy_range_x + xy_range_y) * kIsoAngle;
+        range_y = (xy_range_x + xy_range_y) * kIsoAngle * kIsoYScale;
         break;
     }
 
@@ -219,7 +219,7 @@ AutoFitResult compute_auto_fit(const AABB& raw_bb, ViewMode view_mode, int canva
     // bottom UI strip; a genuinely elongated one keeps the whole canvas and is
     // allowed to run under it rather than shrinking by (1 - occlusion).
     // Ratios of the padded ranges, so this is independent of canvas size.
-    result.elongated = range_y > ELONGATION_LIMIT * range_x;
+    result.elongated = range_y > kElongationLimit * range_x;
 
     const float occlusion = std::clamp(bottom_occlusion, 0.0f, 1.0f);
     const float usable_height = result.elongated

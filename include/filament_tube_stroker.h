@@ -24,6 +24,7 @@
  * intentionally thinner/dimmer than the detail panel).
  */
 
+#include "board_identity.h"
 #include "filament_path_geometry.h"
 #include "lvgl/lvgl.h"
 
@@ -34,16 +35,21 @@ namespace pg = pathgeo;
 
 // Centerline fillet radius for orthogonal lane routing (route_orthogonal clamps
 // internally, so tight layouts degrade gracefully to jogs / straight runs).
-inline constexpr float FILLET_RADIUS = 12.0f;
+inline constexpr float kFilletRadius = 12.0f;
 
 // Halo around the active route: two opaque bands pre-blended from the background
 // toward the wall color, so overlapping chords and bends never double-blend.
-inline constexpr int32_t HALO_WIDTH_EXTRA = 6; // outer band: gauge + 6
-inline constexpr int32_t HALO_INNER_EXTRA = 3; // inner band: gauge + 3
-inline constexpr float HALO_OUTER_MIX = 0.25f; // wall share, outer band
-inline constexpr float HALO_INNER_MIX = 0.55f; // wall share, inner band
+inline constexpr int32_t kHaloWidthExtra = 6; // outer band: gauge + 6
+inline constexpr int32_t kHaloInnerExtra = 3; // inner band: gauge + 3
+inline constexpr float kHaloOuterMix = 0.25f; // wall share, outer band
+inline constexpr float kHaloInnerMix = 0.55f; // wall share, inner band
 
-/// Detect low-performance platforms (K1/K2/MIPS or constrained-memory devices).
+/// Whether a board's row or its memory size calls for reduced effects. Pure: the
+/// decision behind reduced_effects(), separate from its cached evaluation.
+bool reduced_effects_for(const board::Info& board, bool constrained_memory);
+
+/// Detect low-performance platforms: a board whose row asks for it (K2) or a
+/// constrained-memory device (the K1C's 214MB qualifies, the AD5X's 485MB does not).
 /// When true, the stroker drops the halo; walls and bore still draw.
 bool reduced_effects();
 

@@ -23,4 +23,15 @@ class PlrOfferControllerTestAccess {
     static bool prompted(const helix::ui::PlrOfferController& c) {
         return c.prompted_this_connect_;
     }
+    static int offers_shown(const helix::ui::PlrOfferController& c) {
+        return c.offers_shown_;
+    }
+    /// The path the plugin's status reply takes, minus the RPC.
+    static void plugin_status_arrived(helix::ui::PlrOfferController& c,
+                                      const helix::PlrPluginStatus& status) {
+        c.on_plugin_status(status);
+    }
+    static bool has_plugin_status(const helix::ui::PlrOfferController& c) {
+        return c.plugin_status_.has_value();
+    }
 };

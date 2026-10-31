@@ -64,11 +64,11 @@ TEST_CASE_METHOD(HelixTestFixture, "adopt_pending_light_button: fills unset butt
                  "[led][light_button]") {
     auto* cfg = Config::get_instance();
     auto pc = load_panel("t_lb_adopt", nlohmann::json::array({entry("led", true)}));
-    cfg->set(cfg->df() + led::LIGHT_BUTTON_PENDING_PATH, std::string("neopixel a"));
+    cfg->set(cfg->df() + led::kLightButtonPendingPath, std::string("neopixel a"));
 
     CHECK(adopt_pending_light_button(*cfg, pc));
     CHECK(pc.get_widget_config("led")["led"] == "neopixel a");
-    CHECK(cfg->try_get_json(cfg->df() + led::LIGHT_BUTTON_PENDING_PATH)->is_null());
+    CHECK(cfg->try_get_json(cfg->df() + led::kLightButtonPendingPath)->is_null());
     CHECK_FALSE(adopt_pending_light_button(*cfg, pc));
 }
 
@@ -77,7 +77,7 @@ TEST_CASE_METHOD(HelixTestFixture, "adopt_pending_light_button: never overwrites
     auto* cfg = Config::get_instance();
     auto pc = load_panel("t_lb_keep",
                          nlohmann::json::array({entry("led", true, {{"led", "neopixel b"}})}));
-    cfg->set(cfg->df() + led::LIGHT_BUTTON_PENDING_PATH, std::string("all"));
+    cfg->set(cfg->df() + led::kLightButtonPendingPath, std::string("all"));
     CHECK_FALSE(adopt_pending_light_button(*cfg, pc));
     CHECK(pc.get_widget_config("led")["led"] == "neopixel b");
 }
@@ -88,10 +88,10 @@ TEST_CASE_METHOD(HelixTestFixture,
                  "[led][light_button]") {
     auto* cfg = Config::get_instance();
     auto pc = load_panel("t_lb_nobuttons", nlohmann::json::array({}));
-    cfg->set(cfg->df() + led::LIGHT_BUTTON_PENDING_PATH, std::string("neopixel a"));
+    cfg->set(cfg->df() + led::kLightButtonPendingPath, std::string("neopixel a"));
 
     CHECK_FALSE(adopt_pending_light_button(*cfg, pc));
-    CHECK(cfg->try_get_json(cfg->df() + led::LIGHT_BUTTON_PENDING_PATH)->is_null());
+    CHECK(cfg->try_get_json(cfg->df() + led::kLightButtonPendingPath)->is_null());
 
     // A button added after the pass sees no pending value left to adopt, so it
     // reads as the chamber-light default, not the stale staged value.
@@ -108,7 +108,7 @@ TEST_CASE_METHOD(HelixTestFixture,
     auto pc = load_panel("t_lb_two", nlohmann::json::array({entry("led", true), second}));
     CHECK(home_light_button_keys(pc, "all") == std::vector<std::string>{"all", "neopixel b"});
 
-    cfg->set(cfg->df() + led::LIGHT_BUTTON_PENDING_PATH, std::string("neopixel a"));
+    cfg->set(cfg->df() + led::kLightButtonPendingPath, std::string("neopixel a"));
     CHECK(adopt_pending_light_button(*cfg, pc));
     CHECK(pc.get_widget_config("led")["led"] == "neopixel a");
     CHECK(pc.get_widget_config("led:1")["led"] == "neopixel b");

@@ -111,10 +111,10 @@ mtime() { stat -c %Y "$1"; }
     printf '%s\nall:\n\t+@echo "[$(LIBHV_DRY_RUN)]"\n' "$def" > "$mf"
 
     # Under -n make echoes a `+` line before running it, so read the last line.
-    run make --no-print-directory -n -f "$mf"
+    run make -C "$BATS_TEST_TMPDIR" --no-print-directory -n -f "$mf"
     [ "${lines[${#lines[@]}-1]}" = "[-n]" ]
-    run make --no-print-directory -f "$mf"
+    run make -C "$BATS_TEST_TMPDIR" --no-print-directory -f "$mf"
     [ "$output" = "[]" ]
-    run make --no-print-directory -s -f "$mf"
+    run make -C "$BATS_TEST_TMPDIR" --no-print-directory -s -f "$mf"
     [ "$output" = "[]" ]
 }

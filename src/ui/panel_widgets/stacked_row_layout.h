@@ -27,7 +27,7 @@ struct StackedRowMetrics {
 /// tracks — one cell, one and a half, or two. Stacking starts above one whole
 /// cell. A static_assert at each call site ties this to the real
 /// TRACKS_PER_CELL so a change to the grid cannot leave it stale.
-inline constexpr int ICON_ABOVE_MIN_ROWSPAN = 3;
+inline constexpr int kIconAboveMinRowspan = 3;
 
 /// Decide whether the icon-above-temperature layout fits.
 ///
@@ -49,7 +49,7 @@ inline constexpr int ICON_ABOVE_MIN_ROWSPAN = 3;
 /// resolved — returns false, the layout that fits in strictly less room.
 [[nodiscard]] inline bool wants_icon_above(int rowspan, int avail_px, int row_count,
                                            const StackedRowMetrics& row, int row_gap_px) {
-    if (rowspan < ICON_ABOVE_MIN_ROWSPAN)
+    if (rowspan < kIconAboveMinRowspan)
         return false;
     if (avail_px <= 0 || row_count <= 0)
         return false;

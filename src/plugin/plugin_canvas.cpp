@@ -175,6 +175,10 @@ size_t canvas_instance_count(const std::string& name) {
     return it == slots().end() ? 0 : it->second.instances.size();
 }
 
+bool canvas_known(const std::string& name) {
+    return slots().count(name) != 0;
+}
+
 void canvas_set_size_listener(const std::string& name, std::function<void(int32_t, int32_t)> fn) {
     auto& reg = slots();
     auto it = reg.find(name);

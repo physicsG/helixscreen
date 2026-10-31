@@ -30,9 +30,9 @@
 #include <vector>
 
 // Forward declarations
-class IMoonrakerAPI;
 
 namespace helix {
+class IMoonrakerAPI;
 
 // ============================================================================
 // Utility Functions
@@ -180,7 +180,7 @@ class PrintStartAnalyzer {
     /**
      * @brief Analyze PRINT_START macro from pre-downloaded config content
      *
-     * Reads the config from ROOT_CONFIG_FILE through its includes, in Klipper's
+     * Reads the config from kRootConfigFile through its includes, in Klipper's
      * read order, and analyzes the macro definitions Klipper would run.
      * No HTTP requests are made -- this is a synchronous operation.
      *
@@ -191,7 +191,7 @@ class PrintStartAnalyzer {
                  AnalysisCallback on_complete);
 
     /// The config file Klipper starts reading from.
-    static constexpr const char* ROOT_CONFIG_FILE = "printer.cfg";
+    static constexpr const char* kRootConfigFile = "printer.cfg";
 
     // === Static Parsing Methods (for unit testing) ===
 
@@ -216,12 +216,15 @@ class PrintStartAnalyzer {
     [[nodiscard]] static PrintStartOpCategory categorize_operation(const std::string& command);
 
     /// How many macro calls deep analyze() follows from the print start macro.
-    static constexpr int MAX_FOLLOW_DEPTH = 8;
+    static constexpr int kMaxFollowDepth = 8;
 
     // === Macro Name Candidates (public for helper functions) ===
-    static constexpr const char* MACRO_NAMES[] = {"PRINT_START", "START_PRINT", "_PRINT_START",
+    static constexpr const char* kMacroNames[] = {"PRINT_START", "START_PRINT", "_PRINT_START",
                                                   "_START_PRINT"};
-    static constexpr size_t MACRO_NAMES_COUNT = 4;
+    static constexpr size_t kMacroNamesCount = 4;
+    /// The end-of-print counterparts, searched in the same order.
+    static constexpr const char* kEndMacroNames[] = {"PRINT_END", "END_PRINT", "_PRINT_END",
+                                                     "_END_PRINT"};
 
   private:
     // === Parsing Helpers ===

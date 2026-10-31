@@ -35,13 +35,13 @@ using namespace helix;
 namespace {
 
 // Query interval for mDNS discovery (re-query every 3 seconds)
-constexpr auto QUERY_INTERVAL = std::chrono::milliseconds(3000);
+constexpr auto kQueryInterval = std::chrono::milliseconds(3000);
 
 // Buffer size for mDNS operations (must be 32-bit aligned)
-constexpr size_t MDNS_BUFFER_SIZE = 2048;
+constexpr size_t kMdnsBufferSize = 2048;
 
 // Timeout for socket receive operations (milliseconds)
-constexpr int SOCKET_TIMEOUT_MS = 500;
+constexpr int kSocketTimeoutMs = 500;
 
 /**
  * @brief Extract display name from a full hostname
@@ -82,8 +82,7 @@ struct ServiceRecord {
     std::string hostname;      ///< Target host from SRV record
     uint16_t port = 0;         ///< Port from SRV record
     std::string ip_address;    ///< IPv4 address from A record
-    std::string model_name;    ///< From TXT "ty" record (e.g., "Brother QL-800")
-    std::string product;       ///< From TXT "product" record
+    MdnsTxtFields txt;         ///< From the TXT record
 
     bool is_complete() const {
         return !hostname.empty() && port > 0 && !ip_address.empty();
@@ -91,10 +90,10 @@ struct ServiceRecord {
 
     /// Best available display name: TXT "ty" > TXT "product" > hostname
     std::string best_display_name() const {
-        if (!model_name.empty())
-            return model_name;
-        if (!product.empty())
-            return product;
+        if (!txt.model_name.empty())
+            return txt.model_name;
+        if (!txt.product.empty())
+            return txt.product;
         return extract_display_name(hostname);
     }
 };
@@ -197,11 +196,11 @@ class MdnsDiscovery::Impl {
         // Set socket timeout for non-blocking receives
         struct timeval tv;
         tv.tv_sec = 0;
-        tv.tv_usec = SOCKET_TIMEOUT_MS * 1000;
+        tv.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         // Aligned buffer for mDNS operations
-        alignas(4) uint8_t buffer[MDNS_BUFFER_SIZE];
+        alignas(4) uint8_t buffer[kMdnsBufferSize];
 
         while (running_.load()) {
             // Send PTR query for Moonraker service
@@ -233,7 +232,7 @@ class MdnsDiscovery::Impl {
 
             // Wait for next query interval (or until stop requested)
             std::unique_lock<std::mutex> lock(stop_mutex_);
-            stop_cv_.wait_for(lock, QUERY_INTERVAL, [this]() { return !running_.load(); });
+            stop_cv_.wait_for(lock, kQueryInterval, [this]() { return !running_.load(); });
         }
 
         mdns_socket_close(sock);
@@ -344,13 +343,8 @@ class MdnsDiscovery::Impl {
                         value.assign(txt_records[i].value.str, txt_records[i].value.length);
                     }
 
-                    if (key == "ty" && !value.empty()) {
-                        record.model_name = value;
-                        spdlog::trace("[MdnsDiscovery] TXT ty: {} -> {}", record_name, value);
-                    } else if (key == "product" && !value.empty()) {
-                        record.product = value;
-                        spdlog::trace("[MdnsDiscovery] TXT product: {} -> {}", record_name, value);
-                    }
+                    spdlog::trace("[MdnsDiscovery] TXT {}: {} -> {}", key, record_name, value);
+                    apply_mdns_txt_entry(record.txt, key, value);
                 }
             }
             break;
@@ -387,11 +381,9 @@ class MdnsDiscovery::Impl {
 
                 // Only add complete records
                 if (record.is_complete()) {
-                    DiscoveredPrinter printer;
-                    printer.name = record.best_display_name();
-                    printer.hostname = record.hostname;
-                    printer.ip_address = record.ip_address;
-                    printer.port = record.port;
+                    auto printer =
+                        make_discovered_printer(record.best_display_name(), record.hostname,
+                                                record.ip_address, record.port, record.txt);
 
                     // Deduplicate by IP:port
                     auto it = std::find(new_printers.begin(), new_printers.end(), printer);

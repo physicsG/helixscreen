@@ -5,39 +5,14 @@
         <h1>HelixScreen Analytics</h1>
       </div>
       <nav class="sidebar-nav">
-        <router-link to="/" class="nav-link" :class="{ active: route.path === '/' }">
-          Overview
-        </router-link>
-        <router-link to="/adoption" class="nav-link" :class="{ active: route.path === '/adoption' }">
-          Adoption
-        </router-link>
-        <router-link to="/prints" class="nav-link" :class="{ active: route.path === '/prints' }">
-          Prints
-        </router-link>
-        <router-link to="/stability" class="nav-link" :class="{ active: route.path === '/stability' }">
-          Stability
-        </router-link>
-        <router-link to="/releases" class="nav-link" :class="{ active: route.path === '/releases' }">
-          Releases
-        </router-link>
-        <div class="nav-separator"></div>
-        <router-link to="/memory" class="nav-link" :class="{ active: route.path === '/memory' }">
-          Memory
-        </router-link>
-        <router-link to="/hardware" class="nav-link" :class="{ active: route.path === '/hardware' }">
-          Hardware
-        </router-link>
-        <router-link to="/engagement" class="nav-link" :class="{ active: route.path === '/engagement' }">
-          Engagement
-        </router-link>
-        <router-link to="/performance" class="nav-link" :class="{ active: route.path === '/performance' }">
-          Performance
-        </router-link>
-        <router-link to="/features" class="nav-link" :class="{ active: route.path === '/features' }">
-          Features
-        </router-link>
-        <router-link to="/ux" class="nav-link" :class="{ active: route.path === '/ux' }">
-          UX Insights
+        <router-link
+          v-for="tab in TABS"
+          :key="tab.path"
+          :to="navTo(tab.path)"
+          class="nav-link"
+          :class="{ active: isActive(tab.path) }"
+        >
+          {{ tab.label }}
         </router-link>
       </nav>
       <div class="sidebar-footer">
@@ -46,9 +21,11 @@
     </aside>
     <main class="content">
       <div class="content-header">
-        <FilterBar />
+        <FilterBar v-if="!route.meta.noFilters" />
+        <router-link :to="navTo('/devices')" class="devices-link">Devices</router-link>
       </div>
       <div class="content-body">
+        <Breadcrumb class="content-breadcrumb" />
         <slot />
       </div>
     </main>
@@ -56,13 +33,48 @@
 </template>
 
 <script setup lang="ts">
+import { watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useFiltersStore } from '@/stores/filters'
 import { router } from '@/router'
 import FilterBar from '@/components/FilterBar.vue'
+import Breadcrumb from '@/components/Breadcrumb.vue'
+
+// The Health tab is served at '/'.
+const TABS = [
+  { path: '/', label: 'Health' },
+  { path: '/releases', label: 'Releases' },
+  { path: '/stability', label: 'Stability' },
+  { path: '/performance', label: 'Performance' },
+  { path: '/fleet', label: 'Fleet' },
+  { path: '/usage', label: 'Usage' },
+  { path: '/prints', label: 'Prints' },
+  { path: '/reports', label: 'Reports' }
+]
 
 const route = useRoute()
 const auth = useAuthStore()
+const filters = useFiltersStore()
+
+// The URL is the source of truth: route changes (links, back/forward) feed the
+// store, and store edits are written back with replace.
+// A deliberate nav click carries the active filters; history entries stay as recorded.
+// A tab with sub-pages (/reports/<week>) stays lit on them; '/' matches only itself.
+function isActive(path: string): boolean {
+  return route.path === path || (path !== '/' && route.path.startsWith(`${path}/`))
+}
+
+function navTo(path: string) {
+  return { path, query: filters.queryParams }
+}
+
+watch(() => route.query, (q) => filters.syncFromRoute(q), { immediate: true })
+watch(
+  () => [filters.range, filters.platform, filters.version, filters.model, filters.board, filters.expand],
+  () => filters.syncToRoute(router),
+  { deep: true }
+)
 
 function handleLogout() {
   auth.logout()
@@ -123,12 +135,6 @@ function handleLogout() {
   font-weight: 500;
 }
 
-.nav-separator {
-  height: 1px;
-  background: var(--border);
-  margin: 8px 16px;
-}
-
 .sidebar-footer {
   padding: 16px 20px;
   border-top: 1px solid var(--border);
@@ -161,11 +167,25 @@ function handleLogout() {
   padding: 16px 32px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.devices-link {
+  color: var(--accent-blue);
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .content-body {
   flex: 1;
   overflow-y: auto;
   padding: 32px;
+}
+
+.content-breadcrumb {
+  margin-bottom: 16px;
 }
 </style>

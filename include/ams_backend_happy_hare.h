@@ -78,6 +78,11 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     AmsBackendHappyHare(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
     ~AmsBackendHappyHare() override;
 
+    /// The `mmu` fields this backend reads, as a `printer.objects.subscribe` objects map.
+    /// The list is a strict allowlist: `nullptr` would make Klipper serialize every
+    /// internal field on every notification. Empty unless @p hw detected Happy Hare.
+    [[nodiscard]] static nlohmann::json required_status_objects(const helix::PrinterDiscovery& hw);
+
     /**
      * @brief Bare filament-sensor names Happy Hare owns (no AMS keyword).
      *
@@ -91,12 +96,14 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     static bool owns_filament_sensor(const std::string& bare_name,
                                      const helix::PrinterDiscovery& discovery);
 
+    /// Substrings of a lowercased sensor name that mark it as hardware Happy
+    /// Hare drives (ERCF, TradRack, Prusa-style MMUs) whether or not Happy Hare
+    /// was detected. See AmsBackend::sensor_name_names_filament_system.
+    static constexpr const char* kSensorNameKeywords[] = {"mmu", "ercf", "trad", "happy", "hare"};
+
     // State queries
     [[nodiscard]] AmsSystemInfo get_system_info() const override;
     [[nodiscard]] AmsType get_type() const override;
-    [[nodiscard]] const char* get_klipper_object_name() const override {
-        return "mmu"; // Matches the Klipper object name
-    }
     [[nodiscard]] helix::ui::LaneNoun lane_noun() const override {
         return helix::ui::LaneNoun::Gate;
     }
@@ -122,7 +129,7 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     AmsError do_select_slot(int slot_index) override;
     AmsError do_change_tool(int tool_number) override;
     /// Load, unload and tool change: ensure_homed_then() with an error leg that
-    /// emits EVENT_ERROR, which ends an operation Happy Hare never reported.
+    /// emits kEventError, which ends an operation Happy Hare never reported.
     AmsError dispatch_filament_op(std::string cmd);
 
   public:
@@ -155,6 +162,10 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
         // mmu.action stays Idle until MMU_LOAD/MMU_UNLOAD starts, and through
         // the UI's own preheat before it.
         t.holds_optimistic_action = true;
+        // classify_error() raises the pause as a fault, and it fires while a job runs,
+        // so the generic runout modal and the sensor-edge toast both stand down.
+        t.raises_runout_fault = true;
+        t.raises_runout_fault_during_job = true;
         return t;
     }();
     [[nodiscard]] BackendTraits traits() const override {
@@ -276,7 +287,14 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     [[nodiscard]] std::vector<helix::printer::EnvironmentZone>
     get_environment_zones(int unit = -1) const override;
     AmsError start_drying(float temp_c, int duration_min, int fan_pct = -1, int unit = 0) override;
+    /// v4 only: MMU_HEATER HUMIDITY= ends the cycle once the box reads at or below the target.
+    AmsError start_drying_to_humidity(float temp_c, int duration_min, float humidity_pct,
+                                      int fan_pct = -1, int unit = 0) override;
     AmsError stop_drying(int unit = 0) override;
+    /// v4 per-gate heaters: GATES= names the selection, ROTATE=1 turns those spools.
+    AmsError start_drying_request(const DryingRequest& request) override;
+    /// v4 per-gate heaters: MMU_HEATER STOP=1 GATES= cancels only those gates.
+    AmsError stop_drying_gates(int unit, const std::vector<int>& gates) override;
     AmsError update_drying(float temp_c = -1, int duration_min = -1, int fan_pct = -1,
                            int unit = 0) override;
 
@@ -343,8 +361,7 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     // Device Management
     [[nodiscard]] std::vector<helix::printer::DeviceSection> get_device_sections() const override;
     [[nodiscard]] std::vector<helix::printer::DeviceAction> get_device_actions() const override;
-    AmsError execute_device_action(const std::string& action_id,
-                                   const std::any& value = {}) override;
+    AmsError do_execute_device_action(const std::string& action_id, const std::any& value) override;
 
   protected:
     /**
@@ -364,6 +381,10 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
      * @note Takes `mutex_` to build the CSV, releases it before the G-code send.
      */
     AmsError apply_endless_spool_backup(int slot_index, int backup_slot) override;
+
+    /// MMU_ENDLESS_SPOOL ENABLE=0|1 QUIET=1, on a single unit only (see
+    /// get_endless_spool_capabilities()).
+    AmsError apply_endless_spool_enabled(bool enabled) override;
 
     // Allow test helper access to private members
     /// Pre-gate sensor record for @p slot_index, or nullptr when the index is
@@ -409,7 +430,7 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     // PRIVATE namespace: lane_data belongs to the Happy Hare plugin, same as
     // AFC. See AmsBackendAfc for the full rationale.
     //
-    static constexpr const char* OVERRIDE_NAMESPACE = "helix-screen-hh-overrides";
+    static constexpr const char* kOverrideNamespace = "helix-screen-hh-overrides";
     /// Store on the SHARED lane_data namespace, used only by
     /// publish_external_spool_lane. Happy Hare's plugin owns that namespace.
     std::unique_ptr<helix::ams::FilamentSlotOverrideStore> lane_publish_store_;
@@ -427,8 +448,32 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     /// One heater target per command: @p unit's, or for unit<0 on a multi-unit
     /// v4, one per unit that has a heater. Locks mutex_.
     [[nodiscard]] std::vector<std::string> heater_targets_for_unit(int unit) const;
+    /// One heater target per unit @p gates fall in: " UNIT=<n>" where needed, then
+    /// " GATES=<the unit's selected gates>". Gates outside every unit are dropped, so an
+    /// empty result means nothing to command. Caller holds mutex_.
+    [[nodiscard]] std::vector<std::string>
+    heater_targets_for_gates_locked(const std::vector<int>& gates) const;
     /// @p command once per heater target; the first failure stops it.
     AmsError send_heater_command(const std::string& command, int unit);
+    /// @p command once per entry of @p targets. A failed DRY=1 stops the targets
+    /// already started.
+    AmsError send_heater_command(const std::string& command,
+                                 const std::vector<std::string>& targets);
+    /// dryer_info_ with the capabilities derived from the detected version and @p unit's
+    /// hardware. Caller holds mutex_.
+    [[nodiscard]] DryerInfo dryer_capabilities_locked(int unit) const;
+    /// Does @p unit (any unit for a negative one) give each gate its own heater?
+    /// Caller holds mutex_.
+    [[nodiscard]] bool unit_has_per_gate_heaters_locked(int unit) const;
+    /// Does @p unit (any unit for a negative one) have a motor that turns its spools?
+    /// Caller holds mutex_.
+    [[nodiscard]] bool unit_turns_spools_locked(int unit) const;
+    /// MMU_HEATER DRY=1 with TEMP and TIMER, plus HUMIDITY when @p humidity_pct is set and
+    /// ROTATE=1 when @p rotate, sent to @p gates (empty: @p unit's whole-unit targets).
+    AmsError start_drying_cycle(float temp_c, int duration_min, std::optional<float> humidity_pct,
+                                int unit, std::vector<int> gates = {}, bool rotate = false);
+    /// Forget the selected gates of a cycle HelixScreen started. Caller holds mutex_.
+    void forget_dry_gates_locked();
 
     /// UNIT value naming every unit; v4 takes UNIT=ALL on its per-unit commands.
     static constexpr int kAllUnits = -1;
@@ -717,6 +762,16 @@ class AmsBackendHappyHare : public AmsSubscriptionBackend {
     // Dryer state (v4 - KMS/EMU hardware)
     DryerInfo dryer_info_;
     std::time_t dry_end_epoch_ = 0; ///< HelixScreen-initiated drying end (epoch s), 0 = none
+    /// Humidity target of the cycle HelixScreen started, carried across a restart
+    std::optional<float> dry_humidity_target_;
+    /// Gates still drying in a gate-selected cycle HelixScreen started, so a restart or a
+    /// temperature change drives those gates and no others. Empty for a whole-unit cycle,
+    /// and emptied by a stop or once Happy Hare reports every one of them finished.
+    std::vector<int> dry_gates_;
+    bool dry_rotate_ = false;
+    /// Set once a status frame shows one of dry_gates_ queued or active. Until then a
+    /// frame describing the moment before the start must not read as the cycle ending.
+    bool dry_gates_seen_live_ = false;
     std::function<std::time_t()> now_fn_ = [] { return std::time(nullptr); };
     // Dryer enclosure heaters + environment sensors. Happy Hare supports either a
     // single shared enclosure (scalar filament_heater / environment_sensor) OR a

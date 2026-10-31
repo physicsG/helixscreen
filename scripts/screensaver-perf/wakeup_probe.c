@@ -16,7 +16,7 @@
 #include <time.h>
 
 #define INTERVAL_NS 1000000L
-#define HISTOGRAM_US 20000
+#define HISTOGRAM_US 20000 // perfstats.py HISTOGRAM_US
 
 static int64_t to_ns(const struct timespec* ts) {
     return (int64_t)ts->tv_sec * 1000000000LL + ts->tv_nsec;

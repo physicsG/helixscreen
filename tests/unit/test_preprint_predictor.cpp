@@ -8,6 +8,7 @@
  * Tests pure prediction logic without LVGL or Config dependencies.
  */
 
+#include "../test_helpers/preprint_config_scope.h"
 #include "preprint_predictor.h"
 #include "printer_state.h"
 
@@ -38,13 +39,13 @@ TEST_CASE("PreprintPredictor: homing estimate never drops below the floor", "[pr
 
     SECTION("history that barely saw homing") {
         predictor.load_entries({{120, 1700000000, {{homing, 3}}}});
-        REQUIRE(predictor.predicted_homing_seconds() == PreprintPredictor::MIN_HOMING_SECONDS);
+        REQUIRE(predictor.predicted_homing_seconds() == PreprintPredictor::kMinHomingSeconds);
     }
 
     SECTION("history with no homing phase at all") {
         predictor.load_entries(
             {{120, 1700000000, {{static_cast<int>(PrintStartPhase::BED_MESH), 60}}}});
-        REQUIRE(predictor.predicted_homing_seconds() == PreprintPredictor::MIN_HOMING_SECONDS);
+        REQUIRE(predictor.predicted_homing_seconds() == PreprintPredictor::kMinHomingSeconds);
     }
 
     SECTION("history with a real homing time") {
@@ -518,4 +519,295 @@ TEST_CASE("PreprintPredictor: omitting the window filter keeps every entry", "[p
     predictor.load_entries(entries, 1);
 
     REQUIRE(predictor.get_entries().size() == 3);
+}
+
+// ============================================================================
+// estimate(): the model the countdown and the print details share
+// ============================================================================
+
+TEST_CASE("PreprintPredictor: estimate without history sums heating and default phases",
+          "[print][predictor][estimate]") {
+    PreprintConfigScope config;
+    PreprintPredictor predictor;
+    const int homing = static_cast<int>(PrintStartPhase::HOMING);
+    const int nozzle = static_cast<int>(PrintStartPhase::HEATING_NOZZLE);
+    const int bed = static_cast<int>(PrintStartPhase::HEATING_BED);
+    const int mesh = static_cast<int>(PrintStartPhase::BED_MESH);
+
+    float phases = 0.0f;
+    for (const auto& [phase, secs] : PreprintPredictor::default_phase_durations()) {
+        phases += phase == homing ? std::max(secs, PreprintPredictor::kMinHomingSeconds) : secs;
+    }
+
+    SECTION("heating sits on top of the phases") {
+        const auto e = predictor.estimate({100.0f, 70.0f, true});
+        CHECK(e.durations.at(nozzle) == 100.0f);
+        CHECK(e.durations.at(bed) == 70.0f);
+        CHECK(e.total_seconds == 170.0f + phases);
+    }
+
+    SECTION("an unknown nozzle target holds the placeholder") {
+        const auto e = predictor.estimate({0.0f, 70.0f, false});
+        CHECK(e.durations.at(nozzle) == PreprintPredictor::kUnknownNozzleHeatSeconds);
+        CHECK(e.total_seconds == 70.0f + PreprintPredictor::kUnknownNozzleHeatSeconds + phases);
+    }
+
+    SECTION("a skipped phase leaves") {
+        const auto e = predictor.estimate({0.0f, 0.0f, true}, {{mesh, false}});
+        CHECK(e.durations.count(mesh) == 0);
+        CHECK(e.total_seconds == phases - PreprintPredictor::default_phase_durations().at(mesh));
+    }
+}
+
+TEST_CASE("PreprintPredictor: estimate with history takes the recorded wall clock",
+          "[print][predictor][estimate]") {
+    PreprintConfigScope config;
+    const int homing = static_cast<int>(PrintStartPhase::HOMING);
+    const int mesh = static_cast<int>(PrintStartPhase::BED_MESH);
+    const int qgl = static_cast<int>(PrintStartPhase::QGL);
+
+    PreprintEntry e;
+    e.total_seconds = 400;
+    e.timestamp = 1000;
+    e.phase_durations = {{homing, 30}, {mesh, 120}};
+    PreprintPredictor predictor;
+    predictor.add_entry(e);
+
+    SECTION("heating is already inside the recorded total") {
+        const auto est = predictor.estimate({100.0f, 70.0f, true});
+        CHECK(est.total_seconds == 400.0f);
+        CHECK(est.durations.at(mesh) == 120.0f);
+        CHECK(est.durations.at(static_cast<int>(PrintStartPhase::HEATING_BED)) == 70.0f);
+    }
+
+    SECTION("a skipped phase comes off the wall clock") {
+        CHECK(predictor.estimate({}, {{mesh, false}}).total_seconds == 280.0f);
+    }
+
+    SECTION("a phase the start runs adds nothing: the wall clock already holds it") {
+        // AD5M-style: the matcher never named the mesh, the option is on.
+        const auto est = predictor.estimate({}, {{qgl, true}, {mesh, true}});
+        CHECK(est.durations.count(qgl) == 0);
+        CHECK(est.total_seconds == 400.0f);
+    }
+}
+
+TEST_CASE("PreprintPredictor: a skipped phase takes off its share of the whole window",
+          "[print][predictor][estimate]") {
+    PreprintConfigScope config;
+    const int mesh = static_cast<int>(PrintStartPhase::BED_MESH);
+
+    // The older start meshed for 120s, the newer one did not; each spent 280s
+    // on everything else, so skipping the mesh leaves 280s whatever the weights.
+    PreprintEntry meshed;
+    meshed.total_seconds = 400;
+    meshed.timestamp = 1000;
+    meshed.phase_durations = {{mesh, 120}};
+    PreprintEntry unmeshed;
+    unmeshed.total_seconds = 280;
+    unmeshed.timestamp = 2000;
+    PreprintPredictor predictor;
+    predictor.add_entry(meshed);
+    predictor.add_entry(unmeshed);
+
+    REQUIRE(predictor.predicted_total() > 280);
+    CHECK(predictor.estimate({}, {{mesh, false}}).total_seconds ==
+          Catch::Approx(280.0f).margin(0.5f));
+}
+
+TEST_CASE("PreprintPredictor: a bed at 40C starts warm, below it cold", "[print][predictor]") {
+    CHECK(PreprintPredictor::temp_bucket_for(25.0f) == 1);
+    CHECK(PreprintPredictor::temp_bucket_for(39.9f) == 1);
+    CHECK(PreprintPredictor::temp_bucket_for(40.0f) == 2);
+    CHECK(PreprintPredictor::temp_bucket_for(60.0f) == 2);
+}
+
+TEST_CASE("PreprintPredictor: a phase turned on that no start in the window ran adds its default",
+          "[print][predictor][estimate]") {
+    PreprintConfigScope config;
+    const int mesh = static_cast<int>(PrintStartPhase::BED_MESH);
+    const float mesh_s = static_cast<float>(PreprintPredictor::generic_phase_durations().at(mesh));
+    const auto entry = [](int64_t timestamp, std::optional<std::set<int>> skipped) {
+        PreprintEntry e;
+        e.total_seconds = 300;
+        e.timestamp = timestamp;
+        e.skipped_phases = std::move(skipped);
+        return e;
+    };
+    PreprintPredictor predictor;
+
+    SECTION("every start skipped it: the default joins the wall clock") {
+        predictor.add_entry(entry(1000, std::set<int>{mesh}));
+        predictor.add_entry(entry(2000, std::set<int>{mesh}));
+        const auto est = predictor.estimate({}, {{mesh, true}});
+        CHECK(est.durations.at(mesh) == mesh_s);
+        CHECK(est.total_seconds == 300.0f + mesh_s);
+    }
+
+    SECTION("the matcher missed it: a start that did not skip it adds nothing") {
+        predictor.add_entry(entry(1000, std::set<int>{}));
+        CHECK(predictor.estimate({}, {{mesh, true}}).total_seconds == 300.0f);
+    }
+
+    SECTION("one start in the window ran it: nothing is added") {
+        predictor.add_entry(entry(1000, std::set<int>{mesh}));
+        predictor.add_entry(entry(2000, std::set<int>{}));
+        CHECK(predictor.estimate({}, {{mesh, true}}).total_seconds == 300.0f);
+    }
+
+    SECTION("an entry that recorded nothing is unknown: nothing is added") {
+        predictor.add_entry(entry(1000, std::set<int>{mesh}));
+        predictor.add_entry(entry(2000, std::nullopt));
+        CHECK(predictor.estimate({}, {{mesh, true}}).total_seconds == 300.0f);
+    }
+}
+
+TEST_CASE("PreprintPredictor: skipped phases round-trip through the stored history",
+          "[print][predictor]") {
+    PreprintConfigScope config;
+    const int mesh = static_cast<int>(PrintStartPhase::BED_MESH);
+    const int qgl = static_cast<int>(PrintStartPhase::QGL);
+    for (auto skipped :
+         {std::optional<std::set<int>>{std::set<int>{mesh, qgl}},
+          std::optional<std::set<int>>{std::set<int>{}}, std::optional<std::set<int>>{}}) {
+        PreprintEntry e;
+        e.total_seconds = 300;
+        e.timestamp = 1000;
+        e.skipped_phases = skipped;
+        PreprintPredictor::append_to_config(e);
+    }
+
+    const auto loaded = PreprintPredictor::load_entries_from_config();
+    REQUIRE(loaded.size() == 3);
+    REQUIRE(loaded[0].skipped_phases.has_value());
+    CHECK(*loaded[0].skipped_phases == std::set<int>{mesh, qgl});
+    REQUIRE(loaded[1].skipped_phases.has_value());
+    CHECK(loaded[1].skipped_phases->empty());
+    CHECK_FALSE(loaded[2].skipped_phases.has_value());
+}
+
+// ============================================================================
+// Heating-aware totals
+// ============================================================================
+TEST_CASE(
+    "PreprintPredictor: an entry that recorded its heating predicts residual plus live heating",
+    "[print][predictor]") {
+    PreprintPredictor predictor;
+    PreprintEntry e;
+    e.total_seconds = 894;
+    e.timestamp = 2000;
+    e.heating_seconds = 470;
+    predictor.add_entry(e);
+
+    SECTION("a start with the same heating replays the recorded total") {
+        PreprintHeating h;
+        h.nozzle_seconds = 200;
+        h.bed_seconds = 270;
+        h.nozzle_target_known = true;
+        CHECK(predictor.estimate(h, {}).total_seconds == 894.0f);
+    }
+    SECTION("a cheaper start pays only its own heating") {
+        PreprintHeating h;
+        h.nozzle_seconds = 50;
+        h.bed_seconds = 200;
+        h.nozzle_target_known = true;
+        CHECK(predictor.estimate(h, {}).total_seconds == 674.0f);
+    }
+    SECTION("a costlier start never sits below its own heating") {
+        PreprintHeating h;
+        h.nozzle_seconds = 300;
+        h.bed_seconds = 300;
+        h.nozzle_target_known = true;
+        CHECK(predictor.estimate(h, {}).total_seconds == 1024.0f);
+    }
+}
+
+TEST_CASE("PreprintPredictor: a start that cannot price its heating pays the learned heating",
+          "[print][predictor]") {
+    PreprintPredictor predictor;
+    PreprintEntry e;
+    e.total_seconds = 894;
+    e.timestamp = 2000;
+    e.heating_seconds = 470;
+    predictor.add_entry(e);
+
+    SECTION("no targets known: remainder plus learned heating") {
+        PreprintHeating h;
+        CHECK(predictor.estimate(h, {}).total_seconds == 894.0f);
+    }
+    SECTION("a bed priced above the learned heating still pays its own") {
+        PreprintHeating h;
+        h.bed_seconds = 600;
+        // 600 s of bed plus the unknown nozzle's 60 s placeholder.
+        CHECK(predictor.estimate(h, {}).total_seconds == 1084.0f);
+    }
+    SECTION("targets known and reached price heating at 0") {
+        PreprintHeating h;
+        h.nozzle_target_known = true;
+        CHECK(predictor.estimate(h, {}).total_seconds == 424.0f);
+    }
+}
+
+TEST_CASE("PreprintPredictor: legacy history is floored by this start's own heating",
+          "[print][predictor]") {
+    PreprintPredictor predictor;
+    PreprintEntry e;
+    e.total_seconds = 405;
+    e.timestamp = 1000;
+    predictor.add_entry(e);
+
+    SECTION("heating above the recorded total raises the estimate") {
+        PreprintHeating h;
+        h.nozzle_seconds = 58;
+        h.bed_seconds = 412;
+        h.nozzle_target_known = true;
+        CHECK(predictor.estimate(h, {}).total_seconds == 470.0f);
+    }
+    SECTION("cheap heating keeps the learned total") {
+        PreprintHeating h;
+        h.nozzle_seconds = 30;
+        h.bed_seconds = 100;
+        h.nozzle_target_known = true;
+        CHECK(predictor.estimate(h, {}).total_seconds == 405.0f);
+    }
+}
+
+TEST_CASE("PreprintPredictor: mixed history splits only what recorded heating",
+          "[print][predictor]") {
+    PreprintPredictor predictor;
+    PreprintEntry legacy;
+    legacy.total_seconds = 405;
+    legacy.timestamp = 1000;
+    PreprintEntry split;
+    split.total_seconds = 894;
+    split.timestamp = 2000;
+    split.heating_seconds = 470;
+    predictor.add_entry(legacy);
+    predictor.add_entry(split);
+
+    PreprintHeating h;
+    h.nozzle_seconds = 50;
+    h.bed_seconds = 200;
+    h.nozzle_target_known = true;
+    CHECK(predictor.estimate(h, {}).total_seconds == 674.0f);
+}
+
+TEST_CASE("PreprintPredictor: recorded heating round-trips through the stored history",
+          "[print][predictor]") {
+    PreprintConfigScope config;
+    PreprintEntry e;
+    e.total_seconds = 894;
+    e.timestamp = 1000;
+    e.heating_seconds = 470;
+    PreprintPredictor::append_to_config(e);
+    PreprintEntry none;
+    none.total_seconds = 300;
+    none.timestamp = 1001;
+    PreprintPredictor::append_to_config(none);
+
+    const auto loaded = PreprintPredictor::load_entries_from_config();
+    REQUIRE(loaded.size() == 2);
+    REQUIRE(loaded[0].heating_seconds.has_value());
+    CHECK(*loaded[0].heating_seconds == 470);
+    CHECK_FALSE(loaded[1].heating_seconds.has_value());
 }

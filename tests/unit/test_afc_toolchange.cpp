@@ -1,11 +1,11 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
 #include "ams_backend_mock.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
 
 #include "../catch_amalgamated.hpp"
 
@@ -36,6 +36,16 @@ class AfcToolchangeTestHelper : public AmsBackendAfc {
 
     const AmsSystemInfo& info() const {
         return system_info_;
+    }
+
+    void age_toolchange_hold(std::chrono::seconds elapsed) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        AfcTestAccess::toolchange_hold_since(*this) = std::chrono::steady_clock::now() - elapsed;
+    }
+
+    bool latched() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return AfcTestAccess::timed_out_state(*this).has_value();
     }
 };
 } // namespace helix
@@ -542,4 +552,125 @@ TEST_CASE_METHOD(AfcToolchangeRenderFixture, "AFC toolchange text renders AFC's 
         feed_afc(0, 0);
         REQUIRE(rendered().empty());
     }
+}
+
+// AFC drops current_state to Idle between the legs of one CHANGE_TOOL: at the
+// end of TOOL_UNLOAD, across the next extruder's heat wait and between a
+// toolchanger's dock and pickup. next_lane is set for that span (assigned at
+// the top of CHANGE_TOOL; cleared in its finally block from AFC v1.2.0, only
+// after a successful load before it).
+TEST_CASE("AFC holds a toolchange's action across its mid-change Idle",
+          "[afc][toolchange][toolchange_hold]") {
+    AfcToolchangeTestHelper afc;
+    afc.initialize_test_lanes(4);
+
+    afc.feed_afc_state({{"current_state", "Unloading"}, {"next_lane", "lane2"}});
+    REQUIRE(afc.info().action == AmsAction::UNLOADING);
+    const std::string unload_detail = afc.info().operation_detail;
+
+    SECTION("the Idle between unload and load keeps the unload running") {
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        CHECK(afc.info().action == AmsAction::UNLOADING);
+        CHECK(afc.info().operation_detail == unload_detail);
+
+        afc.feed_afc_state({{"current_state", "Loading"}});
+        CHECK(afc.info().action == AmsAction::LOADING);
+    }
+
+    SECTION("next_lane clearing ends the change on the reported Idle") {
+        afc.feed_afc_state({{"current_state", "Loading"}});
+        afc.feed_afc_state({{"current_state", "Idle"}, {"next_lane", nullptr}});
+        CHECK(afc.info().action == AmsAction::IDLE);
+    }
+
+    SECTION("next_lane clearing on a frame without current_state releases a held Idle") {
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        REQUIRE(afc.info().action == AmsAction::UNLOADING);
+        afc.feed_afc_state({{"next_lane", nullptr}});
+        CHECK(afc.info().action == AmsAction::IDLE);
+    }
+
+    SECTION("an AFC error mid change releases the hold") {
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        REQUIRE(afc.info().action == AmsAction::UNLOADING);
+        afc.feed_afc_state({{"error_state", true}});
+        CHECK(afc.info().action == AmsAction::IDLE);
+
+        // next_lane is still set until CHANGE_TOOL's finally runs; an Idle
+        // reported under an error is not held either.
+        afc.feed_afc_state({{"current_state", "Unloading"}});
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        CHECK(afc.info().action == AmsAction::IDLE);
+    }
+
+    SECTION("a hold outliving its budget releases to Idle without latching ERROR") {
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        REQUIRE(afc.info().action == AmsAction::UNLOADING);
+        afc.age_toolchange_hold(std::chrono::seconds(10));
+        (void)afc.get_system_info();
+        CHECK(afc.info().action == AmsAction::UNLOADING);
+
+        afc.age_toolchange_hold(std::chrono::seconds(10000));
+        (void)afc.get_system_info();
+        CHECK(afc.info().action == AmsAction::IDLE);
+        CHECK_FALSE(afc.latched());
+    }
+}
+
+TEST_CASE("AFC toolchange hold ignores a next_lane an earlier change left set",
+          "[afc][toolchange][toolchange_hold]") {
+    AfcToolchangeTestHelper afc;
+    afc.initialize_test_lanes(4);
+
+    SECTION("a change that found its lane already loaded") {
+        afc.feed_afc_state({{"current_load", "lane1"}});
+        afc.feed_afc_state({{"current_state", "Idle"}, {"next_lane", "lane1"}});
+        // A plain unload afterwards ends on AFC's Idle.
+        afc.feed_afc_state({{"current_state", "Unloading"}});
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        CHECK(afc.info().action == AmsAction::IDLE);
+    }
+    SECTION("a change that failed") {
+        afc.feed_afc_state({{"current_state", "Unloading"}, {"next_lane", "lane2"}});
+        afc.feed_afc_state({{"error_state", true}});
+        afc.feed_afc_state({{"error_state", false}, {"current_state", "Idle"}});
+        // next_lane is still lane2; a plain load is not a change.
+        afc.feed_afc_state({{"current_state", "Loading"}});
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        CHECK(afc.info().action == AmsAction::IDLE);
+
+        SECTION("a new change naming another lane holds again") {
+            afc.feed_afc_state({{"current_state", "Unloading"}, {"next_lane", "lane3"}});
+            afc.feed_afc_state({{"current_state", "Idle"}});
+            CHECK(afc.info().action == AmsAction::UNLOADING);
+        }
+    }
+    SECTION("a hold that ran out its budget") {
+        afc.feed_afc_state({{"current_state", "Unloading"}, {"next_lane", "lane2"}});
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        REQUIRE(afc.info().action == AmsAction::UNLOADING);
+        afc.age_toolchange_hold(std::chrono::seconds(10000));
+        (void)afc.get_system_info();
+        REQUIRE(afc.info().action == AmsAction::IDLE);
+
+        afc.feed_afc_state({{"current_state", "Loading"}});
+        afc.feed_afc_state({{"current_state", "Idle"}});
+        CHECK(afc.info().action == AmsAction::IDLE);
+    }
+}
+
+TEST_CASE("AFC toolchange hold never invents an operation", "[afc][toolchange][toolchange_hold]") {
+    AfcToolchangeTestHelper afc;
+    afc.initialize_test_lanes(4);
+
+    // CHANGE_TOOL has started (next_lane set) but AFC has not reported a busy
+    // state yet: there is nothing in progress to hold.
+    afc.feed_afc_state({{"current_state", "Idle"}, {"next_lane", "lane2"}});
+    CHECK(afc.info().action == AmsAction::IDLE);
+
+    // Without a change in progress, Idle ends an operation as always.
+    afc.feed_afc_state({{"next_lane", nullptr}});
+    afc.feed_afc_state({{"current_state", "Loading"}});
+    afc.feed_afc_state({{"current_state", "Idle"}});
+    CHECK(afc.info().action == AmsAction::IDLE);
 }

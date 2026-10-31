@@ -15,28 +15,28 @@
 namespace {
 
 // Color desaturation (for muted heat map appearance)
-constexpr double COLOR_SATURATION = 0.65;   // 65% original color
-constexpr double COLOR_DESATURATION = 0.35; // 35% grayscale mix
+constexpr double kColorSaturation = 0.65;   // 65% original color
+constexpr double kColorDesaturation = 0.35; // 35% grayscale mix
 
 // Heat-map gradient band thresholds (5-band: Purple→Blue→Cyan→Yellow→Red)
-constexpr double GRADIENT_BAND_1_END = 0.125; // Purple to Blue transition
-constexpr double GRADIENT_BAND_2_END = 0.375; // Blue to Cyan transition
-constexpr double GRADIENT_BAND_3_END = 0.625; // Cyan to Yellow transition
-constexpr double GRADIENT_BAND_4_END = 0.875; // Yellow to Red transition
+constexpr double kGradientBand1End = 0.125; // Purple to Blue transition
+constexpr double kGradientBand2End = 0.375; // Blue to Cyan transition
+constexpr double kGradientBand3End = 0.625; // Cyan to Yellow transition
+constexpr double kGradientBand4End = 0.875; // Yellow to Red transition
 
 // Gradient color RGB values (endpoints of each band)
 // Note: Omitted values are 0 (e.g., Purple has G=0, Red has G=0 and B=0)
-constexpr uint8_t GRADIENT_PURPLE_R = 128;
-constexpr uint8_t GRADIENT_PURPLE_B = 255;
-constexpr uint8_t GRADIENT_BLUE_G = 128;
-constexpr uint8_t GRADIENT_CYAN_G = 255;
-constexpr uint8_t GRADIENT_YELLOW_R = 255;
-constexpr uint8_t GRADIENT_YELLOW_G = 255;
-constexpr uint8_t GRADIENT_RED_R = 255;
+constexpr uint8_t kGradientPurpleR = 128;
+constexpr uint8_t kGradientPurpleB = 255;
+constexpr uint8_t kGradientBlueG = 128;
+constexpr uint8_t kGradientCyanG = 255;
+constexpr uint8_t kGradientYellowR = 255;
+constexpr uint8_t kGradientYellowG = 255;
+constexpr uint8_t kGradientRedR = 255;
 
 // Color gradient lookup table (pre-computed for performance)
-constexpr int COLOR_GRADIENT_LUT_SIZE = 1024; // 1024 samples for smooth gradient
-lv_color_t g_color_gradient_lut[COLOR_GRADIENT_LUT_SIZE];
+constexpr int kColorGradientLutSize = 1024; // 1024 samples for smooth gradient
+lv_color_t g_color_gradient_lut[kColorGradientLutSize];
 std::once_flag g_color_gradient_lut_init_flag;
 
 } // anonymous namespace
@@ -48,57 +48,57 @@ std::once_flag g_color_gradient_lut_init_flag;
  */
 static void init_color_gradient_lut() {
     // Pre-compute gradient for normalized values [0.0, 1.0]
-    for (int i = 0; i < COLOR_GRADIENT_LUT_SIZE; i++) {
-        double normalized = static_cast<double>(i) / (COLOR_GRADIENT_LUT_SIZE - 1);
+    for (int i = 0; i < kColorGradientLutSize; i++) {
+        double normalized = static_cast<double>(i) / (kColorGradientLutSize - 1);
 
         // Compute RGB using 5-band heat-map (Purple→Blue→Cyan→Yellow→Red)
         uint8_t r, g, b;
 
-        if (normalized < GRADIENT_BAND_1_END) {
+        if (normalized < kGradientBand1End) {
             // Band 1: Purple to Blue
-            double t = normalized / GRADIENT_BAND_1_END;
-            r = static_cast<uint8_t>(GRADIENT_PURPLE_R * (1.0 - t));
-            g = static_cast<uint8_t>(GRADIENT_BLUE_G * t);
-            b = GRADIENT_PURPLE_B;
-        } else if (normalized < GRADIENT_BAND_2_END) {
+            double t = normalized / kGradientBand1End;
+            r = static_cast<uint8_t>(kGradientPurpleR * (1.0 - t));
+            g = static_cast<uint8_t>(kGradientBlueG * t);
+            b = kGradientPurpleB;
+        } else if (normalized < kGradientBand2End) {
             // Band 2: Blue to Cyan
-            double band_width = GRADIENT_BAND_2_END - GRADIENT_BAND_1_END;
-            double t = (normalized - GRADIENT_BAND_1_END) / band_width;
+            double band_width = kGradientBand2End - kGradientBand1End;
+            double t = (normalized - kGradientBand1End) / band_width;
             r = 0;
-            g = static_cast<uint8_t>(GRADIENT_BLUE_G + (GRADIENT_CYAN_G - GRADIENT_BLUE_G) * t);
-            b = GRADIENT_PURPLE_B;
-        } else if (normalized < GRADIENT_BAND_3_END) {
+            g = static_cast<uint8_t>(kGradientBlueG + (kGradientCyanG - kGradientBlueG) * t);
+            b = kGradientPurpleB;
+        } else if (normalized < kGradientBand3End) {
             // Band 3: Cyan to Yellow
-            double band_width = GRADIENT_BAND_3_END - GRADIENT_BAND_2_END;
-            double t = (normalized - GRADIENT_BAND_2_END) / band_width;
-            r = static_cast<uint8_t>(GRADIENT_YELLOW_R * t);
-            g = GRADIENT_CYAN_G;
-            b = static_cast<uint8_t>(GRADIENT_PURPLE_B * (1.0 - t));
-        } else if (normalized < GRADIENT_BAND_4_END) {
+            double band_width = kGradientBand3End - kGradientBand2End;
+            double t = (normalized - kGradientBand2End) / band_width;
+            r = static_cast<uint8_t>(kGradientYellowR * t);
+            g = kGradientCyanG;
+            b = static_cast<uint8_t>(kGradientPurpleB * (1.0 - t));
+        } else if (normalized < kGradientBand4End) {
             // Band 4: Yellow to Red
-            double band_width = GRADIENT_BAND_4_END - GRADIENT_BAND_3_END;
-            double t = (normalized - GRADIENT_BAND_3_END) / band_width;
-            r = GRADIENT_YELLOW_R;
-            g = static_cast<uint8_t>(GRADIENT_YELLOW_G * (1.0 - t));
+            double band_width = kGradientBand4End - kGradientBand3End;
+            double t = (normalized - kGradientBand3End) / band_width;
+            r = kGradientYellowR;
+            g = static_cast<uint8_t>(kGradientYellowG * (1.0 - t));
             b = 0;
         } else {
             // Band 5: Deep Red (maximum temperature)
-            r = GRADIENT_RED_R;
+            r = kGradientRedR;
             g = 0;
             b = 0;
         }
 
         // Desaturate by 35% for muted appearance
         uint8_t gray = (r + g + b) / 3;
-        r = static_cast<uint8_t>(r * COLOR_SATURATION + gray * COLOR_DESATURATION);
-        g = static_cast<uint8_t>(g * COLOR_SATURATION + gray * COLOR_DESATURATION);
-        b = static_cast<uint8_t>(b * COLOR_SATURATION + gray * COLOR_DESATURATION);
+        r = static_cast<uint8_t>(r * kColorSaturation + gray * kColorDesaturation);
+        g = static_cast<uint8_t>(g * kColorSaturation + gray * kColorDesaturation);
+        b = static_cast<uint8_t>(b * kColorSaturation + gray * kColorDesaturation);
 
         g_color_gradient_lut[i] = lv_color_make(r, g, b);
     }
 
     spdlog::debug("[Bed Mesh Gradient] Initialized color gradient LUT with {} samples",
-                  COLOR_GRADIENT_LUT_SIZE);
+                  kColorGradientLutSize);
 }
 
 lv_color_t bed_mesh_gradient_height_to_color(double value, double min_val, double max_val) {
@@ -117,8 +117,8 @@ lv_color_t bed_mesh_gradient_height_to_color(double value, double min_val, doubl
 
     // Look up color in pre-computed gradient table (10-15% faster than computing)
     // Map normalized [0.0, 1.0] to LUT index [0, 1023]
-    int lut_index = static_cast<int>(normalized * (COLOR_GRADIENT_LUT_SIZE - 1));
-    lut_index = std::max(0, std::min(COLOR_GRADIENT_LUT_SIZE - 1, lut_index));
+    int lut_index = static_cast<int>(normalized * (kColorGradientLutSize - 1));
+    lut_index = std::max(0, std::min(kColorGradientLutSize - 1, lut_index));
 
     return g_color_gradient_lut[lut_index];
 }

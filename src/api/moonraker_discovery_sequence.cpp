@@ -6,45 +6,54 @@
 #include "ui_update_queue.h"
 
 #include "accel_sensor_manager.h"
-#include "ams_backend_afc.h"
-#include "ams_backend_openams.h"
+#include "ams_backend.h"
 #include "ams_state.h"
-#include "batch_feed_reconcile.h"
-#include "screws_tilt_dialect.h"
-#if HELIX_HAS_IFS
-#include "ams_backend_ad5x_ifs.h"
-#endif
 #include "app_globals.h"
+#include "batch_feed_reconcile.h"
+#include "board_identity.h"
 #include "chamber_heater_backend.h"
 #include "config.h"
-#include "filament_temperature_source.h"
+#include "enclosure_top.h"
 #include "firmware_fault_codes.h"
 #include "helix_version.h"
 #include "humidity_sensor_types.h"
+#include "hv/hssl.h"
 #include "hv/requests.h"
+#include "i_moonraker_api.h"
+#include "json_utils.h"
+#include "klipper_extruder_naming.h"
+#include "layer_pause.h"
 #include "led/led_controller.h"
 #include "macro_executor.h"
 #include "macro_fan_analyzer.h"
 #include "macro_param_cache.h"
 #include "macro_patterns.h"
 #include "moonraker_api.h"
+#include "moonraker_auth.h"
 #include "moonraker_client.h"
 #include "moonraker_subscription_merge.h"
+#include "pause_descriptor.h"
+#include "platform_info.h"
 #include "plr_backend.h"
 #include "power_device_state.h"
-#include "power_loss_sensor.h"
 #include "pre_print_preferences.h"
 #include "print_start_profile.h"
 #include "printer_detector.h"
 #include "printer_state.h"
-#include "probe_sensor_manager.h"
+#include "screws_tilt_dialect.h"
+#include "sensor_manager.h"
 #include "sensor_state.h"
+#include "system/platform_tls.h"
 #include "text_io.h"
 #include "tool_offsets.h"
 #include "toolchanger_addon.h"
 #include "unit_conversions.h"
 #include "webcam_service_health.h"
 #include "z_offset_persistence.h"
+
+#ifdef __ANDROID__
+#include "system/http_android.h"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -55,11 +64,26 @@
 namespace helix {
 
 bool probe_snapshot_reachable(const std::string& snapshot_url) {
+#ifdef __ANDROID__
+    if (needs_platform_tls(snapshot_url, HV_WITH_SSL)) {
+        // This runs on the WebSocket thread, so the bridge gets the probe's total
+        // budget as one deadline over connect, handshake and response. The
+        // platform bridge has no separate connect budget, and accepts any 2xx.
+        std::string body;
+        const bool ok =
+            android::https_get_bytes(snapshot_url, HELIX_USER_AGENT, kSnapshotProbeTotalTimeoutSec,
+                                     kMaxPlatformSnapshotBytes, body);
+        if (!ok) {
+            spdlog::debug("[Discovery] Snapshot probe of {} via platform TLS failed", snapshot_url);
+        }
+        return ok;
+    }
+#endif
     auto req = std::make_shared<HttpRequest>();
     req->method = HTTP_GET;
     req->url = snapshot_url;
-    req->connect_timeout = SNAPSHOT_PROBE_CONNECT_TIMEOUT_SEC;
-    req->timeout = SNAPSHOT_PROBE_TOTAL_TIMEOUT_SEC;
+    req->connect_timeout = kSnapshotProbeConnectTimeoutSec;
+    req->timeout = kSnapshotProbeTotalTimeoutSec;
     auto resp = requests::request(req);
     if (resp && resp->status_code == 200) {
         return true;
@@ -73,8 +97,7 @@ bool probe_snapshot_reachable(const std::string& snapshot_url) {
     } else {
         spdlog::debug("[Discovery] Snapshot probe of {} got no response within {}s "
                       "(connect budget {}s)",
-                      snapshot_url, SNAPSHOT_PROBE_TOTAL_TIMEOUT_SEC,
-                      SNAPSHOT_PROBE_CONNECT_TIMEOUT_SEC);
+                      snapshot_url, kSnapshotProbeTotalTimeoutSec, kSnapshotProbeConnectTimeoutSec);
     }
     return false;
 }
@@ -86,10 +109,7 @@ void MoonrakerDiscoverySequence::clear_cache() {
     sensors_.clear();
     fans_.clear();
     leds_.clear();
-    steppers_.clear();
-    afc_objects_.clear();
     filament_sensors_.clear();
-    mcus_.clear();
     {
         std::lock_guard<std::mutex> lock(hardware_mutex_);
         hardware_ = PrinterDiscovery{};
@@ -106,8 +126,9 @@ bool MoonrakerDiscoverySequence::is_current_sequence(uint64_t seq) const {
     return seq == discovery_sequence_;
 }
 
-void MoonrakerDiscoverySequence::start(std::function<void()> on_complete,
-                                       std::function<void(const std::string& reason)> on_error) {
+void MoonrakerDiscoverySequence::start(
+    helix::SharedCallback<void()> on_complete,
+    helix::SharedCallback<void(const std::string& reason)> on_error) {
     spdlog::debug("[Moonraker Client] Starting printer auto-discovery");
 
     // Store callbacks and snapshot the connection generation for stale detection.
@@ -141,7 +162,13 @@ void MoonrakerDiscoverySequence::start(std::function<void()> on_complete,
                 spdlog::info("[Moonraker Client] Identified to Moonraker (connection_id: {})",
                              conn_id);
                 identified_.store(true);
+                helix::moonraker_auth::mark_authorized();
             } else if (identify_response.contains("error")) {
+                const MoonrakerError err = MoonrakerError::from_json_rpc(
+                    identify_response["error"], "server.connection.identify");
+                if (stop_for_refused_login(err)) {
+                    return;
+                }
                 // Log but continue - older Moonraker versions may not support this
                 spdlog::warn("[Moonraker Client] Failed to identify: {}",
                              identify_response["error"].dump());
@@ -154,10 +181,29 @@ void MoonrakerDiscoverySequence::start(std::function<void()> on_complete,
             if (is_stale() || !is_current_sequence(seq))
                 return;
 
+            if (stop_for_refused_login(err)) {
+                return;
+            }
             // Log but continue - identify is not strictly required
             spdlog::warn("[Moonraker Client] Identify request failed: {}", err.message);
             continue_discovery(seq);
         });
+}
+
+bool MoonrakerDiscoverySequence::stop_for_refused_login(const MoonrakerError& err) {
+    if (!helix::moonraker_auth::is_unauthorized_error(err.code, err.message)) {
+        return false;
+    }
+    spdlog::warn("[Moonraker Client] Moonraker refused the login: {}", err.message);
+    if (helix::moonraker_auth::mark_unauthorized()) {
+        client_.emit_event(helix::moonraker_event::login_refused());
+    }
+    if (on_error_discovery_) {
+        auto cb = std::move(on_error_discovery_);
+        on_complete_discovery_ = nullptr;
+        cb(err.message);
+    }
+    return true;
 }
 
 void MoonrakerDiscoverySequence::discover_power_devices() {
@@ -234,6 +280,32 @@ void MoonrakerDiscoverySequence::publish_identity_locked() {
                                                           : reported_machine_name_);
 }
 
+void MoonrakerDiscoverySequence::fetch_moonraker_version_fallback(uint64_t seq) {
+    client_.send_jsonrpc(
+        "machine.update.status", json::object(),
+        [this, seq](const json& response) {
+            if (is_stale() || !is_current_sequence(seq))
+                return;
+            const json* result = helix::json_util::find_member(response, "result");
+            const std::string version =
+                result ? helix::moonraker_version_from_update_status(*result) : std::string();
+            if (version.empty())
+                return;
+            spdlog::debug("[Moonraker Client] Moonraker version from update_manager: {}", version);
+            {
+                std::lock_guard<std::mutex> lock(hardware_mutex_);
+                hardware_.set_moonraker_version(version);
+            }
+            get_printer_state().set_moonraker_version(version);
+        },
+        [](const MoonrakerError& err) {
+            spdlog::debug("[Moonraker Client] update_manager version query failed: {}",
+                          err.message);
+        },
+        0,     // default timeout
+        true); // silent: the version stays Unknown
+}
+
 // Read the hardware fields HelixScreen keeps out of a machine.system_info
 // response. The same response also carries the camera service_state that
 // detect_webcam() cross-checks, which is why one query feeds both.
@@ -297,16 +369,20 @@ void MoonrakerDiscoverySequence::parse_system_info(const json& sys_response) {
 //
 // @param service_state `service_state` out of machine.system_info, or an empty
 //        object when that query failed - which reads as "assume available".
-void MoonrakerDiscoverySequence::detect_webcam(json service_state) {
+void MoonrakerDiscoverySequence::detect_webcam(json service_state, bool probe_local_endpoints) {
     client_.send_jsonrpc(
         "server.webcams.list", json::object(),
-        [service_state = std::move(service_state)](const json& response) {
+        [service_state = std::move(service_state), probe_local_endpoints](const json& response) {
             std::vector<WebcamInfo> cams;
             if (response.contains("result") && response["result"].contains("webcams")) {
                 for (const auto& entry : response["result"]["webcams"]) {
                     WebcamInfo cam = webcam::parse_webcam_entry(entry);
                     if (!cam.enabled) {
                         spdlog::debug("[Discovery] Skipping disabled webcam '{}'", cam.name);
+                        continue;
+                    }
+                    if (webcam::is_own_screen_webcam(cam)) {
+                        spdlog::debug("[Discovery] Skipping our own screen webcam");
                         continue;
                     }
                     // Cross-check the SERVICE before the URL. server.webcams.list
@@ -367,6 +443,8 @@ void MoonrakerDiscoverySequence::detect_webcam(json service_state) {
                              feed.name, feed.service.empty() ? "<unset>" : feed.service,
                              feed.stream_url.empty() ? "<none>" : feed.stream_url,
                              feed.snapshot_url.empty() ? "<none>" : feed.snapshot_url, cams.size());
+            } else if (!probe_local_endpoints) {
+                spdlog::info("[Discovery] No usable Moonraker webcam");
             } else {
                 // No usable Moonraker webcam — probe local camera endpoints.
                 // Run synchronously on the WS callback instead of spawning a
@@ -490,9 +568,9 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                 std::string error_reason = "Failed to query printer objects from Moonraker";
                 if (response.contains("error") && response["error"].contains("message") &&
                     response["error"]["message"].is_string()) {
-                    error_reason = response["error"]["message"].get<std::string>();
-                    spdlog::error("[Moonraker Client] printer.objects.list failed: {}",
-                                  error_reason);
+                    const auto raw_reason = response["error"]["message"].get<std::string>();
+                    spdlog::error("[Moonraker Client] printer.objects.list failed: {}", raw_reason);
+                    error_reason = MoonrakerError::extract_friendly_message(raw_reason);
                 } else {
                     spdlog::error(
                         "[Moonraker Client] printer.objects.list failed: invalid response");
@@ -714,43 +792,41 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                             spdlog::info("[Moonraker Client] Job queue component detected");
                             get_printer_state().capabilities_state().set_job_queue_available(true);
                         }
+
+                        if (helix::is_placeholder_version(moonraker_version) &&
+                            std::find(components.begin(), components.end(), "update_manager") !=
+                                components.end()) {
+                            fetch_moonraker_version_fallback(seq);
+                        }
                     }
                 }
 
                 // Fire-and-forget webcam detection - independent of components list.
-                // Skipped on platforms without a camera widget (HELIX_HAS_CAMERA=0:
-                // AD5M/AD5X/CC1/K1/K2/MIPS/SnapmakerU1). On AD5X specifically, the
-                // firmware's H.264 codec driver crashes the kernel on v4l2_open
-                // (dma_coherent_mem_available NULL deref → process killed by SIGBUS),
-                // so even probing for a webcam is unwanted.
+                // Runs on every build: a platform without a camera widget still
+                // reads the registered snapshot URL for the QR scanner's snapshot
+                // polling, and a stock K1 serves its camera on loopback without
+                // registering it (prestonbrown/helixscreen#1788).
                 //
                 // machine.system_info is fetched first because it feeds two
                 // consumers: the OS/CPU hardware fields, and the camera
                 // service_state the webcam decision cross-checks (#1351). A failed
                 // query is fatal for neither — webcam detection still runs, with an
                 // empty service_state that reads as "assume available".
+                const bool probe_local_cameras =
+                    helix::board::current_info().local_camera_probe_safe;
                 client_.send_jsonrpc(
                     "machine.system_info", json::object(),
-                    [this](const json& sys_response) {
+                    [this, probe_local_cameras](const json& sys_response) {
                         parse_system_info(sys_response);
-#if HELIX_HAS_CAMERA
-                        detect_webcam(webcam::extract_service_state(sys_response));
-#endif
+                        detect_webcam(webcam::extract_service_state(sys_response),
+                                      probe_local_cameras);
                     },
-                    [this](const MoonrakerError& err) {
+                    [this, probe_local_cameras](const MoonrakerError& err) {
                         spdlog::debug("[Moonraker Client] machine.system_info query failed, "
                                       "continuing: {}",
                                       err.message);
-#if HELIX_HAS_CAMERA
-                        detect_webcam(json::object());
-#endif
+                        detect_webcam(json::object(), probe_local_cameras);
                     });
-#if !HELIX_HAS_CAMERA
-                // No camera widget on this platform — explicitly mark unavailable
-                // so any consumer that observes the subject sees a definitive
-                // "no" instead of the default-constructed initial state.
-                get_printer_state().capabilities_state().set_webcam_available(false);
-#endif // HELIX_HAS_CAMERA
 
                 // Fire-and-forget power device detection
                 discover_power_devices();
@@ -763,21 +839,21 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                     if (printer_response.contains("result")) {
                         const json& result = printer_response["result"];
                         auto hostname = result.value("hostname", "unknown");
-                        auto software_version = result.value("software_version", "unknown");
+                        std::string software_version;
+                        bool kalico = false;
                         {
                             std::lock_guard<std::mutex> lock(hardware_mutex_);
                             reported_hostname_ = hostname;
                             publish_identity_locked();
-                            hardware_.set_software_version(software_version);
+                            hardware_.apply_printer_info(result);
+                            software_version = hardware_.software_version();
+                            kalico = hardware_.is_kalico();
                         }
-                        std::string state = result.value("state", "");
-                        std::string state_message = result.value("state_message", "");
+                        const KlippyStatus status = parse_klippy_status(result);
+                        const std::string& state = status.state;
+                        const std::string& state_message = status.state_message;
 
-                        // Detect Kalico (Klipper fork with MPC support)
-                        auto app = result.value("app", "");
-                        if (app == "Kalico") {
-                            std::lock_guard<std::mutex> lock(hardware_mutex_);
-                            hardware_.set_is_kalico(true);
+                        if (kalico) {
                             spdlog::info("[Moonraker Client] Kalico firmware detected");
                         }
 
@@ -798,18 +874,20 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                         // shut down between the request and the response, and the
                         // stale answer would then re-enable everything against a
                         // dead printer.
-                        if (state == "shutdown" || state == "disconnected") {
+                        //
+                        // Moonraker's own "disconnected" seeds SHUTDOWN: Klippy is
+                        // not serving, which is what SHUTDOWN gates on.
+                        const std::optional<KlippyState> seed =
+                            state == "disconnected" ? std::optional(KlippyState::SHUTDOWN)
+                                                    : parse_klippy_state(state);
+                        if (seed == KlippyState::SHUTDOWN || seed == KlippyState::ERROR) {
                             spdlog::warn("[Moonraker Client] Printer is in {} state at startup",
                                          state);
-                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::SHUTDOWN);
-                        } else if (state == "error") {
-                            spdlog::warn("[Moonraker Client] Printer is in ERROR state at startup");
-                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::ERROR);
-                        } else if (state == "startup") {
+                        } else if (seed == KlippyState::STARTUP) {
                             spdlog::info("[Moonraker Client] Printer is starting up");
-                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::STARTUP);
-                        } else if (state == "ready") {
-                            get_printer_state().set_klippy_state_if_unseeded(KlippyState::READY);
+                        }
+                        if (seed) {
+                            get_printer_state().set_klippy_state_if_unseeded(*seed, state_message);
                         }
                     }
 
@@ -832,31 +910,27 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                                 const auto& cfg =
                                     config_response["result"]["status"]["configfile"]["config"];
                                 std::unordered_set<std::string> macros_snapshot;
+                                std::shared_ptr<PrinterDiscovery> configured_hardware;
                                 {
                                     std::lock_guard<std::mutex> lock(hardware_mutex_);
                                     hardware_.parse_config_keys(cfg);
                                     macros_snapshot = hardware_.macros();
+                                    configured_hardware =
+                                        std::make_shared<PrinterDiscovery>(hardware_);
                                 }
                                 MacroParamCache::instance().populate_from_configfile(
                                     cfg, macros_snapshot);
 
-                                // Seed probe sensor z_offset from configfile (some probe
-                                // modules like flashforge_loadcell return null in status).
-                                // Accelerometers have no get_status(), so configfile.config
-                                // is the ONLY place they appear — this is the sole caller
-                                // that fills AccelSensorManager, which Settings > Sensors,
-                                // telemetry and detect_belt_hardware() all read.
-                                // Both must run on main thread: they set LVGL subjects
-                                // (probe_z_offset, accel_count). discover_from_config() rebuilds
-                                // its list from scratch, so a reconnect re-run cannot duplicate.
-                                nlohmann::json cfg_for_sensors = cfg;
+                                // The first sensor pass ran before the configfile arrived, so
+                                // the managers that read config sections (accelerometers, which
+                                // have no get_status(), a probe's z_offset, input reactions)
+                                // discover again on this one. Main thread: discovery sets LVGL
+                                // subjects.
                                 helix::ui::queue_update(
                                     "MoonrakerDiscoverySequence::continue_discovery_objects",
-                                    [cfg_for_sensors]() {
-                                        helix::sensors::ProbeSensorManager::instance()
-                                            .discover_from_config(cfg_for_sensors);
-                                        helix::sensors::AccelSensorManager::instance()
-                                            .discover_from_config(cfg_for_sensors);
+                                    [configured_hardware]() {
+                                        helix::sensors::rediscover_from_config(
+                                            *configured_hardware);
                                     });
 
                                 // Update LED controller with configfile data (effect targets +
@@ -900,8 +974,15 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                                 {
                                     std::lock_guard<std::mutex> lock(hardware_mutex_);
                                     hardware_.parse_build_volume(settings);
-                                    hardware_.parse_filament_diameter(settings);
+                                    hardware_.parse_extruder_dimensions(settings);
+                                    hardware_.parse_fit_limits(settings);
+                                    spdlog::debug(
+                                        "[Discovery] Fit-check limits: {}",
+                                        helix::json_util::safe_dump(
+                                            helix::fit_machine_json(*hardware_.fit_machine())));
                                     hardware_.parse_leveling_probe_points(settings);
+                                    hardware_.parse_probe_xy_offset(settings);
+                                    hardware_.parse_start_macro_injection(settings);
                                 }
 
                                 // Which macros take the host down with them.
@@ -933,6 +1014,7 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                                         helix::skip_wrappers::wrappable(settings),
                                         helix::skip_wrappers::active(settings));
                                     hardware_.parse_sensor_toggle_command(settings);
+                                    hardware_.parse_screws_tilt_builtin(settings);
                                 }
 
                                 helix::MacroFanAnalyzer analyzer;
@@ -940,12 +1022,14 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
 
                                 // Record the chamber cooling fan's configured resting/off
                                 // target. M141 S0 resets the cooling fan to this value (35°C
-                                // on the K2); recognizing it lets the chamber report Off
-                                // instead of misreading the resting fan target as a deliberate
-                                // "Maintaining" set. Klipper lowercases section names in
-                                // configfile.settings, so lowercase the fan's object name for
-                                // the lookup. Stored on hardware_ and read in
-                                // PrinterState::set_hardware (same path as the cooling-fan name).
+                                // on the K2), and a deliberate set equal to it is
+                                // wire-identical; recognizing it lets the chamber label that
+                                // state Resting (auto) rather than misreading the fan target
+                                // as a deliberate "Maintaining" set. Klipper lowercases
+                                // section names in configfile.settings, so lowercase the
+                                // fan's object name for the lookup. Stored on hardware_ and
+                                // read in PrinterState::set_hardware (same path as the
+                                // cooling-fan name).
                                 {
                                     std::lock_guard<std::mutex> lock(hardware_mutex_);
                                     std::string fan = hardware_.chamber_cooling_fan_name();
@@ -975,12 +1059,13 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
                                 {
                                     std::lock_guard<std::mutex> lock(hardware_mutex_);
                                     for (const auto& [section, cfg_vals] : settings.items()) {
+                                        const auto kind = hw::classify_object(section).kind;
                                         const bool is_fan_section =
-                                            section == "fan" ||
-                                            section.rfind("heater_fan ", 0) == 0 ||
-                                            section.rfind("fan_generic ", 0) == 0 ||
-                                            section.rfind("controller_fan ", 0) == 0 ||
-                                            section.rfind("temperature_fan ", 0) == 0;
+                                            kind == hw::ObjectKind::Fan ||
+                                            kind == hw::ObjectKind::HeaterFan ||
+                                            kind == hw::ObjectKind::GenericFan ||
+                                            kind == hw::ObjectKind::ControllerFan ||
+                                            kind == hw::ObjectKind::TemperatureFan;
                                         if (!is_fan_section || !cfg_vals.is_object() ||
                                             !cfg_vals.contains("max_power") ||
                                             !cfg_vals["max_power"].is_number()) {
@@ -1019,17 +1104,10 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
 
                     // Step 5: Query MCU information for printer detection
                     // Find all MCU objects (e.g., "mcu", "mcu EBBCan", "mcu rpi")
-                    std::vector<std::string> printer_objects_snapshot;
+                    std::vector<std::string> mcu_objects;
                     {
                         std::lock_guard<std::mutex> lock(hardware_mutex_);
-                        printer_objects_snapshot = hardware_.printer_objects();
-                    }
-                    std::vector<std::string> mcu_objects;
-                    for (const auto& obj : printer_objects_snapshot) {
-                        // Match "mcu" or "mcu <name>" pattern
-                        if (obj == "mcu" || obj.rfind("mcu ", 0) == 0) {
-                            mcu_objects.push_back(obj);
-                        }
+                        mcu_objects = hardware_.mcus();
                     }
 
                     if (mcu_objects.empty()) {
@@ -1185,12 +1263,7 @@ void MoonrakerDiscoverySequence::continue_discovery_objects(uint64_t seq) {
     );
 }
 
-json MoonrakerDiscoverySequence::build_subscription_objects(
-    const PrinterDiscovery& hw, const std::vector<std::string>& heaters,
-    const std::vector<std::string>& sensors, const std::vector<std::string>& load_cells,
-    const std::vector<std::string>& fans, const std::vector<std::string>& leds,
-    const std::vector<std::string>& afc_objects, const std::vector<std::string>& filament_sensors,
-    const std::vector<std::string>& mcus) {
+json MoonrakerDiscoverySequence::build_subscription_objects(const PrinterDiscovery& hw) {
     json subscription_objects;
 
     // Core non-optional objects — narrow each to the fields HelixScreen
@@ -1198,14 +1271,11 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
     // subscribed-field change, and several of these (toolhead, gcode_move,
     // motion_report) update on every motion step (~100Hz during a print) —
     // nullptr would have us receiving every internal field per step.
-    // power_loss: Creality-Klipper-fork-only Power-Loss-Recovery capability
-    // marker. Absent on mainline Klipper — Moonraker answers a subscribed field
-    // the firmware never populates with an explicit null, which the parser
-    // rejects (presence must mean present AND numeric). See
-    // docs/devel/POWER_LOSS_RECOVERY.md.
+    // Power-loss recovery and the structured pause cause add their own
+    // print_stats / virtual_sdcard fields below.
     subscription_objects["print_stats"] =
         json::array({"state", "filename", "filament_used", "print_duration", "total_duration",
-                     "estimated_time", "info", "message", "power_loss"});
+                     "estimated_time", "info", "message"});
     // virtual_sdcard.progress drives the progress bar. layer / layer_count
     // are the FALLBACK source for layer tracking — preferred source is
     // print_stats.info.{current_layer,total_layer} (slicer-supplied via
@@ -1215,11 +1285,12 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
     // SD playback was deactivated" (Snapmaker U1 dirty-bed exception,
     // level-2 aborts, post-SDCARD_RESET_FILE). prepare_for_resume reads
     // it to decide between RESUME and "Restart from beginning?" UX.
-    // pl_env_valid / file_path: Snapmaker-fork Power-Loss-Recovery fields.
-    // Absent (harmless) on mainline Klipper — Moonraker sends explicit null
-    // for a subscribed field the connected firmware never populates.
+    // file_position: the byte the print stands on, which names the start-
+    // sequence step running on a printer whose slicer inlines it
+    // (PrintStartCollector). It moves exactly when progress does, so it adds
+    // no frames.
     subscription_objects["virtual_sdcard"] =
-        json::array({"progress", "layer", "layer_count", "is_active", "pl_env_valid", "file_path"});
+        json::array({"progress", "layer", "layer_count", "is_active", "file_position"});
     subscription_objects["toolhead"] =
         json::array({"position", "homed_axes", "kinematics", "extruder", "max_velocity",
                      "axis_minimum", "axis_maximum"});
@@ -1239,77 +1310,35 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
     // Pause/resume state (PAUSE/RESUME gcode) — PrinterState::is_paused() reads this.
     subscription_objects["pause_resume"] = json::array({"is_paused"});
 
-    // All discovered heaters (extruders, beds, generic heaters).
-    // PrinterTemperatureState reads temperature, target and duty cycle. Power
-    // is what distinguishes an element working flat out from one barely
-    // ticking over at the same temperature, so it is worth the field.
-    static const json heater_fields = json::array({"temperature", "target", "power"});
-    for (const auto& heater : heaters) {
-        subscription_objects[heater] = heater_fields;
-    }
-
-    // All discovered sensors. temperature_fan also lives in fans and is
-    // overwritten in the fans loop below with the union of fields. "humidity" is
-    // requested for every sensor — Moonraker simply omits it for sensors that
-    // don't report it (temperature-only), and it carries box humidity for the
-    // bme280/htu21d/sht3x chips a Happy Hare filament dryer reads.
-    static const json temp_sensor_fields = json::array({"temperature", "humidity"});
-    for (const auto& sensor : sensors) {
-        subscription_objects[sensor] = temp_sensor_fields;
-    }
-
-    static const json load_cell_fields = json::array({"force_g"});
-    for (const auto& load_cell : load_cells) {
-        subscription_objects[load_cell] = load_cell_fields;
-    }
-
-    // All discovered fans. Klipper publishes fan speed updates whenever PWM
-    // duty changes — without narrowing, every config field would also stream
-    // back per update. Field shape varies by object type:
-    //   - "fan", heater_fan, fan_generic, controller_fan: { "speed" }
-    //   - temperature_fan: { "temperature", "target", "speed" } (also a sensor)
-    //   - output_pin: { "value" } (Creality-style)
-    static const json fan_speed_fields = json::array({"speed"});
-    static const json temp_fan_fields = json::array({"temperature", "target", "speed"});
-    static const json output_pin_value_fields = json::array({"value"});
-    for (const auto& fan : fans) {
-        if (fan.rfind("temperature_fan ", 0) == 0) {
-            subscription_objects[fan] = temp_fan_fields;
-        } else if (fan.rfind("output_pin ", 0) == 0) {
-            subscription_objects[fan] = output_pin_value_fields;
-        } else {
-            subscription_objects[fan] = fan_speed_fields;
+    // Every discovered object is subscribed with the fields its kind reads
+    // (hw::status_fields); Klipper streams a notification per changed field, so
+    // each kind is narrowed to what the parsers consume. Humidity rides on every
+    // temperature kind because Moonraker omits it for sensors that do not report
+    // it. An extruder also carries pressure advance, which the tuning screens
+    // read back as the truth of what is in effect, and the fitted nozzle's
+    // diameter and flow type, which the fit check prefers to the config's where
+    // the firmware reports them (a field an object lacks comes back null or not
+    // at all). Probes are subscribed below through the sensor managers, whose
+    // fields vary per probe type.
+    for (const auto& [name, kind] : hw.object_kinds()) {
+        const auto fields = helix::hw::status_fields(kind);
+        if (fields.empty()) {
+            continue;
         }
-    }
-
-    // Creality tachometer module — PrinterFanState reads fan0_speed..fan9_speed.
-    if (hw.has_fan_feedback()) {
-        static const json fan_feedback_fields =
-            json::array({"fan0_speed", "fan1_speed", "fan2_speed", "fan3_speed", "fan4_speed",
-                         "fan5_speed", "fan6_speed", "fan7_speed", "fan8_speed", "fan9_speed"});
-        subscription_objects["fan_feedback"] = fan_feedback_fields;
-    }
-
-    // All discovered LEDs. Native LEDs (neopixel/dotstar/led) report color_data;
-    // output_pin LEDs report a single value. Other config fields are static
-    // topology already fetched at startup.
-    static const json led_color_fields = json::array({"color_data"});
-    for (const auto& led : leds) {
-        if (led.rfind("output_pin ", 0) == 0) {
-            subscription_objects[led] = output_pin_value_fields;
+        if (fields.size() == 1 && fields.front() == "*") {
+            subscription_objects[name] = nullptr;
+        } else if (kind == helix::hw::ObjectKind::Heater && is_extruder_name(name)) {
+            static const json extruder_fields =
+                json::array({"temperature", "target", "power", "pressure_advance",
+                             "nozzle_diameter", "nozzle_volume_type"});
+            subscription_objects[name] = extruder_fields;
         } else {
-            subscription_objects[led] = led_color_fields;
+            json list = json::array();
+            for (const auto field : fields) {
+                list.push_back(std::string(field));
+            }
+            subscription_objects[name] = std::move(list);
         }
-    }
-
-    // All discovered LED effects (klipper-led_effect plugin objects).
-    // We only read `enabled`. Klipper otherwise publishes per-frame animation
-    // state on every effect tick — subscribing to nullptr would have us
-    // receiving (and Klipper serialising) hundreds of messages per second on
-    // hardware with many led_effects (e.g. AFC BoxTurtle: 2 effects × 8 lanes
-    // = 46 effect objects updating in lockstep with the print).
-    for (const auto& effect : hw.led_effects()) {
-        subscription_objects[effect] = json::array({"enabled"});
     }
 
     // Bed mesh (for 3D visualization). MoonrakerAdvancedAPI reads only the
@@ -1342,78 +1371,14 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
     // Narrowed to the single `state` field to avoid needless notifications.
     subscription_objects["idle_timeout"] = json::array({"state"});
 
-    // Happy Hare MMU object (gate status, colors, materials, filament info)
-    // Subscribe to specific fields only — nullptr means ALL fields, which causes
-    // excessive notifications and Klipper-side serialization cost (#388)
-    if (hw.mmu_type() == AmsType::HAPPY_HARE) {
-        // endless_spool_enabled is the ENABLE bit for endless_spool_groups. Happy Hare
-        // ignores a GROUPS= write while it is 0, so an edit sent without reading it first
-        // fails silently.
-        subscription_objects["mmu"] = json::array({"gate",
-                                                   "tool",
-                                                   "filament",
-                                                   "action",
-                                                   "reason_for_pause",
-                                                   "filament_pos",
-                                                   "gate_status",
-                                                   "gate_color_rgb",
-                                                   "gate_color",
-                                                   "gate_material",
-                                                   "gate_name",
-                                                   "gate_vendor",
-                                                   "gate_filament_name",
-                                                   "gate_spool_id",
-                                                   "gate_temperature",
-                                                   "has_bypass",
-                                                   "num_units",
-                                                   "num_gates",
-                                                   "unit_gate_counts",
-                                                   "unit",
-                                                   "ttg_map",
-                                                   "endless_spool_groups",
-                                                   "endless_spool_enabled",
-                                                   "sensors",
-                                                   "bowden_progress",
-                                                   "clog_detection_enabled",
-                                                   "encoder",
-                                                   "flowguard",
-                                                   "drying_state",
-                                                   "sync_feedback_state",
-                                                   "sync_feedback_bias_modelled",
-                                                   "sync_feedback_bias_raw",
-                                                   "sync_feedback_flow_rate",
-                                                   "sync_drive",
-                                                   "spoolman_support",
-                                                   "pending_spool_id",
-                                                   "espooler_active",
-                                                   "espooler",
-                                                   "tangle_prevention",
-                                                   "num_toolchanges",
-                                                   "slicer_tool_map",
-                                                   "toolchange_purge_volume",
-                                                   "leds"});
-    }
-
-    // All discovered AFC objects: the backend owns which fields each object
-    // type needs. nullptr here would cost dearly: an AFC BoxTurtle setup
-    // typically has ~9 AFC_* objects, all updated by the firmware on every lane
-    // state change.
-    const json afc_subscriptions = AmsBackendAfc::required_status_objects(afc_objects);
-    for (auto it = afc_subscriptions.begin(); it != afc_subscriptions.end(); ++it) {
+    // Filament systems (Happy Hare, AFC, AD5X IFS, CFS, ACE, Snapmaker, QIDI Box,
+    // OpenAMS): each backend owns which objects it reads and which fields of them,
+    // and answers only for its own printer. Subscribing a field-less object costs
+    // Klipper serialization on every tick, so the backends narrow where they can.
+    const json filament_objects = AmsBackend::required_status_objects(hw);
+    for (auto it = filament_objects.begin(); it != filament_objects.end(); ++it) {
         subscription_objects[it.key()] = it.value();
     }
-
-    // AD5X IFS: save_variables for filament state (colors, types, tool mapping),
-    // plus native ZMOD's own zmod_ifs/zmod_color objects where the firmware
-    // publishes them. The backend owns which names those are; asking it keeps
-    // the firmware's schema in the one module that parses it.
-#if HELIX_HAS_IFS
-    if (hw.mmu_type() == AmsType::AD5X_IFS) {
-        for (const auto& object : AmsBackendAd5xIfs::required_status_objects(hw)) {
-            subscription_objects[object] = nullptr;
-        }
-    }
-#endif // HELIX_HAS_IFS
 
     // Firmware that keeps the authoritative z-offset outside gcode_move needs
     // whatever object stores it; without this the Z-offset row reads 0.000
@@ -1437,12 +1402,12 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
         subscription_objects[obj] = nullptr;
     }
 
-    // Firmware that monitors incoming mains keeps the live reading in its own
-    // status object. The reading is diagnostic — the debug bundle's
-    // printer-state query surfaces it — and never gates recovery.
-    // See include/power_loss_sensor.h.
-    for (const auto& obj : helix::power_loss::required_status_objects(hw)) {
-        subscription_objects[obj] = nullptr;
+    // Firmware that reports a removable enclosure top fitted keeps the reading
+    // in its own status object; the home panel's printer picture follows it.
+    // See include/enclosure_top.h.
+    const json enclosure_top_objects = helix::enclosure_top::required_status_objects(hw);
+    for (auto it = enclosure_top_objects.begin(); it != enclosure_top_objects.end(); ++it) {
+        subscription_objects[it.key()] = it.value();
     }
 
     // Firmware that keeps a z-offset PER TOOL needs whatever object stores it.
@@ -1461,131 +1426,28 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
         subscription_objects[obj] = nullptr;
     }
 
-    // ACE (Anycubic ACE Pro — ValgACE/BunnyACE/DuckACE Klipper drivers, native
-    // GoKlipper `filament_hub`, or the Kobra S1 mainline-Python fork's
-    // `ace_instance_N` objects, #1107). Subscribe the real detected object
-    // name(s) so slot colors, materials, status, and dryer state push live via
-    // get_status(). Falls back to `ace` if the name list is unexpectedly empty.
-    if (hw.mmu_type() == AmsType::ACE) {
-        if (hw.ace_object_names().empty()) {
-            subscription_objects["ace"] = nullptr;
-        } else {
-            for (const auto& ace_obj : hw.ace_object_names()) {
-                subscription_objects[ace_obj] = nullptr;
-            }
-        }
-    }
+    // Power-loss recovery and the structured pause cause: each module owns
+    // which fields its firmwares need, including fields on the core objects
+    // above, so they are merged rather than assigned.
+    subscription_objects =
+        merge_subscription_objects(subscription_objects, helix::plr_required_status_fields(hw));
+    subscription_objects = merge_subscription_objects(
+        subscription_objects, helix::pause_descriptor::required_status_fields(hw));
 
-    // CFS (Creality Filament System) — K2 series with RS-485 CFS units
-    if (hw.mmu_type() == AmsType::CFS) {
-        subscription_objects["box"] = nullptr;
-        subscription_objects["motor_control"] = nullptr;
-    }
-
-    // Snapmaker U1 SnapSwap — RFID filament, feed modules, task config, extruder states.
-    // MULTIACE is a superset: AmsBackendMultiAce derives from the Snapmaker backend and
-    // still reads every one of these for unit 0, so it must not miss this block.
-    if (hw.mmu_type() == AmsType::SNAPMAKER || hw.mmu_type() == AmsType::MULTIACE) {
-        // The U1's extruder objects carry custom toolchanger fields
-        // (state/park_pin/active_pin/activating_move) on top of the usual heater
-        // ones. The heaters loop above subscribes every extruder with just
-        // {temperature, target}, which leaves the backend's active-tool
-        // election nothing but toolhead.extruder to read, a field Klipper
-        // always populates and which therefore names a tool even with all four
-        // toolheads parked. Re-subscribe them here (this block runs after the
-        // heaters loop, so it wins) with the union of both sets.
-        static const json snapmaker_extruder_fields =
-            json::array({"temperature", "target", "state", "park_pin", "active_pin",
-                         "activating_move", "extruder_offset"});
-        const auto& all_heaters = hw.heaters();
-        for (int i = 0; i < 4; ++i) {
-            const std::string key = (i == 0) ? "extruder" : fmt::format("extruder{}", i);
-            if (std::find(all_heaters.begin(), all_heaters.end(), key) != all_heaters.end()) {
-                subscription_objects[key] = snapmaker_extruder_fields;
-            }
-        }
-        subscription_objects["filament_detect"] = nullptr;
-        subscription_objects["filament_feed left"] = nullptr;
-        subscription_objects["filament_feed right"] = nullptr;
-        subscription_objects["print_task_config"] = nullptr;
-        subscription_objects["machine_state_manager"] = nullptr;
-        for (int i = 0; i < 4; ++i) {
-            subscription_objects[fmt::format("filament_motion_sensor e{}_filament", i)] = nullptr;
-        }
-        // The batch macro's `doing` variable drives batch-feed progress, so it
-        // needs a subscription to be readable while a feed runs. Klipper
-        // keeps the config's case for the status object key, so subscribe
-        // under the name as written in printer.cfg; a guessed name makes
-        // Moonraker reject the whole subscription.
-        const std::string batch_macro =
-            hw.macro_config_name(helix::macro_patterns::AUTO_FEEDING_BATCH);
-        if (!batch_macro.empty()) {
-            subscription_objects[fmt::format("gcode_macro {}", batch_macro)] = nullptr;
-        }
-        // multiACE's own object. Everything AmsBackendMultiAce needs rides on
-        // this one subscription — mode, device_count, the per-head source maps
-        // and the full per-unit inventory — so no second HTTP client and no
-        // dependency on multiACE's optional FastAPI service. Without it the
-        // backend is constructed and started but never sees an `ace` frame, so
-        // it silently behaves exactly like the plain Snapmaker backend.
-        if (hw.mmu_type() == AmsType::MULTIACE) {
-            subscription_objects["ace"] = nullptr;
-        }
-    }
-
-    // QIDI Box — box_extras carries box_drying_state.box<N>.{dry_state, end_time}
-    // for the dryer countdown (issue #1019); save_variables carries slot/box state.
-    // Both are also bootstrap-queried in AmsBackendQidi::on_started(); subscribing
-    // keeps drying-state changes pushing live to handle_status().
-    if (hw.mmu_type() == AmsType::QIDI_BOX) {
-        subscription_objects["box_extras"] = nullptr;
-        subscription_objects["save_variables"] = nullptr;
-    }
-
-    // OpenAMS: the backend owns which oams_manager fields it reads.
-    const json openams_objects = AmsBackendOpenAms::required_status_objects(hw);
-    for (auto it = openams_objects.begin(); it != openams_objects.end(); ++it) {
-        subscription_objects[it.key()] = it.value();
-    }
-
-    // Power-loss recovery: the PLR module owns which status objects its
-    // backends need for the discovered firmware. A printer already carrying
-    // one of these keys from an earlier block just re-assigns the same map
-    // entry, which is idempotent.
-    for (const auto& obj : helix::plr_required_status_objects(hw)) {
-        subscription_objects[obj] = nullptr;
-    }
-
-    // All discovered filament sensors (filament_switch_sensor, filament_motion_sensor).
-    // FilamentSensorManager reads filament_detected + enabled + detection_count.
-    static const json filament_sensor_fields =
-        json::array({"filament_detected", "enabled", "detection_count"});
-    for (const auto& sensor : filament_sensors) {
-        subscription_objects[sensor] = filament_sensor_fields;
-    }
-
-    // Probe objects. ProbeSensorManager owns which names are probes and which
-    // fields it reads.
-    const json probe_objects =
-        helix::sensors::ProbeSensorManager::required_status_objects(hw.printer_objects());
-    for (auto it = probe_objects.begin(); it != probe_objects.end(); ++it) {
-        subscription_objects[it.key()] = it.value();
-    }
-
-    // All discovered width sensors. WidthSensorManager reads Diameter + Raw.
-    if (hw.has_width_sensors()) {
-        static const json width_sensor_fields = json::array({"Diameter", "Raw"});
-        for (const auto& sensor : hw.width_sensor_objects()) {
-            subscription_objects[sensor] = width_sensor_fields;
-        }
+    // Each sensor manager owns the subscriptions beyond its kinds' table fields
+    // (a probe's fields vary per probe type).
+    for (auto* manager : helix::sensors::sensor_managers()) {
+        subscription_objects =
+            merge_subscription_objects(subscription_objects, manager->extra_subscriptions(hw));
     }
 
     // Toolchanger + per-tool objects. AmsBackendToolchanger reads
-    // status/tool_number/tool_numbers; ToolState reads tool active/mounted/
+    // status/tool_number/tool_numbers; discovery orders the tools by
+    // tool_names; ToolState reads tool active/mounted/
     // detect_state + gcode_*_offset + extruder + fan.
     if (hw.has_tool_changer()) {
         subscription_objects["toolchanger"] =
-            json::array({"status", "tool_number", "tool_numbers"});
+            json::array({"status", "tool_number", "tool_numbers", "tool_names"});
         static const json tool_fields =
             json::array({"active", "mounted", "detect_state", "gcode_x_offset", "gcode_y_offset",
                          "gcode_z_offset", "extruder", "fan"});
@@ -1598,6 +1460,12 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
     // machines have them and what their objects are called.
     for (const auto& object : helix::toolchanger_addon::required_status_objects(hw)) {
         subscription_objects[object] = nullptr;
+    }
+
+    // Scheduled layer pause: the macro whose variables hold the schedule.
+    // See include/layer_pause.h.
+    for (const auto& obj : helix::layer_pause::required_status_objects(hw)) {
+        subscription_objects[obj] = json::array({"pause_next_layer", "pause_at_layer"});
     }
 
     // Firmware retraction. PrinterCalibrationState reads the four tunable
@@ -1632,19 +1500,6 @@ json MoonrakerDiscoverySequence::build_subscription_objects(
         }
     }
 
-    // MCUs — PerformanceState (MoonrakerPerformanceSource) reads
-    // last_stats.mcu_awake for the load % and last_stats.bytes_retransmit
-    // for the link-health counter. Subscribing to last_stats pulls the whole
-    // dict (both fields land in one update). Host throttle bits arrive via
-    // notify_proc_stat_update (not subscribed here). Must be in this union
-    // subscription: printer.objects.subscribe REPLACES the per-connection
-    // subscription, so a separate subscribe call from PerformanceSource
-    // would wipe everything above.
-    static const json mcu_fields = json::array({"last_stats"});
-    for (const auto& mcu : mcus) {
-        subscription_objects[mcu] = mcu_fields;
-    }
-
     return subscription_objects;
 }
 
@@ -1658,8 +1513,7 @@ void MoonrakerDiscoverySequence::complete_discovery_subscription(uint64_t seq) {
 
     // Step 5: Subscribe to all discovered objects + core objects. The pure
     // helper builds the full objects map; per-section logging stays here.
-    json subscription_objects = build_subscription_objects(
-        hw, heaters_, sensors_, load_cells_, fans_, leds_, afc_objects_, filament_sensors_, mcus_);
+    json subscription_objects = build_subscription_objects(hw);
 
     // A matched z-offset persistence provider (ZMOD, Forge-X, Helper-Script's
     // save-zoffset) owns offset storage. "Save Z Offset" must stand down or
@@ -1675,45 +1529,33 @@ void MoonrakerDiscoverySequence::complete_discovery_subscription(uint64_t seq) {
         get_printer_state().clear_z_offset_external_persistence();
     }
 
-    if (!mcus_.empty()) {
-        spdlog::info("[Moonraker Client] Subscribing to {} MCU object(s): {}", mcus_.size(),
-                     json(mcus_).dump());
+    const auto mcus = hw.mcus();
+    if (!mcus.empty()) {
+        spdlog::info("[Moonraker Client] Subscribing to {} MCU object(s): {}", mcus.size(),
+                     json(mcus).dump());
     }
 
-    spdlog::info("[Moonraker Client] Subscribing to {} fans: {}", fans_.size(), json(fans_).dump());
+    spdlog::info("[Moonraker Client] Subscribing to {} fans: {}", hw.fans().size(),
+                 json(hw.fans()).dump());
     if (hw.has_fan_feedback()) {
         spdlog::debug("[MoonrakerDiscoverySequence] Subscribing to fan_feedback for RPM data");
     }
-    if (hw.mmu_type() == AmsType::HAPPY_HARE) {
-        spdlog::info("[Moonraker Client] Subscribing to MMU object (Happy Hare)");
+    {
+        const json filament_objects = AmsBackend::required_status_objects(hw);
+        if (!filament_objects.empty()) {
+            std::vector<std::string> names;
+            for (auto it = filament_objects.begin(); it != filament_objects.end(); ++it) {
+                names.push_back(it.key());
+            }
+            spdlog::info("[Moonraker Client] Subscribing to {} filament system objects ({}): {}",
+                         names.size(), ams_type_to_string(hw.mmu_type()), json(names).dump());
+        }
     }
-    const size_t afc_skipped =
-        afc_objects_.size() - AmsBackendAfc::required_status_objects(afc_objects_).size();
-    if (afc_skipped > 0) {
-        spdlog::debug("[Moonraker Client] Skipped {} unparsed AFC object(s) from subscription",
-                      afc_skipped);
-    }
-    if (hw.mmu_type() == AmsType::OPENAMS) {
-        spdlog::info("[Moonraker Client] Subscribing to oams_manager (OpenAMS UI API)");
-    }
-    if (hw.mmu_type() == AmsType::AD5X_IFS) {
-        spdlog::info("[Moonraker Client] Subscribing to save_variables (AD5X IFS)");
-    }
-    if (!helix::plr_required_status_objects(hw).empty()) {
-        spdlog::info("[Moonraker Client] Subscribing to save_variables (power-loss recovery)");
-    }
+    spdlog::debug("[Moonraker Client] Power-loss recovery fields: {}",
+                  helix::plr_required_status_fields(hw).dump());
     if (helix::zoffset::firmware_persists_z_offset(hw)) {
         spdlog::info("[Moonraker Client] Subscribing persisted z-offset objects ({})",
                      helix::zoffset::persistence_provider_name(hw));
-    }
-    if (hw.mmu_type() == AmsType::ACE) {
-        spdlog::info("[Moonraker Client] Subscribing to ace object (Anycubic ACE)");
-    }
-    if (hw.mmu_type() == AmsType::CFS) {
-        spdlog::info("[Moonraker Client] Subscribing to box + motor_control (CFS)");
-    }
-    if (hw.mmu_type() == AmsType::SNAPMAKER || hw.mmu_type() == AmsType::MULTIACE) {
-        spdlog::info("[Moonraker Client] Subscribing to Snapmaker filament + feed objects");
     }
     if (hw.has_width_sensors()) {
         spdlog::info("[Moonraker Client] Subscribing to {} width sensors",
@@ -1794,12 +1636,6 @@ void MoonrakerDiscoverySequence::finish_discovery_subscription(const PrinterDisc
         spdlog::info("[Moonraker Client] Subscription complete: {} objects subscribed",
                      num_subscribed);
 
-        // Per-filament operation temperatures are static firmware
-        // data published on the console, not through status, so the
-        // one capture belongs at connect time. No-ops on a printer
-        // whose firmware publishes none.
-        filament_temps::capture_on_connect(client_, hw);
-
         // Process initial state from subscription response
         // Moonraker returns current values in result.status
         if (sub_response["result"].contains("status")) {
@@ -1855,6 +1691,13 @@ void MoonrakerDiscoverySequence::finish_discovery_subscription(const PrinterDisc
     json initial_status;
     if (sub_response.contains("result") && sub_response["result"].contains("status")) {
         initial_status = sub_response["result"]["status"];
+    }
+    // The objects list names the tools but not their numbers; the first status
+    // does, and every consumer of the hardware takes a tool's slot from its
+    // position.
+    if (initial_status.contains("toolchanger")) {
+        std::lock_guard<std::mutex> lock(hardware_mutex_);
+        hardware_.order_tools_by_number(initial_status["toolchanger"]);
     }
     if (on_discovery_complete_) {
         PrinterDiscovery hw_snapshot;
@@ -2013,182 +1856,31 @@ void MoonrakerDiscoverySequence::invoke_discovery_complete() {
 }
 
 void MoonrakerDiscoverySequence::parse_objects(const json& objects) {
-    // Populate unified hardware discovery (Phase 2)
-    {
-        std::lock_guard<std::mutex> lock(hardware_mutex_);
-        hardware_.parse_objects(objects);
-    }
-
-    heaters_.clear();
-    sensors_.clear();
-    load_cells_.clear();
-    fans_.clear();
-    leds_.clear();
-    steppers_.clear();
-    afc_objects_.clear();
-    filament_sensors_.clear();
-    mcus_.clear();
-
-    // Collect printer_objects for hardware_ as we iterate
     std::vector<std::string> all_objects;
     all_objects.reserve(objects.size());
-
     for (const auto& obj : objects) {
-        if (!obj.is_string())
-            continue;
-        std::string name = obj.template get<std::string>();
-
-        // Store all objects for detection heuristics (object_exists, macro_match)
-        all_objects.push_back(name);
-
-        // Steppers (stepper_x, stepper_y, stepper_z, stepper_z1, etc.)
-        if (name.rfind("stepper_", 0) == 0) {
-            steppers_.push_back(name);
-        }
-        // Extruders (controllable heaters)
-        // Match "extruder", "extruder1", etc., but NOT "extruder_stepper"
-        else if (name.rfind("extruder", 0) == 0 && name.rfind("extruder_stepper", 0) != 0) {
-            heaters_.push_back(name);
-        }
-        // Heated bed
-        else if (name == "heater_bed") {
-            heaters_.push_back(name);
-        }
-        // Generic heaters (e.g., "heater_generic chamber")
-        else if (name.rfind("heater_generic ", 0) == 0) {
-            heaters_.push_back(name);
-        }
-        // Load cells
-        else if (name.rfind("load_cell ", 0) == 0 || name == "load_cell") {
-            load_cells_.push_back(name);
-        }
-        // Read-only temperature sensors
-        else if (name.rfind("temperature_sensor ", 0) == 0) {
-            sensors_.push_back(name);
-        }
-        // Humidity-capable sensor chips. Happy Hare's filament dryer reads box
-        // humidity from these directly (mmu_environment_manager ENV_SENSOR_CHIPS).
-        // Classified from objects.list, so only existing objects are subscribed;
-        // the humidity field is added to the sensor subscription below.
-        else if (helix::sensors::humidity_chip_for_object(name) != nullptr) {
-            // aht20_f is QIDI's box humidity/temp chip ("aht20_f heater_box1",
-            // publishes {temperature, humidity}); confirmed on stock Q2 (#1022).
-            sensors_.push_back(name);
-        }
-        // Temperature-controlled fans (also act as sensors)
-        else if (name.rfind("temperature_fan ", 0) == 0) {
-            sensors_.push_back(name);
-            fans_.push_back(name); // Also add to fans for control
-        }
-        // TMC stepper drivers with built-in temperature (tmc2240, tmc5160)
-        else if (name.rfind("tmc2240 ", 0) == 0 || name.rfind("tmc5160 ", 0) == 0) {
-            sensors_.push_back(name);
-        }
-        // Part cooling fan
-        else if (name == "fan") {
-            fans_.push_back(name);
-        }
-        // Heater fans (e.g., "heater_fan hotend_fan")
-        else if (name.rfind("heater_fan ", 0) == 0) {
-            fans_.push_back(name);
-        }
-        // Generic fans
-        else if (name.rfind("fan_generic ", 0) == 0) {
-            fans_.push_back(name);
-        }
-        // Controller fans
-        else if (name.rfind("controller_fan ", 0) == 0) {
-            fans_.push_back(name);
-        }
-        // Output pins - classify as fan or LED based on name keywords
-        else if (name.rfind("output_pin ", 0) == 0) {
-            std::string lower_name = name;
-            lower_name = helix::text_io::to_lower(lower_name);
-            if (lower_name.find("fan") != std::string::npos) {
-                fans_.push_back(name);
-            } else if (lower_name.find("light") != std::string::npos ||
-                       lower_name.find("led") != std::string::npos ||
-                       lower_name.find("lamp") != std::string::npos) {
-                leds_.push_back(name);
-            }
-        }
-        // LED outputs
-        else if (name.rfind("led ", 0) == 0 || name.rfind("neopixel ", 0) == 0 ||
-                 name.rfind("dotstar ", 0) == 0) {
-            leds_.push_back(name);
-        }
-        // AFC MMU objects — all AFC objects share the "AFC_" namespace prefix in Klipper.
-        // Subscribe to all of them for lane state, sensor data, filament info, and
-        // unit-level data (BoxTurtle, OpenAMS, ViViD, NightOwl, etc.)
-        else if (name == "AFC" || name.rfind("AFC_", 0) == 0) {
-            afc_objects_.push_back(name);
-        }
-        // Filament sensors (switch or motion type)
-        // These provide runout detection and encoder motion data.
-        // AD5X native Z-Mod publishes its head/motion sensors under custom module
-        // namespaces (zmod_ifs_switch_sensor / zmod_ifs_motion_sensor) rather than
-        // the stock filament_switch_sensor / filament_motion_sensor sections, so
-        // bucket those too — the IFS backend subscribes to them for head-loaded
-        // state.
-        else if (name.rfind("filament_switch_sensor ", 0) == 0 ||
-                 name.rfind("filament_motion_sensor ", 0) == 0 ||
-                 name.rfind("zmod_ifs_switch_sensor ", 0) == 0 ||
-                 name.rfind("zmod_ifs_motion_sensor ", 0) == 0) {
-            filament_sensors_.push_back(name);
-        }
-        // MCUs: "mcu" (primary) and "mcu <name>" (secondary boards, host MCU,
-        // toolhead MCUs, etc.). Subscribed for PerformanceState — last_stats
-        // for load %, bytes_retransmit for link health. Must ride the main
-        // subscription because Moonraker replaces the per-connection
-        // subscription on every printer.objects.subscribe call.
-        else if (name == "mcu" || name.rfind("mcu ", 0) == 0) {
-            mcus_.push_back(name);
+        if (obj.is_string()) {
+            all_objects.push_back(obj.template get<std::string>());
         }
     }
 
+    // PrinterDiscovery classifies every name once; the buckets and the
+    // subscription map are views of that classification.
+    std::lock_guard<std::mutex> lock(hardware_mutex_);
+    hardware_.parse_objects(objects);
     spdlog::debug("[Moonraker Client] Discovered: {} heaters, {} sensors, {} load cells, {} fans, "
-                  "{} LEDs, {} "
-                  "steppers, {} AFC objects, {} filament sensors, {} MCUs",
-                  heaters_.size(), sensors_.size(), load_cells_.size(), fans_.size(), leds_.size(),
-                  steppers_.size(), afc_objects_.size(), filament_sensors_.size(), mcus_.size());
-
-    // Debug output of discovered objects
-    if (!heaters_.empty()) {
-        spdlog::debug("[Moonraker Client] Heaters: {}", json(heaters_).dump());
-    }
-    if (!load_cells_.empty()) {
-        spdlog::debug("[Moonraker Client] Load cells: {}", json(load_cells_).dump());
-    }
-    if (!sensors_.empty()) {
-        spdlog::debug("[Moonraker Client] Sensors: {}", json(sensors_).dump());
-    }
-    if (!fans_.empty()) {
-        spdlog::debug("[Moonraker Client] Fans: {}", json(fans_).dump());
-    }
-    if (!leds_.empty()) {
-        spdlog::debug("[Moonraker Client] LEDs: {}", json(leds_).dump());
-    }
-    if (!steppers_.empty()) {
-        spdlog::debug("[Moonraker Client] Steppers: {}", json(steppers_).dump());
-    }
-    if (!afc_objects_.empty()) {
-        spdlog::info("[Moonraker Client] AFC objects: {}", json(afc_objects_).dump());
-    }
-    if (!filament_sensors_.empty()) {
-        spdlog::info("[Moonraker Client] Filament sensors: {}", json(filament_sensors_).dump());
-    }
-
-    // Store printer objects in hardware discovery (handles all capability parsing)
-    {
-        std::lock_guard<std::mutex> lock(hardware_mutex_);
-        hardware_.set_printer_objects(all_objects);
-    }
+                  "{} LEDs, {} steppers, {} filament sensors, {} MCUs",
+                  hardware_.heaters().size(), hardware_.sensors().size(),
+                  hardware_.load_cells().size(), hardware_.fans().size(), hardware_.leds().size(),
+                  hardware_.steppers().size(), hardware_.filament_sensor_names().size(),
+                  hardware_.mcus().size());
+    hardware_.set_printer_objects(all_objects);
 }
 
 void MoonrakerDiscoverySequence::parse_bed_mesh(const json& bed_mesh) {
     // Invoke bed mesh callback for API layer
     // The API layer (MoonrakerAPI) owns the bed mesh data; Client is just the transport
-    std::function<void(const json&)> callback_copy;
+    helix::SharedCallback<void(const json&)> callback_copy;
     {
         std::lock_guard<std::mutex> lock(callbacks_mutex_);
         callback_copy = bed_mesh_callback_;

@@ -9,10 +9,12 @@
   <view extends="lv_obj"
         width="100%" height="100%" style_pad_all="0" style_pad_gap="0" style_bg_opa="0%" flex_flow="column"
         scrollable="false">
-    <!-- Printer image container -->
+    <!-- Printer image container. The padding keeps the picture off the tile's
+         edge; the image, the callout layer and the callout layout all work in
+         its content box. -->
     <lv_obj name="printer_container"
-            width="100%" flex_grow="1" style_bg_color="#screen_bg" style_pad_all="0" scrollable="false" align="center"
-            clickable="true">
+            width="100%" flex_grow="1" style_bg_color="#screen_bg" style_pad_all="#space_sm" scrollable="false"
+            align="center" clickable="true">
       <event_cb trigger="clicked" callback="printer_manager_clicked_cb"/>
       <!-- Fills the container; a one-side callout layout moves and shrinks it
            (apply_callout_layout), so it is placed from the top-left. -->
@@ -48,18 +50,23 @@
                         flag="hidden"/>
         </lv_obj>
         <leader_line name="callout_line_nozzle" style_line_width="1" style_line_color="#text_muted">
+          <style name="styles.leader_dotted"/>
           <bind_flag_if cond="printer_callout_mode lt 3 or callout_nozzle_shown eq 0" flag="hidden"/>
         </leader_line>
         <leader_line name="callout_line_bed" style_line_width="1" style_line_color="#text_muted">
+          <style name="styles.leader_dotted"/>
           <bind_flag_if cond="printer_callout_mode lt 3 or callout_bed_shown eq 0" flag="hidden"/>
         </leader_line>
         <leader_line name="callout_line_chamber" style_line_width="1" style_line_color="#text_muted">
+          <style name="styles.leader_dotted"/>
           <bind_flag_if cond="printer_callout_mode lt 3 or callout_chamber_shown eq 0" flag="hidden"/>
         </leader_line>
         <leader_line name="callout_line_fan" style_line_width="1" style_line_color="#text_muted">
+          <style name="styles.leader_dotted"/>
           <bind_flag_if cond="printer_callout_mode lt 3 or callout_fan_shown eq 0" flag="hidden"/>
         </leader_line>
         <leader_line name="callout_line_light" style_line_width="1" style_line_color="#text_muted">
+          <style name="styles.leader_dotted"/>
           <bind_flag_if cond="printer_callout_mode lt 3 or callout_light_shown eq 0" flag="hidden"/>
         </leader_line>
 
@@ -103,7 +110,13 @@
           <style name="styles.activity_chip"/>
           <bind_flag_if_eq subject="callout_light_shown" flag="hidden" ref_value="0"/>
           <event_cb trigger="clicked" callback="printer_callout_light_cb"/>
-          <icon src="lightbulb_on" size="xs" variant="warning"/>
+          <event_cb trigger="long_pressed" callback="printer_callout_light_hold_cb"/>
+          <icon name="callout_light_lit" src="lightbulb_on" size="xs" variant="warning">
+            <bind_flag_if_eq subject="callout_light_on" flag="hidden" ref_value="0"/>
+          </icon>
+          <icon name="callout_light_dark" src="lightbulb_outline" size="xs" variant="muted">
+            <bind_flag_if_eq subject="callout_light_on" flag="hidden" ref_value="1"/>
+          </icon>
         </lv_obj>
         <activity_chip name="callout_chip_toolhead"
                        text_subject="callout_toolhead_text" shown_subject="callout_toolhead_merged"

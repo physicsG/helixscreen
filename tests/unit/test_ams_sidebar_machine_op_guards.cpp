@@ -26,6 +26,7 @@
 #include "ams_backend_snapmaker.h"
 #include "ams_state.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "static_subject_registry.h"
 #include "test_helpers/ams_sidebar_xml.h"
 
 #include <lvgl.h>
@@ -202,8 +203,9 @@ TEST_CASE_METHOD(SidebarDirectionGateFixture,
         lv_subject_t* loaded = helix::AmsState::instance().get_filament_loaded_subject();
         REQUIRE(loaded != nullptr);
         REQUIRE(lv_subject_get_int(loaded) == 0); // no tool on the carriage
-        CHECK(gate_value("ams_sidebar_supports_batch") == 1);
-        CHECK_FALSE(lv_obj_has_flag(button("btn_batch_load"), LV_OBJ_FLAG_HIDDEN));
+        CHECK(gate_value("ams_sidebar_unload_picks") == 1);
+        CHECK_FALSE(lv_obj_has_flag(button("btn_load"), LV_OBJ_FLAG_HIDDEN));
+        CHECK(lv_obj_has_flag(button("btn_unload"), LV_OBJ_FLAG_HIDDEN));
         CHECK_FALSE(lv_obj_has_flag(button("btn_batch_unload"), LV_OBJ_FLAG_HIDDEN));
         CHECK(gate_value("ams_sidebar_unload_disabled") == 0);
         CHECK(gate_value("ams_sidebar_load_disabled") == 0);
@@ -240,7 +242,7 @@ TEST_CASE_METHOD(SidebarDirectionGateFixture,
         CHECK(gate_value("ams_sidebar_unload_disabled") == 0);
         CHECK(gate_value("ams_sidebar_load_disabled") == 0);
     }
-    SECTION("non-batch backends keep the aggregate rule and no Load button") {
+    SECTION("a one-head backend keeps the aggregate rule and gains a Load button") {
         // The aggregate flag says loaded while no head answers can_unload: the
         // per-head rule leaking into non-batch backends would grey this out.
         class LoadedButStuckBackend : public helix::AmsBackendMock {
@@ -253,15 +255,14 @@ TEST_CASE_METHOD(SidebarDirectionGateFixture,
         auto mock = std::make_unique<LoadedButStuckBackend>();
         REQUIRE(mock->start().success());
         build(std::move(mock));
-        CHECK(gate_value("ams_sidebar_supports_batch") == 0);
-        CHECK(lv_obj_has_flag(button("btn_batch_load"), LV_OBJ_FLAG_HIDDEN));
+        CHECK(gate_value("ams_sidebar_unload_picks") == 0);
+        CHECK_FALSE(lv_obj_has_flag(button("btn_load"), LV_OBJ_FLAG_HIDDEN));
         CHECK(lv_obj_has_flag(button("btn_batch_unload"), LV_OBJ_FLAG_HIDDEN));
         CHECK_FALSE(lv_obj_has_flag(button("btn_unload"), LV_OBJ_FLAG_HIDDEN));
         lv_subject_t* loaded = helix::AmsState::instance().get_filament_loaded_subject();
         REQUIRE(loaded != nullptr);
         REQUIRE(lv_subject_get_int(loaded) == 1); // something IS loaded
         CHECK(gate_value("ams_sidebar_unload_disabled") == 0);
-        CHECK(gate_value("ams_sidebar_load_disabled") == 1);
     }
 }
 
@@ -294,4 +295,72 @@ TEST_CASE_METHOD(SidebarDirectionGateFixture,
         sidebar_->start_operation(helix::StepOperationType::LOAD_FRESH, 1);
         CHECK(published_action() == helix::AmsAction::HEATING);
     }
+}
+
+namespace {
+/// A filament system that declares no device sections of its own.
+class NoSectionsBackend : public helix::AmsBackendMock {
+  public:
+    NoSectionsBackend() : helix::AmsBackendMock(4) {}
+    [[nodiscard]] std::vector<helix::printer::DeviceSection> get_device_sections() const override {
+        return {};
+    }
+};
+} // namespace
+
+TEST_CASE_METHOD(SidebarDirectionGateFixture,
+                 "AMS sidebar Settings shows for a backend with no device sections",
+                 "[ams][sidebar][device-ops]") {
+    // The device operations still carry Quick Actions and the generic rows, so
+    // the button follows the same gate as Settings > Printing.
+    auto backend = std::make_unique<NoSectionsBackend>();
+    REQUIRE(backend->start().success());
+    build(std::move(backend));
+    CHECK(gate_value("ams_has_device_ops") == 1);
+    CHECK_FALSE(lv_obj_has_flag(button("btn_settings"), LV_OBJ_FLAG_HIDDEN));
+
+    helix::AmsState::instance().set_backend(nullptr);
+    CHECK(gate_value("ams_has_device_ops") == 0);
+    CHECK(lv_obj_has_flag(button("btn_settings"), LV_OBJ_FLAG_HIDDEN));
+}
+
+TEST_CASE_METHOD(SidebarDirectionGateFixture,
+                 "AMS sidebar gating goes back to its defaults when its sidebar goes away",
+                 "[ams][sidebar][gating_lifetime]") {
+    // A U1 sidebar routes Unload through the head picker and hides the one-tap
+    // button. The next sidebar, for any backend, must not inherit that.
+    build(std::make_unique<FixedHeadsBackend>(std::vector<bool>{true, false, true, false}));
+    REQUIRE(gate_value("ams_sidebar_unload_picks") == 1);
+
+    sidebar_.reset();
+    CHECK(gate_value("ams_sidebar_unload_picks") == 0);
+    CHECK(gate_value("ams_sidebar_unload_hidden") == 0);
+
+    lv_obj_t* fresh = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "ams_sidebar", nullptr));
+    REQUIRE(fresh != nullptr);
+    lv_obj_t* unload = lv_obj_find_by_name(fresh, "btn_unload");
+    REQUIRE(unload != nullptr);
+    CHECK_FALSE(lv_obj_has_flag(unload, LV_OBJ_FLAG_HIDDEN));
+    lv_obj_delete(fresh);
+}
+
+TEST_CASE_METHOD(SidebarDirectionGateFixture,
+                 "AMS sidebar gating survives a printer switch at its defaults",
+                 "[ams][sidebar][gating_lifetime]") {
+    build(std::make_unique<FixedHeadsBackend>(std::vector<bool>{true, false, true, false}));
+    REQUIRE(gate_value("ams_sidebar_unload_picks") == 1);
+
+    // A switch runs every entry with its PrinterSwitch disposition. The
+    // subjects come from a process-once registration, so they must still be
+    // published afterwards, holding the values nothing has refreshed yet.
+    auto& registry = StaticSubjectRegistry::instance();
+    using Scope = StaticSubjectRegistry::Scope;
+    REQUIRE(registry.deinit_one("AmsSidebarButtonGatingReset", Scope::PrinterSwitch));
+    REQUIRE(registry.deinit_one("AmsSidebarButtonGating", Scope::PrinterSwitch));
+    CHECK(gate_value("ams_sidebar_unload_picks") == 0);
+    CHECK(gate_value("ams_sidebar_unload_disabled") == 1);
+    CHECK(gate_value("ams_sidebar_supports_reset") == 1);
+
+    // Still registered for the next switch.
+    CHECK(registry.deinit_one("AmsSidebarButtonGatingReset", Scope::PrinterSwitch));
 }

@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -611,47 +612,66 @@ TEST_CASE_METHOD(LVGLTestFixture, "ctl click: every reason a tap would miss", "[
     }
 }
 
-// --- click on a checkable button -----------------------------------------
-//
-// A checkable button acts on CLICKED (extruder selector, gcode test Travels).
-// A `click` that only flips CHECKED leaves every such button dead, so the
-// handler must deliver both events, in the order a real tap does.
+// --- ctl click over the socket ------------------------------------------
 
-TEST_CASE_METHOD(LVGLTestFixture, "ctl click: a checkable button toggles and still fires CLICKED",
-                 "[remote][ctl]") {
-    lv_obj_t* btn = lv_button_create(lv_screen_active());
-    lv_obj_set_name(btn, "ctl_checkable_button");
-    lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
+namespace {
 
-    int clicked = 0;
-    lv_obj_add_event_cb(
-        btn, [](lv_event_t* e) { ++*static_cast<int*>(lv_event_get_user_data(e)); },
-        LV_EVENT_CLICKED, &clicked);
-
-    const std::string sock = (std::filesystem::temp_directory_path() /
-                              ("helix_ctl_click_" + std::to_string(::getpid()) + ".sock"))
-                                 .string();
-    ::unlink(sock.c_str());
-    helix::RemoteConfig config;
-    config.socket_path = sock;
+/// A live RemoteControlServer on a private socket, and a client connection to it.
+struct CtlClickRig {
+    std::string sock = (std::filesystem::temp_directory_path() /
+                        ("helix_ctl_click_" + std::to_string(::getpid()) + ".sock"))
+                           .string();
     helix::RemoteControlServer server;
-    REQUIRE(server.start(config));
+    int fd = -1;
+    int next_id = 1;
 
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    REQUIRE(sock.size() < sizeof(addr.sun_path));
-    std::strncpy(addr.sun_path, sock.c_str(), sizeof(addr.sun_path) - 1);
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    REQUIRE(fd >= 0);
-    REQUIRE(connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    CtlClickRig() {
+        ::unlink(sock.c_str());
+        helix::RemoteConfig config;
+        config.socket_path = sock;
+        REQUIRE(server.start(config));
 
-    // The transport thread services the request through the UI queue, so this
-    // thread must drain while waiting for the reply line.
-    auto click = [&](int id) -> nlohmann::json {
-        const std::string req =
-            R"({"jsonrpc":"2.0","method":"click","params":{"name":"ctl_checkable_button"},"id":)" +
-            std::to_string(id) + "}\n";
-        REQUIRE(send(fd, req.data(), req.size(), 0) == static_cast<ssize_t>(req.size()));
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        REQUIRE(sock.size() < sizeof(addr.sun_path));
+        std::strncpy(addr.sun_path, sock.c_str(), sizeof(addr.sun_path) - 1);
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        REQUIRE(fd >= 0);
+        REQUIRE(connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    }
+
+    ~CtlClickRig() {
+        if (fd >= 0) {
+            ::close(fd);
+        }
+        server.stop();
+        ::unlink(sock.c_str());
+    }
+
+    CtlClickRig(const CtlClickRig&) = delete;
+    CtlClickRig& operator=(const CtlClickRig&) = delete;
+
+    /// `click <name>`.
+    nlohmann::json click(const std::string& name) {
+        return call("click", "name", name);
+    }
+
+    /// One request with one string parameter.
+    nlohmann::json call(const std::string& method, const std::string& key,
+                        const std::string& value) {
+        const nlohmann::json reply = request(method, {{key, value}});
+        REQUIRE(reply.contains("result"));
+        return reply["result"];
+    }
+
+    /// The whole JSON-RPC reply, result or error, to one request. The transport
+    /// thread services it through the UI queue, so this thread must drain while
+    /// waiting for the reply.
+    nlohmann::json request(const std::string& method, const nlohmann::json& params) {
+        const nlohmann::json req = {
+            {"jsonrpc", "2.0"}, {"method", method}, {"params", params}, {"id", next_id++}};
+        const std::string line = req.dump() + "\n";
+        REQUIRE(send(fd, line.data(), line.size(), 0) == static_cast<ssize_t>(line.size()));
 
         std::string response;
         char buf[4096];
@@ -673,23 +693,123 @@ TEST_CASE_METHOD(LVGLTestFixture, "ctl click: a checkable button toggles and sti
         response.erase(response.find('\n'));
         const nlohmann::json reply = nlohmann::json::parse(response, nullptr, false);
         REQUIRE(!reply.is_discarded());
-        REQUIRE(reply.contains("result"));
-        return reply["result"];
-    };
+        return reply;
+    }
+};
 
-    const nlohmann::json first = click(1);
+/// Appends the event code it receives to the std::vector<int> in its user data.
+void record_code_cb(lv_event_t* e) {
+    static_cast<std::vector<int>*>(lv_event_get_user_data(e))
+        ->push_back(static_cast<int>(lv_event_get_code(e)));
+}
+
+} // namespace
+
+// A checkable button acts on CLICKED (extruder selector, gcode test Travels).
+// A `click` that only flips CHECKED leaves every such button dead, so the
+// handler must deliver the tap too, in the order a real tap does.
+TEST_CASE_METHOD(LVGLTestFixture, "ctl click: a checkable button toggles and still fires its tap",
+                 "[remote][ctl]") {
+    lv_obj_t* btn = lv_button_create(lv_screen_active());
+    lv_obj_set_name(btn, "ctl_checkable_button");
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
+
+    std::vector<int> codes;
+    lv_obj_add_event_cb(btn, record_code_cb, LV_EVENT_SHORT_CLICKED, &codes);
+    lv_obj_add_event_cb(btn, record_code_cb, LV_EVENT_CLICKED, &codes);
+
+    CtlClickRig rig;
+    const nlohmann::json first = rig.click("ctl_checkable_button");
     CHECK(first.value("toggled_to", -1) == 1);
     CHECK(lv_obj_has_state(btn, LV_STATE_CHECKED));
-    CHECK(clicked == 1);
+    CHECK(codes == std::vector<int>{LV_EVENT_SHORT_CLICKED, LV_EVENT_CLICKED});
 
-    const nlohmann::json second = click(2);
+    const nlohmann::json second = rig.click("ctl_checkable_button");
     CHECK(second.value("toggled_to", -1) == 0);
     CHECK_FALSE(lv_obj_has_state(btn, LV_STATE_CHECKED));
-    CHECK(clicked == 2);
+    CHECK(codes.size() == 4);
+}
 
-    ::close(fd);
-    server.stop();
-    ::unlink(sock.c_str());
+TEST_CASE_METHOD(LVGLTestFixture, "ctl click: delivers what a quick tap does, in order",
+                 "[remote][ctl][tap_hold]") {
+    lv_obj_t* btn = lv_button_create(lv_screen_active());
+    lv_obj_set_name(btn, "ctl_tap_button");
+    std::vector<int> codes;
+    lv_obj_add_event_cb(btn, record_code_cb, LV_EVENT_SHORT_CLICKED, &codes);
+    lv_obj_add_event_cb(btn, record_code_cb, LV_EVENT_CLICKED, &codes);
+
+    CtlClickRig rig;
+    const nlohmann::json r = rig.click("ctl_tap_button");
+    CHECK(codes == std::vector<int>{LV_EVENT_SHORT_CLICKED, LV_EVENT_CLICKED});
+    CHECK(r.value("tap_handled", false));
+    CHECK_FALSE(r.contains("warning"));
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl navigate: a widget target gets a whole quick tap",
+                 "[remote][ctl][tap_hold]") {
+    lv_obj_t* btn = lv_button_create(lv_screen_active());
+    lv_obj_set_name(btn, "ctl_navigate_button");
+    std::vector<int> codes;
+    lv_obj_add_event_cb(btn, record_code_cb, LV_EVENT_SHORT_CLICKED, &codes);
+    lv_obj_add_event_cb(btn, record_code_cb, LV_EVENT_CLICKED, &codes);
+
+    CtlClickRig rig;
+    const nlohmann::json r = rig.call("navigate", "panel", "ctl_navigate_button");
+    CHECK(r.value("kind", std::string()) == "widget");
+    CHECK(codes == std::vector<int>{LV_EVENT_SHORT_CLICKED, LV_EVENT_CLICKED});
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl click: a hold-only widget says a tap does nothing",
+                 "[remote][ctl][tap_hold]") {
+    lv_obj_t* btn = lv_button_create(lv_screen_active());
+    lv_obj_set_name(btn, "ctl_hold_only");
+    std::vector<int> codes;
+    lv_obj_add_event_cb(btn, record_code_cb, LV_EVENT_LONG_PRESSED, &codes);
+
+    CtlClickRig rig;
+    const nlohmann::json r = rig.click("ctl_hold_only");
+    CHECK(r.value("handlers", 0) == 1);
+    CHECK_FALSE(r.value("tap_handled", true));
+    CHECK(r.value("warning", std::string()).find("long_press") != std::string::npos);
+    CHECK(codes.empty());
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl click: a tap handled by a bubbled-to parent counts",
+                 "[remote][ctl][tap_hold]") {
+    lv_obj_t* parent = lv_obj_create(lv_screen_active());
+    std::vector<int> codes;
+    lv_obj_add_event_cb(parent, record_code_cb, LV_EVENT_SHORT_CLICKED, &codes);
+    lv_obj_t* child = lv_button_create(parent);
+    lv_obj_set_name(child, "ctl_bubbling_child");
+    lv_obj_add_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    CtlClickRig rig;
+    const nlohmann::json r = rig.click("ctl_bubbling_child");
+    CHECK(r.value("tap_handled", false));
+    CHECK_FALSE(r.contains("warning"));
+    CHECK(codes == std::vector<int>{LV_EVENT_SHORT_CLICKED});
+
+    // Without EVENT_BUBBLE the parent's handler never hears the tap.
+    lv_obj_remove_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
+    CHECK_FALSE(rig.click("ctl_bubbling_child").value("tap_handled", true));
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl click: a widget its tap deletes gets nothing more",
+                 "[remote][ctl][tap_hold]") {
+    lv_obj_t* parent = lv_obj_create(lv_screen_active());
+    std::vector<int> parent_codes;
+    lv_obj_add_event_cb(parent, record_code_cb, LV_EVENT_CLICKED, &parent_codes);
+    lv_obj_t* btn = lv_button_create(parent);
+    lv_obj_set_name(btn, "ctl_self_deleting");
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(
+        btn, [](lv_event_t* e) { lv_obj_delete(lv_event_get_current_target_obj(e)); },
+        LV_EVENT_SHORT_CLICKED, nullptr);
+
+    CtlClickRig rig;
+    rig.click("ctl_self_deleting");
+    CHECK(lv_obj_get_child_count(parent) == 0);
+    CHECK(parent_codes.empty());
 }
 
 // --- ctl overflow ------------------------------------------------------------
@@ -725,4 +845,188 @@ TEST_CASE_METHOD(LVGLTestFixture,
     CHECK(found[0].obj == tight);
     CHECK(found[0].right == 4);
     CHECK(found[0].bottom == 0);
+}
+
+// --- ctl scroll --------------------------------------------------------------
+
+namespace {
+
+// An overlay shape: a scrolling viewport holding a plain, non-scrolling column
+// that is taller than the viewport, with the target row at its far end.
+struct ScrollTree {
+    lv_obj_t* viewport;
+    lv_obj_t* column;
+    lv_obj_t* row;
+};
+
+ScrollTree build_scroll_tree(lv_obj_t* screen) {
+    auto box = [](lv_obj_t* parent, int32_t w, int32_t h) {
+        lv_obj_t* o = lv_obj_create(parent);
+        lv_obj_set_size(o, w, h);
+        lv_obj_set_style_pad_all(o, 0, 0);
+        lv_obj_set_style_border_width(o, 0, 0);
+        return o;
+    };
+    ScrollTree t{};
+    t.viewport = box(screen, 200, 200);
+    t.column = box(t.viewport, 200, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(t.column, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(t.column, 0, 0);
+    for (int i = 0; i < 9; ++i) {
+        box(t.column, 200, 100);
+    }
+    t.row = box(t.column, 200, 100);
+    lv_obj_update_layout(screen);
+    return t;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl scroll: a row below the fold ends up inside the viewport",
+                 "[remote][ctl][scroll]") {
+    ScrollTree t = build_scroll_tree(test_screen());
+    REQUIRE(helix::view_clipper(t.row) == t.viewport);
+
+    CHECK(helix::scroll_into_view(t.row) == nullptr);
+
+    lv_area_t row, view;
+    lv_obj_get_coords(t.row, &row);
+    lv_obj_get_coords(t.viewport, &view);
+    CHECK(row.y1 >= view.y1);
+    CHECK(row.y2 <= view.y2);
+    CHECK(lv_obj_get_scroll_y(t.viewport) == 800);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl scroll: an ancestor that cannot scroll is reported",
+                 "[remote][ctl][scroll]") {
+    ScrollTree t = build_scroll_tree(test_screen());
+    lv_obj_remove_flag(t.viewport, LV_OBJ_FLAG_SCROLLABLE);
+
+    CHECK(helix::scroll_into_view(t.row) == t.viewport);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "ctl scroll: a widget taller than the viewport only has to overlap it",
+                 "[remote][ctl][scroll]") {
+    ScrollTree t = build_scroll_tree(test_screen());
+    lv_obj_set_height(t.row, 300);
+    lv_obj_update_layout(test_screen());
+
+    CHECK(helix::scroll_into_view(t.row) == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl scroll: overflow-visible ancestors do not clip",
+                 "[remote][ctl][scroll]") {
+    lv_obj_t* host = lv_obj_create(test_screen());
+    lv_obj_set_size(host, 100, 100);
+    lv_obj_set_style_pad_all(host, 0, 0);
+    lv_obj_t* child = lv_obj_create(host);
+    lv_obj_set_size(child, 50, 50);
+    lv_obj_set_pos(child, 0, 150);
+    lv_obj_update_layout(test_screen());
+    REQUIRE(helix::view_clipper(child) == host);
+
+    lv_obj_add_flag(host, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    CHECK(helix::view_clipper(child) == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl scroll: a widget inside a hidden ancestor is not in view",
+                 "[remote][ctl][scroll]") {
+    ScrollTree t = build_scroll_tree(test_screen());
+    lv_obj_add_flag(t.column, LV_OBJ_FLAG_HIDDEN);
+
+    CHECK(helix::scroll_into_view(t.row) == t.column);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "ctl scroll: a widget on a screen that is not loaded is not in view",
+                 "[remote][ctl][scroll]") {
+    lv_obj_t* other = lv_obj_create(nullptr);
+    ScrollTree t = build_scroll_tree(other);
+
+    CHECK(helix::scroll_into_view(t.row) == other);
+    lv_obj_delete(other);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ctl scroll: an empty clipping ancestor shows nothing",
+                 "[remote][ctl][scroll]") {
+    lv_obj_t* host = lv_obj_create(test_screen());
+    lv_obj_set_size(host, 0, 100);
+    lv_obj_set_pos(host, 50, 0);
+    lv_obj_set_style_pad_all(host, 0, 0);
+    lv_obj_t* child = lv_obj_create(host);
+    lv_obj_set_size(child, 50, 50);
+    // Straddling the empty box's edge, so an overlap test alone would pass it.
+    lv_obj_set_pos(child, -10, 0);
+    lv_obj_update_layout(test_screen());
+
+    CHECK(helix::view_clipper(child) == host);
+}
+
+namespace {
+
+/// The error message `scroll` answers for @p obj, empty when it succeeds.
+std::string scroll_error(CtlClickRig& rig, lv_obj_t* obj) {
+    const nlohmann::json reply = rig.request("scroll", {{"path", helix::path_of(obj)}});
+    if (!reply.contains("error")) {
+        return {};
+    }
+    return reply["error"].value("message", std::string());
+}
+
+void load_screen_cb(lv_event_t* e) {
+    lv_screen_load(static_cast<lv_obj_t*>(lv_event_get_user_data(e)));
+}
+
+} // namespace
+
+// The reply names which kind of ancestor keeps the widget out of view, so the
+// caller knows whether to unhide something, change screens or scroll it.
+TEST_CASE_METHOD(LVGLTestFixture, "ctl scroll: the reply says why a widget stays out of view",
+                 "[remote][ctl][scroll]") {
+    ScrollTree t = build_scroll_tree(lv_screen_active());
+    CtlClickRig rig;
+
+    SECTION("a hidden ancestor") {
+        lv_obj_add_flag(t.column, LV_OBJ_FLAG_HIDDEN);
+        CHECK_THAT(scroll_error(rig, t.row),
+                   Catch::Matchers::EndsWith("is still out of view: hidden by " +
+                                             helix::path_of(t.column)));
+    }
+    SECTION("an ancestor that clips without scrolling") {
+        lv_obj_remove_flag(t.viewport, LV_OBJ_FLAG_SCROLLABLE);
+        CHECK_THAT(scroll_error(rig, t.row),
+                   Catch::Matchers::EndsWith("is still out of view: clipped by " +
+                                             helix::path_of(t.viewport)));
+    }
+    SECTION("a screen that stopped being the loaded one") {
+        // Scrolling the viewport loads another screen, so the row's own screen
+        // is no longer on the display once it has been scrolled into view.
+        lv_obj_t* const home = lv_screen_active();
+        lv_obj_t* other = lv_obj_create(nullptr);
+        lv_obj_add_event_cb(t.viewport, load_screen_cb, LV_EVENT_SCROLL, other);
+        const std::string error = scroll_error(rig, t.row);
+        lv_screen_load(home);
+        lv_obj_delete(other);
+        CHECK_THAT(error, Catch::Matchers::EndsWith("is still out of view: on inactive screen s"));
+    }
+    SECTION("the loaded screen itself, when it does not scroll") {
+        lv_obj_t* const screen = lv_screen_active();
+        const bool screen_scrolls = lv_obj_has_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t* below = lv_obj_create(screen);
+        lv_obj_set_size(below, 50, 50);
+        lv_obj_set_pos(below, 0, lv_obj_get_height(screen) + 100);
+        lv_obj_update_layout(screen);
+        const std::string error = scroll_error(rig, below);
+        lv_obj_delete(below);
+        if (screen_scrolls) {
+            lv_obj_add_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+        }
+        CHECK_THAT(error, Catch::Matchers::EndsWith("is still out of view: clipped by " +
+                                                    helix::path_of(screen)));
+    }
+    SECTION("nothing in the way") {
+        CHECK(scroll_error(rig, t.row).empty());
+    }
 }

@@ -35,10 +35,10 @@ std::string device_dbus_path(sd_bus* bus, const char* mac);
 
 /// Bit set in every BLE handle. connect_rfcomm refuses an fd that carries it, so an RFCOMM
 /// fd and a BLE handle can never share a value.
-inline constexpr int BLE_HANDLE_TAG = 0x40000000;
+inline constexpr int kBleHandleTag = 0x40000000;
 
 inline bool is_ble_handle(int handle) {
-    return handle >= 0 && (handle & BLE_HANDLE_TAG) != 0;
+    return handle >= 0 && (handle & kBleHandleTag) != 0;
 }
 
 } // namespace helix::bluetooth
@@ -79,7 +79,7 @@ struct helix_bt_context {
         std::deque<std::vector<uint8_t>> rx_queue;
     };
     std::mutex ble_mutex;
-    // Indexed by handle & ~BLE_HANDLE_TAG. A disconnected slot is null and the next
+    // Indexed by handle & ~kBleHandleTag. A disconnected slot is null and the next
     // connection reuses it. shared_ptr so a reader or writer that looked a connection up
     // keeps it alive while disconnect frees the slot.
     std::vector<std::shared_ptr<BleConnection>> ble_connections;

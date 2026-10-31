@@ -11,7 +11,7 @@ namespace helix::label {
 std::vector<uint8_t> brother_ql_build_raster(const LabelBitmap& bitmap, const LabelSize& size) {
     std::vector<uint8_t> cmd;
     // Pre-allocate: header ~220 bytes + per-row worst case (3 + 90) * rows + footer
-    cmd.reserve(256 + static_cast<size_t>(bitmap.height()) * (3 + BROTHER_QL_RASTER_ROW_BYTES) + 1);
+    cmd.reserve(256 + static_cast<size_t>(bitmap.height()) * (3 + kBrotherQlRasterRowBytes) + 1);
 
     // 1. Invalidate — 200 bytes of 0x00
     cmd.insert(cmd.end(), 200, 0x00);
@@ -97,7 +97,7 @@ std::vector<uint8_t> brother_ql_build_raster(const LabelBitmap& bitmap, const La
         }
     }
 
-    int right_pad = BROTHER_QL_RASTER_ROW_BYTES - label_byte_width - left_offset;
+    int right_pad = kBrotherQlRasterRowBytes - label_byte_width - left_offset;
     if (right_pad < 0)
         right_pad = 0;
 
@@ -137,7 +137,7 @@ std::vector<uint8_t> brother_ql_build_raster(const LabelBitmap& bitmap, const La
             // Raster data: 0x67 0x00 [byte_count] [data...]
             cmd.push_back(0x67);
             cmd.push_back(0x00);
-            cmd.push_back(static_cast<uint8_t>(BROTHER_QL_RASTER_ROW_BYTES));
+            cmd.push_back(static_cast<uint8_t>(kBrotherQlRasterRowBytes));
 
             // Left offset (centering for die-cut labels on wider backing)
             if (left_offset > 0) {

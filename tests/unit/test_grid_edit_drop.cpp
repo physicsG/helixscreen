@@ -27,11 +27,11 @@ using helix::resolve_drop;
 namespace {
 
 /// A 12x8 track grid, and a one-cell widget of two tracks each way.
-constexpr int COLS = 12;
-constexpr int ROWS = 8;
+constexpr int kCols = 12;
+constexpr int kRows = 8;
 constexpr int SPAN = 2;
 /// Two config pages: page 1 is the last, page 2 the next-page slot.
-constexpr int PAGES = 2;
+constexpr int kPages = 2;
 
 /// A release on page @p page, previewing (@p col, @p row), of a drag whose entry
 /// sits at (0,0) on page 0, with a next-page slot and the widget inside the
@@ -39,7 +39,7 @@ constexpr int PAGES = 2;
 DropInput release_on(int page, int col, int row) {
     DropInput in;
     in.page_index = page;
-    in.page_count = PAGES;
+    in.page_count = kPages;
     in.origin_page = 0;
     in.origin_col = 0;
     in.origin_row = 0;
@@ -68,7 +68,7 @@ DropInput without_slot(DropInput in) {
 }
 
 GridLayout occupied_by(const std::vector<GridPlacement>& widgets) {
-    GridLayout grid(UiBreakpoint::Medium, {COLS, ROWS});
+    GridLayout grid(UiBreakpoint::Medium, {kCols, kRows});
     for (const GridPlacement& widget : widgets) {
         REQUIRE(grid.place(widget));
     }
@@ -110,7 +110,7 @@ TEST_CASE("a release on a config page moves its widget, snaps back or returns ho
          -1,
          -1},
         {"a cell the span overhangs the grid from",
-         release_on(0, COLS - 1, 0),
+         release_on(0, kCols - 1, 0),
          {fan},
          DropOutcome::Cancel,
          -1,
@@ -147,40 +147,40 @@ TEST_CASE("a release creates a page anywhere on the next-page slot, and from the
           "[1638][grid_edit][cross_page]") {
     // The last page is full where a created page's entry lands: a created page
     // is empty, so the last page's widgets never decide it.
-    const GridPlacement rightmost{"clock", COLS - SPAN, 4, SPAN, SPAN};
+    const GridPlacement rightmost{"clock", kCols - SPAN, 4, SPAN, SPAN};
     check_rows({
         {"a previewed cell on the next-page slot",
-         release_on(PAGES, 6, 2),
+         release_on(kPages, 6, 2),
          {},
          DropOutcome::CreatePage,
          6,
          2},
         {"the next-page slot with no previewed cell",
-         release_on(PAGES, -1, -1),
+         release_on(kPages, -1, -1),
          {},
          DropOutcome::ReturnToOrigin,
          -1,
          -1},
         {"the next-page slot with no page to create",
-         without_slot(release_on(PAGES, 6, 2)),
+         without_slot(release_on(kPages, 6, 2)),
          {},
          DropOutcome::ReturnToOrigin,
          -1,
          -1},
         {"past the last page's right border",
-         past_border(release_on(PAGES - 1, 8, 4)),
+         past_border(release_on(kPages - 1, 8, 4)),
          {rightmost},
          DropOutcome::CreatePage,
-         COLS - SPAN,
+         kCols - SPAN,
          4},
         {"past the last page's right border with no previewed row",
-         past_border(release_on(PAGES - 1, -1, -1)),
+         past_border(release_on(kPages - 1, -1, -1)),
          {},
          DropOutcome::CreatePage,
-         COLS - SPAN,
+         kCols - SPAN,
          0},
         {"inside the last page, as after a flip back off the slot",
-         release_on(PAGES - 1, 6, 2),
+         release_on(kPages - 1, 6, 2),
          {},
          DropOutcome::Move,
          6,
@@ -192,7 +192,7 @@ TEST_CASE("a release creates a page anywhere on the next-page slot, and from the
          6,
          2},
         {"past the last page's right border with no page to create",
-         without_slot(past_border(release_on(PAGES - 1, 6, 2))),
+         without_slot(past_border(release_on(kPages - 1, 6, 2))),
          {},
          DropOutcome::Move,
          6,
@@ -202,15 +202,15 @@ TEST_CASE("a release creates a page anywhere on the next-page slot, and from the
 
 TEST_CASE("a created page whose landing cell does not fit an empty page is not created",
           "[1638][grid_edit][cross_page]") {
-    DropInput on_slot = release_on(PAGES, COLS - 1, 0);
+    DropInput on_slot = release_on(kPages, kCols - 1, 0);
     CHECK(resolve_drop(on_slot, occupied_by({})).outcome == DropOutcome::ReturnToOrigin);
 
-    DropInput too_wide = past_border(release_on(PAGES - 1, 0, 0));
-    too_wide.colspan = COLS + SPAN;
+    DropInput too_wide = past_border(release_on(kPages - 1, 0, 0));
+    too_wide.colspan = kCols + SPAN;
     CHECK(resolve_drop(too_wide, occupied_by({})).outcome == DropOutcome::ReturnToOrigin);
 
     DropInput too_wide_left = past_left_border(release_on(0, 0, 0));
-    too_wide_left.colspan = COLS + SPAN;
+    too_wide_left.colspan = kCols + SPAN;
     CHECK(resolve_drop(too_wide_left, occupied_by({})).outcome == DropOutcome::Cancel);
 }
 
@@ -258,10 +258,10 @@ TEST_CASE("a release past the first page's left border creates a page before it"
          2,
          false},
         {"past the last page's right border still appends",
-         past_border(release_on(PAGES - 1, 8, 4)),
+         past_border(release_on(kPages - 1, 8, 4)),
          {},
          DropOutcome::CreatePage,
-         COLS - SPAN,
+         kCols - SPAN,
          4,
          false},
     };
@@ -282,7 +282,7 @@ TEST_CASE("a release past the first page's left border creates a page before it"
     const DropResolution append = resolve_drop(only_page, occupied_by({}));
     CHECK(append.outcome == DropOutcome::CreatePage);
     CHECK_FALSE(append.prepend_page);
-    CHECK(append.col == COLS - SPAN);
+    CHECK(append.col == kCols - SPAN);
 }
 
 TEST_CASE("a release onto one other widget on the origin page swaps the two", "[1503][grid_edit]") {
@@ -348,7 +348,7 @@ TEST_CASE("a swap that does not fit both ways commits nothing", "[1503][grid_edi
     const GridPlacement near_wide{"wide", 2, 0, 2 * SPAN, SPAN};
     const GridPlacement tall{"tall", 4, 0, SPAN, 2 * SPAN};
     DropInput from_bottom = release_on(0, 4, 0);
-    from_bottom.origin_row = ROWS - SPAN;
+    from_bottom.origin_row = kRows - SPAN;
     check_rows({
         {"a wider widget whose origin landing overlaps the dragged one's",
          release_on(0, 2, 0),
@@ -387,7 +387,7 @@ TEST_CASE("a placement is refused outside the def's spans, off whole cells, or o
     def.rowspan = 2;
     def.max_colspan = 8;
     def.max_rowspan = 4;
-    GridLayout occupancy(UiBreakpoint::Medium, {COLS, ROWS});
+    GridLayout occupancy(UiBreakpoint::Medium, {kCols, kRows});
     REQUIRE(occupancy.place({"other", 8, 0, 2, 2}));
 
     CHECK(helix::placement_refusal(def, occupancy, 0, 0, 8, 4).empty());

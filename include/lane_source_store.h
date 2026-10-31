@@ -32,52 +32,52 @@ enum class LaneId : int {};
 /// Not a lane. Every way of naming a lane yields this when it cannot name a
 /// real one, and the funnels drop it rather than writing, so a position that
 /// cannot be addressed files no record instead of one on a neighbour's lane.
-constexpr LaneId INVALID_LANE_ID{-1};
+constexpr LaneId kInvalidLaneId{-1};
 
 /// Ids reserved for one backend's slots. A backend's slot count follows its
-/// firmware rather than AmsState::MAX_SLOTS, which bounds only how many slots
+/// firmware rather than AmsState::kMaxSlots, which bounds only how many slots
 /// get subjects: AFC reports one lane per unit it finds and Happy Hare one per
 /// gate, both uncapped, so a five-unit BoxTurtle or a twenty-gate MMU is
 /// ordinary hardware. Sized well past any of them; the only cost is integer
 /// range.
-constexpr int LANES_PER_BACKEND = 256;
+constexpr int kLanesPerBackend = 256;
 
 /// Blocks reserved for backends. AmsState::backends_ holds one to three in
 /// practice - a filament system beside a tool changer is the wide case.
-constexpr int MAX_BACKENDS = 8;
+constexpr int kMaxBackends = 8;
 
 /// The bypass / external spool, which belongs to the printer rather than to a
 /// backend. Above every backend block so adding backends never reaches it.
-constexpr LaneId BYPASS_LANE_ID{10000};
+constexpr LaneId kBypassLaneId{10000};
 
 /// The slot index the bypass lane's records carry: the same -2 every backend
 /// reports as current_slot while the external spool feeds the toolhead.
-constexpr int BYPASS_SLOT_INDEX = -2;
+constexpr int kBypassSlotIndex = -2;
 
 /// Direct-drive tools, one id per tool from here up. A tool changer's spools
 /// are lanes like any other and stop needing a parallel store.
-constexpr LaneId FIRST_TOOL_LANE_ID{20000};
+constexpr LaneId kFirstToolLaneId{20000};
 
 /// Ids the tool block holds. Nothing in the tree caps a tool count -
 /// ToolState::tools_ is an unbounded vector - and the widest tool ceiling that
 /// does exist is AFC's tool number at 64, so this is a deliberate ceiling
 /// rather than a mirror of an existing one.
-constexpr int MAX_TOOL_LANES = 256;
+constexpr int kMaxToolLanes = 256;
 
 /// One past the last id this scheme assigns. A reserved block added later
 /// starts here; everything from here up is refused.
-constexpr LaneId END_LANE_ID{lane_id_value(FIRST_TOOL_LANE_ID) + MAX_TOOL_LANES};
+constexpr LaneId kEndLaneId{lane_id_value(kFirstToolLaneId) + kMaxToolLanes};
 
 /// Every id the scheme can assign: one block per backend, the bypass, and the
 /// tool lanes. This is the store's size bound, since only these ids are
 /// accepted.
-constexpr int MAX_LANES = MAX_BACKENDS * LANES_PER_BACKEND + 1 + MAX_TOOL_LANES;
+constexpr int kMaxLanes = kMaxBackends * kLanesPerBackend + 1 + kMaxToolLanes;
 
-static_assert(MAX_BACKENDS * LANES_PER_BACKEND <= lane_id_value(BYPASS_LANE_ID),
+static_assert(kMaxBackends * kLanesPerBackend <= lane_id_value(kBypassLaneId),
               "a backend block must not reach the bypass lane id");
-static_assert(BYPASS_LANE_ID < FIRST_TOOL_LANE_ID,
+static_assert(kBypassLaneId < kFirstToolLaneId,
               "the bypass id must not fall inside the tool block");
-static_assert(END_LANE_ID > FIRST_TOOL_LANE_ID,
+static_assert(kEndLaneId > kFirstToolLaneId,
               "the tool block must not overflow a LaneId, or a block placed above it "
               "would wrap back inside it");
 
@@ -85,34 +85,34 @@ static_assert(END_LANE_ID > FIRST_TOOL_LANE_ID,
 /// backend blocks, the bypass, or a tool. Nothing else is a lane, and a
 /// positive integer is not a lane merely for being positive - not the gap
 /// between the last backend block and the bypass, not an id one past the
-/// bypass, not anything from END_LANE_ID up. The funnels drop what this
+/// bypass, not anything from kEndLaneId up. The funnels drop what this
 /// refuses, so a caller that computes an id wrongly is told about it rather
 /// than handed a lane of its own.
 [[nodiscard]] constexpr bool is_lane_id(LaneId id) {
     const int lane = lane_id_value(id);
-    if (lane >= 0 && lane < MAX_BACKENDS * LANES_PER_BACKEND)
+    if (lane >= 0 && lane < kMaxBackends * kLanesPerBackend)
         return true;
-    if (id == BYPASS_LANE_ID)
+    if (id == kBypassLaneId)
         return true;
-    return id >= FIRST_TOOL_LANE_ID && id < END_LANE_ID;
+    return id >= kFirstToolLaneId && id < kEndLaneId;
 }
 
 /// The lane id for @p slot_index on the backend registered at @p backend_index,
-/// or INVALID_LANE_ID when the pair names no lane. AmsState::add_backend hands
+/// or kInvalidLaneId when the pair names no lane. AmsState::add_backend hands
 /// a backend its own index, which combines with a slot index here to give the
 /// backend its own block of lane ids.
 ///
-/// The blocks are adjacent, so a slot index at or past LANES_PER_BACKEND is
+/// The blocks are adjacent, so a slot index at or past kLanesPerBackend is
 /// not an unused id: it is the neighbouring backend's slot, and a record filed
 /// there is a record on the wrong lane, the failure this store exists to
 /// remove. Out of range therefore yields no id at all rather than the nearest
 /// one, which is a statement a caller can act on and a test can pin.
 [[nodiscard]] constexpr LaneId lane_id_for(int backend_index, int slot_index) {
-    if (backend_index < 0 || backend_index >= MAX_BACKENDS)
-        return INVALID_LANE_ID;
-    if (slot_index < 0 || slot_index >= LANES_PER_BACKEND)
-        return INVALID_LANE_ID;
-    return LaneId{backend_index * LANES_PER_BACKEND + slot_index};
+    if (backend_index < 0 || backend_index >= kMaxBackends)
+        return kInvalidLaneId;
+    if (slot_index < 0 || slot_index >= kLanesPerBackend)
+        return kInvalidLaneId;
+    return LaneId{backend_index * kLanesPerBackend + slot_index};
 }
 
 /// The one way a non-UI source writes this store. Replaces this lane's record
@@ -215,7 +215,7 @@ void reset_lane_sources();
 
 /// Holds one LaneSources per lane until the backends that wrote them go away.
 /// Bounded by construction: the funnels accept only ids is_lane_id() admits, so
-/// the map can never hold more than MAX_LANES (2305) entries.
+/// the map can never hold more than kMaxLanes (2305) entries.
 ///
 /// write() is private with exactly two friends: ingest() and commit_slot_edit().
 /// Those two are the only code that can reach a lane's records; a third friend

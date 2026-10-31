@@ -504,6 +504,7 @@ void PrintHistoryManager::adopt_original(PrintHistoryJob& job) {
     if (!original) {
         return;
     }
+    job.archive_plate = helix::gcode::rewritten_archive_plate(job.filename);
     job.filename = std::move(*original);
     job.from_rewrite = true;
 
@@ -533,10 +534,68 @@ void PrintHistoryManager::adopt_original(PrintHistoryJob& job) {
         },
         [this, token, filename, generation](const MoonrakerError&) {
             token.defer("PrintHistoryManager::original_missing", [this, filename, generation]() {
+                if (helix::gcode::is_3mf(filename) && api_) {
+                    // A printer that cannot read a .3mf has no metadata for
+                    // one; whether it is still there is the listing's answer.
+                    look_for_archive(filename, generation);
+                    return;
+                }
                 on_original_answered(filename, generation, OriginalFile{});
             });
         },
         /*silent=*/true);
+}
+
+void PrintHistoryManager::look_for_archive(const std::string& filename, uint64_t generation) {
+    const std::string dir = helix::gcode_dir_of(filename);
+    auto& waiting = archive_listings_[{generation, dir}];
+    waiting.push_back(filename);
+    if (waiting.size() > 1) {
+        return; // the listing under way answers it too
+    }
+    auto token = lifetime_.token();
+    api_->files().get_directory(
+        "gcodes", dir,
+        [this, token, dir, generation](const std::vector<FileInfo>& files) {
+            std::unordered_map<std::string, double> listed;
+            for (const auto& f : files) {
+                if (!f.is_dir) {
+                    listed[f.filename] = f.modified;
+                    listed[f.path] = f.modified;
+                }
+            }
+            token.defer("PrintHistoryManager::archive_listed",
+                        [this, dir, generation, listed = std::move(listed)]() {
+                            answer_archive_listing(dir, generation, &listed);
+                        });
+        },
+        [this, token, dir, generation](const MoonrakerError&) {
+            token.defer("PrintHistoryManager::archive_unlisted", [this, dir, generation]() {
+                answer_archive_listing(dir, generation, nullptr);
+            });
+        });
+}
+
+void PrintHistoryManager::answer_archive_listing(
+    const std::string& dir, uint64_t generation,
+    const std::unordered_map<std::string, double>* listed) {
+    const auto it = archive_listings_.find({generation, dir});
+    if (it == archive_listings_.end()) {
+        return;
+    }
+    const std::vector<std::string> waiting = std::move(it->second);
+    archive_listings_.erase(it);
+    for (const auto& filename : waiting) {
+        OriginalFile answer;
+        if (listed) {
+            const auto f = listed->find(helix::gcode::get_filename_basename(filename));
+            if (f != listed->end()) {
+                answer.exists = true;
+                answer.modified = f->second;
+            }
+        }
+        on_original_answered(filename, generation, std::move(answer));
+    }
 }
 
 void PrintHistoryManager::on_original_answered(const std::string& filename, uint64_t generation,

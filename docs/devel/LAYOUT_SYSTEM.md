@@ -54,6 +54,17 @@ Orientation is also composable with the breakpoint rather than separate from it:
 is guarded because a 1024x600 landscape panel and a 480x640 portrait one land on the same
 breakpoint while only the portrait one is actually short of room.
 
+`ui_is_ultrawide` is the same kind of subject for the `ultrawide` class (wider than 2.5:1,
+the test `is_ultrawide_aspect()` in `src/layout_manager.cpp` owns). It shares
+`ui_is_portrait`'s sources: `theme_manager_init` seeds both from `detect_layout_type()`, and
+`theme_manager_refresh_orientation()` republishes both from `LayoutManager::type()` once a
+`--layout` override is known, and on every resize. A tier cannot stand in for it: 1920x440
+reads `ui_breakpoint` small and 1920x480 medium, the same tiers as ordinary screens.
+`ui_xml/panel_belt_tension.xml#panel_belt_tension` branches on it in place (chart left,
+sidebar right) instead of shipping a `ui_xml/ultrawide/` copy.
+
+C++ that needs the layout class asks `app_layout_type(width, height)` (`include/layout_manager.h`): `LayoutManager::type()` once it is initialized, so a `--layout` override is respected, and the physical `detect_layout_type()` before that. `app_layout_is_portrait()` is built on it. Code that sizes things from raw dimensions before `LayoutManager` exists (`src/ui/overlay_geometry.cpp#nav_width_suffix`) calls `is_ultrawide_aspect(width, height)` rather than restating the threshold.
+
 So "which panels adapt to portrait" is not answered by listing the override directory.
 Beyond the two files there, the app shell, the navigation bar, Motion, Bed Mesh, the
 temperature graph overlay, the Advanced panel's E-stop bar and the bed mesh cards all adapt
@@ -368,15 +379,14 @@ and rowspan mean the same physical thing.
 ```cpp
 // include/grid_layout.h
 TRACKS_PER_CELL = 2                                         // a track is HALF a cell
-GRID_CELL[NUM_BREAKPOINTS] = {34, 40, 40, 60, 60, 72, 96}   // target track edge, px
+GRID_CELL[kNumBreakpoints] = {34, 40, 40, 60, 60, 72, 72}   // target track edge, px
 ```
 
-`GRID_CELL` carries one entry per `UiBreakpoint`, XXLarge included — a `static_assert` ties
+`GRID_CELL` carries one entry per `UiBreakpoint`, XXLarge included - a `static_assert` ties
 its length to `UiBreakpoint::XXLarge + 1` so adding a tier without a track edge fails the
-build. XXLarge went in late (it had been clamping onto XLarge, so a 1080p panel drew a
-720p-sized grid while fonts and icons scaled 1.6-2x around it); `theme_manager`'s
-`nav_width_suffix()` and `ui_xml/navigation_bar.xml` carry the matching `_xlarge` /
-`_xxlarge` nav widths.
+build. XXLarge shares XLarge's 72px edge, so a 1920x1080 panel resolves to a 12x7-cell
+(24x14-track) grid. `theme_manager`'s `nav_width_suffix()` and `ui_xml/navigation_bar.xml`
+carry the matching `_xlarge` / `_xxlarge` nav widths.
 
 `GridLayout::get_dimensions(bp, content_w, content_h)` divides the container's **content
 box** — not the panel resolution — by `TRACKS_PER_CELL * GRID_CELL[bp]`, rounds each axis
@@ -384,7 +394,7 @@ to the **nearest** whole cell, and multiplies back up to tracks:
 
 ```
 cells  = round(content / (TRACKS_PER_CELL * GRID_CELL[bp]))
-tracks = TRACKS_PER_CELL * clamp(cells, MIN_TRACKS/2, MAX_TRACKS/2)
+tracks = TRACKS_PER_CELL * clamp(cells, kMinTracks/2, kMaxTracks/2)
 ```
 
 Two details do the work here:
@@ -404,13 +414,19 @@ Because the count is always a whole number of cells, the track count is always e
 trailing half-cell that a whole-cell widget could never occupy, and edit mode's `TRACKS_PER_CELL`
 snap step can always restore a size the user dragged past.
 
-`MIN_TRACKS` (4) and `MAX_TRACKS` (64) are both whole cells, so clamping cannot produce an
-odd count either. Neither is reached by any measured geometry; `MIN_TRACKS` exists for a
+`kMinTracks` (4) and `kMaxTracks` (64) are both whole cells, so clamping cannot produce an
+odd count either. Neither is reached by any measured geometry; `kMinTracks` exists for a
 container that has not been laid out yet.
 
 The breakpoint comes from the **narrow** axis (`min(width, height)`), so a tall portrait
 panel is classified by its width and keeps the same cell edge after rotation. See
 `include/ui_breakpoint.h`.
+
+**Gutter.** The gap between tracks is the per-breakpoint `home_grid_gap` token
+(`ui_xml/globals.xml`, read by `GridLayout::gutter_px()`): the same as `space_xs` up to
+medium (2/4/5px), wider from large up (10px at large and xlarge, 12px at xxlarge). It is grid
+spacing, so a user's own layout gets it too. It does not change the track count, which comes
+from the content box alone.
 
 **Measured grids.** Content boxes read off a live instance
 (`HELIX_SCREEN_SIZE=<WxH> helix-screen --test -vv`, then the `[PanelWidgetManager] Grid
@@ -419,14 +435,16 @@ layout:` / `Track geometry:` lines); pinned in `tests/unit/test_grid_square_cell
 | Panel | Tier | Content box | Gutter | Grid | Track (w x h) | Aspect |
 |-------|------|-------------|--------|------|---------------|--------|
 | 480x272 | MICRO | 430x264 | 2 | **12x8** | 34.00 x 31.25 | 1.09 |
+| 320x240 | MICRO | 270x232 | 2 | **8x6** | 32.00 x 37.00 | 0.86 |
 | 272x480 | MICRO | 264x394 | 2 | **8x12** | 31.25 x 31.00 | 1.01 |
 | 480x320 | TINY | 418x312 | 2 | **10x8** | 40.00 x 37.25 | 1.07 |
 | 320x480 | TINY | 312x394 | 2 | **8x10** | 37.25 x 37.60 | 0.99 |
 | 480x400 | SMALL | 414x388 | 4 | **10x10** | 37.80 x 35.20 | 1.07 |
 | 800x480 | MEDIUM | 710x466 | 5 | **12x8** | 54.58 x 53.88 | 1.01 |
 | 480x800 | MEDIUM | 466x664 | 5 | **8x12** | 53.88 x 50.75 | 1.06 |
-| 1024x600 | LARGE | 904x584 | 6 | **16x10** | 50.88 x 53.00 | 0.96 |
-| 1280x720 | XLARGE | 1128x700 | 8 | **16x10** | 63.00 x 62.80 | 1.00 |
+| 1024x600 | LARGE | 904x584 | 10 | **16x10** | 47.12 x 49.40 | 0.95 |
+| 1280x720 | XLARGE | 1128x700 | 10 | **16x10** | 61.12 x 61.00 | 1.00 |
+| 1920x1080 | XXLARGE | 1720x1056 | 12 | **24x14** | 60.17 x 64.29 | 0.94 |
 | 1920x440 | SMALL | 1832x428 | 4 | **46x10** | 35.91 x 39.20 | 0.92 |
 | 320x1480 | TINY | 312x1332 | 2 | **8x34** | 37.25 x 37.24 | 1.00 |
 
@@ -444,86 +462,210 @@ of any track, so dividing content by the track count overstates every one of the
 
 ### `assets/config/default_layout.json`
 
-The shipped default placements. The file is **two-dimensional** — layout variant, then
-breakpoint — and every span in it is in **tracks**, not cells:
+The shipped default arrangement, resolved against what the connected printer can do.
+The file is **two-dimensional** - layout variant, then breakpoint - and every span in it
+is in **tracks**, not cells. The resolver is a pure function
+(`resolve_default_layout()` in `include/default_layout_resolver.h`): a table, an optional preset
+overlay, a tier and grid, and a `CapabilitySnapshot` of subject values go in; placements,
+the ids to switch off and a signature come out. It reads no LVGL subject and no file, so
+the same inputs always give the same layout and `tests/unit/test_default_layout_resolver.cpp`
+drives it with hand-built tables.
+
+The table has two kinds of entry in `anchors`.
+
+**Fixed anchors** are `{"id", "placements"}`: one widget, one rectangle per tier.
+
+```json
+{ "id": "print_status",
+  "config": { "layout_style": "detailed" },
+  "placements": {
+    "medium": { "col": 0, "row": 2, "colspan": 8, "rowspan": 4 }
+  } }
+```
+
+**Slots** are a region per tier and an ordered list of alternatives that fill it. They
+exist so a cell can hold whichever widget this printer can use:
+
+```json
+{ "slot": "spool_env_rl",
+  "placements": { "medium": { "col": 4, "row": 2, "colspan": 4, "rowspan": 2 } },
+  "alternatives": [
+    { "cells": [ { "candidates": ["ams"], "at": [0, 0, 4, 2] } ] },
+    { "cells": [ { "candidates": "ENV_FIL", "at": [2, 0, 2, 2] },
+                 { "candidates": "ENV_FIL", "at": [0, 0, 2, 2] } ] }
+  ] }
+```
+
+- `at` is `[col, row, colspan, rowspan]` in tracks, relative to the slot's region. An odd
+  span is allowed only for a widget whose registry def has `supports_half_col` /
+  `supports_half_row`.
+- `candidates` is an inline array or the name of a top-level `candidate_lists` entry. A
+  candidate is an id or `{"id", "requires": ["subject", ...]}`. The shipped table has one
+  list, `ENV_FIL`: filament, led, dryer, chamber_temperature requiring `printer_is_enclosed` (a
+  chamber sensor on an open frame reads the room), and active_spool requiring
+  `printer_has_spoolman`. The bed mesh and the AMS are inline single-candidate lists, and so is
+  the tool switcher, which requires `ams_is_tool_changer`: below large it is the first
+  alternative of the spool slot, so a tool changer gets it in place of the AMS tile; from large
+  up it has a `tool_strip` slot of its own, the 8x2-track strip in the upper half of the planned
+  block, whose lower half stays the declared gap. A printer that is not a tool changer resolves
+  exactly as it would with no switcher in the table (the "not a tool changer" case in
+  `test_default_layout.cpp`), though its signature names `ams_is_tool_changer=0`.
+- **A candidate qualifies** when its registry gate subject is open, every subject in its
+  `requires` is non-zero, and no earlier cell placed it. A gate subject that is not registered
+  reads open; a `requires` subject that is not registered reads 0.
+- **Resolution order:** fixed anchors first, then slots in file order. Within a slot, the first
+  alternative that fits the region and whose lead cell (its first cell) has a qualifying
+  candidate wins; the last alternative has no lead requirement. Each cell takes its first
+  qualifying candidate, so cells that share a list fill in the order they are written, across
+  slots too, and the cells left over stay empty. Authoring order is how a table decides where
+  a printer with fewer readouts shows its empty cells: the cell beside a declared gap or at an
+  edge is written last. With a measured grid, an alternative whose cells run off it gives way
+  to a later one that stays on it.
+- **No stand-ins:** every candidate is gated on hardware or a capability. A printer without
+  the hardware gets an empty cell, never a generic widget (clock, network, macros, motion,
+  z-offset and the like) filling space, and never a dimmed gated tile. A fixed anchor is
+  either an ungated widget or one whose gate is open on every printer that reaches that tier;
+  anything else is a slot.
+- **Planned gaps:** a table's `gaps` map lists, per placement key, the `[col, row, colspan,
+  rowspan]` blocks left empty on purpose. The resolver does not read it; the coverage test
+  does (below). Gaps are whole cells, grouped into one calm block where the tier allows, and a
+  neighbour is never grown into one. The card behind merging tiles covers the bounding box of
+  each connected group, so a gap that sits inside such a box is painted as card: keep a
+  tier's planned gap outside its readout band (large keeps one band of readouts on top for
+  that reason).
+- **Losers are switched off:** every widget a candidate list of the active table names and the
+  resolver did not place comes back in `ResolvedDefault::disabled` and is written
+  `enabled: false`, so auto-placement never tries to seat it into a full grid. That includes the
+  candidates of a slot with no region at this tier.
+- `placements` keys inherit through the tier fallback chain (see below), so a slot's last
+  alternative has to fit every region it can inherit; the table test enforces it.
+
+`default_layout.json` also carries tier `disabled` maps, `config` seeds and variants.
 
 ```json
 {
-  "anchors": [
-    { "id": "printer_image",
-      "placements": {
-        "tiny":   { "col": 0, "row": 0, "colspan": 4, "rowspan": 4 },
-        "medium": { "col": 0, "row": 0, "colspan": 4, "rowspan": 4 },
-        "large":  { "col": 0, "row": 0, "colspan": 6, "rowspan": 4 }
-      }
-    },
-    { "id": "print_status",
-      "config": { "layout_style": "detailed" },
-      "placements": {
-        "medium": { "col": 0, "row": 4, "colspan": 8, "rowspan": 4 }
-      }
-    }
-  ],
   "disabled": {
-    "micro": ["tips", "temp_graph"],
-    "tiny":  ["tips", "temp_graph"]
+    "micro": ["tips"],
+    "medium": ["tips"]
+  },
+  "gaps": {
+    "large": [[4, 2, 4, 2], [8, 2, 8, 4]]
   },
   "variants": {
     "portrait": {
-      "anchors": [
-        { "id": "printer_image",
-          "placements": {
-            "tiny":   { "col": 0, "row": 0, "colspan": 4, "rowspan": 4 },
-            "medium": { "col": 0, "row": 0, "colspan": 4, "rowspan": 4 }
-          }
-        }
-      ],
+      "anchors": [ ... ],
       "disabled": { "tiny": ["tips"] }
     }
   }
 }
 ```
 
-A variant is either a bare anchor array (the legacy shape, still accepted) or an object
-carrying `anchors` plus `disabled`. Both forms have a test.
+A variant is either a bare anchor array or an object carrying `anchors`, `disabled` and `gaps`; the
+resolver uses the first variant in `LayoutManager::variant_chain()` with a non-empty `anchors`
+and falls back to the top-level table. A `disabled` map takes grid-qualified keys
+(`"micro@8x6"`) as well as tier names; see [Grid-qualified keys](#grid-qualified-keys).
 
 **`disabled` is not optional bookkeeping.** Omitting a widget from a tier does *not* switch
-it off — `parse_widget_array()` appends every absent registry widget at its
+it off - `parse_widget_array()` appends every absent registry widget at its
 `default_enabled` and the engine seats it wherever it fits. Worse, an omitted widget
 inherits the first key in its tier's fallback chain that *does* have a placement, lands off
-a grid of a different size, collides, and is evicted as "grid full" — taking whatever would
+a grid of a different size, collides, and is evicted as "grid full" - taking whatever would
 have auto-placed after it. Leaving a widget out of a tier therefore **requires** naming it
-in that table's `disabled` map. This bit twice during the landscape rework; the guard is the
-"no shipped table mixes authored and inherited placements" case in `test_default_layout.cpp`.
+in that table's `disabled` map, unless a candidate list names it (the resolver switches
+losers off itself). The guard is the "no shipped table mixes authored and inherited
+placements" case in `test_default_layout.cpp`.
 
 **`config` on an anchor** seeds that widget's per-instance settings, so a layout can ship
 `print_status` in its Detailed style without a C++ branch. Anchor-level config is merged
 *under* placement-level config.
 
-`PanelWidgetConfig::build_default_grid()` (`src/system/panel_widget_config.cpp`) picks the
-anchor table by walking `LayoutManager::variant_chain()` — the same most-specific-first
-search `ui_xml/` overrides use. `variants.portrait` wins over the base `anchors` on a
-portrait panel, and a `TINY_PORTRAIT` panel falls through `tiny_portrait` → `portrait` →
-base. The keys under `"variants"` are named exactly like the `ui_xml/` override directories.
+**No default places `toolhead`, `host_health` or `exclude_map`.** They stay in the catalog.
 
-Widgets not named in the chosen table are auto-placed; the table only fixes the few that
-have a deliberate home.
+`PanelWidgetConfig::build_default_grid()` (`src/system/panel_widget_config.cpp`) is snapshot
+plus resolve: `snapshot_capabilities()` reads every gate and `requires` subject the table names
+from the live XML subject registry, `resolve_default_layout()` does the rest. The shared parse of
+the file is kept by `load_default_table()` until its mtime or size changes, so the
+runtime-editable table still takes effect without a per-call read.
 
 The three shipped tables are the base (landscape), `variants.ultrawide` (1480x320,
-1920x440) and `variants.portrait`. Each authors **all seven tiers**; see the fallback
-warning above for why leaving one out is dangerous rather than merely terse.
+1920x440) and `variants.portrait`. The base and portrait tables author all seven tiers; see
+the fallback warning above for why leaving one out is dangerous rather than merely terse.
+`variants.ultrawide` authors `tiny` and `small` only, the tiers an ultrawide strip reaches
+(`micro` inherits `tiny`). The xxlarge landscape table is authored on the 12x7-cell grid
+(portrait xxlarge is 14 tracks wide). Four grids carry grid-qualified tables of their own:
+the 320x240 micro panel (`micro@8x6`), the two ultratall portrait strips, 320x1480
+(`tiny@8x34`) and 440x1920 (`small@10x44`), and the 1080x2400 portrait panel
+(`xxlarge@14x32`), whose eight rows past the 14x24 table hold a taller temperature graph and
+a declared empty block.
 
-Inside a table, breakpoint keys are named rather than indexed — `micro`, `tiny`, `small`,
+What every table shares: notifications in the top-right corner; temperatures, fans and the
+spool slot (the AMS tile, or a pair of `ENV_FIL` readouts) beside the printer image;
+print_status always placed. Micro (480x272) puts print_status (4x2 cells) beside the
+temperature graph (2x2); medium keeps the graph and leaves tips off; the ultrawide strips
+are two bands, the image, an empty span and the readout cluster on top, print_status and
+the graph sharing the bottom half and half.
+
+Inside a table, breakpoint keys are named rather than indexed - `micro`, `tiny`, `small`,
 `medium`, `large`, `xlarge`, `xxlarge` (seven, matching `UiBreakpoint`). A missing tier
-resolves by fallback (`micro`→`tiny`→`small`, `xlarge`→`large`, `xxlarge`→`xlarge`→`large`).
+resolves by fallback (`micro`->`tiny`->`small`, `xlarge`->`large`, `xxlarge`->`xlarge`->`large`).
 If no tier in the chain matches, the anchor is dropped and that widget is auto-placed instead.
+
+#### A default stays live until the user edits it
+
+The layout stores a `default` block beside its pages, inside the `serialize_pages()` payload,
+so a parked per-grid copy carries its own:
+
+```json
+"default": { "signature": "<tier>|<cols>|<rows>|<variant chain>|<preset>|<subject>=<value>,...", "hash": "<arrangement hash>" }
+```
+
+- `signature` is what the resolver consulted: tier, grid, variant chain, preset and every
+  consulted subject's value, sorted.
+- `hash` is `helix::layout::arrangement_hash()` of the pages: per page, the id, column, row and
+  spans of each enabled, positioned entry, plus the page count. Per-widget `config` is not in
+  it, so choosing an LED strip or a print_status style does not make a layout the user's.
+- **Unedited** means the stored pages still hash to `default.hash`
+  (`PanelWidgetConfig::is_unedited_default()`). No write path needs to know about this: Edit
+  Mode, the catalog, `ctl home`, plugin RPCs, page add and remove and an older build that keeps
+  unknown keys all change the arrangement, and any of them makes the layout the user's.
+- **When it re-resolves:** at the top of `PanelWidgetManager::populate_widgets`
+  (`refresh_live_default`), before enabled ids are collected and before the "Widget list
+  unchanged" early return. Only while the printer is connected and Klippy is READY (a teardown
+  or retarget zeroes subjects such as `ams_slot_count` and must not reshuffle the panel), only
+  for an unedited default, only when the signature differs, and not while home Edit Mode is open
+  (`PanelWidgetConfig::set_edit_session_open`). The signature is compared before any entries
+  are built. A changed signature saves once; an unchanged one writes nothing.
+- **Offline** (not CONNECTED): a pending block, or an unedited default whose grid changed, is
+  resolved in memory so the panel has something to show, but the block stays pending (empty
+  signature) and nothing is saved, since the subjects may still hold a previous printer's
+  capabilities. A default that has already resolved is left as it is. The first READY populate
+  resolves the pending block from the printer's own values and writes once. While Klippy is
+  starting on a connected printer nothing resolves at all. The gate observers `setup_gate_observers()` registers cover every `requires`
+  subject the table names as well as the registry gates, so a capability arriving late (an AMS
+  backend coming up after connect) re-resolves the panel.
+- A grid change (rotation, UI scale) on an unedited layout re-resolves for the new grid instead
+  of parking and porting. During an open Edit Mode session it is ported so the session keeps
+  its arrangement, but its block stays pending and resolves when the session closes. A parked
+  unedited default that a grid change restores is re-resolved before it is shown.
+- A re-resolve carries each surviving widget's `config` across, merged over the table's
+  `config` for the new placement, so a key the widget never set keeps the table's value.
+- Reset to defaults (`reset_to_defaults()`) stamps a pending block, which the next measured
+  populate resolves. Crash-loop safe mode shows defaults and writes nothing.
+
+#### Preset overlays
+
+A preset can adjust the table without forking it: `assets/config/panel_widgets/<preset>/home.json`
+is an overlay `load_preset_overlay()` reads (cached by mtime and size, like the table) and
+`build_default_grid()` applies over the table. It replaces a base anchor or slot by `id` /
+`slot`, adds ones the table lacks, or removes one with `{"id": "tips", "remove": true}`; the
+same resolver handles it and the preset is part of the signature. No preset ships an overlay today: the base tables cover every packaged printer.
 
 #### Grid-qualified keys
 
 A breakpoint names a *panel*, not a *grid*. The high-DPI UI scale multiplies the cell edge
 (see `include/display_metrics.h`), so one panel at one tier has a different track count per
-scale — 1080x2400 is xxlarge portrait at **12x24** tracks unscaled, **8x18** at 125% and
-**6x14** at 158%. A table authored for one of those does not describe the others.
+scale — 1080x2400 is xxlarge portrait at **14x32** tracks unscaled and fewer at each larger
+scale. A table authored for one of those does not describe the others.
 
 A placement key may therefore name its grid: `"xxlarge@6x14"`. Within a tier the qualified
 key wins over the bare one, and the tier chain still dominates — this tier on some other
@@ -536,6 +678,19 @@ has to fit. A bare key remains the catch-all for every grid with no entry of its
   "xxlarge@6x14": { "col": 4, "row": 0, "colspan": 2, "rowspan": 2 }
 }
 ```
+
+`disabled` maps take the same keys. A grid-qualified list replaces the bare tier's list on
+that grid, so a grid too small for some of the tier's anchors switches them off there and
+nowhere else. The Creality Hi's 320x240 panel is micro on an 8x6 grid: `"micro@8x6"`
+switches off printer_image and fan_stack so print_status can be two cells tall (one cell has
+no room for its progress ring) under a top row of nozzle, bed, one `ENV_FIL` readout and
+notifications in the corner; 480x272 keeps both. Every entry with a bare key for the tier
+needs a grid-qualified placement or a place in that list, or it inherits the bare key's
+coordinates off the smaller grid. The "every measured grid is covered or declared empty" case
+in `test_default_layout.cpp` resolves each measured grid with every gate open, every gate
+open but no AMS, and every gate closed. With gates open the empty tracks must be exactly the
+grid's declared `gaps`; with gates closed an empty track must be a declared gap or a slot cell
+nothing qualified for. An undeclared hole fails, and so does an overlap.
 
 **An anchor that does not fit the measured grid is now dropped rather than clamped.**
 `build_default_grid(grid_cols, grid_rows)` checks each anchor against the grid it is being
@@ -591,9 +746,10 @@ This is also why defaults are no longer built at config load. `load()` runs befo
 widget container exists, and the panel extent it could have guessed from is not what the
 track count divides — the *content box* is, and the two disagree enough to pick a different
 grid (1042x2141 against 1080x2400 is 6x14 tracks against 8x16). So `build_defaults()` tags
-the layout `"anchors": "pending"` and `PanelWidgetManager::populate_widgets()` resolves it
-at the first measured populate, then clears the tag. The tag is positive and written only by
-the defaults path, so a layout a user has arranged is never overwritten.
+the layout `"anchors": "pending"`, which reads as a `default` block with an empty signature,
+and `PanelWidgetManager::populate_widgets()` resolves it at the first measured populate. The
+tag is positive and written only by the defaults path, so a layout a user has arranged is
+never overwritten.
 
 The file is runtime-editable and read via `find_readable()`, so a malformed or missing file
 degrades to a small hardcoded fallback rather than an empty dashboard.
@@ -683,8 +839,11 @@ default without asking, which is safe only because every definition holds that d
 or above its own minimum. A widget authored around whole cells keeps a whole-cell floor on
 both axes.
 
-Half a cell is declined outright at the micro and tiny tiers, where a track is 31-40px and
-the glyph already fills it, and a tile of one cell or less is capped to the authored face
+At the micro and tiny tiers, where a track is 31-40px, a tile that shows a reading declines
+half a cell outright: no rung carries a glyph and a value there. An icon-only tile is left to
+`decide()`, which drops the caption and measures its own glyph against the box, so most take
+half a cell on both axes and a tile whose caption is its identity (which fan, which sensor)
+still refuses. A tile of one cell or less is capped to the authored face
 there so those screens keep the proportions they were designed with. A tile given more
 than a cell on both axes grows on every tier. A glyph that sits in a disc
 (`power_device`, `favorite_macro`) uses `ui_xml/components/tile_badge.xml`, whose disc
@@ -813,6 +972,68 @@ on.
 
 A third case is neither: when placement failed only because the temporary `firmware_restart`
 widget was injected, the widget is skipped and logged, with nothing written at all.
+
+## Layouts shared by the printer's own screen
+
+A printer's own HelixScreen (the one whose Moonraker runs on its host) publishes its home
+layout to Moonraker. A screen that reaches that printer over the network seeds its own home
+layout from it, and the widget catalog offers "Copy layout from printer" to pull it again.
+There is no live sync: after a copy the layout belongs to the screen that took it.
+
+**Payload.** Moonraker database namespace `helix-screen`, key `home_layout`
+(`include/home_layout_share.h#kNamespace`, `kKey`). The value is
+`{schema, grid: "<cols>x<rows>", pages, main_page_index, saved_at, app_version}`, built by
+`build_payload` (`include/home_layout_share.h`) from `serialize_pages()` with
+the `default` block and `next_page_id` left out. `parked_grids` and anchors are not
+published. `parse_payload` accepts only the schema it knows (`kSchema`), a grid of
+1 to 64 columns and rows, and at least one page that keeps an entry; anything else is
+treated as "no published layout". `app_version` is informational and never a gate. Unknown
+widget ids and unknown per-widget config keys are tolerated the way `settings.json` is.
+
+**Which widgets travel.** Widgets are printer-scoped or screen-scoped
+(`include/panel_widget_registry.h#WidgetScope`). Screen-scoped entries
+(`network`, `clock`, `lock`, `tips`, `notifications`, `shutdown`) describe the device they
+sit on, so `strip_screen_scoped` removes them from a payload before import, drops the pages
+that leaves empty and re-points `main_page_index`. The importing screen keeps its own
+defaults for those widgets.
+
+**Who publishes, and when.** `include/home_layout_sync.h#HomeLayoutSync` publishes only
+when the connection's locality verdict (the `moonraker_locality` subject,
+`include/printer_network_state.h`) is `Local`. `Unknown`, which is what a connection reads
+before its verdict is set, publishes nothing. It publishes once per connect and after each
+home-layout save, skips a payload identical to the last one posted on the connection
+(`saved_at` aside), and never publishes an unedited default.
+
+**Who fetches, and when it seeds.** A screen whose locality is `Remote` fetches on connect and
+holds the result tagged with the active printer id. Automatic seeding only happens for a
+printer that has never had a saved home layout
+(`include/panel_widget_config.h#had_saved_layout`): it is derived from the
+printer's settings at load, never persisted, and `mark_printer_changed` re-derives it on a
+printer switch. A Reset counts as someone having had a say, so after a Reset the layout stays
+the generator default. The seed is taken at the points where a default is resolved:
+`HomeLayoutSync::seed_pending_default` when populate applies a pending default, and
+`HomeLayoutSync::adopt_late_seed` for a reply that arrives after the default was applied but
+while the layout is still an unedited default on a known grid. Both skip while edit mode is
+open. No published layout, an unreadable payload or a newer schema falls back to the
+generator default without a message; a successful seed toasts.
+
+**`import_layout`.** `include/panel_widget_config.h#import_layout` takes the
+parsed payload and the importing screen's grid. The payload is checked in full first, so a
+refused import (non-positive grid axis, or no page keeping a known widget) changes and saves
+nothing. On success the layout is loaded as authored for its source grid and ported to the
+local grid by the same path a first visit to a new grid uses
+(`src/ui/layout_port.cpp#port_legacy_layout`). Every parked grid is discarded, since each is
+a port of the layout being replaced. The result is the user's own layout with no default
+marker, saved once.
+
+**After the seed.** The copied layout is owned by the screen that took it. Edits on either
+side never propagate, a later publish never replaces it automatically, and Reset in the
+catalog gives the generator default, not the printer's layout.
+
+**Manual copy.** `src/ui/ui_widget_catalog_overlay.cpp#on_catalog_copy_layout` fetches through
+`HomeLayoutSync::fetch_now`, asks for confirmation, and replaces the current layout whether
+or not it was edited. It is hidden on the printer's own screen. To try it under `--test`, see
+`HELIX_MOCK_HOME_LAYOUT` in `MOCK_ENVIRONMENT_VARIABLES.md`.
 
 ---
 

@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "belt_tension_types.h"
+#include "belt_test_curves.h"
 #include "shaper_csv_parser.h"
 
 #include <cmath>
@@ -41,14 +42,9 @@ BeltComparison compare_fixture(const std::string& printer, float lo, float hi) {
                               load_fixture(printer + "_axis_1_1.csv"), lo, hi);
 }
 
-/// Lorentzian peak on a noise floor, 5-135 Hz at Klipper's 3200/4096 Hz spacing.
+/// One Lorentzian peak on a noise floor, 5-135 Hz at Klipper's 3200/4096 Hz spacing.
 BeltCurve curve_with_peak(float peak_hz, float height = 1e4f, float floor = 50.0f) {
-    BeltCurve c;
-    for (float f = 5.0f; f < 135.0f; f += 0.78125f) {
-        const float d = (f - peak_hz) / 5.0f;
-        c.emplace_back(f, floor + height / (1.0f + d * d));
-    }
-    return c;
+    return test::lorentzian_curve({{peak_hz, height}}, 5.0f, 135.0f, 3200.0f / 4096.0f, floor);
 }
 
 BeltPeak peak(float hz, float amp) {
@@ -141,6 +137,17 @@ TEST_CASE("real K2 Plus captures read well matched", "[belt][compare]") {
     CHECK(cmp.peaks.unpaired_b.empty());
 }
 
+TEST_CASE("real AD5X captures read well matched", "[belt][compare]") {
+    const auto cmp = compare_fixture("ad5x", 20.0f, 80.0f);
+    REQUIRE(cmp.valid);
+    CHECK(cmp.similarity_percent == Catch::Approx(99.5f).margin(1.0f));
+    CHECK(cmp.verdict == BeltVerdict::MATCHED);
+    // Both paths' tallest in-band bin is 54.2 Hz.
+    REQUIRE_FALSE(cmp.peaks.pairs.empty());
+    CHECK(cmp.peaks.pairs.front().a.freq_hz == Catch::Approx(54.2f).margin(0.1f));
+    CHECK(cmp.peaks.pairs.front().b.freq_hz == Catch::Approx(54.2f).margin(0.1f));
+}
+
 TEST_CASE("real U1 captures read close", "[belt][compare]") {
     const auto cmp = compare_fixture("u1", 5.0f, 100.0f);
     REQUIRE(cmp.valid);
@@ -194,7 +201,7 @@ TEST_CASE("identical peak lists pair one to one", "[belt][compare][pair]") {
         CHECK(p.a.freq_hz == p.b.freq_hz);
     }
     // Distances [0,0,0,10,10,10,10,20,20]: median+1.5*IQR = 40, capped.
-    CHECK(r.threshold_hz == Catch::Approx(belt_verdict::PAIR_MAX_HZ).margin(1e-4f));
+    CHECK(r.threshold_hz == Catch::Approx(belt_verdict::kPairMaxHz).margin(1e-4f));
 }
 
 TEST_CASE("a peak 11 Hz from its nearest partner stays unpaired", "[belt][compare][pair]") {
@@ -204,7 +211,7 @@ TEST_CASE("a peak 11 Hz from its nearest partner stays unpaired", "[belt][compar
     REQUIRE(r.unpaired_b.size() == 1);
     CHECK(r.unpaired_a[0].freq_hz == Catch::Approx(50.0f));
     CHECK(r.unpaired_b[0].freq_hz == Catch::Approx(61.0f));
-    CHECK(r.threshold_hz == Catch::Approx(belt_verdict::PAIR_MAX_HZ).margin(1e-4f));
+    CHECK(r.threshold_hz == Catch::Approx(belt_verdict::kPairMaxHz).margin(1e-4f));
 }
 
 TEST_CASE("greedy pairing takes the globally closest pair first", "[belt][compare][pair]") {
@@ -223,14 +230,14 @@ TEST_CASE("empty peak lists pair nothing", "[belt][compare][pair]") {
     CHECK(both_empty.pairs.empty());
     CHECK(both_empty.unpaired_a.empty());
     CHECK(both_empty.unpaired_b.empty());
-    CHECK(both_empty.threshold_hz == Catch::Approx(belt_verdict::PAIR_MAX_HZ).margin(1e-4f));
+    CHECK(both_empty.threshold_hz == Catch::Approx(belt_verdict::kPairMaxHz).margin(1e-4f));
 
     const std::vector<BeltPeak> b{peak(10.0f, 1.0f)};
     const auto a_empty = pair_belt_peaks({}, b);
     CHECK(a_empty.pairs.empty());
     CHECK(a_empty.unpaired_a.empty());
     REQUIRE(a_empty.unpaired_b.size() == 1);
-    CHECK(a_empty.threshold_hz == Catch::Approx(belt_verdict::PAIR_MAX_HZ).margin(1e-4f));
+    CHECK(a_empty.threshold_hz == Catch::Approx(belt_verdict::kPairMaxHz).margin(1e-4f));
 }
 
 TEST_CASE("threshold is median + 1.5 * IQR when under the cap", "[belt][compare][pair]") {

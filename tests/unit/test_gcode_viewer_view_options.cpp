@@ -85,7 +85,7 @@ const std::unordered_set<std::string> kHighlight{"cube1"};
 const std::unordered_set<std::string> kExcluded{"cube2"};
 
 lv_obj_t* make_viewer(lv_obj_t* parent) {
-    lv_obj_t* viewer = ui_gcode_viewer_create(parent);
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
     lv_obj_set_size(viewer, 400, 300);
     lv_obj_update_layout(viewer);
@@ -93,9 +93,9 @@ lv_obj_t* make_viewer(lv_obj_t* parent) {
 }
 
 void set_options(lv_obj_t* viewer) {
-    ui_gcode_viewer_set_highlighted_objects(viewer, kHighlight);
-    ui_gcode_viewer_set_excluded_objects(viewer, kExcluded);
-    ui_gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
+    helix::ui::gcode_viewer_set_highlighted_objects(viewer, kHighlight);
+    helix::ui::gcode_viewer_set_excluded_objects(viewer, kExcluded);
+    helix::ui::gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
 }
 
 void check_2d(lv_obj_t* viewer, bool expect_lane_colors) {
@@ -120,13 +120,13 @@ TEST_CASE_METHOD(LVGLTestFixture,
     set_options(viewer);
 
     test_access::gcode_viewer_install_loaded_file(viewer, make_two_object_file());
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
     check_2d(viewer, /*expect_lane_colors=*/true);
 
     SECTION("a cleared and reloaded viewer keeps the selection sets") {
-        ui_gcode_viewer_clear(viewer);
+        helix::ui::gcode_viewer_clear(viewer);
         test_access::gcode_viewer_install_loaded_file(viewer, make_two_object_file());
-        ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+        helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
         // Tool colors are per load and go with clear(); the sets belong to the
         // print, which outlives a reload of the same viewer.
         check_2d(viewer, /*expect_lane_colors=*/false);
@@ -144,10 +144,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "switching 2D, 3D, 2D leaves every renderer wi
     set_options(viewer);
 
     test_access::gcode_viewer_install_loaded_file(viewer, make_two_object_file());
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
     check_2d(viewer, true);
 
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
     test_access::gcode_viewer_wait_for_build(viewer);
     helix::ui::UpdateQueue::instance().drain();
 
@@ -169,7 +169,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "switching 2D, 3D, 2D leaves every renderer wi
     CHECK(has(kLaneT0));
     CHECK(has(kLaneT1));
 
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
     check_2d(viewer, true);
 
     lv_obj_delete(parent);
@@ -188,8 +188,8 @@ struct UploadedViewer {
         parent = lv_obj_create(lv_screen_active());
         viewer = make_viewer(parent);
         test_access::gcode_viewer_install_loaded_file(viewer, make_two_object_file());
-        ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
-        ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
+        helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+        helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
         test_access::gcode_viewer_wait_for_build(viewer);
         helix::ui::UpdateQueue::instance().drain();
         r3d = test_access::gcode_viewer_3d_renderer(viewer);
@@ -215,24 +215,24 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     // A changed color is what forces the repaint; the setup has to reach it or
     // the unchanged cases below prove nothing.
-    ui_gcode_viewer_set_tool_colors(v.viewer, {kLaneT0, kLaneT1});
+    helix::ui::gcode_viewer_set_tool_colors(v.viewer, {kLaneT0, kLaneT1});
     REQUIRE_FALSE(v.uploaded());
     GCodeGLESRendererTestAccess::mark_uploaded(*v.r3d);
 
-    ui_gcode_viewer_set_tool_colors(v.viewer, {kLaneT0, kLaneT1});
-    ui_gcode_viewer_set_excluded_objects(v.viewer, kExcluded);
-    ui_gcode_viewer_set_excluded_objects(v.viewer, kExcluded);
-    ui_gcode_viewer_set_highlighted_objects(v.viewer, kHighlight);
-    ui_gcode_viewer_set_highlighted_objects(v.viewer, kHighlight);
+    helix::ui::gcode_viewer_set_tool_colors(v.viewer, {kLaneT0, kLaneT1});
+    helix::ui::gcode_viewer_set_excluded_objects(v.viewer, kExcluded);
+    helix::ui::gcode_viewer_set_excluded_objects(v.viewer, kExcluded);
+    helix::ui::gcode_viewer_set_highlighted_objects(v.viewer, kHighlight);
+    helix::ui::gcode_viewer_set_highlighted_objects(v.viewer, kHighlight);
     CHECK(v.uploaded());
 
     // A render-mode round trip applies the options again.
-    ui_gcode_viewer_set_render_mode(v.viewer, GcodeViewerRenderMode::Layer2D);
-    ui_gcode_viewer_set_render_mode(v.viewer, GcodeViewerRenderMode::Render3D);
+    helix::ui::gcode_viewer_set_render_mode(v.viewer, GcodeViewerRenderMode::Layer2D);
+    helix::ui::gcode_viewer_set_render_mode(v.viewer, GcodeViewerRenderMode::Render3D);
     CHECK(v.uploaded());
 
     SECTION("a different color list does") {
-        ui_gcode_viewer_set_tool_colors(v.viewer, {kOtherT0, kOtherT1});
+        helix::ui::gcode_viewer_set_tool_colors(v.viewer, {kOtherT0, kOtherT1});
         CHECK_FALSE(v.uploaded());
     }
 }

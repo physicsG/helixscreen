@@ -62,33 +62,6 @@ void FanSettingsOverlay::on_deactivating(DeactivateReason) {
 }
 
 // ============================================================================
-// FAN TYPE HELPERS
-// ============================================================================
-
-namespace {
-
-/// Convert FanType to a short display string for the type pill
-const char* fan_type_label(helix::FanType type) {
-    switch (type) {
-    case helix::FanType::PART_COOLING:
-        return lv_tr("Part");
-    case helix::FanType::HEATER_FAN:
-        return lv_tr("Heater");
-    case helix::FanType::CONTROLLER_FAN:
-        return lv_tr("Controller");
-    case helix::FanType::TEMPERATURE_FAN:
-        return lv_tr("Temp");
-    case helix::FanType::GENERIC_FAN:
-        return lv_tr("Generic");
-    case helix::FanType::OUTPUT_PIN_FAN:
-        return lv_tr("Output Pin");
-    }
-    return lv_tr("Fan");
-}
-
-} // namespace
-
-// ============================================================================
 // FAN LIST POPULATION
 // ============================================================================
 
@@ -128,7 +101,7 @@ void FanSettingsOverlay::populate_fan_list(lv_obj_t* list, bool controllable) {
         snprintf(speed_buf, sizeof(speed_buf), "%d%%", fan.speed_percent);
 
         // Create row from XML component
-        const char* type_label = fan_type_label(fan.type);
+        const char* type_label = lv_tr(helix::fan_type_label(fan.type));
         const char* attrs[] = {
             "fan_name",   fan.display_name.c_str(), "fan_type", type_label,
             "fan_object", fan.object_name.c_str(),  nullptr,

@@ -4,8 +4,8 @@
 <component>
   <!-- Full-screen backdrop overlay - tap to dismiss -->
   <view name="printer_switch_menu" extends="context_menu_backdrop">
-    <!-- Context menu card - width and position set dynamically by C++ -->
-    <context_menu_card title="Switch Printer" min_width="160">
+    <!-- Context menu card - width (fitted to the names, PrinterSwitchMenu::card_width) and position set by C++ -->
+    <context_menu_card title="Switch Printer">
       <!-- Printer rows populated dynamically by C++ -->
       <!-- max_height set dynamically by C++ to ~2/3 screen height -->
       <lv_obj name="printer_list"

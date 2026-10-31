@@ -209,7 +209,7 @@ on 6 of the 8):
 | Raspberry Pi rig | 800×480 | 206 | 1.0 |
 | K1C, K2 Plus | 480×800 | 218 | 1.0 |
 | AD5M | 800×480 | 221 | 1.0 |
-| Phone (Android) | 1080×2400 | ~405 | 1.578 |
+| Phone (Android), 2x logical surface | 540×1200 logical | ~203 per logical pixel | 1.0 |
 
 Do not read a panel's DPI off the kernel to fill this in. See
 [THEME_SYSTEM.md § The high-DPI UI scale factor](THEME_SYSTEM.md#the-high-dpi-ui-scale-factor).
@@ -274,7 +274,7 @@ make compile_commands  # Generates compile_commands.json (requires bear)
 |-------------|----------|----------|-------------|
 | Layout, styling, colors | `ui_xml/*.xml` | **No** | **Yes** — ON by default for native builds |
 | Logic, bindings, handlers | `src/*.cpp`, `include/*.h` | Yes (`make -j`) | No |
-| Theme colors | `config/themes/*.json` | No — just restart | No |
+| Theme colors | `assets/config/themes/defaults/*.json` | No — just restart | No |
 | Translations | `translations/*.yml` (e.g. `translations/en.yml`) | Yes (code generation step) | No |
 
 ### XML Hot Reload
@@ -325,7 +325,7 @@ Key points for UI contributors:
 | `ui_xml/components/` | Reusable XML components |
 | `ui_xml/ultrawide/` | Ultrawide layout overrides |
 | `ui_xml/globals.xml` | Design tokens and global variables (shared, never override) |
-| `config/themes/` | Theme JSON files (color palettes) |
+| `assets/config/themes/defaults/` | Shipped theme JSON files (color palettes). `config/themes/` is the user layer and holds nothing in the repo |
 
 ---
 
@@ -398,12 +398,15 @@ void ui_panel_motion_init(lv_obj_t* parent);
 **Naming conventions:**
 - Functions/variables: `snake_case` (`ui_panel_home_init`, `temp_target`)
 - XML files: `snake_case` (`history_dashboard_panel.xml`)
-- Constants: `UPPER_SNAKE_CASE` (`MAX_TEMP`) — including `constexpr`, file-scope
-  `static const`, and enum enumerators. **Not** Google's `kCamelCase`: the tree
-  drifted into it for a while and was swept back, so a `kFoo` you find in a diff
-  is a mistake to fix, not a precedent to follow. The exceptions are names that
-  mirror a third-party API verbatim (Apple's `kCWSecurityWPA2Personal`) — match
-  the foreign spelling there rather than inventing a local one.
+- Constants: `kCamelCase` (`kMaxTemp`): `constexpr`, `const` at any scope, static
+  members. `UPPER_SNAKE_CASE` is reserved for preprocessor macros, because a macro
+  ignores scope and silently rewrites any constant spelled the same way. Every word
+  after the `k` is capitalised once, acronyms included (`kHttpRetryMs`, not
+  `kHTTPRetryMs`). `scripts/check_constant_naming.py` fails a new `UPPER_SNAKE`
+  declaration on added lines (`// CONST_NAME_OK: <reason>` opts one out), and
+  `scripts/rename_constants.py --apply --git-range main..HEAD` converts a branch's
+  own. Enumerators keep `UPPER_SNAKE_CASE` for now. Names that mirror a third-party
+  API verbatim (Apple's `kCWSecurityWPA2Personal`) match the foreign spelling.
 
 **Namespace organization:** all HelixScreen code lives under `helix::` (UI
 helpers in `helix::ui::`, sensor managers in `helix::sensors`):
@@ -416,6 +419,29 @@ helpers in `helix::ui::`, sensor managers in `helix::sensors`):
   The baseline may fall, never rise — see prestonbrown/helixscreen#1370
 - Enums are `enum class` within `helix::` (e.g., `helix::PanelId`, `helix::PrintState`)
 - JSON forward declarations come from `#include "json_fwd.h"`
+
+**Comments** (prestonbrown/helixscreen#1363): a comment earns its place when the code
+alone would leave a competent reader short of something they need. Keep:
+- the non-obvious *why*: ordering constraints, thread affinity, LVGL / Klipper /
+  Moonraker quirks, workarounds for upstream bugs
+- contracts the signature cannot show: ownership, nullability, units, lifetime,
+  which thread may call it
+- copyright/SPDX headers and tool directives (`clang-format off`, `NOLINT`,
+  `fallthrough`, the gates' `*_OK:` markers)
+
+Do not write:
+- Doxygen ceremony. Nothing builds documentation from it, so `@brief`, `@param`,
+  `@return` and `@file` are not used in new code. Write a plain `//` line when the
+  name does not already say it, and nothing when it does
+- prose that restates the signature, or a convention (decidegrees, ownership)
+  repeated on every function instead of stated once for the header or namespace
+- `// ===== Section =====` banners. Declarations and namespaces carry the structure
+- commented-out code. Git has it
+- history: what the code used to do and which bug changed it belong in the commit
+  message (CLAUDE.md § "Comments describe the code, not its past")
+
+Existing `@brief`/`@param` blocks are trimmed per subsystem when that code is next
+being reworked, not in a tree-wide sweep.
 
 **Critical patterns:**
 ```cpp

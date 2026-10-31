@@ -9,6 +9,8 @@
  * ui_breakpoint classifies the cramped-axis *tier* and cannot answer "is this
  * portrait" -- 480x800 and 800x480 can land on the same tier. This subject is
  * the missing piece: 1 for any portrait class, 0 otherwise.
+ * ui_is_ultrawide is its sibling for the >2.5:1 class and shares its sources;
+ * its cases close the file.
  *
  * Two sources, in priority order (#1255):
  *   1. LayoutManager::type() once initialized -- override-aware, so a --layout
@@ -224,4 +226,90 @@ TEST_CASE_METHOD(XMLTestFixture,
     lm.init(1024, 600);
     theme_manager_refresh_orientation();
     CHECK(subject_value("ui_is_portrait") == 0);
+}
+
+// ============================================================================
+// ui_is_ultrawide: the same lifecycle, for the >2.5:1 class
+// ============================================================================
+
+TEST_CASE_METHOD(XMLTestFixture, "ui_is_ultrawide marks only the ultrawide class",
+                 "[theme][layout][is-ultrawide-subject]") {
+    RestoreDisplayConsts restore;
+
+    struct Case {
+        int32_t w;
+        int32_t h;
+        int expected;
+    };
+    // 1920x440 and 1920x480 share ui_breakpoint tiers with ordinary screens
+    // (small and medium), so a tier cannot answer this.
+    const Case cases[] = {
+        {1920, 440, 1}, {1920, 480, 1}, {1920, 400, 1}, {800, 480, 0},
+        {480, 800, 0},  {1024, 600, 0}, {1280, 720, 0}, {1200, 480, 0},
+    };
+
+    for (const auto& c : cases) {
+        INFO(c.w << "x" << c.h);
+        lv_display_t* d = make_test_display(c.w, c.h);
+        theme_manager_refresh_layout_constants(d);
+        CHECK(subject_value("ui_is_ultrawide") == c.expected);
+        lv_display_delete(d);
+    }
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "rotation republishes ui_is_ultrawide",
+                 "[theme][layout][is-ultrawide-subject]") {
+    RestoreDisplayConsts restore;
+
+    lv_display_t* wide = make_test_display(1920, 440);
+    theme_manager_refresh_layout_constants(wide);
+    REQUIRE(subject_value("ui_is_ultrawide") == 1);
+    lv_display_delete(wide);
+
+    lv_display_t* tall = make_test_display(440, 1920);
+    theme_manager_refresh_layout_constants(tall);
+    CHECK(subject_value("ui_is_ultrawide") == 0);
+    CHECK(subject_value("ui_is_portrait") == 1);
+    lv_display_delete(tall);
+
+    lv_display_t* back = make_test_display(1920, 440);
+    theme_manager_refresh_layout_constants(back);
+    CHECK(subject_value("ui_is_ultrawide") == 1);
+    lv_display_delete(back);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "the STARTUP publish sets ui_is_ultrawide",
+                 "[theme][layout][is-ultrawide-subject]") {
+    RestoreDisplayConsts restore;
+
+    lv_display_t* d = make_test_display(1920, 440);
+    theme_manager_init(d, theme_manager_is_dark_mode());
+    CHECK(subject_value("ui_is_ultrawide") == 1);
+    lv_display_delete(d);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "ui_is_ultrawide follows a LayoutManager override",
+                 "[theme][layout][is-ultrawide-subject]") {
+    RestoreDisplayConsts restore;
+
+    auto& lm = helix::LayoutManager::instance();
+    lm.set_override("ultrawide");
+    lm.init(800, 480);
+    REQUIRE(lm.type() == helix::LayoutType::ULTRAWIDE);
+
+    lv_display_t* d = make_test_display(800, 480);
+    theme_manager_refresh_layout_constants(d);
+    CHECK(subject_value("ui_is_ultrawide") == 1);
+    CHECK(subject_value("ui_is_portrait") == 0);
+    lv_display_delete(d);
+}
+
+TEST_CASE("is_ultrawide_aspect is the one 2.5:1 threshold",
+          "[theme][layout][is-ultrawide-subject]") {
+    CHECK(helix::is_ultrawide_aspect(1001, 400));
+    CHECK_FALSE(helix::is_ultrawide_aspect(1000, 400));
+    CHECK_FALSE(helix::is_ultrawide_aspect(1920, 0));
+    // detect_layout_type applies it after the micro/tiny classes
+    CHECK(helix::detect_layout_type(1001, 400) == helix::LayoutType::ULTRAWIDE);
+    CHECK(helix::detect_layout_type(480, 150) == helix::LayoutType::MICRO);
 }

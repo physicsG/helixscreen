@@ -1,0 +1,513 @@
+{
+ "_comment": "Printer event journal: repeated `!!` lines. Each case appends entries in order (time in seconds after T0) and expects the entries left, oldest first; count > 1 carries last_time. The rule both journals apply: moonraker-plugin/helix_journal.py JournalStore._repeat_of and src/printer/printer_event_journal.cpp journal_repeat_of. Read by tests/unit/test_printer_event_journal.cpp.",
+ "cases": [
+  {
+   "name": "loop",
+   "description": "A line repeated every second counts on one entry",
+   "appends": [
+    {
+     "time": 0,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 1,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 2,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 3,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 4,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 5,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 6,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 7,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 8,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 9,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 10,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 11,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    }
+   ],
+   "expected": [
+    {
+     "time": 0,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 12,
+     "last_time": 11
+    }
+   ]
+  },
+  {
+   "name": "window_from_last",
+   "description": "The window runs from the latest occurrence, not the first",
+   "appends": [
+    {
+     "time": 0,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 50,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 100,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 150,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    }
+   ],
+   "expected": [
+    {
+     "time": 0,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 4,
+     "last_time": 150
+    }
+   ]
+  },
+  {
+   "name": "gap",
+   "description": "A repeat after more than the window starts a new entry",
+   "appends": [
+    {
+     "time": 0,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 61,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    }
+   ],
+   "expected": [
+    {
+     "time": 0,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 1
+    },
+    {
+     "time": 61,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "interleaved",
+   "description": "Another error between repeats does not stop the count",
+   "appends": [
+    {
+     "time": 0,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 1,
+     "kind": "gcode_error",
+     "text": "Must home axis first",
+     "class": "homing",
+     "job": null
+    },
+    {
+     "time": 2,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    }
+   ],
+   "expected": [
+    {
+     "time": 0,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 2,
+     "last_time": 2
+    },
+    {
+     "time": 1,
+     "text": "Must home axis first",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "other_job",
+   "description": "The same line in another job is another event",
+   "appends": [
+    {
+     "time": 0,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": {
+      "job_id": "00002A",
+      "filename": "benchy.gcode"
+     }
+    },
+    {
+     "time": 1,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": {
+      "job_id": "00002B",
+      "filename": "benchy.gcode"
+     }
+    }
+   ],
+   "expected": [
+    {
+     "time": 0,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 1
+    },
+    {
+     "time": 1,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "lookback",
+   "description": "A repeat of an entry older than the lookback starts a new entry",
+   "appends": [
+    {
+     "time": 0,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    },
+    {
+     "time": 1,
+     "kind": "gcode_error",
+     "text": "Error 0",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 2,
+     "kind": "gcode_error",
+     "text": "Error 1",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 3,
+     "kind": "gcode_error",
+     "text": "Error 2",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 4,
+     "kind": "gcode_error",
+     "text": "Error 3",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 5,
+     "kind": "gcode_error",
+     "text": "Error 4",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 6,
+     "kind": "gcode_error",
+     "text": "Error 5",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 7,
+     "kind": "gcode_error",
+     "text": "Error 6",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 8,
+     "kind": "gcode_error",
+     "text": "Error 7",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 9,
+     "kind": "gcode_error",
+     "text": "Error 8",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 10,
+     "kind": "gcode_error",
+     "text": "Error 9",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 11,
+     "kind": "gcode_error",
+     "text": "Error 10",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 12,
+     "kind": "gcode_error",
+     "text": "Error 11",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 13,
+     "kind": "gcode_error",
+     "text": "Error 12",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 14,
+     "kind": "gcode_error",
+     "text": "Error 13",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 15,
+     "kind": "gcode_error",
+     "text": "Error 14",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 16,
+     "kind": "gcode_error",
+     "text": "Error 15",
+     "class": "other",
+     "job": null
+    },
+    {
+     "time": 20,
+     "kind": "gcode_error",
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "class": "command",
+     "job": null
+    }
+   ],
+   "expected": [
+    {
+     "time": 0,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 1
+    },
+    {
+     "time": 1,
+     "text": "Error 0",
+     "count": 1
+    },
+    {
+     "time": 2,
+     "text": "Error 1",
+     "count": 1
+    },
+    {
+     "time": 3,
+     "text": "Error 2",
+     "count": 1
+    },
+    {
+     "time": 4,
+     "text": "Error 3",
+     "count": 1
+    },
+    {
+     "time": 5,
+     "text": "Error 4",
+     "count": 1
+    },
+    {
+     "time": 6,
+     "text": "Error 5",
+     "count": 1
+    },
+    {
+     "time": 7,
+     "text": "Error 6",
+     "count": 1
+    },
+    {
+     "time": 8,
+     "text": "Error 7",
+     "count": 1
+    },
+    {
+     "time": 9,
+     "text": "Error 8",
+     "count": 1
+    },
+    {
+     "time": 10,
+     "text": "Error 9",
+     "count": 1
+    },
+    {
+     "time": 11,
+     "text": "Error 10",
+     "count": 1
+    },
+    {
+     "time": 12,
+     "text": "Error 11",
+     "count": 1
+    },
+    {
+     "time": 13,
+     "text": "Error 12",
+     "count": 1
+    },
+    {
+     "time": 14,
+     "text": "Error 13",
+     "count": 1
+    },
+    {
+     "time": 15,
+     "text": "Error 14",
+     "count": 1
+    },
+    {
+     "time": 16,
+     "text": "Error 15",
+     "count": 1
+    },
+    {
+     "time": 20,
+     "text": "Unknown command:\"PURGE_LINE\"",
+     "count": 1
+    }
+   ]
+  },
+  {
+   "name": "not_errors",
+   "description": "Only `!!` errors count; other kinds repeat as separate entries",
+   "appends": [
+    {
+     "time": 0,
+     "kind": "pause",
+     "text": "",
+     "class": null,
+     "job": null,
+     "detail": "command"
+    },
+    {
+     "time": 10,
+     "kind": "pause",
+     "text": "",
+     "class": null,
+     "job": null,
+     "detail": "command"
+    }
+   ],
+   "expected": [
+    {
+     "time": 0,
+     "text": "",
+     "count": 1
+    },
+    {
+     "time": 10,
+     "text": "",
+     "count": 1
+    }
+   ]
+  }
+ ]
+}

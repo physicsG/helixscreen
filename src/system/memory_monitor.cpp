@@ -25,7 +25,7 @@
 
 namespace helix {
 
-static constexpr auto RATE_LIMIT_INTERVAL = std::chrono::minutes(5);
+static constexpr auto kRateLimitInterval = std::chrono::minutes(5);
 
 MemoryThresholds MemoryThresholds::for_device(const MemoryInfo& info) {
     MemoryThresholds t;
@@ -354,11 +354,11 @@ void MemoryMonitor::evaluate_thresholds(const MemoryStats& stats) {
 
     // Compute smoothed growth from circular buffer
     int64_t growth_kb = 0;
-    if (rss_history_count_ >= RSS_HISTORY_SIZE) {
+    if (rss_history_count_ >= kRssHistorySize) {
         // Average of 3 oldest samples
         size_t avg_oldest = 0;
         for (size_t i = 0; i < 3; i++) {
-            avg_oldest += rss_history_[(rss_history_index_ + i) % RSS_HISTORY_SIZE];
+            avg_oldest += rss_history_[(rss_history_index_ + i) % kRssHistorySize];
         }
         avg_oldest /= 3;
 
@@ -366,7 +366,7 @@ void MemoryMonitor::evaluate_thresholds(const MemoryStats& stats) {
         size_t avg_newest = 0;
         for (size_t i = 1; i <= 3; i++) {
             avg_newest +=
-                rss_history_[(rss_history_index_ + RSS_HISTORY_SIZE - i) % RSS_HISTORY_SIZE];
+                rss_history_[(rss_history_index_ + kRssHistorySize - i) % kRssHistorySize];
         }
         avg_newest /= 3;
 
@@ -392,7 +392,7 @@ void MemoryMonitor::evaluate_thresholds(const MemoryStats& stats) {
     if (level != MemoryPressureLevel::none) {
         auto now = std::chrono::steady_clock::now();
         int level_idx = static_cast<int>(level);
-        if (now - last_warning_time_[level_idx] >= RATE_LIMIT_INTERVAL) {
+        if (now - last_warning_time_[level_idx] >= kRateLimitInterval) {
             last_warning_time_[level_idx] = now;
 
             std::string reason;
@@ -601,8 +601,8 @@ void MemoryMonitor::monitor_loop() {
             deep_sample_counter_ = 0;
 
             rss_history_[rss_history_index_] = stats.vm_rss_kb;
-            rss_history_index_ = (rss_history_index_ + 1) % RSS_HISTORY_SIZE;
-            if (rss_history_count_ < RSS_HISTORY_SIZE) {
+            rss_history_index_ = (rss_history_index_ + 1) % kRssHistorySize;
+            if (rss_history_count_ < kRssHistorySize) {
                 ++rss_history_count_;
             }
         }

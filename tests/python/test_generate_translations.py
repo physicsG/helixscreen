@@ -9,13 +9,12 @@ They follow TDD principles - written before the implementation exists.
 The generator script will:
 1. Read YAML files from translations/*.yml
 2. Generate LVGL XML files (ui_xml/translations/translations_*.xml)
-3. Generate lv_i18n C code (src/generated/lv_i18n_translations.c and .h)
 """
 
 import pytest
 import sys
 from pathlib import Path
-from textwrap import dedent
+from textwrap import dedent, indent
 
 # Add scripts directory to path for importing the module under test
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
@@ -142,27 +141,6 @@ def sample_translations_dict():
     }
 
 
-@pytest.fixture
-def sample_plurals_dict():
-    """Sample parsed plural translations as Python dict."""
-    return {
-        "en": {
-            "file_count": {
-                "one": "%d file",
-                "other": "%d files",
-            },
-        },
-        "ru": {
-            "file_count": {
-                "one": "%d файл",
-                "few": "%d файла",
-                "many": "%d файлов",
-                "other": "%d файлов",
-            },
-        },
-    }
-
-
 # =============================================================================
 # Test: YAML Parsing
 # =============================================================================
@@ -248,188 +226,6 @@ class TestParseYamlPluralForms:
 
 # =============================================================================
 # Test: XML Generation
-# =============================================================================
-
-class TestGenerateXmlOutput:
-    """Test XML generation for LVGL translations format."""
-
-    def test_generate_xml_has_correct_root_element(self, sample_translations_dict):
-        """Generated XML has <translations> root with languages attribute."""
-        from generate_translations import generate_lvgl_xml
-
-        xml = generate_lvgl_xml(sample_translations_dict)
-
-        assert "<translations" in xml
-        assert 'languages="' in xml
-        assert "</translations>" in xml
-
-    def test_generate_xml_includes_all_languages(self, sample_translations_dict):
-        """Languages attribute includes all provided languages."""
-        from generate_translations import generate_lvgl_xml
-
-        xml = generate_lvgl_xml(sample_translations_dict)
-
-        # Should have both en and de in languages attribute
-        assert 'languages="' in xml
-        assert "en" in xml
-        assert "de" in xml
-
-    def test_generate_xml_translation_elements(self, sample_translations_dict):
-        """Each translation has correct tag and language attributes."""
-        from generate_translations import generate_lvgl_xml
-
-        xml = generate_lvgl_xml(sample_translations_dict)
-
-        assert '<translation tag="Settings"' in xml
-        assert 'en="Settings"' in xml
-        assert 'de="Einstellungen"' in xml
-
-    def test_generate_xml_sorted_alphabetically(self, sample_translations_dict):
-        """Translation tags are sorted alphabetically."""
-        from generate_translations import generate_lvgl_xml
-
-        xml = generate_lvgl_xml(sample_translations_dict)
-
-        # Find positions of each tag
-        cancel_pos = xml.find('tag="Cancel"')
-        home_pos = xml.find('tag="Home"')
-        settings_pos = xml.find('tag="Settings"')
-
-        assert cancel_pos < home_pos < settings_pos
-
-    def test_generate_xml_escapes_special_chars(self):
-        """Special XML characters are properly escaped."""
-        from generate_translations import generate_lvgl_xml
-
-        translations = {
-            "en": {
-                "ampersand": "Save & Exit",
-                "quotes": 'He said "Hello"',
-                "angle": "Temperature < 100",
-            },
-        }
-
-        xml = generate_lvgl_xml(translations)
-
-        assert "&amp;" in xml
-        assert "&quot;" in xml or "&#34;" in xml
-        assert "&lt;" in xml
-
-    def test_generate_xml_valid_format(self, sample_translations_dict):
-        """Generated XML is valid and can be parsed."""
-        from generate_translations import generate_lvgl_xml
-        import xml.etree.ElementTree as ET
-
-        xml = generate_lvgl_xml(sample_translations_dict)
-
-        # Should not raise an exception
-        root = ET.fromstring(xml)
-
-        assert root.tag == "translations"
-
-
-# =============================================================================
-# Test: lv_i18n C Code Generation
-# =============================================================================
-
-class TestGenerateLvI18nCode:
-    """Test C code generation for lv_i18n library."""
-
-    def test_generate_c_creates_singulars_array(self, sample_translations_dict):
-        """C code includes singulars array for each language."""
-        from generate_translations import generate_lv_i18n_c
-
-        c_code = generate_lv_i18n_c(sample_translations_dict, {})
-
-        assert "static const char * en_singulars[]" in c_code
-        assert "static const char * de_singulars[]" in c_code
-
-    def test_generate_c_singulars_content(self, sample_translations_dict):
-        """Singulars array contains correct translation strings."""
-        from generate_translations import generate_lv_i18n_c
-
-        c_code = generate_lv_i18n_c(sample_translations_dict, {})
-
-        # English singulars should contain the English translations
-        assert '"Settings"' in c_code
-        assert '"Einstellungen"' in c_code
-
-    def test_generate_c_creates_plural_arrays(self, sample_plurals_dict):
-        """C code includes plural arrays for each form."""
-        from generate_translations import generate_lv_i18n_c
-
-        c_code = generate_lv_i18n_c({}, sample_plurals_dict)
-
-        assert "plurals_one" in c_code
-        assert "plurals_other" in c_code
-
-    def test_generate_c_russian_plural_forms(self, sample_plurals_dict):
-        """Russian plural forms include few and many."""
-        from generate_translations import generate_lv_i18n_c
-
-        c_code = generate_lv_i18n_c({}, sample_plurals_dict)
-
-        assert "ru_plurals_few" in c_code
-        assert "ru_plurals_many" in c_code
-
-    def test_generate_c_language_struct(self, sample_translations_dict):
-        """C code includes language struct definition."""
-        from generate_translations import generate_lv_i18n_c
-
-        c_code = generate_lv_i18n_c(sample_translations_dict, {})
-
-        assert "lv_i18n_lang_t en_lang" in c_code or "static const lv_i18n_lang_t en_lang" in c_code
-        assert ".locale_name" in c_code
-        assert ".singulars" in c_code
-
-    def test_generate_c_language_pack(self, sample_translations_dict):
-        """C code includes language pack array."""
-        from generate_translations import generate_lv_i18n_c
-
-        c_code = generate_lv_i18n_c(sample_translations_dict, {})
-
-        assert "lv_i18n_language_pack" in c_code
-        assert "NULL" in c_code  # End marker
-
-    def test_generate_c_plural_function(self, sample_plurals_dict):
-        """C code includes plural function for languages with plurals."""
-        from generate_translations import generate_lv_i18n_c
-
-        c_code = generate_lv_i18n_c({}, sample_plurals_dict)
-
-        assert "plural_fn" in c_code
-        assert "LV_I18N_PLURAL_TYPE_ONE" in c_code
-
-    def test_generate_c_escapes_strings(self):
-        """C strings are properly escaped."""
-        from generate_translations import generate_lv_i18n_c
-
-        translations = {
-            "en": {
-                "quote": 'He said "Hello"',
-                "backslash": "path\\to\\file",
-                "newline": "Line1\nLine2",
-            },
-        }
-
-        c_code = generate_lv_i18n_c(translations, {})
-
-        assert r'\"' in c_code  # Escaped double quotes
-        assert r'\\' in c_code  # Escaped backslashes
-
-    def test_generate_header_file(self, sample_translations_dict):
-        """Header file includes necessary declarations."""
-        from generate_translations import generate_lv_i18n_h
-
-        header = generate_lv_i18n_h(sample_translations_dict, {})
-
-        assert "#ifndef" in header  # Include guard
-        assert "#define" in header
-        assert "#endif" in header
-        assert "lv_i18n_language_pack" in header
-        assert 'extern "C"' in header  # C++ compatibility
-
-
 # =============================================================================
 # Test: Validation and Warnings
 # =============================================================================
@@ -564,21 +360,6 @@ class TestFileOperations:
         content = output_path.read_text()
         assert "<translations" in content
 
-    def test_write_c_files(self, tmp_path):
-        """Write generated C code to .c and .h files."""
-        from generate_translations import write_lv_i18n_files
-
-        translations = {"en": {"Test": "Test"}}
-        output_dir = tmp_path
-
-        write_lv_i18n_files(translations, {}, output_dir)
-
-        c_file = output_dir / "lv_i18n_translations.c"
-        h_file = output_dir / "lv_i18n_translations.h"
-
-        assert c_file.exists()
-        assert h_file.exists()
-
 
 # =============================================================================
 # Test: Integration / End-to-End
@@ -610,21 +391,18 @@ class TestIntegration:
         """))
 
         xml_dir = tmp_path / "ui_xml" / "translations"
-        c_dir = tmp_path / "src" / "generated"
 
         # Execute
         result = generate_all(
             yaml_dir=yaml_dir,
             xml_output_dir=xml_dir,
-            c_output_dir=c_dir,
-            emit_lv_i18n=True,  # opt in: asserts the legacy lv_i18n C/H artifacts
         )
 
         # Verify
         assert result.success
         assert (xml_dir / "translations.xml").exists()
-        assert (c_dir / "lv_i18n_translations.c").exists()
-        assert (c_dir / "lv_i18n_translations.h").exists()
+        assert (xml_dir / "en.xml").exists()
+        assert (xml_dir / "de.xml").exists()
 
     def test_pipeline_reports_warnings(self, tmp_path):
         """Pipeline reports warnings for missing translations."""
@@ -651,7 +429,6 @@ class TestIntegration:
         result = generate_all(
             yaml_dir=yaml_dir,
             xml_output_dir=tmp_path / "xml",
-            c_output_dir=tmp_path / "c",
         )
 
         assert len(result.warnings) > 0
@@ -660,6 +437,98 @@ class TestIntegration:
         assert "Missing 'Home' in de" in result.warnings
         assert "Missing 'Cancel' in de" in result.warnings
         assert not any("Settings" in w for w in result.warnings)
+
+
+class TestPluralVariantTags:
+    """A YAML plural mapping becomes runtime tags helix::ui::tr_plural() reads."""
+
+    @staticmethod
+    def _write(tmp_path, ru_body):
+        yaml_dir = tmp_path / "translations"
+        yaml_dir.mkdir()
+        (yaml_dir / "en.yml").write_text(dedent("""\
+            locale: en
+            translations:
+              "%d gadgets": "%d gadgets"
+              "Home": Home
+        """))
+        (yaml_dir / "ru.yml").write_text(
+            "locale: ru\ntranslations:\n" + indent(dedent(ru_body), "  "), encoding="utf-8"
+        )
+        return yaml_dir
+
+    def test_categories_become_suffixed_tags_and_other_the_plain_tag(self, tmp_path):
+        from generate_translations import generate_all
+
+        yaml_dir = self._write(tmp_path, """\
+              "%d gadgets":
+                one: "%d штуковина"
+                few: "%d штуковины"
+                many: "%d штуковин"
+                other: "%d штуковины"
+              "Home": Главная
+        """)
+        xml_dir = tmp_path / "xml"
+        result = generate_all(yaml_dir=yaml_dir, xml_output_dir=xml_dir)
+        assert result.success, result.errors
+        assert not any("gadgets" in w for w in result.warnings)
+
+        ru = (xml_dir / "ru.xml").read_text(encoding="utf-8")
+        assert '<translation tag="%d gadgets" ru="%d штуковины"/>' in ru
+        assert '<translation tag="%d gadgets_one" ru="%d штуковина"/>' in ru
+        assert '<translation tag="%d gadgets_few" ru="%d штуковины"/>' in ru
+        assert '<translation tag="%d gadgets_many" ru="%d штуковин"/>' in ru
+        assert "gadgets_other" not in ru
+
+        master = (xml_dir / "translations.xml").read_text(encoding="utf-8")
+        assert 'tag="%d gadgets_many" ru="%d штуковин"' in master
+        # English stays flat: no variant tags for a locale without a mapping.
+        en = (xml_dir / "en.xml").read_text(encoding="utf-8")
+        assert "gadgets_" not in en
+
+    def test_absent_category_emits_no_tag(self, tmp_path):
+        from generate_translations import generate_all
+
+        yaml_dir = self._write(tmp_path, """\
+              "%d gadgets":
+                one: "%d штуковина"
+                other: "%d штуковины"
+              "Home": Главная
+        """)
+        xml_dir = tmp_path / "xml"
+        assert generate_all(yaml_dir=yaml_dir, xml_output_dir=xml_dir).success
+        ru = (xml_dir / "ru.xml").read_text(encoding="utf-8")
+        assert "gadgets_one" in ru
+        assert "gadgets_few" not in ru
+        assert "gadgets_many" not in ru
+
+    def test_mapping_without_other_fails(self, tmp_path):
+        from generate_translations import generate_all
+
+        yaml_dir = self._write(tmp_path, """\
+              "%d gadgets":
+                one: "%d штуковина"
+                few: "%d штуковины"
+              "Home": Главная
+        """)
+        result = generate_all(yaml_dir=yaml_dir, xml_output_dir=tmp_path / "xml")
+        assert not result.success
+        assert any("'%d gadgets'" in e and "other" in e for e in result.errors)
+        assert not (tmp_path / "xml" / "translations.xml").exists()
+
+    def test_unknown_category_fails(self, tmp_path):
+        from generate_translations import generate_all
+
+        yaml_dir = self._write(tmp_path, """\
+              "%d gadgets":
+                one: "%d штуковина"
+                lots: "%d штуковин"
+                other: "%d штуковины"
+              "Home": Главная
+        """)
+        result = generate_all(yaml_dir=yaml_dir, xml_output_dir=tmp_path / "xml")
+        assert not result.success
+        assert any("lots" in e for e in result.errors)
 
 
 # =============================================================================
@@ -746,7 +615,6 @@ class TestPerLocaleXmlOutput:
         result = generate_all(
             yaml_dir=yaml_dir,
             xml_output_dir=xml_dir,
-            c_output_dir=tmp_path / "c",
         )
 
         assert result.success
@@ -766,8 +634,8 @@ class TestLanguageWhitelist:
     """Tests for the --languages CLI flag / `languages` parameter to generate_all().
 
     Purpose: allow platform Makefiles (e.g. memory-constrained device builds)
-    to filter the compiled C translation table down to a subset of locales,
-    reducing .rodata size. Base locale is always kept as a fallback.
+    to ship only a subset of the per-locale packs. Base locale is always kept
+    as a fallback.
     """
 
     def test_filters_to_requested_locales(self, tmp_path):
@@ -783,23 +651,21 @@ class TestLanguageWhitelist:
                   "Hello": {greeting}
             """))
 
-        c_dir = tmp_path / "c"
+        xml_dir = tmp_path / "xml"
         result = generate_all(
             yaml_dir=yaml_dir,
-            xml_output_dir=tmp_path / "xml",
-            c_output_dir=c_dir,
+            xml_output_dir=xml_dir,
             languages=["en", "de"],
-            emit_lv_i18n=True,  # whitelist asserted via the lv_i18n C table
         )
 
         assert result.success
-        c_content = (c_dir / "lv_i18n_translations.c").read_text(encoding="utf-8")
         # Requested locales present
-        assert "en_singulars" in c_content
-        assert "de_singulars" in c_content
-        # Excluded locales absent — this is the whole point of the filter
-        assert "fr_singulars" not in c_content
-        assert "ja_singulars" not in c_content
+        assert (xml_dir / "en.xml").exists()
+        assert (xml_dir / "de.xml").exists()
+        # Excluded locales absent: this is the whole point of the filter
+        assert not (xml_dir / "fr.xml").exists()
+        assert not (xml_dir / "ja.xml").exists()
+        assert 'languages="de en"' in (xml_dir / "translations.xml").read_text(encoding="utf-8")
 
     def test_base_locale_always_kept(self, tmp_path):
         """Even if the whitelist omits the base locale, it's retained as
@@ -820,19 +686,16 @@ class TestLanguageWhitelist:
               "Hello": Hallo
         """))
 
-        c_dir = tmp_path / "c"
+        xml_dir = tmp_path / "xml"
         result = generate_all(
             yaml_dir=yaml_dir,
-            xml_output_dir=tmp_path / "xml",
-            c_output_dir=c_dir,
+            xml_output_dir=xml_dir,
             languages=["de"],  # omits base_locale="en"
-            emit_lv_i18n=True,  # whitelist asserted via the lv_i18n C table
         )
 
         assert result.success
-        c_content = (c_dir / "lv_i18n_translations.c").read_text(encoding="utf-8")
-        assert "en_singulars" in c_content  # forced in as fallback
-        assert "de_singulars" in c_content
+        assert (xml_dir / "en.xml").exists()  # forced in as fallback
+        assert (xml_dir / "de.xml").exists()
 
     def test_none_means_all_locales(self, tmp_path):
         """`languages=None` (the default) keeps all YAMLs — existing behavior
@@ -848,19 +711,15 @@ class TestLanguageWhitelist:
                   "Hello": Hello-{locale}
             """))
 
-        c_dir = tmp_path / "c"
+        xml_dir = tmp_path / "xml"
         result = generate_all(
             yaml_dir=yaml_dir,
-            xml_output_dir=tmp_path / "xml",
-            c_output_dir=c_dir,
-            emit_lv_i18n=True,  # whitelist asserted via the lv_i18n C table
+            xml_output_dir=xml_dir,
         )
 
         assert result.success
-        c_content = (c_dir / "lv_i18n_translations.c").read_text(encoding="utf-8")
-        assert "en_singulars" in c_content
-        assert "de_singulars" in c_content
-        assert "fr_singulars" in c_content
+        for locale in ["en", "de", "fr"]:
+            assert (xml_dir / f"{locale}.xml").exists()
 
     def test_drop_reported_in_warnings(self, tmp_path):
         """Dropped locales are reported so builds log what they stripped."""
@@ -878,7 +737,6 @@ class TestLanguageWhitelist:
         result = generate_all(
             yaml_dir=yaml_dir,
             xml_output_dir=tmp_path / "xml",
-            c_output_dir=tmp_path / "c",
             languages=["en"],
         )
 

@@ -13,67 +13,23 @@
  * and 200 whole-body for malformed headers.
  */
 
+#include "../test_helpers/raw_http_client.h"
 #include "mock_http_file_server.h"
 
-#include <arpa/inet.h>
-#include <cctype>
 #include <cstdlib>
-#include <cstring>
-#include <netinet/in.h>
 #include <string>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include "../catch_amalgamated.hpp"
 
 namespace {
 
-struct HttpReply {
-    int status = 0;
-    std::string headers;
-    std::string body;
-};
+using HttpReply = helix::test::RawHttpReply;
 
-std::string to_lower(std::string s) {
-    for (char& c : s) {
-        c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-    }
-    return s;
-}
-
-/// One HTTP/1.0 GET per connection; the server closes the socket after the
-/// response, so reading to EOF is the whole reply.
 HttpReply http_get(int port, const std::string& path, const std::string& range_header) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    REQUIRE(fd >= 0);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    REQUIRE(::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-
-    std::string req = "GET " + path + " HTTP/1.0\r\nHost: 127.0.0.1\r\n";
-    if (!range_header.empty()) {
-        req += "Range: " + range_header + "\r\n";
+    if (range_header.empty()) {
+        return helix::test::raw_http(port, "GET", path);
     }
-    req += "\r\n";
-    REQUIRE(::send(fd, req.data(), req.size(), 0) == static_cast<ssize_t>(req.size()));
-
-    std::string raw;
-    char buf[4096];
-    ssize_t n;
-    while ((n = ::recv(fd, buf, sizeof(buf), 0)) > 0) {
-        raw.append(buf, static_cast<size_t>(n));
-    }
-    ::close(fd);
-
-    const size_t split = raw.find("\r\n\r\n");
-    REQUIRE(split != std::string::npos);
-    HttpReply reply;
-    reply.status = std::atoi(raw.c_str() + 9); // past "HTTP/1.x "
-    reply.headers = to_lower(raw.substr(0, split));
-    reply.body = raw.substr(split + 4);
-    return reply;
+    return helix::test::raw_http(port, "GET", path, {{"Range", range_header}});
 }
 
 } // namespace

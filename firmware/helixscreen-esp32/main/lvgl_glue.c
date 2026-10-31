@@ -193,9 +193,9 @@ LV_ATTRIBUTE_MEM_ALIGN static uint8_t s_draw_buf1[UI_DRAW_BUF_BYTES];
 
 // Refresh-cycle cost tripwire: chunk count / staged px / first-to-last-chunk ms
 // for each completed LVGL refresh cycle, logged only when the cycle is
-// expensive (UI-thread stalls starve the polled touch indev — taps during a
-// long cycle are dropped, so slow cycles ARE user-visible input loss). Cheap:
-// three counters and one esp_timer read per chunk.
+// expensive (a slow cycle delays every tap queued behind it, so slow cycles
+// are user-visible input lag). Cheap: three counters and one esp_timer read
+// per chunk.
 static uint32_t s_cyc_chunks;
 static uint64_t s_cyc_px;
 static int64_t s_cyc_t0_us;
@@ -580,9 +580,9 @@ static void* ui_thread_main(void* arg) {
                          (unsigned long)tears);
             }
         }
-        // Cycle-time tripwire: a long lv_timer_handler starves the polled touch
-        // indev — taps during the window are silently dropped. Pairs with the
-        // flush_cb slow-refresh log to split "render slow" from "handler slow".
+        // Cycle-time tripwire: taps during a long lv_timer_handler wait in the
+        // touch queue until it returns. Pairs with the flush_cb slow-refresh
+        // log to split "render slow" from "handler slow".
         int64_t t0 = esp_timer_get_time();
         uint32_t delay = lv_timer_handler();
         int64_t handler_ms = (esp_timer_get_time() - t0) / 1000;
@@ -600,6 +600,10 @@ static void* ui_thread_main(void* arg) {
 
 bool helix_on_ui_task(void) {
     return s_ui_task == NULL || xTaskGetCurrentTaskHandle() == s_ui_task;
+}
+
+size_t lvgl_glue_ui_stack_bytes(void) {
+    return UI_THREAD_STACK_BYTES;
 }
 
 const uint8_t* lvgl_glue_frame(uint32_t* w, uint32_t* h, size_t* stride) {

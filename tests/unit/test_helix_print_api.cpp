@@ -6,41 +6,27 @@
 #include "../../include/moonraker_job_api.h"
 #include "../../include/moonraker_request_tracker.h"
 #include "../../include/printer_state.h"
+#include "../../include/standing_print_options.h"
+#include "../../include/storage_report.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
 
 #include <atomic>
 #include <chrono>
+#include <optional>
 #include <thread>
 
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-// ============================================================================
-// Global LVGL Initialization
-// ============================================================================
-
-struct LVGLInitializerHelixPrint {
-    LVGLInitializerHelixPrint() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerHelixPrint lvgl_init_helix;
 
 // ============================================================================
 // Test Fixtures
 // ============================================================================
 
-class HelixPrintAPITestFixture {
+class HelixPrintAPITestFixture : public LVGLTestFixture {
   public:
     HelixPrintAPITestFixture() {
         state.init_subjects(false);
@@ -85,8 +71,8 @@ TEST_CASE_METHOD(HelixPrintAPITestFixture,
     // (error callback path returns false, not error)
 
     api->job().check_helix_plugin(
-        [this](bool available) {
-            bool_result = available;
+        [this](const helix::HelixPluginInfo& info) {
+            bool_result = info.available;
             success_called = true;
         },
         [this](const MoonrakerError& err) {
@@ -116,8 +102,9 @@ namespace {
 class FallbackScriptedClient : public helix::MoonrakerClient {
   public:
     helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override {
         (void)silent;
@@ -128,6 +115,7 @@ class FallbackScriptedClient : public helix::MoonrakerClient {
             if (error_cb) {
                 MoonrakerError err;
                 err.type = print_modified_error;
+                err.code = print_modified_code;
                 err.message = "helix_print v1.0.0 print_modified bug";
                 err.method = method;
                 error_cb(err);
@@ -148,12 +136,95 @@ class FallbackScriptedClient : public helix::MoonrakerClient {
     // Defaults to the shipped v1.0.0 endpoint bug — a prompt refusal from a
     // plugin that did answer. Cases needing "no answer at all" set it.
     MoonrakerErrorType print_modified_error = MoonrakerErrorType::VALIDATION_ERROR;
+    int print_modified_code = 0;
     uint32_t print_modified_timeout_ms = 0;
     int print_modified_calls = 0;
     int print_start_calls = 0;
     std::string print_start_filename;
 };
 } // namespace
+
+namespace {
+/// Answers server.helix.status with @p result, as a plugin of some vintage does.
+class PluginStatusScriptedClient : public helix::MoonrakerClient {
+  public:
+    explicit PluginStatusScriptedClient(json result) : result_(std::move(result)) {}
+
+    helix::RequestId send_jsonrpc(
+        const std::string& method, const json& /*params*/,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> /*error_cb*/,
+        uint32_t /*timeout_ms*/ = 0, bool /*silent*/ = false,
+        std::optional<helix::rpc_error_policy::CallerIntent> /*intent*/ = std::nullopt) override {
+        if (method == "server.helix.status" && success_cb) {
+            success_cb(json{{"jsonrpc", "2.0"}, {"result", result_}});
+        }
+        return 1;
+    }
+
+  private:
+    json result_;
+};
+} // namespace
+
+TEST_CASE("a plugin status that names no version reports none", "[print][api][plugin_installer]") {
+    PrinterState state;
+    state.init_subjects(false);
+    auto check = [&state](json result) {
+        PluginStatusScriptedClient client(std::move(result));
+        MoonrakerAPI api(client, state);
+        std::optional<helix::HelixPluginInfo> info;
+        api.job().check_helix_plugin([&info](const helix::HelixPluginInfo& i) { info = i; },
+                                     [](const MoonrakerError&) {});
+        helix::ui::UpdateQueue::instance().drain();
+        REQUIRE(info.has_value());
+        return *info;
+    };
+
+    const auto unversioned = check(json{{"enabled", true}});
+    CHECK(unversioned.present);
+    CHECK(unversioned.available);
+    CHECK(unversioned.version.empty());
+
+    const auto versioned = check(json{{"enabled", false}, {"version", "1.2.0"}});
+    CHECK(versioned.version == "1.2.0");
+    CHECK_FALSE(versioned.available);
+}
+
+TEST_CASE("a plugin status features map reaches the plugin_feature gate",
+          "[print][api][plugin_feature]") {
+    PrinterState state;
+    state.init_subjects(false);
+    PluginStatusScriptedClient client(
+        json{{"enabled", true},
+             {"version", "1.3.0"},
+             {"api", 2},
+             {"features",
+              {{"plr", {{"version", 1}, {"available", true}, {"enabled", true}}},
+               {"print_hooks", {{"version", 1}, {"available", true}, {"enabled", false}}}}}});
+    MoonrakerAPI api(client, state);
+    std::optional<helix::HelixPluginInfo> info;
+    api.job().check_helix_plugin([&info](const helix::HelixPluginInfo& i) { info = i; },
+                                 [](const MoonrakerError&) {});
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(info.has_value());
+    REQUIRE(info->features.size() == 2);
+
+    auto& plugin = state.plugin_status_state();
+    plugin.set_features(info->features);
+    plugin.set_installed(true);
+    CHECK(plugin.plugin_feature("plr", 1) == helix::PluginFeatureState::Ready);
+    CHECK(plugin.plugin_feature("plr", 2) == helix::PluginFeatureState::Absent);
+    CHECK(plugin.plugin_feature("print_hooks", 1) == helix::PluginFeatureState::Disabled);
+    CHECK(plugin.plugin_feature("event_journal", 1) == helix::PluginFeatureState::Absent);
+
+    plugin.set_installed(false);
+    CHECK(plugin.plugin_feature("plr", 1) == helix::PluginFeatureState::Absent);
+
+    plugin.set_installed(true);
+    plugin.set_features({});
+    CHECK(plugin.plugin_feature("plr", 1) == helix::PluginFeatureState::Absent);
+}
 
 TEST_CASE("HelixPrint API - falls back to printer.print.start when plugin print_modified fails",
           "[print][api]") {
@@ -218,10 +289,10 @@ TEST_CASE("print_modified outlives a print-start macro that heats synchronously"
 
     REQUIRE(client.print_modified_calls == 1);
     CHECK(client.print_modified_timeout_ms >
-          helix::MoonrakerRequestTracker::DEFAULT_REQUEST_TIMEOUT_MS);
+          helix::MoonrakerRequestTracker::kDefaultRequestTimeoutMs);
     // It ends in the same ack as printer.print.start after strictly more work,
     // so it can never deserve the shorter ceiling of the two.
-    CHECK(client.print_modified_timeout_ms >= MoonrakerJobAPI::PRINT_START_TIMEOUT_MS);
+    CHECK(client.print_modified_timeout_ms >= MoonrakerJobAPI::kPrintStartTimeoutMs);
 }
 
 TEST_CASE("a print_modified that never answered does not start a second print",
@@ -256,6 +327,36 @@ TEST_CASE("a print_modified that never answered does not start a second print",
     // print started, and no second start is fired.
     CHECK(error_called);
     CHECK_FALSE(success_called);
+}
+
+TEST_CASE("a print_modified refused for space is final: no stock start replaces it",
+          "[print][api][plugin_storage]") {
+    // The plugin deletes the copy and answers 507 when the print would leave
+    // less than its free-space floor. A stock start would aim at the deleted
+    // copy, or print below the floor, and hide the space message.
+    while (helix::screen_start_ledger().withdraw_any()) {
+    }
+    FallbackScriptedClient client;
+    client.print_modified_code = helix::storage::kNoSpaceRpcCode;
+    PrinterState state;
+    state.init_subjects(false);
+    MoonrakerAPI api(client, state);
+
+    bool success_called = false;
+    int error_code = 0;
+    api.job().start_modified_print(
+        "benchy.gcode", ".helix_temp/mod_benchy.gcode", {},
+        [&](const ModifiedPrintResult&) { success_called = true; },
+        [&](const MoonrakerError& err) { error_code = err.code; });
+    helix::ui::UpdateQueue::instance().drain();
+
+    REQUIRE(client.print_modified_calls == 1);
+    CHECK(client.print_start_calls == 0);
+    CHECK_FALSE(success_called);
+    CHECK(error_code == helix::storage::kNoSpaceRpcCode);
+    // Nothing started, so the screen's start note is withdrawn: a print some
+    // other client starts next is not taken for this one.
+    CHECK_FALSE(helix::screen_start_ledger().withdraw_any());
 }
 
 // ============================================================================

@@ -8,12 +8,12 @@ The engine resolves three questions at runtime: *what widgets exist* (C++ regist
 flowchart TD
     subgraph XMLFILES["ui_xml/ - runtime-loaded files"]
         GLOBALS["globals.xml<br/>subjects, consts, theme tokens"]
-        LAYOUTS["panels, overlays, modals<br/>+ components/ fragments"]
+        kLayouts["panels, overlays, modals<br/>+ components/ fragments"]
     end
 
     subgraph BOOT["Boot registration"]
         WIDGETS["C++ widget files<br/>call lv_xml_register_widget()"]
-        REG["src/xml_registration.cpp<br/>styles.xml eagerly; every other<br/>component on first use"]
+        kReg["src/xml_registration.cpp<br/>styles.xml eagerly; every other<br/>component on first use"]
         SUBJ["SubjectInitializer<br/>registers C++ data as named subjects"]
     end
 
@@ -22,10 +22,10 @@ flowchart TD
         LOOKUP["bind_text / bind_flag_if_eq / event_cb<br/>subject lookup: component scope, then globals"]
     end
 
-    GLOBALS --> REG
-    LAYOUTS --> REG
+    GLOBALS --> kReg
+    kLayouts --> kReg
     WIDGETS --> CREATE
-    REG --> CREATE
+    kReg --> CREATE
     CREATE --> LOOKUP
     SUBJ --> LOOKUP
 ```
@@ -134,13 +134,13 @@ Structural conditionals avoid building both branches: `<if cond="expr">...</if>`
 - `bind_text="preset_material_0_name"` resolves at creation against the globals scope. The subject is registered from C++ in [`src/system/preset_materials.cpp`](../../../src/system/preset_materials.cpp):
 
   ```cpp
-  static constexpr const char* NAME_SUBJECTS[PRESET_COUNT] = {
+  static constexpr const char* kNameSubjects[kPresetCount] = {
       "preset_material_0_name", "preset_material_1_name", "preset_material_2_name",
       "preset_material_3_name"};
   // ...
   lv_subject_init_string(&s.name_subjects[i], s.name_bufs[i].data(), nullptr,
                          s.name_bufs[i].size(), s.name_bufs[i].data());
-  s.subjects.publish(NAME_SUBJECTS[i], &s.name_subjects[i]);
+  s.subjects.publish(kNameSubjects[i], &s.name_subjects[i]);
   ```
 
   (verbatim from [`src/system/preset_materials.cpp#init_subjects`](../../../src/system/preset_materials.cpp)). `SubjectManager::publish()` ([`include/subject_managed_panel.h#publish`](../../../include/subject_managed_panel.h)) registers the name in the current XML scope, globals at boot, and remembers it so teardown can withdraw the name before freeing the subject. When preset names load from settings, C++ writes the subject once and every bound button across every panel updates.

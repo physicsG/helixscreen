@@ -62,15 +62,21 @@ TEST_CASE_METHOD(LVGLUITestFixture, "clock mode follows pixels on both axes, not
     lv_obj_t* uptime_label = h.child("clock_uptime");
     REQUIRE(uptime_label != nullptr);
 
-    // Mode 0 (compact, time only): both axes below threshold. Contradicting
-    // span: 4x4 (old predicate: colspan>=3 && rowspan>=2 -> mode 3).
-    h.resize(4, 4, w_normal() - 1, h_tall() - 1);
+    // Mode 0 (compact, time only): a short box too narrow for the date.
+    // Contradicting span: 4x4 (old predicate: colspan>=3 && rowspan>=2 -> mode 3).
+    h.resize(4, 4, 40, h_tall() - 1);
     CHECK(clock_size_mode() == 0);
     CHECK(lv_obj_get_style_text_font(time_label, LV_PART_MAIN) ==
           theme_manager_get_font("font_body"));
     CHECK(lv_obj_get_style_text_font(date_label, LV_PART_MAIN) ==
           theme_manager_get_font("font_body"));
     CHECK(lv_obj_has_flag(uptime_label, LV_OBJ_FLAG_HIDDEN));
+
+    // Mode 1 below the normal width band: the date shows wherever it fits,
+    // not only from w_normal() up.
+    h.resize(3, 2, w_normal() - 1, h_tall() - 1);
+    CHECK(clock_size_mode() == 1);
+    CHECK_FALSE(lv_obj_has_flag(date_label, LV_OBJ_FLAG_HIDDEN));
 
     // Mode 1 (normal, time+date): height below threshold, width AT/OVER
     // w_wide(). Isolates "height below threshold" from the width axis --

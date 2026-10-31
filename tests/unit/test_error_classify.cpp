@@ -137,6 +137,43 @@ TEST_CASE("CFS key8xx is CRITICAL", "[error-center][classify]") {
     REQUIRE(e->code == "key849");
 }
 
+TEST_CASE("an opaque firmware code is shown but classifies like an uncoded !!",
+          "[error-center][classify][firmware_error_envelope]") {
+    // A dashed numeric code carries no error-table meaning: it must not read as
+    // CFS, and a mid-print fault must still block rather than toast.
+    const std::string line =
+        R"(!! {"coded": "0003-0522-0002-0008", "oneshot": 0, "msg":"Lost communication with MCU 'e0'"})";
+    ClassifyContext printing;
+    printing.is_printing = true;
+    auto e = classify(line, printing);
+    REQUIRE(e.has_value());
+    CHECK(e->code == "0003-0522-0002-0008");
+    CHECK(e->source == helix::ErrorSource::GENERIC);
+    CHECK(e->severity == helix::ErrorSeverity::CRITICAL);
+    CHECK(e->detail == "Lost communication with MCU 'e0'");
+    CHECK(e->raw_detail.find("\"coded\"") != std::string::npos);
+
+    ClassifyContext paused;
+    paused.is_paused = true;
+    auto p = classify(line, paused);
+    REQUIRE(p.has_value());
+    // The uncoded paused arm's Resume + dismiss, not a code-keyed action.
+    REQUIRE(p->recovery_actions.size() == 2);
+    CHECK(p->recovery_actions[0].gcode == "RESUME");
+}
+
+TEST_CASE("a code key holding a non-table code classifies like an uncoded !!",
+          "[error-center][classify][firmware_error_envelope]") {
+    ClassifyContext printing;
+    printing.is_printing = true;
+    auto e = classify(R"(!! {"code":"E0011","msg":"x"})", printing);
+    REQUIRE(e.has_value());
+    CHECK(e->code == "E0011");
+    CHECK(e->source == helix::ErrorSource::GENERIC);
+    CHECK(e->severity == helix::ErrorSeverity::CRITICAL);
+    CHECK(e->detail == "x");
+}
+
 TEST_CASE("key843 is a WARNING toast, not a blocking modal", "[error-center][classify][1387]") {
     // key843 is the RFID-read failure: most often the box answering busy
     // while mid-operation rather than a broken tag (#1387). It self-resolves

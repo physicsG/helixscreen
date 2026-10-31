@@ -26,7 +26,7 @@ namespace {
 
 /// Captured from a stock Creality K2 Plus (192.168.30.196) on 2026-08-14.
 /// Its moonraker.conf lives in /usr/share/moonraker, i.e. under no root at all.
-const char* K2_ROOTS = R"({"result":[
+const char* kK2Roots = R"({"result":[
   {"name":"config","path":"/mnt/UDISK/printer_data/config","permissions":"rw"},
   {"name":"logs","path":"/mnt/UDISK/printer_data/logs","permissions":"r"},
   {"name":"gcodes","path":"/mnt/UDISK/printer_data/gcodes","permissions":"rw"},
@@ -36,7 +36,7 @@ const char* K2_ROOTS = R"({"result":[
 
 /// Captured from a stock Creality K1C (192.168.30.182) on 2026-08-14 — the
 /// working control, where moonraker.conf IS under the config root.
-const char* K1_ROOTS = R"({"result":[
+const char* kK1Roots = R"({"result":[
   {"name":"config","path":"/usr/data/printer_data/config","permissions":"rw"},
   {"name":"logs","path":"/usr/data/printer_data/logs","permissions":"r"},
   {"name":"gcodes","path":"/usr/data/printer_data/gcodes","permissions":"rw"}
@@ -45,7 +45,7 @@ const char* K1_ROOTS = R"({"result":[
 } // namespace
 
 TEST_CASE("parse_file_roots reads the K2's config root", "[file_roots]") {
-    auto roots = parse_file_roots(json::parse(K2_ROOTS));
+    auto roots = parse_file_roots(json::parse(kK2Roots));
 
     REQUIRE(roots.size() == 5);
     CHECK(roots[0].name == "config");
@@ -55,14 +55,14 @@ TEST_CASE("parse_file_roots reads the K2's config root", "[file_roots]") {
 }
 
 TEST_CASE("parse_file_roots reads the K1's config root", "[file_roots]") {
-    auto roots = parse_file_roots(json::parse(K1_ROOTS));
+    auto roots = parse_file_roots(json::parse(kK1Roots));
 
     REQUIRE(roots.size() == 3);
     CHECK(writable_root_path(roots, "config") == "/usr/data/printer_data/config");
 }
 
 TEST_CASE("a root with permissions \"r\" is not writable", "[file_roots]") {
-    auto roots = parse_file_roots(json::parse(K2_ROOTS));
+    auto roots = parse_file_roots(json::parse(kK2Roots));
 
     REQUIRE(roots.size() == 5);
     CHECK(roots[1].name == "logs");
@@ -74,13 +74,13 @@ TEST_CASE("a root with permissions \"r\" is not writable", "[file_roots]") {
 }
 
 TEST_CASE("writable_root_path finds the config root on the K2", "[file_roots]") {
-    auto roots = parse_file_roots(json::parse(K2_ROOTS));
+    auto roots = parse_file_roots(json::parse(kK2Roots));
     CHECK(writable_root_path(roots, "config") == "/mnt/UDISK/printer_data/config");
     CHECK(writable_root_path(roots, "gcodes") == "/mnt/UDISK/printer_data/gcodes");
 }
 
 TEST_CASE("writable_root_path returns empty for a root that is not there", "[file_roots]") {
-    auto roots = parse_file_roots(json::parse(K1_ROOTS));
+    auto roots = parse_file_roots(json::parse(kK1Roots));
     CHECK(writable_root_path(roots, "timelapse").empty());
     CHECK(writable_root_path(roots, "").empty());
 }
@@ -140,13 +140,14 @@ namespace {
 class RootsClient : public MoonrakerClientMock {
   public:
     helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override {
         last_method = method;
         if (method == "server.files.roots" && success_cb) {
-            success_cb(json::parse(K2_ROOTS));
+            success_cb(json::parse(kK2Roots));
             return 1;
         }
         return MoonrakerClientMock::send_jsonrpc(method, params, success_cb, error_cb, timeout_ms,

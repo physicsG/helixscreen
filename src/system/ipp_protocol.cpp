@@ -444,6 +444,14 @@ IppRequest build_print_job(const std::string& printer_uri, const std::string& jo
     return req;
 }
 
+std::string normalize_resource_path(const std::string& resource_path) {
+    const auto start = resource_path.find_first_not_of('/');
+    if (start == std::string::npos) {
+        return kDefaultResourcePath;
+    }
+    return resource_path.substr(start);
+}
+
 std::string make_printer_uri(const std::string& host, uint16_t port,
                              const std::string& resource_path) {
     std::string uri = "ipp://";
@@ -460,13 +468,7 @@ std::string make_printer_uri(const std::string& host, uint16_t port,
         uri += ":" + std::to_string(port);
     }
 
-    uri += "/";
-    // Strip leading slash from resource_path if present
-    if (!resource_path.empty() && resource_path.front() == '/') {
-        uri += resource_path.substr(1);
-    } else {
-        uri += resource_path;
-    }
+    uri += "/" + normalize_resource_path(resource_path);
 
     return uri;
 }

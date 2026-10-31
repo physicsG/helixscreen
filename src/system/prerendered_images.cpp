@@ -181,10 +181,10 @@ std::string get_prerendered_printer_path(const std::string& printer_name, int sc
 // Persistent printer image cache (exact widget dimensions)
 // =========================================================================
 
-static constexpr const char* PRINTER_CACHE_SUBDIR = "printer_images";
+static constexpr const char* kPrinterCacheSubdir = "printer_images";
 
 std::string get_printer_image_cache_dir() {
-    return get_helix_cache_dir(PRINTER_CACHE_SUBDIR);
+    return get_helix_cache_dir(kPrinterCacheSubdir);
 }
 
 /// Filesystem path for an LVGL image path, which may carry the "A:" drive prefix.

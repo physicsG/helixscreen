@@ -21,9 +21,9 @@
 namespace helix {
 
 namespace {
-constexpr uint32_t PERSIST_INTERVAL_MS = 60'000;
-constexpr float DELTA_WRITE_THRESHOLD_G = 0.05f;
-constexpr float REBASELINE_THRESHOLD_G = 0.5f;
+constexpr uint32_t kPersistIntervalMs = 60'000;
+constexpr float kDeltaWriteThresholdG = 0.05f;
+constexpr float kRebaselineThresholdG = 0.5f;
 
 // Neither SlotInfo nor the external spool carries a diameter, so every spool is
 // metered at the diameter the printer's extruder is configured for.
@@ -42,7 +42,7 @@ void file_metered_weight(float remaining_weight_g, float total_weight_g) {
     if (total_weight_g >= 0.0F) {
         metered.total_weight_g = total_weight_g;
     }
-    helix::ams::ingest(helix::ams::BYPASS_LANE_ID, metered);
+    helix::ams::ingest(helix::ams::kBypassLaneId, metered);
 }
 } // namespace
 
@@ -55,7 +55,7 @@ bool ExternalSpoolSink::is_trackable() const {
 }
 
 uint32_t ExternalSpoolSink::persist_interval_ms() const {
-    return persist_interval_override_ms_ ? persist_interval_override_ms_ : PERSIST_INTERVAL_MS;
+    return persist_interval_override_ms_ ? persist_interval_override_ms_ : kPersistIntervalMs;
 }
 
 void ExternalSpoolSink::snapshot(float filament_used_mm) {
@@ -123,7 +123,7 @@ void ExternalSpoolSink::apply_delta(float filament_used_mm) {
 
     // External-write detection: someone other than us updated remaining_weight_g.
     // Treat as authoritative and rebase our snapshot from it.
-    if (std::abs(info.remaining_weight_g - last_written_weight_g_) > REBASELINE_THRESHOLD_G) {
+    if (std::abs(info.remaining_weight_g - last_written_weight_g_) > kRebaselineThresholdG) {
         spdlog::info("[ConsumptionSink:external] External write detected (was {} g, now "
                      "{} g); rebaselining",
                      last_written_weight_g_, info.remaining_weight_g);
@@ -147,7 +147,7 @@ void ExternalSpoolSink::apply_delta(float filament_used_mm) {
     }
 
     // Avoid noise writes for sub-gram changes the UI can't show anyway.
-    if (std::abs(new_remaining_g - info.remaining_weight_g) < DELTA_WRITE_THRESHOLD_G) {
+    if (std::abs(new_remaining_g - info.remaining_weight_g) < kDeltaWriteThresholdG) {
         return;
     }
 
@@ -206,7 +206,7 @@ bool AmsSlotSink::is_trackable() const {
 }
 
 uint32_t AmsSlotSink::persist_interval_ms() const {
-    return persist_interval_override_ms_ ? persist_interval_override_ms_ : PERSIST_INTERVAL_MS;
+    return persist_interval_override_ms_ ? persist_interval_override_ms_ : kPersistIntervalMs;
 }
 
 std::optional<SlotInfo> AmsSlotSink::current_info() const {
@@ -293,7 +293,7 @@ void AmsSlotSink::apply_delta(float filament_used_mm) {
     // External-write detection: someone other than us changed
     // remaining_weight_g between ticks (user edit, Spoolman poll that didn't
     // also set spoolman_id, etc.). Rebase from their value.
-    if (std::abs(info.remaining_weight_g - last_written_weight_g_) > REBASELINE_THRESHOLD_G) {
+    if (std::abs(info.remaining_weight_g - last_written_weight_g_) > kRebaselineThresholdG) {
         spdlog::info("[ConsumptionSink:{}] External write detected (was {} g, now "
                      "{} g); rebaselining",
                      name_, last_written_weight_g_, info.remaining_weight_g);
@@ -313,7 +313,7 @@ void AmsSlotSink::apply_delta(float filament_used_mm) {
     float consumed_g = filament::length_to_weight_g(consumed_mm, density_g_cm3_, diameter_mm_);
     float new_remaining_g = std::max(0.0f, snapshot_weight_g_ - consumed_g);
 
-    if (std::abs(new_remaining_g - info.remaining_weight_g) < DELTA_WRITE_THRESHOLD_G) {
+    if (std::abs(new_remaining_g - info.remaining_weight_g) < kDeltaWriteThresholdG) {
         return;
     }
 

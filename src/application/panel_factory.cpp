@@ -34,8 +34,8 @@ using namespace helix;
 
 bool PanelFactory::find_panels(lv_obj_t* panel_container) {
     m_panel_container = panel_container; // kept for deferred panel creation (ESP)
-    for (int i = 0; i < UI_PANEL_COUNT; i++) {
-        m_panels[i] = lv_obj_find_by_name(panel_container, PANEL_NAMES[i]);
+    for (int i = 0; i < kUiPanelCount; i++) {
+        m_panels[i] = lv_obj_find_by_name(panel_container, kPanelNames[i]);
         if (!m_panels[i]) {
 #if defined(HELIX_PLATFORM_ESP32)
             // On ESP the app_layout override instantiates only home at boot; the
@@ -43,11 +43,11 @@ bool PanelFactory::find_panels(lv_obj_t* panel_container) {
             // here is expected — only home must be present.
             if (i != static_cast<int>(PanelId::Home)) {
                 spdlog::debug("[PanelFactory] Panel '{}' deferred (built on first nav)",
-                              PANEL_NAMES[i]);
+                              kPanelNames[i]);
                 continue;
             }
 #endif
-            spdlog::error("[PanelFactory] Missing panel '{}' in container", PANEL_NAMES[i]);
+            spdlog::error("[PanelFactory] Missing panel '{}' in container", kPanelNames[i]);
             return false;
         }
     }
@@ -98,7 +98,7 @@ void PanelFactory::build_deferred_panel(int panel_id) {
 #if defined(HELIX_PLATFORM_ESP32)
     if (!m_panel_container || !m_screen)
         return;
-    if (panel_id <= static_cast<int>(PanelId::Home) || panel_id >= UI_PANEL_COUNT)
+    if (panel_id <= static_cast<int>(PanelId::Home) || panel_id >= kUiPanelCount)
         return; // home is built eagerly; nothing else defers
     if (m_panels[panel_id])
         return; // already built
@@ -108,7 +108,7 @@ void PanelFactory::build_deferred_panel(int panel_id) {
     // runs under it). One scrim mechanism for all transitions, not two.
     auto build_start = std::chrono::steady_clock::now();
     // Hidden: nav un-hides it after we return
-    lv_obj_t* obj = helix::ui::create_xml_hidden(m_panel_container, PANEL_NAMES[panel_id]);
+    lv_obj_t* obj = helix::ui::create_xml_hidden(m_panel_container, kPanelNames[panel_id]);
     if (obj) {
         m_panels[panel_id] = obj;
         NavigationManager::instance().replace_panel_widget(static_cast<PanelId>(panel_id), obj);
@@ -116,11 +116,11 @@ void PanelFactory::build_deferred_panel(int panel_id) {
         auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                             build_start)
                       .count();
-        spdlog::info("[PanelFactory] Deferred panel '{}' built in {:.0f}ms", PANEL_NAMES[panel_id],
+        spdlog::info("[PanelFactory] Deferred panel '{}' built in {:.0f}ms", kPanelNames[panel_id],
                      ms);
     } else {
         spdlog::error("[PanelFactory] Deferred build of '{}' FAILED (lv_xml_create null)",
-                      PANEL_NAMES[panel_id]);
+                      kPanelNames[panel_id]);
     }
 #else
     (void)panel_id;
@@ -186,7 +186,7 @@ void PanelFactory::setup_panels(lv_obj_t* screen) {
         },
         [this] {
             spdlog::info("[PanelFactory] Building '{}' while idle, ahead of its first visit",
-                         PANEL_NAMES[kPrintSelect]);
+                         kPanelNames[kPrintSelect]);
             build_deferred_panel(kPrintSelect);
         },
     });

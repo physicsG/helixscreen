@@ -48,10 +48,6 @@ std::vector<std::string> parse_failed_units(const std::string& list_units_output
 std::optional<std::vector<std::string>> failed_units_from(int exit_status,
                                                           const std::string& output);
 
-/// True when systemd is the running init under @p root: a systemctl binary
-/// alone is not enough, since chroots, containers and SysV boxes ship one.
-bool systemd_is_init(const std::string& root);
-
 /// Competing UIs and /dev/fb* or /dev/dri/* holders under @p proc_root, at most
 /// @p cap. A process that vanishes mid-walk is skipped; nothing here throws.
 std::vector<CensusProcess> census_processes(const std::string& proc_root, size_t cap);

@@ -187,6 +187,8 @@ ResonanceCsvData parse_resonance_csv(const std::string& csv_path) {
 
     int freq_col = -1;
     int psd_col = -1;
+    int psd_x_col = -1;
+    int psd_y_col = -1;
     bool has_axis_psd = false;
     int other_cols = 0;
     for (int i = 0; i < static_cast<int>(headers.size()); ++i) {
@@ -197,6 +199,11 @@ ResonanceCsvData parse_resonance_csv(const std::string& csv_path) {
             psd_col = i;
         } else if (h == "psd_x" || h == "psd_y" || h == "psd_z") {
             has_axis_psd = true;
+            if (h == "psd_x") {
+                psd_x_col = i;
+            } else if (h == "psd_y") {
+                psd_y_col = i;
+            }
         } else {
             ++other_cols;
         }
@@ -239,6 +246,11 @@ ResonanceCsvData parse_resonance_csv(const std::string& csv_path) {
         float freq_val = std::strtof(fields[freq_col].c_str(), &end);
         float psd_val = std::strtof(fields[psd_col].c_str(), &end);
         result.curve.emplace_back(freq_val, psd_val);
+        if (psd_x_col >= 0 && psd_y_col >= 0) {
+            const float x = std::strtof(fields[psd_x_col].c_str(), &end);
+            const float y = std::strtof(fields[psd_y_col].c_str(), &end);
+            result.in_plane.emplace_back(freq_val, x + y);
+        }
     }
 
     if (result.curve.empty()) {

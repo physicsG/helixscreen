@@ -16,8 +16,8 @@ namespace gcode {
 size_t GeometryBudgetManager::calculate_budget(size_t available_kb) const {
     if (available_kb == 0)
         return 0;
-    size_t budget = (available_kb * 1024) / (100 / BUDGET_PERCENT);
-    return std::min(budget, MAX_BUDGET_BYTES);
+    size_t budget = (available_kb * 1024) / (100 / kBudgetPercent);
+    return std::min(budget, kMaxBudgetBytes);
 }
 
 size_t GeometryBudgetManager::read_system_available_kb() const {
@@ -25,7 +25,7 @@ size_t GeometryBudgetManager::read_system_available_kb() const {
 }
 
 bool GeometryBudgetManager::is_system_memory_critical() const {
-    return read_system_available_kb() < CRITICAL_MEMORY_KB;
+    return read_system_available_kb() < kCriticalMemoryKb;
 }
 
 std::string GeometryBudgetManager::render_driver_name_at(const std::string& drm_class_dir) {
@@ -68,12 +68,12 @@ GeometryBudgetManager::BudgetConfig GeometryBudgetManager::select_tier(size_t se
                 .budget_bytes = budget_bytes};
     }
 
-    size_t est_n16 = segment_count * BYTES_PER_SEG_N16;
-    size_t est_n8 = segment_count * BYTES_PER_SEG_N8;
-    size_t est_n4 = segment_count * BYTES_PER_SEG_N4;
-    size_t tris_n16 = segment_count * TRIS_PER_SEG_N16;
-    size_t tris_n8 = segment_count * TRIS_PER_SEG_N8;
-    size_t tris_n4 = segment_count * TRIS_PER_SEG_N4;
+    size_t est_n16 = segment_count * kBytesPerSegN16;
+    size_t est_n8 = segment_count * kBytesPerSegN8;
+    size_t est_n4 = segment_count * kBytesPerSegN4;
+    size_t tris_n16 = segment_count * kTrisPerSegN16;
+    size_t tris_n8 = segment_count * kTrisPerSegN8;
+    size_t tris_n4 = segment_count * kTrisPerSegN4;
 
     // A tier qualifies only when both the byte estimate and (when a GPU
     // triangle budget is set) the triangle estimate fit; a tier the triangle
@@ -158,7 +158,7 @@ GeometryBudgetManager::BudgetAction GeometryBudgetManager::check_budget(size_t c
         return BudgetAction::ABORT;
 
     float usage_ratio = static_cast<float>(current_usage_bytes) / budget_bytes;
-    if (usage_ratio < BUDGET_THRESHOLD)
+    if (usage_ratio < kBudgetThreshold)
         return BudgetAction::CONTINUE;
 
     if (current_tier < 3) {

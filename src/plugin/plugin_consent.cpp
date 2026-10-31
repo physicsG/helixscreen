@@ -7,6 +7,8 @@
 
 #include "ui_modal.h"
 
+#include <algorithm>
+
 namespace helix::plugin {
 
 namespace {
@@ -31,7 +33,35 @@ const char* permission_line(Permission p) {
     return "";
 }
 
+const char* menu_target_name(MenuKind k) {
+    switch (k) {
+    case MenuKind::PrintFile:
+        return lv_tr("Print details");
+    case MenuKind::FilamentSlot:
+        return lv_tr("Filament slot menu");
+    case MenuKind::Spool:
+        return lv_tr("Spool menu");
+    case MenuKind::Tile:
+        return lv_tr("Its home tile");
+    }
+    return "";
+}
+
 } // namespace
+
+std::string menu_targets_line(const Manifest& m) {
+    std::string names;
+    for (MenuKind k : kMenuKinds) {
+        const bool declared = std::any_of(m.menu_items.begin(), m.menu_items.end(),
+                                          [k](const MenuItemDecl& d) { return d.menu == k; });
+        if (!declared)
+            continue;
+        if (!names.empty())
+            names += ", ";
+        names += menu_target_name(k);
+    }
+    return names.empty() ? names : std::string(lv_tr("Adds to:")) + " " + names;
+}
 
 std::vector<std::string> consent_lines(const PermissionSet& perms) {
     std::vector<std::string> lines;
@@ -58,6 +88,9 @@ std::string consent_message(const Manifest& m, const std::vector<Permission>& gr
     }
     if (!msg.empty() && msg.back() == '\n')
         msg.pop_back();
+    // Menu items need no permission of their own; the line says where they appear.
+    if (const std::string targets = menu_targets_line(m); !targets.empty())
+        msg += "\n" + targets;
     return msg;
 }
 

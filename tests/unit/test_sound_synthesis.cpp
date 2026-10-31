@@ -11,8 +11,8 @@
 using namespace helix::audio;
 using Catch::Approx;
 
-static constexpr int SAMPLE_RATE = 44100;
-static constexpr int SAMPLES_10MS = 441;
+static constexpr int kSampleRate = 44100;
+static constexpr int kSamples10ms = 441;
 static constexpr float PI = 3.14159265358979323846f;
 
 static float compute_rms(const float* buffer, int num_samples) {
@@ -39,11 +39,11 @@ TEST_CASE("Square wave 1kHz frequency verified by zero crossings", "[sound][synt
     // 1kHz at 44100 Hz sample rate = 44.1 samples/period
     // In 441 samples (10ms) we expect ~10 periods = ~20 zero crossings (positive edge only)
     constexpr float freq = 1000.0f;
-    constexpr int num_samples = SAMPLE_RATE; // 1 full second for accuracy
+    constexpr int num_samples = kSampleRate; // 1 full second for accuracy
     std::vector<float> buffer(num_samples);
     float phase = 0;
 
-    generate_samples(buffer.data(), num_samples, SAMPLE_RATE, Waveform::SQUARE, freq, 1.0f, 0.5f,
+    generate_samples(buffer.data(), num_samples, kSampleRate, Waveform::SQUARE, freq, 1.0f, 0.5f,
                      phase);
 
     // Count rising zero crossings (negative -> positive transitions)
@@ -65,11 +65,11 @@ TEST_CASE("Square wave 1kHz frequency verified by zero crossings", "[sound][synt
 // ============================================================================
 
 TEST_CASE("Square wave duty cycle 0.25 produces 25% time above zero", "[sound][synthesis]") {
-    constexpr int num_samples = SAMPLE_RATE; // 1 second for stable stats
+    constexpr int num_samples = kSampleRate; // 1 second for stable stats
     std::vector<float> buffer(num_samples);
     float phase = 0;
 
-    generate_samples(buffer.data(), num_samples, SAMPLE_RATE, Waveform::SQUARE, 440.0f, 1.0f, 0.25f,
+    generate_samples(buffer.data(), num_samples, kSampleRate, Waveform::SQUARE, 440.0f, 1.0f, 0.25f,
                      phase);
 
     int positive_count = 0;
@@ -89,11 +89,11 @@ TEST_CASE("Square wave duty cycle 0.25 produces 25% time above zero", "[sound][s
 // ============================================================================
 
 TEST_CASE("Sine wave RMS is amplitude / sqrt(2)", "[sound][synthesis]") {
-    constexpr int num_samples = SAMPLE_RATE; // 1 full second = many complete periods
+    constexpr int num_samples = kSampleRate; // 1 full second = many complete periods
     std::vector<float> buffer(num_samples);
     float phase = 0;
 
-    generate_samples(buffer.data(), num_samples, SAMPLE_RATE, Waveform::SINE, 440.0f, 1.0f, 0.5f,
+    generate_samples(buffer.data(), num_samples, kSampleRate, Waveform::SINE, 440.0f, 1.0f, 0.5f,
                      phase);
 
     float rms = compute_rms(buffer.data(), num_samples);
@@ -112,7 +112,7 @@ TEST_CASE("Triangle wave peak positive and negative equal amplitude", "[sound][s
     std::vector<float> buffer(num_samples);
     float phase = 0;
 
-    generate_samples(buffer.data(), num_samples, SAMPLE_RATE, Waveform::TRIANGLE, freq, amplitude,
+    generate_samples(buffer.data(), num_samples, kSampleRate, Waveform::TRIANGLE, freq, amplitude,
                      0.5f, phase);
 
     float max_val = *std::max_element(buffer.begin(), buffer.end());
@@ -138,7 +138,7 @@ TEST_CASE("Saw wave output stays within amplitude bounds", "[sound][synthesis]")
     std::vector<float> buffer(num_samples);
     float phase = 0;
 
-    generate_samples(buffer.data(), num_samples, SAMPLE_RATE, Waveform::SAW, freq, amplitude, 0.5f,
+    generate_samples(buffer.data(), num_samples, kSampleRate, Waveform::SAW, freq, amplitude, 0.5f,
                      phase);
 
     float max_val = *std::max_element(buffer.begin(), buffer.end());
@@ -163,33 +163,33 @@ TEST_CASE("Phase continuity: two consecutive calls produce no discontinuity",
     std::vector<float> buf2(half);
     float phase = 0;
 
-    generate_samples(buf1.data(), half, SAMPLE_RATE, Waveform::SINE, 440.0f, 1.0f, 0.5f, phase);
-    generate_samples(buf2.data(), half, SAMPLE_RATE, Waveform::SINE, 440.0f, 1.0f, 0.5f, phase);
+    generate_samples(buf1.data(), half, kSampleRate, Waveform::SINE, 440.0f, 1.0f, 0.5f, phase);
+    generate_samples(buf2.data(), half, kSampleRate, Waveform::SINE, 440.0f, 1.0f, 0.5f, phase);
 
     // The last sample of buf1 and first sample of buf2 should be continuous.
     // For a 440Hz sine at 44100 sample rate, adjacent samples differ by at most
     // 2*pi*440/44100 ~ 0.0627 in phase. The value difference is amplitude*sin(delta_phase).
     float diff = std::fabs(buf2[0] - buf1[half - 1]);
-    float max_expected_diff = 2.0f * PI * 440.0f / SAMPLE_RATE + 0.01f;
+    float max_expected_diff = 2.0f * PI * 440.0f / kSampleRate + 0.01f;
     REQUIRE(diff < max_expected_diff);
 }
 
 TEST_CASE("Phase continuity: split calls match single call output", "[sound][synthesis]") {
-    constexpr int total = SAMPLES_10MS * 2;
-    constexpr int half = SAMPLES_10MS;
+    constexpr int total = kSamples10ms * 2;
+    constexpr int half = kSamples10ms;
 
     std::vector<float> full_buf(total);
     std::vector<float> half1(half);
     std::vector<float> half2(half);
 
     float phase_full = 0;
-    generate_samples(full_buf.data(), total, SAMPLE_RATE, Waveform::SINE, 440.0f, 1.0f, 0.5f,
+    generate_samples(full_buf.data(), total, kSampleRate, Waveform::SINE, 440.0f, 1.0f, 0.5f,
                      phase_full);
 
     float phase_split = 0;
-    generate_samples(half1.data(), half, SAMPLE_RATE, Waveform::SINE, 440.0f, 1.0f, 0.5f,
+    generate_samples(half1.data(), half, kSampleRate, Waveform::SINE, 440.0f, 1.0f, 0.5f,
                      phase_split);
-    generate_samples(half2.data(), half, SAMPLE_RATE, Waveform::SINE, 440.0f, 1.0f, 0.5f,
+    generate_samples(half2.data(), half, kSampleRate, Waveform::SINE, 440.0f, 1.0f, 0.5f,
                      phase_split);
 
     for (int i = 0; i < half; i++) {
@@ -203,13 +203,13 @@ TEST_CASE("Phase continuity: split calls match single call output", "[sound][syn
 // ============================================================================
 
 TEST_CASE("Zero amplitude produces all-zero output", "[sound][synthesis]") {
-    std::vector<float> buffer(SAMPLES_10MS);
+    std::vector<float> buffer(kSamples10ms);
     float phase = 0;
 
-    generate_samples(buffer.data(), SAMPLES_10MS, SAMPLE_RATE, Waveform::SINE, 440.0f, 0.0f, 0.5f,
+    generate_samples(buffer.data(), kSamples10ms, kSampleRate, Waveform::SINE, 440.0f, 0.0f, 0.5f,
                      phase);
 
-    for (int i = 0; i < SAMPLES_10MS; i++) {
+    for (int i = 0; i < kSamples10ms; i++) {
         REQUIRE(buffer[i] == 0.0f);
     }
 }
@@ -247,11 +247,11 @@ TEST_CASE("Lowpass filter reduces high-frequency energy in mixed signal", "[soun
 
     // Generate high-freq component
     std::vector<float> hi_buf(num_samples);
-    generate_samples(hi_buf.data(), num_samples, SAMPLE_RATE, Waveform::SINE, 8000.0f, 1.0f, 0.5f,
+    generate_samples(hi_buf.data(), num_samples, kSampleRate, Waveform::SINE, 8000.0f, 1.0f, 0.5f,
                      phase_hi);
 
     // Add both into buffer (low freq dominates at low freq region)
-    generate_samples(buffer.data(), num_samples, SAMPLE_RATE, Waveform::SINE, 200.0f, 1.0f, 0.5f,
+    generate_samples(buffer.data(), num_samples, kSampleRate, Waveform::SINE, 200.0f, 1.0f, 0.5f,
                      phase_lo);
     for (int i = 0; i < num_samples; i++) {
         buffer[i] += hi_buf[i];
@@ -261,12 +261,12 @@ TEST_CASE("Lowpass filter reduces high-frequency energy in mixed signal", "[soun
 
     // Apply lowpass at 1kHz — should heavily attenuate the 8kHz component
     BiquadFilter filter{};
-    compute_biquad_coeffs(filter, FilterType::LOWPASS, 1000.0f, SAMPLE_RATE);
+    compute_biquad_coeffs(filter, FilterType::LOWPASS, 1000.0f, kSampleRate);
     apply_filter(filter, buffer.data(), num_samples);
 
     // Apply same filter to the hi_buf alone to measure its attenuation
     BiquadFilter filter2{};
-    compute_biquad_coeffs(filter2, FilterType::LOWPASS, 1000.0f, SAMPLE_RATE);
+    compute_biquad_coeffs(filter2, FilterType::LOWPASS, 1000.0f, kSampleRate);
     apply_filter(filter2, hi_buf.data(), num_samples);
 
     float energy_after = compute_energy_band(hi_buf.data(), num_samples);
@@ -285,14 +285,14 @@ TEST_CASE("Highpass filter reduces low-frequency energy in mixed signal", "[soun
     float phase_lo = 0;
 
     // Generate low-freq component (100Hz)
-    generate_samples(lo_buf.data(), num_samples, SAMPLE_RATE, Waveform::SINE, 100.0f, 1.0f, 0.5f,
+    generate_samples(lo_buf.data(), num_samples, kSampleRate, Waveform::SINE, 100.0f, 1.0f, 0.5f,
                      phase_lo);
 
     float energy_before = compute_energy_band(lo_buf.data(), num_samples);
 
     // Apply highpass at 1kHz — should heavily attenuate the 100Hz component
     BiquadFilter filter{};
-    compute_biquad_coeffs(filter, FilterType::HIGHPASS, 1000.0f, SAMPLE_RATE);
+    compute_biquad_coeffs(filter, FilterType::HIGHPASS, 1000.0f, kSampleRate);
     apply_filter(filter, lo_buf.data(), num_samples);
 
     float energy_after = compute_energy_band(lo_buf.data(), num_samples);
@@ -308,7 +308,7 @@ TEST_CASE("Highpass filter reduces low-frequency energy in mixed signal", "[soun
 TEST_CASE("update_filter_if_needed does not recompute when params are unchanged",
           "[sound][synthesis]") {
     BiquadFilter filter{};
-    update_filter_if_needed(filter, FilterType::LOWPASS, 1000.0f, SAMPLE_RATE);
+    update_filter_if_needed(filter, FilterType::LOWPASS, 1000.0f, kSampleRate);
 
     // Record current cutoff after first call
     float cutoff_after_first = filter.current_cutoff;
@@ -321,13 +321,13 @@ TEST_CASE("update_filter_if_needed does not recompute when params are unchanged"
     filter.b0 = 99999.0f;
 
     // Call again with same params — should NOT recompute (b0 should stay as sentinel)
-    update_filter_if_needed(filter, FilterType::LOWPASS, 1000.0f, SAMPLE_RATE);
+    update_filter_if_needed(filter, FilterType::LOWPASS, 1000.0f, kSampleRate);
 
     REQUIRE(filter.b0 == Approx(99999.0f)); // Not recomputed
     REQUIRE(filter.current_cutoff == Approx(1000.0f));
 
     // Now call with different cutoff — should recompute (b0 should change)
-    update_filter_if_needed(filter, FilterType::LOWPASS, 500.0f, SAMPLE_RATE);
+    update_filter_if_needed(filter, FilterType::LOWPASS, 500.0f, kSampleRate);
 
     REQUIRE(filter.b0 != Approx(99999.0f)); // Recomputed
     REQUIRE(filter.current_cutoff == Approx(500.0f));
@@ -345,13 +345,13 @@ TEST_CASE("All four waveforms produce non-zero output at non-zero amplitude",
     const char* names[] = {"SQUARE", "SAW", "TRIANGLE", "SINE"};
 
     for (int w = 0; w < 4; w++) {
-        std::vector<float> buffer(SAMPLES_10MS);
+        std::vector<float> buffer(kSamples10ms);
         float phase = 0;
 
-        generate_samples(buffer.data(), SAMPLES_10MS, SAMPLE_RATE, waves[w], 440.0f, 1.0f, 0.5f,
+        generate_samples(buffer.data(), kSamples10ms, kSampleRate, waves[w], 440.0f, 1.0f, 0.5f,
                          phase);
 
-        float rms = compute_rms(buffer.data(), SAMPLES_10MS);
+        float rms = compute_rms(buffer.data(), kSamples10ms);
         INFO("Waveform: " << names[w] << " RMS=" << rms);
         REQUIRE(rms > 0.1f);
     }

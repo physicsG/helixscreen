@@ -62,14 +62,14 @@ void PackedVertex::encode_color(uint32_t rgb, uint8_t out[4]) {
 // Debug Face Colors
 // ============================================================================
 
-namespace DebugColors {
+namespace debug_colors {
 constexpr uint32_t TOP = 0xFF0000;       // Bright Red
 constexpr uint32_t BOTTOM = 0x0000FF;    // Bright Blue
 constexpr uint32_t LEFT = 0x00FF00;      // Bright Green
 constexpr uint32_t RIGHT = 0xFFFF00;     // Bright Yellow
-constexpr uint32_t START_CAP = 0xFF00FF; // Bright Magenta
-constexpr uint32_t END_CAP = 0x00FFFF;   // Bright Cyan
-} // namespace DebugColors
+constexpr uint32_t kStartCap = 0xFF00FF; // Bright Magenta
+constexpr uint32_t kEndCap = 0x00FFFF;   // Bright Cyan
+} // namespace debug_colors
 
 // ============================================================================
 // QuantizationParams Implementation
@@ -88,10 +88,10 @@ void QuantizationParams::calculate_scale(const AABB& bbox) {
     // Maximum quantized value = (max_bound - min_bound) * scale = extent * scale
     // Constraint: extent * scale <= 32767
     // Reserve 10% headroom to avoid edge cases
-    constexpr float INT16_MAX_WITH_HEADROOM = 32767.0f * 0.9f;
+    constexpr float kInt16MaxWithHeadroom = 32767.0f * 0.9f;
 
     if (max_extent > 0.0f) {
-        scale_factor = INT16_MAX_WITH_HEADROOM / max_extent;
+        scale_factor = kInt16MaxWithHeadroom / max_extent;
     } else {
         // Fallback for degenerate bounding box
         scale_factor = 1000.0f; // 1 unit = 1mm
@@ -186,7 +186,7 @@ void RibbonGeometry::expand_strips(size_t first_strip, size_t strip_count,
                                    PackedVertex* out) const {
     // Strip order: BL(0), BR(1), TL(2), TR(3)
     // Triangle 1: BL-BR-TL,  Triangle 2: BR-TR-TL
-    static constexpr int TRI_INDICES[6] = {0, 1, 2, 1, 3, 2};
+    static constexpr int kTriIndices[6] = {0, 1, 2, 1, 3, 2};
 
     for (size_t s = 0; s < strip_count; ++s) {
         const size_t strip_idx = first_strip + s;
@@ -198,7 +198,7 @@ void RibbonGeometry::expand_strips(size_t first_strip, size_t strip_count,
         PackedVertex::encode_color(strip_color(strip_idx), rgba);
 
         for (int ti = 0; ti < 6; ++ti) {
-            const auto& vert = vertices[strip[static_cast<size_t>(TRI_INDICES[ti])]];
+            const auto& vert = vertices[strip[static_cast<size_t>(kTriIndices[ti])]];
 
             // Quantized coordinates go to the GPU as-is; the renderer folds the
             // dequantization into its matrices.
@@ -227,7 +227,7 @@ void RibbonGeometry::prepare_interleaved_buffers() {
     size_t num_layers = layer_strip_ranges.empty() ? 1 : layer_strip_ranges.size();
     prepared_buffers.resize(num_layers);
 
-    constexpr size_t STRIDE = PackedVertex::stride();
+    constexpr size_t kStride = PackedVertex::stride();
 
     for (size_t layer = 0; layer < num_layers; ++layer) {
         size_t first_strip = 0;
@@ -247,7 +247,7 @@ void RibbonGeometry::prepare_interleaved_buffers() {
 
         size_t total_verts = strip_count * 6; // 2 triangles per strip
         prepared.vertex_count = total_verts;
-        prepared.data.resize(total_verts * STRIDE);
+        prepared.data.resize(total_verts * kStride);
 
         expand_strips(first_strip, strip_count,
                       reinterpret_cast<PackedVertex*>(prepared.data.data()));
@@ -767,7 +767,7 @@ RibbonGeometry GeometryBuilder::build(const ParsedGCodeFile& gcode,
         // Progressive budget check
         if (budget_limit_bytes_ > 0) {
             segments_since_budget_check++;
-            if (segments_since_budget_check >= GeometryBudgetManager::CHECK_INTERVAL_SEGMENTS) {
+            if (segments_since_budget_check >= GeometryBudgetManager::kCheckIntervalSegments) {
                 segments_since_budget_check = 0;
                 if (cancelled()) {
                     spdlog::info("[GCode::Builder] Build cancelled during emission");
@@ -775,7 +775,7 @@ RibbonGeometry GeometryBuilder::build(const ParsedGCodeFile& gcode,
                 }
                 size_t current_mem = geometry.memory_usage();
                 float threshold = static_cast<float>(budget_limit_bytes_) *
-                                  GeometryBudgetManager::BUDGET_THRESHOLD;
+                                  GeometryBudgetManager::kBudgetThreshold;
                 if (static_cast<float>(current_mem) > threshold) {
                     spdlog::warn("[GCode::Builder] Budget exceeded: {}MB / {}MB at segment {}/{}",
                                  current_mem / (1024 * 1024), budget_limit_bytes_ / (1024 * 1024),
@@ -785,7 +785,7 @@ RibbonGeometry GeometryBuilder::build(const ParsedGCodeFile& gcode,
                 }
 
                 // System memory check (less frequent, only at CHECK_INTERVAL boundaries)
-                if (i > 0 && i % GeometryBudgetManager::SYSTEM_CHECK_INTERVAL_SEGMENTS == 0) {
+                if (i > 0 && i % GeometryBudgetManager::kSystemCheckIntervalSegments == 0) {
                     GeometryBudgetManager budget_mgr;
                     if (budget_mgr.is_system_memory_critical()) {
                         spdlog::error("[GCode::Builder] System memory critical — aborting build");
@@ -867,13 +867,13 @@ RibbonGeometry GeometryBuilder::build(const ParsedGCodeFile& gcode,
                 }
             }
             if (!extended) {
-                if (pending_runs.size() >= MAX_OBJECT_RUNS) {
+                if (pending_runs.size() >= kMaxObjectRuns) {
                     // Past the ceiling the side table stops being cheap relative to
                     // the geometry it indexes. Drop it entirely and let the renderer
                     // behave exactly as it did before runs existed.
                     spdlog::debug("[GCode::Builder] Object runs exceed {} — abandoning run "
                                   "collection (3D selection silhouette disabled for this file)",
-                                  MAX_OBJECT_RUNS);
+                                  kMaxObjectRuns);
                     pending_runs.clear();
                     pending_runs.shrink_to_fit();
                     runs_abandoned = true;
@@ -962,9 +962,9 @@ RibbonGeometry GeometryBuilder::build(const ParsedGCodeFile& gcode,
             size_t remaining = pr.strip_count * 6;
             while (remaining > 0) {
                 // Split rather than truncate: vertex_count is uint16, and
-                // MAX_RUN_VERTICES keeps every piece strip-aligned.
-                const size_t chunk = std::min<size_t>(remaining, MAX_RUN_VERTICES);
-                if (geometry.object_runs.size() >= MAX_OBJECT_RUNS) {
+                // kMaxRunVertices keeps every piece strip-aligned.
+                const size_t chunk = std::min<size_t>(remaining, kMaxRunVertices);
+                if (geometry.object_runs.size() >= kMaxObjectRuns) {
                     overflowed = true;
                     break;
                 }
@@ -987,7 +987,7 @@ RibbonGeometry GeometryBuilder::build(const ParsedGCodeFile& gcode,
             if (overflowed) {
                 spdlog::debug("[GCode::Builder] Object runs exceed {} after splitting — "
                               "abandoning run collection",
-                              MAX_OBJECT_RUNS);
+                              kMaxObjectRuns);
             }
             geometry.object_runs.clear();
             geometry.object_runs.shrink_to_fit();
@@ -1200,15 +1200,15 @@ GeometryBuilder::generate_ribbon_vertices(const ToolpathSegment& segment, Ribbon
 
     if (debug_face_colors_) {
         // Cycle through 4 debug colors for N faces
-        constexpr uint32_t DEBUG_COLORS[] = {
-            DebugColors::TOP,    // Red
-            DebugColors::RIGHT,  // Yellow
-            DebugColors::BOTTOM, // Blue
-            DebugColors::LEFT    // Green
+        constexpr uint32_t kDebugColors[] = {
+            debug_colors::TOP,    // Red
+            debug_colors::RIGHT,  // Yellow
+            debug_colors::BOTTOM, // Blue
+            debug_colors::LEFT    // Green
         };
 
         for (int i = 0; i < N; i++) {
-            uint32_t color = DEBUG_COLORS[i % 4]; // Cycle: R,Y,B,G,R,Y,B,G,...
+            uint32_t color = kDebugColors[i % 4]; // Cycle: R,Y,B,G,R,Y,B,G,...
             face_colors[static_cast<size_t>(i)] = add_to_color_palette(geometry, color);
         }
 
@@ -1284,9 +1284,9 @@ GeometryBuilder::generate_ribbon_vertices(const ToolpathSegment& segment, Ribbon
 
     // ========== START CAP VERTICES (first segment only) ==========
     if (is_first_segment) {
-        // Use unique START_CAP color for debug visualization
+        // Use unique kStartCap color for debug visualization
         start_cap_color_idx = debug_face_colors_
-                                  ? add_to_color_palette(geometry, DebugColors::START_CAP)
+                                  ? add_to_color_palette(geometry, debug_colors::kStartCap)
                                   : face_colors[0]; // Use first face color if not debugging
 
         // Generate N start cap vertices
@@ -1396,7 +1396,7 @@ GeometryBuilder::generate_ribbon_vertices(const ToolpathSegment& segment, Ribbon
     // ========== END CAP VERTICES ==========
     // Create N new vertices at the SAME POSITIONS as end_cap vertices but with axial normals
     uint8_t end_cap_color_idx =
-        debug_face_colors_ ? add_to_color_palette(geometry, DebugColors::END_CAP) : face_colors[0];
+        debug_face_colors_ ? add_to_color_palette(geometry, debug_colors::kEndCap) : face_colors[0];
 
     uint32_t idx_end_cap_start = idx_start;
 

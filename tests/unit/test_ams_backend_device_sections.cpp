@@ -6,9 +6,7 @@
  * @brief Every DeviceAction must name a section its own backend declares.
  *
  * AmsDeviceOperationsOverlay::populate_section_list() renders a row only for
- * actions whose `section` string equals a declared section id, and
- * AmsOperationSidebar::update_settings_visibility() hides the settings gear
- * entirely when a backend declares no sections. A backend that returns
+ * actions whose `section` string equals a declared section id. A backend that returns
  * actions with an empty or undeclared section therefore returns actions the
  * UI can never reach. This pins the pairing for every backend at once, so a
  * new backend (or a conditionally-hidden section whose actions survive)
@@ -17,14 +15,18 @@
 
 #include "../test_helpers/ams_backend_probes.h"
 #include "ams_backend.h"
+#include "ams_backend_indx.h"
 #include "ams_backend_mock.h"
 #include "ams_types.h"
+#include "macro_param_cache.h"
+#include "printer_discovery.h"
 
 #include <algorithm>
 #include <string>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
 
 namespace {
 
@@ -45,6 +47,29 @@ void require_actions_in_declared_sections(const char* backend_name,
         CHECK(std::find(declared_ids.begin(), declared_ids.end(), a.section) != declared_ids.end());
     }
 }
+
+/// An INDX with every optional macro, discovered and fed one frame with a
+/// mounted tool, so every section it can declare is declared.
+class IndxProbe : public helix::AmsBackendIndx {
+  public:
+    IndxProbe() : helix::AmsBackendIndx(nullptr, nullptr) {
+        using json = nlohmann::json;
+        json objects = json::array(
+            {"indx", "save_variables", "extruder", "toolhead", "gcode_macro TOOL_POSITIONS",
+             "gcode_macro _TOOLCHANGE_VARS", "gcode_macro CHANGE_TOOL", "gcode_macro PARK_TOOL",
+             "gcode_macro LOAD_FILAMENT", "gcode_macro T0", "gcode_macro T1"});
+        for (const char* m : {"MODE_STEALTH", "MODE_NORMAL", "MODE_SPORT", "TC_CYCLE_ALL",
+                              "MANUAL_TOOL_SEAT", "MANUAL_TOOL_REMOVE", "SET_TOOL_FILAMENT"}) {
+            objects.push_back(std::string("gcode_macro ") + m);
+        }
+        helix::PrinterDiscovery hw;
+        hw.parse_objects(objects);
+        set_discovery(hw);
+        size_tools(2);
+        handle_status(json{{"save_variables", {{"variables", {{"active_tool", 0}}}}},
+                           {"gcode_macro _TOOLCHANGE_VARS", {{"mode", "normal"}}}});
+    }
+};
 
 } // namespace
 
@@ -75,4 +100,8 @@ TEST_CASE("AMS backends declare a section for every device action", "[ams][secti
 
     helix::AmsBackendMock mock;
     require_actions_in_declared_sections("AmsBackendMock", mock);
+
+    IndxProbe indx;
+    REQUIRE_FALSE(indx.get_device_actions().empty());
+    require_actions_in_declared_sections("AmsBackendIndx", indx);
 }

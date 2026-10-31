@@ -15,10 +15,12 @@
 #include "app_globals.h"
 #include "filament_database.h"
 #include "filament_op_slot_resolver.h"
+#include "i18n_plural.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "pa_calibration.h"
+#include "pa_tuning.h"
 #include "preset_materials.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
@@ -40,11 +42,7 @@ namespace helix::ui {
 
 namespace {
 
-/// Four decimals, always. Every digit is meaningful, and a value shown as
-/// "0.04" would be typed into a slicer as a different filament's setting.
-std::string format_k(float k) {
-    return fmt::format("{:.4f}", k);
-}
+using helix::pa::format_k;
 
 /// m:ss, the shape of a clock somebody is actually waiting on.
 std::string format_clock(int seconds) {
@@ -56,7 +54,7 @@ std::string format_clock(int seconds) {
 
 int material_nozzle_temp(const std::string& name) {
     auto mat = filament::find_material(name.c_str());
-    return mat ? mat->nozzle_recommended() : PACalibrationPanel::TEMP_DEFAULT;
+    return mat ? mat->nozzle_recommended() : PACalibrationPanel::kTempDefault;
 }
 
 } // namespace
@@ -90,21 +88,21 @@ void PACalibrationPanel::init_subjects() {
         UI_MANAGED_SUBJECT_INT(action_is_stop_, 0, "pa_cal_action_is_stop", subjects_);
         UI_MANAGED_SUBJECT_INT(has_last_, 0, "pa_cal_has_last", subjects_);
 
-        for (int i = 0; i < MAX_TOOLS; ++i) {
+        for (int i = 0; i < kMaxTools; ++i) {
             UI_MANAGED_SUBJECT_INT(tool_selected_[i], i == 0 ? 1 : 0,
                                    fmt::format("pa_cal_tool_selected_{}", i).c_str(), subjects_);
             UI_MANAGED_SUBJECT_STRING(tool_sub_[i], tool_sub_buf_[i], "",
                                       fmt::format("pa_cal_tool_sub_{}", i).c_str(), subjects_);
         }
 
-        for (int i = 0; i < PRESET_SLOTS; ++i) {
+        for (int i = 0; i < kPresetSlots; ++i) {
             UI_MANAGED_SUBJECT_INT(preset_selected_[i], 0,
                                    fmt::format("pa_cal_preset_selected_{}", i).c_str(), subjects_);
             UI_MANAGED_SUBJECT_STRING(preset_temp_[i], preset_temp_buf_[i], "",
                                       fmt::format("pa_cal_preset_temp_{}", i).c_str(), subjects_);
         }
 
-        for (int i = 0; i < PHASE_COUNT; ++i) {
+        for (int i = 0; i < kPhaseCount; ++i) {
             UI_MANAGED_SUBJECT_INT(phase_state_[i], 0,
                                    fmt::format("pa_cal_phase_state_{}", i).c_str(), subjects_);
             UI_MANAGED_SUBJECT_STRING(phase_name_[i], phase_name_buf_[i], "",
@@ -196,7 +194,7 @@ void PACalibrationPanel::register_callbacks() {
                      if (!name.empty()) {
                          panel.selected_preset_ = slot;
                          panel.target_temp_ =
-                             std::clamp(material_nozzle_temp(name), TEMP_MIN, TEMP_MAX);
+                             std::clamp(material_nozzle_temp(name), kTempMin, kTempMax);
                          panel.refresh_presets();
                          panel.update_temp_display();
                      }
@@ -206,7 +204,7 @@ void PACalibrationPanel::register_callbacks() {
         {"on_pa_cal_temp_up",
          [](lv_event_t*) {
              auto& panel = get_global_pa_cal_panel();
-             panel.target_temp_ = std::min(panel.target_temp_ + TEMP_STEP, TEMP_MAX);
+             panel.target_temp_ = std::min(panel.target_temp_ + kTempStep, kTempMax);
              // The temperature no longer matches the preset that set it.
              panel.selected_preset_ = -1;
              panel.refresh_presets();
@@ -215,7 +213,7 @@ void PACalibrationPanel::register_callbacks() {
         {"on_pa_cal_temp_down",
          [](lv_event_t*) {
              auto& panel = get_global_pa_cal_panel();
-             panel.target_temp_ = std::max(panel.target_temp_ - TEMP_STEP, TEMP_MIN);
+             panel.target_temp_ = std::max(panel.target_temp_ - kTempStep, kTempMin);
              panel.selected_preset_ = -1;
              panel.refresh_presets();
              panel.update_temp_display();
@@ -290,7 +288,7 @@ bool PACalibrationPanel::printer_supports_calibration() {
 
 void PACalibrationPanel::refresh_tools(bool adopt_active) {
     auto& tools = helix::ToolState::instance();
-    const int count = std::min(tools.tool_count(), MAX_TOOLS);
+    const int count = std::min(tools.tool_count(), kMaxTools);
     const bool per_tool =
         helix::pacal::is_per_tool(get_printer_state().get_discovery()) && tools.is_multi_tool();
 
@@ -320,7 +318,7 @@ void PACalibrationPanel::refresh_tools(bool adopt_active) {
     // can never disagree with the rest of the app about which lane feeds a tool.
     AmsBackend* backend = AmsState::instance().get_backend();
     const AmsSystemInfo sys = backend ? backend->get_system_info() : AmsSystemInfo{};
-    for (int i = 0; i < MAX_TOOLS; ++i) {
+    for (int i = 0; i < kMaxTools; ++i) {
         lv_subject_set_int(&tool_selected_[i], i == selected_tool_ ? 1 : 0);
         // Only when the filament system actually knows. An empty chip says
         // "no information", which is true; a guessed or stale material would
@@ -337,7 +335,7 @@ void PACalibrationPanel::refresh_tools(bool adopt_active) {
 }
 
 void PACalibrationPanel::refresh_presets() {
-    for (int i = 0; i < PRESET_SLOTS; ++i) {
+    for (int i = 0; i < kPresetSlots; ++i) {
         const std::string name = helix::presets::name(i);
         // Nozzle only. The shared preset_material_N_temps subject carries
         // "220°C / 60°C"; the bed is not part of this decision and would read
@@ -380,8 +378,8 @@ void PACalibrationPanel::update_action_button() {
 }
 
 void PACalibrationPanel::update_phase_rows() {
-    lv_subject_copy_string(&phase_name_[PHASE_HEAT], lv_tr("Heat nozzle"));
-    lv_subject_copy_string(&phase_name_[PHASE_MEASURE], lv_tr("Measure"));
+    lv_subject_copy_string(&phase_name_[kPhaseHeat], lv_tr("Heat nozzle"));
+    lv_subject_copy_string(&phase_name_[kPhaseMeasure], lv_tr("Measure"));
 
     // 0 pending, 1 running, 2 done.
     int heat = 0;
@@ -395,8 +393,8 @@ void PACalibrationPanel::update_phase_rows() {
         heat = 2;
         measure = 2;
     }
-    lv_subject_set_int(&phase_state_[PHASE_HEAT], heat);
-    lv_subject_set_int(&phase_state_[PHASE_MEASURE], measure);
+    lv_subject_set_int(&phase_state_[kPhaseHeat], heat);
+    lv_subject_set_int(&phase_state_[kPhaseMeasure], measure);
 }
 
 void PACalibrationPanel::publish_last_result() {
@@ -430,14 +428,15 @@ void PACalibrationPanel::confirm_and_start() {
     // cannot check for itself. The plate must be ON - the opposite of the tool
     // offset screen, which is a real source of confusion for anyone who used
     // that one, so it is stated rather than implied.
-    const std::string msg =
-        fmt::format("{}\n\n{}\n\n{}",
-                    lv_tr("Filament must be loaded in the extruder, and the "
-                          "build plate on with nothing in the way of the head."),
-                    lv_tr("The nozzle extrudes a few short test moves in a corner, away from the "
-                          "print area, and repeats until it agrees with itself."),
-                    fmt::format(fmt::runtime(lv_tr("At {}°C, about {} minutes.")), target_temp_,
-                                estimate_minutes()));
+    const std::string msg = fmt::format(
+        "{}\n\n{}\n\n{}",
+        lv_tr("Filament must be loaded in the extruder, and the "
+              "build plate on with nothing in the way of the head."),
+        lv_tr("The nozzle extrudes a few short test moves in a corner, away from the "
+              "print area, and repeats until it agrees with itself."),
+        fmt::format(fmt::runtime(helix::ui::tr_plural(nullptr, "At {}°C, about {} minutes.",
+                                                      static_cast<uint64_t>(estimate_minutes()))),
+                    target_temp_, estimate_minutes()));
 
     modal_confirm(lv_tr("Before starting"), msg.c_str(), ModalSeverity::Warning, lv_tr("Start"),
                   []() { get_global_pa_cal_panel().begin_run(); });
@@ -622,7 +621,7 @@ void PACalibrationPanel::on_attempt(int attempt, int expected, float k_so_far) {
     if (expected > 0) {
         attempts_expected_ = expected;
     }
-    lv_subject_copy_string(&phase_meta_[PHASE_MEASURE],
+    lv_subject_copy_string(&phase_meta_[kPhaseMeasure],
                            fmt::format(fmt::runtime(lv_tr("attempt {}")), attempt).c_str());
 
     // The candidate the printer is trying right now. Without it the big
@@ -701,11 +700,11 @@ void PACalibrationPanel::on_nozzle_temp(int temp_deci) {
     // baked Noto subset and drew as a tofu box.
     lv_subject_copy_string(&big_sub_,
                            fmt::format(fmt::runtime(lv_tr("target {}°")), target_temp_).c_str());
-    lv_subject_copy_string(&phase_meta_[PHASE_HEAT],
+    lv_subject_copy_string(&phase_meta_[kPhaseHeat],
                            fmt::format("{:.0f}° / {}°", temp, target_temp_).c_str());
     update_progress_display();
 
-    if (temp >= static_cast<float>(target_temp_) - AT_TARGET_TOLERANCE_C) {
+    if (temp >= static_cast<float>(target_temp_) - kAtTargetToleranceC) {
         spdlog::info("[{}] At target ({:.1f}° >= {}°), starting measurement", get_name(), temp,
                      target_temp_);
         stop_heat_tracking();
@@ -740,7 +739,7 @@ void PACalibrationPanel::update_progress_display() {
                       : heat_start_temp_;
         const float heat_s = ThermalRateManager::instance().estimate_heating_seconds(
             selected_heater(), temp, static_cast<float>(target_temp_));
-        remaining_s = static_cast<int>(heat_s) + MEASURE_SECONDS_ESTIMATE;
+        remaining_s = static_cast<int>(heat_s) + kMeasureSecondsEstimate;
 
         // Heating owns the bar up to 80%: it is most of the wait, and a bar
         // that sprints to 90% then sits there is a worse lie than a slow one.
@@ -749,13 +748,13 @@ void PACalibrationPanel::update_progress_display() {
         pct = static_cast<int>(std::clamp(done, 0.0f, 1.0f) * 80.0f);
     } else {
         const uint32_t elapsed_ms = lv_tick_elaps(phase_start_tick_ms_);
-        remaining_s = MEASURE_SECONDS_ESTIMATE - static_cast<int>(elapsed_ms / 1000);
+        remaining_s = kMeasureSecondsEstimate - static_cast<int>(elapsed_ms / 1000);
         // Attempts are the honest progress signal when the firmware reports
         // them; otherwise fall back to the clock.
         const float frac =
             attempts_expected_ > 0
                 ? std::clamp(static_cast<float>(attempts_seen_) / attempts_expected_, 0.0f, 1.0f)
-                : std::clamp(static_cast<float>(elapsed_ms) / (MEASURE_SECONDS_ESTIMATE * 1000.0f),
+                : std::clamp(static_cast<float>(elapsed_ms) / (kMeasureSecondsEstimate * 1000.0f),
                              0.0f, 1.0f);
         pct = 80 + static_cast<int>(frac * 20.0f);
     }
@@ -803,5 +802,11 @@ std::string PACalibrationPanel::selected_heater() const {
 // ============================================================================
 // EVENT TRAMPOLINES
 // ============================================================================
+
+void open_pa_cal_panel(lv_obj_t* parent_screen) {
+    auto& panel = get_global_pa_cal_panel();
+    panel.set_api(get_moonraker_api());
+    panel.show(parent_screen);
+}
 
 } // namespace helix::ui

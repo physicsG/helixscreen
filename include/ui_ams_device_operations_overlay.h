@@ -45,6 +45,10 @@ struct DeviceDetailRow {
 /// A row appears only when its value is published.
 std::vector<DeviceDetailRow> ams_device_detail_rows(const AmsSystemInfo& info);
 
+/// Cancel the filament system's running operation and toast the outcome. The
+/// one abort every surface that offers one calls.
+void abort_ams_operation();
+
 /**
  * @class AmsDeviceOperationsOverlay
  * @brief Progressive disclosure overlay for AMS device operations
@@ -133,9 +137,6 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// Create a single section row (icon + label + chevron)
     void create_section_row(lv_obj_t* parent, const helix::printer::DeviceSection& section);
 
-    /// Convert AmsAction enum to human-readable string
-    static const char* action_to_string(int action);
-
     //
     // === State ===
     //
@@ -160,12 +161,6 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// Buffer for system info text
     char system_info_buf_[128] = {};
 
-    /// Subject for status text display
-    lv_subject_t status_subject_{};
-
-    /// Buffer for status text
-    char status_buf_[128] = {};
-
     /// Subject for bypass support (0=not supported, 1=supported).
     /// Folds in the force-bypass override, so this is what gates the controls.
     lv_subject_t supports_bypass_subject_{};
@@ -185,9 +180,6 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// Subject for backend presence (0=no backend, 1=has backend)
     lv_subject_t has_backend_subject_{};
 
-    /// 1 when the backend lets the user choose whether it unloads after a
-    /// print; gates the unload-after-print toggle.
-    lv_subject_t unload_after_print_configurable_subject_{};
     /// 1 when the bypass lane is virtual (no physical bypass sensor); gates
     /// the always-show-bypass row.
     lv_subject_t bypass_is_virtual_subject_{};
@@ -197,6 +189,7 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// only on systems whose firmware reports spool ids per lane (AFC, Happy
     /// Hare); no backend means hidden.
     lv_subject_t reports_spool_ids_subject_{};
+    lv_subject_t tags_name_spools_subject_{};
 
     /// Subject disabling the keep-spool-info-on-eject toggle (0=enabled,
     /// 1=firmware retention owns it). Set from
@@ -204,18 +197,6 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// remember_spool true everywhere, the toggle has no observable effect,
     /// so it is shown disabled with a note instead of silently lying.
     lv_subject_t printer_retains_spool_info_subject_{};
-
-    /// Subject for QIDI Box backend detection (0=not QIDI, 1=QIDI) — gates the
-    /// eject distance/velocity rows, which only apply to QIDI Box systems
-    lv_subject_t is_qidi_subject_{};
-
-    /// Display string subject for the QIDI eject distance value (e.g. "878 mm")
-    lv_subject_t qidi_eject_distance_display_subject_{};
-    char qidi_eject_distance_buf_[32] = {};
-
-    /// Display string subject for the QIDI eject velocity value (e.g. "100 mm/s")
-    lv_subject_t qidi_eject_velocity_display_subject_{};
-    char qidi_eject_velocity_buf_[32] = {};
 
     /// Subject gating the "Reset Endless Spool" row (0=hidden, 1=shown).
     /// Set from EndlessSpoolCapabilities::editable(), so the row lights up for
@@ -229,14 +210,20 @@ class AmsDeviceOperationsOverlay : public OverlayBase {
     /// change, since what the backend can cancel follows what it is running.
     lv_subject_t can_abort_subject_{};
 
+    /// Subjects enabling Home and Recover (0=disabled, 1=enabled), from
+    /// AmsBackend::reset_available() / recover_available() on refresh.
+    lv_subject_t can_home_subject_{};
+    lv_subject_t can_recover_subject_{};
+
     /// ams_device_detail_rows() as "Label: value" lines, "" when there are none.
     lv_subject_t details_subject_{};
     char details_buf_[512] = {};
     lv_subject_t has_details_subject_{}; ///< 1 when details_subject_ is non-empty
 
-    /// AMS action observer that keeps can_abort_subject_ current while the
-    /// overlay exists.
+    /// AMS action and can-cancel observers that keep can_abort_subject_
+    /// current while the overlay exists.
     ObserverGuard action_observer_;
+    ObserverGuard can_cancel_observer_;
 
     /// Cached section metadata for row click dispatch
     std::vector<helix::printer::DeviceSection> cached_sections_;

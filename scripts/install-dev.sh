@@ -49,13 +49,16 @@ if [ -z "${_HELIX_BUNDLED_INSTALLER:-}" ]; then
     . "$LIB_DIR/requirements.sh"
     . "$LIB_DIR/forgex.sh"
     . "$LIB_DIR/competing_uis.sh"
+    . "$LIB_DIR/desktop.sh"         # x86 desktop flavour (per-user, SDL window)
     . "$LIB_DIR/printer_seed.sh"      # generic per-printer settings.json seeding (#986)
     . "$LIB_DIR/klipper_include.sh"   # generic per-printer Klipper config include (#986)
     . "$LIB_DIR/release.sh"
     . "$LIB_DIR/service.sh"
     . "$LIB_DIR/audio.sh"
+    . "$LIB_DIR/helix_print_conf.sh"  # where [helix_print] lives, shared with moonraker-plugin/install.sh
     . "$LIB_DIR/moonraker.sh"
     . "$LIB_DIR/camera.sh"           # K2 ustreamer camera (replaces stock WebRTC)
+    . "$LIB_DIR/remote_screen.sh"    # nginx route for the built-in screen server
     . "$LIB_DIR/recovery.sh"
     . "$LIB_DIR/kiauh.sh"
     . "$LIB_DIR/uninstall.sh"  # uses functions from other modules

@@ -33,11 +33,13 @@
 #include "system/update_checker.h"
 #include "text_io.h"
 #include "touch_calibration_wrapper.h"
+#include "utils/network_validation.h"
 #include "wifi_link_monitor.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -255,6 +257,19 @@ json DebugBundleCollector::collect(const BundleOptions& options) {
         bundle["printer_config"] = json{{"error", e.what()}};
     }
 
+    try {
+        json plugin_response;
+        if (options.printer.journal_from_plugin) {
+            plugin_response = moonraker_get(get_moonraker_url(), "/server/helix/journal?limit=500");
+        }
+        bundle["event_journal"] =
+            build_event_journal(options.printer.journal_from_plugin, plugin_response,
+                                LocalEventJournal::instance().snapshot());
+    } catch (const std::exception& e) {
+        spdlog::warn("[DebugBundle] Failed to collect event journal: {}", e.what());
+        bundle["event_journal"] = json{{"error", e.what()}};
+    }
+
     if (options.include_klipper_logs) {
         try {
             auto klipper_log = collect_klipper_log_tail();
@@ -413,6 +428,7 @@ json DebugBundleCollector::build_diagnostics_info(const diagnostics::Diagnostics
 
     out["identity"] = json{
         {"platform_key", diag.identity.platform_key},
+        {"board", diag.identity.board},
         {"mod_flavor", diag.identity.mod_flavor},
         {"printer_model", diag.identity.printer_model},
         {"host_arch", diag.identity.host_arch},
@@ -579,12 +595,29 @@ PrinterSnapshot DebugBundleCollector::snapshot_printer_state() {
         // Discovery is read here with the subjects, on the main thread, so the
         // worker never races a re-discovery reassigning it.
         snap.mains_status_objects = helix::power_loss::required_status_objects(ps.get_discovery());
+        snap.journal_from_plugin =
+            decide_journal_source(ps.plugin_status_state().plugin_feature(
+                                      kJournalFeatureName, kJournalFeatureMinVersion))
+                .source == JournalSource::Plugin;
 
         snap.captured = true;
     } catch (const std::exception& e) {
         spdlog::debug("[DebugBundle] Failed to snapshot printer state: {}", e.what());
     }
     return snap;
+}
+
+std::string DebugBundleCollector::platform_model_for(const platform::Info* platform,
+                                                     board::Board board) {
+    if (platform == nullptr || !platform->has_printer_hardware) {
+        return {};
+    }
+    // The unified MIPS row names a board family, not hardware; the mismatch check
+    // against the user's printer model needs the actual board.
+    if (std::string(platform->key) == "mips") {
+        return board::info(board).display_name;
+    }
+    return platform->display_name;
 }
 
 json DebugBundleCollector::collect_printer_info(const PrinterSnapshot& snap) {
@@ -601,26 +634,8 @@ json DebugBundleCollector::collect_printer_info(const PrinterSnapshot& snap) {
         // case — same Klipper config, different hardware). Dashboard title
         // generation should prefer platform_model when it differs from model
         // so AD5X devices stop showing as "5M Pro" in the bundle list.
-        const std::string platform = helix::platform::current_key();
-        std::string display = helix::platform::display_name(platform);
-        if (platform == "mips") {
-            // The unified MIPS key names a board family, not hardware; the
-            // mismatch check below needs the actual board. Name it the way the
-            // installer does (the MACHINE= line or the Z-Mod chroot's os-release
-            // codename — flashforge_machine_id, mirroring ff_machine_id in
-            // scripts/lib/installer/platform.sh), which is what tells the
-            // FlashForge boards apart; a board that names itself neither way
-            // (the K1 series) falls back to the mod-layout probe.
-            if (auto machine = helix::flashforge_machine_id()) {
-                display = helix::flashforge_machine_display_name(*machine);
-            } else {
-                display =
-                    helix::platform::display_name(helix::ad5x_mod_layout_present() ? "ad5x" : "k1");
-            }
-        }
-        const auto* row = helix::platform::find(platform);
-        const std::string platform_model =
-            row && row->has_printer_hardware ? display : std::string{};
+        const std::string platform_model = platform_model_for(
+            helix::platform::find(helix::platform::current_key()), helix::board::current());
         if (!platform_model.empty()) {
             printer["platform_model"] = platform_model;
             // Substring match handles trim variations ("5M" vs "5M Pro"). If
@@ -661,15 +676,15 @@ json DebugBundleCollector::collect_printer_info(const PrinterSnapshot& snap) {
 // =============================================================================
 
 size_t DebugBundleCollector::resolve_log_tail_lines(int requested, size_t ring_capacity) {
-    // Historical fixed size, and logging_init's own floor (MIN_RING_LINES). Used
+    // Historical fixed size, and logging_init's own floor (kMinRingLines). Used
     // when there is no ring to measure, so the file/syslog cascade still gets a
     // bound rather than an open-ended read.
-    constexpr size_t FALLBACK_LOG_TAIL_LINES = 2000;
+    constexpr size_t kFallbackLogTailLines = 2000;
 
     if (requested > 0) {
         return static_cast<size_t>(requested);
     }
-    return ring_capacity > 0 ? ring_capacity : FALLBACK_LOG_TAIL_LINES;
+    return ring_capacity > 0 ? ring_capacity : kFallbackLogTailLines;
 }
 
 std::string DebugBundleCollector::collect_log_tail(int num_lines) {
@@ -1115,7 +1130,7 @@ json DebugBundleCollector::collect_moonraker_local_probe() {
     // collect_update_info()). get_moonraker_url() is the same accessor
     // collect_moonraker_info() already uses from this thread.
     std::string host;
-    uint16_t port = 7125;
+    uint16_t port = helix::kDefaultMoonrakerPort;
     const std::string base_url = get_moonraker_url();
     if (!helix::diag::split_host_port(base_url, host, port)) {
         probe["probed"] = false;
@@ -1351,7 +1366,7 @@ json DebugBundleCollector::extract_gcode_macro_names(const json& object_list) {
         if (name.size() <= PREFIX_LEN)
             continue;
         result.push_back(name.substr(PREFIX_LEN));
-        if (result.size() >= MAX_GCODE_MACRO_NAMES)
+        if (result.size() >= kMaxGcodeMacroNames)
             break;
     }
     return result;
@@ -1493,15 +1508,15 @@ static std::vector<PlatformFile> platform_diagnostic_files(const std::string& pl
 
 // Fetch a text file from Moonraker. Returns body + HTTP status; an HTTP-status
 // of 404 is a normal "not present on this device" signal callers should treat
-// as skip-silently. Truncates the body at MAX_TEXT_BYTES to keep bundles small.
+// as skip-silently. Truncates the body at kMaxTextBytes to keep bundles small.
 static RawHttpResult http_get_text(const std::string& base_url, const std::string& endpoint,
                                    int timeout_sec) {
     auto raw = http_get_raw(base_url, endpoint, timeout_sec);
     // Cap text-file capture at 256 KB. Diagnostic files we currently ship are
     // < 8 KB; the cap is a guardrail against future entries that grow large.
-    constexpr size_t MAX_TEXT_BYTES = 256 * 1024;
-    if (raw.body.size() > MAX_TEXT_BYTES) {
-        raw.body.resize(MAX_TEXT_BYTES);
+    constexpr size_t kMaxTextBytes = 256 * 1024;
+    if (raw.body.size() > kMaxTextBytes) {
+        raw.body.resize(kMaxTextBytes);
         raw.body += "\n[truncated]\n";
     }
     return raw;
@@ -1616,11 +1631,11 @@ json DebugBundleCollector::walk_include_tree(const std::string& root,
         // dangling for every pattern after the first match.
         const std::string path = queue[i];
 
-        if (files.size() >= MAX_CONFIG_FILES) {
+        if (files.size() >= kMaxConfigFiles) {
             truncate_reason = "file count";
             break;
         }
-        if (total_bytes >= MAX_CONFIG_BYTES) {
+        if (total_bytes >= kMaxConfigBytes) {
             truncate_reason = "byte budget";
             break;
         }
@@ -1714,21 +1729,53 @@ json DebugBundleCollector::collect_printer_config() {
 /// Collapse digit runs so lines that differ only by numbers share a shape:
 /// "Stats 14645.9: ... sysload=0.60" and "Stats 14646.9: ... sysload=0.58"
 /// both become "Stats N.N: ... sysload=N.N".
+static bool is_hex_digit(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+/// End of a Python bytes literal (b'...' or b"...") opening at `i`, or npos.
+static size_t bytes_literal_end(const std::string& line, size_t i) {
+    if (line[i] != 'b' || i + 1 >= line.size() || (line[i + 1] != '\'' && line[i + 1] != '"'))
+        return std::string::npos;
+    if (i > 0 && (std::isalnum(static_cast<unsigned char>(line[i - 1])) || line[i - 1] == '_'))
+        return std::string::npos; // the tail of a word, not a literal
+    const char quote = line[i + 1];
+    for (size_t j = i + 2; j < line.size(); ++j) {
+        if (line[j] == '\\')
+            ++j;
+        else if (line[j] == quote)
+            return j + 1;
+    }
+    return std::string::npos;
+}
+
+/// A line's shape: every number folded to N, so repeats of one message collapse.
+/// A number runs on through hex digits (0x1a, 3f), and a Python bytes literal
+/// folds whole, because serial-bus logging (a Creality CFS polls over RS-485)
+/// prints a fresh payload on every line of otherwise identical chatter.
 static std::string line_shape(const std::string& line) {
     std::string shape;
     shape.reserve(line.size());
-    bool in_digits = false;
-    for (char c : line) {
-        const bool is_digit = (c >= '0' && c <= '9');
-        if (is_digit) {
-            if (!in_digits) {
-                shape += 'N';
-                in_digits = true;
-            }
+    size_t i = 0;
+    while (i < line.size()) {
+        const size_t literal_end = bytes_literal_end(line, i);
+        if (literal_end != std::string::npos) {
+            shape += "b'N'";
+            i = literal_end;
             continue;
         }
-        in_digits = false;
+        const char c = line[i];
+        if (c >= '0' && c <= '9') {
+            shape += 'N';
+            ++i;
+            if (c == '0' && i < line.size() && (line[i] == 'x' || line[i] == 'X'))
+                ++i;
+            while (i < line.size() && is_hex_digit(line[i]))
+                ++i;
+            continue;
+        }
         shape += c;
+        ++i;
     }
     return shape;
 }
@@ -1736,15 +1783,15 @@ static std::string line_shape(const std::string& line) {
 /// Klipper's config dump markers (klippy/configfile.py, PrinterConfig::log_config).
 /// The whole of printer.cfg is written between them on every start and on every
 /// log rollover.
-static constexpr const char* KLIPPER_CONFIG_HEADER = "===== Config file =====";
-static constexpr const char* KLIPPER_CONFIG_FOOTER = "=======================";
+static constexpr const char* kKlipperConfigHeader = "===== Config file =====";
+static constexpr const char* kKlipperConfigFooter = "=======================";
 
 /// Klipper's per-second runtime stats line. Used as the discriminator for an
 /// orphan footer: the config dump contains no line starting with "Stats " (the
 /// dump indents every continuation with a tab, and config keys are lowercase),
 /// while a live log window is saturated with them. Measured on Vger1700's
 /// printer.log: 0 before the footer, 3284 after.
-static constexpr const char* KLIPPER_STATS_PREFIX = "Stats ";
+static constexpr const char* kKlipperStatsPrefix = "Stats ";
 
 /// Positional backstop for a lone footer, used alongside the "no Stats yet"
 /// rule above. Deliberately generous: a real AD5X+ZMOD dump is 6668 lines, not
@@ -1752,7 +1799,7 @@ static constexpr const char* KLIPPER_STATS_PREFIX = "Stats ";
 /// the elision whenever the fetch cuts near the top of a dump. The Stats rule
 /// is what actually prevents over-reach; this only caps the damage in a window
 /// that somehow contains no runtime output at all.
-static constexpr size_t ORPHAN_FOOTER_MAX_INDEX = 25000;
+static constexpr size_t kOrphanFooterMaxIndex = 25000;
 
 /// Drop Klipper's config dump(s) from a raw log window, in place.
 ///
@@ -1789,7 +1836,7 @@ static void strip_klipper_config_dumps(std::vector<std::string>& lines) {
         const std::string& line = lines[i];
 
         if (header_at != std::string::npos) {
-            if (line == KLIPPER_CONFIG_FOOTER) {
+            if (line == kKlipperConfigFooter) {
                 note_elision(i - header_at + 1);
                 header_at = std::string::npos;
                 ++dumps_closed;
@@ -1797,7 +1844,7 @@ static void strip_klipper_config_dumps(std::vector<std::string>& lines) {
             continue; // inside the dump: header, body, and footer all go
         }
 
-        if (line == KLIPPER_CONFIG_HEADER) {
+        if (line == kKlipperConfigHeader) {
             header_at = i;
             continue;
         }
@@ -1809,15 +1856,15 @@ static void strip_klipper_config_dumps(std::vector<std::string>& lines) {
         //   - no runtime "Stats " line has been seen, which is what actually
         //     distinguishes a cut-off dump from a stray rule line in a live log;
         //   - a generous positional backstop for a window with no runtime output.
-        if (line == KLIPPER_CONFIG_FOOTER && dumps_closed == 0 && !runtime_output_seen &&
-            i <= ORPHAN_FOOTER_MAX_INDEX) {
+        if (line == kKlipperConfigFooter && dumps_closed == 0 && !runtime_output_seen &&
+            i <= kOrphanFooterMaxIndex) {
             out.clear();
             note_elision(i + 1);
             ++dumps_closed;
             continue;
         }
 
-        if (!runtime_output_seen && line.rfind(KLIPPER_STATS_PREFIX, 0) == 0) {
+        if (!runtime_output_seen && line.rfind(kKlipperStatsPrefix, 0) == 0) {
             runtime_output_seen = true;
         }
         out.push_back(line);
@@ -2006,7 +2053,7 @@ std::string DebugBundleCollector::fetch_log_tail(const std::string& base_url,
 std::string DebugBundleCollector::collect_local_log_tail(const std::string& log_name, int num_lines,
                                                          int condense_max_repeats) {
     std::string host;
-    uint16_t port = 7125;
+    uint16_t port = helix::kDefaultMoonrakerPort;
     if (!helix::diag::split_host_port(get_moonraker_url(), host, port))
         return {};
     // A remote printer's logs are not on our disk, and reading a same-named file
@@ -2137,28 +2184,50 @@ std::string DebugBundleCollector::prepend_rotated_predecessor(const std::string&
 std::string DebugBundleCollector::collect_klipper_log_tail(int num_lines) {
     std::string base_url = get_moonraker_url();
     if (base_url.empty())
-        return collect_local_log_tail("klippy.log", num_lines, KLIPPER_CONDENSE_MAX_REPEATS);
+        return collect_local_log_tail("klippy.log", num_lines, kKlipperCondenseMaxRepeats);
     // 4 MiB of raw klippy.log is ~80 minutes of Klipper's 1-Stats-line-per-second
     // output, versus ~10 minutes for the old 512 KiB tail. condense_klipper_log()
     // then strips the Stats padding, so the retained payload stays in the same
     // ballpark as before while reaching far enough back to contain the incident
     // (bundle UJCCQP6S: 615 of 635 captured lines were Stats, and the MCU
     // shutdown being investigated had scrolled off hours earlier).
-    constexpr int KLIPPER_TAIL_BYTES = 4 * 1024 * 1024;
+    constexpr int kKlipperTailBytes = 4 * 1024 * 1024;
     int raw_bytes = 0;
-    auto body = fetch_log_tail(base_url, "/server/files/klippy.log", num_lines, KLIPPER_TAIL_BYTES,
-                               KLIPPER_CONDENSE_MAX_REPEATS, &raw_bytes);
+    auto body = fetch_log_tail(base_url, "/server/files/klippy.log", num_lines, kKlipperTailBytes,
+                               kKlipperCondenseMaxRepeats, &raw_bytes);
     if (body.empty())
-        return collect_local_log_tail("klippy.log", num_lines, KLIPPER_CONDENSE_MAX_REPEATS);
+        return collect_local_log_tail("klippy.log", num_lines, kKlipperCondenseMaxRepeats);
 
     // klippy.log is the fragile one. Klipper's handler rotates on a clock jump,
     // and an RTC-less printer jumps its clock on every boot — Vger1700's device
     // carried both printer.log.1970-01-01 and printer.log.2025-12-31 as proof.
     // "klippy.log" is a Moonraker alias; on AD5M/AD5X the real file is
     // printer.log, so rotations must be matched under both names.
-    static const std::vector<std::string> STEMS = {"klippy.log", "printer.log"};
-    return prepend_rotated_predecessor(base_url, STEMS, body, raw_bytes, KLIPPER_TAIL_BYTES,
-                                       num_lines, KLIPPER_CONDENSE_MAX_REPEATS);
+    static const std::vector<std::string> kStems = {"klippy.log", "printer.log"};
+    return prepend_rotated_predecessor(base_url, kStems, body, raw_bytes, kKlipperTailBytes,
+                                       num_lines, kKlipperCondenseMaxRepeats);
+}
+
+std::string DebugBundleCollector::fetch_klipper_log_window(int tail_bytes) {
+    const std::string base_url = get_moonraker_url();
+    if (base_url.empty()) {
+        return {};
+    }
+    // The line cap only backstops the byte window: a reader of shutdowns needs
+    // every Stats line in it.
+    constexpr int kWindowMaxLines = 1 << 20;
+    return fetch_log_tail(base_url, "/server/files/klippy.log", kWindowMaxLines, tail_bytes);
+}
+
+json DebugBundleCollector::build_event_journal(bool from_plugin, const json& plugin_response,
+                                               const std::vector<JournalEntry>& screen) {
+    const json* result =
+        from_plugin ? helix::json_util::find_member(plugin_response, "result") : nullptr;
+    const json section =
+        result != nullptr
+            ? build_event_journal_section(JournalSource::Plugin, parse_journal_result(*result))
+            : build_event_journal_section(JournalSource::Screen, screen);
+    return sanitize_json(section);
 }
 
 std::string DebugBundleCollector::collect_moonraker_log_tail(int num_lines) {
@@ -2177,16 +2246,16 @@ std::string DebugBundleCollector::collect_moonraker_log_tail(int num_lines) {
     // klippy.log with it while moonraker.log kept the whole incident.
     std::string base_url = get_moonraker_url();
     if (base_url.empty())
-        return collect_local_log_tail("moonraker.log", num_lines, MOONRAKER_CONDENSE_MAX_REPEATS);
+        return collect_local_log_tail("moonraker.log", num_lines, kMoonrakerCondenseMaxRepeats);
     int raw_bytes = 0;
     auto body = fetch_log_tail(base_url, "/server/files/moonraker.log", num_lines,
-                               MOONRAKER_TAIL_BYTES, MOONRAKER_CONDENSE_MAX_REPEATS, &raw_bytes);
+                               kMoonrakerTailBytes, kMoonrakerCondenseMaxRepeats, &raw_bytes);
     if (body.empty())
-        return collect_local_log_tail("moonraker.log", num_lines, MOONRAKER_CONDENSE_MAX_REPEATS);
+        return collect_local_log_tail("moonraker.log", num_lines, kMoonrakerCondenseMaxRepeats);
 
-    static const std::vector<std::string> STEMS = {"moonraker.log"};
-    return prepend_rotated_predecessor(base_url, STEMS, body, raw_bytes, MOONRAKER_TAIL_BYTES,
-                                       num_lines, MOONRAKER_CONDENSE_MAX_REPEATS);
+    static const std::vector<std::string> kStems = {"moonraker.log"};
+    return prepend_rotated_predecessor(base_url, kStems, body, raw_bytes, kMoonrakerTailBytes,
+                                       num_lines, kMoonrakerCondenseMaxRepeats);
 }
 
 // =============================================================================
@@ -2349,7 +2418,7 @@ const char* DebugBundleCollector::worker_url() {
     if (const char* u = std::getenv("HELIX_BUNDLE_WORKER_URL")) {
         return u;
     }
-    return WORKER_URL;
+    return kWorkerUrl;
 }
 
 namespace {

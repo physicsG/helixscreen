@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    One axis (speed or flow) of the Speed / Flow home widget. The widget publishes
+    speed_flow_rung (SizeRung), speed_flow_show_measured and speed_flow_show_steppers
+    from decide_speed_flow_layout(); everything this part shows or hides binds off them.
+
+    Rungs: 0 glance and 2 column (icon above a small value), 1 strip (icon beside a small value), 3 cell (icon and
+    value in a row, measured reading under it), 4 wide (label, value, measured reading
+    in one row), 5 full (label and measured reading above a large value with steppers).
+  -->
+  <api>
+    <prop name="icon" type="string" default="speed"/>
+    <prop name="label" type="string" default=""/>
+    <prop name="label_tag" type="string" default=""/>
+    <prop name="value_subject" type="string" default=""/>
+    <prop name="measured_subject" type="string" default=""/>
+    <prop name="status_subject" type="string" default=""/>
+    <prop name="step_callback" type="string" default=""/>
+    <prop name="reset_callback" type="string" default=""/>
+    <!-- Percent each stepper sends; two props because XML cannot negate one. -->
+    <prop name="step_down" type="string" default="-5"/>
+    <prop name="step_up" type="string" default="5"/>
+  </api>
+  <styles>
+    <style name="sf_warn" text_color="#warning"/>
+    <style name="sf_normal" text_color="#text"/>
+    <style name="sf_danger" text_color="#danger"/>
+    <style name="sf_fill" width="100%"/>
+    <style name="sf_shrink" width="content"/>
+    <style name="sf_small_font" text_font="#font_xs"/>
+    <style name="sf_stacked" layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center"/>
+    <style name="sf_inline" layout="flex" flex_flow="row" flex_main_place="start" flex_cross_place="center"/>
+  </styles>
+  <view name="speed_flow_part"
+        extends="lv_obj" height="content" flex_flow="column" style_flex_main_place="center"
+        style_flex_cross_place="center" style_pad_all="0" style_pad_row="#space_xxs" style_pad_column="#space_xs"
+        style_bg_opa="0" style_border_width="0" scrollable="false" clickable="false" event_bubble="true">
+    <!-- Wide and Full rows span the tile; the narrower rungs size to their content. -->
+    <bind_style_if_lt name="sf_shrink" subject="speed_flow_rung" ref_value="4"/>
+    <bind_style_if_ge name="sf_fill" subject="speed_flow_rung" ref_value="4"/>
+    <!-- Glance to Wide: one line of icon, label and value. Hidden at Full, which
+         has its own two-line block below. -->
+    <pass_through name="speed_flow_main" height="content" style_pad_row="0" style_pad_column="#space_xs">
+      <bind_style_if_lt name="sf_shrink" subject="speed_flow_rung" ref_value="4"/>
+      <bind_style_if_ge name="sf_fill" subject="speed_flow_rung" ref_value="4"/>
+      <bind_style_if name="sf_stacked" cond="speed_flow_rung eq 0 or speed_flow_rung eq 2"/>
+      <bind_style_if name="sf_inline" cond="speed_flow_rung eq 1 or speed_flow_rung gt 2"/>
+      <bind_flag_if_eq subject="speed_flow_rung" flag="hidden" ref_value="5"/>
+      <icon name="speed_flow_icon" src="$icon" size="xs" variant="muted" clickable="false" event_bubble="true">
+        <bind_flag_if_ge subject="speed_flow_rung" flag="hidden" ref_value="4"/>
+      </icon>
+      <text_body name="speed_flow_label"
+                 text="$label" translation_tag="$label_tag" style_text_color="#text_muted" flex_grow="1"
+                 clickable="false" event_bubble="true">
+        <bind_flag_if_lt subject="speed_flow_rung" flag="hidden" ref_value="4"/>
+      </text_body>
+      <text_body name="speed_flow_value" bind_text="$value_subject" clickable="false" event_bubble="true">
+        <bind_style_if_lt name="sf_small_font" subject="speed_flow_rung" ref_value="3"/>
+        <bind_style_if_eq name="sf_warn" subject="$status_subject" ref_value="1"/>
+        <bind_style_if_eq name="sf_danger" subject="$status_subject" ref_value="2"/>
+      </text_body>
+      <text_small name="speed_flow_measured_right"
+                  bind_text="$measured_subject" style_text_color="#text_muted" clickable="false" event_bubble="true">
+        <bind_flag_if_not_eq subject="speed_flow_rung" flag="hidden" ref_value="4"/>
+        <bind_flag_if_eq subject="speed_flow_show_measured" flag="hidden" ref_value="0"/>
+      </text_small>
+    </pass_through>
+    <!-- The reading under the value at Cell. -->
+    <text_tiny name="speed_flow_measured_below"
+               bind_text="$measured_subject" style_text_color="#text_muted" clickable="false" event_bubble="true">
+      <bind_flag_if_not_eq subject="speed_flow_rung" flag="hidden" ref_value="3"/>
+      <bind_flag_if_eq subject="speed_flow_show_measured" flag="hidden" ref_value="0"/>
+    </text_tiny>
+    <!-- Full: label and measured reading above a large value flanked by steppers. -->
+    <pass_through name="speed_flow_full"
+                  width="100%" height="content" flex_flow="column" style_flex_main_place="start"
+                  style_flex_cross_place="center" style_pad_row="#space_xxs">
+      <bind_flag_if_not_eq subject="speed_flow_rung" flag="hidden" ref_value="5"/>
+      <pass_through width="100%"
+                    height="content" flex_flow="row" style_flex_main_place="space_between"
+                    style_flex_cross_place="center">
+        <text_small name="speed_flow_full_label"
+                    text="$label" translation_tag="$label_tag" style_text_color="#text_muted" clickable="false"
+                    event_bubble="true"/>
+        <text_small name="speed_flow_full_measured"
+                    bind_text="$measured_subject" style_text_color="#text_muted" clickable="false" event_bubble="true">
+          <bind_flag_if_eq subject="speed_flow_show_measured" flag="hidden" ref_value="0"/>
+        </text_small>
+      </pass_through>
+      <pass_through width="100%"
+                    height="content" flex_flow="row" style_flex_main_place="space_between"
+                    style_flex_cross_place="center">
+        <ui_button name="speed_flow_minus" width="#button_height_sm" height="#button_height_sm" text="-">
+          <bind_flag_if_eq subject="speed_flow_show_steppers" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="$step_callback" user_data="$step_down"/>
+        </ui_button>
+        <!-- Long-press resets this axis; the callback ignores it while the steppers are hidden. -->
+        <text_heading name="speed_flow_full_value"
+                      bind_text="$value_subject" flex_grow="1" style_text_align="center" clickable="true"
+                      event_bubble="true">
+          <bind_style_if_eq name="sf_normal" subject="$status_subject" ref_value="0"/>
+          <bind_style_if_eq name="sf_warn" subject="$status_subject" ref_value="1"/>
+          <bind_style_if_eq name="sf_danger" subject="$status_subject" ref_value="2"/>
+          <event_cb trigger="long_pressed" callback="$reset_callback"/>
+        </text_heading>
+        <ui_button name="speed_flow_plus" width="#button_height_sm" height="#button_height_sm" text="+">
+          <bind_flag_if_eq subject="speed_flow_show_steppers" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="$step_callback" user_data="$step_up"/>
+        </ui_button>
+      </pass_through>
+    </pass_through>
+  </view>
+</component>

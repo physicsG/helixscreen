@@ -111,9 +111,15 @@ TEST_CASE("parse_decimal - decimal point is always '.' regardless of the process
     std::string saved = std::setlocale(LC_NUMERIC, nullptr);
     const char* applied = std::setlocale(LC_NUMERIC, "de_DE.UTF-8");
     if (applied == nullptr) {
-        WARN("de_DE.UTF-8 locale not installed; skipping locale-independence check");
-    } else {
-        CHECK(parse("42.5") == Approx(42.5f));
+        WARN("de_DE.UTF-8 locale not installed; checking the unchanged process locale only");
     }
+    // A comma-decimal locale would read "42,5" as 42.5 and stop "42.5" at the dot.
+    CHECK(parse("42.5") == Approx(42.5f));
+    std::string comma = "42,5";
+    float value = 0.0f;
+    const auto [ptr, ec] = parse_decimal(comma.data(), comma.data() + comma.size(), value);
+    CHECK(ec == std::errc{});
+    CHECK(ptr == comma.data() + 2); // the comma is never a decimal separator
+    CHECK(value == Approx(42.0f));
     std::setlocale(LC_NUMERIC, saved.c_str());
 }

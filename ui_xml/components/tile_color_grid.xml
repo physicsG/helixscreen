@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- A home tile's colour choice: the tile palette (include/tile_color.h) as a
+     row_wrap of swatches, the last being "no colour". The colours and the ring
+     come from tile_color_swatch_color_<i> and tile_color_selected, which
+     tile_color::publish_palette() fills when a configure UI opens; the fixed
+     count matches the palette. Swatches are named tile_color_swatch_<i>. -->
+<component>
+  <api>
+    <!-- Required: each host names its own click handler; the swatch index is its user_data. -->
+    <prop name="swatch_callback" type="string"/>
+  </api>
+  <view name="tile_color_grid"
+        extends="lv_obj" width="100%" height="content" flex_flow="row_wrap" style_pad_all="#space_xs"
+        style_pad_gap="#swatch_grid_gap" scrollable="false">
+    <repeat count="16">
+      <color_swatch name="tile_color_swatch_${i}"
+                    index="${i}" color_subject="tile_color_swatch_color_${i}" selected_subject="tile_color_selected"
+                    callback="$swatch_callback" size="#swatch_grid_size" hit="#swatch_grid_gap_half"
+                    reach="#swatch_grid_ring_reach" ring="styles.grid_swatch_ring"/>
+    </repeat>
+  </view>
+</component>

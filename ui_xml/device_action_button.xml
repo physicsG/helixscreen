@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One AMS device-action button, half of a device_action_button_row.
+     AmsDeviceSectionDetailOverlay creates one per BUTTON action and names it
+     after the action's id, which on_device_action_clicked reads back. -->
+<component>
+  <api>
+    <prop name="text" type="string" default=""/>
+    <prop name="icon" type="string" default=""/>
+    <!-- Subject that is 1 while the action is unavailable. A binding, not a fixed
+         state, so it composes with moves_machine's own disabled binding. -->
+    <prop name="disabled_subject" type="string" default=""/>
+    <prop name="moves_machine" type="string" default="false"/>
+    <!-- An expression that disables the button, for motion gated more narrowly
+         than moves_machine (one still allowed while the print is paused). -->
+    <prop name="disabled_cond" type="string" default="0 eq 1"/>
+  </api>
+  <view extends="ui_button" text="$text" icon="$icon" flex_grow="1" moves_machine="$moves_machine">
+    <bind_state_if_eq subject="$disabled_subject" state="disabled" ref_value="1"/>
+    <bind_state_if cond="$disabled_cond" state="disabled"/>
+    <event_cb trigger="clicked" callback="on_device_action_clicked"/>
+  </view>
+</component>

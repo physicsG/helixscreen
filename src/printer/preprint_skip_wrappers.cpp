@@ -9,9 +9,9 @@ namespace helix::skip_wrappers {
 
 namespace {
 
-constexpr const char* BASE_PREFIX = "_HELIX_BASE_";
+constexpr const char* kBasePrefix = "_HELIX_BASE_";
 
-constexpr Op ALL_OPS[] = {Op::BedMesh, Op::Qgl, Op::ZTilt};
+constexpr Op kAllOps[] = {Op::BedMesh, Op::Qgl, Op::ZTilt};
 
 /// One gcode_macro section an Op writes. A consuming wrapper skips its command
 /// when the flag is 0 and restores the flag; a guarding one only skips.
@@ -47,18 +47,18 @@ const char* label_for(Op op) {
 }
 
 std::string set_flag_line(Op op, const std::string& value) {
-    return std::string("SET_GCODE_VARIABLE MACRO=") + PREP_MACRO + " VARIABLE=" + flag_for(op) +
+    return std::string("SET_GCODE_VARIABLE MACRO=") + kPrepMacro + " VARIABLE=" + flag_for(op) +
            " VALUE=" + value;
 }
 
 std::string flag_expr(Op op) {
-    return std::string("printer[\"gcode_macro ") + PREP_MACRO + "\"]." + flag_for(op) + "|int";
+    return std::string("printer[\"gcode_macro ") + kPrepMacro + "\"]." + flag_for(op) + "|int";
 }
 
 /// The gcode body lines, unindented. Each command on its own line: `;` starts
 /// a comment in a config value.
 std::vector<std::string> wrapper_body(Op op, const Wrapper& w) {
-    const std::string base = std::string(BASE_PREFIX) + w.command + " {rawparams}";
+    const std::string base = std::string(kBasePrefix) + w.command + " {rawparams}";
     if (!w.consumes) {
         return {"{% if " + flag_expr(op) + " == 1 %}", base, "{% endif %}"};
     }
@@ -113,7 +113,7 @@ bool wrapper_intact(const nlohmann::json& settings, Op op, const Wrapper& w) {
         return false;
     }
     return helix::text_io::to_upper(rename->get<std::string>()) ==
-               std::string(BASE_PREFIX) + w.command &&
+               std::string(kBasePrefix) + w.command &&
            normalized_lines(gcode->get<std::string>()) == wrapper_body(op, w);
 }
 
@@ -168,10 +168,10 @@ bool ours_intact(const nlohmann::json& configfile_settings, Op op) {
 
 std::vector<Op> active(const nlohmann::json& configfile_settings) {
     std::vector<Op> ops;
-    if (macro_section(configfile_settings, PREP_MACRO) == nullptr) {
+    if (macro_section(configfile_settings, kPrepMacro) == nullptr) {
         return ops;
     }
-    for (Op op : ALL_OPS) {
+    for (Op op : kAllOps) {
         if (ours_intact(configfile_settings, op)) {
             ops.push_back(op);
         }
@@ -229,9 +229,9 @@ bool update_gates(Gates& gates, const nlohmann::json& status) {
             changed |= fold_bool(gates.z_tilt_applied, a->get<bool>());
         }
     }
-    auto prep = status.find(std::string("gcode_macro ") + PREP_MACRO);
+    auto prep = status.find(std::string("gcode_macro ") + kPrepMacro);
     if (prep != status.end() && prep->is_object()) {
-        for (Op op : ALL_OPS) {
+        for (Op op : kAllOps) {
             auto v = prep->find(flag_for(op));
             if (v != prep->end() && v->is_number()) {
                 changed |=
@@ -278,7 +278,7 @@ nlohmann::json status_fields(const std::vector<Op>& active, bool has_z_tilt) {
             fields[has_z_tilt ? "z_tilt" : "z_tilt_ng"] = nlohmann::json::array({"applied"});
         }
     }
-    fields[std::string("gcode_macro ") + PREP_MACRO] = std::move(flags);
+    fields[std::string("gcode_macro ") + kPrepMacro] = std::move(flags);
     return fields;
 }
 
@@ -288,7 +288,7 @@ PrePrintOption option_for(Op op) {
     opt.category = PrePrintCategory::Mechanical;
     opt.order = static_cast<int>(op);
     opt.default_enabled = true; // PRINT_START runs the step unless told to skip it
-    opt.requires_macro = PREP_MACRO;
+    opt.requires_macro = kPrepMacro;
     opt.strategy_kind = PrePrintStrategyKind::PreStartGcode;
     PrePrintStrategyPreStartGcode line;
     line.gcode_template = set_flag_line(op, "{value}");
@@ -298,7 +298,7 @@ PrePrintOption option_for(Op op) {
 }
 
 bool is_wrapper_option(const PrePrintOption& opt) {
-    return opt.requires_macro == PREP_MACRO;
+    return opt.requires_macro == kPrepMacro;
 }
 
 LoadWatch::Verdict LoadWatch::feed(bool ready, bool error) {
@@ -314,7 +314,7 @@ LoadWatch::Verdict LoadWatch::feed(bool ready, bool error) {
 
 std::vector<Op> wrappable(const nlohmann::json& configfile_settings) {
     std::vector<Op> ops;
-    for (Op op : ALL_OPS) {
+    for (Op op : kAllOps) {
         if (!has_builtin(configfile_settings, op)) {
             continue;
         }
@@ -341,7 +341,7 @@ std::string generate(const std::vector<Op>& ops) {
         "# Lets the print details panel skip a leveling step for one print\n"
         "# without editing PRINT_START. Uninstall the helper macros to remove it.\n\n";
 
-    out += std::string("[gcode_macro ") + PREP_MACRO + "]\n";
+    out += std::string("[gcode_macro ") + kPrepMacro + "]\n";
     out += "description: Reset the HelixScreen per-print skips\n";
     for (Op op : ops) {
         out += std::string("variable_") + flag_for(op) + ": 1\n";
@@ -354,7 +354,7 @@ std::string generate(const std::vector<Op>& ops) {
     for (Op op : ops) {
         for (const auto& w : wrappers_for(op)) {
             out += std::string("\n[gcode_macro ") + w.command + "]\n";
-            out += std::string("rename_existing: ") + BASE_PREFIX + w.command + "\n";
+            out += std::string("rename_existing: ") + kBasePrefix + w.command + "\n";
             out += "description: Wrapped by HelixScreen for per-print skips\n";
             out += "gcode:\n";
             for (const auto& line : wrapper_body(op, w)) {

@@ -1,0 +1,467 @@
+{
+  "api_version": 1,
+  "status": "ready",
+  "temp": 25,
+  "dryer_status": {},
+  "gate_status": [
+    1,
+    1,
+    1,
+    1
+  ],
+  "active_device": 0,
+  "device_count": 4,
+  "ace_heads": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "mode": "head",
+  "quad_replenish": false,
+  "quad_first": false,
+  "spools": {},
+  "spool_binding": {},
+  "swap_phase": "idle",
+  "last_swap_result": null,
+  "event_seq": 0,
+  "head_source": {
+    "0": {
+      "ace_index": 0,
+      "slot": 0,
+      "type": "PLA",
+      "color": "FF0000",
+      "brand": "Anycubic",
+      "subtype": "",
+      "load_failed": false
+    },
+    "1": null,
+    "2": {
+      "ace_index": 2,
+      "slot": 3,
+      "type": "PLA",
+      "color": "000000",
+      "brand": "Generic",
+      "subtype": "",
+      "load_failed": false
+    }
+  },
+  "head_manual": {
+    "0": false,
+    "1": false,
+    "2": false,
+    "3": false
+  },
+  "head_feeder": {
+    "0": false,
+    "1": false,
+    "2": false,
+    "3": false
+  },
+  "head_ace": {
+    "0": 0,
+    "1": 1,
+    "2": 2,
+    "3": 3
+  },
+  "swap_in_progress": false,
+  "unload_all_active": false,
+  "aces": [
+    {
+      "idx": 0,
+      "connected": true,
+      "connect_error": "",
+      "protocol": "v1",
+      "model": "ACE Pro",
+      "firmware": "V1.3.84",
+      "community_fw": "",
+      "status": "ready",
+      "temp": 25,
+      "humidity": 31.5,
+      "auto_dry": {},
+      "auto_dry_running": false,
+      "dryer_status": {
+        "status": "stop",
+        "target_temp": 0,
+        "duration": 0,
+        "remain_time": 0
+      },
+      "gate_status": [
+        1,
+        1,
+        0,
+        1
+      ],
+      "feed_assist": -1,
+      "tag_tunnel": {},
+      "fw_hold": false,
+      "slots": [
+        {
+          "index": 0,
+          "status": "ready",
+          "sku": "AHPLRD-101",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 2,
+          "brand": "Anycubic",
+          "color": [
+            255,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 1,
+          "status": "ready",
+          "sku": "",
+          "material": "PETG",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            255
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 2,
+          "status": "empty",
+          "sku": "",
+          "material": "",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 3,
+          "status": "ready",
+          "sku": "",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        }
+      ]
+    },
+    {
+      "idx": 1,
+      "connected": true,
+      "connect_error": "",
+      "protocol": "v1",
+      "model": "ACE Pro",
+      "firmware": "V1.3.84",
+      "community_fw": "",
+      "status": "ready",
+      "temp": 25,
+      "humidity": null,
+      "auto_dry": {},
+      "auto_dry_running": false,
+      "dryer_status": {
+        "status": "stop",
+        "target_temp": 0,
+        "duration": 0,
+        "remain_time": 0
+      },
+      "gate_status": [
+        1,
+        1,
+        0,
+        1
+      ],
+      "feed_assist": -1,
+      "tag_tunnel": {},
+      "fw_hold": false,
+      "slots": [
+        {
+          "index": 0,
+          "status": "ready",
+          "sku": "AHPLRD-101",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 2,
+          "brand": "Anycubic",
+          "color": [
+            255,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 1,
+          "status": "ready",
+          "sku": "",
+          "material": "PETG",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            255
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 2,
+          "status": "empty",
+          "sku": "",
+          "material": "",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 3,
+          "status": "ready",
+          "sku": "",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        }
+      ]
+    },
+    {
+      "idx": 2,
+      "connected": true,
+      "connect_error": "",
+      "protocol": "v1",
+      "model": "ACE Pro",
+      "firmware": "V1.3.84",
+      "community_fw": "",
+      "status": "ready",
+      "temp": 25,
+      "humidity": null,
+      "auto_dry": {},
+      "auto_dry_running": false,
+      "dryer_status": {
+        "status": "stop",
+        "target_temp": 0,
+        "duration": 0,
+        "remain_time": 0
+      },
+      "gate_status": [
+        1,
+        1,
+        0,
+        1
+      ],
+      "feed_assist": -1,
+      "tag_tunnel": {},
+      "fw_hold": false,
+      "slots": [
+        {
+          "index": 0,
+          "status": "ready",
+          "sku": "AHPLRD-101",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 2,
+          "brand": "Anycubic",
+          "color": [
+            255,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 1,
+          "status": "ready",
+          "sku": "",
+          "material": "PETG",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            255
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 2,
+          "status": "empty",
+          "sku": "",
+          "material": "",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 3,
+          "status": "ready",
+          "sku": "",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        }
+      ]
+    },
+    {
+      "idx": 3,
+      "connected": true,
+      "connect_error": "",
+      "protocol": "v1",
+      "model": "ACE Pro",
+      "firmware": "V1.3.84",
+      "community_fw": "",
+      "status": "ready",
+      "temp": 25,
+      "humidity": null,
+      "auto_dry": {},
+      "auto_dry_running": false,
+      "dryer_status": {
+        "status": "drying",
+        "target_temp": 45,
+        "duration": 240,
+        "remain_time": 180
+      },
+      "gate_status": [
+        1,
+        1,
+        0,
+        1
+      ],
+      "feed_assist": -1,
+      "tag_tunnel": {},
+      "fw_hold": false,
+      "slots": [
+        {
+          "index": 0,
+          "status": "ready",
+          "sku": "AHPLRD-101",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 2,
+          "brand": "Anycubic",
+          "color": [
+            255,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 1,
+          "status": "ready",
+          "sku": "",
+          "material": "PETG",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            255
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 2,
+          "status": "empty",
+          "sku": "",
+          "material": "",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        },
+        {
+          "index": 3,
+          "status": "ready",
+          "sku": "",
+          "material": "PLA",
+          "subtype": "",
+          "rfid": 0,
+          "brand": "Generic",
+          "color": [
+            0,
+            0,
+            0
+          ],
+          "uid": "",
+          "tag_format": "",
+          "ident_src": ""
+        }
+      ]
+    }
+  ]
+}

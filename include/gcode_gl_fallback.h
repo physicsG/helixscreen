@@ -21,8 +21,8 @@ namespace gcode {
 //   reaction is to stop issuing 3D draws entirely.
 // GL_INVALID_OPERATION (0x0502): the command stream is in a state the driver
 //   rejects. Continuing to draw risks undefined behaviour in the driver.
-constexpr unsigned int GL_ERR_OUT_OF_MEMORY = 0x0505;
-constexpr unsigned int GL_ERR_INVALID_OPERATION = 0x0502;
+constexpr unsigned int kGlErrOutOfMemory = 0x0505;
+constexpr unsigned int kGlErrInvalidOperation = 0x0502;
 
 /// Decide whether a GL error observed after a draw batch should trigger a
 /// permanent, session-sticky fall-back from the 3D GLES renderer to the
@@ -34,7 +34,7 @@ constexpr unsigned int GL_ERR_INVALID_OPERATION = 0x0502;
 /// @param gl_error  the value returned by glGetError() (0 == GL_NO_ERROR)
 /// @return true if the error is fatal enough to abandon GPU rendering
 inline bool gl_draw_error_is_fatal(unsigned int gl_error) {
-    return gl_error == GL_ERR_OUT_OF_MEMORY || gl_error == GL_ERR_INVALID_OPERATION;
+    return gl_error == kGlErrOutOfMemory || gl_error == kGlErrInvalidOperation;
 }
 
 /// Case-insensitive substring search of a GL_RENDERER string against a list of
@@ -87,20 +87,20 @@ inline bool gl_renderer_matches(const char* renderer, const char* const* needles
 /// @param renderer  the value returned by glGetString(GL_RENDERER) (may be null)
 /// @return true if the renderer matches a known-bad substring (case-insensitive)
 inline bool gl_renderer_is_denylisted(const char* renderer) {
-    static const char* const DENYLIST[] = {"panfrost"};
-    return gl_renderer_matches(renderer, DENYLIST, sizeof(DENYLIST) / sizeof(DENYLIST[0]));
+    static const char* const kDenylist[] = {"panfrost"};
+    return gl_renderer_matches(renderer, kDenylist, sizeof(kDenylist) / sizeof(kDenylist[0]));
 }
 
 /// Triangle budget a GPU can draw per frame in the 3D gcode preview without
 /// tripping the kernel's GPU hang check.
 ///
 /// VideoCore IV (Mesa "vc4", Pi 0-3) draws ~4M triangles/s, so a budget of
-/// VC4_TRIANGLE_BUDGET keeps a frame near 250 ms. Multi-second frames make the
+/// kVc4TriangleBudget keeps a frame near 250 ms. Multi-second frames make the
 /// kernel's GPU hang check fire ("[drm] Resetting GPU") and wedge the GPU until
 /// reboot, so geometry for that driver must be capped by triangle count, not
 /// just by memory. On Pi 4/5 the render node is served by v3d (vc4 drives only
 /// the display there), so only Pi 0-3 match.
-constexpr size_t VC4_TRIANGLE_BUDGET = 1'000'000;
+constexpr size_t kVc4TriangleBudget = 1'000'000;
 
 /// Cap on per-frame triangle count a render driver imposes on the 3D gcode
 /// preview, keyed off the kernel driver name backing the DRM render node
@@ -112,9 +112,9 @@ constexpr size_t VC4_TRIANGLE_BUDGET = 1'000'000;
 /// @param render_driver  kernel driver name, or "" / null when unknown
 /// @return max triangles per frame, 0 for no cap
 inline size_t gpu_triangle_budget(const char* render_driver) {
-    static const char* const CAPPED[] = {"vc4"};
-    if (gl_renderer_matches(render_driver, CAPPED, sizeof(CAPPED) / sizeof(CAPPED[0]))) {
-        return VC4_TRIANGLE_BUDGET;
+    static const char* const kCapped[] = {"vc4"};
+    if (gl_renderer_matches(render_driver, kCapped, sizeof(kCapped) / sizeof(kCapped[0]))) {
+        return kVc4TriangleBudget;
     }
     return 0;
 }

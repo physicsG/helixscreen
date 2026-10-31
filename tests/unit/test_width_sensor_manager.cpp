@@ -3,23 +3,24 @@
 
 /**
  * @file test_width_sensor_manager.cpp
- * @brief Unit tests for WidthSensorManager
- *
- * Tests cover:
- * - Sensor discovery from Klipper object names (tsl1401cl, hall)
- * - Role assignment (FLOW_COMPENSATION)
- * - State updates from Moonraker status JSON
- * - Subject value correctness for UI binding
- * - Config persistence
+ * @brief WidthSensorManager on the SensorManager base: discovery, the
+ *        FLOW_COMPENSATION default, status parsing, the diameter subject and
+ *        the persisted settings shape.
  */
 
+#include "../lvgl_test_fixture.h"
+#include "../test_helpers/golden_json.h"
+#include "../test_helpers/sensor_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
-#include "../ui_test_utils.h"
+#include "config.h"
+#include "hardware_object_table.h"
+#include "printer_discovery.h"
 #include "width_sensor_manager.h"
 #include "width_sensor_types.h"
 
 #include <spdlog/spdlog.h>
 
+#include <fstream>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -28,20 +29,15 @@ using namespace helix;
 using namespace helix::sensors;
 using json = nlohmann::json;
 
-// ============================================================================
-// Test Access
-// ============================================================================
-
 namespace helix::sensors {
 class WidthSensorManagerTestAccess {
   public:
     static void reset(WidthSensorManager& obj) {
-        std::lock_guard<std::recursive_mutex> lock(obj.mutex_);
-        obj.sensors_.clear();
-        obj.sync_mode_ = true;
-        // Reset subject values but keep subjects initialized
-        if (obj.subjects_initialized_) {
-            lv_subject_set_int(&obj.sensor_count_, 0);
+        SensorManagerTestAccess::reconcile(obj, {});
+        std::lock_guard<std::recursive_mutex> lock(obj.mutex());
+        obj.readings_.clear();
+        obj.set_sync_mode(true);
+        if (obj.subjects_initialized()) {
             lv_subject_set_int(&obj.diameter_, -1);
             lv_subject_copy_string(&obj.diameter_text_, "--");
         }
@@ -49,38 +45,27 @@ class WidthSensorManagerTestAccess {
 };
 } // namespace helix::sensors
 
-// ============================================================================
-// Test Fixture
-// ============================================================================
+namespace {
 
-class WidthSensorTestFixture {
+constexpr const char* kTsl = "tsl1401cl_filament_width_sensor";
+constexpr const char* kHall = "hall_filament_width_sensor";
+constexpr uint8_t kNone = static_cast<uint8_t>(WidthSensorRole::NONE);
+constexpr uint8_t kFlow = static_cast<uint8_t>(WidthSensorRole::FLOW_COMPENSATION);
+
+PrinterDiscovery discovery_of(const std::vector<std::string>& objects) {
+    PrinterDiscovery hw;
+    hw.parse_objects(json(objects));
+    return hw;
+}
+
+class WidthSensorTestFixture : public LVGLTestFixture {
   public:
     WidthSensorTestFixture() {
-        // Initialize LVGL (safe version avoids "already initialized" warnings)
-        lv_init_safe();
-
-        // Create a headless display for testing
-        if (!display_created_) {
-            display_ = lv_display_create(480, 320);
-            alignas(64) static lv_color_t buf[480 * 10];
-            lv_display_set_buffers(display_, buf, nullptr, sizeof(buf),
-                                   LV_DISPLAY_RENDER_MODE_PARTIAL);
-            lv_display_set_flush_cb(display_,
-                                    [](lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-                                        lv_display_flush_ready(disp);
-                                    });
-            display_created_ = true;
-        }
-
-        // Initialize subjects first (idempotent - only runs once)
         mgr().init_subjects();
-
-        // Then reset state for test isolation (clears data but keeps subjects)
         WidthSensorManagerTestAccess::reset(mgr());
     }
 
-    ~WidthSensorTestFixture() {
-        // Reset after each test
+    ~WidthSensorTestFixture() override {
         WidthSensorManagerTestAccess::reset(mgr());
     }
 
@@ -89,14 +74,14 @@ class WidthSensorTestFixture {
         return WidthSensorManager::instance();
     }
 
-    // Helper to discover standard test sensors
-    void discover_test_sensors() {
-        std::vector<std::string> sensors = {"tsl1401cl_filament_width_sensor",
-                                            "hall_filament_width_sensor"};
-        mgr().discover(sensors);
+    void discover(const std::vector<std::string>& objects) {
+        mgr().discover(discovery_of(objects));
     }
 
-    // Helper to simulate Moonraker status update
+    void discover_test_sensors() {
+        discover({kTsl, kHall});
+    }
+
     void update_sensor_state(const std::string& klipper_name, float diameter, float raw_value) {
         json status;
         status[klipper_name]["Diameter"] = diameter;
@@ -104,14 +89,18 @@ class WidthSensorTestFixture {
         mgr().update_from_status(status);
     }
 
-  private:
-    static lv_display_t* display_;
-    static bool display_created_;
+    uint8_t role_of(const std::string& klipper_name) {
+        SensorEntry e;
+        REQUIRE(mgr().find(klipper_name, e));
+        return e.role;
+    }
+
+    int diameter() {
+        return lv_subject_get_int(mgr().get_diameter_subject());
+    }
 };
 
-// Static members
-lv_display_t* WidthSensorTestFixture::display_ = nullptr;
-bool WidthSensorTestFixture::display_created_ = false;
+} // namespace
 
 // ============================================================================
 // Type Helper Tests (width_sensor_types.h)
@@ -157,92 +146,101 @@ TEST_CASE("WidthSensorTypes - type string conversion", "[width][types]") {
 
 TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - discovery", "[width][discovery]") {
     SECTION("Discovers TSL1401CL sensor") {
-        std::vector<std::string> sensors = {"tsl1401cl_filament_width_sensor"};
-        mgr().discover(sensors);
+        discover({kTsl});
 
-        REQUIRE(mgr().has_sensors());
         REQUIRE(mgr().sensor_count() == 1);
-
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs.size() == 1);
-        REQUIRE(configs[0].klipper_name == "tsl1401cl_filament_width_sensor");
-        REQUIRE(configs[0].sensor_name == "tsl1401cl");
-        REQUIRE(configs[0].type == WidthSensorType::TSL1401CL);
-        REQUIRE(configs[0].enabled == true);
-        // First discovered sensor is auto-assigned to FLOW_COMPENSATION role
-        REQUIRE(configs[0].role == WidthSensorRole::FLOW_COMPENSATION);
+        const auto entries = mgr().entries();
+        REQUIRE(entries.size() == 1);
+        CHECK(entries[0].klipper_name == kTsl);
+        CHECK(entries[0].type == static_cast<uint8_t>(WidthSensorType::TSL1401CL));
+        CHECK(entries[0].enabled);
+        CHECK(entries[0].available);
+        CHECK(entries[0].role == kFlow);
     }
 
     SECTION("Discovers Hall sensor") {
-        std::vector<std::string> sensors = {"hall_filament_width_sensor"};
-        mgr().discover(sensors);
+        discover({kHall});
 
         REQUIRE(mgr().sensor_count() == 1);
-
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs[0].klipper_name == "hall_filament_width_sensor");
-        REQUIRE(configs[0].sensor_name == "hall");
-        REQUIRE(configs[0].type == WidthSensorType::HALL);
-        // First discovered sensor is auto-assigned to FLOW_COMPENSATION role
-        REQUIRE(configs[0].role == WidthSensorRole::FLOW_COMPENSATION);
+        const auto entries = mgr().entries();
+        CHECK(entries[0].klipper_name == kHall);
+        CHECK(entries[0].type == static_cast<uint8_t>(WidthSensorType::HALL));
+        CHECK(entries[0].role == kFlow);
     }
 
-    SECTION("Discovers multiple sensors") {
+    SECTION("Only the first of several sensors takes the default role") {
         discover_test_sensors();
 
-        REQUIRE(mgr().sensor_count() == 2);
-
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs[0].sensor_name == "tsl1401cl");
-        REQUIRE(configs[0].type == WidthSensorType::TSL1401CL);
-        // First discovered sensor is auto-assigned to FLOW_COMPENSATION role
-        REQUIRE(configs[0].role == WidthSensorRole::FLOW_COMPENSATION);
-        REQUIRE(configs[1].sensor_name == "hall");
-        REQUIRE(configs[1].type == WidthSensorType::HALL);
-        // Second sensor remains unassigned (NONE)
-        REQUIRE(configs[1].role == WidthSensorRole::NONE);
+        const auto entries = mgr().entries();
+        REQUIRE(entries.size() == 2);
+        CHECK(entries[0].klipper_name == kTsl);
+        CHECK(entries[0].role == kFlow);
+        CHECK(entries[1].klipper_name == kHall);
+        CHECK(entries[1].role == kNone);
     }
 
     SECTION("Ignores unrelated objects") {
-        std::vector<std::string> sensors = {"tsl1401cl_filament_width_sensor",
-                                            "filament_switch_sensor runout",
-                                            "temperature_sensor chamber", "extruder"};
-        mgr().discover(sensors);
-
-        REQUIRE(mgr().sensor_count() == 1);
-        REQUIRE(mgr().get_sensors()[0].sensor_name == "tsl1401cl");
+        discover({kTsl, "filament_switch_sensor runout", "temperature_sensor chamber", "extruder"});
+        CHECK(mgr().sensor_count() == 1);
     }
 
     SECTION("Empty sensor list clears previous sensors") {
         discover_test_sensors();
         REQUIRE(mgr().sensor_count() == 2);
 
-        mgr().discover({});
-        REQUIRE(mgr().sensor_count() == 0);
-        REQUIRE_FALSE(mgr().has_sensors());
+        discover({});
+        CHECK(mgr().sensor_count() == 0);
     }
 
-    SECTION("Re-discovery replaces sensor list") {
-        std::vector<std::string> sensors1 = {"tsl1401cl_filament_width_sensor"};
-        mgr().discover(sensors1);
-        REQUIRE(mgr().get_sensors()[0].sensor_name == "tsl1401cl");
-
-        std::vector<std::string> sensors2 = {"hall_filament_width_sensor"};
-        mgr().discover(sensors2);
+    SECTION("Re-discovery drops vanished sensors") {
+        discover({kTsl});
+        discover({kHall});
         REQUIRE(mgr().sensor_count() == 1);
-        REQUIRE(mgr().get_sensors()[0].sensor_name == "hall");
+        CHECK(mgr().entries()[0].klipper_name == kHall);
     }
 
     SECTION("Sensor count subject is updated") {
-        lv_subject_t* count_subject = mgr().get_sensor_count_subject();
-        REQUIRE(lv_subject_get_int(count_subject) == 0);
+        lv_subject_t* count_subject = mgr().count_subject();
+        CHECK(lv_subject_get_int(count_subject) == 0);
 
         discover_test_sensors();
-        REQUIRE(lv_subject_get_int(count_subject) == 2);
+        CHECK(lv_subject_get_int(count_subject) == 2);
 
-        mgr().discover({});
-        REQUIRE(lv_subject_get_int(count_subject) == 0);
+        discover({});
+        CHECK(lv_subject_get_int(count_subject) == 0);
     }
+}
+
+TEST_CASE_METHOD(WidthSensorTestFixture,
+                 "WidthSensorManager - rediscovery keeps the role a survivor holds",
+                 "[width][discovery]") {
+    discover_test_sensors();
+    mgr().set_role(kHall, kFlow);
+    REQUIRE(role_of(kTsl) == kNone);
+
+    discover_test_sensors();
+    CHECK(role_of(kHall) == kFlow);
+    CHECK(role_of(kTsl) == kNone);
+}
+
+TEST_CASE_METHOD(WidthSensorTestFixture,
+                 "WidthSensorManager - the default role goes to the first sensor only when no "
+                 "sensor holds it",
+                 "[width][discovery]") {
+    discover({kHall});
+    mgr().set_role(kHall, kNone);
+    REQUIRE(role_of(kHall) == kNone);
+
+    // Nothing holds the role after the survivor was cleared, so rediscovery assigns it.
+    discover_test_sensors();
+    CHECK(role_of(kTsl) == kFlow);
+    CHECK(role_of(kHall) == kNone);
+
+    // A holder that is not first keeps it.
+    mgr().set_role(kHall, kFlow);
+    discover_test_sensors();
+    CHECK(role_of(kHall) == kFlow);
+    CHECK(role_of(kTsl) == kNone);
 }
 
 // ============================================================================
@@ -252,51 +250,26 @@ TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - discovery", "[wid
 TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - role assignment", "[width][roles]") {
     discover_test_sensors();
 
-    SECTION("Can set FLOW_COMPENSATION role") {
-        mgr().set_sensor_role("tsl1401cl_filament_width_sensor",
-                              WidthSensorRole::FLOW_COMPENSATION);
-
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.sensor_name == "tsl1401cl"; });
-        REQUIRE(it != configs.end());
-        REQUIRE(it->role == WidthSensorRole::FLOW_COMPENSATION);
-    }
-
-    SECTION("Role assignment is unique - assigning same role clears previous") {
-        mgr().set_sensor_role("tsl1401cl_filament_width_sensor",
-                              WidthSensorRole::FLOW_COMPENSATION);
-        mgr().set_sensor_role("hall_filament_width_sensor", WidthSensorRole::FLOW_COMPENSATION);
-
-        auto configs = mgr().get_sensors();
-
-        auto tsl_it = std::find_if(configs.begin(), configs.end(),
-                                   [](const auto& c) { return c.sensor_name == "tsl1401cl"; });
-        REQUIRE(tsl_it->role == WidthSensorRole::NONE);
-
-        auto hall_it = std::find_if(configs.begin(), configs.end(),
-                                    [](const auto& c) { return c.sensor_name == "hall"; });
-        REQUIRE(hall_it->role == WidthSensorRole::FLOW_COMPENSATION);
+    SECTION("FLOW_COMPENSATION is exclusive: assigning it clears the previous holder") {
+        mgr().set_role(kHall, kFlow);
+        CHECK(role_of(kTsl) == kNone);
+        CHECK(role_of(kHall) == kFlow);
     }
 
     SECTION("Can assign NONE without affecting other sensors") {
-        mgr().set_sensor_role("tsl1401cl_filament_width_sensor",
-                              WidthSensorRole::FLOW_COMPENSATION);
-
-        mgr().set_sensor_role("tsl1401cl_filament_width_sensor", WidthSensorRole::NONE);
-
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.sensor_name == "tsl1401cl"; });
-        REQUIRE(it->role == WidthSensorRole::NONE);
+        mgr().set_role(kTsl, kNone);
+        CHECK(role_of(kTsl) == kNone);
+        CHECK(role_of(kHall) == kNone);
     }
 
     SECTION("Assigning role to unknown sensor does nothing") {
-        mgr().set_sensor_role("nonexistent_sensor", WidthSensorRole::FLOW_COMPENSATION);
+        mgr().set_role("nonexistent_sensor", kFlow);
+        CHECK(role_of(kTsl) == kFlow);
+        CHECK(role_of(kHall) == kNone);
+    }
 
-        for (const auto& config : mgr().get_sensors()) {
-            REQUIRE(config.role == WidthSensorRole::NONE);
-        }
+    SECTION("None and the role are offered in the Settings dropdown") {
+        CHECK(mgr().offered_roles() == std::vector<uint8_t>{kNone, kFlow});
     }
 }
 
@@ -306,36 +279,38 @@ TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - role assignment",
 
 TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - state updates", "[width][state]") {
     discover_test_sensors();
-    mgr().set_sensor_role("tsl1401cl_filament_width_sensor", WidthSensorRole::FLOW_COMPENSATION);
 
     SECTION("Parses diameter from status JSON") {
-        auto state = mgr().get_sensor_state(WidthSensorRole::FLOW_COMPENSATION);
-        REQUIRE(state.has_value());
-        REQUIRE(state->diameter == 0.0f);
+        CHECK(diameter() == 0);
+        update_sensor_state(kTsl, 1.75f, 12345.0f);
+        CHECK(diameter() == 1750);
+    }
 
+    SECTION("A null field from a field-restricted subscription is ignored") {
+        update_sensor_state(kTsl, 1.75f, 12345.0f);
         json status;
-        status["tsl1401cl_filament_width_sensor"]["Diameter"] = 1.75f;
-        status["tsl1401cl_filament_width_sensor"]["Raw"] = 12345.0f;
+        status[kTsl]["Diameter"] = nullptr;
+        status[kTsl]["Raw"] = 99.0f;
         mgr().update_from_status(status);
-
-        state = mgr().get_sensor_state(WidthSensorRole::FLOW_COMPENSATION);
-        REQUIRE(state->diameter == Catch::Approx(1.75f));
-        REQUIRE(state->raw_value == Catch::Approx(12345.0f));
+        CHECK(diameter() == 1750);
     }
 
     SECTION("Status update for unknown sensor is ignored") {
         json status;
         status["unknown_sensor"]["Diameter"] = 1.75f;
         mgr().update_from_status(status);
+        CHECK(mgr().sensor_count() == 2);
+        CHECK(diameter() == 0);
+    }
 
-        REQUIRE(mgr().sensor_count() == 2);
+    SECTION("A reading from a sensor without the role does not reach the subject") {
+        update_sensor_state(kHall, 1.90f, 1.0f);
+        CHECK(diameter() == 0);
     }
 
     SECTION("Empty status update is handled") {
-        json status = json::object();
-        mgr().update_from_status(status);
-
-        REQUIRE(mgr().has_sensors());
+        mgr().update_from_status(json::object());
+        CHECK(mgr().sensor_count() == 2);
     }
 }
 
@@ -347,34 +322,33 @@ TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - subject values",
                  "[width][subjects]") {
     discover_test_sensors();
 
-    SECTION("Diameter subject shows 0 after discovery (first sensor auto-assigned)") {
-        // First sensor is auto-assigned to FLOW_COMPENSATION, diameter defaults to 0.0
-        REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == 0);
+    SECTION("Diameter subject is 0 after discovery (first sensor holds the role)") {
+        CHECK(diameter() == 0);
     }
 
     SECTION("Diameter subject updates correctly (diameter x 1000)") {
-        mgr().set_sensor_role("tsl1401cl_filament_width_sensor",
-                              WidthSensorRole::FLOW_COMPENSATION);
-
-        // After assignment, should show 0 since state defaults to 0.0
-        REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == 0);
-
-        // Update state with diameter 1.75mm
-        update_sensor_state("tsl1401cl_filament_width_sensor", 1.75f, 12345.0f);
-        REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == 1750);
-
-        // Update with different value
-        update_sensor_state("tsl1401cl_filament_width_sensor", 1.82f, 54321.0f);
-        REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == 1820);
+        update_sensor_state(kTsl, 1.75f, 12345.0f);
+        CHECK(diameter() == 1750);
+        update_sensor_state(kTsl, 1.82f, 54321.0f);
+        CHECK(diameter() == 1820);
     }
 
-    SECTION("Diameter subject shows -1 when sensor disabled") {
-        mgr().set_sensor_role("tsl1401cl_filament_width_sensor",
-                              WidthSensorRole::FLOW_COMPENSATION);
-        update_sensor_state("tsl1401cl_filament_width_sensor", 1.75f, 12345.0f);
+    SECTION("Diameter subject is -1 when the sensor is disabled") {
+        update_sensor_state(kTsl, 1.75f, 12345.0f);
+        mgr().set_enabled(kTsl, false);
+        CHECK(diameter() == -1);
+    }
 
-        mgr().set_sensor_enabled("tsl1401cl_filament_width_sensor", false);
-        REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == -1);
+    SECTION("Diameter subject follows the role to another sensor") {
+        update_sensor_state(kTsl, 1.75f, 1.0f);
+        update_sensor_state(kHall, 1.60f, 1.0f);
+        mgr().set_role(kHall, kFlow);
+        CHECK(diameter() == 1600);
+    }
+
+    SECTION("Diameter subject is -1 when no sensor holds the role") {
+        mgr().set_role(kTsl, kNone);
+        CHECK(diameter() == -1);
     }
 }
 
@@ -382,117 +356,121 @@ TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - subject values",
 // Config Persistence Tests
 // ============================================================================
 
-TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - config persistence",
+namespace {
+json& width_slot() {
+    Config* cfg = Config::get_instance();
+    return cfg->get_json(cfg->df() + "width_sensors");
+}
+
+json load_width_fixture() {
+    std::ifstream in(helix::test::golden_path("sensor_settings", "width"));
+    REQUIRE(in.good());
+    json j = json::parse(in, nullptr, false);
+    REQUIRE_FALSE(j.is_discarded());
+    return j;
+}
+} // namespace
+
+TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - saved config reads back",
                  "[width][config]") {
+    const json fixture = load_width_fixture();
+    const json saved_slot = width_slot();
+
+    // The fixture gives the role to the first sensor; the opposite assignment
+    // proves load_settings() overrides the discovery default.
+    json swapped = fixture;
+    swapped["sensors"][0]["role"] = "none";
+    swapped["sensors"][1]["role"] = "flow_compensation";
+
     discover_test_sensors();
+    width_slot() = swapped;
+    mgr().load_settings();
+    CHECK(role_of(kTsl) == kNone);
+    CHECK(role_of(kHall) == kFlow);
 
-    SECTION("save_config returns JSON with role assignments") {
-        mgr().set_sensor_role("tsl1401cl_filament_width_sensor",
-                              WidthSensorRole::FLOW_COMPENSATION);
+    width_slot() = fixture;
+    mgr().load_settings();
+    CHECK(role_of(kTsl) == kFlow);
+    CHECK(role_of(kHall) == kNone);
 
-        json config = mgr().save_config();
+    width_slot() = json::object();
+    mgr().save_settings();
+    const std::string written = width_slot().dump();
+    width_slot() = saved_slot;
+    INFO("expected " << fixture.dump());
+    CHECK(written == fixture.dump());
+}
 
-        REQUIRE(config.is_object());
-        REQUIRE(config.contains("sensors"));
-        REQUIRE(config["sensors"].is_array());
-        REQUIRE(config["sensors"].size() == 2);
+TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - disabled state persists",
+                 "[width][config]") {
+    const json saved_slot = width_slot();
+    discover_test_sensors();
+    mgr().set_enabled(kHall, false);
+    mgr().save_settings();
+    const json written = width_slot();
+    width_slot() = saved_slot;
 
-        bool found_tsl = false;
-        for (const auto& sensor : config["sensors"]) {
-            if (sensor["klipper_name"] == "tsl1401cl_filament_width_sensor") {
-                REQUIRE(sensor["role"] == "flow_compensation");
-                found_tsl = true;
-            }
-        }
-        REQUIRE(found_tsl);
-    }
+    REQUIRE(written["sensors"].size() == 2);
+    CHECK(written["sensors"][1]["klipper_name"] == kHall);
+    CHECK(written["sensors"][1]["enabled"] == false);
+}
 
-    SECTION("load_config restores role assignments") {
-        // Set up config JSON
-        json config;
-        json sensors_array = json::array();
-        json sensor1;
-        sensor1["klipper_name"] = "tsl1401cl_filament_width_sensor";
-        sensor1["role"] = "flow_compensation";
-        sensor1["enabled"] = true;
-        sensors_array.push_back(sensor1);
-        config["sensors"] = sensors_array;
+TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - unknown saved sensor is ignored",
+                 "[width][config]") {
+    const json saved_slot = width_slot();
+    discover_test_sensors();
+    width_slot() = json{{"sensors", json::array({json{{"klipper_name", "unknown_sensor"},
+                                                      {"role", "flow_compensation"}}})}};
+    mgr().load_settings();
+    width_slot() = saved_slot;
 
-        mgr().load_config(config);
-
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.sensor_name == "tsl1401cl"; });
-        REQUIRE(it != configs.end());
-        REQUIRE(it->role == WidthSensorRole::FLOW_COMPENSATION);
-    }
-
-    SECTION("load_config with unknown sensor is handled gracefully") {
-        json config;
-        json sensors_array = json::array();
-        json sensor1;
-        sensor1["klipper_name"] = "unknown_sensor";
-        sensor1["role"] = "flow_compensation";
-        sensors_array.push_back(sensor1);
-        config["sensors"] = sensors_array;
-
-        // Should not crash
-        mgr().load_config(config);
-
-        // Existing sensors should be unaffected (first sensor auto-assigned to FLOW_COMPENSATION)
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs[0].role == WidthSensorRole::FLOW_COMPENSATION);
-        REQUIRE(configs[1].role == WidthSensorRole::NONE);
-    }
+    CHECK(role_of(kTsl) == kFlow);
+    CHECK(role_of(kHall) == kNone);
 }
 
 // ============================================================================
-// Edge Cases
+// Lifetime
 // ============================================================================
 
-TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - edge cases", "[width][edge]") {
-    SECTION("get_sensor_state returns state for auto-assigned FLOW_COMPENSATION role") {
-        discover_test_sensors();
-        // First sensor is auto-assigned to FLOW_COMPENSATION
-        auto state = mgr().get_sensor_state(WidthSensorRole::FLOW_COMPENSATION);
-        REQUIRE(state.has_value());
-        REQUIRE(state->diameter == 0.0f); // Default value
-    }
-
-    SECTION("get_sensor_state returns nullopt for NONE role") {
-        discover_test_sensors();
-        auto state = mgr().get_sensor_state(WidthSensorRole::NONE);
-        REQUIRE_FALSE(state.has_value());
-    }
-
-    SECTION("is_sensor_available checks role assignment and enabled") {
-        discover_test_sensors();
-        // First sensor is auto-assigned to FLOW_COMPENSATION, so it should be available
-        REQUIRE(mgr().is_sensor_available(WidthSensorRole::FLOW_COMPENSATION));
-
-        mgr().set_sensor_enabled("tsl1401cl_filament_width_sensor", false);
-        REQUIRE_FALSE(mgr().is_sensor_available(WidthSensorRole::FLOW_COMPENSATION));
-    }
-}
-
-// A deferral queued before deinit_subjects() must not land on the subjects a
-// later init_subjects() creates.
-TEST_CASE_METHOD(WidthSensorTestFixture,
-                 "WidthSensorManager - deferred update dropped after deinit", "[width][lifetime]") {
+// Outside sync mode a status update reaches the subject only through the queue,
+// and a deferral queued before deinit_subjects() is dropped.
+TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - status refresh is deferred",
+                 "[width][lifetime]") {
     discover_test_sensors();
-    mgr().set_sensor_role("tsl1401cl_filament_width_sensor", WidthSensorRole::FLOW_COMPENSATION);
     mgr().set_sync_mode(false);
 
-    update_sensor_state("tsl1401cl_filament_width_sensor", 1.75f, 100.0f);
-    mgr().deinit_subjects();
-    mgr().init_subjects();
-    const int reinit = lv_subject_get_int(mgr().get_diameter_subject());
+    update_sensor_state(kTsl, 1.75f, 100.0f);
+    CHECK(diameter() == 0);
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-    REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == reinit);
-    REQUIRE(reinit != 1750);
+    CHECK(diameter() == 1750);
 
-    update_sensor_state("tsl1401cl_filament_width_sensor", 1.80f, 100.0f);
+    update_sensor_state(kTsl, 1.80f, 100.0f);
+    mgr().deinit_subjects();
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-    REQUIRE(lv_subject_get_int(mgr().get_diameter_subject()) == 1800);
+    mgr().init_subjects();
     mgr().set_sync_mode(true);
+    CHECK(diameter() == -1);
+}
+
+TEST_CASE("WidthSensorManager - is in the sensor registry", "[width][sensor_manager_base]") {
+    const auto& managers = sensor_managers();
+    CHECK(std::find(managers.begin(), managers.end(), &WidthSensorManager::instance()) !=
+          managers.end());
+}
+
+TEST_CASE("hw table: width sensors carry their type as the chip", "[width][hw_object_table]") {
+    CHECK(hw::classify_object(kTsl).chip == static_cast<uint8_t>(WidthSensorType::TSL1401CL));
+    CHECK(hw::classify_object(kHall).chip == static_cast<uint8_t>(WidthSensorType::HALL));
+    CHECK(hw::chip_name(hw::ObjectKind::WidthSensor, hw::classify_object(kHall).chip) == "Hall");
+}
+
+// The object name is long and carries no instance, so the row is named by its
+// type and the object name moves underneath.
+TEST_CASE_METHOD(WidthSensorTestFixture, "WidthSensorManager - rows are named by type",
+                 "[width][sensors]") {
+    discover({"hall_filament_width_sensor", "tsl1401cl_filament_width_sensor"});
+    CHECK(mgr().row(0).name == "Hall width sensor");
+    CHECK(mgr().row(0).detail == "Hall · hall_filament_width_sensor");
+    CHECK(mgr().row(1).name == "TSL1401CL width sensor");
+    CHECK(mgr().row(1).detail == "TSL1401CL · tsl1401cl_filament_width_sensor");
 }

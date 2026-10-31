@@ -91,23 +91,7 @@ class AdvancedPowerGroupFixture : public XMLTestFixture {
         ui_status_pill_register_widget();
         REQUIRE(register_component("setting_group_header"));
         REQUIRE(register_component("setting_action_row"));
-        REQUIRE(register_component("beta_feature"));
         REQUIRE(register_component("advanced_panel"));
-
-        // XMLTestFixture (unlike LVGLUITestFixture) does not route through the
-        // app_globals stub, so ensure the host-power subject exists before the
-        // panel's bindings resolve. STATIC, deliberately: the XML subject
-        // registry is process-global and never forgets an entry, so a fixture
-        // member here dangles after this test and any later consumer of the
-        // name (the home panel's shutdown-widget gate walk, XML
-        // bind_state_if_eq) dereferences a freed lv_subject_t — the nightly
-        // TSan SIGSEGV at setup_gate_observers and the 2026-08-16 ASan
-        // heap-buffer-overflow in lv_subject_add_observer_obj were both this.
-        if (!lv_xml_get_subject(nullptr, "platform_host_power_supported")) {
-            static lv_subject_t host_power_subject;
-            lv_subject_init_int(&host_power_subject, 1);
-            lv_xml_register_subject(nullptr, "platform_host_power_supported", &host_power_subject);
-        }
 
         panel_ = create_component("advanced_panel");
         REQUIRE(panel_ != nullptr);

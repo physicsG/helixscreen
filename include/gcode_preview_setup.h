@@ -51,6 +51,15 @@ bool apply_preview_render_mode(lv_obj_t* viewer, const char* log_tag);
 bool preview_viewer_enabled();
 
 /**
+ * @brief Is the preview's render mode left to Auto?
+ *
+ * True only when no command-line or HELIX_GCODE_MODE override is in force and
+ * the persisted setting is Auto. An explicit 2D or 3D choice is the user's to
+ * make, so the CPU limit on previews (gcode_preview_gate.h) applies only here.
+ */
+bool preview_mode_is_auto();
+
+/**
  * @brief Tell a preview which widget covers the bottom of it.
  *
  * The metadata strip is translucent and sits over the bottom of the preview in

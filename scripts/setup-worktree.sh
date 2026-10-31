@@ -65,7 +65,7 @@ usage() {
     echo "  - Clones compiled libraries (libhv.a) — copies, not symlinks,"
     echo "    so a rebuild here can never write back into the main tree"
     echo "  - Copies compile_commands.json with rewritten paths for clangd"
-    echo "  - Symlinks node_modules and .venv for font/python tools"
+    echo "  - Symlinks node_modules, .venv and the telemetry worker's node_modules"
     echo "  - Uses .git/info/exclude for clean git status"
 }
 
@@ -950,9 +950,21 @@ fi
 # link — back on the critical path of an otherwise no-op build.
 MAIN_GEN="$MAIN_TREE/build/generated"
 if [[ -d "$MAIN_GEN" && ! -d "$WORKTREE_PATH/build/generated" ]]; then
+    mkdir -p "$WORKTREE_PATH/build"
     cp -Rc "$MAIN_GEN" "$WORKTREE_PATH/build/generated" 2>/dev/null \
         || cp -a "$MAIN_GEN" "$WORKTREE_PATH/build/generated"
     echo -e "  build/generated: ${GREEN}cloned${RESET}"
+    # The clone describes the main tree's branch. When this branch's generator
+    # or its input differs, the copied header can still read newer than both and
+    # make keeps it, compiling another branch's contributor table here.
+    for input in CONTRIBUTORS.txt scripts/gen-contributors.sh; do
+        if [[ -e "$MAIN_TREE/$input" || -e "$WORKTREE_PATH/$input" ]] \
+           && ! cmp -s "$MAIN_TREE/$input" "$WORKTREE_PATH/$input"; then
+            rm -f "$WORKTREE_PATH/build/generated/contributors.h"
+            echo -e "  build/generated/contributors.h: ${YELLOW}dropped ($input differs from the main tree's)${RESET}"
+            break
+        fi
+    done
 fi
 
 # Step 3c: Copy compile_commands.json for clangd support
@@ -1048,24 +1060,14 @@ print(len(kept), len(entries) - len(kept))
     fi
 fi
 
-# Step 3d: Point claude-recall at the MAIN tree's .claude-recall/
+# Step 3d: Carry the main tree's local Claude settings into the worktree
 #
-# claude-recall resolves its lessons + stats directory from `git rev-parse
-# --show-toplevel`, which inside a worktree is the WORKTREE. Every worktree
-# therefore accumulated its own LESSONS.md/stats.json, and `git worktree remove`
-# threw them away — so lesson scoring only ever reflected work done in the main
-# tree. PROJECT_DIR overrides that resolution.
-#
-# Written to settings.local.json, which is globally gitignored, rather than
-# symlinking .claude-recall/: those three files are TRACKED, and symlinking a
-# tracked path is how a worktree clobbers it (#1107).
-#
-# Main-tree paths inside permissions are rewritten the same way
-# compile_commands.json is above; PROJECT_DIR is set afterwards so it keeps
-# pointing at the main tree rather than being rewritten with everything else.
-if command -v python3 >/dev/null 2>&1; then
+# settings.local.json is globally gitignored, so a new worktree starts without
+# the permissions granted in the main tree. Main-tree paths inside it are
+# rewritten the same way compile_commands.json is above.
+if command -v python3 >/dev/null 2>&1 && [[ -f "$MAIN_TREE/.claude/settings.local.json" ]]; then
     mkdir -p "$WORKTREE_PATH/.claude"
-    if MAIN_TREE="$MAIN_TREE" WORKTREE_PATH="$WORKTREE_PATH" python3 - <<'PYEOF'
+    if MAIN_TREE="$MAIN_TREE" WORKTREE_PATH="$WORKTREE_PATH" python3 - 2>/dev/null <<'PYEOF'
 import json, os, pathlib
 
 main = os.environ["MAIN_TREE"]
@@ -1073,25 +1075,14 @@ wt = os.environ["WORKTREE_PATH"]
 src = pathlib.Path(main, ".claude", "settings.local.json")
 dst = pathlib.Path(wt, ".claude", "settings.local.json")
 
-cfg = {}
-if src.is_file():
-    try:
-        cfg = json.loads(src.read_text().replace(main, wt))
-    except (json.JSONDecodeError, OSError):
-        cfg = {}  # a malformed local file must not sink worktree setup
-
-if not isinstance(cfg, dict):
-    cfg = {}
-env = cfg.setdefault("env", {})
-if not isinstance(env, dict):
-    env = cfg["env"] = {}
-env["PROJECT_DIR"] = main
+# A malformed local file is left behind rather than sinking worktree setup.
+cfg = json.loads(src.read_text().replace(main, wt))
 dst.write_text(json.dumps(cfg, indent=2) + "\n")
 PYEOF
     then
-        echo -e "  .claude/settings.local.json: ${GREEN}PROJECT_DIR -> main tree${RESET} (claude-recall stats)"
+        echo -e "  .claude/settings.local.json: ${GREEN}copied and paths rewritten${RESET}"
     else
-        echo -e "  .claude/settings.local.json: ${YELLOW}skipped (could not write)${RESET}"
+        echo -e "  .claude/settings.local.json: ${YELLOW}skipped (could not copy)${RESET}"
     fi
 fi
 
@@ -1163,39 +1154,29 @@ done
 
 echo -e "${GREEN}✓ Libraries configured${RESET}"
 
-# Step 6: Symlink node_modules (font converter tools)
-echo -e "${CYAN}Symlinking node_modules...${RESET}"
-if [[ -d "$MAIN_TREE/node_modules" ]]; then
-    if [[ -L "$WORKTREE_PATH/node_modules" ]]; then
-        echo -e "  node_modules: ${GREEN}already symlinked${RESET}"
-    elif [[ -d "$WORKTREE_PATH/node_modules" ]]; then
-        echo -e "  node_modules: ${YELLOW}exists as real directory, replacing with symlink${RESET}"
-        rm -rf "$WORKTREE_PATH/node_modules"
-        ln -s "$MAIN_TREE/node_modules" "$WORKTREE_PATH/node_modules"
+# Steps 6-7: Symlink the main tree's installed tool dependencies. node_modules
+# serves the font converters, .venv the python tools, and the telemetry worker's
+# node_modules pins the vite-node that scripts/release-health.sh runs; without
+# it npx fetches whatever vite-node is newest, which need not run on this node.
+link_from_main_tree() { # $1 = path relative to the tree root
+    local rel=$1
+    if [[ ! -d "$MAIN_TREE/$rel" ]]; then
+        echo -e "  $rel: ${YELLOW}not found in main tree${RESET}"
+    elif [[ -L "$WORKTREE_PATH/$rel" ]]; then
+        echo -e "  $rel: ${GREEN}already symlinked${RESET}"
     else
-        ln -s "$MAIN_TREE/node_modules" "$WORKTREE_PATH/node_modules"
-        echo -e "  node_modules: ${GREEN}symlinked${RESET}"
+        if [[ -d "$WORKTREE_PATH/$rel" ]]; then
+            echo -e "  $rel: ${YELLOW}exists as real directory, replacing with symlink${RESET}"
+            rm -rf "${WORKTREE_PATH:?}/$rel"
+        fi
+        ln -s "$MAIN_TREE/$rel" "$WORKTREE_PATH/$rel"
+        echo -e "  $rel: ${GREEN}symlinked${RESET}"
     fi
-else
-    echo -e "  node_modules: ${YELLOW}not found in main tree${RESET}"
-fi
-
-# Step 7: Symlink Python venv
-echo -e "${CYAN}Symlinking Python venv...${RESET}"
-if [[ -d "$MAIN_TREE/.venv" ]]; then
-    if [[ -L "$WORKTREE_PATH/.venv" ]]; then
-        echo -e "  .venv: ${GREEN}already symlinked${RESET}"
-    elif [[ -d "$WORKTREE_PATH/.venv" ]]; then
-        echo -e "  .venv: ${YELLOW}exists as real directory, replacing with symlink${RESET}"
-        rm -rf "$WORKTREE_PATH/.venv"
-        ln -s "$MAIN_TREE/.venv" "$WORKTREE_PATH/.venv"
-    else
-        ln -s "$MAIN_TREE/.venv" "$WORKTREE_PATH/.venv"
-        echo -e "  .venv: ${GREEN}symlinked${RESET}"
-    fi
-else
-    echo -e "  .venv: ${YELLOW}not found in main tree${RESET}"
-fi
+}
+echo -e "${CYAN}Symlinking tool dependencies...${RESET}"
+for rel in node_modules .venv server/telemetry-worker/node_modules; do
+    link_from_main_tree "$rel"
+done
 echo -e "${GREEN}✓ Development tools configured${RESET}"
 
 # Step 8: Configure git excludes for symlinks (keeps git status clean)
@@ -1349,16 +1330,10 @@ done
 
 # Step 9b: Configure ccache for cross-worktree reuse
 #
-# The native build compiles with -g (debug info). With ccache's default
-# hash_dir=true, the absolute working directory is folded into the cache key,
-# so an object compiled in the main tree NEVER matches the same source compiled
-# under .worktrees/<name>/ — every worktree starts cold and recompiles from
-# scratch. Two settings fix this:
-#   - base_dir: rewrite absolute paths under it to relative before hashing
-#   - hash_dir=false: stop hashing the cwd (the -g debug-path component)
-# With both, a worktree build reuses the main tree's cached objects, so the
-# "rebuild everything" make does after a fresh checkout becomes cache hits
-# instead of real compiles.
+# Worktrees sit at different absolute paths, so ccache shares nothing between
+# them without base_dir and hash_dir=false; scripts/ccache-shared-config.sh
+# says why and writes both. With them, the "rebuild everything" make does after
+# a fresh checkout becomes cache hits instead of real compiles.
 CCACHE_BIN="$(command -v ccache 2>/dev/null || true)"
 if [[ -n "$CCACHE_BIN" ]]; then
     echo -e "${CYAN}Configuring ccache for cross-worktree reuse...${RESET}"
@@ -1374,23 +1349,14 @@ if [[ -n "$CCACHE_BIN" ]]; then
     }
     BUILD_BASEDIR="$(common_ancestor "$MAIN_TREE" "$WORKTREE_PATH")"
 
-    # Persist global ccache config so later manual `make` runs in the worktree
-    # hit the shared cache too — not just this script's initial build. base_dir
-    # defaults to $HOME (the standard broad choice covering all in-home worktrees);
-    # only set when unset so we never override an intentional user value.
-    CUR_BASEDIR="$(ccache --get-config base_dir 2>/dev/null || true)"
-    if [[ -z "$CUR_BASEDIR" ]]; then
-        ccache --set-config "base_dir=$HOME" 2>/dev/null \
-            && echo -e "  base_dir: ${GREEN}set to $HOME${RESET}"
-    else
-        echo -e "  base_dir: ${GREEN}already set ($CUR_BASEDIR)${RESET}"
-    fi
-    if [[ "$(ccache --get-config hash_dir 2>/dev/null || true)" == "true" ]]; then
-        ccache --set-config hash_dir=false 2>/dev/null \
-            && echo -e "  hash_dir: ${GREEN}disabled (paths no longer in cache key)${RESET}"
-    else
-        echo -e "  hash_dir: ${GREEN}already disabled${RESET}"
-    fi
+    # Persist the shared-cache settings so later manual `make` runs in the
+    # worktree hit the shared cache too, not just this script's initial build.
+    # $HOME is the broad prefix covering every in-home worktree; a main tree
+    # outside it gets the common ancestor instead.
+    SHARED_PREFIX="$HOME"
+    case "$MAIN_TREE/" in "$HOME"/*) ;; *) SHARED_PREFIX="$BUILD_BASEDIR" ;; esac
+    "$SCRIPT_DIR/ccache-shared-config.sh" apply "$SHARED_PREFIX" 25G \
+        || echo -e "  ${YELLOW}could not apply the shared ccache settings${RESET}"
 
     # WITHOUT THIS, ccache CACHES NOTHING. Every native build compiles with
     # -include include/lvgl_pch.h, and ccache refuses to cache any compilation using a
@@ -1412,35 +1378,6 @@ if [[ -n "$CCACHE_BIN" ]]; then
             && echo -e "  sloppiness: ${GREEN}pch_defines,time_macros (forced-include builds are now cacheable)${RESET}"
     else
         echo -e "  sloppiness: ${GREEN}already allows forced-include caching ($CUR_SLOPPY)${RESET}"
-    fi
-
-    # The shared cache thrashes hard once a couple of worktrees + cross-compiles
-    # pile in (default 5 GiB fills and evicts constantly, re-causing cold misses).
-    # Raise the ceiling so objects survive between builds. Only ever raise it.
-    #
-    # ccache spells this three ways depending on version and value: human
-    # readable ("5.0 GiB"), parsable ("5.0G"), and a bare byte count below a
-    # megabyte, where 0 means unlimited. A unit is therefore optional, so
-    # neither grep may decide the script's exit status — under `set -o
-    # pipefail` a non-matching grep in an assignment aborts the whole run.
-    CUR_MAX="$(ccache --get-config max_size 2>/dev/null || true)"
-    MAX_NUM="$(printf '%s' "$CUR_MAX" | grep -oE '[0-9]+' | head -1 || true)"
-    MAX_UNIT="$(printf '%s' "$CUR_MAX" | grep -oiE '[KMGT]' | head -1 || true)"
-    raise_max=false
-    case "$MAX_UNIT" in
-        [Kk]|[Mm]) raise_max=true ;;
-        [Gg]) if [[ -n "$MAX_NUM" && "$MAX_NUM" -lt 25 ]]; then raise_max=true; fi ;;
-        [Tt]) ;;
-        *) if [[ -n "$MAX_NUM" && "$MAX_NUM" -ne 0 ]]; then raise_max=true; fi ;;
-    esac
-    if [[ "$raise_max" == true ]]; then
-        if ccache --max-size=25G >/dev/null 2>&1; then
-            echo -e "  max_size: ${GREEN}raised to 25G (was $CUR_MAX)${RESET}"
-        else
-            echo -e "  max_size: ${YELLOW}could not raise it from $CUR_MAX${RESET}"
-        fi
-    else
-        echo -e "  max_size: ${GREEN}already ample ($CUR_MAX)${RESET}"
     fi
 
     # Export for this script's own build below. base_dir must be a prefix of the
@@ -1494,10 +1431,28 @@ if [[ "$PRIVATE_SUBMODULES_NEED_PATCHES" != "true" ]] \
     PRIVATE_SUBMODULES_NEED_PATCHES=true
     echo -e "${YELLOW}patches/ differs from the main tree's${RESET}"
 fi
+# Matching patches/ proves only that the main tree SHOULD carry them. Its own
+# checkout can be pristine (never built, or reset since), and a copy of it then
+# compiles as an unpatched submodule. The marker table greps for each patch's
+# effect, so it answers what the copy actually holds, without a build.
+if [[ "$PRIVATE_SUBMODULES_NEED_PATCHES" != "true" && -f scripts/check_patch_markers.py ]] \
+   && ! python3 scripts/check_patch_markers.py --mk mk/patches.mk --tsv mk/patch-markers.tsv \
+        --patch-dir patches --lvgl lib/lvgl --libhv lib/libhv --lua lib/lua >/dev/null 2>&1; then
+    PRIVATE_SUBMODULES_NEED_PATCHES=true
+    echo -e "${YELLOW}the private submodules copied from the main tree are missing patches${RESET}"
+fi
+# Homebrew installs GNU make as gmake; Apple's /usr/bin/make is 3.81 and
+# the Makefile hard-errors below 4.2. On Linux plain `make` stays: there it
+# may be the jobpool shim, which `gmake` would bypass.
+if [[ "$(uname -s)" == Darwin ]] && command -v gmake >/dev/null 2>&1; then
+    MAKE_BIN="gmake"
+else
+    MAKE_BIN="make"
+fi
 if [[ "$PRIVATE_SUBMODULES_NEED_PATCHES" == "true" ]]; then
     echo -e "${CYAN}Applying this branch's patches to the private submodules...${RESET}"
     unapply_main_tree_patches
-    if make reapply-patches; then
+    if "$MAKE_BIN" reapply-patches; then
         echo -e "${GREEN}✓ Patches match this branch${RESET}"
     else
         echo -e "${RED}✗ make reapply-patches failed — this worktree's submodules do not match patches/${RESET}"
@@ -1514,9 +1469,6 @@ if [[ "$NO_BUILD" == "false" ]]; then
     echo ""
     echo -e "${BOLD}${CYAN}Running initial build...${RESET}"
     cd "$WORKTREE_PATH"
-    # Homebrew installs GNU make as gmake; Apple's /usr/bin/make is 3.81 and
-    # the Makefile hard-errors below 4.2.
-    MAKE_BIN="$(command -v gmake || command -v make)"
     if "$MAKE_BIN" -j; then
         echo ""
         echo -e "${GREEN}${BOLD}✓ Build successful!${RESET}"

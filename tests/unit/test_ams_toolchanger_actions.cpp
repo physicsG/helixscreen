@@ -9,9 +9,9 @@
  * - Mock toolchanger mode basics (topology, type)
  * - change_tool sets SELECTING immediately (race prevention)
  * - Lockout during in-flight operations (busy rejection)
- * - load_filament delegates to change_tool
+ * - Load and Unload refuse: they never mount or park
  * - change_tool with invalid slot returns error
- * - unload_filament works when a tool is mounted
+ * - park_active_tool works when a tool is mounted
  * - Sequential tool changes succeed
  */
 
@@ -183,9 +183,9 @@ TEST_CASE("Lockout rejects operations during in-flight tool change",
     backend.set_operation_delay(500); // real ms — kept in-flight for the immediate reject check
     REQUIRE(backend.start());
 
-    SECTION("change_tool rejected while load is in progress") {
-        // Start a load operation
-        auto result1 = backend.load_filament(1);
+    SECTION("change_tool rejected while a park is in progress") {
+        // The mock starts with T0 mounted.
+        auto result1 = backend.park_active_tool();
         REQUIRE(result1);
 
         // Immediately try another operation -- should be rejected as BUSY
@@ -197,22 +197,11 @@ TEST_CASE("Lockout rejects operations during in-flight tool change",
         REQUIRE(wait_until_ams_idle(backend, std::chrono::seconds(10)));
     }
 
-    SECTION("load_filament rejected while change_tool is in progress") {
+    SECTION("park rejected while change_tool is in progress") {
         auto result1 = backend.change_tool(1);
         REQUIRE(result1);
 
-        auto result2 = backend.load_filament(2);
-        CHECK_FALSE(result2);
-        CHECK(result2.result == helix::AmsResult::BUSY);
-
-        REQUIRE(wait_until_ams_idle(backend, std::chrono::seconds(10)));
-    }
-
-    SECTION("unload_filament rejected while change_tool is in progress") {
-        auto result1 = backend.change_tool(1);
-        REQUIRE(result1);
-
-        auto result2 = backend.unload_active_filament();
+        auto result2 = backend.park_active_tool();
         CHECK_FALSE(result2);
         CHECK(result2.result == helix::AmsResult::BUSY);
 
@@ -223,44 +212,30 @@ TEST_CASE("Lockout rejects operations during in-flight tool change",
 }
 
 // =============================================================================
-// load_filament delegates to change_tool
+// Load and Unload never mount or park
 // =============================================================================
 
-TEST_CASE("load_filament delegates to change_tool in mock toolchanger mode",
+TEST_CASE("Load and Unload refuse in mock toolchanger mode, as the real backend does",
           "[ams][toolchanger][toolchanger_actions]") {
-    FastTimingScopeTC timing_guard;
-
     helix::AmsBackendMock backend(4);
     backend.set_tool_changer_mode(true);
-    backend.set_operation_delay(10);
+    backend.set_operation_delay(0);
     REQUIRE(backend.start());
+    REQUIRE(backend.get_current_slot() == 0);
 
-    SECTION("load_filament succeeds and mounts the requested tool") {
-        // Unload first so we can load a specific tool
-        backend.unload_active_filament();
-        REQUIRE(wait_until_ams_idle(backend, std::chrono::seconds(10)));
+    const auto load = backend.load_filament(2);
+    CHECK_FALSE(load);
+    CHECK(load.result == helix::AmsResult::NOT_SUPPORTED);
+    CHECK_FALSE(load.user_msg.empty());
 
-        auto result = backend.load_filament(2);
-        REQUIRE(result);
+    const auto unload = backend.unload_filament(0);
+    CHECK_FALSE(unload);
+    CHECK(unload.result == helix::AmsResult::NOT_SUPPORTED);
 
-        REQUIRE(wait_until_ams_idle(backend, std::chrono::seconds(10)));
-
-        auto info = backend.get_system_info();
-        CHECK(info.current_slot == 2);
-        CHECK(info.filament_loaded == true);
-    }
-
-    SECTION("load_filament with invalid slot returns error") {
-        auto result = backend.load_filament(99);
-        CHECK_FALSE(result);
-        CHECK(result.result == helix::AmsResult::INVALID_SLOT);
-    }
-
-    SECTION("load_filament with negative slot returns error") {
-        auto result = backend.load_filament(-1);
-        CHECK_FALSE(result);
-        CHECK(result.result == helix::AmsResult::INVALID_SLOT);
-    }
+    // Nothing moved: T0 is still the mounted tool.
+    CHECK(backend.get_current_action() == AmsAction::IDLE);
+    CHECK(backend.get_current_slot() == 0);
+    CHECK(backend.head_filament_ops(0).load == helix::FilamentOpSupport::Manual);
 
     backend.stop();
 }
@@ -298,10 +273,10 @@ TEST_CASE("change_tool with invalid slot returns error in mock toolchanger mode"
 }
 
 // =============================================================================
-// unload_filament works
+// park_active_tool works
 // =============================================================================
 
-TEST_CASE("unload_filament works in mock toolchanger mode",
+TEST_CASE("park_active_tool works in mock toolchanger mode",
           "[ams][toolchanger][toolchanger_actions]") {
     FastTimingScopeTC timing_guard;
 
@@ -310,28 +285,25 @@ TEST_CASE("unload_filament works in mock toolchanger mode",
     backend.set_operation_delay(10);
     REQUIRE(backend.start());
 
-    SECTION("unload succeeds when a tool is mounted") {
-        // Mock starts with slot 0 loaded
-        REQUIRE(backend.is_filament_loaded());
+    SECTION("park succeeds when a tool is mounted") {
+        // Mock starts with slot 0 mounted
+        REQUIRE(backend.get_current_slot() == 0);
 
-        auto result = backend.unload_active_filament();
+        auto result = backend.park_active_tool();
         REQUIRE(result);
 
         REQUIRE(wait_until_ams_idle(backend, std::chrono::seconds(10)));
 
         CHECK(backend.get_current_action() == AmsAction::IDLE);
-        CHECK_FALSE(backend.is_filament_loaded());
         CHECK(backend.get_current_slot() == -1);
     }
 
-    SECTION("unload returns error when nothing is loaded") {
-        // First unload
-        backend.unload_active_filament();
+    SECTION("park returns error when nothing is mounted") {
+        backend.park_active_tool();
         REQUIRE(wait_until_ams_idle(backend, std::chrono::seconds(10)));
-        REQUIRE_FALSE(backend.is_filament_loaded());
+        REQUIRE(backend.get_current_slot() == -1);
 
-        // Second unload should fail — nothing loaded
-        auto result = backend.unload_active_filament();
+        auto result = backend.park_active_tool();
         CHECK_FALSE(result);
         CHECK(result.result == helix::AmsResult::WRONG_STATE);
     }
@@ -436,14 +408,8 @@ TEST_CASE("Operations rejected when mock toolchanger backend not started",
         CHECK(result.result == helix::AmsResult::NOT_CONNECTED);
     }
 
-    SECTION("load_filament fails when not started") {
-        auto result = backend.load_filament(0);
-        CHECK_FALSE(result);
-        CHECK(result.result == helix::AmsResult::NOT_CONNECTED);
-    }
-
-    SECTION("unload_filament fails when not started") {
-        auto result = backend.unload_active_filament();
+    SECTION("park fails when not started") {
+        auto result = backend.park_active_tool();
         CHECK_FALSE(result);
         CHECK(result.result == helix::AmsResult::NOT_CONNECTED);
     }

@@ -238,7 +238,7 @@ the config trail anywhere in a 20,000-line `log_tail`.
 
 | | `init_early()` | `init(config)` |
 |---|---|---|
-| Console sink level | Pinned at WARN (`EARLY_CONSOLE_LEVEL`) | `config.level` |
+| Console sink level | Pinned at WARN (`kEarlyConsoleLevel`) | `config.level` |
 | Ring sink level | `debug`, or WARN when `HELIX_BUNDLE_LOG_DEBUG=0` | `debug`, or `config.level` when `HELIX_BUNDLE_LOG_DEBUG=0` |
 | Logger floor | The more verbose of the two above | Same rule |
 | Ring instance | Created | Adopted if one exists, else created |
@@ -436,6 +436,12 @@ On Klipper-based platforms (Pi, AD5M, K1, K2, Snapmaker U1, etc.), `setup_config
 - `printer_config` — Klipper's `printer.cfg` and every config it `[include]`s, fetched from
   `/server/files/config/<path>` and sanitized per line (see below)
 - `filament_system.gcode_macros` — bare `gcode_macro` names from `/printer/objects/list`
+- `event_journal` — the printer event journal, `{source, entries}`: the HelixPrint plugin's
+  `server.helix.journal` (up to 500 entries) when its `event_journal` feature is ready, else
+  the screen's own `LocalEventJournal`; a plugin read that fails falls back to the screen's.
+  The choice is `decide_journal_source()`, made on the main thread into
+  `PrinterSnapshot::journal_from_plugin`; the section passes through `sanitize_json()`
+  (`DebugBundleCollector::build_event_journal`)
 
 ### Why `printer_config` is its own field
 
@@ -449,7 +455,7 @@ Fetching the files into a separate field gives the content back without putting 
 competition with the incident, and beats the log copy anyway — that one arrives head-truncated
 whenever the byte window slices through the dump.
 
-Budget: `MAX_CONFIG_BYTES` (512 KB) and `MAX_CONFIG_FILES` (40). A full ZMOD AD5X config is ~250 KB
+Budget: `kMaxConfigBytes` (512 KB) and `kMaxConfigFiles` (40). A full ZMOD AD5X config is ~250 KB
 across its includes, so it fits whole. Hitting either cap records `printer_config.truncated` with
 the reason rather than silently shortening.
 

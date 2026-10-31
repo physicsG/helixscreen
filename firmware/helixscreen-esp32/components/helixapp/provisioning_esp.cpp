@@ -54,6 +54,7 @@ bool provisioning_run_portal() {
 #include "ui_update_queue.h"
 
 #include "config.h"
+#include "display_settings_manager.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -80,6 +81,7 @@ bool provisioning_run_portal() {
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -88,21 +90,21 @@ namespace {
 
 const char* TAG = "provisioning";
 
-constexpr char WIFI_NVS_NAMESPACE[] = "wifi"; // Task 13's namespace — read-only here
-constexpr char WIFI_NVS_KEY_SSID[] = "ssid";
+constexpr char kWifiNvsNamespace[] = "wifi"; // Task 13's namespace — read-only here
+constexpr char kWifiNvsKeySsid[] = "ssid";
 
-constexpr int AP_CHANNEL = 1;
-constexpr uint8_t AP_MAX_CONNECTIONS = 4;
+constexpr int kApChannel = 1;
+constexpr uint8_t kApMaxConnections = 4;
 constexpr int DNS_PORT = 53;
-constexpr int DNS_RECV_TIMEOUT_MS = 250; // bounds how often the poll loop re-checks exit flags
+constexpr int kDnsRecvTimeoutMs = 250; // bounds how often the poll loop re-checks exit flags
 // The /save handler's join poll must outlast the backend's own real assoc
-// envelope (wifi_backend_esp.cpp): ASSOC_TIMEOUT_US=15s, then a bounded-backoff
-// retry starting at RETRY_BACKOFF_FLOOR_US=2s. 15s (first attempt) + 2s
+// envelope (wifi_backend_esp.cpp): kAssocTimeoutUs=15s, then a bounded-backoff
+// retry starting at kRetryBackoffFloorUs=2s. 15s (first attempt) + 2s
 // (backoff floor) + 15s (retry attempt) = 32s worst case for the common
 // slow-but-successful case; 40s leaves comfortable margin so in-window
 // resolution is the normal case, not the exception (review MEDIUM-1).
-constexpr int SAVE_JOIN_TIMEOUT_MS = 40000;
-constexpr int SAVE_POLL_MS = 200;
+constexpr int kSaveJoinTimeoutMs = 40000;
+constexpr int kSavePollMs = 200;
 
 // Ceiling on how long the portal keeps the net thread parked. Nothing else
 // ends an unattended session: the dismiss flag needs a touch and s_join_succeeded
@@ -110,7 +112,7 @@ constexpr int SAVE_POLL_MS = 200;
 // the bounded startup wait in app_boot.cpp never gets to run. Sized for a human
 // doing the whole flow by hand — find the SSID, switch networks, type a
 // password — not for the happy path.
-constexpr uint64_t PORTAL_MAX_US = 10ULL * 60 * 1'000'000; // 10 min
+constexpr uint64_t kPortalMaxUs = 10ULL * 60 * 1'000'000; // 10 min
 
 // ---------------------------------------------------------------------------
 // Cross-thread state. Process-lifetime, deliberately never torn down — same
@@ -150,7 +152,7 @@ lv_obj_t* s_alert_dialog = nullptr;
 
 bool read_stored_ssid_present() {
     nvs_handle_t h;
-    esp_err_t rc = nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t rc = nvs_open(kWifiNvsNamespace, NVS_READONLY, &h);
     if (rc == ESP_ERR_NVS_NOT_FOUND) {
         return false; // namespace never created — never seeded, never user-set
     }
@@ -161,7 +163,7 @@ bool read_stored_ssid_present() {
         return false;
     }
     size_t len = 0;
-    esp_err_t ssid_rc = nvs_get_str(h, WIFI_NVS_KEY_SSID, nullptr, &len);
+    esp_err_t ssid_rc = nvs_get_str(h, kWifiNvsKeySsid, nullptr, &len);
     nvs_close(h);
     return ssid_rc == ESP_OK;
 }
@@ -236,9 +238,9 @@ void hide_instructions_modal() {
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> scan_networks_bounded(std::shared_ptr<helix::WiFiManager> wifi) {
-    constexpr int SCAN_WAIT_MS = 3000;
-    constexpr int SCAN_POLL_MS = 200;
-    constexpr int STOP_SCAN_WAIT_MS = 3000;
+    constexpr int kScanWaitMs = 3000;
+    constexpr int kScanPollMs = 200;
+    constexpr int kStopScanWaitMs = 3000;
 
     auto results = std::make_shared<std::vector<std::string>>();
     auto done = std::make_shared<std::atomic<bool>>(false);
@@ -255,8 +257,8 @@ std::vector<std::string> scan_networks_bounded(std::shared_ptr<helix::WiFiManage
         });
     });
 
-    for (int waited = 0; waited < SCAN_WAIT_MS && !done->load(); waited += SCAN_POLL_MS) {
-        vTaskDelay(pdMS_TO_TICKS(SCAN_POLL_MS));
+    for (int waited = 0; waited < kScanWaitMs && !done->load(); waited += kScanPollMs) {
+        vTaskDelay(pdMS_TO_TICKS(kScanPollMs));
     }
 
     // The timeout path can expire while a scan-complete dispatch is still queued,
@@ -272,8 +274,8 @@ std::vector<std::string> scan_networks_bounded(std::shared_ptr<helix::WiFiManage
         stopped->store(true);
     });
 
-    for (int waited = 0; waited < STOP_SCAN_WAIT_MS && !stopped->load(); waited += SCAN_POLL_MS) {
-        vTaskDelay(pdMS_TO_TICKS(SCAN_POLL_MS));
+    for (int waited = 0; waited < kStopScanWaitMs && !stopped->load(); waited += kScanPollMs) {
+        vTaskDelay(pdMS_TO_TICKS(kScanPollMs));
     }
     if (!stopped->load()) {
         // The UI thread never drained the stop. *results may still be written,
@@ -281,7 +283,7 @@ std::vector<std::string> scan_networks_bounded(std::shared_ptr<helix::WiFiManage
         // vector alive for whatever is still holding it. The portal's SSID
         // field falls back to typed entry.
         ESP_LOGW(TAG, "scan: stop_scan did not run within %d ms — dropping results",
-                 STOP_SCAN_WAIT_MS);
+                 kStopScanWaitMs);
         return {};
     }
     return *results;
@@ -360,12 +362,23 @@ std::string render_form_page(const std::string& ap_ssid, const std::vector<std::
             std::to_string(cur_port) +
             "\">"
             "<p class=\"hint\">Leave host blank to keep the current setting.</p>"
+            "<input type=\"hidden\" id=\"tz\" name=\"tz\">"
+            "<input type=\"hidden\" id=\"tz_jan\" name=\"tz_jan\">"
+            "<input type=\"hidden\" id=\"tz_jul\" name=\"tz_jul\">"
             "<button type=\"submit\">Connect</button>"
-            "</form></body></html>";
+            "</form>"
+            // The board has no timezone of its own; the phone's sets it. The
+            // offsets (minutes east of UTC) match a zone the list does not name.
+            "<script>try{var y=new Date().getFullYear(),d=document;"
+            "d.getElementById('tz_jan').value=-new Date(y,0,1).getTimezoneOffset();"
+            "d.getElementById('tz_jul').value=-new Date(y,6,1).getTimezoneOffset();"
+            "d.getElementById('tz').value=Intl.DateTimeFormat().resolvedOptions().timeZone||'';"
+            "}catch(e){}</script>"
+            "</body></html>";
     return html;
 }
 
-constexpr const char SUCCESS_PAGE[] =
+constexpr const char kSuccessPage[] =
     "<!doctype html><html><head><meta charset=\"utf-8\"><title>Connected</title></head>"
     "<body style=\"font-family:sans-serif;text-align:center;margin-top:80px\">"
     "<h1>Connected!</h1><p>HelixScreen is joining your network. You can close this page.</p>"
@@ -418,6 +431,25 @@ std::string current_moonraker_host() {
 int current_moonraker_port() {
     helix::Config* config = helix::Config::get_instance();
     return config->get<int>(config->df() + "moonraker_port", 7125);
+}
+
+// Hands the browser's timezone to DisplaySettingsManager, which keeps any zone
+// the user already picked. Offsets beyond +-14h are not a real zone.
+void adopt_reported_timezone(const std::string& body) {
+    std::string tz, jan_str, jul_str;
+    extract_field(body, "tz", tz);
+    if (!extract_field(body, "tz_jan", jan_str) || !extract_field(body, "tz_jul", jul_str)) {
+        return;
+    }
+    const auto jan = helix::text_io::parse_leading<int>(jan_str);
+    const auto jul = helix::text_io::parse_leading<int>(jul_str);
+    constexpr int kMaxOffsetMinutes = 14 * 60;
+    if (!jan || !jul || std::abs(*jan) > kMaxOffsetMinutes || std::abs(*jul) > kMaxOffsetMinutes) {
+        return;
+    }
+    helix::ui::queue_update("provisioning::timezone", [tz, jan = *jan, jul = *jul]() {
+        helix::DisplaySettingsManager::instance().adopt_timezone_if_unset(tz, jan, jul);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +524,8 @@ esp_err_t save_post_handler(httpd_req_t* req) {
         config->save();
     }
 
+    adopt_reported_timezone(body);
+
     spdlog::info("[provisioning] portal: attempting join to '{}' (password {})",
                  helix::redact::ssid(ssid), password.empty() ? "none" : "provided");
 
@@ -509,16 +543,16 @@ esp_err_t save_post_handler(httpd_req_t* req) {
     });
 
     int waited = 0;
-    while (waited < SAVE_JOIN_TIMEOUT_MS && s_connect_state.load() == JoinState::PENDING) {
-        vTaskDelay(pdMS_TO_TICKS(SAVE_POLL_MS));
-        waited += SAVE_POLL_MS;
+    while (waited < kSaveJoinTimeoutMs && s_connect_state.load() == JoinState::PENDING) {
+        vTaskDelay(pdMS_TO_TICKS(kSavePollMs));
+        waited += kSavePollMs;
     }
 
     JoinState result = s_connect_state.load();
     if (result == JoinState::CONNECTED) {
         s_join_succeeded.store(true); // unblocks provisioning_run_portal()'s poll loop -> teardown
         httpd_resp_set_type(req, "text/html");
-        httpd_resp_send(req, SUCCESS_PAGE, HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send(req, kSuccessPage, HTTPD_RESP_USE_STRLEN);
     } else {
         std::string reason;
         if (result == JoinState::FAILED) {
@@ -611,10 +645,10 @@ struct DnsAnswer {
 };
 #pragma pack(pop)
 
-constexpr uint16_t DNS_OPCODE_MASK = 0x7800;
-constexpr uint16_t DNS_QR_FLAG = 1 << 7;
+constexpr uint16_t kDnsOpcodeMask = 0x7800;
+constexpr uint16_t kDnsQrFlag = 1 << 7;
 constexpr uint16_t DNS_TYPE_A = 0x0001;
-constexpr uint32_t DNS_ANSWER_TTL_SEC = 300;
+constexpr uint32_t kDnsAnswerTtlSec = 300;
 
 int open_dns_socket() {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -624,7 +658,7 @@ int open_dns_socket() {
     }
     struct timeval tv {};
     tv.tv_sec = 0;
-    tv.tv_usec = DNS_RECV_TIMEOUT_MS * 1000;
+    tv.tv_usec = kDnsRecvTimeoutMs * 1000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     struct sockaddr_in addr {};
     addr.sin_family = AF_INET;
@@ -654,7 +688,7 @@ void dns_pump_once(int sock, uint32_t ap_ip_be) {
     }
 
     auto* header = reinterpret_cast<DnsHeader*>(rx);
-    if ((header->flags & htons(DNS_OPCODE_MASK)) != 0) {
+    if ((header->flags & htons(kDnsOpcodeMask)) != 0) {
         return; // not a standard query — ignore
     }
 
@@ -682,7 +716,7 @@ void dns_pump_once(int sock, uint32_t ap_ip_be) {
     }
     std::memcpy(reply, rx, len);
     header = reinterpret_cast<DnsHeader*>(reply);
-    header->flags |= htons(DNS_QR_FLAG);
+    header->flags |= htons(kDnsQrFlag);
     header->an_count = htons(1);
     header->ns_count = 0;
     header->ar_count = 0;
@@ -691,7 +725,7 @@ void dns_pump_once(int sock, uint32_t ap_ip_be) {
     answer->name_ptr = htons(static_cast<uint16_t>(0xC000 | sizeof(DnsHeader)));
     answer->type = htons(DNS_TYPE_A);
     answer->klass = htons(1); // IN
-    answer->ttl = htonl(DNS_ANSWER_TTL_SEC);
+    answer->ttl = htonl(kDnsAnswerTtlSec);
     answer->addr_len = htons(static_cast<uint16_t>(sizeof(uint32_t)));
     answer->ip_addr = ap_ip_be;
 
@@ -725,8 +759,8 @@ bool provisioning_run_portal() {
     size_t n = std::min(s_ap_ssid.size(), sizeof(ap_config.ap.ssid));
     std::memcpy(ap_config.ap.ssid, s_ap_ssid.data(), n);
     ap_config.ap.ssid_len = static_cast<uint8_t>(n);
-    ap_config.ap.channel = AP_CHANNEL;
-    ap_config.ap.max_connection = AP_MAX_CONNECTIONS;
+    ap_config.ap.channel = kApChannel;
+    ap_config.ap.max_connection = kApMaxConnections;
     ap_config.ap.authmode = WIFI_AUTH_OPEN; // R3: terminal design doc is silent on AP security;
                                             // brief's default (OPEN) applies
     esp_err_t cfg_rc = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
@@ -782,10 +816,10 @@ bool provisioning_run_portal() {
     //
     // The deadline is real elapsed time rather than a per-iteration accumulator
     // because dns_pump_once() returns as soon as a query arrives, well short of
-    // its DNS_RECV_TIMEOUT_MS ceiling. Counting iterations would therefore run the
+    // its kDnsRecvTimeoutMs ceiling. Counting iterations would therefore run the
     // clock fast precisely while a client is talking to the portal — the case
     // that most needs the full window.
-    const uint64_t portal_deadline_us = static_cast<uint64_t>(esp_timer_get_time()) + PORTAL_MAX_US;
+    const uint64_t portal_deadline_us = static_cast<uint64_t>(esp_timer_get_time()) + kPortalMaxUs;
     bool portal_expired = false;
     while (!s_dismiss_requested.load() && !s_join_succeeded.load() && !wifi->is_connected()) {
         if (static_cast<uint64_t>(esp_timer_get_time()) >= portal_deadline_us) {
@@ -796,7 +830,7 @@ bool provisioning_run_portal() {
     }
     if (portal_expired) {
         ESP_LOGI(TAG, "portal: no one provisioned within %llu s — closing",
-                 (unsigned long long)(PORTAL_MAX_US / 1'000'000));
+                 (unsigned long long)(kPortalMaxUs / 1'000'000));
     }
 
     close(dns_sock);

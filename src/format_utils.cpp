@@ -223,8 +223,8 @@ std::string format_filament_length(double mm) {
 // =============================================================================
 
 bool parse_http_date(const char* value, std::time_t& epoch_s) {
-    static const char* const MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    static const char* const kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     if (value == nullptr) {
         return false;
     }
@@ -237,16 +237,16 @@ bool parse_http_date(const char* value, std::time_t& epoch_s) {
         return false;
     }
     int month = 0;
-    while (month < 12 && std::strcmp(mon, MONTHS[month]) != 0) {
+    while (month < 12 && std::strcmp(mon, kMonths[month]) != 0) {
         ++month;
     }
     if (month == 12 || year < 1970 || hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
         second < 0 || second > 60) {
         return false;
     }
-    static const int DAYS_IN_MONTH[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    static const int kDaysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    const int month_days = DAYS_IN_MONTH[month] + ((month == 1 && leap) ? 1 : 0);
+    const int month_days = kDaysInMonth[month] + ((month == 1 && leap) ? 1 : 0);
     if (day < 1 || day > month_days) {
         return false;
     }

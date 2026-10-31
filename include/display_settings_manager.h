@@ -43,6 +43,9 @@ class DisplaySettingsManager {
   public:
     static DisplaySettingsManager& instance();
 
+    /// The static PersistedSetting table this manager is built from.
+    static settings::TableView persisted_table();
+
     // Non-copyable
     DisplaySettingsManager(const DisplaySettingsManager&) = delete;
     DisplaySettingsManager& operator=(const DisplaySettingsManager&) = delete;
@@ -137,7 +140,7 @@ class DisplaySettingsManager {
     /**
      * @brief Whether a screensaver is enabled (type != OFF).
      *
-     * Always false when HELIX_ENABLE_SCREENSAVER is not compiled in.
+     * Always false when HELIX_ENABLE_SCREENSAVER is undefined or 0, where the type is Off.
      */
     bool screensaver_enabled() const;
 
@@ -225,6 +228,14 @@ class DisplaySettingsManager {
         settings_.set(Key::SpeedFlowPhysicalUnits, enabled);
     }
 
+    /** @brief Print Status preview card shows the live camera instead of the preview */
+    bool get_print_status_show_camera() const {
+        return settings_.get_bool(Key::PrintStatusShowCamera);
+    }
+    void set_print_status_show_camera(bool enabled) {
+        settings_.set(Key::PrintStatusShowCamera, enabled);
+    }
+
     /** @brief Keep Android navigation bar onscreen (issue #908, Android only) */
     bool get_keep_navbar_visible() const {
         return settings_.get_bool(Key::KeepNavbarVisible);
@@ -232,6 +243,19 @@ class DisplaySettingsManager {
 
     /** @brief Set keep-navbar-visible preference (updates subject + persists + JNI push) */
     void set_keep_navbar_visible(bool enabled);
+
+    /** @brief The saved Glass Effects choice; glass shows only where the gate also passes */
+    bool get_glass_effects() const {
+        return settings_.get_bool(Key::GlassEffects);
+    }
+
+    /** @brief Set the Glass Effects choice (updates subject + persists) */
+    void set_glass_effects(bool enabled);
+
+    /** @brief Record the glass gate's verdict for this run. Main thread; the gate only */
+    void set_glass_available(bool available);
+
+    bool get_glass_available() const;
 
     /**
      * @brief Get the UI scale setting as a percentage.
@@ -271,10 +295,19 @@ class DisplaySettingsManager {
         settings_.set(Key::TimeFormat, static_cast<int>(format));
     }
 
-    /** @brief Get current timezone IANA ID (e.g., "America/New_York") */
+    /// Whether the dropdown offers "System": the host's own zone. The ESP32 has
+    /// none, so an unpicked zone there is UTC.
+#ifdef ESP_PLATFORM
+    static constexpr bool kSystemTimezoneAvailable = false;
+#else
+    static constexpr bool kSystemTimezoneAvailable = true;
+#endif
+
+    /** @brief Current timezone IANA ID (e.g., "America/New_York"), or "" while it follows the
+     * system */
     std::string get_timezone() const;
 
-    /** @brief Set timezone by IANA ID, applies via setenv/tzset, persists */
+    /** @brief Set timezone by IANA ID, applies via setenv/tzset, persists. "" selects System */
     void set_timezone(const std::string& iana_id);
 
     /** @brief Set timezone by dropdown index */
@@ -285,6 +318,32 @@ class DisplaySettingsManager {
 
     /** @brief Get newline-separated dropdown options string */
     static std::string get_timezone_options();
+
+    /**
+     * @brief Apply the persisted /display/timezone to the process
+     *
+     * An absent key follows the system zone where there is one, else UTC.
+     * @return the dropdown index of the applied zone
+     */
+    static int apply_configured_timezone();
+
+    /**
+     * @brief The offered zone a browser-reported zone resolves to
+     *
+     * An offered IANA id matches itself; any other id takes the first offered
+     * zone with the same 1 January and 1 July UTC offsets (minutes east).
+     * @return the offered IANA id, or "" when none matches
+     */
+    static std::string match_timezone(const std::string& iana_id, int jan_minutes_east,
+                                      int jul_minutes_east);
+
+    /**
+     * @brief Adopt a browser-reported zone unless the user has picked one
+     *
+     * Main thread only: it sets the timezone subject.
+     */
+    void adopt_timezone_if_unset(const std::string& iana_id, int jan_minutes_east,
+                                 int jul_minutes_east);
 
     // =========================================================================
     // SCREEN ROTATION
@@ -337,11 +396,15 @@ class DisplaySettingsManager {
     // SCREENSAVER
     // =========================================================================
 
-#ifdef HELIX_ENABLE_SCREENSAVER
-    /** @brief Get screensaver type (a ScreensaverType value, include/screensaver_registry.h) */
+    /**
+     * @brief Get screensaver type (a ScreensaverType value, include/screensaver_registry.h)
+     *
+     * Always Off (0) when HELIX_ENABLE_SCREENSAVER is undefined or 0.
+     */
     int get_screensaver_type() const;
 
-    /** @brief Set screensaver type (updates subject + persists) */
+#if HELIX_ENABLE_SCREENSAVER
+    /** @brief Set screensaver type (updates subject, persists its stable name) */
     void set_screensaver_type(int type);
 #endif
 
@@ -367,6 +430,13 @@ class DisplaySettingsManager {
 
     /** @brief Convert dropdown index to dim seconds */
     static int index_to_dim_seconds(int index);
+
+    /// The form the dim-timeout row takes in Display settings. Without a dimmable
+    /// backlight the same timeout starts the screensaver, so the row is offered
+    /// under that name while one is enabled, and hidden when nothing would happen.
+    /// should_couple_sleep_to_dim() holds exactly when this is not Hidden.
+    enum class DimRowKind { Hidden = 0, ScreenDim = 1, ScreensaverAfter = 2 };
+    static DimRowKind dim_row_kind(bool has_dimming, bool screensaver_enabled);
 
     // =========================================================================
     // DISPLAY SLEEP OPTIONS (for dropdown population)
@@ -463,6 +533,21 @@ class DisplaySettingsManager {
         return settings_.subject(Key::SpeedFlowPhysicalUnits);
     }
 
+    /** @brief The saved Glass Effects choice (integer: 0=flat, 1=glass) */
+    lv_subject_t* subject_glass_effects() {
+        return settings_.subject(Key::GlassEffects);
+    }
+
+    /** @brief Whether the glass gate passed on this board (integer: 0/1, set only by the gate) */
+    lv_subject_t* subject_glass_available() {
+        return &glass_available_subject_;
+    }
+
+    /** @brief Print Status preview content subject (integer: 0=preview, 1=camera) */
+    lv_subject_t* subject_print_status_show_camera() {
+        return settings_.subject(Key::PrintStatusShowCamera);
+    }
+
     /** @brief Keep navbar visible subject (integer: 0=immersive, 1=always show) */
     lv_subject_t* subject_keep_navbar_visible() {
         return settings_.subject(Key::KeepNavbarVisible);
@@ -520,12 +605,15 @@ class DisplaySettingsManager {
         return &timezone_subject_;
     }
 
-#ifdef HELIX_ENABLE_SCREENSAVER
-    /** @brief Screensaver type subject (a ScreensaverType value, include/screensaver_registry.h) */
+    /**
+     * @brief Screensaver type subject (a ScreensaverType value, include/screensaver_registry.h)
+     *
+     * Registered in every build, as Off without screensaver support, so XML that binds
+     * `settings_screensaver_type` resolves and hides saver-only controls.
+     */
     lv_subject_t* subject_screensaver_type() {
         return &screensaver_type_subject_;
     }
-#endif
 
   private:
     DisplaySettingsManager();
@@ -544,10 +632,12 @@ class DisplaySettingsManager {
         HideKeyboardWithHardware,
         PageScrollButtons,
         SpeedFlowPhysicalUnits,
+        PrintStatusShowCamera,
         KeepNavbarVisible,
         BedMeshRenderMode,
         GcodeRenderMode,
         TimeFormat,
+        GlassEffects,
         COUNT
     };
     settings::PersistedSettings<Key, static_cast<size_t>(Key::COUNT)> settings_;
@@ -559,15 +649,16 @@ class DisplaySettingsManager {
     lv_subject_t display_sleep_subject_{};
     lv_subject_t has_backlight_subject_{};
     lv_subject_t has_dimming_subject_{};
+    lv_subject_t dim_row_kind_subject_{};
     lv_subject_t animations_enabled_subject_{};
     lv_subject_t hardware_keyboard_present_subject_{};
     lv_subject_t is_android_subject_{};
     lv_subject_t rotation_available_subject_{};
     lv_subject_t timezone_subject_{};
+    lv_subject_t glass_available_subject_{};
 
-#ifdef HELIX_ENABLE_SCREENSAVER
     lv_subject_t screensaver_type_subject_{};
-#endif
+    lv_subject_t has_screensaver_subject_{};
 
     bool subjects_initialized_ = false;
     bool hardware_keyboard_present_ = false;

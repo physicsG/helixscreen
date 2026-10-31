@@ -19,7 +19,7 @@ AFC hardware types register as different Klipper object prefixes:
 | OpenAMS | `AFC_OpenAMS {name}` | `AFC_lane lane{N}` | `AFC_hub Hub_{N}` | HUB (always) |
 | Toolchanger | `AFC_Toolchanger {name}` | — | — | Container only |
 
-**Critical: OpenAMS uses `AFC_lane`, not `AFC_stepper`.** Both have the same JSON schema and are parsed through the same `parse_afc_stepper()` function. We subscribe to both object types.
+**Critical: OpenAMS uses `AFC_lane`, not `AFC_stepper`.** Both have the same JSON schema and are parsed through the same `apply_lane_status()` function. We subscribe to both object types.
 
 ### Unit Object Structure (Real Production Data)
 
@@ -124,15 +124,31 @@ Status values observed in production and their mapping to `SlotStatus`:
 Fields present in production `AFC_lane` data but not in `AFC_stepper`:
 - `buffer: null` and `buffer_status: null` (OpenAMS has no buffers)
 - `dist_hub: 60` (OpenAMS, short distance) vs `1940-2230` (Box Turtle, long bowden)
-- `td1_td`, `td1_color`, `td1_scan_time` — TD1 filament tag detection sensor data (not currently used by HelixScreen)
+- `td1_td`, `td1_color`, `td1_scan_time` — the TD-1 inline scanner. `td1_color` lands on `SlotInfo::scanned_color_rgb`, never on `color_rgb`, and it is the lane's `tag_reading()`: a colour only, which Reset to tag puts back over a user's pick (`src/printer/ams_backend_afc.cpp#tag_reading`)
 
 ### Detection
 
 Klipper object `AFC` in `printer.objects.list` sets `AmsType::AFC`. Lane names come from `AFC_stepper lane*` and `AFC_lane lane*` objects, hub names from `AFC_hub *` objects. Unit-type objects (`AFC_BoxTurtle`, `AFC_OpenAMS`) provide the lane/extruder/hub/buffer membership that determines per-unit topology.
 
+**The sensors AFC owns.** `AmsBackendAfc::owns_filament_sensor()` claims every filament sensor AFC
+registers, so none of them is offered as a standalone runout switch in sensor settings or the
+setup wizard: the bare `tool_start` / `tool_end`, each lane's `<lane>_prep`, `<lane>_load` and
+`<lane>_selector`, and each `[AFC_extruder <name>]`'s `<name>_tool_start` / `<name>_tool_end`.
+The per-extruder names are matched against `PrinterDiscovery::afc_extruder_names()`, collected
+from the `AFC_extruder <name>` objects. Claiming them is a safety matter, not tidiness: AFC DEV's
+`pin_tool_start: virtual` sensor is a software switch whose `ENABLE` sets AFC's toolhead load
+state, so toggling it from our sensor UI would mark a tool loaded or unloaded.
+
 ### Data Sources
 
-AFC state comes from multiple Klipper objects:
+AFC state comes from multiple Klipper objects. Each is read by a pure parser in
+`include/afc_status_parse.h` (`afc::parse_state`, `afc::parse_lane_status`,
+`afc::parse_lane_data`, `afc::parse_buffer`, ...) into a struct whose fields are
+`std::optional`, or `afc::Clearable` where AFC publishes null as a deliberate clear;
+`AmsBackendAfc::apply_*` overlays the result under its lock. Both lane surfaces
+(`AFC_stepper` and the `lane_data` namespace) read spool identity through one
+reader, `afc::read_lane_identity`, and apply it through one step,
+`AmsBackendAfc::apply_lane_identity`.
 
 **Per-lane state** (`AFC_stepper lane{N}` or `AFC_lane lane{N}`):
 
@@ -213,12 +229,12 @@ the next session's stale error. (Verified against the add-on source on a live Bo
 restarts and a fresh process has no prior text to dedup against, the backend seeds its error
 dedup from `AfcMessageDedup` (`system/afc_message_dedup.h`): the last error text a previous
 session surfaced, persisted in the config dir. An unchanged text raises no toast and no
-`EVENT_ERROR`; a text the store has never seen — including a live, non-pausing fault enqueued
+`kEventError`; a text the store has never seen — including a live, non-pausing fault enqueued
 by `AFC_logger.error()` with `error_state` still false — toasts normally. The seed clears with
 the message field, so a recurrence toasts again.
 
 *A single clear is not enough.* `AmsBackendAfc::clear_fault()` drains **until the queue reports
-empty**, bounded by a wall-clock deadline and by `MESSAGE_DRAIN_MAX_CLEARS` as a runaway guard
+empty**, bounded by a wall-clock deadline and by `kMessageDrainMaxClears` as a runaway guard
 (not as the expected stopping point); see `message_drain_budget_` / `message_drain_deadline_`.
 
 **`AFC.error_state` is not the *detection* signal.** It stayed `false` for a whole session while
@@ -350,6 +366,7 @@ given machine. `BT_*` macros are BoxTurtle-specific and do not exist on other un
 | `SET_RUNOUT LANE={name} RUNOUT={backup_lane}` | Python | Set endless spool backup |
 | `RESET_AFC_MAPPING RUNOUT=no` | Python | Reset tool mappings only. **Renamed `AFC_RESET_MAPPING` by the virtual-tools firmware (Klipper-Add-On #832), which deregistered the old name**; HelixScreen picks per firmware via the `multiple_tool_mapping` status flag |
 | `AFC_CALIBRATION` | Python | Run calibration wizard |
+| `AFC_TOOLHEAD_CALIBRATION` | Python | Guided calibration of `tool_stn`, `tool_stn_unload` and the cutter retract, run through AFC's own action prompts. **AFC DEV only**, and `AFC_VERSION` did not change with it, so the backend asks `printer.gcode.help` once at start (`AmsBackendAfc::detect_afc_commands`) and adds the **Calibrate Toolhead** button at the head of the Toolhead section only when the command is registered. Older AFC answers it with `Unknown command` |
 | `AFC_RESET_MOTOR_TIME LANE={name}` | Python | Reset motor run-time counter |
 | `AFC_QUIET_MODE` | Python | Toggle quiet mode |
 | `TURN_ON_AFC_LED` / `TURN_OFF_AFC_LED` | Python | Toggle LED strip |
@@ -490,7 +507,8 @@ remedies, and AFC_BoxTurtle.py writes `||------||` where AFC.py writes `||-----|
 **message text**, and strip the art.
 
 `helix::afc::afc_fault_position()` (`include/afc_fault_position.h`) — a pure function, no LVGL, no
-printer state:
+printer state. It is AFC's row in the generic fault-path provider table, `helix::faultpath`
+(`include/fault_path_position.h`); the graphic and the modals ask that module, never AFC:
 
 | Message fragment | Filament reached | `PathSegment` |
 |---|---|---|
@@ -508,8 +526,8 @@ plain-text rendering we had before rather than mangling the sentence. Tests driv
 `tests/unit/test_afc_fault_position.cpp`.
 
 **Where it surfaces.** Both modals that can show an AFC lane fault route their text through
-`helix::ui::afc_fault_path_apply()` (`include/ui_afc_fault_path.h`), which publishes the stop point
-to the int subject `afc_fault_segment` and returns the stripped text:
+`helix::ui::fault_path_apply()` (`include/ui_fault_path.h`), which publishes the stop point
+to the int subject `fault_path_segment` and returns the stripped text:
 
 | Path | Modal | Call site |
 |---|---|---|
@@ -517,9 +535,9 @@ to the int subject `afc_fault_segment` and returns the stripped text:
 | `AmsAction::ERROR` rising edge -> `AmsErrorBridge` -> `backend->current_error()` -> `RecoveryModalPresenter` | `ActionPromptModal` | same call site as the row above, reached with no `!!` line involved |
 | `printer.AFC.message` -> `AmsAction::ERROR` -> `AmsPanel` | `AmsLoadingErrorModal` | `ui_panel_ams.cpp` `show_loading_error_modal()` |
 
-All three can fire for the same fault. The graphic itself is `ui_xml/components/afc_fault_path.xml` —
+All three can fire for the same fault. The graphic itself is `ui_xml/components/fault_path.xml` —
 four labelled checkpoints joined by the three **gaps** between them, all bound to
-`afc_fault_segment` alone; 0 (`PathSegment::NONE`) hides the whole component.
+`fault_path_segment` alone; 0 (`PathSegment::NONE`) hides the whole component.
 
 **The gap, not the checkpoint, is what gets marked**, and that is not cosmetic. AFC's own art is
 three sections under four labels (`Spool`→`Lane`, `Lane`→`Hub`, `Hub`→`Toolhead`), which is why it
@@ -532,13 +550,19 @@ filament cleared the sensor and jammed in the extruder gears — so `TOOLHEAD` m
 
 Position alone is not enough on its own, though: it says which element differs from its
 neighbours, not that the difference means failure, and red-against-green is precisely the pair a
-colourblind user cannot separate (#1196). So the component also renders one of four captions —
-*Stopped between Hub and Toolhead*, and so on — bound to the same subject and mutually exclusive
-on it. The caption is also the only thing that can express `TOOLHEAD`, which fails at a node
-rather than in a gap.
+colourblind user cannot separate (#1196). So the label row names the failure in words: *Stopped*
+sits under the failing gap, between the two checkpoint names that bound it, and for `TOOLHEAD`
+*Jammed* takes the toolhead's own label, since that fault happens at a node rather than in a gap.
+Each word is bound to one segment value, so exactly one shows and the strip stays two rows tall.
 
-Every caller must go through `afc_fault_path_apply()` even when the message is not AFC's, or a
-previous fault's marker stays on screen.
+Every caller must go through `fault_path_apply()` even when the message is not AFC's, or a
+previous fault's marker stays on screen. `ActionPromptModal` also re-publishes from its own text
+(`fault_path_publish()`) before it builds, so any action:prompt, including a firmware one such
+as `AFC_CALIBRATION`'s unit picker, shows the strip only for the fault its text names. The subject
+backs a component registered once at boot, so it is a `Lifetime::Process` registry entry: it stays
+registered and live across a printer switch and is torn down only at exit. A modal built while it
+is unregistered would bind nothing and show the strip with every caption at once, so publishing
+also creates it if it does not exist yet.
 
 #### Maintaining the contract across AFC versions
 
@@ -548,11 +572,19 @@ loudly when it does: the step bar simply stops advancing, or a lane fault render
 This subsection is the maintenance half of #1153 — what we depend on, where it lives on our side,
 and what to do on an AFC version bump.
 
-**What the narration actually drives.** A matched phase id is looked up in the *active operation's*
-phase template (`AmsBackendAfc::toolchange_phase_template()`), and the step bar advances to that
-index. A phase id the running operation's template does not contain is matched and then dropped —
-`GcodeNarrationRouter::process_line()` leaves the step subject untouched — so a needle is only ever
-as useful as the template it feeds:
+**What the narration actually drives.** A matched phase id goes to
+`AmsState::apply_narration_phase_id()`, which looks it up in the *active operation's* phase template
+(`AmsBackendAfc::toolchange_phase_template()`) and advances the step bar to that index. A phase id
+the active template does not contain moves nothing, but it is held: when the operation changes,
+`set_active_step_operation()` re-resolves the held id against the new template. That matters for
+an operation started outside HelixScreen (a macro, the console, another client), which narrates
+before its action reaches us, so its first phases arrive while no template or the wrong one is
+active. The sidebar keeps a phase narrated that way when it builds the step bar, and seeds step 0
+only when there is none. The narration ends with the operation: every write of the action goes
+through `AmsState::publish_action()`, which clears the label, the phase index and the high-water
+latch when the action reaches IDLE, so an operation a backend sync ends leaves nothing behind to
+swallow the next one's early phases. An operation the UI starts clears the narration before it
+begins. A needle is still only as useful as the template it feeds:
 
 | Operation | Phase ids, in order (opt = optional: stays Pending when never narrated) |
 |---|---|
@@ -648,7 +680,7 @@ Each lane's `AFC_stepper`/`AFC_lane` object carries a `buffer_status` string nam
 current buffer operation (e.g. "Advancing"). The buffer's own health lives on separate
 `AFC_buffer {name}` objects, discovered from the Klipper object list.
 
-**Buffer health is per buffer, attributed to a unit.** `parse_afc_buffer()` accumulates
+**Buffer health is per buffer, attributed to a unit.** `apply_buffer()` accumulates
 each frame into `buffer_health_[buffer_name]` - Moonraker forwards only changed keys, so
 absent fields must leave the previous reading alone - and `apply_buffer_health_to_units()`
 then derives `AmsUnit::buffer_health` from `buffer_health_` plus `buffer_lane_names_`,
@@ -657,7 +689,7 @@ resolving the first lane that maps to a unit. Two invariants make that work:
 - **Unit objects must be parsed before anything that resolves a lane to a unit.**
   `handle_status()` runs `AFC_BoxTurtle`/`AFC_OpenAMS`/`AFC_vivid` first, then
   `AFC_buffer`. Those unit objects are what build the multi-unit layout
-  (`parse_afc_unit_object` → `rebuild_unit_map_from_klipper` → `reorganize_slots`). With
+  (`apply_unit_object` → `rebuild_unit_map_from_klipper` → `reorganize_slots`). With
   buffers parsed first, every buffer in the first frame resolved against the synthetic
   single unit `initialize_slots()` creates, and a five-unit rig put all five buffers on
   unit 0, each read-modify-writing the previous one's fields (bundle XGVDYEB5).
@@ -781,7 +813,7 @@ absent from `src/` and `include/`, and is recorded here so the reasoning is not 
 | Feature | Supported | Editable |
 |---------|-----------|----------|
 | Endless Spool | `Available`, always `On` | `PerSlot` via `SET_RUNOUT` (see [Endless Spool](FILAMENT_MANAGEMENT.md#endless-spool-shared-model)) |
-| Tool Mapping | Yes | Yes (via `SET_MAP`) |
+| Tool Mapping | Yes | Yes (via `SET_MAP`); none behind Z-Mod's `zmod_afclite` shim, whose `SET_MAP` raises by design because Z-Mod maps tools per print in its own material prompt |
 | Bypass Mode | Yes | Hardware sensor (auto-detect on Box Turtle) |
 | Spoolman | Yes | -- |
 | Auto-Heat on Load | Yes | AFC uses `default_material_temps` from config |

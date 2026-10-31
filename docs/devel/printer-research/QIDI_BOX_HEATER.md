@@ -228,7 +228,7 @@ MULTI_COLOR_BOX_UNLOAD SLOT=slotN   ; eject material back into the box (Q2 FORCE
 
 `slotN` is the same zero-indexed `slot0…` token HelixScreen already uses. Prefer the public `MULTI_COLOR_BOX_UNLOAD` over the internal `SLOT_UNLOAD` (the latter isn't in the public Moonraker `help` surface).
 
-**Dialect discriminator for capability-based dispatch:** presence of the Moonraker **`multi_color_controller`** object. It is Max 4-only — the Q2/Plus 4 expose `box_extras`/`box_stepper`/`box_rfid` but not `multi_color_controller` (confirmed against our presets: `presets/qidi_q2.json` lacks it, `presets/qidi_max4.json` lists it). Dispatch rule: `multi_color_controller` present → Max 4 (`MULTI_COLOR_BOX_UNLOAD SLOT=slotN`); otherwise → Q2/Plus 4 (`FORCE_MOVE STEPPER="box_stepper slotN"`). Sources: `thelegendtubaguy/Qidi-Max-4-Optimized/docs/qidi_box/`, `Wazzup77/Bunny-Box/Max4/`. Not yet verified end-to-end on Max 4 hardware.
+**Dialect discriminator for capability-based dispatch:** a **`[multi_color_controller]`** config section, bare or instanced (`src/printer/ams_backend_qidi.cpp#apply_config_settings`). It is Max 4-only — the Q2/Plus 4 expose `box_extras`/`box_stepper`/`box_rfid` but not `multi_color_controller` (confirmed against our presets: `presets/qidi_q2.json` lacks it, `presets/qidi_max4.json` lists it). Dispatch rule: `multi_color_controller` present → Max 4 (`MULTI_COLOR_BOX_UNLOAD SLOT=slotN`); otherwise → Q2/Plus 4 (`FORCE_MOVE STEPPER="box_stepper slotN"`). Sources: `thelegendtubaguy/Qidi-Max-4-Optimized/docs/qidi_box/`, `Wazzup77/Bunny-Box/Max4/`. Not yet verified end-to-end on Max 4 hardware; report results in [#1067](https://github.com/prestonbrown/helixscreen/issues/1067).
 
 ---
 
@@ -268,7 +268,7 @@ type                           = PLA
 | `[colordict]` | Numeric id → hex color; per-slot color is stored as a color id referencing this table |
 | `[vendor_list]` | Numeric id → vendor name |
 
-`AmsBackendQidi::apply_filas_list()` (declared but unimplemented, `include/ams_backend_qidi.h#apply_filas_list`) should parse this into `fila_profiles_` to seed material presets, nozzle ranges, and per-material drying defaults. The colordict/vendor tables decode the per-slot saved state (see Known Unknowns — where per-slot type/color is persisted is still TBD; `box1.cfg` has **no** `SAVE_VARIABLE` for filament attributes, so it likely lives in `box_rfid.so` state or another saved-variable namespace).
+`src/printer/ams_backend_qidi.cpp#apply_filas_list` parses this into `fila_profiles_` and the colour and vendor tables. Those tables decode the per-slot saved state, which lives in `save_variables` as the row indices `filament_slot<N>` / `color_slot<N>` / `vendor_slot<N>` (see [`FILAMENT_BACKEND_QIDI_BOX.md`](../FILAMENT_BACKEND_QIDI_BOX.md)).
 
 ---
 
@@ -336,12 +336,14 @@ If firmware behavior differs from what is documented here, adjust the command st
 - `officiall_filas_list.cfg` format (INI; `[filaN]` + `[colordict]` + `[vendor_list]`) — see "Filas List Format" above.
 - No discrete single-slot eject command in stock config.
 
-Still unconfirmed (needs the user's device dumps):
+**Resolved from device dumps (#1041):**
 
-- **Where per-slot filament type/color is persisted.** `box1.cfg` has no `SAVE_VARIABLE` for it; suspected `box_rfid.so` state or another saved-variable namespace. Need a `save_variables` dump (and a before/after when a slot's filament is set in QIDI's own UI).
-- **Whether `enable_box` is set on Camden's box** (the likely cause of load doing nothing) and what the `value_t<n>` → slot mapping is.
+- Per-slot filament identity is persisted in `save_variables` as `filament_slot<N>` / `color_slot<N>` / `vendor_slot<N>`.
+- `enable_box` is `1` on a stock box, and `value_t<n>` maps tool `n` to `slot<n>` by default.
+
+Still unconfirmed. Results from a QIDI owner go in a [new issue](https://github.com/prestonbrown/helixscreen/issues/new):
+
 - Box numbering when multiple Box units are chained (does `BOX=2` work as `heater_box2`?)
 - Whether `END_TIME` is in hours or minutes on the PLUS4 firmware variant
 - `MULTI_COLOR_DRY` parameter shapes
 - Whether `box_extras` is present on all supported firmware versions or only some
-- Why the dryer indicator doesn't render on the stock path despite `dryer.supported==true` forcing it (needs a device `-vv` log; see plan §1).

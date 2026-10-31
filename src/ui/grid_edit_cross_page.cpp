@@ -11,37 +11,37 @@ namespace {
 /// Column track width of the 800x480 panel (12 tracks across 710px, 5px
 /// gutters), where the zone and push speed were tuned. Stands in for the track
 /// before a grid exists.
-constexpr float REFERENCE_TRACK_PX = 54.58f;
+constexpr float kReferenceTrackPx = 54.58f;
 
 /// Three quarters of a track: 40px on the reference track. Narrower than a
 /// track, so a finger carrying a widget into the outer column is not
 /// automatically in the zone.
-constexpr float EDGE_ZONE_TRACK_FRACTION = 0.75f;
+constexpr float kEdgeZoneTrackFraction = 0.75f;
 
 /// Floor for the zone: about a fingertip's contact patch on the smallest
 /// panels, whose 34px tracks (480x272) would otherwise give 25px.
-constexpr int EDGE_ZONE_MIN_PX = 24;
+constexpr int kEdgeZoneMinPx = 24;
 
 /// One track of push every 300ms: about 180px/s on the reference track.
-constexpr int PUSH_MS_PER_TRACK = 300;
+constexpr int kPushMsPerTrack = 300;
 
-constexpr int64_t MPX_PER_PX = 1000;
-constexpr float MS_PER_S = 1000.0f;
+constexpr int64_t kMpxPerPx = 1000;
+constexpr float kMsPerS = 1000.0f;
 
 /// The track the tuning reads: the live one, or the reference before a grid exists.
 float tuning_track(float cell_w) {
-    return cell_w > 0.0f ? cell_w : REFERENCE_TRACK_PX;
+    return cell_w > 0.0f ? cell_w : kReferenceTrackPx;
 }
 
 } // namespace
 
 int cross_page_edge_zone_px(float cell_w) {
-    const int zone = static_cast<int>(tuning_track(cell_w) * EDGE_ZONE_TRACK_FRACTION);
-    return std::max(zone, EDGE_ZONE_MIN_PX);
+    const int zone = static_cast<int>(tuning_track(cell_w) * kEdgeZoneTrackFraction);
+    return std::max(zone, kEdgeZoneMinPx);
 }
 
 int cross_page_push_px_per_s(float cell_w) {
-    return static_cast<int>(tuning_track(cell_w) * MS_PER_S / PUSH_MS_PER_TRACK);
+    return static_cast<int>(tuning_track(cell_w) * kMsPerS / kPushMsPerTrack);
 }
 
 bool cross_page_past_right_border(int frame_x2, int widget_left, int widget_width) {
@@ -94,15 +94,15 @@ CrossPageStep cross_page_step(CrossPageState& state, const CrossPageInput& in) {
         // The caps bound the widget's left edge, so a pointer that already puts
         // the widget past one pulls it back to the cap.
         if (zone > 0) {
-            const int max_left = in.frame_x2 - half + CROSS_PAGE_PUSH_CAP_SLOP_PX;
-            push = std::min(push, static_cast<int64_t>(max_left - in.widget_left) * MPX_PER_PX);
+            const int max_left = in.frame_x2 - half + kCrossPagePushCapSlopPx;
+            push = std::min(push, static_cast<int64_t>(max_left - in.widget_left) * kMpxPerPx);
         } else {
-            const int min_left = in.frame_x1 - half - CROSS_PAGE_PUSH_CAP_SLOP_PX;
-            push = std::max(push, static_cast<int64_t>(min_left - in.widget_left) * MPX_PER_PX);
+            const int min_left = in.frame_x1 - half - kCrossPagePushCapSlopPx;
+            push = std::max(push, static_cast<int64_t>(min_left - in.widget_left) * kMpxPerPx);
         }
         state.push_mpx = static_cast<int>(push);
     }
-    out.widget_left = in.widget_left + static_cast<int>(state.push_mpx / MPX_PER_PX);
+    out.widget_left = in.widget_left + static_cast<int>(state.push_mpx / kMpxPerPx);
 
     const bool majority_left = out.widget_left + in.widget_width < in.frame_x1 + half;
     const bool majority_right =

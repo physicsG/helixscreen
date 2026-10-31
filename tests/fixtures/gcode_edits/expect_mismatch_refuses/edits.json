@@ -1,0 +1,22 @@
+{
+  "description": "One stale line refuses the whole list, including edits that would match",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "PRINT_START BED=60",
+      "action": "replace",
+      "args": {
+        "gcode": "PRINT_START BED=60 SKIP_BED_MESH=1"
+      }
+    },
+    {
+      "line_number": 3,
+      "expect_raw_line": "CLEAN_NOZZLE",
+      "action": "comment_out",
+      "args": {
+        "comment": "Disabled Nozzle clean"
+      }
+    }
+  ],
+  "refused": true
+}

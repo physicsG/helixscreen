@@ -70,13 +70,13 @@ TEST_CASE_METHOD(HelixTestFixture, "keypad_bounds: outer floor is the paired inn
                  "[settings_motion]") {
     const auto b = keypad_bounds(Field::TurboOuter, 10.0f, 50.0f);
     CHECK(b.min == Catch::Approx(10.0f));
-    CHECK(b.max == Catch::Approx(helix::settings::JOG_DISTANCE_MAX_MM));
+    CHECK(b.max == Catch::Approx(helix::settings::kJogDistanceMaxMm));
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "keypad_bounds: inner ceiling is the paired outer step",
                  "[settings_motion]") {
     const auto b = keypad_bounds(Field::FineInner, 0.1f, 1.0f);
-    CHECK(b.min == Catch::Approx(helix::settings::JOG_DISTANCE_MIN_MM));
+    CHECK(b.min == Catch::Approx(helix::settings::kJogDistanceMinMm));
     CHECK(b.max == Catch::Approx(1.0f));
 }
 
@@ -123,9 +123,9 @@ TEST_CASE_METHOD(HelixTestFixture, "Bed map clearance defaults to 5mm and clamps
     s.init_subjects();
     REQUIRE(s.get_bed_map_clearance_mm() == 5);
     s.set_bed_map_clearance_mm(0);
-    CHECK(s.get_bed_map_clearance_mm() == helix::BED_MAP_CLEARANCE_MIN_MM);
+    CHECK(s.get_bed_map_clearance_mm() == helix::kBedMapClearanceMinMm);
     s.set_bed_map_clearance_mm(999);
-    CHECK(s.get_bed_map_clearance_mm() == helix::BED_MAP_CLEARANCE_MAX_MM);
+    CHECK(s.get_bed_map_clearance_mm() == helix::kBedMapClearanceMaxMm);
     s.set_bed_map_clearance_mm(5);
 }
 

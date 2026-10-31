@@ -28,9 +28,8 @@ using namespace helix::ui;
 
 namespace {
 
-/// Captures what the notification layer was asked to surface. User-facing
-/// toasts are stubbed out of the test build, so the hook the stub calls is the
-/// only observation point (tests/ui_test_utils.h).
+/// Captures what the notification layer was asked to surface, through the
+/// error-notification hook (tests/ui_test_utils.h).
 class ErrorNotificationWatcher {
   public:
     ErrorNotificationWatcher() {

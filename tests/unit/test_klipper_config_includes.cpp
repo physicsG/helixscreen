@@ -1,11 +1,18 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_update_queue.h"
+
+#include "../test_helpers/update_queue_test_access.h"
 #include "klipper_config_includes.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+#include "printer_state.h"
 
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -375,8 +382,8 @@ namespace {
 struct DeferredDownloads {
     struct Pending {
         std::string path;
-        std::function<void(std::string)> ok;
-        std::function<void(std::string, bool)> fail;
+        helix::SharedCallback<void(std::string)> ok;
+        helix::SharedCallback<void(std::string, bool)> fail;
     };
 
     std::map<std::string, std::string> server;
@@ -385,8 +392,8 @@ struct DeferredDownloads {
     size_t max_outstanding = 0;
 
     ConfigDownloadFn fn() {
-        return [this](const std::string& path, std::function<void(std::string)> ok,
-                      std::function<void(std::string, bool)> fail) {
+        return [this](const std::string& path, helix::SharedCallback<void(std::string)> ok,
+                      helix::SharedCallback<void(std::string, bool)> fail) {
             requested.push_back(path);
             pending.push_back({path, std::move(ok), std::move(fail)});
             max_outstanding = std::max(max_outstanding, pending.size());
@@ -538,8 +545,8 @@ TEST_CASE("download_include_graph - a download rejected before it returns report
     int errors = 0;
     download_include_graph(
         listing, "printer.cfg",
-        [&server](const std::string& path, std::function<void(std::string)> ok,
-                  std::function<void(std::string, bool)> fail) {
+        [&server](const std::string& path, helix::SharedCallback<void(std::string)> ok,
+                  helix::SharedCallback<void(std::string, bool)> fail) {
             if (path == "printer.cfg")
                 ok(server.at(path));
             else
@@ -569,8 +576,8 @@ TEST_CASE("download_include_graph - a full queue is backpressure while downloads
     GraphResult r;
     download_include_graph(
         dl.listing(), "printer.cfg",
-        [&](const std::string& path, std::function<void(std::string)> ok,
-            std::function<void(std::string, bool)> fail) {
+        [&](const std::string& path, helix::SharedCallback<void(std::string)> ok,
+            helix::SharedCallback<void(std::string, bool)> fail) {
             if (path == "c.cfg" && rejections_left > 0) {
                 --rejections_left;
                 dl.requested.push_back(path);
@@ -644,8 +651,8 @@ TEST_CASE("download_include_graph - a request refused for anything but a full qu
     GraphResult r;
     download_include_graph(
         dl.listing(), "printer.cfg",
-        [&](const std::string& path, std::function<void(std::string)> ok,
-            std::function<void(std::string, bool)> fail) {
+        [&](const std::string& path, helix::SharedCallback<void(std::string)> ok,
+            helix::SharedCallback<void(std::string, bool)> fail) {
             if (path == "b.cfg") {
                 dl.requested.push_back(path);
                 fail("invalid path", false); // before returning, with a.cfg in flight
@@ -666,4 +673,132 @@ TEST_CASE("download_include_graph - a request refused for anything but a full qu
     REQUIRE(r.errors == 1);
     CHECK(r.error.find("b.cfg") != std::string::npos);
     CHECK(std::count(dl.requested.begin(), dl.requested.end(), "b.cfg") == 1);
+}
+
+// ---------------------------------------------------------------------------
+// api_config_download: the walk never reaches a destroyed API
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// One printer whose API the test can destroy mid-walk.
+struct TornDownPrinter {
+    helix::PrinterState state;
+    MoonrakerClientMock client;
+    std::unique_ptr<MoonrakerAPIMock> api = std::make_unique<MoonrakerAPIMock>(client, state);
+
+    TornDownPrinter() {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        api->set_config_files({{"printer.cfg", "[include a.cfg]\n[printer]\n"},
+                               {"a.cfg", "[include b.cfg]\n[a]\n"},
+                               {"b.cfg", "[b]\n"}});
+    }
+
+    /// Runs the request queued for the walk's next download.
+    static void step() {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+};
+
+} // namespace
+
+TEST_CASE("api_config_download issues no request once the API is destroyed",
+          "[config][includes][include_walk_lifetime]") {
+    TornDownPrinter printer;
+    int completions = 0;
+    std::string error;
+    resolve_active_config_files_with_content(
+        *printer.api,
+        [&](const std::set<std::string>&, const std::map<std::string, std::string>&) {
+            ++completions;
+        },
+        [&](const std::string& err) { error = err; });
+
+    TornDownPrinter::step(); // printer.cfg arrives; a.cfg is requested
+    printer.api.reset();     // printer teardown, between two downloads
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    CHECK(completions == 0);
+    CHECK(error.find("disconnected") != std::string::npos);
+}
+
+TEST_CASE("api_config_download walks the whole chain while the API lives",
+          "[config][includes][include_walk_lifetime]") {
+    TornDownPrinter printer;
+    std::set<std::string> active;
+    std::string error;
+    resolve_active_config_files_with_content(
+        *printer.api,
+        [&](const std::set<std::string>& files, const std::map<std::string, std::string>&) {
+            active = files;
+        },
+        [&](const std::string& err) { error = err; });
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    CHECK(error.empty());
+    CHECK(active == std::set<std::string>{"printer.cfg", "a.cfg", "b.cfg"});
+}
+
+TEST_CASE("api_config_download stops when its caller no longer wants the walk",
+          "[config][includes][include_walk_lifetime]") {
+    TornDownPrinter printer;
+    bool wanted = true;
+    int completions = 0;
+    std::string error;
+    download_config_include_graph(
+        *printer.api, "printer.cfg", ".cfg",
+        [&](const std::set<std::string>&, const std::map<std::string, std::string>&) {
+            ++completions;
+        },
+        [&](const std::string& err) { error = err; },
+        api_config_download(*printer.api, [&wanted] { return wanted; }));
+
+    TornDownPrinter::step();
+    wanted = false;
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+
+    CHECK(completions == 0);
+    CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("download_include_graph - a full queue reported after the call returns is backpressure",
+          "[config][includes][include_graph]") {
+    DeferredDownloads dl;
+    dl.server = {
+        {"printer.cfg", "[include a.cfg]\n[include b.cfg]\n"},
+        {"a.cfg", "[a]\n"},
+        {"b.cfg", "[b]\n"},
+    };
+    // b.cfg is handed off and refused later, while a.cfg is still in flight.
+    helix::SharedCallback<void(std::string, bool)> refuse_b;
+    auto deferred = dl.fn();
+    GraphResult r;
+    download_include_graph(
+        dl.listing(), "printer.cfg",
+        [&](const std::string& path, helix::SharedCallback<void(std::string)> ok,
+            helix::SharedCallback<void(std::string, bool)> fail) {
+            if (path == "b.cfg" && !refuse_b) {
+                dl.requested.push_back(path);
+                refuse_b = std::move(fail);
+                return;
+            }
+            deferred(path, std::move(ok), std::move(fail));
+        },
+        [&r](const std::set<std::string>& active, const std::map<std::string, std::string>&) {
+            ++r.completions;
+            r.active = active;
+        },
+        [&r](const std::string& err) {
+            ++r.errors;
+            r.error = err;
+        });
+    dl.answer_next(); // printer.cfg: a.cfg and b.cfg are requested
+    REQUIRE(refuse_b);
+    refuse_b("HTTP request could not be queued", true);
+    dl.answer_all();
+
+    CHECK(r.errors == 0);
+    REQUIRE(r.completions == 1);
+    CHECK(r.active == std::set<std::string>{"printer.cfg", "a.cfg", "b.cfg"});
+    CHECK(std::count(dl.requested.begin(), dl.requested.end(), "b.cfg") == 2);
 }

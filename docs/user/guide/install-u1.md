@@ -2,6 +2,8 @@
 
 The Snapmaker U1 is an all-in-one printer with a built-in touchscreen. HelixScreen replaces the stock UI and launches automatically on boot. This guide covers installation, updates, firmware upgrades with HelixScreen installed, and recovery if the screen comes up blank.
 
+> **Easy installer:** the [HelixScreen easy installer](https://helixscreen.org/installer/) does not handle this printer yet. See [what works today](easy-installer-unsupported.md#snapmaker-u1).
+
 ## Tested With
 
 > **Requires SSH access.** Enable it on **stock firmware (1.2+)** via the **Root access** option in printer settings, or install [PAXX Extended Firmware](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware) (SSH on by default). PAXX is **not** required; it's just the turnkey option.

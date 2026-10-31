@@ -14,11 +14,14 @@ on:
 
 # A push to a claude/** work branch is superseded within minutes on a busy day,
 # and this workflow can hold a runner for hours. Keying the group on the ref
-# lets a newer push cancel the older run there. main and release/** key on the
-# SHA instead, so every commit that lands keeps its own run.
+# lets a newer push cancel the older run there. release/** keys on the SHA, so
+# every commit that lands there keeps its own run. main queues instead of
+# cancelling: a run cancelled on main leaves that commit with no verdict, and a
+# release is cut from the newest commit whose CI is fully green
+# (scripts/latest-green-sha.sh). fromJSON makes it a boolean, as in build.yml.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || (startsWith(github.ref, 'refs/heads/release/') && github.sha || github.ref) }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ fromJSON(github.ref != 'refs/heads/main') }}
 
 # Every patch is judged from clean here (see build.yml for why the flag is
 # environment-wide rather than per-step).

@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <string_view>
+
 namespace helix {
 namespace logging {
 
@@ -57,6 +59,14 @@ void set_suppress_translation_warnings(bool suppress);
  * level starts from an empty cache instead.
  */
 void reset_lvgl_log_dedupe();
+
+/**
+ * @brief The telemetry anomaly code a WARN-level LVGL message maps to, or nullptr.
+ *
+ * Matches fixed message text only, never the addresses some messages carry, so
+ * repeats of one failure share one code.
+ */
+const char* anomaly_code_for_warning(std::string_view msg);
 
 } // namespace logging
 } // namespace helix

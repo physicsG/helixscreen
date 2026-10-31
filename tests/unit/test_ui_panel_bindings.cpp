@@ -344,41 +344,43 @@ TEST_CASE_METHOD(XMLTestFixture, "controls_panel: part_fan_slider binding update
 }
 
 // =============================================================================
-// PRINT STATUS PANEL BINDING TESTS (SKIP - complex dependencies)
+// PRINT STATUS PANEL BINDING TESTS (.xml_required: need ui_xml/ on the relative path)
 // =============================================================================
 
 TEST_CASE_METHOD(XMLTestFixture,
-                 "print_status_preview_card: preparing_overlay tracks preparing_visible",
+                 "print_status_strip: the pre-print line replaces the print line while preparing",
                  "[ui][print_status_panel][bind_flag][.xml_required]") {
     PrintStatusSubjects owner(state());
-    REQUIRE(register_component("components/print_status_preview_card"));
+    REQUIRE(register_component("components/print_status_strip"));
     set_xml_subject("preparing_visible", 0);
-    lv_obj_t* card = create_component("print_status_preview_card");
-    lv_obj_t* overlay = require_named(card, "preparing_overlay");
-    CHECK(is_hidden(overlay));
+    lv_obj_t* strip = create_component("print_status_strip");
+    lv_obj_t* prepare = require_named(strip, "ps_strip_prepare_line");
+    lv_obj_t* printing = require_named(strip, "ps_strip_print_line");
+    CHECK(is_hidden(prepare));
+    CHECK_FALSE(is_hidden(printing));
 
     set_xml_subject("preparing_visible", 1);
-    CHECK_FALSE(is_hidden(overlay));
+    CHECK_FALSE(is_hidden(prepare));
+    CHECK(is_hidden(printing));
 }
 
 TEST_CASE_METHOD(XMLTestFixture,
-                 "print_status_preview_card: progress bar goes invisible while preparing",
-                 "[ui][print_status_panel][bind_style][.xml_required]") {
-    // The card dims its progress bar through a shared "invisible" style
-    // (transparent, keeps layout space) pulled in via bind_style. A style
-    // declared in the embedding panel's <styles> block is invisible to a
-    // component parsed in its own scope, so the style has to live in the
-    // cross-file styles.xml namespace - living in the panel, the bar never
-    // dims during pre-print and nothing logs (bundle CSLYH92R).
+                 "print_status_strip: the progress bar gives way to the estimate while preparing",
+                 "[ui][print_status_panel][bind_flag][.xml_required]") {
+    // Pre-print progress is an estimate that can stall through a long phase,
+    // so it has its own bar; the two never show together.
     PrintStatusSubjects owner(state());
-    REQUIRE(register_component("components/print_status_preview_card"));
+    REQUIRE(register_component("components/print_status_strip"));
     set_xml_subject("preparing_visible", 0);
-    lv_obj_t* card = create_component("print_status_preview_card");
-    lv_obj_t* progress = require_named(card, "print_progress");
-    REQUIRE(lv_obj_get_style_opa(progress, LV_PART_MAIN) == LV_OPA_COVER);
+    lv_obj_t* strip = create_component("print_status_strip");
+    lv_obj_t* progress = require_named(strip, "print_progress");
+    lv_obj_t* estimate = require_named(strip, "preparing_progress_bar");
+    CHECK_FALSE(is_hidden(progress));
+    CHECK(is_hidden(estimate));
 
     set_xml_subject("preparing_visible", 1);
-    CHECK(lv_obj_get_style_opa(progress, LV_PART_MAIN) == 0);
+    CHECK(is_hidden(progress));
+    CHECK_FALSE(is_hidden(estimate));
 }
 
 TEST_CASE_METHOD(XMLTestFixture,
@@ -473,15 +475,16 @@ TEST_CASE_METHOD(XMLTestFixture, "controls_panel: all_homed drives btn_home_all 
     check_homing_button_tracks_subject(panel, "btn_home_all", "all_homed");
 }
 
-TEST_CASE_METHOD(XMLTestFixture, "print_status_panel: btn_timelapse hidden without the capability",
+TEST_CASE_METHOD(XMLTestFixture,
+                 "print_status_more_menu: the timelapse entry is hidden without the capability",
                  "[ui][print_status_panel][bind_flag][.xml_required]") {
-    // A printer with no timelapse component must not be offered the button;
+    // A printer with no timelapse component must not be offered the entry;
     // an inverted ref_value here offers an action that cannot work.
     PrintStatusSubjects owner(state());
-    REQUIRE(register_component("print_status_panel"));
+    REQUIRE(register_component("print_status_more_menu"));
     set_xml_subject("printer_has_timelapse", 0);
-    lv_obj_t* panel = create_component("print_status_panel");
-    lv_obj_t* btn = require_named(panel, "btn_timelapse");
+    lv_obj_t* menu = create_component("print_status_more_menu");
+    lv_obj_t* btn = require_named(menu, "btn_more_timelapse");
     CHECK(is_hidden(btn));
 
     set_xml_subject("printer_has_timelapse", 1);

@@ -14,8 +14,11 @@
 #pragma once
 
 #include "overlay_base.h"
+#include "screensaver_registry.h"
 #include "static_panel_registry.h"
 #include "subject_managed_panel.h"
+
+#include <vector>
 
 namespace helix::settings {
 
@@ -35,6 +38,13 @@ class DisplaySettingsOverlay : public OverlayBase {
     /// Slider drag tick: previews the backlight and updates the readout without persisting.
     void handle_brightness_changed(int value);
 
+    /// Lists Off and the savers this board can run, selecting the one that runs for the stored
+    /// type: a too-heavy stored choice shows its fallback, and the stored value is left alone.
+    void init_screensaver_dropdown();
+
+    /// Stores the saver at dropdown `index` of the list init_screensaver_dropdown() built.
+    void handle_screensaver_changed(int index);
+
   private:
     void init_display_rotation_dropdown();
     void init_brightness_controls();
@@ -49,6 +59,9 @@ class DisplaySettingsOverlay : public OverlayBase {
     /// Subject for brightness value label binding
     lv_subject_t brightness_value_subject_{};
     char brightness_value_buf_[8]; // e.g., "100%"
+
+    /// Stable registry name ("off", "maze", ...) at each screensaver dropdown index.
+    std::vector<const char*> screensaver_choices_;
 };
 
 inline DisplaySettingsOverlay& get_display_settings_overlay() {

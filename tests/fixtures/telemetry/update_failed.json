@@ -1,0 +1,21 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "event": "update_failed",
+  "exit_code": 2,
+  "file_size": 52428800,
+  "from_version": "<build>",
+  "host": "releases.helixscreen.org",
+  "http_code": 404,
+  "install_detail": "[ERROR] Cannot write <path>",
+  "platform": "pi",
+  "reason": "download_failed",
+  "schema_version": 3,
+  "timestamp": "<timestamp>",
+  "transfer_code": 0,
+  "transfer_error": "http",
+  "version": "0.14.0"
+}

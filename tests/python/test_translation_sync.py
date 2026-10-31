@@ -1586,3 +1586,26 @@ class TestObsoleteExtractedCache:
 
         names = {p.name for p in translation_sync.DEFAULT_CPP_DIRS}
         assert names == {"src", "include"}
+
+
+class TestTrPluralExtraction:
+    """Both keys of a helix::ui::tr_plural() call are translation keys."""
+
+    def test_both_keys_and_nullptr_singular(self, tmp_path):
+        from translations.extractor import extract_strings_from_cpp
+
+        src = tmp_path / "a.cpp"
+        src.write_text(dedent('''\
+            void f(unsigned long n, size_t c) {
+                snprintf(b, sizeof(b), helix::ui::tr_plural("1 day ago", "%lu days ago", n), n);
+                auto m = fmt::format(fmt::runtime(ui::tr_plural(nullptr,
+                                                                "{} critical issues", c)), c);
+                auto x = tr_plural_in("ru", "1 test-only", "%d test-only", n);
+            }
+        '''))
+        found = extract_strings_from_cpp(src)
+        assert "1 day ago" in found
+        assert "%lu days ago" in found
+        assert "{} critical issues" in found
+        assert "nullptr" not in found
+        assert "1 test-only" not in found

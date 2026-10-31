@@ -15,6 +15,7 @@
 #include "config.h"
 #include "filament_op_dispatch.h"
 #include "filament_op_execute.h"
+#include "filament_op_heater.h"
 #include "macro_param_modal.h"
 #include "moonraker_types.h"
 #include "operation_timeout_guard.h"
@@ -86,8 +87,8 @@ struct FilamentPanelOutcome {
     bool guard_armed = false;
 
     /// Send the user to the AMS panel to pick a slot. FilamentRefusal::SelectSlot
-    /// only -- AlreadyMounted has nothing left to pick, and BypassLoaded needs a
-    /// hand at the toolhead rather than a different lane.
+    /// only -- BypassLoaded needs a hand at the toolhead rather than a
+    /// different lane.
     bool navigate_to_ams = false;
 
     /// arm_manual_pull_prompt() runs before dispatch -- nothing reels this spool
@@ -155,7 +156,7 @@ class FilamentPanel : public PanelBase {
      * @param printer_state Reference to helix::PrinterState
      * @param api Pointer to IMoonrakerAPI (for future temp commands)
      */
-    FilamentPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    FilamentPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     ~FilamentPanel() override;
 
@@ -305,24 +306,9 @@ class FilamentPanel : public PanelBase {
     /**
      * @brief Check if extrusion operations are safe
      *
-     * @return true if nozzle is at or above MIN_EXTRUSION_TEMP (170°C)
+     * @return true if nozzle is at or above kMinExtrusionTemp (170°C)
      */
     bool is_extrusion_allowed() const;
-
-    /**
-     * @brief Must this panel heat the nozzle before dispatching @p plan?
-     *
-     * The temperature gate (is_extrusion_allowed()) answers whether extrusion is
-     * safe RIGHT NOW; this answers the narrower question the Load and Unload
-     * buttons actually ask, which also depends on whether the thing about to run
-     * heats the hotend for us. Extrude / Purge / Retract keep asking the gate
-     * directly: nothing downstream of those heats, so a cold nozzle there always
-     * means preheat.
-     *
-     * @param plan The plan about to be dispatched — see preheat_skip_reason().
-     * @param slot Which StandardMacros slot @p plan resolves against.
-     */
-    bool needs_ui_preheat(const helix::ui::FilamentOpPlan& plan, StandardMacroSlot slot) const;
 
     /**
      * @brief Take the nozzle limits from the printer's safety limits
@@ -362,8 +348,9 @@ class FilamentPanel : public PanelBase {
     /**
      * @brief Handle a long-press on a preset button: opens the material picker
      * @param slot Preset slot index that was long-pressed
+     * @return true when the picker opened, so the hold ends its press
      */
-    void handle_preset_longpress(int slot);
+    bool handle_preset_longpress(int slot);
 
   private:
     //
@@ -465,8 +452,7 @@ class FilamentPanel : public PanelBase {
     uint32_t op_busy_started_tick_ = 0; ///< lv_tick when busy began (min-spinner floor)
     bool backend_op_active_ = false;    ///< true while an AMS-backend op awaits ams_action IDLE
     /// This load takes the macro tier on an unhomed toolhead, so execute_load()
-    /// homes right before the macro is sent. Cleared there and wherever the load
-    /// is abandoned.
+    /// homes right before the macro is sent, after any preheat. Consumed there.
     bool home_before_load_macro_ = false;
 
     lv_subject_t* op_state_subject(FilamentOp op);
@@ -526,12 +512,8 @@ class FilamentPanel : public PanelBase {
     int min_extrude_temp_ = 170; ///< Klipper's min_extrude_temp (default 170°C)
     SafetyLimits limits_;        ///< As set_limits() last received them, for per-extruder lookups
 
-    // Auto-preheat state for filament operations
-    enum class PreheatOp { NONE, LOAD, UNLOAD, EXTRUDE, RETRACT, PURGE };
-    static const char* preheat_op_name(PreheatOp op);
-    PreheatOp pending_preheat_op_ = PreheatOp::NONE;
-    int pending_preheat_target_ = 0; ///< Target temp in °C for pending preheat
-    int prior_nozzle_target_ = 0; ///< Nozzle target before preheat (0 = was off → cool down after)
+    /// The lane the user named for this unload; consumed by execute_unload().
+    std::optional<int> chosen_unload_lane_;
 
     // Filament macros now resolved via StandardMacros singleton (load, unload, purge)
 
@@ -591,6 +573,8 @@ class FilamentPanel : public PanelBase {
     void update_multi_filament_card_visibility();
     void apply_left_column_sizing(bool external_spool_mode);
     void handle_extruder_changed();
+    /// Point the extruder dropdown back at the mounted tool.
+    void revert_extruder_dropdown();
 
     // External spool display (no-AMS mode)
     lv_obj_t* external_spool_row_ = nullptr;
@@ -655,22 +639,28 @@ class FilamentPanel : public PanelBase {
     /// updates the plain type (reassign_preset), attaches the exact branded product
     /// (set_preset_filament), then refreshes labels/temps/highlight to reflect it.
     void apply_preset_pick(int slot, const helix::printer::EffectiveFilament& ef);
-    void update_all_temps();       ///< Unified handler for temp observer bundle
-    void defer_temps_update();     ///< Queues update_all_temps() behind the cached values
-    void check_pending_preheat();  ///< Called from update_all_temps()
-    void cancel_pending_preheat(); ///< Reset preheat state + notify
-    struct PreheatTempResult {
-        int temp = 0;
-        std::string material_name;
-    };
-    /// Nozzle preheat target for an op acting on @p target_slot.
-    /// Priority: that slot > external spool (only when the slot names nothing) >
-    /// the panel's material preset > min_extrude_temp_. The first two tiers are
-    /// helix::ui::resolve_load_preheat_material(), shared with the AMS sidebar.
-    PreheatTempResult resolve_preheat_temp(int target_slot) const;
-    /// resolve_preheat_temp() without the min_extrude_temp_ tail: nullopt when no
-    /// slot, external spool or preset names a material.
-    std::optional<PreheatTempResult> resolve_material_preheat_temp(int target_slot) const;
+    void update_all_temps();   ///< Unified handler for temp observer bundle
+    void defer_temps_update(); ///< Queues update_all_temps() behind the cached values
+    /// A tap on any op button while this panel's own preheat waits withdraws it.
+    /// True when one did; a preheat another surface asked for is left to the
+    /// heater, which the tap's own request replaces.
+    bool cancel_pending_preheat();
+    /// The material an op acting on @p target_slot heats for: that slot, the
+    /// external spool (only when the slot names nothing), then the panel's
+    /// material preset. nullopt when none names one.
+    std::optional<helix::ui::PreheatTarget> resolve_material_preheat_temp(int target_slot) const;
+    /// The panel's material preset, offered to FilamentOpHeater as the material
+    /// to heat for when neither the lane nor the external spool names one.
+    std::optional<helix::ui::PreheatTarget> preset_preheat_material() const;
+    /// Heat for @p op as FilamentOpHeater decides, then run @p execute.
+    void run_after_preheat(helix::ui::FilamentHeatOp op, void (FilamentPanel::*execute)());
+    /// The heater's ticket for the extrude / retract / purge in flight, so its
+    /// success cools down what the heater heated for it. 0 for none.
+    helix::ui::FilamentOpTicket op_heat_ticket_ = 0;
+    /// That op succeeded: hand its ticket back to the heater.
+    void heat_op_succeeded();
+    /// That op failed: the heater forgets its ticket and leaves the nozzle hot.
+    void heat_op_failed();
     /// Nozzle-temperature parameter values for @p op's macro, from the live target of
     /// the extruder the op heats and the material resolve_material_preheat_temp()
     /// names, held above that extruder's extrusion minimum and at most its max_temp
@@ -679,15 +669,10 @@ class FilamentPanel : public PanelBase {
     /// Which slot's material a given op should heat for. Load/Unload follow the
     /// dropdown selection (selected_op_slot); Extrude/Retract/Purge follow the
     /// LOADED lane, since they push what is already in the melt zone.
-    int preheat_slot_for_op(PreheatOp op) const;
-    /// The material @p target_slot names, else the external spool's
-    /// (helix::ui::resolve_load_preheat_material()). No panel preset tail.
-    std::optional<PreheatTempResult> slot_preheat_material(int target_slot) const;
+    int preheat_slot_for_op(helix::ui::FilamentHeatOp op) const;
     /// Whether every slot a cold-nozzle op would preheat for names a material:
     /// the selected slot (Load/Unload) and the loaded lane (Purge/Extrude/Retract).
     bool has_known_op_material() const;
-    void start_preheat_for_op(PreheatOp op); ///< Resolve temp, heat, set pending state
-    void restore_heater_after_preheat();     ///< Cool down if heater was off before preheat
 
     //
     // === Instance Handlers ===
@@ -701,9 +686,16 @@ class FilamentPanel : public PanelBase {
     void handle_chamber_temp_tap();
     void handle_custom_chamber_confirmed(float value);
     void handle_custom_nozzle_confirmed(float value);
+    /// Send nozzle_target_ through TemperatureController; a refusal or failure
+    /// puts the printer's real target back on screen.
+    void send_nozzle_target();
+    /// Show the printer's own nozzle target in place of a request it did not take.
+    void show_printer_nozzle_target();
     void handle_custom_bed_confirmed(float value);
     void handle_load_button();
-    void handle_unload_button();
+    /// @param chosen_lane the lane the user named as the one in the toolhead,
+    ///        when the backend could not (see helix::ui::choose_unload_lane)
+    void handle_unload_button(std::optional<int> chosen_lane = std::nullopt);
     void handle_extrude_button();
     void handle_purge_button();
     void handle_retract_button();
@@ -713,17 +705,15 @@ class FilamentPanel : public PanelBase {
     void update_chamber_temp_display();
     void update_left_card_temps();
     void update_status_icon_for_state();
-    static constexpr uint32_t OPERATION_TIMEOUT_MS =
+    static constexpr uint32_t kOperationTimeoutMs =
         120000; // 2 min — purge/extrude at slow feedrate
 
     // Filament sensor warning helpers
     void show_load_warning();
     void show_unload_warning();
     /// The Load / Unload plan for the current dropdown selection, against live
-    /// backend state. Computed rather than stashed: the preheat decision and the
-    /// dispatch are separated by a heat cycle the firmware can change state
-    /// during, so each asks fresh — the same reason
-    /// AmsOperationSidebar::check_pending_load() re-plans after its preheat.
+    /// backend state. Computed rather than stashed: the dispatch can follow a heat
+    /// cycle the firmware changes state during, so each asks fresh.
     [[nodiscard]] helix::ui::FilamentOpPlan current_load_plan() const;
 
     /// An unload plan and the loaded answer it was built from, which the
@@ -760,9 +750,6 @@ class FilamentPanel : public PanelBase {
     void execute_purge();
     void run_filament_macro(const std::string& macro_name, const std::string& op_label,
                             const helix::MacroParamResult& params);
-
-    int current_extruder_target() const;
-    void snapshot_prior_heater_target();
 
     // Keypad callback bridges (different signature - not LVGL events)
     static void custom_nozzle_keypad_cb(float value, void* user_data);

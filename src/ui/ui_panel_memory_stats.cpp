@@ -15,7 +15,7 @@
 #include <utility>
 
 // Update interval in milliseconds
-static constexpr uint32_t UPDATE_INTERVAL_MS = 2000;
+static constexpr uint32_t kUpdateIntervalMs = 2000;
 
 // Timer callback for periodic updates
 static void memory_stats_timer_cb(lv_timer_t* timer) {
@@ -75,7 +75,7 @@ void MemoryStatsOverlay::init(lv_obj_t* /*parent*/, bool initially_visible) {
     }
 
     // Create update timer
-    update_timer_ = lv_timer_create(memory_stats_timer_cb, UPDATE_INTERVAL_MS, this);
+    update_timer_ = lv_timer_create(memory_stats_timer_cb, kUpdateIntervalMs, this);
 
     // Initial visibility
     if (initially_visible) {

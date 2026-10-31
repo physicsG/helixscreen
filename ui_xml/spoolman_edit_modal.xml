@@ -42,10 +42,11 @@
           <icon src="palette" size="xs" variant="secondary" clickable="false"/>
           <event_cb trigger="clicked" callback="spoolman_edit_color_clicked_cb"/>
         </lv_obj>
-        <!-- Print Label (visible only when label printer configured) -->
+        <!-- Print Label (visible only when label printer configured; starts hidden
+             so it stays hidden wherever the binding cannot resolve) -->
         <lv_obj name="row_print_label"
                 width="100%" height="content" flex_flow="row" style_flex_main_place="center" style_pad_all="0"
-                scrollable="false">
+                scrollable="false" hidden="true">
           <bind_flag_if_eq subject="label_printer_configured" flag="hidden" ref_value="0"/>
           <ui_button name="btn_print_label"
                      width="100%" height="#button_height_sm" text="Print Label" icon="printer" variant="secondary">

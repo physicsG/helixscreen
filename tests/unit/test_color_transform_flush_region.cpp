@@ -92,11 +92,11 @@ TEST_CASE("region + apply_area transform the dirty rect, not the buffer origin",
     // distinguishable from an untouched one channel-wise.
     constexpr int W = 100;
     constexpr int H = 60;
-    constexpr uint32_t STRIDE = 832;
-    std::vector<uint8_t> buf(static_cast<size_t>(STRIDE) * H, 0);
+    constexpr uint32_t kStride = 832;
+    std::vector<uint8_t> buf(static_cast<size_t>(kStride) * H, 0);
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
-            uint8_t* px = &buf[static_cast<size_t>(y) * STRIDE + static_cast<size_t>(x) * 4];
+            uint8_t* px = &buf[static_cast<size_t>(y) * kStride + static_cast<size_t>(x) * 4];
             px[0] = px[1] = px[2] = 0x80; // B = G = R mid gray (BGRA in memory)
             px[3] = 0xFF;
         }
@@ -107,7 +107,7 @@ TEST_CASE("region + apply_area transform the dirty rect, not the buffer origin",
     REQUIRE_FALSE(ct.is_identity());
 
     const lv_area_t area = make_area(40, 20, 69, 39);
-    lv_draw_buf_t dbuf = dbuf_with_stride(STRIDE);
+    lv_draw_buf_t dbuf = dbuf_with_stride(kStride);
     const auto reg = helix::ColorTransform::select_flush_region(
         &dbuf, area, LV_COLOR_FORMAT_XRGB8888, LV_DISPLAY_RENDER_MODE_DIRECT);
 
@@ -115,7 +115,7 @@ TEST_CASE("region + apply_area transform the dirty rect, not the buffer origin",
                   lv_area_get_width(&area), lv_area_get_height(&area), LV_COLOR_FORMAT_XRGB8888);
 
     const auto r_at = [&](int x, int y) {
-        return buf[static_cast<size_t>(y) * STRIDE + static_cast<size_t>(x) * 4 + 2];
+        return buf[static_cast<size_t>(y) * kStride + static_cast<size_t>(x) * 4 + 2];
     };
     // Inside the dirty rect, including its far corner: warm transform applied.
     REQUIRE(r_at(40, 20) > 0x80);

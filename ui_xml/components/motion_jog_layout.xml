@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- The Jog tab's alternative layouts (Settings > Motion > Layout). Only the
+       chosen one is built, and a change rebuilds it in place; the pad layout
+       (0) lives in motion_panel.xml itself. The <if> blocks are this
+       container's only children, and at most one is ever non-empty, so their
+       rebuild order cannot reorder anything. -->
+  <view name="motion_jog_layout"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="0" style_border_opa="0" style_bg_opa="0"
+        scrollable="false">
+    <if cond="settings_motion_layout eq 1">
+      <motion_jog_arrows/>
+    </if>
+    <if cond="settings_motion_layout eq 2">
+      <motion_jog_arrows_home/>
+    </if>
+    <if cond="settings_motion_layout eq 3">
+      <motion_jog_rows/>
+    </if>
+  </view>
+</component>

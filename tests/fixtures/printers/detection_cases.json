@@ -1257,5 +1257,12 @@
       "kinematics": "corexy"
     },
     "expect": "FlashForge Adventurer 5M Pro"
+  },
+  {
+    "name": "Qidi Plus 5 stock capture",
+    "note": "New-generation QIDI (RK3308 host, STM32F407 main + STM32F103 toolhead, 480x800 framebuffer). Nothing names the model, so the ~333x345 travel identifies the Plus 5 (Q2 ~275, Max 4 ~390); its sensor_required on the QIDI Chamber_Thermal_Protection sensor keeps the bed size from identifying any other corexy.",
+    "capture": "qidi_plus5",
+    "autosave": true,
+    "expect": "Qidi Plus 5"
   }
 ]

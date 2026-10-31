@@ -201,6 +201,135 @@ TEST_CASE("decide_idle truth table", "[display][idle_decision]") {
     }
 }
 
+TEST_CASE("decide_idle: a remote viewer caps idle at dim", "[display][idle_decision]") {
+    const auto A = IdleState::Awake;
+    const auto D = IdleState::Dimmed;
+    auto viewed = [](IdleInputs in) {
+        in.remote_viewer = true;
+        return in;
+    };
+
+    SECTION("no timeout combination sleeps while viewed") {
+        const int timeouts[] = {0, 1, 30, 60, 120, 600};
+        const uint32_t inactive[] = {0, 499, 1000, 30000, 60000, 120000, 600000, 3600000};
+        int sleep_due_rows = 0;
+        for (IdleState st : {A, D}) {
+            for (int dim_s : timeouts) {
+                for (int sleep_s : timeouts) {
+                    for (uint32_t ms : inactive) {
+                        for (int caps = 0; caps < 4; ++caps) {
+                            IdleInputs in = make(st, ms, dim_s, sleep_s);
+                            in.can_dim = (caps & 1) != 0;
+                            in.has_screensaver = (caps & 2) != 0;
+                            in.saver_running = st == D && in.has_screensaver;
+                            if (helix::decide_idle(in).action == IdleAction::Sleep) {
+                                ++sleep_due_rows;
+                            }
+                            const auto d = helix::decide_idle(viewed(in));
+                            INFO("state " << static_cast<int>(st) << " dim " << dim_s << " sleep "
+                                          << sleep_s << " inactive " << ms << " caps " << caps);
+                            CHECK(d.action != IdleAction::Sleep);
+                        }
+                    }
+                }
+            }
+        }
+        // The sweep has to include ticks that sleep unviewed, or it proves nothing.
+        REQUIRE(sleep_due_rows > 100);
+    }
+
+    SECTION("viewed, the dim stage still runs") {
+        auto backlight = [](IdleInputs in) {
+            in.can_dim = true;
+            return in;
+        };
+        auto saver = [](IdleInputs in) {
+            in.has_screensaver = true;
+            return in;
+        };
+        CHECK(helix::decide_idle(viewed(backlight(make(A, 60000, 60, 120)))).action ==
+              IdleAction::Dim);
+        CHECK(helix::decide_idle(viewed(saver(make(A, 60000, 60, 120)))).action ==
+              IdleAction::StartSaver);
+        // Past the sleep timeout and never dimmed: the capped sleep dims instead.
+        CHECK(helix::decide_idle(viewed(backlight(make(A, 200000, 60, 120)))).action ==
+              IdleAction::Dim);
+        CHECK(helix::decide_idle(viewed(saver(make(A, 200000, 60, 120)))).action ==
+              IdleAction::StartSaver);
+        // Sleep set, dim "never": dimming at the sleep timeout is the most it may do.
+        CHECK(helix::decide_idle(viewed(backlight(make(A, 120000, 0, 120)))).action ==
+              IdleAction::Dim);
+        CHECK(helix::decide_idle(viewed(saver(make(A, 120000, 0, 120)))).action ==
+              IdleAction::StartSaver);
+        // Sleep before dim: the sleep timeout is when it dims.
+        CHECK(helix::decide_idle(viewed(backlight(make(A, 60000, 120, 60)))).action ==
+              IdleAction::Dim);
+        // Nothing to dim with: it stays as it is.
+        CHECK(helix::decide_idle(viewed(make(A, 200000, 60, 120))).action == IdleAction::None);
+        // Before any timeout nothing happens.
+        CHECK(helix::decide_idle(viewed(backlight(make(A, 30000, 60, 120)))).action ==
+              IdleAction::None);
+        // An unviewed sleep-before-dim still sleeps.
+        CHECK(helix::decide_idle(backlight(make(A, 60000, 120, 60))).action == IdleAction::Sleep);
+    }
+
+    SECTION("the decision says when the viewer held a sleep back") {
+        IdleInputs dimmed = make(D, 200000, 60, 120);
+        dimmed.can_dim = true;
+        CHECK(helix::decide_idle(viewed(dimmed)).action == IdleAction::None);
+        CHECK(helix::decide_idle(viewed(dimmed)).sleep_held);
+        CHECK_FALSE(helix::decide_idle(dimmed).sleep_held);
+        // Not yet due: nothing is being held.
+        CHECK_FALSE(helix::decide_idle(viewed(make(D, 61000, 60, 120))).sleep_held);
+        // A refused entry is not the viewer's doing.
+        IdleInputs inhibited = viewed(dimmed);
+        inhibited.inhibit_entry = true;
+        CHECK_FALSE(helix::decide_idle(inhibited).sleep_held);
+        IdleInputs awake = viewed(make(A, 200000, 60, 120));
+        awake.can_dim = true;
+        CHECK(helix::decide_idle(awake).sleep_held);
+    }
+
+    SECTION("the viewer leaving lets the overdue sleep happen on the next tick") {
+        IdleInputs in = viewed(make(D, 600000, 60, 120));
+        in.can_dim = true;
+        REQUIRE(helix::decide_idle(in).action == IdleAction::None);
+        in.remote_viewer = false;
+        CHECK(helix::decide_idle(in).action == IdleAction::Sleep);
+    }
+
+    SECTION("a viewer arriving wakes a sleeping display, once") {
+        IdleInputs asleep = viewed(make(IdleState::Sleeping, 999999, 60, 120));
+        asleep.remote_viewer_arrived = true;
+        CHECK(helix::decide_idle(asleep).action == IdleAction::Wake);
+        // Waking is never refused, even while entry is inhibited.
+        asleep.inhibit_entry = true;
+        CHECK(helix::decide_idle(asleep).action == IdleAction::Wake);
+        // A viewer that stays does not keep waking it.
+        asleep.inhibit_entry = false;
+        asleep.remote_viewer_arrived = false;
+        CHECK(helix::decide_idle(asleep).action == IdleAction::None);
+        // Arrival changes nothing on a display that is not asleep.
+        IdleInputs dimmed = viewed(make(D, 90000, 60, 120));
+        dimmed.can_dim = true;
+        dimmed.remote_viewer_arrived = true;
+        CHECK(helix::decide_idle(dimmed).action == IdleAction::None);
+        IdleInputs awake = viewed(make(A, 1000, 60, 120));
+        awake.can_dim = true;
+        awake.remote_viewer_arrived = true;
+        CHECK(helix::decide_idle(awake).action == IdleAction::None);
+    }
+
+    SECTION("viewed, wakes are unchanged") {
+        IdleInputs dimmed = viewed(make(D, 10, 60, 120));
+        CHECK(helix::decide_idle(dimmed).action == IdleAction::Wake);
+        IdleInputs asleep = viewed(make(IdleState::Sleeping, 999999, 60, 120));
+        CHECK(helix::decide_idle(asleep).action == IdleAction::None);
+        asleep.wake_requested = true;
+        CHECK(helix::decide_idle(asleep).action == IdleAction::Wake);
+    }
+}
+
 TEST_CASE("wake_should_auto_lock truth table", "[display][idle_decision]") {
     struct LockRow {
         const char* label;

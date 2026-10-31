@@ -8,17 +8,27 @@
   "printer": {
     "heaters": {
       "bed": "heater_bed",
-      "hotend": "extruder"
+      "hotend": "extruder",
+      "chamber": "heater_generic chamber"
     },
     "temp_sensors": {
       "bed": "heater_bed",
-      "hotend": "extruder"
+      "hotend": "extruder",
+      "chamber": "heater_generic chamber"
     },
     "fans": {
+      "part": "fan_generic cooling_fan",
+      "hotend": "heater_fan hotend_fan",
       "chamber": "controller_fan chamber_fan",
       "exhaust": "fan_generic chamber_circulation_fan",
-      "hotend": "heater_fan hotend_fan",
-      "part": "fan_generic cooling_fan"
+      "aux": "fan_generic auxiliary_cooling_fan",
+      "names": {
+        "fan_generic cooling_fan": "Part Cooling",
+        "fan_generic auxiliary_cooling_fan": "Auxiliary",
+        "fan_generic chamber_circulation_fan": "Chamber Exhaust",
+        "controller_fan chamber_fan": "Chamber Heater Fan",
+        "controller_fan board_fan": "Board Fan"
+      }
     },
     "leds": {
       "strip": "output_pin caselight",
@@ -94,11 +104,14 @@
         "heater_fan box1_heater_fan_b",
         "controller_fan box1_board_fan",
         "controller_fan board_fan",
-        "fan_generic auxiliary_cooling_fan"
+        "fan_generic auxiliary_cooling_fan",
+        "heater_generic chamber",
+        "controller_fan chamber_fan",
+        "fan_generic chamber_circulation_fan"
       ]
     },
     "default_macros": {
-      "cooldown": "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\nSET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0",
+      "cooldown": "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0\nSET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=0\nSET_HEATER_TEMPERATURE HEATER=chamber TARGET=0",
       "load_filament": {
         "gcode": "LOAD_FILAMENT",
         "label": "Load"

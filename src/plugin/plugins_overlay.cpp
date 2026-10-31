@@ -10,6 +10,7 @@
 #include "ui_utils.h"
 
 #include "helix-xml/src/xml/lv_xml.h"
+#include "plugin_consent.h"
 #include "plugin_permissions.h"
 #include "ui/ui_widget_helpers.h"
 
@@ -65,6 +66,10 @@ void PluginsOverlay::populate_rows() {
         std::string desc = lv_tr(plugin_status_name(info.status));
         if (!info.reason.empty())
             desc += ": " + info.reason;
+        if (info.manifest) {
+            if (const std::string targets = menu_targets_line(*info.manifest); !targets.empty())
+                desc += "\n" + targets;
+        }
         const std::string row_name = "row_" + info.dir_name;
         const char* pairs[] = {"name",        row_name.c_str(), "label",
                                label.c_str(), "description",    desc.c_str(),

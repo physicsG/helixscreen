@@ -11,14 +11,14 @@ using Catch::Approx;
 // Helper: minimal valid theme JSON
 // ============================================================================
 
-static const char* MINIMAL_THEME_JSON = R"({
+static const char* kMinimalThemeJson = R"({
     "name": "test-theme",
     "description": "A test theme",
     "version": 1,
     "sounds": {}
 })";
 
-static const char* COMPLETE_THEME_JSON = R"({
+static const char* kCompleteThemeJson = R"({
     "name": "complete-theme",
     "description": "Full-featured test theme",
     "version": 2,
@@ -79,7 +79,7 @@ static const char* COMPLETE_THEME_JSON = R"({
 // ============================================================================
 
 TEST_CASE("SoundTheme: parse valid complete theme", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     CHECK(theme->name == "complete-theme");
@@ -206,7 +206,7 @@ TEST_CASE("SoundTheme: invalid musical durations", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: ADSR envelope parsing", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& tap = theme->sounds.at("button_tap");
@@ -223,7 +223,7 @@ TEST_CASE("SoundTheme: ADSR envelope parsing", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: ADSR defaults from theme defaults", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     // toggle_on steps don't specify envelope — should get theme defaults
@@ -241,7 +241,7 @@ TEST_CASE("SoundTheme: ADSR defaults from theme defaults", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: LFO parsing with target/rate/depth", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& alert = theme->sounds.at("error_alert");
@@ -257,7 +257,7 @@ TEST_CASE("SoundTheme: LFO parsing with target/rate/depth", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: sweep parsing with target/end", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& nav = theme->sounds.at("nav_forward");
@@ -272,7 +272,7 @@ TEST_CASE("SoundTheme: sweep parsing with target/end", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: filter parsing with type/cutoff/sweep_to", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& nav = theme->sounds.at("nav_forward");
@@ -288,7 +288,7 @@ TEST_CASE("SoundTheme: filter parsing with type/cutoff/sweep_to", "[sound][theme
 // ============================================================================
 
 TEST_CASE("SoundTheme: step with note field resolves to freq", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& pc = theme->sounds.at("print_complete");
@@ -309,7 +309,7 @@ TEST_CASE("SoundTheme: step with note field resolves to freq", "[sound][theme]")
 // ============================================================================
 
 TEST_CASE("SoundTheme: step with freq field uses raw Hz", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& tap = theme->sounds.at("button_tap");
@@ -321,7 +321,7 @@ TEST_CASE("SoundTheme: step with freq field uses raw Hz", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: pause step", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& alert = theme->sounds.at("error_alert");
@@ -338,7 +338,7 @@ TEST_CASE("SoundTheme: pause step", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: theme defaults applied to steps", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     // toggle_on steps don't specify wave or vel — should get theme defaults
@@ -381,7 +381,7 @@ TEST_CASE("SoundTheme: missing sounds key returns nullopt", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: empty sounds map is valid", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(MINIMAL_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kMinimalThemeJson);
     REQUIRE(theme.has_value());
 
     CHECK(theme->name == "test-theme");
@@ -492,7 +492,7 @@ TEST_CASE("SoundTheme: velocity clamped to 0.0-1.0", "[sound][theme]") {
 // ============================================================================
 
 TEST_CASE("SoundTheme: BPM on sound definition used for musical durations", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     auto& pc = theme->sounds.at("print_complete");
@@ -510,7 +510,7 @@ TEST_CASE("SoundTheme: BPM on sound definition used for musical durations", "[so
 // ============================================================================
 
 TEST_CASE("SoundTheme: repeat field", "[sound][theme]") {
-    auto theme = SoundThemeParser::load_from_string(COMPLETE_THEME_JSON);
+    auto theme = SoundThemeParser::load_from_string(kCompleteThemeJson);
     REQUIRE(theme.has_value());
 
     // error_alert has repeat: 3

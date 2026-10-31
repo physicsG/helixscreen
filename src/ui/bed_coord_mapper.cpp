@@ -37,8 +37,8 @@ PixelRect BedCoordMapper::bbox_to_rect(glm::vec2 bbox_min, glm::vec2 bbox_max) c
     auto [x1, y1] = mm_to_px(bbox_min.x, bbox_max.y);
     auto [x2, y2] = mm_to_px(bbox_max.x, bbox_min.y);
     float raw_w = x2 - x1, raw_h = y2 - y1;
-    float w = std::max(raw_w, MIN_TOUCH_TARGET_PX);
-    float h = std::max(raw_h, MIN_TOUCH_TARGET_PX);
+    float w = std::max(raw_w, kMinTouchTargetPx);
+    float h = std::max(raw_h, kMinTouchTargetPx);
     if (w > raw_w)
         x1 -= (w - raw_w) / 2.0f;
     if (h > raw_h)

@@ -36,7 +36,7 @@ class TimelapseSettingsOverlay : public OverlayBase {
      * @brief Construct TimelapseSettingsOverlay
      * @param api Pointer to IMoonrakerAPI (may be nullptr in test mode)
      */
-    explicit TimelapseSettingsOverlay(IMoonrakerAPI* api);
+    explicit TimelapseSettingsOverlay(helix::IMoonrakerAPI* api);
 
     [[nodiscard]] const char* get_name() const override {
         return "Timelapse Settings";
@@ -61,7 +61,7 @@ class TimelapseSettingsOverlay : public OverlayBase {
      * @brief Update IMoonrakerAPI pointer
      * @param api New API pointer (may be nullptr)
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -86,7 +86,7 @@ class TimelapseSettingsOverlay : public OverlayBase {
     // === Injected Dependencies ===
     //
 
-    IMoonrakerAPI* api_;
+    helix::IMoonrakerAPI* api_;
 
     // Current settings (loaded from API)
     TimelapseSettings current_settings_;
@@ -100,8 +100,8 @@ class TimelapseSettingsOverlay : public OverlayBase {
     lv_obj_t* autorender_switch_ = nullptr;
 
     // Framerate values for dropdown index mapping
-    static constexpr int FRAMERATE_VALUES[] = {15, 24, 30, 60};
-    static constexpr int FRAMERATE_COUNT = 4;
+    static constexpr int kFramerateValues[] = {15, 24, 30, 60};
+    static constexpr int kFramerateCount = 4;
 
     /**
      * @brief Convert framerate value to dropdown index
@@ -116,7 +116,7 @@ class TimelapseSettingsOverlay : public OverlayBase {
 
 // Global accessor
 TimelapseSettingsOverlay& get_global_timelapse_settings();
-void init_global_timelapse_settings(IMoonrakerAPI* api);
+void init_global_timelapse_settings(helix::IMoonrakerAPI* api);
 
 /// Open the timelapse settings overlay (lazy-creates if needed)
 void open_timelapse_settings();

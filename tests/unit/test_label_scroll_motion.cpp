@@ -26,6 +26,7 @@
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/lvgl.h"
 #include "lvgl/src/misc/lv_text_private.h"
+#include "utf8_validation.h"
 
 #include <cstring>
 #include <optional>
@@ -36,22 +37,22 @@
 namespace {
 
 /// A slicer M117 banner long enough to overflow any of the print-status cards.
-constexpr const char* LONG_MESSAGE =
+constexpr const char* kLongMessage =
     "Printing layer 42 of 900 - remaining 3h12m - EXTREMELY LONG STATUS BANNER";
 
 /// A filename long enough to overflow the same cards. Overflow is what starts
 /// the animation, so a short name would let every assertion below pass against
 /// unfixed code.
-constexpr const char* LONG_FILENAME =
+constexpr const char* kLongFilename =
     "CE3E3V2_articulated_crystal_dragon_supportless_remix_v7_bedslinger_edition_"
     "0.2mm_layer_PLA_matte_charcoal_4h13m_draft_quality_final.gcode";
 
 /// The filament line on the detailed card, likewise overflowing.
-constexpr const char* LONG_FILAMENT =
+constexpr const char* kLongFilament =
     "PLA Matte Charcoal Black - 24.81 m / 74.2 g remaining of 1.00 kg spool, slot 3";
 
 /// Mirrors the production markup: a bound, width-constrained, scrolling label.
-constexpr const char* SCROLL_PROBE_XML =
+constexpr const char* kScrollProbeXml =
     "<component>"
     "  <view extends=\"lv_obj\" width=\"240\" height=\"80\" style_pad_all=\"0\">"
     "    <text_body name=\"scroller\" width=\"120\" bind_text=\"display_message\""
@@ -63,11 +64,11 @@ constexpr const char* SCROLL_PROBE_XML =
 /// the way get_display_filename() hands them to the card. Tail-cut to a card
 /// they read "Delta filament barrel base_Hyp" and "Logo filament barrel base_Hype":
 /// the material and the duration, the only parts that differ, are the parts lost.
-constexpr const char* DELTA_JOB = "Delta filament barrel base_Hyper PLA_49m";
-constexpr const char* LOGO_JOB = "Logo filament barrel base_Hyper PLA_54m";
+constexpr const char* kDeltaJob = "Delta filament barrel base_Hyper PLA_49m";
+constexpr const char* kLogoJob = "Logo filament barrel base_Hyper PLA_54m";
 
-/// U+2026 HORIZONTAL ELLIPSIS, the glyph the shortener joins the two ends with.
-constexpr const char* ELLIPSIS = "\xE2\x80\xA6";
+/// U+2026 HORIZONTAL kEllipsis, the glyph the shortener joins the two ends with.
+constexpr const char* kEllipsis = "\xE2\x80\xA6";
 
 /// True when LVGL is running any animation against @p obj — i.e. the label is
 /// invalidating itself every frame.
@@ -82,29 +83,7 @@ int32_t drawn_width(const std::string& text, const lv_font_t* font) {
     return lv_text_get_width(text.c_str(), static_cast<uint32_t>(text.size()), font, &attributes);
 }
 
-/// True when every byte sequence in @p text is a complete UTF-8 glyph: a cut that
-/// lands inside a multi-byte glyph leaves a stray continuation byte at a boundary.
-bool is_valid_utf8(const std::string& text) {
-    size_t i = 0;
-    while (i < text.size()) {
-        const auto lead = static_cast<unsigned char>(text[i]);
-        size_t len = lead < 0x80           ? 1
-                     : (lead >> 5) == 0x6  ? 2
-                     : (lead >> 4) == 0xE  ? 3
-                     : (lead >> 3) == 0x1E ? 4
-                                           : 0;
-        if (len == 0 || i + len > text.size()) {
-            return false;
-        }
-        for (size_t k = 1; k < len; ++k) {
-            if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80) {
-                return false;
-            }
-        }
-        i += len;
-    }
-    return true;
-}
+using helix::text_io::is_valid_utf8;
 
 /// Captures the text of the label draw task LVGL is about to hand a draw unit.
 void capture_drawn_text(lv_event_t* e) {
@@ -127,7 +106,7 @@ class ScrollMotionFixture : public XMLTestFixture {
         lv_xml_register_subject(nullptr, "settings_animations_enabled", &animations_);
 
         lv_subject_init_string(&message_, message_buf_, nullptr, sizeof(message_buf_),
-                               LONG_MESSAGE);
+                               kLongMessage);
         lv_xml_register_subject(nullptr, "display_message", &message_);
 
         // The card keeps this label hidden until Klipper reports an M117, so a
@@ -136,14 +115,14 @@ class ScrollMotionFixture : public XMLTestFixture {
         lv_xml_register_subject(nullptr, "display_message_visible", &message_visible_);
 
         lv_subject_init_string(&filename_, filename_buf_, nullptr, sizeof(filename_buf_),
-                               LONG_FILENAME);
+                               kLongFilename);
         lv_xml_register_subject(nullptr, "print_display_filename", &filename_);
 
         lv_subject_init_string(&filament_, filament_buf_, nullptr, sizeof(filament_buf_),
-                               LONG_FILAMENT);
+                               kLongFilament);
         lv_xml_register_subject(nullptr, "print_status_filament_text", &filament_);
 
-        REQUIRE(lv_xml_register_component_from_data("scroll_motion_probe", SCROLL_PROBE_XML) ==
+        REQUIRE(lv_xml_register_component_from_data("scroll_motion_probe", kScrollProbeXml) ==
                 LV_RESULT_OK);
     }
 
@@ -355,12 +334,12 @@ TEST_CASE_METHOD(ScrollMotionFixture, "animations off does not rewrite the label
                  "[ui_text][label][scroll][1440]") {
     lv_obj_t* label = build_probe();
     REQUIRE(is_animating(label));
-    REQUIRE(std::string(lv_label_get_text(label)) == LONG_MESSAGE);
+    REQUIRE(std::string(lv_label_get_text(label)) == kLongMessage);
 
     set_animations(false);
     lv_obj_update_layout(label);
 
-    CHECK(std::string(lv_label_get_text(label)) == LONG_MESSAGE);
+    CHECK(std::string(lv_label_get_text(label)) == kLongMessage);
     CHECK(std::string(lv_label_get_text(label)).find("...") == std::string::npos);
 }
 
@@ -387,7 +366,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis leaves text that fits alo
 TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis keeps both ends within the width",
                  "[ui_text][label][ellipsis][1441]") {
     const lv_font_t* font = LV_FONT_DEFAULT;
-    const std::string text = DELTA_JOB;
+    const std::string text = kDeltaJob;
     const int32_t width = drawn_width(text, font) / 2;
     REQUIRE(drawn_width(text, font) > width);
 
@@ -395,10 +374,10 @@ TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis keeps both ends within th
 
     INFO("fitted: " << fitted);
     CHECK(drawn_width(fitted, font) <= width);
-    const size_t cut = fitted.find(ELLIPSIS);
+    const size_t cut = fitted.find(kEllipsis);
     REQUIRE(cut != std::string::npos);
     const std::string head = fitted.substr(0, cut);
-    const std::string tail = fitted.substr(cut + std::strlen(ELLIPSIS));
+    const std::string tail = fitted.substr(cut + std::strlen(kEllipsis));
     CHECK_FALSE(head.empty());
     CHECK_FALSE(tail.empty());
     CHECK(text.compare(0, head.size(), head) == 0);
@@ -413,10 +392,10 @@ TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis keeps both ends within th
 TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis keeps the suffix that tells two jobs apart",
                  "[ui_text][label][ellipsis][1441]") {
     const lv_font_t* font = LV_FONT_DEFAULT;
-    const int32_t width = drawn_width(DELTA_JOB, font) * 2 / 3;
+    const int32_t width = drawn_width(kDeltaJob, font) * 2 / 3;
 
-    const std::string delta = helix::ui::middle_ellipsize(DELTA_JOB, width, font);
-    const std::string logo = helix::ui::middle_ellipsize(LOGO_JOB, width, font);
+    const std::string delta = helix::ui::middle_ellipsize(kDeltaJob, width, font);
+    const std::string logo = helix::ui::middle_ellipsize(kLogoJob, width, font);
 
     INFO("delta: " << delta << "  logo: " << logo);
     CHECK(delta != logo);
@@ -440,7 +419,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis cuts a Cyrillic name on g
     const std::string fitted = helix::ui::middle_ellipsize(cyrillic.c_str(), width, font);
 
     INFO("fitted: " << fitted);
-    REQUIRE(fitted.find(ELLIPSIS) != std::string::npos);
+    REQUIRE(fitted.find(kEllipsis) != std::string::npos);
     CHECK(is_valid_utf8(fitted));
     CHECK(drawn_width(fitted, font) <= width);
     CHECK(fitted.rfind("_49m") == fitted.size() - std::strlen("_49m"));
@@ -462,11 +441,11 @@ TEST_CASE_METHOD(ScrollMotionFixture,
 
     REQUIRE(drawn.has_value());
     INFO("drawn: " << *drawn);
-    const size_t cut = drawn->find(ELLIPSIS);
+    const size_t cut = drawn->find(kEllipsis);
     REQUIRE(cut != std::string::npos);
     const std::string head = drawn->substr(0, cut);
-    const std::string tail = drawn->substr(cut + std::strlen(ELLIPSIS));
-    const std::string source = LONG_MESSAGE;
+    const std::string tail = drawn->substr(cut + std::strlen(kEllipsis));
+    const std::string source = kLongMessage;
     CHECK_FALSE(head.empty());
     CHECK_FALSE(tail.empty());
     CHECK(source.compare(0, head.size(), head) == 0);
@@ -475,7 +454,7 @@ TEST_CASE_METHOD(ScrollMotionFixture,
           lv_obj_get_content_width(label));
 
     // Neither constraint from the clip fallback is given up for the affordance.
-    CHECK(std::string(lv_label_get_text(label)) == LONG_MESSAGE);
+    CHECK(std::string(lv_label_get_text(label)) == kLongMessage);
     CHECK(lv_obj_get_height(label) == line_height);
 }
 
@@ -485,7 +464,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "animations off: text that fits is drawn w
     lv_obj_t* label = build_probe();
     const auto before = rendered_text(label);
     REQUIRE(before.has_value());
-    REQUIRE(before->find(ELLIPSIS) != std::string::npos);
+    REQUIRE(before->find(kEllipsis) != std::string::npos);
 
     // The bound subject changes mid-print; the hook must follow the new text,
     // not keep drawing the string it fitted for the old one.
@@ -507,7 +486,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "animations on: the scrolling label draws 
     const auto drawn = rendered_text(label);
 
     REQUIRE(drawn.has_value());
-    CHECK(*drawn == LONG_MESSAGE);
+    CHECK(*drawn == kLongMessage);
 }
 
 // The issue names both: the card is re-laid out on rotation and breakpoint
@@ -518,17 +497,17 @@ TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis is recomputed when the la
     lv_obj_t* label = build_probe();
     const auto narrow = rendered_text(label);
     REQUIRE(narrow.has_value());
-    REQUIRE(narrow->find(ELLIPSIS) != std::string::npos);
+    REQUIRE(narrow->find(kEllipsis) != std::string::npos);
 
-    lv_obj_set_width(lv_obj_get_parent(label), TEST_DISPLAY_WIDTH);
-    lv_obj_set_width(label, TEST_DISPLAY_WIDTH);
+    lv_obj_set_width(lv_obj_get_parent(label), kTestDisplayWidth);
+    lv_obj_set_width(label, kTestDisplayWidth);
     lv_obj_update_layout(label);
     const auto wide = rendered_text(label);
 
     REQUIRE(wide.has_value());
     INFO("narrow: " << *narrow << "  wide: " << *wide);
     CHECK(wide->size() > narrow->size());
-    CHECK(std::string(lv_label_get_text(label)) == LONG_MESSAGE);
+    CHECK(std::string(lv_label_get_text(label)) == kLongMessage);
 }
 
 TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis is recomputed when the font changes",
@@ -540,7 +519,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis is recomputed when the fo
     REQUIRE(lv_font_get_line_height(large) > lv_font_get_line_height(small));
     const auto in_small = rendered_text(label);
     REQUIRE(in_small.has_value());
-    REQUIRE(in_small->find(ELLIPSIS) != std::string::npos);
+    REQUIRE(in_small->find(kEllipsis) != std::string::npos);
 
     lv_obj_set_style_text_font(label, large, LV_PART_MAIN);
     lv_obj_update_layout(label);
@@ -548,7 +527,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "middle ellipsis is recomputed when the fo
 
     REQUIRE(in_large.has_value());
     INFO("small: " << *in_small << "  large: " << *in_large);
-    CHECK(in_large->find(ELLIPSIS) != std::string::npos);
+    CHECK(in_large->find(kEllipsis) != std::string::npos);
     CHECK(in_large->size() < in_small->size());
     CHECK(drawn_width(*in_large, large) <= lv_obj_get_content_width(label));
 }
@@ -558,7 +537,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "detailed print card elides the filename's
                  "[ui_text][label][ellipsis][1441]") {
     REQUIRE(lv_xml_register_component_from_file(
                 "A:ui_xml/components/print_status_detailed_active.xml") == LV_RESULT_OK);
-    set_filename(DELTA_JOB);
+    set_filename(kDeltaJob);
     set_animations(false);
 
     auto* card = static_cast<lv_obj_t*>(
@@ -568,7 +547,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "detailed print card elides the filename's
     lv_obj_update_layout(card);
     lv_obj_t* filename = lv_obj_find_by_name(card, "detailed_filename");
     REQUIRE(filename != nullptr);
-    REQUIRE(drawn_width(DELTA_JOB, lv_obj_get_style_text_font(filename, LV_PART_MAIN)) >
+    REQUIRE(drawn_width(kDeltaJob, lv_obj_get_style_text_font(filename, LV_PART_MAIN)) >
             lv_obj_get_content_width(filename));
 
     const auto drawn = rendered_text(filename);
@@ -576,7 +555,7 @@ TEST_CASE_METHOD(ScrollMotionFixture, "detailed print card elides the filename's
     REQUIRE(drawn.has_value());
     INFO("drawn: " << *drawn);
     CHECK(drawn->rfind("Delta", 0) == 0);
-    CHECK(drawn->find(ELLIPSIS) != std::string::npos);
+    CHECK(drawn->find(kEllipsis) != std::string::npos);
     CHECK(drawn->rfind("_49m") == drawn->size() - std::strlen("_49m"));
-    CHECK(std::string(lv_label_get_text(filename)) == DELTA_JOB);
+    CHECK(std::string(lv_label_get_text(filename)) == kDeltaJob);
 }

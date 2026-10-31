@@ -116,6 +116,100 @@ TEST_CASE("PrinterTemperatureState: default active works with single extruder",
     state.deinit_subjects();
 }
 
+TEST_CASE("PrinterTemperatureState: a partial status frame keeps the fields it omits",
+          "[core][temperature][partial]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder"});
+
+    state.update_from_status({{"extruder", {{"temperature", 200.0}, {"target", 210.0}}},
+                              {"heater_bed", {{"temperature", 60.0}, {"target", 65.0}}}});
+    REQUIRE(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2100);
+    REQUIRE(lv_subject_get_int(state.get_bed_temp_subject()) == 600);
+
+    state.update_from_status({{"extruder", {{"temperature", 205.0}}}});
+    CHECK(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2050);
+    CHECK(lv_subject_get_int(state.get_active_extruder_target_subject()) == 2100);
+    CHECK(lv_subject_get_int(state.get_bed_temp_subject()) == 600);
+    CHECK(lv_subject_get_int(state.get_bed_target_subject()) == 650);
+
+    state.update_from_status(nlohmann::json::object());
+    CHECK(lv_subject_get_int(state.get_active_extruder_temp_subject()) == 2050);
+    CHECK(lv_subject_get_int(state.get_bed_target_subject()) == 650);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: status updates route to each extruder's own subjects",
+          "[core][temperature][multi-extruder]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder", "extruder1"});
+
+    state.update_from_status({{"extruder1", {{"temperature", 220.5}, {"target", 230.0}}}});
+    CHECK(lv_subject_get_int(state.get_extruder_temp_subject("extruder1")) == 2205);
+    CHECK(lv_subject_get_int(state.get_extruder_target_subject("extruder1")) == 2300);
+    CHECK(lv_subject_get_int(state.get_extruder_temp_subject("extruder")) == 0);
+    CHECK(lv_subject_get_int(state.get_extruder_target_subject("extruder")) == 0);
+
+    state.update_from_status({{"extruder", {{"temperature", 200.0}, {"target", 210.0}}},
+                              {"extruder1", {{"temperature", 222.0}, {"target", 231.0}}}});
+    CHECK(lv_subject_get_int(state.get_extruder_temp_subject("extruder")) == 2000);
+    CHECK(lv_subject_get_int(state.get_extruder_target_subject("extruder")) == 2100);
+    CHECK(lv_subject_get_int(state.get_extruder_temp_subject("extruder1")) == 2220);
+    CHECK(lv_subject_get_int(state.get_extruder_target_subject("extruder1")) == 2310);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: init_extruders keeps only extruder heaters",
+          "[core][temperature][multi-extruder]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+
+    state.init_extruders({"extruder", "extruder1", "heater_bed", "temperature_sensor chamber",
+                          "extruder_stepper e1"});
+
+    CHECK(state.extruder_count() == 2);
+    CHECK(state.extruders().count("extruder") == 1);
+    CHECK(state.extruders().count("extruder1") == 1);
+    CHECK(state.get_extruder_temp_subject("heater_bed") == nullptr);
+    CHECK(state.get_extruder_temp_subject("extruder_stepper e1") == nullptr);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: deinit drops every extruder and re-init starts fresh",
+          "[core][temperature][multi-extruder]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder", "extruder1"});
+    state.update_from_status({{"extruder", {{"temperature", 200.0}}}});
+    REQUIRE(state.extruder_count() == 2);
+    REQUIRE(lv_subject_get_int(state.get_extruder_temp_subject("extruder")) == 2000);
+
+    state.deinit_subjects();
+    CHECK(state.extruder_count() == 0);
+    CHECK(state.get_extruder_temp_subject("extruder") == nullptr);
+    CHECK(state.get_extruder_target_subject("extruder") == nullptr);
+
+    // A second deinit is a no-op, not a double free.
+    state.deinit_subjects();
+    CHECK(state.extruder_count() == 0);
+
+    // No reading from the previous session survives into the next one.
+    state.init_subjects(false);
+    state.init_extruders({"extruder"});
+    REQUIRE(state.get_extruder_temp_subject("extruder") != nullptr);
+    CHECK(lv_subject_get_int(state.get_extruder_temp_subject("extruder")) == 0);
+
+    state.deinit_subjects();
+}
+
 TEST_CASE("PrinterTemperatureState: load latch survives cooldown to 0",
           "[core][temperature][swap_preheat]") {
     lv_init_safe();
@@ -420,6 +514,76 @@ TEST_CASE("PrinterTemperatureState: rediscovery frees removed and adds new extru
     state.init_extruders({"extruder"});
     CHECK(state.extruders().at("extruder").display_name == "Nozzle");
     CHECK(state.get_extruder_temp_subject("extruder", again) == kept_subj);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: pressure advance is tracked per extruder and mirrored "
+          "for the active one",
+          "[core][temperature][pa_tune]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder", "extruder1"});
+
+    lv_subject_t* active = state.get_active_extruder_pressure_advance_subject();
+    CHECK(lv_subject_get_int(active) == -1);
+    CHECK_FALSE(state.extruder_pressure_advance("extruder"));
+
+    state.update_from_status({{"extruder", {{"pressure_advance", 0.042}, {"smooth_time", 0.04}}},
+                              {"extruder1", {{"pressure_advance", 0.5}}}});
+    CHECK(lv_subject_get_int(active) == 420);
+    REQUIRE(state.extruder_pressure_advance("extruder1"));
+    CHECK(*state.extruder_pressure_advance("extruder1") == Catch::Approx(0.5f));
+    CHECK_FALSE(state.extruder_pressure_advance("extruder7"));
+
+    // A frame without the field leaves the value alone.
+    state.update_from_status({{"extruder", {{"temperature", 200.0}}}});
+    CHECK(lv_subject_get_int(active) == 420);
+
+    // Switching tools shows the new tool's K.
+    state.set_active_extruder("extruder1");
+    CHECK(lv_subject_get_int(active) == 5000);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE("PrinterTemperatureState: the fitted nozzle an extruder reports is kept per extruder",
+          "[core][temperature][plugin_fitcheck]") {
+    lv_init_safe();
+    PrinterTemperatureState state;
+    state.init_subjects(false);
+    state.init_extruders({"extruder", "extruder1"});
+
+    const auto& info = [&state](const char* name) -> const ExtruderInfo& {
+        return state.extruders().at(name);
+    };
+    CHECK(info("extruder").nozzle_diameter == 0.0);
+    CHECK(info("extruder").nozzle_volume_type.empty());
+
+    state.update_from_status(
+        {{"extruder", {{"nozzle_diameter", 0.2}, {"nozzle_volume_type", "standard"}}},
+         {"extruder1", {{"nozzle_diameter", 0.6}, {"nozzle_volume_type", "high_flow"}}}});
+    CHECK(info("extruder").nozzle_diameter == Catch::Approx(0.2));
+    CHECK(info("extruder").nozzle_volume_type == "standard");
+    CHECK(info("extruder1").nozzle_diameter == Catch::Approx(0.6));
+    CHECK(info("extruder1").nozzle_volume_type == "high_flow");
+
+    // Stock Klipper answers null for both; a frame without them leaves them alone.
+    state.update_from_status(
+        {{"extruder", {{"nozzle_diameter", nullptr}, {"nozzle_volume_type", nullptr}}},
+         {"extruder1", {{"temperature", 210.0}}}});
+    CHECK(info("extruder").nozzle_diameter == Catch::Approx(0.2));
+    CHECK(info("extruder").nozzle_volume_type == "standard");
+    CHECK(info("extruder1").nozzle_diameter == Catch::Approx(0.6));
+
+    // A diameter that is not a positive number says nothing about the nozzle.
+    state.update_from_status(
+        {{"extruder", {{"nozzle_diameter", 0.0}}}, {"extruder1", {{"nozzle_diameter", "0.4"}}}});
+    CHECK(info("extruder").nozzle_diameter == Catch::Approx(0.2));
+    CHECK(info("extruder1").nozzle_diameter == Catch::Approx(0.6));
+    state.update_from_status({{"extruder", {{"nozzle_diameter", -0.4}}}});
+    CHECK(info("extruder").nozzle_diameter == Catch::Approx(0.2));
 
     state.deinit_subjects();
 }

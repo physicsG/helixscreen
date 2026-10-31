@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <string>
 #include <sys/socket.h>
@@ -83,6 +84,12 @@ class WpaFakeSupplicant {
         }
     }
 
+    /// Answer @p cmd with @p reply from now on, in place of the built-in one.
+    void set_reply(const std::string& cmd, const std::string& reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        replies_[cmd] = reply;
+    }
+
     /// Commands received so far, in order (SCAN, ATTACH, PING, ...).
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -122,7 +129,13 @@ class WpaFakeSupplicant {
         }
     }
 
-    static std::string answer_to(const std::string& cmd) {
+    std::string answer_to(const std::string& cmd) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = replies_.find(cmd);
+            if (it != replies_.end())
+                return it->second;
+        }
         if (cmd == "PING")
             return "PONG";
         if (cmd == "LIST_NETWORKS") {
@@ -149,6 +162,7 @@ class WpaFakeSupplicant {
     mutable std::mutex mutex_;
     std::vector<Peer> monitors_;
     std::vector<std::string> commands_;
+    std::map<std::string, std::string> replies_;
 };
 
 /// RAII HELIX_WPA_SOCKET_DIR pin, so a failing assertion cannot leak the env
@@ -165,24 +179,51 @@ struct WpaSocketDirGuard {
 
 /// Hermetic /sys/class/net for the same tests: creates
 /// <base>/sys/class/net/wlan0/wireless (wlan0 to match the fake control
-/// socket's name) and pins HELIX_WPA_NET_SYSFS to the net dir, so the
+/// socket's name), pins HELIX_WPA_NET_SYSFS to the net dir and
+/// HELIX_WPA_SYS_ROOT to <base>/sys (no rfkill switch unless a case adds one), so the
 /// backend's hardware probe finds a radio on machines without one (CI
-/// runners). The dtor unpins and removes only the subtree it created.
+/// runners). The dtor unpins and removes the whole <base>/sys tree, including
+/// anything a case added under it.
 struct WpaNetSysfsGuard {
     explicit WpaNetSysfsGuard(const std::string& base_dir) {
-        net_dir_ = base_dir + "/sys/class/net";
+        sys_dir_ = base_dir + "/sys";
+        const std::string net_dir = sys_dir_ + "/class/net";
         std::error_code ec;
-        std::filesystem::create_directories(net_dir_ + "/wlan0/wireless", ec);
-        ::setenv("HELIX_WPA_NET_SYSFS", net_dir_.c_str(), 1);
+        std::filesystem::create_directories(net_dir + "/wlan0/wireless", ec);
+        ::setenv("HELIX_WPA_NET_SYSFS", net_dir.c_str(), 1);
+        ::setenv("HELIX_WPA_SYS_ROOT", sys_dir_.c_str(), 1);
     }
     ~WpaNetSysfsGuard() {
+        ::unsetenv("HELIX_WPA_SYS_ROOT");
         ::unsetenv("HELIX_WPA_NET_SYSFS");
         std::error_code ec;
-        std::filesystem::remove_all(net_dir_, ec);
+        std::filesystem::remove_all(sys_dir_, ec);
     }
 
   private:
-    std::string net_dir_;
+    std::string sys_dir_;
+};
+
+/// Hermetic process table for the same tests: pins HELIX_WPA_PROC_ROOT to an
+/// empty <base>/proc, so the backend's wpa_supplicant daemon scans read no
+/// real PIDs. A real /proc makes start()'s duration a property of the host:
+/// on one holding ~95k zombie processes each scan costs a second, and init
+/// overruns the 5 s wait start() gives it.
+struct WpaProcRootGuard {
+    explicit WpaProcRootGuard(const std::string& base_dir) {
+        proc_dir_ = base_dir + "/proc";
+        std::error_code ec;
+        std::filesystem::create_directories(proc_dir_, ec);
+        ::setenv("HELIX_WPA_PROC_ROOT", proc_dir_.c_str(), 1);
+    }
+    ~WpaProcRootGuard() {
+        ::unsetenv("HELIX_WPA_PROC_ROOT");
+        std::error_code ec;
+        std::filesystem::remove_all(proc_dir_, ec);
+    }
+
+  private:
+    std::string proc_dir_;
 };
 
 } // namespace helix_test

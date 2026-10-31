@@ -1,8 +1,11 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_filename_utils.h"
+
 #include "env_knobs.h"
 #include "gcode_parser.h"
+#include "mock_disk_usage.h"
 #include "mock_planted_gcodes.h"
 #include "moonraker_client_mock_internal.h"
 #include "runtime_config.h"
@@ -18,7 +21,7 @@
 #include <sys/stat.h>
 
 // Directory path for thumbnail cache (test G-code dir comes from RuntimeConfig::TEST_GCODE_DIR)
-static constexpr const char* THUMBNAIL_CACHE_DIR = "build/thumbnail_cache";
+static constexpr const char* kThumbnailCacheDir = "build/thumbnail_cache";
 
 // Alias for cleaner code - use shared constant from RuntimeConfig
 #define TEST_GCODE_DIR RuntimeConfig::TEST_GCODE_DIR
@@ -39,10 +42,10 @@ static bool scan_gcode_dir(const std::string& dir_path, std::vector<std::string>
             continue;
         }
 
-        // Check for .gcode extension (case insensitive)
+        // .gcode files, and the sliced .3mf archives a slicer can upload instead
         std::string ext = name.substr(name.length() - 6);
         ext = helix::text_io::to_lower(ext);
-        if (ext != ".gcode") {
+        if (ext != ".gcode" && !helix::gcode::is_3mf(name)) {
             continue;
         }
 
@@ -66,7 +69,13 @@ static std::vector<std::string> scan_mock_gcode_files(const std::string& subdir 
     const std::string& planted = helix::mock::planted_gcode_dir();
     const bool planted_found = !planted.empty() && scan_gcode_dir(planted + suffix, files);
     if (!scan_gcode_dir(dir_path, files) && !planted_found) {
-        spdlog::warn("[MoonrakerClientMock] Cannot open test G-code directory: {}", dir_path);
+        // The app probes subdirectories (usb, .helix_temp, ...) that a fixture tree
+        // may simply not have; only a missing root means the mock has no files.
+        if (subdir.empty()) {
+            spdlog::warn("[MoonrakerClientMock] Cannot open test G-code directory: {}", dir_path);
+        } else {
+            spdlog::debug("[MoonrakerClientMock] No test G-code subdirectory: {}", dir_path);
+        }
         return files;
     }
     std::sort(files.begin(), files.end());
@@ -231,6 +240,19 @@ static json build_mock_file_list_response(const std::string& root, const std::st
     return response;
 }
 
+static bool is_gcodes_root(const std::string& path) {
+    return path.empty() || path == "gcodes" || path == "gcodes/";
+}
+
+/// The gcodes disk as Moonraker reports it, in bytes.
+static json mock_gcodes_disk_usage() {
+    constexpr uint64_t kMb = 1024ULL * 1024ULL;
+    const helix::mock::DiskMb disk = helix::mock::gcodes_disk_mb();
+    return {{"total", disk.total * kMb},
+            {"used", (disk.total - disk.free) * kMb},
+            {"free", disk.free * kMb}};
+}
+
 /**
  * @brief Build mock JSON response for server.files.metadata
  * @param filename Filename to get metadata for
@@ -259,7 +281,7 @@ static json build_mock_file_metadata_response(const std::string& filename) {
     auto header_meta = helix::gcode::extract_header_metadata(full_path);
 
     // Get cached thumbnail path (creates cache if needed)
-    std::string thumbnail_path = helix::gcode::get_cached_thumbnail(full_path, THUMBNAIL_CACHE_DIR);
+    std::string thumbnail_path = helix::gcode::get_cached_thumbnail(full_path, kThumbnailCacheDir);
 
     // HELIX_MOCK_REMOTE_THUMBS=1 — advertise a Moonraker-relative path instead
     // of the local cache file. PrintSelectPanel branches on whether the
@@ -344,12 +366,20 @@ static bool metadata_404_enabled() {
     return helix::env_flag("HELIX_MOCK_METADATA_404");
 }
 
+/// Whether the mock has metadata for @p filename. A .3mf has none, as on a
+/// stock Moonraker, unless HELIX_MOCK_3MF_METADATA=1 makes the mock a printer
+/// that reads .3mf archives natively.
+static bool metadata_missing(const std::string& filename) {
+    return metadata_404_enabled() ||
+           (helix::gcode::is_3mf(filename) && !helix::env_flag("HELIX_MOCK_3MF_METADATA"));
+}
+
 void register_file_handlers(std::unordered_map<std::string, MethodHandler>& registry) {
     // server.files.list - List files in a directory
     registry["server.files.list"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         (void)error_cb;
         if (!success_cb) {
@@ -374,8 +404,8 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // server.files.get_directory - Get directory contents (same format as list)
     registry["server.files.get_directory"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         (void)error_cb;
         if (!success_cb) {
@@ -391,6 +421,20 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
             path = params["path"].get<std::string>();
         }
         json response = build_mock_file_list_response(root, path);
+        // Moonraker's own get_directory result is an object that carries the disk's
+        // usage beside the entries; the gcodes root answers in that shape.
+        if ((root.empty() || root == "gcodes") && is_gcodes_root(path) &&
+            response["result"].is_array()) {
+            json files = json::array();
+            for (const auto& entry : response["result"]) {
+                json file = entry;
+                file["filename"] = entry.value("path", "");
+                files.push_back(std::move(file));
+            }
+            response["result"] = {{"dirs", json::array()},
+                                  {"files", std::move(files)},
+                                  {"disk_usage", mock_gcodes_disk_usage()}};
+        }
         spdlog::debug(
             "[MoonrakerClientMock] Returning mock directory listing for root='{}' path='{}'", root,
             path.empty() ? "/" : path);
@@ -401,14 +445,14 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // server.files.metadata - Get file metadata
     registry["server.files.metadata"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string filename;
         if (params.contains("filename")) {
             filename = params["filename"].get<std::string>();
         }
-        if (metadata_404_enabled() && error_cb) {
+        if (metadata_missing(filename) && error_cb) {
             error_cb(MoonrakerError::file_not_found("server.files.metadata", filename));
             return true;
         }
@@ -430,14 +474,14 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // Same as metadata but forces re-parse (in mock, behaves identically)
     registry["server.files.metascan"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string filename;
         if (params.contains("filename")) {
             filename = params["filename"].get<std::string>();
         }
-        if (metadata_404_enabled() && error_cb) {
+        if (metadata_missing(filename) && error_cb) {
             error_cb(MoonrakerError::file_not_found("server.files.metascan", filename));
             return true;
         }
@@ -455,11 +499,37 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
         return true;
     };
 
+    // server.helix.3mf_conversions - the printer-side .3mf converter's provenance.
+    // Absent by default, as on a printer without the converter;
+    // HELIX_MOCK_3MF_CONVERSIONS=<file> serves that JSON file as the result.
+    registry["server.helix.3mf_conversions"] =
+        [](MoonrakerClientMock* /*self*/, const json& /*params*/,
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
+        const char* path = std::getenv("HELIX_MOCK_3MF_CONVERSIONS");
+        json result = json::object();
+        if (path && *path) {
+            const std::string text = helix::text_io::read_file(path).value_or("");
+            result = json::parse(text, nullptr, false);
+        }
+        if (!path || !*path || result.is_discarded()) {
+            if (error_cb) {
+                error_cb(
+                    MoonrakerError::unknown("Method not found", "server.helix.3mf_conversions"));
+            }
+            return true;
+        }
+        if (success_cb) {
+            success_cb(json{{"jsonrpc", "2.0"}, {"result", result}});
+        }
+        return true;
+    };
+
     // server.files.get_file - Download file content (used for accelerometer CSV data)
     registry["server.files.get_file"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         if (!success_cb) {
             return true;
@@ -507,8 +577,8 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // server.files.delete - Delete a file
     registry["server.files.delete"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string path;
         if (params.contains("path")) {
@@ -537,8 +607,8 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // on disk is an error, like real Moonraker's 404.
     registry["server.files.delete_file"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string path;
         if (params.contains("path")) {
@@ -579,8 +649,8 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // server.files.move - Move/rename a file
     registry["server.files.move"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string source, dest;
         if (params.contains("source")) {
@@ -606,8 +676,8 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // server.files.copy - Copy a file
     registry["server.files.copy"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string source, dest;
         if (params.contains("source")) {
@@ -633,8 +703,8 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // server.files.post_directory - Create a directory
     registry["server.files.post_directory"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string path;
         if (params.contains("path")) {
@@ -657,8 +727,8 @@ void register_file_handlers(std::unordered_map<std::string, MethodHandler>& regi
     // server.files.delete_directory - Delete a directory
     registry["server.files.delete_directory"] =
         [](MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         (void)self;
         std::string path;
         if (params.contains("path")) {

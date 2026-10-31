@@ -45,8 +45,8 @@ class RediscoveryClient : public MoonrakerClientMock {
   public:
     using MoonrakerClientMock::MoonrakerClientMock;
 
-    void discover_printer_real(std::function<void()> on_complete,
-                               std::function<void(const std::string&)> on_error) {
+    void discover_printer_real(helix::SharedCallback<void()> on_complete,
+                               helix::SharedCallback<void(const std::string&)> on_error) {
         MoonrakerClient::discover_printer(std::move(on_complete), std::move(on_error));
     }
 };

@@ -90,7 +90,7 @@ jobs:
     needs: gate
     runs-on: ubuntu-22.04
     # Covers the three build/check step budgets below (80 + 45 + 85 = 210)
-    # plus setup: apt, caches, npm install, venv, artifact upload.
+    # plus setup: apt, caches, venv, artifact upload.
     timeout-minutes: 225
     # Matches build.yml's DBGLEVEL, which is part of every ccache key: at the
     # default -g2 no object in the restored build.yml cache can hit.
@@ -154,21 +154,6 @@ jobs:
         key: ccache-ubuntu-22.04-${{ github.sha }}
         restore-keys: |
           ccache-ubuntu-22.04-
-
-    - name: Cache npm downloads
-      uses: actions/cache@v5
-      with:
-        path: ~/.npm
-        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-        restore-keys: |
-          npm-${{ runner.os }}-
-
-    - name: Install Node.js dependencies
-      uses: nick-fields/retry@v4
-      with:
-        timeout_minutes: 6
-        max_attempts: 3
-        command: npm install
 
     # Hygiene, not the timeout fix: the restore step downloads the 1.8 GB
     # `ccache-ubuntu-22.04-` entry -- now the only entry it looks for -- and a
@@ -284,6 +269,9 @@ jobs:
         echo '/tmp/cores/core.%e.%p.%t' | sudo tee /proc/sys/kernel/core_pattern
         cat /proc/sys/kernel/core_pattern
 
+    # Budget: all 8 shards on one 4-core runner end the slowest at 7-8
+    # minutes (459s measured), so each shard gets 840s and
+    # the step 15 minutes around them.
     - name: Run fast tests in parallel shards
       timeout-minutes: 15
       run: |
@@ -295,7 +283,7 @@ jobs:
           # pipefail is required: without it the subshell reports sed's status, not
           # the test binary's, and a failing shard silently exits 0. timeout's 124
           # still propagates — pipefail yields the rightmost non-zero status.
-          (set -o pipefail; timeout 300 ./build/bin/helix-tests "~[.] ~[slow]" --shard-count $NPROCS --shard-index $i --durations yes 2>&1 | sed "s/^/[shard $i] /") &
+          (set -o pipefail; timeout 840 ./build/bin/helix-tests "~[.] ~[slow]" --shard-count $NPROCS --shard-index $i --durations yes 2>&1 | sed "s/^/[shard $i] /") &
           pids="$pids $!"
         done
         failed=0
@@ -543,21 +531,6 @@ jobs:
     # policy at the top of this file exists to protect. This job builds cold, and
     # the step split below is what keeps that affordable.
 
-    - name: Cache npm downloads
-      uses: actions/cache@v5
-      with:
-        path: ~/.npm
-        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-        restore-keys: |
-          npm-${{ runner.os }}-
-
-    - name: Install Node.js dependencies
-      uses: nick-fields/retry@v4
-      with:
-        timeout_minutes: 6
-        max_attempts: 3
-        command: npm install
-
     - name: Configure ccache
       run: |
         ccache --set-config=max_size=1G
@@ -644,21 +617,6 @@ jobs:
     # saving this job's own family would cost ~3 GB of the 10 GB repo budget the
     # policy at the top of this file exists to protect. This job builds cold, and
     # the step split below is what keeps that affordable.
-
-    - name: Cache npm downloads
-      uses: actions/cache@v5
-      with:
-        path: ~/.npm
-        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-        restore-keys: |
-          npm-${{ runner.os }}-
-
-    - name: Install Node.js dependencies
-      uses: nick-fields/retry@v4
-      with:
-        timeout_minutes: 6
-        max_attempts: 3
-        command: npm install
 
     - name: Configure ccache
       run: |
@@ -753,7 +711,11 @@ jobs:
       uses: ./.github/actions/init-submodules
 
     - name: Install dependencies
-      run: brew install sdl2 libusb ccache coreutils
+      run: |
+        brew install sdl2 libusb ccache coreutils make
+        # The Makefile needs GNU make >= 4.2; the runner's /usr/bin/make is Apple's 3.81.
+        # gnubin puts GNU make first as plain `make` for every later step and script.
+        echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
     - name: Cache compiled dependencies
       uses: actions/cache@v5
@@ -777,21 +739,6 @@ jobs:
         key: ccache-macos-14-${{ github.sha }}
         restore-keys: |
           ccache-macos-14-
-
-    - name: Cache npm downloads
-      uses: actions/cache@v5
-      with:
-        path: ~/.npm
-        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-        restore-keys: |
-          npm-${{ runner.os }}-
-
-    - name: Install Node.js dependencies
-      uses: nick-fields/retry@v4
-      with:
-        timeout_minutes: 6
-        max_attempts: 3
-        command: npm install
 
     - name: Configure ccache
       run: |
@@ -849,7 +796,7 @@ jobs:
     name: Unsharded Suite + UpdateQueue Leak Ratchet
     needs: build
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 65
 
     steps:
     - name: Checkout repository
@@ -878,11 +825,13 @@ jobs:
     - name: Fix permissions
       run: chmod +x build/bin/helix-tests
 
-    # A healthy unsharded pass is 5-8 minutes, so this cap is headroom, not a
-    # budget. It is spent, not exceeded, when the suite hangs
-    # (prestonbrown/helixscreen#1524); raising it buys a slower red, not a pass.
+    # Budget: one process runs the whole suite on one core, which the 8-shard
+    # pass spreads over four; its summed per-test durations passed 2300s, so
+    # the inner cap is 2700s and the step 50 minutes. A hung
+    # suite (prestonbrown/helixscreen#1524) still ends at the cap; raising it
+    # further buys a slower red, not a pass.
     - name: Run suite unsharded
-      timeout-minutes: 30
+      timeout-minutes: 50
       run: |
         # 2>&1 is REQUIRED: the isolation listener reports leaks via fprintf(stderr)
         # while Catch2's summary goes to stdout. The gate rejects a log missing
@@ -892,7 +841,7 @@ jobs:
         # `timeout` and leaves a log the ratchet can reject, rather than by the
         # runner, which takes the log with it.
         set -o pipefail
-        timeout 1500 ./build/bin/helix-tests "~[.] ~[slow]" 2>&1 | tee unsharded.log
+        timeout 2700 ./build/bin/helix-tests "~[.] ~[slow]" 2>&1 | tee unsharded.log
 
     - name: UpdateQueue leak ratchet
       # Runs even if the suite failed: a crash mid-run is exactly when the leak
@@ -922,7 +871,7 @@ jobs:
     name: Shared Suite Report
     needs: build
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 80
 
     steps:
     - name: Checkout repository
@@ -953,17 +902,16 @@ jobs:
     # unparseable. The `|| true` is deliberate: a red suite is test-all's job to
     # report, and these gates still have something to say about the report.
     - name: Produce the suite report
-      timeout-minutes: 45
+      timeout-minutes: 65
       env:
         # Below the step timeout, so the run that gets stopped is the one that
-        # can name the case it stopped in.
-        SUITE_REPORT_MAX_SECS: 2400
+        # can name the case it stopped in. Budget: an unsharded run plus the
+        # cost of writing every assertion as XML, measured past 2400s.
+        SUITE_REPORT_MAX_SECS: 3600
       run: |
-        # ~[subprocess] and ~[socket_discovery] fork; the child shares the
-        # report file description and its writes interleave with the XML,
-        # producing a structurally corrupt report. See mk/tests.mk. The filter
-        # comes from the makefile so this job cannot hold a different one from
-        # `make test-vacuous`, and the script exits non-zero if no report lands.
+        # The filter comes from the makefile so this job cannot hold a
+        # different one from `make test-vacuous`, and the script exits non-zero
+        # if no report lands.
         scripts/run_suite_report.sh ./build/bin/helix-tests \
           "$(make -s print-vacuous-filter | tail -1)" build/suite-report.xml
 

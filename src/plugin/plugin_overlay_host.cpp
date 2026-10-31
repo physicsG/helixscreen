@@ -117,6 +117,12 @@ void PluginOverlayHost::close_all(const std::string& plugin_id) {
     }
 }
 
+bool PluginOverlayHost::is_live(int handle) const {
+    return std::any_of(records_.begin(), records_.end(), [handle](const Record& r) {
+        return r.handle == handle && nav::is_in_stack(r.root);
+    });
+}
+
 size_t PluginOverlayHost::open_count(const std::string& plugin_id) const {
     return static_cast<size_t>(
         std::count_if(records_.begin(), records_.end(),

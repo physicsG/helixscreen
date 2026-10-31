@@ -12,7 +12,7 @@ using namespace xml_validator;
 // =============================================================================
 
 // Excerpt from lib/lvgl/src/xml/parsers/lv_xml_label_parser.c
-static const char* LABEL_PARSER_CONTENT = R"(
+static const char* kLabelParserContent = R"(
 void lv_xml_label_apply(lv_xml_parser_state_t * state, const char ** attrs)
 {
     void * item = lv_xml_state_get_item(state);
@@ -46,7 +46,7 @@ void lv_xml_label_apply(lv_xml_parser_state_t * state, const char ** attrs)
 )";
 
 // Excerpt from lib/lvgl/src/xml/parsers/lv_xml_obj_parser.c - lv_xml_obj_apply function
-static const char* OBJ_PARSER_CONTENT = R"(
+static const char* kObjParserContent = R"(
 #define SET_STYLE_IF(prop, value) if(lv_streq(prop_name, "style_" #prop)) lv_obj_set_style_##prop(obj, value, selector)
 
 void lv_xml_obj_apply(lv_xml_parser_state_t * state, const char ** attrs)
@@ -114,7 +114,7 @@ static void apply_styles(lv_xml_parser_state_t * state, lv_obj_t * obj, const ch
 )";
 
 // Widget registration from lib/lvgl/src/xml/lv_xml.c
-static const char* WIDGET_REGISTRATION_CONTENT = R"(
+static const char* kWidgetRegistrationContent = R"(
 void lv_xml_init(void)
 {
     lv_xml_register_widget("lv_obj", lv_xml_obj_create, lv_xml_obj_apply);
@@ -137,7 +137,7 @@ void lv_xml_init(void)
 )";
 
 // Custom widget registration from project source
-static const char* CUSTOM_WIDGET_REGISTRATION_CONTENT = R"(
+static const char* kCustomWidgetRegistrationContent = R"(
 void ui_button_init() {
     lv_xml_register_widget("ui_button", ui_button_create, ui_button_apply);
     spdlog::debug("[ui_button] Registered semantic button widget");
@@ -150,7 +150,7 @@ void helix::ui::icon::register_widget() {
 )";
 
 // Real icon.xml component from ui_xml/icon.xml
-static const char* ICON_COMPONENT_XML = R"(<?xml version="1.0"?>
+static const char* kIconComponentXml = R"(<?xml version="1.0"?>
 <component>
   <api>
     <prop name="src" type="string" default="home"/>
@@ -167,7 +167,7 @@ static const char* ICON_COMPONENT_XML = R"(<?xml version="1.0"?>
 )";
 
 // Component without explicit extends
-static const char* SIMPLE_COMPONENT_XML = R"(<?xml version="1.0"?>
+static const char* kSimpleComponentXml = R"(<?xml version="1.0"?>
 <component>
   <api>
     <prop name="title" type="string" default=""/>
@@ -179,7 +179,7 @@ static const char* SIMPLE_COMPONENT_XML = R"(<?xml version="1.0"?>
 )";
 
 // Non-component XML (just a view)
-static const char* NON_COMPONENT_XML = R"(<?xml version="1.0"?>
+static const char* kNonComponentXml = R"(<?xml version="1.0"?>
 <view>
   <lv_obj name="root" width="100%" height="100%">
     <lv_label text="Hello"/>
@@ -188,7 +188,7 @@ static const char* NON_COMPONENT_XML = R"(<?xml version="1.0"?>
 )";
 
 // Event callback pseudo-widget parser content
-static const char* EVENT_CB_PARSER_CONTENT = R"(
+static const char* kEventCbParserContent = R"(
 void lv_obj_xml_event_cb_apply(lv_xml_parser_state_t * state, const char ** attrs)
 {
     const char * trigger_str = lv_xml_get_value_of(attrs, "trigger");
@@ -217,7 +217,7 @@ void lv_obj_xml_event_cb_apply(lv_xml_parser_state_t * state, const char ** attr
 // =============================================================================
 
 TEST_CASE("extract_attributes_from_parser extracts label attributes", "[xml-validator]") {
-    auto attrs = extract_attributes_from_parser(LABEL_PARSER_CONTENT, "lv_label");
+    auto attrs = extract_attributes_from_parser(kLabelParserContent, "lv_label");
 
     SECTION("Finds direct text attribute") {
         REQUIRE(attrs.count("text") == 1);
@@ -248,7 +248,7 @@ TEST_CASE("extract_attributes_from_parser extracts label attributes", "[xml-vali
 }
 
 TEST_CASE("extract_attributes_from_parser extracts obj attributes", "[xml-validator]") {
-    auto attrs = extract_attributes_from_parser(OBJ_PARSER_CONTENT, "lv_obj");
+    auto attrs = extract_attributes_from_parser(kObjParserContent, "lv_obj");
 
     SECTION("Finds basic positioning attributes") {
         REQUIRE(attrs.count("x") == 1);
@@ -279,7 +279,7 @@ TEST_CASE("extract_attributes_from_parser extracts obj attributes", "[xml-valida
 }
 
 TEST_CASE("extract_attributes_from_parser handles SET_STYLE_IF macro", "[xml-validator]") {
-    auto attrs = extract_attributes_from_parser(OBJ_PARSER_CONTENT, "lv_obj");
+    auto attrs = extract_attributes_from_parser(kObjParserContent, "lv_obj");
 
     SECTION("Extracts style_width from SET_STYLE_IF(width, ...)") {
         REQUIRE(attrs.count("style_width") == 1);
@@ -335,7 +335,7 @@ TEST_CASE("extract_attributes_from_parser handles empty/malformed content", "[xm
 }
 
 TEST_CASE("extract_attributes_from_parser extracts event_cb attributes", "[xml-validator]") {
-    auto attrs = extract_attributes_from_parser(EVENT_CB_PARSER_CONTENT, "lv_obj-event_cb");
+    auto attrs = extract_attributes_from_parser(kEventCbParserContent, "lv_obj-event_cb");
 
     SECTION("Finds trigger attribute") {
         REQUIRE(attrs.count("trigger") == 1);
@@ -355,7 +355,7 @@ TEST_CASE("extract_attributes_from_parser extracts event_cb attributes", "[xml-v
 // =============================================================================
 
 TEST_CASE("extract_widget_registration extracts LVGL widgets", "[xml-validator]") {
-    auto registrations = extract_widget_registration(WIDGET_REGISTRATION_CONTENT);
+    auto registrations = extract_widget_registration(kWidgetRegistrationContent);
 
     SECTION("Extracts lv_obj registration") {
         bool found = false;
@@ -408,7 +408,7 @@ TEST_CASE("extract_widget_registration extracts LVGL widgets", "[xml-validator]"
 }
 
 TEST_CASE("extract_widget_registration extracts custom widgets", "[xml-validator]") {
-    auto registrations = extract_widget_registration(CUSTOM_WIDGET_REGISTRATION_CONTENT);
+    auto registrations = extract_widget_registration(kCustomWidgetRegistrationContent);
 
     SECTION("Extracts ui_button registration") {
         bool found = false;
@@ -450,7 +450,7 @@ TEST_CASE("extract_widget_registration handles edge cases", "[xml-validator]") {
 // =============================================================================
 
 TEST_CASE("extract_component_props parses icon component", "[xml-validator]") {
-    auto info = extract_component_props(ICON_COMPONENT_XML);
+    auto info = extract_component_props(kIconComponentXml);
 
     SECTION("Extracts extends attribute") {
         REQUIRE(info.extends == "lv_label");
@@ -478,7 +478,7 @@ TEST_CASE("extract_component_props parses icon component", "[xml-validator]") {
 }
 
 TEST_CASE("extract_component_props handles missing extends", "[xml-validator]") {
-    auto info = extract_component_props(SIMPLE_COMPONENT_XML);
+    auto info = extract_component_props(kSimpleComponentXml);
 
     SECTION("Defaults to lv_obj when no extends") {
         REQUIRE(info.extends == "lv_obj");
@@ -490,7 +490,7 @@ TEST_CASE("extract_component_props handles missing extends", "[xml-validator]") 
 }
 
 TEST_CASE("extract_component_props handles non-component XML", "[xml-validator]") {
-    auto info = extract_component_props(NON_COMPONENT_XML);
+    auto info = extract_component_props(kNonComponentXml);
 
     SECTION("Returns empty extends for non-component") {
         REQUIRE(info.extends.empty());

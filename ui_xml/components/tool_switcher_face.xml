@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The mounted head as one large target, for a tile too small for a segment
+     per head. The widget publishes what it reads (tool_switcher_face_*): the
+     head's name in the form the cell has room for, its temperature, and its
+     filament band (tool_switcher_band.xml), or "Choose head" with the carriage
+     empty. With no tools known it
+     names nothing and is not filled as mounted. A tap opens the sheet,
+     where every head and Park are. Disabled, like the segments and the sheet's
+     rows, while tool_switcher_change_blocked. Sized by the
+     widget's cell, which is never under the touch floor. -->
+<component>
+  <styles>
+    <!-- Not inline: an inline bg_color would outrank the bound mounted fill. -->
+    <style name="face_idle" bg_color="#elevated_bg" bg_opa="255"/>
+    <style name="face_mounted" bg_color="#primary"/>
+    <style name="face_mounted_text" text_color="#text_on_primary"/>
+    <style name="face_disabled" opa="50%"/>
+  </styles>
+  <view extends="lv_obj"
+        flex_flow="column" style_pad_all="0" style_pad_gap="0" style_radius="0" style_border_width="0" clickable="true"
+        scrollable="false">
+    <bind_style_prop prop="width" subject="tool_switcher_face_w"/>
+    <bind_style_prop prop="height" subject="tool_switcher_face_h"/>
+    <style name="face_idle"/>
+    <style name="styles.press_wash" selector="pressed"/>
+    <style name="face_disabled" selector="disabled"/>
+    <bind_style_if name="face_mounted" cond="active_tool ge 0 and tool_switcher_heads gt 0"/>
+    <bind_state_if_eq subject="tool_switcher_change_blocked" state="disabled" ref_value="1"/>
+    <pass_through name="tool_switcher_face_text"
+                  width="100%" flex_grow="1" flex_flow="column" style_flex_main_place="center"
+                  style_flex_cross_place="center" style_flex_track_place="center" style_pad_gap="0">
+      <text_body name="tool_switcher_face_label"
+                 width="content" style_max_width="100%" style_pad_hor="#space_xs" long_mode="dots"
+                 bind_text="tool_switcher_face_label" style_text_align="center" clickable="false" event_bubble="true">
+        <bind_style_if name="face_mounted_text" cond="active_tool ge 0 and tool_switcher_heads gt 0"/>
+      </text_body>
+      <pass_through name="tool_switcher_face_sub_row"
+                    width="content" height="content" style_max_width="100%" flex_flow="row"
+                    style_flex_cross_place="center" style_pad_gap="#space_xs">
+        <bind_flag_if_eq subject="tool_switcher_two_line" flag="hidden" ref_value="0"/>
+        <text_small name="tool_switcher_face_sub"
+                    bind_text="tool_switcher_face_sub" long_mode="dots" clickable="false" event_bubble="true">
+          <bind_style_if name="face_mounted_text" cond="active_tool ge 0 and tool_switcher_heads gt 0"/>
+        </text_small>
+      </pass_through>
+    </pass_through>
+    <tool_switcher_band name="tool_switcher_face_band"
+                        color="tool_switcher_face_color" colors="tool_switcher_face_colors"
+                        finish="tool_switcher_face_finish" has_color="tool_switcher_face_has_color"
+                        text="tool_switcher_face_material" text_color="tool_switcher_face_band_text"/>
+    <event_cb trigger="clicked" callback="tool_switcher_face_cb"/>
+  </view>
+</component>

@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "moonraker_client_mock.h"
 
+#include <array>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -25,19 +27,22 @@ namespace mock_internal {
 // Mock Printer Configuration Constants
 // ============================================================================
 
-// Bed origin (mm). The far edge is the persona's descriptor().axis_max.
-constexpr double MOCK_BED_X_MIN = 0.0;
-constexpr double MOCK_BED_Y_MIN = 0.0;
-
 // Probe margins - typical probes can't reach bed edges
-constexpr double MOCK_PROBE_MARGIN = 15.0;
+constexpr double kMockProbeMargin = 15.0;
 
 // Bed screw thread advertised in configfile.settings.screws_tilt_adjust.
 // MockScrewsTiltState derives its adjustment strings from this same value, so
 // the mock's SCREWS_TILT_CALCULATE output agrees with the config it reports.
-constexpr const char* MOCK_SCREW_THREAD = "CW-M3";
+constexpr const char* kMockScrewThread = "CW-M3";
 
-/// Area a probe can reach: the persona's bed inset by MOCK_PROBE_MARGIN.
+// The K2 chamber thermostat's configured resting target (its configfile
+// target_temp, captured live in docs/devel/CHAMBER_HEATER.md's verification
+// log). The fan reports this target whenever no M141 set is live, and the
+// configfile answer names it so the discovery-side resting read resolves the
+// same value the frames carry.
+constexpr double kMockK2ChamberFanRestingC = 35.0;
+
+/// Area a probe can reach: the persona's bed inset by kMockProbeMargin.
 struct MeshBounds {
     double x_min;
     double x_max;
@@ -46,9 +51,22 @@ struct MeshBounds {
 };
 
 [[nodiscard]] inline MeshBounds mesh_bounds(helix::mock::PrinterType type) {
-    const auto max = helix::mock::descriptor(type).axis_max;
-    return {MOCK_BED_X_MIN + MOCK_PROBE_MARGIN, max.x - MOCK_PROBE_MARGIN,
-            MOCK_BED_Y_MIN + MOCK_PROBE_MARGIN, max.y - MOCK_PROBE_MARGIN};
+    const auto d = helix::mock::descriptor(type);
+    return {d.axis_min.x + kMockProbeMargin, d.axis_max.x - kMockProbeMargin,
+            d.axis_min.y + kMockProbeMargin, d.axis_max.y - kMockProbeMargin};
+}
+
+/// toolhead axis_minimum/maximum as Klipper reports them: one value per axis
+/// plus a zero for the extruder slot. Every toolhead block the mock serves
+/// builds them here, so the copies cannot drift apart again.
+[[nodiscard]] inline std::array<double, 4>
+toolhead_axis_minimum(const helix::mock::PersonaDescriptor& persona) {
+    return {persona.axis_min.x, persona.axis_min.y, persona.axis_min.z, 0.0};
+}
+
+[[nodiscard]] inline std::array<double, 4>
+toolhead_axis_maximum(const helix::mock::PersonaDescriptor& persona) {
+    return {persona.axis_max.x, persona.axis_max.y, persona.axis_max.z, 0.0};
 }
 
 /**
@@ -63,9 +81,10 @@ struct MeshBounds {
  * @param error_cb Error callback to invoke on failure
  * @return true if the handler recognized and processed the method, false otherwise
  */
-using MethodHandler = std::function<bool(MoonrakerClientMock* self, const json& params,
-                                         std::function<void(const json&)> success_cb,
-                                         std::function<void(const MoonrakerError&)> error_cb)>;
+using MethodHandler =
+    std::function<bool(MoonrakerClientMock* self, const json& params,
+                       helix::SharedCallback<void(const json&)> success_cb,
+                       helix::SharedCallback<void(const MoonrakerError&)> error_cb)>;
 
 /**
  * @brief Register file-related method handlers
@@ -153,6 +172,17 @@ void register_server_handlers(std::unordered_map<std::string, MethodHandler>& re
 void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& registry);
 
 /**
+ * @brief Register the HelixPrint plugin's power-loss handlers
+ *
+ * server.helix.plr.status / plan / prepare / commit / abort / discard, answered
+ * by MoonrakerClientMock::mock_plr_request() while HELIX_MOCK_PLR is set.
+ *
+ * @param registry Map to register handlers into
+ */
+// NAMESPACE_OK: mock_internal handler registry, alongside its sibling registrars
+void register_plr_handlers(std::unordered_map<std::string, MethodHandler>& registry);
+
+/**
  * @brief Get mock gcode_macro configfile entries
  *
  * Returns a JSON object with gcode_macro entries (lowercase keys) for the
@@ -188,8 +218,8 @@ std::string mock_probe_type(helix::mock::PrinterType type);
  * — so all three stay in step. Returns an empty object for "none".
  *
  * Values are STRINGS, matching Klipper: configfile.config is the verbatim
- * printer.cfg text, and ProbeSensorManager::discover_from_config() parses
- * z_offset with std::stof.
+ * printer.cfg text, and ProbeSensorManager seeds its Z offset from the section,
+ * parsing z_offset as a string.
  *
  * The "loadcell" profile deliberately disagrees with the status payload, which
  * reports z_offset: null. That is the flashforge_loadcell shape the config
@@ -211,6 +241,20 @@ json get_mock_mmu_status();
 } // namespace mock_internal
 
 namespace helix::sim {
+/**
+ * @brief A filament sensor's status fields as HELIX_MOCK_FILAMENT_STATE sets them
+ *
+ * The variable is comma-separated `name:state` pairs keyed on the sensor's short
+ * name; `state` is `detected` (the default), `empty`, or `disabled` (stood down in
+ * Klipper, `enabled: false`). Both the initial status frame and printer.objects.subscribe
+ * answer from this, so the two cannot disagree.
+ */
+struct MockFilamentSensorEnvState {
+    bool filament_detected = true;
+    bool enabled = true;
+};
+MockFilamentSensorEnvState mock_filament_sensor_env_state(const std::string& short_name);
+
 /**
  * @brief Extra macro names from HELIX_MOCK_MACRO_COUNT=N (MOCK_MACRO_000 ...)
  *

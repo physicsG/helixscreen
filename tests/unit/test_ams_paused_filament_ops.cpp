@@ -50,12 +50,15 @@
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
 #include "test_helpers/afc_test_access.h"
+#include "test_helpers/snapmaker_test_access.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
 
 using helix::AmsError;
 using helix::AmsErrorHelper;
@@ -81,6 +84,11 @@ template <typename Backend> class PausedGateDouble : public Backend {
     std::vector<std::string> dispatched;
 
     AmsError execute_gcode(const std::string& gcode) override {
+        dispatched.push_back(gcode);
+        return AmsErrorHelper::success();
+    }
+    AmsError execute_gcode(const std::string& gcode, helix::SharedCallback<void()>,
+                           helix::SharedCallback<void(const MoonrakerError&)>, bool) override {
         dispatched.push_back(gcode);
         return AmsErrorHelper::success();
     }
@@ -247,7 +255,7 @@ TEST_CASE_METHOD(PausedGateFixture,
 }
 
 // ============================================================================
-// Snapmaker U1
+// Snapmaker U1 — the backend 329e731e9 missed
 //
 // Every op below drives the toolhead: AUTO_FEEDING forwards to FEED_AUTO, which
 // homes and then switches tools before feeding, and `T{n}` moves the carriage.
@@ -294,14 +302,6 @@ TEST_CASE_METHOD(PausedGateFixture, "Snapmaker refuses toolhead-motion filament 
 
     SECTION("select_slot — on the U1 a slot select IS a physical tool change") {
         expect_refused(backend->select_slot(1));
-    }
-
-    SECTION("park_toolhead — PARK_EXTRUDER docks the carriage mid-print") {
-        // Park is NOT a filament op, so it never passes through run_filament_op()
-        // and gets none of that gating for free. It moves the carriage, so it
-        // carries its own copy of the refusal; without it the toolhead menu's
-        // Park button would dock the head in the middle of a running job.
-        expect_refused(backend->park_toolhead());
     }
 }
 
@@ -557,6 +557,40 @@ TEST_CASE_METHOD(PausedGateFixture, "AFC eject is refused while PRINTING, allowe
     }
 }
 
+TEST_CASE_METHOD(PausedGateFixture,
+                 "AFC toolhead calibration is refused while a print holds the printer",
+                 "[ams][afc][device_actions][paused]") {
+    helix::AfcEjectPrintGateHelper backend(api.get(), &mock_client);
+    const nlohmann::json help = {
+        {"jsonrpc", "2.0"},
+        {"result", {{"AFC_TOOLHEAD_CALIBRATION", "Open the toolhead variable calibration menu"}}}};
+    REQUIRE(helix::AfcTestAccess::apply_gcode_help_response(backend, help));
+    const auto actions = backend.get_device_actions();
+    const auto it = std::find_if(actions.begin(), actions.end(),
+                                 [](const auto& a) { return a.id == "toolhead_calibration"; });
+    REQUIRE(it != actions.end());
+    CHECK(it->moves_machine);
+
+    auto sent_calibration = [&] {
+        const auto& sent = mock_client.gcode_script_history();
+        return std::any_of(sent.begin(), sent.end(), [](const std::string& g) {
+            return g.find("AFC_TOOLHEAD_CALIBRATION") != std::string::npos;
+        });
+    };
+    mock_client.clear_gcode_script_history();
+
+    for (auto s : {helix::PrintJobState::PRINTING, helix::PrintJobState::PAUSED}) {
+        set_print_state(s);
+        const AmsError err = backend.execute_device_action("toolhead_calibration");
+        CHECK(err.user_msg == "Printer is busy with a print");
+        CHECK_FALSE(sent_calibration());
+    }
+
+    set_print_state(helix::PrintJobState::STANDBY);
+    REQUIRE(backend.execute_device_action("toolhead_calibration").success());
+    CHECK(sent_calibration());
+}
+
 TEST_CASE_METHOD(PausedGateFixture, "AFC is the backend whose cold lane ops the firmware gates",
                  "[ams][afc][eject][paused]") {
     CHECK(make<helix::AmsBackendAfc>()->cold_lane_ops_refused_during_print());
@@ -568,54 +602,33 @@ TEST_CASE_METHOD(PausedGateFixture, "AFC is the backend whose cold lane ops the 
 }
 
 // ============================================================================
-// Parking is gated like every other toolhead-motion op
-//
-// park_toolhead() used to be a plain virtual whose only enforcement was a
-// @warning telling each implementer to hand-write check_preconditions(true) --
-// the exact opt-in shape this NVI set exists to abolish, and which had already
-// shipped one backend with no gate at all (180a71c7d). It also bypassed the
-// single-op-in-flight claim. It is now final on AmsSubscriptionBackend and
-// routes through run_filament_op(), so a backend writes only do_park_toolhead()
-// and cannot forget either.
+// Park Toolhead: the shared gate refuses a paused job for every caller
 // ============================================================================
 
-TEST_CASE_METHOD(PausedGateFixture, "A park is refused while a print owns the toolhead",
+TEST_CASE_METHOD(PausedGateFixture, "park_active_tool is refused while paused or printing",
                  "[ams][safety][paused][park]") {
     auto backend = make<helix::AmsBackendSnapmaker>();
+    helix::SnapmakerTestAccess::handle_status(
+        *backend, nlohmann::json{{"toolhead", nlohmann::json{{"extruder", "extruder1"}}}});
+    REQUIRE(backend->get_current_tool() == 1);
 
-    SECTION("PRINTING refuses, and dispatches nothing") {
-        set_print_state(helix::PrintJobState::PRINTING);
-        const AmsError err = backend->park_toolhead();
-        CHECK_FALSE(err.success());
-        // Not just the return value: a refusal that still sent the gcode would
-        // dock the head anyway and report failure.
+    SECTION("paused: refused although the backend allows other ops while paused") {
+        set_print_state(helix::PrintJobState::PAUSED);
+        CHECK(backend->change_tool(2).success());
+        backend->dispatched.clear();
+
+        CHECK_FALSE(backend->park_active_tool().success());
         CHECK(backend->dispatched.empty());
     }
-
-    SECTION("PAUSED is allowed -- parking is a legitimate manual intervention") {
-        // Snapmaker's filament_ops_self_home() is false, so a paused job does
-        // not block. This is the same rule the load/unload ops follow (#991).
-        set_print_state(helix::PrintJobState::PAUSED);
-        CHECK(backend->park_toolhead().success());
-        REQUIRE(backend->dispatched.size() == 1);
-        CHECK(backend->dispatched[0] == "PARK_EXTRUDER");
+    SECTION("printing: refused") {
+        set_print_state(helix::PrintJobState::PRINTING);
+        CHECK_FALSE(backend->park_active_tool().success());
+        CHECK(backend->dispatched.empty());
     }
-
-    SECTION("idle parks") {
+    SECTION("standby: parks") {
         set_print_state(helix::PrintJobState::STANDBY);
-        CHECK(backend->park_toolhead().success());
+        REQUIRE(backend->park_active_tool().success());
         REQUIRE(backend->dispatched.size() == 1);
         CHECK(backend->dispatched[0] == "PARK_EXTRUDER");
     }
-}
-
-TEST_CASE_METHOD(PausedGateFixture, "A backend that cannot park refuses without an override",
-                 "[ams][safety][park]") {
-    // do_park_toolhead()'s default refuses, so supports_toolhead_park() == false
-    // backends need no override and cannot accidentally dispatch one.
-    auto backend = make<helix::AmsBackendAfc>();
-    set_print_state(helix::PrintJobState::STANDBY);
-    CHECK_FALSE(backend->supports_toolhead_park());
-    CHECK_FALSE(backend->park_toolhead().success());
-    CHECK(backend->dispatched.empty());
 }

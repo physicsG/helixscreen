@@ -5,6 +5,7 @@
 
 #include "ams_state.h"
 #include "ams_types.h"
+#include "i18n_plural.h"
 #include "lvgl/lvgl.h"
 #include "static_panel_registry.h"
 #include "ui/ui_widget_helpers.h"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 
 // Static buffer definitions for subject strings
 char WizardAmsIdentifyStep::ams_type_buffer_[64] = {};
@@ -62,6 +64,7 @@ void WizardAmsIdentifyStep::init_subjects() {
                               subjects_);
     UI_MANAGED_SUBJECT_STRING(wizard_ams_details_, ams_details_buffer_, "", "wizard_ams_details",
                               subjects_);
+    UI_MANAGED_SUBJECT_INT(wizard_ams_logo_color_, 0, "wizard_ams_logo_color", subjects_);
 
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
@@ -129,8 +132,9 @@ void WizardAmsIdentifyStep::update_display() {
     // Set logo image (imperative - images don't support bind_src)
     lv_obj_t* logo = helix::ui::find_required(screen_root_, "ams_logo", get_name());
     if (logo && backend) {
-        const char* logo_path =
-            helix::AmsState::get_logo_path(backend->get_system_info().type_name);
+        const helix::LogoArt art = helix::AmsState::get_logo(backend->get_system_info().type_name);
+        const char* logo_path = art.path;
+        lv_subject_set_int(&wizard_ams_logo_color_, art.color ? 1 : 0);
         if (logo_path && logo_path[0] != '\0') {
             lv_image_set_src(logo, logo_path);
             lv_obj_remove_flag(logo, LV_OBJ_FLAG_HIDDEN);
@@ -151,31 +155,11 @@ std::string WizardAmsIdentifyStep::get_ams_type_name() const {
         return lv_tr("Unknown");
     }
 
-    helix::AmsType type = backend->get_type();
-    switch (type) {
-    case helix::AmsType::AFC:
-        return "AFC (Armored Turtle)";
-    case helix::AmsType::HAPPY_HARE:
-        return "Happy Hare MMU";
-    case helix::AmsType::ACE:
-        return "ACE";
-    case helix::AmsType::TOOL_CHANGER:
-        return "Tool Changer";
-    case helix::AmsType::AD5X_IFS:
-        return "FlashForge IFS";
-    case helix::AmsType::CFS:
-        return "Creality CFS";
-    case helix::AmsType::SNAPMAKER:
-        return "Snapmaker SnapSwap";
-    case helix::AmsType::MULTIACE:
-        return "Snapmaker U1 + multiACE"; // i18n: do not translate - product names
-    case helix::AmsType::QIDI_BOX:
-        return "QIDI Box"; // i18n: do not translate - product name
-    case helix::AmsType::OPENAMS:
-        return "OpenAMS"; // i18n: do not translate - product name
-    default:
+    const helix::AmsTypeTraits& traits = helix::ams_type_traits(backend->get_type());
+    if (traits.type == helix::AmsType::NONE) {
         return lv_tr("Unknown");
     }
+    return traits.product_name;
 }
 
 std::string WizardAmsIdentifyStep::get_ams_details() const {
@@ -191,7 +175,9 @@ std::string WizardAmsIdentifyStep::get_ams_details() const {
 
     // Start with slot count if available
     if (const int bays = info.present_slot_count(); bays > 0) {
-        details = fmt::format(lv_tr("{} slots"), bays);
+        details = fmt::format(
+            fmt::runtime(helix::ui::tr_plural(nullptr, "{} slots", static_cast<uint64_t>(bays))),
+            bays);
     }
 
     // Add unit name if available (e.g., "• Turtle 1")
@@ -250,7 +236,9 @@ bool WizardAmsIdentifyStep::should_skip() const {
     }
 
     helix::AmsType type = backend->get_type();
-    bool skip = (type == helix::AmsType::NONE);
+    // A backend whose hardware feeds only the external spool presents no
+    // system, so there is nothing to identify (or to expect next session).
+    bool skip = !backend->get_system_info().presents_filament_system();
 
     if (skip) {
         spdlog::info("[{}] No AMS detected (type=NONE), skipping step", get_name());

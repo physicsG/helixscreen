@@ -2,6 +2,8 @@
 
 #include "screensaver_fireworks_sim.h"
 
+#include "screensaver_buffer.h"
+#include "screensaver_fast_math.h"
 #include "screensaver_motion.h"
 #include "screensaver_pixel_writer.h"
 
@@ -14,42 +16,59 @@ namespace helix::ui {
 namespace {
 
 using screensaver::random_below;
+using screensaver::random_int;
 using screensaver::unit_random;
 
-constexpr float PI = 3.14159265f;
-
-constexpr Rgb SKY_TOP = {2, 3, 10};       // near black overhead
-constexpr Rgb SKY_HORIZON = {12, 20, 52}; // deep navy where the sky meets the hills
-constexpr Rgb HILLS = {1, 2, 4};
+constexpr Rgb kSkyTop = {2, 3, 10};       // near black overhead
+constexpr Rgb kSkyHorizon = {12, 20, 52}; // deep navy where the sky meets the hills
+constexpr Rgb kHills = {1, 2, 4};
 constexpr Rgb WHITE = {255, 255, 255};
-constexpr Rgb EMBER = {255, 110, 30};
-constexpr Rgb WILLOW_GOLD = {255, 190, 90};
-constexpr Rgb ROCKET = {255, 214, 150};
-constexpr Rgb SHELL_COLORS[] = {
+constexpr Rgb kEmber = {255, 110, 30};
+constexpr Rgb kWillowGold = {255, 190, 90};
+constexpr Rgb kPalmGold = {255, 165, 55};
+constexpr Rgb kStrobeWhite = {235, 240, 255};
+constexpr Rgb kRocket = {255, 214, 150};
+constexpr Rgb kShellColors[] = {
     {255, 60, 60},  {80, 255, 90},  {90, 140, 255}, {255, 230, 80},
     {255, 90, 230}, {90, 240, 255}, {255, 160, 60},
 };
-constexpr int SHELL_COLOR_COUNT = static_cast<int>(std::size(SHELL_COLORS));
+constexpr int kShellColorCount = static_cast<int>(std::size(kShellColors));
 
 // Physics runs in steps no longer than this, so a late frame moves everything the same way.
-constexpr uint32_t PHYSICS_STEP_MS = 20;
+constexpr uint32_t kPhysicsStepMs = 20;
 
 // Distances and accelerations are for a 480 px tall frame and scale with the frame's height.
-constexpr float REFERENCE_HEIGHT = 480.0f;
-constexpr float ROCKET_GRAVITY = 110.0f; // px/s^2
-constexpr float BURST_SPEED = 30.0f;     // a shell bursts once it climbs slower than this, px/s
-constexpr float ROCKET_TAIL_PX = 9.0f;
-constexpr int32_t TRAIL_SPACING_TENTHS = 16; // trail points 1.6 px apart
+constexpr float kReferenceHeight = 480.0f;
+constexpr float kRocketGravity = 110.0f; // px/s^2
+constexpr float kBurstSpeed = 30.0f;     // a shell bursts once it climbs slower than this, px/s
+constexpr float kRocketTailPx = 9.0f;
+constexpr float kPalmTailPx = 22.0f;        // a palm shell climbs on a long burning tail
+constexpr float kPalmCometRisePx = 135.0f;  // a palm's comets climb this far above its burst
+constexpr int32_t kTrailSpacingTenths = 16; // trail points 1.6 px apart
 
 // Where each colour phase of a spark's life ends, as a share of the life.
-constexpr float FLASH_END = 0.08f;
-constexpr float COLOR_END = 0.55f;
-constexpr float EMBER_END = 0.80f;
-constexpr float FLICKER_FROM = 0.70f;
-constexpr float BIG_UNTIL = 0.25f;
+constexpr float kFlashEnd = 0.08f;
+constexpr float kColorEnd = 0.55f;
+constexpr float kEmberEnd = 0.80f;
+constexpr float kFlickerFrom = 0.70f;
+constexpr float kBigUntil = 0.25f;
 
-constexpr int STAR_MIN_LEVEL = 40;
-constexpr int STAR_MAX_LEVEL = 110;
+// A crossette star flies this long, then splits into four fragments thrown across its path.
+constexpr int kCrossetteSplitMinMs = 550;
+constexpr int kCrossetteSplitMaxMs = 800;
+constexpr int kCrossetteFragmentMinMs = 700;
+constexpr int kCrossetteFragmentMaxMs = 1050;
+constexpr float kCrossetteFragmentSpeed = 65.0f; // px/s, added to what the star kept
+constexpr int kCrossetteFragments = 4;
+
+// A strobe star shows its shell colour, then hangs blinking white: lit for kStrobeOnMs of
+// every kStrobePeriodMs, each star on its own phase.
+constexpr float kStrobeFrom = 0.30f;
+constexpr uint32_t kStrobePeriodMs = 190;
+constexpr uint32_t kStrobeOnMs = 55;
+
+constexpr int kStarMinLevel = 40;
+constexpr int kStarMaxLevel = 110;
 
 struct KindParams {
     float speed_min; // px/s
@@ -59,33 +78,30 @@ struct KindParams {
     float drag;    // share of velocity lost per second
     float gravity; // px/s^2
     bool full_trail;
+    float big_until; // share of the life a spark is drawn 2x2
 };
 
 // Indexed by FireworksSim::BurstKind.
-constexpr KindParams KINDS[] = {
-    {70.0f, 110.0f, 1100, 1600, 1.1f, 40.0f, false}, // peony: an even ball
-    {80.0f, 120.0f, 1400, 1900, 0.9f, 36.0f, true},  // chrysanthemum: sparks leave trails
-    {55.0f, 85.0f, 2600, 3400, 1.8f, 60.0f, true},   // willow: long-lived gold, heavy drag, droops
-    {95.0f, 115.0f, 1200, 1500, 1.0f, 38.0f, false}, // ring: a tilted flat circle
+constexpr KindParams kKinds[] = {
+    {70.0f, 110.0f, 1100, 1600, 1.1f, 40.0f, false, kBigUntil}, // peony: an even ball
+    {80.0f, 120.0f, 1400, 1900, 0.9f, 36.0f, true, kBigUntil},  // chrysanthemum: sparks trail
+    {55.0f, 85.0f, 2600, 3400, 1.8f, 60.0f, true, kBigUntil},   // willow: gold, heavy drag, droops
+    {95.0f, 115.0f, 1200, 1500, 1.0f, 38.0f, false, kBigUntil}, // ring: a tilted flat circle
+    {125.0f, 150.0f, 2000, 2600, 0.8f, 115.0f, true, 0.65f},    // palm: few heavy comets
+    // crossette: the life is the star's flight before it splits
+    {85.0f, 115.0f, kCrossetteSplitMinMs, kCrossetteSplitMaxMs, 0.9f, 30.0f, true, 1.0f},
+    {60.0f, 90.0f, 2300, 3000, 1.7f, 22.0f, false, 0.15f}, // strobe: slow, hangs, blinks
 };
+static_assert(std::size(kKinds) == FireworksSim::kBurstKindCount, "one entry per burst kind");
 
-uint8_t mix_channel(uint8_t a, uint8_t b, float t) {
-    const float v = static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * t;
-    return static_cast<uint8_t>(std::clamp(v + 0.5f, 0.0f, 255.0f));
-}
-
-Rgb mix(Rgb a, Rgb b, float t) {
-    return {mix_channel(a.r, b.r, t), mix_channel(a.g, b.g, t), mix_channel(a.b, b.b, t)};
-}
-
-/// `c` at `amount` of its brightness, 0 to 255.
-Rgb dimmed(Rgb c, uint32_t amount) {
-    return {static_cast<uint8_t>(c.r * amount / 255), static_cast<uint8_t>(c.g * amount / 255),
-            static_cast<uint8_t>(c.b * amount / 255)};
-}
+// Palm comets and crossette stars are few and large; the rest of the level's sparks are unused.
+constexpr int kPalmMinComets = 7;
+constexpr int kPalmMaxComets = 12;
+constexpr int kCrossetteMinStars = 6;
+constexpr int kCrossetteMaxStars = 18;
 
 int16_t to_pixel(float v) {
-    return static_cast<int16_t>(std::clamp(std::lround(v), -16000L, 16000L));
+    return static_cast<int16_t>(std::clamp(round_px(v), -16000, 16000));
 }
 
 } // namespace
@@ -93,28 +109,28 @@ int16_t to_pixel(float v) {
 void FireworksSim::init(FrameTarget& frame, std::minstd_rand& rng, size_t level,
                         const FireworksPacing& pacing) {
     pacing_ = pacing;
-    level_ = std::min(level, FIREWORKS_LEVEL_COUNT - 1);
+    level_ = std::min(level, kFireworksLevelCount - 1);
     pending_level_ = level_;
     w_ = static_cast<int32_t>(frame.w);
     h_ = static_cast<int32_t>(frame.h);
-    scale_ = std::max(0.4f, static_cast<float>(h_) / REFERENCE_HEIGHT);
+    scale_ = std::max(0.4f, static_cast<float>(h_) / kReferenceHeight);
 
     sky_rows_.resize(static_cast<size_t>(h_));
     for (int32_t y = 0; y < h_; y++) {
         const float t = h_ > 1 ? static_cast<float>(y) / static_cast<float>(h_ - 1) : 0.0f;
-        sky_rows_[static_cast<size_t>(y)] = mix(SKY_TOP, SKY_HORIZON, t);
+        sky_rows_[static_cast<size_t>(y)] = mix_rgb(kSkyTop, kSkyHorizon, t);
     }
 
     // Rolling hills: three waves with random phases give one height per column.
-    const float phase_a = unit_random(rng) * 2.0f * PI;
-    const float phase_b = unit_random(rng) * 2.0f * PI;
-    const float phase_c = unit_random(rng) * 2.0f * PI;
+    const float phase_a = unit_random(rng) * 2.0f * kSaverPi;
+    const float phase_b = unit_random(rng) * 2.0f * kSaverPi;
+    const float phase_c = unit_random(rng) * 2.0f * kSaverPi;
     hill_top_.resize(static_cast<size_t>(w_));
     for (int32_t x = 0; x < w_; x++) {
         const float fx = static_cast<float>(x) / static_cast<float>(std::max(w_, 1));
-        const float share = 0.14f + 0.05f * std::sin(fx * 2.0f * PI * 1.1f + phase_a) +
-                            0.025f * std::sin(fx * 2.0f * PI * 3.0f + phase_b) +
-                            0.01f * std::sin(fx * 2.0f * PI * 9.0f + phase_c);
+        const float share = 0.14f + 0.05f * std::sin(fx * 2.0f * kSaverPi * 1.1f + phase_a) +
+                            0.025f * std::sin(fx * 2.0f * kSaverPi * 3.0f + phase_b) +
+                            0.01f * std::sin(fx * 2.0f * kSaverPi * 9.0f + phase_c);
         const int32_t top = h_ - static_cast<int32_t>(share * static_cast<float>(h_));
         hill_top_[static_cast<size_t>(x)] = static_cast<int16_t>(std::clamp<int32_t>(top, 0, h_));
     }
@@ -122,11 +138,10 @@ void FireworksSim::init(FrameTarget& frame, std::minstd_rand& rng, size_t level,
     // Faint fixed stars, at most one per column, in the upper 70% of the frame.
     star_y_.assign(static_cast<size_t>(w_), -1);
     star_level_.assign(static_cast<size_t>(w_), 0);
-    for (int i = 0; i < STAR_COUNT && w_ > 0 && h_ > 0; i++) {
+    for (int i = 0; i < kStarCount && w_ > 0 && h_ > 0; i++) {
         int32_t x = random_below(rng, w_);
         const int32_t y = random_below(rng, std::max(1, h_ * 7 / 10));
-        const auto star_level = static_cast<uint8_t>(
-            STAR_MIN_LEVEL + random_below(rng, STAR_MAX_LEVEL - STAR_MIN_LEVEL + 1));
+        const auto star_level = static_cast<uint8_t>(random_int(rng, kStarMinLevel, kStarMaxLevel));
         for (int32_t tries = 0; tries < w_ && star_y_[static_cast<size_t>(x)] >= 0; tries++) {
             x = (x + 1) % w_;
         }
@@ -137,7 +152,7 @@ void FireworksSim::init(FrameTarget& frame, std::minstd_rand& rng, size_t level,
         star_level_[static_cast<size_t>(x)] = star_level;
     }
 
-    const FireworksLevel& params = FIREWORKS_LEVELS[level_];
+    const FireworksLevel& params = kFireworksLevels[level_];
     sparks_.assign(static_cast<size_t>(params.sparks_per_burst) * params.bursts_at_once, Spark{});
     next_spark_ = 0;
     for (Burst& b : bursts_) {
@@ -162,7 +177,7 @@ void FireworksSim::init(FrameTarget& frame, std::minstd_rand& rng, size_t level,
 Rgb FireworksSim::sky_at(int32_t x, int32_t y) const {
     const auto column = static_cast<size_t>(x);
     if (y >= hill_top_[column]) {
-        return HILLS;
+        return kHills;
     }
     if (star_y_[column] == y) {
         const uint8_t v = star_level_[column];
@@ -172,7 +187,7 @@ Rgb FireworksSim::sky_at(int32_t x, int32_t y) const {
 }
 
 void FireworksSim::request_level(size_t level) {
-    pending_level_ = std::min(level, FIREWORKS_LEVEL_COUNT - 1);
+    pending_level_ = std::min(level, kFireworksLevelCount - 1);
 }
 
 size_t FireworksSim::sparks_in_use() const {
@@ -181,12 +196,12 @@ size_t FireworksSim::sparks_in_use() const {
     }));
 }
 
+size_t FireworksSim::heap_bytes() const {
+    return buffer_bytes(sparks_, sky_rows_, hill_top_, star_y_, star_level_);
+}
+
 void FireworksSim::clear() {
-    std::vector<Spark>().swap(sparks_);
-    std::vector<Rgb>().swap(sky_rows_);
-    std::vector<int16_t>().swap(hill_top_);
-    std::vector<int16_t>().swap(star_y_);
-    std::vector<uint8_t>().swap(star_level_);
+    release_buffers(sparks_, sky_rows_, hill_top_, star_y_, star_level_);
     for (Burst& b : bursts_) {
         b = Burst{};
     }
@@ -223,8 +238,7 @@ size_t FireworksSim::in_flight() const {
 int32_t FireworksSim::next_gap_ms(std::minstd_rand& rng) const {
     const uint32_t min_gap = pacing_.min_gap_ms;
     const uint32_t max_gap = std::max(pacing_.max_gap_ms, min_gap);
-    return static_cast<int32_t>(min_gap + static_cast<uint32_t>(random_below(
-                                              rng, static_cast<int>(max_gap - min_gap + 1))));
+    return random_int(rng, static_cast<int>(min_gap), static_cast<int>(max_gap));
 }
 
 void FireworksSim::step(uint32_t dt_ms, FrameTarget& frame, std::minstd_rand& rng,
@@ -234,12 +248,12 @@ void FireworksSim::step(uint32_t dt_ms, FrameTarget& frame, std::minstd_rand& rn
         return;
     }
     PixelWriter writer(frame);
-    DirtyRect rocket_boxes[MAX_BURSTS];
-    DirtyRect burst_boxes[MAX_BURSTS];
+    DirtyRect rocket_boxes[kMaxBursts];
+    DirtyRect burst_boxes[kMaxBursts];
 
     // Everything the previous frame drew goes back to sky first, so the frame shows only what
     // it draws itself.
-    for (size_t i = 0; i < MAX_BURSTS; i++) {
+    for (size_t i = 0; i < kMaxBursts; i++) {
         if (rockets_[i].drawn) {
             erase_rocket(writer, rockets_[i], rocket_boxes[i]);
             rockets_[i].drawn = false;
@@ -253,12 +267,12 @@ void FireworksSim::step(uint32_t dt_ms, FrameTarget& frame, std::minstd_rand& rn
     }
 
     for (uint32_t remaining = dt_ms; remaining > 0;) {
-        const uint32_t step_ms = std::min(remaining, PHYSICS_STEP_MS);
+        const uint32_t step_ms = std::min(remaining, kPhysicsStepMs);
         advance(step_ms, rng);
         remaining -= step_ms;
     }
 
-    for (size_t i = 0; i < MAX_BURSTS; i++) {
+    for (size_t i = 0; i < kMaxBursts; i++) {
         if (rockets_[i].active) {
             draw_rocket(writer, rockets_[i], rocket_boxes[i]);
         }
@@ -275,7 +289,7 @@ void FireworksSim::step(uint32_t dt_ms, FrameTarget& frame, std::minstd_rand& rn
         }
     }
 
-    for (size_t i = 0; i < MAX_BURSTS; i++) {
+    for (size_t i = 0; i < kMaxBursts; i++) {
         if (!rocket_boxes[i].empty()) {
             dirty.push_back(rocket_boxes[i]);
         }
@@ -295,8 +309,8 @@ void FireworksSim::advance(uint32_t step_ms, std::minstd_rand& rng) {
         if (finale_left_ == 0) {
             const int extra = std::max(0, static_cast<int>(pacing_.finale_max_shells) -
                                               pacing_.finale_min_shells);
-            finale_left_ = static_cast<uint8_t>(
-                std::max(1, pacing_.finale_min_shells + random_below(rng, extra + 1)));
+            finale_left_ = static_cast<uint8_t>(std::max(
+                1, random_int(rng, pacing_.finale_min_shells, pacing_.finale_min_shells + extra)));
             finale_gap_ms_ = static_cast<int32_t>(pacing_.finale_span_ms / finale_left_);
             launch_in_ms_ = 0;
         }
@@ -304,7 +318,7 @@ void FireworksSim::advance(uint32_t step_ms, std::minstd_rand& rng) {
 
     launch_in_ms_ -= elapsed;
     if (launch_in_ms_ <= 0) {
-        if (in_flight() < FIREWORKS_LEVELS[pending_level_].bursts_at_once) {
+        if (in_flight() < kFireworksLevels[pending_level_].bursts_at_once) {
             launch(rng);
             if (finale_left_ > 0) {
                 finale_left_--;
@@ -315,7 +329,7 @@ void FireworksSim::advance(uint32_t step_ms, std::minstd_rand& rng) {
         }
     }
 
-    const float rocket_gravity = ROCKET_GRAVITY * scale_;
+    const float rocket_gravity = kRocketGravity * scale_;
     for (Rocket& rocket : rockets_) {
         if (!rocket.active) {
             continue;
@@ -323,7 +337,7 @@ void FireworksSim::advance(uint32_t step_ms, std::minstd_rand& rng) {
         rocket.vy += rocket_gravity * dt;
         rocket.x += rocket.vx * dt;
         rocket.y += rocket.vy * dt;
-        if (rocket.vy >= -BURST_SPEED * scale_) {
+        if (rocket.vy >= -kBurstSpeed * scale_) {
             burst(rocket, rng);
             rocket.active = false;
         }
@@ -336,7 +350,13 @@ void FireworksSim::advance(uint32_t step_ms, std::minstd_rand& rng) {
         Burst& owner = bursts_[spark.burst];
         const uint32_t age = static_cast<uint32_t>(spark.age_ms) + step_ms;
         if (age >= spark.life_ms) {
-            spark.flags = static_cast<uint8_t>(spark.flags & ~SPARK_ALIVE);
+            if (owner.kind == BurstKind::CROSSETTE && (spark.flags & SPARK_SPLIT) == 0) {
+                split(spark, rng);
+                continue;
+            }
+            // Only the erase-pending bits survive: take_spark() reuses a spark whose flags are
+            // all clear.
+            spark.flags = static_cast<uint8_t>(spark.flags & (SPARK_DRAWN | SPARK_DRAWN_BIG));
             if (owner.alive > 0) {
                 owner.alive--;
             }
@@ -363,41 +383,70 @@ void FireworksSim::launch(std::minstd_rand& rng) {
     if (slot == nullptr) {
         return;
     }
-    const FireworksLevel& params = FIREWORKS_LEVELS[level_];
+    const FireworksLevel& params = kFireworksLevels[level_];
     // Launched from anywhere along the hills, to burst in the upper 60% of the frame.
     const int32_t x = std::clamp<int32_t>(
         static_cast<int32_t>(static_cast<float>(w_) * (0.1f + 0.8f * unit_random(rng))), 0, w_ - 1);
     const float ground = static_cast<float>(hill_top_[static_cast<size_t>(x)]);
-    const float apex = static_cast<float>(h_) * (0.08f + 0.52f * unit_random(rng));
-    const float rise = std::max(ground - apex, 20.0f * scale_);
+    const float apex_pick = unit_random(rng);
 
     Rocket& rocket = *slot;
     rocket = Rocket{};
     rocket.active = true;
-    rocket.kind = static_cast<BurstKind>(random_below(rng, 4));
-    rocket.color = rocket.kind == BurstKind::WILLOW
-                       ? WILLOW_GOLD
-                       : SHELL_COLORS[random_below(rng, SHELL_COLOR_COUNT)];
+    rocket.kind = pick_kind(rng);
+    // A palm bursts low enough that its comets' climb stays inside the frame.
+    float highest = static_cast<float>(h_) * 0.08f;
+    if (rocket.kind == BurstKind::PALM) {
+        highest = std::max(highest, kPalmCometRisePx * scale_);
+    }
+    const float lowest = std::max(highest, static_cast<float>(h_) * 0.60f);
+    const float apex = highest + (lowest - highest) * apex_pick;
+    const float rise = std::max(ground - apex, 20.0f * scale_);
+    switch (rocket.kind) {
+    case BurstKind::WILLOW:
+        rocket.color = kWillowGold;
+        break;
+    case BurstKind::PALM:
+        rocket.color = kPalmGold;
+        break;
+    default:
+        rocket.color = kShellColors[random_below(rng, kShellColorCount)];
+        break;
+    }
     rocket.sparks = params.sparks_per_burst;
     rocket.trail = params.trail;
     rocket.x = static_cast<float>(x);
     rocket.y = ground;
     rocket.vx = (unit_random(rng) - 0.5f) * 30.0f * scale_;
-    rocket.vy = -std::sqrt(2.0f * ROCKET_GRAVITY * scale_ * rise);
+    rocket.vy = -std::sqrt(2.0f * kRocketGravity * scale_ * rise);
+}
+
+FireworksSim::BurstKind FireworksSim::pick_kind(std::minstd_rand& rng) const {
+    int allowed = 0;
+    for (uint8_t k = 0; k < kBurstKindCount; k++) {
+        allowed += (kinds_ >> k) & 1u;
+    }
+    int pick = random_below(rng, std::max(allowed, 1));
+    for (uint8_t k = 0; k < kBurstKindCount; k++) {
+        if (((kinds_ >> k) & 1u) != 0 && pick-- == 0) {
+            return static_cast<BurstKind>(k);
+        }
+    }
+    return BurstKind::PEONY;
 }
 
 void FireworksSim::burst(const Rocket& rocket, std::minstd_rand& rng) {
-    size_t slot = MAX_BURSTS;
-    for (size_t i = 0; i < MAX_BURSTS; i++) {
+    size_t slot = kMaxBursts;
+    for (size_t i = 0; i < kMaxBursts; i++) {
         if (!bursts_[i].active) {
             slot = i;
             break;
         }
     }
-    if (slot == MAX_BURSTS) {
+    if (slot == kMaxBursts) {
         return;
     }
-    const KindParams& kind = KINDS[static_cast<size_t>(rocket.kind)];
+    const KindParams& kind = kKinds[static_cast<size_t>(rocket.kind)];
     Burst& owner = bursts_[slot];
     owner = Burst{};
     owner.active = true;
@@ -406,11 +455,30 @@ void FireworksSim::burst(const Rocket& rocket, std::minstd_rand& rng) {
     owner.drag = kind.drag;
     owner.gravity = kind.gravity * scale_;
 
+    int count = rocket.sparks;
+    switch (rocket.kind) {
+    case BurstKind::PALM:
+        count = std::clamp(count / 12, kPalmMinComets, kPalmMaxComets);
+        // Few comets afford long tails, even at the level that gives other shells none.
+        owner.trail = static_cast<uint8_t>(std::max(rocket.trail * 3, 6));
+        break;
+    case BurstKind::CROSSETTE:
+        // Each star becomes four fragments, so the burst ends near half the level's sparks.
+        count = std::clamp(count / 8, kCrossetteMinStars, kCrossetteMaxStars);
+        break;
+    case BurstKind::STROBE:
+        count = count * 2 / 3;
+        owner.trail = 0;
+        break;
+    default:
+        break;
+    }
+
     const float speed =
         (kind.speed_min + (kind.speed_max - kind.speed_min) * unit_random(rng)) * scale_;
-    const float tilt = std::cos(unit_random(rng) * 0.45f * PI);
-    const float spin = unit_random(rng) * 2.0f * PI;
-    for (uint16_t i = 0; i < rocket.sparks; i++) {
+    const float tilt = std::cos(unit_random(rng) * 0.45f * kSaverPi);
+    const float spin = unit_random(rng) * 2.0f * kSaverPi;
+    for (int i = 0; i < count; i++) {
         Spark* spark = take_spark();
         if (spark == nullptr) {
             break; // the pool is full: the rest of this burst is dropped
@@ -418,9 +486,17 @@ void FireworksSim::burst(const Rocket& rocket, std::minstd_rand& rng) {
         float dx = 0.0f;
         float dy = 0.0f;
         float spark_speed = speed;
-        if (rocket.kind == BurstKind::RING) {
-            const float theta =
-                2.0f * PI * static_cast<float>(i) / static_cast<float>(rocket.sparks);
+        if (rocket.kind == BurstKind::PALM) {
+            // Comets spread evenly round the burst, thrown slightly upward, so each arcs over
+            // and falls like a frond.
+            const float theta = 2.0f * kSaverPi *
+                                (static_cast<float>(i) + 0.4f * (unit_random(rng) - 0.5f)) /
+                                static_cast<float>(count);
+            dx = std::cos(theta);
+            dy = std::sin(theta) - 0.55f;
+            spark_speed = speed * (0.9f + 0.1f * unit_random(rng));
+        } else if (rocket.kind == BurstKind::RING) {
+            const float theta = 2.0f * kSaverPi * static_cast<float>(i) / static_cast<float>(count);
             const float cx = std::cos(theta);
             const float cy = std::sin(theta) * tilt;
             dx = cx * std::cos(spin) - cy * std::sin(spin);
@@ -428,7 +504,7 @@ void FireworksSim::burst(const Rocket& rocket, std::minstd_rand& rng) {
         } else {
             // A direction uniform over a sphere, seen face on: an evenly filled ball.
             const float z = 2.0f * unit_random(rng) - 1.0f;
-            const float phi = 2.0f * PI * unit_random(rng);
+            const float phi = 2.0f * kSaverPi * unit_random(rng);
             const float radius = std::sqrt(std::max(0.0f, 1.0f - z * z));
             dx = radius * std::cos(phi);
             dy = radius * std::sin(phi);
@@ -439,8 +515,7 @@ void FireworksSim::burst(const Rocket& rocket, std::minstd_rand& rng) {
         spark->y = rocket.y;
         spark->vx = dx * spark_speed + rocket.vx * 0.3f;
         spark->vy = dy * spark_speed + rocket.vy * 0.3f;
-        spark->life_ms = static_cast<uint16_t>(
-            kind.life_min_ms + random_below(rng, kind.life_max_ms - kind.life_min_ms + 1));
+        spark->life_ms = static_cast<uint16_t>(random_int(rng, kind.life_min_ms, kind.life_max_ms));
         spark->color = rocket.color;
         spark->flags = SPARK_ALIVE;
         spark->burst = static_cast<uint8_t>(slot);
@@ -448,6 +523,34 @@ void FireworksSim::burst(const Rocket& rocket, std::minstd_rand& rng) {
     }
     if (owner.alive == 0) {
         owner.active = false;
+    }
+}
+
+void FireworksSim::split(Spark& spark, std::minstd_rand& rng) {
+    const Spark star = spark;
+    Burst& owner = bursts_[star.burst];
+    // The four fragments fly out across the star's path, as an X over its direction of travel.
+    const float base = std::atan2(star.vy, star.vx) + 0.25f * kSaverPi;
+    const float push = kCrossetteFragmentSpeed * scale_;
+    for (int k = 0; k < kCrossetteFragments; k++) {
+        Spark* fragment = k == 0 ? &spark : take_spark();
+        if (fragment == nullptr) {
+            break; // the pool is full: the star splits into fewer fragments
+        }
+        const float theta = base + 0.5f * kSaverPi * static_cast<float>(k);
+        *fragment = Spark{};
+        fragment->x = star.x;
+        fragment->y = star.y;
+        fragment->vx = star.vx * 0.35f + std::cos(theta) * push;
+        fragment->vy = star.vy * 0.35f + std::sin(theta) * push;
+        fragment->life_ms = static_cast<uint16_t>(
+            random_int(rng, kCrossetteFragmentMinMs, kCrossetteFragmentMaxMs));
+        fragment->color = star.color;
+        fragment->flags = SPARK_ALIVE | SPARK_SPLIT;
+        fragment->burst = star.burst;
+        if (k > 0) {
+            owner.alive++;
+        }
     }
 }
 
@@ -460,32 +563,50 @@ void FireworksSim::visit_spark_points(const Spark& spark, uint8_t trail, Visit&&
         visit(spark.drawn_x + 1, spark.drawn_y + 1, 255u);
     }
     for (int32_t k = 1; k <= trail; k++) {
-        const int32_t tx = spark.drawn_x + spark.drawn_dx * k * TRAIL_SPACING_TENTHS / 1000;
-        const int32_t ty = spark.drawn_y + spark.drawn_dy * k * TRAIL_SPACING_TENTHS / 1000;
+        const int32_t tx = spark.drawn_x + spark.drawn_dx * k * kTrailSpacingTenths / 1000;
+        const int32_t ty = spark.drawn_y + spark.drawn_dy * k * kTrailSpacingTenths / 1000;
         visit(tx, ty, static_cast<uint32_t>(220 - 200 * k / (trail + 1)));
     }
 }
 
 void FireworksSim::draw_spark(PixelWriter& writer, Spark& spark, std::minstd_rand& rng,
                               DirtyRect& box) {
+    const BurstKind kind = bursts_[spark.burst].kind;
     const float life = static_cast<float>(std::max<uint16_t>(spark.life_ms, 1));
-    const float f = static_cast<float>(spark.age_ms) / life;
-    // Late in its life a spark flickers: on some frames it is not drawn.
-    if (f > FLICKER_FROM && random_below(rng, 4) == 0) {
-        return;
+    float f = static_cast<float>(spark.age_ms) / life;
+    float big_until = kKinds[static_cast<size_t>(kind)].big_until;
+    if (kind == BurstKind::CROSSETTE) {
+        if ((spark.flags & SPARK_SPLIT) == 0) {
+            f *= 0.45f; // a star still in flight keeps its colour until it splits
+        } else {
+            big_until = kBigUntil;
+        }
     }
 
-    // White flash, the shell colour, ember orange, then a fade into the sky.
     Rgb color = spark.color;
-    if (f < FLASH_END) {
-        color = mix(WHITE, spark.color, f / FLASH_END);
-    } else if (f < COLOR_END) {
+    if (kind == BurstKind::STROBE && f >= kStrobeFrom) {
+        const auto phase = static_cast<uint32_t>(&spark - sparks_.data()) * 53u;
+        if ((spark.age_ms + phase) % kStrobePeriodMs >= kStrobeOnMs) {
+            return;
+        }
+        color = f < kEmberEnd
+                    ? kStrobeWhite
+                    : scale_rgb(kStrobeWhite,
+                                static_cast<uint32_t>(
+                                    255.0f * (1.0f - (f - kEmberEnd) / (1.0f - kEmberEnd))));
+    } else if (f > kFlickerFrom && random_below(rng, 4) == 0) {
+        // Late in its life a spark flickers: on some frames it is not drawn.
+        return;
+    } else if (f < kFlashEnd) {
+        // White flash, the shell colour, ember orange, then a fade into the sky.
+        color = mix_rgb(WHITE, spark.color, f / kFlashEnd);
+    } else if (f < kColorEnd) {
         color = spark.color;
-    } else if (f < EMBER_END) {
-        color = mix(spark.color, EMBER, (f - COLOR_END) / (EMBER_END - COLOR_END));
+    } else if (f < kEmberEnd) {
+        color = mix_rgb(spark.color, kEmber, (f - kColorEnd) / (kEmberEnd - kColorEnd));
     } else {
-        color = dimmed(
-            EMBER, static_cast<uint32_t>(255.0f * (1.0f - (f - EMBER_END) / (1.0f - EMBER_END))));
+        color = scale_rgb(
+            kEmber, static_cast<uint32_t>(255.0f * (1.0f - (f - kEmberEnd) / (1.0f - kEmberEnd))));
     }
 
     const float speed = std::sqrt(spark.vx * spark.vx + spark.vy * spark.vy);
@@ -496,10 +617,10 @@ void FireworksSim::draw_spark(PixelWriter& writer, Spark& spark, std::minstd_ran
     spark.drawn_dy =
         speed > 1.0f ? static_cast<int8_t>(std::lround(-spark.vy / speed * 100.0f)) : 0;
     spark.flags =
-        static_cast<uint8_t>(spark.flags | SPARK_DRAWN | (f < BIG_UNTIL ? SPARK_DRAWN_BIG : 0));
+        static_cast<uint8_t>(spark.flags | SPARK_DRAWN | (f < big_until ? SPARK_DRAWN_BIG : 0));
     visit_spark_points(spark, bursts_[spark.burst].trail,
                        [&](int32_t x, int32_t y, uint32_t amount) {
-                           light_point(writer, x, y, dimmed(color, amount), box);
+                           light_point(writer, x, y, scale_rgb(color, amount), box);
                        });
 }
 
@@ -512,7 +633,7 @@ void FireworksSim::draw_rocket(PixelWriter& writer, Rocket& rocket, DirtyRect& b
     const float speed = std::sqrt(rocket.vx * rocket.vx + rocket.vy * rocket.vy);
     const float ux = speed > 1.0f ? rocket.vx / speed : 0.0f;
     const float uy = speed > 1.0f ? rocket.vy / speed : -1.0f;
-    const float tail = ROCKET_TAIL_PX * scale_;
+    const float tail = (rocket.kind == BurstKind::PALM ? kPalmTailPx : kRocketTailPx) * scale_;
     rocket.head_x = to_pixel(rocket.x);
     rocket.head_y = to_pixel(rocket.y);
     rocket.tail_x = to_pixel(rocket.x - ux * tail);
@@ -527,7 +648,7 @@ void FireworksSim::draw_rocket(PixelWriter& writer, Rocket& rocket, DirtyRect& b
     PixelWriter::line(
         rocket.head_x, rocket.head_y, rocket.tail_x, rocket.tail_y, [&](int32_t x, int32_t y) {
             light_point(writer, x, y,
-                        dimmed(ROCKET, static_cast<uint32_t>(255 - 195 * index / points)), box);
+                        scale_rgb(kRocket, static_cast<uint32_t>(255 - 195 * index / points)), box);
             index++;
         });
 }

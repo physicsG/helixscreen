@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "board_fingerprint.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -22,19 +24,6 @@ class Config;
  */
 
 namespace helix::ui {
-
-/// What the board fingerprint is made of.
-struct BoardFacts {
-    std::string display_backend; ///< "drm", "egl", "fbdev" or "sdl"
-    int cores = 0;
-    float bogomips = 0.0f;
-    int32_t width = 0;
-    int32_t height = 0;
-    int color_depth = 0;
-};
-
-/// "<backend>/<cores>c/<bogomips to the nearest 100>bm/<width>x<height>/<depth>bpp"
-std::string board_fingerprint(const BoardFacts& facts);
 
 /// A saver's remembered level on one board and app version.
 struct SaverLevelEntry {

@@ -22,7 +22,7 @@
 #include <utility>
 #include <vector>
 
-static constexpr size_t MAX_CLIENT_BUFFER = 65536; // 64KB max per request line.
+static constexpr size_t kMaxClientBuffer = 65536; // 64KB max per request line.
 
 namespace helix {
 
@@ -113,16 +113,16 @@ ClientSocketResolution resolve_client_socket_path(const std::vector<std::string>
 
 namespace {
 
-constexpr const char* INSTANCE_PREFIX = "helixscreen-control-";
-constexpr const char* INSTANCE_SUFFIX = ".sock";
+constexpr const char* kInstancePrefix = "helixscreen-control-";
+constexpr const char* kInstanceSuffix = ".sock";
 
 /// The token between prefix and suffix in an instance socket name, if the name is
 /// one. Shared by discovery and the stale sweep so they can never disagree about
 /// what counts as an instance socket. Returns nullopt for the bare well-known
 /// `helixscreen-control.sock`, whose ownership is decided separately.
 std::optional<std::string> instance_token(const std::string& name) {
-    const std::string prefix(INSTANCE_PREFIX);
-    const std::string suffix(INSTANCE_SUFFIX);
+    const std::string prefix(kInstancePrefix);
+    const std::string suffix(kInstanceSuffix);
 
     // Strictly greater: at least one character has to sit between the two, which
     // is exactly what excludes the bare well-known socket.
@@ -322,7 +322,7 @@ void UnixSocketTransport::serve_client(int client_fd) {
         chunk[n] = '\0';
         buffer.append(chunk, static_cast<size_t>(n));
 
-        if (buffer.size() > MAX_CLIENT_BUFFER) {
+        if (buffer.size() > kMaxClientBuffer) {
             spdlog::warn("[RemoteControl] Client buffer overflow (>64KB), disconnecting");
             return;
         }

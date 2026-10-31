@@ -29,6 +29,7 @@
 #include "../../include/printer_state.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
 
 #include <atomic>
@@ -41,32 +42,17 @@ using namespace helix;
 
 namespace {
 
-struct LVGLInitializerSafetyLimits {
-    LVGLInitializerSafetyLimits() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerSafetyLimits lvgl_init;
-
 /// Extruder max_temp used by these tests. Must exceed
 /// SafetyLimits::max_temperature_celsius (400.0) so that parsing it produces an
 /// observable change — that is the signal for "the temperature loop ran".
-constexpr double PROBE_EXTRUDER_MAX_TEMP = 500.0;
+constexpr double kProbeExtruderMaxTemp = 500.0;
 
-class SafetyLimitsFixture {
+class SafetyLimitsFixture : public LVGLTestFixture {
   public:
     SafetyLimitsFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
         state_.init_subjects(false);
         api_ = std::make_unique<MoonrakerAPI>(mock_client_, state_);
-        mock_client_.set_extruder_max_temp(PROBE_EXTRUDER_MAX_TEMP);
+        mock_client_.set_extruder_max_temp(kProbeExtruderMaxTemp);
     }
     ~SafetyLimitsFixture() {
         // Ordered teardown: drain before each owner dies, so no queued callback
@@ -116,7 +102,7 @@ TEST_CASE_METHOD(SafetyLimitsFixture, "numeric position_endstop parses the tempe
     REQUIRE(run_update());
 
     CHECK(api_->get_safety_limits().max_temperature_celsius ==
-          Catch::Approx(PROBE_EXTRUDER_MAX_TEMP));
+          Catch::Approx(kProbeExtruderMaxTemp));
 }
 
 TEST_CASE_METHOD(SafetyLimitsFixture,
@@ -125,12 +111,12 @@ TEST_CASE_METHOD(SafetyLimitsFixture,
     // The regression. Before the fix a bare .get<double>() threw type_error.302
     // on the null endstop, skipping the temperature loop entirely —
     // max_temperature_celsius stayed at the compiled 400.0 default. Revert the
-    // fix and this reads 400.0 instead of PROBE_EXTRUDER_MAX_TEMP.
+    // fix and this reads 400.0 instead of kProbeExtruderMaxTemp.
     mock_client_.set_stepper_z_endstop_null(true);
     REQUIRE(run_update());
 
     CHECK(api_->get_safety_limits().max_temperature_celsius ==
-          Catch::Approx(PROBE_EXTRUDER_MAX_TEMP));
+          Catch::Approx(kProbeExtruderMaxTemp));
 }
 
 TEST_CASE_METHOD(SafetyLimitsFixture, "null position_endstop still reports success",

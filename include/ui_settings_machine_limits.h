@@ -29,7 +29,9 @@
 #include "subject_managed_panel.h"
 
 // Forward declarations
+namespace helix {
 class IMoonrakerAPI;
+}
 
 namespace helix::settings {
 
@@ -184,7 +186,7 @@ class MachineLimitsOverlay : public OverlayBase {
      *
      * The value doubles as the user_data on each setting_value_field in
      * machine_limits_overlay.xml, so the order here and the numbers there must
-     * agree. FIELD_SPECS in the .cpp is indexed by the same value.
+     * agree. kFieldSpecs in the .cpp is indexed by the same value.
      */
     enum class Field : int {
         MaxVelocity = 0,

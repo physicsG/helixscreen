@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One Printer Manager capability: an icon beside one line of bound text, on a
+     tappable pill. The instance names the chip (pm_chip_<capability>) and nests
+     its own visibility binding, so a chip can hide on one subject or on an
+     inline cond. The vertical margins inset the chip row inside its group, and
+     the wrapping row has no padding of its own, so a group whose chips are all
+     hidden measures zero and setting_group collapses it. -->
+<component>
+  <api>
+    <prop name="icon" type="string" default="info"/>
+    <prop name="text" type="subject" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
+        style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm" style_pad_right="#space_sm"
+        style_margin_top="#space_xs" style_margin_bottom="#space_xs" flex_flow="row" style_pad_gap="#space_xs"
+        style_flex_cross_place="center" scrollable="false" style_border_width="0" clickable="true">
+    <style name="styles.press_wash" selector="pressed"/>
+    <event_cb trigger="clicked" callback="pm_chip_clicked"/>
+    <icon src="$icon" size="xs" variant="success" clickable="false" event_bubble="true"/>
+    <text_small name="chip_text" bind_text="$text" clickable="false" event_bubble="true"/>
+  </view>
+</component>

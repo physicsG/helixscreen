@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Tests for restore_config_symlinks() in refresh-service-units.sh
+# Tests for restore_config_symlinks() in restore-user-config.sh
 #
 # Verifies that config symlinks are restored after Moonraker type:web updates
 # destroy them by replacing the entire install directory.
@@ -231,18 +231,18 @@ FUNC_EOF
 
 # --- Verify the function exists in the actual script ---
 
-@test "refresh-service-units.sh contains restore_config_symlinks function" {
-    grep -q 'restore_config_symlinks()' "$WORKTREE_ROOT/config/refresh-service-units.sh"
+@test "restore-user-config.sh contains restore_config_symlinks function" {
+    grep -q 'restore_config_symlinks()' "$WORKTREE_ROOT/config/restore-user-config.sh"
 }
 
-@test "refresh-service-units.sh calls restore_config_symlinks" {
+@test "restore-user-config.sh calls restore_config_symlinks" {
     # Should call the function (not just define it)
-    grep -q '^restore_config_symlinks$' "$WORKTREE_ROOT/config/refresh-service-units.sh"
+    grep -q '^    restore_config_symlinks' "$WORKTREE_ROOT/config/restore-user-config.sh"
 }
 
-@test "refresh-service-units.sh lists all expected user config files" {
-    grep -q 'settings.json' "$WORKTREE_ROOT/config/refresh-service-units.sh"
-    grep -q 'helixscreen.env' "$WORKTREE_ROOT/config/refresh-service-units.sh"
-    grep -q 'tool_spools.json' "$WORKTREE_ROOT/config/refresh-service-units.sh"
-    grep -q '.disabled_services' "$WORKTREE_ROOT/config/refresh-service-units.sh"
+@test "restore-user-config.sh lists all expected user config files" {
+    grep -q 'settings.json' "$WORKTREE_ROOT/config/restore-user-config.sh"
+    grep -q 'helixscreen.env' "$WORKTREE_ROOT/config/restore-user-config.sh"
+    grep -q 'tool_spools.json' "$WORKTREE_ROOT/config/restore-user-config.sh"
+    grep -q '.disabled_services' "$WORKTREE_ROOT/config/restore-user-config.sh"
 }

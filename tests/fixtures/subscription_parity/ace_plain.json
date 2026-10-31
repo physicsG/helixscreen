@@ -1,0 +1,102 @@
+{
+  "ace": null,
+  "bed_mesh": [
+    "profile_name",
+    "probed_matrix",
+    "mesh_min",
+    "mesh_max",
+    "mesh_params",
+    "profiles"
+  ],
+  "display_status": [
+    "message",
+    "progress"
+  ],
+  "exclude_object": [
+    "objects",
+    "excluded_objects",
+    "current_object"
+  ],
+  "extruder": [
+    "temperature",
+    "target",
+    "power",
+    "pressure_advance",
+    "nozzle_diameter",
+    "nozzle_volume_type"
+  ],
+  "fan": [
+    "speed"
+  ],
+  "gcode_macro START_PRINT": [
+    "preparation_done"
+  ],
+  "gcode_macro _HELIX_STATE": [
+    "print_started"
+  ],
+  "gcode_macro _START_PRINT": [
+    "print_started"
+  ],
+  "gcode_move": [
+    "gcode_position",
+    "speed",
+    "speed_factor",
+    "extrude_factor",
+    "homing_origin"
+  ],
+  "heater_bed": [
+    "temperature",
+    "target",
+    "power"
+  ],
+  "idle_timeout": [
+    "state"
+  ],
+  "manual_probe": [
+    "is_active",
+    "z_position"
+  ],
+  "motion_report": [
+    "live_position",
+    "live_velocity",
+    "live_extruder_velocity"
+  ],
+  "pause_resume": [
+    "is_paused"
+  ],
+  "print_stats": [
+    "state",
+    "filename",
+    "filament_used",
+    "print_duration",
+    "total_duration",
+    "estimated_time",
+    "info",
+    "message",
+    "power_loss"
+  ],
+  "stepper_enable": [
+    "steppers"
+  ],
+  "toolhead": [
+    "position",
+    "homed_axes",
+    "kinematics",
+    "extruder",
+    "max_velocity",
+    "axis_minimum",
+    "axis_maximum"
+  ],
+  "virtual_sdcard": [
+    "progress",
+    "layer",
+    "layer_count",
+    "is_active",
+    "file_position",
+    "file_path"
+  ],
+  "webhooks": [
+    "state",
+    "state_message"
+  ]
+}

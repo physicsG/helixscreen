@@ -15,6 +15,9 @@
 #include "../test_helpers/navigation_manager_test_access.h"
 #include "../test_helpers/process_async_timers.h"
 #include "overlay_base.h"
+#include "ui/ui_widget_helpers.h"
+
+#include <memory>
 
 #include "../catch_amalgamated.hpp"
 
@@ -184,4 +187,78 @@ TEST_CASE_METHOD(LVGLTestFixture, "teardown_overlay_ui: aliased root and cached 
     CHECK(lv_obj_is_valid(deferred_raw));
     process_async_timers();
     CHECK_FALSE(lv_obj_is_valid(deferred_raw));
+}
+
+// The drain runs queued work, which can include a close callback that tears the
+// same overlay down. That inner teardown completes it; the outer call must not
+// run the owner's hooks a second time against what the inner one released.
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "teardown_overlay_ui: a teardown the drain completes runs the hooks once",
+                 "[overlay_teardown][drain_reentrancy]") {
+    lv_obj_t* root = lv_obj_create(lv_screen_active());
+    int before_runs = 0;
+    int after_runs = 0;
+    auto hooks = [&]() { return TeardownHooks{[&] { ++before_runs; }, [&] { ++after_runs; }}; };
+
+    helix::ui::UpdateQueue::instance().queue("test::nested_overlay_teardown", [&]() {
+        teardown_overlay_ui(root, "NestedCase", TeardownDelete::Deferred, nullptr, hooks());
+    });
+    CHECK_FALSE(
+        teardown_overlay_ui(root, "NestedCase", TeardownDelete::Deferred, nullptr, hooks()));
+
+    CHECK(root == nullptr);
+    CHECK(before_runs == 1);
+    CHECK(after_runs == 1);
+    process_async_timers();
+}
+
+// The teardown writes through `root` and runs the owner's hooks after its
+// drain, so an owner freed by the drained work stops it: a contract breach,
+// fatal under strict UI checks, logged and survived without them.
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "teardown_overlay_ui: an owner freed by its own drain stops the teardown",
+                 "[overlay_teardown][drain_reentrancy]") {
+    const bool strict = helix::ui::strict_ui_checks();
+    helix::ui::set_strict_ui_checks(false);
+
+    auto owner = std::make_unique<helix::AsyncLifetimeGuard>();
+    lv_obj_t* root = lv_obj_create(lv_screen_active());
+    lv_obj_t* const tree = root;
+    int before_runs = 0;
+    int after_runs = 0;
+    TeardownHooks hooks{[&] { ++before_runs; }, [&] { ++after_runs; }};
+    hooks.owner = owner->token();
+    helix::ui::UpdateQueue::instance().queue("test::free_owner", [&owner]() { owner.reset(); });
+
+    CHECK_FALSE(teardown_overlay_ui(root, "FreedOwner", TeardownDelete::Deferred, nullptr,
+                                    std::move(hooks)));
+    CHECK(before_runs == 0);
+    CHECK(after_runs == 0);
+
+    helix::ui::set_strict_ui_checks(strict);
+    lv_obj_delete(tree);
+}
+
+// The drained close can be followed, in the same drain, by an open that builds
+// a fresh tree into the same pointer. The outer teardown must leave that tree.
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "teardown_overlay_ui: a tree re-created inside the drain survives the outer call",
+                 "[overlay_teardown][drain_reentrancy]") {
+    lv_obj_t* root = lv_obj_create(lv_screen_active());
+    lv_obj_t* fresh = nullptr;
+    int after_runs = 0;
+
+    helix::ui::UpdateQueue::instance().queue("test::close_then_reopen", [&]() {
+        teardown_overlay_ui(root, "ReopenCase", TeardownDelete::Deferred, nullptr,
+                            TeardownHooks::after([&] { ++after_runs; }));
+        root = fresh = lv_obj_create(lv_screen_active());
+    });
+    CHECK_FALSE(teardown_overlay_ui(root, "ReopenCase", TeardownDelete::Deferred, nullptr,
+                                    TeardownHooks::after([&] { ++after_runs; })));
+
+    CHECK(after_runs == 1);
+    CHECK(root == fresh);
+    process_async_timers();
+    CHECK(lv_obj_is_valid(fresh));
+    lv_obj_delete(fresh);
 }

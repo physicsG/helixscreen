@@ -94,7 +94,7 @@ class IdlePrebuilder {
 class PanelFactory {
   public:
     /// Panel names for lookup
-    static constexpr const char* PANEL_NAMES[UI_PANEL_COUNT] = {
+    static constexpr const char* kPanelNames[kUiPanelCount] = {
         "home_panel",     "print_select_panel", "controls_panel",
         "filament_panel", "settings_panel",     "advanced_panel"};
 
@@ -151,7 +151,7 @@ class PanelFactory {
     /**
      * @brief Build a panel that was deferred at boot (ESP32 first-navigation).
      *
-     * Instantiates PANEL_NAMES[panel_id] into the panel container, runs its
+     * Instantiates kPanelNames[panel_id] into the panel container, runs its
      * setup(), and registers the widget + instance with NavigationManager. Paints
      * a loading state before the (multi-second) create. Registered as
      * NavigationManager's deferred_panel_builder on ESP; a no-op on other
@@ -170,7 +170,7 @@ class PanelFactory {
     // pay the build (ESP32; every panel is resident elsewhere).
     IdlePrebuilder m_idle_prebuilder;
 
-    std::array<lv_obj_t*, UI_PANEL_COUNT> m_panels = {};
+    std::array<lv_obj_t*, kUiPanelCount> m_panels = {};
     lv_obj_t* m_print_status_panel = nullptr;
     lv_obj_t* m_panel_container = nullptr; // for deferred panel creation (ESP)
     lv_obj_t* m_screen = nullptr;          // setup() target for deferred panels (ESP)

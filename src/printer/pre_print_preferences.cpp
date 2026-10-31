@@ -28,7 +28,6 @@ const std::vector<Provider>& providers() {
          "print_task_config",
          {
              {"bed_mesh", "auto_bed_leveling"},
-             {"shaper_calibrate", "shaper_calibrate"},
              {"flow_calibrate", "flow_calibrate"},
              {"u1_timelapse", "time_lapse_camera"},
          }},

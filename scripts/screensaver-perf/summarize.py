@@ -12,8 +12,9 @@ import statistics
 import sys
 from collections import defaultdict
 
-# The load gate: in every run, no wake-up of 20 ms or more and a p99 under 5 ms.
-MAX_WAKEUP_US = 20000
+from perfstats import HISTOGRAM_US
+
+# The load gate: in every run, no wake-up of 20 ms (HISTOGRAM_US) or more and a p99 under 5 ms.
 MAX_P99_US = 5000
 
 LINE = re.compile(r"^(\S+) run=(\d+) (\S+) (CPU|FLIPS|STOPPED_MIDRUN|STARTED|RESULT)\s*(.*)$")
@@ -29,7 +30,9 @@ def gate_passes(runs):
     """True when every run of one arm and workload passes the load gate."""
     return (len(runs["p99_us"]) > 0
             and all(samples > 0 for samples in runs["samples"])
-            and all(wakeup < MAX_WAKEUP_US for wakeup in runs["max_us"])
+            # Both: cyclictest prints the max before the overflow count, so a cut-off
+            # histogram can carry a late max and no overflow line.
+            and all(wakeup < HISTOGRAM_US for wakeup in runs["max_us"])
             and all(overflow == 0 for overflow in runs["overflow_gt20ms"])
             and all(p99 < MAX_P99_US for p99 in runs["p99_us"]))
 

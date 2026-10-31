@@ -1,0 +1,13 @@
+{
+  "description": "Lines after the last edit pass through untouched, final newline included",
+  "edits": [
+    {
+      "line_number": 1,
+      "expect_raw_line": "PRINT_START",
+      "action": "replace",
+      "args": {
+        "gcode": "PRINT_START SKIP=1"
+      }
+    }
+  ]
+}

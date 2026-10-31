@@ -3,43 +3,326 @@
 
 /**
  * @file ui_settings_sensors.cpp
- * @brief Implementation of SensorSettingsOverlay
+ * @brief Implementation of SensorSettingsOverlay and SensorRowSection
  */
 
 #include "ui_settings_sensors.h"
 
 #include "ui_callback_helpers.h"
-#include "ui_event_safety.h"
-#include "ui_status_pill.h"
-#include "ui_utils.h"
 
-#include "accel_sensor_manager.h"
 #include "app_globals.h"
 #include "chamber_assignment_options.h"
 #include "filament_sensor_manager.h"
-#include "filament_sensor_types.h"
-#include "humidity_sensor_manager.h"
-#include "load_cell_manager.h"
-#include "printer_hardware.h"
+#include "input_sensor_manager.h"
+#include "observer_factory.h"
+#include "printer_discovery.h"
 #include "printer_state.h"
-#include "probe_sensor_manager.h"
 #include "settings_manager.h"
-#include "temperature_sensor_manager.h"
-#include "theme_manager.h"
 #include "ui/ui_widget_helpers.h"
-#include "width_sensor_manager.h"
 
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <cstring>
 
 namespace helix::settings {
 
 using helix::ui::event_checked;
 using helix::ui::event_selected;
-using helix::ui::find_optional;
 using helix::ui::find_required;
+using sensors::RowToggle;
+using sensors::SensorManager;
+using sensors::SensorRowView;
+
+// ============================================================================
+// SensorRowSection
+// ============================================================================
+
+namespace {
+
+/// The subjects of one row, in sensor_row's sensor_<slug>_row_<field>_<i> naming.
+enum RowField : uint8_t {
+    kName,
+    kDetail,
+    kHasDetail,
+    kState,
+    kHasState,
+    kAlert,
+    kRole,
+    kHasRole,
+    kRoleSet,
+    kHeldRole,
+    kHasHeldRole,
+    kToggleKind,
+    kToggle,
+    kHasNext,
+    kRowFieldCount
+};
+
+constexpr size_t kNameLen = 96;
+constexpr size_t kStateLen = 48;
+
+struct RowFieldSpec {
+    const char* name;
+    int8_t initial;      ///< int fields only
+    uint8_t buf_len;     ///< string fields: buffer size; 0 for an int field
+    uint16_t buf_offset; ///< string fields: offset into Row::bufs
+};
+
+constexpr RowFieldSpec kRowFields[kRowFieldCount] = {
+    {"name", 0, kNameLen, 0},   {"detail", 0, kNameLen, kNameLen},
+    {"has_detail", 0, 0, 0},    {"state", 0, kStateLen, 2 * kNameLen},
+    {"has_state", 0, 0, 0},     {"alert", 0, 0, 0},
+    {"role", -1, 0, 0},         {"has_role", 0, 0, 0},
+    {"role_set", 0, 0, 0},      {"held_role", 0, kStateLen, 2 * kNameLen + kStateLen},
+    {"has_held_role", 0, 0, 0}, {"toggle_kind", 0, 0, 0},
+    {"toggle", 0, 0, 0},        {"has_next", 0, 0, 0},
+};
+
+/// The order fill() writes a row's subjects in.
+constexpr uint8_t kRowFillOrder[kRowFieldCount] = {
+    kName,    kDetail, kHasDetail, kState,       kHasState,   kAlert,  kHasRole,
+    kRoleSet, kRole,   kHeldRole,  kHasHeldRole, kToggleKind, kToggle, kHasNext};
+
+} // namespace
+
+struct SensorRowSection::Row {
+    std::string ids[kRowFieldCount];
+    lv_subject_t subjects[kRowFieldCount]{};
+    char bufs[2 * kNameLen + 2 * kStateLen]{};
+};
+
+namespace {
+
+std::vector<SensorRowSection*>& live_sections() {
+    static std::vector<SensorRowSection*> sections;
+    return sections;
+}
+
+void set_if_changed(lv_subject_t& subject, int value) {
+    if (lv_subject_get_int(&subject) != value) {
+        lv_subject_set_int(&subject, value);
+    }
+}
+
+void set_if_changed(lv_subject_t& subject, const char* value) {
+    if (std::strcmp(lv_subject_get_string(&subject), value) != 0) {
+        lv_subject_copy_string(&subject, value);
+    }
+}
+
+/// The section and row a sensor_row event belongs to: user_data is "<slug>:<row>".
+SensorRowSection* section_for_event(lv_event_t* e, size_t& row) {
+    const char* arg = static_cast<const char*>(lv_event_get_user_data(e));
+    if (!arg) {
+        return nullptr;
+    }
+    const std::string key(arg);
+    const auto colon = key.rfind(':');
+    if (colon == std::string::npos) {
+        return nullptr;
+    }
+    row = static_cast<size_t>(std::atoi(key.c_str() + colon + 1));
+    return SensorRowSection::find(key.substr(0, colon));
+}
+
+} // namespace
+
+SensorRowSection::SensorRowSection(SensorManager& manager, SubjectManager& subjects)
+    : manager_(&manager), subjects_(subjects), slug_(manager.settings_section()),
+      count_id_("sensor_" + slug_ + "_row_count") {
+    UI_MANAGED_SUBJECT_INT(count_, 0, count_id_.c_str(), subjects_);
+    live_sections().push_back(this);
+}
+
+SensorRowSection::~SensorRowSection() {
+    auto& sections = live_sections();
+    sections.erase(std::remove(sections.begin(), sections.end(), this), sections.end());
+}
+
+SensorRowSection* SensorRowSection::find(const std::string& slug) {
+    for (auto* section : live_sections()) {
+        if (section->slug_ == slug) {
+            return section;
+        }
+    }
+    return nullptr;
+}
+
+void SensorRowSection::grow(size_t rows) {
+    while (rows_.size() < rows) {
+        auto row = std::make_unique<Row>();
+        const std::string prefix = "sensor_" + slug_ + "_row_";
+        const std::string suffix = "_" + std::to_string(rows_.size());
+        for (size_t f = 0; f < kRowFieldCount; ++f) {
+            const RowFieldSpec& spec = kRowFields[f];
+            std::string& id = row->ids[f];
+            id.reserve(prefix.size() + std::strlen(spec.name) + suffix.size());
+            id.append(prefix).append(spec.name).append(suffix);
+            lv_subject_t& subject = row->subjects[f];
+            // UI_MANAGED_SUBJECT_INT/STRING, written once for every field.
+            const bool is_string = spec.buf_len != 0;
+            if (is_string) {
+                lv_subject_init_string(&subject, row->bufs + spec.buf_offset, nullptr, spec.buf_len,
+                                       "");
+            } else {
+                lv_subject_init_int(&subject, spec.initial);
+            }
+            helix::xml::register_subject_in_current_scope(id.c_str(), &subject);
+            subjects_.register_subject(&subject, id.c_str());
+            HELIX_SUBJECT_DEBUG_REGISTER(&subject, id.c_str(),
+                                         is_string ? LV_SUBJECT_TYPE_STRING : LV_SUBJECT_TYPE_INT);
+        }
+        rows_.push_back(std::move(row));
+    }
+}
+
+void SensorRowSection::fill(const SensorManager& manager) {
+    const auto entries = manager.entries();
+    filled_entries_ = entries;
+    const std::vector<size_t> listed = manager.settings_rows();
+    slots_.clear();
+    for (const size_t i : listed) {
+        slots_.push_back({entries[i].klipper_name, RowToggle::None});
+    }
+
+    // Grow before the count moves: the <repeat> rebuild it triggers binds by name.
+    grow(listed.size());
+    for (size_t k = 0; k < listed.size(); ++k) {
+        const SensorRowView view = manager.row(listed[k]);
+        Row& row = *rows_[k];
+        slots_[k].toggle = view.toggle;
+        // A role that is not offered selects unset_role_dropdown's trailing "-",
+        // one past the offered roles, and a held one also shows as text.
+        const bool role_set = view.selected_role >= 0;
+        const bool held = !role_set && !view.held_role_label.empty();
+        int ints[kRowFieldCount] = {};
+        ints[kHasDetail] = view.detail.empty() ? 0 : 1;
+        ints[kHasState] = view.state.empty() ? 0 : 1;
+        ints[kAlert] = view.alert ? 1 : 0;
+        ints[kHasRole] = view.role_count == 0 ? 0 : 1;
+        ints[kRoleSet] = role_set ? 1 : 0;
+        ints[kRole] = role_set ? view.selected_role : static_cast<int>(view.role_count);
+        ints[kHasHeldRole] = held ? 1 : 0;
+        ints[kToggleKind] = static_cast<int>(view.toggle);
+        ints[kToggle] = view.toggle_value ? 1 : 0;
+        ints[kHasNext] = k + 1 < listed.size() ? 1 : 0;
+        const char* strings[kRowFieldCount] = {};
+        strings[kName] = view.name.c_str();
+        strings[kDetail] = view.detail.c_str();
+        strings[kState] = view.state.c_str();
+        strings[kHeldRole] = held ? view.held_role_label.c_str() : "";
+        for (const uint8_t f : kRowFillOrder) {
+            if (kRowFields[f].buf_len != 0) {
+                set_if_changed(row.subjects[f], strings[f]);
+            } else {
+                set_if_changed(row.subjects[f], ints[f]);
+            }
+        }
+    }
+    set_if_changed(count_, static_cast<int>(listed.size()));
+}
+
+bool SensorRowSection::rows_may_have_changed() const {
+    if (manager_->rows_show_readings()) {
+        return true;
+    }
+    const auto now = manager_->entries();
+    return !std::equal(now.begin(), now.end(), filled_entries_.begin(), filled_entries_.end(),
+                       [](const sensors::SensorEntry& a, const sensors::SensorEntry& b) {
+                           return a.klipper_name == b.klipper_name &&
+                                  a.display_name == b.display_name && a.type == b.type &&
+                                  a.role == b.role && a.enabled == b.enabled &&
+                                  a.available == b.available;
+                       });
+}
+
+void SensorRowSection::pick_role(size_t row, int option) {
+    if (row >= slots_.size() || option < 0) {
+        return;
+    }
+    const auto offered = manager_->offered_roles();
+    if (static_cast<size_t>(option) >= offered.size()) {
+        return;
+    }
+    const std::string name = slots_[row].klipper_name;
+    manager_->set_role(name, offered[static_cast<size_t>(option)]);
+    manager_->save_settings();
+}
+
+void SensorRowSection::set_toggle(size_t row, bool on) {
+    if (row >= slots_.size()) {
+        return;
+    }
+    const std::string name = slots_[row].klipper_name;
+    switch (slots_[row].toggle) {
+    case RowToggle::Enabled:
+        manager_->set_enabled(name, on);
+        break;
+    case RowToggle::Invert:
+        manager_->set_option(name, on);
+        break;
+    case RowToggle::None:
+        return;
+    }
+    manager_->save_settings();
+}
+
+void SensorRowSection::watch(std::function<void()> after_fill) {
+    after_fill_ = std::move(after_fill);
+    if (!manager_->subjects_initialized()) {
+        return;
+    }
+    revision_observer_ = helix::ui::observe<int>(
+        manager_->revision_subject(), this,
+        [](SensorRowSection* self, int /*revision*/) {
+            if (!self->rows_may_have_changed()) {
+                return;
+            }
+            self->fill(*self->manager_);
+            if (self->after_fill_) {
+                self->after_fill_();
+            }
+        },
+        manager_->subjects_lifetime());
+}
+
+void SensorRowSection::stop() {
+    revision_observer_.reset();
+}
+
+// ============================================================================
+// SensorSettingsOverlay
+// ============================================================================
+
+SensorSettingsOverlay::~SensorSettingsOverlay() {
+    for (auto& section : sections_) {
+        section->stop();
+    }
+}
 
 void SensorSettingsOverlay::register_callbacks() {
     register_xml_callbacks({
+        {"on_sensor_row_role_changed",
+         [](lv_event_t* e) {
+             size_t row = 0;
+             if (auto* section = section_for_event(e, row)) {
+                 section->pick_role(row, event_selected(e));
+             }
+         }},
+        {"on_sensor_row_toggle_changed",
+         [](lv_event_t* e) {
+             size_t row = 0;
+             if (auto* section = section_for_event(e, row)) {
+                 section->set_toggle(row, event_checked(e));
+             }
+         }},
+        {"on_input_door_check_changed",
+         [](lv_event_t* e) {
+             auto& mgr = helix::sensors::InputSensorManager::instance();
+             mgr.set_door_check_enabled(event_checked(e));
+             mgr.save_settings();
+         }},
         {"on_switch_master_toggle_changed",
          [](lv_event_t* e) {
              get_sensor_settings_overlay().handle_switch_master_toggle_changed(event_checked(e));
@@ -65,610 +348,69 @@ void SensorSettingsOverlay::register_callbacks() {
     });
 }
 
-void SensorSettingsOverlay::before_show() {
-    update_all_sensor_counts();
+void SensorSettingsOverlay::init_subjects() {
+    init_subjects_guarded([this]() {
+        UI_MANAGED_SUBJECT_INT(total_count_, 0, "sensor_total_count", subjects_);
+        for (auto* manager : sensors::sensor_managers()) {
+            if (manager->settings_section()) {
+                sections_.push_back(std::make_unique<SensorRowSection>(*manager, subjects_));
+            }
+        }
+    });
 }
 
-// ============================================================================
-// LIFECYCLE HOOKS
-// ============================================================================
+lv_obj_t* SensorSettingsOverlay::create(lv_obj_t* parent) {
+    if (!are_subjects_initialized()) {
+        init_subjects();
+    }
+    refill_all();
+    lv_obj_t* root = OverlayBase::create(parent);
+    if (root) {
+        populate_chamber_assignment();
+    }
+    return root;
+}
 
 void SensorSettingsOverlay::on_activate() {
     OverlayBase::on_activate();
-    populate_all_sensors();
+    if (!are_subjects_initialized()) {
+        init_subjects();
+    }
+    for (auto& section : sections_) {
+        section->watch([this]() { update_total(); });
+    }
+    refill_all();
+    populate_chamber_assignment();
 }
 
-// ============================================================================
-// SWITCH SENSORS (Filament Runout/Motion)
-// ============================================================================
+void SensorSettingsOverlay::on_deactivating(DeactivateReason /*reason*/) {
+    for (auto& section : sections_) {
+        section->stop();
+    }
+}
 
-std::vector<helix::FilamentSensorConfig>
-SensorSettingsOverlay::get_standalone_switch_sensors() const {
-    auto& mgr = helix::FilamentSensorManager::instance();
-    auto all_sensors = mgr.get_sensors();
-
-    const auto& discovery = get_printer_state().get_discovery();
-    std::vector<helix::FilamentSensorConfig> standalone;
-    for (const auto& sensor : all_sensors) {
-        if (!PrinterHardware::is_ams_sensor(sensor.sensor_name, discovery)) {
-            standalone.push_back(sensor);
-        } else {
-            spdlog::debug("[{}] Filtered out AMS sensor: {}", get_name(), sensor.sensor_name);
+SensorRowSection* SensorSettingsOverlay::section(const std::string& slug) const {
+    for (const auto& s : sections_) {
+        if (s->slug() == slug) {
+            return s.get();
         }
     }
-    return standalone;
+    return nullptr;
 }
 
-void SensorSettingsOverlay::update_switch_sensor_count() {
-    if (!overlay_root_)
-        return;
-
-    // The name comes from a badge_name prop the names gate cannot see.
-    lv_obj_t* badge = find_optional(overlay_root_, "switch_sensor_count");
-    if (badge) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%zu", get_standalone_switch_sensors().size());
-        ui_status_pill_set_text(badge, buf);
+void SensorSettingsOverlay::refill_all() {
+    for (auto& section : sections_) {
+        section->fill(section->manager());
     }
+    update_total();
 }
 
-void SensorSettingsOverlay::populate_switch_sensors() {
-    if (!overlay_root_) {
-        return;
+void SensorSettingsOverlay::update_total() {
+    size_t total = 0;
+    for (const auto& section : sections_) {
+        total += section->manager().sensor_count();
     }
-
-    lv_obj_t* sensors_list = find_required(overlay_root_, "switch_sensors_list", get_name());
-    if (!sensors_list) {
-        spdlog::debug("[{}] Could not find switch_sensors_list container", get_name());
-        return;
-    }
-
-    // Clear existing rows
-    uint32_t child_count = lv_obj_get_child_count(sensors_list);
-    for (int i = static_cast<int>(child_count) - 1; i >= 0; i--) {
-        lv_obj_t* child = lv_obj_get_child(sensors_list, i);
-        helix::ui::safe_delete(child);
-    }
-
-    // Get standalone sensors (excludes AMS/multi-material types)
-    auto sensors = get_standalone_switch_sensors();
-
-    spdlog::debug("[{}] Populating switch sensor list with {} sensors", get_name(), sensors.size());
-
-    // Create a row for each sensor
-    for (const auto& sensor : sensors) {
-        // Create sensor row from XML component
-        const char* attrs[] = {
-            "sensor_name", sensor.sensor_name.c_str(), "sensor_type",
-            sensor.type == helix::FilamentSensorType::MOTION ? "motion" : "switch", nullptr};
-        auto* row =
-            static_cast<lv_obj_t*>(lv_xml_create(sensors_list, "filament_sensor_row", attrs));
-        if (!row) {
-            spdlog::error("[{}] Failed to create sensor row for {}", get_name(),
-                          sensor.sensor_name);
-            continue;
-        }
-
-        // Store klipper_name as user data for callbacks. The helper owns the
-        // copy and frees it on LV_EVENT_DELETE; the row is created here, so the
-        // user_data slot is ours (L069).
-        if (!helix::ui::set_owned_user_string(row, sensor.klipper_name)) {
-            spdlog::error("[{}] Failed to attach sensor name to row: {}", get_name(),
-                          sensor.klipper_name);
-            continue;
-        }
-        // Borrowed pointer into the row-owned copy; valid until the row dies,
-        // which is also when the child handlers below stop firing.
-        char* klipper_name = const_cast<char*>(helix::ui::get_owned_user_string(row));
-
-        // Wire up enable toggle
-        lv_obj_t* enable_toggle = helix::ui::find_required(row, "enable_toggle", get_name());
-        lv_obj_t* enable_container = enable_toggle ? lv_obj_get_parent(enable_toggle) : nullptr;
-
-        if (enable_toggle) {
-            if (sensor.enabled) {
-                lv_obj_add_state(enable_toggle, LV_STATE_CHECKED);
-            } else {
-                lv_obj_remove_state(enable_toggle, LV_STATE_CHECKED);
-            }
-
-            if (enable_container && sensor.role == helix::FilamentSensorRole::NONE) {
-                lv_obj_add_flag(enable_container, LV_OBJ_FLAG_HIDDEN);
-            }
-
-            // Pass klipper_name via event user_data rather than lv_obj_set_user_data
-            // on the child widget -- XML-created children may use user_data internally
-            lv_obj_add_event_cb(
-                enable_toggle,
-                [](lv_event_t* e) {
-                    auto* klipper_name_ptr = static_cast<const char*>(lv_event_get_user_data(e));
-                    if (!klipper_name_ptr)
-                        return;
-                    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-
-                    bool enabled = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-
-                    auto& mgr = helix::FilamentSensorManager::instance();
-                    mgr.set_sensor_enabled(klipper_name_ptr, enabled);
-                    mgr.save_config_to_file();
-                    spdlog::info("[SensorSettingsOverlay] Switch sensor {} enabled: {}",
-                                 klipper_name_ptr, enabled ? "ON" : "OFF");
-                },
-                LV_EVENT_VALUE_CHANGED, klipper_name);
-        }
-
-        // Wire up role dropdown
-        lv_obj_t* role_dropdown = helix::ui::find_required(row, "role_dropdown", get_name());
-        if (role_dropdown) {
-            lv_dropdown_set_selected(role_dropdown, static_cast<uint32_t>(sensor.role));
-
-            // Pass klipper_name via event user_data rather than lv_obj_set_user_data
-            // on the child widget -- XML-created children may use user_data internally
-            lv_obj_add_event_cb(
-                role_dropdown,
-                [](lv_event_t* e) {
-                    auto* klipper_name_ptr = static_cast<const char*>(lv_event_get_user_data(e));
-                    if (!klipper_name_ptr)
-                        return;
-                    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-
-                    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-                    auto role = static_cast<helix::FilamentSensorRole>(index);
-
-                    auto& mgr = helix::FilamentSensorManager::instance();
-                    mgr.set_sensor_role(klipper_name_ptr, role);
-                    mgr.save_config_to_file();
-                    spdlog::info("[SensorSettingsOverlay] Switch sensor {} role changed to {}",
-                                 klipper_name_ptr, helix::role_to_config_string(role));
-
-                    // Show/hide enable toggle based on role
-                    lv_obj_t* row_obj = lv_obj_get_parent(lv_obj_get_parent(dropdown));
-                    lv_obj_t* toggle =
-                        helix::ui::find_required(row_obj, "enable_toggle", "Sensors");
-                    if (toggle) {
-                        lv_obj_t* container = lv_obj_get_parent(toggle);
-                        if (role == helix::FilamentSensorRole::NONE) {
-                            lv_obj_add_flag(container, LV_OBJ_FLAG_HIDDEN);
-                        } else {
-                            lv_obj_remove_flag(container, LV_OBJ_FLAG_HIDDEN);
-                        }
-                    }
-                },
-                LV_EVENT_VALUE_CHANGED, klipper_name);
-        }
-
-        spdlog::debug("[{}]   Created row for switch sensor: {}", get_name(), sensor.sensor_name);
-    }
-}
-
-// ============================================================================
-// PROBE SENSORS
-// ============================================================================
-
-void SensorSettingsOverlay::update_probe_sensor_count() {
-    if (!overlay_root_)
-        return;
-
-    // The name comes from a badge_name prop the names gate cannot see.
-    lv_obj_t* badge = find_optional(overlay_root_, "probe_sensor_count_label");
-    if (badge) {
-        auto& mgr = helix::sensors::ProbeSensorManager::instance();
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%zu", mgr.sensor_count());
-        ui_status_pill_set_text(badge, buf);
-    }
-}
-
-void SensorSettingsOverlay::populate_probe_sensors() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* sensors_list = find_required(overlay_root_, "probe_sensors_list", get_name());
-    if (!sensors_list) {
-        spdlog::debug("[{}] Could not find probe_sensors_list container", get_name());
-        return;
-    }
-
-    // Clear existing rows
-    uint32_t child_count = lv_obj_get_child_count(sensors_list);
-    for (int i = static_cast<int>(child_count) - 1; i >= 0; i--) {
-        lv_obj_t* child = lv_obj_get_child(sensors_list, i);
-        helix::ui::safe_delete(child);
-    }
-
-    auto& mgr = helix::sensors::ProbeSensorManager::instance();
-    auto sensors = mgr.get_sensors();
-
-    spdlog::debug("[{}] Populating probe sensor list with {} sensors", get_name(), sensors.size());
-
-    for (const auto& sensor : sensors) {
-        // Create simple info row (probes are display-only here, configured via wizard)
-        auto* row = lv_obj_create(sensors_list);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(row, 0, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_pad_all(row, theme_manager_get_spacing("space_sm"), 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_flex_cross_place(row, LV_FLEX_ALIGN_CENTER, 0);
-
-        // Sensor name label
-        auto* name_label = lv_label_create(row);
-        lv_label_set_text(name_label, sensor.sensor_name.c_str());
-        lv_obj_set_style_text_color(name_label, theme_manager_get_color("text"), 0);
-        lv_obj_set_flex_grow(name_label, 1);
-
-        // Type badge
-        auto* type_label = lv_label_create(row);
-        const char* type_str = "probe";
-        switch (sensor.type) {
-        case helix::sensors::ProbeSensorType::BLTOUCH:
-            type_str = "BLTouch";
-            break;
-        case helix::sensors::ProbeSensorType::SMART_EFFECTOR:
-            type_str = "Smart Effector";
-            break;
-        case helix::sensors::ProbeSensorType::EDDY_CURRENT:
-            type_str = "Eddy";
-            break;
-        default:
-            type_str = lv_tr("Probe");
-            break;
-        }
-        lv_label_set_text(type_label, type_str);
-        lv_obj_set_style_text_color(type_label, theme_manager_get_color("text_muted"), 0);
-
-        spdlog::debug("[{}]   Created row for probe sensor: {}", get_name(), sensor.sensor_name);
-    }
-}
-
-// ============================================================================
-// WIDTH SENSORS
-// ============================================================================
-
-void SensorSettingsOverlay::update_width_sensor_count() {
-    if (!overlay_root_)
-        return;
-
-    // The name comes from a badge_name prop the names gate cannot see.
-    lv_obj_t* badge = find_optional(overlay_root_, "width_sensor_count_label");
-    if (badge) {
-        auto& mgr = helix::sensors::WidthSensorManager::instance();
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%zu", mgr.sensor_count());
-        ui_status_pill_set_text(badge, buf);
-    }
-}
-
-void SensorSettingsOverlay::populate_width_sensors() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* sensors_list = find_required(overlay_root_, "width_sensors_list", get_name());
-    if (!sensors_list) {
-        spdlog::debug("[{}] Could not find width_sensors_list container", get_name());
-        return;
-    }
-
-    // Clear existing rows
-    uint32_t child_count = lv_obj_get_child_count(sensors_list);
-    for (int i = static_cast<int>(child_count) - 1; i >= 0; i--) {
-        lv_obj_t* child = lv_obj_get_child(sensors_list, i);
-        helix::ui::safe_delete(child);
-    }
-
-    auto& mgr = helix::sensors::WidthSensorManager::instance();
-    auto sensors = mgr.get_sensors();
-
-    spdlog::debug("[{}] Populating width sensor list with {} sensors", get_name(), sensors.size());
-
-    // Create a row for each sensor using XML component
-    for (const auto& sensor : sensors) {
-        // Create sensor row from XML component
-        const char* type_str =
-            sensor.type == helix::sensors::WidthSensorType::TSL1401CL ? "TSL1401CL" : "Hall";
-        const char* attrs[] = {"sensor_name", sensor.sensor_name.c_str(), "sensor_type", type_str,
-                               nullptr};
-        auto* row = static_cast<lv_obj_t*>(lv_xml_create(sensors_list, "width_sensor_row", attrs));
-        if (!row) {
-            spdlog::error("[{}] Failed to create sensor row for {}", get_name(),
-                          sensor.sensor_name);
-            continue;
-        }
-
-        // Store klipper_name as user data for callbacks. The helper owns the
-        // copy and frees it on LV_EVENT_DELETE; the row is created here, so the
-        // user_data slot is ours (L069).
-        if (!helix::ui::set_owned_user_string(row, sensor.klipper_name)) {
-            spdlog::error("[{}] Failed to attach sensor name to row: {}", get_name(),
-                          sensor.klipper_name);
-            continue;
-        }
-        // Borrowed pointer into the row-owned copy; valid until the row dies,
-        // which is also when the child handlers below stop firing.
-        char* klipper_name = const_cast<char*>(helix::ui::get_owned_user_string(row));
-
-        // Wire up enable toggle
-        lv_obj_t* enable_toggle = helix::ui::find_required(row, "enable_toggle", get_name());
-
-        if (enable_toggle) {
-            if (sensor.enabled) {
-                lv_obj_add_state(enable_toggle, LV_STATE_CHECKED);
-            } else {
-                lv_obj_remove_state(enable_toggle, LV_STATE_CHECKED);
-            }
-
-            // Pass klipper_name via event user_data
-            lv_obj_add_event_cb(
-                enable_toggle,
-                [](lv_event_t* e) {
-                    auto* klipper_name_ptr = static_cast<const char*>(lv_event_get_user_data(e));
-                    if (!klipper_name_ptr)
-                        return;
-                    auto* toggle = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-
-                    bool enabled = lv_obj_has_state(toggle, LV_STATE_CHECKED);
-
-                    auto& mgr = helix::sensors::WidthSensorManager::instance();
-                    mgr.set_sensor_enabled(klipper_name_ptr, enabled);
-                    mgr.save_config_to_file();
-                    spdlog::info("[SensorSettingsOverlay] Width sensor {} enabled: {}",
-                                 klipper_name_ptr, enabled ? "ON" : "OFF");
-                },
-                LV_EVENT_VALUE_CHANGED, klipper_name);
-        }
-
-        // Wire up role dropdown
-        lv_obj_t* role_dropdown = helix::ui::find_required(row, "role_dropdown", get_name());
-        if (role_dropdown) {
-            lv_dropdown_set_selected(role_dropdown, static_cast<uint32_t>(sensor.role));
-
-            // Pass klipper_name via event user_data
-            lv_obj_add_event_cb(
-                role_dropdown,
-                [](lv_event_t* e) {
-                    auto* klipper_name_ptr = static_cast<const char*>(lv_event_get_user_data(e));
-                    if (!klipper_name_ptr)
-                        return;
-                    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
-
-                    // NOTE: Dropdown option order must match WidthSensorRole enum:
-                    //   0 = NONE, 1 = FLOW_COMPENSATION
-                    // See also: ui_xml/width_sensor_row.xml dropdown options
-                    int index = static_cast<int>(lv_dropdown_get_selected(dropdown));
-                    auto role = static_cast<helix::sensors::WidthSensorRole>(index);
-
-                    auto& mgr = helix::sensors::WidthSensorManager::instance();
-                    mgr.set_sensor_role(klipper_name_ptr, role);
-                    mgr.save_config_to_file();
-                    spdlog::info("[SensorSettingsOverlay] Width sensor {} role changed to {}",
-                                 klipper_name_ptr,
-                                 helix::sensors::width_role_to_display_string(role));
-                },
-                LV_EVENT_VALUE_CHANGED, klipper_name);
-        }
-
-        spdlog::debug("[{}]   Created row for width sensor: {}", get_name(), sensor.sensor_name);
-    }
-}
-
-// ============================================================================
-// HUMIDITY SENSORS
-// ============================================================================
-
-void SensorSettingsOverlay::update_humidity_sensor_count() {
-    if (!overlay_root_)
-        return;
-
-    // The name comes from a badge_name prop the names gate cannot see.
-    lv_obj_t* badge = find_optional(overlay_root_, "humidity_sensor_count_label");
-    if (badge) {
-        auto& mgr = helix::sensors::HumiditySensorManager::instance();
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%zu", mgr.sensor_count());
-        ui_status_pill_set_text(badge, buf);
-    }
-}
-
-void SensorSettingsOverlay::populate_humidity_sensors() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* sensors_list = find_required(overlay_root_, "humidity_sensors_list", get_name());
-    if (!sensors_list) {
-        spdlog::debug("[{}] Could not find humidity_sensors_list container", get_name());
-        return;
-    }
-
-    // Clear existing rows
-    uint32_t child_count = lv_obj_get_child_count(sensors_list);
-    for (int i = static_cast<int>(child_count) - 1; i >= 0; i--) {
-        lv_obj_t* child = lv_obj_get_child(sensors_list, i);
-        helix::ui::safe_delete(child);
-    }
-
-    auto& mgr = helix::sensors::HumiditySensorManager::instance();
-    auto sensors = mgr.get_sensors();
-
-    spdlog::debug("[{}] Populating humidity sensor list with {} sensors", get_name(),
-                  sensors.size());
-
-    for (const auto& sensor : sensors) {
-        auto* row = lv_obj_create(sensors_list);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(row, 0, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_pad_all(row, theme_manager_get_spacing("space_sm"), 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_flex_cross_place(row, LV_FLEX_ALIGN_CENTER, 0);
-
-        auto* name_label = lv_label_create(row);
-        lv_label_set_text(name_label, sensor.sensor_name.c_str());
-        lv_obj_set_style_text_color(name_label, theme_manager_get_color("text"), 0);
-        lv_obj_set_flex_grow(name_label, 1);
-
-        auto* type_label = lv_label_create(row);
-        lv_label_set_text(type_label,
-                          helix::sensors::humidity_type_to_display_string(sensor.type).c_str());
-        lv_obj_set_style_text_color(type_label, theme_manager_get_color("text_muted"), 0);
-
-        spdlog::debug("[{}]   Created row for humidity sensor: {}", get_name(), sensor.sensor_name);
-    }
-}
-
-// ============================================================================
-// ACCELEROMETER SENSORS
-// ============================================================================
-
-void SensorSettingsOverlay::update_accel_sensor_count() {
-    if (!overlay_root_)
-        return;
-
-    // The name comes from a badge_name prop the names gate cannot see.
-    lv_obj_t* badge = find_optional(overlay_root_, "accel_sensor_count_label");
-    if (badge) {
-        auto& mgr = helix::sensors::AccelSensorManager::instance();
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%zu", mgr.sensor_count());
-        ui_status_pill_set_text(badge, buf);
-    }
-}
-
-void SensorSettingsOverlay::populate_accel_sensors() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* sensors_list = find_required(overlay_root_, "accel_sensors_list", get_name());
-    if (!sensors_list) {
-        spdlog::debug("[{}] Could not find accel_sensors_list container", get_name());
-        return;
-    }
-
-    // Clear existing rows
-    uint32_t child_count = lv_obj_get_child_count(sensors_list);
-    for (int i = static_cast<int>(child_count) - 1; i >= 0; i--) {
-        lv_obj_t* child = lv_obj_get_child(sensors_list, i);
-        helix::ui::safe_delete(child);
-    }
-
-    auto& mgr = helix::sensors::AccelSensorManager::instance();
-    auto sensors = mgr.get_sensors();
-
-    spdlog::debug("[{}] Populating accel sensor list with {} sensors", get_name(), sensors.size());
-
-    for (const auto& sensor : sensors) {
-        auto* row = lv_obj_create(sensors_list);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(row, 0, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_pad_all(row, theme_manager_get_spacing("space_sm"), 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_flex_cross_place(row, LV_FLEX_ALIGN_CENTER, 0);
-
-        auto* name_label = lv_label_create(row);
-        lv_label_set_text(name_label, sensor.sensor_name.c_str());
-        lv_obj_set_style_text_color(name_label, theme_manager_get_color("text"), 0);
-        lv_obj_set_flex_grow(name_label, 1);
-
-        auto* type_label = lv_label_create(row);
-        const char* type_str = "ADXL345";
-        switch (sensor.type) {
-        case helix::sensors::AccelSensorType::LIS2DW:
-            type_str = "LIS2DW";
-            break;
-        case helix::sensors::AccelSensorType::LIS3DH:
-            type_str = "LIS3DH";
-            break;
-        case helix::sensors::AccelSensorType::MPU9250:
-            type_str = "MPU9250";
-            break;
-        case helix::sensors::AccelSensorType::ICM20948:
-            type_str = "ICM20948";
-            break;
-        default:
-            type_str = "ADXL345";
-            break;
-        }
-        lv_label_set_text(type_label, type_str);
-        lv_obj_set_style_text_color(type_label, theme_manager_get_color("text_muted"), 0);
-
-        spdlog::debug("[{}]   Created row for accel sensor: {}", get_name(), sensor.sensor_name);
-    }
-}
-
-// ============================================================================
-// LOAD CELLS
-// ============================================================================
-
-void SensorSettingsOverlay::update_load_cell_count() {
-    if (!overlay_root_)
-        return;
-
-    // The name comes from a badge_name prop the names gate cannot see.
-    lv_obj_t* badge = find_optional(overlay_root_, "load_cell_count_label");
-    if (badge) {
-        auto& mgr = helix::sensors::LoadCellManager::instance();
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%zu", mgr.sensor_count());
-        ui_status_pill_set_text(badge, buf);
-    }
-}
-
-void SensorSettingsOverlay::populate_load_cells() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* sensors_list = find_required(overlay_root_, "load_cell_list", get_name());
-    if (!sensors_list) {
-        spdlog::debug("[{}] Could not find load_cell_list container", get_name());
-        return;
-    }
-
-    // Clear existing rows
-    uint32_t child_count = lv_obj_get_child_count(sensors_list);
-    for (int i = static_cast<int>(child_count) - 1; i >= 0; i--) {
-        lv_obj_t* child = lv_obj_get_child(sensors_list, i);
-        helix::ui::safe_delete(child);
-    }
-
-    auto& mgr = helix::sensors::LoadCellManager::instance();
-    auto sensors = mgr.get_sensors_sorted();
-
-    spdlog::debug("[{}] Populating load cell list with {} load cells", get_name(), sensors.size());
-
-    // Create a row for each load cell using XML component
-    for (const auto& sensor : sensors) {
-        // Create sensor row from XML component
-        const char* attrs[] = {"sensor_name", sensor.display_name.c_str(), nullptr};
-        auto* row = static_cast<lv_obj_t*>(lv_xml_create(sensors_list, "load_cell_row", attrs));
-        if (!row) {
-            spdlog::error("[{}] Failed to create sensor row for {}", get_name(),
-                          sensor.sensor_name);
-            continue;
-        }
-
-        spdlog::debug("[{}]   Created row for load_cell: {}", get_name(), sensor.sensor_name);
-    }
-}
-
-// ============================================================================
-// TEMPERATURE SENSORS
-// ============================================================================
-
-void SensorSettingsOverlay::update_temperature_sensor_count() {
-    if (!overlay_root_)
-        return;
-
-    // The name comes from a badge_name prop the names gate cannot see.
-    lv_obj_t* badge = find_optional(overlay_root_, "temp_sensor_count_label");
-    if (badge) {
-        auto& mgr = helix::sensors::TemperatureSensorManager::instance();
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%zu", mgr.sensor_count());
-        ui_status_pill_set_text(badge, buf);
-    }
+    set_if_changed(total_count_, static_cast<int>(total));
 }
 
 // ============================================================================
@@ -732,109 +474,13 @@ void SensorSettingsOverlay::populate_chamber_assignment() {
 }
 
 // ============================================================================
-// TEMPERATURE SENSORS
-// ============================================================================
-
-void SensorSettingsOverlay::populate_temperature_sensors() {
-    if (!overlay_root_)
-        return;
-
-    lv_obj_t* sensors_list = find_required(overlay_root_, "temp_sensors_list", get_name());
-    if (!sensors_list) {
-        spdlog::debug("[{}] Could not find temp_sensors_list container", get_name());
-        return;
-    }
-
-    // Clear existing rows
-    uint32_t child_count = lv_obj_get_child_count(sensors_list);
-    for (int i = static_cast<int>(child_count) - 1; i >= 0; i--) {
-        lv_obj_t* child = lv_obj_get_child(sensors_list, i);
-        helix::ui::safe_delete(child);
-    }
-
-    auto& mgr = helix::sensors::TemperatureSensorManager::instance();
-    auto sensors = mgr.get_sensors_sorted();
-
-    spdlog::debug("[{}] Populating temperature sensor list with {} sensors", get_name(),
-                  sensors.size());
-
-    for (const auto& sensor : sensors) {
-        // Skip CHAMBER-role sensors — they're represented by the chamber assignment dropdowns
-        if (sensor.role == helix::sensors::TemperatureSensorRole::CHAMBER) {
-            continue;
-        }
-
-        auto* row = lv_obj_create(sensors_list);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_opa(row, 0, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_pad_all(row, theme_manager_get_spacing("space_sm"), 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_flex_cross_place(row, LV_FLEX_ALIGN_CENTER, 0);
-
-        auto* name_label = lv_label_create(row);
-        lv_label_set_text(name_label, sensor.display_name.c_str());
-        lv_obj_set_style_text_color(name_label, theme_manager_get_color("text"), 0);
-        lv_obj_set_flex_grow(name_label, 1);
-
-        auto* type_label = lv_label_create(row);
-        const char* type_str = lv_tr("Sensor");
-        switch (sensor.role) {
-        case helix::sensors::TemperatureSensorRole::MCU:
-            type_str = "MCU";
-            break;
-        case helix::sensors::TemperatureSensorRole::HOST:
-            type_str = "Host";
-            break;
-        case helix::sensors::TemperatureSensorRole::AUXILIARY:
-            type_str = "Aux";
-            break;
-        default:
-            type_str = lv_tr("Sensor");
-            break;
-        }
-        lv_label_set_text(type_label, type_str);
-        lv_obj_set_style_text_color(type_label, theme_manager_get_color("text_muted"), 0);
-
-        spdlog::debug("[{}]   Created row for temp sensor: {} ({})", get_name(),
-                      sensor.display_name, type_str);
-    }
-}
-
-// ============================================================================
-// AGGREGATE METHODS
-// ============================================================================
-
-void SensorSettingsOverlay::populate_all_sensors() {
-    populate_switch_sensors();
-    populate_probe_sensors();
-    populate_width_sensors();
-    populate_humidity_sensors();
-    populate_accel_sensors();
-    populate_chamber_assignment();
-    populate_temperature_sensors();
-    populate_load_cells();
-}
-
-void SensorSettingsOverlay::update_all_sensor_counts() {
-    update_switch_sensor_count();
-    update_probe_sensor_count();
-    update_width_sensor_count();
-    update_humidity_sensor_count();
-    update_accel_sensor_count();
-    update_temperature_sensor_count();
-    update_load_cell_count();
-}
-
-// ============================================================================
 // EVENT HANDLERS
 // ============================================================================
 
 void SensorSettingsOverlay::handle_switch_master_toggle_changed(bool enabled) {
     auto& mgr = helix::FilamentSensorManager::instance();
     mgr.set_master_enabled(enabled);
-    mgr.save_config_to_file();
+    mgr.save_settings();
     spdlog::info("[{}] Switch sensor master enabled: {}", get_name(), enabled ? "ON" : "OFF");
 }
 

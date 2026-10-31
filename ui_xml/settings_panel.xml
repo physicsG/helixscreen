@@ -33,6 +33,9 @@
     </setting_group>
     <setting_group name="group_printer">
       <setting_group_header title="PRINTER"/>
+      <setting_action_row name="row_printer"
+                          label="Printer" icon="printer" callback="on_printer_clicked"
+                          description="Name, image and model" description_min_bp="0"/>
       <setting_action_row name="row_printing" label="Printing" icon="printer_3d" callback="on_printing_clicked"/>
       <setting_action_row name="row_devices"
                           label="Devices" icon="sysinfo" callback="on_devices_clicked"

@@ -73,13 +73,13 @@ struct RuntimeConfig {
     static constexpr const char* TEST_GCODE_DIR = "assets/test_gcodes";
 
     /// Default test file used when auto-starting prints or generating mock history
-    static constexpr const char* DEFAULT_TEST_FILE = "3DBenchy.gcode";
+    static constexpr const char* kDefaultTestFile = "3DBenchy.gcode";
 
     /// Production config file path
-    static constexpr const char* PROD_CONFIG_PATH = "config/settings.json";
+    static constexpr const char* kProdConfigPath = "config/settings.json";
 
     /// Test mode config file path (separate from production to avoid conflicts)
-    static constexpr const char* TEST_CONFIG_PATH = "config/settings-test.json";
+    static constexpr const char* kTestConfigPath = "config/settings-test.json";
 
     /**
      * @brief Get full path to default test G-code file
@@ -89,7 +89,7 @@ struct RuntimeConfig {
         // Static buffer to hold the constructed path
         static char path_buf[256] = {};
         if (path_buf[0] == '\0') {
-            snprintf(path_buf, sizeof(path_buf), "%s/%s", TEST_GCODE_DIR, DEFAULT_TEST_FILE);
+            snprintf(path_buf, sizeof(path_buf), "%s/%s", TEST_GCODE_DIR, kDefaultTestFile);
         }
         return path_buf;
     }
@@ -324,28 +324,6 @@ struct RuntimeConfig {
      */
     bool should_show_runout_modal() const;
 };
-
-/**
- * @brief Whether this AMS backend owns the runout surface WHILE A JOB HOLDS
- *        THE MACHINE.
- *
- * The phase-aware sibling of the ownership rule inside
- * RuntimeConfig::should_show_runout_modal(): while a job runs, a backend that
- * raises its own runout fault (Happy Hare, AFC, CFS via classify_error() /
- * current_error()) already has that fault on screen with hardware-derived
- * recovery actions, so the generic sensor-edge toast only restates it
- * (prestonbrown/helixscreen#1388). AD5X IFS is deliberately NOT an owner
- * here: its runout detector fires only while paused and only after a
- * 30-180s confirm dwell, so at the sensor edge nothing has fired yet and
- * quieting the toast would open a silent window - the toast is the immediate
- * surface. Backends with no runout surface of their own (ACE, QIDI Box, tool
- * changers) and AmsType::NONE never own it: for them the toast is the only
- * runout signal there is.
- *
- * @return true if, during a job, this backend surfaces the runout itself and
- *         the generic sensor-edge toast should stand down
- */
-bool backend_owns_runout_during_job(helix::AmsType type);
 
 /**
  * @brief Get global runtime configuration

@@ -24,9 +24,15 @@ struct KeypadInput {
     /// included. "250.75" is five.
     int max_total_digits = 5;
 
+    /// Digits accepted after the decimal point; by default only max_total_digits limits them.
+    int max_frac_digits = static_cast<int>(BUF_SIZE);
+
     /// Whether the decimal point is offered at all. Integer-only fields set
     /// this false so a typed "25.5" cannot be silently truncated on send.
     bool allow_dot = true;
+
+    /// Whether the sign key works. Only fields whose range reaches below zero set it.
+    bool allow_sign = false;
 
     void clear() {
         buf[0] = '\0';
@@ -41,22 +47,26 @@ struct KeypadInput {
     }
 
     /// Append a digit 0-9. Limited by max_int_digits before a decimal point
-    /// is present and by max_total_digits after one.
+    /// is present, and by max_total_digits and max_frac_digits after one.
     bool append_digit(int digit) {
         if (digit < 0 || digit > 9)
             return false;
 
         size_t len = length();
         int digit_count = 0;
+        int frac_count = 0;
         bool dot = false;
         for (size_t i = 0; i < len; i++) {
-            if (buf[i] >= '0' && buf[i] <= '9')
+            if (buf[i] >= '0' && buf[i] <= '9') {
                 digit_count++;
-            else if (buf[i] == '.')
+                if (dot)
+                    frac_count++;
+            } else if (buf[i] == '.') {
                 dot = true;
+            }
         }
         int max_digits = dot ? max_total_digits : max_int_digits;
-        if (digit_count >= max_digits)
+        if (digit_count >= max_digits || (dot && frac_count >= max_frac_digits))
             return false;
 
         if (len < BUF_SIZE - 1) {
@@ -82,6 +92,27 @@ struct KeypadInput {
         return false;
     }
 
+    bool negative() const {
+        return buf[0] == '-';
+    }
+
+    /// Flip the draft's sign, typed digits or not. The sign is not a digit, so the
+    /// digit caps are unaffected; it only needs room in the buffer.
+    bool toggle_sign() {
+        if (!allow_sign)
+            return false;
+        size_t len = length();
+        if (negative()) {
+            memmove(buf, buf + 1, len); // includes the terminator
+            return true;
+        }
+        if (len >= BUF_SIZE - 1)
+            return false;
+        memmove(buf + 1, buf, len + 1);
+        buf[0] = '-';
+        return true;
+    }
+
     /// Remove the last character.
     bool backspace() {
         size_t len = length();
@@ -91,11 +122,13 @@ struct KeypadInput {
         return true;
     }
 
-    /// Parse buffer as float. Empty buffer returns 0.
+    /// Parse buffer as float. Empty buffer returns 0, and so does a signed zero
+    /// ("-", "-0.") rather than -0.
     float value() const {
         if (buf[0] == '\0')
             return 0.0f;
-        return static_cast<float>(atof(buf));
+        const float v = static_cast<float>(atof(buf));
+        return v == 0.0f ? 0.0f : v;
     }
 };
 

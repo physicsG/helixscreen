@@ -23,6 +23,7 @@
 #include "../../include/pending_startup_warnings.h"
 #include "app_constants.h"
 #include "app_globals.h"
+#include "board_identity.h"
 #include "config.h"
 #include "display/lv_display_private.h"
 #include "display_settings_manager.h"
@@ -37,14 +38,16 @@
 #include "refresh_period_hold.h"
 #include "refresh_timing_env.h"
 #include "remote_screen_fb0_sink.h"
+#include "remote_screen_service.h"
 #include "rotation_probe.h"
 #include "runtime_config.h"
 #include "screen_hide_hold.h"
 #include "tap_latch.h"
 #include "touch_calibration_wrapper.h"
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "screensaver.h"
+#include "screensaver_clock.h"
 #endif
 
 #include "pending_startup_warnings.h"
@@ -102,9 +105,10 @@ static int sdl_event_filter(void* /*userdata*/, SDL_Event* event) {
 #endif
 
 DisplayManager::DisplayManager()
-    : m_sleep(DisplaySleepHost{m_backend, m_backlight, m_display, m_shutting_down,
-                               [this] { disable_input_briefly(); },
-                               [this](lv_display_flush_cb_t cb) { restore_flush_cb(cb); }}) {}
+    : m_sleep(DisplaySleepHost{
+          m_backend, m_backlight, m_display, m_shutting_down, [] { cancel_pointer_presses(); },
+          [this](lv_display_flush_cb_t cb) { restore_flush_cb(cb); },
+          [] { return helix::RemoteScreenService::instance().viewer_active(); }}) {}
 
 DisplayManager::~DisplayManager() {
     shutdown();
@@ -147,6 +151,28 @@ void apply_image_cache_env() {
 }
 
 } // namespace
+
+void DisplayManager::schedule_brightness_reassert() {
+    // Schedule delayed brightness override to counteract ForgeX's delayed_gcode.
+    // On AD5M, Klipper's reset_screen fires ~3s after Klipper becomes READY.
+    // Klipper typically becomes ready 10-20s after boot, so a 20s delay ensures
+    // we fire AFTER the delayed_gcode dims the screen.
+    // Only the FlashForge firmwares dim behind our back.
+    if (helix::board::current_info().firmware_dims_backlight_after_boot) {
+        m_brightness_reassert_timer.reset(lv_timer_create(
+            [](lv_timer_t* t) {
+                auto* dm = static_cast<DisplayManager*>(lv_timer_get_user_data(t));
+                dm->m_brightness_reassert_timer.release();
+                if (dm->m_backlight && dm->m_backlight->is_available()) {
+                    const int brightness = DisplaySettingsManager::instance().user_brightness();
+                    dm->m_backlight->set_brightness(brightness);
+                    spdlog::info("[DisplayManager] Delayed brightness override: {}%", brightness);
+                }
+                lv_timer_delete(t);
+            },
+            20000, this));
+    }
+}
 
 bool DisplayManager::init(const Config& config) {
     if (m_initialized) {
@@ -307,66 +333,7 @@ bool DisplayManager::init(const Config& config) {
     // rather than `/display/rotate` precisely because the block below draws
     // on three inputs the key does not see. Move input creation above this
     // block and both gates go blind again.
-    {
-        // CLI/config rotation (passed via Config struct)
-        int rotation_degrees = config.rotation;
-
-        // Environment variable override (highest priority)
-        const char* env_rotate = std::getenv("HELIX_DISPLAY_ROTATION");
-        if (env_rotate) {
-            rotation_degrees = std::atoi(env_rotate);
-            spdlog::info("[DisplayManager] HELIX_DISPLAY_ROTATION={} override", rotation_degrees);
-        }
-
-        // Fall back to config file if not set via Config struct or env
-        if (rotation_degrees == 0) {
-            rotation_degrees = helix::Config::get_instance()->get<int>("/display/rotate", 0);
-        }
-
-        // A first-boot kernel panel_orientation arrives as config.rotation
-        // (Application::init_display()). The interactive probe runs later, from
-        // Application::run_rotation_probe_and_layout().
-
-        // Apply rotation from config, env, or CLI
-        if (rotation_degrees != 0) {
-#ifdef HELIX_DISPLAY_SDL
-            // LVGL's SDL driver only supports software rotation in PARTIAL render mode,
-            // but we use DIRECT mode for performance. Skip rotation on SDL — it's only
-            // for desktop dev. On embedded (fbdev/DRM) rotation works correctly.
-            spdlog::warn("[DisplayManager] Rotation {}° requested but SDL backend does not "
-                         "support software rotation (DIRECT render mode). Ignoring on desktop.",
-                         rotation_degrees);
-#else
-            int phys_w = m_width;
-            int phys_h = m_height;
-
-            lv_display_rotation_t lv_rot = degrees_to_lv_rotation(rotation_degrees);
-
-            // If DRM backend can't do hardware rotation, fall back to fbdev
-            // which handles software rotation flicker-free via LVGL's native path.
-            if (!try_drm_to_fbdev_fallback(lv_rot, config.splash_active)) {
-                // Fallback failed (a DSI display on a non-EGL build, with no fbdev).
-                // Continue without rotation rather than aborting — a
-                // working unrotated display is better than no display.
-                // lv_display_set_rotation() is deliberately NOT called, which
-                // is what makes the display the honest source: `/display/rotate`
-                // still says 90/180/270 here while nothing is rotated, and a
-                // gate believing the key would throw away a perfectly good
-                // stored touch range on every boot of such a unit.
-                spdlog::warn("[DisplayManager] Continuing without rotation. "
-                             "On a non-EGL build, use panel_orientation in "
-                             "/boot/firmware/cmdline.txt instead.");
-                rotation_degrees = 0;
-            } else {
-                // After the fallback, which may have swapped m_backend.
-                settle_display_rotation(lv_rot, phys_w, phys_h);
-            }
-
-            spdlog::info("[DisplayManager] Display rotated {}° — effective resolution: {}x{}",
-                         rotation_degrees, width(), height());
-#endif
-        }
-    }
+    apply_startup_rotation(config);
 
     // Initialize UI update queue for thread-safe async updates
     // Creates the queue's drain timer, which needs lv_init() but not a display
@@ -431,7 +398,7 @@ bool DisplayManager::init(const Config& config) {
                  m_refresh_timing.screensaver_refr_period_ms, m_refresh_timing.loop_min_sleep_ms,
                  m_refresh_timing.screensaver_loop_min_sleep_ms);
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     // The gate halves the screensaver budget during prints and keys stored levels by display path.
     ScreensaverManager::instance().set_host(screensaver_host(m_backend.get()));
 #endif
@@ -493,25 +460,7 @@ bool DisplayManager::init(const Config& config) {
         m_backlight->set_brightness(100);
         spdlog::debug("[DisplayManager] Backlight forced ON at 100% for startup");
 
-        // Schedule delayed brightness override to counteract ForgeX's delayed_gcode.
-        // On AD5M, Klipper's reset_screen fires ~3s after Klipper becomes READY.
-        // Klipper typically becomes ready 10-20s after boot, so a 20s delay ensures
-        // we fire AFTER the delayed_gcode dims the screen.
-        // Only needed on Allwinner (AD5M) - other platforms don't have this issue.
-        if (std::string_view(m_backlight->name()) == "Allwinner") {
-            lv_timer_create(
-                [](lv_timer_t* t) {
-                    auto* dm = static_cast<DisplayManager*>(lv_timer_get_user_data(t));
-                    if (dm && dm->m_backlight && dm->m_backlight->is_available()) {
-                        const int brightness = DisplaySettingsManager::instance().user_brightness();
-                        dm->m_backlight->set_brightness(brightness);
-                        spdlog::info("[DisplayManager] Delayed brightness override: {}%",
-                                     brightness);
-                    }
-                    lv_timer_delete(t);
-                },
-                20000, this);
-        }
+        schedule_brightness_reassert();
     }
 
     // Dim and sleep behavior
@@ -583,6 +532,9 @@ void DisplayManager::set_active_instance(DisplayManager* dm) {
 }
 
 void DisplayManager::shutdown() {
+    // Ahead of the initialized check: a handler can be installed on a manager that
+    // never ran init(), and its event callback holds this manager either way.
+    remove_resize_handler();
     if (!m_initialized) {
         return;
     }
@@ -611,6 +563,7 @@ void DisplayManager::shutdown() {
     m_display = nullptr;
 
     m_sleep.abandon_lvgl_state();
+    m_brightness_reassert_timer.reset();
 
     // Release backends
     m_backlight.reset();
@@ -669,11 +622,11 @@ void DisplayManager::configure_pointer(int scroll_throw, int scroll_limit) {
     watch_pointer();
     configure_scroll(scroll_throw, scroll_limit);
     // Long-press threshold — user-configurable global setting (#1245), default
-    // AppConstants::Input::LONG_PRESS_MS. InputSettingsManager::set_long_press_time
+    // app_constants::input::kLongPressMs. InputSettingsManager::set_long_press_time
     // live-applies changes.
     auto* cfg = helix::Config::get_instance();
     const int long_press_ms = cfg->get<int>("/input/long_press_time",
-                                            static_cast<int>(AppConstants::Input::LONG_PRESS_MS));
+                                            static_cast<int>(app_constants::input::kLongPressMs));
     lv_indev_set_long_press_time(m_pointer, long_press_ms);
 
     // Config rather than InputSettingsManager: this runs before its subjects exist.
@@ -681,7 +634,7 @@ void DisplayManager::configure_pointer(int scroll_throw, int scroll_limit) {
     m_scroll_guard = helix::ScrollClickGuard::from_settings(
         cfg->get<bool>("/input/scroll_guard", false),
         cfg->get<int>("/input/scroll_guard_cooldown_ms",
-                      static_cast<int>(helix::ScrollClickGuard::DEFAULT_COOLDOWN_MS)),
+                      static_cast<int>(helix::ScrollClickGuard::kDefaultCooldownMs)),
         std::getenv("HELIX_SCROLL_GUARD"), std::getenv("HELIX_SCROLL_GUARD_COOLDOWN_MS"),
         scroll_limit);
 
@@ -853,11 +806,24 @@ void DisplayManager::restore_display_on_shutdown() {
     m_sleep.restore_on_shutdown();
 }
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+void DisplayManager::hold_flush_for_power_off() {
+    m_sleep.hold_flush_for_power_off();
+}
+
+#if HELIX_ENABLE_SCREENSAVER
 helix::ui::SaverHost DisplayManager::screensaver_host(const DisplayBackend* backend) {
     helix::ui::SaverHost host;
     host.is_printing = [] {
         return job_holds_machine(get_printer_state().print_state().get_print_lifecycle());
+    };
+    // The remaining time the print status panel shows, smoothed by PrintEtaEstimator.
+    host.print_status = [] {
+        helix::PrinterPrintState& print = get_printer_state().print_state();
+        helix::ui::ClockPrint status;
+        status.phase = helix::ui::clock_print_phase(print.get_print_lifecycle());
+        status.remaining_s = lv_subject_get_int(print.get_print_time_left_subject());
+        status.progress_pct = lv_subject_get_int(print.get_print_progress_display_subject());
+        return status;
     };
     host.display_backend =
         backend ? helix::ui::display_backend_key(backend->type(), backend->is_gpu_accelerated())
@@ -957,54 +923,25 @@ void DisplayManager::enable_affine_calibration() {
 }
 
 // ============================================================================
-// Input Gating (Wake-Only First Touch)
+// Wake-touch press cancel
 // ============================================================================
 
-void DisplayManager::disable_input_briefly() {
-    // Disable all pointer input devices, and cancel whatever press is already
-    // in flight on each.
-    //
-    // lv_indev_enable(false) is a pure flag write: pr_timestamp, long_pr_sent
-    // and pointer.act_obj all survive the blackout, so a finger still on the
-    // glass when input comes back keeps counting toward LV_EVENT_LONG_PRESSED
-    // from the ORIGINAL touch-down. On the wake touch that means a long-press
-    // gesture the user never made — home-grid edit mode opening behind the lock
-    // screen (#1245). lv_indev_reset() is what actually discards that state, and
-    // it lands even while the device is disabled: lv_indev_read() runs the reset
-    // query handler before it checks the enabled flag.
+void DisplayManager::cancel_pointer_presses() {
+    // A pointer whose read callback is not wrapped (SDL's mouse, which Android's touch also
+    // arrives through) has already handed the wake touch to LVGL. lv_indev_reset() drops
+    // that press's target, long-press clock and scroll, and lv_indev_wait_release() keeps
+    // LVGL from re-pressing, scrolling or clicking anything until the finger lifts.
+    // A wrapped pointer reports the wake touch as released, so only the reset applies.
     lv_indev_t* indev = lv_indev_get_next(nullptr);
     while (indev) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
-            lv_indev_enable(indev, false);
+            if (lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) {
+                lv_indev_wait_release(indev);
+            }
             lv_indev_reset(indev, nullptr);
         }
         indev = lv_indev_get_next(indev);
     }
-
-    // Schedule re-enable after 200ms via LVGL timer
-    lv_timer_create(reenable_input_cb, 200, nullptr);
-
-    // info-level so the wake-gate window is captured in debug bundles by
-    // default — diagnoses "tapped Resume but nothing happened" reports
-    // (#22) by letting us correlate user-reported tap times with the
-    // 200ms blackout window.
-    spdlog::info("[DisplayManager] Wake-gate engaged: input disabled for 200ms");
-}
-
-void DisplayManager::reenable_input_cb(lv_timer_t* timer) {
-    // Re-enable all pointer input devices
-    lv_indev_t* indev = lv_indev_get_next(nullptr);
-    while (indev) {
-        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
-            lv_indev_enable(indev, true);
-        }
-        indev = lv_indev_get_next(indev);
-    }
-
-    // Delete the one-shot timer
-    lv_timer_delete(timer);
-
-    spdlog::info("[DisplayManager] Wake-gate released: input re-enabled");
 }
 
 // ============================================================================
@@ -1022,12 +959,17 @@ void DisplayManager::sleep_aware_read_cb(lv_indev_t* indev, lv_indev_data_t* dat
         dm->m_original_pointer_read_cb(indev, data);
     }
 
-    // A press while asleep is absorbed so LVGL sees no press; while dimmed it passes
-    // through but still requests the wake. Decided on the raw press, because LVGL only
-    // updates its activity time on PRESSED and evdev can drain press+release in one read.
-    if (data->state == LV_INDEV_STATE_PRESSED &&
-        dm->m_sleep.note_press(data->point.x, data->point.y)) {
-        data->state = LV_INDEV_STATE_RELEASED;
+    // A press while asleep, dimmed or under a screensaver wakes the display, and LVGL sees
+    // that touch as released until the finger lifts.
+    const bool was_swallowing = dm->m_wake_latch.swallowing();
+    const helix::WakeTouchLatch::Sample out = dm->m_wake_latch.filter(
+        {data->state == LV_INDEV_STATE_PRESSED, data->point.x, data->point.y}, lv_tick_get(),
+        [dm](int32_t x, int32_t y) { return dm->m_sleep.note_press(x, y); });
+    data->state = out.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    data->point.x = out.x;
+    data->point.y = out.y;
+    if (was_swallowing && !dm->m_wake_latch.swallowing()) {
+        spdlog::info("[DisplayManager] Wake touch released; input resumes");
     }
 
     // After the wake handling, so a suppressed press can never cost a wake request.
@@ -1100,15 +1042,15 @@ bool DisplayManager::try_drm_to_fbdev_fallback(lv_display_rotation_t rot, bool s
 }
 
 void DisplayManager::warn_fbdev_high_dpi() {
-    static constexpr int HIGH_DPI_THRESHOLD = 1920;
-    if (m_width <= HIGH_DPI_THRESHOLD && m_height <= HIGH_DPI_THRESHOLD) {
+    static constexpr int kHighDpiThreshold = 1920;
+    if (m_width <= kHighDpiThreshold && m_height <= kHighDpiThreshold) {
         return;
     }
     spdlog::warn("[DisplayManager] Fbdev resolution {}x{} exceeds {}px on one axis. "
                  "Cannot auto-downscale in fbdev mode. Configure a lower resolution "
                  "via kernel parameters (e.g., framebuffer_width/framebuffer_height "
                  "in /boot/firmware/config.txt on Raspberry Pi) and reboot.",
-                 m_width, m_height, HIGH_DPI_THRESHOLD);
+                 m_width, m_height, kHighDpiThreshold);
     char toast_msg[256];
     snprintf(toast_msg, sizeof(toast_msg),
              lv_tr("Display resolution is very high (%dx%d). Text may appear small. "
@@ -1172,6 +1114,84 @@ void DisplayManager::run_rotation_probe() {
     helix::RotationProbe(std::move(host)).run();
 }
 
+void DisplayManager::apply_startup_rotation(const Config& config) {
+    // CLI/config rotation (passed via Config struct)
+    int rotation_degrees = config.rotation;
+
+    // Environment variable override (highest priority)
+    const char* env_rotate = std::getenv("HELIX_DISPLAY_ROTATION");
+    if (env_rotate) {
+        rotation_degrees = std::atoi(env_rotate);
+        spdlog::info("[DisplayManager] HELIX_DISPLAY_ROTATION={} override", rotation_degrees);
+    }
+
+    // Fall back to config file if not set via Config struct or env
+    if (rotation_degrees == 0) {
+        rotation_degrees = helix::Config::get_instance()->get<int>("/display/rotate", 0);
+    }
+
+    // A first-boot kernel panel_orientation arrives as config.rotation
+    // (Application::init_display()). The board's mount is decided here, where
+    // the framebuffer geometry that confirms it is known. The interactive
+    // probe runs later, from Application::run_rotation_probe_and_layout().
+    bool from_board_mount = false;
+    if (rotation_degrees == 0 && config.first_boot_probe) {
+        const int mount =
+            helix::first_boot_board_mount(config.kernel_orientation, m_width, m_height);
+        if (mount > 0) {
+            spdlog::info("[DisplayManager] First boot: board panel mount {}° for {}x{}", mount,
+                         m_width, m_height);
+            rotation_degrees = mount;
+            from_board_mount = true;
+        }
+    }
+
+    // Apply rotation from config, env, or CLI
+    if (rotation_degrees != 0) {
+#ifdef HELIX_DISPLAY_SDL
+        // LVGL's SDL driver only supports software rotation in PARTIAL render mode,
+        // but we use DIRECT mode for performance. Skip rotation on SDL — it's only
+        // for desktop dev. On embedded (fbdev/DRM) rotation works correctly.
+        spdlog::warn("[DisplayManager] Rotation {}° requested but SDL backend does not "
+                     "support software rotation (DIRECT render mode). Ignoring on desktop.",
+                     rotation_degrees);
+#else
+        int phys_w = m_width;
+        int phys_h = m_height;
+
+        lv_display_rotation_t lv_rot = degrees_to_lv_rotation(rotation_degrees);
+
+        // If DRM backend can't do hardware rotation, fall back to fbdev
+        // which handles software rotation flicker-free via LVGL's native path.
+        if (!try_drm_to_fbdev_fallback(lv_rot, config.splash_active)) {
+            // Fallback failed (a DSI display on a non-EGL build, with no fbdev).
+            // Continue without rotation rather than aborting — a
+            // working unrotated display is better than no display.
+            // lv_display_set_rotation() is deliberately NOT called, which
+            // is what makes the display the honest source: `/display/rotate`
+            // still says 90/180/270 here while nothing is rotated, and a
+            // gate believing the key would throw away a perfectly good
+            // stored touch range on every boot of such a unit.
+            spdlog::warn("[DisplayManager] Continuing without rotation. "
+                         "On a non-EGL build, use panel_orientation in "
+                         "/boot/firmware/cmdline.txt instead.");
+            rotation_degrees = 0;
+        } else {
+            // After the fallback, which may have swapped m_backend.
+            settle_display_rotation(lv_rot, phys_w, phys_h);
+        }
+
+        spdlog::info("[DisplayManager] Display rotated {}° — effective resolution: {}x{}",
+                     rotation_degrees, width(), height());
+#endif
+    }
+    if (config.first_boot_probe) {
+        m_first_boot_orientation = config.kernel_orientation >= 0 ? config.kernel_orientation
+                                   : from_board_mount && rotation_degrees > 0 ? rotation_degrees
+                                                                              : -1;
+    }
+}
+
 void DisplayManager::settle_display_rotation(lv_display_rotation_t rot, int phys_w, int phys_h) {
     // The backend may clear LVGL's rotation when the scanout plane rotates instead (#1275,
     // #1587), which is why width()/height() read the display rather than a cache.
@@ -1182,69 +1202,70 @@ void DisplayManager::settle_display_rotation(lv_display_rotation_t rot, int phys
 // Window Resize Handler (Desktop/SDL)
 // ============================================================================
 
-void DisplayManager::resize_timer_cb(lv_timer_t* timer) {
-    auto* self = static_cast<DisplayManager*>(lv_timer_get_user_data(timer));
-    if (!self || self->m_shutting_down) {
+void DisplayManager::fan_out_resize() {
+    if (m_shutting_down) {
         return;
     }
 
     // A timer armed before the suspension began must not fan out either - the
     // rotation probe polls for taps through lv_timer_handler(), and this is the
     // callback that can sit in a multi-second theme refresh while it does.
-    if (self->m_resize_fanout_suspended) {
+    if (m_resize_fanout_suspended) {
         spdlog::debug("[DisplayManager] Resize fanout suspended - dropping pending debounce");
-        lv_timer_delete(timer);
-        self->m_resize_debounce_timer = nullptr;
         return;
     }
 
     spdlog::debug(
         "[DisplayManager] Resize debounce complete: {}x{}, calling {} registered callbacks",
-        self->width(), self->height(), self->m_resize_callbacks.size());
+        width(), height(), m_resize_callbacks.size());
 
-    // Call all registered callbacks
-    for (auto callback : self->m_resize_callbacks) {
-        if (callback) {
+    // The debounce is disarmed before this runs, so a SIZE_CHANGED raised by a
+    // callback arms a fresh one. A callback may register another (panels do so
+    // lazily), which can reallocate the vector: index it, and stop at the count
+    // this resize started with so a newcomer runs from the next resize on.
+    const size_t count = m_resize_callbacks.size();
+    for (size_t i = 0; i < count; i++) {
+        if (ResizeCallback callback = m_resize_callbacks[i]) {
             callback();
         }
     }
+}
 
-    // Delete one-shot timer
-    lv_timer_delete(timer);
-    self->m_resize_debounce_timer = nullptr;
+void DisplayManager::on_screen_size_changed(lv_obj_t* screen) {
+    if (m_shutting_down) {
+        return;
+    }
+
+    lv_coord_t width = lv_obj_get_width(screen);
+    lv_coord_t height = lv_obj_get_height(screen);
+
+    if (m_resize_fanout_suspended) {
+        spdlog::debug("[DisplayManager] Screen size changed to {}x{} while resize fanout "
+                      "suspended - no debounce armed",
+                      width, height);
+        return;
+    }
+
+    spdlog::debug("[DisplayManager] Screen size changed to {}x{}, resetting debounce timer", width,
+                  height);
+    m_resize_debounce.schedule([this]() { fan_out_resize(); });
 }
 
 void DisplayManager::resize_event_cb(lv_event_t* e) {
-    lv_event_code_t code = lv_event_get_code(e);
-
-    if (code == LV_EVENT_SIZE_CHANGED) {
-        auto* self = static_cast<DisplayManager*>(lv_event_get_user_data(e));
-        if (!self || self->m_shutting_down) {
-            return;
-        }
-
-        lv_obj_t* screen = static_cast<lv_obj_t*>(lv_event_get_target(e));
-        lv_coord_t width = lv_obj_get_width(screen);
-        lv_coord_t height = lv_obj_get_height(screen);
-
-        if (self->m_resize_fanout_suspended) {
-            spdlog::debug("[DisplayManager] Screen size changed to {}x{} while resize fanout "
-                          "suspended - no debounce armed",
-                          width, height);
-            return;
-        }
-
-        spdlog::debug("[DisplayManager] Screen size changed to {}x{}, resetting debounce timer",
-                      width, height);
-
-        // Reset or create debounce timer
-        if (self->m_resize_debounce_timer) {
-            lv_timer_reset(self->m_resize_debounce_timer);
-        } else {
-            self->m_resize_debounce_timer =
-                lv_timer_create(resize_timer_cb, RESIZE_DEBOUNCE_MS, self);
-            lv_timer_set_repeat_count(self->m_resize_debounce_timer, 1); // One-shot
-        }
+    auto* self = static_cast<DisplayManager*>(lv_event_get_user_data(e));
+    if (!self) {
+        return;
+    }
+    switch (lv_event_get_code(e)) {
+    case LV_EVENT_SIZE_CHANGED:
+        self->on_screen_size_changed(static_cast<lv_obj_t*>(lv_event_get_target(e)));
+        break;
+    case LV_EVENT_DELETE:
+        // LVGL drops the screen's callbacks with it, so there is nothing left to detach.
+        self->m_resize_screen = nullptr;
+        break;
+    default:
+        break;
     }
 }
 
@@ -1254,10 +1275,21 @@ void DisplayManager::init_resize_handler(lv_obj_t* screen) {
         return;
     }
 
-    // Add SIZE_CHANGED event listener to screen
+    remove_resize_handler();
     lv_obj_add_event_cb(screen, resize_event_cb, LV_EVENT_SIZE_CHANGED, this);
+    lv_obj_add_event_cb(screen, resize_event_cb, LV_EVENT_DELETE, this);
+    m_resize_screen = screen;
 
     spdlog::trace("[DisplayManager] Resize handler initialized on screen");
+}
+
+void DisplayManager::remove_resize_handler() {
+    m_resize_debounce.cancel();
+    // m_resize_screen is cleared when the screen is deleted, so a non-null one is live.
+    if (m_resize_screen && lv_is_initialized()) {
+        lv_obj_remove_event_cb_with_user_data(m_resize_screen, resize_event_cb, this);
+    }
+    m_resize_screen = nullptr;
 }
 
 void DisplayManager::set_resize_fanout_suspended(bool suspended) {
@@ -1364,6 +1396,7 @@ void DisplayManager::install_color_transform_hook() {
                     f.src_format = helix::RemoteScreenPixelFormat::Unknown;
                     break;
                 }
+                f.last_in_refresh = lv_display_flush_is_last(d);
                 self->m_remote_screen.on_frame(f);
             }
         }

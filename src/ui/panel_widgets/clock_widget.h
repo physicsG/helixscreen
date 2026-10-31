@@ -31,6 +31,10 @@ class ClockWidget : public PanelWidget {
     // Update all clock subjects with current time/date/uptime
     void update_clock();
 
+    // Whether the time over the date fits this box at their widest, inside the
+    // widget's own padding
+    bool time_and_date_fit(int width_px, int height_px) const;
+
     // Static timer callback
     static void clock_timer_cb(lv_timer_t* timer);
 };

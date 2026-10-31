@@ -326,8 +326,8 @@ TEST_CASE("An unknown heater max leaves the keypad on the heater default",
 
 namespace {
 
-constexpr double HOTEND_MAX_TEMP = 290.0;   ///< The reported machine: below the 400 default.
-constexpr double MOCK_BED_MAX_TEMP = 120.0; ///< What the mock hardcodes for heater_bed.
+constexpr double HOTEND_MAX_TEMP = 290.0; ///< The reported machine: below the 400 default.
+constexpr double kMockBedMaxTemp = 120.0; ///< What the mock hardcodes for heater_bed.
 
 class ParseFixture : public LVGLTestFixture {
   public:
@@ -374,7 +374,7 @@ TEST_CASE("The config parse adopts a hotend ceiling below the compiled default",
 
     // The whole bug in one assertion: 290 < 400, and widen-only threw it away.
     REQUIRE(limits.max_temp_for("extruder") == HOTEND_MAX_TEMP);
-    REQUIRE(limits.max_temp_for("heater_bed") == MOCK_BED_MAX_TEMP);
+    REQUIRE(limits.max_temp_for("heater_bed") == kMockBedMaxTemp);
 }
 
 TEST_CASE("The parse leaves the global ceiling permissive", "[safety_limits][1355]") {

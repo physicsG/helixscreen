@@ -30,13 +30,13 @@ std::optional<float> max_spaghetti_probability(const std::string& detection_stdo
 /// a hung child must not hold one of the few shared HttpExecutor workers
 /// forever, which would latch busy_ and silently stop detection for the rest
 /// of the print.
-inline constexpr int K2_DETECTION_DEADLINE_S = 20;
+inline constexpr int kK2DetectionDeadlineS = 20;
 
 /// Run @p argv[0] with a fixed argv (posix_spawn, no shell), capture stdout
 /// into @p stdout_out, and SIGKILL the child if it runs past @p deadline_s.
 /// Returns the child's exit code, or -1 on spawn failure or timeout (logged).
 int run_detection_with_deadline(const std::vector<std::string>& argv, std::string& stdout_out,
-                                int deadline_s = K2_DETECTION_DEADLINE_S);
+                                int deadline_s = kK2DetectionDeadlineS);
 
 /**
  * @brief Detection source backed by the Creality K2 stock yolov5n model.
@@ -56,7 +56,7 @@ class K2StockDetectionSource : public DetectionSource {
     using SnapshotFetcher =
         std::function<bool(const std::string& url, const std::string& dest_path)>;
     /// Run @p argv, write its stdout into @p stdout_out, return its exit code. Blocking,
-    /// but bounded: the default runner kills the child at K2_DETECTION_DEADLINE_S.
+    /// but bounded: the default runner kills the child at kK2DetectionDeadlineS.
     using DetectionRunner =
         std::function<int(const std::vector<std::string>& argv, std::string& stdout_out)>;
     /// Schedule blocking work off the main thread.
@@ -64,12 +64,10 @@ class K2StockDetectionSource : public DetectionSource {
 
     K2StockDetectionSource(helix::PrinterState* state);
 
-    /// Unique registration key. Exposed so DetectionManager can match on id()
-    /// and static_cast instead of dynamic_cast; the firmware builds -fno-rtti.
-    static constexpr const char* SOURCE_ID = "k2_stock";
+    static constexpr const char* kSourceId = "k2_stock";
 
     std::string id() const override {
-        return SOURCE_ID;
+        return kSourceId;
     }
     bool available() const override {
         return capable_;

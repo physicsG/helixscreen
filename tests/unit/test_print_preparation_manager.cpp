@@ -6,35 +6,44 @@
 #include "ui_pre_print_options_renderer.h"
 #include "ui_print_preparation_manager.h"
 
+#include "../fake_moonraker_client.h"
 #include "../helix_test_fixture.h"
 #include "../lvgl_test_fixture.h"
 #include "../mocks/mock_websocket_server.h"
 #include "../test_helpers/mock_printer.h"
+#include "../test_helpers/moonraker_client_mock_test_access.h"
+#include "../test_helpers/moonraker_manager_test_access.h"
 #include "../test_helpers/planted_gcode.h"
 #include "../test_helpers/preprint_config_scope.h"
 #include "../test_helpers/print_preparation_manager_test_access.h"
+#include "../test_helpers/print_start_collector_test_access.h"
 #include "../test_helpers/printer_state_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
 #include "capability_matrix.h"
+#include "gcode_edit_list.h"
 #include "gcode_file_modifier.h"
 #include "gcode_ops_detector.h"
 #include "hv/EventLoopThread.h"
 #include "macro_param_cache.h"
 #include "moonraker_api.h"
 #include "moonraker_api_mock.h"
+#include "moonraker_auth.h"
 #include "moonraker_client.h"
 #include "moonraker_client_mock.h"
 #include "moonraker_error.h"
+#include "moonraker_manager.h"
 #include "operation_registry.h"
 #include "pre_start_exclude.h"
 #include "preprint_predictor.h"
 #include "print_start_analyzer.h"
 #include "print_start_checks.h"
+#include "print_start_collector.h"
 #include "printer_detector.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
+#include "storage_report.h"
 
 #include <spdlog/sinks/null_sink.h>
 #include <spdlog/spdlog.h>
@@ -46,6 +55,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -242,9 +252,7 @@ TEST_CASE_METHOD(HelixTestFixture,
 
     auto card = [&state]() {
         // The plugin lands through the queue and its observer queues the count.
-        for (int i = 0; i < 4; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
         return lv_subject_get_int(
             state.composite_visibility_state().get_has_any_preprint_options_subject());
     };
@@ -286,18 +294,14 @@ TEST_CASE_METHOD(HelixTestFixture,
     state.set_helix_plugin_installed(true);
     helix::ui::UpdateQueue::instance().drain();
     device.reset();
-    for (int i = 0; i < 4; ++i) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     CHECK(manager.gcode_rewrite_block() == helix::GcodeRewriteBlock::None);
 
     // Clearing the dependencies drops the observer, so a later change queues
     // nothing for this manager.
     manager.set_dependencies(nullptr, nullptr);
     state.set_helix_plugin_installed(false);
-    for (int i = 0; i < 4; ++i) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 }
 
 TEST_CASE("PrintPreparationManager: get_temp_directory", "[print_preparation][safety]") {
@@ -610,6 +614,11 @@ TEST_CASE("PrintPreparationManager: collect_macro_skip_params uses correct optio
         const auto* macro = std::get_if<PrePrintStrategyMacroParam>(&bed_cap->strategy);
         REQUIRE(macro != nullptr);
         REQUIRE(macro->param_name == "SKIP_LEVELING");
+
+        // The AD5M Pro's START_PRINT takes no purge or skew parameter, so the card
+        // must offer no toggle that would send one.
+        CHECK(caps.find("purge_line") == nullptr);
+        CHECK(caps.find("skew_correct") == nullptr);
     }
 
     SECTION("All option ids match category_to_string output") {
@@ -743,8 +752,48 @@ TEST_CASE_METHOD(HelixTestFixture, "PrintPreparationManager: capabilities come f
     }
 }
 
+namespace {
+
+/// Known heating rates for the estimate tests, cleared again on the way out.
+struct EstimateRatesScope {
+    EstimateRatesScope() {
+        auto& rates = ThermalRateManager::instance();
+        rates.reset();
+        rates.get_model("extruder").set_default_rate(0.5f);
+        rates.get_model("heater_bed").set_default_rate(2.0f);
+    }
+    ~EstimateRatesScope() {
+        ThermalRateManager::instance().reset();
+    }
+};
+
+FileMetadata file_at(double bed_c, double nozzle_c) {
+    FileMetadata m;
+    m.filename = "estimate.gcode";
+    m.first_layer_bed_temp = bed_c;
+    m.first_layer_extr_temp = nozzle_c;
+    return m;
+}
+
+void set_temps(PrinterState& ps, int bed_c, int nozzle_c) {
+    lv_subject_set_int(ps.temperature_state().get_bed_temp_subject(), bed_c * 10);
+    lv_subject_set_int(ps.temperature_state().get_active_extruder_temp_subject(), nozzle_c * 10);
+}
+
+int sum_of_default_phases() {
+    const auto homing = static_cast<int>(helix::PrintStartPhase::HOMING);
+    int total = 0;
+    for (const auto& [phase, secs] : helix::PreprintPredictor::default_phase_durations()) {
+        total +=
+            phase == homing ? std::max(secs, helix::PreprintPredictor::kMinHomingSeconds) : secs;
+    }
+    return total;
+}
+
+} // namespace
+
 TEST_CASE_METHOD(HelixTestFixture,
-                 "PrintPreparationManager: estimate takes its homing time from the predictor",
+                 "PrintPreparationManager: estimate heats to the file's temperatures",
                  "[print_preparation][estimate]") {
     lv_init_safe();
     PrinterState& printer_state = get_printer_state();
@@ -753,24 +802,115 @@ TEST_CASE_METHOD(HelixTestFixture,
 
     PrintPreparationManager manager;
     manager.set_dependencies(nullptr, &printer_state);
-    lv_subject_t* estimate = manager.get_preprint_estimate_subject();
-    const int homing = static_cast<int>(helix::PrintStartPhase::HOMING);
+    lv_subject_t* const estimate = manager.get_preprint_estimate_subject();
+    PreprintConfigScope config;
+    EstimateRatesScope rates;
+    auto& thermal = ThermalRateManager::instance();
+    const FileMetadata file = file_at(60, 220);
 
-    // Heaters idle and no pre-print options: the estimate is the homing time.
-    SECTION("a printer with measured default phases") {
-        const std::string name = "Elegoo Centauri Carbon";
-        PreprintConfigScope config(name);
-        printer_state.set_printer_type_sync(name);
-        manager.recalculate_estimate();
-        REQUIRE(lv_subject_get_int(estimate) ==
-                PrinterDetector::get_print_start_default_phases(name).at(homing));
+    SECTION("no metadata yet: no estimate") {
+        set_temps(printer_state, 25, 25);
+        lv_subject_set_int(estimate, 123);
+        manager.recalculate_estimate(nullptr, file.filename);
+        REQUIRE(lv_subject_get_int(estimate) == 0);
     }
 
-    SECTION("a printer on the generic defaults") {
-        PreprintConfigScope config;
-        manager.recalculate_estimate();
-        REQUIRE(lv_subject_get_int(estimate) ==
-                helix::PreprintPredictor::default_phase_durations().at(homing));
+    SECTION("cold printer, no history: the full heat-up plus every default phase") {
+        set_temps(printer_state, 25, 25);
+        manager.recalculate_estimate(&file, file.filename);
+        const float heat = thermal.estimate_heating_seconds("extruder", 25.0f, 220.0f) +
+                           thermal.estimate_heating_seconds("heater_bed", 25.0f, 60.0f);
+        REQUIRE(heat > 100.0f);
+        REQUIRE(lv_subject_get_int(estimate) == static_cast<int>(heat + sum_of_default_phases()));
+        REQUIRE(lv_subject_get_int(estimate) > 300);
+    }
+
+    SECTION("a warm printer heats less") {
+        set_temps(printer_state, 25, 25);
+        manager.recalculate_estimate(&file, file.filename);
+        const int cold = lv_subject_get_int(estimate);
+        set_temps(printer_state, 55, 200);
+        manager.recalculate_estimate(&file, file.filename);
+        const float heat = thermal.estimate_heating_seconds("extruder", 200.0f, 220.0f) +
+                           thermal.estimate_heating_seconds("heater_bed", 55.0f, 60.0f);
+        REQUIRE(lv_subject_get_int(estimate) == static_cast<int>(heat + sum_of_default_phases()));
+        REQUIRE(lv_subject_get_int(estimate) < cold);
+    }
+
+    SECTION("a printer with its own default phases uses them") {
+        const std::string name = "Elegoo Centauri Carbon";
+        PreprintConfigScope typed(name);
+        printer_state.set_printer_type_sync(name);
+        set_temps(printer_state, 25, 25);
+        manager.invalidate_predictor_cache();
+        manager.recalculate_estimate(&file, file.filename);
+        const float heat = thermal.estimate_heating_seconds("extruder", 25.0f, 220.0f) +
+                           thermal.estimate_heating_seconds("heater_bed", 25.0f, 60.0f);
+        REQUIRE(sum_of_default_phases() != 260);
+        REQUIRE(lv_subject_get_int(estimate) == static_cast<int>(heat + sum_of_default_phases()));
+    }
+
+    SECTION("history: the recorded wall clock, heating included") {
+        helix::PreprintEntry e;
+        e.total_seconds = 400;
+        e.timestamp = 1000;
+        e.temp_bucket = 1;
+        e.window = helix::PreprintWindow::PrinterEdge;
+        e.phase_durations = {{static_cast<int>(helix::PrintStartPhase::HOMING), 30},
+                             {static_cast<int>(helix::PrintStartPhase::BED_MESH), 120}};
+        helix::PreprintPredictor::append_to_config(e);
+        set_temps(printer_state, 25, 25);
+        manager.invalidate_predictor_cache();
+        manager.recalculate_estimate(&file, file.filename);
+        REQUIRE(lv_subject_get_int(estimate) == 400);
+
+        SECTION("a toggle turned off subtracts its phase") {
+            manager.set_option_state_provider(
+                [](const std::string& id) { return id == "bed_mesh" ? 0 : -1; });
+            manager.recalculate_estimate(&file, file.filename);
+            REQUIRE(lv_subject_get_int(estimate) == 280);
+        }
+
+        SECTION("a toggle left on keeps its phase") {
+            manager.set_option_state_provider(
+                [](const std::string& id) { return id == "bed_mesh" ? 1 : -1; });
+            manager.recalculate_estimate(&file, file.filename);
+            REQUIRE(lv_subject_get_int(estimate) == 400);
+        }
+    }
+
+    SECTION("history that never named a phase: a toggle left on adds nothing") {
+        // AD5M-style: the start meshes, the matcher never mapped it, so the
+        // mesh is already inside the recorded 400s.
+        helix::PreprintEntry e;
+        e.total_seconds = 400;
+        e.timestamp = 1000;
+        e.temp_bucket = 1;
+        e.window = helix::PreprintWindow::PrinterEdge;
+        e.phase_durations = {{static_cast<int>(helix::PrintStartPhase::HOMING), 30}};
+        helix::PreprintPredictor::append_to_config(e);
+        set_temps(printer_state, 25, 25);
+        manager.invalidate_predictor_cache();
+        manager.set_option_state_provider([](const std::string& id) {
+            return id == "bed_mesh" || id == "qgl" || id == "z_tilt" || id == "nozzle_clean" ||
+                           id == "purge_line"
+                       ? 1
+                       : -1;
+        });
+        manager.recalculate_estimate(&file, file.filename);
+        REQUIRE(lv_subject_get_int(estimate) == 400);
+    }
+
+    SECTION("no history: a toggle turned off subtracts its default phase") {
+        set_temps(printer_state, 25, 25);
+        manager.recalculate_estimate(&file, file.filename);
+        const int all = lv_subject_get_int(estimate);
+        manager.set_option_state_provider(
+            [](const std::string& id) { return id == "bed_mesh" ? 0 : -1; });
+        manager.recalculate_estimate(&file, file.filename);
+        const int mesh = helix::PreprintPredictor::default_phase_durations().at(
+            static_cast<int>(helix::PrintStartPhase::BED_MESH));
+        REQUIRE(lv_subject_get_int(estimate) == all - mesh);
     }
 }
 
@@ -790,12 +930,16 @@ TEST_CASE_METHOD(
     manager.set_dependencies(nullptr, &printer_state);
 
     PreprintConfigScope config;
-    manager.recalculate_estimate();
+    EstimateRatesScope rates;
+    set_temps(printer_state, 25, 25);
+    const FileMetadata file = file_at(60, 220);
+    manager.recalculate_estimate(&file, file.filename);
 
+    auto& thermal = ThermalRateManager::instance();
+    const float heat = thermal.estimate_heating_seconds("extruder", 25.0f, 220.0f) +
+                       thermal.estimate_heating_seconds("heater_bed", 25.0f, 60.0f);
     lv_subject_t* const estimate = manager.get_preprint_estimate_subject();
-    const int homing = static_cast<int>(helix::PrintStartPhase::HOMING);
-    REQUIRE(lv_subject_get_int(estimate) ==
-            helix::PreprintPredictor::default_phase_durations().at(homing));
+    REQUIRE(lv_subject_get_int(estimate) == static_cast<int>(heat + sum_of_default_phases()));
 }
 
 TEST_CASE_METHOD(HelixTestFixture,
@@ -1048,6 +1192,65 @@ TEST_CASE_METHOD(HelixTestFixture,
         auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
         REQUIRE(line_containing(lines, "LOAD_AI_RUN").empty());
     }
+}
+
+/**
+ * Input shaping is not a pre-print step: a U1 start offers no shaper option
+ * and sends no SHAPER_CALIBRATE preference.
+ */
+TEST_CASE_METHOD(HelixTestFixture, "PrintPreparationManager: a U1 start sends no SHAPER_CALIBRATE",
+                 "[print_preparation][pre_print_options][snapmaker_u1]") {
+    lv_init_safe();
+
+    PrinterState& printer_state = get_printer_state();
+    PrinterStateTestAccess::reset(printer_state);
+    printer_state.init_subjects(false);
+    printer_state.set_printer_type_sync("Snapmaker U1");
+
+    REQUIRE(printer_state.profile_state().pre_print_option_set().find("shaper_calibrate") ==
+            nullptr);
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(nullptr, &printer_state);
+    // Even a provider answering "on" for a shaper id it was never offered
+    // changes nothing.
+    manager.set_option_state_provider([](const std::string&) { return 1; });
+
+    auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager);
+    REQUIRE(line_containing(lines, "SHAPER").empty());
+    REQUIRE(line_containing(lines, "BED_LEVEL") == "SET_PRINT_PREFERENCES BED_LEVEL=1");
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: U1 flow calibration needs every used slot's material",
+                 "[print_preparation][pre_print_options][snapmaker_u1][preflight]") {
+    lv_init_safe();
+
+    PrinterState& printer_state = get_printer_state();
+    PrinterStateTestAccess::reset(printer_state);
+    printer_state.init_subjects(false);
+    printer_state.set_printer_type_sync("Snapmaker U1");
+    const PrePrintOption* flow =
+        printer_state.profile_state().pre_print_option_set().find("flow_calibrate");
+    REQUIRE(flow != nullptr);
+    REQUIRE(flow->needs_material);
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(nullptr, &printer_state);
+    int flow_state = 1;
+    manager.set_option_state_provider(
+        [&flow_state](const std::string& id) { return id == "flow_calibrate" ? flow_state : 1; });
+    CHECK(manager.enabled_options_need_material());
+    flow_state = 0;
+    CHECK_FALSE(manager.enabled_options_need_material());
+
+    // A queued job's saved choice is asked first.
+    CHECK(manager.enabled_options_need_material([](const std::string&) { return 1; }));
+    flow_state = 1;
+    CHECK_FALSE(manager.enabled_options_need_material(
+        [](const std::string& id) { return id == "flow_calibrate" ? 0 : -1; }));
+    // A saved set that does not name the option falls through to the live state.
+    CHECK(manager.enabled_options_need_material([](const std::string&) { return -1; }));
 }
 
 // ============================================================================
@@ -1485,6 +1688,44 @@ TEST_CASE_METHOD(MacroAnalysisRetryFixture,
         REQUIRE(callback_found == false); // All attempts failed
         REQUIRE(manager_.is_macro_analysis_in_progress() == false);
         REQUIRE(manager_.get_macro_analysis().has_value()); // Has result with found=false
+    }
+}
+
+TEST_CASE_METHOD(MacroAnalysisRetryFixture,
+                 "PrintPreparationManager: a failed analysis is reported unless the login was "
+                 "refused",
+                 "[print_preparation][retry][eventloop][slow][api-key]") {
+    const bool refused = GENERATE(false, true);
+    if (refused) {
+        helix::moonraker_auth::set_credential({"printer.lan", 7125, ""});
+        helix::moonraker_auth::mark_unauthorized();
+        REQUIRE(helix::moonraker_auth::unauthorized());
+    }
+    auto errors = std::make_shared<std::vector<std::string>>();
+    helix::ui::set_test_notification_event_hook([errors](const helix::ui::NotificationEvent& e) {
+        if (e.severity == ToastSeverity::ERROR) {
+            errors->push_back(e.message);
+        }
+    });
+
+    set_list_files_always_fail();
+    std::atomic<bool> landed{false};
+    manager_.set_macro_analysis_callback(
+        [&](const helix::PrintStartAnalysis& /*analysis*/) { landed = true; });
+    manager_.analyze_print_start_macro();
+    const bool finished = wait_for([&]() { return landed.load(); }, 8000);
+    helix::ui::set_test_notification_event_hook(nullptr);
+    helix::moonraker_auth::set_credential({});
+
+    INFO("refused login: " << refused);
+    REQUIRE(finished);
+    REQUIRE(get_list_files_call_count() == 3);
+    if (refused) {
+        CHECK(errors->empty());
+    } else {
+        CHECK(*errors == std::vector<std::string>{
+                             "Could not analyze PRINT_START macro. Some print options may be "
+                             "unavailable."});
     }
 }
 
@@ -2372,6 +2613,20 @@ TEST_CASE("PrepManager: Extension safety - registry completeness", "[print_prepa
         // Non-existent key returns nullopt
         REQUIRE_FALSE(OperationRegistry::get_by_key("nonexistent").has_value());
         REQUIRE_FALSE(OperationRegistry::get_by_key("").has_value());
+        // Keys are the lowercase capability keys; the category spelling is not one.
+        REQUIRE_FALSE(OperationRegistry::get_by_key("BED_MESH").has_value());
+        REQUIRE_FALSE(OperationRegistry::get_by_key("homing").has_value());
+    }
+
+    SECTION("Every entry round-trips and matches operation_patterns naming") {
+        for (const auto& info : OperationRegistry::all()) {
+            INFO("Checking: " << info.capability_key);
+            auto by_key = OperationRegistry::get_by_key(info.capability_key);
+            REQUIRE(by_key.has_value());
+            CHECK(by_key->category == info.category);
+            CHECK(info.friendly_name == category_name(info.category));
+            CHECK(info.capability_key == category_key(info.category));
+        }
     }
 }
 
@@ -2671,8 +2926,8 @@ TEST_CASE("PrepManager: Extension safety - adding new operations", "[print_prepa
      *
      * 1. Add enum value to OperationCategory in operation_patterns.h
      * 2. Add entry to OperationRegistry::build_all() in operation_registry.h
-     * 3. Add keyword patterns to OPERATION_KEYWORDS in operation_patterns.h
-     * 4. Add skip/perform variations to SKIP_PARAM_VARIATIONS/PERFORM_PARAM_VARIATIONS
+     * 3. Add keyword patterns to kOperationKeywords in operation_patterns.h
+     * 4. Add skip/perform variations to kSkipParamVariations/kPerformParamVariations
      * 5. Update category_key() and category_name() in operation_patterns.h
      * 6. Add UI subject handling in PrintPreparationManager
      * 7. Add printer database entries if needed
@@ -3094,20 +3349,19 @@ TEST_CASE_METHOD(HelixTestFixture,
     SECTION("job temps come from the file's own START_PRINT call") {
         // The gcode file's START_PRINT line is the source of truth for temps
         // (Moonraker metadata lies on multi-material files). The scanner
-        // extracts them into print_start; the pre-start renderer must use
-        // them when the scanned file is the file being printed.
+        // extracts them into print_start, and the start hands the renderer
+        // its own file's call.
         gcode::ScanResult scan;
         scan.print_start.found = true;
         scan.print_start.macro_name = "START_PRINT";
         scan.print_start.raw_line = "START_PRINT EXTRUDER_TEMP=260 BED_TEMP=105";
         scan.print_start.extruder_temp = 260;
         scan.print_start.bed_temp = 105;
-        manager.set_cached_scan_result(scan, "part.gcode");
 
         manager.set_option_state_provider(
             [](const std::string& id) { return id == "bed_mesh" ? 1 : -1; });
-        auto lines =
-            PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(manager, "part.gcode");
+        auto lines = PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(
+            manager, "part.gcode", &scan);
         bool found = false;
         for (const auto& l : lines) {
             if (l.find("BED_MESH_CALIBRATE_START_PRINT") != std::string::npos) {
@@ -3119,12 +3373,56 @@ TEST_CASE_METHOD(HelixTestFixture,
         REQUIRE(found);
     }
 
-    SECTION("temps render 0 when the scan cache is for a different file") {
+    SECTION("the file's own mesh call replaces the pre-start one") {
+        // A slicer start sequence that calls BED_MESH_CALIBRATE_START_PRINT
+        // meshes on its own; sending the macro ahead of the job meshes twice.
+        manager.set_option_state_provider(
+            [](const std::string& id) { return id == "bed_mesh" ? 1 : -1; });
+        const auto sends_mesh = [&](const std::string& start_gcode) {
+            const gcode::ScanResult scan = gcode::GCodeOpsDetector().scan_content(start_gcode);
+            for (const auto& l : PrintPreparationManagerTestAccess::get_pre_start_gcode_lines(
+                     manager, "part.gcode", &scan)) {
+                if (l.find("BED_MESH_CALIBRATE_START_PRINT") != std::string::npos) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        CHECK_FALSE(sends_mesh("G28\n"
+                               "BED_MESH_CALIBRATE_START_PRINT EXTRUDER_TEMP=250 BED_TEMP=80\n"
+                               "START_PRINT EXTRUDER_TEMP=250 BED_TEMP=80\n"
+                               "G1 X10 Y10 E5\n"));
+        CHECK_FALSE(sends_mesh("  bed_mesh_calibrate_start_print\n"
+                               "G1 X10 Y10 E5\n"));
+        // Other mesh lines ahead of the call do not hide it.
+        CHECK_FALSE(sends_mesh("BED_MESH_CLEAR\n"
+                               "BED_MESH_CALIBRATE_START_PRINT EXTRUDER_TEMP=250 BED_TEMP=80\n"
+                               "G1 X10 Y10 E5\n"));
+        CHECK_FALSE(sends_mesh("BED_MESH_PROFILE LOAD=default\n"
+                               "G28\n"
+                               "BED_MESH_CALIBRATE_START_PRINT\n"
+                               "G1 X10 Y10 E5\n"));
+
+        // Lines that use a stored mesh or only ask for one do not mesh.
+        CHECK(sends_mesh("BED_MESH_PROFILE LOAD=default\n"
+                         "START_PRINT EXTRUDER_TEMP=250 BED_TEMP=80\n"
+                         "G1 X10 Y10 E5\n"));
+        CHECK(sends_mesh("BED_MESH_CLEAR\n"
+                         "G1 X10 Y10 E5\n"));
+        CHECK(sends_mesh("START_PRINT EXTRUDER_TEMP=250 BED_TEMP=80 FORCE_LEVELING=true\n"
+                         "G1 X10 Y10 E5\n"));
+        CHECK(sends_mesh("G28\n"
+                         "G1 X10 Y10 E5\n"));
+    }
+
+    SECTION("temps render 0 when the start has no START_PRINT call of its own") {
+        // The shown file's scan is not the started file's.
         gcode::ScanResult scan;
         scan.print_start.found = true;
         scan.print_start.bed_temp = 105;
         scan.print_start.extruder_temp = 260;
-        manager.set_cached_scan_result(scan, "other.gcode");
+        manager.set_cached_scan_result(scan, "part.gcode");
 
         manager.set_option_state_provider(
             [](const std::string& id) { return id == "bed_mesh" ? 1 : -1; });
@@ -3554,13 +3852,12 @@ TEST_CASE_METHOD(HelixTestFixture,
 // ============================================================================
 // A start that dies inside the manager must retire the preparing job
 //
-// The modify and remap routes take NO completion callback — continue_print_start()
-// calls modify_and_print() and returns — so PrintStartController's
-// retire_preparing(Failed) is unreachable from them. Nothing else can retire the
-// job, and `print_in_progress` is now PUBLISHED from that job rather than set by
-// hand, so a leak latches the flag until the 1800s watchdog: can_start_new_print()
-// refuses every later print, job_holds_machine stays 1 (greying jog, levelling,
-// macros and the bypass tile), and the panel sits on "Preparing".
+// The modify and remap routes end without an error message, so
+// PrintStartController's retire_preparing(Failed) is unreachable from them.
+// Nothing else can retire the job, and `print_in_progress` is PUBLISHED from that
+// job rather than set by hand, so a leak latches the flag until the 1800s watchdog:
+// can_start_new_print() refuses every later print, job_holds_machine stays 1 (greying jog,
+// levelling, macros and the bypass tile), and the panel sits on "Preparing".
 //
 // Mutation check: delete the abandon_start() call from the exit this drives and
 // the REQUIRE_FALSE below fails.
@@ -3589,11 +3886,17 @@ TEST_CASE_METHOD(HelixTestFixture,
     // Mutation-verified: deleting abandon_start("modify_no_api") fails the
     // REQUIRE_FALSE below. (Deleting the OTHER guard's call does not, which is
     // the point of naming which exit this drives rather than guessing.)
-    PrintPreparationManagerTestAccess::modify_and_print(manager, "doomed.gcode");
+    std::optional<bool> completed;
+    PrintPreparationManagerTestAccess::modify_and_print(
+        manager, "doomed.gcode", nullptr,
+        [&completed](bool success, const std::string&) { completed = success; });
 
     REQUIRE_FALSE(state.print_state().has_preparing_job());
     REQUIRE(lv_subject_get_int(state.print_state().get_print_in_progress_subject()) == 0);
     REQUIRE(state.print_state().last_preparing_exit() == helix::PreparingExit::Failed);
+    // The caller waiting on the start learns it ended.
+    REQUIRE(completed.has_value());
+    CHECK_FALSE(*completed);
 
     // And the machine is released — this is the user-visible half of the latch.
     REQUIRE(lv_subject_get_int(state.print_state().get_job_holds_machine_subject()) == 0);
@@ -3635,9 +3938,7 @@ namespace {
 /// Run queued callbacks until nothing new is enqueued. Each drain() swaps out
 /// one batch, and these stages enqueue their successor from inside a batch.
 void drain_until_quiet() {
-    for (int i = 0; i < 16; ++i) {
-        UpdateQueue::instance().drain();
-    }
+    UpdateQueueTestAccess::drain_all(UpdateQueue::instance(), 16);
 }
 
 /// Number of lines equal to @p want once any trailing CR is stripped.
@@ -3721,6 +4022,166 @@ TEST_CASE_METHOD(HelixTestFixture,
 }
 
 TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a remap cancelled during the transfer never starts",
+                 "[print_preparation][remap][preparing_cancel]") {
+    lv_init_safe();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+    state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+
+    // T1 -> T2 rewrites and uploads a copy; T5 is not in the file, so the
+    // original starts unchanged.
+    const bool rewritten = GENERATE(true, false);
+    CAPTURE(rewritten);
+    const std::map<int, int> remap =
+        rewritten ? std::map<int, int>{{1, 2}} : std::map<int, int>{{5, 6}};
+    const bool withdraw = GENERATE(true, false);
+    CAPTURE(withdraw);
+
+    std::optional<bool> completed;
+    manager.modify_and_print_with_remap(
+        kRemapFixture, remap, nullptr,
+        [&completed](bool ok, const std::string&) { completed = ok; });
+    if (withdraw) {
+        // Stop while the copy is still on its way.
+        state.print_state().retire_preparing(helix::PreparingExit::Cancelled);
+    }
+    drain_until_quiet();
+
+    const size_t sent =
+        api.job_mock().started_prints().size() + api.job_mock().modified_prints().size();
+    CHECK(sent == (withdraw ? 0u : 1u));
+    if (withdraw) {
+        REQUIRE(completed.has_value());
+        CHECK_FALSE(*completed);
+        if (rewritten) {
+            // The uploaded copy goes with the start it was made for.
+            const auto& uploads = api.transfers_mock().path_uploads();
+            REQUIRE(uploads.size() == 1);
+            const auto& deleted = api.files_mock().deleted_files();
+            CHECK(std::find(deleted.begin(), deleted.end(), "gcodes/" + uploads[0].dest_path) !=
+                  deleted.end());
+        }
+    } else {
+        CHECK(state.print_state().preparing_start() == helix::PreparingStart::Accepted);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a plugin fallback for a cancelled job never starts",
+                 "[print_preparation][remap][plugin_server_edits][preparing_cancel]") {
+    // The fallback rewrites on the screen, minutes after the job was armed. It
+    // must stay bound to that job rather than adopt "no job" and print.
+    lv_init_safe();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+    state.set_helix_plugin_installed(true);
+    PluginFeatureEntry entry;
+    entry.version = gcode::kServerEditsMinVersion;
+    entry.available = true;
+    entry.enabled = true;
+    state.plugin_status_state().set_features({{gcode::kServerEditsFeature, entry}});
+    drain_until_quiet();
+    api.job_mock().mock_edited_print_error(MoonrakerError::from_json_rpc(
+        {{"code", 503}, {"message", "Feature unavailable"}}, "server.helix.print_edited"));
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+    state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+    manager.set_cached_file_size(123456);
+    std::optional<bool> completed;
+    manager.modify_and_print_with_remap(
+        kRemapFixture, {{1, 2}}, nullptr,
+        [&completed](bool ok, const std::string&) { completed = ok; });
+    REQUIRE(api.job_mock().edited_prints().size() == 1);
+    CHECK(state.print_state().preparing_start() == helix::PreparingStart::InFlight);
+    const bool withdraw = GENERATE(true, false);
+    CAPTURE(withdraw);
+    if (!withdraw) {
+        // The fallback runs first: the plugin refused, so nothing reached the
+        // printer and Stop must not cancel there while the copy is rewritten.
+        UpdateQueue::instance().drain();
+        CHECK(state.print_state().preparing_start() == helix::PreparingStart::None);
+        drain_until_quiet();
+        CHECK(api.job_mock().started_prints().size() + api.job_mock().modified_prints().size() ==
+              1);
+        return;
+    }
+    // Stop while the plugin's refusal is on its way back.
+    state.print_state().retire_preparing(helix::PreparingExit::Cancelled);
+    drain_until_quiet();
+
+    CHECK(api.transfers_mock().download_destinations().empty());
+    CHECK(api.job_mock().started_prints().empty());
+    CHECK(api.job_mock().modified_prints().empty());
+    REQUIRE(completed.has_value());
+    CHECK_FALSE(*completed);
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a staged start that loses its answer stays preparing",
+                 "[print_preparation][remap][preparing_cancel][1898]") {
+    // A timeout means Klipper is busy running the start: the job stays
+    // preparing, Stop or no Stop, and the copy it is printing is not deleted.
+    lv_init_safe();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+    // The plugin's print_edited path, or the upload path's print_modified.
+    const bool edited = GENERATE(true, false);
+    CAPTURE(edited);
+    const MoonrakerError lost = MoonrakerError::timeout("server.helix.print", 600000);
+    if (edited) {
+        state.set_helix_plugin_installed(true);
+        PluginFeatureEntry entry;
+        entry.version = gcode::kServerEditsMinVersion;
+        entry.available = true;
+        entry.enabled = true;
+        state.plugin_status_state().set_features({{gcode::kServerEditsFeature, entry}});
+        drain_until_quiet();
+        api.job_mock().mock_edited_print_error(lost);
+    } else {
+        api.job_mock().mock_modified_print_error(lost);
+    }
+
+    const bool stop_waiting = GENERATE(true, false);
+    CAPTURE(stop_waiting);
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+    state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+    if (stop_waiting) {
+        state.print_state().note_preparing_cancel_requested();
+    }
+    manager.set_cached_file_size(123456);
+    std::optional<bool> completed;
+    manager.modify_and_print_with_remap(
+        kRemapFixture, {{1, 2}}, nullptr,
+        [&completed](bool ok, const std::string&) { completed = ok; });
+    drain_until_quiet();
+
+    REQUIRE(api.job_mock().edited_prints().size() + api.job_mock().modified_prints().size() == 1);
+    CHECK(state.print_state().has_preparing_job());
+    CHECK(state.print_state().preparing_start() == helix::PreparingStart::Unanswered);
+    CHECK_FALSE(completed.has_value());
+    CHECK(api.files_mock().deleted_files().empty());
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
                  "PrintPreparationManager: a remap on a transport without local copies is refused",
                  "[print_preparation][remap]") {
     lv_init_safe();
@@ -3743,6 +4204,179 @@ TEST_CASE_METHOD(HelixTestFixture,
     CHECK(api.job_mock().modified_prints().empty());
     CHECK_FALSE(state.print_state().has_preparing_job());
     CHECK(state.print_state().last_preparing_exit() == helix::PreparingExit::Failed);
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a remap travels to the plugin as an edit list when "
+                 "server_edits is ready",
+                 "[print_preparation][remap][plugin_server_edits]") {
+    lv_init_safe();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+    state.set_helix_plugin_installed(true);
+
+    const bool enabled = GENERATE(true, false);
+    CAPTURE(enabled);
+    PluginFeatureEntry entry;
+    entry.version = gcode::kServerEditsMinVersion;
+    entry.available = true;
+    entry.enabled = enabled;
+    state.plugin_status_state().set_features({{gcode::kServerEditsFeature, entry}});
+    drain_until_quiet();
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+    state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+
+    manager.set_cached_file_size(123456);
+    manager.modify_and_print_with_remap(kRemapFixture, {{1, 2}}, nullptr);
+    drain_until_quiet();
+
+    const auto& edited = api.job_mock().edited_prints();
+    if (enabled) {
+        // Nothing crosses the wire but the edit list.
+        CHECK(api.transfers_mock().download_destinations().empty());
+        CHECK(api.transfers_mock().path_uploads().empty());
+        CHECK(api.job_mock().modified_prints().empty());
+        REQUIRE(edited.size() == 1);
+        CHECK(edited[0].original_filename == kRemapFixture);
+        CHECK(gcode::is_uploaded_rewrite_path(edited[0].temp_file_path));
+        CHECK(gcode::resolve_gcode_filename(edited[0].temp_file_path) == kRemapFixture);
+        CHECK(edited[0].edits == *gcode::to_server_edits(gcode::EditList{{}, {{1, 2}}}));
+        CHECK(edited[0].modifications == std::vector<std::string>{"remap_T1_to_T2"});
+        CHECK(edited[0].file_size == 123456);
+    } else {
+        // Switched off, the screen rewrites the file as it always has.
+        CHECK(edited.empty());
+        CHECK(api.transfers_mock().path_uploads().size() == 1);
+        CHECK(api.job_mock().modified_prints().size() == 1);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a print_edited refused for space says so",
+                 "[print_preparation][remap][plugin_server_edits][plugin_storage]") {
+    lv_init_safe();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+    state.set_helix_plugin_installed(true);
+    PluginFeatureEntry entry;
+    entry.version = gcode::kServerEditsMinVersion;
+    entry.available = true;
+    entry.enabled = true;
+    state.plugin_status_state().set_features({{gcode::kServerEditsFeature, entry}});
+    drain_until_quiet();
+
+    const int code = GENERATE(storage::kNoSpaceRpcCode, 409);
+    CAPTURE(code);
+    api.job_mock().mock_edited_print_error(MoonrakerError::from_json_rpc(
+        {{"code", code}, {"message", "Refused"}}, "server.helix.print_edited"));
+    std::vector<std::string> errors;
+    helix::ui::set_test_notification_error_hook(
+        [&errors](const std::string& msg) { errors.push_back(msg); });
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+    state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+    manager.modify_and_print_with_remap(kRemapFixture, {{1, 2}}, nullptr);
+    drain_until_quiet();
+    helix::ui::set_test_notification_error_hook(nullptr);
+
+    REQUIRE(api.job_mock().edited_prints().size() == 1);
+    REQUIRE(errors.size() == 1);
+    if (code == storage::kNoSpaceRpcCode) {
+        CHECK(errors[0] == storage::kNoUploadSpaceMessage);
+    } else {
+        CHECK(errors[0].rfind("Failed to start print: ", 0) == 0);
+    }
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a failed print_edited falls back only when the "
+                 "plugin cannot do the edit",
+                 "[print_preparation][remap][plugin_server_edits]") {
+    lv_init_safe();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+    state.set_helix_plugin_installed(true);
+    PluginFeatureEntry entry;
+    entry.version = gcode::kServerEditsMinVersion;
+    entry.available = true;
+    entry.enabled = true;
+    state.plugin_status_state().set_features({{gcode::kServerEditsFeature, entry}});
+    drain_until_quiet();
+
+    auto rpc = [](int code, const char* message) {
+        return MoonrakerError::from_json_rpc({{"code", code}, {"message", message}},
+                                             "server.helix.print_edited");
+    };
+    MoonrakerError lost;
+    lost.type = MoonrakerErrorType::CONNECTION_LOST;
+
+    struct Case {
+        const char* what;
+        MoonrakerError error;
+        bool falls_back;
+    };
+    const Case cases[] = {
+        {"timeout", MoonrakerError::timeout("server.helix.print_edited", 1000), false},
+        {"connection lost", lost, false},
+        {"file changed", rpc(409, "Refusing to edit: line 3 is not the line the scan found"),
+         false},
+        {"method not found", rpc(-32601, "Method not found"), true},
+        {"edit kind the plugin lacks", rpc(400, "Invalid edit list: edit 0: unknown action"), true},
+    };
+    for (const auto& c : cases) {
+        CAPTURE(c.what);
+        api.job_mock().mock_edited_print_error(c.error);
+        const size_t edited_before = api.job_mock().edited_prints().size();
+        const size_t downloads_before = api.transfers_mock().download_destinations().size();
+        const size_t modified_before = api.job_mock().modified_prints().size();
+        const size_t deletes_before = api.files_mock().deleted_files().size();
+
+        PrintPreparationManager manager;
+        manager.set_dependencies(&api, &state);
+        state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+        std::optional<bool> completed;
+        manager.modify_and_print_with_remap(
+            kRemapFixture, {{1, 2}}, nullptr,
+            [&completed](bool ok, const std::string&) { completed = ok; });
+        drain_until_quiet();
+
+        CHECK(api.job_mock().edited_prints().size() == edited_before + 1);
+        // The plugin removes its own copy; nothing here deletes a file it may be printing.
+        CHECK(api.files_mock().deleted_files().size() == deletes_before);
+        if (c.falls_back) {
+            CHECK(api.transfers_mock().download_destinations().size() == downloads_before + 1);
+            CHECK(api.job_mock().modified_prints().size() == modified_before + 1);
+        } else {
+            // No second start: after a timeout the plugin may still start this one.
+            CHECK(api.transfers_mock().download_destinations().size() == downloads_before);
+            CHECK(api.job_mock().modified_prints().size() == modified_before);
+            CHECK(api.job_mock().started_prints().empty());
+            // A timeout leaves the job for the printer to settle; a dropped
+            // connection with no Stop waiting, like a refusal, fails it.
+            const bool lost_answer = c.error.command_may_still_run();
+            CHECK(state.print_state().has_preparing_job() == lost_answer);
+            CHECK(completed.has_value() == !lost_answer);
+            if (completed) {
+                CHECK_FALSE(*completed);
+            }
+        }
+        state.print_state().retire_preparing(helix::PreparingExit::Failed);
+    }
 }
 
 TEST_CASE_METHOD(HelixTestFixture,
@@ -3775,6 +4409,42 @@ TEST_CASE_METHOD(HelixTestFixture,
     const auto& uploads = api.transfers_mock().path_uploads();
     REQUIRE(uploads.size() == 1);
     CHECK(gcode::resolve_gcode_filename(uploads[0].dest_path) == original);
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a printer that cannot print from a dot-directory "
+                 "gets its copies staged in the visible directory",
+                 "[print_preparation][remap][staging]") {
+    lv_init_safe();
+    PrinterStateTestAccess::reset(get_printer_state());
+    get_printer_state().init_subjects(false);
+
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+    PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+    state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+
+    const bool forgex = GENERATE(true, false);
+    const std::string route = GENERATE(std::string("remap"), std::string("modify"));
+    CAPTURE(forgex, route);
+    REQUIRE(state.profile_state().set_printer_type(forgex ? "FlashForge Adventurer 5M (ForgeX)"
+                                                          : "FlashForge Adventurer 5M",
+                                                   true, false, false));
+    const std::string root = forgex ? "helix_staging/modified_" : ".helix_temp/modified_";
+    if (route == "remap") {
+        manager.modify_and_print_with_remap(kRemapFixture, {{1, 2}}, nullptr);
+    } else {
+        manager.set_cached_scan_result(gcode::ScanResult{}, kRemapFixture);
+        PrintPreparationManagerTestAccess::modify_and_print(manager, kRemapFixture);
+    }
+    drain_until_quiet();
+
+    const auto& uploads = api.transfers_mock().path_uploads();
+    REQUIRE(uploads.size() == 1);
+    CHECK(uploads[0].dest_path.rfind(root, 0) == 0);
+    CHECK(gcode::resolve_gcode_filename(uploads[0].dest_path) == kRemapFixture);
 }
 
 TEST_CASE_METHOD(HelixTestFixture,
@@ -3826,6 +4496,34 @@ TEST_CASE_METHOD(HelixTestFixture,
     drain_until_quiet();
     CHECK_FALSE(BusyOverlay::is_pending());
     CHECK_FALSE(BusyOverlay::is_visible());
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a failed remap start answers its completion",
+                 "[print_preparation][remap]") {
+    // The completion is how the caller learns to re-enable Print: a remap that
+    // dies on the way must answer it, once, as a failure.
+    lv_init_safe();
+    MockPrinter mock_printer;
+    auto& state = mock_printer.state;
+    auto& api = mock_printer.api;
+
+    PrintPreparationManager manager;
+    manager.set_dependencies(&api, &state);
+    state.print_state().begin_preparing(PrintJobRef{"no_such_file.gcode", "gcodes", ""});
+
+    int answers = 0;
+    bool answered_success = true;
+    manager.modify_and_print_with_remap("no_such_file.gcode", {{1, 2}}, nullptr,
+                                        [&](bool success, const std::string& /*error*/) {
+                                            ++answers;
+                                            answered_success = success;
+                                        });
+    drain_until_quiet();
+
+    CHECK(answers == 1);
+    CHECK_FALSE(answered_success);
+    CHECK_FALSE(state.print_state().has_preparing_job());
 }
 
 TEST_CASE_METHOD(HelixTestFixture,
@@ -3940,6 +4638,48 @@ TEST_CASE_METHOD(HelixTestFixture,
         const auto& deleted = api.files_mock().deleted_files();
         REQUIRE(deleted.size() == 1);
         CHECK(deleted[0] == "gcodes/" + api.transfers_mock().path_uploads()[0].dest_path);
+        expect_job_retired();
+    }
+
+    SECTION("the printer has no room for the rewritten copy") {
+        MoonrakerClientMockTestAccess::report_full_disk(mock_printer.client);
+        std::vector<std::string> errors;
+        helix::ui::set_test_notification_error_hook(
+            [&errors](const std::string& msg) { errors.push_back(msg); });
+        manager.set_dependencies(&api, &state);
+        state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+        REQUIRE(state.print_state().has_preparing_job());
+
+        manager.modify_and_print_with_remap(kRemapFixture, {{1, 2}}, nullptr);
+        drain_until_quiet();
+        helix::ui::set_test_notification_error_hook(nullptr);
+
+        // Nothing is sent that would fill the disk mid-upload.
+        CHECK(api.transfers_mock().path_uploads().empty());
+        CHECK(api.job_mock().modified_prints().empty());
+        CHECK(errors == std::vector<std::string>{storage::kNoUploadSpaceMessage});
+        expect_job_retired();
+    }
+
+    SECTION("the plugin refuses the start for space") {
+        std::vector<std::string> errors;
+        helix::ui::set_test_notification_error_hook(
+            [&errors](const std::string& msg) { errors.push_back(msg); });
+        manager.set_dependencies(&api, &state);
+        api.job_mock().mock_modified_print_error(MoonrakerError::from_json_rpc(
+            {{"code", storage::kNoSpaceRpcCode}, {"message", "Not enough free space"}},
+            "server.helix.print_modified"));
+        state.print_state().begin_preparing(PrintJobRef{kRemapFixture, "gcodes", ""});
+        REQUIRE(state.print_state().has_preparing_job());
+
+        manager.modify_and_print_with_remap(kRemapFixture, {{1, 2}}, nullptr);
+        drain_until_quiet();
+        helix::ui::set_test_notification_error_hook(nullptr);
+        api.job_mock().mock_modified_print_error(std::nullopt);
+
+        REQUIRE(api.job_mock().modified_prints().size() == 1);
+        // The space message, which says where to free some, not a bare failure.
+        CHECK(errors == std::vector<std::string>{storage::kNoUploadSpaceMessage});
         expect_job_retired();
     }
 }
@@ -4155,7 +4895,7 @@ TEST_CASE_METHOD(HelixTestFixture,
         const PrePrintOption& qgl = rows.options[0];
         REQUIRE(qgl.id == "qgl");
         REQUIRE(qgl.default_enabled);
-        REQUIRE(PrePrintOptionsRenderer::label_for(qgl) == "Quad Gantry Level");
+        REQUIRE(PrePrintOptionsRenderer::label_for(qgl) == "Quad gantry level");
         const auto* param = std::get_if<PrePrintStrategyMacroParam>(&qgl.strategy);
         REQUIRE(param);
         REQUIRE(param->param_name == "SKIP_QGL");
@@ -4295,7 +5035,7 @@ TEST_CASE_METHOD(ObjectScanFixture,
 TEST_CASE_METHOD(ObjectScanFixture, "Definitions past the scan window are not in the scan",
                  "[print_preparation][pre_start_exclude]") {
     std::string content = "; HEADER\n";
-    content += std::string(helix::PRINTER_STOP_SCAN_BYTES, ';') + "\n";
+    content += std::string(helix::kPrinterStopScanBytes, ';') + "\n";
     content += "EXCLUDE_OBJECT_DEFINE NAME=Late_A CENTER=1,1\n";
     content += "EXCLUDE_OBJECT_DEFINE NAME=Late_B CENTER=9,9\n";
     helix::PlantedGcode file("late_defines.gcode", "", content);
@@ -4341,4 +5081,143 @@ TEST_CASE_METHOD(HelixTestFixture,
     CHECK(exclusions == std::vector<std::string>{"EXCLUDE_OBJECT NAME=Cube_id_1"});
     set_moonraker_api(nullptr);
     mock_printer.client.disconnect();
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: estimate reads the history window the start will run in",
+                 "[print_preparation][estimate]") {
+    // The pre-start line exists only once the extruder temperature is known,
+    // which for this file only its scanned START_PRINT call states. A start
+    // sends it, so the collector measures the host-pre-start window.
+    PrePrintOption ext_only = make_pre_start_gcode_opt("ai_detect");
+    ext_only.strategy = PrePrintStrategyPreStartGcode{"{?ext}AI_RUN T={extruder_temp}{/?}"};
+    PrePrintOptionSet set;
+    set.macro_name = "START_PRINT";
+    set.options.push_back(ext_only);
+    GateFixture fx(std::move(set));
+
+    PreprintConfigScope config;
+    for (const auto& [window, total] : {std::pair{helix::PreprintWindow::HostPreStart, 500},
+                                        std::pair{helix::PreprintWindow::PrinterEdge, 300}}) {
+        helix::PreprintEntry e;
+        e.total_seconds = total;
+        e.timestamp = 1000;
+        e.temp_bucket = 1;
+        e.window = window;
+        helix::PreprintPredictor::append_to_config(e);
+    }
+
+    gcode::ScanResult scan;
+    scan.print_start.found = true;
+    scan.print_start.macro_name = "START_PRINT";
+    scan.print_start.extruder_temp = 220;
+    scan.print_start.bed_temp = 60;
+    const FileMetadata file = file_at(60, 220);
+    PrintPreparationManagerTestAccess::keep_scan(fx.manager, file.filename, scan);
+
+    set_temps(fx.ps, 25, 25);
+    fx.manager.recalculate_estimate(&file, file.filename);
+    REQUIRE(lv_subject_get_int(fx.manager.get_preprint_estimate_subject()) == 500);
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a start records the phases its toggles turned off",
+                 "[print_preparation][estimate]") {
+    lv_init_safe();
+    PrinterState& printer_state = get_printer_state();
+    PrinterStateTestAccess::reset(printer_state);
+    printer_state.init_subjects(false);
+    PrintPreparationManager manager;
+    manager.set_dependencies(nullptr, &printer_state);
+
+    // bed_mesh off, qgl on, the rest not shown.
+    manager.set_option_state_provider([](const std::string& id) {
+        return id == "bed_mesh" ? 0 : id == "qgl" ? 1 : -1;
+    });
+    const helix::PreprintPhaseOverrides overrides =
+        PrintPreparationManagerTestAccess::preprint_phase_overrides(manager);
+    CHECK(overrides ==
+          helix::PreprintPhaseOverrides{{static_cast<int>(helix::PrintStartPhase::BED_MESH), false},
+                                        {static_cast<int>(helix::PrintStartPhase::QGL), true}});
+    CHECK(helix::PreprintPredictor::phases_skipped_by(overrides) ==
+          std::set<int>{static_cast<int>(helix::PrintStartPhase::BED_MESH)});
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: starting a print hands its phase toggles to the "
+                 "collector",
+                 "[print_preparation][estimate]") {
+    lv_init_safe();
+    MoonrakerManager moonraker;
+    MoonrakerManagerTestAccess::install_client(
+        moonraker, std::make_unique<helix::test::FakeMoonrakerClient>());
+    moonraker.init_print_start_collector();
+    const auto collector = moonraker.print_start_collector();
+    REQUIRE(collector);
+    set_moonraker_manager(&moonraker);
+    struct Uninstall {
+        ~Uninstall() {
+            set_moonraker_manager(nullptr);
+        }
+    } uninstall;
+    REQUIRE_FALSE(PrintStartCollectorTestAccess::phase_overrides(*collector).has_value());
+
+    MockPrinter mock_printer;
+    PrintPreparationManager manager;
+    manager.set_dependencies(&mock_printer.api, &mock_printer.state);
+    // bed_mesh off, qgl on, the rest not shown.
+    manager.set_option_state_provider([](const std::string& id) {
+        return id == "bed_mesh" ? 0 : id == "qgl" ? 1 : -1;
+    });
+
+    // The file's own scan, so the start can act on the steps turned off.
+    PrintPreparationManagerTestAccess::keep_scan(manager, "part.gcode", gcode::ScanResult{});
+
+    manager.start_print("part.gcode", "", []() {}, [](bool, const std::string&) {});
+    helix::ui::UpdateQueue::instance().drain();
+
+    const auto told = PrintStartCollectorTestAccess::phase_overrides(*collector);
+    REQUIRE(told.has_value());
+    CHECK(*told ==
+          helix::PreprintPhaseOverrides{{static_cast<int>(helix::PrintStartPhase::BED_MESH), false},
+                                        {static_cast<int>(helix::PrintStartPhase::QGL), true}});
+    manager.set_dependencies(nullptr, nullptr);
+}
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "PrintPreparationManager: a macro analysis reaches the collector's checklist "
+                 "order when the file has no start block",
+                 "[print_preparation][collector]") {
+    lv_init_safe();
+    MoonrakerManager moonraker;
+    MoonrakerManagerTestAccess::install_client(
+        moonraker, std::make_unique<helix::test::FakeMoonrakerClient>());
+    moonraker.init_print_start_collector();
+    const auto collector = moonraker.print_start_collector();
+    REQUIRE(collector);
+    set_moonraker_manager(&moonraker);
+    struct Uninstall {
+        ~Uninstall() {
+            set_moonraker_manager(nullptr);
+        }
+    } uninstall;
+    REQUIRE(collector->checklist_input().expected_order.empty());
+
+    helix::PrintStartAnalysis analysis;
+    analysis.found = true;
+    analysis.macro_name = "PRINT_START";
+    helix::PrintStartOperation mesh;
+    mesh.name = "BED_MESH_CALIBRATE";
+    mesh.category = helix::OperationCategory::BED_MESH;
+    helix::PrintStartOperation purge;
+    purge.name = "LINE_PURGE";
+    purge.category = helix::OperationCategory::PURGE_LINE;
+    analysis.operations = {mesh, purge};
+
+    PrintPreparationManager manager;
+    manager.set_macro_analysis(analysis);
+
+    CHECK(collector->checklist_input().expected_order ==
+          std::vector<helix::PrintStartPhase>{helix::PrintStartPhase::BED_MESH,
+                                              helix::PrintStartPhase::PURGING});
 }

@@ -13,14 +13,14 @@
 namespace helix::calibration {
 
 bool dsp_ms_is_capable(double psd_ms) {
-    return psd_ms > 0.0 && psd_ms < MAX_PSD_MS;
+    return psd_ms > 0.0 && psd_ms < kMaxPsdMs;
 }
 
 DspProbeResult probe_dsp_throughput() {
     std::vector<AccelSample> samples;
-    samples.reserve(PROBE_WINDOW_SAMPLES);
-    for (int i = 0; i < PROBE_WINDOW_SAMPLES; ++i) {
-        const float t = static_cast<float>(i) / PROBE_SAMPLE_RATE_HZ;
+    samples.reserve(kProbeWindowSamples);
+    for (int i = 0; i < kProbeWindowSamples; ++i) {
+        const float t = static_cast<float>(i) / kProbeSampleRateHz;
         const float decay = std::exp(-6.0f * t);
         const float v = decay * (1000.0f * std::sin(2.0f * 3.14159265f * 86.0f * t) +
                                  400.0f * std::sin(2.0f * 3.14159265f * 172.0f * t));
@@ -28,7 +28,7 @@ DspProbeResult probe_dsp_throughput() {
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    const auto psd = compute_psd(samples, PROBE_SAMPLE_RATE_HZ, PROBE_BANDWIDTH_HZ);
+    const auto psd = compute_psd(samples, kProbeSampleRateHz, kProbeBandwidthHz);
     const auto t1 = std::chrono::steady_clock::now();
 
     DspProbeResult r;
@@ -44,7 +44,7 @@ DspProbeResult probe_dsp_throughput() {
         spdlog::debug("[BeltDsp] probe produced an empty spectrum");
     }
     spdlog::info("[BeltDsp] {}-point PSD at {} Hz bandwidth took {:.1f} ms - {}",
-                 PROBE_WINDOW_SAMPLES, PROBE_BANDWIDTH_HZ, r.psd_ms,
+                 kProbeWindowSamples, kProbeBandwidthHz, r.psd_ms,
                  r.capable ? "capable" : "too slow for the live meter");
     return r;
 }

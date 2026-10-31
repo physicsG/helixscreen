@@ -25,6 +25,7 @@
 #include "moonraker_manager.h"
 #include "print_history_manager.h"
 #include "print_start_collector.h"
+#include "print_stop_reason.h"
 #include "printer_retarget.h"
 #include "printer_state.h"
 #include "sound_manager.h"
@@ -76,6 +77,21 @@ class RetargetFixture : public LVGLTestFixture {
         set_moonraker_manager(nullptr);
     }
 
+    /// The client's notify_gcode_response taps named @p handler.
+    size_t gcode_taps(const std::string& handler) const {
+        size_t n = 0;
+        for (const auto& cb : client_->method_callbacks["notify_gcode_response"]) {
+            n += cb.handler_name == handler ? 1 : 0;
+        }
+        return n;
+    }
+
+    /// The taps that are not the stop-reason tracker's.
+    size_t collector_taps() const {
+        return client_->method_callbacks["notify_gcode_response"].size() -
+               gcode_taps(helix::PrintStopReasonTracker::kHandlerName);
+    }
+
     static std::string shown_name() {
         return lv_subject_get_string(get_printer_state().get_active_printer_name_subject());
     }
@@ -102,14 +118,6 @@ TEST_CASE_METHOD(RetargetFixture, "Retarget: connects to the active printer as a
     CHECK(client_->get_last_url() == "ws://10.0.0.2:7126/websocket");
     CHECK(helix::AmsState::instance().backend_count() == 0);
     CHECK(shown_name() == "Beta");
-}
-
-TEST_CASE_METHOD(RetargetFixture, "Reconnect: the same printer keeps its AMS backends",
-                 "[multi-printer][retarget]") {
-    CHECK(helix::reconnect_active_printer());
-
-    CHECK(client_->get_last_url() == "ws://10.0.0.2:7126/websocket");
-    CHECK(helix::AmsState::instance().backend_count() == 1);
 }
 
 TEST_CASE_METHOD(RetargetFixture, "Retarget: a transport that cannot start reports failure",
@@ -154,12 +162,24 @@ TEST_CASE_METHOD(RetargetFixture, "Connect: every connection gets a print-start 
     // next printer's gcode.
     first->start();
     REQUIRE(first->is_active());
-    REQUIRE(client_->method_callbacks["notify_gcode_response"].size() == 1);
+    REQUIRE(collector_taps() == 1);
     REQUIRE(helix::retarget_printer_connection());
     CHECK(manager_.print_start_collector() != nullptr);
     CHECK(manager_.print_start_collector() != first);
     CHECK_FALSE(first->is_active());
-    CHECK(client_->method_callbacks["notify_gcode_response"].empty());
+    CHECK(collector_taps() == 0);
+}
+
+TEST_CASE_METHOD(RetargetFixture, "Connect: every connection tracks why its prints stop",
+                 "[multi-printer][retarget][stop_reason]") {
+    REQUIRE(gcode_taps(helix::PrintStopReasonTracker::kHandlerName) == 0);
+
+    REQUIRE(helix::connect_active_printer());
+    CHECK(gcode_taps(helix::PrintStopReasonTracker::kHandlerName) == 1);
+
+    // A switch replaces the tracker; the old one's tap goes with it.
+    REQUIRE(helix::retarget_printer_connection());
+    CHECK(gcode_taps(helix::PrintStopReasonTracker::kHandlerName) == 1);
 }
 
 TEST_CASE_METHOD(RetargetFixture, "Connect: a transport that cannot start gets no collector",

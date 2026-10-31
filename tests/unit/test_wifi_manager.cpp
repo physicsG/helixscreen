@@ -3,6 +3,7 @@
 
 #include "../../include/async_lifetime_guard.h"
 #include "../../include/config.h"
+#include "../../include/http_executor.h"
 #include "../../include/runtime_config.h"
 #include "../../include/system_settings_manager.h"
 #include "../../include/ui_update_queue.h"
@@ -19,8 +20,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -82,23 +85,6 @@ struct SysFixture {
  *   WiFiManager after its event callbacks are registered
  * - No callback registration: Networks weren't populating
  */
-
-// ============================================================================
-// Global LVGL Initialization (called once)
-// ============================================================================
-
-namespace {
-struct LVGLInitializer {
-    LVGLInitializer() {
-        lv_init_safe();
-        lv_display_t* disp = lv_display_create(800, 480);
-        alignas(64) static lv_color_t buf[800 * 10];
-        lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-    }
-};
-} // namespace
-
-static LVGLInitializer lvgl_init;
 
 // ============================================================================
 // Test Fixtures
@@ -586,6 +572,7 @@ TEST_CASE("WiFiManager::connect threads the hidden-network flag to the backend",
             reported_success = success;
         },
         /*is_hidden=*/true);
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
     REQUIRE(refused);
     REQUIRE_FALSE(reported_success);
     CHECK(raw->last_connect_hidden());
@@ -593,6 +580,7 @@ TEST_CASE("WiFiManager::connect threads the hidden-network flag to the backend",
     // The default stays "visible": a scan-list connect must not ask for a
     // hidden association.
     manager.connect("NotInScanList", "pw", [](bool, const std::string&, WiFiResult) {});
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
     CHECK_FALSE(raw->last_connect_hidden());
 
     helix::ui::UpdateQueue::instance().drain();
@@ -1040,9 +1028,9 @@ TEST_CASE("READY reasserts a stored WiFi-off setting onto the backend when a wir
     WiFiManager manager(std::move(backend));
 
     // start_async() (called from the constructor) fires READY synchronously
-    // for the mock backend, but the reassert itself is only queued, not run —
-    // drain to let it land.
-    helix::ui::UpdateQueue::instance().drain();
+    // for the mock backend, but the reassert itself is only queued, and its
+    // radio change runs on the control lane — settle to let both land.
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
 
     CHECK_FALSE(raw->is_radio_enabled());
     // A wired fallback exists, so the stored "off" choice is honoured as-is —
@@ -1080,7 +1068,7 @@ TEST_CASE("READY refuses to disable the radio with no wired fallback, and correc
     REQUIRE(raw->is_radio_enabled());
 
     WiFiManager manager(std::move(backend));
-    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
 
     CHECK(raw->is_radio_enabled());
     CHECK(SystemSettingsManager::instance().get_wifi_enabled());
@@ -1113,7 +1101,7 @@ TEST_CASE("READY refuses to disable the radio when interface resolution is incon
     REQUIRE(raw->is_radio_enabled());
 
     WiFiManager manager(std::move(backend));
-    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
 
     CHECK(raw->is_radio_enabled());
     CHECK(SystemSettingsManager::instance().get_wifi_enabled());
@@ -1153,9 +1141,9 @@ TEST_CASE("READY clears a stale soft radio block when the stored setting is WiFi
     WiFiManager manager(std::move(backend));
 
     // start_async() (called from the constructor) fires READY synchronously
-    // for the mock backend, but the reassert itself is only queued, not run —
-    // drain to let it land.
-    helix::ui::UpdateQueue::instance().drain();
+    // for the mock backend, but the reassert itself is only queued, and its
+    // radio change runs on the control lane — settle to let both land.
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
 
     CHECK(raw->is_radio_enabled());
     CHECK(SystemSettingsManager::instance().get_wifi_enabled());
@@ -1183,7 +1171,7 @@ TEST_CASE("READY leaves an already-enabled radio alone when the stored setting i
     REQUIRE(raw->is_radio_enabled());
 
     WiFiManager manager(std::move(backend));
-    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
 
     CHECK(raw->is_radio_enabled());
     CHECK(SystemSettingsManager::instance().get_wifi_enabled());
@@ -1269,7 +1257,7 @@ TEST_CASE("READY refusal path also clears a stale radio block, not just the stor
     REQUIRE_FALSE(raw->is_radio_enabled());
 
     WiFiManager manager(std::move(backend));
-    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(WiFiManagerTestAccess::settle(manager));
 
     CHECK(raw->is_radio_enabled());
     CHECK(SystemSettingsManager::instance().get_wifi_enabled());
@@ -1373,6 +1361,7 @@ TEST_CASE("forget on a backend that cannot forget informs, and never blames the 
             called = true;
             reported_success = ok;
         });
+        REQUIRE(WiFiManagerTestAccess::settle(manager));
 
         CHECK(called);
         // Still not a success — nothing was forgotten, and saying otherwise is
@@ -1393,6 +1382,7 @@ TEST_CASE("forget on a backend that cannot forget informs, and never blames the 
 
         ToastCounter toasts;
         manager.forget("Anything", nullptr);
+        REQUIRE(WiFiManagerTestAccess::settle(manager));
         CHECK(toasts.errors == 1);
         CHECK(toasts.infos == 0);
     }
@@ -1451,5 +1441,89 @@ TEST_CASE("READY leaves the stored WiFi setting alone when the backend cannot to
 
     SystemSettingsManager::instance().set_wifi_enabled(true);
     SystemSettingsManager::instance().deinit_subjects();
+    WiFiManagerTestAccess::reset_sys_root();
+}
+
+namespace {
+
+/// Records the thread every set_radio_enabled() ran on.
+class RadioThreadBackend : public WifiBackendMock {
+  public:
+    WiFiError set_radio_enabled(bool on) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callers_.push_back(std::this_thread::get_id());
+        }
+        return WifiBackendMock::set_radio_enabled(on);
+    }
+    std::vector<std::thread::id> callers() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return callers_;
+    }
+    void clear_callers() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        callers_.clear();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::vector<std::thread::id> callers_;
+};
+
+} // namespace
+
+// Each branch of the READY reassert that moves the radio sends the change down
+// the control lane: on a wedged driver a radio call blocks for seconds, and the
+// LVGL thread must never be the one waiting.
+TEST_CASE("READY's radio reassert runs on the control lane, never the LVGL thread",
+          "[wifi][manager][radio][persistence][wifi_control_lane]") {
+    http::HttpExecutor::fast().start();
+    Config::get_instance();
+    SystemSettingsManager::instance().init_subjects();
+    SysFixture sys;
+    WiFiManagerTestAccess::set_sys_root(sys.sys_root());
+
+    auto backend = std::make_unique<RadioThreadBackend>();
+    RadioThreadBackend* raw = backend.get();
+    helix::wifi::WifiInterface iface;
+    iface.netdev = "wlan0";
+    raw->set_resolved_interface_for_test(iface);
+    bool want_radio_on = false;
+
+    SECTION("stored off, wired path up: the radio goes off") {
+        SystemSettingsManager::instance().set_wifi_enabled(false);
+        sys.write_up("eth0");
+        want_radio_on = false;
+    }
+    SECTION("stored off, no wired path, radio blocked: the radio comes back on") {
+        Config::get_instance()->set_wifi_expected(true);
+        SystemSettingsManager::instance().set_wifi_enabled(false);
+        raw->set_radio_enabled(false);
+        want_radio_on = true;
+    }
+    SECTION("stored on, radio blocked: the stale block is cleared") {
+        Config::get_instance()->set_wifi_expected(true);
+        SystemSettingsManager::instance().set_wifi_enabled(true);
+        raw->set_radio_enabled(false);
+        want_radio_on = true;
+    }
+    raw->clear_callers();
+
+    const auto main_thread = std::this_thread::get_id();
+    {
+        auto manager = std::make_shared<WiFiManager>(std::move(backend));
+        manager->init_self_reference(manager);
+        REQUIRE(WiFiManagerTestAccess::settle(*manager));
+
+        CHECK(raw->is_radio_enabled() == want_radio_on);
+        const auto callers = raw->callers();
+        REQUIRE(callers.size() == 1);
+        CHECK(callers.front() != main_thread);
+    }
+    helix::ui::UpdateQueue::instance().drain();
+
+    SystemSettingsManager::instance().set_wifi_enabled(true);
+    SystemSettingsManager::instance().deinit_subjects();
+    Config::get_instance()->set_wifi_expected(false);
     WiFiManagerTestAccess::reset_sys_root();
 }

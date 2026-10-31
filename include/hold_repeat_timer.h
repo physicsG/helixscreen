@@ -14,7 +14,7 @@ namespace helix {
  *
  *  Both hold-to-repeat owners (the jog pad and the motion panel's Z buttons)
  *  share this class, so no timing logic exists twice; the poll period only
- *  has to divide both DELAY_MS and INTERVAL_MS for the repeats to land on a
+ *  has to divide both DELAY_MS and kIntervalMs for the repeats to land on a
  *  poll. Timing decisions themselves all live in HoldRepeat.
  *
  *  Lifecycle: begin() on press, release() on finger-up, cancel() on press
@@ -39,7 +39,7 @@ class HoldRepeatTimer {
         hold_.press();
         press_tick_ = lv_tick_get();
         stop_timer();
-        timer_ = lv_timer_create(&HoldRepeatTimer::on_timer, POLL_MS, this);
+        timer_ = lv_timer_create(&HoldRepeatTimer::on_timer, kPollMs, this);
     }
 
     /// Finger up: ticks stop; a fired repeat still swallows the click.
@@ -116,7 +116,7 @@ class HoldRepeatTimer {
     }
 
     /// 50 ms divides both 400 and 150, so repeats land exactly on a poll.
-    static constexpr uint32_t POLL_MS = 50;
+    static constexpr uint32_t kPollMs = 50;
 
     HoldRepeat hold_;
     FireFn fire_ = nullptr;

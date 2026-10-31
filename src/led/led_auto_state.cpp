@@ -269,7 +269,7 @@ void LedAutoState::load_config() {
 
     // Enabled flag
     enabled_ = cfg->get<bool>(cfg->df() + "leds/auto_state/enabled", false);
-    strips_ = cfg->get_string_array(cfg->df() + AUTO_STATE_STRIPS_PATH);
+    strips_ = cfg->get_string_array(cfg->df() + kAutoStateStripsPath);
 
     // Mappings
     mappings_.clear();
@@ -336,9 +336,9 @@ void LedAutoState::save_config() {
 
     // An absent key already means the chamber light, and an array there marks the
     // legacy selection as migrated, so an empty list is only written over an array.
-    const nlohmann::json* saved_strips = cfg->try_get_json(cfg->df() + AUTO_STATE_STRIPS_PATH);
+    const nlohmann::json* saved_strips = cfg->try_get_json(cfg->df() + kAutoStateStripsPath);
     if (!strips_.empty() || (saved_strips != nullptr && saved_strips->is_array())) {
-        cfg->set(cfg->df() + AUTO_STATE_STRIPS_PATH, nlohmann::json(strips_));
+        cfg->set(cfg->df() + kAutoStateStripsPath, nlohmann::json(strips_));
     }
 
     cfg->save();
@@ -349,9 +349,9 @@ void stage_light_selection(const SelectionMigration& m) {
     auto* cfg = Config::get_instance();
     // Written directly: LedAutoState::save_config() on an uninitialised instance
     // would save empty mappings over the user's.
-    cfg->set(cfg->df() + AUTO_STATE_STRIPS_PATH, nlohmann::json(m.auto_state_strips));
+    cfg->set(cfg->df() + kAutoStateStripsPath, nlohmann::json(m.auto_state_strips));
     if (!m.light_button.empty()) {
-        cfg->set(cfg->df() + LIGHT_BUTTON_PENDING_PATH, m.light_button);
+        cfg->set(cfg->df() + kLightButtonPendingPath, m.light_button);
     }
     auto& auto_state = LedAutoState::instance();
     if (auto_state.is_initialized()) {

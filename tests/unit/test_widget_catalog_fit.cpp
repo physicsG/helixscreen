@@ -64,11 +64,11 @@ constexpr int CELL = GridLayout::TRACKS_PER_CELL;
 // Row-test IDs: no hardware gate, not multi-instance, default_enabled=false
 // (so a seeded empty layout leaves them unplaced and offerable). "preheat"'s
 // minimum is 2 cells by 1, the brief's own example string.
-constexpr const char* REFUSED_ID = "preheat";
-constexpr const char* OFFERED_ID = "macros";
+constexpr const char* kRefusedId = "preheat";
+constexpr const char* kOfferedId = "macros";
 // Multi-instance base: 24 instances of it tile the full-page test below, where
 // 24 copies of a single-instance def would be dropped at parse as unknown ids.
-constexpr const char* TILE_ID = "favorite_macro";
+constexpr const char* kTileId = "favorite_macro";
 
 /// An empty one-page layout: nothing placed, so no row is dimmed as Placed.
 void seed_empty_layout(const std::string& panel_id) {
@@ -227,16 +227,16 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     WidgetCatalogOverlay::show(
         test_screen(), config, nullptr, nullptr,
-        [](const PanelWidgetDef& def) { return std::string(def.id) != REFUSED_ID; });
+        [](const PanelWidgetDef& def) { return std::string(def.id) != kRefusedId; });
     process_lvgl(10);
 
-    lv_obj_t* refused = result_row(REFUSED_ID);
+    lv_obj_t* refused = result_row(kRefusedId);
     CHECK_FALSE(lv_obj_has_flag(refused, LV_OBJ_FLAG_CLICKABLE));
-    const auto* def = find_widget_def(REFUSED_ID);
+    const auto* def = find_widget_def(kRefusedId);
     REQUIRE(def != nullptr);
     CHECK(label_contains(refused, expected_fit_reason(*def)));
 
-    lv_obj_t* offered = result_row(OFFERED_ID);
+    lv_obj_t* offered = result_row(kOfferedId);
     CHECK(lv_obj_has_flag(offered, LV_OBJ_FLAG_CLICKABLE));
     CHECK_FALSE(label_contains(offered, "Needs"));
 
@@ -255,7 +255,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     WidgetCatalogOverlay::show(test_screen(), config, nullptr);
     process_lvgl(10);
 
-    lv_obj_t* row = result_row(REFUSED_ID);
+    lv_obj_t* row = result_row(kRefusedId);
     CHECK(lv_obj_has_flag(row, LV_OBJ_FLAG_CLICKABLE));
     CHECK_FALSE(label_contains(row, "Needs"));
 
@@ -273,7 +273,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     WidgetCatalogOverlay::show(
         test_screen(), config, nullptr, nullptr,
-        [](const PanelWidgetDef& def) { return std::string(def.id) != REFUSED_ID; });
+        [](const PanelWidgetDef& def) { return std::string(def.id) != kRefusedId; });
     process_lvgl(10);
     NavigationManager::instance().go_back();
     process_lvgl(10);
@@ -283,7 +283,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     WidgetCatalogOverlay::show(test_screen(), config, nullptr);
     process_lvgl(10);
 
-    lv_obj_t* row = result_row(REFUSED_ID);
+    lv_obj_t* row = result_row(kRefusedId);
     CHECK(lv_obj_has_flag(row, LV_OBJ_FLAG_CLICKABLE));
     CHECK_FALSE(label_contains(row, "Needs"));
 
@@ -308,7 +308,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     nlohmann::json widgets = nlohmann::json::array();
     for (int r = 0; r < 4; ++r) {
         for (int c = 0; c < 6; ++c) {
-            widgets.push_back({{"id", std::string(TILE_ID) + ":" + std::to_string(r * 6 + c + 1)},
+            widgets.push_back({{"id", std::string(kTileId) + ":" + std::to_string(r * 6 + c + 1)},
                                {"enabled", true},
                                {"col", c * 2},
                                {"row", r * 2},
@@ -331,7 +331,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // container would read as an empty page and nothing would be refused.
     // 715x475 is the geometry test_grid_edit_snap_anim_lifetime.cpp uses: a
     // 12x8 Medium grid of exact 55px tracks.
-    const int gutter = theme_manager_get_spacing("space_xs");
+    const int gutter = helix::GridLayout::gutter_px();
     REQUIRE(gutter > 0);
     const auto dims = GridLayout::get_dimensions(UiBreakpoint::Medium, 715, 475);
     REQUIRE(dims.cols == 12);
@@ -352,7 +352,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         for (int c = 0; c < 6; ++c) {
             lv_obj_t* tile = lv_obj_create(container);
             lv_obj_set_name(tile,
-                            (std::string(TILE_ID) + ":" + std::to_string(r * 6 + c + 1)).c_str());
+                            (std::string(kTileId) + ":" + std::to_string(r * 6 + c + 1)).c_str());
             lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_grid_cell(tile, LV_GRID_ALIGN_STRETCH, c * 2, 2, LV_GRID_ALIGN_STRETCH,
                                  r * 2, 2);
@@ -375,9 +375,9 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     em.open_widget_catalog(test_screen());
     process_lvgl(10);
 
-    lv_obj_t* refused = result_row(REFUSED_ID);
+    lv_obj_t* refused = result_row(kRefusedId);
     CHECK_FALSE(lv_obj_has_flag(refused, LV_OBJ_FLAG_CLICKABLE));
-    const auto* def = find_widget_def(REFUSED_ID);
+    const auto* def = find_widget_def(kRefusedId);
     REQUIRE(def != nullptr);
     CHECK(label_contains(refused, expected_fit_reason(*def)));
 

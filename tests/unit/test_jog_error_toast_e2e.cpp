@@ -30,9 +30,8 @@
  * correlation. present_deferred_toast()'s 150ms re-check is what closes that
  * ordering gap; this test would catch its removal.
  *
- * ui_notification_error() is a logging-only stub in the test binary (see
- * tests/ui_test_utils.cpp), so toasts are observed via a spdlog ringbuffer
- * sink rather than the widget tree — which is exactly what makes the
+ * Error notifications are counted through the error-notification hook
+ * (tests/ui_test_utils.h) rather than the widget tree, which is what makes the
  * "how many toasts fired" question answerable here.
  */
 
@@ -47,6 +46,7 @@
 #include "../test_helpers/gcode_error_router_test_access.h"
 #include "../test_helpers/log_capture.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../ui_test_utils.h"
 #include "gcode_error_router.h"
 #include "recovery_modal_presenter.h"
 
@@ -63,6 +63,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "mock jog rejection surfaces exactly one reada
                  "[api][movement][errors][mock_fidelity][e2e]") {
     rpc_error_correlation::clear_for_test();
 
+    // The capture swaps the process-wide default logger, which the mock's
+    // simulation thread reads without a lock on every log call. Installing it
+    // before connect() starts that thread, and keeping it until the thread has
+    // been joined below, orders the swap both ways. Exclusive: pushing a sink
+    // onto the shared logger instead would race that thread's sink_it_.
+    ExclusiveLogCapture log(512);
+
     MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
     PrinterState state;
     state.init_subjects(false);
@@ -73,22 +80,22 @@ TEST_CASE_METHOD(LVGLTestFixture, "mock jog rejection surfaces exactly one reada
     mock.connect("ws://mock/websocket", []() {}, []() {});
     MoonrakerAPI api(mock, state);
 
-    // Park near the X_MAX edge (250 on the Voron 2.4 persona) so a
-    // normal-sized jog overshoots — the exact real-world shape of this bug.
+    // Park near the kXMax edge (175 on the centre-origin Voron 2.4 persona)
+    // so a normal-sized jog overshoots — the exact real-world shape of this bug.
     mock.gcode_script("G28");
-    mock.gcode_script("G0 X240");
+    mock.gcode_script("G0 X170");
 
     helix::ui::RecoveryModalPresenter presenter(nullptr);
     // Real router, real client: the ctor registers a notify_gcode_response
     // handler on the mock, so the `!!` broadcast arrives through production glue.
     helix::GcodeErrorRouter router(&api, &mock, presenter);
 
+    std::vector<std::string> error_notifications;
+    helix::ui::set_test_notification_error_hook(
+        [&error_notifications](const std::string& m) { error_notifications.push_back(m); });
+
     std::string rendered_toast;
     {
-        // Exclusive: the mock's simulation threads log concurrently, and
-        // pushing a sink onto the shared logger races their sink_it_ iteration.
-        ExclusiveLogCapture log(512);
-
         // The MotionPanel jog error handler, verbatim (ui_panel_motion.cpp).
         api.motion().move_relative(50.0, 0.0, 0.0, 6000.0, 600.0, nullptr,
                                    [&](const MoonrakerError& err) {
@@ -118,10 +125,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "mock jog rejection surfaces exactly one reada
         INFO("suppression log lines: " << suppressed);
         CHECK(suppressed >= 1);
 
-        // The router's toast arm calls ui_notification_error(lv_tr("Klipper Error"), ...),
-        // which the test stub logs. It must never have fired.
-        CHECK(log.count_containing("ui_notification_error: Klipper Error") == 0);
+        // The caller's NOTIFY_ERROR is the only error notification: the router's
+        // toast arm, ui_notification_error(lv_tr("Klipper Error"), ...), must
+        // never have fired.
+        CHECK(error_notifications == std::vector<std::string>{"Jog failed: " + rendered_toast});
     }
+    helix::ui::set_test_notification_error_hook(nullptr);
 
     mock.stop_temperature_simulation();
     mock.disconnect();

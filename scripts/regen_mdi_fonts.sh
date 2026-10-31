@@ -22,6 +22,9 @@ cd "$(dirname "$0")/.."
 export PATH="$PWD/node_modules/.bin:$PATH"
 
 FONT=assets/fonts/materialdesignicons-webfont.ttf
+# Glyphs MDI does not have (brand marks), merged into every face below. Built
+# from assets/fonts/custom_icons/*.svg by scripts/build_custom_icon_font.py.
+FONT_CUSTOM=assets/fonts/helix-custom-icons.ttf
 
 # Check font exists
 if [ ! -f "$FONT" ]; then
@@ -152,6 +155,7 @@ MDI_ICONS+=",0xF0479"    # sd (SD card)
 MDI_ICONS+=",0xF048A"    # send (for console input)
 MDI_ICONS+=",0xF0493"    # cog (settings)
 MDI_ICONS+=",0xF08BB"    # cog-outline (settings nav inactive state)
+MDI_ICONS+=",0xF145E"    # cog-refresh (firmware restart)
 MDI_ICONS+=",0xF04B2"    # sleep (moon/zzz)
 MDI_ICONS+=",0xF04C5"    # speedometer
 MDI_ICONS+=",0xF04DB"    # stop
@@ -304,6 +308,7 @@ MDI_ICONS+=",0xF1B35"    # train-car-flatbed (print bed base)
 
 # Custom icons
 MDI_ICONS+=",0xF01BE"    # cursor-move (4-way movement cross)
+MDI_ICONS+=",0xF08B9"    # remote-desktop (remote-control indicator)
 MDI_ICONS+=",0xF004C"    # arrow-expand-all (expand_all/move)
 MDI_ICONS+=",0xF051F"    # timer-sand (hourglass)
 
@@ -331,6 +336,9 @@ MDI_ICONS+=",0xF0311"    # keyboard-return (enter key)
 MDI_ICONS+=",0xF0632"    # apple-keyboard-caps (caps lock indicator)
 MDI_ICONS+=",0xF0636"    # apple-keyboard-shift (shift key outline)
 
+# Custom icon codepoints (0xFE000 block), served from FONT_CUSTOM.
+CUSTOM_ICONS="0xFE000,0xFE001,0xFE002,0xFE003"   # spoolman logo, spool, spool_outline, spool_alert
+
 # Sizes to generate - matching text font sizes for consistent UI
 SIZES="14 16 24 32 48 64 80 96 128"
 
@@ -345,6 +353,7 @@ for SIZE in $SIZES; do
     lv_font_conv \
         --font "$FONT" --size "$SIZE" --bpp 4 --format lvgl \
         --range "$MDI_ICONS" \
+        --font "$FONT_CUSTOM" --range "$CUSTOM_ICONS" \
         --no-compress \
         -o "$OUTPUT"
 

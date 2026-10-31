@@ -7,7 +7,7 @@
 
 static helix::DiscoveredPrinter make_printer(const std::string& name,
                                              const std::string& hostname = "printer.local") {
-    return {name, hostname, "192.168.1.100", 9100};
+    return {name, hostname, "192.168.1.100", 9100, ""};
 }
 
 TEST_CASE("label_printer_score Brother QL models", "[label]") {
@@ -52,4 +52,54 @@ TEST_CASE("label_printer_score case insensitive", "[label]") {
     REQUIRE(helix::label_printer_score(make_printer("brother ql-820nwb")) == 100);
     REQUIRE(helix::label_printer_score(make_printer("BROTHER QL-820NWB")) == 100);
     REQUIRE(helix::label_printer_score(make_printer("hp laserjet")) == 0);
+}
+
+// ============================================================================
+// pick_discovered_printer
+// ============================================================================
+
+namespace {
+const std::vector<helix::RankedNetworkPrinter> kRanked = {
+    {"192.168.1.205", "raw"}, // a label printer ranks first
+    {"192.168.1.239", "ipp"},
+    {"192.168.1.88", "ipp"},
+};
+} // namespace
+
+TEST_CASE("pick_discovered_printer replaces an automatic pick with a better one", "[label]") {
+    // IPP answered first and its printer was saved; the label printer ranks above it now.
+    const auto pick = helix::pick_discovered_printer(kRanked, "192.168.1.239", "ipp", true);
+    CHECK(pick.select == 0);
+    CHECK(pick.show == 0);
+}
+
+TEST_CASE("pick_discovered_printer picks the best printer when none is saved", "[label]") {
+    const auto pick = helix::pick_discovered_printer(kRanked, "", "raw", true);
+    CHECK(pick.select == 0);
+    CHECK(pick.show == 0);
+}
+
+TEST_CASE("pick_discovered_printer keeps an automatic pick that is already best", "[label]") {
+    const auto pick = helix::pick_discovered_printer(kRanked, "192.168.1.205", "raw", true);
+    CHECK(pick.select == -1);
+    CHECK(pick.show == 0);
+}
+
+TEST_CASE("pick_discovered_printer never replaces the user's choice", "[label]") {
+    const auto pick = helix::pick_discovered_printer(kRanked, "192.168.1.88", "ipp", false);
+    CHECK(pick.select == -1);
+    CHECK(pick.show == 2);
+}
+
+TEST_CASE("pick_discovered_printer matches address and protocol together", "[label]") {
+    // Same address, other protocol: a different entry, so the saved one is not listed.
+    const auto pick = helix::pick_discovered_printer(kRanked, "192.168.1.205", "ipp", false);
+    CHECK(pick.select == -1);
+    CHECK(pick.show == -1);
+}
+
+TEST_CASE("pick_discovered_printer does nothing with an empty list", "[label]") {
+    const auto pick = helix::pick_discovered_printer({}, "", "raw", true);
+    CHECK(pick.select == -1);
+    CHECK(pick.show == -1);
 }

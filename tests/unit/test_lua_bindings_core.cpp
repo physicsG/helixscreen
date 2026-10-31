@@ -52,6 +52,31 @@ TEST_CASE_METHOD(LVGLTestFixture, "helix.i18n.on_change fires per language chang
     CHECK(b.t.global("c") == "de,en");
 }
 
+TEST_CASE_METHOD(LVGLTestFixture, "helix.i18n.on_change handlers may register more handlers",
+                 "[plugin][bindings][core]") {
+    BoundRuntime b;
+    // The first handler registers enough new ones to force the handler list to
+    // reallocate while the language listener is still walking it.
+    REQUIRE(b.t.run(R"(
+        calls = 0
+        late = 0
+        helix.i18n.on_change(function(code)
+            calls = calls + 1
+            for i = 1, 64 do
+                helix.i18n.on_change(function() late = late + 1 end)
+            end
+        end)
+    )"));
+    helix::ui::locale_set_language("de");
+    REQUIRE(b.t.run(R"(c1, l1 = calls, late)"));
+    CHECK(b.t.global("c1") == "1");
+    CHECK(b.t.global("l1") == "0"); // a handler added during a change first runs on the next
+    helix::ui::locale_set_language("en");
+    REQUIRE(b.t.run(R"(c2, l2 = calls, late)"));
+    CHECK(b.t.global("c2") == "2");
+    CHECK(b.t.global("l2") == "64");
+}
+
 TEST_CASE_METHOD(LVGLTestFixture, "helix.json round-trips", "[plugin][bindings][core]") {
     BoundRuntime b;
     REQUIRE(b.t.run(R"(

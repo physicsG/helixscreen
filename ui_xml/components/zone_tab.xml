@@ -37,8 +37,13 @@
          (zone_tab_on_primary for the pill pair); the default changes nothing. -->
     <prop name="content_selected_style" type="string" default="zone_tab_label_plain"/>
     <prop name="radius" type="string" default="#border_radius"/>
+    <!-- Vertical padding and least size. A chip row that has to be a finger's target passes
+         pad_ver="0" with #touch_target_min for both, so its height is the target's. -->
+    <prop name="pad_ver" type="string" default="#space_sm"/>
+    <prop name="min_height" type="string" default="0"/>
+    <prop name="min_width" type="string" default="0"/>
     <!-- Optional light dot (the LEDs overlay): light_subject holds 1 on, 0 off,
-         2 unknown; light_color_subject fills the lit dot. Collapsed when empty. -->
+         2 unknown; light_color_subject fills the lit dot, a color_dot. Collapsed when empty. -->
     <prop name="light_subject" type="string" default=""/>
     <prop name="light_color_subject" type="string" default=""/>
   </api>
@@ -53,26 +58,30 @@
     <style name="zone_tab_pill_selected" bg_opa="255" bg_color="#primary" border_width="0"/>
     <style name="zone_tab_pill_idle" bg_opa="255" bg_color="#card_bg" border_width="0"/>
     <style name="zone_tab_on_primary" text_color="#text_on_primary"/>
+    <!-- Outlined idle pill, for a multi-select chip row on a card, where the card-filled
+         idle pill would vanish into its background. -->
+    <style name="zone_tab_outline_idle"
+           bg_opa="0" border_width="0" outline_width="1" outline_pad="-1" outline_color="#border" outline_opa="255"/>
     <!-- Underline variant: no fill, a primary rule under the selected tab. -->
     <style name="zone_tab_underline_selected"
            bg_opa="0" border_side="bottom" border_width="#tab_underline_width" border_color="#primary" border_opa="255"/>
     <style name="zone_tab_underline_idle" bg_opa="0" border_width="0"/>
     <style name="zone_tab_label_plain"/>
     <style name="zone_tab_label_muted" text_color="#text_muted"/>
-    <!-- The lit dot's own border reset, a style so the light-theme edge can outrank it. -->
-    <style name="zone_tab_dot_plain" border_width="0"/>
   </styles>
   <view name="zone_tab"
         extends="lv_button" width="content" height="content" style_radius="$radius" style_pad_hor="#space_md"
-        style_pad_ver="#space_sm" style_shadow_width="0">
+        style_pad_ver="$pad_ver" style_min_height="$min_height" style_min_width="$min_width" style_shadow_width="0">
     <!-- Selected tab reads as a filled pill; the rest stay flat. The style
          names come from props so a caller can swap in the filled-pill pair
          without touching this component's AMS behaviour. -->
     <bind_style_if_eq name="$selected_style" subject="$active_subject" ref_value="$active_value"/>
     <bind_style_if_not_eq name="$idle_style" subject="$active_subject" ref_value="$active_value"/>
+    <!-- Centred, so a tab held taller or wider than its content by min_height/min_width
+         keeps its label in the middle. -->
     <lv_obj width="content"
-            height="content" flex_flow="$layout" style_pad_gap="#space_xs" scrollable="false" clickable="false"
-            style_flex_cross_place="$cross_place">
+            height="content" align="center" flex_flow="$layout" style_pad_gap="#space_xs" scrollable="false"
+            clickable="false" style_flex_cross_place="$cross_place">
       <icon name="tab_icon" src="$icon" size="sm" hidden_if_empty="$icon">
         <bind_style_if_eq name="$content_selected_style" subject="$active_subject" ref_value="$active_value"/>
       </icon>
@@ -98,14 +107,9 @@
       </lv_obj>
       <lv_obj name="light_dot"
               width="content" height="content" scrollable="false" clickable="false" hidden_if_empty="$light_subject">
-        <lv_obj width="#tab_dot_size"
-                height="#tab_dot_size" style_radius="9999" style_bg_opa="255" scrollable="false" clickable="false"
-                hidden="true">
-          <style name="zone_tab_dot_plain"/>
-          <bind_style_prop prop="bg_color" subject="$light_color_subject"/>
-          <bind_style_if name="styles.contrast_edge" cond="settings_dark_mode eq 0"/>
+        <color_dot name="light_dot_lit" color_subject="$light_color_subject" size="#tab_dot_size" hidden="true">
           <bind_flag_if_not_eq subject="$light_subject" flag="hidden" ref_value="1"/>
-        </lv_obj>
+        </color_dot>
         <lv_obj width="#tab_dot_size"
                 height="#tab_dot_size" style_radius="9999" style_bg_opa="0" style_border_width="#tab_dot_ring_width"
                 style_border_color="#text_muted" scrollable="false" clickable="false" hidden="true">

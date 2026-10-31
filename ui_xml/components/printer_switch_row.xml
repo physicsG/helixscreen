@@ -19,8 +19,6 @@
     <lv_label name="indicator"
               text="$check_text" style_text_font="#icon_font_xs" style_min_width="16" style_text_color="#text"
               clickable="false" event_bubble="true"/>
-    <lv_label name="printer_name"
-              text="" flex_grow="1" long_mode="dots" style_text_font="#font_body" style_text_color="#text"
-              clickable="false" event_bubble="true"/>
+    <text_body name="printer_name" text="" flex_grow="1" long_mode="dots" clickable="false" event_bubble="true"/>
   </view>
 </component>

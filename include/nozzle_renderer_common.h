@@ -39,7 +39,7 @@ inline lv_color_t nr_lighten(lv_color_t c, uint8_t amt) {
 /// @param factor Blend factor 0.0-1.0
 /// @return Blended color
 inline lv_color_t nr_blend(lv_color_t c1, lv_color_t c2, float factor) {
-    factor = LV_CLAMP(factor, 0.0f, 1.0f);
+    factor = LV_CLAMP(0.0f, factor, 1.0f);
     return lv_color_make((uint8_t)(c1.red + (c2.red - c1.red) * factor),
                          (uint8_t)(c1.green + (c2.green - c1.green) * factor),
                          (uint8_t)(c1.blue + (c2.blue - c1.blue) * factor));

@@ -6,6 +6,7 @@
 #include "ui_callback_helpers.h"
 #include "ui_color_picker.h"
 #include "ui_event_safety.h"
+#include "ui_swatch.h"
 
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
@@ -166,10 +167,6 @@ void LedControlOverlay::on_activate() {
         ctrl.get_led_state_version_subject(), this,
         [](LedControlOverlay* self, int) { self->on_led_state_changed(); },
         ctrl.get_subjects_lifetime());
-    // theme_changed is a file-static theme global, deinited only after LVGL is gone.
-    theme_observer_ = helix::ui::observe<int>(
-        theme_manager_get_changed_subject(), this,
-        [](LedControlOverlay* self, int) { self->publish_swatch_edges(); }, subject_never_freed());
 
     refresh_wled_page();
 
@@ -179,7 +176,6 @@ void LedControlOverlay::on_activate() {
 
 void LedControlOverlay::on_deactivating(DeactivateReason) {
     state_observer_.reset();
-    theme_observer_.reset();
 
     auto& ctrl = LedController::instance();
     const auto* info = focused_info();
@@ -196,7 +192,6 @@ void LedControlOverlay::on_deactivating(DeactivateReason) {
 void LedControlOverlay::cleanup() {
     spdlog::debug("[{}] Cleanup", get_name());
     state_observer_.reset();
-    theme_observer_.reset();
     deinit_subjects_base(subjects_);
     on_ui_destroyed();
     OverlayBase::cleanup();
@@ -209,7 +204,6 @@ void LedControlOverlay::on_ui_destroyed() {
     tab_dot_pool_.reclaim();
     tab_dot_color_pool_.reclaim();
     swatch_color_pool_.reclaim();
-    swatch_edge_pool_.reclaim();
     chip_label_pool_.reclaim();
 }
 
@@ -358,7 +352,6 @@ void LedControlOverlay::publish_page() {
     for (size_t i = 0; i < presets.size(); ++i) {
         swatch_color_pool_.set_color(i, presets[i]);
     }
-    publish_swatch_edges();
     lv_subject_set_int(&swatch_count_, static_cast<int>(presets.size()));
 
     publish_color_state();
@@ -375,14 +368,6 @@ void LedControlOverlay::publish_page() {
         }
     }
     lv_subject_copy_string(&page_note_, note.c_str());
-}
-
-void LedControlOverlay::publish_swatch_edges() {
-    const auto& presets = LedController::instance().color_presets();
-    swatch_edge_pool_.ensure_size(presets.size());
-    for (size_t i = 0; i < presets.size(); ++i) {
-        swatch_edge_pool_.set_int(i, helix::ui::swatch_needs_edge_here(presets[i]) ? 1 : 0);
-    }
 }
 
 void LedControlOverlay::publish_color_state() {
@@ -483,7 +468,7 @@ void LedControlOverlay::set_pending_effect_chip(int chip) {
                 [self = data->self, gen = data->gen]() { self->end_pending_effect(gen); });
             delete data;
         },
-        PENDING_EFFECT_TIMEOUT_MS,
+        kPendingEffectTimeoutMs,
         new Timeout{lifetime_.token(), this, gen}); // TIMER_DTOR_OK: LifetimeToken-guarded one-shot
     lv_timer_set_repeat_count(t, 1);
 }

@@ -66,7 +66,7 @@ TEST_CASE_METHOD(HelixTestFixture, "SILK has a selectable Generic product (AD5X 
     // AD5X stock firmware's material whitelist includes "SILK" as a type distinct from
     // "PLA" (see get_supported_materials() in ams_backend_ad5x_ifs.cpp), but Orca has no
     // profile for it — silk PLA is just a display name over Orca's plain "PLA" type. A
-    // scripts/fixtures/cfs_seed.json entry seeds a standalone "Generic"/"SILK" product so
+    // scripts/fixtures/filament_seed.json entry seeds a standalone "Generic"/"SILK" product so
     // the type dropdown's whitelist-appended SILK row has something to select. This test
     // pins that product against the shipped assets/filaments.json (loaded via
     // FilamentCatalog::load_full(), same as the real UI) so a future `make regen-filaments`

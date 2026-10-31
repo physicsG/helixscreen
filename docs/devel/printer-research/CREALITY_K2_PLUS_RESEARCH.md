@@ -226,7 +226,7 @@ Steps 1 to 5 are done: the SoC is confirmed T113, the armv7 musl toolchain is in
 `docker/Dockerfile.k2`, fbdev and evdev drive the panel and touch, Moonraker is wired on
 7125, and CFS runs through the `box` object and `M8200`.
 
-Remaining work is variant breadth (K2, K2 Pro, K2 SE) and a native CFS implementation - see
+Remaining work is a run on a base K2 and a native CFS implementation - see
 [Section 14](#14-helixscreen-build-target).
 
 ---
@@ -301,8 +301,11 @@ capability bits to be selected. No K2 with that variant has been observed yet.
 
 ## 13. Hardware Profile (answered) and Bring-Up Probe for Other K2 Variants
 
-The questions this section used to pose are answered for the K2 Plus. The commands are kept
-because they are what a contributor with a different K2 variant should run and report.
+**K2 Plus and K2 Pro owners: nothing to collect here.** Both variants are profiled below and
+run HelixScreen. The probe is for the one ARM variant nobody has captured yet, the **base K2**
+(260 mm, no chamber heater). If you have one, run the block below over SSH and paste the output
+into a [new issue](https://github.com/prestonbrown/helixscreen/issues/new). A K2 SE is a
+K1-family MIPS board despite the name, so this probe does not apply to it.
 
 | # | Probe | K2 Plus answer |
 |---|-------|----------------|
@@ -542,7 +545,7 @@ make k2-ssh K2_HOST=192.168.1.100          # SSH into the printer
 | Component | Notes |
 |-----------|-------|
 | CFS reimplementation | Protocol reverse-engineered from `box_wrapper.cpython-39.so`; see [CREALITY_CFS_K2_INTERNALS.md](CREALITY_CFS_K2_INTERNALS.md) |
-| K2, K2 Pro, K2 SE validation | Database entries exist for K2 Plus and K2 Pro; only the K2 Plus has been run by us. A K2 SE is a K1-family MIPS board despite the name - see the routing trap in `src/printer/ams_backend_cfs.cpp` |
+| Base K2 validation | The `creality_k2` entry rests on Creality's spec; no base K2 has been captured or run. The K2 Plus is run by us and the K2 Pro by a community member. A K2 SE is a K1-family MIPS board despite the name - see the routing trap in `src/printer/ams_backend_cfs.cpp` |
 
 ---
 
@@ -552,8 +555,9 @@ The K2 Plus is architecturally easier to target than the K1 (ARM rather than MIP
 stock Moonraker, so no community firmware is required. The target is built, deployed and
 running on real hardware.
 
-What remains is breadth rather than depth: the other K2 variants share the SoC, panel and
-touch controller by every signal collected so far, and need a contributor with the hardware to
-run the probe in Section 13 and report the board string and `printer.cfg`.
+What remains is breadth rather than depth. The K2 Plus and K2 Pro share the SoC, framebuffer
+contract and touch controller, and both run the `k2` target unmodified. The base K2 is the one
+variant still uncaptured: an owner running the probe in Section 13 and reporting the board
+string and `printer.cfg` in an issue is what closes it.
 
 See also: [K1 vs K2 Community Comparison](CREALITY_K1_VS_K2_COMMUNITY.md)

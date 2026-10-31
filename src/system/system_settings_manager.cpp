@@ -3,11 +3,13 @@
 
 #include "system_settings_manager.h"
 
+#include "app_globals.h"
 #include "cjk_font_manager.h"
 #include "config.h"
 #include "locale_formats.h"
 #include "logging_init.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "printer_state.h"
 #include "spdlog/spdlog.h"
 #include "static_subject_registry.h"
 #include "system/crash_handler.h"
@@ -16,57 +18,54 @@
 #include "translation_loader.h"
 
 #include <algorithm>
+#include <iterator>
 #include <string_view>
 
 using namespace helix;
 
 // Log level options (dropdown index → spdlog level)
 // Order: Warn=0, Info=1, Debug=2, Trace=3
-static const spdlog::level::level_enum LOG_LEVEL_VALUES[] = {
+static const spdlog::level::level_enum kLogLevelValues[] = {
     spdlog::level::warn,
     spdlog::level::info,
     spdlog::level::debug,
     spdlog::level::trace,
 };
-static const int LOG_LEVEL_COUNT = sizeof(LOG_LEVEL_VALUES) / sizeof(LOG_LEVEL_VALUES[0]);
+static const int kLogLevelCount = sizeof(kLogLevelValues) / sizeof(kLogLevelValues[0]);
 
 // Config key strings matching the dropdown indices
-static const char* LOG_LEVEL_STRINGS[] = {"warn", "info", "debug", "trace"};
+static const char* kLogLevelStrings[] = {"warn", "info", "debug", "trace"};
 
 static int spdlog_level_to_index(spdlog::level::level_enum level) {
-    for (int i = 0; i < LOG_LEVEL_COUNT; ++i) {
-        if (LOG_LEVEL_VALUES[i] == level) {
+    for (int i = 0; i < kLogLevelCount; ++i) {
+        if (kLogLevelValues[i] == level) {
             return i;
         }
     }
     return 0; // Default to Warn
 }
 
-#ifndef HELIX_HAS_CJK
-#define HELIX_HAS_CJK 1
-#endif
-
 // Language options - codes and display names
 // Order: en, de, fr, es, ru, pt, it, zh, ja (indices 0-8). The CJK pair comes
 // last so a build without CJK fonts (HELIX_HAS_CJK=0, the ESP32 firmware) drops
 // it by shortening the list, and every other index keeps its meaning. A saved
 // zh/ja there reads as English.
-static const char* LANGUAGE_CODES[] = {"en", "de", "fr", "es", "ru", "pt", "it", "zh", "ja"};
-static const int LANGUAGE_COUNT = HELIX_HAS_CJK ? 9 : 7;
-static const char* LANGUAGE_OPTIONS_TEXT =
+static const char* kLanguageCodes[] = {"en", "de", "fr", "es", "ru", "pt", "it", "zh", "ja"};
+static const int kLanguageCount = HELIX_HAS_CJK ? 9 : 7;
+static const char* kLanguageOptionsText =
     HELIX_HAS_CJK
         ? "English\nDeutsch\nFrançais\nEspañol\nРусский\nPortuguês\nItaliano\n中文\n日本語"
         : "English\nDeutsch\nFrançais\nEspañol\nРусский\nPortuguês\nItaliano";
 
 using settings::Scope;
 // Row order is SystemSettingsManager::Key.
-static constexpr settings::PersistedSetting SYSTEM_SETTINGS[] = {
+static constexpr settings::PersistedSetting kSystemSettings[] = {
     // 0=Stable, 1=Beta, 2=Dev
-    {"update_channel", "/update/channel", Scope::Global, false, 0, 0, 2, nullptr},
-    // Opt-in, default off
+    {"update_channel", "/update/channel", Scope::Global, false, 0, 0, 2, "update_channel"},
+    // Opt-in, default off. Unreported: its change switches the collector that would carry it.
     {"settings_telemetry_enabled", "/telemetry_enabled", Scope::Global, true, 0, 0, 1, nullptr},
     // Default on: a device that has never seen this setting comes up with WiFi enabled
-    {"settings_wifi_enabled", "/wifi_enabled", Scope::Global, true, 1, 0, 1, nullptr},
+    {"settings_wifi_enabled", "/wifi_enabled", Scope::Global, true, 1, 0, 1, "wifi_enabled"},
 };
 
 SystemSettingsManager& SystemSettingsManager::instance() {
@@ -74,7 +73,11 @@ SystemSettingsManager& SystemSettingsManager::instance() {
     return instance;
 }
 
-SystemSettingsManager::SystemSettingsManager() : settings_(SYSTEM_SETTINGS) {
+settings::TableView SystemSettingsManager::persisted_table() {
+    return {kSystemSettings, std::size(kSystemSettings)};
+}
+
+SystemSettingsManager::SystemSettingsManager() : settings_(kSystemSettings) {
     spdlog::trace("[SystemSettingsManager] Constructor");
 }
 
@@ -114,7 +117,7 @@ void SystemSettingsManager::init_subjects() {
     }
     UI_MANAGED_SUBJECT_INT(log_level_subject_, log_level_index, "settings_log_level", subjects_);
     spdlog::debug("[SystemSettingsManager] log_level: {} (index {})",
-                  LOG_LEVEL_STRINGS[log_level_index], log_level_index);
+                  kLogLevelStrings[log_level_index], log_level_index);
 
     subjects_initialized_ = true;
 
@@ -145,6 +148,35 @@ std::string SystemSettingsManager::get_language() const {
     return language_index_to_code(index);
 }
 
+namespace {
+
+void save_string_if_changed(const char* key, const std::string& value) {
+    Config* config = Config::get_instance();
+    if (config->get<std::string>(key, "") == value) {
+        return;
+    }
+    config->set(key, value);
+    config->save();
+}
+
+} // namespace
+
+std::string SystemSettingsManager::get_wifi_country() const {
+    return Config::get_instance()->get<std::string>("/wifi_country", "");
+}
+
+void SystemSettingsManager::set_wifi_country(const std::string& code) {
+    save_string_if_changed("/wifi_country", code);
+}
+
+std::string SystemSettingsManager::get_wifi_country_last_seen() const {
+    return Config::get_instance()->get<std::string>("/wifi_country_last_seen", "");
+}
+
+void SystemSettingsManager::set_wifi_country_last_seen(const std::string& code) {
+    save_string_if_changed("/wifi_country_last_seen", code);
+}
+
 void SystemSettingsManager::set_language(const std::string& lang) {
     int index = language_code_to_index(lang);
     spdlog::info("[SystemSettingsManager] set_language({}) -> index {}", lang, index);
@@ -168,6 +200,7 @@ void SystemSettingsManager::set_language(const std::string& lang) {
 
     // Subject strings translated when they were written re-render here
     UpdateChecker::instance().on_language_changed();
+    get_printer_state().capabilities_state().on_language_changed();
 
     // 3. Update locale formatting tables
     helix::ui::locale_set_language(lang);
@@ -189,11 +222,11 @@ int SystemSettingsManager::get_language_index() const {
 }
 
 const char* SystemSettingsManager::get_language_options() {
-    return LANGUAGE_OPTIONS_TEXT;
+    return kLanguageOptionsText;
 }
 
 std::string SystemSettingsManager::get_language_display_name() const {
-    std::string_view options(LANGUAGE_OPTIONS_TEXT);
+    std::string_view options(kLanguageOptionsText);
     size_t pos = 0;
     for (int i = 0; i < get_language_index() && pos != std::string_view::npos; ++i) {
         pos = options.find('\n', pos);
@@ -210,15 +243,15 @@ std::string SystemSettingsManager::get_language_display_name() const {
 }
 
 std::string SystemSettingsManager::language_index_to_code(int index) {
-    if (index < 0 || index >= LANGUAGE_COUNT) {
+    if (index < 0 || index >= kLanguageCount) {
         return "en"; // Default to English
     }
-    return LANGUAGE_CODES[index];
+    return kLanguageCodes[index];
 }
 
 int SystemSettingsManager::language_code_to_index(const std::string& code) {
-    for (int i = 0; i < LANGUAGE_COUNT; ++i) {
-        if (code == LANGUAGE_CODES[i]) {
+    for (int i = 0; i < kLanguageCount; ++i) {
+        if (code == kLanguageCodes[i]) {
             return i;
         }
     }
@@ -253,18 +286,18 @@ int SystemSettingsManager::get_log_level_index() const {
 }
 
 void SystemSettingsManager::set_log_level_by_index(int index) {
-    int clamped = std::clamp(index, 0, LOG_LEVEL_COUNT - 1);
+    int clamped = std::clamp(index, 0, kLogLevelCount - 1);
     spdlog::info("[SystemSettingsManager] set_log_level_by_index({}) -> {}", clamped,
-                 LOG_LEVEL_STRINGS[clamped]);
+                 kLogLevelStrings[clamped]);
 
     // 1. Update subject (UI reacts)
     lv_subject_set_int(&log_level_subject_, clamped);
 
     // 2. Apply immediately — no restart needed
-    helix::logging::set_runtime_level(LOG_LEVEL_VALUES[clamped]);
+    helix::logging::set_runtime_level(kLogLevelValues[clamped]);
 
     // 3. Persist to config
     Config* config = Config::get_instance();
-    config->set<std::string>("/log_level", LOG_LEVEL_STRINGS[clamped]);
+    config->set<std::string>("/log_level", kLogLevelStrings[clamped]);
     config->save();
 }

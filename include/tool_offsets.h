@@ -37,15 +37,22 @@ class PrinterDiscovery;
 
 namespace helix::tool_offsets {
 
-/// Whether this printer keeps ANY offset per toolhead, separate from the live
-/// gcode_move offset. False on every single-toolhead printer, which is what
-/// gates the tune panel's tool selector.
+/// Whether this printer keeps an offset per toolhead that HelixScreen may
+/// write, separate from the live gcode_move offset. False on every
+/// single-toolhead printer, which is what gates the tune panel's tool
+/// selector, and false for a read-only model (one the printer measures and
+/// writes itself).
 bool supports_per_tool_offsets(const PrinterDiscovery& hw);
 
 /// Whether the matched firmware can read, set and save THIS axis. A firmware
 /// that keeps only Z answers false for X and Y; klipper-toolchanger answers
-/// true for all three. False on every printer without per-tool offsets.
+/// true for all three. False on every printer without per-tool offsets, and
+/// for a read-only model: this is the "HelixScreen may edit it" question.
 bool supports_axis(const PrinterDiscovery& hw, Axis axis);
+
+/// Whether the matched model keeps THIS axis per tool, writable or not, so
+/// read_tool_offset_microns() can answer it.
+bool reads_axis(const PrinterDiscovery& hw, Axis axis);
 
 /// Extra Klipper status objects this printer needs subscribed for
 /// read_tool_offset_microns() to ever return a value. Empty when the offsets
@@ -95,9 +102,14 @@ std::optional<int> read_tool_offset_microns(const OffsetReader& reader,
                                             const nlohmann::json& status, Axis axis, int tool_index,
                                             const std::string& tool_name);
 
+/// The offset applied on top of every tool's own, in microns, for a model that
+/// keeps one. nullopt is no news, and the answer for a model without one.
+std::optional<int> read_global_z_offset_microns(const OffsetReader& reader,
+                                                const nlohmann::json& status);
+
 /// Gcode that sets tool @p tool_index's @p axis offset to @p microns, effective
 /// immediately and NOT persisted. Empty when the printer has no per-tool
-/// offset on that axis, or @p tool_index is negative.
+/// offset on that axis, the model is read-only, or @p tool_index is negative.
 ///
 /// Any embedded value is emitted as a bare decimal on purpose: this reaches a
 /// firmware that parses it as a number (klipper-toolchanger runs VALUE= through
@@ -108,7 +120,8 @@ std::string set_tool_offset_gcode(const PrinterDiscovery& hw, Axis axis, int too
 
 /// Gcode that persists tool @p tool_index's @p axis offset as @p microns, so it
 /// survives a restart. Empty when the printer has no per-tool offset on that
-/// axis, or @p tool_index is negative. May be more than one line.
+/// axis, the model is read-only, or @p tool_index is negative. May be more
+/// than one line.
 ///
 /// Self-sufficient: it writes the durable store AND whatever runtime value the
 /// firmware actually prints with, so it is correct on its own and idempotent
@@ -118,6 +131,16 @@ std::string set_tool_offset_gcode(const PrinterDiscovery& hw, Axis axis, int too
 /// persist_requires_save_config().
 std::string save_tool_offset_gcode(const PrinterDiscovery& hw, Axis axis, int tool_index,
                                    int microns);
+
+/// Gcode that applies tool @p tool_index's stored offset to the head now, sent
+/// after a set or save of that tool's offset. Empty unless @p tool_index is the
+/// tool on the carriage (@p mounted_tool, -1 for none) and the model needs it:
+/// on most models a write takes effect on the next move, but a model that
+/// applies the offset only when the tool is picked up leaves a write to the
+/// mounted tool idle until the next swap. Applying an unmounted tool's offset
+/// would shift the head by the wrong tool's correction, hence the gate.
+std::string activate_mounted_offset_gcode(const PrinterDiscovery& hw, int tool_index,
+                                          int mounted_tool);
 
 /// Whether save_tool_offset_gcode() only stages the change and needs a
 /// SAVE_CONFIG to commit it - which restarts Klipper, so the caller must drive

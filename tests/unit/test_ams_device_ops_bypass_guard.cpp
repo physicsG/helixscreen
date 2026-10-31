@@ -30,6 +30,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/chaining_mock_backend.h"
 #include "../test_helpers/print_state_test_drivers.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
@@ -186,9 +187,7 @@ class DeviceOpsBypassFixture : public LVGLUITestFixture {
     }
 
     void settle() {
-        for (int i = 0; i < 4; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
         process_lvgl(10);
     }
 
@@ -199,7 +198,9 @@ class DeviceOpsBypassFixture : public LVGLUITestFixture {
         settle();
         lv_obj_t* root = overlay.get_root();
         REQUIRE(root != nullptr);
-        lv_obj_t* toggle = lv_obj_find_by_name(root, "bypass_toggle");
+        lv_obj_t* row = lv_obj_find_by_name(root, "bypass_virtual_row");
+        REQUIRE(row != nullptr);
+        lv_obj_t* toggle = lv_obj_find_by_name(row, "toggle");
         REQUIRE(toggle != nullptr);
         return toggle;
     }
@@ -220,8 +221,8 @@ class DeviceOpsBypassFixture : public LVGLUITestFixture {
     /// operation thread, an AmsState event sync and a deferred observer, so the
     /// number of drains it needs is an implementation detail, not something a
     /// test should hard-code. wait_until() sleeps real time between passes so a
-    /// background thread can run; settle() never does (process_lvgl only sleeps
-    /// above 50ms), so it cannot wait for one.
+    /// background thread can run; settle() never does (process_lvgl never
+    /// sleeps), so it cannot wait for one.
     template <typename Pred> bool settle_until(Pred pred) {
         return wait_until([&] {
             helix::ui::UpdateQueue::instance().drain();

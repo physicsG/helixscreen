@@ -29,7 +29,7 @@ echo -n "📛 Checking namespace compliance (declarations outside helix::)..."
 # dominant convention (the inline predicates beside the global AmsAction enum,
 # two more ui_gcode_viewer_* C-style entry points, and a custom XML widget
 # module registered by C-string name). 2304 -> 2305 is the next sync's single
-# site: RecoverySuppression::RESTART_FLAG_TIMEOUT joins an existing global
+# site: RecoverySuppression::kRestartFlagTimeout joins an existing global
 # namespace whose other constants are already counted here. 2305 -> 2325 is
 # the 2026-08-31 sync's twenty: main's netd backends (EthernetBackendNetd,
 # WifiBackendNetd, and ethernet_backend.h's foreign-ns sysfs helpers beside
@@ -71,20 +71,32 @@ echo -n "📛 Checking namespace compliance (declarations outside helix::)..."
 # tree also spells - bare 'G', 'Display', 'Window', 'z_' - exempts our own
 # declarations from the gate rather than a library's. The list carries only
 # spellings a third-party API actually uses, and the 18 symbols that covers
-# are counted here, as are the three spellings of ui_gcode_viewer_pump_offscreen_2d:
-# its declaration, its definition, and the stub for builds without the renderer.
-# It joins the ui_gcode_viewer_* C API, which is global by design because it
-# is the widget's LVGL-facing surface; scoping this one call into helix::
-# would make it the only member of that family that is. 2215 -> 2214 is
+# are counted here. 2215 -> 2214 is
 # plugin_api.h's file-scope `class IMoonrakerAPI;` forward declaration.
 # 2193 -> 2194 nets three sites: ui_panel_controls.cpp's redundant
 # redeclaration of get_global_motion_panel() leaves (its header defines it
 # inline), and the bed mesh and spoolman accessors are counted as .cpp
 # definitions, kept out of line because the ESP32 build supplies its own.
+# 2101 -> 2102 is kMockK2ChamberFanRestingC, beside the other mock_internal
+# constants in moonraker_client_mock_internal.h.
+# 2102 -> 2016 is IMoonrakerAPI, the ten sub-API interfaces and their value
+# types moving into helix::, with every forward declaration that named them.
+# 2016 -> 1965 is AppConstants, PrinterImages and RecoverySuppression becoming
+# helix::app_constants, helix::printer_images and helix::recovery_suppression.
+# 1965 -> 1964 is main's own slack of one, picked up by the merge.
+# 1964 -> 1962 is the toolhead, host health and bed mesh widgets sharing
+# helix::ui::set_int_if_changed instead of each keeping a file-local copy.
+# 1962 -> 1960 is the runout-ownership switches leaving runtime_config.cpp for
+# BackendTraits fields.
+# 1957 -> 1880 is the G-code viewer widget's API moving from the global
+# ui_gcode_viewer_* functions into helix::ui as gcode_viewer_*, declarations,
+# definitions and the compiled-out stubs together.
+# 1880 -> 1876 is the shared Ethernet classifiers moving from a top-level
+# ethernet:: into helix::ethernet.
 #
 # tests/shell/test_namespace_gate.bats carries this same number and fails if
 # the two disagree or if the tree drifts under it.
-if python3 scripts/check_namespace_compliance.py --max-allowed 2113 --summary >/tmp/namespace_check.out 2>&1; then
+if python3 scripts/check_namespace_compliance.py --max-allowed 1876 --summary >/tmp/namespace_check.out 2>&1; then
   section_time $SECTION_START
   echo ""
   tail -1 /tmp/namespace_check.out

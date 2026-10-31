@@ -362,8 +362,7 @@ class SubjectManager {
         lv_subject_init_int(&(subject), (initial_value));                                          \
         helix::xml::register_subject_in_current_scope((xml_name), &(subject));                     \
         (manager).register_subject(&(subject), (xml_name));                                        \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (xml_name), LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);                      \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (xml_name), LV_SUBJECT_TYPE_INT);                 \
     } while (0)
 
 /**
@@ -382,8 +381,7 @@ class SubjectManager {
         lv_subject_init_string(&(subject), (buffer), nullptr, sizeof(buffer), (initial_value));    \
         helix::xml::register_subject_in_current_scope((xml_name), &(subject));                     \
         (manager).register_subject(&(subject), (xml_name));                                        \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (xml_name), LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);                   \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (xml_name), LV_SUBJECT_TYPE_STRING);              \
     } while (0)
 
 /**
@@ -405,8 +403,7 @@ class SubjectManager {
         lv_subject_init_string(&(subject), (buffer), nullptr, (size), (buffer));                   \
         helix::xml::register_subject_in_current_scope((xml_name), &(subject));                     \
         (manager).register_subject(&(subject), (xml_name));                                        \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (xml_name), LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);                   \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (xml_name), LV_SUBJECT_TYPE_STRING);              \
     } while (0)
 
 /**
@@ -424,8 +421,7 @@ class SubjectManager {
         lv_subject_init_pointer(&(subject), (initial_value));                                      \
         helix::xml::register_subject_in_current_scope((xml_name), &(subject));                     \
         (manager).register_subject(&(subject), (xml_name));                                        \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (xml_name), LV_SUBJECT_TYPE_POINTER, __FILE__, __LINE__);                  \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (xml_name), LV_SUBJECT_TYPE_POINTER);             \
     } while (0)
 
 /**
@@ -443,6 +439,5 @@ class SubjectManager {
         lv_subject_init_color(&(subject), (initial_value));                                        \
         helix::xml::register_subject_in_current_scope((xml_name), &(subject));                     \
         (manager).register_subject(&(subject), (xml_name));                                        \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (xml_name), LV_SUBJECT_TYPE_COLOR, __FILE__, __LINE__);                    \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (xml_name), LV_SUBJECT_TYPE_COLOR);               \
     } while (0)

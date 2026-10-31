@@ -12,7 +12,7 @@ flowchart TD
         KL -->|"status objects"| MR
     end
 
-    subgraph BG["Background thread (libhv event loop)"]
+    subgraph kBg["Background thread (libhv event loop)"]
         WS["MoonrakerClient<br/>WebSocket + JSON-RPC"]
         NQ["m_notification_queue<br/>mutex-protected JSON queue"]
         WS -->|"register_notify_update()<br/>push raw notification"| NQ
@@ -33,7 +33,7 @@ flowchart TD
     end
 
     NQ -->|"dequeue on main thread"| DEQ
-    BG -->|"queue_update() from any<br/>HTTP/Bluetooth worker"| UQ
+    kBg -->|"queue_update() from any<br/>HTTP/Bluetooth worker"| UQ
 
     subgraph REACT["Reactive layer (ch. 01)"]
         SUBJ["subjects: bed_temp, klippy_state,<br/>print_progress, fan_speed, ..."]
@@ -99,7 +99,7 @@ if (auto frame = helix::parse_status_notification(notification)) {
 }
 ```
 
-(verbatim from [`src/application/moonraker_manager.cpp#process_notifications`](../../../src/application/moonraker_manager.cpp)). `parse_status_notification()` ([`src/printer/printer_state.cpp#parse_status_notification`](../../../src/printer/printer_state.cpp)) is the one reader of the envelope, and `make_status_notification()` ([`include/i_moonraker_client.h#make_status_notification`](../../../include/i_moonraker_client.h)) the one writer of a synthetic one. `dispatch_status_frame()` ([`src/printer/status_dispatch.cpp#dispatch_status_frame`](../../../src/printer/status_dispatch.cpp)) is the list of status consumers: `PrinterState::update_from_status()`, `ToolState`, `LedController`, and every sensor manager through `sensors::for_each_sensor_manager()`. A new consumer of raw status joins that list rather than registering its own notification callback. The freshness pair matters: `eventtime` is monotonic per connection, so a stale replayed snapshot cannot overwrite a newer live reading.
+(verbatim from [`src/application/moonraker_manager.cpp#process_notifications`](../../../src/application/moonraker_manager.cpp)). `parse_status_notification()` ([`src/printer/printer_state.cpp#parse_status_notification`](../../../src/printer/printer_state.cpp)) is the one reader of the envelope, and `make_status_notification()` ([`include/i_moonraker_client.h#make_status_notification`](../../../include/i_moonraker_client.h)) the one writer of a synthetic one. `dispatch_status_frame()` ([`src/printer/status_dispatch.cpp#dispatch_status_frame`](../../../src/printer/status_dispatch.cpp)) is the list of status consumers: `PrinterState::update_from_status()`, `ToolState`, `LedController`, and every sensor manager through `sensors::sensor_managers()`. A new consumer of raw status joins that list rather than registering its own notification callback. The freshness pair matters: `eventtime` is monotonic per connection, so a stale replayed snapshot cannot overwrite a newer live reading.
 
 `update_from_status()` ([`src/printer/printer_state.cpp#update_from_status`](../../../src/printer/printer_state.cpp)) runs on the main thread only, takes no lock, and fans out to its domain components: temperature, motion, print, fan, excluded objects, calibration, and the webhooks parse in `PrinterNetworkState::apply_webhooks()`, which gates klippy state on frame freshness. `PrinterState` is a facade over thirteen such components, each owning its own subjects. Consumers reach a domain through its accessor (`get_printer_state().fan_state()`, `.print_state()`, `.temperature_state()`, `.network_state()`, ... in [`include/printer_state.h#PrinterState`](../../../include/printer_state.h)); only the setters the WebSocket thread calls stay on `PrinterState` itself, because they defer to the main thread. Each component parses its slice of the JSON and writes subjects through small setters that are change-gated: `PrinterNetworkState::set_klippy_state_internal()` ([`src/printer/printer_network_state.cpp#set_klippy_state_internal`](../../../src/printer/printer_network_state.cpp)) returns early if `lv_subject_get_int()` already equals the new value, and only otherwise calls `lv_subject_set_int()`. That matters because of how the subject engine behaves: `lv_subject_set_int()` (`lib/lvgl/src/core/lv_observer.c#lv_subject_set_int`) stores the previous and current value, then notifies **only if changed**. Equal-value writes are silent no-ops - which is why `PrinterTemperatureState` explicitly calls `lv_subject_notify()` when a temperature is unchanged ([`src/printer/printer_temperature_state.cpp#update_from_status`](../../../src/printer/printer_temperature_state.cpp)) to force observers to re-run.
 

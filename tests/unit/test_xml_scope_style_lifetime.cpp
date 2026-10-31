@@ -24,7 +24,7 @@
 namespace {
 
 // One component owning one style, so the retired scope has style storage to free.
-const char* SCOPE_FIXTURE_XML = R"(
+const char* kScopeFixtureXml = R"(
 <component>
   <styles>
     <style name="scope_probe_style" bg_color="0xff0000" pad_all="7"/>
@@ -52,7 +52,7 @@ const lv_style_t* first_style_of(lv_obj_t* obj) {
 TEST_CASE("a widget on a layer keeps its component scope alive", "[xml][style][lifetime]") {
     XMLTestFixture fixture;
 
-    REQUIRE(lv_xml_register_component_from_data("scope_probe", SCOPE_FIXTURE_XML) == LV_RESULT_OK);
+    REQUIRE(lv_xml_register_component_from_data("scope_probe", kScopeFixtureXml) == LV_RESULT_OK);
 
     auto* root = static_cast<lv_obj_t*>(lv_xml_create(lv_screen_active(), "scope_probe", nullptr));
     REQUIRE(root != nullptr);
@@ -72,7 +72,7 @@ TEST_CASE("a widget on a layer keeps its component scope alive", "[xml][style][l
     lv_obj_delete(root);
 
     // Replacing the component retires the scope that owns `style`.
-    REQUIRE(lv_xml_register_component_from_data("scope_probe", SCOPE_FIXTURE_XML) == LV_RESULT_OK);
+    REQUIRE(lv_xml_register_component_from_data("scope_probe", kScopeFixtureXml) == LV_RESULT_OK);
 
     // Freeing it would leave this pointer dangling. LVGL stamps every live style
     // with the sentinel, so a freed-and-reused one reads as anything else.

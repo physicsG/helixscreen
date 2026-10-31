@@ -1,0 +1,29 @@
+{
+    "type": "filament",
+    "name": "Eryone Standard PLA",
+    "instantiation": "false",
+    "filament_vendor": [
+        "Eryone"
+    ],
+    "filament_type": [
+        "PLA"
+    ],
+    "nozzle_temperature": [
+        "220"
+    ],
+    "nozzle_temperature_range_low": [
+        "180"
+    ],
+    "nozzle_temperature_range_high": [
+        "260"
+    ],
+    "filament_density": [
+        "1.24"
+    ],
+    "hot_plate_temp": [
+        "60"
+    ],
+    "textured_plate_temp": [
+        "60"
+    ]
+}

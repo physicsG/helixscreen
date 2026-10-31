@@ -144,7 +144,7 @@ class ActivePrintMediaManager {
     // print starts (OrcaSlicer upload-and-print), so the first metadata query
     // can fail or return no thumbnails. Each failure schedules a one-shot
     // lv_timer retry with backoff (2s, 5s, 10s, 20s, then 30s) up to
-    // MAX_THUMBNAIL_ATTEMPTS total attempts per filename. If the print ends
+    // kMaxThumbnailAttempts total attempts per filename. If the print ends
     // (empty filename) while a retry is pending, last_effective_filename_ is
     // intentionally preserved (see process_filename), so the retry may still
     // late-fill the preserved display info — intended, and bounded by the cap.
@@ -155,7 +155,7 @@ class ActivePrintMediaManager {
     /// filename is no longer current, a retry is already pending, or
     /// @p max_retries retries have already been scheduled.
     void schedule_thumbnail_retry(const std::string& filename,
-                                  int max_retries = MAX_THUMBNAIL_ATTEMPTS - 1);
+                                  int max_retries = kMaxThumbnailAttempts - 1);
     /// Cancel any pending retry timer and clear retry bookkeeping filename.
     void cancel_thumbnail_retry();
 
@@ -211,22 +211,25 @@ class ActivePrintMediaManager {
     ObserverGuard print_filename_observer_;
     ObserverGuard preparing_epoch_observer_;
     std::string last_effective_filename_;
+    /// The filename print_stats last reported, before identity resolution: a
+    /// plate extracted from a .3mf names its plate only there.
+    std::string last_raw_filename_;
     std::string last_loaded_thumbnail_filename_;
     bool last_was_empty_ = false; ///< Prevents repeated "empty filename" log spam
 
     /// Max total metadata/thumbnail load attempts per filename (1 initial + 9 retries).
-    static constexpr int MAX_THUMBNAIL_ATTEMPTS = 10;
+    static constexpr int kMaxThumbnailAttempts = 10;
 
     /// Lower retry cap for the success-with-empty-thumbnails leg: a metadata
     /// record can briefly lack thumbnails mid-scan, but the common cause is a
     /// file sliced WITHOUT thumbnails — a permanent condition where the full
     /// ladder would just burn RPCs. Late-scan cases beyond this are covered by
     /// the notify_filelist_changed / notify_klippy_ready re-triggers.
-    static constexpr int MAX_EMPTY_THUMBNAIL_RETRIES = 2;
+    static constexpr int kMaxEmptyThumbnailRetries = 2;
     /// Retries after a fetched thumbnail failed to decode (ESP32 PSRAM shortage).
     /// On retry_delay_ms()'s ladder they land about 2, 7, 17, 37 and 67s after
     /// the first failure, by which point boot has settled and PSRAM freed up.
-    static constexpr int MAX_DECODE_RETRIES = 5;
+    static constexpr int kMaxDecodeRetries = 5;
 
     helix::ui::LvglTimerGuard retry_timer_; ///< Pending one-shot retry (empty when none)
     int thumbnail_retry_count_ = 0;         ///< Retries scheduled for the current filename
@@ -239,7 +242,7 @@ class ActivePrintMediaManager {
     ThumbnailOrigin thumbnail_origin_ = ThumbnailOrigin::None;
 
     /// Filename whose gcode-header extraction already failed PERMANENTLY
-    /// (header read, nothing embedded — see GCODE_THUMBNAIL_NONE_EMBEDDED).
+    /// (header read, nothing embedded — see kGcodeThumbnailNoneEmbedded).
     /// Transient failures never populate this: on a broken-metadata fork the
     /// extracted header is the only thumbnail source, so a WiFi blip must not
     /// park the print on the placeholder. One entry is enough — there is one

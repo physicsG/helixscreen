@@ -29,7 +29,7 @@ struct WatchdogDecision {
 /// @param max_stall_kicks consecutive confirmed-stall ticks tolerated before
 ///                        giving up (stop kicking, signal error)
 inline WatchdogDecision watchdog_evaluate(const WatchdogObservation& obs, int max_stall_kicks) {
-    constexpr int NEVER_SAMPLED = -2;
+    constexpr int kNeverSampled = -2;
 
     // The cache advances only while the viewer is drawn, and a viewer under a
     // hidden screen (screensaver, software sleep) is not drawn. That is not a
@@ -38,7 +38,7 @@ inline WatchdogDecision watchdog_evaluate(const WatchdogObservation& obs, int ma
         return WatchdogDecision{false, false, 0};
     }
 
-    const bool first_sample = (obs.prev_cached == NEVER_SAMPLED);
+    const bool first_sample = (obs.prev_cached == kNeverSampled);
     const bool behind_target = (obs.cached < obs.target);
     const bool same_state = (obs.cached == obs.prev_cached) && (obs.target == obs.prev_target);
 

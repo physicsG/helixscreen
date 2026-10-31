@@ -6,6 +6,7 @@
 #include "../../include/heater_limits.h"
 #include "../../include/moonraker_client_mock.h"
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/discovery_of_objects.h"
 #include "../test_helpers/log_capture.h"
 #include "chamber_heater_assignment.h"
 #include "lvgl.h"
@@ -349,7 +350,7 @@ TEST_CASE("Manual chamber assignment updates sensor role", "[chamber][role]") {
     std::vector<std::string> objects = {"temperature_sensor chamber_temp",
                                         "temperature_sensor enclosure_bme",
                                         "temperature_sensor mcu_temp"};
-    mgr.discover(objects);
+    mgr.discover(helix::test::discovery_of(objects));
 
     auto sensors = mgr.get_sensors_sorted();
     auto it = std::find_if(sensors.begin(), sensors.end(), [](const auto& s) {
@@ -383,7 +384,7 @@ TEST_CASE("apply_chamber_sensor_override(\"\") demotes existing CHAMBER", "[cham
 
     std::vector<std::string> objects = {"temperature_sensor chamber",
                                         "temperature_sensor mcu_temp"};
-    mgr.discover(objects);
+    mgr.discover(helix::test::discovery_of(objects));
 
     // Auto-categorizer should promote the "chamber"-named sensor.
     auto sensors = mgr.get_sensors_sorted();
@@ -417,7 +418,7 @@ TEST_CASE("apply_chamber_sensor_override promotes non-chamber-named sensor",
     mgr.init_subjects();
 
     std::vector<std::string> objects = {"temperature_sensor cavity", "temperature_sensor mcu_temp"};
-    mgr.discover(objects);
+    mgr.discover(helix::test::discovery_of(objects));
 
     // Auto-categorizer doesn't match "cavity" against the "chamber" substring.
     auto sensors = mgr.get_sensors_sorted();
@@ -449,7 +450,7 @@ TEST_CASE("apply_chamber_sensor_override on already-CHAMBER sensor is a no-op",
 
     std::vector<std::string> objects = {"temperature_sensor chamber",
                                         "temperature_sensor mcu_temp"};
-    mgr.discover(objects);
+    mgr.discover(helix::test::discovery_of(objects));
 
     auto sensors = mgr.get_sensors_sorted();
     auto chamber = std::find_if(sensors.begin(), sensors.end(), [](const auto& s) {
@@ -484,7 +485,7 @@ TEST_CASE("apply_chamber_sensor_override with an absent name keeps the auto-cate
     SECTION("a chamber-named temperature_fan keeps the CHAMBER role") {
         std::vector<std::string> objects = {"temperature_fan chamber_exhaust_fans",
                                             "temperature_sensor mcu_temp"};
-        mgr.discover(objects);
+        mgr.discover(helix::test::discovery_of(objects));
         auto sensors = mgr.get_sensors_sorted();
         auto fan = std::find_if(sensors.begin(), sensors.end(), [](const auto& s) {
             return s.klipper_name == "temperature_fan chamber_exhaust_fans";
@@ -515,7 +516,7 @@ TEST_CASE("apply_chamber_sensor_override with an absent name keeps the auto-cate
 
     SECTION("no discovered chamber candidate keeps every role untouched") {
         std::vector<std::string> objects = {"temperature_sensor mcu_temp"};
-        mgr.discover(objects);
+        mgr.discover(helix::test::discovery_of(objects));
 
         helix::LogCapture capture;
         mgr.apply_chamber_sensor_override("temperature_sensor chamber_temp");
@@ -798,10 +799,11 @@ TEST_CASE("build_heater_gcode generates correct gcode for all heater types", "[c
 
 // Resting-aware chamber mode + effective target. `M141 S0` ("Off") resets the
 // cooling fan to its CONFIGURED RESTING target (35°C on the K2) with the heater
-// at 0; without resting-awareness the fan target of 35 reads back as a deliberate
-// "Maintaining 35°" set (and reddens the display). The mode subject is computed
-// WITH the resting value so the resting state is recognized as Off → effective 0.
-TEST_CASE("chamber mode + effective target treat the cooling-fan resting target as Off",
+// at 0, and a deliberate set that HAPPENS to equal the resting target produces
+// byte-identical Klipper state. Both surface as Resting: the target number is
+// displayed (the fan genuinely enforces it) while the auto glyph, not the
+// Maintaining check, marks it standing behavior rather than a deliberate set.
+TEST_CASE("chamber mode + effective target treat the cooling-fan resting target as Resting",
           "[temperature][m141]") {
     LVGLTestFixture fixture;
 
@@ -809,13 +811,13 @@ TEST_CASE("chamber mode + effective target treat the cooling-fan resting target 
     ts.init_subjects(false);
     ts.set_chamber_heater_name("heater_generic chamber_heater");
     ts.set_chamber_cooling_fan_name("temperature_fan chamber_fan");
-    ts.set_chamber_fan_resting(350); // 35°C ×10 (resting/off value from config)
+    ts.set_chamber_fan_resting(350); // 35°C ×10 (resting value from config)
 
-    // Off: M141 S0 → heater 0, fan at resting 35 → Off, effective 0
+    // Resting: M141 S0 (or a deliberate S35) → heater 0, fan at resting 35
     ts.update_from_status({{"heater_generic chamber_heater", {{"target", 0.0}}},
                            {"temperature_fan chamber_fan", {{"target", 35.0}}}});
-    REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 0);
-    REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Off);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 350);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Resting);
 
     // Maintaining: deliberate 30 (≠ resting) → Maintaining, effective 300
     ts.update_from_status({{"temperature_fan chamber_fan", {{"target", 30.0}}}});
@@ -826,6 +828,12 @@ TEST_CASE("chamber mode + effective target treat the cooling-fan resting target 
     ts.update_from_status({{"heater_generic chamber_heater", {{"target", 60.0}}}});
     REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 600);
     REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Heating);
+
+    // Off: only when nothing holds a target at all (fan absent/0)
+    ts.update_from_status({{"heater_generic chamber_heater", {{"target", 0.0}}},
+                           {"temperature_fan chamber_fan", {{"target", 0.0}}}});
+    REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 0);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Off);
 }
 
 // Pre-config-fetch fallback: when the resting target hasn't been read from config
@@ -853,8 +861,9 @@ TEST_CASE("chamber mode without resting config treats any fan target as Maintain
 // status always carries `target` - on the K1C the default target_temp 40, the
 // fan spin-up threshold - even at speed 0. That target must not enter the heater
 // slot's chamber_target_: it flows through the cooling-fan branch and the
-// resting-target comparison, so an idle K1C chamber reads Off, not Heating to 40.
-TEST_CASE("K1C chamber temperature_fan in the heater slot reads idle as Off",
+// resting-target comparison, so an idle K1C chamber reads Resting (auto 40),
+// never Heating to 40.
+TEST_CASE("K1C chamber temperature_fan in the heater slot reads idle as Resting",
           "[temperature][chamber][k1c]") {
     LVGLTestFixture fixture;
 
@@ -868,9 +877,9 @@ TEST_CASE("K1C chamber temperature_fan in the heater slot reads idle as Off",
         {{"temperature_fan chamber_fan", {{"temperature", 30.3}, {"target", 40.0}}}});
     // Temperature still ingests from the heater-slot object.
     REQUIRE(lv_subject_get_int(ts.get_chamber_temp_subject()) == 303);
-    // Fan target 400 == resting 400 -> Off, effective 0 (no target shown).
-    REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Off);
-    REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 0);
+    // Fan target 400 == resting 400 -> Resting, target shown as standing auto.
+    REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Resting);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 400);
 }
 
 // Same K1C single-object chamber after `M141 S35`: the thermostat target moves to
@@ -922,12 +931,14 @@ TEST_CASE("chamber_effective_setpoint picks the active control", "[temperature][
     REQUIRE(off.deci == 0);
     REQUIRE(off.mode == helix::ChamberMode::Off);
 
-    // Resting-edge: fan == resting → Off (M141 S0 parks fan here, not a deliberate set).
+    // Resting-edge: fan == resting → Resting, the standing auto setpoint
+    // (M141 S0 parks the fan here, and a deliberate set equal to resting is
+    // byte-identical to it).
     auto at_resting = chamber_effective_setpoint(0, 350, 350);
-    REQUIRE(at_resting.deci == 0);
-    REQUIRE(at_resting.mode == helix::ChamberMode::Off);
+    REQUIRE(at_resting.deci == 350);
+    REQUIRE(at_resting.mode == helix::ChamberMode::Resting);
 
-    // Fan above resting → Maintaining.
+    // Fan off resting → Maintaining.
     auto above_resting = chamber_effective_setpoint(0, 360, 350);
     REQUIRE(above_resting.deci == 360);
     REQUIRE(above_resting.mode == helix::ChamberMode::Maintaining);
@@ -942,6 +953,7 @@ TEST_CASE("chamber_mode_word maps enum to untranslated string", "[temperature][m
     using helix::ui::temperature::chamber_mode_word;
     REQUIRE(std::string(chamber_mode_word(helix::ChamberMode::Heating)) == "Heating");
     REQUIRE(std::string(chamber_mode_word(helix::ChamberMode::Maintaining)) == "Maintaining");
+    REQUIRE(std::string(chamber_mode_word(helix::ChamberMode::Resting)) == "Auto");
     REQUIRE(std::string(chamber_mode_word(helix::ChamberMode::Off)) == "Off");
 }
 
@@ -967,22 +979,34 @@ TEST_CASE("PrinterTemperatureState chamber subjects match chamber_effective_setp
     REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Maintaining);
     REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 360);
 
-    // Case 3: heater 0, fan == resting (M141 S0 state) → Off.
+    // Case 3: heater 0, fan == resting (M141 S0 state, or a deliberate set
+    // equal to resting) → Resting at the resting target.
     ts.update_from_status({{"heater_generic chamber_heater", {{"target", 0.0}}},
                            {"temperature_fan chamber_fan", {{"target", 35.0}}}});
-    REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Off);
-    REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 0);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_mode_subject()) == helix::ChamberMode::Resting);
+    REQUIRE(lv_subject_get_int(ts.get_chamber_effective_target_subject()) == 350);
 }
 
 TEST_CASE("chamber_uses_m141 gates only the chamber heater + M141 present", "[temperature][m141]") {
     using helix::ui::temperature::chamber_uses_m141;
     const std::string chamber = "heater_generic chamber_heater";
-    REQUIRE(chamber_uses_m141(chamber, chamber, /*m141_available=*/true));
-    REQUIRE_FALSE(chamber_uses_m141(chamber, chamber, /*m141_available=*/false));
-    REQUIRE_FALSE(chamber_uses_m141("extruder", chamber, true));
-    REQUIRE_FALSE(chamber_uses_m141("heater_bed", chamber, true));
-    REQUIRE_FALSE(chamber_uses_m141("", chamber, true));
-    REQUIRE_FALSE(chamber_uses_m141(chamber, "", true));
+    const std::optional<bool> unknown;
+    REQUIRE(chamber_uses_m141(chamber, chamber, /*m141_available=*/true, unknown));
+    REQUIRE_FALSE(chamber_uses_m141(chamber, chamber, /*m141_available=*/false, unknown));
+    REQUIRE_FALSE(chamber_uses_m141("extruder", chamber, true, unknown));
+    REQUIRE_FALSE(chamber_uses_m141("heater_bed", chamber, true, unknown));
+    REQUIRE_FALSE(chamber_uses_m141("", chamber, true, unknown));
+    REQUIRE_FALSE(chamber_uses_m141(chamber, "", true, unknown));
+}
+
+// An M141 whose body is readable and never sets the chamber heater is some other
+// macro by that name (a Voron exhaust-fan M141), so the heater is set directly.
+TEST_CASE("chamber_uses_m141 skips an M141 that never sets the chamber heater",
+          "[temperature][m141]") {
+    using helix::ui::temperature::chamber_uses_m141;
+    const std::string chamber = "heater_generic chamber";
+    CHECK(chamber_uses_m141(chamber, chamber, true, std::optional<bool>(true)));
+    CHECK_FALSE(chamber_uses_m141(chamber, chamber, true, std::optional<bool>(false)));
 }
 
 TEST_CASE("build_heater_gcode emits M141 when use_m141 is set", "[temperature][m141]") {
@@ -1046,7 +1070,9 @@ TEST_CASE("MoonrakerAPI routes chamber sends through M141 when defined", "[api][
         }
     } cache_reset_guard{macro_cache, settings};
 
-    nlohmann::json config = {{"gcode_macro m141", {{"gcode", "M141 S{params.S|default(0)}"}}}};
+    nlohmann::json config = {
+        {"gcode_macro m141",
+         {{"gcode", "SET_HEATER_TEMPERATURE HEATER=chamber_heater TARGET={params.S|default(0)}"}}}};
     macro_cache.populate_from_configfile(config, {"M141"});
     REQUIRE(macro_cache.has_macro("m141"));
 
@@ -1055,6 +1081,28 @@ TEST_CASE("MoonrakerAPI routes chamber sends through M141 when defined", "[api][
         REQUIRE(client.last_send_method() == "printer.gcode.script");
         REQUIRE(client.last_send_script().find("M141 S60") != std::string::npos);
         REQUIRE(client.last_send_script().find("SET_HEATER_TEMPERATURE") == std::string::npos);
+    }
+
+    SECTION("an M141 that only drives a fan leaves the heater to SET_HEATER_TEMPERATURE") {
+        // A Voron macro set's exhaust-fan M141, naming a fan the printer renamed.
+        macro_cache.populate_from_configfile(
+            {{"gcode_macro m141",
+              {{"gcode", "SET_TEMPERATURE_FAN_TARGET temperature_fan=chamber "
+                         "target={params.S|default(0)}"}}}},
+            {"M141"});
+        REQUIRE(macro_cache.has_macro("m141"));
+        api.set_temperature("heater_generic chamber_heater", 60.0, nullptr, nullptr);
+        REQUIRE(client.last_send_method() == "printer.gcode.script");
+        CHECK(client.last_send_script().find(
+                  "SET_HEATER_TEMPERATURE HEATER=chamber_heater TARGET=60") != std::string::npos);
+        CHECK(client.last_send_script().find("M141") == std::string::npos);
+    }
+
+    SECTION("an M141 whose body Klipper does not expose still routes through M141") {
+        macro_cache.populate_from_configfile(nlohmann::json::object(), {"M141"});
+        REQUIRE(macro_cache.has_macro("m141"));
+        api.set_temperature("heater_generic chamber_heater", 60.0, nullptr, nullptr);
+        CHECK(client.last_send_script().find("M141 S60") != std::string::npos);
     }
 
     SECTION("nozzle still uses SET_HEATER_TEMPERATURE on the same printer") {
@@ -1204,7 +1252,7 @@ TEST_CASE("chamber Heating mode and Off classify plainly",
 TEST_CASE("every heater duty string fits the buffer its surfaces render from",
           "[chamber][temperature]") {
     using helix::ui::temperature::classify_heater_status;
-    using helix::ui::temperature::HEATER_STATUS_BUF_BYTES;
+    using helix::ui::temperature::kHeaterStatusBufBytes;
 
     // The status area renders the duty text and, for a read-only chamber, the
     // translated "Monitoring" word. A surface whose buffer cannot hold the
@@ -1227,7 +1275,7 @@ TEST_CASE("every heater duty string fits the buffer its surfaces render from",
     // this test would hold for any size at all.
     REQUIRE(longest.size() >= 8);
 
-    std::array<char, HEATER_STATUS_BUF_BYTES> buf{};
+    std::array<char, kHeaterStatusBufBytes> buf{};
     std::snprintf(buf.data(), buf.size(), "%s", longest.c_str());
     CHECK(std::string(buf.data()) == longest);
 }

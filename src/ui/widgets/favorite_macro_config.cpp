@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "favorite_macro_config.h"
 
+#include "tile_color.h"
+
+#include <algorithm>
 #include <cstdint>
 
 namespace helix {
@@ -11,11 +14,7 @@ FavoriteMacroConfig favorite_macro_config_from_json(const nlohmann::json& j) {
         c.macro = j["macro"].get<std::string>();
     if (j.contains("icon") && j["icon"].is_string())
         c.icon = j["icon"].get<std::string>();
-    if (j.contains("color") && j["color"].is_number_integer()) {
-        int64_t v = j["color"].get<int64_t>();
-        if (v >= 0 && v <= 0xFFFFFF)
-            c.color = static_cast<uint32_t>(v);
-    }
+    c.color = tile_color::color_from_config(j);
     // Two spellings of the same switch. "require_confirmation" is what this
     // build writes; "skip_param_prompt" is the pre-v23 key with the opposite
     // polarity, still read here so a config that never passed through
@@ -42,6 +41,16 @@ nlohmann::json favorite_macro_config_to_json(const FavoriteMacroConfig& c) {
     if (!c.require_confirmation)
         j["require_confirmation"] = false;
     return j;
+}
+
+std::vector<std::string> pickable_macro_names(const std::unordered_set<std::string>& macros) {
+    std::vector<std::string> names;
+    for (const auto& macro : macros) {
+        if (!macro.empty() && macro[0] != '_')
+            names.push_back(macro);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 } // namespace helix

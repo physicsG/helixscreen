@@ -16,12 +16,10 @@
  * the dialog is lying. Klipper returning to READY is that signal.
  *
  * These drive helix::ui::track_fault_modal() / dismiss_fault_modals() directly
- * rather than going through ui_notification_printer_fault(), because
- * ui_notification.o is excluded from the test link (mk/tests.mk) and its stub
- * builds no modal at all. The registry is where the logic lives and it IS
- * linked, so this is the real code — but note the consequence: the one-line
- * track_fault_modal() call inside ui_notification.cpp is wiring these tests
- * cannot reach.
+ * rather than going through ui_notification_printer_fault(), which builds a
+ * modal only after ToastManager::init(). The registry is where the logic
+ * lives, so the one-line track_fault_modal() call inside ui_notification.cpp is
+ * wiring these tests do not reach.
  */
 
 #include "ui_emergency_stop.h"
@@ -29,6 +27,7 @@
 #include "ui_update_queue.h"
 
 #include "../test_fixtures.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "display_settings_manager.h"
 #include "fault_modal_registry.h"
 #include "moonraker_api.h"
@@ -69,10 +68,7 @@ class FaultModalFixture : public XMLTestFixture {
     /// it touches any modal), so a single drain leaves work in flight — which
     /// showed up as a sweep firing in the middle of a later test step.
     void settle() {
-        for (int i = 0; i < 16 && UpdateQueue::instance().pending_count() > 0; i++) {
-            UpdateQueue::instance().drain();
-        }
-        UpdateQueue::instance().drain();
+        helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance(), 16);
     }
 
     /// A fault alert exactly as ui_notification_printer_fault() builds it:

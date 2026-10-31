@@ -32,13 +32,18 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_fixtures.h"
 #include "../test_helpers/print_state_test_drivers.h"
+#include "../test_helpers/scoped_printer_discovery.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
+#include "filament_accounting_controller.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 
 #include <memory>
+#include <optional>
 
 #include "../catch_amalgamated.hpp"
 
@@ -381,5 +386,64 @@ TEST_CASE_METHOD(AmsErrorModalFixture,
     CHECK_FALSE(panel.is_error_modal_visible());
 
     set_wire_and_phase(helix::PrintJobState::STANDBY, helix::PrintStartPhase::IDLE);
+    teardown_panel(panel, obj);
+}
+
+// ============================================================================
+// Panel level — the active spool
+// ============================================================================
+
+namespace {
+
+/// A plain mock backend (it does not switch the active spool itself) whose
+/// lanes 0 and 1 carry linked spools 42 and 43, lane 0 loaded.
+AmsBackendMock* install_linked_backend() {
+    auto mock = std::make_unique<AmsBackendMock>(4);
+    mock->set_operation_delay(0);
+    REQUIRE(mock->start().success());
+    for (int slot : {0, 1}) {
+        SlotInfo info = mock->get_slot_info(slot);
+        info.spoolman_id = 42 + slot;
+        mock->sync_external_identity(slot, info);
+    }
+    auto* raw = mock.get();
+    AmsState::instance().set_backend(std::move(mock));
+    AmsState::instance().init_subjects(true);
+    AmsState::instance().sync_from_backend();
+    return raw;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(AmsErrorModalFixture,
+                 "the AMS panel switches the active spool only where HelixScreen owns it",
+                 "[ui_integration][ams][active_spool][plugin_filament]") {
+    MoonrakerClientMock mock_client;
+    MoonrakerAPIMock mock_api(mock_client, state());
+    const bool spoollink = GENERATE(false, true);
+    CAPTURE(spoollink);
+    std::optional<helix::test::ScopedPrinterDiscovery> printer;
+    if (spoollink) {
+        printer.emplace(helix::test::spoollink_printer_objects());
+    }
+    mock_client.spoolman_mock().set_active_spool_id(5);
+    auto* backend = install_linked_backend();
+    REQUIRE(lv_subject_get_int(AmsState::instance().get_current_slot_subject()) == 0);
+
+    // The one rule every switch asks.
+    CHECK(spool_to_activate(backend, 0) == (spoollink ? 0 : 42));
+    CHECK(spool_to_activate(backend, -1) == 0);
+    CHECK(spool_to_activate(nullptr, 0) == 0);
+
+    AmsPanel panel(state(), &mock_api);
+    lv_obj_t* obj = build_panel(panel);
+    // Opening the panel syncs the loaded lane's spool.
+    CHECK(mock_client.spoolman_mock().get_mock_active_spool_id() == (spoollink ? 5 : 42));
+
+    // A lane change while the panel is open switches to that lane's spool.
+    lv_subject_set_int(AmsState::instance().get_current_slot_subject(), 1);
+    pump();
+    CHECK(mock_client.spoolman_mock().get_mock_active_spool_id() == (spoollink ? 5 : 43));
+
     teardown_panel(panel, obj);
 }

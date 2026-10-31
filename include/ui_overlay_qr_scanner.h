@@ -101,6 +101,8 @@ class QrScannerOverlay : public OverlayBase {
   private:
     void handle_close();
     void start_scanning();
+    /// Lowers a moving bed for camera clearance and starts the camera or snapshot decode.
+    void start_camera();
     void stop_scanning();
     void on_spool_id_detected(int spool_id);
     void lookup_spool(int spool_id);
@@ -131,7 +133,7 @@ class QrScannerOverlay : public OverlayBase {
 
     // Target max dimension for QR decode — QR codes are readable at low
     // resolution, so we subsample to avoid burning CPU on full-res frames.
-    static constexpr int QR_MAX_DIMENSION = 480;
+    static constexpr int kQrMaxDimension = 480;
 #endif
     std::unique_ptr<helix::SnapshotQrScanner> snapshot_scanner_;
     helix::UsbScannerMonitor usb_monitor_;

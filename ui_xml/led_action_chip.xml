@@ -16,7 +16,7 @@
         style_radius="#led_chip_height" style_min_width="#led_chip_min_width" style_pad_left="#space_md"
         style_pad_right="#space_md" ext_click_area="#led_chip_gap_half">
     <!-- Idle first, active after: the later style wins while it is enabled. -->
-    <style name="styles.led_chip_idle"/>
-    <bind_style_if_eq name="styles.led_chip_active" subject="$active_subject" ref_value="$active_value"/>
+    <style name="styles.chip_idle"/>
+    <bind_style_if_eq name="styles.chip_active" subject="$active_subject" ref_value="$active_value"/>
   </view>
 </component>

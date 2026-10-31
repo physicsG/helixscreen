@@ -8,12 +8,14 @@
 #include "filament_slot_override_store.h"
 #include "lane_binding.h"
 #include "lane_echo.h"
+#include "qidi_status_parse.h"
 
 #include <cstdint>
 #include <ctime>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -59,9 +61,13 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     AmsBackendQidi(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
     ~AmsBackendQidi() override;
 
+    /// The status objects the QIDI Box backend pushes (drying state, slot/box state).
+    /// Empty unless @p hw detected a QIDI Box.
+    [[nodiscard]] static nlohmann::json required_status_objects(const helix::PrinterDiscovery& hw);
+
     /// Single-box default. Chainable up to 16 slots (4 boxes × 4 slots) on
     /// supported hardware, but the stub only advertises a single box.
-    static constexpr int NUM_SLOTS = 4;
+    static constexpr int kNumSlots = 4;
 
     // --- AmsBackend interface ---
     [[nodiscard]] AmsType get_type() const override {
@@ -70,9 +76,6 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     /// Constant capability answers; see BackendTraits.
     static constexpr BackendTraits kTraits = [] {
         BackendTraits t;
-        // QIDI Box exposes user-tunable per-lane eject distance + velocity, which the
-        // device-operations overlay surfaces as slider rows.
-        t.supports_configurable_eject_params = true;
         // The Box publishes a per-slot state word (save_variables slot<N>, where 2
         // means loaded), which is its own statement about that slot and needs no
         // active-slot pointer to interpret. The aggregate pair by contrast is
@@ -91,6 +94,10 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
         // manages hotend temperature itself (heat → load → clear → cool), so the UI
         // must not run its own preheat for QIDI loads.
         t.supports_auto_heat_on_load = true;
+        // Unload is M603, the stock unload that heats before it retracts; the
+        // EXTRUDER_UNLOAD fallback heats to the slot's temperature first
+        // (do_unload_filament()).
+        t.supports_auto_heat_on_unload = true;
         return t;
     }();
     [[nodiscard]] BackendTraits traits() const override {
@@ -129,7 +136,13 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     }
     [[nodiscard]] bool is_bypass_active() const override;
 
+    /// The lane eject distance and speed FORCE_MOVE uses, as two sliders.
+    [[nodiscard]] std::vector<helix::printer::DeviceSection> get_device_sections() const override;
+    [[nodiscard]] std::vector<helix::printer::DeviceAction> get_device_actions() const override;
+
   protected:
+    /// Stores an eject slider's value; nothing is sent until the next eject.
+    AmsError do_execute_device_action(const std::string& action_id, const std::any& value) override;
     // The Box's slots are painted SlotInfo state that persists between
     // save_variables polls, not re-read from firmware each pass, so a lane
     // written from outside the parse (a person's edit) names the slot here and
@@ -167,6 +180,10 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     AmsError recover() override;
     AmsError reset() override;
     AmsError cancel() override;
+    /// cancel() has nothing to send on a QIDI Box, so no Abort is offered.
+    [[nodiscard]] bool can_cancel_operation() const override {
+        return false;
+    }
 
     [[nodiscard]] std::optional<helix::ErrorEvent> current_error() const override;
 
@@ -179,10 +196,15 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
         // needs no [force_move]; the Q2/Plus 4 box_stepper FORCE_MOVE path does. #1083
         return box_uses_multi_color_ || fw_force_move_enabled_;
     }
+    [[nodiscard]] std::string eject_unavailable_reason(int slot_index) const override;
 
     AmsError apply_user_edit(int slot_index, const SlotInfo& info,
                              const helix::ams::Observation& declared) override;
     AmsError sync_external_identity(int slot_index, const SlotInfo& info) override;
+
+    /// The Box's saved RFID ids, resolved, kept while our own write-back holds
+    /// the saved ids (helix::ams::fold_tag_frame).
+    [[nodiscard]] std::optional<helix::ams::TagReading> tag_reading(int slot_index) const override;
     void update_slot_weight_impl(int slot_index, float remaining_weight_g, float total_weight_g,
                                  bool persist) override;
     [[nodiscard]] AmsError can_set_tool_mapping(int tool_number, int slot_index) const override;
@@ -279,12 +301,62 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     /// don't pollute SlotInfo with backend-specific fields. Resolution to
     /// material/color/brand happens via the officiall_filas_list.cfg lookup
     /// (separate cycle). 0 = unknown.
+    ///
+    /// Box firmware 02.03.01.21 and later also saves a string product id
+    /// (`filament_slot<N> = 'QFA90'`) and a colour list
+    /// (`color_slot<N> = ['228332']`). Those land in filament_code and
+    /// color_rgb with the matching row id at 0, and the tables cannot resolve
+    /// a product id: multi_color_controller's slot info does.
     struct QidiSlotRfid {
-        int filament_id = 0; ///< 1-99, index into officiall_filas_list.cfg
-        int color_id = 0;    ///< 1-24, palette index
-        int vendor_id = 0;   ///< Always 1 in the wild so far
+        int filament_id = 0;                    ///< 1-99, index into officiall_filas_list.cfg
+        int color_id = 0;                       ///< 1-24, palette index
+        int vendor_id = 0;                      ///< Always 1 in the wild so far
+        std::string filament_code;              ///< String product id, in place of filament_id
+        std::optional<std::uint32_t> color_rgb; ///< Colour list's RGB, in place of color_id
+
+        /// The fields as fingerprint components: the row id, or the string
+        /// form when the Box saved one ("QFA90", "#228332").
+        [[nodiscard]] std::string filament_token() const;
+        [[nodiscard]] std::string color_token() const;
     };
     std::vector<QidiSlotRfid> slot_rfid_;
+
+    /// What multi_color_controller publishes for a slot, already resolved by
+    /// the firmware: `box.box<B>_filament_info_<I>_*`. The source for a slot
+    /// whose save_variables hold a string product id. Indexed by global slot.
+    struct ControllerSlotInfo {
+        std::string filament_id; ///< The product id this info describes
+        std::string filament_type;
+        std::string vendor;
+        int min_temp = 0;
+        int max_temp = 0;
+        bool operator==(const ControllerSlotInfo& o) const {
+            return filament_id == o.filament_id && filament_type == o.filament_type &&
+                   vendor == o.vendor && min_temp == o.min_temp && max_temp == o.max_temp;
+        }
+        bool operator!=(const ControllerSlotInfo& o) const {
+            return !(*this == o);
+        }
+    };
+    std::vector<ControllerSlotInfo> controller_slots_;
+
+    /// Product id -> material, from every controller slot that has stated
+    /// both. Product ids are global, so a fingerprint naming one decodes to
+    /// its material wherever it was seen.
+    std::map<std::string, std::string> product_types_;
+
+    /// Every filament/color/vendor_slot key save_variables has stated, merged.
+    /// Replayed through parse_save_variables() when controller info changes
+    /// on its own, so a string id resolves without waiting for the next save.
+    nlohmann::json identity_vars_ = nlohmann::json::object();
+
+    /// Fold a multi_color_controller status (deltas included) into
+    /// controller_slots_. True when a slot's info changed. Caller holds mutex_.
+    bool apply_controller_status_locked(const nlohmann::json& controller);
+
+    /// Each slot's tag reading, folded frame by frame from the resolved ids so
+    /// a field our own write replaced keeps the tag's value. Under mutex_.
+    std::unordered_map<int, helix::ams::TagReading> tag_readings_;
 
     // Dryer state for the box PTC heater (issue #1019).
     std::vector<DryerInfo> dryer_info_;      ///< Per-unit (per-box) dryer state, index = unit
@@ -293,22 +365,11 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     std::function<std::time_t()> now_fn_ = [] { return std::time(nullptr); };
 
   public:
-    /// Temperature profile for a single fila entry from
-    /// officiall_filas_list.cfg. Public so test friend can return one.
-    struct FilaProfile {
-        std::string name; ///< Human label from `filament` (e.g. "PLA Rapido")
-        std::string type; ///< Material class from `type` (e.g. "PLA", "ABS-GF")
-        int nozzle_min = 0;
-        int nozzle_max = 0;
-        int box_min = 0;
-        int box_max = 0;
-    };
+    using FilaProfile = helix::qidi::FilaProfile;
 
   private:
-    /// Parse a ConfigParser-formatted officiall_filas_list.cfg payload and
-    /// populate fila_profiles_, color_palette_, and vendor_names_. Tolerant of
-    /// whitespace, blank lines, and `#` / `;` comments. Non-matching sections
-    /// (anything but `[fila<N>]`, `[colordict]`, `[vendor_list]`) are ignored.
+    /// Replace fila_profiles_, color_palette_ and vendor_names_ with what an
+    /// officiall_filas_list.cfg payload states (qidi::parse_filas_list).
     void apply_filas_list(const std::string& content);
 
     /// fila_id (1-99) → temperature profile, populated by apply_filas_list().
@@ -363,16 +424,17 @@ class AmsBackendQidi : public AmsSubscriptionBackend {
     [[nodiscard]] helix::ams::SpoolEvidence
     fingerprint_evidence_locked(const std::string& fingerprint) const;
 
-    /// Cross-product the per-field id lists into the fingerprint set the slot
+    /// Cross-product the per-field token lists into the fingerprint set the slot
     /// may report while our own SAVE_VARIABLEs echo back one field at a time,
     /// and register it with rfid_tracker_ so each echo reads as OwnWriteEcho
     /// instead of a spool swap. The vendor write needs no composite of its
     /// own: the fingerprint does not count the vendor id. Returns the staged
     /// values, for a forget_expected() release when none of the writes
     /// dispatch. Caller must hold mutex_.
-    std::vector<std::string> expect_own_write_echoes_locked(int slot_index, const std::string& base,
-                                                            const std::vector<int>& fila_vals,
-                                                            const std::vector<int>& color_vals);
+    std::vector<std::string>
+    expect_own_write_echoes_locked(int slot_index, const std::string& base,
+                                   const std::vector<std::string>& fila_tokens,
+                                   const std::vector<std::string>& color_tokens);
 
     /// Blanks everything the slot showed, material and colour included, so it
     /// reads as no identity the moment the clear lands; the parse restates

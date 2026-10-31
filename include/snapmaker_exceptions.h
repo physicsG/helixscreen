@@ -45,6 +45,11 @@ enum class ExceptionSeverity { Informational, Pause, Cancel };
 /// form, which omits the level and would otherwise decode shifted by one field.
 [[nodiscard]] std::optional<ExceptionCode> decode_exception_code(const std::string& text);
 
+/// The four-part `LLLL-IIII-NNNN-CCCC` spelling every coded fault is reported
+/// in: console lines, ErrorEvent codes, log tokens. One formatting so the
+/// spellings a user compares by eye cannot drift apart.
+[[nodiscard]] std::string format_exception_code(const ExceptionCode& c);
+
 /// Our wording for a fault we recognise; empty for one we do not, so the caller
 /// falls back to the firmware's own message rather than inventing one.
 [[nodiscard]] std::string_view exception_message(const ExceptionCode& c);

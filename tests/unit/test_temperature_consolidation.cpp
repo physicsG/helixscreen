@@ -180,6 +180,21 @@ TEST_CASE("classify_heater_status: chamber Maintaining above the ceiling is Cool
             HeaterStatusState::Cooling);
 }
 
+// The Resting target is the machine's standing behavior, not a deliberate set:
+// at/below it nothing is being held by the user, so the status area shows the
+// auto glyph rather than the Maintaining check. Above it the fan is genuinely
+// shedding heat, which is the snowflake like any ceiling.
+TEST_CASE("classify_heater_status: chamber Resting renders Auto below the ceiling, Cooling above",
+          "[temperature][heater_status][chamber_mode]") {
+    using helix::ChamberMode;
+    REQUIRE(classify_heater_status(1500, 2000, 0, ChamberMode::Resting).state ==
+            HeaterStatusState::Auto);
+    REQUIRE(classify_heater_status(2000, 2000, 0, ChamberMode::Resting).state ==
+            HeaterStatusState::Auto);
+    REQUIRE(classify_heater_status(2100, 2000, 0, ChamberMode::Resting).state ==
+            HeaterStatusState::Cooling);
+}
+
 // ============================================================================
 // heater_display() - Percentage clamping
 // ============================================================================
@@ -294,7 +309,7 @@ TEST_CASE("get_heating_state_variant: cooling above tolerance", "[temperature][h
 
 TEST_CASE("get_heating_state_variant: tolerance boundaries are at-temp",
           "[temperature][heater_variant]") {
-    // DEFAULT_AT_TEMP_TOLERANCE = 2: target-2 and target+2 are still "at temp"
+    // kDefaultAtTempTolerance = 2: target-2 and target+2 are still "at temp"
     REQUIRE(std::string(get_heating_state_variant(198, 200)) == "success"); // lower bound
     REQUIRE(std::string(get_heating_state_variant(202, 200)) == "success"); // upper bound
     REQUIRE(std::string(get_heating_state_variant(197, 200)) == "danger");  // just below -> heating
@@ -460,7 +475,7 @@ TEST_CASE("classify_heat_state_with_mode: Maintaining at/below ceiling is Neutra
 TEST_CASE("classify_heat_state_with_mode: honors a custom tolerance in Maintaining mode",
           "[temperature][heat_state][chamber_mode]") {
     // Decidegree-scale tolerance (20 = 2 degrees), mirroring helix::ui::HeatingIconAnimator's
-    // TEMP_TOLERANCE usage.
+    // kTempTolerance usage.
     REQUIRE(classify_heat_state_with_mode(2015, 2000, helix::ChamberMode::Maintaining, 20) ==
             HeatState::Neutral);
     REQUIRE(classify_heat_state_with_mode(2025, 2000, helix::ChamberMode::Maintaining, 20) ==

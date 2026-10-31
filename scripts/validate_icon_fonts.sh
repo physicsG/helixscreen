@@ -191,10 +191,10 @@ else
 fi
 
 # =============================================================================
-# SORTED CHECK: ICON_MAP must be alphabetically sorted for binary search
+# SORTED CHECK: kIconMap must be alphabetically sorted for binary search
 # =============================================================================
 echo ""
-echo "Validating ICON_MAP sort order..."
+echo "Validating kIconMap sort order..."
 
 # Extract icon names in order (as they appear in the file)
 ICON_NAMES_ACTUAL=$(grep -E '\{"[^"]+",\s*"\\x' "$CODEPOINTS_FILE" | sed -E 's/.*\{"([^"]+)".*/\1/')
@@ -202,7 +202,7 @@ ICON_NAMES_SORTED=$(echo "$ICON_NAMES_ACTUAL" | sort)
 
 # Compare actual order with sorted order
 if [[ "$ICON_NAMES_ACTUAL" != "$ICON_NAMES_SORTED" ]]; then
-    echo "❌ ICON_MAP is not alphabetically sorted!"
+    echo "❌ kIconMap is not alphabetically sorted!"
     echo ""
     echo "   The binary search in lookup_codepoint() requires alphabetical order."
     echo "   Out-of-order entries will cause icon lookup failures at runtime."
@@ -221,5 +221,5 @@ if [[ "$ICON_NAMES_ACTUAL" != "$ICON_NAMES_SORTED" ]]; then
     echo "To fix: Reorder entries in $CODEPOINTS_FILE alphabetically"
     exit 1
 else
-    echo "✓ ICON_MAP is correctly sorted for binary search"
+    echo "✓ kIconMap is correctly sorted for binary search"
 fi

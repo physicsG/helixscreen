@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <string>
 
 /**
@@ -37,21 +38,32 @@ namespace helix::presets {
 ///
 /// DERIVED from MaterialSettingsManager's default seed, never restated. This
 /// module deliberately contains no material name literals and no default list
-/// of its own — DEFAULT_PRESET_MATERIALS remains the single source for the
+/// of its own — kDefaultPresetMaterials remains the single source for the
 /// default slot assignment, and everything here reads through the manager.
-inline constexpr int PRESET_COUNT = static_cast<int>(DEFAULT_PRESET_MATERIALS.size());
+inline constexpr int kPresetCount = static_cast<int>(kDefaultPresetMaterials.size());
 
-/// Material name assigned to slot (0..PRESET_COUNT-1). Empty string if out of range.
+/// Material name assigned to slot (0..kPresetCount-1). Empty string if out of range.
 /// This is the verbatim material string — safe to hand to filament::find_material()
 /// and to MaterialSettingsManager::get_override().
 std::string name(int slot);
 
 /// All preset material names, slot-indexed.
-std::array<std::string, PRESET_COUNT> all();
+std::array<std::string, kPresetCount> all();
 
 /// Display label for a slot: "Bambu PLA" when a branded filament is attached to
 /// the slot, otherwise just the material name. Never use this as a material key.
 std::string display_label(int slot);
+
+/// Nozzle and bed temperature a slot prints at, whole °C.
+struct SlotTemps {
+    int nozzle = 0;
+    int bed = 0;
+};
+
+/// The slot's temperatures: the attached branded product's when there is one,
+/// otherwise the filament database recommendation. nullopt when the slot is
+/// out of range or its material is unknown.
+std::optional<SlotTemps> slot_temps(int slot);
 
 /// "220°C / 60°C" style summary for a slot (branded product temps when attached,
 /// otherwise the filament database recommendation). "---" if the material is unknown.

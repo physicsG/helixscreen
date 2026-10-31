@@ -17,7 +17,7 @@ using namespace helix;
 
 TEST_CASE("find_matching_mode: empty list returns NO_MATCH", "[drm_mode_matching]") {
     std::vector<DrmModeInfo> modes;
-    REQUIRE(find_matching_mode(modes, 1024, 600) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_matching_mode(modes, 1024, 600) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_matching_mode: exact match at index 0", "[drm_mode_matching]") {
@@ -51,7 +51,7 @@ TEST_CASE("find_matching_mode: no match returns NO_MATCH", "[drm_mode_matching]"
         {1920, 1080, 60, true},
         {800, 480, 60, false},
     };
-    REQUIRE(find_matching_mode(modes, 1234, 567) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_matching_mode(modes, 1234, 567) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_matching_mode: refresh rate is ignored when matching", "[drm_mode_matching]") {
@@ -80,7 +80,7 @@ TEST_CASE("find_preferred_mode_index: no preferred falls back to 0", "[drm_mode_
 
 TEST_CASE("find_preferred_mode_index: empty list returns NO_MATCH", "[drm_mode_matching]") {
     std::vector<DrmModeInfo> modes;
-    REQUIRE(find_preferred_mode_index(modes) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_preferred_mode_index(modes) == DrmModeMatch::kNoMatch);
 }
 
 // --- High-DPI auto-downscale tests ---
@@ -91,7 +91,7 @@ TEST_CASE("find_best_downscale_mode: returns NO_MATCH when preferred is within t
         {1920, 1080, 60, true},
         {1280, 720, 60, false},
     };
-    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_best_downscale_mode: returns NO_MATCH when both axes equal threshold",
@@ -99,7 +99,7 @@ TEST_CASE("find_best_downscale_mode: returns NO_MATCH when both axes equal thres
     std::vector<DrmModeInfo> modes = {
         {1920, 1920, 60, true},
     };
-    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_best_downscale_mode: selects highest sub-threshold mode", "[drm_mode_matching]") {
@@ -136,12 +136,12 @@ TEST_CASE("find_best_downscale_mode: no sub-threshold mode available returns NO_
         {2560, 1440, 60, true},
         {3840, 2160, 30, false},
     };
-    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_best_downscale_mode: empty list returns NO_MATCH", "[drm_mode_matching]") {
     std::vector<DrmModeInfo> modes;
-    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_best_downscale_mode: single mode over threshold with no alternatives",
@@ -149,7 +149,7 @@ TEST_CASE("find_best_downscale_mode: single mode over threshold with no alternat
     std::vector<DrmModeInfo> modes = {
         {2560, 1440, 60, true},
     };
-    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_best_downscale_mode: preferred not first in list", "[drm_mode_matching]") {
@@ -168,7 +168,7 @@ TEST_CASE("find_best_downscale_mode: no preferred flag, mode[0] below threshold"
         {2560, 1440, 60, false}, // high-res but not preferred
     };
     // mode[0] is the fallback preferred; within threshold, so no downscale
-    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::NO_MATCH);
+    REQUIRE(find_best_downscale_mode(modes, 1920) == DrmModeMatch::kNoMatch);
 }
 
 TEST_CASE("find_best_downscale_mode: no preferred flag, mode[0] above threshold",

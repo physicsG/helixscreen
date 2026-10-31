@@ -80,6 +80,18 @@ jobs:
         if-no-files-found: error
         retention-days: 7
 
+    # test_release_health.bats runs `npx vite-node` in server/telemetry-worker;
+    # without its node_modules, npx downloads vite-node from npm mid-test.
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: npm
+        cache-dependency-path: server/telemetry-worker/package-lock.json
+
+    - name: Install telemetry worker dependencies
+      working-directory: server/telemetry-worker
+      run: npm ci --no-audit --no-fund
+
     - name: Run shell tests
       run: make test-shell
 
@@ -114,6 +126,7 @@ jobs:
             {"platform": "mips", "display_name": "Unified MIPS (K1 Series + AD5X)", "build_target": "mips", "build_dir": "mips"},
             {"platform": "k2", "display_name": "Creality K2 Series"},
             {"platform": "x86", "display_name": "x86_64 Debian", "build_target": "x86-both"},
+            {"platform": "x86-desktop", "display_name": "x86_64 Linux Desktop", "build_target": "x86-desktop", "docker_image": "x86"},
             {"platform": "snapmaker-u1", "display_name": "Snapmaker U1"}
           ]
       run: |
@@ -313,17 +326,131 @@ jobs:
         retention-days: 30
 
   # ============================================================================
-  # Build Android APKs (runs in parallel with embedded platform builds)
+  # Run the packaged x86 binary with its GPU libraries removed
   # ============================================================================
-  build-android:
-    name: Build (Android)
-    needs: [validate-shell, plan]
+  # The Pi/x86 helix-screen reaches libdrm, libgbm, libEGL, libGLESv2 and
+  # libinput through runtime-loaded trampolines and falls back to fbdev without
+  # them; helix-tests builds without the DRM path, so this is the only check
+  # that runs it. scripts/ci/gpu_libs_hidden_smoke.sh says what it asserts. The
+  # toolchain image is the x86 build's own (its buildx cache), which has the
+  # libraries installed for the pass that keeps them.
+  gpu-libs-hidden-smoke:
+    name: GPU libraries hidden (x86)
+    needs: [build-platforms, plan]
+    if: ${{ !cancelled() && contains(format(' {0} ', needs.plan.outputs.platforms), ' x86 ') }}
     runs-on: ubuntu-22.04
-    # Two ABIs ran 46-64 minutes through assembleRelease + bundleRelease, and
-    # armeabi-v7a adds roughly half again, so 90 would cut a cold-cache run.
-    timeout-minutes: 130
+    # Two image-build attempts of up to 15 minutes each, then the runs.
+    timeout-minutes: 45
+    permissions:
+      contents: read
 
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    # On a cache miss this pulls the base image and apt packages, so a network
+    # flake would fail the smoke and hold the release; one retry absorbs it.
+    - name: Build x86 toolchain image
+      uses: nick-fields/retry@v4
+      with:
+        timeout_minutes: 15
+        max_attempts: 2
+        retry_wait_seconds: 30
+        command: |
+          docker buildx build \
+            --cache-from type=gha,scope=toolchain-x86 \
+            --load \
+            -t helixscreen/toolchain-x86 \
+            -f docker/Dockerfile.x86 \
+            docker/
+
+    - name: Download x86 release
+      uses: actions/download-artifact@v8
+      with:
+        name: release-x86
+        path: dist
+
+    - name: Unpack x86 release
+      run: |
+        set -euo pipefail
+        mkdir -p dist/install
+        tar -xzf dist/helixscreen-x86-*.tar.gz -C dist/install
+        test -x dist/install/helixscreen/bin/helix-screen
+
+    - name: Run with the GPU libraries hidden and present
+      run: |
+        docker run --rm --network none \
+          -v "${{ github.workspace }}":/src \
+          -w /src/dist/install/helixscreen \
+          -e GPU_SMOKE_WORK=/tmp/gpu-libs-smoke \
+          helixscreen/toolchain-x86 \
+          /src/scripts/ci/gpu_libs_hidden_smoke.sh run bin/helix-screen
+
+  # ============================================================================
+  # Build Android APKs (runs in parallel with embedded platform builds)
+  # ============================================================================
+  # Each ABI's native code compiles in a job of its own, at the same time; the
+  # libraries are then packaged and signed once, in build-android, with no
+  # native recompile. Downstream jobs depend on build-android only.
+  build-android-native:
+    name: Build (Android native, ${{ matrix.abi }})
+    needs: [validate-shell, plan]
+    runs-on: ubuntu-22.04
+    # One ABI, cold, is about a third of the three-ABI cold build that ran
+    # 1h20m, so ~30 min including setup; a warm one is minutes. 60 covers a
+    # cold run with margin and still stops a hung NDK fetch.
+    timeout-minutes: 60
+    strategy:
+      # The release needs every ABI, so one failure ends the others early.
+      fail-fast: true
+      matrix:
+        # Must equal android/app/build.gradle's default helixAbis, ccache-warm's
+        # warm-android matrix and cache-prune's per-ABI release families;
+        # tests/shell/test_android_release_abis.bats holds them together.
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Initialize submodules
+      uses: ./.github/actions/init-submodules
+
+    # A tag sees only its own caches and main's, so this restores the
+    # generation ccache-warm.yml's warm-android job builds on main each night.
+    # Saving here would make a tag-scoped cache no later release can read.
+    - name: Compile native code
+      id: native
+      uses: ./.github/actions/android-native-release
+      with:
+        abi: ${{ matrix.abi }}
+
+    - name: Upload native libraries
+      uses: actions/upload-artifact@v7
+      with:
+        name: android-jnilibs-${{ matrix.abi }}
+        path: ${{ steps.native.outputs.lib-dir }}
+        if-no-files-found: error
+        retention-days: 1
+
+  build-android:
+    name: Build (Android)
+    needs: [build-android-native, validate-shell, plan]
+    runs-on: ubuntu-22.04
+    # Packaging and signing only: assembleRelease + bundleRelease over prebuilt
+    # libraries is a few minutes. The ceiling is for a hung Gradle download.
+    timeout-minutes: 30
+
+    steps:
+    # Packaging compiles nothing from lib/, but the Java sources include SDL's
+    # (android/app/src/main/java/org/libsdl links into lib/sdl2).
     - name: Checkout repository
       uses: actions/checkout@v6
       with:
@@ -338,15 +465,11 @@ jobs:
         distribution: temurin
         java-version: 17
 
+    # AGP still runs its strip pass over the prebuilt libraries, which needs
+    # the NDK; on already-stripped input it is a no-op.
     - name: Install Android NDK
       run: |
         yes | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;29.0.14206865" || true
-
-    - name: Set up ccache
-      uses: hendrikmuhs/ccache-action@v1.2.22
-      with:
-        key: android-ndk-${{ runner.os }}
-        max-size: 500M
 
     - name: Cache Gradle
       uses: actions/cache@v5
@@ -358,8 +481,15 @@ jobs:
         restore-keys: |
           gradle-
 
-    - name: Apply submodule patches
-      run: make apply-patches
+    # Lands as <dir>/<abi>/*.so, the layout -PhelixPrebuiltJniLibs reads. Gradle
+    # refuses the build if any ABI in helixAbis is missing or an extra one is
+    # present.
+    - name: Download native libraries
+      uses: actions/download-artifact@v8
+      with:
+        pattern: android-jnilibs-*
+        merge-multiple: true
+        path: ${{ runner.temp }}/jniLibs
 
     - name: Materialize upload keystore
       id: keystore
@@ -370,7 +500,7 @@ jobs:
           # A release tag has no business producing unsigned or debug-signed
           # artifacts: Play Store rejects a debug-signed AAB. Gradle refuses the
           # same case, but failing here names the missing secret instead of
-          # surfacing as a build error 40 minutes later.
+          # surfacing as a build error later.
           echo "::error::ANDROID_KEYSTORE_BASE64 is not set. A release build must be signed with the upload keystore; see docs/devel/ANDROID_PLAY_STORE.md for the four ANDROID_KEYSTORE_* / ANDROID_KEY_* secrets."
           exit 1
         else
@@ -387,7 +517,7 @@ jobs:
         ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-      run: ./gradlew assembleRelease -PuseCcache
+      run: ./gradlew assembleRelease -PhelixPrebuiltJniLibs="$RUNNER_TEMP/jniLibs"
 
     - name: Build Android AAB (release)
       working-directory: android
@@ -396,7 +526,7 @@ jobs:
         ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-      run: ./gradlew bundleRelease -PuseCcache
+      run: ./gradlew bundleRelease -PhelixPrebuiltJniLibs="$RUNNER_TEMP/jniLibs"
 
     # Runs before anything is renamed or uploaded, so a debug-signed artifact
     # can never reach an artifact store or a GitHub release. Gradle already
@@ -666,13 +796,16 @@ jobs:
     # min budget, against the platform matrix's 82) the release was created
     # with no Android assets and nothing went red.
     # No cycle: publish-android needs [build-android, release], and build-android
-    # needs only validate-shell.
-    needs: [build-platforms, build-android, build-esp32, plan]
+    # needs only build-android-native, validate-shell and plan.
+    # gpu-libs-hidden-smoke is skipped when a dry run builds no x86. A smoke that
+    # timed out ends 'cancelled', not 'failure', so the gate names what passes.
+    needs: [build-platforms, build-android, build-esp32, gpu-libs-hidden-smoke, plan]
     if: >-
       ${{ !cancelled()
       && needs.plan.result == 'success'
       && needs.build-platforms.result == 'success'
-      && needs.build-android.result == 'success' }}
+      && needs.build-android.result == 'success'
+      && contains(fromJSON('["success","skipped"]'), needs.gpu-libs-hidden-smoke.result) }}
     permissions:
       contents: write  # Required to create releases
     env:
@@ -930,6 +1063,16 @@ jobs:
         ./helix-screen
         ```
 
+        ### x86_64 Linux Desktop (runs in a window)
+        ```bash
+        # Install for your user (no sudo), or download and run in place
+        curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --desktop
+        # ...or:
+        wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/helixscreen-x86-desktop-${{ steps.version.outputs.version }}.tar.gz
+        tar -xzf helixscreen-x86-desktop-${{ steps.version.outputs.version }}.tar.gz
+        ./helixscreen/bin/helix-screen --moonraker ws://PRINTER_IP:7125
+        ```
+
         ### Snapmaker U1
         ```bash
         # Download and extract
@@ -1015,23 +1158,25 @@ jobs:
         VERSION="${GITHUB_REF_NAME}"
         RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${VERSION}"
 
-        # Extract changelog entry from CHANGELOG.md
+        # This version's CHANGELOG.md section, HTML comments removed.
         PLAIN_VERSION="${VERSION#v}"
         CHANGELOG=""
         if [ -f CHANGELOG.md ]; then
-          CHANGELOG=$(awk -v ver="$PLAIN_VERSION" '
-            /^## \[/ {
-              if (found) exit
-              if (index($0, "[" ver "]")) found=1
-              next
-            }
-            found { print }
-          ' CHANGELOG.md)
+          CHANGELOG=$(scripts/changelog-section.sh "$PLAIN_VERSION")
         fi
 
-        # Truncate to fit Discord embed limit (4096 chars) with room for wrapper
-        if [ ${#CHANGELOG} -gt 3800 ]; then
-          CHANGELOG="${CHANGELOG:0:3800}..."
+        # The embed description holds 4096 chars. A longer entry is cut at the
+        # last whole line that fits and ends with a link to the full notes.
+        FULL_LINK="**[Read the full changelog on GitHub](${RELEASE_URL})**"
+        if [ ${#CHANGELOG} -gt 3900 ]; then
+          CHANGELOG=$(printf '%s' "$CHANGELOG" | python3 -c '
+        import sys
+        text, limit = sys.stdin.read(), int(sys.argv[1])
+        cut = text[:limit]
+        nl = cut.rfind("\n")
+        print((cut[:nl] if nl > 0 else cut).rstrip())
+        ' "$((3900 - ${#FULL_LINK} - 8))")
+          CHANGELOG="${CHANGELOG}"$'\n\n…\n\n'"${FULL_LINK}"
         fi
 
         # Escape for JSON: backslashes, double quotes, newlines
@@ -1140,17 +1285,9 @@ jobs:
       run: |
         VERSION="${{ steps.version.outputs.version }}"
 
-        # Extract the section for this version from CHANGELOG.md
-        # Matches from "## [VERSION]" to the next "## [" or end of file
+        # This version's CHANGELOG.md section, HTML comments removed.
         if [ -f CHANGELOG.md ]; then
-          NOTES=$(awk -v ver="$VERSION" '
-            /^## \[/ {
-              if (found) exit
-              if (index($0, "[" ver "]")) found=1
-              next
-            }
-            found { print }
-          ' CHANGELOG.md)
+          NOTES=$(scripts/changelog-section.sh "$VERSION")
         fi
 
         if [ -z "$NOTES" ]; then
@@ -1342,6 +1479,11 @@ jobs:
           echo "Generated manifest for ${CHANNEL}:"
           cat "release-files/manifest-${CHANNEL}.json" | jq .
 
+          # The ESP32 entries are checked against the zips on disk before the
+          # manifest goes live, so a bad entry stops the release with nothing
+          # published.
+          scripts/check-esp32-manifest.sh "release-files/manifest-${CHANNEL}.json" release-files
+
           echo "Uploading ${R2_PREFIX}${CHANNEL}/manifest.json..."
           s3cp "release-files/manifest-${CHANNEL}.json" \
             "s3://${R2_BUCKET}/${R2_PREFIX}${CHANNEL}/manifest.json" \
@@ -1355,8 +1497,10 @@ jobs:
           # (cf-cache-status: DYNAMIC), so a mismatch after a few reads is real.
           echo "Verifying ${R2_PREFIX}${CHANNEL}/manifest.json serves v${RELEASE_VERSION}..."
           served=""
+          body=""
           for attempt in 1 2 3 4; do
-            served=$(curl -fsS "${R2_PUBLIC_URL}/${R2_PREFIX}${CHANNEL}/manifest.json" | jq -r '.version // empty')
+            body=$(curl -fsS "${R2_PUBLIC_URL}/${R2_PREFIX}${CHANNEL}/manifest.json" || true)
+            served=$(jq -r '.version // empty' <<<"$body" 2>/dev/null || true)
             [ "$served" = "$RELEASE_VERSION" ] && break
             echo "  attempt ${attempt}: served '${served:-<none>}', expected '${RELEASE_VERSION}'; retrying in 5s..."
             sleep 5
@@ -1365,6 +1509,23 @@ jobs:
             echo "::error::${CHANNEL} manifest serves '${served:-<none>}', expected '${RELEASE_VERSION}' -- release would be invisible to in-app updaters"
             exit 1
           fi
+
+          # Every ESP32 zip the manifest lists must be downloadable. A failure
+          # is recorded and reported after every channel is published: it must
+          # not cost another channel its manifest.
+          while IFS= read -r esp_url; do
+            [ -n "$esp_url" ] || continue
+            reached=false
+            for attempt in 1 2 3 4; do
+              if curl -fsSI "$esp_url" >/dev/null; then reached=true; break; fi
+              echo "  attempt ${attempt}: ${esp_url} not reachable; retrying in 5s..."
+              sleep 5
+            done
+            if [ "$reached" != true ]; then
+              echo "::error::${CHANNEL} manifest lists ${esp_url}, which is not downloadable"
+              ESP_FAILED="${ESP_FAILED:-} ${esp_url}"
+            fi
+          done < <(jq -r '.assets | to_entries[] | select(.key | startswith("esp32-")) | .value.url' <<<"$body")
 
           echo "=== ${CHANNEL} manifest uploaded and verified (v${served}) ==="
         done
@@ -1375,6 +1536,17 @@ jobs:
         s3cp installer/install.sh "s3://${R2_BUCKET}/${R2_PREFIX}install.sh" \
           --content-type "text/x-shellscript"
 
+        # 5. The HelixPrint plugin tarball beside the release's other artifacts,
+        #    and the remote installer the app's plugin command fetches. Also after
+        #    the manifest: the installer every release overwrites stays from the
+        #    previous release, and it falls back to GitHub for a tarball it lacks.
+        echo "Uploading the HelixPrint plugin..."
+        scripts/package-helix-plugin.sh plugin-out/helix-print-plugin.tar.gz
+        s3cp plugin-out/helix-print-plugin.tar.gz \
+          "s3://${R2_BUCKET}/${R2_PREFIX}releases/v${RELEASE_VERSION}/helix-print-plugin.tar.gz"
+        s3cp moonraker-plugin/remote-install.sh "s3://${R2_BUCKET}/${R2_PREFIX}plugin/remote-install.sh" \
+          --content-type "text/x-shellscript"
+
         # Symbol maps and debug info are published separately by the upload-symbols
         # job so their ~20GB+ of uncompressed DWARF never shares this runner's disk
         # with the critical release upload (the v0.99.80 ENOSPC).
@@ -1383,6 +1555,10 @@ jobs:
         for CHANNEL in $UPLOAD_CHANNELS; do
           echo "  ${CHANNEL}: ${R2_PUBLIC_URL}/${R2_PREFIX}${CHANNEL}/manifest.json"
         done
+        if [ -n "${ESP_FAILED:-}" ]; then
+          echo "::error::ESP32 zips listed in a manifest but not downloadable:${ESP_FAILED}"
+          exit 1
+        fi
 
     - name: Clean up old releases (retain 5 most recent)
       if: env.RELEASE_MODE == 'publish'

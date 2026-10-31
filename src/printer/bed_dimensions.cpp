@@ -16,7 +16,10 @@ BedDimensions bed_dimensions_from_volume(float x_min, float x_max, float y_min, 
     return BedDimensions{kDefaultBedSizeMm, kDefaultBedSizeMm, 0.0f, 0.0f};
 }
 
-BedDimensions bed_dimensions(IMoonrakerAPI* api, const PrinterState* ps) {
+namespace {
+
+/// The bed's box from the best available source; see bed_dimensions().
+BedDimensions bed_box(IMoonrakerAPI* api, const PrinterState* ps) {
     if (api) {
         const auto& vol = api->hardware().build_volume();
         // Gate on the raw extent, not the derived w_mm/h_mm — a bed that
@@ -33,6 +36,14 @@ BedDimensions bed_dimensions(IMoonrakerAPI* api, const PrinterState* ps) {
         }
     }
     return BedDimensions{kDefaultBedSizeMm, kDefaultBedSizeMm, 0.0f, 0.0f};
+}
+
+} // namespace
+
+BedDimensions bed_dimensions(IMoonrakerAPI* api, const PrinterState* ps) {
+    BedDimensions bed = bed_box(api, ps);
+    bed.circular = api && circular_bed_kinematics(api->hardware().kinematics());
+    return bed;
 }
 
 } // namespace helix

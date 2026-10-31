@@ -9,10 +9,10 @@
 namespace helix::label {
 
 /// Default print speed for Phomemo M110
-static constexpr uint8_t PHOMEMO_DEFAULT_SPEED = 0x03;
+static constexpr uint8_t kPhomemoDefaultSpeed = 0x03;
 
 /// Default print density for Phomemo M110
-static constexpr uint8_t PHOMEMO_DEFAULT_DENSITY = 0x0A;
+static constexpr uint8_t kPhomemoDefaultDensity = 0x0A;
 
 /// Build Phomemo ESC/POS raster protocol bytes from a bitmap.
 /// Pure function — no I/O. Output can be sent over USB, BLE GATT, or any transport.

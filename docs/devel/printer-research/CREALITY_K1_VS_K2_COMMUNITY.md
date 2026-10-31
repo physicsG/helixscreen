@@ -116,12 +116,12 @@ This is better than nothing, but far from a genuine open-source community effort
 
 | Factor | Assessment |
 |--------|-----------|
-| Cross-compilation | **HARD** - MIPS32r2 with nan2008 ABI, need Ingenic Buildroot toolchain |
+| Cross-compilation | **HARD** - MIPS32r2 with nan2008 ABI; built fully static with the project's ct-ng musl toolchain (`mipsel-k1-linux-musl`, `mk/cross.mk` `mips` target) |
 | Moonraker availability | Requires user to run Guilouz script or Guppy Mod first |
 | Display takeover | Well-documented (kill display-server, write to /dev/fb0) |
 | Proven precedent | GuppyScreen works - LVGL on this hardware is validated |
 | Installed modded base | **Large** - many users already running Moonraker |
-| Resolution | 480x400 (landscape, unusual aspect ratio) |
+| Resolution | 480x800 (portrait) |
 
 ### K2 Series: Easier Build, Smaller Audience
 
@@ -129,24 +129,23 @@ This is better than nothing, but far from a genuine open-source community effort
 |--------|-----------|
 | Cross-compilation | **EASY** - ARM Cortex-A7 (armv7l, 32-bit only; not aarch64-capable), standard armv7 musl toolchain |
 | Moonraker availability | **Stock** - no community tools needed |
-| Display takeover | Less documented, similar approach expected (fb0) |
-| Proven precedent | None - no custom UI has been deployed on K2 |
+| Display takeover | Documented: platform hooks stop the stock UI and HelixScreen drives `/dev/fb0` (see [K2 Series Support](../printers/CREALITY_K2_SUPPORT.md)) |
+| Proven precedent | HelixScreen runs on the K2 Plus (maintainer) and K2 Pro (community) |
 | Installed modded base | **Small** - most K2 users on stock firmware |
 | Resolution | 480x800 (portrait, needs layout work) |
 
-### Recommendation
+### Trade-offs
 
-**K1 is the better first target** despite MIPS pain:
-- Much larger community of users who already have Moonraker running
-- GuppyScreen proves the concept works
-- Active community infrastructure for support/testing
+**K1** has the larger reachable audience:
+- Many users already run Moonraker via Guilouz, Simple AF or Guppy Mod
+- GuppyScreen shows LVGL on this hardware works
+- Active community infrastructure for support and testing
+- The cost is a MIPS nan2008 build and a Moonraker prerequisite
 
-**K2 is the easier technical target** but less impactful:
+**K2** is the simpler technical target:
 - ARM cross-compilation is straightforward
 - Stock Moonraker means zero prerequisites
-- But fewer users, declining community tooling, and we'd be the first custom UI
-
-If targeting both, **start with K1** (bigger impact, proven path), then port to K2 (easier technically once we have the K1 experience).
+- Fewer modded users and thinner community tooling
 
 ---
 

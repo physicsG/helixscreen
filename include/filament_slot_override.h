@@ -53,10 +53,10 @@ enum class LegacyLockKeys;
 class DeclaredFields {
   public:
     /// Rows the bitmask can address. The roster static_asserts against it.
-    static constexpr size_t CAPACITY = 16;
+    static constexpr size_t kCapacity = 16;
 
     [[nodiscard]] bool test(size_t index) const {
-        return index < CAPACITY && (bits_ & (uint16_t{1} << index)) != 0;
+        return index < kCapacity && (bits_ & (uint16_t{1} << index)) != 0;
     }
     [[nodiscard]] bool any() const {
         return bits_ != 0;
@@ -66,14 +66,14 @@ class DeclaredFields {
     }
     /// Withdraw the declaration at roster position @p index.
     void reset(size_t index) {
-        if (index < CAPACITY) {
+        if (index < kCapacity) {
             bits_ &= static_cast<uint16_t>(~(uint16_t{1} << index));
         }
     }
 
   private:
     void set(size_t index) {
-        if (index < CAPACITY) {
+        if (index < kCapacity) {
             bits_ |= static_cast<uint16_t>(uint16_t{1} << index);
         }
     }

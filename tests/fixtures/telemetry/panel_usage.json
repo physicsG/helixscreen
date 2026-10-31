@@ -1,0 +1,27 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "event": "panel_usage",
+  "is_shutdown": false,
+  "overlay_open_count": 1,
+  "overlay_visits": {
+    "fan_control_overlay": 1
+  },
+  "panel_time_sec": {
+    "home": 90
+  },
+  "panel_visits": {
+    "controls": 1,
+    "home": 1
+  },
+  "schema_version": 3,
+  "session_duration_sec": 0,
+  "snapshot_seq": 0,
+  "timestamp": "<timestamp>",
+  "widget_interactions": {
+    "temperature": 1
+  }
+}

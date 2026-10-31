@@ -3,6 +3,7 @@
 
 #include "keypad_input.h"
 
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -314,5 +315,105 @@ TEST_CASE("KeypadInput can refuse the decimal point entirely", "[keypad]") {
         KeypadInput permissive;
         permissive.append_digit(2);
         CHECK(permissive.append_dot());
+    }
+}
+
+TEST_CASE("KeypadInput caps the digits after the decimal point", "[keypad]") {
+    KeypadInput in;
+    in.max_int_digits = 3;
+    in.max_total_digits = 4;
+    in.max_frac_digits = 1;
+    CHECK(in.append_digit(2));
+    CHECK(in.append_dot());
+    CHECK(in.append_digit(5));
+    CHECK_FALSE(in.append_digit(5));
+    CHECK(std::string(in.buf) == "2.5");
+    // Integer digits before the point are not counted against the fraction cap.
+    in.clear();
+    for (int d : {1, 2, 3})
+        CHECK(in.append_digit(d));
+    CHECK(in.append_dot());
+    CHECK(in.append_digit(4));
+    CHECK(std::string(in.buf) == "123.4");
+}
+
+TEST_CASE("KeypadInput sign toggle", "[keypad]") {
+    KeypadInput kp;
+    kp.allow_sign = true;
+
+    SECTION("refused on a field that takes no sign") {
+        KeypadInput plain;
+        CHECK_FALSE(plain.toggle_sign());
+        plain.append_digit(5);
+        CHECK_FALSE(plain.toggle_sign());
+        CHECK(std::string(plain.buf) == "5");
+    }
+
+    SECTION("an empty draft takes the sign first, then digits") {
+        REQUIRE(kp.toggle_sign());
+        CHECK(std::string(kp.buf) == "-");
+        CHECK(kp.value() == 0.0f);
+        CHECK_FALSE(std::signbit(kp.value()));
+        REQUIRE(kp.append_digit(5));
+        CHECK(std::string(kp.buf) == "-5");
+        CHECK(kp.value() == Catch::Approx(-5.0f));
+    }
+
+    SECTION("a typed value flips and flips back without doubling the sign") {
+        kp.append_digit(1);
+        kp.append_digit(2);
+        REQUIRE(kp.toggle_sign());
+        CHECK(std::string(kp.buf) == "-12");
+        REQUIRE(kp.toggle_sign());
+        CHECK(std::string(kp.buf) == "12");
+        REQUIRE(kp.toggle_sign());
+        REQUIRE(kp.toggle_sign());
+        REQUIRE(kp.toggle_sign());
+        CHECK(std::string(kp.buf) == "-12");
+        CHECK(kp.value() == Catch::Approx(-12.0f));
+    }
+
+    SECTION("decimals keep their caps under a sign") {
+        kp.max_frac_digits = 2;
+        kp.append_digit(1);
+        kp.append_dot();
+        kp.append_digit(2);
+        REQUIRE(kp.toggle_sign());
+        CHECK(std::string(kp.buf) == "-1.2");
+        REQUIRE(kp.append_digit(5));
+        CHECK_FALSE(kp.append_digit(9));
+        CHECK(std::string(kp.buf) == "-1.25");
+        CHECK(kp.value() == Catch::Approx(-1.25f));
+    }
+
+    SECTION("the sign is not a digit: a full integer part still flips") {
+        for (int d : {1, 2, 3})
+            kp.append_digit(d);
+        REQUIRE(kp.toggle_sign());
+        CHECK(std::string(kp.buf) == "-123");
+        CHECK_FALSE(kp.append_digit(4));
+        CHECK(std::string(kp.buf) == "-123");
+    }
+
+    SECTION("a sign that would not fit the buffer is refused") {
+        kp.max_int_digits = static_cast<int>(KeypadInput::BUF_SIZE) - 1;
+        for (size_t i = 0; i < KeypadInput::BUF_SIZE - 1; ++i)
+            REQUIRE(kp.append_digit(9));
+        CHECK_FALSE(kp.toggle_sign());
+        CHECK(kp.buf[0] == '9');
+    }
+
+    SECTION("backspace removes a lone sign") {
+        kp.toggle_sign();
+        REQUIRE(kp.backspace());
+        CHECK(std::string(kp.buf) == "");
+    }
+
+    SECTION("negative zero reads as zero") {
+        kp.toggle_sign();
+        kp.append_digit(0);
+        kp.append_dot();
+        CHECK(kp.value() == 0.0f);
+        CHECK_FALSE(std::signbit(kp.value()));
     }
 }

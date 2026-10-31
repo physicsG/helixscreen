@@ -4,6 +4,9 @@
 #include "moonraker_gcode_guards.h"
 
 #include "gcode_homing.h"
+#include "json_utils.h"
+#include "moonraker_validation.h"
+#include "plugin_permissions.h"
 #include "printer_state.h"
 #include "spdlog/spdlog.h"
 #include "spool_latch_gate.h"
@@ -24,10 +27,9 @@ const char* spool_latch_restart_message() {
 
 namespace helix::api {
 
-bool reject_homing_during_active_print(const std::string& gcode, helix::PrinterState& state,
-                                       bool silent,
-                                       const std::function<void(const MoonrakerError&)>& on_error,
-                                       const char* log_tag) {
+bool reject_homing_during_active_print(
+    const std::string& gcode, helix::PrinterState& state, bool silent,
+    const helix::SharedCallback<void(const MoonrakerError&)>& on_error, const char* log_tag) {
     if (!helix::is_homing_gcode(gcode)) {
         return false;
     }
@@ -61,10 +63,9 @@ bool reject_homing_during_active_print(const std::string& gcode, helix::PrinterS
     return true;
 }
 
-bool reject_motion_while_spools_on_bed(const std::string& gcode, helix::PrinterState& state,
-                                       bool silent,
-                                       const std::function<void(const MoonrakerError&)>& on_error,
-                                       const char* log_tag) {
+bool reject_motion_while_spools_on_bed(
+    const std::string& gcode, helix::PrinterState& state, bool silent,
+    const helix::SharedCallback<void(const MoonrakerError&)>& on_error, const char* log_tag) {
     if (!state.print_state().spool_latch_active() ||
         helix::spool_latch_allows(gcode, state.print_state().spool_latch_extra_tokens())) {
         return false;
@@ -79,8 +80,9 @@ bool reject_motion_while_spools_on_bed(const std::string& gcode, helix::PrinterS
     return true;
 }
 
-bool reject_job_while_spools_on_bed(const helix::PrinterState* state, const char* method,
-                                    const std::function<void(const MoonrakerError&)>& on_error) {
+bool reject_job_while_spools_on_bed(
+    const helix::PrinterState* state, const char* method,
+    const helix::SharedCallback<void(const MoonrakerError&)>& on_error) {
     if (!state || !state->print_state().spool_latch_active()) {
         return false;
     }
@@ -93,7 +95,7 @@ bool reject_job_while_spools_on_bed(const helix::PrinterState* state, const char
 
 bool reject_restart_while_spools_on_bed(
     const helix::PrinterState* state, const char* method,
-    const std::function<void(const MoonrakerError&)>& on_error) {
+    const helix::SharedCallback<void(const MoonrakerError&)>& on_error) {
     if (!state || !state->print_state().spool_latch_active()) {
         return false;
     }
@@ -103,5 +105,56 @@ bool reject_restart_while_spools_on_bed(
     }
     return true;
 }
+
+#if HELIX_HAS_PLUGINS
+bool reject_plugin_rpc(helix::PrinterState& state, const std::string& method,
+                       const nlohmann::json& params,
+                       const helix::SharedCallback<void(const MoonrakerError&)>& on_error) {
+    static constexpr const char* kTag = "[Plugin]";
+    const auto str = [&params](const char* key) {
+        return helix::json_util::safe_string(params, key, "");
+    };
+
+    if (method == "printer.print.start") {
+        return moonraker_internal::reject_invalid_path(str("filename"), method.c_str(), on_error) ||
+               reject_job_while_spools_on_bed(&state, method.c_str(), on_error);
+    }
+    // Both start a print from a linked copy of a file, checked here only for its
+    // paths and the spool latch. A plugin's print_edited `edits` can inject any
+    // gcode into that copy, past the printer.gcode.script motion guards: the
+    // same power as printer.print.start of a file the plugin uploaded itself.
+    if (method == "server.helix.print_modified" || method == "server.helix.print_edited") {
+        return moonraker_internal::reject_invalid_path(str("original_filename"), method.c_str(),
+                                                       on_error) ||
+               moonraker_internal::reject_invalid_path(str("temp_file_path"), method.c_str(),
+                                                       on_error) ||
+               reject_job_while_spools_on_bed(&state, method.c_str(), on_error);
+    }
+    // The rest of server.helix.* heats, moves, deletes or drives the resume wizard, which
+    // only a confirmed tap on the screen may do.
+    if (method.rfind("server.helix.", 0) == 0 &&
+        !helix::plugin::is_readonly_moonraker_method(method)) {
+        spdlog::warn("{} Refusing plugin call to {}", kTag, method);
+        if (on_error) {
+            on_error(MoonrakerError::not_ready(method, method + " is not available to plugins"));
+        }
+        return true;
+    }
+    if (method == "printer.print.resume" || method == "server.job_queue.start") {
+        return reject_job_while_spools_on_bed(&state, method.c_str(), on_error);
+    }
+    if (method == "printer.restart" || method == "printer.firmware_restart" ||
+        (method == "machine.services.restart" &&
+         str("service").find("klipper") != std::string::npos)) {
+        return reject_restart_while_spools_on_bed(&state, method.c_str(), on_error);
+    }
+    if (method == "printer.gcode.script") {
+        const std::string script = str("script");
+        return reject_homing_during_active_print(script, state, false, on_error, kTag) ||
+               reject_motion_while_spools_on_bed(script, state, false, on_error, kTag);
+    }
+    return false;
+}
+#endif // HELIX_HAS_PLUGINS
 
 } // namespace helix::api

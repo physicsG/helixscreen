@@ -73,8 +73,21 @@ Measured on a real `make package-k2`, `assets/images` goes from 42 MB to 15 MB:
 
 The 15 MB that remains is the 300px printer set (7.7 MB), the `medium` splash
 canvases and logo (1.2 MB), and ~6 MB of other UI art that every platform needs.
-A platform whose panel is unknown until runtime keeps every size class, and one
-with a tracker keeps its music.
+A platform with a tracker keeps its music.
+
+A package that serves several known boards (`mips`, one binary for the K1, the
+AD5X and the Creator 5 / 5 Pro) names them in `panel.candidates` and ships the union
+of what each board selects, hedges such as `extra_printer_image_sizes` included. A
+candidate is a platform id or, for a board with no entry of its own, an inline panel. Its PNGs go only when
+every printer has a render at every kept size.
+
+A platform whose panel is unbounded (`pi`, `pi32`, `x86`, `x86-desktop`) keeps every
+size class and the source PNGs. `generate_cached_printer_image()` reads the PNG
+whenever the home printer widget is larger than the 300px tier (396x386 at
+1920x1080 in the default layout), so dropping them would bake an upscaled tier
+into that cache. Every package, the APK and the ESP32 image included, drops
+`ui_xml/translations/translations.xml` and `en.xml`: the runtime loads one
+`<lang>.xml` per locale and needs no English pack (`scripts/translation_packs.py`).
 
 ### File Format
 

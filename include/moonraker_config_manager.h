@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <cstddef>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -273,5 +274,19 @@ class MoonrakerConfigManager {
     static std::string set_existing_value(const std::string& content,
                                           const std::string& section_name, const std::string& key,
                                           const std::string& value);
+
+    /// The file whose `[section_name]` Moonraker reads last when it loads `root_file`,
+    /// so the one whose options take effect: Moonraker merges a section defined in
+    /// several files, a later read overriding an earlier one.
+    ///
+    /// `files` maps config-root-relative paths to content. `[include]` is followed the
+    /// way Moonraker follows it: a pattern resolves against the including file's
+    /// directory and globs within it, an included file is read in place of its include
+    /// line, and an include cycle or a chain deeper than five is cut. An absolute include
+    /// names no path in `files` and is skipped. Empty when no file reached defines the
+    /// section.
+    static std::string find_section_file(const std::map<std::string, std::string>& files,
+                                         const std::string& root_file,
+                                         const std::string& section_name);
 };
 } // namespace helix

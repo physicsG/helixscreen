@@ -6,6 +6,8 @@
 #include <lvgl.h>
 #include <string>
 
+#include "hv/json.hpp"
+
 namespace helix {
 
 /**
@@ -17,7 +19,7 @@ namespace helix {
  * app-wide minimum: it gates one consequence of one feature, and it is stated
  * where that feature is offered rather than at startup.
  */
-inline constexpr const char* MIN_MOONRAKER_VERSION = "0.9.0";
+inline constexpr const char* kMinMoonrakerVersion = "0.9.0";
 
 /**
  * @brief True only for a version we could both read AND place below the floor.
@@ -28,6 +30,26 @@ inline constexpr const char* MIN_MOONRAKER_VERSION = "0.9.0";
  * never announced a version, so anything unparseable answers false here.
  */
 [[nodiscard]] bool moonraker_history_is_degraded(const std::string& version);
+
+/**
+ * @brief True for a version string that names no version.
+ *
+ * Empty, "?" (what Moonraker's server.info reports when `git describe` fails,
+ * as on a tagless fork checkout) and "unknown" (what discovery substitutes for
+ * a missing field), all ignoring case and surrounding whitespace.
+ */
+[[nodiscard]] bool is_placeholder_version(const std::string& version);
+
+/**
+ * @brief The Moonraker version update_manager knows, from a machine.update.status result.
+ *
+ * The fallback for a server.info that reports a placeholder. Takes
+ * `version_info.moonraker.version` when it names a release; a checkout with no
+ * release tags reads "v0.0.0-N" there, so it answers the short commit hash
+ * (`current_hash`, 7 characters) instead, the form Kalico reports itself in.
+ * "" when neither is present.
+ */
+[[nodiscard]] std::string moonraker_version_from_update_status(const nlohmann::json& result);
 
 /**
  * @brief Manages software version subjects for UI display
@@ -93,6 +115,13 @@ class PrinterVersionsState {
      */
     void set_os_version_internal(const std::string& version);
 
+    /**
+     * @brief Set the firmware's name ("Klipper", "Kalico"; must be on UI thread)
+     *
+     * Labels the row that shows klipper_version, so a fork reads as itself.
+     */
+    void set_firmware_name_internal(const std::string& name);
+
     // ========================================================================
     // Subject accessors
     // ========================================================================
@@ -124,7 +153,7 @@ class PrinterVersionsState {
         klipper_version_raw_.clear();
     }
 
-    /// 1 when this Moonraker is below MIN_MOONRAKER_VERSION, 0 otherwise.
+    /// 1 when this Moonraker is below kMinMoonrakerVersion, 0 otherwise.
     /// Derived in set_moonraker_version_internal() from the RAW string, before
     /// the display form drops what a comparison needs.
     lv_subject_t* get_moonraker_history_degraded_subject() {
@@ -154,11 +183,13 @@ class PrinterVersionsState {
     lv_subject_t moonraker_version_{};
     lv_subject_t os_version_{};
     lv_subject_t moonraker_history_degraded_{};
+    lv_subject_t klipper_firmware_name_{};
 
     // String buffers for subject storage
     char klipper_version_buf_[64]{};
     char moonraker_version_buf_[64]{};
     char os_version_buf_[64]{};
+    char klipper_firmware_name_buf_[32]{};
 
     // Raw form of the klipper version, as reported (see get_klipper_version_raw)
     std::string klipper_version_raw_;

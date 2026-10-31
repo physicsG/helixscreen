@@ -187,7 +187,7 @@ TEST_CASE_METHOD(NotificationHistoryPanelFixture,
     lv_obj_t* overlay = content();
     REQUIRE(overlay != nullptr);
     lv_obj_t* base = lv_obj_create(lv_screen_active());
-    lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+    lv_obj_t* panels[kUiPanelCount] = {nullptr};
     panels[static_cast<int>(helix::PanelId::Home)] = base;
     NavigationManager::instance().set_panels(panels);
 
@@ -211,4 +211,91 @@ TEST_CASE_METHOD(NotificationHistoryPanelFixture,
     UpdateQueue::instance().drain();
     helix::nav::unregister_overlay(root_);
     lv_obj_delete(base);
+}
+
+TEST_CASE_METHOD(NotificationHistoryPanelFixture,
+                 "NotificationHistoryPanel: a row with an action is clickable and runs it",
+                 "[ui][notifications]") {
+    REQUIRE(root_ != nullptr);
+    std::string ran;
+    helix::ui::set_notification_action_handler("history_row_test",
+                                               [&ran](const std::string& arg) { ran = arg; });
+
+    NotificationHistoryEntry plain = make_entry("Plain", "no action");
+    NotificationHistoryEntry acting = make_entry("Acting", "has an action");
+    acting.severity = ToastSeverity::ERROR;
+    strncpy(acting.action, "history_row_test:second", sizeof(acting.action) - 1);
+    NotificationHistory::instance().add(plain);
+    NotificationHistory::instance().add(acting);
+    panel_->refresh();
+
+    lv_obj_t* overlay = content();
+    REQUIRE(lv_obj_get_child_count(overlay) == 2);
+    lv_obj_t* first = lv_obj_get_child(overlay, 0); // newest first: "Acting"
+    lv_obj_t* second = lv_obj_get_child(overlay, 1);
+    CHECK(lv_obj_has_flag(first, LV_OBJ_FLAG_CLICKABLE));
+    CHECK_FALSE(lv_obj_has_flag(second, LV_OBJ_FLAG_CLICKABLE));
+    CHECK_FALSE(lv_obj_has_flag(lv_obj_find_by_name(first, "icon_error"), LV_OBJ_FLAG_HIDDEN));
+    CHECK(lv_obj_has_flag(lv_obj_find_by_name(first, "icon_info"), LV_OBJ_FLAG_HIDDEN));
+
+    panel_->handle_item_clicked(1);
+    CHECK(ran.empty());
+    panel_->handle_item_clicked(0);
+    CHECK(ran == "second");
+    panel_->handle_item_clicked(7);
+
+    helix::ui::set_notification_action_handler("history_row_test", {});
+}
+
+TEST_CASE_METHOD(NotificationHistoryPanelFixture,
+                 "NotificationHistoryPanel: deinit_subjects withdraws every row subject",
+                 "[ui][notifications]") {
+    REQUIRE(root_ != nullptr);
+    NotificationHistory::instance().add(make_entry("Entry One", "a row"));
+    panel_->refresh();
+    REQUIRE(lv_xml_get_subject(nullptr, "notification_row_title_0") != nullptr);
+    REQUIRE(lv_xml_get_subject(nullptr, "notification_row_has_action_0") != nullptr);
+
+    lv_obj_delete(root_);
+    root_ = nullptr;
+    UpdateQueue::instance().drain();
+    panel_->deinit_subjects();
+
+    // A later init and rebuild must not bind to the dead rows' names.
+    CHECK(lv_xml_get_subject(nullptr, "notification_row_title_0") == nullptr);
+    CHECK(lv_xml_get_subject(nullptr, "notification_row_has_action_0") == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "NotificationHistoryPanel: tapping a built row runs its action",
+                 "[ui][notifications]") {
+    // The XML row's click callback reaches the app's panel, so this drives that one.
+    helix::ui::notification_init_subjects();
+    NotificationHistory::instance().clear();
+    auto& panel = get_global_notification_history_panel();
+    panel.init_subjects();
+    lv_obj_t* root = static_cast<lv_obj_t*>(
+        lv_xml_create(lv_screen_active(), "notification_history_panel", nullptr));
+    REQUIRE(root != nullptr);
+    panel.setup(root, lv_screen_active());
+
+    std::string ran;
+    helix::ui::set_notification_action_handler("history_tap_test",
+                                               [&ran](const std::string& arg) { ran = arg; });
+    NotificationHistoryEntry acting = make_entry("Acting", "has an action");
+    strncpy(acting.action, "history_tap_test:tapped", sizeof(acting.action) - 1);
+    NotificationHistory::instance().add(acting);
+    panel.refresh();
+
+    lv_obj_t* overlay = lv_obj_find_by_name(root, "overlay_content");
+    REQUIRE(overlay != nullptr);
+    REQUIRE(lv_obj_get_child_count(overlay) == 1);
+    lv_obj_send_event(lv_obj_get_child(overlay, 0), LV_EVENT_CLICKED, nullptr);
+    UpdateQueue::instance().drain();
+    CHECK(ran == "tapped");
+
+    helix::ui::set_notification_action_handler("history_tap_test", {});
+    lv_obj_delete(root);
+    UpdateQueue::instance().drain();
+    panel.deinit_subjects();
+    NotificationHistory::instance().clear();
 }

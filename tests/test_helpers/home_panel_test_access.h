@@ -8,6 +8,7 @@
 
 #include "panel_widget_manager.h"
 
+#include <string>
 #include <vector>
 
 // Friend access to HomePanel internals. `ui_panel_home.h` declares
@@ -48,6 +49,29 @@ struct HomePanelTestAccess {
     /// Populate every page, as a config rebuild does.
     static void populate(HomePanel& panel) {
         panel.populate_widgets(/*force=*/true);
+    }
+
+    /// Populate every page as a gate observer does: an unchanged widget list
+    /// is skipped, and one that only flips hardware gates swaps those tiles.
+    static void populate_unforced(HomePanel& panel) {
+        panel.populate_widgets(/*force=*/false);
+    }
+
+    /// Re-seat every page in place, as a placement-only config change does.
+    static bool reseat(HomePanel& panel) {
+        return panel.reseat_widgets();
+    }
+
+    /// The widget ids page @p page was last built from.
+    static std::vector<std::string> built_ids(const HomePanel& panel, size_t page) {
+        const auto& ids = panel.pages_.at(page).visible_ids;
+        return ids ? *ids : std::vector<std::string>{};
+    }
+
+    /// Overwrite the ids page @p page records it was built from, so the next
+    /// unforced population compares against them.
+    static void set_built_ids(HomePanel& panel, size_t page, std::vector<std::string> ids) {
+        panel.pages_.at(page).visible_ids = std::move(ids);
     }
 
     static void clear_page_containers(HomePanel& panel) {
@@ -168,6 +192,10 @@ struct HomePanelTestAccess {
     /// The observer-fired page change, as carousel_scroll_end_cb delivers it.
     static void fire_page_changed(HomePanel& panel, int new_page) {
         panel.on_page_changed(new_page);
+    }
+
+    static std::string& last_printer_image_path(HomePanel& panel) {
+        return panel.last_printer_image_path_;
     }
 
     /// Publish the panel-lifetime subjects (the page badge and the populated

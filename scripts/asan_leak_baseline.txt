@@ -21,18 +21,13 @@
 # The ceilings below catch an already-listed origin leaking MORE, which the key
 # set alone cannot see. They come from the SUMMARY line, so they cover direct
 # and indirect bytes together.
-# Ceilings are the zeus ASAN run (16 shards) measured at 205 allocations / 18467 B, plus ~25% headroom.
-max-leaked-bytes: 23100
-max-leaked-objects: 256
+# Ceilings are the zeus ASAN run (16 shards) measured at 48 allocations / 9710 B, plus ~25% headroom.
+max-leaked-bytes: 12100
+max-leaked-objects: 60
+#
+# Why the remaining origin is still here:
+#
+# <no-stack>: allocated inside the distro's libcrypto (CRYPTO_zalloc), whose
+#   frames carry no frame pointers, so the unwinder stops there and no frame of
+#   ours is ever recorded. libcrypto owns the allocation; nothing of ours can free it.
 <no-stack>
-lib/lvgl/src/layouts/grid/lv_grid.c::calc_rows
-lib/lvgl/src/misc/lv_ll.c::lv_ll_ins_tail
-src/printer/power_device_state.cpp::PowerDeviceState::set_devices
-src/ui/ui_icon_picker.cpp::populate_icon_grid
-src/ui/ui_split_button.cpp::ui_split_button_create
-tests/unit/test_observer_factory.cpp::CATCH2_INTERNAL_TEST::test
-tests/unit/test_observer_factory.cpp::CATCH2_INTERNAL_TEST::test()::lambda::operator()
-tests/unit/test_panel_widget_manager.cpp::CATCH2_INTERNAL_TEST::lambda::operator()
-tests/unit/test_panel_widget_manager.cpp::operator()
-tests/unit/test_temp_graph_controller.cpp::CATCH2_INTERNAL_TEST::test
-tests/unit/test_temp_graph_controller.cpp::test

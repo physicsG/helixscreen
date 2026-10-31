@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<component>
+  <!-- The answer, asked as a dialog when the calibration print completes. It
+       waits behind the app's own print-complete dialog. The dropdown is filled
+       from the event and writes its pick back through bind_value. -->
+  <api>
+    <prop name="opts" type="string" default=""/>
+  </api>
+  <consts>
+    <px name="calibration-bridge__pick_w_small" value="200"/>
+    <px name="calibration-bridge__pick_w_medium" value="260"/>
+    <px name="calibration-bridge__pick_w_large" value="320"/>
+  </consts>
+  <view extends="ui_dialog" width="content" height="content" align="center" flex_flow="column" style_pad_gap="0">
+    <modal_header title="Which one is best?"
+                  title_tag="Which one is best?" icon_name="calibration-bridge__result_icon"
+                  title_name="calibration-bridge__result_title" close_name="calibration-bridge__result_close"/>
+    <lv_obj name="calibration-bridge__result_body"
+            width="content" height="content" flex_flow="column" style_pad_all="#space_lg" style_pad_gap="#space_sm"
+            style_bg_opa="0" style_border_width="0" scrollable="false">
+      <text_small name="calibration-bridge__result_context"
+                  bind_text="calibration-bridge__state_title" style_text_color="#text_muted"/>
+      <lv_dropdown name="calibration-bridge__pick"
+                   width="#calibration-bridge__pick_w" options="$opts" bind_value="calibration-bridge__choice_idx"/>
+    </lv_obj>
+    <modal_button_row primary_text="Use this"
+                      primary_tag="Use this" primary_callback="plugin_event"
+                      primary_user_data="calibration-bridge__accept" secondary_text="Later" secondary_tag="Later"
+                      secondary_callback="plugin_event" secondary_user_data="calibration-bridge__later"
+                      primary_name="calibration-bridge__use" secondary_name="calibration-bridge__later_btn"
+                      tertiary_name="calibration-bridge__result_t" quaternary_name="calibration-bridge__result_q"
+                      tertiary_divider_name="calibration-bridge__result_dt"
+                      quaternary_divider_name="calibration-bridge__result_dq"/>
+  </view>
+</component>

@@ -61,6 +61,8 @@ Klipper SHAPER_CALIBRATE
 | `include/ui_panel_input_shaper.h` | Input shaper panel (overlay) |
 | `src/ui/ui_panel_input_shaper.cpp` | Panel implementation |
 | `ui_xml/input_shaper_panel.xml` | XML layout with subject bindings |
+| `include/ui_shaper_sweep_chart.h`, `src/ui/ui_shaper_sweep_chart.cpp` | `ShaperSweepChart`: the live chart shared by the panel's MEASURING view and the wizard step |
+| `include/live_sweep_preview.h`, `include/sweep_response_estimator.h` | The stream-to-points pipeline behind every live sweep chart (`BELT_TENSION.md` § Live preview) |
 | `include/ui_panel_calibration_pid.h` | PID calibration panel |
 | `src/ui/ui_panel_calibration_pid.cpp` | PID panel implementation |
 | `ui_xml/calibration_pid_panel.xml` | PID panel XML layout |
@@ -170,6 +172,8 @@ bool   ui_frequency_response_chart_is_chart_mode(chart);
 lv_obj_t* ui_frequency_response_chart_get_obj(chart);
 ```
 
+**Axis label gutters.** The chart sizes its own label space from `font_small` instead of fixed pixels (`src/ui/ui_frequency_response_chart.cpp#apply_axis_pads`). The left pad is `ui_frequency_response_chart_y_gutter_width()`, the widest amplitude label the formatter can emit ("100%", "999k", "0.005", "1e-04", "100e9"), never under 36 px, plus `space_xs`; the bottom pad is `space_sm` plus the font height plus `space_xs`. Both re-run on `LV_EVENT_SIZE_CHANGED`, because a breakpoint change swaps the font under a live chart. Frequency labels are centred on their tick but clamped inside the chart's box (`ui_frequency_response_chart_x_label_center`, half-width from `ui_frequency_response_chart_x_label_half_width`) so "100 Hz" never clips at either edge. Tick spacing follows the range: 5 Hz up to a 40 Hz span, 10 Hz up to 80, so a zoomed belt-tuning zone still shows a few ticks. `ui_frequency_response_chart_get_freq_range()` reads the range back.
+
 ### Internal Structure
 
 ```cpp
@@ -191,7 +195,7 @@ struct ui_frequency_response_chart_t {
     size_t max_points;
     bool chart_mode;
     float freq_min/max, amp_min/max;
-    FrequencySeriesData series[MAX_SERIES]; // Up to 13 series
+    FrequencySeriesData series[kMaxSeries]; // Up to 13 series
 };
 ```
 
@@ -209,9 +213,20 @@ The chart uses five LVGL draw event callbacks registered on `LV_EVENT_DRAW_MAIN`
 
 5. **`draw_muted_series_cb`** (DRAW_POST) -- Draws series flagged via `ui_frequency_response_chart_set_series_muted()` as thin (1px, ~66% opacity) polylines from their stored data, instead of through their LVGL chart series (which stays hidden). Used for the live-before "Previous" curve so the fitted curves stay visually dominant. Point placement mirrors the built-in renderer: X from point index, Y from amplitude over the configured range.
 
+### NaN gaps
+
+A non-finite amplitude is a gap. The built-in LVGL renderer skips it
+(`LV_CHART_POINT_NONE`), and the styled and muted passes stroke and fill only the runs
+`include/ui_frequency_response_chart.h#fr_chart_finite_runs` returns: every maximal run of
+finite values at least two points long. A lone finite point between two gaps draws nothing.
+Points are placed by index, so a caller with a partial curve passes the whole frequency grid
+with NaN where it has no value (the live preview does exactly this).
+
 ### Downsampling
 
-When `set_data()` is called with more points than `max_points` for the current tier, data is automatically downsampled using evenly-spaced point selection. The first and last points are always preserved to maintain frequency range endpoints.
+When `set_data()` is called with more points than `max_points` for the current tier, data is automatically downsampled using evenly-spaced point selection. The first and last points are always preserved to maintain frequency range endpoints. Picking
+can land on a NaN gap or step over a narrow peak, so the live curve on a BASIC-tier chart is
+coarser than the CSV curve that replaces it.
 
 ---
 
@@ -260,7 +275,7 @@ Each chip is an LVGL button styled as a pill:
 
 ### Chip Subject Bindings
 
-Per chip (11 per axis matching `MAX_SHAPERS`; only chips backed by a CSV curve are shown, via `is_{axis}_num_chips`):
+Per chip (11 per axis matching `kMaxShapers`; only chips backed by a CSV curve are shown, via `is_{axis}_num_chips`):
 - `is_x_chip_0_label` / `is_y_chip_0_label` -- Shaper name text (string subject)
 - `is_x_chip_0_active` / `is_y_chip_0_active` -- Selection state (int subject, 0=unselected, 1=selected)
 
@@ -278,7 +293,7 @@ User taps chip -> input_shaper_chip_x_2_cb (XML event callback)
 
 ### Shaper Overlay Colors
 
-Colors come from the 11-entry `SHAPER_OVERLAY_COLORS[]` array, shared by chart lines and legend dots. Assignment is positional — each shaper takes the color at its column index in the CSV (`index % 11`), so an 11-shaper Kalico CSV never reuses a color:
+Colors come from the 11-entry `kShaperOverlayColors[]` array, shared by chart lines and legend dots. Assignment is positional — each shaper takes the color at its column index in the CSV (`index % 11`), so an 11-shaper Kalico CSV never reuses a color:
 
 | Index | Shaper (stock Klipper) | Color (hex) | Visual |
 |-------|------------------------|-------------|--------|
@@ -319,7 +334,7 @@ Per axis, when a before-value exists and the result is valid:
 
 Some klippy forks (Creality's K1C build) overwrite the staged X result with the Y-axis values at the end of a Y-axis run and announce it with a console line starting `copy_TestAxis_y_to_x Recommended shaper_type_x = ...`. The collector's marker matcher runs BEFORE the recommendation parser — the marker embeds a real `Recommended shaper_type_x` wording that would otherwise clobber the Y run's own recommendation — and sets `InputShaperResult::x_overwritten_by_firmware` on the Y result. The panel carries that onto the X results card (`fw_overwrite_warn_x`, gated on `is_x_fw_overwrite_warn`) with a warning row: the measured X recommendation shown on screen was discarded by the firmware and the saved config holds Y's values for both axes. A Y-only run has no X card to carry it, so the same warning also renders on the Y card (`fw_overwrite_warn_y`, gated `is_x_fw_overwrite_warn eq 1 and is_results_has_x eq 0`).
 
-The transfer math lives in `src/calibration/shaper_response.cpp` and reproduces the klippy shaper tap definitions plus the damping-aware `_estimate_shaper()` (pessimized over Klipper's `TEST_DAMPING_RATIOS`), which is what the firmware writes into a calibration CSV's fitted columns. `tests/unit/test_shaper_response.cpp` pins it against a real K1C CSV column so the port cannot silently drift from firmware output.
+The transfer math lives in `src/calibration/shaper_response.cpp` and reproduces the klippy shaper tap definitions plus the damping-aware `_estimate_shaper()` (pessimized over Klipper's `kTestDampingRatios`), which is what the firmware writes into a calibration CSV's fitted columns. `tests/unit/test_shaper_response.cpp` pins it against a real K1C CSV column so the port cannot silently drift from firmware output.
 
 ---
 
@@ -331,7 +346,7 @@ The transfer math lives in `src/calibration/shaper_response.cpp` and reproduces 
 IDLE (0)          Shows instructions, current config, Calibrate X/Y/All buttons
   |
   v
-MEASURING (1)     Spinner/progress bar, step labels, Abort button
+MEASURING (1)     Progress bar, step labels, Stop button, and the live response chart (§ Live sweep chart)
 
 Both the panel and the first-run wizard step use the same analysis-phase
 treatment: the sweep shows a determinate bar; the offline analysis reports no
@@ -360,9 +375,47 @@ State visibility is controlled entirely through XML subject bindings:
 4. Calibrate Y axis (progress: "Step 2 of 2")
 5. Show results for both axes
 
-### Abort Behavior
+### Live sweep chart
 
-Aborting during calibration sends `M112` (emergency stop) followed by `FIRMWARE_RESTART`. This is necessary because `SHAPER_CALIBRATE` blocks the G-code queue and cannot be cancelled through normal means. Recovery dialog suppression is applied for 15 seconds.
+While `SHAPER_CALIBRATE` sweeps, MEASURING draws the measured response as it arrives, in
+`chart_container_measuring` (`ui_xml/input_shaper_panel.xml`). The wizard step draws the same
+chart in `wizard_input_shaper_chart_host`. Both own a
+`include/ui_shaper_sweep_chart.h#ShaperSweepChart`, which wraps a `LiveSweepPreview`
+(`BELT_TENSION.md` § Live preview covers the signals, the drive lock, why the console timing
+is not drawn, and the threading crossing).
+
+- **Arming.** `InputShaperPanel::begin_axis_preview` and
+  `WizardInputShaperStep::begin_axis_preview` build a target with
+  `live_sweep_target(preview_facts_, SweepAxis::X or Y)`. The facts (socket path,
+  reachability, `[resonance_tester]`) are queried once on entry (`query_preview_facts`). A
+  per-axis `accel_chip_x` / `accel_chip_y` picks that axis's chip.
+- **Progress.** `ShaperSweepChart::on_progress`: `Sweeping` with a frequency feeds the
+  console value (the first one opens the stream), `Analyzing` calls `finish()`, which keeps
+  the stream for the last points and then releases the chip before the offline analysis.
+- **Column and axis.** The chart plots the axis under test (`SweepColumn::X` or `Y`) on a
+  fixed 0 to `kShaperChartMaxHz` (200 Hz) axis shared with the results charts, so a curve
+  sits at the same x before and after the swap. The amplitude range follows the tallest
+  point with `kShaperChartHeadroom`.
+- **Swap.** `show_curve` stops the stream and draws the CSV curve in place. In Calibrate All
+  the panel keeps X's CSV curve on screen until Y's first preview points replace it, so the
+  chart never blanks between axes. Anywhere else the panel clears the chart on completion.
+- **Visibility.** The layout decides whether the chart fits: the XML publishes
+  `is_measuring_chart_fits` (panel) and `wizard_input_shaper_chart_fits` (wizard) from the
+  breakpoint, and `live_chart_layout_fits` reads them. Where it is hidden nothing arms, so
+  nothing streams for a chart nobody sees.
+- **Rebuild.** A hot-reload rebuild frees the widget tree without `on_ui_destroyed()`, so
+  `InputShaperPanel::on_deactivating` calls it on `DeactivateReason::Rebuild` while the tree
+  is still alive: the live chart and both results charts are destroyed with their hosts,
+  `create()` makes the results charts again, and the next sweep makes the live chart. The
+  wizard step destroys its chart in `cleanup()`, before the wizard deletes the screen.
+- **No stream, no chart.** Without a reachable socket, a single chip, or with
+  `HELIX_SWEEP_PREVIEW_OFF`, MEASURING shows the progress bar alone.
+- **Never a verdict.** Recommendations, the comparison table and the residual scoring read
+  the CSV only.
+
+### Stop Behavior
+
+The Stop button (`ui_xml/input_shaper_panel.xml#btn_abort`, the wizard's `ui_xml/wizard_input_shaper.xml#cancel_calibration_btn`) sends `M112` (emergency stop) followed by `FIRMWARE_RESTART`. This is necessary because `SHAPER_CALIBRATE` blocks the G-code queue and cannot be cancelled through normal means. Recovery dialog suppression is applied for 15 seconds. Every control that performs this stop is labelled "Stop" with the `alert_octagon` icon and `variant="danger"`: Input Shaper, the wizard step, PID, Tool Offsets and Belt Tension.
 
 ### Klipper Commands
 
@@ -374,6 +427,17 @@ Aborting during calibration sends `M112` (emergency stop) followed by `FIRMWARE_
 | `SHAPER_CALIBRATE AXIS=Y` | Y axis resonance test |
 
 Saving never sends `SET_INPUT_SHAPER` or `SAVE_CONFIG`: `handle_save_clicked()` resolves each axis's selection via `selected_shaper_for()`, `shaper_config_edits()` builds `[input_shaper]` `ADD_KEY` edits (`shaper_type_x`, `shaper_freq_x` formatted `%.1f`, same for Y), and the `safe_multi_edit()` call ends in a `FIRMWARE_RESTART` so the written config is applied atomically.
+
+### Where the save writes
+
+`KlipperConfigEditor` (`src/system/klipper_config_editor.cpp`) serves this save, PID/MPC migration (`ui_panel_calibration_pid.cpp`) and the probe overlay's config rows (`safe_edit_value()`). `config_edit_route()` picks one of two writers from `plugin_feature("config_edit", 1)`:
+
+- **Plugin ready:** `plugin_multi_edit()` reads the section with `server.helix.config`, `plan_plugin_config_edits()` turns the edit list into `server.helix.config_edit` edits that each carry the option's current value as `expect`, and the plugin writes them atomically into the file and line that define each option, after a backup under `.helix_backups/`. A revert copies the backups it returned back over their files.
+- **Otherwise, and when the plugin path hands back:** the file API. `load_config_files()` downloads the include chain, `resolve_includes()` maps each section to the file of its last definition in Klipper's read order (an include is read where its line stands, so a section an include redefines belongs to the include), `config_edit_target_file()` picks the file, `apply_edits()` edits it in memory, `backup_file()` copies it to `config_backup_path()` (`.helix_backups/<file>.helix_backup`), and the upload replaces it. `restore_backups()` / `cleanup_backups()` find backups by `config_backup_original()`.
+
+The plugin refuses options that live only in the `SAVE_CONFIG` block, so `plan_plugin_config_edits()` routes such a list to the file API. There an `ADD_KEY` of such an option is written into `printer.cfg`, never an include: Klipper reads a regular definition instead of the block's, and its next `SAVE_CONFIG` of that option comments out a duplicate in `printer.cfg` but refuses one in an included file ("conflicts with included value"). A failed `server.helix.config` read also falls back, since nothing is written yet. Both writers end in the same `restart_and_monitor()`: `FIRMWARE_RESTART`, wait for Klipper, and on timeout restore the backups and restart again.
+
+Tests: `[plugin_config_edit]` (`tests/unit/test_config_edit_plugin.cpp`), which also pins `resolve_includes()` against the plugin's reader on the shared fixture tree `tests/fixtures/klipper_config_tree/`.
 
 ---
 
@@ -406,7 +470,7 @@ Invariants:
 
 ### Screws-tilt specifics
 
-- **Direction override.** `screws_tilt_direction` (`"cw"` / `"ccw"`) on a printer entry flips the parser's tighten/loosen wording (`include/printer_detector.h#screws_tilt_direction_override`, applied via `flip_screws_tilt_direction()` in `include/calibration_types.h`) for firmwares whose reported direction is inverted.
+- **Direction.** The rotation arrows show Klipper's CW/CCW as reported; the Tighten/Loosen wording is derived from the probed corner heights, not from Klipper's direction.
 - **Recentering hint.** Klipper reports every screw relative to `screw1`, treating it as a fixed base - but the adjustment vector is only determined up to a uniform translation (adding a constant to every screw moves the bed without changing tilt), so "reference = 0" is an arbitrary choice, not the cheapest one. When all non-reference screws need the same large correction, `suggest_screw_recentering()` offers the one-screw alternative as a hint subject on the panel (`screws_tilt_recenter_hint`).
 
 ---
@@ -421,7 +485,7 @@ The PID panel provides an interactive UI for Klipper's `PID_CALIBRATE` command w
 IDLE (0)          Heater selection (extruder/bed), temp adjustment, material presets
   |
   v
-CALIBRATING (1)   Live temp graph, progress bar, Abort button
+CALIBRATING (1)   Live temp graph, progress bar, Stop button
   |
   +---> COMPLETE (3)   Shows Kp/Ki/Kd results with before/after comparison
   |
@@ -536,7 +600,7 @@ Set `INPUT_SHAPER_AUTO_START=1` to auto-start X axis calibration when the panel 
 
 ### Adding a New Shaper Type
 
-The CSV parser auto-discovers shaper columns from the header, and the chip toggles and comparison table rows are pre-built for up to 11 shapers (`MAX_SHAPERS` in `ui_panel_input_shaper.h`) — stock Klipper's five plus Kalico's six smooth shapers fit with no code changes. To support more than 11, increase `MAX_SHAPERS` and add the corresponding chip XML elements and callback registrations. The exception is client-side re-scoring: a genuinely new shaper type still needs a new taps function in `shaper_response.h` (see "Adding Support for New Shaper Types" above), or its verdict row and live-before overlays stay hidden.
+The CSV parser auto-discovers shaper columns from the header, and the chip toggles and comparison table rows are pre-built for up to 11 shapers (`kMaxShapers` in `ui_panel_input_shaper.h`) — stock Klipper's five plus Kalico's six smooth shapers fit with no code changes. To support more than 11, increase `kMaxShapers` and add the corresponding chip XML elements and callback registrations. The exception is client-side re-scoring: a genuinely new shaper type still needs a new taps function in `shaper_response.h` (see "Adding Support for New Shaper Types" above), or its verdict row and live-before overlays stay hidden.
 
 ### Adding a New Calibration Metric
 
@@ -582,3 +646,4 @@ Test tags:
 - `[input_shaper]` -- Combined input shaper tests
 - `[platform]` -- Platform tier detection and adaptation
 - `[downsampling]` -- Data downsampling behavior
+- Live sweep chart: `tests/unit/test_shaper_sweep_chart.cpp`, `test_live_sweep_preview.cpp`, `test_sweep_response_estimator.cpp`, `test_mock_accel_batch_source.cpp`; the wizard step's wiring is in `test_wizard_input_shaper_step.cpp`

@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  INDX device flow status line: the sentence under a section's buttons while a
+  tool cycle or a heater calibration runs and after it ends.
+
+  Entirely subject-driven: ui_indx_device_flows.cpp publishes indx_flow_phase
+  (0 nothing to report, 1 running, 2 result) and indx_flow_status (the text).
+-->
+<component>
+  <view extends="lv_obj" width="100%" height="content" style_pad_all="0" scrollable="false" clickable="false">
+    <bind_flag_if_eq subject="indx_flow_phase" flag="hidden" ref_value="0"/>
+    <text_small name="indx_flow_status_line"
+                width="100%" long_mode="wrap" bind_text="indx_flow_status" style_text_color="#text_muted"/>
+  </view>
+</component>

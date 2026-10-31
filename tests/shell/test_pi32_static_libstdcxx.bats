@@ -9,7 +9,7 @@ load helpers
 
 @test "pi32 targets link libstdc++ and libgcc statically" {
     for target in pi32 pi32-fbdev pi32-both; do
-        run make -s PLATFORM_TARGET=$target CROSS_COMPILE= CC=gcc CXX=g++ print-target-ldflags
+        run scratch_make -s PLATFORM_TARGET=$target CROSS_COMPILE= CC=gcc CXX=g++ print-target-ldflags
         [ "$status" -eq 0 ]
         echo "$output" | grep -qE '(^|\s)-static-libstdc\+\+(\s|$)' || {
             echo "$target TARGET_LDFLAGS lacks -static-libstdc++: $output"

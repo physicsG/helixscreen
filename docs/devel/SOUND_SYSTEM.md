@@ -26,7 +26,7 @@ SoundManager (singleton, public API)
         +-> SDLSoundBackend   (desktop, per-sample envelope + biquad filter)
         +-> ALSASoundBackend  (Linux SBCs, per-sample envelope + biquad filter)
         +-> PWMSoundBackend   (AD5M hardware buzzer, sysfs /sys/class/pwm)
-        +-> JzPwmSoundBackend (AD5X piezo, jz_pwm DMA one-shot buffers via fx-pwm)
+        +-> JzPwmSoundBackend (FlashForge MIPS boards' piezo: AD5X, Creator 5, Creator 5 Pro, jz_pwm DMA one-shot buffers via fx-pwm)
         +-> M300SoundBackend  (Klipper printers, G-code via Moonraker)
 ```
 
@@ -80,7 +80,7 @@ The sequencer thread sleeps on a condition variable when idle (no sound playing,
 | 0 | PWM | `/sound/pwm_channel` setting (or the `HELIX_PWM_SOUND` override) names `<chip>:<channel>` (pi, pi32, x86, yocto, native and ad5m builds) and the channel exports | A buzzer the user wired to a PWM pin |
 | 1 | SDL | `#ifdef HELIX_DISPLAY_SDL` + `SDL_OpenAudioDevice` succeeds | Desktop/simulator |
 | 2 | ALSA | `#ifdef HELIX_HAS_ALSA` + ALSA PCM device opens (saved/env device, then `default`) | Linux SBCs with audio hardware |
-| 3 | JzPwm | `#ifdef HELIX_HAS_JZ_PWM` (ad5x builds) + `/dev/jz_pwm` exists and fx-pwm is executable | AD5X piezo (on-rig install) |
+| 3 | JzPwm | `#ifdef HELIX_HAS_JZ_PWM` (unified MIPS build) + the board row says it has the piezo (AD5X, Creator 5, Creator 5 Pro) + `/dev/jz_pwm` exists and fx-pwm is executable | FlashForge MIPS boards' piezo (on-rig install) |
 | 4 | PWM | ad5m/ad5m-br builds only, unnamed: `pwmchip0/pwm6`, auto-exported by `initialize()` | AD5M hardware buzzer |
 | 5 | M300 | Printer answers M300 gcode: a beeper `output_pin` or an M300 macro in objects/list, or the `speaker` capability override forced on — plus a `MoonrakerClient` set via `set_moonraker_client()` | Klipper printers with a gcode beeper (no local audio) |
 | 6 | None | All above failed | Sounds silently disabled |
@@ -232,12 +232,12 @@ Tracker builds are the Pi family, x86, native and unified MIPS (`mips k1 ad5x`, 
 
 The PCM render path stays compiled and unit-tested for hardware that can actually demodulate duty-modulated PWM (a filtered speaker circuit) -- on the AD5M's piezo it is unreachable because nothing installs a render source. The render loop is built to be printer-safe above all (`src/system/pwm_sound_backend.cpp#render_loop`):
 
-- **8 kHz sample rate** -- the piezo's response rolls off around 3-4 kHz, so rendering faster adds no audible content (`PCM_SAMPLE_RATE`, `include/pwm_sound_backend.h#PCM_SAMPLE_RATE`).
-- **62.5 kHz carrier**, above the audible range; each sample becomes a duty-cycle value within that period (`PCM_CARRIER_HZ`).
+- **8 kHz sample rate** -- the piezo's response rolls off around 3-4 kHz, so rendering faster adds no audible content (`kPcmSampleRate`, `include/pwm_sound_backend.h#kPcmSampleRate`).
+- **62.5 kHz carrier**, above the audible range; each sample becomes a duty-cycle value within that period (`kPcmCarrierHz`).
 - **Render thread at SCHED_IDLE + 1 ns timerslack** (`apply_render_thread_priority()`). SCHED_IDLE means the thread runs only when nothing else wants the CPU, so its pacing can never starve klippy, and setting it needs no privileges. Timerslack affects the relative polls only (the 1 ms no-source poll, the 10 ms park poll) -- the sample loop paces with `TIMER_ABSTIME`, which timerslack does not touch.
-- **Absolute pacing with a 20 µs spin budget** -- sleep (`TIMER_ABSTIME`) to each sample deadline minus 20 µs, then spin the final stretch. This absorbs hrtimer wake lateness without burning real CPU (`PCM_SPIN_BUDGET_NS`).
-- **Bounded catch-up** -- more than 2 samples late snaps the sample clock forward (resync) instead of bursting the missed writes. The burst is what starved klippy under the old loop (`PCM_CATCHUP_MAX_SAMPLES`).
-- **Silence auto-park** -- 8 consecutive exactly-silent buffers (~512 ms at 64 ms/buffer) park the channel (duty 0, enable 0) and drop to a 10 ms poll. Each poll pulls an 80-frame probe (10 ms @ 8 kHz) from the render source at 1x real time and resumes the moment real audio shows up (`PCM_PARK_SILENT_BUFFERS`, `park_probe_frames()`).
+- **Absolute pacing with a 20 µs spin budget** -- sleep (`TIMER_ABSTIME`) to each sample deadline minus 20 µs, then spin the final stretch. This absorbs hrtimer wake lateness without burning real CPU (`kPcmSpinBudgetNs`).
+- **Bounded catch-up** -- more than 2 samples late snaps the sample clock forward (resync) instead of bursting the missed writes. The burst is what starved klippy under the old loop (`kPcmCatchupMaxSamples`).
+- **Silence auto-park** -- 8 consecutive exactly-silent buffers (~512 ms at 64 ms/buffer) park the channel (duty 0, enable 0) and drop to a 10 ms poll. Each poll pulls an 80-frame probe (10 ms @ 8 kHz) from the render source at 1x real time and resumes the moment real audio shows up (`kPcmParkSilentBuffers`, `park_probe_frames()`).
 - **Channel auto-export** -- the stock AD5M kernel ships the beeper channel unexported; nothing materializes pwm6 until `initialize()` writes the channel number to `pwmchip0/export` (`HELIX_PWM_AUTO_EXPORT`, ad5m/ad5m-br only). This one is live for tone mode too: without it the backend never initializes and the AD5M has no audio at all after boot.
 
 The PCM path stays dormant behind the transducer verdict above (nothing installs a render source on the AD5M's piezo), and the render loop's printer-safe shape (SCHED_IDLE, bounded catch-up, silence auto-park) is what keeps it harmless to leave compiled and unit-tested for hardware that can demodulate it.
@@ -402,7 +402,7 @@ These are the 13 standard sound names recognized by the system. Theme files may 
 | `error_tone` | EVENT | Error | Error severity toast shown |
 | `alarm_urgent` | ALARM | Critical | Critical failure alarm |
 | `test_beep` | UI | Settings | Preview sound buttons in settings |
-| `startup` | EVENT | System | HelixScreen boot chime |
+| `startup` | EVENT | System | HelixScreen boot chime (skipped under `--test`, via `SoundManager::plays_startup_sound()`) |
 
 **UI sounds** (`button_tap`, `toggle_on`, `toggle_off`, `nav_forward`, `nav_back`, `dropdown_open`) are affected by the `ui_sounds_enabled` toggle. EVENT and ALARM sounds play regardless of the UI toggle -- only the `sounds_enabled` master toggle can disable them.
 
@@ -633,8 +633,8 @@ if (SoundManager::instance().is_available()) {
 | `include/sound_theme.h` | Theme structs (`SoundTheme`, `SoundStep`, `ADSREnvelope`, etc.) + parser class |
 | `include/sound_sequencer.h` | Playback engine (`SoundPriority` enum, sequencer thread) |
 | `include/sound_manager.h` | Singleton public API |
-| `include/sdl_sound_backend.h` | SDL2 audio backend; owns `VoiceSlot voice_slots_[MAX_VOICES]` (desktop, `#ifdef HELIX_DISPLAY_SDL`) |
-| `include/alsa_sound_backend.h` | ALSA PCM audio backend; owns `VoiceSlot voice_slots_[MAX_VOICES]` (Linux SBCs, `#ifdef HELIX_HAS_ALSA`) |
+| `include/sdl_sound_backend.h` | SDL2 audio backend; owns `VoiceSlot voice_slots_[kMaxVoices]` (desktop, `#ifdef HELIX_DISPLAY_SDL`) |
+| `include/alsa_sound_backend.h` | ALSA PCM audio backend; owns `VoiceSlot voice_slots_[kMaxVoices]` (Linux SBCs, `#ifdef HELIX_HAS_ALSA`) |
 | `include/sound_synthesis.h` | Shared synthesis: waveform generation, biquad filter, `BiquadFilter` struct |
 | `include/jz_pwm_sound_backend.h` | AD5X jz_pwm DMA backend (one-shot duty-encoded buffers) |
 | `include/pwm_sound_backend.h` | PWM sysfs backend (AD5M buzzer) |
@@ -687,10 +687,10 @@ if (SoundManager::instance().is_available()) {
 ./build/bin/helix-tests "[sound][m300]"      # M300 backend
 
 # Full suite with sharding (recommended)
-make test-run
+make unit-sweep
 ```
 
-**Important**: Do NOT run `./build/bin/helix-tests` without a tag filter or `make test-run` sharding -- some non-sound tests hang in single-process mode.
+**Important**: Do NOT run `./build/bin/helix-tests` without a tag filter or `make unit-sweep` sharding -- some non-sound tests hang in single-process mode.
 
 ### Testing Backends Without Hardware
 

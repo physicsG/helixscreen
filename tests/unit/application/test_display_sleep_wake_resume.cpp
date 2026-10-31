@@ -34,13 +34,15 @@
 
 #include <array>
 #include <chrono>
+#include <map>
+#include <string>
 #include <thread>
 
 #include "../../catch_amalgamated.hpp"
 
 using helix::DisplaySettingsManager;
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 #include "screensaver.h"
 #endif
 
@@ -70,7 +72,7 @@ class CountingPanel : public PanelBase {
     int deactivates = 0;
 };
 
-constexpr helix::PanelId TEST_PANEL = helix::PanelId::Home;
+constexpr helix::PanelId kTestPanel = helix::PanelId::Home;
 
 /// Available backlight so the screensaver-off idle path dims instead, which
 /// marks the display dimmed without suspending any lifecycle.
@@ -117,8 +119,8 @@ class SleepWakeFixture : public LVGLTestFixture {
             p = lv_obj_create(lv_screen_active());
         }
         nav.set_panels(root_panels_.data());
-        nav.register_panel_instance(TEST_PANEL, &panel_);
-        nav.set_active(TEST_PANEL);
+        nav.register_panel_instance(kTestPanel, &panel_);
+        nav.set_active(kTestPanel);
         helix::ui::UpdateQueue::instance().drain();
 
         // NavigationManager is a process singleton and suspend/resume latches on
@@ -133,14 +135,14 @@ class SleepWakeFixture : public LVGLTestFixture {
     }
 
     ~SleepWakeFixture() override {
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
         ScreensaverManager::instance().stop();
 #endif
         display_->inv_en_cnt = saved_inv_en_cnt_;
         auto& nav = NavigationManager::instance();
         // Leave the suspend latch cleared for the next test, whatever this one did.
         nav.resume_active();
-        nav.register_panel_instance(TEST_PANEL, nullptr);
+        nav.register_panel_instance(kTestPanel, nullptr);
         helix::ui::UpdateQueue::instance().drain();
         nav.deinit_subjects();
         // Leave DisplaySettingsManager initialized for the next fixture. A
@@ -161,7 +163,7 @@ class SleepWakeFixture : public LVGLTestFixture {
     }
 
     CountingPanel panel_;
-    std::array<lv_obj_t*, UI_PANEL_COUNT> root_panels_{};
+    std::array<lv_obj_t*, kUiPanelCount> root_panels_{};
     lv_display_t* display_ = nullptr;
     decltype(lv_display_t::inv_en_cnt) saved_inv_en_cnt_ = 0;
 
@@ -179,7 +181,7 @@ class SleepWakeFixture : public LVGLTestFixture {
 
 } // namespace
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 TEST_CASE_METHOD(SleepWakeFixture, "waking from sleep resumes the panel the screensaver suspended",
                  "[application][display][sleep][screensaver][wake]") {
@@ -246,6 +248,46 @@ TEST_CASE_METHOD(SleepWakeFixture,
     lv_display_trigger_activity(nullptr);
     mgr.check_display_sleep();
     REQUIRE_FALSE(mgr.is_display_dimmed());
+}
+
+TEST_CASE_METHOD(SleepWakeFixture,
+                 "screensaver usage records a touch wake, an app wake and no preview",
+                 "[application][display][screensaver][screensaver_usage]") {
+    configure_idle(/*screensaver_type=*/1, /*dim_sec=*/30, /*sleep_sec=*/60);
+    const std::string name = helix::ui::screensaver_name(ScreensaverType::FLYING_TOASTERS);
+    helix::SaverUsage& usage = ScreensaverManager::instance().usage();
+    ScreensaverManager::instance().stop();
+    usage.reset_window(std::chrono::steady_clock::now());
+    auto window = [&usage] { return usage.window(std::chrono::steady_clock::now()); };
+
+    DisplayManager mgr;
+    mgr.set_dim_timeout(1);
+
+    // Idle starts the saver; activity wakes it.
+    lv_display_trigger_activity(nullptr);
+    process_lvgl(1300);
+    mgr.check_display_sleep();
+    REQUIRE(mgr.is_display_dimmed());
+    lv_display_trigger_activity(nullptr);
+    mgr.check_display_sleep();
+    REQUIRE_FALSE(mgr.is_display_dimmed());
+    CHECK(window().woke_by_touch == std::map<std::string, int>{{name, 1}});
+    CHECK(window().stopped_other.empty());
+
+    // A wake the app asks for (print done, remote control) is not a touch.
+    process_lvgl(1300);
+    mgr.check_display_sleep();
+    REQUIRE(mgr.is_display_dimmed());
+    mgr.wake_display();
+    REQUIRE_FALSE(mgr.is_display_dimmed());
+    CHECK(window().stopped_other == std::map<std::string, int>{{name, 1}});
+    CHECK(window().starts == std::map<std::string, int>{{name, 2}});
+
+    // The settings preview is not a real run.
+    mgr.preview_screensaver(1);
+    REQUIRE(mgr.is_display_dimmed());
+    mgr.wake_display();
+    CHECK(window().starts == std::map<std::string, int>{{name, 2}});
 }
 
 TEST_CASE_METHOD(SleepWakeFixture, "waking does not resume a lifecycle Application suspended",

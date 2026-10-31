@@ -227,10 +227,10 @@ TEST_CASE("size bands are byte-identical at scale 1.0", "[widget_size][panel_wid
     for (int i = to_int(UiBreakpoint::Micro); i <= to_int(UiBreakpoint::XXLarge); ++i) {
         const auto bp = as_breakpoint(i);
         INFO("tier " << i);
-        CHECK(w_normal(bp) == W_NORMAL_PX[static_cast<size_t>(i)]);
-        CHECK(w_wide(bp) == W_WIDE_PX[static_cast<size_t>(i)]);
-        CHECK(h_tall(bp) == H_TALL_PX[static_cast<size_t>(i)]);
-        CHECK(h_taller(bp) == H_TALLER_PX[static_cast<size_t>(i)]);
+        CHECK(w_normal(bp) == kWNormalPx[static_cast<size_t>(i)]);
+        CHECK(w_wide(bp) == kWWidePx[static_cast<size_t>(i)]);
+        CHECK(h_tall(bp) == kHTallPx[static_cast<size_t>(i)]);
+        CHECK(h_taller(bp) == kHTallerPx[static_cast<size_t>(i)]);
     }
 }
 

@@ -14,12 +14,21 @@
  * - ACE/ToolChanger stub implementations
  */
 
+#include "../lvgl_test_fixture.h"
+#include "../test_helpers/print_state_test_drivers.h"
 #include "ams_backend_ace.h"
 #include "ams_backend_mock.h"
+#include "ams_backend_qidi.h"
 #include "ams_backend_toolchanger.h"
+#include "ams_device_action_value.h"
 #include "ams_types.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+#include "printer_state.h"
 
 #include <any>
+#include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -645,7 +654,8 @@ TEST_CASE("ACE device actions - sections and actions", "[ams][device_actions][ac
             CHECK_FALSE(action.id.empty());
             CHECK_FALSE(action.label.empty());
             CHECK_FALSE(action.section.empty());
-            CHECK(action.enabled == true);
+            // Nothing is loaded, which leaves Feed Assist no slot to act on.
+            CHECK(action.enabled == (action.id != "ace_feed_assist_toggle"));
         }
     }
 
@@ -714,23 +724,76 @@ TEST_CASE("ACE device actions - execute valid actions", "[ams][device_actions][a
         CHECK(result.result == helix::AmsResult::NOT_CONNECTED);
     }
 
-    SECTION("ace_feed_assist_toggle with enable=true returns not_connected") {
-        auto result = backend.execute_device_action("ace_feed_assist_toggle", true);
-        CHECK_FALSE(result);
-        CHECK(result.result == helix::AmsResult::NOT_CONNECTED);
+    SECTION("ace_feed_assist_toggle with nothing loaded is refused, either way") {
+        for (const bool enable : {true, false}) {
+            auto result = backend.execute_device_action("ace_feed_assist_toggle", enable);
+            CHECK_FALSE(result);
+            CHECK(result.result == helix::AmsResult::WRONG_STATE);
+        }
     }
 
-    SECTION("ace_feed_assist_toggle with enable=false returns not_connected") {
-        auto result = backend.execute_device_action("ace_feed_assist_toggle", false);
-        CHECK_FALSE(result);
-        CHECK(result.result == helix::AmsResult::NOT_CONNECTED);
-    }
-
-    SECTION("ace_feed_assist_toggle with no value returns not_connected") {
+    SECTION("ace_feed_assist_toggle with no value is refused before anything is sent") {
         auto result = backend.execute_device_action("ace_feed_assist_toggle");
         CHECK_FALSE(result);
-        CHECK(result.result == helix::AmsResult::NOT_CONNECTED);
+        CHECK(result.result == helix::AmsResult::WRONG_STATE);
     }
+}
+
+// =============================================================================
+// device_action_value: the one reader of a control's value
+// =============================================================================
+
+TEST_CASE("device_action_value reads a number whatever type carries it",
+          "[ams][device_actions][device_action_value]") {
+    // The section overlay's sliders send float; backends and tests hold double or int.
+    for (const std::any& v : {std::any(42.0f), std::any(42.0), std::any(42), std::any(42L)}) {
+        const auto [as_double, err_d] = device_action_value<double>(v, "speed");
+        CHECK(err_d.success());
+        CHECK(as_double == 42.0);
+        const auto [as_float, err_f] = device_action_value<float>(v, "speed");
+        CHECK(err_f.success());
+        CHECK(as_float == 42.0f);
+    }
+    CHECK(device_action_number(std::any(-2.5f)) == -2.5);
+}
+
+TEST_CASE("device_action_value refuses a missing, mistyped or non-finite value",
+          "[ams][device_actions][device_action_value]") {
+    SECTION("missing") {
+        const auto [v, err] = device_action_value<double>(std::any{}, "speed");
+        CHECK(err.result == helix::AmsResult::WRONG_STATE);
+        CHECK(err.user_msg == "Missing value");
+    }
+    SECTION("a string where a number belongs") {
+        const auto [v, err] = device_action_value<float>(std::any(std::string("42")), "speed");
+        CHECK(err.result == helix::AmsResult::WRONG_STATE);
+        CHECK(err.user_msg == "Invalid value type");
+    }
+    SECTION("a number where a bool belongs") {
+        const auto [v, err] = device_action_value<bool>(std::any(1), "sync state");
+        CHECK_FALSE(err.success());
+    }
+    SECTION("NaN") {
+        CHECK_FALSE(device_action_number(std::any(std::nan(""))).has_value());
+        CHECK_FALSE(device_action_value<double>(std::any(std::nan("")), "speed").second.success());
+    }
+}
+
+TEST_CASE("device_action_macro_choice reads a picker's macro",
+          "[ams][device_actions][device_action_value]") {
+    CHECK(device_action_macro_choice(std::any(std::string("ACE_BYPASS_ON"))).first ==
+          "ACE_BYPASS_ON");
+    CHECK(device_action_macro_choice(std::any(std::string(""))).second.result ==
+          helix::AmsResult::WRONG_STATE);
+    CHECK_FALSE(device_action_macro_choice(std::any(3)).second.success());
+    CHECK_FALSE(device_action_macro_choice(std::any{}).second.success());
+}
+
+TEST_CASE("device_action_value reads bools and strings exactly",
+          "[ams][device_actions][device_action_value]") {
+    CHECK(device_action_value<bool>(std::any(true), "state").first);
+    CHECK(device_action_value<std::string>(std::any(std::string("Auto")), "mode").first == "Auto");
+    CHECK_FALSE(device_action_value<std::string>(std::any("Auto"), "mode").second.success());
 }
 
 // =============================================================================
@@ -950,4 +1013,104 @@ TEST_CASE("Mock backend device actions in tool changer mode",
     }
 
     backend.stop();
+}
+
+// =============================================================================
+// Tracked device actions and edit follow-ups (AmsSubscriptionBackend gate)
+// =============================================================================
+
+namespace {
+
+/// A subscription backend whose device actions and follow-up are fixed, so the
+/// base gate is what is tested. QIDI is only the concrete carrier.
+class GatedActionsBackend : public helix::AmsBackendQidi {
+  public:
+    using AmsBackendQidi::AmsBackendQidi;
+
+    std::vector<DeviceAction> get_device_actions() const override {
+        DeviceAction off = DeviceAction::button("off", "Off", "setup");
+        off.enabled = false;
+        off.disable_reason = "Nope";
+        return {DeviceAction::button("go", "Go", "setup"), off,
+                DeviceAction::button("move", "Move", "setup").with_machine_motion()};
+    }
+
+    int executed = 0;
+    int runs = 0;
+    int follow_ups = 0;
+
+  protected:
+    helix::AmsError do_execute_device_action(const std::string&, const std::any&) override {
+        ++executed;
+        return helix::AmsErrorHelper::success();
+    }
+    helix::AmsError do_run_device_action(const std::string& id, const std::any& value,
+                                         DeviceActionDone on_done) override {
+        ++runs;
+        return AmsBackendQidi::do_run_device_action(id, value, std::move(on_done));
+    }
+    helix::AmsError do_run_edit_follow_up(int, const helix::SlotInfo&,
+                                          const helix::SlotInfo&) override {
+        ++follow_ups;
+        return helix::AmsErrorHelper::success();
+    }
+};
+
+struct GatedActionsFixture : public LVGLTestFixture {
+    GatedActionsFixture() : mock_client(MoonrakerClientMock::PrinterType::VORON_24) {
+        state.init_subjects(false);
+        api = std::make_unique<MoonrakerAPIMock>(mock_client, state);
+        backend = std::make_unique<GatedActionsBackend>(api.get(), &mock_client);
+    }
+
+    MoonrakerClientMock mock_client;
+    helix::PrinterState state;
+    std::unique_ptr<MoonrakerAPIMock> api;
+    std::unique_ptr<GatedActionsBackend> backend;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(GatedActionsFixture, "run_device_action shares execute_device_action's gate",
+                 "[ams][device_actions]") {
+    int done = 0;
+    helix::AmsError last;
+    auto on_done = [&](const helix::AmsError& r) {
+        ++done;
+        last = r;
+    };
+
+    CHECK_FALSE(backend->run_device_action("unlisted", {}, on_done).success());
+    CHECK(done == 0);
+    CHECK(backend->runs == 0);
+
+    auto off = backend->run_device_action("off", {}, on_done);
+    CHECK(off.result == helix::AmsResult::WRONG_STATE);
+    CHECK(done == 0);
+    CHECK(backend->runs == 0);
+
+    CHECK(backend->run_device_action("go", {}, on_done).success());
+    CHECK(backend->runs == 1);
+    CHECK(backend->executed == 1);
+    CHECK(done == 1);
+    CHECK(last.success());
+
+    helix::test::set_wire_state(state, helix::PrintJobState::PRINTING);
+    CHECK_FALSE(backend->run_device_action("move", {}, on_done).success());
+    CHECK(backend->runs == 1);
+    CHECK(done == 1);
+}
+
+TEST_CASE_METHOD(GatedActionsFixture, "run_edit_follow_up refuses while a print holds the printer",
+                 "[ams][device_actions]") {
+    helix::SlotInfo after;
+    helix::test::set_wire_state(state, helix::PrintJobState::PRINTING);
+    CHECK_FALSE(backend->run_edit_follow_up(0, helix::SlotInfo{}, after).success());
+    helix::test::set_wire_state(state, helix::PrintJobState::PAUSED);
+    CHECK_FALSE(backend->run_edit_follow_up(0, helix::SlotInfo{}, after).success());
+    CHECK(backend->follow_ups == 0);
+
+    helix::test::set_wire_state(state, helix::PrintJobState::STANDBY);
+    CHECK(backend->run_edit_follow_up(0, helix::SlotInfo{}, after).success());
+    CHECK(backend->follow_ups == 1);
 }

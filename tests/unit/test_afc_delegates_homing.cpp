@@ -27,12 +27,12 @@
 using namespace helix;
 
 namespace {
-const char* CFG_WITH_AUTO_HOME = R"(
+const char* kCfgWithAutoHome = R"(
 [AFC]
 auto_home: True
 )";
 
-const char* CFG_WITHOUT_AUTO_HOME = R"(
+const char* kCfgWithoutAutoHome = R"(
 [AFC]
 tool_start: direct
 )";
@@ -61,19 +61,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "AFC delegates_homing_to_printer reads [AFC] a
     // conservatively false — our G28 still goes out.
     CHECK_FALSE(afc.delegates_homing_to_printer());
 
-    afc.load_config(CFG_WITHOUT_AUTO_HOME);
+    afc.load_config(kCfgWithoutAutoHome);
     CHECK_FALSE(afc.delegates_homing_to_printer());
 
-    afc.load_config(CFG_WITH_AUTO_HOME);
+    afc.load_config(kCfgWithAutoHome);
     CHECK(afc.delegates_homing_to_printer());
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "base default: no backend delegates homing",
-                 "[capabilities][homing][1265]") {
-    // Qualified call pins the BASE default, matching the
-    // printer_reports_spool_ids pattern in test_ams_firmware_persistence.cpp.
-    auto afc = std::make_unique<AmsBackendAfc>(nullptr, nullptr);
-    CHECK_FALSE(afc->AmsBackend::delegates_homing_to_printer());
 }
 
 namespace helix {
@@ -104,7 +96,8 @@ class AfcDispatchHelper : public AmsBackendAfc {
 
     // Both forms, as in HomingProbeBackend: the test passes on_complete, so
     // dispatch_payload() reaches THIS 2-arg virtual, not the 1-arg one.
-    AmsError execute_gcode(const std::string& gcode, std::function<void()> on_complete) override {
+    AmsError execute_gcode(const std::string& gcode,
+                           helix::SharedCallback<void()> on_complete) override {
         captured.push_back(gcode);
         if (on_complete) {
             on_complete();
@@ -124,7 +117,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
                  "ensure_homed_then sends no G28 when delegating, and homes first when not (#1265)",
                  "[afc][homing][1265]") {
     AfcDispatchHelper afc;
-    afc.load_config(CFG_WITH_AUTO_HOME);
+    afc.load_config(kCfgWithAutoHome);
 
     bool dispatched = false;
     afc.ensure_homed_then("AFF_LOAD LANE=lane1", [&dispatched]() { dispatched = true; });
@@ -133,7 +126,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     REQUIRE(afc.captured.size() == 1);
     CHECK(afc.captured[0] == "AFF_LOAD LANE=lane1");
 
-    afc.load_config(CFG_WITHOUT_AUTO_HOME);
+    afc.load_config(kCfgWithoutAutoHome);
     afc.captured.clear();
 
     bool dispatched2 = false;

@@ -5,12 +5,31 @@
 
 #include "moonraker_error.h"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
+namespace helix {
 class IMoonrakerAPI;
 
-namespace helix {
+/// What a successful recovery established.
+enum class RecoveryOutcome {
+    KLIPPY_READY,   ///< printer.info reported `ready` after the restart.
+    RESTART_ISSUED, ///< A restart was started; Klippy's state comes from its notifications.
+};
+
+/// Cadence and bounds of the recovery chain.
+struct RecoveryTiming {
+    uint32_t poll_interval_ms = 2000;
+    /// How long a Klippy answering anything but `startup` or `ready` is given
+    /// before the script runs; restarts after the script runs.
+    uint32_t verify_window_ms = 45000;
+    /// Measured from recover(): past it the chain stops polling and ends. A
+    /// script already running is still waited for, up to script_timeout_ms.
+    uint32_t chain_deadline_ms = 120000;
+    /// helix-recover.sh is killed if it runs longer than this.
+    uint32_t script_timeout_ms = 90000;
+};
 
 /// Platform-blind printer recovery orchestrator.
 ///
@@ -26,7 +45,19 @@ namespace helix {
 /// error (transport down / klippy disconnected / method unavailable):
 ///   1. `printer.firmware_restart` — proxies through klippy_uds. Always
 ///      tried first; on a healthy klippy it's the cheapest restart and
-///      what users expect to see happen.
+///      what users expect to see happen. Moonraker accepting it proves only
+///      that the restart began, so the chain then polls `printer.info` for a
+///      bounded window: `ready` completes, while `error` (a startup failure
+///      such as key298) or no `ready` before the window ends runs step 2 once.
+///      While Klippy keeps reporting `startup` the window stretches to the
+///      chain's deadline instead, since a slow boot is not a failure; the
+///      deadline ends the chain with no script. After the script exits 0 the
+///      same poll runs once more, under the same deadline and without
+///      escalating again, so a recovery that brings Klippy back reports it
+///      ready. Without a local script the chain ends
+///      at the first escalation: a startup error on a host with no platform
+///      knowledge is a config fault no service restart clears, and the
+///      app's klippy state already shows it.
 ///   2. **Local exec** of `$INSTALL_DIR/bin/helix-recover.sh` (this class
 ///      `fork()` + `execvp()`s it). The per-platform installer
 ///      (`scripts/lib/installer/recovery.sh`) writes the script with the
@@ -41,15 +72,23 @@ namespace helix {
 /// All platform knowledge lives in the shipped helix-recover.sh.
 ///
 /// Lifetime: stateless free-standing helper, owned wherever it's invoked from
-/// (typically the EmergencyStopOverlay or a toast action callback).
+/// (typically the EmergencyStopOverlay or a toast action callback). The
+/// chain outlives it; a chain whose Moonraker client is destroyed (printer
+/// switch, soft restart) stops without calling either callback.
+///
+/// Single-flight: one chain runs at a time, process-wide. recover() while one
+/// is running refuses through on_error.
 class PrinterRecoveryService {
   public:
-    using SuccessCallback = std::function<void()>;
+    using SuccessCallback = std::function<void(RecoveryOutcome)>;
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
 
-    explicit PrinterRecoveryService(IMoonrakerAPI* api) : api_(api) {}
+    explicit PrinterRecoveryService(IMoonrakerAPI* api, RecoveryTiming timing = {})
+        : api_(api), timing_(timing) {}
 
-    /// Run the full recovery chain (see class doc).
+    /// Run the full recovery chain (see class doc). Either callback may run
+    /// on the WebSocket thread or the main thread, and exactly one runs unless
+    /// the Moonraker client is destroyed mid-chain.
     void recover(SuccessCallback on_success, ErrorCallback on_error);
 
     /// True iff `$INSTALL_DIR/bin/helix-recover.sh` exists and is executable.
@@ -71,9 +110,23 @@ class PrinterRecoveryService {
     /// Static — doesn't touch any instance state and the recover() chain
     /// captures lambdas that outlive `this` (the holding widget can be
     /// destroyed mid-chain; [L072]).
-    static void run_local_recovery(SuccessCallback on_success, ErrorCallback on_error);
+    static void run_local_recovery(uint32_t timeout_ms, SuccessCallback on_success,
+                                   ErrorCallback on_error);
+
+    struct RestartVerification;
 
     IMoonrakerAPI* api_;
+    RecoveryTiming timing_;
 };
+
+namespace detail {
+/// Script path local_recovery_script_path() returns instead of the installed
+/// one when non-empty. The test binary has no install root, which would leave
+/// the local-exec step permanently dark.
+inline std::string& local_recovery_script_override_ref() {
+    static std::string path;
+    return path;
+}
+} // namespace detail
 
 } // namespace helix

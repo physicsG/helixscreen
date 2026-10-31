@@ -6,11 +6,16 @@ How the Printer Manager overlay works, its sub-components (inline name editing, 
 
 ## Overview
 
-The Printer Manager is a full-screen overlay accessed by tapping the printer image on the home panel. It serves as the central hub for printer identity and hardware capabilities, displaying:
+The Printer Manager is a full-screen overlay with two entry points, both calling `get_printer_manager_overlay().show()`:
+
+- **Home panel**: tapping the Printer Image widget (`src/ui/panel_widgets/printer_image_widget.cpp#handle_printer_manager_clicked`)
+- **Settings > Printer**: the `row_printer` row at the top of the Printer group in `ui_xml/settings_panel.xml`, wired to `on_printer_clicked` through `nav_row<get_printer_manager_overlay>()` in `src/ui/ui_panel_settings.cpp#register_settings_panel_callbacks`. It keeps the overlay reachable on a layout without the Printer Image widget
+
+It serves as the central hub for printer identity and hardware capabilities, displaying:
 
 - **Printer identity** -- name (editable inline), model, and image (swappable)
 - **Software versions** -- Klipper, Moonraker, and HelixScreen
-- **Hardware capabilities** -- auto-detected features shown as filterable chips
+- **Capabilities** -- everything HelixScreen detected on this printer, as grouped chips with detail text; each chip opens the screen that uses it, or a short info popup
 
 It follows the standard OverlayBase lifecycle and uses the `overlay_panel` XML component for navigation (back button, title bar).
 
@@ -19,7 +24,11 @@ It follows the standard OverlayBase lifecycle and uses the `overlay_panel` XML c
 | File | Purpose |
 |------|---------|
 | `include/ui_printer_manager_overlay.h` | Class declaration, subjects, callbacks |
-| `src/ui/ui_printer_manager_overlay.cpp` | Implementation (refresh, name edit, chip nav) |
+| `src/ui/ui_printer_manager_overlay.cpp` | Implementation (refresh, name edit, chip text subjects) |
+| `include/printer_manager_chips.h` | Chip spec table, fact gathering, tap dispatch |
+| `src/ui/printer_manager_chips.cpp` | One `CapChipSpec` per chip: name, text subject, info copy, opener |
+| `include/capability_chip_text.h` | `CapChip`, `CapabilityChipFacts`, `capability_chip_text()` (pure) |
+| `ui_xml/components/capability_chip.xml` | The chip: icon, bound text, tap callback |
 | `ui_xml/printer_manager_overlay.xml` | Declarative layout (3 sections) |
 | `tests/unit/test_printer_manager_overlay.cpp` | Unit tests |
 | `include/printer_image_manager.h` | Image import/conversion/selection |
@@ -31,7 +40,8 @@ It follows the standard OverlayBase lifecycle and uses the `overlay_panel` XML c
 | `include/prerendered_images.h` | Screen-responsive image size selection |
 | `include/ui_overlay_printer_type.h` | Model-correction overlay (click-to-correct row) |
 | `src/ui/ui_overlay_printer_type.cpp` | Type list, selection, `apply_type_choice()` routing |
-| `config/printer_database.json` | Printer definitions, heuristics, images |
+| `assets/config/printer_database.json` | Printer definitions, heuristics, images |
+| `include/printer_image_variants.h` | `image_variants` matcher: pure, over `HardwareFacts` |
 | `include/capability_matrix.h` | Pre-print operation capability merging |
 | `include/capability_overrides.h` | User overrides for auto-detected capabilities |
 
@@ -40,22 +50,33 @@ It follows the standard OverlayBase lifecycle and uses the `overlay_panel` XML c
 ## Architecture
 
 ```
-PrinterManagerOverlay (overlay_panel)
+PrinterManagerOverlay (overlay_panel; header: Manage Printers, a text button in landscape, an icon in portrait)
   |
-  +-- Section 1: Printer Identity
+  +-- Section 1: Printer Identity (pm_identity_card)
   |     +-- Printer image (lv_image, clickable -> PrinterImageOverlay)
-  |     +-- Printer name (text_heading, clickable -> inline edit)
+  |     +-- Printer name (text_heading, max_lines="2": wraps, then dots; clickable -> inline edit)
   |     +-- Printer model (text_muted + pencil icon, clickable -> PrinterTypeOverlay)
   |
+  +-- pm_details: Sections 2 and 3
+  |
   +-- Section 2: Software Versions
-  |     +-- Klipper version (bound to klipper_version subject)
+  |     +-- Firmware version: label bound to klipper_firmware_name ("Klipper", "Kalico"), value to klipper_version
   |     +-- Moonraker version (bound to moonraker_version subject)
   |     +-- HelixScreen version (bound to helix_version subject)
   |
-  +-- Section 3: Hardware Capabilities
-        +-- Capability chips (flow-wrapped, subject-bound visibility)
-        +-- Clickable chips navigate to feature overlays
+  +-- Section 3: Capabilities, six setting_groups
+        +-- MOTION & LEVELING, THERMAL & AIR, FILAMENT & TOOLHEAD,
+        |   PRINTING, ELECTRONICS & ACCESSORIES, ADD-ONS
+        +-- capability_chip instances (flow-wrapped, subject-bound visibility)
+        +-- every chip taps through pm_chip_clicked
 ```
+
+Landscape is two columns: the identity card on the left (`#pm_identity_width` wide,
+image over name over model) and `pm_details` filling the rest and scrolling on its own.
+Portrait stacks an identity header card (a `#pm_image_size_portrait` image beside the
+name and model) over the two groups, and the whole body scrolls. One tree serves both:
+the orientation-dependent properties are `bind_style_if_eq` pairs keyed on
+`ui_is_portrait`, so none of them may also be set inline.
 
 The model row is clickable because detection can decline to guess or land on a wrong
 near-neighbour; picking a model in `PrinterTypeOverlay` goes through
@@ -65,37 +86,24 @@ near-neighbour; picking a model in `PrinterTypeOverlay` goes through
 
 ### Subject Bindings
 
-The overlay owns three subjects for its own data:
+The overlay owns these subjects for its own data:
 
 | Subject Name | Type | Description |
 |---|---|---|
 | `printer_manager_name` | string | User-editable printer name |
 | `printer_manager_model` | string | Printer model from config |
 | `helix_version` | string | HelixScreen build version |
+| `pm_name_editing` | int | 1 while the name editor is open |
+| `pm_chip_text_<chip>` | string | One per capability chip: its text (see Capability Chips) |
+| `pm_has_kinematics`, `pm_has_build_volume`, `pm_has_filament_system`, `pm_has_tool_changer`, `pm_has_mcus` | int | Visibility for chips whose fact has no app-wide subject |
 
-Capability chip visibility is driven by subjects defined elsewhere (in `PrinterState`):
+The firmware row's label binds `klipper_firmware_name`, which `PrinterVersionsState`
+publishes from `PrinterDiscovery::firmware_name()`.
 
-| Subject | Controls |
-|---|---|
-| `printer_has_probe` | Probe chip |
-| `printer_has_bed_mesh` | Bed Mesh chip |
-| `printer_has_heater_bed` | Heated Bed chip |
-| `printer_has_led` | LEDs chip |
-| `printer_has_accelerometer` | ADXL chip |
-| `printer_has_qgl` | QGL chip |
-| `printer_has_z_tilt` | Z-Tilt chip |
-| `printer_has_firmware_retraction` | Retraction chip |
-| `printer_has_spoolman` | Spoolman chip |
-| `printer_has_timelapse` | Timelapse chip |
-| `printer_has_screws_tilt` | Screws Tilt chip |
-| `printer_has_webcam` | Webcam chip |
-| `printer_has_extra_fans` | Fans chip |
-| `printer_has_chamber_sensor` | Chamber chip |
-| `printer_has_speaker` | Speaker chip |
-| `printer_has_nozzle_clean` | Nozzle Clean chip |
-| `ams_type` | AMS chip (hidden when 0) |
-
-All chips use `<bind_flag_if_eq flag="hidden" ref_value="0"/>` -- they are hidden when the subject value is 0, visible when non-zero.
+Every other chip's visibility binds the subject the rest of the app gates on
+(`printer_has_*`, `power_device_count`, `filament_sensor_count`, `ams_is_tool_changer`,
+`helix_macros_status`, ...). The chip list in `printer_manager_overlay.xml` is the
+reference for which subject hides which chip.
 
 ---
 
@@ -110,6 +118,7 @@ get_printer_manager_overlay()     // Singleton, lazy-created
 on_activate()                     // Called each time overlay becomes visible
   -> cancel_name_edit()           // Reset any in-progress edit
   -> refresh_printer_info()       // Re-read config, update subjects + image
+  -> observe_chip_inputs()        // Watch what the chips read; schedules ONE refresh_capability_chips()
 ```
 
 `refresh_printer_info()` is called on every activation, ensuring the overlay always shows current data. It:
@@ -117,7 +126,7 @@ on_activate()                     // Called each time overlay becomes visible
 1. Reads printer name from `Config` (key: `/wizard/printer_name`)
 2. Reads printer model from `Config` (key: `/wizard/printer_type`)
 3. Reads HelixScreen version from `helix_version()`
-4. Resolves the printer image: checks `PrinterImageManager` for a user-selected image first, falls back to auto-detection via `PrinterImages::get_best_printer_image()`
+4. Resolves the printer image: checks `PrinterImageManager` for a user-selected image first, falls back to auto-detection via `helix::printer_images::get_best_printer_image()`
 
 ---
 
@@ -268,10 +277,10 @@ The XML also uses responsive consts for the image container:
 
 ### Image Resolution Priority
 
-When displaying the printer image in the Printer Manager:
+`PrinterImageManager::get_displayed_image_path()` decides what every surface shows:
 
-1. **User-selected image** -- `PrinterImageManager::get_active_image_path()` checks config for `shipped:` or `custom:` ID
-2. **Auto-detected image** -- `PrinterImages::get_best_printer_image()` looks up the printer type in `printer_database.json`
+1. **User-selected image** -- `PrinterImageManager::get_active_image_path()` checks config for a `shipped:` or `custom:` ID
+2. **Auto-detected image** -- `get_detected_image_path()` looks up the configured printer type in `printer_database.json`, applying `image_variants` (see [Image Lookup](#image-lookup))
 3. **Fallback** -- `generic-corexy.png` if nothing else matches
 
 ### Auto-Import
@@ -282,7 +291,7 @@ On overlay activation, `auto_import_raw_images()` scans `config/custom_images/` 
 
 ## Printer Database
 
-The printer database (`config/printer_database.json`) is the source of truth for printer identity, detection heuristics, and image mappings.
+The printer database (`assets/config/printer_database.json`) is the source of truth for printer identity, detection heuristics, and image mappings.
 
 ### Entry Structure
 
@@ -318,12 +327,14 @@ The printer database (`config/printer_database.json`) is the source of truth for
 | `name` | Human-readable name shown in UI |
 | `manufacturer` | Manufacturer name |
 | `image` | PNG filename in `assets/images/printers/` |
+| `image_variants` | Optional ordered list of alternate images chosen by detected hardware, e.g. `[{"when": {"filament_system": "cfs"}, "image": "creality-k2-cfs.png"}]`. See [Image Lookup](#image-lookup) |
 | `print_start_profile` | Profile for print start phase detection |
-| `z_offset_calibration_strategy` | Z-offset calibration approach: `probe_calibrate`, `endstop`, or `firmware_managed` (firmware/macros persist it, so HelixScreen hides its own Save step). Omit to derive from probe presence. Separate from *where the value is stored* — see `include/z_offset_persistence.h` |
-| `hide_manual_z_calibration` | `true` when the printer's `CALIBRATE_TOOL_OFFSETS` routine sets every tool's Z, the reference tool included, so the manual Z calibration (paper test) entries step aside while that beta screen is shown. Omit (default `false`) for a stock klipper-toolchanger, whose example macro measures the other tools against T0 and writes nothing for T0. Independent of `z_offset_calibration_strategy`: the result may still need `SAVE_CONFIG`. |
+| `z_offset_calibration_strategy` | Z-offset calibration approach: `probe_calibrate`, `endstop`, or `firmware_managed` (HelixScreen offers no Save step of its own). Omit to derive from probe presence. Separate from *where the value is stored* — see `include/z_offset_persistence.h` |
+| `z_offset_persists` | `false` on a `firmware_managed` printer whose firmware does not persist a `SET_GCODE_OFFSET` adjustment, so Print Tune calls the adjustment temporary instead of auto-saved. Omit (default `true`) when the firmware persists it. An installed persistence provider (`include/z_offset_persistence.h`) counts as persisting whatever this says. |
+| `tool_change_resets_z_offset` | `true` when activating a tool re-applies that head's stored gcode offset absolutely, replacing any adjustment; Print Tune then says a tool change resets it. Omit (default `false`) otherwise, including klipper-toolchanger, whose tool offsets leave the babystep alone. |
+| `hide_manual_z_calibration` | `true` when the printer's `CALIBRATE_TOOL_OFFSETS` routine sets every tool's Z, the reference tool included, so the manual Z calibration (paper test) entries step aside. Omit (default `false`) for a stock klipper-toolchanger, whose example macro measures the other tools against T0 and writes nothing for T0. Independent of `z_offset_calibration_strategy`: the result may still need `SAVE_CONFIG`. |
 | `heuristics` | Array of detection rules with confidence scores |
 | `print_start_capabilities` | PRINT_START macro parameters |
-| `screws_tilt_direction` | `"cw"` or `"ccw"` — override for the physical tightening direction of bed screws. Use when the vendor-shipped Klipper `screw_thread` disagrees with the actual screw geometry, causing `SCREWS_TILT_CALCULATE` directions to un-level the bed. When set to `"ccw"` (disagreeing with Klipper's default CW-M\* semantics), HelixScreen flips CW↔CCW in the displayed direction. Omit the field (or set `"cw"`) for printers whose Klipper config matches reality. Known use: FlashForge Adventurer 5M family. |
 
 The bundled `assets/config/printer_database.json` is schema-checked by the `[printer_database][schema]` test (`tests/unit/test_printer_database_evidence.cpp`): every entry needs non-empty string `id`, `name`, `manufacturer` and `image` fields and a `heuristics` array, ids are unique lowercase slugs (`a-z`, `0-9`, `_`, `-`), and names are unique ignoring case.
 
@@ -347,52 +358,76 @@ Detection scores are combined across multiple heuristics. A confidence of >= 70 
 
 ### Image Lookup
 
-`PrinterDetector::get_image_for_printer(name)` returns the `image` field for a given printer name. Note: there is no `PrinterDatabase` class -- the printer database is a JSON file (`config/printer_database.json`) accessed through `PrinterDetector` static methods. `PrinterImages::get_best_printer_image()` then resolves this to an LVGL path, preferring pre-rendered `.bin` files.
+`PrinterDetector::get_image_for_printer(name)` returns the `image` field for a given printer name. Note: there is no `PrinterDatabase` class -- the printer database is a JSON file (`assets/config/printer_database.json`) accessed through `PrinterDetector` static methods. The two-argument overload, `get_image_for_printer(name, facts)`, applies `image_variants`. `helix::printer_images::get_best_image_for_file()` then resolves a filename to an LVGL path, preferring pre-rendered `.bin` files.
+
+**What the connected printer shows** comes from one resolver,
+`src/system/printer_image_manager.cpp#get_displayed_image_path`: the
+user's chosen image (`custom:` or `shipped:`) if there is one, else
+`get_detected_image_path()`, the configured printer type's image after `image_variants`.
+The home widget, the printer manager, the screensavers, the image picker's Auto-Detect
+preview and the tagger all read it; the wizard's model list uses the plain `image`, since
+it names models rather than the machine in front of it.
+
+`image_variants` is an ordered list on an entry. Each variant is `{"when": {...},
+"image": "..."}`; the first whose every condition holds replaces `image`, and none holding
+leaves `image`. The matcher is a pure function over detected facts
+(`include/printer_image_variants.h`, `[printer_image_variants]`), so a vendor name appears
+only in the database.
+
+| Condition | Holds when | Values |
+|---|---|---|
+| `filament_system` | a registered backend of this kind (any of them, not only the active one) has at least one unit that is `connected` and not `absent`. A backend registered from the firmware object alone, before a unit reports in, does not count | an `AmsType` spelling `ams_type_from_string()` parses that `is_filament_system()` accepts: `cfs`, `afc`, `happy_hare`, `ace`, `ad5x_ifs`, `snapmaker`, `qidi_box`, `openams`. `tool_changer` is not a filament system and never matches |
+| `enclosure_top` | the firmware's report of a removable enclosure top (`include/enclosure_top.h`, read into the `printer_enclosure_top_fitted` capability subject) equals the value. A printer that reports none, or has not reported yet, reads `false` | a JSON boolean |
+| `chamber_heater` | whether the printer has a chamber heater, detected or manually assigned (the `printer_has_chamber_heater` capability subject), equals the value | a JSON boolean |
+
+A condition key or value the build does not know makes its variant never match, so the
+entry degrades to its plain image; the `[printer_database][schema]` test fails on one, and
+`scripts/check_printer_images.py` fails on a variant image that is not on disk. A new
+condition is a new `HardwareFacts` field, a branch in `condition_holds()`, and its
+gathering in `PrinterImageManager` (`src/system/printer_image_manager.cpp#detected_hardware_facts`). The home widget re-resolves when AmsState's
+backend count, type or data revision changes, or the enclosure-top or chamber-heater subject does, so a filament system whose units report in after connect switches the
+image live, and one whose units drop back to disconnected switches it back; a top fitted or lifted off, or a heater assigned by hand, does the same. Conditions in one `when` all have to hold; to show one image when either of two facts holds, list two variants naming the same image. Each variant image needs its own `regions.json` entry for the callout chips.
 
 ---
 
 ## Capability Chips
 
-Capability chips are pill-shaped UI elements displayed in a flow-wrapped container. Each chip has:
+The CAPABILITIES area lists what HelixScreen detected on this printer, and only that: a
+capability that was not detected has no chip. Chips sit under six `setting_group`s; a
+group whose chips are all hidden collapses, header included, because each group's chip
+row (`pm_chips_<group>`) has no vertical padding and the chips carry their own vertical
+margins, so an empty row measures zero and `setting_group` treats the group as empty.
 
-- An icon (Material Design icon via the `icon` component)
-- A label (via `text_small`)
-- Subject-driven visibility (`bind_flag_if_eq` hides when capability is 0)
-- Optional click handler for navigation
+Three pieces make a chip:
 
-### Chip Categories
+| Piece | Where | Owns |
+|---|---|---|
+| Visibility | `printer_manager_overlay.xml`, a binding nested in each `capability_chip` | Which subject (or inline `cond=`) hides it. Always the subject the app's own gating uses |
+| Text | `capability_chip_text(CapChip, CapabilityChipFacts)` | The label, then ` · ` and a detail ("Probe · Beacon", "Tool Changer · 4 Tools", "QGL · set manually") |
+| Tap | `CapChipSpec::open` in `printer_manager_chips.cpp` | The screen it opens; `nullptr` shows `info_title` / `info_message` in `modal_alert` |
 
-| Chip | Subject | Clickable | Navigates To |
-|---|---|---|---|
-| Probe | `printer_has_probe` | No | -- |
-| Bed Mesh | `printer_has_bed_mesh` | Yes | BedMeshPanel |
-| Heated Bed | `printer_has_heater_bed` | No | -- |
-| LEDs | `printer_has_led` | Yes | LED Settings Overlay |
-| ADXL | `printer_has_accelerometer` | Yes | InputShaperPanel |
-| QGL | `printer_has_qgl` | No | -- |
-| Z-Tilt | `printer_has_z_tilt` | No | -- |
-| Retraction | `printer_has_firmware_retraction` | Yes | RetractionSettingsOverlay |
-| Spoolman | `printer_has_spoolman` | Yes | SpoolmanPanel |
-| Timelapse | `printer_has_timelapse` | Yes | TimelapseSettingsOverlay |
-| Screws Tilt | `printer_has_screws_tilt` | Yes | ScrewsTiltPanel |
-| Webcam | `printer_has_webcam` | No | -- |
-| AMS | `ams_type` | Yes | AMS Panel |
-| Fans | `printer_has_extra_fans` | Yes | FanControlOverlay |
-| Chamber | `printer_has_chamber_sensor` | No | -- |
-| Speaker | `printer_has_speaker` | Yes | SoundSettingsOverlay |
-| Nozzle Clean | `printer_has_nozzle_clean` | No | -- |
+`gather_capability_chip_facts()` reads the facts on the main thread: the API's
+`PrinterDiscovery` (kinematics, build volume, MCUs, fans, LEDs, LED effects), the
+primary probe's type, the count subjects, `ToolState`, every `AmsState` backend's
+`get_system_info()`, and `CapabilityOverrides::is_forced_on()` for the overridable
+capabilities (bed mesh, QGL, Z-tilt, nozzle clean, heat soak, speaker). Vendor names in
+chip text come only from those owning modules (`type_name`, `probe_type_to_display_string`).
 
-### Chip Navigation Pattern
+The tool chip reads "Tool Changer · N Tools" when discovery found a klipper-toolchanger
+or any AMS backend is a tool changer, and "N Extruders" for several heads without one
+(IDEX, multi-extruder); N is `ToolState::physical_heads()`. The Multi-Filament chip names
+the other backends and hides when a tool changer is the only one. The Fans chip counts
+controllable fans besides part cooling (`PrinterFanState::count_extra_controllable_fans`).
 
-Clickable chips open the panel through its global accessor's `OverlayBase::show()`, which creates it on first use:
+While the overlay is open, `observe_chip_inputs()` re-texts the chips when discovery
+reruns (`printer_hardware_generation`, bumped by `set_hardware()` and new kinematics),
+the build volume arrives, an AMS backend or slot count changes, the tool list changes,
+or a count a chip shows changes. Requests made before the refresh runs join it, so an
+activation computes the chips once.
 
-```cpp
-void on_chip_bed_mesh_clicked(lv_event_t*) {
-    get_global_bed_mesh_panel().show(lv_display_get_screen_active(nullptr));
-}
-```
-
-The panel object owns its root, so the chip keeps no pointer to it.
+On ESP32, screens absent from the image (bed mesh, input shaper, screws tilt, belt
+tension, PA and tool offset calibration, Spoolman, timelapse) have `open = nullptr`
+there, so their chips show the info popup instead.
 
 ---
 
@@ -400,46 +435,26 @@ The panel object owns its root, so the chip keeps no pointer to it.
 
 ### Adding a New Capability Chip
 
-1. **Add the subject** in `PrinterState` (if not already present):
-   ```cpp
-   // In printer_state.h / printer_state.cpp
-   lv_subject_t printer_has_my_feature_;
-   ```
-
-2. **Add the chip XML** in `printer_manager_overlay.xml` inside the capabilities section:
+1. **The capability subject.** Use the one the app already gates on. If none exists,
+   add a `Capability` and a `kCapabilityDefs` row in
+   `src/printer/printer_capabilities_state.cpp` and set it in `set_hardware()`.
+2. **The text.** Add a `CapChip` enumerator (display order) and its case in
+   `capability_chip_text()`, with a `[capability_chip_text]` test.
+3. **The spec.** Add the `CapChipSpec` row in `printer_manager_chips.cpp` (same order):
+   widget name `pm_chip_<snake>`, text subject `pm_chip_text_<snake>`, info title and
+   message (`TR_NOOP`, what it is, what HelixScreen does with it, where), and an opener or
+   `nullptr`, and `beta`. The opener calls the owning module's `open_*()` so every
+   entry point opens it the same way. Screens not in the ESP32 image go through
+   `PM_DESKTOP_SCREEN()`.
+4. **The XML.** Add the chip to its group in `printer_manager_overlay.xml`:
    ```xml
-   <lv_obj name="pm_chip_my_feature"
-           width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255"
-           style_radius="16" style_pad_top="#space_xs" style_pad_bottom="#space_xs"
-           style_pad_left="#space_sm" style_pad_right="#space_sm"
-           flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-           scrollable="false" style_border_width="0" clickable="true">
+   <capability_chip name="pm_chip_my_feature" icon="my_icon" text="pm_chip_text_my_feature">
      <bind_flag_if_eq subject="printer_has_my_feature" flag="hidden" ref_value="0"/>
-     <event_cb trigger="clicked" callback="pm_chip_my_feature_clicked"/>
-     <icon src="my_icon" size="xs" variant="success"/>
-     <text_small text="My Feature"/>
-   </lv_obj>
+   </capability_chip>
    ```
+5. `make translation-sync && make translations`, then translate the new keys.
 
-3. **Add the callback** in `ui_printer_manager_overlay.h`:
-   ```cpp
-   static void on_chip_my_feature_clicked(lv_event_t* e);
-   lv_obj_t* my_feature_panel_ = nullptr;
-   ```
-
-4. **Register the callback** in `register_callbacks()`:
-   ```cpp
-   lv_xml_register_event_cb(nullptr, "pm_chip_my_feature_clicked",
-                            on_chip_my_feature_clicked);
-   ```
-
-5. **Implement navigation** in the `.cpp`:
-   ```cpp
-   void PrinterManagerOverlay::on_chip_my_feature_clicked(lv_event_t* e) {
-       (void)e;
-       get_global_my_feature_panel().show(lv_display_get_screen_active(nullptr));
-   }
-   ```
+The `[printer_manager]` tests fail if a chip has no spec or a spec no chip.
 
 ### Adding a Shipped Printer Image
 
@@ -447,6 +462,13 @@ The panel object owns its root, so the chip keeps no pointer to it.
 2. Run `make gen-printer-images` to create pre-rendered `.bin` variants
 3. Add a printer entry in `config/printer_database.json` with `"image": "my-printer.png"`
 4. The image will appear in both the auto-detect lookup and the shipped images list
+
+An image for optional hardware (a printer with its filament unit attached) is a variant, not a new entry:
+
+1. Add the PNG as above, named `<entry image>-<hardware>.png` (`creality-k2-cfs.png`)
+2. Tag its callout points in `assets/images/printers/regions.json` under its own basename; a variant shares nothing with the plain image's entry
+3. Add `"image_variants": [{"when": {"filament_system": "cfs"}, "image": "creality-k2-cfs.png"}]` to the printer entry, keeping its plain `image`
+4. `scripts/check_printer_images.py` and `[printer_database][schema]` check that the image exists and the condition is known
 
 ### Adding a Custom Image Import Source
 
@@ -489,6 +511,6 @@ Tests cover:
 
 ## Multi-Printer Management
 
-When beta features are enabled and multiple printers are configured, a **Manage Printers** button appears at the bottom of the Printer Manager overlay. This navigates to the Printer List overlay for switching, adding, and deleting printers.
+A **Manage Printers** button always appears in the Printer Manager overlay's header bar: the labelled `action_button` in landscape, the round `printer_3d` icon `action_icon_button` in portrait, where the label would crowd out the title. This navigates to the Printer List overlay for switching, adding, and deleting printers.
 
 See [Multi-Printer Management](MULTI_PRINTER.md) for the full developer guide on the multi-printer system.

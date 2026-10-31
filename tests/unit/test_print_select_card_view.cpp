@@ -14,6 +14,7 @@
 #include "ui_virtual_list.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/scoped_pointer_indev.h"
 #include "lvgl/src/display/lv_display_private.h" // inv_areas
 #include "lvgl/src/misc/lv_area_private.h"       // lv_area_is_in
 
@@ -111,7 +112,7 @@ size_t window_cards(lv_obj_t* container, const CardDimensions& dims, int file_co
     const int rows = (file_count + dims.num_columns - 1) / dims.num_columns;
     const auto w =
         helix::ui::compute_window(lv_obj_get_scroll_y(container), lv_obj_get_height(container),
-                                  stride, rows, PrintSelectCardView::BUFFER_ROWS);
+                                  stride, rows, PrintSelectCardView::kBufferRows);
     return static_cast<size_t>(std::min(file_count, w.last * dims.num_columns) -
                                w.first * dims.num_columns);
 }
@@ -271,7 +272,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
         const auto w =
             helix::ui::compute_window(lv_obj_get_scroll_y(container), lv_obj_get_height(container),
-                                      stride, 15, PrintSelectCardView::BUFFER_ROWS);
+                                      stride, 15, PrintSelectCardView::kBufferRows);
         int expect = w.first * dims.num_columns;
         for (uint32_t i = 0; i < lv_obj_get_child_count(container); ++i) {
             lv_obj_t* card = lv_obj_get_child(container, static_cast<int32_t>(i));
@@ -586,5 +587,56 @@ TEST_CASE_METHOD(LVGLUITestFixture, "CardView: a stopped prebuild builds no more
         process_lvgl(120);
     }
     CHECK(view.pool_size() == 0);
+    lv_obj_delete(container);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "CardView: a held file opens its hold action, a slow tap on a folder opens it",
+                 "[ui][card_view][print_select][tap_hold]") {
+    lv_obj_t* container = lv_obj_create(test_screen());
+    lv_obj_set_size(container, 700, 400);
+    lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW_WRAP);
+
+    std::vector<size_t> taps;
+    std::vector<size_t> holds;
+    PrintSelectCardView view;
+    REQUIRE(view.setup(container, [&taps](size_t i) { taps.push_back(i); }, nullptr));
+    view.set_on_file_long_press([&holds](size_t i) { holds.push_back(i); });
+    const CardDimensions dims{4, 2, 160, 200};
+    auto files = make_files(8);
+    files[2].is_dir = true;
+    view.populate(files, dims);
+    lv_obj_update_layout(test_screen());
+
+    lv_obj_t* card = card_for(container, 1);
+    REQUIRE(card != nullptr);
+    lv_area_t a;
+    lv_obj_get_coords(card, &a);
+    const int x = (a.x1 + a.x2) / 2, y = (a.y1 + a.y2) / 2;
+    helix_test::ScopedPointerIndev finger;
+
+    finger.press(x, y);
+    finger.hold(finger.long_press_hold_ms());
+    finger.release(x, y);
+    CHECK(holds == std::vector<size_t>{1});
+    CHECK(taps.empty());
+
+    finger.press(x, y);
+    finger.release(x, y);
+    CHECK(taps == std::vector<size_t>{1});
+    CHECK(holds.size() == 1);
+
+    // A folder has no hold action, so a slow tap on it still opens it.
+    lv_obj_t* folder = card_for(container, 2);
+    REQUIRE(folder != nullptr);
+    lv_obj_get_coords(folder, &a);
+    const int fx = (a.x1 + a.x2) / 2, fy = (a.y1 + a.y2) / 2;
+    finger.press(fx, fy);
+    finger.hold(600);
+    finger.release(fx, fy);
+    CHECK(taps == std::vector<size_t>{1, 2});
+    CHECK(holds.size() == 1);
+
+    view.cleanup();
     lv_obj_delete(container);
 }

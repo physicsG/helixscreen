@@ -332,7 +332,7 @@ TEST_CASE("Tier classification: a 1GB quad-core Pi 3B is STANDARD", "[platform][
     auto caps = PlatformCapabilities::from_metrics(856, 4, 1000.0f);
     REQUIRE(caps.tier == PlatformTier::STANDARD);
     REQUIRE(caps.supports_animations);
-    REQUIRE(caps.max_chart_points == PlatformCapabilities::STANDARD_CHART_POINTS);
+    REQUIRE(caps.max_chart_points == PlatformCapabilities::kStandardChartPoints);
 }
 
 TEST_CASE("Tier classification: boundary at exactly 4 cores", "[platform][tier][boundary]") {

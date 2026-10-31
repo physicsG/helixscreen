@@ -98,10 +98,10 @@ class PWMSoundBackend : public SoundBackend {
     /// register a tone; shorter notes collapse into clicks. The sequencer
     /// quantizes every theme step up to the tick interval, so each step
     /// sounds for at least one floor. Overridable for rig tuning via
-    /// HELIX_PWM_MIN_NOTE_MS, clamped to [MIN_NOTE_MS_CLAMP_LOW, HIGH].
-    static constexpr float DEFAULT_MIN_NOTE_MS = 20.0f;
-    static constexpr float MIN_NOTE_MS_CLAMP_LOW = 10.0f;
-    static constexpr float MIN_NOTE_MS_CLAMP_HIGH = 100.0f;
+    /// HELIX_PWM_MIN_NOTE_MS, clamped to [kMinNoteMsClampLow, HIGH].
+    static constexpr float kDefaultMinNoteMs = 20.0f;
+    static constexpr float kMinNoteMsClampLow = 10.0f;
+    static constexpr float kMinNoteMsClampHigh = 100.0f;
 
     /// Shift a frequency into the piezo's loud band [500, 2500] Hz by whole
     /// octaves (preserves pitch class). Below 500 doubles, above 2500 halves,
@@ -121,35 +121,35 @@ class PWMSoundBackend : public SoundBackend {
     /// PCM render sample rate (Hz) — 8 kHz: the piezo's response rolls off
     /// around 3-4 kHz, so rendering faster adds no audible content while
     /// halving the wall-time each duty-cycle write gets
-    static constexpr int PCM_SAMPLE_RATE = 8000;
+    static constexpr int kPcmSampleRate = 8000;
 
     /// PWM carrier frequency for PCM mode (Hz) — above audible range
-    static constexpr int PCM_CARRIER_HZ = 62500;
+    static constexpr int kPcmCarrierHz = 62500;
 
     /// Frames requested per render-source call — 512 @ 8 kHz = 64 ms per
     /// buffer, amortizing sysfs write overhead without audible lag
-    static constexpr int PCM_RENDER_BUFFER_FRAMES = 512;
+    static constexpr int kPcmRenderBufferFrames = 512;
 
     /// Consecutive exactly-silent buffers before the render loop parks the
     /// channel (duty 0, enable 0) and drops to a 10 ms poll — 8 @ 64 ms
     /// = ~512 ms of true silence means playback is over, not a quiet passage
-    static constexpr int PCM_PARK_SILENT_BUFFERS = 8;
+    static constexpr int kPcmParkSilentBuffers = 8;
 
     /// Park poll interval (ns) — how often the parked loop re-checks for a
     /// render source: 10 ms
-    static constexpr int64_t PCM_PARK_POLL_NS = 10000000LL;
+    static constexpr int64_t kPcmParkPollNs = 10000000LL;
 
     /// Max samples to skip in one catch-up step after a scheduling stall —
     /// a larger gap resyncs instead of replaying
-    static constexpr int PCM_CATCHUP_MAX_SAMPLES = 2;
+    static constexpr int kPcmCatchupMaxSamples = 2;
 
     /// Busy-wait budget at each sample deadline (ns) — sleep (TIMER_ABSTIME)
     /// to deadline minus this budget, then spin the final stretch: 20 µs
     /// absorbs hrtimer wake lateness without burning real CPU
-    static constexpr int64_t PCM_SPIN_BUDGET_NS = 20000LL;
+    static constexpr int64_t kPcmSpinBudgetNs = 20000LL;
 
-    /// Audio frames elapsed in one park poll interval: PCM_PARK_POLL_NS at
-    /// PCM_SAMPLE_RATE (10 ms @ 8 kHz = 80 frames)
+    /// Audio frames elapsed in one park poll interval: kPcmParkPollNs at
+    /// kPcmSampleRate (10 ms @ 8 kHz = 80 frames)
     static int64_t park_probe_frames();
 
     /// Whole samples the render clock is late for sample_index's deadline —
@@ -206,8 +206,8 @@ class PWMSoundBackend : public SoundBackend {
     Waveform current_wave_ = Waveform::SQUARE;
 
     // Audible floor reported by min_tick_ms(); initialize() applies the
-    // HELIX_PWM_MIN_NOTE_MS override (clamped) on top of DEFAULT_MIN_NOTE_MS.
-    float min_note_ms_ = DEFAULT_MIN_NOTE_MS;
+    // HELIX_PWM_MIN_NOTE_MS override (clamped) on top of kDefaultMinNoteMs.
+    float min_note_ms_ = kDefaultMinNoteMs;
 
     // Tone dedup (mirrors M300SoundBackend::last_freq_): the sequencer
     // re-sends the same note every tick, so a held tone would otherwise
@@ -232,7 +232,7 @@ class PWMSoundBackend : public SoundBackend {
     std::atomic<int> silent_buffer_run_{0};
     std::atomic<uint64_t> duty_write_count_{0};
     std::atomic<int> applied_sched_policy_{-1};
-    int park_silent_buffers_ = PCM_PARK_SILENT_BUFFERS;
+    int park_silent_buffers_ = kPcmParkSilentBuffers;
 
     // Clock/sleep seams — injected by tests before the render thread starts,
     // otherwise defaulted by render_loop() itself
@@ -247,7 +247,7 @@ class PWMSoundBackend : public SoundBackend {
     // Track last period for glitch-free tone transitions
     uint32_t last_period_ns_ = 0;
 
-    // Render buffer (PCM_RENDER_BUFFER_FRAMES per source call) and the
+    // Render buffer (kPcmRenderBufferFrames per source call) and the
     // smaller probe buffer the parked loop polls with
     std::vector<float> render_buf_;
     std::vector<float> park_probe_buf_;

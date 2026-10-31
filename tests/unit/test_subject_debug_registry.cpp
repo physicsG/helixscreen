@@ -9,9 +9,18 @@
  * mapping subject pointers to metadata (name, type, file, line).
  */
 
+#include "ui_subject_registry.h"
+
+#include "../lvgl_test_fixture.h"
 #include "subject_debug_registry.h"
+#include "subject_managed_panel.h"
 
 #include "../catch_amalgamated.hpp"
+
+// The subject macros feed desktop debug tooling (LVGL subject warnings, the
+// name lookups below); only the ESP32 firmware may compile the registry out.
+static_assert(HELIX_SUBJECT_DEBUG_REGISTRY_ENABLED,
+              "the subject debug registry is compiled out of a non-ESP32 build");
 
 // ============================================================================
 // Register and Lookup Tests
@@ -204,4 +213,43 @@ TEST_CASE("SubjectDebugRegistry: lookup with nullptr returns nullptr",
 
     const SubjectDebugInfo* info = registry.lookup(nullptr);
     REQUIRE(info == nullptr);
+}
+
+// ============================================================================
+// Registration Macros
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "SubjectDebugRegistry: the subject macros record their subjects",
+                 "[subject_debug][registry][macros]") {
+    SubjectDebugRegistry& registry = SubjectDebugRegistry::instance();
+    registry.clear();
+
+    SECTION("UI_MANAGED_SUBJECT_INT") {
+        lv_subject_t subject{};
+        SubjectManager manager;
+        UI_MANAGED_SUBJECT_INT(subject, 7, "registry_probe_managed_int", manager);
+
+        REQUIRE(registry.lookup_by_name("registry_probe_managed_int") == &subject);
+        const SubjectDebugInfo* info = registry.lookup(&subject);
+        REQUIRE(info != nullptr);
+        REQUIRE(info->type == LV_SUBJECT_TYPE_INT);
+        REQUIRE(info->file == __FILE__);
+        manager.deinit_all();
+    }
+
+    SECTION("UI_SUBJECT_INIT_AND_REGISTER_STRING") {
+        lv_subject_t subject{};
+        char buf[16];
+        SubjectManager manager;
+        UI_SUBJECT_INIT_AND_REGISTER_STRING(subject, buf, "x", "registry_probe_string");
+        manager.register_subject(&subject, "registry_probe_string");
+
+        REQUIRE(registry.lookup_by_name("registry_probe_string") == &subject);
+        const SubjectDebugInfo* info = registry.lookup(&subject);
+        REQUIRE(info != nullptr);
+        REQUIRE(info->type == LV_SUBJECT_TYPE_STRING);
+        manager.deinit_all();
+    }
+
+    registry.clear();
 }

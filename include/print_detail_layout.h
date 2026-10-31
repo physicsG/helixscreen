@@ -14,12 +14,20 @@ namespace helix::ui {
 /// height, the edge is only nudged out of grid gaps and tile outer quarters
 /// into a middle half, by at most gap + tile_h / 2. Never below width/3,
 /// where the preview stops reading as a model.
+///
+/// With `fit_all` (small portrait screens, where scrolling the options is the
+/// costlier trade), an overflow shrinks the preview just enough to show ALL of
+/// the content whenever that keeps it at or above the width/3 floor, and only
+/// otherwise falls back to cutting row 2.
 inline int decide_detail_portrait_preview(int width, int avail_h, int content_h, int grid_top,
-                                          int tile_h, int gap) {
+                                          int tile_h, int gap, bool fit_all = false) {
     const int base = width / 2;
     const int min_h = width / 3;
     if (content_h <= avail_h - base) {
         return base;
+    }
+    if (fit_all && avail_h - content_h >= min_h) {
+        return avail_h - content_h;
     }
     if (tile_h <= 0) {
         return base;

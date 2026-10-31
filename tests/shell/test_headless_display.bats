@@ -40,9 +40,6 @@ teardown() {
     helix_app_lock_release
 }
 
-require_binary() {
-    [ -x "$BIN" ] || skip "helix-screen not built (run 'make -j')"
-}
 
 # The patched LVGL sources only exist once the submodule is checked out and
 # mk/patches.mk has run. Jobs that validate shell scripts without building
@@ -62,7 +59,7 @@ headless_socket() {
 }
 
 @test "headless boot under SDL_VIDEODRIVER=dummy does not segfault" {
-    require_binary
+    require_app "$BIN"
     local log="$BATS_TEST_TMPDIR/headless.log"
 
     # 139 = 128 + SIGSEGV(11). The pre-fix binary died here every time.
@@ -77,7 +74,7 @@ headless_socket() {
 }
 
 @test "headless boot creates an SDL display via the software renderer" {
-    require_binary
+    require_app "$BIN"
     local log="$BATS_TEST_TMPDIR/sw.log"
 
     run env SDL_VIDEODRIVER=dummy timeout -s KILL 15 "$BIN" --test -vv \
@@ -98,7 +95,7 @@ headless_socket() {
     # headless run stays headless. The visible signal is the driver name in
     # the [SDLSound] init log; without the override it would be 'pulseaudio'
     # or 'pipewire' on a dev box.
-    require_binary
+    require_app "$BIN"
     local log="$BATS_TEST_TMPDIR/audio.log"
 
     # -u SDL_AUDIODRIVER: make sure the test isn't polluted by the dev box's
@@ -123,7 +120,7 @@ headless_socket() {
     # Use a real but unlikely-to-be-default value; we can't guarantee the
     # box has pulseaudio/pipewire, but 'alsa' is part of SDL's stock list
     # and selecting it via env still gets passed through to SDL_Init.
-    require_binary
+    require_app "$BIN"
     local log="$BATS_TEST_TMPDIR/audio-explicit.log"
 
     run env SDL_AUDIODRIVER=alsa SDL_VIDEODRIVER=dummy timeout -s KILL 15 "$BIN" \
@@ -138,7 +135,7 @@ headless_socket() {
 }
 
 @test "headless instance can be driven via ctl and capture a screenshot" {
-    require_binary
+    require_app "$BIN"
     local sock shot log
     sock="$(headless_socket)"
     shot="$BATS_TEST_TMPDIR/shot.png"

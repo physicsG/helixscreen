@@ -2,6 +2,7 @@
 #include "helix/xml/indexed_subject_pool.h"
 
 #include "lvgl/lvgl.h"
+#include "text_io.h"
 
 extern "C" {
 #include "helix-xml/src/xml/lv_xml.h"
@@ -11,15 +12,18 @@ extern "C" {
 
 namespace helix::xml {
 
-IndexedSubjectPool::IndexedSubjectPool(std::string prefix, Type type, size_t string_cap)
-    : prefix_(std::move(prefix)), type_(type), string_cap_(string_cap) {}
+// Out of line: a class holding several pools would otherwise inline each one's
+// construction into its own constructor.
+IndexedSubjectPool::IndexedSubjectPool(const char* prefix, Type type, size_t string_cap,
+                                       const char* suffix)
+    : prefix_(prefix), suffix_(suffix), type_(type), string_cap_(string_cap) {}
 
 IndexedSubjectPool::~IndexedSubjectPool() {
     reclaim();
 }
 
 std::string IndexedSubjectPool::slot_name(size_t i) const {
-    return prefix_ + "_" + std::to_string(i);
+    return std::string(prefix_) + "_" + std::to_string(i) + suffix_;
 }
 
 void IndexedSubjectPool::ensure_size(size_t n) {
@@ -62,7 +66,10 @@ void IndexedSubjectPool::set_color(size_t i, uint32_t rgb) {
 
 void IndexedSubjectPool::set_string(size_t i, const std::string& v) {
     assert(type_ == Type::String);
-    lv_subject_copy_string(subjects_.at(i).get(), v.c_str());
+    // LVGL cuts at the byte; a cut inside a multi-byte codepoint leaves an
+    // invalid tail that renders as a stray glyph.
+    const std::string fitted(helix::text_io::utf8_prefix(v, string_cap_ > 0 ? string_cap_ - 1 : 0));
+    lv_subject_copy_string(subjects_.at(i).get(), fitted.c_str());
 }
 
 lv_subject_t* IndexedSubjectPool::at(size_t i) {

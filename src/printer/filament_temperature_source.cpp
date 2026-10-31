@@ -2,14 +2,17 @@
 
 #include "filament_temperature_source.h"
 
-#include "i_moonraker_client.h"
+#include "http_request_epoch.h"
+#include "i_moonraker_sub_apis.h"
+#include "printer_discovery.h"
 #include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cstring>
+#include <iterator>
+#include <memory>
 #include <mutex>
 #include <utility>
 
@@ -18,17 +21,26 @@
 namespace helix::filament_temps {
 namespace {
 
-/// One firmware that publishes its own per-filament temperature table.
+/// One firmware that keeps its own per-filament temperature table in files.
 struct Provider {
     const char* name;          ///< For logs.
     const char* detect_object; ///< Klipper object whose presence identifies it.
-    const char* query_gcode;   ///< One-line command that prints the table.
+    const char* root;          ///< Moonraker file root the files live under.
+    const char* const* files;  ///< Paths under root, in merge order.
+    size_t file_count;
 };
 
-// The U1's `filament_parameters` module exists to answer this query; it
-// publishes nothing through status, only through the console response.
-constexpr Provider PROVIDERS[] = {
-    {"Snapmaker U1", "filament_parameters", "FILAMENT_PARA_GET_ALL_INFO"},
+// The U1's `filament_parameters` module writes one file per nozzle config into
+// its snapmaker config dir once Klipper is ready, so they match what it holds
+// in memory. The stock 0.4 nozzle's file leads the merge.
+constexpr const char* kU1TableFiles[] = {
+    "snapmaker/filament_para_standard_04.json",  "snapmaker/filament_para_standard_02.json",
+    "snapmaker/filament_para_standard_06.json",  "snapmaker/filament_para_standard_08.json",
+    "snapmaker/filament_para_high_flow_04.json",
+};
+
+constexpr Provider kProviders[] = {
+    {"Snapmaker U1", "filament_parameters", "config", kU1TableFiles, std::size(kU1TableFiles)},
 };
 
 const Provider* match(const PrinterDiscovery& hw) {
@@ -36,7 +48,7 @@ const Provider* match(const PrinterDiscovery& hw) {
         return nullptr;
     }
     const auto& objects = hw.printer_objects();
-    for (const Provider& p : PROVIDERS) {
+    for (const Provider& p : kProviders) {
         if (std::find(objects.begin(), objects.end(), p.detect_object) != objects.end()) {
             return &p;
         }
@@ -47,42 +59,6 @@ const Provider* match(const PrinterDiscovery& hw) {
 bool ends_with(const std::string& s, const char* suffix) {
     const size_t slen = std::strlen(suffix);
     return s.size() >= slen && s.compare(s.size() - slen, slen, suffix) == 0;
-}
-
-/// True when every True/False in the payload sits where the schema puts a
-/// boolean literal: after a ':' or '[' (spaces aside) and before a ',', '}' or
-/// ']'. A True spelled inside a quoted value fails this and the parse refuses.
-bool booleans_are_literals(const std::string& s) {
-    for (const char* word : {"True", "False"}) {
-        const size_t len = std::strlen(word);
-        size_t pos = 0;
-        while ((pos = s.find(word, pos)) != std::string::npos) {
-            size_t before = pos;
-            while (before > 0 && s[before - 1] == ' ') {
-                --before;
-            }
-            if (before == 0 || (s[before - 1] != ':' && s[before - 1] != '[')) {
-                return false;
-            }
-            size_t after = pos + len;
-            while (after < s.size() && s[after] == ' ') {
-                ++after;
-            }
-            if (after >= s.size() || (s[after] != ',' && s[after] != '}' && s[after] != ']')) {
-                return false;
-            }
-            pos = after;
-        }
-    }
-    return true;
-}
-
-void replace_all(std::string& s, const std::string& from, const std::string& to) {
-    size_t pos = 0;
-    while ((pos = s.find(from, pos)) != std::string::npos) {
-        s.replace(pos, from.size(), to);
-        pos += to.size();
-    }
 }
 
 /// Read one leaf temperature: an integer the firmware reports, bounded like a
@@ -102,6 +78,15 @@ std::optional<int> scalar_temp(const nlohmann::json& value) {
 
 std::mutex g_table_mutex;
 std::map<FilamentKey, FilamentTemperatures> g_table;
+/// The REST epoch the table was read under: a lookup made after REST moved to
+/// another printer must not answer with this one's temperatures.
+uint64_t g_table_epoch = 0;
+
+void store_table(const std::map<FilamentKey, FilamentTemperatures>& table, uint64_t epoch) {
+    std::lock_guard<std::mutex> lock(g_table_mutex);
+    g_table = table;
+    g_table_epoch = epoch;
+}
 
 } // namespace
 
@@ -109,34 +94,22 @@ bool firmware_publishes_filament_temperatures(const PrinterDiscovery& hw) {
     return match(hw) != nullptr;
 }
 
-std::string filament_temperature_query_gcode(const PrinterDiscovery& hw) {
+std::string filament_temperature_root(const PrinterDiscovery& hw) {
     const Provider* p = match(hw);
-    return p ? std::string(p->query_gcode) : std::string();
+    return p ? std::string(p->root) : std::string();
+}
+
+std::vector<std::string> filament_temperature_files(const PrinterDiscovery& hw) {
+    const Provider* p = match(hw);
+    if (!p) {
+        return {};
+    }
+    return std::vector<std::string>(p->files, p->files + p->file_count);
 }
 
 std::map<FilamentKey, FilamentTemperatures>
-parse_filament_temperatures(const std::string& response) {
-    std::string payload = response;
-    const size_t first_char = payload.find_first_not_of(" \t\r\n");
-    payload.erase(0, first_char == std::string::npos ? payload.size() : first_char);
-    // One console line on the response channel, prefixed "// ".
-    if (payload.rfind("// ", 0) == 0) {
-        payload.erase(0, 3);
-    } else if (payload.rfind("//", 0) == 0) {
-        payload.erase(0, 2);
-    }
-
-    // The quote/boolean swap below is only sound for the firmware's own
-    // spelling; anything richer must refuse rather than corrupt.
-    if (payload.find('"') != std::string::npos || payload.find('\\') != std::string::npos ||
-        !booleans_are_literals(payload)) {
-        return {};
-    }
-    std::replace(payload.begin(), payload.end(), '\'', '"');
-    replace_all(payload, "True", "true");
-    replace_all(payload, "False", "false");
-
-    nlohmann::json root = nlohmann::json::parse(payload, nullptr, false);
+parse_filament_temperatures(const std::string& json_text) {
+    const nlohmann::json root = nlohmann::json::parse(json_text, nullptr, false);
     if (root.is_discarded()) {
         return {};
     }
@@ -199,8 +172,7 @@ void merge_filament_temperatures(std::map<FilamentKey, FilamentTemperatures>& ta
 }
 
 void store_filament_temperatures(const std::map<FilamentKey, FilamentTemperatures>& table) {
-    std::lock_guard<std::mutex> lock(g_table_mutex);
-    g_table = table;
+    store_table(table, helix::http_epoch::current());
 }
 
 void clear_filament_temperatures() {
@@ -210,6 +182,9 @@ void clear_filament_temperatures() {
 
 std::optional<FilamentTemperatures> lookup_filament_temperatures(const SlotInfo& slot) {
     std::lock_guard<std::mutex> lock(g_table_mutex);
+    if (g_table_epoch != helix::http_epoch::current()) {
+        return std::nullopt;
+    }
     const std::string main = helix::text_io::to_lower(slot.material);
     const std::string vendor = helix::text_io::to_lower(slot.brand);
     const std::string sub = helix::text_io::to_lower(slot.spool_name);
@@ -233,43 +208,70 @@ std::optional<FilamentTemperatures> lookup_filament_temperatures(const SlotInfo&
     return at("generic", "generic");
 }
 
-void capture_on_connect(IMoonrakerClient& client, const PrinterDiscovery& hw) {
+void capture_on_connect(ITransfersAPI& transfers, const PrinterDiscovery& hw) {
     clear_filament_temperatures();
     const Provider* p = match(hw);
     if (!p) {
         return;
     }
-    spdlog::info("[FilamentTemps] {} publishes per-filament temperatures; querying", p->name);
-    const json params = {{"script", std::string(p->query_gcode)}};
-    client.send_jsonrpc("printer.gcode.script", params, [&client](const json& response) {
-        if (response.contains("error")) {
+    const std::string root = filament_temperature_root(hw);
+    const std::vector<std::string> files = filament_temperature_files(hw);
+    spdlog::info("[FilamentTemps] {} keeps per-filament temperatures; reading {} files", p->name,
+                 files.size());
+
+    // Replies arrive on transfer threads in any order; each file keeps its own
+    // slot so the merge runs in the provider's order once the last one settles.
+    struct Capture {
+        std::mutex mutex;
+        std::vector<std::map<FilamentKey, FilamentTemperatures>> parts;
+        size_t pending = 0;
+        uint64_t epoch = 0;
+    };
+    auto capture = std::make_shared<Capture>();
+    capture->parts.resize(files.size());
+    capture->pending = files.size();
+    capture->epoch = helix::http_epoch::current();
+
+    auto settle = [capture](size_t index, std::map<FilamentKey, FilamentTemperatures> part) {
+        std::map<FilamentKey, FilamentTemperatures> table;
+        {
+            std::lock_guard<std::mutex> lock(capture->mutex);
+            capture->parts[index] = std::move(part);
+            if (--capture->pending != 0) {
+                return;
+            }
+            for (const auto& each : capture->parts) {
+                merge_filament_temperatures(table, each);
+            }
+        }
+        if (helix::http_epoch::current() != capture->epoch) {
+            spdlog::debug("[FilamentTemps] Dropping a table read from a previous printer");
             return;
         }
-        // Script completion means every line it printed is already in the
-        // store. The firmware answers with one dict per nozzle config, each
-        // listing a different subset of the materials, so merge every
-        // response line instead of keeping a single one.
-        client.get_gcode_store(
-            32,
-            [](const std::vector<GcodeStoreEntry>& entries) {
-                std::map<FilamentKey, FilamentTemperatures> table;
-                for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-                    if (it->type != "response") {
-                        continue;
-                    }
-                    merge_filament_temperatures(table, parse_filament_temperatures(it->message));
+        if (table.empty()) {
+            spdlog::warn("[FilamentTemps] No readable temperature table files");
+            return;
+        }
+        store_table(table, capture->epoch);
+        spdlog::info("[FilamentTemps] Published {} per-filament temperature leaves", table.size());
+    };
+
+    for (size_t i = 0; i < files.size(); ++i) {
+        const std::string& path = files[i];
+        transfers.download_file(
+            root, path,
+            [settle, i, path](const std::string& content) {
+                auto part = parse_filament_temperatures(content);
+                if (part.empty()) {
+                    spdlog::debug("[FilamentTemps] {} carries no temperature table", path);
                 }
-                if (table.empty()) {
-                    spdlog::warn(
-                        "[FilamentTemps] No temperature table in the gcode store after query");
-                    return;
-                }
-                store_filament_temperatures(table);
-                spdlog::info("[FilamentTemps] Published {} per-filament temperature leaves",
-                             table.size());
+                settle(i, std::move(part));
             },
-            [](const MoonrakerError&) {});
-    });
+            [settle, i, path](const MoonrakerError& err) {
+                spdlog::debug("[FilamentTemps] {} unreadable: {}", path, err.message);
+                settle(i, {});
+            });
+    }
 }
 
 } // namespace helix::filament_temps

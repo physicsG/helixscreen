@@ -80,7 +80,7 @@ struct BandPlan {
 /// regardless of the stride: horizontal skins plus the whole first layer. Surfaces are what
 /// keep the model from reading as hollow, so they get their share of the budget first, as
 /// long as that share is at most half; past that they are strided with the shell. The mesh
-/// draws at 4 tube sides, so its triangles per segment are TRIS_PER_SEG_N4. The floor of 2
+/// draws at 4 tube sides, so its triangles per segment are kTrisPerSegN4. The floor of 2
 /// keeps bands from degenerating into the full-resolution build. 0 budget (no planning rate
 /// at all) means no mesh, so the answer is the off value.
 inline BandPlan plan_bands(size_t shell_segments, size_t surface_segments,
@@ -88,7 +88,7 @@ inline BandPlan plan_bands(size_t shell_segments, size_t surface_segments,
     if (budget_triangles == 0) {
         return {1, false};
     }
-    constexpr size_t kTris = GeometryBudgetManager::TRIS_PER_SEG_N4;
+    constexpr size_t kTris = GeometryBudgetManager::kTrisPerSegN4;
     auto layers_for = [](size_t triangles, size_t budget) {
         const size_t layers = (triangles + budget - 1) / budget; // ceil divide
         return static_cast<int>(layers < 2 ? 2 : layers);

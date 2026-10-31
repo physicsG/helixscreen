@@ -111,6 +111,7 @@ std::optional<PrePrintOption> parse_pre_print_option(const nlohmann::json& j) {
     opt.default_enabled = helix::json_util::safe_bool(j, "default_enabled", false);
     opt.order = helix::json_util::safe_int(j, "order", 0);
     opt.requires_macro = helix::json_util::safe_string(j, "requires_macro");
+    opt.needs_material = helix::json_util::safe_bool(j, "needs_material", false);
 
     // category — defaults to Mechanical if absent or unknown (warned).
     if (j.contains("category") && j["category"].is_string()) {
@@ -264,19 +265,19 @@ std::string render_pre_start_gcode(const PrePrintOption& opt, bool enabled,
     // needs no marker: get_float(minval=0) accepts 0, and a bed target of 0
     // (unheated bed) is a real, slicable configuration that must pass
     // through as-is rather than read as "unknown".
-    static constexpr std::string_view EXT_OPEN = "{?ext}";
-    static constexpr std::string_view SEG_CLOSE = "{/?}";
+    static constexpr std::string_view kExtOpen = "{?ext}";
+    static constexpr std::string_view kSegClose = "{/?}";
     if (ctx.extruder_temp > 0) {
-        out = replace_all(std::move(out), std::string(EXT_OPEN), "");
-        out = replace_all(std::move(out), std::string(SEG_CLOSE), "");
+        out = replace_all(std::move(out), std::string(kExtOpen), "");
+        out = replace_all(std::move(out), std::string(kSegClose), "");
     } else {
-        for (size_t open = out.find(EXT_OPEN); open != std::string::npos;
-             open = out.find(EXT_OPEN)) {
-            const size_t close = out.find(SEG_CLOSE, open);
+        for (size_t open = out.find(kExtOpen); open != std::string::npos;
+             open = out.find(kExtOpen)) {
+            const size_t close = out.find(kSegClose, open);
             if (close == std::string::npos) {
                 break; // unmatched marker: leave the rest untouched
             }
-            out.erase(open, close - open + SEG_CLOSE.size());
+            out.erase(open, close - open + kSegClose.size());
         }
     }
 

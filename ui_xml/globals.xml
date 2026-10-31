@@ -32,25 +32,44 @@
     <px name="tab_dot_ring_width_medium" value="2"/>
     <px name="tab_dot_ring_width_large" value="2"/>
     <px name="tab_dot_unknown_opacity" value="90"/>
-    <!-- The 6-column, 30-swatch preset grids (color_swatch_grid, theme_swatch_grid):
+    <!-- The two-column color picker modal. Small keeps 470 (a 480-wide panel
+         cannot host more); the core tiers widen so the preset grid's 6 columns
+         of touch-target-sized cells fit beside the 190px HSV column as the
+         space_* padding grows. -->
+    <px name="color_picker_modal_width_small" value="470"/>
+    <px name="color_picker_modal_width_medium" value="500"/>
+    <px name="color_picker_modal_width_large" value="500"/>
+    <px name="color_picker_modal_width_xlarge" value="510"/>
+    <px name="color_picker_modal_width_xxlarge" value="520"/>
+    <!-- The 6-column, 30-swatch preset grids (color_swatch_grid, either palette):
          swatch, gap, half the gap (each swatch's hit reach), and the grid width,
-         six swatches and five gaps, so the 30 always form 5 even rows. -->
+         six swatches and five gaps, so the 30 always form 5 even rows. Every
+         class keeps each swatch's whole touch target at least 7mm on its
+         panel: swatch + 2*half is the pitch, 44px at 160 dpi or less, 46px on
+         the tiny class's 3.5" 480x320 at 165 dpi. gap == 2*half so
+         neighbouring targets abut without overlapping (LVGL gives an overlap
+         to the topmost widget, which makes taps unpredictable). Every grid
+         that uses them, the AMS editor's included, takes them from here. -->
     <px name="swatch_grid_size_micro" value="26"/>
+    <px name="swatch_grid_size_tiny" value="28"/>
     <px name="swatch_grid_size_small" value="28"/>
     <px name="swatch_grid_size_medium" value="32"/>
     <px name="swatch_grid_size_large" value="32"/>
-    <px name="swatch_grid_gap_micro" value="4"/>
-    <px name="swatch_grid_gap_small" value="8"/>
-    <px name="swatch_grid_gap_medium" value="8"/>
-    <px name="swatch_grid_gap_large" value="8"/>
-    <px name="swatch_grid_gap_half_micro" value="2"/>
-    <px name="swatch_grid_gap_half_small" value="4"/>
-    <px name="swatch_grid_gap_half_medium" value="4"/>
-    <px name="swatch_grid_gap_half_large" value="4"/>
-    <px name="swatch_grid_width_micro" value="176"/>
-    <px name="swatch_grid_width_small" value="208"/>
-    <px name="swatch_grid_width_medium" value="232"/>
-    <px name="swatch_grid_width_large" value="232"/>
+    <px name="swatch_grid_gap_micro" value="18"/>
+    <px name="swatch_grid_gap_tiny" value="18"/>
+    <px name="swatch_grid_gap_small" value="16"/>
+    <px name="swatch_grid_gap_medium" value="12"/>
+    <px name="swatch_grid_gap_large" value="12"/>
+    <px name="swatch_grid_gap_half_micro" value="9"/>
+    <px name="swatch_grid_gap_half_tiny" value="9"/>
+    <px name="swatch_grid_gap_half_small" value="8"/>
+    <px name="swatch_grid_gap_half_medium" value="6"/>
+    <px name="swatch_grid_gap_half_large" value="6"/>
+    <px name="swatch_grid_width_micro" value="246"/>
+    <px name="swatch_grid_width_tiny" value="258"/>
+    <px name="swatch_grid_width_small" value="248"/>
+    <px name="swatch_grid_width_medium" value="252"/>
+    <px name="swatch_grid_width_large" value="252"/>
     <!-- The grids' ring: 2px wide with a 1px gap, a reach of 3. -->
     <px name="swatch_grid_ring_width_small" value="2"/>
     <px name="swatch_grid_ring_width_medium" value="2"/>
@@ -108,6 +127,14 @@
     <px name="space_xs_large" value="6"/>
     <px name="space_xs_xlarge" value="8"/>
     <px name="space_xs_xxlarge" value="10"/>
+    <!-- home_grid_gap: gap between the home widget grid's tracks. Matches space_xs up to
+         medium; wider from large up, where cells are big enough to want the air. -->
+    <px name="home_grid_gap_tiny" value="2"/>
+    <px name="home_grid_gap_small" value="4"/>
+    <px name="home_grid_gap_medium" value="5"/>
+    <px name="home_grid_gap_large" value="10"/>
+    <px name="home_grid_gap_xlarge" value="10"/>
+    <px name="home_grid_gap_xxlarge" value="12"/>
     <!-- space_sm: Small (tight layouts, minor separations) -->
     <px name="space_sm_tiny" value="4"/>
     <px name="space_sm_small" value="6"/>
@@ -393,6 +420,44 @@
     <px name="buffer_trace_h_large" value="98"/>
     <px name="buffer_trace_h_xlarge" value="112"/>
     <px name="buffer_trace_h_xxlarge" value="122"/>
+    <!-- text_small_line_h: one line of <text_small> (font_small's line height on
+         the same ladder), for a label that must truncate to a single line. -->
+    <px name="text_small_line_h_micro" value="15"/>
+    <px name="text_small_line_h_tiny" value="15"/>
+    <px name="text_small_line_h_small" value="18"/>
+    <px name="text_small_line_h_medium" value="22"/>
+    <px name="text_small_line_h_large" value="24"/>
+    <px name="text_small_line_h_xlarge" value="27"/>
+    <px name="text_small_line_h_xxlarge" value="34"/>
+    <!-- belt_tune_hero_h: the Belt Tension tuning hero (instruction, turn
+         stepper, gap, round facts). Fixed, so the chart below keeps its height
+         whatever the hero says. Each value is the tallest column's measured
+         height, the stepper column in ADJUST. Only landscape medium and up show
+         this hero; below medium and in portrait the panel uses its one-line
+         hero, so _small only completes the required triplet. -->
+    <px name="belt_tune_hero_h_small" value="94"/>
+    <px name="belt_tune_hero_h_medium" value="94"/>
+    <px name="belt_tune_hero_h_large" value="101"/>
+    <px name="belt_tune_hero_h_xlarge" value="119"/>
+    <px name="belt_tune_hero_h_xxlarge" value="158"/>
+    <!-- belt_sidebar_w: on ultrawide screens the Belt Tension chart grows on
+         the left and everything else sits in a sidebar this wide. Its tier
+         follows the short axis, so a 1920x440 panel reads _small. Sized so the
+         four RESULTS buttons and the tuning buttons fit in every locale. -->
+    <px name="belt_sidebar_w_small" value="640"/>
+    <px name="belt_sidebar_w_medium" value="720"/>
+    <px name="belt_sidebar_w_large" value="800"/>
+    <px name="belt_sidebar_w_xlarge" value="960"/>
+    <px name="belt_sidebar_w_xxlarge" value="1280"/>
+    <!-- belt_chart_max_h: in portrait the Belt Tension chart grows into the
+         spare height only up to about its own width. Portrait tiers follow the
+         screen width, so each value sits a little under that tier's content
+         width. -->
+    <px name="belt_chart_max_h_small" value="400"/>
+    <px name="belt_chart_max_h_medium" value="440"/>
+    <px name="belt_chart_max_h_large" value="560"/>
+    <px name="belt_chart_max_h_xlarge" value="680"/>
+    <px name="belt_chart_max_h_xxlarge" value="960"/>
 
     <!-- Spinner arc widths - proportional to size -->
     <px name="spinner_arc_lg_small" value="3"/>
@@ -421,18 +486,30 @@
     <!-- accent_bar_width moved to home_panel.xml -->
     <!-- accent_bar_height moved to home_panel.xml -->
     <!-- accent_bar_gap moved to home_panel.xml -->
-    <!-- Controls > Calibration & Tools: a tile's share of its row. Two per row
-         up to large, so the usual four-tile set is a 2x2 grid with one-line
-         labels; three from xlarge up. Two rows fill the card. -->
-    <string name="calib_cell_width_micro" value="48%"/>
-    <string name="calib_cell_width_tiny" value="48%"/>
-    <string name="calib_cell_width_small" value="48%"/>
-    <string name="calib_cell_width_medium" value="48%"/>
-    <string name="calib_cell_width_large" value="48%"/>
-    <string name="calib_cell_width_xlarge" value="32%"/>
-    <percentage name="calib_cell_height" value="48%"/>
+    <!-- Controls > Calibration & Tools: the smallest tile that still holds its
+         icon over a one-line label. fit_tile_grid picks the grid shape whose
+         tiles clear this by the most, and drops labels when none can. -->
+    <px name="calib_tile_min_width_micro" value="64"/>
+    <px name="calib_tile_min_width_tiny" value="66"/>
+    <px name="calib_tile_min_width_small" value="64"/>
+    <px name="calib_tile_min_width_medium" value="76"/>
+    <px name="calib_tile_min_width_large" value="88"/>
+    <px name="calib_tile_min_width_xlarge" value="100"/>
+    <px name="calib_tile_min_height_micro" value="40"/>
+    <px name="calib_tile_min_height_tiny" value="40"/>
+    <px name="calib_tile_min_height_small" value="44"/>
+    <px name="calib_tile_min_height_medium" value="56"/>
+    <px name="calib_tile_min_height_large" value="76"/>
+    <px name="calib_tile_min_height_xlarge" value="88"/>
     <!-- Motors Off beside Motion on the Controls position card: at least 40px
          wide to tap, with the glyph sized to the one-button-tall row -->
+    <!-- Motion + Motors Off row on a portrait Controls panel: Motion is inline
+         there, so the row only has to hold the Motors Off icon over its label -->
+    <px name="controls_action_row_portrait_tiny" value="40"/>
+    <px name="controls_action_row_portrait_small" value="48"/>
+    <px name="controls_action_row_portrait_medium" value="48"/>
+    <px name="controls_action_row_portrait_large" value="60"/>
+    <px name="controls_action_row_portrait_xlarge" value="64"/>
     <string name="controls_toggle_icon_size_micro" value="xs"/>
     <string name="controls_toggle_icon_size_tiny" value="sm"/>
     <string name="controls_toggle_icon_size_small" value="sm"/>
@@ -445,30 +522,33 @@
     <px name="controls_toggle_width_medium" value="80"/>
     <px name="controls_toggle_width_large" value="96"/>
     <px name="controls_toggle_width_xlarge" value="112"/>
-    <!-- Pre-print option tiles (option_tile.xml): fixed-height cells of the
-         2-column grid on the print file detail view. The tile height itself
-         bounds the label (style_max_height="100%"), so long_mode="dots"
-         ellipsizes instead of wrapping past the cell. option_tile_tab is the
-         corner check tab, holding an xs check glyph. -->
+    <!-- Pre-print option tiles (option_tile.xml): fixed-height pills of the
+         2-column grid on the print file detail view, tall enough for a
+         two-line font_small label. -->
     <px name="option_tile_height_micro" value="40"/>
     <px name="option_tile_height_tiny" value="40"/>
     <px name="option_tile_height_small" value="48"/>
     <px name="option_tile_height_medium" value="48"/>
     <px name="option_tile_height_large" value="56"/>
     <px name="option_tile_height_xlarge" value="64"/>
-    <px name="option_tile_tab_micro" value="14"/>
-    <px name="option_tile_tab_tiny" value="14"/>
-    <px name="option_tile_tab_small" value="16"/>
-    <px name="option_tile_tab_medium" value="16"/>
-    <px name="option_tile_tab_large" value="18"/>
-    <px name="option_tile_tab_xlarge" value="20"/>
-    <!-- The tab's lift off the tile's bottom border: -space_xs per tier. -->
-    <px name="option_tile_tab_lift_micro" value="-2"/>
-    <px name="option_tile_tab_lift_tiny" value="-2"/>
-    <px name="option_tile_tab_lift_small" value="-4"/>
-    <px name="option_tile_tab_lift_medium" value="-5"/>
-    <px name="option_tile_tab_lift_large" value="-6"/>
-    <px name="option_tile_tab_lift_xlarge" value="-8"/>
+    <!-- Filament chip row on the print file detail view (filament_swatch is
+         height="100%" of it): a header band over a body band, each tall enough
+         for its label. -->
+    <px name="filament_chip_row_height_micro" value="34"/>
+    <px name="filament_chip_row_height_tiny" value="32"/>
+    <px name="filament_chip_row_height_small" value="40"/>
+    <px name="filament_chip_row_height_medium" value="40"/>
+    <px name="filament_chip_row_height_large" value="40"/>
+    <px name="filament_chip_row_height_xlarge" value="48"/>
+    <!-- Width of one filament chip (filament_swatch.xml). Four fit the 274px
+         chip row at 800x480; the narrower ladders keep three on the 181px row
+         at 480x272. -->
+    <px name="filament_chip_width_micro" value="52"/>
+    <px name="filament_chip_width_tiny" value="52"/>
+    <px name="filament_chip_width_small" value="60"/>
+    <px name="filament_chip_width_medium" value="64"/>
+    <px name="filament_chip_width_large" value="64"/>
+    <px name="filament_chip_width_xlarge" value="80"/>
     <!-- Calibration tiles: the glyph a tile's share of the card holds above a
          one-line label -->
     <string name="calib_icon_size_micro" value="sm"/>
@@ -498,9 +578,35 @@
     <px name="button_height_sm_xlarge" value="48"/>
     <px name="button_height_sm_xxlarge" value="56"/>
 
+    <!-- jog_mode_h / jog_mode_w: a jog mode key in the pad layout (icon over
+         label). The height holds touch_target_min; the width cap keeps the key
+         within 1.4x its height, so a wide row centres its keys instead of
+         stretching them into bars. -->
+    <px name="jog_mode_h_micro" value="48"/>
+    <px name="jog_mode_h_tiny" value="48"/>
+    <px name="jog_mode_h_small" value="56"/>
+    <px name="jog_mode_h_medium" value="64"/>
+    <px name="jog_mode_h_large" value="80"/>
+    <px name="jog_mode_h_xlarge" value="88"/>
+    <px name="jog_mode_h_xxlarge" value="104"/>
+    <px name="jog_mode_w_micro" value="67"/>
+    <px name="jog_mode_w_tiny" value="67"/>
+    <px name="jog_mode_w_small" value="78"/>
+    <px name="jog_mode_w_medium" value="90"/>
+    <px name="jog_mode_w_large" value="112"/>
+    <px name="jog_mode_w_xlarge" value="123"/>
+    <px name="jog_mode_w_xxlarge" value="145"/>
+
+    <!-- touch_target_min: the least height a tappable control may have, whatever
+         the breakpoint; a compact layout trades width or rows, never this.
+         One exception: an action prompt's swatch grid keeps every color visible,
+         so its tiles hold this width but let height drop toward button_height
+         before the grid scrolls (prestonbrown/helixscreen#1806). -->
+    <px name="touch_target_min" value="48"/>
+
     <!-- button_height is responsive: _small/_medium/_large registered as button_height based on screen size -->
     <px name="button_height_micro" value="26"/>
-    <px name="button_height_tiny" value="32"/>
+    <px name="button_height_tiny" value="44"/>
     <px name="button_height_small" value="48"/>
     <px name="button_height_medium" value="52"/>
     <px name="button_height_large" value="72"/>
@@ -542,10 +648,24 @@
     <px name="button_height_lg_xlarge" value="112"/>
     <px name="button_height_lg_xxlarge" value="128"/>
 
+    <!-- Print status strip buttons beside the progress: square at this size
+         each way, narrower where four do not fit the row's share. -->
+    <px name="ps_strip_button_micro" value="58"/>
+    <px name="ps_strip_button_tiny" value="66"/>
+    <px name="ps_strip_button_small" value="76"/>
+    <px name="ps_strip_button_medium" value="90"/>
+    <px name="ps_strip_button_large" value="112"/>
+    <px name="ps_strip_button_xlarge" value="120"/>
+    <px name="ps_strip_button_xxlarge" value="144"/>
+
+    <!-- components/progress_bar.xml's height, read by the print status layout
+         fitter to estimate the strip before it is laid out. -->
+    <px name="progress_bar_height" value="12"/>
+
     <!-- Other component dimensions -->
     <!-- header_height is responsive: _small/_medium/_large registered as header_height based on screen height -->
     <px name="header_height_micro" value="28"/>
-    <px name="header_height_tiny" value="32"/>
+    <px name="header_height_tiny" value="33"/>
     <px name="header_height_small" value="48"/>
     <px name="header_height_medium" value="56"/>
     <px name="header_height_large" value="60"/>
@@ -608,14 +728,14 @@
           its scroll area pinned at 10px gives chrome = card - scroll, and the
           cap is (85% cap - chrome) with 8px spare:
             micro   480x272   chrome  70  cap 231
-            tiny    480x320   chrome  85  cap 272
+            tiny    480x320   chrome  97  cap 272
             small   640x400   chrome 114  cap 340
             medium  800x480   chrome 124  cap 408
             large  1024x600   chrome 150  cap 510
             xlarge 1200x900   chrome 174  cap 765
             xxlarge 1280x1024 chrome 220  cap 870 -->
     <px name="dialog_content_recovery_max_micro" value="153"/>
-    <px name="dialog_content_recovery_max_tiny" value="179"/>
+    <px name="dialog_content_recovery_max_tiny" value="167"/>
     <px name="dialog_content_recovery_max_small" value="218"/>
     <px name="dialog_content_recovery_max_medium" value="276"/>
     <px name="dialog_content_recovery_max_large" value="352"/>
@@ -623,7 +743,7 @@
     <px name="dialog_content_recovery_max_xxlarge" value="642"/>
 
     <px name="dialog_content_max_micro" value="140"/>
-    <px name="dialog_content_max_tiny" value="200"/>
+    <px name="dialog_content_max_tiny" value="170"/>
     <px name="dialog_content_max_small" value="260"/>
     <px name="dialog_content_max_medium" value="320"/>
     <px name="dialog_content_max_large" value="440"/>
@@ -631,12 +751,15 @@
     <px name="dialog_content_max_xxlarge" value="800"/>
 
 
+    <!-- The widget catalog's narrowest portrait width: the panel an 800x480
+         landscape screen gives it (70% of 800). -->
+    <px name="catalog_min_width" value="560"/>
+
     <!-- input_height: standard height for all input fields (textareas, dropdowns,
-         icon toggles). Static 48px historically — now a responsive ladder so inputs
-         scale up on bigger screens instead of looking cramped (history panel search
-         box, spoolman search, modal text inputs, wifi password row, etc.). Small
-         breakpoints keep 48 (no regression on cramped Snapmaker U1 / 480x320). -->
-    <px name="input_height_micro" value="48"/>
+         icon toggles). A responsive ladder, so inputs scale up on bigger screens.
+         Micro (480x272) matches its 12px body font and 26px buttons; tiny and small
+         keep 48 for the cramped 480x320 panels. -->
+    <px name="input_height_micro" value="32"/>
     <px name="input_height_tiny" value="48"/>
     <px name="input_height_small" value="48"/>
     <px name="input_height_medium" value="52"/>
@@ -657,6 +780,18 @@
          (print_status overlay buttons, exclude_object close) go oval. -->
     <px name="icon_button_size_lg" value="36"/>
     <px name="icon_button_radius_lg" value="18"/>
+    <!-- plate_label_max_width: the widest the print-file detail's plate name
+         may grow before it ends in an ellipsis. The preview card's top row on
+         the narrowest landscape card of each size, less the two
+         icon_button_size_lg arrows, a two-digit "12/12" plate position and the
+         strip's three space_xs gaps, so the position and the arrows never
+         leave the preview. -->
+    <px name="plate_label_max_width_micro" value="102"/>
+    <px name="plate_label_max_width_tiny" value="96"/>
+    <px name="plate_label_max_width_small" value="72"/>
+    <px name="plate_label_max_width_medium" value="212"/>
+    <px name="plate_label_max_width_large" value="300"/>
+    <px name="plate_label_max_width_xlarge" value="270"/>
 
     <!-- icon_badge: the circular container holding a single status icon at the
          top of an overlay or on a home-screen widget. NOT badge_size_* — that
@@ -748,6 +883,17 @@
     <string name="font_body_xlarge" value="noto_sans_24"/>
     <string name="font_body_xxlarge" value="noto_sans_32"/>
     <!-- NO BASE font_body - registered at runtime -->
+    <!-- font_jog_key variants: the Axis Rows jog keys. Body text where the keys
+         are small; the heading face from large up, where a body label leaves
+         most of a key empty. Each value is a face its tier already links. -->
+    <string name="font_jog_key_micro" value="noto_sans_12"/>
+    <string name="font_jog_key_tiny" value="noto_sans_12"/>
+    <string name="font_jog_key_small" value="noto_sans_14"/>
+    <string name="font_jog_key_medium" value="noto_sans_18"/>
+    <string name="font_jog_key_large" value="noto_sans_28"/>
+    <string name="font_jog_key_xlarge" value="noto_sans_32"/>
+    <string name="font_jog_key_xxlarge" value="noto_sans_40"/>
+    <!-- NO BASE font_jog_key - registered at runtime -->
     <!-- font_small variants (hints, helpers, chart labels) - uses Light weight -->
     <string name="font_small_micro" value="noto_sans_light_10"/>
     <string name="font_small_tiny" value="noto_sans_light_11"/>
@@ -766,6 +912,16 @@
     <string name="font_xs_xlarge" value="noto_sans_light_16"/>
     <string name="font_xs_xxlarge" value="noto_sans_light_20"/>
     <!-- NO BASE font_xs - registered at runtime -->
+    <!-- font_chip_material variants (a FILAMENTS-card chip's material header) - Bold where the
+         chip is wide enough to hold "ABS-GF" in it, Light below that -->
+    <string name="font_chip_material_micro" value="noto_sans_light_10"/>
+    <string name="font_chip_material_tiny" value="noto_sans_light_10"/>
+    <string name="font_chip_material_small" value="noto_sans_light_10"/>
+    <string name="font_chip_material_medium" value="noto_sans_bold_14"/>
+    <string name="font_chip_material_large" value="noto_sans_bold_14"/>
+    <string name="font_chip_material_xlarge" value="noto_sans_bold_16"/>
+    <string name="font_chip_material_xxlarge" value="noto_sans_bold_20"/>
+    <!-- NO BASE font_chip_material - registered at runtime -->
     <!-- font_mono variants (monospace for console/terminal displays) - Source Code Pro -->
     <string name="font_mono_micro" value="source_code_pro_10"/>
     <string name="font_mono_tiny" value="source_code_pro_10"/>
@@ -787,6 +943,16 @@
     <string name="icon_font_xs_xlarge" value="mdi_icons_24"/>
     <string name="icon_font_xs_xxlarge" value="mdi_icons_32"/>
     <!-- NO BASE icon_font_xs - registered at runtime -->
+    <!-- icon_font_jog_key: the Axis Rows jog-key arrows, sized with
+         font_jog_key (ui_button icon_size="jog_key"). -->
+    <string name="icon_font_jog_key_micro" value="mdi_icons_16"/>
+    <string name="icon_font_jog_key_tiny" value="mdi_icons_24"/>
+    <string name="icon_font_jog_key_small" value="mdi_icons_24"/>
+    <string name="icon_font_jog_key_medium" value="mdi_icons_24"/>
+    <string name="icon_font_jog_key_large" value="mdi_icons_32"/>
+    <string name="icon_font_jog_key_xlarge" value="mdi_icons_48"/>
+    <string name="icon_font_jog_key_xxlarge" value="mdi_icons_64"/>
+    <!-- NO BASE icon_font_jog_key - registered at runtime -->
     <!-- icon_font_sm: Small inline icons (metadata, hints, small indicators) -->
     <string name="icon_font_sm_micro" value="mdi_icons_16"/>
     <string name="icon_font_sm_tiny" value="mdi_icons_24"/>
@@ -890,8 +1056,6 @@
     <!-- Faceted toolhead base color (static - Voron-style red) -->
     <color name="toolhead_body" value="#E53935"/>
     <!-- AMS slot colors (static - 3D visualization) -->
-    <color name="ams_hub" value="#1A1A1A"/>
-    <color name="ams_hub_border" value="#333333"/>
     <color name="ams_badge_bg" value="#505050"/>
     <!-- Spool canvas colors (static - 3D visualization) -->
     <color name="spool_body" value="#666666"/>
@@ -1029,6 +1193,7 @@
     <str name="icon_code_tags" value="󰅴"/>
     <str name="icon_cog" value="󰒓"/>
     <str name="icon_cog_outline" value="󰢻"/>
+    <str name="icon_cog_refresh" value="󱑞"/>
     <str name="icon_console" value="󰆍"/>
     <str name="icon_content_copy" value="󰆏"/>
     <str name="icon_coolant_temperature" value="󰏈"/>
@@ -1053,9 +1218,11 @@
     <str name="icon_eye_off" value="󰈉"/>
     <str name="icon_fan" value="󰈐"/>
     <str name="icon_fan_off" value="󰠝"/>
-    <str name="icon_filament" value="󰹛"/>
-    <str name="icon_filament_alert" value="󱇀"/>
-    <str name="icon_filament_outline" value="󰹜"/>
+    <str name="icon_filament" value="󾀁"/>
+    <str name="icon_filament_alert" value="󾀃"/>
+    <str name="icon_filament_outline" value="󾀂"/>
+    <str name="icon_filament_sensor" value="󰹛"/>
+    <str name="icon_filament_sensor_alert" value="󱇀"/>
     <str name="icon_filter" value="󰈲"/>
     <str name="icon_fine_tune" value="󰘮"/>
     <str name="icon_fire" value="󰈸"/>
@@ -1119,6 +1286,9 @@
     <str name="icon_move" value="󰁌"/>
     <str name="icon_network" value="󰈀"/>
     <str name="icon_notifications" value="󰂚"/>
+    <str name="icon_nozzle" value="󰹛"/>
+    <str name="icon_nozzle_alert" value="󱇀"/>
+    <str name="icon_nozzle_outline" value="󰹜"/>
     <str name="icon_palette" value="󰏘"/>
     <str name="icon_pause" value="󰏤"/>
     <str name="icon_pencil" value="󰏫"/>
@@ -1156,6 +1326,7 @@
     <str name="icon_radiator" value="󰐸"/>
     <str name="icon_redo" value="󰑎"/>
     <str name="icon_refresh" value="󰑐"/>
+    <str name="icon_remote_desktop" value="󰢹"/>
     <str name="icon_restart" value="󰜉"/>
     <str name="icon_resume" value="󰐌"/>
     <str name="icon_robot" value="󰚩"/>
@@ -1177,7 +1348,7 @@
     <str name="icon_speed_down" value="󰾆"/>
     <str name="icon_speed_up" value="󰾅"/>
     <str name="icon_spirit_level" value="󱓱"/>
-    <str name="icon_spoolman" value="󰈯"/>
+    <str name="icon_spoolman" value="󾀀"/>
     <str name="icon_star" value="󰓎"/>
     <str name="icon_stop" value="󰓛"/>
     <str name="icon_swap_horizontal" value="󰓡"/>

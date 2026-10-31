@@ -1,30 +1,63 @@
 <?xml version="1.0"?>
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- A small pill: an icon (nested as the instance's plain children) beside one
-     line of bound text. Sized to content until the owner positions and widths
-     it; the owner also bounds the label's max width to what the icons leave,
-     so a chip narrower than its text ends in dots.
+<!-- A small pill: an icon (nested as the instance's plain children) beside
+     bound text, one line unless max_lines says more. Sized to content until
+     the owner positions and widths it; the owner also bounds the label's max
+     width to what the icons leave, so a chip narrower than its text ends in
+     dots.
      Pill styling (colors, padding, row_reverse) lives in styles.activity_chip
      so an icon-only chip with no label can borrow the identical look.
      shown_subject is the chip's shown int; its value 2 (a heater off but
      still hot) greys the text. compact_subject's value 1 sets the text in
-     font_xs. -->
+     font_xs.
+     Optional, left unset by the home screen: tone_subject (ChipTone: 2 Warn
+     turns the border and text amber, 3 Dim greys the text) and
+     progress_subject (0-100 fills a thin bar along the chip's foot and turns
+     the border amber; -1 hides the bar). The bar ignores the flex layout, so
+     the chip measures the same with or without it. state_subject, also
+     optional, is a HeaterStatusState int: the chip then ends in the
+     heater_status glyph (flame, check, snowflake, circled A). -->
 <component>
   <api>
     <prop name="text_subject" type="subject" default=""/>
     <prop name="shown_subject" type="subject" default=""/>
     <prop name="compact_subject" type="subject" default=""/>
+    <prop name="tone_subject" type="subject" default=""/>
+    <prop name="progress_subject" type="subject" default=""/>
+    <prop name="state_subject" type="string" default=""/>
+    <prop name="max_lines" type="string" default="1"/>
   </api>
   <styles>
     <style name="residual" text_color="#text_subtle"/>
-    <style name="compact" text_font="#font_xs"/>
+    <style name="accent_border" border_color="#warning"/>
+    <!-- Pinned chips sit on the photo itself, so they hide what is behind them. -->
+    <style name="pinned" bg_opa="90%"/>
   </styles>
   <view extends="lv_obj" width="content" height="content" scrollable="false" clickable="true">
     <style name="styles.activity_chip"/>
-    <text_small name="chip_text" bind_text="$text_subject" long_mode="dots">
+    <bind_style_if_eq name="pinned" subject="$compact_subject" ref_value="1"/>
+    <bind_style_if_eq name="accent_border" subject="$tone_subject" ref_value="2"/>
+    <bind_style_if_ge name="accent_border" subject="$progress_subject" ref_value="0"/>
+    <!-- Before the label in markup, after it on screen: the pill lays out row_reverse. -->
+    <!-- Takes no room without a state: an unset subject skips the binding and
+         hidden stays, and state 0 (off) hides it. -->
+    <heater_status name="chip_state" state_subject="$state_subject" hidden="true">
+      <bind_flag_if_eq subject="$state_subject" flag="hidden" ref_value="0"/>
+    </heater_status>
+    <text_small name="chip_text" bind_text="$text_subject" long_mode="dots" max_lines="$max_lines">
       <bind_style_if_eq name="residual" subject="$shown_subject" ref_value="2"/>
-      <bind_style_if_eq name="compact" subject="$compact_subject" ref_value="1"/>
+      <bind_style_if_eq name="residual" subject="$tone_subject" ref_value="3"/>
+      <bind_style_if_eq name="styles.chip_text_warning" subject="$tone_subject" ref_value="2"/>
+      <bind_style_if_ge name="styles.chip_text_warning" subject="$progress_subject" ref_value="0"/>
+      <bind_style_if_eq name="styles.chip_text_compact" subject="$compact_subject" ref_value="1"/>
     </text_small>
+    <lv_bar name="chip_progress"
+            width="100%" height="#space_xxs" ignore_layout="true" align="bottom_mid" min_value="0" max_value="100"
+            bind_value="$progress_subject" style_bg_color="#text_subtle" style_bg_opa="120" style_radius="0"
+            style_bg_color-indicator="#warning" style_bg_opa-indicator="255" style_radius-indicator="0"
+            clickable="false" hidden="true">
+      <bind_flag_if_lt subject="$progress_subject" flag="hidden" ref_value="0"/>
+    </lv_bar>
   </view>
 </component>

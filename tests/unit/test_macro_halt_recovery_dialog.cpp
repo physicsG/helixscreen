@@ -47,8 +47,8 @@ namespace {
 
 /// A macro name that no branch of MoonrakerClientMock::gcode_script() matches,
 /// so the only thing that decides the rpc's fate is the forced error below.
-constexpr const char* HALTING_MACRO = "PANIC_WRAPPER";
-constexpr const char* RESTARTING_MACRO = "SAVE_WRAPPER";
+constexpr const char* kHaltingMacro = "PANIC_WRAPPER";
+constexpr const char* kRestartingMacro = "SAVE_WRAPPER";
 
 class MacroFailureFixture : public LVGLTestFixture {
   public:
@@ -72,8 +72,8 @@ class MacroFailureFixture : public LVGLTestFixture {
         // one process, so an inherited window would make the halt assertion
         // pass for the wrong reason.
         EmergencyStopOverlayTestAccess::reset_suppression(EmergencyStopOverlay::instance());
-        hw.set_host_halting_macros({HALTING_MACRO});
-        hw.set_host_restarting_macros({RESTARTING_MACRO});
+        hw.set_host_halting_macros({kHaltingMacro});
+        hw.set_host_restarting_macros({kRestartingMacro});
     }
 
     ~MacroFailureFixture() override {
@@ -99,9 +99,7 @@ class MacroFailureFixture : public LVGLTestFixture {
     // The rpc callback settles on the calling thread, but the toast and the
     // suppression writes hop the queue, so drain until it stops producing.
     void settle() {
-        for (int i = 0; i < 4; i++) {
-            helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 };
 
@@ -110,10 +108,10 @@ class MacroFailureFixture : public LVGLTestFixture {
 TEST_CASE_METHOD(MacroFailureFixture,
                  "A halting macro's dropped rpc must not arm the restart suppression",
                  "[macro][restart][halt]") {
-    REQUIRE(helix::macro_host_effect(HALTING_MACRO, hw) == helix::MacroHostEffect::Halts);
+    REQUIRE(helix::macro_host_effect(kHaltingMacro, hw) == helix::MacroHostEffect::Halts);
 
-    drop_next_rpc_for(HALTING_MACRO);
-    run(HALTING_MACRO);
+    drop_next_rpc_for(kHaltingMacro);
+    run(kHaltingMacro);
 
     // The whole point of the branch: no suppression window, so the klippy
     // SHUTDOWN that follows raises the recovery dialog at once instead of
@@ -133,10 +131,10 @@ TEST_CASE_METHOD(MacroFailureFixture,
     // The control. Without it the halt assertions above could pass because the
     // rpc never failed, or because execute_macro_gcode() never reached its
     // error callback at all.
-    REQUIRE(helix::macro_host_effect(RESTARTING_MACRO, hw) == helix::MacroHostEffect::Restarts);
+    REQUIRE(helix::macro_host_effect(kRestartingMacro, hw) == helix::MacroHostEffect::Restarts);
 
-    drop_next_rpc_for(RESTARTING_MACRO);
-    run(RESTARTING_MACRO);
+    drop_next_rpc_for(kRestartingMacro);
+    run(kRestartingMacro);
 
     CHECK(EmergencyStopOverlay::instance().is_recovery_suppressed());
     CHECK(api.suppress_disconnect_modal_calls() == 1);

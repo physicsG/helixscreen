@@ -51,9 +51,9 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: an unchanged snap preview repain
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_snap");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
 
-    constexpr int SPAN = GridEditScene::COLSPAN;
+    constexpr int SPAN = GridEditScene::kColspan;
     GridEditModeTestAccess::update_snap_preview(em, 0, 0, SPAN, SPAN, true);
     lv_obj_t* preview = GridEditModeTestAccess::snap_preview(em);
     REQUIRE(preview != nullptr);
@@ -91,7 +91,7 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_outline");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
 
     GridEditModeTestAccess::make_resize_preview(em, 0, 0, 200, 150);
     flush_invalidation();
@@ -127,7 +127,7 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_drag");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     em.select_widget(scene.widget);
     lv_obj_t* overlay = GridEditModeTestAccess::selection_overlay(em);
     REQUIRE(overlay != nullptr);
@@ -186,7 +186,7 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_drag_exit");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     em.select_widget(scene.widget);
     GridEditModeTestAccess::lift_dragged_widget(em);
     REQUIRE(lv_obj_get_parent(scene.widget) != scene.container);
@@ -204,7 +204,7 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_drag_forget");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     em.select_widget(scene.widget);
     GridEditModeTestAccess::lift_dragged_widget(em);
     lv_obj_t* lifted = scene.widget;
@@ -225,7 +225,7 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: a drop that moves nothing repain
     ScopedWholeCellDef whole_cell("temperature");
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_noop_drop");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     lv_obj_update_layout(scene.container);
     flush_invalidation();
 
@@ -246,10 +246,10 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: a resize step leaves the page's 
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_layout");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     GridEditModeTestAccess::make_resize_preview(em, 0, 0, 200, 150);
-    GridEditModeTestAccess::update_snap_preview(em, 0, 0, GridEditScene::COLSPAN,
-                                                GridEditScene::ROWSPAN, true);
+    GridEditModeTestAccess::update_snap_preview(em, 0, 0, GridEditScene::kColspan,
+                                                GridEditScene::kRowspan, true);
     flush_invalidation();
     lv_obj_t* screen = lv_obj_get_screen(scene.container);
     REQUIRE_FALSE(screen->scr_layout_inv);
@@ -258,7 +258,7 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: a resize step leaves the page's 
     // and the next refresh lays out every object on the screen for it.
     GridEditModeTestAccess::make_resize_preview(em, 0, 0, 260, 150);
     GridEditModeTestAccess::update_snap_preview(
-        em, GridEditScene::COLSPAN, 0, GridEditScene::COLSPAN, GridEditScene::ROWSPAN, true);
+        em, GridEditScene::kColspan, 0, GridEditScene::kColspan, GridEditScene::kRowspan, true);
     CHECK_FALSE(screen->scr_layout_inv);
 
     em.exit();
@@ -272,7 +272,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     ScopedWholeCellDef whole_cell("temperature");
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_lattice");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     REQUIRE(GridEditModeTestAccess::drawn_dot_count(em) > 0);
     flush_invalidation();
 
@@ -294,7 +294,7 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: the lattice is drawn, not built 
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_lattice_objects");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     lv_obj_t* shield = GridEditModeTestAccess::shield(em);
     REQUIRE(shield != nullptr);
     // A fine lattice is a hundred-odd dots, which a slow board takes ~200 ms
@@ -312,7 +312,7 @@ TEST_CASE_METHOD(XMLTestFixture,
                  "[grid_edit][grid_edit_redraw]") {
     GridEditScene scene(test_screen(), "test_grid_edit_redraw_chrome_layout");
     GridEditMode em;
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     flush_invalidation();
     lv_obj_t* screen = lv_obj_get_screen(scene.container);
     REQUIRE_FALSE(screen->scr_layout_inv);

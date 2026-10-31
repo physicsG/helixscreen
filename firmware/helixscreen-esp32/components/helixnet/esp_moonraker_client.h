@@ -18,7 +18,9 @@
 
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
+#include "helix_shared_callback.h"
 #include "i_moonraker_client.h"
+#include "klippy_state.h"
 #include "reconnect_backoff.h"
 #include "rpc_error_policy.h"
 #include "transport_lifecycle.h"
@@ -44,9 +46,19 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     EspMoonrakerClient(const EspMoonrakerClient&) = delete;
     EspMoonrakerClient& operator=(const EspMoonrakerClient&) = delete;
 
+    // esp_websocket_client's own task stack (create_transport()'s cfg.task_stack),
+    // allocated from INTERNAL DRAM on every connect. Discovery peaks at ~7.1KB on
+    // this task, almost all of it discovery_subscribe's fixed frame (the inlined
+    // subscription builder, ~2.3KB): every frame on that path is static-sized and
+    // json nesting is constant, so the peak does not grow with the printer's object
+    // count. 10KB leaves ~3KB; each KB costs a KB of steady-state internal free, and
+    // nothing at the WiFi-association low point, when no websocket task exists.
+    // The discovery-complete watermark log reports the live margin.
+    static constexpr uint32_t kWsTaskStackBytes = 10 * 1024;
+
     // --- Connection lifecycle ---
-    int connect(const char* url, std::function<void()> on_connected,
-                std::function<void()> on_disconnected) override;
+    int connect(const char* url, helix::SharedCallback<void()> on_connected,
+                helix::SharedCallback<void()> on_disconnected) override;
     void disconnect() override;
     const std::string& get_last_url() const override {
         return url_;
@@ -60,28 +72,39 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     using LinkDropObserver = void (*)(int64_t silence_ms);
     static void set_link_drop_observer(LinkDropObserver observer);
 
+    /// Where this client reports Klippy's state; PrinterState lives above this
+    /// component. Both run on the websocket task and must not block.
+    struct KlippyStateSink {
+        /// A new connection session starts: its frames are measured afresh.
+        void (*session_started)();
+        /// A notify_klippy_* notification reported this state.
+        void (*state_reported)(KlippyState state);
+    };
+    static void set_klippy_state_sink(const KlippyStateSink* sink);
+
     // --- JSON-RPC protocol ---
     int send_jsonrpc(const std::string& method) override;
     int send_jsonrpc(const std::string& method, const json& params) override;
     RequestId send_jsonrpc(const std::string& method, const json& params,
-                           std::function<void(const json&)> cb) override;
+                           helix::SharedCallback<void(const json&)> cb) override;
     RequestId
     send_jsonrpc(const std::string& method, const json& params,
-                 std::function<void(const json&)> success_cb,
-                 std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
-                 bool silent = false,
+                 helix::SharedCallback<void(const json&)> success_cb,
+                 helix::SharedCallback<void(const MoonrakerError&)> error_cb,
+                 uint32_t timeout_ms = 0, bool silent = false,
                  std::optional<rpc_error_policy::CallerIntent> intent = std::nullopt) override;
     int gcode_script(const std::string& gcode) override;
     void get_gcode_store(int count,
                          std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-                         std::function<void(const MoonrakerError&)> on_error) override;
-    void get_temperature_store(std::function<void(const TemperatureStore&)> on_success,
-                               std::function<void(const MoonrakerError&)> on_error) override;
+                         helix::SharedCallback<void(const MoonrakerError&)> on_error) override;
+    void
+    get_temperature_store(std::function<void(const TemperatureStore&)> on_success,
+                          helix::SharedCallback<void(const MoonrakerError&)> on_error) override;
 
     // --- Discovery (Plan 4 fills the real sequence) ---
-    void
-    discover_printer(std::function<void()> on_complete,
-                     std::function<void(const std::string& reason)> on_error = nullptr) override;
+    void discover_printer(
+        helix::SharedCallback<void()> on_complete,
+        helix::SharedCallback<void(const std::string& reason)> on_error = nullptr) override;
     PrinterDiscovery hardware() const override;
     void parse_objects(const json& objects) override;
     void clear_discovery_cache() override;
@@ -90,13 +113,13 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     void set_on_discovery_complete(
         std::function<void(const helix::PrinterDiscovery&, const json& initial_status)> cb)
         override;
-    void set_bed_mesh_callback(std::function<void(const json&)> callback) override;
+    void set_bed_mesh_callback(helix::SharedCallback<void(const json&)> callback) override;
 
     // --- Subscriptions & method callbacks ---
-    SubscriptionId register_notify_update(std::function<void(const json&)> cb) override;
+    SubscriptionId register_notify_update(helix::SharedCallback<void(const json&)> cb) override;
     bool unsubscribe_notify_update(SubscriptionId id) override;
     void register_method_callback(const std::string& method, const std::string& handler_name,
-                                  std::function<void(const json&)> cb) override;
+                                  helix::SharedCallback<void(const json&)> cb) override;
     bool unregister_method_callback(const std::string& method,
                                     const std::string& handler_name) override;
     void dispatch_status_update(const json& status, bool from_cached_snapshot = false,
@@ -107,7 +130,8 @@ class EspMoonrakerClient final : public IMoonrakerClient {
 
     // --- Connection state & observers ---
     ConnectionState get_connection_state() const override;
-    void add_connected_observer(const std::string& handler_name, std::function<void()> cb) override;
+    void add_connected_observer(const std::string& handler_name,
+                                helix::SharedCallback<void()> cb) override;
     bool remove_connected_observer(const std::string& handler_name) override;
     void force_reconnect() override;
 
@@ -146,16 +170,16 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     /// Called once, from the transport worker or the housekeeping task, when a transport
     /// job could not finish: its websocket task would not stop, or a start was refused.
     /// Process-wide: set once at boot, before the first connect.
-    static void set_transport_stall_handler(std::function<void()> handler);
+    static void set_transport_stall_handler(helix::SharedCallback<void()> handler);
 
   private:
     // --- Transport worker ---
     // Every websocket stop, destroy, init and start runs on this one thread, in order, so
     // neither the UI thread nor the housekeeping timer ever waits on a websocket task.
-    static constexpr uint32_t TRANSPORT_WORKER_STACK_BYTES = 6 * 1024;
-    static constexpr int64_t TRANSPORT_STALL_US = 10LL * 1000 * 1000;
-    static constexpr int64_t TRANSPORT_STALL_UNCONNECTED_US = 30LL * 1000 * 1000;
-    void post_transport_job(const char* what, std::function<void()> job);
+    static constexpr uint32_t kTransportWorkerStackBytes = 6 * 1024;
+    static constexpr int64_t kTransportStallUs = 10LL * 1000 * 1000;
+    static constexpr int64_t kTransportStallUnconnectedUs = 30LL * 1000 * 1000;
+    void post_transport_job(const char* what, helix::SharedCallback<void()> job);
     static void* transport_worker_main(void* self);
     void transport_worker_loop();
     esp_websocket_client_handle_t create_transport(const std::string& url);
@@ -165,7 +189,7 @@ class EspMoonrakerClient final : public IMoonrakerClient {
 
     std::mutex transport_mutex_;
     std::condition_variable transport_cv_;
-    std::deque<std::pair<const char*, std::function<void()>>> transport_jobs_;
+    std::deque<std::pair<const char*, helix::SharedCallback<void()>>> transport_jobs_;
     pthread_t transport_worker_{};
     bool transport_worker_started_ = false;
     bool transport_quit_ = false;
@@ -176,13 +200,13 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     // Reassembly cap: a single WS message larger than this is dropped whole.
     // Moonraker does not chunk at the protocol level, so an oversized response's
     // RPC will simply time out (see brief). 256 KiB.
-    static constexpr size_t MAX_MESSAGE_BYTES = 262144;
+    static constexpr size_t kMaxMessageBytes = 262144;
     /// Reassembly capacity kept between messages; anything larger is released.
-    static constexpr size_t RX_BUF_KEEP_BYTES = 32768;
+    static constexpr size_t kRxBufKeepBytes = 32768;
     // Own request-tracker cap — far below desktop's 500 (RAM-bound). On overflow
     // the error callback fires synchronously with a CONNECTION_LOST error.
-    static constexpr size_t MAX_PENDING_REQUESTS = 64;
-    static constexpr uint32_t DEFAULT_REQUEST_TIMEOUT_MS = 60000;
+    static constexpr size_t kMaxPendingRequests = 64;
+    static constexpr uint32_t kDefaultRequestTimeoutMs = 60000;
     // The two bounds below both exist for one reason: no transport call may
     // stall the LVGL thread long enough for the screen to look dead. The task
     // watchdog is NOT the constraint — it watches the idle tasks only and
@@ -191,7 +215,7 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     // UX judgement: long enough that an ordinary LAN operation never trips it,
     // short enough that a tap on an unreachable printer reads as slow rather
     // than crashed.
-    static constexpr uint32_t UI_STALL_BUDGET_MS = 3000;
+    static constexpr uint32_t kUiStallBudgetMs = 3000;
 
     // How long esp_websocket_client_send_text() may block the CALLING task
     // waiting for the transport lock and the socket write. Every UI event
@@ -199,7 +223,7 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     // Deliberately NOT connection_timeout_ms_, which
     // MoonrakerManager::configure_timeouts() sets to 10s from
     // moonraker_connection_timeout_ms.
-    static constexpr uint32_t SEND_TIMEOUT_MS = UI_STALL_BUDGET_MS;
+    static constexpr uint32_t kSendTimeoutMs = kUiStallBudgetMs;
 
     // Ceiling applied to cfg.network_timeout_ms in connect(). The websocket
     // task spends that budget inside esp_transport_connect() when the address
@@ -219,28 +243,19 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     // on MainsailOS/Fluidd), so a stop() issued while a slow or failing
     // resolution is in progress can still exceed this cap by the DNS time.
     // The cap is a real improvement for the address case, not a guarantee.
-    static constexpr uint32_t MAX_NETWORK_TIMEOUT_MS = UI_STALL_BUDGET_MS;
+    static constexpr uint32_t kMaxNetworkTimeoutMs = kUiStallBudgetMs;
     // How long RECONNECTING persists before the informational FAILED transition.
-    static constexpr int64_t RECONNECTING_TO_FAILED_US = 60LL * 1000 * 1000;
+    static constexpr int64_t kReconnectingToFailedUs = 60LL * 1000 * 1000;
     // Period of the owned esp_timer that drives timeout + FAILED bookkeeping.
-    static constexpr uint64_t HOUSEKEEPING_PERIOD_US = 5LL * 1000 * 1000;
-    // esp_websocket_client's own task stack (connect()'s cfg.task_stack).
-    // Named so the discovery-complete watermark log (discovery_subscribe)
-    // reports headroom against the SAME value connect() actually configures.
-    // Sized from measurement, not guesswork: 44 forced-reconnect cycles
-    // showed a deterministic ~6.5KB peak (watermark 10,060 free of a trial
-    // 16384), so 8192 carries ~1.7KB headroom — and this stack is INTERNAL
-    // DRAM (a 16KB trial cost exactly 8KB of steady-state internal free,
-    // breaking the >=100KB budget). The watermark log guards the margin.
-    static constexpr uint32_t WS_TASK_STACK_BYTES = 8192;
+    static constexpr uint64_t kHousekeepingPeriodUs = 5LL * 1000 * 1000;
     // connect()'s cfg.pingpong_timeout_sec (Defect 1, Task 9 confirm soak).
-    // Must stay comfortably below DEFAULT_REQUEST_TIMEOUT_MS (60s) so a
+    // Must stay comfortably below kDefaultRequestTimeoutMs (60s) so a
     // silently-dead connection is caught by ping/pong first, not by the
     // slower per-request timeout — see connect()'s comment for the soak
     // evidence (5 separate requests across 3 different methods each sat the
     // full 60s with no disconnect ever observed in between).
-    static constexpr int PING_PONG_TIMEOUT_SEC = 20;
-    static constexpr int64_t SLOW_DISPATCH_LOG_MS = 500;
+    static constexpr int kPingPongTimeoutSec = 20;
+    static constexpr int64_t kSlowDispatchLogMs = 500;
     // Websocket-task only: reported when a connection drops.
     unsigned pongs_this_connection_ = 0;
     /// Last PONG for one of our PINGs (the connect time until the first), read by the
@@ -250,7 +265,7 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     /// A connection with no PONG and no other frame for this long is dead, whatever the
     /// websocket task believes; the client reconnects. Above Moonraker's 25 s pong
     /// timeout, so a link Moonraker gives up on closes before this fires.
-    static constexpr int64_t LINK_DEAD_US = 40LL * 1000 * 1000;
+    static constexpr int64_t kLinkDeadUs = 40LL * 1000 * 1000;
     int64_t connected_us_ = 0;
     // Any frame received (websocket task writes, timer task reads) and the last
     // stall report, for the rx-stall tripwire in process_timeouts().
@@ -261,17 +276,17 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     std::atomic<uint32_t> stale_frames_dropped_{0};
     /// connection_lost callbacks for requests a disconnect failed, delivered by
     /// process_timeouts(); guarded by requests_mutex_.
-    std::vector<std::function<void()>> failed_callbacks_;
-    static constexpr int64_t RX_STALL_LOG_US = 5 * 1000 * 1000;
-    static_assert(PING_PONG_TIMEOUT_SEC * 1000u < DEFAULT_REQUEST_TIMEOUT_MS,
+    std::vector<helix::SharedCallback<void()>> failed_callbacks_;
+    static constexpr int64_t kRxStallLogUs = 5 * 1000 * 1000;
+    static_assert(kPingPongTimeoutSec * 1000u < kDefaultRequestTimeoutMs,
                   "ping/pong must detect a dead link before the per-request timeout fires — "
                   "otherwise silent connection death stalls requests for the full request "
                   "timeout with no disconnect in between (Task 9 confirm-soak defect)");
 
     struct Pending {
         std::string method;
-        std::function<void(const json&)> success_cb;
-        std::function<void(const MoonrakerError&)> error_cb;
+        helix::SharedCallback<void(const json&)> success_cb;
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb;
         int64_t sent_us = 0;
         uint32_t timeout_ms = 0;
         bool silent = false;
@@ -282,6 +297,8 @@ class EspMoonrakerClient final : public IMoonrakerClient {
                                     void* event_data);
     void on_ws_connected();
     void on_ws_disconnected();
+    void on_klippy_notification(const std::string& method);
+    void invoke_connected_callbacks();
     void on_ws_data(const esp_websocket_event_data_t* data);
     void dispatch_message(const char* buf, size_t len);
     // Fan a notify_status_update-shaped message out to the notify callbacks
@@ -317,23 +334,27 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     // (>=0) or negative on failure. Safe to call from any task.
     int send_envelope(const json& envelope);
     RequestId track_and_send(const std::string& method, const json& params,
-                             std::function<void(const json&)> success_cb,
-                             std::function<void(const MoonrakerError&)> error_cb,
+                             helix::SharedCallback<void(const json&)> success_cb,
+                             helix::SharedCallback<void(const MoonrakerError&)> error_cb,
                              uint32_t timeout_ms, bool silent);
     bool is_connected() const;
 
     // --- Discovery chain (Task 7). discover_printer() is the entry point; each
     // step below runs on the websocket_task and threads the shared user callbacks
     // through. Split out of discover_printer for readability. ---
-    using DiscoveryDone = std::shared_ptr<std::function<void()>>;
-    using DiscoveryFail = std::shared_ptr<std::function<void(const std::string&)>>;
+    using DiscoveryDone = std::shared_ptr<helix::SharedCallback<void()>>;
+    using DiscoveryFail = std::shared_ptr<helix::SharedCallback<void(const std::string&)>>;
     // `generation` is the connection_generation_ snapshot captured at
     // discover_printer() entry (R3). Every step re-checks it as the first
     // thing it does; a mismatch means a reconnect landed mid-chain and this
     // continuation abandons in place without touching hardware_,
     // discovery_in_flight_, or the user callbacks.
     void discovery_gate_klippy(DiscoveryDone done, DiscoveryFail fail, uint64_t generation);
-    void discovery_query_objects(DiscoveryDone done, DiscoveryFail fail, uint64_t generation);
+    // `moonraker_version` comes from the gate's server.info reply; it is stored after
+    // parse_objects(), which clears the printer info.
+    void discovery_query_objects(DiscoveryDone done, DiscoveryFail fail, uint64_t generation,
+                                 std::string moonraker_version);
+    void discovery_printer_info(DiscoveryDone done, DiscoveryFail fail, uint64_t generation);
     void discovery_subscribe(DiscoveryDone done, DiscoveryFail fail, uint64_t generation);
     // Emit `ev`, clear discovery_in_flight_, and invoke the error callback once
     // — but only if `generation` still matches (see above).
@@ -355,8 +376,8 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     esp_timer_handle_t housekeeping_timer_ = nullptr;
     std::string url_;
 
-    std::function<void()> on_connected_;
-    std::function<void()> on_disconnected_;
+    helix::SharedCallback<void()> on_connected_;
+    helix::SharedCallback<void()> on_disconnected_;
 
     // Flipped false in the dtor BEFORE esp_websocket_client_stop() so any event
     // still in flight on the WS task early-outs instead of touching torn-down
@@ -427,29 +448,29 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     std::mutex requests_mutex_;
     std::map<uint64_t, Pending> pending_;
     std::atomic<uint64_t> next_request_id_{0};
-    uint32_t default_request_timeout_ms_ = DEFAULT_REQUEST_TIMEOUT_MS;
+    uint32_t default_request_timeout_ms_ = kDefaultRequestTimeoutMs;
     // Feeds cfg.network_timeout_ms only — the transport's per-operation budget,
-    // spent on the websocket task — and is capped at MAX_NETWORK_TIMEOUT_MS on
+    // spent on the websocket task — and is capped at kMaxNetworkTimeoutMs on
     // the way in. MoonrakerManager::configure_timeouts() overwrites this from
     // moonraker_connection_timeout_ms at init, so the value here is only the
     // pre-configuration default. The UI-thread send wait is bounded separately
-    // by SEND_TIMEOUT_MS.
+    // by kSendTimeoutMs.
     uint32_t connection_timeout_ms_ = 10000;
 
     // Callback maps.
     std::mutex callbacks_mutex_;
-    std::map<SubscriptionId, std::function<void(const json&)>> notify_callbacks_;
+    std::map<SubscriptionId, helix::SharedCallback<void(const json&)>> notify_callbacks_;
     std::atomic<uint64_t> next_subscription_id_{0};
-    std::map<std::string, std::map<std::string, std::function<void(const json&)>>>
+    std::map<std::string, std::map<std::string, helix::SharedCallback<void(const json&)>>>
         method_callbacks_;
     // Discovery / bed-mesh callbacks (guarded by callbacks_mutex_). In v1 these
     // pair with the discover_printer stub; Plan 4 drives them from real discovery.
     std::function<void(const helix::PrinterDiscovery&)> on_hardware_discovered_;
     std::function<void(const helix::PrinterDiscovery&, const json&)> on_discovery_complete_;
-    std::function<void(const json&)> bed_mesh_callback_;
+    helix::SharedCallback<void(const json&)> bed_mesh_callback_;
 
     std::mutex observers_mutex_;
-    std::map<std::string, std::function<void()>> connected_observers_;
+    std::map<std::string, helix::SharedCallback<void()>> connected_observers_;
 
     std::mutex event_mutex_;
     MoonrakerEventCallback event_handler_;
@@ -468,6 +489,8 @@ class EspMoonrakerClient final : public IMoonrakerClient {
     // handles the rest: a stale chain's own continuations never reach the
     // code that would touch this flag on the new generation's behalf.
     std::atomic<bool> discovery_in_flight_{false};
+    // Discovery reached its subscription on this connection.
+    std::atomic<bool> discovery_completed_{false};
 
     PrinterDiscovery hardware_; // populated via discovery (guarded by hardware_mutex_)
 };

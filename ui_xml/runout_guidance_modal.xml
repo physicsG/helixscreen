@@ -101,7 +101,7 @@
       <!-- Unload button (wired programmatically by RunoutGuidanceModal::on_show → wire_quaternary_button) -->
       <ui_button name="btn_unload_filament" flex_grow="1" icon="arrow_up" text="Unload"/>
       <!-- Purge button (wired programmatically by RunoutGuidanceModal::on_show → wire_quinary_button) -->
-      <ui_button name="btn_purge" flex_grow="1" icon="filament" text="Purge"/>
+      <ui_button name="btn_purge" flex_grow="1" icon="nozzle" text="Purge"/>
     </lv_obj>
     <!-- CLOSE BUTTON ROW (only when NOT paused - hidden when print_state_enum == 2).
          Close is wired programmatically by RunoutGuidanceModal::on_show → wire_senary_button. -->

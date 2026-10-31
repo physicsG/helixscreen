@@ -2,8 +2,9 @@
 
 > **Source:** `klippy.log` + `moonraker.log` from a community Kobra S1 running a
 > **Python Klipper fork** (not KobraOS), captured 2026-06-24. Logs were taken with
-> the ACE connected but **no print running** — a second capture *with* a print is
-> pending (see [Open Items](#open-items)).
+> the ACE connected but **no print running**. Print-running logs (#1107) and the ACEPRO
+> driver source (#1069) settled what these logs could not; no further capture is needed
+> (see [Open Items](#open-items)).
 >
 > This is a companion to [`ANYCUBIC_KOBRA_COREXY_RESEARCH.md`](ANYCUBIC_KOBRA_COREXY_RESEARCH.md).
 > Where the two disagree, **this file reflects observed log data**; the research doc
@@ -25,9 +26,10 @@ it is a Kobra-S1-specific firmware fork (see [Scope](#scope-fork-specific-vs-por
 
 **Good news for HelixScreen:** the control surface is gcode (`ACE_CHANGE_TOOL`,
 `ACE_ENABLE/DISABLE_FEED_ASSIST`, `T0..T7`), which our backend already emits.
-**Open question:** the *status* surface (`[ace_status]` JSON shape / REST endpoints)
-is unconfirmed and may differ from both `filament_hub` and our assumed
-`/server/ace/*` REST endpoints. That gap is the main integration risk.
+The *status* surface is the `/server/ace/*` REST family plus a manager-shaped `ace`
+object and per-unit `ace_instance_N` objects; see
+[Sample files received](#sample-files-received-1098-2026-07-15). `ams_backend_ace.cpp`
+parses it.
 
 ---
 
@@ -68,11 +70,11 @@ This is why "ACE support" is not one thing. At least three integration surfaces 
 | Platform | Klipper | ACE status surface | Notes |
 |----------|---------|--------------------|-------|
 | **KobraOS / GoKlipper** (stock + Rinkhals) | Go rewrite | native `filament_hub` / `ace` printer object | what [`ams_backend_ace.cpp`](../../../src/printer/ams_backend_ace.cpp) currently parses |
-| **KS1 mainline-Klipper fork** (these logs) | Python fork `klipper-kobra-s1` | custom `[ace_status]` component (shape **TBD**) | KS1-specific macros; external or on-board host |
-| **ValgACE on any Klipper printer** | vanilla Python | its own `ace_status.py` (shape **TBD**) | user supplies cutter/purge macros for their machine |
+| **KS1 mainline-Klipper fork** (these logs) | Python fork `klipper-kobra-s1` | `ace` manager + `ace_instance_N` objects, `/server/ace/*` REST via `[ace_status]` | KS1-specific macros; external or on-board host |
+| **ValgACE on any Klipper printer** | vanilla Python | `ace` object + `/server/ace/*` REST | user supplies cutter/purge macros for their machine |
 
-Whether one backend code path covers all three depends entirely on how similar those
-status surfaces are — currently unknown (see [Open Items](#open-items)).
+One `AmsBackendAce` covers all three: it reads `filament_hub`, `ace` and `ace_instance_N`
+over the WebSocket and falls back to REST (`docs/devel/FILAMENT_BACKEND_ACE.md`).
 
 ---
 
@@ -255,21 +257,13 @@ must support manual SKU assignment**; do not assume RFID populates slots.
 | Master enable detection | ✅ `output_pin ACE_Pro` value gates everything |
 | Slot count / topology | ✅ 4 slots/unit, up to 8 tools |
 | Dryer temp readout | ✅ via `temperature_sensor ace_temp` |
-| Dryer **control** | ❓ no drying command observed in this fork (research doc cites `drying`/`drying_stop` on native protocol) |
-| **Status payload shape** | ❌ **unknown** — `[ace_status]` surface not in logs; may not match `status.filament_hub`/`status.ace` that our backend parses, nor the assumed `/server/ace/*` REST endpoints |
-| Live slot state (loaded/empty/type/color/humidity) | ❌ not in connect-only logs |
-
-**Integration risk = the status surface.** Our backend reads slot state from
-`filament_hub`/`ace` Klipper objects (KobraOS/GoKlipper native). This Python-fork
-setup may instead serve slot state via the custom `[ace_status]` REST/JSON. Until we
-see that shape, we can't confirm `ams_backend_ace.cpp` populates slots on this path.
+| Dryer **control** | ✅ `ACE_START_DRYING TEMP= DURATION=` / `ACE_STOP_DRYING`, confirmed in the ACEPRO source (#1069) |
+| **Status payload shape** | ✅ not in these logs; settled by the #1098 samples and the ACEPRO source (#1069) |
+| Live slot state (loaded/empty/type/color/humidity) | ✅ from `ace_instance_N`; `current_index` on the manager marks the loaded slot. Confirmed on v1.1.0-beta.7 (#1069) |
 
 ---
 
 ## Open Items
-
-> TODO items, highest-value first. The first two beat the pending print log for
-> integration purposes.
 
 - [x] **DONE (via #1098): obtained `moonraker/components/ace_status.py`** — see the
   [Sample files received](#sample-files-received-1098-2026-07-15) section below.
@@ -277,19 +271,15 @@ see that shape, we can't confirm `ams_backend_ace.cpp` populates slots on this p
 - [x] **DONE (via #1098): obtained a populated `saved_variables.cfg`** — sample at
   `kobra-s1-ace-1098/saved_variables.cfg`. Shape differs from what was predicted here;
   see corrections below.
-- [ ] **TODO: print-running log capture** (requested). Will surface: live status-push
-  JSON, real tool-change sequencing/timing, feed-assist behavior under load,
-  error/retry paths, and slicer-driven purge amounts.
-- [ ] **TODO: resolve `rfid` flag semantics** — why `rfid=0` vs `rfid=1` both mean
-  "no tag". Needs the `[ace]`/`ace_status` source or a tagged-spool capture.
-- [ ] **TODO: confirm dryer control path** on this fork (is there a drying gcode/API,
-  or read-only temp?).
-- [ ] **TODO: confirm whether `ams_backend_ace.cpp` actually populates slots** against
-  the `[ace_status]` surface, or needs a new code path for the Python-fork ACE.
-- [ ] **TODO: decide if one backend covers all three ACE platforms** (KobraOS
-  `filament_hub`, this KS1 fork's `[ace_status]`, ValgACE's `ace_status.py`) or whether
-  they need separate parsing — depends on diffing their status surfaces. See
-  [Scope → Three distinct ACE platforms](#three-distinct-ace-platforms-for-helixscreen).
+- [x] **Print-running logs:** #1107 (tool swaps mid-print); the `ace_instance_N`
+  detection fix is `eabeb7eea`.
+- [x] **Dryer control:** `ACE_START_DRYING TEMP= DURATION=` / `ACE_STOP_DRYING`, from
+  the ACEPRO source (#1069).
+- [x] **Slot population and one backend for all three platforms:** `AmsBackendAce`
+  reads every surface; the loaded slot shows correctly on v1.1.0-beta.7 (#1069).
+- [ ] **`rfid` flag semantics:** why `rfid=0` and `rfid=1` both mean "no tag". The
+  backend accepts both forms; the meaning is unexplained. A capture with an RFID-tagged
+  spool settles it - attach one to a [new issue](https://github.com/prestonbrown/helixscreen/issues/new).
 
 ---
 
@@ -315,8 +305,8 @@ The fork's `[ace_status]` Moonraker component is a **proxy**, not a new object m
   remain_time}`, `temp`, `fan_speed`, `enable_rfid`, `slots[]` where each slot =
   `{index, status, type, color[3], sku, rfid}`. **Caveat:** when live, the component
   returns `ace_instance_{N}.get_status()` *verbatim* — the tidy slot struct above is
-  only its *fallback default*, so the real populated field names are still unconfirmed
-  (needs the print-running log or the `[ace]` extra source).
+  only its *fallback default*. The populated fields, from the ACEPRO source (#1069), are
+  `material`/`tool`/`status`/`color`/`rfid`, plus `current_index` on the manager.
 - **Commands:** sanitized gcode via `klippy_apis.run_gcode`, so tool-change and dryer
   control are reachable through the generic `command` endpoint.
 
@@ -335,9 +325,8 @@ Predicted `ace_inventory_0`/`_1` with `{sku, status}` entries. Actual sample:
 Shipped `ams_backend_ace.cpp` fixes for this path (#1069, commit `8a832d87b`): REST
 fallback now engages on the manager-only `ace` object, `/server/ace/info` is optional,
 the slot parser accepts `type` as a `material` alias, and slot-status vocabulary is
-shared between the object and REST paths. **Deferred:** the populated `ace_instance_{N}`
-slot-field mapping, pending a live-print `/server/ace/status` capture (avoids coding
-against the fallback-default struct).
+shared between the object and REST paths. The populated `ace_instance_{N}` slot mapping
+and `current_index` as the loaded-slot signal ship in `c8cbdfdab` (#1069).
 
 ---
 

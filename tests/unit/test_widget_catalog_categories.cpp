@@ -21,7 +21,6 @@
 #include "../test_helpers/config_test_access.h"
 #include "../test_helpers/press_wash_probe.h"
 #include "../test_helpers/process_async_timers.h"
-#include "../test_helpers/scope_exit.h"
 #include "config.h"
 #include "display_settings_manager.h"
 #include "grid_layout.h"
@@ -29,6 +28,7 @@
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
+#include "scope_exit.h"
 
 #include <algorithm>
 #include <array>
@@ -301,7 +301,7 @@ class WidgetCatalogCategoryFixture : public LVGLUITestFixture {
 
     Config config_;
     std::unique_ptr<PanelWidgetConfig> widget_config_;
-    std::array<lv_obj_t*, UI_PANEL_COUNT> root_panels_{};
+    std::array<lv_obj_t*, kUiPanelCount> root_panels_{};
     int close_count_ = 0;
     bool animations_were_enabled_ = true;
     std::vector<std::string> selected_ids_;
@@ -1305,7 +1305,7 @@ TEST_CASE_METHOD(WidgetCatalogCategoryFixture,
     lv_obj_t* results = search_results();
     REQUIRE(results != nullptr);
     const uint32_t base_rows = child_count(results);
-    helix::test::ScopeExit cleanup([] { unregister_runtime_widget_def("rt-search-tile"); });
+    helix::ScopeExit cleanup([] { unregister_runtime_widget_def("rt-search-tile"); });
 
     // The count change alone rebuilds the rows; the search index is the half
     // that can go stale, so the assertions lean on the query, not the count.
@@ -1339,7 +1339,7 @@ TEST_CASE_METHOD(WidgetCatalogCategoryFixture,
 TEST_CASE_METHOD(WidgetCatalogCategoryFixture,
                  "Widget catalog: same-count def changes under it still rebuild",
                  "[widget_catalog][widget_registry]") {
-    helix::test::ScopeExit cleanup([] {
+    helix::ScopeExit cleanup([] {
         unregister_runtime_widget_def("rt-swap-a");
         unregister_runtime_widget_def("rt-swap-b");
     });
@@ -1389,7 +1389,7 @@ TEST_CASE_METHOD(WidgetCatalogCategoryFixture,
     RuntimeWidgetDef d = make_runtime_def("rt-span-tile", "Span Tile");
     d.colspan = 2;
     d.rowspan = 2;
-    helix::test::ScopeExit cleanup([] { unregister_runtime_widget_def("rt-span-tile"); });
+    helix::ScopeExit cleanup([] { unregister_runtime_widget_def("rt-span-tile"); });
     REQUIRE(register_runtime_widget_def(d));
     open_catalog();
     build_search_rows();
@@ -1427,7 +1427,7 @@ TEST_CASE_METHOD(WidgetCatalogCategoryFixture,
     // resolves as a const reference and the label comes up blank.
     RuntimeWidgetDef d = make_runtime_def("rt-hash-tile", "#1 Hash Tile");
     d.description = "#tag description";
-    helix::test::ScopeExit cleanup([] { unregister_runtime_widget_def("rt-hash-tile"); });
+    helix::ScopeExit cleanup([] { unregister_runtime_widget_def("rt-hash-tile"); });
     REQUIRE(register_runtime_widget_def(d));
     open_catalog();
     build_search_rows();

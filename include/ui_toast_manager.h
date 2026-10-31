@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <string>
 
@@ -32,7 +33,7 @@ typedef void (*toast_action_callback_t)(void* user_data);
  *
  * Stacks multiple simultaneous toasts in the top-right of the screen. Each
  * toast owns its own dismiss timer and action callback so the stack can
- * dismiss in any order. The stack height is capped at MAX_VISIBLE to protect
+ * dismiss in any order. The stack height is capped at kMaxVisible to protect
  * small screens — overflow silently drops the oldest toast (no queueing).
  */
 class ToastManager {
@@ -72,19 +73,63 @@ class ToastManager {
     /**
      * Show a toast with an action button. Each toast has its own callback, so
      * multiple action toasts can coexist in the stack.
+     *
+     * @p duration_ms of 0 means the toast never auto-dismisses, as for
+     * show_with_detail(): it stays until its button or close button is tapped.
+     *
+     * @p user_closed_callback runs when the user closes this toast with its X
+     * button, with @p user_data — a decision to decline the action, unlike
+     * hide(), the dismiss timer or stack eviction, which say nothing. Runs on
+     * the main thread once the widget is removed.
      */
     void show_with_action(ToastSeverity severity, const char* message, const char* action_text,
                           toast_action_callback_t action_callback, void* user_data,
-                          uint32_t duration_ms = 5000);
+                          uint32_t duration_ms = 5000,
+                          toast_action_callback_t user_closed_callback = nullptr);
 
     /** Dismiss all currently visible toasts (animated). */
     void hide();
+
+    /** Dismiss only the action toasts whose button runs @p action_callback on
+     *  @p user_data (animated): the pair show_with_action() was given. For a
+     *  sticky toast whose question was answered somewhere else. */
+    void hide(toast_action_callback_t action_callback, void* user_data);
 
     /** Deinit LVGL resources; safe to call before lv_deinit. */
     void deinit_subjects();
 
     /** True if at least one toast is visible. */
     bool is_visible() const;
+
+    /**
+     * What one show*() or hide(action) call asked for, reported on the calling
+     * thread before the toast is queued or looked up.
+     */
+    struct Event {
+        enum class Kind {
+            Show,      ///< show(), show_with_detail() or show_with_action()
+            HideAction ///< hide(action_callback, user_data)
+        };
+        Kind kind = Kind::Show;
+        ToastSeverity severity = ToastSeverity::INFO;
+        std::string message;
+        std::string detail;
+        uint32_t duration_ms = 0;
+        toast_action_callback_t action_cb = nullptr;
+        void* action_user_data = nullptr;
+        toast_action_callback_t user_closed_cb = nullptr;
+    };
+
+    /** Install the one observer every Event goes to; an empty function removes
+     *  it. The test binary reads what code under test asked to show through it.
+     *  Not synchronized: install it before the calls it should see. */
+    void set_observer(std::function<void(const Event&)> observer) {
+        observer_ = std::move(observer);
+    }
+
+    /** Before init(), queue @p text for the drain that follows init() and
+     *  return true; after it, return false and queue nothing. Thread-safe. */
+    bool defer_until_initialized(ToastSeverity severity, const char* text, uint32_t duration_ms);
 
     /** Whether init() has completed. Callers before phase 9d should route
      *  through PendingStartupWarnings — see ui_notification.cpp. Atomic
@@ -102,6 +147,8 @@ class ToastManager {
         lv_timer_t* dismiss_timer = nullptr;
         toast_action_callback_t action_cb = nullptr;
         void* action_user_data = nullptr;
+        toast_action_callback_t user_closed_cb = nullptr;
+        bool closed_by_user = false;
         bool is_exiting = false;
         ToastSeverity severity = ToastSeverity::INFO;
         std::string message; // for dedupe of rapid identical toasts
@@ -111,7 +158,9 @@ class ToastManager {
     void create_toast_internal(ToastSeverity severity, const char* message, const char* detail,
                                uint32_t duration_ms, bool with_action,
                                toast_action_callback_t action_cb, void* action_user_data,
-                               const char* action_text);
+                               const char* action_text, toast_action_callback_t user_closed_cb);
+    /** The X button's removal: a user decision, unlike hide() or a timer. */
+    void user_close_toast(ToastList::iterator it);
     void ensure_stack_container();
     ToastList::iterator find_by_widget(lv_obj_t* widget);
     /** If a non-exiting toast with identical severity+message is visible,
@@ -120,17 +169,7 @@ class ToastManager {
      *  flapping sensor re-raising one notice) otherwise stack N identical
      *  widgets. An action toast only folds into one whose button runs the
      *  same callback on the same user_data: two toasts with one message but
-     *  different targets are two questions, and merging them would drop one.
-     *
-     *  Defined inline (header-only): mk/tests.mk excludes
-     *  ui_toast_manager.o from the test build and tests/ui_test_utils.cpp
-     *  supplies a stub ToastManager for the rest of the class, so an
-     *  out-of-line definition here would need a second copy in the stub —
-     *  and the unit test would end up exercising that copy, not this one.
-     *  Keeping the one real implementation in the header means both the
-     *  app binary and the test binary link the same code; only LVGL's
-     *  lv_timer_reset() is needed, which is available in both. Do not
-     *  move this back to ui_toast_manager.cpp or add a stub override. */
+     *  different targets are two questions, and merging them would drop one. */
     bool refresh_duplicate(ToastSeverity severity, const char* message,
                            toast_action_callback_t action_cb = nullptr,
                            void* action_user_data = nullptr) {
@@ -153,14 +192,7 @@ class ToastManager {
      *  of a widget in active_. Returns active_.end() when the node lives
      *  outside every registered toast — the safe no-op answer for event
      *  callbacks that can fire after their toast's list entry is gone
-     *  (deinit_subjects runs on printer switches, not only before lv_deinit).
-     *
-     *  Defined inline for the same reason as refresh_duplicate() above:
-     *  mk/tests.mk excludes ui_toast_manager.o from the test build and
-     *  tests/ui_test_utils.cpp stubs the class, so an out-of-line definition
-     *  would never be linked into helix-tests and the unit tests would
-     *  exercise a stub, not the real walk. Depends only on lvgl.h; do not
-     *  move it to ui_toast_manager.cpp or add includes here. */
+     *  (deinit_subjects runs on printer switches, not only before lv_deinit). */
     ToastList::iterator find_owning_toast(lv_obj_t* node) {
         while (node) {
             for (auto it = active_.begin(); it != active_.end(); ++it) {
@@ -172,6 +204,7 @@ class ToastManager {
         return active_.end();
     }
     void begin_exit(ToastList::iterator it);
+    template <typename Pred> void hide_where(Pred pred);
     void force_remove(ToastList::iterator it); // no animation
     void finalize_remove(lv_obj_t* widget);    // called from exit-anim completion
 
@@ -192,12 +225,13 @@ class ToastManager {
     static void action_btn_clicked(lv_event_t* e);
 
     // Hard cap — further bounded at first show_by screen height.
-    static constexpr size_t MAX_VISIBLE = 5;
+    static constexpr size_t kMaxVisible = 5;
 
     lv_obj_t* toast_stack_ = nullptr;
     ToastList active_;
-    size_t max_visible_ = MAX_VISIBLE;
+    size_t max_visible_ = kMaxVisible;
     std::atomic<bool> initialized_{false};
+    std::function<void(const Event&)> observer_;
 
     friend class ToastManagerTestAccess;
 };
@@ -224,8 +258,7 @@ namespace notifications {
  *
  * Honours the user's minimum toast severity, and drops the toast before
  * ToastManager::init() since there is no history row to fall back on.
- * Main thread only. Inline so the test binary runs this code against its
- * ToastManager stub.
+ * Main thread only.
  */
 inline void show_transient_success(const char* text, uint32_t duration_ms) {
     auto& toasts = ToastManager::instance();

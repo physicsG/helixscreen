@@ -2,9 +2,11 @@
 
 #pragma once
 
+#include "file_version.h"
+#include "versioned_lru.h"
+
 #include <cstdint>
 #include <ctime>
-#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -23,35 +25,34 @@ class ToolsUsedCache {
 
     /// nullopt = miss / stale / malformed. An EMPTY set is a legitimate
     /// cached value (single-extruder file) and is returned as such.
-    std::optional<std::set<int>> lookup(const std::string& file_path, uint64_t size_bytes,
-                                        time_t modified);
+    std::optional<std::set<int>> lookup(const std::string& file_path, FileVersion version);
 
     /// Persist an entry (also compacts when over MAX_ENTRIES — drop
     /// least-recently-LOOKED-UP first). Writes through to disk immediately;
     /// a failed write logs a warning and keeps the in-memory entry.
-    void store(const std::string& file_path, uint64_t size_bytes, time_t modified,
-               const std::set<int>& tools);
+    void store(const std::string& file_path, FileVersion version, const std::set<int>& tools);
 
     static constexpr size_t MAX_ENTRIES = 256;
 
-    /// Test seam + cheap explicit reset. Not needed in production flow.
+    /// Drop the in-memory copy; the next use reads the file again. Not needed
+    /// in production flow: tests reset the shared instance with it when they
+    /// point the cache directory elsewhere.
     void invalidate() {
         entries_.clear();
+        loaded_ = false;
     }
 
   private:
-    struct Entry {
-        uint64_t size_bytes = 0;
-        time_t modified = 0;
-        std::set<int> tools;
-        uint64_t last_used_ctr = 0; // higher = more recent
-    };
     bool load_from_disk();
     void save_to_disk();
 
-    std::map<std::string, Entry> entries_;
-    uint64_t next_ctr_ = 1;
+    VersionedLru<std::set<int>> entries_;
     bool loaded_ = false;
 };
+
+/// The one cache every reader and writer shares: the file view's chips and a
+/// queued start's facts. One instance, because each saves its whole map, so a
+/// second would drop the first's entries and lose its lookup recency.
+ToolsUsedCache& tools_used_cache();
 
 } // namespace helix

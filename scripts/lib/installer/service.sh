@@ -68,7 +68,25 @@ _has_no_new_privs() {
 # resolve_chroot_daemon_dir). Use the in-chroot one when we have it.
 _set_init_script_daemon_dir() {
     _daemon_dir="${HELIX_CHROOT_DAEMON_DIR:-$INSTALL_DIR}"
-    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${_daemon_dir}\"|" "$INIT_SCRIPT_DEST"
+    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"$(_init_assignment_value "$_daemon_dir")\"|" "$INIT_SCRIPT_DEST"
+    _set_init_script_pd_helix "$INIT_SCRIPT_DEST"
+}
+
+# Record where user config lives in an init script, beside DAEMON_DIR, so
+# restore-user-config.sh finds it after a web update has removed the install
+# dir. An init script without the line (an older copy) is left untouched.
+# Args: $1 = init script path
+_set_init_script_pd_helix() {
+    grep -q '^HELIX_PD_HELIX=' "$1" 2>/dev/null || return 0
+    _sed_inplace "s|^HELIX_PD_HELIX=.*|HELIX_PD_HELIX=\"$(_init_assignment_value "$(helix_pd_helix_dir)")\"|" "$1"
+}
+
+# A value for the inside of a double-quoted assignment in an init script and
+# the replacement half of a sed command: the shell's own specials are escaped
+# first, then sed's.
+# Args: $1 = value
+_init_assignment_value() {
+    sed_escape_replacement "$(printf '%s' "$1" | sed 's/[\\"$`]/\\&/g')"
 }
 
 # Remove a HOST-side init script this install superseded. The payload's own
@@ -107,13 +125,29 @@ remove_superseded_host_init() {
     return 0
 }
 
+_init_script_has_stale_hooks_path() {
+    grep -q 'assets/config/platform/hooks\.sh' "$1" 2>/dev/null
+}
+
 _migrate_init_script_hooks_path() {
     local init_script="${INIT_SCRIPT_DEST:-}"
     [ -n "$init_script" ] && [ -f "$init_script" ] || return 0
-    if grep -q 'assets/config/platform/hooks\.sh' "$init_script" 2>/dev/null; then
+    if _init_script_has_stale_hooks_path "$init_script"; then
         log_info "Migrating stale PLATFORM_HOOKS path in $init_script"
         _sed_inplace 's|assets/config/platform/hooks\.sh|platform/hooks.sh|' "$init_script"
     fi
+}
+
+# True when this run writes the SysV init script: a fresh install, a
+# self-update with no script installed, or a self-update whose
+# install_service_sysv edits the installed script (a root migration
+# repointing DAEMON_DIR, or the stale hooks path). Any other self-update
+# leaves the script exactly as it is.
+_self_update_needs_service_write() {
+    _is_self_update || return 0
+    [ -n "${INIT_SCRIPT_DEST:-}" ] && [ -f "$INIT_SCRIPT_DEST" ] || return 0
+    [ -z "${MIGRATE_FROM_DIR:-}" ] || return 0
+    _init_script_has_stale_hooks_path "$INIT_SCRIPT_DEST"
 }
 
 # Install service (dispatcher)
@@ -163,19 +197,35 @@ is_rc_common_script() {
     esac
 }
 
+# True when the rc.d link $1 points at $2. Silent; a missing link is false.
+_rcd_link_points_at() {
+    [ "$($SUDO readlink "$1" 2>/dev/null || true)" = "$2" ]
+}
+
 # Verify one rc.d boot link points where rc.common's `enable` puts it. A
 # mismatch — including a missing link — is a failed boot entry; the caller
 # has already run `enable`, so the manual fix is to run it again by hand.
 _verify_rcd_link() {
     local link="$1" expected="$2" script="$3"
-    local actual
-    actual="$($SUDO readlink "$link" 2>/dev/null || true)"
-    if [ "$actual" != "$expected" ]; then
-        log_error "$link -> '$actual' (expected '$expected')"
+    if ! _rcd_link_points_at "$link" "$expected"; then
+        log_error "$link -> '$($SUDO readlink "$link" 2>/dev/null || true)' (expected '$expected')"
         log_error "The rc.d boot entry is incomplete; Manual fix: $SUDO $script enable"
         return 1
     fi
     return 0
+}
+
+# True when rc.d already holds exactly the boot links `enable` makes for
+# <name>: S<start>, plus K<stop> when STOP is declared, each pointing at
+# ../init.d/<name>, and no other S??/K?? entry for the name.
+_rcd_links_current() {
+    local name="$1" start="$2" stop="$3" entries
+    # Expanded as root for the same reason as enable_and_verify_rcd's rm.
+    entries="$($SUDO sh -c "for f in /etc/rc.d/S??\"$name\" /etc/rc.d/K??\"$name\"; do
+        if [ -e \"\$f\" ] || [ -L \"\$f\" ]; then printf '%s ' \"\$f\"; fi; done" 2>/dev/null)"
+    [ "${entries% }" = "/etc/rc.d/S${start}${name}${stop:+ /etc/rc.d/K${stop}${name}}" ] || return 1
+    _rcd_link_points_at "/etc/rc.d/S${start}${name}" "../init.d/$name" || return 1
+    [ -z "$stop" ] || _rcd_link_points_at "/etc/rc.d/K${stop}${name}" "../init.d/$name"
 }
 
 # The START=/STOP= slot a script declares, as bare digits; prints it and
@@ -243,6 +293,13 @@ enable_and_verify_rcd() {
         stop=""
     fi
 
+    # Rewriting links that already verify gains nothing, and on a full or
+    # read-only overlay the remove can succeed where `enable` then fails.
+    if _rcd_links_current "$name" "$start" "$stop"; then
+        log_info "$name: rc.d boot links already current (S${start}${name}${stop:+ K${stop}${name}})"
+        return 0
+    fi
+
     # The glob must expand as root: an unprivileged shell cannot read
     # /etc/rc.d, the pattern would reach rm literally, and rm -f on the
     # literal name removes nothing without a sound.
@@ -288,9 +345,23 @@ install_procd_shim_k2() {
         return 1
     fi
 
-    log_info "Installing K2 procd boot shim..."
-    $SUDO cp "$shim_src" "$shim_dest"
-    $SUDO chmod +x "$shim_dest"
+    # The shim sits on the root overlay, which may be full: copy beside it and
+    # rename over it, so a failed write never truncates a working boot entry.
+    if [ -f "$shim_dest" ] && cmp -s "$shim_src" "$shim_dest"; then
+        log_info "K2 procd boot shim already current"
+    else
+        log_info "Installing K2 procd boot shim..."
+        local shim_tmp="${shim_dest}.new.$$"
+        if ! { $SUDO cp "$shim_src" "$shim_tmp" 2>/dev/null && $SUDO chmod +x "$shim_tmp" \
+               && $SUDO mv -f "$shim_tmp" "$shim_dest"; }; then
+            $SUDO rm -f "$shim_tmp" 2>/dev/null || true
+            if [ ! -f "$shim_dest" ]; then
+                log_error "Could not write the K2 procd shim to $shim_dest"
+                return 1
+            fi
+            log_warn "Could not write the K2 procd shim (filesystem full or read-only); the existing $shim_dest is kept"
+        fi
+    fi
 
     # Drop any rc.d entry an older install left, then verify the fresh pair.
     enable_and_verify_rcd "$shim_dest" || return 1
@@ -394,7 +465,8 @@ install_service_snapmaker_u1() {
         exit 1
     fi
     chmod +x "$init_script"
-    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"${INSTALL_DIR}\"|" "$init_script"
+    _sed_inplace "s|DAEMON_DIR=.*|DAEMON_DIR=\"$(_init_assignment_value "$INSTALL_DIR")\"|" "$init_script"
+    _set_init_script_pd_helix "$init_script"
 
     # --- Patch S99screen to delegate to helixscreen.init on boot ---
     if [ -f "${INSTALL_DIR}/scripts/snapmaker-u1-setup-autostart.sh" ]; then
@@ -462,6 +534,7 @@ install_service_systemd() {
 
     _sed_inplace "s|@@HELIX_USER@@|${helix_user}|g" "$service_dest"
     _sed_inplace "s|@@HELIX_GROUP@@|${helix_group}|g" "$service_dest"
+    _sed_inplace "s|@@HELIX_PD_HELIX@@|$(sed_escape_replacement "$(helix_pd_helix_dir)")|g" "$service_dest"
     _template_install_paths "$service_dest"
 
     if ! run_logged $SUDO systemctl daemon-reload; then
@@ -815,6 +888,13 @@ deploy_platform_hooks() {
     mkdir -p "${install_dir}/platform" 2>/dev/null || $SUDO mkdir -p "${install_dir}/platform" 2>/dev/null || true
     cp "$hooks_src" "${install_dir}/platform/hooks.sh" 2>/dev/null || $SUDO cp "$hooks_src" "${install_dir}/platform/hooks.sh" 2>/dev/null || true
     chmod +x "${install_dir}/platform/hooks.sh" 2>/dev/null || $SUDO chmod +x "${install_dir}/platform/hooks.sh" 2>/dev/null || true
+
+    # Record the key so refresh-service-units.sh can re-deploy the hooks after
+    # a Moonraker web update removes platform/. Written to the install dir and
+    # relocated into printer_data with the other user config files.
+    if [ -d "${install_dir}/config" ]; then
+        printf '%s\n' "$platform" | $(file_sudo "${install_dir}/config") tee "${install_dir}/config/.platform_hook" >/dev/null 2>&1 || true
+    fi
 
     # Every copy above is non-fatal, so success has to be observed rather than
     # assumed. A missing hooks.sh leaves each platform_* function the no-op stub

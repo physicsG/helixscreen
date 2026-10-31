@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "platform_info.h"
 
+#include "board_identity.h"
+
 #include <spdlog/spdlog.h>
 
 #include <fstream>
@@ -35,11 +37,7 @@ bool platform_defaults_to_external_updates() {
     if (s_external_updates_default_override >= 0) {
         return s_external_updates_default_override != 0;
     }
-#ifdef HELIX_PLATFORM_SNAPMAKER_U1
-    return true;
-#else
-    return false;
-#endif
+    return board::current_info().firmware_manages_updates;
 }
 
 void set_external_updates_default_override(int override_value) {
@@ -57,13 +55,7 @@ bool is_printer_embedded() {
     if (s_printer_embedded_override >= 0) {
         return s_printer_embedded_override != 0;
     }
-#if defined(HELIX_PLATFORM_AD5M) || defined(HELIX_PLATFORM_AD5X) || defined(HELIX_PLATFORM_K1) ||  \
-    defined(HELIX_PLATFORM_CC1) || defined(HELIX_PLATFORM_SNAPMAKER_U1) ||                         \
-    defined(HELIX_PLATFORM_K2) || defined(HELIX_PLATFORM_MIPS)
-    return true;
-#else
-    return false;
-#endif
+    return board::current() != board::Board::Generic;
 }
 
 void set_printer_embedded_override(int override_value) {
@@ -84,14 +76,19 @@ static std::string rooted(const std::string& probe_root, const char* abs_path) {
     return root + abs_path;
 }
 
-bool ad5x_mod_layout_present(const std::string& probe_root, const char** flavor_out) {
-    auto found = [&](const char* flavor) {
-        if (flavor_out != nullptr) {
-            *flavor_out = flavor;
-        }
-        return true;
-    };
+const char* flashforge_mod_tree_name(FlashForgeModTree tree) {
+    switch (tree) {
+    case FlashForgeModTree::Zmod:
+        return "ZMOD";
+    case FlashForgeModTree::ForgeX:
+        return "Forge-X"; // i18n: do not translate
+    case FlashForgeModTree::None:
+        break;
+    }
+    return "none";
+}
 
+FlashForgeModTree flashforge_mod_tree(const std::string& probe_root) {
     // ZMOD hosts carry FlashForge's /usr/prog dir or the /ZMOD marker file. A
     // Forge-X chroot has neither — and not even /usr/data, which the chroot
     // binds at /opt — but the mod's git tree stays reachable, and
@@ -101,15 +98,15 @@ bool ad5x_mod_layout_present(const std::string& probe_root, const char** flavor_
     struct ::stat st {};
     if ((::stat(rooted(probe_root, "/ZMOD").c_str(), &st) == 0 && S_ISREG(st.st_mode)) ||
         (::stat(rooted(probe_root, "/usr/prog").c_str(), &st) == 0 && S_ISDIR(st.st_mode))) {
-        return found("ZMOD");
+        return FlashForgeModTree::Zmod;
     }
     for (const char* mod_tree : {"/opt/config/mod", "/usr/data/config/mod"}) {
         const std::string probe = rooted(probe_root, mod_tree) + "/.shell/platform.sh";
         if (::stat(probe.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
-            return found("Forge-X");
+            return FlashForgeModTree::ForgeX;
         }
     }
-    return false;
+    return FlashForgeModTree::None;
 }
 
 namespace {

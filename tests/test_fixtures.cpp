@@ -3,18 +3,21 @@
 
 #include "test_fixtures.h"
 
-#include "ui_afc_fault_path.h"
 #include "ui_button.h"
 #include "ui_card.h"
 #include "ui_dialog.h"
+#include "ui_fault_path.h"
+#include "ui_humidity_drop.h"
 #include "ui_icon.h"
 #include "ui_progress_bar.h"
+#include "ui_swatch.h"
 #include "ui_switch.h"
 #include "ui_temp_display.h"
 #include "ui_text.h"
 #include "ui_text_input.h"
 #include "ui_tile_rung.h"
 
+#include "app_globals.h"
 #include "material_settings_manager.h"
 #include "preset_materials.h"
 #include "spdlog/spdlog.h"
@@ -127,6 +130,11 @@ XMLTestFixture::XMLTestFixture() : LVGLTestFixture() {
     // pointers for the duration of this test.
     m_state.init_subjects(true);
 
+    // The app's global subjects (home_edit_mode, platform gates, ...) are live before
+    // any XML is built. A fixture that tore them down leaves the names registered
+    // against deinitialized subjects, which refuse the bindings built here.
+    app_globals_init_subjects();
+
     // Quick-preset material subjects (preset_material_N_name/_temps). The
     // filament panel, all three temp panels, the temp graph overlay and the PID
     // panel bind these by name, so any XML test that builds one needs them
@@ -199,14 +207,16 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     lv_xml_register_component_from_file("A:ui_xml/styles.xml");
 
     // 4. Register custom widgets (must be done before loading components that use them)
-    helix::ui::icon::register_widget();      // icon component
-    helix::ui::register_tile_rung_binding(); // <bind_tile_rung>
-    ui_text_init();                          // text_heading, text_body, text_small, text_xs
-    ui_text_input_init();                    // text_input (textarea with bind_text support)
-    ui_button_init();                        // ui_button with bind_icon support
-    ui_progress_bar_init();                  // progress_bar (print progress, preview card)
-    ui_card_register();                      // ui_card
-    ui_temp_display_init();                  // temp_display
+    helix::ui::icon::register_widget();         // icon component
+    helix::ui::register_humidity_drop_widget(); // humidity_drop
+    helix::ui::register_tile_rung_binding();    // <bind_tile_rung>
+    helix::ui::register_swatch_paint_widget();  // <swatch_paint>, inside color_swatch
+    ui_text_init();                             // text_heading, text_body, text_small, text_xs
+    ui_text_input_init();                       // text_input (textarea with bind_text support)
+    ui_button_init();                           // ui_button with bind_icon support
+    ui_progress_bar_init();                     // progress_bar (print progress, preview card)
+    ui_card_register();                         // ui_card
+    ui_temp_display_init();                     // temp_display
 
     // 5. Register no-op callbacks for event handlers in XML components
     lv_xml_register_event_cb(nullptr, "", xml_test_noop_event_callback);
@@ -219,7 +229,7 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     lv_xml_register_component_from_file("A:ui_xml/overlay_panel.xml");
     lv_xml_register_component_from_file("A:ui_xml/components/nozzle_icon.xml");
 
-    // The heater status area rides inside controls_panel, temp_card_unified and
+    // The heater status area rides inside controls_panel and
     // temp_graph_overlay; an unregistered instance silently vanishes from the
     // tree and only the surrounding row renders.
     lv_xml_register_component_from_file("A:ui_xml/components/heater_status.xml");
@@ -262,10 +272,10 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     lv_xml_register_component_from_file("A:ui_xml/macro_param_modal.xml");
     lv_xml_register_component_from_file("A:ui_xml/form_field.xml");
 
-    // <afc_fault_path> + the afc_fault_segment subject it binds. Embedded by
+    // <fault_path> + the fault_path_segment subject it binds. Embedded by
     // ams_loading_error_modal.xml and action_prompt_modal.xml, both of which
     // tests register directly (#1184).
-    helix::ui::afc_fault_path_register();
+    helix::ui::fault_path_register();
 
     // <context_menu_backdrop> is the root every context menu extends, so it has
     // to exist before a test registers any of them.
@@ -273,6 +283,10 @@ void XMLTestFixture::setup_global_xml_registrations_once() {
     // <context_menu_card> is the card they all nest inside it, so it has to be
     // here for the same reason.
     lv_xml_register_component_from_file("A:ui_xml/components/context_menu_card.xml");
+    // The rows plugin menu items add to any context menu.
+    lv_xml_register_component_from_file("A:ui_xml/components/plugin_menu_heading.xml");
+    lv_xml_register_component_from_file("A:ui_xml/components/plugin_menu_row.xml");
+    lv_xml_register_component_from_file("A:ui_xml/components/plugin_menu_empty.xml");
 
     s_global_registered = true;
 }
@@ -303,19 +317,3 @@ lv_obj_t* XMLTestFixture::create_component(const char* component_name, const cha
     }
     return obj;
 }
-
-// ============================================================================
-// Stubs for application globals used by display_manager.cpp
-// ============================================================================
-// These stubs provide test-safe no-op implementations of app_globals functions
-// that are referenced by display_manager.cpp but not needed in unit tests.
-
-void app_request_quit() {
-    // No-op for tests - display manager calls this on window close
-    spdlog::debug("[TestStub] app_request_quit() called - no-op in tests");
-}
-
-// NOTE: helix_notify_app_backgrounded() / helix_notify_app_foregrounded() used to be
-// stubbed here because application.o was excluded from the test link. It no longer is
-// (see mk/tests.mk), so the real implementations are linked and these stubs are gone —
-// they would be duplicate definitions. Both real functions only flip an atomic and log.

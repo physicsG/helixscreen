@@ -38,16 +38,16 @@ namespace helix {
 
 // Default cache directory - will be overridden by ThumbnailCache when it initializes.
 // This is just a fallback for early initialization before ThumbnailCache runs.
-static constexpr const char* DEFAULT_CACHE_DIR = "/tmp/helix_thumbs";
+static constexpr const char* kDefaultCacheDir = "/tmp/helix_thumbs";
 
 // Thread pool configuration
-static constexpr int MIN_WORKER_THREADS = 1;
-static constexpr int MAX_WORKER_THREADS = 2; // Don't starve UI thread on single-core
+static constexpr int kMinWorkerThreads = 1;
+static constexpr int kMaxWorkerThreads = 2; // Don't starve UI thread on single-core
 
 // Safety limits to prevent memory exhaustion and integer overflow
-static constexpr size_t MAX_PNG_INPUT_SIZE = 10 * 1024 * 1024; // 10 MB compressed
-static constexpr int MAX_SOURCE_DIMENSION = THUMBNAIL_MAX_SOURCE_DIMENSION;
-static constexpr int MAX_OUTPUT_DIMENSION = 1024; // 1K max output
+static constexpr size_t kMaxPngInputSize = 10 * 1024 * 1024; // 10 MB compressed
+static constexpr int kMaxSourceDimension = kThumbnailMaxSourceDimension;
+static constexpr int kMaxOutputDimension = 1024; // 1K max output
 
 // ============================================================================
 // Singleton
@@ -59,10 +59,10 @@ ThumbnailProcessor& ThumbnailProcessor::instance() {
 }
 
 ThumbnailProcessor::ThumbnailProcessor()
-    : thread_pool_(std::make_shared<HThreadPool>(MIN_WORKER_THREADS, MAX_WORKER_THREADS)),
+    : thread_pool_(std::make_shared<HThreadPool>(kMinWorkerThreads, kMaxWorkerThreads)),
       cache_dir_(get_helix_cache_dir("helix_thumbs")) {
     if (cache_dir_.empty()) {
-        cache_dir_ = DEFAULT_CACHE_DIR; // last-resort; ThumbnailCache re-points later
+        cache_dir_ = kDefaultCacheDir; // last-resort; ThumbnailCache re-points later
     }
     // Ensure cache directory exists
     try {
@@ -72,9 +72,9 @@ ThumbnailProcessor::ThumbnailProcessor()
     }
 
     // Start thread pool
-    thread_pool_->start(MIN_WORKER_THREADS);
+    thread_pool_->start(kMinWorkerThreads);
     spdlog::debug("[ThumbnailProcessor] Initialized with {} worker threads, cache: {}",
-                  MIN_WORKER_THREADS, cache_dir_);
+                  kMinWorkerThreads, cache_dir_);
 }
 
 ThumbnailProcessor::~ThumbnailProcessor() {
@@ -391,9 +391,9 @@ ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::
     }
 
     // Safety check: reject excessively large PNG files
-    if (png_data.size() > MAX_PNG_INPUT_SIZE) {
+    if (png_data.size() > kMaxPngInputSize) {
         result.error = "PNG too large (" + std::to_string(png_data.size() / 1024 / 1024) +
-                       " MB, max " + std::to_string(MAX_PNG_INPUT_SIZE / 1024 / 1024) + " MB)";
+                       " MB, max " + std::to_string(kMaxPngInputSize / 1024 / 1024) + " MB)";
         return result;
     }
 
@@ -427,10 +427,10 @@ ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::
         result.error = std::string("Failed to read PNG header: ") + stbi_failure_reason();
         return result;
     }
-    if (src_width > MAX_SOURCE_DIMENSION || src_height > MAX_SOURCE_DIMENSION) {
+    if (src_width > kMaxSourceDimension || src_height > kMaxSourceDimension) {
         result.error = "Source image too large (" + std::to_string(src_width) + "x" +
-                       std::to_string(src_height) + ", max " +
-                       std::to_string(MAX_SOURCE_DIMENSION) + ")";
+                       std::to_string(src_height) + ", max " + std::to_string(kMaxSourceDimension) +
+                       ")";
         return result;
     }
 
@@ -466,8 +466,8 @@ ThumbnailProcessor::do_process(const std::vector<uint8_t>& png_data, const std::
     out_height = std::max(out_height, 1);
 
     // Clamp output dimensions to prevent integer overflow in buffer allocation
-    out_width = std::min(out_width, MAX_OUTPUT_DIMENSION);
-    out_height = std::min(out_height, MAX_OUTPUT_DIMENSION);
+    out_width = std::min(out_width, kMaxOutputDimension);
+    out_height = std::min(out_height, kMaxOutputDimension);
 
     spdlog::trace("[ThumbnailProcessor] Scaling {}x{} -> {}x{} (scale: {:.2f})", src_width,
                   src_height, out_width, out_height, scale);

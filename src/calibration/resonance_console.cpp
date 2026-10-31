@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 namespace helix::calibration {
 
@@ -32,6 +33,62 @@ void query_resonance_tester_config(IMoonrakerClient& client,
         },
         [on_done](const MoonrakerError&) { on_done(ResonanceTesterConfig{}); });
 }
+
+namespace {
+
+/// "x, y, z" from the first non-empty line of a probe_points string.
+std::optional<std::array<float, 3>> parse_probe_point_text(std::string_view text) {
+    std::string_view line;
+    for (const std::string_view candidate : text_io::lines(text)) {
+        line = text_io::trim(candidate);
+        if (!line.empty()) {
+            break;
+        }
+    }
+    std::array<float, 3> point{};
+    size_t filled = 0;
+    for (const std::string_view field : text_io::lines(line, ',')) {
+        if (filled == point.size()) {
+            break;
+        }
+        const auto value = text_io::parse_leading<float>(field);
+        if (!value) {
+            return std::nullopt;
+        }
+        point[filled++] = *value;
+    }
+    if (filled < point.size()) {
+        return std::nullopt;
+    }
+    return point;
+}
+
+/// The first point of configfile's probe_points: [[x, y, z], ...] or a string.
+std::optional<std::array<float, 3>> parse_probe_point(const nlohmann::json& value) {
+    if (value.is_string()) {
+        return parse_probe_point_text(value.get_ref<const std::string&>());
+    }
+    if (!value.is_array() || value.empty()) {
+        return std::nullopt;
+    }
+    const auto& first = value[0];
+    if (first.is_string()) {
+        return parse_probe_point_text(first.get_ref<const std::string&>());
+    }
+    if (!first.is_array() || first.size() != 3) {
+        return std::nullopt;
+    }
+    std::array<float, 3> point{};
+    for (size_t i = 0; i < point.size(); ++i) {
+        if (!first[i].is_number()) {
+            return std::nullopt;
+        }
+        point[i] = first[i].get<float>();
+    }
+    return point;
+}
+
+} // namespace
 
 ResonanceTesterConfig parse_resonance_tester_config(const nlohmann::json& settings) {
     ResonanceTesterConfig cfg;
@@ -67,6 +124,19 @@ ResonanceTesterConfig parse_resonance_tester_config(const nlohmann::json& settin
     cfg.max_freq = *max_freq;
     cfg.hz_per_sec = *hz_per_sec;
     cfg.from_printer = true;
+    if (const auto pp = rt->find("probe_points"); pp != rt->end()) {
+        cfg.probe_point = parse_probe_point(*pp);
+    }
+    auto read_chip = [&rt](const char* key) -> std::string {
+        const auto it = rt->find(key);
+        if (it == rt->end() || !it->is_string()) {
+            return {};
+        }
+        return std::string(text_io::trim(it->get_ref<const std::string&>()));
+    };
+    cfg.accel_chip = read_chip("accel_chip");
+    cfg.accel_chip_x = read_chip("accel_chip_x");
+    cfg.accel_chip_y = read_chip("accel_chip_y");
     return cfg;
 }
 

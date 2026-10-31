@@ -3,11 +3,15 @@
 
 #pragma once
 
+#include "error_event.h"
+#include "firmware_error_envelope.h"
 #include "format_utils.h"
 #include "json_fwd.h"
 #include "translation_loader.h"
 
+#include <optional>
 #include <string>
+#include <string_view>
 
 /**
  * @brief Error types for Moonraker operations
@@ -177,53 +181,72 @@ struct MoonrakerError {
      *
      * Klipper errors often arrive as Python dict repr strings like:
      *   {'error': 'WebRequestError', 'message': 'Must home axis first'}
-     * This extracts just the 'message' value for user-friendly display.
+     * This extracts just the 'message' value for user-friendly display, then
+     * replaces any firmware JSON error envelope in it with the envelope's
+     * message (firmware_error_envelope.h).
      */
     static std::string extract_friendly_message(const std::string& raw) {
-        // Look for 'message': '...' pattern (Python dict repr with single quotes)
-        static constexpr const char* key = "'message': '";
-        auto pos = raw.find(key);
-        if (pos != std::string::npos) {
-            auto start = pos + std::char_traits<char>::length(key);
-            auto end = raw.find('\'', start);
-            if (end != std::string::npos && end > start) {
-                return raw.substr(start, end - start);
-            }
+        return helix::decode_firmware_error_text(extract_message_field(raw));
+    }
+
+    /// extract_friendly_message() of an error line that may still carry its
+    /// `!!` / `Error:` prefixes (`!! Error: foo`), with them and the
+    /// whitespace after each removed.
+    static std::string friendly_error_line(const std::string& raw) {
+        std::string text = raw;
+        for (auto parsed = helix::parse_gcode_error_line(text);
+             parsed.prefix != helix::GcodeErrorPrefix::None;
+             parsed = helix::parse_gcode_error_line(text)) {
+            text = std::move(parsed.text);
+            const auto start = text.find_first_not_of(" \t");
+            text.erase(0, start == std::string::npos ? text.size() : start);
         }
-        // Also handle "message": "..." (JSON with double quotes)
-        static constexpr const char* key2 = "\"message\": \"";
-        pos = raw.find(key2);
-        if (pos == std::string::npos) {
-            static constexpr const char* key3 = "\"message\":\"";
-            pos = raw.find(key3);
-            if (pos != std::string::npos) {
-                auto start = pos + std::char_traits<char>::length(key3);
-                auto end = raw.find('"', start);
-                if (end != std::string::npos && end > start) {
-                    return raw.substr(start, end - start);
-                }
-            }
-        } else {
-            auto start = pos + std::char_traits<char>::length(key2);
-            auto end = raw.find('"', start);
-            if (end != std::string::npos && end > start) {
-                return raw.substr(start, end - start);
-            }
-        }
-        // Creality/Klipper key-error envelope uses "msg" instead of "message":
-        //   {"code":"keyNNN","msg":"...","values":[...]}
-        // Checked last so an explicit "message" is preferred when both exist.
-        for (const char* msg_key : {"\"msg\": \"", "\"msg\":\""}) {
-            pos = raw.find(msg_key);
-            if (pos != std::string::npos) {
-                auto start = pos + std::char_traits<char>::length(msg_key);
-                auto end = raw.find('"', start);
-                if (end != std::string::npos && end > start) {
-                    return raw.substr(start, end - start);
-                }
+        return extract_friendly_message(text);
+    }
+
+    /// The 'message' value of a Python-repr or JSON error dict, or `raw`.
+    static std::string extract_message_field(const std::string& raw) {
+        // Python dict repr with single quotes, then JSON with and without a space.
+        for (const char* key : {"'message': '", "\"message\": \"", "\"message\":\""}) {
+            if (auto value = quoted_value_after(raw, key)) {
+                return std::move(*value);
             }
         }
         return raw;
+    }
+
+    /// The non-empty quoted value right after `key` in `raw`, which ends with
+    /// the opening quote. A backslash escapes the next character, so an
+    /// escaped quote or backslash is kept as the character itself and any
+    /// other escape is kept verbatim. nullopt when `key` is absent or the
+    /// value is empty or unterminated.
+    static std::optional<std::string> quoted_value_after(const std::string& raw, const char* key) {
+        const auto pos = raw.find(key);
+        if (pos == std::string::npos) {
+            return std::nullopt;
+        }
+        const std::string_view k(key);
+        const char quote = k.back();
+        std::string value;
+        for (size_t i = pos + k.size(); i < raw.size(); ++i) {
+            const char c = raw[i];
+            if (c == quote) {
+                if (value.empty()) {
+                    return std::nullopt;
+                }
+                return value;
+            }
+            if (c == '\\' && i + 1 < raw.size()) {
+                const char next = raw[++i];
+                if (next != quote && next != '\\') {
+                    value += c;
+                }
+                value += next;
+                continue;
+            }
+            value += c;
+        }
+        return std::nullopt;
     }
 
     /**
@@ -408,7 +431,9 @@ struct MoonrakerError {
         MoonrakerError err;
         err.type = MoonrakerErrorType::JSON_RPC_ERROR;
         err.method = method;
-        err.message = message;
+        // Callers hand over raw `!!` lines, which can carry a firmware envelope;
+        // decoded the way from_json_rpc() decodes Moonraker's message.
+        err.message = extract_friendly_message(message);
         err.details = details;
         return err;
     }

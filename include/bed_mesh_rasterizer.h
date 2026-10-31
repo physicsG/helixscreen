@@ -17,7 +17,7 @@ namespace helix {
 namespace mesh {
 
 /// Default opacity for mesh triangle surfaces (100% - fully opaque)
-constexpr lv_opa_t MESH_TRIANGLE_OPACITY = LV_OPA_COVER;
+constexpr lv_opa_t kMeshTriangleOpacity = LV_OPA_COVER;
 
 class PixelBuffer;
 
@@ -29,10 +29,10 @@ class PixelBuffer;
  * @param x2, y2 Second vertex coordinates
  * @param x3, y3 Third vertex coordinates
  * @param color Fill color (r/g/b extracted from lv_color_t)
- * @param opacity Fill opacity (default: MESH_TRIANGLE_OPACITY)
+ * @param opacity Fill opacity (default: kMeshTriangleOpacity)
  */
 void fill_triangle_solid(PixelBuffer& buf, int x1, int y1, int x2, int y2, int x3, int y3,
-                         lv_color_t color, lv_opa_t opacity = MESH_TRIANGLE_OPACITY);
+                         lv_color_t color, lv_opa_t opacity = kMeshTriangleOpacity);
 
 /**
  * @brief Fill triangle with per-vertex color gradient into a pixel buffer
@@ -41,11 +41,11 @@ void fill_triangle_solid(PixelBuffer& buf, int x1, int y1, int x2, int y2, int x
  * @param x1, y1, c1 First vertex position and color
  * @param x2, y2, c2 Second vertex position and color
  * @param x3, y3, c3 Third vertex position and color
- * @param opacity Fill opacity (default: MESH_TRIANGLE_OPACITY)
+ * @param opacity Fill opacity (default: kMeshTriangleOpacity)
  */
 void fill_triangle_gradient(PixelBuffer& buf, int x1, int y1, lv_color_t c1, int x2, int y2,
                             lv_color_t c2, int x3, int y3, lv_color_t c3,
-                            lv_opa_t opacity = MESH_TRIANGLE_OPACITY);
+                            lv_opa_t opacity = kMeshTriangleOpacity);
 
 } // namespace mesh
 } // namespace helix

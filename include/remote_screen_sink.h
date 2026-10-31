@@ -69,6 +69,10 @@ struct RemoteScreenFrame {
     uint32_t src_stride = 0; ///< Bytes per row of `px_map`.
     RemoteScreenPixelFormat src_format =
         RemoteScreenPixelFormat::Unknown; ///< Pixel layout of px_map.
+    /// The last dirty area of this refresh (`lv_display_flush_is_last`). A partial-mode
+    /// refresh arrives as a run of stripes, and only after the last one is the
+    /// mirrored screen whole.
+    bool last_in_refresh = true;
 };
 
 /**

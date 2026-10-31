@@ -28,16 +28,47 @@ constexpr size_t kMaxStorageBytes = 256 * 1024;
 constexpr size_t kMaxSettingString = 1024;
 constexpr size_t kMaxInflightHttp = 2;
 
-/// Delay between a storage change and its write. A burst of sets in one entry, or
-/// across a few, costs one write, and the write never runs inside a Lua entry.
+/// Delay between a change and its write. A burst of sets in one entry, or across a
+/// few, costs one write, and the write never runs inside a Lua entry.
 constexpr uint32_t kStorageFlushMs = 500;
+
+/// A write that waits for a one-shot timer instead of running in the call that asked
+/// for it: the write fsyncs, which on a busy SD card can block for seconds.
+struct DeferredWrite {
+    std::function<void()> write;
+    bool dirty = false;
+    helix::ui::LvglTimerGuard timer; ///< armed while dirty
+};
+
+void flush_now(DeferredWrite& w) {
+    w.timer.reset();
+    if (!w.dirty)
+        return;
+    w.dirty = false;
+    w.write();
+}
+
+void on_deferred_write_timer(lv_timer_t* timer) {
+    auto* w = static_cast<DeferredWrite*>(lv_timer_get_user_data(timer));
+    w->timer.release(); // LVGL deletes this one-shot after the callback returns
+    flush_now(*w);
+}
+
+void schedule_write(DeferredWrite& w) {
+    w.dirty = true;
+    if (!w.timer.get()) {
+        lv_timer_t* t = lv_timer_create(&on_deferred_write_timer, kStorageFlushMs, &w);
+        lv_timer_set_repeat_count(t, 1);
+        w.timer.reset(t);
+    }
+}
 
 struct IoState {
     std::optional<json> storage; ///< loaded on first use
     std::string storage_path;
     std::string plugin_id;
-    bool storage_dirty = false;
-    helix::ui::LvglTimerGuard flush_timer; ///< armed while storage_dirty
+    DeferredWrite storage_write;
+    DeferredWrite settings_write;
     std::unordered_map<std::string, std::vector<int>> on_change;
     /// Shared with the backend's reply closures, which can outlive the runtime and run on a
     /// worker thread; the count they decrement must survive with them.
@@ -164,24 +195,15 @@ int storage_get(lua_State* L) {
     return 1;
 }
 
-void flush_storage(IoState& st) {
-    st.flush_timer.reset();
-    if (!st.storage_dirty)
-        return;
-    st.storage_dirty = false;
+void write_storage(const IoState& st) {
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(st.storage_path).parent_path(), ec);
     if (!helix::text_io::write_file_atomic(st.storage_path, st.storage->dump()))
         spdlog::warn("[plugin {}] cannot write storage {}", st.plugin_id, st.storage_path);
 }
 
-void on_storage_flush_timer(lv_timer_t* timer) {
-    auto* st = static_cast<IoState*>(lv_timer_get_user_data(timer));
-    st->flush_timer.release(); // LVGL deletes this one-shot after the callback returns
-    flush_storage(*st);
-}
-
 int storage_set(lua_State* L) {
+    forbid_in_check(L, "helix.storage.set");
     require_permission(L, Permission::Storage, "helix.storage.set");
     if (context(L).storage_path.empty())
         return luaL_error(L, "helix.storage: no storage path for this plugin");
@@ -197,15 +219,7 @@ int storage_set(lua_State* L) {
         return luaL_error(L, "helix.storage.set: storage would exceed 256 KB");
 
     storage_of(L) = std::move(next);
-    // The write fsyncs, which on a busy SD card can block for seconds, so it runs
-    // from a timer, outside any Lua entry and its budget.
-    auto& st = io_state(L);
-    st.storage_dirty = true;
-    if (!st.flush_timer.get()) {
-        lv_timer_t* t = lv_timer_create(&on_storage_flush_timer, kStorageFlushMs, &st);
-        lv_timer_set_repeat_count(t, 1);
-        st.flush_timer.reset(t);
-    }
+    schedule_write(io_state(L).storage_write);
     return 0;
 }
 
@@ -249,6 +263,7 @@ int settings_get(lua_State* L) {
 }
 
 int settings_on_change(lua_State* L) {
+    forbid_in_check(L, "helix.settings.on_change");
     auto& ctx = context(L);
     std::string key = luaL_checkstring(L, 1);
     if (!find_decl(ctx.manifest, key))
@@ -260,6 +275,7 @@ int settings_on_change(lua_State* L) {
 }
 
 int settings_set(lua_State* L) {
+    forbid_in_check(L, "helix.settings.set");
     auto& ctx = context(L);
     std::string key = luaL_checkstring(L, 1);
     const SettingDecl* d = find_decl(ctx.manifest, key);
@@ -296,9 +312,16 @@ bool set_plugin_setting(PluginContext& ctx, const std::string& key, const json& 
     const SettingDecl* d = find_decl(ctx.manifest, key);
     if (!d || !fits(*d, value))
         return false;
+    // Restating the stored value is no change: nothing to write, nothing to tell a handler
+    // that would otherwise set it back and recurse.
+    if (auto stored = ctx.settings->find(key); stored != ctx.settings->end() && *stored == value)
+        return true;
     (*ctx.settings)[key] = value;
-    ctx.save_settings();
-    auto& handlers = io_state(ctx.rt.state()).on_change;
+    IoState& io = io_state(ctx.rt.state());
+    schedule_write(io.settings_write);
+    if (ctx.setting_changed)
+        ctx.setting_changed(key, value);
+    auto& handlers = io.on_change;
     if (auto it = handlers.find(key); it != handlers.end()) {
         // A handler may register another handler for this key mid-notification, which
         // reallocates the vector this loop would otherwise read. A handler registered
@@ -322,8 +345,11 @@ void install_io_bindings(PluginContext& ctx) {
     lua_pushlightuserdata(L, state);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &kIoStateKey);
     // Unload and app shutdown both close the runtime, so a pending change is written here.
+    state->storage_write.write = [state] { write_storage(*state); };
+    state->settings_write.write = [&ctx] { ctx.save_settings(); };
     ctx.rt.on_close([state] {
-        flush_storage(*state);
+        flush_now(state->storage_write);
+        flush_now(state->settings_write);
         delete state;
     });
 

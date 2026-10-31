@@ -1,6 +1,7 @@
 set_wizard_cancel_callback
 reset_discovery_session
 queue_freeze.emplace
+AmsState::instance().before_disconnect()
 ->disconnect()
 SoundManager::instance().set_moonraker_client(nullptr
 set_moonraker_manager(nullptr)
@@ -16,7 +17,7 @@ upgrade_banner.shutdown()
 UpdateChecker::instance().shutdown()
 TelemetryManager::instance().shutdown()
 CrashHistory::instance().shutdown()
-AfcMessageDedup::instance().shutdown()
+AmsBackend::shutdown_persistent_state()
 SoundManager::instance().shutdown()
 PostOpCooldownManager::instance().shutdown()
 "notify_filelist_changed"
@@ -38,6 +39,7 @@ AmsState::instance().clear_backends()
 update_queue_shutdown()
 LedAutoState::instance().deinit()
 LedController::instance().deinit()
+abandon_queued_job_start()
 lv_anim_delete_all()
 m_panels.reset()
 m_subjects.reset()
@@ -47,7 +49,7 @@ FilamentConsumptionTracker::instance().stop()
 destroy_panels()
 ui_notification_deinit()
 deinit_active_print_media_manager()
-StaticSubjectRegistry::instance().deinit_all()
+StaticSubjectRegistry::instance().deinit_all(
 destroy_panels()
 m_job_queue_state.reset()
 CjkFontManager::instance().shutdown()

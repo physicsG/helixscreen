@@ -1,0 +1,453 @@
+{
+  "buckets": {
+    "fans": [
+      "output_pin exhaust_fan",
+      "output_pin fan_light",
+      "output_pin led_fan",
+      "temperature_fan exhaust",
+      "heater_fan hotend_fan",
+      "controller_fan board",
+      "fan_generic aux",
+      "fan"
+    ],
+    "filament_sensor_names": [
+      "filament_switch_sensor runout",
+      "filament_motion_sensor encoder"
+    ],
+    "has_accelerometer": false,
+    "has_fan_feedback": true,
+    "has_filament_sensors": true,
+    "has_led": true,
+    "has_led_effects": true,
+    "has_probe": true,
+    "has_speaker": true,
+    "has_width_sensors": true,
+    "heaters": [
+      "extruder",
+      "heater_bed",
+      "heater_generic chamber_heater"
+    ],
+    "leds": [
+      "neopixel",
+      "dotstar",
+      "neopixel strip"
+    ],
+    "load_cells": [
+      "load_cell scale"
+    ],
+    "printer_objects": [
+      "extruder",
+      "heater_bed",
+      "output_pin exhaust_fan",
+      "output_pin fan_light",
+      "output_pin led_fan",
+      "output_pin beeper",
+      "neopixel",
+      "dotstar",
+      "neopixel strip",
+      "aht20_f heater_box1",
+      "bme280 enclosure",
+      "temperature_sensor extruder_board",
+      "heater_generic chamber_heater",
+      "temperature_fan exhaust",
+      "tmc2240 stepper_x",
+      "mcu",
+      "mcu toolhead",
+      "zmod_ifs_switch_sensor head",
+      "filament_switch_sensor runout",
+      "filament_motion_sensor encoder",
+      "hall_filament_width_sensor",
+      "load_cell scale",
+      "probe",
+      "bltouch",
+      "beacon",
+      "cartographer",
+      "probe_eddy_current btt",
+      "gcode_button door",
+      "power_loss_check",
+      "led_effect rainbow",
+      "fan_feedback",
+      "heater_fan hotend_fan",
+      "controller_fan board",
+      "fan_generic aux",
+      "fan"
+    ],
+    "sensors": [
+      "aht20_f heater_box1",
+      "bme280 enclosure",
+      "temperature_sensor extruder_board",
+      "temperature_fan exhaust",
+      "tmc2240 stepper_x"
+    ],
+    "width_sensor_objects": [
+      "hall_filament_width_sensor"
+    ]
+  },
+  "managers": {
+    "accel": {
+      "count": 0,
+      "entries": []
+    },
+    "filament": {
+      "count": 2,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "filament_switch_sensor runout",
+          "role": "runout",
+          "sensor_name": "runout",
+          "type": "switch"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "filament_motion_sensor encoder",
+          "role": "none",
+          "sensor_name": "encoder",
+          "type": "motion"
+        }
+      ]
+    },
+    "humidity": {
+      "count": 2,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "aht20_f heater_box1",
+          "role": "none",
+          "sensor_name": "heater_box1",
+          "type": "aht20_f"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "bme280 enclosure",
+          "role": "none",
+          "sensor_name": "enclosure",
+          "type": "bme280"
+        }
+      ]
+    },
+    "input": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "gcode_button door",
+          "role": "door",
+          "sensor_name": "door",
+          "type": "gcode_button"
+        }
+      ]
+    },
+    "load_cell": {
+      "count": 1,
+      "entries": [
+        {
+          "klipper_name": "load_cell scale",
+          "role": "spool_weight",
+          "sensor_name": "scale",
+          "type": ""
+        }
+      ]
+    },
+    "probe": {
+      "count": 3,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "bltouch",
+          "role": "none",
+          "sensor_name": "bltouch",
+          "type": "bltouch"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "beacon",
+          "role": "none",
+          "sensor_name": "beacon",
+          "type": "beacon"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "cartographer",
+          "role": "none",
+          "sensor_name": "cartographer",
+          "type": "cartographer"
+        }
+      ]
+    },
+    "temperature": {
+      "count": 6,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "aht20_f heater_box1",
+          "role": "auxiliary",
+          "sensor_name": "heater_box1",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "bme280 enclosure",
+          "role": "auxiliary",
+          "sensor_name": "enclosure",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "temperature_sensor extruder_board",
+          "role": "auxiliary",
+          "sensor_name": "extruder_board",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "heater_generic chamber_heater",
+          "role": "chamber",
+          "sensor_name": "chamber_heater",
+          "type": "heater_generic"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "temperature_fan exhaust",
+          "role": "auxiliary",
+          "sensor_name": "exhaust",
+          "type": "temperature_fan"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "tmc2240 stepper_x",
+          "role": "stepper_driver",
+          "sensor_name": "stepper_x",
+          "type": "temperature_sensor"
+        }
+      ]
+    },
+    "width": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "hall_filament_width_sensor",
+          "role": "flow_compensation",
+          "sensor_name": "hall",
+          "type": "hall"
+        }
+      ]
+    }
+  },
+  "subscriptions": {
+    "aht20_f heater_box1": [
+      "temperature",
+      "humidity"
+    ],
+    "beacon": [
+      "last_z_result",
+      "z_offset"
+    ],
+    "bed_mesh": [
+      "profile_name",
+      "probed_matrix",
+      "mesh_min",
+      "mesh_max",
+      "mesh_params",
+      "profiles"
+    ],
+    "bltouch": [
+      "last_query",
+      "last_z_result",
+      "z_offset"
+    ],
+    "bme280 enclosure": [
+      "temperature",
+      "humidity"
+    ],
+    "controller_fan board": [
+      "speed"
+    ],
+    "display_status": [
+      "message",
+      "progress"
+    ],
+    "dotstar": [
+      "color_data"
+    ],
+    "exclude_object": [
+      "objects",
+      "excluded_objects",
+      "current_object"
+    ],
+    "extruder": [
+      "temperature",
+      "target",
+      "power",
+      "pressure_advance",
+      "nozzle_diameter",
+      "nozzle_volume_type"
+    ],
+    "fan": [
+      "speed"
+    ],
+    "fan_feedback": [
+      "fan0_speed",
+      "fan1_speed",
+      "fan2_speed",
+      "fan3_speed",
+      "fan4_speed",
+      "fan5_speed",
+      "fan6_speed",
+      "fan7_speed",
+      "fan8_speed",
+      "fan9_speed"
+    ],
+    "fan_generic aux": [
+      "speed"
+    ],
+    "filament_motion_sensor encoder": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "filament_switch_sensor runout": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "gcode_button door": [
+      "state"
+    ],
+    "gcode_macro START_PRINT": [
+      "preparation_done"
+    ],
+    "gcode_macro _HELIX_STATE": [
+      "print_started"
+    ],
+    "gcode_macro _START_PRINT": [
+      "print_started"
+    ],
+    "gcode_move": [
+      "gcode_position",
+      "speed",
+      "speed_factor",
+      "extrude_factor",
+      "homing_origin"
+    ],
+    "hall_filament_width_sensor": [
+      "Diameter",
+      "Raw"
+    ],
+    "heater_bed": [
+      "temperature",
+      "target",
+      "power"
+    ],
+    "heater_fan hotend_fan": [
+      "speed"
+    ],
+    "heater_generic chamber_heater": [
+      "temperature",
+      "target",
+      "power"
+    ],
+    "idle_timeout": [
+      "state"
+    ],
+    "led_effect rainbow": [
+      "enabled"
+    ],
+    "load_cell scale": [
+      "force_g"
+    ],
+    "manual_probe": [
+      "is_active",
+      "z_position"
+    ],
+    "mcu": [
+      "last_stats"
+    ],
+    "mcu toolhead": [
+      "last_stats"
+    ],
+    "motion_report": [
+      "live_position",
+      "live_velocity",
+      "live_extruder_velocity"
+    ],
+    "neopixel": [
+      "color_data"
+    ],
+    "neopixel strip": [
+      "color_data"
+    ],
+    "output_pin exhaust_fan": [
+      "value"
+    ],
+    "output_pin fan_light": [
+      "value"
+    ],
+    "output_pin led_fan": [
+      "value"
+    ],
+    "pause_resume": [
+      "is_paused"
+    ],
+    "power_loss_check": null,
+    "print_stats": [
+      "state",
+      "filename",
+      "filament_used",
+      "print_duration",
+      "total_duration",
+      "estimated_time",
+      "info",
+      "message",
+      "power_loss"
+    ],
+    "probe": [
+      "last_query",
+      "last_z_result",
+      "z_offset"
+    ],
+    "stepper_enable": [
+      "steppers"
+    ],
+    "temperature_fan exhaust": [
+      "temperature",
+      "target",
+      "speed"
+    ],
+    "temperature_sensor extruder_board": [
+      "temperature",
+      "humidity"
+    ],
+    "tmc2240 stepper_x": [
+      "temperature",
+      "humidity"
+    ],
+    "toolhead": [
+      "position",
+      "homed_axes",
+      "kinematics",
+      "extruder",
+      "max_velocity",
+      "axis_minimum",
+      "axis_maximum"
+    ],
+    "virtual_sdcard": [
+      "progress",
+      "layer",
+      "layer_count",
+      "is_active",
+      "file_position",
+      "file_path"
+    ],
+    "webhooks": [
+      "state",
+      "state_message"
+    ],
+    "zmod_ifs_switch_sensor head": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ]
+  }
+}

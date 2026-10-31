@@ -78,7 +78,7 @@ namespace {
 
 /// Gcode the tier-3 load fallback must contain. execute_gcode() annotates the
 /// script, so tests match on a substring rather than the whole string.
-constexpr const char* LOAD_FALLBACK_MARKER = "G1 E56";
+constexpr const char* kLoadFallbackMarker = "G1 E56";
 
 class DispatchSurfaceFixture : public LVGLTestFixture {
   public:
@@ -141,7 +141,7 @@ class DispatchSurfaceFixture : public LVGLTestFixture {
     ///
     /// reset() alone does not produce that state. It clears detected_macro only;
     /// configured_macro and fallback_macro survive it by design, and
-    /// FALLBACK_MACROS seeds UnloadFilament with HELIX_UNLOAD_FILAMENT in the
+    /// kFallbackMacros seeds UnloadFilament with HELIX_UNLOAD_FILAMENT in the
     /// constructor. A fresh singleton therefore reaches the unload cases with the
     /// slot already non-empty, plan_unload() answers Macro instead of RawGcode,
     /// and the raw-gcode assertion fails. It only passed because an earlier test
@@ -225,7 +225,7 @@ class DispatchSurfaceFixture : public LVGLTestFixture {
     MacroExecuteCallback pending_execute;
 
   private:
-    IMoonrakerAPI* previous_api_ = nullptr;
+    helix::IMoonrakerAPI* previous_api_ = nullptr;
 };
 
 } // namespace
@@ -314,7 +314,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
     sidebar.handle_load_with_preheat(0);
 
     CHECK(prompt_count == 0);
-    CHECK(gcode_sent_containing(LOAD_FALLBACK_MARKER));
+    CHECK(gcode_sent_containing(kLoadFallbackMarker));
 }
 
 TEST_CASE_METHOD(DispatchSurfaceFixture,
@@ -445,7 +445,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     CHECK(prompt_count == 0);
-    CHECK(gcode_sent_containing(LOAD_FALLBACK_MARKER));
+    CHECK(gcode_sent_containing(kLoadFallbackMarker));
 }
 
 // -----------------------------------------------------------------------------
@@ -744,7 +744,7 @@ TEST_CASE("nozzle_temp_prefill knows nothing with the heater off and no material
 TEST_CASE_METHOD(DispatchSurfaceFixture,
                  "A macro whose every parameter is known runs with those values and no prompt",
                  "[filament][dispatch][wiring][params][prefill]") {
-    cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
 
     bool ran = false;
     MacroParamResult seen;
@@ -785,7 +785,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
 TEST_CASE_METHOD(DispatchSurfaceFixture,
                  "With nothing known a params-taking macro prompts with nothing prefilled",
                  "[filament][dispatch][wiring][params][prefill]") {
-    cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
 
     bool ran = false;
     const bool prompted = helix::ui::dispatch_filament_macro(
@@ -818,7 +818,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
                  "Sidebar load sends the live nozzle target to a temperature-only macro",
                  "[filament][dispatch][wiring][ams][prefill]") {
     configure_filament_macros();
-    cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     set_extruder_target(260.0);
 
     AmsOperationSidebar sidebar(state);
@@ -871,7 +871,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
                  "Sidebar load with the heater off sends the lane's material temperature",
                  "[filament][dispatch][wiring][ams][prefill]") {
     configure_filament_macros();
-    cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     set_extruder_target(0.0);
     AmsScope ams(std::make_unique<helix::test::LaneMaterialBackend>(/*lane=*/1, 240));
 
@@ -887,7 +887,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
                  "Sidebar load never sends a live target below the extrusion minimum",
                  "[filament][dispatch][wiring][ams][prefill]") {
     configure_filament_macros();
-    cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     auto limits = api->get_safety_limits();
     limits.min_extrude_temp_celsius = 180.0;
     api->set_safety_limits(limits);
@@ -908,7 +908,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
                  "Sidebar load never sends a material temperature above the hotend's maximum",
                  "[filament][dispatch][wiring][ams][prefill]") {
     configure_filament_macros();
-    cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     auto limits = api->get_safety_limits();
     limits.set_max_temp_for("extruder", 280.0);
     api->set_safety_limits(limits);
@@ -926,10 +926,10 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
 }
 
 TEST_CASE_METHOD(DispatchSurfaceFixture,
-                 "Sidebar unload with no printer connection offers its macro no temperature",
+                 "Sidebar unload with no printer connection raises no macro prompt",
                  "[filament][dispatch][wiring][ams][prefill]") {
-    // Unload dispatches its macro inline, so its prefill is read with no printer
-    // connection to take the extrusion limits from.
+    // With no printer to send it to, the shared ladder refuses the macro before
+    // asking for its parameters.
     configure_filament_macros();
     cache_macros({{"UNLOAD_FILAMENT",
                    "{% set t = params.TEMP|default(200)|int %}\nM109 S{t}\nG1 E-60 F600"}});
@@ -940,8 +940,7 @@ TEST_CASE_METHOD(DispatchSurfaceFixture,
     AmsOperationSidebar sidebar(state);
     sidebar.handle_unload(1);
 
-    CHECK(prompt_count == 1);
-    CHECK(prompted_prefill.empty());
+    CHECK(prompt_count == 0);
 }
 
 // -----------------------------------------------------------------------------

@@ -3,7 +3,6 @@
 
 #include "ui_clog_bar.h"
 
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "clog_meter_geometry.h"
@@ -47,11 +46,6 @@ UiClogBar::UiClogBar(lv_obj_t* parent) {
 }
 
 UiClogBar::~UiClogBar() {
-    // Freeze the queue around teardown so a background enqueue cannot land
-    // between the drain and the observer resets, the same way UiClogMeter does.
-    auto freeze = UpdateQueue::instance().scoped_freeze();
-    UpdateQueue::instance().drain();
-
     helix::ui::remove_event_cb_if_alive(track_, on_track_size_changed, this);
 
     // Before the widget pointers below are cleared: its callback calls

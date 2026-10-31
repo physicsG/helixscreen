@@ -27,10 +27,26 @@ enum class LayoutType {
 /// threshold that sizes overlays from ever disagreeing.
 LayoutType detect_layout_type(int width, int height);
 
+/// The ultrawide test: wider than 2.5:1. detect_layout_type() applies it after
+/// the micro/tiny classes; callers that size things from raw dimensions before
+/// LayoutManager exists apply it through here too, so the threshold has one home.
+bool is_ultrawide_aspect(int width, int height);
+
 /// True for every portrait class, i.e. every geometry whose navigation bar is
 /// the horizontal bottom strip ui_xml/navigation_bar.xml builds when
 /// ui_is_portrait is 1.
 bool is_portrait_layout(LayoutType type);
+
+/// The app's layout type: LayoutManager's answer once it is initialized, so a
+/// --layout override is respected (#1255), and the physical classification of
+/// @p width x @p height before then (early startup, tests).
+LayoutType app_layout_type(int width, int height);
+
+/// Whether the app is laid out in portrait: LayoutManager's answer once it is
+/// initialized, so a --layout override is respected (#1255), and the physical
+/// classification of @p width x @p height before then (early startup, tests).
+/// The value ui_is_portrait publishes, for C++ that decides placement itself.
+bool app_layout_is_portrait(int width, int height);
 
 class LayoutManager {
   public:

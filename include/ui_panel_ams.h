@@ -9,16 +9,17 @@
 #include "ui_ams_loading_error_modal.h"
 #include "ui_ams_selector_menu.h"
 #include "ui_ams_sidebar.h"
-#include "ui_ams_toolhead_menu.h"
 #include "ui_bypass_spool_widget.h"
 #include "ui_observer_guard.h"
 #include "ui_panel_base.h"
 
+#include "ams_standing_fault.h"
 #include "ams_state.h"
 #include "ams_types.h" // For SlotInfo
 #include "async_lifetime_guard.h"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -68,7 +69,7 @@ class AmsPanel : public PanelBase {
      * @param printer_state Reference to global helix::PrinterState
      * @param api Pointer to IMoonrakerAPI (may be nullptr)
      */
-    AmsPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    AmsPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
     ~AmsPanel() override;
 
     // === PanelBase Interface ===
@@ -156,17 +157,15 @@ class AmsPanel : public PanelBase {
 
     // === Slot Management ===
 
-    static constexpr int MAX_VISIBLE_SLOTS =
-        16; ///< Max slots displayed (increased for 8+ gate systems)
-    lv_obj_t* slot_widgets_[MAX_VISIBLE_SLOTS] = {nullptr};
-    lv_obj_t* label_widgets_[MAX_VISIBLE_SLOTS] = {nullptr}; ///< Separate label layer for z-order
-    AmsDetailWidgets detail_widgets_;                        ///< Shared component widget pointers
+    static constexpr int kMaxVisibleSlots = kAmsDetailMaxSlots; ///< Max slots displayed
+    lv_obj_t* slot_widgets_[kMaxVisibleSlots] = {nullptr};
+    lv_obj_t* label_widgets_[kMaxVisibleSlots] = {nullptr}; ///< Separate label layer for z-order
+    AmsDetailWidgets detail_widgets_;                       ///< Shared component widget pointers
 
     // === Extracted UI Modules ===
 
     std::unique_ptr<helix::ui::AmsContextMenu> context_menu_;      ///< Slot context menu
     std::unique_ptr<helix::ui::AmsSelectorMenu> selector_menu_;    ///< Selector/hub context menu
-    std::unique_ptr<helix::ui::AmsToolheadMenu> toolhead_menu_;    ///< Per-nozzle context menu
     std::unique_ptr<helix::ui::AmsLoadingErrorModal> error_modal_; ///< Loading error modal
     std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;      ///< Shared sidebar component
 
@@ -288,6 +287,7 @@ class AmsPanel : public PanelBase {
     // === Path Canvas Callbacks ===
 
     static void on_path_slot_clicked(int slot_index, void* user_data);
+    static void on_path_toolhead_clicked(int slot_index, void* user_data);
     static void on_path_hub_clicked_thunk(lv_point_t click_pt, void* user_data);
     static void on_bypass_spool_clicked(void* user_data);
 
@@ -297,16 +297,6 @@ class AmsPanel : public PanelBase {
      * Opens the Happy Hare selector context menu (selector-only backends).
      */
     void on_path_hub_clicked(lv_point_t click_pt);
-
-    /**
-     * @brief Nozzle tap on a PARALLEL canvas: open the per-toolhead menu.
-     *
-     * Mount/park is a carriage question, not a lane one, so it gets its own
-     * menu instead of the per-slot one. @p tool_index is the tool number on the
-     * badge under the nozzle; helix::ui::show_toolhead_menu_at_touch() does the
-     * rest.
-     */
-    static void on_path_toolhead_clicked(int tool_index, void* user_data);
 
     /**
      * @brief Handle click on bypass spool box in path canvas
@@ -381,3 +371,50 @@ AmsPanel* get_existing_ams_panel();
  * Call this when the panel is closed to free memory on embedded systems.
  */
 void destroy_ams_panel_ui();
+
+namespace helix::ui {
+
+/**
+ * @brief Show the filament-error dialog: @p message with AFC's position diagram
+ *        drawn as a graphic, and a dismissal that clears the backend's fault
+ *        for @p slot after running @p on_dismissed
+ *
+ * Shared by the AMS panel and AmsStandingFaultDialog.
+ */
+void show_ams_error_dialog(AmsLoadingErrorModal& modal, lv_obj_t* parent,
+                           const std::string& message, int slot, std::function<void()> on_dismissed,
+                           AmsLoadingErrorModal::RetryCallback retry);
+
+/**
+ * @brief The firmware's stand-in for AmsErrorBridge: raises the filament-error
+ *        dialog for a fault standing while the print is paused or no print
+ *        runs (StandingFaultTrigger), whether or not the AMS panel is open
+ *
+ * The detail is AmsState::standing_fault()'s, told by the fault's cause. Retry
+ * opens the AMS panel, where the load is retried. The dialog closes on its own
+ * when the fault clears or a print runs.
+ */
+class AmsStandingFaultDialog {
+  public:
+    explicit AmsStandingFaultDialog(PrinterState& printer);
+
+    [[nodiscard]] bool is_visible() const {
+        return modal_ && modal_->is_visible();
+    }
+
+  private:
+    void evaluate();
+
+    PrinterState& printer_;
+    StandingFaultTrigger trigger_;
+    std::unique_ptr<AmsLoadingErrorModal> modal_;
+    ObserverGuard action_observer_;
+    ObserverGuard print_state_observer_;
+    ObserverGuard stop_reason_observer_;
+};
+
+/// Builds the process-wide AmsStandingFaultDialog. Firmware startup only: the
+/// desktop raises these faults through AmsErrorBridge's recovery dialog.
+void init_ams_standing_fault_dialog();
+
+} // namespace helix::ui

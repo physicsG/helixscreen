@@ -29,7 +29,7 @@ struct Paths {
     /// get_helix_cache_dir() reports as a [CacheDir] fall-through.
     std::string cache_dir;
     /// Which rung of the cache cascade won: "HELIX_CACHE_DIR", "config",
-    /// "AD5M", "CC1", "K2", "MIPS", "Android", or "" for a fall-through rung
+    /// a board key ("ad5m", "k1", "creator5-pro"), "Android", or "" for a fall-through rung
     /// (XDG, $HOME, /var/tmp, /tmp).
     std::string cache_tier;
     std::string state_dir; ///< backup/state root (settings.json.backup lives here)
@@ -46,6 +46,8 @@ struct Identity {
     /// serve several filesystem layouts — "mips" is the K1 series and both
     /// AD5X firmware populations — which is what mod_flavor separates.
     std::string platform_key;
+    /// helix::board::current_info().key ("creator5-pro", "k1", "generic").
+    std::string board;
     std::string mod_flavor;    ///< "none", "ZMOD" or "Forge-X"
     std::string printer_model; ///< printer type as configured in HelixScreen
     std::string host_arch;     ///< helix::host_arch_string()

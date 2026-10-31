@@ -248,6 +248,91 @@ MOCK
     [ "$status" -ne 0 ]
 }
 
+# A curl stand-in shaped like libhv's example client, which Creality K1 firmware
+# ships as /usr/bin/curl: it answers --version with "curl version 1.0.0" and
+# rejects the flags the installer passes. Records every non-version call.
+make_libhv_curl_bin() {
+    local bin="$BATS_TEST_TMPDIR/libhv_curl_bin"
+    mkdir -p "$bin"
+    cat > "$bin/curl" << MOCK
+#!/bin/sh
+case "\$1" in
+    --version|-V) echo "curl version 1.0.0"; exit 0 ;;
+esac
+echo "\$*" >> "$BATS_TEST_TMPDIR/libhv_curl_calls"
+case "\$1" in
+    -*) echo "curl: invalid option -- '\${1#-}'" >&2; exit 1 ;;
+esac
+exit 0
+MOCK
+    cat > "$bin/wget" << 'MOCK'
+#!/bin/sh
+dest=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -O) dest="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+[ -n "$dest" ] && echo "wget content" > "$dest"
+exit 0
+MOCK
+    chmod +x "$bin/curl" "$bin/wget"
+    echo "$bin"
+}
+
+@test "_has_real_curl: rejects a libhv-style curl that answers to the name" {
+    local bin
+    bin=$(make_libhv_curl_bin)
+    run env PATH="$bin:/usr/bin:/bin" /bin/bash -c "
+        source tests/shell/helpers.bash
+        unset _HELIX_RELEASE_SOURCED _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _PY_BIN _PY_PROBED _REAL_CURL
+        source scripts/lib/installer/common.sh
+        source scripts/lib/installer/host_profile.sh
+        source scripts/lib/installer/release.sh
+        _has_real_curl
+    "
+    [ "$status" -ne 0 ]
+}
+
+@test "_has_real_curl: accepts curl proper" {
+    local bin="$BATS_TEST_TMPDIR/real_curl_bin"
+    mkdir -p "$bin"
+    cat > "$bin/curl" << 'MOCK'
+#!/bin/sh
+for a in "$@"; do
+    [ "$a" = "--version" ] && { echo "curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0"; echo "Protocols: http https"; exit 0; }
+done
+exit 2
+MOCK
+    chmod +x "$bin/curl"
+    run env PATH="$bin:/usr/bin:/bin" /bin/bash -c "
+        source tests/shell/helpers.bash
+        unset _HELIX_RELEASE_SOURCED _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _PY_BIN _PY_PROBED _REAL_CURL
+        source scripts/lib/installer/common.sh
+        source scripts/lib/installer/host_profile.sh
+        source scripts/lib/installer/release.sh
+        _has_real_curl
+    "
+    [ "$status" -eq 0 ]
+}
+
+@test "download_file: a libhv-style curl falls through to wget" {
+    local bin
+    bin=$(make_libhv_curl_bin)
+    run env PATH="$bin:/usr/bin:/bin" /bin/bash -c "
+        source tests/shell/helpers.bash
+        unset _HELIX_RELEASE_SOURCED _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _PY_BIN _PY_PROBED _REAL_CURL
+        source scripts/lib/installer/common.sh
+        source scripts/lib/installer/host_profile.sh
+        source scripts/lib/installer/release.sh
+        download_file 'http://example.com/test' '$TMP_DIR/libhv_curl_test.tar.gz'
+    "
+    [ "$status" -eq 0 ]
+    grep -q "wget content" "$TMP_DIR/libhv_curl_test.tar.gz"
+    [ ! -e "$BATS_TEST_TMPDIR/libhv_curl_calls" ]
+}
+
 @test "download_file: uses wget when curl not in PATH" {
     local bin="$BATS_TEST_TMPDIR/dl_bin"
     mkdir -p "$bin"
@@ -506,7 +591,7 @@ PY
     # (See also the AD5M case below: python present but built without zlib.)
     local bin="$BATS_TEST_TMPDIR/nopy"
     make_fake_unzip "$bin" busybox131
-    for t in dd du cut sed grep head basename; do
+    for t in dd du wc cut sed grep head basename; do
         real=$(command -v "$t" 2>/dev/null) && ln -sf "$real" "$bin/$t"
     done
     ln -sf /bin/sh "$bin/sh"
@@ -543,7 +628,7 @@ PY
     # another, so the check must degrade to the structural probe instead.
     local bin="$BATS_TEST_TMPDIR/nozlib"
     make_fake_unzip "$bin" busybox131
-    for t in dd du cut sed grep head basename; do
+    for t in dd du wc cut sed grep head basename; do
         real=$(command -v "$t" 2>/dev/null) && ln -sf "$real" "$bin/$t"
     done
     ln -sf /bin/sh "$bin/sh"
@@ -588,7 +673,7 @@ MOCK
 @test "validate_archive: errors when neither python nor unzip can validate" {
     local bin="$BATS_TEST_TMPDIR/notools"
     mkdir -p "$bin"
-    for t in dd du cut sed grep head basename; do
+    for t in dd du wc cut sed grep head basename; do
         real=$(command -v "$t" 2>/dev/null) && ln -sf "$real" "$bin/$t"
     done
     ln -sf /bin/sh "$bin/sh"

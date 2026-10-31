@@ -77,7 +77,7 @@ class ALSASoundBackend : public SoundBackend {
     void set_voice_waveform(int slot, Waveform w) override;
     void silence_voice(int slot) override;
     int voice_count() const override {
-        return MAX_VOICES;
+        return kMaxVoices;
     }
 
     // NoteEvent interface (primary path for synth sounds)
@@ -150,9 +150,9 @@ class ALSASoundBackend : public SoundBackend {
     std::mutex ack_mutex_;
     std::condition_variable ack_cv_;
 
-    static constexpr int MAX_VOICES = 4;
+    static constexpr int kMaxVoices = 4;
 
-    VoiceSlot voice_slots_[MAX_VOICES];
+    VoiceSlot voice_slots_[kMaxVoices];
 
     // Scratch buffer for mixing (sized in initialize())
     std::vector<float> mix_buf_;

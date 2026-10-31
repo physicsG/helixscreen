@@ -1417,6 +1417,50 @@ TEST_CASE("GCodeParser - a T with parameters is not a tool change", "[gcode][par
     CHECK(file.tools_used_indices == std::set<int>{0});
 }
 
+TEST_CASE("tool_index_for_line - a tool change may carry Klipper macro parameters",
+          "[gcode][parser][1848]") {
+    // AFC's Orca Change Filament G-code: the T macro takes KEY=VALUE words.
+    CHECK(tool_index_for_line("T3") == 3);
+    CHECK(tool_index_for_line("T0 PURGE_LENGTH=121.4 NEW_EXTRUDER_TEMP=222") == 0);
+    CHECK(tool_index_for_line("T3 PURGE_LENGTH=0 ; change") == 3);
+    CHECK(tool_index_for_line("  T12\tpurge_length=5\r") == 12);
+
+    // A G-code word, an empty key or value, or one bare word among parameters
+    // makes it something other than a tool change.
+    CHECK(tool_index_for_line("T0 X1") == -1);
+    CHECK(tool_index_for_line("T0X1") == -1);
+    CHECK(tool_index_for_line("T0 =5") == -1);
+    CHECK(tool_index_for_line("T0 PURGE_LENGTH=") == -1);
+    CHECK(tool_index_for_line("T0 PURGE-LENGTH=1") == -1);
+    CHECK(tool_index_for_line("T0 PURGE_LENGTH=1 X1") == -1);
+    CHECK(tool_index_for_line("TURN_OFF_HEATERS") == -1);
+    CHECK(tool_index_for_line("t0 PURGE_LENGTH=1") == -1);
+    CHECK(tool_index_for_line("; T0 PURGE_LENGTH=1") == -1);
+
+    // The digit span covers the tool number alone.
+    std::pair<size_t, size_t> digits;
+    const std::string line = "  T10 PURGE_LENGTH=121.399 NEW_EXTRUDER_TEMP=222";
+    REQUIRE(tool_index_for_line(line, &digits) == 10);
+    CHECK(digits == std::pair<size_t, size_t>{3, 5});
+}
+
+TEST_CASE("Tools-used scan counts parameterised tool changes", "[gcode][parser][1848]") {
+    const std::string content = "T0 PURGE_LENGTH=121.399 NEW_EXTRUDER_TEMP=222\n"
+                                "G1 X10 Y10 E1\n"
+                                "T1 PURGE_LENGTH=98.2 NEW_EXTRUDER_TEMP=230\n"
+                                "G1 X20 Y20 E1\n"
+                                "T2 PURGE_LENGTH=0 ; change";
+    CHECK(scan_tools_used_from_content(content) == std::set<int>{0, 1, 2});
+
+    GCodeParser parser;
+    std::istringstream in(content);
+    std::string line;
+    while (std::getline(in, line)) {
+        parser.parse_line(line);
+    }
+    CHECK(parser.finalize().tools_used_indices == std::set<int>{0, 1, 2});
+}
+
 TEST_CASE("get_best_thumbnail - real file picks the largest block", "[gcode][thumbnail]") {
     // 3DBenchy embeds a 48x48 and a 300x300 thumbnail, in that order
     const std::string test_file = "assets/test_gcodes/3DBenchy.gcode";
@@ -2172,4 +2216,69 @@ TEST_CASE("GCodeParser keeps a quoted object name whole across DEFINE and START"
     REQUIRE_FALSE(file.layers.empty());
     REQUIRE_FALSE(file.layers[0].segments.empty());
     CHECK(file.get_object_name(file.layers[0].segments[0].object_name_index) == "Part 1");
+}
+
+TEST_CASE("GCodeParser - an object's box grows from the extrusions inside it", "[gcode][parser]") {
+    GCodeParser parser;
+    SECTION("defined before it starts") {
+        parser.parse_line("EXCLUDE_OBJECT_DEFINE NAME=part1 CENTER=15,10");
+        parser.parse_line("EXCLUDE_OBJECT_START NAME=part1");
+    }
+    SECTION("defined after it starts") {
+        parser.parse_line("EXCLUDE_OBJECT_START NAME=part1");
+        parser.parse_line("EXCLUDE_OBJECT_DEFINE NAME=part1 CENTER=15,10");
+    }
+    parser.parse_line("G1 X10 Y10 Z0.2 E1");
+    parser.parse_line("G1 X20 Y12 E2");
+    parser.parse_line("EXCLUDE_OBJECT_END NAME=part1");
+    parser.parse_line("G1 X90 Y90 E3"); // outside the object: must not reach its box
+
+    auto file = parser.finalize();
+    REQUIRE(file.objects.count("part1") == 1);
+    const auto& box = file.objects["part1"].bounding_box;
+    CHECK(box.max.x == Approx(20.0f));
+    CHECK(box.max.y == Approx(12.0f));
+    CHECK(box.max.x < 90.0f);
+}
+
+TEST_CASE("GCodeParser - parsing after finalize() leaves the returned file alone",
+          "[gcode][parser]") {
+    GCodeParser parser;
+    parser.parse_line("EXCLUDE_OBJECT_DEFINE NAME=part1 CENTER=15,10");
+    parser.parse_line("EXCLUDE_OBJECT_START NAME=part1");
+    parser.parse_line("G1 X10 Y10 Z0.2 E1");
+    parser.parse_line("G1 X20 Y10 E2");
+    auto file = parser.finalize();
+    REQUIRE(file.objects.count("part1") == 1);
+    const float max_x = file.objects["part1"].bounding_box.max.x;
+
+    // Still inside part1 as far as the parser knows; the file it handed out
+    // owns that object's box now.
+    parser.parse_line("G1 X150 Y150 E3");
+    CHECK(file.objects["part1"].bounding_box.max.x == max_x);
+}
+
+TEST_CASE("GCodeParser - reset() forgets the wipe tower's interned index",
+          "[gcode][parser][multicolor]") {
+    GCodeParser parser;
+    parser.parse_line("; WIPE_TOWER_START");
+    parser.parse_line("G1 X20 Y20 E2");
+    parser.parse_line("; WIPE_TOWER_END");
+    (void)parser.finalize();
+
+    // After reset the name table starts empty: an object takes index 0, so the
+    // wipe tower must be interned afresh rather than reuse the old index.
+    parser.reset();
+    parser.parse_line("EXCLUDE_OBJECT_START NAME=part1");
+    parser.parse_line("G1 X10 Y10 E1");
+    parser.parse_line("EXCLUDE_OBJECT_END NAME=part1");
+    parser.parse_line("; WIPE_TOWER_START");
+    parser.parse_line("G1 X30 Y30 E2");
+    parser.parse_line("; WIPE_TOWER_END");
+    auto file = parser.finalize();
+
+    const auto& segs = file.layers.at(0).segments;
+    REQUIRE(segs.size() >= 2);
+    CHECK(file.get_object_name(segs.front().object_name_index) == "part1");
+    CHECK(file.get_object_name(segs.back().object_name_index) == "__WIPE_TOWER__");
 }

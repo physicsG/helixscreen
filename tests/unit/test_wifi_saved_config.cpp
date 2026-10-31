@@ -37,7 +37,7 @@ using helix::wifi::detail::is_volatile_path;
 
 namespace {
 
-constexpr const char* CONFIG_BODY = "ctrl_interface=/var/run/wpa_supplicant\n"
+constexpr const char* kConfigBody = "ctrl_interface=/var/run/wpa_supplicant\n"
                                     "update_config=1\n"
                                     "\n"
                                     "network={\n"
@@ -75,7 +75,7 @@ TEST_CASE("A healthy platform is left alone", "[network][wifi][savedconfig][regr
         const std::string conf = "/tmp/helix_plain_conf_test.conf";
         {
             std::ofstream out(conf);
-            out << CONFIG_BODY;
+            out << kConfigBody;
         }
 
         helix::wifi::remember_persistent_target(conf);
@@ -125,7 +125,7 @@ TEST_CASE("A symlink to persistent storage is remembered and mirrored",
         ::unlink(link.c_str());
         {
             std::ofstream out(link);
-            out << CONFIG_BODY;
+            out << kConfigBody;
         }
 
         REQUIRE(helix::wifi::mirror_to_persistent(link));
@@ -139,7 +139,7 @@ TEST_CASE("A symlink to persistent storage is remembered and mirrored",
         ::unlink(link.c_str());
         {
             std::ofstream out(link);
-            out << CONFIG_BODY;
+            out << kConfigBody;
         }
         REQUIRE(helix::wifi::mirror_to_persistent(link));
 
@@ -154,7 +154,7 @@ TEST_CASE("A symlink to persistent storage is remembered and mirrored",
         ::unlink(link.c_str());
         {
             std::ofstream out(link);
-            out << CONFIG_BODY;
+            out << kConfigBody;
         }
         REQUIRE(helix::wifi::mirror_to_persistent(link));
 
@@ -177,7 +177,7 @@ TEST_CASE("An empty saved config is not mirrored over a good one",
 
     {
         std::ofstream out(durable);
-        out << CONFIG_BODY;
+        out << kConfigBody;
     }
     REQUIRE(::symlink(durable.c_str(), link.c_str()) == 0);
     helix::wifi::remember_persistent_target(link);

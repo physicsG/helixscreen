@@ -44,8 +44,8 @@ namespace {
 
 // Real assets, so lv_image_set_src resolves instead of logging a decoder miss,
 // and distinguishable so "which print's image is on screen" is a real assertion.
-constexpr const char* THUMB_A = "A:assets/images/filament_spool.png";
-constexpr const char* THUMB_B = "A:assets/images/printer_400.png";
+constexpr const char* kThumbA = "A:assets/images/filament_spool.png";
+constexpr const char* kThumbB = "A:assets/images/printer_400.png";
 
 struct FilenameObserverFixture : public LVGLTestFixture {
     FilenameObserverFixture() {
@@ -98,9 +98,9 @@ TEST_CASE_METHOD(FilenameObserverFixture,
 
     // The manager stamps its publishes with the resolved original; the panel must
     // already agree, or it drops every one of them with no retry.
-    state().print_state().set_print_thumbnail("Widget.gcode", THUMB_B);
+    state().print_state().set_print_thumbnail("Widget.gcode", kThumbB);
     drain();
-    CHECK(Access::displayed_src(panel()) == THUMB_B);
+    CHECK(Access::displayed_src(panel()) == kThumbB);
     CHECK(Access::displayed_file(panel()) == "Widget.gcode");
 }
 
@@ -112,19 +112,19 @@ TEST_CASE_METHOD(FilenameObserverFixture,
     // re-entrant set_filename(printA) retires the override that was just
     // installed for B. Something must put it back before `desired` is computed.
     report_filename("printA.gcode");
-    state().print_state().set_print_thumbnail("printA.gcode", THUMB_A);
+    state().print_state().set_print_thumbnail("printA.gcode", kThumbA);
     drain();
-    REQUIRE(Access::displayed_src(panel()) == THUMB_A);
+    REQUIRE(Access::displayed_src(panel()) == kThumbA);
 
     report_filename(".helix_temp/modified_1748_Widget.gcode");
 
     CHECK(state().print_state().get_effective_print_filename() == "Widget.gcode");
 
-    state().print_state().set_print_thumbnail("Widget.gcode", THUMB_B);
+    state().print_state().set_print_thumbnail("Widget.gcode", kThumbB);
     drain();
     // The symptom this whole issue is about: print A's image must not still be
     // the one on screen.
-    CHECK(Access::displayed_src(panel()) == THUMB_B);
+    CHECK(Access::displayed_src(panel()) == kThumbB);
     CHECK(Access::displayed_file(panel()) == "Widget.gcode");
 }
 
@@ -136,16 +136,16 @@ TEST_CASE_METHOD(FilenameObserverFixture,
     // retirement check becomes load-bearing for every print instead of just the
     // rewritten ones, and the two cases above would pass for the wrong reason.
     report_filename("printA.gcode");
-    state().print_state().set_print_thumbnail("printA.gcode", THUMB_A);
+    state().print_state().set_print_thumbnail("printA.gcode", kThumbA);
     drain();
-    REQUIRE(Access::displayed_src(panel()) == THUMB_A);
+    REQUIRE(Access::displayed_src(panel()) == kThumbA);
 
     report_filename("printB.gcode");
     CHECK(Access::identity_override(panel()).empty());
     CHECK(state().print_state().get_effective_print_filename() == "printB.gcode");
 
-    state().print_state().set_print_thumbnail("printB.gcode", THUMB_B);
+    state().print_state().set_print_thumbnail("printB.gcode", kThumbB);
     drain();
-    CHECK(Access::displayed_src(panel()) == THUMB_B);
+    CHECK(Access::displayed_src(panel()) == kThumbB);
     CHECK(Access::displayed_file(panel()) == "printB.gcode");
 }

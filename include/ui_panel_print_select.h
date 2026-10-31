@@ -18,18 +18,22 @@
 #include "ui_timer_guard.h"
 
 #include "ams_backend.h"
+#include "app_constants.h"
 #include "async_lifetime_guard.h"
 #include "connection_state.h"
 #include "gcode_ops_detector.h"
 #include "helix_plugin_installer.h"
+#include "helix_shared_callback.h"
 #include "in_flight_guard.h"
 #include "moonraker_error.h"
+#include "plugin_self_heal.h"
 #include "print_file_data.h"
 #include "print_history_manager.h"
 #include "print_select_button_view.h"
 #include "queued_job_options.h"
 #include "subject_managed_panel.h"
 #include "text_io.h"
+#include "three_mf_reader.h"
 #include "usb_backend.h"
 
 #include <algorithm>
@@ -111,16 +115,16 @@ struct CardDimensions {
 
 // Card width bounds, and the width a card wants to be. CARD_TARGET_WIDTH mirrors
 // card_base_width in print_file_card.xml — the size the component was drawn around.
-inline constexpr int CARD_WIDTH_MIN = 130;
-inline constexpr int CARD_WIDTH_MAX = 230;
-inline constexpr int CARD_WIDTH_TARGET = 170;
+inline constexpr int kCardWidthMin = 130;
+inline constexpr int kCardWidthMax = 230;
+inline constexpr int kCardWidthTarget = 170;
 
 /**
  * @brief Choose how many card columns fit across a container.
  *
  * Considers every column count whose resulting card width is within
- * [CARD_WIDTH_MIN, CARD_WIDTH_MAX] and keeps the one landing nearest
- * CARD_WIDTH_TARGET. Ties keep the wider card (the lower column count wins).
+ * [kCardWidthMin, kCardWidthMax] and keeps the one landing nearest
+ * kCardWidthTarget. Ties keep the wider card (the lower column count wins).
  *
  * The previous rule walked column counts downward and took the first that fit,
  * which always maximized columns and therefore always produced the narrowest
@@ -145,11 +149,11 @@ inline int choose_card_columns(int container_width, int card_gap) {
         int total_gaps = (cols - 1) * card_gap;
         int card_width = (container_width - total_gaps) / cols;
 
-        if (card_width < CARD_WIDTH_MIN || card_width > CARD_WIDTH_MAX) {
+        if (card_width < kCardWidthMin || card_width > kCardWidthMax) {
             continue;
         }
 
-        int distance = std::abs(card_width - CARD_WIDTH_TARGET);
+        int distance = std::abs(card_width - kCardWidthTarget);
         if (best_cols == 0 || distance < best_distance) {
             best_cols = cols;
             best_distance = distance;
@@ -248,7 +252,7 @@ class PrintSelectPanel : public PanelBase {
      * @param printer_state Reference to helix::PrinterState for mock detection
      * @param api Pointer to IMoonrakerAPI for file operations
      */
-    PrintSelectPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    PrintSelectPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     /**
      * @brief Destructor - cleanup observers
@@ -318,6 +322,10 @@ class PrintSelectPanel : public PanelBase {
      * @brief Toggle between card and list view
      */
     void toggle_view();
+
+    /// The thumbnail key (the path its listing gave) of each listed printer file that has one,
+    /// in list order; empty while the list shows a USB stick.
+    [[nodiscard]] std::vector<std::string> printer_thumbnail_keys() const;
 
     /**
      * @brief Handle Printer source button click
@@ -390,6 +398,57 @@ class PrintSelectPanel : public PanelBase {
     bool refetch_after_connection_loss(size_t i, const std::string& filename,
                                        const MoonrakerError& error);
 
+    // === Sliced .3mf archives (ui_print_select_archive.cpp) ===
+
+    /**
+     * @brief Reads file @p i's .3mf archive: its plates, their time and
+     *        filament, and their renders.
+     *
+     * @p extract: the printer has no metadata for the file, so the archive's
+     * summary stands in for it and Print extracts the plate shown. Without it
+     * the printer reads the .3mf itself and only its render comes from here.
+     */
+    void load_archive(size_t i, const std::string& filename, bool extract);
+
+    /// Fetches the render of file @p i's shown plate as its card thumbnail.
+    void fetch_archive_thumbnail(size_t i);
+
+    /// Shows the plate @p step places before (-1) or after (+1) the selected
+    /// file's current one, in the detail view and its card.
+    void step_archive_plate(int step);
+
+    /// Shows plate @p plate_index of file @p i's archive: its filaments for the
+    /// mapping card and the start, its render, and its stats in the detail view.
+    void show_archive_plate(size_t i, int plate_index);
+
+    /// Publishes the selected file's plate stepper: its plate count and label.
+    void update_plate_stepper();
+
+    /// Tells the preparation manager what prints for the selected .3mf (its
+    /// shown plate, or the printer's conversion of it), for the pre-print scan.
+    void sync_archive_scan_source();
+
+    /// The detail view's time, weight and material for the plate shown, where
+    /// the list card carries a several-plate archive's totals.
+    void apply_plate_stats_to_detail();
+
+    /// Fills the stats file @p i's printer metadata left out (time, weight,
+    /// materials, colors) from its archive, for a .3mf the printer reads itself.
+    void fill_missing_from_archive(size_t i);
+
+    /// Shows @p file's thumbnail and stats in the detail view (the selected file).
+    void show_file_in_detail(const PrintFileData& file);
+
+    /// Tells the preparation manager whether the selected file prints as an
+    /// extracted .3mf plate, and which. False, with a toast, when it cannot
+    /// print here at all.
+    bool prepare_archive_start();
+
+    /// What Add to Queue queues for the selected file: itself, the printer's
+    /// conversion of a .3mf's shown plate, or nothing (with a toast) for a
+    /// .3mf that has to be extracted first, which the queue cannot do.
+    std::optional<std::string> queueable_path();
+
     /**
      * @brief Navigate into a subdirectory
      *
@@ -429,7 +488,7 @@ class PrintSelectPanel : public PanelBase {
      *
      * @param api Pointer to IMoonrakerAPI (may be nullptr to disconnect)
      */
-    void set_api(IMoonrakerAPI* api);
+    void set_api(helix::IMoonrakerAPI* api);
 
     /**
      * @brief Set selected file data and update subjects
@@ -469,7 +528,7 @@ class PrintSelectPanel : public PanelBase {
      * @param filename File name to select (matches against filename field)
      * @return true if file was found and selected, false otherwise
      */
-    bool select_file_by_name(const std::string& filename);
+    bool select_file_by_name(const std::string& filename, int archive_plate = 0);
 
     /**
      * @brief Set a pending file selection (for --select-file flag)
@@ -532,6 +591,8 @@ class PrintSelectPanel : public PanelBase {
     /// icon, whose XML event_cb routes here so the icon keeps working while the
     /// card itself is disabled.
     void show_remap_help();
+    /// The detail view's more button: plugin actions for the file shown.
+    void show_plugin_actions();
 
     /**
      * @brief Set reference to print status panel
@@ -580,7 +641,7 @@ class PrintSelectPanel : public PanelBase {
     static constexpr const char* kUsbCopyDir = "usb_prints";
 
     /// A USB copy whose transfer reports no progress for this long is abandoned.
-    static constexpr uint32_t kUsbCopyStallMs = 30000;
+    static constexpr uint32_t kUsbCopyStallMs = helix::app_constants::transfer::STALL_MS;
 
     /**
      * @brief Queue the selected file instead of starting it.
@@ -608,20 +669,30 @@ class PrintSelectPanel : public PanelBase {
      *
      * @param job The queue entry to start (job_id + queued filename)
      */
-    void start_queued_job(const JobQueueEntry& job);
+    void start_queued_job(const helix::JobQueueEntry& job);
+
+    /**
+     * @brief The app's one PrintPreparationManager.
+     *
+     * Owned by this panel's detail-view model, which exists from setup() so
+     * the PRINT_START analysis runs on connect. A start with no file view
+     * (the home tile's QueuedJobStarter) drives this same instance, so there
+     * is one analysis per connect and one owner of the skip-pending handler.
+     */
+    [[nodiscard]] helix::ui::PrintPreparationManager* print_preparation_manager();
 
     /**
      * @brief Show the enriched pre-flight filament check modal.
      *
      * Replaces the simple confirmation dialog. Renders a per-tool breakdown of
-     * intended vs seated filament and offers Remap… / Cancel / Print Anyway.
-     * Print Anyway re-enters start_print(true); Remap… routes by backend
+     * intended vs seated filament and offers Map Filament… / Cancel / Print Anyway.
+     * Print Anyway re-enters start_print(true); Map Filament… routes by backend
      * strategy via on_preflight_remap().
      */
     void show_preflight_modal(const helix::PreflightResult& pf);
 
     /**
-     * @brief Route a Remap… request to the single unified remap UI.
+     * @brief Route a Map Filament… request to the single unified remap UI.
      *
      * Thin wrapper around open_remap_modal(). The per-backend difference lives
      * at the apply layer (apply_remap) and at print-start (already strategy-
@@ -659,11 +730,11 @@ class PrintSelectPanel : public PanelBase {
     // Card layout constants (used by calculate_card_dimensions).
     // Width bounds live at namespace scope as CARD_WIDTH_* so choose_card_columns()
     // can share them; these aliases keep the existing call sites reading the same.
-    static constexpr int CARD_MIN_WIDTH = CARD_WIDTH_MIN;
-    static constexpr int CARD_MAX_WIDTH = CARD_WIDTH_MAX;
-    static constexpr int CARD_DEFAULT_HEIGHT = 245;
-    static constexpr int ROW_COUNT_3_MIN_HEIGHT = 520;
-    static constexpr const char* FOLDER_UP_ICON = "A:assets/images/folder-up.png";
+    static constexpr int kCardMinWidth = kCardWidthMin;
+    static constexpr int kCardMaxWidth = kCardWidthMax;
+    static constexpr int kCardDefaultHeight = 245;
+    static constexpr int kRowCount3MinHeight = 520;
+    static constexpr const char* kFolderUpIcon = "A:assets/images/folder-up.png";
 
     //
     // === Widget References ===
@@ -720,6 +791,15 @@ class PrintSelectPanel : public PanelBase {
     lv_subject_t selected_filament_type_subject_{};
     char selected_filament_type_buffer_[64]; // Longer for full names like "PolyMaker PolyLite ABS"
 
+    /// Sliced plates of the selected .3mf (the plate stepper shows from 2), the
+    /// shown plate's name or number, and where it sits among them ("1/2", empty
+    /// with one plate).
+    lv_subject_t selected_plate_count_subject_{};
+    lv_subject_t selected_plate_text_subject_{};
+    char selected_plate_text_buffer_[64];
+    lv_subject_t selected_plate_position_subject_{};
+    char selected_plate_position_buffer_[16];
+
     lv_subject_t detail_view_visible_subject_{};
 
     /// View mode subject: 0 = CARD, 1 = LIST (XML bindings control visibility)
@@ -764,7 +844,8 @@ class PrintSelectPanel : public PanelBase {
         FileHistoryStatus::NEVER_PRINTED; ///< History status of selected file
     int selected_success_count_ = 0;      ///< Success count of selected file
     std::string
-        pending_file_selection_; ///< File to auto-select when list is populated (--select-file)
+        pending_file_selection_;    ///< File to auto-select when list is populated (--select-file)
+    int pending_archive_plate_ = 0; ///< The plate that selection opens on, for an archive
 
     /// A queued job being walked through the detail view toward a start.
     /// Lives from start_queued_job() until one of:
@@ -825,11 +906,11 @@ class PrintSelectPanel : public PanelBase {
 
     // Debounce timer for view refresh (prevents rebuilding views for each metadata callback)
     lv_timer_t* refresh_timer_ = nullptr;
-    static constexpr uint32_t REFRESH_DEBOUNCE_MS = 50; ///< Debounce delay for view refresh
+    static constexpr uint32_t kRefreshDebounceMs = 50; ///< Debounce delay for view refresh
 
     // Periodic polling timer for file list (fallback when WebSocket notifications are missed)
     lv_timer_t* file_poll_timer_ = nullptr;
-    static constexpr uint32_t FILE_POLL_INTERVAL_MS = 5000; ///< 5s polling fallback
+    static constexpr uint32_t kFilePollIntervalMs = 5000; ///< 5s polling fallback
     /// Single-flight guard for overlapping get_directory RPCs, with a 30s
     /// self-heal: if a response is silently lost the flag would otherwise wedge
     /// forever and the panel would stop refreshing. The threshold sits between
@@ -851,6 +932,12 @@ class PrintSelectPanel : public PanelBase {
 
     // File data provider (handles Moonraker file fetching and metadata)
     std::unique_ptr<helix::ui::PrintSelectFileProvider> file_provider_;
+
+    // Reads sliced .3mf archives on the printer; set with the API.
+    std::unique_ptr<helix::three_mf::ThreeMfReader> archive_reader_;
+    /// Set when the listing the archive reads under way belong to goes away.
+    std::shared_ptr<std::atomic<bool>> archive_cancel_ = std::make_shared<std::atomic<bool>>(false);
+    void cancel_archive_reads();
 
     // Print start controller (handles print initiation workflow, warnings)
     std::unique_ptr<helix::ui::PrintStartController> print_controller_;
@@ -900,7 +987,7 @@ class PrintSelectPanel : public PanelBase {
     bool esp_lane_refused_ = false;
     /// Clears a refusal when no fetch of ours is in flight to free a lane slot.
     helix::ui::LvglTimerGuard esp_lane_retry_timer_;
-    static constexpr uint32_t ESP_LANE_RETRY_MS = 500;
+    static constexpr uint32_t kEspLaneRetryMs = 500;
 
     /// The card window [first, end) the last sync saw.
     size_t esp_window_first_ = 0;
@@ -908,7 +995,7 @@ class PrintSelectPanel : public PanelBase {
     /// Counts syncs; a file in the window records it as when it was last shown.
     uint32_t esp_show_tick_ = 0;
     /// Applies plan_card_thumbnails() to the card window [first, end): fetches
-    /// within CARD_THUMBNAIL_BUDGET, and keeps thumbnails outside it, most
+    /// within kCardThumbnailBudget, and keeps thumbnails outside it, most
     /// recently shown first, in what the budget leaves.
     /// With @p keep_off_screen false, thumbnails outside the window are dropped
     /// and their slots freed.
@@ -940,6 +1027,26 @@ class PrintSelectPanel : public PanelBase {
     // Plugin installer for helix_print Moonraker plugin
     helix::HelixPluginInstaller plugin_installer_;
     PluginInstallModal plugin_install_modal_;
+    /// The startup repair of an installed plugin; after plugin_installer_, which it uses.
+    helix::PluginSelfHeal plugin_self_heal_{printer_state_, plugin_installer_,
+                                            []() { return plugin_screen_state(); }};
+
+    /// What on screen a plugin action waits behind (helix::decide_plugin_turn()).
+    static helix::PluginScreenState plugin_screen_state();
+
+    /// The install modal, from the boot-time prompt or the card's Set up tap.
+    /// A successful install restarts Moonraker so the plugin loads.
+    void show_plugin_install_modal();
+
+    /// The boot-time prompt: opens once a session when discovery finds the
+    /// plugin absent, following helix::decide_plugin_turn(). A wait for the
+    /// job is resumed by the lifecycle observer, a wait for the screen by
+    /// plugin_prompt_timer_.
+    void maybe_prompt_plugin_install();
+    helix::PluginTurnStep plugin_prompt_wait_ = helix::PluginTurnStep::Stop;
+    helix::ui::LvglTimerGuard plugin_prompt_timer_;
+    /// How often a prompt waiting for the screen looks again.
+    static constexpr uint32_t kPluginPromptRecheckMs = 1000;
 
     //
     // === Internal Methods ===
@@ -995,7 +1102,7 @@ class PrintSelectPanel : public PanelBase {
      * @brief Schedule a debounced view refresh
      *
      * Instead of rebuilding views immediately, this schedules a single refresh
-     * after REFRESH_DEBOUNCE_MS. Multiple calls within the debounce window
+     * after kRefreshDebounceMs. Multiple calls within the debounce window
      * only trigger one actual refresh. This prevents O(n²) widget rebuilds
      * when metadata arrives for each file.
      */
@@ -1042,7 +1149,7 @@ class PrintSelectPanel : public PanelBase {
         std::string local_path;
         uint64_t size = 0;
         uint64_t generation = 0; ///< usb_copy_generation_ when the copy began
-        std::function<void(const std::string& dest)> then;
+        helix::SharedCallback<void(const std::string& dest)> then;
     };
 
     /// Bumped per copy and on abandon; an answer for another value is stale.
@@ -1067,16 +1174,24 @@ class PrintSelectPanel : public PanelBase {
      * is never replaced. @p then runs on the main thread with the copy's
      * Moonraker-relative path; a failure toasts and runs nothing.
      */
-    void copy_usb_file_to_printer(std::function<void(const std::string& dest)> then);
+    void copy_usb_file_to_printer(helix::SharedCallback<void(const std::string& dest)> then);
 
     /// Name the copy from what kUsbCopyDir holds, then upload or reuse.
     void upload_usb_copy(UsbCopyRequest req, const std::map<std::string, uint64_t>& existing);
 
+    /// Upload the USB file of @p req to gcodes/@p dest.
+    void start_usb_upload(UsbCopyRequest req, const std::string& dest);
+
     /// Hand the controller @p filename in Moonraker directory @p dir, with the
-    /// tool colors, thumbnail and object picks read when Print was tapped, and start.
+    /// tool colors, thumbnail, object picks and @p scan_key (the key its scan
+    /// is kept under) read when Print was tapped, and start.
     void dispatch_print(const std::string& filename, const std::string& dir,
                         const std::vector<std::string>& filament_colors,
-                        const std::string& thumbnail, std::vector<std::string> exclude_picks);
+                        const std::string& thumbnail, std::vector<std::string> exclude_picks,
+                        std::string scan_key);
+
+    /// The key the prep manager keeps the selected file's scan under.
+    [[nodiscard]] std::string selected_scan_key() const;
 
     /// True, after a toast, when every object is picked and nothing would print.
     bool refuse_start_with_every_object_picked();
@@ -1182,7 +1297,8 @@ class PrintSelectPanel : public PanelBase {
  * @param api Pointer to IMoonrakerAPI (may be nullptr)
  * @return Pointer to the global instance
  */
-PrintSelectPanel* get_print_select_panel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+PrintSelectPanel* get_print_select_panel(helix::PrinterState& printer_state,
+                                         helix::IMoonrakerAPI* api);
 
 /**
  * @brief Get reference to the global PrintSelectPanel instance
@@ -1191,3 +1307,15 @@ PrintSelectPanel* get_print_select_panel(helix::PrinterState& printer_state, IMo
  * @return Reference to the global instance
  */
 PrintSelectPanel& get_global_print_select_panel();
+
+/// The global PrintSelectPanel, or nullptr before it is created.
+// NAMESPACE_OK: beside get_global_print_select_panel, the global accessor it complements
+PrintSelectPanel* find_print_select_panel();
+
+/// The controller a start with no file view of its own goes through (a
+/// reprint, a restart): Print Files' controller, or one kept for these starts
+/// until Print Files is built (the ESP32 build defers that panel to its first
+/// visit). Main thread.
+// NAMESPACE_OK: beside get_print_select_panel, whose controller it hands out
+helix::ui::PrintStartController& print_start_controller_for(helix::PrinterState& printer_state,
+                                                            helix::IMoonrakerAPI* api);

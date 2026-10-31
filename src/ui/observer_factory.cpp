@@ -22,7 +22,7 @@ namespace {
  * See issue #174: SEGV in LedWidget::update_light_icon() via stale pointer.
  */
 template <typename V> struct LambdaObserverContext {
-    std::shared_ptr<const std::function<void(V)>> fn;
+    std::shared_ptr<const helix::Callback<void(V)>> fn;
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 };
 
@@ -104,24 +104,24 @@ ObserverGuard attach(lv_subject_t* subject, lv_observer_cb_t cb, Context* ctx,
 
 } // namespace
 
-ObserverGuard observe_core(lv_subject_t* subject, const void* owner, std::function<void(int)> fn,
+ObserverGuard observe_core(lv_subject_t* subject, const void* owner, helix::Callback<void(int)> fn,
                            Dispatch dispatch, const SubjectLifetime& lifetime) {
     if (!attachable(subject, owner)) {
         return ObserverGuard();
     }
-    auto* ctx = new IntContext{std::make_shared<const std::function<void(int)>>(std::move(fn))};
+    auto* ctx = new IntContext{std::make_shared<const helix::Callback<void(int)>>(std::move(fn))};
     return attach(subject, dispatch == Dispatch::Deferred ? int_deferred_cb : int_immediate_cb, ctx,
                   lifetime);
 }
 
 ObserverGuard observe_core(lv_subject_t* subject, const void* owner,
-                           std::function<void(const char*)> fn, Dispatch dispatch,
+                           helix::Callback<void(const char*)> fn, Dispatch dispatch,
                            const SubjectLifetime& lifetime) {
     if (!attachable(subject, owner)) {
         return ObserverGuard();
     }
-    auto* ctx =
-        new StringContext{std::make_shared<const std::function<void(const char*)>>(std::move(fn))};
+    auto* ctx = new StringContext{
+        std::make_shared<const helix::Callback<void(const char*)>>(std::move(fn))};
     return attach(subject,
                   dispatch == Dispatch::Deferred ? string_deferred_cb : string_immediate_cb, ctx,
                   lifetime);

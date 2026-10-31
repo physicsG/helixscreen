@@ -7,6 +7,7 @@
 
 #include "grid_layout.h"
 #include "plugin_host.h"
+#include "plugin_menu_context.h"
 
 namespace helix::plugin {
 
@@ -55,6 +56,19 @@ void LuaPanelWidget::on_size_changed(int colspan, int rowspan, int width_px, int
         lua_pushinteger(co, height_px);
         return 4;
     });
+}
+
+bool LuaPanelWidget::has_edit_configure() const {
+    return !runtime_.expired() &&
+           plugin_menu::any_declared(plugin_menu::MenuKind::Tile, plugin_id_);
+}
+
+bool LuaPanelWidget::on_edit_configure() {
+    if (!root() || runtime_.expired())
+        return false;
+    tile_menu_.show_for(lv_obj_get_screen(root()), root(), plugin_menu::MenuKind::Tile,
+                        plugin_menu::tile_context(widget_id_), plugin_id_);
+    return false;
 }
 
 void LuaPanelWidget::on_activate() {

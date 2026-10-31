@@ -5,6 +5,7 @@
 
 #ifdef __ANDROID__
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +30,14 @@ std::pair<int, std::string>
 https_post_binary(const std::string& url, const std::vector<unsigned char>& body,
                   const std::string& content_type, const std::string& content_encoding,
                   const std::string& user_agent, const std::string& api_key, int timeout_sec);
+
+/// HTTP(S) GET of a binary body (a camera snapshot) via Android's Java
+/// HttpURLConnection. @p timeout_sec bounds the whole request, connect and
+/// TLS handshake included, so it blocks no longer than that. Fills @p body and
+/// returns true only for a 2xx answer of at most @p max_bytes; any other status,
+/// a larger body, the deadline or a transport failure returns false.
+bool https_get_bytes(const std::string& url, const std::string& user_agent, int timeout_sec,
+                     size_t max_bytes, std::string& body);
 
 } // namespace helix::android
 

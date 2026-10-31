@@ -12,6 +12,7 @@
 #include "config.h"
 #include "drm_rotation_strategy.h"
 #include "env_knobs.h"
+#include "gpu_libs.h"
 #include "helix_display_telemetry.h"
 #include "input_device_scanner.h"
 #include "refresh_timing_env.h"
@@ -27,12 +28,11 @@
 // survive. Ask the preprocessor what it resolved to, never the header.
 //
 // Both directions are errors, and they fail differently. A request with no
-// result gives a binary that believes it is GPU-accelerated and presents
+// result gives a backend that believes it is GPU-accelerated and presents
 // through dumb buffers. A result with no request is worse: mk/egl-link.mk
-// builds two binaries from one set of objects and tells them apart by this
-// macro alone, so LV_USE_OPENGLES turned on in lv_conf.h would put the EGL
-// driver in BOTH of them, leaving nothing to step down to when the probe
-// declines.
+// compiles this file twice into one binary and tells the two apart by this
+// macro alone, so LV_USE_OPENGLES turned on in lv_conf.h would make both of
+// them EGL, leaving nothing to step down to when the probe declines.
 #if defined(HELIX_ENABLE_OPENGLES) && !LV_LINUX_DRM_USE_EGL
 #error "HELIX_ENABLE_OPENGLES set but LVGL resolved LV_LINUX_DRM_USE_EGL to 0"
 #endif
@@ -65,6 +65,18 @@ set ENABLE_OPENGLES in the build, do not edit LV_USE_OPENGLES in lv_conf.h"
 #include <xf86drmMode.h>
 
 namespace {
+
+/// The libraries this compile of the backend calls into. The EGL presentation
+/// path needs the GPU stack on top of libdrm.
+bool drm_libs_present() {
+    return helix::gpu_libs::drm_libs_present(LV_LINUX_DRM_USE_EGL != 0);
+}
+
+/// Whether this backend finds and opens its input devices through libinput.
+bool use_libinput() {
+    return helix::gpu_libs::input_discovery(LV_USE_LIBINPUT != 0) ==
+           helix::gpu_libs::InputDiscovery::Libinput;
+}
 
 /**
  * @brief Check if a DRM device supports dumb buffers and has a connected display
@@ -239,7 +251,10 @@ std::string auto_detect_drm_device() {
 
 } // namespace
 
-DisplayBackendDRM::DisplayBackendDRM() : drm_device_(auto_detect_drm_device()) {}
+// Without libdrm the device stays empty, which is_available() reports, so no
+// call reaches the library on a system that lacks it.
+DisplayBackendDRM::DisplayBackendDRM()
+    : drm_device_(drm_libs_present() ? auto_detect_drm_device() : std::string()) {}
 
 DisplayBackendDRM::DisplayBackendDRM(const std::string& drm_device) : drm_device_(drm_device) {}
 
@@ -258,6 +273,9 @@ DisplayBackendDRM::~DisplayBackendDRM() {
 }
 
 bool DisplayBackendDRM::is_available() const {
+    if (!drm_libs_present()) {
+        return false;
+    }
     if (drm_device_.empty()) {
         spdlog::debug("[DRM Backend] No DRM device configured");
         return false;
@@ -376,17 +394,17 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
     // panels (e.g. 5.5" QHD 1440x2560) that would otherwise render with
     // unreadably small text. Skip if the user explicitly requested a resolution
     // via -s. See prestonbrown/helixscreen#773, #774.
-    static constexpr uint32_t HIGH_DPI_THRESHOLD = 1920;
+    static constexpr uint32_t kHighDpiThreshold = 1920;
     int downscale_idx = size_was_explicit_
-                            ? helix::DrmModeMatch::NO_MATCH
-                            : helix::find_best_downscale_mode(modes, HIGH_DPI_THRESHOLD);
-    if (downscale_idx != helix::DrmModeMatch::NO_MATCH) {
+                            ? helix::DrmModeMatch::kNoMatch
+                            : helix::find_best_downscale_mode(modes, kHighDpiThreshold);
+    if (downscale_idx != helix::DrmModeMatch::kNoMatch) {
         int pref_idx = helix::find_preferred_mode_index(modes);
         const auto& native = modes[pref_idx];
         const auto& target = modes[downscale_idx];
         spdlog::info("[DRM Backend] Native resolution {}x{} exceeds {}px threshold, "
                      "selecting {}x{}@{} mode",
-                     native.hdisplay, native.vdisplay, HIGH_DPI_THRESHOLD, target.hdisplay,
+                     native.hdisplay, native.vdisplay, kHighDpiThreshold, target.hdisplay,
                      target.vdisplay, target.vrefresh);
         width = static_cast<int>(target.hdisplay);
         height = static_cast<int>(target.vdisplay);
@@ -398,13 +416,13 @@ lv_display_t* DisplayBackendDRM::create_display(int width, int height) {
     if (width > 0 && height > 0) {
         int match_idx = helix::find_matching_mode(modes, static_cast<uint32_t>(width),
                                                   static_cast<uint32_t>(height));
-        if (match_idx != helix::DrmModeMatch::NO_MATCH) {
+        if (match_idx != helix::DrmModeMatch::kNoMatch) {
             chosen_w = modes[match_idx].hdisplay;
             chosen_h = modes[match_idx].vdisplay;
             spdlog::info("[DRM Backend] Using requested mode {}x{}", chosen_w, chosen_h);
         } else if (size_was_explicit_ && !modes.empty()) {
             int pref = helix::find_preferred_mode_index(modes);
-            if (pref != helix::DrmModeMatch::NO_MATCH) {
+            if (pref != helix::DrmModeMatch::kNoMatch) {
                 chosen_w = modes[pref].hdisplay;
                 chosen_h = modes[pref].vdisplay;
             }
@@ -605,7 +623,9 @@ void DisplayBackendDRM::open_pointer_devices() {
     // If we have an explicit device, try it first
     if (!device_override.empty()) {
 #if LV_USE_LIBINPUT
-        pointer_ = lv_libinput_create(LV_INDEV_TYPE_POINTER, device_override.c_str());
+        if (use_libinput()) {
+            pointer_ = lv_libinput_create(LV_INDEV_TYPE_POINTER, device_override.c_str());
+        }
         if (pointer_ != nullptr) {
             pointer_path_ = device_override;
             spdlog::info("[DRM Backend] Libinput pointer device created on {}", device_override);
@@ -627,44 +647,49 @@ void DisplayBackendDRM::open_pointer_devices() {
     // Priority 3: Auto-discover touch device
     spdlog::info("[DRM Backend] Auto-detecting touch/pointer device...");
 
+    // libinput finds the touch device when the library is installed; the sysfs
+    // scanner finds it otherwise. touch_path points into whichever owns it.
+    const char* touch_path = nullptr;
+    std::optional<helix::input::ScannedDevice> scanned_touch;
+    if (use_libinput()) {
 #if LV_USE_LIBINPUT
-    // Use libinput to discover touch devices, then prefer evdev driver for
-    // multi-touch gesture recognition (pinch-to-zoom)
-    char* touch_path = lv_libinput_find_dev(LV_LIBINPUT_CAPABILITY_TOUCH, true);
-    if (touch_path) {
-        spdlog::info("[DRM Backend] Found touch device: {}", touch_path);
-        pointer_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, touch_path);
-        if (pointer_ != nullptr) {
-            pointer_is_evdev_ = true;
-            spdlog::info("[DRM Backend] Evdev touch device created on {} (multi-touch enabled)",
-                         touch_path);
-            configure_touch_gestures(pointer_);
-        } else {
-            // Fall back to libinput if evdev fails
-            pointer_ = lv_libinput_create(LV_INDEV_TYPE_POINTER, touch_path);
+        // Prefer the evdev driver on the device libinput finds, for multi-touch
+        // gesture recognition (pinch-to-zoom)
+        char* found = lv_libinput_find_dev(LV_LIBINPUT_CAPABILITY_TOUCH, true);
+        touch_path = found;
+        if (found) {
+            spdlog::info("[DRM Backend] Found touch device: {}", found);
+            pointer_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, found);
             if (pointer_ != nullptr) {
-                spdlog::info("[DRM Backend] Libinput touch device created on {}", touch_path);
+                pointer_is_evdev_ = true;
+                spdlog::info("[DRM Backend] Evdev touch device created on {} (multi-touch enabled)",
+                             found);
+                configure_touch_gestures(pointer_);
             } else {
-                spdlog::warn("[DRM Backend] Failed to create input device for: {}", touch_path);
+                // Fall back to libinput if evdev fails
+                pointer_ = lv_libinput_create(LV_INDEV_TYPE_POINTER, found);
+                if (pointer_ != nullptr) {
+                    spdlog::info("[DRM Backend] Libinput touch device created on {}", found);
+                } else {
+                    spdlog::warn("[DRM Backend] Failed to create input device for: {}", found);
+                }
+            }
+        }
+#endif
+    } else {
+        scanned_touch = helix::input::find_touch_device();
+        if (scanned_touch) {
+            touch_path = scanned_touch->path.c_str();
+            spdlog::info("[DRM Backend] Found touch device via evdev scan: {} ({})",
+                         scanned_touch->path, scanned_touch->name);
+            pointer_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, touch_path);
+            if (pointer_ != nullptr) {
+                pointer_is_evdev_ = true;
+                spdlog::info("[DRM Backend] Evdev touch device created on {}", scanned_touch->path);
+                configure_touch_gestures(pointer_);
             }
         }
     }
-#else
-    // No libinput: the sysfs scanner finds the touchscreen
-    const char* touch_path = nullptr;
-    auto touch = helix::input::find_touch_device();
-    if (touch) {
-        touch_path = touch->path.c_str();
-        spdlog::info("[DRM Backend] Found touch device via evdev scan: {} ({})", touch->path,
-                     touch->name);
-        pointer_ = lv_evdev_create(LV_INDEV_TYPE_POINTER, touch_path);
-        if (pointer_ != nullptr) {
-            pointer_is_evdev_ = true;
-            spdlog::info("[DRM Backend] Evdev touch device created on {}", touch->path);
-            configure_touch_gestures(pointer_);
-        }
-    }
-#endif
 
     // --- Touch calibration detection ---
     if (pointer_ && touch_path) {
@@ -1017,8 +1042,8 @@ void DisplayBackendDRM::open_pointer_devices() {
     }
 
     // If no touch was found, try pointer devices
-    if (!pointer_) {
 #if LV_USE_LIBINPUT
+    if (!pointer_ && use_libinput()) {
         // Try pointer devices via libinput (mouse, trackpad)
         // Don't free pointer_path — points into LVGL's internal devices[] array
         char* pointer_path = lv_libinput_find_dev(LV_LIBINPUT_CAPABILITY_POINTER, false);
@@ -1033,8 +1058,8 @@ void DisplayBackendDRM::open_pointer_devices() {
                              pointer_path);
             }
         }
-#endif
     }
+#endif
 
     if (!pointer_) {
         // Fallback to evdev on common device paths
@@ -1115,7 +1140,9 @@ lv_indev_t* DisplayBackendDRM::create_input_keyboard() {
     const char* env_device = std::getenv("HELIX_KEYBOARD_DEVICE");
     if (env_device && env_device[0] != '\0') {
 #if LV_USE_LIBINPUT
-        keyboard_ = lv_libinput_create(LV_INDEV_TYPE_KEYPAD, env_device);
+        if (use_libinput()) {
+            keyboard_ = lv_libinput_create(LV_INDEV_TYPE_KEYPAD, env_device);
+        }
         if (keyboard_) {
             spdlog::info("[DRM Backend] Keyboard created on {} (env override)", env_device);
             return keyboard_;
@@ -1603,5 +1630,11 @@ void DisplayBackendDRM::clear_calibration() {
     calibration_context_.calibration = calibration_;
     spdlog::info("[DRM Backend] Stored calibration cleared — device is uncalibrated");
 }
+
+#if LV_LINUX_DRM_USE_EGL
+std::unique_ptr<DisplayBackend> helix::make_drm_egl_backend() {
+    return std::make_unique<DisplayBackendDRM>();
+}
+#endif
 
 #endif // HELIX_DISPLAY_DRM

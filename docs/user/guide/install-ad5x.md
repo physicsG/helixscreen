@@ -2,6 +2,8 @@
 
 End-to-end guide for the FlashForge Adventurer 5X running the ZMOD firmware modification: install, update, and uninstall.
 
+> **Easy installer:** support for the Adventurer 5X in the [HelixScreen easy installer](https://helixscreen.org/installer/) is coming. Until then this guide is the way to install.
+
 > **Tested and working.** Prebuilt `ad5x` binaries are included in releases. Installation is handled through ZMOD.
 
 ## Prerequisites
@@ -16,7 +18,15 @@ End-to-end guide for the FlashForge Adventurer 5X running the ZMOD firmware modi
 
 ## Install
 
-ZMOD manages HelixScreen installation and updates through Moonraker's update manager. If you are setting up an AD5X from stock, install ZMOD first following its own instructions; HelixScreen then arrives and updates as an update-manager entry. That path "just works" and is the one most users should take.
+ZMOD manages HelixScreen installation and updates through Moonraker's update manager. If you are setting up an AD5X from stock, install ZMOD first following its own instructions. Then, in the Fluidd or Mainsail console (`http://<printer-ip>`):
+
+1. Run `ENABLE_EXTRA_PLUGINS`. This adds ZMOD's list of third-party plugins to Moonraker, which includes the `helixscreen` update-manager entry, and reboots the printer. It does not install HelixScreen yet.
+2. When the printer is back, open the update manager in Fluidd or Mainsail and update **helixscreen**. ZMOD starts it at version v0.0.1, so the current release shows as an update; applying it downloads `helixscreen-ad5x.zip` into `/srv/helixscreen`.
+3. Run `DISPLAY_OFF HELIX=1`. This turns the stock screen off and selects HelixScreen as the replacement, then reboots. Do this only after step 2: if no HelixScreen files are installed yet, the printer comes up with no screen at all.
+
+HelixScreen then updates through the same update manager entry. To go back to the stock screen, run `DISPLAY_ON`.
+
+> **Read ZMOD's warning first.** With the stock screen off, the printer no longer runs the stock screen's print start and end routines, so bed leveling, Z-offset and your slicer's start and end G-code work differently. See ZMOD's [DISPLAY_OFF documentation](https://github.com/ghzserg/zmod/blob/main/docs/en/System.md) before you switch.
 
 <details>
 <summary>Manual install from the command line (advanced)</summary>

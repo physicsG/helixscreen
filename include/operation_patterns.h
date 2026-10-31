@@ -42,6 +42,7 @@ enum class OperationCategory {
     HOMING,       ///< Homing axes (G28)
     CHAMBER_SOAK, ///< Chamber heat soak (HEAT_SOAK)
     SKEW_CORRECT, ///< Skew correction (SKEW_PROFILE, SET_SKEW)
+    MOTOR_SYNC,   ///< AWD belt motor sync (motors-sync's SYNC_MOTORS)
     START_PRINT,  ///< The print start macro itself (PRINT_START, START_PRINT)
     UNKNOWN,      ///< Unrecognized operation
 };
@@ -63,7 +64,7 @@ struct OperationKeyword {
  * Both PrintStartAnalyzer and GCodeOpsDetector use this list.
  */
 // clang-format off
-inline const OperationKeyword OPERATION_KEYWORDS[] = {
+inline const OperationKeyword kOperationKeywords[] = {
     // === Bed Mesh ===
     // Matches BED_MESH_CALIBRATE, BED_MESH_PROFILE, AUTO_BED_LEVEL, etc.
     {"BED_MESH",             OperationCategory::BED_MESH, "SKIP_BED_MESH",     false},
@@ -106,14 +107,20 @@ inline const OperationKeyword OPERATION_KEYWORDS[] = {
     {"SKEW_PROFILE",         OperationCategory::SKEW_CORRECT, "SKIP_SKEW",         false},
     {"SET_SKEW",             OperationCategory::SKEW_CORRECT, "SKIP_SKEW",         false},
     {"SKEW",                 OperationCategory::SKEW_CORRECT, "SKIP_SKEW",         false},
+
+    // === Motor Sync ===
+    // Exact: SYNC_MOTORS_CALIBRATE and SYNC_MOTORS_STATS are not a sync.
+    // motors-sync has no skip parameter; a macro skips the command behind
+    // printer.motors_sync.applied instead.
+    {"SYNC_MOTORS",          OperationCategory::MOTOR_SYNC,   "",                  true},
 };
 // clang-format on
 
-inline constexpr size_t OPERATION_KEYWORDS_COUNT =
-    sizeof(OPERATION_KEYWORDS) / sizeof(OPERATION_KEYWORDS[0]);
+inline constexpr size_t kOperationKeywordsCount =
+    sizeof(kOperationKeywords) / sizeof(kOperationKeywords[0]);
 
 /// Row width of the parameter-name tables below; unused slots are empty.
-inline constexpr size_t MAX_PARAM_VARIATIONS = 8;
+inline constexpr size_t kMaxParamVariations = 8;
 
 /// One category's parameter names: a view into a constexpr table row, so the
 /// tables need no static initialization in the TUs that include this header.
@@ -136,14 +143,14 @@ struct ParamNames {
 
 /// The names in @p table's row for @p cat, or none when @p cat has no row.
 template <size_t N>
-ParamNames param_names(const std::string_view (&table)[N][MAX_PARAM_VARIATIONS],
+ParamNames param_names(const std::string_view (&table)[N][kMaxParamVariations],
                        OperationCategory cat) {
     size_t idx = static_cast<size_t>(cat);
     if (idx >= N) {
         return {};
     }
     size_t n = 0;
-    while (n < MAX_PARAM_VARIATIONS && !table[idx][n].empty()) {
+    while (n < kMaxParamVariations && !table[idx][n].empty()) {
         ++n;
     }
     return {table[idx], n};
@@ -156,7 +163,7 @@ ParamNames param_names(const std::string_view (&table)[N][MAX_PARAM_VARIATIONS],
  * to determine if an operation can be skipped.
  */
 // clang-format off
-inline constexpr std::string_view SKIP_PARAM_VARIATIONS[][MAX_PARAM_VARIATIONS] = {
+inline constexpr std::string_view kSkipParamVariations[][kMaxParamVariations] = {
     // Index 0: BED_MESH
     {"SKIP_BED_MESH", "SKIP_MESH", "SKIP_BED_LEVELING", "NO_BED_MESH", "SKIP_LEVEL"},
     // Index 1: QGL
@@ -187,7 +194,7 @@ inline constexpr std::string_view SKIP_PARAM_VARIATIONS[][MAX_PARAM_VARIATIONS] 
  * These use opt-in semantics: param=1 means "do it", param=0 or omitted means "skip it".
  */
 // clang-format off
-inline constexpr std::string_view PERFORM_PARAM_VARIATIONS[][MAX_PARAM_VARIATIONS] = {
+inline constexpr std::string_view kPerformParamVariations[][kMaxParamVariations] = {
     // Index 0: BED_MESH
     {"PERFORM_BED_MESH", "DO_BED_MESH", "ENABLE_BED_MESH", "FORCE_BED_MESH", "FORCE_LEVELING"},
     // Index 1: QGL
@@ -221,7 +228,7 @@ inline constexpr std::string_view PERFORM_PARAM_VARIATIONS[][MAX_PARAM_VARIATION
  * Used by GCodeOpsDetector for parameter parsing, NOT by PrintStartAnalyzer.
  */
 // clang-format off
-inline constexpr std::string_view SLICER_PARAM_VARIATIONS[][MAX_PARAM_VARIATIONS] = {
+inline constexpr std::string_view kSlicerParamVariations[][kMaxParamVariations] = {
     // Index 0: BED_MESH
     {"MESH", "BED_MESH", "DO_BED_MESH"},
     // Index 1: QGL
@@ -250,7 +257,7 @@ inline constexpr std::string_view SLICER_PARAM_VARIATIONS[][MAX_PARAM_VARIATIONS
  * @return List of short parameter name variations, or empty if none
  */
 inline ParamNames get_slicer_param_variations(OperationCategory cat) {
-    return param_names(SLICER_PARAM_VARIATIONS, cat);
+    return param_names(kSlicerParamVariations, cat);
 }
 
 /**
@@ -276,6 +283,8 @@ inline const char* category_name(OperationCategory cat) {
         return "Chamber heat soak";
     case OperationCategory::SKEW_CORRECT:
         return "Skew correction";
+    case OperationCategory::MOTOR_SYNC:
+        return "Motor sync";
     case OperationCategory::START_PRINT:
         return "Start print";
     case OperationCategory::UNKNOWN:
@@ -307,6 +316,8 @@ inline const char* category_key(OperationCategory cat) {
         return "chamber_soak";
     case OperationCategory::SKEW_CORRECT:
         return "skew_correct";
+    case OperationCategory::MOTOR_SYNC:
+        return "motor_sync";
     case OperationCategory::START_PRINT:
         return "start_print";
     case OperationCategory::UNKNOWN:
@@ -322,7 +333,7 @@ inline const char* category_key(OperationCategory cat) {
  * @return List of skip parameter name variations, or empty if none
  */
 inline ParamNames get_skip_variations(OperationCategory cat) {
-    return param_names(SKIP_PARAM_VARIATIONS, cat);
+    return param_names(kSkipParamVariations, cat);
 }
 
 /**
@@ -363,7 +374,7 @@ inline std::vector<std::string> get_all_skip_variations(OperationCategory cat) {
  * @return List of perform parameter name variations, or empty if none
  */
 inline ParamNames get_perform_variations(OperationCategory cat) {
-    return param_names(PERFORM_PARAM_VARIATIONS, cat);
+    return param_names(kPerformParamVariations, cat);
 }
 
 /**
@@ -393,60 +404,8 @@ inline std::vector<std::string> get_all_perform_variations(OperationCategory cat
 }
 
 // ============================================================================
-// String Utilities (LT3)
+// Keyword Lookup (LT3)
 // ============================================================================
-
-/**
- * @brief Case-insensitive substring search (pure ASCII).
- *
- * Folds only A-Z/a-z, so it is locale-independent and leaves every other byte
- * (including high-bit-set and UTF-8 continuation bytes) untouched. That matches
- * the earlier ::toupper-based fold under the "C" locale this process keeps
- * (only LC_TIME is ever setlocale'd, so LC_CTYPE stays "C"), without the two
- * per-call std::string allocations or the ::toupper-on-negative-char UB.
- *
- * Empty needle returns false rather than the std::string::find "found at 0"
- * convention: every call site searches for a concrete token, and an empty
- * needle matching everything is a foot-gun the former local copies guarded
- * against explicitly. Verified equivalent over all real needles across every
- * byte 0x01-0xFF plus UTF-8 in de/fr/ru/ja.
- *
- * Accepts std::string_view, so std::string and string literals convert without
- * allocating.
- */
-inline bool contains_ci(std::string_view haystack, std::string_view needle) {
-    if (needle.empty() || needle.size() > haystack.size()) {
-        return false;
-    }
-    for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
-        bool match = true;
-        for (size_t j = 0; j < needle.size(); ++j) {
-            char hc = haystack[i + j];
-            char nc = needle[j];
-            if (hc >= 'A' && hc <= 'Z') {
-                hc = static_cast<char>(hc + 32);
-            }
-            if (nc >= 'A' && nc <= 'Z') {
-                nc = static_cast<char>(nc + 32);
-            }
-            if (hc != nc) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/**
- * @brief Case-insensitive string equality
- */
-inline bool equals_ci(std::string_view a, std::string_view b) {
-    return helix::text_io::to_upper(a) == helix::text_io::to_upper(b);
-}
 
 /**
  * @brief Find keyword entry by pattern string (substring match, case-insensitive)
@@ -465,18 +424,18 @@ inline const OperationKeyword* find_keyword(const std::string& pattern) {
     // Always uppercase for case-insensitive comparison
     std::string pat = helix::text_io::to_upper(pattern);
 
-    for (size_t i = 0; i < OPERATION_KEYWORDS_COUNT; ++i) {
-        std::string keyword = helix::text_io::to_upper(OPERATION_KEYWORDS[i].keyword);
+    for (size_t i = 0; i < kOperationKeywordsCount; ++i) {
+        std::string keyword = helix::text_io::to_upper(kOperationKeywords[i].keyword);
 
-        if (OPERATION_KEYWORDS[i].exact_match) {
+        if (kOperationKeywords[i].exact_match) {
             // G-codes: exact match only (avoid G28 matching inside FOO_G28_BAR)
             if (pat == keyword) {
-                return &OPERATION_KEYWORDS[i];
+                return &kOperationKeywords[i];
             }
         } else {
             // Macros: substring match (catches _PRIME_NOZZLE, AUTO_BED_LEVEL, etc.)
             if (pat.find(keyword) != std::string::npos) {
-                return &OPERATION_KEYWORDS[i];
+                return &kOperationKeywords[i];
             }
         }
     }
@@ -522,14 +481,14 @@ match_parameter_to_category(const std::string& param_name, bool include_slicer_p
 
         // Check perform variations (OPT_IN) first - they're more specific
         for (const auto& var : get_all_perform_variations(cat)) {
-            if (equals_ci(param_name, var)) {
+            if (helix::text_io::equals_ignore_case(param_name, var)) {
                 return ParamMatchResult{cat, ParameterSemantic::OPT_IN, std::string(var)};
             }
         }
 
         // Check skip variations (OPT_OUT)
         for (const auto& var : get_all_skip_variations(cat)) {
-            if (equals_ci(param_name, var)) {
+            if (helix::text_io::equals_ignore_case(param_name, var)) {
                 return ParamMatchResult{cat, ParameterSemantic::OPT_OUT, std::string(var)};
             }
         }
@@ -537,7 +496,7 @@ match_parameter_to_category(const std::string& param_name, bool include_slicer_p
         // Check slicer-style short params (OPT_IN semantics: value=1 means do it)
         if (include_slicer_params) {
             for (const auto& var : get_slicer_param_variations(cat)) {
-                if (equals_ci(param_name, var)) {
+                if (helix::text_io::equals_ignore_case(param_name, var)) {
                     return ParamMatchResult{cat, ParameterSemantic::OPT_IN, std::string(var)};
                 }
             }

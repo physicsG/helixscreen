@@ -49,3 +49,62 @@ TEST_CASE("an unknown code resolves to nothing", "[klipper][errors]") {
     CHECK(klipper_error_lookup("") == nullptr);
     CHECK(klipper_error_lookup("not-a-code") == nullptr);
 }
+
+using helix::ErrorSeverity;
+using helix::printer::klipper_error_classify;
+using helix::printer::klipper_error_modal_title;
+
+TEST_CASE("a box hardware fault blocks and names the filament system", "[klipper][errors]") {
+    const auto c = klipper_error_classify("key835");
+    CHECK(c.source == helix::ErrorSource::CFS);
+    CHECK(c.severity == ErrorSeverity::CRITICAL);
+    CHECK(c.title == "Filament System Error");
+    CHECK(c.recovery_actions.empty());
+}
+
+TEST_CASE("a box fault missing from the table still blocks", "[klipper][errors]") {
+    REQUIRE(klipper_error_lookup("key899") == nullptr);
+    const auto c = klipper_error_classify("key899");
+    CHECK(c.severity == ErrorSeverity::CRITICAL);
+    CHECK(c.title == "Filament System Error");
+}
+
+TEST_CASE("busy-box and restated-runout codes are toasts", "[klipper][errors]") {
+    for (const char* code : {"key839", "key843"}) {
+        CAPTURE(code);
+        const auto c = klipper_error_classify(code);
+        CHECK(c.severity == ErrorSeverity::WARNING);
+        CHECK(c.recovery_actions.empty());
+    }
+}
+
+TEST_CASE("key840 is a toast that offers the box reset", "[klipper][errors]") {
+    const auto c = klipper_error_classify("key840");
+    CHECK(c.severity == ErrorSeverity::WARNING);
+    REQUIRE(c.recovery_actions.size() == 1);
+    CHECK(c.recovery_actions[0].label == "Reset CFS");
+    CHECK(c.recovery_actions[0].gcode == "BOX_ERROR_CLEAR");
+    CHECK(c.recovery_actions[0].log_tag == "error_classify::key840_reset");
+}
+
+TEST_CASE("key298 offers the service-backed recover action", "[klipper][errors]") {
+    const auto c = klipper_error_classify("key298");
+    CHECK(c.severity == ErrorSeverity::WARNING);
+    REQUIRE(c.recovery_actions.size() == 1);
+    CHECK(c.recovery_actions[0].label == "Recover");
+    CHECK(c.recovery_actions[0].gcode.empty());
+    CHECK(c.recovery_actions[0].log_tag == helix::printer::kKlipperErrorRecoveryServiceTag);
+}
+
+TEST_CASE("Klipper-layer codes are untitled toasts", "[klipper][errors]") {
+    for (const char* code : {"key111", "key585", "key777"}) {
+        CAPTURE(code);
+        const auto c = klipper_error_classify(code);
+        CHECK(c.severity == ErrorSeverity::WARNING);
+        CHECK(c.title.empty());
+        CHECK(c.recovery_actions.empty());
+        CHECK(klipper_error_modal_title(code) == nullptr);
+    }
+    REQUIRE(klipper_error_modal_title("key899") != nullptr);
+    CHECK(std::string(klipper_error_modal_title("key899")) == "Filament System Error");
+}

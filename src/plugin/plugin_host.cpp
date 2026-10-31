@@ -6,6 +6,7 @@
 #include "plugin_host.h"
 
 #include "ui_callback_helpers.h"
+#include "ui_icon_image.h"
 #include "ui_nav.h"
 #include "ui_toast_manager.h"
 #include "ui_utils.h"
@@ -20,7 +21,9 @@
 #include "panel_widget_registry.h"
 #include "plugin_canvas.h"
 #include "plugin_settings_overlay.h"
+#include "plugin_table.h"
 #include "plugin_xml_policy.h"
+#include "text_io.h"
 #include "translation_loader.h"
 #include "version.h"
 
@@ -91,6 +94,7 @@ void register_plugin_event_callback() {
     });
     register_plugin_settings_callbacks();
     register_plugin_canvas_widget();
+    register_plugin_table_widget();
     registered = true;
 }
 
@@ -140,6 +144,13 @@ const char* plugin_status_name(PluginStatus s) {
 
 PluginHost::PluginHost(Deps deps) : deps_(std::move(deps)) {
     g_live_host = this;
+    layout_hook_ = theme_manager_add_layout_refresh_hook(
+        [this](lv_display_t* display) { refresh_layout_constants(display); });
+}
+
+void PluginHost::refresh_layout_constants(lv_display_t* display) {
+    for (const auto& [id, l] : loaded_)
+        register_plugin_consts(l.consts, display);
 }
 
 PluginHost* PluginHost::live() {
@@ -147,6 +158,7 @@ PluginHost* PluginHost::live() {
 }
 
 PluginHost::~PluginHost() {
+    theme_manager_remove_layout_refresh_hook(layout_hook_);
     unload_all();
     guard_.invalidate();
     if (g_live_host == this)
@@ -253,26 +265,73 @@ void PluginHost::consider(PluginInfo& info) {
 namespace {
 
 // An i18n/ folder of LVGL translation packs registers into the global table
-// LVGL already resolves every string through (app packs, then identity
-// English). Packs cannot be removed, so a path registers once and a plugin
-// re-enable or hot reload reuses what is already loaded.
+// LVGL already resolves every string through. Plugin packs sit at the END of
+// the lookup order, behind every app pack whenever it was loaded, so a pack
+// supplies only the tags the app does not translate and an empty slot in it
+// cannot hide an app string. English is the tag itself and has no app pack to
+// win against, so a pack declaring `en` is refused. Packs cannot be removed,
+// so a path registers once: a plugin re-enable or hot reload reuses what is
+// loaded, and an edited pack takes effect on the next app start.
+constexpr std::uintmax_t kMaxI18nPackBytes = 256 * 1024;
+
+bool declares_english(const std::string& xml) {
+    size_t at = xml.find("languages=\"");
+    if (at == std::string::npos)
+        return false;
+    at += 11;
+    std::string langs = " " + xml.substr(at, xml.find('"', at) - at) + " ";
+    return langs.find(" en ") != std::string::npos;
+}
+
 void register_plugin_translations(const std::filesystem::path& root) {
     std::error_code ec;
-    std::vector<std::string> files;
+    std::vector<std::filesystem::path> files;
     for (const auto& e : std::filesystem::directory_iterator(root / "i18n", ec)) {
         if (e.is_regular_file(ec) && e.path().extension() == ".xml")
-            files.push_back("A:" + e.path().string());
+            files.push_back(e.path());
     }
     std::sort(files.begin(), files.end());
     static std::set<std::string> registered;
     for (const auto& path : files) {
-        if (registered.count(path))
+        if (registered.count(path.string()))
             continue;
-        if (lv_xml_register_translation_from_file(path.c_str()) == LV_RESULT_OK) {
-            registered.insert(path);
-            spdlog::info("[PluginHost] translations registered: {}", path);
+        std::uintmax_t size = std::filesystem::file_size(path, ec);
+        if (ec || size > kMaxI18nPackBytes) {
+            spdlog::warn("[PluginHost] translation pack {} skipped: over {} bytes", path.string(),
+                         kMaxI18nPackBytes);
+            continue;
+        }
+        auto xml = helix::text_io::read_file(path.string(), kMaxI18nPackBytes);
+        if (!xml)
+            continue;
+        if (declares_english(*xml)) {
+            spdlog::warn("[PluginHost] translation pack {} skipped: English is the tag itself, "
+                         "drop 'en' from its languages",
+                         path.string());
+            continue;
+        }
+        lv_translation_set_new_packs_at_tail(true);
+        lv_result_t res = lv_xml_register_translation_from_data(xml->c_str());
+        lv_translation_set_new_packs_at_tail(false);
+        if (res == LV_RESULT_OK) {
+            registered.insert(path.string());
+            spdlog::info("[PluginHost] translations registered: {}", path.string());
         }
     }
+}
+
+/// `rel` (already a checked plugin-relative path) inside `root`, or empty when a symlink
+/// resolves it outside the plugin folder.
+std::string path_inside(const std::filesystem::path& root, const std::string& rel) {
+    std::error_code ec;
+    const auto base = std::filesystem::weakly_canonical(root, ec);
+    if (ec)
+        return {};
+    const auto full = std::filesystem::weakly_canonical(root / rel, ec);
+    if (ec)
+        return {};
+    auto mismatch = std::mismatch(base.begin(), base.end(), full.begin(), full.end());
+    return mismatch.first == base.end() ? full.string() : std::string();
 }
 
 } // namespace
@@ -336,9 +395,20 @@ bool PluginHost::load(PluginInfo& info) {
         }
     }
 
+    // Constants resolve when a component is created, so they are in place before
+    // any of the plugin's components is registered.
+    PluginConsts consts = collect_plugin_consts(buffers);
+    if (auto errors = missing_tier_errors(consts.px); !errors.empty()) {
+        info.status = PluginStatus::Invalid;
+        info.reason = errors.front();
+        return false;
+    }
+    register_plugin_consts(consts, lv_display_get_default());
+
     auto [it, inserted] = loaded_.try_emplace(id);
     Loaded& l = it->second;
     l.gen = next_load_gen_++;
+    l.consts = std::move(consts);
     for (size_t i = 0; i < xmls.size(); ++i) {
         if (lv_xml_register_component_from_data(stems[i].c_str(), buffers[i].c_str()) !=
             LV_RESULT_OK) {
@@ -348,6 +418,21 @@ bool PluginHost::load(PluginInfo& info) {
             return false;
         }
         l.components.emplace_back(stems[i], lv_xml_component_get_scope(stems[i].c_str()));
+    }
+
+    // An icon that cannot draw its image draws its fallback; the plugin still loads.
+    for (const IconDecl& d : m.icons) {
+        const std::string path = path_inside(root, d.src);
+        const auto status = helix::ui::icon::register_image_icon(d.name, path, d.fallback);
+        l.icons.push_back(d.name);
+        if (status != helix::ui::icon::ImageIconStatus::Ok)
+            spdlog::warn("[plugin {}] icon '{}' ({}) {}; drawing '{}' instead", id, d.name, d.src,
+                         path.empty() ? "is outside the plugin folder"
+                         : status == helix::ui::icon::ImageIconStatus::Missing ? "is missing"
+                         : status == helix::ui::icon::ImageIconStatus::TooLarge
+                             ? "is over 64 KB or 256x256"
+                             : "is not a readable PNG",
+                         d.fallback);
     }
 
     json block = deps_.read_block();
@@ -371,20 +456,38 @@ bool PluginHost::load(PluginInfo& info) {
     l.ctx = std::make_unique<PluginContext>(
         PluginContext{*l.rt, deps_.backend, m, &l.settings, [this, id] { save_settings(id); },
                       plugin_storage_path(deps_.settings_path, id)});
-    l.ui.open = [this, id](const std::string& component, std::function<void()> on_closed,
+    l.ctx->setting_changed = [this, id, gen = l.gen](const std::string& key, const json& value) {
+        for (auto& screen : settings_screens_) {
+            if (screen->plugin_id() == id && screen->load_gen() == gen)
+                screen->show_setting(key, value);
+        }
+    };
+    l.ui.open = [this, id](const std::string& component, PluginUi::Callbacks cb,
                            const PluginUi::Attrs& attrs) {
-        return overlays_.open(id, component, std::move(on_closed), attrs);
+        return surfaces_.open_overlay(id, component, std::move(cb), attrs);
+    };
+    l.ui.dialog = [this, id](const std::string& component, PluginUi::Callbacks cb,
+                             const PluginUi::Attrs& attrs) {
+        return surfaces_.open_dialog(id, component, std::move(cb), attrs);
     };
     l.ui.open_count = [this](const std::string& plugin_id) {
-        return overlays_.open_count(plugin_id);
+        return surfaces_.overlay_count(plugin_id);
     };
-    l.ui.close = [this](int handle) { overlays_.close(handle); };
+    l.ui.dialog_count = [this](const std::string& plugin_id) {
+        return surfaces_.dialog_count(plugin_id);
+    };
+    l.ui.close = [this](int handle) { surfaces_.close(handle); };
+    l.ui.is_open = [this](int handle) { return surfaces_.is_open(handle); };
+    l.ui.queue_confirm = [this, id](std::function<bool()> present,
+                                    std::function<void()> cancelled) {
+        surfaces_.queue_confirm(id, std::move(present), std::move(cancelled));
+    };
     l.ctx->ui = &l.ui;
     register_plugin_translations(root);
     for (Installer install :
          {&install_core_bindings, &install_ui_bindings, &install_printer_bindings,
           &install_moonraker_bindings, &install_io_bindings, &install_widget_bindings,
-          &install_canvas_bindings})
+          &install_canvas_bindings, &install_sound_bindings, &install_table_bindings})
         install(*l.ctx);
 
     if (!l.rt->run_file("main.lua")) {
@@ -398,7 +501,7 @@ bool PluginHost::load(PluginInfo& info) {
         helix::RuntimeWidgetDef def;
         def.id = d.id;
         def.display_name = d.name;
-        def.icon = d.icon.empty() ? "puzzle_outline" : d.icon;
+        def.icon = d.icon.empty() ? kDefaultPluginIcon : d.icon;
         def.description = d.description;
         def.colspan = d.colspan;
         def.rowspan = d.rowspan;
@@ -446,6 +549,7 @@ void PluginHost::unload(const std::string& id) {
     }
     // Overlays go before the runtime does too, and silently: the plugin's on_close
     // hooks point at a Lua state that is about to close.
+    surfaces_.drop_plugin(id);
     overlays_.close_all(id);
     // Its generated settings screen leaves the same way, through navigation, so
     // the close callback that erases it runs on every path.
@@ -464,6 +568,8 @@ void PluginHost::unload(const std::string& id) {
         }
     }
     l.rt.reset();
+    for (const auto& name : l.icons)
+        helix::ui::icon::unregister_image_icon(name);
     for (const auto& [name, scope] : l.components) {
         if (lv_xml_component_find_scope(name.c_str()) == scope)
             lv_xml_component_unregister(name.c_str());
@@ -620,6 +726,153 @@ void PluginHost::disable(const std::string& id) {
         info->status = PluginStatus::Disabled;
         info->reason.clear();
     }
+}
+
+namespace {
+
+LuaRuntime::PushFn push_context(const json& context) {
+    return [&context](lua_State* co) {
+        push_json(co, context);
+        return 1;
+    };
+}
+
+/// What a menu check decided for one item.
+struct CheckVerdict {
+    bool valid = false;
+    bool visible = false;
+    bool enabled = true;
+    std::string reason;
+};
+
+/// Reads a check's return value: a boolean, or a plain table whose `visible` and `enabled`
+/// are booleans (absent means true) and whose `reason` is a string (absent means none).
+/// call_sync runs it between the check's resume and closing its thread, outside any
+/// protected call, so nothing here may run plugin code: an error would reach the panic
+/// handler. Fields are read raw, and a table with a metatable is not a valid result.
+CheckVerdict read_check_value(lua_State* co, int nres) {
+    CheckVerdict v;
+    if (nres < 1)
+        return v;
+    const int at = lua_absindex(co, -nres);
+    if (lua_type(co, at) == LUA_TBOOLEAN) {
+        v.valid = true;
+        v.visible = lua_toboolean(co, at);
+        return v;
+    }
+    if (lua_type(co, at) != LUA_TTABLE)
+        return v;
+    if (lua_getmetatable(co, at)) {
+        lua_pop(co, 1);
+        return v;
+    }
+    auto raw_field = [&](const char* key) {
+        lua_pushstring(co, key);
+        return lua_rawget(co, at);
+    };
+    auto flag = [&](const char* key, bool& out) {
+        int t = raw_field(key);
+        bool ok = t == LUA_TNIL || t == LUA_TBOOLEAN;
+        out = t == LUA_TNIL || lua_toboolean(co, -1);
+        lua_pop(co, 1);
+        return ok;
+    };
+    bool ok = flag("visible", v.visible) && flag("enabled", v.enabled);
+    int t = raw_field("reason");
+    if (t == LUA_TSTRING)
+        v.reason = lua_tostring(co, -1);
+    lua_pop(co, 1);
+    v.valid = ok && (t == LUA_TNIL || t == LUA_TSTRING);
+    return v;
+}
+
+} // namespace
+
+bool PluginHost::menu_declared(MenuKind kind, std::string_view plugin_id) const {
+    for (const auto& [id, l] : loaded_) {
+        if (!l.rt || l.rt->faulted() || (!plugin_id.empty() && id != plugin_id))
+            continue;
+        const auto& items = l.ctx->manifest.menu_items;
+        if (std::any_of(items.begin(), items.end(),
+                        [kind](const MenuItemDecl& d) { return d.menu == kind; }))
+            return true;
+    }
+    return false;
+}
+
+std::vector<plugin_menu::Entry> PluginHost::resolve_menu(MenuKind kind, const json& context,
+                                                         std::string_view only_plugin) {
+    std::vector<plugin_menu::Entry> out;
+    const size_t cap = static_cast<size_t>(std::max(0, plugin_menu::row_cap(kind)));
+    size_t dropped = 0;
+    // plugins_ is in load order; loaded_ holds the runtimes.
+    for (const auto& info : plugins_) {
+        if (!only_plugin.empty() && info.dir_name != only_plugin)
+            continue;
+        auto it = loaded_.find(info.dir_name);
+        if (it == loaded_.end())
+            continue;
+        Loaded& l = it->second;
+        const Manifest& m = l.ctx->manifest;
+        for (const auto& d : m.menu_items) {
+            if (d.menu != kind)
+                continue;
+            if (!l.rt || l.rt->faulted())
+                break;
+            if (out.size() >= cap) {
+                ++dropped;
+                continue;
+            }
+            plugin_menu::Entry e;
+            e.plugin_id = m.id;
+            e.plugin_name = lv_tr(m.name.c_str());
+            e.item_id = d.id;
+            e.label = lv_tr(d.label.c_str());
+            e.icon = d.icon;
+            e.gen = l.gen;
+            if (!d.check.empty()) {
+                CheckVerdict v;
+                if (!call_ui_handler_sync(
+                        *l.rt, d.check, push_context(context),
+                        [&v](lua_State* co, int nres) { v = read_check_value(co, nres); }))
+                    continue;
+                if (!v.valid) {
+                    l.rt->report_error(
+                        "menu check '" + d.check +
+                        "' must return a boolean or a plain table {visible = bool, enabled = "
+                        "bool, reason = string}");
+                    continue;
+                }
+                if (!v.visible)
+                    continue;
+                e.enabled = v.enabled;
+                if (!v.enabled && !v.reason.empty())
+                    e.reason = lv_tr(v.reason.c_str());
+            }
+            out.push_back(std::move(e));
+        }
+    }
+    if (dropped > 0)
+        spdlog::debug("[PluginHost] {} menu: {} plugin row(s) past the cap of {} not shown",
+                      menu_kind_name(kind), dropped, cap);
+    return out;
+}
+
+void PluginHost::activate_menu(const plugin_menu::Entry& e, const json& context) {
+    auto it = loaded_.find(e.plugin_id);
+    if (it == loaded_.end() || it->second.gen != e.gen || !it->second.rt ||
+        it->second.rt->faulted()) {
+        spdlog::debug("[PluginHost] menu item '{}' of '{}' is gone; ignoring the tap", e.item_id,
+                      e.plugin_id);
+        return;
+    }
+    const auto& items = it->second.ctx->manifest.menu_items;
+    auto d = std::find_if(items.begin(), items.end(),
+                          [&](const MenuItemDecl& m) { return m.id == e.item_id; });
+    if (d == items.end())
+        return;
+    if (!dispatch_ui_handler(*it->second.rt, d->handler, push_context(context)))
+        spdlog::debug("[PluginHost] plugin '{}' has no handler '{}'", e.plugin_id, d->handler);
 }
 
 void PluginHost::dispatch_event(std::string_view user_data) {

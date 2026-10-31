@@ -2,9 +2,9 @@
 
 #pragma once
 
+#include "callout_layout.h"
 #include "overlay_base.h"
 #include "printer_image_regions.h"
-#include "src/ui/panel_widgets/callout_layout.h"
 #include "static_panel_registry.h"
 
 #include <optional>

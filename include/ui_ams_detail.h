@@ -22,7 +22,7 @@
  */
 
 /// Maximum slots supported in a single detail view
-static constexpr int AMS_DETAIL_MAX_SLOTS = 16;
+static constexpr int kAmsDetailMaxSlots = helix::kAmsMaxSlots;
 
 /// Widget pointers resolved from an ams_unit_detail component
 struct AmsDetailWidgets {
@@ -31,7 +31,7 @@ struct AmsDetailWidgets {
     lv_obj_t* slot_tray = nullptr;     ///< Visual "holder" in front of spool bottoms
     lv_obj_t* labels_layer = nullptr;  ///< Overlay for material labels (5+ slots)
     lv_obj_t* badge_layer = nullptr;   ///< Overlay for slot badges (in front of tray)
-    lv_obj_t* env_indicator = nullptr; ///< Environment indicator (temp/humidity, right side)
+    lv_obj_t* env_indicator = nullptr; ///< Environment chip (temp/humidity) on the lid
 };
 
 /**
@@ -49,7 +49,7 @@ AmsDetailWidgets ams_detail_find_widgets(lv_obj_t* root);
  *
  * @param w           Widget pointers from ams_detail_find_widgets()
  * @param slot_widgets Output array of created slot widget pointers
- * @param max_slots   Size of slot_widgets array (use AMS_DETAIL_MAX_SLOTS)
+ * @param max_slots   Size of slot_widgets array (use kAmsDetailMaxSlots)
  * @param unit_index  Backend unit index (-1 = whole backend for single-unit panels)
  * @param click_cb    Per-slot click callback (panel-specific)
  * @param user_data   User data for click callback (typically panel pointer)
@@ -74,6 +74,9 @@ void ams_detail_destroy_slots(AmsDetailWidgets& w, lv_obj_t* slot_widgets[], int
 
 /**
  * @brief Size tray to 1/4 of slot grid height (minimum 20px) with 3D box effect
+ *
+ * No box is drawn in flat spool style or for a unit with no housing; the
+ * environment pill then stands beside the spools.
  * @param w Widget pointers — uses slot_grid height and positions slot_tray
  */
 void ams_detail_update_tray(AmsDetailWidgets& w, lv_obj_t* const slot_widgets[] = nullptr,
@@ -120,10 +123,8 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
 /**
  * @brief Pre-show environment indicator if backend has environment sensors
  *
- * Must be called BEFORE ams_detail_create_slots() so the flex layout
- * accounts for the indicator's width when calculating slot sizes.
- * Without this, slots are sized for full width, then the indicator
- * appears on top of the last spool.
+ * The chip floats on the lid and takes no row width; ams_detail_update_tray()
+ * places it once the box is laid out.
  *
  * Also selects which unit's env indicator subjects the statically-embedded
  * detail-view indicator mirrors (see AmsState::set_detail_env_unit) and
@@ -186,14 +187,11 @@ void ams_detail_sync_slot_states(lv_obj_t* slot_widgets[], int slot_count,
 /**
  * @brief Dispatch the context-menu actions that are pure backend calls
  *
- * AmsPanel and AmsOverviewPanel each wire their own AmsContextMenu action
- * callback, and the two switches drifted: Overview was missing EJECT,
- * SELECT_GATE, CHECK_GATE and CLEAR_SPOOL entirely, so those fell through its
- * `default:` and were swallowed without a toast or a log line. Multi-unit
- * setups render the Overview, so every AFC user with two units had a dead
- * Eject button (prestonbrown/helixscreen#1258).
+ * AmsPanel and AmsOverviewPanel both route their slot menus through this, so
+ * neither can swallow one of these actions in its own `default:`
+ * (prestonbrown/helixscreen#1258).
  *
- * These five actions need nothing from the owning panel except the path canvas,
+ * These actions need nothing from the owning panel except the path canvas,
  * so they live here rather than in either panel. Panel-specific actions (EDIT,
  * SPOOLMAN, SCAN_QR, LOAD/UNLOAD's sidebar routing) stay with their panel —
  * they open panel-owned modals and have no single shared form.

@@ -93,7 +93,7 @@ std::string PrintStartAnalysis::summary() const {
 // Operation Detection Patterns - Now using shared operation_patterns.h
 // ============================================================================
 // All patterns are defined in operation_patterns.h and accessed via
-// OPERATION_KEYWORDS[] and get_skip_variations()
+// kOperationKeywords[] and get_skip_variations()
 
 // ============================================================================
 // PrintStartAnalyzer Implementation
@@ -328,7 +328,7 @@ PrintStartAnalysis analyze_chain(const std::string& name, const std::string& gco
             contributing.push_back(visits[index].name);
         }
 
-        if (visits[index].depth >= PrintStartAnalyzer::MAX_FOLLOW_DEPTH) {
+        if (visits[index].depth >= PrintStartAnalyzer::kMaxFollowDepth) {
             continue;
         }
         const size_t first_callee = visits.size();
@@ -365,26 +365,26 @@ void PrintStartAnalyzer::analyze(const std::map<std::string, std::string>& file_
     spdlog::debug("[PrintStartAnalyzer] Searching {} cached config files for macro...",
                   file_contents.size());
 
-    const MacroDefinitions definitions = collect_macro_definitions(file_contents, ROOT_CONFIG_FILE);
+    const MacroDefinitions definitions = collect_macro_definitions(file_contents, kRootConfigFile);
 
-    for (size_t i = 0; i < MACRO_NAMES_COUNT; ++i) {
-        auto def_it = definitions.find(MACRO_NAMES[i]);
+    for (size_t i = 0; i < kMacroNamesCount; ++i) {
+        auto def_it = definitions.find(kMacroNames[i]);
         if (def_it == definitions.end()) {
             continue;
         }
         const MacroDefinition& definition = def_it->second;
         std::vector<std::string> contributing;
         PrintStartAnalysis result =
-            analyze_chain(MACRO_NAMES[i], definition.gcode, definitions, contributing);
+            analyze_chain(kMacroNames[i], definition.gcode, definitions, contributing);
         result.found = true;
-        result.macro_name = MACRO_NAMES[i];
+        result.macro_name = kMacroNames[i];
         result.source_file = definition.file;
         std::string sources;
         for (const auto& macro : contributing) {
             sources += (sources.empty() ? "" : ", ") + macro;
         }
         spdlog::info("[PrintStartAnalyzer] Found macro '{}' in {} ({} chars), operations from: {}",
-                     MACRO_NAMES[i], definition.file, definition.gcode.size(),
+                     kMacroNames[i], definition.file, definition.gcode.size(),
                      sources.empty() ? "none" : sources);
         spdlog::debug("[PrintStartAnalyzer] Analyzed {}", chain_text(result));
         if (on_complete) {

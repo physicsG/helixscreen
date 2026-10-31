@@ -25,6 +25,16 @@ enum class FaultReason { None, Overtemp, SensorFault, CommsLoss, Other };
 /// these at the backend border; the raw string is kept for logging only.
 enum class FilterFanDriver { Unknown, Off, Requested, Device };
 
+/// Why the heater turned down a target we asked for. Vendor reason codes map
+/// to one of these at the backend border; the raw code is kept for logs only.
+/// Conflict: another controller changed the heater between our read and our
+/// write. Refused: the heater itself declined (see RefusalCause). Auth: it did
+/// not accept the printer's credentials.
+enum class CommandRejection { None, Conflict, Refused, Auth };
+
+/// What a Refused rejection is about, for the words the user reads.
+enum class RefusalCause { Unspecified, TurnedOff, Fault, Inhibited };
+
 /// Generic chamber-heater diagnostics — the ONLY shape subjects/UI ever see.
 /// Vendor JSON schemas are translated to this at the backend border.
 ///
@@ -60,6 +70,21 @@ struct ChamberHeaterDiagnostics {
     std::optional<int> drying_remaining_s;
     std::optional<int> drying_target_c;     ///< the cycle's target temperature
     std::optional<int> drying_duration_min; ///< the cycle's full length
+    /// The heater's answer to the last target we sent. Engaged None is the
+    /// device reporting no rejection outstanding. A backend that does not
+    /// report rejections never engages these.
+    std::optional<CommandRejection> rejection;
+    std::optional<RefusalCause> refusal_cause;
+    /// Increments once per rejection, so a repeat of the same reason is
+    /// still a new event.
+    std::optional<int> rejection_seq;
+    /// Target the rejected command asked for, °C; NAN = not reported.
+    std::optional<double> rejection_target_c;
+    std::optional<std::string> rejection_code; ///< raw vendor code, logs only
+    /// The device's own wait on the chamber (an M191 its glue runs) is
+    /// holding the queue. A backend that reports none never engages these.
+    std::optional<bool> wait_active;
+    std::optional<double> wait_target_c; ///< the wait's temperature; NAN = not reported
 };
 
 /// One chamber-heater style/brand behind an interface (AMS-backend pattern).
@@ -79,6 +104,13 @@ class ChamberHeaterBackend {
     virtual std::string_view filter_fan_pin() const = 0;
     /// Gcode clearing a latched fault ("" = none).
     virtual std::string_view fault_reset_gcode() const = 0;
+    /// Moonraker JSON-RPC method that sets the heater target outside the gcode
+    /// queue, taking {"target": °C} ("" = none). A gcode set waits behind
+    /// whatever holds the queue, including a TEMPERATURE_WAIT on this very
+    /// heater; this route does not.
+    virtual std::string_view set_target_method() const {
+        return {};
+    }
     /// Backend reports the heating element's own temperature. False hides the
     /// element readout: a permanently blank row tells the user nothing, and
     /// this is a property of the schema, not of any one frame.

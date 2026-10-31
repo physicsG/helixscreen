@@ -16,7 +16,7 @@ using Clock = std::chrono::steady_clock;
 /// See the header for why 3 s: it has to span `!!` broadcast -> AFC
 /// pause_print() -> Moonraker status delta -> AmsAction::ERROR edge, which is
 /// a full round trip on the slowest supported hardware.
-constexpr auto CAUSAL_WINDOW = std::chrono::milliseconds(3000);
+constexpr auto kCausalWindow = std::chrono::milliseconds(3000);
 
 /// Runaway guard. Nothing prunes on a write-only workload — a printer spraying
 /// distinct error strings would otherwise grow this without bound between
@@ -41,7 +41,7 @@ std::deque<Entry>& entries() {
 // Caller must hold mu().
 void prune_locked() {
     const auto now = Clock::now();
-    while (!entries().empty() && (now - entries().front().recorded_at) > CAUSAL_WINDOW) {
+    while (!entries().empty() && (now - entries().front().recorded_at) > kCausalWindow) {
         entries().pop_front();
     }
 }

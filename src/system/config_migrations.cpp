@@ -10,6 +10,7 @@
 #include "input_defaults.h"
 #include "json_utils.h"
 #include "platform_capabilities.h"
+#include "screensaver_setting.h"
 #include "text_io.h"
 
 #if !defined(HELIX_SPLASH_ONLY) && !defined(HELIX_WATCHDOG)
@@ -281,26 +282,24 @@ static void migrate_v11_to_v12(json& config, const std::string& /*config_path*/)
     }
 }
 
-/// Repair stale AD5X display settings from the pre-#431 preset. The original AD5X
-/// preset (#235) set sleep_backlight_off=false under the assumption that backlight
-/// power-off prevented wake-on-touch. #431 corrected this after hardware verification.
-/// Users whose wizard ran between those commits still have the stale combination
-/// (backlight never turns off at sleep).
-static void migrate_v12_to_v13(json& config, const std::string& /*config_path*/) {
-    bool is_ad5x = false;
-    if (helix::json_util::safe_string(config, "preset") == "ad5x") {
-        is_ad5x = true;
-    } else if (config.contains("printers") && config["printers"].is_object()) {
-        for (auto& [printer_id, printer] : config["printers"].items()) {
-            if (helix::json_util::safe_string(printer, "type") == "FlashForge Adventurer 5X") {
-                is_ad5x = true;
-                break;
-            }
-        }
+/// True when the config's preset is `preset`, or any saved printer has type `printer_type`.
+/// A migration freezes its detection rule at the version it repairs, so this reads the raw
+/// config and never asks PrinterDetector.
+static bool config_names_printer(const json& config, const char* preset, const char* printer_type) {
+    if (helix::json_util::safe_string(config, "preset") == preset)
+        return true;
+    if (!config.contains("printers") || !config["printers"].is_object())
+        return false;
+    for (const auto& [printer_id, printer] : config["printers"].items()) {
+        if (helix::json_util::safe_string(printer, "type") == printer_type)
+            return true;
     }
-    if (!is_ad5x)
-        return;
+    return false;
+}
 
+/// Turn the backlight off at sleep when the display block still carries the stale pair
+/// (sleep_backlight_off=false with hardware_blank=0).
+static void restore_backlight_off_sleep(json& config, const char* log_tag) {
     if (!config.contains("display") || !config["display"].is_object())
         return;
 
@@ -309,9 +308,21 @@ static void migrate_v12_to_v13(json& config, const std::string& /*config_path*/)
         helix::json_util::safe_int(display, "hardware_blank", -1) == 0) {
         display["sleep_backlight_off"] = true;
         display["hardware_blank"] = 1;
-        spdlog::info("[Config] Migration v13: restored AD5X backlight-off sleep "
-                     "(sleep_backlight_off=true, hardware_blank=1)");
+        spdlog::info("[Config] {}: restored AD5X backlight-off sleep "
+                     "(sleep_backlight_off=true, hardware_blank=1)",
+                     log_tag);
     }
+}
+
+/// Repair stale AD5X display settings from the pre-#431 preset. The original AD5X
+/// preset (#235) set sleep_backlight_off=false under the assumption that backlight
+/// power-off prevented wake-on-touch. #431 corrected this after hardware verification.
+/// Users whose wizard ran between those commits still have the stale combination
+/// (backlight never turns off at sleep).
+static void migrate_v12_to_v13(json& config, const std::string& /*config_path*/) {
+    // VENDOR_OK: a migration freezes the printers it repairs
+    if (config_names_printer(config, "ad5x", "FlashForge Adventurer 5X"))
+        restore_backlight_off_sleep(config, "Migration v13");
 }
 
 /// Fold legacy telemetry_config.json into settings.json. The previous
@@ -364,31 +375,9 @@ static void migrate_v13_to_v14(json& config, const std::string& config_path) {
 /// release that introduces this migration. Detection condition is identical to
 /// v12→v13 so the fix is idempotent if the wizard is re-run on an older build.
 static void migrate_v14_to_v15(json& config, const std::string& /*config_path*/) {
-    bool is_ad5x = false;
-    if (helix::json_util::safe_string(config, "preset") == "ad5x") {
-        is_ad5x = true;
-    } else if (config.contains("printers") && config["printers"].is_object()) {
-        for (auto& [printer_id, printer] : config["printers"].items()) {
-            if (helix::json_util::safe_string(printer, "type") == "FlashForge Adventurer 5X") {
-                is_ad5x = true;
-                break;
-            }
-        }
-    }
-    if (!is_ad5x)
-        return;
-
-    if (!config.contains("display") || !config["display"].is_object())
-        return;
-
-    auto& display = config["display"];
-    if (!helix::json_util::safe_bool(display, "sleep_backlight_off", true) &&
-        helix::json_util::safe_int(display, "hardware_blank", -1) == 0) {
-        display["sleep_backlight_off"] = true;
-        display["hardware_blank"] = 1;
-        spdlog::info("[Config] Migration v15: re-applied AD5X backlight-off sleep "
-                     "after wizard-override removal");
-    }
+    // VENDOR_OK: a migration freezes the printers it repairs
+    if (config_names_printer(config, "ad5x", "FlashForge Adventurer 5X"))
+        restore_backlight_off_sleep(config, "Migration v15");
 }
 
 /// v15 → v16: Turn the screensaver off on BASIC/EMBEDDED tiers where Flying Toasters
@@ -793,7 +782,7 @@ static int fan_out_to_printers(json& config, const std::string& root_path,
 }
 
 /// The four leaves of a printer's legacy scanner/ node.
-static constexpr const char* SCANNER_LEAVES[] = {"usb_vendor_product", "usb_device_name",
+static constexpr const char* kScannerLeaves[] = {"usb_vendor_product", "usb_device_name",
                                                  "bt_address", "keymap"};
 
 /// Collapse the per-printer scanner/ nodes into one root-level /scanner.
@@ -811,7 +800,7 @@ static void collapse_scanner_to_root(json& config) {
     if (!active.empty()) {
         json* source = find_relative(config, "printers/" + active + "/scanner");
         if (source != nullptr && source->is_object()) {
-            for (const char* leaf : SCANNER_LEAVES) {
+            for (const char* leaf : kScannerLeaves) {
                 const auto it = source->find(leaf);
                 if (it == source->end() || it->is_null()) {
                     continue;
@@ -1166,11 +1155,11 @@ static void migrate_v24_to_v25(json& config, const std::string& /*config_path*/)
     // PrintStartPhase as it was numbered when these documents were written,
     // before SOAKING took slot 4. Frozen — it describes stored data, not the
     // current enum, and must not be regenerated from it.
-    static constexpr const char* LEGACY_PHASE_NAMES[] = {
+    static constexpr const char* kLegacyPhaseNames[] = {
         "IDLE",   "INITIALIZING", "HOMING",   "HEATING_BED", "HEATING_NOZZLE", "QGL",
         "Z_TILT", "BED_MESH",     "CLEANING", "PURGING",     "COMPLETE",
     };
-    constexpr int LEGACY_PHASE_COUNT = static_cast<int>(std::size(LEGACY_PHASE_NAMES));
+    constexpr int kLegacyPhaseCount = static_cast<int>(std::size(kLegacyPhaseNames));
 
     if (!config.contains("print_start_history") ||
         !config["print_start_history"].contains("entries") ||
@@ -1200,11 +1189,11 @@ static void migrate_v24_to_v25(json& config, const std::string& /*config_path*/)
             // At most three digits, so it always parses.
             const int ordinal = tio::parse_int<int>(key).value_or(-1);
             changed = true;
-            if (ordinal < 0 || ordinal >= LEGACY_PHASE_COUNT) {
+            if (ordinal < 0 || ordinal >= kLegacyPhaseCount) {
                 ++dropped;
                 continue;
             }
-            renamed[LEGACY_PHASE_NAMES[ordinal]] = it.value();
+            renamed[kLegacyPhaseNames[ordinal]] = it.value();
         }
 
         if (changed) {
@@ -1252,10 +1241,90 @@ static void migrate_v26_to_v27(json& config, const std::string& /*config_path*/)
         return;
     }
     const int stored = input["scroll_throw"].get<int>();
-    const int migrated = migrated_scroll_throw(stored, helix::input_defaults::SCROLL_THROW);
+    const int migrated = migrated_scroll_throw(stored, helix::input_defaults::kScrollThrow);
     if (migrated != stored) {
         input["scroll_throw"] = migrated;
         spdlog::info("[Config] Migration v27: input.scroll_throw {} -> {}", stored, migrated);
+    }
+}
+
+/// Rewrite an integer /display/screensaver_type as the stable name it stood for, straight from
+/// the frozen legacy table and never through the live registry, so neither a reordered nor a
+/// removed saver changes what an old number becomes. An out-of-range number becomes the default
+/// saver. A string is already a name and is left as it is, as is any other JSON type, which the
+/// reader treats as the default.
+static void migrate_v27_to_v28(json& config, const std::string& /*config_path*/) {
+    if (!config.contains("display") || !config["display"].is_object()) {
+        return;
+    }
+    json& display = config["display"];
+    if (!display.contains("screensaver_type") || !display["screensaver_type"].is_number_integer()) {
+        return;
+    }
+    const json& stored = display["screensaver_type"];
+    const char* name = helix::ui::legacy_screensaver_name(stored.get<long long>());
+    if (name == nullptr) {
+        name = helix::ui::screensaver_name(helix::ui::kDefaultScreensaverType);
+    }
+    spdlog::info("[Config] Migration v28: display.screensaver_type {} -> \"{}\"", stored.dump(),
+                 name);
+    display["screensaver_type"] = name;
+}
+
+/// Move each printer's ams/afc_unload_after_print to the backend-neutral
+/// ams/unload_after_print. A printer that already holds the new key keeps it.
+static void migrate_v28_to_v29(json& config, const std::string& /*config_path*/) {
+    if (!config.contains("printers") || !config["printers"].is_object()) {
+        return;
+    }
+    for (auto& [printer_id, printer] : config["printers"].items()) {
+        if (!printer.is_object()) {
+            continue;
+        }
+        if (migrate_config_keys(printer,
+                                {{"/ams/afc_unload_after_print", "/ams/unload_after_print"}})) {
+            spdlog::info("[Config] Migration v29: ams/afc_unload_after_print -> "
+                         "ams/unload_after_print for printer '{}'",
+                         printer_id);
+        }
+    }
+}
+
+/// Move each printer's lane eject distance and speed off the QIDI-named keys to
+/// the backend-neutral ams/eject_distance and ams/eject_velocity. A printer that
+/// already holds a new key keeps it.
+static void migrate_v29_to_v30(json& config, const std::string& /*config_path*/) {
+    if (!config.contains("printers") || !config["printers"].is_object()) {
+        return;
+    }
+    for (auto& [printer_id, printer] : config["printers"].items()) {
+        if (!printer.is_object()) {
+            continue;
+        }
+        if (migrate_config_keys(printer, {{"/ams/qidi_eject_distance", "/ams/eject_distance"},
+                                          {"/ams/qidi_eject_velocity", "/ams/eject_velocity"}})) {
+            spdlog::info("[Config] Migration v30: ams/qidi_eject_* -> ams/eject_* for printer '{}'",
+                         printer_id);
+        }
+    }
+}
+
+/// Move the install-wide /remote_screen/enabled and /remote_screen/control into the active
+/// printer, the one they were last turned on for. Every other printer starts with sharing
+/// off: a copy would list the screen among the webcams of printers nobody chose to share
+/// it with. A printer that already holds a value keeps it.
+static void migrate_v30_to_v31(json& config, const std::string& /*config_path*/) {
+    if (!config.contains("remote_screen") || !config["remote_screen"].is_object()) {
+        return;
+    }
+    const std::string active = find_active_printer_key(config);
+    if (active.empty()) {
+        return;
+    }
+    const std::string base = "/printers/" + active + "/remote_screen";
+    if (migrate_config_keys(config, {{"/remote_screen/enabled", base + "/enabled"},
+                                     {"/remote_screen/control", base + "/control"}})) {
+        spdlog::info("[Config] Migration v31: screen sharing moved to printer '{}'", active);
     }
 }
 
@@ -1273,16 +1342,18 @@ constexpr struct {
     {19, migrate_v18_to_v19}, {20, migrate_v19_to_v20}, {21, migrate_v20_to_v21},
     {22, migrate_v21_to_v22}, {23, migrate_v22_to_v23}, {24, migrate_v23_to_v24},
     {25, migrate_v24_to_v25}, {26, migrate_v25_to_v26}, {27, migrate_v26_to_v27},
+    {28, migrate_v27_to_v28}, {29, migrate_v28_to_v29}, {30, migrate_v29_to_v30},
+    {31, migrate_v30_to_v31},
 };
 
-static_assert(kMigrations[std::size(kMigrations) - 1].to_version == CURRENT_CONFIG_VERSION,
+static_assert(kMigrations[std::size(kMigrations) - 1].to_version == kCurrentConfigVersion,
               "the last migration must reach CURRENT_CONFIG_VERSION");
 
 } // namespace
 
 namespace helix::config_detail {
 
-/// Run all versioned migrations in sequence from current version to CURRENT_CONFIG_VERSION
+/// Run all versioned migrations in sequence from current version to kCurrentConfigVersion
 void run_versioned_migrations(json& config, const std::string& config_path) {
     int version = 0;
     if (config.contains("config_version")) {
@@ -1318,10 +1389,10 @@ void run_versioned_migrations(json& config, const std::string& config_path) {
     // whole subtree over its path discards what the node held before save()
     // ever sees it, so a subtree owner has to merge into the existing node —
     // PanelWidgetConfig::save() is the one that carries newer keys this way.
-    if (version > CURRENT_CONFIG_VERSION) {
+    if (version > kCurrentConfigVersion) {
         spdlog::warn("[Config] config_version {} was written by a newer build (this build "
                      "understands {}) — leaving the document unmigrated and unstamped",
-                     version, CURRENT_CONFIG_VERSION);
+                     version, kCurrentConfigVersion);
         return;
     }
 
@@ -1334,7 +1405,7 @@ void run_versioned_migrations(json& config, const std::string& config_path) {
         }
     }
 
-    config["config_version"] = CURRENT_CONFIG_VERSION;
+    config["config_version"] = kCurrentConfigVersion;
 }
 
 int migrated_scroll_throw(int stored, int platform_default) {

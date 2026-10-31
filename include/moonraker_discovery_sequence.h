@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "json_fwd.h"
 #include "printer_discovery.h"
 #include "webcam_selection.h"
@@ -48,14 +49,14 @@ class MoonrakerDiscoverySequence {
      * @param on_complete Called when discovery finishes successfully
      * @param on_error Called if discovery fails (e.g., Klippy not connected)
      */
-    void start(std::function<void()> on_complete,
-               std::function<void(const std::string& reason)> on_error = nullptr);
+    void start(helix::SharedCallback<void()> on_complete,
+               helix::SharedCallback<void(const std::string& reason)> on_error = nullptr);
 
     /**
      * @brief Parse Klipper object list into typed hardware vectors
      *
      * Categorizes objects into heaters, sensors, fans, LEDs, steppers,
-     * AFC objects, and filament sensors.
+     * filament sensors and MCUs.
      *
      * @param objects JSON array of object name strings
      */
@@ -139,7 +140,7 @@ class MoonrakerDiscoverySequence {
     }
 
     /** @brief Set callback for bed mesh updates */
-    void set_bed_mesh_callback(std::function<void(const json&)> cb) {
+    void set_bed_mesh_callback(helix::SharedCallback<void(const json&)> cb) {
         std::lock_guard<std::mutex> lock(callbacks_mutex_);
         bed_mesh_callback_ = std::move(cb);
     }
@@ -161,7 +162,7 @@ class MoonrakerDiscoverySequence {
     /** @brief Invoke the on_discovery_complete callback with current hardware (mock use) */
     void invoke_discovery_complete();
 
-    // ======== Hardware vector accessors (for mock to populate directly) ========
+    // ======== Mock-owned hardware lists (real discovery reads PrinterDiscovery) ========
     // Thread safety: mutable accessors must only be called before start() or
     // from the same thread as discovery callbacks. Not safe for concurrent use.
 
@@ -171,20 +172,11 @@ class MoonrakerDiscoverySequence {
     std::vector<std::string>& sensors() {
         return sensors_;
     }
-    std::vector<std::string>& load_cells() {
-        return load_cells_;
-    }
     std::vector<std::string>& fans() {
         return fans_;
     }
     std::vector<std::string>& leds() {
         return leds_;
-    }
-    std::vector<std::string>& steppers() {
-        return steppers_;
-    }
-    std::vector<std::string>& afc_objects() {
-        return afc_objects_;
     }
     std::vector<std::string>& filament_sensors() {
         return filament_sensors_;
@@ -192,9 +184,6 @@ class MoonrakerDiscoverySequence {
 
     const std::vector<std::string>& heaters() const {
         return heaters_;
-    }
-    const std::vector<std::string>& load_cells() const {
-        return load_cells_;
     }
     const std::vector<std::string>& sensors() const {
         return sensors_;
@@ -204,12 +193,6 @@ class MoonrakerDiscoverySequence {
     }
     const std::vector<std::string>& leds() const {
         return leds_;
-    }
-    const std::vector<std::string>& steppers() const {
-        return steppers_;
-    }
-    const std::vector<std::string>& afc_objects() const {
-        return afc_objects_;
     }
     const std::vector<std::string>& filament_sensors() const {
         return filament_sensors_;
@@ -226,6 +209,11 @@ class MoonrakerDiscoverySequence {
 
     /** @brief Check if a captured sequence number matches the current discovery */
     bool is_current_sequence(uint64_t seq) const;
+
+    /// The identify failed because Moonraker refused the login: every later request would
+    /// fail the same way, so discovery stops and the refusal is reported once. False for
+    /// any other error, which discovery carries on past.
+    bool stop_for_refused_login(const MoonrakerError& err);
 
     /**
      * @brief Continue discovery after server.connection.identify
@@ -251,6 +239,15 @@ class MoonrakerDiscoverySequence {
      * Called alongside discover_power_devices() during both partial and full discovery.
      */
     void discover_sensors();
+
+    /**
+     * @brief Read Moonraker's version from update_manager (fire-and-forget)
+     *
+     * For a server.info that reported a placeholder version: machine.update.status
+     * still knows the checkout's tag or commit. Publishes to hardware_ (for the
+     * discovery snapshot) and PrinterState (for a reply landing after it).
+     */
+    void fetch_moonraker_version_fallback(uint64_t seq);
 
     /**
      * @brief Record the hardware fields carried by a machine.system_info reply
@@ -285,8 +282,11 @@ class MoonrakerDiscoverySequence {
      * @param service_state `service_state` out of machine.system_info, or an
      *        empty object when that query failed — which reads as "assume
      *        available" (prestonbrown/helixscreen#1351).
+     * @param probe_local_endpoints Fall back to probing loopback camera ports
+     *        when the registry has nothing usable; see
+     *        helix::board::Info::local_camera_probe_safe for where that is allowed.
      */
-    void detect_webcam(json service_state);
+    void detect_webcam(json service_state, bool probe_local_endpoints);
 
     /**
      * @brief Continue discovery after Klippy readiness gate passes
@@ -332,41 +332,29 @@ class MoonrakerDiscoverySequence {
      * narrowing each object to just the fields HelixScreen parsers actually
      * read. Exposed publicly so unit tests can lock the field lists against
      * regression — production code calls it from
-     * complete_discovery_subscription() with the live discovery vectors.
+     * complete_discovery_subscription() with the discovery snapshot.
      *
-     * Pure (no I/O, no logging, no member access) — depends only on its args.
+     * Every object PrinterDiscovery classified is subscribed with
+     * hw::status_fields(kind). Pure aside from the active print-start profile
+     * lookup; no member access.
      */
-    static nlohmann::json build_subscription_objects(
-        const PrinterDiscovery& hw, const std::vector<std::string>& heaters,
-        const std::vector<std::string>& sensors, const std::vector<std::string>& load_cells,
-        const std::vector<std::string>& fans, const std::vector<std::string>& leds,
-        const std::vector<std::string>& afc_objects,
-        const std::vector<std::string>& filament_sensors, const std::vector<std::string>& mcus);
+    static nlohmann::json build_subscription_objects(const PrinterDiscovery& hw);
 
   private:
     MoonrakerClient& client_;
 
     // Discovery sequence callbacks (stored once in start(), used by chained methods)
-    std::function<void()> on_complete_discovery_;
-    std::function<void(const std::string&)> on_error_discovery_;
+    helix::SharedCallback<void()> on_complete_discovery_;
+    helix::SharedCallback<void(const std::string&)> on_error_discovery_;
     uint64_t discovery_generation_{0};
     uint64_t discovery_sequence_{0}; // Monotonic counter to invalidate prior discoveries
 
     // Hardware vectors
     std::vector<std::string> heaters_;
-    std::vector<std::string> load_cells_;
     std::vector<std::string> sensors_;
     std::vector<std::string> fans_;
     std::vector<std::string> leds_;
-    std::vector<std::string> steppers_;
-    std::vector<std::string> afc_objects_;
     std::vector<std::string> filament_sensors_;
-    // MCUs (matches "mcu" and "mcu <name>" — e.g. "mcu host", "mcu e0").
-    // Subscribed alongside the rest so PerformanceState gets live
-    // last_stats/bytes_retransmit via the single union subscription. Moonraker
-    // replaces the subscription on every printer.objects.subscribe call, so
-    // PerformanceSource cannot subscribe separately without wiping ours.
-    std::vector<std::string> mcus_;
 
     PrinterDiscovery hardware_;
     mutable std::mutex hardware_mutex_; // Protects hardware_ from concurrent read/write (#777)
@@ -396,21 +384,21 @@ class MoonrakerDiscoverySequence {
     std::function<void(const PrinterDiscovery&)> on_hardware_discovered_;
     std::function<void(const PrinterDiscovery&, const nlohmann::json& initial_status)>
         on_discovery_complete_;
-    std::function<void(const json&)> bed_mesh_callback_;
+    helix::SharedCallback<void(const json&)> bed_mesh_callback_;
     std::mutex callbacks_mutex_;
 };
 
 /// Seconds allowed for the TCP connect phase of a snapshot reachability probe.
 /// This is the budget that decides "is anything listening at this address" —
 /// the stale-DHCP / wrong-subnet case the probe exists to catch.
-inline constexpr int SNAPSHOT_PROBE_CONNECT_TIMEOUT_SEC = 2;
+inline constexpr int kSnapshotProbeConnectTimeoutSec = 2;
 
 /// Seconds allowed for the whole snapshot reachability probe.
 /// Deliberately longer than the connect budget: a go2rtc-style endpoint that
 /// transcodes H.264 must wait for the next keyframe before it can emit a JPEG,
 /// measured at up to ~2.9s on a Pi 5. Raising this does not slow the dead-address
 /// case down — that one loses on the connect budget above.
-inline constexpr int SNAPSHOT_PROBE_TOTAL_TIMEOUT_SEC = 6;
+inline constexpr int kSnapshotProbeTotalTimeoutSec = 6;
 
 /**
  * @brief Probe an absolute snapshot URL to decide whether the webcam is live.

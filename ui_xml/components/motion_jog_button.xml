@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- One motion panel jog button: a tap jogs once, a hold repeats. `jog`
+       names the move in MotionPanel's parse_jog_button() form
+       (<axis>_<direction>_<size>, e.g. z_up_large or x_minus_step). The
+       button lays out its icon and label when it is created, so those are
+       props (`label` names the text subject; empty means icon only); size,
+       bind_icon and any disabled binding come from the instance. -->
+  <api>
+    <prop name="jog" type="string" default=""/>
+    <prop name="icon" type="string" default="arrow_up"/>
+    <prop name="icon_position" type="string" default="left"/>
+    <prop name="variant" type="string" default="primary"/>
+    <prop name="label" type="string" default=""/>
+    <prop name="icon_size" type="string" default="sm"/>
+  </api>
+  <view extends="ui_button"
+        style_pad_ver="0" icon="$icon" icon_position="$icon_position" variant="$variant" bind_text="$label"
+        icon_size="$icon_size">
+    <event_cb trigger="clicked" callback="on_motion_jog_button" user_data="$jog"/>
+    <event_cb trigger="pressed" callback="on_motion_jog_button_pressed" user_data="$jog"/>
+    <event_cb trigger="released" callback="on_motion_jog_button_released"/>
+    <event_cb trigger="press_lost" callback="on_motion_jog_button_press_lost"/>
+  </view>
+</component>

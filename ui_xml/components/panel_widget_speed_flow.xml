@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    Speed / Flow home widget. SpeedFlowWidget publishes speed_flow_rung (SizeRung),
+    speed_flow_show_measured, speed_flow_show_steppers and the value/status texts; the
+    two speed_flow_part children bind every appearance off them. A tap anywhere that is
+    not a stepper opens the Tune overlay.
+  -->
+  <styles>
+    <style name="sf_body_column"
+           layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center" flex_track_place="center"/>
+    <style name="sf_body_row"
+           layout="flex" flex_flow="row" flex_main_place="space_evenly" flex_cross_place="center"
+           flex_track_place="center"/>
+  </styles>
+  <view name="panel_widget_speed_flow"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_xxs" scrollable="false">
+    <event_cb trigger="clicked" callback="speed_flow_clicked_cb"/>
+    <pass_through name="speed_flow_body"
+                  width="100%" height="100%" style_pad_row="#space_xxs" style_pad_column="#space_xxs">
+      <bind_style_if_eq name="sf_body_row" subject="speed_flow_rung" ref_value="1"/>
+      <bind_style_if_not_eq name="sf_body_column" subject="speed_flow_rung" ref_value="1"/>
+      <speed_flow_part name="speed_flow_speed_part"
+                       icon="speed" label="Speed" value_subject="speed_flow_speed_text"
+                       measured_subject="speed_flow_speed_measured" status_subject="speed_flow_speed_status"
+                       step_callback="speed_flow_speed_step_cb" reset_callback="speed_flow_speed_reset_cb"/>
+      <speed_flow_part name="speed_flow_flow_part"
+                       icon="nozzle" label="Flow" value_subject="speed_flow_flow_text"
+                       measured_subject="speed_flow_flow_measured" status_subject="speed_flow_flow_status"
+                       step_callback="speed_flow_flow_step_cb" reset_callback="speed_flow_flow_reset_cb" step_down="-1"
+                       step_up="1">
+        <bind_flag_if_eq subject="speed_flow_rung" flag="hidden" ref_value="0"/>
+      </speed_flow_part>
+    </pass_through>
+  </view>
+</component>

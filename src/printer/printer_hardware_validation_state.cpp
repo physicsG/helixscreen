@@ -11,6 +11,7 @@
 
 #include "printer_hardware_validation_state.h"
 
+#include "i18n_plural.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "state/subject_macros.h"
 
@@ -80,9 +81,11 @@ void PrinterHardwareValidationState::set_hardware_validation_result(
                  lv_tr("All configured hardware detected"));
     } else {
         size_t total = result.total_issue_count();
-        snprintf(hardware_status_title_buf_, sizeof(hardware_status_title_buf_), "%s",
-                 total == 1 ? lv_tr("1 Issue Detected")
-                            : fmt::format(lv_tr("{} Issues Detected"), total).c_str());
+        snprintf(
+            hardware_status_title_buf_, sizeof(hardware_status_title_buf_), "%s",
+            fmt::format(
+                fmt::runtime(ui::tr_plural("1 Issue Detected", "{} Issues Detected", total)), total)
+                .c_str());
 
         // Build detail string
         std::string detail;
@@ -115,12 +118,12 @@ void PrinterHardwareValidationState::set_hardware_validation_result(
     if (total == 0) {
         snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_), "%s",
                  lv_tr("No Hardware Issues"));
-    } else if (total == 1) {
-        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_), "%s",
-                 lv_tr("1 Hardware Issue"));
     } else {
-        snprintf(hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_), "%s",
-                 fmt::format(lv_tr("{} Hardware Issues"), total).c_str());
+        snprintf(
+            hardware_issues_label_buf_, sizeof(hardware_issues_label_buf_), "%s",
+            fmt::format(
+                fmt::runtime(ui::tr_plural("1 Hardware Issue", "{} Hardware Issues", total)), total)
+                .c_str());
     }
     lv_subject_copy_string(&hardware_issues_label_, hardware_issues_label_buf_);
 

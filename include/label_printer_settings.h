@@ -19,6 +19,7 @@ namespace helix {
  * - printer_address (IP/hostname of Brother QL printer or IPP printer)
  * - printer_port (raw socket port, default 9100; IPP uses 631)
  * - printer_protocol ("raw" or "ipp") — auto-detected from mDNS discovery
+ * - ipp_resource_path (IPP queue path from mDNS TXT "rp"; belongs to printer_address)
  * - usb_vid, usb_pid, usb_serial (USB device identification)
  * - bt_address (Bluetooth MAC address)
  * - bt_transport ("spp" or "ble")
@@ -62,8 +63,15 @@ class LabelPrinterSettingsManager {
     /** @brief Get printer IP address or hostname */
     std::string get_printer_address() const;
 
-    /** @brief Set printer address (updates configured subject + persists) */
+    /** @brief Set printer address (updates configured subject + persists).
+     *  A different address clears the IPP resource path, which belongs to the old one. */
     void set_printer_address(const std::string& addr);
+
+    /** @brief Get the IPP resource path as stored (empty = printer advertised none) */
+    std::string get_ipp_resource_path() const;
+
+    /** @brief Set the IPP resource path (persists to config) */
+    void set_ipp_resource_path(const std::string& path);
 
     /** @brief Get raw socket port (default 9100) */
     int get_printer_port() const;
@@ -162,5 +170,28 @@ class LabelPrinterSettingsManager {
 
     bool subjects_initialized_ = false;
 };
+
+/**
+ * @brief The subject XML binds as `label_printer_configured`
+ *
+ * Builds without label-printer support get a permanent 0, so a
+ * `bind_flag_if_eq subject="label_printer_configured" flag="hidden"` resolves and
+ * hides the label controls instead of failing to bind and leaving them visible.
+ */
+inline lv_subject_t* label_printer_configured_subject() {
+#if HELIX_HAS_LABEL_PRINTER
+    auto& settings = LabelPrinterSettingsManager::instance();
+    settings.init_subjects();
+    return settings.subject_printer_configured();
+#else
+    static lv_subject_t unsupported{};
+    static bool initialized = false;
+    if (!initialized) {
+        lv_subject_init_int(&unsupported, 0);
+        initialized = true;
+    }
+    return &unsupported;
+#endif
+}
 
 } // namespace helix

@@ -18,6 +18,7 @@
 #pragma once
 
 #include "lvgl/lvgl.h"
+#include "observer_factory.h"
 #include "overlay_base.h"
 #include "static_panel_registry.h"
 
@@ -62,7 +63,18 @@ class UpdatesSettingsOverlay : public OverlayBase {
     void hide_update_download_modal();
 
   private:
+    /// Brings the download dialog back for an error reported after a backdrop
+    /// tap, ESC or a modal-stack sweep closed it. The worker outlives the
+    /// dialog, and update_download_modal is the only view of download_status,
+    /// so without this a failed update leaves nothing on screen
+    /// (prestonbrown/helixscreen#1727).
+    void on_download_status(int status);
+
     lv_obj_t* update_download_modal_ = nullptr;
+    /// Set by hide_update_download_modal(): the user's own Cancel/Close, which
+    /// an error arriving afterwards must not override.
+    bool download_modal_closed_by_user_ = false;
+    ObserverGuard download_status_observer_;
 };
 
 inline UpdatesSettingsOverlay& get_updates_settings_overlay() {

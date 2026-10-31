@@ -3,12 +3,15 @@
 
 #pragma once
 
+#include "async_lifetime_guard.h"
+#include "helix_shared_callback.h"
 #include "i_moonraker_client.h"   // for helix::ConnectionState, helix::SubscriptionId
 #include "i_moonraker_sub_apis.h" // sub-API interfaces returned by the accessors
 #include "json_fwd.h"
 #include "lvgl.h" // lv_subject_t
 #include "moonraker_error.h"
 #include "moonraker_types.h" // SafetyLimits, PowerDevice, GcodeStoreEntry
+#include "utils/network_validation.h"
 
 #include <cstdint>
 #include <functional>
@@ -18,11 +21,21 @@
 
 namespace helix {
 struct SensorInfo;      // Forward declaration for get_sensors()
-struct PlrDetectResult; // plr_backend.h — check_continue_print_state() result
 class IMoonrakerClient; // returned by get_client()
 class PrinterState;     // returned by printer_state()
 class PrinterDiscovery; // returned by hardware()
-} // namespace helix
+
+/// Klippy's state as Moonraker's printer.info reports it. `state` is the raw
+/// string: Klipper's ready/startup/shutdown/error (parse_klippy_state() maps
+/// those), or Moonraker's own "disconnected" while it has no Klippy connection.
+struct KlippyStatus {
+    std::string state;
+    std::string state_message;
+};
+
+/// Read state and state_message from a printer.info `result` object; either is
+/// empty when absent or not a string.
+KlippyStatus parse_klippy_status(const nlohmann::json& info);
 
 /**
  * @brief Abstract interface for the high-level Moonraker API façade.
@@ -44,11 +57,12 @@ class PrinterDiscovery; // returned by hardware()
  */
 class IMoonrakerAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using BoolCallback = std::function<void(bool)>;
-    using StringCallback = std::function<void(const std::string&)>;
-    using JsonCallback = std::function<void(const json&)>;
+    using StringCallback = helix::SharedCallback<void(const std::string&)>;
+    using JsonCallback = helix::SharedCallback<void(const json&)>;
+    using KlippyStatusCallback = std::function<void(const KlippyStatus&)>;
 
     using PowerDevicesCallback = std::function<void(const std::vector<PowerDevice>&)>;
     using SensorsCallback =
@@ -57,25 +71,25 @@ class IMoonrakerAPI {
     // ========== G-code execute_gcode timeout constants ==========
     // Default (timeout_ms = 0) is MoonrakerRequestTracker's 60s. These are for
     // long-running commands.
-    static constexpr uint32_t HOMING_TIMEOUT_MS = 300000;        // 5 min — G28 on large printers
-    static constexpr uint32_t AMS_OPERATION_TIMEOUT_MS = 300000; // 5 min — MMU/AFC/tool change ops
-    static constexpr uint32_t EXTRUSION_TIMEOUT_MS =
+    static constexpr uint32_t kHomingTimeoutMs = 300000;       // 5 min — G28 on large printers
+    static constexpr uint32_t kAmsOperationTimeoutMs = 300000; // 5 min — MMU/AFC/tool change ops
+    static constexpr uint32_t kExtrusionTimeoutMs =
         120000; // 2 min — filament purge/load at slow feedrate
-    static constexpr uint32_t MACRO_TIMEOUT_MS =
+    static constexpr uint32_t kMacroTimeoutMs =
         300000; // 5 min — user macros can do anything (homing, leveling, filament ops)
     /// 20 min — a pre-print macro chain that the print start must WAIT for.
     /// Creality's BED_MESH_CALIBRATE_START_PRINT homes, wipes, heats the bed to
     /// print temp and then runs a full adaptive mesh; measured at ~10 min on a
-    /// warm K2 Plus, and a cold ASA soak to 105C pushes it past MACRO_TIMEOUT_MS.
+    /// warm K2 Plus, and a cold ASA soak to 105C pushes it past kMacroTimeoutMs.
     /// If even this ceiling expires while the printer still reports busy,
     /// PrintPreparationManager waits for the busy->idle edge instead of failing;
     /// only a printer that never goes idle aborts the start.
-    static constexpr uint32_t PRE_START_MACRO_TIMEOUT_MS = 1200000;
+    static constexpr uint32_t kPreStartMacroTimeoutMs = 1200000;
 
     /// Moonraker's default API port. When the HTTP base points here we assume a
     /// "direct to Moonraker" connection, where the webcam is served by a separate
     /// reverse proxy (conventionally nginx on :80) rather than the API port.
-    static constexpr int MOONRAKER_DEFAULT_PORT = 7125;
+    static constexpr int kMoonrakerDefaultPort = helix::kDefaultMoonrakerPort;
 
     virtual ~IMoonrakerAPI() = default;
 
@@ -116,14 +130,14 @@ class IMoonrakerAPI {
 
     /// @brief Subscribe to status update notifications
     virtual helix::SubscriptionId
-    subscribe_notifications(std::function<void(const json&)> callback) = 0;
+    subscribe_notifications(helix::SharedCallback<void(const json&)> callback) = 0;
 
     /// @brief Unsubscribe from status update notifications
     virtual bool unsubscribe_notifications(helix::SubscriptionId id) = 0;
 
     /// @brief Register a persistent callback for a specific notification method
     virtual void register_method_callback(const std::string& method, const std::string& name,
-                                          std::function<void(const json&)> callback) = 0;
+                                          helix::SharedCallback<void(const json&)> callback) = 0;
 
     /// @brief Unregister a method-specific callback
     virtual bool unregister_method_callback(const std::string& method, const std::string& name) = 0;
@@ -134,7 +148,7 @@ class IMoonrakerAPI {
     /// @brief Retrieve recent G-code commands/responses from Moonraker's store
     virtual void
     get_gcode_store(int count, std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-                    std::function<void(const MoonrakerError&)> on_error) = 0;
+                    helix::SharedCallback<void(const MoonrakerError&)> on_error) = 0;
 
     // ========================================================================
     // Moonraker Database
@@ -142,18 +156,19 @@ class IMoonrakerAPI {
 
     /// @brief Get a value from Moonraker's database
     virtual void database_get_item(const std::string& namespace_name, const std::string& key,
-                                   std::function<void(const json&)> on_success,
+                                   helix::SharedCallback<void(const json&)> on_success,
                                    ErrorCallback on_error = nullptr) = 0;
 
     /// @brief Store a value in Moonraker's database
     virtual void database_post_item(const std::string& namespace_name, const std::string& key,
-                                    const json& value, std::function<void()> on_success = nullptr,
+                                    const json& value,
+                                    helix::SharedCallback<void()> on_success = nullptr,
                                     ErrorCallback on_error = nullptr) = 0;
 
     /// @brief Get all keys in a namespace. Moonraker returns a JSON object
     ///        mapping key -> value. Empty object if namespace is empty/missing.
     virtual void database_get_namespace(const std::string& namespace_name,
-                                        std::function<void(const json&)> on_success,
+                                        helix::SharedCallback<void(const json&)> on_success,
                                         ErrorCallback on_error = nullptr) = 0;
 
     /// @brief Delete a key from Moonraker's database. Implementations normalize
@@ -161,7 +176,7 @@ class IMoonrakerAPI {
     ///        into on_success so callers can treat delete as idempotent. on_error
     ///        only fires for genuine failures (network, permission, protocol).
     virtual void database_delete_item(const std::string& namespace_name, const std::string& key,
-                                      std::function<void()> on_success = nullptr,
+                                      helix::SharedCallback<void()> on_success = nullptr,
                                       ErrorCallback on_error = nullptr) = 0;
 
     // ========================================================================
@@ -236,16 +251,6 @@ class IMoonrakerAPI {
     virtual void exclude_object(const std::string& object_name, SuccessCallback on_success,
                                 ErrorCallback on_error) = 0;
 
-    /// @brief Probe Creality's power-loss recovery snapshot. SIDE-EFFECTFUL —
-    ///        call at most once per connection, only in standby, never poll.
-    ///        See MoonrakerAPI for the full contract.
-    virtual void
-    check_continue_print_state(std::function<void(const helix::PlrDetectResult&)> on_result,
-                               ErrorCallback on_error) = 0;
-
-    /// @brief Discard the Creality power-loss recovery snapshot.
-    virtual void cancel_continue_print(SuccessCallback on_success, ErrorCallback on_error) = 0;
-
     /// @brief Emergency stop
     virtual void emergency_stop(SuccessCallback on_success, ErrorCallback on_error) = 0;
 
@@ -272,8 +277,8 @@ class IMoonrakerAPI {
     // Query Operations
     // ========================================================================
 
-    /// @brief Query if printer is ready for commands
-    virtual void is_printer_ready(BoolCallback on_result, ErrorCallback on_error) = 0;
+    /// @brief Query Klippy's state and state message (printer.info)
+    virtual void get_klippy_status(KlippyStatusCallback on_result, ErrorCallback on_error) = 0;
 
     /// @brief Get current print state
     virtual void get_print_state(StringCallback on_result, ErrorCallback on_error) = 0;
@@ -318,6 +323,12 @@ class IMoonrakerAPI {
     /// @brief Get client lifetime guard (for SubscriptionGuard safety)
     virtual std::weak_ptr<bool> client_lifetime_weak() const = 0;
 
+    /// @brief A token that expires when this API is destroyed
+    ///
+    /// Destruction runs on the main thread, so a callback that checks the token
+    /// there before touching the API never reaches a freed one.
+    virtual LifetimeToken lifetime_token() const = 0;
+
     // ========================================================================
     // Internal Access
     // ========================================================================
@@ -356,3 +367,5 @@ class IMoonrakerAPI {
     virtual IFilesAPI& files() = 0;
     virtual IQueueAPI& queue() = 0;
 };
+
+} // namespace helix

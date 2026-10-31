@@ -5,6 +5,7 @@
 #include "ui_callback_helpers.h"
 #include "ui_emergency_stop.h"
 #include "ui_error_reporting.h"
+#include "ui_guided_device_flow.h"
 #include "ui_modal.h"
 #include "ui_nav.h"
 #include "ui_update_queue.h"
@@ -14,6 +15,7 @@
 #include "format_utils.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "macro_executor.h"
 #include "macro_param_cache.h"
 #include "observer_factory.h"
 #include "print_lifecycle_state.h"
@@ -31,6 +33,17 @@
 namespace helix::ui {
 
 namespace cal = helix::tool_offset_calibration;
+
+namespace {
+
+/// The blocking macro the panel runs, or empty when this printer's entry runs
+/// some other procedure.
+std::string panel_macro() {
+    const cal::Procedure p = cal::resolve_procedure(get_printer_state().get_discovery());
+    return p.kind == cal::ProcedureKind::Panel ? p.gcode : std::string{};
+}
+
+} // namespace
 
 // ============================================================================
 // LIFECYCLE
@@ -119,7 +132,7 @@ void ToolOffsetCalibrationPanel::on_activate() {
     // reads every description. Without one, say only what is true of every
     // implementation: how it heats, probes and which tool it measures
     // against is the macro's business, not this screen's.
-    const std::string desc = helix::MacroParamCache::instance().get(cal::kMacro).description;
+    const std::string desc = helix::MacroParamCache::instance().get(panel_macro()).description;
     lv_subject_copy_string(&hint_, desc.empty()
                                        ? lv_tr("Runs the printer's tool offset calibration "
                                                "for every tool.")
@@ -236,7 +249,7 @@ void ToolOffsetCalibrationPanel::begin_run() {
         spdlog::warn("[ToolOffsetCal] No API - cannot start calibration");
         return;
     }
-    const std::string gcode = cal::calibrate_all_gcode(get_printer_state().get_discovery());
+    const std::string gcode = panel_macro();
     if (gcode.empty()) {
         NOTIFY_ERROR("{}", lv_tr("This printer cannot calibrate tool offsets automatically"));
         return;
@@ -263,7 +276,7 @@ void ToolOffsetCalibrationPanel::begin_run() {
         object_lifetime_.bg_cb("ToolOffsetCal::done", [this]() { on_run_finished(true, ""); }),
         object_lifetime_.bg_cb("ToolOffsetCal::error",
                                [this](const MoonrakerError& err) { on_run_rpc_error(err); }),
-        CALIBRATION_TIMEOUT_MS);
+        kCalibrationTimeoutMs);
 }
 
 void ToolOffsetCalibrationPanel::on_run_rpc_error(const MoonrakerError& err) {
@@ -299,7 +312,7 @@ void ToolOffsetCalibrationPanel::begin_idle_wait() {
     // printer still busy after another one is wedged. Re-read the subject when
     // it fires - an edge that landed between the last notification and the
     // timer is a finished run.
-    idle_wait_backstop_.begin(CALIBRATION_TIMEOUT_MS, [this]() {
+    idle_wait_backstop_.begin(kCalibrationTimeoutMs, [this]() {
         const bool still_busy =
             lv_subject_get_int(
                 get_printer_state().calibration_state().get_idle_timeout_printing_subject()) == 1;
@@ -426,7 +439,7 @@ void ToolOffsetCalibrationPanel::save_offsets() {
     // and so do staged tool parameters; a firmware that persists immediately
     // restarts nothing.
     const bool restart_expected =
-        facts.global_dirty ||
+        helix::zoffset::saves_global(facts) ||
         (facts.tools_dirty &&
          helix::tool_offsets::persist_requires_save_config(ps.get_discovery()));
     if (!restart_expected) {
@@ -437,7 +450,7 @@ void ToolOffsetCalibrationPanel::save_offsets() {
         lv_tr("Save offsets?"),
         // The one restart also commits the babystep; say so in the words the
         // Controls and header saves use.
-        facts.global_dirty
+        helix::zoffset::saves_global(facts)
             ? lv_tr("This will save the Z-offset and restart Klipper to write the configuration. "
                     "The printer will briefly disconnect.")
             : lv_tr("This writes the tool offsets to the printer's config and restarts Klipper, "
@@ -462,14 +475,14 @@ void ToolOffsetCalibrationPanel::send_save() {
     // this same restart or silently lost by it, its pending delta still shown
     // in Controls for an adjustment that no longer exists.
     const helix::zoffset::SaveAvailability facts = helix::zoffset::current_save_availability();
-    if (!facts.global_dirty && !facts.tools_dirty) {
+    if (!helix::zoffset::saves_global(facts) && !facts.tools_dirty) {
         spdlog::info("[ToolOffsetCal] Nothing left to save");
         return;
     }
     lv_subject_copy_string(&status_, lv_tr("Saving offsets..."));
     helix::zoffset::save_dirty_offsets(
         api, save_watch_, ps.profile_state().z_offset_calibration_strategy(), ps.get_discovery(),
-        facts.global_dirty,
+        helix::zoffset::saves_global(facts),
         object_lifetime_.bg_cb("ToolOffsetCal::saved",
                                [this]() {
                                    last_error_.clear();
@@ -510,12 +523,42 @@ void ToolOffsetCalibrationPanel::on_tools_changed() {
 void init_tool_offset_row_handler() {
     register_xml_callbacks({
         {"on_tool_offset_row_clicked",
-         [](lv_event_t*) { get_global_tool_offset_cal_panel().show(lv_screen_active()); }},
+         [](lv_event_t*) { open_tool_offset_cal_panel(lv_screen_active()); }},
     });
 }
 
 ToolOffsetCalibrationPanel& get_global_tool_offset_cal_panel() {
     return helix::lazy_global<ToolOffsetCalibrationPanel>("ToolOffsetCalibrationPanel");
+}
+
+void open_tool_offset_cal_panel(lv_obj_t* parent_screen) {
+    const cal::Procedure procedure = cal::resolve_procedure(get_printer_state().get_discovery());
+    switch (procedure.kind) {
+    case cal::ProcedureKind::GuidedFlow: {
+        const GuidedDeviceFlow* flow = find_guided_device_flow(procedure.flow_id);
+        if (flow && flow->start) {
+            flow->start(lv_tr("Tool Offsets"));
+        } else {
+            spdlog::warn("[ToolOffsetCal] Guided flow '{}' is not registered", procedure.flow_id);
+        }
+        return;
+    }
+    case cal::ProcedureKind::PrinterPrompt: {
+        // The printer's prompt confirms and runs it; the panel could follow
+        // none of it.
+        MachineGcode cmd;
+        cmd.gcode = procedure.gcode;
+        cmd.log_name = procedure.gcode;
+        cmd.display_name = lv_tr("Tool Offsets");
+        start_calibration_gcode(get_moonraker_api(), cmd, /*needs_home=*/false, "[ToolOffsetCal]");
+        return;
+    }
+    case cal::ProcedureKind::Panel:
+    case cal::ProcedureKind::None:
+        // With nothing to run, the panel itself says so (begin_run()).
+        get_global_tool_offset_cal_panel().show(parent_screen);
+        return;
+    }
 }
 
 } // namespace helix::ui

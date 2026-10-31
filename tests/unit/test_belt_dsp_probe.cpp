@@ -8,14 +8,14 @@
 
 using helix::calibration::cached_dsp_probe;
 using helix::calibration::dsp_ms_is_capable;
-using helix::calibration::MAX_PSD_MS;
-using helix::calibration::PROBE_BANDWIDTH_HZ;
+using helix::calibration::kMaxPsdMs;
+using helix::calibration::kProbeBandwidthHz;
 using helix::calibration::probe_dsp_throughput;
 
 TEST_CASE("dsp_ms_is_capable brackets the threshold", "[belt][dsp_probe]") {
     CHECK(dsp_ms_is_capable(1.0));
-    CHECK(dsp_ms_is_capable(MAX_PSD_MS - 0.001));
-    CHECK_FALSE(dsp_ms_is_capable(MAX_PSD_MS + 0.001));
+    CHECK(dsp_ms_is_capable(kMaxPsdMs - 0.001));
+    CHECK_FALSE(dsp_ms_is_capable(kMaxPsdMs + 0.001));
     CHECK_FALSE(dsp_ms_is_capable(10000.0));
 }
 
@@ -34,7 +34,7 @@ TEST_CASE("probe measures a positive elapsed time", "[belt][dsp_probe]") {
 }
 
 TEST_CASE("the printer's own board clears the DSP budget", "[belt][dsp_probe]") {
-    // MAX_PSD_MS is a budget for the board the pluck path actually runs on, so
+    // kMaxPsdMs is a budget for the board the pluck path actually runs on, so
     // this measurement only means something when the binary is running there.
     // Off the printer it times the host instead: a dev laptop or CI runner
     // answers a different question, and answers it wrong the moment anything
@@ -46,7 +46,7 @@ TEST_CASE("the printer's own board clears the DSP budget", "[belt][dsp_probe]") 
     }
 
     const auto r = probe_dsp_throughput();
-    INFO("measured psd_ms = " << r.psd_ms << ", threshold = " << MAX_PSD_MS);
+    INFO("measured psd_ms = " << r.psd_ms << ", threshold = " << kMaxPsdMs);
     CHECK(r.capable);
 }
 
@@ -62,8 +62,8 @@ TEST_CASE("the probe measures at least the bandwidth production requests", "[bel
     // silently start timing a cheaper transform than the pluck path runs -
     // the gate would still pass while the real work no longer fits the budget.
     float lo = 0.0f, hi = 0.0f;
-    REQUIRE(helix::calibration::search_window_for_span(helix::calibration::REFERENCE_SPAN_MM, &lo,
-                                                       &hi));
-    CHECK(PROBE_BANDWIDTH_HZ >=
-          helix::calibration::required_bandwidth_hz(hi, helix::calibration::DEFAULT_HARMONICS));
+    REQUIRE(
+        helix::calibration::search_window_for_span(helix::calibration::kReferenceSpanMm, &lo, &hi));
+    CHECK(kProbeBandwidthHz >=
+          helix::calibration::required_bandwidth_hz(hi, helix::calibration::kDefaultHarmonics));
 }

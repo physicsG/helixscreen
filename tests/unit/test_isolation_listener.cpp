@@ -26,6 +26,8 @@
 #include "../test_helpers/thumbnail_processor_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "http_executor.h"
+#include "moonraker_client_mock.h"
+#include "system/lvgl_thread_check.h"
 #include "thumbnail_processor.h"
 
 #include <spdlog/sinks/null_sink.h>
@@ -35,6 +37,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <fstream>
 #include <future>
 #include <string>
@@ -148,6 +151,31 @@ std::string arrivals_since(const std::vector<ThreadIdentity>& before,
     return join(counts);
 }
 
+// Where the process is in the run, one line overwritten at each step, in the
+// file HELIX_TEST_PROGRESS_FILE names (the unit sweep sets one per shard and
+// scripts/triage_shard.sh reads it). A killed shard's console log cannot say
+// this: stdout is block-buffered into a pipe, and Catch2 reports a fatal
+// signal only while a case body runs, so a kill anywhere else prints nothing.
+//   running <case>   inside the case: its fixture, body or sections
+//   after <case>     the case returned; in the post-case checks or between cases
+//   run-ended        every case finished; exit-time teardown
+void record_progress(const char* state, const std::string& name = {}) {
+    static const int fd = [] {
+        const char* path = std::getenv("HELIX_TEST_PROGRESS_FILE");
+        return path && *path ? ::open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644) : -1;
+    }();
+    if (fd < 0)
+        return;
+    std::string line = state;
+    if (!name.empty())
+        line += " " + name;
+    line += "\n";
+    // Written over the old line before the old tail is cut, so a kill between
+    // the two leaves a complete first line.
+    if (::pwrite(fd, line.data(), line.size(), 0) == static_cast<ssize_t>(line.size()))
+        (void)::ftruncate(fd, static_cast<off_t>(line.size()));
+}
+
 std::string basename(const char* path) {
     std::string p(path);
     size_t slash = p.find_last_of('/');
@@ -173,9 +201,14 @@ class IsolationListener : public Catch::EventListenerBase {
         auto null_logger = std::make_shared<spdlog::logger>("null", null_sink);
         spdlog::set_default_logger(std::move(null_logger));
 
+        // Report every LVGL call made off the LVGL thread (stderr, once per call
+        // site); HELIX_LVGL_THREAD_CHECK=abort makes the first one fail the run.
+        helix::lvgl_thread_check::set_mode(
+            helix::lvgl_thread_check::mode_from_env(helix::lvgl_thread_check::Mode::Report));
+
         // Pre-warm process-wide worker pools ONCE before any per-test thread
         // baseline is captured. ThumbnailProcessor is a Meyer's singleton whose
-        // constructor eagerly starts an HThreadPool worker (MIN_WORKER_THREADS=1)
+        // constructor eagerly starts an HThreadPool worker (kMinWorkerThreads=1)
         // that lives for the whole process. The first test to reach a thumbnail
         // fetch (get_thumbnail_cache() -> ThumbnailProcessor::instance()) would
         // otherwise be flagged as "leaking" that thread — a false positive, since
@@ -218,12 +251,19 @@ class IsolationListener : public Catch::EventListenerBase {
         // into the baseline.
         helix::http::HttpExecutor::start_all();
 
+        // Every MoonrakerClientMock::connect() would otherwise block the test
+        // that calls it for the mock's simulated handshake, and no test waits
+        // on that pause.
+        MoonrakerClientMock::set_connect_delay_ms(0);
+
         // Record who those pre-warmed threads are, so the first genuine leak is
         // reported as the one name that is not among them.
         known_threads_ = live_thread_identities();
     }
 
     void testRunEnded(Catch::TestRunStats const& /*stats*/) override {
+        record_progress("run-ended");
+
         // Production teardown calls ObserverGuard::invalidate_all() before LVGL is
         // torn down so surviving singletons release their observers instead of
         // calling lv_observer_remove() on freed state. The test binary has no such
@@ -236,6 +276,8 @@ class IsolationListener : public Catch::EventListenerBase {
     }
 
     void testCaseStarting(Catch::TestCaseInfo const& info) override {
+        record_progress("running", info.name);
+
         // The Config singleton outlives every test, so whatever the previous
         // test left in it — a path pointing at a deleted temp dir, an LED
         // selection, a stale active_printer_id_ — is what this test starts
@@ -263,7 +305,9 @@ class IsolationListener : public Catch::EventListenerBase {
         }
     }
 
-    void testCaseEnded(Catch::TestCaseStats const& /*stats*/) override {
+    void testCaseEnded(Catch::TestCaseStats const& stats) override {
+        record_progress("after", stats.testInfo->name);
+
         // Report AND auto-heal: a leaked CWD / data-dir env breaks find_readable()
         // for every later test in the process (cascading "file not found"
         // failures). Restoring here makes that failure class structurally

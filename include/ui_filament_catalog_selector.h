@@ -5,6 +5,7 @@
 
 #include "filament_catalog.h"
 #include "lvgl.h"
+#include "widget_data_registry.h"
 
 #include <functional>
 #include <map>
@@ -206,7 +207,7 @@ class FilamentCatalogSelector {
     lv_obj_t* find_child(const char* name) const;
 
     static FilamentCatalogSelector* from_event(lv_event_t* e);
-    static std::map<lv_obj_t*, FilamentCatalogSelector*>& registry();
+    static WidgetDataRegistry<FilamentCatalogSelector>& registry();
     static bool callbacks_registered_;
 
     // Declarative row event callbacks (registered in register_callbacks(),

@@ -1,0 +1,19 @@
+{
+  "description": "A file without a final newline: the last line is edited and none is added",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "BED_MESH_CALIBRATE",
+      "action": "comment_out",
+      "args": {}
+    },
+    {
+      "line_number": 3,
+      "expect_raw_line": "M84",
+      "action": "inject_before",
+      "args": {
+        "gcode": "G1 Z10"
+      }
+    }
+  ]
+}

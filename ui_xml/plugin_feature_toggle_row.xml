@@ -1,0 +1,81 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- A settings switch backed by a HelixPrint plugin feature. The row's look
+     follows plugin_feature_mode_<feature> (PluginSwitchMode, decided by
+     plugin_switch_mode()):
+       0 hidden: the plugin cannot run the feature on this printer
+       1 a working switch
+       2 greyed, "Requires the HelixPrint plugin", Install
+       3 greyed, the installed plugin is too old
+       4 a working switch the app's fallback serves, with a hint and Install
+       5 the same, the hint asking for a plugin update
+     The feature must have a row in kPluginSwitchFeatures, which publishes that
+     subject. A feature switched through plugin_features passes
+     subject="plugin_feature_on_<feature>" and
+     callback="on_plugin_feature_switch_changed"; one that owns its switch
+     passes its own subject and callback. -->
+<component>
+  <api>
+    <prop name="feature" type="string" default=""/>
+    <prop name="label" type="string" default="Setting"/>
+    <prop name="label_tag" type="string" default=""/>
+    <prop name="icon" type="string" default=""/>
+    <prop name="description" type="string" default=""/>
+    <prop name="description_tag" type="string" default=""/>
+    <prop name="subject" type="string" default=""/>
+    <prop name="callback" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false"
+        flex_flow="column">
+    <bind_flag_if_eq subject="plugin_feature_mode_${feature}" flag="hidden" ref_value="0"/>
+    <!-- Modes 1, 4, 5: the working switch -->
+    <!-- Named for the feature: the default callback reads it from here -->
+    <setting_toggle_row name="plugin_feature_row_${feature}"
+                        label="$label" label_tag="$label_tag" icon="$icon" description="$description"
+                        description_tag="$description_tag" subject="$subject" callback="$callback">
+      <bind_flag_if cond="plugin_feature_mode_${feature} eq 2 or plugin_feature_mode_${feature} eq 3" flag="hidden"/>
+    </setting_toggle_row>
+    <!-- Modes 2, 3: the same row greyed -->
+    <setting_toggle_row name="greyed_row"
+                        label="$label" label_tag="$label_tag" icon="$icon" description="$description"
+                        description_tag="$description_tag" disabled="plugin_feature_greyed">
+      <bind_flag_if cond="plugin_feature_mode_${feature} lt 2 or plugin_feature_mode_${feature} gt 3" flag="hidden"/>
+    </setting_toggle_row>
+    <!-- Modes 2 to 5: what the plugin would add -->
+    <lv_obj name="plugin_hint"
+            width="100%" height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
+            style_pad_bottom="#space_md" style_bg_opa="0" style_border_width="0" scrollable="false" flex_flow="row"
+            style_flex_cross_place="center" style_pad_gap="#space_md">
+      <bind_flag_if_lt subject="plugin_feature_mode_${feature}" flag="hidden" ref_value="2"/>
+      <icon src="puzzle_outline" size="xs" variant="secondary"/>
+      <text_small name="needs_install_text"
+                  flex_grow="1" text="Requires the HelixPrint plugin" long_mode="wrap" style_text_color="#text_muted">
+        <bind_flag_if_not_eq subject="plugin_feature_mode_${feature}" flag="hidden" ref_value="2"/>
+      </text_small>
+      <text_small name="needs_update_text"
+                  flex_grow="1" text="Requires a newer HelixPrint plugin" long_mode="wrap"
+                  style_text_color="#text_muted">
+        <bind_flag_if_not_eq subject="plugin_feature_mode_${feature}" flag="hidden" ref_value="3"/>
+      </text_small>
+      <text_small name="fallback_install_text"
+                  flex_grow="1"
+                  text="Only while this app is connected. Install the HelixPrint plugin to cover every print."
+                  long_mode="wrap" style_text_color="#text_muted">
+        <bind_flag_if_not_eq subject="plugin_feature_mode_${feature}" flag="hidden" ref_value="4"/>
+      </text_small>
+      <text_small name="fallback_update_text"
+                  flex_grow="1"
+                  text="Only while this app is connected. Update the HelixPrint plugin to cover every print."
+                  long_mode="wrap" style_text_color="#text_muted">
+        <bind_flag_if_not_eq subject="plugin_feature_mode_${feature}" flag="hidden" ref_value="5"/>
+      </text_small>
+      <ui_button name="install_button"
+                 width="content" height="#button_height" style_min_width="64" variant="secondary" text="Install">
+        <bind_flag_if cond="plugin_feature_mode_${feature} ne 2 and plugin_feature_mode_${feature} ne 4" flag="hidden"/>
+        <event_cb trigger="clicked" callback="on_plugin_feature_install_clicked"/>
+      </ui_button>
+    </lv_obj>
+  </view>
+</component>

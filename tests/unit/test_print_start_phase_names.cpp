@@ -90,6 +90,7 @@ TEST_CASE("PrintStartPhase: the HELIX:PHASE aliases resolve", "[print][phase][na
         {"PRIMING", PrintStartPhase::PURGING},
         {"HEAT_SOAK", PrintStartPhase::SOAKING},
         {"SOAK", PrintStartPhase::SOAKING},
+        {"SYNC_MOTORS", PrintStartPhase::MOTOR_SYNC},
     };
 
     for (const auto& c : cases) {
@@ -116,6 +117,7 @@ TEST_CASE("PrintStartPhase: the prediction history stores dwell phases only",
     // Heating is predicted from measured heat rates by ThermalRateModel, and
     // IDLE/INITIALIZING/COMPLETE are transitions with no dwell of their own.
     CHECK(print_start_phase_stores_duration(PrintStartPhase::HOMING));
+    CHECK(print_start_phase_stores_duration(PrintStartPhase::MOTOR_SYNC));
     CHECK(print_start_phase_stores_duration(PrintStartPhase::SOAKING));
     CHECK(print_start_phase_stores_duration(PrintStartPhase::QGL));
     CHECK(print_start_phase_stores_duration(PrintStartPhase::Z_TILT));

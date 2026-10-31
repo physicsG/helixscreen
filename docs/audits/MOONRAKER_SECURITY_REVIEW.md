@@ -400,7 +400,7 @@ Unsubscribe methods were added:
 ```cpp
 // src/moonraker_client.cpp:581-595
 bool MoonrakerClient::unsubscribe_notify_update(SubscriptionId id) {
-    if (id == INVALID_SUBSCRIPTION_ID) {
+    if (id == kInvalidSubscriptionId) {
         return false;
     }
     std::lock_guard<std::mutex> lock(callbacks_mutex_);
@@ -493,7 +493,7 @@ RequestId MoonrakerClient::send_jsonrpc(...) {
             if (on_error) {
                 on_error(MoonrakerError::request_failed("Too many pending requests"));
             }
-            return INVALID_REQUEST_ID;
+            return kInvalidRequestId;
         }
     }
     // ... proceed with request ...

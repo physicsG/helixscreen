@@ -53,7 +53,8 @@ _helix_klipper_cfg_dir() {
 # Args: $1 = entry (e.g. "cfg:/path" or "include:/printer.cfg:helixscreen/x.cfg")
 _record_klipper_include() {
     local entry="$1"
-    local state_file="${INSTALL_DIR}/config/.klipper_includes"
+    local state_file
+    state_file="$(_ledger_path .klipper_includes)"
 
     if [ -n "${INSTALL_DIR:-}" ] && [ ! -d "${INSTALL_DIR}/config" ]; then
         $(file_sudo "${INSTALL_DIR}") mkdir -p "${INSTALL_DIR}/config"

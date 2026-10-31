@@ -17,7 +17,7 @@ namespace helix::ui {
 ExcludeModeController::~ExcludeModeController() {
     // The viewer can outlive us; it must not call back into a freed controller.
     if (viewer_ && lv_is_initialized()) {
-        ui_gcode_viewer_set_object_tap_callback(viewer_, nullptr, nullptr);
+        helix::ui::gcode_viewer_set_object_tap_callback(viewer_, nullptr, nullptr);
     }
 }
 
@@ -45,8 +45,8 @@ void ExcludeModeController::show(const ExcludeModeTargets& targets,
         map_view_ = std::make_unique<ExcludeObjectMapView>();
         map_view_->set_close_callback([this]() { hide(); });
         // The map copies what it draws; the viewer may free its parse while the map is open.
-        map_view_->create(targets.card, state_, targets.bed_w_mm, targets.bed_h_mm, forward, mode,
-                          viewer_ ? ui_gcode_viewer_get_parsed_file(viewer_) : nullptr);
+        map_view_->create(targets.card, state_, targets.bed, forward, mode,
+                          viewer_ ? helix::ui::gcode_viewer_get_parsed_file(viewer_) : nullptr);
         // The list's X closes the whole mode; one dismiss control is enough.
         if (auto* map_root = map_view_->root()) {
             if (lv_obj_t* map_close = lv_obj_find_by_name(map_root, "close_btn")) {
@@ -55,9 +55,10 @@ void ExcludeModeController::show(const ExcludeModeTargets& targets,
         }
     }
 
-    // Landscape covers the right-hand column by ratio; portrait sizes the list
-    // to the control stack it covers, up to the preview card, so measure both.
-    const bool portrait = helix::is_portrait_layout(helix::LayoutManager::instance().type());
+    // Side by side covers the right-hand column by ratio; stacked sizes the
+    // list to the controls it covers, up to the preview card, so measure both.
+    const bool portrait = targets.stacked.value_or(
+        helix::is_portrait_layout(helix::LayoutManager::instance().type()));
     int32_t controls_h = 0;
     int32_t content_h = 0;
     int32_t gap = 0;
@@ -89,8 +90,9 @@ void ExcludeModeController::show(const ExcludeModeTargets& targets,
     // Installed whatever the mode, so switching thumbnail -> 2D/3D while open
     // still routes render taps.
     if (viewer_) {
-        ui_gcode_viewer_set_object_tap_callback(viewer_, on_viewer_tap, this);
-        ui_gcode_viewer_set_excluded_badges_pickable(viewer_, mode == ExcludeTapMode::Toggle);
+        helix::ui::gcode_viewer_set_object_tap_callback(viewer_, on_viewer_tap, this);
+        helix::ui::gcode_viewer_set_excluded_badges_pickable(viewer_,
+                                                             mode == ExcludeTapMode::Toggle);
     }
 
     const auto refresh = [](ExcludeModeController* self, int) { self->refresh_render_badges(); };
@@ -106,10 +108,10 @@ void ExcludeModeController::hide() {
     excluded_obs_.reset();
     defined_obs_.reset();
     if (viewer_) {
-        ui_gcode_viewer_set_object_tap_callback(viewer_, nullptr, nullptr);
-        ui_gcode_viewer_set_excluded_badges_pickable(viewer_, false);
-        ui_gcode_viewer_set_highlighted_objects(viewer_, {});
-        ui_gcode_viewer_set_object_badges(viewer_, {});
+        helix::ui::gcode_viewer_set_object_tap_callback(viewer_, nullptr, nullptr);
+        helix::ui::gcode_viewer_set_excluded_badges_pickable(viewer_, false);
+        helix::ui::gcode_viewer_set_highlighted_objects(viewer_, {});
+        helix::ui::gcode_viewer_set_object_badges(viewer_, {});
     }
     if (side_list_) {
         side_list_->destroy();
@@ -132,8 +134,8 @@ void ExcludeModeController::refresh_render_badges() {
     if (!viewer_ || !state_ || !is_open()) {
         return;
     }
-    ui_gcode_viewer_set_object_badges(
-        viewer_, compute_object_badges(*state_, ui_gcode_viewer_get_parsed_file(viewer_)));
+    helix::ui::gcode_viewer_set_object_badges(
+        viewer_, compute_object_badges(*state_, helix::ui::gcode_viewer_get_parsed_file(viewer_)));
 }
 
 void ExcludeModeController::on_viewer_tap(lv_obj_t* /*viewer*/, const char* name, void* user_data) {

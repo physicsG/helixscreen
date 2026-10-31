@@ -15,7 +15,7 @@ whose overview matrix lists every printer's target and status. Build targets are
 | [CREALITY_K1_SUPPORT.md](CREALITY_K1_SUPPORT.md) | Creality K1, K1C, K1 Max, K1 SE | `mips`, `k1-dynamic` |
 | [CREALITY_K2_SUPPORT.md](CREALITY_K2_SUPPORT.md) | Creality K2, K2 Plus, K2 Pro | `k2` |
 | [SNAPMAKER_U1_SUPPORT.md](SNAPMAKER_U1_SUPPORT.md) | Snapmaker U1 (stock 1.2+ and PAXX) | `snapmaker-u1` |
-| [QIDI_SUPPORT.md](QIDI_SUPPORT.md) | QIDI Q2 and Max 4 on-device; Plus 4 and 3-series as remote targets | `pi` |
+| [QIDI_SUPPORT.md](QIDI_SUPPORT.md) | QIDI Q2, Max 4 and Plus 5 on-device; Plus 4 and 3-series as remote targets | `pi` |
 | [ELEGOO_CENTAURI_CARBON_YOCTO.md](ELEGOO_CENTAURI_CARBON_YOCTO.md) | Elegoo Centauri Carbon 1 on OpenCentauri COSMOS: the two targets and the Yocto dev loop | `cc1`, `yocto` |
 
 Filament systems that come with a printer have their own backend docs one level up

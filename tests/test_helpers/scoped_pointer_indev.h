@@ -49,7 +49,7 @@ class ScopedPointerIndev {
   public:
     /// One pointer read period on the device: LVGL's indev read timer runs at
     /// the display refresh period.
-    static constexpr uint32_t READ_PERIOD_MS = LV_DEF_REFR_PERIOD;
+    static constexpr uint32_t kReadPeriodMs = LV_DEF_REFR_PERIOD;
 
     ScopedPointerIndev() {
         indev_ = lv_indev_create();
@@ -77,10 +77,10 @@ class ScopedPointerIndev {
     }
 
     /// Hold length after press() that ends on the read dispatching
-    /// LONG_PRESSED: hold() reads every READ_PERIOD_MS starting at the press's
+    /// LONG_PRESSED: hold() reads every kReadPeriodMs starting at the press's
     /// own tick, so its last read is the first at or past long_press_ms().
     uint32_t long_press_hold_ms() const {
-        return long_press_ms() + READ_PERIOD_MS;
+        return long_press_ms() + kReadPeriodMs;
     }
 
     /// One read reporting @p state at (@p x, @p y).
@@ -127,9 +127,9 @@ class ScopedPointerIndev {
     /// reads as it does on the device. @p after_cycle runs at the end of every
     /// cycle.
     void hold(uint32_t ms, const std::function<void()>& after_cycle = nullptr) {
-        for (uint32_t held = 0; held < ms; held += READ_PERIOD_MS) {
+        for (uint32_t held = 0; held < ms; held += kReadPeriodMs) {
             press(point_.x, point_.y);
-            lv_tick_inc(READ_PERIOD_MS);
+            lv_tick_inc(kReadPeriodMs);
             lv_timer_handler_safe();
             if (after_cycle) {
                 after_cycle();

@@ -3,6 +3,8 @@
 
 #include "ui_tile_rung.h"
 
+#include "ui_text.h"
+
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_parser.h"
 #include "helix-xml/src/xml/lv_xml_utils.h"
@@ -113,11 +115,10 @@ void rung_observer_cb(lv_observer_t* observer, lv_subject_t* subject) {
     if (ladder == TileLadder::Icon) {
         apply_face_scale(obj, face);
     }
-    // A dotted label ellipsizes only at a fixed height; at content height it
-    // wraps instead. One line of the face it now draws in is that height.
-    // DECLARATIVE_OK: measured from the computed face, which XML cannot name.
-    if ((packed & kOneLineBit) && font) {
-        lv_obj_set_height(obj, lv_font_get_line_height(font));
+    // At content height a dotted label wraps instead of ellipsizing; held to one
+    // line, its height follows the face it now draws in.
+    if (packed & kOneLineBit) {
+        helix::ui::label_hold_one_line(obj);
     }
 }
 

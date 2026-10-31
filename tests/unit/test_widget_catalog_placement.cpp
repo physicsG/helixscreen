@@ -62,10 +62,10 @@ namespace {
 // and unclickable for an unrelated reason, which would mask what these tests
 // assert. ("lock" took this role after "shutdown" grew the
 // platform_host_power_supported gate.)
-constexpr const char* PLACED_ID = "lock";            // enabled, has a cell
-constexpr const char* LIMBO_ID = "motion";           // enabled, no cell
-constexpr const char* DISABLED_ID = "gcode_console"; // not enabled
-constexpr const char* MULTI_ID = "favorite_macro";   // multi_instance base
+constexpr const char* kPlacedId = "lock";            // enabled, has a cell
+constexpr const char* kLimboId = "motion";           // enabled, no cell
+constexpr const char* kDisabledId = "gcode_console"; // not enabled
+constexpr const char* kMultiId = "favorite_macro";   // multi_instance base
 
 /// The catalog labels a row with the widget's registry display name, so that is
 /// how a test finds the row it means.
@@ -131,33 +131,33 @@ lv_obj_t* find_row(lv_obj_t* scroll, const std::string& text) {
 /// tests only ever look at the four IDs above.
 nlohmann::json make_layout() {
     nlohmann::json widgets = nlohmann::json::array();
-    widgets.push_back({{"id", PLACED_ID},
+    widgets.push_back({{"id", kPlacedId},
                        {"enabled", true},
                        {"col", 0},
                        {"row", 0},
                        {"colspan", 1},
                        {"rowspan", 1}});
     // The bug's state: configured on, but holding no cell.
-    widgets.push_back({{"id", LIMBO_ID},
+    widgets.push_back({{"id", kLimboId},
                        {"enabled", true},
                        {"col", -1},
                        {"row", -1},
                        {"colspan", 1},
                        {"rowspan", 1}});
-    widgets.push_back({{"id", DISABLED_ID},
+    widgets.push_back({{"id", kDisabledId},
                        {"enabled", false},
                        {"col", -1},
                        {"row", -1},
                        {"colspan", 1},
                        {"rowspan", 1}});
     // One placed instance and one in limbo — the "(N Placed)" count must say 1.
-    widgets.push_back({{"id", std::string(MULTI_ID) + ":1"},
+    widgets.push_back({{"id", std::string(kMultiId) + ":1"},
                        {"enabled", true},
                        {"col", 1},
                        {"row", 0},
                        {"colspan", 1},
                        {"rowspan", 1}});
-    widgets.push_back({{"id", std::string(MULTI_ID) + ":2"},
+    widgets.push_back({{"id", std::string(kMultiId) + ":2"},
                        {"enabled", true},
                        {"col", -1},
                        {"row", -1},
@@ -182,10 +182,10 @@ class CatalogRowFixture : public LVGLUITestFixture {
         // Guard the premise: parse_widget_array() drops IDs the registry does
         // not know, which would leave these tests asserting on rows that were
         // never seeded.
-        REQUIRE(entry_for(PLACED_ID).has_grid_position());
-        REQUIRE(entry_for(LIMBO_ID).enabled);
-        REQUIRE_FALSE(entry_for(LIMBO_ID).has_grid_position());
-        REQUIRE_FALSE(entry_for(DISABLED_ID).enabled);
+        REQUIRE(entry_for(kPlacedId).has_grid_position());
+        REQUIRE(entry_for(kLimboId).enabled);
+        REQUIRE_FALSE(entry_for(kLimboId).has_grid_position());
+        REQUIRE_FALSE(entry_for(kDisabledId).enabled);
 
         WidgetCatalogOverlay::show(test_screen(), config_,
                                    [this](const std::string& id) { selected_ = id; });
@@ -291,15 +291,15 @@ TEST_CASE("PanelWidgetConfig::is_placed separates a grid cell from being enabled
     PanelWidgetConfig config(panel_id, *cfg);
     config.load();
 
-    CHECK(config.is_enabled(PLACED_ID));
-    CHECK(config.is_placed(PLACED_ID));
+    CHECK(config.is_enabled(kPlacedId));
+    CHECK(config.is_placed(kPlacedId));
 
     // The state the catalog got wrong: on, but on no grid.
-    CHECK(config.is_enabled(LIMBO_ID));
-    CHECK_FALSE(config.is_placed(LIMBO_ID));
+    CHECK(config.is_enabled(kLimboId));
+    CHECK_FALSE(config.is_placed(kLimboId));
 
-    CHECK_FALSE(config.is_enabled(DISABLED_ID));
-    CHECK_FALSE(config.is_placed(DISABLED_ID));
+    CHECK_FALSE(config.is_enabled(kDisabledId));
+    CHECK_FALSE(config.is_placed(kDisabledId));
 
     // Unknown IDs are neither.
     CHECK_FALSE(config.is_placed("no_such_widget"));
@@ -309,7 +309,7 @@ TEST_CASE("PanelWidgetConfig::is_placed separates a grid cell from being enabled
 // labelled. Without this, "make everything clickable" would pass the next test.
 TEST_CASE_METHOD(CatalogRowFixture, "Catalog: a widget holding a grid cell reads as Placed",
                  "[widget_catalog][panel_widget]") {
-    lv_obj_t* row = row_for(PLACED_ID);
+    lv_obj_t* row = row_for(kPlacedId);
     CHECK(has_exact_label(row, lv_tr("Placed")));
     CHECK_FALSE(lv_obj_has_flag(row, LV_OBJ_FLAG_CLICKABLE));
 }
@@ -317,7 +317,7 @@ TEST_CASE_METHOD(CatalogRowFixture, "Catalog: a widget holding a grid cell reads
 // The bug.
 TEST_CASE_METHOD(CatalogRowFixture, "Catalog: an enabled widget with no grid cell is offered",
                  "[widget_catalog][panel_widget][regression]") {
-    lv_obj_t* row = row_for(LIMBO_ID);
+    lv_obj_t* row = row_for(kLimboId);
     INFO("labels: " << [&] {
         std::string s;
         for (const auto& t : label_texts(row))
@@ -331,13 +331,13 @@ TEST_CASE_METHOD(CatalogRowFixture, "Catalog: an enabled widget with no grid cel
     // row is a dead target that looks alive.
     lv_obj_send_event(row, LV_EVENT_CLICKED, nullptr);
     process_lvgl(10);
-    CHECK(selected_ == LIMBO_ID);
+    CHECK(selected_ == kLimboId);
 }
 
 // Unchanged behaviour: a switched-off widget was always offered.
 TEST_CASE_METHOD(CatalogRowFixture, "Catalog: a disabled widget is offered",
                  "[widget_catalog][panel_widget]") {
-    lv_obj_t* row = row_for(DISABLED_ID);
+    lv_obj_t* row = row_for(kDisabledId);
     CHECK_FALSE(has_exact_label(row, lv_tr("Placed")));
     CHECK(lv_obj_has_flag(row, LV_OBJ_FLAG_CLICKABLE));
 }
@@ -346,11 +346,11 @@ TEST_CASE_METHOD(CatalogRowFixture, "Catalog: a disabled widget is offered",
 // two macro buttons were on the dashboard when only one was.
 TEST_CASE_METHOD(CatalogRowFixture, "Catalog: the placed count skips instances with no cell",
                  "[widget_catalog][panel_widget][regression]") {
-    const std::string base = display_name_of(MULTI_ID);
+    const std::string base = display_name_of(kMultiId);
     const std::string expected = base + " (1 " + lv_tr("Placed") + ")";
     const std::string overcounted = base + " (2 " + lv_tr("Placed") + ")";
 
-    lv_obj_t* scroll = category_scroll_for(MULTI_ID);
+    lv_obj_t* scroll = category_scroll_for(kMultiId);
     INFO("expected row label: " << expected);
     CHECK(find_row(scroll, overcounted) == nullptr);
     CHECK(find_row(scroll, expected) != nullptr);
@@ -378,7 +378,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Catalog placement moves a limbo entry instead 
                         {{{"id", "main"}, {"widgets", nlohmann::json::array()}},
                          {{"id", "second"},
                           {"widgets",
-                           {{{"id", LIMBO_ID},
+                           {{{"id", kLimboId},
                              {"enabled", true},
                              {"col", -1},
                              {"row", -1},
@@ -397,7 +397,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Catalog placement moves a limbo entry instead 
 
     GridEditMode em;
     em.enter(container, &config, /*page_index=*/0);
-    GridEditModeTestAccess::place_from_catalog(em, LIMBO_ID);
+    GridEditModeTestAccess::place_from_catalog(em, kLimboId);
     em.exit();
     process_lvgl(10);
 
@@ -405,7 +405,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Catalog placement moves a limbo entry instead 
     const PanelWidgetEntry* placed = nullptr;
     for (size_t p = 0; p < config.page_count(); ++p) {
         for (const auto& e : config.page_entries(p)) {
-            if (e.id == LIMBO_ID) {
+            if (e.id == kLimboId) {
                 ++total;
                 if (e.has_grid_position()) {
                     placed = &e;
@@ -413,7 +413,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Catalog placement moves a limbo entry instead 
             }
         }
     }
-    INFO("entries named '" << LIMBO_ID << "' across all pages: " << total);
+    INFO("entries named '" << kLimboId << "' across all pages: " << total);
     CHECK(total == 1);
     REQUIRE(placed != nullptr);
     CHECK(placed->enabled);
@@ -445,7 +445,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     config.load();
     REQUIRE(config.page_count() == 1);
 
-    const std::string instance_id = config.mint_instance_id(MULTI_ID);
+    const std::string instance_id = config.mint_instance_id(kMultiId);
     for (const auto& e : config.page_entries(0)) {
         REQUIRE(e.id != instance_id);
     }

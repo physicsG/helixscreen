@@ -1,0 +1,107 @@
+{
+  "_comment": "Shared by server/telemetry-worker (vitest) and scripts/telemetry-printer-issues.py (pytest): both producers must give these exact outputs.",
+  "fingerprint": [
+    {
+      "kind": "printer",
+      "parts": [
+        "CoreXY",
+        " STM32H723 ",
+        "350x350x330"
+      ],
+      "expected": "printer:corexy|stm32h723|350x350x330"
+    },
+    {
+      "kind": "crash_cluster",
+      "parts": [
+        "SIGSEGV",
+        "SEGV_MAPERR",
+        "1.1.0-beta.9"
+      ],
+      "expected": "crash_cluster:sigsegv|segv_maperr|1.1.0-beta.9"
+    },
+    {
+      "kind": "error_code",
+      "parts": [
+        "Moonraker",
+        "E 42\n-->evil"
+      ],
+      "expected": "error_code:moonraker|e_42_--_evil"
+    },
+    {
+      "kind": "update_failure",
+      "parts": [
+        "Pi  4\tModel B",
+        "checksum | mismatch @octocat"
+      ],
+      "expected": "update_failure:pi_4_model_b|checksum___mismatch__octocat"
+    },
+    {
+      "kind": "data_health",
+      "parts": [
+        "\u00dcn\u00efcode \ud83d\ude00",
+        "x"
+      ],
+      "expected": "data_health:_n_code__|x"
+    },
+    {
+      "kind": "update_failure",
+      "parts": [
+        "[link](http://x.y/z)",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "expected": "update_failure:_link__http://x.y/z_|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "kind": "printer",
+      "parts": [
+        "  ",
+        "V1.0"
+      ],
+      "expected": "printer:|v1.0"
+    }
+  ],
+  "code_span": [
+    {
+      "input": "rpi4",
+      "expected": "`rpi4`"
+    },
+    {
+      "input": "a|b",
+      "expected": "`a\\|b`"
+    },
+    {
+      "input": "line1\r\nline2\nline3",
+      "expected": "`line1 line2 line3`"
+    },
+    {
+      "input": "@octocat",
+      "expected": "`@\u200boctocat`"
+    },
+    {
+      "input": "x`y",
+      "expected": "`x'y`"
+    },
+    {
+      "input": "",
+      "expected": ""
+    },
+    {
+      "input": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected": "`bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb...`"
+    }
+  ],
+  "title": [
+    {
+      "input": "Crash SIGSEGV SEGV_MAPERR in 1.1.0",
+      "expected": "Crash SIGSEGV SEGV_MAPERR in 1.1.0"
+    },
+    {
+      "input": "Crash @octocat\nnow",
+      "expected": "Crash @\u200boctocat now"
+    },
+    {
+      "input": "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+      "expected": "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT..."
+    }
+  ]
+}

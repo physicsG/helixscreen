@@ -138,7 +138,7 @@ std::vector<std::string> default_file_paths(const std::string& probe_root) {
     if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
         paths.push_back(std::string(home) + "/.local/share/helix-screen/helix.log");
     }
-    // AD5X mod tree (ZMOD or Forge-X — see ad5x_mod_layout_present()). /opt/config
+    // AD5X mod tree (ZMOD or Forge-X — see flashforge_mod_tree()). /opt/config
     // is a bind-mount of the durable mod config dir, visible at /usr/data/config
     // too, so each file has two path spellings. Two DIFFERENT streams live under
     // mod_data/log:
@@ -160,7 +160,7 @@ std::vector<std::string> default_file_paths(const std::string& probe_root) {
     // on the layout so a plain host's cascade carries only paths a helix
     // install could ever have written — on hosts without the mod tree these
     // were dead stat probes.
-    if (helix::ad5x_mod_layout_present(probe_root)) {
+    if (helix::flashforge_mod_tree(probe_root) != helix::FlashForgeModTree::None) {
         paths.emplace_back("/opt/config/mod_data/log/helix.log");
         paths.emplace_back("/usr/data/config/mod_data/log/helix.log");
         paths.emplace_back("/opt/config/mod_data/log/helixscreen.log");

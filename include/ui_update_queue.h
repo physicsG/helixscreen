@@ -39,6 +39,7 @@
 
 #pragma once
 
+#include "helix_callback.h"
 #include "lvgl/lvgl.h"
 #include "system/crash_handler.h"
 
@@ -46,7 +47,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -58,8 +58,11 @@ namespace helix::ui {
 
 /**
  * @brief Callback type for queued updates
+ *
+ * Move-only: the queue moves each callback in under its lock and runs it once
+ * on the main thread, so nothing ever copies one.
  */
-using UpdateCallback = std::function<void()>;
+using UpdateCallback = helix::Callback<void()>;
 
 /**
  * @brief Callback entry with optional debug tag
@@ -147,7 +150,7 @@ class UpdateQueue {
         // coalesce into a single slot with a count, preserving runway for
         // distinct callbacks above.
         crash_handler::register_previous_tag_ring(previous_tag_ring_, previous_tag_count_ring_,
-                                                  PREVIOUS_TAG_RING_SIZE, &previous_tag_next_);
+                                                  kPreviousTagRingSize, &previous_tag_next_);
 
         // init() runs on the LVGL thread by construction — it creates an LVGL
         // timer. Record that identity so callers can ask whether they are
@@ -246,7 +249,18 @@ class UpdateQueue {
     }
 
     /**
-     * @brief RAII guard that silently discards queued callbacks
+     * @brief Whether a queued callback is running, at any depth
+     *
+     * A drain() called from inside a callback runs further callbacks under the
+     * first, so code that must not run inside any batch asks this rather than
+     * whether it was itself queued. Main thread only.
+     */
+    bool is_draining() const {
+        return drain_depth_ > 0;
+    }
+
+    /**
+     * @brief RAII guard that buffers queued callbacks until the last freeze ends
      *
      * Use around drain()+destroy sequences to prevent the WebSocket background
      * thread from queueing new callbacks between drain() and widget destruction.
@@ -465,6 +479,7 @@ class UpdateQueue {
             std::swap(to_process, pending_);
         }
 
+        ++drain_depth_;
         // Execute all pending updates - safe because no render is in progress.
         //
         // std::system_error is matched ahead of std::exception (it derives
@@ -513,17 +528,18 @@ class UpdateQueue {
             if (current_tag_) {
                 unsigned int next = previous_tag_next_;
                 if (next > 0 &&
-                    previous_tag_ring_[(next - 1) % PREVIOUS_TAG_RING_SIZE] == current_tag_) {
-                    previous_tag_count_ring_[(next - 1) % PREVIOUS_TAG_RING_SIZE] += 1;
+                    previous_tag_ring_[(next - 1) % kPreviousTagRingSize] == current_tag_) {
+                    previous_tag_count_ring_[(next - 1) % kPreviousTagRingSize] += 1;
                 } else {
-                    previous_tag_ring_[next % PREVIOUS_TAG_RING_SIZE] = current_tag_;
-                    previous_tag_count_ring_[next % PREVIOUS_TAG_RING_SIZE] = 1;
+                    previous_tag_ring_[next % kPreviousTagRingSize] = current_tag_;
+                    previous_tag_count_ring_[next % kPreviousTagRingSize] = 1;
                     previous_tag_next_ = next + 1;
                 }
             }
             current_tag_ = nullptr;
             to_process.pop();
         }
+        --drain_depth_;
     }
 
     /**
@@ -555,6 +571,8 @@ class UpdateQueue {
     bool shut_down_ = false;
     // Protected by mutex_ — accessed from queue() and ScopedFreeze ctor/dtor.
     int freeze_depth_ = 0;
+    /// process_pending() calls on the stack. Main thread only.
+    int drain_depth_ = 0;
 
     /// Tag of the currently executing callback (read by crash handler).
     /// Only written from the main LVGL thread; read by the crash signal handler.
@@ -569,9 +587,9 @@ class UpdateQueue {
     /// `previous_tag_count_ring_[i]` records how many consecutive callbacks
     /// shared slot `i`'s tag — coalesce keeps the ring representative when
     /// high-frequency producers (TSM, etc.) dominate the queue.
-    static constexpr unsigned int PREVIOUS_TAG_RING_SIZE = 4;
-    static inline volatile const char* previous_tag_ring_[PREVIOUS_TAG_RING_SIZE] = {};
-    static inline volatile uint32_t previous_tag_count_ring_[PREVIOUS_TAG_RING_SIZE] = {};
+    static constexpr unsigned int kPreviousTagRingSize = 4;
+    static inline volatile const char* previous_tag_ring_[kPreviousTagRingSize] = {};
+    static inline volatile uint32_t previous_tag_count_ring_[kPreviousTagRingSize] = {};
     static inline volatile unsigned int previous_tag_next_ = 0;
 
     /// Identity of the LVGL main thread, captured in init(). Read from any
@@ -613,7 +631,7 @@ class UpdateQueue {
     static const char* previous_callback_tag() {
         if (previous_tag_next_ == 0)
             return nullptr;
-        unsigned int idx = (previous_tag_next_ - 1) % PREVIOUS_TAG_RING_SIZE;
+        unsigned int idx = (previous_tag_next_ - 1) % kPreviousTagRingSize;
         return const_cast<const char*>(previous_tag_ring_[idx]);
     }
 };
@@ -687,17 +705,17 @@ inline void queue_update(const char* tag, UpdateCallback callback) {
  * The data is captured and passed to the callback.
  *
  * @tparam T Type of data to pass
+ * @tparam F Callback type: void(T*)
  * @param data Data to pass to callback (moved into queue)
  * @param callback Function to execute with data
  */
-template <typename T>
-void queue_update(std::unique_ptr<T> data, std::function<void(T*)> callback,
-                  const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
-    // shared_ptr, not a raw release: UpdateCallback must be copyable, and a
-    // callback the queue drops unrun must still free the payload.
-    queue_update([owned = std::shared_ptr<T>(std::move(data)),
-                  callback = std::move(callback)]() { callback(owned.get()); },
-                 file, line);
+template <typename T, typename F>
+void queue_update(std::unique_ptr<T> data, F&& callback, const char* file = __builtin_FILE(),
+                  int line = __builtin_LINE()) {
+    // The callback owns the payload, so one the queue drops unrun still frees it.
+    queue_update(
+        [owned = std::move(data), cb = std::forward<F>(callback)]() mutable { cb(owned.get()); },
+        file, line);
 }
 
 /**
@@ -744,7 +762,7 @@ template <typename T, typename F>
 void queue_update(lv_obj_t* widget, std::unique_ptr<T> data, F&& callback,
                   const char* file = __builtin_FILE(), int line = __builtin_LINE()) {
     queue_update(
-        [widget, owned = std::shared_ptr<T>(std::move(data)), cb = std::forward<F>(callback)]() {
+        [widget, owned = std::move(data), cb = std::forward<F>(callback)]() mutable {
             if (!lv_obj_is_valid(widget)) {
                 spdlog::debug(
                     "[UpdateQueue] Widget-safe guard: widget destroyed, skipping callback");

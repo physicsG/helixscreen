@@ -6,6 +6,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/lvgl.h"
+#include "theme_manager.h"
 
 #include <cstring>
 #include <string>
@@ -310,6 +311,28 @@ TEST_CASE_METHOD(TextInputBindingFixture, "text_input bind_text writes edits bac
     CHECK(std::string(lv_textarea_get_text(ta)) == "typed by user");
 }
 
+TEST_CASE_METHOD(TextInputBindingFixture,
+                 "text_input bind_text keeps the cursor where a mid-string insert left it",
+                 "[text_input][xml][bind_text]") {
+    const char* attrs[] = {"bind_text", "ti_text_subject", nullptr};
+    lv_obj_t* ta = create_text_input(test_screen(), attrs);
+    REQUIRE(ta != nullptr);
+    REQUIRE(std::string(lv_textarea_get_text(ta)) == "initial");
+
+    // A keystroke with the cursor placed by hand: add_char fires VALUE_CHANGED,
+    // which writes the new text back to the subject.
+    lv_textarea_set_cursor_pos(ta, 2);
+    lv_textarea_add_char(ta, 'X');
+
+    REQUIRE(std::string(lv_subject_get_string(text_subject())) == "inXitial");
+    CHECK(std::string(lv_textarea_get_text(ta)) == "inXitial");
+    CHECK(lv_textarea_get_cursor_pos(ta) == 3);
+
+    // An external subject change still replaces the text.
+    lv_subject_copy_string(text_subject(), "from subject");
+    CHECK(std::string(lv_textarea_get_text(ta)) == "from subject");
+}
+
 TEST_CASE_METHOD(TextInputBindingFixture, "text_input bind_text refuses a bad subject",
                  "[text_input][xml][bind_text]") {
     SECTION("an unknown subject name leaves the widget usable but unbound") {
@@ -360,6 +383,63 @@ TEST_CASE_METHOD(LVGLUITestFixture, "text_input multiline is applied before sizi
         lv_obj_update_layout(ta);
         CHECK_FALSE(lv_textarea_get_one_line(ta));
         CHECK(lv_obj_get_height(ta) == 120);
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "text_input fits one line of text inside a fixed height",
+                 "[text_input][xml][padding]") {
+    const int32_t space_md = theme_manager_get_spacing("space_md");
+    REQUIRE(space_md > 2);
+
+    SECTION("a fixed height shorter than a padded line shrinks the padding") {
+        lv_obj_t* probe = create_text_input(test_screen(), nullptr);
+        REQUIRE(probe != nullptr);
+        const int32_t line_h =
+            lv_font_get_line_height(lv_obj_get_style_text_font(probe, LV_PART_MAIN));
+        const int32_t border = lv_obj_get_style_border_width(probe, LV_PART_MAIN);
+        lv_obj_delete(probe);
+
+        const std::string height = std::to_string(line_h + 2 * border + 4);
+        const char* attrs[] = {"height", height.c_str(), nullptr};
+        lv_obj_t* ta = create_text_input(test_screen(), attrs);
+        REQUIRE(ta != nullptr);
+        lv_obj_update_layout(ta);
+        lv_textarea_set_text(ta, "ZMorph EVO");
+
+        CHECK(lv_obj_get_style_pad_top(ta, LV_PART_MAIN) == 2);
+        CHECK(lv_obj_get_style_pad_bottom(ta, LV_PART_MAIN) == 2);
+        CHECK(lv_obj_get_content_height(ta) >= line_h);
+        // Without room for a line, the cursor-follow scroll never settles.
+        for (int i = 0; i < 6; ++i) {
+            process_lvgl(150);
+            CHECK(lv_obj_get_scroll_y(ta) == 0);
+        }
+    }
+
+    SECTION("a content-sized input keeps the full padding") {
+        lv_obj_t* ta = create_text_input(test_screen(), nullptr);
+        REQUIRE(ta != nullptr);
+        lv_textarea_set_text(ta, "ZMorph EVO");
+        lv_obj_update_layout(ta);
+        CHECK(lv_obj_get_style_pad_top(ta, LV_PART_MAIN) == space_md);
+        CHECK(lv_obj_get_style_pad_bottom(ta, LV_PART_MAIN) == space_md);
+    }
+
+    SECTION("a short multiline input keeps the full padding") {
+        const char* attrs[] = {"multiline", "true", "height", "20", nullptr};
+        lv_obj_t* ta = create_text_input(test_screen(), attrs);
+        REQUIRE(ta != nullptr);
+        lv_obj_update_layout(ta);
+        REQUIRE(lv_obj_get_height(ta) == 20);
+        CHECK(lv_obj_get_style_pad_top(ta, LV_PART_MAIN) == space_md);
+    }
+
+    SECTION("a tall fixed height keeps the full padding") {
+        const char* attrs[] = {"height", "400", nullptr};
+        lv_obj_t* ta = create_text_input(test_screen(), attrs);
+        REQUIRE(ta != nullptr);
+        lv_obj_update_layout(ta);
+        CHECK(lv_obj_get_style_pad_top(ta, LV_PART_MAIN) == space_md);
     }
 }
 

@@ -17,11 +17,13 @@ LIB_DIR="$WORKTREE_ROOT/scripts/lib/installer"
 setup() {
     load helpers
 
-    unset _HELIX_COMMON_SOURCED _HELIX_REQUIREMENTS_SOURCED _HELIX_RELEASE_SOURCED
+    unset _HELIX_COMMON_SOURCED _HELIX_REQUIREMENTS_SOURCED _HELIX_RELEASE_SOURCED \
+          _HELIX_SERVICE_SOURCED
     export SUDO=""
     . "$LIB_DIR/common.sh"
     . "$LIB_DIR/requirements.sh"
     . "$LIB_DIR/release.sh"
+    . "$LIB_DIR/service.sh"
 
     log_info()    { echo "INFO: $*"; }
     log_warn()    { echo "WARN: $*"; }
@@ -61,6 +63,79 @@ split_filesystems() {
     run check_service_dest_space
     [ "$status" -eq 1 ]
     echo "$output" | grep -q "Cannot write the service definition"
+}
+
+@test "check_service_dest_space: a systemd self-update writes no service file, so it skips" {
+    # The app runs install.sh inside its unit's ProtectSystem=strict sandbox,
+    # where /etc is read-only even for root; a self-update writes no unit there.
+    split_filesystems
+    dd() { echo "probe-ran" >&2; return 1; }
+    _systemd_is_init() { return 0; }
+    export HELIX_SELF_UPDATE=1
+
+    run check_service_dest_space
+    [ "$status" -eq 0 ]
+    lacks "probe-ran" "$output"
+}
+
+@test "check_service_dest_space: a SysV self-update with no init script installed refuses" {
+    split_filesystems
+    dd() { return 1; }
+    _systemd_is_init() { return 1; }
+    export HELIX_SELF_UPDATE=1
+
+    run check_service_dest_space
+    [ "$status" -eq 1 ]
+    contains "Cannot write the service definition" "$output"
+}
+
+# A SysV self-update leaves an installed init script alone, so a full or
+# read-only init dir only matters when the script is missing or must be edited.
+sysv_self_update_unwritable() {
+    split_filesystems
+    dd() { return 1; }
+    _systemd_is_init() { return 1; }
+    export HELIX_SELF_UPDATE=1
+    unset MIGRATE_FROM_DIR
+    printf '#!/bin/sh\nDAEMON_DIR="%s"\nPLATFORM_HOOKS="${DAEMON_DIR}/platform/hooks.sh"\n' \
+        "$INSTALL_DIR" > "$INIT_SCRIPT_DEST"
+}
+
+@test "check_service_dest_space: a SysV self-update over an installed init script warns and proceeds" {
+    sysv_self_update_unwritable
+
+    run check_service_dest_space
+    [ "$status" -eq 0 ]
+    contains "WARN: " "$output"
+    contains "$(dirname "$INIT_SCRIPT_DEST")" "$output"
+    lacks "Cannot write the service definition" "$output"
+}
+
+@test "check_service_dest_space: a SysV self-update that migrates the install root refuses" {
+    sysv_self_update_unwritable
+    export MIGRATE_FROM_DIR="$BATS_TEST_TMPDIR/old/helixscreen"
+
+    run check_service_dest_space
+    [ "$status" -eq 1 ]
+    contains "Cannot write the service definition" "$output"
+}
+
+@test "check_service_dest_space: a SysV self-update whose init script has the stale hooks path refuses" {
+    sysv_self_update_unwritable
+    printf '#!/bin/sh\nPLATFORM_HOOKS="${DAEMON_DIR}/assets/config/platform/hooks.sh"\n' \
+        > "$INIT_SCRIPT_DEST"
+
+    run check_service_dest_space
+    [ "$status" -eq 1 ]
+    contains "Cannot write the service definition" "$output"
+}
+
+@test "_self_update_needs_service_write: a fresh install always writes the service" {
+    sysv_self_update_unwritable
+    unset HELIX_SELF_UPDATE
+
+    run _self_update_needs_service_write
+    [ "$status" -eq 0 ]
 }
 
 @test "check_service_dest_space: passes when the probe write succeeds" {

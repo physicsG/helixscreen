@@ -27,6 +27,19 @@ export PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 NAME="helixscreen"
 DESC="HelixScreen 3D Printer Touch UI"
 DAEMON_DIR="/opt/helixscreen"  # Updated by installer for different firmware
+HELIX_PD_HELIX=""  # Updated by installer: printer_data/config/helixscreen
+
+# Run in place (the Snapmaker U1 starts this script from the install dir's
+# config/), a Moonraker update replaces it with the template, which names the
+# default install dir. When that has no binary but this script's own install
+# dir does, the script belongs to the install dir it sits in.
+if [ ! -x "${DAEMON_DIR}/bin/helix-screen" ]; then
+    _self_dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)
+    if [ -n "$_self_dir" ] && [ -x "${_self_dir}/bin/helix-screen" ]; then
+        DAEMON_DIR="$_self_dir"
+    fi
+    unset _self_dir
+fi
 DAEMON="${DAEMON_DIR}/bin/helix-screen"
 SPLASH="${DAEMON_DIR}/bin/helix-splash"
 WATCHDOG="${DAEMON_DIR}/bin/helix-watchdog"
@@ -80,6 +93,19 @@ mkdir -p /var/lib/helixscreen 2>/dev/null || mkdir -p "${HOME}/.helixscreen" 2>/
 
 # Check if binary exists
 [ -x "$DAEMON" ] || exit 0
+
+# A Moonraker type:web update replaces the install dir, taking the config
+# symlinks into printer_data and platform/hooks.sh with it. Put them back before
+# anything below reads helixscreen.env or sources the hooks. Idempotent and
+# quick; a failure never blocks start.
+case "$1" in
+    start|restart|reload)
+        if [ -f "${DAEMON_DIR}/config/restore-user-config.sh" ]; then
+            HELIX_PD_HELIX_DIR="$HELIX_PD_HELIX" \
+                sh "${DAEMON_DIR}/config/restore-user-config.sh" >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
 
 # HELIX_NO_SPLASH is the one operator-settable variable this script consumes
 # before the launcher runs: the early splash gate inside start(). Init runs
@@ -180,6 +206,14 @@ start() {
         done
         unset _exit_waited
     fi
+    # The launcher outlives helix-screen while it runs its exit trap, so the
+    # PIDFILE can name a launcher with nothing left under it. The launcher
+    # answers whether one is exiting, and waits it out, so this script and
+    # the platform hooks share one rule.
+    if [ -x "$LAUNCHER" ]; then
+        "$LAUNCHER" --wait-for-predecessor || true
+        export HELIX_PREDECESSOR_WAITED=1
+    fi
 
     if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE")
@@ -206,6 +240,10 @@ start() {
     # hooks), then the hook's file-scope default (Forge-X) — so this gate
     # and the launcher's own splash decision agree.
     EARLY_SPLASH_PID=""
+    # A launcher's exit sweep stops processes tagged with its PID. A tag
+    # inherited from whoever ran this script (helix-screen restarting itself)
+    # names the launcher being replaced, which would stop this splash.
+    unset HELIX_LAUNCHER_PID
     if [ -x "$SPLASH" ] && [ "${HELIX_NO_SPLASH:-0}" != "1" ]; then
         echo "Starting splash screen..."
         "$SPLASH" >/dev/null 2>&1 &

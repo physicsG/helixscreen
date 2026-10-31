@@ -19,6 +19,9 @@
 // Forward declarations for factory methods (avoid header coupling)
 struct FileInfo;
 struct UsbGcodeFile;
+namespace helix::three_mf {
+struct ArchiveSummary;
+} // namespace helix::three_mf
 
 /**
  * @brief Print history status for file list display
@@ -52,8 +55,9 @@ struct PrintFileData {
     size_t file_size_bytes;             ///< File size in bytes
     std::string uuid;                   ///< Slicer UUID from metadata (empty if not available)
     time_t modified_timestamp;          ///< Last modified timestamp
-    int print_time_minutes;             ///< Print time in minutes
-    float filament_grams;               ///< Filament weight in grams
+    double modified = 0;       ///< Last modified time as listed, to the fraction of a second
+    int print_time_minutes;    ///< Print time in minutes
+    float filament_grams;      ///< Filament weight in grams
     std::string filament_type; ///< Filament type (e.g., "PLA", "PETG", "ABS") — first tool only
     std::string
         filament_name; ///< Full filament name (e.g., "PolyMaker PolyLite ABS") — first tool only
@@ -82,6 +86,19 @@ struct PrintFileData {
 
     // Metadata loading state (travels with file during sorting)
     bool metadata_fetched = false; ///< True if metadata has been loaded
+
+    // A sliced .3mf, read from its archive (null for anything else, and for a
+    // .3mf not read yet)
+    std::shared_ptr<const helix::three_mf::ArchiveSummary> archive;
+    /// The printer has no metadata for this .3mf: it prints as an extracted plate.
+    bool archive_extract = false;
+    /// Its archive read has been started; it is not started again for this entry.
+    bool archive_requested = false;
+    /// The plate the card and the detail view show and Print prints (0 = the first).
+    int archive_plate = 0;
+    /// Plates the printer-side converter has already turned into a current,
+    /// listed G-code, with that output: those print from it, not by extraction.
+    std::map<int, std::string> archive_outputs;
 
     // Print history status (from PrintHistoryManager)
     FileHistoryStatus history_status = FileHistoryStatus::NEVER_PRINTED;
@@ -251,6 +268,7 @@ inline void carry_forward_print_file_metadata(std::vector<PrintFileData>& files,
             continue;
         }
         const time_t modified = f.modified_timestamp;
+        const double modified_exact = f.modified;
         const size_t size = f.file_size_bytes;
         if (should_carry_forward_print_file_metadata(it->second, size, retry_missing_thumbnails,
                                                      keeps_local_copies)) {
@@ -268,6 +286,7 @@ inline void carry_forward_print_file_metadata(std::vector<PrintFileData>& files,
 #endif
             f = std::move(it->second);
             f.modified_timestamp = modified;
+            f.modified = modified_exact;
             f.file_size_bytes = size;
         } else {
             // The provider may have kept metadata_fetched / thumbnail_path on the

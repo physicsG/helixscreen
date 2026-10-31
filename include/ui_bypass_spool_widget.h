@@ -10,6 +10,7 @@
 namespace helix {
 class AmsBackend;
 struct AmsSystemInfo;
+struct SlotInfo;
 } // namespace helix
 
 namespace helix::ui {
@@ -112,6 +113,9 @@ void bypass_spool_destroy(BypassSpoolWidgets& w);
 
 /// Update the spool icon color (RGB 0xRRGGBB). No-op when unchanged.
 void bypass_spool_set_color(BypassSpoolWidgets& w, uint32_t color_rgb);
+
+/// Paint the bypass spool with a slot's filament: colour, multi-colour split and finish.
+void bypass_spool_set_filament(BypassSpoolWidgets& w, const SlotInfo& slot);
 
 /// Show filled spool when true, hollow outline when false. No-op when unchanged.
 void bypass_spool_set_has_spool(BypassSpoolWidgets& w, bool has_spool);

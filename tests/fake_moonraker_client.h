@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "helix_shared_callback.h"
+
 /**
  * @file fake_moonraker_client.h
  * @brief Recording stand-in for helix::IMoonrakerClient.
@@ -46,7 +48,7 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
     /// One live notification subscription.
     struct MethodCallback {
         std::string handler_name;
-        std::function<void(const nlohmann::json&)> callback;
+        helix::SharedCallback<void(const nlohmann::json&)> callback;
     };
 
     /// One unregister_method_callback() call.
@@ -61,8 +63,10 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
     struct RpcCall {
         std::string method;
         nlohmann::json params;
-        std::function<void(const nlohmann::json&)> success_cb;
-        std::function<void(const MoonrakerError&)> error_cb;
+        helix::SharedCallback<void(const nlohmann::json&)> success_cb;
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb;
+        /// The four-argument form's timeout; 0 for the others
+        uint32_t timeout_ms = 0;
     };
 
     /// Live subscriptions keyed by notification method, mirroring the real
@@ -83,6 +87,37 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
 
     /// What connect() returns; nonzero is a transport that could not start.
     int connect_result = 0;
+
+    /// What last_connect_failure() reports after fire_disconnected().
+    helix::ConnectFailureKind connect_failure = helix::ConnectFailureKind::Unknown;
+
+    /// Deliver the last connect()'s on_disconnected, as a failed attempt would.
+    /// @return false when connect() was never called.
+    bool fire_disconnected() {
+        if (!on_disconnected_) {
+            return false;
+        }
+        auto cb = on_disconnected_;
+        cb();
+        return true;
+    }
+
+    /// Deliver the last connect()'s on_connected, as an attempt that opened would.
+    /// @return false when connect() was never called.
+    bool fire_connected() {
+        if (!on_connected_) {
+            return false;
+        }
+        auto cb = on_connected_;
+        cb();
+        return true;
+    }
+
+    /// Every URL connect() was handed, oldest first.
+    std::vector<std::string> connect_urls;
+
+    /// How many times disconnect() was called.
+    int disconnect_calls = 0;
 
     /// Deliver @p msg to every handler registered for @p method.
     /// @return false when nothing is subscribed — which is itself the
@@ -159,7 +194,7 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
     // ========================================================================
 
     void register_method_callback(const std::string& method, const std::string& handler_name,
-                                  std::function<void(const nlohmann::json&)> cb) override {
+                                  helix::SharedCallback<void(const nlohmann::json&)> cb) override {
         method_callbacks[method].push_back({handler_name, std::move(cb)});
     }
 
@@ -195,18 +230,19 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
     }
 
     helix::RequestId send_jsonrpc(const std::string& method, const nlohmann::json& params,
-                                  std::function<void(const nlohmann::json&)> cb) override {
+                                  helix::SharedCallback<void(const nlohmann::json&)> cb) override {
         rpc_calls.push_back({method, params, std::move(cb), {}});
         return ++next_request_id_;
     }
 
     helix::RequestId
     send_jsonrpc(const std::string& method, const nlohmann::json& params,
-                 std::function<void(const nlohmann::json&)> success_cb,
-                 std::function<void(const MoonrakerError&)> error_cb, uint32_t /*timeout_ms*/,
+                 helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+                 helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms,
                  bool /*silent*/,
                  std::optional<helix::rpc_error_policy::CallerIntent> /*intent*/) override {
-        rpc_calls.push_back({method, params, std::move(success_cb), std::move(error_cb)});
+        rpc_calls.push_back(
+            {method, params, std::move(success_cb), std::move(error_cb), timeout_ms});
         return ++next_request_id_;
     }
 
@@ -214,11 +250,20 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
     // Everything else — inert
     // ========================================================================
 
-    int connect(const char* url, std::function<void()>, std::function<void()>) override {
+    int connect(const char* url, helix::SharedCallback<void()> on_connected,
+                helix::SharedCallback<void()> on_disconnected) override {
         last_url_ = url ? url : "";
+        connect_urls.push_back(last_url_);
+        on_connected_ = std::move(on_connected);
+        on_disconnected_ = std::move(on_disconnected);
         return connect_result;
     }
-    void disconnect() override {}
+    helix::ConnectFailureKind last_connect_failure() const override {
+        return connect_failure;
+    }
+    void disconnect() override {
+        ++disconnect_calls;
+    }
     const std::string& get_last_url() const override {
         return last_url_;
     }
@@ -227,11 +272,11 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
         return 0;
     }
     void get_gcode_store(int, std::function<void(const std::vector<GcodeStoreEntry>&)>,
-                         std::function<void(const MoonrakerError&)>) override {}
+                         helix::SharedCallback<void(const MoonrakerError&)>) override {}
     void get_temperature_store(std::function<void(const TemperatureStore&)>,
-                               std::function<void(const MoonrakerError&)>) override {}
-    void discover_printer(std::function<void()>, std::function<void(const std::string&)>) override {
-    }
+                               helix::SharedCallback<void(const MoonrakerError&)>) override {}
+    void discover_printer(helix::SharedCallback<void()>,
+                          helix::SharedCallback<void(const std::string&)>) override {}
     helix::PrinterDiscovery hardware() const override {
         return {};
     }
@@ -245,10 +290,10 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
         std::function<void(const helix::PrinterDiscovery&, const nlohmann::json&)> cb) override {
         on_discovery_complete = std::move(cb);
     }
-    void set_bed_mesh_callback(std::function<void(const nlohmann::json&)>) override {}
+    void set_bed_mesh_callback(helix::SharedCallback<void(const nlohmann::json&)>) override {}
     helix::SubscriptionId
-    register_notify_update(std::function<void(const nlohmann::json&)>) override {
-        return helix::INVALID_SUBSCRIPTION_ID;
+    register_notify_update(helix::SharedCallback<void(const nlohmann::json&)>) override {
+        return helix::kInvalidSubscriptionId;
     }
     bool unsubscribe_notify_update(helix::SubscriptionId) override {
         return false;
@@ -259,7 +304,7 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
     helix::ConnectionState get_connection_state() const override {
         return connection_state;
     }
-    void add_connected_observer(const std::string&, std::function<void()>) override {}
+    void add_connected_observer(const std::string&, helix::SharedCallback<void()>) override {}
     bool remove_connected_observer(const std::string&) override {
         return false;
     }
@@ -288,6 +333,8 @@ class FakeMoonrakerClient : public helix::IMoonrakerClient {
 
   protected:
     std::string last_url_;
+    helix::SharedCallback<void()> on_connected_;
+    helix::SharedCallback<void()> on_disconnected_;
     helix::RequestId next_request_id_ = 0;
     /// Held, not a temporary: a weak_ptr to a just-destroyed shared_ptr is
     /// born expired, which silently disarms every SubscriptionGuard built

@@ -274,7 +274,7 @@ TEST_CASE("parse_theme_json - legacy format falls back to the built-in theme",
     // Legacy format is not supported - falls back to the built-in theme, which is
     // the configured default rather than Nord (see get_builtin_fallback_theme).
     REQUIRE(theme.name == "HelixScreen");
-    REQUIRE(theme.filename == helix::DEFAULT_THEME);
+    REQUIRE(theme.filename == helix::kDefaultTheme);
     REQUIRE(theme.is_valid());
 }
 

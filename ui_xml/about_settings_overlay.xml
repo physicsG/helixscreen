@@ -58,49 +58,34 @@
         <event_cb trigger="clicked" callback="on_about_version_clicked"/>
       </ui_button>
       <!-- Klipper Version -->
-      <setting_info_row name="row_klipper" label="Klipper" icon="toy_brick_outline">
-        <text_muted name="value" bind_text="klipper_version"/>
-      </setting_info_row>
+      <setting_info_row name="row_klipper" label="Klipper" icon="toy_brick_outline" bind_value="klipper_version"/>
       <!-- Moonraker Version -->
-      <setting_info_row name="row_moonraker" label="Moonraker" icon="toy_brick_outline">
-        <text_muted name="value" bind_text="moonraker_version"/>
-      </setting_info_row>
+      <setting_info_row name="row_moonraker" label="Moonraker" icon="toy_brick_outline" bind_value="moonraker_version"/>
       <!-- OS Version -->
-      <setting_info_row name="row_os" label="OS" icon="console">
-        <text_muted name="value" bind_text="os_version"/>
-      </setting_info_row>
+      <setting_info_row name="row_os" label="OS" icon="console" bind_value="os_version"/>
       <!-- Host (kernel arch · userspace bitness). Hidden on Android — irrelevant
            when the OS row already reads "Android". -->
       <lv_obj name="container_host_arch" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_host_arch" label="Host" icon="sysinfo">
-          <text_muted name="value" bind_text="host_arch_value"/>
-        </setting_info_row>
+        <setting_info_row name="row_host_arch" label="Host" icon="sysinfo" bind_value="host_arch_value"/>
       </lv_obj>
       <!-- Install Root (hidden on Android — SDL-sandboxed paths are not user-meaningful) -->
       <lv_obj name="container_install_root" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_install_root" label="Install Root" icon="folder_home">
-          <text_muted name="value" width="75%" bind_text="install_root_value" style_text_align="right" long_mode="wrap"/>
-        </setting_info_row>
+        <setting_info_row name="row_install_root"
+                          label="Install Root" icon="folder_home" bind_value="install_root_value"/>
       </lv_obj>
       <!-- Config Dir (hidden on Android) -->
       <lv_obj name="container_config_dir" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_config_dir" label="Config Dir" icon="cog">
-          <text_muted name="value" width="75%" bind_text="config_dir_value" style_text_align="right" long_mode="wrap"/>
-        </setting_info_row>
+        <setting_info_row name="row_config_dir" label="Config Dir" icon="cog" bind_value="config_dir_value"/>
       </lv_obj>
       <!-- Logs (active spdlog destination — journal/syslog/file path/console/logcat) -->
-      <setting_info_row name="row_log_dest" label="Logs" icon="script_text">
-        <text_muted name="value" width="75%" bind_text="log_dest_value" style_text_align="right" long_mode="wrap"/>
-      </setting_info_row>
+      <setting_info_row name="row_log_dest" label="Logs" icon="script_text" bind_value="log_dest_value"/>
       <!-- Cache Dir (hidden on Android) -->
       <lv_obj name="container_cache_dir" width="100%" style_pad_all="0" scrollable="false">
         <bind_flag_if_eq subject="settings_is_android" flag="hidden" ref_value="1"/>
-        <setting_info_row name="row_cache_dir" label="Cache Dir" icon="database">
-          <text_muted name="value" width="75%" bind_text="cache_dir_value" style_text_align="right" long_mode="wrap"/>
-        </setting_info_row>
+        <setting_info_row name="row_cache_dir" label="Cache Dir" icon="database" bind_value="cache_dir_value"/>
       </lv_obj>
       <!-- Total Print Hours (opens history dashboard) -->
       <setting_action_row name="row_print_hours"
@@ -118,7 +103,7 @@
                 style_radius="#border_radius" scrollable="false">
           <text_tiny name="licenses_text"
                      width="100%" style_text_color="#text_muted" style_text_line_space="4"
-                     text="HelixScreen — GPL-3.0&#10;LVGL — MIT License&#10;helix-xml — MIT License (our fork of LVGL's XML engine)&#10;libhv — BSD 3-Clause License&#10;spdlog — MIT License&#10;nlohmann/json — MIT License&#10;SDL2 — zlib License&#10;Expat — MIT License&#10;md4c — MIT License&#10;ThorVG — MIT License&#10;GLM — Happy Bunny or MIT License&#10;quirc — ISC License&#10;lv_i18n — MIT License&#10;lv_markdown — MIT License&#10;stb — MIT License / Public Domain&#10;mdns — Public Domain&#10;linenoise — BSD 2-Clause License&#10;libnl — LGPL 2.1&#10;minilzo — GPL 2.0&#10;cpp-terminal — MIT License&#10;wpa_supplicant — BSD 3-Clause License"/>
+                     text="HelixScreen — GPL-3.0&#10;LVGL — MIT License&#10;helix-xml — MIT License (our fork of LVGL's XML engine)&#10;libhv — BSD 3-Clause License&#10;spdlog — MIT License&#10;nlohmann/json — MIT License&#10;SDL2 — zlib License&#10;Expat — MIT License&#10;md4c — MIT License&#10;ThorVG — MIT License&#10;GLM — Happy Bunny or MIT License&#10;quirc — ISC License&#10;lv_i18n — MIT License&#10;lv_markdown — MIT License&#10;stb — MIT License / Public Domain&#10;mdns — Public Domain&#10;linenoise — BSD 2-Clause License&#10;libnl — LGPL 2.1&#10;minilzo — GPL 2.0&#10;cpp-terminal — MIT License&#10;wpa_supplicant — BSD 3-Clause License&#10;freeglut teapot data — MIT License&#10;Spoolman logo — MIT License"/>
         </lv_obj>
       </lv_obj>
       <!-- Credits -->

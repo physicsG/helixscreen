@@ -31,11 +31,13 @@
  * that they stay no-ops: absence must not clobber what we already knew.
  */
 
+#include "ui_update_queue.h"
+
 #include "active_material_provider.h"
-#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 #include "filament_database.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <string>
 #include <vector>
@@ -52,6 +54,11 @@ namespace helix {
 /// test does, and exposes the version member the readers under test write.
 class AfcStatusFieldHelper : public AmsBackendAfc {
   public:
+    // A message frame queues its toast decision for the main thread.
+    ~AfcStatusFieldHelper() override {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
     AfcStatusFieldHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2"};
         AfcTestAccess::initialize_slots(*this, names);

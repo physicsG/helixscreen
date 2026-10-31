@@ -1,8 +1,10 @@
 #!/usr/bin/env bats
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Tests for install_permission_rules (permissions.sh)
-# Covers udev backlight rules and polkit NetworkManager rules.
+# Tests for install_permission_rules (permissions.sh), ensure-polkit-rule.sh
+# and remove_permission_rules (uninstall.sh).
+# Covers udev backlight rules, polkit NetworkManager rules and the polkit
+# logind power-off/reboot rule.
 
 WORKTREE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
@@ -25,9 +27,16 @@ setup() {
     mkdir -p "$INSTALL_DIR/config"
     cp "$WORKTREE_ROOT/config/99-helixscreen-backlight.rules" "$INSTALL_DIR/config/"
     cp "$WORKTREE_ROOT/config/helixscreen-network.pkla" "$INSTALL_DIR/config/"
+    cp "$WORKTREE_ROOT/config/ensure-polkit-rule.sh" "$INSTALL_DIR/config/"
+
+    # ensure-polkit-rule.sh writes under this instead of /etc/polkit-1
+    export HELIX_POLKIT_DIR="$BATS_TEST_TMPDIR/etc/polkit-1"
 
     # Mock systemctl to prevent restarting real services (e.g., polkit) on dev machines
     mock_command "systemctl" ""
+    # ensure-polkit-rule.sh picks .rules or .pkla from `pkaction --version`; the
+    # host's polkit (0.105 on Ubuntu 22.04 runners) must not choose for the test.
+    mock_command "pkaction" "pkaction version 124"
 }
 
 # Helper: create a SUDO wrapper that rewrites system paths to tmpdir
@@ -40,17 +49,11 @@ setup_sudo_redirect() {
 new_args=""
 for arg in "$@"; do
     case "$arg" in
-        /etc/udev/rules.d/*)
-            basename="${arg##*/}"
-            arg="${BATS_TEST_TMPDIR}/etc/udev/rules.d/${basename}"
-            ;;
-        /etc/polkit-1/localauthority/50-local.d/*)
-            basename="${arg##*/}"
-            arg="${BATS_TEST_TMPDIR}/etc/polkit-1/localauthority/50-local.d/${basename}"
-            ;;
-        /etc/polkit-1/rules.d/*)
-            basename="${arg##*/}"
-            arg="${BATS_TEST_TMPDIR}/etc/polkit-1/rules.d/${basename}"
+        # The rule directories themselves too: `$SUDO test -d /etc/polkit-1/rules.d`
+        # must ask the sandbox, not whether this host happens to run polkit.
+        /etc/udev/rules.d | /etc/udev/rules.d/* | /etc/polkit-1/rules.d | /etc/polkit-1/rules.d/* | \
+        /etc/polkit-1/localauthority/50-local.d | /etc/polkit-1/localauthority/50-local.d/*)
+            arg="${BATS_TEST_TMPDIR}${arg}"
             ;;
     esac
     new_args="$new_args \"$arg\""
@@ -690,4 +693,349 @@ _flow_line() {
     # install.sh is generated from the modules; a stale bundle would
     # ship the old flow to every curl|sh user even with main.sh fixed.
     grep -q '^    install_permission_rules "\$platform"$' "$INSTALL_BUNDLE"
+}
+
+# =============================================================================
+# logind power-off/reboot rule (ensure-polkit-rule.sh)
+#
+# A service has no seat session, so logind answers its PowerOff/Reboot with
+# "Interactive authentication required" unless a rule grants them.
+# =============================================================================
+
+POWER_IDS="org.freedesktop.login1.power-off
+org.freedesktop.login1.power-off-multiple-sessions
+org.freedesktop.login1.reboot
+org.freedesktop.login1.reboot-multiple-sessions"
+
+# A PATH holding only what ensure-polkit-rule.sh needs, so the host's own
+# nmcli and pkaction cannot leak in. Pass "nmcli" to add a mock nmcli; set
+# PKACTION_VERSION to add a mock pkaction that reports it.
+_minimal_path() {
+    local d="$BATS_TEST_TMPDIR/minbin" c
+    mkdir -p "$d"
+    for c in sh cat sed tr rm chmod head; do
+        ln -sf "$(command -v "$c")" "$d/$c"
+    done
+    if [ "${1:-}" = "nmcli" ]; then
+        printf '#!/bin/sh\nexit 0\n' > "$d/nmcli"
+        chmod +x "$d/nmcli"
+    fi
+    if [ -n "${PKACTION_VERSION:-}" ]; then
+        printf '#!/bin/sh\necho "pkaction version %s"\n' "$PKACTION_VERSION" > "$d/pkaction"
+        chmod +x "$d/pkaction"
+    fi
+    echo "$d"
+}
+
+# Run ensure-polkit-rule.sh for <user> with a minimal PATH ($2 = "nmcli" adds one).
+_run_ensure() {
+    local mp
+    mp="$(_minimal_path "${2:-}")"
+    run env PATH="$mp" HELIX_POLKIT_DIR="$HELIX_POLKIT_DIR" \
+        "$mp/sh" "$WORKTREE_ROOT/config/ensure-polkit-rule.sh" "$1"
+}
+
+@test "ensure-polkit-rule: power .rules grants exactly the four logind power-off/reboot ids" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    _run_ensure pbrown
+    [ "$status" -eq 0 ]
+
+    local rule="$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules"
+    [ -f "$rule" ]
+    grep -q 'subject.user === "pbrown"' "$rule"
+    grep -q "polkit.Result.YES" "$rule"
+    local id
+    for id in $POWER_IDS; do
+        grep -q "\"$id\"" "$rule"
+    done
+    # Nothing beyond them: no ignore-inhibit, so a block inhibitor holds
+    [ "$(grep -o 'org\.freedesktop\.[A-Za-z0-9.-]*' "$rule" | sort -u | wc -l)" -eq 4 ]
+    [ -z "$(grep ignore-inhibit "$rule")" ]
+}
+
+@test "ensure-polkit-rule: power .rules is valid JavaScript that grants only its user" {
+    command -v node >/dev/null 2>&1 || skip "node not installed"
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    _run_ensure pbrown
+    [ "$status" -eq 0 ]
+
+    run node -e '
+const polkit = { Result: { YES: "yes" }, rules: [], addRule(f) { this.rules.push(f); } };
+eval(require("fs").readFileSync(process.argv[1], "utf8"));
+const f = polkit.rules[0];
+const out = [
+  f({ id: "org.freedesktop.login1.power-off" }, { user: "pbrown" }),
+  f({ id: "org.freedesktop.login1.reboot-multiple-sessions" }, { user: "pbrown" }),
+  f({ id: "org.freedesktop.login1.hibernate" }, { user: "pbrown" }),
+  f({ id: "org.freedesktop.login1.power-off-ignore-inhibit" }, { user: "pbrown" }),
+  f({ id: "org.freedesktop.login1.power-off" }, { user: "other" }),
+];
+console.log(out.join(","));
+' "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules"
+    [ "$status" -eq 0 ]
+    [ "$output" = "yes,yes,,," ]
+}
+
+@test "ensure-polkit-rule: power rule is installed without nmcli" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    _run_ensure pbrown
+    [ "$status" -eq 0 ]
+    [ -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ]
+    # No NetworkManager, no network rule
+    [ ! -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules" ]
+}
+
+@test "ensure-polkit-rule: an existing network rule does not stop the power rule" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    echo "// existing network rule" > "$HELIX_POLKIT_DIR/rules.d/50-helixscreen-network.rules"
+
+    _run_ensure pbrown nmcli
+    [ "$status" -eq 0 ]
+    [ -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ]
+    # The network rule is left exactly as found, and no second one is added
+    [ "$(cat "$HELIX_POLKIT_DIR/rules.d/50-helixscreen-network.rules")" = "// existing network rule" ]
+    [ ! -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules" ]
+}
+
+@test "ensure-polkit-rule: a 49- network rule counts as present" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    echo "// installer network rule" > "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules"
+
+    _run_ensure pbrown nmcli
+    [ "$status" -eq 0 ]
+    [ ! -f "$HELIX_POLKIT_DIR/rules.d/50-helixscreen-network.rules" ]
+    [ "$(cat "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules")" = "// installer network rule" ]
+}
+
+@test "ensure-polkit-rule: with nmcli and no rule, writes the 49- network rule" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    _run_ensure pbrown nmcli
+    [ "$status" -eq 0 ]
+    grep -q 'subject.user === "pbrown"' "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules"
+    [ ! -f "$HELIX_POLKIT_DIR/rules.d/50-helixscreen-network.rules" ]
+}
+
+@test "ensure-polkit-rule: falls back to .pkla when rules.d is absent" {
+    local pkla_dir="$HELIX_POLKIT_DIR/localauthority/50-local.d"
+    mkdir -p "$pkla_dir"
+    _run_ensure pbrown
+    [ "$status" -eq 0 ]
+
+    local pkla="$pkla_dir/helixscreen-power.pkla"
+    [ -f "$pkla" ]
+    grep -q '^Identity=unix-user:pbrown$' "$pkla"
+    grep -q '^ResultAny=yes$' "$pkla"
+    local expected
+    expected="Action=$(printf '%s' "$POWER_IDS" | tr '\n' ';')"
+    grep -qxF "$expected" "$pkla"
+}
+
+@test "ensure-polkit-rule: a .rules install removes a stale power .pkla" {
+    local pkla_dir="$HELIX_POLKIT_DIR/localauthority/50-local.d"
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d" "$pkla_dir"
+    echo "stale" > "$pkla_dir/helixscreen-power.pkla"
+    _run_ensure pbrown
+    [ "$status" -eq 0 ]
+    [ -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ]
+    [ ! -f "$pkla_dir/helixscreen-power.pkla" ]
+}
+
+@test "ensure-polkit-rule: power rule is rewritten for a changed user, and left alone when current" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    local rule="$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules"
+
+    _run_ensure olduser
+    grep -q '"olduser"' "$rule"
+
+    _run_ensure pbrown
+    [ "$status" -eq 0 ]
+    grep -q '"pbrown"' "$rule"
+    [ -z "$(grep '"olduser"' "$rule")" ]
+    contains "installed" "$output"
+
+    # A second run with the same user rewrites nothing
+    _run_ensure pbrown
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "ensure-polkit-rule: root gets no rules" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    _run_ensure root nmcli
+    [ "$status" -eq 0 ]
+    [ -z "$(ls -A "$HELIX_POLKIT_DIR/rules.d")" ]
+}
+
+@test "ensure-polkit-rule: root removes a previous user's power grant in both formats" {
+    local pkla_dir="$HELIX_POLKIT_DIR/localauthority/50-local.d"
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d" "$pkla_dir"
+    echo old > "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules"
+    echo old > "$pkla_dir/helixscreen-power.pkla"
+    echo net > "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules"
+
+    _run_ensure root nmcli
+    [ "$status" -eq 0 ]
+    [ ! -e "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ]
+    [ ! -e "$pkla_dir/helixscreen-power.pkla" ]
+    # Only the power grant is withdrawn
+    [ -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules" ]
+}
+
+@test "ensure-polkit-rule: an implausible user name gets no rule of either kind" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    local bad
+    for bad in 'evil") || true; //' 'Pbrown' '1abc' 'a b' 'a$b' '-x' ''; do
+        [ -n "$bad" ] || continue
+        _run_ensure "$bad" nmcli
+        [ "$status" -eq 0 ] || fail "status $status for '$bad'"
+        contains "refusing user name" "$output"
+        [ -z "$(ls -A "$HELIX_POLKIT_DIR/rules.d")" ] || fail "wrote a rule for '$bad'"
+    done
+}
+
+@test "ensure-polkit-rule: plausible user names are accepted" {
+    local good
+    for good in pbrown _svc biqu-2 'machine$'; do
+        rm -rf "$HELIX_POLKIT_DIR"
+        mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+        _run_ensure "$good"
+        [ "$status" -eq 0 ] || fail "status $status for '$good'"
+        grep -qF "subject.user === \"$good\"" "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ||
+            fail "no rule for '$good'"
+    done
+}
+
+@test "ensure-polkit-rule: pkaction 0.105 picks .pkla even when rules.d exists" {
+    local pkla_dir="$HELIX_POLKIT_DIR/localauthority/50-local.d"
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d" "$pkla_dir"
+    PKACTION_VERSION=0.105 _run_ensure pbrown nmcli
+    [ "$status" -eq 0 ]
+    [ -f "$pkla_dir/helixscreen-power.pkla" ]
+    [ -f "$pkla_dir/helixscreen-network.pkla" ]
+    [ -z "$(ls -A "$HELIX_POLKIT_DIR/rules.d")" ]
+}
+
+@test "ensure-polkit-rule: pkaction 124 picks .rules even when the pkla dir exists" {
+    local pkla_dir="$HELIX_POLKIT_DIR/localauthority/50-local.d"
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d" "$pkla_dir"
+    PKACTION_VERSION=124 _run_ensure pbrown nmcli
+    [ "$status" -eq 0 ]
+    [ -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ]
+    [ -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules" ]
+    [ -z "$(ls -A "$pkla_dir")" ]
+}
+
+@test "ensure-polkit-rule: pkaction 0.106 counts as .rules" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d" "$HELIX_POLKIT_DIR/localauthority/50-local.d"
+    PKACTION_VERSION=0.106 _run_ensure pbrown
+    [ "$status" -eq 0 ]
+    [ -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ]
+}
+
+@test "ensure-polkit-rule: pkaction 0.105 with only rules.d writes nothing" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    PKACTION_VERSION=0.105 _run_ensure pbrown
+    [ "$status" -eq 0 ]
+    [ -z "$(ls -A "$HELIX_POLKIT_DIR/rules.d")" ]
+}
+
+@test "ensure-polkit-rule: no polkit directory exits 0 and writes nothing" {
+    _run_ensure pbrown nmcli
+    [ "$status" -eq 0 ]
+    [ ! -e "$HELIX_POLKIT_DIR" ]
+}
+
+@test "ensure-polkit-rule: an unwritable rules.d does not fail the service start" {
+    [ "$(id -u)" != "0" ] || skip "root can write a 0555 directory"
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    chmod 555 "$HELIX_POLKIT_DIR/rules.d"
+    _run_ensure pbrown nmcli
+    chmod 755 "$HELIX_POLKIT_DIR/rules.d"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cannot write"* ]]
+}
+
+@test "service unit runs ensure-polkit-rule.sh as root on every start" {
+    grep -qx 'ExecStartPre=+@@INSTALL_DIR@@/config/ensure-polkit-rule.sh @@HELIX_USER@@' \
+        "$WORKTREE_ROOT/config/helixscreen.service"
+}
+
+# =============================================================================
+# logind power-off/reboot rule through the installer and uninstaller
+# =============================================================================
+
+@test "install_permission_rules: installs the power rule without nmcli" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    mock_command "udevadm" ""
+    local mp
+    mp="$(_minimal_path)"
+
+    PATH="$BATS_TEST_TMPDIR/bin:$mp" run install_permission_rules "pi"
+    [ "$status" -eq 0 ]
+    grep -q 'subject.user === "biqu"' "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules"
+    [ ! -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules" ]
+    [[ "$output" == *"power-off/reboot polkit rule"* ]]
+}
+
+@test "install_permission_rules: installs the power rule alongside the network rule" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    setup_sudo_redirect
+    mock_command "nmcli" ""
+    mock_command "udevadm" ""
+
+    run install_permission_rules "pi"
+    [ "$status" -eq 0 ]
+    grep -q '"biqu"' "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-network.rules"
+    grep -q '"biqu"' "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules"
+}
+
+@test "install_permission_rules: root-only platforms get no power rule" {
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    run install_permission_rules "k1"
+    [ "$status" -eq 0 ]
+    [ ! -f "$HELIX_POLKIT_DIR/rules.d/49-helixscreen-power.rules" ]
+}
+
+@test "remove_permission_rules: removes the power rule in both formats" {
+    unset _HELIX_UNINSTALL_SOURCED
+    . "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
+    setup_sudo_redirect
+
+    local rules_dir="$BATS_TEST_TMPDIR/etc/polkit-1/rules.d"
+    local pkla_dir="$BATS_TEST_TMPDIR/etc/polkit-1/localauthority/50-local.d"
+    local udev_dir="$BATS_TEST_TMPDIR/etc/udev/rules.d"
+    mkdir -p "$rules_dir" "$pkla_dir" "$udev_dir"
+    local f
+    for f in "$rules_dir/49-helixscreen-power.rules" "$pkla_dir/helixscreen-power.pkla" \
+             "$rules_dir/49-helixscreen-network.rules" "$rules_dir/50-helixscreen-network.rules" \
+             "$pkla_dir/helixscreen-network.pkla" "$udev_dir/99-helixscreen-backlight.rules"; do
+        echo x > "$f"
+    done
+    echo keep > "$rules_dir/10-network-manager.rules"
+
+    remove_permission_rules
+
+    [ -z "$(ls -A "$pkla_dir")" ]
+    [ -z "$(ls -A "$udev_dir")" ]
+    [ "$(ls -A "$rules_dir")" = "10-network-manager.rules" ]
+}
+
+@test "uninstall: both uninstall paths call remove_permission_rules" {
+    [ "$(grep -c '^ *remove_permission_rules$' "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh")" -eq 2 ]
+}
+
+@test "install_permission_rules: a power rule that could not be written is reported, with the reason" {
+    [ "$(id -u)" != "0" ] || skip "root can write a 0555 directory"
+    mkdir -p "$HELIX_POLKIT_DIR/rules.d"
+    chmod 555 "$HELIX_POLKIT_DIR/rules.d"
+    mock_command "udevadm" ""
+    local mp
+    mp="$(_minimal_path)"
+
+    PATH="$BATS_TEST_TMPDIR/bin:$mp" run install_permission_rules "pi"
+    chmod 755 "$HELIX_POLKIT_DIR/rules.d"
+    [ "$status" -eq 0 ]
+    contains "cannot write" "$output"
+    contains "Failed to install power-off/reboot polkit rule" "$output"
+    [[ "$output" != *"Installed power-off/reboot polkit rule"* ]]
 }

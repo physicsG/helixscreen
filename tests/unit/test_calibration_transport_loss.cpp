@@ -247,7 +247,7 @@ TEST_CASE_METHOD(TransportLossFixture,
                                         "Connection to printer lost", "SHAPER_CALIBRATE");
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {},
+        'X', [](int, ShaperCalibrationPhase, float) {},
         [this](const InputShaperResult&) { success_.store(true); },
         [this](const MoonrakerError& err) {
             captured_error_ = err.message;

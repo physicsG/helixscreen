@@ -127,7 +127,7 @@ TEST_CASE_METHOD(MigrationV21Fixture,
                  "[config][migration]") {
     write_and_init(v20_two_printers());
 
-    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version") == kCurrentConfigVersion);
 
     // 1. toolhead_style copied to EVERY printer, root key retired.
     CHECK(config.get<int>(p("voronv2", "appearance/toolhead_style"), -1) == 5);
@@ -280,7 +280,7 @@ TEST_CASE_METHOD(MigrationV21Fixture,
                  "[config][migration]") {
     // A config that is already v21 must not have its per-printer values
     // clobbered by a stale root key, nor its scanner node re-collapsed.
-    json v21 = {{"config_version", CURRENT_CONFIG_VERSION},
+    json v21 = {{"config_version", kCurrentConfigVersion},
                 {"active_printer_id", "voronv2"},
                 {"appearance", {{"toolhead_style", 7}}}, // stale leftover; must be ignored
                 {"scanner", {{"keymap", "qwerty"}}},
@@ -332,7 +332,7 @@ TEST_CASE_METHOD(MigrationV21Fixture,
                     {"appearance", {{"toolhead_style", 4}}},
                     {"detection", {{"policy_u1", 0}}}};
         REQUIRE_NOTHROW(write_and_init(v20));
-        CHECK(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        CHECK(config.get<int>("/config_version") == kCurrentConfigVersion);
         // Nothing to fan out into, so the root values are kept for a later boot.
         CHECK(config.get<int>("/appearance/toolhead_style", -1) == 4);
     }
@@ -342,7 +342,7 @@ TEST_CASE_METHOD(MigrationV21Fixture,
                     {"active_printer_id", "voronv2"},
                     {"printers", {{"voronv2", {{"moonraker_host", "192.168.1.112"}}}}}};
         REQUIRE_NOTHROW(write_and_init(v20));
-        CHECK(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        CHECK(config.get<int>("/config_version") == kCurrentConfigVersion);
         CHECK_FALSE(config.exists("/scanner/keymap"));
         CHECK_FALSE(config.exists(p("voronv2", "appearance/toolhead_style")));
     }
@@ -354,7 +354,7 @@ TEST_CASE_METHOD(MigrationV21Fixture,
                     {"detection", {{"policy_u1", nullptr}}},
                     {"printers", {{"voronv2", {{"scanner", {{"keymap", nullptr}}}}}}}};
         REQUIRE_NOTHROW(write_and_init(v20));
-        CHECK(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        CHECK(config.get<int>("/config_version") == kCurrentConfigVersion);
         // A null is "absent", so nothing is copied and no null is propagated.
         CHECK_FALSE(config.exists(p("voronv2", "appearance/toolhead_style")));
         CHECK_FALSE(config.exists("/scanner/keymap"));
@@ -366,7 +366,7 @@ TEST_CASE_METHOD(MigrationV21Fixture,
                     {"appearance", {{"toolhead_style", 4}}},
                     {"printers", json::array({"voronv2"})}};
         REQUIRE_NOTHROW(write_and_init(v20));
-        CHECK(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        CHECK(config.get<int>("/config_version") == kCurrentConfigVersion);
     }
 
     SECTION("wrong-typed nodes where objects are expected") {
@@ -378,7 +378,7 @@ TEST_CASE_METHOD(MigrationV21Fixture,
                     {"detection", 42},
                     {"printers", {{"voronv2", {{"scanner", "not-an-object"}}}}}};
         REQUIRE_NOTHROW(write_and_init(v20));
-        CHECK(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        CHECK(config.get<int>("/config_version") == kCurrentConfigVersion);
         // The junk scanner node is dropped along with the well-formed ones.
         CHECK_FALSE(config.exists(p("voronv2", "scanner")));
     }

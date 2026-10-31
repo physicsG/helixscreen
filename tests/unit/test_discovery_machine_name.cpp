@@ -56,7 +56,7 @@ class IdentityDiscoveryClient : public MoonrakerClientMock {
     }
 
     helix::RequestId send_jsonrpc(const std::string& method, const json& params,
-                                  std::function<void(const json&)> cb) override {
+                                  helix::SharedCallback<void(const json&)> cb) override {
         if (auto scripted = scripted_reply(method)) {
             if (cb) {
                 cb(*scripted);
@@ -67,8 +67,9 @@ class IdentityDiscoveryClient : public MoonrakerClientMock {
     }
 
     helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override {
         if (auto scripted = scripted_reply(method)) {
@@ -81,6 +82,12 @@ class IdentityDiscoveryClient : public MoonrakerClientMock {
                                                  std::move(error_cb), timeout_ms, silent, intent);
     }
 
+    /// What the next printer.info reply names as its firmware and version.
+    void set_firmware(std::string app, json software_version) {
+        app_ = std::move(app);
+        software_version_ = std::move(software_version);
+    }
+
   private:
     std::optional<json> scripted_reply(const std::string& method) const {
         if (method == "printer.info") {
@@ -89,8 +96,8 @@ class IdentityDiscoveryClient : public MoonrakerClientMock {
                          {{"state", "ready"},
                           {"state_message", "Printer is ready"},
                           {"hostname", hostname_},
-                          {"app", "Klipper"},
-                          {"software_version", "v0.12.0-qidi"}}}};
+                          {"app", app_},
+                          {"software_version", software_version_}}}};
         }
         if (method == "machine.system_info") {
             json system_info = {
@@ -106,6 +113,8 @@ class IdentityDiscoveryClient : public MoonrakerClientMock {
 
     std::string hostname_;
     std::string machine_name_;
+    std::string app_ = "Klipper";
+    json software_version_ = "v0.12.0-qidi";
 };
 
 /// The identity string detection is scored against, lowercased for comparison.
@@ -146,4 +155,35 @@ TEST_CASE("Discovery keeps the printer.info hostname when no model string is rep
     client.discover_printer_real();
 
     CHECK(client.hardware().hostname() == "voron-trident-300");
+}
+
+TEST_CASE("Discovery reads the firmware and its version from printer.info",
+          "[discovery][printer_discovery][versions]") {
+    LVGLTestFixture fixture;
+
+    IdentityDiscoveryClient client("voron-trident-300", /*machine_name=*/"");
+    client.set_klippy_state(MoonrakerClientMock::KlippyState::READY);
+    client.set_firmware("Kalico", "v2026.07.00-0-g30c65e09");
+    client.discover_printer_real();
+
+    CHECK(client.hardware().software_version() == "v2026.07.00-0-g30c65e09");
+    CHECK(client.hardware().is_kalico());
+    CHECK(std::string(client.hardware().firmware_name()) == "Kalico");
+
+    SECTION("a later discovery of a Klipper printer drops the Kalico marker") {
+        client.set_firmware("Klipper", "v0.13.0-100-gabcdef12");
+        client.discover_printer_real();
+
+        CHECK(client.hardware().software_version() == "v0.13.0-100-gabcdef12");
+        CHECK_FALSE(client.hardware().is_kalico());
+        CHECK(std::string(client.hardware().firmware_name()) == "Klipper");
+    }
+
+    SECTION("a version that is not a string reads as unknown") {
+        client.set_firmware("Klipper", 42);
+        client.discover_printer_real();
+
+        CHECK(client.hardware().software_version() == "unknown");
+        CHECK_FALSE(client.hardware().is_kalico());
+    }
 }

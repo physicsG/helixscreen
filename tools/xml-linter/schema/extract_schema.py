@@ -619,6 +619,7 @@ def extract_schema(xml_src_dir: Path) -> dict[str, Any]:
     # Map parser file -> widget name -> apply function name
     widget_parser_map: dict[str, list[tuple[str, str]]] = {
         "lv_xml_label_parser.c": [("lv_label", "lv_xml_label_apply")],
+        "lv_xml_responsive_grid_parser.c": [("responsive_grid", "lv_xml_responsive_grid_apply")],
         "lv_xml_button_parser.c": [("lv_button", "lv_xml_button_apply")],
         "lv_xml_image_parser.c": [("lv_image", "lv_xml_image_apply")],
         "lv_xml_bar_parser.c": [("lv_bar", "lv_xml_bar_apply")],
@@ -1091,6 +1092,7 @@ CPP_WIDGET_FILES: dict[str, dict[str, Any]] = {
             "stroke_color": {"type": "color"},
             "stroke_opa": {"type": "opa"},
             "text_transform": {"type": "enum", "enum": "text_transform"},
+            "max_lines": {"type": "int"},
         },
     },
     "ui_text.cpp:text_button": {
@@ -1114,9 +1116,11 @@ CPP_WIDGET_FILES: dict[str, dict[str, Any]] = {
             "bind_icon": {"type": "string"},
             "bind_op_state": {"type": "string"},
             "long_mode": {"type": "enum", "enum": "label_long_mode"},
+            "label_align": {"type": "enum", "enum": "button_label_align"},
             "label_hidden_if_bp_eq": {"type": "int"},
             "label_hidden_subject": {"type": "string"},
             "label_hidden_if_eq": {"type": "int"},
+            "label_hidden_cond": {"type": "string"},
             "bind_text-fmt": {"type": "string"},
             "text-fmt": {"type": "string"},
         },
@@ -1458,6 +1462,7 @@ def _add_cpp_enums(schema: dict[str, Any]) -> None:
         "icon_size": ["xs", "sm", "md", "lg", "xl"],
         "icon_position": ["left", "right", "top", "bottom"],
         "button_layout": ["row", "column"],
+        "button_label_align": ["start", "center"],
         "spinner_size": ["xs", "sm", "md", "lg"],
         "switch_size": ["tiny", "small", "medium", "large"],
         "switch_orientation": ["horizontal", "vertical", "auto"],

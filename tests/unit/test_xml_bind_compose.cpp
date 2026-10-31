@@ -22,6 +22,7 @@
 #include "ui_update_queue.h"
 
 #include "../test_fixtures.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "printer_state.h"
 
 #include <filesystem>
@@ -128,9 +129,7 @@ struct InventoryFixture : public XMLTestFixture {
 
     void set_and_settle(lv_subject_t* subject, int value) {
         lv_subject_set_int(subject, value);
-        for (int pass = 0; pass < 8; ++pass) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     bool applied(const BindGroup& g, lv_obj_t* obj) const {

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
+
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -10,7 +12,9 @@
 #include <string>
 #include <vector>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 struct MoonrakerError;
 
 namespace helix::system {
@@ -68,24 +72,37 @@ resolve_active_files(const std::map<std::string, std::string>& files, const std:
 // Async Moonraker integration
 // ============================================================================
 
-using ActiveFilesCallback = std::function<void(const std::set<std::string>&)>;
-using ErrorCallback = std::function<void(const std::string&)>;
+using ActiveFilesCallback = helix::SharedCallback<void(const std::set<std::string>&)>;
+using ErrorCallback = helix::SharedCallback<void(const std::string&)>;
 
 /// Callback providing active files AND their downloaded contents
-using ActiveFilesWithContentCallback =
-    std::function<void(const std::set<std::string>&, const std::map<std::string, std::string>&)>;
+using ActiveFilesWithContentCallback = helix::SharedCallback<void(
+    const std::set<std::string>&, const std::map<std::string, std::string>&)>;
 
 /// Downloads one config file and calls exactly one of @p on_ok (content) or
 /// @p on_fail (message, and whether the transport refused it for a full queue).
 /// Either may run before the call returns.
-using ConfigDownloadFn =
-    std::function<void(const std::string& path, std::function<void(std::string)> on_ok,
-                       std::function<void(std::string, bool queue_full)> on_fail)>;
+using ConfigDownloadFn = helix::SharedCallback<void(
+    const std::string& path, helix::SharedCallback<void(std::string)> on_ok,
+    helix::SharedCallback<void(std::string, bool queue_full)> on_fail)>;
 
 /// Config downloads outstanding at once. The ESP32 HTTP lane queues 8 requests
 /// for every caller, thumbnails included, and frees a slot only after the
 /// completion callback returns, so the walk can hold one more than this.
 inline constexpr size_t kMaxConfigDownloadsInFlight = 4;
+
+/// The failure message api_config_download() gives a request its caller's
+/// still_wanted() refused; the walk's error message contains it.
+inline constexpr const char* kConfigDownloadNotWanted = "no longer wanted";
+
+/// A ConfigDownloadFn that fetches through @p api, always from the main thread.
+/// The walk asks for each next file from the previous download's completion, on
+/// a background thread, and printer teardown destroys the API on the main thread
+/// without draining those; on the main thread @p api's lifetime token proves it
+/// still alive. Once the API is gone, or @p still_wanted (run on the main thread)
+/// returns false, the request fails without touching @p api.
+[[nodiscard]] ConfigDownloadFn api_config_download(IMoonrakerAPI& api,
+                                                   helix::SharedCallback<bool()> still_wanted = {});
 
 /// Download @p root_file and every file its [include] chain reaches, following
 /// globs against @p listing (every path in the config root) and paths relative
@@ -98,6 +115,15 @@ void download_include_graph(std::vector<std::string> listing, const std::string&
                             ConfigDownloadFn download, ActiveFilesWithContentCallback on_complete,
                             ErrorCallback on_error,
                             size_t max_in_flight = kMaxConfigDownloadsInFlight, int max_depth = 5);
+
+/// Lists the "config" root through @p api, then download_include_graph() from
+/// @p root_file over every listed file whose name ends in @p suffix ("" keeps
+/// every file). Each file is fetched with @p download, or with
+/// api_config_download(@p api) when it is empty.
+void download_config_include_graph(IMoonrakerAPI& api, const std::string& root_file,
+                                   const std::string& suffix,
+                                   ActiveFilesWithContentCallback on_complete,
+                                   ErrorCallback on_error, ConfigDownloadFn download = {});
 
 /// Async wrapper: lists config directory via Moonraker, downloads printer.cfg and
 /// all included files, then resolves the active file set.

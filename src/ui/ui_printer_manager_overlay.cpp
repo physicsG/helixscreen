@@ -4,36 +4,33 @@
 
 #include "ui_callback_helpers.h"
 #include "ui_event_safety.h"
-#include "ui_fan_control_overlay.h"
 #include "ui_keyboard_manager.h"
 #include "ui_nav.h"
 #include "ui_overlay_printer_image.h"
 #include "ui_overlay_printer_type.h"
-#include "ui_overlay_retraction_settings.h"
-#include "ui_overlay_timelapse_settings.h"
-#include "ui_panel_ams.h"
-#include "ui_panel_ams_overview.h"
-#include "ui_panel_bed_mesh.h"
-#include "ui_panel_input_shaper.h"
-#include "ui_panel_power.h"
-#include "ui_panel_screws_tilt.h"
-#include "ui_panel_spoolman.h"
 #include "ui_printer_list_overlay.h"
-#include "ui_settings_led.h"
-#include "ui_settings_sound.h"
 #include "ui_toast_manager.h"
 
+#include "accel_sensor_manager.h"
+#include "ams_state.h"
 #include "app_globals.h"
 #include "config.h"
+#include "filament_sensor_manager.h"
 #include "helix_version.h"
+#include "i_moonraker_api.h"
+#include "observer_factory.h"
 #include "prerendered_images.h"
+#include "printer_capabilities_state.h"
 #include "printer_detector.h"
 #include "printer_image_manager.h"
-#include "printer_images.h"
+#include "printer_manager_chips.h"
 #include "printer_name_sync.h"
+#include "printer_state.h"
 #include "static_panel_registry.h"
 #include "subject_debug_registry.h"
+#include "tool_state.h"
 #include "ui/ui_widget_helpers.h"
+#include "width_sensor_manager.h"
 #include "wizard_config_paths.h"
 
 #include <lvgl/src/misc/cache/lv_cache.h>
@@ -66,6 +63,16 @@ void PrinterManagerOverlay::init_subjects() {
         UI_MANAGED_SUBJECT_STRING(helix_version_, version_buf_, "0.0.0", "helix_version",
                                   subjects_);
         UI_MANAGED_SUBJECT_INT(name_editing_, 0, "pm_name_editing", subjects_);
+        UI_MANAGED_SUBJECT_INT(has_kinematics_, 0, "pm_has_kinematics", subjects_);
+        UI_MANAGED_SUBJECT_INT(has_build_volume_, 0, "pm_has_build_volume", subjects_);
+        UI_MANAGED_SUBJECT_INT(has_filament_system_, 0, "pm_has_filament_system", subjects_);
+        UI_MANAGED_SUBJECT_INT(has_tool_changer_, 0, "pm_has_tool_changer", subjects_);
+        UI_MANAGED_SUBJECT_INT(has_mcus_, 0, "pm_has_mcus", subjects_);
+        for (const auto& spec : cap_chip_specs()) {
+            const auto i = static_cast<size_t>(spec.chip);
+            UI_MANAGED_SUBJECT_STRING_N(chip_text_[i], chip_text_bufs_[i].data(), kChipTextLen, "",
+                                        spec.text_subject, subjects_);
+        }
     });
 }
 
@@ -105,9 +112,10 @@ lv_obj_t* PrinterManagerOverlay::create(lv_obj_t* parent) {
             LV_EVENT_CANCEL, nullptr);
     }
 
-    // Clicking the overlay content area while editing saves and dismisses the input.
+    // Clicking anywhere in the body while editing saves and dismisses the input.
     // LVGL DEFOCUSED events don't fire reliably on touchscreens, so we use a
-    // click handler on the scrollable content instead.
+    // click handler on the body instead; the body's containers (the scrolling
+    // details column among them) set event_bubble so a tap on them lands here.
     if (auto* content = helix::ui::find_required(overlay_root_, "overlay_content", get_name())) {
         lv_obj_add_event_cb(
             content,
@@ -121,12 +129,9 @@ lv_obj_t* PrinterManagerOverlay::create(lv_obj_t* parent) {
     }
 
 #if defined(HELIX_PLATFORM_ESP32)
-    // v1 Core+AMS cut has no camera, so timelapse is unavailable. The chip's XML
-    // already hides it when printer_has_timelapse==0; force it hidden here too so
-    // it never renders regardless of printer capability. Imperative (not a stacked
-    // bind_flag) because the chip already carries a printer_has_timelapse binding
-    // and this helix-xml build has no compound-condition (subject_expr/cond) support.
-    // Compiled out on desktop → zero desktop impact.
+    // The ESP32 image has no camera, so timelapse is unavailable whatever the
+    // printer reports. That is a compile-time fact no subject carries, so the
+    // chip is hidden here rather than by its XML binding.
     if (auto* timelapse_chip =
             helix::ui::find_required(overlay_root_, "pm_chip_timelapse", get_name())) {
         // DECLARATIVE_OK: compile-time capability (#if), no runtime subject exists
@@ -137,99 +142,23 @@ lv_obj_t* PrinterManagerOverlay::create(lv_obj_t* parent) {
     return overlay_root_;
 }
 
-namespace {
-
-// =============================================================================
-// Chip Navigation Callbacks
-// =============================================================================
-
-void on_chip_bed_mesh_clicked(lv_event_t*) {
-    spdlog::debug("[Printer Manager] Bed Mesh chip clicked");
-#if defined(HELIX_PLATFORM_ESP32)
-    helix::ui::show_feature_unavailable_toast();
-    return;
-#endif
-    get_global_bed_mesh_panel().show(lv_display_get_screen_active(nullptr));
-}
-
-void on_chip_adxl_clicked(lv_event_t*) {
-    spdlog::debug("[Printer Manager] ADXL chip clicked");
-#if defined(HELIX_PLATFORM_ESP32)
-    helix::ui::show_feature_unavailable_toast();
-    return;
-#endif
-    get_global_input_shaper_panel().show(lv_display_get_screen_active(nullptr));
-}
-
-void on_chip_screws_tilt_clicked(lv_event_t*) {
-    spdlog::debug("[Printer Manager] Screws Tilt chip clicked");
-#if defined(HELIX_PLATFORM_ESP32)
-    helix::ui::show_feature_unavailable_toast();
-    return;
-#endif
-    get_global_screws_tilt_panel().set_client(get_moonraker_client(), get_moonraker_api());
-    get_global_screws_tilt_panel().show(lv_display_get_screen_active(nullptr));
-}
-
-void on_chip_ams_clicked(lv_event_t*) {
-    spdlog::debug("[Printer Manager] AMS chip clicked");
-
-    helix::ui::open_ams_detail_panel();
-}
-
-void on_chip_power_clicked(lv_event_t*) {
-    spdlog::debug("[Printer Manager] Power Devices chip clicked");
-    auto& panel = get_global_power_panel();
-    lv_obj_t* overlay = panel.get_or_create_overlay(lv_display_get_screen_active(nullptr));
-    if (overlay) {
-        helix::nav::push_overlay(overlay);
-    }
-}
-
-} // namespace
-
 // =============================================================================
 // Callbacks
 // =============================================================================
 
 void PrinterManagerOverlay::register_callbacks() {
     register_xml_callbacks({
-        {"pm_chip_bed_mesh_clicked", on_chip_bed_mesh_clicked},
-        {"pm_chip_leds_clicked",
-         [](lv_event_t*) {
-             spdlog::debug("[Printer Manager] LEDs chip clicked");
-             auto& overlay = helix::settings::get_led_settings_overlay();
-             overlay.show(lv_display_get_screen_active(nullptr));
-         }},
-        {"pm_chip_adxl_clicked", on_chip_adxl_clicked},
-        {"pm_chip_retraction_clicked",
-         [](lv_event_t*) {
-             spdlog::debug("[Printer Manager] Retraction chip clicked");
-             get_global_retraction_settings().show(lv_display_get_screen_active(nullptr));
-         }},
-        {"pm_chip_spoolman_clicked",
-         [](lv_event_t*) {
-             spdlog::debug("[Printer Manager] Spoolman chip clicked");
-             get_global_spoolman_panel().show(lv_display_get_screen_active(nullptr));
-         }},
-        {"pm_chip_timelapse_clicked",
-         [](lv_event_t*) {
-             spdlog::debug("[Printer Manager] Timelapse chip clicked");
-             get_global_timelapse_settings().show(lv_display_get_screen_active(nullptr));
-         }},
-        {"pm_chip_screws_tilt_clicked", on_chip_screws_tilt_clicked},
-        {"pm_chip_ams_clicked", on_chip_ams_clicked},
-        {"pm_chip_fans_clicked",
-         [](lv_event_t*) {
-             spdlog::debug("[Printer Manager] Fans chip clicked");
-             helix::open_fan_control_overlay(lv_display_get_screen_active(nullptr));
-         }},
-        {"pm_chip_power_clicked", on_chip_power_clicked},
-        {"pm_chip_speaker_clicked",
-         [](lv_event_t*) {
-             spdlog::debug("[Printer Manager] Speaker chip clicked");
-             auto& overlay = helix::settings::get_sound_settings_overlay();
-             overlay.show(lv_display_get_screen_active(nullptr));
+        {"pm_chip_clicked",
+         [](lv_event_t* e) {
+             auto* chip = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+             const char* name = chip ? lv_obj_get_name(chip) : nullptr;
+             const CapChipSpec* spec = name ? find_cap_chip_spec(name) : nullptr;
+             if (!spec) {
+                 spdlog::warn("[Printer Manager] Click on unknown chip '{}'",
+                              name ? name : "<unnamed>");
+                 return;
+             }
+             open_cap_chip(*spec);
          }},
         {"pm_printer_name_clicked",
          [](lv_event_t*) { get_printer_manager_overlay().start_name_edit(); }},
@@ -343,6 +272,7 @@ void PrinterManagerOverlay::on_activate() {
     }
 
     refresh_printer_info();
+    observe_chip_inputs();
 }
 
 void PrinterManagerOverlay::on_deactivating(DeactivateReason) {
@@ -355,6 +285,7 @@ void PrinterManagerOverlay::on_deactivating(DeactivateReason) {
 }
 
 void PrinterManagerOverlay::on_ui_destroyed() {
+    chip_input_observers_.clear();
     printer_image_obj_ = nullptr;
     name_input_ = nullptr;
 }
@@ -392,11 +323,8 @@ void PrinterManagerOverlay::refresh_printer_info() {
         lv_display_t* disp = lv_display_get_default();
         int screen_width = disp ? lv_display_get_horizontal_resolution(disp) : 800;
 
-        auto& pim = helix::PrinterImageManager::instance();
-        std::string new_path = pim.get_active_image_path(screen_width);
-        if (new_path.empty()) {
-            new_path = PrinterImages::get_best_printer_image(model);
-        }
+        std::string new_path =
+            helix::PrinterImageManager::instance().get_displayed_image_path(screen_width);
 
         // LVGL keys its decoded copy on the path alone, and an import can rewrite an
         // image in place under that same path, so the decoded copy is dropped on
@@ -411,4 +339,82 @@ void PrinterManagerOverlay::refresh_printer_info() {
         lv_image_set_src(printer_image_obj_, current_image_path_.c_str());
         spdlog::debug("[{}] Printer image: '{}'", get_name(), current_image_path_);
     }
+}
+
+// =============================================================================
+// Capability Chips
+// =============================================================================
+
+void PrinterManagerOverlay::refresh_capability_chips() {
+    chip_refresh_pending_ = false;
+    ++chip_refresh_count_;
+    const CapabilityChipFacts facts = gather_capability_chip_facts();
+    for (const auto& spec : cap_chip_specs()) {
+        const auto i = static_cast<size_t>(spec.chip);
+        const std::string text = capability_chip_text(spec.chip, facts);
+        if (text != chip_text_bufs_[i].data()) {
+            lv_subject_copy_string(&chip_text_[i], text.c_str());
+        }
+    }
+
+    auto set_if_changed = [](lv_subject_t& subject, bool value) {
+        if (lv_subject_get_int(&subject) != (value ? 1 : 0)) {
+            lv_subject_set_int(&subject, value ? 1 : 0);
+        }
+    };
+    auto has_text = [&facts](CapChip chip) { return !capability_chip_text(chip, facts).empty(); };
+    set_if_changed(has_kinematics_, has_text(CapChip::Kinematics));
+    set_if_changed(has_build_volume_, has_text(CapChip::BuildVolume));
+    set_if_changed(has_filament_system_, has_text(CapChip::FilamentSystem));
+    set_if_changed(has_tool_changer_, has_text(CapChip::ToolChanger));
+    set_if_changed(has_mcus_, has_text(CapChip::Mcus));
+}
+
+void PrinterManagerOverlay::request_chip_refresh() {
+    if (chip_refresh_pending_) {
+        return;
+    }
+    chip_refresh_pending_ = true;
+    lifetime_.defer("PrinterManagerOverlay::refresh_capability_chips",
+                    [this]() { refresh_capability_chips(); });
+}
+
+void PrinterManagerOverlay::observe_chip_inputs() {
+    chip_input_observers_.clear();
+    // A refresh deferred before the last deactivation was dropped with it.
+    chip_refresh_pending_ = false;
+    // Attaching notifies at once, so every observer below asks for the same
+    // single refresh this activation needs.
+    auto watch = [this](lv_subject_t* subject, const SubjectLifetime& lifetime) {
+        if (!subject) {
+            return;
+        }
+        chip_input_observers_.push_back(helix::ui::observe<int>(
+            subject, this, [](PrinterManagerOverlay* self, int) { self->request_chip_refresh(); },
+            lifetime, helix::ui::Dispatch::Immediate));
+    };
+
+    PrinterState& ps = get_printer_state();
+    auto& caps = ps.capabilities_state();
+    const SubjectLifetime caps_lifetime = caps.get_subjects_lifetime();
+    watch(caps.subject(Capability::HardwareGeneration), caps_lifetime);
+    watch(caps.subject(Capability::PowerDeviceCount), caps_lifetime);
+    watch(caps.subject(Capability::WebcamCount), caps_lifetime);
+    if (auto* api = get_moonraker_api()) {
+        watch(api->get_build_volume_version_subject(), subject_never_freed());
+    }
+
+    auto& accel = helix::sensors::AccelSensorManager::instance();
+    watch(accel.count_subject(), accel.subjects_lifetime());
+    auto& filament = helix::FilamentSensorManager::instance();
+    watch(filament.count_subject(), filament.subjects_lifetime());
+    auto& width = helix::sensors::WidthSensorManager::instance();
+    watch(width.count_subject(), width.subjects_lifetime());
+
+    auto& ams = AmsState::instance();
+    watch(ams.get_backend_count_subject(), ams.get_subjects_lifetime());
+    watch(ams.get_slot_count_subject(), ams.get_subjects_lifetime());
+    watch(ams.get_ams_type_subject(), ams.get_subjects_lifetime());
+    auto& tools = ToolState::instance();
+    watch(tools.get_tools_version_subject(), tools.get_subjects_lifetime());
 }

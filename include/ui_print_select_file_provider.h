@@ -12,7 +12,9 @@
 
 // Forward declarations
 struct PrintFileData;
+namespace helix {
 class IMoonrakerAPI;
+}
 
 namespace helix::ui {
 
@@ -137,7 +139,7 @@ class PrintSelectFileProvider {
     std::atomic<uint32_t> refresh_generation_{0};
 
     // === Constants ===
-    static constexpr const char* FOLDER_UP_ICON = "A:assets/images/folder-up.png";
+    static constexpr const char* kFolderUpIcon = "A:assets/images/folder-up.png";
 };
 
 } // namespace helix::ui

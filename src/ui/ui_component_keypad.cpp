@@ -28,6 +28,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,8 +39,8 @@
 // ============================================================================
 static lv_subject_t keypad_display_subject;
 static char keypad_display_buf[16] = "";
-// The keypad is shared by every numeric field in the app, so its header has to
-// say which one is being edited. Machine Limits alone opens it from five rows.
+// The keypad is shared by every numeric field in the app, so it has to say which
+// one is being edited. Machine Limits alone opens it from five rows.
 static lv_subject_t keypad_title_subject;
 static char keypad_title_buf[48] = "";
 // Unit shown inside the display's right end ("°C", "mm/s").
@@ -47,6 +49,8 @@ static char keypad_unit_buf[16] = "";
 // Drives the dot key's disabled state. An integer-only field used to show a
 // live "." that silently did nothing to the buffer.
 static lv_subject_t keypad_allow_decimal_subject;
+// Shows the +/- key, only on fields whose range reaches below zero.
+static lv_subject_t keypad_allow_negative_subject;
 
 /// Dims what stays live beside the pad. NavigationManager only backdrops the FIRST
 /// overlay on the stack, and the keypad is almost never that - it opens over a temp
@@ -69,10 +73,13 @@ static lv_obj_t* keypad_parent = nullptr;
 
 // Decimals offered once a decimal point is entered. Two covers retraction
 // distances (0.85mm) and half-step square corner velocity alike.
-static constexpr int KEYPAD_FRACTION_DIGITS = 2;
+static constexpr int kKeypadFractionDigits = 2;
 
 // Current config and input state
 static ui_keypad_config_t current_config;
+// Set by a confirm: the close that follows is not a cancel, and carries this value.
+static bool confirmed = false;
+static float confirmed_value = 0.0f;
 static helix::ui::KeypadInput input;
 
 // ============================================================================
@@ -97,6 +104,7 @@ void ui_keypad_init_subjects() {
                               subjects_);
     UI_MANAGED_SUBJECT_STRING(keypad_unit_subject, keypad_unit_buf, "", "keypad_unit", subjects_);
     UI_MANAGED_SUBJECT_INT(keypad_allow_decimal_subject, 1, "keypad_allow_decimal", subjects_);
+    UI_MANAGED_SUBJECT_INT(keypad_allow_negative_subject, 0, "keypad_allow_negative", subjects_);
 
     subjects_initialized = true;
 
@@ -145,12 +153,19 @@ void ui_keypad_init(lv_obj_t* parent) {
     // it is built. Only the widget tree is deferred.
     ui_keypad_init_subjects();
 
-    keypad_parent = parent;
+    helix::ui::store_until_deleted(&keypad_parent, parent);
     // The in-pad confirm key (phone layout, integer fields) does what the header's Set does.
     register_xml_callbacks({
         {"on_keypad_confirm",
          [](lv_event_t*) {
              helix::ui::event_safe_call("keypad_confirm", []() { handle_confirm(); });
+         }},
+        {"on_keypad_sign",
+         [](lv_event_t*) {
+             helix::ui::event_safe_call("keypad_sign", []() {
+                 if (input.toggle_sign())
+                     update_display();
+             });
          }},
     });
     spdlog::debug("[Keypad] Numeric keypad registered (tree deferred to first show)");
@@ -163,21 +178,16 @@ static bool ensure_keypad_built() {
         return true;
     }
     if (!keypad_parent) {
-        spdlog::error("[Keypad] Cannot build keypad: never initialized with a parent");
+        spdlog::error(
+            "[Keypad] Cannot build keypad: no parent (never initialized, or it was deleted)");
         return false;
     }
 
-    keypad_widget = (lv_obj_t*)lv_xml_create(keypad_parent, "numeric_keypad_panel", nullptr);
+    helix::ui::store_until_deleted(
+        &keypad_widget, (lv_obj_t*)lv_xml_create(keypad_parent, "numeric_keypad_panel", nullptr));
     if (!keypad_widget) {
         spdlog::error("[Keypad] Failed to create keypad from XML");
         return false;
-    }
-
-    // header_bar takes its title as a creation-time string and documents that
-    // a runtime-varying title is bound by the owning screen rather than by a
-    // bind_text inside the shared component. Follow that here.
-    if (lv_obj_t* title = helix::ui::find_required(keypad_widget, "header_title", "Keypad")) {
-        lv_label_bind_text(title, &keypad_title_subject, nullptr);
     }
 
     wire_button_events();
@@ -188,13 +198,13 @@ static bool ensure_keypad_built() {
 // ============================================================================
 // Public API
 // ============================================================================
-void ui_keypad_show(const ui_keypad_config_t* config) {
+bool ui_keypad_show(const ui_keypad_config_t* config) {
     if (!config) {
         spdlog::error("[Keypad] Cannot show keypad: invalid config");
-        return;
+        return false;
     }
     if (!ensure_keypad_built()) {
-        return;
+        return false;
     }
 
     // Store config
@@ -205,11 +215,23 @@ void ui_keypad_show(const ui_keypad_config_t* config) {
 
     // Size the buffer to this field's own range. The 3-digit default is
     // temperature-shaped and cannot express a max accel of 50000; deriving the
-    // cap means a new caller cannot forget to widen it.
-    input.max_int_digits = helix::ui::keypad_int_digits_for(config->max_value);
-    input.max_total_digits = input.max_int_digits + KEYPAD_FRACTION_DIGITS;
+    // cap means a new caller cannot forget to widen it. A range reaching further
+    // below zero than above it (-100 to 5) needs its minimum's digits.
+    input.max_int_digits = helix::ui::keypad_int_digits_for(
+        config->allow_negative
+            ? std::max(std::fabs(config->min_value), std::fabs(config->max_value))
+            : config->max_value);
+    if (config->max_fraction_digits > 0) {
+        input.max_frac_digits = std::min(config->max_fraction_digits, kKeypadFractionDigits);
+        input.max_total_digits = input.max_int_digits + input.max_frac_digits;
+    } else {
+        input.max_frac_digits = static_cast<int>(helix::ui::KeypadInput::BUF_SIZE);
+        input.max_total_digits = input.max_int_digits + kKeypadFractionDigits;
+    }
     input.allow_dot = config->allow_decimal;
     lv_subject_set_int(&keypad_allow_decimal_subject, config->allow_decimal ? 1 : 0);
+    input.allow_sign = config->allow_negative;
+    lv_subject_set_int(&keypad_allow_negative_subject, config->allow_negative ? 1 : 0);
 
     lv_subject_copy_string(&keypad_title_subject, config->title_label ? config->title_label : "");
 
@@ -219,7 +241,7 @@ void ui_keypad_show(const ui_keypad_config_t* config) {
     lv_subject_copy_string(&keypad_unit_subject, config->unit_label ? config->unit_label : "");
 
     // Register with nullptr lifecycle — keypad is function-based, not class-based
-    // The panel authors its own width (#keypad_width, 320-400px by breakpoint): a pad of
+    // The panel authors its own width (#keypad_width, per breakpoint): a pad of
     // three digit columns, not a screen. Neither navigation width class applies, so opt
     // out of push-time width management or the push stretches it to overlay width.
     helix::nav::set_overlay_width_unmanaged(keypad_widget);
@@ -234,18 +256,31 @@ void ui_keypad_show(const ui_keypad_config_t* config) {
         // Blur when the platform can afford it, a plain dim when it cannot - the same
         // 40/255 the navigation layer uses for a first overlay, so the pad dims its
         // surroundings exactly as much as any other layer does.
-        keypad_backdrop = helix::ui::create_fullscreen_backdrop(screen, 40);
+        helix::ui::store_until_deleted(&keypad_backdrop,
+                                       helix::ui::create_fullscreen_backdrop(screen, 40));
         if (keypad_backdrop) {
             helix::ui::bring_to_front(keypad_backdrop);
         }
     }
-    helix::nav::on_close(keypad_widget, []() { destroy_keypad_backdrop(); });
+    confirmed = false;
+    // Runs once the keypad is off screen, so either hook may open the keypad again.
+    helix::nav::on_close(keypad_widget,
+                         [on_confirm = config->on_confirm, on_cancel = config->on_cancel]() {
+                             destroy_keypad_backdrop();
+                             const bool was_confirmed = confirmed;
+                             const float value = confirmed_value;
+                             if (was_confirmed && on_confirm)
+                                 on_confirm(value);
+                             else if (!was_confirmed && on_cancel)
+                                 on_cancel();
+                         });
 
     // Show via overlay navigation, but keep previous panel visible (transparent overlay)
     helix::nav::push_overlay(keypad_widget, false /* hide_previous */);
 
     spdlog::info("[Keypad] Showing (initial={:.1f}, range={:.0f}-{:.0f})", config->initial_value,
                  config->min_value, config->max_value);
+    return true;
 }
 
 void ui_keypad_hide() {
@@ -280,6 +315,15 @@ static void handle_confirm() {
                      current_config.max_value);
         return; // Don't close keypad, let user correct the value
     }
+    if (current_config.validate) {
+        const std::string why = current_config.validate(value);
+        if (!why.empty()) {
+            NOTIFY_ERROR("{}", why);
+            return;
+        }
+    }
+    confirmed = true;
+    confirmed_value = value;
 
     // Invoke callback before hiding — hiding pops the overlay stack which
     // invalidates lifetime tokens on the parent overlay, so the callback

@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace helix::gcode {
 
@@ -35,6 +36,14 @@ std::string get_filename_basename(const std::string& path);
  * @return "filename" when @p dir is empty, otherwise "dir/filename"
  */
 std::string join_gcode_path(const std::string& dir, const std::string& filename);
+
+/// Where a path's directory part ends: its last '/', or npos for a bare name.
+/// Moonraker and USB paths separate with '/' alone, so a backslash is part of
+/// a name. gcode_dir_of() and get_filename_basename() both split here, so the
+/// two halves of a path always come from one split.
+[[nodiscard]] inline size_t last_path_separator(const std::string& path) {
+    return path.rfind('/');
+}
 
 /**
  * @brief Does this filename carry an extension we treat as printable?
@@ -129,6 +138,39 @@ std::optional<std::string> trusted_original_path(const std::string& path);
  */
 bool is_rewritten_gcode_path(const std::string& path);
 
+/// Which staging directory a copy the app uploads goes to. Hidden (.helix_temp)
+/// everywhere Klipper prints from a dot-directory; Visible (helix_staging) where
+/// its file list skips them, since a print it cannot list fails to open.
+enum class StagingRoot { Hidden, Visible };
+
+/**
+ * @brief Where this printer's staged copies go.
+ *
+ * The printer's own answer wins: the HelixPrint plugin installs its link
+ * directory visible exactly where Klipper skips dot-directories, so with the
+ * plugin present and its directory known, a visible one means stage visibly.
+ * Without that, @p db_hides_dot_dirs (the printer database's flag) decides.
+ */
+StagingRoot staging_root_for(bool plugin_present, const std::string& plugin_link_dir,
+                             bool db_hides_dot_dirs);
+
+/// Every staging directory, relative to the gcodes root: the startup sweep
+/// empties each.
+std::vector<std::string> staging_dirs();
+
+/// A gcodes-root directory the app owns (visible staging, the plugin's link
+/// directory), which the file list leaves out as it does dot-directories.
+bool is_app_managed_directory(const std::string& name);
+
+/// Whether gcodes-root directory @p name is the plugin's link directory: its
+/// default `.helix_print` or the one its status names. Any thread.
+bool is_plugin_link_dir(const std::string& name);
+
+/// The HelixPrint plugin's link directory, as its status reports it: a print
+/// it starts runs `<dir>/full/<original>`, which resolves back to the original
+/// alongside the default `.helix_print`. Empty forgets it. Any thread.
+void set_plugin_link_dir(const std::string& dir);
+
 /**
  * @brief Build the gcodes-root-relative path a rewritten copy is uploaded to.
  *
@@ -145,9 +187,27 @@ bool is_rewritten_gcode_path(const std::string& path);
  * trusted_original_path() then declines to vouch for.
  *
  * @param original_path The original's gcodes-root-relative path
+ * @param root Which staging directory (StagingRoot)
  * @return e.g. "<staging dir>/modified_1766807545p_parts~sbenchy.gcode"
  */
-std::string make_rewritten_gcode_path(const std::string& original_path);
+std::string make_rewritten_gcode_path(const std::string& original_path,
+                                      StagingRoot root = StagingRoot::Hidden);
+
+/**
+ * @brief The staged path for plate @p plate's G-code, extracted from @p archive_path.
+ *
+ * The sibling of make_rewritten_gcode_path() for a .3mf: the same staging
+ * prefix, so the same cleanup reaps it, and a name ending "~p<plate>.gcode" so
+ * Klipper takes it as G-code. resolve_gcode_filename() and
+ * trusted_original_path() map it back to the archive.
+ *
+ * @return e.g. "<staging dir>/modified_1766807545p_parts~sX.gcode.3mf~p9.gcode"
+ */
+std::string make_extracted_plate_path(const std::string& archive_path, int plate,
+                                      StagingRoot root = StagingRoot::Hidden);
+
+/// The plate a staged copy was extracted from (make_extracted_plate_path()), or 0.
+int rewritten_archive_plate(const std::string& path);
 
 /**
  * @brief Is this a copy WE staged on the printer, i.e. ours to delete?
@@ -183,30 +243,35 @@ bool is_uploaded_rewrite_path(const std::string& path);
  */
 bool thumbnail_source_describes(const std::string& raw, const std::string& source);
 
-/**
- * @brief Test whether a filename is a QIDI native-3MF shadow G-code.
- *
- * QIDI firmware translates a native `.3mf` plate into a G-code file exposed via
- * Moonraker's hidden `.temp` root, named `shadow_native_plate_<N>.gcode`. This
- * matches that pattern: the `shadow_native_plate_` prefix, a `.gcode` suffix,
- * and at least one character in between. Case-sensitive to match the firmware.
- *
- * @param name Bare filename (relative to the `.temp` root)
- * @return true if the name is a native-3MF shadow G-code file
- */
-bool is_native_3mf_shadow(const std::string& name);
+/// What Reprint starts: a file, and the plate of it to extract when it is an
+/// archive the printer printed as an extracted plate (0 otherwise).
+struct ReprintTarget {
+    std::string file;
+    int archive_plate = 0;
+};
 
 /**
- * @brief Name of the plate G-code QIDI's Moonraker extracts into `.temp` when a
- *        `.3mf` print starts: the basename without `.3mf`, with `.gcode` added
- *        when that leaves no `.gcode` suffix ("Benchy.gcode.3mf" and
- *        "Benchy.3mf" both give "Benchy.gcode").
+ * @brief What Reprint starts, from the job identity this session recorded
+ *        (@p recorded, possibly empty) and the name the printer reports (@p raw).
+ *
+ * The original, never a staged copy that is deleted when the print ends: the
+ * recorded identity where the report agrees with it or cannot place one,
+ * else the report itself. A plate staged from an archive comes back as the
+ * archive with its plate, so it extracts again; the printer's own conversion
+ * of one is reported as itself and starts as it is.
  */
-std::string qidi_3mf_extract_name(const std::string& print_filename);
+ReprintTarget reprint_target(const std::string& recorded, const std::string& raw);
 
-/// Is the `.temp` entry @p entry the extract of @p print_filename? Compared
-/// case-insensitively.
-bool is_qidi_3mf_extract(const std::string& entry, const std::string& print_filename);
+/**
+ * @brief The G-code a print's preview reads.
+ *
+ * A print the user started from a .3mf (@p effective, its identity) runs as
+ * G-code the printer reports instead (@p raw): a plate extracted and staged,
+ * or the printer's own conversion of it. That G-code is what is printing, so
+ * it is what the preview shows; a .3mf the printer runs itself (raw is the
+ * .3mf) and every ordinary print keep @p effective.
+ */
+std::string preview_gcode_for(const std::string& effective, const std::string& raw);
 
 /**
  * @brief Test whether a filename names a `.3mf` project file (case-insensitive).
@@ -217,3 +282,14 @@ bool is_qidi_3mf_extract(const std::string& entry, const std::string& print_file
 bool is_3mf(const std::string& name);
 
 } // namespace helix::gcode
+
+namespace helix {
+
+/// The directory a gcodes-root path sits in: "sub/dir/Foo.gcode" -> "sub/dir", "Foo.gcode" -> "".
+/// The inverse of gcode::join_gcode_path() together with gcode::get_filename_basename().
+[[nodiscard]] inline std::string gcode_dir_of(const std::string& gcode_path) {
+    const auto slash = gcode::last_path_separator(gcode_path);
+    return slash == std::string::npos ? std::string() : gcode_path.substr(0, slash);
+}
+
+} // namespace helix

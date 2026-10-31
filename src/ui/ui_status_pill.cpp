@@ -92,6 +92,7 @@ static void ui_status_pill_xml_apply(lv_xml_parser_state_t* state, const char** 
     // Process status_pill-specific properties
     const char* text = nullptr;
     const char* variant_str = nullptr;
+    const char* bind_text = nullptr;
 
     for (int i = 0; attrs[i]; i += 2) {
         const char* name = attrs[i];
@@ -101,6 +102,8 @@ static void ui_status_pill_xml_apply(lv_xml_parser_state_t* state, const char** 
             text = value;
         } else if (strcmp(name, "variant") == 0) {
             variant_str = value;
+        } else if (strcmp(name, "bind_text") == 0) {
+            bind_text = value;
         }
     }
 
@@ -108,6 +111,18 @@ static void ui_status_pill_xml_apply(lv_xml_parser_state_t* state, const char** 
         lv_obj_t* label = get_label(pill);
         if (label)
             lv_label_set_text(label, text);
+    }
+
+    // An empty name is an optional binding left unset.
+    if (bind_text && bind_text[0] != '\0') {
+        lv_subject_t* subject = lv_xml_get_subject(&state->scope, bind_text);
+        lv_obj_t* label = get_label(pill);
+        if (!subject) {
+            spdlog::warn("[StatusPill] Subject \"{}\" doesn't exist in bind_text", bind_text);
+        } else if (label) {
+            lv_label_bind_text(label, subject,
+                               subject->type == LV_SUBJECT_TYPE_INT ? "%d" : nullptr);
+        }
     }
 
     if (variant_str) {

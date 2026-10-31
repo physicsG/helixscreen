@@ -38,63 +38,6 @@ struct StepOperationResult {
 };
 
 /**
- * @brief Whether the operation on screen is one this UI started.
- *
- * Was inferred from `target_load_slot_ < 0`, which conflated "no slot" with
- * "not ours" and got the answer wrong in the one case that matters. The
- * sidebar cleared that field whenever the action was not a running one — but
- * start_operation() optimistically sets HEATING and the backend's still-IDLE
- * truth lands on top of it before the firmware picks the op up. That pre-start
- * lag looks identical to completion, so a UI-initiated unload was declared
- * foreign mid-flight and detect_step_operation() re-read it as the unload half
- * of a swap, replacing the 4-step bar with the 5-step load one.
- *
- * The fix is to tell those two apart, which needs one extra bit: has the
- * backend confirmed the operation actually started? A non-running action only
- * means "finished" AFTER a running one has been seen. Before that it means
- * "not started yet", and ownership must survive it.
- *
- * Deterministic — no timers, no debounce on a transient whose length is a
- * property of the printer.
- */
-struct OperationOwnership {
-    bool ui_initiated = false;  ///< start_operation() was called for this op
-    bool progress_seen = false; ///< ...and the backend has since reported it running
-
-    /// This UI just dispatched an operation.
-    void on_start() {
-        ui_initiated = true;
-        progress_seen = false;
-    }
-
-    /// @param action_is_progress the AMS action names a running operation.
-    void on_action(bool action_is_progress) {
-        if (action_is_progress) {
-            progress_seen = true;
-            return;
-        }
-        // Idle AFTER running = finished, so release ownership and let the next
-        // externally-started operation be detected as one. Idle BEFORE running
-        // is the pre-start lag above — keep it.
-        if (progress_seen) {
-            ui_initiated = false;
-            progress_seen = false;
-        }
-    }
-
-    /// The dispatch never reached the printer (refused, or it threw): there is
-    /// no operation to own, and no running action will ever arrive to end it.
-    void on_abandon() {
-        ui_initiated = false;
-        progress_seen = false;
-    }
-
-    [[nodiscard]] bool is_external() const {
-        return !ui_initiated;
-    }
-};
-
-/**
  * @brief Detect which step operation type to show based on action transitions
  *
  * Handles both the initial detection (when an external operation starts) and
@@ -110,53 +53,16 @@ struct OperationOwnership {
  *        active backend. Passed in rather than recomputed here: this used to
  *        carry its own copy of the action list, the sidebar's visibility check
  *        carried another, and the two disagreed about SELECTING.
+ * @param unloads_stand_alone AmsBackend::unloads_stand_alone() for the active
+ *        backend: an unload is never the first half of a swap, so UNLOADING
+ *        means UNLOAD and a LOADING after it is a fresh load of its own.
  * @return StepOperationResult with detection result
  */
 inline StepOperationResult detect_step_operation(AmsAction action, AmsAction prev_action,
                                                  StepOperationType current_op, bool is_external,
-                                                 bool filament_loaded, bool is_active_action) {
+                                                 bool filament_loaded, bool is_active_action,
+                                                 bool unloads_stand_alone) {
     StepOperationResult result;
-
-    // An explicit UNLOAD that is currently unloading is never reinterpreted.
-    //
-    // Everything below guesses at an operation nobody told us about, and the
-    // guess is only safe while there is nothing better to go on. Here there is:
-    // the caller already built an UNLOAD bar. Without this, an ordinary Unload
-    // press landed in the swap arm below — UNLOADING with filament loaded reads
-    // as "the unload half of a swap" — and the 4-step unload bar was rebuilt as
-    // the 5-step load one, parked on "Feed filament" for the rest of the
-    // operation.
-    //
-    // `is_external` cannot be trusted to exclude it: it means "target_load_slot_
-    // < 0", and the caller clears that on any non-progress action, so a single
-    // transient IDLE mid-unload makes the UI's own operation look foreign. That
-    // same transient is what puts prev_action at IDLE, so both conditions of the
-    // arm below are met by a UI-initiated unload.
-    //
-    // A real swap still arrives: LOADING while current_op is UNLOAD hits the
-    // upgrade arm at the bottom, which is the designed route for exactly that.
-    if (current_op == StepOperationType::UNLOAD && action == AmsAction::UNLOADING) {
-        return result; // no change — keep the unload bar
-    }
-
-    // The same rule in the LOAD direction: a swap bar that is loading is never
-    // demoted to a fresh-load one.
-    //
-    // The guard above fixed only the unload direction, and the identical
-    // transient reaches this one. A UI-initiated swap that preheats first spends
-    // the whole wait at HEATING and then IDLE, which reads as "finished" — so at
-    // dispatch the operation looked foreign, the arm below saw LOADING out of
-    // IDLE, and the 7-step multiACE swap bar was rebuilt as the 5-step load one
-    // with the retract half already discarded.
-    //
-    // Ownership is re-armed at dispatch now, which is the root fix; this is the
-    // matching structural guard, and it also covers a swap the printer started
-    // on its own. A genuine fresh load never reaches here with a swap bar up:
-    // recreate_step_progress_for_operation() only builds LOAD_SWAP when the
-    // caller planned one.
-    if (current_op == StepOperationType::LOAD_SWAP && action == AmsAction::LOADING) {
-        return result; // no change — keep the swap bar
-    }
 
     // External operation just started (transitioned from IDLE to any active action)
     if (is_external && is_active_action && prev_action == AmsAction::IDLE) {
@@ -165,7 +71,9 @@ inline StepOperationResult detect_step_operation(AmsAction action, AmsAction pre
         if (action == AmsAction::LOADING) {
             // Started directly with loading — fresh load
             result.op_type = StepOperationType::LOAD_FRESH;
-        } else if (filament_loaded) {
+        } else if (unloads_stand_alone && action == AmsAction::UNLOADING) {
+            result.op_type = StepOperationType::UNLOAD;
+        } else if (filament_loaded && !unloads_stand_alone) {
             // Filament loaded + unload-like first action → swap
             result.op_type = StepOperationType::LOAD_SWAP;
         } else {
@@ -175,9 +83,11 @@ inline StepOperationResult detect_step_operation(AmsAction action, AmsAction pre
         return result;
     }
 
-    // Explicit unload detection (not part of a swap where UNLOADING follows cutting/tip-forming)
+    // Explicit unload detection (not part of a swap where UNLOADING follows cutting/tip-forming).
+    // An unload already on screen keeps its bar when it returns to UNLOADING after a heat step.
     if (is_external && action == AmsAction::UNLOADING && prev_action != AmsAction::CUTTING &&
-        prev_action != AmsAction::FORMING_TIP && current_op != StepOperationType::LOAD_SWAP) {
+        prev_action != AmsAction::FORMING_TIP && current_op != StepOperationType::LOAD_SWAP &&
+        current_op != StepOperationType::UNLOAD) {
         result.should_recreate = true;
         result.op_type = StepOperationType::UNLOAD;
         return result;
@@ -185,8 +95,13 @@ inline StepOperationResult detect_step_operation(AmsAction action, AmsAction pre
 
     // Mid-operation upgrade: what looked like a standalone unload is actually a swap.
     // Loading started after unloading — upgrade to LOAD_SWAP so remaining steps display.
+    // Where unloads stand alone, that load is a new operation with its own steps.
     if (is_external && action == AmsAction::LOADING && current_op == StepOperationType::UNLOAD) {
         result.should_recreate = true;
+        if (unloads_stand_alone) {
+            result.op_type = StepOperationType::LOAD_FRESH;
+            return result;
+        }
         result.op_type = StepOperationType::LOAD_SWAP;
         result.jump_to_step = 2; // Skip heat + cut/tip (already done)
         return result;

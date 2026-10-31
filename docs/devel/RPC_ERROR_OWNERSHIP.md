@@ -135,7 +135,7 @@ api->execute_gcode("G28",
                                    spdlog::warn("[ensure_homed_then] G28 failed: {}", err.message);
                                    if (on_error) { on_error(err); }
                                }),
-                   IMoonrakerAPI::HOMING_TIMEOUT_MS, /*silent=*/false,
+                   IMoonrakerAPI::kHomingTimeoutMs, /*silent=*/false,
                    /*on_queued=*/nullptr,
                    /*caller_surfaces_errors=*/caller_surfaces);
 ```
@@ -188,7 +188,7 @@ matching `!!` line arrives, `already_reported_via_rpc()`
 
 Details that matter when reading that code:
 
-- **Exact-string match, 1.5 s window** (`src/api/rpc_error_correlation.cpp#CAUSAL_WINDOW`). The two
+- **Exact-string match, 1.5 s window** (`src/api/rpc_error_correlation.cpp#kCausalWindow`). The two
   channels are causally tied — the window absorbs network jitter, nothing more. Substring
   matching would mask unrelated errors sharing a phrase.
 - **The recorded identity is Klipper's raw wording**, before `clean_error_text()` rewrites it.
@@ -199,6 +199,34 @@ Details that matter when reading that code:
   which is what catches an RPC reply that lands *after* the `!!` line. A CRITICAL modal fires
   immediately and does not defer — which is the other half of why the generic fallback must
   stand down for `gcode.script` unconditionally rather than racing.
+
+### A refusal the classifier explains
+
+The record above lets a caller's report silence the router. For a refusal an AMS backend
+explains better than the caller can, the direction reverses: the router's explanation
+wins and the caller's report becomes the fallback.
+
+- A backend's `classify_error()` sets `ErrorEvent::command_refusal`
+  (`include/error_event.h`) on a line that says why the firmware refused a command the user
+  just sent. The U1's `e<N> not edit filament` resume refusal is the one today
+  (`src/printer/ams_backend_snapmaker.cpp#classify_error`).
+- The caller reports through `rpc_error_correlation::report_unless_explained(message, report)`
+  instead of toasting directly. `GcodeErrorRouter` installs itself as the broadcast
+  claimant (`set_broadcast_claimant()`); `explains_rpc_error()` classifies `"!! " + message`
+  against the active backend, and when that is a command refusal the router presents, it
+  takes `report` and arms a one-shot `kRpcReportClaimMs` (1500 ms) timer
+  (`src/application/gcode_error_router.cpp#claim_rpc_report`). With no router, or a message
+  no backend explains, `report` runs at once.
+- When the timer fires, `report` runs unless `fault_surface_correlation` shows the
+  explanation surfaced: the `!!` copy can be lost in transit, and a refusal nobody saw is the
+  failure this guards against. The router's destructor drops pending claims with it.
+- `already_reported_via_rpc()` never suppresses a `command_refusal` event, and
+  `present_recovery_modal()` clears the presenter's handled-fault memory first, so a second
+  refusal shows even after the user dismissed an identical one.
+- Callers today: `dispatch_prepared_resume()` (`src/ui/ui_resume_dispatch.cpp`, the
+  "Failed to resume:" toast) and `RecoveryModalPresenter::dispatch_recovery()` (the
+  "Recovery failed:" toast). Pinned by `tests/unit/test_resume_refusal_report.cpp`
+  (`[resume][error-router]`).
 
 Do not confuse this ledger with `fault_surface_correlation`
 (`src/application/fault_surface_correlation.cpp`, 3 s). They are different pairs: this one

@@ -1,11 +1,57 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "filament_accounting.h"
+#include "fit_check.h"
+#include "helix_plugin_features.h"
+#include "plr_backend.h"
+#include "print_photos.h"
+#include "standing_print_options.h"
+#include "storage_report.h"
 #include "subject_managed_panel.h"
 
+#include <array>
+#include <functional>
 #include <lvgl.h>
+#include <optional>
 
 namespace helix {
+
+/// A plugin feature with a switch in the settings. Each gets two XML subjects:
+/// `mode_subject` (PluginSwitchMode, which a plugin_feature_toggle_row binds
+/// through its `feature` name) and, unless the feature owns its switch,
+/// `on_subject` (the switch's state).
+struct PluginSwitchFeature {
+    const char* name;
+    int min_version;
+    /// The app does the feature itself when the plugin cannot
+    bool has_fallback;
+    /// Acts on a print or a spool, so it is off until opted into
+    bool acts;
+    const char* mode_subject;
+    /// nullptr for a feature that owns its switch and publishes its own state
+    const char* on_subject;
+};
+
+inline constexpr std::array<PluginSwitchFeature, 6> kPluginSwitchFeatures = {{
+    {kPlrFeatureName, kPlrFeatureMinVersion, false, true, "plugin_feature_mode_plr", nullptr},
+    {kPrintHooksFeature, kPrintHooksMinVersion, true, true, "plugin_feature_mode_print_hooks",
+     "plugin_feature_on_print_hooks"},
+    {storage::kAutoCleanupFeature, storage::kAutoCleanupMinVersion, false, true,
+     "plugin_feature_mode_storage_auto_cleanup", "plugin_feature_on_storage_auto_cleanup"},
+    {kFilamentAccountingFeature, kFilamentAccountingMinVersion, true, true,
+     "plugin_feature_mode_filament_accounting", "plugin_feature_on_filament_accounting"},
+    {kPhotosFeature, kPhotosMinVersion, true, false, "plugin_feature_mode_photos",
+     "plugin_feature_on_photos"},
+    {kFitCheckFeature, kFitCheckMinVersion, false, true,
+     "plugin_feature_mode_fit_check_blocks_autostart",
+     "plugin_feature_on_fit_check_blocks_autostart"},
+}};
+
+/// helix_plugin_installed values once the probe has answered (-1 before). A
+/// plugin set to `enabled: False` serves nothing, so it reads as absent.
+constexpr int kHelixPluginAbsent = 0;
+constexpr int kHelixPluginInstalled = 1;
 
 enum class MacroInstallStatus;
 
@@ -77,6 +123,74 @@ class PrinterPluginStatusState {
      */
     void set_installed(bool installed);
 
+    /// The plugin's link directory (its status' `symlink_dir`); empty when it
+    /// reported none. Also tells the filename helpers to recognise it.
+    void set_link_dir(const std::string& dir);
+
+    /// The plugin's link directory, or empty when unknown.
+    const std::string& link_dir() const {
+        return link_dir_;
+    }
+
+    /// The version the running plugin reports; empty when it did not answer.
+    void set_version(const std::string& version) {
+        version_ = version;
+    }
+    const std::string& version() const {
+        return version_;
+    }
+
+    /// The plugin answered but is set to `enabled: False`: configured, and
+    /// reading as not installed until an install turns it on.
+    void set_disabled(bool disabled) {
+        disabled_ = disabled;
+    }
+    bool disabled() const {
+        return disabled_;
+    }
+
+    /// The features map the plugin's status reported; empty when it reported
+    /// none. With FeatureAnnounce::IfChanged, the same map touches nothing.
+    void set_features(PluginFeatureMap features,
+                      FeatureAnnounce announce = FeatureAnnounce::Always) {
+        if (announce == FeatureAnnounce::IfChanged && features == features_) {
+            return;
+        }
+        features_ = std::move(features);
+        publish_features();
+        if (subjects_initialized_) {
+            lv_subject_set_int(&helix_plugin_probe_seq_,
+                               lv_subject_get_int(&helix_plugin_probe_seq_) + 1);
+        }
+    }
+    const PluginFeatureMap& features() const {
+        return features_;
+    }
+
+    /// Forget what the plugin's status reported, touching no subject. For
+    /// PrinterStateTestAccess::clear_data, so one test's probe does not decide
+    /// the next one's plugin features on the shared singleton.
+    void clear_data() {
+        set_link_dir("");
+        version_.clear();
+        disabled_ = false;
+        features_.clear();
+        stored_opt_ins_ = nlohmann::json::object();
+    }
+
+    /// Whether plugin feature @p name, at contract @p min_version or newer, is
+    /// usable now. Gate plugin-backed behaviour on this, never on version().
+    PluginFeatureState plugin_feature(const std::string& name, int min_version) const {
+        return plugin_feature_state(service_has_helix_plugin(), features_, name, min_version);
+    }
+
+    /// Whether the plugin reports feature @p name at @p min_version or newer,
+    /// even one it cannot run here.
+    bool plugin_feature_reported(const std::string& name, int min_version) const {
+        return helix::plugin_feature_reported(service_has_helix_plugin(), features_, name,
+                                              min_version);
+    }
+
     /**
      * @brief Set the discovery-derived helper-macro install status
      *
@@ -112,7 +226,7 @@ class PrinterPluginStatusState {
     // Subject accessors
     // ========================================================================
 
-    /// Tri-state: -1=unknown, 0=not installed, 1=installed
+    /// -1 unknown, else a kHelixPlugin* value (0 absent, 1 installed and enabled)
     lv_subject_t* get_helix_plugin_installed_subject() {
         return &helix_plugin_installed_;
     }
@@ -120,6 +234,73 @@ class PrinterPluginStatusState {
     /// HelixMacrosStatus value the XML rows bind against
     lv_subject_t* get_helix_macros_status_subject() {
         return &helix_macros_status_;
+    }
+
+    /// PluginFeatureState of the power-loss recovery feature (`plr`), as an
+    /// int: 0 Absent, 1 Disabled, 2 Ready. The settings row binds it.
+    lv_subject_t* get_plr_feature_state_subject() {
+        return &plr_feature_state_;
+    }
+
+    /// Whether printer.cfg carries the plugin's mesh include, as the
+    /// server.helix.plr.mesh_include status answered: -1 never asked (or the
+    /// ask failed), 0 absent, 1 present. Reset to -1 whenever the plr feature
+    /// reads Absent, so a stale answer cannot outlive the feature.
+    lv_subject_t* get_plr_mesh_include_subject() {
+        return &plr_mesh_include_;
+    }
+
+    void set_plr_mesh_include(std::optional<bool> present);
+
+    /// Where screen_local() reads whether this screen runs on the printer's
+    /// own host. PrinterState points it at its connection's locality verdict,
+    /// the one place that fact is kept.
+    void set_locality_source(std::function<bool()> is_local) {
+        is_local_ = std::move(is_local);
+    }
+
+    /// The locality verdict changed: republish what depends on it. Main thread.
+    void on_locality_changed() {
+        publish_features();
+    }
+
+    /// This screen runs on the printer's own host (false while not known).
+    /// Decides whether a fallback switch carries a hint.
+    bool screen_local() const {
+        return is_local_ && is_local_();
+    }
+
+    /// The helix-screen/plugin_features record as last read: the opt-ins a
+    /// fallback switch shows while no plugin reports the feature. Main thread.
+    void set_stored_opt_ins(nlohmann::json record) {
+        stored_opt_ins_ = std::move(record);
+        publish_features();
+    }
+    const nlohmann::json& stored_opt_ins() const {
+        return stored_opt_ins_;
+    }
+
+    /// PluginSwitchMode of kPluginSwitchFeatures[@p index], as an int.
+    lv_subject_t* get_switch_mode_subject(size_t index) {
+        return &switch_mode_[index];
+    }
+
+    /// The switch state of kPluginSwitchFeatures[@p index]: its `enabled`.
+    lv_subject_t* get_switch_on_subject(size_t index) {
+        return &switch_on_[index];
+    }
+
+    /// Counts the plugin's status answers applied this session (0 before the
+    /// first). Each discovery pass's probe answers after that pass has resolved
+    /// the printer type, so a change here says the type is this connection's.
+    lv_subject_t* get_helix_plugin_probe_seq_subject() {
+        return &helix_plugin_probe_seq_;
+    }
+
+    /// 1 while the plugin reports power-loss saving switched on: the plr entry's
+    /// `saving`, else its `enabled` from a plugin that reports no `saving`.
+    lv_subject_t* get_plr_saving_enabled_subject() {
+        return &plr_saving_enabled_;
     }
 
     // ========================================================================
@@ -148,9 +329,24 @@ class PrinterPluginStatusState {
   private:
     SubjectManager subjects_;
     bool subjects_initialized_ = false;
+    std::string link_dir_;
+    std::string version_;
+    bool disabled_ = false;
+    PluginFeatureMap features_;
 
     // Plugin status subjects (tri-state: -1=unknown, 0=no, 1=yes)
     lv_subject_t helix_plugin_installed_{}; // HelixPrint Klipper plugin
+
+    lv_subject_t plr_feature_state_{};
+    lv_subject_t helix_plugin_probe_seq_{};
+    lv_subject_t plr_saving_enabled_{};
+    lv_subject_t plr_mesh_include_{};
+    std::function<bool()> is_local_;
+    nlohmann::json stored_opt_ins_ = nlohmann::json::object();
+    std::array<lv_subject_t, kPluginSwitchFeatures.size()> switch_mode_{};
+    std::array<lv_subject_t, kPluginSwitchFeatures.size()> switch_on_{};
+    /// Republish the feature subjects from the plugin state and features map.
+    void publish_features();
 
     /// Composed HelixMacrosStatus; see publish_helix_macros_status()
     lv_subject_t helix_macros_status_{};

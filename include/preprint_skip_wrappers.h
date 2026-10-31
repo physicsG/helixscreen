@@ -27,7 +27,7 @@
 namespace helix::skip_wrappers {
 
 inline constexpr const char* FILENAME = "helix_skips.cfg";
-inline constexpr const char* PREP_MACRO = "_HELIX_PREP";
+inline constexpr const char* kPrepMacro = "_HELIX_PREP";
 
 enum class Op { BedMesh, Qgl, ZTilt };
 

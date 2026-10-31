@@ -91,7 +91,9 @@
                          bind_text="filament_nozzle_current" clickable="false" event_bubble="true"/>
               <text_body text="/" clickable="false" event_bubble="true"/>
               <text_body name="nozzle_target_temp"
-                         bind_text="filament_nozzle_target" clickable="false" event_bubble="true"/>
+                         bind_text="filament_nozzle_target" clickable="false" event_bubble="true">
+                <bind_style name="styles.heat_blocked" subject="ams_nozzle_heat_blocked" ref_value="1"/>
+              </text_body>
             </lv_obj>
           </lv_obj>
           <lv_obj name="bed_chip"
@@ -204,7 +206,9 @@
                         width="content" height="content" style_pad_all="#space_xs" scrollable="false" flex_flow="row"
                         style_flex_cross_place="center" style_pad_gap="#space_xs" clickable="false" event_bubble="true">
                   <text_body name="nozzle_target_temp"
-                             bind_text="filament_nozzle_target" clickable="false" event_bubble="true"/>
+                             bind_text="filament_nozzle_target" clickable="false" event_bubble="true">
+                    <bind_style name="styles.heat_blocked" subject="ams_nozzle_heat_blocked" ref_value="1"/>
+                  </text_body>
                   <icon src="pencil" size="xs" variant="tertiary" clickable="false" event_bubble="true"/>
                 </lv_obj>
               </lv_obj>

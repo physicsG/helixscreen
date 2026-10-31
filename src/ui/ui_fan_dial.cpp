@@ -335,8 +335,8 @@ void FanDial::update_knob_glow(int percent) {
         }
 
         // Quadratic opacity: 0%→0, 50%→35, 100%→140
-        constexpr int MAX_OPA = 140;
-        int opa = (percent * percent * MAX_OPA) / 10000;
+        constexpr int kMaxOpa = 140;
+        int opa = (percent * percent * kMaxOpa) / 10000;
 
         // Knob shadow — scale with actual arc indicator width
         int32_t arc_w = lv_obj_get_style_arc_width(arc_, LV_PART_INDICATOR);
@@ -384,12 +384,12 @@ void FanDial::handle_arc_changed() {
     // the release event never arrives (e.g. AD5X touchscreen quirks).
     pending_speed_ = value;
     has_pending_send_ = true;
-    constexpr uint32_t DEBOUNCE_MS = 500;
+    constexpr uint32_t kDebounceMs = 500;
     if (debounce_timer_) {
         lv_timer_reset(debounce_timer_);
-        lv_timer_set_period(debounce_timer_, DEBOUNCE_MS);
+        lv_timer_set_period(debounce_timer_, kDebounceMs);
     } else {
-        debounce_timer_ = lv_timer_create(on_debounce_timer, DEBOUNCE_MS, this);
+        debounce_timer_ = lv_timer_create(on_debounce_timer, kDebounceMs, this);
         lv_timer_set_repeat_count(debounce_timer_, 1);
     }
 

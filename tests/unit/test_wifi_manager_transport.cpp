@@ -74,6 +74,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "WiFiManager still sends a join that displaces
         error = msg;
         result = r;
     });
+    REQUIRE(helix::WiFiManagerTestAccess::settle(manager));
 
     REQUIRE_FALSE(success);
     REQUIRE(result == WiFiResult::NETWORK_NOT_FOUND);
@@ -94,6 +95,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "WiFiManager stays silent when no wired link i
 
     helix::WiFiManager manager(std::move(backend), /*silent=*/true);
     manager.connect("NotInScanResults", "pw", [](bool, const std::string&, WiFiResult) {});
+    REQUIRE(helix::WiFiManagerTestAccess::settle(manager));
 
     REQUIRE_FALSE(toasts.warned(lv_tr("Joining Wi-Fi disconnects the wired network.")));
 }
@@ -110,6 +112,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "WiFiManager reports the backend's own reason 
     std::string error;
     manager.connect("NotInScanResults", "",
                     [&](bool, const std::string& msg, WiFiResult) { error = msg; });
+    REQUIRE(helix::WiFiManagerTestAccess::settle(manager));
 
     // Whatever the mock said, it is not empty and it is not a canned message —
     // the reason is the only thing the user can act on.
@@ -177,7 +180,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "WiFiManager delivers AUTHENTICATION_FAILED as
     lv_timer_handler_safe(); // drain the queue → arms the grace timer
     REQUIRE(calls == 0);
 
-    lv_tick_inc(5000); // past AUTH_FAIL_GRACE_MS with no CONNECTED
+    lv_tick_inc(5000); // past kAuthFailGraceMs with no CONNECTED
     lv_timer_handler_safe();
 
     REQUIRE(calls == 1);
@@ -201,7 +204,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "WiFiManager delivers a watchdog timeout as TI
                                                 });
     helix::WiFiManagerTestAccess::arm_connect_watchdog(*manager);
 
-    lv_tick_inc(46000); // past CONNECT_TIMEOUT_MS
+    lv_tick_inc(46000); // past kConnectTimeoutMs
     lv_timer_handler_safe();
 
     REQUIRE(calls == 1);

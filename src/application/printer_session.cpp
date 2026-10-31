@@ -28,10 +28,14 @@
 #include "active_print_media_manager.h"
 #include "ams_state.h"
 #include "app_globals.h"
+#include "bed_mesh_state.h"
+#include "bed_occupancy_state.h"
 #include "cjk_font_manager.h"
 #include "cli_args.h"
 #include "config.h"
+#include "demo_overlays.h"
 #include "detection_manager.h"
+#include "detection_source_table.h"
 #include "discovery_steps.h"
 #include "display_manager.h"
 #include "filament_consumption_tracker.h"
@@ -39,7 +43,6 @@
 #include "helix_version.h"
 #include "job_queue_state.h"
 #include "json_utils.h"
-#include "k2_stock_detection_source.h"
 #include "led/led_auto_state.h"
 #include "led/led_controller.h"
 #include "light_button_config.h"
@@ -59,6 +62,7 @@
 #include "printer_discovery.h"
 #include "printer_retarget.h"
 #include "printer_state.h"
+#include "queued_job_start.h"
 #include "sensor_state.h"
 #include "session_wiring.h"
 #include "settings_manager.h"
@@ -68,14 +72,12 @@
 #include "static_panel_registry.h"
 #include "static_subject_registry.h"
 #include "subject_initializer.h"
-#include "system/afc_message_dedup.h"
 #include "system/crash_handler.h"
 #include "system/crash_history.h"
 #include "system/telemetry_manager.h"
 #include "system/update_checker.h"
 #include "temperature_history_manager.h"
 #include "timelapse_state.h"
-#include "u1_stock_detection_source.h"
 #include "ui/ui_widget_helpers.h"
 #include "upgrade_banner.h"
 #include "xml_registration.h"
@@ -103,9 +105,16 @@ PrinterSession::PrinterSession(Config*& config, AsyncLifetimeGuard& async, lv_ob
               [] { helix::nav::set_active(PanelId::Home); }}),
       m_screen(screen), m_prompter(
                             async, [this] { return m_screen; },
-                            [this] { return m_moonraker ? m_moonraker->api() : nullptr; }) {}
+                            [this] { return m_moonraker ? m_moonraker->api() : nullptr; }) {
+    set_type_mismatch_demo([this](const std::string& detected, int confidence,
+                                  const std::string& saved, bool open_review) {
+        m_prompter.show_type_mismatch_demo(detected, confidence, saved, open_review);
+    });
+}
 
-PrinterSession::~PrinterSession() = default;
+PrinterSession::~PrinterSession() {
+    set_type_mismatch_demo(nullptr);
+}
 
 void PrinterSession::reset_discovery_session() {
     m_hw_changes.reset();
@@ -135,11 +144,9 @@ bool PrinterSession::init_core_subjects() {
     // These must exist before MoonrakerManager::init() can create the API
     m_subjects->init_core_and_state();
 
-    // Register the ams_current_tool_text formatter (a translated position
-    // label, e.g. "Tool 1", or "---") now that AmsState's subjects are live.
-    // The print status panel embeds <ams_current_tool> and binds
-    // ams_current_tool_text — without this observer the lane label stays at
-    // its default "---" until a user navigates into an AMS panel.
+    // Register the AMS tool text formatters (toolchange progress, the nozzle
+    // badge) now that AmsState's subjects are live, so the print status panel
+    // shows them before a user navigates into an AMS panel.
     helix::ui::init_ams_tool_text_observers();
 
     // Tool and extruder names are translated where the printer layer discovers
@@ -170,22 +177,12 @@ bool PrinterSession::init_panel_subjects() {
     // subjects, before the shell.
     helix::init_session_services(m_moonraker->api(), m_screen);
 
-    // Spaghetti / failed-print detection
-    // (see docs/devel/printers/SNAPMAKER_U1_SUPPORT.md, defect_detection)
+    // Spaghetti / failed-print detection.
     // Must happen after MoonrakerClient + PrinterState exist (above).
     {
-        auto u1 = std::make_unique<helix::detection::U1StockSource>(&get_printer_state());
-        u1->start();
-        // K2: replaces the stock camera loop the installer disables. Probes
-        // capability itself (K2 + /usr/bin/detection) and stays inert elsewhere.
-        auto k2 = std::make_unique<helix::detection::K2StockDetectionSource>(&get_printer_state());
-        k2->start();
         auto& dm = helix::detection::DetectionManager::instance();
-        dm.register_source(std::move(u1));
-        dm.register_source(std::move(k2));
+        helix::detection::register_builtin_sources(dm, &get_printer_state());
         dm.init(get_moonraker_client(), &get_printer_state());
-        dm.set_policy("u1_stock", static_cast<helix::detection::DetectionPolicy>(
-                                      SettingsManager::instance().get_detection_policy_u1()));
         dm.set_presenter(
             [](const helix::detection::DetectionEvent& e, helix::detection::DetectionPolicy p) {
                 helix::detection::present_detection(e, p);
@@ -219,6 +216,10 @@ bool PrinterSession::init_panel_subjects() {
             std::make_unique<helix::perf::MoonrakerPerformanceSource>(m_moonraker->api()));
     }
     spdlog::debug("[Application] PerformanceState initialized");
+
+    // Follow the active bed mesh from here on, so the stats are current before any
+    // panel or home tile that reads them exists.
+    helix::BedMeshState::instance().attach(m_moonraker->api());
 
     spdlog::debug("[Application] Panel subjects initialized");
     helix::MemoryMonitor::log_now("after_panel_subjects_init");
@@ -269,6 +270,12 @@ bool PrinterSession::init_moonraker() {
     m_history_manager->hold_until_discovery();
     set_print_history_manager(m_history_manager.get());
     spdlog::debug("[Application] PrintHistoryManager created");
+
+    // Whether a finished print may still be on the bed, for the plate and its lift
+    m_bed_occupancy_state =
+        std::make_unique<BedOccupancyState>(get_printer_state(), m_history_manager.get());
+    m_bed_occupancy_state->init_subjects();
+    set_bed_occupancy_state(m_bed_occupancy_state.get());
 
     // Create job queue state manager
     m_job_queue_state = std::make_unique<JobQueueState>(m_moonraker->api(), get_moonraker_client());
@@ -666,6 +673,10 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
         queue_freeze.emplace(helix::ui::UpdateQueue::instance(), "teardown_printer_scope");
     }
 
+    // Backends speak last while the client can still send: an operation left running
+    // (a calibration holding the heaters) is ended on the printer, not abandoned there.
+    AmsState::instance().before_disconnect();
+
     // Disconnect the WebSocket client FIRST to stop background threads (mock simulation,
     // WebSocket I/O). Otherwise a notification delivered mid-teardown can trigger new API
     // requests (history fetch, metascan, webcam detection). The client object stays valid
@@ -685,7 +696,8 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
     set_moonraker_manager(nullptr);
     set_moonraker_api(nullptr);
     set_moonraker_client(nullptr);
-    set_job_queue_state(nullptr); // the object itself dies after deinit_all(), below
+    set_job_queue_state(nullptr);     // the object itself dies after deinit_all(), below
+    set_bed_occupancy_state(nullptr); // likewise
     set_print_history_manager(nullptr);
     set_temperature_history_manager(nullptr);
 
@@ -706,7 +718,7 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
         UpdateChecker::instance().shutdown();    // cancels pending checks
         TelemetryManager::instance().shutdown(); // persists queue, joins send thread
         helix::CrashHistory::instance().shutdown();
-        AfcMessageDedup::instance().shutdown();
+        AmsBackend::shutdown_persistent_state();
         // Before the client is destroyed: the M300 backend's sender lambda references it
         // and the sequencer thread must be stopped first (#714).
         SoundManager::instance().shutdown();
@@ -739,6 +751,9 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
     // unregistration). JobQueueState is reset AFTER deinit_all() because it owns LVGL
     // subjects that panels still observe: destroying it early frees subject memory while
     // panel ObserverGuards still hold observer pointers into those lists.
+    if (m_bed_occupancy_state) {
+        m_bed_occupancy_state->detach_history();
+    }
     m_history_manager.reset();
     m_temp_history_manager.reset();
 
@@ -755,6 +770,7 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
     }
 
     // Unsubscribe power device and sensor state
+    helix::BedMeshState::instance().detach();
     if (m_moonraker && m_moonraker->api()) {
         helix::PowerDeviceState::instance().unsubscribe(*m_moonraker->api());
         helix::SensorState::instance().unsubscribe(*m_moonraker->api());
@@ -782,6 +798,10 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
         helix::led::LedAutoState::instance().deinit();
         helix::led::LedController::instance().deinit();
     }
+
+    // The home tile's queued-job starter outlives every printer and drives
+    // print-select's prep manager and this API: drop its start before either is freed.
+    helix::queue::abandon_queued_job_start();
 
     // Stop ALL LVGL animations before destroying panels: they hold widget pointers, and
     // completion callbacks fired by lv_anim_delete_all() would dereference freed objects
@@ -826,7 +846,10 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
     // lv_deinit(). lv_subject_deinit() calls lv_observer_remove() for each observer, which
     // removes unsubscribe_on_delete_cb from widget event lists, so widgets then delete
     // without firing stale unsubscribe callbacks on corrupted linked lists.
-    StaticSubjectRegistry::instance().deinit_all();
+    // A switch spares the entries whose init the rebuild below does not re-run.
+    StaticSubjectRegistry::instance().deinit_all(exiting
+                                                     ? StaticSubjectRegistry::Scope::ProcessExit
+                                                     : StaticSubjectRegistry::Scope::PrinterSwitch);
 
     // Sweep any panel singleton a deinit callback lazily re-created on its way out (a
     // callback reaching through an auto-creating get_global_*_panel() getter builds a
@@ -837,6 +860,7 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
     // After deinit_all() so JobQueueState's registered cleanup lambda runs on a live
     // object; before m_moonraker.reset() so client unregistration works.
     m_job_queue_state.reset();
+    m_bed_occupancy_state.reset();
 
     if (exiting) {
         // Destroy runtime CJK fonts before LVGL shutdown
@@ -872,13 +896,12 @@ void PrinterSession::teardown_printer_scope(TeardownScope scope, DisplayManager*
     KeyboardManager::instance().reset(); // widget pointers dangle after the tree delete
 
     // Delete the LVGL widget tree (panels already released their references). The display
-    // stays alive, so no lv_deinit(). cancel_add_printer_wizard() reaches here inside a
-    // queue_update() batch, where a synchronous lv_obj_del() would delete inside
-    // UpdateQueue::process_pending() and can corrupt LVGL's global event list (#776/#190/#80);
-    // m_app_layout is also the Home widget grid, where a relayout racing teardown could
-    // iterate a freed container (#983). safe_delete_subtree() detaches the tree off-screen
-    // synchronously (so the immediate init_printer_state() rebuild sees a clean m_screen),
-    // forces LV_LAYOUT_NONE, and frees it asynchronously outside the batch.
+    // stays alive, so no lv_deinit(). A synchronous lv_obj_del() of the tree the current
+    // event or callback may still be walking can corrupt LVGL's global event list
+    // (#776/#190/#80); m_app_layout is also the Home widget grid, where a relayout racing
+    // teardown could iterate a freed container (#983). safe_delete_subtree() detaches the
+    // tree off-screen synchronously (so the immediate init_printer_state() rebuild sees a
+    // clean m_screen), forces LV_LAYOUT_NONE, and frees it asynchronously.
     if (m_app_layout) {
         helix::ui::safe_delete_subtree(m_app_layout);
         m_app_layout = nullptr;

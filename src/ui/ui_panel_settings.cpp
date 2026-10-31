@@ -12,6 +12,7 @@
 #endif
 #include "ui_nav.h"
 #include "ui_panel_memory_stats.h"
+#include "ui_printer_manager_overlay.h"
 #include "ui_settings_appearance.h"
 #include "ui_settings_connection.h"
 #include "ui_settings_display.h"
@@ -361,6 +362,7 @@ void register_settings_panel_callbacks() {
         {"on_appearance_clicked", nav_row<get_appearance_settings_overlay>()},
         {"on_sound_clicked", nav_row<get_sound_settings_overlay>()},
         {"on_language_time_clicked", nav_row<get_language_time_settings_overlay>()},
+        {"on_printer_clicked", nav_row<get_printer_manager_overlay>()},
         {"on_printing_clicked", nav_row<get_printing_settings_overlay>()},
         {"on_devices_clicked", nav_row<get_hardware_settings_overlay>()},
         {"on_safety_clicked", nav_row<get_safety_settings_overlay>()},

@@ -34,7 +34,7 @@ std::string attr(const SettingRowSpec& spec, const std::string& name) {
 /// go_back close path runs inline, and panel_stack_[0] holding a stand-in base panel.
 class SettingsFx : public LVGLUITestFixture {
   public:
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
 
     SettingsFx() {
         DisplaySettingsManager::instance().set_animations_enabled(false);
@@ -135,6 +135,7 @@ TEST_CASE_METHOD(SettingsFx, "the generated screen writes settings through the p
     drain();
     CHECK(rig.host->set_setting("widget-demo", "step", 7));
     CHECK_FALSE(rig.host->set_setting("widget-demo", "step", 99)); // outside [1, 20]
+    process_lvgl(600); // the settings write waits for its timer
     CHECK(rig.block["settings"]["widget-demo"]["step"] == json(7));
     CHECK(int_global(rt, "seen") == 7);
 }
@@ -159,8 +160,53 @@ TEST_CASE_METHOD(SettingsFx, "a released slider row writes its value through the
     lv_slider_set_value(slider, 7, LV_ANIM_OFF);
     lv_obj_send_event(slider, LV_EVENT_RELEASED, nullptr);
     drain();
+    process_lvgl(600); // the settings write waits for its timer
     CHECK(rig.block["settings"]["widget-demo"]["step"] == json(7));
     CHECK(int_global(rt, "seen") == 7);
+}
+
+TEST_CASE_METHOD(SettingsFx, "an open screen follows helix.settings.set",
+                 "[plugin][plugin_settings]") {
+    HostRig rig(enabled("widget-demo", {}));
+    rig.host->load_from("tests/fixtures/plugins");
+    LuaRuntime* rt = rig.host->runtime("widget-demo");
+    REQUIRE(rt);
+    REQUIRE(rig.host->open_settings("widget-demo"));
+    drain();
+    PluginSettingsOverlay* screen = rig.host->settings_screen("widget-demo");
+    REQUIRE(screen);
+    lv_obj_t* slider = value_widget(screen->row_for("step"), "slider");
+    REQUIRE(slider);
+    REQUIRE(lv_slider_get_value(slider) == 5);
+
+    REQUIRE(rt->run_string(R"(helix.settings.set("step", 12))", "t"));
+    CHECK(lv_slider_get_value(slider) == 12);
+}
+
+TEST_CASE_METHOD(SettingsFx, "a row shows the value its handler settled on",
+                 "[plugin][plugin_settings]") {
+    HostRig rig(enabled("widget-demo", {}));
+    rig.host->load_from("tests/fixtures/plugins");
+    LuaRuntime* rt = rig.host->runtime("widget-demo");
+    REQUIRE(rt);
+    REQUIRE(rt->run_string(R"(helix.settings.on_change("step", function(v)
+        if v > 10 then helix.settings.set("step", 10) end
+    end))",
+                           "t"));
+    REQUIRE(rig.host->open_settings("widget-demo"));
+    drain();
+    PluginSettingsOverlay* screen = rig.host->settings_screen("widget-demo");
+    REQUIRE(screen);
+    lv_obj_t* slider = value_widget(screen->row_for("step"), "slider");
+    REQUIRE(slider);
+    lv_slider_set_value(slider, 15, LV_ANIM_OFF);
+    lv_obj_send_event(slider, LV_EVENT_RELEASED, nullptr);
+    drain();
+    CHECK(lv_slider_get_value(slider) == 10);
+    // The clamp is the stored state, so releasing at 10 again is not a write.
+    lv_obj_send_event(slider, LV_EVENT_RELEASED, nullptr);
+    drain();
+    CHECK(lv_slider_get_value(slider) == 10);
 }
 
 TEST_CASE_METHOD(SettingsFx, "confirming a text row twice fires on_change once",
@@ -185,6 +231,7 @@ TEST_CASE_METHOD(SettingsFx, "confirming a text row twice fires on_change once",
     lv_obj_send_event(input, LV_EVENT_READY, nullptr);
     lv_obj_send_event(input, LV_EVENT_DEFOCUSED, nullptr);
     drain();
+    process_lvgl(600); // the settings write waits for its timer
     CHECK(rig.block["settings"]["widget-demo"]["name"] == json("y"));
     CHECK(int_global(rt, "count") == 1);
 }
@@ -209,6 +256,7 @@ TEST_CASE_METHOD(SettingsFx, "an out-of-range text write is refused and the row 
     lv_textarea_set_text(input, "ok");
     lv_obj_send_event(input, LV_EVENT_READY, nullptr);
     drain();
+    process_lvgl(600); // the settings write waits for its timer
     REQUIRE(rig.block["settings"]["widget-demo"]["name"] == json("ok"));
 
     // kMaxSettingString is 1024; 1100 characters do not fit the declaration.
@@ -216,6 +264,7 @@ TEST_CASE_METHOD(SettingsFx, "an out-of-range text write is refused and the row 
     lv_obj_send_event(input, LV_EVENT_READY, nullptr);
     drain();
     CHECK(std::string(lv_textarea_get_text(input)) == "ok");
+    process_lvgl(600); // the settings write waits for its timer
     CHECK(rig.block["settings"]["widget-demo"]["name"] == json("ok"));
     CHECK(int_global(rt, "count") == 1);
 }
@@ -269,6 +318,7 @@ TEST_CASE_METHOD(SettingsFx, "slider rows show the formatted value and follow th
     lv_obj_send_event(slider, LV_EVENT_RELEASED, nullptr);
     drain();
     CHECK(std::string(lv_label_get_text(step_label)) == "7");
+    process_lvgl(600); // the settings write waits for its timer
     CHECK(rig.block["settings"]["widget-demo"]["step"] == json(7));
 }
 
@@ -286,6 +336,7 @@ TEST_CASE_METHOD(SettingsFx, "toggle and dropdown rows write through the event p
     lv_obj_remove_state(toggle, LV_STATE_CHECKED);
     lv_obj_send_event(toggle, LV_EVENT_VALUE_CHANGED, nullptr);
     drain();
+    process_lvgl(600); // the settings write waits for its timer
     CHECK(rig.block["settings"]["widget-demo"]["enabled"] == json(false));
 
     lv_obj_t* dropdown = value_widget(screen->row_for("mode"), "dropdown");
@@ -293,6 +344,7 @@ TEST_CASE_METHOD(SettingsFx, "toggle and dropdown rows write through the event p
     lv_dropdown_set_selected(dropdown, 1); // "b"
     lv_obj_send_event(dropdown, LV_EVENT_VALUE_CHANGED, nullptr);
     drain();
+    process_lvgl(600); // the settings write waits for its timer
     CHECK(rig.block["settings"]["widget-demo"]["mode"] == json("b"));
 }
 

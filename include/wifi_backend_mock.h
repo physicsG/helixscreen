@@ -75,6 +75,19 @@ class WifiBackendMock : public WifiBackend {
     }
     std::optional<helix::wifi::WifiInterface> resolved_interface() const override;
 
+    /// Country starts as HELIX_MOCK_WIFI_COUNTRY ("" = world). set_country()
+    /// dispatches REGDOM_CHANGE the way wpa_supplicant does.
+    bool supports_country() const override {
+        return true;
+    }
+    WiFiError get_country(std::string& code) override;
+    WiFiError set_country(const std::string& code) override;
+
+    /// Test helpers: stand in for a country the device's own configuration
+    /// set, and count the set_country() calls that reached the radio.
+    void set_country_for_test(const std::string& code);
+    int set_country_calls() const;
+
     // Test helpers — allow test code to drive state directly without going
     // through the simulated async connect/disconnect flow.
     void set_connected_state(bool connected, const std::string& ssid = "",
@@ -132,12 +145,17 @@ class WifiBackendMock : public WifiBackend {
     bool radio_enabled_{true};
     bool join_displaces_wired_link_{false};
     std::optional<helix::wifi::WifiInterface> resolved_interface_;
+    mutable std::mutex country_mutex_; ///< get/set_country() run on the control lane
+    std::string country_;
+    int set_country_calls_{0};
 
     // Async timers for scan/connect simulation (std::thread based - no LVGL dependency)
     std::thread scan_thread_;
     std::thread connect_thread_;
     std::atomic<bool> scan_active_{false};
     std::atomic<bool> connect_active_{false};
+    std::mutex sim_wait_mutex_; ///< Pairs with sim_wait_cv_ so a cancel wakes a simulated delay
+    std::condition_variable sim_wait_cv_;
 
     // Mock networks (realistic variety with passwords)
     std::vector<MockWiFiNetwork> mock_networks_;
@@ -161,6 +179,11 @@ class WifiBackendMock : public WifiBackend {
     // Thread functions for async scan/connect simulation
     void scan_thread_func();
     void connect_thread_func();
+
+    /// Clears @p active and wakes any simulated delay waiting on it.
+    void cancel_sim(std::atomic<bool>& active);
+    /// Sleeps @p delay_ms unless @p active is cleared first; true when still active.
+    bool sim_delay(const std::atomic<bool>& active, int delay_ms);
 
     // Connection simulation state
     std::string connecting_ssid_;

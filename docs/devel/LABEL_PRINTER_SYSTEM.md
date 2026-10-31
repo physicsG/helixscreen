@@ -241,7 +241,7 @@ Layout adapts to the physical stock:
 - The QR takes 40% of label width on STANDARD, 30% on COMPACT, both capped
   (`qr_max` 250 / 200 px) and shrunk further on narrow stock.
 - On `MINIMAL` the number scales to fill whatever space the QR leaves, bounded by
-  `ID_MIN_SCALE`/`ID_MAX_SCALE` (3..12), placed beside the QR when it stays legible there,
+  `kIdMinScale`/`kIdMaxScale` (3..12), placed beside the QR when it stays legible there,
   below otherwise.
 
 ## Testing
@@ -257,6 +257,6 @@ Layout adapts to the physical stock:
 2. Create `src/system/<brand>_protocol.cpp` with implementation
 3. Create `include/<brand>_bt_printer.h` implementing `ILabelPrinter`
 4. Create `src/system/<brand>_bt_printer.cpp` with BLE/RFCOMM transport
-5. Add brand entries to `KNOWN_BRANDS[]` in `bt_discovery_utils.h`
+5. Add brand entries to `kKnownBrands[]` in `bt_discovery_utils.h`
 6. Add routing in `label_printer_utils.cpp` (both size selection and print dispatch)
 7. Add unit tests for protocol in `tests/unit/test_<brand>_protocol.cpp`

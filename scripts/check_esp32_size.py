@@ -70,7 +70,10 @@ def largest_inputs(map_text: str, name: str, count: int) -> list[tuple[int, str,
     end = re.compile(r"^\.\S", re.M).search(map_text, start.end())
     body = map_text[start.end():end.start() if end else len(map_text)]
     found = []
-    for m in re.finditer(r"^ (\S+)\s*\n?\s+0x[0-9a-f]+\s+0x([0-9a-f]+)\s+(\S+)", body, re.M):
+    # Horizontal whitespace only after the name's own line: a *fill* line has no object, and
+    # \s there would take the next input's name for one, hiding that input.
+    for m in re.finditer(r"^ (\S+)[ \t]*\n?[ \t]+0x[0-9a-f]+[ \t]+0x([0-9a-f]+)[ \t]+(\S+)",
+                         body, re.M):
         size = int(m.group(2), 16)
         if size:
             obj = re.search(r"\(([^)]+)\)$", m.group(3))

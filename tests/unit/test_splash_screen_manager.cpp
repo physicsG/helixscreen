@@ -44,12 +44,12 @@ TEST_CASE("SplashScreenManager: discovery timing", "[splash][application]") {
     mgr.start(999999);
 
     SECTION("waits for discovery before signaling") {
-        // Discovery is not complete and DISCOVERY_TIMEOUT_MS has not elapsed, so
+        // Discovery is not complete and kDiscoveryTimeoutMs has not elapsed, so
         // check_and_signal() must take the "keep splash showing" return and leave
         // the manager unsignaled. This SECTION previously made the call and
         // asserted nothing at all, so deleting that gate changed no test.
         REQUIRE_FALSE(mgr.is_discovery_complete());
-        REQUIRE(mgr.elapsed_ms() < SplashScreenManager::DISCOVERY_TIMEOUT_MS);
+        REQUIRE(mgr.elapsed_ms() < SplashScreenManager::kDiscoveryTimeoutMs);
         REQUIRE_FALSE(mgr.ready_to_signal());
 
         mgr.check_and_signal();
@@ -145,13 +145,13 @@ TEST_CASE("SplashScreenManager: elapsed time tracking", "[splash][application]")
         const int64_t after = mgr.elapsed_ms();
         // Allow scheduler slop on the low side; the upper bound only has to be
         // loose enough not to flake under load and tight enough to stay well
-        // clear of DISCOVERY_TIMEOUT_MS.
+        // clear of kDiscoveryTimeoutMs.
         REQUIRE(after - before >= kSleepMs - 20);
-        REQUIRE(after < SplashScreenManager::DISCOVERY_TIMEOUT_MS);
+        REQUIRE(after < SplashScreenManager::kDiscoveryTimeoutMs);
     }
 
     SECTION("the timeout has not elapsed immediately after start") {
-        REQUIRE(mgr.elapsed_ms() < SplashScreenManager::DISCOVERY_TIMEOUT_MS);
+        REQUIRE(mgr.elapsed_ms() < SplashScreenManager::kDiscoveryTimeoutMs);
         REQUIRE_FALSE(mgr.ready_to_signal());
     }
 }

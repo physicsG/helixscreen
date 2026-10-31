@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Wiring tests for PrintTuneOverlay's z-offset baby-step: which base it adjusts
-// from, and which SET_GCODE_OFFSET form it puts on the wire.
+// from, and which SET_GCODE_OFFSET form it puts on the wire. The pressure
+// advance row's and the speed/flow step buttons' cases share the overlay fixture.
 //
 // The helper choosing between relative and absolute is unit-tested in
 // test_z_offset_utils.cpp. These tests pin the WIRING: that the overlay seeds its
@@ -18,8 +19,10 @@
 #include "ui_nav_manager.h"
 #include "ui_print_tune_overlay.h"
 #include "ui_update_queue.h"
+#include "ui_utils.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "config.h"
 #include "moonraker_api.h"
 #include "moonraker_client_mock.h"
 #include "printer_discovery.h"
@@ -118,7 +121,7 @@ class PrintTuneZOffsetFixture : public LVGLUITestFixture {
 
     MoonrakerClientMock mock_client;
     std::unique_ptr<MoonrakerAPI> capture_api;
-    std::array<lv_obj_t*, UI_PANEL_COUNT> root_panels_{};
+    std::array<lv_obj_t*, kUiPanelCount> root_panels_{};
 };
 
 } // namespace
@@ -361,4 +364,62 @@ TEST_CASE_METHOD(PrintTuneZOffsetFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     CHECK(std::string(lv_subject_get_string(display)) == "0.250 mm");
+}
+
+TEST_CASE_METHOD(PrintTuneZOffsetFixture,
+                 "PrintTune: the pressure advance row shows and sends with beta features off",
+                 "[ui_integration][pa_tune]") {
+    struct BetaOff {
+        lv_subject_t* subject = lv_xml_get_subject(nullptr, "show_beta_features");
+        bool prev_config = helix::Config::get_instance()->is_beta_features_enabled();
+        int prev_subject = subject ? lv_subject_get_int(subject) : 0;
+        BetaOff() {
+            helix::Config::get_instance()->set<bool>("/beta_features", false);
+            if (subject) {
+                lv_subject_set_int(subject, 0);
+            }
+        }
+        ~BetaOff() {
+            helix::Config::get_instance()->set<bool>("/beta_features", prev_config);
+            if (subject) {
+                lv_subject_set_int(subject, prev_subject);
+            }
+        }
+    } beta_off;
+    REQUIRE(beta_off.subject != nullptr);
+
+    state().update_from_status(json{{"extruder", json{{"pressure_advance", 0.04}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    auto& overlay = show_overlay();
+    lv_obj_t* row = lv_obj_find_by_name(overlay.get_panel(), "tune_pa_row");
+    REQUIRE(row != nullptr);
+    CHECK_FALSE(lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN));
+
+    overlay.handle_pa_adjust(1);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(last_gcode() == "SET_PRESSURE_ADVANCE EXTRUDER=extruder ADVANCE=0.0410");
+}
+
+TEST_CASE_METHOD(PrintTuneZOffsetFixture,
+                 "PrintTune: flow buttons step 5 and 1 percent, speed buttons 10 and 5",
+                 "[ui_integration][print_tune][speed_flow_steps]") {
+    auto& overlay = show_overlay();
+    overlay.update_speed_flow_display(100, 100);
+    auto tap = [&](const char* name) {
+        lv_obj_t* btn = lv_obj_find_by_name(overlay.get_panel(), name);
+        REQUIRE(btn != nullptr);
+        helix::ui::send_tap(btn);
+        helix::ui::UpdateQueue::instance().drain();
+        return last_gcode();
+    };
+
+    CHECK(tap("btn_flow_minus_5") == "M221 S95");
+    CHECK(tap("btn_flow_minus_1") == "M221 S94");
+    CHECK(tap("btn_flow_plus_1") == "M221 S95");
+    CHECK(tap("btn_flow_plus_5") == "M221 S100");
+
+    CHECK(tap("btn_speed_minus_10") == "M220 S90");
+    CHECK(tap("btn_speed_minus_5") == "M220 S85");
+    CHECK(tap("btn_speed_plus_5") == "M220 S90");
+    CHECK(tap("btn_speed_plus_10") == "M220 S100");
 }

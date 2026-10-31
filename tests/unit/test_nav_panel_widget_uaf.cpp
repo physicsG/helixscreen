@@ -5,7 +5,7 @@
  * @file test_nav_panel_widget_uaf.cpp
  * @brief NavigationManager must not write through a deleted panel widget
  *
- * handle_active_panel_change() sweeps panel_widgets_[UI_PANEL_COUNT] and calls
+ * handle_active_panel_change() sweeps panel_widgets_[kUiPanelCount] and calls
  * lv_obj_add_flag()/lv_obj_remove_flag() on every non-null entry, guarded only
  * by the null check, so a deleted panel must leave a null slot behind.
  *
@@ -46,7 +46,7 @@ class NavPanelWidgetUafFixture : public LVGLTestFixture {
     NavPanelWidgetUafFixture() {
         NavigationManager::instance().init();
 
-        for (int i = 0; i < UI_PANEL_COUNT; i++) {
+        for (int i = 0; i < kUiPanelCount; i++) {
             panels_[i] = lv_obj_create(test_screen());
             REQUIRE(panels_[i] != nullptr);
         }
@@ -54,7 +54,7 @@ class NavPanelWidgetUafFixture : public LVGLTestFixture {
 
         // Every slot must actually hold a widget, or a "no crash" result would
         // be the null check passing rather than the fix working.
-        for (int i = 0; i < UI_PANEL_COUNT; i++) {
+        for (int i = 0; i < kUiPanelCount; i++) {
             REQUIRE(NavigationManager::instance().get_panel_widget(static_cast<PanelId>(i)) ==
                     panels_[i]);
         }
@@ -82,7 +82,7 @@ class NavPanelWidgetUafFixture : public LVGLTestFixture {
     }
 
   private:
-    lv_obj_t* panels_[UI_PANEL_COUNT] = {nullptr};
+    lv_obj_t* panels_[kUiPanelCount] = {nullptr};
 };
 
 } // namespace

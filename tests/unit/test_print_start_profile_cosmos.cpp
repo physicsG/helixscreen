@@ -25,7 +25,7 @@ static std::shared_ptr<PrintStartProfile> get_cosmos_profile() {
     return PrintStartProfile::load("cosmos_cc1");
 }
 
-static constexpr const char* NO_SKEW_LINE =
+static constexpr const char* kNoSkewLine =
     "Info: No skew profile defined. If skew correction is desired, create 'my_skew_profile' "
     "in printer.cfg";
 
@@ -90,7 +90,7 @@ TEST_CASE("PrintStartProfile: cosmos_cc1 maps the PRINT_START narration",
     }
 
     SECTION("Skew check completes the pre-print whether or not a profile exists") {
-        REQUIRE(profile->try_match_pattern(NO_SKEW_LINE, result));
+        REQUIRE(profile->try_match_pattern(kNoSkewLine, result));
         REQUIRE(result.phase == PrintStartPhase::COMPLETE);
 
         PrintStartProfile::MatchResult found;

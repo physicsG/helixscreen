@@ -17,12 +17,12 @@
 #include "observer_factory.h"
 #include "panel_widget_registry.h"
 #include "printer_state.h"
-#include "static_subject_registry.h"
 #include "subject_managed_panel.h"
 #include "text_measure.h"
 #include "theme_manager.h"
 #include "tool_state.h"
 #include "ui/ui_widget_helpers.h"
+#include "widget_subjects.h"
 
 #include <spdlog/spdlog.h>
 
@@ -44,27 +44,18 @@ namespace {
 lv_subject_t s_label_mode_subject{};
 lv_subject_t s_columns_subject{};
 lv_subject_t s_compact_font_subject{};
-bool s_subjects_initialized = false;
-SubjectManager s_subjects;
+helix::WidgetSubjects s_subjects{"NozzleTempsWidgetSubjects"};
 
 void nozzle_temps_widget_init_subjects() {
-    if (s_subjects_initialized)
-        return;
-
-    lv_subject_init_int(&s_label_mode_subject,
-                        static_cast<int>(helix::NozzleLabelMode::Long)); // the degenerate default
-    s_subjects.publish("nozzle_row_label_mode", &s_label_mode_subject);
-    lv_subject_init_int(&s_columns_subject, 1);
-    s_subjects.publish("nozzle_row_columns", &s_columns_subject);
-    lv_subject_init_int(&s_compact_font_subject, 0);
-    s_subjects.publish("nozzle_row_compact", &s_compact_font_subject);
-    s_subjects_initialized = true;
-
-    StaticSubjectRegistry::instance().register_deinit("NozzleTempsWidgetSubjects", []() {
-        if (s_subjects_initialized && lv_is_initialized()) {
-            s_subjects.deinit_all();
-            s_subjects_initialized = false;
-        }
+    s_subjects.ensure_init([] {
+        lv_subject_init_int(
+            &s_label_mode_subject,
+            static_cast<int>(helix::NozzleLabelMode::Long)); // the degenerate default
+        s_subjects.publish("nozzle_row_label_mode", &s_label_mode_subject);
+        lv_subject_init_int(&s_columns_subject, 1);
+        s_subjects.publish("nozzle_row_columns", &s_columns_subject);
+        lv_subject_init_int(&s_compact_font_subject, 0);
+        s_subjects.publish("nozzle_row_compact", &s_compact_font_subject);
     });
 }
 
@@ -101,12 +92,9 @@ void register_nozzle_temps_widget() {
 
 std::vector<std::string> helix::distinct_extruder_names(const std::vector<ToolInfo>& tools) {
     std::vector<std::string> result;
-    std::set<std::string> seen;
-    for (const auto& tool : tools) {
-        if (!tool.extruder_name)
-            continue;
-        if (seen.insert(*tool.extruder_name).second)
-            result.push_back(*tool.extruder_name);
+    for (const auto& head : physical_heads(tools)) {
+        if (head.extruder_name)
+            result.push_back(*head.extruder_name);
     }
     return result;
 }
@@ -149,6 +137,18 @@ void NozzleTempsWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
         },
         printer_state_.get_subjects_lifetime());
 
+    auto& tool_state = ToolState::instance();
+    named_mounted_tool_ = lv_subject_get_int(tool_state.get_active_tool_subject());
+    mounted_tool_observer_ = helix::ui::observe<int>(
+        tool_state.get_active_tool_subject(), this,
+        [](NozzleTempsWidget* self, int tool) {
+            if (tool == self->named_mounted_tool_ || !ToolState::instance().heads_share_heater())
+                return;
+            self->named_mounted_tool_ = tool;
+            self->rebuild_rows();
+        },
+        tool_state.get_subjects_lifetime());
+
     // "off" is formatted into the value labels, and the value width decides the
     // layout, so a new language re-formats and re-measures.
     language_observer_ = helix::ui::observe_language_change(this, [](NozzleTempsWidget* self) {
@@ -170,6 +170,7 @@ void NozzleTempsWidget::detach() {
     lifetime_.invalidate();
     version_observer_.reset();
     language_observer_.reset();
+    mounted_tool_observer_.reset();
     clear_rows();
     uninstall_delete_hook();
     widget_obj_ = nullptr;
@@ -547,7 +548,7 @@ void NozzleTempsWidget::create_extruder_row(lv_obj_t* container, ExtruderRow& ro
     // toolchanger).
     std::string short_name = tool_state.display_label_for_extruder(row.name);
     if (short_name.empty())
-        short_name = row.name;
+        short_name = tool_state.heads_share_heater() ? tool_state.nozzle_label() : row.name;
 
     // Long label: prefer the user-friendly "Nozzle N" from PrinterTemperatureState
     // when the tool's gcode identity is just the default Tn pattern. For
@@ -555,7 +556,11 @@ void NozzleTempsWidget::create_extruder_row(lv_obj_t* container, ExtruderRow& ro
     // configured tool name is already meaningful — keep it.
     std::string gcode_name = tool_state.tool_name_for_extruder(row.name);
     std::string long_name = gcode_name.empty() ? row.name : gcode_name;
-    if (helix::ui::is_generated_tool_name(gcode_name)) {
+    if (tool_state.heads_share_heater()) {
+        // One heater, several nozzles: the row is the mounted nozzle, named
+        // exactly as every other nozzle readout names it.
+        long_name = tool_state.nozzle_label();
+    } else if (helix::ui::is_generated_tool_name(gcode_name)) {
         const auto& exts = printer_state_.temperature_state().extruders();
         auto it = exts.find(row.name);
         if (it != exts.end() && !it->second.display_name.empty())

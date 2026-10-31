@@ -18,10 +18,14 @@
  * - Public API uses the internal enums internally
  */
 
+#include "ui_fonts.h"
+
 #include "../../include/ui_icon.h"
 #include "../../include/ui_icon_codepoints.h"
 
 #include <spdlog/spdlog.h>
+
+#include <cstring>
 
 #include "../catch_amalgamated.hpp"
 
@@ -123,6 +127,31 @@ TEST_CASE("Icon codepoint lookup handles empty string", "[ui_icon][codepoint][er
 
     const char* result = helix::ui::icon::lookup_codepoint("");
     REQUIRE(result == nullptr);
+}
+
+// The Spoolman logo is not an MDI glyph: it comes from helix-custom-icons.ttf,
+// merged into the icon faces by regen_mdi_fonts.sh. A face regenerated without
+// that font still compiles, and the icon then draws nothing at all.
+TEST_CASE("Spoolman icon resolves to a custom glyph present in every icon face",
+          "[ui_icon][codepoint]") {
+    const char* utf8 = helix::ui::icon::lookup_codepoint("spoolman");
+    REQUIRE(utf8 != nullptr);
+    REQUIRE(std::strlen(utf8) == 4);
+    const auto* b = reinterpret_cast<const unsigned char*>(utf8);
+    const uint32_t cp =
+        ((b[0] & 0x07u) << 18) | ((b[1] & 0x3Fu) << 12) | ((b[2] & 0x3Fu) << 6) | (b[3] & 0x3Fu);
+    REQUIRE(cp == 0xFE000);
+
+    const lv_font_t* faces[] = {&mdi_icons_14, &mdi_icons_16, &mdi_icons_24,
+                                &mdi_icons_32, &mdi_icons_48, &mdi_icons_64,
+                                &mdi_icons_80, &mdi_icons_96, &mdi_icons_128};
+    for (const lv_font_t* face : faces) {
+        lv_font_glyph_dsc_t dsc{};
+        INFO("face line height " << face->line_height);
+        REQUIRE(lv_font_get_glyph_dsc(face, &dsc, cp, 0));
+        CHECK(dsc.box_w > 0);
+        CHECK(dsc.box_h > 0);
+    }
 }
 
 // ============================================================================

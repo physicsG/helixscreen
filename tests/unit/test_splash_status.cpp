@@ -22,7 +22,7 @@ TEST_CASE("splash lifetime: no heartbeat preserves legacy 30s cap", "[splash][li
     // No heartbeat ever observed (-1).
     REQUIRE(splash_should_continue(p, start, start + 0, -1) == true);
     REQUIRE(splash_should_continue(p, start, start + 29, -1) == true);
-    // At exactly the cap it must stop (matches original `>= MAX_LIFETIME_SEC`).
+    // At exactly the cap it must stop (matches original `>= kMaxLifetimeSec`).
     REQUIRE(splash_should_continue(p, start, start + 30, -1) == false);
     REQUIRE(splash_should_continue(p, start, start + 31, -1) == false);
 }

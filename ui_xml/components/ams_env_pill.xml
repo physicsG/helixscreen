@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    AMS Environment Pill - a pill on the right end of the detail view's spool
+    box: the temperature beside a thermometer over the humidity beside a drop filled
+    to the reading.
+
+    Same subjects as ams_environment_indicator (the overview cards' readout), so
+    the detail view passes the ams_env_ind_detail_* set. While the unit dries,
+    the temperature row turns to the heat icon and the dryer's status, in the
+    warning color; the humidity stays. Hidden when the unit has no environment data. Its height is the box's,
+    set by ams_detail_update_tray(); it is tappable and opens the environment
+    overlay (on_env_indicator_clicked, unit read from user_data).
+  -->
+  <api>
+    <prop name="temp_text" type="subject" default="ams_env_ind_0_temp_text"/>
+    <prop name="humidity_text" type="subject" default="ams_env_ind_0_humidity_text"/>
+    <prop name="humidity" type="subject" default="ams_env_ind_0_humidity"/>
+    <prop name="humidity_status" type="subject" default="ams_env_ind_0_humidity_status"/>
+    <prop name="humidity_visible" type="subject" default="ams_env_ind_0_humidity_visible"/>
+    <prop name="visible" type="subject" default="ams_env_ind_0_visible"/>
+    <prop name="drying_active" type="subject" default="ams_env_ind_0_drying_active"/>
+    <prop name="drying_text" type="subject" default="ams_env_ind_0_drying_text"/>
+  </api>
+  <view name="ams_env_pill"
+        extends="lv_obj" width="content" height="content" style_pad_top="#space_xs" style_pad_bottom="#space_xs"
+        style_pad_left="#space_xxs" style_pad_right="#space_xxs" flex_flow="column" style_flex_main_place="space_evenly"
+        style_flex_cross_place="center" style_pad_gap="0" scrollable="false" clickable="true" style_bg_opa="220"
+        style_bg_color="#screen_bg" style_border_width="#border_width" style_border_color="#border"
+        style_radius="#border_radius" hidden="true">
+    <style name="styles.press_wash" selector="pressed"/>
+    <bind_flag_if_eq subject="$visible" flag="hidden" ref_value="0"/>
+    <event_cb trigger="clicked" callback="on_env_indicator_clicked"/>
+
+    <!-- Temperature: thermometer and reading, or while the unit dries the heat icon
+         and the dryer's short status (time left), in the warning color. Each
+         reading is a row (icon, value): the box is too short to stack an icon
+         over each value at the small sizes. -->
+    <lv_obj width="content"
+            height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+            style_pad_gap="#space_xxs" scrollable="false" clickable="false" event_bubble="true">
+      <icon src="thermometer" size="xs" variant="secondary" clickable="false" event_bubble="true">
+        <bind_flag_if_not_eq subject="$drying_active" flag="hidden" ref_value="0"/>
+      </icon>
+      <icon src="heat_wave" size="xs" variant="warning" clickable="false" event_bubble="true" hidden="true">
+        <bind_flag_if_eq subject="$drying_active" flag="hidden" ref_value="0"/>
+      </icon>
+      <text_xs bind_text="$temp_text" clickable="false" event_bubble="true">
+        <bind_flag_if_not_eq subject="$drying_active" flag="hidden" ref_value="0"/>
+      </text_xs>
+      <text_xs bind_text="$drying_text" style_text_color="#warning" clickable="false" event_bubble="true" hidden="true">
+        <bind_flag_if_eq subject="$drying_active" flag="hidden" ref_value="0"/>
+      </text_xs>
+    </lv_obj>
+
+    <!-- Humidity, color-coded by the material comfort range -->
+    <lv_obj width="content"
+            height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+            style_pad_gap="#space_xxs" scrollable="false" clickable="false" event_bubble="true" hidden="true">
+      <bind_flag_if_not_eq subject="$humidity_visible" flag="hidden" ref_value="1"/>
+      <humidity_drop name="env_humidity_drop" bind_value="$humidity" size="xs" clickable="false" event_bubble="true"/>
+      <text_xs bind_text="$humidity_text" clickable="false" event_bubble="true" hidden="true">
+        <bind_flag_if_not_eq subject="$humidity_status" flag="hidden" ref_value="0"/>
+      </text_xs>
+      <text_xs bind_text="$humidity_text"
+               style_text_color="#warning" clickable="false" event_bubble="true" hidden="true">
+        <bind_flag_if_not_eq subject="$humidity_status" flag="hidden" ref_value="1"/>
+      </text_xs>
+      <text_xs bind_text="$humidity_text" style_text_color="#danger" clickable="false" event_bubble="true" hidden="true">
+        <bind_flag_if_not_eq subject="$humidity_status" flag="hidden" ref_value="2"/>
+      </text_xs>
+    </lv_obj>
+  </view>
+</component>

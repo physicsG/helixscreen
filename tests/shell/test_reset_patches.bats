@@ -20,13 +20,15 @@
 # base/dns_resolv.c and convinced the old DNS guard the patch was applied when
 # the wiring was not — see test_libhv_dns_resolver_patch.bats.
 
+load helpers
+
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     PATCHES_MK="$REPO_ROOT/mk/patches.mk"
 
     # The reset loop for each submodule is emitted as one shell line, so the
     # libhv loop can be isolated by the submodule path inside it.
-    DRYRUN="$(cd "$REPO_ROOT" && make -n reset-patches 2>/dev/null)"
+    DRYRUN="$(scratch_make -n reset-patches 2>/dev/null)"
     LIBHV_LOOP="$(printf '%s\n' "$DRYRUN" | grep 'for file in' | grep 'lib/libhv' || true)"
 }
 
@@ -108,7 +110,7 @@ declared_libhv_files() {
     # reset half is restoring. Both spellings satisfy the invariant, so only the
     # resulting order is worth pinning.
     local dryrun reset_at apply_at
-    dryrun="$(cd "$REPO_ROOT" && make -n reapply-patches 2>/dev/null)"
+    dryrun="$(scratch_make -n reapply-patches 2>/dev/null)"
 
     # Reset half: the libhv restore loop, the same anchor setup() keys on.
     reset_at="$(printf '%s\n' "$dryrun" | grep -n 'for file in' | grep 'lib/libhv' |
@@ -122,3 +124,27 @@ declared_libhv_files() {
     [ -n "$apply_at" ]
     [ "$reset_at" -lt "$apply_at" ]
 }
+
+# The paths a patch touches, created files included (`+++ b/` lines).
+patch_paths() { sed -n 's|^+++ b/||p' "$1" | sort -u; }
+
+# Every path every patch touches is in its submodule's *_PATCHED_FILES, so a
+# reset restores or deletes it. The submodule comes from the patch's name.
+@test "every file a patch touches is declared in its submodule's patched-files list" {
+    local p var f missing=""
+    for p in "$REPO_ROOT"/patches/*.patch; do
+        case "$(basename "$p")" in
+            lvgl*) var=LVGL_PATCHED_FILES ;;
+            libhv*) var=LIBHV_PATCHED_FILES ;;
+            lua*) var=LUA_PATCHED_FILES ;;
+            *) continue ;;
+        esac
+        declared=$(sed -n "/^$var[[:space:]]*:=/,/^\$/p" "$PATCHES_MK" | sed "s/^$var[[:space:]]*:=//" |
+            tr -d '\\' | tr ' \t' '\n' | grep -v '^#' | grep -v '^$')
+        while IFS= read -r f; do
+            printf '%s\n' "$declared" | grep -qxF -- "$f" || missing="$missing $(basename "$p"):$f"
+        done < <(patch_paths "$p")
+    done
+    [ -z "$missing" ] || fail "not in a *_PATCHED_FILES list, so a reset leaves it patched:$missing"
+}
+

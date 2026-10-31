@@ -11,10 +11,14 @@
     <!-- 1 while the unit is an absent placeholder: a box address held for a box
          that is not on the bus. The card shows disabled and says so. -->
     <prop name="absent" type="subject" default="ams_env_ind_off_flag"/>
+    <!-- 1 while the unit's logo is full-color art, drawn as is; 0 for a white mono mark,
+         which is tinted to the text color. -->
+    <prop name="logo_color" type="subject" default="ams_env_ind_off_flag"/>
     <!-- 1 while a present unit is reported offline: drawn faded, with a chip. -->
     <prop name="disconnected" type="subject" default="ams_env_ind_off_flag"/>
     <prop name="temp_text" type="subject" default="ams_env_ind_0_temp_text"/>
     <prop name="humidity_text" type="subject" default="ams_env_ind_0_humidity_text"/>
+    <prop name="humidity" type="subject" default="ams_env_ind_0_humidity"/>
     <prop name="humidity_status" type="subject" default="ams_env_ind_0_humidity_status"/>
     <prop name="humidity_visible" type="subject" default="ams_env_ind_0_humidity_visible"/>
     <prop name="visible" type="subject" default="ams_env_ind_0_visible"/>
@@ -27,9 +31,9 @@
   <view name="ams_unit_card"
         extends="lv_obj" height="content" scrollable="false" flex_flow="column" style_flex_main_place="start"
         style_flex_cross_place="center" style_bg_color="#elevated_bg" style_bg_opa="255" style_radius="#border_radius"
-        style_pad_all="#space_sm" style_pad_gap="#space_xs" style_border_width="1" style_border_color="#border"
-        style_border_opa="80" style_min_width="#ams_card_min_width" style_max_width="#ams_card_max_width"
-        clickable="true">
+        style_pad_ver="#space_sm" style_pad_hor="#space_xs" style_pad_gap="#space_xs" style_border_width="1"
+        style_border_color="#border" style_border_opa="80" style_min_width="#ams_card_min_width"
+        style_max_width="#ams_card_max_width" clickable="true">
     <style name="styles.press_wash" selector="pressed"/>
     <bind_state_if_eq subject="$absent" state="disabled" ref_value="1"/>
     <!-- Offline fades the header, bars and readout, but not the card itself: it stays
@@ -47,6 +51,7 @@
            the binding. -->
       <lv_image name="unit_logo" width="#ams_logo_size" height="#ams_logo_size" inner_align="contain">
         <bind_flag_if_eq subject="ams_cards_compact" flag="hidden" ref_value="1"/>
+        <bind_style_if_eq name="styles.ams_logo_mono" subject="$logo_color" ref_value="0"/>
       </lv_image>
       <!-- width="1"+flex_grow so the label is sized by the row rather than by its
            own content: a name longer than the card used to size to content, overflow
@@ -62,7 +67,7 @@
          mirrors the single-unit detail layout (ams_unit_detail.xml). -->
     <lv_obj width="100%"
             height="content" scrollable="false" clickable="false" event_bubble="true" flex_flow="row"
-            style_flex_main_place="center" style_flex_cross_place="center" style_pad_all="0" style_pad_gap="#space_xs"
+            style_flex_main_place="center" style_flex_cross_place="center" style_pad_all="0" style_pad_gap="#space_xxs"
             style_bg_opa="0" style_border_width="0">
       <!-- Left column: mini bars + slot count + runout. width="1"+flex_grow per L066 so
            flex allocates from grown width (not content), letting the indicator take the rest. -->
@@ -77,8 +82,10 @@
                 style_pad_column="#space_xxs" style_bg_opa="0" style_border_width="0">
           <bind_style_if_eq name="unit_offline" subject="$disconnected" ref_value="1"/>
         </lv_obj>
-        <!-- Slot count label -->
-        <text_small name="slot_count" text="0 slots" event_bubble="true">
+        <!-- Slot count label: bounded by the column so it can never run under the
+             environment box beside it; a noun too long for the column ellipsizes. -->
+        <text_small name="slot_count"
+                    width="100%" text="0 slots" long_mode="dots" style_text_align="center" event_bubble="true">
           <bind_flag_if_eq subject="$absent" flag="hidden" ref_value="1"/>
           <bind_flag_if_eq subject="$disconnected" flag="hidden" ref_value="1"/>
         </text_small>
@@ -96,8 +103,9 @@
       <!-- Environment indicator (temp/humidity/dryer) — to the right; hidden when no sensors -->
       <ams_environment_indicator name="env_indicator"
                                  event_bubble="true" temp_text="$temp_text" humidity_text="$humidity_text"
-                                 humidity_status="$humidity_status" humidity_visible="$humidity_visible"
-                                 visible="$visible" drying_active="$drying_active" drying_text="$drying_text">
+                                 humidity="$humidity" humidity_status="$humidity_status"
+                                 humidity_visible="$humidity_visible" visible="$visible" drying_active="$drying_active"
+                                 drying_text="$drying_text">
         <bind_style_if_eq name="unit_offline" subject="$disconnected" ref_value="1"/>
       </ams_environment_indicator>
     </lv_obj>

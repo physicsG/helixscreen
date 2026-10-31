@@ -466,6 +466,19 @@ class AmsErrorHelper {
     }
 
     /**
+     * @brief Create an error for a slot that cannot take this operation now
+     * @param noun The backend's word for one position
+     * @param slot Slot index asked about
+     * @param reason filament_op_eligibility_reason() for the slot
+     * @return AmsError configured for UI display
+     */
+    static AmsError slot_ineligible(ui::LaneNoun noun, int slot, const char* reason) {
+        return AmsError(AmsResult::WRONG_STATE,
+                        "Slot " + std::to_string(slot) + " cannot take the operation: " + reason,
+                        position_label(noun, slot) + ": " + lv_tr(reason), "", slot);
+    }
+
+    /**
      * @brief Create an invalid slot error
      * @param noun The backend's word for one position
      * @param slot Invalid slot index
@@ -541,6 +554,16 @@ class AmsErrorHelper {
         return AmsError(AmsResult::NOT_SUPPORTED, feature + " is not supported by this backend",
                         lv_tr("Feature not available"),
                         lv_tr("This feature requires different hardware or configuration"));
+    }
+
+    /**
+     * @brief A device action that moves the printer, refused while a print holds it
+     * @return AmsError configured for UI display
+     */
+    static AmsError busy_with_print() {
+        return AmsError(AmsResult::WRONG_STATE, "Machine motion refused: a print holds the printer",
+                        lv_tr("Printer is busy with a print"),
+                        lv_tr("Finish or cancel the print first"));
     }
 
     /**

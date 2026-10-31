@@ -13,6 +13,7 @@
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "settings_manager.h"
 #include "static_panel_registry.h"
+#include "z_offset_utils.h"
 
 #include <spdlog/spdlog.h>
 
@@ -63,7 +64,7 @@ struct FieldSpec {
     bool outer;   ///< distances only
 };
 
-constexpr FieldSpec FIELD_SPECS[] = {
+constexpr FieldSpec kFieldSpecs[] = {
     {"Jog Speed XY", Kind::Speed, false, {}, false},
     {"Jog Speed Z", Kind::Speed, true, {}, false},
     {"Fine Inner", Kind::Distance, false, JogMode::Fine, false},
@@ -75,8 +76,8 @@ constexpr FieldSpec FIELD_SPECS[] = {
     {"Bed Map Clearance", Kind::Clearance, false, {}, false},
 };
 
-constexpr size_t FIELD_COUNT = sizeof(FIELD_SPECS) / sizeof(FIELD_SPECS[0]);
-static_assert(FIELD_COUNT == static_cast<size_t>(Field::Count),
+constexpr size_t kFieldCount = sizeof(kFieldSpecs) / sizeof(kFieldSpecs[0]);
+static_assert(kFieldCount == static_cast<size_t>(Field::Count),
               "FIELD_SPECS must have one entry per Field");
 
 /// Each mode occupies one adjacent inner/outer pair, starting at an even
@@ -86,10 +87,10 @@ static_assert(FIELD_COUNT == static_cast<size_t>(Field::Count),
 constexpr bool distance_pairs_alternate() {
     for (size_t i = static_cast<size_t>(Field::FineInner);
          i <= static_cast<size_t>(Field::TurboOuter); ++i) {
-        if (FIELD_SPECS[i].mode != FIELD_SPECS[i ^ 1].mode) {
+        if (kFieldSpecs[i].mode != kFieldSpecs[i ^ 1].mode) {
             return false;
         }
-        if (FIELD_SPECS[i].outer == FIELD_SPECS[i ^ 1].outer) {
+        if (kFieldSpecs[i].outer == kFieldSpecs[i ^ 1].outer) {
             return false;
         }
     }
@@ -101,7 +102,7 @@ static_assert(distance_pairs_alternate(),
               "distance rows must pair same-mode inner/outer at i, i^1");
 
 /// XML value_subject names, in Field order.
-constexpr const char* const SUBJECT_NAMES[FIELD_COUNT] = {
+constexpr const char* const kSubjectNames[kFieldCount] = {
     "jog_speed_xy_display", "jog_speed_z_display",  "fine_inner_display",
     "fine_outer_display",   "coarse_inner_display", "coarse_outer_display",
     "turbo_inner_display",  "turbo_outer_display",  "bed_map_clearance_display",
@@ -146,10 +147,10 @@ void MotionSettingsOverlay::set_api(IMoonrakerAPI* api) {
 // ============================================================================
 
 void MotionSettingsOverlay::init_subjects() {
-    for (size_t i = 0; i < FIELD_COUNT; ++i) {
+    for (size_t i = 0; i < kFieldCount; ++i) {
         format_display(i);
         UI_MANAGED_SUBJECT_STRING(display_subjects_[i], display_buffers_[i], display_buffers_[i],
-                                  SUBJECT_NAMES[i], subjects_);
+                                  kSubjectNames[i], subjects_);
     }
     UI_MANAGED_SUBJECT_STRING(jog_speed_max_subject_, jog_speed_max_buf_, "500",
                               "jog_speed_max_display", subjects_);
@@ -180,8 +181,17 @@ void MotionSettingsOverlay::register_callbacks() {
                  spdlog::warn("[MotionSettingsOverlay] Ignoring out-of-range field index {}", raw);
              }
          }},
+        {"on_motion_layout_changed",
+         [](lv_event_t* e) {
+             const int index = helix::ui::event_selected(e);
+             if (index >= 0 && index < kMotionLayoutCount) {
+                 SettingsManager::instance().set_motion_layout(static_cast<MotionLayout>(index));
+             }
+         }},
         {"on_reset_distances",
          [](lv_event_t*) { get_motion_settings_overlay().handle_reset_distances(); }},
+        {"on_z_offset_save_toggled",
+         [](lv_event_t* e) { helix::zoffset::set_save_enabled(ui::event_checked(e)); }},
     });
 }
 
@@ -227,7 +237,7 @@ void MotionSettingsOverlay::on_deactivating(DeactivateReason) {
 // ============================================================================
 
 void MotionSettingsOverlay::format_display(size_t i) {
-    const FieldSpec& spec = FIELD_SPECS[i];
+    const FieldSpec& spec = kFieldSpecs[i];
     auto& settings = SettingsManager::instance();
 
     if (spec.kind == Kind::Speed) {
@@ -245,7 +255,7 @@ void MotionSettingsOverlay::format_display(size_t i) {
 }
 
 void MotionSettingsOverlay::refresh_displays() {
-    for (size_t i = 0; i < FIELD_COUNT; ++i) {
+    for (size_t i = 0; i < kFieldCount; ++i) {
         format_display(i);
         lv_subject_copy_string(&display_subjects_[i], display_buffers_[i]);
     }
@@ -342,7 +352,7 @@ void MotionSettingsOverlay::persist_pending_speed() {
 
 void MotionSettingsOverlay::handle_field_clicked(Field field) {
     const size_t i = static_cast<size_t>(field);
-    const FieldSpec& spec = FIELD_SPECS[i];
+    const FieldSpec& spec = kFieldSpecs[i];
     auto& settings = SettingsManager::instance();
     pending_keypad_field_ = field;
 
@@ -366,8 +376,8 @@ void MotionSettingsOverlay::handle_field_clicked(Field field) {
         config.unit_label = "mm/s";
     } else if (spec.kind == Kind::Clearance) {
         config.initial_value = static_cast<float>(settings.get_bed_map_clearance_mm());
-        config.min_value = static_cast<float>(BED_MAP_CLEARANCE_MIN_MM);
-        config.max_value = static_cast<float>(BED_MAP_CLEARANCE_MAX_MM);
+        config.min_value = static_cast<float>(kBedMapClearanceMinMm);
+        config.max_value = static_cast<float>(kBedMapClearanceMaxMm);
         config.allow_decimal = false;
         config.unit_label = "mm";
     } else {
@@ -396,7 +406,7 @@ void MotionSettingsOverlay::handle_keypad_value(Field field, double value) {
     // on_activate() that follows.
     returning_from_keypad_ = true;
 
-    const FieldSpec& spec = FIELD_SPECS[static_cast<size_t>(field)];
+    const FieldSpec& spec = kFieldSpecs[static_cast<size_t>(field)];
     if (spec.kind == Kind::Clearance) {
         SettingsManager::instance().set_bed_map_clearance_mm(static_cast<int>(value));
         const size_t i = static_cast<size_t>(field);

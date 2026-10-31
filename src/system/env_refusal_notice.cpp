@@ -22,6 +22,7 @@
 
 #include "ui_notification.h"
 
+#include "i18n_plural.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -135,13 +136,15 @@ void surface_env_refusal_from_launcher() {
         notice.skipped_truncated ? notice.skipped_lines - 1 : notice.skipped_lines;
     std::string message;
     if (notice.skipped_truncated) {
-        message = fmt::format(
-            fmt::runtime(lv_tr("At least {} lines in helixscreen.env were ignored")), listed);
-    } else if (listed == 1) {
-        message = lv_tr("1 line in helixscreen.env was ignored");
-    } else {
         message =
-            fmt::format(fmt::runtime(lv_tr("{} lines in helixscreen.env were ignored")), listed);
+            fmt::format(fmt::runtime(ui::tr_plural(
+                            nullptr, "At least {} lines in helixscreen.env were ignored", listed)),
+                        listed);
+    } else {
+        message = fmt::format(
+            fmt::runtime(ui::tr_plural("1 line in helixscreen.env was ignored",
+                                       "{} lines in helixscreen.env were ignored", listed)),
+            listed);
     }
     ui_notification_warning_with_detail(message.c_str(), detail.c_str());
 }

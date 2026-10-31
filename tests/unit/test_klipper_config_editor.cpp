@@ -5,6 +5,7 @@
 
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/moonraker_client_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "http_executor.h"
 #include "klipper_config_editor.h"
 #include "moonraker_api_mock.h"
@@ -587,6 +588,7 @@ TEST_CASE("KlipperConfigEditor::load_config_files finds sections behind a glob i
             completed = true;
         },
         [&](const std::string& err) { error = err; });
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     REQUIRE(error.empty());
     REQUIRE(completed);
@@ -600,6 +602,29 @@ TEST_CASE("KlipperConfigEditor::load_config_files finds sections behind a glob i
     auto cached = editor.get_cached_file("conf.d/options.cfg");
     REQUIRE(cached.has_value());
     CHECK(cached->find("shaper_freq_x: 47.4") != std::string::npos);
+}
+
+TEST_CASE("KlipperConfigEditor::load_config_files stops at a printer teardown mid-walk",
+          "[config][editor][include_walk_lifetime]") {
+    helix::PrinterState state;
+    MoonrakerClientMock client;
+    auto api = std::make_unique<MoonrakerAPIMock>(client, state);
+    api->set_config_files({{"printer.cfg", "[include hardware.cfg]\n[printer]\n"},
+                           {"hardware.cfg", "[stepper_x]\nstep_pin: PA1\n"}});
+
+    KlipperConfigEditor editor;
+    bool completed = false;
+    std::string error;
+    editor.load_config_files(
+        *api, [&](std::map<std::string, SectionLocation>) { completed = true; },
+        [&](const std::string& err) { error = err; });
+
+    helix::ui::UpdateQueue::instance().drain(); // printer.cfg arrives
+    api.reset();
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK_FALSE(completed);
+    CHECK(error.find("disconnected") != std::string::npos);
 }
 
 TEST_CASE("KlipperConfigEditor::load_config_files still resolves plain includes",
@@ -628,6 +653,7 @@ TEST_CASE("KlipperConfigEditor::load_config_files still resolves plain includes"
             completed = true;
         },
         [](const std::string&) {});
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     REQUIRE(completed);
     REQUIRE(section_map.count("probe") == 1);
@@ -814,6 +840,8 @@ TEST_CASE_METHOD(LVGLTestFixture,
         },
         [&]() { succeeded = true; }, [&](const std::string& err) { error = err; },
         /*restart_timeout_ms=*/300);
+    // The config walk downloads from the main thread: run it up to the write.
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     // The health monitor polls on an HttpExecutor::fast() worker that captured
     // `api` and `editor` BY REFERENCE. Returning while it is still running is a
@@ -866,6 +894,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
             {ConfigEdit::Type::ADD_KEY, "heater_power", "40"},
         },
         [&]() { succeeded = true; }, [&](const std::string& err) { error = err; });
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     // Bails at the section lookup, so no worker was ever submitted - but assert
     // that rather than assume it, since a regression that reaches the upload

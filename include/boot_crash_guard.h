@@ -13,16 +13,16 @@ namespace helix {
 
 /// Crash resets in a row, with no healthy session between them, that make boot stop
 /// connecting to the active printer (prestonbrown/helixscreen#1750).
-constexpr int BOOT_CRASH_FALLBACK_THRESHOLD = 3;
+constexpr int kBootCrashFallbackThreshold = 3;
 
 /// Config key: boot does not connect to the active printer until the user picks one.
-inline constexpr const char* BOOT_CONNECT_HOLD_KEY = "/boot_connect_hold";
+inline constexpr const char* kBootConnectHoldKey = "/boot_connect_hold";
 /// Config key: crash resets since the last healthy session.
-inline constexpr const char* BOOT_CRASH_STREAK_KEY = "/boot_crash_streak";
+inline constexpr const char* kBootCrashStreakKey = "/boot_crash_streak";
 /// Config key: the printer a switch left, where a crash run on the new one falls back to.
-inline constexpr const char* SWITCH_PREVIOUS_PRINTER_KEY = "/switch_previous_printer_id";
+inline constexpr const char* kSwitchPreviousPrinterKey = "/switch_previous_printer_id";
 /// Config key: restart fallbacks since the last healthy session.
-inline constexpr const char* SWITCH_RESTART_STREAK_KEY = "/switch_restart_streak";
+inline constexpr const char* kSwitchRestartStreakKey = "/switch_restart_streak";
 
 struct BootPrinterChoice {
     int crash_streak = 0;     ///< The streak to persist for the next boot.
@@ -44,7 +44,7 @@ inline BootPrinterChoice choose_boot_printer(bool crash_reset, int crash_streak,
     if (!crash_reset) {
         return {crash_streak, {}, !connect_held, false};
     }
-    if (crash_streak + 1 < BOOT_CRASH_FALLBACK_THRESHOLD) {
+    if (crash_streak + 1 < kBootCrashFallbackThreshold) {
         return {crash_streak + 1, {}, !connect_held, false};
     }
     const bool previous_exists =
@@ -60,14 +60,14 @@ inline BootPrinterChoice choose_boot_printer(bool crash_reset, int crash_streak,
 /// Returns whether anything changed, so the caller saves only then.
 inline bool end_boot_crash_run(Config& config) {
     bool changed = false;
-    for (const char* key : {BOOT_CRASH_STREAK_KEY, SWITCH_RESTART_STREAK_KEY}) {
+    for (const char* key : {kBootCrashStreakKey, kSwitchRestartStreakKey}) {
         if (config.get<int>(key, 0) != 0) {
             config.set<int>(key, 0);
             changed = true;
         }
     }
-    if (config.get<bool>(BOOT_CONNECT_HOLD_KEY, false)) {
-        config.set<bool>(BOOT_CONNECT_HOLD_KEY, false);
+    if (config.get<bool>(kBootConnectHoldKey, false)) {
+        config.set<bool>(kBootConnectHoldKey, false);
         changed = true;
     }
     return changed;

@@ -4,8 +4,10 @@
 
 #include "runtime_config.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <unistd.h>
 #include <utility>
 
 namespace helix::mock {
@@ -16,8 +18,12 @@ namespace helix::mock {
 /// planted there moves another process's numbers. Listings, metadata, reads
 /// and deletes see both; the history scan sees only the shipped files.
 /// Empty (the default) means the shipped directory alone.
+/// HELIX_MOCK_GCODE_DIR plants a directory for a whole --test run.
 inline std::string& planted_gcode_dir() {
-    static std::string dir;
+    static std::string dir = [] {
+        const char* env = std::getenv("HELIX_MOCK_GCODE_DIR");
+        return std::string(env ? env : "");
+    }();
     return dir;
 }
 
@@ -25,13 +31,28 @@ inline void set_planted_gcode_dir(std::string dir) {
     planted_gcode_dir() = std::move(dir);
 }
 
+/// Where files uploaded to the mock's gcodes root land when no directory is
+/// planted: one directory per process, so the uploads of parallel runs and
+/// tests never meet, and the shipped directory is never written.
+inline std::string uploaded_gcode_dir() {
+    static const std::string dir =
+        (std::filesystem::temp_directory_path() /
+         ("helix-mock-uploads-" + std::to_string(static_cast<long>(::getpid()))))
+            .string();
+    return dir;
+}
+
 /// Where a gcodes-root-relative file lives on disk: the planted copy when one
-/// exists, else the shipped directory.
+/// exists, else an uploaded one, else the shipped directory.
 inline std::string gcode_disk_path(const std::string& relative) {
     const std::string& planted = planted_gcode_dir();
-    if (!planted.empty()) {
-        std::string path = planted + "/" + relative;
-        if (std::filesystem::exists(path)) {
+    for (const std::string& dir : {planted, uploaded_gcode_dir()}) {
+        if (dir.empty()) {
+            continue;
+        }
+        std::string path = dir + "/" + relative;
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec)) {
             return path;
         }
     }

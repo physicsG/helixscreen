@@ -9,6 +9,8 @@
 #include "filament_slot_override_store.h"
 #include "test_helpers/seeded_override.h"
 
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,9 +50,79 @@ class ToolChangerTestAccess {
     /// A cancelled home confirmation must clear this -- otherwise the next
     /// macro ack (or a superseding dispatch) resolves against a generation
     /// that no longer describes anything in flight.
+    /// Set the optimistic action the way a dispatch does, without sending.
+    static void arm_dispatch(AmsBackendToolChanger& b, AmsAction action) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        b.begin_dispatch_locked(action);
+    }
+
     static bool has_pending_dispatch(const AmsBackendToolChanger& b) {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.pending_dispatch_action_.has_value();
+    }
+
+    /// Deliver the operator's prompt reply to the mount-to-feed run, the
+    /// main-thread half its notify_gcode_response listener drives on a real
+    /// client.
+    static void feed_operator_reply(AmsBackendToolChanger& b, helix::mount_feed::Reply reply) {
+        b.on_feed_reply(reply);
+    }
+
+    /// Deliver what the console watcher parsed: a reply, or the dismissal echo
+    /// of the prompt ending without an answer.
+    static void feed_console_signal(AmsBackendToolChanger& b,
+                                    helix::mount_feed::ConsoleSignal signal) {
+        b.on_feed_signal(signal);
+    }
+
+    /// Advance the operator wait by @p ms, the way the watchdog timer does
+    /// once a second in the app.
+    static void feed_wait_elapsed(AmsBackendToolChanger& b, uint32_t ms) {
+        b.handle_wait_elapsed(ms);
+    }
+
+    /// Replace the operator-wait watchdog's clock.
+    static void set_feed_clock(AmsBackendToolChanger& b,
+                               std::function<std::chrono::steady_clock::time_point()> clock) {
+        b.feed_clock_ = std::move(clock);
+    }
+
+    /// One firing of the operator-wait watchdog timer, as LVGL runs it.
+    static void feed_wait_tick(AmsBackendToolChanger& b) {
+        b.feed_wait_tick();
+    }
+
+    /// The backend stopping under a live run, through stop() itself so the
+    /// unwind runs under the same locking it meets in the app.
+    static void feed_disconnect_stopping(AmsBackendToolChanger& b) {
+        b.stop();
+    }
+
+    /// The wording of the last toast a feed run raised.
+    static const std::string& feed_last_toast(const AmsBackendToolChanger& b) {
+        return b.feed_last_toast_;
+    }
+
+    /// Forget the last toast, so a case can tell a repeat from no toast at all.
+    static void clear_feed_last_toast(AmsBackendToolChanger& b) {
+        b.feed_last_toast_.clear();
+    }
+
+    /// The grace for the dock sensors to confirm an acked swap ran out.
+    static void feed_swap_check_elapsed(AmsBackendToolChanger& b) {
+        b.handle_swap_check_elapsed();
+    }
+
+    /// A sensor fault flagged under no live run, as a path that never consumes
+    /// it would leave it.
+    static void set_feed_sensor_fault(AmsBackendToolChanger& b) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        b.feed_sensor_fault_ = true;
+    }
+
+    /// The severity of the last toast a feed run raised.
+    static ToastSeverity feed_last_toast_severity(const AmsBackendToolChanger& b) {
+        return b.feed_last_toast_severity_;
     }
 
     /// Deliver one gcode-response line to the Z-Mod marker handler, the
@@ -59,6 +131,12 @@ class ToolChangerTestAccess {
     /// does not wire.
     static void feed_zmod_marker(AmsBackendToolChanger& b, const std::string& line) {
         b.on_zmod_marker_line(line);
+    }
+
+    /// The controller's latched phase word.
+    static std::string last_operation_word(const AmsBackendToolChanger& b) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        return b.last_operation_word_;
     }
 
     /// Run the REAL on_started(), which is where the backend builds its
@@ -92,6 +170,29 @@ class ToolChangerTestAccess {
         // The backend's own init files both stores together; a fixture that
         // wrote only this map would leave the lane reading empty.
         helix::test::file_override_as_lane_records(b, slot_index, ovr);
+    }
+
+    /// Run the lane_data re-read a firmware change scheduled, now rather than
+    /// after its debounce.
+    static void fire_lane_record_reread(AmsBackendToolChanger& b) {
+        b.lane_reread_pending_.store(false);
+        b.reread_lane_records();
+    }
+
+    /// Whether a lane_data re-read is scheduled and has not run yet.
+    static bool lane_reread_pending(const AmsBackendToolChanger& b) {
+        return b.lane_reread_pending_.load();
+    }
+
+    /// The override standing for @p slot_index, or nullopt when it has none.
+    static std::optional<helix::ams::FilamentSlotOverride>
+    get_override(const AmsBackendToolChanger& b, int slot_index) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        auto it = b.overrides_.find(slot_index);
+        if (it == b.overrides_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
     }
 
     /// True once any slot holds a stored override.

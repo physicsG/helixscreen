@@ -28,7 +28,7 @@ struct PowerPanelTestAccess; // test-only friend (tests/test_helpers/)
  */
 class PowerPanel : public PanelBase {
   public:
-    PowerPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    PowerPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
     ~PowerPanel() override;
 
     void init_subjects() override;
@@ -133,3 +133,8 @@ class PowerPanel : public PanelBase {
  * @return Reference to the singleton power panel
  */
 PowerPanel& get_global_power_panel();
+
+/// Push the Power panel over @p parent_screen. False when it could not be built.
+namespace helix::ui {
+bool open_power_panel(lv_obj_t* parent_screen);
+} // namespace helix::ui

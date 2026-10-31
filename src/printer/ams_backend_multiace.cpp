@@ -1,108 +1,433 @@
-// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 #if HELIX_HAS_SNAPMAKER
 
 #include "ams_backend_multiace.h"
 
-#include "color_utils.h"
-#include "filament_slot_override.h"
-#include "filament_slot_override_store.h"
-#include "json_utils.h"
+#include "ace_slot_parse.h"
+#include "ams_fault_event.h"
+#include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "snapmaker_channel_state.h"
-#include "text_io.h"
+#include "snapmaker_exceptions.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <array>
-#include <cmath>
-#include <type_traits>
+#include <cctype>
 
 namespace helix {
 
 namespace {
 
-/// multiACE keys its per-head maps by the head index rendered as a STRING
-/// ("0".."3"), not as a JSON int. Reading them with an int key silently finds
-/// nothing and every head looks feeder-fed.
-template <typename T> std::optional<T> head_keyed(const nlohmann::json& obj, int head) {
-    if (!obj.is_object()) {
-        return std::nullopt;
-    }
-    auto it = obj.find(std::to_string(head));
-    if (it == obj.end() || it->is_null()) {
-        return std::nullopt;
-    }
-    // get<T>() throws on a mismatched type, so the type is settled first.
-    const bool convertible =
-        std::is_same_v<T, bool> ? it->is_boolean() : (it->is_number() || it->is_boolean());
-    if (!convertible) {
-        return std::nullopt;
-    }
-    return it->get<T>();
-}
+/// multiACE's console faults: the U1's coded-exception shape with module id
+/// 525 (FEEDING) and a code in the 200 band (its ace.py#_ace_error registry).
+constexpr int kMultiAceFaultId = 525;
+constexpr int kMultiAceCodeFirst = 200;
+constexpr int kMultiAceCodeLast = 299;
 
-/// `slots[].color` is an [r,g,b] array of ints, not a hex string. Returns
-/// nullopt for a missing/short array so a slot with no colour keeps the
-/// SlotInfo default rather than being forced to black.
-std::optional<uint32_t> color_array_to_rgb(const nlohmann::json& c) {
-    if (!c.is_array() || c.size() < 3) {
+/// The head a multiACE fault names. The engine sends index 0 both for head 0
+/// and for a fault tied to no head, so index 0 counts only when the message
+/// names the head, which it does in its own 1-based words ("head 1").
+std::optional<int> fault_head(int index, const std::string& message) {
+    if (index < 0 || index >= multiace::kHeadCount) {
         return std::nullopt;
     }
-    auto ch = [&](size_t i) -> uint32_t {
-        return c[i].is_number_integer() ? static_cast<uint32_t>(std::clamp(c[i].get<int>(), 0, 255))
-                                        : 0u;
-    };
-    return (ch(0) << 16) | (ch(1) << 8) | ch(2);
-}
-
-/// Split multiACE's `"<ace>_<slot>"` bay key, bounds-checked.
-///
-/// Used by BOTH `slot_overrides.json` and the `spool_binding` map — they share
-/// the key shape, and the two hand-written copies of this had already drifted
-/// apart in their comments. Returns nullopt for a malformed key or one naming
-/// hardware outside MAX_ACE_UNITS / ACE_SLOTS_PER_UNIT, so callers `continue`.
-std::optional<std::pair<int, int>> parse_bay_key(const std::string& key, int max_aces,
-                                                 int slots_per_unit) {
-    const auto sep = key.find('_');
-    if (sep == std::string::npos) {
-        return std::nullopt;
+    if (index > 0) {
+        return index;
     }
-    const int a = helix::text_io::parse_leading<int>(key.substr(0, sep)).value_or(-1);
-    const int s = helix::text_io::parse_leading<int>(key.substr(sep + 1)).value_or(-1);
-    if (a < 0 || a >= max_aces || s < 0 || s >= slots_per_unit) {
-        return std::nullopt;
+    std::string lower = message;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (size_t at = lower.find("head 1"); at != std::string::npos;
+         at = lower.find("head 1", at + 1)) {
+        const size_t end = at + 6;
+        const bool word_start = at == 0 || !std::isalpha(static_cast<unsigned char>(lower[at - 1]));
+        const bool number_ends =
+            end >= lower.size() || !std::isdigit(static_cast<unsigned char>(lower[end]));
+        if (word_start && number_ends) {
+            return 0;
+        }
     }
-    return std::pair<int, int>{a, s};
-}
-
-/// Model name for an ACE unit, from the only field that distinguishes them.
-/// multiACE's own FILAMENT_MOTION_FEATURE_REFERENCE.md § 10 names the two
-/// protocol generations "ACE Pro v1" and "ACE 2 Pro v2" — note the digit sits
-/// in the middle, so it is "ACE 2 Pro", not "ACE Pro 2". An unrecognised or
-/// absent protocol falls back to the bare family name rather than guessing.
-const char* ace_model_name(const std::string& protocol) {
-    if (protocol == "v2") {
-        return "ACE 2 Pro"; // i18n: do not translate - product name
-    }
-    if (protocol == "v1") {
-        return "ACE Pro"; // i18n: do not translate - product name
-    }
-    return "ACE"; // i18n: do not translate - product name
+    return std::nullopt;
 }
 
 } // namespace
 
 AmsBackendMultiAce::AmsBackendMultiAce(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
-    : AmsBackendSnapmaker(api, client) {
-    // The base ctor has already built unit 0 (the U1's four heads) and every
-    // Snapmaker capability flag. Only the identity changes here; ACE units are
-    // added when the first `ace` frame arrives, because their count is not
-    // known until then.
-    system_info_.type_name = "Snapmaker U1 + multiACE";
-    spdlog::debug("[AmsBackendMultiAce] Constructed (unit 0 = U1 SnapSwap, ACE units pending)");
+    : AmsBackendSnapmaker(api, client) {}
+
+// ============================================================================
+// Engine state
+// ============================================================================
+
+bool AmsBackendMultiAce::active_locked() const {
+    return api_version_ == multiace::kApiVersion &&
+           (mode_ == multiace::Mode::MULTI || mode_ == multiace::Mode::HEAD);
+}
+
+bool AmsBackendMultiAce::ace_fed_locked(int head) const {
+    if (head < 0 || head >= kHeads || !active_locked()) {
+        return false;
+    }
+    const auto h = static_cast<size_t>(head);
+    return multiace::head_feed(mode_, head_manual_[h], head_feeder_[h]) == multiace::HeadFeed::ACE;
+}
+
+std::optional<std::pair<int, int>> AmsBackendMultiAce::routed_bay_locked(int head) const {
+    if (head < 0 || head >= kHeads) {
+        return std::nullopt;
+    }
+    const auto& src = head_source_[static_cast<size_t>(head)];
+    if (!src || src->load_failed || src->ace < 0 || src->slot < 0) {
+        return std::nullopt;
+    }
+    // A route naming a unit the engine is not reporting describes a bay this
+    // backend cannot show; reading it would badge and caption a lane that has
+    // no spool behind it.
+    if (unit_position_locked(src->ace) < 0) {
+        return std::nullopt;
+    }
+    return std::make_pair(src->ace, src->slot);
+}
+
+int AmsBackendMultiAce::unit_position_locked(int ace) const {
+    for (size_t i = 0; i < units_.size(); ++i) {
+        if (units_[i].idx == ace) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+std::optional<int> AmsBackendMultiAce::head_for_global_locked(int global) const {
+    const auto bay = multiace::bay_of(global);
+    if (!bay || !active_locked() || unit_position_locked(bay->first) < 0) {
+        return std::nullopt;
+    }
+    std::array<multiace::HeadFeed, kHeads> feed{};
+    for (int h = 0; h < kHeads; ++h) {
+        const auto i = static_cast<size_t>(h);
+        feed[i] = multiace::head_feed(mode_, head_manual_[i], head_feeder_[i]);
+    }
+    return multiace::head_for_bay(mode_, bay->first, bay->second, head_ace_, feed);
+}
+
+const multiace::Unit* AmsBackendMultiAce::unit_for_index_locked(int unit_index) const {
+    if (!active_locked() || unit_index < 1 || unit_index > static_cast<int>(units_.size())) {
+        return nullptr;
+    }
+    return &units_[static_cast<size_t>(unit_index - 1)];
+}
+
+void AmsBackendMultiAce::apply_extension_locked(const nlohmann::json& status, bool& changed) {
+    const auto it = status.find("ace");
+    if (it == status.end()) {
+        return;
+    }
+    const multiace::StatusDelta d = multiace::parse_ace_status(*it);
+
+    if (d.api_version) {
+        api_version_ = d.api_version;
+        if (*d.api_version != multiace::kApiVersion && !api_mismatch_logged_) {
+            spdlog::warn("{} multiACE reports engine API {}, this screen speaks {}: showing the "
+                         "U1's own heads only",
+                         backend_log_tag(), *d.api_version, multiace::kApiVersion);
+            api_mismatch_logged_ = true;
+        }
+    }
+    if (d.mode) {
+        mode_ = *d.mode;
+    }
+    if (d.head_ace) {
+        head_ace_ = *d.head_ace;
+    }
+    if (d.head_feeder) {
+        head_feeder_ = *d.head_feeder;
+    }
+    if (d.head_manual) {
+        head_manual_ = *d.head_manual;
+    }
+    std::vector<int> load_failed_heads;
+    if (d.head_source) {
+        for (int h = 0; h < kHeads; ++h) {
+            const auto& src = (*d.head_source)[static_cast<size_t>(h)];
+            const auto& prev = head_source_[static_cast<size_t>(h)];
+            if (src && src->load_failed && !(prev && prev->load_failed)) {
+                load_failed_heads.push_back(h);
+            }
+        }
+        head_source_ = *d.head_source;
+    }
+    if (d.aces) {
+        units_ = *d.aces;
+    }
+    if (d.swap_in_progress) {
+        swap_in_progress_ = *d.swap_in_progress;
+    }
+    if (d.unload_all_active) {
+        unload_all_active_ = *d.unload_all_active;
+    }
+    if (d.swap_phase) {
+        swap_phase_ = *d.swap_phase;
+    }
+    if (d.last_swap_result) {
+        last_swap_ = *d.last_swap_result;
+    }
+    if (d.event_seq) {
+        event_seq_ = *d.event_seq;
+    }
+
+    if (d.ace_heads && active_locked()) {
+        // The engine's own list of ACE-driven heads, against ours from the
+        // per-head flags. A disagreement means the two readings of its mode
+        // drifted; the flags are what the engine's commands act on.
+        std::vector<int> ours;
+        for (int h = 0; h < kHeads; ++h) {
+            if (ace_fed_locked(h)) {
+                ours.push_back(h);
+            }
+        }
+        if (ours != *d.ace_heads) {
+            spdlog::debug("{} ace_heads disagrees with the per-head flags", backend_log_tag());
+        }
+    }
+
+    if (d.api_version || d.mode || d.head_ace || d.head_feeder || d.head_manual || d.head_source ||
+        d.aces) {
+        rebuild_units_locked();
+        changed = true;
+    }
+
+    // The engine's own account of a load that failed: the frame hides the
+    // route (load_failed) and this says why, on the rising edge only so a
+    // stream of frames carrying the standing failure reports it once.
+    // Collected here under the lock; handle_status emits outside it.
+    for (int h : load_failed_heads) {
+        mark_load_unconfirmed_locked(h, "engine reported load_failed");
+        pending_load_failed_errors_.push_back(AmsErrorHelper::position_label(tool_noun(), h) +
+                                              ": " + lv_tr("Load failed"));
+    }
+}
+
+void AmsBackendMultiAce::rebuild_units_locked() {
+    system_info_.units.resize(1);
+    int total = kHeads;
+    if (active_locked()) {
+        std::array<multiace::HeadFeed, kHeads> feed{};
+        for (int h = 0; h < kHeads; ++h) {
+            const auto i = static_cast<size_t>(h);
+            feed[i] = multiace::head_feed(mode_, head_manual_[i], head_feeder_[i]);
+        }
+        for (size_t pos = 0; pos < units_.size(); ++pos) {
+            const multiace::Unit& u = units_[pos];
+            AmsUnit unit;
+            unit.unit_index = static_cast<int>(pos) + 1;
+            unit.name = fmt::format("ACE {}", u.idx + 1);
+            unit.display_name = unit.name;
+            unit.slot_count = multiace::kBaysPerUnit;
+            unit.first_slot_global_index = multiace::bay_global(u.idx, 0);
+            unit.connected = u.connected;
+            unit.firmware_version = u.firmware;
+            if (u.temp || u.humidity) {
+                EnvironmentData env;
+                env.temperature_c = u.temp.value_or(0.0f);
+                env.humidity_pct = u.humidity.value_or(0.0f);
+                env.has_humidity = u.humidity.has_value();
+                unit.environment = env;
+            }
+            if (mode_ == multiace::Mode::HEAD) {
+                unit.topology = PathTopology::HUB;
+                unit.hub_tool_label =
+                    multiace::head_for_bay(mode_, u.idx, 0, head_ace_, feed).value_or(-1);
+            } else {
+                unit.topology = PathTopology::PARALLEL;
+            }
+
+            for (int s = 0; s < multiace::kBaysPerUnit; ++s) {
+                SlotInfo slot;
+                slot.slot_index = s;
+                slot.global_index = multiace::bay_global(u.idx, s);
+                const auto bay = std::find_if(u.bays.begin(), u.bays.end(),
+                                              [s](const multiace::Bay& b) { return b.index == s; });
+                if (bay != u.bays.end()) {
+                    slot.status = bay->status;
+                    slot.material = bay->material;
+                    slot.brand = bay->brand;
+                    if (bay->color) {
+                        slot.color_rgb = *bay->color;
+                    }
+                }
+                const auto head = multiace::head_for_bay(mode_, u.idx, s, head_ace_, feed);
+                if (head) {
+                    slot.mapped_tool = *head;
+                    slot.extruder_name = helix::extruder_name_for_tool(*head);
+                    if (routed_bay_locked(*head) == std::make_pair(u.idx, s)) {
+                        slot.status = SlotStatus::LOADED;
+                    }
+                }
+
+                // The engine's bay table is also the bay's identity signal,
+                // the role a head's RFID reading plays: a change runs the
+                // shared insert rule and a different-spool verdict clears the
+                // bay's user edit, the same hardware-event clear a head with
+                // a tag has. A bay entry stating no identity (an empty bay)
+                // and an absent entry are both no signal: they state nothing
+                // about a DIFFERENT spool, so the baseline waits for one.
+                // Must run before the ingest below so the clear sees the
+                // engine's own reading, not the lane's resolved view.
+                helix::ams::SpoolEvidence bay_evidence;
+                if (bay != u.bays.end()) {
+                    bay_evidence.tag_uid = bay->uid;
+                    bay_evidence.material = bay->material;
+                    bay_evidence.color_rgb = bay->color;
+                    bay_evidence.tag_read_complete =
+                        !bay->uid.empty() || !bay->material.empty() || bay->color.has_value();
+                }
+                check_hardware_event_clear(slot, slot.global_index, bay_evidence);
+
+                // The engine's own table is the bay's machine reading, the role
+                // a head's RFID tag plays: filed whole (an absent bay entry
+                // states nothing, retracting what an earlier frame said), then
+                // outranked by the lane's resolution, where a user's edit - and,
+                // after a restart, its stored record - declares what the bay
+                // holds. Temps no engine frame carries come from the stored
+                // record alone.
+                helix::ams::Observation engine(helix::ams::ObservationSource::VendorCache);
+                if (bay != u.bays.end()) {
+                    if (!bay->material.empty()) {
+                        engine.material = bay->material;
+                    }
+                    if (!bay->brand.empty()) {
+                        engine.brand = bay->brand;
+                    }
+                    engine.color_rgb = bay->color;
+                }
+                helix::ams::ingest(lane_id(slot.global_index), engine);
+                apply_resolved_lane(slot, slot.global_index);
+                if (const auto ovr = overrides_.find(slot.global_index); ovr != overrides_.end()) {
+                    const ams::ResolvedTemps temps = ams::resolved_temps(ovr->second);
+                    if (temps.nozzle_temp > 0) {
+                        slot.nozzle_temp_min = temps.nozzle_temp;
+                        slot.nozzle_temp_max = temps.nozzle_temp;
+                    }
+                    if (temps.bed_temp > 0) {
+                        slot.bed_temp = temps.bed_temp;
+                    }
+                }
+                unit.slots.push_back(std::move(slot));
+            }
+            total = std::max(total, unit.first_slot_global_index + unit.slot_count);
+            system_info_.units.push_back(std::move(unit));
+        }
+    }
+    system_info_.total_slots = total;
+}
+
+// ============================================================================
+// Base hooks
+// ============================================================================
+
+bool AmsBackendMultiAce::head_is_upstream_fed_locked(int head) const {
+    return ace_fed_locked(head);
+}
+
+bool AmsBackendMultiAce::resume_may_refeed_locked(int head) const {
+    // The engine owns the feed state machine for every head while its contract
+    // is in force, and loads through ACE_LOAD_HEAD; AUTO_FEEDING is the stock
+    // firmware's load, which the engine is not known to honour mid-print.
+    (void)head;
+    return !active_locked();
+}
+
+bool AmsBackendMultiAce::preload_finish_ends_unload_locked(int head) const {
+    // multiACE's FEED_AUTO unload leaves an ACE head's channel at
+    // preload_finish: the filament is back in the ACE, not at the head's port.
+    return ace_fed_locked(head);
+}
+
+// ============================================================================
+// Slot identity
+// ============================================================================
+
+AmsError AmsBackendMultiAce::apply_user_edit(int slot_index, const SlotInfo& info,
+                                             const helix::ams::Observation& declared) {
+    if (!multiace::bay_of(slot_index)) {
+        return AmsBackendSnapmaker::apply_user_edit(slot_index, info, declared);
+    }
+    if (auto err = validate_slot_index(slot_index); err.result != AmsResult::SUCCESS) {
+        return err;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        SlotInfo* slot = system_info_.get_slot_global(slot_index);
+        if (!slot) {
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
+        }
+        slot->assign_filament_fields(info);
+        // The staged record survives the restart; the lane's declaration, filed
+        // by commit_user_edit() once this returns, is what rebuild_units_locked
+        // lays back over every engine frame.
+        helix::ams::stage_user_override(overrides_, slot_index, info, declared);
+    }
+
+    if (override_store_) {
+        helix::ams::persist_staged_override(override_store_.get(), mutex_, overrides_, slot_index,
+                                            backend_log_tag(), "Override");
+    }
+
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
+    return AmsErrorHelper::success();
+}
+
+AmsError AmsBackendMultiAce::sync_external_identity(int slot_index, const SlotInfo& info) {
+    if (!multiace::bay_of(slot_index)) {
+        return AmsBackendSnapmaker::sync_external_identity(slot_index, info);
+    }
+    if (auto err = validate_slot_index(slot_index); err.result != AmsResult::SUCCESS) {
+        return err;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        SlotInfo* slot = system_info_.get_slot_global(slot_index);
+        if (!slot) {
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
+                                                system_info_.total_slots - 1);
+        }
+        // overrides_ is left alone and nothing reaches the engine: the next
+        // frame restates its own table, which outranks a synced value.
+        slot->assign_filament_fields(info);
+    }
+
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
+    return AmsErrorHelper::success();
+}
+
+void AmsBackendMultiAce::clear_slot_override(int slot_index) {
+    if (!multiace::bay_of(slot_index)) {
+        AmsBackendSnapmaker::clear_slot_override(slot_index);
+        return;
+    }
+    if (auto err = validate_slot_index(slot_index); !err.success()) {
+        spdlog::warn("{} clear_slot_override: invalid slot {}", backend_log_tag(), slot_index);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        SlotInfo* slot = system_info_.get_slot_global(slot_index);
+        if (!slot) {
+            spdlog::warn("{} clear_slot_override: no slot entry for index {}", backend_log_tag(),
+                         slot_index);
+            return;
+        }
+        spdlog::info("{} Slot {} override cleared by user request", backend_log_tag(), slot_index);
+        clear_override_locked(slot_index, slot);
+    }
+
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 }
 
 // ============================================================================
@@ -111,1365 +436,710 @@ AmsBackendMultiAce::AmsBackendMultiAce(IMoonrakerAPI* api, helix::IMoonrakerClie
 
 PathTopology AmsBackendMultiAce::get_unit_topology(int unit_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (unit_index < 0 || unit_index >= static_cast<int>(system_info_.units.size())) {
-        return PathTopology::PARALLEL; // the U1 itself, and the safe default
+    if (unit_index >= 0 && unit_index < static_cast<int>(system_info_.units.size())) {
+        return system_info_.units[static_cast<size_t>(unit_index)].topology;
     }
-    return system_info_.units[unit_index].topology;
+    return get_topology();
 }
 
-std::optional<int> AmsBackendMultiAce::slot_identity_owner_unit(int slot_index) const {
+PathSegment AmsBackendMultiAce::get_slot_filament_segment(int slot_index) const {
+    int routed_head = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot_index < kHeads) {
+            routed_head = slot_index;
+        } else {
+            const SlotInfo* slot = system_info_.get_slot_global(slot_index);
+            const auto head = head_for_global_locked(slot_index);
+            if (!slot) {
+                return PathSegment::NONE;
+            }
+            if (head && routed_bay_locked(*head) == multiace::bay_of(slot_index)) {
+                routed_head = *head;
+            } else {
+                // Filament an ACE holds back sits at its gate.
+                return slot->is_present() ? PathSegment::PREP : PathSegment::NONE;
+            }
+        }
+    }
+    return AmsBackendSnapmaker::get_slot_filament_segment(routed_head);
+}
+
+std::optional<int> AmsBackendMultiAce::head_for_slot(int slot) const {
+    if (slot >= 0 && slot < kHeads) {
+        return slot;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    // Only the U1's own heads (unit 0) can be fed from elsewhere. An ACE bay is
-    // the source, so it always describes itself.
-    if (slot_index < 0 || slot_index >= NUM_TOOLS) {
+    return head_for_global_locked(slot);
+}
+
+std::optional<int> AmsBackendMultiAce::head_source_slot(int head, const AmsSystemInfo&) const {
+    if (head < 0 || head >= kHeads) {
         return std::nullopt;
     }
-    if (head_kind_[slot_index] != HeadSource::ACE) {
-        return std::nullopt;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ace_fed_locked(head)) {
+        return head;
     }
-    // Wiring, not contents: an ACE-fed head is the ACE's to describe whether or
-    // not filament happens to be in it. Requiring head_seated_ here made the head
-    // flip back to a SnapSwap spool position on every unload — the unit count
-    // went 3 -> 4 and the ACE's bays renumbered under the user.
-    if (head_ace_index_[slot_index] >= 0) {
-        return head_ace_index_[slot_index] + 1; // unit 0 is the U1 itself
+    std::vector<int> bays;
+    for (int global = kHeads; global < system_info_.total_slots; ++global) {
+        if (head_for_global_locked(global) == head) {
+            bays.push_back(global);
+        }
     }
-    // No head_ace yet (older firmware, or before the first full frame): fall
-    // back to whatever is seated, which is the only other thing that knows.
-    if (head_seated_[slot_index]) {
-        return head_seated_[slot_index]->unit_index;
+    if (bays.size() == 1) {
+        return bays.front();
+    }
+    if (const auto routed = routed_bay_locked(head)) {
+        const int global = multiace::bay_global(routed->first, routed->second);
+        if (std::find(bays.begin(), bays.end(), global) != bays.end()) {
+            return global;
+        }
     }
     return std::nullopt;
 }
 
-std::optional<int> AmsBackendMultiAce::slot_identity_owner_slot(int slot_index) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    // Same gate as slot_identity_owner_unit: only a seated ACE-fed head views a
-    // spool it does not hold.
-    if (slot_index < 0 || slot_index >= NUM_TOOLS) {
-        return std::nullopt;
+bool AmsBackendMultiAce::needs_unload_before_load(const AmsSystemInfo& info,
+                                                  int target_slot) const {
+    if (multiace::bay_of(target_slot)) {
+        return false;
     }
-    if (head_kind_[slot_index] != HeadSource::ACE || !head_seated_[slot_index]) {
-        return std::nullopt;
-    }
-    const auto& seated = *head_seated_[slot_index];
-    // system_info_ is the authority on where a unit's slots start; deriving it
-    // as NUM_TOOLS + ace_index * ACE_SLOTS_PER_UNIT would silently drift if the
-    // unit list is ever built differently.
-    if (seated.unit_index < 0 || seated.unit_index >= static_cast<int>(system_info_.units.size())) {
-        return std::nullopt;
-    }
-    return system_info_.units[static_cast<size_t>(seated.unit_index)].first_slot_global_index +
-           seated.slot;
+    return AmsBackendSnapmaker::needs_unload_before_load(info, target_slot);
 }
 
-int AmsBackendMultiAce::head_fed_by_ace_locked(int ace_index) const {
-    for (int h = 0; h < NUM_TOOLS; ++h) {
-        if (head_kind_[h] == HeadSource::ACE && head_ace_index_[h] == ace_index) {
-            return h;
+AmsBackend::FilamentOpEligibility AmsBackendMultiAce::slot_op_eligibility(int slot_index,
+                                                                          bool load) const {
+    if (load) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot_index >= 0 && slot_index < kHeads && active_locked() &&
+            ace_fed_locked(slot_index)) {
+            return FilamentOpEligibility::NotSupported;
         }
     }
-    return -1;
+    return AmsBackendSnapmaker::slot_op_eligibility(slot_index, load);
 }
 
-int AmsBackendMultiAce::bay_feeds_head_locked(int ace_index, int bay) const {
-    if (ace_index < 0 || ace_index >= MAX_ACE_UNITS || bay < 0 || bay >= ACE_SLOTS_PER_UNIT) {
-        return -1;
-    }
-    if (!head_mode_) {
-        // Multi mode: bay s feeds head s. Nothing to look up -- multiACE's own
-        // web UI sends `ACE_LOAD_HEAD HEAD=<slot> ACE=<ace>` here, and the
-        // firmware's multi-mode branch defaults SLOT to HEAD for the same reason.
-        return bay < NUM_TOOLS ? bay : -1;
-    }
-    // Head mode: the one head this ACE is bound to. From head_ace -- NOT from
-    // head_seated_, which empties on every unload and took the bays' tool badges
-    // and the unit's path with it. Seating is only the fallback for firmware
-    // that has not sent the wiring map yet; it is the only other thing that
-    // knows which head the ACE reaches.
-    const int wired = head_fed_by_ace_locked(ace_index);
-    if (wired >= 0) {
-        return wired;
-    }
-    for (int h = 0; h < NUM_TOOLS; ++h) {
-        if (head_seated_[h] && head_seated_[h]->ace_index == ace_index) {
-            return h;
-        }
-    }
-    return -1;
-}
-
-AmsBackendMultiAce::HeadSource AmsBackendMultiAce::head_source_kind(int head) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (head < 0 || head >= NUM_TOOLS) {
-        return HeadSource::UNKNOWN;
-    }
-    return head_kind_[head];
-}
-
-std::optional<AmsBackendMultiAce::SeatedSource> AmsBackendMultiAce::seated_source(int head) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (head < 0 || head >= NUM_TOOLS) {
+std::optional<int> AmsBackendMultiAce::upstream_slot(int slot_index) const {
+    if (slot_index < 0 || slot_index >= kHeads) {
         return std::nullopt;
     }
-    return head_seated_[head];
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ace_fed_locked(slot_index)) {
+        return std::nullopt;
+    }
+    const auto bay = routed_bay_locked(slot_index);
+    if (!bay) {
+        return std::nullopt;
+    }
+    return multiace::bay_global(bay->first, bay->second);
+}
+
+int AmsBackendMultiAce::spool_display_number(int slot_index) const {
+    if (slot_index < 0) {
+        return slot_index + 1;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    // A routed head aliases its bay; every other lane (bays, unrouted heads)
+    // numbers in global order, so the numbers on spool-owning lanes run 1..N.
+    // Only indices a unit actually covers count: a gap the engine left in the
+    // ace numbering is not a spool, so the numbers stay consecutive.
+    const auto aliased = [this](int head) {
+        return head < kHeads && ace_fed_locked(head) && routed_bay_locked(head).has_value();
+    };
+    int target = slot_index;
+    if (aliased(slot_index)) {
+        const auto bay = *routed_bay_locked(slot_index);
+        target = multiace::bay_global(bay.first, bay.second);
+    }
+    int n = 0;
+    for (int gi = 0; gi < system_info_.total_slots; ++gi) {
+        if (!aliased(gi) && system_info_.get_slot_global(gi)) {
+            ++n;
+        }
+        if (gi == target) {
+            break;
+        }
+    }
+    return n;
+}
+
+bool AmsBackendMultiAce::can_unload_from_toolhead(int slot_index) const {
+    int head = slot_index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot_index >= kHeads) {
+            const auto h = head_for_global_locked(slot_index);
+            if (!h || routed_bay_locked(*h) != multiace::bay_of(slot_index)) {
+                return false;
+            }
+            head = *h;
+        }
+    }
+    return AmsBackendSnapmaker::can_unload_from_toolhead(head);
+}
+
+bool AmsBackendMultiAce::slot_has_filament_at_toolhead(int slot_index) const {
+    int head = slot_index;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot_index >= kHeads) {
+            const auto h = head_for_global_locked(slot_index);
+            if (!h || routed_bay_locked(*h) != multiace::bay_of(slot_index)) {
+                return false;
+            }
+            head = *h;
+        }
+    }
+    return AmsBackendSnapmaker::slot_has_filament_at_toolhead(head);
+}
+
+bool AmsBackendMultiAce::slot_is_actively_loaded(int slot_index) const {
+    if (slot_index < kHeads) {
+        return AmsBackendSnapmaker::slot_is_actively_loaded(slot_index);
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const SlotInfo* slot = system_info_.get_slot_global(slot_index);
+    return slot && slot->status == SlotStatus::LOADED;
 }
 
 // ============================================================================
-// Status parsing
+// Filament operations
 // ============================================================================
+
+std::optional<AmsError> AmsBackendMultiAce::head_load_refusal(int head, bool ace_head) const {
+    if (AmsBackendSnapmaker::slot_has_filament_at_toolhead(head)) {
+        return AmsErrorHelper::slot_ineligible(
+            lane_noun(), head,
+            filament_op_eligibility_reason(FilamentOpEligibility::AlreadyLoaded));
+    }
+    if (ace_head) {
+        return std::nullopt;
+    }
+    // A feeder or manual head: the engine loads it through the side feeder,
+    // under the same feeder preconditions the U1 checks.
+    switch (const auto e = slot_op_eligibility(head, /*load=*/true)) {
+    case FilamentOpEligibility::AlreadyLoaded:
+    case FilamentOpEligibility::FeederUnavailable:
+    case FilamentOpEligibility::SensorDisabled:
+        return AmsErrorHelper::slot_ineligible(lane_noun(), head,
+                                               filament_op_eligibility_reason(e));
+    default:
+        return std::nullopt;
+    }
+}
+
+AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
+    int head = -1;
+    bool engine = false;
+    bool ace_head = false;
+    std::optional<std::pair<int, int>> bay;
+    std::optional<std::pair<int, int>> recorded;
+    bool head_has_source = false;
+    bool bay_empty = false;
+    multiace::Mode mode = multiace::Mode::UNKNOWN;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        engine = active_locked();
+        mode = mode_;
+        if (slot_index >= 0 && slot_index < kHeads) {
+            head = engine ? slot_index : -1;
+        } else if (const auto h = head_for_global_locked(slot_index)) {
+            head = *h;
+            bay = multiace::bay_of(slot_index);
+            const SlotInfo* slot = system_info_.get_slot_global(slot_index);
+            bay_empty = !slot || slot->status == SlotStatus::EMPTY;
+        } else if (multiace::bay_of(slot_index)) {
+            return AmsErrorHelper::not_supported("Loading an ACE bay no toolhead is wired to");
+        }
+        if (head >= 0) {
+            ace_head = ace_fed_locked(head);
+            const auto& src = head_source_[static_cast<size_t>(head)];
+            head_has_source = src.has_value();
+            if (src && src->ace >= 0 && src->slot >= 0) {
+                recorded = std::make_pair(src->ace, src->slot);
+            }
+        }
+    }
+
+    if (head < 0) {
+        // No engine contract, or no slot at all: the U1's own path, which
+        // validates the index.
+        return AmsBackendSnapmaker::do_load_filament(slot_index);
+    }
+
+    const bool head_loaded = AmsBackendSnapmaker::slot_has_filament_at_toolhead(head);
+    const auto already_loaded = [&] {
+        return AmsErrorHelper::slot_ineligible(
+            lane_noun(), slot_index,
+            filament_op_eligibility_reason(FilamentOpEligibility::AlreadyLoaded));
+    };
+
+    if (!bay) {
+        if (auto refusal = head_load_refusal(head, ace_head)) {
+            return *refusal;
+        }
+        if (!ace_head) {
+            AmsError err =
+                dispatch_feed(multiace::load_gcode(head, std::nullopt), kEventLoadComplete, head);
+            if (err.success()) {
+                cancel_pending_load("a new load");
+            }
+            return err;
+        }
+        if (mode == multiace::Mode::MULTI) {
+            // Multi mode defaults a bare load to the globally active unit, not
+            // to anything this head was fed from, so the bay is always named.
+            if (!recorded) {
+                return AmsError(AmsResult::WRONG_STATE,
+                                "multi mode: head " + std::to_string(head) +
+                                    " has no recorded bay to load from",
+                                lv_tr("Select a filament slot to load"), "", slot_index);
+            }
+            AmsError err =
+                dispatch_feed(multiace::load_gcode(head, recorded), kEventLoadComplete, head);
+            if (err.success()) {
+                cancel_pending_load("a new load");
+            }
+            return err;
+        }
+        // Head mode defaults to the wired unit and the head's last bay.
+        AmsError err =
+            dispatch_feed(multiace::load_gcode(head, std::nullopt), kEventLoadComplete, head);
+        if (err.success()) {
+            cancel_pending_load("a new load");
+        }
+        return err;
+    }
+
+    // The engine swaps bays mid-print itself, as the sliced file asks; a bay
+    // change from the screen while a print holds the heads is refused.
+    if (auto err = refuse_if_printing(/*paused_blocks=*/true); !err.success()) {
+        return err;
+    }
+    if (bay_empty) {
+        return AmsErrorHelper::slot_not_available(lane_noun(), slot_index);
+    }
+    if (head_loaded && recorded == bay) {
+        return already_loaded();
+    }
+    if (head_loaded && !head_has_source) {
+        // Filament at the head that the engine has no record of: no bay of
+        // its own to return it to, so a swap would feed a second strand.
+        return AmsError(AmsResult::WRONG_STATE,
+                        "head " + std::to_string(head) +
+                            " is loaded with no recorded source; refusing a bay swap",
+                        AmsErrorHelper::position_label(tool_noun(), head) + ": " +
+                            lv_tr("Unload from toolhead first"),
+                        "", slot_index);
+    }
+    if (!head_loaded && !head_has_source) {
+        AmsError err = dispatch_feed(multiace::load_gcode(head, bay), kEventLoadComplete, head);
+        if (err.success()) {
+            cancel_pending_load("a new load");
+        }
+        return err;
+    }
+
+    // ACE_LOAD_HEAD answers OK and feeds nothing into a head that still holds
+    // filament, so the unload goes alone and the load waits for a frame that
+    // shows the head empty (advance_pending_load()).
+    uint64_t id = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        id = next_pending_id_++;
+        PendingBayLoad pending;
+        pending.head = head;
+        pending.bay = *bay;
+        pending.id = id;
+        pending_load_ = pending;
+    }
+    const auto answered = [this, id] {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pending_load_ && pending_load_->id == id) {
+            pending_load_->unload_answered = true;
+            pending_load_->unload_answered_at = std::chrono::steady_clock::now();
+        }
+    };
+    auto err = dispatch_feed(multiace::unload_gcode(head), answered,
+                             [this, id, answered](const MoonrakerError& e) {
+                                 if (e.type == MoonrakerErrorType::TIMEOUT) {
+                                     // The unload may still be running; the frames decide.
+                                     answered();
+                                     return;
+                                 }
+                                 {
+                                     std::lock_guard<std::mutex> lock(mutex_);
+                                     if (pending_load_ && pending_load_->id == id) {
+                                         pending_load_.reset();
+                                     }
+                                 }
+                                 emit_event(kEventError, e.message);
+                             });
+    if (!err.success()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pending_load_ && pending_load_->id == id) {
+            pending_load_.reset();
+        }
+    }
+    return err;
+}
 
 void AmsBackendMultiAce::handle_status(const nlohmann::json& status) {
-    // The U1 half is unchanged and must run first: it owns unit 0, the load
-    // latch, the sensors and the tool election.
     AmsBackendSnapmaker::handle_status(status);
-
-    bool changed = false;
-    bool want_overrides = false;
+    std::vector<std::string> load_failed;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (status.contains("ace") && status["ace"].is_object()) {
-            parse_ace_object_locked(status["ace"], changed);
-            // Read, NOT cleared: only the fetch that actually goes out consumes
-            // the flag (see the member comment).
-            want_overrides = override_refetch_wanted_;
-        }
-        // EVERY frame, not just the ones carrying `ace`: the swap latch follows
-        // the U1's channel_state, which arrives in `filament_feed` frames that
-        // have no `ace` object at all.
-        apply_swap_phase_locked();
+        load_failed.swap(pending_load_failed_errors_);
     }
-    // Outside the lock on purpose: fetch_slot_overrides() takes mutex_ itself.
-    if (want_overrides) {
-        fetch_slot_overrides();
+    for (const std::string& message : load_failed) {
+        emit_event(kEventError, message);
     }
-    if (changed) {
-        emit_event(EVENT_STATE_CHANGED);
+    advance_pending_load();
+}
+
+void AmsBackendMultiAce::on_klipper_restarted() {
+    cancel_pending_load("Klipper restarted");
+    AmsBackendSnapmaker::on_klipper_restarted();
+}
+
+void AmsBackendMultiAce::cancel_pending_load(const char* why) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (pending_load_) {
+        spdlog::info("{} Dropping the load of ACE {} bay {} into head {}: {}", backend_log_tag(),
+                     pending_load_->bay.first + 1, pending_load_->bay.second + 1,
+                     pending_load_->head + 1, why);
+        pending_load_.reset();
     }
 }
 
-void AmsBackendMultiAce::parse_ace_object_locked(const nlohmann::json& ace, bool& changed) {
-    if (ace.contains("mode") && ace["mode"].is_string()) {
-        const bool head_mode = ace["mode"].get<std::string>() == "head";
-        if (head_mode != head_mode_) {
-            head_mode_ = head_mode;
-            changed = true;
-        }
-    }
-    if (ace.contains("device_count") && ace["device_count"].is_number_integer()) {
-        const int n = std::clamp(ace["device_count"].get<int>(), 0, MAX_ACE_UNITS);
-        if (n != device_count_) {
-            device_count_ = n;
-            changed = true;
-        }
-    }
-
-    // multiACE's own swap telemetry. Cached for corroboration and for the log,
-    // NOT branched on: `swap_phase` is a string whose enumeration is unknown --
-    // every capture taken so far is "idle" -- and it is not established whether
-    // `swap_in_progress` tracks ACE_LOAD_HEAD/ACE_UNLOAD_HEAD or only the
-    // single-command ACE_SWAP_HEAD this backend does not use. The ACE-side step
-    // is therefore derived from the U1's own channel_state (see
-    // apply_swap_phase_locked), which is understood, and these only enrich it.
-    // Deliberately does NOT set `changed`: telemetry moving on its own must not
-    // force a UI resync (the same reason AceUnitState has whole-state equality).
-    if (ace.contains("swap_in_progress") && ace["swap_in_progress"].is_boolean()) {
-        ace_swap_in_progress_ = ace["swap_in_progress"].get<bool>();
-    }
-    ace_swap_phase_ = helix::json_util::safe_string(ace, "swap_phase", ace_swap_phase_);
-    ace_status_ = helix::json_util::safe_string(ace, "status", ace_status_);
-
-    // `last_swap_result` is an OBJECT, not a string:
-    //   {"head":3, "ace":0, "slot":1, "status":"ok", "ts":6163.707908022}
-    // (null before the first swap of a session). Read off a live U1 -- it was
-    // written as a string first, and `is_string()` meant the whole branch was
-    // simply dead on hardware rather than wrong, which is the harder kind to
-    // notice.
-    //
-    // It is the LAST result and it PERSISTS, so the value alone says nothing
-    // about now: surfacing a non-ok status on sight would pop an error for a
-    // swap that failed before the UI even started. `ts` is what makes it an
-    // event -- record it on the first frame, and only a CHANGE is news.
-    const auto& lsr = ace.contains("last_swap_result") ? ace["last_swap_result"] : nlohmann::json();
-    if (lsr.is_object()) {
-        const double ts = helix::json_util::safe_double(lsr, "ts", 0.0);
-        const auto status = helix::json_util::safe_string(lsr, "status", "ok");
-        const bool first_seen = last_swap_ts_ < 0.0;
-        if (ts != last_swap_ts_) {
-            last_swap_ts_ = ts;
-            const bool failed = !status.empty() && status != "ok" && status != "success";
-            if (failed && !first_seen) {
-                const int head = helix::json_util::safe_int(lsr, "head", -1);
-                spdlog::warn("{} swap on head {} reported '{}'", backend_log_tag(), head, status);
-                system_info_.action = AmsAction::ERROR;
-                system_info_.operation_detail = status;
-                swap_in_flight_head_ = -1;
-                swap_progress_seen_ = false;
-                swap_load_half_started_ = false;
-                changed = true;
-            } else if (failed) {
-                spdlog::debug("{} last_swap_result='{}' predates this session — not surfacing",
-                              backend_log_tag(), status);
-            }
-        }
-    }
-
-    // Per-head source kind. Order matters and is not arbitrary: `head_ace`
-    // carries an ACE index for EVERY head (on the live U1 it reads
-    // {0:0,1:1,2:2,3:0} while only head 3 is ACE-fed), so it cannot be used to
-    // decide *whether* a head is ACE-fed. head_feeder/head_manual are the
-    // authority; ACE is what is left over.
-    //
-    // Each map is its own DELTA. Klippy diffs `ace` per field, and the two maps
-    // are separate fields, so a frame can carry one without the other -- an
-    // ACE<->MANUAL toggle resends `head_manual` while `head_feeder`, unchanged,
-    // is omitted. Deciding from the frame's own maps read the absent one as
-    // all-false and relabelled the stock-feeder heads ACE-fed, which is the
-    // wrong command path for them and made a native unload end at
-    // preload_finish. So: merge whichever maps this frame carries into the
-    // cached per-head values, then decide from the cache. A frame that carries
-    // neither map leaves the kinds alone (a partial update used to re-run the
-    // decision against two empty maps, with the same relabelling).
-    const bool have_manual = ace.contains("head_manual") && ace["head_manual"].is_object();
-    const bool have_feeder = ace.contains("head_feeder") && ace["head_feeder"].is_object();
-    const bool have_maps = have_manual || have_feeder;
-    if (have_manual) {
-        for (int h = 0; h < NUM_TOOLS; ++h) {
-            head_manual_[h] = head_keyed<bool>(ace["head_manual"], h).value_or(false);
-        }
-    }
-    if (have_feeder) {
-        for (int h = 0; h < NUM_TOOLS; ++h) {
-            head_feeder_[h] = head_keyed<bool>(ace["head_feeder"], h).value_or(false);
-        }
-    }
-
-    // ...but once head_feeder/head_manual have decided WHETHER, `head_ace` is the
-    // authority on WHICH ACE feeds the head, and it is the only one that survives
-    // an EMPTY head: head_source goes null the moment the filament leaves, while
-    // the wiring does not change. Binding on head_source alone made an ACE-fed
-    // head revert to a SnapSwap spool position whenever it was unloaded.
-    const auto& head_ace = ace.contains("head_ace") ? ace["head_ace"] : nlohmann::json::object();
-
-    // Status frames are DELTAS. A frame that says nothing about head sources must
-    // leave them alone -- treating "absent" as "cleared" wiped the seating on
-    // every partial `ace` update, which on hardware meant the ACE's bays lost
-    // their mapped_tool a second after gaining it: no tool badges, and the unit
-    // detail fell back to hub-only because it no longer knew which head it fed.
-    const bool have_source_map = ace.contains("head_source") && ace["head_source"].is_object();
-
-    for (int h = 0; h < NUM_TOOLS; ++h) {
-        if (have_maps) {
-            HeadSource kind;
-            if (head_manual_[h].value_or(false)) {
-                kind = HeadSource::MANUAL;
-            } else if (head_feeder_[h].value_or(false)) {
-                kind = HeadSource::FEEDER;
-            } else {
-                kind = HeadSource::ACE;
-            }
-            if (kind != head_kind_[h]) {
-                head_kind_[h] = kind;
-                changed = true;
-            }
-        }
-
-        // Delta-safe: only touched when this frame carries the key.
-        if (auto a = head_keyed<int>(head_ace, h)) {
-            const int idx = (*a >= 0 && *a < MAX_ACE_UNITS) ? *a : -1;
-            if (idx != head_ace_index_[h]) {
-                head_ace_index_[h] = idx;
-                changed = true;
-            }
-        }
-
-        if (!have_source_map) {
-            continue; // nothing said about seating this frame
-        }
-        std::optional<SeatedSource> seated;
-        auto it = ace["head_source"].find(std::to_string(h));
-        if (it != ace["head_source"].end() && it->is_object()) {
-            const int ai = helix::json_util::safe_int(*it, "ace_index", -1);
-            const int sl = helix::json_util::safe_int(*it, "slot", -1);
-            if (ai >= 0 && ai < MAX_ACE_UNITS && sl >= 0) {
-                seated = SeatedSource{/*unit_index=*/ai + 1, ai, sl};
-            }
-        }
-        if (seated.has_value() != head_seated_[h].has_value() ||
-            (seated && head_seated_[h] &&
-             (seated->ace_index != head_seated_[h]->ace_index ||
-              seated->slot != head_seated_[h]->slot))) {
-            head_seated_[h] = seated;
-            changed = true;
-        }
-    }
-
-    // Per-unit inventory.
-    if (ace.contains("aces") && ace["aces"].is_array()) {
-        for (const auto& unit : ace["aces"]) {
-            if (!unit.is_object()) {
-                continue;
-            }
-            const int idx = helix::json_util::safe_int(unit, "idx", -1);
-            if (idx < 0 || idx >= MAX_ACE_UNITS) {
-                continue;
-            }
-            auto& st = ace_units_[idx];
-            // Compared at the end of the loop body. Klippy resends the whole
-            // `aces` array whenever ONE element's field ticks, so "an entry was
-            // present" is not "an entry changed" -- marking every entry changed
-            // unconditionally forced a full AmsState resync and UI rebuild per
-            // frame for the length of every dry cycle's temperature ramp.
-            const AceUnitState before = st;
-            st.connected = helix::json_util::safe_bool(unit, "connected", st.connected);
-            st.protocol = helix::json_util::safe_string(unit, "protocol", st.protocol);
-            st.temp = helix::json_util::safe_int(unit, "temp", st.temp);
-            st.humidity = helix::json_util::safe_int(unit, "humidity", st.humidity);
-
-            if (unit.contains("dryer_status") && unit["dryer_status"].is_object()) {
-                const auto& ds = unit["dryer_status"];
-                // "stop" is the idle value; anything else is a running programme.
-                const auto status = helix::json_util::safe_string(ds, "status", "stop");
-                st.drying = (status != "stop" && !status.empty());
-                st.dryer_target_c = helix::json_util::safe_int(ds, "target_temp", 0);
-                st.dryer_duration_min = helix::json_util::safe_int(ds, "duration", 0);
-                st.dryer_remaining_min = helix::json_util::safe_int(ds, "remain_time", 0);
-            }
-
-            // Frames are DELTAS, so every field keeps its previous value when the
-            // frame does not mention it. `auto_dry_running` is its own key next to
-            // the block, not inside it, and arrives on its own often enough that
-            // defaulting it to false here would flicker the rule off between frames.
-            if (unit.contains("auto_dry") && unit["auto_dry"].is_object()) {
-                const auto& ad = unit["auto_dry"];
-                st.has_auto_dry = true;
-                st.auto_dry_enabled =
-                    helix::json_util::safe_bool(ad, "enabled", st.auto_dry_enabled);
-                st.auto_dry_rh_start =
-                    helix::json_util::safe_float(ad, "rh_start", st.auto_dry_rh_start);
-                st.auto_dry_rh_end = helix::json_util::safe_float(ad, "rh_end", st.auto_dry_rh_end);
-                st.auto_dry_temp_c = helix::json_util::safe_int(ad, "temp", st.auto_dry_temp_c);
-                st.auto_dry_master = helix::json_util::safe_int(ad, "master", st.auto_dry_master);
-                st.auto_dry_add_time_min =
-                    helix::json_util::safe_int(ad, "add_time", st.auto_dry_add_time_min);
-            }
-            if (unit.contains("auto_dry_running")) {
-                st.auto_dry_running =
-                    helix::json_util::safe_bool(unit, "auto_dry_running", st.auto_dry_running);
-            }
-
-            if (unit.contains("gate_status") && unit["gate_status"].is_array()) {
-                const auto& gs = unit["gate_status"];
-                for (int s = 0; s < ACE_SLOTS_PER_UNIT && s < static_cast<int>(gs.size()); ++s) {
-                    st.gate_present[s] = gs[s].is_number_integer() && gs[s].get<int>() != 0;
-                }
-            }
-            if (unit.contains("slots") && unit["slots"].is_array()) {
-                const auto& slots = unit["slots"];
-                for (int s = 0; s < ACE_SLOTS_PER_UNIT && s < static_cast<int>(slots.size()); ++s) {
-                    if (!slots[s].is_object()) {
-                        continue;
-                    }
-                    st.material[s] = helix::json_util::safe_string(slots[s], "material", "");
-                    if (slots[s].contains("color")) {
-                        st.color_rgb[s] = color_array_to_rgb(slots[s]["color"]);
-                    }
-                }
-            }
-            if (st != before) {
-                changed = true;
-            }
-        }
-    }
-
-    // slot_overrides.json lives on disk, not in this object, so nothing here can
-    // say it changed. `event_seq` is multiACE's own bump-on-any-state-change
-    // counter, which is the closest thing to a signal — and the first frame
-    // (seq -1) is what fetches it at all.
-    if (ace.contains("event_seq") && ace["event_seq"].is_number_integer()) {
-        const int64_t seq = ace["event_seq"].get<int64_t>();
-        if (seq != overrides_fetched_seq_) {
-            overrides_fetched_seq_ = seq;
-            override_refetch_wanted_ = true;
-        }
-    } else if (overrides_fetched_seq_ < 0) {
-        overrides_fetched_seq_ = 0; // firmware without event_seq: fetch once
-        override_refetch_wanted_ = true;
-    }
-
-    parse_spool_table_locked(ace, changed);
-    // Only when something moved. Every input the rebuild reads sets `changed`
-    // when it changes (mode, count, head kinds/wiring/seating, per-unit state
-    // including the spool table -- all compared field-for-field above), and the
-    // one input that lives elsewhere, slot_overrides_, rebuilds from its own
-    // fetch completion. Rebuilding on every `ace` frame re-formatted the unit
-    // names and re-merged three identity layers per bay under mutex_ for
-    // frames that carried nothing this parser reads.
-    if (changed) {
-        rebuild_ace_units_locked();
-    }
-}
-
-AmsBackendMultiAce::OverrideMap
-AmsBackendMultiAce::parse_slot_overrides(const std::string& content) {
-    OverrideMap out{};
-    const nlohmann::json doc = nlohmann::json::parse(content, nullptr, false);
-    if (doc.is_discarded()) {
-        spdlog::warn("[AMS multiACE] slot_overrides.json is not valid JSON");
-        return out;
-    }
-    if (!doc.is_object()) {
-        return out;
-    }
-    for (const auto& [key, v] : doc.items()) {
-        if (!v.is_object()) {
-            continue;
-        }
-        // Keyed "<ace>_<slot>". The entries also repeat the pair as `ace`/`slot`
-        // fields; the key is authoritative.
-        const auto bay = parse_bay_key(key, MAX_ACE_UNITS, ACE_SLOTS_PER_UNIT);
-        if (!bay) {
-            continue;
-        }
-        const int a = bay->first;
-        const int s = bay->second;
-        auto& o = out[static_cast<size_t>(a)][static_cast<size_t>(s)];
-        o.set = true;
-        o.material = helix::json_util::safe_string(v, "material", "");
-        o.brand = helix::json_util::safe_string(v, "brand", "");
-        // "#RRGGBB" here — leading '#', unlike the spool table's bare hex and
-        // unlike slots[].color's [r,g,b] array. Three encodings, one concept.
-        // parse_hex_color tolerates the optional leading '#' and validates the
-        // WHOLE string — std::stoul would accept a valid prefix and silently
-        // turn "12G456" into near-black.
-        if (auto rgb = helix::parse_hex_color(helix::json_util::safe_string(v, "color", ""))) {
-            o.color_rgb = *rgb;
-        }
-    }
-    return out;
-}
-
-void AmsBackendMultiAce::download_slot_overrides(
-    std::function<void(const std::string&)> on_success,
-    std::function<void(const MoonrakerError&)> on_error) {
-    if (!api_) {
-        return;
-    }
-    api_->transfers().download_file("config", "extended/multiace/slot_overrides.json",
-                                    std::move(on_success), std::move(on_error));
-}
-
-void AmsBackendMultiAce::fetch_slot_overrides() {
+void AmsBackendMultiAce::advance_pending_load() {
+    PendingBayLoad pending;
+    std::chrono::milliseconds grace{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (override_fetch_in_flight_) {
-            // One at a time. The want-flag is deliberately LEFT SET: this frame's
-            // event_seq is already recorded as fetched, so no later frame with
-            // the same seq will ask again -- the completion handler below is
-            // what re-issues the fetch. Returning here used to drop the request
-            // on the floor, and the download in flight brought back the file as
-            // it was BEFORE the edit that bumped the seq.
+        if (!pending_load_) {
             return;
         }
-        override_fetch_in_flight_ = true;
-        override_refetch_wanted_ = false; // consumed by the fetch going out
+        pending = *pending_load_;
+        grace = pending_load_grace_;
     }
-
-    auto token = lifetime_.token();
-    download_slot_overrides(
-        [this, token](const std::string& content) {
-            // BG THREAD: parse_slot_overrides is static and touches no member.
-            OverrideMap parsed = parse_slot_overrides(content);
-            token.defer("AmsBackendMultiAce::slot_overrides_apply",
-                        [this, parsed = std::move(parsed)]() mutable {
-                            bool again = false;
-                            {
-                                std::lock_guard<std::mutex> lock(mutex_);
-                                slot_overrides_ = std::move(parsed);
-                                override_fetch_in_flight_ = false;
-                                again = override_refetch_wanted_;
-                                rebuild_ace_units_locked();
-                            }
-                            emit_event(EVENT_STATE_CHANGED);
-                            if (again) {
-                                fetch_slot_overrides(); // a seq moved while this was out
-                            }
-                        });
-        },
-        [this, token](const MoonrakerError& error) {
-            // Absent on an install that has never used the web UI, which is not
-            // an error worth shouting about — the spool table still stands.
-            spdlog::debug("[AMS multiACE] slot_overrides.json unavailable: {}", error.message);
-            token.defer("AmsBackendMultiAce::slot_overrides_failed", [this]() {
-                bool again = false;
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    override_fetch_in_flight_ = false;
-                    again = override_refetch_wanted_;
-                }
-                if (again) {
-                    fetch_slot_overrides();
-                }
-            });
-        });
-}
-
-void AmsBackendMultiAce::parse_spool_table_locked(const nlohmann::json& ace, bool& changed) {
-    // A bay's identity is NOT in `slots[]` — those fields are filled from RFID
-    // and read empty for every hand-entered spool, which is why the panel showed
-    // nothing the user had typed into multiACE's own web UI. It lives in a spool
-    // TABLE, `spools` (keyed by id, as a string), joined to bays through
-    // `spool_binding` with keys of the form "<ace>_<slot>".
-    //
-    // Both keys are deltas like everything else, so a frame that omits them
-    // leaves the table alone. `spool_binding` also has to be handled as a
-    // WHOLESALE replacement when present: unbinding a spool DELETES its key
-    // rather than nulling it, so merging would strand the old binding forever.
-    bool touched = false;
-
-    // The TABLE, keyed by spool id. Cached: a frame that only moves a binding
-    // does not resend it, and resolving the two together threw every detail away
-    // the moment a spool was unbound.
-    if (ace.contains("spools") && ace["spools"].is_object()) {
-        spool_table_.clear();
-        for (const auto& [id, sp] : ace["spools"].items()) {
-            if (!sp.is_object()) {
-                continue;
-            }
-            AceUnitState::BaySpool e;
-            e.bound = true;
-            e.material = helix::json_util::safe_string(sp, "material", "");
-            e.vendor = helix::json_util::safe_string(sp, "vendor", "");
-            e.label = helix::json_util::safe_string(sp, "label", "");
-            e.sku = helix::json_util::safe_string(sp, "sku", "");
-            // spoolman_id is a STRING here, unlike everywhere else it appears.
-            const std::string sm = helix::json_util::safe_string(sp, "spoolman_id", "");
-            e.spoolman_id = helix::text_io::parse_leading<int>(sm).value_or(0);
-            // `weight_g` is deliberately not read: it is multiACE's local copy of
-            // Spoolman's remaining weight, and Spoolman owns both weights here.
-            // Bare hex, no leading '#', unlike slots[].color which is [r,g,b].
-            if (auto rgb = helix::parse_hex_color(helix::json_util::safe_string(sp, "color", ""))) {
-                e.color_rgb = *rgb;
-            }
-            spool_table_[id] = std::move(e);
+    // Takes mutex_ itself, so read before the decision below re-takes it.
+    const bool head_loaded = AmsBackendSnapmaker::slot_has_filament_at_toolhead(pending.head);
+    std::string dropped;
+    bool send = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!pending_load_ || pending_load_->id != pending.id) {
+            return;
         }
-        touched = true;
+        const bool empty =
+            !head_loaded && !head_source_[static_cast<size_t>(pending.head)].has_value();
+        // Expiry is judged before emptiness: a head that empties only after
+        // its window closed was emptied by something other than this unload,
+        // and the user has already been told the load is off.
+        const bool expired = pending.unload_answered &&
+                             std::chrono::steady_clock::now() > pending.unload_answered_at + grace;
+        if (!active_locked()) {
+            dropped = "multiACE stopped driving the ACE units";
+        } else if (expired) {
+            dropped =
+                fmt::format("toolhead {} did not empty in time after its unload", pending.head + 1);
+        } else if (empty) {
+            send = true;
+        } else {
+            return;
+        }
+        pending_load_.reset();
     }
-
-    // The BINDINGS. Replaced WHOLESALE when present: unbinding a spool deletes
-    // its key rather than nulling it, so merging would strand it forever.
-    if (ace.contains("spool_binding") && ace["spool_binding"].is_object()) {
-        for (auto& row : bay_spool_id_) {
-            row.fill(std::string{});
+    if (send) {
+        // A print that took the heads while the unload ran owns them now.
+        if (auto err = refuse_if_printing(/*paused_blocks=*/true); !err.success()) {
+            dropped = "a print holds the toolheads";
         }
-        for (const auto& [key, value] : ace["spool_binding"].items()) {
-            const auto bay = parse_bay_key(key, MAX_ACE_UNITS, ACE_SLOTS_PER_UNIT);
-            if (!bay) {
-                continue;
-            }
-            const int a = bay->first;
-            const int s = bay->second;
-            // The id is a string in both the binding and the table's keys.
-            bay_spool_id_[static_cast<size_t>(a)][static_cast<size_t>(s)] =
-                value.is_string()
-                    ? value.get<std::string>()
-                    : (value.is_number_integer() ? std::to_string(value.get<int>()) : "");
-        }
-        touched = true;
     }
-
-    if (!touched) {
+    if (!dropped.empty()) {
+        spdlog::warn("{} Not loading ACE {} bay {} into head {}: {}", backend_log_tag(),
+                     pending.bay.first + 1, pending.bay.second + 1, pending.head + 1, dropped);
+        emit_event(kEventError,
+                   fmt::format("ACE {} bay {} was not loaded: {}", pending.bay.first + 1,
+                               pending.bay.second + 1, dropped));
         return;
     }
-
-    // Resolve bays from the two caches.
-    std::array<std::array<AceUnitState::BaySpool, ACE_SLOTS_PER_UNIT>, MAX_ACE_UNITS> next{};
-    for (int a = 0; a < MAX_ACE_UNITS; ++a) {
-        for (int s = 0; s < ACE_SLOTS_PER_UNIT; ++s) {
-            const std::string& id = bay_spool_id_[static_cast<size_t>(a)][static_cast<size_t>(s)];
-            if (id.empty()) {
-                continue;
-            }
-            auto& bay = next[static_cast<size_t>(a)][static_cast<size_t>(s)];
-            auto it = spool_table_.find(id);
-            if (it != spool_table_.end()) {
-                bay = it->second;
-            } else {
-                bay.bound = true; // bound to a spool the table has not described
-            }
-        }
-    }
-
-    for (int a = 0; a < MAX_ACE_UNITS; ++a) {
-        for (int s = 0; s < ACE_SLOTS_PER_UNIT; ++s) {
-            auto& cur = ace_units_[static_cast<size_t>(a)].spool[static_cast<size_t>(s)];
-            const auto& nx = next[static_cast<size_t>(a)][static_cast<size_t>(s)];
-            // Whole-struct compare: the field list this used to spell out
-            // omitted `vendor`, so a brand-only correction never emitted.
-            if (cur != nx) {
-                changed = true;
-            }
-            cur = nx;
-        }
-    }
+    spdlog::info("{} Head {} is empty; loading ACE {} bay {}", backend_log_tag(), pending.head + 1,
+                 pending.bay.first + 1, pending.bay.second + 1);
+    dispatch_feed(multiace::load_gcode(pending.head, pending.bay), kEventLoadComplete,
+                  pending.head);
 }
 
-void AmsBackendMultiAce::rebuild_ace_units_locked() {
-    // Unit 0 is the U1 and is owned by the base class — never touched here.
-    if (system_info_.units.empty()) {
-        return;
-    }
-
-    // Grow or shrink ONLY when the hardware count actually changed. This used to
-    // resize(1) and push_back fresh units on every `ace` frame, which arrive
-    // constantly — so a spool the user had just assigned to an ACE bay was
-    // discarded a fraction of a second later ("Slot 5 updated", then nothing),
-    // and the churn reset the panel out of the unit detail it was showing.
-    const size_t want_units = 1 + static_cast<size_t>(device_count_);
-    if (system_info_.units.size() != want_units) {
-        system_info_.units.resize(want_units);
-    }
-
-    int next_global = NUM_TOOLS;
-    for (int a = 0; a < device_count_; ++a) {
-        const auto& st = ace_units_[a];
-        AmsUnit& unit = system_info_.units[static_cast<size_t>(a) + 1];
-
-        unit.unit_index = a + 1;
-        unit.name = fmt::format("ACE{}", a);
-        // With one unit the model is the most useful label. With several, which
-        // unit it is matters more than which model, and the card is far too
-        // narrow at 480x320 to carry both — the model stays available on the
-        // unit itself for the detail view.
-        const char* model = ace_model_name(st.protocol);
-        unit.display_name = device_count_ > 1 ? fmt::format("ACE {}", a + 1) : model;
-        unit.firmware_version = model;
-        unit.slot_count = ACE_SLOTS_PER_UNIT;
-        unit.first_slot_global_index = next_global;
-        unit.connected = st.connected;
-        // In head mode one ACE binds to a single head and all four of its slots
-        // feed that head — a hub, not a parallel fan. In multi mode slot s feeds
-        // head s, so each slot has its own path.
-        unit.topology = head_mode_ ? PathTopology::HUB : PathTopology::PARALLEL;
-        if (st.temp != 0 || st.humidity != 0) {
-            EnvironmentData env;
-            env.temperature_c = static_cast<float>(st.temp);
-            env.humidity_pct = static_cast<float>(st.humidity);
-            env.has_humidity = true;
-            unit.environment = env;
+AmsError AmsBackendMultiAce::do_unload_filament(int slot_index) {
+    int head = slot_index;
+    bool engine = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        engine = active_locked();
+        if (head < 0) {
+            head = system_info_.current_slot;
         }
-
-        if (unit.slots.size() != static_cast<size_t>(ACE_SLOTS_PER_UNIT)) {
-            unit.slots.assign(static_cast<size_t>(ACE_SLOTS_PER_UNIT), SlotInfo{});
+        if (head >= kHeads) {
+            const auto h = head_for_global_locked(head);
+            if (!h || routed_bay_locked(*h) != multiace::bay_of(head)) {
+                return AmsErrorHelper::not_loaded();
+            }
+            head = *h;
         }
-        for (int s = 0; s < ACE_SLOTS_PER_UNIT; ++s) {
-            SlotInfo& slot = unit.slots[static_cast<size_t>(s)];
-            const int global_index = next_global++;
-            slot.slot_index = s;
-            slot.global_index = global_index;
-            // gate_status is the ACE's own "is there filament at this bay",
-            // which is the only presence signal it publishes for an idle slot —
-            // slots[].status reads "unknown" on real hardware even when the
-            // gate is occupied.
-            // LOADED when this exact bay is the one currently feeding a head:
-            // without it a bay the user just loaded looked identical to its
-            // three idle neighbours, and every "is this loaded?" rule the UI
-            // asks -- the spool highlight, the Unload entry -- answered no.
-            // head_seated_ is the right source here (unlike mapped_tool below,
-            // which must survive an unload): "which bay is AT the head" is
-            // exactly what it tracks.
-            bool bay_is_seated = false;
-            for (int h = 0; h < NUM_TOOLS && !bay_is_seated; ++h) {
-                bay_is_seated = head_seated_[h] && head_seated_[h]->ace_index == a &&
-                                head_seated_[h]->slot == s;
+    }
+    if (!engine) {
+        return AmsBackendSnapmaker::do_unload_filament(head);
+    }
+    if (head < 0) {
+        // The engine owns the feed state machine while it is active: no head
+        // resolved means nothing to unload, never the stock leaf macro.
+        return AmsErrorHelper::not_loaded();
+    }
+    // Every head, ACE-fed or not: the engine owns the feed state machine.
+    AmsError err = dispatch_feed(multiace::unload_gcode(head), kEventUnloadComplete);
+    if (err.success()) {
+        cancel_pending_load("an unload");
+    }
+    return err;
+}
+
+AmsError AmsBackendMultiAce::do_select_slot(int slot_index) {
+    if (slot_index < kHeads) {
+        return AmsBackendSnapmaker::do_select_slot(slot_index);
+    }
+    int head = -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto h = head_for_global_locked(slot_index);
+        if (h && routed_bay_locked(*h) == multiace::bay_of(slot_index)) {
+            head = *h;
+        }
+    }
+    if (head < 0) {
+        // Selecting a bay is a tool change to its head, which prints that bay
+        // only once it is the head's routed bay.
+        return AmsErrorHelper::slot_ineligible(
+            lane_noun(), slot_index,
+            filament_op_eligibility_reason(FilamentOpEligibility::NotLoaded));
+    }
+    return do_change_tool(head);
+}
+
+AmsError AmsBackendMultiAce::do_change_tool(int tool_number) {
+    if (tool_number >= kHeads) {
+        return AmsErrorHelper::tool_out_of_range(tool_number);
+    }
+    AmsError err = AmsBackendSnapmaker::do_change_tool(tool_number);
+    if (err.success()) {
+        cancel_pending_load("a tool change");
+    }
+    return err;
+}
+
+AmsError AmsBackendMultiAce::do_park_active_tool() {
+    AmsError err = AmsBackendSnapmaker::do_park_active_tool();
+    if (err.success()) {
+        cancel_pending_load("a tool park");
+    }
+    return err;
+}
+
+AmsError AmsBackendMultiAce::do_filament_batch(const std::vector<int>& slots, bool load) {
+    std::vector<int> heads;
+    bool engine = false;
+    bool any_ace = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        engine = active_locked();
+        if (engine) {
+            for (int s : slots) {
+                int head = s;
+                if (s >= kHeads) {
+                    const auto h = head_for_global_locked(s);
+                    if (load || !h || routed_bay_locked(*h) != multiace::bay_of(s)) {
+                        return AmsErrorHelper::not_supported(
+                            load ? "Batch load from ACE bays"
+                                 : "Batch unload of unrouted ACE bays");
+                    }
+                    head = *h;
+                }
+                if (head < 0 || head >= kHeads) {
+                    return validate_slot_index_locked(head);
+                }
+                if (std::find(heads.begin(), heads.end(), head) == heads.end()) {
+                    heads.push_back(head);
+                    any_ace = any_ace || ace_fed_locked(head);
+                }
             }
-            slot.status = bay_is_seated        ? SlotStatus::LOADED
-                          : st.gate_present[s] ? SlotStatus::AVAILABLE
-                                               : SlotStatus::EMPTY;
-            slot.material = st.material[s];
-            if (st.color_rgb[s]) {
-                slot.color_rgb = *st.color_rgb[s];
-            }
-            // Which head this slot can reach; -1 when nothing is bound, so the
-            // canvas draws no lane. THE rule, shared with bay_source() so the
-            // badge and the dispatch can never name different heads.
-            slot.mapped_tool = bay_feeds_head_locked(a, s);
-
-            // These SlotInfo objects are reused across rebuilds — only a change
-            // in unit COUNT reallocates them — so every identity field has to be
-            // cleared here or it survives the spool that put it there. `material`
-            // and `color_rgb` above are assigned unconditionally and so reset
-            // themselves; these four were only ever written, never cleared, and
-            // an unbound bay kept the name of the spool taken out of it.
-            slot.spool_name.clear();
-            slot.brand.clear();
-            slot.spoolman_id = 0;
-            // Both weights, together: they are one pair and come from one place
-            // (Spoolman, via spoolman_id). Clearing only the remaining left a
-            // total from a previous spool and a percentage measured against it.
-            slot.remaining_weight_g = -1.0f;
-            slot.total_weight_g = -1.0f;
-
-            // The base class's convergence point covers the four heads only,
-            // so what the lane model holds for a bay (the user's own edit, a
-            // Spoolman record) is laid on here.
-            apply_resolved_lane(slot, global_index);
-
-            // ...but multiACE's own spool table OUTRANKS that for a bay it has
-            // a binding for. The ACE is the authority on what is in its own
-            // bays (the same doctrine slot_identity_owner_unit() states for an
-            // ACE-fed head), so a value the user typed into multiACE must not be
-            // masked by a stale local edit. Applied after the lane for exactly
-            // that reason.
-            const auto& bay = st.spool[static_cast<size_t>(s)];
-            if (bay.bound) {
-                if (!bay.material.empty()) {
-                    slot.material = bay.material;
-                }
-                if (!bay.vendor.empty()) {
-                    slot.brand = bay.vendor;
-                }
-                if (!bay.label.empty()) {
-                    slot.spool_name = bay.label;
-                }
-                if (bay.color_rgb) {
-                    slot.color_rgb = *bay.color_rgb;
-                }
-                // The one the lane model cannot supply, and the one that
-                // matters most: SpoolmanManager keys its weight refresh on it and
-                // fills BOTH remaining and total from Spoolman. multiACE's own
-                // `weight_g` is deliberately NOT used: it is a local copy, so
-                // preferring it would take remaining from one source and total
-                // from another and compute a percentage across the two.
-                if (bay.spoolman_id > 0) {
-                    slot.spoolman_id = bay.spoolman_id;
-                }
-            }
-
-            // The override file wins over both. multiACE resolves its own web UI
-            // from it — every bay there reports source:"override" — and it is the
-            // only place a bay with NO spool bound can still carry a material and
-            // colour, which is how bay 2 read empty here while multiACE showed
-            // PETG/Generic.
-            const auto& ov = slot_overrides_[static_cast<size_t>(a)][static_cast<size_t>(s)];
-            if (ov.set) {
-                if (!ov.material.empty()) {
-                    slot.material = ov.material;
-                }
-                if (!ov.brand.empty()) {
-                    slot.brand = ov.brand;
-                }
-                if (ov.color_rgb) {
-                    slot.color_rgb = *ov.color_rgb;
-                }
-                // A bound bay holds a spool even when gate_status has not caught
-                // up, and multiACE keeps the binding across a spool being taken
-                // out — so presence still comes from the gate, not from this.
+        }
+    }
+    if (!engine) {
+        return AmsBackendSnapmaker::do_filament_batch(slots, load);
+    }
+    if (heads.empty()) {
+        return AmsErrorHelper::invalid_parameter("empty batch");
+    }
+    if (load && any_ace) {
+        return AmsErrorHelper::not_supported("Batch load into ACE-fed toolheads");
+    }
+    if (load) {
+        // Every head is checked before anything is sent: Klipper aborts the
+        // rest of a script at the first line that raises.
+        for (int h : heads) {
+            if (auto refusal = head_load_refusal(h, /*ace_head=*/false)) {
+                return *refusal;
             }
         }
     }
 
-    system_info_.total_slots = next_global;
-    // debug, not info: this runs on every `ace` frame.
-    spdlog::debug("{} {} ACE unit(s) in {} mode -> {} units, {} slots total", backend_log_tag(),
-                  device_count_, head_mode_ ? "head" : "multi", system_info_.units.size(),
-                  system_info_.total_slots);
+    if (!load) {
+        std::vector<int> loaded_heads;
+        for (int h = 0; h < kHeads; ++h) {
+            if (AmsBackendSnapmaker::slot_has_filament_at_toolhead(h)) {
+                loaded_heads.push_back(h);
+            }
+        }
+        std::vector<int> sorted = heads;
+        std::sort(sorted.begin(), sorted.end());
+        if (!loaded_heads.empty() && sorted == loaded_heads) {
+            // The engine's own unload-all: its loop walks all four heads and
+            // unloads every one whose motion sensor sees filament, ACE-fed,
+            // feeder and manual alike (its _unload_all_heads).
+            AmsError err = dispatch_feed(multiace::unload_all_gcode(), kEventUnloadComplete);
+            if (err.success()) {
+                cancel_pending_load("a batch operation");
+            }
+            return err;
+        }
+    }
+
+    // One engine command per head; Klipper stops the script at the first one
+    // that raises.
+    std::string script;
+    for (int h : heads) {
+        if (!script.empty()) {
+            script += "\n";
+        }
+        script += load ? multiace::load_gcode(h, std::nullopt) : multiace::unload_gcode(h);
+    }
+    AmsError err =
+        dispatch_feed(std::move(script), load ? kEventLoadComplete : kEventUnloadComplete);
+    if (err.success()) {
+        cancel_pending_load("a batch operation");
+    }
+    return err;
 }
 
 // ============================================================================
 // Dryer
 // ============================================================================
 
-namespace {
-/// HelixScreen unit 0 is the U1 itself, so ACE `a` is global unit `a + 1`.
-/// Returns -1 when the index does not name an ACE.
-int ace_index_for_unit(int unit_index, int device_count) {
-    const int ace = unit_index - 1;
-    return (ace >= 0 && ace < device_count) ? ace : -1;
-}
-} // namespace
-
 DryerInfo AmsBackendMultiAce::get_dryer_info(int unit) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    DryerInfo info;
-    const int ace = ace_index_for_unit(unit, device_count_);
-    if (ace < 0) {
-        return info; // the U1 itself has no dryer
+    if (const multiace::Unit* u = unit_for_index_locked(unit)) {
+        return u->dryer;
     }
-    const auto& st = ace_units_[static_cast<size_t>(ace)];
-    info.supported = true;
-    // Drying is a chamber operation on the ACE, not a toolhead one, so it is
-    // safe while the printer prints.
-    info.allows_during_print = true;
-    info.active = st.drying;
-    info.current_temp_c = static_cast<float>(st.temp);
-    info.target_temp_c = static_cast<float>(st.dryer_target_c);
-    info.duration_min = st.dryer_duration_min;
-    info.remaining_min = st.dryer_remaining_min;
-    // The ACE runs its own fan with the heater; there is no independent control.
-    info.supports_fan_control = false;
-    info.min_temp_c = 35.0f;
-    // multiACE's own max_dryer_temperature safety cap.
-    info.max_temp_c = 70.0f;
-    info.max_duration_min = 12 * 60;
-    return info;
+    return DryerInfo{.supported = false};
 }
 
 AmsError AmsBackendMultiAce::start_drying(float temp_c, int duration_min, int fan_pct, int unit) {
-    (void)fan_pct; // no independent fan control on the ACE
+    (void)fan_pct;
+    auto err = check_preconditions();
+    if (!err.success()) {
+        return err;
+    }
     int ace = -1;
+    DryerInfo dryer;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        ace = ace_index_for_unit(unit, device_count_);
+        if (const multiace::Unit* u = unit_for_index_locked(unit)) {
+            ace = u->idx;
+            dryer = u->dryer;
+        }
     }
     if (ace < 0) {
-        return AmsErrorHelper::not_supported("Dryer");
+        return AmsErrorHelper::not_supported("Drying on a unit with no ACE");
     }
-    // ACE_DRY takes TEMP and DURATION directly -- no config edit, no Klipper
-    // restart. (ACED__DRY_START_n, the macro in multiACE's Fluidd table, is the
-    // parameterless form and would ignore whatever the user picked here.)
-    const int temp = std::clamp(static_cast<int>(std::lround(temp_c)), 35, 70);
-    const int mins = std::clamp(duration_min, 1, 12 * 60);
-    spdlog::info("{} ACE {} dry {} C for {} min", backend_log_tag(), ace, temp, mins);
-    return execute_gcode(fmt::format("ACE_DRY ACE={} TEMP={} DURATION={}", ace, temp, mins));
+    if (auto refusal = helix::ace::check_dryer_request(dryer, temp_c, duration_min)) {
+        return *refusal;
+    }
+    spdlog::info("{} Drying ACE {}: {}°C for {} minutes", backend_log_tag(), ace + 1, temp_c,
+                 duration_min);
+    return execute_gcode(multiace::dry_gcode(ace, static_cast<int>(temp_c), duration_min));
 }
 
 AmsError AmsBackendMultiAce::stop_drying(int unit) {
     int ace = -1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        ace = ace_index_for_unit(unit, device_count_);
+        if (const multiace::Unit* u = unit_for_index_locked(unit)) {
+            ace = u->idx;
+        }
     }
     if (ace < 0) {
-        return AmsErrorHelper::not_supported("Dryer");
+        return AmsErrorHelper::not_supported("Drying on a unit with no ACE");
     }
-    return execute_gcode(fmt::format("ACE_STOP_DRYING ACE={}", ace));
+    spdlog::info("{} Stopping drying on ACE {}", backend_log_tag(), ace + 1);
+    return execute_gcode(multiace::stop_dry_gcode(ace));
 }
 
-AutoDryInfo AmsBackendMultiAce::get_auto_dry_info(int unit) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    AutoDryInfo info;
-    const int ace = ace_index_for_unit(unit, device_count_);
-    if (ace < 0) {
-        return info; // the U1 itself has no dryer, so no rule to arm either
+AmsError AmsBackendMultiAce::update_drying(float temp_c, int duration_min, int fan_pct, int unit) {
+    auto err = stop_drying(unit);
+    if (!err.success()) {
+        return err;
     }
-    const auto& st = ace_units_[static_cast<size_t>(ace)];
-    if (!st.has_auto_dry) {
-        return info; // firmware too old to carry the block
-    }
-    info.supported = true;
-    info.enabled = st.auto_dry_enabled;
-    info.running = st.auto_dry_running;
-    info.rh_start_pct = st.auto_dry_rh_start;
-    info.rh_end_pct = st.auto_dry_rh_end;
-    info.temp_c = st.auto_dry_temp_c;
-    // Only the ACE 2 Pro (protocol v2) carries a humidity sensor, so only it can
-    // evaluate a threshold. A v1 unit has no reading of its own and instead
-    // mirrors a v2 unit's cycle, running on for add_time past it.
-    info.follows_master = (st.protocol != "v2");
-    info.add_time_min = st.auto_dry_add_time_min;
-    // multiACE names the master by ACE index; AMS unit indices are one higher
-    // because unit 0 is the U1. -1 (none picked) must stay -1, not become 0.
-    info.master_unit = st.auto_dry_master >= 0 ? st.auto_dry_master + 1 : -1;
-    return info;
+    const DryerInfo dryer = get_dryer_info(unit);
+    const auto [target_temp, target_duration] =
+        helix::ace::restart_request(dryer, temp_c, duration_min);
+    return start_drying(target_temp, target_duration, fan_pct, unit);
 }
 
-AmsError AmsBackendMultiAce::set_auto_dry_enabled(bool enabled, int unit) {
-    // Reads its own lock, so it has to happen before we take ours.
-    const AutoDryInfo info = get_auto_dry_info(unit);
-    if (!info.supported) {
-        return AmsErrorHelper::not_supported("Auto-dry");
-    }
-    // Arming a follower that has no master is a state multiACE rejects; refusing
-    // here keeps the failure on our side of the wire, where it can be explained.
-    if (enabled && !info.can_enable()) {
-        return AmsErrorHelper::wrong_state("no auto-dry master selected",
-                                           "a master unit to follow");
-    }
-    int ace = -1;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ace = ace_index_for_unit(unit, device_count_);
-    }
-    if (ace < 0) {
-        return AmsErrorHelper::not_supported("Auto-dry");
-    }
-    spdlog::info("{} ACE {} auto-dry {}", backend_log_tag(), ace, enabled ? "on" : "off");
-    // ENABLE alone: every field of ACE_SET_AUTO_DRY is independent, so arming the
-    // rule must not restate thresholds the user set in multiACE's own UI.
-    return execute_gcode(fmt::format("ACE_SET_AUTO_DRY ACE={} ENABLE={}", ace, enabled ? 1 : 0));
+std::vector<DryingPreset> AmsBackendMultiAce::get_drying_presets() const {
+    return get_default_drying_presets();
 }
 
 // ============================================================================
-// Filament ops — ACE-fed heads take the ACE path
+// Errors
 // ============================================================================
 
-namespace {
-/// What each step of the bay-swap bar projects to, by position. The step model
-/// and the published action both read this, so the two cannot disagree.
-constexpr std::array kSwapStepActions{
-    AmsAction::UNLOADING, AmsAction::UNLOADING, AmsAction::HEATING, AmsAction::UNLOADING,
-    AmsAction::LOADING,   AmsAction::LOADING,   AmsAction::PURGING};
-
-/// classify_channel_state()'s load-direction step indices.
-constexpr int kLoadStepFeed = 2;
-constexpr int kLoadStepHeat = 3;
-constexpr int kLoadStepExtrude = 4;
-constexpr int kLoadStepPurge = 5;
-} // namespace
-
-AmsBackend::OperationStepModel AmsBackendMultiAce::swap_step_model() {
-    // A swap on an ACE-fed head is ONE operation with two halves, so it gets a
-    // bar of its own rather than the load model the base answers with.
-    //
-    // The load half's own Home / Select / Heat are deliberately absent: by then
-    // the head is already mounted and already hot from steps 2-3, so they pass
-    // straight through and step_phase_locked() holds the bar across them.
-    //
-    // There is NO step for the ACE-side fetch. The gap between the halves is a
-    // few seconds of `inited` in a ~100 second operation (measured on a live
-    // U1, firmware 20260722), because the bay is already staged at its gate. A
-    // row that is complete before it is read is worse than no row: the bar
-    // holds on "Retract filament" across it.
-    //
-    // Labels carry no product name: the step bar names the operation, not the
-    // hardware performing it.
-    OperationStepModel model;
-    model.steps.push_back({lv_tr("Home"), 0});
-    model.steps.push_back({lv_tr("Select"), 1});
-    model.steps.push_back({lv_tr("Heat nozzle"), 2, false, /*live_temp=*/true});
-    model.steps.push_back({lv_tr("Retract filament"), SWAP_STEP_RETRACT});
-    model.steps.push_back({lv_tr("Feed filament"), SWAP_STEP_FEED});
-    model.steps.push_back({lv_tr("Extrude"), SWAP_STEP_EXTRUDE});
-    model.steps.push_back({lv_tr("Purge"), SWAP_STEP_PURGE});
-    for (size_t i = 0; i < model.steps.size() && i < kSwapStepActions.size(); ++i) {
-        model.steps[i].coarse = kSwapStepActions[i];
+std::optional<helix::ErrorEvent>
+AmsBackendMultiAce::classify_error(const std::string& raw_line,
+                                   const helix::ClassifyContext& ctx) const {
+    if (!helix::is_bang_line(raw_line)) {
+        return AmsBackendSnapmaker::classify_error(raw_line, ctx);
     }
-    return model;
-}
-
-AmsBackend::OperationStepModel
-AmsBackendMultiAce::get_operation_step_model(StepOperationType op) const {
-    // Which head the operation is about.
-    //
-    // op_target_head_ is the head the last dispatch NAMED; current_slot, the
-    // head on the carriage, is the fallback for an operation this backend did
-    // not dispatch. Preferring the target matters in `mode="multi"`, where bay
-    // *s* feeds head *s* and the bay being acted on routinely belongs to a head
-    // other than the mounted one. One lock scope so the reads are one snapshot,
-    // and the _locked helpers exist so nothing here re-takes the non-recursive
-    // mutex_.
-    bool ace_fed = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        int head = op_target_head_ >= 0 ? op_target_head_ : system_info_.current_slot;
-        if (head >= NUM_TOOLS) {
-            if (auto bay = bay_source_locked(head)) {
-                head = bay->head;
-            }
-        }
-        ace_fed = head >= 0 && head < NUM_TOOLS && head_kind_[head] == HeadSource::ACE;
+    const std::string detail = helix::strip_bang_prefix(raw_line);
+    const auto code = snapmaker::decode_exception_code(detail);
+    if (!code || code->id != kMultiAceFaultId || code->code < kMultiAceCodeFirst ||
+        code->code > kMultiAceCodeLast) {
+        return AmsBackendSnapmaker::classify_error(raw_line, ctx);
     }
 
-    if (op == StepOperationType::LOAD_SWAP && ace_fed) {
-        return swap_step_model();
+    const std::string token = snapmaker::format_exception_code(*code);
+    std::string message = detail;
+    if (const auto at = message.find(token); at != std::string::npos) {
+        message.erase(at, token.size());
+    }
+    const auto first = message.find_first_not_of(" :");
+    message = first == std::string::npos ? std::string{} : message.substr(first);
+    while (!message.empty() && message.back() == ' ') {
+        message.pop_back();
     }
 
-    AmsBackend::OperationStepModel model = AmsBackendSnapmaker::get_operation_step_model(op);
-    if (op != StepOperationType::UNLOAD || model.steps.empty() || !ace_fed) {
-        return model; // a stock feeder head retracts to its own buffer
-    }
-    model.steps.back().label = lv_tr("Retract filament");
-    return model;
-}
-
-int AmsBackendMultiAce::step_phase_locked(int head, const snapmaker::ChannelStateInfo& info) const {
-    if (swap_in_flight_head_ < 0 || head != swap_in_flight_head_) {
-        return AmsBackendSnapmaker::step_phase_locked(head, info);
-    }
-    // The unload half occupies the bar's first four positions in the unload
-    // model's own order.
-    if (info.action == AmsAction::UNLOADING) {
-        return info.phase;
-    }
-    if (info.action == AmsAction::LOADING) {
-        switch (info.phase) {
-        case kLoadStepFeed:
-        case kLoadStepHeat: // already hot; the bar has no second heat row
-            return SWAP_STEP_FEED;
-        case kLoadStepExtrude:
-            return SWAP_STEP_EXTRUDE;
-        case kLoadStepPurge:
-            return SWAP_STEP_PURGE;
-        default: // the load half's Home / Select
-            return SWAP_STEP_RETRACT;
-        }
-    }
-    // A resting state between the halves holds the bar on the retract. Before
-    // the firmware has picked the swap up, and once the load half has run, a
-    // resting state is no step at all.
-    if (!info.is_fail && swap_progress_seen_ && !swap_load_half_started_) {
-        return SWAP_STEP_RETRACT;
-    }
-    return -1;
-}
-
-std::optional<AmsAction> AmsBackendMultiAce::step_action_locked() const {
-    if (swap_in_flight_head_ < 0) {
-        return AmsBackendSnapmaker::step_action_locked();
-    }
-    const int phase = system_info_.operation_phase;
-    if (phase < 0 || phase >= static_cast<int>(kSwapStepActions.size())) {
-        return std::nullopt;
-    }
-    return kSwapStepActions[static_cast<size_t>(phase)];
-}
-
-void AmsBackendMultiAce::apply_swap_phase_locked() {
-    // Nothing to do unless a swap this backend dispatched is in flight.
-    if (swap_in_flight_head_ < 0) {
-        return;
-    }
-
-    // do_load_filament() arms the latch when the gcode goes out, and the
-    // firmware has not picked it up yet: the next frame still reports IDLE.
-    // Only a running action makes a later idle one mean the end.
-    const bool running =
-        system_info_.action == AmsAction::LOADING || system_info_.action == AmsAction::UNLOADING;
-    if (running) {
-        swap_progress_seen_ = true;
-    }
-    // The action follows the direction of the channel_state in flight, so
-    // LOADING is the load half. From here preload_finish and unload_finish
-    // have their ordinary meaning again.
-    if (system_info_.action == AmsAction::LOADING) {
-        swap_load_half_started_ = true;
-    }
-
-    const bool operation_over = swap_progress_seen_ && (system_info_.action == AmsAction::IDLE ||
-                                                        system_info_.action == AmsAction::ERROR);
-    if (operation_over) {
-        spdlog::debug("{} swap on head {} done (phase={} action={})", backend_log_tag(),
-                      swap_in_flight_head_, system_info_.operation_phase,
-                      ams_action_to_string(system_info_.action));
-        swap_in_flight_head_ = -1;
-        swap_progress_seen_ = false;
-        swap_load_half_started_ = false;
-    }
-}
-
-bool AmsBackendMultiAce::bay_load_needs_unload_locked(int slot_index) const {
-    const auto bay = bay_source_locked(slot_index);
-    if (!bay || bay->head < 0) {
-        return false; // a head, an out-of-range index, or a bay bound to nothing
-    }
-    const auto& seated = head_seated_[static_cast<size_t>(bay->head)];
-    if (!seated) {
-        return false; // nothing at that head to retract
-    }
-    // Already the seated bay: ACE_LOAD_HEAD is a no-op re-feed, not a swap.
-    return !(seated->ace_index == bay->ace_index && seated->slot == bay->bay);
-}
-
-bool AmsBackendMultiAce::needs_unload_before_load(const AmsSystemInfo& info,
-                                                  int target_slot) const {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (bay_source_locked(target_slot)) {
-            return bay_load_needs_unload_locked(target_slot);
-        }
-    }
-    // Heads and feeder lanes keep the inherited answer. Delegated with the lock
-    // DROPPED: the base reaches slot_has_independent_path() -> get_unit_topology(),
-    // which this class overrides and which takes mutex_ (ams_backend.h records
-    // the same hazard for AFC).
-    return AmsBackendSnapmaker::needs_unload_before_load(info, target_slot);
-}
-
-std::optional<AmsBackendMultiAce::BaySource>
-AmsBackendMultiAce::bay_source_locked(int slot_index) const {
-    if (slot_index < NUM_TOOLS) {
-        return std::nullopt; // a head, not a bay
-    }
-    // system_info_ is the authority on where a unit's slots start -- deriving it
-    // as NUM_TOOLS + ace_index * ACE_SLOTS_PER_UNIT would silently drift if the
-    // unit list is ever built differently (same reasoning as
-    // slot_identity_owner_slot()).
-    for (size_t u = 1; u < system_info_.units.size(); ++u) {
-        const auto& unit = system_info_.units[u];
-        const int first = unit.first_slot_global_index;
-        if (slot_index < first || slot_index >= first + unit.slot_count) {
-            continue;
-        }
-        BaySource src;
-        src.ace_index = static_cast<int>(u) - 1; // unit 0 is the U1 itself
-        src.bay = slot_index - first;
-        src.head = bay_feeds_head_locked(src.ace_index, src.bay);
-        return src;
-    }
-    return std::nullopt;
-}
-
-std::optional<AmsBackendMultiAce::BaySource> AmsBackendMultiAce::bay_source(int slot_index) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return bay_source_locked(slot_index);
-}
-
-bool AmsBackendMultiAce::slot_is_actively_loaded(int slot_index) const {
-    {
-        // One lock, no SlotInfo copy. This runs for EVERY slot on every frame
-        // (AmsState::sync_from_backend), and it used to take mutex_ twice --
-        // once in bay_source(), once in get_slot_info() -- and deep-copy a
-        // SlotInfo with its ~8 std::strings to read a single enum.
-        //
-        // rebuild_ace_units_locked() marks exactly the seated bay LOADED, so the
-        // status IS the answer; this stays one source of truth rather than a
-        // second reverse lookup that could disagree.
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_index >= NUM_TOOLS) {
-            const SlotInfo* slot = system_info_.get_slot_global(slot_index);
-            return slot != nullptr && slot->status == SlotStatus::LOADED;
-        }
-    }
-    return AmsBackendSnapmaker::slot_is_actively_loaded(slot_index);
-}
-
-AmsError AmsBackendMultiAce::do_load_filament(int slot_index) {
-    // A BAY, not a head: this is "feed this specific spool to the head its ACE
-    // serves". The base validate_slot_index() only knows the U1's four heads, so
-    // this arm comes first. Sequence copied from multiACE's own web UI
-    // (`http://<printer>/multiace/app.js`, loadSlotHeadMode): unload the head
-    // first when it already holds a DIFFERENT source, then load, because
-    // ACE_LOAD_HEAD's own guard only refuses when filament is already at the
-    // head -- it will not swap for you.
-    // One snapshot of everything the decision reads -- the bay's head, what is
-    // seated there, the head's kind -- rather than three lock round-trips that
-    // could straddle a frame. The gcode goes out with the lock dropped.
-    std::optional<BaySource> bay;
-    std::optional<SeatedSource> seated;
-    HeadSource head_kind = HeadSource::UNKNOWN;
-    bool needs_unload = false;
-    int last_slot = 0;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        bay = bay_source_locked(slot_index);
-        last_slot = system_info_.total_slots - 1;
-        if (bay && bay->head >= 0) {
-            seated = head_seated_[bay->head];
-            // The SAME predicate needs_unload_before_load() answers the planner
-            // with, so the bar the UI draws and the commands that go out are one
-            // decision. They used to be two hand-written copies of it.
-            needs_unload = bay_load_needs_unload_locked(slot_index);
-            op_target_head_ = bay->head;
-            // Arm BEFORE the gcode goes out: the two commands are queued back to
-            // back and the first channel_state can land before we return.
-            swap_in_flight_head_ = needs_unload ? bay->head : -1;
-            swap_progress_seen_ = false;
-            swap_load_half_started_ = false;
-        } else if (!bay && slot_index >= 0 && slot_index < NUM_TOOLS) {
-            head_kind = head_kind_[slot_index];
-            op_target_head_ = slot_index;
-            swap_in_flight_head_ = -1;
-        }
-    }
-
-    if (bay) {
-        if (bay->head < 0) {
-            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, last_slot);
-        }
-        if (needs_unload && seated) {
-            spdlog::info("[AmsBackendMultiAce] head {} holds ACE {} slot {} -> unload before "
-                         "loading ACE {} slot {}",
-                         bay->head, seated->ace_index, seated->slot, bay->ace_index, bay->bay);
-            AmsError unload_err = execute_gcode(fmt::format("ACE_UNLOAD_HEAD HEAD={}", bay->head));
-            if (!unload_err.success()) {
-                // No swap is running after all. Left armed, the latch would
-                // hold every later unload on this head open at its end.
-                std::lock_guard<std::mutex> lock(mutex_);
-                swap_in_flight_head_ = -1;
-                return unload_err;
-            }
-        }
-        spdlog::info("[AmsBackendMultiAce] bay {} -> ACE_LOAD_HEAD HEAD={} ACE={} SLOT={}",
-                     slot_index, bay->head, bay->ace_index, bay->bay);
-        AmsError load_err = execute_gcode(fmt::format("ACE_LOAD_HEAD HEAD={} ACE={} SLOT={}",
-                                                      bay->head, bay->ace_index, bay->bay));
-        if (!load_err.success()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            swap_in_flight_head_ = -1;
-        }
-        return load_err;
-    }
-
-    // Every bay was handled above, so what is left has to name a head.
-    if (slot_index < 0 || slot_index >= NUM_TOOLS) {
-        return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, last_slot);
-    }
-    if (head_kind != HeadSource::ACE) {
-        // Stock feeder (or not yet known): the inherited native path is right,
-        // and is the only one that exists for a head the ACE does not own.
-        return AmsBackendSnapmaker::do_load_filament(slot_index);
-    }
-    spdlog::info("[AmsBackendMultiAce] ACE-fed head {} -> ACE_LOAD_HEAD", slot_index);
-    return execute_gcode(fmt::format("ACE_LOAD_HEAD HEAD={}", slot_index));
-}
-
-AmsError AmsBackendMultiAce::do_unload_filament(int slot_index) {
-    // A BAY: "unload the head this spool is feeding". Same shape as the load
-    // arm in do_load_filament() and for the same reason -- the base
-    // validate_slot_index() only knows the U1's four heads, so a bay index
-    // would fall through to the native path and be refused as out of range.
-    // ACE_UNLOAD_HEAD names only the head; the bay is implied by what is seated.
-    std::optional<BaySource> bay;
-    int last_slot = 0;
-    // Callers may pass -1 for "whatever is loaded"; resolve it the same way the
-    // base does before deciding which path owns the head.
-    int head = slot_index;
-    HeadSource head_kind = HeadSource::UNKNOWN;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        bay = bay_source_locked(slot_index);
-        last_slot = system_info_.total_slots - 1;
-        if (head < 0) {
-            head = system_info_.current_slot;
-        }
-        if (head >= 0 && head < NUM_TOOLS) {
-            head_kind = head_kind_[head];
-        }
-        // A standalone unload, whichever entry point asked for it: name the head
-        // for the step model, and make sure no stale swap latch survives into it.
-        op_target_head_ = bay && bay->head >= 0 ? bay->head : head;
-        swap_in_flight_head_ = -1;
-        swap_progress_seen_ = false;
-        swap_load_half_started_ = false;
-    }
-
-    if (bay) {
-        if (bay->head < 0) {
-            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, last_slot);
-        }
-        spdlog::info("[AmsBackendMultiAce] bay {} -> ACE_UNLOAD_HEAD HEAD={}", slot_index,
-                     bay->head);
-        return execute_gcode(fmt::format("ACE_UNLOAD_HEAD HEAD={}", bay->head));
-    }
-
-    if (head >= NUM_TOOLS) {
-        return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, last_slot);
-    }
-    if (head < 0 || head_kind != HeadSource::ACE) {
-        return AmsBackendSnapmaker::do_unload_filament(slot_index);
-    }
-    // The ACE performs the retract, so an ACE-fed head is unloaded through the
-    // ACE's own command rather than the feeder's.
-    spdlog::info("[AmsBackendMultiAce] ACE-fed head {} -> ACE_UNLOAD_HEAD", head);
-    return execute_gcode(fmt::format("ACE_UNLOAD_HEAD HEAD={}", head));
-}
-
-AmsError AmsBackendMultiAce::do_select_slot(int slot_index) {
-    return do_change_tool(slot_index);
-}
-
-AmsError AmsBackendMultiAce::do_change_tool(int tool_number) {
-    if (tool_number < 0 || tool_number >= NUM_TOOLS) {
-        return AmsErrorHelper::invalid_slot(tool_noun(), tool_number, NUM_TOOLS - 1);
-    }
-    return AmsBackendSnapmaker::do_change_tool(tool_number);
-}
-
-AmsError AmsBackendMultiAce::do_filament_batch(const std::vector<int>& slots, bool load) {
-    (void)slots;
-    (void)load;
-    return AmsErrorHelper::not_supported("Batch filament ops");
-}
-
-AmsBackend::FilamentOpEligibility AmsBackendMultiAce::slot_op_eligibility(int slot_index,
-                                                                          bool load) const {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_index >= NUM_TOOLS) {
-            const SlotInfo* slot = system_info_.get_slot_global(slot_index);
-            if (slot == nullptr) {
-                return FilamentOpEligibility::Busy;
-            }
-            return slot->is_present() ? FilamentOpEligibility::Eligible
-                                      : FilamentOpEligibility::Empty;
-        }
-        if (slot_index >= 0 && head_kind_[slot_index] == HeadSource::ACE) {
-            return FilamentOpEligibility::Eligible;
-        }
-    }
-    return AmsBackendSnapmaker::slot_op_eligibility(slot_index, load);
-}
-
-// ============================================================================
-// Spool edits on a bay
-// ============================================================================
-
-AmsError AmsBackendMultiAce::apply_user_edit(int slot_index, const SlotInfo& info,
-                                             const helix::ams::Observation& declared) {
-    if (slot_index < NUM_TOOLS) {
-        return AmsBackendSnapmaker::apply_user_edit(slot_index, info, declared);
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto* slot = system_info_.get_slot_global(slot_index);
-        if (!slot) {
-            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
-                                                std::max(0, system_info_.total_slots - 1));
-        }
-        slot->assign_filament_fields(info);
-        // rebuild_ace_units_locked() rewrites a bay's identity from the ACE on
-        // every change, so an edit kept only on the slot would not outlive the
-        // next `ace` frame. The staged override survives a restart; the lane's
-        // own declaration, filed when the edit is committed, is what the
-        // rebuild lays back on.
-        helix::ams::stage_user_override(overrides_, slot_index, info, declared);
-    }
-    if (override_store_) {
-        helix::ams::persist_staged_override(override_store_.get(), mutex_, overrides_, slot_index,
-                                            backend_log_tag(), "Override");
-    }
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
-    return AmsErrorHelper::success();
-}
-
-AmsError AmsBackendMultiAce::sync_external_identity(int slot_index, const SlotInfo& info) {
-    if (slot_index < NUM_TOOLS) {
-        return AmsBackendSnapmaker::sync_external_identity(slot_index, info);
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto* slot = system_info_.get_slot_global(slot_index);
-        if (!slot) {
-            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index,
-                                                std::max(0, system_info_.total_slots - 1));
-        }
-        slot->assign_filament_fields(info);
-    }
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
-    return AmsErrorHelper::success();
-}
-
-void AmsBackendMultiAce::clear_slot_override(int slot_index) {
-    if (slot_index < NUM_TOOLS) {
-        AmsBackendSnapmaker::clear_slot_override(slot_index);
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto* slot = system_info_.get_slot_global(slot_index);
-        if (!slot) {
-            spdlog::warn("{} clear_slot_override: no slot entry for index {}", backend_log_tag(),
-                         slot_index);
-            return;
-        }
-        spdlog::info("{} Slot {} override cleared by user request", backend_log_tag(), slot_index);
-        clear_override_locked(slot_index, slot);
-        // The clear blanked what the override supplied; the ACE's own word for
-        // the bay goes straight back on.
-        rebuild_ace_units_locked();
-    }
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    std::vector<helix::RecoveryAction> actions;
+    actions.push_back({lv_tr("OK"), "", "ams_backend_multiace::fault_dismiss", "", false});
+    const std::optional<int> head = fault_head(code->index, message);
+    helix::ErrorEvent e = helix::make_ams_fault_event(
+        helix::ErrorSource::SNAPMAKER, lv_tr("Filament operation failed"),
+        head ? fmt::format("{}: {}", AmsErrorHelper::position_label(tool_noun(), *head), message)
+             : message,
+        std::move(actions));
+    e.code = token;
+    e.raw_detail = detail;
+    // Idle, the fault is the engine refusing a command the user just sent.
+    e.command_refusal = !ctx.is_printing && !ctx.is_paused;
+    return e;
 }
 
 } // namespace helix

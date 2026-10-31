@@ -9,7 +9,7 @@
  * Full tests require LVGL and XML components - marked as .integration.
  */
 
-#include "ui_nav_manager.h" // For UI_PANEL_COUNT
+#include "ui_nav_manager.h" // For kUiPanelCount
 
 #include "panel_factory.h"
 
@@ -24,7 +24,7 @@ using namespace helix;
 // ============================================================================
 
 TEST_CASE("PanelFactory has correct panel count", "[application][panels]") {
-    REQUIRE(UI_PANEL_COUNT == 6);
+    REQUIRE(kUiPanelCount == 6);
 }
 
 TEST_CASE("Panel enum values are sequential", "[application][panels]") {
@@ -38,31 +38,31 @@ TEST_CASE("Panel enum values are sequential", "[application][panels]") {
 
 TEST_CASE("PanelFactory PANEL_NAMES has correct entries", "[application][panels]") {
     // Verify the panel names array matches expected values
-    REQUIRE(std::strcmp(PanelFactory::PANEL_NAMES[static_cast<int>(PanelId::Home)], "home_panel") ==
+    REQUIRE(std::strcmp(PanelFactory::kPanelNames[static_cast<int>(PanelId::Home)], "home_panel") ==
             0);
-    REQUIRE(std::strcmp(PanelFactory::PANEL_NAMES[static_cast<int>(PanelId::PrintSelect)],
+    REQUIRE(std::strcmp(PanelFactory::kPanelNames[static_cast<int>(PanelId::PrintSelect)],
                         "print_select_panel") == 0);
-    REQUIRE(std::strcmp(PanelFactory::PANEL_NAMES[static_cast<int>(PanelId::Controls)],
+    REQUIRE(std::strcmp(PanelFactory::kPanelNames[static_cast<int>(PanelId::Controls)],
                         "controls_panel") == 0);
-    REQUIRE(std::strcmp(PanelFactory::PANEL_NAMES[static_cast<int>(PanelId::Filament)],
+    REQUIRE(std::strcmp(PanelFactory::kPanelNames[static_cast<int>(PanelId::Filament)],
                         "filament_panel") == 0);
-    REQUIRE(std::strcmp(PanelFactory::PANEL_NAMES[static_cast<int>(PanelId::Settings)],
+    REQUIRE(std::strcmp(PanelFactory::kPanelNames[static_cast<int>(PanelId::Settings)],
                         "settings_panel") == 0);
-    REQUIRE(std::strcmp(PanelFactory::PANEL_NAMES[static_cast<int>(PanelId::Advanced)],
+    REQUIRE(std::strcmp(PanelFactory::kPanelNames[static_cast<int>(PanelId::Advanced)],
                         "advanced_panel") == 0);
 }
 
 TEST_CASE("PanelFactory PANEL_NAMES count matches UI_PANEL_COUNT", "[application][panels]") {
     // Verify the array has the right number of entries
-    size_t count = sizeof(PanelFactory::PANEL_NAMES) / sizeof(PanelFactory::PANEL_NAMES[0]);
-    REQUIRE(count == UI_PANEL_COUNT);
+    size_t count = sizeof(PanelFactory::kPanelNames) / sizeof(PanelFactory::kPanelNames[0]);
+    REQUIRE(count == kUiPanelCount);
 }
 
 TEST_CASE("PanelFactory starts with null panels", "[application][panels]") {
     PanelFactory factory;
 
     // All panel pointers should be null initially
-    for (int i = 0; i < UI_PANEL_COUNT; i++) {
+    for (int i = 0; i < kUiPanelCount; i++) {
         REQUIRE(factory.panels()[i] == nullptr);
     }
 

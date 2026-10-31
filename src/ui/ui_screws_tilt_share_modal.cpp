@@ -19,9 +19,9 @@ namespace helix::ui {
 
 namespace {
 
-constexpr size_t NAME_BUF_SIZE = 40;
-constexpr size_t Z_BUF_SIZE = 24;
-constexpr size_t ADJ_BUF_SIZE = 24;
+constexpr size_t kNameBufSize = 40;
+constexpr size_t kZBufSize = 24;
+constexpr size_t kAdjBufSize = 24;
 
 /**
  * @brief Row subjects backing the modal's <repeat> expansion
@@ -35,13 +35,13 @@ constexpr size_t ADJ_BUF_SIZE = 24;
  */
 struct ShareSubjects {
     lv_subject_t count{};
-    std::array<lv_subject_t, ScrewsTiltShareModal::MAX_ROWS> name{};
-    std::array<lv_subject_t, ScrewsTiltShareModal::MAX_ROWS> z{};
-    std::array<lv_subject_t, ScrewsTiltShareModal::MAX_ROWS> adj{};
+    std::array<lv_subject_t, ScrewsTiltShareModal::kMaxRows> name{};
+    std::array<lv_subject_t, ScrewsTiltShareModal::kMaxRows> z{};
+    std::array<lv_subject_t, ScrewsTiltShareModal::kMaxRows> adj{};
 
-    char name_bufs[ScrewsTiltShareModal::MAX_ROWS][NAME_BUF_SIZE] = {};
-    char z_bufs[ScrewsTiltShareModal::MAX_ROWS][Z_BUF_SIZE] = {};
-    char adj_bufs[ScrewsTiltShareModal::MAX_ROWS][ADJ_BUF_SIZE] = {};
+    char name_bufs[ScrewsTiltShareModal::kMaxRows][kNameBufSize] = {};
+    char z_bufs[ScrewsTiltShareModal::kMaxRows][kZBufSize] = {};
+    char adj_bufs[ScrewsTiltShareModal::kMaxRows][kAdjBufSize] = {};
 
     SubjectManager manager;
     bool initialized = false;
@@ -70,7 +70,7 @@ void init_share_subjects() {
 
     UI_MANAGED_SUBJECT_INT(s.count, 0, "screws_share_count", s.manager);
 
-    for (size_t i = 0; i < ScrewsTiltShareModal::MAX_ROWS; i++) {
+    for (size_t i = 0; i < ScrewsTiltShareModal::kMaxRows; i++) {
         char name_key[40];
         char z_key[40];
         char adj_key[40];
@@ -78,10 +78,10 @@ void init_share_subjects() {
         std::snprintf(z_key, sizeof(z_key), "screws_share_%zu_z", i);
         std::snprintf(adj_key, sizeof(adj_key), "screws_share_%zu_adj", i);
 
-        UI_MANAGED_SUBJECT_STRING_N(s.name[i], s.name_bufs[i], NAME_BUF_SIZE, "", name_key,
+        UI_MANAGED_SUBJECT_STRING_N(s.name[i], s.name_bufs[i], kNameBufSize, "", name_key,
                                     s.manager);
-        UI_MANAGED_SUBJECT_STRING_N(s.z[i], s.z_bufs[i], Z_BUF_SIZE, "", z_key, s.manager);
-        UI_MANAGED_SUBJECT_STRING_N(s.adj[i], s.adj_bufs[i], ADJ_BUF_SIZE, "", adj_key, s.manager);
+        UI_MANAGED_SUBJECT_STRING_N(s.z[i], s.z_bufs[i], kZBufSize, "", z_key, s.manager);
+        UI_MANAGED_SUBJECT_STRING_N(s.adj[i], s.adj_bufs[i], kAdjBufSize, "", adj_key, s.manager);
     }
 
     s.initialized = true;
@@ -92,15 +92,15 @@ void init_share_subjects() {
                                                       []() { deinit_share_subjects(); });
 
     spdlog::debug("[ScrewsTiltShare] Subjects initialized ({} rows)",
-                  ScrewsTiltShareModal::MAX_ROWS);
+                  ScrewsTiltShareModal::kMaxRows);
 }
 
 /// Push one result set into the row subjects; returns the row count rendered.
 int publish_rows(const std::vector<ScrewTiltResult>& results) {
     auto& s = share_subjects();
-    const size_t rows = std::min(results.size(), ScrewsTiltShareModal::MAX_ROWS);
+    const size_t rows = std::min(results.size(), ScrewsTiltShareModal::kMaxRows);
 
-    for (size_t i = 0; i < ScrewsTiltShareModal::MAX_ROWS; i++) {
+    for (size_t i = 0; i < ScrewsTiltShareModal::kMaxRows; i++) {
         if (i >= rows) {
             lv_subject_copy_string(&s.name[i], "");
             lv_subject_copy_string(&s.z[i], "");
@@ -109,7 +109,7 @@ int publish_rows(const std::vector<ScrewTiltResult>& results) {
         }
 
         const auto& screw = results[i];
-        char z_text[Z_BUF_SIZE];
+        char z_text[kZBufSize];
         std::snprintf(z_text, sizeof(z_text), "Z %s", format_screw_share_z(screw).c_str());
 
         lv_subject_copy_string(&s.name[i], screw.display_name().c_str());

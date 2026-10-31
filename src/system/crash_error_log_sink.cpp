@@ -22,7 +22,7 @@ CrashErrorLogSink::CrashErrorLogSink() {
     // Register the process-lifetime ring exactly once. The crash handler just
     // stores these pointers; install() does not clear them, so order vs.
     // install() doesn't matter.
-    crash_handler::register_error_log_ring(&ring_[0][0], CAP, &next_);
+    crash_handler::register_error_log_ring(&ring_[0][0], kCap, &next_);
 }
 
 void CrashErrorLogSink::clear_for_test() {
@@ -35,7 +35,7 @@ void CrashErrorLogSink::sink_it_(const spdlog::details::log_msg& msg) {
     // base_sink already holds the mutex here. Capture the raw payload (the
     // formatted user message, no timestamp/level prefix) into the next slot,
     // stripping newlines so each entry stays a single `key:value` crash line.
-    char* slot = ring_[next_ % CAP];
+    char* slot = ring_[next_ % kCap];
     const char* src = msg.payload.data();
     const size_t srclen = msg.payload.size();
     size_t n = 0;

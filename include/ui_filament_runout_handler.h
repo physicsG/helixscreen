@@ -27,7 +27,9 @@
 #include "async_lifetime_guard.h"
 
 // Forward declarations
+namespace helix {
 class IMoonrakerAPI;
+}
 
 // Forward declare the global PrintState enum (defined in ui_panel_print_status.h)
 enum class PrintState;
@@ -140,6 +142,10 @@ class FilamentRunoutHandler {
     /// Flag to track if runout modal was shown for current pause
     /// Reset when print resumes or ends, prevents repeated modal popups
     bool runout_modal_shown_for_pause_{false};
+
+    /// The lane the shown runout came from (FilamentSensorManager::real_runout_lane()),
+    /// -1 when it named none. Load and Unload act on its head.
+    int runout_lane_{-1};
 
     /// Set when the user triggers Load/Unload/Purge from within the modal. While
     /// true, the sensor-driven auto-close is suppressed so a user-initiated load

@@ -1,0 +1,240 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Guided resume after a power loss, driven by the HelixPrint plugin.
+     One state per PlrWizardStep value on plr_wizard_step; PlrWizardOverlay
+     publishes the plan and the answers it still needs. -->
+<component>
+  <view name="plr_wizard_overlay" extends="overlay_panel" title="Resume Print" bg_color="#screen_bg">
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" style_pad_all="#space_md" scrollable="false" flex_flow="column"
+            style_pad_gap="#space_md">
+      <!-- ================================================================ -->
+      <!-- STEP: OFFER (0) - waiting for the plan -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_loading"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
+              style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="0"/>
+        <spinner size="lg"/>
+        <text_heading width="100%" text="Finding where the print stopped..." style_text_align="center" long_mode="wrap"/>
+        <text_small width="90%"
+                    text="The printer reads the file up to the last saved position. A large file can take a minute."
+                    style_text_align="center" long_mode="wrap"/>
+        <ui_button name="btn_plr_cancel_loading" width="40%" text="Cancel" variant="secondary">
+          <event_cb trigger="clicked" callback="on_plr_wizard_abort"/>
+        </ui_button>
+      </lv_obj>
+      <!-- ================================================================ -->
+      <!-- STEP: CHECKS (1) - the plan and the pre-motion confirmations -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_checks"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
+              scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="1"/>
+        <lv_obj name="plr_checks_body"
+                width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
+                scroll_dir="ver">
+          <lv_obj width="100%"
+                  height="content" style_bg_color="#section_bg_color" style_radius="#border_radius"
+                  style_pad_all="#space_sm" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
+            <text_body name="plr_file" width="100%" bind_text="plr_wizard_file" long_mode="dots"/>
+            <text_small name="plr_position" width="100%" bind_text="plr_wizard_position" long_mode="wrap"/>
+            <text_small name="plr_outage"
+                        width="100%" bind_text="plr_wizard_outage" long_mode="wrap" style_text_color="#text_muted"/>
+            <text_small name="plr_bed"
+                        width="100%" bind_text="plr_wizard_bed" long_mode="wrap" style_text_color="#text_muted"/>
+            <text_small name="plr_heat_in_place_note"
+                        width="100%" long_mode="wrap" style_text_color="#text_muted"
+                        text="The bed and nozzle heat together before anything moves, so the print re-grips and the nozzle lets go of it."/>
+            <text_small name="plr_layer_start_note"
+                        width="100%" long_mode="wrap" style_text_color="#warning"
+                        text="The exact stopping point could not be found. The print resumes at the start of the next layer and skips the rest of this one.">
+              <bind_flag_if_eq subject="plr_warn_layer_start" flag="hidden" ref_value="0"/>
+            </text_small>
+          </lv_obj>
+          <lv_checkbox name="plr_ack_part"
+                       width="100%" text="The print is still stuck to the bed" bind_checked="plr_ack_part">
+            <bind_flag_if_eq subject="plr_need_part" flag="hidden" ref_value="0"/>
+          </lv_checkbox>
+          <lv_checkbox name="plr_ack_nozzle"
+                       width="100%" text="The nozzle is clear of the print" bind_checked="plr_ack_nozzle">
+            <bind_flag_if_eq subject="plr_need_nozzle" flag="hidden" ref_value="0"/>
+          </lv_checkbox>
+          <lv_checkbox name="plr_ack_no_mesh"
+                       width="100%" text="Resume without the bed mesh this print used" bind_checked="plr_ack_no_mesh">
+            <bind_flag_if_eq subject="plr_need_no_mesh" flag="hidden" ref_value="0"/>
+          </lv_checkbox>
+          <lv_checkbox name="plr_ack_next_layer"
+                       width="100%" text="Skip the rest of this layer and resume at the next one"
+                       bind_checked="plr_ack_next_layer">
+            <bind_flag_if_eq subject="plr_need_next_layer" flag="hidden" ref_value="0"/>
+          </lv_checkbox>
+          <lv_checkbox name="plr_ack_cold_bed"
+                       width="100%" text="Resume even though the bed cooled down" bind_checked="plr_ack_cold_bed">
+            <bind_flag_if_eq subject="plr_need_cold_bed" flag="hidden" ref_value="0"/>
+          </lv_checkbox>
+        </lv_obj>
+        <lv_obj width="100%"
+                height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md" scrollable="false">
+          <ui_button name="btn_plr_cancel_checks" flex_grow="1" text="Cancel" variant="secondary">
+            <event_cb trigger="clicked" callback="on_plr_wizard_abort"/>
+          </ui_button>
+          <ui_button name="btn_plr_continue" flex_grow="2" bind_text="plr_wizard_continue_text" moves_machine="true">
+            <bind_state_if cond="plr_need_part gt plr_ack_part or plr_need_nozzle gt plr_ack_nozzle or plr_need_no_mesh gt plr_ack_no_mesh or plr_need_next_layer gt plr_ack_next_layer or plr_need_cold_bed gt plr_ack_cold_bed"
+                           state="disabled"/>
+            <event_cb trigger="clicked" callback="on_plr_wizard_continue"/>
+          </ui_button>
+        </lv_obj>
+      </lv_obj>
+      <!-- ================================================================ -->
+      <!-- STEP: PREPARING (2) - bed wait, cold lift, X/Y home -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_preparing"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
+              style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="2"/>
+        <spinner size="lg"/>
+        <text_heading width="100%" text="Preparing the printer" style_text_align="center" long_mode="wrap"/>
+        <text_body name="plr_progress"
+                   width="90%" bind_text="plr_wizard_progress" style_text_align="center" long_mode="wrap"/>
+        <text_small name="plr_bed_live"
+                    width="90%" bind_text="plr_wizard_bed_live" style_text_align="center" style_text_color="#text_muted"/>
+        <ui_button name="btn_plr_cancel_preparing"
+                   width="100%" height="#button_height_lg" icon="alert_octagon" text="Cancel" variant="danger">
+          <event_cb trigger="clicked" callback="on_plr_wizard_abort"/>
+        </ui_button>
+      </lv_obj>
+      <!-- ================================================================ -->
+      <!-- STEP: Z (3) - tier 2 confirms the held height, tier 1 jogs to the part -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_z"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
+              scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="3"/>
+        <lv_obj name="plr_z_body"
+                width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_cross_place="center"
+                style_pad_gap="#space_sm" scroll_dir="ver">
+          <!-- plr_wizard_z_kind: 0 jog, 1 lifted and homed by prepare, 2 not moved -->
+          <text_body name="plr_z_lifted_text"
+                     width="100%" long_mode="wrap"
+                     text="The nozzle is lifted clear of the print and X and Y are homed. Resuming lowers it back to the height it stopped at.">
+            <bind_flag_if_not_eq subject="plr_wizard_z_kind" flag="hidden" ref_value="1"/>
+          </text_body>
+          <text_body name="plr_z_in_place_text"
+                     width="100%" long_mode="wrap"
+                     text="The nozzle hasn't moved since the power went out. Check that it sits just above the top of the print, then resume.">
+            <bind_flag_if_not_eq subject="plr_wizard_z_kind" flag="hidden" ref_value="2"/>
+          </text_body>
+          <text_body name="plr_z_jog_text"
+                     width="100%" long_mode="wrap"
+                     text="Lower the nozzle until it just touches the top of the print, then resume.">
+            <bind_flag_if_not_eq subject="plr_wizard_z_kind" flag="hidden" ref_value="0"/>
+          </text_body>
+          <lv_obj name="plr_jog_controls"
+                  width="100%" height="content" style_pad_all="0" flex_flow="column" style_flex_cross_place="center"
+                  style_pad_gap="#space_sm" scrollable="false">
+            <bind_flag_if_not_eq subject="plr_wizard_tier" flag="hidden" ref_value="1"/>
+            <text_heading name="plr_z_display" bind_text="plr_wizard_z"/>
+            <lv_obj width="100%"
+                    height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs" scrollable="false">
+              <ui_button name="btn_plr_step_0" flex_grow="1" text="0.05 mm">
+                <bind_style name="styles.choice_selected" subject="plr_jog_step" ref_value="0"/>
+                <bind_style_if name="styles.choice_idle" cond="plr_jog_step ne 0"/>
+                <event_cb trigger="clicked" callback="on_plr_wizard_step" user_data="0"/>
+              </ui_button>
+              <ui_button name="btn_plr_step_1" flex_grow="1" text="0.1 mm">
+                <bind_style name="styles.choice_selected" subject="plr_jog_step" ref_value="1"/>
+                <bind_style_if name="styles.choice_idle" cond="plr_jog_step ne 1"/>
+                <event_cb trigger="clicked" callback="on_plr_wizard_step" user_data="1"/>
+              </ui_button>
+              <ui_button name="btn_plr_step_2" flex_grow="1" text="1 mm">
+                <bind_style name="styles.choice_selected" subject="plr_jog_step" ref_value="2"/>
+                <bind_style_if name="styles.choice_idle" cond="plr_jog_step ne 2"/>
+                <event_cb trigger="clicked" callback="on_plr_wizard_step" user_data="2"/>
+              </ui_button>
+            </lv_obj>
+            <lv_obj width="100%"
+                    height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
+              <ui_button name="btn_plr_jog_up" flex_grow="1" icon="arrow_up" text="Raise" moves_machine="true">
+                <event_cb trigger="clicked" callback="on_plr_wizard_jog" user_data="1"/>
+              </ui_button>
+              <ui_button name="btn_plr_jog_down" flex_grow="1" icon="arrow_down" text="Lower" moves_machine="true">
+                <event_cb trigger="clicked" callback="on_plr_wizard_jog" user_data="-1"/>
+              </ui_button>
+            </lv_obj>
+          </lv_obj>
+        </lv_obj>
+        <lv_obj width="100%"
+                height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md" scrollable="false">
+          <ui_button name="btn_plr_cancel_z" flex_grow="1" text="Cancel" variant="danger">
+            <event_cb trigger="clicked" callback="on_plr_wizard_abort"/>
+          </ui_button>
+          <ui_button name="btn_plr_resume" flex_grow="2" text="Resume Print" variant="success" moves_machine="true">
+            <bind_state_if cond="plr_wizard_tier eq 1 and plr_z_jogged eq 0" state="disabled"/>
+            <event_cb trigger="clicked" callback="on_plr_wizard_resume"/>
+          </ui_button>
+        </lv_obj>
+      </lv_obj>
+      <!-- ================================================================ -->
+      <!-- STEP: COMMITTING (4) - nozzle heat, purge, start -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_committing"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
+              style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="4"/>
+        <spinner size="lg"/>
+        <text_heading width="100%" text="Resuming the print" style_text_align="center" long_mode="wrap"/>
+        <text_body name="plr_commit_progress"
+                   width="90%" bind_text="plr_wizard_progress" style_text_align="center" long_mode="wrap"/>
+        <ui_button name="btn_plr_cancel_committing"
+                   width="100%" height="#button_height_lg" icon="alert_octagon" text="Cancel" variant="danger">
+          <bind_flag_if_eq subject="plr_print_starting" flag="hidden" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_plr_wizard_abort"/>
+        </ui_button>
+      </lv_obj>
+      <!-- ================================================================ -->
+      <!-- STEP: DONE (5) -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_done"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
+              style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="5"/>
+        <icon src="check_circle" size="lg" variant="success"/>
+        <text_heading width="100%" text="Print resumed" style_text_align="center"/>
+        <ui_button name="btn_plr_done" width="40%" text="Done">
+          <event_cb trigger="clicked" callback="on_plr_wizard_close"/>
+        </ui_button>
+      </lv_obj>
+      <!-- ================================================================ -->
+      <!-- STEP: FAILED (6) -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_failed"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
+              style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="6"/>
+        <icon src="alert_circle" size="lg" variant="danger"/>
+        <text_heading width="100%" text="Resume failed" style_text_align="center"/>
+        <text_body name="plr_error" width="90%" bind_text="plr_wizard_error" style_text_align="center" long_mode="wrap"/>
+        <ui_button name="btn_plr_close_failed" width="40%" text="Close">
+          <event_cb trigger="clicked" callback="on_plr_wizard_close"/>
+        </ui_button>
+      </lv_obj>
+      <!-- ================================================================ -->
+      <!-- STEP: ABORTED (7) -->
+      <!-- ================================================================ -->
+      <lv_obj name="plr_step_aborted"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
+              style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="plr_wizard_step" flag="hidden" ref_value="7"/>
+        <text_heading width="100%" text="Resume canceled" style_text_align="center"/>
+        <text_body width="90%"
+                   text="The saved position is kept. Reconnect or restart the screen to be offered the resume again."
+                   style_text_align="center" long_mode="wrap"/>
+        <ui_button name="btn_plr_close_aborted" width="40%" text="Close">
+          <event_cb trigger="clicked" callback="on_plr_wizard_close"/>
+        </ui_button>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

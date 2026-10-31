@@ -22,32 +22,29 @@
 
 ## What this fork adds
 
-### Multiple ACE units alongside the U1's own toolheads
+### multiACE and LAN pairing are upstream now
 
-Stock HelixScreen models the U1 as a four-head parallel toolchanger. This fork adds
-**multiACE**: one or more Snapmaker ACE units feeding the same machine, shown as
-separate units with their own slot counts, and a filament path that traces which
-spool actually feeds which tool.
+Multiple ACE units alongside the U1's own toolheads ([multiACE](https://github.com/decay71/multiACE))
+and LAN pairing for Snapmaker Orca and the Snapmaker App both started in this fork
+and now ship in upstream HelixScreen, which this fork tracks. The ACE units appear
+as their own units beside the U1's heads, with the filament path tracing which bay
+feeds which head and per-unit drying controls:
 
 <img src="docs/images/u1/ams-overview.png" alt="Multi-filament overview: SnapSwap and ACE 2 Pro" width="800"/>
 
-Per-unit drying comes with it — live temperature and humidity, material presets, and
-auto-dry with its own thresholds:
-
 <img src="docs/images/u1/filament-environment.png" alt="ACE 2 Pro drying controls" width="800"/>
 
-### LAN pairing for Snapmaker Orca and the Snapmaker App
-
-The U1's firmware brokers pairing itself and delegates one step to the printer's
-screen: the approval tap. Replacing the stock screen means nothing answers, so
-Orca and the phone app hang at *"requesting connection"* until they time out.
-
-This fork answers it:
+The pairing prompt answers the firmware's approval step, so Orca and the phone app
+connect instead of hanging at *"requesting connection"*
+([`docs/devel/LAN_CLIENT_AUTHORIZATION.md`](docs/devel/LAN_CLIENT_AUTHORIZATION.md)):
 
 <img src="docs/images/u1/pairing-prompt.png" alt="Connection Request prompt" width="800"/>
 
-Deny goes on the wire too, so a refused client fails immediately instead of waiting.
-Details in [`docs/devel/LAN_CLIENT_AUTHORIZATION.md`](docs/devel/LAN_CLIENT_AUTHORIZATION.md).
+### Runout recovery on a paused U1
+
+A runout-paused U1 can be recovered from the runout dialog: Resume refeeds the
+head without the `PRINTING=1` flag that makes the firmware skip the load, and the
+manual Load/Unload/Purge row stays available while paused.
 
 ### Installable U1 builds
 

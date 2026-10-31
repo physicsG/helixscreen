@@ -7,27 +7,26 @@
  *        has already decided which tier to take.
  *
  * filament_op_dispatch.h (plan_load(), plan_unload()) centralizes the DECISION
- * of which tier a filament operation takes. The act of actually running that
- * tier — building BackendCaps, switching over FilamentTier, dispatching the
- * configured macro or falling back to raw gcode — had begun to diverge the
- * same way across surfaces before this file existed. Extracted from
- * PrintStatusWidget::dispatch_load(), which was the first duplicate of
- * FilamentRunoutHandler's version. FilamentRunoutHandler was converted onto
- * this file too, so both callers now share this execution; FilamentPanel and
- * AmsOperationSidebar still answer the same plan_load()/plan_unload()
- * decision but each run their own independent execution ladder — unconverted
- * follow-up.
+ * of which tier a filament operation takes. This file runs that tier: building
+ * BackendCaps, switching over FilamentTier, dispatching the configured macro or
+ * falling back to raw gcode. Every entry point heats the nozzle first through
+ * FilamentOpHeater (filament_op_heater.h) when the op needs it, so a surface on
+ * this ladder cannot dispatch onto a cold nozzle.
  */
 
 #pragma once
 
+#include "filament_action_set.h"
 #include "filament_op_dispatch.h"
 #include "filament_op_router.h"
+#include "filament_op_slot_resolver.h"
+#include "helix_shared_callback.h"
 #include "moonraker_types.h"
 #include "standard_macros.h"
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace helix {
@@ -60,6 +59,32 @@ namespace helix::ui {
  */
 [[nodiscard]] BackendCaps read_backend_caps(AmsBackend* backend, AmsSystemInfo& info_out,
                                             int target_slot);
+
+/**
+ * @brief Read the filament action decision's inputs off a live AmsBackend.
+ *
+ * selected_head stays -1: a surface with a selection sets it itself.
+ *
+ * @param backend  May be null; the view then reports no backend.
+ * @param snapshot A get_system_info() reading of @p backend already in hand
+ *                 (AmsState's shared one); null reads the backend.
+ */
+[[nodiscard]] FilamentHeadView read_filament_head_view(AmsBackend* backend, PrinterState& state,
+                                                       const AmsSystemInfo* snapshot = nullptr);
+
+/**
+ * @brief The slot a runout's Load or Unload names.
+ *
+ * The runout's own lane decides the head. An Unload takes that lane, which is
+ * what sits in the head; a Load takes the head's Assigned Tool slot, falling
+ * back to the lane. A runout that names no lane uses the active slot.
+ *
+ * @param backend      May be null; the answer is then -1.
+ * @param runout_lane  FilamentSensorManager::real_runout_lane(): nullopt or -1
+ *                     when the runout names no lane.
+ */
+[[nodiscard]] int runout_target_slot(AmsBackend* backend, std::optional<int> runout_lane,
+                                     bool load);
 
 /// The extruder a filament op heats, and the numbers a nozzle prefill holds to.
 struct OpNozzle {
@@ -112,7 +137,7 @@ struct OpNozzle {
 enum class PreheatSkip {
     None,             ///< Preheat as usual
     UserOverride,     ///< "Allow cold load/unload" — the user's macros do their own heating
-    BackendSelfHeats, ///< AmsBackend::supports_auto_heat_on_load()
+    BackendSelfHeats, ///< AmsBackend::supports_auto_heat_on_load() / _on_unload()
     MacroSelfHeats,   ///< helix::filament_macros::macro_heats_hotend()
 };
 
@@ -141,22 +166,34 @@ enum class PreheatSkip {
 // ============================================================================
 
 /**
+ * @brief The homing decision, from facts already gathered.
+ *
+ * Homes only when something known needs it: on tier 1 a backend that does not
+ * delegate homing to the printer, on tier 2 a macro profile that needs a home
+ * first. An unrecognized macro runs as it is, unhomed (#1819). The raw-gcode
+ * tier moves E only, which Klipper runs unhomed.
+ *
+ * Each claim is read against its own TIER. A backend's claim is about the gcode
+ * that backend emits, so it says nothing once bypass has dropped the op to the
+ * user's macro; a macro's claim is about that macro run alone, so it says
+ * nothing about a backend that merely composes it with moves of its own.
+ *
+ * @param tier                     The tier the op dispatches on.
+ * @param toolhead_homed           Already homed needs nothing.
+ * @param backend_delegates_homing AmsBackend::delegates_homing_to_printer().
+ * @param macro_needs_home_first   filament_macros::macro_needs_home_first().
+ */
+[[nodiscard]] bool prerequisite_home_needed(FilamentTier tier, bool toolhead_homed,
+                                            bool backend_delegates_homing,
+                                            bool macro_needs_home_first);
+
+/**
  * @brief Must the toolhead be homed before this op is dispatched?
  *
  * A surface that gets a yes homes first, with no confirmation: asking for the op
  * is consent to the home it requires. Same shape as preheat_skip_reason(), for
- * the other thing a surface would otherwise do redundantly. Two ways the question is already
- * answered: AmsBackend::delegates_homing_to_printer() on tier 1, and a macro carrying its own
- * conditional home on tier 2.
- *
- * Both are read against the TIER, which is what makes them safe. A backend's
- * claim is about the gcode that backend emits, so it says nothing once bypass
- * has dropped the op to the user's macro; a macro's claim is about that macro
- * run alone, so it says nothing about a backend that merely composes it with
- * unguarded moves of its own.
- *
- * When unsure the answer is yes: an unneeded G28 costs time, while a skipped
- * one moves a toolhead with no reference.
+ * the other thing a surface would otherwise do redundantly. Gathers the facts
+ * for prerequisite_home_needed(), which holds the rule.
  *
  * @param plan           The plan about to be dispatched.
  * @param slot           Which StandardMacros slot @p plan resolves against.
@@ -195,21 +232,21 @@ struct FilamentOpSurface {
     /// Arm what this surface shows while the op runs. Called once, immediately
     /// before the chosen tier runs — never on a refusal, which is what keeps a
     /// refused op from leaving a surface stuck in a phantom "busy".
-    std::function<void(const FilamentOpPlan&)> on_begin;
+    helix::SharedCallback<void(const FilamentOpPlan&)> on_begin;
 
     /// Unwind what on_begin armed, after a tier-1 dispatch the backend rejected
     /// outright. Owning the report is the surface's option: an unset hook leaves
     /// the executor to raise the generic AMS-error toast, while a hook that sets
     /// `reported` true has raised its own and suppresses that.
-    std::function<void(const FilamentOpPlan&, const AmsError&, bool& reported)> on_failed;
+    helix::SharedCallback<void(const FilamentOpPlan&, const AmsError&, bool& reported)> on_failed;
 
     /// Unwind after a macro or raw-gcode dispatch failed. Separate from
     /// on_failed because there is no AmsError there — the executor has already
     /// reported through report_op_error(), and this is bookkeeping only.
-    std::function<void(const FilamentOpPlan&)> on_async_failed;
+    helix::SharedCallback<void(const FilamentOpPlan&)> on_async_failed;
 
     /// Present a refusal. Unset raises the shared toasts.
-    std::function<void(const FilamentOpPlan&)> on_refused;
+    helix::SharedCallback<void(const FilamentOpPlan&)> on_refused;
 
     /// The op finished, on the tiers that have a completion signal (macro and
     /// raw gcode). Tier 1 completion arrives through the backend's action feed
@@ -221,14 +258,14 @@ struct FilamentOpSurface {
     /// on_begin, on_failed and on_refused are NOT marshalled — those run inline
     /// on whichever thread called the executor, which is the UI thread for every
     /// surface that has a button.
-    std::function<void()> on_async_success;
+    helix::SharedCallback<void()> on_async_success;
 
     /// Wrap a callback that may outlive this surface. Unset runs it directly,
     /// which is correct ONLY for a surface that outlives every dispatch it
     /// starts. A surface torn down with a panel must supply the token.defer()
     /// wrapper here, or a macro-parameter modal answered after the teardown
     /// reaches freed memory.
-    std::function<void(std::function<void()>)> guard;
+    helix::SharedCallback<void(helix::SharedCallback<void()>)> guard;
 
     /// Parameter values this surface already knows for the macro @p op runs, keyed
     /// by parameter name (nozzle_temp_prefill() in filament_op_router.h). Called
@@ -236,14 +273,39 @@ struct FilamentOpSurface {
     /// dispatch_filament_macro(), which sends only the names the macro reads and
     /// skips the prompt when they fill every one. Unset offers nothing, and under
     /// ParamPolicy::Suppress the values are not used.
-    std::function<std::map<std::string, std::string>(FilamentMacroOp op)> macro_prefill;
+    helix::SharedCallback<std::map<std::string, std::string>(FilamentMacroOp op)> macro_prefill;
 
     /// Runs just before the macro tier sends its macro, once any parameter prompt
     /// has been answered: call `send` to go ahead, or `fail` to stop with that
     /// error, which unwinds and reports the op the way a failed macro does and
     /// sends nothing. Unset sends straight away.
-    std::function<void(std::function<void()> send, std::function<void(const MoonrakerError&)> fail)>
+    helix::SharedCallback<void(helix::SharedCallback<void()> send,
+                               helix::SharedCallback<void(const MoonrakerError&)> fail)>
         before_macro;
+
+    /// The material to heat for when neither the target lane nor the external
+    /// spool names one (a material preset the surface offers). Asked once, when
+    /// the op is requested. Unset heats to kDefaultLoadPreheatTemp there.
+    helix::SharedCallback<std::optional<PreheatTarget>()> preheat_fallback_material;
+
+    /// The preheat this op waited on ended without running it: the user
+    /// withdrew it, another op replaced it, or it could not complete. Unset is
+    /// right for a surface whose user saw the heater's toast and has nothing
+    /// waiting on the op; a surface with a continuation (a flow that moves on
+    /// once the op finishes) must set it, or that flow stalls silently. Runs on
+    /// the main thread, through the guard.
+    helix::SharedCallback<void()> on_preheat_ended;
+
+    /// Names this surface to the preheat: the same op on the same slot from the
+    /// same owner is a re-tap. Unset uses log_tag, which every caller passes as a
+    /// literal naming its surface.
+    const void* owner = nullptr;
+
+    /// Whether the surface is still there for the user, for a dispatch that runs
+    /// after a preheat. One that is not raises no parameter prompt: the dispatch
+    /// downgrades ParamPolicy::Prompt to Unattended, which sends the prefill read
+    /// at request time. Unset counts as alive.
+    helix::SharedCallback<bool()> alive;
 };
 
 /// @note **`log_tag` must have static storage duration.** All three functions
@@ -259,9 +321,11 @@ struct FilamentOpSurface {
 /// tier through plan_load() and running it. `log_tag` prefixes the spdlog lines
 /// so a reader can still tell which surface asked.
 ///
-/// Extracted from PrintStatusWidget::dispatch_load(). filament_op_dispatch.h
-/// already centralizes the DECISION; this centralizes the EXECUTION, which had
-/// begun to diverge the same way.
+/// Unless the plan is refused, the op goes through FilamentOpHeater first: it
+/// runs now on a hot nozzle, or once the nozzle is hot. A deferred op re-plans
+/// against AmsState's backend at that moment, since the backend or its lanes
+/// can change while the nozzle heats. A request while a preheat is pending
+/// cancels that preheat instead.
 void execute_filament_load(AmsBackend* backend, int slot, const char* log_tag);
 
 /// Load, with this surface's bookkeeping hung off the shared ladder.
@@ -280,12 +344,7 @@ void execute_filament_unload(AmsBackend* backend, int slot, bool target_is_loade
 /// Purge counterpart. Two tiers only (the configured macro, then
 /// filament_purge_fallback_gcode() from filament_op_router.h) — no AmsBackend
 /// exposes a purge entry point, so there is no plan_purge() to route through.
-/// Extracted from FilamentRunoutHandler::dispatch_purge(), the one existing
-/// purge dispatch that was NOT entangled with panel UI state; that method now
-/// calls this. FilamentPanel::execute_purge() was deliberately not the source:
-/// it drives that panel's operation_guard_ spinner and a macro-parameter modal
-/// with a nozzle-temperature prefill, none of which apply here — and it
-/// remains an unconverted third copy for that reason.
+/// Heats for the loaded lane's material first, like the load and unload.
 void execute_filament_purge(const char* log_tag);
 
 } // namespace helix::ui

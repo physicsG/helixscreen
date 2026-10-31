@@ -21,19 +21,19 @@ namespace helix {
 /// so a release at the border drops on the page the user sees rather than on
 /// one that has only begun sliding in. Short, because a widget dragged past the
 /// border is already a committed intent.
-inline constexpr uint32_t CROSS_PAGE_CROSSING_DELAY_MS = 50;
+inline constexpr uint32_t kCrossPageCrossingDelayMs = 50;
 
 /// How long the pointer stays in an edge zone before the dwell flips, in ms.
 ///
 /// Long enough that carrying a widget through the zone to the outer column does
 /// not flip, short enough to read as a response to a held push.
-inline constexpr uint32_t CROSS_PAGE_DWELL_MS = 600;
+inline constexpr uint32_t kCrossPageDwellMs = 600;
 
 /// How far past the majority line the edge push may carry a widget, in px.
 ///
 /// The cap sits just past the line on both sides, so a pinned pointer always
 /// reaches a crossing and never runs the widget further off the page than that.
-inline constexpr int CROSS_PAGE_PUSH_CAP_SLOP_PX = 4;
+inline constexpr int kCrossPagePushCapSlopPx = 4;
 
 /// Width of the edge zone inside each side of the page frame, in px, for a grid
 /// whose column track is @p cell_w px wide.
@@ -116,7 +116,7 @@ bool cross_page_drop_creates_page(int page_index, int page_count, bool has_next_
  *
  * - Edge push: while the pointer stays in an edge zone the widget slides past
  *   where the pointer puts it, by the push speed times the time spent in the
- *   zone, capped CROSS_PAGE_PUSH_CAP_SLOP_PX past the majority line on either
+ *   zone, capped kCrossPagePushCapSlopPx past the majority line on either
  *   side. Leaving or changing zones drops the widget back on the pointer.
  * - Crossing: the widget's majority beyond a frame edge requests one flip
  *   toward it; the next crossing waits until the widget is majority inside.

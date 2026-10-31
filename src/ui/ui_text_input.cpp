@@ -30,6 +30,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -38,14 +39,14 @@
  * The user_data is structured as: (MAGIC | hint_value)
  * This allows us to both identify text_input widgets and store their hint.
  */
-static constexpr uintptr_t TEXT_INPUT_MAGIC = 0xBADC0DE0;
-static constexpr uintptr_t TEXT_INPUT_MAGIC_MASK = 0xFFFFFFF0;
-static constexpr uintptr_t TEXT_INPUT_HINT_MASK = 0x0000000F;
+static constexpr uintptr_t kTextInputMagic = 0xBADC0DE0;
+static constexpr uintptr_t kTextInputMagicMask = 0xFFFFFFF0;
+static constexpr uintptr_t kTextInputHintMask = 0x0000000F;
 
 // Size of the clear button icon (matches mdi_icons_24 font)
-static constexpr int32_t CLEAR_BTN_SIZE = 24;
+static constexpr int32_t kClearBtnSize = 24;
 // Right padding the clear button adds to the textarea for itself.
-static constexpr int32_t CLEAR_BTN_EXTRA_PAD = CLEAR_BTN_SIZE + 4;
+static constexpr int32_t kClearBtnExtraPad = kClearBtnSize + 4;
 
 // ============================================================================
 // Observer / Binding Callbacks
@@ -61,12 +62,20 @@ static thread_local bool g_updating_from_textarea = false;
  */
 static void textarea_text_observer_cb(lv_observer_t* observer, lv_subject_t* subject) {
     if (subject->type == LV_SUBJECT_TYPE_STRING || subject->type == LV_SUBJECT_TYPE_POINTER) {
+        auto* textarea = static_cast<lv_obj_t*>(observer->target);
+        const char* value = static_cast<const char*>(subject->value.pointer);
+        // Every keystroke's write-back lands here too. lv_textarea_set_text()
+        // moves the cursor to the end, so re-applying text the textarea already
+        // holds would yank a hand-placed cursor away after each character.
+        const char* current = lv_textarea_get_text(textarea);
+        if (value && current && std::strcmp(current, value) == 0) {
+            return;
+        }
         // With max_length set, lv_textarea_set_text() adds one character at a
         // time and fires VALUE_CHANGED after each. Writing that partial text
         // back would overwrite the subject buffer it is still reading from.
         g_updating_from_textarea = true;
-        lv_textarea_set_text(static_cast<lv_obj_t*>(observer->target),
-                             static_cast<const char*>(subject->value.pointer));
+        lv_textarea_set_text(textarea, value);
         g_updating_from_textarea = false;
     }
 }
@@ -196,7 +205,7 @@ static lv_obj_t* create_clear_button(lv_obj_t* textarea) {
 
     // Add right padding to textarea so text doesn't overlap the button
     int32_t original_pad = lv_obj_get_style_pad_right(textarea, LV_PART_MAIN);
-    int32_t extra_pad = CLEAR_BTN_EXTRA_PAD;
+    int32_t extra_pad = kClearBtnExtraPad;
     lv_obj_set_style_pad_right(textarea, original_pad + extra_pad, 0);
 
     // Alignment is relative to the content area (inside padding).
@@ -241,7 +250,7 @@ static void layout_suffix(lv_obj_t* suffix) {
     // Alignment is relative to the content area, so both float back out into the padding.
     lv_obj_align(suffix, LV_ALIGN_RIGHT_MID, reserve, 0);
     if (lv_obj_t* clear_btn = find_clear_btn(textarea)) {
-        lv_obj_align(clear_btn, LV_ALIGN_RIGHT_MID, CLEAR_BTN_EXTRA_PAD + reserve, 0);
+        lv_obj_align(clear_btn, LV_ALIGN_RIGHT_MID, kClearBtnExtraPad + reserve, 0);
     }
 }
 
@@ -269,6 +278,35 @@ static lv_obj_t* create_suffix(lv_obj_t* textarea) {
 }
 
 // ============================================================================
+// Vertical Fit
+// ============================================================================
+
+/**
+ * Shrink the vertical padding of a fixed-height one-line input until one line of
+ * text fits inside it, keeping it centered. When the content box is shorter than
+ * a line, the textarea's keep-the-cursor-visible scroll can satisfy neither its
+ * top nor its bottom edge and ping-pongs between them, so the text bounces.
+ */
+static void fit_pad_to_height_cb(lv_event_t* e) {
+    lv_obj_t* textarea = lv_event_get_target_obj(e);
+    if (!lv_textarea_get_one_line(textarea)) {
+        return;
+    }
+    const int32_t line_h =
+        lv_font_get_line_height(lv_obj_get_style_text_font(textarea, LV_PART_MAIN));
+    const int32_t border = lv_obj_get_style_border_width(textarea, LV_PART_MAIN);
+    const int32_t room = (lv_obj_get_height(textarea) - 2 * border - line_h) / 2;
+    const int32_t pad = std::clamp(room, int32_t{0}, theme_manager_get_spacing("space_md"));
+    if (lv_obj_get_style_pad_top(textarea, LV_PART_MAIN) != pad ||
+        lv_obj_get_style_pad_bottom(textarea, LV_PART_MAIN) != pad) {
+        lv_obj_set_style_pad_ver(textarea, pad, LV_PART_MAIN);
+        // A scroll toward the cursor started while the line did not fit would
+        // otherwise run on and leave the text shifted.
+        lv_obj_scroll_to_y(textarea, 0, LV_ANIM_OFF);
+    }
+}
+
+// ============================================================================
 // XML Widget Callbacks
 // ============================================================================
 
@@ -291,11 +329,8 @@ static void* ui_text_input_create(lv_xml_parser_state_t* state, const char** att
     lv_obj_set_style_text_font(textarea, theme_manager_get_font("font_body"), LV_PART_MAIN);
 
     // Apply responsive padding for consistent height across screen sizes
-    const char* pad_ver = lv_xml_get_const(nullptr, "space_md");
-    if (pad_ver) {
-        int32_t padding = std::atoi(pad_ver);
-        lv_obj_set_style_pad_ver(textarea, padding, 0);
-    }
+    lv_obj_set_style_pad_ver(textarea, theme_manager_get_spacing("space_md"), 0);
+    lv_obj_add_event_cb(textarea, fit_pad_to_height_cb, LV_EVENT_SIZE_CHANGED, nullptr);
 
     // Note: Border and background styling is handled by the theme's apply_cb,
     // which adds the outlined InputBg style to all textareas.
@@ -307,7 +342,7 @@ static void* ui_text_input_create(lv_xml_parser_state_t* state, const char** att
     // Set default keyboard hint (TEXT) via user_data magic value
     lv_obj_set_user_data(
         textarea,
-        reinterpret_cast<void*>(TEXT_INPUT_MAGIC | static_cast<uintptr_t>(KeyboardHint::TEXT)));
+        reinterpret_cast<void*>(kTextInputMagic | static_cast<uintptr_t>(KeyboardHint::TEXT)));
 
     // Auto-register with keyboard manager for software keyboard support.
     //
@@ -394,7 +429,7 @@ static void ui_text_input_apply(lv_xml_parser_state_t* state, const char** attrs
             }
 
             lv_obj_set_user_data(
-                textarea, reinterpret_cast<void*>(TEXT_INPUT_MAGIC | static_cast<uintptr_t>(hint)));
+                textarea, reinterpret_cast<void*>(kTextInputMagic | static_cast<uintptr_t>(hint)));
         } else if (lv_streq("show_clear_button", name)) {
             show_clear = lv_streq("true", value);
         } else if (lv_streq("clear_callback", name)) {
@@ -454,9 +489,9 @@ KeyboardHint ui_text_input_get_keyboard_hint(lv_obj_t* textarea) {
 
     auto user_data = reinterpret_cast<uintptr_t>(lv_obj_get_user_data(textarea));
 
-    if ((user_data & TEXT_INPUT_MAGIC_MASK) != TEXT_INPUT_MAGIC) {
+    if ((user_data & kTextInputMagicMask) != kTextInputMagic) {
         return KeyboardHint::TEXT;
     }
 
-    return static_cast<KeyboardHint>(user_data & TEXT_INPUT_HINT_MASK);
+    return static_cast<KeyboardHint>(user_data & kTextInputHintMask);
 }

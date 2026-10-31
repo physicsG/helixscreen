@@ -11,6 +11,7 @@
 #include "ams_error_bridge.h"
 #include "ams_state.h"
 #include "app_globals.h"
+#include "event_journal_recorder.h"
 #include "filament_insert_watcher.h"
 #include "gcode_error_router.h"
 #include "gcode_narration_router.h"
@@ -58,7 +59,7 @@ void GcodeResponseRouting::attach(IMoonrakerClient* client, IMoonrakerAPI* api) 
                         ui::report_action_prompt_gcode_failure(err.localized_message());
                     });
                 },
-                IMoonrakerAPI::MACRO_TIMEOUT_MS);
+                IMoonrakerAPI::kMacroTimeoutMs);
         });
     }
 
@@ -70,7 +71,7 @@ void GcodeResponseRouting::attach(IMoonrakerClient* client, IMoonrakerAPI* api) 
         }
         spdlog::info("[ActionPrompt] Closed on screen, sending prompt_end");
         api->execute_gcode(
-            ActionPromptManager::PROMPT_END_GCODE, nullptr,
+            ActionPromptManager::kPromptEndGcode, nullptr,
             [](const MoonrakerError& err) {
                 spdlog::warn("[ActionPrompt] prompt_end failed: {}", err.message);
             },
@@ -140,6 +141,8 @@ void GcodeResponseRouting::attach(IMoonrakerClient* client, IMoonrakerAPI* api) 
     m_filament_insert_watcher = std::make_unique<FilamentInsertWatcher>(api);
     m_filament_insert_watcher->start();
 
+    m_event_journal_recorder = std::make_unique<EventJournalRecorder>(client);
+
     // Layer tracking fallback: some slicers don't emit SET_PRINT_STATS_INFO, so
     // print_stats.info never updates current_layer. The response lines carry it.
     client->register_method_callback(
@@ -184,6 +187,7 @@ void GcodeResponseRouting::detach_handlers(IMoonrakerClient* client) {
 }
 
 void GcodeResponseRouting::release_routers() {
+    m_event_journal_recorder.reset();
     m_gcode_narration_router.reset();
     m_lan_client_auth_router.reset();
     m_gcode_error_router.reset();

@@ -6,8 +6,8 @@ struct _lv_obj_t;
 typedef struct _lv_obj_t lv_obj_t;
 namespace helix {
 class Config;
-}
 class IMoonrakerAPI;
+} // namespace helix
 
 namespace helix::wizard {
 

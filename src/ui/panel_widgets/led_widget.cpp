@@ -6,7 +6,6 @@
 #include "ui_event_safety.h"
 #include "ui_icon.h"
 #include "ui_tile_rung.h"
-#include "ui_toast_manager.h"
 #include "ui_utils.h"
 
 #include "app_globals.h"
@@ -164,7 +163,7 @@ std::vector<std::string> LedWidget::targets() const {
 }
 
 std::string LedWidget::overlay_device() const {
-    if (led_key_ == led::LIGHT_BUTTON_ALL) {
+    if (led_key_ == led::kLightButtonAll) {
         return led::LedController::instance().chamber_light();
     }
     const auto t = targets();
@@ -247,7 +246,7 @@ void LedWidget::bind_led() {
 
     auto& led_ctrl = led::LedController::instance();
     std::string name;
-    if (led_key_ == led::LIGHT_BUTTON_ALL) {
+    if (led_key_ == led::kLightButtonAll) {
         name = lv_tr("All lights");
     } else {
         const auto t = targets();
@@ -275,30 +274,8 @@ void LedWidget::select_light(const std::string& key) {
 }
 
 void LedWidget::handle_light_toggle() {
-    auto& led_ctrl = led::LedController::instance();
-    if (led_ctrl.light_command_in_flight()) {
-        spdlog::debug("[LedWidget] Ignoring toggle — LED command already in flight");
-        ToastManager::instance().show(
-            ToastSeverity::INFO, lv_tr("Light will switch when the current operation finishes"));
-        return;
-    }
-    const auto ids = targets();
-    if (ids.empty()) {
-        spdlog::warn("[LedWidget] Light toggle called but no light resolves");
-        return;
-    }
-
-    const bool on = led_ctrl.toggle_power(ids);
-    spdlog::info("[LedWidget] {} toggled {} device(s) {}", instance_id_, ids.size(),
-                 on ? "ON" : "OFF");
-
-    // Nothing will report back for devices with no readable state, so the
-    // flash is the only acknowledgement the tap gets.
-    const bool all_unknown = std::all_of(ids.begin(), ids.end(), [&](const std::string& id) {
-        return led_ctrl.device_state(id).power == led::PowerState::Unknown;
-    });
-    if (all_unknown) {
-        flash_light_icon();
+    if (toggle_lights(targets(), instance_id_.c_str()).unconfirmed) {
+        flash_light_icon(light_icon_);
     }
 }
 
@@ -309,7 +286,7 @@ LightIconLook LedWidget::icon_look() const {
         states.push_back(led_ctrl.device_state(id));
     }
     LightIconLook look = light_icon_look(states);
-    if (led_key_ == led::LIGHT_BUTTON_ALL) {
+    if (led_key_ == led::kLightButtonAll) {
         look.has_rgb = false;
     }
     return look;
@@ -345,36 +322,61 @@ void LedWidget::update_light_icon() {
                   look.unknown ? " (unknown)" : "");
 }
 
-void LedWidget::flash_light_icon() {
-    if (!light_icon_)
+namespace {
+
+void flash_opa_cb(void* obj, int32_t value) {
+    lv_obj_set_style_opa(static_cast<lv_obj_t*>(obj), static_cast<lv_opa_t>(value), 0);
+}
+
+/// The icon's text color before a flash, packed for lv_anim user data: bit 24
+/// set means a local color to put back, clear means the icon's styles own it.
+constexpr uintptr_t kFlashHadLocalColor = uintptr_t{1} << 24;
+
+} // namespace
+
+void flash_light_icon(lv_obj_t* icon) {
+    if (!icon)
         return;
 
-    // Flash gold briefly then fade back to muted
-    helix::ui::icon::set_color(light_icon_, theme_manager_get_color("light_icon_on"), LV_OPA_COVER);
-
-    if (!DisplaySettingsManager::instance().get_animations_enabled()) {
-        // No animations -- the next status update will restore the icon naturally
-        return;
+    // A flash already running keeps the color it will restore; reading the icon
+    // now would capture the flash's own lamp color.
+    uintptr_t resting = 0;
+    if (lv_anim_t* running = lv_anim_get(icon, flash_opa_cb)) {
+        resting = reinterpret_cast<uintptr_t>(lv_anim_get_user_data(running));
+        lv_anim_delete(icon, flash_opa_cb);
+    } else {
+        lv_style_value_t v;
+        if (lv_obj_get_local_style_prop(icon, LV_STYLE_TEXT_COLOR, &v, LV_PART_MAIN) ==
+            LV_STYLE_RES_FOUND) {
+            resting = kFlashHadLocalColor | (lv_color_to_u32(v.color) & 0xFFFFFF);
+        }
     }
 
-    // Animate opacity 255 -> 0 then restore to muted on completion
+    helix::ui::icon::set_color(icon, theme_manager_get_color("light_icon_on"), LV_OPA_COVER);
+
+    // With animations off the lamp color holds for the same time, unfaded.
+    const bool fade = DisplaySettingsManager::instance().get_animations_enabled();
     lv_anim_t anim;
     lv_anim_init(&anim);
-    lv_anim_set_var(&anim, light_icon_);
-    lv_anim_set_values(&anim, LV_OPA_COVER, LV_OPA_TRANSP);
+    lv_anim_set_var(&anim, icon);
+    lv_anim_set_values(&anim, LV_OPA_COVER, fade ? LV_OPA_TRANSP : LV_OPA_COVER);
     lv_anim_set_duration(&anim, 300);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
-    lv_anim_set_exec_cb(&anim, [](void* obj, int32_t value) {
-        lv_obj_set_style_opa(static_cast<lv_obj_t*>(obj), static_cast<lv_opa_t>(value), 0);
-    });
+    lv_anim_set_exec_cb(&anim, flash_opa_cb);
+    lv_anim_set_user_data(&anim, reinterpret_cast<void*>(resting));
     lv_anim_set_completed_cb(&anim, [](lv_anim_t* a) {
-        auto* icon = static_cast<lv_obj_t*>(a->var);
-        lv_obj_set_style_opa(icon, LV_OPA_COVER, 0);
-        helix::ui::icon::set_color(icon, theme_manager_get_color("light_icon_off"), LV_OPA_COVER);
+        auto* obj = static_cast<lv_obj_t*>(a->var);
+        const auto packed = reinterpret_cast<uintptr_t>(lv_anim_get_user_data(a));
+        lv_obj_set_style_opa(obj, LV_OPA_COVER, 0);
+        if (packed & kFlashHadLocalColor) {
+            lv_obj_set_style_text_color(obj, lv_color_hex(packed & 0xFFFFFF), LV_PART_MAIN);
+        } else {
+            lv_obj_remove_local_style_prop(obj, LV_STYLE_TEXT_COLOR, LV_PART_MAIN);
+        }
     });
     lv_anim_start(&anim);
 
-    spdlog::debug("[LedWidget] Flash light icon (state unknown)");
+    spdlog::debug("[LightButtons] Flash light icon (state unknown)");
 }
 
 bool LedWidget::on_edit_configure() {
@@ -396,7 +398,7 @@ void LedWidget::show_led_picker() {
     for (size_t i = 0; i < devices.size(); ++i) {
         picker_.row_ids.push_back(devices[i].id);
         subs.names.set_string(i, led::device_display_name(devices[i]));
-        if (led_key_ != led::LIGHT_BUTTON_ALL && !t.empty() && devices[i].id == t.front()) {
+        if (led_key_ != led::kLightButtonAll && !t.empty() && devices[i].id == t.front()) {
             selected = static_cast<int>(i);
         }
     }
@@ -441,7 +443,7 @@ void LedWidget::led_picker_row_cb(lv_event_t* e) {
         return;
     }
     const int index = helix::text_io::parse_leading<int>(ud).value_or(-1);
-    std::string key = led::LIGHT_BUTTON_ALL;
+    std::string key = led::kLightButtonAll;
     if (index >= 0 && static_cast<size_t>(index) < picker->row_ids.size()) {
         key = picker->row_ids[static_cast<size_t>(index)];
     }

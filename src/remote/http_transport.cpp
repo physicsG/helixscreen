@@ -21,7 +21,7 @@
 #include <unistd.h>
 #include <utility>
 
-static constexpr size_t MAX_HTTP_REQUEST = 1024 * 1024; // 1MB request cap.
+static constexpr size_t kMaxHttpRequest = 1024 * 1024; // 1MB request cap.
 
 namespace helix {
 
@@ -206,7 +206,7 @@ void HttpTransport::serve_client(int client_fd) {
             return; // Disconnected before a complete request.
         }
         buffer.append(chunk, static_cast<size_t>(n));
-        if (buffer.size() > MAX_HTTP_REQUEST) {
+        if (buffer.size() > kMaxHttpRequest) {
             std::string resp = http_response(413, "Payload Too Large", "text/plain", "too large\n");
             write_all(client_fd, resp.c_str(), resp.size());
             return;
@@ -273,7 +273,7 @@ void HttpTransport::serve_client(int client_fd) {
             break;
         }
         body.append(chunk, static_cast<size_t>(n));
-        if (body.size() > MAX_HTTP_REQUEST) {
+        if (body.size() > kMaxHttpRequest) {
             std::string resp = http_response(413, "Payload Too Large", "text/plain", "too large\n");
             write_all(client_fd, resp.c_str(), resp.size());
             return;

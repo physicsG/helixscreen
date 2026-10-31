@@ -31,7 +31,7 @@ void show_shared_param_modal(const std::string& macro_name, const helix::CachedM
         return;
     }
     get_filament_param_modal().show_for_unknown_params(lv_screen_active(), macro_name,
-                                                       std::move(on_execute));
+                                                       std::move(on_execute), prefill);
 }
 
 } // namespace
@@ -61,7 +61,7 @@ bool dispatch_filament_macro(const std::string& macro_name, ParamPolicy policy,
         helix::MacroParamDefaults::instance().get(macro_name);
 
     helix::MacroRunRequest req;
-    req.prompt_for_params = policy != ParamPolicy::Suppress && defaults.ask_for_params;
+    req.prompt_for_params = policy == ParamPolicy::Prompt && defaults.ask_for_params;
     // Suppress must keep sending exactly what it did before saved defaults:
     // the saved values only, and nothing without a record. Passing the
     // computed values through would make it a sender it never was.
@@ -126,28 +126,28 @@ std::map<std::string, std::string> nozzle_temp_prefill(FilamentMacroOp op, int e
 std::string filament_load_fallback_gcode() {
     // Fast move through bowden (56mm at 20mm/s) then slow push into the melt
     // zone (24mm at 5mm/s).
-    constexpr int LOAD_FAST_MM = 56;
-    constexpr int LOAD_FAST_SPEED = 20 * 60; // 20 mm/s → 1200 mm/min
-    constexpr int LOAD_SLOW_MM = 24;
-    constexpr int LOAD_SLOW_SPEED = 5 * 60; // 5 mm/s → 300 mm/min
-    return fmt::format("M83\nG1 E{} F{}\nG1 E{} F{}", LOAD_FAST_MM, LOAD_FAST_SPEED, LOAD_SLOW_MM,
-                       LOAD_SLOW_SPEED);
+    constexpr int kLoadFastMm = 56;
+    constexpr int kLoadFastSpeed = 20 * 60; // 20 mm/s → 1200 mm/min
+    constexpr int kLoadSlowMm = 24;
+    constexpr int kLoadSlowSpeed = 5 * 60; // 5 mm/s → 300 mm/min
+    return fmt::format("M83\nG1 E{} F{}\nG1 E{} F{}", kLoadFastMm, kLoadFastSpeed, kLoadSlowMm,
+                       kLoadSlowSpeed);
 }
 
 std::string filament_unload_fallback_gcode() {
     // Tip-shape (push 3mm, quick pull 5mm, dwell) then retract 80mm.
-    constexpr int UNLOAD_MM = 80;
-    constexpr int UNLOAD_SPEED = 20 * 60;   // 20 mm/s → 1200 mm/min
-    constexpr int TIP_PUSH_SPEED = 5 * 60;  // 5 mm/s → 300 mm/min
-    constexpr int TIP_PULL_SPEED = 60 * 60; // 60 mm/s → 3600 mm/min
-    return fmt::format("M83\nG1 E3 F{}\nG1 E-5 F{}\nG4 P500\nG1 E-{} F{}", TIP_PUSH_SPEED,
-                       TIP_PULL_SPEED, UNLOAD_MM, UNLOAD_SPEED);
+    constexpr int kUnloadMm = 80;
+    constexpr int kUnloadSpeed = 20 * 60;  // 20 mm/s → 1200 mm/min
+    constexpr int kTipPushSpeed = 5 * 60;  // 5 mm/s → 300 mm/min
+    constexpr int kTipPullSpeed = 60 * 60; // 60 mm/s → 3600 mm/min
+    return fmt::format("M83\nG1 E3 F{}\nG1 E-5 F{}\nG4 P500\nG1 E-{} F{}", kTipPushSpeed,
+                       kTipPullSpeed, kUnloadMm, kUnloadSpeed);
 }
 
 std::string filament_purge_fallback_gcode() {
-    constexpr int PURGE_FALLBACK_MM = 50;
-    constexpr int PURGE_FALLBACK_SPEED_MM_MIN = 10 * 60; // 10 mm/s → 600 mm/min
-    return fmt::format("M83\nG1 E{} F{}", PURGE_FALLBACK_MM, PURGE_FALLBACK_SPEED_MM_MIN);
+    constexpr int kPurgeFallbackMm = 50;
+    constexpr int kPurgeFallbackSpeedMmMin = 10 * 60; // 10 mm/s → 600 mm/min
+    return fmt::format("M83\nG1 E{} F{}", kPurgeFallbackMm, kPurgeFallbackSpeedMmMin);
 }
 
 } // namespace helix::ui

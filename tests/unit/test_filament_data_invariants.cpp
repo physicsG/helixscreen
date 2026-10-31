@@ -62,14 +62,14 @@ std::string join(const std::set<std::string>& s) {
 
 /// Absolute envelope for an FDM hotend. Nothing real prints at 50 °C or 900 °C;
 /// a value outside this band is a transposed digit, not a material.
-constexpr int NOZZLE_FLOOR = 150;
-constexpr int NOZZLE_CEIL = 450;
+constexpr int kNozzleFloor = 150;
+constexpr int kNozzleCeil = 450;
 
 /// Widest plausible product-vs-type disagreement. A brand may legitimately run
 /// hotter or cooler than the generic type (LW-PLA foams at 260-270 under type
 /// "PLA"), but a 50 °C gulf is the outer edge of "legitimate variant" and past it
 /// you are looking at a units error or a wrong `type` field.
-constexpr int TYPE_DIVERGENCE_TOLERANCE = 50;
+constexpr int kTypeDivergenceTolerance = 50;
 
 } // namespace
 
@@ -87,8 +87,8 @@ TEST_CASE("MATERIALS - nozzle range is ordered and physically plausible",
         // Strict: a zero-width range means the "range" carries no information and
         // nozzle_recommended() degenerates to a single point.
         CHECK(mat.nozzle_min < mat.nozzle_max);
-        CHECK(mat.nozzle_min >= NOZZLE_FLOOR);
-        CHECK(mat.nozzle_max <= NOZZLE_CEIL);
+        CHECK(mat.nozzle_min >= kNozzleFloor);
+        CHECK(mat.nozzle_max <= kNozzleCeil);
         // A range wider than 80 °C is not a recommendation, it is a guess. The
         // widest legitimate entry today is PLA-AERO at 60 (foaming grades use
         // temperature as the foaming knob).
@@ -170,7 +170,7 @@ TEST_CASE("MATERIALS - every compat group is served by a drying preset or is who
     // is correct, not a bug, but it must stay a deliberate short list. A group
     // silently dropping out of the dryer UI because someone zeroed its last
     // dry_temp_c is exactly the failure this pins.
-    static const std::set<std::string> INTENTIONALLY_NO_PRESET = {
+    static const std::set<std::string> kIntentionallyNoPreset = {
         "PE",  // polyethylene: negligible moisture uptake
         "EVA", // low Vicat point, drying would deform it
     };
@@ -193,7 +193,7 @@ TEST_CASE("MATERIALS - every compat group is served by a drying preset or is who
         } else {
             // Not servable — assert it is one of the known-dry groups so a new
             // all-dry group cannot appear unnoticed.
-            CHECK(INTENTIONALLY_NO_PRESET.count(group) == 1);
+            CHECK(kIntentionallyNoPreset.count(group) == 1);
         }
     }
 
@@ -318,7 +318,7 @@ TEST_CASE("drying data has exactly ONE source, and every consumer derives from i
     }
 
     // Aliases must not open a side door to different drying numbers.
-    for (const auto& alias : MATERIAL_ALIASES) {
+    for (const auto& alias : kMaterialAliases) {
         INFO("alias: " << alias.alias << " -> " << alias.canonical);
         const auto via_alias = get_comfort_range(alias.alias);
         const auto via_canonical = get_comfort_range(alias.canonical);
@@ -387,7 +387,7 @@ TEST_CASE("resolve_alias is idempotent", "[filament][database][invariant][alias]
     // Resolving an already-resolved name must be a no-op, otherwise an alias
     // chain (A -> B where B is itself an alias) would resolve differently
     // depending on how many times it was passed through.
-    for (const auto& alias : MATERIAL_ALIASES) {
+    for (const auto& alias : kMaterialAliases) {
         INFO("alias: " << alias.alias << " -> " << alias.canonical);
         auto once = resolve_alias(alias.alias);
         auto twice = resolve_alias(once);
@@ -420,7 +420,7 @@ TEST_CASE("find_material is case-insensitive for every material and alias",
         }
     }
 
-    for (const auto& alias : MATERIAL_ALIASES) {
+    for (const auto& alias : kMaterialAliases) {
         std::string up = alias.alias, lo = lower(alias.alias);
         std::transform(up.begin(), up.end(), up.begin(), ::toupper);
 
@@ -437,7 +437,7 @@ TEST_CASE("find_material is case-insensitive for every material and alias",
 TEST_CASE("find_material agrees with resolve_alias", "[filament][database][invariant][alias]") {
     // find_material() runs resolve_alias() first. The two must never disagree, or
     // a caller that pre-resolves gets a different material than one that does not.
-    for (const auto& alias : MATERIAL_ALIASES) {
+    for (const auto& alias : kMaterialAliases) {
         INFO("alias: " << alias.alias);
         auto via_alias = find_material(alias.alias);
         auto via_canonical = find_material(resolve_alias(alias.alias));
@@ -527,12 +527,12 @@ TEST_CASE("MATERIALS - names survive JSON and Orca string matching",
 
 #if HELIX_HAS_IFS
 TEST_CASE("AD5X firmware material whitelist all resolves", "[filament][database][invariant]") {
-    // Derived from AmsBackendAd5xIfs::STOCK_WHITELIST — the same array
+    // Derived from AmsBackendAd5xIfs::kStockWhitelist — the same array
     // get_supported_materials() seeds from, so this cannot drift from the thing it
     // guards. The stock AD5X firmware rejects anything outside the list, so these
     // are the only types that printer's picker can offer. If one stops resolving in
     // Layer A it inherits a 0 °C bed and no drying data, and the picker breaks.
-    for (const auto* type : helix::AmsBackendAd5xIfs::STOCK_WHITELIST) {
+    for (const auto* type : helix::AmsBackendAd5xIfs::kStockWhitelist) {
         INFO("AD5X whitelist type: " << type);
         auto mat = find_material(type);
         REQUIRE(mat.has_value());
@@ -547,7 +547,7 @@ TEST_CASE("AD5X firmware material whitelist all resolves", "[filament][database]
 TEST_CASE("DEFAULT_PRESET_MATERIALS all resolve", "[filament][database][invariant]") {
     // include/material_settings_manager.h — the four types the settings UI seeds
     // temperature-override presets for.
-    for (const auto* name : helix::DEFAULT_PRESET_MATERIALS) {
+    for (const auto* name : helix::kDefaultPresetMaterials) {
         INFO("preset material: " << name);
         auto mat = find_material(name);
         REQUIRE(mat.has_value());
@@ -568,15 +568,15 @@ TEST_CASE_METHOD(HelixTestFixture, "every mock-backend fixture material resolves
     // the mock emits, aliases included.
     //
     // If a fixture string legitimately should not resolve, name it in
-    // NON_RESOLVING_FIXTURE_MATERIALS below with a reason — do not weaken the check.
-    static const std::set<std::string> NON_RESOLVING_FIXTURE_MATERIALS = {
+    // kNonResolvingFixtureMaterials below with a reason — do not weaken the check.
+    static const std::set<std::string> kNonResolvingFixtureMaterials = {
         // (empty) — every mock fixture material currently resolves.
     };
 
     // Each entry drives the mock into one scripted configuration. Adding a new
     // mock mode? Add it here so its fixture strings are covered too.
     using ModeSetter = std::function<void(helix::AmsBackendMock&)>;
-    const std::vector<std::pair<const char*, ModeSetter>> MODES = {
+    const std::vector<std::pair<const char*, ModeSetter>> kModes = {
         {"default", [](helix::AmsBackendMock&) {}},
         {"tool_changer", [](helix::AmsBackendMock& b) { b.set_tool_changer_mode(true); }},
         {"afc", [](helix::AmsBackendMock& b) { b.set_afc_mode(true); }},
@@ -589,7 +589,7 @@ TEST_CASE_METHOD(HelixTestFixture, "every mock-backend fixture material resolves
     };
 
     size_t checked = 0;
-    for (const auto& [mode_name, apply_mode] : MODES) {
+    for (const auto& [mode_name, apply_mode] : kModes) {
         helix::AmsBackendMock backend;
         apply_mode(backend);
         backend.start();
@@ -600,7 +600,7 @@ TEST_CASE_METHOD(HelixTestFixture, "every mock-backend fixture material resolves
             if (slot.material.empty()) {
                 continue; // empty slot — nothing to resolve
             }
-            if (NON_RESOLVING_FIXTURE_MATERIALS.count(slot.material) > 0) {
+            if (kNonResolvingFixtureMaterials.count(slot.material) > 0) {
                 continue;
             }
             INFO("mock mode: " << mode_name << " slot " << i << " material: " << slot.material);
@@ -611,7 +611,7 @@ TEST_CASE_METHOD(HelixTestFixture, "every mock-backend fixture material resolves
 
     // Guard the guard: if the mock stops producing slots (API drift, start() failing
     // silently), the loop above would vacuously pass while checking nothing.
-    INFO("materials checked across " << MODES.size() << " mock configurations");
+    INFO("materials checked across " << kModes.size() << " mock configurations");
     CHECK(checked >= 20);
 }
 
@@ -622,7 +622,7 @@ TEST_CASE("get_comfort_range covers EVERY material, and only real materials",
     // It is now derived: humidity from the material's compat group, drying from
     // get_drying_presets_by_group(). Coverage is therefore total by construction,
     // and this asserts that construction actually holds — a compat group with no
-    // GROUP_HUMIDITY_RANGES row would fall into the fail-closed nullopt branch and
+    // kGroupHumidityRanges row would fall into the fail-closed nullopt branch and
     // silently drop that material off the AMS humidity indicator.
     for (const auto& mat : *shipped_materials()) {
         INFO("material: " << mat.name << " (group " << mat.compat_group << ")");
@@ -642,7 +642,7 @@ TEST_CASE("get_comfort_range covers EVERY material, and only real materials",
     }
 
     // Aliases resolve; unknown names do not.
-    for (const auto& alias : MATERIAL_ALIASES) {
+    for (const auto& alias : kMaterialAliases) {
         INFO("alias: " << alias.alias);
         CHECK(get_comfort_range(alias.alias).has_value());
     }
@@ -650,7 +650,7 @@ TEST_CASE("get_comfort_range covers EVERY material, and only real materials",
     CHECK_FALSE(get_comfort_range("").has_value());
 
     // Pin the user-visible thresholds that the AMS indicator colour-codes against,
-    // so a careless edit to GROUP_HUMIDITY_RANGES shows up as a test failure rather
+    // so a careless edit to kGroupHumidityRanges shows up as a test failure rather
     // than as a green badge on a wet spool.
     CHECK(get_comfort_range("PLA")->max_humidity_good == Catch::Approx(50.0f));
     CHECK(get_comfort_range("PETG")->max_humidity_good == Catch::Approx(40.0f));
@@ -668,9 +668,9 @@ TEST_CASE("MATERIAL_HUMIDITY_OVERRIDES stay small, real, and earned",
     // AND actually differ from its group, so an entry that merely restates the
     // group value — or one whose group later moved to match it — gets deleted
     // instead of accumulating into the parallel list this replaced.
-    CHECK(std::size(MATERIAL_HUMIDITY_OVERRIDES) <= 6);
+    CHECK(std::size(kMaterialHumidityOverrides) <= 6);
 
-    for (const auto& ovr : MATERIAL_HUMIDITY_OVERRIDES) {
+    for (const auto& ovr : kMaterialHumidityOverrides) {
         INFO("override: " << ovr.group);
         auto mat = find_material(ovr.group);
         REQUIRE(mat.has_value());
@@ -679,7 +679,7 @@ TEST_CASE("MATERIAL_HUMIDITY_OVERRIDES stay small, real, and earned",
         CHECK(ovr.max_humidity_good < ovr.max_humidity_warn);
 
         const GroupHumidityRange* group_row = nullptr;
-        for (const auto& gr : GROUP_HUMIDITY_RANGES) {
+        for (const auto& gr : kGroupHumidityRanges) {
             if (std::string_view(gr.group) == std::string_view(mat->compat_group)) {
                 group_row = &gr;
                 break;
@@ -703,7 +703,7 @@ TEST_CASE("GROUP_HUMIDITY_RANGES covers every compat group exactly once",
         groups.insert(mat.compat_group);
 
     std::set<std::string> rows;
-    for (const auto& gr : GROUP_HUMIDITY_RANGES) {
+    for (const auto& gr : kGroupHumidityRanges) {
         INFO("humidity row: " << gr.group);
         CHECK(gr.max_humidity_good < gr.max_humidity_warn);
         CHECK(gr.max_humidity_warn <= 100.0f);
@@ -802,6 +802,9 @@ TEST_CASE_METHOD(HelixTestFixture, "catalog - identity fields are present and un
     // fails outright.
     std::map<std::pair<std::string, std::string>, int> pair_counts;
     std::set<std::string> ids;
+    // A CFS RFID tag resolves through codes["cfs"]; a code two products carry
+    // resolves to whichever loaded first.
+    std::set<std::string> cfs_codes;
 
     for (const auto* p : all) {
         INFO("product: " << p->id);
@@ -821,6 +824,10 @@ TEST_CASE_METHOD(HelixTestFixture, "catalog - identity fields are present and un
         CHECK(p->type.back() != ' ');
         CHECK(ids.insert(p->id).second); // ids are the merge key for the overlay
         pair_counts[{p->brand, p->name}]++;
+        auto cfs = p->codes.find("cfs");
+        if (cfs != p->codes.end()) {
+            CHECK(cfs_codes.insert(cfs->second).second);
+        }
     }
 
     for (const auto& [key, count] : pair_counts) {
@@ -856,8 +863,8 @@ TEST_CASE_METHOD(HelixTestFixture, "catalog - every effective field is fully res
         CHECK(p->nozzle_recommended > 0);
         CHECK(p->nozzle_min <= p->nozzle_recommended);
         CHECK(p->nozzle_recommended <= p->nozzle_max);
-        CHECK(p->nozzle_min >= NOZZLE_FLOOR);
-        CHECK(p->nozzle_max <= NOZZLE_CEIL);
+        CHECK(p->nozzle_min >= kNozzleFloor);
+        CHECK(p->nozzle_max <= kNozzleCeil);
 
         CHECK(p->bed_temp >= 20);
         CHECK(p->bed_temp <= 160);
@@ -912,10 +919,10 @@ TEST_CASE_METHOD(HelixTestFixture, "catalog - product temps do not wildly contra
                          << base->nozzle_min << "-" << base->nozzle_max << ", bed " << p->bed_temp
                          << " vs type " << base->bed_temp);
 
-        CHECK(p->nozzle_min >= base->nozzle_min - TYPE_DIVERGENCE_TOLERANCE);
-        CHECK(p->nozzle_max <= base->nozzle_max + TYPE_DIVERGENCE_TOLERANCE);
-        CHECK(p->bed_temp >= base->bed_temp - TYPE_DIVERGENCE_TOLERANCE);
-        CHECK(p->bed_temp <= base->bed_temp + TYPE_DIVERGENCE_TOLERANCE);
+        CHECK(p->nozzle_min >= base->nozzle_min - kTypeDivergenceTolerance);
+        CHECK(p->nozzle_max <= base->nozzle_max + kTypeDivergenceTolerance);
+        CHECK(p->bed_temp >= base->bed_temp - kTypeDivergenceTolerance);
+        CHECK(p->bed_temp <= base->bed_temp + kTypeDivergenceTolerance);
 
         if (p->nozzle_min < base->nozzle_min - 25 || p->nozzle_max > base->nozzle_max + 25 ||
             std::abs(p->bed_temp - base->bed_temp) > 25) {
@@ -943,8 +950,8 @@ TEST_CASE_METHOD(HelixTestFixture, "two-layer closure - every material type is r
     //
     // So a new type added to filament_database.h now FAILS the build until someone
     // decides, explicitly and in the data, which of the two it is — a Generic seed
-    // entry in scripts/fixtures/cfs_seed.json, or a line in
-    // RESOLUTION_ONLY_MATERIALS with the reason it is not user-selectable.
+    // entry in scripts/fixtures/filament_seed.json, or a line in
+    // kResolutionOnlyMaterials with the reason it is not user-selectable.
     // Neither choice can be made by accident, and neither can silently rot: a
     // RESOLUTION_ONLY entry that later gains a product fails here too.
     auto cat = FilamentCatalog::load_from_file("assets/filaments.json", false, "");
@@ -970,7 +977,7 @@ TEST_CASE_METHOD(HelixTestFixture, "two-layer closure - every material type is r
     }
 
     std::set<std::string> declared;
-    for (const auto* m : RESOLUTION_ONLY_MATERIALS) {
+    for (const auto* m : kResolutionOnlyMaterials) {
         INFO("RESOLUTION_ONLY entry: " << m);
         // Must name a real row, spelled exactly as MATERIALS spells it.
         auto mat = find_material(m);
@@ -994,6 +1001,24 @@ TEST_CASE_METHOD(HelixTestFixture, "two-layer closure - every material type is r
     }
     // Both at once, so the failure message shows the whole picture.
     CHECK(unreachable == declared);
-    CHECK(declared.size() == RESOLUTION_ONLY_COUNT);
+    CHECK(declared.size() == kResolutionOnlyCount);
     CHECK(reachable.size() + declared.size() == shipped_materials()->size());
+}
+
+// CF and GF are different materials (stiffness, abrasiveness, print temps), so the
+// picker must never collapse them by aliasing one onto the other.
+TEST_CASE("CF and GF variants stay distinct", "[filament_data]") {
+    static const char* kPairs[][2] = {
+        {"ASA-CF", "ASA-GF"},   {"ABS-CF", "ABS-GF"}, {"PC-CF", "PC-GF"}, {"PET-CF", "PET-GF"},
+        {"PETG-CF", "PETG-GF"}, {"PA-CF", "PA-GF"},   {"PP-CF", "PP-GF"}, {"PPA-CF", "PPA-GF"},
+    };
+    for (const auto& pair : kPairs) {
+        INFO("pair: " << pair[0] << " vs " << pair[1]);
+        auto cf = find_material(pair[0]);
+        auto gf = find_material(pair[1]);
+        REQUIRE(cf.has_value());
+        REQUIRE(gf.has_value());
+        CHECK(std::string(cf->name) == pair[0]);
+        CHECK(std::string(gf->name) == pair[1]);
+    }
 }

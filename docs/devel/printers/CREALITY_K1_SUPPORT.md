@@ -8,10 +8,13 @@ All K1 models use the Ingenic X2000E MIPS32r2 dual-core processor running Creali
 
 | Model | Build Volume | Display | Notable Features | Status |
 |-------|-------------|---------|------------------|--------|
-| K1 | 220 x 220 x 250 mm | 4.3" 480x800 | Standard | Untested |
+| K1 | 220 x 220 x 250 mm | 4.3" 480x800 | Standard | Community-confirmed running (#1401) |
 | K1C | 220 x 220 x 250 mm | 4.3" 480x800 | Tri-metal "Unicorn" nozzle | **Tested** |
 | K1 Max | 300 x 300 x 300 mm | 4.3" 480x800 | AI camera, LiDAR, ethernet | **Tested** |
 | K1 SE | 220 x 220 x 250 mm | 4.3" 480x800 | Budget model | Untested |
+| K2 SE | 220x215x245 mm | Unknown | K1-family MIPS board despite the K2 name; runs the K1 firmware image and installs the mips package | User-confirmed install (wget) |
+
+Running HelixScreen on a K1 SE? Report what works and what does not in a [new issue](https://github.com/prestonbrown/helixscreen/issues/new), with the firmware version.
 
 ## Hardware (Confirmed on K1C and K1 Max — 2026-03)
 
@@ -253,6 +256,8 @@ Sets `HELIX_CACHE_DIR=/usr/data/helixscreen/cache` since `/usr/data/` is the wri
 ## Display Backend
 
 HelixScreen renders directly to `/dev/fb0`. The framebuffer is 480x800 portrait (virtual size 480x1600 for double-buffering). Software rotation to landscape yields an effective resolution of 800x480.
+
+The K1, K1C and K1 Max mount that panel the same way, so a first boot applies 270° from the board's known-panel entry (`src/application/display_metrics.cpp#kKnownPanels`) and saves it, without the interactive rotation probe. It applies only on a 480x800 framebuffer: Board::K1 is also what any unrecognised mips box resolves to, and those keep the probe. The k1/k1c presets carry no rotation of their own. An explicit `/display/rotate`, `--rotate` or `HELIX_DISPLAY_ROTATION` still wins, and `HELIX_FORCE_ROTATION_PROBE=1` brings the probe back.
 
 ## Touch Input
 

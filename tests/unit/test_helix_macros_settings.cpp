@@ -20,6 +20,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/advanced_panel_test_access.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
@@ -37,7 +38,7 @@ using helix::ui::UpdateQueue;
 
 namespace {
 
-const char* PRINTER_CFG = "[stepper_x]\nstep_pin: PF0\n";
+const char* kPrinterCfg = "[stepper_x]\nstep_pin: PF0\n";
 
 /// Discovery snapshots that parse a real objects list (so the status is an
 /// observation, not UNKNOWN).
@@ -63,7 +64,7 @@ struct MacrosSettingsFixture : LVGLUITestFixture {
         // reads another test's leftovers.
         helix::PrinterStateTestAccess::reset(state());
         state().init_subjects(true);
-        api_.set_config_files({{"printer.cfg", PRINTER_CFG}});
+        api_.set_config_files({{"printer.cfg", kPrinterCfg}});
         AdvancedPanelTestAccess::wire_macro_observer(panel);
     }
 
@@ -88,9 +89,7 @@ struct MacrosSettingsFixture : LVGLUITestFixture {
 
     /// A drained step can queue the next one; pump until quiet.
     void settle() {
-        for (int i = 0; i < 12; ++i) {
-            UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance(), 12);
     }
 
     void tap_install_row() {

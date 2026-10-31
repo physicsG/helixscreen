@@ -471,7 +471,7 @@ print('ok')
     # compiled dependencies it cannot. Only APPLIED_STAMPS feeds the id, so a
     # stamp variable defined but left out of it watches nothing.
     local db
-    db="$(make -pn help 2>/dev/null | grep '^APPLIED_STAMPS := ')"
+    db="$(make_db | grep '^APPLIED_STAMPS := ')"
     # Anchored: a path that merely starts with the name is a different file,
     # and make would be watching something the gate never writes.
     grep -qE 'modules/lvgl/helix-patches-applied\.json( |$)' <<<"$db" \
@@ -596,11 +596,12 @@ edit_an_applied_patch() {
     # separately rather than pinning one formatting of the command.
     grep -q 'HELIX_QC_SKIP_PATCH_DRIFT=1' .githooks/pre-push
     grep -q './scripts/quality-checks.sh' .githooks/pre-push
-    grep -q 'cd "$REPO_ROOT" && python3 scripts/check_patch_drift.py' .githooks/pre-push
+    [ "$(grep -c 'prepush_patch_drift "$REPO_ROOT"' .githooks/pre-push)" -eq 2 ]
+    grep -q 'cd "$tree" && python3 scripts/check_patch_drift.py' .githooks/lib/push-range.sh
 }
 
 @test "pre-push blames the working tree, not the pushed commit, for drift" {
-    grep -q 'Patch drift is in YOUR WORKING TREE' .githooks/pre-push
+    grep -q 'Patch drift is in YOUR WORKING TREE' .githooks/lib/push-range.sh
 }
 
 # --- the clang gate has the same borrowed-tree problem ---
@@ -652,4 +653,378 @@ edit_an_applied_patch() {
         fi'
     [ "$status" -eq 0 ]
     [[ "$output" == *"gate would run"* ]]
+}
+
+# --- --pending-since: drift the pushed commits explain ---
+#
+# A landing that adds or edits a patch is pushed from a tree that has not built
+# it yet. Drift confined to patches the pushed range changed is that tree being
+# behind, not a fault in the commits; everything else still fails.
+
+commit_root() {
+    git -C "$ROOT" add Makefile mk/patches.mk patches
+    git -C "$ROOT" commit -qm "$1"
+}
+
+# delta.patch on the shelf and wired, committed; nothing applies it.
+commit_new_delta_patch() {
+    printf 'one\nALPHA\nDELTA\n' > "$SUB/one.txt"
+    git -C "$SUB" diff -- one.txt > "$ROOT/patches/delta.patch"
+    printf 'one\nALPHA\n' > "$SUB/one.txt"
+    write_patches_mk alpha beta gamma delta
+    commit_root "add delta"
+}
+
+# alpha.patch grows a hunk the applied submodule does not carry, committed.
+commit_edited_alpha_patch() {
+    printf 'one\nALPHA\nALPHA_NEW\n' > "$SUB/one.txt"
+    git -C "$SUB" diff -- one.txt > "$ROOT/patches/alpha.patch"
+    printf 'one\nALPHA\n' > "$SUB/one.txt"
+    commit_root "edit alpha"
+}
+
+@test "--pending-since: a new patch the range adds is a note, not drift" {
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_new_delta_patch
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 0 ]
+    contains "pushed commits explain" "$output"
+    contains "[patch-unapplied] lib/fake delta.patch" "$output"
+    contains 'The next `make` here applies the new patches' "$output"
+    lacks "❌" "$output"
+}
+
+@test "--pending-since: no rev given keeps the plain verdict on the same tree" {
+    init_root_repo
+    in_sync
+    commit_new_delta_patch
+
+    run_gate
+    [ "$status" -eq 1 ]
+    contains "never applied" "$output"
+    lacks "pushed commits explain" "$output"
+}
+
+@test "--pending-since: an edited patch the range changes is a note naming reapply" {
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_edited_alpha_patch
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 0 ]
+    contains "[patch-edited] lib/fake alpha.patch" "$output"
+    contains "make reapply-patches" "$output"
+}
+
+@test "--pending-since: a removed patch the range deletes is a note" {
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    git -C "$ROOT" rm -q patches/beta.patch
+    write_patches_mk alpha gamma
+    commit_root "drop beta"
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 0 ]
+    contains "[patch-removed] lib/fake beta.patch" "$output"
+}
+
+@test "--pending-since: a patch the range renames explains both names" {
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    git -C "$ROOT" mv patches/beta.patch patches/beta2.patch
+    write_patches_mk alpha beta2 gamma
+    commit_root "rename beta"
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 0 ]
+    contains "[patch-removed] lib/fake beta.patch" "$output"
+    contains "[patch-unapplied] lib/fake beta2.patch" "$output"
+}
+
+@test "--pending-since: an uncommitted edit to a patch the range changed still fails" {
+    # The range explains the committed revision; bytes on disk that differ
+    # from the pushed commit are this tree's own edit, not the push.
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_edited_alpha_patch
+    printf '# in flight\n' >> "$ROOT/patches/alpha.patch"
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 1 ]
+    contains "[patch-edited] lib/fake alpha.patch" "$output"
+    lacks "pushed commits explain" "$output"
+}
+
+@test "--pending-since: a patch the range removed but still on disk fails" {
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    git -C "$ROOT" rm -q --cached patches/beta.patch
+    write_patches_mk alpha gamma
+    git -C "$ROOT" add mk/patches.mk
+    git -C "$ROOT" commit -qm "drop beta"
+    [ -z "$(git -C "$ROOT" ls-files patches/beta.patch)" ]
+    # Unwired, so it reads as removed, but its file is still on disk.
+    [ -f "$ROOT/patches/beta.patch" ]
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 1 ]
+    contains "[patch-removed] lib/fake beta.patch" "$output"
+}
+
+@test "--pending-since: a same-named file in a patches/ subdirectory explains nothing" {
+    init_root_repo
+    in_sync
+    commit_edited_alpha_patch
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    mkdir -p "$ROOT/patches/old"
+    printf 'archived\n' > "$ROOT/patches/old/alpha.patch"
+    commit_root "archive"
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 1 ]
+    contains "[patch-edited] lib/fake alpha.patch" "$output"
+}
+
+@test "--pending-since: an edited patch outside the range still fails" {
+    init_root_repo
+    in_sync
+    commit_edited_alpha_patch
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    printf '# unrelated\n' >> "$ROOT/Makefile"
+    commit_root "unrelated"
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 1 ]
+    contains "[patch-edited] lib/fake alpha.patch" "$output"
+    contains "make reapply-patches" "$output"
+    lacks "pushed commits explain" "$output"
+}
+
+@test "--pending-since: a changed submodule file fails even with a patch in range" {
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_new_delta_patch
+    printf 'two\nBETA\nhand edit\n' > "$SUB/two.txt"
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 1 ]
+    contains "[file-changed] lib/fake two.txt" "$output"
+    # The explained half is still named, so the pusher sees both.
+    contains "[patch-unapplied] lib/fake delta.patch" "$output"
+    contains "pushed commits explain" "$output"
+}
+
+@test "--pending-since: only patch findings are explained, whatever the name" {
+    # A changed submodule file is never explained by the range, even when a
+    # patches/ file the range touched happens to share its name.
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    printf 'notes\n' > "$ROOT/patches/two.txt"
+    commit_root "shelf note"
+    printf 'two\nBETA\nhand edit\n' > "$SUB/two.txt"
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 1 ]
+    contains "[file-changed] lib/fake two.txt" "$output"
+}
+
+@test "--pending-since: a missing stamp over a dirty submodule still fails" {
+    init_root_repo
+    apply_all
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_new_delta_patch
+
+    run_gate --pending-since "$base"
+    [ "$status" -eq 1 ]
+    contains "no-stamp" "$output"
+}
+
+@test "--pending-since: a rev git cannot resolve treats every finding as drift" {
+    init_root_repo
+    in_sync
+    commit_new_delta_patch
+
+    run_gate --pending-since 0123456789abcdef0123456789abcdef01234567
+    [ "$status" -eq 1 ]
+    contains "could not diff patches/" "$output"
+    contains "never applied" "$output"
+}
+
+@test "--pending-head bounds the range, not HEAD" {
+    init_root_repo
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_new_delta_patch
+    head=$(git -C "$ROOT" rev-parse HEAD)
+
+    run_gate --pending-since "$base" --pending-head "$base"
+    [ "$status" -eq 1 ]
+    run_gate --pending-since "$base" --pending-head "$head"
+    [ "$status" -eq 0 ]
+}
+
+# --- the pre-push hook, end to end against the fixture ---
+#
+# The fixture gets its own copy of the gate and a stand-in quality-checks.sh
+# that reports whether the hook deferred drift to its own follow-up.
+
+setup_hook_fixture() {
+    init_root_repo
+    mkdir -p "$ROOT/scripts"
+    cp "$GATE" "$ROOT/scripts/check_patch_drift.py"
+    printf '#!/bin/sh\necho "qc-sweep skip-drift=${HELIX_QC_SKIP_PATCH_DRIFT:-unset}"\n' \
+        > "$ROOT/scripts/quality-checks.sh"
+    chmod +x "$ROOT/scripts/quality-checks.sh"
+    # The hook links each lib/ submodule into its throwaway checkout, which
+    # needs lib/ to be a tracked directory there, as it is in the real repo.
+    touch "$ROOT/lib/.keep"
+    git -C "$ROOT" add scripts lib/.keep
+    git -C "$ROOT" commit -qm scripts
+}
+
+HOOK="$BATS_TEST_DIRNAME/../../.githooks/pre-push"
+
+run_hook() {
+    local target remote="$1"
+    target=$(git -C "$ROOT" rev-parse HEAD)
+    run env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+        bash -c 'cd "$1" && printf "refs/heads/main %s refs/heads/main %s\n" "$2" "$3" | bash "$4"' \
+        _ "$ROOT" "$target" "$remote" "$HOOK"
+}
+
+@test "pre-push fast path: a pushed new patch is a note and the push proceeds" {
+    setup_hook_fixture
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_new_delta_patch
+
+    run_hook "$base"
+    [ "$status" -eq 0 ]
+    contains "full quality sweep" "$output"
+    contains "qc-sweep skip-drift=1" "$output"
+    contains "[patch-unapplied] lib/fake delta.patch" "$output"
+    lacks "YOUR WORKING TREE" "$output"
+}
+
+@test "pre-push fast path: drift the push does not explain still rejects it" {
+    setup_hook_fixture
+    in_sync
+    commit_edited_alpha_patch
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    printf '# unrelated\n' >> "$ROOT/Makefile"
+    commit_root "unrelated"
+
+    run_hook "$base"
+    [ "$status" -eq 1 ]
+    contains "[patch-edited] lib/fake alpha.patch" "$output"
+    contains "YOUR WORKING TREE" "$output"
+}
+
+@test "pre-push isolated path: a pushed edited patch is a note and the push proceeds" {
+    setup_hook_fixture
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_edited_alpha_patch
+    printf '# in flight\n' >> "$ROOT/Makefile"
+
+    run_hook "$base"
+    [ "$status" -eq 0 ]
+    contains "throwaway checkout" "$output"
+    contains "qc-sweep skip-drift=1" "$output"
+    contains "[patch-edited] lib/fake alpha.patch" "$output"
+}
+
+@test "pre-push isolated path: a changed submodule file still rejects the push" {
+    setup_hook_fixture
+    in_sync
+    base=$(git -C "$ROOT" rev-parse HEAD)
+    commit_new_delta_patch
+    printf 'two\nBETA\nhand edit\n' > "$SUB/two.txt"
+    printf '# in flight\n' >> "$ROOT/Makefile"
+
+    run_hook "$base"
+    [ "$status" -eq 1 ]
+    contains "[file-changed] lib/fake two.txt" "$output"
+    contains "YOUR WORKING TREE" "$output"
+}
+
+@test "pre-push with no base to measure from asks the plain question" {
+    # A new branch in a clone with no origin/main has no range: nothing is
+    # explained, so a pushed new patch fails as it does in the commit gate.
+    setup_hook_fixture
+    in_sync
+    commit_new_delta_patch
+
+    run_hook 0000000000000000000000000000000000000000
+    [ "$status" -eq 1 ]
+    contains "never applied" "$output"
+}
+
+# --- push_base: where the pushed range starts ---
+
+PUSH_RANGE_LIB="$BATS_TEST_DIRNAME/../../.githooks/lib/push-range.sh"
+
+# main and release/1.0 fork at m0; feat is cut from release/1.0.
+setup_fork_fixture() {
+    P="$BATS_TEST_TMPDIR/forks"
+    git init -q -b main "$P"
+    git -C "$P" config user.email t@example.invalid
+    git -C "$P" config user.name Fixture
+    git -C "$P" commit -q --allow-empty -m m0
+    M0=$(git -C "$P" rev-parse HEAD)
+    git -C "$P" checkout -q -b release/1.0
+    git -C "$P" commit -q --allow-empty -m r1
+    R1=$(git -C "$P" rev-parse HEAD)
+    git -C "$P" checkout -q main
+    git -C "$P" commit -q --allow-empty -m m1
+    git -C "$P" update-ref refs/remotes/origin/main main
+    git -C "$P" checkout -q -b feat release/1.0
+    git -C "$P" commit -q --allow-empty -m f1
+    F1=$(git -C "$P" rev-parse HEAD)
+}
+
+run_push_base() { # <remote sha> <target>
+    run env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+        bash -c 'cd "$1" && . "$2" && push_base "$3" "$4"' _ "$P" "$PUSH_RANGE_LIB" "$1" "$2"
+}
+
+@test "push_base takes the remote's sha when this clone has it" {
+    setup_fork_fixture
+    run_push_base "$R1" "$F1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$R1" ]
+}
+
+@test "push_base measures a new branch from its nearest fork, not from main" {
+    setup_fork_fixture
+    mkdir -p "$P/scripts"
+    cp scripts/diff_base.py "$P/scripts/"
+    run_push_base 0000000000000000000000000000000000000000 "$F1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$R1" ]
+}
+
+@test "push_base in a tree without diff_base.py falls back to origin/main" {
+    setup_fork_fixture
+    run_push_base 0000000000000000000000000000000000000000 "$F1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$M0" ]
+}
+
+@test "diff_base.py --head measures from the named rev, not HEAD" {
+    setup_fork_fixture
+    git -C "$P" checkout -q main
+    run python3 scripts/diff_base.py --root "$P" --head "$F1"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$R1" ]
 }

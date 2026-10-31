@@ -22,6 +22,32 @@
 
 namespace helix {
 
+std::optional<KlippyState> parse_klippy_state(std::string_view state) {
+    if (state == "ready")
+        return KlippyState::READY;
+    if (state == "startup")
+        return KlippyState::STARTUP;
+    if (state == "shutdown")
+        return KlippyState::SHUTDOWN;
+    if (state == "error")
+        return KlippyState::ERROR;
+    return std::nullopt;
+}
+
+const char* klippy_state_name(KlippyState state) {
+    switch (state) {
+    case KlippyState::READY:
+        return "ready";
+    case KlippyState::STARTUP:
+        return "startup";
+    case KlippyState::SHUTDOWN:
+        return "shutdown";
+    case KlippyState::ERROR:
+        return "error";
+    }
+    return "error";
+}
+
 PrinterNetworkState::PrinterNetworkState() {
     // Initialize string buffer
     std::memset(printer_connection_message_buf_, 0, sizeof(printer_connection_message_buf_));
@@ -61,6 +87,11 @@ void PrinterNetworkState::init_subjects(bool register_xml) {
     // resolve to this host. Set on CONNECTED edges by MoonrakerManager; the
     // UI-facing mirror of helix::is_moonraker_on_same_host().
     INIT_SUBJECT_INT(moonraker_is_remote, 0, subjects_, register_xml);
+
+    // Locality verdict for the current connection (MoonrakerLocality). Unlike
+    // moonraker_is_remote it distinguishes "not settled yet" from "local".
+    INIT_SUBJECT_INT(moonraker_locality, static_cast<int>(MoonrakerLocality::Unknown), subjects_,
+                     register_xml);
 
     INIT_SUBJECT_INT(klippy_state_message_seq, 0, subjects_, register_xml);
 
@@ -116,6 +147,17 @@ void PrinterNetworkState::set_moonraker_is_remote_internal(bool remote) {
     lv_subject_set_int(&moonraker_is_remote_, value);
 }
 
+void PrinterNetworkState::set_moonraker_locality_internal(MoonrakerLocality locality) {
+    if (!subjects_initialized_) {
+        return;
+    }
+    const int value = static_cast<int>(locality);
+    if (lv_subject_get_int(&moonraker_locality_) == value)
+        return;
+    spdlog::debug("[PrinterNetworkState] moonraker_locality: {}", value);
+    lv_subject_set_int(&moonraker_locality_, value);
+}
+
 void PrinterNetworkState::set_network_status(int status) {
     if (lv_subject_get_int(&network_status_) == status)
         return;
@@ -160,37 +202,18 @@ bool PrinterNetworkState::apply_webhooks(const nlohmann::json& webhooks, double 
 
         if (webhooks.contains("state") && webhooks["state"].is_string()) {
             std::string klippy_state_str = webhooks["state"].get<std::string>();
-            KlippyState new_state = KlippyState::READY;
-            bool recognized = true;
-
-            if (klippy_state_str == "ready") {
-                new_state = KlippyState::READY;
-            } else if (klippy_state_str == "startup") {
-                new_state = KlippyState::STARTUP;
-            } else if (klippy_state_str == "shutdown") {
-                new_state = KlippyState::SHUTDOWN;
-            } else if (klippy_state_str == "error") {
-                new_state = KlippyState::ERROR;
-            } else {
-                // Klipper documents exactly ready/startup/shutdown/error.
-                // Resolving anything else to READY would be fail-OPEN on a
-                // liveness signal: nav re-enabled and the gcode guards re-opened.
-                // Leave the current state alone instead; a stale-but-known
-                // state is safer than an invented READY. Deduped on the string so a value Klipper
-                // repeats every frame warns once, not per frame.
-                recognized = false;
-                if (last_unknown_klippy_state_ != klippy_state_str) {
-                    last_unknown_klippy_state_ = klippy_state_str;
-                    spdlog::warn("[PrinterNetworkState] Unrecognised webhooks.state '{}' — leaving "
-                                 "klippy state unchanged",
-                                 klippy_state_str);
-                }
-            }
-
-            if (recognized) {
-                changed = set_klippy_state_internal(new_state);
+            if (const std::optional<KlippyState> parsed = parse_klippy_state(klippy_state_str)) {
+                changed = set_klippy_state_internal(*parsed);
                 applied_state = true;
-                message_describes = new_state;
+                message_describes = *parsed;
+            } else if (last_unknown_klippy_state_ != klippy_state_str) {
+                // Leave the current state alone: a stale-but-known state is
+                // safer than an invented one. Deduped on the string so a value
+                // Klipper repeats every frame warns once, not per frame.
+                last_unknown_klippy_state_ = klippy_state_str;
+                spdlog::warn("[PrinterNetworkState] Unrecognised webhooks.state '{}' — leaving "
+                             "klippy state unchanged",
+                             klippy_state_str);
             }
         }
 

@@ -21,7 +21,14 @@ set(SHIM ${CMAKE_CURRENT_LIST_DIR}/shim)
 # EspMoonrakerClient calls PrinterDiscovery::parse_objects(), defined out of line
 # in printer_discovery_parse.cpp; helixapp links before helixnet, so its copy
 # of that TU cannot satisfy a reference from here.
+# MoonrakerError::from_json_rpc() (inline) decodes firmware error envelopes via
+# src/printer/firmware_error_envelope.cpp, which needs only hv/json.hpp; it
+# compiles here for the same link-order reason.
+# EspMoonrakerClient asks src/api/moonraker_auth.cpp for the printer's API key,
+# also for the link-order reason.
 set(REPO_SRCS ${REPO_ROOT}/src/format_utils.cpp
+              ${REPO_ROOT}/src/api/moonraker_auth.cpp
+              ${REPO_ROOT}/src/printer/firmware_error_envelope.cpp
               ${REPO_ROOT}/src/printer/printer_discovery_parse.cpp)
 
 idf_component_register(
@@ -45,8 +52,18 @@ target_include_directories(${COMPONENT_LIB} PRIVATE
 target_include_directories(${COMPONENT_LIB} SYSTEM PRIVATE
     ${REPO_ROOT}/lib)           # libhv/include/hv/json.hpp + spdlog bundled fmt
 
+# server.connection.identify reports the app version to Moonraker.
+idf_build_get_property(helix_version HELIX_VERSION)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE HELIX_VERSION="${helix_version}")
+
 # Repo headers are C++17; nlohmann/fmt trip -Wformat on Xtensa GCC. Match the
 # audit's flags (compile/link viability, not warning hygiene).
 target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>
+    # GCC clones inline functions per translation unit ($isra, $constprop, $part)
+    # as local symbols the linker cannot merge, so every TU carries its own copy of
+    # the same std::string and json helpers.
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-ipa-sra>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-ipa-cp-clone>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-partial-inlining>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-format>)

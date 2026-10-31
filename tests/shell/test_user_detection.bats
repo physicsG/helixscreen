@@ -18,6 +18,10 @@ setup() {
     K1_FIRMWARE=""
     INSTALL_DIR="/opt/helixscreen"
     TMP_DIR="/tmp/helixscreen-install"
+    # The printer_data scan reads this instead of the host's /home, whose
+    # contents vary by machine and by whatever else is running on it.
+    export KLIPPER_HOMES_ROOT="$BATS_TEST_TMPDIR/home"
+    mkdir -p "$KLIPPER_HOMES_ROOT"
 
     # Source common.sh + platform.sh (skip source guards by unsetting them).
     # platform.sh calls common.sh's validate_install_dir/validate_tmp_dir; the
@@ -133,15 +137,22 @@ setup() {
 @test "printer_data scan: finds user via directory" {
     mock_command_fail "systemctl"
     mock_command "ps" ""
-    # Create a temporary printer_data directory
-    mkdir -p "$BATS_TEST_TMPDIR/home/testuser/printer_data"
+    mock_command "id" ""
+    mkdir -p "$KLIPPER_HOMES_ROOT/testuser/printer_data"
 
-    # We can't easily test the /home/* glob in isolation without root
-    # but we can verify the function doesn't crash
-    mock_command_fail "id"
     detect_klipper_user
-    # Falls through to root since test user doesn't exist in /etc/passwd
-    [ -n "$KLIPPER_USER" ]
+    [ "$KLIPPER_USER" = "testuser" ]
+    [ "$KLIPPER_HOME" = "$KLIPPER_HOMES_ROOT/testuser" ]
+}
+
+@test "printer_data scan: a user that does not exist is skipped" {
+    mock_command_fail "systemctl"
+    mock_command "ps" ""
+    mock_command_fail "id"
+    mkdir -p "$KLIPPER_HOMES_ROOT/testuser/printer_data"
+
+    detect_klipper_user
+    [ "$KLIPPER_USER" = "root" ]
 }
 
 # --- Well-known users ---
@@ -149,8 +160,9 @@ setup() {
 @test "well-known user: biqu checked before pi" {
     mock_command_fail "systemctl"
     mock_command "ps" ""
-    # id succeeds for all users (mock always returns success)
-    mock_command "id" ""
+    # Only the well-known users exist, so a real /home/*/printer_data on the
+    # machine running the suite cannot win the earlier directory scan.
+    mock_command_script "id" 'case "$1" in biqu|pi|mks|qidi) exit 0;; *) exit 1;; esac'
 
     detect_klipper_user
     [ "$KLIPPER_USER" = "biqu" ]

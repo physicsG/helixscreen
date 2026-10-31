@@ -3,6 +3,8 @@
 #pragma once
 #if HELIX_HAS_SNAPMAKER
 
+#include "ui_timer_guard.h"
+
 #include "ams_subscription_backend.h"
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
@@ -14,18 +16,23 @@
 #include "snapmaker_status_parse.h"
 
 #include <array>
+#include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace helix {
 
 class SnapmakerTestAccess;
 class SnapmakerRealtimeTestAccess;
+class FileStartFactsLoader;
+struct FileStartFacts;
 class RunoutScopeTestAccess;
 
 /**
@@ -50,6 +57,11 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     AmsBackendSnapmaker(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
 
     ~AmsBackendSnapmaker() override;
+
+    /// The status objects the SnapSwap backend pushes: RFID filament, feed modules,
+    /// task config, extruder state, and the batch-feed macro when the firmware has it.
+    /// Empty unless @p hw detected the Snapmaker filament system.
+    [[nodiscard]] static nlohmann::json required_status_objects(const helix::PrinterDiscovery& hw);
 
     [[nodiscard]] AmsType get_type() const override {
         return AmsType::SNAPMAKER;
@@ -78,7 +90,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// inherited identity default agrees for T0-T3 and diverges silently from T4
     /// up. Same reasoning as preprint_gcode() below.
     [[nodiscard]] static helix::FirmwareRouting default_routing() {
-        return helix::FirmwareRouting::fixed_heads(NUM_TOOLS, 0);
+        return helix::FirmwareRouting::fixed_heads(kNumTools, 0);
     }
 
     [[nodiscard]] helix::FirmwareRouting firmware_default_routing() const override {
@@ -111,12 +123,9 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] lv_subject_t* get_operation_step_index_subject(StepOperationType op) override;
 
     /// Snapmaker U1 has 4 independent extruders (extruder, extruder1, extruder2,
-    /// extruder3), one per tool. Tool N sources slot N directly — identity mapping.
+    /// extruder3), one per tool. Each extrudes from the slot feeding its head.
     [[nodiscard]] std::optional<int> slot_for_extruder(int extruder_idx) const override {
-        if (extruder_idx < 0 || extruder_idx >= static_cast<int>(get_system_info().total_slots)) {
-            return std::nullopt;
-        }
-        return extruder_idx;
+        return head_source_slot(extruder_idx, get_system_info());
     }
 
     // Path visualization (PARALLEL topology — each tool is independent)
@@ -133,6 +142,10 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         // there.
         t.has_physical_tray = false;
         t.supports_auto_heat_on_load = true;
+        // AUTO_FEEDING ... UNLOAD=1 runs the firmware's unload state machine,
+        // whose unload_heating stage heats (FILAMENT_BACKEND_SNAPMAKER_U1.md).
+        // unload_heats_hotend() excludes the bare INNER_FILAMENT_UNLOAD fallback.
+        t.supports_auto_heat_on_unload = true;
         // Snapmaker U1's Resume runs AUTO_FEEDING (loads filament to the nozzle)
         // before RESUME, so Resume alone recovers a runout. The runout dialog uses
         // this to present Resume as primary and demote manual Load/Unload/Purge.
@@ -148,27 +161,49 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         // runout — the slicer auto-feeds heads the print doesn't use → empty head →
         // runout cancel.
         t.requires_preprint_send = true;
-        // The U1's four independent feeders can be driven as one batch: the
-        // firmware sequences per-extruder AUTO_FEEDING itself. Gates the batch
-        // Load/Unload affordance in the UI.
-        t.supports_batch_filament_ops = true;
-        // The four heads are independent toolheads, each drawn and labelled
-        // below its slot, so a "T3" badge on the spool repeats what the
-        // toolhead already says.
-        t.should_hide_slot_tool_badge = true;
-        // `print_task_config` carries filament_type and filament_vendor per
-        // head, so the printer states what is loaded even though it stores no
-        // Spoolman id (has_firmware_spool_persistence stays false).
-        t.has_firmware_filament_identity = true;
-        // `PARK_EXTRUDER` returns the mounted head to its dock and leaves the
-        // filament where it is. It is firmware-native and ships with no
-        // description, so it does not appear in `gcode/help`; the machine's
-        // own `print_end` macro calls it bare and parameterless.
-        t.supports_toolhead_park = true;
+        // The sidebar's Reset has nothing to clear here: the firmware's own
+        // feed state machine recovers each head.
+        t.supports_reset = false;
+        // channel_state stays idle between AUTO_FEEDING being accepted and the
+        // firmware's first homing step.
+        t.holds_optimistic_action = true;
+        // Each head has its own lane and AUTO_FEEDING runs one direction, so
+        // an unload is never the first half of a swap.
+        t.unloads_stand_alone = true;
         return t;
     }();
     [[nodiscard]] BackendTraits traits() const override {
         return kTraits;
+    }
+
+    // PARK_EXTRUDER docks every head, so the carriage can be empty even though
+    // a load feeds filament rather than mounting a tool.
+    [[nodiscard]] bool carriage_can_be_empty() const override {
+        return true;
+    }
+
+    /// One head per extruder, each fed by the lane of the same index.
+    [[nodiscard]] int filament_head_count() const override {
+        return kNumTools;
+    }
+    [[nodiscard]] std::optional<int> head_for_slot(int slot) const override {
+        if (slot < 0 || slot >= kNumTools) {
+            return std::nullopt;
+        }
+        return slot;
+    }
+    [[nodiscard]] std::optional<int> head_source_slot(int head,
+                                                      const AmsSystemInfo&) const override {
+        return head_for_slot(head);
+    }
+    /// Loaded to the nozzle, or parked in the toolhead short of it: either way
+    /// an unload has filament to act on.
+    [[nodiscard]] std::optional<bool> head_has_filament(int head) const override;
+
+    /// The four independent feeders run as one batch: the firmware sequences
+    /// per-extruder AUTO_FEEDING itself.
+    [[nodiscard]] int max_heads_per_filament_op() const override {
+        return kNumTools;
     }
 
     // FEED_AUTO homes and sets its own nozzle target from the lane's material:
@@ -185,6 +220,19 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] PathSegment get_filament_segment() const override;
     [[nodiscard]] PathSegment get_slot_filament_segment(int slot_index) const override;
     [[nodiscard]] PathSegment infer_error_segment() const override;
+
+    /// Every feeder's port sensor sits at the top of its tube: the lane's
+    /// entry sensor, read as PREP. A head fed from upstream has none of its
+    /// own (head_is_upstream_fed_locked()).
+    [[nodiscard]] bool slot_has_prep_sensor(int slot_index) const override;
+
+    /// Pending while a feeder insert waits on filament_detect.info, then the
+    /// reader's verdict (pending_insert_passes_ / insert_verdict_).
+    [[nodiscard]] InsertIdentity slot_insert_identity(int slot_index) const override;
+
+    /// The feeder port sensor alone: a tool parking or print_task_config's
+    /// filament_exist moves the slot status without a spool going in.
+    [[nodiscard]] std::optional<bool> slot_insert_presence(int slot_index) const override;
 
     // Per-slot "filament is loaded to THIS tool's nozzle". Returns the
     // channel_state latch (loaded_at_toolhead_), driven by filament_feed
@@ -212,7 +260,10 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     struct ChannelSnapshot {
         std::string state;        ///< channel_state, e.g. "load_finish"
         std::string action_state; ///< channel_action_state: last op step, kept at rest
-        std::string error{"ok"};  ///< channel_error
+        /// An op outcome channel_action_state reported while the channel still
+        /// showed a step under way, applied when it settles.
+        std::string pending_outcome;
+        std::string error{"ok"}; ///< channel_error
         bool filament_detected{false};
         bool module_exist{false};
         bool disable_auto{false};
@@ -240,9 +291,23 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     AmsError do_load_filament(int slot_index) override;
     AmsError do_unload_filament(int slot_index) override;
     AmsError do_select_slot(int slot_index) override;
-    AmsError do_change_tool(int tool_number) override;
-    AmsError do_park_toolhead() override;
 
+  public:
+    /// The AUTO_FEEDING unload heats; the bare INNER_FILAMENT_UNLOAD leaf, sent
+    /// when no slot resolves, skips the state machine that does.
+    [[nodiscard]] bool unload_heats_hotend(int slot_index) const override;
+
+  protected:
+    AmsError do_change_tool(int tool_number) override;
+    /// PARK_EXTRUDER: the firmware's "Detach Toolhead", back to its dock.
+    AmsError do_park_active_tool() override;
+
+  public:
+    [[nodiscard]] bool supports_tool_park() const override {
+        return true;
+    }
+
+  protected:
     /// Batch load/unload as ONE AUTO_FEEDING script. The firmware serializes
     /// channels itself (FEED_AUTO's process-wide channel_active gate) and
     /// Moonraker holds the script response until every line has run, so the
@@ -268,15 +333,23 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     AmsError recover() override;
     AmsError reset() override;
     AmsError cancel() override;
+    /// cancel() has nothing to send on this firmware, so no Abort is offered.
+    [[nodiscard]] bool can_cancel_operation() const override {
+        return false;
+    }
+    /// Also forgets each channel's last frame and in-flight op, because the
+    /// backend outlives the restart: the subscription's first full frame is
+    /// then a fresh start rather than a change from firmware that is gone.
+    void on_klipper_restarted() override;
 
-    // Resume preparation. Snapmaker latches a motion-sensor runout exception
-    // in Klipper that RESUME alone can't clear when the printer's
-    // extruders_used flags are all false. When sensor_filament_present_ is
-    // false for the active tool, run a single gcode chain: disable the runout
-    // sensor, heat to the slot's recorded nozzle min temp (fallback 200°C),
-    // extrude 30 mm to push past the encoder, re-enable the sensor. Otherwise
-    // invoke the callback immediately so the caller dispatches RESUME without
-    // delay. on_ready is always called on the main thread.
+    // Resume preparation. A Terminal pause answers RESUME_REQUIRES_RESTART at
+    // once. A head whose last load is unconfirmed holds RESUME: the head
+    // resumed on retries its load, any other head is refused. After a runout
+    // (sensor_filament_present_ false for the active tool) AUTO_FEEDING refeeds it before the
+    // caller dispatches RESUME. Otherwise every used head whose print_task_config record names no
+    // filament type while the slot knows its material gets that record
+    // written (the firmware refuses RESUME without it). on_ready is always
+    // called on the main thread.
     void prepare_for_resume(int slot_index, ResumeReadyCallback on_ready) override;
 
     // The firmware refuses RESUME while a used extruder still has no material
@@ -306,6 +379,10 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     AmsError apply_user_edit(int slot_index, const SlotInfo& info,
                              const helix::ams::Observation& declared) override;
     AmsError sync_external_identity(int slot_index, const SlotInfo& info) override;
+
+    /// The channel's last tag reading. An entry whose CARD_UID names no card
+    /// was written over the API, not read off a spool, and is none.
+    [[nodiscard]] std::optional<helix::ams::TagReading> tag_reading(int slot_index) const override;
     void persist_slot_weight(int slot_index, float remaining_weight_g,
                              float total_weight_g) override;
     void persist_external_identity_impl(int slot_index,
@@ -340,6 +417,24 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] std::string build_preprint_gcode(const std::set<int>& tools_used,
                                                    const std::map<int, int>& remap) const override;
 
+    /// A start from this screen during a print in progress (a restart whose
+    /// cancel and start reach this backend as one unbroken print) begins a
+    /// new print's state.
+    void note_print_start_from_here() override;
+
+    /// print_task_config.py's reset_print_info() returns extruder_map_table to
+    /// identity at every print end (complete, cancel, error).
+    [[nodiscard]] bool print_routing_resets_to_identity() const override {
+        return true;
+    }
+
+    /// SET_PRINT_USED_EXTRUDERS for @p tools_used at their default heads, no
+    /// map, plus the per-print unload choice. Only while the firmware's map
+    /// still reads its default for every used tool: a map a failed start left
+    /// pending would route them elsewhere, and then only the unload choice goes.
+    [[nodiscard]] std::string
+    build_unrouted_preprint_gcode(const std::set<int>& tools_used) const override;
+
     /// The builder above, as a free-standing function.
     ///
     /// It reads no member state — the routing is entirely a function of its two
@@ -352,6 +447,26 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// format moved.
     [[nodiscard]] static std::string preprint_gcode(const std::set<int>& tools_used,
                                                     const std::map<int, int>& remap);
+
+    /// `SET_PRINT_USED_EXTRUDERS EXTRUDERS=<heads>`, ascending.
+    [[nodiscard]] static std::string used_extruders_line(const std::set<int>& heads);
+
+    /// Which lines of a filament record write to send.
+    enum class RecordLines { Both, Identity, Colour };
+
+    /// The SET_PRINT_FILAMENT_CONFIG script that writes @p slot's identity into
+    /// print_task_config for physical head @p head: one line for vendor, type
+    /// and subtype, one for colour (@p lines picks either alone). VENDOR is
+    /// "Snapmaker" for a Snapmaker spool and "Generic" otherwise;
+    /// FILAMENT_SUBTYPE is the spool's product line when it names one, else
+    /// "Basic". Empty when the slot names no material or one
+    /// IMoonrakerAPI::is_safe_material_param() refuses; values with a space are
+    /// quoted by IMoonrakerAPI::gcode_param_value(). A soft material adds
+    /// SOFT=1 to the identity line. @p force appends FORCE=1 to every line,
+    /// which a head the firmware calls official requires.
+    [[nodiscard]] static std::string
+    build_filament_config_gcode(int head, const SlotInfo& slot, bool force = false,
+                                RecordLines lines = RecordLines::Both);
 
     /// One multi-line feed script covering @p slots, in the order given,
     /// newline-joined with no trailing newline. Empty @p slots yields the
@@ -415,6 +530,20 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// macro has no interlock, and the command would be bogus there.
     void end_firmware_batch();
 
+    /// Sends a single-head feed command. The macro blocks until the feed is
+    /// over, so its answer ends the operation: OK raises @p complete_event and
+    /// an error raises kEventError. Either one ends an action the UI is holding
+    /// for a feed the firmware declined without moving channel_state. A
+    /// timeout raises nothing: the feed may still be running, and
+    /// channel_state reports its end. An error or a timeout on a load marks
+    /// @p load_head's load unconfirmed; -1 names no head.
+    AmsError dispatch_feed(std::string gcode, const char* complete_event, int load_head = -1);
+
+    /// dispatch_feed() with the answer handed to the caller: @p on_ok on OK,
+    /// @p on_failed on an error or a timeout. Both run on the main thread.
+    AmsError dispatch_feed(std::string gcode, std::function<void()> on_ok,
+                           std::function<void(const MoonrakerError&)> on_failed);
+
     /// Applied logical-tool -> physical-head routing for the CURRENT print.
     ///
     /// The capability question generic code asks; the vendor knowledge (that the
@@ -444,7 +573,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         return print_preferences_;
     }
 
-    /// The Print Behaviour section shown on the AMS device-operations
+    /// The Print Behavior section shown on the AMS device-operations
     /// overlay. Absent until the firmware has reported a preference, so the
     /// overlay never offers a setting whose state it does not know.
     [[nodiscard]] std::vector<helix::printer::DeviceSection> get_device_sections() const override;
@@ -455,8 +584,24 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
 
     /// Sends the SET_PRINT_PREFERENCES line build_preference_gcode() maps the
     /// action id to. Unknown ids are reported as not supported.
-    AmsError execute_device_action(const std::string& action_id,
-                                   const std::any& value = {}) override;
+    AmsError do_execute_device_action(const std::string& action_id, const std::any& value) override;
+
+    /// The saved unload-at-end list (SettingsManager's end-of-print unload
+    /// tools) as one SET_PRINT_PREFERENCES line, sized to the toolheads the
+    /// firmware reports, with every soft_heads() head 0; empty until it has
+    /// reported them. The firmware clears its list when every print ends, so
+    /// build_preprint_gcode() carries it on every start. @p print_running
+    /// renders it for a print already under way, which the firmware refuses
+    /// without FORCE.
+    [[nodiscard]] std::string end_unload_gcode(bool print_running = false) const;
+
+    /// The unload-at-end list for a print some other client started.
+    [[nodiscard]] std::string standing_print_gcode() const override;
+
+    /// Per head, whether it holds soft filament: the firmware's filament_soft
+    /// flag, or a soft material on the slot. Never the flag alone: the
+    /// firmware sets it only for types its own table names.
+    [[nodiscard]] std::vector<bool> soft_heads() const;
 
     /// The command one action produces, or empty when the id is not ours.
     /// Separated from execute_device_action so the mapping is testable without
@@ -464,7 +609,49 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     [[nodiscard]] std::string build_preference_gcode(const std::string& action_id,
                                                      const std::any& value) const;
 
+    /// Ends a toolhead offset calibration run in progress, so the printer is
+    /// not left holding the calibration state with heaters on.
+    void before_disconnect() override;
+
+    /// Endless Spool is the firmware's auto-replenish: available once it has
+    /// reported the flag, switchable, and firmware-managed (the firmware
+    /// chooses the backup head).
+    [[nodiscard]] helix::printer::EndlessSpoolCapabilities
+    get_endless_spool_capabilities() const override;
+
   protected:
+    /// SET_PRINT_PREFERENCES AUTO_REPLENISH_FILAMENT=0|1.
+    AmsError apply_endless_spool_enabled(bool enabled) override;
+
+    // Extension points for hardware hung off the U1's heads. Each default is
+    // the stock U1's answer, and each is called with mutex_ held.
+
+    /// Whether @p head is fed from upstream of its feeder port, through a
+    /// bowden from another unit. Its feed channel's filament_detected is then
+    /// that unit's gate, not a spool seated at the head's port: no PREP
+    /// sensor, no insert presence, no insert to judge.
+    [[nodiscard]] virtual bool head_is_upstream_fed_locked(int head) const {
+        (void)head;
+        return false;
+    }
+
+    /// Whether a channel reaching preload_finish straight from an unload's
+    /// in-progress states ends that unload on @p head. A stock unload ends at
+    /// unload_finish and only rests at preload_finish.
+    [[nodiscard]] virtual bool preload_finish_ends_unload_locked(int head) const {
+        (void)head;
+        return false;
+    }
+
+    /// Reads the extension's own status objects out of one frame, ahead of the
+    /// U1's own sections, so they see this frame's answers from the hooks
+    /// above. Sets @p changed when it moved anything published; the frame
+    /// notifies once either way.
+    virtual void apply_extension_locked(const nlohmann::json& status, bool& changed) {
+        (void)status;
+        (void)changed;
+    }
+
     void on_started() override;
     void handle_status(const nlohmann::json& status) override;
     const char* backend_log_tag() const override {
@@ -473,65 +660,29 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     SlotInfo* cached_slot_locked(int slot_index) override;
     [[nodiscard]] std::optional<AmsAction> step_action_locked() const override;
 
-    /// The U1's fixed head count. Protected because a backend that adds units
-    /// beside the four heads derives from this one and indexes the same heads.
-    static constexpr int NUM_TOOLS = 4;
-
-    /// Is `preload_finish` the LAST channel_state an unload of head @p head
-    /// will produce?
-    ///
-    /// On a stock feeder head it is not: an unload rests at preload_finish
-    /// (lane staged in the buffer) while the nozzle is still heating, and only
-    /// `unload_finish` ends it. A head whose retract is performed by hardware
-    /// outside the feeder never reports `unload_finish`: its channel walks
-    /// unload_picking -> unload_heating -> unload_doing -> preload_finish and
-    /// stops, so the action would stay UNLOADING and every slot would read
-    /// busy.
-    ///
-    /// @warning Called with mutex_ HELD, from inside the channel_state parse. An
-    /// override must read state directly and must not call a public accessor
-    /// that locks: mutex_ is not recursive, and the parse runs on the main
-    /// thread.
-    [[nodiscard]] virtual bool preload_finish_ends_unload(int head) const {
-        (void)head;
-        return false;
-    }
-
-    /// Is the unload head @p head just finished only the first half of an
-    /// operation whose load half is already queued?
-    ///
-    /// True holds the action where it is across the boundary: resolving to
-    /// IDLE there hides the step bar, releases the operation and arms the
-    /// post-op nozzle cooldown while the load half still needs the heat.
-    ///
-    /// @warning Called with mutex_ HELD; see preload_finish_ends_unload().
-    [[nodiscard]] virtual bool unload_continues_into_load(int head) const {
-        (void)head;
-        return false;
-    }
-
-    /// The step-bar index to publish for head @p head reporting @p info.
-    ///
-    /// The default is the classifier's per-direction index, which is the
-    /// position in get_operation_step_model()'s load or unload list. A subclass
-    /// whose step model lays both directions on one bar maps it to a position
-    /// on that bar.
-    ///
-    /// @warning Called with mutex_ HELD; see preload_finish_ends_unload().
-    [[nodiscard]] virtual int step_phase_locked(int head,
-                                                const snapmaker::ChannelStateInfo& info) const {
-        (void)head;
-        return info.phase;
-    }
-
   private:
     friend class SnapmakerTestAccess;
     friend class SnapmakerRealtimeTestAccess;
     friend class RunoutScopeTestAccess;
 
+    static constexpr int kNumTools = 4;
+
     /// What one status frame decides, collected under mutex_ and acted on by
     /// dispatch_effects() after it is released, plus the frame-local values the
     /// parse sections hand to each other.
+    /// A user edit's record write held by record_writes_held_locked().
+    struct PendingRecordWrite {
+        SlotInfo info;
+        bool material_declared = false;
+    };
+
+    /// A refeed whose AUTO_FEEDING answered OK before the feeder's frame
+    /// named its outcome.
+    struct RefeedWait {
+        int slot = -1;
+        ResumeReadyCallback on_ready;
+    };
+
     struct FrameEffects {
         bool changed = false;
         /// The active-tool port-present flag changed (#991): published to
@@ -551,19 +702,24 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
         /// entry (no UID, read not finished) means the frame carried no
         /// filament_detect.info for that channel, which the insert rule reads
         /// as no signal.
-        std::array<helix::ams::SpoolEvidence, NUM_TOOLS> observed_evidence{};
+        std::array<helix::ams::SpoolEvidence, kNumTools> observed_evidence{};
         /// The head whose channel reported an in-progress state this frame.
         int in_progress_head = -1;
-        /// The step-bar index this frame elects: the first channel reporting
-        /// an active step wins, and -1 stands only when no channel reported
-        /// one. A full query carries all four channels, and the idle ones that
-        /// follow the operating head must not blank its step.
-        int step_phase = -1;
-        /// A channel carried a channel_state this frame, so step_phase is an
-        /// answer rather than silence.
-        bool step_phase_seen = false;
         /// The batch macro reported doing=false and retired the active plan.
         bool batch_retired = false;
+        /// official_flag_repairs_locked() output, sent outside mutex_.
+        std::vector<std::pair<int, std::string>> official_repairs;
+        /// record_restores_locked() output, sent outside mutex_.
+        std::vector<std::pair<int, std::string>> record_restores;
+        /// Held record writes this frame released.
+        std::vector<std::pair<int, PendingRecordWrite>> record_flushes;
+        /// The head a refeed waits on reached a settled state this frame.
+        bool refeed_settled = false;
+        /// The print's first printing frame: its file's heads are checked for
+        /// one the firmware will not load.
+        bool check_used_heads = false;
+        std::string check_used_heads_file;
+        uint32_t check_used_heads_print = 0;
     };
 
     void dispatch_effects(const FrameEffects& fx);
@@ -575,6 +731,12 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     void apply_active_tool_locked(const snapmaker::StatusDelta& delta, FrameEffects& fx);
     void apply_filament_detect_locked(const snapmaker::StatusDelta& delta, FrameEffects& fx);
     void apply_rfid_entry_locked(int slot_index, const SnapmakerRfidInfo& rfid, FrameEffects& fx);
+    /// Keep this entry as the channel's tag reading (the vendor-cache @p cache
+    /// plus the temperatures and multi-colour the lane model has no field
+    /// for), and lay the tag's multi-colour onto
+    /// @p slot unless the lane declares a colour.
+    void record_tag_reading_locked(int slot_index, const SnapmakerRfidInfo& rfid,
+                                   const helix::ams::Observation& cache, SlotInfo& slot);
     void apply_feed_channels_locked(const snapmaker::StatusDelta& delta, FrameEffects& fx);
     void apply_feed_channel_locked(const snapmaker::FeedChannelDelta& channel, FrameEffects& fx);
     /// The feed-port flag: its false -> true edge is an insert into the channel.
@@ -622,7 +784,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// RPC timeout budget for ONE batch feed op. AUTO_FEEDING heats from cold +
     /// feeds + flushes; measured ~86s live (see prepare_for_resume), so 150s is
     /// the headroom the resume path already uses. A batch scales this per op.
-    static constexpr uint32_t BATCH_FEED_OP_TIMEOUT_MS = 150000;
+    static constexpr uint32_t kBatchFeedOpTimeoutMs = 150000;
 
     /// Firmware routing: logical tool index -> physical head index, mirrored from
     /// print_task_config.extruder_map_table (32 logical entries, 4 heads).
@@ -679,7 +841,22 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     snapmaker::PrintPreferences print_preferences_;
 
     /// Per-extruder cached state
-    std::array<ExtruderToolState, NUM_TOOLS> extruder_states_;
+    std::array<ExtruderToolState, kNumTools> extruder_states_;
+
+    /// How long a sent T<n> keeps the carriage from reading empty if the head
+    /// never reports; a change that fails on the firmware must not hold it forever.
+    static constexpr std::chrono::seconds kToolChangeWindow{20};
+
+    /// Tool of a T<n> sent and not yet seen on the carriage, -1 when none. The
+    /// old head docks before the new one reports, so every head briefly reads
+    /// PARKED mid-change; this keeps that gap from reading as an empty carriage.
+    /// Guarded by mutex_.
+    int pending_tool_ = -1;
+    std::chrono::steady_clock::time_point pending_until_{};
+
+    /// A head is moving onto the carriage: a T<n> is pending, a head is in its
+    /// activating move, or the action is SELECTING. Caller holds mutex_.
+    [[nodiscard]] bool tool_change_in_flight_locked() const;
 
     /// Per-slot filament_motion_sensor "filament_detected" state. True means
     /// filament is currently being fed to the toolhead; false means runout has
@@ -690,12 +867,15 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// for that sensor, which only happens on configured runout sensors. Read
     /// by get_filament_segment() / get_slot_filament_segment() to break the
     /// spool→toolhead line when the active tool has run out.
-    std::array<bool, NUM_TOOLS> sensor_filament_present_{{true, true, true, true}};
+    std::array<bool, kNumTools> sensor_filament_present_{{true, true, true, true}};
 
     /// Whether sensor_filament_present_[i] came from a real filament_detected
     /// report. Its true default means "no runout", never "filament in the
     /// toolhead", so only a reported reading answers the parked question.
-    std::array<bool, NUM_TOOLS> toolhead_switch_reported_{{false, false, false, false}};
+    std::array<bool, kNumTools> toolhead_switch_reported_{{false, false, false, false}};
+
+    /// How far tool i's own lane holds filament. Caller holds mutex_.
+    [[nodiscard]] PathSegment slot_segment_locked(int i) const;
 
     /// Filament in tool i's toolhead short of the nozzle. Caller holds mutex_.
     [[nodiscard]] bool parked_in_toolhead_locked(int i) const {
@@ -712,7 +892,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// seen filament_feed data for doesn't generate a "stuck sensor" false
     /// positive of its own — the auto-recover path requires the port sensor
     /// to explicitly report present.
-    std::array<bool, NUM_TOOLS> port_sensor_filament_present_{{false, false, false, false}};
+    std::array<bool, kNumTools> port_sensor_filament_present_{{false, false, false, false}};
 
     /// Last value published to AmsState::set_active_tool_port_present for the
     /// active tool (#991). Tracks the active-tool port flag so we only push to
@@ -734,7 +914,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// slot_has_filament_at_toolhead() and can_unload_from_toolhead(). The
     /// motion sensor (sensor_filament_present_) still owns mid-print runout —
     /// a different question ("did the ACTIVE lane run out during extrusion").
-    std::array<bool, NUM_TOOLS> loaded_at_toolhead_{{false, false, false, false}};
+    std::array<bool, kNumTools> loaded_at_toolhead_{{false, false, false, false}};
 
     /// Per-slot "filament_feed has reported this lane" — set the first time a
     /// frame carries a boolean filament_detected or a channel_state for the
@@ -742,7 +922,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// ingest stays silent: the port/latch arrays rest on their defaults
     /// ("no reading yet", not "no filament"), and declaring those defaults
     /// would empty a lane whose only signal so far is the toolhead pin state.
-    std::array<bool, NUM_TOOLS> feed_presence_seen_{{false, false, false, false}};
+    std::array<bool, kNumTools> feed_presence_seen_{{false, false, false, false}};
 
     /// Per-channel pending insert: parse passes held since the feed-port
     /// presence rose, 0 = none pending. The port edge fires the moment
@@ -756,7 +936,300 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// cancels it: the spool left before any read. A feed the firmware itself
     /// drives (tool-change load/unload, one of our batch ops) never arms it.
     /// Written only from handle_status (the single writer).
-    std::array<int, NUM_TOOLS> pending_insert_passes_{{0, 0, 0, 0}};
+    std::array<int, kNumTools> pending_insert_passes_{{0, 0, 0, 0}};
+
+    /// The reader's verdict on each channel's last judged insert: FromTag,
+    /// NoTag, or NotRead once a new insert arms or the reader never judged one.
+    /// Written only from handle_status, beside pending_insert_passes_.
+    std::array<InsertIdentity, kNumTools> insert_verdict_{};
+
+    /// What each channel's firmware last said about the spool's identity:
+    /// whether filament_detect.info named one, and print_task_config's vendor
+    /// and official flag. Unset until the first frame carrying each.
+    std::array<std::optional<bool>, kNumTools> tag_names_identity_{};
+    std::array<std::optional<std::string>, kNumTools> task_vendor_{};
+    std::array<std::optional<bool>, kNumTools> task_official_{};
+
+    /// print_task_config.filament_type per head, as the firmware spells it
+    /// ("NONE" or "" when nothing is set). SlotInfo::material cannot answer
+    /// this: the user's own declaration is laid over it. Unset until the first
+    /// frame carrying it.
+    std::array<std::optional<std::string>, kNumTools> task_type_{};
+
+    /// print_task_config.filament_color_rgba per head, decoded. Unset until the
+    /// first frame carrying a colour that decodes.
+    std::array<std::optional<uint32_t>, kNumTools> task_color_{};
+
+    /// print_task_config.filament_sub_type per head, as the firmware spells it.
+    /// Unset until the first frame carrying it.
+    std::array<std::optional<std::string>, kNumTools> task_subtype_{};
+
+    /// Per head: an official-flag repair has been sent this session. Under
+    /// mutex_.
+    std::array<bool, kNumTools> official_repair_sent_{};
+
+    /// Per head: the lane's declaration has been written back since the
+    /// firmware record last named a type. Under mutex_.
+    std::array<bool, kNumTools> record_restore_sent_{};
+
+    /// Per channel: a spool went into the feeder port after the lane's
+    /// material was declared, so the declaration may name a spool that has
+    /// left. The next user edit declares the spool in the port. Under mutex_.
+    std::array<bool, kNumTools> insert_since_declaration_{};
+
+    /// Per channel: the tag reader has shown a real card this session. Under
+    /// mutex_.
+    std::array<bool, kNumTools> card_seen_{};
+
+    /// print_stats.state from this backend's own status frames; unset until a
+    /// frame carries it. Under mutex_.
+    std::optional<std::string> print_state_;
+
+    /// Per head: a load during the current print ended without the feeder
+    /// reporting load_finish with channel_error ok. The head presence switch
+    /// reads "present" for filament that reached the toolhead and stopped
+    /// short of the nozzle, so it cannot vouch for a load; until the feeder
+    /// does, Resume retries the load instead of sending RESUME. Cleared by a
+    /// confirmed load, the print ending, and a disconnect. Under mutex_.
+    std::array<bool, kNumTools> load_unconfirmed_{};
+
+    /// The current print's used heads have been checked: once per print,
+    /// reset when the print ends. Under mutex_.
+    bool used_heads_checked_ = false;
+
+    /// A restart began while a print was in progress: its check waits for a
+    /// frame naming the new file. A restart of the same file names none and
+    /// goes unchecked. Under mutex_.
+    bool awaiting_restart_file_ = false;
+
+    /// How long a refeed's OK waits for the head's next settled frame.
+    static constexpr std::chrono::milliseconds kRefeedFrameWait{3000};
+
+    /// The refeed waiting on its head's frame. Under mutex_.
+    std::optional<RefeedWait> refeed_wait_;
+
+    /// A refeed was sent and has not been judged. Under mutex_.
+    bool refeed_in_flight_ = false;
+
+    /// Ends refeed_wait_ at kRefeedFrameWait. Main thread.
+    helix::ui::LvglTimerGuard refeed_wait_timer_;
+
+    /// Counts prints: bumped each time print_stats.state enters or leaves a
+    /// print, so an answer about one print's file is dropped once it ends.
+    /// Under mutex_.
+    uint32_t print_generation_ = 0;
+
+    /// print_stats.filename from this backend's own frames. Under mutex_.
+    std::string print_filename_;
+
+    /// Reads the running print's file for its tools. Created on first use;
+    /// main thread only.
+    std::unique_ptr<FileStartFactsLoader> file_facts_;
+
+    /// Answers the tools @p filename uses (empty when unreadable); tests
+    /// replace the file read with it. Main thread only.
+    std::function<void(const std::string& filename, std::function<void(std::set<int>)> on_tools)>
+        file_tools_probe_;
+
+    /// machine_state_manager.main_state from this backend's own status frames;
+    /// unset until a frame carries it. Under mutex_.
+    std::optional<int> main_state_;
+
+    /// Per head, the latest held record write; dropped with the head's
+    /// override and at on_started(). Under mutex_.
+    std::array<std::optional<PendingRecordWrite>, kNumTools> pending_record_writes_{};
+
+    /// The temperatures and spool weight the last tag reading on each channel
+    /// wrote onto SlotInfo, which no lane record carries. Unset until a tag is
+    /// read, and again once retract_tag_reading_locked() takes them back.
+    struct TagSlotValues {
+        int nozzle_temp_min = 0;
+        int nozzle_temp_max = 0;
+        int bed_temp = 0;
+        float total_weight_g = 0;
+    };
+    std::array<std::optional<TagSlotValues>, kNumTools> tag_slot_values_{};
+
+    /// The last tag reading on each channel, as tag_reading() reports it. Unset
+    /// when the channel's entry names no tag, or a CARD_UID naming no card.
+    /// Written by handle_status, retract_tag_reading_locked() and
+    /// on_started(); all access under mutex_.
+    std::array<std::optional<helix::ams::TagReading>, kNumTools> tag_readings_{};
+
+    /// Whether filament_detect.info last showed a real card on each channel: a
+    /// CARD_UID with a nonzero byte. Unset until the first entry for it.
+    std::array<std::optional<bool>, kNumTools> tag_has_card_{};
+
+    /// How a SET_PRINT_FILAMENT_CONFIG may reach @p head: false plain, true
+    /// with FORCE=1 (the firmware calls the head official but no card backs
+    /// it), nullopt not at all (a real tag's record, or no card reading yet
+    /// beside an official flag). Caller holds mutex_.
+    [[nodiscard]] std::optional<bool> record_write_needs_force_locked(int head) const;
+
+    /// Write a user edit into the head's print_task_config record, the one the
+    /// firmware's RESUME gate, the stock screen and slicers read: the identity
+    /// line when the record names a different type, vendor or subtype, the
+    /// colour line when it names a different colour, nothing when it already
+    /// agrees (every line runs FLOW_RESET_K on the head), both lines with
+    /// FORCE=1 on an official head with no card. A record not seen yet is
+    /// written only for a declared material, @p material_declared. While
+    /// record_writes_held_locked() the edit is kept in pending_record_writes_
+    /// and written by the first frame for which heads_free_locked(). Main
+    /// thread.
+    void write_task_filament_record(int head, const SlotInfo& info, bool material_declared);
+
+    /// Whether a user edit's record write must wait: the offset calibration
+    /// holds the heads, this backend's own print_stats.state reads printing,
+    /// or, before its frames have named one, the app's print job state reads
+    /// PRINTING or is not initialized. Caller holds mutex_.
+    [[nodiscard]] bool record_writes_held_locked() const;
+
+    /// FORCE=1 rewrites for heads whose record is flagged official while the
+    /// tag entry is filled with no card behind it, the channel has shown no
+    /// card this session, and the record holds exactly what this backend's
+    /// stored edit says. A filament_detect/set write (Extended Firmware) leaves
+    /// that flag, and the firmware then refuses plain writes from us and from
+    /// the stock screen. Nothing is returned until this backend has read a
+    /// print_stats.state that is neither printing nor paused. Marks each head
+    /// returned sent. Caller holds mutex_.
+    [[nodiscard]] std::vector<std::pair<int, std::string>> official_flag_repairs_locked();
+
+    /// Forget @p head's held record write, if it has one. Caller holds mutex_.
+    void drop_pending_record_write_locked(int head);
+
+    /// Whether the toolhead offset calibration holds the machine state: it
+    /// parks, heats and probes the heads between its steps. Caller holds mutex_.
+    [[nodiscard]] bool calibration_holds_heads_locked() const;
+
+    /// Whether this backend's own print_stats.state is known and holds no head:
+    /// neither printing nor paused, and no offset calibration holds the
+    /// machine state. Caller holds mutex_.
+    [[nodiscard]] bool heads_free_locked() const;
+
+    /// The firmware forgets a head's record whenever filament leaves its
+    /// toolhead (an unload, unload-at-end, a runout), though the spool still
+    /// sits in the feeder. One SET_PRINT_FILAMENT_CONFIG script per head whose
+    /// record names no type while its lane declares a material, a spool is in
+    /// the port or at the nozzle, no spool has gone in since the declaration,
+    /// no tag read is pending on it, no feed is moving the head, and the heads
+    /// are free. Marks each head
+    /// returned sent until its record next names a type. Caller holds mutex_.
+    [[nodiscard]] std::vector<std::pair<int, std::string>> record_restores_locked();
+
+    /// The script that refills @p head's record from its slot: empty unless
+    /// the record is known to name no type, a write may reach the head, and
+    /// the slot names a material. Caller holds mutex_.
+    [[nodiscard]] std::string unset_record_restore_locked(int head) const;
+
+    /// Send each script in @p writes as its own request, logging @p why per
+    /// head. Main thread, outside mutex_.
+    void dispatch_record_scripts(const std::vector<std::pair<int, std::string>>& writes,
+                                 const char* why);
+
+    /// One SET_PRINT_FILAMENT_CONFIG script per head the paused task uses whose
+    /// firmware record names no type while the slot knows its material: the
+    /// record the firmware's RESUME gate checks. The used heads are the union
+    /// of extruders_used, the heads the task's map routes to, and
+    /// @p active_slot. Caller holds mutex_.
+    [[nodiscard]] std::vector<std::pair<int, std::string>>
+    resume_record_repairs_locked(int active_slot) const;
+
+    /// Send each of @p repairs as its own request, in order, then run @p next
+    /// on the main thread, whatever each answered: a refused head leaves RESUME
+    /// to report the firmware's own refusal. Runs @p next at once when there
+    /// is nothing to send.
+    void send_resume_repairs_then(std::vector<std::pair<int, std::string>> repairs,
+                                  std::function<void()> next);
+
+    /// prepare_for_resume after a runout on @p slot, or with @p slot's last
+    /// load unconfirmed: AUTO_FEEDING refeeds it, and on_ready reports success
+    /// only when the feeder then reads load_finish with channel_error ok.
+    /// FEED_AUTO answers OK without feeding when the port reads empty under
+    /// PRINTING=1, so the command's own answer proves nothing.
+    void run_runout_refeed(int slot, ResumeReadyCallback on_ready);
+
+    /// The feeder's own word that @p head is loaded to the nozzle: the success
+    /// test FEED_AUTO applies before it raises 525.
+    [[nodiscard]] static bool load_confirmed(const ChannelSnapshot& snap) {
+        return snap.state == "load_finish" && snap.error == "ok";
+    }
+
+    /// A channel_error that is a fault. The firmware reports "no_filament"
+    /// for any empty feeder and ""/"none" when a channel has nothing to say,
+    /// none of which is one.
+    [[nodiscard]] static bool channel_error_is_fault(const std::string& error) {
+        return error != "ok" && !error.empty() && error != "none" && error != "no_filament";
+    }
+
+    /// The feeder's own word that the head holds filament it loaded: a load
+    /// finished at the nozzle, or a hand feed finished, either with no error.
+    [[nodiscard]] static bool feeder_reports_loaded(const ChannelSnapshot& snap) {
+        return load_confirmed(snap) || (snap.state == "manual_sta_finish" && snap.error == "ok");
+    }
+
+    /// The feeder reports this channel failed: a *_fail state, or a
+    /// channel_error that is a fault.
+    [[nodiscard]] static bool feed_failure_reported(const ChannelSnapshot& snap) {
+        return snapmaker::classify_channel_state(snap.state).is_fail ||
+               channel_error_is_fault(snap.error);
+    }
+
+    /// An automatic feeder serves this head, so its channel_state says
+    /// whether filament is loaded to the nozzle.
+    [[nodiscard]] static bool feeder_serves_head(const ChannelSnapshot& snap) {
+        return snap.module_exist && !snap.disable_auto && !snap.state.empty();
+    }
+
+    /// After a refeed's OK: judge it now when the feeder already reads
+    /// load_finish, else on the head's next settled frame or at
+    /// kRefeedFrameWait. Main thread.
+    void await_refeed_outcome(int slot, ResumeReadyCallback on_ready);
+    /// End a pending refeed wait, judging it on what the feeder reads now.
+    void finish_refeed_wait();
+    /// Judge a refeed on the head's snapshot and answer @p on_ready.
+    void settle_refeed(int slot, ResumeReadyCallback on_ready);
+
+    /// The head whose unconfirmed load holds Resume: @p preferred when it is
+    /// one, else the lowest the print is known to use, else -1. Caller holds
+    /// mutex_.
+    [[nodiscard]] int unconfirmed_load_head_locked(int preferred) const;
+
+    /// Resume refused because @p head's last load is unconfirmed. The detail
+    /// line offers Resume as the retry only when @p retry_on_resume.
+    [[nodiscard]] AmsError unconfirmed_load_error(int head, std::string technical,
+                                                  bool retry_on_resume = true) const;
+
+    /// print_stats.state names a print in progress (printing or paused).
+    [[nodiscard]] bool print_in_progress_locked() const;
+
+    /// Apply this frame's print_stats.state; a print that ends forgets the
+    /// unconfirmed loads and the task judgement. Caller holds mutex_.
+    void apply_print_state_locked(const std::string& state);
+
+    /// True once per print, on its first printing frame that names its state
+    /// or file (only its file after a restart that never left the print): the
+    /// moment its used heads are checked. Caller holds mutex_.
+    [[nodiscard]] bool used_heads_check_due_locked(bool frame_names_state, bool frame_names_file);
+
+    /// The heads @p tools print from: the task's map when the firmware holds a
+    /// configured task, else the default routing. Caller holds mutex_.
+    [[nodiscard]] std::set<int> heads_for_tools_locked(const std::set<int>& tools) const;
+
+    /// Read @p filename's tools and warn, once per head, about each head the
+    /// print uses that its feeder reports not loaded and the firmware will not
+    /// load itself (not in extruders_used), while print @p print still runs.
+    /// Silent when the tools cannot be read.
+    void warn_unloaded_used_heads(const std::string& filename, uint32_t print);
+
+    /// On a channel whose firmware states no identity at all, drop the brand
+    /// and product line the lane only remembers. Caller holds mutex_.
+    void retract_unbacked_identity_locked(int slot_index, SlotInfo& slot);
+
+    /// On a channel whose tag reader names no tag, drop the lane's vendor-cache
+    /// record and take what it stated off @p slot, falling back to what
+    /// print_task_config last said. Returns whether a record was dropped.
+    /// Caller holds mutex_.
+    bool retract_tag_reading_locked(int slot_index, SlotInfo& slot);
 
     /// Last filament_feed frame's raw per-channel fields (channel_state,
     /// channel_error, filament_detected, module_exist, disable_auto), written
@@ -764,13 +1237,18 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// whole entry, defaulting any feeder field that frame omitted;
     /// sensor_enabled arrives from the motion-sensor objects instead and is
     /// carried across a feeder write. Read by channel_snapshot().
-    std::array<ChannelSnapshot, NUM_TOOLS> channel_snapshots_{};
+    std::array<ChannelSnapshot, kNumTools> channel_snapshots_{};
 
     /// Per channel: the last in-progress channel_state was a preload_*. A
     /// preload ends at preload_finish; any other op merely rests there (an
     /// unload heats with the channel still at preload_finish), so only this
     /// lets preload_finish resolve the op. Under mutex_.
-    std::array<bool, NUM_TOOLS> preload_in_flight_{};
+    std::array<bool, kNumTools> preload_in_flight_{};
+
+    /// Per channel: the last in-progress channel_state was an unload_*. Lets
+    /// preload_finish_ends_unload_locked() tell an unload's end from the rest
+    /// state an unload starts from. Under mutex_.
+    std::array<bool, kNumTools> unload_in_flight_{};
 
     /// Layer a configured FilamentSlotOverride for `slot_index` over `slot`,
     /// mutating `slot` in place. Override wins for every non-default field.
@@ -778,6 +1256,7 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// AFTER firmware data has been populated and BEFORE event emission, so
     /// the very next get_slot_info() reflects the overridden values.
 
+  protected:
     /// Hardware-event detection under the insert rule
     /// (prestonbrown/helixscreen#1710): each RFID reading becomes a tracker
     /// fingerprint built from exactly the fields the rule judges - the UID
@@ -797,12 +1276,31 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// don't race the baseline. (CFS shares the tracker but DOES need that
     /// guard - it writes color_value back to the box, which is half of its
     /// fingerprint.)
+    ///
+    /// Protected: AmsBackendMultiAce feeds its bays' engine identity through
+    /// the same rule and the same tracker.
     void check_hardware_event_clear(SlotInfo& slot, int slot_index,
                                     const helix::ams::SpoolEvidence& observed);
 
-    /// Brand / spool_name / total_weight_g are kept: firmware populates them
-    /// from the RFID tag. The tag has no colour-name field, so color_name is
-    /// override-exclusive and goes.
+    /// Record that a load on @p head ended unconfirmed. Only during a print
+    /// (printing or paused); outside one there is no Resume to hold.
+    /// Caller holds mutex_. Protected: AmsBackendMultiAce records the
+    /// engine's own load_failed through it.
+    void mark_load_unconfirmed_locked(int head, std::string_view why);
+
+    /// Whether Resume may load @p head itself with AUTO_FEEDING before RESUME,
+    /// when the feeder has not confirmed it. False refuses Resume and leaves
+    /// the load to the user. Caller holds mutex_.
+    [[nodiscard]] virtual bool resume_may_refeed_locked(int head) const {
+        (void)head;
+        return true;
+    }
+
+  private:
+    /// Brand / total_weight_g are kept: firmware populates them from the RFID
+    /// tag. spool_name goes, and each clear restates the tag's product line.
+    /// The tag has no colour-name field, so color_name is override-exclusive
+    /// and goes.
     void clear_override_fields(SlotInfo& slot) const override;
 
     /// Whether the connected firmware ships the AUTO_FEEDING_BATCH macro,
@@ -817,6 +1315,11 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     /// spelling: Klipper preserves the config's case in object keys. All
     /// access under mutex_.
     std::string batch_macro_object_;
+
+    /// The firmware ships the multi-toolhead offset calibration macros
+    /// (snapmaker::nozzle_offset::supported), cached by set_discovery(). All
+    /// access under mutex_.
+    bool nozzle_offset_supported_ = false;
 
     /// The batch do_filament_batch() dispatched, verified head-by-head in
     /// handle_status's channel_state parse. All access under mutex_.
@@ -837,22 +1340,10 @@ class AmsBackendSnapmaker : public AmsSubscriptionBackend {
     // access under mutex_.
     helix::ams::SlotFingerprintTracker rfid_tracker_;
 
-    // The base's own_write_echoes_, on this backend:
-    // What the user declared in their last edit of a channel, out of the
-    // fields apply_user_edit actually sent to /printer/filament_detect/set.
-    //
-    // The write target is filament_detect.info, the same object
-    // parse_rfid_info reads, and VENDOR / MAIN_TYPE / SUB_TYPE are spelled
-    // identically on both sides, so firmware reports a user's declaration
-    // back through the RFID path where it is indistinguishable by value from
-    // a tag reading.
-    //
-    // The boundary is the tag's CARD_UID, taken from rfid_tracker_: a
-    // hardware identifier the edit UI cannot set, so a change is
-    // unambiguously a different physical spool. It is the same signal
-    // check_hardware_event_clear() trusts to delete the user's override, so
-    // the suppression and the clear end together and neither can expose what
-    // the other still holds. All access under mutex_.
+    // The base's own_write_echoes_ stays unarmed on this backend: a user edit
+    // reaches firmware only through SET_PRINT_FILAMENT_CONFIG, which writes
+    // print_task_config, and that struct files no lane observation. Nothing
+    // this backend sends comes back through filament_detect.info.
 };
 
 } // namespace helix

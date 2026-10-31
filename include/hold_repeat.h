@@ -11,7 +11,7 @@ namespace helix {
  * values instead of a running periodic timer (the unit-test harness only
  * executes one-shot timers). A press arms the machine; the owner then asks
  * on_elapsed() at whatever cadence it polls. No repeat fires before DELAY_MS,
- * then one fires per INTERVAL_MS. After release, swallow_click() says whether
+ * then one fires per kIntervalMs. After release, swallow_click() says whether
  * the CLICKED that follows must be dropped: a hold that repeated must not add
  * one extra jog on release, while a plain tap with no repeat still jogs
  * exactly once via the existing click path.
@@ -21,7 +21,7 @@ class HoldRepeat {
     /// Held this long before the first repeat: an ordinary tap never repeats.
     static constexpr uint32_t DELAY_MS = 400;
     /// One repeat every this long once the delay has passed.
-    static constexpr uint32_t INTERVAL_MS = 150;
+    static constexpr uint32_t kIntervalMs = 150;
 
     void press() {
         active_ = true;
@@ -50,8 +50,8 @@ class HoldRepeat {
         // A late poll (stalled main loop) fires once and resumes on the grid
         // at the first boundary after now; repaying every missed interval
         // would burst the head forward one repeat per poll.
-        const uint32_t phase = (ms_since_press - DELAY_MS) % INTERVAL_MS;
-        next_ms_ = ms_since_press + (INTERVAL_MS - phase);
+        const uint32_t phase = (ms_since_press - DELAY_MS) % kIntervalMs;
+        next_ms_ = ms_since_press + (kIntervalMs - phase);
         return true;
     }
 

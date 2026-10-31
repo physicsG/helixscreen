@@ -1,14 +1,18 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_icon_codepoints.h"
+
 #include "afc_defaults.h"
 #include "ams_backend_ace.h"
 #include "ams_backend_cfs.h"
+#include "ams_device_sections.h"
 #include "ams_types.h"
 #include "hh_defaults.h"
 
 #include <algorithm>
 #include <any>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -65,9 +69,23 @@ TEST_CASE("DeviceAction factories set every field the control type uses", "[ams]
     }
 }
 
+TEST_CASE("DeviceAction::info is a read-only string row", "[ams][device_actions]") {
+    auto a = DeviceAction::info("id", "Label", "tool_offsets", "X 0.100 mm", "axis_arrow", "hint");
+    CHECK(a.type == ActionType::INFO);
+    const auto* value = std::any_cast<std::string>(&a.current_value);
+    REQUIRE(value != nullptr);
+    CHECK(*value == "X 0.100 mm");
+    CHECK(a.label == "Label");
+    CHECK(a.section == "tool_offsets");
+    CHECK(a.icon == "axis_arrow");
+    CHECK(a.description == "hint");
+    CHECK_FALSE(a.moves_machine);
+    CHECK(a.enabled);
+}
+
 TEST_CASE("AFC default actions keep their shipped field values", "[ams][afc][device_actions]") {
     const auto actions = afc_default_actions();
-    CHECK(actions.size() == 26);
+    CHECK(actions.size() == 27);
 
     const auto& bowden = by_id(actions, "bowden_length");
     CHECK(bowden.label == "Bowden Length");
@@ -83,12 +101,15 @@ TEST_CASE("AFC default actions keep their shipped field values", "[ams][afc][dev
     const auto& cut = by_id(actions, "hub_cut_enabled");
     CHECK(cut.type == ActionType::TOGGLE);
     CHECK(std::any_cast<bool>(cut.current_value) == false);
-    CHECK(cut.icon == "content-cut");
+    CHECK(cut.icon == "tune");
     CHECK(cut.section == "hub");
+
+    CHECK(by_id(actions, "calibration_wizard").moves_machine);
+    CHECK_FALSE(bowden.moves_machine);
 
     const auto& park = by_id(actions, "park");
     CHECK(park.type == ActionType::BUTTON);
-    CHECK(park.icon == "parking");
+    CHECK(park.icon == "home_import");
     CHECK(park.description == "Park the AFC system");
     CHECK_FALSE(park.current_value.has_value());
 }
@@ -124,15 +145,123 @@ TEST_CASE("ACE and CFS device actions keep their shipped field values",
     CHECK(ace[0].section == "filament_control");
     CHECK(ace[0].description == "Feed filament from current slot");
     CHECK(ace[0].type == ActionType::BUTTON);
+    // Manual feed and retract push filament through the toolhead path.
+    CHECK(ace[0].moves_machine);
+    CHECK(ace[1].moves_machine);
+    CHECK_FALSE(ace[0].allowed_while_paused);
     CHECK(ace[2].id == "ace_feed_assist_toggle");
     CHECK(ace[2].type == ActionType::TOGGLE);
     CHECK_FALSE(ace[2].current_value.has_value());
 
     const auto cfs = AmsBackendCfs(nullptr, nullptr).get_device_actions();
-    REQUIRE(cfs.size() == 4);
-    CHECK(cfs[1].id == "toggle_auto_refill");
-    CHECK(cfs[1].type == ActionType::TOGGLE);
+    REQUIRE(cfs.size() == 3);
+    CHECK(cfs[1].id == "nozzle_clean");
     CHECK(cfs[1].section == "maintenance");
-    CHECK(cfs[3].label == "Communication Test");
-    CHECK(cfs[3].enabled);
+    CHECK(cfs[2].label == "Communication Test");
+    CHECK(cfs[2].enabled);
+}
+
+TEST_CASE("every default device action names an icon the font has",
+          "[ams][device_actions][icons]") {
+    for (const auto& actions : {afc_default_actions(), hh_default_actions()}) {
+        for (const auto& a : actions) {
+            if (!a.icon.empty()) {
+                INFO(a.id << " icon " << a.icon);
+                CHECK(helix::ui::icon::lookup_codepoint(a.icon.c_str()) != nullptr);
+            }
+        }
+    }
+}
+
+TEST_CASE("every backend's sections come from the shared vocabulary with a real icon",
+          "[ams][device_actions][device_sections]") {
+    for (const auto& kind : helix::printer::kDeviceSectionKinds) {
+        INFO(kind.id);
+        CHECK(helix::ui::icon::lookup_codepoint(kind.icon) != nullptr);
+    }
+
+    std::vector<std::vector<DeviceSection>> all = {
+        afc_default_sections(),
+        hh_default_sections(),
+        helix::AmsBackendAce(nullptr, nullptr).get_device_sections(),
+        AmsBackendCfs(nullptr, nullptr).get_device_sections(),
+    };
+    for (const auto& sections : all) {
+        REQUIRE_FALSE(sections.empty());
+        for (const auto& section : sections) {
+            INFO(section.id);
+            const auto* kind = helix::printer::find_device_section_kind(section.id);
+            REQUIRE(kind != nullptr);
+            CHECK(section.label == kind->label);
+            CHECK(section.icon == kind->icon);
+        }
+    }
+    // One word for one kind of section, whichever system declares it.
+    CHECK(afc_default_sections()[1].label == hh_default_sections()[1].label);
+}
+
+TEST_CASE("tool_offsets is a section kind", "[ams][sections]") {
+    const auto* kind = helix::printer::find_device_section_kind("tool_offsets");
+    REQUIRE(kind != nullptr);
+    CHECK(std::string(kind->label) == "Tool Offsets");
+    CHECK(std::string(kind->icon) == "axis_arrow");
+}
+
+TEST_CASE("an id outside the section vocabulary still renders",
+          "[ams][device_actions][device_sections]") {
+    const auto section = helix::printer::device_section("not_a_kind", 3, "d");
+    CHECK(section.label == "not_a_kind");
+    CHECK(section.icon == "cog");
+    CHECK(section.display_order == 3);
+}
+
+TEST_CASE("Happy Hare default sections and actions are well-formed", "[ams][hh_defaults]") {
+    const auto sections = hh_default_sections();
+    const auto actions = hh_default_actions();
+    REQUIRE_FALSE(sections.empty());
+    REQUIRE_FALSE(actions.empty());
+
+    std::set<std::string> section_ids;
+    for (size_t i = 0; i < sections.size(); ++i) {
+        const auto& s = sections[i];
+        INFO("section " << s.id);
+        CHECK_FALSE(s.id.empty());
+        CHECK_FALSE(s.label.empty());
+        CHECK_FALSE(s.description.empty());
+        CHECK(s.display_order >= 0);
+        if (i > 0) {
+            CHECK(s.display_order > sections[i - 1].display_order);
+        }
+        CHECK(section_ids.insert(s.id).second);
+    }
+
+    std::set<std::string> action_ids;
+    for (const auto& a : actions) {
+        INFO("action " << a.id);
+        CHECK_FALSE(a.id.empty());
+        CHECK_FALSE(a.label.empty());
+        CHECK(section_ids.count(a.section) == 1);
+        CHECK(action_ids.insert(a.id).second);
+        if (a.type == ActionType::SLIDER) {
+            CHECK(a.min_value < a.max_value);
+            CHECK_FALSE(a.unit.empty());
+        }
+        if (a.type == ActionType::DROPDOWN) {
+            CHECK(a.options.size() >= 2);
+        }
+    }
+}
+
+TEST_CASE("HH default actions: extruder load and unload share the first button row",
+          "[ams][hh_defaults]") {
+    // The section overlay packs consecutive buttons two to a row.
+    std::vector<std::string> maintenance_buttons;
+    for (const auto& a : hh_default_actions()) {
+        if (a.section == "maintenance" && a.type == ActionType::BUTTON) {
+            maintenance_buttons.push_back(a.id);
+        }
+    }
+    REQUIRE(maintenance_buttons.size() >= 2);
+    CHECK(maintenance_buttons[0] == "load_extruder");
+    CHECK(maintenance_buttons[1] == "unload_extruder");
 }

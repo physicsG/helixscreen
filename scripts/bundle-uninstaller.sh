@@ -81,10 +81,14 @@ HEADER
     # Include each module (only those needed for uninstall).
     # service.sh provides stop_service, called by uninstall.sh's clean_old_installation.
     # camera.sh provides uninstall_camera_k2, called by uninstall.sh (K2 ustreamer teardown).
+    # remote_screen.sh provides remove_remote_screen_route (uses camera.sh's nginx helpers).
     # host_profile.sh provides the mod-ownership guard behind uninstall.sh's
     # HELIX_INSTALL_DIRS sweeps and moonraker.sh's stanza writer; main() below
     # probes it before set_install_paths' install-dir gate calls it.
-    for module in common.sh host_profile.sh platform.sh permissions.sh requirements.sh forgex.sh competing_uis.sh service.sh moonraker.sh camera.sh uninstall.sh; do
+    # helix_print_conf.sh provides helix_print_section_files, which
+    # moonraker.sh's plugin removal calls, and the Moonraker HTTP helpers
+    # behind restart_moonraker, which camera.sh's teardown calls.
+    for module in common.sh host_profile.sh platform.sh permissions.sh requirements.sh forgex.sh competing_uis.sh desktop.sh service.sh helix_print_conf.sh moonraker.sh camera.sh remote_screen.sh uninstall.sh; do
         module_path="$LIB_DIR/$module"
         if [ ! -f "$module_path" ]; then
             echo "ERROR: Module not found: $module_path" >&2
@@ -464,6 +468,7 @@ guard_self_delete() {
 # Main uninstall
 main() {
     force=false
+    X86_FLAVOUR_FLAG=""
 
     # Parse arguments
     while [ $# -gt 0 ]; do
@@ -493,6 +498,11 @@ main() {
                 MOD_PAYLOAD_ROOT="$2"
                 shift 2
                 ;;
+            --desktop|--kiosk)
+                # x86 with both flavours installed: which one this run removes.
+                X86_FLAVOUR_FLAG="${1#--}"
+                shift
+                ;;
             --help|-h)
                 echo "HelixScreen Uninstaller"
                 echo ""
@@ -507,6 +517,9 @@ main() {
                 echo "                The payload root to remove (default: the root"
                 echo "                the install recorded, else the probed default)"
                 echo "                Requires --mod-payload to do anything"
+                echo "  --desktop, --kiosk"
+                echo "                x86_64 Linux with both installed: remove the"
+                echo "                desktop-window install or the kiosk install"
                 echo "  --help, -h    Show this help message"
                 exit 0
                 ;;
@@ -524,8 +537,12 @@ main() {
     # its mod-ownership guard needs HOST_MOD_ROOT already probed.
     host_profile_probe
 
-    # Detect platform and firmware to set correct paths
+    # Detect platform and firmware to set correct paths. On x86 a desktop
+    # install found on disk makes the platform x86-desktop, whose removal
+    # touches nothing outside the user's home.
     platform=$(detect_platform)
+    uninstall_mode=true
+    resolve_x86_flavour
     if [ "$platform" = "ad5x" ]; then
         ad5x_check_chroot_context
     fi
@@ -544,6 +561,26 @@ main() {
 
     # Check for root
     check_permissions "$platform"
+
+    # A desktop install has no service and touched nothing outside the
+    # user's home, so nothing below this point applies to it.
+    if [ "$platform" = "x86-desktop" ]; then
+        if [ "$force" = false ]; then
+            echo "This will:"
+            echo "  - Remove $INSTALL_DIR"
+            echo "  - Remove the HelixScreen app menu entry"
+            echo ""
+            printf "Are you sure you want to continue? [y/N] "
+            read -r response
+            case "$response" in
+                [yY][eE][sS]|[yY]) ;;
+                *) log_note "Uninstall cancelled"; exit 0 ;;
+            esac
+            echo ""
+        fi
+        uninstall_desktop
+        exit 0
+    fi
 
     # Detect init system
     detect_init_system

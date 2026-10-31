@@ -20,6 +20,8 @@
 
 #include "remote_client.h"
 
+#include "screensaver_registry.h"
+
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
@@ -44,7 +46,7 @@
 // Line editing for REPL
 #include "linenoise.h"
 
-static const char* PROGRAM_NAME = "helix-screen ctl";
+static const char* kProgramName = "helix-screen ctl";
 
 // ---------------------------------------------------------------------------
 // Help text
@@ -89,6 +91,10 @@ static const HelpEntry HELP[] = {
      "until pixels stop changing (see `freeze`)"},
     {nullptr, "status", "Show panel, connection state, printer status", nullptr},
     {nullptr, "wake", "Reset idle timer / dismiss the screensaver", nullptr},
+    {nullptr, "screensaver <name|off>", "Preview a screensaver by name, as Test Screensaver does",
+     "toasters, starfield, pipes, bounce, fireworks, logo, maze,\n"
+     "hyperspace, flipclock, fireflies; a saver too heavy for the board\n"
+     "runs its fallback. `off` is wake"},
     {nullptr, "demo <name>", "Show a sample-data overlay unreachable in mock mode",
      "preflight-check, runout-modal, lock-screen, print-status,\n"
      "print-tune, ams, camera"},
@@ -168,7 +174,7 @@ static const HelpEntry HELP[] = {
     {"Interactive", "repl", "Interactive REPL with line editing and history", nullptr},
 };
 
-static constexpr int HELP_USAGE_WIDTH = 26;
+static constexpr int kHelpUsageWidth = 26;
 
 /// Render the shared table. `verbose` adds each entry's `detail` lines, which
 /// the REPL omits so its in-session listing stays scannable.
@@ -177,18 +183,18 @@ static void print_help_table(bool verbose) {
         if (e.section) {
             printf("\n%s:\n", e.section);
         }
-        int pad = HELP_USAGE_WIDTH - 2 - static_cast<int>(strlen(e.usage));
+        int pad = kHelpUsageWidth - 2 - static_cast<int>(strlen(e.usage));
         if (pad > 0) {
             printf("  %s%*s%s\n", e.usage, pad, "", e.summary);
         } else {
             // Usage too long to share a line — summary goes underneath.
-            printf("  %s\n%*s%s\n", e.usage, HELP_USAGE_WIDTH, "", e.summary);
+            printf("  %s\n%*s%s\n", e.usage, kHelpUsageWidth, "", e.summary);
         }
         if (verbose && e.detail) {
             for (const char* p = e.detail; p;) {
                 const char* nl = strchr(p, '\n');
                 int len = nl ? static_cast<int>(nl - p) : static_cast<int>(strlen(p));
-                printf("%*s%.*s\n", HELP_USAGE_WIDTH, "", len, p);
+                printf("%*s%.*s\n", kHelpUsageWidth, "", len, p);
                 p = nl ? nl + 1 : nullptr;
             }
         }
@@ -196,7 +202,7 @@ static void print_help_table(bool verbose) {
 }
 
 static void print_usage() {
-    printf("Usage: %s [options] <command> [args...]\n", PROGRAM_NAME);
+    printf("Usage: %s [options] <command> [args...]\n", kProgramName);
     print_help_table(/*verbose=*/true);
     printf("\nOptions:\n");
     printf("  -s, --socket <path>     Socket path (default: auto-detect)\n");
@@ -733,6 +739,10 @@ static nlohmann::json build_request_from_tokens(const std::vector<std::string>& 
         return build_request("scenario", {{"name", tokens[1]}});
     } else if (cmd == "list_scenarios") {
         return build_request("list_scenarios");
+    } else if (cmd == "screensaver" && tokens.size() >= 2 &&
+               !helix::ui::equals_ignoring_case(tokens[1], helix::ui::kScreensaverOffName)) {
+        // `screensaver <name>` previews a saver by its stable name.
+        return build_request("preview_screensaver", {{"name", tokens[1]}});
     } else if (cmd == "wake" || cmd == "screensaver") {
         // `wake` or `screensaver off` — reset the idle timer / dismiss the saver.
         return build_request("wake");
@@ -823,7 +833,7 @@ static nlohmann::json build_request_from_tokens(const std::vector<std::string>& 
 // ---------------------------------------------------------------------------
 
 // All known commands for tab completion
-static const char* REPL_COMMANDS[] = {"ping",
+static const char* kReplCommands[] = {"ping",
                                       "navigate",
                                       "cd",
                                       "go_back",
@@ -837,6 +847,7 @@ static const char* REPL_COMMANDS[] = {"ping",
                                       "screenshot",
                                       "status",
                                       "wake",
+                                      "screensaver",
                                       "demo",
                                       "get",
                                       "set",
@@ -924,9 +935,9 @@ static void repl_completion(const char* buf, linenoiseCompletions* lc) {
 
     if (space_pos == std::string::npos) {
         // Completing a command name
-        for (int i = 0; REPL_COMMANDS[i]; i++) {
-            if (strncmp(buf, REPL_COMMANDS[i], input.length()) == 0) {
-                linenoiseAddCompletion(lc, REPL_COMMANDS[i]);
+        for (int i = 0; kReplCommands[i]; i++) {
+            if (strncmp(buf, kReplCommands[i], input.length()) == 0) {
+                linenoiseAddCompletion(lc, kReplCommands[i]);
             }
         }
     } else {

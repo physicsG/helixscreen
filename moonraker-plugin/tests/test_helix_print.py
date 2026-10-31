@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,7 +24,13 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from helix_print import HelixPrint, PrintInfo, load_component
+from helix_print import (
+    DB_RECORD_MAX_AGE,
+    HELIX_NAMESPACE,
+    HelixPrint,
+    PrintInfo,
+    load_component,
+)
 
 
 # ============================================================================
@@ -82,6 +89,9 @@ class MockEventLoop:
     def delay_callback(self, delay: float, callback, *args):
         pass
 
+    def run_in_thread(self, callback, *args):
+        return asyncio.get_event_loop().run_in_executor(None, callback, *args)
+
 
 class MockFileManager:
     """Mock file manager for testing."""
@@ -114,17 +124,26 @@ class MockDatabase:
         self.sql_commands.append((sql, params))
         return MagicMock(lastrowid=1, rowcount=0)
 
-    async def insert_item(self, namespace: str, key: str, value: Any) -> None:
-        self.namespaces.setdefault(namespace, {})[key] = value
+    @staticmethod
+    def _key(key: Any) -> str:
+        # A one-element list names a key whole, as Moonraker takes it.
+        return ".".join(key) if isinstance(key, list) else key
 
-    async def get_item(self, namespace: str, key: str, default: Any = None) -> Any:
-        return self.namespaces.get(namespace, {}).get(key, default)
+    async def insert_item(self, namespace: str, key: Any, value: Any) -> None:
+        self.namespaces.setdefault(namespace, {})[self._key(key)] = value
 
-    async def update_item(self, namespace: str, key: str, value: Any) -> None:
-        self.namespaces.setdefault(namespace, {})[key] = value
+    async def get_item(self, namespace: str, key: Any = None, default: Any = None) -> Any:
+        if key is None:
+            if namespace not in self.namespaces:
+                return default
+            return dict(self.namespaces[namespace])
+        return self.namespaces.get(namespace, {}).get(self._key(key), default)
 
-    async def delete_item(self, namespace: str, key: str) -> None:
-        self.namespaces.get(namespace, {}).pop(key, None)
+    async def update_item(self, namespace: str, key: Any, value: Any) -> None:
+        self.namespaces.setdefault(namespace, {})[self._key(key)] = value
+
+    async def delete_item(self, namespace: str, key: Any) -> None:
+        self.namespaces.get(namespace, {}).pop(self._key(key), None)
 
     async def ns_items(self, namespace: str) -> list:
         return list(self.namespaces.get(namespace, {}).items())
@@ -424,7 +443,7 @@ class TestStatusAPI:
         assert result["temp_dir"] == ".helix_temp"
         assert result["symlink_dir"] == ".helix_print"
         assert result["cleanup_delay"] == 3600
-        assert result["version"] == "1.1.0"
+        assert result["version"] == "1.4.0"
         assert result["active_prints"] == 0
 
 
@@ -744,6 +763,85 @@ class TestPathValidation:
         result = await handler(request)
         assert result["status"] == "printing"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("temp", [
+        "benchy.gcode",
+        "other.gcode",
+        "prints/mod_benchy.gcode",
+        ".helix_temp/nested/mod_benchy.gcode",
+        ".helix_print/mod_benchy.gcode",
+    ])
+    async def test_the_copy_must_sit_in_a_staging_dir(
+        self, helix_print_component, mock_server, temp_gcodes_dir, temp
+    ):
+        """A failed start deletes the copy, so a copy path naming the original
+        or another user file would delete that file."""
+        gcodes = Path(temp_gcodes_dir)
+        for name in ("benchy.gcode", "other.gcode", "prints/mod_benchy.gcode",
+                     ".helix_temp/nested/mod_benchy.gcode", ".helix_print/mod_benchy.gcode"):
+            (gcodes / name).parent.mkdir(parents=True, exist_ok=True)
+            (gcodes / name).write_text("G28\n")
+        await helix_print_component.component_init()
+        apis = mock_server.components["klippy_apis"]
+        apis.run_gcode.side_effect = RuntimeError("klippy down")
+
+        with pytest.raises(Exception, match="400"):
+            await mock_server.endpoints["/server/helix/print_modified"](MockWebRequest({
+                "original_filename": "benchy.gcode", "temp_file_path": temp,
+                "modifications": [],
+            }))
+        assert (gcodes / temp).read_text() == "G28\n"
+        apis.run_gcode.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_staged_link_to_the_original_is_refused(
+        self, helix_print_component, mock_server, temp_gcodes_dir
+    ):
+        gcodes = Path(temp_gcodes_dir)
+        (gcodes / "benchy.gcode").write_text("G28\n")
+        (gcodes / ".helix_temp").mkdir()
+        (gcodes / ".helix_temp" / "mod_benchy.gcode").symlink_to(gcodes / "benchy.gcode")
+        await helix_print_component.component_init()
+        with pytest.raises(Exception, match="400"):
+            await mock_server.endpoints["/server/helix/print_modified"](MockWebRequest({
+                "original_filename": "benchy.gcode",
+                "temp_file_path": ".helix_temp/mod_benchy.gcode", "modifications": [],
+            }))
+        assert (gcodes / "benchy.gcode").read_text() == "G28\n"
+
+    @pytest.mark.asyncio
+    async def test_a_staged_original_is_never_its_own_copy(
+        self, helix_print_component, mock_server, temp_gcodes_dir
+    ):
+        gcodes = Path(temp_gcodes_dir)
+        (gcodes / ".helix_temp").mkdir()
+        (gcodes / ".helix_temp" / "mod_benchy.gcode").write_text("G28\n")
+        await helix_print_component.component_init()
+        mock_server.components["klippy_apis"].run_gcode.side_effect = RuntimeError("down")
+        with pytest.raises(Exception, match="400.*original"):
+            await mock_server.endpoints["/server/helix/print_modified"](MockWebRequest({
+                "original_filename": ".helix_temp/mod_benchy.gcode",
+                "temp_file_path": ".helix_temp/mod_benchy.gcode", "modifications": [],
+            }))
+        assert (gcodes / ".helix_temp" / "mod_benchy.gcode").read_text() == "G28\n"
+
+    @pytest.mark.asyncio
+    async def test_the_visible_staging_dir_is_accepted(
+        self, helix_print_component, mock_server, temp_gcodes_dir
+    ):
+        """Where the link dir is visible, the app stages under helix_staging
+        whatever temp_dir says."""
+        gcodes = Path(temp_gcodes_dir)
+        (gcodes / "benchy.gcode").write_text("G28\n")
+        (gcodes / "helix_staging").mkdir()
+        (gcodes / "helix_staging" / "modified_1_benchy.gcode").write_text("G28\n")
+        await helix_print_component.component_init()
+        result = await mock_server.endpoints["/server/helix/print_modified"](MockWebRequest({
+            "original_filename": "benchy.gcode",
+            "temp_file_path": "helix_staging/modified_1_benchy.gcode", "modifications": [],
+        }))
+        assert result["status"] == "printing"
+
     @staticmethod
     def _stage_nested(gcodes_dir):
         subdir = Path(gcodes_dir) / "prints" / "2024"
@@ -771,6 +869,38 @@ class TestPathValidation:
 
         assert result["print_filename"] == ".helix_print/full/prints/2024/benchy.gcode"
         assert (Path(temp_gcodes_dir) / result["print_filename"]).is_symlink()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("original,link", [
+        ("prints/benchy.gcode.3mf", ".helix_print/full/prints/benchy.gcode"),
+        ("prints/benchy.3MF", ".helix_print/full/prints/benchy.gcode"),
+    ])
+    async def test_a_3mf_original_links_under_a_gcode_name(
+        self, helix_print_component, mock_server, temp_gcodes_dir, original, link
+    ):
+        """Klipper's virtual_sdcard opens only .gcode/.g/.gco names, so the
+        link for a .3mf original carries the .gcode name it stands for, while
+        the original keeps its own name for history."""
+        gcodes = Path(temp_gcodes_dir)
+        (gcodes / "prints").mkdir()
+        (gcodes / original).write_bytes(b"PK\x03\x04")
+        (gcodes / ".helix_temp").mkdir()
+        (gcodes / ".helix_temp" / "plate.gcode").write_text("G28\n")
+        await helix_print_component.component_init()
+
+        result = await mock_server.endpoints["/server/helix/print_modified"](
+            MockWebRequest({
+                "original_filename": original,
+                "temp_file_path": ".helix_temp/plate.gcode",
+                "modifications": [],
+            })
+        )
+
+        assert result["print_filename"] == link
+        assert result["original_filename"] == original
+        assert (gcodes / link).is_symlink()
+        apis = mock_server.components["klippy_apis"]
+        apis.run_gcode.assert_awaited_with(f'SDCARD_PRINT_FILE FILENAME="{link}"')
 
     @pytest.mark.asyncio
     async def test_rejects_a_symlink_path_that_escapes(
@@ -994,7 +1124,7 @@ class TestHistoryPatching:
 
         await component._patch_history_entry(_print_info(), "complete")
 
-        assert "History filename-rename unavailable" in caplog.text
+        assert "History rewrite unavailable" in caplog.text
 
     @pytest.mark.asyncio
     async def test_missing_printer_job_class_warns(self, helix_print_component,
@@ -1162,3 +1292,308 @@ class TestHistoryIdCapture:
         job, job_id = history.save_job_calls[0]
         assert job_id == 0x1A
         assert job.filename == "prints/benchy.gcode"
+
+
+# ============================================================================
+# Visible symlink directory
+# ============================================================================
+
+class TestVisibleSymlinkDir:
+    """symlink_dir without a leading dot, as the installer sets it where
+    Klipper's virtual_sdcard will not open a file under a hidden directory."""
+
+    @pytest.fixture
+    def component(self, mock_server, temp_gcodes_dir):
+        mock_server.components["file_manager"] = MockFileManager(temp_gcodes_dir)
+        mock_server.components["database"] = MockDatabase()
+        mock_server.components["klippy_connection"] = MockKlippy()
+        mock_server.components["klippy_apis"] = MockKlippyApis()
+        mock_server.components["history"] = MockHistory()
+        return load_component(MockConfigHelper(mock_server, {
+            "temp_dir": ".helix_temp",
+            "symlink_dir": "helix_print",
+            "cleanup_delay": 3600,
+            "enabled": True,
+        }))
+
+    @staticmethod
+    def _stage(gcodes: Path) -> MockWebRequest:
+        (gcodes / "parts").mkdir()
+        (gcodes / "parts" / "benchy.gcode").write_text("G28\n")
+        (gcodes / ".helix_temp").mkdir(exist_ok=True)
+        (gcodes / ".helix_temp" / "mod_benchy.gcode").write_text("G28\nG1 X1\n")
+        return MockWebRequest({
+            "original_filename": "parts/benchy.gcode",
+            "temp_file_path": ".helix_temp/mod_benchy.gcode",
+            "modifications": [],
+        })
+
+    @pytest.mark.asyncio
+    async def test_print_links_under_the_visible_directory(
+        self, component, mock_server, temp_gcodes_dir
+    ):
+        gcodes = Path(temp_gcodes_dir)
+        request = self._stage(gcodes)
+        await component.component_init()
+        assert (gcodes / "helix_print").is_dir()
+
+        result = await mock_server.endpoints["/server/helix/print_modified"](request)
+
+        link = "helix_print/full/parts/benchy.gcode"
+        assert result["print_filename"] == link
+        assert (gcodes / link).is_symlink()
+        assert (gcodes / link).read_text() == "G28\nG1 X1\n"
+        mock_server.components["klippy_apis"].run_gcode.assert_awaited_with(
+            f'SDCARD_PRINT_FILE FILENAME="{link}"')
+
+    @pytest.mark.asyncio
+    async def test_finished_print_is_cleaned_up_and_attributed(
+        self, component, mock_server, temp_gcodes_dir
+    ):
+        gcodes = Path(temp_gcodes_dir)
+        request = self._stage(gcodes)
+        await component.component_init()
+        result = await mock_server.endpoints["/server/helix/print_modified"](request)
+        link = result["print_filename"]
+
+        await component._on_job_state_changed(
+            None, {"state": "printing", "filename": link},
+            {"state": "complete", "filename": link})
+
+        assert link not in component.active_prints
+        assert not (gcodes / link).is_symlink()
+        assert not (gcodes / "helix_print" / "full").exists()
+        assert (gcodes / "helix_print").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_startup_removes_links_whose_file_is_gone(
+        self, component, temp_gcodes_dir
+    ):
+        gcodes = Path(temp_gcodes_dir)
+        await component.component_init()
+        full = gcodes / "helix_print" / "full"
+        (full / "a").mkdir(parents=True)
+        (full / "keep").mkdir()
+        live_target = gcodes / ".helix_temp" / "live.gcode"
+        live_target.write_text("G28\n")
+        (full / "a" / "stale.gcode").symlink_to(gcodes / ".helix_temp" / "gone.gcode")
+        (full / "keep" / "live.gcode").symlink_to(live_target)
+
+        await component._startup_cleanup()
+
+        assert not (full / "a").exists()
+        assert (full / "keep" / "live.gcode").is_symlink()
+        assert (gcodes / "helix_print").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_the_sweep_never_follows_a_linked_directory_out(
+        self, component, temp_gcodes_dir
+    ):
+        gcodes = Path(temp_gcodes_dir)
+        await component.component_init()
+        outside = gcodes / "user"
+        outside.mkdir()
+        (outside / "dangling.gcode").symlink_to(gcodes / "nowhere.gcode")
+        (gcodes / "helix_print" / "full").mkdir(parents=True)
+        (gcodes / "helix_print" / "full" / "user").symlink_to(outside)
+
+        await component._startup_cleanup()
+
+        assert (outside / "dangling.gcode").is_symlink()
+
+
+# ============================================================================
+# Namespace persistence on Moonraker 0.9.3's database
+# ============================================================================
+
+class Moonraker093Database:
+    """The namespace half of Moonraker v0.9.3's `database` component, as
+    vendored by Forge-X: no execute_db_command (so the plugin takes the
+    namespace route), no ns_items, string keys split on "." with an empty
+    segment refused, nested inserts for multi-segment keys, and get_item
+    with no key returning the whole namespace."""
+
+    def __init__(self):
+        self.ns: Dict[str, Dict[str, Any]] = {}
+
+    class Error(Exception):
+        def __init__(self, message, status_code=400):
+            super().__init__(message)
+            self.status_code = status_code
+
+    @classmethod
+    def _parse(cls, key):
+        keys = key if isinstance(key, list) else key.split(".")
+        if not keys or "" in keys:
+            raise cls.Error(f"Invalid Key Format: '{key}'")
+        return keys
+
+    async def insert_item(self, namespace, key, value):
+        keys = self._parse(key)
+        store = self.ns.setdefault(namespace, {})
+        if len(keys) == 1:
+            store[keys[0]] = value
+            return
+        record = store.get(keys[0])
+        if not isinstance(record, dict):
+            record = {}
+        item = record
+        for k in keys[1:-1]:
+            item = item.setdefault(k, {})
+        item[keys[-1]] = value
+        store[keys[0]] = record
+
+    async def update_item(self, namespace, key, value):
+        keys = self._parse(key)
+        store = self.ns.get(namespace, {})
+        if keys[0] not in store:
+            raise self.Error(f"Key '{key}' in namespace '{namespace}' not found", 404)
+        if len(keys) == 1 and isinstance(value, dict) and isinstance(store[keys[0]], dict):
+            store[keys[0]].update(value)
+        else:
+            await self.insert_item(namespace, key, value)
+
+    async def get_item(self, namespace, key=None, default=Exception):
+        try:
+            if key is None:
+                if namespace not in self.ns:
+                    raise self.Error(f"Namespace {namespace} not found", 404)
+                return dict(self.ns[namespace])
+            keys = self._parse(key)
+            value = self.ns[namespace][keys[0]]
+            for k in keys[1:]:
+                value = value[k]
+            return value
+        except (KeyError, TypeError, self.Error):
+            if default is not Exception:
+                return default
+            raise self.Error(f"Key '{key}' in namespace '{namespace}' not found", 404)
+
+    async def delete_item(self, namespace, key):
+        keys = self._parse(key)
+        return self.ns.get(namespace, {}).pop(keys[0], None)
+
+
+class TestNamespacePersistence093:
+    @pytest.fixture
+    def db(self):
+        return Moonraker093Database()
+
+    @pytest.fixture
+    def component(self, mock_server, temp_gcodes_dir, db):
+        mock_server.components["file_manager"] = MockFileManager(temp_gcodes_dir)
+        mock_server.components["database"] = db
+        mock_server.components["klippy_connection"] = MockKlippy()
+        mock_server.components["klippy_apis"] = MockKlippyApis()
+        mock_server.components["history"] = MockHistory()
+        return load_component(MockConfigHelper(mock_server, {
+            "temp_dir": ".helix_temp", "symlink_dir": ".helix_print",
+            "cleanup_delay": 3600, "enabled": True,
+        }))
+
+    @staticmethod
+    def _stage(gcodes: Path) -> MockWebRequest:
+        (gcodes / "benchy.gcode").write_text("G28\n")
+        (gcodes / ".helix_temp").mkdir(exist_ok=True)
+        (gcodes / ".helix_temp" / "modified_1_benchy.gcode").write_text("G28\nG1\n")
+        return MockWebRequest({
+            "original_filename": "benchy.gcode",
+            "temp_file_path": ".helix_temp/modified_1_benchy.gcode",
+            "modifications": [],
+        })
+
+    @pytest.mark.asyncio
+    async def test_takes_the_namespace_route(self, component):
+        await component.component_init()
+        assert component._use_namespace and not component._use_sqlite
+
+    @pytest.mark.asyncio
+    async def test_a_dotted_temp_name_stores_as_one_record(
+        self, component, mock_server, temp_gcodes_dir, db
+    ):
+        await component.component_init()
+        await mock_server.endpoints["/server/helix/print_modified"](
+            self._stage(Path(temp_gcodes_dir)))
+
+        record = db.ns[HELIX_NAMESPACE][".helix_temp/modified_1_benchy.gcode"]
+        assert record["status"] == "active"
+        assert record["symlink_filename"] == ".helix_print/full/benchy.gcode"
+
+    @pytest.mark.asyncio
+    async def test_an_overdue_record_is_cleaned_at_startup(
+        self, component, mock_server, temp_gcodes_dir, db
+    ):
+        gcodes = Path(temp_gcodes_dir)
+        await component.component_init()
+        result = await mock_server.endpoints["/server/helix/print_modified"](
+            self._stage(gcodes))
+        info = component.active_prints[result["print_filename"]]
+        await component._schedule_cleanup(info)
+        record = db.ns[HELIX_NAMESPACE][".helix_temp/modified_1_benchy.gcode"]
+        assert record["status"] == "pending_cleanup"
+        record["cleanup_scheduled_at"] = time.time() - 1
+
+        await component._startup_cleanup()
+
+        assert not (gcodes / ".helix_temp" / "modified_1_benchy.gcode").exists()
+        assert db.ns[HELIX_NAMESPACE][".helix_temp/modified_1_benchy.gcode"]["status"] == "cleaned"
+
+    @pytest.mark.asyncio
+    async def test_old_cleaned_records_are_purged(self, component, db):
+        await component.component_init()
+        old = time.time() - DB_RECORD_MAX_AGE - 10
+        await db.insert_item(HELIX_NAMESPACE, [".helix_temp/a.gcode"], {
+            "temp_filename": ".helix_temp/a.gcode", "symlink_filename": "x",
+            "status": "cleaned", "created_at": old})
+        await db.insert_item(HELIX_NAMESPACE, [".helix_temp/b.gcode"], {
+            "temp_filename": ".helix_temp/b.gcode", "symlink_filename": "y",
+            "status": "cleaned", "created_at": time.time()})
+
+        await component._startup_cleanup()
+
+        assert list(db.ns[HELIX_NAMESPACE]) == [".helix_temp/b.gcode"]
+
+    @pytest.mark.asyncio
+    async def test_no_namespace_yet_starts_cleanly(self, component, db):
+        await component.component_init()
+        await component._startup_cleanup()
+        assert HELIX_NAMESPACE not in db.ns
+
+    @pytest.mark.asyncio
+    async def test_a_record_left_nested_by_a_string_key_is_rekeyed_and_cleaned(
+        self, component, temp_gcodes_dir, db
+    ):
+        """A temp dir without a leading dot let a string key store: split on
+        its dots, the record sits nested under the first segment."""
+        gcodes = Path(temp_gcodes_dir)
+        (gcodes / "helix_temp").mkdir()
+        (gcodes / "helix_temp" / "modified_1_benchy.gcode").write_text("G28\n")
+        record = {
+            "temp_filename": "helix_temp/modified_1_benchy.gcode",
+            "symlink_filename": ".helix_print/full/benchy.gcode",
+            "status": "pending_cleanup", "cleanup_scheduled_at": time.time() - 1,
+            "created_at": time.time() - 100,
+        }
+        await db.insert_item(HELIX_NAMESPACE, "helix_temp/modified_1_benchy.gcode", record)
+        assert "helix_temp/modified_1_benchy" in db.ns[HELIX_NAMESPACE]
+        await component.component_init()
+
+        await component._startup_cleanup()
+
+        store = db.ns[HELIX_NAMESPACE]
+        assert "helix_temp/modified_1_benchy" not in store
+        assert store["helix_temp/modified_1_benchy.gcode"]["status"] == "cleaned"
+        assert not (gcodes / "helix_temp" / "modified_1_benchy.gcode").exists()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_values_in_the_namespace_do_not_break_startup(
+        self, component, db
+    ):
+        await db.insert_item(HELIX_NAMESPACE, ["junk"], "not a record")
+        await db.insert_item(HELIX_NAMESPACE, ["nested"], {"a": {"b": 1}})
+        await component.component_init()
+
+        await component._startup_cleanup()
+
+        assert db.ns[HELIX_NAMESPACE]["junk"] == "not a record"
+        assert db.ns[HELIX_NAMESPACE]["nested"] == {"a": {"b": 1}}

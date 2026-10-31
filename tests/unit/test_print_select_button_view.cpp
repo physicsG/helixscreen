@@ -83,6 +83,22 @@ TEST_CASE("button view: macro analysis disables an idle printer too",
     CHECK(std::string(v.blocked_reason) == "Analyzing data...");
 }
 
+TEST_CASE("button view: a pending file check holds Print, never a queue add",
+          "[print_select][button_view][file_check]") {
+    PrintSelectButtonInputs in;
+    in.file_check_pending = true;
+    const auto v = compute_print_select_button_view(in);
+    CHECK(v.mode == PrintSelectButtonMode::Print);
+    CHECK_FALSE(view_actionable(v));
+    CHECK(std::string(v.blocked_reason) == "Checking file…");
+
+    auto queued = machine_held(true);
+    queued.file_check_pending = true;
+    const auto q = compute_print_select_button_view(queued);
+    CHECK(q.mode == PrintSelectButtonMode::Queue);
+    CHECK(view_actionable(q));
+}
+
 TEST_CASE("button view: a committed but unconfirmed start blocks without queueing",
           "[print_select][button_view]") {
     // The machine is not held here — the block is this app's own preparing

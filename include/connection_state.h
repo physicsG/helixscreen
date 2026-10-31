@@ -19,4 +19,13 @@ enum class ConnectionState {
     FAILED        // Connection failed (max retries exceeded)
 };
 
+/**
+ * @brief Why a connection attempt that never opened failed, as far as the socket can tell
+ */
+enum class ConnectFailureKind {
+    Unknown, // nothing failed yet, or no socket-level cause (e.g. the WebSocket upgrade failed)
+    Timeout, // no answer: the connect timed out or had no route to the host
+    Refused, // the host answered and refused that port
+};
+
 } // namespace helix

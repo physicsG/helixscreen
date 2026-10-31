@@ -7,6 +7,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <string_view>
 
 namespace helix {
@@ -73,6 +74,107 @@ PrinterStopCall find_printer_stop_call(std::string_view gcode_template) {
     return call;
 }
 
+bool template_sets_active_spool(std::string_view gcode_template) {
+    const std::string upper = helix::text_io::to_upper(gcode_template);
+    const auto is_word = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+    };
+    for (const std::string_view word : {"SET_ACTIVE_SPOOL", "SPOOLMAN_SET_ACTIVE_SPOOL"}) {
+        for (size_t pos = upper.find(word); pos != std::string::npos;
+             pos = upper.find(word, pos + 1)) {
+            const size_t end = pos + word.size();
+            const bool starts = pos == 0 || !is_word(upper[pos - 1]);
+            const bool ends = end >= upper.size() || !is_word(upper[end]);
+            if (starts && ends) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+namespace {
+
+bool is_word_char(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+}
+
+/// Drop leading whitespace and `{% ... %}` / `{# ... #}` blocks.
+std::string_view skip_jinja_prefix(std::string_view line) {
+    for (;;) {
+        const size_t start = line.find_first_not_of(" \t\r");
+        if (start == std::string_view::npos) {
+            return {};
+        }
+        line.remove_prefix(start);
+        if (line.size() >= 2 && line[0] == '{' && (line[1] == '%' || line[1] == '#')) {
+            const char closer[3] = {line[1], '}', '\0'};
+            const size_t end = line.find(closer, 2);
+            if (end == std::string_view::npos) {
+                return {};
+            }
+            line.remove_prefix(end + 2);
+            continue;
+        }
+        return line;
+    }
+}
+
+/// The value of `key=` in an upper-cased command line, or empty.
+std::string_view param_value(std::string_view upper_line, std::string_view key) {
+    for (size_t pos = upper_line.find(key); pos != std::string_view::npos;
+         pos = upper_line.find(key, pos + 1)) {
+        if (pos > 0 && is_word_char(upper_line[pos - 1])) {
+            continue;
+        }
+        const size_t value_start = pos + key.size();
+        const size_t value_end = upper_line.find_first_of(" \t\r", value_start);
+        return upper_line.substr(value_start, value_end == std::string_view::npos
+                                                  ? std::string_view::npos
+                                                  : value_end - value_start);
+    }
+    return {};
+}
+
+} // namespace
+
+TemplateTemperatureUse template_temperature_use(std::string_view gcode_template) {
+    TemplateTemperatureUse use;
+    const std::string upper = helix::text_io::to_upper(gcode_template);
+    std::string_view rest = upper;
+    while (!rest.empty()) {
+        const size_t nl = rest.find('\n');
+        std::string_view line = skip_jinja_prefix(rest.substr(0, nl));
+        rest = nl == std::string_view::npos ? std::string_view{} : rest.substr(nl + 1);
+
+        size_t word_end = 0;
+        while (word_end < line.size() && is_word_char(line[word_end])) {
+            ++word_end;
+        }
+        if (word_end == 0) {
+            continue;
+        }
+        const std::string_view command = line.substr(0, word_end);
+        use.commands.emplace_back(command);
+
+        const char* kind = nullptr;
+        std::string_view value;
+        if (command == "SET_HEATER_TEMPERATURE") {
+            kind = "heater ";
+            value = param_value(line, "HEATER=");
+        } else if (command == "SET_TEMPERATURE_FAN_TARGET") {
+            kind = "temperature_fan ";
+            value = param_value(line, "TEMPERATURE_FAN=");
+        }
+        if (kind && !value.empty()) {
+            std::string name = value.find('{') != std::string_view::npos ? "*" : std::string(value);
+            to_lower_inplace(name);
+            use.targets.push_back(kind + name);
+        }
+    }
+    return use;
+}
+
 MacroParamCache& MacroParamCache::instance() {
     static MacroParamCache cache;
     return cache;
@@ -122,6 +224,19 @@ void MacroParamCache::populate_from_configfile(
         PrinterStopCall stop = find_printer_stop_call(gcode_template);
         info.stops_printer = stop.calls;
         info.stop_message = std::move(stop.message);
+        info.sets_active_spool = template_sets_active_spool(gcode_template);
+        info.has_template = !gcode_template.empty();
+        info.temperature_use = template_temperature_use(gcode_template);
+        if (it.value().is_object()) {
+            static constexpr std::string_view kVariablePrefix = "variable_";
+            for (const auto& [field, value] : it.value().items()) {
+                if (field.size() > kVariablePrefix.size() &&
+                    field.compare(0, kVariablePrefix.size(), kVariablePrefix) == 0 &&
+                    value.is_string()) {
+                    info.variables[field.substr(kVariablePrefix.size())] = value.get<std::string>();
+                }
+            }
+        }
         auto params = parse_macro_params(gcode_template);
 
         // Note: variable_* keys (Klipper SET_GCODE_VARIABLE state) are
@@ -154,6 +269,105 @@ void MacroParamCache::populate_from_configfile(
     populated_ = true;
     spdlog::info("[MacroParamCache] Populated: {} entries from configfile, {} unknown macros",
                  config_count, unknown_count);
+}
+
+namespace {
+
+/// `heater_generic chamber` and a bare `chamber` are both what HEATER=chamber sets.
+std::string target_key(const std::string& full_name) {
+    static constexpr std::string_view kFan = "temperature_fan ";
+    static constexpr std::string_view kGeneric = "heater_generic ";
+    std::string key;
+    if (full_name.rfind(kFan, 0) == 0) {
+        key = "temperature_fan " + full_name.substr(kFan.size());
+    } else if (full_name.rfind(kGeneric, 0) == 0) {
+        key = "heater " + full_name.substr(kGeneric.size());
+    } else {
+        key = "heater " + full_name;
+    }
+    to_lower_inplace(key);
+    return key;
+}
+
+constexpr int kMaxMacroCallDepth = 4;
+
+std::optional<bool> sets_target(const std::unordered_map<std::string, CachedMacroInfo>& cache,
+                                const std::string& macro, const std::string& key,
+                                const std::string& any_key, int depth,
+                                std::unordered_set<std::string>& visited) {
+    const auto it = cache.find(macro);
+    if (it == cache.end() || !it->second.has_template) {
+        return std::nullopt;
+    }
+    const auto& use = it->second.temperature_use;
+    for (const auto& target : use.targets) {
+        if (target == key || target == any_key) {
+            return true;
+        }
+    }
+    bool unknown = false;
+    if (depth < kMaxMacroCallDepth) {
+        for (const auto& command : use.commands) {
+            std::string callee = command;
+            to_lower_inplace(callee);
+            if (cache.find(callee) == cache.end() || !visited.insert(callee).second) {
+                continue; // a Klipper command, or a macro already on this path
+            }
+            const auto r = sets_target(cache, callee, key, any_key, depth + 1, visited);
+            if (r == std::optional<bool>(true)) {
+                return true;
+            }
+            unknown = unknown || !r.has_value();
+        }
+    }
+    return unknown ? std::nullopt : std::optional<bool>(false);
+}
+
+bool runs_command(const std::unordered_map<std::string, CachedMacroInfo>& cache,
+                  const std::string& macro, const std::string& command, int depth,
+                  std::unordered_set<std::string>& visited) {
+    const auto it = cache.find(macro);
+    if (it == cache.end()) {
+        return false;
+    }
+    for (const auto& line_command : it->second.temperature_use.commands) {
+        if (line_command == command) {
+            return true;
+        }
+    }
+    if (depth >= kMaxMacroCallDepth) {
+        return false;
+    }
+    for (const auto& line_command : it->second.temperature_use.commands) {
+        std::string callee = line_command;
+        to_lower_inplace(callee);
+        if (cache.find(callee) != cache.end() && visited.insert(callee).second &&
+            runs_command(cache, callee, command, depth + 1, visited)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+bool MacroParamCache::macro_runs(const std::string& macro_name, const std::string& command) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string macro = macro_name;
+    to_lower_inplace(macro);
+    std::unordered_set<std::string> visited{macro};
+    return runs_command(cache_, macro, helix::text_io::to_upper(command), 0, visited);
+}
+
+std::optional<bool> MacroParamCache::macro_sets_target(const std::string& macro_name,
+                                                       const std::string& target_full_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string macro = macro_name;
+    to_lower_inplace(macro);
+    const std::string key = target_key(target_full_name);
+    const std::string any_key = key.substr(0, key.find(' ') + 1) + "*";
+    std::unordered_set<std::string> visited{macro};
+    return sets_target(cache_, macro, key, any_key, 0, visited);
 }
 
 std::map<std::string, std::string> MacroParamCache::printer_stop_commands() const {

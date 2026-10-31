@@ -9,6 +9,7 @@
 #include "moonraker_types.h"
 #include "printer_state.h"
 #include "safety_settings_manager.h"
+#include "sort_small.h"
 #include "spdlog/spdlog.h"
 #include "theme_manager.h"
 #include "tool_state.h"
@@ -85,11 +86,12 @@ char* format_temperature(int temp, char* buffer, size_t buffer_size) {
     return buffer;
 }
 
-char* format_temperature_pair(int current, int target, char* buffer, size_t buffer_size) {
-    if (target == 0) {
-        snprintf(buffer, buffer_size, "%d / —°C", current);
+char* format_temperature_pair(int current, int target, char* buffer, size_t buffer_size,
+                              bool with_unit) {
+    if (target <= 0) {
+        snprintf(buffer, buffer_size, with_unit ? "%d / —°C" : "%d / —", current);
     } else {
-        snprintf(buffer, buffer_size, "%d / %d°C", current, target);
+        snprintf(buffer, buffer_size, with_unit ? "%d / %d°C" : "%d / %d", current, target);
     }
     return buffer;
 }
@@ -111,7 +113,7 @@ char* format_temperature_f(float temp, char* buffer, size_t buffer_size) {
 char* format_temperature_pair_f(float current, float target, char* buffer, size_t buffer_size) {
     char current_buf[16];
     format_temp_number(current, current_buf, sizeof(current_buf));
-    if (target == 0.0f) {
+    if (target <= 0.0f) {
         snprintf(buffer, buffer_size, "%s / —°C", current_buf);
     } else {
         char target_buf[16];
@@ -122,8 +124,8 @@ char* format_temperature_pair_f(float current, float target, char* buffer, size_
 }
 
 char* format_target_or_off(int target, char* buffer, size_t buffer_size) {
-    if (target == 0) {
-        snprintf(buffer, buffer_size, "— °C");
+    if (target <= 0) {
+        snprintf(buffer, buffer_size, "—°C");
     } else {
         snprintf(buffer, buffer_size, "%d°C", target);
     }
@@ -165,8 +167,10 @@ HeatState classify_heat_state(int current, int target, int tolerance) {
 
 HeatState classify_heat_state_with_mode(int current, int target, helix::ChamberMode mode,
                                         int tolerance) {
-    if (mode == helix::ChamberMode::Maintaining) {
+    if (mode == helix::ChamberMode::Maintaining || mode == helix::ChamberMode::Resting) {
         // Target is a cooling ceiling, not a heat goal — Heating never applies.
+        // Resting (the standing setpoint) is the same ceiling with a different
+        // owner: the machine, not the user.
         if (current > target + tolerance) {
             return HeatState::Cooling;
         }
@@ -177,7 +181,7 @@ HeatState classify_heat_state_with_mode(int current, int target, helix::ChamberM
 }
 
 bool is_residual_hot(int current_deci) {
-    return current_deci > RESIDUAL_HEAT_THRESHOLD_DECI;
+    return current_deci > kResidualHeatThresholdDeci;
 }
 
 lv_color_t get_heating_state_color(HeatState state) {
@@ -233,6 +237,8 @@ HeaterDisplayResult heater_display(int current_deci, int target_deci) {
     int target_deg = deci_to_degrees(target_deci);
 
     // Format temperature string
+    // Not format_temperature_pair(): a 0.1°C target is still commanded and reads
+    // "25 / 0°C", where the pair formatter takes a whole-degree 0 as off.
     char buf[32];
     if (target_deci > 0) {
         std::snprintf(buf, sizeof(buf), "%d / %d°C", current_deg, target_deg);
@@ -253,7 +259,7 @@ HeaterDisplayResult heater_display(int current_deci, int target_deci) {
     // decidegrees against the displayed reading so the glyph matches both the
     // string above and the temp_display card showing the same heater.
     const HeatState state =
-        classify_heat_state(shown_deci, target_deci, DEFAULT_AT_TEMP_TOLERANCE_DECI);
+        classify_heat_state(shown_deci, target_deci, kDefaultAtTempToleranceDeci);
     result.state = state;
 
     // Get color from the same heating state logic
@@ -293,20 +299,28 @@ const char* build_heater_gcode(const std::string& heater_full_name, int target_d
 }
 
 bool chamber_uses_m141(const std::string& heater_full_name, const std::string& chamber_heater_name,
-                       bool m141_available) {
+                       bool m141_available, std::optional<bool> m141_sets_heater) {
     return m141_available && !heater_full_name.empty() && !chamber_heater_name.empty() &&
-           heater_full_name == chamber_heater_name;
+           heater_full_name == chamber_heater_name &&
+           m141_sets_heater != std::optional<bool>(false);
 }
 
 ChamberSetpoint chamber_effective_setpoint(int heater_target_deci, int fan_target_deci,
                                            int fan_resting_deci) {
-    // Mirrors the live computation in PrinterTemperatureState::update_chamber_setpoint()
-    // exactly: heater wins; fan wins only when it is above 0 and not at the
-    // configured resting target (which M141 S0 parks the fan at on the K2).
+    // The one rule for the effective setpoint, applied by
+    // PrinterTemperatureState on every status frame:
+    // heater wins; the fan target is always the effective setpoint when
+    // it holds one, and is labeled Resting when it equals the configured resting
+    // target — the state M141 S0 parks the fan at on the K2 and that a deliberate
+    // set equal to resting is byte-identical to. The number is displayed either
+    // way; Resting only changes which glyph sits beside it.
     if (heater_target_deci > 0)
         return {heater_target_deci, helix::ChamberMode::Heating};
-    if (fan_target_deci > 0 && fan_target_deci != fan_resting_deci)
-        return {fan_target_deci, helix::ChamberMode::Maintaining};
+    if (fan_target_deci > 0) {
+        return {fan_target_deci, fan_target_deci == fan_resting_deci
+                                     ? helix::ChamberMode::Resting
+                                     : helix::ChamberMode::Maintaining};
+    }
     return {0, helix::ChamberMode::Off};
 }
 
@@ -316,6 +330,8 @@ const char* chamber_mode_word(helix::ChamberMode mode) {
         return "Heating";
     case helix::ChamberMode::Maintaining:
         return "Maintaining";
+    case helix::ChamberMode::Resting:
+        return "Auto";
     default:
         return "Off";
     }
@@ -343,7 +359,13 @@ HeaterStatus classify_heater_status(int current_deci, int target_deci, int power
                                     helix::ChamberMode mode) {
     HeaterStatus status;
     status.state = status_state_of(classify_heat_state_with_mode(
-        displayed_deci(current_deci), target_deci, mode, DEFAULT_AT_TEMP_TOLERANCE_DECI));
+        displayed_deci(current_deci), target_deci, mode, kDefaultAtTempToleranceDeci));
+    // Resting holds at its ceiling as Neutral, which reads Ready — but the
+    // check glyph means "your deliberate setpoint is satisfied". The standing
+    // setpoint is the machine's own behavior, so it takes the auto glyph.
+    if (mode == helix::ChamberMode::Resting && status.state == HeaterStatusState::Ready) {
+        status.state = HeaterStatusState::Auto;
+    }
     if (power_pct > 0) {
         status.duty = std::to_string(power_pct) + "%";
     }
@@ -377,10 +399,10 @@ std::string build_cooldown_gcode(const std::string& macro_gcode,
         }
     }
     // Shorter first, so extruder2 precedes extruder10.
-    std::sort(extra_extruders.begin(), extra_extruders.end(),
-              [](const std::string& a, const std::string& b) {
-                  return a.size() != b.size() ? a.size() < b.size() : a < b;
-              });
+    helix::sort_small(extra_extruders.begin(), extra_extruders.end(),
+                      [](const std::string& a, const std::string& b) {
+                          return a.size() != b.size() ? a.size() < b.size() : a < b;
+                      });
     extra_extruders.erase(std::unique(extra_extruders.begin(), extra_extruders.end()),
                           extra_extruders.end());
 

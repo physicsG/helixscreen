@@ -1,0 +1,2230 @@
+{
+  "_comment": "File-fits-printer check. `machines`: configfile.settings, optionally what each extruder reports live (`live`, by extruder number), and the limits both parsers must read from them (moonraker-plugin/helix_fitcheck.py machine_limits + machine_with_live_nozzles, src/printer/fit_check.cpp fit_machine_from_settings + fit_machine_with_live_nozzles). `checks`: limits, a file's bounds and header, and the findings both checkers must give, in order (helix_fitcheck.py check_fit, fit_check.cpp check_fit). Read by moonraker-plugin/tests/test_helix_fitcheck.py and tests/unit/test_fit_check.cpp.",
+  "machines": [
+    {
+      "name": "corexy reads its travel from stepper_x, stepper_y and stepper_z",
+      "settings": {
+        "printer": {
+          "kinematics": "corexy"
+        },
+        "stepper_x": {
+          "position_min": 0.0,
+          "position_max": 350.0,
+          "position_endstop": 350.0
+        },
+        "stepper_y": {
+          "position_min": -5.0,
+          "position_max": 355.0
+        },
+        "stepper_z": {
+          "position_min": -5.0,
+          "position_max": 340.0
+        },
+        "extruder": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "heater_bed": {
+          "max_temp": 120.0
+        }
+      },
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          -5.0,
+          -5.0
+        ],
+        "axis_max": [
+          350.0,
+          355.0,
+          340.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 120.0,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "a stepper without position_min starts at 0, and no heater_bed means no bed limit",
+      "settings": {
+        "printer": {
+          "kinematics": "cartesian"
+        },
+        "stepper_x": {
+          "position_max": 235.0
+        },
+        "stepper_y": {
+          "position_max": 235.0
+        },
+        "stepper_z": {
+          "position_max": 250.0
+        },
+        "extruder": {
+          "max_temp": 260.0,
+          "nozzle_diameter": 0.4
+        }
+      },
+      "machine": {
+        "kinematics": "cartesian",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          235.0,
+          235.0,
+          250.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 260.0,
+        "max_bed_temp": null,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "delta reads a radius and its height from the towers, not stepper_x",
+      "settings": {
+        "printer": {
+          "kinematics": "delta",
+          "delta_radius": 140.0,
+          "print_radius": 120.0,
+          "minimum_z_position": -5.0
+        },
+        "stepper_a": {
+          "position_endstop": 300.0
+        },
+        "stepper_b": {
+          "position_endstop": 299.5
+        },
+        "stepper_c": {
+          "position_endstop": 300.2
+        },
+        "extruder": {
+          "max_temp": 250.0,
+          "nozzle_diameter": 0.4
+        },
+        "heater_bed": {
+          "max_temp": 110.0
+        }
+      },
+      "machine": {
+        "kinematics": "delta",
+        "axis_min": [
+          null,
+          null,
+          -5.0
+        ],
+        "axis_max": [
+          null,
+          null,
+          299.5
+        ],
+        "print_radius": 120.0,
+        "max_extruder_temp": 250.0,
+        "max_bed_temp": 110.0,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "delta without print_radius uses delta_radius, and its floor defaults to 0",
+      "settings": {
+        "printer": {
+          "kinematics": "delta",
+          "delta_radius": 95.0
+        },
+        "stepper_a": {
+          "position_endstop": 250.0
+        },
+        "stepper_b": {
+          "position_endstop": 250.0
+        },
+        "stepper_c": {
+          "position_endstop": 250.0
+        },
+        "extruder": {
+          "max_temp": 245.0,
+          "nozzle_diameter": 0.4
+        }
+      },
+      "machine": {
+        "kinematics": "delta",
+        "axis_min": [
+          null,
+          null,
+          0.0
+        ],
+        "axis_max": [
+          null,
+          null,
+          250.0
+        ],
+        "print_radius": 95.0,
+        "max_extruder_temp": 245.0,
+        "max_bed_temp": null,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "extruders in number order, the hottest limit, and T macros past the extruders",
+      "settings": {
+        "printer": {
+          "kinematics": "corexy"
+        },
+        "stepper_x": {
+          "position_min": 0.0,
+          "position_max": 300.0
+        },
+        "stepper_y": {
+          "position_min": 0.0,
+          "position_max": 300.0
+        },
+        "stepper_z": {
+          "position_min": 0.0,
+          "position_max": 300.0
+        },
+        "extruder1": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.6
+        },
+        "extruder": {
+          "max_temp": 280.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder_stepper belt": {
+          "rotation_distance": 22.0
+        },
+        "gcode_macro t0": {
+          "gcode": "ACTIVATE_EXTRUDER EXTRUDER=extruder"
+        },
+        "gcode_macro t3": {
+          "gcode": "M117 lane 3"
+        },
+        "gcode_macro tune": {
+          "gcode": "M117"
+        },
+        "heater_bed": {
+          "max_temp": 110.0
+        }
+      },
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          300.0,
+          300.0,
+          300.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 110.0,
+        "tool_count": 4,
+        "tool_count_confirmed": false,
+        "nozzle_diameters": [
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "a dual carriage widens the axis it moves on",
+      "settings": {
+        "printer": {
+          "kinematics": "cartesian"
+        },
+        "stepper_x": {
+          "position_min": -10.0,
+          "position_max": 300.0
+        },
+        "dual_carriage": {
+          "axis": "x",
+          "position_min": 20.0,
+          "position_max": 360.0
+        },
+        "stepper_y": {
+          "position_min": 0.0,
+          "position_max": 300.0
+        },
+        "stepper_z": {
+          "position_min": 0.0,
+          "position_max": 300.0
+        },
+        "extruder": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder1": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        }
+      },
+      "machine": {
+        "kinematics": "cartesian",
+        "axis_min": [
+          -10.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          360.0,
+          300.0,
+          300.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": null,
+        "tool_count": 2,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4,
+          0.4
+        ],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "polar has no stepper_x or stepper_y, so only Z is known",
+      "settings": {
+        "printer": {
+          "kinematics": "polar"
+        },
+        "stepper_bed": {
+          "gear_ratio": "80:16"
+        },
+        "stepper_arm": {
+          "position_max": 150.0
+        },
+        "stepper_z": {
+          "position_min": 0.0,
+          "position_max": 200.0
+        },
+        "extruder": {
+          "max_temp": 250.0,
+          "nozzle_diameter": 0.4
+        }
+      },
+      "machine": {
+        "kinematics": "polar",
+        "axis_min": [
+          null,
+          null,
+          0.0
+        ],
+        "axis_max": [
+          null,
+          null,
+          200.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 250.0,
+        "max_bed_temp": null,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "settings that are not numbers, and no settings at all, read as unknown",
+      "settings": {
+        "printer": {
+          "kinematics": 7
+        },
+        "stepper_x": {
+          "position_min": "0",
+          "position_max": true
+        },
+        "extruder": {
+          "max_temp": "300",
+          "nozzle_diameter": null
+        }
+      },
+      "machine": {
+        "kinematics": "",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "an empty settings object",
+      "settings": {},
+      "machine": {
+        "kinematics": "",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": false,
+        "nozzle_diameters": [],
+        "nozzle_volume_types": [],
+        "model": ""
+      }
+    },
+    {
+      "name": "a nozzle each extruder reports live replaces the config's, and its flow type is recorded in any spelling",
+      "settings": {
+        "printer": {
+          "kinematics": "corexy"
+        },
+        "stepper_x": {
+          "position_min": 0.0,
+          "position_max": 270.0
+        },
+        "stepper_y": {
+          "position_min": 0.0,
+          "position_max": 270.0
+        },
+        "stepper_z": {
+          "position_min": 0.0,
+          "position_max": 270.0
+        },
+        "heater_bed": {
+          "max_temp": 100.0
+        },
+        "extruder": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder1": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder2": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder3": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        }
+      },
+      "live": [
+        {
+          "nozzle_diameter": 0.2,
+          "nozzle_volume_type": "standard"
+        },
+        {
+          "nozzle_diameter": 0.4,
+          "nozzle_volume_type": "high_flow"
+        },
+        {
+          "nozzle_diameter": 0.4,
+          "nozzle_volume_type": "High Flow"
+        },
+        {
+          "nozzle_diameter": 0.6,
+          "nozzle_volume_type": "Standard"
+        }
+      ],
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      }
+    },
+    {
+      "name": "an extruder that reports no nozzle, or nothing usable, keeps the config's",
+      "settings": {
+        "printer": {
+          "kinematics": "corexy"
+        },
+        "stepper_x": {
+          "position_min": 0.0,
+          "position_max": 270.0
+        },
+        "stepper_y": {
+          "position_min": 0.0,
+          "position_max": 270.0
+        },
+        "stepper_z": {
+          "position_min": 0.0,
+          "position_max": 270.0
+        },
+        "heater_bed": {
+          "max_temp": 100.0
+        },
+        "extruder": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder1": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder2": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        },
+        "extruder3": {
+          "max_temp": 300.0,
+          "nozzle_diameter": 0.4
+        }
+      },
+      "live": [
+        {
+          "nozzle_diameter": null,
+          "nozzle_volume_type": null
+        },
+        null,
+        {
+          "nozzle_diameter": 0.0,
+          "nozzle_volume_type": "brass"
+        },
+        {
+          "nozzle_diameter": 0.6,
+          "nozzle_volume_type": "high_flow"
+        }
+      ],
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "",
+          "",
+          "",
+          "high_flow"
+        ],
+        "model": ""
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "a file inside every limit has no findings",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          350.0,
+          350.0,
+          340.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 120.0,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "model": "Voron 2.4"
+      },
+      "file": {
+        "print": {
+          "min": [
+            100.0,
+            100.0,
+            0.2
+          ],
+          "max": [
+            250.0,
+            250.0,
+            40.0
+          ]
+        },
+        "travel": {
+          "min": [
+            0.0,
+            0.0,
+            0.2
+          ],
+          "max": [
+            350.0,
+            350.0,
+            50.0
+          ]
+        },
+        "max_hotend_temp": 260.0,
+        "max_bed_temp": 100.0,
+        "tools": [
+          0
+        ],
+        "nozzle_diameters": [
+          0.4
+        ],
+        "printer_model": "Voron 2.4 350"
+      },
+      "findings": []
+    },
+    {
+      "name": "exactly at position_max passes",
+      "machine": {
+        "kinematics": "cartesian",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          235.0,
+          235.0,
+          250.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": {
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "max": [
+            235.0,
+            235.0,
+            250.0
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "one step over position_max fails, on each axis that is over",
+      "machine": {
+        "kinematics": "cartesian",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          235.0,
+          235.0,
+          250.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": {
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "max": [
+            235.001,
+            235.0,
+            250.001
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "x",
+            "side": "max",
+            "value": 235.001,
+            "limit": 235.0
+          }
+        },
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "z",
+            "side": "max",
+            "value": 250.001,
+            "limit": 250.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "below position_min fails; a purge line inside a negative position_min passes",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          -5.0,
+          -5.0
+        ],
+        "axis_max": [
+          350.0,
+          355.0,
+          340.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": {
+          "min": [
+            5.0,
+            5.0,
+            0.2
+          ],
+          "max": [
+            300.0,
+            300.0,
+            30.0
+          ]
+        },
+        "travel": {
+          "min": [
+            -0.5,
+            -4.0,
+            0.2
+          ],
+          "max": [
+            300.0,
+            300.0,
+            30.0
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "x",
+            "side": "min",
+            "value": -0.5,
+            "limit": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "without travel bounds the printing moves are checked",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          180.0,
+          180.0,
+          180.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": {
+          "min": [
+            10.0,
+            10.0,
+            0.2
+          ],
+          "max": [
+            200.0,
+            170.0,
+            20.0
+          ]
+        },
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "x",
+            "side": "max",
+            "value": 200.0,
+            "limit": 180.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a file that never names Z, or a printer with no Z limit, checks no Z",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          null
+        ],
+        "axis_max": [
+          180.0,
+          180.0,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": {
+          "min": [
+            10.0,
+            10.0,
+            null
+          ],
+          "max": [
+            170.0,
+            170.0,
+            null
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "delta: a box edge exactly at the print radius passes",
+      "machine": {
+        "kinematics": "delta",
+        "axis_min": [
+          null,
+          null,
+          0.0
+        ],
+        "axis_max": [
+          null,
+          null,
+          300.0
+        ],
+        "print_radius": 120.0,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": {
+          "min": [
+            -120.0,
+            -50.0,
+            0.2
+          ],
+          "max": [
+            60.0,
+            120.0,
+            100.0
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "delta: a box edge one step past the print radius fails",
+      "machine": {
+        "kinematics": "delta",
+        "axis_min": [
+          null,
+          null,
+          0.0
+        ],
+        "axis_max": [
+          null,
+          null,
+          300.0
+        ],
+        "print_radius": 120.0,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": {
+          "min": [
+            -120.001,
+            -50.0,
+            0.2
+          ],
+          "max": [
+            60.0,
+            110.0,
+            300.5
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "z",
+            "side": "max",
+            "value": 300.5,
+            "limit": 300.0
+          }
+        },
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "radius",
+            "side": "max",
+            "value": 120.001,
+            "limit": 120.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "delta: corners past the radius do not fail, since a round part fills no corner",
+      "machine": {
+        "kinematics": "delta",
+        "axis_min": [
+          null,
+          null,
+          0.0
+        ],
+        "axis_max": [
+          null,
+          null,
+          300.0
+        ],
+        "print_radius": 120.0,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": {
+          "min": [
+            -100.0,
+            -100.0,
+            0.2
+          ],
+          "max": [
+            100.0,
+            100.0,
+            50.0
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "temperatures at max_temp pass, above it fail",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 110.0,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": 300.0,
+        "max_bed_temp": 111.0,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "temp_over_max",
+          "severity": "block",
+          "detail": {
+            "heater": "heater_bed",
+            "value": 111.0,
+            "limit": 110.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a hotend over the hottest extruder fails",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 280.0,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": 281.0,
+        "max_bed_temp": 60.0,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "temp_over_max",
+          "severity": "block",
+          "detail": {
+            "heater": "extruder",
+            "value": 281.0,
+            "limit": 280.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a tool past the printer's last fails; an unknown tool count checks nothing",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": 2,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          0,
+          1,
+          3
+        ],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "too_many_tools",
+          "severity": "block",
+          "detail": {
+            "tool": 3,
+            "limit": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "every tool within the count passes",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": 2,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          0,
+          1
+        ],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "unknown tool count",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          0,
+          5
+        ],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "a nozzle the slicer assumed differs from the printer's: warn per extruder",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4,
+          0.4
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          0,
+          1
+        ],
+        "nozzle_diameters": [
+          0.404,
+          0.6
+        ],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "nozzle_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 1,
+            "file": 0.6,
+            "printer": 0.4
+          }
+        }
+      ]
+    },
+    {
+      "name": "a single-nozzle printer compares only its own extruder with a per-filament list",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "nozzle_diameters": [
+          0.4,
+          0.6,
+          0.6,
+          0.6
+        ],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "a model that names another printer warns",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": "Voron 2.4"
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": "Creality K1C"
+      },
+      "findings": [
+        {
+          "kind": "printer_model_mismatch",
+          "severity": "note",
+          "detail": {
+            "file": "Creality K1C",
+            "printer": "Voron 2.4"
+          }
+        }
+      ]
+    },
+    {
+      "name": "models match ignoring case, spaces, punctuation and a variant suffix",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": "FlashForge Adventurer 5M (ForgeX)"
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": "FLASHFORGE Adventurer-5M"
+      },
+      "findings": []
+    },
+    {
+      "name": "an unknown printer model checks nothing",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": "Creality K1C"
+      },
+      "findings": []
+    },
+    {
+      "name": "a tool past a count T macros raised only warns",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": 2,
+        "tool_count_confirmed": false,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          0,
+          2
+        ],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "too_many_tools",
+          "severity": "warn",
+          "detail": {
+            "tool": 2,
+            "limit": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "travel without both ends is not a box: the printing moves are checked",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          200.0,
+          200.0,
+          200.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": false,
+        "nozzle_diameters": [],
+        "model": ""
+      },
+      "file": {
+        "print": {
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "max": [
+            201.0,
+            100.0,
+            10.0
+          ]
+        },
+        "travel": {
+          "min": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "x",
+            "side": "max",
+            "value": 201.0,
+            "limit": 200.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "model names compare ASCII letters and digits only: é is dropped on both sides",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          null,
+          null,
+          null
+        ],
+        "axis_max": [
+          null,
+          null,
+          null
+        ],
+        "print_radius": null,
+        "max_extruder_temp": null,
+        "max_bed_temp": null,
+        "tool_count": null,
+        "tool_count_confirmed": false,
+        "nozzle_diameters": [],
+        "model": "Creality Ender-3 V2 No"
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [],
+        "printer_model": "Ender-3 V2 Néo"
+      },
+      "findings": []
+    },
+    {
+      "name": "every kind at once, in the order both checkers give them",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          220.0,
+          220.0,
+          250.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 1,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.4
+        ],
+        "model": "Voron 0.2"
+      },
+      "file": {
+        "print": {
+          "min": [
+            10.0,
+            10.0,
+            0.2
+          ],
+          "max": [
+            300.0,
+            200.0,
+            20.0
+          ]
+        },
+        "travel": {
+          "min": [
+            -1.0,
+            0.0,
+            0.2
+          ],
+          "max": [
+            300.0,
+            200.0,
+            30.0
+          ]
+        },
+        "max_hotend_temp": 320.0,
+        "max_bed_temp": 110.0,
+        "tools": [
+          0,
+          1
+        ],
+        "nozzle_diameters": [
+          0.6
+        ],
+        "printer_model": "Prusa MK4"
+      },
+      "findings": [
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "x",
+            "side": "min",
+            "value": -1.0,
+            "limit": 0.0
+          }
+        },
+        {
+          "kind": "out_of_bounds",
+          "severity": "block",
+          "detail": {
+            "axis": "x",
+            "side": "max",
+            "value": 300.0,
+            "limit": 220.0
+          }
+        },
+        {
+          "kind": "temp_over_max",
+          "severity": "block",
+          "detail": {
+            "heater": "extruder",
+            "value": 320.0,
+            "limit": 300.0
+          }
+        },
+        {
+          "kind": "temp_over_max",
+          "severity": "block",
+          "detail": {
+            "heater": "heater_bed",
+            "value": 110.0,
+            "limit": 100.0
+          }
+        },
+        {
+          "kind": "too_many_tools",
+          "severity": "block",
+          "detail": {
+            "tool": 1,
+            "limit": 1
+          }
+        },
+        {
+          "kind": "nozzle_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 0,
+            "file": 0.6,
+            "printer": 0.4
+          }
+        },
+        {
+          "kind": "printer_model_mismatch",
+          "severity": "note",
+          "detail": {
+            "file": "Prusa MK4",
+            "printer": "Voron 0.2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a 0.6 job on the head that reports 0.6 fits, whatever the config says",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          3
+        ],
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "standard",
+          "standard",
+          "standard"
+        ],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "a nozzle or flow type that differs on a tool the file never uses is not judged",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          3
+        ],
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "high_flow",
+          "standard",
+          "standard",
+          "standard"
+        ],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "a nozzle that differs on a tool the file uses warns",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          0,
+          3
+        ],
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "standard",
+          "standard",
+          "standard"
+        ],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "nozzle_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 0,
+            "file": 0.4,
+            "printer": 0.2
+          }
+        }
+      ]
+    },
+    {
+      "name": "High Flow G-code for a tool whose nozzle is standard warns",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          3
+        ],
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "high_flow"
+        ],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "nozzle_flow_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 3,
+            "file": "high_flow",
+            "printer": "standard"
+          }
+        }
+      ]
+    },
+    {
+      "name": "standard G-code for a tool whose nozzle is High Flow warns",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          1
+        ],
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "standard",
+          "standard",
+          "standard"
+        ],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "nozzle_flow_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 1,
+            "file": "standard",
+            "printer": "high_flow"
+          }
+        }
+      ]
+    },
+    {
+      "name": "a flow type unknown on either side checks nothing",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [
+          1,
+          2,
+          3
+        ],
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "high_flow",
+          "high_flow",
+          "",
+          "Turbo"
+        ],
+        "printer_model": null
+      },
+      "findings": []
+    },
+    {
+      "name": "a file naming no tools has every extruder's nozzle judged, sizes before flow types",
+      "machine": {
+        "kinematics": "corexy",
+        "axis_min": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis_max": [
+          270.0,
+          270.0,
+          270.0
+        ],
+        "print_radius": null,
+        "max_extruder_temp": 300.0,
+        "max_bed_temp": 100.0,
+        "tool_count": 4,
+        "tool_count_confirmed": true,
+        "nozzle_diameters": [
+          0.2,
+          0.4,
+          0.4,
+          0.6
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "high_flow",
+          "high_flow",
+          "standard"
+        ],
+        "model": ""
+      },
+      "file": {
+        "print": null,
+        "travel": null,
+        "max_hotend_temp": null,
+        "max_bed_temp": null,
+        "tools": [],
+        "nozzle_diameters": [
+          0.4,
+          0.4,
+          0.4,
+          0.4
+        ],
+        "nozzle_volume_types": [
+          "standard",
+          "standard",
+          "standard",
+          "standard"
+        ],
+        "printer_model": null
+      },
+      "findings": [
+        {
+          "kind": "nozzle_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 0,
+            "file": 0.4,
+            "printer": 0.2
+          }
+        },
+        {
+          "kind": "nozzle_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 3,
+            "file": 0.4,
+            "printer": 0.6
+          }
+        },
+        {
+          "kind": "nozzle_flow_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 1,
+            "file": "standard",
+            "printer": "high_flow"
+          }
+        },
+        {
+          "kind": "nozzle_flow_mismatch",
+          "severity": "warn",
+          "detail": {
+            "tool": 2,
+            "file": "standard",
+            "printer": "high_flow"
+          }
+        }
+      ]
+    }
+  ]
+}

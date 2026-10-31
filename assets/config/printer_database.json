@@ -1,6 +1,8 @@
 {
   "version": "2.0",
   "description": "Printer auto-detection database with Klipper hardware fingerprints",
+  "_field_variant_of": "Optional on a printer entry: the id of the entry for the same machine without this entry's firmware mod or add-on, which \"variant_label\" (required alongside it) names in a few words, e.g. \"ForgeX\" or \"CFS\". A saved-vs-detected type warning between an entry and its base, or two variants of one base, is worded as that difference rather than as two different printers. A base entry carries neither field.",
+  "_field_image_variants": "Optional on a printer entry: an ordered list of alternate images chosen by hardware the app detects on the connected printer, each {\"when\": {<condition>: <value>, ...}, \"image\": \"<file in assets/images/printers/>\"}. The first variant whose every condition holds replaces the entry's image; none holding leaves the plain image, and a custom image the user picked always wins. Conditions: filament_system - a detected filament system of this kind that the app presents, as AmsSystemInfo::presents_filament_system() decides (tool_changer is not a filament system and never matches), spelled as ams_type_from_string() parses it (cfs, afc, happy_hare, ace, ad5x_ifs, snapmaker, qidi_box, openams). A condition key or value this build does not know makes its variant never match, and the [printer_database][schema] test fails on one, so a misspelling cannot ship silently. The image re-resolves when detection changes, so a filament system registering after connect switches it live.",
   "heuristic_types": {
     "hostname_match": "Match against Moonraker hostname (from /printer/info)",
     "hostname_exclude": "Exclude this printer if the hostname matches this pattern",
@@ -120,6 +122,7 @@
         }
       ],
       "operations": [
+        "screws_tilt",
         "probe_accuracy",
         "z_offset_calibrate"
       ],
@@ -128,7 +131,7 @@
       ],
       "label": "Zeroing load cell",
       "timeout_s": 60,
-      "reason": "COSMOS probes with a load cell whose zero drifts between calibrations. Its load_cell module registers LOAD_CELL_TARE as a command, never a gcode_macro, so macro_match cannot see it: the load_cell_probe object keys the rule, and COSMOS's _COSMOS_SETTINGS macro keeps it off other firmware whose load cell may not define that command. COSMOS's SCREWS_TILT_CALCULATE and BED_MESH_CALIBRATE tare the load cell themselves, so only probe accuracy and Z-offset calibration get it."
+      "reason": "COSMOS probes with a load cell whose zero drifts between calibrations. Its load_cell module registers LOAD_CELL_TARE as a command, never a gcode_macro, so macro_match cannot see it: the load_cell_probe object keys the rule, and COSMOS's _COSMOS_SETTINGS macro keeps it off other firmware whose load cell may not define that command. COSMOS's BED_MESH_CALIBRATE tares the load cell itself, so bed mesh does not get it. Screws tilt does: the Elegoo Centauri Carbon entry's shipped sequence tares on its own and is self-preparing, and without COSMOS's wrapper the stock SCREWS_TILT_CALCULATE needs the tare from here."
     }
   ],
   "printers": [
@@ -139,7 +142,6 @@
       "image": "flashforge-adventurer-5m.png",
       "preset": "ad5m",
       "print_start_profile": "ad5m",
-      "screws_tilt_direction": "ccw",
       "heuristics": [
         {
           "type": "macro_exclude",
@@ -234,13 +236,15 @@
     },
     {
       "id": "flashforge_adventurer_5m_forgex",
+      "variant_of": "flashforge_adventurer_5m",
+      "variant_label": "ForgeX",
+      "klipper_hides_dot_dirs": true,
       "name": "FlashForge Adventurer 5M (ForgeX)",
       "manufacturer": "FlashForge",
       "image": "flashforge-adventurer-5m.png",
       "preset": "ad5m_forgex",
       "print_start_profile": "forge_x",
       "z_offset_calibration_strategy": "firmware_managed",
-      "screws_tilt_direction": "ccw",
       "heuristics": [
         {
           "type": "macro_exclude",
@@ -358,7 +362,6 @@
       "image": "flashforge-adventurer-5m-pro.png",
       "preset": "ad5m_pro",
       "print_start_profile": "ad5m",
-      "screws_tilt_direction": "ccw",
       "heuristics": [
         {
           "type": "macro_exclude",
@@ -474,6 +477,9 @@
     },
     {
       "id": "flashforge_ad5m_pro_forgex",
+      "variant_of": "flashforge_ad5m_pro",
+      "variant_label": "ForgeX",
+      "klipper_hides_dot_dirs": true,
       "enclosed": true,
       "name": "FlashForge Adventurer 5M Pro (ForgeX)",
       "manufacturer": "FlashForge",
@@ -481,7 +487,6 @@
       "preset": "ad5m_pro_forgex",
       "print_start_profile": "forge_x",
       "z_offset_calibration_strategy": "firmware_managed",
-      "screws_tilt_direction": "ccw",
       "heuristics": [
         {
           "type": "macro_exclude",
@@ -607,15 +612,27 @@
           }
         ]
       },
-      "toolhead_style": "default"
+      "toolhead_style": "default",
+      "_print_start_default_phases_comment": "Measured on an AD5M Pro on Forge-X 1.4.2 2026-10-15 (KAMP, ABS 105/265): homing ~5s; the nozzle clean ~135s, ~112s of it the silent cool-down to 120C for probing; the 25-point mesh plus Smart Park ~150s; the priming line ~15s. Heating is omitted - the thermal model owns those.",
+      "print_start_default_phases": {
+        "HOMING": 5,
+        "CLEANING": 135,
+        "BED_MESH": 150,
+        "PURGING": 15
+      },
+      "_thermal_rates_comment": "Seconds per degree C for a first print, from the same capture: the bed took ~480s from 30C to 105C, the nozzle ~48s from 36C to 265C.",
+      "thermal_rates": {
+        "heater_bed": 6.4,
+        "extruder": 0.21
+      }
     },
     {
       "id": "flashforge_ad5x",
+      "klipper_hides_dot_dirs": true,
       "name": "FlashForge Adventurer 5X",
       "manufacturer": "FlashForge",
       "image": "flashforge-adventurer-5x.png",
       "preset": "ad5x",
-      "screws_tilt_direction": "ccw",
       "z_offset_calibration_strategy": "firmware_managed",
       "heuristics": [
         {
@@ -858,6 +875,7 @@
       "enclosed": true,
       "name": "Voron 2.4",
       "manufacturer": "Voron",
+      "belt_tensioner": "screw",
       "image": "voron-v2.png",
       "_print_start_default_phases_comment": "Estimates for a 350mm-class gantry machine with a probe-based mesh: G28 plus a four-point QUAD_GANTRY_LEVEL (the 2.4 levels its gantry, never Z_TILT), then a mesh sweep, a brush wipe and a purge line. Heating is omitted - the thermal model owns those.",
       "print_start_default_phases": {
@@ -1108,6 +1126,7 @@
       "enclosed": true,
       "name": "Voron Trident",
       "manufacturer": "Voron",
+      "belt_tensioner": "screw",
       "image": "voron-trident.png",
       "_print_start_default_phases_comment": "Estimates for a 350mm-class machine with a probe-based mesh: G28 plus a three-point Z_TILT_ADJUST (the Trident tilts its bed, it has no gantry to QGL), then a mesh sweep, a brush wipe and a purge line. Heating is omitted - the thermal model owns those.",
       "print_start_default_phases": {
@@ -1351,6 +1370,8 @@
     },
     {
       "id": "creality_k1_cfs",
+      "variant_of": "creality_k1",
+      "variant_label": "CFS",
       "enclosed": true,
       "name": "Creality K1 (with CFS)",
       "manufacturer": "Creality",
@@ -1594,6 +1615,8 @@
     },
     {
       "id": "creality_k1_max_cfs",
+      "variant_of": "creality_k1_max",
+      "variant_label": "CFS",
       "enclosed": true,
       "name": "Creality K1 Max (with CFS)",
       "manufacturer": "Creality",
@@ -1714,6 +1737,14 @@
       "manufacturer": "Creality",
       "toolhead_style": "creality_k2",
       "image": "creality-k2-plus.png",
+      "image_variants": [
+        {
+          "when": {
+            "filament_system": "cfs"
+          },
+          "image": "creality-k2-plus-cfs.png"
+        }
+      ],
       "probe_type": "prtouch_v3",
       "preset": "k2",
       "print_start_profile": "creality_k2",
@@ -1856,12 +1887,22 @@
     },
     {
       "id": "creality_k2_plus_k2improvements",
+      "variant_of": "creality_k2_plus",
+      "variant_label": "k2-improvements",
       "enclosed": true,
       "name": "Creality K2 Plus (k2-improvements)",
       "manufacturer": "Creality",
       "toolhead_style": "creality_k2",
       "image": "creality-k2-plus.png",
-      "probe_type": "cartographer",
+      "image_variants": [
+        {
+          "when": {
+            "filament_system": "cfs"
+          },
+          "image": "creality-k2-plus-cfs.png"
+        }
+      ],
+      "probe_type": "prtouch_v3",
       "preset": "k2",
       "print_start_profile": "k2_improvements",
       "console_filters": [
@@ -1887,6 +1928,20 @@
       },
       "heuristics": [
         {
+          "type": "kinematics_exclude",
+          "field": "kinematics",
+          "pattern": "delta",
+          "confidence": 0,
+          "reason": "Every K2 is corexy. _START_PRINT_VARS is a common user-macro name too (FLSUN T1 Pro configs carry it), so it cannot be definitive on another kinematics"
+        },
+        {
+          "type": "kinematics_exclude",
+          "field": "kinematics",
+          "pattern": "cartesian",
+          "confidence": 0,
+          "reason": "Every K2 is corexy"
+        },
+        {
           "type": "macro_match",
           "field": "macros",
           "pattern": "_START_PRINT_VARS",
@@ -1894,11 +1949,18 @@
           "reason": "_START_PRINT_VARS is the k2-improvements START_PRINT's variable holder - definitive, and it is the macro that changes the narration"
         },
         {
+          "type": "object_required",
+          "field": "printer_objects",
+          "pattern": "^gcode_macro _START_PRINT_VARS$",
+          "confidence": 0,
+          "reason": "A K2 without the mod is its stock entry's: the stock entries score every other heuristic here equally, so without this exclusion the two tie"
+        },
+        {
           "type": "object_exists",
           "field": "printer_objects",
           "pattern": "^cartographer$",
           "confidence": 70,
-          "reason": "The mod replaces prtouch_v3 with a Cartographer probe",
+          "reason": "Cartographer is the mod's optional probe: its gimme-the-jamin.sh installer swaps prtouch_v3 for it, no-carto.sh keeps prtouch_v3. A real Cartographer types itself from this object, so the entry's probe_type stays prtouch_v3",
           "corroborating": true
         },
         {
@@ -2001,6 +2063,14 @@
       "manufacturer": "Creality",
       "toolhead_style": "creality_k2",
       "image": "creality-k2-pro.png",
+      "image_variants": [
+        {
+          "when": {
+            "filament_system": "cfs"
+          },
+          "image": "creality-k2-pro-cfs.png"
+        }
+      ],
       "probe_type": "prtouch_v3",
       "preset": "k2",
       "print_start_profile": "creality_k2",
@@ -2142,6 +2212,177 @@
       }
     },
     {
+      "id": "creality_k2_pro_k2improvements",
+      "variant_of": "creality_k2_pro",
+      "variant_label": "k2-improvements",
+      "enclosed": true,
+      "name": "Creality K2 Pro (k2-improvements)",
+      "manufacturer": "Creality",
+      "toolhead_style": "creality_k2",
+      "image": "creality-k2-pro.png",
+      "image_variants": [
+        {
+          "when": {
+            "filament_system": "cfs"
+          },
+          "image": "creality-k2-pro-cfs.png"
+        }
+      ],
+      "probe_type": "prtouch_v3",
+      "preset": "k2",
+      "print_start_profile": "k2_improvements",
+      "console_filters": [
+        "creality_rs485",
+        "creality_k2_modules"
+      ],
+      "pre_print_options": {
+        "macro_name": "START_PRINT",
+        "setup_gcode": "PRINT_PREPARED",
+        "options": [
+          {
+            "id": "ai_detect",
+            "category": "monitoring",
+            "order": 10,
+            "default_enabled": false,
+            "label_key": "AI detection",
+            "description_key": "Monitor for print abnormalities (K2 Plus camera-based)",
+            "strategy": "pre_start_gcode",
+            "gcode_template": "LOAD_AI_RUN SWITCH={value}",
+            "requires_macro": "LOAD_AI_RUN"
+          }
+        ]
+      },
+      "heuristics": [
+        {
+          "type": "kinematics_exclude",
+          "field": "kinematics",
+          "pattern": "delta",
+          "confidence": 0,
+          "reason": "Every K2 is corexy. _START_PRINT_VARS is a common user-macro name too (FLSUN T1 Pro configs carry it), so it cannot be definitive on another kinematics"
+        },
+        {
+          "type": "kinematics_exclude",
+          "field": "kinematics",
+          "pattern": "cartesian",
+          "confidence": 0,
+          "reason": "Every K2 is corexy"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "_START_PRINT_VARS",
+          "confidence": 99,
+          "reason": "_START_PRINT_VARS is the k2-improvements START_PRINT's variable holder - definitive, and it is the macro that changes the narration"
+        },
+        {
+          "type": "object_required",
+          "field": "printer_objects",
+          "pattern": "^gcode_macro _START_PRINT_VARS$",
+          "confidence": 0,
+          "reason": "A K2 without the mod is its stock entry's: the stock entries score every other heuristic here equally, so without this exclusion the two tie"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^cartographer$",
+          "confidence": 70,
+          "reason": "Cartographer is the mod's optional probe: its gimme-the-jamin.sh installer swaps prtouch_v3 for it, no-carto.sh keeps prtouch_v3. A real Cartographer types itself from this object, so the entry's probe_type stays prtouch_v3",
+          "corroborating": true
+        },
+        {
+          "type": "kinematics_match",
+          "field": "kinematics",
+          "pattern": "corexy",
+          "confidence": 40,
+          "reason": "CoreXY kinematics"
+        },
+        {
+          "type": "sensor_match",
+          "field": "sensors",
+          "pattern": "chamber_temp",
+          "confidence": 70,
+          "reason": "Chamber temperature sensor",
+          "corroborating": true
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^box$",
+          "confidence": 45,
+          "reason": "CFS box object. Every CFS-equipped Creality carries it, so it narrows a machine to the range and never to a model; the model is the hostname's and bed size's to name",
+          "corroborating": true
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "motor_control",
+          "confidence": 75,
+          "reason": "K2-specific motor control module"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "fan_feedback",
+          "confidence": 65,
+          "reason": "Creality fan-tachometer module. A captured real K1C reports it too, so it evidences Creality's range and not this model; the model is the hostname's and bed size's to name. Weight left as-is deliberately: re-scoring or dropping it wants a real K2 discovery snapshot, and no fixture has one"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "creality",
+          "confidence": 60,
+          "reason": "Hostname contains 'creality'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "k2",
+          "confidence": 85,
+          "reason": "Hostname contains 'k2'"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "load_ai",
+          "confidence": 60,
+          "reason": "K2 AI print monitoring"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "filament_rack",
+          "confidence": 65,
+          "reason": "K2 filament rack module"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "heater_generic chamber_heater",
+          "confidence": 70,
+          "reason": "Active chamber heater"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "k2pro",
+          "confidence": 90,
+          "reason": "Hostname contains 'K2Pro'"
+        },
+        {
+          "type": "build_volume_range",
+          "field": "bed_mesh",
+          "measure": "declared_bed",
+          "min_x": 290,
+          "max_x": 310,
+          "min_y": 290,
+          "max_y": 310,
+          "confidence": 55,
+          "reason": "Declared bed ~300mm (K2 Pro); separates Pro from Plus once the K2 platform is identified. Measures the bed size Creality's product_param macro declares; 300 is Creality's spec for the Pro, not a captured value. Stepper travel overshoots the bed: a reported K2 Pro has position_max 302 in X and 332 in Y",
+          "separator": true
+        }
+      ]
+    },
+    {
       "id": "creality_k2",
       "enclosed": true,
       "name": "Creality K2",
@@ -2149,6 +2390,14 @@
       "toolhead_style": "creality_k2",
       "image": "creality-k2.png",
       "_image_comment": "creality-k2.png is a byte copy of creality-k2-plus.png until a photo of the base K2 exists. It keeps its own filename because detection tells machines apart by image: a shared file would make the base K2 and the K2 Plus one machine to the tie rules",
+      "image_variants": [
+        {
+          "when": {
+            "filament_system": "cfs"
+          },
+          "image": "creality-k2-cfs.png"
+        }
+      ],
       "probe_type": "prtouch_v3",
       "preset": "k2",
       "preset_default": true,
@@ -2361,6 +2610,8 @@
     },
     {
       "id": "creality_k1c_cfs",
+      "variant_of": "creality_k1c",
+      "variant_label": "CFS",
       "enclosed": true,
       "name": "Creality K1C (with CFS)",
       "manufacturer": "Creality",
@@ -2722,6 +2973,29 @@
           "pattern": "ender-3-v3-ke",
           "confidence": 95,
           "reason": "Hostname contains 'ender-3-v3-ke'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "nebula",
+          "confidence": 50,
+          "reason": "Creality Nebula Pad host (hostname 'Nebula'). The pad drives the Ender-3 V3 SE/KE and retrofits onto an Ender-3 / Pro / V2, so it names the family, never the model"
+        },
+        {
+          "type": "cpu_arch_match",
+          "field": "cpu_arch",
+          "pattern": "mips",
+          "confidence": 50,
+          "corroborating": true,
+          "reason": "MIPS host (Nebula Pad's Ingenic X2000E) - shared with FlashForge and the K1 line, so it supports a Nebula Pad identification and never establishes one"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "CX_PRINT_LEVELING_CALIBRATION",
+          "confidence": 50,
+          "corroborating": true,
+          "reason": "Creality stock-firmware macro set (Nebula Pad, K1 line) - names the vendor's firmware, not a model"
         }
       ]
     },
@@ -2826,6 +3100,29 @@
           "pattern": "ender-3",
           "confidence": 85,
           "reason": "Hostname contains 'ender-3'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "nebula",
+          "confidence": 50,
+          "reason": "Creality Nebula Pad host (hostname 'Nebula'). The pad drives the Ender-3 V3 SE/KE and retrofits onto an Ender-3 / Pro / V2, so it names the family, never the model"
+        },
+        {
+          "type": "cpu_arch_match",
+          "field": "cpu_arch",
+          "pattern": "mips",
+          "confidence": 50,
+          "corroborating": true,
+          "reason": "MIPS host (Nebula Pad's Ingenic X2000E) - shared with FlashForge and the K1 line, so it supports a Nebula Pad identification and never establishes one"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "CX_PRINT_LEVELING_CALIBRATION",
+          "confidence": 50,
+          "corroborating": true,
+          "reason": "Creality stock-firmware macro set (Nebula Pad, K1 line) - names the vendor's firmware, not a model"
         }
       ]
     },
@@ -3003,9 +3300,12 @@
       "image": "elegoo-centauri-carbon.png",
       "preset": "cc1",
       "_calibration_comment": "COSMOS's BED_MESH_CALIBRATE is a macro that heats the bed to BED_TEMP, homes, cleans the nozzle, tares the load cell, probes, then measures the Z offset. It needs nothing sent ahead of it (bed_mesh_self_prepares); its M190/M109 wait for a hot bed to cool, so BED_TEMP never asks for less than a bed above 60C already has, even when a lower target is set. {profile_arg} stores the mesh under the chosen name as it completes; the Z-offset step clears the active mesh right after, so it cannot be saved from there.",
+      "_screws_tilt_comment": "COSMOS replaces SCREWS_TILT_CALCULATE with a macro (rename_existing: SCREWS_TILT_CALCULATE_BASE) that tares the load cell, runs Klipper's calculation, parks, then opens a Manual Leveling prompt measuring every screw against a fixed bed height (z_bed_level + position_endstop - 4) rather than against a base screw. The shipped sequence is that macro without its prompt, so the Bed Screws panel shows Klipper's base-relative turns. Firmware without the wrapper runs the stock command, and the cosmos_load_cell_tare rule tares ahead of it.",
       "calibration": {
         "bed_mesh_gcode": "BED_MESH_CALIBRATE{profile_arg} BED_TEMP={bed_temp}",
-        "bed_mesh_self_prepares": true
+        "bed_mesh_self_prepares": true,
+        "screws_tilt_gcode": "LOAD_CELL_CALIBRATE TARE=TRUE SAVE=TRUE\n{screws_tilt_builtin}\nG90\nG1 X128 Y220 Z20 F6000",
+        "screws_tilt_self_prepares": true
       },
       "print_start_profile": "cosmos_cc1",
       "_print_start_default_phases_comment": "COSMOS PRINT_START, measured on a CC1 running 26.08 (2026-09-14, cold start, 105C bed / 260C nozzle): both heaters set without waiting, G28 through homing_override ~23s, M190, a heat soak of cosmos.conf heatsoak minutes (60s by default; cosmos_cc1.json holds the pre-print open for the minutes it announces), the stored default mesh loaded in under a second (adaptive_mesh probes a new mesh instead, which the history learns), SMART_PARK, M109, then a KAMP line purge ~13s. Heating is omitted: the thermal model owns it.",
@@ -4046,6 +4346,13 @@
       "print_start_profile": "qidi",
       "ams_type": "qidi_box",
       "notes": "Compatible with the QIDI Box filament changer (4-slot hub-style, chainable to 16).",
+      "plr": {
+        "tier": 2,
+        "backend": "qidi_print_state",
+        "storage": "emmc",
+        "z_holds_unpowered": true,
+        "note": "Tier 2 replicates QIDI's own stock resume, which already trusts the Z the steppers held. Verified on a Q2 (fw 01.01.02.01) with host-stack kills through QIDI's resume; a real power pull has not been run."
+      },
       "heuristics": [
         {
           "type": "kinematics_match",
@@ -4130,6 +4437,134 @@
           "confidence": 35,
           "reason": "STM32F407 main MCU (QIDI new-generation board)",
           "corroborating": true
+        }
+      ]
+    },
+    {
+      "id": "qidi_plus_5",
+      "name": "Qidi Plus 5",
+      "manufacturer": "Qidi",
+      "image": "qidi-plus-5.png",
+      "enclosed": true,
+      "preset": "qidi_plus5",
+      "print_start_profile": "qidi",
+      "ams_type": "qidi_box",
+      "notes": "New-generation QIDI board (RK3308 host, STM32F407 main MCU) with a 480x800 Linux framebuffer display, so HelixScreen runs on-device. Same generation as the Q2 and Max 4. Compatible with the QIDI Box filament changer (4-slot hub-style, chainable to 16). The panel is a portrait 480x800 mounted sideways; HelixScreen's rotation is set by the preset.",
+      "heuristics": [
+        {
+          "type": "kinematics_exclude",
+          "field": "kinematics",
+          "pattern": "cartesian",
+          "reason": "Qidi Plus 5 is corexy; a cartesian printer is never a Qidi (telemetry: 100% of Qidi report corexy)"
+        },
+        {
+          "type": "kinematics_match",
+          "field": "kinematics",
+          "pattern": "corexy",
+          "confidence": 40,
+          "reason": "CoreXY kinematics"
+        },
+        {
+          "type": "sensor_required",
+          "field": "sensors",
+          "pattern": "Chamber_Thermal_Protection",
+          "reason": "Exclude any machine lacking the QIDI chamber thermal protection sensor - the QIDI family marker - so bed size alone never identifies a Plus 5"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "plus5",
+          "confidence": 95,
+          "reason": "Hostname contains 'plus5'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "plus-5",
+          "confidence": 95,
+          "reason": "Hostname contains 'plus-5'"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "qidi",
+          "confidence": 50,
+          "reason": "Hostname contains 'qidi'"
+        },
+        {
+          "type": "build_volume_range",
+          "field": "bed_mesh",
+          "min_x": 324,
+          "max_x": 342,
+          "min_y": 336,
+          "max_y": 354,
+          "confidence": 92,
+          "identifying": true,
+          "reason": "Stepper travel ~333x345mm: the unique Qidi Plus 5 bed (Q2 ~275, Max 4 ~390). Identified by size but gated: the entry requires the QIDI-only Chamber_Thermal_Protection sensor (sensor_required), so a nameless corexy of this size without it is excluded rather than saved as a Plus 5."
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "heater_generic chamber",
+          "confidence": 80,
+          "corroborating": true,
+          "reason": "Active chamber heater (QIDI enclosed range; class evidence)"
+        },
+        {
+          "type": "sensor_match",
+          "field": "sensors",
+          "pattern": "Chamber_Thermal_Protection",
+          "confidence": 50,
+          "corroborating": true,
+          "reason": "Chamber thermal protection sensor (QIDI stock config)"
+        },
+        {
+          "type": "fan_match",
+          "field": "fans",
+          "pattern": "auxiliary_cooling_fan",
+          "confidence": 80,
+          "corroborating": true,
+          "reason": "Auxiliary cooling fan (QIDI new-gen layout)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "multi_color_controller",
+          "confidence": 45,
+          "corroborating": true,
+          "reason": "QIDI multi-color controller object (QIDI Box host; shared by the Q2/Plus 4/Max 4)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "probe_air",
+          "confidence": 40,
+          "corroborating": true,
+          "reason": "probe_air object (QIDI stock firmware, shared across the range)"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "M4029",
+          "confidence": 65,
+          "corroborating": true,
+          "reason": "M4029 calibration macro (QIDI stock firmware, shared across the range)"
+        },
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "CLEAR_NOZZLE",
+          "confidence": 60,
+          "corroborating": true,
+          "reason": "CLEAR_NOZZLE macro (common on QIDI printers)"
+        },
+        {
+          "type": "mcu_match",
+          "field": "mcu",
+          "pattern": "STM32F407",
+          "confidence": 35,
+          "corroborating": true,
+          "reason": "STM32F407 main MCU (QIDI new-generation board)"
         }
       ]
     },
@@ -4303,6 +4738,7 @@
     },
     {
       "id": "flsun_s1",
+      "enclosed": true,
       "name": "FLSUN S1 / S1 Pro",
       "manufacturer": "FLSUN",
       "image": "flsun-s1.png",
@@ -4370,6 +4806,52 @@
           "pattern": "flsuns1",
           "confidence": 95,
           "reason": "Hostname contains 'flsuns1'"
+        }
+      ]
+    },
+    {
+      "id": "flsun_t1_pro",
+      "enclosed": true,
+      "name": "FLSUN T1 Pro",
+      "manufacturer": "FLSUN",
+      "image": "flsun-t1-pro.png",
+      "preset": "flsun_t1",
+      "heuristics": [
+        {
+          "type": "kinematics_match",
+          "field": "kinematics",
+          "pattern": "delta",
+          "confidence": 90,
+          "reason": "Delta kinematics"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "flsunt1pro",
+          "confidence": 100,
+          "reason": "Stock FLSUN OS names the host FLSunT1Pro"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^box_light$",
+          "confidence": 95,
+          "reason": "FLSUN's box_light Klipper module (T1 enclosure light)"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "^locate_printing_gcode$",
+          "confidence": 95,
+          "reason": "FLSUN's locate_printing_gcode Klipper module (power-loss resume)"
+        },
+        {
+          "type": "hostname_match",
+          "field": "hostname",
+          "pattern": "flsun",
+          "confidence": 90,
+          "reason": "Hostname contains 'flsun'",
+          "corroborating": true
         }
       ]
     },
@@ -6542,10 +7024,26 @@
       "name": "Snapmaker U1",
       "manufacturer": "Snapmaker",
       "image": "snapmaker-u1.png",
+      "image_variants": [
+        {
+          "when": {
+            "enclosure_top": true
+          },
+          "image": "snapmaker-u1-tophat.png"
+        },
+        {
+          "when": {
+            "chamber_heater": true
+          },
+          "image": "snapmaker-u1-tophat.png"
+        }
+      ],
       "toolhead_style": "snapmaker_u1",
       "probe_type": "eddy_current",
       "preset": "snapmaker_u1",
       "z_offset_calibration_strategy": "firmware_managed",
+      "z_offset_persists": false,
+      "tool_change_resets_z_offset": true,
       "print_start_profile": "snapmaker_u1",
       "heuristics": [
         {
@@ -6711,21 +7209,12 @@
             "emit_when_disabled": true
           },
           {
-            "id": "shaper_calibrate",
-            "category": "mechanical",
-            "order": 20,
-            "default_enabled": false,
-            "label_key": "Input Shaper Calibration",
-            "strategy": "pre_start_gcode",
-            "gcode_template": "SET_PRINT_PREFERENCES SHAPER_CALIBRATE={value}",
-            "emit_when_disabled": true
-          },
-          {
             "id": "flow_calibrate",
             "category": "quality",
             "order": 10,
             "default_enabled": false,
             "label_key": "Pressure Advance Calibration",
+            "needs_material": true,
             "strategy": "pre_start_gcode",
             "gcode_template": "SET_PRINT_PREFERENCES FLOW_CALIBRATE={value}",
             "emit_when_disabled": true
@@ -7069,10 +7558,12 @@
     },
     {
       "id": "duender_medusahc",
+      "variant_of": "duender",
+      "variant_label": "MedusaHC",
       "name": "Duender (MedusaHC)",
       "manufacturer": "Irbis3D",
       "image": "duender.png",
-      "notes": "Duender CoreXY (Irbis3D) fitted with the MedusaHC hotend changer. Two config shapes exist. The reference one is klipper-toolchanger plus MedusaHC's own pin_watch extra, both alongside [medusahc]; a single fork folds the dock sensing into [medusahc] + [medusahc_tool N] and ships neither pin_watch nor toolchanger. Both are scored here, the fork as compatibility rather than as a second mainline. Everything else (toolchanger/tool_count/corexy) describes any multi-tool CoreXY and would claim machines that are not this one. The bare-Duender hostname deliberately does NOT appear here, or the 'duender' entry could never outscore this one; a DuCR10 hostname is excluded instead, since the MedusaHC signals alone cannot tell the two frames apart.",
+      "notes": "Duender CoreXY (Irbis3D) fitted with the MedusaHC hotend changer. MedusaHC's own pin_watch extra and its Python controller's [medusahc] are scored here, with or without klipper-toolchanger beside them. Everything else (toolchanger/tool_count/corexy) describes any multi-tool CoreXY and would claim machines that are not this one. The bare-Duender hostname deliberately does NOT appear here, or the 'duender' entry could never outscore this one; a DuCR10 hostname is excluded instead, since the MedusaHC signals alone cannot tell the two frames apart.",
       "heuristics": [
         {
           "type": "object_exists",
@@ -7086,7 +7577,7 @@
           "field": "printer_objects",
           "pattern": "medusahc",
           "confidence": 92,
-          "reason": "MedusaHC registers [medusahc]; a fork carries it with no pin_watch and no klipper-toolchanger at all"
+          "reason": "MedusaHC's Python controller registers [medusahc], with or without klipper-toolchanger"
         },
         {
           "type": "hostname_match",
@@ -7113,6 +7604,8 @@
     },
     {
       "id": "ducr10_medusahc",
+      "variant_of": "ducr10",
+      "variant_label": "MedusaHC",
       "name": "DuCR10 (MedusaHC)",
       "manufacturer": "Irbis3D",
       "image": "ducr10.png",
@@ -7123,7 +7616,7 @@
           "field": "printer_objects",
           "pattern": "medusahc",
           "confidence": 92,
-          "reason": "MedusaHC registers [medusahc]; one fork carries the dock sensing in it too, with no pin_watch"
+          "reason": "MedusaHC's Python controller registers [medusahc], with or without klipper-toolchanger"
         },
         {
           "type": "object_exists",

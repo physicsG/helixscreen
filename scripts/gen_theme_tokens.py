@@ -23,7 +23,22 @@ def cstr(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def collect() -> dict:
+def top_level_files() -> list:
+    """(path, bytes) for each top-level ui_xml/*.xml, sorted by file name."""
+    names = sorted(
+        f for f in os.listdir(UI_XML_DIR)
+        if f.endswith(".xml") and os.path.isfile(os.path.join(UI_XML_DIR, f))
+    )
+    out = []
+    for fname in names:
+        path = os.path.join(UI_XML_DIR, fname)
+        with open(path, "rb") as f:
+            out.append((path, f.read()))
+    return out
+
+
+def collect(files=None) -> dict:
+    """Tokens from `files`, (path, bytes) pairs in scan order; default the disk."""
     # Uses raw xml.parsers.expat (no namespace processing) rather than
     # xml.etree.ElementTree, matching theme_token_scan.cpp's own
     # XML_ParserCreate(nullptr) exactly. ui_xml/*.xml uses colon-suffixed
@@ -32,14 +47,9 @@ def collect() -> dict:
     # "unbound prefix" — plain expat treats the colon as a literal
     # character, same as the C++ scanner.
     tokens = {}  # (type, name) -> value, insertion order preserved
-    files = sorted(
-        f for f in os.listdir(UI_XML_DIR)
-        if f.endswith(".xml") and os.path.isfile(os.path.join(UI_XML_DIR, f))
-    )
-    for fname in files:
-        path = os.path.join(UI_XML_DIR, fname)
-        with open(path, "rb") as f:
-            content = f.read()
+    if files is None:
+        files = top_level_files()
+    for path, content in files:
         if not content:
             continue
 

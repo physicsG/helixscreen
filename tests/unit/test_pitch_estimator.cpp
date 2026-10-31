@@ -302,12 +302,12 @@ TEST_CASE("QuietSpectrum reports a planted tone as prominent and the rest as ord
     const auto bg = quiet_with_fan(115.0f, 60.0f);
     REQUIRE(bg.valid());
 
-    CHECK(bg.prominence_at(115.0f) > BACKGROUND_PROMINENCE_TOLERANCE);
+    CHECK(bg.prominence_at(115.0f) > kBackgroundProminenceTolerance);
     CHECK(bg.weight_at(115.0f) < 1.0f);
     CHECK(bg.weight_at(115.0f) > 0.0f); // a discount, never a veto
 
     // A frequency the fan does not occupy is ordinary, so it is not discounted.
-    CHECK(bg.prominence_at(99.0f) < BACKGROUND_PROMINENCE_TOLERANCE);
+    CHECK(bg.prominence_at(99.0f) < kBackgroundProminenceTolerance);
     CHECK(bg.weight_at(99.0f) == 1.0f);
 }
 
@@ -358,7 +358,7 @@ TEST_CASE("a fan inside the search window does not win the pitch estimate",
     REQUIRE(blind.valid);
     CHECK(blind.frequency_hz == Catch::Approx(115.0f).margin(3.0f));
 
-    auto informed = estimate_pitch(psd, 77.0f, 165.0f, DEFAULT_HARMONICS, &bg);
+    auto informed = estimate_pitch(psd, 77.0f, 165.0f, kDefaultHarmonics, &bg);
     REQUIRE(informed.valid);
     CHECK(informed.frequency_hz == Catch::Approx(99.0f).margin(3.0f));
 }
@@ -378,7 +378,7 @@ TEST_CASE("a fan sitting on a harmonic of the true fundamental does not win eith
     REQUIRE(blind.valid);
     CHECK(blind.frequency_hz == Catch::Approx(164.0f).margin(3.0f));
 
-    auto informed = estimate_pitch(psd, 77.0f, 165.0f, DEFAULT_HARMONICS, &bg);
+    auto informed = estimate_pitch(psd, 77.0f, 165.0f, kDefaultHarmonics, &bg);
     REQUIRE(informed.valid);
     CHECK(informed.frequency_hz == Catch::Approx(82.0f).margin(3.0f));
 }
@@ -391,7 +391,7 @@ TEST_CASE("estimate_pitch_for_span forwards the quiet spectrum", "[belt_tension]
     REQUIRE(blind.valid);
     CHECK(blind.frequency_hz == Catch::Approx(115.0f).margin(3.0f));
 
-    auto informed = estimate_pitch_for_span(rd, kRate, kSpan, DEFAULT_HARMONICS, nullptr, &bg);
+    auto informed = estimate_pitch_for_span(rd, kRate, kSpan, kDefaultHarmonics, nullptr, &bg);
     REQUIRE(informed.valid);
     CHECK(informed.frequency_hz == Catch::Approx(99.0f).margin(3.0f));
 }
@@ -408,16 +408,16 @@ TEST_CASE("real captures concentrate their energy on a harmonic series",
     for (const auto* name : {"a_belt_86hz_1.csv", "a_belt_86hz_2.csv", "a_belt_86hz_3.csv"}) {
         auto s = load_fixture(name);
         auto psd = compute_psd(s, fixture_sample_rate(s), required_bandwidth_hz(hi));
-        const float c = harmonic_concentration(psd, 86.0f, DEFAULT_HARMONICS, lo);
+        const float c = harmonic_concentration(psd, 86.0f, kDefaultHarmonics, lo);
         INFO("fixture " << name << " concentration " << c);
-        CHECK(c > MIN_HARMONIC_CONCENTRATION);
+        CHECK(c > kMinHarmonicConcentration);
     }
     for (const auto* name : {"b_belt_82hz_1.csv", "b_belt_82hz_2.csv", "b_belt_82hz_3.csv"}) {
         auto s = load_fixture(name);
         auto psd = compute_psd(s, fixture_sample_rate(s), required_bandwidth_hz(hi));
-        const float c = harmonic_concentration(psd, 82.0f, DEFAULT_HARMONICS, lo);
+        const float c = harmonic_concentration(psd, 82.0f, kDefaultHarmonics, lo);
         INFO("fixture " << name << " concentration " << c);
-        CHECK(c > MIN_HARMONIC_CONCENTRATION);
+        CHECK(c > kMinHarmonicConcentration);
     }
 }
 
@@ -432,7 +432,7 @@ TEST_CASE("a broadband thump does not concentrate on any harmonic series",
     // maximum swings about 9% (0.191 to 0.227) while p90 swings about 1.3%
     // (0.157 to 0.161), so a max-based assertion has a failure threshold that
     // depends on which block it happens to hold - the same largest-of-N trap
-    // MIN_HARMONIC_CONCENTRATION itself went through. p90 gives a reproducible
+    // kMinHarmonicConcentration itself went through. p90 gives a reproducible
     // one.
     std::vector<float> concentrations;
     for (uint32_t seed = 1; seed <= 200; ++seed) {
@@ -452,7 +452,7 @@ TEST_CASE("a broadband thump does not concentrate on any harmonic series",
             continue; // the estimator found nothing; the gate never sees it
         }
         concentrations.push_back(
-            harmonic_concentration(psd, est.frequency_hz, DEFAULT_HARMONICS, 77.0f));
+            harmonic_concentration(psd, est.frequency_hz, kDefaultHarmonics, 77.0f));
     }
     REQUIRE(concentrations.size() > 150); // the estimator returns SOMETHING for noise
 
@@ -465,11 +465,11 @@ TEST_CASE("a broadband thump does not concentrate on any harmonic series",
     const float p90 = quantile(0.90);
     const size_t at_or_above =
         static_cast<size_t>(std::count_if(concentrations.begin(), concentrations.end(),
-                                          [](float c) { return c >= MIN_HARMONIC_CONCENTRATION; }));
+                                          [](float c) { return c >= kMinHarmonicConcentration; }));
 
     INFO("n=" << concentrations.size() << " p50 " << p50 << " p90 " << p90 << " max "
               << concentrations.back());
-    CHECK(p90 < MIN_HARMONIC_CONCENTRATION);
+    CHECK(p90 < kMinHarmonicConcentration);
     // Deterministic for this seed range, and not a margin: no thump in it is
     // accepted. Crossings do exist further out - see the constant's note.
     CHECK(at_or_above == 0);
@@ -488,19 +488,19 @@ TEST_CASE("concentration discounts a fan that owns the band", "[belt_tension][pi
     auto rd = ringdown_with_fan(115.0f, 60.0f, 99.0f, 8.0f);
     auto psd = compute_psd(rd, kRate, required_bandwidth_hz(165.0f));
 
-    const float blind = harmonic_concentration(psd, 99.0f, DEFAULT_HARMONICS, 77.0f);
-    const float informed = harmonic_concentration(psd, 99.0f, DEFAULT_HARMONICS, 77.0f, &bg);
+    const float blind = harmonic_concentration(psd, 99.0f, kDefaultHarmonics, 77.0f);
+    const float informed = harmonic_concentration(psd, 99.0f, kDefaultHarmonics, 77.0f, &bg);
     INFO("blind " << blind << " informed " << informed);
-    CHECK(blind < MIN_HARMONIC_CONCENTRATION);
-    CHECK(informed > MIN_HARMONIC_CONCENTRATION);
+    CHECK(blind < kMinHarmonicConcentration);
+    CHECK(informed > kMinHarmonicConcentration);
 }
 
 TEST_CASE("harmonic_concentration rejects degenerate input", "[belt_tension][pitch][edge_case]") {
     auto s = load_fixture("a_belt_86hz_1.csv");
     auto psd = compute_psd(s, fixture_sample_rate(s), 700.0f);
-    CHECK(harmonic_concentration({}, 86.0f, DEFAULT_HARMONICS, 77.0f) == 0.0f);
-    CHECK(harmonic_concentration(psd, 0.0f, DEFAULT_HARMONICS, 77.0f) == 0.0f);
+    CHECK(harmonic_concentration({}, 86.0f, kDefaultHarmonics, 77.0f) == 0.0f);
+    CHECK(harmonic_concentration(psd, 0.0f, kDefaultHarmonics, 77.0f) == 0.0f);
     CHECK(harmonic_concentration(psd, 86.0f, 0, 77.0f) == 0.0f);
     // A band that starts above its own top is empty, not 100% concentrated.
-    CHECK(harmonic_concentration(psd, 86.0f, DEFAULT_HARMONICS, 5000.0f) == 0.0f);
+    CHECK(harmonic_concentration(psd, 86.0f, kDefaultHarmonics, 5000.0f) == 0.0f);
 }

@@ -4,11 +4,23 @@
 <!-- Numeric Keypad Overlay - Responsive layout for all screen sizes -->
 <component>
   <consts>
-    <!-- keypad_width: Panel width (right-aligned overlay) -->
-    <px name="keypad_width_tiny" value="320"/>
-    <px name="keypad_width_small" value="320"/>
+    <!-- keypad_width: Panel width (right-aligned overlay), measured per tier so a key keeps
+         the 800x480 pad's roughly 1.4:1 shape. The rows share the screen height, so a
+         shorter screen means shorter keys and a narrower pad, a taller one a wider pad. -->
+    <px name="keypad_width_micro" value="193"/>
+    <px name="keypad_width_tiny" value="240"/>
+    <px name="keypad_width_small" value="283"/>
     <px name="keypad_width_medium" value="340"/>
-    <px name="keypad_width_large" value="400"/>
+    <px name="keypad_width_large" value="456"/>
+    <px name="keypad_width_xlarge" value="548"/>
+    <!-- keypad_title_font: the header's field name, the body font ladder, except tiny:
+         its 33px header holds two lines of font_small but not of font_body. -->
+    <string name="keypad_title_font_micro" value="noto_sans_12"/>
+    <string name="keypad_title_font_tiny" value="noto_sans_light_11"/>
+    <string name="keypad_title_font_small" value="noto_sans_14"/>
+    <string name="keypad_title_font_medium" value="noto_sans_18"/>
+    <string name="keypad_title_font_large" value="noto_sans_20"/>
+    <string name="keypad_title_font_xlarge" value="noto_sans_24"/>
 
   </consts>
   <styles>
@@ -25,20 +37,37 @@
         extends="lv_obj" width="#keypad_width" height="100%" style_max_width="100%" align="right_mid" style_pad_all="0"
         style_border_width="0" style_bg_opa="255" style_bg_color="#card_bg" scrollable="false" flex_flow="column"
         hidden="true">
-    <!-- Header: no title, just back arrow and OK button -->
+    <!-- Header: the field being edited sits between back and Set. The keypad is shared by
+         every numeric field, and a field name ("Square Corner Velocity") is far longer
+         than a screen title, so it takes the body font and wraps to two lines inside the
+         bar instead of clipping. -->
     <header_bar name="overlay_header"
-                title="" action_button_text="Set " hide_action_button="false" action_button_height="#button_height"
-                action_button_pad="#space_md"/>
+                title="" title_subject="keypad_title" title_transform="none" title_font="#keypad_title_font"
+                title_long_mode="dots" title_max_lines="2" action_button_text="Set " hide_action_button="false"/>
     <!-- Content -->
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_all="#space_md" scrollable="false" flex_flow="column" style_pad_gap="0"
             style_pad_row="0">
 
-      <!-- Display: read-only field spanning the key block, unit inside it at the end -->
-      <text_input name="input_display"
-                  width="100%" height="content" text="" bind_text="keypad_display" bind_suffix="keypad_unit"
-                  style_text_font="#font_heading" style_text_align="right" style_radius="#border_radius" one_line="true"
-                  clickable="false" scrollable="false" style_margin_bottom="#space_md"/>
+      <!-- Display: read-only field spanning the key block, unit inside it at the end. A field
+           that allows negatives puts a +/- key in front of it; a hidden flex child takes no
+           room, so every other field's display keeps the full width. The row's height is
+           the display's, and the key fills it so its edges meet the display's border. -->
+      <lv_obj name="keypad_display_row"
+              width="100%" height="content" style_pad_all="0" style_pad_column="#space_sm" style_bg_opa="0"
+              style_border_width="0" scrollable="false" clickable="false" flex_flow="row"
+              style_flex_cross_place="center" style_margin_bottom="#space_md">
+        <ui_button name="btn_sign"
+                   width="content" height="100%" style_min_width="#button_height" style_pad_hor="#space_sm"
+                   style_pad_ver="0" text="+/-" variant="secondary" style_radius="#border_radius">
+          <bind_flag_if_eq subject="keypad_allow_negative" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="on_keypad_sign"/>
+        </ui_button>
+        <text_input name="input_display"
+                    height="content" flex_grow="1" text="" bind_text="keypad_display" bind_suffix="keypad_unit"
+                    style_text_font="#font_heading" style_text_align="right" style_radius="#border_radius"
+                    one_line="true" clickable="false" scrollable="false"/>
+      </lv_obj>
 
       <!-- Button Grid: four rows share the height left under the display, so the
            keys grow with the screen instead of leaving it empty. Each row carries its

@@ -79,6 +79,8 @@ setup() {
     # shellcheck disable=SC1090
     . "$WORKTREE_ROOT/scripts/lib/installer/service.sh"
     # shellcheck disable=SC1090
+    . "$WORKTREE_ROOT/scripts/lib/installer/helix_print_conf.sh"
+    # shellcheck disable=SC1090
     . "$WORKTREE_ROOT/scripts/lib/installer/moonraker.sh"
     # shellcheck disable=SC1090
     . "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
@@ -267,8 +269,8 @@ create_payload_tarball() {
 
 @test "payload install: --auto-update is refused even at a root outside the mod tree" {
     # Where the root sits does not make the stanza safe. Moonraker's type:web
-    # updater rmtree()s path: and the stanza carries no persistent_files, so it
-    # destroys config/ - which lives inside the root - whether or not the mod
+    # updater rmtree()s path: and persistent_files cannot keep a nested config/,
+    # so it destroys config/ - which lives inside the root - whether or not the mod
     # owns that path. A payload is updated by the mod's OTA and by nothing else.
     local durable="$SANDBOX/usr/data/helixscreen"
     mkdir -p "$SANDBOX/usr/data/config/mod_data" "$durable/bin"

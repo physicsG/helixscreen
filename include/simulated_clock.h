@@ -39,10 +39,10 @@
 namespace helix::sim {
 
 /// Slowest factor anything may ask for; matches `--sim-speed`.
-inline constexpr double MIN_SPEED = 1.0;
+inline constexpr double kMinSpeed = 1.0;
 /// Fastest factor anything may ASK for — the `--sim-speed` range, and the bound
 /// on a single configured multiplier such as `HELIX_MOCK_DRYER_SPEED`. It is not
-/// a bound on the rate a composition may reach; see `MAX_COMPOSED_SPEED`.
+/// a bound on the rate a composition may reach; see `kMaxComposedSpeed`.
 inline constexpr double MAX_SPEED = 1000.0;
 /// Overflow guard on a composed rate, not a policy limit. Composition is meant
 /// to multiply: a subsystem at 60x really does run at 60000x under
@@ -51,15 +51,15 @@ inline constexpr double MAX_SPEED = 1000.0;
 /// only so a malformed or repeatedly-composed product cannot run away, and it
 /// keeps the nanosecond arithmetic in `accelerate_progress()` exact across
 /// roughly a day of real time.
-inline constexpr double MAX_COMPOSED_SPEED = 100000.0;
+inline constexpr double kMaxComposedSpeed = 100000.0;
 
 /// Bring a factor someone ASKED for — a flag value, an env override, a
 /// subsystem's own multiplier — into the range every such source shares.
 [[nodiscard]] constexpr double clamp_speed(double factor) {
     // NaN compares false against both bounds, so test for the valid interval
     // rather than clamping, and fall back to real time when it fails.
-    if (!(factor >= MIN_SPEED)) {
-        return MIN_SPEED;
+    if (!(factor >= kMinSpeed)) {
+        return kMinSpeed;
     }
     return std::min(factor, MAX_SPEED);
 }
@@ -67,26 +67,26 @@ inline constexpr double MAX_COMPOSED_SPEED = 100000.0;
 /// Bound a composed rate against overflow, far above any rate composing two
 /// in-range factors is meant to produce.
 [[nodiscard]] constexpr double clamp_composed_speed(double rate) {
-    if (!(rate >= MIN_SPEED)) {
-        return MIN_SPEED;
+    if (!(rate >= kMinSpeed)) {
+        return kMinSpeed;
     }
-    return std::min(rate, MAX_COMPOSED_SPEED);
+    return std::min(rate, kMaxComposedSpeed);
 }
 
 /**
  * @brief How much faster than real time a simulation runs.
  *
  * A factor that was ASKED for — `of()`, `global()` — lands in
- * [MIN_SPEED, MAX_SPEED]. A COMPOSED one may exceed it: `composed_with()`
+ * [kMinSpeed, MAX_SPEED]. A COMPOSED one may exceed it: `composed_with()`
  * multiplies, so a subsystem carrying its own 60x runs at 60000x under
- * `--sim-speed 1000`, bounded only by the MAX_COMPOSED_SPEED overflow guard.
+ * `--sim-speed 1000`, bounded only by the kMaxComposedSpeed overflow guard.
  */
 class SimSpeed {
   public:
     /// Real time: no fast-forward at all.
     constexpr SimSpeed() = default;
 
-    /// @param factor Speedup factor, clamped into [MIN_SPEED, MAX_SPEED].
+    /// @param factor Speedup factor, clamped into [kMinSpeed, MAX_SPEED].
     [[nodiscard]] static constexpr SimSpeed of(double factor) {
         return SimSpeed(clamp_speed(factor));
     }
@@ -106,10 +106,10 @@ class SimSpeed {
      * behaviour a subsystem multiplier exists to provide.
      *
      * The subsystem's own multiplier IS an asked-for factor, so it is clamped
-     * to [MIN_SPEED, MAX_SPEED] before it multiplies.
+     * to [kMinSpeed, MAX_SPEED] before it multiplies.
      *
      * @param subsystem_factor The subsystem's own multiplier at 1x global
-     * @return The product, bounded only by the MAX_COMPOSED_SPEED overflow guard
+     * @return The product, bounded only by the kMaxComposedSpeed overflow guard
      */
     [[nodiscard]] constexpr SimSpeed composed_with(double subsystem_factor) const {
         return SimSpeed(clamp_composed_speed(factor_ * clamp_speed(subsystem_factor)));
@@ -122,7 +122,7 @@ class SimSpeed {
 
     /// True when nothing is being fast-forwarded, so simulated time is real time.
     [[nodiscard]] constexpr bool is_real_time() const {
-        return factor_ == MIN_SPEED;
+        return factor_ == kMinSpeed;
     }
 
     // -- DIVIDES: less real waiting -----------------------------------------
@@ -169,7 +169,7 @@ class SimSpeed {
   private:
     constexpr explicit SimSpeed(double clamped_factor) : factor_(clamped_factor) {}
 
-    double factor_ = MIN_SPEED;
+    double factor_ = kMinSpeed;
 };
 
 /**

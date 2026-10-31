@@ -2,10 +2,11 @@
 #include "ui_exclude_object_map_view.h"
 
 #include "ui_open_instances.h"
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "bed_dimensions.h"
+#include "bed_grid.h"
+#include "exclude_map_hatch.h"
 #include "lv_draw_buf_guard.h"
 #include "observer_factory.h"
 #include "printer_excluded_objects_state.h"
@@ -48,23 +49,28 @@ ExcludeObjectMapView::~ExcludeObjectMapView() {
 // ============================================================================
 
 void ExcludeObjectMapView::create(lv_obj_t* parent, helix::PrinterExcludedObjectsState* state,
-                                  float bed_w_mm, float bed_h_mm, ObjectTapFn on_object_tapped,
+                                  const helix::BedDimensions& bed, ObjectTapFn on_object_tapped,
                                   ExcludeTapMode tap_mode,
-                                  const helix::gcode::ParsedGCodeFile* parsed_file) {
+                                  const helix::gcode::ParsedGCodeFile* parsed_file,
+                                  ExcludeMapMode mode) {
     if (root_) {
         spdlog::warn("[ExcludeObjectMapView] create() called but already active");
         return;
     }
 
-    spdlog::debug("[ExcludeObjectMapView] create() bed={}x{}", bed_w_mm, bed_h_mm);
+    spdlog::debug("[ExcludeObjectMapView] create() bed={}x{} at ({},{}){}", bed.w_mm, bed.h_mm,
+                  bed.origin_x, bed.origin_y, bed.circular ? " round" : "");
 
     state_ = state;
     on_object_tapped_ = std::move(on_object_tapped);
     tap_mode_ = tap_mode;
+    mode_ = mode;
     copy_parsed_geometry(parsed_file);
-    const auto bed = helix::bed_dimensions_from_volume(0.0f, bed_w_mm, 0.0f, bed_h_mm);
-    bed_w_mm_ = bed.w_mm;
-    bed_h_mm_ = bed.h_mm;
+    bed_ = helix::bed_dimensions_from_volume(bed.origin_x, bed.origin_x + bed.w_mm, bed.origin_y,
+                                             bed.origin_y + bed.h_mm);
+    bed_.circular = bed.circular;
+    bed_w_mm_ = bed_.w_mm;
+    bed_h_mm_ = bed_.h_mm;
 
     // Register XML event callback once (idempotent — registration only takes
     // effect the first time; subsequent calls are harmless no-ops).
@@ -77,7 +83,9 @@ void ExcludeObjectMapView::create(lv_obj_t* parent, helix::PrinterExcludedObject
     open_map_views().add(this);
 
     // Instantiate the XML component
-    root_ = static_cast<lv_obj_t*>(lv_xml_create(parent, "exclude_object_map", nullptr));
+    root_ = static_cast<lv_obj_t*>(mode_ == ExcludeMapMode::Mini
+                                       ? lv_xml_create(parent, "exclude_object_map_mini", nullptr)
+                                       : lv_xml_create(parent, "exclude_object_map", nullptr));
     if (!root_) {
         spdlog::error("[ExcludeObjectMapView] lv_xml_create failed");
         open_map_views().remove(this);
@@ -105,8 +113,9 @@ void ExcludeObjectMapView::create(lv_obj_t* parent, helix::PrinterExcludedObject
     }
 
     // Create transparent overlay container for object rects.
-    // EVENT_BUBBLE ensures clicks on object rects reach the close button.
-    if (plate_area_) {
+    // EVENT_BUBBLE ensures clicks on object rects reach the close button. The mini map
+    // has nothing to tap, so it has no container.
+    if (plate_area_ && mode_ == ExcludeMapMode::Interactive) {
         object_container_ = lv_obj_create(plate_area_);
         lv_obj_set_size(object_container_, lv_pct(100), lv_pct(100));
         lv_obj_set_style_bg_opa(object_container_, LV_OPA_TRANSP, 0);
@@ -118,10 +127,46 @@ void ExcludeObjectMapView::create(lv_obj_t* parent, helix::PrinterExcludedObject
         lv_obj_set_pos(object_container_, 0, 0);
     }
 
+    build_surface();
+    build_object_rects();
+
+    // Set up observers to react to state changes
+    if (state_) {
+        auto rebuild_handler = [](ExcludeObjectMapView* self, int) {
+            if (!self->root_)
+                return;
+            self->update_visual_states();
+        };
+
+        excluded_version_obs_ = observe<int>(state_->get_excluded_objects_version_subject(), this,
+                                             rebuild_handler, state_->get_subjects_lifetime());
+
+        defined_version_obs_ = observe<int>(
+            state_->get_defined_objects_version_subject(), this,
+            [](ExcludeObjectMapView* self, int) {
+                if (!self->root_)
+                    return;
+                self->build_surface();
+                self->build_object_rects();
+            },
+            state_->get_subjects_lifetime());
+    }
+
+    spdlog::info("[ExcludeObjectMapView] Created successfully");
+}
+
+// ============================================================================
+// Build surface
+// ============================================================================
+
+void ExcludeObjectMapView::build_surface() {
+    if (!plate_area_)
+        return;
+
     // Compute actual coordinate extents from all object geometry.
     // Objects may have negative coordinates (e.g., bed centered at 0,0).
-    float coord_min_x = 0.0f, coord_min_y = 0.0f;
-    float coord_max_x = bed_w_mm_, coord_max_y = bed_h_mm_;
+    float coord_min_x = bed_.origin_x, coord_min_y = bed_.origin_y;
+    float coord_max_x = bed_.origin_x + bed_.w_mm, coord_max_y = bed_.origin_y + bed_.h_mm;
     bool have_extents = false;
 
     if (state_) {
@@ -154,67 +199,63 @@ void ExcludeObjectMapView::create(lv_obj_t* parent, helix::PrinterExcludedObject
         coord_min_y -= pad_y;
         coord_max_x += pad_x;
         coord_max_y += pad_y;
-        bed_w_mm_ = coord_max_x - coord_min_x;
-        bed_h_mm_ = coord_max_y - coord_min_y;
     }
+    bed_w_mm_ = coord_max_x - coord_min_x;
+    bed_h_mm_ = coord_max_y - coord_min_y;
+    coord_min_x_ = coord_min_x;
+    coord_min_y_ = coord_min_y;
 
     // Update plate dimensions label
-    lv_obj_t* dims_label =
-        helix::ui::find_required(root_, "plate_dims_label", "ExcludeObjectMapView");
-    if (dims_label) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%.0f×%.0f mm", bed_w_mm_, bed_h_mm_);
-        lv_label_set_text(dims_label, buf);
+    if (mode_ == ExcludeMapMode::Interactive) {
+        lv_obj_t* dims_label =
+            helix::ui::find_required(root_, "plate_dims_label", "ExcludeObjectMapView");
+        if (dims_label) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.0f×%.0f mm", bed_w_mm_, bed_h_mm_);
+            lv_label_set_text(dims_label, buf);
+        }
     }
 
     // Build mapper after layout so plate_area has real dimensions
-    if (plate_area_) {
-        lv_obj_update_layout(root_);
-        int vw = lv_obj_get_width(plate_area_);
-        int vh = lv_obj_get_height(plate_area_);
-        mapper_ =
-            std::make_unique<CoordMapper>(bed_w_mm_, bed_h_mm_, vw, vh, coord_min_x, coord_min_y);
+    lv_obj_update_layout(root_);
+    const int vw = lv_obj_get_width(plate_area_);
+    const int vh = lv_obj_get_height(plate_area_);
+    built_w_ = vw;
+    built_h_ = vh;
+    mapper_ =
+        std::make_unique<CoordMapper>(bed_w_mm_, bed_h_mm_, vw, vh, coord_min_x_, coord_min_y_);
 
-        // Create canvas for first-layer outline rendering
-        if (vw > 0 && vh > 0) {
-            canvas_buf_ = lv_draw_buf_create(vw, vh, LV_COLOR_FORMAT_ARGB8888, 0);
-            if (canvas_buf_) {
+    // A canvas for first-layer outline rendering. A resize swaps the buffer under the
+    // canvas it already has.
+    if (vw > 0 && vh > 0) {
+        lv_draw_buf_t* buf = lv_draw_buf_create(vw, vh, LV_COLOR_FORMAT_ARGB8888, 0);
+        if (buf) {
+            if (!canvas_) {
                 canvas_ = lv_canvas_create(plate_area_);
-                lv_canvas_set_draw_buf(canvas_, canvas_buf_);
-                lv_canvas_fill_bg(canvas_, lv_color_black(), LV_OPA_TRANSP);
                 lv_obj_remove_flag(canvas_, LV_OBJ_FLAG_CLICKABLE);
                 lv_obj_remove_flag(canvas_, LV_OBJ_FLAG_SCROLLABLE);
                 lv_obj_set_scrollbar_mode(canvas_, LV_SCROLLBAR_MODE_OFF);
                 lv_obj_add_flag(canvas_, LV_OBJ_FLAG_EVENT_BUBBLE);
                 lv_obj_set_pos(canvas_, 0, 0);
             }
+            lv_canvas_set_draw_buf(canvas_, buf);
+            lv_canvas_fill_bg(canvas_, lv_color_black(), LV_OPA_TRANSP);
+            helix::safe_draw_buf_destroy(canvas_buf_, "exclmap");
+            canvas_buf_ = buf;
+            // The canvas sizes itself to its buffer on the next layout pass.
+            lv_obj_update_layout(root_);
         }
     }
+}
 
+void ExcludeObjectMapView::resize() {
+    if (!root_ || !plate_area_)
+        return;
+    lv_obj_update_layout(root_);
+    if (lv_obj_get_width(plate_area_) == built_w_ && lv_obj_get_height(plate_area_) == built_h_)
+        return;
+    build_surface();
     build_object_rects();
-
-    // Set up observers to react to state changes
-    if (state_) {
-        auto rebuild_handler = [](ExcludeObjectMapView* self, int) {
-            if (!self->root_)
-                return;
-            self->update_visual_states();
-        };
-
-        excluded_version_obs_ = observe<int>(state_->get_excluded_objects_version_subject(), this,
-                                             rebuild_handler, state_->get_subjects_lifetime());
-
-        defined_version_obs_ = observe<int>(
-            state_->get_defined_objects_version_subject(), this,
-            [](ExcludeObjectMapView* self, int) {
-                if (!self->root_)
-                    return;
-                self->build_object_rects();
-            },
-            state_->get_subjects_lifetime());
-    }
-
-    spdlog::info("[ExcludeObjectMapView] Created successfully");
 }
 
 // ============================================================================
@@ -237,11 +278,9 @@ void ExcludeObjectMapView::destroy() {
     // during the delete cascade cannot reach this view.
     open_map_views().remove(this);
 
-    // Freeze queue, drain pending callbacks, then delete widgets
+    // The observers released above were the only queued work that reaches
+    // these widgets.
     {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-
         object_rects_.clear();
         mapper_.reset();
 
@@ -295,6 +334,10 @@ void ExcludeObjectMapView::destroy() {
 // ============================================================================
 
 void ExcludeObjectMapView::build_object_rects() {
+    if (mode_ == ExcludeMapMode::Mini) {
+        update_visual_states();
+        return;
+    }
     if (!object_container_ || !state_ || !mapper_)
         return;
 
@@ -463,6 +506,10 @@ void ExcludeObjectMapView::draw_first_layer_outlines() {
     // Clear canvas to transparent
     lv_canvas_fill_bg(canvas_, lv_color_black(), LV_OPA_TRANSP);
 
+    lv_layer_t layer;
+    lv_canvas_init_layer(canvas_, &layer);
+    draw_bed_reference(&layer);
+
     // Outline per object: the parsed first-layer hull, else Klipper's polygon.
     std::unordered_map<std::string, std::vector<glm::vec2>> object_polygons = parsed_outlines_;
 
@@ -474,14 +521,21 @@ void ExcludeObjectMapView::draw_first_layer_outlines() {
         auto geom = state_->get_object_geometry(name);
         if (geom && !geom->polygon.empty()) {
             object_polygons[name] = geom->polygon;
+        } else if (geom && geom->has_bbox) {
+            const glm::vec2 lo = geom->bbox_min;
+            const glm::vec2 hi = geom->bbox_max;
+            object_polygons[name] = {lo, {hi.x, lo.y}, hi, {lo.x, hi.y}};
         }
     }
 
-    if (object_polygons.empty())
+    if (object_polygons.empty()) {
+        lv_canvas_finish_layer(canvas_, &layer);
         return;
+    }
 
     for (const auto& [name, poly] : object_polygons) {
-        spdlog::info("[ExcludeObjectMapView] Object '{}' polygon has {} points", name, poly.size());
+        spdlog::trace("[ExcludeObjectMapView] Object '{}' polygon has {} points", name,
+                      poly.size());
     }
 
     // Build name -> color index mapping
@@ -491,10 +545,27 @@ void ExcludeObjectMapView::draw_first_layer_outlines() {
     }
 
     const auto& excluded = state_->get_excluded_objects();
+    const bool mini = mode_ == ExcludeMapMode::Mini;
+    const std::string& current = state_->get_current_object();
+    const lv_color_t current_color = theme_manager_get_color("primary");
+    const int hatch_px = std::max<int>(4, theme_manager_get_spacing("space_xs"));
 
     // Draw polygon outlines on canvas
-    lv_layer_t layer;
-    lv_canvas_init_layer(canvas_, &layer);
+    const auto draw_line = [&](float x1, float y1, float x2, float y2, lv_color_t color,
+                               int32_t width, lv_opa_t opa) {
+        lv_draw_line_dsc_t dsc;
+        lv_draw_line_dsc_init(&dsc);
+        dsc.color = color;
+        dsc.width = width;
+        dsc.p1.x = static_cast<lv_value_precise_t>(x1);
+        dsc.p1.y = static_cast<lv_value_precise_t>(y1);
+        dsc.p2.x = static_cast<lv_value_precise_t>(x2);
+        dsc.p2.y = static_cast<lv_value_precise_t>(y2);
+        dsc.opa = opa;
+        dsc.round_start = 1;
+        dsc.round_end = 1;
+        lv_draw_line(&layer, &dsc);
+    };
 
     for (const auto& [obj_name, polygon] : object_polygons) {
         auto it = name_to_index.find(obj_name);
@@ -503,27 +574,31 @@ void ExcludeObjectMapView::draw_first_layer_outlines() {
         if (polygon.size() < 3)
             continue;
 
-        lv_color_t color = object_badge_color(it->second);
+        const bool is_excluded = excluded.count(obj_name) > 0;
+        const bool is_current = mini && !is_excluded && obj_name == current;
+        const lv_color_t color = is_current ? current_color : object_badge_color(it->second);
+        // The mini map reads at a glance: the object printing now is full strength and
+        // heavier, the rest sit back, and an excluded one is faded and hatched.
+        const lv_opa_t opa =
+            is_excluded ? object_badge_opa(true) : (mini && !is_current ? LV_OPA_70 : LV_OPA_COVER);
+        const int32_t width = is_current ? 3 : 2;
+
+        std::vector<glm::vec2> px(polygon.size());
+        for (size_t i = 0; i < polygon.size(); ++i) {
+            const auto [x, y] = mapper_->mm_to_px(polygon[i].x, polygon[i].y);
+            px[i] = {x, y};
+        }
 
         // Draw closed polygon edges
-        for (size_t i = 0; i < polygon.size(); ++i) {
-            size_t j = (i + 1) % polygon.size();
-            auto [px1, py1] = mapper_->mm_to_px(polygon[i].x, polygon[i].y);
-            auto [px2, py2] = mapper_->mm_to_px(polygon[j].x, polygon[j].y);
+        for (size_t i = 0; i < px.size(); ++i) {
+            const glm::vec2& a = px[i];
+            const glm::vec2& b = px[(i + 1) % px.size()];
+            draw_line(a.x, a.y, b.x, b.y, color, width, opa);
+        }
 
-            lv_draw_line_dsc_t dsc;
-            lv_draw_line_dsc_init(&dsc);
-            dsc.color = color;
-            dsc.width = 2;
-            dsc.p1.x = static_cast<lv_value_precise_t>(px1);
-            dsc.p1.y = static_cast<lv_value_precise_t>(py1);
-            dsc.p2.x = static_cast<lv_value_precise_t>(px2);
-            dsc.p2.y = static_cast<lv_value_precise_t>(py2);
-            dsc.opa = object_badge_opa(excluded.count(obj_name) > 0);
-            dsc.round_start = 1;
-            dsc.round_end = 1;
-
-            lv_draw_line(&layer, &dsc);
+        if (mini && is_excluded) {
+            for (const auto& seg : hatch_polygon(px, static_cast<float>(hatch_px)))
+                draw_line(seg.a.x, seg.a.y, seg.b.x, seg.b.y, color, 1, LV_OPA_50);
         }
     }
 
@@ -531,6 +606,43 @@ void ExcludeObjectMapView::draw_first_layer_outlines() {
 
     spdlog::debug("[ExcludeObjectMapView] Drew polygon outlines for {} objects",
                   object_polygons.size());
+}
+
+void ExcludeObjectMapView::draw_bed_reference(lv_layer_t* layer) const {
+    if (!mapper_ || !plate_area_) {
+        return;
+    }
+    const double x_min = bed_.origin_x;
+    const double x_max = bed_.origin_x + bed_.w_mm;
+    const double y_min = bed_.origin_y;
+    const double y_max = bed_.origin_y + bed_.h_mm;
+
+    // The plate's own border color: the grid faint, the bed edge solid. The
+    // canvas clips whatever lies outside the zoomed view.
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+    dsc.color = lv_obj_get_style_border_color(plate_area_, LV_PART_MAIN);
+    auto draw = [&](const helix::BedGridSegment& seg) {
+        const auto [x1, y1] =
+            mapper_->mm_to_px(static_cast<float>(seg.x1), static_cast<float>(seg.y1));
+        const auto [x2, y2] =
+            mapper_->mm_to_px(static_cast<float>(seg.x2), static_cast<float>(seg.y2));
+        dsc.p1 = {static_cast<lv_value_precise_t>(x1), static_cast<lv_value_precise_t>(y1)};
+        dsc.p2 = {static_cast<lv_value_precise_t>(x2), static_cast<lv_value_precise_t>(y2)};
+        lv_draw_line(layer, &dsc);
+    };
+
+    dsc.width = 1;
+    dsc.opa = LV_OPA_40;
+    for (const auto& seg : helix::bed_grid_lines(x_min, x_max, y_min, y_max,
+                                                 helix::kBedGridSpacingMm, bed_.circular)) {
+        draw(seg);
+    }
+    dsc.width = 2;
+    dsc.opa = LV_OPA_COVER;
+    for (const auto& seg : helix::bed_outline_segments(x_min, x_max, y_min, y_max, bed_.circular)) {
+        draw(seg);
+    }
 }
 
 // ============================================================================

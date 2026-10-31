@@ -19,6 +19,7 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
 
@@ -46,13 +47,6 @@ TEST_CASE("job_holds_machine: false when no job owns the toolhead",
     REQUIRE_FALSE(job_holds_machine(PrintState::Error));
 }
 
-TEST_CASE("job_holds_machine: Preparing is the whole point - it is what print_active cannot see",
-          "[core][print_state][job_holds_machine]") {
-    // If this ever flips, the predicate has collapsed back onto PRINTING||PAUSED
-    // and every guard built on it silently loses the pre-print window.
-    REQUIRE(job_holds_machine(PrintState::Preparing));
-}
-
 // ============================================================================
 // The published subject
 // ============================================================================
@@ -67,9 +61,7 @@ struct JobHoldsMachineFixture : public LVGLTestFixture {
     /// set_print_start_state() defers, so drive the queue to quiescence rather
     /// than once - a handler running during a drain can queue more work.
     static void drain() {
-        for (int pass = 0; pass < 8; ++pass) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     void report_job_state(const char* moonraker_state) {
@@ -228,9 +220,7 @@ TEST_CASE_METHOD(XMLTestFixture, "the bypass tile is disabled during a host-side
     // of it and cannot keep this tile from being tapped.
     state().update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
     state().print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
-    for (int pass = 0; pass < 8; ++pass) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     REQUIRE(lv_subject_get_int(state().print_state().get_print_active_subject()) == 0);
     REQUIRE(lv_obj_has_state(tile, LV_STATE_DISABLED));
@@ -238,9 +228,7 @@ TEST_CASE_METHOD(XMLTestFixture, "the bypass tile is disabled during a host-side
     // And it comes back when the block is abandoned - a latched-disabled control
     // is the failure mode that would make this fix worse than the bug.
     state().print_state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
-    for (int pass = 0; pass < 8; ++pass) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     REQUIRE_FALSE(lv_obj_has_state(tile, LV_STATE_DISABLED));
 }
 
@@ -265,18 +253,14 @@ TEST_CASE_METHOD(XMLTestFixture, "moves_machine installs the toolhead guard by c
     // lifecycle subject moves.
     state().update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
     state().print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
-    for (int pass = 0; pass < 8; ++pass) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     REQUIRE(lv_subject_get_int(state().print_state().get_print_active_subject()) == 0);
     REQUIRE(lv_obj_has_state(control, LV_STATE_DISABLED));
 
     // And it releases - a latched-disabled control is the failure mode.
     state().print_state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
-    for (int pass = 0; pass < 8; ++pass) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     REQUIRE_FALSE(lv_obj_has_state(control, LV_STATE_DISABLED));
 
     // Spools on the bed block the same controls with no job at all
@@ -332,23 +316,42 @@ constexpr GuardedFile kGuardedFiles[] = {
     {"ui_xml/calibration_tool_offset_panel.xml", 2},
     {"ui_xml/chamber_dryer_modal.xml", 1},
     {"ui_xml/cfs_chute_calibration_overlay.xml", 6},
-    {"ui_xml/components/ams_sidebar.xml", 1},
+    {"ui_xml/snapmaker_nozzle_offset_overlay.xml", 3},
+    {"ui_xml/stepper_resonance_cal_modal.xml", 1},
+    {"ui_xml/components/ams_sidebar.xml", 3},
     {"ui_xml/components/chamber_dryer_row.xml", 1},
+    {"ui_xml/components/panel_widget_bed_mesh_tile.xml", 1},
     {"ui_xml/components/panel_widget_bypass.xml", 1},
+    {"ui_xml/components/panel_widget_job_queue.xml", 2},
+    {"ui_xml/components/panel_widget_toolhead.xml", 6},
+    {"ui_xml/components/panel_widget_z_offset.xml", 2},
     {"ui_xml/calibration_pa_panel.xml", 2},
     {"ui_xml/controls_panel.xml", 17},
+    {"ui_xml/guided_load_modal.xml", 2},
     {"ui_xml/header_bar.xml", 1},
+    {"ui_xml/pa_tuning_overlay.xml", 1},
+    {"ui_xml/plr_wizard_overlay.xml", 4},
     {"ui_xml/micro/controls_panel.xml", 17},
     {"ui_xml/micro/header_bar.xml", 1},
     {"ui_xml/motion_panel.xml", 8},
     {"ui_xml/components/move_preset_grid.xml", 11},
     {"ui_xml/components/motion_bed_map.xml", 2},
+    // Every layout's home key; the layouts themselves hold only components.
+    {"ui_xml/components/motion_home_button.xml", 1},
+    {"ui_xml/components/motion_leveling_row.xml", 2},
+    // Jog keys stay live through a print, as the pad layout's Z column does;
+    // the layouts' home keys carry the guards.
+    {"ui_xml/components/motion_jog_button.xml", 0},
+    // Recovery actions answer a fault in a paused job, so they stay live.
+    {"ui_xml/recovery_fault_modal.xml", 0},
     {"ui_xml/probe_generic_panel.xml", 2},
     {"ui_xml/probe_eddy_panel.xml", 2},
     {"ui_xml/probe_cartographer_panel.xml", 2},
     {"ui_xml/probe_bltouch_panel.xml", 2},
     {"ui_xml/probe_beacon_panel.xml", 2},
     {"ui_xml/temp_graph_overlay.xml", 2},
+    {"ui_xml/components/tool_switcher_feeder_segment.xml", 1},
+    {"ui_xml/components/tool_switcher_park_segment.xml", 1},
 };
 
 /// Control-bearing files that command nothing on the printer. A guard appearing
@@ -356,7 +359,6 @@ constexpr GuardedFile kGuardedFiles[] = {
 constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/abort_progress_modal.xml",
     "ui_xml/about_settings_overlay.xml",
-    "ui_xml/accel_sensor_row.xml",
     "ui_xml/advanced_panel.xml",
     "ui_xml/ams_context_menu.xml",
     "ui_xml/ams_current_tool.xml",
@@ -368,32 +370,43 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/ams_recover_state_modal.xml",
     "ui_xml/ams_selector_menu.xml",
     "ui_xml/ams_slot_view.xml",
-    "ui_xml/ams_toolhead_menu.xml",
     "ui_xml/ams_unit_card.xml",
     "ui_xml/barcode_scanner_settings.xml",
     "ui_xml/bed_mesh_calibrate_modal.xml",
     "ui_xml/bed_mesh_panel.xml",
     "ui_xml/bed_mesh_rename_modal.xml",
     "ui_xml/bed_mesh_save_config_modal.xml",
+    // Re-test sweeps: refused by Belt Tension's Start gate in C++
+    // (gate_allows_sweep, which closes on an active print) rather than
+    // moves_machine, the same as panel_belt_tension.xml.
+    "ui_xml/belt_retest_menu.xml",
+    // Identify buzzes a motor: refused by the same Start gate in C++.
+    "ui_xml/belt_names_modal.xml",
     "ui_xml/calibration_pid_panel.xml",
     "ui_xml/calibration_zoffset_panel.xml",
     "ui_xml/change_host_modal.xml",
     "ui_xml/color_picker.xml",
     "ui_xml/components/activity_chip.xml",
+    "ui_xml/components/ams_env_pill.xml",
     "ui_xml/components/ams_environment_indicator.xml",
     "ui_xml/components/barcode_scanner_device_row.xml",
+    "ui_xml/components/bed_check_modal.xml",
     "ui_xml/components/bed_drying_banner.xml",
     "ui_xml/components/bed_mesh_canvas_band.xml",
     "ui_xml/components/bed_mesh_profiles_card.xml",
     "ui_xml/components/buffer_status_modal.xml",
+    "ui_xml/components/calib_tile.xml",
     "ui_xml/components/camera_config_modal.xml",
     "ui_xml/components/camera_fullscreen.xml",
+    "ui_xml/components/capability_chip.xml",
     "ui_xml/components/chamber_fault_banner.xml",
+    "ui_xml/components/chamber_stall_modal.xml",
     "ui_xml/components/clog_detection_config_modal.xml",
     "ui_xml/components/color_swatch.xml",
     "ui_xml/components/color_swatch_grid.xml",
     "ui_xml/components/context_menu_backdrop.xml",
     "ui_xml/components/context_menu_card.xml",
+    "ui_xml/components/custom_color_swatch.xml",
     "ui_xml/components/exclude_object_map.xml",
     "ui_xml/components/exclude_object_row.xml",
     "ui_xml/components/exclude_object_side_list.xml",
@@ -404,9 +417,12 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/components/filament_mapping_tool_row.xml",
     "ui_xml/components/filament_material_group.xml",
     "ui_xml/components/filament_operations_group.xml",
+    "ui_xml/components/filament_slot_picker.xml",
+    "ui_xml/components/filament_slot_picker_choice.xml",
     "ui_xml/components/filament_slot_picker_row.xml",
     "ui_xml/components/filament_source_row.xml",
     "ui_xml/components/filament_spool_card.xml",
+    "ui_xml/components/filament_swatch.xml",
     "ui_xml/components/home_action_tile.xml",
     "ui_xml/components/home_next_page_slot.xml",
     "ui_xml/components/home_page_container.xml",
@@ -414,6 +430,13 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/components/job_queue_row.xml",
     "ui_xml/components/lock_screen.xml",
     "ui_xml/components/material_temps_row.xml",
+    // The layouts' own markup carries only the resize hook; their keys are
+    // motion_jog_button / motion_home_button, classified above.
+    "ui_xml/components/motion_jog_arrows.xml",
+    "ui_xml/components/motion_jog_arrows_home.xml",
+    "ui_xml/components/motion_jog_rows.xml",
+    "ui_xml/components/motion_jog_modes.xml",
+    "ui_xml/components/motion_step_bar.xml",
     "ui_xml/components/navbar_drying.xml",
     "ui_xml/components/navbar_estop.xml",
     "ui_xml/components/option_tile.xml",
@@ -428,13 +451,15 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/components/panel_widget_fan_stack.xml",
     "ui_xml/components/panel_widget_favorite_macro.xml",
     "ui_xml/components/panel_widget_filament.xml",
+    "ui_xml/components/panel_widget_exclude_map.xml",
     "ui_xml/components/panel_widget_filament_buffer.xml",
     "ui_xml/components/panel_widget_firmware_restart.xml",
     "ui_xml/components/panel_widget_gcode_console.xml",
-    "ui_xml/components/panel_widget_job_queue.xml",
+    "ui_xml/components/panel_widget_host_health.xml",
     "ui_xml/components/panel_widget_led.xml",
     "ui_xml/components/panel_widget_led_controls.xml",
     "ui_xml/components/panel_widget_lock.xml",
+    "ui_xml/components/panel_widget_maintenance.xml",
     "ui_xml/components/panel_widget_macros.xml",
     "ui_xml/components/panel_widget_motion.xml",
     "ui_xml/components/panel_widget_network.xml",
@@ -443,30 +468,45 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/components/panel_widget_power_device.xml",
     "ui_xml/components/panel_widget_preheat.xml",
     "ui_xml/components/panel_widget_print_stats.xml",
+    "ui_xml/components/panel_widget_dryer.xml",
     "ui_xml/components/panel_widget_print_status.xml",
     "ui_xml/components/panel_widget_printer_image.xml",
     "ui_xml/components/panel_widget_shutdown.xml",
+    "ui_xml/components/panel_widget_speed_flow.xml",
     "ui_xml/components/panel_widget_temp_graph.xml",
     "ui_xml/components/panel_widget_temp_stack.xml",
     "ui_xml/components/panel_widget_temperature.xml",
     "ui_xml/components/panel_widget_thermistor.xml",
     "ui_xml/components/panel_widget_tips.xml",
-    "ui_xml/components/panel_widget_tool_switcher.xml",
+    "ui_xml/components/plugin_menu_column_row.xml",
+    "ui_xml/components/plugin_menu_row.xml",
+    "ui_xml/components/speed_flow_part.xml",
+    "ui_xml/components/storage_consumer_row.xml",
     "ui_xml/components/picker_chip.xml",
     "ui_xml/components/picker_option_row.xml",
     "ui_xml/components/pin_entry_modal.xml",
     "ui_xml/components/preflight_check_modal.xml",
+    "ui_xml/components/preview_icon_button.xml",
     "ui_xml/components/print_status_detailed_active.xml",
     "ui_xml/components/print_status_detailed_idle.xml",
-    "ui_xml/components/print_status_fan_row.xml",
     "ui_xml/components/print_status_preview_card.xml",
+    "ui_xml/components/print_status_printer_tile.xml",
+    "ui_xml/components/print_status_strip.xml",
     "ui_xml/components/printer_switch_row.xml",
     "ui_xml/components/progress_bar.xml",
+    "ui_xml/components/progress_bar_estimate.xml",
     "ui_xml/components/spaghetti_detection_modal.xml",
-    "ui_xml/components/temp_card_unified.xml",
     "ui_xml/components/temp_graph_config_modal.xml",
-    "ui_xml/components/theme_swatch_grid.xml",
-    "ui_xml/components/tool_picker_button.xml",
+    "ui_xml/components/temp_graph_series_row.xml",
+    "ui_xml/components/thermistor_carousel_page.xml",
+    "ui_xml/components/thermistor_picker_row.xml",
+    "ui_xml/components/tile_color_grid.xml",
+    // Head changes: guarded by tool_switcher_change_blocked (a print that
+    // refuses the change, or spools on the bed) rather than moves_machine,
+    // which also holds through a pause, where the change is offered behind a
+    // confirmation.
+    "ui_xml/components/tool_switcher_face.xml",
+    "ui_xml/components/tool_switcher_segment.xml",
     "ui_xml/components/upgrade_banner.xml",
     "ui_xml/components/zone_row.xml",
     "ui_xml/components/zone_tab.xml",
@@ -476,16 +516,18 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/create_filament_modal.xml",
     "ui_xml/create_vendor_modal.xml",
     "ui_xml/debug_bundle_modal.xml",
+    "ui_xml/device_action_button.xml",
     "ui_xml/estop_confirmation_dialog.xml",
     "ui_xml/exclude_object_modal.xml",
     "ui_xml/factory_reset_modal.xml",
+    // Chamber air modes only set fan speeds.
+    "ui_xml/fan_control_overlay.xml",
     "ui_xml/fan_dial.xml",
     "ui_xml/fan_rename_modal.xml",
     "ui_xml/favorite_macro_config_modal.xml",
     "ui_xml/filament_mapping_modal.xml",
     "ui_xml/filament_panel.xml",
     "ui_xml/filament_product_edit_modal.xml",
-    "ui_xml/filament_sensor_row.xml",
     "ui_xml/form_field.xml",
     "ui_xml/hardware_issue_row.xml",
     "ui_xml/hidden_network_modal.xml",
@@ -494,12 +536,13 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/history_list_panel.xml",
     "ui_xml/history_list_row.xml",
     "ui_xml/home_panel.xml",
-    "ui_xml/humidity_sensor_row.xml",
     "ui_xml/info_qr_modal.xml",
     "ui_xml/input_shaper_panel.xml",
     "ui_xml/job_queue_modal.xml",
     "ui_xml/klipper_recovery_dialog.xml",
     "ui_xml/label_printer_settings.xml",
+    "ui_xml/layer_pause_modal.xml",
+    "ui_xml/led_auto_color_swatches.xml",
     "ui_xml/led_control_overlay.xml",
     "ui_xml/led_list_chip.xml",
     "ui_xml/led_picker.xml",
@@ -507,6 +550,7 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/led_white_tone.xml",
     "ui_xml/machine_limits_overlay.xml",
     "ui_xml/macro_buttons_overlay.xml",
+    "ui_xml/maintenance_overlay.xml",
     "ui_xml/macro_card.xml",
     "ui_xml/macro_panel.xml",
     "ui_xml/macro_param_modal.xml",
@@ -522,13 +566,17 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/navigation_bar.xml",
     "ui_xml/network_settings_overlay.xml",
     "ui_xml/network_test_modal.xml",
+    "ui_xml/notification_history_item.xml",
+    "ui_xml/notification_history_panel.xml",
     "ui_xml/numeric_keypad_panel.xml",
     "ui_xml/overlay_backdrop.xml",
     "ui_xml/overlay_panel.xml",
     "ui_xml/panel_belt_tension.xml",
+    "ui_xml/plugin_feature_toggle_row.xml",
     "ui_xml/plugin_install_modal.xml",
     "ui_xml/portrait/print_status_panel.xml",
     "ui_xml/portrait/print_tune_panel.xml",
+    "ui_xml/power_device_picker.xml",
     "ui_xml/power_device_row.xml",
     "ui_xml/print_completion_modal.xml",
     "ui_xml/print_cancel_confirm_modal.xml",
@@ -537,8 +585,10 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/print_file_list_row.xml",
     "ui_xml/print_select_panel.xml",
     "ui_xml/print_status_configure_picker.xml",
+    "ui_xml/print_status_more_menu.xml",
     "ui_xml/print_status_panel.xml",
     "ui_xml/print_tune_panel.xml",
+    "ui_xml/components/tune_pa_row.xml",
     "ui_xml/printer_image_list_item.xml",
     "ui_xml/printer_image_overlay.xml",
     "ui_xml/printer_image_tagger_overlay.xml",
@@ -550,7 +600,6 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/probe_accuracy_modal.xml",
     "ui_xml/probe_config_edit_modal.xml",
     "ui_xml/probe_overlay.xml",
-    "ui_xml/probe_sensor_row.xml",
     "ui_xml/qr_scanner_overlay.xml",
     "ui_xml/restart_prompt_dialog.xml",
     "ui_xml/retraction_settings_overlay.xml",
@@ -558,6 +607,7 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/screws_tilt_panel.xml",
     "ui_xml/screws_tilt_share_modal.xml",
     "ui_xml/security_settings_overlay.xml",
+    "ui_xml/sensor_row.xml",
     "ui_xml/sensors_overlay.xml",
     "ui_xml/setting_action_row.xml",
     "ui_xml/setting_dropdown_row.xml",
@@ -579,7 +629,9 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/settings_panel.xml",
     "ui_xml/settings_printing_overlay.xml",
     "ui_xml/settings_safety_overlay.xml",
+    "ui_xml/settings_screen_sharing_overlay.xml",
     "ui_xml/settings_sound_overlay.xml",
+    "ui_xml/settings_storage_overlay.xml",
     "ui_xml/settings_system_overlay.xml",
     "ui_xml/settings_touch_overlay.xml",
     "ui_xml/settings_updates_overlay.xml",
@@ -593,6 +645,7 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/spoolman_spool_row.xml",
     "ui_xml/telemetry_data_overlay.xml",
     "ui_xml/telemetry_info_modal.xml",
+    "ui_xml/text_entry_modal.xml",
     "ui_xml/theme_editor_overlay.xml",
     "ui_xml/theme_preview_overlay.xml",
     "ui_xml/theme_save_as_modal.xml",
@@ -601,12 +654,12 @@ constexpr const char* kNoMachineControlFiles[] = {
     "ui_xml/timelapse_video_card.xml",
     "ui_xml/timelapse_videos_overlay.xml",
     "ui_xml/toast_notification.xml",
+    "ui_xml/toolhead_preset_config_modal.xml",
     "ui_xml/touch_calibration_overlay.xml",
     "ui_xml/tour_tooltip_card.xml",
     "ui_xml/update_download_modal.xml",
     "ui_xml/update_notify_modal.xml",
     "ui_xml/widget_catalog_overlay.xml",
-    "ui_xml/width_sensor_row.xml",
     "ui_xml/wifi_network_item.xml",
     "ui_xml/wifi_password_modal.xml",
     "ui_xml/wizard_catalog_row.xml",

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -17,9 +18,8 @@ using namespace helix;
 namespace {
 // Redirects the writable config dir (get_themes_directory() resolves through
 // HELIX_CONFIG_DIR) to an isolated temp directory, so theme tests that create,
-// overwrite, or delete user theme files never touch the repo's real
-// config/themes/. Previously these tests ran against config/themes/ and could
-// wipe the tracked nord.json out of a developer's working tree.
+// overwrite, or delete user theme files never touch a developer's own
+// config/themes/.
 struct ThemeDirFixture {
     ThemeDirFixture() {
         if (const char* prev = std::getenv("HELIX_CONFIG_DIR")) {
@@ -138,7 +138,7 @@ TEST_CASE("get_builtin_fallback_theme returns valid theme", "[theme]") {
     auto theme = helix::get_builtin_fallback_theme();
 
     REQUIRE(theme.name == "HelixScreen");
-    REQUIRE(theme.filename == helix::DEFAULT_THEME);
+    REQUIRE(theme.filename == helix::kDefaultTheme);
     REQUIRE(theme.is_valid());
     REQUIRE(theme.dark.screen_bg == "#19191C");
     REQUIRE(theme.light.screen_bg == "#F0F0F4");
@@ -374,4 +374,86 @@ TEST_CASE_METHOD(ThemeDirFixture, "reset_theme_to_default returns nullopt for us
 
     // Cleanup
     std::remove(user_path.c_str());
+}
+
+namespace {
+// The config/themes/nord.json the release tarball and APK last shipped, byte for byte.
+constexpr const char* kShippedNordJson = R"JSON({
+  "border_opacity": 40,
+  "border_radius_size": 3,
+  "border_width": 1,
+  "dark": {
+    "border": "#616e88",
+    "card_bg": "#434c5e",
+    "danger": "#bf616a",
+    "elevated_bg": "#4c566a",
+    "focus": "#8fbcbb",
+    "info": "#b48ead",
+    "overlay_bg": "#3b4252",
+    "primary": "#88c0d0",
+    "screen_bg": "#2e3440",
+    "secondary": "#81a1c1",
+    "success": "#a3be8c",
+    "tertiary": "#5e81ac",
+    "text": "#eceff4",
+    "text_muted": "#d8dee9",
+    "text_subtle": "#b8c2d1",
+    "warning": "#ebcb8b"
+  },
+  "handle_color": "primary",
+  "handle_style": "round",
+  "light": {
+    "border": "#cbd5e1",
+    "card_bg": "#ffffff",
+    "danger": "#b23a48",
+    "elevated_bg": "#edeff6",
+    "focus": "#8fbcbb",
+    "info": "#b48ead",
+    "overlay_bg": "#e5e9f0",
+    "primary": "#5e81ac",
+    "screen_bg": "#eceff4",
+    "secondary": "#81a1c1",
+    "success": "#3fa47d",
+    "tertiary": "#4c566a",
+    "text": "#2e3440",
+    "text_muted": "#3b4252",
+    "text_subtle": "#64748b",
+    "warning": "#b08900"
+  },
+  "name": "Nord",
+  "shadow_intensity": 0,
+  "shadow_offset_y": 2,
+  "shadow_opa": 0
+})JSON";
+
+void write_file(const std::string& path, const std::string& content) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << content;
+}
+} // namespace
+
+TEST_CASE_METHOD(ThemeDirFixture,
+                 "a shipped nord.json in the user layer is removed, an edit is kept", "[theme]") {
+    const std::string themes_dir = helix::get_themes_directory();
+    const std::string user_path = themes_dir + "/nord.json";
+    struct stat st;
+
+    SECTION("the shipped bytes are removed at theme load") {
+        write_file(user_path, kShippedNordJson);
+        REQUIRE(helix::ensure_themes_directory(themes_dir));
+        CHECK(stat(user_path.c_str(), &st) != 0);
+    }
+
+    SECTION("a user's edit of it survives") {
+        write_file(user_path, std::string(kShippedNordJson) + " ");
+        REQUIRE(helix::ensure_themes_directory(themes_dir));
+        CHECK(stat(user_path.c_str(), &st) == 0);
+    }
+
+    SECTION("another theme with the same bytes is not touched") {
+        const std::string other = themes_dir + "/gruvbox.json";
+        write_file(other, kShippedNordJson);
+        REQUIRE(helix::ensure_themes_directory(themes_dir));
+        CHECK(stat(other.c_str(), &st) == 0);
+    }
 }

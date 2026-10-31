@@ -5,8 +5,8 @@
   <!-- Full-screen backdrop overlay - tap to dismiss -->
   <view name="power_device_picker" extends="context_menu_backdrop">
     <!-- Card positioned and height-capped by ContextMenu. A device row or sensor
-         chip applies and closes; an icon applies live and leaves the card up, so
-         the header offers Done rather than an X. -->
+         chip applies and closes; an icon or a colour applies live and leaves the
+         card up, so the header offers Done rather than an X. -->
     <context_menu_card title="Configure" close_icon="check" close_text="Done">
       <lv_obj width="100%"
               height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm" scrollable="false"
@@ -29,6 +29,8 @@
           <lv_obj name="icon_grid"
                   width="100%" height="content" flex_flow="row_wrap" style_pad_all="0" style_pad_gap="#space_xxs"
                   scrollable="false" clickable="false"/>
+          <text_small text="Color" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+          <tile_color_grid name="color_grid" swatch_callback="power_device_color_cb"/>
           <!-- Deleted by C++ when the printer reports no energy sensors -->
           <lv_obj name="sensor_section"
                   width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs"

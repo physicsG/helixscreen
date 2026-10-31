@@ -37,13 +37,20 @@ class PrintStatusPanelFixture : public LVGLUITestFixture {
 
     /// @p before_create runs before the panel is built; what it returns lives
     /// until the panel is gone (e.g. a layout scope the panel was built under).
-    explicit PrintStatusPanelFixture(const std::function<std::shared_ptr<void>()>& before_create) {
+    /// @p drain_before_create delivers the constructor's deferred observer
+    /// fires before the widget tree exists, the order the app runs them in
+    /// when the panel is built lazily.
+    explicit PrintStatusPanelFixture(const std::function<std::shared_ptr<void>()>& before_create,
+                                     bool drain_before_create = false) {
         heal_global_print_status_panel_subjects();
         if (before_create) {
             setup_ = before_create();
         }
         panel_ = std::make_unique<PrintStatusPanel>(state(), nullptr);
         panel_->init_subjects();
+        if (drain_before_create) {
+            UpdateQueue::instance().drain();
+        }
         root_ = panel_->create(test_screen());
         REQUIRE(root_ != nullptr);
     }

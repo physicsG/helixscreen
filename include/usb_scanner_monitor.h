@@ -67,6 +67,17 @@ class UsbScannerMonitor {
     /// between the pointer load and the layout store.
     static void set_active_layout(ScannerKeymap layout);
 
+    /// True when a scanner configured in Settings > Barcode Scanner is attached,
+    /// so spool scanning can skip the camera. Only configured devices count: an
+    /// empty id or MAC is never present, whatever its presence flag says.
+    static bool use_configured_scanner(const std::string& usb_id, const std::string& bt_mac,
+                                       bool usb_present, bool bt_present);
+
+    /// Probes /dev/input and /sys for the configured USB VID:PID and paired BT
+    /// MAC, then applies use_configured_scanner(). An unconfigured setup or an
+    /// auto-detected keyboard returns false.
+    static bool configured_scanner_present();
+
     // Public for testing: check if accumulated string is a Spoolman QR code
     // and extract the spool ID. Returns -1 if not a match.
     static int check_spoolman_pattern(const std::string& input);

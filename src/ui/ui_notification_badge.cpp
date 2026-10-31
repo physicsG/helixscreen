@@ -27,8 +27,8 @@ namespace {
  * prevents crashes by detecting stale/invalid user_data.
  */
 struct BadgeData {
-    static constexpr uint32_t MAGIC = 0x42444745; // "BDGE"
-    uint32_t magic{MAGIC};
+    static constexpr uint32_t kMagic = 0x42444745; // "BDGE"
+    uint32_t magic{kMagic};
     lv_obj_t* label; // Label widget for count display
 };
 
@@ -36,12 +36,12 @@ struct BadgeData {
 // width/height outranks every style bound from XML, so the tile rung styles
 // (styles.tile_badge_*) could never move it. Keyed by px value and static for
 // the process, the same shape as helix::ui::shared_font_style.
-constexpr size_t MAX_BOX_STYLES = 16;
-int32_t g_box_sizes[MAX_BOX_STYLES] = {};
-lv_style_t g_box_styles[MAX_BOX_STYLES];
+constexpr size_t kMaxBoxStyles = 16;
+int32_t g_box_sizes[kMaxBoxStyles] = {};
+lv_style_t g_box_styles[kMaxBoxStyles];
 
 lv_style_t* shared_badge_box_style(int32_t size) {
-    for (size_t i = 0; i < MAX_BOX_STYLES; ++i) {
+    for (size_t i = 0; i < kMaxBoxStyles; ++i) {
         if (g_box_sizes[i] == size)
             return &g_box_styles[i];
         if (g_box_sizes[i] == 0) {
@@ -54,7 +54,7 @@ lv_style_t* shared_badge_box_style(int32_t size) {
         }
     }
     spdlog::critical("[notification_badge] shared box style table full ({} entries)",
-                     MAX_BOX_STYLES);
+                     kMaxBoxStyles);
     return nullptr;
 }
 
@@ -64,7 +64,7 @@ lv_style_t* shared_badge_box_style(int32_t size) {
 void update_badge_text_contrast(lv_obj_t* badge) {
     // Check magic to ensure user_data is valid (not stale/overwritten)
     BadgeData* data = static_cast<BadgeData*>(lv_obj_get_user_data(badge));
-    if (!data || data->magic != BadgeData::MAGIC) {
+    if (!data || data->magic != BadgeData::kMagic) {
         return;
     }
 
@@ -95,7 +95,7 @@ void update_badge_text_contrast(lv_obj_t* badge) {
  */
 void fit_badge_label_font(lv_obj_t* badge) {
     BadgeData* data = static_cast<BadgeData*>(lv_obj_get_user_data(badge));
-    if (!data || data->magic != BadgeData::MAGIC || !data->label) {
+    if (!data || data->magic != BadgeData::kMagic || !data->label) {
         return;
     }
 
@@ -138,7 +138,7 @@ void badge_delete_cb(lv_event_t* e) {
     lv_obj_t* badge = lv_event_get_target_obj(e);
     BadgeData* data = static_cast<BadgeData*>(lv_obj_get_user_data(badge));
     // Only delete if magic matches - user_data may be invalid
-    if (data && data->magic == BadgeData::MAGIC) {
+    if (data && data->magic == BadgeData::kMagic) {
         delete data;
         lv_obj_set_user_data(badge, nullptr);
     }
@@ -215,7 +215,7 @@ void* notification_badge_create(lv_xml_parser_state_t* state, const char** attrs
     lv_obj_center(label);
 
     // Allocate user data to track label reference (for safe style change handling)
-    BadgeData* data = new BadgeData{.magic = BadgeData::MAGIC, .label = label};
+    BadgeData* data = new BadgeData{.magic = BadgeData::kMagic, .label = label};
     lv_obj_set_user_data(badge, data);
 
     // Face follows the box (the rung bindings land after create and refit it

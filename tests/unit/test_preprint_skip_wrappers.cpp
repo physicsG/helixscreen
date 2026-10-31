@@ -78,7 +78,7 @@ json installed(json s) {
     return s;
 }
 
-const std::string KAMP_STYLE = "[gcode_macro BED_MESH_CALIBRATE]\n"
+const std::string kKampStyle = "[gcode_macro BED_MESH_CALIBRATE]\n"
                                "rename_existing: _BED_MESH_CALIBRATE\n"
                                "gcode:\n"
                                "    _BED_MESH_CALIBRATE {rawparams}\n";
@@ -117,7 +117,7 @@ TEST_CASE("wrappable leaves a user's own macro alone", "[skip_wrappers]") {
     }
     SECTION("a user macro added after install, merged over ours, drops that step") {
         json merged = installed(s);
-        load(merged, KAMP_STYLE);
+        load(merged, kKampStyle);
         CHECK(sw::wrappable(merged) == std::vector<Op>{Op::Qgl});
     }
 }
@@ -130,7 +130,7 @@ TEST_CASE("ours_intact recognises exactly what generate wrote", "[skip_wrappers]
     CHECK_FALSE(sw::ours_intact(s, Op::ZTilt));
 
     SECTION("a user macro that wins gcode and rename_existing is not ours") {
-        load(s, KAMP_STYLE);
+        load(s, kKampStyle);
         CHECK_FALSE(sw::ours_intact(s, Op::BedMesh));
     }
     SECTION("a merge that replaces only the gcode is not ours") {
@@ -210,7 +210,7 @@ TEST_CASE("active needs the loaded file and an intact wrapper", "[skip_wrappers]
     }
     SECTION("a user macro merged over one wrapper leaves the other active") {
         json s = installed(voron());
-        load(s, KAMP_STYLE);
+        load(s, kKampStyle);
         CHECK(sw::active(s) == std::vector<Op>{Op::Qgl});
     }
 }

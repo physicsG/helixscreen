@@ -25,9 +25,7 @@
               text="" style_text_font="#icon_font_xs" style_min_width="16" clickable="false" event_bubble="true"/>
     <!-- Product name. Flex-grows to push temps / edit to the trailing edge and
          ellipsizes on narrow screens. -->
-    <lv_label name="name_label"
-              text="" flex_grow="1" long_mode="dots" style_text_font="#font_body" style_text_color="#text"
-              clickable="false" event_bubble="true"/>
+    <text_body name="name_label" text="" flex_grow="1" long_mode="dots" clickable="false" event_bubble="true"/>
     <!-- Variant-disambiguation chip (e.g. "ASA-CF" under the ASA heading).
          Hidden until C++ shows it for a variant row whose type differs from the
          family heading. -->

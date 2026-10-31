@@ -20,11 +20,11 @@
 #include "ui_update_queue.h"
 
 #include "connection_state.h"
+#include "helix_callback.h"
 #include "lvgl/lvgl.h"
 #include "print_lifecycle_state.h" // PrintState; declares PrintJobState
 
 #include <cstdint>
-#include <functional>
 #include <type_traits>
 
 namespace helix::ui {
@@ -38,18 +38,18 @@ enum class Dispatch : uint8_t {
 namespace detail {
 
 // The observer machinery is compiled once per value type in src/ui/observer_factory.cpp.
-// Each call site only binds its owner into a std::function; see observe_core() there for
+// Each call site only binds its owner into a helix::Callback; see observe_core() there for
 // the context layout and the teardown invariant it depends on.
 
-ObserverGuard observe_core(lv_subject_t* subject, const void* owner, std::function<void(int)> fn,
+ObserverGuard observe_core(lv_subject_t* subject, const void* owner, helix::Callback<void(int)> fn,
                            Dispatch dispatch, const SubjectLifetime& lifetime);
 ObserverGuard observe_core(lv_subject_t* subject, const void* owner,
-                           std::function<void(const char*)> fn, Dispatch dispatch,
+                           helix::Callback<void(const char*)> fn, Dispatch dispatch,
                            const SubjectLifetime& lifetime);
 
 /// One handler instance serves every notification, so a `mutable` handler keeps its state.
 template <typename V, typename Panel, typename Handler>
-std::function<void(V)> bind_owner(Panel* panel, Handler&& handler) {
+helix::Callback<void(V)> bind_owner(Panel* panel, Handler&& handler) {
     return [panel, h = std::forward<Handler>(handler)](V value) mutable { h(panel, value); };
 }
 

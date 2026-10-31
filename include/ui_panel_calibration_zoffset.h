@@ -15,10 +15,10 @@
 
 #include <string>
 
-class IMoonrakerAPI;
 namespace helix {
+class IMoonrakerAPI;
 class PrinterState;
-}
+} // namespace helix
 
 /**
  * @file ui_panel_calibration_zoffset.h
@@ -127,7 +127,7 @@ class ZOffsetCalibrationPanel : public OverlayBase {
      *
      * @param api IMoonrakerAPI for sending commands
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -157,7 +157,7 @@ class ZOffsetCalibrationPanel : public OverlayBase {
 
     // API reference
     // Note: overlay_root_ inherited from OverlayBase
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     // State management
     State state_ = State::IDLE;
@@ -211,8 +211,8 @@ class ZOffsetCalibrationPanel : public OverlayBase {
 
     // Operation timeout guard (PROBING: 180s, SAVING: 30s)
     OperationTimeoutGuard operation_guard_;
-    static constexpr uint32_t WARMING_TIMEOUT_MS = 300000; // 5 min for bed to reach temp
-    static constexpr uint32_t SAVING_TIMEOUT_MS = 30000;
+    static constexpr uint32_t kWarmingTimeoutMs = 300000; // 5 min for bed to reach temp
+    static constexpr uint32_t kSavingTimeoutMs = 30000;
 
     /// Arm (or re-arm) the SAVING-state timeout.
     void arm_saving_timeout();
@@ -223,9 +223,9 @@ class ZOffsetCalibrationPanel : public OverlayBase {
 
     /// SAVE_CONFIG restarts Klipper; some printers chain a second config write +
     /// restart tens of seconds later. Each extension buys another
-    /// SAVING_TIMEOUT_MS, but only if this save actually restarted Klipper — so
-    /// a genuinely hung save still fails after one SAVING_TIMEOUT_MS.
-    static constexpr unsigned SAVING_TIMEOUT_MAX_EXTENSIONS = 4;
+    /// kSavingTimeoutMs, but only if this save actually restarted Klipper — so
+    /// a genuinely hung save still fails after one kSavingTimeoutMs.
+    static constexpr unsigned kSavingTimeoutMaxExtensions = 4;
     unsigned saving_timeout_extensions_ = 0;
 
     /// Latches restart activity seen during a save. Reset on every entry to and

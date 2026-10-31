@@ -16,10 +16,10 @@ struct EffectiveFilament;
 
 namespace helix {
 
-inline constexpr std::array<const char*, 4> DEFAULT_PRESET_MATERIALS{"PLA", "PETG", "ABS", "TPU"};
+inline constexpr std::array<const char*, 4> kDefaultPresetMaterials{"PLA", "PETG", "ABS", "TPU"};
 
 /**
- * @brief DEFAULT_PRESET_MATERIALS as owning strings.
+ * @brief kDefaultPresetMaterials as owning strings.
  *
  * Single source for every default-preset seed: the member initializer (which
  * must hold before init() runs, since construction is defaulted) and
@@ -28,7 +28,7 @@ inline constexpr std::array<const char*, 4> DEFAULT_PRESET_MATERIALS{"PLA", "PET
 inline std::array<std::string, 4> default_preset_materials() {
     std::array<std::string, 4> out;
     for (size_t i = 0; i < out.size(); ++i) {
-        out[i] = DEFAULT_PRESET_MATERIALS[i];
+        out[i] = kDefaultPresetMaterials[i];
     }
     return out;
 }
@@ -84,7 +84,7 @@ class MaterialSettingsManager {
     /** @brief Assign a material name to a preset slot (0-3); saves to config */
     void set_preset_material(int index, const std::string& material);
 
-    /** @brief Restore all preset slots to DEFAULT_PRESET_MATERIALS; saves to config */
+    /** @brief Restore all preset slots to kDefaultPresetMaterials; saves to config */
     void reset_preset_materials();
 
     /** @brief Branded filament info attached to a quick-material preset slot */
@@ -120,7 +120,7 @@ class MaterialSettingsManager {
     bool migrate_settings_overrides();
     void load_presets_from_config();
     void save_presets_to_config();
-    /** @brief Reset all 4 preset slots (in memory only) to DEFAULT_PRESET_MATERIALS */
+    /** @brief Reset all 4 preset slots (in memory only) to kDefaultPresetMaterials */
     void assign_defaults();
 
     std::unordered_map<std::string, filament::MaterialOverride> overrides_;

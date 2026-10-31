@@ -24,14 +24,18 @@
 #include "ams_backend_toolchanger.h"
 #include "ams_state.h"
 #include "app_constants.h"
+#include "app_globals.h"
 #include "config.h"
 #include "i_moonraker_sub_apis.h"
+#include "printer_state.h"
 #include "spoolman_active_spool_sync.h"
 #include "spoolman_types.h"
 #include "tool_state.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <filesystem>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -50,21 +54,25 @@ namespace {
 
 /// Records the Spoolman calls the sync makes and keeps their callbacks so a test
 /// decides when, and with what, the server answers.
-class RecordingSpoolman : public ISpoolmanAPI {
+class RecordingSpoolman : public helix::ISpoolmanAPI {
   public:
     struct SpoolRequest {
         int id;
         helix::SpoolCallback on_success;
+        bool on_main_thread;
     };
     std::vector<SpoolRequest> spool_requests;
     int status_requests = 0;
+    std::function<void(bool, int)> status_callback;
 
-    void get_spoolman_status(std::function<void(bool, int)>, ErrorCallback, bool) override {
+    void get_spoolman_status(std::function<void(bool, int)> on_success, ErrorCallback,
+                             bool) override {
         ++status_requests;
+        status_callback = std::move(on_success);
     }
     void get_spoolman_spool(int spool_id, helix::SpoolCallback on_success, ErrorCallback,
                             bool) override {
-        spool_requests.push_back({spool_id, std::move(on_success)});
+        spool_requests.push_back({spool_id, std::move(on_success), helix::ui::is_main_thread()});
     }
 
     /// Answer the oldest outstanding fetch with a spool of that id.
@@ -88,6 +96,8 @@ class RecordingSpoolman : public ISpoolmanAPI {
     void update_spoolman_filament(int, const json&, SuccessCallback, ErrorCallback) override {}
     void update_spoolman_filament_color(int, const std::string&, SuccessCallback,
                                         ErrorCallback) override {}
+    void set_spoolman_filament_extra_number(int, const std::string&, const std::string&, double,
+                                            SuccessCallback, ErrorCallback) override {}
     void get_spoolman_vendors(helix::VendorListCallback, ErrorCallback) override {}
     void get_spoolman_filaments(helix::FilamentListCallback, ErrorCallback) override {}
     void get_spoolman_filaments(int, helix::FilamentListCallback, ErrorCallback) override {}
@@ -110,9 +120,9 @@ struct SyncFixture : LVGLTestFixture {
 
     SyncFixture() {
         fs::create_directories(temp_dir);
-        fs::remove(AppConstants::Update::config_backup_fallback());
-        fs::remove(AppConstants::Update::legacy_config_backup_fallback());
-        fs::remove(AppConstants::Update::env_backup_fallback());
+        fs::remove(helix::app_constants::update::config_backup_fallback());
+        fs::remove(helix::app_constants::update::legacy_config_backup_fallback());
+        fs::remove(helix::app_constants::update::env_backup_fallback());
         Config::get_instance()->init(temp_dir + "/settings.json");
         AmsState::instance().clear_backends();
         AmsState::instance().clear_external_spool_info();
@@ -215,6 +225,29 @@ TEST_CASE_METHOD(SyncFixture,
     CHECK(external_spool_id() == 0);
 }
 
+TEST_CASE_METHOD(SyncFixture, "clearing the active spool keeps an unlinked bypass entry",
+                 "[spoolman_sync]") {
+    // Unlinking the bypass spool commits a manual entry and clears the server's
+    // active spool; that clear comes straight back as this notification.
+    SlotInfo manual;
+    manual.spoolman_id = 0;
+    manual.brand = "Generic";
+    manual.material = "ASA";
+    manual.color_rgb = 0x1A1A1A;
+    AmsState::instance().set_external_spool_info(manual);
+    REQUIRE(AmsState::instance().active_spool_describes_bypass());
+    REQUIRE(AmsState::instance().get_external_spool_info().has_value());
+
+    notify_active_spool(0);
+    pump();
+
+    const auto kept = AmsState::instance().get_external_spool_info();
+    REQUIRE(kept.has_value());
+    CHECK(kept->material == "ASA");
+    CHECK(kept->brand == "Generic");
+    CHECK(kept->color_rgb == 0x1A1A1A);
+}
+
 TEST_CASE_METHOD(SyncFixture, "a toolchanger tool with no spool adopts the active one",
                  "[spoolman_sync][toolchanger]") {
     auto& tools = helix::ToolState::instance();
@@ -312,4 +345,81 @@ TEST_CASE_METHOD(SyncFixture, "a status that already matches the external slot c
         REQUIRE(spoolman.spool_requests.size() == 1);
         CHECK(spoolman.spool_requests[0].id == 8);
     }
+}
+
+// Moonraker answers server.spoolman.status on the WebSocket thread, and the
+// "already matches" check reads AmsState, which is main-thread only.
+TEST_CASE_METHOD(SyncFixture, "the startup status reply is acted on from the main thread",
+                 "[spoolman_sync][threading]") {
+    REQUIRE(spoolman.status_callback);
+    // Lenient, so a read on the wrong thread shows up as a failed check below
+    // instead of aborting the run.
+    helix::ui::set_strict_ui_checks(false);
+    std::thread([this] { spoolman.status_callback(true, 5); }).join();
+    helix::ui::set_strict_ui_checks(true);
+
+    CHECK(spoolman.spool_requests.empty());
+    pump();
+    REQUIRE(spoolman.spool_requests.size() == 1);
+    CHECK(spoolman.spool_requests[0].id == 5);
+    CHECK(spoolman.spool_requests[0].on_main_thread);
+
+    spoolman.answer_with_spool(0, 5);
+    pump();
+    CHECK(external_spool_id() == 5);
+}
+
+namespace {
+
+void notify_spoolman_status(FakeMoonrakerClient& client, bool connected) {
+    REQUIRE(client.fire_notification(
+        "notify_spoolman_status_changed",
+        json{{"params", json::array({json{{"spoolman_connected", connected}}})}}));
+}
+
+/// PrinterCapabilitiesState writes the flag through a deferral that lands on a
+/// later queue tick than the notification's own hop to the main thread.
+void settle() {
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+}
+
+} // namespace
+
+// Moonraker can come up before Spoolman does, so discovery's one status query
+// answers "down" and only this notification ever says otherwise.
+TEST_CASE_METHOD(SyncFixture, "Spoolman connecting after startup makes it available",
+                 "[spoolman_sync][spoolman_status]") {
+    get_printer_state().init_subjects(false);
+    get_printer_state().capabilities_state().set_spoolman_available(false);
+    settle();
+    REQUIRE_FALSE(get_printer_state().is_spoolman_available());
+    CHECK(client.handler_count("notify_spoolman_status_changed", "spoolman_status_sync") == 1);
+    const int status_requests_before = spoolman.status_requests;
+
+    notify_spoolman_status(client, true);
+    settle();
+    CHECK(get_printer_state().is_spoolman_available());
+    // The startup active-spool sync found Spoolman down and did nothing, so
+    // the reconnect runs it again.
+    CHECK(spoolman.status_requests == status_requests_before + 1);
+
+    notify_spoolman_status(client, false);
+    settle();
+    CHECK_FALSE(get_printer_state().is_spoolman_available());
+    CHECK(spoolman.status_requests == status_requests_before + 1);
+
+    spool_sync::detach(client);
+    CHECK(client.handler_count("notify_spoolman_status_changed", "spoolman_status_sync") == 0);
+}
+
+TEST_CASE_METHOD(SyncFixture, "a status notification without the field changes nothing",
+                 "[spoolman_sync][spoolman_status]") {
+    get_printer_state().init_subjects(false);
+    get_printer_state().capabilities_state().set_spoolman_available(true);
+    settle();
+
+    REQUIRE(client.fire_notification("notify_spoolman_status_changed",
+                                     json{{"params", json::array({json::object()})}}));
+    settle();
+    CHECK(get_printer_state().is_spoolman_available());
 }

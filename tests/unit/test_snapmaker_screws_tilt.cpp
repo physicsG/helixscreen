@@ -41,7 +41,7 @@ namespace {
 
 // Real U1 coordinates and names, verbatim from the device's
 // configfile.settings.auto_screws_tilt_adjust section.
-const json U1_CONFIG_SECTION = {
+const json kU1ConfigSection = {
     {"screw1", "15,15"},
     {"screw2", "255,15"},
     {"screw3", "255,255"},
@@ -73,10 +73,10 @@ json make_status(float target_z, float base1, float base2, float base3, float ba
  * A clearly tilted bed: diffs of +0.25 / -0.15 / +0.075 / -0.175 mm about the
  * mean. Signed minutes on an M3 (0.5mm) pitch: +30 / -18 / +9 / -21.
  */
-const json TILTED_STATUS = [] { return make_status(0.4f, 0.15f, 0.55f, 0.325f, 0.575f); }();
+const json kTiltedStatus = [] { return make_status(0.4f, 0.15f, 0.55f, 0.325f, 0.575f); }();
 
 /// The same bed within 0.015mm of level: diffs of ±0.015 / ±0.010 mm.
-const json LEVEL_STATUS = [] { return make_status(0.4f, 0.385f, 0.415f, 0.39f, 0.41f); }();
+const json kLevelStatus = [] { return make_status(0.4f, 0.385f, 0.415f, 0.39f, 0.41f); }();
 
 /**
  * The discriminating fixture: target_z deliberately OFFSET from the mean of
@@ -84,18 +84,18 @@ const json LEVEL_STATUS = [] { return make_status(0.4f, 0.385f, 0.415f, 0.39f, 0
  * re-derives target_z as a midrange after a tuning round, so the mapper must
  * follow the field, and only this shape tells the two apart.
  */
-const json OFFSET_TARGET_STATUS = [] { return make_status(0.5f, 0.15f, 0.55f, 0.325f, 0.575f); }();
+const json kOffsetTargetStatus = [] { return make_status(0.5f, 0.15f, 0.55f, 0.325f, 0.575f); }();
 
 /// Measured on the U1, where target_z and the mean coincide: base points
 /// -0.18083 / -0.53958 / -0.11625 / -0.295 with target_z exactly their mean.
-const json DEVICE_MEASURED_STATUS = [] {
+const json kDeviceMeasuredStatus = [] {
     return make_status(-0.28292f, -0.18083f, -0.53958f, -0.11625f, -0.295f);
 }();
 
 /// Expected signed minutes for one screw, derived from the spec's arithmetic
 /// (target_z - base_point, M3 pitch) rather than hardcoded.
 int expected_minutes(float target_z, float base_point) {
-    return screw_minutes_for_mm(target_z - base_point, SCREW_PITCH_M3_MM);
+    return screw_minutes_for_mm(target_z - base_point, kScrewPitchM3Mm);
 }
 
 } // namespace
@@ -107,7 +107,7 @@ int expected_minutes(float target_z, float base_point) {
 TEST_CASE("parse_auto_screws_tilt maps status fields to ScrewTiltResult",
           "[calibration][screws_tilt][auto_screws]") {
     const AutoScrewsTiltResults res =
-        parse_auto_screws_tilt(TILTED_STATUS, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+        parse_auto_screws_tilt(kTiltedStatus, kU1ConfigSection, kScrewPitchM3Mm);
 
     REQUIRE(res.ok());
     REQUIRE(res.screws.size() == 4);
@@ -184,7 +184,7 @@ TEST_CASE("parse_auto_screws_tilt reads the target_z field, not a recomputed mea
         }
 
         const AutoScrewsTiltResults res =
-            parse_auto_screws_tilt(OFFSET_TARGET_STATUS, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+            parse_auto_screws_tilt(kOffsetTargetStatus, kU1ConfigSection, kScrewPitchM3Mm);
         REQUIRE(res.ok());
         REQUIRE(res.screws.size() == 4);
 
@@ -197,7 +197,7 @@ TEST_CASE("parse_auto_screws_tilt reads the target_z field, not a recomputed mea
 
     SECTION("the measured U1 payload, where field and mean coincide, still maps") {
         const AutoScrewsTiltResults res =
-            parse_auto_screws_tilt(DEVICE_MEASURED_STATUS, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+            parse_auto_screws_tilt(kDeviceMeasuredStatus, kU1ConfigSection, kScrewPitchM3Mm);
         REQUIRE(res.ok());
         REQUIRE(res.screws.size() == 4);
         REQUIRE(res.screws[1].z_height == Catch::Approx(-0.53958f));
@@ -224,15 +224,15 @@ TEST_CASE("parse_auto_screws_tilt verdicts are invariant to thread pitch",
     // minutes on a finer thread) - only the verdict is invariant.
 
     SECTION("a tilted bed needs adjustment at every pitch") {
-        const auto m3 = parse_auto_screws_tilt(TILTED_STATUS, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
-        const auto m6 = parse_auto_screws_tilt(TILTED_STATUS, U1_CONFIG_SECTION, SCREW_PITCH_M6_MM);
+        const auto m3 = parse_auto_screws_tilt(kTiltedStatus, kU1ConfigSection, kScrewPitchM3Mm);
+        const auto m6 = parse_auto_screws_tilt(kTiltedStatus, kU1ConfigSection, kScrewPitchM6Mm);
         REQUIRE(m3.ok());
         REQUIRE(m3.screws.size() == 4);
         REQUIRE(m6.ok());
         REQUIRE(m6.screws.size() == 4);
 
-        const ScrewLevelReport r3 = evaluate_screw_level(m3.screws, SCREW_PITCH_M3_MM);
-        const ScrewLevelReport r6 = evaluate_screw_level(m6.screws, SCREW_PITCH_M6_MM);
+        const ScrewLevelReport r3 = evaluate_screw_level(m3.screws, kScrewPitchM3Mm);
+        const ScrewLevelReport r6 = evaluate_screw_level(m6.screws, kScrewPitchM6Mm);
 
         REQUIRE(r3.verdict == ScrewLevelVerdict::NEEDS_ADJUSTMENT);
         REQUIRE(r6.verdict == ScrewLevelVerdict::NEEDS_ADJUSTMENT);
@@ -240,13 +240,13 @@ TEST_CASE("parse_auto_screws_tilt verdicts are invariant to thread pitch",
     }
 
     SECTION("a level bed reads level at every pitch") {
-        const auto m3 = parse_auto_screws_tilt(LEVEL_STATUS, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
-        const auto m6 = parse_auto_screws_tilt(LEVEL_STATUS, U1_CONFIG_SECTION, SCREW_PITCH_M6_MM);
+        const auto m3 = parse_auto_screws_tilt(kLevelStatus, kU1ConfigSection, kScrewPitchM3Mm);
+        const auto m6 = parse_auto_screws_tilt(kLevelStatus, kU1ConfigSection, kScrewPitchM6Mm);
         REQUIRE(m3.ok());
         REQUIRE(m6.ok());
 
-        const ScrewLevelReport r3 = evaluate_screw_level(m3.screws, SCREW_PITCH_M3_MM);
-        const ScrewLevelReport r6 = evaluate_screw_level(m6.screws, SCREW_PITCH_M6_MM);
+        const ScrewLevelReport r3 = evaluate_screw_level(m3.screws, kScrewPitchM3Mm);
+        const ScrewLevelReport r6 = evaluate_screw_level(m6.screws, kScrewPitchM6Mm);
 
         REQUIRE(r3.verdict == ScrewLevelVerdict::LEVEL);
         REQUIRE(r6.verdict == ScrewLevelVerdict::LEVEL);
@@ -265,7 +265,7 @@ TEST_CASE("parse_auto_screws_tilt fails loudly on unusable payloads",
         status.erase("base_point3");
 
         const AutoScrewsTiltResults res =
-            parse_auto_screws_tilt(status, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+            parse_auto_screws_tilt(status, kU1ConfigSection, kScrewPitchM3Mm);
         REQUIRE_FALSE(res.ok());
         REQUIRE(res.screws.empty());
         REQUIRE(res.error.find("base_point3") != std::string::npos);
@@ -277,7 +277,7 @@ TEST_CASE("parse_auto_screws_tilt fails loudly on unusable payloads",
         status["base_point2"] = nullptr;
 
         const AutoScrewsTiltResults res =
-            parse_auto_screws_tilt(status, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+            parse_auto_screws_tilt(status, kU1ConfigSection, kScrewPitchM3Mm);
         REQUIRE_FALSE(res.ok());
         REQUIRE(res.screws.empty());
         REQUIRE(res.error.find("base_point2") != std::string::npos);
@@ -288,7 +288,7 @@ TEST_CASE("parse_auto_screws_tilt fails loudly on unusable payloads",
         status.erase("target_z");
 
         const AutoScrewsTiltResults res =
-            parse_auto_screws_tilt(status, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+            parse_auto_screws_tilt(status, kU1ConfigSection, kScrewPitchM3Mm);
         REQUIRE_FALSE(res.ok());
         REQUIRE(res.screws.empty());
         REQUIRE(res.error.find("target_z") != std::string::npos);
@@ -299,7 +299,7 @@ TEST_CASE("parse_auto_screws_tilt fails loudly on unusable payloads",
         status["target_z"] = nullptr;
 
         const AutoScrewsTiltResults res =
-            parse_auto_screws_tilt(status, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+            parse_auto_screws_tilt(status, kU1ConfigSection, kScrewPitchM3Mm);
         REQUIRE_FALSE(res.ok());
         REQUIRE(res.screws.empty());
         REQUIRE(res.error.find("target_z") != std::string::npos);
@@ -310,10 +310,10 @@ TEST_CASE("parse_auto_screws_tilt fails loudly on unusable payloads",
         status.erase("base_point1");
 
         const AutoScrewsTiltResults res =
-            parse_auto_screws_tilt(status, U1_CONFIG_SECTION, SCREW_PITCH_M3_MM);
+            parse_auto_screws_tilt(status, kU1ConfigSection, kScrewPitchM3Mm);
         REQUIRE_FALSE(res.ok());
         // The downstream judge must not render a partial set as green.
-        REQUIRE(evaluate_screw_level(res.screws, SCREW_PITCH_M3_MM).verdict ==
+        REQUIRE(evaluate_screw_level(res.screws, kScrewPitchM3Mm).verdict ==
                 ScrewLevelVerdict::PARSE_ERROR);
     }
 }
@@ -324,7 +324,7 @@ TEST_CASE("parse_auto_screws_tilt fails loudly on unusable payloads",
 
 TEST_CASE("auto_screws stale_calibration_state decides a held state is safe to clear",
           "[calibration][screws_tilt][auto_screws]") {
-    using helix::snapmaker::screws_tilt::MAIN_STATE_SCREWS_TILT_ADJUST;
+    using helix::snapmaker::screws_tilt::kMainStateScrewsTiltAdjust;
     using helix::snapmaker::screws_tilt::stale_calibration_state;
 
     SECTION("a terminal or never-started probe step is stale") {
@@ -332,7 +332,7 @@ TEST_CASE("auto_screws stale_calibration_state decides a held state is safe to c
              {"adjust_idle", "adjust_complete", "adjust_failed", "adjust_homing_failed",
               "adjust_plate_detection_error", "adjust_aborted"}) {
             CAPTURE(step);
-            REQUIRE(stale_calibration_state(MAIN_STATE_SCREWS_TILT_ADJUST, step));
+            REQUIRE(stale_calibration_state(kMainStateScrewsTiltAdjust, step));
         }
     }
 
@@ -343,13 +343,13 @@ TEST_CASE("auto_screws stale_calibration_state decides a held state is safe to c
               "adjust_refpoint_done", "adjust_aborting", "adjust_probing", "adjust_wait_manual",
               "adjust_next_point_adjust", "adjust_verify"}) {
             CAPTURE(step);
-            REQUIRE_FALSE(stale_calibration_state(MAIN_STATE_SCREWS_TILT_ADJUST, step));
+            REQUIRE_FALSE(stale_calibration_state(kMainStateScrewsTiltAdjust, step));
         }
     }
 
     SECTION("an unknown probe step is not stale") {
-        REQUIRE_FALSE(stale_calibration_state(MAIN_STATE_SCREWS_TILT_ADJUST, "adjust_bogus"));
-        REQUIRE_FALSE(stale_calibration_state(MAIN_STATE_SCREWS_TILT_ADJUST, ""));
+        REQUIRE_FALSE(stale_calibration_state(kMainStateScrewsTiltAdjust, "adjust_bogus"));
+        REQUIRE_FALSE(stale_calibration_state(kMainStateScrewsTiltAdjust, ""));
     }
 
     SECTION("a main_state that is not SCREWS_TILT_ADJUST is never ours to clear") {
@@ -423,8 +423,8 @@ TEST_CASE("auto_screws results_from_query maps a probe-result query response",
 
     SECTION("status object plus configfile section map to screw results") {
         const json response = query_response(
-            {{helix::snapmaker::screws_tilt::MODULE_NAME, TILTED_STATUS},
-             {"configfile", {{"settings", {{"auto_screws_tilt_adjust", U1_CONFIG_SECTION}}}}}});
+            {{helix::snapmaker::screws_tilt::kModuleName, kTiltedStatus},
+             {"configfile", {{"settings", {{"auto_screws_tilt_adjust", kU1ConfigSection}}}}}});
 
         const AutoScrewsTiltResults res = results_from_query(response);
         REQUIRE(res.ok());
@@ -434,7 +434,7 @@ TEST_CASE("auto_screws results_from_query maps a probe-result query response",
 
     SECTION("a missing configfile section still maps - coords and names are optional") {
         const json response =
-            query_response({{helix::snapmaker::screws_tilt::MODULE_NAME, TILTED_STATUS}});
+            query_response({{helix::snapmaker::screws_tilt::kModuleName, kTiltedStatus}});
 
         const AutoScrewsTiltResults res = results_from_query(response);
         REQUIRE(res.ok());
@@ -447,7 +447,7 @@ TEST_CASE("auto_screws results_from_query maps a probe-result query response",
             results_from_query(query_response({{"configfile", json::object()}}));
         REQUIRE_FALSE(res.ok());
         REQUIRE(res.screws.empty());
-        REQUIRE(evaluate_screw_level(res.screws, SCREW_PITCH_M3_MM).verdict ==
+        REQUIRE(evaluate_screw_level(res.screws, kScrewPitchM3Mm).verdict ==
                 ScrewLevelVerdict::PARSE_ERROR);
     }
 }

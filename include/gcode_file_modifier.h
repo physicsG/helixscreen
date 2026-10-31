@@ -45,6 +45,17 @@ struct Modification {
     /// Optional comment explaining the modification (for debugging)
     std::string comment;
 
+    /// For COMMENT_OUT and REPLACE: the line the scan saw there. When set, a
+    /// file whose line differs is refused rather than rewritten: the scan
+    /// was of other G-code, and its line numbers mean nothing here.
+    std::string expected_line;
+
+    /// This modification, checked against @p line before it is applied.
+    [[nodiscard]] Modification expecting(std::string line) && {
+        expected_line = std::move(line);
+        return std::move(*this);
+    }
+
     /// Create a COMMENT_OUT modification for a single line
     static Modification comment_out(size_t line, const std::string& reason = "") {
         return {ModificationType::COMMENT_OUT, line, 0, "", reason};

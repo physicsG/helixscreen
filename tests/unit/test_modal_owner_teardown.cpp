@@ -37,7 +37,7 @@
 namespace {
 
 /// Minimal real modal component: no subject bindings, no owning C++ class.
-constexpr const char* TEST_COMPONENT = "print_cancel_confirm_modal";
+constexpr const char* kTestComponent = "print_cancel_confirm_modal";
 
 /// Counts on_hide() invocations so tests can prove the instance teardown ran.
 class TrackingModal : public Modal {
@@ -48,7 +48,7 @@ class TrackingModal : public Modal {
         return "TrackingModal";
     }
     const char* component_name() const override {
-        return TEST_COMPONENT;
+        return kTestComponent;
     }
     void on_hide() override {
         ++hide_calls;
@@ -73,7 +73,7 @@ class StackOwnedModal : public Modal {
         return "StackOwnedModal";
     }
     const char* component_name() const override {
-        return TEST_COMPONENT;
+        return kTestComponent;
     }
 };
 
@@ -89,7 +89,7 @@ class ReentrantModal : public Modal {
         return "ReentrantModal";
     }
     const char* component_name() const override {
-        return TEST_COMPONENT;
+        return kTestComponent;
     }
     void on_hide() override {
         ++hide_calls;
@@ -246,7 +246,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "on_hide reaching back into static hide does
 
 TEST_CASE_METHOD(LVGLUITestFixture, "Hiding an owned modal raises the modal beneath it",
                  "[modal][1230]") {
-    lv_obj_t* lower = Modal::show(TEST_COMPONENT);
+    lv_obj_t* lower = Modal::show(kTestComponent);
     REQUIRE(lower != nullptr);
     lv_obj_t* lower_backdrop = ModalStack::instance().backdrop_for(lower);
     REQUIRE(lower_backdrop != nullptr);
@@ -279,7 +279,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Hiding an owned modal raises the modal bene
 // ============================================================================
 
 TEST_CASE_METHOD(LVGLUITestFixture, "Static show/hide still tears a modal down", "[modal][1230]") {
-    lv_obj_t* dialog = Modal::show(TEST_COMPONENT);
+    lv_obj_t* dialog = Modal::show(kTestComponent);
     REQUIRE(dialog != nullptr);
     REQUIRE_FALSE(ModalStack::instance().stack_empty());
     REQUIRE(Modal::any_visible());
@@ -294,7 +294,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Static show/hide still tears a modal down",
 
 TEST_CASE_METHOD(LVGLUITestFixture, "rebuild_top hides a statically shown modal too",
                  "[modal][1230]") {
-    lv_obj_t* original = Modal::show(TEST_COMPONENT);
+    lv_obj_t* original = Modal::show(kTestComponent);
     REQUIRE(original != nullptr);
 
     // A re-show cannot carry the runtime attrs or the post-show button wiring
@@ -338,7 +338,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
 TEST_CASE_METHOD(LVGLUITestFixture, "Hiding a statically shown top modal raises the one beneath",
                  "[modal][1230]") {
-    lv_obj_t* lower = Modal::show(TEST_COMPONENT);
+    lv_obj_t* lower = Modal::show(kTestComponent);
     REQUIRE(lower != nullptr);
     lv_obj_t* lower_backdrop = ModalStack::instance().backdrop_for(lower);
     REQUIRE(lower_backdrop != nullptr);
@@ -346,7 +346,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Hiding a statically shown top modal raises 
     lv_obj_t* sentinel = make_z_order_sentinel(test_screen());
     REQUIRE(sentinel != nullptr);
 
-    lv_obj_t* upper = Modal::show(TEST_COMPONENT);
+    lv_obj_t* upper = Modal::show(kTestComponent);
     REQUIRE(upper != nullptr);
     REQUIRE_FALSE(is_foreground_child(lower_backdrop));
 
@@ -422,7 +422,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "A press held across hide does not fire the 
         REQUIRE(dialog != nullptr);
 
         // Let the entrance animation finish before measuring -
-        // MODAL_ENTRANCE_DURATION_MS is 250, and coordinates taken mid-animation
+        // kModalEntranceDurationMs is 250, and coordinates taken mid-animation
         // point at a scaled dialog.
         process_lvgl(400);
         // process_lvgl() pumps timers but does not force a layout pass, and
@@ -846,7 +846,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "An expired owner token suppresses modal_ale
 }
 
 // The owner frees itself one tick after on_hide(), while the dialog lives out
-// MODAL_EXIT_DURATION_MS. Every callback carrying that pointer must be gone
+// kModalExitDurationMs. Every callback carrying that pointer must be gone
 // before then, or a programmatic click in the window dispatches into freed
 // memory - lv_obj_send_event ignores the CLICKABLE flag that
 // disable_clicks_recursive removes, which is how `ctl click` reaches disabled

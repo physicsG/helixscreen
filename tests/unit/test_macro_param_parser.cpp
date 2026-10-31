@@ -242,6 +242,20 @@ TEST_CASE("parse_raw_macro_params - skips missing equals", "[macro_params]") {
     CHECK(result["TEMP"] == "200");
 }
 
+TEST_CASE("parse_raw_macro_params - reports the tokens it could not read", "[macro_params]") {
+    std::vector<std::string> rejected;
+    auto result = helix::parse_raw_macro_params("JUSTVALUE temp=200 =5", &rejected);
+    CHECK(result == std::map<std::string, std::string>{{"TEMP", "200"}});
+    CHECK(rejected == std::vector<std::string>{"JUSTVALUE", "=5"});
+}
+
+TEST_CASE("format_raw_macro_params - parses back to the same values", "[macro_params]") {
+    const std::map<std::string, std::string> values{{"PURGE", "1"}, {"LANE", "lane2"}};
+    CHECK(helix::format_raw_macro_params(values) == "LANE=lane2 PURGE=1");
+    CHECK(helix::parse_raw_macro_params(helix::format_raw_macro_params(values)) == values);
+    CHECK(helix::format_raw_macro_params({}).empty());
+}
+
 TEST_CASE("parse_raw_macro_params - extra whitespace", "[macro_params]") {
     auto result = helix::parse_raw_macro_params("  TEMP=200   SPEED=50  ");
     REQUIRE(result.size() == 2);
@@ -294,7 +308,7 @@ MacroParam only_param(const std::string& gcode) {
 TEST_CASE("parse_macro_params - a default read from printer state is an expression",
           "[macro_params][macro_defaults]") {
     lv_init_safe();
-    auto result = parse_macro_params(helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT);
+    auto result = parse_macro_params(helix::test::kLoadFilamentExpressionDefault);
 
     REQUIRE(result.size() == 1);
     const MacroParam& param = result[0];

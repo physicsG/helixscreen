@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<component>
+  <consts>
+    <px name="consts-bad__w_small" value="10"/>
+    <px name="consts-bad__w_large" value="30"/>
+  </consts>
+  <view extends="lv_obj"/>
+</component>

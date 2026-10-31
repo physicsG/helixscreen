@@ -1,5 +1,6 @@
 HelixScreen installer v1.0.1 (stable)
   Printer    x86 · systemd · user root
+  Mode       kiosk, takes over the screen (existing install)
   Found      HelixScreen at /root/helixscreen
   Update     v1.0.0 → v1.0.1 (stable) · local file, <size>
 

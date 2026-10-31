@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
+
 /**
  * @file moonraker_validation.h
  * @brief Input validators and error-report helpers for the Moonraker sub-APIs
@@ -15,10 +17,12 @@
 #include "moonraker_error.h"
 #include "moonraker_types.h"
 #include "spdlog/spdlog.h"
+#include "utf8_validation.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <initializer_list>
 #include <string>
@@ -37,15 +41,28 @@ namespace helix {
  * @param detail Developer-facing reason, logged at warn
  * @param user_message Text a UI shows: the MoonrakerError message or the toast
  */
-void report_validation_error(const std::function<void(const MoonrakerError&)>& on_error,
+void report_validation_error(const helix::SharedCallback<void(const MoonrakerError&)>& on_error,
                              const char* method, const std::string& detail,
                              const std::string& user_message);
+
+/**
+ * @brief Whether @p cp is a non-ASCII codepoint Python's str.isspace() treats as whitespace
+ *
+ * Klipper strips and splits G-code lines with Python's Unicode-aware whitespace rules, so
+ * any of these inside a parameter value truncates it the way an ASCII space does. U+180E
+ * (no longer whitespace in Unicode, still in older tables) is included as well.
+ */
+inline bool is_unicode_space(uint32_t cp) {
+    return cp == 0x85 || cp == 0xA0 || cp == 0x1680 || cp == 0x180E ||
+           (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F ||
+           cp == 0x205F || cp == 0x3000;
+}
 
 } // namespace helix
 
 namespace moonraker_internal {
 
-using ErrorCallback = std::function<void(const MoonrakerError&)>;
+using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
 
 /**
  * @brief Validate that a string contains only safe identifier characters
@@ -94,36 +111,57 @@ inline bool is_safe_file_root(const std::string& root) {
  * (e.g., `Part.stl_id_0_copy_0`, `model-v2.3mf`, `component:sub`). Rejecting these silently
  * breaks EXCLUDE_OBJECT for most real-world prints (prestonbrown/helixscreen#768).
  *
- * Allows: alphanumeric, `_ - . : ( ) [ ]`. Rejects everything else — which keeps G-code
- * injection vectors closed: `;` (comment), `\n\r` (line injection), control chars, quotes,
- * backslash, and — critically — whitespace. Klipper's G-code parser tokenizes parameters
- * on whitespace, so a NAME containing a space would either truncate (wrong object excluded)
- * or leak trailing tokens into the parameter list. Slicers URL-encode/underscore-replace
+ * Allows: alphanumeric, `_ - . : ( ) [ ]`, and well-formed UTF-8 for any codepoint from
+ * U+00A0 up that is not Unicode whitespace (helix::is_unicode_space()). Rejects everything else —
+ * which keeps G-code injection vectors closed: `;` (comment), `\n\r` (line injection), control
+ * chars, quotes, backslash, and — critically — whitespace. Klipper's G-code parser tokenizes
+ * parameters on whitespace, so a NAME containing a space would either truncate (wrong object
+ * excluded) or leak trailing tokens into the parameter list. Slicers URL-encode/underscore-replace
  * spaces in object names, so disallowing space breaks nothing real.
+ *
+ * Non-ASCII is allowed because slicers keep the model's own name, so a Chinese or Japanese
+ * model file defines `EXCLUDE_OBJECT_DEFINE NAME=测试件.stl_id_0_copy_0`, and Klipper accepts
+ * it. Every byte of a multi-byte UTF-8 sequence is >= 0x80, so none can be one of the ASCII
+ * delimiters above. The sequence must be well-formed because the name travels in a JSON-RPC
+ * request, and malformed UTF-8 cannot be serialized.
  */
 inline bool is_safe_object_name(const std::string& str) {
     if (str.empty()) {
         return false;
     }
 
-    return std::all_of(str.begin(), str.end(), [](char c) {
-        if (std::isalnum(static_cast<unsigned char>(c))) {
-            return true;
+    size_t i = 0;
+    while (i < str.size()) {
+        const auto c = static_cast<unsigned char>(str[i]);
+        if (c < 0x80) {
+            if (std::isalnum(c)) {
+                ++i;
+                continue;
+            }
+            switch (c) {
+            case '_':
+            case '-':
+            case '.':
+            case ':':
+            case '(':
+            case ')':
+            case '[':
+            case ']':
+                ++i;
+                continue;
+            default:
+                return false;
+            }
         }
-        switch (c) {
-        case '_':
-        case '-':
-        case '.':
-        case ':':
-        case '(':
-        case ')':
-        case '[':
-        case ']':
-            return true;
-        default:
+
+        const std::optional<helix::text_io::Utf8Sequence> seq = helix::text_io::decode_utf8(str, i);
+        // U+0080..U+009F are C1 controls; U+00A0 opens the printable range.
+        if (!seq || seq->codepoint < 0xA0 || helix::is_unicode_space(seq->codepoint)) {
             return false;
         }
-    });
+        i += seq->length;
+    }
+    return true;
 }
 
 /**

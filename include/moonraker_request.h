@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "json_fwd.h"
 #include "moonraker_error.h"
 #include "rpc_error_policy.h"
@@ -19,11 +20,12 @@
 struct PendingRequest {
     uint64_t id;        ///< JSON-RPC request ID
     std::string method; ///< Method name for logging
-    std::function<void(const json&)>
+    helix::SharedCallback<void(const json&)>
         success_callback; ///< Success callback (pass-by-value for thread safety)
-    std::function<void(const MoonrakerError&)> error_callback; ///< Error callback (optional)
-    std::chrono::steady_clock::time_point timestamp;           ///< When request was sent
-    uint32_t timeout_ms;                                       ///< Timeout in milliseconds
+    helix::SharedCallback<void(const MoonrakerError&)>
+        error_callback;                              ///< Error callback (optional)
+    std::chrono::steady_clock::time_point timestamp; ///< When request was sent
+    uint32_t timeout_ms;                             ///< Timeout in milliseconds
     /// What the caller told us about who reports this error to the user, captured
     /// before any internal callback wrapping. Consumed by
     /// helix::rpc_error_policy::decide() — see include/rpc_error_policy.h.

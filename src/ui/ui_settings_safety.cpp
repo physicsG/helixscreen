@@ -34,10 +34,10 @@ void SafetySettingsOverlay::register_callbacks() {
          }},
         {"on_cancel_escalation_timeout_changed",
          [](lv_event_t* e) {
-             static constexpr int TIMEOUT_SECONDS[] = {15, 30, 60, 120};
+             static constexpr int kTimeoutSeconds[] = {15, 30, 60, 120};
              int index = std::clamp(event_selected(e), 0, 3);
              SafetySettingsManager::instance().set_cancel_escalation_timeout_seconds(
-                 TIMEOUT_SECONDS[index]);
+                 kTimeoutSeconds[index]);
          }},
         {"on_completion_alert_changed",
          [](lv_event_t* e) {

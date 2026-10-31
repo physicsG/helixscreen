@@ -2,7 +2,8 @@ build/
 sdkconfig
 sdkconfig.old
 managed_components/
-dependencies.lock
+# dependencies.lock is committed: it pins the managed components (littlefs,
+# frogfs, touch) so every build, CI and release included, uses the same versions.
 
 # Real WiFi/Moonraker credentials for the Task 10 network HIL scenario are
 # injected here at flash time — NEVER committed (public repo). See

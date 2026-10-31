@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "fan_gcode.h"
+#include "printer_fan_state.h"
 
 #include <iomanip>
 #include <sstream>
@@ -85,4 +86,23 @@ TEST_CASE("Fan gcode fractional values match fixed two-decimal formatting", "[fa
                   reference("SET_FAN_SPEED FAN=aux SPEED=", v));
         }
     }
+}
+
+// K2's output_pin extruder_fan is driven with the hotend heater. Fan Control
+// shows it like a heater_fan, with no dial, and no command is ever built for it.
+TEST_CASE("A hotend-area output_pin fan is read-only and never commanded", "[fan][gcode]") {
+    using helix::FanType;
+    using helix::PrinterFanState;
+    for (const char* name :
+         {"output_pin extruder_fan", "output_pin hotend_fan", "output_pin Heatbreak_Fan"}) {
+        INFO(name);
+        CHECK(PrinterFanState::classify_fan_type(name, "") == FanType::HEATER_FAN);
+        CHECK_FALSE(
+            PrinterFanState::is_fan_controllable(PrinterFanState::classify_fan_type(name, "")));
+        CHECK(helix::fan_gcode(name, 50.0).empty());
+    }
+    // Other output_pin fans stay commandable.
+    CHECK(PrinterFanState::classify_fan_type("output_pin aux_fan", "") == FanType::OUTPUT_PIN_FAN);
+    CHECK(PrinterFanState::classify_fan_type("output_pin fan1", "") == FanType::OUTPUT_PIN_FAN);
+    CHECK(helix::fan_gcode("output_pin aux_fan", 50.0) == "SET_PIN PIN=aux_fan VALUE=0.50");
 }

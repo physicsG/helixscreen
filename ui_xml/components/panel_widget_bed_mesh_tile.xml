@@ -1,0 +1,168 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    Bed mesh home widget. BedMeshTileWidget publishes bed_mesh_tile_rung (SizeRung) and the
+    flags the verdict sets (show_map, show_range, show_empty, show_details, show_scale,
+    show_footer, show_calibrate, show_load, calibrating), the flatness status and the texts
+    below; the stats themselves are BedMeshState's bed_mesh_* subjects. A tap anywhere that is not a
+    button opens the Bed Mesh panel.
+
+    Rungs: 0 glance (grid glyph over the range), 1 strip (small heatmap beside the range),
+    2 column (heatmap over the range), 3 cell (the same, larger), 4 wide (heatmap beside the
+    profile name, range, min..max and grid size), 5 full and 6 large (heatmap, colour scale,
+    profile name, range and profile count). With no mesh loaded the heatmap gives way to a
+    grid-off glyph, and at full and up an idle printer offers Calibrate and Load profile.
+  -->
+  <gradients>
+    <horizontal name="bm_scale">
+      <stop color="#7F2CD2" offset="0"/>
+      <stop color="#2C7FD2" offset="31"/>
+      <stop color="#3BE1E1" offset="95"/>
+      <stop color="#E1E13B" offset="159"/>
+      <stop color="#C31D1D" offset="223"/>
+    </horizontal>
+  </gradients>
+  <styles>
+    <style name="bm_ok" text_color="#success"/>
+    <style name="bm_warn" text_color="#warning"/>
+    <style name="bm_danger" text_color="#danger"/>
+    <style name="bm_font_xs" text_font="#font_xs"/>
+    <style name="bm_stacked"
+           layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center" flex_track_place="center"/>
+    <style name="bm_inline"
+           layout="flex" flex_flow="row" flex_main_place="center" flex_cross_place="center" flex_track_place="center"/>
+    <style name="bm_text_column" width="100%"/>
+    <style name="bm_text_row" width="#space_xl" flex_grow="1"/>
+    <style name="bm_slot_column" width="100%" height="#space_md"/>
+    <style name="bm_slot_row" width="#space_md" height="100%"/>
+  </styles>
+  <view name="panel_widget_bed_mesh_tile"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_xxs" scrollable="false">
+    <event_cb trigger="clicked" callback="bed_mesh_tile_clicked_cb"/>
+    <pass_through name="bed_mesh_tile_body"
+                  width="100%" height="100%" style_pad_row="#space_xxs" style_pad_column="#space_xs">
+      <bind_style_if name="bm_inline" cond="bed_mesh_tile_rung eq 1 or bed_mesh_tile_rung eq 4"/>
+      <bind_style_if name="bm_stacked" cond="bed_mesh_tile_rung ne 1 and bed_mesh_tile_rung ne 4"/>
+
+      <!-- A grid glyph stands in for the heatmap: tinted by flatness when a mesh is loaded
+           but the heatmap does not fit, grid-off when there is none. -->
+      <icon name="bed_mesh_tile_glyph" src="grid_large" size="xs" clickable="false" event_bubble="true">
+        <bind_flag_if cond="bed_mesh_tile_show_map eq 1 or bed_mesh_available eq 0" flag="hidden"/>
+        <bind_style_if_eq name="bm_ok" subject="bed_mesh_tile_status" ref_value="0"/>
+        <bind_style_if_eq name="bm_warn" subject="bed_mesh_tile_status" ref_value="1"/>
+        <bind_style_if_eq name="bm_danger" subject="bed_mesh_tile_status" ref_value="2"/>
+      </icon>
+      <icon name="bed_mesh_tile_glyph_off"
+            src="grid_off" size="xs" variant="muted" clickable="false" event_bubble="true">
+        <bind_flag_if cond="bed_mesh_tile_show_empty eq 1 or bed_mesh_available eq 1" flag="hidden"/>
+      </icon>
+      <icon name="bed_mesh_tile_glyph_empty"
+            src="grid_off" size="lg" variant="muted" clickable="false" event_bubble="true">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_empty" flag="hidden" ref_value="0"/>
+      </icon>
+
+      <!-- The heatmap's slot takes whatever the other parts leave, along the flow. -->
+      <pass_through name="bed_mesh_tile_slot" flex_grow="1">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_map" flag="hidden" ref_value="0"/>
+        <bind_style_if name="bm_slot_row" cond="bed_mesh_tile_rung eq 1 or bed_mesh_tile_rung eq 4"/>
+        <bind_style_if name="bm_slot_column" cond="bed_mesh_tile_rung ne 1 and bed_mesh_tile_rung ne 4"/>
+        <bed_mesh name="bed_mesh_tile_map"
+                  width="100%" height="100%" clickable="false" event_bubble="true" style_border_width="0"/>
+      </pass_through>
+
+      <text_small name="bed_mesh_tile_range" bind_text="bed_mesh_tile_range_text" clickable="false" event_bubble="true">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_range" flag="hidden" ref_value="0"/>
+        <bind_style_if_lt name="bm_font_xs" subject="bed_mesh_tile_rung" ref_value="3"/>
+        <bind_style_if_eq name="bm_ok" subject="bed_mesh_tile_status" ref_value="0"/>
+        <bind_style_if_eq name="bm_warn" subject="bed_mesh_tile_status" ref_value="1"/>
+        <bind_style_if_eq name="bm_danger" subject="bed_mesh_tile_status" ref_value="2"/>
+      </text_small>
+
+      <text_small name="bed_mesh_tile_empty_text"
+                  text="No mesh loaded" style_text_color="#text_muted" long_mode="wrap" style_text_align="center"
+                  clickable="false" event_bubble="true">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_empty" flag="hidden" ref_value="0"/>
+        <bind_style_if name="bm_text_row" cond="bed_mesh_tile_rung eq 1 or bed_mesh_tile_rung eq 4"/>
+        <bind_style_if name="bm_text_column" cond="bed_mesh_tile_rung ne 1 and bed_mesh_tile_rung ne 4"/>
+      </text_small>
+
+      <!-- Wide: the profile beside its numbers. The numbers size the column; a longer
+           profile name ellipsizes to their width. -->
+      <pass_through name="bed_mesh_tile_details"
+                    width="content" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="start" style_pad_row="#space_xxs">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_details" flag="hidden" ref_value="0"/>
+        <text_small name="bed_mesh_tile_details_name"
+                    width="100%" bind_text="bed_mesh_profile_name" long_mode="dots" clickable="false"
+                    event_bubble="true"/>
+        <text_body name="bed_mesh_tile_details_range"
+                   bind_text="bed_mesh_variance" clickable="false" event_bubble="true">
+          <bind_style_if_eq name="bm_ok" subject="bed_mesh_tile_status" ref_value="0"/>
+          <bind_style_if_eq name="bm_warn" subject="bed_mesh_tile_status" ref_value="1"/>
+          <bind_style_if_eq name="bm_danger" subject="bed_mesh_tile_status" ref_value="2"/>
+        </text_body>
+        <text_tiny name="bed_mesh_tile_details_extent"
+                   bind_text="bed_mesh_tile_extent_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true"/>
+        <text_tiny name="bed_mesh_tile_details_grid"
+                   bind_text="bed_mesh_dimensions" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+      </pass_through>
+
+      <!-- Full and up: the colour scale under the heatmap, low to high. -->
+      <pass_through name="bed_mesh_tile_scale"
+                    width="100%" height="content" flex_flow="row" style_flex_main_place="space_between"
+                    style_flex_cross_place="center" style_pad_column="#space_xs">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_scale" flag="hidden" ref_value="0"/>
+        <text_tiny name="bed_mesh_tile_scale_low"
+                   bind_text="bed_mesh_tile_scale_low_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true"/>
+        <lv_obj name="bed_mesh_tile_scale_bar"
+                height="#space_xs" flex_grow="1" style_radius="#space_xxs" style_bg_opa="255" style_bg_grad="bm_scale"
+                style_border_width="0" style_pad_all="0" scrollable="false" clickable="false" event_bubble="true"/>
+        <text_tiny name="bed_mesh_tile_scale_high"
+                   bind_text="bed_mesh_tile_scale_high_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true"/>
+      </pass_through>
+
+      <pass_through name="bed_mesh_tile_footer"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="start" style_pad_row="0">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_footer" flag="hidden" ref_value="0"/>
+        <pass_through name="bed_mesh_tile_footer_top"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="space_between"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <text_small name="bed_mesh_tile_footer_name"
+                      bind_text="bed_mesh_profile_name" flex_grow="1" long_mode="dots" clickable="false"
+                      event_bubble="true"/>
+          <text_small name="bed_mesh_tile_footer_range"
+                      bind_text="bed_mesh_variance" clickable="false" event_bubble="true">
+            <bind_style_if_eq name="bm_ok" subject="bed_mesh_tile_status" ref_value="0"/>
+            <bind_style_if_eq name="bm_warn" subject="bed_mesh_tile_status" ref_value="1"/>
+            <bind_style_if_eq name="bm_danger" subject="bed_mesh_tile_status" ref_value="2"/>
+          </text_small>
+        </pass_through>
+        <text_tiny name="bed_mesh_tile_footer_count"
+                   bind_text="bed_mesh_tile_count_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true"/>
+      </pass_through>
+
+      <!-- No mesh and nothing printing: start one, or load a stored profile. -->
+      <pass_through name="bed_mesh_tile_actions"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xs">
+        <bind_flag_if_eq subject="bed_mesh_tile_show_calibrate" flag="hidden" ref_value="0"/>
+        <ui_button name="bed_mesh_tile_calibrate"
+                   width="content" height="#button_height_sm" variant="primary" text="Calibrate" moves_machine="true">
+          <bind_flag_if_eq subject="bed_mesh_tile_calibrating" flag="hidden" ref_value="1"/>
+          <event_cb trigger="clicked" callback="bed_mesh_tile_calibrate_cb"/>
+        </ui_button>
+        <ui_button name="bed_mesh_tile_load" width="content" height="#button_height_sm" text="Load Profile">
+          <bind_flag_if_eq subject="bed_mesh_tile_show_load" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="bed_mesh_tile_load_cb"/>
+        </ui_button>
+      </pass_through>
+    </pass_through>
+  </view>
+</component>

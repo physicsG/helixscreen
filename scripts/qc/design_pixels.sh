@@ -132,7 +132,7 @@ else
   PW_SCROLLABLE_ARGS=""
 fi
 # shellcheck disable=SC2086
-if python3 scripts/check_panel_widget_scrollable.py --max-allowed 21 --summary $PW_SCROLLABLE_ARGS \
+if python3 scripts/check_panel_widget_scrollable.py --max-allowed 5 --summary $PW_SCROLLABLE_ARGS \
     >/tmp/panel_widget_scrollable.out 2>&1; then
   tail -1 /tmp/panel_widget_scrollable.out
 else

@@ -158,7 +158,7 @@ void HeatingIconAnimator::update(int current_temp, int target_temp, helix::Chamb
     // classify_heat_state() — a no-op for nozzle/bed. Only the chamber ever
     // passes Off/Maintaining.
     State new_state = helix::ui::temperature::classify_heat_state_with_mode(
-        helix::ui::temperature::displayed_deci(current_temp), target_temp, mode, TEMP_TOLERANCE);
+        helix::ui::temperature::displayed_deci(current_temp), target_temp, mode, kTempTolerance);
 
     if (new_state != state_) {
         state_ = new_state;
@@ -193,10 +193,10 @@ void HeatingIconAnimator::start_pulse() {
     lv_anim_t anim;
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, this);
-    lv_anim_set_values(&anim, PULSE_OPA_MIN, PULSE_OPA_MAX);
-    lv_anim_set_duration(&anim, PULSE_DURATION_MS);
+    lv_anim_set_values(&anim, kPulseOpaMin, kPulseOpaMax);
+    lv_anim_set_duration(&anim, kPulseDurationMs);
     lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_playback_duration(&anim, PULSE_DURATION_MS);
+    lv_anim_set_playback_duration(&anim, kPulseDurationMs);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
     lv_anim_set_exec_cb(&anim, pulse_anim_cb);
     lv_anim_start(&anim);
@@ -261,7 +261,7 @@ void HeatingIconAnimator::apply_color() {
 
 lv_color_t HeatingIconAnimator::get_secondary_color() {
     // Off-state color, shared with the temperature label (text_muted, not secondary).
-    return helix::ui::temperature::get_heating_state_color(0, 0, TEMP_TOLERANCE);
+    return helix::ui::temperature::get_heating_state_color(0, 0, kTempTolerance);
 }
 
 void HeatingIconAnimator::refresh_theme() {

@@ -46,11 +46,12 @@ class WifiBackendNetworkManager : public WifiBackend {
     WifiBackendNetworkManager();
     ~WifiBackendNetworkManager();
 
-    /// NetworkManager holds nothing while it is down: an init failure here
-    /// means the daemon is masked, stopped or otherwise unreachable, leaving
-    /// the radio, the supplicant and DHCP free for wpa_supplicant to drive.
+    /// NetworkManager holds nothing while it is down, leaving the radio, the
+    /// supplicant and DHCP free for wpa_supplicant to drive. A polkit denial is
+    /// the opposite case: the daemon answered, so it still owns wlan0 and its
+    /// D-Bus-only supplicant, and a second client would fight it for the radio.
     bool supports_wpa_supplicant_fallback() const override {
-        return true;
+        return !daemon_refused_access_.load();
     }
 
     // ========================================================================
@@ -72,12 +73,20 @@ class WifiBackendNetworkManager : public WifiBackend {
     ConnectionStatus get_status() override;
     bool supports_5ghz() const override;
 
+    /// NetworkManager has no regulatory-domain setting of its own, so the
+    /// country goes to the kernel through `iw reg`. Supported where iw is
+    /// installed.
+    bool supports_country() const override;
+    WiFiError get_country(std::string& code) override;
+    WiFiError set_country(const std::string& code) override;
+
   private:
     // ========================================================================
     // Internal State
     // ========================================================================
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> daemon_refused_access_{false}; ///< Last start() hit a polkit denial
     std::mutex start_mutex_;     // Serializes start() against concurrent start_async()
     std::string wifi_interface_; ///< Detected WiFi interface (e.g., "wlan0")
 
@@ -108,6 +117,9 @@ class WifiBackendNetworkManager : public WifiBackend {
     // 5GHz support — computed once at start(), never changes
     std::atomic<bool> supports_5ghz_cached_{false};
     std::atomic<bool> supports_5ghz_resolved_{false};
+    /// `iw` is installed and this process may set the regulatory domain
+    /// (root or CAP_NET_ADMIN). Resolved in start(), off the LVGL thread.
+    std::atomic<bool> country_settable_{false};
 
     // Cached `nmcli radio wifi` state. is_radio_enabled() is polled from the
     // UI thread (WiFiManager::is_enabled), so it must not shell out; the cache
@@ -220,7 +232,7 @@ class WifiBackendNetworkManager : public WifiBackend {
     // Result of one nmcli connect attempt (fork/exec, captures stderr).
     struct ConnectAttempt {
         int exit_code = -1;     // -1 = internal failure (fork/pipe/timeout)
-        bool timed_out = false; // true => killed after CONNECT_TIMEOUT_SECONDS
+        bool timed_out = false; // true => killed after kConnectTimeoutSeconds
         std::string stderr_out;
     };
 

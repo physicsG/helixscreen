@@ -9,16 +9,16 @@
 
 #include "../catch_amalgamated.hpp"
 
-static const char* TYPES[] = {"color", "px", "string"};
-static const char* SUFFIXES[] = {"_light",  "_dark",  "_micro",  "_tiny",   "_small",
-                                 "_medium", "_large", "_xlarge", "_xxlarge"};
+static const char* kTypes[] = {"color", "px", "string"};
+static const char* kSuffixes[] = {"_light",  "_dark",  "_micro",  "_tiny",   "_small",
+                                  "_medium", "_large", "_xlarge", "_xxlarge"};
 
 TEST_CASE("token table matches runtime scan (full element maps)", "[theme][tokens]") {
     // Fail loudly if HELIX_TOKEN_TABLE leaked into the test environment: with
     // the table enabled, the "scanned" side below would hit the fast path too,
     // making the parity check vacuous (table compared against itself).
     REQUIRE_FALSE(helix::theme_tokens::enabled());
-    for (const char* type : TYPES) {
+    for (const char* type : kTypes) {
         INFO("type=" << type << " — if this fails, run: make regen-tokens");
         auto scanned = theme_manager_parse_all_xml_for_element("ui_xml", type);
         auto table = helix::theme_tokens::for_element(type);
@@ -31,8 +31,8 @@ TEST_CASE("token table matches runtime scan (suffix maps)", "[theme][tokens]") {
     // the table enabled, the "scanned" side below would hit the fast path too,
     // making the parity check vacuous (table compared against itself).
     REQUIRE_FALSE(helix::theme_tokens::enabled());
-    for (const char* type : TYPES) {
-        for (const char* suffix : SUFFIXES) {
+    for (const char* type : kTypes) {
+        for (const char* suffix : kSuffixes) {
             INFO("type=" << type << " suffix=" << suffix
                          << " — if this fails, run: make regen-tokens");
             auto scanned = theme_manager_parse_all_xml_for_suffix("ui_xml", type, suffix);
@@ -53,7 +53,7 @@ TEST_CASE("uncovered token types still reach the live scanner", "[theme][tokens]
     }
 
     // The three the table does carry, so the fast path is reachable at all.
-    for (const char* type : TYPES) {
+    for (const char* type : kTypes) {
         INFO("type=" << type);
         REQUIRE(helix::theme_tokens::covers(type));
     }
@@ -66,7 +66,7 @@ TEST_CASE("the table answers only covered types in the canonical dir", "[theme][
     using helix::theme_tokens::answers_from_table;
     const char* canonical = "ui_xml";
 
-    for (const char* type : TYPES) {
+    for (const char* type : kTypes) {
         INFO("type=" << type);
         REQUIRE(answers_from_table(true, type, canonical, canonical));
     }

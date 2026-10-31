@@ -20,29 +20,43 @@
  * 3. The saved option states seed the detail view's rows for the queued file
  *    (the merge rules themselves are pinned at the renderer level in
  *    test_print_select_detail_subjects.cpp and test_pre_print_options_renderer.cpp).
+ *
+ * The home tile's QueuedJobStarter keeps contract 2 through the same
+ * finish_started_queued_job(); its own checks are in test_queued_job_start.cpp.
  */
 
 #include "ui_job_queue_modal.h"
+#include "ui_modal.h"
 #include "ui_update_queue.h"
 
 #include "../test_helpers/job_queue_modal_test_access.h"
 #include "../test_helpers/job_queue_state_test_access.h"
+#include "../test_helpers/job_queue_subjects_fixture.h"
 #include "../test_helpers/moonraker_client_mock_test_access.h"
+#include "../test_helpers/panel_widget_size_harness.h"
 #include "../test_helpers/print_select_panel_fixture.h"
 #include "../test_helpers/print_select_panel_test_access.h"
+#include "../test_helpers/print_start_controller_test_access.h"
 #include "../test_helpers/print_state_test_drivers.h"
+#include "../test_helpers/queued_job_starter_test_access.h"
+#include "../test_helpers/queued_start_fixture.h"
+#include "../test_helpers/tile_boxes.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
 #include "job_queue_start.h"
 #include "job_queue_state.h"
 #include "moonraker_api.h"
+#include "panel_widget_manager.h"
 #include "printer_state.h"
 #include "queued_job_options.h"
+#include "queued_job_start.h"
+#include "src/ui/panel_widgets/job_queue_widget.h"
 #include "static_panel_registry.h"
 #include "test_helpers/pre_print_option_sets.h"
 #include "test_helpers/printer_state_test_access.h"
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,114 +67,12 @@ using helix::PlantedGcode;
 using helix::PrintJobState;
 using helix::queue::QueuedJobOptions;
 using helix::queue::QueuedJobOptionsMap;
+using helix::queue::QueuedJobStarter;
 using helix::test::make_skip_and_addon_set;
 using helix::test::set_wire_state;
 
-namespace {
-
-/// Collects the user-facing warning toasts: toasts are compiled out of the
-/// test build, so the hook is the only observable.
-struct WarningLog {
-    std::vector<std::string> messages;
-
-    WarningLog() {
-        helix::ui::set_test_notification_warning_hook(
-            [this](const std::string& message) { messages.push_back(message); });
-    }
-    ~WarningLog() {
-        helix::ui::set_test_notification_warning_hook(nullptr);
-    }
-    WarningLog(const WarningLog&) = delete;
-    WarningLog& operator=(const WarningLog&) = delete;
-
-    bool contains(const std::string& needle) const {
-        for (const auto& m : messages) {
-            if (m.find(needle) != std::string::npos) {
-                return true;
-            }
-        }
-        return false;
-    }
-};
-
-class QueuedStartFixture : private helix::PrintSelectGlobalStateReset,
-                           public helix::PrintSelectPanelFixture {
-  public:
-    QueuedStartFixture()
-        : helix::PrintSelectPanelFixture(helix::PrintSelectFilelistHandler::Unregistered) {
-        PrinterStateTestAccess::set_option_set(get_printer_state(), make_skip_and_addon_set());
-        previous_api_ = get_moonraker_api();
-        set_moonraker_api(api_.get());
-        drain();
-    }
-
-    ~QueuedStartFixture() override {
-        // With the panel and its api still alive: settle the state, then hand
-        // the global api pointer back before the bases tear anything down.
-        auto& ps = get_printer_state();
-        if (ps.print_state().has_preparing_job()) {
-            ps.print_state().retire_preparing(helix::PreparingExit::Superseded);
-        }
-        set_wire_state(ps, PrintJobState::STANDBY);
-        drain();
-        set_moonraker_api(previous_api_);
-    }
-
-    /// Writes a stored-options entry the way add_to_queue does: one post to
-    /// the job's own key. The mock dispatches inline, so it answers before
-    /// returning.
-    void seed_store(const std::string& job_id, const std::string& filename,
-                    std::map<std::string, bool> options) {
-        api_->database_post_item(
-            helix::queue::kOptionsDbNamespace, helix::queue::queued_job_option_key(job_id),
-            helix::queue::encode_queued_job_entry(QueuedJobOptions{filename, std::move(options)}),
-            []() {}, [](const MoonrakerError&) { FAIL("seed post failed"); });
-    }
-
-    /// Reads the stored option map straight from the (mock) database.
-    QueuedJobOptionsMap read_store() {
-        QueuedJobOptionsMap out;
-        bool answered = false;
-        api_->database_get_item(
-            helix::queue::kOptionsDbNamespace, helix::queue::kOptionsDbKey,
-            [&out, &answered](const json& value) {
-                out = helix::queue::decode_queued_job_options(value);
-                answered = true;
-            },
-            [&answered](const MoonrakerError&) { answered = true; });
-        REQUIRE(answered);
-        return out;
-    }
-
-    /// Whether the job is still in Moonraker's queue (the mock answers
-    /// synchronously, so a capturing lambda is safe here).
-    bool queue_has(const std::string& job_id) {
-        bool found = false;
-        api_->queue().get_queue_status(
-            [&found, &job_id](const JobQueueStatus& status) {
-                for (const auto& job : status.queued_jobs) {
-                    if (job.job_id == job_id) {
-                        found = true;
-                    }
-                }
-            },
-            [](const MoonrakerError& err) { FAIL(err.message); });
-        return found;
-    }
-
-    static JobQueueEntry entry(const std::string& job_id, const std::string& filename) {
-        return JobQueueEntry{job_id, filename, 0.0, 0.0};
-    }
-
-    const std::string* pending_job_id() const {
-        return ::PrintSelectPanelTestAccess::pending_queued_job_id(*panel_);
-    }
-
-  private:
-    IMoonrakerAPI* previous_api_ = nullptr;
-};
-
-} // namespace
+using helix::test::QueuedStartFixture;
+using helix::test::WarningLog;
 
 TEST_CASE_METHOD(QueuedStartFixture,
                  "a queued job opens the detail view seeded and is removed only on confirmed start",
@@ -548,8 +460,9 @@ TEST_CASE_METHOD(QueuedStartFixture, "a refused queue removal keeps the job and 
     // override answers error_cb where the stock handler succeeds.
     helix::MoonrakerClientMockTestAccess::set_method_handler(
         mock_client_, "server.job_queue.delete_job",
-        [](MoonrakerClientMock*, const json&, std::function<void(const json&)> /*success_cb*/,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+        [](MoonrakerClientMock*, const json&,
+           helix::SharedCallback<void(const json&)> /*success_cb*/,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
             if (error_cb) {
                 error_cb(MoonrakerError::unknown("refused", "server.job_queue.delete_job"));
             }
@@ -591,4 +504,226 @@ TEST_CASE_METHOD(QueuedStartFixture,
     CHECK(queue_has("0001"));
     CHECK(read_store().count("0001") == 1);
     CHECK_FALSE(::PrintSelectPanelTestAccess::detail_view_visible(*panel_));
+}
+
+// ============================================================================
+// The home tile's starter shares the after-start bookkeeping
+// ============================================================================
+
+namespace {
+
+/// Start @p job through @p starter with its option read held, so the start
+/// is in flight, then report Moonraker confirming the print.
+std::optional<QueuedJobStarter::Outcome> confirm_starter_start(QueuedStartFixture& f,
+                                                               QueuedJobStarter& starter,
+                                                               const helix::JobQueueEntry& job) {
+    std::optional<QueuedJobStarter::Outcome> outcome;
+    f.mock_client_.defer_next("server.database.get_item");
+    starter.start(job, [&outcome](QueuedJobStarter::Outcome o) { outcome = o; });
+    REQUIRE(starter.in_flight());
+    PrintStartControllerTestAccess::fire_print_started(
+        QueuedJobStarterTestAccess::controller(starter));
+    QueuedStartFixture::drain();
+    return outcome;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(QueuedStartFixture,
+                 "the starter removes the job and its options once the print starts",
+                 "[job_queue][queue_start]") {
+    seed_store("0001", "3DBenchy.gcode", {{"bed_mesh", false}});
+    QueuedJobStarter starter(get_printer_state(), api_.get());
+
+    const auto outcome = confirm_starter_start(*this, starter, entry("0001", "3DBenchy.gcode"));
+
+    REQUIRE(outcome.has_value());
+    CHECK(*outcome == QueuedJobStarter::Outcome::Started);
+    CHECK_FALSE(queue_has("0001"));
+    CHECK(read_store().count("0001") == 0);
+    CHECK_FALSE(starter.in_flight());
+}
+
+TEST_CASE_METHOD(QueuedStartFixture,
+                 "a refused removal after a starter start keeps the job and its options",
+                 "[job_queue][queue_start]") {
+    WarningLog warnings;
+    seed_store("0001", "3DBenchy.gcode", {{"bed_mesh", false}});
+    helix::MoonrakerClientMockTestAccess::set_method_handler(
+        mock_client_, "server.job_queue.delete_job",
+        [](MoonrakerClientMock*, const json&,
+           helix::SharedCallback<void(const json&)> /*success_cb*/,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
+            if (error_cb) {
+                error_cb(MoonrakerError::unknown("refused", "server.job_queue.delete_job"));
+            }
+            return true;
+        });
+    QueuedJobStarter starter(get_printer_state(), api_.get());
+
+    const auto outcome = confirm_starter_start(*this, starter, entry("0001", "3DBenchy.gcode"));
+
+    REQUIRE(outcome.has_value());
+    CHECK(*outcome == QueuedJobStarter::Outcome::Started);
+    CHECK(queue_has("0001"));
+    CHECK(read_store().count("0001") == 1);
+    CHECK(warnings.contains("Could not remove the job from the queue"));
+}
+
+// ============================================================================
+// The home tile's start button
+// ============================================================================
+
+namespace {
+
+/// The queue tile over a queue holding one planted job, with the process-wide
+/// starter pointed at this fixture's print-select and put back afterwards.
+class TileStartFixture : public helix::test::QueuedStartMockedFixture {
+  public:
+    TileStartFixture() {
+        PanelWidgetManager::instance().init_widget_subjects();
+        jqs.init_subjects();
+        lv_subject_set_int(lv_xml_get_subject(nullptr, "printer_has_job_queue"), 1);
+        previous_prep_ = QueuedJobStarterTestAccess::swap_prep_source(
+            helix::queue::queued_job_starter(),
+            [this]() { return panel_->print_preparation_manager(); });
+    }
+
+    ~TileStartFixture() override {
+        QueuedJobStarterTestAccess::swap_prep_source(helix::queue::queued_job_starter(),
+                                                     previous_prep_);
+        lv_subject_set_int(lv_xml_get_subject(nullptr, "printer_has_job_queue"), 0);
+    }
+
+    /// Hand the tile a queue of just @p job, as Moonraker's answer would.
+    void show_queue(const JobQueueEntry& job) {
+        JobQueueStatus status;
+        status.queue_state = "ready";
+        status.queued_jobs.push_back(job);
+        JobQueueStateTestAccess::deliver_status(jqs, status);
+        settle();
+    }
+
+    /// Click @p button_name on a tile granted @p w x @p h and run the start to its end.
+    void tap_start(int w, int h, const char* button_name) {
+        PanelWidgetHarness<JobQueueWidget> tile(test_screen());
+        tile.resize(1, 1, w, h);
+        lv_obj_t* button = tile.child(button_name);
+        REQUIRE(button != nullptr);
+        REQUIRE_FALSE(lv_obj_has_flag(button, LV_OBJ_FLAG_HIDDEN));
+        lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr);
+        CHECK(helix::queue::queued_job_starter().in_flight());
+        REQUIRE(wait_until([] { return !helix::queue::queued_job_starter().in_flight(); }, 5000));
+        settle();
+    }
+
+    JobQueueState jqs{nullptr, nullptr};
+    helix::ScopedJobQueueSubjects subject_guard;
+    helix::ScopedJobQueueState scoped_state{&jqs};
+
+  private:
+    QueuedJobStarterTestAccess::PrepSource previous_prep_;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(TileStartFixture,
+                 "the tile's start button starts the front job through the shared starter",
+                 "[job_queue][queue_start][widget_size]") {
+    struct Button {
+        int w;
+        int h;
+        const char* name;
+    };
+    const Button button = GENERATE(Button{test::kStrip.w, test::kStrip.h, "jq_action_icon"},
+                                   Button{test::kCell.w, test::kCell.h, "jq_action"},
+                                   Button{test::kWide.w, test::kWide.h, "jq_action"});
+    INFO(button.name);
+
+    PlantedGcode file("tile_start_button.gcode");
+    seed_store("0001", file.name(), {{"bed_mesh", false}});
+    REQUIRE(queue_has("0001"));
+    show_queue(entry("0001", file.name()));
+
+    tap_start(button.w, button.h, button.name);
+
+    CHECK(starts() == 1);
+    CHECK_FALSE(queue_has("0001"));
+    CHECK(read_store().count("0001") == 0);
+    CHECK(mock_client_.call_count("server.job_queue.start") == 0);
+    // The file view was not involved, and the tap did not open the queue modal.
+    CHECK(pending_job_id() == nullptr);
+    CHECK(ModalStack::instance().top_dialog() == nullptr);
+}
+
+TEST_CASE_METHOD(TileStartFixture, "the tile reads Starting with no button while its start runs",
+                 "[job_queue][queue_start][widget_size]") {
+    PlantedGcode file("tile_start_busy.gcode");
+    show_queue(entry("0001", file.name()));
+    PanelWidgetHarness<JobQueueWidget> tile(test_screen());
+    tile.resize(1, 1, test::kCell.w, test::kCell.h);
+    lv_obj_t* button = tile.child("jq_action");
+    REQUIRE(button != nullptr);
+    REQUIRE_FALSE(lv_obj_has_flag(button, LV_OBJ_FLAG_HIDDEN));
+    auto state = []() { return lv_subject_get_int(lv_xml_get_subject(nullptr, "jq_tile_state")); };
+
+    mock_client_.defer_next("server.database.get_item"); // hold the saved-options read
+    lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr);
+    settle();
+    process_lvgl(30); // the tile refreshes on the next tick
+    REQUIRE(helix::queue::queued_job_starter().in_flight());
+    CHECK(state() == static_cast<int>(helix::JobQueueTileState::Starting));
+    CHECK(lv_obj_has_flag(button, LV_OBJ_FLAG_HIDDEN));
+
+    // The printer takes another job meanwhile, which ends the start.
+    set_wire_state(get_printer_state(), PrintJobState::PRINTING);
+    mock_client_.fire_deferred("server.database.get_item");
+    REQUIRE(wait_until([] { return !helix::queue::queued_job_starter().in_flight(); }, 5000));
+    settle();
+    process_lvgl(30);
+    CHECK_FALSE(jqs.start_in_flight());
+    CHECK(state() == static_cast<int>(helix::JobQueueTileState::Printing));
+}
+
+TEST_CASE_METHOD(TileStartFixture, "a tap on the tile outside the button opens the queue modal",
+                 "[job_queue][widget_size]") {
+    PlantedGcode file("tile_tap_modal.gcode");
+    show_queue(entry("0001", file.name()));
+    PanelWidgetHarness<JobQueueWidget> tile(test_screen());
+    tile.resize(1, 1, test::kCell.w, test::kCell.h);
+
+    REQUIRE(ModalStack::instance().top_dialog() == nullptr);
+    lv_obj_send_event(tile.root(), LV_EVENT_CLICKED, nullptr);
+    settle();
+
+    lv_obj_t* dialog = ModalStack::instance().top_dialog();
+    REQUIRE(dialog != nullptr);
+    CHECK_FALSE(helix::queue::queued_job_starter().in_flight());
+    Modal::hide(dialog);
+    settle();
+}
+
+TEST_CASE_METHOD(helix::test::QueuedStartMockedFixture,
+                 "Up next keeps the file-view path with the printer idle",
+                 "[job_queue][queue_start]") {
+    PlantedGcode file("up_next_file_view.gcode");
+    seed_store("0001", file.name(), {{"bed_mesh", false}});
+    JobQueueState jqs(nullptr, nullptr);
+    helix::ScopedJobQueueSubjects subject_guard;
+    helix::ScopedJobQueueState scoped_state(&jqs);
+    jqs.init_subjects();
+    JobQueueStatus status;
+    status.queue_state = "ready";
+    status.queued_jobs.push_back(entry("0001", file.name()));
+    JobQueueStateTestAccess::deliver_status(jqs, status);
+
+    helix::handle_up_next_tap();
+    settle();
+
+    const std::string* pending = ::PrintSelectPanelTestAccess::pending_queued_job_id(
+        *get_print_select_panel(get_printer_state(), get_moonraker_api()));
+    REQUIRE(pending != nullptr);
+    CHECK(*pending == "0001");
+    CHECK_FALSE(helix::queue::queued_job_starter().in_flight());
+    CHECK(starts() == 0);
 }

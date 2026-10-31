@@ -34,9 +34,9 @@ static int32_t default_hue_height() {
     static const int32_t size = helix::get_system_memory_info().is_constrained_device() ? 16 : 24;
     return size;
 }
-constexpr int32_t DEFAULT_GAP = 8;
-constexpr int32_t INDICATOR_RADIUS = 6;
-constexpr int32_t INDICATOR_BORDER = 2;
+constexpr int32_t kDefaultGap = 8;
+constexpr int32_t kIndicatorRadius = 6;
+constexpr int32_t kIndicatorBorder = 2;
 
 // === Color Conversion Utilities ===
 
@@ -231,7 +231,7 @@ static void update_indicators(HsvPickerData* data) {
     if (data->sv_indicator) {
         int32_t x = static_cast<int32_t>(data->saturation / 100.0f * (data->sv_size - 1));
         int32_t y = static_cast<int32_t>((1.0f - data->value / 100.0f) * (data->sv_size - 1));
-        lv_obj_set_pos(data->sv_indicator, x - INDICATOR_RADIUS, y - INDICATOR_RADIUS);
+        lv_obj_set_pos(data->sv_indicator, x - kIndicatorRadius, y - kIndicatorRadius);
     }
 
     // Hue indicator position (horizontal bar: vertical line indicator)
@@ -350,7 +350,7 @@ static void* ui_hsv_picker_xml_create(lv_xml_parser_state_t* state, const char**
     data_ptr->value = 100.0f;
     data_ptr->sv_size = default_sv_size();
     data_ptr->hue_height = default_hue_height();
-    data_ptr->gap = DEFAULT_GAP;
+    data_ptr->gap = kDefaultGap;
     data_ptr->callback = nullptr;
     data_ptr->callback_user_data = nullptr;
 
@@ -441,10 +441,10 @@ static void ui_hsv_picker_xml_apply(lv_xml_parser_state_t* state, const char** a
 
     // Create SV indicator (circular crosshair)
     data->sv_indicator = lv_obj_create(data->sv_image);
-    lv_obj_set_size(data->sv_indicator, INDICATOR_RADIUS * 2, INDICATOR_RADIUS * 2);
+    lv_obj_set_size(data->sv_indicator, kIndicatorRadius * 2, kIndicatorRadius * 2);
     lv_obj_set_style_radius(data->sv_indicator, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(data->sv_indicator, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(data->sv_indicator, INDICATOR_BORDER, 0);
+    lv_obj_set_style_border_width(data->sv_indicator, kIndicatorBorder, 0);
     lv_obj_set_style_border_color(data->sv_indicator, lv_color_white(), 0);
     lv_obj_set_style_shadow_width(data->sv_indicator, 2, 0);
     lv_obj_set_style_shadow_color(data->sv_indicator, lv_color_black(), 0);
@@ -454,7 +454,7 @@ static void ui_hsv_picker_xml_apply(lv_xml_parser_state_t* state, const char** a
     data->hue_indicator = lv_obj_create(data->hue_image);
     lv_obj_set_size(data->hue_indicator, 4, data->hue_height);
     lv_obj_set_style_bg_opa(data->hue_indicator, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(data->hue_indicator, INDICATOR_BORDER, 0);
+    lv_obj_set_style_border_width(data->hue_indicator, kIndicatorBorder, 0);
     lv_obj_set_style_border_color(data->hue_indicator, lv_color_white(), 0);
     lv_obj_set_style_shadow_width(data->hue_indicator, 2, 0);
     lv_obj_set_style_shadow_color(data->hue_indicator, lv_color_black(), 0);

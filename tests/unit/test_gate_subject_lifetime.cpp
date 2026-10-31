@@ -13,13 +13,17 @@
 #include "../lvgl_test_fixture.h"
 #include "ams_state.h"
 #include "app_globals.h"
+#include "default_layout_resolver.h"
 #include "filament_sensor_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "humidity_sensor_manager.h"
 #include "led/led_controller.h"
+#include "panel_widget_config.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
+#include "performance_state.h"
 #include "printer_state.h"
+#include "src/ui/panel_widgets/dryer_model.h"
 #include "static_subject_registry.h"
 #include "temperature_sensor_manager.h"
 #include "width_sensor_manager.h"
@@ -46,8 +50,8 @@ const std::vector<std::pair<std::string, Owner>>& owners() {
         std::vector<std::pair<std::string, Owner>> t;
         const Owner ams{[] { AmsState::instance().init_subjects(true); },
                         [] { AmsState::instance().deinit_subjects(); }};
-        for (const char* n :
-             {"ams_slot_count", "ams_supports_bypass", "clog_meter_mode", "buffer_present"})
+        for (const char* n : {"ams_slot_count", "ams_supports_bypass", "ams_is_tool_changer",
+                              "clog_meter_mode", "buffer_present"})
             t.emplace_back(n, ams);
         t.emplace_back("filament_sensor_count",
                        Owner{[] { FilamentSensorManager::instance().init_subjects(); },
@@ -69,9 +73,19 @@ const std::vector<std::pair<std::string, Owner>>& owners() {
         t.emplace_back(
             "platform_host_power_supported",
             Owner{[] { app_globals_init_subjects(); }, [] { app_globals_deinit_subjects(); }});
+        t.emplace_back(
+            "home_dryer_available",
+            Owner{[] { dryer_model::init_subjects(); },
+                  [] { StaticSubjectRegistry::instance().deinit_one("DryerModelSubjects"); }});
+        t.emplace_back("perf_available",
+                       Owner{[] { perf::PerformanceState::instance().init_subjects(); },
+                             [] { perf::PerformanceState::instance().deinit_subjects(); }});
         const Owner printer{[] { get_printer_state().init_subjects(true); },
                             [] { get_printer_state().deinit_subjects(); }};
-        for (const char* n : {"power_device_count", "printer_has_chamber"})
+        for (const char* n :
+             {"power_device_count", "printer_has_chamber", "printer_has_exclude_object",
+              "printer_has_bed_mesh", "printer_has_spoolman", "printer_is_enclosed",
+              "printer_has_job_queue"})
             t.emplace_back(n, printer);
         return t;
     }();
@@ -112,5 +126,21 @@ TEST_CASE("gate_subject_lifetime: every widget gate subject has an owner row",
         INFO("gate subject " << def.hardware_gate_subject);
         CHECK(covered.count(def.hardware_gate_subject) == 1);
         CHECK(gate_subject_lifetime(def.hardware_gate_subject) != nullptr);
+    }
+}
+
+TEST_CASE("gate_subject_lifetime: every subject the shipped default table names has an owner row",
+          "[panel_widget][manager][observer]") {
+    // A `requires` subject re-resolves the live default exactly like a widget
+    // gate, so it needs the same owner mapping.
+    std::set<std::string> covered;
+    for (const auto& row : owners())
+        covered.insert(row.first);
+    const auto names = helix::layout::subjects_named_by(*PanelWidgetConfig::load_default_table());
+    REQUIRE_FALSE(names.empty());
+    for (const auto& name : names) {
+        INFO("subject " << name);
+        CHECK(covered.count(name) == 1);
+        CHECK(gate_subject_lifetime(name.c_str()) != nullptr);
     }
 }

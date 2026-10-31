@@ -1,0 +1,55 @@
+{
+  "app": {
+    "board": "<build>",
+    "display": "800x480",
+    "display_backend": "DRM/KMS",
+    "has_backlight": true,
+    "has_hw_blank": true,
+    "input_type": "touch",
+    "locale": "<state>",
+    "platform": "<build>",
+    "theme": "<state>",
+    "version": "<build>",
+    "zip_tool": "<host>"
+  },
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "event": "session",
+  "features": [
+    "bed_mesh",
+    "qgl",
+    "probe",
+    "heated_bed",
+    "chamber",
+    "filament_sensor",
+    "led",
+    "firmware_retraction",
+    "exclude_object",
+    "mmu_happy_hare"
+  ],
+  "host": {
+    "arch": "<host>",
+    "cpu_cores": 0,
+    "cpu_model": "<host>",
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "ram_total_mb": 0,
+    "screen_locality": "<state>"
+  },
+  "printer": {
+    "build_volume": "350x350x340",
+    "detected_model": "Voron 2.4",
+    "extruder_count": 1,
+    "has_chamber": true,
+    "has_heated_bed": true,
+    "kinematics": "corexy",
+    "klipper_version": "v0.12.0-300",
+    "mcu": "stm32f446xx",
+    "mcu_count": 2,
+    "moonraker_version": "v0.9.3-20"
+  },
+  "schema_version": 3,
+  "timestamp": "<timestamp>"
+}

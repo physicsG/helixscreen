@@ -83,15 +83,26 @@ ALLOWED_OMISSIONS: dict[str, dict[str, dict[str, str]]] = {
             "at breakpoint 1. Multi-tool micro loses the T0 hint — cosmetic.",
             "macro_header_visible": "collapses the Quick Actions header to reclaim vertical "
             "space; micro's macro section is laid out to not need it.",
+            "ui_is_portrait": "the base restyles its top row for portrait; 480x272 is a landscape "
+            "layout only, so micro has no portrait arrangement to switch to.",
+        },
+        "condition": {
+            # Only for the conds CONDITION_ALLOWANCE_SCOPE below names.
+            "calib_tile@disabled_cond": "only the QGL and Z-Tilt cells disable while a leveling "
+            "operation runs, and the micro Calibration & Tools card has neither cell.",
+            "bind_style_if@cond": "the base's Motion button goes inline in portrait as well as at "
+            "tiny; micro is landscape-only and always lays Motion out inline.",
         },
     },
-    "ui_xml/portrait/print_status_panel.xml": {
-        "subject": {
-            "ui_breakpoint": "the base hides speed_flow_row below MEDIUM (breakpoints 0-2) because the "
-            "landscape controls column has no room for it. Portrait merged Speed/Flow and the "
-            "filament+AMS cluster into ONE row that fits at every portrait width, so there is "
-            "nothing left to hide — the row is rendered unconditionally, not dropped.",
-        },
+}
+
+# A condition allowance covers only base expressions matching its pattern: a new
+# condition of the same element in the base, binding anything else, still has to
+# reach the variant.
+CONDITION_ALLOWANCE_SCOPE: dict[str, dict[str, re.Pattern]] = {
+    "ui_xml/micro/controls_panel.xml": {
+        "calib_tile@disabled_cond": re.compile(r"^controls_operation_in_progress eq 1$"),
+        "bind_style_if@cond": re.compile(r"^ui_breakpoint (ge 2 and|le 1 or) ui_is_portrait eq [01]$"),
     },
 }
 
@@ -115,6 +126,8 @@ class Collected:
         self.callbacks: set[str] = set()
         self.props: set[str] = set()
         self.conds: set[str] = set()
+        # The expression text behind each condition key, for scoped allowances.
+        self.cond_values: dict[str, set[str]] = {}
 
 
 def collect(path: Path) -> Collected:
@@ -160,6 +173,7 @@ def collect(path: Path) -> Collected:
                 # still resolves to a live expression at instantiation, so it
                 # counts as present like any other value would.
                 out.conds.add(f"{el.tag}@{attr}")
+                out.cond_values.setdefault(f"{el.tag}@{attr}", set()).add(value)
 
     return out
 
@@ -235,7 +249,16 @@ def main() -> int:
         bad |= report("subject", base_rel, variant_rel, base.subjects, var.subjects)
         bad |= report("callback", base_rel, variant_rel, base.callbacks, var.callbacks)
         bad |= report("api prop", base_rel, variant_rel, base.props, var.props)
-        bad |= report("condition", base_rel, variant_rel, base.conds, var.conds)
+        # A scoped condition allowance stops covering a key once the base binds
+        # anything outside its pattern; report then names it as missing.
+        base_conds = set(base.conds)
+        for key, pattern in CONDITION_ALLOWANCE_SCOPE.get(variant_rel, {}).items():
+            if key in base_conds and key not in var.conds:
+                stray = sorted(v for v in base.cond_values.get(key, ()) if not pattern.match(v))
+                if stray:
+                    print(f"\n  {variant_rel}: {key} allowance does not cover {stray}")
+                    bad = True
+        bad |= report("condition", base_rel, variant_rel, base_conds, var.conds)
         if bad:
             failures += 1
 

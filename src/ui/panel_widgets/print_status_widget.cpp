@@ -9,7 +9,6 @@
 #include "ui_filename_utils.h"
 #include "ui_format_utils.h"
 #include "ui_nav.h"
-#include "ui_next_tick.h"
 #include "ui_overlay_temp_graph.h"
 #include "ui_panel_print_select.h"
 #include "ui_panel_print_status.h"
@@ -42,22 +41,29 @@
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
 #include "print_history_manager.h"
+#include "printer_event_journal.h"
 #include "printer_state.h"
 #include "runtime_config.h"
+#include "sort_small.h"
+#include "src/ui/panel_widgets/content_chrome.h"
+#include "src/ui/panel_widgets/print_status_library_layout.h"
 #include "standard_macros.h"
 #include "static_subject_registry.h"
 #include "subject_managed_panel.h"
+#include "text_measure.h"
 #include "theme_manager.h"
 #include "thumbnail_cache.h"
 #include "thumbnail_load_context.h"
 #include "thumbnail_processor.h"
 #include "tool_state.h"
+#include "tune_controller.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <string_view>
 #include <unordered_set>
 
@@ -133,19 +139,36 @@ void PrintStatusWidget::init_static_subjects() {
     s_static_subjects.publish("print_status_queue_hidden", &queue_hidden_subject_);
     lv_subject_init_int(&actions_hidden_subject_, 0);
     s_static_subjects.publish("print_status_actions_hidden", &actions_hidden_subject_);
+    lv_subject_init_int(&library_icon_only_subject_, 0);
+    s_static_subjects.publish("print_status_library_icon_only", &library_icon_only_subject_);
+    lv_subject_init_int(&library_grid_subject_, 0);
+    s_static_subjects.publish("print_status_library_grid", &library_grid_subject_);
+    lv_subject_init_int(&library_wrap_at_subject_, -1);
+    s_static_subjects.publish("print_status_library_wrap_at", &library_wrap_at_subject_);
     visibility_subjects_initialized_ = true;
 
     // Detailed-layout subjects
     lv_subject_init_int(&layout_effective_subject_, 0);
-    // Observed through layout_effective_subject_for_test() by
-    // tests/unit/test_print_status_widget_layout_gate.cpp, the width-gating guard.
+    // Observed through layout_effective_subject_for_test(), the width-gating guard.
     s_static_subjects.publish(
         "print_status_layout_effective",
-        &layout_effective_subject_); // SUBJECT_OK: read by the layout-gate test
+        &layout_effective_subject_); // SUBJECT_OK: read by test_widget_size_print_status
     lv_subject_init_int(&show_filament_active_subject_, 0);
     s_static_subjects.publish("print_status_show_filament_active", &show_filament_active_subject_);
     lv_subject_init_int(&multi_tool_subject_, 0);
     s_static_subjects.publish("print_status_multi_tool", &multi_tool_subject_);
+    lv_subject_init_int(&nozzle_pickable_subject_, 0);
+    s_static_subjects.publish("print_status_nozzle_pickable", &nozzle_pickable_subject_);
+    lv_subject_init_int(&nozzle_picker_fits_subject_, 1);
+    s_static_subjects.publish("print_status_nozzle_picker_fits", &nozzle_picker_fits_subject_);
+    lv_subject_init_int(&layer_z_fits_subject_, 1);
+    s_static_subjects.publish("print_status_layer_z_fits", &layer_z_fits_subject_);
+    lv_subject_init_int(&elapsed_fits_subject_, 1);
+    s_static_subjects.publish("print_status_elapsed_fits", &elapsed_fits_subject_);
+    lv_subject_init_int(&speed_fits_subject_, 1);
+    s_static_subjects.publish("print_status_speed_fits", &speed_fits_subject_);
+    lv_subject_init_int(&flow_fits_subject_, 1);
+    s_static_subjects.publish("print_status_flow_fits", &flow_fits_subject_);
     // Initial value 0 = idle_library_full — matches the default ref_value=0
     // on print_card_idle's bind_flag_if_not_eq so it shows by default
     // before any state events fire.
@@ -302,7 +325,7 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
                 self->saw_filament_present_ = true;
             }
         },
-        fsm.get_subjects_lifetime());
+        fsm.subjects_lifetime());
 
     // Observe job queue count to show/hide queue row
     auto* jq_count_subj = lv_xml_get_subject(nullptr, "job_queue_count");
@@ -394,8 +417,14 @@ void PrintStatusWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
             self->apply_card_layout();
             if (v >= 3)
                 self->defer_apply_active_thumbnail();
+            else
+                self->schedule_library_fit();
         },
         subject_never_freed());
+
+    // XML re-translates the labels; their new widths may no longer fit.
+    language_observer_ = helix::ui::observe_language_change(
+        this, [](PrintStatusWidget* self) { self->schedule_library_fit(); });
 
     // Re-run visibility when the breakpoint changes so the 'Print Library' header
     // hides on shrink-to-micro and returns on grow-past-micro.
@@ -431,8 +460,9 @@ void PrintStatusWidget::detach() {
     // Invalidate lifetime guard FIRST to abort in-flight async fetches
     lifetime_.invalidate();
     live_instances().erase(this);
-    idle_reset_pending_ = false;
-    active_apply_pending_ = false;
+    idle_reset_timer_.cancel();
+    active_apply_timer_.cancel();
+    library_fit_timer_.cancel();
     // The next attach may bring fresh XML thumbs that show nothing of this.
     shown_idle_thumb_ = {};
 
@@ -444,6 +474,7 @@ void PrintStatusWidget::detach() {
     // Release observers
     print_state_observer_.reset();
     view_observer_.reset();
+    language_observer_.reset();
     print_thumbnail_path_observer_.reset();
 #if defined(HELIX_PLATFORM_ESP32)
     print_psram_thumb_observer_.reset();
@@ -509,6 +540,44 @@ void PrintStatusWidget::on_activate() {
     }
 }
 
+namespace helix {
+
+IdleCardNeeds measure_idle_card_needs() {
+    IdleCardNeeds n;
+    // ui_card pads by #space_md; a pixel per side covers its border.
+    const int card_pad = theme_manager_get_spacing("space_md") + 1;
+    n.chrome_w = 2 * card_pad;
+    n.chrome_h = 2 * card_pad;
+    const lv_font_t* title_font = theme_manager_get_font("font_body");
+    const lv_font_t* line_font = theme_manager_get_font("font_small");
+    n.gap = theme_manager_get_spacing("space_xs");
+    n.title_h = title_font ? lv_font_get_line_height(title_font) : 0;
+    // The "when" and "meta" lines, stacked with the column's gap.
+    n.detail_h = line_font ? 2 * lv_font_get_line_height(line_font) + n.gap : 0;
+    n.button_h = theme_manager_get_spacing("button_height_sm");
+    // A caption measured in font_body, the larger face a button label takes.
+    const int button_chrome = helix::button_label_chrome_w();
+    n.reprint_w = ui::measure_text_px(lv_tr("Reprint Last"), title_font) + button_chrome;
+    n.queue_w = ui::measure_text_px(lv_tr("Job Queue"), title_font) + button_chrome;
+    return n;
+}
+
+bool idle_card_fits(const IdleCardNeeds& n, int width_px, int height_px) {
+    const int avail_w = width_px - n.chrome_w;
+    if (avail_w < std::max(n.reprint_w, n.queue_w)) {
+        return false;
+    }
+    const bool side_by_side = avail_w >= n.reprint_w + n.gap + n.queue_w;
+    const int buttons_h = side_by_side ? n.button_h : 2 * n.button_h + n.gap;
+    return height_px - n.chrome_h >= n.title_h + n.gap + n.detail_h + n.gap + buttons_h;
+}
+
+} // namespace helix
+
+bool PrintStatusWidget::fits_at(int width_px, int height_px) const {
+    return idle_card_fits(measure_idle_card_needs(), width_px, height_px);
+}
+
 void PrintStatusWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int width_px,
                                         int height_px) {
     last_width_px_ = width_px;
@@ -529,6 +598,7 @@ void PrintStatusWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int wi
         width_band = 2; // wide
     }
     lv_subject_set_int(&width_band_subject_, width_band);
+    schedule_library_fit();
 
     // Derive layout_effective: detailed only when user opted in AND width clears the normal floor
     int user_pref = (layout_style_ == "detailed") ? 1 : 0;
@@ -662,6 +732,7 @@ void PrintStatusWidget::bind_active_branch() {
     print_card_thumb_wrap_ = lv_obj_find_by_name(widget_obj_, "print_card_thumb_wrap");
     print_card_info_ = lv_obj_find_by_name(widget_obj_, "print_card_info");
     print_card_preparing_info_ = lv_obj_find_by_name(widget_obj_, "print_card_preparing_info");
+    schedule_library_fit();
 
     lv_obj_t* detailed_arc = lv_obj_find_by_name(widget_obj_, "detailed_progress_arc");
     if (s_formatter_) {
@@ -704,12 +775,12 @@ void PrintStatusWidget::update_active_layout_mode() {
 
 void PrintStatusWidget::handle_print_card_clicked() {
     // Startup grace period: reject phantom clicks during early boot
-    auto elapsed = std::chrono::steady_clock::now() - AppConstants::Startup::PROCESS_START_TIME;
-    if (elapsed < AppConstants::Startup::PRINT_START_GRACE_PERIOD) {
+    auto elapsed = std::chrono::steady_clock::now() - app_constants::startup::kProcessStartTime;
+    if (elapsed < app_constants::startup::kPrintStartGracePeriod) {
         auto secs = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
         spdlog::warn("[PrintStatusWidget] Rejected print card click during startup grace period "
                      "({}s < {}s)",
-                     secs, AppConstants::Startup::PRINT_START_GRACE_PERIOD.count());
+                     secs, app_constants::startup::kPrintStartGracePeriod.count());
         return;
     }
 
@@ -966,44 +1037,29 @@ time_t PrintStatusWidget::get_last_print_source_modified() const {
 }
 
 void PrintStatusWidget::defer_reset_print_card_to_idle() {
-    if (idle_reset_pending_) {
-        return;
-    }
-    idle_reset_pending_ = true;
-    // run_next_tick escapes the UpdateQueue::process_pending() batch (see
-    // CLAUDE.md "Safe escape routes"). detach() invalidates lifetime_, so a
-    // callback queued before it is skipped and the next attach queues its own.
-    helix::ui::run_next_tick(lifetime_.token(), [this]() {
-        if (widget_obj_ && idle_reset_pending_) {
-            idle_reset_pending_ = false;
+    // A zero-period timer fires on the next LVGL tick, outside the
+    // UpdateQueue::process_pending() batch the callers run in. detach() cancels
+    // it, so a recycled instance never sees a tick queued by its previous
+    // attach.
+    idle_reset_timer_.schedule_once([this]() {
+        if (widget_obj_) {
             reset_print_card_to_idle();
         }
     });
 }
 
 void PrintStatusWidget::defer_apply_active_thumbnail() {
-    if (active_apply_pending_) {
-        return;
-    }
-    active_apply_pending_ = true;
-    // run_next_tick escapes the UpdateQueue::process_pending() batch the
-    // observers run in, the same escape defer_reset_print_card_to_idle() makes
-    // for the idle sibling. detach() invalidates lifetime_, so a callback queued
-    // before it is skipped and the next attach queues its own.
-    helix::ui::run_next_tick(lifetime_.token(), [this]() {
-        if (!active_apply_pending_) {
-            return;
-        }
-        active_apply_pending_ = false;
+    // Same next-tick escape as defer_reset_print_card_to_idle().
+    active_apply_timer_.schedule_once([this]() {
         if (!widget_obj_ || !print_card_active_thumb_) {
             return;
         }
         // Trigger hardening (#1001), matching reset_print_card_to_idle(): by the
         // time the tick fires, populate_page's safe_clean_children() may have
         // reparented this subtree onto lv_layer_top() to await deletion.
-        // lv_image_set_src → update_align → lv_obj_update_layout would then walk
+        // lv_image_set_src -> update_align -> lv_obj_update_layout would then walk
         // the whole layer and recurse into sibling condemned grid subtrees whose
-        // children may already be freed → SIGSEGV in grid calc().
+        // children may already be freed -> SIGSEGV in grid calc().
         if (!helix::ui::is_on_active_screen(print_card_active_thumb_)) {
             spdlog::debug("[PrintStatusWidget] Skip active thumbnail: off active screen "
                           "(mid-teardown)");
@@ -1128,22 +1184,14 @@ void PrintStatusWidget::reset_print_card_to_idle() {
     // before it ever reaches this callback.
     req.api = api;
 
-    auto token = lifetime_.token();
-
+    // fetch() delivers on the main thread and only while ctx is still current,
+    // so the callback may touch members directly.
     get_thumbnail_cache().fetch(
         req, ctx,
-        [this, token, ctx, key = req.key, stamp = req.source_modified](const std::string& lvgl_path,
-                                                                       bool /*degraded*/) {
-            // Marshal first, then touch members — a bare expired() check
-            // followed by a `this` dereference is L081 Mechanism C.
-            token.defer(
-                "PrintStatusWidget::apply_idle_thumb", [this, ctx, key, stamp, lvgl_path]() {
-                    // A later resolve can land in the hop this defer adds.
-                    if (!ctx.is_valid())
-                        return;
-                    publish_idle_render(key, stamp, lvgl_path);
-                    spdlog::info("[PrintStatusWidget] Idle thumbnail loaded: {}", lvgl_path);
-                });
+        [this, key = req.key, stamp = req.source_modified](const std::string& lvgl_path,
+                                                           bool /*degraded*/) {
+            publish_idle_render(key, stamp, lvgl_path);
+            spdlog::info("[PrintStatusWidget] Idle thumbnail loaded: {}", lvgl_path);
         },
         [](const std::string& error) {
             spdlog::debug("[PrintStatusWidget] Idle thumbnail fetch failed: {}", error);
@@ -1340,10 +1388,10 @@ void PrintStatusWidget::show_idle_runout_modal() {
 
 void PrintStatusWidget::dispatch_load() {
     AmsBackend* backend = AmsState::instance().get_backend();
-    // Nothing is printing, so there is no "currently feeding" lane to infer from
-    // a print job — the backend's own active slot is the only target available,
-    // and this dialog has no slot picker.
-    const int slot = backend ? backend->get_current_slot() : -1;
+    // This dialog has no slot picker: an idle runout names its head, and with
+    // no lane named the backend's active slot is the target.
+    const int slot = helix::ui::runout_target_slot(
+        backend, helix::FilamentSensorManager::instance().real_runout_lane(), /*load=*/true);
     helix::ui::execute_filament_load(backend, slot, "[PrintStatusWidget]");
 }
 
@@ -1422,6 +1470,7 @@ void PrintStatusWidget::recompute_actions_visibility() {
         show_print_files_ || show_reprint_last_ || show_recent_prints_ || queue_visible;
 
     lv_subject_set_int(&actions_hidden_subject_, any_button_visible ? 0 : 1);
+    schedule_library_fit();
 
     if (!widget_obj_ || !print_card_thumb_)
         return;
@@ -1438,6 +1487,101 @@ void PrintStatusWidget::recompute_actions_visibility() {
             lv_obj_set_style_flex_main_place(library_body, LV_FLEX_ALIGN_CENTER, 0);
             lv_obj_set_style_flex_cross_place(library_body, LV_FLEX_ALIGN_CENTER, 0);
         }
+    }
+}
+
+void PrintStatusWidget::schedule_library_fit() {
+    // Same next-tick escape as defer_reset_print_card_to_idle(): the fit reads a
+    // settled layout, and its subjects restyle the column it measured.
+    library_fit_timer_.schedule_once([this]() {
+        if (widget_obj_) {
+            fit_library_actions();
+            fit_nozzle_picker();
+            fit_row("detailed_layer_row", &layer_z_fits_subject_);
+            fit_row("detailed_time_row", &elapsed_fits_subject_);
+            fit_speed_row();
+            fit_row("detailed_filament_row", &flow_fits_subject_);
+        }
+    });
+}
+
+void PrintStatusWidget::fit_library_actions() {
+    lv_obj_t* actions = lv_obj_find_by_name(widget_obj_, "library_actions");
+    // Off-screen trees may be awaiting deletion: laying one out walks freed grids.
+    if (!actions || lv_subject_get_int(&view_subject_) != 0 ||
+        !helix::ui::is_on_active_screen(actions)) {
+        return;
+    }
+    lv_obj_update_layout(actions);
+
+    struct Action {
+        lv_subject_t* hidden;
+        const char* button;
+        const char* icon;
+        const char* label;
+    };
+    static constexpr int kActions = helix::kLibraryActionsMax;
+    const Action all[kActions] = {
+        {&files_hidden_subject_, "library_row_files", "library_files_icon", "library_files_label"},
+        {&last_hidden_subject_, "library_row_last", "library_last_icon", "library_last_label"},
+        {&recent_hidden_subject_, "library_row_recent", "library_recent_icon",
+         "library_recent_label"},
+        {&queue_hidden_subject_, "library_row_queue", "library_queue_icon", "library_queue_label"},
+    };
+
+    helix::LibraryActionsInput in;
+    in.avail_w = lv_obj_get_content_width(actions);
+    in.avail_h = lv_obj_get_content_height(actions);
+    // The column's gap, which the two-row layout trades for cell padding.
+    in.gap = theme_manager_get_spacing("space_xs");
+    in.min_button_h = theme_manager_get_spacing("button_height_sm");
+    // The icon sits beside the label unless the card's column mode hides it there.
+    const bool icon_beside_label = lv_subject_get_int(&column_mode_subject_) == 0;
+    int cell_of[kActions] = {};
+    for (int i = 0; i < kActions; ++i) {
+        const Action& a = all[i];
+        if (lv_subject_get_int(a.hidden) != 0) {
+            continue;
+        }
+        lv_obj_t* btn = lv_obj_find_by_name(actions, a.button);
+        lv_obj_t* label = lv_obj_find_by_name(actions, a.label);
+        if (!btn || !label) {
+            continue;
+        }
+        // Measured from the label's text, whether or not it is shown now, so the
+        // verdict never depends on the one it last published.
+        int need = lv_obj_get_style_space_left(btn, LV_PART_MAIN) +
+                   lv_obj_get_style_space_right(btn, LV_PART_MAIN) +
+                   helix::ui::text_width(lv_label_get_text(label),
+                                         lv_obj_get_style_text_font(label, LV_PART_MAIN),
+                                         lv_obj_get_style_text_letter_space(label, LV_PART_MAIN));
+        lv_obj_t* icon = icon_beside_label ? lv_obj_find_by_name(actions, a.icon) : nullptr;
+        if (icon) {
+            need += lv_obj_get_width(icon) + lv_obj_get_style_pad_column(btn, LV_PART_MAIN);
+        }
+        cell_of[in.count] = i;
+        in.labeled_w[in.count++] = need;
+    }
+
+    const helix::LibraryActionsVerdict v = helix::decide_library_actions_layout(in);
+    const int icon_only = v.icon_only ? 1 : 0;
+    const int grid = v.grid ? 1 : 0;
+    const int wrap_at =
+        v.second_row_at >= 0 && v.second_row_at < in.count ? cell_of[v.second_row_at] : -1;
+    if (lv_subject_get_int(&library_icon_only_subject_) != icon_only ||
+        lv_subject_get_int(&library_grid_subject_) != grid ||
+        lv_subject_get_int(&library_wrap_at_subject_) != wrap_at) {
+        std::string widths;
+        for (int i = 0; i < in.count; ++i) {
+            widths += fmt::format("{}{}", i ? "," : "", in.labeled_w[i]);
+        }
+        spdlog::debug("[PrintStatusWidget] library actions {}x{} ({} buttons, labelled widths {}): "
+                      "icon_only={} grid={} wrap_at={}",
+                      in.avail_w, in.avail_h, in.count, widths, icon_only, grid, wrap_at);
+        // The new track lands before the layout re-flows to rows.
+        lv_subject_set_int(&library_wrap_at_subject_, wrap_at);
+        lv_subject_set_int(&library_icon_only_subject_, icon_only);
+        lv_subject_set_int(&library_grid_subject_, grid);
     }
 }
 
@@ -1674,16 +1818,151 @@ void PrintStatusWidget::print_status_layout_detailed_cb(lv_event_t* /*e*/) {
 // Nozzle Tool Picker
 // ============================================================================
 
+bool PrintStatusWidget::nozzle_picker_available() const {
+    // One heater: the picker has nothing to pin the readout to. Counts heaters,
+    // matching the print_status_nozzle_pickable gate that hides the chevron:
+    // AMS lanes and nozzles sharing one heater both have a single readout.
+    // Where the temperature row has no room for the chevron, the picker goes
+    // with it and the readout follows its current tool.
+    return ToolState::instance().has_multiple_extruders() &&
+           lv_subject_get_int(&nozzle_picker_fits_subject_) != 0;
+}
+
+void PrintStatusWidget::fit_nozzle_picker() {
+    lv_obj_t* row = lv_obj_find_by_name(widget_obj_, "detailed_temp_row");
+    lv_obj_t* target = row ? lv_obj_find_by_name(row, "detailed_nozzle_click_target") : nullptr;
+    const uint32_t target_children = target ? lv_obj_get_child_count(target) : 0;
+    // Off-screen trees may be awaiting deletion: laying one out walks freed grids.
+    if (target_children == 0 || !helix::ui::is_on_active_screen(row)) {
+        return;
+    }
+    lv_obj_update_layout(row);
+
+    lv_obj_t* chevron = lv_obj_get_child(target, static_cast<int32_t>(target_children) - 1);
+    // Measured from the glyph, whether or not it is shown now, so the verdict
+    // never depends on the one it last published.
+    const int chevron_need =
+        helix::ui::text_width(lv_label_get_text(chevron),
+                              lv_obj_get_style_text_font(chevron, LV_PART_MAIN),
+                              lv_obj_get_style_text_letter_space(chevron, LV_PART_MAIN)) +
+        lv_obj_get_style_pad_column(target, LV_PART_MAIN);
+
+    int need = 0;
+    int shown = 0;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(row); ++i) {
+        lv_obj_t* child = lv_obj_get_child(row, static_cast<int32_t>(i));
+        if (!lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
+            need += lv_obj_get_width(child);
+            ++shown;
+        }
+    }
+    need += lv_obj_get_style_pad_column(row, LV_PART_MAIN) * std::max(0, shown - 1);
+    if (lv_obj_has_flag(chevron, LV_OBJ_FLAG_HIDDEN)) {
+        need += chevron_need;
+    }
+
+    const int avail = lv_obj_get_content_width(row);
+    const int fits = need <= avail ? 1 : 0;
+    if (lv_subject_get_int(&nozzle_picker_fits_subject_) != fits) {
+        spdlog::debug("[PrintStatusWidget] nozzle picker needs {}px of {}px: fits={}", need, avail,
+                      fits);
+        lv_subject_set_int(&nozzle_picker_fits_subject_, fits);
+    }
+}
+
+namespace {
+// The width an object asks for laid out on one line: a label's text, a row's
+// children side by side. Hidden children count, so a verdict that hides a piece
+// never reads its absence as room for it.
+int natural_width(lv_obj_t* obj) {
+    if (lv_obj_check_type(obj, &lv_label_class)) {
+        return helix::ui::text_width(lv_label_get_text(obj),
+                                     lv_obj_get_style_text_font(obj, LV_PART_MAIN),
+                                     lv_obj_get_style_text_letter_space(obj, LV_PART_MAIN));
+    }
+    const uint32_t n = lv_obj_get_child_count(obj);
+    if (n == 0) {
+        return lv_obj_get_width(obj);
+    }
+    int width = lv_obj_get_style_pad_left(obj, LV_PART_MAIN) +
+                lv_obj_get_style_pad_right(obj, LV_PART_MAIN) +
+                lv_obj_get_style_pad_column(obj, LV_PART_MAIN) * static_cast<int>(n - 1);
+    for (uint32_t i = 0; i < n; ++i) {
+        width += natural_width(lv_obj_get_child(obj, static_cast<int32_t>(i)));
+    }
+    return width;
+}
+} // namespace
+
+void PrintStatusWidget::fit_row(const char* row_name, lv_subject_t* fits) {
+    lv_obj_t* row = lv_obj_find_by_name(widget_obj_, row_name);
+    // Off-screen trees may be awaiting deletion: laying one out walks freed grids.
+    if (!row || !helix::ui::is_on_active_screen(row)) {
+        return;
+    }
+    lv_obj_update_layout(row);
+
+    const int avail = lv_obj_get_content_width(row);
+    const int need = natural_width(row) - lv_obj_get_style_pad_left(row, LV_PART_MAIN) -
+                     lv_obj_get_style_pad_right(row, LV_PART_MAIN);
+    const int verdict = need <= avail ? 1 : 0;
+    if (lv_subject_get_int(fits) != verdict) {
+        spdlog::debug("[PrintStatusWidget] {} needs {}px of {}px: fits={}", row_name, need, avail,
+                      verdict);
+        lv_subject_set_int(fits, verdict);
+    }
+}
+
+void PrintStatusWidget::fit_speed_row() {
+    lv_obj_t* col = lv_obj_find_by_name(widget_obj_, "detailed_data_col");
+    lv_obj_t* row = lv_obj_find_by_name(widget_obj_, "detailed_speed_row");
+    // Off-screen trees may be awaiting deletion: laying one out walks freed grids.
+    if (!col || !row || !helix::ui::is_on_active_screen(col)) {
+        return;
+    }
+    lv_obj_update_layout(col);
+
+    // A hidden row keeps no height of its own, so it is sized from its tallest child's
+    // style: the text line, or the icon beside it.
+    int row_h = 0;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(row); ++i) {
+        lv_obj_t* child = lv_obj_get_child(row, static_cast<int32_t>(i));
+        const lv_font_t* font = lv_obj_get_style_text_font(child, LV_PART_MAIN);
+        const int32_t style_h = lv_obj_get_style_height(child, LV_PART_MAIN);
+        if (LV_COORD_IS_PX(style_h)) {
+            row_h = std::max(row_h, static_cast<int>(style_h));
+        }
+        if (font) {
+            row_h = std::max(row_h, static_cast<int>(lv_font_get_line_height(font)));
+        }
+    }
+
+    const int gap = lv_obj_get_style_pad_row(col, LV_PART_MAIN);
+    int need = row_h;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(col); ++i) {
+        lv_obj_t* child = lv_obj_get_child(col, static_cast<int32_t>(i));
+        if (child == row || lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+        need += lv_obj_get_height(child) + gap;
+    }
+    const int avail = lv_obj_get_content_height(col);
+    const int verdict = need <= avail ? 1 : 0;
+    if (lv_subject_get_int(&speed_fits_subject_) != verdict) {
+        spdlog::debug("[PrintStatusWidget] detailed_speed_row needs {}px of {}px: fits={}", need,
+                      avail, verdict);
+        lv_subject_set_int(&speed_fits_subject_, verdict);
+    }
+}
+
 void PrintStatusWidget::show_nozzle_tool_picker(lv_obj_t* anchor) {
     if (nozzle_picker_.is_visible() || !parent_screen_ || !anchor)
         return;
 
-    // Single-hotend printer: picker has nothing useful to offer. The whole
-    // nozzle group is now the click target (chevron is visual-only), so this
-    // can fire on a regular print and should be a clean no-op. Counts nozzles
-    // rather than tools, matching the print_status_multi_tool gate that hides
-    // the chevron — an AMS's filament lanes all feed the one hotend.
-    if (!ToolState::instance().has_multiple_extruders()) {
+    // The whole nozzle group is the click target (the chevron is visual-only),
+    // so this fires whenever it is tapped and must be a clean no-op when the
+    // picker is not on offer.
+    if (!nozzle_picker_available()) {
         return;
     }
 
@@ -1801,7 +2080,7 @@ std::vector<PrintStatusWidget::NozzleToolOption> PrintStatusWidget::build_nozzle
     // extruders() is an unordered_map, so impose the printer's own order:
     // "extruder" first, then extruder1, extruder2, ... A plain name sort would
     // put extruder10 ahead of extruder2.
-    std::sort(options.begin(), options.end(), [](const auto& a, const auto& b) {
+    helix::sort_small(options.begin(), options.end(), [](const auto& a, const auto& b) {
         return helix::tool_number_for_extruder(a.extruder_name).value_or(0) <
                helix::tool_number_for_extruder(b.extruder_name).value_or(0);
     });
@@ -1855,12 +2134,12 @@ void PrintStatusWidget::print_card_clicked_cb(lv_event_t* e) {
     // originated inside the named nozzle click target; the chevron cb
     // handles it. Name must match the lv_obj name in
     // ui_xml/components/print_status_detailed_active.xml.
-    constexpr std::string_view NOZZLE_CLICK_TARGET_NAME = "detailed_nozzle_click_target";
+    constexpr std::string_view kNozzleClickTargetName = "detailed_nozzle_click_target";
     bool from_nozzle_group = false;
     if (auto* target = lv_event_get_target_obj(e)) {
         for (lv_obj_t* o = target; o; o = lv_obj_get_parent(o)) {
             const char* name = lv_obj_get_name(o);
-            if (name && std::string_view(name) == NOZZLE_CLICK_TARGET_NAME) {
+            if (name && std::string_view(name) == kNozzleClickTargetName) {
                 from_nozzle_group = true;
                 break;
             }
@@ -1949,22 +2228,39 @@ void PrintStatusWidget::DetailedFormatter::update_layer_text() {
     auto& ps = get_printer_state();
     int cur = lv_subject_get_int(ps.print_state().get_print_layer_current_subject());
     int tot = lv_subject_get_int(ps.print_state().get_print_layer_total_subject());
-    std::string text = helix::ui::format_layer_progress(
-        cur, tot, ps.print_state().layer_is_accurate(),
-        lv_subject_get_int(ps.motion_state().get_gcode_position_z_subject()));
+    std::string text =
+        helix::ui::format_layer_progress_compact(cur, tot, ps.print_state().layer_is_accurate(), 0);
     snprintf(layer_text_buf_, sizeof(layer_text_buf_), "%s", text.c_str());
     lv_subject_copy_string(&layer_text_subject_, layer_text_buf_);
+    std::string z = helix::ui::format_layer_z(
+        lv_subject_get_int(ps.motion_state().get_gcode_position_z_subject()));
+    snprintf(layer_z_text_buf_, sizeof(layer_z_text_buf_), "%s", z.c_str());
+    lv_subject_copy_string(&layer_z_text_subject_, layer_z_text_buf_);
+    // The count and the Z both grow as the print climbs, so the room for the Z
+    // is measured again each time they change.
+    for (auto* widget : live_instances()) {
+        widget->schedule_library_fit();
+    }
 }
 
 void PrintStatusWidget::DetailedFormatter::update_time_text() {
     auto& ps = get_printer_state();
     int elapsed = lv_subject_get_int(ps.print_state().get_print_elapsed_subject());
     int remain = lv_subject_get_int(ps.print_state().get_print_time_left_subject());
-    int total = elapsed + remain;
-    std::string text =
-        helix::format::duration_padded(elapsed) + " / " + helix::format::duration_padded(total);
-    snprintf(time_text_buf_, sizeof(time_text_buf_), "%s", text.c_str());
-    lv_subject_copy_string(&time_text_subject_, time_text_buf_);
+    const size_t old_len = strlen(elapsed_text_buf_) + strlen(remaining_text_buf_);
+    snprintf(elapsed_text_buf_, sizeof(elapsed_text_buf_), "%s",
+             helix::format::duration_padded(elapsed).c_str());
+    lv_subject_copy_string(&elapsed_text_subject_, elapsed_text_buf_);
+    snprintf(remaining_text_buf_, sizeof(remaining_text_buf_), "%s",
+             helix::format::duration_padded(remain).c_str());
+    lv_subject_copy_string(&remaining_text_subject_, remaining_text_buf_);
+    // A time that gains or loses a field ("59m" to "1h 00m") changes what the
+    // time row needs; ticks within one length do not.
+    if (strlen(elapsed_text_buf_) + strlen(remaining_text_buf_) != old_len) {
+        for (auto* widget : live_instances()) {
+            widget->schedule_library_fit();
+        }
+    }
 }
 
 void PrintStatusWidget::DetailedFormatter::update_filament_text() {
@@ -1973,8 +2269,7 @@ void PrintStatusWidget::DetailedFormatter::update_filament_text() {
     if (used_mm <= 0) {
         filament_text_buf_[0] = '\0';
     } else {
-        std::string text = std::string(lv_tr("Filament")) + ": " +
-                           helix::format::format_filament_length(static_cast<double>(used_mm));
+        std::string text = helix::format::format_filament_length(static_cast<double>(used_mm));
         snprintf(filament_text_buf_, sizeof(filament_text_buf_), "%s", text.c_str());
     }
     lv_subject_copy_string(&filament_text_subject_, filament_text_buf_);
@@ -1985,6 +2280,30 @@ void PrintStatusWidget::DetailedFormatter::update_filament_text() {
     int width_band = lv_subject_get_int(&PrintStatusWidget::width_band_subject_);
     int show = (width_band >= 2 && used_mm > 0) ? 1 : 0;
     lv_subject_set_int(&PrintStatusWidget::show_filament_active_subject_, show);
+}
+
+void PrintStatusWidget::DetailedFormatter::update_speed_flow_text() {
+    auto& ps = get_printer_state();
+    // Always the live rates: the percent factors are Tune's to show.
+    snprintf(speed_text_buf_, sizeof(speed_text_buf_), "%s",
+             helix::tune::live_speed_text(
+                 lv_subject_get_int(ps.motion_state().get_live_velocity_subject()))
+                 .c_str());
+    lv_subject_copy_string(&speed_text_subject_, speed_text_buf_);
+    snprintf(flow_text_buf_, sizeof(flow_text_buf_), "· %s",
+             helix::tune::live_flow_text(
+                 helix::tune::volumetric_flow_mm3_s(
+                     lv_subject_get_int(ps.motion_state().get_live_extruder_velocity_subject()),
+                     ps.get_discovery().filament_diameter_mm()))
+                 .c_str());
+    lv_subject_copy_string(&flow_text_subject_, flow_text_buf_);
+    // A rate gaining a digit can push the flow out of its row.
+    if (strlen(speed_text_buf_) + strlen(flow_text_buf_) != speed_flow_len_) {
+        speed_flow_len_ = strlen(speed_text_buf_) + strlen(flow_text_buf_);
+        for (auto* widget : live_instances()) {
+            widget->schedule_library_fit();
+        }
+    }
 }
 
 void PrintStatusWidget::DetailedFormatter::update_nozzle_text() {
@@ -2082,21 +2401,26 @@ bool PrintStatusWidget::DetailedFormatter::set_nozzle_tool_override(
 }
 
 void PrintStatusWidget::DetailedFormatter::update_multi_tool() {
-    // Gated on physical extruders, not tool_count(): set_ams_topology() expands
+    // Gated on nozzles, not tool_count(): set_ams_topology() expands
     // ToolState's tool list to one entry per filament SLOT, so a 4-lane AMS or a
     // 16-wide AD5X tool map reports many "tools" behind a single hotend. Naming
     // which nozzle you are looking at only means something when there is more
     // than one nozzle. Matches the nozzle_icon badge gate in ui_ams_tool_text.
-    const bool multi = ToolState::instance().has_multiple_extruders();
-    lv_subject_set_int(&PrintStatusWidget::multi_tool_subject_, multi ? 1 : 0);
+    auto& tools = ToolState::instance();
+    lv_subject_set_int(&PrintStatusWidget::multi_tool_subject_,
+                       tools.names_mounted_nozzle() ? 1 : 0);
+    // The picker pins the readout to a heater, so it needs more than one:
+    // nozzles sharing one heater have a single readout to show.
+    lv_subject_set_int(&PrintStatusWidget::nozzle_pickable_subject_,
+                       tools.has_multiple_extruders() ? 1 : 0);
 }
 
 void PrintStatusWidget::DetailedFormatter::update_tool_label() {
     auto& tools = ToolState::instance();
-    if (!tools.has_multiple_extruders()) {
-        nozzle_tool_label_buf_[0] = '\0';
+    if (!tools.names_mounted_nozzle()) {
+        nozzle_badge_text_buf_[0] = '\0';
     } else {
-        // Label tracks what the user is VIEWING — the pinned tool when one
+        // The number tracks what the user is VIEWING — the pinned tool when one
         // is set, otherwise the currently active tool. Anything else looks
         // broken right after a pin ("I picked Nozzle 2 but it still says Tool 1").
         int idx = -1;
@@ -2113,13 +2437,13 @@ void PrintStatusWidget::DetailedFormatter::update_tool_label() {
         }
         const auto& tool_list = tools.tools();
         if (idx >= 0 && idx < static_cast<int>(tool_list.size())) {
-            snprintf(nozzle_tool_label_buf_, sizeof(nozzle_tool_label_buf_), "%s",
-                     tool_list[idx].display_label.c_str());
+            snprintf(nozzle_badge_text_buf_, sizeof(nozzle_badge_text_buf_), "%s",
+                     helix::ui::lane_number_text(tool_list[idx].index).c_str());
         } else {
-            nozzle_tool_label_buf_[0] = '\0';
+            nozzle_badge_text_buf_[0] = '\0';
         }
     }
-    lv_subject_copy_string(&nozzle_tool_label_subject_, nozzle_tool_label_buf_);
+    lv_subject_copy_string(&nozzle_badge_text_subject_, nozzle_badge_text_buf_);
 }
 
 namespace helix {
@@ -2192,8 +2516,7 @@ void PrintStatusWidget::DetailedFormatter::update_idle_fields() {
         lv_subject_set_int(&idle_has_last_subject_, 0);
         return;
     }
-    const double now_s =
-        std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const double now_s = wall_now_s();
     const LastPrintText text = describe_last_print(*newest, now_s);
     snprintf(idle_filename_buf_, sizeof(idle_filename_buf_), "%s", text.filename.c_str());
     lv_subject_copy_string(&idle_filename_subject_, idle_filename_buf_);
@@ -2207,14 +2530,22 @@ void PrintStatusWidget::DetailedFormatter::update_idle_fields() {
 PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     UI_MANAGED_SUBJECT_STRING(layer_text_subject_, layer_text_buf_, "", "print_status_layer_text",
                               subjects_);
-    UI_MANAGED_SUBJECT_STRING(time_text_subject_, time_text_buf_, "0h 00m / 0h 00m",
-                              "print_status_time_text", subjects_);
+    UI_MANAGED_SUBJECT_STRING(layer_z_text_subject_, layer_z_text_buf_, "",
+                              "print_status_layer_z_text", subjects_);
+    UI_MANAGED_SUBJECT_STRING(elapsed_text_subject_, elapsed_text_buf_, "0m",
+                              "print_status_elapsed_text", subjects_);
+    UI_MANAGED_SUBJECT_STRING(remaining_text_subject_, remaining_text_buf_, "0m",
+                              "print_status_remaining_text", subjects_);
     UI_MANAGED_SUBJECT_STRING(filament_text_subject_, filament_text_buf_, "",
                               "print_status_filament_text", subjects_);
+    UI_MANAGED_SUBJECT_STRING(speed_text_subject_, speed_text_buf_, "", "print_status_speed_text",
+                              subjects_);
+    UI_MANAGED_SUBJECT_STRING(flow_text_subject_, flow_text_buf_, "", "print_status_flow_text",
+                              subjects_);
     UI_MANAGED_SUBJECT_STRING(nozzle_text_subject_, nozzle_text_buf_, "0 / 0°C",
                               "print_status_nozzle_text", subjects_);
-    UI_MANAGED_SUBJECT_STRING(nozzle_tool_label_subject_, nozzle_tool_label_buf_, "",
-                              "print_status_nozzle_tool_label", subjects_);
+    UI_MANAGED_SUBJECT_STRING(nozzle_badge_text_subject_, nozzle_badge_text_buf_, "",
+                              "print_status_nozzle_badge_text", subjects_);
     UI_MANAGED_SUBJECT_INT(nozzle_current_subject_, 0, "print_status_nozzle_current", subjects_);
     UI_MANAGED_SUBJECT_INT(nozzle_target_subject_, 0, "print_status_nozzle_target", subjects_);
     UI_MANAGED_SUBJECT_STRING(idle_filename_subject_, idle_filename_buf_, "",
@@ -2243,6 +2574,8 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
         s_formatter_->elapsed_observer_.reset();
         s_formatter_->time_left_observer_.reset();
         s_formatter_->filament_used_observer_.reset();
+        s_formatter_->live_velocity_observer_.reset();
+        s_formatter_->live_extruder_velocity_observer_.reset();
         s_formatter_->nozzle_temp_observer_.reset();
         s_formatter_->nozzle_target_observer_.reset();
         s_formatter_->tools_version_observer_.reset();
@@ -2273,6 +2606,14 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
         ps.print_state().get_print_filament_used_subject(), this,
         [](DetailedFormatter* self, int) { self->update_filament_text(); },
         ps.get_subjects_lifetime());
+    live_velocity_observer_ = observe<int>(
+        ps.motion_state().get_live_velocity_subject(), this,
+        [](DetailedFormatter* self, int) { self->update_speed_flow_text(); },
+        ps.get_subjects_lifetime());
+    live_extruder_velocity_observer_ = observe<int>(
+        ps.motion_state().get_live_extruder_velocity_subject(), this,
+        [](DetailedFormatter* self, int) { self->update_speed_flow_text(); },
+        ps.get_subjects_lifetime());
 
     // Auto-tool nozzle: the active_extruder subjects are static members of
     // PrinterState, but its lifetime token still has to be handed over — the
@@ -2294,6 +2635,7 @@ PrintStatusWidget::DetailedFormatter::DetailedFormatter() {
     update_layer_text();
     update_time_text();
     update_filament_text();
+    update_speed_flow_text();
     update_nozzle_text();
 
     // Multi-extruder: observe the tool-list version + active_tool to drive the
@@ -2354,6 +2696,8 @@ PrintStatusWidget::DetailedFormatter::~DetailedFormatter() {
     elapsed_observer_.reset();
     time_left_observer_.reset();
     filament_used_observer_.reset();
+    live_velocity_observer_.reset();
+    live_extruder_velocity_observer_.reset();
     nozzle_temp_observer_.reset();
     nozzle_target_observer_.reset();
     tools_version_observer_.reset();

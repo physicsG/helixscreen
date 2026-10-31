@@ -84,12 +84,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "PanelWidgetConfig: save_soon writes once edit
     CHECK(stored_col(scene.path) == 0); // not written yet
 
     // A second edit inside the window restarts it.
-    process_lvgl(PanelWidgetConfig::SAVE_SETTLE_MS / 2);
+    process_lvgl(PanelWidgetConfig::kSaveSettleMs / 2);
     scene.config.save_soon();
-    process_lvgl(PanelWidgetConfig::SAVE_SETTLE_MS / 2 + 100);
+    process_lvgl(PanelWidgetConfig::kSaveSettleMs / 2 + 100);
     CHECK(stored_col(scene.path) == 0);
 
-    process_lvgl(PanelWidgetConfig::SAVE_SETTLE_MS);
+    process_lvgl(PanelWidgetConfig::kSaveSettleMs);
     CHECK_FALSE(scene.config.save_pending());
     CHECK(stored_col(scene.path) == 2);
 }
@@ -143,11 +143,11 @@ TEST_CASE_METHOD(XMLTestFixture,
     const std::string path = Config::get_instance()->df() + "panel_widgets/" + scene.panel_id;
     {
         GridEditMode em;
-        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
         em.select_widget(scene.widget);
         GridEditModeTestAccess::commit_resize(
             em,
-            {0, 0, GridEditScene::COLSPAN + GridLayout::TRACKS_PER_CELL, GridEditScene::ROWSPAN});
+            {0, 0, GridEditScene::kColspan + GridLayout::TRACKS_PER_CELL, GridEditScene::kRowspan});
         REQUIRE(scene.config->save_pending());
         // The app shutting down destroys the home panel, and its session, here.
     }
@@ -155,7 +155,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     const auto node = Config::get_instance()->get<nlohmann::json>(path, nlohmann::json());
     REQUIRE(node.contains("pages"));
     CHECK(node["pages"][1]["widgets"][0]["colspan"] ==
-          GridEditScene::COLSPAN + GridLayout::TRACKS_PER_CELL);
+          GridEditScene::kColspan + GridLayout::TRACKS_PER_CELL);
     process_lvgl(50);
     lv_obj_delete(scene.container);
 }
@@ -179,7 +179,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "PanelWidgetConfig: a destroyed config never f
     }
     // The timer's callback holds a raw `this`: the destructor cancels it, so
     // running past the window writes nothing for the freed object.
-    process_lvgl(PanelWidgetConfig::SAVE_SETTLE_MS + 200);
+    process_lvgl(PanelWidgetConfig::kSaveSettleMs + 200);
     CHECK(stored_col(path) == 0);
 }
 
@@ -192,13 +192,13 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: every edit asks for a save once 
 
     SECTION("entering syncs a drifted position") {
         // The entry says column 4; the widget is laid out in column 0.
-        scene.config->page_entries_mut(GridEditScene::PAGE_INDEX)[0].col = 4;
-        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
-        REQUIRE(scene.config->page_entries(GridEditScene::PAGE_INDEX)[0].col == 0);
+        scene.config->page_entries_mut(GridEditScene::kPageIndex)[0].col = 4;
+        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
+        REQUIRE(scene.config->page_entries(GridEditScene::kPageIndex)[0].col == 0);
         CHECK(scene.config->save_pending());
     }
     SECTION("removing a widget") {
-        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
         scene.config->flush_pending_save();
         em.select_widget(scene.widget);
         lv_obj_t* remove = GridEditModeTestAccess::remove_button(em);
@@ -208,7 +208,7 @@ TEST_CASE_METHOD(XMLTestFixture, "GridEditMode: every edit asks for a save once 
         CHECK(scene.config->save_pending());
     }
     SECTION("placing a widget from the catalog") {
-        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+        em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
         scene.config->flush_pending_save();
         GridEditModeTestAccess::place_from_catalog(em, "clock");
         REQUIRE(scene.config->is_placed("clock"));

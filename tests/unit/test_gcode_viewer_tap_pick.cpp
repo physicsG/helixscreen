@@ -95,14 +95,14 @@ struct Fixture {
     Taps taps;
 
     Fixture() {
-        viewer = ui_gcode_viewer_create(lv_screen_active());
+        viewer = helix::ui::gcode_viewer_create(lv_screen_active());
         REQUIRE(viewer != nullptr);
         lv_obj_set_size(viewer, kViewerSize, kViewerSize);
         lv_obj_set_pos(viewer, kViewerX, kViewerY);
         lv_obj_update_layout(viewer);
-        ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
-        ui_gcode_viewer_set_object_tap_callback(viewer, on_tap, &taps);
-        ui_gcode_viewer_set_object_long_press_callback(viewer, on_long_press, &taps);
+        helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+        helix::ui::gcode_viewer_set_object_tap_callback(viewer, on_tap, &taps);
+        helix::ui::gcode_viewer_set_object_long_press_callback(viewer, on_long_press, &taps);
 
         renderer = helix::test_access::gcode_viewer_budget_force_2d(viewer, make_two_object_file());
         REQUIRE(renderer != nullptr);

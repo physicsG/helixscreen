@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "ui_screensaver.h"
 
 #include "ui_utils.h"
 
 #include "lv_draw_buf_guard.h"
+#include "screensaver_image.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <cstdlib>
-#include <draw/lv_image_decoder_private.h>
+#include <iterator>
 
 using helix::ui::DirtyRect;
 using helix::ui::screensaver::flap_frame_at;
@@ -20,21 +21,21 @@ using helix::ui::screensaver::flight_pos_at;
 using helix::ui::screensaver::FlightPos;
 
 // Sprite asset paths
-static constexpr const char* TOASTER_FRAMES[] = {
+static constexpr const char* kToasterFrames[] = {
     "A:assets/images/screensaver/toaster_0.png",
     "A:assets/images/screensaver/toaster_1.png",
     "A:assets/images/screensaver/toaster_2.png",
     "A:assets/images/screensaver/toaster_3.png",
 };
-static constexpr const char* TOAST_IMG = "A:assets/images/screensaver/toast.png";
-static constexpr int NUM_TOASTER_FRAMES = sizeof(TOASTER_FRAMES) / sizeof(TOASTER_FRAMES[0]);
+static constexpr const char* kToastImg = "A:assets/images/screensaver/toast.png";
+static constexpr int kNumToasterFrames = sizeof(kToasterFrames) / sizeof(kToasterFrames[0]);
 
 // CSS reference: translate(-1600px, 1600px) — fixed travel distance
-static constexpr int FLIGHT_DISTANCE = 1600;
+static constexpr int kFlightDistance = 1600;
 
 // Each wing frame holds this long on a 10 s or 16 s flight, and twice as long on a
 // 24 s flight: slower flight, slower flap.
-static constexpr int FLAP_STEP_MS = 50;
+static constexpr int kFlapStepMs = 50;
 
 // Object definition matching the exact CSS classes and positions.
 // CSS uses right/top percentages. Negative right = off-screen to the right.
@@ -65,7 +66,7 @@ struct ObjectDef {
 };
 
 // Exact objects from the CSS HTML, in order
-static constexpr ObjectDef OBJECTS[] = {
+static constexpr ObjectDef kObjects[] = {
     // First group
     {-0.02f, -0.17f, true, false, 10000, 0}, // t1 p6
     {0.10f, -0.19f, true, false, 24000, 0},  // t3 p7
@@ -131,12 +132,39 @@ static constexpr ObjectDef OBJECTS[] = {
     {0.30f, -0.24f, true, true, 24000, 20000}, // t9 p21
     {-0.29f, 0.50f, true, true, 24000, 20000}, // t9 p26
 };
-static constexpr int NUM_OBJECTS = sizeof(OBJECTS) / sizeof(OBJECTS[0]);
+static constexpr int NUM_OBJECTS = sizeof(kObjects) / sizeof(kObjects[0]);
 
-// Sprites flown per level, indexed like LEVEL_PERIODS_MS. Every visible sprite costs
-// dirty-region work each frame, so the rungs past half rate thin the flock rather than slow it
-// again. OBJECTS[] is ordered by delay and wave, so a prefix keeps a representative mix.
-static constexpr int LEVEL_SPRITE_CAPS[] = {NUM_OBJECTS, NUM_OBJECTS, 25, 10};
+namespace helix::ui {
+namespace {
+
+struct ToasterLevel {
+    uint32_t period_ms; // frame period in ms
+    int sprites;        // sprites flown, a prefix of kObjects[]
+};
+
+// The ladder, most expensive level first. Every visible sprite costs dirty-region work each
+// frame, and a halved rate that still flies every sprite saves little, so the rungs past half
+// rate thin the flock rather than slow it again. kObjects[] is ordered by delay and wave, so a
+// prefix keeps a representative mix.
+constexpr ToasterLevel kToasterLevels[] = {
+    {kSaverFastPeriod, NUM_OBJECTS},
+    {33, NUM_OBJECTS},
+    {33, 25},
+    {33, 10},
+};
+
+} // namespace
+} // namespace helix::ui
+
+using helix::ui::kToasterLevels;
+
+size_t FlyingToasterScreensaver::ladder_size() const {
+    return std::size(kToasterLevels);
+}
+
+uint32_t FlyingToasterScreensaver::ladder_period_ms(size_t level) const {
+    return helix::ui::ladder_period(kToasterLevels, level);
+}
 
 int FlyingToasterScreensaver::get_scale_factor() const {
     lv_display_t* disp = lv_display_get_default();
@@ -167,12 +195,8 @@ void FlyingToasterScreensaver::on_level_request(size_t level) {
 }
 
 size_t FlyingToasterScreensaver::sprite_limit(size_t level) const {
-    // A member sees the private period table, so the two stay the same length here.
-    static_assert(sizeof(LEVEL_SPRITE_CAPS) / sizeof(LEVEL_SPRITE_CAPS[0]) ==
-                      sizeof(LEVEL_PERIODS_MS) / sizeof(LEVEL_PERIODS_MS[0]),
-                  "every level needs both a frame period and a sprite cap");
-    constexpr size_t last = sizeof(LEVEL_SPRITE_CAPS) / sizeof(LEVEL_SPRITE_CAPS[0]) - 1;
-    return static_cast<size_t>(std::min(NUM_OBJECTS, LEVEL_SPRITE_CAPS[std::min(level, last)]));
+    return static_cast<size_t>(std::min(
+        NUM_OBJECTS, kToasterLevels[std::min(level, std::size(kToasterLevels) - 1)].sprites));
 }
 
 void FlyingToasterScreensaver::drop_sprites_past(size_t limit) {
@@ -204,7 +228,7 @@ void FlyingToasterScreensaver::spawn_objects(size_t count) {
     m_objects.reserve(active_count);
 
     for (int i = 0; i < active_count; i++) {
-        const auto& def = OBJECTS[i];
+        const auto& def = kObjects[i];
 
         // Convert CSS right/top percentages to LVGL left/top coordinates.
         // CSS: right: R% means element's right edge is R% from container right.
@@ -259,8 +283,8 @@ void FlyingToasterScreensaver::create_flying_object(int start_x, int start_y, bo
     obj.delay_ms = delay_ms;
     obj.initial_frame = initial_frame;
     obj.flap_frame = initial_frame;
-    // 10 s and 16 s flights hold each wing frame FLAP_STEP_MS, 24 s flights twice that
-    obj.flap_step_ms = static_cast<uint16_t>(FLAP_STEP_MS * std::max(1, speed_ms / 10000));
+    // 10 s and 16 s flights hold each wing frame kFlapStepMs, 24 s flights twice that
+    obj.flap_step_ms = static_cast<uint16_t>(kFlapStepMs * std::max(1, speed_ms / 10000));
     m_objects.push_back(obj);
 }
 
@@ -284,7 +308,7 @@ void FlyingToasterScreensaver::on_frame(uint32_t dt_ms, std::vector<DirtyRect>& 
 
         // Position is a function of elapsed time, never of how often the timer fired
         const FlightPos pos = flight_pos_at(m_elapsed_ms, obj.start_x, obj.start_y, obj.fly_ms,
-                                            obj.delay_ms, FLIGHT_DISTANCE);
+                                            obj.delay_ms, kFlightDistance);
 
         // Skip objects still in their start delay
         if (!pos.started) {
@@ -332,34 +356,13 @@ void FlyingToasterScreensaver::decode_sprites() {
     // Pre-decode each unique PNG into a persistent draw buffer.
     // When used as lv_image_set_src(), LVGL treats these as LV_IMAGE_SRC_VARIABLE —
     // no file open, no PNG decompression, just direct pixel data.
-    for (int i = 0; i < NUM_TOASTER_FRAMES; i++) {
-        lv_image_decoder_dsc_t dsc;
-        lv_result_t res = lv_image_decoder_open(&dsc, TOASTER_FRAMES[i], nullptr);
-        if (res == LV_RESULT_OK && dsc.decoded) {
-            m_decoded_frames[i] = lv_draw_buf_dup(dsc.decoded);
-            lv_image_decoder_close(&dsc);
-        } else {
-            spdlog::warn("[Screensaver] Failed to pre-decode {}", TOASTER_FRAMES[i]);
-            if (res == LV_RESULT_OK)
-                lv_image_decoder_close(&dsc);
-        }
+    for (int i = 0; i < kNumToasterFrames; i++) {
+        m_decoded_frames[i] = helix::ui::saver_decode_image(kToasterFrames[i], "toaster frame");
     }
-
-    {
-        lv_image_decoder_dsc_t dsc;
-        lv_result_t res = lv_image_decoder_open(&dsc, TOAST_IMG, nullptr);
-        if (res == LV_RESULT_OK && dsc.decoded) {
-            m_decoded_toast = lv_draw_buf_dup(dsc.decoded);
-            lv_image_decoder_close(&dsc);
-        } else {
-            spdlog::warn("[Screensaver] Failed to pre-decode {}", TOAST_IMG);
-            if (res == LV_RESULT_OK)
-                lv_image_decoder_close(&dsc);
-        }
-    }
+    m_decoded_toast = helix::ui::saver_decode_image(kToastImg, "toast");
 
     spdlog::debug("[Screensaver] Pre-decoded {} toaster frames + toast sprite into RAM",
-                  NUM_TOASTER_FRAMES);
+                  kNumToasterFrames);
 }
 
 void FlyingToasterScreensaver::free_sprites() {

@@ -63,6 +63,11 @@ class TempGraphWidget : public PanelWidget {
     /// Static click callback (XML-registered)
     static void on_temp_graph_widget_clicked(lv_event_t* e);
 
+    /// Settings dialog callbacks (XML-registered); a row's index is the user_data.
+    static void config_swatch_cb(lv_event_t* e);
+    static void config_series_switch_cb(lv_event_t* e);
+    static void config_follow_switch_cb(lv_event_t* e);
+
   private:
     void build_default_config();
     std::vector<TempGraphSeriesSpec> build_series_from_config() const;
@@ -143,7 +148,16 @@ class TempGraphWidget : public PanelWidget {
         using SaveCallback = std::function<void(const nlohmann::json& new_config)>;
 
         TempGraphConfigModal(const nlohmann::json& config, SaveCallback on_save);
-        ~TempGraphConfigModal() override = default;
+        ~TempGraphConfigModal() override;
+
+        /// The dialog on screen, or nullptr.
+        static TempGraphConfigModal* active() {
+            return s_active_;
+        }
+        /// Step row @p idx's series colour to the next palette entry.
+        void cycle_color(size_t idx);
+        void set_series_on(size_t idx, bool on);
+        void set_follow(bool on);
 
         const char* get_name() const override {
             return "Temperature Graph Config";
@@ -166,20 +180,18 @@ class TempGraphWidget : public PanelWidget {
         struct SensorRow {
             std::string name;    ///< Klipper sensor key
             std::string display; ///< Human-readable name
-            bool enabled = true;
-            int color_idx = 0; ///< Index into TEMP_GRAPH_SERIES_COLORS palette
-            lv_obj_t* swatch = nullptr;
-            lv_obj_t* sw = nullptr;
+            int color_idx = 0;   ///< Index into kTempGraphSeriesColors palette
         };
 
-        void populate_follow_toggle();
+        /// Publish one subject slot per series (name, colour, on/off) and the
+        /// row count the dialog's <repeat> expands.
         void populate_sensor_list();
-        static void color_swatch_clicked(lv_event_t* e);
+
+        static TempGraphConfigModal* s_active_;
 
         nlohmann::json config_;
         SaveCallback on_save_;
         std::vector<SensorRow> rows_;
-        lv_obj_t* follow_switch_ = nullptr;
     };
 
     std::unique_ptr<TempGraphConfigModal> config_modal_;

@@ -129,10 +129,18 @@ TEST_CASE_METHOD(BlockingOpFixture, "is_external_blocking_operation_active attri
         CHECK(state.is_external_blocking_operation_active());
     }
 
-    SECTION("self busy: app motion in flight -> not blocked") {
-        state.app_motion_activity().note_sent();
+    SECTION("self busy: the app's jog that started the episode, in flight -> not blocked") {
+        const auto start = state.calibration_state().idle_timeout_busy().printing_since();
+        state.app_motion_activity().note_sent(start - std::chrono::milliseconds(100));
         CHECK(state.is_blocking_operation_active()); // raw predicate unchanged
         CHECK_FALSE(state.is_external_blocking_operation_active());
+        state.app_motion_activity().note_done();
+    }
+
+    SECTION("motion in flight that was sent into an external episode -> blocked") {
+        const auto start = state.calibration_state().idle_timeout_busy().printing_since();
+        state.app_motion_activity().note_sent(start + std::chrono::milliseconds(500));
+        CHECK(state.is_external_blocking_operation_active());
         state.app_motion_activity().note_done();
     }
 

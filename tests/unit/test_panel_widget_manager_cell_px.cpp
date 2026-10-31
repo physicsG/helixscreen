@@ -128,7 +128,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Widget is told the pixel width the grid actual
     // theme_manager_resolve_px_tokens() reads "ui_xml" as a relative path. Run
     // from anywhere but the repo root and every spacing token silently becomes
     // 0, the gutters vanish, and this test would pass without proving anything.
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     ScopedWidgetFactory oracle("shutdown", size_oracle_factory());
 
@@ -173,7 +173,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Widget is told the pixel width the grid actual
     // truncates the promise. 2px covers that; the gutter-blind bug this test
     // guards against is off by roughly a whole gutter, well outside it either way.
     INFO("promised=" << SizeOracleWidget::s_width_px << " rendered=" << rendered_w
-                     << " gutter=" << theme_manager_get_spacing("space_xs"));
+                     << " gutter=" << helix::GridLayout::gutter_px());
     REQUIRE(std::abs(SizeOracleWidget::s_width_px - rendered_w) <= 2);
 
     mgr.clear_panel_config(panel_id);
@@ -191,7 +191,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // theme_manager_resolve_px_tokens() reads "ui_xml" as a relative path. Run
     // from anywhere but the repo root and every spacing token silently becomes
     // 0, the gutters vanish, and this test would pass without proving anything.
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     ScopedWidgetFactory oracle("tips", span_oracle_factory());
 
@@ -232,7 +232,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // below reads 0 and the remainder check passes for the wrong reason.
     lv_obj_update_layout(container);
 
-    const int gutter = theme_manager_get_spacing("space_xs");
+    const int gutter = helix::GridLayout::gutter_px();
     const int content_w = lv_obj_get_content_width(container);
     const int content_h = lv_obj_get_content_height(container);
     const int cols = GridLayout::get_cols(UiBreakpoint::Medium, content_w, content_h);

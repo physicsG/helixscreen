@@ -20,8 +20,8 @@
 // Visual center measured from bounding box: X=500, Y=667
 // ============================================================================
 
-static constexpr int DESIGN_CENTER_X = 500;
-static constexpr int DESIGN_CENTER_Y = 630;
+static constexpr int kDesignCenterX = 500;
+static constexpr int kDesignCenterY = 630;
 
 // --- Silhouette (overall outline) ---
 static const lv_point_t pts_silhouette[] = {
@@ -294,11 +294,11 @@ void draw_nozzle_a4t(lv_layer_t* layer, int32_t cx, int32_t cy, std::optional<lv
     };
 
     helix::nr_draw_polygons(layer, polys, std::size(polys), palette, cx, cy, scale,
-                            {DESIGN_CENTER_X, DESIGN_CENTER_Y});
+                            {kDesignCenterX, kDesignCenterY});
 
     // Layer 10: Nozzle tip (shows filament color when loaded)
     {
-        int32_t nozzle_top_y = cy + (int32_t)((1300 - DESIGN_CENTER_Y) * scale);
+        int32_t nozzle_top_y = cy + (int32_t)((1300 - kDesignCenterY) * scale);
         int32_t nozzle_height = LV_MAX((int32_t)(30 * scale), 2);
         int32_t nozzle_top_width = LV_MAX((int32_t)(80 * scale), 4);
         int32_t nozzle_bottom_width = LV_MAX((int32_t)(30 * scale), 2);

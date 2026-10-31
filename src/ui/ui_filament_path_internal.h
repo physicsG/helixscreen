@@ -61,65 +61,65 @@ namespace pg = helix::ui::pathgeo;
 // ============================================================================
 
 // Default dimensions
-inline constexpr int32_t DEFAULT_WIDTH = 300;
-inline constexpr int32_t DEFAULT_HEIGHT = 200;
-inline constexpr int DEFAULT_SLOT_COUNT = 4;
+inline constexpr int32_t kDefaultWidth = 300;
+inline constexpr int32_t kDefaultHeight = 200;
+inline constexpr int kDefaultSlotCount = 4;
 
 // LINEAR/HUB layout ratios (as fraction of widget height)
 // Entry points at very top to connect visually with slot grid above
-inline constexpr float ENTRY_Y_RATIO =
+inline constexpr float kEntryYRatio =
     -0.12f; // Top entry points (above canvas, very close to spool box)
-inline constexpr float PREP_Y_RATIO = 0.10f;     // Prep sensor position
-inline constexpr float MERGE_Y_RATIO = 0.20f;    // Where lanes merge
-inline constexpr float HUB_Y_RATIO = 0.30f;      // Hub/selector center
-inline constexpr float HUB_HEIGHT_RATIO = 0.10f; // Hub box height
+inline constexpr float kPrepYRatio = 0.10f;     // Prep sensor position
+inline constexpr float kMergeYRatio = 0.20f;    // Where lanes merge
+inline constexpr float kHubYRatio = 0.30f;      // Hub/selector center
+inline constexpr float kHubHeightRatio = 0.10f; // Hub box height
 // Note: output sensor Y is computed as hub_bottom (butted against hub, no separate ratio)
-inline constexpr float TOOLHEAD_Y_RATIO = 0.68f; // Toolhead sensor
-inline constexpr float NOZZLE_Y_RATIO =
+inline constexpr float kToolheadYRatio = 0.68f; // Toolhead sensor
+inline constexpr float kNozzleYRatio =
     0.82f; // Nozzle/extruder center (needs more room for larger extruder)
 
 // Bypass position (right side of widget)
-inline constexpr float BYPASS_X_RATIO = 0.85f; // Right side for bypass spool
+inline constexpr float kBypassXRatio = 0.85f; // Right side for bypass spool
 // Bypass merge point: where bypass path joins the center path, BELOW the hub output sensor.
 // This is where a physical or virtual bypass sensor lives.
-inline constexpr float BYPASS_MERGE_Y_RATIO = 0.58f;
+inline constexpr float kBypassMergeYRatio = 0.58f;
 // Buffer element position (between hub output and bypass merge)
-inline constexpr float BUFFER_Y_RATIO = 0.46f;
+inline constexpr float kBufferYRatio = 0.46f;
 
 // PARALLEL topology (tool changer): the toolhead glyphs stand on this line,
 // and each tool's entry sensor sits this fraction of the way from the lane
 // entries down to its toolhead. parallel_rows() turns them into Ys for the
 // renderer and the click hit-test alike.
-inline constexpr float PARALLEL_GLYPH_BOTTOM_RATIO = 0.74f;
-inline constexpr float PARALLEL_SENSOR_FRACTION = 0.75f;
+inline constexpr float kParallelGlyphBottomRatio = 0.74f;
+inline constexpr float kParallelSensorFraction = 0.75f;
 
 // Slot-entry click hit-test padding (click handler only; no renderer
 // counterpart — these widen the entry band so taps near the spool grid still
 // register on the nearest slot).
-inline constexpr int32_t ENTRY_HIT_MARGIN_TOP = 10;    // px above entry_y
-inline constexpr int32_t ENTRY_HIT_MARGIN_BOTTOM = 20; // px below prep_y
+inline constexpr int32_t kEntryHitMarginTop = 10;    // px above entry_y
+inline constexpr int32_t kEntryHitMarginBottom = 20; // px below prep_y
 
 // Line widths (scaled by space_xs for responsiveness)
-inline constexpr int LINE_WIDTH_IDLE_BASE = 2;
-inline constexpr int LINE_WIDTH_ACTIVE_BASE = 3;
-inline constexpr int SENSOR_RADIUS_BASE = 4;
+inline constexpr int kLineWidthIdleBase = 2;
+inline constexpr int kLineWidthActiveBase = 3;
+inline constexpr int kSensorRadiusBase = 4;
 
 // Default filament color (used when no active filament)
-inline constexpr uint32_t DEFAULT_FILAMENT_COLOR = 0x4488FF;
+inline constexpr uint32_t kDefaultFilamentColor = 0x4488FF;
 
 // Animation constants
-inline constexpr int SEGMENT_ANIM_DURATION_MS = 300; // Duration for segment-to-segment animation
-inline constexpr int ERROR_PULSE_DURATION_MS = 800;  // Error pulse cycle duration
-inline constexpr lv_opa_t ERROR_PULSE_OPA_MIN = 100; // Minimum opacity during error pulse
-inline constexpr lv_opa_t ERROR_PULSE_OPA_MAX = 255; // Maximum opacity during error pulse
-inline constexpr int HEAT_PULSE_DURATION_MS = 800;   // Heat pulse cycle duration
-inline constexpr lv_opa_t HEAT_PULSE_OPA_MIN = 100;  // Minimum opacity during heat pulse
-inline constexpr lv_opa_t HEAT_PULSE_OPA_MAX = 255;  // Maximum opacity during heat pulse
-inline constexpr int FLOW_ANIM_DURATION_MS = 1500;   // Full cycle for flow dot animation
-inline constexpr int FLOW_DOT_SPACING = 20;          // Pixels between flow dots
-inline constexpr int FLOW_DOT_RADIUS = 1;            // Radius of each flow particle
-inline constexpr lv_opa_t FLOW_DOT_OPA = 90;         // Opacity of flow dots
-inline constexpr int OUTPUT_X_ANIM_DURATION_MS = 250;
+inline constexpr int kSegmentAnimDurationMs = 300; // Duration for segment-to-segment animation
+inline constexpr int kErrorPulseDurationMs = 800;  // Error pulse cycle duration
+inline constexpr lv_opa_t kErrorPulseOpaMin = 100; // Minimum opacity during error pulse
+inline constexpr lv_opa_t kErrorPulseOpaMax = 255; // Maximum opacity during error pulse
+inline constexpr int kHeatPulseDurationMs = 800;   // Heat pulse cycle duration
+inline constexpr lv_opa_t kHeatPulseOpaMin = 100;  // Minimum opacity during heat pulse
+inline constexpr lv_opa_t kHeatPulseOpaMax = 255;  // Maximum opacity during heat pulse
+inline constexpr int kFlowAnimDurationMs = 1500;   // Full cycle for flow dot animation
+inline constexpr int kFlowDotSpacing = 20;         // Pixels between flow dots
+inline constexpr int kFlowDotRadius = 1;           // Radius of each flow particle
+inline constexpr lv_opa_t kFlowDotOpa = 90;        // Opacity of flow dots
+inline constexpr int kOutputXAnimDurationMs = 250;
 
 // ============================================================================
 // Widget state
@@ -153,10 +153,10 @@ struct ThemeCache {
     lv_color_t color_accent;    // Active route walls and halo ("primary")
     lv_color_t color_buffer[3]; // Buffer box by ClogMeterStatus: text_muted, warning, danger
 
-    int32_t line_width_idle = LINE_WIDTH_IDLE_BASE;
-    int32_t line_width_active = LINE_WIDTH_ACTIVE_BASE;
-    int32_t tube_gauge = LINE_WIDTH_ACTIVE_BASE + 2; // tube outer width, walls included
-    int32_t sensor_radius = SENSOR_RADIUS_BASE;
+    int32_t line_width_idle = kLineWidthIdleBase;
+    int32_t line_width_active = kLineWidthActiveBase;
+    int32_t tube_gauge = kLineWidthActiveBase + 2; // tube outer width, walls included
+    int32_t sensor_radius = kSensorRadiusBase;
     int32_t hub_width = 60;
     int32_t border_radius = 6;
     int32_t extruder_scale = 10; // Scale unit for extruder (based on space_md)
@@ -190,7 +190,7 @@ struct AnimState {
 
     // Flow particles along the active path during load/unload
     bool flow_active = false;
-    int32_t flow_offset = 0; // 0 → FLOW_DOT_SPACING, cycles continuously
+    int32_t flow_offset = 0; // 0 → kFlowDotSpacing, cycles continuously
 
     // Output-X slide (LINEAR: output exits beneath active slot)
     int32_t output_x_current = 0;
@@ -260,12 +260,12 @@ struct PathCache {
 // subsystem-owned state.
 struct FilamentPathData {
     // --- Configuration ---
-    int topology = 1;                    // 0=LINEAR, 1=HUB (PathTopology values)
-    int slot_count = DEFAULT_SLOT_COUNT; // Number of slots
-    int active_slot = -1;                // Currently active slot (-1=none)
-    int filament_segment = 0;            // PathSegment enum value (target)
-    int error_segment = 0;               // Error location (0=none)
-    uint32_t filament_color = DEFAULT_FILAMENT_COLOR;
+    int topology = 1;                   // 0=LINEAR, 1=HUB (PathTopology values)
+    int slot_count = kDefaultSlotCount; // Number of slots
+    int active_slot = -1;               // Currently active slot (-1=none)
+    int filament_segment = 0;           // PathSegment enum value (target)
+    int error_segment = 0;              // Error location (0=none)
+    uint32_t filament_color = kDefaultFilamentColor;
     int32_t slot_overlap = 0; // Overlap between slots in pixels (for 5+ gates)
     int32_t slot_width = 90;  // Dynamic slot width (fallback when slot_grid unavailable)
 
@@ -274,30 +274,36 @@ struct FilamentPathData {
     lv_obj_t* slot_grid = nullptr;
     // The spool box's front edge below slot_grid's top, INT32_MIN when none.
     int32_t lane_entry_offset = INT32_MIN;
-    static constexpr int MAX_SLOTS = 16;
-    lv_obj_t* spool_containers[MAX_SLOTS] = {};
+    static constexpr int kMaxSlots = helix::kAmsMaxSlots;
+    lv_obj_t* spool_containers[kMaxSlots] = {};
 
     // Per-slot filament state (for showing all installed filaments, not just active)
-    SlotFilamentState slot_filament_states[MAX_SLOTS] = {};
+    SlotFilamentState slot_filament_states[kMaxSlots] = {};
 
     // Per-slot prep sensor capability (true = slot has prep/pre-gate sensor)
-    bool slot_has_prep_sensor[MAX_SLOTS] = {};
+    bool slot_has_prep_sensor[kMaxSlots] = {};
     // Per-slot load sensor between prep and hub (AFC), read as LANE
-    bool slot_has_load_sensor[MAX_SLOTS] = {};
+    bool slot_has_load_sensor[kMaxSlots] = {};
     // Per-slot error the slot reports (SlotInfo::error at ERROR severity)
-    bool slot_has_error[MAX_SLOTS] = {};
+    bool slot_has_error[kMaxSlots] = {};
     // How much of the bowden (OUTPUT) tube a load or unload has filled, in
     // percent from the hub end; -1 when the backend reports no progress.
     int bowden_fill = -1;
 
     // Per-slot tool mapping (actual AFC map values, not slot index)
-    int mapped_tool[MAX_SLOTS];              // -1 = use slot index as fallback
-    bool slot_is_hub_routed[MAX_SLOTS] = {}; // true = lane routes through hub (MIXED topology)
+    int mapped_tool[kMaxSlots];              // -1 = use slot index as fallback
+    bool slot_is_hub_routed[kMaxSlots] = {}; // true = lane routes through hub (MIXED topology)
+
+    // Caption naming the lane whose spool feeds this one ("ACE 2 · 3"), for a
+    // lane fed from storage upstream of it. Empty = the lane's spool is its
+    // own. Copied on set; drawn small and muted on the lane's column.
+    static constexpr int kUpstreamCaptionBytes = 24;
+    char slot_upstream_caption[kMaxSlots][kUpstreamCaptionBytes] = {};
 
     // Per-lane Klipper extruder identity, derived from the lane's extruder name
     // (#1229). Toolhead badges read "E<n>" from this when every lane resolved;
     // otherwise they fall back to the AFC lane aliases in mapped_tool.
-    int extruder_tool[MAX_SLOTS];       // -1 = this lane's extruder is unknown
+    int extruder_tool[kMaxSlots];       // -1 = this lane's extruder is unknown
     bool use_extruder_identity = false; // true = badge toolheads "E<n>"
 
     // Bypass mode state
@@ -330,6 +336,9 @@ struct FilamentPathData {
     // toolhead and the shared hub->nozzle run is a short stub (printers whose
     // combiner mounts on the print head; the per-lane tubes run the whole way).
     bool hub_on_toolhead = false;
+    // The LINEAR/HUB path continues past the hub to a toolhead. False for a unit
+    // that feeds no nozzle: its lanes end at the hub, with nothing drawn below it.
+    bool feeds_toolhead = true;
     bool eject_mode = false;         // true = allow segment to drop below LANE (past slot sensor)
     bool has_toolhead_sensor = true; // the unit reports a toolhead filament sensor
 
@@ -343,14 +352,6 @@ struct FilamentPathData {
     // Callbacks
     filament_path_slot_cb_t slot_callback = nullptr;
     void* slot_user_data = nullptr;
-    /// Optional. When set, the toolhead hit region reports here instead of
-    /// slot_callback — the nozzle and the spool are different questions on a
-    /// toolchanger. Unset leaves both regions on slot_callback, as before.
-    /// Which physical tool is on the carriage, or -1. Unit-scoped views (the
-    /// HUB detail) draw ONE toolhead and otherwise cannot say whether it is the
-    /// mounted one — on a toolchanger that is most of what you want to know.
-    int mounted_tool = -1;
-
     filament_path_slot_cb_t toolhead_callback = nullptr;
     void* toolhead_user_data = nullptr;
     filament_path_bypass_cb_t bypass_callback = nullptr;
@@ -408,7 +409,7 @@ struct BaseGeometry {
     int32_t width = 0;
     int32_t height = 0;
     int slot_count = 0;
-    int32_t slot_x[FilamentPathData::MAX_SLOTS] = {}; // absolute X per slot
+    int32_t slot_x[FilamentPathData::kMaxSlots] = {}; // absolute X per slot
     int32_t center_x = 0; // midpoint between first and last slot, or canvas mid
     // The spool box's front edge, where the lanes enter the path; INT32_MIN
     // when no box is drawn above the canvas.
@@ -429,7 +430,7 @@ struct SlotRenderState {
     bool has_error = false; // the slot reports an error of its own
 };
 
-using SlotRenderStates = std::array<SlotRenderState, FilamentPathData::MAX_SLOTS>;
+using SlotRenderStates = std::array<SlotRenderState, FilamentPathData::kMaxSlots>;
 
 SlotRenderStates compute_slot_render_states(const FilamentPathData* data);
 

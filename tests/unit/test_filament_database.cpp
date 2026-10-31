@@ -327,12 +327,12 @@ TEST_CASE("MaterialInfo::needs_drying - every material except the known non-hygr
     //
     //   PE  — polyolefin, negligible moisture uptake; drying buys nothing.
     //   EVA — low Vicat softening point makes oven drying actively risky.
-    const std::set<std::string_view> INTENTIONALLY_NOT_DRIED{"PE", "EVA"};
+    const std::set<std::string_view> kIntentionallyNotDried{"PE", "EVA"};
 
     std::set<std::string_view> seen_not_dried;
     for (const auto& mat : *shipped_materials()) {
         INFO("Checking material: " << mat.name);
-        if (INTENTIONALLY_NOT_DRIED.count(mat.name) > 0) {
+        if (kIntentionallyNotDried.count(mat.name) > 0) {
             // Pin the exception: if someone later gives PE or EVA a real dry
             // temperature, this fires and the exception list must be updated.
             CHECK_FALSE(mat.needs_drying());
@@ -343,7 +343,7 @@ TEST_CASE("MaterialInfo::needs_drying - every material except the known non-hygr
     }
 
     // Guard against the exception list rotting if a row is renamed or removed.
-    CHECK(seen_not_dried == INTENTIONALLY_NOT_DRIED);
+    CHECK(seen_not_dried == kIntentionallyNotDried);
 }
 
 TEST_CASE("MaterialInfo::nozzle_recommended - returns midpoint", "[filament][database][helpers]") {
@@ -593,12 +593,12 @@ TEST_CASE("Phase 2 - get_default_drying_presets includes fan_pct",
 TEST_CASE("orphan catalog types now resolve with complete data", "[filament][database]") {
     // Every one of these had >= 1 product in assets/filaments.json but no
     // database row. Deleting any row fails this test.
-    static const char* FORMER_ORPHANS[] = {
+    static const char* kFormerOrphans[] = {
         "ASA-AERO", "CoPE",  "EVA",   "PA6-CF", "PE",     "PET", "PHA",    "PLA-AERO",
         "PP",       "PP-CF", "PP-GF", "PPA-CF", "PPA-GF", "PPS", "PPS-CF", "SBS",
     };
 
-    for (const auto* name : FORMER_ORPHANS) {
+    for (const auto* name : kFormerOrphans) {
         INFO("material: " << name);
         auto mat = find_material(name);
         REQUIRE(mat.has_value());
@@ -668,7 +668,7 @@ TEST_CASE("every material row is internally consistent", "[filament][database]")
 TEST_CASE("no material alias shadows a real material name", "[filament][database][alias]") {
     // An alias whose name also exists as a MATERIALS row would silently redirect
     // lookups away from that row (resolve_alias runs first in find_material).
-    for (const auto& alias : MATERIAL_ALIASES) {
+    for (const auto& alias : kMaterialAliases) {
         INFO("alias: " << alias.alias);
         bool shadows = false;
         for (const auto& mat : *shipped_materials()) {

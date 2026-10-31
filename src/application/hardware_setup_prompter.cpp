@@ -9,6 +9,10 @@
 #include "hardware_setup_prompter.h"
 
 #include "ui_modal.h"
+#include "ui_notification.h"
+#include "ui_panel_notification_history.h"
+#include "ui_timer_guard.h"
+#include "ui_toast_manager.h"
 #include "ui_wizard.h"
 
 #include "app_globals.h"
@@ -28,7 +32,119 @@
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
+#include <charconv>
+#include <cstdint>
+
 using namespace helix;
+
+namespace {
+
+/// The warning toast's button. user_data carries the warning's generation, so the
+/// action dispatched is that warning's own, exactly as its history entry's is.
+void review_toast_clicked(void* user_data) {
+    const auto generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(user_data));
+    const std::string action = fmt::format("{}:{}", kReviewPrinterTypeAction, generation);
+    if (auto review = helix::ui::notification_action_handler(action)) {
+        review();
+    }
+}
+
+/// The warning toast's X button. Closing it is a decision — keep the saved
+/// type — so it dispatches through the same action registry as the review
+/// button and inherits its lifetime and staleness guarantees.
+void mismatch_toast_closed(void* user_data) {
+    const auto generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(user_data));
+    const std::string action = fmt::format("{}:{}", kMismatchToastClosedAction, generation);
+    if (auto settle = helix::ui::notification_action_handler(action)) {
+        settle();
+    }
+}
+
+/// Both toast actions carry "<key>:<generation>"; a bad parse has nothing to
+/// dispatch on.
+bool parse_action_generation(const std::string& arg, uint32_t& gen) {
+    const auto parsed = std::from_chars(arg.data(), arg.data() + arg.size(), gen);
+    return parsed.ec == std::errc{} && parsed.ptr == arg.data() + arg.size();
+}
+
+/// PRINTER_TYPE and TYPE_MISMATCH_SHOWN_FOR hold display names, which a
+/// database rename orphans; every comparison reads them through the alias list.
+std::string canonical_saved_type() {
+    auto* cfg = Config::get_instance();
+    return PrinterDetector::canonical_type_name(
+        cfg->get<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, ""));
+}
+
+std::string canonical_shown_for() {
+    auto* cfg = Config::get_instance();
+    return PrinterDetector::canonical_type_name(
+        cfg->get<std::string>(cfg->df() + helix::wizard::TYPE_MISMATCH_SHOWN_FOR, ""));
+}
+
+void* toast_generation(uint32_t generation) {
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(generation));
+}
+
+// The format strings are translated handles, not compile-time literals, hence
+// fmt::runtime. Two entries for one machine are worded as the firmware mod or
+// add-on that separates them: naming the same printer twice reads as nonsense.
+
+std::string type_mismatch_toast_text(const std::string& saved, const std::string& detected) {
+    using Relation = PrinterDetector::TypeRelation;
+    const auto rel = PrinterDetector::relate_types(saved, detected);
+    switch (rel.relation) {
+    case Relation::DetectedVariant:
+        return fmt::format(
+            fmt::runtime(lv_tr("Your {0} looks like it has {1}, but it is set up as stock.")),
+            rel.base, rel.detected_label);
+    case Relation::SavedVariant:
+        return fmt::format(fmt::runtime(lv_tr("Your {0} is set up for {1}, but it looks stock.")),
+                           rel.base, rel.saved_label);
+    case Relation::SiblingVariants:
+        return fmt::format(
+            fmt::runtime(lv_tr("Your {0} looks like it has {1}, but it is set up for {2}.")),
+            rel.base, rel.detected_label, rel.saved_label);
+    case Relation::DifferentModel:
+        break;
+    }
+    return fmt::format(fmt::runtime(lv_tr("This looks like a {}, but it is set up as a {}")),
+                       detected, saved);
+}
+
+std::string type_mismatch_review_text(const std::string& saved, const std::string& detected,
+                                      int confidence) {
+    using Relation = PrinterDetector::TypeRelation;
+    const auto rel = PrinterDetector::relate_types(saved, detected);
+    switch (rel.relation) {
+    case Relation::DetectedVariant:
+        return fmt::format(
+            fmt::runtime(lv_tr("This {0} looks like it has {1} ({2}% confidence), but it is set "
+                               "up as stock. A wrong profile applies incorrect pre-print options "
+                               "and presets.")),
+            rel.base, rel.detected_label, confidence);
+    case Relation::SavedVariant:
+        return fmt::format(
+            fmt::runtime(lv_tr("This {0} is set up for {1}, but it looks stock ({2}% "
+                               "confidence). A wrong profile applies incorrect pre-print options "
+                               "and presets.")),
+            rel.base, rel.saved_label, confidence);
+    case Relation::SiblingVariants:
+        return fmt::format(
+            fmt::runtime(lv_tr("This {0} looks like it has {1} ({2}% confidence), but it is set "
+                               "up for {3}. A wrong profile applies incorrect pre-print options "
+                               "and presets.")),
+            rel.base, rel.detected_label, confidence, rel.saved_label);
+    case Relation::DifferentModel:
+        break;
+    }
+    return fmt::format(
+        fmt::runtime(lv_tr("This printer looks like a {} ({}% confidence), but it is "
+                           "set up as a {}. A wrong type applies incorrect pre-print "
+                           "options and presets.")),
+        detected, confidence, saved);
+}
+
+} // namespace
 
 namespace helix {
 
@@ -54,11 +170,53 @@ HardwarePrompt choose_prompt(const HardwarePromptGates& g,
     return g.type_mismatch_shown ? HardwarePrompt::None : HardwarePrompt::TypeMismatch;
 }
 
+HardwareSetupPrompter::~HardwareSetupPrompter() {
+    cancel_launch_timer();
+    // The handlers hold `this`; a toast or history row outliving the prompter then
+    // finds nothing to call.
+    if (review_handler_registered_) {
+        helix::ui::set_notification_action_handler(kReviewPrinterTypeAction, nullptr);
+        helix::ui::set_notification_action_handler(kMismatchToastClosedAction, nullptr);
+    }
+}
+
+void HardwareSetupPrompter::cancel_launch_timer() {
+    helix::ui::lv_timer_cancel_safe(launch_timer_);
+    launch_timer_ = nullptr;
+    pending_launch_ = nullptr;
+}
+
+void HardwareSetupPrompter::launch_after_modal_exit(void (HardwareSetupPrompter::*launch)()) {
+    // Build the wizard AFTER the modal's exit animation, not inside the click that
+    // started it: the dialog's own close only marks the backdrop exiting, so creating
+    // the full-screen wizard here would put it underneath a still-fading backdrop.
+    cancel_launch_timer();
+    pending_launch_ = launch;
+    launch_timer_ = lv_timer_create(
+        [](lv_timer_t* t) {
+            auto* self = static_cast<HardwareSetupPrompter*>(lv_timer_get_user_data(t));
+            auto launch = self->pending_launch_;
+            self->launch_timer_ = nullptr;
+            self->pending_launch_ = nullptr;
+            lv_timer_delete(t);
+            if (launch) {
+                (self->*launch)();
+            }
+        },
+        300, this);
+    lv_timer_set_repeat_count(launch_timer_, 1);
+}
+
 void HardwareSetupPrompter::reset_for_new_connection() {
     guards.reconfig_shown = false;
     guards.deferred_prompt_shown = false;
     guards.type_mismatch_shown = false;
     pending_steps_.clear();
+    // A review captured for the previous printer must not open against the next one.
+    pending_review_.reset();
+    ++review_generation_;
+    // A soft restart clears the modal stack without reporting a dismissal.
+    review_open_ = false;
 }
 
 HardwarePrompt HardwareSetupPrompter::run_discovery_prompts(const PrinterDiscovery& hw,
@@ -243,24 +401,17 @@ void HardwareSetupPrompter::prompt_deferred_hardware_setup(
             // Settle first: the wizard tears itself down asynchronously, and a
             // crash mid-run must not leave the offer pending forever.
             settle_deferred_hardware_setup();
-            // Build the wizard AFTER the modal's exit animation, not inside the
-            // click that started it: the dialog's own close only marks the
-            // backdrop exiting, so creating the full-screen wizard here would
-            // put it underneath a still-fading backdrop. The pending step list
-            // lives on the prompter until the timer consumes it.
-            lv_timer_t* launch = lv_timer_create(
-                [](lv_timer_t* t) {
-                    auto* self = static_cast<HardwareSetupPrompter*>(lv_timer_get_user_data(t));
-                    lv_timer_delete(t);
-                    self->launch_deferred_hardware_setup();
-                },
-                300, this);
-            lv_timer_set_repeat_count(launch, 1);
+            // The pending step list lives on the prompter until the launch consumes it.
+            launch_after_modal_exit(&HardwareSetupPrompter::launch_deferred_hardware_setup);
         },
         opts);
 }
 
 void HardwareSetupPrompter::settle_type_mismatch_warning() {
+    pending_review_.reset();
+    review_open_ = false;
+    // Answered: the sticky toast has nothing left to ask.
+    ToastManager::instance().hide(review_toast_clicked, toast_generation(review_generation_));
     auto* cfg = Config::get_instance();
     cfg->set<std::string>(cfg->df() + helix::wizard::TYPE_MISMATCH_SHOWN_FOR,
                           cfg->get<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, ""));
@@ -313,8 +464,7 @@ void HardwareSetupPrompter::maybe_warn_type_mismatch(const helix::PrinterDiscove
 
     // Canonicalised too: a dismissal recorded under the pre-rename name still
     // answers for the same printer.
-    const std::string flag = PrinterDetector::canonical_type_name(
-        cfg->get<std::string>(cfg->df() + helix::wizard::TYPE_MISMATCH_SHOWN_FOR, ""));
+    const std::string flag = canonical_shown_for();
 
     auto detected = PrinterDetector::auto_detect(hardware);
     const auto decision = PrinterDetector::classify_type_mismatch(saved, detected, flag);
@@ -327,24 +477,113 @@ void HardwareSetupPrompter::maybe_warn_type_mismatch(const helix::PrinterDiscove
             "margin >={} - {}",
             detected.type_name, detected.confidence, detected.runner_up_type_name,
             detected.runner_up_confidence, detected.margin(), detected.tied_count, saved, flag,
-            PrinterDetector::MISMATCH_MIN_CONFIDENCE, PrinterDetector::DETECT_MIN_MARGIN,
+            PrinterDetector::kMismatchMinConfidence, PrinterDetector::kDetectMinMargin,
             PrinterDetector::mismatch_decision_name(decision));
         return;
     }
 
-    // Session guard: one prompt per boot regardless of which button dismisses it.
+    // Session guard: one warning per boot. The toast and history entry stay until the
+    // user answers the review; only an answer persists TYPE_MISMATCH_SHOWN_FOR.
     guards.type_mismatch_shown = true;
     spdlog::info("[HardwareSetup] Printer type mismatch: saved '{}' but detected '{}' ({}%)", saved,
                  detected.type_name, detected.confidence);
+    warn_type_mismatch({detected.type_name, detected.confidence, saved});
+}
 
-    // modal_confirm takes a plain const char* - compose the parameterized body
-    // first (fmt::runtime: the format string is the translated handle, not a
-    // compile-time literal).
+void HardwareSetupPrompter::warn_type_mismatch(TypeMismatchReview review) {
+    const std::string message = type_mismatch_toast_text(review.saved, review.detected);
+    pending_review_ = std::move(review);
+    const uint32_t generation = ++review_generation_;
+
+    // Toast and history row both reach the review through this one registration, so
+    // neither holds the prompter: the destructor removes it. Each carries its own
+    // generation, which the handler checks.
+    helix::ui::set_notification_action_handler(
+        kReviewPrinterTypeAction, [this](const std::string& arg) {
+            uint32_t gen = 0;
+            if (!parse_action_generation(arg, gen)) {
+                spdlog::info("[HardwareSetup] Type mismatch review skipped: bad action '{}'", arg);
+                return;
+            }
+            show_type_mismatch_review(gen);
+        });
+    helix::ui::set_notification_action_handler(
+        kMismatchToastClosedAction, [this](const std::string& arg) {
+            uint32_t gen = 0;
+            if (!parse_action_generation(arg, gen)) {
+                spdlog::info("[HardwareSetup] Type mismatch settle skipped: bad action '{}'", arg);
+                return;
+            }
+            settle_type_mismatch_on_close(gen);
+        });
+    review_handler_registered_ = true;
+
+    const std::string action = fmt::format("{}:{}", kReviewPrinterTypeAction, generation);
+    ui_notification_warning_with_action(lv_tr("Printer type mismatch"), message.c_str(),
+                                        action.c_str());
+    // Sticky: a wrong type applies wrong pre-print options to every print, so the
+    // warning stays until it is answered or closed; either way settles it.
+    ToastManager::instance().show_with_action(
+        ToastSeverity::WARNING, message.c_str(), lv_tr("Review"), review_toast_clicked,
+        toast_generation(generation), 0, mismatch_toast_closed);
+}
+
+bool HardwareSetupPrompter::pending_review_current(uint32_t generation, const char* what) {
+    if (!pending_review_ || generation != review_generation_) {
+        spdlog::info("[HardwareSetup] Type mismatch {} skipped: warning {} is not the pending "
+                     "one ({}{})",
+                     what, generation, review_generation_, pending_review_ ? "" : ", none pending");
+        return false;
+    }
+    // A warning about a type the user has since replaced, or one already
+    // answered, is spent: it settles nothing and stays disarmed for the new type.
+    const std::string saved = canonical_saved_type();
+    const std::string flag = canonical_shown_for();
+    if (saved != pending_review_->saved || flag == saved) {
+        spdlog::info("[HardwareSetup] Type mismatch {} skipped: warned for '{}', saved type is "
+                     "now '{}', dismissed-for '{}'",
+                     what, pending_review_->saved, saved, flag);
+        pending_review_.reset();
+        return false;
+    }
+    return true;
+}
+
+void HardwareSetupPrompter::settle_type_mismatch_on_close(uint32_t generation) {
+    if (!pending_review_current(generation, "settle")) {
+        return;
+    }
+    spdlog::info("[HardwareSetup] Type mismatch toast closed; keeping saved type '{}'",
+                 pending_review_->saved);
+    settle_type_mismatch_warning();
+}
+
+void HardwareSetupPrompter::show_type_mismatch_review(uint32_t generation) {
+    if (pending_review_current(generation, "review")) {
+        open_type_mismatch_review();
+    }
+}
+
+void HardwareSetupPrompter::show_type_mismatch_demo(const std::string& detected, int confidence,
+                                                    const std::string& saved, bool open_review) {
+    warn_type_mismatch({detected, confidence, saved});
+    if (open_review) {
+        open_type_mismatch_review();
+    }
+}
+
+void HardwareSetupPrompter::open_type_mismatch_review() {
+    // The toast and its history row both open this; a second tap must not stack a
+    // second copy over the first.
+    if (!pending_review_ || review_open_) {
+        spdlog::debug("[HardwareSetup] Type mismatch review already open or none pending");
+        return;
+    }
+    const TypeMismatchReview& review = *pending_review_;
+
+    // modal_confirm takes a plain const char*, so the body is composed first.
     const std::string body =
-        fmt::format(fmt::runtime(lv_tr("This printer looks like a {} ({}% confidence), but it is "
-                                       "set up as a {}. A wrong type applies incorrect pre-print "
-                                       "options and presets.")),
-                    detected.type_name, detected.confidence, saved);
+        type_mismatch_review_text(review.saved, review.detected, review.confidence);
 
     helix::ui::ConfirmOptions opts;
     opts.on_cancel = [this] {
@@ -356,33 +595,25 @@ void HardwareSetupPrompter::maybe_warn_type_mismatch(const helix::PrinterDiscove
         settle_type_mismatch_warning();
         spdlog::info("[HardwareSetup] Type mismatch warning declined");
     };
+    // Not an answer: the review stays reachable, so the next tap must open it again.
+    opts.on_dismiss = [this] { review_open_ = false; };
     opts.cancel_text = lv_tr("Keep current");
     opts.owner_token = lifetime_.token();
-    // No on_dismiss, deliberately: a backdrop tap or ESC is not an answer, so
-    // the prompt stays armed for the next boot. Only a button settles it, and
-    // an accidental tap must not permanently silence a wrong-printer warning.
+    // A backdrop tap or ESC settles nothing: the review stays reachable from history
+    // and the warning returns next boot. Only a button settles it, and an accidental
+    // tap must not permanently silence a wrong-printer warning.
 
-    helix::ui::modal_confirm(
-        lv_tr("Printer type mismatch"), body.c_str(), ModalSeverity::Warning, lv_tr("Choose Model"),
-        [this] {
-            // Settle first: the wizard tears itself down asynchronously, and a
-            // crash mid-run must not leave the prompt pending forever.
-            settle_type_mismatch_warning();
-            // Build the wizard AFTER the modal's exit animation, not inside the
-            // click that started it: the dialog's own close only marks the
-            // backdrop exiting, so creating the full-screen wizard here would
-            // put it underneath a still-fading backdrop (same 300 ms one-shot
-            // as launch_deferred_hardware_setup).
-            lv_timer_t* launch = lv_timer_create(
-                [](lv_timer_t* t) {
-                    auto* self = static_cast<HardwareSetupPrompter*>(lv_timer_get_user_data(t));
-                    lv_timer_delete(t);
-                    self->launch_type_reidentify_wizard();
-                },
-                300, this);
-            lv_timer_set_repeat_count(launch, 1);
-        },
-        opts);
+    review_open_ =
+        helix::ui::modal_confirm(
+            lv_tr("Printer type mismatch"), body.c_str(), ModalSeverity::Warning,
+            lv_tr("Choose Model"),
+            [this] {
+                // Settle first: the wizard tears itself down asynchronously, and a
+                // crash mid-run must not leave the prompt pending forever.
+                settle_type_mismatch_warning();
+                launch_after_modal_exit(&HardwareSetupPrompter::launch_type_reidentify_wizard);
+            },
+            opts) != nullptr;
 }
 
 void HardwareSetupPrompter::launch_type_reidentify_wizard() {

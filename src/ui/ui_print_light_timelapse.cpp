@@ -6,7 +6,6 @@
 #include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
-#include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
 #include "i_moonraker_api.h"
@@ -68,8 +67,6 @@ void PrintLightTimelapseControls::init_subjects() {
     // Timelapse button icon: video-off (F0568) initially disabled
     UI_MANAGED_SUBJECT_STRING(timelapse_button_subject_, timelapse_button_buf_, "\xF3\xB0\x95\xA8",
                               "timelapse_button_icon", subjects_);
-    UI_MANAGED_SUBJECT_STRING(timelapse_label_subject_, timelapse_label_buf_, "Off",
-                              "timelapse_button_label", subjects_);
 
     // Light button icon: lightbulb_outline (F0336) initially off
     UI_MANAGED_SUBJECT_STRING(light_button_subject_, light_button_buf_, "\xF3\xB0\x8C\xB6",
@@ -90,8 +87,6 @@ void PrintLightTimelapseControls::init_subjects() {
     register_xml_callbacks({
         {"on_print_status_light",
          [](lv_event_t*) { get_global_light_timelapse_controls().handle_light_button(); }},
-        {"on_print_status_timelapse",
-         [](lv_event_t*) { get_global_light_timelapse_controls().handle_timelapse_button(); }},
     });
 
     subjects_initialized_ = true;
@@ -115,33 +110,17 @@ void PrintLightTimelapseControls::deinit_subjects() {
 // ============================================================================
 
 void PrintLightTimelapseControls::handle_light_button() {
-    if (helix::led::LedController::instance().light_command_in_flight()) {
-        spdlog::debug("[PrintLightTimelapseControls] Ignoring toggle — LED command in flight");
-        ToastManager::instance().show(
-            ToastSeverity::INFO, lv_tr("Light will switch when the current operation finishes"));
-        return;
-    }
     // Drives what the home light buttons drive (the light the user picked), or
     // the chamber light when none is placed. The icon updates when its state
     // does, via refresh_light_state().
-    const auto targets = helix::home_light_button_targets();
-    if (targets.empty()) {
-        spdlog::warn("[PrintLightTimelapseControls] Light button clicked but no light resolves");
-        return;
-    }
-    const bool on = helix::led::LedController::instance().toggle_power(targets);
-    spdlog::info("[PrintLightTimelapseControls] Light button clicked, {} device(s) -> {}",
-                 targets.size(), on ? "ON" : "OFF");
+    helix::toggle_lights(helix::home_light_button_targets(), "PrintStatus");
 }
 
 void PrintLightTimelapseControls::refresh_timelapse_display() {
     // MDI Plane 15 icons use 4-byte UTF-8: video (F0567) on, video-off (F0568) off
     std::snprintf(timelapse_button_buf_, sizeof(timelapse_button_buf_), "%s",
                   timelapse_enabled_ ? "\xF3\xB0\x95\xA7" : "\xF3\xB0\x95\xA8");
-    std::snprintf(timelapse_label_buf_, sizeof(timelapse_label_buf_), "%s",
-                  timelapse_enabled_ ? lv_tr("On") : lv_tr("Off"));
     lv_subject_copy_string(&timelapse_button_subject_, timelapse_button_buf_);
-    lv_subject_copy_string(&timelapse_label_subject_, timelapse_label_buf_);
 }
 
 void PrintLightTimelapseControls::handle_timelapse_button() {

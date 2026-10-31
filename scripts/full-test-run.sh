@@ -24,27 +24,10 @@ TEST_HOST_RUN=${TEST_HOST_RUN:-$(dirname "$0")/test-host-run.sh}
 # shellcheck source-path=SCRIPTDIR source=lib/build_hosts.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/build_hosts.sh"
 
-# A warm test-host sweep finishes before the local bats suite does, so the
-# split pays whenever the link does; the probe decides that.
-HELIX_TEST_HOST_AUTO=${HELIX_TEST_HOST_AUTO:-1}
-
-case "${TEST_HOST:-}" in
-    1) require_build_host HELIX_TEST_HOST || exit 2
-       where=remote ;;
-    0) where=local ;;
-    "")
-        if [ -z "${HELIX_TEST_HOST:-}" ]; then
-            where=local
-        elif [ "$HELIX_TEST_HOST_AUTO" != 1 ]; then
-            echo "→ unit sweep runs here (HELIX_TEST_HOST_AUTO=0; TEST_HOST=1 forces the test host)"
-            where=local
-        elif "$TEST_HOST_RUN" --probe; then
-            where=remote
-        else
-            where=local
-        fi ;;
-    *) echo "✗ TEST_HOST must be 1, 0 or unset, not '$TEST_HOST'" >&2; exit 2 ;;
-esac
+# shellcheck source-path=SCRIPTDIR source=lib/sweep_location.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/sweep_location.sh"
+resolve_sweep_location || exit $?
+where=$SWEEP_WHERE
 
 done_msg() {
     echo "✓ Completion gate passed: unit sweep + shell suite"

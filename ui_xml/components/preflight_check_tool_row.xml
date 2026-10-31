@@ -17,21 +17,15 @@
     <lv_label name="tool_label"
               text="" align="center" style_text_font="#font_body" style_text_color="#text" clickable="false"
               event_bubble="true"/>
-    <!-- Slicer-intended color swatch (bg set from C++). -->
-    <lv_obj name="intended_swatch"
-            width="#space_2xl" height="#space_2xl" style_radius="9999" style_bg_opa="255" style_bg_color="#text_muted"
-            style_border_width="1" style_border_color="#text_muted" style_border_opa="30" style_pad_all="0"
-            scrollable="false" clickable="false" event_bubble="true"/>
+    <!-- Slicer-intended colour (painted from C++). -->
+    <color_dot name="intended_swatch" size="#space_2xl" color="#text_muted"/>
     <!-- Intended → seated arrow. -->
     <lv_label name="arrow"
               text="#icon_arrow_right" style_text_font="mdi_icons_24" style_text_color="#text_muted" clickable="false"
               event_bubble="true"/>
-    <!-- Actually-seated slot color swatch (bg set from C++). Hidden when the
+    <!-- Actually-seated slot colour (painted from C++). Hidden when the
          mapped slot is empty/absent — the empty_label is shown instead. -->
-    <lv_obj name="seated_swatch"
-            width="#space_2xl" height="#space_2xl" hidden="true" style_radius="9999" style_bg_opa="255"
-            style_bg_color="#text_muted" style_border_width="1" style_border_color="#text_muted" style_border_opa="30"
-            style_pad_all="0" scrollable="false" clickable="false" event_bubble="true"/>
+    <color_dot name="seated_swatch" size="#space_2xl" hidden="true"/>
     <!-- "EMPTY" label shown when the mapped slot has no filament. -->
     <lv_label name="empty_label"
               hidden="true" text="EMPTY" style_text_font="#font_body" style_text_color="#warning" clickable="false"

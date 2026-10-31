@@ -6,6 +6,7 @@
 #include "ams_subscription_backend.h"
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
+#include "openams_status_parse.h"
 
 #include <atomic>
 #include <cstdint>
@@ -83,6 +84,10 @@ class AmsBackendOpenAms : public AmsSubscriptionBackend {
     /// finishes, so the cancel command could not run until there is nothing
     /// left to cancel; that case is refused as busy.
     AmsError cancel() override;
+    /// Also forgets the load or unload this backend dispatched, which would
+    /// otherwise outrank the manager's report on the next frame, and retires
+    /// its generation so the command's late answer reports no outcome.
+    void on_klipper_restarted() override;
     [[nodiscard]] bool can_cancel_operation() const override;
 
     /// Bookkeeping only: drops the failure a dispatch latched. The manager's
@@ -106,6 +111,10 @@ class AmsBackendOpenAms : public AmsSubscriptionBackend {
     [[nodiscard]] bool owns_tool_mapping_table() const override {
         return true;
     }
+
+    /// T<n> loads the slot serving group T<n> (get_tool_mapping()), which moves
+    /// to a backup when the serving slot runs out; nothing remaps it per print.
+    [[nodiscard]] helix::FirmwareRouting firmware_default_routing() const override;
 
     /// Every `groups[]` entry that lists two or more slots is an endless-spool
     /// group: when the slot feeding it runs out, OpenAMS continues with another
@@ -159,28 +168,16 @@ class AmsBackendOpenAms : public AmsSubscriptionBackend {
     /// configured toolchange, homing included, so no home is added here; the
     /// failure it raises reaches the user through the G-code error stream,
     /// which is why @p on_error only unwinds. A test seam.
-    virtual AmsError send_operation_gcode(const std::string& gcode,
-                                          std::function<void()> on_complete,
-                                          std::function<void(const MoonrakerError&)> on_error);
+    virtual AmsError
+    send_operation_gcode(const std::string& gcode, helix::SharedCallback<void()> on_complete,
+                         helix::SharedCallback<void(const MoonrakerError&)> on_error);
 
   private:
     friend class OpenAmsTestAccess;
 
-    /// One entry of a unit's published fault list.
-    struct UnitFault {
-        std::string severity; ///< "stop", "pause", ...
-        std::string code;
-        std::string text;
-        int bay = -1;           ///< unit-local bay, -1 for the whole unit
-        bool clearable = false; ///< the unit advertises clear_fault for it
-    };
-
-    /// One `groups[]` entry, with its members as global slot indices.
-    struct Group {
-        std::string name;
-        std::string lane;
-        std::vector<int> slots;
-    };
+    using UnitFault = openams::UnitFault;
+    using Group = openams::Group;
+    using UnitDryer = openams::UnitDryer;
 
     /// Re-read the lane_data records and file what they say onto the lanes.
     /// The read never blocks and never holds the backend mutex; the filing
@@ -189,16 +186,6 @@ class AmsBackendOpenAms : public AmsSubscriptionBackend {
     void refresh_lane_records();
     void apply_lane_records(int backend_block,
                             const std::unordered_map<int, helix::ams::LaneDataRecord>& records);
-
-    /// What a unit publishes about its dryer. Parallel to system_info_.units.
-    struct UnitDryer {
-        bool offered = false;           ///< capability plus dryer_start or dryer_stop
-        bool can_start = false;         ///< dryer_start is advertised now
-        bool can_stop = false;          ///< dryer_stop is advertised now
-        bool requires_unloaded = false; ///< no bay may be loaded while it runs
-        std::optional<EnvironmentData> environment;
-        DryerInfo info;
-    };
 
     /// Parallel to system_info_.units.
     std::vector<std::vector<UnitFault>> unit_faults_;
@@ -243,7 +230,6 @@ class AmsBackendOpenAms : public AmsSubscriptionBackend {
     /// The lane id the unload command names for @p slot_index, or empty when
     /// that slot is not the one loaded on any lane.
     [[nodiscard]] std::string loaded_lane_of_slot_locked(int slot_index) const;
-    [[nodiscard]] static AmsAction action_from_lane_state(const std::string& state);
 
     /// Last full view of oams_manager: status updates carry only the fields
     /// that changed, and are merged over this.

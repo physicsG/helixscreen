@@ -98,14 +98,14 @@ class BusyGuardFixture : public LVGLTestFixture {
 /**
  * @brief Whether an activity tracker has anything in flight, ignoring its grace window.
  *
- * `recently_active(now)` is `inflight_ > 0 || (now - last_done_ < GRACE_WINDOW)`.
+ * `recently_active(now)` is `inflight_ > 0 || (now - last_done_ < kGraceWindow)`.
  * Passing a `now` past the grace window retires the second term, collapsing the
  * call to a pure `inflight_ > 0` read. Neither AppMotionActivity nor
  * AppMacroActivity exposes an inflight getter; this is the supported way to
  * isolate the counter (the same trick test_app_motion_activity.cpp uses).
  */
 template <typename Activity> bool activity_inflight(Activity& activity) {
-    return activity.recently_active(Activity::clock::now() + Activity::GRACE_WINDOW +
+    return activity.recently_active(Activity::clock::now() + Activity::kGraceWindow +
                                     std::chrono::seconds(1));
 }
 

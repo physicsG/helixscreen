@@ -14,7 +14,7 @@
 
 namespace {
 
-constexpr unsigned int TEXTURE = 7;
+constexpr unsigned int kTexture = 7;
 constexpr int32_t W = 800;
 constexpr int32_t H = 480;
 
@@ -27,17 +27,17 @@ lv_area_t rect(int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
     return a;
 }
 
-/// Partial upload on, and TEXTURE already filled at W x H.
+/// Partial upload on, and kTexture already filled at W x H.
 lv_linux_drm_egl_upload_state_t filled_state() {
     lv_linux_drm_egl_upload_state_t s{};
     s.partial = true;
-    lv_linux_drm_egl_upload_filled(&s, TEXTURE, W, H);
+    lv_linux_drm_egl_upload_filled(&s, kTexture, W, H);
     return s;
 }
 
 lv_linux_drm_egl_upload_t plan(const lv_linux_drm_egl_upload_state_t& s, bool last,
                                const lv_area_t& area, lv_area_t* clipped = nullptr,
-                               unsigned int texture = TEXTURE, int32_t w = W, int32_t h = H,
+                               unsigned int texture = kTexture, int32_t w = W, int32_t h = H,
                                bool in_place = true) {
     lv_area_t scratch = rect(-1, -1, -1, -1);
     return lv_linux_drm_egl_upload_plan(&s, texture, w, h, in_place, last, &area,
@@ -65,7 +65,7 @@ TEST_CASE("EGL upload: a texture never filled gets the whole buffer first",
     CHECK(plan(s, false, area) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
     CHECK(plan(s, true, area) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
 
-    lv_linux_drm_egl_upload_filled(&s, TEXTURE, W, H);
+    lv_linux_drm_egl_upload_filled(&s, kTexture, W, H);
     CHECK(plan(s, false, area) == LV_LINUX_DRM_EGL_UPLOAD_AREA);
     CHECK(plan(s, true, area) == LV_LINUX_DRM_EGL_UPLOAD_AREA);
 }
@@ -97,7 +97,7 @@ TEST_CASE("EGL upload: a requested full upload waits for the last flush and happ
     CHECK(plan(s, false, area) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
     REQUIRE(plan(s, true, area) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
 
-    lv_linux_drm_egl_upload_filled(&s, TEXTURE, W, H);
+    lv_linux_drm_egl_upload_filled(&s, kTexture, W, H);
     CHECK_FALSE(s.full_pending);
     CHECK(plan(s, true, area) == LV_LINUX_DRM_EGL_UPLOAD_AREA);
 }
@@ -109,16 +109,16 @@ TEST_CASE("EGL upload: a different texture or size gets the whole buffer",
     REQUIRE(plan(s, true, area) == LV_LINUX_DRM_EGL_UPLOAD_AREA);
 
     SECTION("new texture") {
-        CHECK(plan(s, false, area, nullptr, TEXTURE + 1) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
-        CHECK(plan(s, true, area, nullptr, TEXTURE + 1) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
+        CHECK(plan(s, false, area, nullptr, kTexture + 1) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
+        CHECK(plan(s, true, area, nullptr, kTexture + 1) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
     }
     SECTION("new width") {
-        CHECK(plan(s, false, area, nullptr, TEXTURE, W + 1) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
-        CHECK(plan(s, true, area, nullptr, TEXTURE, W + 1) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
+        CHECK(plan(s, false, area, nullptr, kTexture, W + 1) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
+        CHECK(plan(s, true, area, nullptr, kTexture, W + 1) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
     }
     SECTION("new height") {
-        CHECK(plan(s, false, area, nullptr, TEXTURE, W, H + 1) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
-        CHECK(plan(s, true, area, nullptr, TEXTURE, W, H + 1) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
+        CHECK(plan(s, false, area, nullptr, kTexture, W, H + 1) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
+        CHECK(plan(s, true, area, nullptr, kTexture, W, H + 1) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
     }
 }
 
@@ -127,8 +127,8 @@ TEST_CASE("EGL upload: areas not at display coordinates get the whole buffer",
     const lv_linux_drm_egl_upload_state_t s = filled_state();
     const lv_area_t area = rect(10, 10, 20, 20);
 
-    CHECK(plan(s, false, area, nullptr, TEXTURE, W, H, false) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
-    CHECK(plan(s, true, area, nullptr, TEXTURE, W, H, false) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
+    CHECK(plan(s, false, area, nullptr, kTexture, W, H, false) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
+    CHECK(plan(s, true, area, nullptr, kTexture, W, H, false) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
 }
 
 TEST_CASE("EGL upload: a flushed area is clipped to the texture", "[display][egl_upload]") {
@@ -173,25 +173,25 @@ TEST_CASE(
 TEST_CASE("EGL upload: an area starts a stride per row and a pixel per column into the buffer",
           "[display][egl_upload]") {
     // A stride wider than width * pixel size tells a row step apart from a recomputed pitch.
-    constexpr uint32_t STRIDE_32 = W * 4 + 4;
-    constexpr uint32_t STRIDE_16 = W * 2 + 2;
+    constexpr uint32_t kStride32 = W * 4 + 4;
+    constexpr uint32_t kStride16 = W * 2 + 2;
 
     const lv_area_t origin = rect(0, 0, 10, 10);
-    CHECK(lv_linux_drm_egl_upload_first_byte(&origin, STRIDE_32, 4) == 0);
+    CHECK(lv_linux_drm_egl_upload_first_byte(&origin, kStride32, 4) == 0);
 
     const lv_area_t row_only = rect(0, 3, 10, 10);
-    CHECK(lv_linux_drm_egl_upload_first_byte(&row_only, STRIDE_32, 4) == 3 * STRIDE_32);
+    CHECK(lv_linux_drm_egl_upload_first_byte(&row_only, kStride32, 4) == 3 * kStride32);
 
     const lv_area_t column_only = rect(5, 0, 10, 10);
-    CHECK(lv_linux_drm_egl_upload_first_byte(&column_only, STRIDE_32, 4) == 5 * 4);
+    CHECK(lv_linux_drm_egl_upload_first_byte(&column_only, kStride32, 4) == 5 * 4);
 
     const lv_area_t both = rect(7, 2, 10, 10);
-    CHECK(lv_linux_drm_egl_upload_first_byte(&both, STRIDE_32, 4) == 2 * STRIDE_32 + 7 * 4);
-    CHECK(lv_linux_drm_egl_upload_first_byte(&both, STRIDE_16, 2) == 2 * STRIDE_16 + 7 * 2);
+    CHECK(lv_linux_drm_egl_upload_first_byte(&both, kStride32, 4) == 2 * kStride32 + 7 * 4);
+    CHECK(lv_linux_drm_egl_upload_first_byte(&both, kStride16, 2) == 2 * kStride16 + 7 * 2);
 
     const lv_area_t far = rect(W - 1, H - 1, W - 1, H - 1);
-    CHECK(lv_linux_drm_egl_upload_first_byte(&far, STRIDE_32, 4) ==
-          static_cast<size_t>(H - 1) * STRIDE_32 + static_cast<size_t>(W - 1) * 4);
+    CHECK(lv_linux_drm_egl_upload_first_byte(&far, kStride32, 4) ==
+          static_cast<size_t>(H - 1) * kStride32 + static_cast<size_t>(W - 1) * 4);
 }
 
 TEST_CASE("EGL upload: only a whole-buffer upload marks the texture filled",
@@ -203,7 +203,7 @@ TEST_CASE("EGL upload: only a whole-buffer upload marks the texture filled",
         s.partial = true;
         REQUIRE(plan(s, false, area) == LV_LINUX_DRM_EGL_UPLOAD_NONE);
 
-        lv_linux_drm_egl_upload_record(&s, LV_LINUX_DRM_EGL_UPLOAD_NONE, TEXTURE, W, H);
+        lv_linux_drm_egl_upload_record(&s, LV_LINUX_DRM_EGL_UPLOAD_NONE, kTexture, W, H);
         CHECK(plan(s, true, area) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
     }
 
@@ -211,9 +211,10 @@ TEST_CASE("EGL upload: only a whole-buffer upload marks the texture filled",
         lv_linux_drm_egl_upload_state_t s = filled_state();
         s.full_pending = true;
 
-        lv_linux_drm_egl_upload_record(&s, LV_LINUX_DRM_EGL_UPLOAD_AREA, TEXTURE + 1, W + 1, H + 1);
+        lv_linux_drm_egl_upload_record(&s, LV_LINUX_DRM_EGL_UPLOAD_AREA, kTexture + 1, W + 1,
+                                       H + 1);
         CHECK(s.full_pending);
-        CHECK(s.texture_id == TEXTURE);
+        CHECK(s.texture_id == kTexture);
         CHECK(s.width == W);
         CHECK(s.height == H);
     }
@@ -224,7 +225,7 @@ TEST_CASE("EGL upload: only a whole-buffer upload marks the texture filled",
         s.full_pending = true;
         REQUIRE(plan(s, true, area) == LV_LINUX_DRM_EGL_UPLOAD_FULL);
 
-        lv_linux_drm_egl_upload_record(&s, LV_LINUX_DRM_EGL_UPLOAD_FULL, TEXTURE, W, H);
+        lv_linux_drm_egl_upload_record(&s, LV_LINUX_DRM_EGL_UPLOAD_FULL, kTexture, W, H);
         CHECK_FALSE(s.full_pending);
         CHECK(plan(s, false, area) == LV_LINUX_DRM_EGL_UPLOAD_AREA);
     }

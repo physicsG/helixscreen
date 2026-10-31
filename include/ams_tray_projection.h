@@ -9,24 +9,25 @@
  *
  * x runs along the slot row, y is screen-down at the front plane, z is depth
  * from the front wall (0) to the back wall (DZ). A point at depth z draws
- * DEPTH_SKEW * z to the right and RISE * z / DZ higher, the same skew the spool
+ * kDepthSkew * z to the right and RISE * z / DZ higher, the same skew the spool
  * flanges use, so the spools stand in the box rather than float in front of it.
  */
 
 #include "ams_types.h"
 
+#include <algorithm>
 #include <cstdint>
 
 namespace helix::ui::tray {
 
-inline constexpr float DEPTH_SKEW = 0.45f;          // sideways shift per unit of depth
-inline constexpr float SPOOL_FLANGE_RADIUS = 0.42f; // flange vertical radius / spool size
-inline constexpr float BOX_DEPTH_MARGIN = 0.10f;    // box depth: a spool diameter plus 10%
-inline constexpr float DEPTH_RISE = 0.09f;          // back edges rise this share of the depth
-inline constexpr float SPOOL_FLOOR_GAP = 2.0f;      // flange bottom above the floor's front edge
-inline constexpr float LID_GAP = 1.0f;              // lid crest above the spool tops
-inline constexpr float SPOOL_WIDTH = 0.35f;         // flange-to-flange width / spool size
-inline constexpr float PITCH_CLEARANCE = 16.0f;     // free space between neighbouring spools
+inline constexpr float kDepthSkew = 0.45f;         // sideways shift per unit of depth
+inline constexpr float kSpoolFlangeRadius = 0.42f; // flange vertical radius / spool size
+inline constexpr float kBoxDepthMargin = 0.10f;    // box depth: a spool diameter plus 10%
+inline constexpr float kDepthRise = 0.09f;         // back edges rise this share of the depth
+inline constexpr float kSpoolFloorGap = 2.0f;      // flange bottom above the floor's front edge
+inline constexpr float kLidGap = 1.0f;             // lid crest above the spool tops
+inline constexpr float kSpoolWidth = 0.35f;        // flange-to-flange width / spool size
+inline constexpr float kPitchClearance = 16.0f;    // free space between neighbouring spools
 
 struct PointF {
     float x = 0;
@@ -56,7 +57,7 @@ float spool_front_cy(const TrayBox& b, float flange_ry);
 PointF spool_center(const TrayBox& b, float slot_x, float flange_ry);
 
 /// Lid height over the chord from the front-wall top to the back-wall top,
-/// so the crest at mid-depth clears the spool tops by LID_GAP.
+/// so the crest at mid-depth clears the spool tops by kLidGap.
 float lid_height(const TrayBox& b, float flange_ry);
 /// A point of the lid's end-cap profile at @p x_end; theta runs pi (front) to 0 (back).
 PointF cap_point(const TrayBox& b, float lid_h, float x_end, float theta);
@@ -64,6 +65,17 @@ PointF cap_point(const TrayBox& b, float lid_h, float x_end, float theta);
 int cap_polyline(const TrayBox& b, float lid_h, float x_end, PointF* out, int n);
 /// Highest drawn y of the unit: the lid silhouette's top, or the back-wall top.
 float unit_top_y(const TrayBox& b, float lid_h, bool has_lid);
+
+/// Top-left of lane @p lane_x's number badge on the box front. It sits inside the
+/// front face, @p inset above its bottom edge, with its right edge @p inset inside
+/// the lane's lid edge (lane_x + @p lane_half); where the pitch is too tight for
+/// that, centered on the lane instead.
+PointF lane_badge_origin(const TrayBox& b, float lane_x, float lane_half, float badge_w,
+                         float badge_h, float inset);
+
+/// Left edge of the environment pill that stands against the box's right end:
+/// the box's back-right corner, where its right side face ends.
+float pill_left_x(const TrayBox& b);
 
 enum class LidMode : uint8_t { None, Unit, PerLane };
 /// Any climate data gets glass: a unit reading or a dryer covers the row, per-lane
@@ -73,8 +85,8 @@ LidMode lid_mode(const AmsUnit& unit, bool has_physical_tray, bool dryer_support
 float lane_lid_half_width(float slot_spacing, const TrayBox& b);
 
 // The lid's sheen: one diffuse band, drawn as one horizontal gradient per row.
-inline constexpr int SHEEN_MAX_ROWS = 25;
-inline constexpr float SHEEN_THETA_DEG = 112.0f; // profile angle of the band
+inline constexpr int kSheenMaxRows = 25;
+inline constexpr float kSheenThetaDeg = 112.0f; // profile angle of the band
 struct SheenRow {
     float y;
     uint8_t opa;

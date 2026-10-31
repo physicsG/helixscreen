@@ -54,10 +54,14 @@ class FilamentMappingModal : public Modal {
     void on_show() override;
     void on_ok() override;
     void on_cancel() override;
+    /// A close no button answered reverts like Cancel.
+    void on_dismissed() override;
 
   private:
     friend class ::FilamentMappingModalTestAccess;
 
+    /// Undo the picks and the auto-color-map preference flipped while open.
+    void revert();
     void rebuild_rows();
     lv_obj_t* create_tool_row(int tool_index);
     void on_row_tapped(int tool_index);

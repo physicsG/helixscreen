@@ -80,9 +80,9 @@ MaterialInfo to_material_info(const nlohmann::json& t, bool user_defined) {
 /// of the real bound and 0.
 void drop_non_numeric_fields(nlohmann::json& patch, const std::string& name,
                              const std::string& path) {
-    static constexpr const char* NUMERIC_KEYS[] = {"nozzle_min", "nozzle_max", "bed",    "chamber",
+    static constexpr const char* kNumericKeys[] = {"nozzle_min", "nozzle_max", "bed",    "chamber",
                                                    "dry_temp",   "dry_time",   "density"};
-    for (const char* key : NUMERIC_KEYS) {
+    for (const char* key : kNumericKeys) {
         auto it = patch.find(key);
         if (it != patch.end() && !it->is_number()) {
             spdlog::warn("[filament] ignoring non-numeric '{}' of type '{}' in {}", key, name,

@@ -9,6 +9,7 @@
 #include "lane_observation.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <optional>
 #include <string>
@@ -25,6 +26,12 @@
 // ============================================================================
 // Spoolman Data Types
 // ============================================================================
+
+/// Spoolman filament extra field that carries a pressure advance K. One per
+/// filament: K belongs to the material and the extruder, not to one spool.
+namespace helix {
+inline constexpr const char* kSpoolmanPaExtraKey = "pressure_advance";
+} // namespace helix
 
 /**
  * @brief Vendor information from Spoolman
@@ -119,6 +126,10 @@ struct SpoolInfo {
     int bed_temp_max = 0;
     int bed_temp_recommended = 0;
 
+    /// Pressure advance K saved on the filament (extra field
+    /// kSpoolmanPaExtraKey), nullopt when none is saved.
+    std::optional<float> pressure_advance;
+
     /**
      * @brief Get remaining percentage
      * @return Percentage of filament remaining (0-100)
@@ -157,6 +168,12 @@ struct SpoolInfo {
     [[nodiscard]] std::string display_name() const {
         std::string name = helix::compose_filament_label(vendor, filament_name, material);
         return name.empty() ? "Unknown Spool" : name;
+    }
+
+    /// The surface finish the material or filament name announces (silk, ...).
+    [[nodiscard]] helix::FilamentFinish finish() const {
+        const helix::FilamentFinish f = helix::filament_finish_of(material);
+        return f != helix::FilamentFinish::None ? f : helix::filament_finish_of(filament_name);
     }
 };
 
@@ -214,7 +231,7 @@ std::vector<SpoolInfo> filter_spools(const std::vector<SpoolInfo>& spools, const
 
 /// Sentinel recency key for a spool carrying no parseable timestamp at all.
 /// Sorts below every dated spool.
-constexpr int64_t SPOOL_RECENCY_NONE = INT64_MIN;
+constexpr int64_t kSpoolRecencyNone = INT64_MIN;
 
 /**
  * @brief Parse a Spoolman ISO 8601 timestamp to epoch seconds
@@ -241,7 +258,7 @@ std::optional<int64_t> parse_spool_timestamp(const std::string& ts);
  * never-used spool competes on its registration date and can outrank a spool
  * that was used a while ago. Never-used spools are NOT banished below used ones.
  *
- * @return Epoch seconds of the later timestamp, or SPOOL_RECENCY_NONE if the
+ * @return Epoch seconds of the later timestamp, or kSpoolRecencyNone if the
  *         spool has neither a parseable last_used nor a parseable registered.
  */
 int64_t spool_recency_key(const SpoolInfo& spool);
@@ -255,6 +272,38 @@ int64_t spool_recency_key(const SpoolInfo& spool);
  * cannot churn the list order.
  */
 void sort_spools_by_recency(std::vector<SpoolInfo>& spools);
+
+/**
+ * @brief The material families of @p spools, in the list's own order
+ *
+ * The recents source for the spool editor's Material row. The input is the
+ * recency-sorted spool list the Spoolman API returns (sort_spools_by_recency()
+ * applied in the API layer), so first appearance IS most-recent-first; families
+ * dedupe case-insensitively keeping the first spelling. Empty materials are
+ * skipped. Pure: no fetch, no clock.
+ */
+// NAMESPACE_OK: sits beside sort_spools_by_recency at file scope
+std::vector<std::string> recent_material_families(const std::vector<SpoolInfo>& spools);
+
+/**
+ * @brief The brands of @p spools, in the list's own order — see
+ * recent_material_families().
+ */
+// NAMESPACE_OK: sits beside sort_spools_by_recency at file scope
+std::vector<std::string> recent_brands(const std::vector<SpoolInfo>& spools);
+
+namespace helix {
+/// A spool price as its edit field shows it: two decimals, blank for none
+/// (zero or the negative "unknown" sentinel).
+inline std::string format_spool_price(double price) {
+    if (price <= 0) {
+        return {};
+    }
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%.2f", price);
+    return buf;
+}
+} // namespace helix
 
 // ============================================================================
 // SpoolInfo → SlotInfo Conversion

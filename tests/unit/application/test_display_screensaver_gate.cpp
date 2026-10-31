@@ -1,10 +1,11 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "ui_update_queue.h"
 
+#include "../../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "display_backend.h"
 #include "display_manager.h"
@@ -96,9 +97,7 @@ TEST_CASE_METHOD(
         printer_state.update_from_status(nlohmann::json{{"print_stats", {{"state", wire_state}}}});
         printer_state.print_state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
         process_lvgl(10);
-        for (int i = 0; i < 8; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     };
 
     const helix::ui::SaverHost host = DisplayManager::screensaver_host(nullptr);

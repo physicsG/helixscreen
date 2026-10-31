@@ -56,7 +56,7 @@ setup() {
 }
 
 @test "validate_tmp_dir: accepts the in-app updater's staging dir handoff" {
-    # update_checker.cpp STAGING_NAME — install.sh is exec'd with this TMP_DIR.
+    # update_checker.cpp kStagingName — install.sh is exec'd with this TMP_DIR.
     run validate_tmp_dir "/home/pi/.helix-update-staging"
     [ "$status" -eq 0 ]
 }
@@ -133,6 +133,166 @@ setup() {
     [ "$status" -eq 0 ]
     [ -f "$d/config/printer.cfg" ]
     [[ "$output" == *"Refusing to rm -rf"* ]]
+}
+
+# A PATH holding only what _safe_remove_tmp_dir needs besides the probes, so
+# neither mountpoint nor stat exists: Forge-X's BusyBox has neither applet.
+no_mount_tools() {
+    mkdir -p "$BATS_TEST_TMPDIR/minbin"
+    ln -sf "$(command -v sed)" "$BATS_TEST_TMPDIR/minbin/sed"
+    ln -sf "$(command -v rm)" "$BATS_TEST_TMPDIR/minbin/rm"
+    mkdir -p "$BATS_TEST_TMPDIR/proc"
+}
+
+# _safe_remove_tmp_dir DIR with no mountpoint or stat, reading the mount
+# table from $BATS_TEST_TMPDIR/proc/mounts.
+remove_without_mount_tools() {
+    PATH="$BATS_TEST_TMPDIR/minbin" HELIX_PROC_ROOT="$BATS_TEST_TMPDIR/proc" \
+        _safe_remove_tmp_dir "$1"
+}
+
+@test "_safe_remove_tmp_dir: with no mountpoint or stat, a dir the mount table lists is refused" {
+    no_mount_tools
+    # A space in the path: the table spells it \040, never a literal space.
+    local d="$BATS_TEST_TMPDIR/data part/helixscreen-install"
+    mkdir -p "$d"
+    touch "$d/payload"
+    local phys
+    phys=$(cd "$d" && pwd -P)
+    {
+        echo "/dev/root / ext4 rw 0 0"
+        printf '/dev/mmcblk0p7 %s ext4 rw 0 0\n' "$(printf '%s' "$phys" | sed 's/ /\\040/g')"
+    } > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ "$status" -eq 0 ]
+    [ -f "$d/payload" ]
+    contains "Refusing to rm -rf mountpoint" "$output"
+}
+
+@test "_safe_remove_tmp_dir: with no mountpoint or stat, a dir the mount table does not list is removed" {
+    no_mount_tools
+    local d="$BATS_TEST_TMPDIR/data part/helixscreen-install"
+    mkdir -p "$d"
+    touch "$d/payload"
+    local phys
+    phys=$(cd "$d" && pwd -P)
+    # The parent is a mount and an unescaped spelling of the dir itself is
+    # present: neither is the dir as the table writes it.
+    {
+        echo "/dev/root / ext4 rw 0 0"
+        printf '/dev/mmcblk0p7 %s ext4 rw 0 0\n' "$(printf '%s' "${phys%/*}" | sed 's/ /\\040/g')"
+        printf 'tmpfs %s tmpfs rw 0 0\n' "$phys"
+    } > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ "$status" -eq 0 ]
+    [ ! -d "$d" ]
+}
+
+@test "_safe_remove_tmp_dir: with no mountpoint, stat or readable mount table, the dir is kept" {
+    no_mount_tools
+    local d="$BATS_TEST_TMPDIR/helixscreen-install"
+    mkdir -p "$d"
+    touch "$d/payload"
+    # No $BATS_TEST_TMPDIR/proc/mounts at all.
+    run remove_without_mount_tools "$d"
+    [ "$status" -eq 0 ]
+    [ -f "$d/payload" ]
+    contains "cannot tell whether it is a mountpoint" "$output"
+    # An empty table judges nothing either.
+    : > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ -f "$d/payload" ]
+    contains "cannot tell whether it is a mountpoint" "$output"
+}
+
+# A mountpoint(1) on the minimal PATH that exits with status $1 whatever it
+# is asked: 0 is "a mountpoint", 32 util-linux's "not one", 1 an error (or
+# BusyBox's "not one").
+fake_mountpoint() {
+    printf '#!/bin/sh\nexit %s\n' "$1" > "$BATS_TEST_TMPDIR/minbin/mountpoint"
+    chmod +x "$BATS_TEST_TMPDIR/minbin/mountpoint"
+}
+
+# The mount table line for a mount at PATH, escaped the way the kernel writes it.
+mounts_line() {
+    printf '/dev/mmcblk0p7 %s ext4 rw 0 0\n' "$(printf '%s' "$1" | sed 's/ /\\040/g')"
+}
+
+@test "_safe_remove_tmp_dir: a mount the table lists is refused even when mountpoint says no" {
+    no_mount_tools
+    fake_mountpoint 32
+    local d="$BATS_TEST_TMPDIR/helixscreen-install"
+    mkdir -p "$d"
+    touch "$d/payload"
+    { echo "/dev/root / ext4 rw 0 0"; mounts_line "$(cd "$d" && pwd -P)"; } \
+        > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ -f "$d/payload" ] || fail "removed a dir the mount table lists"
+    contains "Refusing to rm -rf mountpoint" "$output"
+}
+
+@test "_safe_remove_tmp_dir: a mountpoint error with nothing else to judge by keeps the dir" {
+    no_mount_tools
+    fake_mountpoint 1
+    local d="$BATS_TEST_TMPDIR/helixscreen-install"
+    mkdir -p "$d"
+    touch "$d/payload"
+    run remove_without_mount_tools "$d"
+    [ -f "$d/payload" ] || fail "removed a dir nothing could judge"
+    contains "cannot tell whether it is a mountpoint" "$output"
+}
+
+@test "_safe_remove_tmp_dir: BusyBox's mountpoint saying no, with a table that agrees, removes the dir" {
+    no_mount_tools
+    fake_mountpoint 1
+    local d="$BATS_TEST_TMPDIR/helixscreen-install"
+    mkdir -p "$d"
+    touch "$d/payload"
+    echo "/dev/root / ext4 rw 0 0" > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ "$status" -eq 0 ]
+    [ ! -d "$d" ]
+}
+
+@test "_safe_remove_tmp_dir: a filesystem mounted inside the dir is refused" {
+    no_mount_tools
+    fake_mountpoint 32
+    local d="$BATS_TEST_TMPDIR/helixscreen-install"
+    mkdir -p "$d/extract/usb"
+    touch "$d/extract/usb/user-file"
+    { echo "/dev/root / ext4 rw 0 0"; mounts_line "$(cd "$d" && pwd -P)/extract/usb"; } \
+        > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ -f "$d/extract/usb/user-file" ] || fail "removed a dir with a mount inside it"
+    contains "a filesystem is mounted inside it" "$output"
+}
+
+@test "_safe_remove_tmp_dir: a mount at a sibling sharing the dir's name prefix is not inside it" {
+    no_mount_tools
+    fake_mountpoint 32
+    local d="$BATS_TEST_TMPDIR/helixscreen-install"
+    mkdir -p "$d" "$d-2"
+    { echo "/dev/root / ext4 rw 0 0"; mounts_line "$(cd "$d-2" && pwd -P)"; } \
+        > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ "$status" -eq 0 ]
+    [ ! -d "$d" ]
+}
+
+@test "_safe_remove_tmp_dir: a mount-table escape that cannot be computed keeps the dir" {
+    no_mount_tools
+    # A sed that fails: the table cannot be matched, so it judges nothing.
+    printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/minbin/sed.fail"
+    rm -f "$BATS_TEST_TMPDIR/minbin/sed"
+    mv "$BATS_TEST_TMPDIR/minbin/sed.fail" "$BATS_TEST_TMPDIR/minbin/sed"
+    chmod +x "$BATS_TEST_TMPDIR/minbin/sed"
+    local d="$BATS_TEST_TMPDIR/helixscreen-install"
+    mkdir -p "$d"
+    touch "$d/payload"
+    echo "/dev/root / ext4 rw 0 0" > "$BATS_TEST_TMPDIR/proc/mounts"
+    run remove_without_mount_tools "$d"
+    [ -f "$d/payload" ] || fail "removed a dir the table could not judge"
+    contains "cannot tell whether it is a mountpoint" "$output"
 }
 
 # ===========================================================================

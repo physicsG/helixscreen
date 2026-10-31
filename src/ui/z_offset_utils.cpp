@@ -6,13 +6,13 @@
 #include "ui_error_reporting.h"
 #include "ui_modal.h"
 #include "ui_observer_guard.h"
-#include "ui_toast_manager.h"
 
 #include "app_globals.h"
 #include "config.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "save_config_restart.h"
+#include "settings_manager.h"
 #include "state/subject_macros.h"
 #include "static_subject_registry.h"
 #include "subject_managed_panel.h"
@@ -32,19 +32,6 @@
 #include <optional>
 
 namespace helix::zoffset {
-
-bool is_auto_saved(ZOffsetCalibrationStrategy strategy) {
-    if (strategy == ZOffsetCalibrationStrategy::FIRMWARE_MANAGED) {
-        // FIRMWARE_MANAGED means firmware or macros handle Z-offset persistence
-        // (e.g., FlashForge firmware, Artillery M1 save-zoffset macro).
-        // HelixScreen should not offer its own save path.
-        spdlog::debug("[ZOffsetUtils] Z-offset auto-saved by firmware (firmware_managed strategy)");
-        ToastManager::instance().show(ToastSeverity::INFO,
-                                      lv_tr("Z-offset is auto-saved by firmware"), 3000);
-        return true;
-    }
-    return false;
-}
 
 void format_delta(int microns, char* buf, size_t buf_size) {
     if (microns == 0) {
@@ -101,9 +88,46 @@ std::string build_z_adjust_gcode(int base_microns, int live_microns, int delta_m
                        static_cast<double>(base_microns + delta_microns) / 1000.0, move);
 }
 
+bool adjust_tool_offset(IMoonrakerAPI* api, PrinterState* ps, int tool_index, double delta_mm) {
+    if (!api || !ps) {
+        return false;
+    }
+    auto& ts = ToolState::instance();
+    // Adjust from the value we DISPLAYED: the firmware takes an absolute offset, so a
+    // delta applied to anything else would land somewhere the user did not ask for.
+    // Without a reported value there is no base, so refuse rather than assume zero
+    // and overwrite whatever the tool actually holds.
+    if (!ts.tool_offset_known(tool_index, Axis::Z)) {
+        spdlog::warn("[zoffset] No reported offset for tool {} - refusing to adjust", tool_index);
+        return false;
+    }
+    const int base_microns =
+        static_cast<int>(std::lround(ts.tool_offset_mm(tool_index, Axis::Z) * 1000.0));
+    const int new_microns = base_microns + static_cast<int>(std::lround(delta_mm * 1000.0));
+
+    std::string gcode =
+        tool_offsets::set_tool_offset_gcode(ps->get_discovery(), Axis::Z, tool_index, new_microns);
+    if (gcode.empty()) {
+        return false;
+    }
+    const std::string activate = tool_offsets::activate_mounted_offset_gcode(
+        ps->get_discovery(), tool_index, ts.active_tool_index());
+    if (!activate.empty()) {
+        gcode += "\n" + activate;
+    }
+    api->execute_gcode(gcode, nullptr, nullptr);
+
+    // Through ToolState, not straight at the subject: tools_ is what
+    // dirty_tool_indices() and the save path read, so a save that starts before the
+    // firmware echoes this back must still see it.
+    ts.set_tool_offset_local(tool_index, Axis::Z, new_microns);
+    return true;
+}
+
 void apply_and_save(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_watch,
-                    ZOffsetCalibrationStrategy strategy, std::function<void()> on_success,
-                    std::function<void(const std::string& error)> on_error, PrinterState* ps) {
+                    ZOffsetCalibrationStrategy strategy, helix::SharedCallback<void()> on_success,
+                    helix::SharedCallback<void(const std::string& error)> on_error,
+                    PrinterState* ps) {
     // Both success paths below (the FIRMWARE_MANAGED early return and the
     // APPLY -> SAVE_CONFIG chain) funnel through this wrapper, so the pending
     // Z-offset delta is cleared exactly once, wherever the save actually
@@ -314,11 +338,26 @@ SaveAvailability current_save_availability() {
     facts.global_dirty = lv_subject_get_int(ps.motion_state().get_gcode_z_offset_subject()) != 0;
     facts.tools_dirty =
         lv_subject_get_int(helix::ToolState::instance().get_any_tool_offset_dirty_subject()) == 1;
+    facts.save_enabled = save_enabled();
     return facts;
 }
 
 bool save_available() {
     return save_available(current_save_availability());
+}
+
+bool save_enabled() {
+    const auto mode = static_cast<SaveMode>(SettingsManager::instance().get_z_offset_save_mode());
+    const bool per_tool_z =
+        lv_subject_get_int(
+            helix::ToolState::instance().get_per_tool_axis_supported_subject(Axis::Z)) == 1;
+    return save_enabled(mode, per_tool_z);
+}
+
+void set_save_enabled(bool enabled) {
+    spdlog::info("[zoffset] Z-offset save {} for this printer", enabled ? "enabled" : "disabled");
+    SettingsManager::instance().set_z_offset_save_mode(
+        static_cast<int>(enabled ? SaveMode::Show : SaveMode::Hide));
 }
 
 namespace {
@@ -339,12 +378,16 @@ void republish_save_available(lv_observer_t*, lv_subject_t*);
 struct SaveAvailabilityPublisher {
     SubjectManager subjects;
     lv_subject_t z_offset_save_available_{};
+    lv_subject_t z_offset_save_enabled_{};
     ObserverGuard global_offset_obs;
     ObserverGuard tools_dirty_obs;
     ObserverGuard can_save_obs;
+    ObserverGuard per_tool_z_obs;
+    ObserverGuard save_mode_obs;
 
     void init(bool register_xml) {
         INIT_SUBJECT_INT(z_offset_save_available, 0, subjects, register_xml);
+        INIT_SUBJECT_INT(z_offset_save_enabled, 1, subjects, register_xml);
 
         PrinterState& ps = get_printer_state();
         auto& ts = helix::ToolState::instance();
@@ -354,10 +397,20 @@ struct SaveAvailabilityPublisher {
                 ps.get_subjects_lifetime());
         observe(tools_dirty_obs, ts.get_any_tool_offset_dirty_subject(),
                 ts.get_subjects_lifetime());
+        observe(per_tool_z_obs, ts.get_per_tool_axis_supported_subject(Axis::Z),
+                ts.get_subjects_lifetime());
+        // The settings toggle writes this subject. A printer switch needs nothing
+        // here: its soft restart re-initialises these subjects for the new printer.
+        auto& settings = SettingsManager::instance();
+        if (settings.are_subjects_initialized()) {
+            observe(save_mode_obs, settings.subject_z_offset_save_mode(),
+                    settings.get_subjects_lifetime());
+        }
     }
 
-    void publish(int available) {
-        lv_subject_set_int(&z_offset_save_available_, available);
+    void publish(bool enabled, bool available) {
+        lv_subject_set_int(&z_offset_save_enabled_, enabled ? 1 : 0);
+        lv_subject_set_int(&z_offset_save_available_, available ? 1 : 0);
     }
 
   private:
@@ -382,7 +435,10 @@ void republish_save_available(lv_observer_t*, lv_subject_t*) {
     if (!storage) {
         return;
     }
-    storage->publish(save_available() ? 1 : 0);
+    const SaveAvailability facts = current_save_availability();
+    // Print Tune's hint is one decision in PrinterProfileState; hand it the setting.
+    get_printer_state().profile_state().set_z_offset_save_enabled(facts.save_enabled);
+    storage->publish(facts.save_enabled, save_available(facts));
 }
 
 } // namespace
@@ -415,6 +471,8 @@ void deinit_save_available_subject() {
     storage->global_offset_obs.reset();
     storage->can_save_obs.reset();
     storage->tools_dirty_obs.reset();
+    storage->per_tool_z_obs.reset();
+    storage->save_mode_obs.reset();
     storage->subjects.deinit_all();
     storage.reset();
 }
@@ -422,6 +480,11 @@ void deinit_save_available_subject() {
 lv_subject_t* get_save_available_subject() {
     auto& storage = save_available_storage();
     return storage ? &storage->z_offset_save_available_ : nullptr;
+}
+
+SubjectLifetime get_save_available_lifetime() {
+    auto& storage = save_available_storage();
+    return storage ? storage->subjects.get_subjects_lifetime() : SubjectLifetime{};
 }
 
 namespace {
@@ -495,7 +558,7 @@ void run_shared_save() {
     NOTIFY_INFO(lv_tr("Saving Z-offset..."));
     save_dirty_offsets(
         api, shared_save_watch(), ps.profile_state().z_offset_calibration_strategy(),
-        ps.get_discovery(), current_save_availability().global_dirty,
+        ps.get_discovery(), saves_global(current_save_availability()),
         []() {
             end_shared_save();
             NOTIFY_SUCCESS("{}", lv_tr("Z-offset saved"));
@@ -549,8 +612,9 @@ void save_dirty_offsets_shared() {
 
 void save_dirty_offsets(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_watch,
                         ZOffsetCalibrationStrategy strategy, const helix::PrinterDiscovery& hw,
-                        bool global_dirty, std::function<void()> on_success,
-                        std::function<void(const std::string& error)> on_error, PrinterState* ps) {
+                        bool global_dirty, helix::SharedCallback<void()> on_success,
+                        helix::SharedCallback<void(const std::string& error)> on_error,
+                        PrinterState* ps) {
     if (!api) {
         if (on_error) {
             on_error("No printer connection");
@@ -570,6 +634,7 @@ void save_dirty_offsets(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_wat
     // runtime-only and SAVE_CONFIG restarts Klipper, so a Z-only save here
     // would silently throw away an unsaved X or Y on the way through.
     for (int tool : dirty_tools) {
+        bool wrote = false;
         for (helix::Axis axis : helix::kAllAxes) {
             if (!ts.tool_offset_dirty(tool, axis)) {
                 continue;
@@ -582,6 +647,13 @@ void save_dirty_offsets(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_wat
                 continue;
             }
             api->execute_gcode(gcode, nullptr, nullptr);
+            wrote = true;
+        }
+        // Once per tool, after every axis has landed in the store it reads.
+        const std::string activate =
+            helix::tool_offsets::activate_mounted_offset_gcode(hw, tool, ts.active_tool_index());
+        if (wrote && !activate.empty()) {
+            api->execute_gcode(activate, nullptr, nullptr);
         }
     }
 
@@ -625,8 +697,23 @@ void save_dirty_offsets(IMoonrakerAPI* api, helix::ui::SaveConfigWatch& save_wat
         // success before the command had reached the printer — the same shape
         // as prestonbrown/helixscreen#1359. begin() arms the suppression, sends
         // the save itself, and reports success only once Klipper is back READY.
+        //
+        // The restart also resets the live machine-wide offset. One the caller
+        // chose not to save (Z-offset saving off) is put back once Klipper is
+        // READY: SET_GCODE_OFFSET is live-only, so this persists nothing.
+        const int live_microns =
+            ps ? lv_subject_get_int(ps->motion_state().get_gcode_z_offset_subject()) : 0;
+        auto on_restarted = [api, live_microns, saved = std::move(on_saved)]() {
+            if (live_microns != 0) {
+                const std::string restore = fmt::format("SET_GCODE_OFFSET Z={:.3f}",
+                                                        static_cast<double>(live_microns) / 1000.0);
+                spdlog::info("[ZOffsetUtils] Restoring the unsaved live offset: {}", restore);
+                api->execute_gcode(restore, nullptr, nullptr);
+            }
+            saved();
+        };
         save_watch.begin(
-            api, "Saving tool offsets... Klipper will restart.", std::move(on_saved),
+            api, "Saving tool offsets... Klipper will restart.", std::move(on_restarted),
             [on_error](const std::string& err) {
                 spdlog::error("[ZOffsetUtils] SAVE_CONFIG (tool offsets) failed: {}", err);
                 if (on_error) {

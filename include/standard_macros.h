@@ -31,7 +31,9 @@
 #include <vector>
 
 // Forward declarations
+namespace helix {
 class IMoonrakerAPI;
+}
 struct MoonrakerError;
 
 namespace helix {
@@ -203,7 +205,12 @@ struct MacroScriptValues {
     std::string profile_arg;
 
     /// Replaces `{bed_temp}`, in whole degrees C: the bed temperature to probe at.
-    int bed_temp_c = bed_mesh::DEFAULT_PROBE_BED_TEMP_C;
+    int bed_temp_c = bed_mesh::kDefaultProbeBedTempC;
+
+    /// Replaces `{screws_tilt_builtin}`: Klipper's SCREWS_TILT_CALCULATE under the
+    /// name a wrapper renamed it to. Empty when nothing wraps it, and then a shipped
+    /// sequence naming the placeholder gives way to the next tier.
+    std::string screws_tilt_builtin;
 };
 
 /// A slot resolved into something runnable.
@@ -467,7 +474,7 @@ class StandardMacros {
      * @return true if macro was found and execution attempted,
      *         false if slot is empty (no callbacks called)
      */
-    bool execute(StandardMacroSlot slot, IMoonrakerAPI* api, SuccessCallback on_success,
+    bool execute(StandardMacroSlot slot, helix::IMoonrakerAPI* api, SuccessCallback on_success,
                  ErrorCallback on_error, uint32_t timeout_ms = 0, bool suppress_auto_toast = false);
 
     /**
@@ -489,7 +496,7 @@ class StandardMacros {
      *        rpc_error_policy.h and rpc_error_correlation.h).
      * @return true if macro was found and execution attempted
      */
-    bool execute(StandardMacroSlot slot, IMoonrakerAPI* api,
+    bool execute(StandardMacroSlot slot, helix::IMoonrakerAPI* api,
                  const std::map<std::string, std::string>& params, SuccessCallback on_success,
                  ErrorCallback on_error, uint32_t timeout_ms = 0, bool suppress_auto_toast = false);
 

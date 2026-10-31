@@ -12,22 +12,22 @@ namespace pathgeo {
 
 namespace {
 constexpr float PI = 3.14159265358979323846f;
-constexpr float HALF_PI = PI / 2.0f;
+constexpr float kHalfPi = PI / 2.0f;
 
 // Minimum horizontal offset before we bother routing around a corner.
-constexpr float MIN_DX = 2.0f;
+constexpr float kMinDx = 2.0f;
 // Minimum effective fillet radius before arcs are worthwhile.
-constexpr float MIN_FILLET = 2.0f;
+constexpr float kMinFillet = 2.0f;
 // Extra straight room (px) reserved on each leg adjoining a merge-fan corner,
 // on top of the fillet radius itself. route_polyline_filleted clamps the fillet
 // trim to half the shorter adjoining leg, so a leg of length >= fillet_r + slack
 // guarantees the corner can sweep at (close to) the full radius instead of
 // collapsing to a starved arc or a sharp miter.
-constexpr float FILLET_SLACK = 4.0f;
+constexpr float kFilletSlack = 4.0f;
 } // namespace
 
 void FilamentPath::add_line(float x0, float y0, float x1, float y1) {
-    if (count >= MAX_SEGS)
+    if (count >= kMaxSegs)
         return;
     // Skip zero-length lines.
     float dx = x1 - x0;
@@ -45,7 +45,7 @@ void FilamentPath::add_line(float x0, float y0, float x1, float y1) {
 }
 
 void FilamentPath::add_arc(float cx, float cy, float r, float a0, float sweep) {
-    if (count >= MAX_SEGS)
+    if (count >= kMaxSegs)
         return;
     PathSeg& s = segs[count++];
     s.type = PathSeg::ARC;
@@ -180,7 +180,7 @@ void route_orthogonal(FilamentPath& out, float x0, float y0, float x1, float y1,
     }
 
     // Negligible horizontal offset: a single vertical run.
-    if (std::fabs(dx) < MIN_DX) {
+    if (std::fabs(dx) < kMinDx) {
         out.add_line(x0, y0, x1, y1);
         return;
     }
@@ -189,7 +189,7 @@ void route_orthogonal(FilamentPath& out, float x0, float y0, float x1, float y1,
     float r_eff = std::min({fillet_r, std::fabs(dx) / 2.0f, dy / 2.0f});
 
     // Fillet too small to draw meaningful arcs: 45-degree jog (3 straight lines).
-    if (r_eff < MIN_FILLET) {
+    if (r_eff < kMinFillet) {
         float y_a = y0 + dy / 3.0f;
         float y_b = y0 + 2.0f * dy / 3.0f;
         out.add_line(x0, y0, x0, y_a);  // vertical
@@ -212,7 +212,7 @@ void route_orthogonal(FilamentPath& out, float x0, float y0, float x1, float y1,
         float cx = x0 + dir * r;
         float cy = ymid - r;
         float a0 = (dir > 0.0f) ? PI : 0.0f;
-        float sweep = -dir * HALF_PI;
+        float sweep = -dir * kHalfPi;
         out.add_arc(cx, cy, r, a0, sweep);
     }
 
@@ -223,8 +223,8 @@ void route_orthogonal(FilamentPath& out, float x0, float y0, float x1, float y1,
     {
         float cx = x1 - dir * r;
         float cy = ymid + r;
-        float a0 = -HALF_PI;
-        float sweep = dir * HALF_PI;
+        float a0 = -kHalfPi;
+        float sweep = dir * kHalfPi;
         out.add_arc(cx, cy, r, a0, sweep);
     }
 
@@ -316,7 +316,7 @@ void route_polyline_filleted(FilamentPath& out, const PathPoint* pts, int n, flo
         // real turn, so advance the cursor THROUGH V (emit cursor->V) — a plain
         // `continue` here would let the next emitted line run from the stale
         // cursor straight to the following trim point, cutting this corner off.
-        if (r_eff < MIN_FILLET) {
+        if (r_eff < kMinFillet) {
             out.add_line(cursor.x, cursor.y, V.x, V.y);
             cursor = V;
             continue;
@@ -364,12 +364,12 @@ float merge_fan_width(const MergeLaneIn* lanes, int n, float hub_cx, float hub_t
     max_width = std::max(min_width, max_width);
     if (!lanes || n < 2 || min_separation <= 0)
         return min_width;
-    const int count = std::min(n, FilamentPath::MAX_SEGS);
+    const int count = std::min(n, FilamentPath::kMaxSegs);
     const int reserve = std::max(0, reserve_each_side);
     float deepest_start = lanes[0].start_y;
     for (int i = 1; i < count; ++i)
         deepest_start = std::max(deepest_start, lanes[i].start_y);
-    const float budget = std::max(0.0f, hub_top - deepest_start - 2.0f * (fillet_r + FILLET_SLACK));
+    const float budget = std::max(0.0f, hub_top - deepest_start - 2.0f * (fillet_r + kFilletSlack));
 
     auto clearance = [&](float width) {
         float usable = std::max(0.0f, width - 2.0f * entry_margin);
@@ -416,7 +416,7 @@ void build_merge_fan(const MergeLaneIn* lanes, int n, float hub_cx, float hub_to
     // vertical (approach_y -> hub_top) and the first vertical (start_y -> y_bend)
     // must each be at least this long so route_polyline_filleted's half-leg trim
     // clamp can't starve the corner down to a sharp miter (#... merge-fan notch).
-    const float leg_reserve = fillet_r + FILLET_SLACK;
+    const float leg_reserve = fillet_r + kFilletSlack;
 
     // Common approach height above the hub top; every lane's short final vertical
     // drops from here into its own entry_x at one clean level. Pushed up by the
@@ -434,8 +434,8 @@ void build_merge_fan(const MergeLaneIn* lanes, int n, float hub_cx, float hub_to
     const int positions = n + 2 * reserve;
     float entry_step = (positions > 1) ? usable / (float)(positions - 1) : 0.0f;
 
-    float entry_x[FilamentPath::MAX_SEGS];
-    int count = std::min(n, FilamentPath::MAX_SEGS);
+    float entry_x[FilamentPath::kMaxSegs];
+    int count = std::min(n, FilamentPath::kMaxSegs);
     for (int i = 0; i < count; ++i)
         entry_x[i] = (positions == 1) ? hub_cx : (left_end + entry_step * (float)(i + reserve));
 

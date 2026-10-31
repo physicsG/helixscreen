@@ -3,6 +3,8 @@
 
 #include "console_line.h"
 
+#include "text_io.h"
+
 #include <algorithm>
 #include <cctype>
 #include <utility>
@@ -12,10 +14,10 @@ namespace helix::ui {
 namespace {
 
 // HTML span tag delimiters used by AFC/Happy Hare plugins (Mainsail-style)
-constexpr const char SPAN_OPEN[] = "<span class=";
-constexpr size_t SPAN_OPEN_LEN = sizeof(SPAN_OPEN) - 1;
-constexpr const char SPAN_CLOSE[] = "</span>";
-constexpr size_t SPAN_CLOSE_LEN = sizeof(SPAN_CLOSE) - 1;
+constexpr const char kSpanOpen[] = "<span class=";
+constexpr size_t kSpanOpenLen = sizeof(kSpanOpen) - 1;
+constexpr const char kSpanClose[] = "</span>";
+constexpr size_t kSpanCloseLen = sizeof(kSpanClose) - 1;
 
 /// Maps "success--text" -> "success", etc. Empty for unrecognized classes.
 std::string extract_color_class(const std::string& class_attr) {
@@ -41,15 +43,7 @@ bool is_console_error_message(const std::string& message) {
     }
 
     // Case-insensitive check for "error" at start (covers "Error:", "ERROR:", etc.)
-    if (message.size() >= 5) {
-        auto ci_eq = [](char a, char b) {
-            return std::tolower(static_cast<unsigned char>(a)) ==
-                   std::tolower(static_cast<unsigned char>(b));
-        };
-        return std::equal(message.begin(), message.begin() + 5, "error", ci_eq);
-    }
-
-    return false;
+    return helix::text_io::equals_ignore_case(std::string_view(message).substr(0, 5), "error");
 }
 
 bool is_console_temp_message(const std::string& message) {
@@ -84,7 +78,7 @@ bool is_console_temp_message(const std::string& message) {
 }
 
 bool contains_console_html_spans(const std::string& message) {
-    return message.find(SPAN_OPEN) != std::string::npos &&
+    return message.find(kSpanOpen) != std::string::npos &&
            (message.find("success--text") != std::string::npos ||
             message.find("info--text") != std::string::npos ||
             message.find("warning--text") != std::string::npos ||
@@ -98,7 +92,7 @@ std::vector<ConsoleTextSegment> parse_console_html_spans(const std::string& mess
     const size_t len = message.size();
 
     while (pos < len) {
-        size_t span_start = message.find(SPAN_OPEN, pos);
+        size_t span_start = message.find(kSpanOpen, pos);
 
         if (span_start == std::string::npos) {
             std::string remaining = message.substr(pos);
@@ -114,7 +108,7 @@ std::vector<ConsoleTextSegment> parse_console_html_spans(const std::string& mess
         }
 
         // Find the class value (ends at >)
-        size_t class_start = span_start + SPAN_OPEN_LEN;
+        size_t class_start = span_start + kSpanOpenLen;
         size_t class_end = message.find('>', class_start);
 
         if (class_end == std::string::npos) {
@@ -128,7 +122,7 @@ std::vector<ConsoleTextSegment> parse_console_html_spans(const std::string& mess
 
         // Find the closing </span>
         size_t content_start = class_end + 1;
-        size_t span_close = message.find(SPAN_CLOSE, content_start);
+        size_t span_close = message.find(kSpanClose, content_start);
 
         if (span_close == std::string::npos) {
             // No closing tag - add rest as colored text
@@ -141,7 +135,7 @@ std::vector<ConsoleTextSegment> parse_console_html_spans(const std::string& mess
             segments.push_back({std::move(content), std::move(color_class)});
         }
 
-        pos = span_close + SPAN_CLOSE_LEN;
+        pos = span_close + kSpanCloseLen;
     }
 
     return segments;

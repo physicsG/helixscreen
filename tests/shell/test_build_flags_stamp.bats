@@ -10,7 +10,7 @@
 load helpers
 
 setup() {
-    cd "$BATS_TEST_DIRNAME/../.." || return 1
+    cd "$(scratch_tree)" || return 1
     OBJ="${BATS_TEST_TMPDIR:-$(mktemp -d)}/obj"
     STAMP="$OBJ/.build-flags"
 }

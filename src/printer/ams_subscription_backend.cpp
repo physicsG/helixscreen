@@ -3,6 +3,7 @@
 
 #include "ams_subscription_backend.h"
 
+#include "http_executor.h"
 #include "lane_echo.h"
 #include "lane_legacy_migration.h"
 #include "lane_source_store.h"
@@ -12,6 +13,7 @@
 #include "printer_state.h"
 #include "toolhead_homing.h"
 
+#include <chrono>
 #include <utility>
 
 #include "hv/json.hpp"
@@ -30,8 +32,19 @@ AmsSubscriptionBackend::AmsSubscriptionBackend(IMoonrakerAPI* api, helix::IMoonr
 }
 
 AmsSubscriptionBackend::~AmsSubscriptionBackend() {
+    {
+        std::lock_guard<std::mutex> lock(debounce_cancel_->mutex);
+        debounce_cancel_->cancelled = true;
+    }
+    debounce_cancel_->cv.notify_all();
     // Release without unsubscribe -- MoonrakerClient may already be destroyed
     subscription_.release();
+}
+
+bool AmsSubscriptionBackend::debounce_wait(const std::shared_ptr<DebounceCancel>& cancel,
+                                           std::chrono::milliseconds window) {
+    std::unique_lock<std::mutex> lock(cancel->mutex);
+    return !cancel->cv.wait_for(lock, window, [&cancel] { return cancel->cancelled; });
 }
 
 AmsError AmsSubscriptionBackend::start() {
@@ -72,7 +85,7 @@ AmsError AmsSubscriptionBackend::start() {
                             [this, notification]() { handle_status_update(notification); });
             });
 
-        if (id == helix::INVALID_SUBSCRIPTION_ID) {
+        if (id == helix::kInvalidSubscriptionId) {
             spdlog::error("{} Failed to register for status updates", backend_log_tag());
             return AmsErrorHelper::not_connected("Failed to subscribe to Moonraker updates");
         }
@@ -110,14 +123,17 @@ void AmsSubscriptionBackend::handle_status_update(const nlohmann::json& notifica
 }
 
 void AmsSubscriptionBackend::stop() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!running_) {
+            return;
+        }
+        on_stopping();
+        subscription_.reset();
+        running_ = false;
+        spdlog::info("{} Backend stopped", backend_log_tag());
     }
-    on_stopping();
-    subscription_.reset();
-    running_ = false;
-    spdlog::info("{} Backend stopped", backend_log_tag());
+    on_stopped();
 }
 
 std::uint64_t AmsSubscriptionBackend::own_write_echo_sequence(int slot_index) {
@@ -218,71 +234,155 @@ void AmsSubscriptionBackend::request_resync() {
     AmsSubscriptionBackend* self = this;
     store->reload_async([token, block,
                          self](std::unordered_map<int, helix::ams::LaneDataRecord> records) {
-        token.defer(
-            "AmsSubscriptionBackend::resync_lane_records",
-            [self, block, records = std::move(records)]() {
-                for (const auto& [slot, entry] : records) {
-                    // Only what the namespace merely remembers is
-                    // re-filed. A record naming a spool is the
-                    // server's statement and one declaring a colour or material
-                    // is a person's; re-filing either would forge a
-                    // declaration out of a re-read, which is the
-                    // confusion the source model exists to end.
-                    //
-                    // Remembered rather than VendorCache because this
-                    // re-reads our own store, not a firmware frame.
-                    helix::ams::Observation obs = helix::ams::declared_from_record(entry.record);
-                    if (obs.source != helix::ams::ObservationSource::Remembered) {
-                        continue;
-                    }
-                    // A co-authored namespace carries the mirror of
-                    // this backend's own write, so the re-read
-                    // strips what it can see is a standing
-                    // declaration. It is a stored record, not a
-                    // live producer: a value that differs from the
-                    // declaration is staleness in the store, not
-                    // firmware demonstrating it can say something
-                    // else, so it releases nothing - withholding
-                    // here would let one stale record unhook the
-                    // guard while the live firmware is still
-                    // echoing the write.
-                    //
-                    // The strip runs first either way: firmware
-                    // mirrors a write back with none of our
-                    // authorship keys, so a foreign-looking record
-                    // can still be that echo. What the guard strips
-                    // is our write whatever the record reads as;
-                    // what survives is not explained by any write
-                    // of ours. A slot with the guard still standing
-                    // has a write of ours unconfirmed in flight,
-                    // which is newer than anything a stored record
-                    // can say about the lane: there the strip alone
-                    // decides what files, and the promotion below
-                    // is not this record's to judge.
-                    bool write_in_flight = false;
-                    {
-                        std::lock_guard<std::mutex> lock(self->mutex_);
-                        self->own_write_echoes_.strip_standing(slot, obs);
-                        write_in_flight = self->own_write_echoes_.standing(slot);
-                    }
-                    const helix::ams::LaneId lane = helix::ams::lane_id_for(block, slot);
-                    // A record another tool wrote is the newest
-                    // statement on the lane when it displaces what
-                    // stands there (prestonbrown/helixscreen#1632):
-                    // it files on the user's rung, where it
-                    // resolves over firmware's cache and yields to
-                    // whatever edit lands next. A record the
-                    // backend's own firmware plugin wrote is a
-                    // reading, not an edit, and keeps filing as
-                    // remembered; anything else does too, below
-                    // whatever a person said.
-                    if (helix::ams::file_outside_edit_if_newer(lane, entry, obs, write_in_flight)) {
-                        continue;
-                    }
-                    helix::ams::ingest(lane, obs);
-                }
-            });
+        token.defer("AmsSubscriptionBackend::resync_lane_records",
+                    [self, block, records = std::move(records)]() {
+                        for (const auto& [slot, entry] : records) {
+                            // Only what the namespace merely remembers is
+                            // re-filed. A record naming a spool is the
+                            // server's statement and one declaring a colour or material
+                            // is a person's; re-filing either would forge a
+                            // declaration out of a re-read, which is the
+                            // confusion the source model exists to end.
+                            //
+                            // Remembered rather than VendorCache because this
+                            // re-reads our own store, not a firmware frame.
+                            helix::ams::Observation obs =
+                                helix::ams::declared_from_record(entry.record);
+                            if (obs.source != helix::ams::ObservationSource::Remembered) {
+                                continue;
+                            }
+                            // A record another tool wrote is the newest
+                            // statement on the lane when it displaces what
+                            // stands there (prestonbrown/helixscreen#1632):
+                            // it files on the user's rung, where it
+                            // resolves over firmware's cache and yields to
+                            // whatever edit lands next. A record the
+                            // backend's own firmware plugin wrote is a
+                            // reading, not an edit, and keeps filing as
+                            // remembered; anything else does too, below
+                            // whatever a person said.
+                            const helix::ams::LaneId lane = helix::ams::lane_id_for(block, slot);
+                            if (self->file_reread_outside_edit(lane, slot, entry, obs)) {
+                                continue;
+                            }
+                            helix::ams::ingest(lane, obs);
+                        }
+                    });
     });
+}
+
+bool AmsSubscriptionBackend::file_reread_outside_edit(helix::ams::LaneId lane, int slot_index,
+                                                      const helix::ams::LaneDataRecord& entry,
+                                                      helix::ams::Observation& obs) {
+    bool write_in_flight = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        own_write_echoes_.strip_standing(slot_index, obs);
+        write_in_flight = own_write_echoes_.standing(slot_index);
+    }
+    return helix::ams::file_outside_edit_if_newer(lane, entry, obs, write_in_flight);
+}
+
+void AmsSubscriptionBackend::schedule_lane_record_reread() {
+    on_lane_reread_scheduled();
+    if (lane_reread_pending_.exchange(true)) {
+        return;
+    }
+    auto token = lifetime_.token();
+    helix::http::HttpExecutor::fast().submit([this, token, cancel = debounce_cancel_]() {
+        // BG THREAD: only the debounce sleep.
+        if (!debounce_wait(cancel, std::chrono::seconds(2))) {
+            return;
+        }
+        token.defer("AmsSubscriptionBackend::lane_record_reread", [this]() {
+            lane_reread_pending_.store(false);
+            reread_lane_records();
+        });
+    });
+}
+
+void AmsSubscriptionBackend::seed_lane_records_seen_locked() {
+    lane_wire_seen_.clear();
+    if (!override_store_) {
+        return;
+    }
+    for (const auto& [slot, entry] : override_store_->last_lane_data_records()) {
+        lane_wire_seen_[slot] = entry.wire;
+    }
+}
+
+void AmsSubscriptionBackend::reread_lane_records() {
+    helix::ams::FilamentSlotOverrideStore* store = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        store = override_store_.get();
+    }
+    if (!store) {
+        on_lane_reread_finished({});
+        return;
+    }
+    auto token = lifetime_.token();
+    // A read that never lands took no slot.
+    store->reload_async(
+        [this, token](std::unordered_map<int, helix::ams::LaneDataRecord> records) {
+            token.defer(
+                "AmsSubscriptionBackend::apply_lane_records",
+                [this, records = std::move(records)]() { apply_reread_lane_records(records); });
+        },
+        [this, token]() {
+            token.defer("AmsSubscriptionBackend::lane_reread_failed", [this]() {
+                spdlog::debug("{} lane_data re-read failed; the next change retries",
+                              backend_log_tag());
+                on_lane_reread_finished({});
+            });
+        });
+}
+
+void AmsSubscriptionBackend::apply_reread_lane_records(
+    const std::unordered_map<int, helix::ams::LaneDataRecord>& records) {
+    std::unordered_set<int> taken;
+    for (const auto& [slot, entry] : records) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (slot < 0 || slot >= slot_index_bound_locked()) {
+                continue;
+            }
+            auto seen = lane_wire_seen_.find(slot);
+            const bool unchanged = seen != lane_wire_seen_.end() && seen->second == entry.wire;
+            lane_wire_seen_[slot] = entry.wire;
+            if (unchanged) {
+                continue;
+            }
+        }
+        // Every field the record states, not only what request_resync() would
+        // re-file as remembered: the spool link is what this read is for.
+        helix::ams::Observation obs = helix::ams::declared_from_record(entry.record);
+        const auto lane = lane_id(slot);
+        const bool rebinds = helix::ams::outside_record_rebinds(lane, obs);
+        if (!file_reread_outside_edit(lane, slot, entry, obs)) {
+            continue;
+        }
+        spdlog::info("{} Slot {} lane_data rewritten by another tool; taking its record",
+                     backend_log_tag(), slot);
+        taken.insert(slot);
+        {
+            // The override follows the lane: a rebinding starts it afresh, and
+            // anything else amends it, so a later save neither republishes
+            // what the tool replaced nor drops what it left alone.
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto& ovr = overrides_[slot];
+            if (rebinds) {
+                helix::ams::FilamentSlotOverride fresh;
+                fresh.fingerprint = ovr.fingerprint;
+                fresh.unlinked_spool_id = ovr.unlinked_spool_id;
+                ovr = std::move(fresh);
+            }
+            helix::ams::amend_record(ovr, obs);
+        }
+        repaint_slot_from_lane(slot);
+        emit_event(kEventSlotChanged, std::to_string(slot));
+    }
+    on_lane_reread_finished(taken);
 }
 
 void AmsSubscriptionBackend::repaint_slot_from_lane(int slot_index) {
@@ -307,6 +407,20 @@ void AmsSubscriptionBackend::emit_event(const std::string& event, const std::str
     if (cb) {
         cb(event, data);
     }
+}
+
+void AmsSubscriptionBackend::on_klipper_restarted() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ams_action_is_busy(system_info_.action)) {
+            return;
+        }
+        spdlog::warn("{} {} ended with a Klipper restart; no longer reporting it busy",
+                     backend_log_tag(), ams_action_to_string(system_info_.action));
+        system_info_.action = AmsAction::IDLE;
+        system_info_.operation_detail.clear();
+    }
+    emit_event(EVENT_STATE_CHANGED);
 }
 
 AmsAction AmsSubscriptionBackend::get_current_action() const {
@@ -334,13 +448,10 @@ bool AmsSubscriptionBackend::op_moves_toolhead(FilamentOp op) const {
     case FilamentOp::Load:
     case FilamentOp::Unload:
     case FilamentOp::ChangeTool:
+    case FilamentOp::ParkTool:
         // Pushing or pulling filament through the hotend, and swapping what is
         // on the carriage, are toolhead motion on every backend there is. No
         // override path exists for these on purpose.
-        return true;
-    case FilamentOp::Park:
-        // Docking the head IS carriage motion, by definition — there is no
-        // backend on which parking leaves the carriage where it was.
         return true;
     case FilamentOp::SelectSlot:
         // The one genuinely per-backend answer. See select_slot_moves_toolhead().
@@ -356,13 +467,11 @@ AmsError AmsSubscriptionBackend::claim_filament_op(FilamentOp op, bool check_sta
         pending = AmsAction::LOADING;
         break;
     case FilamentOp::Unload:
+    case FilamentOp::ParkTool:
         pending = AmsAction::UNLOADING;
         break;
     case FilamentOp::SelectSlot:
     case FilamentOp::ChangeTool:
-    case FilamentOp::Park:
-        // Park is carriage motion like a select/tool change, and SELECTING is
-        // the closest name the busy refusal can carry for it.
         pending = AmsAction::SELECTING;
         break;
     }
@@ -414,7 +523,10 @@ AmsError AmsSubscriptionBackend::run_filament_op(FilamentOp op, int arg,
     // synchronization and nothing in system_info_ to be atomic with, and the
     // claim already excludes a second op for the whole window.
     if (op_moves_toolhead(op)) {
-        if (auto e = refuse_if_printing(); !e.success()) {
+        // Parking leaves no tool for a paused job to resume with, so a paused
+        // job refuses it on every backend, whatever the others allow.
+        if (auto e = refuse_if_printing(/*paused_blocks=*/op == FilamentOp::ParkTool);
+            !e.success()) {
             return e;
         }
     }
@@ -437,8 +549,8 @@ AmsError AmsSubscriptionBackend::run_filament_op(FilamentOp op, int arg,
         return do_select_slot(arg);
     case FilamentOp::ChangeTool:
         return do_change_tool(arg);
-    case FilamentOp::Park:
-        return do_park_toolhead();
+    case FilamentOp::ParkTool:
+        return do_park_active_tool();
     }
     return AmsErrorHelper::success(); // Unreachable; the enum is exhaustive.
 }
@@ -459,9 +571,13 @@ AmsError AmsSubscriptionBackend::change_tool(int tool_number) {
     return run_filament_op(FilamentOp::ChangeTool, tool_number);
 }
 
-AmsError AmsSubscriptionBackend::park_toolhead() {
-    // The arg is unused — the firmware parks whichever head is on the carriage.
-    return run_filament_op(FilamentOp::Park, -1);
+AmsError AmsSubscriptionBackend::park_active_tool() {
+    // Unsupported is the answer whatever state the backend is in, so it comes
+    // before the gate's not-started and busy refusals.
+    if (!supports_tool_park()) {
+        return AmsErrorHelper::not_supported("Tool park");
+    }
+    return run_filament_op(FilamentOp::ParkTool, -1);
 }
 
 AmsError AmsSubscriptionBackend::load_filament_batch(const std::vector<int>& slots) {
@@ -479,6 +595,11 @@ AmsError AmsSubscriptionBackend::state_preconditions_unlocked() const {
     }
     if (system_info_.is_busy()) {
         return AmsErrorHelper::busy(ams_action_to_string(system_info_.action));
+    }
+    // A calibration or tool cycle the printer is still running: Klipper would
+    // queue the op behind it, to run unattended minutes later.
+    if (tracked_run_active_.load()) {
+        return AmsErrorHelper::busy("a device action");
     }
     return AmsErrorHelper::success();
 }
@@ -513,7 +634,7 @@ AmsError AmsSubscriptionBackend::check_preconditions(bool requires_toolhead_moti
     return AmsErrorHelper::success();
 }
 
-AmsError AmsSubscriptionBackend::refuse_if_printing() const {
+AmsError AmsSubscriptionBackend::refuse_if_printing(bool paused_blocks) const {
     // The AmsError face of print_blocks_filament_op(), which states the rule and
     // why each lifecycle answers as it does. Only the parts specific to being
     // the BACKEND end of it live here.
@@ -534,7 +655,7 @@ AmsError AmsSubscriptionBackend::refuse_if_printing() const {
     }
     const auto lifecycle = api_->printer_state().print_state().get_print_lifecycle();
     const bool is_paused = (lifecycle == PrintState::Paused);
-    const bool self_homes = filament_ops_self_home();
+    const bool self_homes = paused_blocks || filament_ops_self_home();
     // print_blocks_filament_op() is the rule, shared with every surface that
     // greys a filament-op button. This function's job is to map its answer onto
     // an AmsError, not to decide it a second time.
@@ -554,6 +675,112 @@ AmsError AmsSubscriptionBackend::refuse_if_printing() const {
     return AmsErrorHelper::print_active(is_paused, /*pause_allows_ops=*/!self_homes);
 }
 
+bool AmsSubscriptionBackend::print_holds_printer() const {
+    // self_homes=true: PAUSED holds it too, the same span machine_motion_blocked greys.
+    return api_ &&
+           print_blocks_filament_op(api_->printer_state().print_state().get_print_lifecycle(),
+                                    /*backend_self_homes=*/true);
+}
+
+AmsError AmsSubscriptionBackend::refuse_motion_if_printing() const {
+    if (!print_holds_printer()) {
+        return AmsErrorHelper::success();
+    }
+    spdlog::warn("{} Refusing machine motion while a print holds the printer (lifecycle={})",
+                 backend_log_tag(),
+                 static_cast<int>(api_->printer_state().print_state().get_print_lifecycle()));
+    return AmsErrorHelper::busy_with_print();
+}
+
+AmsError AmsSubscriptionBackend::send_endless_spool_switch(const std::string& gcode,
+                                                           std::function<void()> on_sent) {
+    auto token = lifetime_.token();
+    return execute_gcode(
+        gcode,
+        [on_sent = std::move(on_sent)]() {
+            if (on_sent) {
+                on_sent();
+            }
+        },
+        [this, token](const MoonrakerError&) {
+            token.defer("AmsSubscriptionBackend::endless_spool_refused",
+                        [this]() { emit_event(kEventEndlessSpoolRefused); });
+        });
+}
+
+AmsError AmsSubscriptionBackend::device_action_refusal(const std::string& action_id) const {
+    // Only an action the backend offers right now runs: one it no longer lists
+    // (its hardware went away, its config changed) has no moves_machine answer
+    // to gate it by.
+    const auto actions = get_device_actions();
+    const auto it = std::find_if(actions.begin(), actions.end(),
+                                 [&](const auto& a) { return a.id == action_id; });
+    if (it == actions.end()) {
+        spdlog::warn("{} Refusing device action '{}': not offered now", backend_log_tag(),
+                     action_id);
+        return AmsErrorHelper::not_supported("Device action " + action_id);
+    }
+    // Listed but unavailable (no hardware for it, config still loading): every
+    // caller is refused, the UI's own checks aside.
+    if (!it->enabled) {
+        spdlog::warn("{} Refusing device action '{}': {}", backend_log_tag(), action_id,
+                     it->disable_reason);
+        return AmsError(AmsResult::WRONG_STATE, "Device action " + action_id + " is unavailable",
+                        lv_tr("Not available now"), lv_tr(it->disable_reason.c_str()));
+    }
+    if (it->moves_machine) {
+        if (tracked_run_active_.load()) {
+            return AmsErrorHelper::busy("a device action");
+        }
+        return it->allowed_while_paused ? refuse_if_printing() : refuse_motion_if_printing();
+    }
+    return AmsErrorHelper::success();
+}
+
+bool AmsSubscriptionBackend::begin_tracked_run() {
+    bool expected = false;
+    return tracked_run_active_.compare_exchange_strong(expected, true);
+}
+
+void AmsSubscriptionBackend::end_tracked_run() {
+    tracked_run_active_.store(false);
+}
+
+AmsError AmsSubscriptionBackend::execute_device_action(const std::string& action_id,
+                                                       const std::any& value) {
+    if (auto refused = device_action_refusal(action_id); !refused.success()) {
+        return refused;
+    }
+    return do_execute_device_action(action_id, value);
+}
+
+AmsError AmsSubscriptionBackend::run_device_action(const std::string& action_id,
+                                                   const std::any& value,
+                                                   DeviceActionDone on_done) {
+    if (auto refused = device_action_refusal(action_id); !refused.success()) {
+        return refused;
+    }
+    return do_run_device_action(action_id, value, std::move(on_done));
+}
+
+AmsError AmsSubscriptionBackend::do_run_device_action(const std::string& action_id,
+                                                      const std::any& value,
+                                                      DeviceActionDone on_done) {
+    AmsError result = do_execute_device_action(action_id, value);
+    if (result.success() && on_done) {
+        on_done(result);
+    }
+    return result;
+}
+
+AmsError AmsSubscriptionBackend::run_edit_follow_up(int slot_index, const SlotInfo& before,
+                                                    const SlotInfo& after) {
+    if (auto refused = refuse_if_printing(/*paused_blocks=*/true); !refused.success()) {
+        return refused;
+    }
+    return do_run_edit_follow_up(slot_index, before, after);
+}
+
 bool AmsSubscriptionBackend::toolhead_homed() const {
     if (!api_) {
         // No connection: callers fall back to dispatching directly, so the
@@ -565,10 +792,11 @@ bool AmsSubscriptionBackend::toolhead_homed() const {
 }
 
 AmsError AmsSubscriptionBackend::ensure_homed_then(
-    std::string gcode, std::function<void()> on_complete,
-    std::function<void(const MoonrakerError&)> on_error, uint32_t timeout_ms, bool skip_homing,
-    bool silent, std::optional<bool> caller_surfaces_errors,
-    std::function<void(const MoonrakerError&)> on_predispatch_error) {
+    std::string gcode, helix::SharedCallback<void()> on_complete,
+    helix::SharedCallback<void(const MoonrakerError&)> on_error, uint32_t timeout_ms,
+    bool skip_homing, bool silent, std::optional<bool> caller_surfaces_errors,
+    helix::SharedCallback<void(const MoonrakerError&)> on_predispatch_error,
+    bool bypass_busy_gate) {
     // The homed answer comes from the live homed_axes subject, not an RPC:
     // toolhead is in the standing objects.subscribe set, so querying it again
     // was a redundant round trip. skip_homing short-circuits the check
@@ -578,7 +806,7 @@ AmsError AmsSubscriptionBackend::ensure_homed_then(
     // auto_home) — no G28 from us.
     if (skip_homing || delegates_homing_to_printer() || toolhead_homed()) {
         return dispatch_payload(std::move(gcode), std::move(on_complete), std::move(on_error),
-                                timeout_ms, silent, caller_surfaces_errors);
+                                timeout_ms, silent, caller_surfaces_errors, bypass_busy_gate);
     }
 
     // An operation that needs a home just homes first, with no confirmation:
@@ -593,7 +821,7 @@ AmsError AmsSubscriptionBackend::ensure_homed_then(
     // virtual to capture - routing around it here would make the unhomed
     // branch untestable and silently drop the G28 from the recorded sequence.
     // The real path below cannot use the virtual because it needs an error
-    // callback and HOMING_TIMEOUT_MS, which the virtual forms do not take.
+    // callback and kHomingTimeoutMs, which the virtual forms do not take.
     // Fixtures are synchronous (no real RPC), so the AmsError the virtual
     // returns IS the only failure signal available here -- there is no async
     // MoonrakerError to forward, so a failure is translated into one.
@@ -607,7 +835,7 @@ AmsError AmsSubscriptionBackend::ensure_homed_then(
             return AmsErrorHelper::success();
         }
         dispatch_payload(std::move(gcode), std::move(on_complete), std::move(on_error), timeout_ms,
-                         silent, caller_surfaces_errors);
+                         silent, caller_surfaces_errors, bypass_busy_gate);
         return AmsErrorHelper::success();
     }
 
@@ -615,21 +843,21 @@ AmsError AmsSubscriptionBackend::ensure_homed_then(
     api_->execute_gcode(
         "G28",
         [this, token, gcode = std::move(gcode), on_complete, on_error, timeout_ms, silent,
-         caller_surfaces_errors]() {
+         caller_surfaces_errors, bypass_busy_gate]() {
             // L081 Mechanism C: the ack lands on a bg thread and dispatch_payload
             // touches api_/members. Marshal to main.
-            token.defer(
-                "AmsSubscriptionBackend::ensure_homed_then_g28_success",
-                [this, gcode, on_complete, on_error, timeout_ms, silent, caller_surfaces_errors]() {
-                    dispatch_payload(gcode, on_complete, on_error, timeout_ms, silent,
-                                     caller_surfaces_errors);
-                });
+            token.defer("AmsSubscriptionBackend::ensure_homed_then_g28_success",
+                        [this, gcode, on_complete, on_error, timeout_ms, silent,
+                         caller_surfaces_errors, bypass_busy_gate]() {
+                            dispatch_payload(gcode, on_complete, on_error, timeout_ms, silent,
+                                             caller_surfaces_errors, bypass_busy_gate);
+                        });
         },
         [this, token, pre_err](const MoonrakerError& err) {
             token.defer("AmsSubscriptionBackend::ensure_homed_then_g28_error",
                         [this, err, pre_err]() { handle_dispatch_error(err, pre_err); });
         },
-        IMoonrakerAPI::HOMING_TIMEOUT_MS, /*silent=*/false, /*on_queued=*/nullptr,
+        IMoonrakerAPI::kHomingTimeoutMs, /*silent=*/false, /*on_queued=*/nullptr,
         // The G28 error leg lands in handle_dispatch_error(), which without a
         // caller callback only logs and resets the action to IDLE. Its ownership
         // answer is the caller's, not this wrapper's — and on this leg the
@@ -640,7 +868,7 @@ AmsError AmsSubscriptionBackend::ensure_homed_then(
 }
 
 void AmsSubscriptionBackend::handle_dispatch_error(
-    const MoonrakerError& err, const std::function<void(const MoonrakerError&)>& on_error) {
+    const MoonrakerError& err, const helix::SharedCallback<void(const MoonrakerError&)>& on_error) {
     if (on_error) {
         on_error(err);
         return;
@@ -654,7 +882,7 @@ void AmsSubscriptionBackend::handle_dispatch_error(
 }
 
 AmsError AmsSubscriptionBackend::refuse_dispatch_no_api(
-    const std::function<void(const MoonrakerError&)>& on_error) {
+    const helix::SharedCallback<void(const MoonrakerError&)>& on_error) {
     MoonrakerError synthetic;
     synthetic.type = MoonrakerErrorType::CONNECTION_LOST;
     synthetic.message = "IMoonrakerAPI not available";
@@ -662,34 +890,49 @@ AmsError AmsSubscriptionBackend::refuse_dispatch_no_api(
     return AmsErrorHelper::not_connected("IMoonrakerAPI not available");
 }
 
-AmsError
-AmsSubscriptionBackend::dispatch_payload(std::string gcode, std::function<void()> on_complete,
-                                         std::function<void(const MoonrakerError&)> on_error,
-                                         uint32_t timeout_ms, bool silent,
-                                         std::optional<bool> caller_surfaces_errors) {
-    // Legacy shape: dispatch through the SAME two virtuals as before this
-    // method grew these parameters. ~20 fixtures override ONLY
-    // execute_gcode(gcode) / execute_gcode(gcode, on_complete) (see the
+AmsError AmsSubscriptionBackend::dispatch_payload(
+    std::string gcode, helix::SharedCallback<void()> on_complete,
+    helix::SharedCallback<void(const MoonrakerError&)> on_error, uint32_t timeout_ms, bool silent,
+    std::optional<bool> caller_surfaces_errors, bool bypass_busy_gate) {
+    // Default shape: dispatch through the 1-arg and 2-arg execute_gcode()
+    // virtuals. ~20 fixtures override ONLY those two (see the
     // dispatch_payload() doc comment in the header); a payload with no
     // on_complete must reach the 1-arg override or those tests silently stop
-    // capturing anything. All 8 pre-existing callers never pass
-    // on_error/timeout_ms/silent, so they always land here, byte-for-byte the
-    // pre-widening behaviour.
-    if (!on_error && timeout_ms == IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS && silent) {
+    // capturing anything. Callers that pass no on_error/timeout_ms/silent
+    // always land here.
+    if (!on_error && timeout_ms == IMoonrakerAPI::kAmsOperationTimeoutMs && silent) {
         return on_complete ? execute_gcode(gcode, std::move(on_complete)) : execute_gcode(gcode);
-    }
-
-    // A caller asked for its own error/timeout/toast policy -- the hardcoded
-    // virtuals above can't carry that (they fix AMS_OPERATION_TIMEOUT_MS and
-    // silent=true, and their error handling only logs). Talk to IMoonrakerAPI
-    // directly, the same way AmsBackendCfs::dispatch_action_script used to
-    // before this method existed to replace its fork.
-    if (!api_) {
-        return refuse_dispatch_no_api(on_error);
     }
 
     const char* tag = backend_log_tag();
     auto token = lifetime_.token();
+
+    // An error callback that only unwinds state, at the standard timeout, is
+    // exactly the 4-arg execute_gcode() virtual's contract, so it goes through
+    // that virtual: fixtures capture it there the way they capture the shapes
+    // above. That virtual already runs the completion on main; the error leg
+    // still hops here because a refusal for want of an IMoonrakerAPI arrives
+    // synchronously, and handle_dispatch_error() takes mutex_.
+    // A busy-gate bypass with a live API needs the direct path below: the
+    // virtual carries no such flag. Fixtures (no API) still capture through it.
+    if (timeout_ms == IMoonrakerAPI::kAmsOperationTimeoutMs &&
+        !caller_surfaces_errors.value_or(on_error != nullptr) && !(bypass_busy_gate && api_)) {
+        return execute_gcode(
+            gcode, std::move(on_complete),
+            [this, token, on_error](const MoonrakerError& err) {
+                token.defer("AmsSubscriptionBackend::dispatch_payload_error",
+                            [this, err, on_error]() { handle_dispatch_error(err, on_error); });
+            },
+            silent);
+    }
+
+    // A caller asked for its own error/timeout/toast policy -- the hardcoded
+    // virtuals above can't carry that (they fix kAmsOperationTimeoutMs and
+    // silent=true, and their error handling only logs). Talk to IMoonrakerAPI
+    // directly.
+    if (!api_) {
+        return refuse_dispatch_no_api(on_error);
+    }
 
     // Captured from the CALLER's on_error, before the wrapper below makes the
     // callback we hand to IMoonrakerAPI unconditionally non-null. A caller that
@@ -721,7 +964,7 @@ AmsSubscriptionBackend::dispatch_payload(std::string gcode, std::function<void()
             token.defer("AmsSubscriptionBackend::dispatch_payload_error",
                         [this, err, on_error]() { handle_dispatch_error(err, on_error); });
         },
-        timeout_ms, silent, /*on_queued=*/nullptr, caller_surfaces);
+        timeout_ms, silent, /*on_queued=*/nullptr, caller_surfaces, bypass_busy_gate);
     return AmsErrorHelper::success();
 }
 
@@ -745,7 +988,7 @@ AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode) {
                 spdlog::error("{} G-code failed: {} - {}", tag, gcode, err.message);
             }
         },
-        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
+        IMoonrakerAPI::kAmsOperationTimeoutMs,
         // silent=true: the phase tracker + IFS_STATUS own operation completion,
         // so the RPC timeout is advisory for these long macros. A cold-start
         // load can legitimately run past the 300s ceiling (bundle 77TDH9N6:
@@ -763,50 +1006,18 @@ AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode) {
 }
 
 AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode,
-                                               std::function<void()> on_complete) {
-    if (!api_) {
-        return AmsErrorHelper::not_connected("IMoonrakerAPI not available");
-    }
-    const char* tag = backend_log_tag();
-    spdlog::info("{} Executing G-code: {}", tag, gcode);
-    api_->execute_gcode(
-        gcode,
-        [tag, on_complete = std::move(on_complete)]() {
-            spdlog::debug("{} G-code executed successfully", tag);
-            // Fires when the command finishes (Klipper acks the script), so a
-            // long macro has fully run — the reliable completion signal.
-            if (on_complete) {
-                on_complete();
-            }
-        },
-        [tag, gcode](const MoonrakerError& err) {
-            if (err.type == MoonrakerErrorType::TIMEOUT) {
-                spdlog::warn("{} G-code response timed out (may still be running): {}", tag, gcode);
-            } else if (err.type == MoonrakerErrorType::NOT_READY) {
-                spdlog::debug("{} G-code skipped (Klipper halted): {}", tag, gcode);
-            } else {
-                spdlog::error("{} G-code failed: {} - {}", tag, gcode, err.message);
-            }
-        },
-        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
-        // silent=true: completion is owned by the phase tracker + IFS_STATUS, not
-        // the RPC return, so the advisory 300s timeout must not surface a false
-        // "timed out" toast for a legitimately-long macro (bundle 77TDH9N6),
-        // along with the tracker's generic fallback.
-        /*silent=*/true, /*on_queued=*/nullptr,
-        // caller_surfaces_errors=false: the error_cb above only writes to the
-        // log, which the user never sees. Declaring otherwise would silence
-        // GcodeErrorRouter, so a real AFC/Happy Hare/CFS macro rejection would
-        // reach nobody. With this false, Klipper's `!!` broadcast stays free to
-        // surface it. See include/rpc_error_policy.h.
-        /*caller_surfaces_errors=*/false);
-    return AmsErrorHelper::success();
+                                               helix::SharedCallback<void()> on_complete) {
+    // silent=true: completion is owned by the phase tracker + IFS_STATUS, not
+    // the RPC return, so the advisory 300s timeout must not surface a false
+    // "timed out" toast for a legitimately-long macro (bundle 77TDH9N6),
+    // along with the tracker's generic fallback.
+    return AmsSubscriptionBackend::execute_gcode(gcode, std::move(on_complete), nullptr,
+                                                 /*silent=*/true);
 }
 
-AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode,
-                                               std::function<void()> on_complete,
-                                               std::function<void(const MoonrakerError&)> on_error,
-                                               bool silent) {
+AmsError AmsSubscriptionBackend::execute_gcode(
+    const std::string& gcode, helix::SharedCallback<void()> on_complete,
+    helix::SharedCallback<void(const MoonrakerError&)> on_error, bool silent) {
     if (!api_) {
         // The send never went out, but on_error still owes the caller its
         // unwind: an optimistic AmsAction set before this dispatch stays set
@@ -822,15 +1033,23 @@ AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode,
     }
     const char* tag = backend_log_tag();
     spdlog::info("{} Executing G-code: {}", tag, gcode);
+    auto token = lifetime_.token();
     api_->execute_gcode(
         gcode,
-        [tag, on_complete = std::move(on_complete)]() {
+        [tag, token, on_complete = std::move(on_complete)]() {
             spdlog::debug("{} G-code executed successfully", tag);
-            if (on_complete) {
-                on_complete();
+            if (!on_complete) {
+                return;
             }
+            // The answer lands on the libhv response thread, while the status
+            // frames that arrived before it are still queued for main. The
+            // completion runs behind them, on main, so it judges the state
+            // those frames report rather than the state they are about to
+            // replace.
+            token.defer("AmsSubscriptionBackend::execute_gcode_complete",
+                        [on_complete]() { on_complete(); });
         },
-        [tag, gcode, on_error = std::move(on_error)](const MoonrakerError& err) {
+        [tag, token, gcode, on_error = std::move(on_error)](const MoonrakerError& err) {
             if (err.type == MoonrakerErrorType::TIMEOUT) {
                 spdlog::warn("{} G-code response timed out (may still be running): {}", tag, gcode);
             } else if (err.type == MoonrakerErrorType::NOT_READY) {
@@ -838,11 +1057,16 @@ AmsError AmsSubscriptionBackend::execute_gcode(const std::string& gcode,
             } else {
                 spdlog::error("{} G-code failed: {} - {}", tag, gcode, err.message);
             }
-            if (on_error) {
-                on_error(err);
+            if (!on_error) {
+                return;
             }
+            // Same thread and ordering as the completion. A refusal can also
+            // arrive synchronously, on the caller's stack, while it holds
+            // mutex_.
+            token.defer("AmsSubscriptionBackend::execute_gcode_error",
+                        [on_error, err]() { on_error(err); });
         },
-        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS, silent, /*on_queued=*/nullptr,
+        IMoonrakerAPI::kAmsOperationTimeoutMs, silent, /*on_queued=*/nullptr,
         // caller_surfaces_errors=false: on_error unwinds caller state but does
         // not put anything on screen, so declaring otherwise would silence
         // GcodeErrorRouter and a real macro rejection would reach nobody.

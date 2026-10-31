@@ -42,7 +42,7 @@ class ContextMenu {
     using ActionCallback = std::function<void(int action, int item_index)>;
 
     /** @brief Action id dispatched when the menu is dismissed without a choice */
-    static constexpr int ACTION_CANCELLED = -1;
+    static constexpr int kActionCancelled = -1;
 
     /**
      * @brief Where the card is placed, and what it is placed relative to
@@ -72,11 +72,20 @@ class ContextMenu {
      * A zero `pct` leaves the card at whatever width its XML declared, which is
      * what a `width="content"` menu wants. Menus whose rows are `width="100%"`
      * must be sized before those children can resolve, so they state a policy.
+     *
+     * With `fit_content` the card is as wide as its rows ask (content_width(),
+     * plus the card's own padding), never narrower than `min`, and `pct` of the
+     * screen becomes the ceiling, along with `max` when set and the screen less a
+     * margin each side. Text wider than the ceiling ellipsizes in its row.
+     * A portrait screen is narrow enough that a menu may want a larger share
+     * there: a nonzero `portrait_pct` replaces `pct` as the ceiling in portrait.
      */
     struct CardWidth {
         int pct = 0;
         int min = 0;
         int max = 0;
+        bool fit_content = false;
+        int portrait_pct = 0;
 
         [[nodiscard]] bool is_set() const {
             return pct > 0;
@@ -252,10 +261,33 @@ class ContextMenu {
     }
 
     /**
+     * @brief Width the card's rows need, inside the card's padding
+     *
+     * Read only under a `fit_content` policy, after on_created(), so a menu that
+     * builds its rows there can measure them. Default: nothing to fit.
+     */
+    virtual int32_t content_width() const {
+        return 0;
+    }
+
+    /**
+     * @brief How wide @p row must be to show @p text in @p label without dots
+     *
+     * A dotted label reports its clipped width, and its own text may already
+     * carry the dots, so the text is measured from the caller's copy. The label
+     * may be the row's child or nested in one (a text column); every other
+     * visible child counts at its laid-out width, plus the row's padding, the
+     * padding from the label out to the row and the flex gaps between children.
+     * The caller lays the row out first (once, for a whole set of rows).
+     */
+    [[nodiscard]] static int32_t row_width_for_text(lv_obj_t* row, lv_obj_t* label,
+                                                    const char* text);
+
+    /**
      * @brief Called when the backdrop is clicked (before hide)
      *
      * This is where a menu states what a tap outside it means. The default is
-     * cancel — dispatch `ACTION_CANCELLED` and take no action — which is right
+     * cancel — dispatch `kActionCancelled` and take no action — which is right
      * for a menu whose whole job is choosing one item.
      *
      * A *configure* menu whose controls already apply live has nothing to cancel,
@@ -336,6 +368,9 @@ class ContextMenu {
     /** @brief Apply card_width() to the card, before its children resolve */
     void apply_card_width(lv_obj_t* menu_card);
 
+    /** @brief Apply a `fit_content` card_width() once on_created() has built the rows */
+    void apply_fit_card_width(lv_obj_t* menu_card);
+
     /**
      * @brief Name of the optional column-group container inside a menu card
      *
@@ -343,13 +378,13 @@ class ContextMenu {
      * container with this name, one child per group. Cards without it are simply
      * never reflowed.
      */
-    static constexpr const char* COLUMNS_NAME = "menu_columns";
+    static constexpr const char* kColumnsName = "menu_columns";
 
     /** @brief Name of a column group's heading block (label + rule), if it has one */
-    static constexpr const char* COLUMN_HEADING_NAME = "col_heading";
+    static constexpr const char* kColumnHeadingName = "col_heading";
 
     /** @brief Shortest a row can be and still plausibly be a tap target, in px */
-    static constexpr int32_t MIN_TAPPABLE_H = 8;
+    static constexpr int32_t kMinTappableH = 8;
 
     /**
      * @brief Widen every tappable row to the width of the container holding it
@@ -366,8 +401,9 @@ class ContextMenu {
      *
      * Stacked column groups are the default. If the stacked card would not fit the
      * backdrop (less a margin top and bottom), the group container flips to a row so
-     * the groups sit side by side; if even that overflows, the card is capped and
-     * made scrollable.
+     * the groups sit side by side, wrapping the groups that do not fit the width
+     * onto a second line (decide_column_flow()); if even that overflows, the card is
+     * capped and made scrollable.
      */
     static void fit_card_to_screen(lv_obj_t* menu_card);
 
@@ -386,6 +422,41 @@ class ContextMenu {
     void position_card(lv_obj_t* menu_card);
 
   public:
+    /// How a card's column groups flow.
+    enum class ColumnFlow {
+        Stacked, ///< one list, top to bottom
+        Row,     ///< side by side
+        RowWrap, ///< side by side, the groups that do not fit wrapping to a second line
+    };
+
+    /**
+     * @brief The flow fit_card_to_screen() gives a card's column groups
+     *
+     * Stacked while the stacked card fits @p avail_h; else side by side while the
+     * row of groups fits @p avail_w; else side by side and wrapping, so a third
+     * group on a narrow portrait screen goes under the first two rather than off
+     * the edge.
+     *
+     * @param stacked_h The card's height with its groups stacked
+     * @param row_w     The card's width with its groups side by side
+     * @param avail_w   The backdrop's width, less the margin each side
+     * @param avail_h   The backdrop's height, less the margin top and bottom
+     */
+    static ColumnFlow decide_column_flow(int32_t stacked_h, int32_t row_w, int32_t avail_w,
+                                         int32_t avail_h);
+
+    /**
+     * @brief Card width for @p policy, factored out so it can be tested
+     *
+     * Without `fit_content`: `pct` of @p screen_w clamped to [min, max].
+     * With it: @p content_w, raised to `min`, then capped at `pct` of the screen
+     * (`portrait_pct` when @p portrait and it is set), at `max` when set, and at
+     * the screen less @p margin each side. The cap wins over `min`, so the card
+     * never leaves the screen.
+     */
+    static int32_t compute_card_width(const CardWidth& policy, int32_t screen_w, int32_t content_w,
+                                      int32_t margin, bool portrait);
+
     /**
      * @brief Geometry of position_card(), factored out so it can be tested
      *

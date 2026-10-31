@@ -1,0 +1,3 @@
+# Hand-rolled colour swatches, per file and shape. Ratchet: may fall, never rise.
+# Lower one by moving the site onto the swatch painter, then re-run with
+# --write-baseline. docs/devel/COLOR_SWATCHES.md.

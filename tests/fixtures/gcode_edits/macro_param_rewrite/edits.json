@@ -1,0 +1,14 @@
+{
+  "description": "A leveling parameter on the start macro is switched off",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "START_PRINT BED=110 FORCE_LEVELING=true",
+      "action": "replace",
+      "args": {
+        "gcode": "START_PRINT BED=110 FORCE_LEVELING=FALSE",
+        "comment": "Disabled FORCE_LEVELING"
+      }
+    }
+  ]
+}

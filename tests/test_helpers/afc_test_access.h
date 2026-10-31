@@ -107,9 +107,6 @@ class AfcTestAccess {
     template <class B> static auto& configfile_answered(B& b) {
         return b.configfile_answered_;
     }
-    template <class B> static auto& configfile_has_toolchanger(B& b) {
-        return b.configfile_has_toolchanger_;
-    }
     template <class B> static auto& configs_loaded(B& b) {
         return b.configs_loaded_;
     }
@@ -148,6 +145,9 @@ class AfcTestAccess {
     }
     template <class B> static auto& action_start_time(B& b) {
         return b.action_start_time_;
+    }
+    template <class B> static auto& toolchange_hold_since(B& b) {
+        return b.toolchange_hold_since_;
     }
     template <class B> static auto& timed_out_state(B& b) {
         return b.timed_out_state_;
@@ -191,7 +191,7 @@ class AfcTestAccess {
 
     /// Static constant, so no object to take.
     static constexpr auto message_drain_max_clears() {
-        return AmsBackendAfc::MESSAGE_DRAIN_MAX_CLEARS;
+        return AmsBackendAfc::kMessageDrainMaxClears;
     }
 
     // --- private methods ----------------------------------------------------
@@ -216,11 +216,11 @@ class AfcTestAccess {
     template <class B, class... A> static decltype(auto) on_started(B& b, A&&... a) {
         return b.on_started(std::forward<A>(a)...);
     }
-    template <class B, class... A> static decltype(auto) parse_afc_state(B& b, A&&... a) {
-        return b.parse_afc_state(std::forward<A>(a)...);
+    template <class B, class... A> static decltype(auto) apply_afc_state(B& b, A&&... a) {
+        return b.apply_afc_state(std::forward<A>(a)...);
     }
-    template <class B, class... A> static decltype(auto) parse_lane_data(B& b, A&&... a) {
-        return b.parse_lane_data(std::forward<A>(a)...);
+    template <class B, class... A> static decltype(auto) apply_lane_data(B& b, A&&... a) {
+        return b.apply_lane_data(std::forward<A>(a)...);
     }
     template <class B, class... A> static decltype(auto) apply_lane_data_response(B& b, A&&... a) {
         return b.apply_lane_data_response(std::forward<A>(a)...);
@@ -228,6 +228,9 @@ class AfcTestAccess {
     template <class B, class... A>
     static decltype(auto) apply_afc_version_response(B& b, A&&... a) {
         return b.apply_afc_version_response(std::forward<A>(a)...);
+    }
+    template <class B, class... A> static decltype(auto) apply_gcode_help_response(B& b, A&&... a) {
+        return b.apply_gcode_help_response(std::forward<A>(a)...);
     }
     template <class B, class... A> static decltype(auto) detect_afc_version(B& b, A&&... a) {
         return b.detect_afc_version(std::forward<A>(a)...);
@@ -261,13 +264,6 @@ class AfcTestAccess {
     }
     template <class B, class... A> static decltype(auto) ensure_homed_then(B& b, A&&... a) {
         return b.ensure_homed_then(std::forward<A>(a)...);
-    }
-    /// Static private method, so it takes no backend object.
-    template <class... A> static decltype(auto) database_item_value(A&&... a) {
-        return AmsBackendAfc::database_item_value(std::forward<A>(a)...);
-    }
-    template <class B, class... A> static decltype(auto) has_toolchanger(B& b, A&&... a) {
-        return b.has_toolchanger(std::forward<A>(a)...);
     }
     template <class B, class... A> static decltype(auto) clear_values(B& b, A&&... a) {
         return b.clear_values(std::forward<A>(a)...);

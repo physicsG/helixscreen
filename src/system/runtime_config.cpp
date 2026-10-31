@@ -103,77 +103,6 @@ bool RuntimeConfig::hot_reload_enabled() {
     return enabled;
 }
 
-namespace {
-
-/// Whether this backend surfaces its own runout fault, and therefore owns the
-/// runout surface for the printer it is on.
-///
-/// The rule, and it is one rule for both channels of the error architecture
-/// (docs/devel/FILAMENT_MANAGEMENT.md § "Two error channels"): **exactly one
-/// surface per printer**. A backend that raises its own event — AFC and Happy
-/// Hare through classify_error(), AD5X IFS through current_error(), CFS through
-/// classify_error() as of #1250 — already tells the user what happened, with
-/// recovery buttons derived from live hardware state. The generic
-/// sensor-driven modal must stand down for those, or a runout on a config where
-/// an AMS lane sensor does carry a FilamentSensorRole produces two dialogs.
-///
-/// A backend that raises nothing owns nothing. ACE and QIDI Box implement none
-/// of the three hooks, so suppressing the generic modal for them (which the old
-/// blanket "is it hub topology" test did) left those users with no runout
-/// notification at all. That is the case this function narrows.
-///
-/// Keyed on AmsType rather than a virtual because the answer is "does this class
-/// override an error hook", which the class cannot usefully answer about itself
-/// without a second flag to keep in sync. Adding a backend that overrides
-/// classify_error() or current_error() means adding it here — the switch has no
-/// `default:` precisely so `-Wswitch` names this function when AmsType grows a
-/// value. Should one slip through anyway, the fallthrough is false, i.e. keep
-/// the generic modal: a redundant dialog beats silence about a real runout.
-bool backend_owns_runout_surface(helix::AmsType type) {
-    switch (type) {
-    case helix::AmsType::HAPPY_HARE: // classify_error()
-    case helix::AmsType::AFC:        // classify_error() + current_error()
-    case helix::AmsType::AD5X_IFS:   // current_error() (unattended-runout detector)
-    case helix::AmsType::CFS:        // classify_error() (auto-refill give-up messages)
-        return true;
-    case helix::AmsType::ACE:
-    case helix::AmsType::QIDI_BOX:
-    case helix::AmsType::OPENAMS: // no error hook
-    case helix::AmsType::TOOL_CHANGER:
-    case helix::AmsType::SNAPMAKER:
-    case helix::AmsType::MULTIACE: // inherits Snapmaker's handling; no classify_error()
-    case helix::AmsType::NONE:
-        return false;
-    }
-    return false;
-}
-
-} // namespace
-
-bool backend_owns_runout_during_job(helix::AmsType type) {
-    switch (type) {
-    case helix::AmsType::HAPPY_HARE: // classify_error() fires while a job runs
-    case helix::AmsType::AFC:        // classify_error() + current_error()
-    case helix::AmsType::CFS:        // classify_error() (the ActionPromptModal #1388 observed)
-        return true;
-    case helix::AmsType::AD5X_IFS: // the runout detector fires only while PAUSED and
-                                   // only after a 30-180s confirm dwell, so at the
-                                   // sensor edge nothing has fired yet and quieting
-                                   // the toast would open a silent window; the toast
-                                   // is the immediate surface mid-print
-    case helix::AmsType::ACE:      // no error hook: the toast is the only runout signal
-    case helix::AmsType::QIDI_BOX: // current_error() reports lane-BLOCKED faults, not
-                                   // runout; for runout the toast is the only signal
-    case helix::AmsType::OPENAMS:  // no error hook: the toast is the only runout signal
-    case helix::AmsType::TOOL_CHANGER:
-    case helix::AmsType::SNAPMAKER:
-    case helix::AmsType::MULTIACE: // inherits Snapmaker's handling
-    case helix::AmsType::NONE:
-        return false;
-    }
-    return false;
-}
-
 bool RuntimeConfig::should_show_runout_modal() const {
     // If explicitly forced via env var, always show
     if (std::getenv("HELIX_FORCE_RUNOUT_MODAL") != nullptr) {
@@ -196,7 +125,7 @@ bool RuntimeConfig::should_show_runout_modal() const {
         // single-extruder printer. Bypass doesn't apply to tool changers.
         if (auto* backend = ams.get_backend(0);
             backend && backend->supports_per_tool_spool_assignment()) {
-            spdlog::debug("[RuntimeConfig] Tool-changer AMS - showing runout modal");
+            spdlog::debug("[RuntimeConfig] Tool-changer AMS - runout modal allowed");
             return true;
         }
 
@@ -212,7 +141,7 @@ bool RuntimeConfig::should_show_runout_modal() const {
         if (bypass_active == 0) {
             auto* backend = ams.get_backend(0);
             const helix::AmsType type = backend ? backend->get_type() : helix::AmsType::NONE;
-            if (backend_owns_runout_surface(type)) {
+            if (backend && backend->raises_runout_fault()) {
                 spdlog::debug("[RuntimeConfig] Suppressing runout modal - {} raises its own "
                               "runout fault",
                               helix::ams_type_to_string(type));
@@ -222,7 +151,7 @@ bool RuntimeConfig::should_show_runout_modal() const {
                           helix::ams_type_to_string(type));
             return true;
         }
-        spdlog::debug("[RuntimeConfig] AMS bypass active - showing runout modal");
+        spdlog::debug("[RuntimeConfig] AMS bypass active - runout modal allowed");
     }
 
     // No AMS or AMS with bypass active - show modal

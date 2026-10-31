@@ -13,7 +13,7 @@ float expected_frequency_for_span(float span_mm) {
     if (span_mm <= 0.0f) {
         return 0.0f;
     }
-    return REFERENCE_FREQUENCY_HZ * REFERENCE_SPAN_MM / span_mm;
+    return kReferenceFrequencyHz * kReferenceSpanMm / span_mm;
 }
 
 bool search_window_for_span(float span_mm, float* lo_hz, float* hi_hz) {
@@ -24,8 +24,8 @@ bool search_window_for_span(float span_mm, float* lo_hz, float* hi_hz) {
     if (expected <= 0.0f) {
         return false;
     }
-    *lo_hz = expected * SEARCH_WINDOW_LO_FRACTION;
-    *hi_hz = expected * SEARCH_WINDOW_HI_FRACTION;
+    *lo_hz = expected * kSearchWindowLoFraction;
+    *hi_hz = expected * kSearchWindowHiFraction;
     return true;
 }
 
@@ -72,7 +72,7 @@ float QuietSpectrum::prominence_at(float freq_hz) const {
     // The quiet window and the ring-down are different lengths, so a tone lands
     // on differently-numbered bins in each. Take the loudest bin within the
     // match tolerance rather than the one nearest arithmetic.
-    const float tol = std::max(resolution_, BIN_MATCH_FRACTION * freq_hz);
+    const float tol = std::max(resolution_, kBinMatchFraction * freq_hz);
     const auto span = static_cast<long>(std::ceil(tol / resolution_));
     const auto centre = static_cast<long>(std::lround(freq_hz / resolution_)) - 1;
     const auto bins = static_cast<long>(psd_.size());
@@ -92,10 +92,10 @@ float QuietSpectrum::weight_at(float freq_hz) const {
         return 1.0f;
     }
     const float prominence = prominence_at(freq_hz);
-    if (prominence <= BACKGROUND_PROMINENCE_TOLERANCE) {
+    if (prominence <= kBackgroundProminenceTolerance) {
         return 1.0f;
     }
-    return std::max(MIN_BACKGROUND_WEIGHT, BACKGROUND_PROMINENCE_TOLERANCE / prominence);
+    return std::max(kMinBackgroundWeight, kBackgroundProminenceTolerance / prominence);
 }
 
 void QuietSpectrum::clear() {
@@ -151,7 +151,7 @@ float harmonic_concentration(const std::vector<std::pair<float, float>>& psd, fl
         for (int h = 1; h <= n_harmonics; ++h) {
             const float harmonic_hz = static_cast<float>(h) * f0;
             const float tol =
-                std::max(HARMONIC_MATCH_BINS * resolution, BIN_MATCH_FRACTION * harmonic_hz);
+                std::max(kHarmonicMatchBins * resolution, kBinMatchFraction * harmonic_hz);
             if (std::fabs(freq - harmonic_hz) <= tol) {
                 on_harmonics += weighted;
                 break;

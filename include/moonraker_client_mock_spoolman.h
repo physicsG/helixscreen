@@ -6,6 +6,7 @@
 #include "spoolman_types.h"
 
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -79,6 +80,12 @@ class MockSpoolmanServer {
     };
     /// Every PATCH /v1/filament/{id}
     std::vector<FilamentUpdateRecord> filament_updates;
+    /// When set, the next GET /v1/filament/{id} answers this verbatim, for a
+    /// test of a server returning something other than a filament object.
+    std::optional<json> next_filament_get_result;
+
+    /// POST /v1/field/filament/{key} bodies, with the key
+    std::vector<std::pair<std::string, json>> defined_filament_fields;
 
     struct SpoolUpdateRecord {
         int spool_id = 0;
@@ -86,6 +93,9 @@ class MockSpoolmanServer {
     };
     /// PATCH /v1/spool/{id} bodies, except weight-only ones
     std::vector<SpoolUpdateRecord> spool_updates;
+    /// When set, a PATCH /v1/spool/{id} whose body carries this key answers
+    /// 500 and changes nothing, for a test of a save that fails part-way.
+    std::optional<std::string> refuse_spool_patch_key;
 
     struct WeightUpdateRecord {
         int spool_id = 0;
@@ -117,6 +127,13 @@ class MockSpoolmanServer {
     int external_search_latency_ms_ = 0;
     int external_search_count_ = 0;
     int next_filament_id_ = 300;
+    /// Extra field definitions for filaments (GET/POST /v1/field/filament),
+    /// and each filament's extra values, keyed by filament id. Values are
+    /// JSON-encoded strings, as Spoolman stores them.
+    json filament_fields_ = json::array();
+    std::map<int, json> filament_extra_;
+    [[nodiscard]] json filament_extra(int filament_id) const;
+    [[nodiscard]] bool filament_field_defined(const std::string& key) const;
 
     void init_mock_spools();
     [[nodiscard]] std::vector<VendorInfo> vendor_list() const;

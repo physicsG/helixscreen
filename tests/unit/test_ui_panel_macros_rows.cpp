@@ -8,6 +8,7 @@
 #include "ui_panel_macros.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
+#include "ui_utils.h"
 
 #include "../test_fixtures.h"
 #include "../test_helpers/macros_panel_test_access.h"
@@ -161,8 +162,14 @@ class MacrosRowsFixture : public XMLTestFixture {
     }
 
     void tap(lv_obj_t* card) {
-        lv_obj_send_event(card, LV_EVENT_CLICKED, nullptr);
+        helix::ui::send_tap(card);
         settle();
+    }
+
+    static lv_point_t centre_of(lv_obj_t* card) {
+        lv_area_t a;
+        lv_obj_get_coords(card, &a);
+        return {(a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2};
     }
 
     void long_press(lv_obj_t* card) {
@@ -349,6 +356,57 @@ TEST_CASE_METHOD(MacrosRowsFixture,
     indev.release(x, y);
     settle();
     CHECK(toasts.empty());
+}
+
+TEST_CASE_METHOD(MacrosRowsFixture,
+                 "A Macros row hold that acts ends the press; one that declines keeps the tap",
+                 "[macros][macros_rows][tap_hold]") {
+    open({"CLEAN_NOZZLE", "LOAD_FILAMENT", "PRINT_START"});
+    helix_test::ScopedPointerIndev finger;
+    const auto hold_row = [&](const char* macro) {
+        const lv_point_t p = centre_of(row_named(macro));
+        finger.press(p.x, p.y);
+        finger.hold(finger.long_press_hold_ms());
+        finger.release(p.x, p.y);
+        settle();
+    };
+
+    SECTION("a hold enters edit mode, and its lift is not also a tap on the row") {
+        hold_row("LOAD_FILAMENT");
+        REQUIRE(MacrosPanelTestAccess::edit_mode(panel));
+        // A tap in edit mode toggles the row, so the lift would uncheck it.
+        CHECK(checked(row_named("LOAD_FILAMENT")));
+    }
+
+    SECTION("a hold kept down three times the long-press time is still one hold") {
+        lv_obj_t* card = row_named("LOAD_FILAMENT");
+        int holds = 0;
+        lv_obj_add_event_cb(
+            card, [](lv_event_t* e) { ++*static_cast<int*>(lv_event_get_user_data(e)); },
+            LV_EVENT_LONG_PRESSED, &holds);
+        const lv_point_t p = centre_of(card);
+        finger.press(p.x, p.y);
+        finger.hold(3 * finger.long_press_hold_ms());
+        finger.release(p.x, p.y);
+        settle();
+        REQUIRE(MacrosPanelTestAccess::edit_mode(panel));
+        CHECK(holds == 1);
+    }
+
+    SECTION("in edit mode the hold declines, so its release is still the row's tap") {
+        long_press(row_named("CLEAN_NOZZLE"));
+        REQUIRE(MacrosPanelTestAccess::edit_mode(panel));
+        REQUIRE(checked(row_named("LOAD_FILAMENT")));
+
+        hold_row("LOAD_FILAMENT");
+        CHECK_FALSE(checked(row_named("LOAD_FILAMENT")));
+
+        const lv_point_t p = centre_of(row_named("LOAD_FILAMENT"));
+        finger.press(p.x, p.y);
+        finger.release(p.x, p.y);
+        settle();
+        CHECK(checked(row_named("LOAD_FILAMENT")));
+    }
 }
 
 TEST_CASE_METHOD(MacrosRowsFixture, "A taller Macros viewport fills with rows",

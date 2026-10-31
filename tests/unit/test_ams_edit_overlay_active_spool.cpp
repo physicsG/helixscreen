@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "ui_ams_edit_overlay.h"
+#include "ui_ams_lane_settings.h"
 #include "ui_nav_manager.h"
 #include "ui_update_queue.h"
 
@@ -19,8 +20,10 @@
 #include "settings_manager.h"
 #include "spoolman_manager.h"
 #include "spoolman_slot_saver.h"
+#include "test_helpers/scoped_printer_discovery.h"
 #include "test_helpers/unique_temp_dir.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 
@@ -49,8 +52,12 @@ class AmsEditOverlayTestAccess {
     void set_slot_index(int idx) {
         overlay_.slot_index_ = idx;
     }
-    void set_save_to_spoolman_opt_in(bool opt_in) {
-        overlay_.save_to_spoolman_opt_in_ = opt_in;
+    void set_save_to_spoolman_opt_in(bool) {
+        // The toggle is gone: untracked slots reach Spoolman only through the
+        // Add-to-Spoolman link, which sets the create intent directly.
+    }
+    void call_handle_add_to_spoolman() {
+        overlay_.handle_add_to_spoolman();
     }
     void set_completion_callback(AmsEditOverlay::CompletionCallback cb) {
         overlay_.completion_callback_ = std::move(cb);
@@ -74,6 +81,19 @@ class AmsEditOverlayTestAccess {
     bool completion_fired() const {
         return overlay_.completion_fired_;
     }
+    void set_lane_settings(int tool_original, int backup_original, int tool_working,
+                           int backup_working) {
+        overlay_.lane_original_ = {tool_original, backup_original};
+        overlay_.lane_working_ = {tool_working, backup_working};
+    }
+    bool lane_dirty() const {
+        return overlay_.lane_settings_dirty();
+    }
+    /// A stored More-section value; with no detail widgets built, Save reads
+    /// it back as cleared, which is a logistics edit.
+    void set_detail_original_location(const std::string& location) {
+        overlay_.detail_original_.location = location;
+    }
 
     // Forward the private static create-gate predicate (friend access).
     static bool should_create_new_spool(const SlotInfo& working_info, bool save_to_spoolman) {
@@ -84,11 +104,6 @@ class AmsEditOverlayTestAccess {
     }
     static bool needs_identity_confirmation(const SlotInfo& original, const SlotInfo& edited) {
         return AmsEditOverlay::needs_identity_confirmation(original, edited);
-    }
-    static AmsEditOverlay::WeightStaging
-    decide_weight_staging(bool entered_tracked, bool remaining_filled, bool total_filled) {
-        return AmsEditOverlay::decide_weight_staging(entered_tracked, remaining_filled,
-                                                     total_filled);
     }
     static bool may_write_spoolman_now(const SlotInfo& original, const SlotInfo& edited) {
         return AmsEditOverlay::may_write_spoolman_now(original, edited);
@@ -121,9 +136,9 @@ struct OverlayCommitFixture : LVGLTestFixture {
         config_path = temp_dir + "/settings.json";
 
         // Same cross-test contamination guard as TempConfigFixture.
-        std::filesystem::remove(AppConstants::Update::config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::legacy_config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::env_backup_fallback());
+        std::filesystem::remove(app_constants::update::config_backup_fallback());
+        std::filesystem::remove(app_constants::update::legacy_config_backup_fallback());
+        std::filesystem::remove(app_constants::update::env_backup_fallback());
         Config::get_instance()->init(config_path);
         SettingsManager::instance().clear_external_spool_info();
 
@@ -482,50 +497,6 @@ TEST_CASE("AmsEditOverlay::should_create_new_spool is gated by the Save-to-Spool
 // the user had to reopen and save a second time. Observed on the .112 BoxTurtle:
 // save at 19:13:24 emitted SET_COLOR + SET_MATERIAL and no SET_WEIGHT; the
 // weight only landed on the following save at 19:13:40.
-TEST_CASE("AmsEditOverlay::decide_weight_staging stages remaining even when unlinking in place",
-          "[ams][edit_overlay][spoolman]") {
-    SECTION("genuinely untracked slot stages both fields") {
-        auto s = AmsEditOverlayTestAccess::decide_weight_staging(
-            /*entered_tracked=*/false, /*remaining_filled=*/true, /*total_filled=*/true);
-        CHECK(s.stage_remaining);
-        CHECK(s.stage_total);
-    }
-
-    SECTION("unlinked-in-place stages remaining but NOT total (core-weight ambiguity)") {
-        auto s = AmsEditOverlayTestAccess::decide_weight_staging(
-            /*entered_tracked=*/true, /*remaining_filled=*/true, /*total_filled=*/true);
-        CHECK(s.stage_remaining); // the bug: this was false, so SET_WEIGHT never fired
-        CHECK_FALSE(s.stage_total);
-    }
-
-    SECTION("blank fields stage nothing (blank means unchanged)") {
-        auto s = AmsEditOverlayTestAccess::decide_weight_staging(
-            /*entered_tracked=*/false, /*remaining_filled=*/false, /*total_filled=*/false);
-        CHECK_FALSE(s.stage_remaining);
-        CHECK_FALSE(s.stage_total);
-    }
-
-    SECTION("blank remaining is not staged even on a genuinely untracked slot") {
-        auto s = AmsEditOverlayTestAccess::decide_weight_staging(
-            /*entered_tracked=*/false, /*remaining_filled=*/false, /*total_filled=*/true);
-        CHECK_FALSE(s.stage_remaining);
-        CHECK(s.stage_total);
-    }
-}
-
-// The logistics two-PATCH in handle_spool_edit_save() ran BEFORE
-// commit_and_close() evaluated needs_identity_confirmation(), so a save that was
-// about to ask "Different filament?" had already written to Spoolman by the time
-// the dialog appeared — and Cancel, documented as a true abort, could not take it
-// back. Observed on the .112 BoxTurtle:
-//
-//   19:11:55  Updating spool 86 with 1 fields
-//   19:11:55  Spool 86 updated successfully
-//   19:11:55  set_active_spool(86)
-//   19:11:56  Confirmation dialog shown: 'Different filament?'
-//   19:12:17  fire_completion saved=false        <- user cancelled
-//
-// Invariant: if the edit will prompt, nothing may be written first.
 TEST_CASE("AmsEditOverlay::may_write_spoolman_now withholds writes until identity is confirmed",
           "[ams][edit_overlay][spoolman]") {
     SlotInfo linked;
@@ -610,6 +581,35 @@ TEST_CASE("SlotInfo::clear_spoolman_link clears the whole Spoolman identity",
     CHECK(slot.product_name == "PLA+ 2.0");
 }
 
+TEST_CASE("SlotInfo::unlink_as_different_filament forgets the old spool's weights",
+          "[ams][edit_overlay][spoolman]") {
+    SlotInfo before;
+    before.spoolman_id = 139;
+    before.brand = "Likesilk";
+    before.material = "ASA";
+    before.remaining_weight_g = 0.0f;
+    before.total_weight_g = 1000.0f;
+
+    SlotInfo edited = before;
+    edited.brand = "Generic";
+
+    SECTION("weights the user left alone become unknown") {
+        edited.unlink_as_different_filament(before);
+        CHECK(edited.spoolman_id == 0);
+        CHECK(edited.brand == "Generic");
+        CHECK(edited.material == "ASA");
+        CHECK(edited.remaining_weight_g < 0.0f);
+        CHECK(edited.total_weight_g < 0.0f);
+    }
+
+    SECTION("a weight typed in the same edit stands") {
+        edited.remaining_weight_g = 750.0f;
+        edited.unlink_as_different_filament(before);
+        CHECK(edited.remaining_weight_g == Catch::Approx(750.0f));
+        CHECK(edited.total_weight_g < 0.0f);
+    }
+}
+
 TEST_CASE("AmsEditOverlay::needs_identity_confirmation applies to ALL Spoolman backends (§6)",
           "[ams_edit_overlay][spoolman][identity_confirm]") {
     SlotInfo original;
@@ -689,14 +689,14 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     UpdateQueue::instance().drain();
     process_lvgl(10);
 
-    CHECK(access.get_view_mode() == AmsEditOverlay::VIEW_SPOOL_PICKER);
+    CHECK(access.get_view_mode() == AmsEditOverlay::kViewSpoolPicker);
 
     NavigationManager::instance().go_back();
     UpdateQueue::instance().drain();
     process_lvgl(10);
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "show_for_slot opens on the overview by default (#1071)",
+TEST_CASE_METHOD(LVGLUITestFixture, "show_for_slot opens on the editor by default (#1071)",
                  "[ams_edit_overlay][spoolman][ui_integration][1071]") {
     auto& overlay = get_ams_edit_overlay();
     AmsEditOverlayTestAccess access(overlay);
@@ -708,9 +708,297 @@ TEST_CASE_METHOD(LVGLUITestFixture, "show_for_slot opens on the overview by defa
     UpdateQueue::instance().drain();
     process_lvgl(10);
 
-    CHECK(access.get_view_mode() == AmsEditOverlay::VIEW_OVERVIEW);
+    CHECK(access.get_view_mode() == AmsEditOverlay::kViewEditor);
 
     NavigationManager::instance().go_back();
     UpdateQueue::instance().drain();
     process_lvgl(10);
+}
+
+// ============================================================================
+// Lane settings: a write the backend refuses is not taken as saved
+// ============================================================================
+
+namespace {
+
+/// A mock whose tool-mapping and backup writes can each be refused, the way a
+/// firmware rejects the G-code.
+class RefusingLaneBackend : public AmsBackendMock {
+  public:
+    using AmsBackendMock::AmsBackendMock;
+    std::atomic<bool> refuse_tool{false};
+    std::atomic<bool> refuse_backup{false};
+    std::atomic<int> tool_writes{0};
+
+    AmsError set_tool_mapping_impl(int tool_number, int slot_index) override {
+        ++tool_writes;
+        if (refuse_tool.load()) {
+            return AmsErrorHelper::not_supported("refused for test");
+        }
+        return AmsBackendMock::set_tool_mapping_impl(tool_number, slot_index);
+    }
+
+  protected:
+    AmsError apply_endless_spool_backup(int slot_index, int backup_slot) override {
+        if (refuse_backup.load()) {
+            return AmsErrorHelper::not_supported("refused for test");
+        }
+        return AmsBackendMock::apply_endless_spool_backup(slot_index, backup_slot);
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(OverlayCommitFixture,
+                 "a lane write the backend refuses stays staged and the next Save retries it",
+                 "[ams_edit_overlay][lane_settings]") {
+    auto owned = std::make_unique<RefusingLaneBackend>(4);
+    RefusingLaneBackend* lanes = owned.get();
+    AmsState::instance().set_backend(std::move(owned));
+
+    AmsEditOverlay overlay;
+    AmsEditOverlayTestAccess access(overlay);
+    access.init_subjects();
+    const SlotInfo slot = lanes->get_slot_info(1);
+    access.set_original_info(slot);
+    access.set_working_info(slot);
+    access.set_api(&api);
+    access.set_slot_index(1);
+    bool completion_fired = false;
+    access.set_completion_callback(
+        [&](const AmsEditOverlay::EditResult&) { completion_fired = true; });
+
+    const int backup_before = lane_settings::backup_of(*lanes, 1);
+    REQUIRE(backup_before != 3);
+    const int tool_before = lane_settings::assigned_tool(*lanes, 1);
+    REQUIRE(tool_before != 2);
+    // Stage tool 2 and backup slot 3; the backup write is refused.
+    access.set_lane_settings(tool_before, backup_before, 2, 3);
+    lanes->refuse_backup = true;
+
+    access.call_handle_save();
+    UpdateQueue::instance().drain();
+
+    CHECK(lane_settings::backup_of(*lanes, 1) == backup_before);
+    REQUIRE(lanes->get_tool_mapping().size() > 2);
+    CHECK(lanes->get_tool_mapping()[2] == 1);
+    CHECK(lanes->tool_writes == 1);
+    CHECK(access.lane_dirty());
+    CHECK_FALSE(completion_fired);
+
+    // The backend accepts it now. Save writes the backup and does not resend
+    // the tool, which already landed.
+    lanes->refuse_backup = false;
+    access.call_handle_save();
+    UpdateQueue::instance().drain();
+
+    CHECK(lane_settings::backup_of(*lanes, 1) == 3);
+    CHECK(lanes->tool_writes == 1);
+    CHECK_FALSE(access.lane_dirty());
+    CHECK(completion_fired);
+}
+
+TEST_CASE_METHOD(OverlayCommitFixture,
+                 "with Spoolman unreachable and More edits pending, Save still writes the lane",
+                 "[ams_edit_overlay][lane_settings]") {
+    auto owned = std::make_unique<RefusingLaneBackend>(4);
+    RefusingLaneBackend* lanes = owned.get();
+    AmsState::instance().set_backend(std::move(owned));
+
+    AmsEditOverlay overlay;
+    AmsEditOverlayTestAccess access(overlay);
+    access.init_subjects();
+    SlotInfo slot = lanes->get_slot_info(1);
+    slot.spoolman_id = 7; // linked, but its record never loaded
+    access.set_original_info(slot);
+    access.set_working_info(slot);
+    access.set_api(nullptr); // Spoolman unreachable
+    access.set_slot_index(1);
+    access.set_detail_original_location("Shelf A");
+    access.set_completion_callback([](const AmsEditOverlay::EditResult&) {});
+
+    const int backup_before = lane_settings::backup_of(*lanes, 1);
+    REQUIRE(backup_before != 3);
+    access.set_lane_settings(-1, backup_before, -1, 3);
+
+    access.call_handle_save();
+    UpdateQueue::instance().drain();
+
+    CHECK(lane_settings::backup_of(*lanes, 1) == 3);
+    CHECK_FALSE(access.lane_dirty());
+}
+
+// ============================================================================
+// Tests: a spool created from the editor becomes active only through the
+// commit's rule (the loaded lane, and only where nothing else switches it)
+// ============================================================================
+
+namespace {
+
+/// Create a Spoolman spool from the editor for @p slot (unlinked, complete
+/// identity) and commit it the way the AMS panels do; the created id.
+int add_new_spool_from_editor(OverlayCommitFixture& f, int slot) {
+    f.client.spoolman_mock().get_mock_spools().clear();
+    f.client.spoolman_mock().add_vendor(7, "Polymaker");
+    f.client.spoolman_mock().next_created_filament_id = 101;
+    f.client.spoolman_mock().next_created_spool_id = 500;
+
+    AmsEditOverlay overlay;
+    AmsEditOverlayTestAccess access(overlay);
+    access.init_subjects();
+    SlotInfo working = f.backend->get_slot_info(slot);
+    working.spoolman_id = 0;
+    working.brand = "Polymaker";
+    working.material = "PLA";
+    working.color_rgb = 0xFF0000;
+    access.set_original_info(working);
+    access.set_working_info(working);
+    access.set_api(&f.api);
+    access.set_slot_index(slot);
+    int committed_id = 0;
+    access.set_completion_callback([&](const AmsEditOverlay::EditResult& result) {
+        REQUIRE(result.saved);
+        committed_id = result.slot_info.spoolman_id;
+        SlotInfo pre_edit = AmsState::instance().get_backend()->get_slot_info(result.slot_index);
+        AmsState::instance().commit_slot_edit(result.slot_index, pre_edit, result.slot_info);
+    });
+    access.call_handle_add_to_spoolman();
+    UpdateQueue::instance().drain();
+    return committed_id;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(OverlayCommitFixture,
+                 "a spool added to a lane that is not loaded leaves the active spool alone",
+                 "[ams_edit_overlay][spoolman][active_spool][plugin_filament]") {
+    install_backend(9);
+    backend->set_operation_delay(0);
+    REQUIRE(backend->start().success());
+    REQUIRE(backend->slot_is_actively_loaded(0));
+    REQUIRE_FALSE(backend->slot_is_actively_loaded(2));
+    client.spoolman_mock().set_active_spool_id(9);
+
+    REQUIRE(add_new_spool_from_editor(*this, 2) == 500);
+    CHECK(backend->get_slot_info(2).spoolman_id == 500);
+    CHECK(client.spoolman_mock().get_mock_active_spool_id() == 9);
+}
+
+TEST_CASE_METHOD(OverlayCommitFixture, "a spool added to the loaded lane becomes the active one",
+                 "[ams_edit_overlay][spoolman][active_spool][plugin_filament]") {
+    install_backend(0);
+    backend->set_operation_delay(0);
+    REQUIRE(backend->start().success());
+    REQUIRE(backend->slot_is_actively_loaded(0));
+    client.spoolman_mock().set_active_spool_id(9);
+
+    REQUIRE(add_new_spool_from_editor(*this, 0) == 500);
+    CHECK(client.spoolman_mock().get_mock_active_spool_id() == 500);
+}
+
+TEST_CASE_METHOD(OverlayCommitFixture,
+                 "an external spool edit leaves the active spool to SpoolLink firmware",
+                 "[ams_edit_overlay][spoolman][active_spool][plugin_filament]") {
+    helix::test::ScopedPrinterDiscovery printer(helix::test::spoollink_printer_objects());
+    client.spoolman_mock().set_active_spool_id(5);
+
+    SlotInfo linked;
+    linked.spoolman_id = 42;
+    AmsState::instance().commit_external_spool_edit(linked);
+    UpdateQueue::instance().drain();
+    CHECK(client.spoolman_mock().get_mock_active_spool_id() == 5);
+    CHECK(AmsState::instance().get_external_spool_info().value_or(SlotInfo{}).spoolman_id == 42);
+
+    INFO("the server-first form writes the store without the server round trip");
+    bool committed = false;
+    SlotInfo relinked;
+    relinked.spoolman_id = 43;
+    AmsState::instance().commit_external_spool_edit(
+        relinked, [&] { committed = true; }, [](const MoonrakerError&) {});
+    UpdateQueue::instance().drain();
+    CHECK(committed);
+    CHECK(client.spoolman_mock().get_mock_active_spool_id() == 5);
+    CHECK(AmsState::instance().get_external_spool_info().value_or(SlotInfo{}).spoolman_id == 43);
+}
+
+// ============================================================================
+// Tests: the external spool sets or clears the active spool only while it is
+// what feeds (no lane loaded, or the bypass engaged)
+// ============================================================================
+
+namespace {
+
+/// A filament system feeding from @p lane, or from its bypass.
+class FeedingMock : public AmsBackendMock {
+  public:
+    FeedingMock(int lane, bool bypass) : AmsBackendMock(4), lane_(lane), bypass_(bypass) {}
+    [[nodiscard]] bool is_bypass_active() const override {
+        return bypass_;
+    }
+    [[nodiscard]] bool is_filament_loaded() const override {
+        return true;
+    }
+    [[nodiscard]] int get_current_slot() const override {
+        return bypass_ ? -2 : lane_;
+    }
+
+  private:
+    int lane_;
+    bool bypass_;
+};
+
+void link_external(int spool_id, bool server_first) {
+    SlotInfo info;
+    info.spoolman_id = spool_id;
+    if (server_first) {
+        AmsState::instance().commit_external_spool_edit(info, [] {}, [](const MoonrakerError&) {});
+    } else {
+        AmsState::instance().commit_external_spool_edit(info);
+    }
+    UpdateQueue::instance().drain();
+}
+
+} // namespace
+
+TEST_CASE_METHOD(OverlayCommitFixture,
+                 "an external spool edit leaves the active spool alone while a lane feeds",
+                 "[ams_edit_overlay][spoolman][active_spool][plugin_filament]") {
+    AmsState::instance().set_backend(std::make_unique<FeedingMock>(2, /*bypass=*/false));
+    client.spoolman_mock().set_active_spool_id(7);
+
+    for (const bool server_first : {false, true}) {
+        INFO("server-first form: " << server_first);
+        link_external(42, server_first);
+        CHECK(client.spoolman_mock().get_mock_active_spool_id() == 7);
+        CHECK(AmsState::instance().get_external_spool_info().value_or(SlotInfo{}).spoolman_id ==
+              42);
+        INFO("and its unlink does not clear the lane's spool");
+        client.spoolman_mock().set_active_spool_id(42);
+        link_external(0, server_first);
+        CHECK(client.spoolman_mock().get_mock_active_spool_id() == 42);
+        client.spoolman_mock().set_active_spool_id(7);
+    }
+}
+
+TEST_CASE_METHOD(OverlayCommitFixture,
+                 "an external spool edit sets and clears the active spool while the bypass feeds",
+                 "[ams_edit_overlay][spoolman][active_spool][plugin_filament]") {
+    AmsState::instance().set_backend(std::make_unique<FeedingMock>(2, /*bypass=*/true));
+    client.spoolman_mock().set_active_spool_id(7);
+
+    link_external(42, /*server_first=*/false);
+    CHECK(client.spoolman_mock().get_mock_active_spool_id() == 42);
+    link_external(0, /*server_first=*/false);
+    CHECK(client.spoolman_mock().get_mock_active_spool_id() == 0);
+}
+
+TEST_CASE_METHOD(OverlayCommitFixture,
+                 "an external unlink clears only its own spool, not one made active since",
+                 "[ams_edit_overlay][spoolman][active_spool][plugin_filament]") {
+    // No filament system: the external spool is the feed.
+    link_external(42, /*server_first=*/false);
+    REQUIRE(client.spoolman_mock().get_mock_active_spool_id() == 42);
+    client.spoolman_mock().set_active_spool_id(55);
+    link_external(0, /*server_first=*/false);
+    CHECK(client.spoolman_mock().get_mock_active_spool_id() == 55);
 }

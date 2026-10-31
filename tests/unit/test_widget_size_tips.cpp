@@ -3,7 +3,8 @@
 
 /**
  * @file test_widget_size_tips.cpp
- * @brief tips picks its text font from physical width, not colspan.
+ * @brief tips picks its text font from physical width, not colspan, and gives
+ *        its title the height of the tile.
  *
  * `compact` is the widget's only branch (`on_size_changed` predicate at
  * tips_widget.cpp:165), so no isolation is needed beyond the two cases below
@@ -23,6 +24,8 @@
 #include "../test_helpers/panel_widget_size_harness.h"
 #include "panel_widget_size.h"
 #include "src/ui/panel_widgets/tips_widget.h"
+
+#include <string>
 
 #include "../catch_amalgamated.hpp"
 
@@ -61,4 +64,39 @@ TEST_CASE_METHOD(LVGLUITestFixture, "tips text font follows width, not colspan",
             theme_manager_get_font("font_heading"));
     REQUIRE(lv_obj_get_style_text_font(prefix, LV_PART_MAIN) ==
             theme_manager_get_font("font_heading"));
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "a long tip title fills the tile's height and stops inside it",
+                 "[widget_size][tips]") {
+    PanelWidgetHarness<TipsWidget> h(test_screen());
+
+    lv_obj_t* tip_container = h.child("tip_container");
+    REQUIRE(tip_container != nullptr);
+    lv_obj_t* label = h.child("status_text_label");
+    REQUIRE(label != nullptr);
+
+    std::string title;
+    for (int i = 0; i < 40; ++i) {
+        title += "calibrate ";
+    }
+    lv_label_set_text(label, title.c_str());
+
+    const int tile_h = 120;
+    h.resize(2, 2, w_wide() - 1, tile_h);
+    lv_obj_update_layout(h.root());
+
+    const lv_font_t* font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    REQUIRE(font != nullptr);
+    const int32_t line_h = lv_font_get_line_height(font);
+    const int32_t pad_v = lv_obj_get_style_pad_top(tip_container, LV_PART_MAIN) +
+                          lv_obj_get_style_pad_bottom(tip_container, LV_PART_MAIN);
+    // More lines of title than the tile has room for.
+    REQUIRE(line_h * 6 > tile_h);
+
+    // The title wraps over the height the tile gives it, not just the row's
+    // single line beside the icon...
+    CHECK(lv_obj_get_height(label) > 2 * line_h);
+    // ...and ends inside the tile's padding.
+    CHECK(lv_obj_get_height(label) <= tile_h - pad_v);
+    CHECK(lv_obj_get_height(tip_container) <= tile_h);
 }

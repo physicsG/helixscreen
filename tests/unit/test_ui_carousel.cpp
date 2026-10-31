@@ -56,7 +56,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Carousel creation produces valid state with c
 
     CarouselState* retrieved = ui_carousel_get_state(container);
     REQUIRE(retrieved != nullptr);
-    REQUIRE(retrieved->magic == CarouselState::MAGIC);
+    REQUIRE(retrieved->magic == CarouselState::kMagic);
     REQUIRE(retrieved->scroll_container != nullptr);
     REQUIRE(retrieved->indicator_row != nullptr);
     REQUIRE(retrieved->real_tiles.empty());
@@ -464,7 +464,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "ui_carousel_create_obj creates valid carousel
 
     CarouselState* state = ui_carousel_get_state(carousel);
     REQUIRE(state != nullptr);
-    REQUIRE(state->magic == CarouselState::MAGIC);
+    REQUIRE(state->magic == CarouselState::kMagic);
     REQUIRE(state->scroll_container != nullptr);
     REQUIRE(state->indicator_row != nullptr);
     REQUIRE(state->real_tiles.empty());

@@ -37,8 +37,6 @@
 #include "i_moonraker_client.h"
 #include "lvgl/lvgl.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "panel_widget_config.h"
-#include "panel_widget_manager.h"
 #include "platform_info.h"
 #include "runtime_config.h"
 #include "static_panel_registry.h"
@@ -93,6 +91,15 @@ static std::optional<helix::wizard::StepId> current_screen_step;
 
 // Guard against rapid double-clicks during navigation
 static bool navigating = false;
+
+// Bumped by every screen load. A load whose drain runs another load (or the
+// wizard's completion) sees it change and leaves the screen to that one.
+static uint64_t s_screen_load_gen = 0;
+
+// The step a load cleaned whose replacement screen is not built yet. A load
+// run by that load's drain finds no current screen and leaves this step in its
+// place, so the redirect its exit decides (PrinterIdentify's preset) still runs.
+static std::optional<helix::wizard::StepId> s_left_step;
 
 // Targeted (subset) wizard session state. Non-empty iff a targeted session is
 // active — running only these steps, in this order, for hardware
@@ -560,6 +567,8 @@ lv_obj_t* ui_wizard_create(lv_obj_t* parent) {
     // the deferred Home navigation or runout check fire mid-wizard.
     g_completion_timers.cancel();
 
+    s_left_step.reset();
+
     // Create wizard from XML (constants already registered)
     wizard_container = (lv_obj_t*)lv_xml_create(parent, "wizard_container", nullptr);
 
@@ -772,7 +781,7 @@ static void ui_wizard_ensure_filament_sensors_discovered() {
     }
     IMoonrakerAPI* api = get_moonraker_api();
     if (api && api->hardware().has_filament_sensors()) {
-        fsm.discover_sensors(api->hardware().filament_sensor_names());
+        fsm.discover(api->hardware());
         spdlog::debug("[Wizard] Populated FilamentSensorManager for skip calculation");
     }
 }
@@ -823,7 +832,11 @@ static void ui_wizard_load_screen(helix::wizard::StepId step) {
         return;
     }
 
-    const int prev_idx = current_screen_step ? static_cast<int>(*current_screen_step) : -1;
+    const std::optional<helix::wizard::StepId> leaving =
+        current_screen_step ? current_screen_step : s_left_step;
+    const int prev_idx = leaving ? static_cast<int>(*leaving) : -1;
+    const uint64_t load_gen = ++s_screen_load_gen;
+    lv_obj_t* const container = wizard_container;
 
     // Cleanup previous screen resources BEFORE clearing widgets. Freeze the
     // update queue around cleanup + drain + destroy so background-thread
@@ -838,8 +851,17 @@ static void ui_wizard_load_screen(helix::wizard::StepId step) {
         auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
         crash_handler::breadcrumb::note("wiz", "cleanup_begin", static_cast<long>(prev_idx));
         ui_wizard_cleanup_current_screen();
+        // Cleaned: a load the drain below runs must not clean this step again.
+        current_screen_step.reset();
+        s_left_step = leaving;
         crash_handler::breadcrumb::note("wiz", "drain_begin", static_cast<long>(step_idx));
         helix::ui::UpdateQueue::instance().drain();
+        // The drained work loaded another screen, which now owns `content`, or
+        // completed the wizard, which condemned it, and possibly started another.
+        if (load_gen != s_screen_load_gen || wizard_container != container) {
+            spdlog::debug("[Wizard] Load of step {} superseded during its drain", step_idx);
+            return;
+        }
         // Cancel every pending animation targeting any descendant of the wizard
         // content container before deletion. Style transitions (lv_obj_set_style_*
         // with a transition descriptor) queue animations that aren't tied to the
@@ -874,7 +896,6 @@ static void ui_wizard_load_screen(helix::wizard::StepId step) {
                 if (!nxt) {
                     spdlog::info("[Wizard] Preset applied during printer-identify cleanup; "
                                  "no further steps, completing");
-                    current_screen_step.reset(); // suppress double-cleanup
                     ui_wizard_complete();
                     return;
                 }
@@ -886,7 +907,6 @@ static void ui_wizard_load_screen(helix::wizard::StepId step) {
             spdlog::info("[Wizard] Preset applied during printer-identify cleanup; redirecting "
                          "{} -> {}",
                          helix::wizard::to_string(step), helix::wizard::to_string(redirected));
-            current_screen_step.reset(); // suppress double-cleanup
             ui_wizard_navigate_to_step(redirected);
             return;
         }
@@ -945,6 +965,7 @@ static void ui_wizard_load_screen(helix::wizard::StepId step) {
 
     // Update current screen step tracking
     current_screen_step = step;
+    s_left_step.reset();
 }
 
 // ============================================================================
@@ -1035,16 +1056,9 @@ size_t ui_wizard_record_expected_hardware(helix::Config* config) {
         auto& ams = AmsState::instance();
         AmsBackend* backend = ams.get_backend();
         if (backend) {
-            std::string ams_hw_name = backend->get_klipper_object_name();
+            std::string ams_hw_name = ams_type_traits(backend->get_type()).expected_hardware;
             if (!ams_hw_name.empty()) {
                 names.push_back(std::move(ams_hw_name));
-            }
-
-            // Enable AMS widget on home panel since AMS hardware was detected
-            auto& wc = PanelWidgetManager::instance().get_widget_config("home");
-            if (wc.set_enabled_by_id("ams", true)) {
-                wc.save();
-                spdlog::info("[Wizard] Enabled AMS widget on home panel");
             }
         }
     }

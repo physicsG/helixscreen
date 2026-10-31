@@ -3,8 +3,8 @@
 **Settings > Printing** holds the settings that change how your printer moves, heats and handles filament, and the buttons and macros HelixScreen runs for you. The page has three sections:
 
 - **MACHINE**: Machine Limits, Motion, Retraction Settings and Enclosure
-- **FILAMENT**: Material Temperatures, Allow cold load/unload and Cool nozzle after filament ops
-- **EXTRAS**: Timelapse and Macro Buttons
+- **FILAMENT**: Multi-Filament System Management, Material Temperatures, Allow cold load/unload, Cool nozzle after filament ops, Edit filament on insert and Confirm tool changes
+- **EXTRAS**: Timelapse, Power-loss recovery, Resume reloads the saved bed mesh, Apply start options to prints from other apps, and Macro Buttons
 
 Looking for how the printer is *drawn* (toolhead picture, G-code preview, Z button labels, bed mesh view)? That's in [Appearance](appearance.md#printer-visuals).
 
@@ -40,7 +40,7 @@ Under the sliders, a **Config-defined** section shows your **Max Z Velocity** an
 
 ## Motion
 
-Jog speeds, how far each jog pad button moves, and the Bed tab's Z clearance. See [Motion](../motion.md#motion-settings) for what each one does.
+Jog speeds, how far each jog pad button moves, the Z clearance a move across the plate keeps (Bed tab, Move tab positions and the home Toolhead widget), and whether Save Z-Offset buttons appear. See [Motion](../motion.md#motion-settings) for what each one does.
 
 ---
 
@@ -67,6 +67,32 @@ As with Machine Limits, **tap a value to type an exact number**. Distances take 
 Tells HelixScreen whether your printer is enclosed. **Auto** (the default) counts the printer as enclosed when its model is known to ship enclosed, or when a chamber heater is set up. Choose **Enclosed** if you've enclosed an open-frame printer yourself, or **Open frame** if HelixScreen thinks your printer is enclosed and it isn't.
 
 It matters for [drying filament on the bed](../temperature.md#drying-filament-on-the-bed), which is only offered on an enclosed printer.
+
+---
+
+## Multi-Filament System Management
+
+> Only shown when HelixScreen finds a multi-filament system.
+
+Opens quick actions, calibration and speed settings for your filament system: AFC, Happy Hare, ACE and the other systems HelixScreen supports. Most of what's inside depends on your hardware, but these switches can appear on any system:
+
+| Switch | When it appears | What it does |
+|--------|-----------------|--------------|
+| **Endless Spool** | Systems whose firmware takes an on/off switch (Creality CFS, Anycubic ACE, Snapmaker U1, single-unit Happy Hare) | Switches to a matching spool when one runs out mid-print. The firmware picks which spool |
+| **Keep Spool Info on Eject** | Systems that track a spool per lane (AFC, Happy Hare) | Remembers a lane's spool when you eject it, so putting the same spool back after maintenance needs no new selection. On by default. Only applies to spools chosen in HelixScreen: spools assigned elsewhere clear with the lane (for those, use your firmware's own option, such as AFC's `remember_spool`). If your firmware's option already covers every lane, it takes over and this switch is grayed out |
+| **Link Spools from Tags** | Creality CFS, with Spoolman set up | When a spool whose tag names a Spoolman spool is put in a slot, links the slot to that spool. On by default |
+| **Always Show Bypass Spool** | AFC only | Keeps the external spool on the filament path even while bypass is off. AFC reports a bypass sensor whether or not one is wired, so the spool is hidden until you actually use bypass |
+| **Enable Bypass Controls** | Only when your firmware reports **no** bypass | Shows the bypass controls and external spool anyway, for printers where you feed filament straight to the extruder. Applies to the Anycubic ACE Pro, Snapmaker U1, tool changers, QIDI Box and any Happy Hare setup with `has_bypass: 0` |
+
+What **Enable Bypass Controls** gets you depends on the system:
+
+- **Happy Hare**: `MMU_SELECT_BYPASS` works whether or not `[mmu_machine] has_bypass` is set, so the bypass becomes fully usable. This helps `mmu_vendor: Other` setups, such as a QIDI Box run through Happy Hare, and uncalibrated type-A selectors.
+- **Creality CFS**: bypass always works and is always shown, so the switch never appears.
+- **Snapmaker, tool changers, QIDI Box, and an ACE without a bypass switch**: there's no bypass command, so the Bypass switch says the operation isn't supported. The setting still lets you record the material and color you loaded by hand, which keeps filament tracking and temperature presets right. An ACE Pro with a fifth spool on its bypass switch and bypass macros does get a working Bypass switch.
+
+See [Filament: When Bypass Doesn't Appear](../filament.md#when-bypass-doesnt-appear).
+
+**Unload at end** lives in the **Print Behavior** section on AFC and Snapmaker U1 systems. On AFC it records whether your end-of-print macros unload the toolhead, so an empty toolhead at the next print start is not flagged. The U1 has one switch per toolhead.
 
 ---
 
@@ -105,7 +131,7 @@ The file has two lists: `types` for materials (PLA, PETG and so on) and `filamen
 
 - Fields: `nozzle_min`, `nozzle_max`, `bed`, `chamber` (0 means no chamber heat), `preheat_macro`, `macro_handles_heating`, `dry_temp`, `dry_time` (minutes), `density` (g/cm³), `category` and `compat_group`.
 - Write numbers as plain numbers: `205`, not `"205"`. A field holding text or `null` is ignored (with a warning in the log) and the built-in value stays.
-- A new material must set `nozzle_min` and `nozzle_max`, with `nozzle_max` at least `nozzle_min`. One without a usable nozzle range is skipped, with a warning in the log. Set `bed` too; anything else you leave out is 0. Its `compat_group` is its own name unless you set one, so endless spool never swaps it for a different material. Set `compat_group` to an existing group (for example `"PLA"`) only if it really can stand in for that group.
+- A new material must set `nozzle_min` and `nozzle_max`, with `nozzle_max` at least `nozzle_min`. One without a usable nozzle range is skipped, with a warning in the log. Set `bed` too; anything else you leave out is 0. Its `compat_group` is its own name unless you set one, so Endless Spool never swaps it for a different material. Set `compat_group` to an existing group (for example `"PLA"`) only if it really can stand in for that group.
 - The built-in list is the `types` section of `assets/filaments.json` in the HelixScreen install folder. Read it for names and defaults, but don't edit it: updates replace it.
 - **Reset to Default** on the Material Temperatures screen removes your temperature and macro changes for a built-in material. A material you added has no default, so the button is hidden for it.
 
@@ -154,6 +180,28 @@ The setting is per printer, so an AFC printer can turn it off while your other p
 
 ---
 
+## Confirm tool changes
+
+| Setting | What happens |
+|---------|--------------|
+| **On** (default) | Tapping another tool asks "Switch to Tool 2 (T1)?" before the printer moves |
+| **Off** | Tapping another tool switches to it straight away |
+
+> Only shown on printers with more than one tool.
+
+On a printer with more than one toolhead, three places switch tools with a tap: the tool switcher on the home screen, a toolhead on your filament system's screen, and the tool list on the Filament screen. This setting decides whether those taps ask first. Where a hub feeds several lanes into one toolhead, selecting that toolhead keeps the lane already loaded in it.
+
+Some things happen whatever the switch says:
+
+- A paused print always asks, because the toolhead moves while your part is still on the bed. Printers whose filament change homes the toolhead itself (such as the AD5X) refuse a tool change while paused instead.
+- While a print is running or starting, or while spools are on the bed, the change is refused with a message.
+- While your filament system is waiting for you to deal with a problem, the change is refused with "The filament system needs attention". Sort it out on the filament system's screen, then try again.
+- While your filament system is busy loading or unloading, the tap does nothing.
+
+Tapping a filament tube or spool on the filament system's screen never switches tools: it opens the slot menu. So does tapping the toolhead that is already mounted.
+
+---
+
 ## Timelapse
 
 > Only shown when the [Moonraker-Timelapse](https://github.com/mainsail-crew/moonraker-timelapse) plugin is installed.
@@ -173,6 +221,25 @@ If the plugin isn't installed yet, HelixScreen shows an **Install Wizard** that 
 
 ---
 
+## Power-loss recovery and start options for other apps
+
+These settings come from the **HelixPrint plugin** on your printer. See [HelixPrint Plugin](../helixprint-plugin.md) for installing it and everything else it adds.
+
+| Setting | What it does |
+|---------|--------------|
+| **Power-loss recovery** | Saves the print position about once a second so a print can resume after a power cut. Shown only on a printer HelixScreen supports for it (today, the QIDI Q2). On by default on a supported printer that stores its data on eMMC; off on an SD card, where it adds wear. Resuming is described in [Recovering After a Power Loss](../printing.md#resuming-with-the-helixprint-plugin) |
+| **Apply start options to prints from other apps** | When a print starts from Mainsail, Fluidd, your slicer or the job queue, sends your standing print options too, such as which toolheads unload at the end. Off until you turn it on |
+| **Resume reloads the saved bed mesh** | Adds `[include helix-plr/*.cfg]` to printer.cfg, so a power-loss resume reloads the mesh the print started with instead of the printer's default mesh profile. HelixScreen keeps a backup of printer.cfg beside it, asks before changing anything, and offers the firmware restart that applies the change. Tap the row again to remove the lines |
+
+Without the plugin on the printer:
+
+- **Power-loss recovery** is greyed out with **Requires the HelixPrint plugin** and an **Install** button (or asks for a newer plugin when yours is too old). If your printer cannot use it at all, the switch is not shown.
+- **Apply start options to prints from other apps** still works: HelixScreen sends the options itself when it sees a print start, as long as the HelixScreen app is running and connected to the printer. A screen attached to the printer covers almost every print (only a print that starts while the printer is booting or HelixScreen is restarting is missed), so it shows no note. A phone, tablet or other remote screen covers prints only while it is connected, so there the switch says **Only while this app is connected** and offers **Install**: with the plugin, the printer applies the options to every print itself.
+
+If several HelixScreens are connected to one printer, only one of them sends the options: the one attached to the printer, or a remote one when none is attached.
+
+---
+
 ## Macro Buttons
 
 Chooses what HelixScreen's quick buttons run, and which of your Klipper macros it uses for common jobs such as loading filament or cleaning the nozzle.
@@ -188,7 +255,7 @@ The Controls panel's **Quick Actions** card has four quick buttons under the Hom
 | **Quick Button 3** | (Empty) |
 | **Quick Button 4** | (Empty) |
 
-- **A standard action** runs whatever macro that action is assigned to under Standard Macros. If your printer has no macro for it, the button shows greyed out.
+- **A standard action** runs whatever macro that action is assigned to under Standard Macros. If your printer has no macro for it, the button shows grayed out.
 - **Light** turns the button into an on/off switch for the chamber light, like a home screen LED Light widget left on its default. It hides while no light is controllable.
 - **(Empty)** hides the button.
 
@@ -215,7 +282,7 @@ HelixScreen looks for common macros in your Klipper config and uses them for eac
 | **Purge** | Purging or priming the nozzle | PURGE, PURGE_LINE, LINE_PURGE, PRIME_LINE |
 | **Pause** | Pausing a print | PAUSE, M600 |
 | **Resume** | Resuming a print | RESUME |
-| **Cancel** | Cancelling a print | CANCEL_PRINT |
+| **Cancel** | Canceling a print | CANCEL_PRINT |
 | **Bed Mesh** | Bed mesh calibration | BED_MESH_CALIBRATE |
 | **Bed Level** | Manual bed leveling | BED_SCREWS_ADJUST, SCREWS_TILT_CALCULATE |
 | **Clean Nozzle** | Nozzle cleaning | CLEAN_NOZZLE, NOZZLE_CLEAN |

@@ -10,6 +10,9 @@ WORKTREE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
 setup() {
     load helpers
+
+    # Before the mocks below: common.sh defines the real kill_process_by_name.
+    . "$WORKTREE_ROOT/scripts/lib/installer/common.sh"
     # The developer's own desktop session must not read as the installer's.
     unset DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE
     log_info() { echo "INFO: $*"; }

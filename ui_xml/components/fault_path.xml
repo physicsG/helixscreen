@@ -1,0 +1,152 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Graphical replacement for AFC's monospace fault diagram (prestonbrown/helixscreen#1184). -->
+<!--                                                                                          -->
+<!-- Four checkpoints along the filament path, joined by the three GAPS between them:          -->
+<!--                                                                                          -->
+<!--   *=======*=======*~~~~~~~o                                                               -->
+<!--   Spool   Lane    Hub  Toolhead                                                           -->
+<!--                                                                                          -->
+<!-- The gap is the unit that matters, because that is where AFC reports failures. Its own     -->
+<!-- ASCII art works the same way and is widely misread because of it: ||=====||====||==>~~||  -->
+<!-- is THREE sections under FOUR labels, i.e. TRG to LOAD, LOAD to HUB, HUB to TOOL. Traced in      -->
+<!-- AFC.py: "did not trigger hub sensor" fires after loaded_to_hub is already true (so the    -->
+<!-- LOAD to HUB gap), and "pre extruder gear toolhead sensor" fires while homing down the       -->
+<!-- bowden past an already-cleared hub (the HUB to TOOL gap). Painting the checkpoint red        -->
+<!-- instead of the gap would say "the hub failed" about a hub the filament passed cleanly.    -->
+<!--                                                                                          -->
+<!-- Driven entirely by the int subject `fault_path_segment`, whose values are PathSegment      -->
+<!-- (include/ams_types.h). C++ writes it via helix::ui::fault_path_apply():               -->
+<!--                                                                                          -->
+<!--   0 NONE     - no recognised stop point; the whole component hides                        -->
+<!--   1 SPOOL    - never reached the lane trigger          -> Spool..Lane gap fails           -->
+<!--   4 HUB      - past the lane, never reached the hub    -> Lane..Hub gap fails             -->
+<!--   5 OUTPUT   - past the hub, never reached the head    -> Hub..Toolhead gap fails         -->
+<!--   6 TOOLHEAD - past the toolhead sensor, jammed in the extruder gears -> Toolhead fails   -->
+<!--                                                                                          -->
+<!-- The captions are the non-colour channel (prestonbrown/helixscreen#1196). Position     -->
+<!-- alone says WHERE the odd element is; only red says that it FAILED, and red against      -->
+<!-- green is exactly the pair a deuteranope cannot separate, on a printer screen in        -->
+<!-- daylight no less. So a word names the failure where it happened: "Stopped" sits in the -->
+<!-- label row under the failing gap, between the two checkpoint names that bound it, and   -->
+<!-- for TOOLHEAD "Jammed" takes the toolhead's own label, the one fault that happens AT a  -->
+<!-- checkpoint rather than in a gap. Each is bound to one segment value, so exactly one     -->
+<!-- word shows and the strip stays two rows tall.                                          -->
+<!--                                                                                          -->
+<!-- Every element's bindings are exhaustive and mutually exclusive over the whole int range,  -->
+<!-- so exactly one is ever enabled — which is why colour comes from bind_style and NOT from   -->
+<!-- an inline style_bg_color (an inline attr is a local style and would win outright).        -->
+<component>
+  <styles>
+    <!-- Filament got here, or through here. -->
+    <style name="fault_path_reached" bg_color="#success" radius="#border_radius"/>
+    <!-- Where it stopped. -->
+    <style name="fault_path_failed" bg_color="#danger" radius="#border_radius"/>
+    <!-- Never got this far. -->
+    <style name="fault_path_pending" bg_color="#text_muted" radius="#border_radius"/>
+  </styles>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xxs" style_bg_opa="0"
+        style_border_width="0" scrollable="false">
+    <!-- No recognised position => nothing to draw, and the modal reads exactly as before. -->
+    <bind_flag_if_eq subject="fault_path_segment" flag="hidden" ref_value="0"/>
+
+    <lv_obj width="100%"
+            height="content" flex_flow="row" style_pad_all="0" style_pad_gap="0" style_bg_opa="0" style_border_width="0"
+            scrollable="false" style_flex_cross_place="center">
+
+      <!-- Spool: the filament is always at least here, or there would be no fault to draw. -->
+      <lv_obj name="fault_path_node_spool"
+              width="#space_md" height="#space_md" style_bg_opa="255" style_pad_all="0" style_border_width="0"
+              scrollable="false" style_radius="#border_radius" style_bg_color="#success"/>
+
+      <lv_obj name="fault_path_gap_spool_lane"
+              height="#space_xxs" flex_grow="1" style_bg_opa="255" style_pad_all="0" style_border_width="0"
+              scrollable="false">
+        <bind_style_if_eq name="fault_path_failed" subject="fault_path_segment" ref_value="1"/>
+        <bind_style_if_not_eq name="fault_path_reached" subject="fault_path_segment" ref_value="1"/>
+      </lv_obj>
+
+      <lv_obj name="fault_path_node_lane"
+              width="#space_md" height="#space_md" style_bg_opa="255" style_pad_all="0" style_border_width="0"
+              scrollable="false">
+        <bind_style_if_eq name="fault_path_pending" subject="fault_path_segment" ref_value="1"/>
+        <bind_style_if_not_eq name="fault_path_reached" subject="fault_path_segment" ref_value="1"/>
+      </lv_obj>
+
+      <lv_obj name="fault_path_gap_lane_hub"
+              height="#space_xxs" flex_grow="1" style_bg_opa="255" style_pad_all="0" style_border_width="0"
+              scrollable="false">
+        <bind_style_if_lt name="fault_path_pending" subject="fault_path_segment" ref_value="4"/>
+        <bind_style_if_eq name="fault_path_failed" subject="fault_path_segment" ref_value="4"/>
+        <bind_style_if_gt name="fault_path_reached" subject="fault_path_segment" ref_value="4"/>
+      </lv_obj>
+
+      <lv_obj name="fault_path_node_hub"
+              width="#space_md" height="#space_md" style_bg_opa="255" style_pad_all="0" style_border_width="0"
+              scrollable="false">
+        <bind_style_if_lt name="fault_path_pending" subject="fault_path_segment" ref_value="5"/>
+        <bind_style_if_ge name="fault_path_reached" subject="fault_path_segment" ref_value="5"/>
+      </lv_obj>
+
+      <lv_obj name="fault_path_gap_hub_toolhead"
+              height="#space_xxs" flex_grow="1" style_bg_opa="255" style_pad_all="0" style_border_width="0"
+              scrollable="false">
+        <bind_style_if_lt name="fault_path_pending" subject="fault_path_segment" ref_value="5"/>
+        <bind_style_if_eq name="fault_path_failed" subject="fault_path_segment" ref_value="5"/>
+        <bind_style_if_gt name="fault_path_reached" subject="fault_path_segment" ref_value="5"/>
+      </lv_obj>
+
+      <!-- Toolhead: red when the filament got PAST the sensor and jammed in the extruder
+           gears — the one fault that happens AT a checkpoint rather than in a gap. -->
+      <lv_obj name="fault_path_node_toolhead"
+              width="#space_md" height="#space_md" style_bg_opa="255" style_pad_all="0" style_border_width="0"
+              scrollable="false">
+        <bind_style_if_lt name="fault_path_pending" subject="fault_path_segment" ref_value="6"/>
+        <bind_style_if_eq name="fault_path_failed" subject="fault_path_segment" ref_value="6"/>
+      </lv_obj>
+    </lv_obj>
+
+    <!-- Checkpoint names, with the gap cells between them carrying "Stopped" under the gap
+         that failed. Path vocabulary, not product names, so everything translates. -->
+    <lv_obj width="100%"
+            height="content" flex_flow="row" style_pad_all="0" style_pad_gap="0" style_bg_opa="0" style_border_width="0"
+            scrollable="false" style_flex_cross_place="center">
+      <text_small name="fault_path_stop_label_spool" text="Spool"/>
+      <lv_obj height="content"
+              flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+        <text_small name="fault_path_stop_caption_spool"
+                    width="100%" align="center" long_mode="dots" style_text_align="center" style_text_color="#danger"
+                    text="Stopped">
+          <bind_flag_if_not_eq subject="fault_path_segment" flag="hidden" ref_value="1"/>
+        </text_small>
+      </lv_obj>
+      <text_small name="fault_path_stop_label_lane" text="Lane"/>
+      <lv_obj height="content"
+              flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+        <text_small name="fault_path_stop_caption_hub"
+                    width="100%" align="center" long_mode="dots" style_text_align="center" style_text_color="#danger"
+                    text="Stopped">
+          <bind_flag_if_not_eq subject="fault_path_segment" flag="hidden" ref_value="4"/>
+        </text_small>
+      </lv_obj>
+      <text_small name="fault_path_stop_label_hub" text="Hub"/>
+      <lv_obj height="content"
+              flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+        <text_small name="fault_path_stop_caption_output"
+                    width="100%" align="center" long_mode="dots" style_text_align="center" style_text_color="#danger"
+                    text="Stopped">
+          <bind_flag_if_not_eq subject="fault_path_segment" flag="hidden" ref_value="5"/>
+        </text_small>
+      </lv_obj>
+      <text_small name="fault_path_stop_label_toolhead" text="Toolhead">
+        <bind_flag_if_eq subject="fault_path_segment" flag="hidden" ref_value="6"/>
+      </text_small>
+      <!-- Not a gap: the filament cleared the toolhead sensor and jammed in the extruder gears. -->
+      <text_small name="fault_path_stop_caption_toolhead" style_text_color="#danger" text="Jammed">
+        <bind_flag_if_not_eq subject="fault_path_segment" flag="hidden" ref_value="6"/>
+      </text_small>
+    </lv_obj>
+  </view>
+</component>

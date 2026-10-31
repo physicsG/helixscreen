@@ -4,13 +4,20 @@
 import { mapEventToDataPoints } from "./analytics";
 import {
   executeQuery,
+  excludedBy,
+  filterNotApplicable,
+  ENDPOINT_DELTA_KINDS,
+  aeCountsQuery,
+  isIsoDate,
   parseRange,
   overviewQueries,
   adoptionQueries,
   printsQueries,
   crashesQueries,
   crashListQuery,
-  releasesQueries,
+  releaseScorecardQueries,
+  retentionQuery,
+  topVersionsQuery,
   memoryQueries,
   memoryWarningQueries,
   hardwareQueries,
@@ -20,10 +27,24 @@ import {
   printStartQueries,
   performanceQueries,
   featuresQueries,
+  CONFIGURED_FEATURE_FLAGS,
   uxInsightsQueries,
+  devicesQueries,
+  deviceQueries,
+  notApplicableFor,
   type QueryConfig,
   type FilterParams,
 } from "./queries";
+import { buildDeviceList, buildDevicePage, isDeviceId, type DeviceCountColumn } from "./devices";
+import { releaseRates } from "./health";
+import { fetchHealth } from "./health_source";
+import { loopDeps, queryConfigOf, runScheduledLoop } from "./loop/wiring";
+import { runLoop } from "./loop/run";
+import { r2Store, type LoopEnv } from "./loop/ports";
+import { reportKey, reportWeeks, REPORT_PREFIX, WEEK_PATTERN } from "./loop/report";
+import { num, rowsOf, str } from "./schema";
+import { attributePrints, printsByVersion } from "./prints";
+import { buildRetention } from "./retention";
 import {
   snapshotDay,
   snapshotToDataPoints,
@@ -47,7 +68,7 @@ interface AnalyticsEngineDataset {
   }): void;
 }
 
-interface Env {
+interface Env extends LoopEnv {
   TELEMETRY_BUCKET: R2Bucket;
   INGEST_API_KEY: string; // Cloudflare secret: wrangler secret put INGEST_API_KEY
   ADMIN_API_KEY: string; // Cloudflare secret: wrangler secret put ADMIN_API_KEY (for analytics)
@@ -56,7 +77,109 @@ interface Env {
   CLOUDFLARE_ACCOUNT_ID: string; // Set in wrangler.toml [vars]
   HELIX_ANALYTICS_READ_TOKEN?: string; // Cloudflare secret: wrangler secret put HELIX_ANALYTICS_READ_TOKEN
   CDN_ZONE_ID?: string; // Set in wrangler.toml [vars]
+  GIT_SHA?: string; // Set at deploy: wrangler deploy --var GIT_SHA:$(git rev-parse --short HEAD)
   CF_ZONE_ANALYTICS_TOKEN?: string; // Cloudflare secret: needs Zone Analytics:Read on helixscreen.org
+  // The feedback loop's settings are LoopEnv: [vars] in wrangler.toml, plus the secrets
+  // RESEND_API_KEY and GITHUB_APP_PRIVATE_KEY.
+}
+
+/**
+ * Collapse a "1"/"0" tri-state column into a labelled yes/no split.
+ * Rows with an empty name never reach here (the query filters them), so
+ * `reported` counts only devices that actually answered. Analytics Engine
+ * returns the name as a number or a string depending on the column type.
+ */
+export function toYesNo(res: unknown, yesKey: string, noKey: string) {
+  const d = res as { data?: Array<{ name: string | number; count: number }> };
+  const rows = d.data ?? [];
+  const yes = rows.find((r) => String(r.name) === "1")?.count ?? 0;
+  const no = rows.find((r) => String(r.name) === "0")?.count ?? 0;
+  return { [yesKey]: yes, [noKey]: no, reported: yes + no };
+}
+
+/**
+ * The fields every delta-era endpoint returns beside its values: how many
+ * devices on a delta-era client reported, and the filter, if any, that the
+ * endpoint's delta kinds cannot be filtered by (their values then read "not
+ * reported per <filter>" rather than "waiting").
+ */
+function deltaEraFields(endpoint: keyof typeof ENDPOINT_DELTA_KINDS, deltaEraDevices: number, filters: FilterParams) {
+  return {
+    delta_era_devices: deltaEraDevices,
+    filter_not_applicable: filterNotApplicable([...ENDPOINT_DELTA_KINDS[endpoint]], filters),
+  };
+}
+
+/** The `delta_era_devices` count a query returned; no row means none. */
+function deltaEraCount(res: unknown): number {
+  const d = res as { data?: Array<{ delta_era_devices?: number }> };
+  return Number(d.data?.[0]?.delta_era_devices ?? 0);
+}
+
+/**
+ * A value aggregated from delta rows. Before any device on a delta-era client
+ * has reported there is nothing to aggregate, and 0 would read as a
+ * measurement, so it is null.
+ */
+function deltaValue(deltaEraDevices: number, value: number | undefined): number | null {
+  return deltaEraDevices > 0 ? Number(value ?? 0) : null;
+}
+
+/**
+ * crashes / sessions, or null when the filters exclude every crash or every
+ * session row: a model filter matches no crash, so 0% would read as a
+ * measurement.
+ */
+function crashRate(crashes: number, sessions: number, applies: boolean): number | null {
+  if (!applies) return null;
+  return sessions > 0 ? crashes / sessions : 0;
+}
+
+/** The scorecard blocks a filter can leave unreported. */
+const RELEASE_BLOCKS = ["crashes", "prints", "updates", "performance"] as const;
+
+/** Device list count columns a filter can leave unreported. */
+const DEVICE_LIST_BLOCKS = ["crashes", "prints"] as const satisfies readonly DeviceCountColumn[];
+
+/** Devices that used one overlay or widget id in the window. */
+export interface FeatureUse {
+  id: string;
+  devices: number;
+}
+
+/**
+ * Adoption per feature id, highest first: devices that used it over the
+ * delta-era device count. Empty until a delta-era device has reported. An id
+ * reported as both an overlay and a widget appears once; the larger device
+ * count is the closest lower bound of their union available without the
+ * device lists.
+ */
+export function deriveFeatureAdoption(
+  overlays: FeatureUse[],
+  widgets: FeatureUse[],
+  deltaEraDevices: number,
+): Array<FeatureUse & { adoption_rate: number }> {
+  if (deltaEraDevices <= 0) return [];
+  const devices = new Map<string, number>();
+  for (const row of [...overlays, ...widgets]) {
+    const id = String(row.id ?? "");
+    if (!id) continue;
+    devices.set(id, Math.max(devices.get(id) ?? 0, Number(row.devices ?? 0)));
+  }
+  return [...devices]
+    .map(([id, n]) => ({ id, devices: n, adoption_rate: n / deltaEraDevices }))
+    .sort((a, b) => b.adoption_rate - a.adoption_rate || a.id.localeCompare(b.id));
+}
+
+/**
+ * One configured-feature flag: devices whose settings snapshots reported it
+ * on in the window, over devices that reported it on or off (a device that
+ * changed it in the window counts on both sides, as in toYesNo). The rate is
+ * null until a device has reported, since 0% would read as a measurement.
+ */
+export function configuredFeature(id: string, res: unknown) {
+  const { devices, reported } = toYesNo(res, "devices", "off");
+  return { id, devices, reported, adoption_rate: reported > 0 ? Number(devices) / reported : null };
 }
 
 const CORS_HEADERS: Record<string, string> = {
@@ -141,9 +264,11 @@ function parseFilters(searchParams: URLSearchParams): FilterParams {
   const platform = searchParams.get("platform");
   const version = searchParams.get("version");
   const model = searchParams.get("model");
+  const board = searchParams.get("board");
   if (platform) filters.platform = platform;
   if (version) filters.version = version;
   if (model) filters.model = model;
+  if (board) filters.board = board;
   return filters;
 }
 
@@ -178,12 +303,17 @@ async function captureCdnFleetDay(env: Env, date: string): Promise<FleetDaySnaps
         env.TELEMETRY_ANALYTICS.writeDataPoint(point);
       }
     } catch {
-      // R2 already holds the day; a failed AE write is recoverable by backfill.
+      // R2 already holds the day; re-running the snapshot appends rows for the day
+      // that the queries collapse with max().
     }
   }
 
   return snap;
 }
+
+/** The schedules in wrangler.toml [triggers]: scheduled() runs the loop on LOOP_CRON and the CDN snapshot otherwise. */
+export const CDN_CRON = "10 2 * * *";
+export const LOOP_CRON = "0 13 * * *";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -196,7 +326,7 @@ export default {
 
     // Health check
     if (url.pathname === "/health" && request.method === "GET") {
-      return json({ status: "healthy" });
+      return json({ status: "healthy", git_sha: env.GIT_SHA ?? "unknown" });
     }
 
     // Event ingestion
@@ -356,6 +486,7 @@ export default {
       const range = url.searchParams.get("range");
       const days = parseRange(range);
       const filters = parseFilters(url.searchParams);
+      const crashRateApplies = !excludedBy("crash", filters) && !excludedBy("session", filters);
 
       try {
         // GET /v1/dashboard/overview
@@ -397,8 +528,11 @@ export default {
           return json({
             active_devices: devicesData.data?.[0]?.active_devices ?? 0,
             total_events: totalData.data?.[0]?.total_events ?? 0,
-            crash_rate: crashRow.session_count > 0 ? crashRow.crash_count / crashRow.session_count : 0,
-            print_success_rate: printRow.total > 0 ? printRow.successes / printRow.total : 0,
+            crash_rate: crashRate(crashRow.crash_count, crashRow.session_count, crashRateApplies),
+            print_success_rate:
+              printRow.total > 0 && !excludedBy("print_outcome", filters)
+                ? printRow.successes / printRow.total
+                : null,
             events_over_time: (timeData.data ?? []).map((r) => ({
               date: r.date,
               count: r.count,
@@ -424,7 +558,7 @@ export default {
         // GET /v1/dashboard/adoption
         if (url.pathname === "/v1/dashboard/adoption") {
           const queries = adoptionQueries(days, filters);
-          const [platformsRes, versionsRes, modelsRes, kinematicsRes] =
+          const [platformsRes, versionsRes, modelsRes, kinematicsRes, boardsRes] =
             await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
 
           const toList = (res: unknown) => {
@@ -437,6 +571,7 @@ export default {
             versions: toList(versionsRes),
             printer_models: toList(modelsRes),
             kinematics: toList(kinematicsRes),
+            boards: toList(boardsRes),
           });
         }
 
@@ -448,11 +583,14 @@ export default {
             [...queries, ...startQueries].map((q) => executeQuery(queryConfig, q)),
           );
 
-          const [rateTimeRes, filamentRes, avgDurRes, slicerRes, fileSizeRes, thumbRes, amsRes, sourceRes] = allResults;
+          const [rateTimeRes, filamentRes, avgDurRes, devicePrintsRes, deviceSessionsRes,
+                 slicerRes, fileSizeRes, thumbRes, amsRes, sourceRes] = allResults;
 
           const rateTimeData = rateTimeRes as { data: Array<{ date: string; rate: number; total: number }> };
           const filamentData = filamentRes as { data: Array<{ type: string; success_rate: number; count: number }> };
           const avgDurData = avgDurRes as { data: Array<{ avg_duration_sec: number }> };
+          const devicePrints = rowsOf(devicePrintsRes);
+          const deviceSessions = rowsOf(deviceSessionsRes);
           const slicerData = slicerRes as { data: Array<{ name: string; count: number }> };
           const fileSizeData = fileSizeRes as { data: Array<{ name: string; count: number }> };
           const thumbData = thumbRes as { data: Array<{ thumbnail_rate: number }> };
@@ -501,7 +639,17 @@ export default {
                 }))
                 .sort((a, b) => b.count - a.count);
             })(),
+            not_applicable: notApplicableFor(["prints"], filters),
             avg_duration_sec: avgDurData.data?.[0]?.avg_duration_sec ?? 0,
+            by_model: [...attributePrints(devicePrints, deviceSessions, "model", "Unknown")]
+              .map(([model, { successes, total }]) => ({ model, successes, total, rate: total > 0 ? successes / total : null }))
+              .sort((a, b) => b.total - a.total),
+            by_version: printsByVersion(devicePrints, deviceSessions).map((r) => ({
+              version: str(r.ver),
+              successes: num(r.print_successes),
+              total: num(r.print_total),
+              rate: num(r.print_total) > 0 ? num(r.print_successes) / num(r.print_total) : null,
+            })),
             start_context: {
               slicers: (slicerData.data ?? []).map((r) => ({ name: r.name, count: r.count })),
               file_size_buckets: (fileSizeData.data ?? []).map((r) => ({ name: r.name, count: r.count })),
@@ -609,7 +757,7 @@ export default {
                 version: r.ver,
                 crash_count: r.crash_count,
                 session_count: sessionCount,
-                rate: sessionCount > 0 ? r.crash_count / sessionCount : 0,
+                rate: crashRate(r.crash_count, sessionCount, crashRateApplies),
               };
             }),
             by_signal: (signalData.data ?? []).map((r) => ({
@@ -620,19 +768,19 @@ export default {
             by_platform: Array.from(platMap.values())
               .map((p) => ({
                 ...p,
-                rate: p.session_count > 0 ? p.crash_count / p.session_count : 0,
+                rate: crashRate(p.crash_count, p.session_count, crashRateApplies),
               }))
               .sort((a, b) => b.session_count - a.session_count),
             trailing_14d: {
               crash_count: overall14Crash,
               session_count: overall14Session,
-              rate: overall14Session > 0 ? overall14Crash / overall14Session : 0,
+              rate: crashRate(overall14Crash, overall14Session, crashRateApplies),
               by_platform: Array.from(platMap14.entries())
                 .map(([platform, v]) => ({
                   platform,
                   crash_count: v.crash_count,
                   session_count: v.session_count,
-                  rate: v.session_count > 0 ? v.crash_count / v.session_count : 0,
+                  rate: crashRate(v.crash_count, v.session_count, crashRateApplies),
                 }))
                 .sort((a, b) => b.session_count - a.session_count),
             },
@@ -782,16 +930,6 @@ export default {
             return (d.data ?? []).map((r) => ({ name: r.name, count: r.count }));
           };
 
-          // Collapse a "1"/"0" tri-state column into a labelled yes/no split.
-          // Rows with an empty name never reach here (the query filters them),
-          // so `reported` counts only devices that actually answered.
-          const toYesNo = (res: unknown, yesKey: string, noKey: string) => {
-            const rows = toList(res);
-            const yes = rows.find((r) => r.name === "1")?.count ?? 0;
-            const no = rows.find((r) => r.name === "0")?.count ?? 0;
-            return { [yesKey]: yes, [noKey]: no, reported: yes + no };
-          };
-
           const capsData = capsRes as { data: Array<Record<string, number>> };
           const capsRow = capsData.data?.[0] ?? {};
           const volData = volRes as { data: Array<{ avg_vol_x: number; avg_vol_y: number; avg_vol_z: number }> };
@@ -875,8 +1013,10 @@ export default {
         // GET /v1/dashboard/engagement
         if (url.pathname === "/v1/dashboard/engagement") {
           const queries = engagementQueries(days, filters);
-          const [panelTimeRes, panelVisitsRes, sessionTrendRes, themeRes, localeRes, brightnessRes, darkLightRes, widgetPlacementRes, widgetInteractionRes, overlayVisitsRes] =
+          const [panelTimeRes, panelVisitsRes, sessionTrendRes, themeRes, localeRes, brightnessRes, darkLightRes, widgetPlacementRes, widgetInteractionRes, overlayVisitsRes, avgSessionRes, deltaEraRes] =
             await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
+          const deltaEraDevices = deltaEraCount(deltaEraRes);
+          const avgSession = avgSessionRes as { data: Array<{ avg_session_sec: number }> };
 
           const toList = (res: unknown) => {
             const d = res as { data: Array<{ name: string; count: number }> };
@@ -909,6 +1049,8 @@ export default {
           const overlayVisitsData = overlayVisitsRes as { data: Array<{ overlay: string; total_visits: number }> };
 
           return json({
+            ...deltaEraFields("engagement", deltaEraDevices, filters),
+            avg_session_sec: deltaValue(deltaEraDevices, avgSession.data?.[0]?.avg_session_sec),
             panel_time: (panelTimeData.data ?? []).map((r) => ({
               panel: r.panel,
               total_time_sec: r.total_time_sec,
@@ -947,8 +1089,9 @@ export default {
         // GET /v1/dashboard/reliability
         if (url.pathname === "/v1/dashboard/reliability") {
           const queries = reliabilityQueries(days, filters);
-          const [uptimeRes, disconnectRes, longestRes, errorCatsRes, errorCodesRes] =
+          const [uptimeRes, disconnectRes, longestRes, errorCatsRes, errorCodesRes, deltaEraRes] =
             await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
+          const deltaEraDevices = deltaEraCount(deltaEraRes);
 
           const uptimeData = uptimeRes as { data: Array<{ date: string; avg_uptime_pct: number }> };
           const disconnectData = disconnectRes as { data: Array<{ date: string; avg_disconnects: number }> };
@@ -957,6 +1100,7 @@ export default {
           const errorCodesData = errorCodesRes as { data: Array<{ category: string; code: string; count: number }> };
 
           return json({
+            ...deltaEraFields("reliability", deltaEraDevices, filters),
             uptime_trend: (uptimeData.data ?? []).map((r) => ({
               date: r.date,
               avg_uptime_pct: r.avg_uptime_pct,
@@ -965,7 +1109,7 @@ export default {
               date: r.date,
               avg_disconnects: r.avg_disconnects,
             })),
-            max_disconnect_sec: longestData.data?.[0]?.max_disconnect_sec ?? 0,
+            max_disconnect_sec: deltaValue(deltaEraDevices, longestData.data?.[0]?.max_disconnect_sec),
             error_categories: (errorCatsData.data ?? []).map((r) => ({
               category: r.category,
               count: r.count,
@@ -1003,7 +1147,11 @@ export default {
             executeQuery(queryConfig, queries[12]), // display anomaly by version
             executeQuery(queryConfig, queries[13]), // recent display anomalies
             executeQuery(queryConfig, queries[14]), // display affected devices
+            executeQuery(queryConfig, queries[15]), // delta-era devices
+            executeQuery(queryConfig, queries[16]), // crash clusters
+            executeQuery(queryConfig, queries[17]), // error codes per version
           ]);
+          const deltaEraDevices = deltaEraCount(allResults[12]);
 
           const sessionTimeRes = allResults[0] as { data: Array<{ date: string; session_count: number }> };
           const sessionByVerRes = allResults[1] as { data: Array<{ ver: string; session_count: number }> };
@@ -1038,6 +1186,12 @@ export default {
           };
 
           const dedupedCrashes = deduplicateCrashes(crashListRes.data ?? []);
+          const clusterRes = allResults[13] as {
+            data?: Array<{ sig: string; fault: string; ver: string; board: string; count: number; devices: number }>;
+          };
+          const errorsByVerRes = allResults[14] as {
+            data?: Array<{ category: string; code: string; version: string; count: number; devices: number }>;
+          };
 
           // Compute crash aggregates from the deduplicated crash list
           // Crash count by date (from deduped crash timestamps)
@@ -1056,7 +1210,7 @@ export default {
           const crash_rate_trend = [...allDates].sort().map((date) => {
             const crashes = crashByDate.get(date) ?? 0;
             const sessions = sessionByDate.get(date) ?? 0;
-            return { date, crashes, sessions, rate: sessions > 0 ? crashes / sessions : 0 };
+            return { date, crashes, sessions, rate: crashRate(crashes, sessions, crashRateApplies) };
           });
 
           // Crash count by version (from deduped list)
@@ -1076,7 +1230,7 @@ export default {
                 version: ver,
                 crash_count: crashes,
                 session_count: sessionCount,
-                rate: sessionCount > 0 ? crashes / sessionCount : 0,
+                rate: crashRate(crashes, sessionCount, crashRateApplies),
               };
             });
 
@@ -1095,6 +1249,8 @@ export default {
             : 0;
 
           return json({
+            ...deltaEraFields("stability", deltaEraDevices, filters),
+            not_applicable: notApplicableFor(["crashes", "errors"], filters),
             crash_rate_trend,
             by_version,
             by_signal,
@@ -1117,6 +1273,26 @@ export default {
               code: r.code,
               count: r.count,
             })),
+            crash_clusters: (clusterRes.data ?? [])
+              .map((r) => ({
+                signal: String(r.sig ?? ""),
+                fault_code: String(r.fault ?? ""),
+                version: String(r.ver ?? ""),
+                board: String(r.board ?? ""),
+                count: Number(r.count),
+                devices: Number(r.devices),
+              }))
+              .filter((c) => c.count > 0)
+              .sort((a, b) => b.count - a.count),
+            errors_by_version: (errorsByVerRes.data ?? [])
+              .map((r) => ({
+                category: String(r.category ?? ""),
+                code: String(r.code ?? ""),
+                version: String(r.version ?? ""),
+                count: Number(r.count),
+                devices: Number(r.devices),
+              }))
+              .sort((a, b) => b.count - a.count),
             recent_crashes: dedupedCrashes.slice(0, displayLimit).map((r) => ({
               timestamp: r.timestamp,
               device_id: r.device_id,
@@ -1153,78 +1329,92 @@ export default {
           });
         }
 
-        // GET /v1/dashboard/releases?versions=v0.9.18,v0.9.19
+        // GET /v1/dashboard/releases[?versions=v0.9.18,v0.9.19]
         if (url.pathname === "/v1/dashboard/releases") {
           const versionsParam = url.searchParams.get("versions");
-          if (!versionsParam) {
-            return json({ error: "versions parameter required" }, 400);
-          }
-          const versions = versionsParam.split(",").map((v) => v.trim()).filter(Boolean);
-          if (versions.length === 0 || versions.length > 20) {
-            return json({ error: "Provide 1-20 comma-separated versions" }, 400);
-          }
-
-          const queries = releasesQueries(versions);
-          const [statsRes, devicesRes, printStatsRes] =
-            await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
-
-          const statsData = statsRes as {
-            data: Array<{
-              ver: string;
-              total_sessions: number;
-              total_crashes: number;
-              update_failures: number;
-              update_successes: number;
-            }>;
-          };
-          const devicesData = devicesRes as {
-            data: Array<{ ver: string; active_devices: number }>;
-          };
-          const printStatsData = printStatsRes as {
-            data: Array<{ ver: string; print_successes: number; print_total: number }>;
-          };
-
-          // Build device count lookup
-          const deviceMap = new Map<string, number>();
-          for (const row of devicesData.data ?? []) {
-            deviceMap.set(row.ver, row.active_devices);
+          let versions: string[];
+          if (versionsParam === null) {
+            const topRes = (await executeQuery(queryConfig, topVersionsQuery(days, filters))) as {
+              data?: Array<{ ver: string }>;
+            };
+            versions = (topRes.data ?? []).map((r) => String(r.ver));
+            if (versions.length === 0) {
+              return json({ versions: [], adoption: [], not_applicable: notApplicableFor(RELEASE_BLOCKS, filters) });
+            }
+          } else {
+            versions = versionsParam.split(",").map((v) => v.trim()).filter(Boolean);
+            if (versions.length === 0 || versions.length > 20) {
+              return json({ error: "Provide 1-20 comma-separated versions" }, 400);
+            }
           }
 
-          // Build print stats lookup
-          const printMap = new Map<string, { successes: number; total: number }>();
-          for (const row of printStatsData.data ?? []) {
-            printMap.set(row.ver, { successes: row.print_successes, total: row.print_total });
-          }
+          const [statsRes, devicesRes, devicePrintsRes, crashingRes, frameRes, rssRes, adoptionRes, deviceSessionsRes] =
+            await Promise.all(releaseScorecardQueries(versions, days, filters).map((q) => executeQuery(queryConfig, q)));
+
+          const not_applicable = notApplicableFor(RELEASE_BLOCKS, filters);
+          const byVersion = (res: unknown) => new Map(rowsOf(res).map((r) => [String(r.ver), r]));
+          const deviceMap = byVersion(devicesRes);
+          const printMap = byVersion({ data: printsByVersion(rowsOf(devicePrintsRes), rowsOf(deviceSessionsRes)) });
+          const crashingMap = byVersion(crashingRes);
+          const frameMap = byVersion(frameRes);
+          const rssMap = byVersion(rssRes);
+          const nullable = (v: unknown): number | null => (v === undefined || v === null ? null : num(v));
 
           return json({
-            versions: (statsData.data ?? []).map((r) => {
-              const prints = printMap.get(r.ver) ?? { successes: 0, total: 0 };
+            versions: rowsOf(statsRes).map((r) => {
+              const ver = String(r.ver);
+              const prints = printMap.get(ver);
+              const active = num(deviceMap.get(ver)?.active_devices);
+              const counts = {
+                sessions: num(r.sessions),
+                crashes: num(r.crashes),
+                session_devices: active,
+                crash_devices: num(crashingMap.get(ver)?.crashing_devices),
+                update_failures: num(r.update_failures),
+                update_successes: num(r.update_successes),
+                print_successes: num(prints?.print_successes),
+                print_total: num(prints?.print_total),
+              };
+              const rates = releaseRates(counts, not_applicable.crashes === null);
               return {
-                version: r.ver,
-                active_devices: deviceMap.get(r.ver) ?? 0,
-                crash_rate: r.total_sessions > 0 ? r.total_crashes / r.total_sessions : 0,
-                print_success_rate: prints.total > 0 ? prints.successes / prints.total : 0,
-                total_sessions: r.total_sessions,
-                total_crashes: r.total_crashes,
+                version: ver,
+                active_devices: active,
+                crash_rate: rates.crash_rate,
+                crash_free_devices: rates.crash_free,
+                p95_frame_ms: nullable(frameMap.get(ver)?.p95_frame_ms),
+                p95_rss_kb: nullable(rssMap.get(ver)?.p95_rss_kb),
+                print_success_rate: rates.print_success,
+                total_sessions: counts.sessions,
+                total_crashes: counts.crashes,
                 // Self-update health for devices RUNNING this version. A version
-                // whose update_success_rate collapses is one that cannot upgrade
-                // itself — the helixscreen#993 signature.
-                update_failures: r.update_failures ?? 0,
-                update_successes: r.update_successes ?? 0,
-                update_success_rate:
-                  (r.update_successes ?? 0) + (r.update_failures ?? 0) > 0
-                    ? (r.update_successes ?? 0) /
-                      ((r.update_successes ?? 0) + (r.update_failures ?? 0))
-                    : null,
+                // whose update_failure_rate climbs is one that cannot upgrade
+                // itself (prestonbrown/helixscreen#993).
+                update_failures: counts.update_failures,
+                update_successes: counts.update_successes,
+                update_failure_rate: rates.update_failure_rate,
               };
             }),
+            adoption: rowsOf(adoptionRes).map((r) => ({
+              date: r.date,
+              version: r.ver,
+              devices: r.devices,
+            })),
+            not_applicable,
           });
+        }
+
+        // GET /v1/dashboard/fleet/retention
+        if (url.pathname === "/v1/dashboard/fleet/retention") {
+          const res = (await executeQuery(queryConfig, retentionQuery(filters))) as {
+            data?: Array<{ first_day: string; last_day: string }>;
+          };
+          return json({ cohorts: buildRetention(res.data ?? [], new Date().toISOString().slice(0, 10)) });
         }
 
         // GET /v1/dashboard/performance
         if (url.pathname === "/v1/dashboard/performance") {
           const queries = performanceQueries(days, filters);
-          const [timeRes, platRes, verRes, worstRes, fleetRes, highDropRes] =
+          const [timeRes, platRes, verRes, worstRes, fleetRes, highDropRes, platVerRes, panelByPlatRes, rssByPlatVerRes] =
             await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
 
           const timeData = timeRes as { data: Array<{ date: string; avg_p50: number; avg_p95: number; avg_p99: number }> };
@@ -1233,6 +1423,10 @@ export default {
           const worstData = worstRes as { data: Array<{ panel: string; times_worst: number; avg_p95_ms: number }> };
           const fleetData = fleetRes as { data: Array<{ fleet_p50: number; total_dropped: number; total_frames: number; total_devices: number }> };
           const highDropData = highDropRes as { data: Array<{ high_drop_devices: number }> };
+          const platVerData = platVerRes as { data: Array<{ platform: string; version: string; p95_frame_ms: number; devices: number }> };
+          const panelByPlatData = panelByPlatRes as { data: Array<{ platform: string; panel: string; times_worst: number; avg_p95_ms: number }> };
+          const rssByPlatVerData = rssByPlatVerRes as { data: Array<{ platform: string; version: string; avg_rss_kb: number }> };
+          const rssOf = new Map((rssByPlatVerData.data ?? []).map((r) => [`${r.platform}\u0000${r.version}`, r.avg_rss_kb]));
 
           const fleet = fleetData.data?.[0] ?? { fleet_p50: 0, total_dropped: 0, total_frames: 0, total_devices: 0 };
 
@@ -1254,40 +1448,31 @@ export default {
             jankiest_panels: (worstData.data ?? []).map(r => ({
               panel: r.panel, times_worst: r.times_worst, avg_p95_ms: Math.round(r.avg_p95_ms),
             })),
+            by_platform_version: (platVerData.data ?? []).map(r => ({
+              platform: r.platform,
+              version: r.version,
+              p95_frame_ms: r.p95_frame_ms,
+              avg_rss_kb: rssOf.get(`${r.platform}\u0000${r.version}`) ?? null,
+              devices: r.devices,
+            })),
+            jankiest_by_platform: (panelByPlatData.data ?? []).map(r => ({
+              platform: r.platform, panel: r.panel, times_worst: r.times_worst, avg_p95_ms: Math.round(r.avg_p95_ms),
+            })),
           });
         }
 
         // GET /v1/dashboard/features
         if (url.pathname === "/v1/dashboard/features") {
           const queries = featuresQueries(days, filters);
-          const [adoptionRes, byVersionRes, totalRes] =
+          const [overlayRes, widgetRes, deltaEraRes, ...flagRes] =
             await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
-
-          const adoptionData = adoptionRes as { data: Array<Record<string, number>> };
-          const byVersionData = byVersionRes as { data: Array<Record<string, unknown>> };
-          const totalData = totalRes as { data: Array<{ total_devices: number }> };
-
-          const row = adoptionData.data?.[0] ?? {};
-          const totalDevices = totalData.data?.[0]?.total_devices ?? 0;
-
-          const featureNames = ["macros", "camera", "bed_mesh", "console_gcode",
-            "input_shaper", "filament_management", "manual_probe"];
-
-          const features = featureNames.map(name => ({
-            name,
-            adoption_rate: Number(row[name] ?? 0),
-          }));
+          const deltaEraDevices = deltaEraCount(deltaEraRes);
+          const uses = (res: unknown) => ((res as { data?: FeatureUse[] }).data ?? []);
 
           return json({
-            total_devices: totalDevices,
-            features: features.sort((a, b) => b.adoption_rate - a.adoption_rate),
-            by_version: (byVersionData.data ?? []).map(r => ({
-              version: String(r.version ?? ""),
-              devices: Number(r.devices ?? 0),
-              macros: Number(r.macros ?? 0),
-              camera: Number(r.camera ?? 0),
-              bed_mesh: Number(r.bed_mesh ?? 0),
-            })),
+            ...deltaEraFields("features", deltaEraDevices, filters),
+            features: deriveFeatureAdoption(uses(overlayRes), uses(widgetRes), deltaEraDevices),
+            configured: CONFIGURED_FEATURE_FLAGS.map((id, i) => configuredFeature(id, flagRes[i])),
           });
         }
 
@@ -1295,8 +1480,9 @@ export default {
         if (url.pathname === "/v1/dashboard/ux") {
           const queries = uxInsightsQueries(days, filters);
           const [panelTimeRes, panelVisitRes, settingsFreqRes, settingsDefaultsRes,
-                 totalDevicesRes, avgSessionRes, changeRateRes] =
+                 totalDevicesRes, avgSessionRes, changeRateRes, deltaEraRes] =
             await Promise.all(queries.map((q) => executeQuery(queryConfig, q)));
+          const deltaEraDevices = deltaEraCount(deltaEraRes);
 
           const panelTime = panelTimeRes as { data: Array<{ panel: string; total_time_sec: number }> };
           const panelVisits = panelVisitRes as { data: Array<{ panel: string; total_visits: number; devices: number }> };
@@ -1313,7 +1499,8 @@ export default {
           const leastVisited = panels.length > 0 ? panels[panels.length - 1].panel : "";
 
           return json({
-            avg_session_sec: avgSession.data?.[0]?.avg_session_sec ?? 0,
+            ...deltaEraFields("ux", deltaEraDevices, filters),
+            avg_session_sec: deltaValue(deltaEraDevices, avgSession.data?.[0]?.avg_session_sec),
             most_visited_panel: mostVisited,
             least_visited_panel: leastVisited,
             settings_change_rate_per_device_per_week:
@@ -1331,6 +1518,46 @@ export default {
           });
         }
 
+        // GET /v1/dashboard/health
+        if (url.pathname === "/v1/dashboard/health") {
+          return json(await fetchHealth(queryConfig, new Date().toISOString().slice(0, 10), filters));
+        }
+
+        // GET /v1/dashboard/reports
+        if (url.pathname === "/v1/dashboard/reports") {
+          return json({ weeks: reportWeeks(await r2Store(env.TELEMETRY_BUCKET).list(REPORT_PREFIX)) });
+        }
+
+        // GET /v1/dashboard/reports/<YYYY-Www>
+        if (url.pathname.startsWith("/v1/dashboard/reports/")) {
+          const week = url.pathname.slice("/v1/dashboard/reports/".length);
+          if (!WEEK_PATTERN.test(week)) return json({ error: "week must be YYYY-Www" }, 400);
+          const stored = await r2Store(env.TELEMETRY_BUCKET).get(reportKey(week));
+          if (stored === null) return json({ error: "Not found" }, 404);
+          return new Response(stored, { headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+        }
+
+        // GET /v1/dashboard/devices
+        if (url.pathname === "/v1/dashboard/devices") {
+          const [sessionsRes, totalRes, crashesRes, printsRes] = await Promise.all(
+            devicesQueries(days, filters).map((q) => executeQuery(queryConfig, q)),
+          );
+          return json(
+            buildDeviceList(sessionsRes, crashesRes, printsRes, totalRes, notApplicableFor(DEVICE_LIST_BLOCKS, filters)),
+          );
+        }
+
+        // GET /v1/dashboard/device/<64 hex id>
+        if (url.pathname.startsWith("/v1/dashboard/device/")) {
+          const id = url.pathname.slice("/v1/dashboard/device/".length);
+          if (!isDeviceId(id)) return json({ error: "invalid device id" }, 400);
+          const [rowsRes, versionsRes] = await Promise.all(
+            deviceQueries(id).map((q) => executeQuery(queryConfig, q)),
+          );
+          const page = buildDevicePage(id, rowsRes, versionsRes);
+          return page ? json(page) : json({ error: "device not found" }, 404);
+        }
+
         return json({ error: "Not found" }, 404);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -1338,57 +1565,68 @@ export default {
       }
     }
 
-    // ---------- Backfill endpoint (admin only) ----------
-    // POST /v1/admin/backfill — writes historical events to Analytics Engine
-    if (url.pathname === "/v1/admin/backfill" && request.method === "POST") {
+    // Runs the feedback loop with real reads. Nothing is sent, filed or written unless
+    // dry=0 is explicit.
+    // POST /v1/admin/loop/run?mode=daily|weekly[&dry=0]
+    if (url.pathname === "/v1/admin/loop/run" && request.method === "POST") {
       const apiKey = request.headers.get("x-api-key") ?? "";
       if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
         return json({ error: "Unauthorized" }, 401);
       }
 
-      if (!env.TELEMETRY_ANALYTICS) {
+      const mode = url.searchParams.get("mode");
+      if (mode !== "daily" && mode !== "weekly") {
+        return json({ error: "mode must be daily or weekly" }, 400);
+      }
+
+      const config = queryConfigOf(env);
+      if (!config) return json({ error: "Analytics Engine not configured" }, 503);
+
+      try {
+        const dryRun = url.searchParams.get("dry") !== "0";
+        return json(await runLoop(mode, loopDeps(env, config, new Date()), dryRun));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        return json({ error: `Loop run failed: ${message}` }, 502);
+      }
+    }
+
+    // Per-kind Analytics Engine row counts for one UTC day, for reconciling
+    // against R2 (scripts/reconcile.ts).
+    // GET /v1/admin/ae-counts?date=YYYY-MM-DD
+    if (url.pathname === "/v1/admin/ae-counts" && request.method === "GET") {
+      const apiKey = request.headers.get("x-api-key") ?? "";
+      if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
+        return json({ error: "Unauthorized" }, 401);
+      }
+
+      const date = url.searchParams.get("date") ?? "";
+      if (!isIsoDate(date)) {
+        return json({ error: "date must be YYYY-MM-DD" }, 400);
+      }
+
+      if (!env.CLOUDFLARE_ACCOUNT_ID || !env.HELIX_ANALYTICS_READ_TOKEN) {
         return json({ error: "Analytics Engine not configured" }, 503);
       }
 
-      const contentType = request.headers.get("content-type") ?? "";
-      if (!contentType.includes("application/json")) {
-        return json({ error: "Content-Type must be application/json" }, 400);
-      }
-
-      let body: unknown;
       try {
-        body = await request.json();
-      } catch {
-        return json({ error: "Invalid JSON body" }, 400);
+        const res = (await executeQuery(
+          { accountId: env.CLOUDFLARE_ACCOUNT_ID, apiToken: env.HELIX_ANALYTICS_READ_TOKEN },
+          aeCountsQuery(date),
+        )) as { data?: Array<{ kind: string; row_count: number; weighted: number; devices: number }> };
+        return json({
+          date,
+          kinds: (res.data ?? []).map((r) => ({
+            kind: r.kind,
+            rows: r.row_count,
+            weighted: r.weighted,
+            devices: r.devices,
+          })),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        return json({ error: `Analytics query failed: ${message}` }, 502);
       }
-
-      if (typeof body !== "object" || body === null || Array.isArray(body)) {
-        return json({ error: "Body must be an object with events array" }, 400);
-      }
-
-      const events = (body as Record<string, unknown>).events;
-      if (!Array.isArray(events)) {
-        return json({ error: "events must be an array" }, 400);
-      }
-
-      if (events.length === 0) {
-        return json({ error: "events array must not be empty" }, 400);
-      }
-
-      let written = 0;
-      for (const evt of events) {
-        try {
-          const points = mapEventToDataPoints(evt as Record<string, unknown>);
-          for (const point of points) {
-            env.TELEMETRY_ANALYTICS.writeDataPoint(point);
-            written++;
-          }
-        } catch {
-          // Skip individual failures, continue backfilling
-        }
-      }
-
-      return json({ status: "ok", written });
     }
 
     // Symbol map listing — returns available platforms for a version
@@ -1469,19 +1707,25 @@ export default {
   },
 
   /**
-   * Daily CDN fleet snapshot (see wrangler.toml [triggers]).
+   * Cron dispatch (see wrangler.toml [triggers]). The 13:00 UTC cron runs the feedback
+   * loop; every other one is the daily CDN fleet snapshot.
    *
-   * Snapshots the UTC day that just closed. Zone analytics retain roughly 8
-   * days, so a missed run is recoverable via POST /v1/admin/cdn-snapshot for
+   * The CDN snapshot snapshots the UTC day that just closed. Zone analytics retain
+   * roughly 8 days, so a missed run is recoverable via POST /v1/admin/cdn-snapshot for
    * a few days and unrecoverable after that.
    *
-   * Failures are deliberately NOT caught. An expired or re-scoped token would
+   * Its failures are deliberately NOT caught. An expired or re-scoped token would
    * otherwise stop the metric silently and the tile would simply stop advancing
    * with nothing to explain why - which is the exact failure mode this whole
    * metric exists to avoid. Letting it reject marks the cron invocation as
-   * errored in Cloudflare's observability, where it can be seen.
+   * errored in Cloudflare's observability, where it can be seen. The loop is the
+   * opposite: it logs its own failures and never rejects.
    */
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (event.cron === LOOP_CRON) {
+      ctx.waitUntil(runScheduledLoop(env, new Date(event.scheduledTime)));
+      return;
+    }
     const date = previousUtcDay(new Date());
     ctx.waitUntil(captureCdnFleetDay(env, date));
   },

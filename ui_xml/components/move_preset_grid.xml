@@ -21,7 +21,8 @@
         extends="lv_obj" width="100%" height="100%" style_pad_all="0" style_border_opa="0" scrollable="false"
         flex_flow="column" style_pad_gap="#space_xs">
     <!-- Every preset button is disabled while the panel's moves are gated:
-       nav buttons off (not connected / klippy not ready) or a print active.
+       nav buttons off (not connected / klippy not ready), a print active, or
+       any axis unhomed (only an explicit Home homes).
        The C++ handlers re-check both as a backstop. Presets and Park also
        grey out while the toolhead is busy (idle_timeout "Printing"), so a
        second tap cannot land mid-move. The raw flag also blips during a
@@ -37,18 +38,21 @@
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="rear_left"/>
         </ui_button>
         <ui_button name="preset_rear" width="0" height="100%" text="Rear" flex_grow="1" moves_machine="true">
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="rear"/>
         </ui_button>
         <ui_button name="preset_rear_right" width="0" height="100%" text="Rear Right" flex_grow="1" moves_machine="true">
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="rear_right"/>
         </ui_button>
       </lv_obj>
@@ -60,18 +64,21 @@
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="left"/>
         </ui_button>
         <ui_button name="preset_center" width="0" height="100%" text="Center" flex_grow="1" moves_machine="true">
           <style name="preset_center"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="center"/>
         </ui_button>
         <ui_button name="preset_right" width="0" height="100%" text="Right" flex_grow="1" moves_machine="true">
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="right"/>
         </ui_button>
       </lv_obj>
@@ -83,12 +90,14 @@
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="front_left"/>
         </ui_button>
         <ui_button name="preset_front" width="0" height="100%" text="Front" flex_grow="1" moves_machine="true">
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="front"/>
         </ui_button>
         <ui_button name="preset_front_right"
@@ -96,6 +105,7 @@
           <style name="preset_rim"/>
           <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
           <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+          <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
           <event_cb trigger="clicked" callback="on_motion_preset_clicked" user_data="front_right"/>
         </ui_button>
       </lv_obj>
@@ -109,6 +119,7 @@
                  width="0" height="#button_height" text="Park" variant="outline" flex_grow="1" moves_machine="true">
         <bind_state_if_eq subject="nav_buttons_enabled" state="disabled" ref_value="0"/>
         <bind_state_if_eq subject="idle_timeout_printing" state="disabled" ref_value="1"/>
+        <bind_state_if cond="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0" state="disabled"/>
         <event_cb trigger="clicked" callback="on_motion_park_clicked"/>
       </ui_button>
       <ui_button name="move_motors_off"

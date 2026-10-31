@@ -75,7 +75,7 @@ class SuspendReasonFixture : public LVGLUITestFixture {
         home_widget_ = lv_obj_create(test_screen());
         controls_widget_ = lv_obj_create(test_screen());
 
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = home_widget_;
         panels[static_cast<int>(PanelId::Controls)] = controls_widget_;
         nav.set_panels(panels);

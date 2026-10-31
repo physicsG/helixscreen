@@ -1,0 +1,19 @@
+{
+  "description": "Delete one line and a two-line range",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "L2",
+      "action": "delete",
+      "args": {}
+    },
+    {
+      "line_number": 4,
+      "expect_raw_line": "",
+      "action": "delete",
+      "args": {
+        "end_line": 5
+      }
+    }
+  ]
+}

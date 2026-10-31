@@ -9,7 +9,7 @@
 
 #include "../catch_amalgamated.hpp"
 
-using helix::bed_mesh::DEFAULT_PROBE_BED_TEMP_C;
+using helix::bed_mesh::kDefaultProbeBedTempC;
 using helix::bed_mesh::probe_bed_temp_c;
 
 TEST_CASE("probe bed temp: a set target wins", "[bed_mesh][probe_temp]") {
@@ -44,7 +44,7 @@ TEST_CASE("probe bed temp: an idle bed still hot is not left to cool", "[bed_mes
 
 TEST_CASE("probe bed temp: a cool bed with no target probes at 60", "[bed_mesh][probe_temp]") {
     CHECK(probe_bed_temp_c(0, 240) == 60);
-    CHECK(DEFAULT_PROBE_BED_TEMP_C == 60);
+    CHECK(kDefaultProbeBedTempC == 60);
     // "Above 60" is strict, and 60.9 floors to 60.
     CHECK(probe_bed_temp_c(0, 600) == 60);
     CHECK(probe_bed_temp_c(0, 609) == 60);

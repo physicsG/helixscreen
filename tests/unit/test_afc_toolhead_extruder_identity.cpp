@@ -28,6 +28,7 @@
 
 #include "ams_backend_afc.h"
 #include "ams_types.h"
+#include "display_numbering.h"
 #include "ui/ams_drawing_utils.h"
 
 #include <spdlog/spdlog.h>
@@ -62,8 +63,7 @@ nlohmann::json load_fixture(const std::string& name) {
     return j;
 }
 
-/// Harness copied from test_afc_toolhead_node_count.cpp — same capture, same
-/// settling requirement.
+/// Discovers lanes from the capture's object list and feeds its status frames.
 class AfcLayoutHelper : public AmsBackendAfc {
   public:
     AfcLayoutHelper() : AmsBackendAfc(nullptr, nullptr) {}
@@ -199,13 +199,12 @@ TEST_CASE("AFC toolchanger: toolhead nodes carry extruder identity, not lane ali
     CHECK(ams_draw::layout_has_extruder_identity(layout));
 
     const auto badges = ams_draw::compute_tool_badge_labels(layout, info, -1, -1);
-    // A toolhead badge is 'T' on both paths; the extruder name, never the
-    // virtual lane alias, supplies the number (prestonbrown/helixscreen#1229).
-    CHECK(badges.prefix == 'T');
+    CHECK(badges.prefix == 'E');
     REQUIRE(badges.numbers.size() == expected.size());
     for (size_t p = 0; p < expected.size(); ++p) {
         INFO("physical node " << p << " is " << expected[p]);
-        CHECK(badges.numbers[p] == helix::tool_number_for_extruder(expected[p]).value());
+        CHECK(badges.numbers[p] ==
+              helix::ui::lane_number(helix::tool_number_for_extruder(expected[p]).value()));
     }
 }
 
@@ -255,13 +254,11 @@ TEST_CASE("AFC toolchanger: the extruder5 toolhead is E5, never the lane's T0 al
     REQUIRE(badges.numbers.size() > static_cast<size_t>(node_e5));
 
     INFO("toolhead " << node_e5 << " drives extruder5 but its lane is mapped T" << *alias_e5);
-    CHECK(badges.numbers[node_e5] == 5);
-    CHECK(badges.numbers[node_e5] != *alias_e5); // THE defect: 5, never 0
-    CHECK(badges.numbers[node_e4] == 4);
+    CHECK(badges.numbers[node_e5] == 6);         // 1-based extruder5 (index 5)
+    CHECK(badges.numbers[node_e5] != *alias_e5); // THE defect: 6, never 0
+    CHECK(badges.numbers[node_e4] == 5);         // 1-based extruder4 (index 4)
     CHECK(badges.numbers[node_e4] != *alias_e4);
-    // A toolhead badge is 'T' on both paths; the extruder name, never the
-    // virtual lane alias, supplies the number (prestonbrown/helixscreen#1229).
-    CHECK(badges.prefix == 'T');
+    CHECK(badges.prefix == 'E');
 }
 
 TEST_CASE("AFC toolchanger: an active lane's alias is never written onto a toolhead",
@@ -292,11 +289,8 @@ TEST_CASE("AFC toolchanger: an active lane's alias is never written onto a toolh
 
     const auto badges = ams_draw::compute_tool_badge_labels(layout, info, active_slot, active_node);
     INFO("active lane alias T" << slot->mapped_tool << " must not overwrite the E5 badge");
-    // A toolhead badge is 'T' plus the tool's own 0-based number on both
-    // paths; the extruder name, never the virtual lane alias, supplies the
-    // number (prestonbrown/helixscreen#1229).
-    CHECK(badges.numbers[active_node] == 5);
-    CHECK(badges.prefix == 'T');
+    CHECK(badges.numbers[active_node] == 6); // 1-based extruder5 (index 5)
+    CHECK(badges.prefix == 'E');
 
     // The legacy path keeps the substitution — it is long-standing behaviour on
     // backends with no extruder names, and this pins that it is still applied.

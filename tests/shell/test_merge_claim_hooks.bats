@@ -162,3 +162,15 @@ teardown() {
     run grep -c 'helix-claim take' .githooks/lib/claim-tree.sh
     [ "$output" -eq 1 ]
 }
+
+@test "a helix-claim usage error (exit 2) reaches stderr instead of vanishing" {
+    printf '#!/bin/sh\n[ "$1" = check ] && exit 0\necho "helix-claim: unknown option: --bogus" >&2\nexit 2\n' > scripts/helix-claim
+    run bash -c '. .githooks/lib/claim-tree.sh; claim_tree probe 2>&1 >/dev/null'
+    contains "unknown option: --bogus" "$output"
+}
+
+@test "a refused take (exit 1) stays quiet" {
+    printf '#!/bin/sh\n[ "$1" = check ] && exit 0\necho REFUSED\nexit 1\n' > scripts/helix-claim
+    run bash -c '. .githooks/lib/claim-tree.sh; claim_tree probe 2>&1'
+    [ -z "$output" ]
+}

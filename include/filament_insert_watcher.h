@@ -4,6 +4,7 @@
 #pragma once
 
 #include "async_lifetime_guard.h"
+#include "filament_insert_policy.h"
 #include "i_moonraker_api.h"
 #include "observer_factory.h"
 
@@ -12,10 +13,13 @@
 
 namespace helix {
 
+class AmsBackend;
+
 /// Opens the per-slot editor when a person newly inserts filament (#1335).
 ///
 /// Two sources, one decision (should_open_editor_on_insert):
-///  - AMS lanes with a prep sensor going empty to present;
+///  - AMS lanes with a prep sensor going empty to present, unless the lane's
+///    tag reader names the spool (lane_insert_action);
 ///  - the ENTRY/TOOLHEAD sensors going empty to present, for a manual load on a
 ///    printer with no AMS or with its bypass engaged. The target is the external
 ///    spool.
@@ -26,10 +30,19 @@ class FilamentInsertWatcher {
     explicit FilamentInsertWatcher(IMoonrakerAPI* api);
     void start(); ///< One-shot; installs the observers
 
+    /// One judging pass over the lanes: updates each lane's baseline and held
+    /// insert, claims the insert prompt for a lane it asks or waits on, and
+    /// returns the lane whose editor to open, or -1. @p ctx carries the guards
+    /// (setting, print, operation, editor); its presence fields are per lane.
+    int judge_lanes(const AmsBackend& backend, FilamentInsertContext ctx);
+
+    /// Forget every baseline, held insert and prompt claim: a reconnect, Klipper
+    /// restart or sensor reconfiguration moves readings with no insert.
+    void reseed();
+
   private:
     void on_ams_changed();
     void on_sensor_changed();
-    void reseed();
     [[nodiscard]] bool operation_busy() const;
     void open_lane(int slot_index);
     void open_external();
@@ -43,6 +56,8 @@ class FilamentInsertWatcher {
     ObserverGuard config_observer_;
     /// Last stated presence per lane; empty means "seed on the next tick".
     std::vector<std::optional<bool>> lane_prev_;
+    /// Lanes whose insert waits on the tag reader's verdict (slot_insert_identity).
+    std::vector<bool> lane_waiting_;
     std::optional<bool> sensor_prev_;
 };
 

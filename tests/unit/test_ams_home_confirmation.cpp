@@ -34,7 +34,7 @@ namespace {
 /// failure signal for the (fixture-driven) G28/payload dispatch is the
 /// AmsError these overrides return, which it translates into the
 /// MoonrakerError passed to on_error. Deliberately NOT a stored
-/// std::function<void(const MoonrakerError&)> callback invoked directly by
+/// helix::SharedCallback<void(const MoonrakerError&)> callback invoked directly by
 /// the override -- the override has no way to receive ensure_homed_then's
 /// on_error as a parameter (the 1-arg/2-arg execute_gcode virtuals predate
 /// on_error and can't grow it without breaking ~20 other fixtures), so the
@@ -51,7 +51,7 @@ class HomingProbeBackend : public helix::AmsBackendAfc {
         return helix::AmsErrorHelper::success();
     }
     helix::AmsError execute_gcode(const std::string& gcode,
-                                  std::function<void()> on_complete) override {
+                                  helix::SharedCallback<void()> on_complete) override {
         if (fail_next_gcode) {
             return helix::AmsError(helix::AmsResult::COMMAND_FAILED, "boom", "boom");
         }
@@ -100,7 +100,7 @@ TEST_CASE("ensure_homed_then skip_homing bypasses the home entirely", "[ams][hom
     HomingProbeBackend backend;
     backend.homed = false;
 
-    backend.ensure_homed_then("BOX_LOAD", nullptr, nullptr, MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
+    backend.ensure_homed_then("BOX_LOAD", nullptr, nullptr, MoonrakerAPI::kAmsOperationTimeoutMs,
                               /*skip_homing=*/true);
 
     REQUIRE(backend.captured.size() == 1);
@@ -137,12 +137,19 @@ class ToolChangerHomingProbeBackend : public helix::AmsBackendToolChanger {
         return helix::AmsErrorHelper::success();
     }
     helix::AmsError execute_gcode(const std::string& gcode,
-                                  std::function<void()> on_complete) override {
+                                  helix::SharedCallback<void()> on_complete) override {
         captured.push_back(gcode);
         if (on_complete) {
             on_complete();
         }
         return helix::AmsErrorHelper::success();
+    }
+    // A dispatch that unwinds on a rejection sends through this form.
+    helix::AmsError execute_gcode(const std::string& gcode,
+                                  helix::SharedCallback<void()> on_complete,
+                                  helix::SharedCallback<void(const MoonrakerError&)> /*on_error*/,
+                                  bool /*silent*/) override {
+        return execute_gcode(gcode, std::move(on_complete));
     }
     bool toolhead_homed() const override {
         return homed;
@@ -182,8 +189,10 @@ class UnhomedToolChanger : public helix::test::ToolChangerHelper {
 } // namespace
 
 // Bed drying's unload and the filament surfaces all route through
-// execute_filament_unload(): an unhomed printer homes and unloads, unasked.
-TEST_CASE("an unload through execute_filament_unload on an unhomed printer homes and proceeds",
+// execute_filament_unload(). On a tool changer the unload is by hand, so even an
+// unhomed one neither homes nor sends: nothing would move.
+TEST_CASE("an unload through execute_filament_unload on a tool changer homes nothing and sends "
+          "nothing",
           "[ams][homing][filament]") {
     LVGLTestFixture fixture;
     UnhomedToolChanger tc(4);
@@ -192,9 +201,7 @@ TEST_CASE("an unload through execute_filament_unload on an unhomed printer homes
     helix::ui::execute_filament_unload(&tc, 1, /*target_is_loaded=*/true, "[HomingTest]");
 
     CHECK(ModalStack::instance().empty());
-    REQUIRE(tc.sent().size() == 2);
-    CHECK(tc.sent()[0] == "G28");
-    CHECK(tc.sent()[1] == "UNSELECT_TOOL T=1");
+    CHECK(tc.sent().empty());
 }
 
 // =====================================================================
@@ -218,8 +225,8 @@ TEST_CASE("ensure_homed_then custom timeout/silent bypass the hardcoded virtuals
 
     helix::AmsBackendAfc backend(&api, &client);
 
-    constexpr uint32_t CUSTOM_TIMEOUT_MS = 12345;
-    REQUIRE(CUSTOM_TIMEOUT_MS != MoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
+    constexpr uint32_t kCustomTimeoutMs = 12345;
+    REQUIRE(kCustomTimeoutMs != MoonrakerAPI::kAmsOperationTimeoutMs);
     // The mock handler for printer.gcode.script runs synchronously inside
     // send_jsonrpc(), so this fires before ensure_homed_then() even returns --
     // exercising the on_error leg of dispatch_payload()'s custom branch, not
@@ -231,15 +238,15 @@ TEST_CASE("ensure_homed_then custom timeout/silent bypass the hardcoded virtuals
     // is already covered by the two tests above.
     auto err = backend.ensure_homed_then(
         "BOX_LOAD", nullptr, [&seen](const MoonrakerError& e) { seen = e.message; },
-        CUSTOM_TIMEOUT_MS, /*skip_homing=*/true, /*silent=*/false);
+        kCustomTimeoutMs, /*skip_homing=*/true, /*silent=*/false);
     REQUIRE(err.success());
 
     // Dispatch went straight to MoonrakerAPI::execute_gcode() carrying OUR
     // timeout_ms/silent -- the hardcoded 1-arg/2-arg execute_gcode virtuals fix
-    // AMS_OPERATION_TIMEOUT_MS/true and can never produce these values.
+    // kAmsOperationTimeoutMs/true and can never produce these values.
     CHECK(client.last_send_method() == "printer.gcode.script");
     CHECK(client.last_send_script() == "BOX_LOAD");
-    CHECK(client.last_send_timeout_ms() == CUSTOM_TIMEOUT_MS);
+    CHECK(client.last_send_timeout_ms() == kCustomTimeoutMs);
     CHECK_FALSE(client.last_send_silent());
 
     // The error callback is marshalled through token.defer() (L081 Mechanism
@@ -314,7 +321,7 @@ TEST_CASE("CFS Fork variant never homes via dispatch_action_script", "[ams][homi
 }
 
 // =====================================================================
-// FilamentPanel: an unhomed macro-tier load homes first, unasked
+// FilamentPanel: an unhomed macro-tier load homes only when its profile says so
 // =====================================================================
 
 namespace {
@@ -330,12 +337,29 @@ struct UnhomedMacroLoad {
         get_printer_state().update_from_status({{"toolhead", {{"homed_axes", ""}}}});
         h.state.update_from_status({{"toolhead", {{"homed_axes", ""}}},
                                     {"extruder", {{"temperature", 240.0}, {"target", 240.0}}}});
-        h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+        h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     }
 
     void press_load() {
         helix::ui::FilamentPanelTestAccess::handle_load_button(*h.panel);
         helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    }
+
+    void execute_load_needing_home() {
+        helix::ui::FilamentPanelTestAccess::set_home_before_load_macro(*h.panel, true);
+        helix::ui::FilamentPanelTestAccess::execute_load(*h.panel);
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    }
+
+    /// How many sent scripts start with @p word.
+    [[nodiscard]] long count_sent(const std::string& word) const {
+        long n = 0;
+        for (const auto& line : h.client.gcode_script_history()) {
+            if (line == word || line.rfind(word + " ", 0) == 0) {
+                ++n;
+            }
+        }
+        return n;
     }
 
     /// Position of the first sent script starting with @p word, or -1.
@@ -355,17 +379,29 @@ struct UnhomedMacroLoad {
 } // namespace
 
 TEST_CASE_METHOD(LVGLUITestFixture,
-                 "An unhomed macro-tier load sends G28, then the macro, with no prompt",
+                 "An unhomed load through an unrecognized macro sends the macro with no G28",
                  "[filament][homing]") {
     UnhomedMacroLoad t;
 
     t.press_load();
+
+    CHECK(t.first_sent("LOAD_FILAMENT") >= 0);
+    CHECK(t.first_sent("G28") < 0);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "A macro-tier load that needs a home sends G28, then the macro, with no prompt",
+                 "[filament][homing]") {
+    UnhomedMacroLoad t;
+
+    t.execute_load_needing_home();
 
     const long home = t.first_sent("G28");
     const long load = t.first_sent("LOAD_FILAMENT");
     REQUIRE(home >= 0);
     REQUIRE(load >= 0);
     CHECK(home < load);
+    CHECK(t.count_sent("LOAD_FILAMENT") == 1);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture, "A home that fails before a macro-tier load sends no macro",
@@ -373,7 +409,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "A home that fails before a macro-tier load 
     UnhomedMacroLoad t;
     t.h.client.force_next_gcode_error(MoonrakerErrorType::UNKNOWN, "Homing failed", "G28");
 
-    t.press_load();
+    t.execute_load_needing_home();
 
     CHECK(t.first_sent("G28") >= 0);
     CHECK(t.first_sent("LOAD_FILAMENT") < 0);

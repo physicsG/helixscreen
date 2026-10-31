@@ -191,7 +191,7 @@ class MemoryMonitor {
     /**
      * @brief Set the main-loop hang threshold. 0 disables detection.
      *
-     * Default is MainLoopHangDetector::DEFAULT_THRESHOLD_MS. It has to clear the
+     * Default is MainLoopHangDetector::kDefaultThresholdMs. It has to clear the
      * longest legitimate main-thread block, and those are real: the startup XML
      * parse alone runs ~8s on AD5M.
      */
@@ -227,22 +227,22 @@ class MemoryMonitor {
     // thread; the threshold is atomic because it is set from the UI thread at
     // startup, and the callback is guarded by callback_mutex_ like the others.
     MainLoopHangDetector hang_detector_{};
-    std::atomic<uint32_t> hang_threshold_ms_{MainLoopHangDetector::DEFAULT_THRESHOLD_MS};
+    std::atomic<uint32_t> hang_threshold_ms_{MainLoopHangDetector::kDefaultThresholdMs};
     HangCallback hang_callback_;
     std::vector<std::pair<PressureResponderId, std::function<void(MemoryPressureLevel)>>>
         pressure_responders_;
     std::atomic<uint32_t> next_responder_id_{1};
 
     // Growth tracking: circular buffer of RSS samples at 30s intervals (5-min window)
-    static constexpr size_t RSS_HISTORY_SIZE = 10;
-    std::array<size_t, RSS_HISTORY_SIZE> rss_history_{};
+    static constexpr size_t kRssHistorySize = 10;
+    std::array<size_t, kRssHistorySize> rss_history_{};
     size_t rss_history_index_ = 0;
     size_t rss_history_count_ = 0;
     int deep_sample_counter_ = 0; ///< Counts 5s ticks; deep sample every 6th (30s)
 
     // Rate limiting: last warning time per level
-    static constexpr int NUM_LEVELS = 4;
-    std::array<std::chrono::steady_clock::time_point, NUM_LEVELS> last_warning_time_{};
+    static constexpr int kNumLevels = 4;
+    std::array<std::chrono::steady_clock::time_point, kNumLevels> last_warning_time_{};
 
     /// When the level first reached `warning` and stayed there; reset whenever
     /// it drops below warning. Feeds compute_pressure_level's escalation.

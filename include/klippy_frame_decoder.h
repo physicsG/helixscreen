@@ -27,12 +27,12 @@ namespace helix {
 class KlippyFrameDecoder {
   public:
     /// Klipper's frame terminator.
-    static constexpr char FRAME_TERMINATOR = '\x03';
+    static constexpr char kFrameTerminator = '\x03';
 
     /// Ceiling on unterminated buffered bytes. A peer that never terminates a
     /// frame must not be able to exhaust memory on a 512 MB printer board.
     /// Four times the largest observed frame, rounded up generously.
-    static constexpr size_t MAX_PENDING_BYTES = 4 * 1024 * 1024;
+    static constexpr size_t kMaxPendingBytes = 4 * 1024 * 1024;
 
     /**
      * @brief Consume bytes, invoking on_frame once per complete frame
@@ -50,7 +50,7 @@ class KlippyFrameDecoder {
         return pending_.size();
     }
 
-    /// True once MAX_PENDING_BYTES was exceeded. Latches until reset(). The
+    /// True once kMaxPendingBytes was exceeded. Latches until reset(). The
     /// stream is unreliable from that point - the owner should reconnect.
     [[nodiscard]] bool overflowed() const {
         return overflowed_;

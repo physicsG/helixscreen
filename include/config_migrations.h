@@ -32,7 +32,7 @@ std::string find_active_printer_key(const json& config, const std::string& prefe
 /// @p platform_default; any other value is the user's and stays.
 int migrated_scroll_throw(int stored, int platform_default);
 
-/// Upgrade @p config from its config_version to CURRENT_CONFIG_VERSION and
+/// Upgrade @p config from its config_version to kCurrentConfigVersion and
 /// stamp it. @p config_path locates sidecar files a migration folds in.
 void run_versioned_migrations(json& config, const std::string& config_path);
 

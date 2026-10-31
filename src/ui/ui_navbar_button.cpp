@@ -4,6 +4,8 @@
 #include "ui_navbar_button.h"
 
 #include "ui_effects.h"
+#include "ui_keyboard_manager.h"
+#include "ui_modal.h"
 #include "ui_utils.h"
 
 #include "theme_manager.h"
@@ -28,7 +30,15 @@ void NavbarButton::create(lv_obj_t* navbar) {
         return;
     }
     lv_obj_set_name(button_, widget_name_);
-    add_always_on_top(button_);
+    add_always_on_top(button_, [this] { raise(); });
+    // Built while a modal is open, it goes under that modal's backdrop like the
+    // chrome already there.
+    if (chrome_covered()) {
+        lv_obj_t* backdrop = ModalStack::instance().lowest_covering_backdrop();
+        if (backdrop && lv_obj_get_parent(backdrop) == screen) {
+            lv_obj_move_to_index(button_, static_cast<int32_t>(lv_obj_get_index(backdrop)));
+        }
+    }
     spdlog::debug("[NavigationManager] {} created over {}", component_, slot_name_);
     // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
     lv_obj_add_event_cb(button_, button_deleted_cb, LV_EVENT_DELETE, this);
@@ -89,6 +99,27 @@ void NavbarButton::sync() {
     lv_obj_set_pos(button_, area.x1, y);
 }
 
+bool NavbarButton::rides_above_keyboard() const {
+    return lifts_over_keyboard_ && keyboard_top_ >= 0 && navbar_ &&
+           lv_obj_get_height(navbar_) > lv_obj_get_width(navbar_);
+}
+
+void NavbarButton::raise() {
+    if (!button_) {
+        return;
+    }
+    lv_obj_move_foreground(button_);
+    if (rides_above_keyboard()) {
+        return;
+    }
+    // An open keyboard over the navbar covers the button; it stays just under it.
+    lv_obj_t* keyboard = KeyboardManager::instance().get_instance();
+    if (keyboard && KeyboardManager::instance().is_visible() &&
+        lv_obj_get_parent(keyboard) == lv_obj_get_parent(button_)) {
+        lv_obj_move_to_index(button_, static_cast<int32_t>(lv_obj_get_index(keyboard)));
+    }
+}
+
 void NavbarButton::set_keyboard_top(int32_t top) {
     if (!lifts_over_keyboard_) {
         return;
@@ -97,7 +128,7 @@ void NavbarButton::set_keyboard_top(int32_t top) {
     sync();
     // Only a side navbar leaves room above the keyboard. A portrait bottom navbar is
     // under it, and a button raised there would sit on the keyboard's keys.
-    if (top >= 0 && button_ && navbar_ && lv_obj_get_height(navbar_) > lv_obj_get_width(navbar_)) {
+    if (top >= 0 && button_ && rides_above_keyboard() && !chrome_covered()) {
         lv_obj_move_foreground(button_);
     }
 }

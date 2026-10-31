@@ -15,6 +15,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -254,4 +255,35 @@ TEST_CASE_METHOD(SplitButtonXmlFixture,
 
     // ...and the callback body never ran against the freed widget.
     CHECK(captured.find("[ui_split_button] Label width set to") == std::string::npos);
+}
+
+TEST_CASE_METHOD(SplitButtonXmlFixture,
+                 "split_button: an open dropdown's overlay goes with the widget after a disarm",
+                 "[split_button][lifetime]") {
+    // The open dropdown puts a click-catching overlay on the screen, outside the
+    // widget's own tree, so only the widget's DELETE hook can remove it. A
+    // closing modal nulls user_data on every object in its dialog first; the
+    // hook must not depend on that slot to find what it owns.
+    lv_obj_t* screen = lv_screen_active();
+    const uint32_t before = lv_obj_get_child_count(screen);
+    const char* attrs[] = {"text", "Preheat", "options", "PLA\nPETG\nABS", nullptr};
+    auto* sb = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "ui_split_button", attrs));
+    REQUIRE(sb != nullptr);
+    helix::ui::UpdateQueue::instance().drain();
+
+    const uint32_t closed_children = lv_obj_get_child_count(screen);
+    lv_obj_t* arrow_btn = lv_obj_get_child(sb, 2);
+    REQUIRE(arrow_btn != nullptr);
+    lv_obj_send_event(arrow_btn, LV_EVENT_CLICKED, nullptr);
+    REQUIRE(lv_obj_get_child_count(screen) > closed_children);
+
+    std::vector<lv_obj_t*> tree{sb};
+    for (size_t i = 0; i < tree.size(); ++i) {
+        lv_obj_set_user_data(tree[i], nullptr);
+        for (uint32_t c = 0; c < lv_obj_get_child_count(tree[i]); ++c) {
+            tree.push_back(lv_obj_get_child(tree[i], c));
+        }
+    }
+    lv_obj_delete(sb);
+    CHECK(lv_obj_get_child_count(screen) == before);
 }

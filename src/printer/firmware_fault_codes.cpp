@@ -58,8 +58,7 @@ std::optional<ErrorEvent> classify_snapmaker(const Provider& p, const std::strin
     ErrorEvent e;
     e.source = p.source;
     e.severity = severity_of_event(snapmaker::severity_of(code->level));
-    e.code =
-        fmt::format("{:04d}-{:04d}-{:04d}-{:04d}", code->level, code->id, code->index, code->code);
+    e.code = snapmaker::format_exception_code(*code);
     e.raw_detail = text;
     // A fault we have no wording for still classifies, carrying the
     // firmware's own sentence rather than a fabricated one.

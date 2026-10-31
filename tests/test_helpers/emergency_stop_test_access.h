@@ -63,15 +63,31 @@ class EmergencyStopOverlayTestAccess {
     ///
     /// Both halves call the production code rather than writing the member: true
     /// runs begin_restart_window(), which is exactly what restart_klipper() and
-    /// firmware_restart() call, and false stores the 0 the klippy-READY handler
-    /// stores. A test that seeded the deadline itself would be testing its own
-    /// arithmetic - including the expiry, which is the point.
+    /// firmware_restart() call, and false runs end_restart_window(), which the
+    /// klippy-READY handler calls. A test that seeded the deadline itself would
+    /// be testing its own arithmetic - including the expiry, which is the point.
     static void set_restart_in_progress(EmergencyStopOverlay& o, bool in_progress) {
         if (in_progress) {
             o.begin_restart_window();
         } else {
-            o.restart_expires_at_.store(0, std::memory_order_relaxed);
+            o.end_restart_window();
         }
+    }
+
+    /// The recovery dialog's own Restart Klipper / Firmware Restart buttons.
+    static void recovery_restart_klipper_clicked() {
+        EmergencyStopOverlay::recovery_restart_klipper_clicked(nullptr);
+    }
+    static void recovery_firmware_restart_clicked() {
+        EmergencyStopOverlay::recovery_firmware_restart_clicked(nullptr);
+    }
+
+    /// The Restart Klipper / Firmware Restart actions every button reaches.
+    static void restart_klipper(EmergencyStopOverlay& o) {
+        o.restart_klipper();
+    }
+    static void firmware_restart(EmergencyStopOverlay& o) {
+        o.firmware_restart();
     }
 
     /// Drop the dependency pointers init() installed. Same singleton problem as

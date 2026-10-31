@@ -29,7 +29,7 @@ struct PersonaEnv {
 /// loop over "all printer types" covers a new persona without an edit.
 inline std::vector<const helix::mock::PersonaEntry*> personas_one_per_type() {
     std::vector<const helix::mock::PersonaEntry*> out;
-    for (const auto& p : helix::mock::PERSONAS) {
+    for (const auto& p : helix::mock::kPersonas) {
         bool seen = false;
         for (const auto* q : out) {
             seen = seen || q->type == p.type;

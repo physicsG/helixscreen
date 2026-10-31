@@ -1,7 +1,7 @@
 {
   "name": "Forge-X Mod",
-  "description": "FlashForge AD5M/AD5M Pro with Forge-X firmware mod",
-  "progress_mode": "sequential",
+  "description": "FlashForge AD5M / AD5M Pro with the Forge-X firmware mod. 1.4.x narrates through the operation_context status object (a stack of contexts, each with its own state); older versions print '// State:' lines.",
+  "progress_mode": "weighted",
   "signal_formats": [
     {
       "prefix": "// State: ",
@@ -24,106 +24,31 @@
     }
   ],
   "response_patterns": [
-    {
-      "pattern": "// Wait bed temperature to reach (\\d+)",
-      "phase": "HEATING_BED",
-      "message": "Heating bed to $1\u00b0C...",
-      "weight": 15
-    },
-    {
-      "pattern": "// Wait extruder temperature to reach (\\d+)",
-      "phase": "HEATING_NOZZLE",
-      "message": "Heating nozzle to $1\u00b0C...",
-      "weight": 15
-    }
+    { "pattern": "^info Cleaning nozzle with a priming line", "phase": "PURGING", "message": "Priming nozzle...", "weight": 10 },
+    { "pattern": "^// Clean to X:", "phase": "CLEANING", "message": "Cleaning nozzle...", "weight": 20 },
+    { "pattern": "// Wait bed temperature to reach (\\d+)", "phase": "HEATING_BED", "message": "Heating bed to $1°C...", "weight": 15 }
   ],
   "phase_object": {
     "object": "operation_context",
-    "field": "current_state"
+    "field": "current_state",
+    "context_field": "context_types"
   },
   "state_patterns": [
-    {
-      "pattern": "HOMING",
-      "phase": "HOMING",
-      "message": "Homing...",
-      "weight": 5
-    },
-    {
-      "pattern": "HEATING",
-      "phase": "HEATING_BED",
-      "message": "Heating Bed...",
-      "weight": 15
-    },
-    {
-      "pattern": "CLEANING",
-      "phase": "CLEANING",
-      "message": "Cleaning Nozzle...",
-      "weight": 20
-    },
-    {
-      "pattern": "LEVELING",
-      "phase": "BED_MESH",
-      "message": "Bed Mesh...",
-      "weight": 25
-    },
-    {
-      "pattern": "MESHING",
-      "phase": "BED_MESH",
-      "message": "Bed Mesh...",
-      "weight": 25
-    },
-    {
-      "pattern": "PARKING",
-      "phase": "INITIALIZING",
-      "message": "Preparing...",
-      "weight": 5
-    },
-    {
-      "pattern": "PRIMING",
-      "phase": "PURGING",
-      "message": "Priming nozzle...",
-      "weight": 10
-    },
-    {
-      "pattern": "PURGING",
-      "phase": "PURGING",
-      "message": "Priming nozzle...",
-      "weight": 10
-    },
-    {
-      "pattern": "PRINTING",
-      "phase": "COMPLETE",
-      "message": "Starting print...",
-      "weight": 100
-    },
-    {
-      "pattern": "FINISHING",
-      "phase": "COMPLETE",
-      "message": "Starting print...",
-      "weight": 100
-    }
-  ],
-  "status_signals": [
-    {
-      "name": "at_cutter",
-      "object": "toolhead",
-      "when": [
-        { "field": "position", "index": 0, "op": "lt", "value": 0.0 },
-        { "field": "position", "index": 1, "op": "lt", "value": 0.0 }
-      ],
-      "phase": "PURGING",
-      "message": "Changing filament...",
-      "weight": 30
-    },
-    {
-      "name": "at_chute",
-      "object": "toolhead",
-      "when": [
-        { "field": "position", "index": 1, "op": "gt", "value": 225.0 }
-      ],
-      "phase": "PURGING",
-      "message": "Purging...",
-      "weight": 20
-    }
+    { "pattern": "^print/PRINTING$", "phase": "COMPLETE", "message": "Starting print...", "weight": 100 },
+    { "pattern": "^print/PRIMING$", "phase": "PURGING", "message": "Priming nozzle...", "weight": 10 },
+    { "pattern": "^print/CHECKING FILE$", "phase": "INITIALIZING", "message": "Verifying file...", "weight": 3 },
+    { "pattern": "^[a-z_]+/HOMING$", "phase": "HOMING", "message": "Homing...", "weight": 5 },
+    { "pattern": "^(kamp|bed_level)/LEVELING$", "phase": "BED_MESH", "message": "Creating bed mesh...", "weight": 25 },
+    { "pattern": "^mesh_validation/CHECKING MESH$", "phase": "BED_MESH", "message": "Validating bed mesh...", "weight": 25, "counts_probes": false },
+    { "pattern": "^nozzle_clean/PREPARING TO CLEAN$", "phase": "CLEANING", "message": "Preparing to clean...", "weight": 20 },
+    { "pattern": "^nozzle_clean/CLEANING$", "phase": "CLEANING", "message": "Cleaning nozzle...", "weight": 20 },
+    { "pattern": "^nozzle_clean/COOLING NOZZLE$", "phase": "CLEANING", "message": "Cooling for probing...", "weight": 20 },
+    { "pattern": "^nozzle_clean/FINISHING$", "phase": "CLEANING", "message": "Finishing clean...", "weight": 20 },
+    { "pattern": "^(kamp|bed_level)/COOLING NOZZLE$", "phase": "HEATING_NOZZLE", "message": "Cooling for probing...", "weight": 15 },
+    { "pattern": "^print/RESUMING HEAT$", "phase": "HEATING_NOZZLE", "message": "Reheating...", "weight": 15 },
+    { "pattern": "^print/PARKING$", "phase": "HEATING_NOZZLE", "message": "Preparing...", "weight": 15 },
+    { "pattern": "^[a-z_]+/HEATING NOZZLE$", "phase": "HEATING_NOZZLE", "message": "Heating Nozzle...", "weight": 15 },
+    { "pattern": "^[a-z_]+/HEATING BED$", "phase": "HEATING_BED", "message": "Heating Bed...", "weight": 15 },
+    { "pattern": "^(nozzle_clean|kamp|bed_level)/HEATING$", "phase": "HEATING_BED", "message": "Heating...", "weight": 15 }
   ]
 }

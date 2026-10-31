@@ -7,6 +7,9 @@
 
 #include "lvgl.h"
 
+#include <functional>
+#include <string>
+
 /**
  * @brief Unified notification API for HelixScreen
  *
@@ -99,6 +102,21 @@ void ui_notification_info(const char* title, const char* message);
  * @param action Action identifier (e.g., "show_update_modal")
  */
 void ui_notification_info_with_action(const char* title, const char* message, const char* action);
+
+/**
+ * @brief Add a warning notification to history only (no toast)
+ *
+ * ui_notification_info_with_action at WARNING severity, for a history entry the
+ * user should act on. Pair it with ToastManager::show_with_action() when the
+ * moment itself also needs a button.
+ *
+ * @param title Title for the history entry
+ * @param message Message text
+ * @param action Action identifier dispatched when the entry is tapped
+ */
+// NAMESPACE_OK: matches ui_notification_info_with_action, this file's existing global-scope API
+void ui_notification_warning_with_action(const char* title, const char* message,
+                                         const char* action);
 
 /**
  * @brief Show a success toast notification
@@ -224,3 +242,32 @@ void ui_notification_warning_with_detail(const char* message, const char* detail
  */
 // NAMESPACE_OK: joins this header's global ui_notification_* free-function API
 void ui_notification_warning_sticky(const char* message, const char* detail);
+
+namespace helix {
+namespace ui {
+
+/**
+ * @brief What one ui_notification_* call surfaced.
+ *
+ * Reported on the calling thread before threading, the startup queue or the
+ * user's toast threshold decide how (and whether) it is shown.
+ */
+struct NotificationEvent {
+    ToastSeverity severity = ToastSeverity::INFO;
+    std::string title;   ///< The title the call was given; empty when untitled
+    std::string message; ///< The text of the history row the call adds
+    std::string action;  ///< Set only for the history-only *_with_action rows
+    bool sticky = false; ///< Stays on screen until dismissed
+};
+
+/**
+ * @brief Install the one observer every ui_notification_* call reports to.
+ *
+ * An empty function removes it. The test binary reads what code under test
+ * surfaced through it. Not synchronized: install it before the calls it
+ * should see.
+ */
+void set_notification_observer(std::function<void(const NotificationEvent&)> observer);
+
+} // namespace ui
+} // namespace helix

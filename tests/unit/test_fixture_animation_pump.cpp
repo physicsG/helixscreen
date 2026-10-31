@@ -16,7 +16,7 @@
 // a modal exit with animations enabled left its dialog parented to the screen
 // permanently, so lv_obj_find_by_name() kept finding the OUTGOING dialog and
 // tests silently asserted against the previous modal's content
-// (test_afc_fault_path_modal.cpp did exactly that).
+// (test_fault_path_modal.cpp did exactly that).
 //
 // Mutation check: drop the lv_anim_refr_now() call from lv_timer_handler_safe()
 // and every test here fails.

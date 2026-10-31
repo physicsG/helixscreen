@@ -20,8 +20,8 @@
 // Visual center measured from bounding box: X=500, Y=687
 // ============================================================================
 
-static constexpr int DESIGN_CENTER_X = 590;
-static constexpr int DESIGN_CENTER_Y = 687;
+static constexpr int kDesignCenterX = 590;
+static constexpr int kDesignCenterY = 687;
 
 // --- body_dark: dark grays forming base/silhouette (6 polygons) ---
 
@@ -950,12 +950,12 @@ void draw_nozzle_jabberwocky(lv_layer_t* layer, int32_t cx, int32_t cy,
     };
 
     helix::nr_draw_polygons(layer, polys, std::size(polys), palette, cx, cy, scale,
-                            {DESIGN_CENTER_X, DESIGN_CENTER_Y});
+                            {kDesignCenterX, kDesignCenterY});
 
     // Layer 13: Nozzle tip (shows filament color when loaded)
     {
         // Nozzle tip positioned below the copper assembly
-        int32_t nozzle_top_y = cy + (int32_t)((1510 - DESIGN_CENTER_Y) * scale);
+        int32_t nozzle_top_y = cy + (int32_t)((1510 - kDesignCenterY) * scale);
         int32_t nozzle_height = LV_MAX((int32_t)(40 * scale), 2);
         int32_t nozzle_top_width = LV_MAX((int32_t)(80 * scale), 4);
         int32_t nozzle_bottom_width = LV_MAX((int32_t)(30 * scale), 2);

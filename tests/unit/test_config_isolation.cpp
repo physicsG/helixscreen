@@ -36,7 +36,7 @@ bool under_sandbox(const std::string& path) {
     return !sandbox.empty() && path.rfind(sandbox, 0) == 0;
 }
 
-constexpr const char* PROBE_STRIP = "neopixel:config_isolation_probe";
+constexpr const char* kProbeStrip = "neopixel:config_isolation_probe";
 
 std::string probe_key(Config* cfg) {
     return cfg->df() + "leds/selected_strips";
@@ -61,12 +61,12 @@ TEST_CASE_METHOD(HelixTestFixture, "Config singleton is sandboxed and reset per 
         // Config::init()/save() write rolling backups through these, and two
         // fixtures delete the fallback outright. Before the sandbox that meant
         // the developer's real $HOME/.helixscreen/*.backup, every test run.
-        REQUIRE(under_sandbox(AppConstants::Update::state_dir()));
-        REQUIRE(under_sandbox(AppConstants::Update::backup_fallback_dir()));
-        REQUIRE(under_sandbox(AppConstants::Update::config_backup_fallback()));
-        REQUIRE(under_sandbox(AppConstants::Update::env_backup_fallback()));
-        REQUIRE(under_sandbox(AppConstants::Update::config_backup_primary()));
-        REQUIRE(under_sandbox(AppConstants::Update::env_backup_primary()));
+        REQUIRE(under_sandbox(helix::app_constants::update::state_dir()));
+        REQUIRE(under_sandbox(helix::app_constants::update::backup_fallback_dir()));
+        REQUIRE(under_sandbox(helix::app_constants::update::config_backup_fallback()));
+        REQUIRE(under_sandbox(helix::app_constants::update::env_backup_fallback()));
+        REQUIRE(under_sandbox(helix::app_constants::update::config_backup_primary()));
+        REQUIRE(under_sandbox(helix::app_constants::update::env_backup_primary()));
     }
 
     SECTION("ToolState persists tool_spools.json inside the sandbox, not the repo") {
@@ -80,7 +80,7 @@ TEST_CASE_METHOD(HelixTestFixture, "Config singleton is sandboxed and reset per 
     // with a fresh fixture in between. That is the cross-test contamination
     // this pair proves is gone.
     SECTION("writer: persists a distinctive LED selection") {
-        cfg->set(probe_key(cfg), json::array({PROBE_STRIP}));
+        cfg->set(probe_key(cfg), json::array({kProbeStrip}));
         REQUIRE(cfg->get_string_array(probe_key(cfg)).size() == 1);
         REQUIRE(cfg->save());
     }

@@ -32,7 +32,7 @@ size_t GCodeLayerCache::estimate_memory(const std::vector<ToolpathSegment>& segm
 
     size_t base_cost = sizeof(std::vector<ToolpathSegment>) + 64; // Vector overhead + some slack
 
-    size_t per_segment = BYTES_PER_SEGMENT;
+    size_t per_segment = kBytesPerSegment;
 
     // Charge capacity, not size: a vector grown by repeated push_back (multi-sub-layer
     // parses) can hold up to 2x the live element count.
@@ -127,18 +127,18 @@ GCodeLayerCache::get_or_load(size_t layer_index,
     // Calculate memory needed
     size_t needed = estimate_memory(segments);
 
-    // Check if this single layer exceeds budget
+    // A layer larger than the whole budget is held alone rather than refused: the
+    // caller asked for it, and a refusal makes every later request parse it again
+    // (the renderer re-asks for its current layer each frame). The next layer
+    // that needs room evicts it like any other.
     if (needed > memory_budget_) {
-        spdlog::warn("[LayerCache] Layer {} ({} segments, {} bytes) exceeds budget ({} bytes)",
+        spdlog::info("[LayerCache] Layer {} ({} segments, {} bytes) exceeds budget ({} bytes); "
+                     "holding it alone",
                      layer_index, segments.size(), needed, memory_budget_);
-        // Return the data but don't cache it
-        // Note: This is a bit tricky - we return a temporary that will be destroyed
-        // The caller should check load_failed and handle accordingly
-        return CacheResult{nullptr, false, true};
+        evict_for_space(memory_budget_);
+    } else {
+        evict_for_space(needed);
     }
-
-    // Make room if needed
-    evict_for_space(needed);
 
     // Insert into cache - use shared_ptr for thread-safe lifetime management
     CacheEntry entry;
@@ -414,7 +414,7 @@ bool GCodeLayerCache::check_memory_pressure() {
         // Rate limit checks to avoid overhead
         auto elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(now - last_pressure_check_);
-        if (elapsed.count() < PRESSURE_CHECK_INTERVAL_MS) {
+        if (elapsed.count() < kPressureCheckIntervalMs) {
             return false;
         }
 

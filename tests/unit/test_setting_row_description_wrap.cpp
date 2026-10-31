@@ -38,13 +38,13 @@ void no_op_cb(lv_event_t*) {}
 
 /// Longest description actually shipped on a setting_toggle_row
 /// (ui_xml/settings_safety_overlay.xml, row_allow_cold_extrude).
-constexpr const char* LONG_TOGGLE_DESC =
+constexpr const char* kLongToggleDesc =
     "Run filament load/unload even when the nozzle is cold (for macros that heat the nozzle "
     "themselves)";
 
 /// Longest description shipped on a setting_slider_row
 /// (ui_xml/settings_touch_overlay.xml, long-press duration).
-constexpr const char* LONG_SLIDER_DESC =
+constexpr const char* kLongSliderDesc =
     "How long to hold before a press counts as a long-press, in ms (raise if edit mode or other "
     "long-press actions trigger by accident)";
 
@@ -52,7 +52,7 @@ constexpr const char* LONG_SLIDER_DESC =
 /// under `<lv_obj width="100%" flex_flow="column" flex_grow="1" scrollable="true">`,
 /// so a fixed-width column is a faithful stand-in. 380px is roughly what a
 /// 480px-wide panel leaves after the setting_group margins.
-constexpr int32_t COLUMN_W = 380;
+constexpr int32_t kColumnW = 380;
 
 class SettingRowWrapFixture : public LVGLUITestFixture {
   public:
@@ -75,7 +75,7 @@ class SettingRowWrapFixture : public LVGLUITestFixture {
     /// A fixed-width, content-height column standing in for a settings list.
     lv_obj_t* make_column() {
         lv_obj_t* col = lv_obj_create(lv_screen_active());
-        lv_obj_set_width(col, COLUMN_W);
+        lv_obj_set_width(col, kColumnW);
         lv_obj_set_height(col, LV_SIZE_CONTENT);
         lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_all(col, 0, LV_PART_MAIN);
@@ -124,7 +124,7 @@ TEST_CASE_METHOD(SettingRowWrapFixture, "setting_toggle_row wraps a long descrip
         "name",        "row_under_test",     "label",    "Allow cold load/unload",
         "subject",     "test_row_wrap_val",  "disabled", "test_row_wrap_dis",
         "callback",    "test_row_wrap_noop", "icon",     "flash",
-        "description", LONG_TOGGLE_DESC,     nullptr};
+        "description", kLongToggleDesc,      nullptr};
     lv_obj_t* row = static_cast<lv_obj_t*>(lv_xml_create(col, "setting_toggle_row", attrs));
     REQUIRE(row != nullptr);
     lv_obj_update_layout(col);
@@ -176,7 +176,7 @@ TEST_CASE_METHOD(SettingRowWrapFixture, "setting_action_row wraps a long descrip
 
     const char* attrs[] = {"name",        "row_action",         "label", "Automatic Heater Control",
                            "callback",    "test_row_wrap_noop", "icon",  "flash",
-                           "description", LONG_TOGGLE_DESC,     nullptr};
+                           "description", kLongToggleDesc,      nullptr};
     lv_obj_t* row = static_cast<lv_obj_t*>(lv_xml_create(col, "setting_action_row", attrs));
     REQUIRE(row != nullptr);
     lv_obj_update_layout(col);
@@ -192,7 +192,7 @@ TEST_CASE_METHOD(SettingRowWrapFixture, "setting_slider_row wraps its longest de
     lv_obj_t* col = make_column();
 
     const char* attrs[] = {"name",     "row_slider",         "label",       "Long-Press Duration",
-                           "callback", "test_row_wrap_noop", "description", LONG_SLIDER_DESC,
+                           "callback", "test_row_wrap_noop", "description", kLongSliderDesc,
                            nullptr};
     lv_obj_t* row = static_cast<lv_obj_t*>(lv_xml_create(col, "setting_slider_row", attrs));
     REQUIRE(row != nullptr);

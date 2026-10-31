@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Belt Tension: which physical belt each path is. Identify buzzes a path's -->
+<!-- motor; the layout is chosen as a pair, so the two names never contradict, -->
+<!-- and is saved per printer the moment it is tapped. -->
+<!-- NOTE: Backdrop created programmatically by Modal system -->
+<component>
+  <consts>
+    <!-- Narrowest a layout choice gets before the pairs stack to one column. -->
+    <px name="belt_layout_choice_min_micro" value="130"/>
+    <px name="belt_layout_choice_min_tiny" value="140"/>
+    <px name="belt_layout_choice_min_small" value="160"/>
+    <px name="belt_layout_choice_min_medium" value="180"/>
+    <px name="belt_layout_choice_min_large" value="200"/>
+    <px name="belt_layout_choice_min_xlarge" value="220"/>
+    <px name="belt_layout_choice_min_xxlarge" value="240"/>
+  </consts>
+  <styles>
+    <style name="status_error" text_color="#danger"/>
+  </styles>
+  <view name="belt_names_modal"
+        extends="ui_dialog" width="80%" height="content" align="center" flex_flow="column" style_flex_main_place="start"
+        style_pad_gap="0">
+    <lv_obj name="belt_names_content"
+            width="100%" height="content" style_max_height="#dialog_content_max" style_pad_left="#space_lg"
+            style_pad_right="#space_lg" style_pad_top="#space_md" style_pad_bottom="#space_md" flex_flow="column"
+            style_pad_gap="#space_sm" scrollable="true">
+      <text_heading width="100%" text="Which belt is which?" long_mode="wrap"/>
+      <!-- Path A -->
+      <lv_obj width="100%"
+              height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+              style_pad_gap="#space_sm" scrollable="false">
+        <text_body text="Path A" style_text_font="#font_body_bold" style_text_color="#belt_path_a"/>
+        <text_small width="0"
+                    flex_grow="1" text="Watch which motor turns" long_mode="wrap" style_text_color="#text_muted"/>
+        <ui_button name="btn_identify_a" height="#button_height_sm" icon="vibrate" text="Identify" variant="secondary">
+          <bind_state_if_eq subject="bt_can_start" state="disabled" ref_value="0"/>
+          <event_cb trigger="clicked" callback="belt_tension_identify_a_cb"/>
+        </ui_button>
+      </lv_obj>
+      <!-- Path B -->
+      <lv_obj width="100%"
+              height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+              style_pad_gap="#space_sm" scrollable="false">
+        <text_body text="Path B" style_text_font="#font_body_bold" style_text_color="#belt_path_b"/>
+        <text_small width="0"
+                    flex_grow="1" text="Watch which motor turns" long_mode="wrap" style_text_color="#text_muted"/>
+        <ui_button name="btn_identify_b" height="#button_height_sm" icon="vibrate" text="Identify" variant="secondary">
+          <bind_state_if_eq subject="bt_can_start" state="disabled" ref_value="0"/>
+          <event_cb trigger="clicked" callback="belt_tension_identify_b_cb"/>
+        </ui_button>
+      </lv_obj>
+      <!-- bt_identify_state: 0 idle, 1 a motor is buzzing, 2 the buzz failed -->
+      <text_small name="bt_identify_status"
+                  width="100%" bind_text="bt_identify_status" long_mode="wrap" style_text_color="#text_muted">
+        <bind_flag_if_eq subject="bt_identify_state" flag="hidden" ref_value="0"/>
+        <bind_style name="status_error" subject="bt_identify_state" ref_value="2"/>
+      </text_small>
+      <text_small width="100%" text="Which belt is each path?" long_mode="wrap" style_text_color="#text_muted"/>
+      <!-- settings_belt_layout: helix::calibration::BeltLayout -->
+      <lv_obj width="100%"
+              height="content" style_pad_all="0" flex_flow="column" style_pad_row="#space_xs" scrollable="false">
+        <ui_button name="btn_layout_0" width="100%" height="#button_height_sm" text="Not set" long_mode="dots">
+          <bind_style name="styles.choice_selected" subject="settings_belt_layout" ref_value="0"/>
+          <bind_style_if name="styles.choice_idle" cond="settings_belt_layout ne 0"/>
+          <event_cb trigger="clicked" callback="belt_names_layout_cb" user_data="0"/>
+        </ui_button>
+        <!-- The four pairings, two to a row: each row is one axis's two readings. -->
+        <responsive_grid min_col_width="#belt_layout_choice_min"
+                         max_cols="2" style_pad_row="#space_xs" style_pad_column="#space_xs">
+          <ui_button name="btn_layout_1" height="#button_height_sm" text="A left, B right" long_mode="dots">
+            <bind_style name="styles.choice_selected" subject="settings_belt_layout" ref_value="1"/>
+            <bind_style_if name="styles.choice_idle" cond="settings_belt_layout ne 1"/>
+            <event_cb trigger="clicked" callback="belt_names_layout_cb" user_data="1"/>
+          </ui_button>
+          <ui_button name="btn_layout_2" height="#button_height_sm" text="A right, B left" long_mode="dots">
+            <bind_style name="styles.choice_selected" subject="settings_belt_layout" ref_value="2"/>
+            <bind_style_if name="styles.choice_idle" cond="settings_belt_layout ne 2"/>
+            <event_cb trigger="clicked" callback="belt_names_layout_cb" user_data="2"/>
+          </ui_button>
+          <ui_button name="btn_layout_3" height="#button_height_sm" text="A upper, B lower" long_mode="dots">
+            <bind_style name="styles.choice_selected" subject="settings_belt_layout" ref_value="3"/>
+            <bind_style_if name="styles.choice_idle" cond="settings_belt_layout ne 3"/>
+            <event_cb trigger="clicked" callback="belt_names_layout_cb" user_data="3"/>
+          </ui_button>
+          <ui_button name="btn_layout_4" height="#button_height_sm" text="A lower, B upper" long_mode="dots">
+            <bind_style name="styles.choice_selected" subject="settings_belt_layout" ref_value="4"/>
+            <bind_style_if name="styles.choice_idle" cond="settings_belt_layout ne 4"/>
+            <event_cb trigger="clicked" callback="belt_names_layout_cb" user_data="4"/>
+          </ui_button>
+        </responsive_grid>
+      </lv_obj>
+    </lv_obj>
+    <modal_button_row hide_secondary="true"
+                      primary_name="btn_names_done" primary_text="Done" primary_callback="on_modal_ok_clicked"/>
+  </view>
+</component>

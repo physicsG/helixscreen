@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Heads one plugin's group of items in an app context menu. The plugin
+       name is plugin text, so C++ sets it (a leading '#' in a prop reads as a
+       const). -->
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="column" style_pad_left="#space_sm" style_pad_right="#space_sm"
+        style_pad_top="#space_xs" style_pad_bottom="0" style_bg_opa="0" style_border_width="0" scrollable="false"
+        clickable="false" event_bubble="true">
+    <text_small name="plugin_name"
+                width="100%" text="" long_mode="dots" style_text_color="#text_muted" clickable="false"
+                event_bubble="true"/>
+  </view>
+</component>

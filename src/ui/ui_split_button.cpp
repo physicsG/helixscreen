@@ -5,6 +5,7 @@
 
 #include "ui_fonts.h"
 #include "ui_icon_codepoints.h"
+#include "ui_text.h"
 #include "ui_update_queue.h"
 
 #include "helix-xml/src/xml/lv_xml.h"
@@ -27,8 +28,8 @@ using namespace helix;
 namespace {
 
 struct SplitButtonData {
-    static constexpr uint32_t MAGIC = 0x53504C54; // "SPLT"
-    uint32_t magic{MAGIC};
+    static constexpr uint32_t kMagic = 0x53504C54; // "SPLT"
+    uint32_t magic{kMagic};
     lv_obj_t* main_btn{nullptr};
     lv_obj_t* arrow_btn{nullptr};
     lv_obj_t* dropdown{nullptr};
@@ -48,7 +49,7 @@ SplitButtonData* get_data(lv_obj_t* sb) {
     if (!first_child)
         return nullptr;
     auto* data = static_cast<SplitButtonData*>(lv_obj_get_user_data(first_child));
-    if (!data || data->magic != SplitButtonData::MAGIC)
+    if (!data || data->magic != SplitButtonData::kMagic)
         return nullptr;
     return data;
 }
@@ -299,9 +300,11 @@ void dropdown_value_changed_cb(lv_event_t* e) {
  * @brief Delete callback — clean up user data
  */
 void split_button_delete_cb(lv_event_t* e) {
-    lv_obj_t* sb = lv_event_get_target_obj(e);
-    auto* data = get_data(sb);
-    if (!data)
+    // The hook's own user_data owns the allocation, not get_data()'s slot on
+    // main_btn: a closing modal nulls every user_data in its tree to stop
+    // dispatch, and reading ownership back from that slot would strand it.
+    auto* data = static_cast<SplitButtonData*>(lv_event_get_user_data(e));
+    if (!data || data->magic != SplitButtonData::kMagic)
         return;
 
     if (data->click_overlay) {
@@ -460,13 +463,12 @@ void* ui_split_button_create(lv_xml_parser_state_t* state, const char** attrs) {
     }
 
     // Label — width=1 so flex doesn't expand main_btn to content size.
-    // Height = 1 line so DOTS mode truncates (DOTS needs height overflow to trigger).
+    // Held to one line so DOTS truncates instead of wrapping.
     // Correct width is set by async callback after layout resolves.
     data->label = lv_label_create(data->main_btn);
     lv_obj_set_width(data->label, 1);
-    const lv_font_t* text_font = lv_obj_get_style_text_font(data->label, LV_PART_MAIN);
-    lv_obj_set_height(data->label, lv_font_get_line_height(text_font));
     lv_label_set_long_mode(data->label, LV_LABEL_LONG_MODE_DOTS);
+    helix::ui::label_hold_one_line(data->label);
     lv_label_set_text(data->label, text);
 
     // Main button click handler
@@ -586,7 +588,7 @@ void* ui_split_button_create(lv_xml_parser_state_t* state, const char** attrs) {
     // Register event handlers on container
     lv_obj_add_event_cb(sb, split_button_style_changed_cb, LV_EVENT_STYLE_CHANGED, nullptr);
     lv_obj_add_event_cb(sb, split_button_style_changed_cb, LV_EVENT_STATE_CHANGED, nullptr);
-    lv_obj_add_event_cb(sb, split_button_delete_cb, LV_EVENT_DELETE, nullptr);
+    lv_obj_add_event_cb(sb, split_button_delete_cb, LV_EVENT_DELETE, data);
 
     // Apply initial contrast
     update_split_button_contrast(sb);

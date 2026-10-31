@@ -9,6 +9,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "moonraker_auth.h"
 #include "psram_thread_stack.h"
 
 #include <algorithm>
@@ -24,21 +25,21 @@ namespace {
 constexpr char TAG[] = "esp_http_lane";
 // Lazily claimed on first submit_get(), from PSRAM (see
 // ensure_worker_started_locked).
-constexpr size_t WORKER_STACK_BYTES = 16 * 1024;
+constexpr size_t kWorkerStackBytes = 16 * 1024;
 // Connecting and reading the headers: a busy Moonraker on a weak link can take
 // seconds to answer, and one timeout here fails the request.
-constexpr int HTTP_TIMEOUT_MS = 15000;
+constexpr int kHttpTimeoutMs = 15000;
 // Each socket read of the body: short, so a stalled read comes back to
-// read_capped_body() to be timed against BODY_DEADLINES rather than blocking.
-constexpr int BODY_READ_TIMEOUT_MS = 5000;
+// read_capped_body() to be timed against kBodyDeadlines rather than blocking.
+constexpr int kBodyReadTimeoutMs = 5000;
 // A thumbnail is a few KB: a body still arriving after 30 s, or silent for
 // 10 s, is a link that has stopped, and the lane has other cards waiting.
-constexpr LaneDeadlines BODY_DEADLINES{30000, 10000};
+constexpr LaneDeadlines kBodyDeadlines{30000, 10000};
 // esp_http_client's own internal read-chunk buffer (config.buffer_size) —
 // small and fine in internal RAM. Only the accumulation buffer built up in
 // run_one() below needs to be PSRAM; that's the buffer the R3 "PSRAM buffer,
 // capped" requirement is about.
-constexpr size_t CLIENT_BUFFER_BYTES = 4096;
+constexpr size_t kClientBufferBytes = 4096;
 
 std::atomic<EspHttpLane::DateHeaderHook> s_date_hook{nullptr};
 std::atomic<EspHttpLane::WorkerStartHook> s_worker_start_hook{nullptr};
@@ -67,7 +68,7 @@ EspHttpLane& EspHttpLane::instance() {
 }
 
 bool EspHttpLane::submit_get(std::string url, size_t range_max_bytes, FetchSuccessCb on_success,
-                             FetchErrorCb on_error, FetchCancelFlag cancelled) {
+                             FetchErrorCb on_error, FetchCancelFlag cancelled, uint64_t offset) {
     const size_t cap = clamp_fetch_cap(range_max_bytes);
 
     {
@@ -78,11 +79,11 @@ bool EspHttpLane::submit_get(std::string url, size_t range_max_bytes, FetchSucce
             return false;
         }
         queue_.push_back(Job{std::move(url), cap, std::move(on_success), std::move(on_error),
-                             std::move(cancelled)});
+                             std::move(cancelled), offset});
 
         // The worker is the only thing that drains the queue and releases
         // slots. Without it the job sits forever and its slot is never
-        // returned, so QUEUE_DEPTH failed submissions would wedge the lane for
+        // returned, so kQueueDepth failed submissions would wedge the lane for
         // the rest of the session. Undo the push and the acquire instead.
         if (!ensure_worker_started_locked()) {
             queue_.pop_back();
@@ -102,7 +103,7 @@ bool EspHttpLane::ensure_worker_started_locked() {
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, WORKER_STACK_BYTES);
+    pthread_attr_setstacksize(&attr, kWorkerStackBytes);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
     // The stack goes in PSRAM: after WiFi is up the internal heap's largest
@@ -111,7 +112,7 @@ bool EspHttpLane::ensure_worker_started_locked() {
     pthread_t thread;
     int rc;
     {
-        helix::PsramThreadStackScope psram_stack("http_lane", WORKER_STACK_BYTES);
+        helix::PsramThreadStackScope psram_stack("http_lane", kWorkerStackBytes);
         rc = pthread_create(&thread, &attr, &EspHttpLane::worker_main, this);
     }
     pthread_attr_destroy(&attr);
@@ -163,8 +164,8 @@ void EspHttpLane::worker_loop() {
 void EspHttpLane::run_one(const Job& job) {
     esp_http_client_config_t config = {};
     config.url = job.url.c_str();
-    config.timeout_ms = HTTP_TIMEOUT_MS;
-    config.buffer_size = CLIENT_BUFFER_BYTES;
+    config.timeout_ms = kHttpTimeoutMs;
+    config.buffer_size = kClientBufferBytes;
     config.method = HTTP_METHOD_GET;
     config.event_handler = &on_http_event;
 
@@ -176,12 +177,17 @@ void EspHttpLane::run_one(const Job& job) {
         return;
     }
 
-    // Bounded prefix via Range — mirrors desktop's download_file_partial
-    // (src/api/moonraker_file_transfer_api.cpp): "bytes=0-{cap-1}", inclusive.
-    // Servers that ignore Range return 200 with the full body; the read loop
-    // below enforces the cap regardless of what the server does with Range.
-    std::string range = "bytes=0-" + std::to_string(job.cap - 1);
+    // Bounded range — mirrors desktop's download_file_range
+    // (src/api/moonraker_file_transfer_api.cpp): "bytes={offset}-{offset+cap-1}",
+    // inclusive. Servers that ignore Range return 200 with the full body; the
+    // read loop below enforces the cap regardless of what the server does with
+    // Range, and a 200 for a range past the start is refused below.
+    std::string range =
+        "bytes=" + std::to_string(job.offset) + "-" + std::to_string(job.offset + job.cap - 1);
     esp_http_client_set_header(client, "Range", range.c_str());
+    if (const std::string key = helix::moonraker_auth::key_for_url(job.url); !key.empty()) {
+        esp_http_client_set_header(client, helix::moonraker_auth::kApiKeyHeader, key.c_str());
+    }
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
@@ -197,9 +203,10 @@ void EspHttpLane::run_one(const Job& job) {
     const int64_t content_length = esp_http_client_fetch_headers(client);
 
     int status = esp_http_client_get_status_code(client);
-    if (status != 200 && status != 206) {
+    if ((status != 200 && status != 206) || (status == 200 && job.offset > 0)) {
         if (job.on_error) {
-            job.on_error("HTTP " + std::to_string(status));
+            job.on_error(status == 200 ? std::string("server ignored Range")
+                                       : "HTTP " + std::to_string(status));
         }
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -208,13 +215,13 @@ void EspHttpLane::run_one(const Job& job) {
 
     // Accumulation buffer, in PSRAM: this is the buffer the RAM budget cares
     // about, not esp_http_client's own small read-chunk buffer
-    // (config.buffer_size above, CLIENT_BUFFER_BYTES).
-    esp_http_client_set_timeout_ms(client, BODY_READ_TIMEOUT_MS);
+    // (config.buffer_size above, kClientBufferBytes).
+    esp_http_client_set_timeout_ms(client, kBodyReadTimeoutMs);
     struct Transport {
         esp_http_client_handle_t client;
         int read(char* buf, int len) {
             const int n = esp_http_client_read(client, buf, len);
-            return n == -ESP_ERR_HTTP_EAGAIN ? TRANSPORT_AGAIN : n;
+            return n == -ESP_ERR_HTTP_EAGAIN ? kTransportAgain : n;
         }
         bool complete() const {
             return esp_http_client_is_complete_data_received(client);
@@ -223,7 +230,7 @@ void EspHttpLane::run_one(const Job& job) {
     std::string body;
     const BodyRead read = read_capped_body(
         transport, job.cap, content_length, body, [] { return esp_timer_get_time() / 1000; },
-        BODY_DEADLINES, job.cancelled.get());
+        kBodyDeadlines, job.cancelled.get());
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
@@ -232,10 +239,10 @@ void EspHttpLane::run_one(const Job& job) {
         char why[64];
         if (read == BodyRead::Stalled) {
             snprintf(why, sizeof(why), "stalled: no data for %lld ms",
-                     static_cast<long long>(BODY_DEADLINES.stall_ms));
+                     static_cast<long long>(kBodyDeadlines.stall_ms));
         } else if (read == BodyRead::TimedOut) {
             snprintf(why, sizeof(why), "timed out after %lld ms",
-                     static_cast<long long>(BODY_DEADLINES.total_ms));
+                     static_cast<long long>(kBodyDeadlines.total_ms));
         } else {
             snprintf(why, sizeof(why), "%s",
                      read == BodyRead::AllocFailed  ? "PSRAM allocation failed"

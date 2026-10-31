@@ -52,8 +52,6 @@ class TempStackWidget : public PanelWidget {
     helix::ui::HeaterIconBinder bed_icon_binder_;
     helix::ui::HeaterIconBinder chamber_icon_binder_;
 
-    bool long_pressed_ = false;
-
     // MUST stay declared LAST: reverse-declaration destruction makes this the
     // first member torn down, invalidating every captured token before any
     // observer destructs. Kept for future deferred-callback use (e.g.

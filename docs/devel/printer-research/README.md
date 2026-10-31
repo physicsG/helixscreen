@@ -17,12 +17,12 @@ config, not hardware-verified. Build targets are `PLATFORM_TARGET` values in `mk
 |---------|-----------|-------|-----------------|----------------|--------|--------|
 | FlashForge Adventurer 5M / Pro | Allwinner, Cortex-A7 armv7 | 800x480 fbdev | Forge-X, Klipper Mod or ZMOD | none | `ad5m`, `ad5m-br` | Tested |
 | FlashForge Adventurer 5X | Ingenic X2600, MIPS32 (nan2008) | 800x480 fbdev | ZMOD 1.7.0+ | IFS (4) | `mips` (alias `ad5x`) | Tested |
-| FlashForge Creator 5 / 5 Pro | Ingenic X2000, MIPS32 | 800x480 (portrait fb, rotated) | Z-Mod or Reforge | 4-head toolchanger | `mips` (`make creator5`) | UI runs on device; toolchanger verified in mock only |
-| Creality K1 / K1C / K1 Max / K1 SE | Ingenic X2000E, MIPS32r2 | 480x800 portrait fbdev | Guilouz, Simple AF or Guppy Mod (Moonraker) | optional CFS upgrade | `mips` (alias `k1`), `k1-dynamic` | Supported (K1C, K1 Max tested) |
-| Creality K2 / K2 Plus / K2 Pro | Allwinner T113, Cortex-A7 armv7 | 480x800 portrait, rotated | stock | CFS (up to 16) | `k2` | Tested |
+| FlashForge Creator 5 / 5 Pro | Ingenic X2000, MIPS32 | 800x480 (portrait fb, rotated) | Z-Mod or Reforge | 4-head toolchanger | `mips` (`make creator5`) | UI runs on device; Load/Unload tested on a Creator 5 Pro (Z-Mod 1.7.4 + afclite, #1779); live-swap step bar open (#1714) |
+| Creality K1 / K1C / K1 Max / K1 SE | Ingenic X2000E, MIPS32r2 | 480x800 portrait fbdev | Guilouz, Simple AF or Guppy Mod (Moonraker) | optional CFS upgrade | `mips` (alias `k1`), `k1-dynamic` | Supported (K1C, K1 Max tested; K1 community) |
+| Creality K2 / K2 Plus / K2 Pro | Allwinner T113, Cortex-A7 armv7 | 480x800 portrait, rotated | stock | CFS (up to 16) | `k2` | Tested (K2 Plus); Community (K2 Pro); base K2 not captured |
 | Snapmaker U1 | Rockchip RK3562, aarch64 | 480x320 DRM | stock 1.2+ with Root access, or PAXX | SnapSwap 4-head | `snapmaker-u1` | Tested on PAXX; stock unverified |
 | Elegoo Centauri Carbon 1 | Allwinner R528, Cortex-A7 armv7 | 480x272 fbdev | OpenCentauri COSMOS 26.07.0+ | none | `cc1`, `yocto` | Tested |
-| QIDI Q2 / Max 4 | Cortex-A35, aarch64 | 480x272 / 800x480 fbdev | stock, FreeDi, FreeQIDI | QIDI Box | `pi` | Supported (Q2 community-validated) |
+| QIDI Q2 / Max 4 / Plus 5 | Cortex-A35, aarch64 | 480x272 / 800x480 / 480x800 fbdev | stock, FreeDi, FreeQIDI | QIDI Box | `pi` | Supported (Q2 community-validated; Max 4 + Plus 5 community-run, box eject unverified) |
 | QIDI Plus 4 and 3-series | RK3328, aarch64 | TJC serial HMI | stock | QIDI Box (Plus 4) | remote only | Supported as a remote target |
 | Creality Sonic Pad | Allwinner R818, armv7 userspace | 1024x600 | SonicPad-Debian | n/a | `pi32` | Supported |
 | Anycubic Kobra 2 Pro / 3 / S1, Sovol SV06 ACE | various | n/a | Rinkhals or community Klipper | ACE Pro | remote | Community |
@@ -38,6 +38,7 @@ documents below record which.
 | [FLASHFORGE_AD5M_TOOLCHAIN_NOTES.md](FLASHFORGE_AD5M_TOOLCHAIN_NOTES.md) | Why `ad5m` links fully static: glibc 2.25 on the printer, the toolchains ruled out, link fixes |
 | [FLASHFORGE_AD5X_RESEARCH.md](FLASHFORGE_AD5X_RESEARCH.md) | AD5X hardware, stock firmware, ZMOD, and the 2026-08 firmware-ecosystem survey |
 | [FLASHFORGE_AD5X_PLATFORM_NOTES.md](FLASHFORGE_AD5X_PLATFORM_NOTES.md) | The runtime environment HelixScreen deploys into on a ZMOD AD5X: chroot layout, logs, ZMOD display lifecycle, rig observations |
+| [FLASHFORGE_CREATOR5_FIRMWARE.md](FLASHFORGE_CREATOR5_FIRMWARE.md) | Creator 5 stock firmware: finding and decrypting packages, the 2.0.0 full-image layout, what 2.0.0 changed (decoded mixed-temperature table, multi-plate, calibration records, Klipper deltas), and the stock UI's features against HelixScreen |
 | [FLASHFORGE_AD5X_IFS_ANALYSIS.md](FLASHFORGE_AD5X_IFS_ANALYSIS.md) | IFS serial protocol, Klipper objects, the ZMOD IFS Python module, bambufy vs lessWaste, unload semantics verified against ZMOD source |
 | [CREALITY_K1_SERIES_RESEARCH.md](CREALITY_K1_SERIES_RESEARCH.md) | K1C / K1 Max hardware, stock firmware, rooting, community firmware |
 | [CREALITY_CFS_K1_INTERNALS.md](CREALITY_CFS_K1_INTERNALS.md) | K1-family CFS box wrapper (`box_wrapper.cpython-38-mipsel`): `BOX_*` semantics, tn_data.json, deferred-failure and resume traps. Read before changing anything the CFS backend emits on K1 |
@@ -48,6 +49,7 @@ documents below record which.
 | [SNAPMAKER_U1_RESEARCH.md](SNAPMAKER_U1_RESEARCH.md) | U1 toolhead layout, published firmware sources, on-device layout, PAXX extended firmware |
 | [QIDI_PLUS_4_RESEARCH.md](QIDI_PLUS_4_RESEARCH.md) | A modded Plus 4 (Pi 4 + Kalico + Happy Hare + QIDI Box) from a user dump; TJC panel and `libColPic` encoder |
 | [QIDI_BOX_HEATER.md](QIDI_BOX_HEATER.md) | QIDI Box PTC heater: Klipper objects, command surfaces, firmware variants, HelixScreen integration |
+| [QIDI_PLUS_5_RESEARCH.md](QIDI_PLUS_5_RESEARCH.md) | Stock Plus 5 recon: RK3308 host, no-VT kernel, sideways 480x800 panel, STM32F407/F103 MCUs, and why detection keys off the ~325mm bed |
 | [ANYCUBIC_KOBRA_COREXY_RESEARCH.md](ANYCUBIC_KOBRA_COREXY_RESEARCH.md) | Kobra S1 / 3 series, ACE Pro, Rinkhals, native `filament_hub` interface |
 | [ANYCUBIC_ACE_KOBRA_S1_LOG_ANALYSIS.md](ANYCUBIC_ACE_KOBRA_S1_LOG_ANALYSIS.md) | ACE Pro on the mainline-Python Kobra S1 fork, from real logs; raw samples in [`kobra-s1-ace-1098/`](kobra-s1-ace-1098/README.md) |
 | [BTT_K_TOUCH_HARDWARE.md](BTT_K_TOUCH_HARDWARE.md) | K-Touch (ESP32-S3) hardware recon and stock firmware layout |
@@ -57,7 +59,7 @@ documents below record which.
 
 | Device | Display | CPU | OS |
 |--------|---------|-----|-----|
-| Creality Nebula Pad | 4.3" 480x272 resistive | Allwinner T113 | Creality OS (closed) |
+| Creality Nebula Pad | 4.3" 480x272 resistive | Dual-core ARM, likely Allwinner T113 (unconfirmed) | Creality OS (closed) |
 | Creality Sonic Pad | 7" 1024x600 capacitive | Allwinner R818 | Klipper-based; HelixScreen runs on it under SonicPad-Debian |
 | BTT Pad 7 | 7" 1024x600 capacitive | Allwinner H616 | Klipper + KlipperScreen |
 
@@ -65,7 +67,7 @@ documents below record which.
 
 | Project | Printers | Notes |
 |---------|----------|-------|
-| [Forge-X](https://github.com/DrA1ex/ff5m) | AD5M / Pro | Moonraker, GuppyScreen; HelixScreen ready-made image at [prestonbrown/ff5m](https://github.com/prestonbrown/ff5m) |
+| [Forge-X](https://github.com/DrA1ex/ff5m) | AD5M / Pro | Moonraker, GuppyScreen; HelixScreen installs over SSH |
 | [ZMOD](https://github.com/ghzserg/zmod) | AD5M / Pro, AD5X | Moonraker; installs and updates HelixScreen on the AD5X |
 | [Klipper Mod](https://github.com/xblax/flashforge_ad5m_klipper_mod) | AD5M / Pro | Buildroot; can package HelixScreen via `ad5m-br` |
 | [Guilouz Helper Script](https://github.com/Guilouz/Creality-K1-and-K1-Max) | K1 series | Moonraker, Fluidd |

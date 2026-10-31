@@ -88,7 +88,7 @@ TEST_CASE("build_active_material: unknown material without temps uses default",
 
     auto result = build_active_material(slot);
 
-    CHECK(result.material_info.nozzle_min == 220); // DEFAULT_LOAD_PREHEAT_TEMP
+    CHECK(result.material_info.nozzle_min == 220); // kDefaultLoadPreheatTemp
     CHECK(result.material_info.nozzle_max == 220);
 }
 

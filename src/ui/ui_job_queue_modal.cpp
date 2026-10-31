@@ -5,6 +5,7 @@
 
 #include "ui_button.h"
 #include "ui_error_reporting.h"
+#include "ui_filename_utils.h"
 #include "ui_panel_print_select.h"
 #include "ui_row_text.h"
 #include "ui_utils.h"
@@ -180,8 +181,7 @@ void JobQueueModal::update_queue_state_ui() {
     if (!jqs)
         return;
 
-    const auto& state = jqs->get_queue_state();
-    bool is_paused = (state == "paused");
+    const bool is_paused = jqs->run_state() == helix::QueueRunState::Paused;
 
     // Whole strings, not "Queue: %s" over an untranslated state word.
     lv_label_set_text(state_label, is_paused ? lv_tr("Queue: Paused") : lv_tr("Queue: Ready"));
@@ -215,11 +215,7 @@ void JobQueueModal::populate_job_list() {
 
     for (const auto& job : jobs) {
         // Extract just the filename
-        std::string display_name = job.filename;
-        auto slash = display_name.rfind('/');
-        if (slash != std::string::npos) {
-            display_name = display_name.substr(slash + 1);
-        }
+        std::string display_name = helix::gcode::get_filename_basename(job.filename);
 
         std::string queued;
         if (job.time_in_queue > 0) {
@@ -272,7 +268,7 @@ void JobQueueModal::toggle_queue() {
     if (!jqs)
         return;
 
-    bool is_paused = (jqs->get_queue_state() == "paused");
+    const bool is_paused = jqs->run_state() == helix::QueueRunState::Paused;
     auto token = lifetime_.token();
 
     auto on_success = [token, this]() {

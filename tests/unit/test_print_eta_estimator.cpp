@@ -11,7 +11,7 @@
  * here names its own arithmetic rather than restating the implementation's
  * formula, because a test that recomputes the thing under test cannot fail.
  *
- * NO_ESTIMATE is a rung too, and the one most easily broken by accident:
+ * kNoEstimate is a rung too, and the one most easily broken by accident:
  * returning 0 where there is no answer reads as "finished" on the panel.
  */
 
@@ -128,14 +128,14 @@ TEST_CASE("ETA: inputs that support no answer say so rather than saying zero", "
 
     // Nothing started and no slicer estimate: zero here would render as a
     // finished print.
-    CHECK(est.remaining_seconds(job(0, 0, 0)) == PrintEtaEstimator::NO_ESTIMATE);
+    CHECK(est.remaining_seconds(job(0, 0, 0)) == PrintEtaEstimator::kNoEstimate);
 
     // Preparing, but the file carried no estimate to add the prep to.
     PrintEtaInputs prep_only;
     prep_only.progress_pct = 0;
     prep_only.preprint_remaining_s = 120;
-    CHECK(est.remaining_seconds(prep_only) == PrintEtaEstimator::NO_ESTIMATE);
+    CHECK(est.remaining_seconds(prep_only) == PrintEtaEstimator::kNoEstimate);
 
     // Underway, but with neither a clock nor an estimate to go on.
-    CHECK(est.remaining_seconds(job(40, 0, 0)) == PrintEtaEstimator::NO_ESTIMATE);
+    CHECK(est.remaining_seconds(job(40, 0, 0)) == PrintEtaEstimator::kNoEstimate);
 }

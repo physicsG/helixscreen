@@ -41,9 +41,9 @@ using namespace helix;
 namespace {
 
 // Non-degenerate triangle that passes compute_calibration + validation at 800x480.
-constexpr Point POINT1{100, 120};
-constexpr Point POINT2{380, 390};
-constexpr Point POINT3{660, 60};
+constexpr Point kPoint1{100, 120};
+constexpr Point kPoint2{380, 390};
+constexpr Point kPoint3{660, 60};
 
 /**
  * @brief Drives the wizard's private panel with a deterministic injected clock.
@@ -76,7 +76,7 @@ class WizardAutoAcceptFixture {
         panel_->on_release();
     }
 
-    // SAMPLES_REQUIRED clean taps to fully capture one calibration point.
+    // kSamplesRequired clean taps to fully capture one calibration point.
     void capture_point_via_release(Point p) {
         for (int i = 0; i < TouchCalibrationPanelTestAccess::samples_required(); ++i) {
             tap(p);
@@ -107,9 +107,9 @@ class WizardAutoAcceptFixture {
 TEST_CASE_METHOD(WizardAutoAcceptFixture,
                  "Wizard auto-accept: 3 points via release reach COMPLETE (#1029)",
                  "[wizard][touch-calibration][autoaccept]") {
-    capture_point_via_release(POINT1); // POINT_1 -> POINT_2
-    capture_point_via_release(POINT2); // POINT_2 -> POINT_3
-    capture_point_via_release(POINT3); // POINT_3 -> VERIFY -> (auto-accept) COMPLETE
+    capture_point_via_release(kPoint1); // POINT_1 -> POINT_2
+    capture_point_via_release(kPoint2); // POINT_2 -> POINT_3
+    capture_point_via_release(kPoint3); // POINT_3 -> VERIFY -> (auto-accept) COMPLETE
 
     REQUIRE(state() == TouchCalibrationPanel::State::COMPLETE);
 }
@@ -122,13 +122,13 @@ TEST_CASE_METHOD(WizardAutoAcceptFixture,
 TEST_CASE_METHOD(WizardAutoAcceptFixture,
                  "Wizard auto-accept: final commit via stall timer reaches COMPLETE (#1029)",
                  "[wizard][touch-calibration][autoaccept]") {
-    capture_point_via_release(POINT1);
-    capture_point_via_release(POINT2);
+    capture_point_via_release(kPoint1);
+    capture_point_via_release(kPoint2);
 
     // First two samples of POINT_3 on release; the last on the stall fallback.
-    tap(POINT3);
-    tap(POINT3);
-    tap_via_stall(POINT3); // commits the 3rd sample -> VERIFY -> auto-accept
+    tap(kPoint3);
+    tap(kPoint3);
+    tap_via_stall(kPoint3); // commits the 3rd sample -> VERIFY -> auto-accept
 
     REQUIRE(state() == TouchCalibrationPanel::State::COMPLETE);
 }
@@ -141,8 +141,8 @@ TEST_CASE_METHOD(WizardAutoAcceptFixture,
 TEST_CASE_METHOD(WizardAutoAcceptFixture,
                  "Wizard auto-accept: stays mid-capture until POINT_3 commits (#1029)",
                  "[wizard][touch-calibration][autoaccept]") {
-    capture_point_via_release(POINT1);
-    capture_point_via_release(POINT2);
+    capture_point_via_release(kPoint1);
+    capture_point_via_release(kPoint2);
 
     REQUIRE(state() == TouchCalibrationPanel::State::POINT_3);
 }

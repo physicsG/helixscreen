@@ -61,27 +61,82 @@ EOF
 die() { printf 'helix-claim: %s\n' "$1" >&2; exit 2; }
 slug() { printf '%s' "$1" | tr '/:' '__' | tr -cd '[:alnum:]_.-'; }
 
-# Field 22 of /proc/PID/stat. comm can contain spaces and parens, so count from
-# the last ')' rather than splitting the whole line.
-pid_starttime() {
-    local stat; stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
-    printf '%s' "${stat##*) }" | awk '{print $20}'
+# Process facts come from /proc where the box has one and from ps(1) where it
+# does not (a Mac). HELIX_CLAIM_PROC points the /proc reads elsewhere, so the
+# ps path runs under test on Linux too.
+PROC_ROOT=${HELIX_CLAIM_PROC:-/proc}
+if [ -r "$PROC_ROOT/$$/stat" ]; then HAVE_PROC=1; else HAVE_PROC=0; fi
+
+# The fields of /proc/PID/stat after comm, which can contain spaces and parens,
+# so cut through the last ") ": state is $1, ppid $2, starttime $20.
+proc_stat_tail() {
+    local stat; stat=$(cat "$PROC_ROOT/$1/stat" 2>/dev/null) || return 1
+    printf '%s' "${stat##*) }"
 }
 
-# A Bash tool call is a transient shell, so its own pid is useless as an owner.
-# Walk to the nearest `claude` ancestor, which lives as long as the session.
-session_pid() {
-    local p=$$ ppid comm hops=0 pgid
+# The kernel's start time, which tells a process from a later one reusing its
+# pid. ps reports it to the second, which is as fine as pid reuse ever gets.
+pid_starttime() {
+    if [ "$HAVE_PROC" = 1 ]; then
+        proc_stat_tail "$1" | awk '{print $20}'
+        return "${PIPESTATUS[0]}"
+    fi
+    local st; st=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ')
+    st=${st# }; st=${st% }
+    [ -n "$st" ] || return 1
+    printf '%s' "$st"
+}
+
+pid_ppid() {
+    if [ "$HAVE_PROC" = 1 ]; then
+        proc_stat_tail "$1" | awk '{print $2}'
+    else
+        ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '
+    fi
+}
+
+# One letter: R, S, T (stopped), Z...
+pid_state() {
+    if [ "$HAVE_PROC" = 1 ]; then
+        proc_stat_tail "$1" | cut -c1
+    else
+        ps -o stat= -p "$1" 2>/dev/null | tr -d ' ' | cut -c1
+    fi
+}
+
+# ps prints comm as the executable's path on a Mac.
+pid_comm() {
+    if [ "$HAVE_PROC" = 1 ]; then
+        cat "$PROC_ROOT/$1/comm" 2>/dev/null
+    else
+        local c; c=$(ps -o comm= -p "$1" 2>/dev/null) || return 1
+        [ -n "$c" ] || return 1
+        basename "$c"
+    fi
+}
+
+# Nearest `claude` ancestor of this process: it lives as long as the session,
+# unlike the transient shell a Bash tool call runs in. Fails when the chain
+# holds none.
+SESSION_COMM=${HELIX_CLAIM_SESSION_COMM:-claude}
+claude_ancestor() {
+    local p=$$ ppid comm hops=0
     while [ "$p" -gt 1 ] && [ "$hops" -lt 40 ]; do
-        comm=$(cat "/proc/$p/comm" 2>/dev/null) || break
-        [ "$comm" = "claude" ] && { printf '%s' "$p"; return 0; }
-        # /proc/PID/stat: comm may hold spaces and parens, so cut through the
-        # final ") "; the remaining fields begin at state, making ppid $2.
-        ppid=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | awk '{print $2}')
+        comm=$(pid_comm "$p") || break
+        [ "$comm" = "$SESSION_COMM" ] && { printf '%s' "$p"; return 0; }
+        ppid=$(pid_ppid "$p")
         case "$ppid" in ''|*[!0-9]*) break;; esac
         [ "$ppid" = "$p" ] && break
         p=$ppid; hops=$((hops+1))
     done
+    return 1
+}
+
+# The default owner of a claim: the session's `claude` process when there is
+# one, else a stand-in that is stable across the commands of one run.
+session_pid() {
+    local pgid
+    claude_ancestor && return 0
     # Outside a Claude session $PPID names whichever shell happened to invoke
     # this, so a take and a release in the same run can derive different owners
     # and the claim becomes unreleasable by the run that took it. Every process
@@ -89,7 +144,7 @@ session_pid() {
     # with a start time, so liveness is derived exactly as before.
     pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
     case "$pgid" in ''|*[!0-9]*) printf '%s' "$PPID"; return 0;; esac
-    [ -e "/proc/$pgid" ] || [ "$(uname -s)" != Linux ] || { printf '%s' "$PPID"; return 0; }
+    pid_starttime "$pgid" >/dev/null || { printf '%s' "$PPID"; return 0; }
     printf '%s' "$pgid"
 }
 
@@ -125,13 +180,53 @@ sibling_file() {
     printf '%s/%s.json' "$CLAIM_DIR" "$(slug "$other:$name")"
 }
 
-# Echoes the sibling's file when a DIFFERENT live session holds the same tree.
+# True when pid is this process or one of its ancestors: a subagent running under
+# its parent session's claim is the same owner as that session.
+is_self_or_ancestor() {
+    local p=$$ ppid hops=0
+    while [ "$p" -gt 1 ] && [ "$hops" -lt 40 ]; do
+        [ "$p" = "$1" ] && return 0
+        ppid=$(pid_ppid "$p")
+        case "$ppid" in ''|*[!0-9]*) return 1;; esac
+        [ "$ppid" = "$p" ] && return 1
+        p=$ppid; hops=$((hops+1))
+    done
+    return 1
+}
+
+# The session this command runs for, as a claim records it. Empty outside one.
+# Claude Code's own id wins; HELIX_SESSION_ID is the fallback for an agent that
+# is not Claude, and must be set per session, never exported machine-wide, or
+# every session on the box reads as one owner.
+caller_session_id() { printf '%s' "${CLAUDE_CODE_SESSION_ID:-${HELIX_SESSION_ID:-}}"; }
+
+# One ownership rule for every holder-versus-caller question, given the holder
+# claim's body and the caller's pid: the holder is the caller's own pid, an
+# ancestor of it, or a SESSION-OWNED claim (owner_kind "session": taken with
+# --session, --pid auto or by default under a `claude` ancestor) recorded under
+# the caller's session id. The id is what still ties a process reparented to
+# init (a detached launch whose shell exited) to its session. It never matches
+# a claim owned by an explicit pid, so a build: claim taken with --pid, as
+# land-gate takes it, refuses the tree to that session's subagents. A default
+# take under a claude ancestor records the claude pid instead, and the
+# session's subagents match it by ancestry. Two empty ids never match.
+same_owner() {
+    local holder sid
+    holder=$(json_get "$1" pid)
+    [ "$holder" = "$2" ] && return 0
+    is_self_or_ancestor "$holder" && return 0
+    [ "$(json_get "$1" owner_kind)" = session ] || return 1
+    sid=$(json_get "$1" session_id)
+    [ -n "$sid" ] && [ "$sid" = "$(caller_session_id)" ]
+}
+
+# Echoes the sibling's file when a DIFFERENT live session holds the same tree,
+# as same_owner judges it.
 blocking_sibling() {
     local f; f=$(sibling_file "$1") || return 1
     [ -f "$f" ] || return 1
     [ "$(state_of "$f")" = "LIVE" ] || return 1
-    local body; body=$(tr -d '\n' < "$f")
-    [ "$(json_get "$body" pid)" = "$2" ] && return 1
+    same_owner "$(tr -d '\n' < "$f")" "$2" && return 1
     printf '%s' "$f"
 }
 
@@ -161,7 +256,7 @@ tree_pids() {
 # RSS of a pid plus all its descendants, in KB. A heavy job is a make or a
 # shard runner whose own RSS is nothing next to its children's.
 tree_rss_kb() {
-    ps -o rss= -p "$(tree_pids "$1" | paste -sd,)" 2>/dev/null | awk '{ t += $1 } END { print t + 0 }'
+    ps -o rss= -p "$(tree_pids "$1" | paste -sd, -)" 2>/dev/null | awk '{ t += $1 } END { print t + 0 }'
 }
 
 # Only a LIVE heavy: claim has a job behind it worth measuring.
@@ -216,6 +311,21 @@ fi
 HOST
 }
 
+# Memory a new job may take, in kB: lib/mem_available.sh, which bounds
+# MemAvailable by a container's own limit. A copy of this script run without
+# its lib/ (the helix-claim bats copy it alone) reads MemAvailable directly.
+mem_available_kb() {
+    local lib
+    lib="$(dirname "${BASH_SOURCE[0]}")/lib/mem_available.sh"
+    if [ -r "$lib" ]; then
+        # shellcheck source-path=SCRIPTDIR source=lib/mem_available.sh
+        . "$lib"
+        helix_mem_available_kb
+    else
+        awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null
+    fi
+}
+
 # The live jobpool's target, or exit 1 when there is none. `jobpool target`
 # takes no lock and moves no tokens, so this is safe on every make and under a
 # timeout. JOBPOOL=0 is jobpool's own bypass, so it bypasses here too.
@@ -258,26 +368,92 @@ unpooled_runners() {
     done
 }
 
+# The main tree is the first entry of the worktree list.
+is_main_tree_resource() {
+    local main
+    main=$(git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+    [ -n "$main" ] && [ "${1#*:}" = "$(basename "$main")" ]
+}
+
+# Workflows whose failure on main means main is red; others (nightly, release,
+# cache jobs) fail for reasons that do not block landing.
+RED_MAIN_WORKFLOWS=${HELIX_CLAIM_CI_WORKFLOWS:-Build|Code Quality}
+
+# Prints "<workflow> <sha>" for each main-CI workflow whose latest completed,
+# non-cancelled push run on origin/main failed (failure, timed_out or
+# startup_failure). Runs still in progress are ignored. A run whose commit is
+# known locally but is not on origin/main (a fork PR from its main branch) is
+# ignored. Prints nothing when green or when the state cannot be read: an
+# advisory lock must not wedge on a flaky network, so a gh that is missing,
+# unauthenticated or slow warns once and lets the take go on.
+red_main_workflows() {
+    git remote get-url origin >/dev/null 2>&1 || return 0
+    local out limit="" wf concl sha
+    if ! command -v gh >/dev/null 2>&1; then
+        printf 'helix-claim: gh not installed; skipping the red-main check\n' >&2; return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then limit="timeout 10"
+    elif command -v gtimeout >/dev/null 2>&1; then limit="gtimeout 10"; fi
+    out=$(${HELIX_CLAIM_TIMEOUT-$limit} gh run list --branch main --event push --limit 40 \
+            --json conclusion,status,workflowName,headSha \
+            --jq '.[] | select(.status=="completed" and .conclusion!="cancelled" and .conclusion!="skipped") | [.workflowName,.conclusion,.headSha] | @tsv' 2>/dev/null) || {
+        printf 'helix-claim: could not read CI state from gh; skipping the red-main check\n' >&2; return 0
+    }
+    local have_ref=0
+    git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null && have_ref=1
+    while IFS=$'\t' read -r wf concl sha; do
+        [ -n "$wf" ] || continue
+        if (( have_ref )) && git cat-file -e "$sha^{commit}" 2>/dev/null &&
+           ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main 2>/dev/null; then
+            continue
+        fi
+        printf '%s\t%s\t%s\n' "$wf" "$concl" "${sha:0:9}"
+    done <<<"$out" | awk -F'\t' -v want="$RED_MAIN_WORKFLOWS" '
+        BEGIN { n = split(want, w, "|"); for (i = 1; i <= n; i++) wf[w[i]] = 1 }
+        ($1 in wf) && !($1 in seen) { seen[$1] = 1; if ($2 == "failure" || $2 == "timed_out" || $2 == "startup_failure") print $1 " " $3 }'
+}
+
 cmd=${1:-}; shift 2>/dev/null || true
 case "$cmd" in
 take)
     res=${1:-}; op=${2:-}; shift 2 2>/dev/null || true
     res=$(canon "$res")
-    [ -n "$res" ] && [ -n "$op" ] || die "usage: helix-claim take <resource> <op> [--note X] [--pid N]"
-    note=""; pid=""
+    [ -n "$res" ] && [ -n "$op" ] || die "usage: helix-claim take <resource> <op> [--note X] [--pid N|auto|--session]"
+    note=""; pid=""; ack_red=0
     while [ $# -gt 0 ]; do
         case $1 in
+            --ack-red-main) ack_red=1; shift;;
             --note) [ $# -ge 2 ] || die "--note needs a value"; note=$2; shift 2;;
             --pid)  [ $# -ge 2 ] || die "--pid needs a value";  pid=$2;  shift 2;;
+            --session) pid=auto; shift;;
             *) die "unknown option: $1";;
         esac
     done
-    [ -n "$pid" ] || pid=$(session_pid)
+    owner_kind=pid
+    if [ "$pid" = auto ]; then
+        pid=$(claude_ancestor) ||
+            die "--pid auto: found no process named '$SESSION_COMM' among the ancestors of this command (searched up to 40 parents); pass --pid <long-lived owner> instead"
+        owner_kind=session
+    fi
+    case "$pid" in *[!0-9]*) die "--pid needs a number or 'auto', got: $pid";; esac
+    if [ -z "$pid" ]; then
+        if pid=$(claude_ancestor); then owner_kind=session; else pid=$(session_pid); fi
+    fi
     mkdir -p "$CLAIM_DIR" || die "cannot create $CLAIM_DIR"
     f="$CLAIM_DIR/$(slug "$res").json"
     if [ "$(state_of "$f")" = "LIVE" ]; then
         printf 'REFUSED: already claimed\n'; describe "$f"; exit 1
     fi
+    case "$res" in worktree:*)
+        if (( ! ack_red )) && is_main_tree_resource "$res"; then
+            red=$(red_main_workflows)
+            if [ -n "$red" ]; then
+                printf 'REFUSED: CI on origin/main is red (%s)\n' "$(paste -sd, - <<<"$red" | sed 's/,/, /g')"
+                printf '  fix or revert main first, or pass --ack-red-main to work in it anyway\n'
+                exit 1
+            fi
+        fi;;
+    esac
     if sib=$(blocking_sibling "$res" "$pid"); then
         printf 'REFUSED: another session holds the same tree\n'; describe "$sib"; exit 1
     fi
@@ -286,17 +462,21 @@ take)
     # than resolving a pid back to a session by hand. Both are empty for a caller
     # outside a Claude session, so describe() prints each only when it is set;
     # HELIX_SESSION_ID and HELIX_SESSION_SOCKET let any other agent fill them in.
+    # owner_kind says whether pid is the session itself (session) or a process
+    # the caller named (pid); same_owner trusts session_id only for the former.
     cat > "$tmp" <<EOF
 {
   "resource": "$res",
   "op": "$op",
   "session": "${HELIX_SESSION_NAME:-$(hostname)-$pid}",
-  "session_id": "${HELIX_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}",
+  "session_id": "$(caller_session_id)",
+  "owner_kind": "$owner_kind",
   "socket": "${HELIX_SESSION_SOCKET:-${CLAUDE_CODE_MESSAGING_SOCKET:-}}",
   "pid": $pid,
   "pid_start": "$(pid_starttime "$pid")",
   "cwd": "$PWD",
-  "started": "$(date -Is)",
+  "started": "$(date +%Y-%m-%dT%H:%M:%S%z)",
+  "started_epoch": $(date +%s),
   "note": "$note"
 }
 EOF
@@ -381,7 +561,7 @@ jobs)
     # pool divides it between builds as they run. Without it (CI, a Mac, a
     # contributor's box) it is the cores, capped by memory at ~1GB per
     # compile.
-    avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+    avail_kb=$(mem_available_kb)
     mem_gb=$(( ${avail_kb:-0} / 1048576 ))
     if target=$(pool_target); then
         if [ "${1:-}" = "-v" ]; then
@@ -438,9 +618,10 @@ run)
     ( kill -STOP "$BASHPID"; exec "$@" <&3 3<&- ) &
     child=$!
     exec 3<&-
+    # CONT before the child's own STOP lands would leave it stopped for good.
     for _ in $(seq 500); do
-        st=$(cat "/proc/$child/stat" 2>/dev/null) || break
-        st=${st##*) }; [ "${st%% *}" = T ] && break
+        st=$(pid_state "$child") && [ -n "$st" ] || break
+        [ "$st" = T ] && break
         sleep 0.01
     done
     "$self" take "$res" "$op" --note "$note" --pid "$child" >&2
@@ -465,20 +646,33 @@ resources)
     # A snapshot to read before starting heavy work. Read-only.
     remote=1
     [ "${1:-}" = "--no-test-host" ] && remote=0
-    avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
-    read -r l1 l5 l15 _ < /proc/loadavg
+    if [ -r /proc/meminfo ]; then
+        avail_kb=$(mem_available_kb)
+        read -r l1 l5 l15 _ < /proc/loadavg
+    else
+        # macOS: free, inactive and speculative pages are what it hands out
+        # without swapping, the nearest it has to MemAvailable.
+        avail_kb=$(vm_stat 2>/dev/null | awk '/page size of/ {ps = $8}
+            /^Pages (free|inactive|speculative):/ {gsub(/\./, "", $NF); n += $NF}
+            END {if (ps) printf "%d", n * ps / 1024}')
+        read -r l1 l5 l15 _ <<<"$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}')"
+    fi
     if j=$(pool_target); then jl="jobpool target $j"; else jl="build -j$("${BASH_SOURCE[0]}" jobs)"; fi
     printf '%s: %.1fGB available, load %s %s %s on %s cpus, %s\n' \
-        "$(hostname -s)" "$(awk -v kb="$avail_kb" 'BEGIN{print kb/1048576}')" \
-        "$l1" "$l5" "$l15" "$(nproc)" "$jl"
+        "$(hostname -s)" "$(awk -v kb="${avail_kb:-0}" 'BEGIN{print kb/1048576}')" \
+        "${l1:-?}" "${l5:-?}" "${l15:-?}" "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" "$jl"
     shopt -s nullglob
     live=0
     for f in "$CLAIM_DIR"/*.json; do
         [ "$(state_of "$f")" = LIVE ] || continue
         [ "$live" = 0 ] && printf 'live claims:\n'; live=$((live+1))
         body=$(tr -d '\n' < "$f")
-        since=$(date -d "$(json_get "$body" started)" +%s 2>/dev/null) &&
-            age=$(fmt_age $(( $(date +%s) - since ))) || age='?'
+        # started_epoch is portable; parsing the ISO stamp needs GNU date -d.
+        since=$(json_get "$body" started_epoch)
+        case "$since" in
+            ''|*[!0-9]*) since=$(date -d "$(json_get "$body" started)" +%s 2>/dev/null) ;;
+        esac
+        [ -n "$since" ] && age=$(fmt_age $(( $(date +%s) - since ))) || age='?'
         rss=$(heavy_rss "$f") && rss=" rss=$rss" || rss=""
         printf '  %-30s %-16s %6s%s  %s\n' "$(json_get "$body" resource)" \
             "$(json_get "$body" session)" "$age" "$rss" "$(json_get "$body" note)"
@@ -496,7 +690,15 @@ resources)
     # The named groups always show when present; clangd in particular grows
     # without bound per session. The rest fill in by size.
     printf 'memory by command (count, total RSS, largest):\n'
-    ps -eo rss=,pid=,etimes=,comm= 2>/dev/null | awk '
+    # etime ([[dd-]hh:]mm:ss), not etimes, which a Mac lacks. comm runs to the
+    # end of the line: on a Mac it is the executable's path, spaces and all.
+    ps -eo rss=,pid=,etime=,comm= 2>/dev/null | awk '
+        function secs(e,    d, t, n) {
+            d = 0
+            if (index(e, "-")) { d = substr(e, 1, index(e, "-") - 1); e = substr(e, index(e, "-") + 1) }
+            n = split(e, t, ":")
+            return d * 86400 + (n == 3 ? t[1] * 3600 + t[2] * 60 + t[3] : t[1] * 60 + t[2])
+        }
         function age(s) {
             if (s >= 86400) return sprintf("%dd%02dh", s/86400, s%86400/3600)
             if (s >= 3600)  return sprintf("%dh%02dm", s/3600, s%3600/60)
@@ -508,12 +710,14 @@ resources)
         }
         {
             g = $4
+            for (i = 5; i <= NF; i++) g = g " " $i
+            if (g ~ /^\//) sub(/.*\//, "", g)
             if (g ~ /^clangd/) g = "clangd"   # its worker threads rename the process
             else if (g ~ /^(cc1plus|clang\+\+|clang|g\+\+)$/) g = "cc1plus/clang++"
             else if (g ~ /^(addr2line|eu-addr2line|llvm-symbolizer|llvm-addr2line|gdb)$/) g = "addr2line/gdb"
             else if (g ~ /^(docker|containerd)/) g = "docker"
             n[g]++; tot[g] += $1
-            if ($1 > big[g]) { big[g] = $1; bpid[g] = $2; bage[g] = $3 }
+            if ($1 > big[g]) { big[g] = $1; bpid[g] = $2; bage[g] = secs($3) }
         }
         END {
             for (g in tot)
@@ -527,8 +731,10 @@ resources)
     # none configured there is nothing to ask. Each held run lock names its job.
     # shellcheck source-path=SCRIPTDIR source=lib/build_hosts.sh
     . "$(dirname "${BASH_SOURCE[0]}")/lib/build_hosts.sh"
-    thost=${HELIX_TEST_HOST:-}
-    [ -n "$thost" ] || exit 0
+    [ -n "${HELIX_TEST_HOST:-}" ] || exit 0
+    resolve_build_host HELIX_TEST_HOST ||
+        { printf 'test host (%s): unreachable\n' "$HELIX_TEST_HOST"; exit 0; }
+    thost=$HELIX_TEST_HOST
     tline=$(test_host_probe | timeout 8 ssh -o ConnectTimeout=3 -o BatchMode=yes "$thost" \
             bash -s -- "${HELIX_TEST_CONTAINER:-helix-test}" "${HELIX_TEST_LOCK_DIR:-/tmp}" 2>/dev/null) &&
         [ -n "$tline" ] || { printf 'test host (%s): unreachable\n' "$thost"; exit 0; }
@@ -542,8 +748,7 @@ held-by-other)
     me=$(session_pid)
     f="$CLAIM_DIR/$(slug "$res").json"
     if [ -f "$f" ] && [ "$(state_of "$f")" = "LIVE" ]; then
-        body=$(tr -d '\n' < "$f")
-        [ "$(json_get "$body" pid)" != "$me" ] && { describe "$f"; exit 0; }
+        same_owner "$(tr -d '\n' < "$f")" "$me" || { describe "$f"; exit 0; }
     fi
     if sib=$(blocking_sibling "$res" "$me"); then describe "$sib"; exit 0; fi
     exit 1
@@ -589,7 +794,15 @@ release)
     cat <<'USAGE'
 helix-claim - advisory claims on resources shared between agent sessions
 
-  take <resource> <op> [--note X] [--pid N]   claim; refuses if a LIVE claim exists
+  take <resource> <op> [--note X] [--pid N | --session]
+                                              claim; refuses if a LIVE claim exists.
+                                              --session (= --pid auto) owns it by the
+                                              nearest `claude` ancestor (errors if none)
+                                              worktree:<main> is refused while the latest
+                                              Build / Code Quality push run on origin/main
+                                              failed (failure, timed_out, startup_failure),
+                                              unless --ack-red-main; runs still in
+                                              progress are ignored
   check <resource>                            FREE | LIVE | STALE (exit 1 if LIVE)
   list                                        all claims with derived liveness
   release <resource> [--force]                drop your claim; refuses one another

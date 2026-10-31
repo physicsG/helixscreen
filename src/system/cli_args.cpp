@@ -71,7 +71,7 @@ void print_test_mode_banner() {
     // Resolved, not the raw constant: with HELIX_CONFIG_DIR set the app reads
     // and writes the override path, and a banner naming config/ instead sends
     // you editing a file the run never touches.
-    printf("  Config: %s\n", Config::resolve_path(RuntimeConfig::TEST_CONFIG_PATH).c_str());
+    printf("  Config: %s\n", Config::resolve_path(RuntimeConfig::kTestConfigPath).c_str());
 
     printf("\n");
 }
@@ -720,7 +720,7 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
         }
     }
 
-    // HELIX_MOCK_AMS=medusahc[-fork] selects mock HARDWARE, not a mock
+    // HELIX_MOCK_AMS=medusahc[-ktc|-tn] selects mock HARDWARE, not a mock
     // backend: MoonrakerClientMock publishes the objects and status a real
     // hotend changer does, and the production AmsBackendToolChanger is meant to
     // drive them. That is exactly what --real-ams already means, so imply it
@@ -742,8 +742,7 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
         const char* printer_env = std::getenv("HELIX_MOCK_PRINTER");
         const std::string mode =
             helix::mock::effective_mock_ams(std::getenv("HELIX_MOCK_AMS"), printer_env);
-        if (mode == "medusahc" || mode == "medusa" || mode == "mhc" || mode == "medusahc-fork" ||
-            mode == "medusa-fork") {
+        if (helix::mock::medusa_variant(mode) != helix::mock::MedusaVariant::NONE) {
             config.use_real_ams = true;
             spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
                          "tool-changer backend)",
@@ -762,6 +761,16 @@ bool parse_cli_args(int argc, char** argv, CliArgs& args, int& screen_width, int
             config.use_real_ams = true;
             spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
                          "OpenAMS backend)",
+                         mode);
+        } else if (mode == "multiace") {
+            config.use_real_ams = true;
+            spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
+                         "multiACE-on-U1 backend)",
+                         mode);
+        } else if (mode == "indx") {
+            config.use_real_ams = true;
+            spdlog::info("[CLI] HELIX_MOCK_AMS={} implies --real-ams (mock hardware, real "
+                         "INDX backend)",
                          mode);
         } else if (mode.empty() && printer_env && helix::mock::is_hardware_persona(printer_env)) {
             config.use_real_ams = true;

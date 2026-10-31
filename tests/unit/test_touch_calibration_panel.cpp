@@ -802,7 +802,7 @@ TEST_CASE_METHOD(TouchCalibrationPanelFailureFixture,
     panel_->start();
     REQUIRE(panel_->get_state() == TouchCalibrationPanel::State::POINT_1);
 
-    // 2 good + 1 saturated (ADC max) — 2 valid meets MIN_VALID_SAMPLES
+    // 2 good + 1 saturated (ADC max) — 2 valid meets kMinValidSamples
     panel_->add_sample(Point{100, 120});
     panel_->add_sample(Point{4095, 4095}); // saturated
     panel_->add_sample(Point{102, 119});
@@ -961,7 +961,7 @@ TEST_CASE_METHOD(TouchCalibrationPanelDebounceFixture,
     panel_->set_verify_entry_callback([&]() { ++verify_entries; });
     panel_->start();
 
-    // SAMPLES_REQUIRED commits per point, each a clean press/release past the
+    // kSamplesRequired commits per point, each a clean press/release past the
     // refractory window. The transition into VERIFY lands on the final commit.
     const Point taps[3] = {{100, 120}, {380, 390}, {660, 60}};
     for (const auto& tap : taps) {

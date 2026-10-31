@@ -26,10 +26,12 @@
  * carry byte-identical detail while only the second carries the recovery set.
  */
 
-#include "test_helpers/afc_test_access.h"
+#include "ui_update_queue.h"
+
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 #include "error_event.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <string>
 
@@ -41,6 +43,11 @@ namespace helix {
 
 class AfcCurrentErrorHelper : public AmsBackendAfc {
   public:
+    // A message frame queues its toast decision for the main thread.
+    ~AfcCurrentErrorHelper() override {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
     AfcCurrentErrorHelper() : AmsBackendAfc(nullptr, nullptr) {
         std::vector<std::string> names{"lane1", "lane2", "lane3", "lane4"};
         AfcTestAccess::initialize_slots(*this, names);
@@ -153,6 +160,9 @@ TEST_CASE("AFC current_error carries the fault text and a recovery set", "[ams][
 
         auto e = afc.current_error();
         REQUIRE(e.has_value());
+        // AFC's fault channel is the runout channel: the trait says so.
+        CHECK(afc.traits().raises_runout_fault);
+        CHECK(afc.traits().raises_runout_fault_during_job);
         CHECK(e->source == helix::ErrorSource::AFC);
         CHECK(e->severity == helix::ErrorSeverity::CRITICAL);
         CHECK(e->sticky);

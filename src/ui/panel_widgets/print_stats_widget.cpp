@@ -1,120 +1,157 @@
+// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "print_stats_widget.h"
 
 #include "ui_event_safety.h"
-#include "ui_filename_utils.h"
 #include "ui_next_tick.h"
+#include "ui_panel_history_dashboard.h"
+#include "ui_subject_registry.h"
 
 #include "app_globals.h"
+#include "helix_psram_attr.h"
 #include "i_moonraker_api.h"
+#include "locale_formats.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "observe_language.h"
 #include "observer_factory.h"
 #include "panel_widget_registry.h"
 #include "panel_widget_size.h"
-#include "static_subject_registry.h"
-#include "subject_debug_registry.h"
+#include "print_activity.h"
+#include "src/ui/panel_widgets/content_chrome.h"
+#include "src/ui/panel_widgets/live_tile_owner.h"
 #include "subject_managed_panel.h"
+#include "text_measure.h"
+#include "theme_manager.h"
+#include "widget_subjects.h"
 
 #include <spdlog/spdlog.h>
 
-#include <chrono>
-#include <cstdio>
+#include <algorithm>
+#include <ctime>
 #include <string>
 
-// Subjects owned by PrintStatsWidget module
-static lv_subject_t s_size_mode;
-static lv_subject_t s_view_mode; // 0=lifetime, 1=weekly
-static lv_subject_t s_title;
-static lv_subject_t s_total_prints;
-static lv_subject_t s_total_time;
-static lv_subject_t s_total_time_short;
-static lv_subject_t s_success_rate;
-static lv_subject_t s_weekly;
-static lv_subject_t s_last_print;
+using helix::ui::measure_text_px;
 
-// Sized for UTF-8: the Russian title alone is 41 bytes.
-static char s_title_buf[64] = "Lifetime Print Stats";
-static char s_total_prints_buf[16] = "--";
-static char s_total_time_buf[24] = "--";
-static char s_total_time_short_buf[16] = "--";
-static char s_success_rate_buf[8] = "--";
-static char s_weekly_buf[16] = "--";
-static char s_last_print_buf[64] = "";
+namespace {
 
-static bool s_subjects_initialized = false;
-static SubjectManager s_subjects;
+// The verdict and texts the widget publishes, read by panel_widget_print_stats.xml.
+// Module-level because the widget is single-instance and registration rides
+// SubjectInitializer's panel-subject phase, so the subjects exist before any XML that
+// binds them is parsed.
+struct Subjects {
+    lv_subject_t rung{};
+    lv_subject_t content{};
+    lv_subject_t support{};
+    lv_subject_t show_bars{};
+    lv_subject_t show_day_labels{};
+    lv_subject_t side_by_side{};
+    lv_subject_t strip_text{};
+    lv_subject_t hero{};
+    lv_subject_t hero_label{};
+    lv_subject_t support_text{};
+    lv_subject_t day[helix::kActivityDays]{};
+    lv_subject_t day_label[helix::kActivityDays]{};
+    char hero_buf[24]{};
+    char hero_label_buf[96]{};
+    char support_text_buf[160]{};
+    char day_label_buf[helix::kActivityDays][16]{};
+};
+HELIX_PSRAM_BSS Subjects s_subj;
+helix::WidgetSubjects s_subjects{"PrintStatsWidgetSubjects"};
+// The instance bound to the live tile. Only it publishes: a transient instance (a
+// rebuild's outgoing widget) must not overwrite the tile's verdict.
+helix::LiveTileOwner<helix::PrintStatsWidget> s_tile;
 
-/// Start of the weekly window. One spelling, because the cache is asked to
-/// cover this window and the numbers are then aggregated over it - a
-/// disagreement between those two would read as a silent undercount.
-static double week_ago_timestamp() {
-    const auto now = std::chrono::system_clock::now();
-    return static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(
-                                   (now - std::chrono::hours(24 * 7)).time_since_epoch())
-                                   .count());
-}
-
-static void print_stats_init_subjects() {
-    if (s_subjects_initialized)
-        return;
-
-    lv_subject_init_int(&s_size_mode, 2);
-    lv_subject_init_int(&s_view_mode, 0);
-    lv_subject_init_string(&s_title, s_title_buf, nullptr, sizeof(s_title_buf),
-                           lv_tr("Lifetime Print Stats"));
-    lv_subject_init_string(&s_total_prints, s_total_prints_buf, nullptr, sizeof(s_total_prints_buf),
-                           "--");
-    lv_subject_init_string(&s_total_time, s_total_time_buf, nullptr, sizeof(s_total_time_buf),
-                           "--");
-    lv_subject_init_string(&s_total_time_short, s_total_time_short_buf, nullptr,
-                           sizeof(s_total_time_short_buf), "--");
-    lv_subject_init_string(&s_success_rate, s_success_rate_buf, nullptr, sizeof(s_success_rate_buf),
-                           "--");
-    lv_subject_init_string(&s_weekly, s_weekly_buf, nullptr, sizeof(s_weekly_buf), "--");
-    lv_subject_init_string(&s_last_print, s_last_print_buf, nullptr, sizeof(s_last_print_buf), "");
-
-    s_subjects.publish("print_stats_size_mode", &s_size_mode);
-    s_subjects.publish("print_stats_view_mode", &s_view_mode);
-    s_subjects.publish("print_stats_title", &s_title);
-    s_subjects.publish("print_stats_total_prints", &s_total_prints);
-    s_subjects.publish("print_stats_total_time", &s_total_time);
-    s_subjects.publish("print_stats_total_time_short", &s_total_time_short);
-    s_subjects.publish("print_stats_success_rate", &s_success_rate);
-    s_subjects.publish("print_stats_weekly", &s_weekly);
-    s_subjects.publish("print_stats_last_print", &s_last_print);
-
-    SubjectDebugRegistry::instance().register_subject(&s_size_mode, "print_stats_size_mode",
-                                                      LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_view_mode, "print_stats_view_mode",
-                                                      LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_title, "print_stats_title",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_total_prints, "print_stats_total_prints",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_total_time, "print_stats_total_time",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_total_time_short,
-                                                      "print_stats_total_time_short",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_success_rate, "print_stats_success_rate",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_weekly, "print_stats_weekly",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&s_last_print, "print_stats_last_print",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-
-    s_subjects_initialized = true;
-
-    StaticSubjectRegistry::instance().register_deinit("PrintStatsWidgetSubjects", []() {
-        if (s_subjects_initialized && lv_is_initialized()) {
-            s_subjects.deinit_all();
-            s_subjects_initialized = false;
+void print_stats_init_subjects() {
+    s_subjects.ensure_init([] {
+        UI_MANAGED_SUBJECT_INT(s_subj.rung, static_cast<int>(helix::SizeRung::Cell),
+                               "print_stats_rung", s_subjects);
+        UI_MANAGED_SUBJECT_INT(s_subj.content, static_cast<int>(helix::PrintStatsContent::Loading),
+                               "print_stats_content", s_subjects);
+        UI_MANAGED_SUBJECT_INT(s_subj.support, static_cast<int>(helix::PrintStatsSupport::None),
+                               "print_stats_support", s_subjects);
+        UI_MANAGED_SUBJECT_INT(s_subj.show_bars, 0, "print_stats_show_bars", s_subjects);
+        UI_MANAGED_SUBJECT_INT(s_subj.show_day_labels, 0, "print_stats_show_day_labels",
+                               s_subjects);
+        UI_MANAGED_SUBJECT_INT(s_subj.side_by_side, 0, "print_stats_side_by_side", s_subjects);
+        UI_MANAGED_SUBJECT_INT(s_subj.strip_text,
+                               static_cast<int>(helix::PrintStatsStripText::HeadingWeek),
+                               "print_stats_strip_text", s_subjects);
+        UI_MANAGED_SUBJECT_STRING(s_subj.hero, s_subj.hero_buf, "--", "print_stats_hero",
+                                  s_subjects);
+        UI_MANAGED_SUBJECT_STRING(s_subj.hero_label, s_subj.hero_label_buf, "",
+                                  "print_stats_hero_label", s_subjects);
+        UI_MANAGED_SUBJECT_STRING(s_subj.support_text, s_subj.support_text_buf, "",
+                                  "print_stats_support_text", s_subjects);
+        // Subject names are held by pointer, so they must outlive this function.
+        static const char* const kDayNames[helix::kActivityDays] = {
+            "print_stats_day_0", "print_stats_day_1", "print_stats_day_2", "print_stats_day_3",
+            "print_stats_day_4", "print_stats_day_5", "print_stats_day_6"};
+        static const char* const kDayLabelNames[helix::kActivityDays] = {
+            "print_stats_day_label_0", "print_stats_day_label_1", "print_stats_day_label_2",
+            "print_stats_day_label_3", "print_stats_day_label_4", "print_stats_day_label_5",
+            "print_stats_day_label_6"};
+        for (int i = 0; i < helix::kActivityDays; ++i) {
+            UI_MANAGED_SUBJECT_INT(s_subj.day[i], 0, kDayNames[i], s_subjects);
+            UI_MANAGED_SUBJECT_STRING(s_subj.day_label[i], s_subj.day_label_buf[i], "",
+                                      kDayLabelNames[i], s_subjects);
         }
-    });
 
-    spdlog::debug("[PrintStatsWidget] Subjects initialized");
+        spdlog::debug("[PrintStatsWidget] Subjects initialized");
+    });
 }
+
+using helix::line_px;
+
+/// The Strip's short label: "/wk" for this week's figure, the label itself otherwise.
+std::string strip_short_label(helix::PrintStatsContent content, const std::string& label) {
+    return content == helix::PrintStatsContent::Activity ? std::string(lv_tr("/wk")) : label;
+}
+
+/// The minimum content box each rung draws in. Mirrors panel_widget_print_stats.xml:
+/// the root's gap is space_xxs between rows, space_xs between the hero and the bars
+/// when they sit side by side, and space_xs between bars. The hero is budgeted at a
+/// fixed worst-case sample so the rung holds while the hours change. The support line
+/// is not budgeted here: the decision measures it as it would draw and drops it to a
+/// shorter level when it does not fit.
+helix::RungNeeds measure_needs(const helix::ContentChrome& chrome) {
+    using helix::rung_box;
+    const lv_font_t* heading = theme_manager_get_font("font_heading");
+    const lv_font_t* small = theme_manager_get_font("font_small");
+    const lv_font_t* xs = theme_manager_get_font("font_xs");
+    const int row_gap = theme_manager_get_spacing("space_xxs");
+    const int col_gap = theme_manager_get_spacing("space_xs");
+    const int heading_h = line_px(heading);
+    const int small_h = line_px(small);
+
+    const int hero_w = measure_text_px(helix::format_print_hours(888.0).c_str(), heading);
+    const int label_w = measure_text_px(lv_tr("this week"), small);
+    const int text_w = std::max(hero_w, label_w);
+    const int hero_block_h = heading_h + small_h;
+    const int bar_w = col_gap;
+    const int bars_w = helix::kActivityDays * bar_w + (helix::kActivityDays - 1) * col_gap;
+    // Bars shorter than a heading line stop reading as a chart; the baseline is 1px.
+    const int bars_h = heading_h + 1;
+
+    helix::RungNeeds needs;
+    // The hero and its label share one line; the label ellipsizes, so only its first
+    // letters are budgeted.
+    const int label_min_w = measure_text_px("th…", small);
+    needs.strip = rung_box(hero_w + col_gap + label_min_w, heading_h);
+    needs.cell = rung_box(text_w, hero_block_h);
+    needs.wide =
+        rung_box(text_w + col_gap + bars_w, std::max(hero_block_h, bars_h) + row_gap + small_h);
+    // Full is a size class as well as a content fit: a 2x1 tile can hold the content,
+    // but the rung is for 2x2 and up.
+    needs.full =
+        rung_box(std::max({text_w, bars_w, helix::widget_size::w_normal() - chrome.w}),
+                 std::max(hero_block_h + row_gap + bars_h + line_px(xs) + row_gap + small_h,
+                          helix::widget_size::h_tall() - chrome.h));
+    return needs;
+}
+
+} // namespace
 
 namespace helix {
 
@@ -132,43 +169,92 @@ PrintStatsWidget::~PrintStatsWidget() {
     detach();
 }
 
+PrintStatsTileVerdict PrintStatsWidget::decide(int width_px, int height_px,
+                                               PrintStatsContent content, bool lifetime_known,
+                                               const std::string& hero,
+                                               const std::string& label) const {
+    // The root's padding, as panel_widget_print_stats.xml sets it. The needs and the
+    // support line's height count the gap above the support line.
+    const ContentChrome chrome = content_padding_or_estimate(root(), "space_sm", "space_xxs");
+    const lv_font_t* small = theme_manager_get_font("font_small");
+    PrintStatsTileLayoutInput li;
+    li.content_w = width_px - chrome.w;
+    li.content_h = height_px - chrome.h;
+    li.content = content;
+    li.lifetime_known = lifetime_known;
+    li.needs = measure_needs(chrome);
+    if (lifetime_known) {
+        li.count_line_w = measure_text_px(count_line().c_str(), small);
+        li.full_line_w = measure_text_px(full_line().c_str(), small);
+    }
+    li.support_line_h = line_px(small) + theme_manager_get_spacing("space_xxs");
+    // The Strip line in each font pair, the full label then the short one. The hero is
+    // hidden when there is no history, and so is its gap.
+    const lv_font_t* heading = theme_manager_get_font("font_heading");
+    const lv_font_t* body = theme_manager_get_font("font_body");
+    const lv_font_t* xs = theme_manager_get_font("font_xs");
+    const lv_font_t* hero_fonts[] = {heading, body, body, small};
+    const lv_font_t* label_fonts[] = {small, small, xs, xs};
+    const bool hero_shown = content != PrintStatsContent::NoHistory;
+    const std::string short_label = strip_short_label(content, label);
+    const int col_gap = theme_manager_get_spacing("space_xs");
+    for (int i = 0; i < kPrintStatsStripTexts; ++i) {
+        const int pair = i % 4;
+        const std::string& text = i < 4 ? label : short_label;
+        const int hero_w =
+            hero_shown ? measure_text_px(hero.c_str(), hero_fonts[pair]) + col_gap : 0;
+        li.strip_line_w[i] = hero_w + measure_text_px(text.c_str(), label_fonts[pair]);
+    }
+    const auto& n = li.needs;
+    spdlog::trace("[PrintStatsWidget] box {}x{} chrome {}x{} needs s{}x{} c{}x{} w{}x{} f{}x{} "
+                  "content={}",
+                  width_px, height_px, chrome.w, chrome.h, n.strip.w, n.strip.h, n.cell.w, n.cell.h,
+                  n.wide.w, n.wide.h, n.full.w, n.full.h, static_cast<int>(content));
+    return decide_print_stats_tile_layout(li);
+}
+
+std::string PrintStatsWidget::count_line() const {
+    return format_print_count(lifetime_totals_.total_jobs);
+}
+
+std::string PrintStatsWidget::full_line() const {
+    return format_lifetime_line(lifetime_totals_, true);
+}
+
 void PrintStatsWidget::attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) {
     widget_obj_ = widget_obj;
     parent_screen_ = parent_screen;
 
-    // Pressed feedback: dim on touch
-    lv_obj_set_style_opa(widget_obj_, LV_OPA_70, LV_PART_MAIN | LV_STATE_PRESSED);
-
+    s_tile.claim(this);
     install_delete_hook(widget_obj_);
 
-    // Register history observer for live updates.
-    // NOTE: Do NOT call fetch() or update_stats() here — attach() runs inside
-    // a ScopedFreeze (rebuild_widget_grid), so queue_update() callbacks are
-    // silently dropped. Data loading is deferred to on_activate().
-    auto* hm = get_print_history_manager();
-    if (hm) {
+    // attach() runs inside a ScopedFreeze (rebuild_widget_grid), so queue_update()
+    // callbacks are silently dropped: nothing is fetched here. Data loading is
+    // deferred to on_activate().
+    if (auto* hm = get_print_history_manager()) {
         auto token = lifetime_.token();
         history_observer_ = [this, token]() {
             if (token.expired())
                 return;
             // A finished print changes the server totals too, so re-ask.
             fetch_lifetime_totals();
-            update_stats();
+            refresh();
         };
         hm->add_observer(&history_observer_);
     }
 
-    language_observer_ = helix::ui::observe_language_change(
-        this, [](PrintStatsWidget* self) { self->update_stats(); });
+    language_observer_ =
+        helix::ui::observe_language_change(this, [](PrintStatsWidget* self) { self->refresh(); });
 
+    // Instances are recycled across rebuilds and the size callback may not follow.
+    refresh();
     spdlog::debug("[PrintStatsWidget] Attached");
 }
 
 void PrintStatsWidget::on_activate() {
     // Instances are recycled across grid rebuilds, so this runs again on every
-    // activation — the totals request is the only thing that re-seeds a fresh
-    // instance's lifetime numbers (attach() cannot: it runs inside a
-    // ScopedFreeze, where queued callbacks are dropped).
+    // activation: the totals request is the only thing that re-seeds a fresh
+    // instance's lifetime figures (attach() cannot, see above).
     fetch_lifetime_totals();
 
     auto* hm = get_print_history_manager();
@@ -176,19 +262,18 @@ void PrintStatsWidget::on_activate() {
         return;
 
     if (hm->is_loaded(helix::HistoryScope::RECENT)) {
-        update_stats();
+        refresh();
     }
 
-    // The "N/wk" row is computed on every update, in both view modes, so the
-    // cache has to reach a week back whether or not it is already populated -
-    // a startup slice that stops short of that undercounts on a busy printer.
-    // Deferred to next tick so it runs outside any ScopedFreeze.
-    // ensure_covers_since(), not fetch(): fetch() means "the cached list is
-    // wrong", so asking it for a populate while a request is already out
+    // The seven bars reach back to the oldest local midnight, whether or not the
+    // cache is already populated: a startup slice that stops short of that
+    // undercounts on a busy printer. Deferred to next tick so it runs outside any
+    // ScopedFreeze. ensure_covers_since(), not fetch(): fetch() means "the cached
+    // list is wrong", so asking it for a populate while a request is already out
     // queues a second identical one.
     helix::ui::run_next_tick(lifetime_.token(), []() {
         if (auto* history = get_print_history_manager()) {
-            history->ensure_covers_since(week_ago_timestamp());
+            history->ensure_covers_since(local_day_starts(std::time(nullptr))[0]);
         }
     });
 }
@@ -196,7 +281,7 @@ void PrintStatsWidget::on_activate() {
 void PrintStatsWidget::detach() {
     lifetime_.invalidate();
     // invalidate() drops any totals callback still in flight, so the guard has
-    // to be cleared by hand — this instance may be recycled into the next grid
+    // to be cleared by hand: this instance may be recycled into the next grid
     // rebuild, and a stale flag would block its refetch forever.
     lifetime_totals_in_flight_ = false;
     if (auto* hm = get_print_history_manager()) {
@@ -207,10 +292,11 @@ void PrintStatsWidget::detach() {
 
     uninstall_delete_hook();
 
-    if (widget_obj_) {
-        widget_obj_ = nullptr;
-    }
+    widget_obj_ = nullptr;
     parent_screen_ = nullptr;
+
+    if (PrintStatsWidget* displaced = s_tile.release(this))
+        displaced->refresh();
 
     spdlog::debug("[PrintStatsWidget] Detached");
 }
@@ -218,39 +304,25 @@ void PrintStatsWidget::detach() {
 void PrintStatsWidget::on_hooked_root_deleted() {
     // Runs inside LVGL's delete event: drop pointers and expire the guard only.
     //
-    // update_stats() publishes through static lv_subject_t values rather than
-    // into the tile tree, so a drained totals callback is harmless on its own.
-    // What is not harmless is widget_obj_ outliving the object it names: a
-    // later detach() would call lv_obj_set_user_data() on freed memory.
+    // refresh() publishes through static lv_subject_t values rather than into the
+    // tile tree, so a drained totals callback is harmless on its own. What is not
+    // harmless is widget_obj_ outliving the object it names: a later detach() would
+    // call lv_obj_set_user_data() on freed memory.
     lifetime_.invalidate();
     lifetime_totals_in_flight_ = false;
     widget_obj_ = nullptr;
     parent_screen_ = nullptr;
 }
 
-int PrintStatsWidget::mode_for_size(int width_px, int height_px) {
-    return mode_for_size(width_px, height_px, widget_size::current_breakpoint());
-}
-
-int PrintStatsWidget::mode_for_size(int width_px, int height_px, UiBreakpoint bp) {
-    if (height_px < widget_size::h_tall(bp) && width_px < widget_size::w_wide(bp)) {
-        return 0; // narrow compact: time · success
-    }
-    if (height_px < widget_size::h_tall(bp)) {
-        return 3; // wide compact: prints · time · success · weekly
-    }
-    if (width_px < widget_size::w_wide(bp)) {
-        return 1; // 2x2 grid
-    }
-    return 2; // 3x2 full
-}
-
 void PrintStatsWidget::on_size_changed(int /*colspan*/, int /*rowspan*/, int width_px,
                                        int height_px) {
-    const int mode = mode_for_size(width_px, height_px);
-    spdlog::debug("[PrintStatsWidget] on_size_changed {}x{}px -> mode {}", width_px, height_px,
-                  mode);
-    lv_subject_set_int(&s_size_mode, mode);
+    granted_w_ = width_px;
+    granted_h_ = height_px;
+    refresh();
+}
+
+bool PrintStatsWidget::fits_at(int width_px, int height_px) const {
+    return decide(width_px, height_px, PrintStatsContent::Activity, false).fits;
 }
 
 void PrintStatsWidget::fetch_lifetime_totals() {
@@ -264,7 +336,7 @@ void PrintStatsWidget::fetch_lifetime_totals() {
     lifetime_totals_in_flight_ = true;
 
     // Both callbacks fire on the HTTP/WebSocket thread and touch members, so
-    // both go through bg_cb — it marshals the whole body to the main thread and
+    // both go through bg_cb: it marshals the whole body to the main thread and
     // drops it if the widget was torn down while the request was in flight.
     api->history().get_history_totals(
         lifetime_.bg_cb("PrintStatsWidget::get_history_totals",
@@ -272,146 +344,89 @@ void PrintStatsWidget::fetch_lifetime_totals() {
                             lifetime_totals_in_flight_ = false;
                             lifetime_totals_ = totals;
                             lifetime_totals_valid_ = true;
-                            update_stats();
+                            refresh();
                         }),
         lifetime_.bg_cb("PrintStatsWidget::get_history_totals_error",
                         [this](const MoonrakerError& error) {
                             lifetime_totals_in_flight_ = false;
-                            spdlog::warn("[PrintStatsWidget] Totals fetch failed, using cached "
-                                         "jobs: {}",
+                            spdlog::warn("[PrintStatsWidget] Totals fetch failed, the lifetime "
+                                         "line stays hidden: {}",
                                          error.message);
                         }));
 }
 
-void PrintStatsWidget::update_stats() {
-    // The title needs no history, only the view mode.
-    bool weekly_mode = (lv_subject_get_int(&s_view_mode) == 1);
-    const char* title = weekly_mode ? lv_tr("Weekly Print Stats") : lv_tr("Lifetime Print Stats");
-    std::snprintf(s_title_buf, sizeof(s_title_buf), "%s", title);
-    lv_subject_copy_string(&s_title, s_title_buf);
-
-    auto* hm = get_print_history_manager();
-    if (!hm)
+void PrintStatsWidget::refresh() {
+    if (granted_w_ <= 0 || granted_h_ <= 0 || !s_tile.is_owner(this))
         return;
 
-    const auto& jobs = hm->get_jobs();
+    auto* hm = get_print_history_manager();
+    const bool loaded = hm && hm->is_loaded(helix::HistoryScope::RECENT);
+    const int cached_jobs = hm ? static_cast<int>(hm->get_jobs().size()) : 0;
+    const int64_t lifetime_prints =
+        lifetime_totals_valid_ ? static_cast<int64_t>(lifetime_totals_.total_jobs) : -1;
+    const PrintStatsContent content = print_stats_content(loaded, cached_jobs, lifetime_prints);
+    const ActivityDayStarts starts = local_day_starts(std::time(nullptr));
+    const WeekActivity week = hm ? summarize_week(hm->get_jobs(), starts) : WeekActivity{};
+    const auto bars = scale_day_bars(week.hours_by_day);
 
-    // Determine which jobs to aggregate
-    std::vector<PrintHistoryJob> filtered_jobs;
-    if (weekly_mode) {
-        filtered_jobs = hm->get_jobs_since(week_ago_timestamp());
+    std::string hero = "--";
+    std::string hero_label = lv_tr("this week");
+    if (content == PrintStatsContent::NoHistory) {
+        hero = format_print_hours(0.0);
+        hero_label = lv_tr("No prints yet");
+    } else if (content == PrintStatsContent::Activity) {
+        hero = format_print_hours(week.week_hours);
+        if (week.week_prints == 0)
+            hero_label = lv_tr("No prints this week");
     }
 
-    const auto& source = weekly_mode ? filtered_jobs : jobs;
+    const PrintStatsTileVerdict verdict =
+        decide(granted_w_, granted_h_, content, lifetime_totals_valid_, hero, hero_label);
+    if (verdict.strip_text >= PrintStatsStripText::HeadingShort)
+        hero_label = strip_short_label(content, hero_label);
 
-    // Compute totals from the cached jobs. For the lifetime view this is only
-    // the fallback: the cache holds at most one page of history, and this
-    // widget asks for the startup slice, so on a printer with a longer history
-    // it undercounts both prints and time (#1272). Server-computed totals
-    // replace it below as soon as they arrive.
-    uint64_t total_jobs = source.size();
-    uint64_t total_time_secs = 0;
-    size_t completed_count = 0;
-
-    for (const auto& job : source) {
-        total_time_secs += static_cast<uint64_t>(job.total_duration);
-        if (job.status == PrintJobStatus::COMPLETED) {
-            completed_count++;
-        }
+    std::string support_text;
+    if (verdict.support == PrintStatsSupport::PrintsOnly) {
+        support_text = count_line();
+    } else if (verdict.support == PrintStatsSupport::Full) {
+        support_text = full_line();
     }
 
-    // `server.history.totals` is lifetime-only — it cannot answer a 7-day
-    // window, so weekly mode keeps aggregating the filtered cache.
-    if (!weekly_mode && lifetime_totals_valid_) {
-        total_jobs = lifetime_totals_.total_jobs;
-        total_time_secs = lifetime_totals_.total_time;
+    helix::ui::set_int_if_changed(&s_subj.rung, static_cast<int>(verdict.rung));
+    helix::ui::set_int_if_changed(&s_subj.content, static_cast<int>(content));
+    helix::ui::set_int_if_changed(&s_subj.support, static_cast<int>(verdict.support));
+    helix::ui::set_int_if_changed(&s_subj.show_bars, verdict.show_bars ? 1 : 0);
+    helix::ui::set_int_if_changed(&s_subj.show_day_labels, verdict.show_day_labels ? 1 : 0);
+    helix::ui::set_int_if_changed(&s_subj.side_by_side, verdict.side_by_side ? 1 : 0);
+    helix::ui::set_int_if_changed(&s_subj.strip_text, static_cast<int>(verdict.strip_text));
+    helix::ui::copy_string_if_changed(&s_subj.hero, hero.c_str());
+    helix::ui::copy_string_if_changed(&s_subj.hero_label, hero_label.c_str());
+    helix::ui::copy_string_if_changed(&s_subj.support_text, support_text.c_str());
+    for (int i = 0; i < kActivityDays; ++i) {
+        const std::time_t day_start = static_cast<std::time_t>(starts[static_cast<size_t>(i)]);
+        std::tm local{};
+        localtime_r(&day_start, &local);
+        helix::ui::set_int_if_changed(&s_subj.day[i], bars[static_cast<size_t>(i)]);
+        helix::ui::copy_string_if_changed(
+            &s_subj.day_label[i],
+            weekday_initial(ui::format_localized_weekday_abbr(&local)).c_str());
     }
 
-    // Total prints
-    std::snprintf(s_total_prints_buf, sizeof(s_total_prints_buf), "%llu",
-                  static_cast<unsigned long long>(total_jobs));
-    lv_subject_copy_string(&s_total_prints, s_total_prints_buf);
-
-    // Total time — full (hours+minutes) and short (hours only)
-    auto hours = total_time_secs / 3600;
-    auto mins = (total_time_secs % 3600) / 60;
-    if (hours >= 100) {
-        std::snprintf(s_total_time_buf, sizeof(s_total_time_buf), "%luh",
-                      static_cast<unsigned long>(hours));
-    } else {
-        std::snprintf(s_total_time_buf, sizeof(s_total_time_buf), "%luh %lum",
-                      static_cast<unsigned long>(hours), static_cast<unsigned long>(mins));
-    }
-    lv_subject_copy_string(&s_total_time, s_total_time_buf);
-
-    std::snprintf(s_total_time_short_buf, sizeof(s_total_time_short_buf), "%luh",
-                  static_cast<unsigned long>(hours));
-    lv_subject_copy_string(&s_total_time_short, s_total_time_short_buf);
-
-    // Success rate stays list-derived on BOTH sides of the ratio: Moonraker's
-    // totals endpoint carries no status breakdown, so the cached jobs are the
-    // best approximation available (same call HistoryDashboardPanel documents
-    // for its ALL_TIME filter). Mixing a server numerator with a cached
-    // denominator — or vice versa — would produce a meaningless percentage.
-    if (!source.empty()) {
-        int rate = static_cast<int>((completed_count * 100) / source.size());
-        std::snprintf(s_success_rate_buf, sizeof(s_success_rate_buf), "%d%%", rate);
-    } else {
-        std::snprintf(s_success_rate_buf, sizeof(s_success_rate_buf), "--");
-    }
-    lv_subject_copy_string(&s_success_rate, s_success_rate_buf);
-
-    // Weekly count (always computed for compact/activity row)
-    auto recent = weekly_mode ? filtered_jobs : hm->get_jobs_since(week_ago_timestamp());
-    std::snprintf(s_weekly_buf, sizeof(s_weekly_buf), "%zu/wk", recent.size());
-    lv_subject_copy_string(&s_weekly, s_weekly_buf);
-
-    // Last print info
-    if (!jobs.empty()) {
-        const auto& last = jobs.front();
-        // Same display name the rest of the UI shows: basename with any of
-        // .gcode/.gco/.g/.3mf stripped case-insensitively.
-        std::string name = helix::gcode::get_display_filename(last.filename);
-        if (name.length() > 20)
-            name = name.substr(0, 18) + "..";
-
-        const char* status_icon = "";
-        switch (last.status) {
-        case PrintJobStatus::COMPLETED:
-            status_icon = "OK";
-            break;
-        case PrintJobStatus::CANCELLED:
-            status_icon = "X";
-            break;
-        case PrintJobStatus::ERROR:
-            status_icon = "!";
-            break;
-        default:
-            break;
-        }
-        std::snprintf(s_last_print_buf, sizeof(s_last_print_buf), "%s: %s %s", lv_tr("Last"),
-                      name.c_str(), status_icon);
-    } else {
-        std::snprintf(s_last_print_buf, sizeof(s_last_print_buf), "%s", lv_tr("No prints yet"));
-    }
-    lv_subject_copy_string(&s_last_print, s_last_print_buf);
-
-    spdlog::debug("[PrintStatsWidget] Updated ({}): {} jobs, {}h (source: {}, {} cached)",
-                  weekly_mode ? "weekly" : "lifetime", total_jobs, hours,
-                  (!weekly_mode && lifetime_totals_valid_) ? "server totals" : "cached jobs",
-                  source.size());
+    spdlog::debug("[PrintStatsWidget] refresh {}x{} content={} rung={} support={} week={} "
+                  "prints, {} cached",
+                  granted_w_, granted_h_, static_cast<int>(content), static_cast<int>(verdict.rung),
+                  static_cast<int>(verdict.support), week.week_prints, cached_jobs);
 }
 
 void PrintStatsWidget::handle_clicked() {
-    // Toggle between lifetime and weekly view
-    int current = lv_subject_get_int(&s_view_mode);
-    lv_subject_set_int(&s_view_mode, current == 0 ? 1 : 0);
-    update_stats();
+    if (parent_screen_)
+        get_global_history_dashboard_panel().show(parent_screen_);
 }
 
 void PrintStatsWidget::print_stats_clicked_cb(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[PrintStatsWidget] print_stats_clicked_cb");
     if (auto* self = panel_widget_from_event<PrintStatsWidget>(e)) {
+        self->record_interaction();
         self->handle_clicked();
     }
     LVGL_SAFE_EVENT_CB_END();

@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_modal.h"
 #include "ui_nav_manager.h"
 #include "ui_wizard.h"
 
@@ -39,7 +40,7 @@ void reset_tour_settings() {
 TEST_CASE("FirstRunTour gate: blocks when tour already completed", "[tour]") {
     reset_tour_settings();
     Config::get_instance()->set<bool>("/tour/completed", true);
-    Config::get_instance()->set<int>("/tour/last_seen_version", helix::tour::TOUR_VERSION);
+    Config::get_instance()->set<int>("/tour/last_seen_version", helix::tour::kTourVersion);
     REQUIRE(FirstRunTour::should_auto_start() == false);
 }
 
@@ -59,11 +60,14 @@ TEST_CASE("FirstRunTour gate: re-triggers when last_seen_version is behind TOUR_
     reset_tour_settings();
     Config::get_instance()->set<bool>("/tour/completed", true);
     Config::get_instance()->set<int>("/tour/last_seen_version", 0);
-    // TOUR_VERSION is 1; last_seen=0 < 1, so tour should re-trigger.
+    // kTourVersion is 1; last_seen=0 < 1, so tour should re-trigger.
     REQUIRE(FirstRunTour::should_auto_start() == true);
 }
 
-TEST_CASE("FirstRunTour gate: blocks while home grid edit mode is active", "[tour]") {
+// The edit-mode subject is owned by app_globals_init_subjects(), which the UI
+// fixture runs; without it the subject has no value to set.
+TEST_CASE_METHOD(LVGLUITestFixture, "FirstRunTour gate: blocks while home grid edit mode is active",
+                 "[tour]") {
     reset_tour_settings();
     // Pin that the gate is otherwise open, so a gate stuck at false cannot pass.
     REQUIRE(FirstRunTour::should_auto_start() == true);
@@ -96,12 +100,37 @@ TEST_CASE_METHOD(LVGLUITestFixture, "FirstRunTour: wizard completion re-evaluate
     tour.skip();
 }
 
+TEST_CASE_METHOD(LVGLUITestFixture, "FirstRunTour: a modal shown before the deferred start wins",
+                 "[tour]") {
+    reset_tour_settings();
+    auto& tour = FirstRunTour::instance();
+    REQUIRE_FALSE(tour.is_running());
+    REQUIRE(FirstRunTour::should_auto_start());
+
+    // The gate passes, then a modal comes up before the queued start runs.
+    tour.maybe_start();
+    lv_obj_t* backdrop = lv_obj_create(lv_screen_active());
+    lv_obj_t* dialog = lv_obj_create(backdrop);
+    ModalStack::instance().push(backdrop, dialog, "plr_offer_stand_in");
+    CHECK_FALSE(FirstRunTour::should_auto_start());
+    process_lvgl(50);
+    CHECK_FALSE(tour.is_running());
+
+    ModalStack::instance().remove(backdrop, true);
+    lv_obj_delete(backdrop);
+    CHECK(FirstRunTour::should_auto_start());
+    tour.maybe_start();
+    process_lvgl(50);
+    CHECK(tour.is_running());
+    tour.skip();
+}
+
 TEST_CASE("FirstRunTour mark_completed writes both flags", "[tour]") {
     reset_tour_settings();
     FirstRunTour::mark_completed();
     auto* cfg = Config::get_instance();
     REQUIRE(cfg->get<bool>("/tour/completed", false) == true);
-    REQUIRE(cfg->get<int>("/tour/last_seen_version", 0) == helix::tour::TOUR_VERSION);
+    REQUIRE(cfg->get<int>("/tour/last_seen_version", 0) == helix::tour::kTourVersion);
 }
 
 TEST_CASE("Tour steps: always 8 steps regardless of AMS", "[tour]") {

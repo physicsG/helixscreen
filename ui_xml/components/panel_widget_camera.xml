@@ -7,7 +7,7 @@
               width="100%" height="100%" style_radius="#border_radius" style_clip_corner="true"
               style_image_recolor="#screen_bg" style_image_recolor_opa="0" clickable="false" event_bubble="true"/>
     <lv_obj name="camera_overlay"
-            width="100%" height="100%" align="center" style_pad_all="#space_lg" scrollbar_mode="off"
+            width="100%" height="100%" align="center" style_pad_all="#space_md" scrollbar_mode="off"
             style_bg_color="#card_bg" style_bg_opa="cover" style_radius="#border_radius" style_clip_corner="true"
             flex_flow="column" style_flex_cross_place="center" style_layout="flex" style_flex_main_place="center"
             style_flex_track_place="center" style_pad_row="#space_sm" clickable="false" event_bubble="true">

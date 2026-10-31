@@ -441,3 +441,13 @@ TEST_CASE("parse_cli_args: --sim-speed", "[cli_args][simclock]") {
         REQUIRE_FALSE(parse_cli_args(4, const_cast<char**>(above), args, w, h));
     }
 }
+
+TEST_CASE("parse_cli_args: HELIX_MOCK_AMS=indx implies --real-ams under --test",
+          "[cli_args][mock][indx]") {
+    ScopedRuntimeConfig scoped_config;
+    ScopedEnv ams{"HELIX_MOCK_AMS", "indx"};
+    ScopedEnv printer{"HELIX_MOCK_PRINTER", nullptr};
+    CliArgs args;
+    REQUIRE(parse({"helix-screen", "--test"}, args));
+    CHECK(get_runtime_config()->use_real_ams);
+}

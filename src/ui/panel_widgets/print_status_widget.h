@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ui_coalesced_timer.h"
 #include "ui_context_menu.h"
 #include "ui_heater_icon_binder.h"
 #include "ui_job_queue_modal.h"
@@ -48,6 +49,29 @@ struct LastPrintText {
 /// seconds, passed in so every branch is reachable from a test.
 [[nodiscard]] LastPrintText describe_last_print(const PrintHistoryJob& job, double now_s);
 
+/// What the idle card needs to show its filename, its detail lines and its
+/// action buttons, measured from the live theme.
+struct IdleCardNeeds {
+    int chrome_w = 0; ///< Card padding and border, both sides.
+    int chrome_h = 0;
+    int title_h = 0;   ///< One line of the filename.
+    int detail_h = 0;  ///< The detail column beside the thumbnail: both its lines.
+    int gap = 0;       ///< Between the card's rows, and between the two buttons.
+    int button_h = 0;  ///< One row of buttons.
+    int reprint_w = 0; ///< Each button's natural width: caption plus padding.
+    int queue_w = 0;
+};
+
+/// The idle card's needs at the current breakpoint.
+[[nodiscard]] IdleCardNeeds measure_idle_card_needs();
+
+/// Whether a box holds the idle card: the filename, the detail column and both
+/// buttons, side by side where the row has room for the two and stacked where
+/// it does not. The detail column always draws its two lines, so a box with
+/// room for one would push the second under the buttons. Monotonic on both
+/// axes, as PanelWidget::fits_at must be.
+[[nodiscard]] bool idle_card_fits(const IdleCardNeeds& needs, int width_px, int height_px);
+
 class PrintStatusWidget : public PanelWidget {
     friend class PrintStatusWidgetTestAccess;
 
@@ -60,10 +84,14 @@ class PrintStatusWidget : public PanelWidget {
     void on_activate() override;
     void on_edit_mode_exited() override;
     void on_size_changed(int colspan, int rowspan, int width_px, int height_px) override;
+    /// Refuses a box the idle card cannot draw in (idle_card_fits). The needs
+    /// are the Detailed card's whatever layout_style is set: the Library card's
+    /// action rows shrink to share their column, so it has no fixed floor.
+    bool fits_at(int width_px, int height_px) const override;
     /// Factory-registration key. Exposed so callers scanning a heterogeneous
     /// widget list can match on id() and static_cast, instead of dynamic_cast —
     /// the firmware builds -fno-rtti.
-    static constexpr const char* WIDGET_ID = "print_status";
+    static constexpr const char* kWidgetId = "print_status";
 
     /// One row of the nozzle-tool picker: what it reads, and the Klipper
     /// extruder object it pins the temperature display to.
@@ -88,7 +116,7 @@ class PrintStatusWidget : public PanelWidget {
     bool apply_nozzle_tool_override(const std::string& tool_key);
 
     const char* id() const override {
-        return WIDGET_ID;
+        return kWidgetId;
     }
 
     // Configuration
@@ -333,12 +361,32 @@ class PrintStatusWidget : public PanelWidget {
     static inline lv_subject_t actions_hidden_subject_;
     static inline bool visibility_subjects_initialized_ = false;
 
+    // The library actions' measured fit (decide_library_actions_layout): 1 = every
+    // label hidden; 1 = two rows of buttons instead of one column; and in two
+    // rows, the action cell (0 files, 1 last, 2 recent, 3 queue) that starts the
+    // second row, -1 otherwise.
+    static inline lv_subject_t library_icon_only_subject_;
+    static inline lv_subject_t library_grid_subject_;
+    static inline lv_subject_t library_wrap_at_subject_;
+
     // Detailed-layout subjects (static inline — shared across all widget instances)
     static inline lv_subject_t layout_effective_subject_{}; // after width gating
     // Combined gate: (width band == wide) AND (filament_used > 0). Avoids the
     // phantom-row gap when filament hasn't started extruding yet.
     static inline lv_subject_t show_filament_active_subject_{};
-    static inline lv_subject_t multi_tool_subject_{}; // 1 when tool_count > 1
+    static inline lv_subject_t multi_tool_subject_{}; // 1 when the readout names its nozzle
+    /// 1 when there is more than one heater to pin the readout to.
+    static inline lv_subject_t nozzle_pickable_subject_{};
+    // 1 when the detailed temperature row has room for the picker chevron.
+    static inline lv_subject_t nozzle_picker_fits_subject_{};
+    // 1 when the detailed layer row has room for the Z height after the count.
+    static inline lv_subject_t layer_z_fits_subject_{};
+    // 1 when the detailed time row has room for the elapsed time before the remaining.
+    static inline lv_subject_t elapsed_fits_subject_{};
+    // 1 when the detailed data column has the height for the speed row.
+    static inline lv_subject_t speed_fits_subject_{};
+    // 1 when the filament row has room for the flow after the length used.
+    static inline lv_subject_t flow_fits_subject_{};
     // Resolved thumbnail path for the detailed-idle hero; written by
     // reset_print_card_to_idle alongside the lv_image_set_src calls on the
     // Library-mode thumbs, so all three idle thumbnails share the same source.
@@ -388,7 +436,8 @@ class PrintStatusWidget : public PanelWidget {
     ObserverGuard job_queue_count_observer_;
     ObserverGuard connection_observer_;
     ObserverGuard breakpoint_observer_;
-    ObserverGuard view_observer_; ///< Rebinds the active views after any card rebuilds them
+    ObserverGuard view_observer_;     ///< Rebinds the active views after any card rebuilds them
+    ObserverGuard language_observer_; ///< Re-fits the library actions to the new labels
 
     // Guards async thumbnail callbacks and history observer from use-after-free
     helix::AsyncLifetimeGuard lifetime_;
@@ -418,9 +467,12 @@ class PrintStatusWidget : public PanelWidget {
     // An idle resolve is queued and has not run yet. Every trigger in the same
     // tick (attach, the print-state observer's first notification, activation)
     // joins it rather than issuing its own request for the same file.
-    bool idle_reset_pending_ = false;
+    helix::ui::CoalescedTimer idle_reset_timer_{0};
     // Same coalescing for the active-print thumbnail write.
-    bool active_apply_pending_ = false;
+    helix::ui::CoalescedTimer active_apply_timer_{0};
+    // Re-fits the library actions on the next tick, once the layout that asked
+    // for it has settled.
+    helix::ui::CoalescedTimer library_fit_timer_{0};
 
     // Thermal tint for the detailed-active heater icons. Plain by-value members
     // of THIS instance — never on the shared/refcounted s_formatter_ below.
@@ -480,24 +532,30 @@ class PrintStatusWidget : public PanelWidget {
         SubjectManager subjects_;
 
         // Buffers backing string subjects
-        char layer_text_buf_[64];    // "Layer ~9999 / 9999 (123.4mm)", translated
-        char time_text_buf_[40];     // "12h 34m / 99h 99m"
-        char filament_text_buf_[32]; // "1234.5m / 9999.9m"
-        char nozzle_text_buf_[32];   // "265 / 270°C" — kept for tool_override test
-        // Holds a translated position label ("Tool 1", "Lane 9",
-        // "Печатающая головка 16") — sized like layer_text_buf_ above, since a
-        // translated noun plus a two-digit number can run well past ASCII length.
-        char nozzle_tool_label_buf_[64];
+        char layer_text_buf_[32];     // "~9999 / 9999"
+        char layer_z_text_buf_[24];   // "· 123.4mm"
+        char elapsed_text_buf_[24];   // "12h 34m"
+        char remaining_text_buf_[24]; // "99h 59m"
+        char filament_text_buf_[32];  // "1234.5m"
+        char speed_text_buf_[16];     // "1234mm/s"
+        char flow_text_buf_[24];      // "· 123.4 mm³/s"
+        size_t speed_flow_len_ = 0;
+        char nozzle_text_buf_[32];       // "265 / 270°C" — kept for tool_override test
+        char nozzle_badge_text_buf_[16]; // the nozzle icon's 1-based tool number
         char idle_filename_buf_[160];
         char idle_when_buf_[64]; // "Completed 2 hours ago"
         char idle_meta_buf_[64]; // "12.4m filament • 4h 12m"
 
         // String + int subjects (XML-registered)
         lv_subject_t layer_text_subject_{};
-        lv_subject_t time_text_subject_{};
+        lv_subject_t layer_z_text_subject_{};
+        lv_subject_t elapsed_text_subject_{};
+        lv_subject_t remaining_text_subject_{};
         lv_subject_t filament_text_subject_{};
+        lv_subject_t speed_text_subject_{};
+        lv_subject_t flow_text_subject_{};
         lv_subject_t nozzle_text_subject_{};
-        lv_subject_t nozzle_tool_label_subject_{};
+        lv_subject_t nozzle_badge_text_subject_{};
         // Proxy temp subjects (decidegrees, int) so the temp_display widget in the
         // detailed XML follows the pinned tool when nozzle_tool_override is set.
         // The formatter's nozzle_temp/target observers re-bind on pin change and
@@ -515,6 +573,8 @@ class PrintStatusWidget : public PanelWidget {
         ObserverGuard elapsed_observer_;
         ObserverGuard time_left_observer_;
         ObserverGuard filament_used_observer_;
+        ObserverGuard live_velocity_observer_;
+        ObserverGuard live_extruder_velocity_observer_;
 
         // Nozzle temp observers — paired SubjectLifetimes per [L084] for per-tool pinning.
         // Lifetimes declared before observers so they destruct AFTER observers in ~dtor
@@ -535,6 +595,7 @@ class PrintStatusWidget : public PanelWidget {
         void update_layer_text();
         void update_time_text();
         void update_filament_text();
+        void update_speed_flow_text();
         void update_nozzle_text();
         void update_multi_tool();
         void update_tool_label();
@@ -643,6 +704,10 @@ class PrintStatusWidget : public PanelWidget {
     void show_configure_picker();
     void apply_visibility_config();
     void recompute_actions_visibility();
+    /// Measure the library action buttons on the next tick and publish whether
+    /// they drop their labels and re-flow into two rows.
+    void schedule_library_fit();
+    void fit_library_actions();
     // Re-run width gating against the last granted size, so a layout_style change
     // made in the configure picker reaches the visible widget the moment the card
     // closes.
@@ -655,6 +720,14 @@ class PrintStatusWidget : public PanelWidget {
     void bind_active_branch();
 
     void show_nozzle_tool_picker(lv_obj_t* anchor);
+    // Whether the nozzle readout offers its tool picker at the current size.
+    bool nozzle_picker_available() const;
+    // Publishes print_status_nozzle_picker_fits from the temperature row's widths.
+    void fit_nozzle_picker();
+    // Publishes whether the named row has room for all of its pieces, the ones
+    // its optional piece hides included.
+    void fit_row(const char* row_name, lv_subject_t* fits);
+    void fit_speed_row();
 
     // The two context menus this widget raises
     ConfigurePicker configure_picker_{*this};

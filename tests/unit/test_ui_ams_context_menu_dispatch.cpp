@@ -59,9 +59,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: claims every backend-only act
     // These five must be handled centrally. If any one of them stops being
     // claimed here, the Overview panel silently swallows it again — which is
     // exactly the #1258 failure mode.
-    const MenuAction shared[] = {MenuAction::EJECT,       MenuAction::RECOVER_POSITION,
-                                 MenuAction::SELECT_GATE, MenuAction::CHECK_GATE,
-                                 MenuAction::PRELOAD,     MenuAction::CLEAR_SPOOL};
+    const MenuAction shared[] = {MenuAction::EJECT, MenuAction::RECOVER_POSITION,
+                                 MenuAction::CHECK_GATE, MenuAction::PRELOAD,
+                                 MenuAction::CLEAR_SPOOL};
 
     for (MenuAction action : shared) {
         INFO("action index = " << static_cast<int>(action));
@@ -121,6 +121,24 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: claims actions even with no b
     CHECK_FALSE(helix::ui::ams_dispatch_backend_action(MenuAction::EDIT, 0, nullptr));
 }
 
+TEST_CASE_METHOD(LVGLUITestFixture, "ams dispatch: clears the external spool with no backend",
+                 "[ui][ams][context_menu][dispatch][clear_spool]") {
+    helix::AmsState::instance().init_subjects(true);
+    helix::AmsState::instance().set_backend(nullptr);
+    helix::SlotInfo ext;
+    ext.slot_index = -2;
+    ext.global_index = -2;
+    ext.spoolman_id = 139;
+    ext.material = "ASA";
+    helix::AmsState::instance().set_external_spool_info(ext);
+    REQUIRE(helix::AmsState::instance().get_external_spool_info().has_value());
+
+    CHECK(helix::ui::ams_dispatch_backend_action(MenuAction::CLEAR_SPOOL, -2, nullptr));
+
+    const auto after = helix::AmsState::instance().get_external_spool_info();
+    CHECK((!after || (after->spoolman_id == 0 && after->material.empty())));
+}
+
 // The menu publishes "ams_slot_is_loaded" / "ams_slot_can_load" into the
 // process-wide XML subject registry, which resolves by name and holds a raw
 // pointer. Those subjects used to be instance members deinited in the
@@ -169,43 +187,6 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams context menu: subjects outlive every me
     CHECK(lv_xml_get_subject(nullptr, "ams_slot_can_load") == can_load_before);
     second.reset();
     CHECK(lv_xml_get_subject(nullptr, "ams_slot_can_load") == can_load_before);
-}
-
-// ============================================================================
-// Subjects are the class's, not the instance's
-// ============================================================================
-
-TEST_CASE_METHOD(LVGLUITestFixture, "AmsContextMenu instances share one set of XML subjects",
-                 "[ams][context_menu][subjects]") {
-    // Three owners construct their own menu (AmsPanel, the overview, the
-    // external-spool menu). With per-instance subjects registered under the
-    // same fixed names, whichever instance registered LAST owned the names: the
-    // others' writes landed on subjects no card was bound to, and once an owner
-    // was destroyed the registry pointed at reclaimed storage. The registry
-    // must resolve the SAME subject before, during and after a second
-    // instance's lifetime.
-    helix::ui::AmsContextMenu first;
-    lv_subject_t* can_load = lv_xml_get_subject(nullptr, "ams_slot_can_load");
-    lv_subject_t* is_loaded = lv_xml_get_subject(nullptr, "ams_slot_is_loaded");
-    lv_subject_t* external = lv_xml_get_subject(nullptr, "ams_slot_source_external");
-    REQUIRE(can_load != nullptr);
-    REQUIRE(is_loaded != nullptr);
-    REQUIRE(external != nullptr);
-
-    {
-        helix::ui::AmsContextMenu second;
-        CHECK(lv_xml_get_subject(nullptr, "ams_slot_can_load") == can_load);
-        CHECK(lv_xml_get_subject(nullptr, "ams_slot_is_loaded") == is_loaded);
-        CHECK(lv_xml_get_subject(nullptr, "ams_slot_source_external") == external);
-    }
-    // ...and the second's destruction takes nothing with it.
-    CHECK(lv_xml_get_subject(nullptr, "ams_slot_can_load") == can_load);
-    CHECK(lv_xml_get_subject(nullptr, "ams_slot_is_loaded") == is_loaded);
-    CHECK(lv_xml_get_subject(nullptr, "ams_slot_source_external") == external);
-    // The registered subject is live storage, not a dangling record.
-    lv_subject_set_int(can_load, 0);
-    CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "ams_slot_can_load")) == 0);
-    lv_subject_set_int(can_load, 1);
 }
 
 // ============================================================================

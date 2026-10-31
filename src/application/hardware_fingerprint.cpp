@@ -43,14 +43,10 @@ size_t compute_hardware_fingerprint(const PrinterDiscovery& hw) {
     combine_vec(hw.leds());
     combine_vec(hw.steppers());
     combine_vec(hw.filament_sensor_names());
-    combine_vec(hw.afc_lane_names());
-    combine_vec(hw.afc_hub_names());
-    combine_vec(hw.afc_unit_object_names());
-    combine_vec(hw.afc_buffer_names());
     combine_vec(hw.tool_names());
-    combine_vec(hw.mmu_encoder_names());
-    combine_vec(hw.mmu_servo_names());
-    combine_vec(hw.ace_object_names());
+    for (const auto* inventory : hw.filament_system_inventories()) {
+        combine_vec(*inventory);
+    }
     combine_vec(hw.width_sensor_objects());
     combine_vec(hw.led_effects());
     combine_vec(hw.led_macros());
@@ -64,7 +60,9 @@ size_t compute_hardware_fingerprint(const PrinterDiscovery& hw) {
     combine(hw.mcu());
     combine(hw.kinematics());
     combine(static_cast<int>(hw.mmu_type()));
-    combine(hw.qidi_box_slot_count());
+    for (const int fact : hw.filament_system_facts()) {
+        combine(fact);
+    }
 
     // Capability flags — these are derived from the object list, but include
     // them explicitly so adding a new capability flag in PrinterDiscovery
@@ -75,7 +73,6 @@ size_t compute_hardware_fingerprint(const PrinterDiscovery& hw) {
     combine(hw.has_probe());
     combine(hw.has_heater_bed());
     combine(hw.has_mmu());
-    combine(hw.has_snapmaker());
     combine(hw.has_tool_changer());
     combine(hw.has_medusahc());
     combine(hw.has_chamber_heater());
@@ -93,7 +90,7 @@ size_t compute_hardware_fingerprint(const PrinterDiscovery& hw) {
     combine(hw.has_klippain_shaketune());
     combine(hw.has_speaker());
     combine(hw.has_fan_feedback());
-    combine(hw.is_kalico());
+    combine(std::string(hw.firmware_name()));
 
     return h;
 }

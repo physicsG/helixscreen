@@ -9,9 +9,9 @@ namespace helix::input_defaults {
 /// ESP32 panels redraw a scrolling list slowly, so a long glide there reads
 /// as a stutter rather than momentum; a stronger decay keeps it short.
 #if defined(ESP_PLATFORM)
-inline constexpr int SCROLL_THROW = 35;
+inline constexpr int kScrollThrow = 35;
 #else
-inline constexpr int SCROLL_THROW = 25;
+inline constexpr int kScrollThrow = 25;
 #endif
 
 } // namespace helix::input_defaults

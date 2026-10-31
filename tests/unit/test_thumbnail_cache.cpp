@@ -148,7 +148,7 @@ TEST_CASE("ThumbnailCache size management", "[assets][cache]") {
     ThumbnailCache& cache = get_thumbnail_cache();
 
     SECTION("get_max_size returns positive value") {
-        REQUIRE(cache.get_max_size() >= ThumbnailCache::MIN_CACHE_SIZE);
+        REQUIRE(cache.get_max_size() >= ThumbnailCache::kMinCacheSize);
     }
 
     SECTION("set_max_size updates the limit") {

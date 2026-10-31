@@ -24,23 +24,23 @@
  * This header adds the full LVGL path prefix "A:assets/images/printers/".
  */
 
-namespace PrinterImages {
+namespace helix::printer_images {
 
 /// Base path for printer images (LVGL filesystem prefix)
-inline constexpr const char* IMAGE_BASE_PATH = "A:assets/images/printers/";
+inline constexpr const char* kImageBasePath = "A:assets/images/printers/";
 
 /// Base path for pre-rendered printer images (faster on embedded)
-inline constexpr const char* PRERENDERED_BASE_PATH = "A:assets/images/printers/prerendered/";
+inline constexpr const char* kPrerenderedBasePath = "A:assets/images/printers/prerendered/";
 
 /// Default fallback image for unknown/unmapped printers (generic CoreXY)
-inline constexpr const char* DEFAULT_IMAGE = "A:assets/images/printers/generic-corexy.png";
+inline constexpr const char* kDefaultImage = "A:assets/images/printers/generic-corexy.png";
 
 /// Default image filename (without path)
-inline constexpr const char* DEFAULT_IMAGE_FILENAME = "generic-corexy.png";
+inline constexpr const char* kDefaultImageFilename = "generic-corexy.png";
 
 /// Resolve the generic fallback image through the asset root. Identity on
 /// desktop (asset_root "."); on ESP32 (asset_root "/assets") it prepends the
-/// mount that a raw "A:assets/..." literal misses. Used wherever DEFAULT_IMAGE
+/// mount that a raw "A:assets/..." literal misses. Used wherever kDefaultImage
 /// would otherwise be returned raw.
 inline std::string default_printer_image_path() {
     return helix::asset_component_uri("assets/images/printers/generic-corexy.png");
@@ -122,7 +122,7 @@ inline std::string get_prerendered_path(const std::string& image_filename,
     std::string basename = image_filename.substr(0, dot_pos);
     const int size = helix::get_printer_image_size(screen_width);
     std::string prerendered_name = basename + "-" + std::to_string(size) + ".bin";
-    std::string full_path = std::string(PRERENDERED_BASE_PATH) + prerendered_name;
+    std::string full_path = std::string(kPrerenderedBasePath) + prerendered_name;
 
     if (image_file_exists(full_path)) {
         return full_path;
@@ -131,85 +131,48 @@ inline std::string get_prerendered_path(const std::string& image_filename,
 }
 
 /**
- * @brief Get image path for a printer name (from database)
+ * @brief The best available render of one database image file
  *
- * Looks up the image in the printer database JSON and constructs the full
- * LVGL path. Prefers pre-rendered .bin files for performance on embedded
- * devices, falls back to PNG if not available.
+ * Strips the .png extension and resolves the screen-sized prerendered .bin,
+ * falling back to the PNG, then to the generic CoreXY image.
  *
- * @param printer_name Printer name (e.g., "Voron 2.4", "FlashForge Adventurer 5M")
- * @return Full LVGL path to printer image
- */
-inline std::string get_image_path_for_name(const std::string& printer_name,
-                                           int screen_width = current_screen_width()) {
-    // Look up image filename from database
-    std::string image_filename = PrinterDetector::get_image_for_printer(printer_name);
-
-    if (!image_filename.empty()) {
-        // Try pre-rendered binary first (much faster on embedded)
-        std::string prerendered = get_prerendered_path(image_filename, screen_width);
-        if (!prerendered.empty()) {
-            return prerendered;
-        }
-
-        // Fall back to original PNG (routed through the asset root so the
-        // /assets mount is applied on ESP32; identity on desktop).
-        std::string full_path =
-            helix::asset_component_uri("assets/images/printers/" + image_filename);
-        if (image_file_exists(full_path)) {
-            return full_path;
-        }
-    }
-
-    // Fall back to default
-    return default_printer_image_path();
-}
-
-/**
- * @brief Get the best available printer image for a printer type name
- *
- * Performs the full smart image lookup:
- * 1. Looks up image filename from printer database
- * 2. Strips .png extension to get base name
- * 3. Selects responsive size based on current screen width (300px or 150px)
- * 4. Prefers pre-rendered .bin (faster on embedded), falls back to PNG
- * 5. Falls back to generic CoreXY image if nothing found
- *
- * This is the recommended function for displaying printer images.
- *
- * @param printer_type Printer type name from config (e.g., "Voron 2.4", "FlashForge Adventurer 5M")
+ * @param image_filename Filename from the printer database (e.g. "voron-v2.png"); "" for none
+ * @param screen_width Display width; selects the tier
  * @return Full LVGL path to the best available image
  */
-inline std::string get_best_printer_image(const std::string& printer_type) {
-    if (printer_type.empty()) {
-        return default_printer_image_path();
-    }
-
-    // Look up image filename from printer database
-    std::string image_filename = PrinterDetector::get_image_for_printer(printer_type);
+inline std::string get_best_image_for_file(const std::string& image_filename,
+                                           int screen_width = current_screen_width()) {
     if (image_filename.empty()) {
         return default_printer_image_path();
     }
-
-    // Strip .png extension to get base name for prerendered lookup
     std::string base_name = image_filename;
     if (base_name.size() > 4 && base_name.substr(base_name.size() - 4) == ".png") {
         base_name = base_name.substr(0, base_name.size() - 4);
     }
-
-    // Get screen width for responsive image sizing
-    lv_display_t* disp = lv_display_get_default();
-    int screen_width = disp ? lv_display_get_horizontal_resolution(disp) : 800;
-
-    // Use prerendered .bin if available (screen-responsive), else fallback to PNG
     return helix::get_prerendered_printer_path(base_name, screen_width);
+}
+
+/**
+ * @brief Get image path for a printer name (from database)
+ *
+ * The name's plain database `image`, through get_best_image_for_file(). It
+ * ignores `image_variants`: what the connected printer shows, variants
+ * included, is PrinterImageManager::get_detected_image_path().
+ *
+ * @param printer_name Printer name (e.g., "Voron 2.4", "FlashForge Adventurer 5M")
+ * @return Full LVGL path to printer image; the generic image for an unknown name
+ */
+inline std::string get_image_path_for_name(const std::string& printer_name,
+                                           int screen_width = current_screen_width()) {
+    return get_best_image_for_file(PrinterDetector::get_image_for_printer(printer_name),
+                                   screen_width);
 }
 
 /**
  * @brief Get image path for a printer type index
  *
  * Converts index to printer name, then looks up image in database.
- * Falls back to DEFAULT_IMAGE if not found or file doesn't exist.
+ * Falls back to kDefaultImage if not found or file doesn't exist.
  *
  * @param printer_type_index Index from printer type list
  * @return Full LVGL path to printer image
@@ -235,4 +198,4 @@ inline std::string get_validated_image_path(int printer_type_index) {
     return get_image_path(printer_type_index);
 }
 
-} // namespace PrinterImages
+} // namespace helix::printer_images

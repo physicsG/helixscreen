@@ -69,48 +69,67 @@
           <text_small width="100%"
                       text="Optimizes temperature control for stable, consistent heating."
                       style_text_color="#text_muted" style_text_align="center"/>
-          <!-- Method + Heater Selection (combined row) -->
+          <!-- Method + Heater Selection, and the tool row under it -->
           <lv_obj width="100%"
                   height="content" style_bg_color="#section_bg_color" style_radius="#border_radius"
-                  style_pad_all="#space_sm" flex_flow="row" style_pad_gap="#space_md" style_flex_cross_place="center"
-                  scrollable="false">
-            <!-- Method selector (shown only on firmware with MPC support) -->
-            <lv_obj name="method_selector"
-                    width="1" height="content" flex_grow="1" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
-                    style_flex_cross_place="center" scrollable="false" style_flex_track_place="center">
-              <bind_flag_if_eq subject="cal_is_kalico" flag="hidden" ref_value="0"/>
-              <lv_obj width="content"
-                      height="content" style_pad_all="0" flex_flow="column" style_pad_gap="2"
-                      style_flex_cross_place="center" scrollable="false">
-                <text_body text="Method"/>
-              </lv_obj>
-              <ui_button name="btn_method_mpc" flex_grow="1" text="MPC">
-                <bind_style name="pid_heater_selected" subject="cal_method_is_mpc" ref_value="1"/>
-                <bind_style name="pid_heater_unselected" subject="cal_method_is_mpc" ref_value="0"/>
-                <event_cb trigger="clicked" callback="on_cal_method_mpc"/>
-              </ui_button>
-              <ui_button name="btn_method_pid" flex_grow="1" text="PID">
-                <bind_style name="pid_heater_selected" subject="cal_method_is_mpc" ref_value="0"/>
-                <bind_style name="pid_heater_unselected" subject="cal_method_is_mpc" ref_value="1"/>
-                <event_cb trigger="clicked" callback="on_cal_method_pid"/>
-              </ui_button>
-              <divider_vertical/>
-            </lv_obj>
-            <!-- Heater selector -->
-            <lv_obj width="1"
-                    height="content" flex_grow="1" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                  style_pad_all="#space_sm" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
+            <lv_obj width="100%"
+                    height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md"
                     style_flex_cross_place="center" scrollable="false">
-              <text_body text="Heater"/>
-              <ui_button name="btn_heater_extruder" flex_grow="1" text="Extruder">
-                <bind_style name="pid_heater_selected" subject="pid_heater_is_extruder" ref_value="1"/>
-                <bind_style name="pid_heater_unselected" subject="pid_heater_is_extruder" ref_value="0"/>
-                <event_cb trigger="clicked" callback="on_pid_heater_extruder"/>
-              </ui_button>
-              <ui_button name="btn_heater_bed" flex_grow="1" text="Heated Bed">
-                <bind_style name="pid_heater_selected" subject="pid_heater_is_extruder" ref_value="0"/>
-                <bind_style name="pid_heater_unselected" subject="pid_heater_is_extruder" ref_value="1"/>
-                <event_cb trigger="clicked" callback="on_pid_heater_bed"/>
-              </ui_button>
+              <!-- Method selector (shown only on firmware with MPC support) -->
+              <lv_obj name="method_selector"
+                      width="1" height="content" flex_grow="1" style_pad_all="0" flex_flow="row"
+                      style_pad_gap="#space_xs" style_flex_cross_place="center" scrollable="false"
+                      style_flex_track_place="center">
+                <bind_flag_if_eq subject="cal_supports_mpc" flag="hidden" ref_value="0"/>
+                <lv_obj width="content"
+                        height="content" style_pad_all="0" flex_flow="column" style_pad_gap="2"
+                        style_flex_cross_place="center" scrollable="false">
+                  <text_body text="Method"/>
+                </lv_obj>
+                <ui_button name="btn_method_mpc" flex_grow="1" text="MPC">
+                  <bind_style name="pid_heater_selected" subject="cal_method_is_mpc" ref_value="1"/>
+                  <bind_style name="pid_heater_unselected" subject="cal_method_is_mpc" ref_value="0"/>
+                  <event_cb trigger="clicked" callback="on_cal_method_mpc"/>
+                </ui_button>
+                <ui_button name="btn_method_pid" flex_grow="1" text="PID">
+                  <bind_style name="pid_heater_selected" subject="cal_method_is_mpc" ref_value="0"/>
+                  <bind_style name="pid_heater_unselected" subject="cal_method_is_mpc" ref_value="1"/>
+                  <event_cb trigger="clicked" callback="on_cal_method_pid"/>
+                </ui_button>
+                <divider_vertical/>
+              </lv_obj>
+              <!-- Heater selector -->
+              <lv_obj width="1"
+                      height="content" flex_grow="1" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                      style_flex_cross_place="center" scrollable="false">
+                <text_body text="Heater"/>
+                <ui_button name="btn_heater_extruder" flex_grow="1" text="Extruder">
+                  <bind_style name="pid_heater_selected" subject="pid_heater_is_extruder" ref_value="1"/>
+                  <bind_style name="pid_heater_unselected" subject="pid_heater_is_extruder" ref_value="0"/>
+                  <event_cb trigger="clicked" callback="on_pid_heater_extruder"/>
+                </ui_button>
+                <ui_button name="btn_heater_bed" flex_grow="1" text="Heated Bed">
+                  <bind_style name="pid_heater_selected" subject="pid_heater_is_extruder" ref_value="0"/>
+                  <bind_style name="pid_heater_unselected" subject="pid_heater_is_extruder" ref_value="1"/>
+                  <event_cb trigger="clicked" callback="on_pid_heater_bed"/>
+                </ui_button>
+              </lv_obj>
+            </lv_obj>
+            <!-- Which extruder, on a printer with several heated heads -->
+            <lv_obj name="pid_tool_row"
+                    width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                    style_flex_cross_place="center" scrollable="false">
+              <bind_flag_if cond="pid_cal_multi_tool eq 0 or pid_heater_is_extruder eq 0" flag="hidden"/>
+              <text_body text="Tool"/>
+              <repeat count="pid_cal_tool_count">
+                <ui_button name="pid_tool_${i}"
+                           width="1" height="#button_height_sm" flex_grow="1" bind_text="pid_cal_tool_label_${i}">
+                  <bind_style name="pid_heater_selected" subject="pid_cal_tool_selected_${i}" ref_value="1"/>
+                  <bind_style name="pid_heater_unselected" subject="pid_cal_tool_selected_${i}" ref_value="0"/>
+                  <event_cb trigger="clicked" callback="on_pid_cal_tool" user_data="$i"/>
+                </ui_button>
+              </repeat>
             </lv_obj>
           </lv_obj>
           <!-- Two-column row: Temperature (left) + Fan slider (right) -->
@@ -355,7 +374,7 @@
                     text="The heater will cycle on and off several times." style_text_align="center"
                     style_text_color="#text_muted"/>
         <!-- Abort Button -->
-        <ui_button name="btn_abort" width="25%" text="Abort" variant="danger">
+        <ui_button name="btn_abort" width="25%" icon="alert_octagon" text="Stop" variant="danger">
           <event_cb trigger="clicked" callback="on_pid_abort"/>
         </ui_button>
       </lv_obj>

@@ -174,8 +174,8 @@ static void draw_circle(lv_layer_t* layer, int32_t cx, int32_t cy, int32_t radiu
 
 // Visual center of the Stealthburner polygon data (not exactly 500,500)
 // Measured from bounding box: X=[274,710] midpoint=492, Y=[78,928] midpoint=503
-static constexpr int DESIGN_CENTER_X = 492;
-static constexpr int DESIGN_CENTER_Y = 500;
+static constexpr int kDesignCenterX = 492;
+static constexpr int kDesignCenterY = 500;
 
 namespace {
 enum : uint8_t {
@@ -237,12 +237,12 @@ void draw_nozzle_stealthburner(lv_layer_t* layer, int32_t cx, int32_t cy,
         helix::nr_poly(pts_top_circle, RECESS),      // Extruder motor recess
     };
     helix::nr_draw_polygons(layer, body_polys, std::size(body_polys), palette, cx, cy, scale,
-                            {DESIGN_CENTER_X, DESIGN_CENTER_Y});
+                            {kDesignCenterX, kDesignCenterY});
 
     // Bottom circle (fan) - simple filled circle instead of complex polygon
     // Fan center is at (490, 690) in design space with radius ~115
-    int32_t fan_cx = cx + (int32_t)((490 - DESIGN_CENTER_X) * scale);
-    int32_t fan_cy = cy + (int32_t)((690 - DESIGN_CENTER_Y) * scale);
+    int32_t fan_cx = cx + (int32_t)((490 - kDesignCenterX) * scale);
+    int32_t fan_cy = cy + (int32_t)((690 - kDesignCenterY) * scale);
     int32_t fan_radius = (int32_t)(115 * scale);
     draw_circle(layer, fan_cx, fan_cy, fan_radius, palette[RECESS], 32);
 
@@ -253,14 +253,14 @@ void draw_nozzle_stealthburner(lv_layer_t* layer, int32_t cx, int32_t cy,
         helix::nr_poly(pts_logo_3, LOGO),
     };
     helix::nr_draw_polygons(layer, logo_polys, std::size(logo_polys), palette, cx, cy, scale,
-                            {DESIGN_CENTER_X, DESIGN_CENTER_Y});
+                            {kDesignCenterX, kDesignCenterY});
 
     // Nozzle tip indicator at bottom (shows filament color when loaded)
     // Position below the Stealthburner body (body bottom is ~Y=898)
     // Y=920 places the tip just below the housing where the nozzle emerges
     // Offset +2px right, -4px up to align with the Stealthburner body's nozzle opening
     int32_t tip_cx = cx;
-    int32_t nozzle_top_y = cy + (int32_t)((920 - DESIGN_CENTER_Y) * scale) - 6;
+    int32_t nozzle_top_y = cy + (int32_t)((920 - kDesignCenterY) * scale) - 6;
     int32_t nozzle_height = (int32_t)(40 * scale); // Small tip
     int32_t nozzle_top_width = (int32_t)(60 * scale);
     int32_t nozzle_bottom_width = (int32_t)(20 * scale);

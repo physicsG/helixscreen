@@ -20,6 +20,7 @@
 #include "moonraker_client_mock.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
+#include "settings_manager.h"
 #include "tool_state.h"
 #include "z_offset_utils.h"
 
@@ -217,6 +218,29 @@ TEST_CASE_METHOD(ControlsSaveZOffsetFixture,
     REQUIRE(wait_for_sent("SAVE_CONFIG"));
     CHECK(sent("Z_OFFSET_APPLY_PROBE") == 1);
     CHECK(sent("SAVE_CONFIG") == 1);
+}
+
+TEST_CASE_METHOD(ControlsSaveZOffsetFixture,
+                 "Controls save honours saving turned off while the confirm is open",
+                 "[controls][zoffset][save-flow][save-toggle]") {
+    // The positive control is the case above: the same flow, left on, sends
+    // Z_OFFSET_APPLY_PROBE once confirmed.
+    auto& settings = helix::SettingsManager::instance();
+    settings.init_subjects();
+    settings.set_z_offset_save_mode(static_cast<int>(helix::zoffset::SaveMode::Show));
+    set_global_offset_mm(-0.15);
+    click_save();
+    REQUIRE(ModalStack::instance().top_dialog() != nullptr);
+
+    settings.set_z_offset_save_mode(static_cast<int>(helix::zoffset::SaveMode::Hide));
+    confirm_save();
+    for (int i = 0; i < 50; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        settle();
+    }
+    CHECK(sent("Z_OFFSET_APPLY_PROBE") == 0);
+    CHECK(sent("SAVE_CONFIG") == 0);
+    settings.set_z_offset_save_mode(static_cast<int>(helix::zoffset::SaveMode::Auto));
 }
 
 TEST_CASE_METHOD(ControlsSaveZOffsetFixture, "Controls save cancelled sends nothing",

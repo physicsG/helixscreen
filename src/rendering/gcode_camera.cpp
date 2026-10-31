@@ -185,16 +185,16 @@ void GCodeCamera::fit_to_bounds(const AABB& raw_bounds) {
         // ortho_size = distance / (2 * zoom), visible = 2 * ortho_size (vertical)
         // We need: proj_height <= 2 * ortho_size * margin, and
         //          proj_width  <= 2 * ortho_size * aspect * margin
-        constexpr float MARGIN = 0.80f; // ~10% margin on each side
+        constexpr float kMargin = 0.80f; // ~10% margin on each side
 
         // Same shape rule as compute_auto_fit(): only a model markedly taller
         // than it is wide keeps the full viewport height and runs under the
         // bottom UI strip. Anything squatter is framed to sit above it.
-        const bool elongated = proj_height > projection::ELONGATION_LIMIT * proj_width;
+        const bool elongated = proj_height > projection::kElongationLimit * proj_width;
         const float usable_height_frac = elongated ? 1.0f : (1.0f - bottom_occlusion_);
 
-        zoom_for_height = distance_ * usable_height_frac / (proj_height / MARGIN);
-        zoom_for_width = distance_ * aspect / (proj_width / MARGIN);
+        zoom_for_height = distance_ * usable_height_frac / (proj_height / kMargin);
+        zoom_for_width = distance_ * aspect / (proj_width / kMargin);
     }
     zoom_level_ = std::min(zoom_for_height, zoom_for_width);
     zoom_level_ = std::clamp(zoom_level_, 0.1f, 100.0f);

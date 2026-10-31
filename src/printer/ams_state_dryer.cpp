@@ -65,8 +65,8 @@ void AmsState::adjust_modal_temp(int delta_c) {
     assert_main_thread();
 
     // Get limits from backend if available, fallback to constants
-    float min_temp = static_cast<float>(MIN_DRYER_TEMP_C);
-    float max_temp = static_cast<float>(MAX_DRYER_TEMP_C);
+    float min_temp = static_cast<float>(kMinDryerTempC);
+    float max_temp = static_cast<float>(kMaxDryerTempC);
     auto* backend = get_backend(0);
     if (backend) {
         DryerInfo dryer = backend->get_dryer_info(dryer_mirror_unit_);
@@ -86,7 +86,7 @@ void AmsState::adjust_modal_duration(int delta_min) {
     assert_main_thread();
 
     // Get max duration from backend if available, fallback to constant
-    int max_duration = MAX_DRYER_DURATION_MIN;
+    int max_duration = kMaxDryerDurationMin;
     auto* backend = get_backend(0);
     if (backend) {
         DryerInfo dryer = backend->get_dryer_info(dryer_mirror_unit_);
@@ -95,7 +95,7 @@ void AmsState::adjust_modal_duration(int delta_min) {
 
     int cur = lv_subject_get_int(&modal_duration_min_);
     int new_duration = cur + delta_min;
-    new_duration = std::max(MIN_DRYER_DURATION_MIN, std::min(new_duration, max_duration));
+    new_duration = std::max(kMinDryerDurationMin, std::min(new_duration, max_duration));
     lv_subject_set_int(&modal_duration_min_, new_duration);
 
     spdlog::debug("[AMS State] Modal duration adjusted to {} min", new_duration);

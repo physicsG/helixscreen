@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One page of the thermistor widget's carousel: icon, reading, sensor name.
+     Bound to the <prefix>_<index>_temp and _name subjects the widget keeps for
+     its pages. A tap opens the widget's sensor picker. -->
+<component>
+  <api>
+    <prop name="prefix" type="string" default="thermistor_page"/>
+    <prop name="index" type="string" default="0"/>
+    <prop name="icon" type="string" default="thermometer"/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="100%" flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center"
+        style_flex_track_place="center" style_pad_all="0" style_pad_gap="0" style_border_width="0" style_bg_opa="0"
+        scrollable="false" clickable="true">
+    <icon src="$icon" size="sm" variant="secondary"/>
+    <text_body name="page_temp" bind_text="${prefix}_${index}_temp" style_text_font="noto_sans_14"/>
+    <text_xs name="page_name"
+             width="100%" bind_text="${prefix}_${index}_name" long_mode="dots" style_text_color="#text_muted"
+             style_text_align="center"/>
+    <event_cb trigger="clicked" callback="thermistor_carousel_page_cb"/>
+  </view>
+</component>

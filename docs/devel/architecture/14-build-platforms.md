@@ -22,22 +22,22 @@ flowchart TB
     subgraph mk["Makefile + mk/*.mk"]
         CROSS["mk/cross.mk<br/>PLATFORM_TARGET to toolchain,<br/>flags, backend, feature gates"]
         PATCHES["mk/patches.mk<br/>patches/ onto lib/lvgl, lib/libhv, lib/lua"]
-        RULES["mk/rules.mk<br/>all: apply-patches, fonts,<br/>splash, link, strip"]
+        kRules["mk/rules.mk<br/>all: apply-patches, fonts,<br/>splash, link, strip"]
         TESTS["mk/tests.mk<br/>helix-tests + Catch2 shards"]
     end
 
     BIN["build/TARGET/bin/helix-screen<br/>DRM / fbdev / SDL auto-detect at runtime"]
     TESTBIN["build/bin/helix-tests"]
     DEPLOY["deploy-pi / deploy-ad5m / deploy-cc1 / ..."]
-    DEVICES["Ships on: K1 series, K2, AD5M, AD5X, Creator 5 Pro, CC1,<br/>Snapmaker U1, Pi, QIDI Q2/Max 4, Sonic Pad,<br/>x86 SBCs; Yocto recipe; Android APK"]
+    DEVICES["Ships on: K1 series, K2, AD5M, AD5X, Creator 5 Pro, CC1,<br/>Snapmaker U1, Pi, QIDI Q2/Max 4, Sonic Pad,<br/>x86 SBCs, Linux desktops; Yocto recipe; Android APK"]
     ESP["firmware/helixscreen-esp32<br/>ESP-IDF build, BTT K-Touch"]
 
     DEV --> CROSS
     DOCKER --> CROSS
     REMOTE --> CROSS
-    CROSS --> RULES
-    PATCHES --> RULES
-    RULES --> BIN
+    CROSS --> kRules
+    PATCHES --> kRules
+    kRules --> BIN
     CROSS --> TESTS
     TESTS --> TESTBIN
     THOST --> TESTS
@@ -114,7 +114,8 @@ font tiers, and `-DHELIX_HAS_*` / `-DHELIX_PLATFORM_*` gates that code checks at
 | `pi`, `pi-fbdev`, `pi-both` | Raspberry Pi aarch64 | DRM / fbdev | `-both` compiles once, links DRM + fbdev ([`mk/pi-dual-link.mk`](../../../mk/pi-dual-link.mk)) |
 | `pi32` (+`-fbdev`/`-both`) | Pi armhf, **Sonic Pad** | DRM / fbdev | Same binary serves any armhf Debian-ish box |
 | `x86`, `x86-fbdev`, `x86-both` | x86_64 Debian SBCs | DRM / fbdev | Built in a Bullseye container for glibc 2.31 compat |
-| `ad5m`, `ad5m-br` | FlashForge AD5M (armv7) | fbdev | Fully static; ships as a ready-made firmware image (Forge-X fork); `-br` is the buildroot variant built inside AD5M Klipper Mod ([`printers/FLASHFORGE_AD5M_SUPPORT.md`](../printers/FLASHFORGE_AD5M_SUPPORT.md)) |
+| `x86-desktop` | x86_64 Linux desktops | SDL | A window beside the user's desktop, released and installed per user; same Bullseye container, static SDL2 from `lib/sdl2`, its own compile since `LV_USE_SDL` changes every LVGL object ([`../BUILD_SYSTEM.md`](../BUILD_SYSTEM.md#x86_64-linux-desktop-x86-desktop)) |
+| `ad5m`, `ad5m-br` | FlashForge AD5M (armv7) | fbdev | Fully static; release tarballs installed onto Forge-X, Klipper Mod or ZMOD; `-br` is the buildroot variant built inside AD5M Klipper Mod ([`printers/FLASHFORGE_AD5M_SUPPORT.md`](../printers/FLASHFORGE_AD5M_SUPPORT.md)) |
 | `cc1` | Elegoo Centauri Carbon (armv7) | fbdev | Static, tested; also the fallback binary for old-glibc armv7 boxes generally |
 | `mips` (also spelled `k1`, `ad5x`; `make creator5` builds it) | Creality K1 series, FlashForge AD5X, FlashForge Creator 5 Pro (Ingenic MIPS32) | fbdev | One static musl binary for all three boards, built at the shared `mips32r2` + `-mnan=2008 -mfp64` ABI; the board is told apart at runtime |
 | `k1-dynamic` | Creality K1 series (MIPS32) | fbdev | Mixed static/dynamic against the device's glibc and GCC 7 libstdc++ |
@@ -135,9 +136,28 @@ which is what lets one binary cover a device family.
 The per-target gates are where devices differ in features, not just flags: font tiers scale the
 compiled font payload from `micro tiny` (cc1, yocto, both 112MB RAM) to `all` (pi, x86); the label-printer,
 CFS, and IFS gates are off on AD5M ([`mk/cross.mk`](../../../mk/cross.mk)). Sound is gated in the top-level `Makefile`
-(`Makefile#"HELIX_HAS_SOUND:   Pi"`): full, with the tracker player, on Pi, x86, native and the unified MIPS build;
+(`Makefile#"HELIX_HAS_SOUND:   Pi"`): full, with the tracker player, on Pi, x86, x86-desktop, native and the unified MIPS build;
 tone-only on AD5M; compiled out on K2, CC1, k1-dynamic, the Snapmaker U1 and Yocto. The camera gate,
 `HELIX_HAS_CAMERA`, is derived from the platform defines in `lv_conf.h` rather than set in `mk/cross.mk`.
+
+### Board identity
+
+A platform key names a *build*; a board is the printer that build is running on. The unified
+`mips` build serves the K1 series, the AD5X, the Creator 5 and the Creator 5 Pro, so the key
+alone cannot answer a board question. [`include/board_identity.h`](../../../include/board_identity.h)
+is the one place that does: `helix::board::current()` resolves the platform key plus, for `mips`
+only, the FlashForge machine id and mod-tree probe, caches the answer, and `board::info(board)` returns
+the row of per-board facts (camera probing, the jz_pwm piezo, reduced effects, backlight re-assert,
+firmware-owned updates, legacy release asset). Capability modules that own large per-board data
+key their own tables on `board::Board` the same way: touch fits
+(`src/ui/touch_calibration.cpp#factory_touch_fit`), panel geometry
+(`src/application/display_metrics.cpp`) and cache rungs
+(`src/system/helix_cache_dir.cpp#board_cache_candidates`). Generic code asks the board; it never
+tests a `HELIX_PLATFORM_*` macro or probes the filesystem for a vendor. A new board is one enum
+value and one row. `scripts/check_vendor_branches.py` is the ratchet that enforces it.
+
+Tests set a board with `helix::test::ScopedBoard` (`tests/test_helpers/scoped_board.h`);
+`HelixTestFixture::reset_all()` clears any override so it cannot leak into the next case.
 
 ### The ESP32 firmware: a curated subset with its own gates
 
@@ -160,8 +180,8 @@ Two independent choices, easy to conflate:
 
 - The **display backend** decides how finished pixels reach the panel: fbdev, DRM/KMS dumb buffers,
   DRM through EGL/GBM, SDL. Chosen at runtime by [`src/api/display_backend.cpp#create_auto`](../../../src/api/display_backend.cpp);
-  the EGL presentation path is a separate binary, `helix-screen-egl`, that the Pi targets link beside the
-  DRM one ([`mk/egl-link.mk`](../../../mk/egl-link.mk)).
+  on the Pi targets the DRM binary links the EGL presentation path beside dumb buffers and takes it for
+  `HELIX_DISPLAY_BACKEND=egl` ([`mk/egl-link.mk`](../../../mk/egl-link.mk)).
 - The **draw unit** decides what rasterizes widgets: `lv_draw_sw`, `lv_draw_opengles`,
   `lv_draw_nanovg`, `vg_lite`. Chosen at compile time by the `LV_USE_DRAW_*` switches in
   `lv_conf.h`.
@@ -169,7 +189,10 @@ Two independent choices, easy to conflate:
 **Every target draws with `lv_draw_sw`.** No GPU draw unit is compiled in on any platform, so
 rasterization is CPU work everywhere, including the Pi. GLES on Pi and x86 belongs to the 3D
 G-code viewer ([`src/rendering/gcode_gles_renderer.cpp`](../../../src/rendering/gcode_gles_renderer.cpp)),
-which owns a private EGL context and no part of the LVGL pipeline. The EGL display backend accelerates
+which owns a private GL context (EGL on DRM builds, SDL's on SDL builds) and no part of the LVGL
+pipeline. SDL builds resolve its GLES2 entry points at runtime
+([`include/gles2_loader.h`](../../../include/gles2_loader.h)) rather than linking `libGLESv2`,
+so a desktop without GLES still starts and the viewer draws in 2D. The EGL display backend accelerates
 only *presentation*; drawing follows the draw unit, not the backend. [`../GPU_ACCELERATION.md`](../GPU_ACCELERATION.md) has the measured
 numbers per board.
 
@@ -225,15 +248,15 @@ Cursor direction is judged with the picture upright, the way a rotated install i
 lv_evdev bounds a relative position by the unrotated display, which at 90 and 270 is not the
 picture, so the hook reads the position before that bound and bounds it by the picture instead.
 
-On the EGL binary every nonzero angle takes the GPU strategy. Otherwise 90 and 270 never go to the plane,
+On the EGL path every nonzero angle takes the GPU strategy. Otherwise 90 and 270 never go to the plane,
 whatever its mask advertises: the plane is programmed at the panel's own width and height and LVGL keeps laying
 out unrotated ([`src/api/drm_rotation_strategy.cpp#choose_drm_rotation_strategy`](../../../src/api/drm_rotation_strategy.cpp)).
 A board whose plane cannot carry the angle falls to the fbdev backend.
 
-**A panel needing 90 or 270 belongs on the EGL binary where the board has a GPU, else on the fbdev binary.** Pi targets ship
-`helix-screen` for DRM, `helix-screen-fbdev` ([`mk/pi-dual-link.mk`](../../../mk/pi-dual-link.mk)) and
-`helix-screen-egl`, with [`scripts/helix-launcher.sh`](../../../scripts/helix-launcher.sh)
-selecting between them (EGL only when `--probe-egl` finds a real GPU) and falling back on a DRM crash. Forcing the fbdev binary is
+**A panel needing 90 or 270 belongs on the EGL path where the board has a GPU, else on fbdev.** Pi and x86 targets ship
+one `helix-screen` carrying all three rungs (EGL, DRM dumb buffers, fbdev), with no load-time dependency on the GPU
+libraries ([`mk/implib.mk`](../../../mk/implib.mk)), and [`scripts/helix-launcher.sh`](../../../scripts/helix-launcher.sh)
+choosing the rung (EGL only when `--probe-egl` finds a real GPU) and stepping down one rung on a crash. Forcing fbdev is
 `HELIX_DISPLAY_BACKEND=fbdev`.
 
 ### Patches: forked fixes, stamp-applied
@@ -330,7 +353,7 @@ Read in this order; about 25 minutes total.
 1. `Makefile#"CRITICAL: Always use 'make'"` - the header contract: always `make`, never invoke the compiler directly, and what the build system handles for you.
 2. `mk/rules.mk#"Phase 1: Check for unlimited -j"` - the two-phase `all` target: toolchain check, then re-invocation under a bounded `-j`; then `mk/rules.mk#"$(TARGET) $(FBDEV_TARGET)"` for what a build actually gates on (`apply-patches` first).
 3. [`mk/rules.mk#TOOLCHAIN_MARKER`](../../../mk/rules.mk) - the `.build-target` target-and-compiler marker and auto-clean.
-4. [`mk/tests.mk#test`](../../../mk/tests.mk) - the `test` (build-only) vs `test-run` (parallel shards) split, and the `~[.] ~[slow]` filter convention.
+4. [`mk/tests.mk#test`](../../../mk/tests.mk) - the `test` (build-only) vs `unit-sweep` (parallel shards) split, and the `~[.] ~[slow]` filter convention.
 5. [`mk/cross.mk`](../../../mk/cross.mk) - the commented platform menu; then `mk/cross.mk#"$(PLATFORM_TARGET),pi)"` (pi: DRM+GLES, all font tiers) against `mk/cross.mk#"else ifeq ($(PLATFORM_TARGET),ad5m)"` (ad5m: `-Os -flto -static`, label-printer gate off, trimmed fonts) to see how far the knobs turn.
 6. [`mk/cross.mk`](../../../mk/cross.mk) - the `native` block: SDL backend, and why dev conveniences live here rather than in cross builds.
 7. `Makefile#"ENABLE_REMOTE_CONTROL ?= no"` - `ENABLE_REMOTE_CONTROL`'s developer-on / packaging-off wiring, keyed on `HELIX_PACKAGING`; `Makefile#"ENABLE_DEV_PANELS ?= yes"` shows the simpler native-only shape for dev panels.

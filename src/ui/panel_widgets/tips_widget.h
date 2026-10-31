@@ -20,6 +20,8 @@ class TipsWidget : public PanelWidget {
     void on_activate() override;
     void on_deactivate() override;
     void on_size_changed(int colspan, int rowspan, int width_px, int height_px) override;
+    /// Refuses a width whose title column cannot hold the widest unbreakable run of any tip title.
+    bool fits_at(int width_px, int height_px) const override;
     const char* id() const override {
         return "tips";
     }

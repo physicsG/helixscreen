@@ -26,7 +26,7 @@ setup() {
     FIXTURE="${BATS_TEST_TMPDIR:-$(mktemp -d)}/icon_names"
     mkdir -p "$FIXTURE/ui_xml" "$FIXTURE/include"
     cat > "$FIXTURE/include/ui_icon_codepoints.h" <<'HDR'
-static const IconEntry ICON_MAP[] = {
+static const IconEntry kIconMap[] = {
     {"alert",        "\xF3\xB0\x80\xA6"},
     {"check_circle", "\xF3\xB0\x97\xA1"},
     {"info",         "\xF3\xB0\x8B\xBC"},

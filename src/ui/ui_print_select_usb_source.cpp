@@ -79,20 +79,18 @@ void PrintSelectUsbSource::init_subjects() {
         return;
     lv_subject_init_int(&s_print_source_is_usb, 0);
     s_subjects.publish("print_source_is_usb", &s_print_source_is_usb);
-    SubjectDebugRegistry::instance().register_subject(&s_print_source_is_usb, "print_source_is_usb",
-                                                      LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
+    HELIX_SUBJECT_DEBUG_REGISTER(&s_print_source_is_usb, "print_source_is_usb",
+                                 LV_SUBJECT_TYPE_INT);
 
     lv_subject_init_int(&s_print_source_usb_present, 0);
     s_subjects.publish("print_source_usb_present", &s_print_source_usb_present);
-    SubjectDebugRegistry::instance().register_subject(&s_print_source_usb_present,
-                                                      "print_source_usb_present",
-                                                      LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
+    HELIX_SUBJECT_DEBUG_REGISTER(&s_print_source_usb_present, "print_source_usb_present",
+                                 LV_SUBJECT_TYPE_INT);
 
     lv_subject_init_int(&s_print_source_moonraker_usb_access, 0);
     s_subjects.publish("print_source_moonraker_usb_access", &s_print_source_moonraker_usb_access);
-    SubjectDebugRegistry::instance().register_subject(&s_print_source_moonraker_usb_access,
-                                                      "print_source_moonraker_usb_access",
-                                                      LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
+    HELIX_SUBJECT_DEBUG_REGISTER(&s_print_source_moonraker_usb_access,
+                                 "print_source_moonraker_usb_access", LV_SUBJECT_TYPE_INT);
 
     s_source_subject_initialized = true;
 

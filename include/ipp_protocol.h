@@ -184,9 +184,16 @@ IppRequest build_get_printer_attributes(const std::string& printer_uri,
 IppRequest build_print_job(const std::string& printer_uri, const std::string& job_name,
                            const std::string& document_format, const std::string& media = "");
 
+/// Resource path of a printer that advertises none (IPP Everywhere's default).
+inline constexpr const char* kDefaultResourcePath = "ipp/print";
+
+/// The resource path without leading slashes, or kDefaultResourcePath when that
+/// leaves nothing.
+std::string normalize_resource_path(const std::string& resource_path);
+
 /// Construct an IPP printer URI from discovered mDNS info.
 /// host: hostname or IP, port: IPP port, resource_path: from mDNS TXT "rp" field.
 std::string make_printer_uri(const std::string& host, uint16_t port,
-                             const std::string& resource_path = "ipp/print");
+                             const std::string& resource_path = kDefaultResourcePath);
 
 } // namespace helix::ipp

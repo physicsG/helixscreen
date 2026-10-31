@@ -44,8 +44,7 @@
       <!-- Text container: name + optional description -->
       <lv_obj flex_grow="1" flex_flow="column" style_pad_gap="#space_xs" scrollable="false" clickable="false">
         <text_body name="macro_label" bind_text="$name_subject"/>
-        <text_small name="macro_desc"
-                    width="100%" bind_text="$desc_subject" style_text_color="#text_muted" long_mode="dots">
+        <text_small name="macro_desc" width="100%" bind_text="$desc_subject" style_text_color="#text_muted">
           <bind_flag_if_eq subject="$desc_hidden_subject" flag="hidden" ref_value="1"/>
         </text_small>
       </lv_obj>

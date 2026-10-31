@@ -117,6 +117,30 @@ TEST_CASE_METHOD(MappingReclassifyFixture,
     CHECK_FALSE(result[0].color_mismatch);
 }
 
+TEST_CASE_METHOD(MappingReclassifyFixture,
+                 "A row the user sets in the modal is marked as their pick",
+                 "[filament_mapping][modal][routing]") {
+    // Print start sends a remap only for a pick (or an auto color match), and a
+    // card refresh re-seeds every row that is not one. Unmarked, a lane chosen
+    // here would be thrown away on the next AMS update and never sent.
+    SECTION("a lane") {
+        FilamentMappingModal modal;
+        seed(modal);
+        REQUIRE(modal.show(test_screen()));
+        const auto result = pick(modal, {1, 0, false});
+        REQUIRE(result.size() == 1);
+        CHECK(result[0].user_picked);
+    }
+    SECTION("Auto") {
+        FilamentMappingModal modal;
+        seed(modal);
+        REQUIRE(modal.show(test_screen()));
+        const auto result = pick(modal, {-1, -1, true});
+        REQUIRE(result.size() == 1);
+        CHECK(result[0].user_picked);
+    }
+}
+
 TEST_CASE_METHOD(MappingReclassifyFixture, "Choosing auto leaves no pairing to warn about",
                  "[filament_mapping][modal][colour_mismatch]") {
     // "Auto" is the firmware picking at print time, so there is no lane yet and

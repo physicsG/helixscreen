@@ -69,7 +69,7 @@ void SoundSequencer::start() {
     running_.store(true);
     // It only computes tones and hands them to the backend (an M300 is a WebSocket send),
     // so it can run on a PSRAM stack and leave internal RAM to the WebSocket task.
-    PsramThreadStackScope psram_stack("sound_seq", SEQUENCER_STACK_BYTES);
+    PsramThreadStackScope psram_stack("sound_seq", kSequencerStackBytes);
     sequencer_thread_ = helix::make_thread(&SoundSequencer::sequencer_loop, this);
     spdlog::debug("[SoundSequencer] started sequencer thread");
 }

@@ -14,6 +14,8 @@
 #include "print_history_manager.h"
 #include "printer_state.h"
 #include "sound_manager.h"
+#include "text_io.h"
+#include "utils/network_validation.h"
 
 #include <spdlog/spdlog.h>
 
@@ -33,16 +35,15 @@ IMoonrakerClient* disconnect_for_retarget() {
         spdlog::error("[PrinterRetarget] Cannot reconnect - client or manager unavailable");
         return nullptr;
     }
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::SHORT);
+    EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::SHORT);
     client->disconnect();
     return client;
 }
 
 /// The active printer's Moonraker as "host:port".
 std::string active_printer_host_port(const std::string& default_host) {
-    Config* config = Config::get_instance();
-    return config->get<std::string>(config->df() + "moonraker_host", default_host) + ":" +
-           std::to_string(config->get<int>(config->df() + "moonraker_port", 7125));
+    const moonraker_auth::Credential c = active_printer_credential(default_host);
+    return c.host + ":" + std::to_string(c.port);
 }
 
 /// The new printer's first status replaces the live values; an unreachable one never sends
@@ -74,12 +75,40 @@ std::string active_printer_http_url(const std::string& default_host) {
     return "http://" + active_printer_host_port(default_host);
 }
 
+moonraker_auth::Credential active_printer_credential(const std::string& default_host) {
+    Config* config = Config::get_instance();
+    const std::string df = config->df();
+    moonraker_auth::Credential c;
+    c.host = config->get<std::string>(df + "moonraker_host", default_host);
+    c.port = config->get<int>(df + "moonraker_port", helix::kDefaultMoonrakerPort);
+    // false, absent or blank: this printer takes no key.
+    if (const nlohmann::json* key = config->try_get_json(df + "moonraker_api_key");
+        key && key->is_string()) {
+        c.api_key = std::string(text_io::trim(key->get<std::string>()));
+    }
+    return c;
+}
+
+void set_active_printer_api_key(const std::string& api_key) {
+    Config* config = Config::get_instance();
+    const std::string_view key = text_io::trim(api_key);
+    // false, not "": the shape a printer with no key has from its defaults.
+    if (key.empty()) {
+        config->set(config->df() + "moonraker_api_key", false);
+    } else {
+        config->set(config->df() + "moonraker_api_key", std::string(key));
+    }
+}
+
 bool connect_printer(MoonrakerManager& manager, const std::string& ws_url,
                      const std::string& http_url) {
+    // Before the connect: the WebSocket upgrade is the first request that needs it.
+    moonraker_auth::set_credential(active_printer_credential());
     // Tracks PRINT_START progress for this printer, with its own print-start profile.
     // Created before the connect: the observers it installs on the API are then in place
     // before the WebSocket task can call them.
     manager.init_print_start_collector();
+    manager.init_print_stop_reason();
     spdlog::info("[PrinterRetarget] Connecting to {}", ws_url);
     if (manager.connect(ws_url, http_url) != 0) {
         spdlog::error("[PrinterRetarget] Connecting to {} could not start", ws_url);
@@ -96,13 +125,6 @@ bool connect_active_printer() {
         return false;
     }
     return connect_printer(*manager, active_printer_ws_url(), active_printer_http_url());
-}
-
-bool reconnect_active_printer() {
-    if (!disconnect_for_retarget()) {
-        return false;
-    }
-    return connect_active_printer();
 }
 
 bool retarget_printer_connection() {

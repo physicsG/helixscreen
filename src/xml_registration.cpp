@@ -3,16 +3,13 @@
 
 #include "xml_registration.h"
 
-#include "ui_afc_fault_path.h"
 #include "ui_ams_current_tool.h"
 #include "ui_ams_device_operations_overlay.h"
 #include "ui_ams_device_section_detail_overlay.h"
-#include "ui_bed_drying_modal.h"
-#include "ui_belt_path_sketch.h"
-#if HELIX_HAS_CFS
-#include "ui_cfs_chute_calibration_overlay.h"
-#endif
 #include "ui_ams_edit_overlay.h"
+#include "ui_bed_drying_modal.h"
+#include "ui_belt_gap_gauge.h"
+#include "ui_belt_path_sketch.h"
 #include "ui_button.h"
 #include "ui_carousel.h"
 #include "ui_color_picker.h"
@@ -20,6 +17,7 @@
 #include "ui_context_menu.h"
 #include "ui_event_safety.h"
 #include "ui_fan_dial.h"
+#include "ui_fault_path.h"
 #include "ui_fonts.h"
 #include "ui_gcode_viewer.h"
 #include "ui_hsv_picker.h"
@@ -32,11 +30,14 @@
 #include "ui_panel_home.h"
 #include "ui_panel_settings.h"
 #include "ui_pin_entry_modal.h"
+#include "ui_plugin_feature_row.h"
+#include "ui_plugin_menu_rows.h"
 #include "ui_printer_switch_menu.h"
 #include "ui_progress_bar.h"
 #include "ui_spinner.h"
 #include "ui_split_button.h"
 #include "ui_spool_canvas.h"
+#include "ui_swatch.h"
 #include "ui_switch.h"
 #include "ui_text.h"
 #include "ui_text_input.h"
@@ -382,15 +383,16 @@ void register_xml_components() {
 
     // Register semantic text widgets (AFTER theme init, BEFORE components that use them)
     ui_text_init();
-    ui_text_input_init();                     // <text_input> with bind_text support
-    ui_spinner_init();                        // <spinner> with responsive sizing
-    ui_button_init();                         // <ui_button> with variant styles and auto-contrast
-    ui_split_button_init();                   // <ui_split_button> with primary action + dropdown
-    ui_markdown_init();                       // <ui_markdown> with theme-aware markdown rendering
-    ui_notification_badge_init();             // <notification_badge> with auto-contrast text
-    helix::ui::register_leader_line_widget(); // <leader_line>, a bare lv_line for callouts
-    ui_carousel_init();                       // <ui_carousel> horizontal scroll-snap carousel
-    ui_confetti_init();                       // <ui_confetti> celebration animation canvas
+    ui_text_input_init();                      // <text_input> with bind_text support
+    ui_spinner_init();                         // <spinner> with responsive sizing
+    ui_button_init();                          // <ui_button> with variant styles and auto-contrast
+    ui_split_button_init();                    // <ui_split_button> with primary action + dropdown
+    ui_markdown_init();                        // <ui_markdown> with theme-aware markdown rendering
+    ui_notification_badge_init();              // <notification_badge> with auto-contrast text
+    helix::ui::register_leader_line_widget();  // <leader_line>, a bare lv_line for callouts
+    helix::ui::register_swatch_paint_widget(); // <swatch_paint>, the one colour-swatch painter
+    ui_carousel_init();                        // <ui_carousel> horizontal scroll-snap carousel
+    ui_confetti_init();                        // <ui_confetti> celebration animation canvas
 
     // Register no-op callback and subject for optional handlers in XML components
     // This silences warnings when components use callback/subject props with default=""
@@ -412,22 +414,25 @@ void register_xml_components() {
     // Backdrop tap and close/Done for every context menu — one pair, routed through
     // ContextMenu::active(), rather than a callback per menu.
     helix::ui::ContextMenu::register_shared_callbacks();
+    // plugin_feature_toggle_row: any settings page may place one.
+    helix::ui::register_plugin_feature_row_callbacks();
     lv_subject_init_int(&s_noop_subject, 0);
     lv_xml_register_subject(nullptr, "", &s_noop_subject);
     s_noop_subject_initialized = true;
 
     // Self-register cleanup — ensures deinit runs before lv_deinit()
-    StaticSubjectRegistry::instance().register_deinit("XmlSubjects", helix::deinit_xml_subjects);
+    StaticSubjectRegistry::instance().register_deinit("XmlSubjects", helix::deinit_xml_subjects,
+                                                      StaticSubjectRegistry::Lifetime::Process);
 
     // Register custom widgets (BEFORE components that use them)
-    ui_gcode_viewer_register();
+    helix::ui::gcode_viewer_register();
     ui_spool_canvas_register();       // Needed by Spoolman panel (and AMS panel)
     ui_hsv_picker_register();         // HSV color picker for edit filament modal
     ui_z_offset_indicator_register(); // Z-offset nozzle indicator
     ui_ams_current_tool_init();       // AMS current tool indicator callbacks
-    // <afc_fault_path> + its afc_fault_segment subject, embedded by both modals
-    // that can show an AFC lane fault.
-    helix::ui::afc_fault_path_register();
+    // <fault_path> + its fault_path_segment subject, embedded by the modals
+    // that can show a positioned lane fault.
+    helix::ui::fault_path_register();
     // NOTE: Other AMS widgets (ams_slot, filament_path_canvas) are
     // registered lazily in ui_panel_ams.cpp when the AMS panel is first accessed
 
@@ -453,6 +458,7 @@ void register_xml_components() {
 
     // Panel widget components (dynamic instantiation from PanelWidgetConfig)
     helix::ui::PrinterSwitchMenu::register_callbacks();
+    helix::ui::register_plugin_menu_row_callbacks();
 
     register_fan_dial_callbacks(); // Register FanDial event callbacks
 
@@ -462,6 +468,7 @@ void register_xml_components() {
 
 #if HELIX_HAS_BELT_TUNER
     helix::ui::register_belt_path_sketch_widget(); // before the panel XML that uses it
+    helix::ui::register_belt_gap_gauge_widget();
 #endif
 
     register_settings_panel_callbacks(); // Register callbacks before XML parse [L013]

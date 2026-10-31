@@ -78,40 +78,114 @@ SHIM
 
     export PATH="$HELIX_TEST_SANDBOX_BIN:$PATH"
 
+    # The suite runs the same inside a make as outside one. `make test-shell`,
+    # full-test-run and land-gate hand every test their jobserver, their
+    # command-line variables (BATS_REQUIRED=1 among them, through MAKEFLAGS
+    # and the plain environment alike) and the variables the Makefile exports,
+    # and a make a test runs would read all of it as its own.
+    unset MAKEFLAGS MFLAGS GNUMAKEFLAGS MAKELEVEL MAKEOVERRIDES BATS_REQUIRED BATS_BIN \
+        ABI_STAMPED_FOR HELIX_PATCHES_FROM_CLEAN HELIX_FROM_CLEAN_SENTINEL HELIX_TESTS_NO_STALE_CHECK
+
+    # make never runs in the tree under test. A gate runs this suite while its
+    # own lanes build there, and a second make in that tree deletes the test
+    # binary they are about to run (prune-orphan-test-objs). A dry run is no
+    # safer: make still runs every recipe line that names $(MAKE), and parsing
+    # the Makefile writes stamps under build/. A test runs make in
+    # scratch_tree (helpers.bash) or in a directory of its own; one whose
+    # directory, after any -C, is this tree or inside it is blocked and
+    # recorded like the commands above.
+    #
     # A macOS host's /usr/bin/make is GNU make 3.81 (Homebrew's 4.x installs
-    # as gmake), and the repo Makefile hard-errors below 4.2, so every test
-    # that runs make would fail on the environment alone. Forward make to
-    # gmake for the whole suite when bare make is too old and gmake exists.
-    # A Linux make, and the jobpool shim (which execs a modern make), parse as
-    # 4.2+ and are left untouched.
-    local mk_ver mk_major mk_minor gmake_bin
-    mk_ver="$(make --version 2>/dev/null | head -1)"
+    # as gmake), and the repo Makefile hard-errors below 4.2, so the guard
+    # hands such a host's make calls to gmake. A Linux make, and the jobpool
+    # shim (which execs a modern make), parse as 4.2+ and are used as found.
+    export HELIX_TEST_REPO_ROOT
+    HELIX_TEST_REPO_ROOT="$(cd "$repo" && pwd -P)"
+    # The guard execs the first make on PATH that is neither itself nor a
+    # jobpool shim: such a shim execs the next make on PATH, which is the guard
+    # again. JOBPOOL=0 below makes a shim a passthrough anyway.
+    local mk_ver mk_major mk_minor real_make="" d
+    local IFS=:
+    for d in ${PATH#"$HELIX_TEST_SANDBOX_BIN:"}; do
+        [ -n "$d" ] && [ -x "$d/make" ] && [ ! -d "$d/make" ] || continue
+        head -n 2 "$d/make" 2>/dev/null | grep -q '^# jobpool shim' && continue
+        real_make="$d/make"
+        break
+    done
+    unset IFS
+    mk_ver="$("$real_make" --version 2>/dev/null | head -1)"
     mk_major="$(printf '%s\n' "$mk_ver" | sed -n 's/^GNU Make \([0-9]*\)\..*$/\1/p')"
     mk_minor="$(printf '%s\n' "$mk_ver" | sed -n 's/^GNU Make [0-9]*\.\([0-9]*\).*$/\1/p')"
     if { [ -z "$mk_major" ] || [ "$mk_major" -lt 4 ] ||
          { [ "$mk_major" -eq 4 ] && [ "${mk_minor:-0}" -lt 2 ]; }; } &&
-        gmake_bin="$(command -v gmake)"; then
-        cat > "$HELIX_TEST_SANDBOX_BIN/make" <<SHIM
+        command -v gmake >/dev/null 2>&1; then
+        real_make="$(command -v gmake)"
+    fi
+    # One guard behind both names a test can call make by. It finds the
+    # directory make would run in from -C (alone, or last in a cluster such as
+    # -sC), --directory and any prefix of it make accepts (--dir=), each taken
+    # relative to the one before.
+    export HELIX_TEST_MAKE_GUARD="$BATS_SUITE_TMPDIR/make-guard.sh"
+    cat > "$HELIX_TEST_MAKE_GUARD" <<'GUARD'
 #!/bin/sh
-exec '$gmake_bin' "\$@"
-SHIM
-        chmod +x "$HELIX_TEST_SANDBOX_BIN/make"
-        # The function layer, for the same reason as the blocked commands: a
-        # callee that REPLACES PATH loses the shim. A function outranks PATH,
-        # so it must hand control back to a test's own make mock, which is
-        # whatever PATH resolves to under the bats run directory.
-        eval "make() {
-            local resolved
-            resolved=\"\$(type -P make 2>/dev/null)\"
-            if [ -n \"\$resolved\" ] && [ \"\$resolved\" != \"\$HELIX_TEST_SANDBOX_BIN/make\" ] &&
-               [ \"\${resolved#\"\$BATS_RUN_TMPDIR\"/}\" != \"\$resolved\" ]; then
-                \"\$resolved\" \"\$@\"
-            else
-                '$gmake_bin' \"\$@\"
-            fi
-        }"
-        # shellcheck disable=SC2163  # the name is fixed, by design
-        export -f make
+# make-guard.sh <real make> <name it was called by> [make args...]
+real=$1 name=$2
+shift 2
+dir=$(pwd -P)
+info= want= skip=
+chdir() { dir=$(cd "$dir" 2>/dev/null && cd "$1" 2>/dev/null && pwd -P) || dir=; }
+for a in "$@"; do
+    if [ -n "$want" ]; then chdir "$a"; want=; continue; fi
+    if [ -n "$skip" ]; then skip=; continue; fi
+    case "$a" in
+        --) break ;;
+        --version | --help) info=1 ;;
+        --di*=*) case --directory in "${a%%=*}"*) chdir "${a#*=}" ;; esac ;;
+        --di*) case --directory in "$a"*) want=1 ;; esac ;;
+        --*) ;;
+        -?*)
+            c=${a#-}
+            while [ -n "$c" ]; do
+                f=${c%"${c#?}"}
+                c=${c#?}
+                case "$f" in
+                    C) if [ -n "$c" ]; then chdir "$c"; else want=1; fi; break ;;
+                    v | h) info=1 ;;
+                    # Options whose argument is the rest of the cluster or the next word.
+                    [fIoWE]) [ -n "$c" ] || skip=1; break ;;
+                esac
+            done ;;
+    esac
+done
+case "$dir/" in
+    "$HELIX_TEST_REPO_ROOT"/*)
+        if [ -z "$info" ]; then
+            printf '%s\t%s\t%s %s (in %s)\n' \
+                "${BATS_TEST_FILENAME##*/}" "${BATS_TEST_NAME:-(file setup)}" "$name" "$*" "$dir" \
+                >> "$HELIX_TEST_SANDBOX_LEDGER"
+            printf 'helix sandbox: blocked %s in the tree under test (%s): run it in scratch_tree\n' "$name" "$dir" >&2
+            [ "$HELIX_TEST_SANDBOX_MODE" = permissive ] && exit 0
+            exit 1
+        fi ;;
+esac
+exec "$real" "$@"
+GUARD
+    chmod +x "$HELIX_TEST_MAKE_GUARD"
+    printf '#!/bin/sh\nexec "$HELIX_TEST_MAKE_GUARD" %s make "$@"\n' "'$real_make'" \
+        > "$HELIX_TEST_SANDBOX_BIN/make"
+    chmod +x "$HELIX_TEST_SANDBOX_BIN/make"
+    # The function layer, for the same reason as the blocked commands: a
+    # callee that REPLACES PATH loses the shim.
+    make() { _helix_sandbox_dispatch make "$@"; }
+    export -f make
+    local real_gmake
+    real_gmake="$(PATH="${PATH#"$HELIX_TEST_SANDBOX_BIN:"}" command -v gmake)" || real_gmake=""
+    if [ -n "$real_gmake" ]; then
+        printf '#!/bin/sh\nexec "$HELIX_TEST_MAKE_GUARD" %s gmake "$@"\n' "'$real_gmake'" \
+            > "$HELIX_TEST_SANDBOX_BIN/gmake"
+        chmod +x "$HELIX_TEST_SANDBOX_BIN/gmake"
+        gmake() { _helix_sandbox_dispatch gmake "$@"; }
+        export -f gmake
     fi
 
     # The host's build pool is shared with every other session on the box. A
@@ -173,6 +247,7 @@ teardown_suite() {
         echo
         echo "Mock the command in that test's setup() - mock_command_script"
         echo "\"killall\" 'exit 0' - or call it on a pid the test owns instead."
+        echo "A make in the tree under test runs in scratch_tree (helpers.bash) instead."
     } >&2
 
     [ "$HELIX_TEST_SANDBOX_MODE" = permissive ] && return 0

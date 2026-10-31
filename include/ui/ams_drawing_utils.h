@@ -32,6 +32,18 @@ struct HubGroup {
     std::string hub_id;     ///< Empty for a unit that is its own hub
     std::vector<int> units; ///< Member unit indices, in backend order
 };
+/**
+ * @brief Caption naming the lane whose spool feeds @p slot: the upstream
+ *        lane's unit and position, "ACE 2 · 3"
+ *
+ * Built from the backend's upstream_slot(): empty when the lane's spool is its
+ * own, when it has no backend answer, or when the upstream lane is not one
+ * this system shows. The position is 1-based inside its unit, spelled with the
+ * shared unit separator.
+ */
+[[nodiscard]] std::string upstream_lane_caption(const helix::AmsSystemInfo& info,
+                                                const helix::AmsBackend& backend, int slot);
+
 } // namespace helix::ui
 
 namespace ams_draw {
@@ -64,27 +76,16 @@ helix::SlotError::Severity worst_unit_severity(const helix::AmsUnit& unit);
 // ============================================================================
 
 /**
- * Minimum rendered fill for a lane that HAS an assigned spool.
- *
- * display_fill_level() is 0 for anything not present, and every spool visual
- * sizes its coloured ring by fill — so without a floor, a lane you just
- * assigned a spool to renders as bare grey chrome with no hint of its colour.
- * Shared so the mini-status strip, the overview bars and the slot widget all
- * agree on what "assigned but empty" looks like.
- */
-constexpr int SPOOL_ASSIGNED_MIN_FILL_PCT = 5;
-
-/**
  * Floor a display_fill_pct-encoded value for BAR rendering: -1 propagates
  * ("no data", callers keep the previous render), anything else clamps to
  * min_pct..100 so a present-but-spent lane keeps a visible sliver instead of
  * vanishing. THE shared rule - every bar-family surface must go through it or
  * the same lane renders empty on one surface and floored on another.
  */
-int floor_fill_pct(int pct, int min_pct = SPOOL_ASSIGNED_MIN_FILL_PCT);
+int floor_fill_pct(int pct, int min_pct = 5);
 
 /** Calculate fill percentage from SlotInfo weight data (returns min_pct..100, or 100 if unknown) */
-int fill_percent_from_slot(const helix::SlotInfo& slot, int min_pct = SPOOL_ASSIGNED_MIN_FILL_PCT);
+int fill_percent_from_slot(const helix::SlotInfo& slot, int min_pct = 5);
 
 /**
  * Calculate bar width to fit slot_count bars in container_width.
@@ -114,7 +115,7 @@ lv_obj_t* create_transparent_container(lv_obj_t* parent);
 /// Opacity of a spool visual and its labels on a lane that is assigned but not
 /// physically present. Shared by the AMS slot widget and the mini status strip
 /// so two views of the same lane cannot ghost to different strengths.
-inline constexpr lv_opa_t GHOST_OPA = LV_OPA_30;
+inline constexpr lv_opa_t kGhostOpa = LV_OPA_30;
 
 /** Create a circular lane-number badge (1-based) using AMS badge tokens.
  *  @param parent typically the spool container; caller may re-align.
@@ -134,16 +135,16 @@ void set_lane_badge_active(lv_obj_t* badge, bool active);
 // ============================================================================
 
 /// Pulse animation constants (shared by error badges and error dots)
-constexpr int32_t PULSE_SCALE_MIN = 180; ///< ~70% scale
-constexpr int32_t PULSE_SCALE_MAX = 256; ///< 100% scale
-constexpr int32_t PULSE_SAT_MIN = 80;    ///< Washed out
-constexpr int32_t PULSE_SAT_MAX = 255;   ///< Full vivid
-constexpr uint32_t PULSE_DURATION_MS = 800;
+constexpr int32_t kPulseScaleMin = 180; ///< ~70% scale
+constexpr int32_t kPulseScaleMax = 256; ///< 100% scale
+constexpr int32_t kPulseSatMin = 80;    ///< Washed out
+constexpr int32_t kPulseSatMax = 255;   ///< Full vivid
+constexpr uint32_t kPulseDurationMs = 800;
 
 /// Active-node ring geometry, shared by the lane slots and the bypass node.
-constexpr int32_t ACTIVE_RING_BORDER_WIDTH = 3;
-constexpr int32_t ACTIVE_RING_GLOW_WIDTH = 16;
-constexpr int32_t ACTIVE_RING_GLOW_SPREAD = 2;
+constexpr int32_t kActiveRingBorderWidth = 3;
+constexpr int32_t kActiveRingGlowWidth = 16;
+constexpr int32_t kActiveRingGlowSpread = 2;
 
 /** Start scale+saturation pulse animation on an object. Stores base_color in border_color. */
 void start_pulse(lv_obj_t* dot, lv_color_t base_color);
@@ -192,17 +193,8 @@ struct SlotColumn {
 };
 
 /// Status line dimensions
-constexpr int32_t STATUS_LINE_HEIGHT_PX = 3;
-constexpr int32_t STATUS_LINE_GAP_PX = 2;
-
-/// Mini slot-bar geometry. Shared because two surfaces draw the same bars: the
-/// overview's unit cards, and the slot that stands for a position fed from
-/// another unit (an ACE-fed head shows its ACE's bays rather than one spool).
-/// Keeping them here is what stops the two drifting into near-identical.
-constexpr int32_t MINI_BAR_MIN_WIDTH_PX = 6; ///< below this a bar is invisible
-constexpr int32_t MINI_BAR_MAX_WIDTH_PX = 14;
-constexpr int32_t MINI_BAR_HEIGHT_PX = 40; ///< decorative; no responsive scaling
-constexpr int32_t MINI_BAR_RADIUS_PX = 4;
+constexpr int32_t kStatusLineHeightPx = 3;
+constexpr int32_t kStatusLineGapPx = 2;
 
 /** Create slot column: bar_bg (with bar_fill child) + status_line in a column flex container */
 SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_height,
@@ -211,10 +203,6 @@ SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_h
 // ============================================================================
 // Logo Helpers
 // ============================================================================
-
-/** The logo image path for a unit: its own name first, then the system's type name.
- *  Null when neither has one. */
-const char* unit_logo_path(const helix::AmsUnit& unit, const helix::AmsSystemInfo& info);
 
 /** Apply logo to image widget: try unit name -> type name -> hide */
 void apply_logo(lv_obj_t* image, const helix::AmsUnit& unit, const helix::AmsSystemInfo& info);
@@ -235,15 +223,6 @@ struct UnitToolLayout {
     int min_virtual_tool = -1;   ///< Minimum mapped_tool value (for labeling)
     int hub_tool_label =
         -1; ///< Override label for HUB units (from extruder index, -1 = use min_virtual_tool)
-    /// Bit t = this unit actually SUPPLIES physical nozzle first_physical_tool + t.
-    /// A unit can own a nozzle it does not feed: a toolchanger head fed by an
-    /// MMU (an ACE-fed U1 head) belongs to the head's unit, but its slot's
-    /// identity is owned by the MMU -- AmsBackend::slot_identity_owner_unit().
-    /// Cleared for those, so the canvas draws no supply line from the owner to
-    /// filament it is not supplying. Computed HERE, once, from the same walk
-    /// that placed the nozzles: the overview used to re-derive it inline from
-    /// the same data with a per-(tool, slot) backend query.
-    uint32_t feeds_mask = ~0u;
     /// Extruder this unit's single nozzle belongs to, as an opaque name. Set
     /// only for one-nozzle units whose lanes all agree; empty otherwise. Two
     /// units naming the same extruder feed one nozzle — that is string
@@ -370,5 +349,17 @@ namespace helix::ui {
 /// toolhead @p physical_tool, in group order.
 [[nodiscard]] std::vector<int> hub_groups_of_tool(const ams_draw::SystemToolLayout& layout,
                                                   int physical_tool);
+
+/**
+ * @brief Whether the view of @p unit_index draws its path on to a toolhead
+ *
+ * The overview's own rule. With one nozzle or none, the overview joins every
+ * present unit to the one toolhead. With several, a unit the layout places on
+ * no nozzle (an unwired hub) feeds none, so its view ends at the hub. An absent
+ * box never feeds one. The all-units view (@p unit_index < 0) and an index past
+ * the system always do.
+ */
+[[nodiscard]] bool unit_feeds_toolhead(const helix::AmsSystemInfo& info,
+                                       const helix::AmsBackend* backend, int unit_index);
 
 } // namespace helix::ui

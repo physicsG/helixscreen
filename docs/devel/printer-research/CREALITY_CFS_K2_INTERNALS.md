@@ -90,7 +90,7 @@ Everything from here to "Disconnected Units" describes the **stock** schema. The
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `state` | string | Connection state: `"connect"`, `"None"` |
+| `state` | string | Bus state: `"None"` at Klipper startup, then `"disconnect"` while no unit answers and `"connect"` once one does. A K2 with a CFS reads `"disconnect"` for about 30 s at every boot; see [Boot sequence and the address table](#boot-sequence-and-the-address-table) |
 | `filament` | int | Filament loaded flag (1 = loaded) |
 | `enable` | int | CFS enabled for printing |
 | `auto_refill` | int | Auto-refill (backup spool) enabled |
@@ -117,7 +117,7 @@ Each CFS unit (T1=unit 1, T2=unit 2, etc.) has:
 | `remain_len` | array[4] | `["35","57","52","52"]` | Remaining filament length (meters) per slot |
 | `color_value` | array[4] | `["0000000","0FFFFFF","00A2989","0C12E1F"]` | Filament color hex per slot |
 | `material_type` | array[4] | `["101001","101001","101001","101001"]` | Material type code per slot |
-| `uuid` | array | ints | RFID UUID bytes |
+| `uuid` | array \| `"None"` | `[19, 103]` | Per **unit**, not per slot (the example frame these rows come from carries two ints for a four-bay unit; `"None"` on a disconnected unit). Meaning unconfirmed; HelixScreen does not read it |
 | `change_color_num` | array[4] | `["-1","-1","-1","-1"]` | Color change count per slot |
 
 #### Slot Addressing
@@ -154,9 +154,60 @@ Colors are 7-character hex strings with a leading `0`: `"0RRGGBB"`. Examples:
 - `"00A2989"` = teal
 - `"0C12E1F"` = orange-red
 
+#### RFID tags
+
+A tagged bay's `vender` entry is the tag's whole 40-character record, not just a vendor code. Two reads from two independent stock Creality Hyper PLA spools, split by field: a white one on a K2 Pro (debug bundle, 2026-10-22) and an orange one on our K2 Plus:
+
+| Chars | White (K2 Pro) | Orange (K2 Plus) | Field |
+|-------|----------------|------------------|-------|
+| 1-5 | `BB525` | `3C525` | Production date |
+| 6-9 | `0276` | `0276` | Supplier (Creality) |
+| 10-11 | `A2` | `A2` | Batch |
+| 12-17 | `101001` | `101001` | Material code, the same value as the bay's `material_type` |
+| 18-24 | `0FFFFFF` | `0C12E1F` | Color, the same value as the bay's `color_value` |
+| 25-28 | `0165` | `0165` | Length |
+| 29-34 | `000001` | `000001` | Serial number |
+| 35-40 | `000000` | `000000` | Reserved |
+
+Whole records: `BB5250276A21010010FFFFFF0165000001000000` and `3C5250276A21010010C12E1F0165000001000000`. Both stock spools carry serial `000001`, the same value CFTag uses as its default.
+
+The material and color fields lining up with the bay's own `material_type` and `color_value` is what pins the offsets; the other field names follow Creality's tag layout and are not otherwise verified. `"unknown"` means a spool with no tag, `"none"` an empty bay.
+
+So the serial and reserved fields do reach Klipper's `box` object, and every Moonraker client can read them. The firmware also stores each bay's tag data in material_box_info.json on the printer (`serialNum` per slot), which tools such as CFSync read over SSH. Third-party tag writers put a Spoolman spool id in the serial field: CFTag ([koen01/cftag](https://github.com/koen01/cftag), `GetSpoolmanSerialNum()` in MainActivity.java) writes `String.format("%06d", id)` for ids 1 to 999999, and its default serial (`def_ser` in strings.xml) is `000001` with reserve `000000`. A stock spool's serial is `000001` too, so a serial that parses as a number is not by itself a Spoolman id, and 1 never is.
+
+- **Reading** is `BOX_GET_RFID` / `BOX_INFO_REFRESH` (see [Refresh Spool Info](#refresh-spool-info)); the RS-485 command set names an RFID read and no write.
+- **Writing a tag:** the printer has no known command for it, in the G-code list above or on the serial link as documented here. Tags are written off the printer, e.g. with a phone. `BOX_MODIFY_TN_DATA` edits the box's record of a bay, not the tag.
+- **Open question:** whether the CFS writes consumption (remaining length) back to a stock tag. Not verified either way.
+- HelixScreen uses `material_type|color_value` as each bay's swap fingerprint (`FILAMENT_BACKEND_CFS.md`, "Swap detection"); the serial stays out of it. It reads the serial only as a Spoolman spool id (`FILAMENT_BACKEND_CFS.md`, "Spoolman link").
+
 #### Disconnected Units
 
 Units that are not connected report all fields as `"None"` or `"-1"`.
+
+#### Boot sequence and the address table
+
+Measured on a K2 Plus with one CFS, polling `box` every 0.2 s across a reboot (#1933),
+times from Klipper's `webhooks` reaching `ready`:
+
+| Time | `box.state` | Units |
+|------|-------------|-------|
+| startup (-3 s) | `"None"` | all `"None"`, `sn` `"-1"`, `uuid` `"None"` |
+| ready (0 s) | `"None"` | all `"None"` |
+| +7 s | `"disconnect"` | all `"None"` |
+| +38 s | `"disconnect"` | `T1` `"connect"`, `sn` and `uuid` filled |
+| +39 s | `"connect"` | `T1` `"connect"` |
+
+So for about 30 s a K2 with a CFS publishes exactly the frame a K2 without one does
+(`"disconnect"`, every address `"None"`, debug bundle on #1904): the frames alone cannot
+tell them apart. RS-485 discovery (`auto_addr`) is what ends the window.
+
+What does tell them apart is persisted: discovery saves the uuid of each address it
+assigns in printer.cfg's SAVE_CONFIG block, readable at boot through Moonraker as
+`configfile.settings.auto_addr.mb_addr_table_uniids`. On the machine above it reads
+`[[19, 103, 59, 72, 36, 34, 176, 3, 54, 53, 52, 52], [0], [0], [0]]`: one entry per
+address, `[0]` for an empty one, and entry 1 equals `T1.uuid` once the unit answers. It
+records the units last saved, not the units on the bus now, so a CFS unplugged since keeps
+its entry.
 
 ### Community Kalico port
 
@@ -374,7 +425,7 @@ These are the **stock K2** commands (`CfsMacroVariant::K2`). Two other dialects 
 | Command | Description |
 |---------|-------------|
 | `BOX_ENABLE_CFS_PRINT ENABLE={0\|1}` | Enable/disable CFS for printing |
-| `BOX_ENABLE_AUTO_REFILL ENABLE={0\|1}` | **Setter, not a toggle.** The handler reads an int via `gcmd.get_int`, so it sets auto-refill on or off rather than flipping it. **Parameter spelling RECOVERED** (2026-08-17): Creality's own master-server sends `BOX_ENABLE_AUTO_REFILL ENABLE=1` / `ENABLE=0` — present in the string tables of both OTA images (K1 `CR4CU220812S11_ota_img_V2.3.5.34.img`, K2 Plus `CR0CN240110C10_ota_img_V1.1.4.11.img`). HelixScreen's `toggle_auto_refill` device action sends the switch's value as the explicit argument (with no value, the inverse of the cached flag). |
+| `BOX_ENABLE_AUTO_REFILL ENABLE={0\|1}` | **Setter, not a toggle.** The handler reads an int via `gcmd.get_int`, so it sets auto-refill on or off rather than flipping it. **Parameter spelling RECOVERED** (2026-08-17): Creality's own master-server sends `BOX_ENABLE_AUTO_REFILL ENABLE=1` / `ENABLE=0` — present in the string tables of both OTA images (K1 `CR4CU220812S11_ota_img_V2.3.5.34.img`, K2 Plus `CR0CN240110C10_ota_img_V1.1.4.11.img`). HelixScreen's Endless Spool switch sends the switch's value as the explicit argument. |
 | `BOX_SET_BOX_MODE` | Set CFS operating mode |
 | `BOX_SET_TEMP` | Set extrusion temperature |
 | `BOX_SET_PRE_LOADING ADDR={n} NUM={n} ACTION=RUN` | Pre-load filament |

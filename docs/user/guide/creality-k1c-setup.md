@@ -2,6 +2,8 @@
 
 Get HelixScreen running on your Creality K1C (also works for K1 and K1 Max).
 
+> **Easy installer:** on a K1 that already runs Simple AF or is rooted, the [HelixScreen easy installer](https://helixscreen.org/installer/) can update HelixScreen from a desktop app. First installs on stock firmware are still done by hand with this guide; see [K1 series](install-k1.md).
+
 **Time required:** ~20 minutes
 
 ---

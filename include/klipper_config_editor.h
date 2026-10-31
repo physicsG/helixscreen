@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
+
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <map>
@@ -14,7 +17,12 @@
 #include <string>
 #include <vector>
 
+#include "hv/json.hpp"
+
+namespace helix {
 class IMoonrakerAPI;
+enum class PluginFeatureState;
+} // namespace helix
 struct MoonrakerError;
 
 namespace helix::system {
@@ -62,8 +70,73 @@ struct ConfigEdit {
 /// empty list is false — it asserts nothing about any section.
 bool all_add_key(const std::vector<ConfigEdit>& edits);
 
+/// The config-root directory HelixScreen's config backups live in, each at its
+/// file's own relative path. Klipper's include globs never match a dot
+/// directory, so no [include dir/*] reads a backup as config.
+inline constexpr const char* kConfigBackupDir = ".helix_backups";
+
+/// Where the file-API path backs config file @p file up:
+/// .helix_backups/<file>.helix_backup.
+std::string config_backup_path(const std::string& file);
+
+/// The config file a config_backup_path() names; nullopt for any other path.
+std::optional<std::string> config_backup_original(const std::string& path);
+
+/// The file a file-API edit list for @p section goes to: the file of the
+/// section's last definition in @p section_map, else the root (printer.cfg)
+/// when no file defines the section and every edit is ADD_KEY. An ADD_KEY of
+/// an option only the root's SAVE_CONFIG block defines also goes to the root:
+/// Klipper's SAVE_CONFIG comments out a root definition of an option it saves,
+/// but refuses one in an included file. Empty when no file can take the list.
+std::string config_edit_target_file(const std::map<std::string, SectionLocation>& section_map,
+                                    const std::string& root_content, const std::string& section,
+                                    const std::vector<ConfigEdit>& edits);
+
+/// The HelixPrint plugin feature that reads and writes the config
+/// (server.helix.config / server.helix.config_edit), and the contract this
+/// editor speaks.
+inline constexpr const char* kConfigEditFeature = "config_edit";
+inline constexpr int kConfigEditFeatureMinVersion = 1;
+
+/// Who writes a config edit: the plugin, atomically and in the file and line
+/// that define each option, or the screen over Moonraker's file API.
+enum class ConfigEditRoute { Plugin, FileApi };
+
+/// The route for plugin_feature(kConfigEditFeature, kConfigEditFeatureMinVersion).
+ConfigEditRoute config_edit_route(PluginFeatureState state);
+
+/// What the plugin path makes of an edit list, given the plugin's read of the
+/// section (a server.helix.config result).
+struct PluginConfigEditPlan {
+    enum class Kind {
+        Edits,   ///< send `edits` to server.helix.config_edit
+        FileApi, ///< an option lives in the SAVE_CONFIG block: the file path serves it
+        Error,   ///< the list cannot apply; `error` says why
+    };
+    Kind kind = Kind::Error;
+    nlohmann::json edits = nlohmann::json::array();
+    std::string error;
+};
+
+/// The server.helix.config_edit edit list for @p edits on @p section, each
+/// carrying the value it expects to replace, read from @p config. Mirrors
+/// apply_edits(): SET_VALUE needs the key, ADD_KEY sets or adds, REMOVE_KEY of
+/// an absent key is skipped, and only an all-ADD_KEY list may create a section.
+PluginConfigEditPlan plan_plugin_config_edits(const std::string& section,
+                                              const std::vector<ConfigEdit>& edits,
+                                              const nlohmann::json& config);
+
+/// The backups a server.helix.config_edit result names, as
+/// (backup path, file path) pairs relative to the config root.
+std::vector<std::pair<std::string, std::string>>
+plugin_config_edit_backups(const nlohmann::json& result);
+
 class KlipperConfigEditor {
   public:
+    using FeatureStateSource = helix::SharedCallback<PluginFeatureState()>;
+
+    KlipperConfigEditor();
+
     /// Cancels any in-flight FIRMWARE_RESTART health monitor and waits for it to
     /// unwind. The monitor polls on an HttpExecutor::fast() worker while holding
     /// `this` and the IMoonrakerAPI by reference, and this editor is a member of
@@ -72,9 +145,9 @@ class KlipperConfigEditor {
     /// workers stop. Without this join the monitor keeps polling a freed editor.
     ~KlipperConfigEditor();
 
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const std::string& error)>;
-    using SectionMapCallback = std::function<void(std::map<std::string, SectionLocation>)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const std::string& error)>;
+    using SectionMapCallback = helix::SharedCallback<void(std::map<std::string, SectionLocation>)>;
 
     static ConfigStructure parse_structure(const std::string& content);
 
@@ -129,14 +202,14 @@ class KlipperConfigEditor {
                     const std::string& new_value, SuccessCallback on_success,
                     ErrorCallback on_error);
 
-    /// Create backup of a config file (file.cfg -> file.cfg.helix_backup)
+    /// Create backup of a config file at config_backup_path()
     void backup_file(IMoonrakerAPI& api, const std::string& file_path, SuccessCallback on_success,
                      ErrorCallback on_error);
 
-    /// Restore all .helix_backup files to their original names
+    /// Copy every config_backup_path() backup back over its file
     void restore_backups(IMoonrakerAPI& api, SuccessCallback on_complete, ErrorCallback on_error);
 
-    /// Delete all .helix_backup files (cleanup after successful edit)
+    /// Delete every config_backup_path() backup (cleanup after successful edit)
     void cleanup_backups(IMoonrakerAPI& api, SuccessCallback on_complete);
 
     /// Get cached section map from last load_config_files() call
@@ -144,6 +217,17 @@ class KlipperConfigEditor {
 
     /// Get cached file content by path
     std::optional<std::string> get_cached_file(const std::string& path) const;
+
+    /// Where the editor reads the config_edit feature's state. The default
+    /// reads PrinterState, which only the main thread may do: from any other
+    /// thread it answers Absent.
+    void set_feature_state_source(FeatureStateSource source);
+
+    /// How often the FIRMWARE_RESTART health monitor checks the connection and
+    /// the cancel flag. A monitor already running keeps the interval it started with.
+    void set_restart_poll_interval(std::chrono::milliseconds interval) {
+        restart_poll_interval_ = interval;
+    }
 
     /// Perform a safe config edit: edit value, restart firmware, monitor health.
     /// If Klipper fails to restart within the timeout, auto-restore backups
@@ -167,11 +251,54 @@ class KlipperConfigEditor {
 
     /// Safe multi-edit: load config, apply edits, backup, upload, restart, monitor health.
     /// If Klipper fails to restart, auto-restore backups.
+    /// With the plugin's config_edit feature ready, the plugin writes the edits
+    /// instead (config_edit_route()), and the restart and revert are the same.
+    /// Call safe_multi_edit() and safe_edit_value() from the main thread.
     void safe_multi_edit(IMoonrakerAPI& api, const std::string& section,
                          const std::vector<ConfigEdit>& edits, SuccessCallback on_success,
                          ErrorCallback on_error, int restart_timeout_ms = 15000);
 
   private:
+    /// How a restart that Klipper does not survive is undone, and what a
+    /// restart it survives cleans up.
+    struct RestartRecovery {
+        helix::SharedCallback<void(IMoonrakerAPI&, SuccessCallback, ErrorCallback)> restore;
+        helix::SharedCallback<void(IMoonrakerAPI&, SuccessCallback)> cleanup;
+    };
+
+    /// The file-API route: load, apply, back up, upload, then restart.
+    void file_api_multi_edit(IMoonrakerAPI& api, const std::string& section,
+                             const std::vector<ConfigEdit>& edits, SuccessCallback on_success,
+                             ErrorCallback on_error, int restart_timeout_ms);
+
+    /// The plugin route: read the section, write through
+    /// server.helix.config_edit, then restart. Falls back to the file route
+    /// when the plugin cannot serve the list.
+    void plugin_multi_edit(IMoonrakerAPI& api, const std::string& section,
+                           const std::vector<ConfigEdit>& edits, SuccessCallback on_success,
+                           ErrorCallback on_error, int restart_timeout_ms);
+
+    /// Send FIRMWARE_RESTART and watch Klipper come back; @p recovery undoes
+    /// the edit when it does not within @p restart_timeout_ms.
+    void restart_and_monitor(IMoonrakerAPI& api, RestartRecovery recovery,
+                             SuccessCallback on_success, ErrorCallback on_error,
+                             int restart_timeout_ms);
+
+    ConfigEditRoute route() const;
+
+    /// Undo by copying each .helix_backup over its file; clean up by deleting them.
+    RestartRecovery file_api_recovery();
+
+    /// Copy each (backup, file) pair the plugin reported back over its file.
+    static void
+    restore_plugin_backups(IMoonrakerAPI& api,
+                           const std::vector<std::pair<std::string, std::string>>& backups,
+                           SuccessCallback on_complete, ErrorCallback on_error);
+
+    FeatureStateSource feature_state_source_;
+
+    std::chrono::milliseconds restart_poll_interval_{500};
+
     /// Remember a freshly submitted health monitor so the destructor can wait
     /// for it, and drop the futures of monitors that have already finished.
     void track_restart_monitor(std::future<void> monitor);

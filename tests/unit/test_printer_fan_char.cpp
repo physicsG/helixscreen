@@ -1032,6 +1032,55 @@ TEST_CASE("Fan role config: display name overrides from configured roles",
     }
 }
 
+TEST_CASE("Fan labels: every role at every length", "[fan][fan_labels]") {
+    struct Row {
+        FanRole role;
+        const char* chip;
+        const char* word;
+        const char* full;
+    };
+    const Row rows[] = {
+        {FanRole::Part, "Part", "Part", "Part Fan"},
+        {FanRole::Hotend, "HE", "Hotend", "Hotend Fan"},
+        {FanRole::Chamber, "Chamber", "Chamber", "Chamber Fan"},
+        {FanRole::Exhaust, "Exhaust", "Exhaust", "Exhaust Fan"},
+        {FanRole::Aux, "Aux", "Aux", "Aux Fan"},
+    };
+    for (const Row& row : rows) {
+        CAPTURE(static_cast<int>(row.role));
+        CHECK(std::string(fan_role_label(row.role, FanLabelLength::Chip)) == row.chip);
+        CHECK(std::string(fan_role_label(row.role, FanLabelLength::Word)) == row.word);
+        CHECK(std::string(fan_role_label(row.role, FanLabelLength::Full)) == row.full);
+    }
+}
+
+TEST_CASE("Fan labels: a type pill reads as the role its type fills", "[fan][fan_labels]") {
+    CHECK(std::string(fan_type_label(FanType::PART_COOLING)) == "Part");
+    CHECK(std::string(fan_type_label(FanType::HEATER_FAN)) == "HE");
+    CHECK(std::string(fan_type_label(FanType::CONTROLLER_FAN)) == "Controller");
+    CHECK(std::string(fan_type_label(FanType::TEMPERATURE_FAN)) == "Temp");
+    CHECK(std::string(fan_type_label(FanType::GENERIC_FAN)) == "Generic");
+    CHECK(std::string(fan_type_label(FanType::OUTPUT_PIN_FAN)) == "Output Pin");
+}
+
+TEST_CASE("Fan role config: a configured aux fan is named by its role",
+          "[fan][role_config][display_name]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    helix::FanRoleConfig roles;
+    roles.aux_fan = "fan_generic nevermore";
+    state.fan_state().init_fans({"fan", "fan_generic nevermore"}, roles);
+
+    const auto& fans = state.fan_state().get_fans();
+    REQUIRE(fans.size() == 2);
+    CHECK(fans[0].display_name == "Part Cooling Fan");
+    CHECK(fans[1].display_name == "Aux Fan");
+}
+
 TEST_CASE("Fan role config: empty roles uses default behavior", "[fan][role_config]") {
     lv_init_safe();
 

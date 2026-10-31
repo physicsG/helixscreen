@@ -37,24 +37,28 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import DateRangePicker from '@/components/DateRangePicker.vue'
 import { useFiltersStore } from '@/stores/filters'
 import { api } from '@/services/api'
+import type { DashFilterKey } from '@/utils/urlState'
 
 const filtersStore = useFiltersStore()
 
 const platformOptions = ref<string[]>([])
 const versionOptions = ref<string[]>([])
 const modelOptions = ref<string[]>([])
+const boardOptions = ref<string[]>([])
 const openDropdown = ref<string | null>(null)
 
 const filters = computed(() => [
   { key: 'platform', label: 'Platform', options: platformOptions.value, selected: filtersStore.platform },
   { key: 'version', label: 'Version', options: versionOptions.value, selected: filtersStore.version },
-  { key: 'model', label: 'Model', options: modelOptions.value, selected: filtersStore.model }
+  { key: 'model', label: 'Model', options: modelOptions.value, selected: filtersStore.model },
+  { key: 'board', label: 'Board', options: boardOptions.value, selected: filtersStore.board }
 ])
 
 const hasActiveFilters = computed(() =>
   filtersStore.platform.length > 0 ||
   filtersStore.version.length > 0 ||
-  filtersStore.model.length > 0
+  filtersStore.model.length > 0 ||
+  filtersStore.board.length > 0
 )
 
 function toggleDropdown(key: string) {
@@ -63,7 +67,7 @@ function toggleDropdown(key: string) {
 
 function toggleOption(key: string, value: string) {
   const store = filtersStore
-  const current = [...store[key as 'platform' | 'version' | 'model']]
+  const current = [...store[key as DashFilterKey]]
   const idx = current.indexOf(value)
   if (idx >= 0) {
     current.splice(idx, 1)
@@ -73,6 +77,7 @@ function toggleOption(key: string, value: string) {
   if (key === 'platform') store.setPlatform(current)
   else if (key === 'version') store.setVersion(current)
   else if (key === 'model') store.setModel(current)
+  else if (key === 'board') store.setBoard(current)
 }
 
 function handleClickOutside(e: MouseEvent) {
@@ -89,6 +94,7 @@ onMounted(async () => {
     platformOptions.value = data.platforms.map(p => p.name)
     versionOptions.value = data.versions.map(v => v.name)
     modelOptions.value = data.printer_models.map(m => m.name)
+    boardOptions.value = data.boards.map(b => b.name)
   } catch {
     // Options will remain empty
   }

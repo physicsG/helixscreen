@@ -49,9 +49,11 @@ hook_cache_dir() {
     # of the same fact drifting on its own.
     local from_hook
     from_hook="$(hook_cache_dir cc1)"
-    run grep -A8 'defined(HELIX_PLATFORM_CC1)' "$CACHE_DIR_CPP"
+    # The rung is the state root; board_cache_candidates() appends /cache/<subdir>.
+    local root="${from_hook%/cache}"
+    run grep -A8 'case board::Board::Cc1:' "$CACHE_DIR_CPP"
     [ "$status" -eq 0 ] || fail "no CC1 rung in helix_cache_dir.cpp"
-    contains "$from_hook" "$output"
+    contains "$root" "$output"
 }
 
 @test "cc1 log and cache both land on the same writable partition" {

@@ -8,6 +8,7 @@
 #include "async_lifetime_guard.h"
 #include "lvgl/lvgl.h"
 #include "moonraker_job_api.h"
+#include "printer_recovery_service.h"
 #include "printer_state.h"
 #include "subject_managed_panel.h"
 
@@ -15,9 +16,8 @@
 #include <mutex>
 #include <string>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 /**
  * @brief Smart print cancellation manager with progressive escalation
@@ -128,8 +128,16 @@ class AbortManager {
      * - Resolves HeaterInterruptSupport from printer.info "app" field if UNKNOWN
      * - If SUPPORTED -> TRY_HEATER_INTERRUPT (soft interrupt for M109 waits)
      * - If UNSUPPORTED or UNKNOWN -> PROBE_QUEUE (skip heater interrupt)
+     *
+     * @p entry starts further in when the caller already knows what the queue
+     * is doing. Cancel sends printer.print.cancel at once: the caller has made
+     * the wait holding the queue end (or the firmware ends it on a cancel), so
+     * a probe would only stall behind it and escalate for nothing.
+     * EmergencyStop goes straight to M112 + FIRMWARE_RESTART, for a wait that
+     * nothing else ends; the caller confirms it with the user first.
      */
-    void start_abort();
+    enum class Entry { Probe, Cancel, EmergencyStop };
+    void start_abort(Entry entry = Entry::Probe);
 
     /**
      * @brief Check if abort is currently in progress
@@ -219,17 +227,24 @@ class AbortManager {
     // Timeout Constants (public for testing)
     // ========================================================================
 
-    static constexpr uint32_t HEATER_INTERRUPT_TIMEOUT_MS = 1000;                     ///< 1 second
-    static constexpr uint32_t PROBE_TIMEOUT_MS = 2000;                                ///< 2 seconds
-    static constexpr uint32_t CANCEL_TIMEOUT_MS = MoonrakerJobAPI::CANCEL_TIMEOUT_MS; ///< 5 minutes
-    static constexpr uint32_t CANCEL_NUDGE_MS = 15000; ///< 15 seconds
+    static constexpr uint32_t kHeaterInterruptTimeoutMs = 1000;                     ///< 1 second
+    static constexpr uint32_t kProbeTimeoutMs = 2000;                               ///< 2 seconds
+    static constexpr uint32_t kCancelTimeoutMs = MoonrakerJobAPI::kCancelTimeoutMs; ///< 5 minutes
+    static constexpr uint32_t kCancelNudgeMs = 15000;                               ///< 15 seconds
     /// Wait window for klippy_state to reach READY after the recovery service
     /// returns. The recovery service can take 30s+ on K2 (klipper_mcu bounce),
     /// but that's handled async — this timer only covers the gap between
     /// "script returned" and "klippy reports READY". 30s gives platforms with
     /// slow MCU re-enumeration (CFS rediscovery, RS-485 bus settle) enough
     /// headroom without leaving the user staring at "Restarting..." forever.
-    static constexpr uint32_t RECONNECT_TIMEOUT_MS = 30000; ///< 30 seconds
+    static constexpr uint32_t kReconnectTimeoutMs = 30000; ///< 30 seconds
+    /// Backstop for the recovery service itself. The chain's worst case is its
+    /// deadline (polling stops), plus a script started just before it running
+    /// to its bound, plus one poll interval and one printer.info request
+    /// timing out after that: 120s + 90s + 2s + 60s = 272s with the defaults.
+    /// This sits above that, so it fires only when the chain never reports back;
+    /// the static_assert in abort_manager.cpp keeps the two in step.
+    static constexpr uint32_t kRestartTimeoutMs = 300000; ///< 5 minutes
 
   private:
     friend class AbortManagerTestAccess;
@@ -286,6 +301,7 @@ class AbortManager {
     helix::ui::LvglTimerGuard probe_timer_;
     helix::ui::LvglTimerGuard cancel_timer_;
     helix::ui::LvglTimerGuard reconnect_timer_;
+    helix::ui::LvglTimerGuard restart_timer_;
 
     // Invalidated by start_abort(), so replies from an earlier sequence are dropped
     helix::AsyncLifetimeGuard lifetime_;
@@ -342,7 +358,7 @@ class AbortManager {
     void on_cancel_success();
     void on_cancel_timeout();
     void on_estop_sent();
-    void on_restart_sent();
+    void on_restart_sent(RecoveryOutcome outcome);
     void on_klippy_state_changed(KlippyState klippy_state);
 
     // ========================================================================
@@ -389,6 +405,7 @@ class AbortManager {
     static void probe_timer_cb(lv_timer_t* timer);
     static void cancel_timer_cb(lv_timer_t* timer);
     static void reconnect_timer_cb(lv_timer_t* timer);
+    static void restart_timer_cb(lv_timer_t* timer);
 };
 
 } // namespace helix

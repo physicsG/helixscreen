@@ -2,7 +2,7 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Devices Settings Overlay -->
-<!-- Hardware issues, camera, AMS, fans, sensors, LEDs, power devices, spoolman -->
+<!-- Hardware issues, camera, fans, sensors, LEDs, power devices, spoolman -->
 <component>
   <view name="settings_hardware_overlay" extends="overlay_panel" title="Devices" bg_color="#screen_bg">
     <!-- Content Area - no padding, rows handle their own -->
@@ -37,14 +37,13 @@
             <bind_flag_if_eq subject="platform_extras_available" flag="hidden" ref_value="0"/>
           </setting_action_row>
         </lv_obj>
-        <!-- ================================================================== -->
-        <!-- MULTI-FILAMENT MANAGEMENT (hidden if no AMS detected) -->
-        <!-- ================================================================== -->
-        <lv_obj name="container_ams_settings" width="100%" style_pad_all="0" scrollable="false">
-          <bind_flag_if_eq subject="ams_slot_count" flag="hidden" ref_value="0"/>
-          <setting_action_row name="row_ams_settings"
-                              label="Multi-Filament System Management" icon="filament"
-                              description="Quick actions, calibration, speed" callback="on_ams_settings_clicked"/>
+        <!-- PRINT PHOTOS: the plugin's photos feature, or this screen's own (hidden without a webcam) -->
+        <lv_obj name="container_print_photos" width="100%" height="content" style_pad_all="0" scrollable="false">
+          <bind_flag_if_eq subject="printer_has_webcam" flag="hidden" ref_value="0"/>
+          <plugin_feature_toggle_row name="row_print_photos"
+                                     feature="photos" label="Print photos" icon="image_area"
+                                     description="Saves a camera photo after layer 2 and when each print ends, shown in print history."
+                                     subject="plugin_feature_on_photos" callback="on_plugin_feature_switch_changed"/>
         </lv_obj>
         <!-- ================================================================== -->
         <!-- FANS (hidden until fans are discovered) -->
@@ -61,7 +60,7 @@
         <lv_obj name="container_filament_sensors" width="100%" style_pad_all="0" scrollable="false">
           <bind_flag_if_eq subject="filament_sensor_count" flag="hidden" ref_value="0"/>
           <setting_action_row name="row_filament_sensors"
-                              label="Sensors" icon="filament" description="Configure printer sensors"
+                              label="Sensors" icon="sensor" description="Configure printer sensors"
                               callback="on_filament_sensors_clicked"/>
         </lv_obj>
         <!-- ================================================================== -->
@@ -87,7 +86,7 @@
         <!-- SPOOLMAN -->
         <!-- ================================================================== -->
         <setting_action_row name="row_spoolman_settings"
-                            label="Spoolman" icon="database" description="Filament tracking &amp; label printing"
+                            label="Spoolman" icon="spoolman" description="Filament tracking &amp; label printing"
                             callback="on_spoolman_settings_clicked"/>
       </setting_group>
     </lv_obj>

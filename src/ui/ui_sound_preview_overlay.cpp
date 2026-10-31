@@ -38,7 +38,7 @@ std::string SoundPreviewOverlay::display_name(const std::string& sound_name) {
         {"nav_back", "Nav Back"},
         {"dropdown_open", "Dropdown"},
         {"print_complete", "Print Complete"},
-        {"print_cancelled", "Print Cancelled"},
+        {"print_cancelled", "Print Canceled"},
         {"error_alert", "Error Alert"},
         {"error_tone", "Error Tone"},
         {"alarm_urgent", "Alarm Urgent"},

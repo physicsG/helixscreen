@@ -20,6 +20,8 @@
   <api>
     <!-- Subject holding the formatted value text, e.g. "3000 mm/s²" -->
     <prop name="value_subject" type="string" default=""/>
+    <!-- Static value text, for a field whose owner sets it rather than binding it -->
+    <prop name="value" type="string" default=""/>
     <!-- Registered event callback fired on tap -->
     <prop name="callback" type="string" default=""/>
     <!-- Identifies which row was tapped, read via lv_event_get_user_data() -->
@@ -32,7 +34,7 @@
         style_pad_bottom="#space_xs" style_pad_gap="#space_xs" flex_flow="row" style_flex_cross_place="center"
         style_flex_main_place="end" clickable="true" scrollable="false">
     <style name="styles.press_wash" selector="pressed"/>
-    <text_body name="value" text="" bind_text="$value_subject" clickable="false" event_bubble="true"/>
+    <text_body name="value" text="$value" bind_text="$value_subject" clickable="false" event_bubble="true"/>
     <!-- Affordance: without it the field reads as a boxed label rather than
          something to press. Muted so it does not compete with the value. -->
     <icon src="pencil" size="xs" variant="muted" clickable="false" event_bubble="true"/>

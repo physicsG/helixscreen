@@ -331,12 +331,15 @@ PARALLEL and MIXED take the same shape with `plan_parallel` and `plan_mixed`
 (rows from `parallel_rows()`, MIXED from `compute_mixed_frame`), then draw the
 MIXED hub box and every toolhead glyph over the painted tubes. Their toolheads
 stand on a glyph-bottom line near the canvas bottom; the sensors and the hub
-sit fixed fractions of the run down to them.
+sit fixed fractions of the run down to them. A PARALLEL unit has no housing, so
+`ams_detail_sync_lane_entry()` hands the canvas the spools' flange bottom
+instead of a box front, and `parallel_rows()` hangs each tube's round cap from
+it whenever that leaves room above the sensor.
 
 Each toolhead carries its tool label as a corner badge (`ui_toolhead_badge.h`):
 the spool tool badge's look from the shared `ams_slot_tool_badge_*` tokens and
 `tool_badge_colors()`, in the glyph's lower-right corner for every nozzle style
-(`TOOLHEAD_BADGE_CORNER`), clear of the tube entering at the top center.
+(`kToolheadBadgeCorner`), clear of the tube entering at the top center.
 `toolhead_bounds()` gives each style's drawn extent. The overview uses the
 same badge.
 
@@ -379,8 +382,12 @@ the hub and buffer stack above the toolhead glyph (`glyph_top` is
 - **Bands.** Clamp bands replace the sensor dots: prep (per slot with a prep
   sensor), hub entry (HUB), output (hub bottom, not on-toolhead), bypass merge
   (bypass shown) and toolhead (whenever the unit reports a toolhead sensor,
-  `FilamentPathData::has_toolhead_sensor`). PARALLEL and MIXED lanes each get
-  one band at their sensor, read as `TOOLHEAD`. `band_state()`: Error on the active
+  `FilamentPathData::has_toolhead_sensor`). MIXED lanes each get one band at
+  their sensor, read as `TOOLHEAD`; PARALLEL lanes get it only when the unit
+  publishes a toolhead sensor, so a tool changer's tubes run unbanded. A PARALLEL lane whose backend
+  publishes an entry sensor (`slot_has_prep_sensor`) gets a second band three
+  tube gauges below its cap, read as `PREP`; the run between the two bands is
+  `LANE`, so filament only the entry sensor sees fills the tube to that band. `band_state()`: Error on the active
   route at the error segment, Active once triggered on the active route, Loaded
   (the lane's own filament color) once triggered off it, else Empty.
 - **Paint.** `coalesce()` joins adjacent painted segments with equal styles into
@@ -423,6 +430,10 @@ NOZZLE`.
 Per-slot render state (color, segment, mounted-ness, at-sensor, at-nozzle) is
 derived once into `SlotRenderStates` by `compute_slot_render_states()` and read
 by the topology bodies, so the same state isn't re-derived across phases.
+The active slot takes the system's filament segment over its own, except that
+a bare `SPOOL` (no strand in the path) never makes an empty slot look loaded:
+filament presence is the slot's own report, so an empty active lane draws no
+fill and no glow. Its toolhead still draws as mounted.
 
 ---
 
@@ -451,6 +462,17 @@ LINEAR/HUB stores the active route's filled prefix (`filled_prefix()`) in
 topology render. Hub/buffer/bypass phases record their drawn boxes
 into `hits`, and `filament_path_click_cb()` tests taps against those rects — the
 single source of truth, no geometry re-derivation.
+
+A PARALLEL tap goes through the pure `helix::ui::parallel_tap_at()`
+(`include/ui_filament_path_canvas.h`) over a `ParallelTapLayout` built from the same
+`parallel_rows()` and `toolhead_glyph_bounds()` the renderer draws with. Above the head
+glyph's top, and above the sensor row however tall the glyph is drawn, a tap is the lane's
+(tube or spool); below that it is a head's only inside the drawn glyph, and where
+neighbours overlap the nearest column answers. A lane tap reaches the slot callback. A head
+tap reaches the toolhead callback (`filament_path_canvas_set_toolhead_callback()`), or the
+slot callback when none is set. The AMS panel's toolhead callback offers a tool change and
+falls back to the slot menu for the mounted head or a slot mapped to no tool
+(`src/ui/ui_panel_ams.cpp#on_path_toolhead_clicked`).
 
 ### What invalidates what
 
@@ -588,6 +610,8 @@ use the LVGL test fixture.
 | `tests/unit/test_toolhead_badge.cpp` | `[toolhead_badge]` | Glyph bounds against drawn pixels per style; the badge corner clears the tube |
 | `tests/unit/test_system_path_plan.cpp` | `[system_path]` | The overview's plan: continuous unit routes, hub bands in all four states, dumb hubs, idle trunk, bypass merge, toolchanger routes |
 | `tests/unit/test_filament_path_canvas.cpp` | `[canvas][hit_test]`, `[filament-path][canvas]` | Hit-rect tests (hub box dead-center / argument order), SIZE_CHANGED handler |
+| `tests/unit/test_filament_path_parallel_tap.cpp` | `[filament-path][hit_test][toolhead_tap]` | A rendered PARALLEL canvas: a head tap reaches the toolhead callback (the slot callback when none is set), a tube tap the slot callback |
+| `tests/unit/test_ams_panel_toolhead_tap.cpp` | `[ams][path][hit_test]`, `[ams][path][toolhead_tap]` | `parallel_tap_at()` (glyph edges, tube above the glyph and sensor row, between columns, nearest column on overlap); the AMS panel's head tap asks or mounts, the mounted head opens the slot menu, busy is ignored, printing and spools on the bed refuse |
 
 ```bash
 ./build/bin/helix-tests "[filament-path]"

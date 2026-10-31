@@ -38,6 +38,12 @@
  *
  * When set_data is called with more points than max_points for the current tier,
  * the data is automatically downsampled while preserving frequency range endpoints.
+ * Downsampling picks points, so on BASIC a narrow peak can fall between picks.
+ *
+ * A non-finite amplitude is a gap: the built-in renderer skips it
+ * (LV_CHART_POINT_NONE) and the styled and muted passes stroke and fill only
+ * fr_chart_finite_runs(). Points are still placed by index, so a caller
+ * drawing a partial curve passes the full grid with NaN where it has no value.
  *
  * @see platform_capabilities.h for tier definitions
  * @see docs/INPUT_SHAPING_IMPLEMENTATION.md for design rationale
@@ -47,6 +53,8 @@
 #include "platform_capabilities.h"
 
 #include <cstddef>
+#include <string>
+#include <utility>
 #include <vector>
 
 // Forward declaration
@@ -177,6 +185,46 @@ void ui_frequency_response_chart_set_y_labels_visible(ui_frequency_response_char
                                                       bool visible);
 
 /**
+ * @brief Width of the amplitude-label gutter for @p font
+ *
+ * The widest label the gutter draws ("100%", "99.5k", "99.5m", "99.5u",
+ * "100e9"), never less than 36 px. The chart adds space_xs on top of it.
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+int32_t ui_frequency_response_chart_y_gutter_width(const lv_font_t* font);
+
+/**
+ * @brief The amplitude gutter's labels, top (amp_max) to bottom (amp_min) (pure)
+ *
+ * divisions + 1 labels at amp_max - i * (amp_max - amp_min) / divisions.
+ * Percent mode prints "%.0f%%". Otherwise one SI suffix for the whole axis,
+ * picked from the larger end's magnitude (e9, M, k, none, m, u), and the
+ * fewest decimals (0 to 2) that keep every label distinct; an exact 0 reads "0".
+ * {0, 0.022}: "22m", "16.5m", "11m", "5.5m", "0".
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] std::vector<std::string> fr_chart_amplitude_labels(float amp_min, float amp_max,
+                                                                 int divisions, bool percent);
+
+/**
+ * @brief Half the box each frequency label is centred in, for @p font
+ *
+ * Room for "100 Hz" on one line, never less than 32 px.
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+int32_t ui_frequency_response_chart_x_label_half_width(const lv_font_t* font);
+
+/**
+ * @brief Centre of a frequency label's box for a tick at @p tick_x
+ *
+ * The tick itself, moved in just enough that a box of @p half_w either side
+ * stays within [@p x_min, @p x_max]; the chart clips anything past its edges.
+ */
+// NAMESPACE_OK: matches this file's C-style chart API
+int32_t ui_frequency_response_chart_x_label_center(int32_t tick_x, int32_t half_w, int32_t x_min,
+                                                   int32_t x_max);
+
+/**
  * @brief Label the amplitude gridlines as percentages
  *
  * For callers that normalise their data to 0-100 and set the amplitude range
@@ -211,6 +259,11 @@ struct FrChartSeriesStyle {
     bool glow = false; ///< two wider, fainter strokes under the line
     bool fill = false; ///< vertical gradient from 35% of the series color to transparent
 };
+
+/// The measured curve's look on every chart that draws one, live and final:
+/// filled and glowing, so a live preview hands over to its CSV curve seamlessly.
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+inline constexpr FrChartSeriesStyle kFrMeasuredCurveStyle{3, true, true};
 
 /**
  * @brief What a tier may draw (pure)
@@ -286,6 +339,53 @@ void ui_frequency_response_chart_set_cursor(ui_frequency_response_chart_t* chart
  */
 // NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
 void ui_frequency_response_chart_clear_cursor(ui_frequency_response_chart_t* chart);
+
+/**
+ * @brief A run of consecutive finite amplitudes, [begin, end)
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+struct FrChartRun {
+    size_t begin = 0;
+    size_t end = 0;
+};
+
+/**
+ * @brief Where a series can be stroked (pure)
+ *
+ * Every maximal run of finite values at least two points long, in order. A
+ * non-finite amplitude is a gap: no segment or fill touches it, and a lone
+ * finite point between two gaps draws nothing.
+ * {1, 2, NaN, 3, 4, 5, NaN} -> {[0,2), [3,6)}.
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] std::vector<FrChartRun> fr_chart_finite_runs(const float* amps, size_t count);
+
+/// Fill opacity right under the curve; it fades linearly to transparent at the
+/// plot bottom.
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+inline constexpr lv_opa_t kFrFillTopOpa = 90;
+
+/// Gradient start opacities for one segment's two fill triangles: @c first is
+/// (top_a, top_b, bottom under a), whose top row is the segment's higher point;
+/// @c second is (top_b, bottom under b, bottom under a), whose top row is top_b.
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+struct FrFillSegmentOpa {
+    lv_opa_t first;
+    lv_opa_t second;
+};
+
+/**
+ * @brief Fill gradient for one curve segment, top rows @p top_a_y / @p top_b_y (pure)
+ *
+ * The tint follows the curve: kFrFillTopOpa at the segment's higher point,
+ * however low on the plot that is, fading to 0 at @p bottom_y. LVGL spans a
+ * triangle's vertical gradient over that triangle's own bounding box, so the
+ * lower-topped triangle starts at the ramp's value for its top row and both
+ * triangles shade every row they share alike.
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] FrFillSegmentOpa fr_chart_fill_segment_opa(int32_t top_a_y, int32_t top_b_y,
+                                                         int32_t bottom_y);
 
 // ============================================================================
 // Data Management
@@ -396,6 +496,13 @@ void ui_frequency_response_chart_set_freq_range(ui_frequency_response_chart_t* c
                                                 float max);
 
 /**
+ * @brief The frequency axis range last set, as {min, max} ({0, 0} for null)
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] std::pair<float, float>
+ui_frequency_response_chart_get_freq_range(ui_frequency_response_chart_t* chart);
+
+/**
  * @brief Set the amplitude axis range
  *
  * @param chart Chart instance
@@ -404,6 +511,13 @@ void ui_frequency_response_chart_set_freq_range(ui_frequency_response_chart_t* c
  */
 void ui_frequency_response_chart_set_amplitude_range(ui_frequency_response_chart_t* chart,
                                                      float min, float max);
+
+/**
+ * @brief The amplitude axis range last set, as {min, max} ({0, 0} for null)
+ */
+// NAMESPACE_OK: joins this header's global ui_frequency_response_chart_* API
+[[nodiscard]] std::pair<float, float>
+ui_frequency_response_chart_get_amplitude_range(ui_frequency_response_chart_t* chart);
 
 /**
  * @brief Get the underlying LVGL object

@@ -8,7 +8,7 @@
 //             segments and couples the flow particles on/off
 //   error     infinite opacity pulse on the segment that reported an error
 //   heat      infinite opacity pulse for the nozzle heat glow halo
-//   flow      infinite linear 0→FLOW_DOT_SPACING cycle moving the particles
+//   flow      infinite linear 0→kFlowDotSpacing cycle moving the particles
 //   output_x  one-shot slide of the LINEAR output exit under the active slot
 //
 // All systems share run_anim() (the lv_anim boilerplate) and write only their
@@ -76,7 +76,7 @@ void segment_anim_cb(void* var, int32_t value) {
         // may not fire again after the final step.
         if (data->anim.flow_active) {
             int seg = data->filament_segment;
-            bool is_terminal = (seg == 0 || seg == PATH_SEGMENT_COUNT - 1);
+            bool is_terminal = (seg == 0 || seg == kPathSegmentCount - 1);
             if (is_terminal) {
                 stop_flow_animation(obj, data);
             }
@@ -168,7 +168,7 @@ void start_segment_animation(lv_obj_t* obj, FilamentPathData* data, int from_seg
         return;
     }
 
-    run_anim(obj, segment_anim_cb, 0, 100, SEGMENT_ANIM_DURATION_MS, lv_anim_path_ease_out,
+    run_anim(obj, segment_anim_cb, 0, 100, kSegmentAnimDurationMs, lv_anim_path_ease_out,
              /*infinite=*/false, /*playback=*/false);
 
     // Start flow particles only for real filament movement (small steps).
@@ -203,7 +203,7 @@ void start_error_pulse(lv_obj_t* obj, FilamentPathData* data) {
         return;
 
     data->anim.error_pulse_active = true;
-    data->anim.error_pulse_opa = ERROR_PULSE_OPA_MAX;
+    data->anim.error_pulse_opa = kErrorPulseOpaMax;
 
     // Skip animation if disabled - just show static error state
     if (!animations_enabled()) {
@@ -212,8 +212,8 @@ void start_error_pulse(lv_obj_t* obj, FilamentPathData* data) {
         return;
     }
 
-    run_anim(obj, error_pulse_anim_cb, ERROR_PULSE_OPA_MIN, ERROR_PULSE_OPA_MAX,
-             ERROR_PULSE_DURATION_MS, lv_anim_path_ease_in_out, /*infinite=*/true,
+    run_anim(obj, error_pulse_anim_cb, kErrorPulseOpaMin, kErrorPulseOpaMax, kErrorPulseDurationMs,
+             lv_anim_path_ease_in_out, /*infinite=*/true,
              /*playback=*/true);
 
     spdlog::trace("[FilamentPath] Started error pulse animation");
@@ -237,7 +237,7 @@ void start_heat_pulse(lv_obj_t* obj, FilamentPathData* data) {
         return;
 
     data->anim.heat_pulse_active = true;
-    data->anim.heat_pulse_opa = HEAT_PULSE_OPA_MAX;
+    data->anim.heat_pulse_opa = kHeatPulseOpaMax;
 
     // Skip animation if disabled - just show static heat state
     if (!animations_enabled()) {
@@ -246,8 +246,8 @@ void start_heat_pulse(lv_obj_t* obj, FilamentPathData* data) {
         return;
     }
 
-    run_anim(obj, heat_pulse_anim_cb, HEAT_PULSE_OPA_MIN, HEAT_PULSE_OPA_MAX,
-             HEAT_PULSE_DURATION_MS, lv_anim_path_ease_in_out, /*infinite=*/true,
+    run_anim(obj, heat_pulse_anim_cb, kHeatPulseOpaMin, kHeatPulseOpaMax, kHeatPulseDurationMs,
+             lv_anim_path_ease_in_out, /*infinite=*/true,
              /*playback=*/true);
 
     spdlog::trace("[FilamentPath] Started heat pulse animation");
@@ -276,7 +276,7 @@ void start_flow_animation(lv_obj_t* obj, FilamentPathData* data) {
     data->anim.flow_offset = 0;
     spdlog::info("[FilamentPath] Flow animation STARTED");
 
-    run_anim(obj, flow_anim_cb, 0, FLOW_DOT_SPACING, FLOW_ANIM_DURATION_MS, lv_anim_path_linear,
+    run_anim(obj, flow_anim_cb, 0, kFlowDotSpacing, kFlowAnimDurationMs, lv_anim_path_linear,
              /*infinite=*/true, /*playback=*/false);
 }
 
@@ -320,7 +320,7 @@ void start_output_x_animation(lv_obj_t* obj, FilamentPathData* data, int32_t fro
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, obj);
     lv_anim_set_values(&anim, from_x, to_x);
-    lv_anim_set_duration(&anim, OUTPUT_X_ANIM_DURATION_MS);
+    lv_anim_set_duration(&anim, kOutputXAnimDurationMs);
     lv_anim_set_exec_cb(&anim, output_x_anim_cb);
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
     lv_anim_set_completed_cb(&anim, [](lv_anim_t* a) {

@@ -6,17 +6,21 @@
 #include "ui_exclude_mode_controller.h"
 #include "ui_filament_mapping_card.h"
 #include "ui_observer_guard.h"
+#include "ui_plugin_items_menu.h"
 #include "ui_pre_print_options_renderer.h"
 #include "ui_print_preparation_manager.h"
 
 #include "ams_remap.h"
 #include "gcode_footer_summary.h"
 #include "gcode_preview_fetcher.h"
+#include "helix_shared_callback.h"
 #include "moonraker_types.h"
 #include "overlay_base.h"
 #include "preflight_validator.h"
 #include "print_file_data.h" // For FileHistoryStatus
+#include "print_start_inputs.h"
 #include "printer_excluded_objects_state.h"
+#include "queued_job_options.h"
 #include "subject_managed_panel.h"
 #include "tools_used_cache.h"
 
@@ -29,7 +33,9 @@
 #include <string>
 
 // Forward declarations
+namespace helix {
 class IMoonrakerAPI;
+}
 class PrintSelectDetailViewTestAccess; // NAMESPACE_OK: test seam befriended below, defined in the
                                        // unit test
 namespace helix {
@@ -67,7 +73,7 @@ namespace helix::ui {
 /**
  * @brief Callback when delete is confirmed
  */
-using DeleteConfirmedCallback = std::function<void()>;
+using DeleteConfirmedCallback = helix::SharedCallback<void()>;
 
 /**
  * @brief Detail view overlay manager
@@ -173,7 +179,7 @@ class PrintSelectDetailView : public OverlayBase {
      * The tap is only offered when current_remap_block() answers None, which
      * also drives the chevron and the card's clickable flag.
      */
-    void set_on_remap_requested(std::function<void()> callback) {
+    void set_on_remap_requested(helix::SharedCallback<void()> callback) {
         on_remap_requested_ = std::move(callback);
     }
 
@@ -184,7 +190,7 @@ class PrintSelectDetailView : public OverlayBase {
      * panel to the plugin install modal, so a card that refuses a remap offers
      * the one action that would make it work instead of dead-ending.
      */
-    void set_on_plugin_setup_requested(std::function<void()> callback) {
+    void set_on_plugin_setup_requested(helix::SharedCallback<void()> callback) {
         on_plugin_setup_requested_ = std::move(callback);
     }
 
@@ -197,7 +203,7 @@ class PrintSelectDetailView : public OverlayBase {
      * panel wires its back-out bookkeeping (a pending queued start) here so
      * those paths cannot miss it.
      */
-    void set_on_dismissed(std::function<void()> callback) {
+    void set_on_dismissed(helix::SharedCallback<void()> callback) {
         on_dismissed_cb_ = std::move(callback);
     }
 
@@ -206,6 +212,16 @@ class PrintSelectDetailView : public OverlayBase {
     void set_on_macro_analysis(MacroAnalysisCallback callback) {
         on_macro_analysis_cb_ = std::move(callback);
     }
+
+    /// Set callback fired when file_check_pending() may have changed: the
+    /// shown file's scan was asked for or answered, or an option row changed.
+    void set_on_print_readiness_changed(helix::SharedCallback<void()> callback) {
+        on_print_readiness_changed_cb_ = std::move(callback);
+    }
+
+    /// Print waits on the shown file's scan: it is still reading, and an
+    /// option as now set needs it (PrintPreparationManager::print_waits_on_scan()).
+    [[nodiscard]] bool file_check_pending() const;
 
     /**
      * @brief Handle a tap on the filament card.
@@ -218,6 +234,17 @@ class PrintSelectDetailView : public OverlayBase {
      * one tap would open the picker twice.
      */
     void on_color_card_clicked();
+
+    /**
+     * @brief Handle a tap on one filament chip.
+     *
+     * The same gate as on_color_card_clicked(): NeedsPlugin explains, any other
+     * block does nothing, and None opens chip @p chip's slot dropdown under
+     * @p trigger (FilamentMappingCard::open_slot_picker()), or the full mapping
+     * modal where Print would not carry out a stored pick
+     * (print_carries_out_chip_pick()).
+     */
+    void on_chip_clicked(size_t chip, lv_obj_t* trigger);
 
     /**
      * @brief Why a tap on the filament card cannot open the picker, or None.
@@ -234,6 +261,16 @@ class PrintSelectDetailView : public OverlayBase {
      */
     [[nodiscard]] helix::printer::RemapBlock current_remap_block() const;
 
+    /// The remap gate a card or chip tap passes: false (after opening the help
+    /// modal for NeedsPlugin) unless current_remap_block() is None.
+    /// @param what "card" or "chip", for the log
+    bool remap_tap_allowed(const char* what);
+
+    /// Whether the active backend's Print carries out a pick the chip dropdown
+    /// stores (helix::printer::print_carries_out_stored_pick()). When it does not,
+    /// a chip tap opens the full mapping modal instead.
+    [[nodiscard]] bool print_carries_out_chip_pick() const;
+
     /**
      * @brief Explain the card's remap state, and offer the fix when there is one.
      *
@@ -245,6 +282,10 @@ class PrintSelectDetailView : public OverlayBase {
      */
     void show_remap_help_modal();
 
+    /// Opens the plugin items menu for the file shown, below the more button, with
+    /// the print_file context as it stands now (metadata not yet loaded is left out).
+    void show_plugin_actions();
+
     /**
      * @brief Set the visible subject for XML binding
      *
@@ -253,6 +294,20 @@ class PrintSelectDetailView : public OverlayBase {
     void set_visible_subject(lv_subject_t* subject) {
         visible_subject_ = subject;
     }
+
+    /**
+     * @brief The details row's material subject, written with the materials the
+     * print uses (helix::used_materials_text over the card's used tools).
+     *
+     * Republished whenever the used tools or the palette change; left alone when
+     * the file names no material, so the caller's text stands.
+     */
+    void set_material_text_subject(lv_subject_t* subject) {
+        material_text_subject_ = subject;
+    }
+
+    /// Write the details row's material text now (no-op without a subject).
+    void publish_material_text();
 
     // === Visibility ===
 
@@ -286,6 +341,11 @@ class PrintSelectDetailView : public OverlayBase {
      * Uses nav system to properly hide with backdrop management.
      */
     void hide();
+
+    /// Replaces the shown file's slicer palette: a .3mf's plates each use
+    /// their own filaments, and stepping to another plate swaps them.
+    void set_file_palette(const std::vector<std::string>& filament_colors,
+                          const std::vector<std::string>& filament_materials);
 
     /// Toggle the preview between slicer-intended colors (true) and actual loaded
     /// AMS slot colors (false). Session-local; the panel's toggle callback calls
@@ -337,7 +397,7 @@ class PrintSelectDetailView : public OverlayBase {
      * callback is tracked; a later call overwrites an earlier pending one.
      * Cleared on show() so a stale attempt from a previous file can't fire.
      */
-    void run_when_loaded(std::function<void()> cb);
+    void run_when_loaded(helix::SharedCallback<void()> cb);
 
     /**
      * @brief Run @p cb once a Print tap can be evaluated (is_print_start_ready()).
@@ -345,18 +405,25 @@ class PrintSelectDetailView : public OverlayBase {
      * Unlike run_when_loaded() this fires when EITHER the viewer parse OR the
      * headless tools_used scan completes, and the file scan has answered — so it
      * never hangs on 2D-only platforms. If already ready, runs @p cb
-     * synchronously. A safety timeout (see PREFLIGHT_READY_TIMEOUT_MS) fires
+     * synchronously. A safety timeout (see kPreflightReadyTimeoutMs) fires
      * @p cb anyway if the answers do not arrive, so a stuck/failed scan can never
      * wedge the print: the print proceeds without those checks rather than never
      * starting.
      */
-    void run_when_preflight_ready(std::function<void()> cb);
+    void run_when_preflight_ready(helix::SharedCallback<void()> cb);
 
     // === Pre-start object picks ===
 
     /// Re-read the file's objects: the scan's list, extended by the full parse
     /// once the viewer has it. Publishes whether the skip button shows.
     void refresh_exclude_objects();
+
+    /// Re-run the fit check over what is known of the shown file and publish
+    /// detail_fit_check_severity / detail_fit_check_text.
+    void refresh_fit_check();
+
+    /// Ask the plugin for the shown file's analysis, for the fit check.
+    void request_fit_record();
 
     /// Pick or un-pick a defined object (matched upper-case). A name the
     /// printer cannot be sent is refused with a toast.
@@ -448,11 +515,12 @@ class PrintSelectDetailView : public OverlayBase {
      * states are handed back before show() so the rows for that one file open
      * as they were saved, not at default_enabled. Applied in on_activate()
      * right after populate_option_rows() re-initializes the rows, then
-     * consumed — a later show starts from defaults again. Ids with no row are
-     * dropped by the renderer's set_state(); ids the seed does not mention
-     * keep their defaults.
+     * consumed — a later show starts from defaults again. Each row reads its
+     * state through helix::queue::saved_option_state(), the rule a queued start
+     * with no file view shares: ids with no row drop, rows the job saved
+     * nothing for keep their defaults.
      */
-    void seed_option_states(std::map<std::string, bool> overrides);
+    void seed_option_states(helix::queue::QueuedJobOptions saved);
 
     /**
      * @brief Get current filament mappings from the mapping card
@@ -523,6 +591,11 @@ class PrintSelectDetailView : public OverlayBase {
         return headless_tool_grams_;
     }
 
+    /// What the file does, for the file-fits-printer check: the plugin's
+    /// analysis when it answered, else this view's head scan, the metadata and
+    /// the preview's model box (fit_file_from_sources()).
+    [[nodiscard]] helix::FitFile get_fit_file() const;
+
     /**
      * @brief Effective tool→slot remap the print will actually use.
      *
@@ -571,8 +644,7 @@ class PrintSelectDetailView : public OverlayBase {
      *
      * Computed in try_extract_gcode_colors() after the gcode is parsed, for
      * ALL AMS backends (including those whose mapping card is hidden, e.g.
-     * Snapmaker U1 / ACE). Drives the filament_mismatch_ and
-     * empty_tools_warning_ subjects, and is read by the print-start gate and
+     * Snapmaker U1 / ACE). Read by the print-start gate and
      * the enriched pre-print modal. Empty (no checks) until a file is parsed.
      */
     [[nodiscard]] const helix::PreflightResult& preflight_result() const {
@@ -585,8 +657,7 @@ class PrintSelectDetailView : public OverlayBase {
      * Rebuilds the per-tool intent (filtered to the precise tools_used set from
      * the parsed gcode), re-reads available slots from AmsState, computes the
      * default mapping, runs PreflightValidator::validate, caches the result into
-     * preflight_result_, and republishes the filament_mismatch_ /
-     * empty_tools_warning_ subjects.
+     * preflight_result_.
      *
      * Called once after parse (from try_extract_gcode_colors()) and again after
      * a native tool→slot remap so the print-start gate reflects the new mapping.
@@ -598,7 +669,7 @@ class PrintSelectDetailView : public OverlayBase {
      * @brief Open the filament mapping modal (tool→slot reassignment).
      *
      * Thin passthrough to the embedded FilamentMappingCard's modal. Used by the
-     * pre-flight gate's "Remap…" button for native-routing backends (AFC, Happy
+     * pre-flight gate's "Map Filament…" button for native-routing backends (AFC, Happy
      * Hare, CFS, AD5X-IFS, toolchanger). Applied mappings flow through the card's
      * existing on_mappings_changed path, which recomputes pre-flight.
      */
@@ -613,6 +684,10 @@ class PrintSelectDetailView : public OverlayBase {
     [[nodiscard]] std::optional<FileMetadata> get_file_metadata() const {
         return cached_file_metadata_;
     }
+
+    /// The shown file's identity, PrintPreparationManager::scan_key(): the key
+    /// of its operations scan and of its ToolsUsedCache entry.
+    [[nodiscard]] std::string current_file_key() const;
 
     // === Checkbox Access (for prep manager setup) ===
 
@@ -673,6 +748,12 @@ class PrintSelectDetailView : public OverlayBase {
   private:
     friend class ::PrintSelectDetailViewTestAccess;
 
+    /// Keep the file's fetched metadata and re-estimate the prep time, which
+    /// heats to the metadata's first-layer temperatures. Metadata fetched for
+    /// @p file_key, a current_file_key(), is dropped once another file shows.
+    /// @return false when dropped
+    bool apply_file_metadata(const std::string& file_key, const FileMetadata& metadata);
+
     /**
      * @brief LV_EVENT_DELETE hook on the detail root: the only notice this view
      *        gets when the tree is deleted by anything other than
@@ -725,6 +806,10 @@ class PrintSelectDetailView : public OverlayBase {
     IMoonrakerAPI* api_ = nullptr;
     PrinterState* printer_state_ = nullptr;
     lv_subject_t* visible_subject_ = nullptr;
+    lv_subject_t* material_text_subject_ = nullptr; ///< see set_material_text_subject()
+
+    /// The card's used-tools filter, then the details row that follows it.
+    void set_card_used_tools(std::optional<std::set<int>> used);
 
     // === Widget References ===
     // Note: overlay_root_ inherited from OverlayBase holds the main widget
@@ -819,7 +904,7 @@ class PrintSelectDetailView : public OverlayBase {
     // Pending print-attempt (or other) callback registered via run_when_loaded()
     // while a parse was still in flight. Fired once from the load callback after
     // preflight_result_ is fresh, then cleared. Reset on show().
-    std::function<void()> on_loaded_cb_;
+    helix::SharedCallback<void()> on_loaded_cb_;
 
     // --- Shared gcode download (ONE file + ONE download per open) ---
     // The headless tools scan and the viewer preview share a single canonical
@@ -865,7 +950,7 @@ class PrintSelectDetailView : public OverlayBase {
     /// stand-ins as though they were the file's own colors.
     bool palette_settled_ = false;
     bool headless_scan_done_ = false; // scan finished (success/empty/fail/timeout)
-    // True ONLY where the scan actually SETTLED: finish_scan's deferred body,
+    // True ONLY where the scan actually SETTLED: apply_scan_result(),
     // the show() cache-hit seed, or the no-API early-out. Deliberately NOT
     // set by the preflight safety timeout, which flips headless_scan_done_
     // while a download/scan may still be in flight. Gates oversize-reject
@@ -878,18 +963,17 @@ class PrintSelectDetailView : public OverlayBase {
     // Pending callback registered via run_when_preflight_ready() while neither the
     // viewer parse nor the headless scan had completed. Fired once when readiness
     // arrives (or on the safety timeout), then cleared. Reset on show().
-    std::function<void()> on_preflight_ready_cb_;
+    helix::SharedCallback<void()> on_preflight_ready_cb_;
     lv_timer_t* preflight_ready_timeout_timer_ = nullptr; // safety fallback; never wedge a print
 
     // Safety fallback: if neither the viewer parse nor the headless scan reports
     // readiness within this window, fire the deferred print attempt anyway
     // (graceful degradation — print without Part A's optimization, never hang).
-    static constexpr uint32_t PREFLIGHT_READY_TIMEOUT_MS = 8000;
+    static constexpr uint32_t kPreflightReadyTimeoutMs = 8000;
 
     // Pre-print option toggle state lives in `option_rows_renderer_` (one
     // heap-allocated subject per option) — the legacy fixed six subjects
     // (preprint_bed_mesh_, preprint_qgl_, etc.) were retired in Phase 3.5.
-    lv_subject_t filament_mismatch_{};        // 1 = material mismatch warning visible
     lv_subject_t filament_mapping_visible_{}; // 1 = filament card visible (AMS+tools)
     // 1 = tapping the filament card opens the remap picker. Drives BOTH the
     // chevron that advertises the tap and the card's own clickable flag, so a
@@ -907,14 +991,23 @@ class PrintSelectDetailView : public OverlayBase {
     // Covers both the refusal and the "this will misfile your history" advisory;
     // the copy is chosen when the icon is tapped, not when it is published.
     lv_subject_t color_card_remap_help_visible_{};
-    lv_subject_t empty_tools_warning_{}; // 1 = at least one used tool's slot is empty
+    // The fit check's verdict for the shown file: 0 none, 1 notes only,
+    // 2 warnings, 3 a block, and one line per finding.
+    lv_subject_t detail_fit_severity_{};
+    lv_subject_t detail_fit_text_{};
+    char detail_fit_text_buf_[512]{};
+    // The plugin's analysis of the shown file, as the fit check reads it.
+    std::optional<helix::FitFile> fit_record_;
+    /// 1 while an enabled plugin declares a print_file menu item: the button row
+    /// becomes Delete, more, Print as square icon buttons. Set on every show().
+    lv_subject_t print_detail_has_plugin_items_{};
+    helix::ui::PluginItemsMenu plugin_items_menu_;
     // Whether a job rewrite can run, in the tri-state the pre-print option rows
     // that need one bind their visibility to: 1 yes, 0 no, -1 not known yet.
     // Published by publish_rewrite_availability().
     lv_subject_t gcode_rewrite_available_{};
     // Cached backend-agnostic pre-flight validation result for the current file.
-    // Computed in try_extract_gcode_colors() once the gcode is parsed; the single
-    // source of truth driving filament_mismatch_ + empty_tools_warning_ (works
+    // Computed in try_extract_gcode_colors() once the gcode is parsed (works
     // even when the mapping card is hidden, e.g. Snapmaker U1 / ACE). Read by the
     // print-start gate and the enriched pre-print modal. Empty until a file parses.
     helix::PreflightResult preflight_result_{};
@@ -928,6 +1021,9 @@ class PrintSelectDetailView : public OverlayBase {
     // Observes the STATIC AmsState::slots_version subject — no SubjectLifetime
     // token (singleton, not a per-slot dynamic subject).
     ObserverGuard slots_version_observer_;
+    ObserverGuard tool_map_version_observer_; ///< printer tool-table moves (same lifetime)
+    ObserverGuard external_spool_observer_;   ///< the loaded chips' spool (same lifetime)
+    ObserverGuard auto_color_map_observer_;   ///< auto-color-map setting flips
     // The plugin probe completes after first paint and the Moonraker version
     // lands with discovery, so both arrive after the card has already published.
     // Without these the card would sit in its Probing look for the session.
@@ -960,7 +1056,7 @@ class PrintSelectDetailView : public OverlayBase {
 
     // States handed over by seed_option_states(), applied over the freshly
     // populated rows by the next on_activate() and consumed there.
-    std::map<std::string, bool> pending_option_seed_;
+    std::optional<helix::queue::QueuedJobOptions> pending_option_seed_;
 
     // === Cached show() parameters (used by on_activate) ===
     std::string current_filename_;
@@ -969,18 +1065,15 @@ class PrintSelectDetailView : public OverlayBase {
     std::string current_filament_type_;
     std::vector<std::string> current_filament_colors_;
     std::vector<std::string> current_filament_materials_;
-    size_t current_file_size_bytes_ = 0;
-    time_t current_file_modified_ = 0; // mtime of the shown file (cache key part)
+    helix::FileVersion current_file_version_; ///< the shown file's size and mtime
     // Offset where the G-code body ends (Moonraker metadata). Everything after
     // it is the slicer's footer, so it sizes the footer read exactly. 0 = the
     // server didn't report it; the tail read falls back to a fixed window.
     uint64_t current_gcode_end_byte_ = 0;
 
-    // Persistent tools-used cache (path/size/mtime keyed, JSON in the helix
-    // cache dir). Seeded at show() so re-prints render the final chip state
-    // in one paint; written through when a scan/parse makes the set final.
-    // Main-thread use only (documented on helix::ToolsUsedCache).
-    helix::ToolsUsedCache tools_used_cache_;
+    // The footer read and whole-file tools scan, shared with a queued start
+    // that has no file view.
+    helix::FileStartFactsLoader facts_loader_{nullptr};
 
     // Cached metadata from the async fetch (nullopt until fetch completes or when file changes)
     std::optional<FileMetadata> cached_file_metadata_;
@@ -990,12 +1083,14 @@ class PrintSelectDetailView : public OverlayBase {
 
     // Fired when the user taps the filament card. Set by PrintSelectPanel to
     // open the remap modal — the same entry point the preflight-check modal's
-    // "Remap…" button uses. Empty on backends where the card is purely
+    // "Map Filament…" button uses. Empty on backends where the card is purely
     // informational.
-    std::function<void()> on_remap_requested_;
-    std::function<void()> on_plugin_setup_requested_;
-    std::function<void()> on_dismissed_cb_;
+    helix::SharedCallback<void()> on_remap_requested_;
+    helix::SharedCallback<void()> on_plugin_setup_requested_;
+    helix::SharedCallback<void()> on_dismissed_cb_;
     MacroAnalysisCallback on_macro_analysis_cb_;
+    helix::SharedCallback<void()> on_print_readiness_changed_cb_;
+    void notify_print_readiness_changed() const;
 
     // === Internal Methods ===
 
@@ -1056,8 +1151,6 @@ class PrintSelectDetailView : public OverlayBase {
 
     void reclaim_download(const std::string& path);
 
-    [[nodiscard]] std::string current_file_key() const;
-
     /**
      * @brief Invoke @p cb (main thread) once the current file's gcode is on disk
      *
@@ -1068,7 +1161,7 @@ class PrintSelectDetailView : public OverlayBase {
      * resolves (main thread). ok=false on download error / no API / no cache
      * dir.
      */
-    void ensure_gcode_downloaded(std::function<void(bool ok, const std::string& path)> cb);
+    void ensure_gcode_downloaded(helix::SharedCallback<void(bool ok, const std::string& path)> cb);
 
     /**
      * @brief Point the viewer at @p path and start loading it
@@ -1078,67 +1171,25 @@ class PrintSelectDetailView : public OverlayBase {
      * preflight readiness, reveal — was identical in the former cached-file
      * and post-download paths; it lives here once now.
      */
-    void begin_viewer_load(const std::string& path);
+    /// @p layer_index_sidecar: the plugin's layer index for the file, or empty.
+    void begin_viewer_load(const std::string& path, std::string layer_index_sidecar = {});
     /// Clear every viewer callback that carries `this`.
     void disarm_viewer_callbacks();
 
     /**
-     * @brief Apply a finished headless tools-scan result (callable from any thread)
+     * @brief Apply a finished headless tools-scan result (main thread).
      *
-     * Marshals via tok.defer — `this` is only touched inside the deferred
-     * body (main thread), where the result is stored, the color swatches are
-     * rendered (2D-only platforms), pre-flight is recomputed, the mapping
-     * card is restricted, and any deferred preflight-ready attempt is
-     * released. When @p authoritative is true (the scan actually read the
-     * downloaded file) the result is also written through to the tools-used
-     * cache — including a legitimate empty set (single-extruder file). A
-     * degraded finish (download failed, authoritative=false) must NOT
-     * persist: its empty set carries no information and, on 2D-only
-     * platforms where no viewer parse ever repairs it, would freeze "no
-     * tools" for the file permanently.
+     * Stores the result, renders the color swatches (2D-only platforms),
+     * recomputes pre-flight, restricts the mapping card and releases any
+     * deferred preflight-ready attempt. The loader has already cached a set
+     * it read from the file.
      */
-    void finish_scan(LifetimeToken tok, std::set<int> tools, bool authoritative);
+    void apply_scan_result(std::set<int> tools);
 
-    /**
-     * @brief Main-thread body of finish_scan() (see there for the contract).
-     *
-     * Split out so the footer-read path can adopt the file's palette and
-     * publish the used-tool set in ONE deferred tick, instead of chaining a
-     * second defer behind the colour update.
-     */
-    void apply_scan_result(std::set<int> tools, bool authoritative);
-
-    /**
-     * @brief Fast path: answer tools_used (and colors) from the file's footer.
-     *
-     * Slicers write `filament used [g]` and `filament_colour` after the last
-     * move, so one HTTP suffix range over the last few tens of KB answers both
-     * — no whole-file download, no geometry parse (~16s for an 870 KB file on
-     * a K2). Sized from gcode_end_byte when Moonraker reported it.
-     *
-     * Parsing happens on the HTTP thread (pure, no `this`); the result is
-     * marshaled by apply_scan_result() via tok.defer. ANY failure — transport
-     * error, a slicer that writes neither key, an all-zero usage vector —
-     * falls through to start_full_tools_scan(), so the footer read can only
-     * ever be faster than today, never worse.
-     */
-    void start_tail_summary_scan(LifetimeToken tok, std::set<int> stop_set,
-                                 helix::gcode::FooterReadNeed need);
-
-    /// Apply whatever a footer read managed to answer. `need` says what the
-    /// read was issued for: when it did NOT include the tools question, the
-    /// used-tool set is already settled (cache hit) and must not be re-derived
-    /// from this summary — only the palette and grams are taken.
-    void apply_footer_summary(const helix::gcode::GcodeFooterSummary& summary,
-                              helix::gcode::FooterReadNeed need);
-
-    /**
-     * @brief Fallback: download the whole file and scan it for Tn commands.
-     *
-     * The pre-footer-read behavior, unchanged. Shares the ONE canonical
-     * download with the viewer preview (ensure_gcode_downloaded).
-     */
-    void start_full_tools_scan(LifetimeToken tok, std::set<int> stop_set);
+    /// Apply whatever a footer read managed to answer. Without
+    /// @p tools_answered the used-tool set is settled elsewhere (cache hit) or
+    /// still unknown, and only the palette and grams are taken.
+    void apply_footer_summary(const helix::gcode::GcodeFooterSummary& summary, bool tools_answered);
 
     /**
      * @brief Show or hide the gcode viewer
@@ -1179,16 +1230,13 @@ class PrintSelectDetailView : public OverlayBase {
     /**
      * @brief Start the headless tools_used scan for the current file.
      *
-     * Tries the footer read first (start_tail_summary_scan) — a small suffix
-     * range that usually answers outright. Only when that cannot answer does
-     * it fall back to start_full_tools_scan(), which shares the ONE canonical
-     * download with the viewer preview
-     * (ensure_gcode_downloaded); once the file is on disk, runs a lightweight
-     * Tn-only line scan on the slow HTTP lane (off the main thread,
-     * memory-safe — never holds the whole file), early-exiting once every
-     * slicer-palette tool has been seen. finish_scan() then marshals the
-     * result back to the main thread: sets headless_tools_used_ +
-     * headless_scan_done_ and runs recompute_preflight() +
+     * Runs through FileStartFactsLoader::scan(), the read a queued start with
+     * no file view uses too: the footer read first (a small suffix range that
+     * usually answers outright), and only when that cannot answer the whole-file
+     * Tn scan, which shares the ONE canonical download with the viewer preview
+     * (ensure_gcode_downloaded). The answers land on the main thread in
+     * apply_footer_summary() and apply_scan_result(), which set
+     * headless_tools_used_ + headless_scan_done_ and run recompute_preflight() +
      * fire_on_preflight_ready(). Runs on ALL platforms; it is the readiness
      * signal the gate uses on 2D-only (where the viewer never parses).
      * Degrades gracefully: a download/scan failure still marks the scan done
@@ -1288,7 +1336,7 @@ class PrintSelectDetailView : public OverlayBase {
      * The single implementation of the "we now know which tools this file
      * really uses" render, shared by the three sites that learn that set:
      * show()'s tools-used cache seed, the viewer parse
-     * (try_extract_gcode_colors) and the headless scan (finish_scan).
+     * (try_extract_gcode_colors) and the headless scan (apply_scan_result).
      * Re-publishes the card's visibility now that the precise set is known
      * (never the slicer palette size, which over-counts), re-runs the
      * pre-flight gate, and restricts the card to @p tools_used.
@@ -1298,7 +1346,7 @@ class PrintSelectDetailView : public OverlayBase {
      * @param refresh_card_from_palette Also rebuild the mapping card's display
      *                                state from the full palette. Only the
      *                                headless path needs this — see
-     *                                finish_scan().
+     *                                apply_scan_result().
      */
     void render_authoritative_chips(const std::set<int>& tools_used,
                                     bool refresh_card_from_palette = false);

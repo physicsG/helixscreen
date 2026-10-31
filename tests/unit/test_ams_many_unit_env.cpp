@@ -30,11 +30,11 @@ using namespace helix;
 namespace {
 
 // Enough units that the last two sit past the per-unit subjects.
-constexpr int kUnits = AmsState::MAX_UNITS + 4;
+constexpr int kUnits = AmsState::kMaxUnits + 4;
 constexpr int kLast = kUnits - 1;
 // A unit at the first index with no per-unit subjects, and its predecessor.
-constexpr int kPast = AmsState::MAX_UNITS + 2;
-constexpr int kBelow = AmsState::MAX_UNITS - 1;
+constexpr int kPast = AmsState::kMaxUnits + 2;
+constexpr int kBelow = AmsState::kMaxUnits - 1;
 
 class FleetMock : public AmsBackendMock {
   public:
@@ -112,9 +112,13 @@ std::string subject_str(const char* name) {
 
 TEST_CASE_METHOD(LVGLUITestFixture, "The detail env chip shows a unit past the per-unit cap",
                  "[ams][pages][env]") {
-    static_assert(kUnits > AmsState::MAX_UNITS);
+    static_assert(kUnits > AmsState::kMaxUnits);
     FleetMock* mock = install();
     auto& ams = AmsState::instance();
+
+    // The per-unit drop's reading, in tenths of a percent.
+    CHECK(subject_int("ams_env_ind_0_humidity") == 300);
+    CHECK(subject_int("ams_env_ind_1_humidity") == 310);
 
     ams.set_detail_env_unit(kPast);
     helix::ui::UpdateQueue::instance().drain();
@@ -124,12 +128,14 @@ TEST_CASE_METHOD(LVGLUITestFixture, "The detail env chip shows a unit past the p
     CHECK(subject_str("ams_env_ind_detail_humidity_text") == std::to_string(30 + kPast) + "%");
     CHECK(subject_int("ams_env_ind_detail_visible") == 1);
     CHECK(subject_int("ams_env_ind_detail_humidity_visible") == 1);
+    CHECK(subject_int("ams_env_ind_detail_humidity") == (30 + kPast) * 10);
     CHECK(subject_int("ams_env_ind_detail_drying_active") == 1);
     CHECK(subject_str("ams_env_ind_detail_drying_text") == "2:15");
 
     SECTION("the humidity row hides for a unit without a humidity reading") {
         ams.set_detail_env_unit(kLast);
         CHECK(subject_int("ams_env_ind_detail_humidity_visible") == 0);
+        CHECK(subject_int("ams_env_ind_detail_humidity") < 0);
         CHECK(subject_int("ams_env_ind_detail_drying_active") == 0);
         CHECK(subject_str("ams_env_ind_detail_temp_text") == std::to_string(20 + kLast) + "\xC2\xB0"
                                                                                           "C");

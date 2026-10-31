@@ -65,16 +65,6 @@ EOF
     chmod +x "$FAKE"
 }
 
-path_without_jobpool() {
-    local d p=""
-    local IFS=:
-    for d in $PATH; do
-        [ -e "$d/jobpool" ] && continue
-        p=${p:+$p:}$d
-    done
-    printf '%s' "$p"
-}
-
 no_pool() {
     unset HELIX_JOBPOOL
     unset -f jobpool 2>/dev/null || true
@@ -118,14 +108,14 @@ test_shell() {
     printf '#!/bin/sh\n' > "$BIN/parallel"
     chmod +x "$BIN/bats" "$BIN/parallel"
     mkdir -p "$BATS_TEST_TMPDIR/tmp"
-    (cd "$REPO" && env TMPDIR="$BATS_TEST_TMPDIR/tmp" PATH="$BIN:$(path_without_jobpool)" make -s --no-print-directory test-shell 2>&1)
+    (cd "$(scratch_tree)" && env TMPDIR="$BATS_TEST_TMPDIR/tmp" PATH="$BIN:$(path_without_jobpool)" make -s --no-print-directory test-shell 2>&1)
 }
 
 @test "make test-shell runs bats on the pool's growing slot file" {
     fake_pool
     run test_shell
     [ "$status" -eq 0 ]
-    contains "BATS --jobs 2 --parallel-binary-name $REPO/scripts/parallel-jobs-file.sh --no-parallelize-within-files tests/shell/" "$output"
+    contains "BATS --jobs 2 --parallel-binary-name $(scratch_tree)/scripts/parallel-jobs-file.sh --no-parallelize-within-files tests/shell/" "$output"
     contains "FILE 5" "$output"
     # A third of the fake pool's target of 7, and a slot file to grow.
     grep -q '^hold --min 2 --grow .*/slots -- ' "$FAKE_LOG"
@@ -367,7 +357,7 @@ cached_ninja() {
 # ---------------------------------------------------------------------------
 
 cross_submake() {
-    (cd "$REPO" && env PATH="$(path_without_jobpool)" make -n --no-print-directory MAKE='echo SUBMAKE' "$@" 2>&1)
+    (cd "$(scratch_tree)" && env PATH="$(path_without_jobpool)" make -n --no-print-directory MAKE='echo SUBMAKE' "$@" 2>&1)
 }
 
 @test "a native cross sub-make inherits a live pool instead of taking -j" {

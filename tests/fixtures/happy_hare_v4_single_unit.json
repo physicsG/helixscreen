@@ -60,6 +60,7 @@
    "gear_unload_speed": 120.0,
    "sync_to_extruder": 1,
    "heater_max_temp": 65.0,
+   "heater_default_dry_humidity": 25.0,
    "flowguard_encoder_mode": 2
   },
   "mmu_toolhead default": {

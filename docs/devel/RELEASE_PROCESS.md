@@ -67,21 +67,24 @@ and is not used.
 
 ### The trunk's beta line
 
-`main` carries `RELEASE_CHANNEL=beta`, so its tags reach the beta and dev channels
-while `release/1.0` keeps stable:
+Each minor's betas start on `main` and finish on that minor's own branch. The 1.1
+betas began on the trunk; from `1.1.0-beta.14` on, `release/1.1` carries them, and
+the trunk has moved on to 1.2:
 
 | Branch | Versions | Channel |
 |--------|----------|---------|
 | `release/1.0` | `1.0.0`, `1.0.1`, `1.0.2` ... | stable |
-| `main` | `1.1.0-beta.1`, `1.1.0-beta.2` ... | beta + dev |
-| `release/1.1` (future) | `1.1.0`, then `1.1.1` ... | stable |
+| `release/1.1` | `1.1.0-beta.15` ..., then `1.1.0`, `1.1.1` ... | beta + dev, then stable |
+| `main` | `1.2.0-beta.1` ... (untagged until `1.1.0` ships) | dev, then beta + dev |
 
 The trunk names the release it is heading for, so a beta install says which minor
 it belongs to and `1.1.0` stays free for the stable cut. A beta at `1.1.0-beta.7`
 is offered `1.1.0` the moment it publishes, and a `1.0.2` hotfix on the stable line
 never looks like an upgrade to it.
 
-When `release/1.1` is cut, `main` moves to `1.2.0-beta.1` and the pattern repeats.
+While a release branch is still shipping betas, the trunk says `dev` and is not
+tagged: the downgrade guard would refuse the next `1.1.0-beta.N` on dev once dev
+served a `1.2.0-beta.N`. See `BRANCHING.md`.
 
 ---
 
@@ -170,7 +173,7 @@ A dry run creates no GitHub release and sends nothing to Play, Discord or the we
    ```bash
    git checkout main
    git pull origin main
-   make test-run  # Run tests
+   make land-gate  # Run tests
    ```
 
 2. **Bump `VERSION.txt` and add the CHANGELOG entry, in one `chore(release):` commit.**
@@ -245,10 +248,12 @@ The workflow auto-generates basic release notes if no annotation is provided.
 
 ### Before Tagging
 
-- [ ] All tests pass (`make test-run`)
+- [ ] All tests pass (`make land-gate`)
 - [ ] No critical bugs in issue tracker
 - [ ] Documentation updated for new features
 - [ ] Tested on real hardware (Pi and/or AD5M)
+
+`scripts/release-gate.sh fast` also runs `scripts/release-health.sh`, which compares the newest beta of `VERSION.txt`'s release against the current stable release in telemetry (releases endpoint, 14 days): crash-free devices, crash rate, update failure rate, print success rate, and p95 frame time and memory. It prints a table and a `WARN` line per metric that trails stable, and notes a candidate seen on fewer than 10 devices. It is informational and never fails the gate; with no admin key, no network or no beta in telemetry it prints one line saying so. The table is in `build/release-gate/release-health.log`; `RELEASE_HEALTH=0` skips the step. The thresholds are `RELEASE_WARN` in `server/telemetry-worker/scripts/releaseHealth.ts`.
 
 ### After Release
 
@@ -325,12 +330,11 @@ channel regardless of which branch it was cut from.
 
 ### Graduating the beta line
 
-A stable release is not a re-tag of the last beta. Cut the maintenance branch,
-edit its `RELEASE_CHANNEL` to `stable`, drop the suffix from `VERSION.txt`, and tag
-there:
+A stable release is not a re-tag of the last beta. On the release branch, edit its
+`RELEASE_CHANNEL` to `stable`, drop the suffix from `VERSION.txt`, and tag there:
 
 ```bash
-git checkout -b release/1.1 main
+git switch release/1.1
 $EDITOR RELEASE_CHANNEL          # beta -> stable
 printf '1.1.0\n' > VERSION.txt   # was 1.1.0-beta.N
 git commit -m "chore(release): v1.1.0" RELEASE_CHANNEL VERSION.txt CHANGELOG.md
@@ -340,7 +344,8 @@ git push origin release/1.1 v1.1.0
 
 Dropping the suffix is itself the promotion: `1.1.0` outranks every
 `1.1.0-beta.N`, so the beta fleet is offered it as an ordinary forward step.
-`main` then moves to `1.2.0-beta.1` and keeps publishing to beta.
+`main`, already at `1.2.0-beta.1`, then switches its `RELEASE_CHANNEL` from `dev`
+back to `beta` and may tag again.
 
 ---
 
@@ -372,8 +377,9 @@ make PLATFORM_TARGET=ad5m clean release-ad5m
 
 `CHANGELOG.md` is the changelog. It is written by hand in the release commit (Step 1);
 nothing generates it. The annotated tag's message becomes the GitHub release body
-(Step 2), and `scripts/generate-whatsnew.sh` distills the finished CHANGELOG section
-into the Play Store "What's New" - both consume what was already written.
+(Step 2). The Play Store "What's New" is not taken from it: a stable release writes that
+text by hand in `android/whatsnew/<version>.txt`, which `scripts/generate-whatsnew.sh`
+uses verbatim (`android/whatsnew/README.md`).
 
 Prose style - user-facing voice, separator, issue-link form, and the daily vs milestone
 entry shapes - is specified in [CHANGELOG_STYLE.md](CHANGELOG_STYLE.md). Read it before

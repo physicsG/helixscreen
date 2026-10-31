@@ -101,6 +101,11 @@ class StubBackend : public helix::AmsBackendMock {
     helix::AmsError unload_filament(int) override {
         return helix::AmsErrorHelper::success();
     }
+
+    int restart_calls = 0;
+    void on_klipper_restarted() override {
+        ++restart_calls;
+    }
 };
 
 AmsSystemInfo afc_sys() {
@@ -225,6 +230,24 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     CHECK_FALSE(TA::op_in_flight(*h.panel));
 }
 
+TEST_CASE_METHOD(LVGLUITestFixture, "A timed-out backend op leaves the backend's action alone",
+                 "[ui_integration][filament][op_timeout_expire]") {
+    // A long operation (a cold-nozzle swap) can run past the panel's budget, so
+    // the timeout only warns: ending the backend's operation here would
+    // re-enable Load, Unload and tool changes in the middle of it.
+    TimeoutHarness h(*this);
+
+    TA::execute_load(*h.panel);
+    REQUIRE(TA::backend_op_active(*h.panel));
+    h.mock->sys_.action = AmsAction::LOADING;
+
+    h.fire_operation_timeout();
+
+    REQUIRE_FALSE(TA::operation_active(*h.panel));
+    CHECK(h.mock->restart_calls == 0);
+    CHECK(h.mock->get_system_info().action == AmsAction::LOADING);
+}
+
 TEST_CASE_METHOD(LVGLUITestFixture, "#1183: AmsAction::ERROR ends the operation and fails the op",
                  "[ui_integration][filament][regression][1183]") {
     // AmsBackendAfc::check_action_timeout()'s entire output is a flip to ERROR.
@@ -236,7 +259,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "#1183: AmsAction::ERROR ends the operation 
     REQUIRE(TA::operation_active(*h.panel));
 
     h.publish_action(AmsAction::LOADING, 10);
-    h.publish_action(AmsAction::ERROR, 600); // > MIN_SPINNER_VISIBLE_MS, so a
+    h.publish_action(AmsAction::ERROR, 600); // > kMinSpinnerVisibleMs, so a
                                              // mistaken op_succeeded() would have
                                              // reached the done state by now
 
@@ -383,7 +406,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "unknown-command abort survives the macro's 
     // op's success callback still arrives.
     TA::op_succeeded_extrude(*h.panel);
 
-    // Past MIN_SPINNER_VISIBLE_MS, so a success that got through would have
+    // Past kMinSpinnerVisibleMs, so a success that got through would have
     // reached the done state by now.
     process_lvgl(700);
     CHECK(TA::op_extrude_state(*h.panel) == 0); // still idle, never 2/done

@@ -33,7 +33,9 @@ enum class PrintJobState;
 #include <unordered_set>
 
 // Forward declarations
+namespace helix {
 class IMoonrakerAPI;
+}
 struct MoonrakerError;
 class PrintExcludeObjectManagerTestAccess;
 namespace helix {

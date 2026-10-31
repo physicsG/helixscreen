@@ -60,8 +60,37 @@ void ui_spool_canvas_invalidate_cache(void);
 #ifdef __cplusplus
 }
 
+#include "ui_swatch.h"
+
+#include "filament_tube_stroker.h"
+
+#include <string>
+
 namespace helix::ui {
-bool reduced_effects();
+
+/**
+ * @brief Paint the spool's filament: @p rgb, split into @p multi_color_hexes'
+ *        colours when it lists two or more, in @p finish.
+ *
+ * The split, the matte colour and the silk, marble and sparkle textures are
+ * the swatch painter's (ui_swatch.h), so a spool and its swatch agree.
+ */
+void spool_canvas_set_filament(lv_obj_t* canvas, uint32_t rgb, const std::string& multi_color_hexes,
+                               SwatchFinish finish);
+
+/// spool_canvas_set_filament() from a slot's colour, multi-colour list and finish.
+void spool_canvas_set_filament(lv_obj_t* canvas, const SlotInfo& slot);
+
+/// Which way a spool canvas looks at its spool: from the side (the pseudo-3D
+/// drum between two flanges) or face-on (the vented front flange over the
+/// wound filament).
+enum class SpoolView : uint8_t { Side, Front };
+
+/// Look at @p canvas's spool from @p view; redraws when it changes.
+void spool_canvas_set_view(lv_obj_t* canvas, SpoolView view);
+
+/// The view @p canvas draws.
+SpoolView spool_canvas_get_view(lv_obj_t* canvas);
 
 /**
  * @brief Create a glow layer: an image the caller places behind a spool,
@@ -72,14 +101,13 @@ lv_obj_t* spool_glow_create(lv_obj_t* parent);
 /**
  * @brief Light the glow for a silhouette of @p size px and keep it current.
  *
- * The silhouette is @p spool_canvas's own alpha (3D style), or a disc of
- * diameter @p size when it is null (flat style). The layer stays bound to the
- * spool: it repaints when the spool renders a new shape, and stays empty until
- * the spool's first render. Capable hardware gets a soft accent halo plus a
- * lighter tight rim; @p simple a 2 px solid outline. The image overhangs the
- * object by the glow margin, reported as ext draw size, so layout never moves.
- * One image per (shape, accent, simple) is shared by every layer showing it,
- * from a small cache of its own. Calling again re-reads the theme accent.
+ * The silhouette is @p spool_canvas's own alpha, from the side or face-on.
+ * The layer stays bound to the spool: it repaints when the spool renders a new shape, and stays
+ * empty until the spool's first render. Capable hardware gets a soft accent halo plus a lighter
+ * tight rim; @p simple a 2 px solid outline. The image overhangs the object by the glow margin,
+ * reported as ext draw size, so layout never moves. One image per (shape, accent, simple) is shared
+ * by every layer showing it, from a small cache of its own. Calling again re-reads the theme
+ * accent.
  */
 void spool_glow_paint(lv_obj_t* glow, lv_obj_t* spool_canvas, int32_t size,
                       bool simple = reduced_effects());

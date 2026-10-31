@@ -56,7 +56,13 @@ class AmsStateTestAccess {
     /// The production window, so tests express "just inside" / "just outside"
     /// against the real constant instead of a hardcoded copy of it.
     static constexpr std::chrono::seconds grace_window() {
-        return RunoutGrace::WINDOW;
+        return RunoutGrace::kWindow;
+    }
+
+    /// Drop the cached system_info() readings, as a backend event does, for a
+    /// test backend whose answer changes without raising one.
+    static void invalidate_system_info(AmsState& ams) {
+        ams.invalidate_system_info();
     }
 
     /// Drive the clog-meter subject sync with a hand-built AmsSystemInfo, so
@@ -65,10 +71,30 @@ class AmsStateTestAccess {
         ams.sync_clog_meter_from_info(info);
     }
 
+    /// Detach the clog meter from the filament motion sensors, so a test that
+    /// installed the observer does not leave later tests' sensor frames
+    /// re-syncing the shared meter.
+    static void remove_motion_sensor_observer(AmsState& ams) {
+        ams.motion_sensor_observer_.reset();
+    }
+
+    /// What a PrinterState subject teardown does to the lifecycle observer.
+    static void remove_print_lifecycle_observer(AmsState& ams) {
+        ams.print_lifecycle_observer_.reset();
+    }
+
     /// Drive the buffer reading sync with a hand-built AmsSystemInfo at a
     /// chosen time, so trace tests need neither a backend nor a clock.
     static void sync_buffer(AmsState& ams, const AmsSystemInfo& info, int64_t now_ms) {
         ams.sync_buffer_from_info(info, now_ms);
+    }
+
+    /// A status frame from the primary backend: the data moved, then the sync
+    /// that frame queues, run now. A test staging a mock slot by hand has no
+    /// event to say so.
+    static void backend_frame(AmsState& ams) {
+        ams.invalidate_system_info();
+        ams.sync_from_backend();
     }
 
     /// Drop every buffer trace, which outlive a test on the singleton.

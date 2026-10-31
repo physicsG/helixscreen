@@ -67,6 +67,26 @@
           </lv_obj>
         </lv_obj>
         <!-- ================================================================== -->
+        <!-- BED CLEAR CHECK (only when the printer has a switchable camera bed check) -->
+        <!-- ================================================================== -->
+        <lv_obj name="container_bed_check" width="100%" style_pad_all="0" scrollable="false" flex_flow="column">
+          <bind_flag_if_eq subject="detection_bed_check_available" flag="hidden" ref_value="0"/>
+          <setting_toggle_row name="row_bed_check"
+                              label="Bed Clear Check" icon="train_flatbed"
+                              description="Camera checks the bed is empty before each print"
+                              subject="detection_bed_check_enabled" callback="on_bed_check_changed"
+                              disabled="detection_bed_check_switchable" disabled_ref_value="0"/>
+        </lv_obj>
+        <!-- ================================================================== -->
+        <!-- SLICER PRINTS THAT DO NOT FIT: the plugin's fit_check_blocks_autostart -->
+        <!-- ================================================================== -->
+        <plugin_feature_toggle_row name="row_fit_check_blocks_autostart"
+                                   feature="fit_check_blocks_autostart" label="Hold slicer prints that do not fit"
+                                   icon="ruler"
+                                   description="When a slicer uploads and starts a file that moves past this printer's travel, heats past its limits or uses a missing tool, keep the file but do not start it."
+                                   subject="plugin_feature_on_fit_check_blocks_autostart"
+                                   callback="on_plugin_feature_switch_changed"/>
+        <!-- ================================================================== -->
         <!-- PRINT COMPLETION ALERT -->
         <!-- ================================================================== -->
         <setting_dropdown_row name="row_completion_alert"

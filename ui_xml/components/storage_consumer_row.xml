@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One consumer of the Storage page: its icon, name and size, and Clean up
+     when its files may be removed. Binds storage_<key>_value / _shown / _clean,
+     which StorageSettingsOverlay publishes for every key in kConsumers. -->
+<component>
+  <api>
+    <prop name="key" type="string" default=""/>
+    <prop name="label" type="string" default=""/>
+    <prop name="label_tag" type="string" default=""/>
+    <prop name="icon" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
+        style_bg_opa="0" style_border_width="0" style_pad_left="#space_lg" style_pad_right="#space_lg"
+        style_pad_top="#space_md" style_pad_bottom="#space_md" style_pad_gap="#space_md" scrollable="false">
+    <bind_flag_if_eq subject="storage_${key}_shown" flag="hidden" ref_value="0"/>
+    <icon src="$icon" size="sm" variant="secondary"/>
+    <text_body name="label" width="0" flex_grow="1" text="$label" translation_tag="$label_tag" long_mode="wrap"/>
+    <text_muted name="value" width="content" bind_text="storage_${key}_value" style_text_align="right"/>
+    <ui_button name="storage_clean_${key}"
+               width="content" height="#button_height" style_min_width="64" variant="secondary" text="Clean up">
+      <bind_flag_if_eq subject="storage_${key}_clean" flag="hidden" ref_value="0"/>
+      <event_cb trigger="clicked" callback="on_storage_clean_clicked"/>
+    </ui_button>
+  </view>
+</component>

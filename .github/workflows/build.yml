@@ -158,24 +158,16 @@ jobs:
         git submodule status
         echo "Submodules initialized"
 
-    - name: Cache npm downloads
-      uses: actions/cache@v5
-      with:
-        path: ~/.npm
-        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-        restore-keys: |
-          npm-${{ runner.os }}-
-
-    - name: Install Node.js dependencies
-      uses: nick-fields/retry@v4
-      with:
-        timeout_minutes: 6
-        max_attempts: 3
-        command: npm install
-
+    # The app and test objects of one commit fill about 1.8G compressed. When a
+    # run's misses push the cache past its ceiling, ccache evicts the entries
+    # oldest by mtime, and mid-build those are the restored test objects the
+    # app build has not reached yet. 4G holds the restored generation plus a
+    # run's misses; "Trim ccache" below cuts the saved cache back to what this
+    # run used, so the saved generation does not grow.
     - name: Configure ccache
       run: |
-        ccache --set-config=max_size=2G
+        echo "CCACHE_RUN_START=$(date +%s)" >> "$GITHUB_ENV"
+        ccache --set-config=max_size=4G
         ccache --set-config=compression=true
         # Depend mode: resolve cache entries from the compiler's own -MMD
         # dependency output instead of preprocessing each TU first. Worth
@@ -219,6 +211,14 @@ jobs:
     # crowds out the entries every push restores from. A work branch still gets a
     # warm start: the `ccache-ubuntu-22.04-` prefix above resolves to the default
     # branch's generation, which is readable from every ref.
+    # A hit refreshes an entry's mtime, so everything older than this job is
+    # an entry no compile of this commit used.
+    - name: Trim ccache
+      if: always()
+      run: |
+        ccache --evict-older-than "$(( $(date +%s) - CCACHE_RUN_START + 60 ))s"
+        ccache -s | grep -i 'cache size'
+
     - name: Save ccache
       if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
       uses: actions/cache/save@v5
@@ -240,20 +240,21 @@ jobs:
       timeout-minutes: 5
       run: ./scripts/smoke-headless.sh
 
-    # The shell suite is the only place installer/download/bats behavior is
-    # verified; without this step those changes ride to the release gate
-    # untested (two CI-green reds landed that way on 2026-09-01). Same recipe
-    # release.yml runs: bats via npm, suite via make test-shell. Runs here in
-    # compile-ubuntu because the patched submodules the gate tests read are
-    # already in place after the build steps above.
-    - name: Apply submodule patches
-      run: make apply-patches
-
+    # The whole shell suite runs in the test-shell job, before this one starts.
+    # Only the files that drive the built app skip there (each calls
+    # require_app, tests/shell/helpers.bash), so they run here, against the
+    # binary this job just linked.
     - name: Install bats
       run: sudo npm install -g bats
 
-    - name: Run shell tests
-      run: make test-shell
+    - name: Run shell tests that need the built app
+      run: |
+        files=$(grep -lE '^[[:space:]]*require_app[[:space:]]' tests/shell/*.bats)
+        if [ -z "$files" ]; then
+          echo "::error::no shell test file needs the built app; this step would run nothing"
+          exit 1
+        fi
+        bats $files
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v7
@@ -264,11 +265,19 @@ jobs:
           build/bin/helix-tests
         retention-days: 7
 
+  # The unit suite is CPU-bound: 8 shards on one 4-core runner kept every core
+  # busy to the end, so each leg runs half of the same 8-shard layout, one shard
+  # per core. The layout stays 8 because which tests share a process decides
+  # what a use-after-free corrupts, and land-gate's CI_SHARDS reproduces it.
   test-ubuntu:
-    name: Test (Ubuntu 22.04)
+    name: Test (Ubuntu 22.04, leg ${{ matrix.leg }})
     runs-on: ubuntu-22.04
     needs: compile-ubuntu
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [0, 1]
 
     steps:
     - name: Checkout repository
@@ -318,10 +327,11 @@ jobs:
     - name: Run unit tests
       timeout-minutes: 10
       run: |
-        NPROCS=$(( $(nproc) * 2 ))
-        echo "Running $NPROCS test shards in parallel..."
+        NPROCS=8
+        LEGS=2
+        echo "Running shards ${{ matrix.leg }}, $(( ${{ matrix.leg }} + LEGS )), ... of $NPROCS in parallel..."
         pids=""
-        for i in $(seq 0 $((NPROCS-1))); do
+        for i in $(seq ${{ matrix.leg }} $LEGS $((NPROCS-1))); do
           # Subshell + pipefail: without both, $! is the sed at the end of the
           # pipeline and `wait` collects sed's status, so a failing shard exits 0.
           (set -o pipefail; ./build/bin/helix-tests "~[.] ~[slow]" --shard-count $NPROCS --shard-index $i 2>&1 | sed "s/^/[shard $i] /") &
@@ -337,12 +347,15 @@ jobs:
         fi
         echo "All tests passed"
 
+    # The Python suites run once, on leg 1; the unit shards are what is split.
     - name: Setup Python
+      if: matrix.leg == 1
       uses: actions/setup-python@v6
       with:
         python-version: '3.11'
 
     - name: Install Python test dependencies
+      if: matrix.leg == 1
       run: |
         python -m pip install --upgrade pip
         pip install pytest
@@ -370,11 +383,13 @@ jobs:
     # all, and moonraker-plugin/install.sh sat pointing at a config file that had
     # been deleted for months (prestonbrown/helixscreen#1268).
     - name: Run Moonraker plugin tests (pytest)
+      if: matrix.leg == 1
       timeout-minutes: 2
       run: pytest moonraker-plugin/tests/ -v
 
     # -m "not slow" leaves the minutes-long screen sweeps to nightly.yml.
     - name: Run out-of-process UI tests (pytest, excluding goldens)
+      if: matrix.leg == 1
       timeout-minutes: 5
       run: pytest tests/ui/ -v --ignore=tests/ui/test_screens.py -m "not slow"
 
@@ -412,7 +427,10 @@ jobs:
 
     - name: Install dependencies
       run: |
-        brew install sdl2 libusb ccache
+        brew install sdl2 libusb ccache make
+        # The Makefile needs GNU make >= 4.2; the runner's /usr/bin/make is Apple's 3.81.
+        # gnubin puts GNU make first as plain `make` for every later step and script.
+        echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
         # node/npm usually pre-installed on GitHub Actions macOS runners
 
     - name: Cache compiled dependencies
@@ -447,23 +465,9 @@ jobs:
         git submodule status
         echo "Submodules initialized"
 
-    - name: Cache npm downloads
-      uses: actions/cache@v5
-      with:
-        path: ~/.npm
-        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-        restore-keys: |
-          npm-${{ runner.os }}-
-
-    - name: Install Node.js dependencies
-      uses: nick-fields/retry@v4
-      with:
-        timeout_minutes: 6
-        max_attempts: 3
-        command: npm install
-
     - name: Configure ccache
       run: |
+        echo "CCACHE_RUN_START=$(date +%s)" >> "$GITHUB_ENV"
         ccache --set-config=max_size=2G
         ccache --set-config=compression=true
         ccache -z  # Reset stats for this run
@@ -482,6 +486,12 @@ jobs:
         make -j$(sysctl -n hw.ncpu)
         echo "HelixScreen built successfully"
         ccache -s
+
+    - name: Trim ccache
+      if: always()
+      run: |
+        ccache --evict-older-than "$(( $(date +%s) - CCACHE_RUN_START + 60 ))s"
+        ccache -s | grep -i 'cache size'
 
     - name: Save ccache
       if: always() && github.ref == 'refs/heads/main'
@@ -552,9 +562,22 @@ jobs:
     - name: Apply submodule patches
       run: make apply-patches
 
+    # The two ABIs compile one after the other, 17-20 minutes each with no
+    # cache. Restored from main's newest generation on every ref, saved from
+    # main only (see the ccache note in compile-ubuntu), and trimmed to the
+    # entries this job used. The key is not release.yml's: that cache holds
+    # release objects, which share nothing with a debug build.
+    - name: Set up ccache
+      uses: hendrikmuhs/ccache-action@v1.2.22
+      with:
+        key: android-debug-ubuntu-22.04
+        max-size: 3G
+        evict-old-files: job
+        save: ${{ github.ref == 'refs/heads/main' }}
+
     - name: Build Android APK (debug)
       working-directory: android
-      run: ./gradlew assembleDebug -PhelixAbis=arm64-v8a,x86_64
+      run: ./gradlew assembleDebug -PhelixAbis=arm64-v8a,x86_64 -PuseCcache -PhelixNoDebugInfo
 
     - name: Upload APK
       uses: actions/upload-artifact@v7
@@ -638,21 +661,6 @@ jobs:
         restore-keys: |
           ccache-x86-fbdev-
 
-    - name: Cache npm downloads
-      uses: actions/cache@v5
-      with:
-        path: ~/.npm
-        key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-        restore-keys: |
-          npm-${{ runner.os }}-
-
-    - name: Install Node.js dependencies
-      uses: nick-fields/retry@v4
-      with:
-        timeout_minutes: 6
-        max_attempts: 3
-        command: npm install
-
     - name: Configure ccache
       run: |
         ccache --set-config=max_size=2G
@@ -686,7 +694,7 @@ jobs:
   test-shell:
     name: Shell Tests (BATS)
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
     - name: Checkout repository
@@ -721,8 +729,57 @@ jobs:
     - name: Setup Python venv for translation and XML gates
       run: make venv-setup
 
+    # test_release_health.bats runs scripts/release-health.sh, which runs
+    # `npx vite-node` in server/telemetry-worker. Without that directory's
+    # node_modules, npx downloads vite-node from npm in the middle of the test,
+    # and a slow registry holds the whole suite's output behind it.
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: npm
+        cache-dependency-path: server/telemetry-worker/package-lock.json
+
+    - name: Install telemetry worker dependencies
+      working-directory: server/telemetry-worker
+      run: npm ci --no-audit --no-fund
+
+    # make test-shell runs the files in parallel, one per slot of
+    # `helix-claim jobs`; bare bats runs them one after another, which on this
+    # 4-core runner takes most of the job's timeout. A runner without GNU
+    # parallel would fall back to the serial run, so its absence is an error.
     - name: Run shell tests
-      run: bats tests/shell/
+      run: |
+        command -v parallel >/dev/null || { echo "::error::GNU parallel is missing: make test-shell would run bats serially"; exit 1; }
+        make test-shell BATS_REQUIRED=1
+
+  # The plugin runs inside each printer's own Moonraker, on Python 3.8 (K1C,
+  # Buildroot 2020.02) up to 3.13; test-ubuntu runs the suite on 3.11. This
+  # job runs it on the floor, which is what catches a 3.9+ stdlib call. Its
+  # dependencies are unpinned so pip picks the last releases that support 3.8.
+  test-plugin-py38:
+    name: Moonraker Plugin Tests (Python 3.8)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Setup Python 3.8
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.8'
+
+    - name: Install test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-asyncio
+
+    - name: Run Moonraker plugin tests (pytest)
+      timeout-minutes: 2
+      run: pytest moonraker-plugin/tests/ -v
 
   test-telemetry-worker:
     name: Telemetry Worker Tests (vitest)
@@ -735,25 +792,44 @@ jobs:
       with:
         submodules: false
 
+    # npm ci from the committed lockfile, with setup-node caching the
+    # downloads keyed on it, so a slow registry does not stall the install.
     - uses: actions/setup-node@v4
       with:
         node-version: '20'
+        cache: npm
+        cache-dependency-path: server/telemetry-worker/package-lock.json
 
-    # `npm install`, not `npm ci`: package-lock.json is gitignored repo-wide
-    # (.gitignore "Dependencies" block), so there is no lockfile to install
-    # from and nothing to key a cache on.
     - name: Install dependencies
       working-directory: server/telemetry-worker
-      run: npm install
+      run: npm ci --no-audit --no-fund
 
     - name: Run worker tests
       working-directory: server/telemetry-worker
       run: npm test
 
+  # Drop the generations this push superseded, as soon as its own are saved.
+  # Every save above lands in a job end post-step, so the prune has to be a job
+  # that needs them. Left to GitHub's LRU, the 10 GB budget evicts the
+  # ccache-release-* caches instead: they are read only by the nightly warm
+  # and a release, while these are read on every push. Keeps the newest
+  # generation per (ref, family) and never touches ccache-release-*.
+  # always(): a failed build still saved its partial cache, and the prune never
+  # deletes a family's newest entry.
+  prune-ccache:
+    name: Prune superseded ccaches
+    needs: [compile-ubuntu, build-macos, build-android, link-aux-binaries]
+    if: >-
+      ${{ always() && github.event_name == 'push'
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
+    uses: ./.github/workflows/cache-prune.yml
+    permissions:
+      actions: write
+
   build-status:
     name: Build Status
     runs-on: ubuntu-latest
-    needs: [compile-ubuntu, test-ubuntu, build-macos, build-android, link-aux-binaries, test-shell, test-telemetry-worker]
+    needs: [compile-ubuntu, test-ubuntu, build-macos, build-android, link-aux-binaries, test-shell, test-plugin-py38, test-telemetry-worker]
     if: always()
 
     steps:
@@ -774,6 +850,7 @@ jobs:
         [ "${{ needs.build-macos.result }}" = "success" ]           || failed+=("macOS build")
         [ "${{ needs.build-android.result }}" = "success" ]         || failed+=("Android build")
         [ "${{ needs.test-shell.result }}" = "success" ]            || failed+=("Shell tests")
+        [ "${{ needs.test-plugin-py38.result }}" = "success" ]      || failed+=("Plugin tests on Python 3.8")
         [ "${{ needs.test-telemetry-worker.result }}" = "success" ] || failed+=("Telemetry worker tests")
         [ "${{ needs.link-aux-binaries.result }}" = "success" ]     || failed+=("splash/watchdog link check")
 

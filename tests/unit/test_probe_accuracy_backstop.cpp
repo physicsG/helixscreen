@@ -20,10 +20,14 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/probe_overlay_test_access.h"
+#include "app_globals.h"
+#include "moonraker_api.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
+#include "static_panel_registry.h"
 
 #include <string>
 
@@ -84,4 +88,29 @@ TEST_CASE_METHOD(ProbeAccuracyFixture, "a backstop for a superseded run leaves t
 
     CHECK(ProbeOverlayTestAccess::accuracy_backstop_timer(overlay_) == nullptr);
     CHECK(ProbeOverlayTestAccess::accuracy_state(overlay_) == 1); // still PROBING
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "a probe accuracy error line shows the firmware's message",
+                 "[probe][firmware_error_envelope]") {
+    MoonrakerClientMock client{MoonrakerClientMock::PrinterType::VORON_24};
+    helix::PrinterState state;
+    MoonrakerAPI api{client, state};
+    client.force_next_gcode_dropped_response("PROBE_ACCURACY");
+
+    ProbeOverlay& overlay = get_global_probe_overlay();
+    overlay.init_subjects();
+    overlay.set_api(&api);
+    overlay.handle_probe_accuracy();
+    REQUIRE(ProbeOverlayTestAccess::accuracy_state(overlay) == 1); // PROBING
+
+    client.dispatch_gcode_response(
+        R"(!! {"coded": "0003-0522-0002-0008", "oneshot": 0, "msg":"Lost communication with MCU 'e0'"})");
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK(ProbeOverlayTestAccess::accuracy_state(overlay) == 3); // ERROR
+    CHECK(ProbeOverlayTestAccess::accuracy_error(overlay) == "Lost communication with MCU 'e0'");
+
+    overlay.set_api(nullptr);
+    StaticPanelRegistry::instance().destroy_all();
+    helix::ui::UpdateQueue::instance().drain();
 }

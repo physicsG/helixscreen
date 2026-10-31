@@ -23,9 +23,6 @@ using namespace helix;
 #ifndef HELIX_MAX_FONT_TIER
 #define HELIX_MAX_FONT_TIER 6 // default: all tiers (micro=0 .. xxlarge=6)
 #endif
-#ifndef HELIX_HAS_HIDPI_FONTS
-#define HELIX_HAS_HIDPI_FONTS 0 // conservative: assume the 48/64 faces are not linked
-#endif
 
 // External subject for enabling/disabling Next button
 extern lv_subject_t connection_test_passed;
@@ -35,7 +32,7 @@ extern lv_subject_t connection_test_passed;
 // ============================================================================
 
 // Welcome text in each supported language (cycles during animation)
-static const char* WELCOME_TRANSLATIONS[] = {
+static const char* kWelcomeTranslations[] = {
     "Welcome!",          // en
     "Willkommen!",       // de
     "Bienvenue!",        // fr
@@ -46,16 +43,16 @@ static const char* WELCOME_TRANSLATIONS[] = {
     "欢迎！",            // zh
     "ようこそ！",        // ja
 };
-static constexpr int WELCOME_COUNT = 9;
+static constexpr int kWelcomeCount = 9;
 
 // Language codes for saving to config (matches button order in XML)
-static const char* LANGUAGE_CODES[] = {"en", "de", "fr", "es", "ru", "pt", "it", "zh", "ja"};
+static const char* kLanguageCodes[] = {"en", "de", "fr", "es", "ru", "pt", "it", "zh", "ja"};
 
 // Timer period for cycling welcome text
-static constexpr uint32_t WELCOME_CYCLE_MS = 2500;
+static constexpr uint32_t kWelcomeCycleMs = 2500;
 
 // Animation durations
-static constexpr int32_t CROSSFADE_DURATION_MS = 150;
+static constexpr int32_t kCrossfadeDurationMs = 150;
 
 namespace helix {
 
@@ -148,7 +145,7 @@ void WizardLanguageChooserStep::init_subjects() {
     spdlog::debug("[{}] Initializing subjects", get_name());
 
     // Initialize welcome text subject with string buffer
-    strncpy(welcome_buffer_, WELCOME_TRANSLATIONS[0], sizeof(welcome_buffer_) - 1);
+    strncpy(welcome_buffer_, kWelcomeTranslations[0], sizeof(welcome_buffer_) - 1);
     welcome_buffer_[sizeof(welcome_buffer_) - 1] = '\0';
     UI_MANAGED_SUBJECT_STRING(welcome_text_, welcome_buffer_, welcome_buffer_,
                               "wizard_welcome_text", subjects_);
@@ -216,8 +213,8 @@ static void on_language_selected(lv_event_t* e) {
         return;
     }
 
-    spdlog::info("[Wizard Language Chooser] Language selected: {} ({})", LANGUAGE_CODES[index],
-                 WELCOME_TRANSLATIONS[index % WELCOME_COUNT]);
+    spdlog::info("[Wizard Language Chooser] Language selected: {} ({})", kLanguageCodes[index],
+                 kWelcomeTranslations[index % kWelcomeCount]);
 
     // Update visual selection
     lv_obj_t* clicked_btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
@@ -225,7 +222,7 @@ static void on_language_selected(lv_event_t* e) {
 
     // Apply language immediately via SystemSettingsManager (hot-reload)
     // This updates the subject, calls lv_translation_set_language(), and persists to config
-    SystemSettingsManager::instance().set_language(LANGUAGE_CODES[index]);
+    SystemSettingsManager::instance().set_language(kLanguageCodes[index]);
 
     // Refresh the wizard header with new translations
     ui_wizard_refresh_header_translations();
@@ -261,8 +258,8 @@ void WizardLanguageChooserStep::cycle_timer_cb(lv_timer_t* timer) {
 
 void WizardLanguageChooserStep::cycle_welcome_text() {
     // Advance to next language
-    current_welcome_index_ = (current_welcome_index_ + 1) % WELCOME_COUNT;
-    const char* new_text = WELCOME_TRANSLATIONS[current_welcome_index_];
+    current_welcome_index_ = (current_welcome_index_ + 1) % kWelcomeCount;
+    const char* new_text = kWelcomeTranslations[current_welcome_index_];
 
     spdlog::trace("[{}] Cycling to welcome text: {}", get_name(), new_text);
 
@@ -304,7 +301,7 @@ void WizardLanguageChooserStep::animate_crossfade(const char* new_text) {
     lv_anim_init(&fade_out);
     lv_anim_set_var(&fade_out, welcome_header);
     lv_anim_set_values(&fade_out, LV_OPA_COVER, LV_OPA_TRANSP);
-    lv_anim_set_duration(&fade_out, CROSSFADE_DURATION_MS);
+    lv_anim_set_duration(&fade_out, kCrossfadeDurationMs);
     lv_anim_set_path_cb(&fade_out, lv_anim_path_ease_in);
     lv_anim_set_exec_cb(&fade_out, [](void* obj, int32_t value) {
         lv_obj_set_style_opa(static_cast<lv_obj_t*>(obj), static_cast<lv_opa_t>(value),
@@ -324,7 +321,7 @@ void WizardLanguageChooserStep::animate_crossfade(const char* new_text) {
             lv_anim_init(&fade_in);
             lv_anim_set_var(&fade_in, header);
             lv_anim_set_values(&fade_in, LV_OPA_TRANSP, LV_OPA_COVER);
-            lv_anim_set_duration(&fade_in, CROSSFADE_DURATION_MS);
+            lv_anim_set_duration(&fade_in, kCrossfadeDurationMs);
             lv_anim_set_path_cb(&fade_in, lv_anim_path_ease_out);
             lv_anim_set_exec_cb(&fade_in, [](void* obj, int32_t value) {
                 lv_obj_set_style_opa(static_cast<lv_obj_t*>(obj), static_cast<lv_opa_t>(value),
@@ -380,9 +377,9 @@ lv_obj_t* WizardLanguageChooserStep::create(lv_obj_t* parent) {
     }
 
     // Start the welcome text cycling timer
-    lv_timer_t* timer = lv_timer_create(cycle_timer_cb, WELCOME_CYCLE_MS, this);
+    lv_timer_t* timer = lv_timer_create(cycle_timer_cb, kWelcomeCycleMs, this);
     cycle_timer_.reset(timer);
-    spdlog::debug("[{}] Started welcome text cycle timer ({}ms)", get_name(), WELCOME_CYCLE_MS);
+    spdlog::debug("[{}] Started welcome text cycle timer ({}ms)", get_name(), kWelcomeCycleMs);
 
     spdlog::debug("[{}] Screen created successfully", get_name());
     return screen_root_;

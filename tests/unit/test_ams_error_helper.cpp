@@ -86,8 +86,8 @@ TEST_CASE("a position error keeps the raw index in the technical detail", "[ams]
 }
 
 TEST_CASE("the suggested span is 1-based", "[ams][numbering]") {
-    // max_slot arrives 0-based at every call site (NUM_PORTS - 1,
-    // total_slots - 1, CFS_MAX_SLOTS - 1), so a four-position backend passes 3
+    // max_slot arrives 0-based at every call site (kNumPorts - 1,
+    // total_slots - 1, kCfsMaxSlots - 1), so a four-position backend passes 3
     // and the user must be told 1-4, not 0-3 and not 1-3. The noun is not in
     // the suggestion: the user_msg prefix already names it, and a frame holding
     // it would need its adjective to agree with it.

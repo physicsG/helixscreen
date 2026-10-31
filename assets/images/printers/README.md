@@ -5,14 +5,28 @@ first-run configuration wizard (`src/ui/ui_wizard_printer_identify.cpp`), the Pr
 Image picker overlay (`src/ui/ui_overlay_printer_image.cpp`), and the home panel's
 printer widget (`src/ui/panel_widgets/printer_image_widget.cpp`).
 
-80 PNGs, ~27 MB. PNG is the only format here; nothing loads a `.jpg` or `.webp` from
+85 PNGs, ~27 MB. PNG is the only format here; nothing loads a `.jpg` or `.webp` from
 this directory.
 
 ## Which printer gets which image
 
 `assets/config/printer_database.json` owns that mapping — each entry's `image` field
-names a file in this directory. This README does not list them, because a
+names a file in this directory, and an optional `image_variants` list names alternates
+chosen by detected hardware (a K2 with a CFS on top shows `creality-k2-cfs.png`, a K2 Pro
+`creality-k2-pro-cfs.png`;
+`docs/devel/PRINTER_MANAGER.md` § Image Lookup). This README does not list them, because a
 hand-maintained list drifts from the database silently.
+
+A variant replaces the plain `image` when every condition in its `when` holds; the first
+matching variant wins, and none matching leaves the plain image. Three conditions exist:
+`filament_system`, which holds when a filament system of that kind (`cfs`, `afc`, ...) has
+at least one unit connected, so a backend that has registered but heard from no unit yet
+does not count; and `enclosure_top` (`true`/`false`), which follows the firmware's report
+of a removable top (a Snapmaker U1 with its top module fitted); and `chamber_heater`
+(`true`/`false`), whether the printer has a chamber heater. Two variants naming the same
+image show it when either holds. The home widget switches images live as units report in
+or drop out, as a top is fitted or removed, and as a heater is assigned. A
+user's own pick in the image picker always wins over both.
 
 ```bash
 scripts/check_printer_images.py --list   # entries whose image is not on disk
@@ -86,6 +100,18 @@ magick input.jpg -resize 800x800 -background none -gravity center output.png
 4. `scripts/trim_printer_images.py` to crop it to its content
 5. `scripts/check_printer_images.py` to confirm it resolves
 
+For a variant (the printer with optional hardware attached), save the art as
+`<plain image>-<hardware>.png` (`creality-k2-cfs.png`), run steps 4 and 5, tag it in
+`regions.json` under its own name (below), and add it to the entry's `image_variants`
+instead of replacing `image`:
+
+```json
+"image_variants": [{"when": {"filament_system": "cfs"}, "image": "creality-k2-cfs.png"}]
+```
+
+The `[printer_database][schema]` test fails on a condition key or value the app does not
+know, since such a variant would never match.
+
 ## Tagging parts for live callouts
 
 The home panel's printer widget pins live chips (nozzle, part fan, chamber, light, bed) onto
@@ -137,7 +163,7 @@ since a new photo of the same aspect has the same size. Reset tags deletes the e
 Users add their own without touching this directory:
 
 1. Drop a PNG/JPEG/BMP/GIF into `config/custom_images/` in the install directory
-2. Open the picker (Home Panel -> tap printer image -> Printer Manager -> tap image)
+2. Open the picker (Home Panel -> tap printer image, or Settings -> Printer; then tap the image in the Printer Manager)
 3. Custom images appear under the "Custom" section
 
 **Limits:** 5 MB, 2048x2048 (`MAX_FILE_SIZE` / `MAX_IMAGE_DIMENSION` in
@@ -145,6 +171,6 @@ Users add their own without touching this directory:
 `#PrinterImageManager::auto_import_raw_images` converts each raw file to `-300.bin`
 and `-150.bin` beside it, so custom art skips the PNG decode that shipped art hits.
 
-Selection is stored as `"display.printer_image": "custom:<filename>"` (no extension);
-shipped art uses `"shipped:<name>"`, and an unset value means auto-detect from the
-detected printer type.
+Selection is stored per printer at `/printers/<id>/printer_image` as `"custom:<filename>"`
+(no extension); shipped art uses `"shipped:<name>"`, and an unset value means auto-detect
+from the detected printer type and its `image_variants`.

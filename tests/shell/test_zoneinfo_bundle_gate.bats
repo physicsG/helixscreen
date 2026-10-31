@@ -3,7 +3,7 @@
 #
 # Keeps the timezone picker and the bundled TZif database in sync.
 #
-# TIMEZONE_ENTRIES in src/system/display_settings_manager.cpp is the list the
+# kTimezoneEntries in src/system/display_settings_manager.cpp is the list the
 # user picks from. assets/zoneinfo/ is the TZif subset shipped for devices with
 # no system tzdata (Elegoo Centauri Carbon / OpenCentauri COSMOS). When a zone
 # is offered but not bundled, glibc silently resolves it to UTC — the picker
@@ -19,20 +19,20 @@ SRC="src/system/display_settings_manager.cpp"
 REGEN="scripts/regen_zoneinfo.sh"
 BUNDLE="assets/zoneinfo"
 
-# Extract the IANA ids from TIMEZONE_ENTRIES — the second string of each
+# Extract the IANA ids from kTimezoneEntries — the second string of each
 # {"Display (+0:00)", "Area/Location"} pair, between the array's braces.
 extract_ids() {
-    sed -n '/^static const TimezoneEntry TIMEZONE_ENTRIES\[\] = {/,/^};/p' "$SRC" |
+    sed -n '/^static const TimezoneEntry kTimezoneEntries\[\] = {/,/^};/p' "$SRC" |
         sed -n 's/.*{[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*[,}].*/\1/p'
 }
 
 # The display half of each pair — what the user actually reads in the dropdown.
 extract_labels() {
-    sed -n '/^static const TimezoneEntry TIMEZONE_ENTRIES\[\] = {/,/^};/p' "$SRC" |
+    sed -n '/^static const TimezoneEntry kTimezoneEntries\[\] = {/,/^};/p' "$SRC" |
         sed -n 's/.*{[[:space:]]*"\([^"]*\)"[[:space:]]*,[[:space:]]*"[^"]*"[[:space:]]*[,}].*/\1/p'
 }
 
-@test "TIMEZONE_ENTRIES parses to a non-empty id list" {
+@test "kTimezoneEntries parses to a non-empty id list" {
     run extract_ids
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -gt 20 ]
@@ -48,7 +48,7 @@ extract_labels() {
     done < <(extract_ids)
 
     if [ -n "$missing" ]; then
-        echo "Offered in TIMEZONE_ENTRIES but NOT in $BUNDLE/:$missing"
+        echo "Offered in kTimezoneEntries but NOT in $BUNDLE/:$missing"
         echo "Re-run: $REGEN"
         false
     fi
@@ -103,7 +103,7 @@ extract_labels() {
         local footer
         footer=$(tail -n 1 "$BUNDLE/$zone")
         [ "$posix" = "$footer" ] || bad="$bad $zone($posix != $footer)"
-    done < <(sed -n '/^static const TimezoneEntry TIMEZONE_ENTRIES\[\] = {/,/^};/p' "$SRC" |
+    done < <(sed -n '/^static const TimezoneEntry kTimezoneEntries\[\] = {/,/^};/p' "$SRC" |
         sed -n 's/.*{[[:space:]]*"[^"]*"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*,[[:space:]]*"\([^"]*\)"[[:space:]]*}.*/\1|\2/p')
 
     # A row without a POSIX column parses as an id but not as a triple.
@@ -119,7 +119,7 @@ extract_labels() {
     ids=$(extract_ids | LC_ALL=C sort)
     dups=$(printf '%s\n' "$ids" | uniq -d)
     if [ -n "$dups" ]; then
-        echo "Duplicate IANA ids in TIMEZONE_ENTRIES: $dups"
+        echo "Duplicate IANA ids in kTimezoneEntries: $dups"
         false
     fi
 }

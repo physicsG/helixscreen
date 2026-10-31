@@ -42,7 +42,7 @@ bool PluckDetector::learn_noise_floor(const std::vector<AccelSample>& quiet) {
     }
     noise_floor_ = window_rms(quiet.data(), quiet.size());
     spdlog::debug("[PluckDetector] noise floor {:.2f}, gate at {:.2f}", noise_floor_,
-                  noise_floor_ * MIN_RMS_RATIO);
+                  noise_floor_ * kMinRmsRatio);
     return noise_floor_ > 0.0f;
 }
 
@@ -54,7 +54,7 @@ float PluckDetector::rms_ratio(const AccelSample* samples, size_t count) const {
 }
 
 bool PluckDetector::passes_gate(const AccelSample* samples, size_t count) const {
-    return rms_ratio(samples, count) >= MIN_RMS_RATIO;
+    return rms_ratio(samples, count) >= kMinRmsRatio;
 }
 
 size_t PluckDetector::find_onset(const AccelSample* samples, size_t count) {
@@ -93,8 +93,8 @@ float PluckDetector::onset_rise(const AccelSample* samples, size_t count, float 
         return 0.0f;
     }
 
-    const size_t segment = static_cast<size_t>(sample_rate * ENVELOPE_SEGMENT_MS / 1000.0f);
-    const size_t lookback = static_cast<size_t>(ONSET_LOOKBACK_MS / ENVELOPE_SEGMENT_MS);
+    const size_t segment = static_cast<size_t>(sample_rate * kEnvelopeSegmentMs / 1000.0f);
+    const size_t lookback = static_cast<size_t>(kOnsetLookbackMs / kEnvelopeSegmentMs);
     if (segment == 0 || lookback == 0) {
         return 0.0f;
     }
@@ -134,7 +134,7 @@ float PluckDetector::onset_rise(const AccelSample* samples, size_t count, float 
 }
 
 bool PluckDetector::has_sharp_onset(const AccelSample* samples, size_t count, float sample_rate) {
-    return onset_rise(samples, count, sample_rate) >= MIN_ONSET_RISE;
+    return onset_rise(samples, count, sample_rate) >= kMinOnsetRise;
 }
 
 bool PluckDetector::ringdown_ready(const AccelSample* samples, size_t count, float sample_rate) {
@@ -143,8 +143,8 @@ bool PluckDetector::ringdown_ready(const AccelSample* samples, size_t count, flo
     }
     const size_t onset = find_onset(samples, count);
     const size_t post = count - onset;
-    const size_t min_post = static_cast<size_t>(sample_rate * MIN_RINGDOWN_MS / 1000.0f);
-    return post >= min_post && post >= static_cast<size_t>(DECAY_SEGMENTS);
+    const size_t min_post = static_cast<size_t>(sample_rate * kMinRingdownMs / 1000.0f);
+    return post >= min_post && post >= static_cast<size_t>(kDecaySegments);
 }
 
 float PluckDetector::decay_end_ratio(const AccelSample* samples, size_t count, float sample_rate) {
@@ -157,15 +157,15 @@ float PluckDetector::decay_end_ratio(const AccelSample* samples, size_t count, f
         return -1.0f;
     }
     const size_t post = count - onset;
-    const size_t min_post = static_cast<size_t>(sample_rate * MIN_DECAY_SPAN_MS / 1000.0f);
-    if (post < min_post || post < static_cast<size_t>(DECAY_SEGMENTS)) {
+    const size_t min_post = static_cast<size_t>(sample_rate * kMinDecaySpanMs / 1000.0f);
+    if (post < min_post || post < static_cast<size_t>(kDecaySegments)) {
         return -1.0f;
     }
 
-    const size_t segment = post / static_cast<size_t>(DECAY_SEGMENTS);
+    const size_t segment = post / static_cast<size_t>(kDecaySegments);
     const float first = window_rms(samples + onset, segment);
     const float last =
-        window_rms(samples + onset + static_cast<size_t>(DECAY_SEGMENTS - 1) * segment, segment);
+        window_rms(samples + onset + static_cast<size_t>(kDecaySegments - 1) * segment, segment);
     if (first <= 0.0f) {
         return -1.0f;
     }
@@ -187,15 +187,15 @@ float PluckDetector::decay_rise(const AccelSample* samples, size_t count, float 
     // what something still ramping up looks like. A caller that can wait for
     // more samples should ask ringdown_ready() first, which wants a good deal
     // more than this floor.
-    const size_t min_post = static_cast<size_t>(sample_rate * MIN_DECAY_SPAN_MS / 1000.0f);
-    if (post < min_post || post < static_cast<size_t>(DECAY_SEGMENTS)) {
+    const size_t min_post = static_cast<size_t>(sample_rate * kMinDecaySpanMs / 1000.0f);
+    if (post < min_post || post < static_cast<size_t>(kDecaySegments)) {
         return -1.0f;
     }
 
-    const size_t segment = post / static_cast<size_t>(DECAY_SEGMENTS);
+    const size_t segment = post / static_cast<size_t>(kDecaySegments);
     float worst = 0.0f;
     float previous = 0.0f;
-    for (int i = 0; i < DECAY_SEGMENTS; ++i) {
+    for (int i = 0; i < kDecaySegments; ++i) {
         const float rms = window_rms(samples + onset + static_cast<size_t>(i) * segment, segment);
         if (i > 0) {
             worst = std::max(worst, previous <= 0.0f ? std::numeric_limits<float>::infinity()
@@ -208,14 +208,14 @@ float PluckDetector::decay_rise(const AccelSample* samples, size_t count, float 
 
 bool PluckDetector::has_pluck_decay(const AccelSample* samples, size_t count, float sample_rate) {
     const float rise = decay_rise(samples, count, sample_rate);
-    if (rise < 0.0f || rise > MAX_DECAY_RISE) {
+    if (rise < 0.0f || rise > kMaxDecayRise) {
         return false;
     }
 
     // A steady tone passes the per-segment rise tolerance trivially - every
     // segment is the same. What it cannot do is end quieter than it started.
     const float ratio = decay_end_ratio(samples, count, sample_rate);
-    return ratio >= 0.0f && ratio <= MAX_DECAY_END_RATIO;
+    return ratio >= 0.0f && ratio <= kMaxDecayEndRatio;
 }
 
 bool PluckDetector::extract_ringdown(const std::vector<AccelSample>& buffer, float sample_rate,
@@ -224,8 +224,8 @@ bool PluckDetector::extract_ringdown(const std::vector<AccelSample>& buffer, flo
         return false;
     }
 
-    const size_t analyze_len = static_cast<size_t>(sample_rate * ANALYZE_MS / 1000.0f);
-    const size_t skip_len = static_cast<size_t>(sample_rate * SKIP_MS / 1000.0f);
+    const size_t analyze_len = static_cast<size_t>(sample_rate * kAnalyzeMs / 1000.0f);
+    const size_t skip_len = static_cast<size_t>(sample_rate * kSkipMs / 1000.0f);
     if (analyze_len == 0 || buffer.size() < analyze_len) {
         return false;
     }

@@ -13,7 +13,7 @@ struct PowerIconPair {
     const char* on_icon;
     const char* off_icon;
 };
-inline const PowerIconPair POWER_ICON_PAIRS[] = {
+inline const PowerIconPair kPowerIconPairs[] = {
     {"power_on", "power_off"},
     {"power_plug", "power_plug_off"},
     {"lightbulb_on", "lightbulb_outline"},
@@ -23,7 +23,7 @@ inline const PowerIconPair POWER_ICON_PAIRS[] = {
 /// Map an off-variant icon name to its on-variant (e.g., "fan_off" -> "fan").
 /// Returns the input unchanged if it's not an off-variant.
 inline const char* power_icon_to_on_variant(const char* icon) {
-    for (const auto& pair : POWER_ICON_PAIRS) {
+    for (const auto& pair : kPowerIconPairs) {
         if (std::strcmp(icon, pair.off_icon) == 0)
             return pair.on_icon;
     }
@@ -40,7 +40,7 @@ inline const char* power_icon_to_on_variant(const char* icon) {
 inline const char* power_resolve_icon_for_state(const char* base_icon, int status) {
     if (status < 0 || status == 1)
         return base_icon;
-    for (const auto& pair : POWER_ICON_PAIRS) {
+    for (const auto& pair : kPowerIconPairs) {
         if (std::strcmp(base_icon, pair.on_icon) == 0)
             return pair.off_icon;
     }

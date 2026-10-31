@@ -12,6 +12,7 @@
 #pragma once
 
 // LVGL core headers
+#include "helix_features.h"
 #include "lvgl/lvgl.h"
 
 // Helix XML engine (extracted from LVGL, standalone since v9.5 removed XML)

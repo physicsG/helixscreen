@@ -18,7 +18,7 @@ namespace batch_feeding {
 /// of the config's spelling; the status object key is not (see
 /// macro_config_name()). Every site that ends a firmware batch sends this, so
 /// a copy drifting strands the interlock.
-inline constexpr const char* END_GCODE = "AUTO_FEEDING_BATCH ACTION=END";
+inline constexpr const char* kEndGcode = "AUTO_FEEDING_BATCH ACTION=END";
 
 /**
  * @brief Connect-time cleanup of a stranded AUTO_FEEDING_BATCH interlock

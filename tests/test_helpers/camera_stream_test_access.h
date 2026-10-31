@@ -8,6 +8,10 @@
 
 #include "camera_stream.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -29,7 +33,7 @@ class CameraStreamTestAccess {
   public:
     /// Consecutive stream failures the worker tolerates before giving up.
     static constexpr int max_stream_failures() {
-        return CameraStream::MAX_STREAM_FAILURES;
+        return CameraStream::kMaxStreamFailures;
     }
 
     /// Spawn the worker on a real std::thread (stored in `stream_thread_`,
@@ -46,7 +50,7 @@ class CameraStreamTestAccess {
         // false, so no request is ever built from this URL.
         s.stream_url_ = "http://127.0.0.1:9/never-contacted";
         s.snapshot_url_.clear();
-        s.stream_fail_count_ = CameraStream::MAX_STREAM_FAILURES;
+        s.stream_fail_count_ = CameraStream::kMaxStreamFailures;
         s.running_.store(true);
         s.stream_thread_ = std::thread(&CameraStream::stream_thread_func, &s);
     }
@@ -65,9 +69,27 @@ class CameraStreamTestAccess {
     static void run_worker_inline_with_snapshot(CameraStream& s, const std::string& snapshot_url) {
         s.stream_url_ = "http://127.0.0.1:9/never-contacted";
         s.snapshot_url_ = snapshot_url;
-        s.stream_fail_count_ = CameraStream::MAX_STREAM_FAILURES;
+        s.stream_fail_count_ = CameraStream::kMaxStreamFailures;
         s.running_.store(true);
         s.stream_thread_func();
+    }
+
+    /// Consecutive failed snapshots tolerated before the stream reports an error.
+    static constexpr int max_snapshot_failures() {
+        return CameraStream::kMaxSnapshotFailures;
+    }
+
+    /// Run one snapshot fetch of @p snapshot_url on the calling thread, as the
+    /// poll loop does, with the given error and frame callbacks.
+    static void fetch_snapshot_once(CameraStream& s, const std::string& snapshot_url,
+                                    CameraStream::ErrorCallback on_error,
+                                    CameraStream::FrameCallback on_frame = nullptr) {
+        s.snapshot_url_ = snapshot_url;
+        s.on_error_ = std::move(on_error);
+        s.on_frame_ = std::move(on_frame);
+        s.running_.store(true);
+        s.fetch_snapshot();
+        s.running_.store(false);
     }
 
     /// Ask a worker parked in run_worker_inline_with_snapshot() to unwind.
@@ -99,6 +121,33 @@ class CameraStreamTestAccess {
     /// over a joinable one is std::terminate, so start() must reap it.
     static bool worker_joinable(const CameraStream& s) {
         return s.stream_thread_.joinable();
+    }
+
+    /// Shorten how long stop() waits for the worker before detaching it.
+    static void set_join_timeout(CameraStream& s, std::chrono::milliseconds timeout) {
+        s.join_timeout_ = timeout;
+    }
+
+    /// Spawn a worker that ignores stop() and parks until @p release is set,
+    /// standing in for a stream thread wedged in a request that will not cancel.
+    /// It touches nothing of @p s, so it may outlive the object; it sets
+    /// @p exited as it returns.
+    static void spawn_wedged_worker(CameraStream& s, std::shared_ptr<std::atomic<bool>> release,
+                                    std::shared_ptr<std::atomic<bool>> exited) {
+        s.running_.store(true);
+        s.stream_thread_ = std::thread([release, exited] {
+            while (!release->load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            exited->store(true);
+        });
+    }
+
+    /// Byte range of `stream_thread_` within a CameraStream, for checking that
+    /// nothing writes to the object's storage after it is gone.
+    static size_t worker_offset(const CameraStream& s) {
+        return static_cast<size_t>(reinterpret_cast<const unsigned char*>(&s.stream_thread_) -
+                                   reinterpret_cast<const unsigned char*>(&s));
     }
 
   private:

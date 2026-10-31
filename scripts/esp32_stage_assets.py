@@ -28,12 +28,14 @@ not larger, once packed.
 """
 
 import argparse
+import json
 import re
 import shutil
 import sys
 from pathlib import Path
 
 import esp32_printer_images
+from translation_packs import MERGED_CATALOGUE, UNLOADED_TRANSLATION_FILES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = REPO_ROOT / "firmware" / "helixscreen-esp32" / "build" / "littlefs_staging"
@@ -47,8 +49,6 @@ UI_XML_OVERRIDES_DIR = REPO_ROOT / "firmware" / "helixscreen-esp32" / "ui_xml_ov
 
 # ui_xml subtrees/files excluded from staging.
 EXCLUDED_XML_DIRS = ("micro",)
-EXCLUDED_XML_FILES = ("translations.xml",)  # merged file; per-language files ship instead
-IDENTITY_LOCALE = "en"  # the source language: its pack maps each tag to itself
 # Languages that need a CJK font. The firmware builds HELIX_HAS_CJK=0 and ships
 # no CJK face, so their packs would render as empty boxes; --with-cjk is for a
 # build that ships the font.
@@ -161,7 +161,7 @@ def stage_ui_xml(ui_xml_dir: Path, out_dir: Path) -> int:
             continue
         if rel.parts and rel.parts[0] == "translations":
             continue  # handled by stage_translations
-        if src.name in EXCLUDED_XML_FILES:
+        if src.name == MERGED_CATALOGUE:
             continue
         text = src.read_text(encoding="utf-8")
         minified = minify_xml(text)
@@ -208,7 +208,7 @@ def stage_translations(ui_xml_dir: Path, out_dir: Path,
     included: list[str] = []
     total = 0
     for src in sorted(translations_dir.glob("*.xml")):
-        if src.name in EXCLUDED_XML_FILES or src.stem == IDENTITY_LOCALE:
+        if src.name in UNLOADED_TRANSLATION_FILES:
             continue
         if src.stem in CJK_LOCALES and not with_cjk:
             continue
@@ -221,9 +221,21 @@ def stage_translations(ui_xml_dir: Path, out_dir: Path,
     return total, included
 
 
+def _stage_minified_json(src: Path, dest: Path) -> int:
+    """Write src to dest as compact JSON; returns the bytes written. A file that
+    does not parse raises, since the firmware would silently ignore it."""
+    text = json.dumps(json.loads(src.read_text(encoding="utf-8")),
+                      separators=(",", ":"), ensure_ascii=False)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding="utf-8")
+    return len(text.encode("utf-8"))
+
+
 def stage_config(assets_dir: Path, out_dir: Path) -> int:
     """Copy assets/config/{printer_database.json, printing_tips.json, themes/,
-    presets/*.json, print_start_profiles/default.json}. Returns total raw bytes."""
+    presets/*.json, print_start_profiles/default.json, default_layout.json
+    (minified), panel_widgets/<preset>/home.json seeds when present}. Returns
+    total raw bytes."""
     total = 0
     config_dir = assets_dir / "config"
     dest_config = out_dir / "assets" / "config"
@@ -239,6 +251,15 @@ def stage_config(assets_dir: Path, out_dir: Path) -> int:
         (dest_config / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest_config / name)
         total += src.stat().st_size
+
+    # PanelWidgetConfig resolves the home-layout tables and preset seeds through
+    # find_readable(), which falls back to this bundle.
+    default_layout = config_dir / "default_layout.json"
+    if default_layout.is_file():
+        total += _stage_minified_json(default_layout, dest_config / "default_layout.json")
+    for seed in sorted((config_dir / "panel_widgets").glob("*/home.json")):
+        rel = seed.relative_to(config_dir)
+        total += _stage_minified_json(seed, dest_config / rel)
 
     themes_src = config_dir / "themes"
     if themes_src.is_dir():
@@ -369,7 +390,7 @@ def main() -> int:
     print(f"  ui_xml (minified, excl. micro/ + translations.xml): {format_bytes(ui_xml_bytes)}")
     print(f"  translations ({', '.join(included_langs) if included_langs else 'none'}): "
           f"{format_bytes(translations_bytes)}")
-    print(f"  assets/config (printer_database, printing_tips, themes, default print-start profile): {format_bytes(config_bytes)}")
+    print(f"  assets/config (printer_database, printing_tips, themes, default print-start profile, default home layout): {format_bytes(config_bytes)}")
     print(f"  assets/filaments.json: {format_bytes(filaments_bytes)}")
     print(f"  assets/images/printers (build/esp32_printer_images/): "
           f"{format_bytes(printer_images_bytes)}")

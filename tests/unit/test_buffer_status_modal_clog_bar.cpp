@@ -101,3 +101,32 @@ TEST_CASE_METHOD(LVGLUITestFixture, "buffer_status_modal hides the bar with no d
     lv_obj_update_layout(dialog);
     CHECK_FALSE(lv_obj_has_flag(bar_root, LV_OBJ_FLAG_HIDDEN));
 }
+
+TEST_CASE_METHOD(LVGLUITestFixture, "clog bar: one status glyph per severity, Off included",
+                 "[modals][buffer_status][clog][motion][1823]") {
+    auto& ams = AmsState::instance();
+    ams.init_subjects(true);
+    publish(static_cast<int>(ui::ClogMeterMode::Motion), ui::kMotionDisarmedValue, 0, 0);
+
+    lv_obj_t* dialog = build_modal(test_screen());
+    REQUIRE(dialog != nullptr);
+    struct Glyph {
+        const char* name;
+        ui::ClogMeterStatus status;
+    };
+    const Glyph glyphs[] = {{"clog_bar_status_off", ui::ClogMeterStatus::Off},
+                            {"clog_bar_status_ok", ui::ClogMeterStatus::Ok},
+                            {"clog_bar_status_warning", ui::ClogMeterStatus::Warning},
+                            {"clog_bar_status_fault", ui::ClogMeterStatus::Fault}};
+    for (const auto& shown : glyphs) {
+        lv_subject_set_int(ams.get_clog_meter_status_subject(), static_cast<int>(shown.status));
+        for (const auto& g : glyphs) {
+            lv_obj_t* obj = lv_obj_find_by_name(dialog, g.name);
+            REQUIRE(obj != nullptr);
+            INFO("status " << static_cast<int>(shown.status) << ", glyph " << g.name);
+            CHECK(lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN) == (g.status != shown.status));
+        }
+    }
+    lv_subject_set_int(ams.get_clog_meter_status_subject(), 0);
+    publish(static_cast<int>(ui::ClogMeterMode::None), 0, 0, 0);
+}

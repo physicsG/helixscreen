@@ -14,11 +14,16 @@
 
 using namespace helix::ui::tray;
 using Catch::Approx;
+using helix::ui::ams_stagger_label_width;
+using helix::ui::ams_stagger_row;
+using helix::ui::ams_stagger_row_height;
+using helix::ui::ams_stepper_horizontal;
+using helix::ui::AmsLabelRow;
 
 namespace {
 
 constexpr float PI = 3.14159265358979f;
-constexpr float FLANGE_RY = 0.42f * 61;
+constexpr float kFlangeRy = 0.42f * 61;
 
 TrayBox reference_box() {
     const float dz = box_depth(61);
@@ -36,7 +41,7 @@ TEST_CASE("tray projection: depth, rise and the skew", "[ams][tray]") {
     const TrayBox b = reference_box();
     CHECK(b.depth == Approx(56.364).margin(0.001));
     CHECK(b.rise == 5);
-    CHECK(DEPTH_SKEW * b.depth == Approx(25.364).margin(0.001));
+    CHECK(kDepthSkew * b.depth == Approx(25.364).margin(0.001));
     check_point(proj(b, 0, 0, 0), 0, 0);
     check_point(proj(b, 0, 0, b.depth), 25.364f, -5);
 }
@@ -61,23 +66,23 @@ TEST_CASE("tray projection: the box faces", "[ams][tray]") {
 
 TEST_CASE("tray projection: spools stand on the floor", "[ams][tray]") {
     const TrayBox b = reference_box();
-    CHECK(spool_front_cy(b, FLANGE_RY) == Approx(98.38).margin(0.001));
-    const PointF c = spool_center(b, 58, FLANGE_RY);
+    CHECK(spool_front_cy(b, kFlangeRy) == Approx(98.38).margin(0.001));
+    const PointF c = spool_center(b, 58, kFlangeRy);
     check_point(c, 70.682f, 95.88f);
     // The spool's bottom lies below the front-wall top: the wall covers it.
-    CHECK(c.y + FLANGE_RY > b.ft);
+    CHECK(c.y + kFlangeRy > b.ft);
 }
 
 TEST_CASE("tray projection: the lid clears the spools by one pixel", "[ams][tray]") {
     const TrayBox b = reference_box();
-    const float lid_h = lid_height(b, FLANGE_RY);
+    const float lid_h = lid_height(b, kFlangeRy);
     CHECK(lid_h == Approx(24.24).margin(0.001));
     check_point(cap_point(b, lid_h, 392, PI), 392, 101);
     check_point(cap_point(b, lid_h, 392, 0), 417.364f, 86);
     const PointF crest = cap_point(b, lid_h, 392, PI / 2);
     check_point(crest, 404.682f, 69.26f);
-    const PointF spool = spool_center(b, 58, FLANGE_RY);
-    CHECK(spool.y - FLANGE_RY - crest.y == Approx(1).margin(0.001));
+    const PointF spool = spool_center(b, 58, kFlangeRy);
+    CHECK(spool.y - kFlangeRy - crest.y == Approx(1).margin(0.001));
 
     // The hull's top is above the mid-depth crest: the chord slopes up to the back.
     CHECK(unit_top_y(b, lid_h, true) == Approx(68.13).margin(0.01));
@@ -86,7 +91,7 @@ TEST_CASE("tray projection: the lid clears the spools by one pixel", "[ams][tray
 
 TEST_CASE("tray projection: the cap profile runs front to back above its chord", "[ams][tray]") {
     const TrayBox b = reference_box();
-    const float lid_h = lid_height(b, FLANGE_RY);
+    const float lid_h = lid_height(b, kFlangeRy);
     PointF pts[17];
     REQUIRE(cap_polyline(b, lid_h, 392, pts, 17) == 17);
     check_point(pts[0], 392, 101);
@@ -105,19 +110,19 @@ TEST_CASE("tray projection: the cap profile runs front to back above its chord",
 
 TEST_CASE("tray projection: one diffuse sheen band", "[ams][tray]") {
     const TrayBox b = reference_box();
-    const float lid_h = lid_height(b, FLANGE_RY);
+    const float lid_h = lid_height(b, kFlangeRy);
     check_point(cap_point(b, lid_h, 10, 112 * PI / 180), 17.931f, 73.835f);
     check_point(cap_point(b, lid_h, 392, 112 * PI / 180), 399.931f, 73.835f);
 
     SheenSpan span{};
-    SheenRow rows[SHEEN_MAX_ROWS];
+    SheenRow rows[kSheenMaxRows];
     const int n = sheen_rows(b, lid_h, 0.26f, span, rows);
     CHECK(span.x0 == Approx(37.931).margin(0.001));
     CHECK(span.full0 == Approx(107.931).margin(0.001));
     CHECK(span.full1 == Approx(259.931).margin(0.001));
     CHECK(span.x1 == Approx(369.931).margin(0.001));
     REQUIRE(n > 0);
-    REQUIRE(n <= SHEEN_MAX_ROWS);
+    REQUIRE(n <= kSheenMaxRows);
     auto opa_at = [&](int k) {
         for (int i = 0; i < n; ++i)
             if (std::fabs(rows[i].y - (73.835f + k)) < 0.01f)
@@ -172,12 +177,12 @@ TEST_CASE("tray projection: per-lane lids meet the box corners", "[ams][tray]") 
     row.fl = slots[0] - h;
     row.fr = slots[3] + h;
     CHECK(slots[0] - h == Approx(row.fl));
-    const float lid_h = lid_height(row, FLANGE_RY);
+    const float lid_h = lid_height(row, kFlangeRy);
     const PointF last_cap_back = cap_point(row, lid_h, slots[3] + h, 0);
     const PointF br_t = tray_faces(row).back_wall[1];
     check_point(last_cap_back, br_t.x, br_t.y);
     // A lid's right cap [x+h, x+h+S] overlaps the next lid's left end by S/2 at most.
-    const float s = DEPTH_SKEW * b.depth;
+    const float s = kDepthSkew * b.depth;
     const float overlap = (slots[0] + h + s) - (slots[1] - h);
     CHECK(overlap <= s / 2 + 0.001f);
 }
@@ -221,4 +226,109 @@ TEST_CASE("slot layout: a pitch cap holds up to four slots, centered", "[ams][tr
     // Five or more overlap as before; the cap does not apply.
     CHECK(calculate_ams_slot_layout(470, 8, 72).slot_width ==
           calculate_ams_slot_layout(470, 8).slot_width);
+}
+
+TEST_CASE("stagger rows: 1.5 lines from the medium breakpoint up", "[ams][tray][stagger]") {
+    CHECK(ams_stagger_row_height(22, UiBreakpoint::Medium) == 33);
+    CHECK(ams_stagger_row_height(22, UiBreakpoint::Large) == 33);
+    CHECK(ams_stagger_row_height(26, UiBreakpoint::XXLarge) == 39);
+}
+
+TEST_CASE("stagger rows: one line apart below the medium breakpoint", "[ams][tray][stagger]") {
+    CHECK(ams_stagger_row_height(15, UiBreakpoint::Micro) == 15);
+    CHECK(ams_stagger_row_height(15, UiBreakpoint::Tiny) == 15);
+    CHECK(ams_stagger_row_height(18, UiBreakpoint::Small) == 18);
+}
+
+TEST_CASE("stagger rows never overlap their own line", "[ams][tray][stagger]") {
+    for (int lh = 8; lh <= 40; ++lh) {
+        for (int bp = 0; bp <= 6; ++bp)
+            CHECK(ams_stagger_row_height(lh, as_breakpoint(bp)) >= lh);
+    }
+}
+
+TEST_CASE("stagger rows: below medium the lanes alternate between two rows",
+          "[ams][tray][stagger]") {
+    for (int bp = 0; bp <= 2; ++bp) {
+        for (int count : {5, 7, 8}) {
+            CAPTURE(bp, count);
+            for (int i = 0; i < count; ++i) {
+                const AmsLabelRow r = ams_stagger_row(i, count, as_breakpoint(bp));
+                CHECK(r.rows == 2);
+                CHECK(r.row == i % 2);
+            }
+        }
+    }
+}
+
+TEST_CASE("stagger rows: from medium up, three rows from seven lanes, two from five",
+          "[ams][tray][stagger]") {
+    // High, mid, low, mid, high...
+    const int three[] = {2, 1, 0, 1, 2, 1, 0, 1};
+    for (int i = 0; i < 8; ++i) {
+        CAPTURE(i);
+        const AmsLabelRow r = ams_stagger_row(i, 8, UiBreakpoint::Medium);
+        CHECK(r.rows == 3);
+        CHECK(r.row == three[i]);
+    }
+    CHECK(ams_stagger_row(0, 5, UiBreakpoint::Large).rows == 2);
+    CHECK(ams_stagger_row(0, 5, UiBreakpoint::Large).row == 1);
+    CHECK(ams_stagger_row(1, 5, UiBreakpoint::Large).row == 0);
+}
+
+TEST_CASE("stagger rows: four lanes or fewer stand in one row", "[ams][tray][stagger]") {
+    for (int bp = 0; bp <= 6; ++bp) {
+        const AmsLabelRow r = ams_stagger_row(3, 4, as_breakpoint(bp));
+        CHECK(r.rows == 1);
+        CHECK(r.row == 0);
+    }
+}
+
+TEST_CASE("stagger labels: below medium a label keeps to its two-lane span",
+          "[ams][tray][stagger]") {
+    CHECK(ams_stagger_label_width(30, UiBreakpoint::Micro, 4) == 56);
+    CHECK(ams_stagger_label_width(30, UiBreakpoint::Small, 4) == 56);
+    // From medium up labels are not narrowed.
+    CHECK(ams_stagger_label_width(30, UiBreakpoint::Medium, 4) == 0);
+    CHECK(ams_stagger_label_width(0, UiBreakpoint::Micro, 4) == 0);
+}
+
+TEST_CASE("lane badge: on the front face, inside the lane's lid edge", "[ams][tray][badge]") {
+    const TrayBox b = reference_box(); // front face y 101..126
+    SECTION("a wide pitch puts it at the lane's front bottom-right") {
+        const PointF p = lane_badge_origin(b, 100, 40, 20, 20, 2);
+        CHECK(p.x == Approx(118));
+        CHECK(p.y == Approx(104));
+        CHECK(p.y + 20 <= b.fb);
+        CHECK(p.y >= b.ft);
+    }
+    SECTION("a tight pitch centers it on the lane") {
+        const PointF p = lane_badge_origin(b, 100, 6, 16, 16, 2);
+        CHECK(p.x == Approx(92));
+        CHECK(p.y == Approx(108));
+    }
+    SECTION("a badge taller than the face keeps to its top, never below the box") {
+        TrayBox low = b;
+        low.ft = low.fb - 12;
+        const PointF p = lane_badge_origin(low, 100, 40, 16, 16, 2);
+        CHECK(p.y == Approx(low.ft));
+    }
+}
+
+TEST_CASE("env pill: stands at the box's back-right corner", "[ams][tray][env_chip]") {
+    const TrayBox b = reference_box();
+    CHECK(pill_left_x(b) == Approx(b.fr + kDepthSkew * b.depth));
+    CHECK(pill_left_x(b) == Approx(tray_faces(b).back_wall[1].x));
+}
+
+TEST_CASE("step progress: horizontal only on a narrow portrait screen", "[ams][tray][stepper]") {
+    // Landscape keeps the vertical list at every size.
+    for (int bp = 0; bp <= 6; ++bp)
+        CHECK_FALSE(ams_stepper_horizontal(false, as_breakpoint(bp)));
+    // Portrait below medium has no height for a vertical list under the strip.
+    CHECK(ams_stepper_horizontal(true, UiBreakpoint::Micro));
+    CHECK(ams_stepper_horizontal(true, UiBreakpoint::Tiny));
+    CHECK(ams_stepper_horizontal(true, UiBreakpoint::Small));
+    CHECK_FALSE(ams_stepper_horizontal(true, UiBreakpoint::Medium));
+    CHECK_FALSE(ams_stepper_horizontal(true, UiBreakpoint::Large));
 }

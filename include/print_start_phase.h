@@ -33,15 +33,16 @@ enum class PrintStartPhase {
     IDLE = 0,           ///< Not in PRINT_START (normal operation)
     INITIALIZING = 1,   ///< PRINT_START detected, waiting for phases
     HOMING = 2,         ///< G28 / Home All Axes detected
-    HEATING_BED = 3,    ///< M140/M190 / Heating bed detected
-    SOAKING = 4,        ///< Holding at temperature: heat-soak dwell or chamber wait
-    HEATING_NOZZLE = 5, ///< M104/M109 / Heating nozzle detected
-    QGL = 6,            ///< QUAD_GANTRY_LEVEL detected
-    Z_TILT = 7,         ///< Z_TILT_ADJUST detected
-    BED_MESH = 8,       ///< BED_MESH_CALIBRATE or BED_MESH_PROFILE LOAD detected
-    CLEANING = 9,       ///< CLEAN_NOZZLE / nozzle wipe detected
-    PURGING = 10,       ///< VORON_PURGE / LINE_PURGE detected
-    COMPLETE = 11       ///< Transitioning to PRINTING state
+    MOTOR_SYNC = 3,     ///< motors-sync SYNC_MOTORS (AWD belt motor sync), needs homed axes
+    HEATING_BED = 4,    ///< M140/M190 / Heating bed detected
+    SOAKING = 5,        ///< Holding at temperature: heat-soak dwell or chamber wait
+    HEATING_NOZZLE = 6, ///< M104/M109 / Heating nozzle detected
+    QGL = 7,            ///< QUAD_GANTRY_LEVEL detected
+    Z_TILT = 8,         ///< Z_TILT_ADJUST detected
+    BED_MESH = 9,       ///< BED_MESH_CALIBRATE or BED_MESH_PROFILE LOAD detected
+    CLEANING = 10,      ///< CLEAN_NOZZLE / nozzle wipe detected
+    PURGING = 11,       ///< VORON_PURGE / LINE_PURGE detected
+    COMPLETE = 12       ///< Transitioning to PRINTING state
 };
 
 /// Number of declared phases; every int in [0, count) is a PrintStartPhase.
@@ -64,6 +65,8 @@ inline constexpr std::string_view print_start_phase_name(PrintStartPhase phase) 
         return "INITIALIZING";
     case PrintStartPhase::HOMING:
         return "HOMING";
+    case PrintStartPhase::MOTOR_SYNC:
+        return "MOTOR_SYNC";
     case PrintStartPhase::HEATING_BED:
         return "HEATING_BED";
     case PrintStartPhase::SOAKING:
@@ -102,6 +105,7 @@ struct PrintStartPhaseAlias {
 inline constexpr PrintStartPhaseAlias kPrintStartPhaseAliases[] = {
     {"START", PrintStartPhase::INITIALIZING},
     {"STARTING", PrintStartPhase::INITIALIZING},
+    {"SYNC_MOTORS", PrintStartPhase::MOTOR_SYNC},
     {"BED_HEATING", PrintStartPhase::HEATING_BED},
     {"HEAT_SOAK", PrintStartPhase::SOAKING},
     {"SOAK", PrintStartPhase::SOAKING},
@@ -151,6 +155,7 @@ inline std::optional<PrintStartPhase> print_start_phase_from_name(std::string_vi
 inline constexpr bool print_start_phase_stores_duration(PrintStartPhase phase) {
     switch (phase) {
     case PrintStartPhase::HOMING:
+    case PrintStartPhase::MOTOR_SYNC:
     case PrintStartPhase::SOAKING:
     case PrintStartPhase::QGL:
     case PrintStartPhase::Z_TILT:

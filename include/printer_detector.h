@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "belt_tension_types.h"
+#include "plr_profile.h"
 #include "pre_print_option.h"
 
 #include <map>
@@ -15,6 +17,9 @@ class Config;
 }
 namespace helix {
 class PrinterDiscovery;
+}
+namespace helix::printer_images {
+struct HardwareFacts;
 }
 
 /**
@@ -54,7 +59,7 @@ struct PrinterDetectionResult {
 
     /// The printers a person has to choose between. The winner comes first.
     /// When ambiguous(), every other candidate picturing a different machine
-    /// that the winner does not lead by PrinterDetector::DETECT_MIN_MARGIN
+    /// that the winner does not lead by PrinterDetector::kDetectMinMargin
     /// follows, one name per machine. Only the winner when the detection
     /// separated; empty when nothing was identified.
     std::vector<std::string> contenders;
@@ -107,7 +112,26 @@ struct BuildVolume {
     float plate_x_max = 0.0f;
     float plate_y_min = 0.0f;
     float plate_y_max = 0.0f;
+
+    /// Printable size along X and Y, for display and reporting: the declared bed
+    /// where the firmware states one, else printable_axis_span() of the travel.
+    float printable_x() const;
+    float printable_y() const;
 };
+
+namespace helix {
+/// Printable span of one travel range. A negative minimum that is small next to
+/// the maximum is endstop overtravel (a Y endstop 14mm behind the bed homes to -14),
+/// not room to print in, so the span starts at 0. A centre-origin range (a delta's
+/// -100..100) keeps its full extent.
+float printable_axis_span(float min, float max);
+
+/// Klipper's probe x_offset/y_offset: the probe's position relative to the nozzle.
+struct ProbeXYOffset {
+    double x = 0.0;
+    double y = 0.0;
+};
+} // namespace helix
 
 /**
  * @brief Printer hardware discovery data
@@ -196,6 +220,17 @@ class PrinterDetector {
      * @return Image filename if found, empty string if not found
      */
     static std::string get_image_for_printer(const std::string& printer_name);
+
+    /**
+     * @brief Image filename for a printer type, given the hardware detected on it
+     *
+     * The entry's first `image_variants` entry whose conditions @p facts meet,
+     * else its plain `image` (printer_image_variants.h).
+     *
+     * @return Image filename if found, empty string if not found
+     */
+    static std::string get_image_for_printer(const std::string& printer_name,
+                                             const helix::printer_images::HardwareFacts& facts);
 
     /**
      * @brief Get console filter pattern preset for a printer
@@ -407,6 +442,16 @@ class PrinterDetector {
      */
     static bool hide_manual_z_calibration(const std::string& printer_name);
 
+    /// The database's `z_offset_persists` field for @p printer_name: false when the
+    /// firmware keeps a SET_GCODE_OFFSET adjustment only for the running print.
+    /// True when absent or unknown. Read only for the firmware_managed strategy.
+    static bool z_offset_persists(const std::string& printer_name);
+
+    /// The database's `"tool_change_resets_z_offset": true` flag for @p printer_name:
+    /// activating a tool re-applies that head's stored gcode offset absolutely,
+    /// replacing any adjustment. False when absent or unknown.
+    static bool tool_change_resets_z_offset(const std::string& printer_name);
+
     /// Look up probe type override from the printer database.
     /// @return Probe type string (e.g., "prtouch_v2"), or empty if not specified
     static std::string get_probe_type(const std::string& printer_name);
@@ -438,6 +483,23 @@ class PrinterDetector {
      * @return false when the entry, its calibration object or the flag is absent.
      */
     static bool get_bed_mesh_self_prepares(const std::string& printer_name);
+
+    /**
+     * @brief Printer-specific screws-tilt sequence
+     *
+     * `calibration.screws_tilt_gcode`, for firmware that wraps SCREWS_TILT_CALCULATE
+     * in a macro answering a different question. `{screws_tilt_builtin}` names
+     * Klipper's calculation under the wrapper's rename_existing; on a printer with
+     * no wrapper the sequence yields to the stock command (resolve_macro_script()).
+     *
+     * @return Template, possibly with placeholders, or empty string if the
+     *         printer ships no sequence for this operation.
+     */
+    static std::string get_screws_tilt_gcode(const std::string& printer_name);
+
+    /// `calibration.screws_tilt_self_prepares`: the shipped screws-tilt sequence
+    /// does its own probe preparation. See get_bed_mesh_self_prepares().
+    static bool get_screws_tilt_self_prepares(const std::string& printer_name);
 
     /**
      * @brief Get print start profile name for a printer
@@ -481,7 +543,7 @@ class PrinterDetector {
      * print should assume, e.g. `{"heater_bed": 6.0, "extruder": 0.4}`.
      * ThermalRateManager uses these in place of its build-volume guess; a rate
      * learned from this printer's own prints still wins. Only heaters in
-     * ThermalRateManager::PERSISTED_HEATERS are returned.
+     * ThermalRateManager::kPersistedHeaters are returned.
      *
      * @param printer_name Printer name (e.g., "Elegoo Centauri Carbon")
      * @return heater name -> s/°C; empty when the entry declares none
@@ -588,6 +650,21 @@ class PrinterDetector {
     /// (prestonbrown/helixscreen#1730); false when absent or unknown.
     static bool is_enclosed(const std::string& printer_name);
 
+    /// How @p printer_name tensions its belts, from the database's `"belt_tensioner"` string
+    /// (`"screw"` or `"spring"`). UNKNOWN when the field is absent, empty, not a string, or
+    /// any other value, and for an unknown printer.
+    static helix::calibration::BeltTensionerKind
+    get_belt_tensioner(const std::string& printer_name);
+
+    /// The database's `"klipper_hides_dot_dirs": true` flag for @p printer_name:
+    /// its Klipper skips dot-directories when it resolves a file to print, so a
+    /// copy staged under one fails to open. False when absent or unknown.
+    static bool klipper_hides_dot_dirs(const std::string& printer_name);
+
+    /// The database's power-loss recovery `plr` block for @p printer_name;
+    /// nullopt when the printer is unknown or unlisted for it (tier 0).
+    static std::optional<helix::PlrDbBlock> get_plr_block(const std::string& printer_name);
+
     /**
      * @brief Check if connected printer is a Creality K1 series
      * @return true if printer type contains both "creality" and "k1"
@@ -609,29 +686,6 @@ class PrinterDetector {
      * CR_BOX_* primitives). AmsBackendCfs keys its macro variant off this.
      */
     static bool is_creality_hi();
-
-    /**
-     * @brief Declared physical tightening direction for bed screws
-     *
-     * Printer database entries may set `"screws_tilt_direction": "cw"` or
-     * `"ccw"` to declare which rotation, from the user's physical viewpoint,
-     * tightens a bed screw on that printer. This is an explicit override —
-     * independent of whatever Klipper's `screw_thread` is set to — that
-     * describes the printer's own geometry.
-     *
-     * Klipper's own output direction (CW/CCW) is computed using its
-     * configured `screw_thread`. When the DB override disagrees with
-     * Klipper's default CW-M* semantics (value "ccw"), HelixScreen flips
-     * CW↔CCW in the displayed direction so the UI matches the printer's
-     * physical reality.
-     *
-     * Used to override vendors whose shipped `screw_thread` config disagrees
-     * with the physical screw response (e.g. FlashForge Adventurer 5M family:
-     * ships CW-M4 but the physical response requires CCW-M4 semantics).
-     *
-     * @return "cw", "ccw", or empty string if not declared (treat as "cw")
-     */
-    static std::string screws_tilt_direction_override();
 
     /**
      * @brief Resolve a stored printer type name to the name the database uses now.
@@ -656,14 +710,14 @@ class PrinterDetector {
 
     /// Minimum winning confidence before detection may persist a printer type.
     /// Mirrors HELIX_DETECT_MIN_CONFIDENCE in scripts/lib/installer/printer_seed.sh.
-    static constexpr int AUTOSAVE_MIN_CONFIDENCE = 85;
+    static constexpr int kAutosaveMinConfidence = 85;
 
     /// Minimum detection confidence before the saved-vs-detected type warning
     /// may be offered. Telling a user the type they chose is wrong is a
     /// stronger claim than filling in a blank, so it is derived from the
     /// autosave bar rather than set alongside it: the two cannot drift into an
     /// order where contradicting an explicit setting is the cheaper of the two.
-    static constexpr int MISMATCH_MIN_CONFIDENCE = AUTOSAVE_MIN_CONFIDENCE;
+    static constexpr int kMismatchMinConfidence = kAutosaveMinConfidence;
 
     /// Minimum lead over the best candidate offering a different outcome before
     /// a detection counts as an identification rather than a guess between
@@ -681,7 +735,7 @@ class PrinterDetector {
     /// Independent of the installer's HELIX_DETECT_MIN_MARGIN in
     /// scripts/lib/installer/printer_seed.sh, which chooses between two seeding depths rather than
     /// between saving and declining.
-    static constexpr int DETECT_MIN_MARGIN = 1;
+    static constexpr int kDetectMinMargin = 1;
 
     /**
      * @brief Why the saved-vs-detected type warning was or was not offered.
@@ -693,8 +747,8 @@ class PrinterDetector {
     enum class MismatchDecision {
         Warn,                 ///< Offer the prompt.
         NoDetection,          ///< Detection produced no type name.
-        ConfidenceTooLow,     ///< Below MISMATCH_MIN_CONFIDENCE.
-        Ambiguous,            ///< Scored well, but a rival outcome scored within DETECT_MIN_MARGIN.
+        ConfidenceTooLow,     ///< Below kMismatchMinConfidence.
+        Ambiguous,            ///< Scored well, but a rival outcome scored within kDetectMinMargin.
         MatchesSavedType,     ///< Detected type equals the saved one.
         SavedTypeNotSpecific, ///< Saved type is empty, Custom/Other, or Unknown.
         AlreadyDismissed      ///< The user already answered for this saved type.
@@ -706,8 +760,8 @@ class PrinterDetector {
     /**
      * @brief Classify the saved-vs-detected type comparison.
      *
-     * Warn iff detection is high-confidence (>= MISMATCH_MIN_CONFIDENCE), leads
-     * its nearest rival outcome by DETECT_MIN_MARGIN, contradicts a meaningful
+     * Warn iff detection is high-confidence (>= kMismatchMinConfidence), leads
+     * its nearest rival outcome by kDetectMinMargin, contradicts a meaningful
      * saved type (not Custom/Other, Unknown, or empty), and the per-printer
      * flag does not already equal the current saved type (changing the type
      * re-arms the warning once).
@@ -717,7 +771,7 @@ class PrinterDetector {
      *        is a tie that reaches the decision as a separation, and the whole
      *        Ambiguous branch goes dark without a compile error. A caller that
      *        holds no candidate field - a bare confidence from a stored
-     *        verdict - passes DETECT_MIN_MARGIN, asserting nothing about rivals
+     *        verdict - passes kDetectMinMargin, asserting nothing about rivals
      *        rather than inventing an ambiguity.
      */
     static MismatchDecision classify_type_mismatch(const std::string& saved_type,
@@ -740,6 +794,46 @@ class PrinterDetector {
                                                    const PrinterDetectionResult& detected,
                                                    const std::string& flag_value);
 
+    /// The variant fields of one database entry. An entry with "variant_of"
+    /// is the same machine as the entry with that id, differing only by a
+    /// firmware mod or an add-on that "variant_label" names.
+    struct VariantEntry {
+        std::string id;
+        std::string name;
+        std::string variant_of; ///< Base entry's id, empty on a base entry
+        std::string variant_label;
+    };
+
+    /// How a saved type and a contradicting detected type relate.
+    enum class TypeRelation {
+        DifferentModel,  ///< Two machines, or a variant link that does not resolve.
+        DetectedVariant, ///< Detected is a variant of the saved base entry.
+        SavedVariant,    ///< Saved is a variant; the hardware looks like its base.
+        SiblingVariants  ///< Both are different variants of one base.
+    };
+
+    struct TypeRelationResult {
+        TypeRelation relation = TypeRelation::DifferentModel;
+        std::string base;           ///< Base entry's name; empty for DifferentModel
+        std::string saved_label;    ///< Saved entry's variant label, if it is a variant
+        std::string detected_label; ///< Detected entry's variant label, if it is a variant
+    };
+
+    /**
+     * @brief Relate a saved and a detected type through the entries' variant links.
+     *
+     * Pure: decides from @p entries alone. A variant whose "variant_of" names no
+     * entry, or that carries no label, counts as a model of its own, so the
+     * caller falls back to the plain different-model wording.
+     */
+    static TypeRelationResult relate_types(const std::vector<VariantEntry>& entries,
+                                           const std::string& saved_type,
+                                           const std::string& detected_type);
+
+    /// relate_types() against the loaded printer database.
+    static TypeRelationResult relate_types(const std::string& saved_type,
+                                           const std::string& detected_type);
+
     /**
      * @brief Decide whether a detection result is solid enough to persist.
      *
@@ -747,11 +841,11 @@ class PrinterDetector {
      * forever, so whatever is written here is what the printer stays. Two
      * things have to hold before that is a fair thing to do:
      *
-     *  - the winner scored at least AUTOSAVE_MIN_CONFIDENCE. Below that bar a
+     *  - the winner scored at least kAutosaveMinConfidence. Below that bar a
      *    custom rig whose only FlashForge-ish signal was an LED named
      *    'chamber_light' scores 55 and ships as a FlashForge Adventurer 5M Pro.
      *  - the winner leads the best candidate offering a DIFFERENT outcome by
-     *    DETECT_MIN_MARGIN. Without it, a field of look-alikes that all score
+     *    kDetectMinMargin. Without it, a field of look-alikes that all score
      *    the same is resolved by heuristic count and database order, and an
      *    arbitrary pick becomes permanent.
      *
@@ -764,5 +858,5 @@ class PrinterDetector {
 };
 
 inline bool PrinterDetectionResult::ambiguous() const {
-    return detected() && margin() < PrinterDetector::DETECT_MIN_MARGIN;
+    return detected() && margin() < PrinterDetector::kDetectMinMargin;
 }

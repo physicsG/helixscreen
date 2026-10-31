@@ -7,7 +7,7 @@
 namespace helix::printer {
 
 // Static sentinel for invalid unit access
-static const RegistryUnit INVALID_UNIT{"", -1, 0};
+static const RegistryUnit kInvalidUnit{"", -1, 0};
 
 void SlotRegistry::initialize(const std::string& unit_name,
                               const std::vector<std::string>& slot_names) {
@@ -168,7 +168,7 @@ int SlotRegistry::unit_count() const {
 
 const RegistryUnit& SlotRegistry::unit(int unit_index) const {
     if (unit_index < 0 || unit_index >= static_cast<int>(units_.size())) {
-        return INVALID_UNIT;
+        return kInvalidUnit;
     }
     return units_[unit_index];
 }

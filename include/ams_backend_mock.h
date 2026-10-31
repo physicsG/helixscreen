@@ -36,7 +36,7 @@ class AmsBackendMock : public AmsBackend {
 
     /**
      * @brief Construct mock backend with specified slot count
-     * @param slot_count Number of simulated slots (1-16, default 4)
+     * @param slot_count Number of simulated slots (1 to ams::kLanesPerBackend, default 4)
      */
     explicit AmsBackendMock(int slot_count = 4);
 
@@ -91,14 +91,6 @@ class AmsBackendMock : public AmsBackend {
      *
      * Scoped to tool-changer mode: the mock also stands in for lane-based systems,
      * where the inherited LOADED-status rule is the correct one.
-     *
-     * Snapmaker/multiACE answer separately, and are not tool_changer_mode_: only
-     * a HEAD can be unloaded from the toolhead, exactly as AmsBackendSnapmaker
-     * answers (false for every index >= NUM_TOOLS). Multiace mode is PARALLEL, so
-     * under the base rule every filled ACE bay reads "already at the toolhead":
-     * the slot menu greys Load on all four bays of an ACE and offers Unload on
-     * all four, which makes swapping bays on an ACE-fed head unreachable in
-     * `--test`.
      */
     [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
 
@@ -153,6 +145,10 @@ class AmsBackendMock : public AmsBackend {
     AmsError unload_filament(int slot_index) override;
     AmsError select_slot(int slot_index) override;
     AmsError change_tool(int tool_number) override;
+    /// Docks the mounted tool on the personas whose hardware can (tool
+    /// changer, Snapmaker U1): the unload simulation, ending with no tool.
+    AmsError park_active_tool() override;
+    [[nodiscard]] bool supports_tool_park() const override;
 
     /// Slot index the last accepted unload_filament() ran with, or nullopt when
     /// none has run. The unload itself ignores the slot, so tests asserting
@@ -224,7 +220,15 @@ class AmsBackendMock : public AmsBackend {
     // Dryer
     [[nodiscard]] DryerInfo get_dryer_info(int unit = 0) const override;
     AmsError start_drying(float temp_c, int duration_min, int fan_pct = -1, int unit = 0) override;
+    /// Runs the same simulated cycle as start_drying(); the target is logged, not simulated.
+    AmsError start_drying_to_humidity(float temp_c, int duration_min, float humidity_pct,
+                                      int fan_pct = -1, int unit = 0) override;
     AmsError stop_drying(int unit = 0) override;
+    /// The "emu_dryer" rig marks the started gates Active (the first) and Queued (the
+    /// rest), then runs the ordinary simulated cycle. Every other rig answers as the base.
+    AmsError start_drying_request(const DryingRequest& request) override;
+    /// The "emu_dryer" rig cancels just those gates and ends the cycle once none is left.
+    AmsError stop_drying_gates(int unit, const std::vector<int>& gates) override;
 
     /**
      * @brief Report the capped rig's non-running heated zones as Queued.
@@ -276,12 +280,29 @@ class AmsBackendMock : public AmsBackend {
     [[nodiscard]] RemapStrategy get_remap_strategy() const override;
     [[nodiscard]] bool remap_ready() const override;
     [[nodiscard]] bool owns_tool_mapping_table() const override;
+    [[nodiscard]] bool carriage_can_be_empty() const override;
+
+    /// One head per slot where the persona's backend has one per tool (tool
+    /// changer, Snapmaker), one shared head otherwise; the Snapmaker batches
+    /// all of them, as AmsBackendSnapmaker does.
+    /// A tool-changer persona answers as AmsBackendToolChanger does with no feed.
+    [[nodiscard]] HeadFilamentOps head_filament_ops(int head) const override;
+    [[nodiscard]] int filament_head_count() const override;
+    [[nodiscard]] std::optional<int> head_for_slot(int slot) const override;
+    [[nodiscard]] std::optional<int> head_source_slot(int head,
+                                                      const AmsSystemInfo& info) const override;
+    [[nodiscard]] std::optional<bool> head_has_filament(int head) const override;
+    [[nodiscard]] int max_heads_per_filament_op() const override;
 
     /// Emulate a backend that declares a different route. The shape worth
     /// reaching for is RemapStrategy::None — ACE, or a single-extruder printer
     /// with no AMS — which no mock MODE produces, and which several tests need
     /// in order to cover the "card shown, nothing to tap" branch.
     void set_remap_strategy(RemapStrategy strategy);
+
+    /// Emulate a firmware that picks each tool's lane itself at print time.
+    void set_firmware_picks_lanes_at_print(bool picks);
+    [[nodiscard]] bool firmware_picks_lanes_at_print() const override;
 
     /// Emulate a backend built to remap through a firmware object it has not
     /// discovered yet: AD5X IFS before `_IFS_VARS`. Declared route, unusable.
@@ -452,6 +473,8 @@ class AmsBackendMock : public AmsBackend {
      * - "passive": Per-unit temp/humidity, no dryer capability
      * - "dryer": Per-unit temp/humidity + dryer supported (default when dryer enabled)
      * - "slot": Per-slot temp/humidity (different values per slot)
+     * - "emu_dryer": A sealed box, a sensor and a heater per lane; the dryer takes a gate
+     *   selection and rotation, and a cycle is already running on lanes 1-3
      * - "" or unset: auto-detect from dryer state (dryer enabled → "dryer", else "passive")
      *
      * Can also be set via HELIX_MOCK_AMS_ENV environment variable.
@@ -468,6 +491,22 @@ class AmsBackendMock : public AmsBackend {
      * - Support start_drying() and stop_drying() commands
      */
     void set_dryer_enabled(bool enabled);
+
+    /**
+     * @brief Whether the simulated dryers take a humidity target
+     *
+     * Off by default, the answer every dryer gives that has no humidity-terminated
+     * cycle. Can also be set via HELIX_MOCK_DRYER_HUMIDITY_TARGET=1.
+     */
+    void set_dryer_humidity_target(bool enabled);
+
+    /**
+     * @brief The target a start with none applies, reported as
+     *        DryerInfo::default_humidity_target while the dryers take a target
+     *
+     * Unset by default. Can also be set via HELIX_MOCK_DRYER_DEFAULT_HUMIDITY=<pct>.
+     */
+    void set_dryer_default_humidity(std::optional<float> pct);
 
     /**
      * @brief Set dryer simulation speed multiplier
@@ -591,7 +630,8 @@ class AmsBackendMock : public AmsBackend {
     /**
      * @brief Enable multi-unit mode for testing overview panel
      *
-     * Creates a Box Turtle (4 slots) + Night Owl (2 slots) = 6 total slots.
+     * Creates a Box Turtle (4 slots) + Night Owl (2 slots) = 6 total slots, named as AFC
+     * names them: "Box_Turtle Turtle_1" and "Night_Owl Night_Owl_1".
      * All units feed a single toolhead via combiner (virtual tools).
      *
      * @param enabled true to enable multi-unit, false to revert to single unit
@@ -633,9 +673,9 @@ class AmsBackendMock : public AmsBackend {
      * @brief Enable mixed topology mode for testing multi-unit mixed hardware
      *
      * Simulates J0eB0l's real hardware: 6-tool toolchanger with mixed AFC:
-     * - Unit 0: "Turtle_1" (Box Turtle) - 4 lanes, PARALLEL, 1:1 lane->tool
-     * - Unit 1: "AMS_1" (OpenAMS) - 4 lanes, HUB, 4:1 lane->T4
-     * - Unit 2: "AMS_2" (OpenAMS) - 4 lanes, HUB, 4:1 lane->T5
+     * - Unit 0: "Box_Turtle Turtle_1" - 4 lanes, PARALLEL, 1:1 lane->tool
+     * - Unit 1: "OpenAMS AMS_1" - 4 lanes, HUB, 4:1 lane->T4
+     * - Unit 2: "OpenAMS AMS_2" - 4 lanes, HUB, 4:1 lane->T5
      *
      * @param enabled true to enable mixed topology mode
      */
@@ -650,9 +690,9 @@ class AmsBackendMock : public AmsBackend {
      * @brief Enable ViViD mixed mode for testing 2x BoxTurtle + 1x ViViD
      *
      * Simulates the user's real hardware:
-     * - Unit 0: "Turtle_1" (Box Turtle) - lanes 1-4, HUB topology
-     * - Unit 1: "Turtle_2" (Box Turtle) - lanes 5-8, HUB topology (shared hub)
-     * - Unit 2: "vivid_1" (ViViD) - lanes 13-16, HUB topology
+     * - Unit 0: "Box_Turtle Turtle_1" - lanes 1-4, HUB topology
+     * - Unit 1: "Box_Turtle Turtle_2" - lanes 5-8, HUB topology (shared hub)
+     * - Unit 2: "ViViD Vivid_1" - lanes 13-16, HUB topology
      *
      * @param enabled true to enable ViViD mixed mode
      */
@@ -684,34 +724,9 @@ class AmsBackendMock : public AmsBackend {
      */
     void set_snapmaker_mode(bool enabled);
 
-    /// Simulate a U1 with TWO ACE units, one bound to each of the first two
-    /// heads. The shape the real rig cannot show on one machine: heads 0 and 1
-    /// ACE-fed (so each draws its feeder's four bays), heads 2 and 3 on their
-    /// stock feeders. Exercises the presentation an ACE-fed position gets —
-    /// bars, a spool-number range, no tool badge, no Load — without a printer.
-    void set_multiace_mode(bool enabled);
-
-    /// In multiace mode heads 0 and 1 are fed by ACE 1 and ACE 2, so their
-    /// spool identity belongs to that unit — exactly as AmsBackendMultiAce
-    /// reports for the real thing. Every other mode answers nullopt, which is
-    /// the base behaviour.
-    [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override;
-    [[nodiscard]] std::optional<int> slot_identity_owner_slot(int slot_index) const override;
-
-    /// Mounting the head an ACE bay feeds moves the carriage and feeds nothing,
-    /// so `T{n}` is not that bay's load — exactly as AmsBackendMultiAce answers.
-    ///
-    /// Under the base's blanket `true`, plan_load()'s swap arm substitutes
-    /// `change_tool(mapped_tool)` for the bay's load. Every bay of ACE 1 maps to
-    /// tool 0, so a bay swap would dispatch a tool change that names no bay.
-    [[nodiscard]] bool change_tool_completes_load(int slot_index) const override;
-
-    /// The step models of the U1 personas, so the step bar under test is the
-    /// one that ships: the U1's positional LOAD / UNLOAD models in Snapmaker and
-    /// multiACE mode, and AmsBackendMultiAce::swap_step_model() for a bay swap
-    /// on an ACE-fed head. Every other persona keeps the base answer.
-    [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
-    [[nodiscard]] lv_subject_t* get_operation_step_index_subject(StepOperationType op) override;
+    /// Hold @p slot_index's filament at its feeder: its entry sensor reads it,
+    /// its toolhead has not taken it (HELIX_MOCK_AMS_STATE=feeder).
+    void set_slot_at_feeder(int slot_index);
 
     /**
      * @brief Configure (or clear) the simulated Snapmaker print task.
@@ -910,7 +925,7 @@ class AmsBackendMock : public AmsBackend {
      * The dryer's own multiplier composed with --sim-speed, so fast-forwarding the
      * simulated clock carries the drying cycle with it instead of leaving it at 60x.
      * The product is a composed rate, so it is bounded by
-     * helix::sim::MAX_COMPOSED_SPEED rather than by the flag's own MAX_SPEED:
+     * helix::sim::kMaxComposedSpeed rather than by the flag's own MAX_SPEED:
      * at the 60x base, --sim-speed 1000 really does dry at 60000x.
      * Caller must hold mutex_.
      */
@@ -932,7 +947,7 @@ class AmsBackendMock : public AmsBackend {
      * @brief File this backend's simulated slot population as lane observations
      *
      * The simulated population is this backend's firmware: the constructor seeds
-     * it from SAMPLE_FILAMENTS and each rig mode rebuilds it, which is the same
+     * it from kSampleFilaments and each rig mode rebuilds it, which is the same
      * signal a real backend gets from a parse. Presence is Sensed; colour and
      * material are VendorCache.
      *
@@ -946,7 +961,7 @@ class AmsBackendMock : public AmsBackend {
      * to file, not this backend's.
      *
      * Called from start(), which AmsState reaches only after registration has
-     * stamped a backend index; an earlier call files onto INVALID_LANE_ID and
+     * stamped a backend index; an earlier call files onto kInvalidLaneId and
      * is dropped.
      *
      * Takes mutex_ itself, so the caller must not hold it.
@@ -959,29 +974,6 @@ class AmsBackendMock : public AmsBackend {
      * @param detail Operation detail string
      */
     void set_action(AmsAction action, const std::string& detail);
-
-    /// Publish the current step of a mocked Snapmaker/multiACE operation: the
-    /// positional index into the step model of the bar in flight, -1 for none.
-    /// No-op in every other mock mode, which has no step model of its own and
-    /// uses the coarse AmsAction bar.
-    void set_operation_phase(int phase);
-
-    /// Make @p step of @p model current: its coarse action (or @p fallback when
-    /// the step declares none), @p detail, and the step index, in one event.
-    void publish_u1_step(const OperationStepModel& model, int step, AmsAction fallback,
-                         const std::string& detail);
-
-    /// Walk the unload half of a multiACE bay swap (Home, Select, Heat nozzle,
-    /// Retract filament on the swap bar). Returns false if the operation was
-    /// cancelled partway.
-    bool run_multiace_swap_prologue(InterruptibleSleep interruptible_sleep);
-
-    /// A load in Snapmaker/multiACE mode, walked in the U1's own order: Feed
-    /// filament, Heat nozzle, Extrude, Purge. With @p on_swap_bar the steps are
-    /// the load half of the multiACE swap bar instead, which has no Heat step
-    /// because the unload half leaves the nozzle hot.
-    void execute_u1_load_operation(int slot_index, bool on_swap_bar,
-                                   InterruptibleSleep interruptible_sleep);
 
     /**
      * @brief Execute load operation with optional multi-phase sequence
@@ -1083,9 +1075,11 @@ class AmsBackendMock : public AmsBackend {
     std::string environment_mode_; ///< "passive", "dryer", "slot", or "" (auto)
 
     // Dryer simulation state
-    bool dryer_enabled_ = false;        ///< Whether dryer is simulated
-    int dryer_initial_elapsed_min_ = 0; ///< One-shot head start for next start_drying()
-    DryerInfo dryer_state_;             ///< Current dryer state
+    bool dryer_enabled_ = false;                  ///< Whether dryer is simulated
+    int dryer_initial_elapsed_min_ = 0;           ///< One-shot head start for next start_drying()
+    bool dryer_humidity_target_ = false;          ///< Dryers report supports_humidity_target
+    std::optional<float> dryer_default_humidity_; ///< Reported default humidity target
+    DryerInfo dryer_state_;                       ///< Current dryer state
     /// Per-unit dryer overrides. Empty = every unit reports dryer_state_, which is the
     /// single-enclosure shape. A rig with a heated box beside a passive one fills this.
     std::vector<DryerInfo> unit_dryers_;
@@ -1102,9 +1096,15 @@ class AmsBackendMock : public AmsBackend {
     float pending_drying_temp_c_ = 0.0f;
     int pending_drying_duration_min_ = 0;
     int pending_drying_elapsed_min_ = 0;
+    /// Per-gate drying state of the "emu_dryer" rig, indexed by global gate.
+    std::vector<helix::printer::ZoneDryingState> gate_drying_;
+    /// Mark @p gates' part in a new cycle: the first Active, the rest Queued, every
+    /// other gate Idle. Caller holds mutex_.
+    void begin_gate_cycle_locked(const std::vector<int>& gates);
 
     // Tool changer mode (alternative to filament system simulation)
     bool tool_changer_mode_ = false; ///< Simulate tool changer instead of filament system
+    int slot_at_feeder_ = -1;        ///< Lane whose filament only its entry sensor sees
 
     // AFC mode (alternative to Happy Hare simulation)
     bool afc_mode_ = false;              ///< Simulate AFC Box Turtle instead of Happy Hare
@@ -1115,22 +1115,10 @@ class AmsBackendMock : public AmsBackend {
     bool htlf_toolchanger_mode_ = false; ///< Simulate HTLF + Toolchanger mixed topology
     bool torture_mode_ = false;          ///< A table-driven AFC rig profile (torture, stealth)
     bool snapmaker_mode_ = false; ///< Simulate Snapmaker U1 (4 slots, PARALLEL, non-editable)
-    bool multiace_mode_ = false;  ///< Simulate a U1 with two ACE units (see set_multiace_mode)
-    /// Which ACE bay is seated at each U1 head in multiace mode, -1 = none.
-    /// Drives slot_identity_owner_slot(), so the head and its bay share one
-    /// spool number instead of each consuming one.
-    std::array<int, 4> multiace_seated_{{-1, -1, -1, -1}};
-
-    /// The head the last multiace load/unload targeted, or -1.
-    ///
-    /// Mirrors AmsBackendMultiAce::op_target_head_ and exists for the same
-    /// reason: get_operation_step_model() takes no slot, and `current_slot` is
-    /// not the head — after a bay load it holds the BAY's global index, which
-    /// names no ACE-fed head and would select the plain load model for a swap.
-    int multiace_op_head_ = -1;
     /// Declared remap route outside Snapmaker mode. Native by default: every
     /// non-Snapmaker mode stands in for a table-owning backend.
     RemapStrategy remap_strategy_ = RemapStrategy::Native;
+    bool firmware_picks_lanes_at_print_ = false;
     bool remap_ready_ = true; ///< Cleared to emulate AD5X IFS before `_IFS_VARS`
     /// The emulated print_task_config, in the firmware's own two fields so
     /// AmsBackendSnapmaker::task_routing() can gate on them unchanged. Both
@@ -1158,6 +1146,8 @@ class AmsBackendMock : public AmsBackend {
     std::atomic<bool> scenario_thread_running_{false}; ///< Guards against double-join
     bool mock_toolhead_unaccounted_ = false; ///< "unaccounted" scenario staged (gate input)
     std::optional<int> last_unload_slot_;    ///< slot unload_filament() last accepted
+    bool park_pending_ =
+        false; ///< the running unload is a park: it ends with no tool. Under mutex_
 
     // Test override for native-tracking capability. False in production; tests
     // flip this to exercise the FilamentConsumptionTracker gating path.

@@ -7,6 +7,7 @@
 #include "plugin_backend.h"
 #include "plugin_manifest.h"
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -31,6 +32,9 @@ struct PluginContext {
     /// Set while on_unload runs: the plugin is leaving (at shutdown navigation is
     /// already down), so it may not open overlays or dialogs.
     bool unloading = false;
+    /// Called after a setting changed through set_plugin_setting, before its on_change
+    /// handlers run; the host uses it to refresh an open generated settings screen.
+    std::function<void(const std::string& key, const json& value)> setting_changed;
 };
 
 using Installer = void (*)(PluginContext&);
@@ -50,6 +54,17 @@ void install_io_bindings(PluginContext& ctx);
 void install_widget_bindings(PluginContext& ctx);
 /// helix.canvas. BoundRuntime users may pass it in `installers`.
 void install_canvas_bindings(PluginContext& ctx);
+/// helix.sound. BoundRuntime users may pass it in `installers`.
+void install_sound_bindings(PluginContext& ctx);
+/// helix.ui.table. Runs after install_ui_bindings; BoundRuntime users may pass it in
+/// `installers`.
+void install_table_bindings(PluginContext& ctx);
+
+/// The shortest gap between two helix.sound cues of one plugin at UI priority, and at
+/// event priority, which holds the speaker against every UI sound. A cue inside its gap
+/// is dropped.
+constexpr uint32_t kPluginUiCueIntervalMs = 150;
+constexpr uint32_t kPluginEventCueIntervalMs = 1000;
 
 PluginContext& context(lua_State* L);
 
@@ -57,6 +72,22 @@ PluginContext& context(lua_State* L);
 /// http fetches ask for one byte more than this, so a body that fills the ask is refused
 /// by the cap check instead of landing whole in the Lua state.
 size_t memory_remaining(const LuaRuntime& rt);
+
+/// Charges `bytes` of binding-held data (canvas lists, table rows) to the plugin's memory
+/// budget, or raises "<call>: plugin memory budget exceeded" with nothing charged. A little
+/// room stays uncharged so the error itself can still be raised.
+void charge_plugin_memory(lua_State* L, size_t bytes, const char* call);
+
+/// luaL_newmetatable for a binding's userdata type, with `__metatable` set so plugin
+/// code sees a string from getmetatable and cannot edit the table (a `__gc` added to it
+/// would be armed on the next userdata C creates, outside every time budget). Leaves
+/// the metatable on the stack. Every binding metatable is made through this.
+void new_locked_metatable(lua_State* L, const char* name);
+
+/// Raises "<call> is not allowed in a <check label>" while the runtime runs a check
+/// (LuaRuntime::call_sync). The first statement of every binding with a side effect;
+/// async bindings are refused by await_async.
+void forbid_in_check(lua_State* L, const char* call);
 
 /// Raises "<call> needs the '<permission>' permission in manifest.json" unless granted.
 void require_permission(lua_State* L, Permission p, const char* call);
@@ -78,7 +109,8 @@ int push_rpc_value(lua_State* co, const RpcResult&);
 int push_rpc_capped_body(lua_State* co, const json& value, size_t body_bytes);
 
 /// How one row of the stable printer table converts its subject into a Lua value.
-enum class PrinterValueKind { Bool, String, Int, DeciDegrees };
+/// KlippyState is the klippy_state subject's int as Klipper's own state name.
+enum class PrinterValueKind { Bool, String, Int, DeciDegrees, KlippyState };
 
 /// One Lua-facing printer name and the XML subject backing it.
 struct PrinterField {
@@ -119,6 +151,15 @@ PluginEventTarget parse_plugin_event(std::string_view user_data);
 /// Runs the helix.ui.on handler `name` of `rt` with `arg` (or nil). False if there is none.
 bool dispatch_ui_handler(LuaRuntime& rt, const std::string& name,
                          const std::optional<std::string>& arg);
+
+/// Runs the helix.ui.on handler `name` of `rt` with `args`. False if there is none.
+bool dispatch_ui_handler(LuaRuntime& rt, const std::string& name, const LuaRuntime::PushFn& args);
+
+/// Runs the helix.ui.on handler `name` of `rt` through LuaRuntime::call_sync, as a menu
+/// check. False, after report_error, when there is no such handler; otherwise
+/// call_sync's result.
+bool call_ui_handler_sync(LuaRuntime& rt, const std::string& name, const LuaRuntime::PushFn& args,
+                          const LuaRuntime::ReadFn& read);
 
 /// One lifecycle hook a plugin may register on a widget it declares.
 enum class WidgetHook { Attach, Detach, Size, Activate, Deactivate };

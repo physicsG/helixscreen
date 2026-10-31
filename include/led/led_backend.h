@@ -53,11 +53,11 @@ inline LedStripInfo* find_strip(std::vector<LedStripInfo>& strips, const std::st
 
 /// Macro devices are addressed by a synthetic "macro:<display name>" strip ID
 /// so they can share the selection list with real strips.
-constexpr const char* MACRO_STRIP_PREFIX = "macro:";
+constexpr const char* kMacroStripPrefix = "macro:";
 
 /// True when a strip ID refers to a macro device.
 inline bool is_macro_strip_id(const std::string& id) {
-    return id.rfind(MACRO_STRIP_PREFIX, 0) == 0;
+    return id.rfind(kMacroStripPrefix, 0) == 0;
 }
 
 /// Strip the "macro:" prefix from a strip ID, yielding the raw macro display

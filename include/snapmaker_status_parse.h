@@ -61,11 +61,19 @@ struct SnapmakerRfidInfo {
     int hotend_max_temp = 0;
     int bed_temp = 0;
     int weight_g = 0; ///< Spool weight in grams
+    /// A multi-colour spool's colours, COLOR_NUMS of RGB_1..RGB_5, as
+    /// "#RRGGBB,#RRGGBB". Empty when the tag states one colour.
+    std::string multi_color_hexes;
     /// Canonical string form of CARD_UID (e.g. "144,32,196,2"). Empty when no
     /// tag is present, the RFID reader is disabled, or the field is missing.
     /// Used by the override system as the hardware-event signal: a change
     /// means the physical spool was swapped.
     std::string uid;
+    /// Whether CARD_UID names a real card: a nonzero integer, or an array with a
+    /// nonzero byte. The firmware reports a scalar 0 or an all-zero array for no
+    /// card (reader off, untagged spool, an endpoint write). nullopt when the
+    /// entry carries no readable CARD_UID.
+    std::optional<bool> has_card;
 };
 
 namespace snapmaker {
@@ -105,6 +113,10 @@ struct PrintTaskConfigDelta {
     std::array<std::optional<bool>, kToolCount> filament_exist;
     std::array<std::optional<std::string>, kToolCount> filament_type;
     std::array<std::optional<std::string>, kToolCount> filament_vendor;
+    /// The product line inside the type ("Basic", "SnapSpeed").
+    std::array<std::optional<std::string>, kToolCount> filament_sub_type;
+    /// Whether the head's entry came from a Snapmaker RFID spool.
+    std::array<std::optional<bool>, kToolCount> filament_official;
     /// Hex RGBA, as the firmware spells it; see rgb_from_rgba_hex.
     std::array<std::optional<std::string>, kToolCount> filament_color_rgba;
 };

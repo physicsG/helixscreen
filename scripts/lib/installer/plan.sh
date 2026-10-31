@@ -22,6 +22,11 @@ print_plan() {
 # Steps the run will show, so a no-terminal run can number them [n/N].
 # apply_install skips exactly the steps left out here.
 plan_count_steps() {
+    # Checking system, Downloading, Installing files, Adding to the app menu.
+    if [ "${platform:-}" = "x86-desktop" ]; then
+        STEP_TOTAL=4
+        return 0
+    fi
     STEP_TOTAL=6
     [ -n "$(plan_missing_libs)" ] && STEP_TOTAL=$((STEP_TOTAL + 1))
     [ -n "${COMPETING_UIS_FOUND:-}" ] && STEP_TOTAL=$((STEP_TOTAL + 1))
@@ -64,6 +69,7 @@ plan_adds_line() {
         _pal="${_pal:+$_pal$(_plan_sep)}$_pa_text"
     done
     [ -n "${KIAUH_DIR:-}" ] && _pal="${_pal:+$_pal$(_plan_sep)}KIAUH extension"
+    [ "${platform:-}" = "x86-desktop" ] && _pal="${_pal:+$_pal$(_plan_sep)}app menu entry"
     printf '%s' "$_pal"
 }
 
@@ -88,8 +94,10 @@ confirm_point() { # platform version
     fi
     _cp_libs=$(plan_missing_libs)
     _cp_add="$(plan_adds_line)"
+    _cp_mode="$(x86_flavour_plan_text)"
 
     plan_set Printer "$(plan_printer_line "$1")"
+    [ -n "$_cp_mode" ] && plan_set Mode "$_cp_mode"
     [ -d "${INSTALL_DIR:-}" ] && plan_set Found "HelixScreen at $INSTALL_DIR"
     plan_set "$_cp_label" "$_cp_install${PROBE_SIZE_TEXT:+$(_plan_sep)$PROBE_SIZE_TEXT}"
     [ "${clean_mode:-false}" = true ] && plan_set Remove \
@@ -97,10 +105,12 @@ confirm_point() { # platform version
     [ -n "$_cp_libs" ] && plan_set Libraries "$_cp_libs (apt)"
     [ -n "${COMPETING_UIS_FOUND:-}" ] && plan_set Disable "$COMPETING_UIS_FOUND"
     [ -n "$_cp_add" ] && plan_set Add "$_cp_add"
+    [ -n "${KIAUH_WRITE_SKIPPED:-}" ] && plan_set KIAUH \
+        "found at $(display_path "$KIAUH_WRITE_SKIPPED"), not writable without sudo: extension skipped"
     [ -n "${DISK_CHECK_DEFERRED:-}" ] && plan_set Disk "would check after sudo"
     # Under NoNewPrivileges sudo cannot run, and the steps that need it skip.
     if [ -n "${SUDO:-}" ] && ! _has_no_new_privs; then
-        plan_set sudo "needed for: service, ${_cp_libs:+libraries, }udev and polkit rules"
+        plan_set sudo "needed for: service, ${_cp_libs:+libraries, }${KIAUH_SUDO:+KIAUH extension, }udev and polkit rules"
     fi
 
     print_banner "$2" "${R2_CHANNEL:-stable}"
@@ -159,6 +169,16 @@ _summary_row() { printf '  %-10s %s\n' "$1" "$2" >&2; }
 print_summary() { # version
     _ps_channel="${R2_CHANNEL:-stable}"
     printf '\n' >&2
+    if [ "${platform:-}" = "x86-desktop" ]; then
+        printf '%b\n\n' "${BOLD}HelixScreen $1 is installed ($_ps_channel channel).${NC}" >&2
+        _summary_row Launch "HelixScreen in your app menu, or $(display_path "$INSTALL_DIR/bin/helix-screen")"
+        _summary_row Printer "the first start asks for it, or add --moonraker ws://PRINTER_IP:7125"
+        _summary_row Config "$(display_path "$INSTALL_DIR/config")"
+        _summary_row Updates "announced in the app; install them by re-running this installer"
+        _summary_row Remove "re-run this installer with --uninstall"
+        [ -z "${INSTALL_LOG_KEPT:-}" ] || _summary_row Log "$(display_path "$INSTALL_LOG_KEPT")"
+        return 0
+    fi
     if plan_starts_ui; then
         printf '%b\n\n' "${BOLD}HelixScreen $1 is running ($_ps_channel channel).${NC}" >&2
     else

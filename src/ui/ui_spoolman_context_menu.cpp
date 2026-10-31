@@ -4,7 +4,9 @@
 #include "ui_spoolman_context_menu.h"
 
 #include "ui_callback_helpers.h"
+#include "ui_plugin_menu_rows.h"
 
+#include "plugin_menu_context.h"
 #include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -122,6 +124,12 @@ void SpoolmanContextMenu::on_created(lv_obj_t* menu_obj) {
             // DECLARATIVE_OK: per-show visibility decision with no subject to bind
             lv_obj_add_flag(btn_archive, LV_OBJ_FLAG_HIDDEN);
         }
+    }
+
+    if (plugin_menu::any_declared(plugin_menu::MenuKind::Spool)) {
+        const plugin_menu::json context = plugin_menu::spool_context(pending_spool_);
+        append_plugin_rows(*this, lv_obj_find_by_name(menu_obj, "plugin_rows"),
+                           plugin_menu::resolve(plugin_menu::MenuKind::Spool, context), context);
     }
 
     // Prevent context menu buttons from triggering scroll on the underlying list

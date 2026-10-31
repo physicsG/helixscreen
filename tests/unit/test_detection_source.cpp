@@ -131,3 +131,74 @@ TEST_CASE_METHOD(XMLTestFixture, "U1StockSource fires when the noodle code lands
     drain();
     CHECK(fired == 1);
 }
+
+TEST_CASE_METHOD(XMLTestFixture, "U1StockSource reports a dirty bed and explains the pause",
+                 "[detection][u1][bed_check]") {
+    helix::detection::U1StockSource src(&state());
+    src.set_capable(true);
+    helix::detection::DetectionEvent got;
+    int fired = 0;
+    src.set_callback([&](const helix::detection::DetectionEvent& e) {
+        got = e;
+        ++fired;
+    });
+    src.start();
+    auto drain = [] {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    };
+
+    state().update_from_status(
+        json{{"print_stats", {{"state", "printing"}, {"exception", json::object()}}}});
+    drain();
+    CHECK_FALSE(src.explains_current_pause());
+
+    // The U1 bed check's own report: id 532, code 1, then the pause.
+    state().update_from_status(json{{"print_stats",
+                                     {{"state", "paused"},
+                                      {"exception",
+                                       {{"id", 532},
+                                        {"index", 0},
+                                        {"code", 1},
+                                        {"message", "detected dirty bed"},
+                                        {"level", 2}}}}}});
+    drain();
+    REQUIRE(fired == 1);
+    CHECK(got.kind == DetectionKind::DirtyBed);
+    CHECK(got.already_paused);
+    CHECK(got.message == "detected dirty bed");
+    CHECK(src.explains_current_pause());
+
+    // A source the probe never confirmed explains nothing.
+    src.set_capable(false);
+    CHECK_FALSE(src.explains_current_pause());
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "U1StockSource leaves another module's code 1 alone",
+                 "[detection][u1][bed_check]") {
+    helix::detection::U1StockSource src(&state());
+    src.set_capable(true);
+    int fired = 0;
+    src.set_callback([&](const helix::detection::DetectionEvent&) { ++fired; });
+    src.start();
+
+    state().update_from_status(
+        json{{"print_stats", {{"state", "printing"}, {"exception", json::object()}}}});
+    // Exception 523 is the feeder's runout; its code space is not the defect
+    // module's, so a code 1 under it is no dirty bed.
+    state().update_from_status(
+        json{{"print_stats",
+              {{"state", "paused"},
+               {"exception", {{"id", 523}, {"index", 0}, {"code", 1}, {"message", "runout"}}}}}});
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    CHECK(fired == 0);
+    CHECK_FALSE(src.explains_current_pause());
+}
+
+TEST_CASE("U1 defect kinds belong to exception 532", "[detection][source][bed_check]") {
+    using helix::detection::kind_from_u1_exception;
+    CHECK(kind_from_u1_exception(532, 1) == DetectionKind::DirtyBed);
+    CHECK(kind_from_u1_exception(532, 2) == DetectionKind::Spaghetti);
+    CHECK(kind_from_u1_exception(-1, 1) == DetectionKind::DirtyBed);
+    CHECK(kind_from_u1_exception(523, 1) == DetectionKind::Unknown);
+    CHECK(kind_from_u1_exception(532, 0) == DetectionKind::Unknown);
+}

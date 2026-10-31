@@ -112,6 +112,25 @@ TEST_CASE_METHOD(LVGLUITestFixture, "the router surfaces our wording for a coded
     get_printer_state().set_hardware(PrinterDiscovery{});
 }
 
+TEST_CASE_METHOD(LVGLUITestFixture, "the router decodes an unknown coded fault's envelope",
+                 "[snapmaker][classify][firmware_error_envelope]") {
+    // An unknown code keeps the firmware's text, which on this firmware is a
+    // JSON envelope; the user must get its msg, not the raw object.
+    PrinterDiscovery hw = coded_firmware();
+    get_printer_state().set_hardware(std::move(hw));
+
+    helix::ui::RecoveryModalPresenter presenter(nullptr);
+    helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
+    REQUIRE_NOTHROW(GcodeErrorRouterTestAccess::process_line(
+        router,
+        R"(!! {"coded": "0002-0999-0000-0007", "oneshot": 0, "msg":"no wording for this"})"));
+    helix::ui::UpdateQueue::instance().drain();
+
+    REQUIRE(fault_surface_correlation::was_recently_surfaced("no wording for this"));
+
+    get_printer_state().set_hardware(PrinterDiscovery{});
+}
+
 // ============================================================================
 // Translation: the fault table holds the English source; the wording becomes
 // user-facing at the detail/message assignment, which is where lv_tr() lives.
@@ -416,9 +435,9 @@ nlohmann::json raise_frame(const nlohmann::json& entry) {
             {"params", nlohmann::json::array({entry})}};
 }
 
-constexpr const char* PREFS_CODE = "0001-0531-0000-0016";
-constexpr const char* PREFS_METHOD = "notify_exception_notification";
-constexpr const char* PREFS_MESSAGE =
+constexpr const char* kPrefsCode = "0001-0531-0000-0016";
+constexpr const char* kPrefsMethod = "notify_exception_notification";
+constexpr const char* kPrefsMessage =
     "[print_task_config] not allow to set preferences during printing!";
 
 } // namespace
@@ -429,13 +448,13 @@ TEST_CASE("the status list and the raise notification produce the same line",
     // whichever way it arrives -- and feeds one classify path.
     const auto standing =
         faultcodes::read_standing_faults(coded_firmware(), standing_frame({prefs_entry()}));
-    const auto note = faultcodes::read_fault_notification(PREFS_METHOD, prefs_entry());
+    const auto note = faultcodes::read_fault_notification(kPrefsMethod, prefs_entry());
     REQUIRE(standing.has_value());
     REQUIRE(note.has_value());
     REQUIRE(standing->size() == 1);
     REQUIRE((*standing)[0] == note->line);
-    REQUIRE(note->line == std::string("!! ") + PREFS_CODE + " " + PREFS_MESSAGE);
-    REQUIRE(note->message == PREFS_MESSAGE);
+    REQUIRE(note->line == std::string("!! ") + kPrefsCode + " " + kPrefsMessage);
+    REQUIRE(note->message == kPrefsMessage);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture, "a coded raise notification surfaces our wording",
@@ -445,17 +464,17 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a coded raise notification surfaces our wor
 
     helix::ui::RecoveryModalPresenter presenter(nullptr);
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::on_notify_fault(router, PREFS_METHOD, raise_frame(prefs_entry()));
+    GcodeErrorRouterTestAccess::on_notify_fault(router, kPrefsMethod, raise_frame(prefs_entry()));
     helix::ui::UpdateQueue::instance().drain();
 
     // The notification alone must surface our wording, not the console prose:
     // exactly one presentation, naming the coded spelling.
     process_lvgl(250);
     REQUIRE(GcodeErrorRouterTestAccess::deferred_shown_count(router) == 1);
-    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == PREFS_CODE);
+    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == kPrefsCode);
 
     const auto wording =
-        snapmaker::exception_message(*snapmaker::decode_exception_code(PREFS_CODE));
+        snapmaker::exception_message(*snapmaker::decode_exception_code(kPrefsCode));
     REQUIRE_FALSE(wording.empty());
     REQUIRE(fault_surface_correlation::was_recently_surfaced(std::string(wording)));
     get_printer_state().set_hardware(PrinterDiscovery{});
@@ -469,15 +488,15 @@ TEST_CASE_METHOD(LVGLUITestFixture, "prose then its coded raise show only our wo
     helix::ui::RecoveryModalPresenter presenter(nullptr);
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
     // The console copy first: code-stripped, the generic classifier's to own.
-    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + PREFS_MESSAGE);
+    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + kPrefsMessage);
     // The coded raise milliseconds later.
-    GcodeErrorRouterTestAccess::on_notify_fault(router, PREFS_METHOD, raise_frame(prefs_entry()));
+    GcodeErrorRouterTestAccess::on_notify_fault(router, kPrefsMethod, raise_frame(prefs_entry()));
     helix::ui::UpdateQueue::instance().drain();
 
     // Both spellings schedule a held presentation; only the coded one fires.
     process_lvgl(250);
     REQUIRE(GcodeErrorRouterTestAccess::deferred_shown_count(router) == 1);
-    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == PREFS_CODE);
+    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == kPrefsCode);
     get_printer_state().set_hardware(PrinterDiscovery{});
 }
 
@@ -505,7 +524,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a coded raise after the prose fired shows a
 
     helix::ui::RecoveryModalPresenter presenter(nullptr);
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + PREFS_MESSAGE);
+    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + kPrefsMessage);
     helix::ui::UpdateQueue::instance().drain();
     // Past the 150ms hold the prose has shown; there is nothing pending to
     // stand down anymore.
@@ -516,11 +535,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a coded raise after the prose fired shows a
     // two spellings share no recorded identity (prose recorded its cleaned
     // text, the code carries ours), and wording ours over the firmware's
     // chinglish is worth one transient duplicate toast.
-    GcodeErrorRouterTestAccess::on_notify_fault(router, PREFS_METHOD, raise_frame(prefs_entry()));
+    GcodeErrorRouterTestAccess::on_notify_fault(router, kPrefsMethod, raise_frame(prefs_entry()));
     helix::ui::UpdateQueue::instance().drain();
     process_lvgl(250);
     REQUIRE(GcodeErrorRouterTestAccess::deferred_shown_count(router) == 2);
-    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == PREFS_CODE);
+    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == kPrefsCode);
     get_printer_state().set_hardware(PrinterDiscovery{});
 }
 
@@ -532,7 +551,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a standing fault and its notification surfa
     helix::ui::RecoveryModalPresenter presenter(nullptr);
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
     // Notification first: it claims the fault...
-    GcodeErrorRouterTestAccess::on_notify_fault(router, PREFS_METHOD, raise_frame(prefs_entry()));
+    GcodeErrorRouterTestAccess::on_notify_fault(router, kPrefsMethod, raise_frame(prefs_entry()));
     helix::ui::UpdateQueue::instance().drain();
     // ...then the status list raises the same fault.
     GcodeErrorRouterTestAccess::on_notify_status_update(
@@ -542,7 +561,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a standing fault and its notification surfa
 
     process_lvgl(250);
     REQUIRE(GcodeErrorRouterTestAccess::deferred_shown_count(router) == 1);
-    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == PREFS_CODE);
+    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == kPrefsCode);
     get_printer_state().set_hardware(PrinterDiscovery{});
 }
 
@@ -559,12 +578,12 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a notification for an already-standing faul
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(GcodeErrorRouterTestAccess::standing_fed_count(router) == 1);
     // ...then the notification of the same raise arrives.
-    GcodeErrorRouterTestAccess::on_notify_fault(router, PREFS_METHOD, raise_frame(prefs_entry()));
+    GcodeErrorRouterTestAccess::on_notify_fault(router, kPrefsMethod, raise_frame(prefs_entry()));
     helix::ui::UpdateQueue::instance().drain();
 
     process_lvgl(250);
     REQUIRE(GcodeErrorRouterTestAccess::deferred_shown_count(router) == 1);
-    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == PREFS_CODE);
+    REQUIRE(GcodeErrorRouterTestAccess::last_deferred_shown(router) == kPrefsCode);
     get_printer_state().set_hardware(PrinterDiscovery{});
 }
 
@@ -575,11 +594,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a caller-handled RPC error suppresses the n
 
     // The RPC response carries the firmware's bare message, which is the
     // notification's identity too, so the pre-check catches it.
-    rpc_error_correlation::record_caller_handled(PREFS_MESSAGE);
+    rpc_error_correlation::record_caller_handled(kPrefsMessage);
 
     helix::ui::RecoveryModalPresenter presenter(nullptr);
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::on_notify_fault(router, PREFS_METHOD, raise_frame(prefs_entry()));
+    GcodeErrorRouterTestAccess::on_notify_fault(router, kPrefsMethod, raise_frame(prefs_entry()));
     helix::ui::UpdateQueue::instance().drain();
     process_lvgl(250);
 
@@ -594,11 +613,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a printer without the code channel ignores 
 
     helix::ui::RecoveryModalPresenter presenter(nullptr);
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::on_notify_fault(router, PREFS_METHOD, raise_frame(prefs_entry()));
+    GcodeErrorRouterTestAccess::on_notify_fault(router, kPrefsMethod, raise_frame(prefs_entry()));
     helix::ui::UpdateQueue::instance().drain();
     process_lvgl(250);
 
     REQUIRE(GcodeErrorRouterTestAccess::deferred_shown_count(router) == 0);
-    REQUIRE_FALSE(fault_surface_correlation::was_recently_surfaced(PREFS_MESSAGE));
+    REQUIRE_FALSE(fault_surface_correlation::was_recently_surfaced(kPrefsMessage));
     get_printer_state().set_hardware(PrinterDiscovery{});
 }

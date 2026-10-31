@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- The line a plugin items menu shows when no item is visible for what it
+       was opened on. C++ passes the translated text. -->
+  <api>
+    <prop name="text" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" style_pad_all="#space_sm" style_bg_opa="0" style_border_width="0"
+        scrollable="false" clickable="false" event_bubble="true">
+    <text_body name="empty_text"
+               width="100%" text="$text" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+  </view>
+</component>

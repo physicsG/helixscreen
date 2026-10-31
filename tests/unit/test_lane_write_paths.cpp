@@ -342,3 +342,71 @@ TEST_CASE_METHOD(LVGLTestFixture, "A remembered field never outranks the machine
 
     CHECK(resolve(lane_sources(lane)).brand == "Elegoo");
 }
+
+// A spool name describes the spool the rest of the identity named. An edit that
+// re-declares that identity without restating the name must not carry the old
+// name onto the new spool (the "SnapSpeed" a Generic ASA lane inherited).
+TEST_CASE("An edit that changes the spool's identity drops a name it did not restate",
+          "[lane][spool_name]") {
+    SlotInfo original;
+    original.brand = "Snapmaker";
+    original.material = "PLA";
+    original.spool_name = "SnapSpeed";
+
+    SECTION("a new brand") {
+        SlotInfo edited = original;
+        edited.brand = "Generic";
+        edited.material = "ASA";
+        CHECK(helix::ams::drop_stale_spool_name(original, edited));
+        CHECK(edited.spool_name.empty());
+    }
+    SECTION("a new material under the same brand") {
+        SlotInfo edited = original;
+        edited.material = "PETG";
+        CHECK(helix::ams::drop_stale_spool_name(original, edited));
+        CHECK(edited.spool_name.empty());
+    }
+    SECTION("a different catalog product") {
+        original.catalog_id = "sunlu-pla-marble";
+        SlotInfo edited = original;
+        edited.catalog_id = "sunlu-pla-plus-2-0";
+        CHECK(helix::ams::drop_stale_spool_name(original, edited));
+        CHECK(edited.spool_name.empty());
+    }
+}
+
+TEST_CASE("An edit that keeps the spool's identity keeps its name", "[lane][spool_name]") {
+    SlotInfo original;
+    original.brand = "Sunlu";
+    original.material = "PLA";
+    original.spool_name = "Bench reel";
+
+    SECTION("a colour edit with the brand and material re-cased") {
+        SlotInfo edited = original;
+        edited.brand = "SUNLU";
+        edited.material = "pla";
+        edited.color_rgb = 0x00FF00;
+        CHECK_FALSE(helix::ams::drop_stale_spool_name(original, edited));
+        CHECK(edited.spool_name == "Bench reel");
+    }
+    SECTION("a first catalog pick, which the editor makes on any Save") {
+        SlotInfo edited = original;
+        edited.catalog_id = "sunlu-pla-marble";
+        CHECK_FALSE(helix::ams::drop_stale_spool_name(original, edited));
+        CHECK(edited.spool_name == "Bench reel");
+    }
+    SECTION("a name the edit itself states") {
+        SlotInfo edited = original;
+        edited.brand = "Polymaker";
+        edited.spool_name = "PolyLite";
+        CHECK_FALSE(helix::ams::drop_stale_spool_name(original, edited));
+        CHECK(edited.spool_name == "PolyLite");
+    }
+    SECTION("a linked spool, whose name is the spool's own") {
+        original.spoolman_id = 7;
+        SlotInfo edited = original;
+        edited.brand = "Polymaker";
+        CHECK_FALSE(helix::ams::drop_stale_spool_name(original, edited));
+        CHECK(edited.spool_name == "Bench reel");
+    }
+}

@@ -160,18 +160,18 @@ class TempGraphOverlay : public OverlayBase {
     };
     /// How many of the user's preset material slots this overlay surfaces.
     ///
-    /// DELIBERATELY 3, not helix::presets::PRESET_COUNT. This overlay's preset
+    /// DELIBERATELY 3, not helix::presets::kPresetCount. This overlay's preset
     /// strip has no room for a fourth button — it is a layout constraint, not an
     /// oversight, and not something a DRY pass should "fix". The temp PANELS
     /// (nozzle/bed/chamber) do show all four slots; this compact overlay shows
     /// the first three. If you widen it, you must first find the space.
-    static constexpr int TEMP_GRAPH_VISIBLE_PRESETS = 3;
-    static_assert(TEMP_GRAPH_VISIBLE_PRESETS <= helix::presets::PRESET_COUNT,
+    static constexpr int kTempGraphVisiblePresets = 3;
+    static_assert(kTempGraphVisiblePresets <= helix::presets::kPresetCount,
                   "cannot surface more preset slots than exist");
 
     /// "Off" + the visible material presets.
-    static constexpr int MAX_PRESETS = 1 + TEMP_GRAPH_VISIBLE_PRESETS;
-    std::array<PresetData, MAX_PRESETS> preset_data_{};
+    static constexpr int kMaxPresets = 1 + kTempGraphVisiblePresets;
+    std::array<PresetData, kMaxPresets> preset_data_{};
 
     // State
     Mode mode_ = Mode::GraphOnly;
@@ -254,7 +254,7 @@ class TempGraphOverlay : public OverlayBase {
     // Subject management
     SubjectManager subjects_;
 
-    // Color palette — uses shared TEMP_GRAPH_SERIES_COLORS from temp_graph_controller.h
+    // Color palette — uses shared kTempGraphSeriesColors from temp_graph_controller.h
 };
 
 /// Lazy singleton shared by every entry point that opens the graph.

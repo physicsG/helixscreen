@@ -1,0 +1,54 @@
+diff --git a/src/others/translation/lv_translation.c b/src/others/translation/lv_translation.c
+--- a/src/others/translation/lv_translation.c
++++ b/src/others/translation/lv_translation.c
+@@ -63,6 +63,12 @@
+  * lv_mutex_t is a no-op. */
+ static pthread_mutex_t translation_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
++/* While set, lv_translation_add_dynamic() appends the new pack to the END of the
++ * list instead of inserting it at the head. Lookups return the first pack that
++ * holds both the language and the tag, so tail packs are consulted only for tags
++ * no head pack translates. */
++static bool new_packs_at_tail;
++
+ /**********************
+  *      MACROS
+  **********************/
+@@ -143,10 +149,17 @@
+     return pack;
+ }
+ 
++void lv_translation_set_new_packs_at_tail(bool enable)
++{
++    pthread_mutex_lock(&translation_lock);
++    new_packs_at_tail = enable;
++    pthread_mutex_unlock(&translation_lock);
++}
++
+ lv_translation_pack_t * lv_translation_add_dynamic(void)
+ {
+     pthread_mutex_lock(&translation_lock);
+-    lv_translation_pack_t * pack = lv_ll_ins_head(&packs_ll);
++    lv_translation_pack_t * pack = new_packs_at_tail ? lv_ll_ins_tail(&packs_ll) : lv_ll_ins_head(&packs_ll);
+     LV_ASSERT_MALLOC(pack);
+     if(pack == NULL) {
+         pthread_mutex_unlock(&translation_lock);
+diff --git a/src/others/translation/lv_translation.h b/src/others/translation/lv_translation.h
+--- a/src/others/translation/lv_translation.h
++++ b/src/others/translation/lv_translation.h
+@@ -64,6 +64,15 @@
+ lv_translation_pack_t * lv_translation_add_dynamic(void);
+ 
+ /**
++ * Choose where packs added by `lv_translation_add_dynamic()` land in the lookup order.
++ * By default a new pack is consulted first. With `enable` set it is consulted last, so
++ * it supplies only the tags no earlier pack translates. Affects packs added while it is
++ * set; call it again with false when done.
++ * @param enable    true to append new dynamic packs at the end of the lookup order
++ */
++void lv_translation_set_new_packs_at_tail(bool enable);
++
++/**
+  * Select the current language
+  * The `LV_EVENT_TRANSLATION_LANGUAGE_CHANGED` event will be sent to every widget
+  * @param lang      a string from the defined languages. E.g. "en" or "de"

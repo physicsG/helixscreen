@@ -220,8 +220,8 @@ void MakeIdBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& s
     }
 
     // E1 head is 96px (12 bytes) regardless of tape width
-    static constexpr int MAKEID_E1_HEAD_BYTES = 12;
-    int printer_width_bytes = MAKEID_E1_HEAD_BYTES;
+    static constexpr int kMakeidE1HeadBytes = 12;
+    int printer_width_bytes = kMakeidE1HeadBytes;
 
     MakeIdPrintJobConfig config;
     config.printer_width_bytes = printer_width_bytes;

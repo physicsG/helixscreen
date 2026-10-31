@@ -4,6 +4,7 @@
 // This file compiles the Catch2 implementation once
 #define CATCH_CONFIG_MAIN
 #include "helix_test_fixture.h"
+#include "test_helpers/stale_binary_check.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,12 @@
 #include <unistd.h>
 
 #include "catch_amalgamated.hpp"
+
+/// "<base> <content-hash>" for the sources this binary was built from, and the
+/// file listing them, written by the link rule in mk/tests.mk
+/// (scripts/tree_stamp.sh, scripts/test_link_sources.py).
+extern "C" const char helix_build_tree_stamp[];
+extern "C" const char helix_build_tree_stamp_paths[];
 
 namespace {
 
@@ -26,12 +33,8 @@ char g_cache_sandbox[256];
 
 /// Pin every cache rung a test can reach into a per-run sandbox.
 ///
-/// get_helix_cache_dir() used to be stubbed out of the test link by
-/// tests/ui_test_utils.cpp, so a test could not reach the developer's real
-/// cache no matter what it asked for. The real cascade is linked now
-/// (src/system/helix_cache_dir.cpp) — which is the point, since the stub was a
-/// two-rung fake that left rungs 2-7 untested — but it also means an unpinned
-/// run resolves to $HOME/.cache/helix and writes there.
+/// The real cache cascade (src/system/helix_cache_dir.cpp) is linked, so an
+/// unpinned run resolves to $HOME/.cache/helix and writes there.
 ///
 /// WHY A CONSTRUCTOR AND NOT A CATCH2 LISTENER: the cache directory is latched
 /// by a Meyer's singleton, and tests/unit/test_isolation_listener.cpp reaches it
@@ -123,6 +126,10 @@ namespace {
 /// Remove the sandbox once the run is over. Only the teardown lives in a
 /// listener — by testRunEnded the ordering hazard above is long past.
 ///
+/// A run also starts by warning when the binary predates the tree's sources:
+/// `./build/bin/helix-tests` after an edit without `make test` reports the
+/// previous build's results.
+///
 /// Every case also starts from HelixTestFixture's baseline, not only the ones
 /// that derive from it: CI shards run in random order, so a plain-fixture or
 /// fixture-less case would otherwise inherit whatever the case before it left in
@@ -130,6 +137,11 @@ namespace {
 class CacheSandboxListener : public Catch::EventListenerBase {
   public:
     using Catch::EventListenerBase::EventListenerBase;
+
+    void testRunStarting(Catch::TestRunInfo const&) override {
+        helix::test::warn_if_binary_stale("helix-tests", helix_build_tree_stamp,
+                                          helix_build_tree_stamp_paths);
+    }
 
     void testCaseStarting(Catch::TestCaseInfo const&) override {
         HelixTestFixture::reset_all();

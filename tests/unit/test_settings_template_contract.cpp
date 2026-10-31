@@ -7,7 +7,7 @@
  *
  * The template is a self-documenting reference: DEVELOPMENT.md tells contributors
  * to `cp config/settings.json.template config/settings.json` for first-time setup,
- * and RuntimeConfig::PROD_CONFIG_PATH is the relative path "config/settings.json",
+ * and RuntimeConfig::kProdConfigPath is the relative path "config/settings.json",
  * so that copy really is the config the app loads from a repo checkout.
  *
  * Nothing checked it, and it rotted into a state no migration could repair:
@@ -19,7 +19,7 @@
  *    show_printer_switcher. normalize_versionless_document moves "printer" under "printers/<slug>"
  *    but returns early when "printers" already exists, so the whole printer block —
  *    host, port, every timeout — was orphaned and ignored, with no error.
- *  - "display.theme" naming a theme that is not DEFAULT_THEME, with a comment
+ *  - "display.theme" naming a theme that is not kDefaultTheme, with a comment
  *    claiming it was both the default and the only option.
  *
  * These assertions pin each of those. They are deliberately about STRUCTURE the
@@ -27,7 +27,7 @@
  * optional settings than a fresh config writes is the file doing its job, so this
  * never asserts the template is a subset of anything.
  *
- * If you add a migration, CURRENT_CONFIG_VERSION moves and this fails until the
+ * If you add a migration, kCurrentConfigVersion moves and this fails until the
  * template's config_version follows. That is the point — it is the only thing
  * stopping this file from silently rotting again.
  */
@@ -81,7 +81,7 @@ TEST_CASE("settings template declares the current config version", "[config][tem
          "tarball default and restore a backup over it, so nothing in the file applies.");
     REQUIRE(tpl.contains("config_version"));
     REQUIRE(tpl["config_version"].is_number_integer());
-    CHECK(tpl["config_version"].get<int>() == helix::CURRENT_CONFIG_VERSION);
+    CHECK(tpl["config_version"].get<int>() == helix::kCurrentConfigVersion);
 }
 
 TEST_CASE("settings template uses the multi-printer schema", "[config][template]") {
@@ -130,7 +130,7 @@ TEST_CASE("settings template names a theme that exists", "[config][template]") {
 
     // Scoped so each message only accompanies its own assertion — an INFO lives to
     // the end of its enclosing scope, and a stray "theme file does not exist" printed
-    // against the DEFAULT_THEME mismatch below would be an outright false statement.
+    // against the kDefaultTheme mismatch below would be an outright false statement.
     {
         INFO("display.theme is '" << theme << "' but assets/config/themes/defaults/" << theme
                                   << ".json does not exist");
@@ -138,7 +138,7 @@ TEST_CASE("settings template names a theme that exists", "[config][template]") {
     }
     {
         INFO("the template should ship the app's own default theme, DEFAULT_THEME = "
-             << helix::DEFAULT_THEME);
-        CHECK(theme == helix::DEFAULT_THEME);
+             << helix::kDefaultTheme);
+        CHECK(theme == helix::kDefaultTheme);
     }
 }

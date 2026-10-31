@@ -1,0 +1,281 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Pressure advance tuned by eye on a live test print. -->
+<!-- -->
+<!-- One screen, four stages selected by pa_tune_stage: SETUP (what to print and -->
+<!-- the K sweep), RUNNING (the K in effect, large, with -/+ that take over from -->
+<!-- the ramp), PICK (the bands the printer reported, tap the one that looked -->
+<!-- best) and RESULT (the number, applied, with where to keep it). -->
+<component>
+  <view name="pa_tuning_overlay" extends="overlay_panel" title="Pressure Advance Tuning">
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" style_pad_left="#space_lg" style_pad_right="#space_lg"
+            style_pad_bottom="#space_md" style_pad_top="0" flex_flow="column" style_pad_gap="#space_sm"
+            scrollable="false">
+      <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
+
+      <!-- ============================================================ -->
+      <!-- SETUP                                                        -->
+      <!-- ============================================================ -->
+      <lv_obj name="pa_setup"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md" scrollable="false">
+        <bind_flag_if_not_eq subject="pa_tune_stage" flag="hidden" ref_value="0"/>
+
+        <lv_obj name="pa_setup_left"
+                width="1" height="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs"
+                scrollable="true">
+          <lv_obj name="pa_tool_row"
+                  width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                  scrollable="false">
+            <bind_flag_if_eq subject="pa_tune_multi_tool" flag="hidden" ref_value="0"/>
+            <repeat count="pa_tune_tool_count">
+              <ui_button name="pa_tool_${i}"
+                         width="1" height="#button_height_sm" flex_grow="1" bind_text="pa_tune_tool_label_${i}">
+                <bind_style_if_eq name="styles.chip_active" subject="pa_tune_tool_selected_${i}" ref_value="1"/>
+                <bind_style_if_eq name="styles.chip_idle" subject="pa_tune_tool_selected_${i}" ref_value="0"/>
+                <event_cb trigger="clicked" callback="on_pa_tune_tool" user_data="$i"/>
+              </ui_button>
+            </repeat>
+          </lv_obj>
+          <text_small text="Material" text_transform="uppercase" style_text_color="#text_muted"/>
+          <lv_obj name="pa_preset_grid"
+                  width="100%" height="content" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row_wrap"
+                  style_flex_main_place="space_between" scrollable="false">
+            <repeat count="4">
+              <lv_obj name="pa_preset_${i}"
+                      width="48%" height="#button_height" style_pad_hor="#space_xs" style_pad_ver="0"
+                      style_radius="#border_radius" style_border_width="1" flex_flow="column"
+                      style_flex_main_place="center" style_pad_gap="0" clickable="true" scrollable="false">
+                <style name="styles.press_wash" selector="pressed"/>
+                <bind_style_if_eq name="styles.chip_active" subject="pa_tune_preset_selected_${i}" ref_value="1"/>
+                <bind_style_if_eq name="styles.chip_idle" subject="pa_tune_preset_selected_${i}" ref_value="0"/>
+                <event_cb trigger="clicked" callback="on_pa_tune_preset" user_data="$i"/>
+                <text_small name="pa_preset_name_${i}"
+                            width="100%" bind_text="preset_material_${i}_name" long_mode="dots" clickable="false"
+                            event_bubble="true"/>
+                <text_small name="pa_preset_temp_${i}"
+                            width="100%" bind_text="pa_tune_preset_temp_${i}" style_text_font="#font_xs"
+                            style_text_color="#text_muted" long_mode="dots" clickable="false" event_bubble="true"/>
+              </lv_obj>
+            </repeat>
+          </lv_obj>
+          <text_small text="Extruder" text_transform="uppercase" style_text_color="#text_muted"/>
+          <lv_obj name="pa_kind_row"
+                  width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                  scrollable="false">
+            <ui_button name="pa_kind_direct" width="1" height="#button_height_sm" flex_grow="1" text="Direct drive">
+              <bind_style_if_eq name="styles.chip_active" subject="pa_tune_kind" ref_value="0"/>
+              <bind_style_if_eq name="styles.chip_idle" subject="pa_tune_kind" ref_value="1"/>
+              <event_cb trigger="clicked" callback="on_pa_tune_kind" user_data="0"/>
+            </ui_button>
+            <ui_button name="pa_kind_bowden" width="1" height="#button_height_sm" flex_grow="1" text="Bowden">
+              <bind_style_if_eq name="styles.chip_active" subject="pa_tune_kind" ref_value="1"/>
+              <bind_style_if_eq name="styles.chip_idle" subject="pa_tune_kind" ref_value="0"/>
+              <event_cb trigger="clicked" callback="on_pa_tune_kind" user_data="1"/>
+            </ui_button>
+          </lv_obj>
+        </lv_obj>
+
+        <lv_obj name="pa_setup_right"
+                width="1" height="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs"
+                scrollable="true">
+          <lv_obj width="100%"
+                  height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                  style_flex_cross_place="center" scrollable="false">
+            <text_small text="Start K" flex_grow="1" style_text_color="#text_muted"/>
+            <ui_button name="pa_start_k_down" width="#button_height_sm" height="#button_height_sm" text="-">
+              <event_cb trigger="clicked" callback="on_pa_tune_start_k" user_data="-1"/>
+            </ui_button>
+            <text_heading name="pa_start_k" width="content" bind_text="pa_tune_start_k" style_text_align="center"/>
+            <ui_button name="pa_start_k_up" width="#button_height_sm" height="#button_height_sm" text="+">
+              <event_cb trigger="clicked" callback="on_pa_tune_start_k" user_data="1"/>
+            </ui_button>
+          </lv_obj>
+          <lv_obj width="100%"
+                  height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                  style_flex_cross_place="center" scrollable="false">
+            <text_small text="End K" flex_grow="1" style_text_color="#text_muted"/>
+            <ui_button name="pa_end_k_down" width="#button_height_sm" height="#button_height_sm" text="-">
+              <event_cb trigger="clicked" callback="on_pa_tune_end_k" user_data="-1"/>
+            </ui_button>
+            <text_heading name="pa_end_k" width="content" bind_text="pa_tune_end_k" style_text_align="center"/>
+            <ui_button name="pa_end_k_up" width="#button_height_sm" height="#button_height_sm" text="+">
+              <event_cb trigger="clicked" callback="on_pa_tune_end_k" user_data="1"/>
+            </ui_button>
+          </lv_obj>
+          <text_small name="pa_summary"
+                      width="100%" bind_text="pa_tune_summary" long_mode="wrap" style_text_color="#text_muted"/>
+          <text_small name="pa_error" width="100%" bind_text="pa_tune_error" long_mode="wrap" style_text_color="#danger"/>
+          <lv_obj width="100%" flex_grow="1" style_pad_all="0" scrollable="false"/>
+          <ui_button name="pa_btn_start" width="100%" icon="play" text="Print Test Tower" moves_machine="true">
+            <bind_state_if_eq subject="pa_tune_can_start" state="disabled" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_start"/>
+          </ui_button>
+        </lv_obj>
+      </lv_obj>
+
+      <!-- ============================================================ -->
+      <!-- RUNNING (and STARTING, before the first layer)               -->
+      <!-- ============================================================ -->
+      <lv_obj name="pa_running"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
+              style_flex_cross_place="center" scrollable="false" hidden="true">
+        <bind_flag_if cond="pa_tune_stage ne 1 and pa_tune_stage ne 2" flag="hidden"/>
+        <lv_obj width="100%"
+                height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center" scrollable="false">
+          <text_body name="pa_layer_text" bind_text="pa_tune_layer_text" flex_grow="1" long_mode="dots"/>
+          <text_small name="pa_mode_text" bind_text="pa_tune_mode_text" long_mode="dots" style_max_width="55%">
+            <bind_style_if_eq name="styles.heater_duty_muted" subject="pa_tune_manual" ref_value="0"/>
+            <bind_style_if_eq name="styles.maint_text_warn" subject="pa_tune_manual" ref_value="1"/>
+          </text_small>
+        </lv_obj>
+        <lv_obj name="pa_dial"
+                width="100%" flex_grow="1" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md"
+                style_flex_cross_place="center" style_flex_main_place="center" style_flex_track_place="center"
+                scrollable="false">
+          <ui_button name="pa_btn_minus" width="#pa_tune_nudge_w" height="#pa_tune_nudge_h" icon="minus" icon_size="lg">
+            <bind_state_if_not_eq subject="pa_tune_stage" state="disabled" ref_value="2"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_nudge" user_data="-1"/>
+          </ui_button>
+          <lv_obj name="pa_dial_center"
+                  width="1" height="100%" flex_grow="1" style_pad_all="0" flex_flow="column"
+                  style_flex_cross_place="center" style_pad_gap="#space_xxs" scrollable="false">
+            <text_small text="Pressure advance" style_text_color="#text_muted"/>
+            <lv_label name="pa_k_big" bind_text="pa_tune_k_big" style_text_font="#font_display" style_text_color="#text"/>
+            <!-- The band log so far, newest first: what has printed at which K,
+                 while there is still time to compare it with the tower. -->
+            <lv_obj name="pa_run_bands"
+                    width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="0" scrollable="true">
+              <repeat count="pa_tune_band_count">
+                <lv_obj name="pa_run_band_${i}"
+                        width="100%" height="content" style_pad_all="0" flex_flow="row" scrollable="false">
+                  <text_small name="pa_run_band_range_${i}"
+                              bind_text="pa_tune_band_range_${i}" flex_grow="1" style_text_color="#text_muted"/>
+                  <text_small name="pa_run_band_k_${i}" bind_text="pa_tune_band_k_${i}"/>
+                </lv_obj>
+              </repeat>
+            </lv_obj>
+          </lv_obj>
+          <ui_button name="pa_btn_plus" width="#pa_tune_nudge_w" height="#pa_tune_nudge_h" icon="plus" icon_size="lg">
+            <bind_state_if_not_eq subject="pa_tune_stage" state="disabled" ref_value="2"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_nudge" user_data="1"/>
+          </ui_button>
+        </lv_obj>
+        <lv_obj name="pa_step_row"
+                width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                style_flex_cross_place="center" scrollable="false">
+          <text_small text="Step" style_text_color="#text_muted"/>
+          <ui_button name="pa_step_0" width="1" height="#button_height_sm" flex_grow="1" text="0.001">
+            <bind_style_if_eq name="styles.chip_active" subject="pa_tune_step_idx" ref_value="0"/>
+            <bind_style_if_not_eq name="styles.chip_idle" subject="pa_tune_step_idx" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_step" user_data="0"/>
+          </ui_button>
+          <ui_button name="pa_step_1" width="1" height="#button_height_sm" flex_grow="1" text="0.005">
+            <bind_style_if_eq name="styles.chip_active" subject="pa_tune_step_idx" ref_value="1"/>
+            <bind_style_if_not_eq name="styles.chip_idle" subject="pa_tune_step_idx" ref_value="1"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_step" user_data="1"/>
+          </ui_button>
+          <ui_button name="pa_step_2" width="1" height="#button_height_sm" flex_grow="1" text="0.01">
+            <bind_style_if_eq name="styles.chip_active" subject="pa_tune_step_idx" ref_value="2"/>
+            <bind_style_if_not_eq name="styles.chip_idle" subject="pa_tune_step_idx" ref_value="2"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_step" user_data="2"/>
+          </ui_button>
+          <ui_button name="pa_step_3" width="1" height="#button_height_sm" flex_grow="1" text="0.05">
+            <bind_style_if_eq name="styles.chip_active" subject="pa_tune_step_idx" ref_value="3"/>
+            <bind_style_if_not_eq name="styles.chip_idle" subject="pa_tune_step_idx" ref_value="3"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_step" user_data="3"/>
+          </ui_button>
+          <ui_button name="pa_btn_end" height="#button_height_sm" text="End Test" icon="stop">
+            <event_cb trigger="clicked" callback="on_pa_tune_end"/>
+          </ui_button>
+        </lv_obj>
+      </lv_obj>
+
+      <!-- ============================================================ -->
+      <!-- PICK                                                         -->
+      <!-- ============================================================ -->
+      <lv_obj name="pa_pick"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md" scrollable="false"
+              hidden="true">
+        <bind_flag_if_not_eq subject="pa_tune_stage" flag="hidden" ref_value="3"/>
+        <lv_obj name="pa_band_list"
+                width="1" height="100%" flex_grow="3" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs"
+                scrollable="true">
+          <!-- Own container: a reactive repeat appends its rebuilt rows at
+               the end of its parent, which would put them after Keep current. -->
+          <lv_obj name="pa_band_rows"
+                  width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs"
+                  scrollable="false">
+            <repeat count="pa_tune_band_count">
+              <lv_obj name="pa_band_${i}"
+                      width="100%" height="#button_height_sm" flex_flow="row" style_flex_cross_place="center"
+                      clickable="true" scrollable="false">
+                <style name="styles.picker_row"/>
+                <style name="styles.press_wash" selector="pressed"/>
+                <bind_style_if_eq name="styles.selected_row" subject="pa_tune_band_selected_${i}" ref_value="1"/>
+                <event_cb trigger="clicked" callback="on_pa_tune_band" user_data="$i"/>
+                <text_body name="pa_band_range_${i}"
+                           bind_text="pa_tune_band_range_${i}" flex_grow="1" clickable="false" event_bubble="true"/>
+                <text_body name="pa_band_k_${i}" bind_text="pa_tune_band_k_${i}" clickable="false" event_bubble="true"/>
+              </lv_obj>
+            </repeat>
+          </lv_obj>
+          <lv_obj name="pa_band_keep"
+                  width="100%" height="#button_height_sm" flex_flow="row" style_flex_cross_place="center"
+                  clickable="true" scrollable="false">
+            <style name="styles.picker_row"/>
+            <style name="styles.press_wash" selector="pressed"/>
+            <bind_style_if_eq name="styles.selected_row" subject="pa_tune_keep_selected" ref_value="1"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_keep"/>
+            <text_body name="pa_keep_text"
+                       bind_text="pa_tune_keep_text" flex_grow="1" clickable="false" event_bubble="true"/>
+          </lv_obj>
+        </lv_obj>
+        <lv_obj name="pa_pick_side"
+                width="1" height="100%" flex_grow="2" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
+                scrollable="false">
+          <text_heading text="Pick the best band"/>
+          <text_small width="100%"
+                      long_mode="wrap" style_text_color="#text_muted"
+                      text="Measure up from the plate. Sharp corners with no bulge and no gap mark the right K. Each row is a height range and the K the printer reported while it printed."/>
+          <lv_obj width="100%" flex_grow="1" style_pad_all="0" scrollable="false"/>
+          <ui_button name="pa_btn_apply" width="100%" icon="check" text="Apply">
+            <bind_state_if_eq subject="pa_tune_has_pick" state="disabled" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_apply"/>
+          </ui_button>
+          <ui_button name="pa_btn_discard" width="100%" variant="ghost" text="Discard">
+            <event_cb trigger="clicked" callback="on_pa_tune_discard"/>
+          </ui_button>
+        </lv_obj>
+      </lv_obj>
+
+      <!-- ============================================================ -->
+      <!-- RESULT                                                       -->
+      <!-- ============================================================ -->
+      <lv_obj name="pa_result"
+              width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
+              style_flex_cross_place="center" style_flex_track_place="center" scrollable="true" hidden="true">
+        <bind_flag_if_not_eq subject="pa_tune_stage" flag="hidden" ref_value="4"/>
+        <text_small text="Pressure advance" style_text_color="#text_muted"/>
+        <lv_label name="pa_result_k"
+                  bind_text="pa_tune_result_k" style_text_font="#font_display" style_text_color="#text"/>
+        <text_body name="pa_result_note"
+                   width="100%" bind_text="pa_tune_result_note" long_mode="wrap" style_text_align="center"/>
+        <text_small name="pa_spoolman_text"
+                    width="100%" bind_text="pa_tune_spoolman_text" long_mode="wrap" style_text_align="center"
+                    style_text_color="#text_muted"/>
+        <lv_obj width="100%"
+                height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
+          <ui_button name="pa_btn_save_spool" width="1" flex_grow="1" icon="spoolman" text="Save to Spool">
+            <bind_state_if_eq subject="pa_tune_can_save_spool" state="disabled" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_pa_tune_save_spool"/>
+          </ui_button>
+          <ui_button name="pa_btn_done" width="1" flex_grow="1" icon="check" text="Done">
+            <event_cb trigger="clicked" callback="on_pa_tune_done"/>
+          </ui_button>
+        </lv_obj>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

@@ -28,8 +28,8 @@ namespace {
 
 // Subject-backed message text ("HelixScreen <version> is available — update
 // now"). Buffer is static since one banner exists for the app's lifetime.
-constexpr size_t MESSAGE_BUF_SIZE = 128;
-char g_message_buf[MESSAGE_BUF_SIZE] = "";
+constexpr size_t kMessageBufSize = 128;
+char g_message_buf[kMessageBufSize] = "";
 
 // The banner root sits directly on lv_layer_top and carries its owner as user data.
 UpgradeBanner* owner_of(lv_event_t* e) {
@@ -51,7 +51,7 @@ void UpgradeBanner::init() {
     // Create + register the text subject before the XML is instantiated so
     // the `bind_text="upgrade_banner_text"` binding resolves to our buffer.
     if (!message_subject_initialized_) {
-        lv_subject_init_string(&message_subject_, g_message_buf, nullptr, MESSAGE_BUF_SIZE, "");
+        lv_subject_init_string(&message_subject_, g_message_buf, nullptr, kMessageBufSize, "");
         subjects_.publish("upgrade_banner_text", &message_subject_);
         message_subject_initialized_ = true;
     }
@@ -142,7 +142,7 @@ void UpgradeBanner::update_message_text() {
         text = fmt::format(lv_tr("HelixScreen {} is available — tap Update"), version);
     }
 
-    size_t n = std::min<size_t>(text.size(), MESSAGE_BUF_SIZE - 1);
+    size_t n = std::min<size_t>(text.size(), kMessageBufSize - 1);
     std::memcpy(g_message_buf, text.data(), n);
     g_message_buf[n] = '\0';
     lv_subject_notify(&message_subject_);

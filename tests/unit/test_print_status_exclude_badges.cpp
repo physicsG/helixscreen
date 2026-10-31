@@ -194,9 +194,10 @@ class PortraitExcludePanelFixture : public PrintStatusPanelFixture {
 
 } // namespace
 
-TEST_CASE_METHOD(PortraitExcludePanelFixture,
-                 "In portrait the print status object list covers the controls and not the preview",
-                 "[exclude_badges][print_status][pre_start_exclude][portrait]") {
+TEST_CASE_METHOD(
+    PortraitExcludePanelFixture,
+    "Stacked, the print status object list covers the printer tile and not the preview",
+    "[exclude_badges][print_status][pre_start_exclude][portrait]") {
     state().excluded_objects_state().set_defined_objects_with_geometry(
         {placed("Zed", 30, 30), placed("Alpha", 90, 30), placed("Mid", 150, 30)});
     UpdateQueue::instance().drain();
@@ -209,7 +210,11 @@ TEST_CASE_METHOD(PortraitExcludePanelFixture,
 
     lv_obj_t* rows = lv_obj_find_by_name(root_, "rows_container");
     REQUIRE(rows != nullptr);
-    lv_obj_t* controls = lv_obj_find_by_name(root_, "controls_section");
+    lv_subject_t* arrangement = lv_xml_get_subject(nullptr, "ps_arrangement");
+    REQUIRE(arrangement != nullptr);
+    REQUIRE(lv_subject_get_int(arrangement) ==
+            static_cast<int>(helix::PrintStatusArrangement::Stacked));
+    lv_obj_t* controls = lv_obj_find_by_name(root_, "ps_printer_tile");
     lv_obj_t* preview = lv_obj_find_by_name(root_, "thumbnail_section");
     REQUIRE(controls != nullptr);
     REQUIRE(preview != nullptr);
@@ -217,10 +222,74 @@ TEST_CASE_METHOD(PortraitExcludePanelFixture,
     lv_obj_get_coords(lv_obj_get_parent(rows), &list);
     lv_obj_get_coords(controls, &ctl);
     lv_obj_get_coords(preview, &card);
-    INFO("list y1=" << list.y1 << " controls y1=" << ctl.y1 << " preview y2=" << card.y2);
+    INFO("list y1=" << list.y1 << " y2=" << list.y2 << " tile y1=" << ctl.y1 << " y2=" << ctl.y2
+                    << " preview y2=" << card.y2);
     CHECK(list.y1 <= ctl.y1);
+    CHECK(list.y2 >= ctl.y2);
     CHECK(list.y1 > card.y2);
 
     PrintStatusPanelTestAccess::hide_exclude(panel());
     UpdateQueue::instance().drain();
+}
+
+namespace {
+
+/// Objects defined, and [exclude_object] known, before the panel is built.
+class ObjectsBeforeCreateFixture : public PrintStatusPanelFixture {
+  public:
+    ObjectsBeforeCreateFixture()
+        : PrintStatusPanelFixture(
+              [this]() -> std::shared_ptr<void> {
+                  helix::PrinterDiscovery hw;
+                  hw.parse_objects(nlohmann::json{"exclude_object", "extruder"});
+                  state().set_hardware(hw);
+                  state().excluded_objects_state().set_defined_objects({"A", "B"});
+                  UpdateQueue::instance().drain();
+                  return nullptr;
+              },
+              /*drain_before_create=*/true) {}
+    ~ObjectsBeforeCreateFixture() override {
+        state().excluded_objects_state().set_defined_objects({});
+        state().set_hardware(helix::PrinterDiscovery{});
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(ObjectsBeforeCreateFixture,
+                 "The view toggle sits beside the objects button, not over it",
+                 "[exclude_button][print_status][view_toggle]") {
+    lv_subject_set_int(PrintStatusPanelTestAccess::gcode_viewer_mode_subject(panel()), 1);
+    UpdateQueue::instance().drain();
+    process_lvgl(50);
+    lv_obj_update_layout(root_);
+
+    lv_obj_t* objects_btn = lv_obj_find_by_name(root_, "btn_objects");
+    lv_obj_t* toggle = lv_obj_find_by_name(root_, "btn_view_toggle");
+    REQUIRE(objects_btn != nullptr);
+    REQUIRE(toggle != nullptr);
+    REQUIRE_FALSE(lv_obj_has_flag(objects_btn, LV_OBJ_FLAG_HIDDEN));
+    REQUIRE_FALSE(lv_obj_has_flag(toggle, LV_OBJ_FLAG_HIDDEN));
+
+    // Transformed coords: a style translate moves what the user sees and taps.
+    lv_area_t a, b;
+    lv_obj_get_coords(objects_btn, &a);
+    lv_obj_get_coords(toggle, &b);
+    lv_obj_get_transformed_area(objects_btn, &a, LV_OBJ_POINT_TRANSFORM_FLAG_NONE);
+    lv_obj_get_transformed_area(toggle, &b, LV_OBJ_POINT_TRANSFORM_FLAG_NONE);
+    INFO("objects x1=" << a.x1 << " x2=" << a.x2 << " toggle x1=" << b.x1 << " x2=" << b.x2);
+    CHECK(lv_area_get_width(&a) > 0);
+    CHECK(lv_area_get_width(&b) > 0);
+    const bool overlap = a.x1 <= b.x2 && b.x1 <= a.x2 && a.y1 <= b.y2 && b.y1 <= a.y2;
+    CHECK_FALSE(overlap);
+
+    // With the objects button hidden, the toggle takes the corner.
+    state().excluded_objects_state().set_defined_objects({"Solo"});
+    UpdateQueue::instance().drain();
+    lv_obj_update_layout(root_);
+    REQUIRE(lv_obj_has_flag(objects_btn, LV_OBJ_FLAG_HIDDEN));
+    lv_area_t solo;
+    lv_obj_get_coords(toggle, &solo);
+    lv_obj_get_transformed_area(toggle, &solo, LV_OBJ_POINT_TRANSFORM_FLAG_NONE);
+    CHECK(solo.x1 == a.x1);
 }

@@ -9,7 +9,9 @@
   <view extends="lv_obj"
         width="100%" height="100%" style_pad_all="0" style_pad_gap="0" style_bg_opa="0%" scrollable="false"
         flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center">
-    <!-- Tip container: left border acts as accent bar, auto-sizes to text height -->
+    <!-- Tip container: left border acts as accent bar, auto-sizes to text height.
+         The title wraps until TipsWidget's cap at the tile's height, then ends in an
+         ellipsis. Declaring a max height is what keeps a dots label multi-line. -->
     <lv_obj name="tip_container"
             width="100%" height="content" flex_flow="row" style_bg_opa="0%" style_radius="0"
             style_border_width="#accent_bar_width" style_border_side="left" style_border_color="#primary"
@@ -21,7 +23,8 @@
       <text_heading text="Tip:" style_text_color="#text"/>
       <!-- Tip text (bound to subject) -->
       <text_heading name="status_text_label"
-                    bind_text="status_text" flex_grow="1" long_mode="wrap" style_text_color="#text"/>
+                    bind_text="status_text" flex_grow="1" style_max_height="100%" long_mode="dots"
+                    style_text_color="#text"/>
       <!-- Question mark icon -->
       <icon src="help_circle" size="lg" variant="muted"/>
     </lv_obj>

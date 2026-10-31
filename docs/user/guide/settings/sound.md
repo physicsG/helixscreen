@@ -74,7 +74,7 @@ Plays, or stops, the Crockett's Theme music track. Use it to check that music pl
 | Navigate forward | Rising tone | A screen opens |
 | Navigate back | Falling tone | You go back or close a screen |
 | Print complete | Victory melody | A print finishes |
-| Print cancelled | Falling tone | A print is cancelled |
+| Print canceled | Falling tone | A print is canceled |
 | Error alert | Pulsing alarm | Something went seriously wrong |
 | Error notification | Short buzz | An error message pops up |
 | Critical alarm | Urgent siren | A critical failure needs your attention |

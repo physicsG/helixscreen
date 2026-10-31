@@ -43,7 +43,6 @@ SKIP_PREFIXES = (
     "lib/",
     "build/",
     ".worktrees/",
-    ".claude-recall/",
     "docs/devel/plans/",
     "docs/superpowers/",
     "tests/shell/",

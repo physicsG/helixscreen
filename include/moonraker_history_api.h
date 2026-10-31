@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 #include "print_history_data.h"
@@ -38,10 +39,10 @@ class IMoonrakerClient;
  *       [](const auto& jobs, uint64_t total) { ... },
  *       [](const auto& err) { ... });
  */
-class MoonrakerHistoryAPI : public IHistoryAPI {
+class MoonrakerHistoryAPI : public helix::IHistoryAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using HistoryListCallback =
         std::function<void(const std::vector<PrintHistoryJob>&, uint64_t total_count)>;
     using HistoryTotalsCallback = std::function<void(const PrintHistoryTotals&)>;

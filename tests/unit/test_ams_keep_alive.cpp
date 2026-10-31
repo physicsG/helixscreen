@@ -50,7 +50,7 @@ class AmsKeepAliveFixture : public LVGLUITestFixture {
         DisplaySettingsManager::instance().set_animations_enabled(false);
         helix::ui::destroy_static_panels();
 
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = lv_obj_create(test_screen());
         panels[static_cast<int>(PanelId::Controls)] = lv_obj_create(test_screen());
         NavigationManager::instance().set_panels(panels);

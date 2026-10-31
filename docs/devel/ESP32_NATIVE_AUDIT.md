@@ -426,9 +426,13 @@ absorb 10-100MB gcode. `StreamingPolicy`'s existing "stream" answer is
 mode: **no local materialization**. Inventory of desktop temp-file users and
 their ESP32 disposition:
 - `GCodeFileModifier` (print-prep download→modify→re-upload, e.g. spool remap
-  without native mapping): must go printer-side (Moonraker-side transform, or
-  restrict to printers with native remap à la U1 `SET_PRINT_EXTRUDER_MAP`) or
-  be feature-gated off.
+  without native mapping): the printer-side transform exists as the HelixPrint
+  plugin's `server.helix.print_edited` (feature `server_edits`), which the
+  app takes whenever the plugin reports it ready
+  (`gcode::choose_edit_transport`, `include/gcode_edit_list.h`). Without the
+  plugin the download path still needs local storage, so on ESP32 it stays
+  feature-gated off or restricted to printers with native remap à la U1
+  `SET_PRINT_EXTRUDER_MAP`.
 - 2D gcode viewer full-file download: already compiled out
   (`HELIX_HAS_GCODE_VIEWER=0`, `f71f10341`).
 - Thumbnails (`thumbnail_processor`): small (tens of KB) — cap + PSRAM-only,

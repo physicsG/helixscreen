@@ -48,7 +48,7 @@ extern "C" {
  *
  * XML attributes:
  *   - topology: "linear" (Happy Hare) or "hub" (AFC) - default "hub"
- *   - slot_count: Number of slots (1-16) - default 4
+ *   - slot_count: Number of slots (1 to helix::kAmsMaxSlots) - default 4
  *   - active_slot: Currently active slot (-1 = none) - default -1
  *   - filament_segment: Current position (0-7, PathSegment enum)
  *   - error_segment: Error location (0-7, PathSegment enum, 0=none)
@@ -94,10 +94,23 @@ void ui_filament_path_canvas_set_topology(lv_obj_t* obj, int topology);
 void ui_filament_path_canvas_set_hub_on_toolhead(lv_obj_t* obj, bool on_toolhead);
 
 /**
+ * @brief Whether the LINEAR/HUB path continues past the hub to a toolhead
+ *
+ * False for a unit that feeds no nozzle: the lanes still run into the hub box,
+ * but nothing is drawn below it (no trunk, buffer, bypass, toolhead sensor or
+ * nozzle), and the toolhead and bypass getters report nothing to anchor on.
+ * PARALLEL and MIXED layouts ignore it. Default: true.
+ */
+void ui_filament_path_canvas_set_feeds_toolhead(lv_obj_t* obj, bool feeds);
+
+/// The value set by ui_filament_path_canvas_set_feeds_toolhead(); true for a null widget.
+bool ui_filament_path_canvas_get_feeds_toolhead(lv_obj_t* obj);
+
+/**
  * @brief Set the number of slots
  *
  * @param obj The filament_path_canvas widget
- * @param count Number of slots (1-16)
+ * @param count Number of slots (1 to helix::kAmsMaxSlots)
  */
 void ui_filament_path_canvas_set_slot_count(lv_obj_t* obj, int count);
 
@@ -195,22 +208,6 @@ void ui_filament_path_canvas_set_slot_callback(lv_obj_t* obj, filament_path_slot
                                                void* user_data);
 
 /**
- * @brief Set callback for taps on a toolhead (PARALLEL topology only)
- *
- * The nozzle and the spool above it ask different questions on a toolchanger —
- * "mount or park this head" versus "what filament is in this lane" — and the
- * canvas already hit-tests them as separate regions. Registering this splits
- * them; without it both regions continue to report to the slot callback, which
- * is what every non-toolchanger panel wants.
- *
- * @param obj The filament_path_canvas widget
- * @param cb Callback function (slot_index, user_data)
- * @param user_data User data passed to callback
- */
-void ui_filament_path_canvas_set_toolhead_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
-                                                   void* user_data);
-
-/**
  * @brief Start segment transition animation
  *
  * Animates the filament tip moving from one segment to another.
@@ -244,7 +241,7 @@ void ui_filament_path_canvas_stop_animations(lv_obj_t* obj);
  * that have filament installed, even when not the active slot.
  *
  * @param obj The filament_path_canvas widget
- * @param slot_index Slot index (0-15)
+ * @param slot_index Slot index (0 to helix::kAmsMaxSlots - 1)
  * @param segment PathSegment enum value indicating how far filament extends
  * @param color RGB color (0xRRGGBB) of the filament
  */
@@ -260,7 +257,7 @@ void ui_filament_path_canvas_set_slot_filament(lv_obj_t* obj, int slot_index, in
  * PathSegment::NONE.
  *
  * @param obj The filament_path_canvas widget
- * @param slot_index Slot index (0-15)
+ * @param slot_index Slot index (0 to helix::kAmsMaxSlots - 1)
  * @return PathSegment enum value (as int) for the slot
  */
 int ui_filament_path_canvas_get_slot_filament(lv_obj_t* obj, int slot_index);
@@ -273,7 +270,7 @@ int ui_filament_path_canvas_get_slot_filament(lv_obj_t* obj, int slot_index);
  * callers set per-slot based on actual pre-gate sensor presence.
  *
  * @param obj The filament_path_canvas widget
- * @param slot Slot index (0-15)
+ * @param slot Slot index (0 to helix::kAmsMaxSlots - 1)
  * @param has_sensor true if this slot has a prep/pre-gate sensor
  */
 void ui_filament_path_canvas_set_slot_prep_sensor(lv_obj_t* obj, int slot, bool has_sensor);
@@ -397,6 +394,15 @@ void ui_filament_path_canvas_set_edge_reserve(lv_obj_t* obj, int32_t px, int32_t
 bool ui_filament_path_canvas_get_hub_box(lv_obj_t* obj, lv_area_t* area_out);
 
 /**
+ * @brief Where the toolhead glyph is drawn, in absolute display coordinates
+ *
+ * The same frame and glyph bounds the renderer draws (LINEAR and HUB layouts).
+ * False for other layouts, for a path that feeds no toolhead, or before the
+ * widget has a size.
+ */
+bool ui_filament_path_canvas_get_toolhead_box(lv_obj_t* obj, lv_area_t* area_out);
+
+/**
  * @brief Set the unit's hub (or selector) output sensor
  *
  * With the sensor the hub's output edge carries a clamp band, and filament the sensor
@@ -493,8 +499,8 @@ void ui_filament_path_canvas_set_bypass_has_spool(lv_obj_t* obj, bool has_spool)
  * @brief Compute where the bypass tube terminates (absolute screen coords).
  *
  * The owning panel anchors its shared BypassSpoolWidgets overlay at this
- * point. Returns false when bypass isn't enabled (`show_bypass=false`) or the canvas hasn't been
- * laid out yet.
+ * point. Returns false when bypass isn't enabled (`show_bypass=false`), when a LINEAR/HUB
+ * path feeds no toolhead, or the canvas hasn't been laid out yet.
  */
 bool ui_filament_path_canvas_get_bypass_merge_pos(lv_obj_t* obj, int32_t* cx_out, int32_t* cy_out);
 
@@ -505,10 +511,33 @@ bool ui_filament_path_canvas_get_bypass_merge_pos(lv_obj_t* obj, int32_t* cx_out
  * Used to show correct T-labels (e.g., T0,T2,T1,T3) in parallel/mixed topologies.
  *
  * @param obj The filament_path_canvas widget
- * @param slot Slot index (0-15)
+ * @param slot Slot index (0 to helix::kAmsMaxSlots - 1)
  * @param tool Mapped tool number, or -1 to fall back to slot index
  */
 void ui_filament_path_canvas_set_slot_mapped_tool(lv_obj_t* obj, int slot, int tool);
+
+/**
+ * @brief Set the caption naming the lane whose spool feeds this one
+ *
+ * A lane fed from storage upstream of it ("ACE 2 · 3") draws that caption on
+ * its column, so the path names where its filament comes from. NULL or an
+ * empty string clears it; the text is copied. PARALLEL topology draws it.
+ *
+ * @param obj The filament_path_canvas widget
+ * @param slot Slot index (0 to helix::kAmsMaxSlots - 1)
+ * @param caption Caption text, or NULL for none
+ */
+void ui_filament_path_canvas_set_slot_upstream(lv_obj_t* obj, int slot, const char* caption);
+
+/**
+ * @brief Read back a slot's upstream caption ("" when it has none)
+ *
+ * @param obj The filament_path_canvas widget
+ * @param slot Slot index (0 to helix::kAmsMaxSlots - 1)
+ * @param out Buffer receiving the caption
+ * @param out_size Size of @p out
+ */
+void ui_filament_path_canvas_get_slot_upstream(lv_obj_t* obj, int slot, char* out, size_t out_size);
 
 /**
  * @brief Set per-lane Klipper extruder identity for toolhead badges
@@ -536,7 +565,7 @@ void ui_filament_path_canvas_set_extruder_tools(lv_obj_t* obj, const int* tools,
  * the draw_mixed_topology() rendering decision per lane.
  *
  * @param obj The filament_path_canvas widget
- * @param slot Slot index (0-15)
+ * @param slot Slot index (0 to helix::kAmsMaxSlots - 1)
  * @param is_hub true if lane routes through hub, false for direct-to-extruder
  */
 void ui_filament_path_canvas_set_slot_hub_routed(lv_obj_t* obj, int slot, bool is_hub);
@@ -595,6 +624,20 @@ int filament_path_canvas_buffer_fault_state(lv_obj_t* obj);
 void filament_path_canvas_release_buffer(lv_obj_t* obj);
 
 /**
+ * @brief Set click callback for a toolhead on a PARALLEL (one head per tool) path
+ *
+ * A tap on a head reaches this callback; a tap on its filament tube or spool
+ * still reaches the slot callback. With none set, a head tap reaches the slot
+ * callback too.
+ *
+ * @param obj The filament_path_canvas widget
+ * @param cb Callback function (slot_index, user_data)
+ * @param user_data User data passed to callback
+ */
+void filament_path_canvas_set_toolhead_callback(lv_obj_t* obj, filament_path_slot_cb_t cb,
+                                                void* user_data);
+
+/**
  * @brief Pure coordinate hit-test for an axis-aligned box.
  *
  * Returns true when point @p p falls within the box centered at (@p cx, @p cy)
@@ -614,14 +657,36 @@ bool hub_box_hit(lv_point_t p, int32_t cx, int32_t cy, int32_t w, int32_t h, int
  */
 bool recorded_box_hit(lv_point_t p, const lv_area_t& box, lv_point_t rendered_origin,
                       lv_point_t current_origin, int32_t margin);
-} // namespace helix::ui
-#endif
+
+/// What a tap on a PARALLEL path landed on.
+enum class ParallelTapTarget : uint8_t {
+    None,
+    Toolhead, ///< A tool's head glyph
+    Lane,     ///< A tool's filament tube or spool, above its entry sensor
+};
+
+struct ParallelTap {
+    ParallelTapTarget target = ParallelTapTarget::None;
+    int slot = -1;
+};
+
+/// Where a PARALLEL path draws its lanes and heads, for parallel_tap_at().
+struct ParallelTapLayout {
+    const int32_t* slot_x = nullptr; ///< Each column's center x
+    int slot_count = 0;
+    int32_t sensor_y = 0;        ///< A lane owns at least everything above this row
+    int32_t lane_half_width = 0; ///< A lane's reach either side of its column
+    lv_area_t head{};            ///< A head glyph's drawn bounds, x relative to its column
+};
 
 /**
- * @brief Tell the canvas which physical tool is on the carriage (-1 = none)
+ * @brief Pure hit-test for a tap on a PARALLEL path.
  *
- * Only meaningful on a toolchanger. A unit-scoped HUB view draws a single
- * toolhead and cannot otherwise say whether that head is the mounted one, which
- * on a toolchanger is most of what the view is for.
+ * Above the head glyph's top a tap is a lane's, and above the sensor row it
+ * is a lane's however tall the glyph is drawn, so a tap on a tube never
+ * reaches a head. Below that a tap is a head's only inside a drawn glyph
+ * (bounds inclusive). Where neighbours overlap, the nearest column answers.
  */
-void ui_filament_path_canvas_set_mounted_tool(lv_obj_t* obj, int tool_index);
+ParallelTap parallel_tap_at(lv_point_t p, const ParallelTapLayout& layout);
+} // namespace helix::ui
+#endif

@@ -37,7 +37,20 @@
  * - /dev/dri/card0 must exist and be accessible
  * - User must be in 'video' and 'input' groups
  * - libdrm and libinput libraries
+ *
+ * Which of LVGL's two DRM drivers the class presents through is fixed when it
+ * compiles: dumb buffers, or EGL/OpenGL ES when LV_LINUX_DRM_USE_EGL. A Pi
+ * build compiles it once each way into the same binary, so each compile puts
+ * the class in its own inline namespace. Code that names DisplayBackendDRM gets
+ * the dumb-buffer one; the EGL one is reached only through
+ * make_drm_egl_backend().
  */
+#if LV_LINUX_DRM_USE_EGL
+#define HELIX_DRM_PRESENT_NS drm_present_egl
+#else
+#define HELIX_DRM_PRESENT_NS drm_present_dumb
+#endif
+inline namespace HELIX_DRM_PRESENT_NS {
 class DisplayBackendDRM : public DisplayBackend {
   public:
     /**
@@ -208,5 +221,13 @@ class DisplayBackendDRM : public DisplayBackend {
     int screen_height_ = 0;
     bool size_was_explicit_ = false;
 };
+} // namespace HELIX_DRM_PRESENT_NS
+
+namespace helix {
+/// A DRM backend presenting through EGL/OpenGL ES, from the compile of
+/// display_backend_drm.cpp that carries LVGL's EGL driver. Weak, so a binary
+/// linked without that compile sees a null function and offers no EGL path.
+std::unique_ptr<DisplayBackend> make_drm_egl_backend() __attribute__((weak));
+} // namespace helix
 
 #endif // HELIX_DISPLAY_DRM

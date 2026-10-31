@@ -22,6 +22,7 @@
 #include "utils/decimal_parse.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <system_error>
@@ -34,6 +35,12 @@ namespace pause_scan_detail {
 
 inline char ascii_lower(char c) {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+}
+
+/// Whitespace between the words of a line, including the CR a CRLF file
+/// leaves on every getline result.
+inline bool is_word_separator(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
 /// True when the code part's first word equals @p word (case-insensitive,
@@ -54,11 +61,25 @@ inline bool first_word_is(std::string_view line, std::string_view word) {
     const size_t end = i + word.size();
     if (end < line.size()) {
         const char c = line[end];
-        if (c != ' ' && c != '\t' && c != ';' && c != '\r' && c != '\n') {
+        if (!is_word_separator(c) && c != ';') {
             return false; // longer identifier (M6000, PAUSED, …)
         }
     }
     return true;
+}
+
+/// The next word of the code part at or after @p pos, advancing @p pos past
+/// it; empty once the code part (up to ';' or end) is exhausted. Separators
+/// and terminators are one set, so every call either consumes a word or ends.
+inline std::string_view next_word(std::string_view line, size_t& pos) {
+    while (pos < line.size() && is_word_separator(line[pos])) {
+        ++pos;
+    }
+    const size_t start = pos;
+    while (pos < line.size() && !is_word_separator(line[pos]) && line[pos] != ';') {
+        ++pos;
+    }
+    return line.substr(start, pos - start);
 }
 
 } // namespace pause_scan_detail
@@ -98,9 +119,47 @@ struct ScheduledPause {
     PauseKind kind{PauseKind::Macro};
 };
 
+/// Where the file tells the firmware it reached a layer: a
+/// `SET_PRINT_STATS_INFO ... CURRENT_LAYER=N` line. A pause scheduled at
+/// runtime for layer N fires as that line runs (layer_pause.h), so this is
+/// where its marker belongs on the progress bar.
+struct LayerMark {
+    int32_t layer{0}; ///< N, the slicer's own layer number
+    float byte_fraction{0.0f};
+    float slicer_fraction{0.0f};
+};
+
 /// Which fraction of a pause is valid for a file's axis.
 inline float display_fraction(const ScheduledPause& pause, ProgressAxis axis) {
     return axis == ProgressAxis::SlicerTime ? pause.slicer_fraction : pause.byte_fraction;
+}
+
+/// Which fraction of a layer mark is valid for a file's axis.
+inline float display_fraction(const LayerMark& mark, ProgressAxis axis) {
+    return axis == ProgressAxis::SlicerTime ? mark.slicer_fraction : mark.byte_fraction;
+}
+
+/// Everything one pass over a file collects for the progress surfaces.
+struct PauseScanResult {
+    std::vector<ScheduledPause> pauses;
+    /// One per distinct CURRENT_LAYER value, in file order. Empty when the
+    /// slicer reports no layers.
+    std::vector<LayerMark> layer_marks;
+    ProgressAxis axis{ProgressAxis::BytePosition};
+};
+
+/// One scan, shared read-only by everyone who holds it (the layer index, the
+/// viewer, print state): a long print's marks are not worth three copies.
+using PauseScanPtr = std::shared_ptr<const PauseScanResult>;
+
+/// The first mark for @p layer, or null when the file never reports it.
+inline const LayerMark* find_layer_mark(const PauseScanResult& scan, int32_t layer) {
+    for (const auto& mark : scan.layer_marks) {
+        if (mark.layer == layer) {
+            return &mark;
+        }
+    }
+    return nullptr;
 }
 
 /// True when @p line's command word is one of the pause commands, with the kind.
@@ -120,30 +179,60 @@ inline std::optional<PauseKind> classify_pause_command(std::string_view line) {
     return std::nullopt;
 }
 
+/// N from a `SET_PRINT_STATS_INFO ... CURRENT_LAYER=N` line, or nullopt when
+/// the line is not one or carries no CURRENT_LAYER. Case-insensitive.
+inline std::optional<int32_t> reported_current_layer(std::string_view line) {
+    using pause_scan_detail::ascii_lower;
+    using pause_scan_detail::first_word_is;
+    using pause_scan_detail::next_word;
+    if (!first_word_is(line, "set_print_stats_info")) {
+        return std::nullopt;
+    }
+    static constexpr std::string_view kKey = "current_layer=";
+    size_t pos = 0;
+    for (std::string_view word = next_word(line, pos); !word.empty(); word = next_word(line, pos)) {
+        if (word.size() > kKey.size()) {
+            bool match = true;
+            for (size_t k = 0; k < kKey.size(); ++k) {
+                if (ascii_lower(word[k]) != kKey[k]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                int32_t value = 0;
+                bool digits = false;
+                for (size_t k = kKey.size(); k < word.size(); ++k) {
+                    const char d = word[k];
+                    if (d < '0' || d > '9' || value > 100000000) {
+                        return std::nullopt;
+                    }
+                    value = value * 10 + (d - '0');
+                    digits = true;
+                }
+                return digits ? std::optional<int32_t>(value) : std::nullopt;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 /// The P value (0-100) of an `M73 P…` line, or nullopt when the line is not an
 /// M73 carrying a P parameter. R (minutes left) and Bambu's Q (fine bar) are
 /// ignored — P is the only word that feeds display_status.progress.
 inline std::optional<float> m73_progress_percent(std::string_view line) {
     using pause_scan_detail::first_word_is;
+    using pause_scan_detail::next_word;
     if (!first_word_is(line, "m73")) {
         return std::nullopt;
     }
-    // Scan the words after "M73" for a P at token start. ';' ends the code part.
+    // Scan the words after "M73" for a P at word start.
     size_t pos = 0;
-    while (pos < line.size() && line[pos] != ';') {
-        if (line[pos] == ' ' || line[pos] == '\t' || line[pos] == '\r' || line[pos] == '\n') {
-            ++pos;
-            continue;
-        }
-        const size_t token_start = pos;
-        while (pos < line.size() && line[pos] != ' ' && line[pos] != '\t' && line[pos] != ';' &&
-               line[pos] != '\r' && line[pos] != '\n') {
-            ++pos;
-        }
-        if (line[token_start] == 'P' || line[token_start] == 'p') {
+    for (std::string_view word = next_word(line, pos); !word.empty(); word = next_word(line, pos)) {
+        if (word[0] == 'P' || word[0] == 'p') {
             float value = 0.0f;
-            const auto* first = line.data() + token_start + 1;
-            const auto* last = line.data() + pos;
+            const auto* first = word.data() + 1;
+            const auto* last = word.data() + word.size();
             const auto [ptr, ec] = parse_decimal(first, last, value);
             if (ec == std::errc{} && ptr != first) {
                 return value < 0.0f ? 0.0f : (value > 100.0f ? 100.0f : value);
@@ -173,6 +262,7 @@ class PauseScan {
     void begin(size_t total_bytes) {
         total_bytes_ = total_bytes;
         pauses_.clear();
+        layer_marks_.clear();
         last_m73_fraction_ = 0.0f;
         has_m73_ = false;
     }
@@ -184,7 +274,7 @@ class PauseScan {
      * @return true when this line added a pause.
      */
     bool feed_line(std::string_view line, uint64_t line_offset, int32_t layer_index) {
-        // Both things this scanner looks for are commands: first word of the
+        // Everything this scanner looks for is a command: first word of the
         // code part. Most lines of a sliced file are G moves, so gating on the
         // first non-space character keeps the scan near-free for them without
         // every caller having to pre-filter.
@@ -196,6 +286,14 @@ class PauseScan {
             return false;
         }
         const char c = line[i];
+        if (c == 'S' || c == 's') {
+            if (auto layer = reported_current_layer(line)) {
+                if (layer_marks_.empty() || layer_marks_.back().layer != *layer) {
+                    layer_marks_.push_back({*layer, fraction_of(line_offset), last_m73_fraction_});
+                }
+            }
+            return false;
+        }
         if (c != 'M' && c != 'm' && c != 'P' && c != 'p') {
             return false;
         }
@@ -208,10 +306,7 @@ class PauseScan {
         if (auto kind = classify_pause_command(line)) {
             ScheduledPause pause;
             pause.file_offset = line_offset;
-            pause.byte_fraction = total_bytes_ > 0
-                                      ? static_cast<float>(static_cast<double>(line_offset) /
-                                                           static_cast<double>(total_bytes_))
-                                      : 0.0f;
+            pause.byte_fraction = fraction_of(line_offset);
             pause.slicer_fraction = last_m73_fraction_;
             pause.layer_index = layer_index;
             pause.kind = *kind;
@@ -223,6 +318,22 @@ class PauseScan {
 
     const std::vector<ScheduledPause>& pauses() const {
         return pauses_;
+    }
+
+    const std::vector<LayerMark>& layer_marks() const {
+        return layer_marks_;
+    }
+
+    /// The whole collection, in the form the progress surfaces consume.
+    PauseScanResult result() const {
+        return {pauses_, layer_marks_, axis()};
+    }
+
+    /// result() moved into a shared, immutable copy; the scan is spent after.
+    PauseScanPtr take_shared() {
+        const ProgressAxis a = axis();
+        return std::make_shared<const PauseScanResult>(
+            PauseScanResult{std::move(pauses_), std::move(layer_marks_), a});
     }
 
     /// True when the file carries at least one M73 P line — the bar for this
@@ -237,7 +348,14 @@ class PauseScan {
     }
 
   private:
+    float fraction_of(uint64_t line_offset) const {
+        return total_bytes_ > 0 ? static_cast<float>(static_cast<double>(line_offset) /
+                                                     static_cast<double>(total_bytes_))
+                                : 0.0f;
+    }
+
     std::vector<ScheduledPause> pauses_;
+    std::vector<LayerMark> layer_marks_;
     size_t total_bytes_{0};
     float last_m73_fraction_{0.0f};
     bool has_m73_{false};

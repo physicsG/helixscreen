@@ -19,6 +19,9 @@
 #include "lvgl/lvgl.h"
 #include "subject_managed_panel.h"
 
+#include <functional>
+#include <string>
+
 /**
  * @brief Callback for keypad value confirmation
  * @param value Confirmed value (clamped to min/max)
@@ -39,6 +42,16 @@ struct ui_keypad_config_t {
     bool allow_negative;           ///< Allow negative values
     ui_keypad_callback_t callback; ///< Called on OK confirmation
     void* user_data;               ///< Passed to callback
+    /// Digits accepted after the decimal point, 1 to 2; 0 caps only the total digit count.
+    int max_fraction_digits = 0;
+    /// Called on OK with an in-range value, before `callback`. An empty result accepts
+    /// it; anything else is shown as an error and the keypad stays open.
+    std::function<std::string(float)> validate;
+    /// Called with the accepted value once the keypad has closed, so it may show the
+    /// keypad again.
+    std::function<void(float)> on_confirm;
+    /// Called once when the keypad closes without a confirmed value.
+    std::function<void()> on_cancel;
 };
 
 /**
@@ -72,8 +85,9 @@ void ui_keypad_init(lv_obj_t* parent);
  * Uses NavigationManager::push_overlay() for standard overlay behavior.
  *
  * @param config Keypad configuration with initial value and callback
+ * @return false when the keypad could not be built or the config is null
  */
-void ui_keypad_show(const ui_keypad_config_t* config);
+bool ui_keypad_show(const ui_keypad_config_t* config);
 
 /**
  * @brief Hide keypad overlay (cancel without callback)

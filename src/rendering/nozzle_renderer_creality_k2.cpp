@@ -175,14 +175,14 @@ void draw_nozzle_creality_k2(lv_layer_t* layer, int32_t cx, int32_t cy,
 
         lv_color_t slit_color = nr_darken(body_base, 30);
 
-        constexpr int32_t SLIT_COUNT = 13;
+        constexpr int32_t kSlitCount = 13;
         lv_draw_fill_dsc_t slit_fill;
         lv_draw_fill_dsc_init(&slit_fill);
         slit_fill.color = slit_color;
         slit_fill.opa = LV_OPA_COVER;
 
-        for (int32_t i = 0; i < SLIT_COUNT; i++) {
-            int32_t slit_x = vent_area_left + (vent_area_width * i) / (SLIT_COUNT - 1);
+        for (int32_t i = 0; i < kSlitCount; i++) {
+            int32_t slit_x = vent_area_left + (vent_area_width * i) / (kSlitCount - 1);
             // Each slit is a 1px wide vertical line
             lv_area_t slit = {slit_x, slit_top, slit_x, slit_bottom};
             lv_draw_fill(layer, &slit_fill, &slit);

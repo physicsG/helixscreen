@@ -23,7 +23,7 @@ namespace helix {
 namespace calibration {
 
 /// Klipper's default input shaper damping ratio (shaper_defs.py).
-inline constexpr double SHAPER_DEFAULT_DAMPING_RATIO = 0.1;
+inline constexpr double kShaperDefaultDampingRatio = 0.1;
 
 /**
  * @brief Attenuation |H(f)| of a shaper at each frequency bin

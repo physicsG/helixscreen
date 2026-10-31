@@ -40,17 +40,18 @@ REMOTE_SSH_TARGET = $(if $(REMOTE_USER),$(REMOTE_USER)@)$(REMOTE_HOST)
 
 # A remote target with no host stops before anything runs, in one line naming
 # the file. REMOTE_DIR is checked for every target that uses it: rsync --delete
-# to "$(REMOTE_HOST):/" is what an empty one would mean. remote-native and
-# remote-test go through scripts/remote-build.sh, which keeps its own clone.
+# to "$(REMOTE_HOST):/" is what an empty one would mean. A host given as a
+# candidate list is resolved by that first read, and a list where no candidate
+# answers reads as empty. remote-native and remote-test go through
+# scripts/remote-build.sh, which keeps its own clone and resolves the host
+# itself, so make never reads it for them.
 build_hosts_missing = $(error $(1) is not set: add $(1)=<value> to $(BUILD_HOSTS_FILE) (or export it))
-ifneq ($(filter remote-%,$(MAKECMDGOALS)),)
+ifneq ($(filter-out remote-native remote-test,$(filter remote-%,$(MAKECMDGOALS))),)
 ifeq ($(strip $(REMOTE_HOST)),)
 $(call build_hosts_missing,REMOTE_HOST)
 endif
-ifneq ($(filter-out remote-native remote-test,$(filter remote-%,$(MAKECMDGOALS))),)
 ifeq ($(strip $(REMOTE_DIR)),)
 $(call build_hosts_missing,REMOTE_DIR)
-endif
 endif
 endif
 

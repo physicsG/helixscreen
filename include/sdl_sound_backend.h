@@ -55,7 +55,7 @@ class SDLSoundBackend : public SoundBackend {
     void set_voice_waveform(int slot, Waveform w) override;
     void silence_voice(int slot) override;
     int voice_count() const override {
-        return MAX_VOICES;
+        return kMaxVoices;
     }
 
     // NoteEvent interface (primary path — per-sample envelope/sweep/LFO in callback)
@@ -72,11 +72,11 @@ class SDLSoundBackend : public SoundBackend {
     void clear_render_source() override;
 
   private:
-    static constexpr int MAX_VOICES = 4;
+    static constexpr int kMaxVoices = 4;
 
     static void audio_callback(void* userdata, uint8_t* stream, int len);
 
-    VoiceSlot voice_slots_[MAX_VOICES];
+    VoiceSlot voice_slots_[kMaxVoices];
 
     // Scratch buffer for mixing (sized in initialize())
     std::vector<float> mix_buf_;

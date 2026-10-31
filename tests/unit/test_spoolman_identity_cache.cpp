@@ -747,3 +747,67 @@ TEST_CASE_METHOD(IdentityCacheFixture,
     h.poll(); // identity already cached, weights still unchanged
     CHECK(lv_subject_get_int(AmsState::instance().get_slots_version_subject()) == settled);
 }
+
+TEST_CASE_METHOD(IdentityCacheFixture,
+                 "SpoolmanManager identity: a late identity names the AMS slot card",
+                 "[spoolman][identity][slot_name]") {
+    // The slot card's name line reads AmsState's per-slot name subject. A lane
+    // that only Spoolman can name paints material-only first, then must pick
+    // the name up when the identity lands, with no slot change to carry it.
+    set_spoolman_available(true);
+    PollHarness h;
+
+    SlotInfo slot = h.backend->get_slot_info(0);
+    slot.spoolman_id = 1;
+    slot.spool_name.clear();
+    slot.color_name.clear();
+    slot.remaining_weight_g = 850.0f;
+    slot.total_weight_g = 1000.0f;
+    helix::test::apply_edit(*h.backend, 0, slot);
+    AmsState::instance().sync_from_backend();
+
+    lv_subject_t* name = AmsState::instance().get_slot_name_subject(0);
+    REQUIRE(name != nullptr);
+    REQUIRE(std::string(lv_subject_get_string(name)).empty());
+    REQUIRE(IdTA::cache_size(SpoolmanManager::instance()) == 0);
+
+    h.poll();
+
+    const auto identity = SpoolmanManager::find_identity(1);
+    REQUIRE(identity.has_value());
+    REQUIRE_FALSE(identity->filament_name.empty());
+    CHECK(std::string(lv_subject_get_string(name)) == identity->filament_name);
+}
+
+TEST_CASE_METHOD(IdentityCacheFixture,
+                 "SpoolmanManager identity: an identity relearned for an unchanged lane renames "
+                 "the slot card",
+                 "[spoolman][identity][slot_name]") {
+    // Spoolman drops out and comes back: the identity cache empties, but the
+    // lane's filed record is the one the next poll returns, so no slot write
+    // carries the name back. Only the identity arriving can.
+    set_spoolman_available(true);
+    PollHarness h;
+
+    SlotInfo slot = h.backend->get_slot_info(0);
+    slot.spoolman_id = 1;
+    slot.spool_name.clear();
+    slot.color_name.clear();
+    slot.remaining_weight_g = 850.0f;
+    slot.total_weight_g = 1000.0f;
+    helix::test::apply_edit(*h.backend, 0, slot);
+    h.poll();
+
+    lv_subject_t* name = AmsState::instance().get_slot_name_subject(0);
+    REQUIRE(name != nullptr);
+    const std::string learned(lv_subject_get_string(name));
+    REQUIRE_FALSE(learned.empty());
+
+    SpoolmanManager::clear_identity_cache();
+    AmsState::instance().sync_from_backend();
+    // The slot itself carries no name: only the identity can supply one.
+    REQUIRE(std::string(lv_subject_get_string(name)).empty());
+
+    h.poll();
+    CHECK(std::string(lv_subject_get_string(name)) == learned);
+}

@@ -12,9 +12,9 @@
     <prop name="tile_target_subject" type="string" default=""/>
   </api>
   <view name="panel_widget_lock" extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false">
-    <!-- Closed lock while a PIN is set, open lock while none is. -->
+    <!-- The tile locks the screen, so it always shows a lock; muted while no PIN is set, where a tap opens security settings instead. -->
     <home_action_tile width="100%"
-                      height="100%" icon="lock" icon_variant="secondary" alt_icon="lock_open" alt_icon_variant="muted"
+                      height="100%" icon="lock" icon_variant="secondary" alt_icon="lock" alt_icon_variant="muted"
                       icon_swap_subject="lock_pin_set" label="Lock" callback="lock_screen_clicked_cb"
                       button_name="lock_button" icon_name="lock_icon_closed" tile_icon_subject="$tile_icon_subject"
                       tile_label_subject="$tile_label_subject" tile_dir_subject="$tile_dir_subject"/>

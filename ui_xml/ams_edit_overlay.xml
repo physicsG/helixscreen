@@ -1,15 +1,16 @@
 <?xml version="1.0"?>
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- AMS slot editor overlay. One overlay, internal views selected by the
-     ams_edit_view int subject: 0=overview (form), 1=Spoolman spool picker.
-     Header bar: back button (per-view routing via ams_edit_back_cb) and a
-     dirty-gated Save action (ams_edit_save_disabled subject), hidden outside
-     the overview via ams_edit_save_hidden. Both subjects are written
-     exclusively by AmsEditOverlay::set_view(). -->
+<!-- Spool editor overlay. One overlay, internal views selected by the
+     ams_edit_view int subject: 0=editor (the identity form; the entry view),
+     1=Spoolman spool picker, 2=custom color (presets + HSV).
+     Header: back (ams_edit_back_cb), lane-name title (bound from C++ in AmsEditOverlay::create()),
+     the linked-spool badge (an indicator, part of the back target), and Spoolman
+     + Scan QR round icon buttons (header_content slot, left of the
+     dirty-gated Save action). All three header subjects are written
+     exclusively by AmsEditOverlay::set_view()/update_ui(). -->
 <component>
   <consts>
-    <px name="left_column_width" value="120"/>
     <!-- Spool-picker list max height: caps the scroll viewport so the picker
          stays inside the overlay. Tuned to show ~5 rows at each breakpoint. -->
     <px name="spool_list_max_height_micro" value="130"/>
@@ -33,138 +34,472 @@
     <px name="field_w_text_small" value="120"/>
     <px name="field_w_text_medium" value="150"/>
     <px name="field_w_text_large" value="180"/>
-    <!-- Height of the spool-edit color column, so the catalog selector beside it
-         can be pinned to the same height and its product list lands flush with the
-         bottom swatch row (LVGL flex has no cross-axis stretch, so the selector
-         needs a definite height for its flex_grow list to have slack — #1128).
-         = swatch grid (5 rows) + the 28px "Color ▣ ✎" header + one space_xs gap.
-         KEEP IN SYNC with the swatch/gap ladder in
-         register_swatch_grid_constants() (src/xml_registration.cpp):
-           micro 24px/6gap, tiny+small 28/8, medium+ 32/8. -->
-    <px name="swatch_col_height_micro" value="174"/>
-    <px name="swatch_col_height_tiny" value="202"/>
-    <px name="swatch_col_height_small" value="204"/>
-    <px name="swatch_col_height_medium" value="225"/>
-    <px name="swatch_col_height_large" value="226"/>
-    <px name="swatch_col_height_xlarge" value="228"/>
-    <px name="swatch_col_height_xxlarge" value="230"/>
+    <!-- Vertical gap between the editor's rows: the theme's space_xs (4)
+         everywhere except the cramped small class, where the stack needs two
+         pixels back to fit the fold. -->
+    <px name="ams_edit_vgap_micro" value="4"/>
+    <px name="ams_edit_vgap_tiny" value="1"/>
+    <px name="ams_edit_vgap_small" value="1"/>
+    <px name="ams_edit_vgap_medium" value="4"/>
+    <px name="ams_edit_vgap_large" value="4"/>
+    <px name="ams_edit_vgap_xlarge" value="4"/>
+    <px name="ams_edit_vgap_xxlarge" value="4"/>
+    <!-- The collapsed More row's vertical padding, trimmed at the cramped
+         classes for the same reason. -->
+    <px name="ams_edit_more_pad_micro" value="0"/>
+    <px name="ams_edit_more_pad_tiny" value="0"/>
+    <px name="ams_edit_more_pad_small" value="0"/>
+    <px name="ams_edit_more_pad_medium" value="2"/>
+    <px name="ams_edit_more_pad_large" value="2"/>
+    <px name="ams_edit_more_pad_xlarge" value="2"/>
+    <px name="ams_edit_more_pad_xxlarge" value="2"/>
+    <!-- Row label column ("Material", "Variant"): fixed so the four rows
+         align; sized for the longest locale at text_small. -->
+    <px name="ams_edit_row_label_w_micro" value="56"/>
+    <px name="ams_edit_row_label_w_tiny" value="64"/>
+    <px name="ams_edit_row_label_w_small" value="72"/>
+    <px name="ams_edit_row_label_w_medium" value="76"/>
+    <px name="ams_edit_row_label_w_large" value="80"/>
+    <!-- Colour column width in the split (short-landscape) layout: wide
+         enough for four swatches plus the ring reach. -->
+    <px name="ams_edit_color_col_w_micro" value="132"/>
+    <px name="ams_edit_color_col_w_tiny" value="148"/>
+    <px name="ams_edit_color_col_w_small" value="160"/>
+    <!-- The split column exists only at the micro class; the taller classes
+         stack the grid full-width and never read this token. -->
+    <px name="ams_edit_color_col_w_medium" value="#ams_edit_color_col_w_small"/>
+    <px name="ams_edit_color_col_w_large" value="#ams_edit_color_col_w_small"/>
+    <!-- The lane-setting dropdowns, as narrow as their options allow so both
+         share one row at every landscape class: the backup's wide enough for
+         "Gate 12", the tool's for "None". -->
+    <px name="ams_edit_tool_dd_w_micro" value="72"/>
+    <px name="ams_edit_tool_dd_w_tiny" value="72"/>
+    <px name="ams_edit_tool_dd_w_small" value="80"/>
+    <px name="ams_edit_tool_dd_w_medium" value="96"/>
+    <px name="ams_edit_tool_dd_w_large" value="110"/>
+    <px name="ams_edit_lane_dd_w_micro" value="96"/>
+    <px name="ams_edit_lane_dd_w_tiny" value="96"/>
+    <px name="ams_edit_lane_dd_w_small" value="110"/>
+    <px name="ams_edit_lane_dd_w_medium" value="130"/>
+    <px name="ams_edit_lane_dd_w_large" value="150"/>
+    <!-- Hit reach for the weight pill: its 24px minimum height reaches 44.
+         The summary row is 44 tall, so the reach stays inside it. -->
+    <px name="ams_edit_pill_hit" value="10"/>
+    <!-- Hit reach for the More toggle and the Add link: the bar's height
+         plus twice this is at least 44 at every class. -->
+    <px name="ams_edit_bar_hit_micro" value="13"/>
+    <px name="ams_edit_bar_hit_tiny" value="13"/>
+    <px name="ams_edit_bar_hit_small" value="12"/>
+    <px name="ams_edit_bar_hit_medium" value="8"/>
+    <px name="ams_edit_bar_hit_large" value="8"/>
+    <px name="ams_edit_bar_hit_xlarge" value="8"/>
+    <px name="ams_edit_bar_hit_xxlarge" value="8"/>
+    <!-- Header icon buttons: hit reach and spacing. The buttons are
+         #button_height_sm circles; the reach takes each to the header's
+         height (40 at micro) or 44, and the gap is twice the reach so the
+         two targets meet without overlapping. -->
+    <px name="ams_edit_hdr_hit_micro" value="8"/>
+    <px name="ams_edit_hdr_hit_small" value="2"/>
+    <px name="ams_edit_hdr_hit_medium" value="2"/>
+    <px name="ams_edit_hdr_hit_large" value="2"/>
+    <px name="ams_edit_hdr_gap_micro" value="16"/>
+    <px name="ams_edit_hdr_gap_small" value="4"/>
+    <px name="ams_edit_hdr_gap_medium" value="4"/>
+    <px name="ams_edit_hdr_gap_large" value="4"/>
   </consts>
+  <styles>
+    <!-- The colour view's presets pane: content-wide beside the picker, the
+         view's full width alone. Both are bound styles, since an inline width
+         would outrank either. -->
+    <style name="color_pane_fit" width="content"/>
+    <style name="color_pane_fill" width="100%"/>
+  </styles>
   <view name="ams_edit_overlay"
-        extends="overlay_panel" title="Edit Slot" hide_action_button="false" action_button_text="Save"
+        extends="overlay_panel" title="Edit Spool" hide_action_button="false" action_button_text="Save"
         action_button_callback="ams_edit_save_cb" action_button_disabled_subject="ams_edit_save_disabled"
-        action_button_hidden_subject="ams_edit_save_hidden" title_badge_image="spoolman_mark"
+        action_button_hidden_subject="ams_edit_save_hidden" title_badge_icon="spoolman"
         title_badge_subject="ams_edit_is_managed" back_button_callback="ams_edit_back_cb">
+    <!-- Header icon buttons, left of Save: Choose from Spoolman and Scan QR,
+         drawn by styles.header_icon_button. Injected into header_bar's content slot;
+         gated on Spoolman availability (ams_edit_scan_enabled also carries
+         the no-camera build gate). The row is the header's full height and
+         padded by the reach, so each button's ext_click_area lies inside it:
+         LVGL only hit-tests a child inside its parent's box. -->
+    <header_bar-header_content>
+      <lv_obj name="hdr_actions"
+              width="content" height="100%" style_pad_ver="0" style_pad_hor="#ams_edit_hdr_hit"
+              style_pad_gap="#ams_edit_hdr_gap" style_bg_opa="0" style_border_width="0" scrollable="false"
+              clickable="false" flex_flow="row" style_flex_cross_place="center" style_flex_track_place="center"
+              hidden="true">
+        <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="0"/>
+        <ui_button name="btn_hdr_spoolman"
+                   width="#button_height_sm" height="#button_height_sm" icon="spoolman" icon_size="sm"
+                   ext_click_area="#ams_edit_hdr_hit" hidden="true">
+          <style name="styles.header_icon_button"/>
+          <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="ams_edit_choose_spoolman_cb"/>
+        </ui_button>
+        <ui_button name="btn_hdr_scan_qr"
+                   width="#button_height_sm" height="#button_height_sm" icon="qrcode_scan" icon_size="sm"
+                   ext_click_area="#ams_edit_hdr_hit" hidden="true">
+          <style name="styles.header_icon_button"/>
+          <bind_flag_if_eq subject="ams_edit_scan_enabled" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="ams_edit_scan_qr_cb"/>
+        </ui_button>
+      </lv_obj>
+    </header_bar-header_content>
     <lv_obj name="overlay_content"
-            width="100%" flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="0" scrollable="true"
+            width="100%" flex_grow="1" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_xs"
+            style_pad_bottom="#space_xs" flex_flow="column" style_pad_gap="#space_xs" scrollable="true"
             scrollbar_mode="auto">
 
       <!-- ============================================================ -->
-      <!-- OVERVIEW VIEW: slot state + manual edit (ams_edit_view=0)    -->
+      <!-- EDITOR VIEW (ams_edit_view=0): the entry view.               -->
       <!-- ============================================================ -->
-      <lv_obj name="form_view"
-              width="100%" flex_grow="1" flex_flow="column" style_pad_gap="0" style_flex_main_place="center"
-              scrollable="false">
+      <lv_obj name="editor_view"
+              width="100%" height="content" flex_flow="column" style_pad_gap="#ams_edit_vgap" scrollable="false">
         <bind_flag_if_not_eq subject="ams_edit_view" flag="hidden" ref_value="0"/>
-        <!-- Content area - HORIZONTAL layout with side-by-side sections -->
+
+        <!-- Summary: colour dot + "eSUN Silk PETG, Blue" + from-tag badge +
+             the weight pill. -->
         <lv_obj width="100%"
-                height="content" style_pad_all="#space_lg" flex_flow="row" style_pad_gap="#space_xl" scrollable="false">
-          <!-- LEFT COLUMN: Tool remap + Color preview -->
-          <lv_obj width="#left_column_width"
-                  height="content" style_pad_all="0" flex_flow="column" style_flex_main_place="start"
-                  style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false">
-            <!-- Tool assignment dropdown (hidden when backend doesn't support remapping) -->
-            <lv_obj name="tool_remap_row"
-                    width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs"
-                    scrollable="false" hidden="true">
-              <text_small text="Remap Tool"/>
-              <lv_dropdown name="tool_dropdown"
-                           width="100%" height="content" style_radius="#border_radius" options="None">
-                <event_cb trigger="value_changed" callback="ams_edit_tool_changed_cb"/>
+                height="content" style_pad_all="0" flex_flow="row_wrap" style_flex_cross_place="center"
+                style_pad_gap="#space_sm" scrollable="false">
+          <lv_obj name="summary_swatch_wrap"
+                  width="44" height="44" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="row"
+                  style_flex_main_place="center" style_flex_cross_place="center" scrollable="false" clickable="true">
+            <event_cb trigger="clicked" callback="ams_edit_custom_color_cb"/>
+            <color_dot name="summary_color_swatch" size="#swatch_grid_size" color="#card_bg"/>
+          </lv_obj>
+          <text_body name="summary_text" bind_text="ams_edit_summary_text" flex_grow="1" long_mode="dots"/>
+          <tag_badge name="summary_tag_badge" subject="ams_edit_tag_badge_visible"/>
+          <lv_obj name="weight_pill"
+                  width="content" height="content" flex_flow="row" style_flex_cross_place="center"
+                  style_pad_hor="#space_md" style_pad_ver="#space_xs" style_pad_gap="#space_xs"
+                  style_radius="#border_radius" style_bg_color="#elevated_bg" style_bg_opa="255" style_border_width="1"
+                  style_border_color="#border" scrollable="false" clickable="true" ext_click_area="#ams_edit_pill_hit">
+            <style name="styles.press_wash" selector="pressed"/>
+            <icon src="weight" size="xs" variant="muted" clickable="false" event_bubble="true"/>
+            <text_body bind_text="ams_edit_weight_text" clickable="false" event_bubble="true"/>
+            <text_small bind_text="ams_edit_weight_hint"
+                        style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+            <icon src="pencil" size="xs" variant="muted" clickable="false" event_bubble="true"/>
+            <event_cb trigger="clicked" callback="ams_edit_weight_cb"/>
+          </lv_obj>
+        </lv_obj>
+        <!-- Temperature line, full-width outside the short-landscape class; the
+             split layout carries its own under the form, where the colour
+             column leaves room. -->
+        <lv_obj name="temp_row"
+                width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                style_pad_gap="#space_xs" scrollable="false">
+          <bind_flag_if cond="ui_breakpoint eq 0 and ui_is_portrait eq 0" flag="hidden"/>
+          <text_small name="temp_line" bind_text="ams_edit_temp_text" style_text_color="#text_muted"/>
+          <tag_badge subject="ams_edit_tag_temps"/>
+        </lv_obj>
+
+        <!-- Two layouts, both built, one hidden (bind_flag, not a structural
+             <if>: the engine refuses <repeat> nested inside <if>). The short
+             landscape class (min dimension <= 272, not portrait) splits -
+             dropdown form left, colour column right; everything else stacks
+             the colour grid under the form. Each dropdown's option list ends
+             in "Browse catalog..." for the full catalog picker. -->
+        <lv_obj name="layout_split"
+                width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md"
+                style_flex_cross_place="start" scrollable="false">
+          <bind_flag_if cond="ui_breakpoint gt 0 or ui_is_portrait eq 1" flag="hidden"/>
+          <lv_obj height="content"
+                  flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
+            <lv_obj width="100%"
+                    height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                    style_pad_gap="#space_xs" scrollable="false">
+              <text_small text="Material" style_min_width="#ams_edit_row_label_w"/>
+              <lv_dropdown name="dropdown_material_split"
+                           height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+                <event_cb trigger="value_changed" callback="ams_edit_material_dd_cb"/>
+              </lv_dropdown>
+              <tag_badge subject="ams_edit_tag_material"/>
+            </lv_obj>
+            <lv_obj width="100%"
+                    height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                    style_pad_gap="#space_xs" scrollable="false">
+              <text_small text="Variant" style_min_width="#ams_edit_row_label_w"/>
+              <lv_dropdown name="dropdown_variant_split"
+                           height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+                <event_cb trigger="value_changed" callback="ams_edit_variant_dd_cb"/>
               </lv_dropdown>
             </lv_obj>
-          </lv_obj>
-          <!-- RIGHT: current-spool card. All display of the loaded spool in one
-               tappable unit; pencil signals editability; tap opens spool-edit.
-               Every child is clickable="false" event_bubble="true" so taps reach
-               the card [L071]. -->
-          <lv_obj name="spool_card"
-                  height="content" flex_grow="1" style_bg_color="#elevated_bg" style_bg_opa="255"
-                  style_radius="#border_radius" style_pad_all="#space_md" flex_flow="column" style_pad_gap="#space_sm"
-                  clickable="true" scrollable="false">
-            <style name="styles.press_wash" selector="pressed"/>
-            <event_cb trigger="clicked" callback="ams_edit_card_clicked_cb"/>
-            <!-- Row 1: swatch + name + mark + pencil -->
             <lv_obj width="100%"
-                    height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
-                    style_pad_gap="#space_sm" clickable="false" event_bubble="true" scrollable="false">
-              <lv_obj name="card_color_swatch"
-                      width="28" height="28" style_radius="#border_radius_small" style_bg_color="#card_bg"
-                      style_bg_opa="255" style_border_width="1" style_border_color="#text_muted" style_border_opa="80"
-                      clickable="false" event_bubble="true" scrollable="false"/>
-              <text_body name="card_identity_label"
-                         text="" flex_grow="1" long_mode="dots" clickable="false" event_bubble="true"/>
-              <!-- Trailing Spoolman-tracked badge. Rendered at the asset's
-                   intrinsic 24px (spoolman_24.png) and tinted via recolor. -->
-              <lv_image name="chip_spoolman_mark"
-                        src="spoolman_mark" style_image_recolor="#text_muted" style_image_recolor_opa="255"
-                        hidden="true" clickable="false" event_bubble="true">
-                <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-              </lv_image>
-              <!-- Spoolman spool number ("#19") next to the mark. The mark alone
-                   says "tracked" but not *which* spool; the id is what the user
-                   cross-references against Spoolman's own list. -->
-              <text_small name="chip_spoolman_id"
-                          bind_text="ams_edit_spoolman_id" style_text_color="#text_muted" hidden="true"
-                          clickable="false" event_bubble="true">
-                <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-              </text_small>
-              <icon src="pencil" size="sm" variant="muted" clickable="false" event_bubble="true"/>
+                    height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                    style_pad_gap="#space_xs" scrollable="false">
+              <text_small text="Brand" style_min_width="#ams_edit_row_label_w"/>
+              <lv_dropdown name="dropdown_brand_split"
+                           height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+                <event_cb trigger="value_changed" callback="ams_edit_brand_dd_cb"/>
+              </lv_dropdown>
+              <tag_badge subject="ams_edit_tag_brand"/>
             </lv_obj>
-            <!-- Row 2: remaining (display-only). remaining_progress_container's
-                 hidden state has exactly one writer: update_ui() (total <= 0
-                 hides it). -->
-            <lv_obj name="card_remaining_row"
+            <lv_obj width="100%"
+                    height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                    style_pad_gap="#space_xs" scrollable="false">
+              <bind_flag_if_eq subject="ams_edit_product_hidden" flag="hidden" ref_value="1"/>
+              <text_small text="Product" style_min_width="#ams_edit_row_label_w"/>
+              <lv_dropdown name="dropdown_product_split"
+                           height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+                <event_cb trigger="value_changed" callback="ams_edit_product_dd_cb"/>
+              </lv_dropdown>
+              <tag_badge subject="ams_edit_tag_product"/>
+            </lv_obj>
+            <lv_obj name="temp_row_split"
                     width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
-                    style_pad_gap="#space_sm" clickable="false" event_bubble="true" scrollable="false">
-              <lv_obj name="remaining_progress_container"
-                      height="#slider_height" flex_grow="1" style_bg_color="#text_muted" style_bg_opa="38"
-                      style_radius="#border_radius" style_pad_all="0" clickable="false" event_bubble="true"
-                      scrollable="false">
-                <lv_obj name="remaining_progress_fill"
-                        width="100%" height="100%" style_bg_color="#primary" style_bg_opa="255"
-                        style_radius="#border_radius" style_pad_all="0" clickable="false" scrollable="false"/>
-              </lv_obj>
-              <text_small name="remaining_pct_label" text="—" clickable="false" event_bubble="true"/>
+                    style_pad_gap="#space_xs" scrollable="false">
+              <text_small bind_text="ams_edit_temp_text" style_text_color="#text_muted"/>
+              <tag_badge subject="ams_edit_tag_temps"/>
             </lv_obj>
-            <!-- Row 3: temps (full strings written by update_temp_display) -->
+          </lv_obj>
+
+          <lv_obj width="#ams_edit_color_col_w"
+                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
             <lv_obj width="100%"
-                    height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_lg" clickable="false"
-                    event_bubble="true" scrollable="false">
-              <text_small name="temp_nozzle_label" text="" clickable="false" event_bubble="true"/>
-              <text_small name="temp_bed_label" text="" clickable="false" event_bubble="true"/>
+                    height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                    style_flex_cross_place="center" scrollable="false">
+              <text_small text="Color"/>
+              <tag_badge subject="ams_edit_tag_color"/>
+            </lv_obj>
+            <lv_obj name="color_grid_split"
+                    width="100%" height="content" style_pad_all="#swatch_grid_gap_half" flex_flow="row_wrap"
+                    style_pad_gap="#swatch_grid_gap" scrollable="false">
+              <!-- The custom colour: the app's rainbow custom swatch, the grid's
+                   first tile so it shares the 44px hit pitch. It leads because
+                   a count change rebuilds the repeat at the end of the row. -->
+              <custom_color_swatch name="btn_custom_color_split"
+                                   selected_subject="ams_edit_color_selected" callback="ams_edit_custom_color_cb"/>
+              <repeat count="ams_edit_color_col_count">
+                <color_swatch index="${i}"
+                              color_subject="general_swatch_color_${i}" selected_subject="ams_edit_color_selected"
+                              callback="ams_edit_quick_swatch_cb" size="#swatch_grid_size" hit="#swatch_grid_gap_half"
+                              reach="#swatch_grid_ring_reach" ring="styles.grid_swatch_ring"/>
+              </repeat>
             </lv_obj>
           </lv_obj>
         </lv_obj>
-        <!-- Filament actions: paired row under the card (design Option 1).
-             Change Filament is the primary swap action — the Spoolman picker
-             when connected, else the untracked spool-edit setup (routing in
-             handle_change_filament). Scan QR is the identity fast path for both
-             linked and unlinked slots and is gated on Spoolman availability
-             (update_spoolman_button_state toggles btn_scan_qr_code's hidden
-             flag). A hidden flex child drops out of layout, so when Scan QR is
-             hidden the lone Change Filament button stays centered. Unlink and
-             Print Label live in the spool-edit view. -->
-        <lv_obj name="filament_action_row"
-                width="100%" height="content" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="0"
-                style_pad_bottom="#space_sm" flex_flow="row_wrap" style_flex_main_place="center"
-                style_flex_cross_place="center" style_pad_gap="#space_md" scrollable="false">
-          <ui_button name="btn_change_filament"
-                     height="#button_height" text="Change Filament" variant="secondary" icon="arrow_left_right">
-            <event_cb trigger="clicked" callback="ams_edit_change_filament_cb"/>
-          </ui_button>
-          <ui_button name="btn_scan_qr_code"
-                     height="#button_height" text="Scan QR Code" variant="secondary" icon="qrcode_scan">
-            <event_cb trigger="clicked" callback="ams_edit_scan_qr_cb"/>
+
+        <lv_obj name="layout_stacked"
+                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs"
+                scrollable="false">
+          <bind_flag_if cond="ui_breakpoint eq 0 and ui_is_portrait eq 0" flag="hidden"/>
+          <lv_obj width="100%"
+                  height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                  style_pad_gap="#space_xs" scrollable="false">
+            <text_small text="Material" style_min_width="#ams_edit_row_label_w"/>
+            <lv_dropdown name="dropdown_material"
+                         height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+              <event_cb trigger="value_changed" callback="ams_edit_material_dd_cb"/>
+            </lv_dropdown>
+            <tag_badge subject="ams_edit_tag_material"/>
+          </lv_obj>
+          <lv_obj width="100%"
+                  height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                  style_pad_gap="#space_xs" scrollable="false">
+            <text_small text="Variant" style_min_width="#ams_edit_row_label_w"/>
+            <lv_dropdown name="dropdown_variant"
+                         height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+              <event_cb trigger="value_changed" callback="ams_edit_variant_dd_cb"/>
+            </lv_dropdown>
+          </lv_obj>
+          <lv_obj width="100%"
+                  height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                  style_pad_gap="#space_xs" scrollable="false">
+            <text_small text="Brand" style_min_width="#ams_edit_row_label_w"/>
+            <lv_dropdown name="dropdown_brand"
+                         height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+              <event_cb trigger="value_changed" callback="ams_edit_brand_dd_cb"/>
+            </lv_dropdown>
+            <tag_badge subject="ams_edit_tag_brand"/>
+          </lv_obj>
+          <lv_obj width="100%"
+                  height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                  style_pad_gap="#space_xs" scrollable="false">
+            <bind_flag_if_eq subject="ams_edit_product_hidden" flag="hidden" ref_value="1"/>
+            <text_small text="Product" style_min_width="#ams_edit_row_label_w"/>
+            <lv_dropdown name="dropdown_product"
+                         height="#button_height_sm" flex_grow="1" style_radius="#border_radius" options="">
+              <event_cb trigger="value_changed" callback="ams_edit_product_dd_cb"/>
+            </lv_dropdown>
+            <tag_badge subject="ams_edit_tag_product"/>
+          </lv_obj>
+
+          <lv_obj width="100%"
+                  height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xs"
+                  style_flex_cross_place="center" scrollable="false">
+            <text_small text="Color"/>
+            <tag_badge subject="ams_edit_tag_color"/>
+          </lv_obj>
+          <lv_obj name="color_grid"
+                  width="100%" height="content" style_pad_all="#swatch_grid_gap_half" flex_flow="row_wrap"
+                  style_pad_gap="#swatch_grid_gap" scrollable="false">
+            <!-- The custom colour: the app's rainbow custom swatch, the grid's
+                 first tile so it shares the 44px hit pitch. It leads because
+                 a count change rebuilds the repeat at the end of the row. -->
+            <custom_color_swatch name="btn_custom_color"
+                                 selected_subject="ams_edit_color_selected" callback="ams_edit_custom_color_cb"/>
+            <repeat count="ams_edit_color_row_count">
+              <color_swatch index="${i}"
+                            color_subject="general_swatch_color_${i}" selected_subject="ams_edit_color_selected"
+                            callback="ams_edit_quick_swatch_cb" size="#swatch_grid_size" hit="#swatch_grid_gap_half"
+                            reach="#swatch_grid_ring_reach" ring="styles.grid_swatch_ring"/>
+            </repeat>
+          </lv_obj>
+        </lv_obj>
+
+        <!-- The lane's own settings, written to the backend on Save: which tool
+             it feeds and its Endless Spool backup. Each row shows only where
+             the backend supports it; the backup row reads disabled where the
+             firmware picks the backup itself. The status line under them says
+             what a runout will do, including where neither row can show. It
+             sits above More, so it is in view when the editor opens. -->
+        <lv_obj name="lane_section"
+                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#ams_edit_vgap"
+                scrollable="false" hidden="true">
+          <bind_flag_if_eq subject="ams_edit_lane_visible" flag="hidden" ref_value="0"/>
+          <lv_obj name="lane_row"
+                  width="100%" height="content" style_pad_all="0" flex_flow="row_wrap" style_flex_cross_place="center"
+                  style_pad_column="#space_lg" style_pad_row="#ams_edit_vgap" scrollable="false">
+            <bind_flag_if cond="ams_edit_tool_row_visible eq 0 and ams_edit_backup_row_visible eq 0" flag="hidden"/>
+            <lv_obj name="tool_dropdown_row"
+                    width="content" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                    style_pad_gap="#space_xs" scrollable="false" hidden="true">
+              <bind_flag_if_eq subject="ams_edit_tool_row_visible" flag="hidden" ref_value="0"/>
+              <text_small name="tool_label" text="Assigned Tool"/>
+              <lv_dropdown name="tool_dropdown"
+                           width="#ams_edit_tool_dd_w" height="#button_height_sm" style_radius="#border_radius"
+                           options="">
+                <event_cb trigger="value_changed" callback="ams_edit_tool_dd_cb"/>
+              </lv_dropdown>
+            </lv_obj>
+            <lv_obj name="backup_dropdown_row"
+                    width="content" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                    style_pad_gap="#space_xs" scrollable="false" hidden="true">
+              <bind_flag_if_eq subject="ams_edit_backup_row_visible" flag="hidden" ref_value="0"/>
+              <icon src="infinity" size="xs" variant="muted"/>
+              <text_small name="backup_label" bind_text="ams_edit_backup_label"/>
+              <lv_dropdown name="backup_dropdown"
+                           width="#ams_edit_lane_dd_w" height="#button_height_sm" style_radius="#border_radius"
+                           options="">
+                <bind_state_if_eq subject="ams_edit_backup_editable" state="disabled" ref_value="0"/>
+                <event_cb trigger="value_changed" callback="ams_edit_backup_dd_cb"/>
+              </lv_dropdown>
+            </lv_obj>
+          </lv_obj>
+          <ams_endless_status name="endless_status"/>
+        </lv_obj>
+
+        <!-- The quiet actions bar. MORE is a collapsed disclosure for the four
+             logistics fields, which are Spoolman-owned, so the toggle exists
+             only on a linked slot. The Add-to-Spoolman link is the untracked
+             slot's way in, so it sits beside the toggle rather than inside it.
+             Reset to tag restores every field the spool's tag states. Clear
+             Spool takes the spool off the slot, Spoolman or not. Each
+             reaches a 44px hit through ext_click_area, so the bar stays short. -->
+        <lv_obj name="more_bar"
+                width="100%" height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                style_pad_gap="#space_sm" scrollable="false">
+          <bind_flag_if cond="ams_edit_is_managed eq 0 and ams_edit_add_spoolman_visible eq 0 and ams_edit_reset_tag_visible eq 0 and ams_edit_clear_visible eq 0"
+                        flag="hidden"/>
+          <lv_obj name="more_row"
+                  height="content" flex_grow="1" flex_flow="row" style_flex_cross_place="center" hidden="true"
+                  style_pad_hor="#space_sm" style_pad_ver="#ams_edit_more_pad" style_pad_gap="#space_sm"
+                  style_radius="#border_radius" style_bg_opa="0" style_border_width="0" scrollable="false"
+                  clickable="true" ext_click_area="#ams_edit_bar_hit">
+            <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
+            <style name="styles.press_wash" selector="pressed"/>
+            <event_cb trigger="clicked" callback="ams_edit_more_toggle_cb"/>
+            <icon name="more_chevron" src="chevron_down" size="sm" variant="muted" clickable="false" event_bubble="true"/>
+            <text_body text="More" clickable="false" event_bubble="true"/>
+            <text_small text="Price, location, lot, notes"
+                        flex_grow="1" long_mode="dots" clickable="false" event_bubble="true"/>
+          </lv_obj>
+          <lv_obj name="add_to_spoolman_link"
+                  width="content" height="content" style_pad_hor="#space_xs" style_pad_ver="#space_xxs" flex_flow="row"
+                  style_flex_cross_place="center" style_pad_gap="#space_xxs" style_radius="#border_radius"
+                  style_bg_opa="0" style_border_width="0" clickable="true" scrollable="false" hidden="true"
+                  ext_click_area="#ams_edit_bar_hit">
+            <bind_flag_if_eq subject="ams_edit_add_spoolman_visible" flag="hidden" ref_value="0"/>
+            <style name="styles.press_wash" selector="pressed"/>
+            <event_cb trigger="clicked" callback="ams_edit_add_to_spoolman_cb"/>
+            <icon src="plus" size="xs" variant="primary" clickable="false" event_bubble="true"/>
+            <text_small text="Add to Spoolman + label" style_text_color="#primary" clickable="false" event_bubble="true"/>
+          </lv_obj>
+          <lv_obj name="btn_reset_tag"
+                  width="content" height="content" style_pad_hor="#space_xs" style_pad_ver="#space_xxs" flex_flow="row"
+                  style_flex_cross_place="center" style_pad_gap="#space_xxs" style_radius="#border_radius"
+                  style_bg_opa="0" style_border_width="0" clickable="true" scrollable="false" hidden="true"
+                  ext_click_area="#ams_edit_bar_hit">
+            <bind_flag_if_eq subject="ams_edit_reset_tag_visible" flag="hidden" ref_value="0"/>
+            <style name="styles.press_wash" selector="pressed"/>
+            <event_cb trigger="clicked" callback="ams_edit_reset_tag_cb"/>
+            <icon src="undo" size="xs" variant="primary" clickable="false" event_bubble="true"/>
+            <text_small text="Reset to tag" style_text_color="#primary" clickable="false" event_bubble="true"/>
+          </lv_obj>
+          <lv_obj name="btn_clear_spool"
+                  width="content" height="content" style_pad_hor="#space_xs" style_pad_ver="#space_xxs" flex_flow="row"
+                  style_flex_cross_place="center" style_pad_gap="#space_xxs" style_radius="#border_radius"
+                  style_bg_opa="0" style_border_width="0" clickable="true" scrollable="false" hidden="true"
+                  ext_click_area="#ams_edit_bar_hit">
+            <bind_flag_if_eq subject="ams_edit_clear_visible" flag="hidden" ref_value="0"/>
+            <style name="styles.press_wash" selector="pressed"/>
+            <event_cb trigger="clicked" callback="ams_edit_clear_spool_cb"/>
+            <icon src="close" size="xs" variant="primary" clickable="false" event_bubble="true"/>
+            <text_small text="Clear Spool" style_text_color="#primary" clickable="false" event_bubble="true"/>
+          </lv_obj>
+        </lv_obj>
+        <lv_obj name="more_section"
+                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs"
+                scrollable="false" hidden="true">
+          <bind_flag_if_eq subject="ams_edit_more_open" flag="hidden" ref_value="0"/>
+          <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
+          <lv_obj width="100%"
+                  height="content" style_pad_all="0" flex_flow="row_wrap" style_pad_gap="#space_md" scrollable="false">
+            <lv_obj width="content"
+                    height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
+              <text_small text="Price"/>
+              <text_input name="detail_field_price"
+                          width="#field_w_num" keyboard_hint="numeric" placeholder="0.00" max_length="10">
+                <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
+              </text_input>
+            </lv_obj>
+            <lv_obj width="content"
+                    height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
+              <text_small text="Location"/>
+              <text_input name="detail_field_location"
+                          width="#field_w_text" placeholder="Shelf A" placeholder_tag="Shelf A" max_length="64">
+                <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
+              </text_input>
+            </lv_obj>
+            <lv_obj width="content"
+                    height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
+              <text_small text="Lot/Batch Nr"/>
+              <text_input name="detail_field_lot_nr" width="#field_w_text" placeholder="" max_length="32">
+                <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
+              </text_input>
+            </lv_obj>
+          </lv_obj>
+          <lv_obj width="100%"
+                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
+            <text_small text="Notes"/>
+            <text_input name="detail_field_comment"
+                        width="100%" height="#notes_height" placeholder="" max_length="256" multiline="true">
+              <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
+            </text_input>
+          </lv_obj>
+          <!-- Spool-logistics action: visible only when a label printer is
+               configured. Starts hidden so it stays hidden wherever the
+               binding cannot resolve. -->
+          <ui_button name="btn_detail_print_label"
+                     width="content" height="#button_height_sm" text="Print Label" variant="secondary" icon="printer"
+                     hidden="true">
+            <bind_flag_if_eq subject="label_printer_configured" flag="hidden" ref_value="0"/>
+            <event_cb trigger="clicked" callback="ams_edit_print_label_cb"/>
           </ui_button>
         </lv_obj>
       </lv_obj>
@@ -184,10 +519,7 @@
         </text_input>
 
         <!-- Loading state: the canonical centered loading pattern (cf.
-             spoolman_panel.xml loading_state). The old hand-rolled flex block
-             centered its children against a content-width track laid out
-             before the overlay's push-time width resolved, leaving the spinner
-             and label left-packed. -->
+             spoolman_panel.xml loading_state). -->
         <centered_column name="picker_loading" width="100%" height="120" hidden="true">
           <bind_flag_if_not_eq subject="edit_picker_state" flag="hidden" ref_value="0"/>
           <spinner size="md"/>
@@ -237,220 +569,51 @@
       </lv_obj>
 
       <!-- ============================================================ -->
-      <!-- SPOOL EDIT VIEW (ams_edit_view=2): unified identity + color + -->
-      <!-- logistics. Untracked setup AND editing the current filament  -->
-      <!-- (spec §3.3); logistics section shows for managed slots only.  -->
+      <!-- COLOR VIEW (ams_edit_view=2): preset grid and custom HSV.    -->
+      <!-- A preset tap applies immediately; HSV/hex + Select applies a -->
+      <!-- custom color. Returns to the editor view (its sole entry).   -->
       <!-- ============================================================ -->
-      <lv_obj name="details_view"
-              width="100%" height="content" flex_flow="column" style_pad_all="#space_md" style_pad_gap="#space_md"
-              scrollable="false" hidden="true">
+      <!-- Where both panes fit the content area (ams_edit_color_fits, measured
+           by update_color_fit) they show together, side by side or wrapped onto
+           two rows. Where they do not, one pane fills the view at a time
+           (ams_edit_color_pane): the presets lead with the rainbow custom swatch,
+           which swaps in the picker, and the picker's Presets button swaps back. -->
+      <lv_obj name="color_view"
+              width="100%" height="content" style_min_height="100%" flex_flow="row_wrap" style_pad_all="#space_lg"
+              style_pad_gap="#space_xl" style_flex_main_place="center" style_flex_cross_place="center"
+              style_flex_track_place="center" scrollable="false" hidden="true">
         <bind_flag_if_not_eq subject="ams_edit_view" flag="hidden" ref_value="2"/>
 
-        <!-- Identity + color side by side: the color palette (LEFT) fits the
-             fixed-width swatch grid; the catalog identity (RIGHT) takes the
-             remaining width. Horizontal space is plentiful here, vertical is
-             scarce — so the two stacks share a row instead of stacking.
-             The selector carries a DEFINITE height (#swatch_col_height above) so its
-             children can fill it: LVGL flex has no cross-axis stretch, and a
-             content-sized column would leave the flex_grow product list collapsed to
-             its min-height instead of running down to the swatch baseline (#1128). -->
-        <lv_obj width="100%"
-                height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_lg"
-                style_flex_cross_place="start" scrollable="false">
-          <!-- LEFT: inline color — shared full preset palette (one palette
-               everywhere) + custom-hue affordance (✎ opens the color view). -->
-          <lv_obj width="content"
-                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
-            <lv_obj width="100%"
-                    height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm"
-                    style_flex_cross_place="center" scrollable="false">
-              <text_small text="Color"/>
-              <!-- Selected-color preview -->
-              <lv_obj name="details_color_preview"
-                      width="28" height="28" style_radius="#border_radius_small" style_bg_color="#card_bg"
-                      style_bg_opa="255" style_border_width="2" style_border_color="#text_muted" style_border_opa="80"
-                      scrollable="false"/>
-              <!-- Custom-hue escape hatch: opens the color view (swatches + HSV) -->
-              <ui_button name="btn_details_custom_color" width="28" height="28" icon="pencil" variant="ghost">
-                <event_cb trigger="clicked" callback="ams_edit_custom_color_cb"/>
-              </ui_button>
-            </lv_obj>
-            <color_swatch_grid swatch_callback="ams_edit_quick_swatch_cb"/>
-            <!-- Inline scanner reading (hint only): shown when the slot has a scan -->
-            <lv_obj name="details_scan_row"
-                    width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm"
-                    style_flex_cross_place="center" scrollable="false">
-              <bind_flag_if cond="ams_edit_has_scan eq 0" flag="hidden"/>
-              <lv_obj name="details_scan_swatch"
-                      width="28" height="28" style_radius="#border_radius_small" style_bg_color="#card_bg"
-                      style_bg_opa="255" style_border_width="2" style_border_color="#text_muted" style_border_opa="80"
-                      scrollable="false"/>
-              <text_small bind_text="ams_edit_scan_text"/>
-              <ui_button name="btn_use_scanned_color"
-                         width="content" height="#button_height_sm" text="Use scan" variant="secondary">
-                <event_cb trigger="clicked" callback="ams_edit_use_scan_cb"/>
-              </ui_button>
-            </lv_obj>
-          </lv_obj>
-          <!-- RIGHT: Brand / Material / product. Pinned to the color column's exact
-               height (#swatch_col_height) so the flex_grow product list has real
-               slack and lands flush with the bottom of the last swatch row. -->
-          <lv_obj height="content"
-                  flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
-            <!-- Spoolman owns a linked spool's brand and material, so with the
-                 server unreachable the selector gives way to a row that states
-                 what the slot carries. Both operands are Phase 9a subjects, so
-                 this is a cond= and not a subject_expr. -->
-            <filament_catalog_selector name="details_catalog_selector" height="#swatch_col_height">
-              <bind_flag_if cond="ams_edit_identity_is_spoolmans eq 1 and printer_has_spoolman eq 0" flag="hidden"/>
-            </filament_catalog_selector>
-            <lv_obj name="details_identity_readonly"
-                    width="100%" height="content" hidden="true" style_pad_all="0" flex_flow="column"
-                    style_pad_gap="#space_xs" scrollable="false" clickable="false">
-              <bind_flag_if cond="ams_edit_identity_is_spoolmans eq 0 or printer_has_spoolman eq 1" flag="hidden"/>
-              <text_body name="details_identity_label"
-                         bind_text="ams_edit_identity_text" long_mode="dots" clickable="false"/>
-              <text_small text="Spoolman is offline. Brand and material can change once it's back."
-                          style_text_color="#text_muted" long_mode="wrap" clickable="false"/>
-            </lv_obj>
-          </lv_obj>
-        </lv_obj>
-
-        <!-- One full-width metadata row for every short field: Remaining and Spool wt
-             (which apply to tracked AND untracked slots) plus the Spoolman-only
-             Price / Location / Lot. Full width rather than inside the selector column
-             because five content-sized fields need more room than that column has.
-             The three Spoolman fields carry the ams_edit_is_managed gate individually
-             so an untracked slot drops them and keeps the two gram fields — the row
-             is shared, so the gate cannot live on a wrapper. row_wrap reflows the set
-             onto as many lines as the width allows. -->
-        <lv_obj width="100%"
-                height="content" style_pad_all="0" flex_flow="row_wrap" style_pad_gap="#space_md" scrollable="false">
-          <lv_obj width="content"
-                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
-            <text_small text="Remaining (g)"/>
-            <text_input name="detail_field_remaining"
-                        width="#field_w_num" keyboard_hint="numeric" placeholder="1000" max_length="8">
-              <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
-            </text_input>
-          </lv_obj>
-          <lv_obj width="content"
-                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
-            <text_small text="Spool wt (g)"/>
-            <text_input name="detail_field_spool_weight"
-                        width="#field_w_num" keyboard_hint="numeric" placeholder="0" max_length="8">
-              <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
-            </text_input>
-          </lv_obj>
-          <lv_obj width="content"
-                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false"
-                  hidden="true">
-            <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-            <text_small text="Price"/>
-            <text_input name="detail_field_price"
-                        width="#field_w_num" keyboard_hint="numeric" placeholder="0.00" max_length="10">
-              <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
-            </text_input>
-          </lv_obj>
-          <lv_obj width="content"
-                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false"
-                  hidden="true">
-            <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-            <text_small text="Location"/>
-            <text_input name="detail_field_location"
-                        width="#field_w_text" placeholder="Shelf A" placeholder_tag="Shelf A" max_length="64">
-              <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
-            </text_input>
-          </lv_obj>
-          <lv_obj width="content"
-                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false"
-                  hidden="true">
-            <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-            <text_small text="Lot/Batch Nr"/>
-            <text_input name="detail_field_lot_nr" width="#field_w_text" placeholder="" max_length="32">
-              <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
-            </text_input>
-          </lv_obj>
-          <!-- Save to Spoolman toggle — locked naming (spec §3.8). Absent when
-               Spoolman is disconnected; defaults to the slot's managed state. Gated on
-               printer_has_spoolman (NOT is_managed): it must stay reachable on an
-               untracked slot, since it is how the user opts that slot into Spoolman. -->
-          <lv_obj name="save_to_spoolman_row"
-                  height="content" flex_grow="1" style_pad_all="0" style_min_width="170" flex_flow="row"
-                  style_flex_main_place="end" style_flex_cross_place="center" style_pad_gap="#space_sm"
-                  scrollable="false">
-            <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="0"/>
-            <text_small text="Save to Spoolman"/>
-            <ui_switch name="save_to_spoolman_switch" size="small">
-              <bind_state_if_eq subject="ams_edit_is_managed" state="checked" ref_value="1"/>
-            </ui_switch>
-          </lv_obj>
-        </lv_obj>
-
-        <!-- Logistics: the remaining Spoolman-only field. Price/Location/Lot moved up
-             into the shared metadata row; Notes stays here because it is the one
-             field that wants the full width. Hidden for untracked slots. -->
-        <lv_obj name="spool_edit_logistics"
-                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
-                scrollable="false" hidden="true">
-          <bind_flag_if_eq subject="ams_edit_is_managed" flag="hidden" ref_value="0"/>
-          <!-- Notes (full width) -->
-          <lv_obj width="100%"
-                  height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" scrollable="false">
-            <text_small text="Notes"/>
-            <text_input name="detail_field_comment"
-                        width="100%" height="#notes_height" placeholder="" max_length="256" multiline="true">
-              <event_cb trigger="value_changed" callback="ams_edit_detail_field_changed_cb"/>
-            </text_input>
-          </lv_obj>
-        </lv_obj>
-
-        <!-- Save lives in the header bar on this view (visible on overview AND
-             spool-edit); it applies identity/color/logistics, then finishes and
-             closes the editor. The former in-content Save button was retired. -->
-
-        <!-- Spool-logistics action: visible only when a label printer is
-             configured. The static hidden="true" is the fallback for builds
-             without label-printer support, where `label_printer_configured` is
-             never registered and this binding is skipped. -->
-        <ui_button name="btn_detail_print_label"
-                   width="100%" height="#button_height" text="Print Label" variant="secondary" icon="printer"
-                   hidden="true">
-          <bind_flag_if_eq subject="label_printer_configured" flag="hidden" ref_value="0"/>
-          <event_cb trigger="clicked" callback="ams_edit_print_label_cb"/>
-        </ui_button>
-      </lv_obj>
-
-      <!-- ============================================================ -->
-      <!-- COLOR VIEW (ams_edit_view=3): one screen — preset grid AND   -->
-      <!-- custom HSV side by side. A preset tap applies immediately;   -->
-      <!-- HSV/hex + Select applies a custom color. Returns to the      -->
-      <!-- spool-edit view (its sole entry point).                      -->
-      <!-- ============================================================ -->
-      <lv_obj name="color_view"
-              width="100%" flex_grow="1" flex_flow="row" style_pad_all="#space_lg" style_pad_gap="#space_xl"
-              style_flex_main_place="center" style_flex_cross_place="center" scrollable="false" hidden="true">
-        <bind_flag_if_not_eq subject="ams_edit_view" flag="hidden" ref_value="3"/>
-
         <!-- Preset swatches: tap applies + returns -->
-        <lv_obj height="content"
-                flex_grow="1" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
+        <lv_obj name="color_presets"
+                height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
+          <bind_flag_if cond="ams_edit_color_fits eq 0 and ams_edit_color_pane eq 1" flag="hidden"/>
+          <bind_style name="color_pane_fit" subject="ams_edit_color_fits" ref_value="1"/>
+          <bind_style name="color_pane_fill" subject="ams_edit_color_fits" ref_value="0"/>
           <text_small text="Presets"/>
-          <color_swatch_grid swatch_callback="ams_edit_color_swatch_cb"/>
+          <!-- Last child: the reactive <if> rebuilds at the end of the list. -->
+          <if cond="ams_edit_color_fits eq 1">
+            <color_swatch_grid swatch_callback="ams_edit_color_swatch_cb"/>
+            <else/>
+            <color_swatch_grid width="100%"
+                               swatch_callback="ams_edit_color_swatch_cb" lead_hidden="false"
+                               lead_callback="ams_edit_color_show_picker_cb"/>
+          </if>
         </lv_obj>
 
         <!-- Custom hue: HSV + hex + Select -->
-        <lv_obj width="content"
-                height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_md"
+        <lv_obj name="color_custom"
+                width="content" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xl"
                 style_flex_cross_place="center" scrollable="false">
+          <bind_flag_if cond="ams_edit_color_fits eq 0 and ams_edit_color_pane eq 0" flag="hidden"/>
           <ui_hsv_picker name="ams_color_hsv" sv_size="#sv_size" hue_height="#hue_height" gap="#space_sm"/>
           <lv_obj width="content"
                   height="content" style_pad_all="0" flex_flow="column" style_flex_main_place="start"
                   style_flex_cross_place="start" style_pad_gap="#space_sm" scrollable="false">
-            <lv_obj name="ams_color_preview"
-                    width="#color_preview_size" height="#color_preview_size_small" style_radius="#border_radius"
-                    style_bg_color="#card_bg" style_bg_opa="255" style_border_width="2" style_border_color="#text_muted"
-                    style_border_opa="80" scrollable="false"/>
+            <!-- A colour area, not a swatch: a rounded rect. -->
+            <swatch_paint name="ams_color_preview"
+                          width="#color_preview_size" height="#color_preview_size_small" style_radius="#border_radius"
+                          color="#card_bg"/>
             <text_input name="ams_color_hex_input"
                         width="100" height="content" max_length="9" text="#808080" placeholder_text="#hex_placeholder"
                         style_outline_width="0" scrollable="false">
@@ -458,6 +621,10 @@
             </text_input>
             <ui_button name="btn_color_apply" width="100" height="#button_height_sm" text="Select" variant="primary">
               <event_cb trigger="clicked" callback="ams_edit_color_apply_cb"/>
+            </ui_button>
+            <ui_button name="btn_color_presets" width="100" height="#button_height_sm" text="Presets" variant="ghost">
+              <bind_flag_if_eq subject="ams_edit_color_fits" flag="hidden" ref_value="1"/>
+              <event_cb trigger="clicked" callback="ams_edit_color_show_presets_cb"/>
             </ui_button>
           </lv_obj>
         </lv_obj>

@@ -323,7 +323,7 @@ TEST_CASE("CFS flat schema: 'None' is absent on every text field", "[ams][cfs][f
     }
 
     SECTION("color falls back rather than parsing the sentinel") {
-        REQUIRE(s.color_rgb == AMS_DEFAULT_SLOT_COLOR);
+        REQUIRE(s.color_rgb == kAmsDefaultSlotColor);
     }
 
     SECTION("an empty material resolves no temperature") {
@@ -494,7 +494,7 @@ TEST_CASE("CFS flat schema: malformed payloads degrade, never throw", "[ams][cfs
         json box = make_flat_box_json();
         box["slots"][0]["color"] = "not-a-color";
         auto info = AmsBackendCfs::parse_box_status(box);
-        REQUIRE(info.units[0].slots[0].color_rgb == AMS_DEFAULT_SLOT_COLOR);
+        REQUIRE(info.units[0].slots[0].color_rgb == kAmsDefaultSlotColor);
     }
 }
 
@@ -712,6 +712,51 @@ TEST_CASE("CFS flat: a real four-box payload parses as four boxes, three of them
     // The external holder at 16 is not a bay.
     CHECK(info.get_slot_global(16) == nullptr);
     CHECK(info.current_slot == -1);
+}
+
+// The payload's one temp/humidity reading belongs to the box load_path.box_addr
+// names (1-based), not to whichever box parses first.
+TEST_CASE("CFS flat: the environment reading lands on the box load_path.box_addr names",
+          "[ams][cfs][flat][fork][environment]") {
+    auto box = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+
+    const auto units_with_environment = [](const AmsSystemInfo& info) {
+        std::vector<int> out;
+        for (const auto& u : info.units) {
+            if (u.environment.has_value()) {
+                out.push_back(u.unit_index);
+            }
+        }
+        return out;
+    };
+
+    SECTION("box_addr 4 puts it on the fourth unit only") {
+        box["load_path"]["box_addr"] = 4;
+        const auto info = AmsBackendCfs::parse_box_status(box);
+        REQUIRE(units_with_environment(info) == std::vector<int>{3});
+        CHECK(info.units[3].environment->temperature_c == 27.0f);
+        CHECK(info.units[3].environment->humidity_pct == 54.0f);
+    }
+
+    SECTION("box_addr 2 puts it on the second unit only") {
+        box["load_path"]["box_addr"] = 2;
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)) ==
+                std::vector<int>{1});
+    }
+
+    SECTION("a null box_addr keeps it on the first unit") {
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)) ==
+                std::vector<int>{0});
+    }
+
+    SECTION("a box_addr naming no listed box keeps it on the first unit") {
+        box["load_path"]["box_addr"] = 9;
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)) ==
+                std::vector<int>{0});
+        box["load_path"]["box_addr"] = 0;
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)) ==
+                std::vector<int>{0});
+    }
 }
 
 TEST_CASE("CFS flat: four boxes converge on one toolhead in the system path layout",
@@ -954,4 +999,420 @@ TEST_CASE_METHOD(CfsGoldenFixture, "CFS golden status sequence", "[ams][cfs][gol
         all += name + "\n" + feed(params) + "\n";
     }
     CHECK(all == kCfsGolden);
+}
+
+// ============================================================================
+// Flat frames are deltas. Klipper sends a status object's changed top-level
+// fields only, each one whole, so a frame that edits a slot carries `slots`
+// and nothing else. The backend reads the box as the sum of every frame
+// since the session began (Jacob10383/k2-plus-custom-firmware#3).
+// ============================================================================
+
+namespace {
+
+/// The frame Klipper sends when a status object goes from @p before to
+/// @p after: every top-level field whose value changed, carried whole.
+json klipper_delta(const json& before, const json& after) {
+    json out = json::object();
+    for (const auto& [key, value] : after.items()) {
+        if (!before.contains(key) || before[key] != value) {
+            out[key] = value;
+        }
+    }
+    return out;
+}
+
+json box_frame(const json& box) {
+    return json{{"box", box}};
+}
+
+std::vector<int> units_with_environment(const AmsSystemInfo& info) {
+    std::vector<int> out;
+    for (const auto& u : info.units) {
+        if (u.environment.has_value()) {
+            out.push_back(u.unit_index);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS flat: a slots-only delta keeps the environment reading",
+                 "[ams][cfs][flat][environment]") {
+    const json full = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    feed(box_frame(full));
+    REQUIRE(units_with_environment(backend.get_system_info()) == std::vector<int>{0});
+
+    // The user sets spool info on bay 2: box.py republishes slots[] and
+    // nothing else changed.
+    json edited = full;
+    edited["slots"][1]["material"] = "PETG";
+    edited["slots"][1]["brand"] = "Jayo";
+    const json delta = klipper_delta(full, edited);
+    REQUIRE(delta.size() == 1);
+    REQUIRE(delta.contains("slots"));
+    feed(box_frame(delta));
+
+    const auto info = backend.get_system_info();
+    REQUIRE(units_with_environment(info) == std::vector<int>{0});
+    CHECK(info.units[0].environment->temperature_c == 27.0f);
+    CHECK(info.units[0].environment->humidity_pct == 54.0f);
+    CHECK(info.units[0].slots[1].material == "PETG");
+    CHECK(info.units[0].slots[1].brand == "Jayo");
+    CHECK(info.units.size() == 4);
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS flat: an environment-only delta keeps the slots",
+                 "[ams][cfs][flat][environment]") {
+    const json full = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    feed(box_frame(full));
+    REQUIRE(backend.get_system_info().supports_bypass);
+
+    json warmer = full;
+    warmer["temp_c"] = 31;
+    const json delta = klipper_delta(full, warmer);
+    REQUIRE(delta == json{{"temp_c", 31}});
+    feed(box_frame(delta));
+
+    const auto info = backend.get_system_info();
+    REQUIRE(info.units.size() == 4);
+    REQUIRE(info.total_slots == 16);
+    CHECK(info.units[0].slots[0].material == "PLA");
+    CHECK(info.units[0].slots[0].brand == "Sunlu");
+    CHECK(info.units[0].slots[0].status == SlotStatus::AVAILABLE);
+    REQUIRE(units_with_environment(info) == std::vector<int>{0});
+    CHECK(info.units[0].environment->temperature_c == 31.0f);
+    CHECK(info.units[0].environment->humidity_pct == 54.0f);
+    // The external holder is still the one slots[] listed.
+    CHECK(info.supports_bypass);
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture,
+                 "CFS flat: a load_path delta moves the environment to box_addr and back",
+                 "[ams][cfs][flat][environment]") {
+    const json full = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    REQUIRE(full["load_path"]["box_addr"].is_null());
+    feed(box_frame(full));
+    REQUIRE(units_with_environment(backend.get_system_info()) == std::vector<int>{0});
+
+    json on_box4 = full;
+    on_box4["load_path"]["box_addr"] = 4;
+    feed(box_frame(klipper_delta(full, on_box4)));
+    auto info = backend.get_system_info();
+    REQUIRE(units_with_environment(info) == std::vector<int>{3});
+    CHECK(info.units[3].environment->temperature_c == 27.0f);
+
+    // Nothing loaded again: the firmware reads the lowest responding box and
+    // names no address, so the reading returns to the first box.
+    feed(box_frame(klipper_delta(on_box4, full)));
+    info = backend.get_system_info();
+    REQUIRE(units_with_environment(info) == std::vector<int>{0});
+    CHECK(info.units[0].environment->humidity_pct == 54.0f);
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS flat: a runout-plan delta reads the bays it names",
+                 "[ams][cfs][flat]") {
+    const json full = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    feed(box_frame(full));
+    REQUIRE(backend.get_endless_spool_config().empty());
+
+    json planned = full;
+    planned["runout"] = json{{"loaded_slot", 2}, {"chain", json::array({3})}};
+    feed(box_frame(klipper_delta(full, planned)));
+
+    CHECK(endless_spool_backup_for(backend.get_endless_spool_config(), 2) == 3);
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS flat: a new session forgets the last one's frames",
+                 "[ams][cfs][flat][environment]") {
+    const json full = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    feed(box_frame(full));
+    REQUIRE(units_with_environment(backend.get_system_info()) == std::vector<int>{0});
+
+    CfsTestAccess::start_load(backend);
+
+    // The new session's box states its slots but no reading yet: the old
+    // session's temp_c must not fill the gap.
+    json no_reading = full;
+    no_reading.erase("temp_c");
+    no_reading.erase("humidity_pct");
+    feed(box_frame(json{{"slots", no_reading["slots"]}}));
+
+    const auto info = backend.get_system_info();
+    REQUIRE(info.units.size() == 4);
+    CHECK(units_with_environment(info).empty());
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS flat: a delta field replaces its predecessor whole",
+                 "[ams][cfs][flat]") {
+    const json full = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    REQUIRE(full["materials"].contains("PLA"));
+    feed(box_frame(full));
+    const int stated = full["materials"]["PLA"]["target_temp"].get<int>();
+    REQUIRE(backend.get_system_info().units[0].slots[0].nozzle_temp_max == stated);
+
+    // A material deleted from box.py's table: Klipper sends the whole new
+    // table, and the PLA entry it no longer lists is gone.
+    json edited = full;
+    edited["materials"].erase("PLA");
+    feed(box_frame(klipper_delta(full, edited)));
+
+    const auto info = backend.get_system_info();
+    CHECK(info.units[0].slots[0].material == "PLA");
+    CHECK(info.units[0].slots[0].nozzle_temp_max != stated);
+}
+
+namespace {
+
+/// The four-box fixture with bay 2 threaded through to the toolhead.
+json flat_box_with_bay_2_loaded() {
+    json box = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    box["loaded_slot"] = 2;
+    box["slots"][2]["loaded"] = true;
+    return box;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS flat: a slots-only edit keeps the loaded bay",
+                 "[ams][cfs][flat]") {
+    const json full = flat_box_with_bay_2_loaded();
+    feed(box_frame(full));
+    REQUIRE(backend.get_system_info().current_slot == 2);
+
+    json edited = full;
+    edited["slots"][0]["material"] = "PETG";
+    const json delta = klipper_delta(full, edited);
+    REQUIRE(delta.size() == 1);
+    feed(box_frame(delta));
+
+    const auto info = backend.get_system_info();
+    CHECK(info.current_slot == 2);
+    CHECK(info.current_tool == 2);
+    CHECK(info.units[0].slots[0].material == "PETG");
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture,
+                 "CFS flat: a delta before the new session's first full frame changes nothing",
+                 "[ams][cfs][flat]") {
+    const json full = flat_box_with_bay_2_loaded();
+    feed(box_frame(full));
+    REQUIRE(backend.get_system_info().current_slot == 2);
+
+    CfsTestAccess::start_load(backend);
+
+    // A notify can beat the initial query's answer. It names no slots, so
+    // there is no box to parse yet.
+    feed(box_frame(json{{"temp_c", 31}}));
+    auto info = backend.get_system_info();
+    CHECK(info.current_slot == 2);
+    CHECK(info.units.size() == 4);
+
+    // The query's full frame lands, and the delta's field is in the merge.
+    json answered = full;
+    answered.erase("temp_c");
+    feed(box_frame(answered));
+    info = backend.get_system_info();
+    CHECK(info.current_slot == 2);
+    REQUIRE(units_with_environment(info) == std::vector<int>{0});
+    CHECK(info.units[0].environment->temperature_c == 31.0f);
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS: a stock unit frame after flat ones returns to stock",
+                 "[ams][cfs][flat]") {
+    feed(box_frame(load_box_fixture("cfs_fork_four_box_L8MMBCCK.json")));
+    REQUIRE(CfsTestAccess::macro_variant(backend) == CfsMacroVariant::Fork);
+
+    feed(box_frame(json{{"state", "connect"},
+                        {"filament", 1},
+                        {"auto_refill", 1},
+                        {"filament_useup", 0},
+                        {"map", json{{"T1A", "T1A"}, {"T1B", "T1B"}}},
+                        {"T1", golden_unit("None", {"Creality", "Creality", "none", "none"})}}));
+    auto info = backend.get_system_info();
+    REQUIRE(info.units.size() == 1);
+    CHECK(CfsTestAccess::macro_variant(backend) != CfsMacroVariant::Fork);
+    CHECK_FALSE(info.filament_runout);
+
+    // Stock deltas that name no unit read as stock: the runout latch and the
+    // tool map come from them, and the merged units survive.
+    feed(box_frame(json{{"filament", 1}, {"filament_useup", 1}}));
+    feed(box_frame(json{{"map", json{{"T1A", "T1B"}, {"T1B", "T1A"}}}}));
+    info = backend.get_system_info();
+    CHECK(info.filament_runout);
+    REQUIRE(info.units.size() == 1);
+    CHECK(info.units[0].slots[0].brand == "Creality");
+    REQUIRE(info.tool_to_slot_map.size() >= 2);
+    CHECK(info.tool_to_slot_map[0] == 1);
+    CHECK(info.tool_to_slot_map[1] == 0);
+}
+
+namespace {
+
+/// The four-box fixture as revision 2 reports it: one reading per box in
+/// boxes[], listed out of address order so a join by position would misfile
+/// them. Box 2 is offline and box 4 is not listed.
+json make_revision2_box() {
+    json box = load_box_fixture("cfs_fork_four_box_L8MMBCCK.json");
+    box["api_revision"] = 2;
+    box["boxes"] = json::parse(R"([
+        {"address": 3, "online": true, "slots": [8, 9, 10, 11],
+         "temp_c": 30.5, "humidity_pct": 61, "fault": null},
+        {"address": 1, "online": true, "slots": [0, 1, 2, 3],
+         "temp_c": 24, "humidity_pct": 38, "fault": null},
+        {"address": 2, "online": false, "slots": [4, 5, 6, 7],
+         "temp_c": null, "humidity_pct": null, "fault": null}
+    ])");
+    return box;
+}
+
+} // namespace
+
+TEST_CASE("CFS flat: revision 2 gives each box its own environment reading",
+          "[ams][cfs][flat][fork][environment][boxes]") {
+    json box = make_revision2_box();
+
+    SECTION("readings join on address") {
+        const auto info = AmsBackendCfs::parse_box_status(box);
+        REQUIRE(info.units.size() == 4);
+        REQUIRE(units_with_environment(info) == std::vector<int>{0, 2});
+        CHECK(info.units[0].environment->temperature_c == 24.0f);
+        CHECK(info.units[0].environment->humidity_pct == 38.0f);
+        CHECK(info.units[0].environment->has_humidity);
+        CHECK(info.units[2].environment->temperature_c == 30.5f);
+        CHECK(info.units[2].environment->humidity_pct == 61.0f);
+    }
+
+    SECTION("an online box with null readings shows none") {
+        box["boxes"][0]["temp_c"] = nullptr;
+        box["boxes"][0]["humidity_pct"] = nullptr;
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)) ==
+                std::vector<int>{0});
+    }
+
+    SECTION("an offline box shows none even with a stale reading") {
+        box["boxes"][2]["temp_c"] = 22;
+        box["boxes"][2]["humidity_pct"] = 40;
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)) ==
+                std::vector<int>{0, 2});
+    }
+
+    SECTION("the top-level legacy pair is not also attributed") {
+        box["load_path"]["box_addr"] = 4;
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)) ==
+                std::vector<int>{0, 2});
+    }
+
+    SECTION("revision 1 ignores boxes[] and attributes the top-level pair as before") {
+        box.erase("api_revision");
+        box["load_path"]["box_addr"] = 2;
+        const auto info = AmsBackendCfs::parse_box_status(box);
+        REQUIRE(units_with_environment(info) == std::vector<int>{1});
+        CHECK(info.units[1].environment->temperature_c == 27.0f);
+        CHECK(info.units[1].environment->humidity_pct == 54.0f);
+    }
+
+    SECTION("revision 2 before the first poll (boxes empty) shows no reading") {
+        box["boxes"] = json::array();
+        REQUIRE(units_with_environment(AmsBackendCfs::parse_box_status(box)).empty());
+    }
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture, "CFS flat: a delta without boxes[] keeps the per-box readings",
+                 "[ams][cfs][flat][environment][boxes]") {
+    const json full = make_revision2_box();
+    feed(box_frame(full));
+    REQUIRE(units_with_environment(backend.get_system_info()) == std::vector<int>{0, 2});
+
+    json edited = full;
+    edited["slots"][1]["material"] = "PETG";
+    const json delta = klipper_delta(full, edited);
+    REQUIRE_FALSE(delta.contains("boxes"));
+    feed(box_frame(delta));
+
+    auto info = backend.get_system_info();
+    REQUIRE(units_with_environment(info) == std::vector<int>{0, 2});
+    CHECK(info.units[2].environment->temperature_c == 30.5f);
+
+    json box3_cooler = edited;
+    box3_cooler["boxes"][0]["temp_c"] = 28;
+    feed(box_frame(klipper_delta(edited, box3_cooler)));
+    info = backend.get_system_info();
+    REQUIRE(units_with_environment(info) == std::vector<int>{0, 2});
+    CHECK(info.units[2].environment->temperature_c == 28.0f);
+    CHECK(info.units[0].environment->temperature_c == 24.0f);
+}
+
+TEST_CASE_METHOD(CfsGoldenFixture,
+                 "CFS flat: a box reporting offline reads disconnected until it returns",
+                 "[ams][cfs][flat][boxes]") {
+    const json full = make_revision2_box();
+    feed(box_frame(full));
+    auto info = backend.get_system_info();
+    REQUIRE(info.units.size() == 4);
+    CHECK(info.units[0].connected);
+    CHECK_FALSE(info.units[1].connected);
+    CHECK(info.units[2].connected);
+    // Not listed in boxes[]: nothing says it is offline.
+    CHECK(info.units[3].connected);
+
+    json back = full;
+    back["boxes"][2]["online"] = true;
+    back["boxes"][2]["temp_c"] = 23;
+    back["boxes"][2]["humidity_pct"] = 41;
+    feed(box_frame(klipper_delta(full, back)));
+    info = backend.get_system_info();
+    CHECK(info.units[1].connected);
+    REQUIRE(units_with_environment(info) == std::vector<int>{0, 1, 2});
+
+    feed(box_frame(klipper_delta(back, full)));
+    info = backend.get_system_info();
+    CHECK_FALSE(info.units[1].connected);
+    CHECK(info.units[0].connected);
+}
+
+TEST_CASE("CFS flat: revision 1 ignores boxes[] online flags", "[ams][cfs][flat][boxes]") {
+    json box = make_revision2_box();
+    box.erase("api_revision");
+    const auto info = AmsBackendCfs::parse_box_status(box);
+    for (const auto& u : info.units) {
+        INFO("unit " << u.unit_index);
+        CHECK(u.connected);
+    }
+}
+
+// A K2 Plus on the k2-improvements box.py, API revision 1 with a boxes[] list
+// (bundle EH9J7764). The printer picture picks its CFS variant off a unit that
+// is connected and not absent, so this payload has to produce one.
+TEST_CASE("CFS flat schema: a k2-improvements revision 1 payload has a present unit",
+          "[ams][cfs][flat][printer_image_variants]") {
+    const json box = json::parse(R"({
+        "api_version": 1, "data_ready": true, "driver_ready": true,
+        "boxes": [{"address": 1, "fault": null, "humidity_pct": 20, "online": true,
+                   "slots": [0, 1, 2, 3], "state": "IDLE", "state_code": 0,
+                   "status": "OK", "status_code": 0, "temp_c": 23}],
+        "filament_detected": true, "filament_sensor_error": null,
+        "humidity_pct": 20, "loaded_mask": 4, "loaded_slot": 2,
+        "runout": {"chain": [], "loaded_slot": 2}, "runout_swap_enabled": true,
+        "slot_filament_mask": 7, "state": "IDLE", "state_code": 0,
+        "status": "OK", "status_code": 0, "temp_c": 23, "tracking_active": false,
+        "slots": [
+            {"index": 0, "external": false, "present": true, "loaded": false,
+             "material": "PLA", "color": "#1A1A1A", "brand": "Overture", "name": ""},
+            {"index": 1, "external": false, "present": true, "loaded": false,
+             "material": "PLA", "color": "#AEEA00", "brand": "SUNLU", "name": ""},
+            {"index": 2, "external": false, "present": true, "loaded": true,
+             "material": "PLA", "color": "#FFFFFF", "brand": "Overture", "name": ""},
+            {"index": 3, "external": false, "present": false, "loaded": false,
+             "material": "", "color": "", "brand": "", "name": ""},
+            {"index": 4, "external": true, "present": true, "loaded": false,
+             "material": "", "color": "", "brand": "", "name": ""}
+        ]
+    })");
+
+    const auto info = AmsBackendCfs::parse_box_status(box);
+    REQUIRE(info.units.size() == 1);
+    CHECK(info.units[0].connected);
+    CHECK_FALSE(info.units[0].absent);
 }

@@ -53,7 +53,7 @@ struct Rule {
 /// The five AFC error sites that ship a position diagram, mapped to how far the
 /// filament actually got. `post` precedes `pre` only for defensiveness — the two
 /// needles are not substrings of one another.
-constexpr std::array<Rule, 5> RULES{{
+constexpr std::array<Rule, 5> kRules{{
     // AFC.py:1469 — 'Current lane not loaded, LOAD TRIGGER NOT TRIGGERED'
     {"load trigger not triggered", PathSegment::SPOOL},
     // AFC_BoxTurtle.py:527 — ' FAILED TO LOAD, CHECK FILAMENT AT TRIGGER'
@@ -86,7 +86,7 @@ bool is_diagram_row(std::string_view line) {
 /// The label row: `TRG   LOAD   HUB   TOOL` (AFC.py:1294 ends it `TOOL.`). Pinned on
 /// all four labels in order so a sentence merely mentioning HUB cannot be eaten.
 bool is_label_row(std::string_view line) {
-    static constexpr std::array<std::string_view, 4> LABELS{"trg", "load", "hub", "tool"};
+    static constexpr std::array<std::string_view, 4> kLabels{"trg", "load", "hub", "tool"};
 
     size_t label = 0;
     size_t i = 0;
@@ -104,21 +104,21 @@ bool is_label_row(std::string_view line) {
         // AFC.py:1294 writes the last label as `TOOL.`
         if (!token.empty() && token.back() == '.')
             token.remove_suffix(1);
-        if (label >= LABELS.size() || token.size() != LABELS[label].size())
+        if (label >= kLabels.size() || token.size() != kLabels[label].size())
             return false;
         for (size_t j = 0; j < token.size(); ++j) {
-            if (lower(token[j]) != LABELS[label][j])
+            if (lower(token[j]) != kLabels[label][j])
                 return false;
         }
         ++label;
     }
-    return label == LABELS.size();
+    return label == kLabels.size();
 }
 
 } // namespace
 
 std::optional<PathSegment> afc_fault_position(std::string_view message) {
-    for (const auto& rule : RULES) {
+    for (const auto& rule : kRules) {
         if (contains_word(message, rule.needle))
             return rule.segment;
     }

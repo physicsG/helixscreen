@@ -16,7 +16,7 @@ void KlippyFrameDecoder::feed(const char* data, size_t len,
 
     size_t search_from = 0;
     for (;;) {
-        const size_t term = pending_.find(FRAME_TERMINATOR, search_from);
+        const size_t term = pending_.find(kFrameTerminator, search_from);
         if (term == std::string::npos) {
             break;
         }
@@ -32,7 +32,7 @@ void KlippyFrameDecoder::feed(const char* data, size_t len,
         pending_.erase(0, search_from);
     }
 
-    if (pending_.size() > MAX_PENDING_BYTES) {
+    if (pending_.size() > kMaxPendingBytes) {
         spdlog::warn("[KlippyFrame] Discarding {} unterminated bytes - stream is unreliable",
                      pending_.size());
         pending_.clear();

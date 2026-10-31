@@ -6,7 +6,7 @@
 namespace helix::config_trust {
 
 /// Update URL overrides from the root-owned state file
-/// (AppConstants::Update::state_dir()/update_urls.json). Empty string means
+/// (app_constants::update::state_dir()/update_urls.json). Empty string means
 /// "use the built-in default".
 struct UpdateUrls {
     std::string r2_url;

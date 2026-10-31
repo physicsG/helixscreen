@@ -21,18 +21,26 @@
  *    blanking the card pre-parse / on the headless single-extruder path).
  *
  * The later test cases exercise the full render path (MappingCardRenderFixture,
- * built on LVGLUITestFixture + a mock AMS backend): rebuild_compact_view()
- * must be a NO-OP when its inputs are unchanged and children exist, so the
- * late AMS resync that arrives after the print-detail panel opens cannot
- * flash the chips through a destroy/recreate cycle; it must render stacked
- * filament_swatch chips; and set_mappings() must repaint them, because the
- * lane number inside each chip is written imperatively during the rebuild.
+ * built on LVGLUITestFixture + a mock AMS backend): the filament_chip_*
+ * subjects the card publishes for each used tool, the filament_swatch chips
+ * that bind them, and the "+N" pill past what the row or the subject cap holds.
  */
 
 #include "ui_filament_mapping_card.h"
+#include "ui_swatch.h"
 #include "ui_update_queue.h"
 
 #include "../mapping_card_render_fixture.h"
+#include "../test_helpers/mock_bypass.h"
+#include "../test_helpers/update_queue_test_access.h"
+#include "ams_remap.h"
+#include "ams_state.h"
+#include "filament_chip_model.h"
+#include "lvgl/src/others/translation/lv_translation.h"
+#include "print_start_checks.h"
+#include "print_start_inputs.h"
+#include "settings_manager.h"
+#include "system_settings_manager.h"
 #include "theme_manager.h"
 
 #include <optional>
@@ -193,176 +201,58 @@ TEST_CASE("find_by_tool_index: full palette resolves each tool to its own entry"
 }
 
 // ============================================================================
-// Idempotent rebuild (full render path)
+// The card holds what compute_mapping answers
 // ============================================================================
 
 TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "FilamentMappingCard rebuild is idempotent on identical input",
-                 "[filament_mapping][idempotent]") {
-    const std::vector<std::string> colors = {"#FF0000", "#00FF00"};
-    const std::vector<std::string> materials = {"PLA", "PETG"};
+                 "FilamentMappingCard holds what compute_mapping answers for the file",
+                 "[filament_mapping][compute_mapping]") {
+    const std::vector<std::string> colors = {"#FF0000", "#00FF00", "#0000FF"};
+    const std::vector<std::string> materials = {"PLA", "PETG", "PLA"};
+    const std::optional<std::set<int>> used = std::set<int>{0, 2};
 
-    // First render: one pill per tool.
-    card.update(colors, materials);
+    const auto m = FilamentMappingCard::compute_mapping(colors, materials, used);
+    REQUIRE(m.shows);
+    CHECK(m.palette_colour_count == 3);
+    CHECK(m.palette_tool_count == 3);
+    // Seeded from the whole palette, then narrowed to the used tools.
+    REQUIRE(m.tool_info.size() == 2);
+    CHECK(m.tool_info[1].tool_index == 2);
+    REQUIRE(m.mappings.size() == 2);
+    CHECK(m.mappings[1].tool_index == 2);
+    CHECK_FALSE(m.slots.empty());
+
+    // The used set arriving before the palette, or after it: the same answer.
+    SECTION("used tools first") {
+        card.set_used_tools(used);
+        card.update(colors, materials);
+    }
+    SECTION("palette first") {
+        card.update(colors, materials);
+        card.set_used_tools(used);
+    }
     REQUIRE(card.should_show());
-    const uint32_t count_after_first = lv_obj_get_child_count(rows);
-    REQUIRE(count_after_first == 2);
-    lv_obj_t* const first_pill = lv_obj_get_child(rows, 0);
-
-    // Second update with IDENTICAL inputs — the late AMS-resync-after-open
-    // path this guards. No destroy/recreate: same children, same pointers.
-    card.update(colors, materials);
-    CHECK(lv_obj_get_child_count(rows) == count_after_first);
-    CHECK(lv_obj_get_child(rows, 0) == first_pill);
-
-    // Changed slot color => fingerprint differs => a rebuild really happens
-    // (fresh pills, first-child pointer differs). Pin this so an over-eager
-    // early-return cannot silently disable the card.
-    auto slot = mock->get_slot_info(0);
-    slot.color_rgb = 0x123456;
-    mock->sync_external_identity(0, slot);
-    card.update(colors, materials);
-    CHECK(lv_obj_get_child_count(rows) == count_after_first);
-    CHECK(lv_obj_get_child(rows, 0) != first_pill);
-
-    // Flush the async deletes of the replaced pills (safe_clean_children
-    // reparents + lv_obj_delete_async) before teardown.
+    const auto tools = card.get_tool_info();
+    const auto mappings = card.get_mappings();
+    REQUIRE(tools.size() == m.tool_info.size());
+    REQUIRE(mappings.size() == m.mappings.size());
+    for (size_t i = 0; i < tools.size(); ++i) {
+        CHECK(tools[i].tool_index == m.tool_info[i].tool_index);
+        CHECK(mappings[i].tool_index == m.mappings[i].tool_index);
+        CHECK(mappings[i].mapped_slot == m.mappings[i].mapped_slot);
+    }
+    CHECK(card.get_available_slots().size() == m.slots.size());
     process_lvgl(100);
 }
 
 // ============================================================================
-// Stacked-swatch render + repaint
+// Chip subjects (full render path)
 // ============================================================================
-
-namespace {
-
-// Lane number currently drawn in chip `idx`'s bottom band, or "" when hidden.
-// Re-fetches the chip every call: a real rebuild reparents the old children
-// away, so a cached pointer would report pre-rebuild text forever and the test
-// would pass on a broken card.
-std::string rendered_lane_number(lv_obj_t* rows, uint32_t idx) {
-    lv_obj_t* const chip = lv_obj_get_child(rows, static_cast<int32_t>(idx));
-    if (chip == nullptr) {
-        return "<no chip>";
-    }
-    lv_obj_t* const band = lv_obj_find_by_name(chip, "bottom_band");
-    if (band == nullptr) {
-        return "<no bottom_band>";
-    }
-    lv_obj_t* const lbl = lv_obj_find_by_name(band, "slot_label");
-    if (lbl == nullptr) {
-        return "<no slot_label>";
-    }
-    if (lv_obj_has_flag(lbl, LV_OBJ_FLAG_HIDDEN)) {
-        return "";
-    }
-    return lv_label_get_text(lbl);
-}
-
-// One explicit mapping per tool, so the rendered lane number is a pure function
-// of the slot index chosen here rather than of the seeding heuristic.
-std::vector<ToolMapping> mappings_to_slots(const std::vector<int>& slots) {
-    std::vector<ToolMapping> m;
-    m.reserve(slots.size());
-    for (size_t i = 0; i < slots.size(); ++i) {
-        ToolMapping tm;
-        tm.tool_index = static_cast<int>(i);
-        tm.mapped_slot = slots[i];
-        tm.mapped_backend = 0;
-        tm.is_auto = false;
-        tm.reason = ToolMapping::MatchReason::FIRMWARE_MAPPING;
-        m.push_back(tm);
-    }
-    return m;
-}
-
-} // namespace
-
-TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "FilamentMappingCard renders stacked filament_swatch chips",
-                 "[filament_mapping][swatch]") {
-    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
-    REQUIRE(card.should_show());
-    REQUIRE(lv_obj_get_child_count(rows) == 2);
-
-    // The stacked chip's structure, not the pill's. A pill has gcode_dot/arrow/
-    // slot_dot; a swatch has top_band/divider/bottom_band.
-    lv_obj_t* const chip = lv_obj_get_child(rows, 0);
-    CHECK(lv_obj_find_by_name(chip, "top_band") != nullptr);
-    CHECK(lv_obj_find_by_name(chip, "divider") != nullptr);
-    CHECK(lv_obj_find_by_name(chip, "bottom_band") != nullptr);
-    CHECK(lv_obj_find_by_name(chip, "gcode_dot") == nullptr);
-
-    process_lvgl(100);
-}
-
-TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "FilamentMappingCard::set_mappings repaints the lane number",
-                 "[filament_mapping][remap]") {
-    // The native-remap flow does not go through the card's own modal callback:
-    // the print-detail view overrides the card's tap handler, so an accepted
-    // remap arrives here as a bare set_mappings() call. The lane number is
-    // written imperatively during rebuild, so a setter that stores without
-    // rebuilding leaves the old lane on screen while the print runs the new one.
-    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
-    REQUIRE(lv_obj_get_child_count(rows) == 2);
-
-    // Tool 0 on the mock's 4th lane (local_slot_index 3 => displayed "4").
-    card.set_mappings(mappings_to_slots({3, 1}));
-    CHECK(rendered_lane_number(rows, 0) == "4");
-
-    // The reported scenario: remap tool 0 down to the 3rd lane, same colour but
-    // more filament. The chip must follow the mapping.
-    card.set_mappings(mappings_to_slots({2, 1}));
-    CHECK(rendered_lane_number(rows, 0) == "3");
-
-    // Untouched tools keep their lane — a repaint, not a reset.
-    CHECK(rendered_lane_number(rows, 1) == "2");
-
-    process_lvgl(100);
-}
-
-TEST_CASE_METHOD(MappingCardRenderFixture, "Unknown gcode colour draws no fill on the top band",
-                 "[filament_mapping][swatch]") {
-    // A K2 Plus report: painting the neutral stand-in reads as "this file prints
-    // in grey", a claim about the file that nothing has made. The pill fixed this
-    // via GcodeToolInfo::color_known; the swatch renderer never had the guard, so
-    // it must not be lost in the move. Empty palette entry => colour unknown.
-    card.update({"", ""}, {"PLA", "PETG"});
-    REQUIRE(lv_obj_get_child_count(rows) == 2);
-
-    lv_obj_t* const band = lv_obj_find_by_name(lv_obj_get_child(rows, 0), "top_band");
-    REQUIRE(band != nullptr);
-    CHECK(lv_obj_get_style_bg_opa(band, LV_PART_MAIN) == LV_OPA_TRANSP);
-
-    process_lvgl(100);
-}
-
-TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "Top band names the material, falling back to the tool number",
-                 "[filament_mapping][swatch]") {
-    card.update({"#FF0000", "#00FF00"}, {"ASA", ""});
-    REQUIRE(lv_obj_get_child_count(rows) == 2);
-
-    auto visible_text = [&](uint32_t idx, const char* name) -> std::string {
-        lv_obj_t* const lbl =
-            lv_obj_find_by_name(lv_obj_get_child(rows, static_cast<int32_t>(idx)), name);
-        REQUIRE(lbl != nullptr);
-        return lv_obj_has_flag(lbl, LV_OBJ_FLAG_HIDDEN) ? "" : lv_label_get_text(lbl);
-    };
-
-    CHECK(visible_text(0, "material_label") == "ASA");
-    CHECK(visible_text(0, "tool_label").empty());
-    CHECK(visible_text(1, "material_label").empty());
-    CHECK(visible_text(1, "tool_label") == "T1");
-
-    process_lvgl(100);
-}
 
 namespace {
 
 /// Load lane @p index with a colour and material. The card reads lanes through
-/// AmsState, so this is the only way to drive the surround: the renderer
+/// AmsState, so this is the only way to drive a chip's severity: the card
 /// classifies (tool, lane) itself rather than trusting a flag on the mapping.
 void load_lane(helix::AmsBackendMock* mock, int index, uint32_t rgb, const char* material) {
     auto slot = mock->get_slot_info(index);
@@ -371,98 +261,476 @@ void load_lane(helix::AmsBackendMock* mock, int index, uint32_t rgb, const char*
     mock->sync_external_identity(index, slot);
 }
 
-/// Does chip @p idx wear the colour-mismatch surround?
-bool chip_surrounded(lv_obj_t* rows, uint32_t idx) {
-    lv_obj_t* const chip = lv_obj_get_child(rows, static_cast<int32_t>(idx));
-    REQUIRE(chip != nullptr);
-    return lv_obj_has_state(chip, LV_STATE_USER_2);
+// One explicit mapping per tool (-1: none), so what a chip shows is a pure
+// function of the lane chosen here rather than of the seeding heuristic.
+std::vector<ToolMapping> mappings_to_slots(const std::vector<int>& slots) {
+    std::vector<ToolMapping> m;
+    m.reserve(slots.size());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        ToolMapping tm;
+        tm.tool_index = static_cast<int>(i);
+        tm.mapped_slot = slots[i];
+        tm.mapped_backend = slots[i] < 0 ? -1 : 0;
+        tm.is_auto = false;
+        tm.reason = ToolMapping::MatchReason::FIRMWARE_MAPPING;
+        m.push_back(tm);
+    }
+    return m;
+}
+
+/// Give `rows` room for exactly @p n chips at this breakpoint's chip width.
+void size_rows_for(lv_obj_t* rows, int n) {
+    const int32_t gap = theme_manager_get_spacing("space_xs");
+    const int32_t chip = theme_manager_get_spacing("filament_chip_width");
+    REQUIRE(chip > 0);
+    lv_obj_set_style_pad_all(rows, 0, 0);
+    lv_obj_set_style_border_width(rows, 0, 0);
+    lv_obj_set_width(rows, n * chip + (n - 1) * gap);
+    lv_obj_update_layout(rows);
+    REQUIRE(FilamentMappingCard::chips_that_fit(lv_obj_get_content_width(rows), gap, chip) ==
+            static_cast<size_t>(n));
+}
+
+lv_color_t border_of(lv_obj_t* obj) {
+    return lv_obj_get_style_border_color(obj, LV_PART_MAIN);
 }
 
 } // namespace
 
-TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "A colour-mismatched chip is surrounded and a matched one is not",
-                 "[filament_mapping][swatch][colour_mismatch]") {
-    // Scope is what separates this from the empty-lane border: empty is a fact
-    // about the LANE and stays on bottom_band, colour is a fact about the
-    // PAIRING and surrounds the whole chip. All three directions in ONE render -
-    // a surround that is always on, or never on, passes a one-sided check.
-    //
-    // Driven by real lane data, never by setting the flag: the renderer
-    // classifies the pairing itself, so a hand-set color_mismatch would test
-    // nothing at all.
-    load_lane(mock, 0, 0xFF0000, "PLA");  // exactly what T0 asked for
-    load_lane(mock, 1, 0x0000FF, "PETG"); // nowhere near T1's green
-    card.update({"#FF0000", "#00FF00", "#0000FF"}, {"PLA", "PETG", "PLA"});
-    REQUIRE(lv_obj_get_child_count(rows) == 3);
-
-    // Pin the lanes so the surround is decided by the colours set above rather
-    // than by wherever the seeding heuristic put each tool. T2 is deliberately
-    // unresolved: no lane, so no comparison, so nothing to warn about.
+TEST_CASE_METHOD(MappingCardRenderFixture, "The chip subjects for a three-tool file",
+                 "[filament_mapping][chip]") {
+    // One render, all three outlines: a matched pair, a colour that differs and
+    // a tool with no lane. An outline that is always one colour fails here.
+    load_lane(mock, 0, 0xFF0000, "PLA");
+    load_lane(mock, 1, 0x0000FF, "PETG");
+    card.update({"#FF0000", "#00FF00", "#0000FF"}, {"PLA", "PETG", ""});
     card.set_mappings(mappings_to_slots({0, 1, -1}));
+    REQUIRE(chip_count() == 3);
 
-    CHECK_FALSE(chip_surrounded(rows, 0));
-    CHECK(chip_surrounded(rows, 1));
-    CHECK_FALSE(chip_surrounded(rows, 2));
+    // T0: exactly what the file asked for.
+    CHECK(chip_string(0, "_material") == "PLA");
+    CHECK(chip_int(0, "_file_color_known") == 1);
+    CHECK((lv_color_to_u32(lv_subject_get_color(chip_subject(0, "_file_color"))) & 0xFFFFFF) ==
+          0xFF0000u);
+    CHECK(chip_string(0, "_slot") == "1");
+    CHECK(chip_int(0, "_slot_state") == 1);
+    CHECK((lv_color_to_u32(lv_subject_get_color(chip_subject(0, "_slot_color"))) & 0xFFFFFF) ==
+          0xFF0000u);
+    CHECK(chip_int(0, "_severity") == 0);
 
-    // The state is only half the wiring: filament_swatch.xml has to hang the
-    // colour_mismatch style off it, and the chip's own inline border_width="0"
-    // is what that style has to beat.
-    lv_obj_t* const mismatched = lv_obj_get_child(rows, 1);
-    lv_obj_t* const matched = lv_obj_get_child(rows, 0);
-    CHECK(lv_obj_get_style_border_width(mismatched, LV_PART_MAIN) == 2);
-    CHECK(lv_color_eq(lv_obj_get_style_border_color(mismatched, LV_PART_MAIN),
-                      theme_manager_get_color("warning")));
-    CHECK(lv_obj_get_style_border_width(matched, LV_PART_MAIN) == 0);
+    // T1: right material, wrong colour.
+    CHECK(chip_string(1, "_slot") == "2");
+    CHECK(chip_int(1, "_severity") == 1);
 
-    // The empty-lane border keeps its own scope: nothing was added to the bands.
-    lv_obj_t* const band = lv_obj_find_by_name(mismatched, "bottom_band");
-    REQUIRE(band != nullptr);
-    CHECK_FALSE(lv_obj_has_state(band, LV_STATE_USER_1));
+    // T2: no material in the file, so the header names the tool; no lane.
+    CHECK(chip_string(2, "_material") == "T2");
+    CHECK(chip_string(2, "_slot").empty());
+    CHECK(chip_int(2, "_slot_state") == 0);
+    CHECK(chip_int(2, "_severity") == 2);
+
+    // The XML half: the outline and the slot text follow the severity subject.
+    lv_obj_t* const ok = chip(0);
+    lv_obj_t* const warn = chip(1);
+    lv_obj_t* const block = chip(2);
+    REQUIRE(ok != nullptr);
+    REQUIRE(warn != nullptr);
+    REQUIRE(block != nullptr);
+    CHECK(lv_color_eq(border_of(ok), theme_manager_get_color("text_muted")));
+    CHECK(lv_color_eq(border_of(warn), theme_manager_get_color("warning")));
+    CHECK(lv_color_eq(border_of(block), theme_manager_get_color("danger")));
+    // No lane: the empty-spool icon stands in, and no word sits in the body.
+    CHECK_FALSE(lv_obj_has_flag(lv_obj_find_by_name(block, "chip_pick"), LV_OBJ_FLAG_HIDDEN));
+    CHECK(lv_obj_has_flag(lv_obj_find_by_name(block, "chip_slot"), LV_OBJ_FLAG_HIDDEN));
+    CHECK(lv_obj_has_flag(lv_obj_find_by_name(ok, "chip_pick"), LV_OBJ_FLAG_HIDDEN));
+    lv_obj_t* const warn_slot = lv_obj_find_by_name(warn, "chip_slot");
+    REQUIRE(warn_slot != nullptr);
+    CHECK_FALSE(lv_obj_has_flag(warn_slot, LV_OBJ_FLAG_HIDDEN));
+    CHECK(std::string(lv_label_get_text(warn_slot)) == "2");
+    CHECK(lv_obj_has_flag(lv_obj_find_by_name(block, "chip_spool"), LV_OBJ_FLAG_HIDDEN));
+    CHECK_FALSE(lv_obj_has_flag(lv_obj_find_by_name(ok, "chip_spool"), LV_OBJ_FLAG_HIDDEN));
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "An empty slot outlines its chip red",
+                 "[filament_mapping][chip]") {
+    load_lane(mock, 0, 0xFF0000, "PLA");
+    mock->force_slot_status(1, helix::SlotStatus::EMPTY);
+    card.update({"#FF0000", "#FF0000"}, {"PLA", "PLA"});
+    card.set_mappings(mappings_to_slots({0, 1}));
+    REQUIRE(chip_count() == 2);
+
+    CHECK(chip_int(0, "_severity") == 0);
+    CHECK(chip_int(1, "_severity") == 2);
+    CHECK(chip_int(1, "_slot_state") == 2);
+    CHECK(chip_string(1, "_slot") == "2");
+    lv_obj_t* const empty = chip(1);
+    REQUIRE(empty != nullptr);
+    CHECK(lv_obj_has_flag(lv_obj_find_by_name(empty, "chip_spool"), LV_OBJ_FLAG_HIDDEN));
+    CHECK_FALSE(lv_obj_has_flag(lv_obj_find_by_name(empty, "chip_empty_ring"), LV_OBJ_FLAG_HIDDEN));
 
     process_lvgl(100);
 }
 
 TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "The surround follows a spool swap rather than being decided once",
-                 "[filament_mapping][swatch][colour_mismatch]") {
-    // refresh_slot_data() replaces available_slots_ and rebuilds with mappings_
-    // deliberately untouched - it runs on every live slot update while the detail
-    // view is open (ui_print_select_detail_view.cpp:1355). A verdict cached on the
-    // mapping therefore outlives the lane it judged: load the file's own colour
-    // into that lane and the bottom band repaints (the fingerprint carries
-    // s.color_rgb, so the rebuild really happens) while the surround stays on.
-    //
-    // The same shape as the stale lane number this chip was built to fix, which is
-    // why it is pinned rather than left to the classifier's unit tests.
-    // Two tools because a single-extruder AMS hides the card below two
-    // (should_show(), ui_filament_mapping_card.cpp:112). T1 is the control: its
-    // lane already matches and must stay unsurrounded throughout, so a rebuild
-    // that simply cleared every chip could not pass.
+                 "A chip's severity and spool follow a spool swap rather than being decided once",
+                 "[filament_mapping][chip]") {
+    // refresh_slot_data() replaces available_slots_ and keeps mappings_, so a
+    // verdict cached on the mapping would outlive the lane it judged. T1 is the
+    // control: its lane matches throughout.
     load_lane(mock, 0, 0x0000FF, "PLA"); // blue lane, red file
     load_lane(mock, 1, 0x00FF00, "PLA"); // green lane, green file
     card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
-    REQUIRE(lv_obj_get_child_count(rows) == 2);
     card.set_mappings(mappings_to_slots({0, 1}));
-    REQUIRE(chip_surrounded(rows, 0));
-    REQUIRE_FALSE(chip_surrounded(rows, 1));
+    REQUIRE(chip_int(0, "_severity") == 1);
+    REQUIRE(chip_int(1, "_severity") == 0);
 
-    // Swap the spool for one holding what the file asked for. Nothing else moves:
-    // same tools, same mappings, same lane indices.
     load_lane(mock, 0, 0xFF0000, "PLA");
     helix::ui::UpdateQueue::instance().drain();
     card.refresh_slot_data();
+    CHECK(chip_int(0, "_severity") == 0);
+    CHECK((lv_color_to_u32(lv_subject_get_color(chip_subject(0, "_slot_color"))) & 0xFFFFFF) ==
+          0xFF0000u);
+    CHECK(chip_int(1, "_severity") == 0);
 
-    CHECK_FALSE(chip_surrounded(rows, 0));
-    CHECK_FALSE(chip_surrounded(rows, 1));
-
-    // And back again, so the fix cannot be "the surround only ever clears".
+    // And back, so the fix cannot be "severity only ever clears".
     load_lane(mock, 0, 0x0000FF, "PLA");
     helix::ui::UpdateQueue::instance().drain();
     card.refresh_slot_data();
-    CHECK(chip_surrounded(rows, 0));
-    CHECK_FALSE(chip_surrounded(rows, 1));
+    CHECK(chip_int(0, "_severity") == 1);
+    CHECK((lv_color_to_u32(lv_subject_get_color(chip_subject(0, "_slot_color"))) & 0xFFFFFF) ==
+          0x0000FFu);
 
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "set_mappings republishes the slot label",
+                 "[filament_mapping][remap]") {
+    // A remap accepted from the modal or the picker arrives as set_mappings().
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    REQUIRE(chip_count() == 2);
+
+    card.set_mappings(mappings_to_slots({3, 1}));
+    CHECK(chip_string(0, "_slot") == "4");
+    card.set_mappings(mappings_to_slots({2, 1}));
+    CHECK(chip_string(0, "_slot") == "3");
+    CHECK(chip_string(1, "_slot") == "2");
+    lv_obj_t* const label = lv_obj_find_by_name(chip(0), "chip_slot");
+    REQUIRE(label != nullptr);
+    CHECK(std::string(lv_label_get_text(label)) == "3");
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "Unknown gcode colour draws no fill on the header",
+                 "[filament_mapping][chip]") {
+    // Painting a stand-in reads as "this file prints in grey", a claim about
+    // the file that nothing has made.
+    card.update({"", "#00FF00"}, {"PLA", "PETG"});
+    REQUIRE(chip_count() == 2);
+    CHECK(chip_int(0, "_file_color_known") == 0);
+    CHECK(chip_int(0, "_ink") == 0);
+    CHECK(lv_obj_has_flag(lv_obj_find_by_name(chip(0), "chip_header_fill"), LV_OBJ_FLAG_HIDDEN));
+    CHECK(chip_int(1, "_file_color_known") == 1);
+    CHECK(chip_int(1, "_ink") != 0);
+    CHECK_FALSE(
+        lv_obj_has_flag(lv_obj_find_by_name(chip(1), "chip_header_fill"), LV_OBJ_FLAG_HIDDEN));
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "The chip's spool paints the slot's split and finish",
+                 "[filament_mapping][chip]") {
+    auto slot = mock->get_slot_info(0);
+    slot.color_rgb = 0xFF0000;
+    slot.multi_color_hexes = "#FF0000,#00FF00,#0000FF";
+    slot.material = "PLA";
+    slot.product_name = "Silk Rainbow";
+    mock->sync_external_identity(0, slot);
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    card.set_mappings(mappings_to_slots({0, 1}));
+    REQUIRE(chip_count() == 2);
+
+    lv_obj_t* const spool = lv_obj_find_by_name(chip(0), "chip_spool");
+    REQUIRE(spool != nullptr);
+    CHECK(helix::ui::swatch_paint_colors(spool).size() == 3);
+    CHECK(helix::ui::swatch_paint_finish(spool) == helix::ui::SwatchFinish::Silk);
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "Republishing the same file keeps the chips",
+                 "[filament_mapping][idempotent]") {
+    // The late AMS resync after the panel opens republishes identical data; the
+    // chips must not be torn down and rebuilt for it.
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    REQUIRE(chip_count() == 2);
+    lv_obj_t* const first = chip(0);
+    REQUIRE(first != nullptr);
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    CHECK(chip_count() == 2);
+    CHECK(chip(0) == first);
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "An unmapped chip carries no word in any language",
+                 "[filament_mapping][chip]") {
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    card.set_mappings(mappings_to_slots({0, -1}));
+    REQUIRE(chip_int(1, "_slot_state") == 0);
+    REQUIRE(chip_string(1, "_slot").empty());
+
+    struct RestoreEnglish {
+        ~RestoreEnglish() {
+            helix::SystemSettingsManager::instance().set_language("en");
+            helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        }
+    } restore;
+    helix::SystemSettingsManager::instance().set_language("de");
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE(std::string(lv_tr("Pick")) != "Pick");
+    CHECK(chip_string(1, "_slot").empty());
+    CHECK(chip_int(1, "_slot_state") == 0);
+    process_lvgl(100);
+}
+
+// ============================================================================
+// Single-row truncation + "+N" overflow pill
+// ============================================================================
+
+TEST_CASE("chips_that_fit: capacity is what the row can actually hold",
+          "[filament][filament_mapping][mapping][overflow]") {
+    constexpr int32_t gap = 2;
+    // filament_mapping_rows is 181px at 480x272, where a chip is 52px: three
+    // chips and two gaps need 160, a fourth would need 214.
+    CHECK(FilamentMappingCard::chips_that_fit(181, gap, 52) == 3);
+    CHECK(FilamentMappingCard::chips_that_fit(160, gap, 52) == 3);
+    CHECK(FilamentMappingCard::chips_that_fit(159, gap, 52) == 2);
+    // 274px at 800x480 with 64px chips and a 5px gap: four need 271.
+    CHECK(FilamentMappingCard::chips_that_fit(274, 5, 64) == 4);
+
+    // A row too narrow for one chip still gets a slot: that slot carries the
+    // "+N" pill, which is the whole point of not silently dropping tools.
+    CHECK(FilamentMappingCard::chips_that_fit(10, gap, 52) == 1);
+
+    // Layout has not settled: fall back to the floor, never to "everything".
+    CHECK(FilamentMappingCard::chips_that_fit(0, gap, 52) == FilamentMappingCard::kMinVisibleChips);
+    CHECK(FilamentMappingCard::chips_that_fit(-1, gap, 52) ==
+          FilamentMappingCard::kMinVisibleChips);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture,
+                 "A palette wider than the row truncates behind a +N pill",
+                 "[filament_mapping][overflow]") {
+    size_rows_for(rows, 3);
+    card.update({"#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF"},
+                {"PLA", "PETG", "PLA", "PETG", "PLA", "PETG"});
+    REQUIRE(card.should_show());
+
+    // Two chips plus the pill: the pill takes a chip's place.
+    CHECK(chip_count() == 2);
+    CHECK(chip(1) != nullptr);
+    CHECK(chip(2) == nullptr);
+    lv_obj_t* const pill = lv_obj_find_by_name(rows, "filament_chip_more");
+    REQUIRE(pill != nullptr);
+    CHECK_FALSE(lv_obj_has_flag(pill, LV_OBJ_FLAG_HIDDEN));
+    CHECK(std::string(lv_label_get_text(lv_obj_find_by_name(pill, "count_label"))) == "+4");
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "A palette that fits draws no overflow pill",
+                 "[filament_mapping][overflow]") {
+    // A "+0" would claim tools are missing on every multi-tool print.
+    size_rows_for(rows, 4);
+    card.update({"#FF0000", "#00FF00", "#0000FF"}, {"PLA", "PETG", "PLA"});
+    CHECK(chip_count() == 3);
+    lv_obj_t* const pill = lv_obj_find_by_name(rows, "filament_chip_more");
+    REQUIRE(pill != nullptr);
+    CHECK(lv_obj_has_flag(pill, LV_OBJ_FLAG_HIDDEN));
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture,
+                 "A capacity chosen before layout settled is corrected on the next publish",
+                 "[filament_mapping][overflow]") {
+    const std::vector<std::string> colors = {"#FF0000", "#00FF00", "#0000FF",
+                                             "#FFFF00", "#FF00FF", "#00FFFF"};
+    const std::vector<std::string> materials = {"PLA", "PETG", "PLA", "PETG", "PLA", "PETG"};
+
+    lv_obj_set_style_pad_all(rows, 0, 0);
+    lv_obj_set_style_border_width(rows, 0, 0);
+    lv_obj_set_width(rows, 0);
+    lv_obj_update_layout(rows);
+    REQUIRE(lv_obj_get_content_width(rows) <= 0);
+
+    // Unmeasurable row: the floor, and six tools do not fit in it.
+    card.update(colors, materials);
+    CHECK(chip_count() == static_cast<int>(FilamentMappingCard::kMinVisibleChips) - 1);
+    CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "filament_chip_more_count")) ==
+          6 - (static_cast<int>(FilamentMappingCard::kMinVisibleChips) - 1));
+
+    // Layout settles; the data is identical, only the width changed.
+    size_rows_for(rows, 6);
+    card.update(colors, materials);
+    CHECK(chip_count() == 6);
+    CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "filament_chip_more_count")) == 0);
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture,
+                 "More tools than the subject cap show a pill and write no subject past it",
+                 "[filament_mapping][overflow]") {
+    // A row wide enough for every tool still stops at kMaxFilamentChips.
+    size_rows_for(rows, 24);
+    std::vector<std::string> colors(20, "#FF0000");
+    std::vector<std::string> materials(20, "PLA");
+    card.update(colors, materials);
+    REQUIRE(card.should_show());
+
+    const int cap = static_cast<int>(FilamentMappingCard::kMaxFilamentChips);
+    CHECK(chip_count() == cap - 1);
+    CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "filament_chip_more_count")) ==
+          20 - (cap - 1));
+    CHECK(std::string(lv_subject_get_string(lv_xml_get_subject(
+              nullptr, "filament_chip_more_text"))) == "+" + std::to_string(20 - (cap - 1)));
+    // No subject exists past the cap, so none can have been written.
+    CHECK(chip_subject(cap - 1, "_material") != nullptr);
+    CHECK(chip_subject(cap, "_material") == nullptr);
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture,
+                 "A mapping the user never picked follows the printer; a picked one stays",
+                 "[filament_mapping][routing]") {
+    // The card seeds once, when the file opens. Lanes that change while it is
+    // open (a table that arrives late, a spool moved on the printer) must move
+    // every tool the user left alone, or print start sends the stale seed as
+    // remaps. A lane the user chose is theirs and stays put.
+    struct AutoColorOn {
+        bool prev;
+        AutoColorOn() {
+            helix::SettingsManager::instance().init_subjects();
+            prev = helix::SettingsManager::instance().get_auto_color_map();
+            helix::SettingsManager::instance().set_auto_color_map(true);
+        }
+        ~AutoColorOn() {
+            helix::SettingsManager::instance().set_auto_color_map(prev);
+        }
+    } auto_color_on;
+
+    load_lane(mock, 0, 0x0000FF, "PLA");
+    load_lane(mock, 1, 0x00FF00, "PLA");
+    load_lane(mock, 2, 0xFF0000, "PLA");
+    helix::ui::UpdateQueue::instance().drain();
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    auto seeded = card.get_mappings();
+    REQUIRE(seeded.size() == 2);
+    REQUIRE(seeded[0].mapped_slot == 2); // red
+    REQUIRE(seeded[1].mapped_slot == 1); // green
+
+    // The user puts T1 on lane 0; T0 is left to the seed.
+    seeded[1].mapped_slot = 0;
+    seeded[1].user_picked = true;
+    card.set_mappings(seeded);
+
+    // Red moves from lane 2 to lane 1, where green was.
+    load_lane(mock, 2, 0xFFFFFF, "PLA");
+    load_lane(mock, 1, 0xFF0000, "PLA");
+    helix::ui::UpdateQueue::instance().drain();
+    card.refresh_slot_data();
+
+    const auto after = card.get_mappings();
+    REQUIRE(after.size() == 2);
+    CHECK(after[0].mapped_slot == 1);
+    CHECK_FALSE(after[0].user_picked);
+    CHECK(after[1].mapped_slot == 0);
+    CHECK(after[1].user_picked);
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "A hidden card keeps nothing from the previous file",
+                 "[filament_mapping][routing]") {
+    // File A gets a pick. File B's card is hidden (no palette), so B has no
+    // mappings of its own, and A's pick must not survive to be sent as B's.
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    auto picked = card.get_mappings();
+    REQUIRE(picked.size() == 2);
+    picked[1].mapped_slot = 3;
+    picked[1].user_picked = true;
+    card.set_mappings(picked);
+
+    card.update({}, {});
+    REQUIRE_FALSE(card.should_show());
+    CHECK(card.get_mappings().empty());
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture,
+                 "A palette arriving late for the same file keeps the user's picks",
+                 "[filament_mapping][routing]") {
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    auto picked = card.get_mappings();
+    REQUIRE(picked.size() == 2);
+    picked[1].mapped_slot = 3;
+    picked[1].user_picked = true;
+    card.set_mappings(picked);
+
+    // The same file's palette re-read (footer or parse backfill).
+    card.refresh_palette({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    auto kept = card.get_mappings();
+    REQUIRE(kept.size() == 2);
+    CHECK(kept[1].mapped_slot == 3);
+    CHECK(kept[1].user_picked);
+
+    // A different file starts from its own seed.
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    auto fresh = card.get_mappings();
+    REQUIRE(fresh.size() == 2);
+    CHECK_FALSE(fresh[1].user_picked);
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "A card hidden after it showed keeps no mappings",
+                 "[filament_mapping][routing][bypass]") {
+    // Hidden means print start must find nothing here to send, whichever path
+    // hid the card.
+    SECTION("bypass engaging hides it on a slot refresh") {
+        card.update({"#FF0000"}, {"PLA"});
+        REQUIRE(card.should_show());
+        auto picked = card.get_mappings();
+        REQUIRE(picked.size() == 1);
+        picked[0].mapped_slot = 2;
+        picked[0].user_picked = true;
+        card.set_mappings(picked);
+
+        REQUIRE(helix::test::unload_for_bypass(*mock));
+        REQUIRE(mock->enable_bypass().success());
+        helix::ui::UpdateQueue::instance().drain();
+        card.refresh_slot_data();
+        REQUIRE_FALSE(card.should_show());
+        CHECK(card.get_mappings().empty());
+    }
+
+    SECTION("the used-tool set narrowing a bypassed print hides it") {
+        REQUIRE(helix::test::unload_for_bypass(*mock));
+        REQUIRE(mock->enable_bypass().success());
+        helix::ui::UpdateQueue::instance().drain();
+        card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+        REQUIRE(card.should_show());
+        auto picked = card.get_mappings();
+        REQUIRE_FALSE(picked.empty());
+        picked[0].user_picked = true;
+        card.set_mappings(picked);
+
+        card.set_used_tools(std::set<int>{0});
+        REQUIRE_FALSE(card.should_show());
+        CHECK(card.get_mappings().empty());
+    }
     process_lvgl(100);
 }
 
@@ -499,125 +767,303 @@ TEST_CASE("resolve_mapped_slot: a mapping that outlived its lane resolves to not
 }
 
 // ============================================================================
-// Single-row truncation + "+N" overflow pill
+// A chip tap opens the slot dropdown
 // ============================================================================
 
-TEST_CASE("chips_that_fit: capacity is what the row can actually hold",
-          "[filament][filament_mapping][mapping][overflow]") {
-    // Pure arithmetic at a 4px gap; space_xs is breakpoint-scaled, so the widths
-    // below are the two rows measured in the running app and the answers are the
-    // ones the app actually reported for them.
-    constexpr int32_t gap = 4;
-    // filament_mapping_rows is 181px at 480x272. Four 40px chips plus three gaps
-    // is 172; a fifth would need 216. The app reports 4 there.
-    CHECK(FilamentMappingCard::chips_that_fit(181, gap) == 4);
-    CHECK(FilamentMappingCard::chips_that_fit(172, gap) == 4);
-    CHECK(FilamentMappingCard::chips_that_fit(171, gap) == 3);
-    // 296px at 800x480: six chips need 260, seven need 304. The app reports 6.
-    CHECK(FilamentMappingCard::chips_that_fit(296, gap) == 6);
+namespace {
 
-    // A row too narrow for one chip still gets a slot — that slot carries the
-    // "+N" pill, which is the whole point of not silently dropping tools.
-    CHECK(FilamentMappingCard::chips_that_fit(10, gap) == 1);
-
-    // Layout has not settled: fall back to the floor, never to "everything".
-    CHECK(FilamentMappingCard::chips_that_fit(0, gap) == FilamentMappingCard::MIN_VISIBLE_CHIPS);
-    CHECK(FilamentMappingCard::chips_that_fit(-1, gap) == FilamentMappingCard::MIN_VISIBLE_CHIPS);
+lv_obj_t* on_screen(const char* name) {
+    return lv_obj_find_by_name(lv_screen_active(), name);
 }
 
-TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "A palette wider than the row truncates behind a +N pill",
-                 "[filament_mapping][overflow]") {
-    // The row does not wrap and does not scroll, so anything past the right edge
-    // is invisible. Six tools in a row that holds three must not quietly become
-    // three: the print uses all six, and the card has to say so.
-    //
-    // space_xs is breakpoint-dependent (4/5/6px), so read the real gap rather
-    // than assuming one; 140px holds exactly 3 chips at every one of those.
-    const int32_t gap = theme_manager_get_spacing("space_xs");
-    lv_obj_set_width(rows, 140);
-    lv_obj_set_style_pad_all(rows, 0, 0);
-    lv_obj_set_style_border_width(rows, 0, 0);
-    lv_obj_update_layout(rows);
-    REQUIRE(FilamentMappingCard::chips_that_fit(lv_obj_get_content_width(rows), gap) == 3);
-
-    card.update({"#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF"},
-                {"PLA", "PETG", "PLA", "PETG", "PLA", "PETG"});
-    REQUIRE(card.should_show());
-
-    // Two chips plus the pill — the pill occupies a slot rather than being drawn
-    // past the edge, so overflowing costs a chip.
-    REQUIRE(lv_obj_get_child_count(rows) == 3);
-    lv_obj_t* const last = lv_obj_get_child(rows, 2);
-    REQUIRE(lv_obj_find_by_name(last, "top_band") == nullptr); // not a chip
-    lv_obj_t* const count = lv_obj_find_by_name(last, "count_label");
-    REQUIRE(count != nullptr);
-    CHECK(std::string(lv_label_get_text(count)) == "+4");
-
-    process_lvgl(100);
+std::string picker_string(const char* name) {
+    return lv_subject_get_string(lv_xml_get_subject(nullptr, name));
 }
 
-TEST_CASE_METHOD(MappingCardRenderFixture, "A palette that fits draws no overflow pill",
-                 "[filament_mapping][overflow]") {
-    // The complement: the pill must not appear when nothing is hidden, or every
-    // multi-tool print grows a "+0" that claims tools are missing.
-    lv_obj_set_width(rows, 300); // holds 6 chips at every space_xs value
-    lv_obj_set_style_pad_all(rows, 0, 0);
-    lv_obj_set_style_border_width(rows, 0, 0);
-    lv_obj_update_layout(rows);
-    REQUIRE(FilamentMappingCard::chips_that_fit(lv_obj_get_content_width(rows),
-                                                theme_manager_get_spacing("space_xs")) == 6);
+void tap(lv_obj_t* obj) {
+    REQUIRE(obj != nullptr);
+    lv_obj_send_event(obj, LV_EVENT_CLICKED, nullptr);
+    helix::ui::UpdateQueue::instance().drain();
+}
 
-    card.update({"#FF0000", "#00FF00", "#0000FF"}, {"PLA", "PETG", "PLA"});
-    REQUIRE(lv_obj_get_child_count(rows) == 3);
-    for (uint32_t i = 0; i < 3; ++i) {
-        CHECK(lv_obj_find_by_name(lv_obj_get_child(rows, static_cast<int32_t>(i)), "top_band") !=
-              nullptr);
+} // namespace
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "A chip tap opens that tool's ranked slot dropdown",
+                 "[filament_mapping][chip_tap]") {
+    load_lane(mock, 0, 0xFF0000, "PLA");
+    load_lane(mock, 1, 0x00FF00, "PETG");
+    load_lane(mock, 2, 0x0000FF, "PETG");
+    load_lane(mock, 3, 0x00FF00, "PLA");
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    card.set_mappings(mappings_to_slots({0, 2}));
+    REQUIRE(chip_count() == 2);
+
+    // No gate installed on the card: a tap goes straight to the dropdown.
+    tap(chip(1));
+    REQUIRE(card.slot_picker().is_visible());
+
+    CHECK(picker_string("filament_picker_title") == "T1 · PETG");
+    CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "filament_picker_offer_auto")) == 1);
+    CHECK(picker_string("filament_picker_extra_text") == "More options…");
+
+    // Rows in rank_slots_for_tool's order, each with slot_fit_text.
+    const auto ranked =
+        helix::rank_slots_for_tool(card.get_tool_info()[1], card.get_available_slots(),
+                                   card.get_tool_info(), card.get_mappings());
+    REQUIRE(ranked.size() == 4);
+    REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "filament_picker_row_count")) == 4);
+    // Lane 2 (index 1) is the exact match; lane 3, mapped now, only differs in colour.
+    CHECK(ranked[0].slot_pos == 1);
+    for (size_t k = 0; k < ranked.size(); ++k) {
+        const std::string reason = "filament_picker_row_" + std::to_string(k) + "_reason";
+        CHECK(picker_string(reason.c_str()) == helix::slot_fit_text(ranked[k]));
     }
 
+    // The current pick is highlighted, on screen and not only in its subject.
+    size_t current_row = ranked.size();
+    for (size_t k = 0; k < ranked.size(); ++k) {
+        if (ranked[k].slot_pos == 2) {
+            current_row = k;
+        }
+    }
+    REQUIRE(current_row < ranked.size());
+    const std::string row_name = "filament_picker_row_" + std::to_string(current_row);
+    lv_obj_t* const row = on_screen(row_name.c_str());
+    REQUIRE(row != nullptr);
+    CHECK(lv_obj_get_style_bg_opa(row, LV_PART_MAIN) == 40);
+    lv_obj_t* const other =
+        on_screen(current_row == 0 ? "filament_picker_row_1" : "filament_picker_row_0");
+    REQUIRE(other != nullptr);
+    CHECK(lv_obj_get_style_bg_opa(other, LV_PART_MAIN) == 0);
+
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "Picking a row records it once, the way the modal does",
+                 "[filament_mapping][chip_tap]") {
+    load_lane(mock, 0, 0xFF0000, "PLA");
+    load_lane(mock, 1, 0x00FF00, "PETG");
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    card.set_mappings(mappings_to_slots({0, 3}));
+    int changed = 0;
+    card.set_on_mappings_changed([&changed] { ++changed; });
+
+    card.open_slot_picker(1, chip(1));
+    REQUIRE(card.slot_picker().is_visible());
+    // Row 0 is the best fit: lane 2, exactly T1's green PETG.
+    tap(on_screen("filament_picker_row_0"));
+
+    CHECK_FALSE(card.slot_picker().is_visible());
+    CHECK(changed == 1);
+    const auto mappings = card.get_mappings();
+    REQUIRE(mappings.size() == 2);
+    CHECK(mappings[1].mapped_slot == 1);
+    CHECK(mappings[1].user_picked);
+    CHECK_FALSE(mappings[1].is_auto);
+    CHECK(mappings[0].mapped_slot == 0); // the other tool is untouched
+    CHECK(chip_string(1, "_slot") == "2");
+    CHECK(chip_int(1, "_severity") == 0);
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "More options opens the full mapping",
+                 "[filament_mapping][chip_tap]") {
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    const auto before = card.get_mappings();
+    int full = 0;
+    card.set_on_tap([&full] { ++full; });
+    int changed = 0;
+    card.set_on_mappings_changed([&changed] { ++changed; });
+
+    card.open_slot_picker(0, chip(0));
+    REQUIRE(card.slot_picker().is_visible());
+    tap(on_screen("extra_choice"));
+
+    CHECK(full == 1);
+    CHECK(changed == 0);
+    CHECK_FALSE(card.slot_picker().is_visible());
+    CHECK(card.get_mappings().size() == before.size());
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "Fresh slot data closes an open dropdown",
+                 "[filament_mapping][chip_tap]") {
+    load_lane(mock, 0, 0xFF0000, "PLA");
+    load_lane(mock, 1, 0x00FF00, "PETG");
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    card.open_slot_picker(0, chip(0));
+    REQUIRE(card.slot_picker().is_visible());
+
+    // Nothing moved: the dropdown stays.
+    card.refresh_slot_data();
+    REQUIRE(card.slot_picker().is_visible());
+
+    load_lane(mock, 1, 0x0000FF, "PETG");
+    card.refresh_slot_data();
+    CHECK_FALSE(card.slot_picker().is_visible());
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "A pick the gate refuses is not recorded",
+                 "[filament_mapping][chip_tap]") {
+    load_lane(mock, 0, 0xFF0000, "PLA");
+    load_lane(mock, 1, 0x00FF00, "PETG");
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    const auto before = card.get_mappings();
+    int changed = 0;
+    card.set_on_mappings_changed([&changed] { ++changed; });
+    bool allowed = true;
+    card.set_pick_gate([&allowed] { return allowed; });
+
+    card.open_slot_picker(1, chip(1));
+    REQUIRE(card.slot_picker().is_visible());
+    allowed = false; // the remap went away while the dropdown was open
+    tap(on_screen("filament_picker_row_0"));
+
+    CHECK_FALSE(card.slot_picker().is_visible());
+    CHECK(changed == 0);
+    const auto after = card.get_mappings();
+    REQUIRE(after.size() == before.size());
+    CHECK_FALSE(after[1].user_picked);
+    CHECK(after[1].mapped_slot == before[1].mapped_slot);
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture, "Picking Auto shows the lane the tool routes to",
+                 "[filament_mapping][chip_tap]") {
+    load_lane(mock, 0, 0xFF0000, "PLA");
+    load_lane(mock, 1, 0x00FF00, "PETG");
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PETG"});
+    card.set_mappings(mappings_to_slots({0, 0}));
+    REQUIRE(chip_int(1, "_severity") == 2); // T1's PETG on lane 1's PLA
+
+    card.open_slot_picker(1, chip(1));
+    REQUIRE(card.slot_picker().is_visible());
+    tap(on_screen("auto_choice"));
+
+    REQUIRE(card.get_mappings()[1].is_auto);
+    // The mock routes lane-per-tool: T1 prints from lane 2, its own PETG.
+    CHECK(chip_int(1, "_severity") != 2);
+    CHECK(chip_int(1, "_severity") == 0);
+    CHECK(chip_string(1, "_slot") == "2");
+    CHECK(chip_int(1, "_slot_state") == 1);
+    // The print-start gate judges the same lane and lets it print.
+    CHECK_FALSE(
+        helix::file_preflight(card.get_tool_info(), card.get_mappings(), false).has_block());
     process_lvgl(100);
 }
 
 TEST_CASE_METHOD(MappingCardRenderFixture,
-                 "A capacity chosen before layout settled is corrected on the next rebuild",
-                 "[filament_mapping][overflow]") {
-    // The measured width decides how many chips get drawn, so it has to be an
-    // input to the render fingerprint too. A first render that lands before
-    // layout has settled takes the MIN_VISIBLE_CHIPS fallback; if the width is
-    // not in the fingerprint that wrong answer is permanent, because every later
-    // rebuild with the same data early-returns and on_ui_destroyed() is the only
-    // other thing that clears the fingerprint.
-    const std::vector<std::string> colors = {"#FF0000", "#00FF00", "#0000FF",
-                                             "#FFFF00", "#FF00FF", "#00FFFF"};
-    const std::vector<std::string> materials = {"PLA", "PETG", "PLA", "PETG", "PLA", "PETG"};
+                 "An Auto that routes to no lane is red with the no-slot body, as the gate blocks",
+                 "[filament_mapping][chip_tap][preflight]") {
+    // T5 on four lanes: identity routing gives it head 5, which no lane is.
+    card.set_used_tools(std::set<int>{0, 5});
+    card.update({"#FF0000", "#00FF00", "#0000FF", "#FFFFFF", "#000000", "#00FFFF"},
+                {"PLA", "PLA", "PLA", "PLA", "PLA", "PLA"});
+    auto mappings = card.get_mappings();
+    REQUIRE(mappings.size() == 2);
+    REQUIRE(mappings[1].tool_index == 5);
+    helix::FilamentMapper::pick_slot(mappings[1], card.get_tool_info()[1],
+                                     card.get_available_slots(), -1, -1, true);
+    card.set_mappings(mappings);
+    REQUIRE(chip_count() == 2);
+    CHECK(chip_int(1, "_severity") == 2);
+    CHECK(chip_int(1, "_slot_state") == 0);
+    // The print-start gate reads the same mapping and blocks it.
+    CHECK(helix::file_preflight(card.get_tool_info(), card.get_mappings(), false).has_block());
+    process_lvgl(100);
+}
 
-    lv_obj_set_style_pad_all(rows, 0, 0);
-    lv_obj_set_style_border_width(rows, 0, 0);
-    lv_obj_set_width(rows, 0);
-    lv_obj_update_layout(rows);
-    REQUIRE(lv_obj_get_content_width(rows) <= 0);
+TEST_CASE_METHOD(
+    MappingCardRenderFixture,
+    "Where Print carries out no stored pick, the card seeds each tool on its routed head",
+    "[filament_mapping][chip][preflight]") {
+    // GcodeRewrite: the Print button prints the file as sliced, so T0 prints
+    // from the head it routes to even though another lane holds its colour.
+    struct AutoColorOn {
+        bool prev;
+        AutoColorOn() {
+            helix::SettingsManager::instance().init_subjects();
+            prev = helix::SettingsManager::instance().get_auto_color_map();
+            helix::SettingsManager::instance().set_auto_color_map(true);
+        }
+        ~AutoColorOn() {
+            helix::SettingsManager::instance().set_auto_color_map(prev);
+        }
+    } auto_color_on;
 
-    // Unmeasurable row falls back to the floor, and six tools do not fit in four
-    // slots: three chips and a "+3".
-    card.update(colors, materials);
-    REQUIRE(FilamentMappingCard::MIN_VISIBLE_CHIPS == 4);
-    REQUIRE(lv_obj_get_child_count(rows) == 4);
-    lv_obj_t* const first_before = lv_obj_get_child(rows, 0);
-    lv_obj_t* const pill = lv_obj_get_child(rows, 3);
-    REQUIRE(lv_obj_find_by_name(pill, "count_label") != nullptr);
-    CHECK(std::string(lv_label_get_text(lv_obj_find_by_name(pill, "count_label"))) == "+3");
+    mock->set_remap_strategy(helix::AmsBackend::RemapStrategy::GcodeRewrite);
+    mock->force_slot_status(0, helix::SlotStatus::EMPTY);
+    load_lane(mock, 1, 0x00FF00, "PLA");
+    load_lane(mock, 2, 0xFF0000, "PLA");
+    helix::ui::UpdateQueue::instance().drain();
+    // Colour matching is on, so a seed that colour-matched would pick lane 3.
+    REQUIRE(helix::AmsState::instance().effective_auto_match());
 
-    // Layout settles. Tools, mappings and slots are byte-identical to the render
-    // above — the width is the only thing that changed.
-    lv_obj_set_width(rows, 300);
-    lv_obj_update_layout(rows);
-    REQUIRE(FilamentMappingCard::chips_that_fit(lv_obj_get_content_width(rows),
-                                                theme_manager_get_spacing("space_xs")) == 6);
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    const auto seeded = card.get_mappings();
+    REQUIRE(seeded.size() == 2);
+    CHECK(seeded[0].mapped_slot == 0);
+    CHECK(seeded[1].mapped_slot == 1);
 
-    card.update(colors, materials);
-    CHECK(lv_obj_get_child_count(rows) == 6);         // all six fit now, no pill
-    CHECK(lv_obj_get_child(rows, 0) != first_before); // really re-rendered
-    CHECK(lv_obj_find_by_name(lv_obj_get_child(rows, 5), "top_band") != nullptr);
+    const auto preflight = helix::file_preflight(card.get_tool_info(), seeded, false);
+    REQUIRE(preflight.checks.size() == 2);
+    CHECK(preflight.checks[0].severity == helix::ToolCheck::Severity::EmptySlot);
+    CHECK(preflight.has_block());
 
+    REQUIRE(chip_count() == 2);
+    CHECK(chip_int(0, "_severity") == 2);
+    CHECK(chip_int(0, "_slot_state") == 2);
+
+    // The rewrite modal still suggests the colour match: its apply rewrites the
+    // job, so the suggestion prints as shown.
+    const auto suggested = helix::remap_modal_mappings(seeded, card.get_tool_info());
+    REQUIRE(suggested.size() == 2);
+    CHECK(suggested[0].mapped_slot == 2);
+    process_lvgl(100);
+}
+
+TEST_CASE_METHOD(MappingCardRenderFixture,
+                 "Where the firmware picks lanes at print time, the card claims no lane",
+                 "[filament_mapping][chip][preflight]") {
+    mock->set_remap_strategy(helix::AmsBackend::RemapStrategy::None);
+    mock->set_firmware_picks_lanes_at_print(true);
+    mock->force_slot_status(0, helix::SlotStatus::EMPTY);
+    load_lane(mock, 1, 0x00FF00, "PETG");
+    helix::ui::UpdateQueue::instance().drain();
+
+    card.update({"#FF0000", "#00FF00"}, {"PLA", "PLA"});
+    const auto seeded = card.get_mappings();
+    REQUIRE(seeded.size() == 2);
+    for (const auto& m : seeded) {
+        CHECK(m.is_auto);
+        CHECK(m.mapped_slot == -1);
+    }
+
+    // The file's filament over the unknown body, in a grey outline.
+    REQUIRE(chip_count() == 2);
+    for (int i = 0; i < 2; ++i) {
+        CHECK(chip_int(i, "_severity") == 0);
+        CHECK(chip_int(i, "_slot_state") == 4);
+        CHECK(chip_string(i, "_slot").empty());
+    }
+
+    // The tap gate offers no dropdown.
+    CHECK(helix::printer::remap_block(*mock, helix::GcodeRewriteBlock::None, 2) ==
+          helix::printer::RemapBlock::NoStrategy);
+
+    // Neither the empty lane 1 nor the PETG in lane 2 is held against a tool.
+    const auto preflight = helix::file_preflight(card.get_tool_info(), seeded, false);
+    CHECK(preflight.checks.empty());
+    CHECK_FALSE(preflight.has_block());
+    CHECK_FALSE(preflight.has_advisory());
+
+    helix::PrintStartContext ctx;
+    ctx.filament_color_count = 2;
+    ctx.mappings = seeded;
+    ctx.lanes_picked_at_print =
+        helix::AmsState::instance().collect_firmware_routing().chosen_at_print;
+    CHECK(ctx.lanes_picked_at_print);
+    CHECK(helix::unresolved_tools_in(ctx).empty());
     process_lvgl(100);
 }

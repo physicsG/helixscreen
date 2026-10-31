@@ -35,10 +35,10 @@ using helix::InvalidSampleTracker;
 
 namespace {
 
-constexpr int64_t ONE_SECOND_MS = 1000;
+constexpr int64_t kOneSecondMs = 1000;
 /// A thermistor reading -70°C, the shape reported in #1348 (min_temp: -100).
-constexpr int OPEN_THERMISTOR_DECI = -700;
-constexpr int SANE_DECI = 2050;
+constexpr int kOpenThermistorDeci = -700;
+constexpr int kSaneDeci = 2050;
 
 /// Feed @p count invalid samples at 1 Hz starting at @p start_ms, collecting
 /// every loggable report along with the offset at which it fired.
@@ -51,8 +51,8 @@ std::vector<Emission> feed_invalid(InvalidSampleTracker& tracker, const std::str
                                    int64_t count, int64_t start_ms = 0) {
     std::vector<Emission> out;
     for (int64_t i = 0; i < count; ++i) {
-        const int64_t t = start_ms + i * ONE_SECOND_MS;
-        const InvalidSampleReport r = tracker.record(key, false, OPEN_THERMISTOR_DECI, t);
+        const int64_t t = start_ms + i * kOneSecondMs;
+        const InvalidSampleReport r = tracker.record(key, false, kOpenThermistorDeci, t);
         if (r.loggable()) {
             out.push_back({t, r});
         }
@@ -70,16 +70,16 @@ TEST_CASE("InvalidSampleTracker bounds log volume over a permanent bad run", "[1
     InvalidSampleTracker tracker;
 
     // One hour of 1 Hz samples from a thermistor that never recovers.
-    constexpr int64_t SAMPLES = 3600;
-    const auto emitted = feed_invalid(tracker, "extruder", SAMPLES);
+    constexpr int64_t kSamples = 3600;
+    const auto emitted = feed_invalid(tracker, "extruder", kSamples);
 
     // The whole point: not one line per sample.
-    CHECK(tracker.log_events() < SAMPLES / 100);
+    CHECK(tracker.log_events() < kSamples / 100);
     CHECK(static_cast<int64_t>(emitted.size()) == tracker.log_events());
 
     // Backoff schedule from the public constants: the run opens at t=0, then
     // heartbeats fire the first time a sample lands at or past the window,
-    // doubling from FIRST_REPEAT_MS each time —
+    // doubling from kFirstRepeatMs each time —
     //   open  t=0
     //   +60s  t=60      next window 120s
     //   +120s t=180     next window 240s
@@ -89,14 +89,14 @@ TEST_CASE("InvalidSampleTracker bounds log volume over a permanent bad run", "[1
     //   (next would be t=3660, past the hour)
     REQUIRE(emitted.size() == 6);
     CHECK(emitted[0].at_ms == 0);
-    CHECK(emitted[1].at_ms == 60 * ONE_SECOND_MS);
-    CHECK(emitted[2].at_ms == 180 * ONE_SECOND_MS);
-    CHECK(emitted[3].at_ms == 420 * ONE_SECOND_MS);
-    CHECK(emitted[4].at_ms == 900 * ONE_SECOND_MS);
-    CHECK(emitted[5].at_ms == 1860 * ONE_SECOND_MS);
+    CHECK(emitted[1].at_ms == 60 * kOneSecondMs);
+    CHECK(emitted[2].at_ms == 180 * kOneSecondMs);
+    CHECK(emitted[3].at_ms == 420 * kOneSecondMs);
+    CHECK(emitted[4].at_ms == 900 * kOneSecondMs);
+    CHECK(emitted[5].at_ms == 1860 * kOneSecondMs);
 
     // Every sample is still counted even though almost none are logged.
-    CHECK(tracker.dropped_in_run("extruder") == SAMPLES);
+    CHECK(tracker.dropped_in_run("extruder") == kSamples);
 }
 
 TEST_CASE("InvalidSampleTracker keeps the heartbeat under the cap over a long run",
@@ -104,20 +104,20 @@ TEST_CASE("InvalidSampleTracker keeps the heartbeat under the cap over a long ru
     InvalidSampleTracker tracker;
 
     // The 7.7 hour uptime from the bundle in #1348.
-    constexpr int64_t SAMPLES = 27720;
-    const auto emitted = feed_invalid(tracker, "extruder5", SAMPLES);
+    constexpr int64_t kSamples = 27720;
+    const auto emitted = feed_invalid(tracker, "extruder5", kSamples);
 
     // ~20 lines instead of ~27,720. Bound it generously so the assertion is
     // about the growth rate, not the exact schedule (pinned above).
     CHECK(tracker.log_events() > 5);
     CHECK(tracker.log_events() < 30);
 
-    // Once the interval saturates, spacing must be exactly MAX_REPEAT_MS.
+    // Once the interval saturates, spacing must be exactly kMaxRepeatMs.
     REQUIRE(emitted.size() >= 3);
     const int64_t last_gap = emitted.back().at_ms - emitted[emitted.size() - 2].at_ms;
-    CHECK(last_gap == InvalidSampleTracker::MAX_REPEAT_MS);
+    CHECK(last_gap == InvalidSampleTracker::kMaxRepeatMs);
     for (size_t i = 1; i < emitted.size(); ++i) {
-        CHECK((emitted[i].at_ms - emitted[i - 1].at_ms) <= InvalidSampleTracker::MAX_REPEAT_MS);
+        CHECK((emitted[i].at_ms - emitted[i - 1].at_ms) <= InvalidSampleTracker::kMaxRepeatMs);
     }
 }
 
@@ -150,11 +150,11 @@ TEST_CASE("InvalidSampleTracker heartbeat carries the running drop count and age
     feed_invalid(tracker, "extruder", 60); // t = 0..59s, opens the run
     CHECK(tracker.log_events() == 1);
 
-    const InvalidSampleReport beat = tracker.record("extruder", false, -700, 60 * ONE_SECOND_MS);
+    const InvalidSampleReport beat = tracker.record("extruder", false, -700, 60 * kOneSecondMs);
     REQUIRE(beat.what == InvalidSampleLog::StillInvalid);
     CHECK(beat.dropped == 61);
-    CHECK(beat.duration_ms == 60 * ONE_SECOND_MS);
-    CHECK(beat.first_temp_deci == OPEN_THERMISTOR_DECI);
+    CHECK(beat.duration_ms == 60 * kOneSecondMs);
+    CHECK(beat.first_temp_deci == kOpenThermistorDeci);
 }
 
 TEST_CASE("InvalidSampleTracker reports the transition back to valid", "[1348][logging]") {
@@ -165,20 +165,20 @@ TEST_CASE("InvalidSampleTracker reports the transition back to valid", "[1348][l
     REQUIRE(tracker.in_run("extruder2"));
 
     const InvalidSampleReport recovered =
-        tracker.record("extruder2", true, SANE_DECI, 300 * ONE_SECOND_MS);
+        tracker.record("extruder2", true, kSaneDeci, 300 * kOneSecondMs);
 
     REQUIRE(recovered.what == InvalidSampleLog::Recovered);
     CHECK(recovered.loggable());
     CHECK(recovered.dropped == 300);
-    CHECK(recovered.duration_ms == 300 * ONE_SECOND_MS);
-    CHECK(recovered.first_temp_deci == OPEN_THERMISTOR_DECI);
-    CHECK(recovered.last_temp_deci == OPEN_THERMISTOR_DECI);
+    CHECK(recovered.duration_ms == 300 * kOneSecondMs);
+    CHECK(recovered.first_temp_deci == kOpenThermistorDeci);
+    CHECK(recovered.last_temp_deci == kOpenThermistorDeci);
     CHECK(tracker.log_events() == events_during_run + 1);
 
     // Run is closed: the key is forgotten, and healthy samples stay silent.
     CHECK_FALSE(tracker.in_run("extruder2"));
     CHECK(tracker.dropped_in_run("extruder2") == 0);
-    CHECK_FALSE(tracker.record("extruder2", true, SANE_DECI, 301 * ONE_SECOND_MS).loggable());
+    CHECK_FALSE(tracker.record("extruder2", true, kSaneDeci, 301 * kOneSecondMs).loggable());
     CHECK(tracker.log_events() == events_during_run + 1);
 }
 
@@ -186,11 +186,11 @@ TEST_CASE("InvalidSampleTracker treats a second bad run as a fresh transition", 
     InvalidSampleTracker tracker;
 
     feed_invalid(tracker, "extruder", 5);
-    tracker.record("extruder", true, SANE_DECI, 5 * ONE_SECOND_MS);
+    tracker.record("extruder", true, kSaneDeci, 5 * kOneSecondMs);
 
     // A new run must announce itself immediately rather than inheriting the
     // previous run's backoff window (otherwise a flapping sensor goes silent).
-    const InvalidSampleReport again = tracker.record("extruder", false, -900, 6 * ONE_SECOND_MS);
+    const InvalidSampleReport again = tracker.record("extruder", false, -900, 6 * kOneSecondMs);
     CHECK(again.what == InvalidSampleLog::Entered);
     CHECK(again.dropped == 1);
     CHECK(again.first_temp_deci == -900);
@@ -219,7 +219,7 @@ TEST_CASE("InvalidSampleTracker tracks each key independently", "[1348][logging]
     }
 
     // Recovering one tool must not disturb the others' runs.
-    tracker.record("extruder3", true, SANE_DECI, 50 * ONE_SECOND_MS);
+    tracker.record("extruder3", true, kSaneDeci, 50 * kOneSecondMs);
     CHECK_FALSE(tracker.in_run("extruder3"));
     CHECK(tracker.in_run("extruder"));
     CHECK(tracker.dropped_in_run("extruder5") == 50);
@@ -229,7 +229,7 @@ TEST_CASE("InvalidSampleTracker stays silent for a key that is never invalid", "
     InvalidSampleTracker tracker;
 
     for (int64_t i = 0; i < 1000; ++i) {
-        CHECK_FALSE(tracker.record("extruder", true, SANE_DECI, i * ONE_SECOND_MS).loggable());
+        CHECK_FALSE(tracker.record("extruder", true, kSaneDeci, i * kOneSecondMs).loggable());
     }
     CHECK(tracker.log_events() == 0);
     CHECK_FALSE(tracker.in_run("extruder"));
@@ -238,9 +238,9 @@ TEST_CASE("InvalidSampleTracker stays silent for a key that is never invalid", "
 TEST_CASE("InvalidSampleTracker clamps a backwards clock step to zero age", "[1348][logging]") {
     InvalidSampleTracker tracker;
 
-    tracker.record("extruder", false, OPEN_THERMISTOR_DECI, 10'000'000);
+    tracker.record("extruder", false, kOpenThermistorDeci, 10'000'000);
     // NTP steps the wall clock backwards mid-run; age must not go negative.
-    const InvalidSampleReport recovered = tracker.record("extruder", true, SANE_DECI, 9'000'000);
+    const InvalidSampleReport recovered = tracker.record("extruder", true, kSaneDeci, 9'000'000);
     REQUIRE(recovered.what == InvalidSampleLog::Recovered);
     CHECK(recovered.duration_ms == 0);
 }

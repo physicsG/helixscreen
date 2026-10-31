@@ -112,10 +112,10 @@ class Listener {
 /// well be in use, which would silently invert the assertion.
 pid_t reaped_pid() {
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
     if (pid == 0) {
         _exit(0);
     }
+    REQUIRE(pid > 0);
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
     return pid;

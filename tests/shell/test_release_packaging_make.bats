@@ -9,7 +9,7 @@ load helpers
 # Cache make -n -p output once per file (expensive: parses entire Makefile tree)
 setup_file() {
     export MAKE_DB_CACHE="$BATS_FILE_TMPDIR/make_db.txt"
-    make -n -p 2>/dev/null > "$MAKE_DB_CACHE" || true
+    make_db > "$MAKE_DB_CACHE" || true
 }
 
 # ============================================================================

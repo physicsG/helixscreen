@@ -63,14 +63,18 @@
 #include "../../include/printer_hardware.h"
 #include "../../include/printer_state.h"
 #include "../../include/runtime_config.h"
+#include "../../include/ui_update_queue.h"
 #include "../helix_test_fixture.h"
+#include "../test_helpers/scoped_env.h"
 #include "../test_helpers/scoped_runtime_config.h"
 #include "moonraker_api.h"
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -95,7 +99,7 @@ using namespace helix;
 class MockBehaviorTestFixture {
   public:
     /// Default speedup for tests (100x makes 250ms connect delay → 2.5ms)
-    static constexpr double TEST_SPEEDUP = 100.0;
+    static constexpr double kTestSpeedup = 100.0;
 
     MockBehaviorTestFixture() = default;
 
@@ -104,7 +108,7 @@ class MockBehaviorTestFixture {
      */
     std::unique_ptr<MoonrakerClientMock> create_mock(
         MoonrakerClientMock::PrinterType type = MoonrakerClientMock::PrinterType::VORON_24) {
-        return std::make_unique<MoonrakerClientMock>(type, TEST_SPEEDUP);
+        return std::make_unique<MoonrakerClientMock>(type, kTestSpeedup);
     }
 
     /**
@@ -244,6 +248,35 @@ TEST_CASE("MoonrakerClientMock records the connection URL like the real client",
 
         mock.stop_temperature_simulation();
         mock.disconnect();
+    }
+}
+
+TEST_CASE("MoonrakerClientMock connect() pauses for the configured delay",
+          "[connection][mock_connect_delay]") {
+    const int saved = MoonrakerClientMock::connect_delay_ms();
+    struct RestoreDelay {
+        int ms;
+        ~RestoreDelay() {
+            MoonrakerClientMock::set_connect_delay_ms(ms);
+        }
+    } restore{saved};
+
+    auto timed_connect = [](int delay_ms) {
+        MoonrakerClientMock::set_connect_delay_ms(delay_ms);
+        MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        const auto start = std::chrono::steady_clock::now();
+        mock.connect("ws://127.0.0.1:7125/websocket", []() {}, []() {});
+        const auto took = std::chrono::steady_clock::now() - start;
+        mock.stop_temperature_simulation();
+        mock.disconnect();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(took).count();
+    };
+
+    SECTION("no delay connects without pausing") {
+        CHECK(timed_connect(0) < 100);
+    }
+    SECTION("a delay holds connect() for it") {
+        CHECK(timed_connect(150) >= 150);
     }
 }
 
@@ -1443,6 +1476,81 @@ TEST_CASE("MoonrakerClientMock bed mesh", "[slow][mock][calibration]") {
     }
 }
 
+namespace {
+
+/// Element-wise mesh comparison: dimensions plus every height within @p tolerance.
+bool meshes_equal(const BedMeshProfile& a, const BedMeshProfile& b, float tolerance = 0.001f) {
+    if (a.x_count != b.x_count || a.y_count != b.y_count ||
+        a.probed_matrix.size() != b.probed_matrix.size()) {
+        return false;
+    }
+    for (size_t row = 0; row < a.probed_matrix.size(); row++) {
+        if (a.probed_matrix[row].size() != b.probed_matrix[row].size()) {
+            return false;
+        }
+        for (size_t col = 0; col < a.probed_matrix[row].size(); col++) {
+            if (std::fabs(a.probed_matrix[row][col] - b.probed_matrix[row][col]) > tolerance) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+// Mesh heights follow the profile: test_mock_gcode_dispatch pins names and shapes
+// but masks the heights, so these are the cases that see the data itself.
+TEST_CASE("MoonrakerClientMock bed mesh profiles store their heights", "[bed_mesh][mock]") {
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+
+    SECTION("default and adaptive have different mesh data") {
+        mock.gcode_script("BED_MESH_PROFILE LOAD=default");
+        BedMeshProfile default_mesh = mock.get_active_bed_mesh();
+
+        mock.gcode_script("BED_MESH_PROFILE LOAD=adaptive");
+        BedMeshProfile adaptive_mesh = mock.get_active_bed_mesh();
+
+        REQUIRE(!meshes_equal(default_mesh, adaptive_mesh));
+    }
+
+    SECTION("LOAD restores actual mesh data") {
+        mock.gcode_script("BED_MESH_PROFILE LOAD=default");
+        BedMeshProfile default_mesh = mock.get_active_bed_mesh();
+
+        mock.gcode_script("BED_MESH_PROFILE LOAD=adaptive");
+        REQUIRE(mock.get_active_bed_mesh().name == "adaptive");
+        REQUIRE(!meshes_equal(mock.get_active_bed_mesh(), default_mesh));
+
+        mock.gcode_script("BED_MESH_PROFILE LOAD=default");
+        REQUIRE(mock.get_active_bed_mesh().name == "default");
+        REQUIRE(meshes_equal(mock.get_active_bed_mesh(), default_mesh));
+    }
+
+    SECTION("SAVE stores current mesh data") {
+        mock.gcode_script("BED_MESH_CALIBRATE PROFILE=test_save");
+        BedMeshProfile calibrated = mock.get_active_bed_mesh();
+
+        mock.gcode_script("BED_MESH_PROFILE LOAD=default");
+        REQUIRE(mock.get_active_bed_mesh().name == "default");
+
+        mock.gcode_script("BED_MESH_PROFILE LOAD=test_save");
+        REQUIRE(mock.get_active_bed_mesh().name == "test_save");
+        REQUIRE(meshes_equal(mock.get_active_bed_mesh(), calibrated));
+    }
+
+    SECTION("multiple calibrations produce different results") {
+        std::vector<BedMeshProfile> meshes;
+        for (int i = 0; i < 5; i++) {
+            mock.gcode_script("BED_MESH_CALIBRATE PROFILE=multi_" + std::to_string(i));
+            meshes.push_back(mock.get_active_bed_mesh());
+        }
+        for (size_t i = 1; i < meshes.size(); i++) {
+            REQUIRE(!meshes_equal(meshes[i], meshes[i - 1]));
+        }
+    }
+}
+
 // ============================================================================
 // send_jsonrpc Tests
 // ============================================================================
@@ -1471,7 +1579,7 @@ TEST_CASE("MoonrakerClientMock send_jsonrpc methods", "[connection][jsonrpc]") {
         });
 
         // Verify valid request ID returned
-        REQUIRE(id != INVALID_REQUEST_ID);
+        REQUIRE(id != kInvalidRequestId);
 
         // Verify callback was invoked (printer.info is a registered handler)
         REQUIRE(callback_invoked);
@@ -1501,7 +1609,7 @@ TEST_CASE("MoonrakerClientMock send_jsonrpc methods", "[connection][jsonrpc]") {
             [&](const MoonrakerError&) { error_invoked = true; }, 5000);
 
         // Verify valid request ID returned
-        REQUIRE(id != INVALID_REQUEST_ID);
+        REQUIRE(id != kInvalidRequestId);
 
         // Verify success callback was invoked, not error callback
         REQUIRE(success_invoked);
@@ -2495,6 +2603,8 @@ TEST_CASE("MoonrakerClientMock M112 reports Klipper's shutdown reason until a re
 
     mock.stop_temperature_simulation();
     mock.disconnect();
+    // M112 also reports the shutdown to the global PrinterState from the UI thread.
+    helix::ui::UpdateQueue::instance().drain();
 }
 
 // ============================================================================
@@ -3061,7 +3171,7 @@ TEST_CASE("MoonrakerClientMock restart simulation", "[slow][mock][restart]") {
         //
         // Time to the webhooks "ready" notification, NOT to an arbitrary notification
         // count: the mock's physics thread dispatches a status update every
-        // SIMULATION_INTERVAL_MS (250ms of REAL time — the speedup scales the physics
+        // kSimulationIntervalMs (250ms of REAL time — the speedup scales the physics
         // step, not the tick period), so a stray temperature tick can push the
         // notification count past a threshold while the restart is still in flight.
         auto start = std::chrono::steady_clock::now();
@@ -3591,13 +3701,133 @@ TEST_CASE("MoonrakerClientMock: M117 sets display_status.message", "[mock][displ
     }
 }
 
+TEST_CASE("MoonrakerClientMock: print-start steps show the macro chatter a printer would",
+          "[mock][display_message]") {
+    using Mock = MoonrakerClientMock;
+    CHECK(std::string(Mock::print_start_display_message(0)) == "Heating...");
+    CHECK(std::string(Mock::print_start_display_message(1)) == "Homing...");
+    CHECK(std::string(Mock::print_start_display_message(2)) == "Homing...");
+    CHECK(std::string(Mock::print_start_display_message(3)) == "Syncing motors...");
+    CHECK(std::string(Mock::print_start_display_message(4)) == "Heating bed...");
+    CHECK(std::string(Mock::print_start_display_message(5)) == "Heating nozzle...");
+    CHECK(std::string(Mock::print_start_display_message(6)) == "Leveling Gantry...");
+    CHECK(std::string(Mock::print_start_display_message(7)) == "Calibrating bed mesh...");
+    CHECK(std::string(Mock::print_start_display_message(8)) == "Purging nozzle");
+    CHECK(std::string(Mock::print_start_display_message(9)) == "Purging nozzle");
+}
+
+TEST_CASE("MoonrakerClientMock: HELIX_MOCK_OBJECTS adds motors-sync to a persona",
+          "[mock][motor_sync]") {
+    SECTION("without it the printer has no motors_sync object") {
+        helix::ScopedEnv env("HELIX_MOCK_OBJECTS", nullptr);
+        TestableMoonrakerMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        mock.connect("ws://mock/websocket", []() {}, []() {});
+        CHECK_FALSE(mock.has_motors_sync());
+        mock.disconnect();
+    }
+
+    SECTION("with it the printer reports motors_sync") {
+        helix::ScopedEnv env("HELIX_MOCK_OBJECTS", "motors_sync");
+        TestableMoonrakerMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        mock.connect("ws://mock/websocket", []() {}, []() {});
+        CHECK(mock.has_motors_sync());
+        mock.disconnect();
+    }
+}
+
+TEST_CASE("MoonrakerClientMock: HELIX_MOCK_DISPLAY_MESSAGE presets the display message",
+          "[mock][display_message]") {
+    SECTION("idle with no knob and no M117 publishes no message") {
+        helix::ScopedEnv env("HELIX_MOCK_DISPLAY_MESSAGE", nullptr);
+        TestableMoonrakerMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        CHECK(mock.current_display_message().is_null());
+    }
+
+    SECTION("the knob's text is published while idle") {
+        helix::ScopedEnv env("HELIX_MOCK_DISPLAY_MESSAGE", "Nozzle wiped, ready");
+        TestableMoonrakerMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        REQUIRE(mock.current_display_message().is_string());
+        CHECK(mock.current_display_message().get<std::string>() == "Nozzle wiped, ready");
+    }
+
+    SECTION("an M117 replaces the preset, and a bare M117 clears it") {
+        helix::ScopedEnv env("HELIX_MOCK_DISPLAY_MESSAGE", "Nozzle wiped, ready");
+        TestableMoonrakerMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        mock.gcode_script("M117 Calibrating");
+        CHECK(mock.current_display_message().get<std::string>() == "Calibrating");
+        mock.gcode_script("M117");
+        CHECK(mock.current_display_message().get<std::string>() == "");
+    }
+
+    SECTION("the subscription snapshot carries the preset message") {
+        helix::ScopedEnv env("HELIX_MOCK_DISPLAY_MESSAGE", "Nozzle wiped, ready");
+        TestableMoonrakerMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        json message;
+        bool answered = false;
+        mock.send_jsonrpc(
+            "printer.objects.subscribe", {{"objects", {{"display_status", nullptr}}}},
+            [&](json response) {
+                answered = true;
+                message = response["result"]["status"]["display_status"]["message"];
+            },
+            nullptr);
+        REQUIRE(answered);
+        REQUIRE(message.is_string());
+        CHECK(message.get<std::string>() == "Nozzle wiped, ready");
+    }
+
+    SECTION("an empty knob presets nothing") {
+        helix::ScopedEnv env("HELIX_MOCK_DISPLAY_MESSAGE", "");
+        TestableMoonrakerMock mock(MoonrakerClientMock::PrinterType::VORON_24);
+        CHECK(mock.current_display_message().is_null());
+    }
+}
+
+TEST_CASE("MoonrakerClientMock: periodic broadcasts carry each print-start step's message",
+          "[mock][display_message][slow]") {
+    helix::ScopedEnv env("HELIX_MOCK_DISPLAY_MESSAGE", nullptr);
+    MockBehaviorTestFixture fixture;
+    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24, 20.0);
+    mock.register_notify_update(fixture.create_capture_callback());
+    mock.connect("ws://mock/websocket", []() {}, []() {});
+
+    mock.gcode_script("SDCARD_PRINT_FILE FILENAME=3DBenchy.gcode");
+    fixture.reset();
+    REQUIRE(fixture.wait_for_callbacks(3, 8000));
+    mock.stop_temperature_simulation();
+
+    // A step-specific message, not the generic one a printer with no PRINT_START
+    // chatter would show.
+    const std::set<std::string> step_messages = {"Homing...", "Heating bed...", "Heating nozzle...",
+                                                 "Leveling Gantry...", "Calibrating bed mesh..."};
+    bool saw_step_message = false;
+    for (const auto& notification : fixture.get_notifications()) {
+        if (!notification.contains("params") || !notification["params"].is_array() ||
+            notification["params"].empty()) {
+            continue;
+        }
+        const json& status = notification["params"][0];
+        if (!status.is_object() || !status.contains("print_stats") ||
+            !status.contains("display_status")) {
+            continue;
+        }
+        const json& message = status["display_status"]["message"];
+        if (message.is_string() && step_messages.count(message.get<std::string>()) > 0) {
+            saw_step_message = true;
+        }
+    }
+    CHECK(saw_step_message);
+
+    mock.disconnect();
+}
+
 // ============================================================================
 // M117 precedence over periodic status broadcasts
 // ============================================================================
 //
 // Commit 959bb0140's central design property: once a user sends M117, that
 // message must survive the mock's own periodic status broadcast (fired every
-// NOTIFICATION_INTERVAL_TICKS ticks from temperature_simulation_loop()) even
+// kNotificationIntervalTicks ticks from temperature_simulation_loop()) even
 // while the print is in a phase that would otherwise emit a canned string
 // ("Heating...", "Purging nozzle"). The SECTIONs above only ever inspect the
 // notification dispatched by the M117 call itself - they never drive the

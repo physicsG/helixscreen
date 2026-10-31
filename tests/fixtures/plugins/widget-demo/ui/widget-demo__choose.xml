@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<component>
+  <view extends="ui_dialog">
+    <modal_header title="Pick one"
+                  icon_name="widget-demo__hicon" title_name="widget-demo__htitle" close_name="widget-demo__hclose"/>
+    <modal_button_row primary_text="Use 2"
+                      primary_callback="plugin_event" primary_user_data="widget-demo__pick:2"
+                      secondary_callback="plugin_event" secondary_user_data="widget-demo__pick:none"
+                      primary_name="widget-demo__ok" secondary_name="widget-demo__no" tertiary_name="widget-demo__t"
+                      quaternary_name="widget-demo__q" tertiary_divider_name="widget-demo__dt"
+                      quaternary_divider_name="widget-demo__dq"/>
+  </view>
+</component>

@@ -26,18 +26,18 @@
 
 #include "../catch_amalgamated.hpp"
 
-using helix::temp_graph::COLUMN_NOT_DRAWN;
 using helix::temp_graph::column_series_y;
 using helix::temp_graph::column_to_point;
+using helix::temp_graph::kColumnNotDrawn;
 
 namespace {
 // Deci-degrees, matching the chart's storage: 0-250C over a 100px content box.
-constexpr int32_t Y_MIN = 0;
-constexpr int32_t Y_MAX = 2500;
+constexpr int32_t kYMin = 0;
+constexpr int32_t kYMax = 2500;
 constexpr int32_t CH = 100;
 
 int32_t at(int32_t deci) {
-    return column_series_y(deci, deci, 0, Y_MIN, Y_MAX, CH);
+    return column_series_y(deci, deci, 0, kYMin, kYMax, CH);
 }
 } // namespace
 
@@ -45,25 +45,25 @@ TEST_CASE("Column mapping places a value at the expected pixel row",
           "[temp_graph][gradient][column_map]") {
     // Top of range sits at the top row, bottom of range falls to the floor and
     // so is not drawn at all.
-    CHECK(at(Y_MAX) == 0);
-    CHECK(at(Y_MIN) == COLUMN_NOT_DRAWN);
+    CHECK(at(kYMax) == 0);
+    CHECK(at(kYMin) == kColumnNotDrawn);
 
     // Mid-range lands mid-box. Derived from the range, not copied from the
     // implementation: half the span should be half the height above the floor.
-    CHECK(at(Y_MAX / 2) == CH / 2);
+    CHECK(at(kYMax / 2) == CH / 2);
 }
 
 TEST_CASE("A sub-pixel change within a row maps to the same row",
           "[temp_graph][gradient][column_map]") {
-    // One pixel spans (Y_MAX - Y_MIN) / CH = 25 deci-degrees, i.e. 2.5 C, and
+    // One pixel spans (kYMax - kYMin) / CH = 25 deci-degrees, i.e. 2.5 C, and
     // the per-sample jitter on a real printer is far smaller. Sit mid-bucket:
     // the contract is that jitter INSIDE a row is invisible, not that every
     // small change is - a value sitting on a boundary still flips, which is the
     // next test and is why the measured skip rate was ~47% rather than 100%.
-    const int32_t one_px = (Y_MAX - Y_MIN) / CH; // 25
+    const int32_t one_px = (kYMax - kYMin) / CH; // 25
     const int32_t base = 1000 + one_px / 2;      // mid-row, not on the edge
     const int32_t row = at(base);
-    REQUIRE(row != COLUMN_NOT_DRAWN);
+    REQUIRE(row != kColumnNotDrawn);
 
     CHECK(at(base + 1) == row); // +0.1 C
     CHECK(at(base + 5) == row); // +0.5 C
@@ -80,7 +80,7 @@ TEST_CASE("A change across a row boundary is still reported",
     // 0.1 C move, so those frames still render. That is correct - the skip must
     // never hide a change that reaches the screen - and it is why the optimisation
     // removes about half the renders rather than all of them.
-    const int32_t one_px = (Y_MAX - Y_MIN) / CH;
+    const int32_t one_px = (kYMax - kYMin) / CH;
     const int32_t on_edge = 1000; // exactly 40 * one_px
     REQUIRE(on_edge % one_px == 0);
     CHECK(at(on_edge + 1) != at(on_edge - 1));
@@ -89,25 +89,25 @@ TEST_CASE("A change across a row boundary is still reported",
 TEST_CASE("A change big enough to move a row is reported", "[temp_graph][gradient][column_map]") {
     const int32_t base = 1000;
     const int32_t row = at(base);
-    REQUIRE(row != COLUMN_NOT_DRAWN);
+    REQUIRE(row != kColumnNotDrawn);
 
     // A full pixel's worth must move, or the skip would freeze a graph that is
     // genuinely changing.
-    const int32_t one_px = (Y_MAX - Y_MIN) / CH;
+    const int32_t one_px = (kYMax - kYMin) / CH;
     CHECK(at(base + 2 * one_px) != row);
     CHECK(at(base - 2 * one_px) != row);
 }
 
 TEST_CASE("Missing points are reported as not drawn", "[temp_graph][gradient][column_map]") {
     SECTION("both ends missing") {
-        CHECK(column_series_y(LV_CHART_POINT_NONE, LV_CHART_POINT_NONE, 128, Y_MIN, Y_MAX, CH) ==
-              COLUMN_NOT_DRAWN);
+        CHECK(column_series_y(LV_CHART_POINT_NONE, LV_CHART_POINT_NONE, 128, kYMin, kYMax, CH) ==
+              kColumnNotDrawn);
     }
     SECTION("one end missing falls back to the other, and still draws") {
-        const int32_t solo = column_series_y(LV_CHART_POINT_NONE, 1000, 128, Y_MIN, Y_MAX, CH);
-        CHECK(solo != COLUMN_NOT_DRAWN);
+        const int32_t solo = column_series_y(LV_CHART_POINT_NONE, 1000, 128, kYMin, kYMax, CH);
+        CHECK(solo != kColumnNotDrawn);
         CHECK(solo == at(1000));
-        CHECK(column_series_y(1000, LV_CHART_POINT_NONE, 128, Y_MIN, Y_MAX, CH) == solo);
+        CHECK(column_series_y(1000, LV_CHART_POINT_NONE, 128, kYMin, kYMax, CH) == solo);
     }
 }
 
@@ -116,9 +116,9 @@ TEST_CASE("Interpolation honours the fractional weight", "[temp_graph][gradient]
     const int32_t hi = 2000;
 
     // frac 0 is entirely the first point; 255 is (all but a step of) the second.
-    CHECK(column_series_y(lo, hi, 0, Y_MIN, Y_MAX, CH) == at(lo));
+    CHECK(column_series_y(lo, hi, 0, kYMin, kYMax, CH) == at(lo));
 
-    const int32_t mid = column_series_y(lo, hi, 128, Y_MIN, Y_MAX, CH);
+    const int32_t mid = column_series_y(lo, hi, 128, kYMin, kYMax, CH);
     // Rows grow downward, so the midpoint sits between the two endpoint rows.
     CHECK(mid < at(lo));
     CHECK(mid > at(hi));

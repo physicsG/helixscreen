@@ -231,3 +231,29 @@ TEST_CASE_METHOD(PreparingIdentityFixture,
         REQUIRE(Access::reprint_filename(panel()) == "parts/benchy.gcode");
     }
 }
+
+TEST_CASE("reprint_target extracts a staged archive plate again, and starts a conversion as is",
+          "[print_status][reprint][three_mf]") {
+    using helix::gcode::reprint_target;
+    const std::string staged = helix::gcode::make_extracted_plate_path("parts/Door.gcode.3mf", 5);
+
+    auto t = reprint_target("parts/Door.gcode.3mf", staged);
+    CHECK(t.file == "parts/Door.gcode.3mf");
+    CHECK(t.archive_plate == 5);
+    // After a restart, the report alone still places archive and plate.
+    t = reprint_target("", staged);
+    CHECK(t.file == "parts/Door.gcode.3mf");
+    CHECK(t.archive_plate == 5);
+    // The printer's own conversion printed: that G-code starts as it is.
+    t = reprint_target("parts/Door.gcode.3mf", "parts/Door_plate5.gcode");
+    CHECK(t.file == "parts/Door_plate5.gcode");
+    CHECK(t.archive_plate == 0);
+    // A printer that runs the .3mf itself reprints the .3mf.
+    t = reprint_target("parts/Door.gcode.3mf", "parts/Door.gcode.3mf");
+    CHECK(t.file == "parts/Door.gcode.3mf");
+    CHECK(t.archive_plate == 0);
+    // Plain G-code is unaffected.
+    t = reprint_target("", helix::gcode::make_rewritten_gcode_path("parts/benchy.gcode"));
+    CHECK(t.file == "parts/benchy.gcode");
+    CHECK(t.archive_plate == 0);
+}

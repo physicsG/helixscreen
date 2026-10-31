@@ -18,13 +18,13 @@
 
 // Material Design indeterminate spinner timing constants
 namespace {
-constexpr uint32_t ROTATION_DURATION_MS = 1568; // Full 360° rotation of the arc
-constexpr uint32_t SWEEP_DURATION_MS = 667;     // Half of grow/shrink cycle
-constexpr int32_t ARC_MIN_SWEEP = 45;  // Minimum arc length (degrees) - larger for visible rotation
-constexpr int32_t ARC_MAX_SWEEP = 270; // Maximum arc length (degrees)
+constexpr uint32_t kRotationDurationMs = 1568; // Full 360° rotation of the arc
+constexpr uint32_t kSweepDurationMs = 667;     // Half of grow/shrink cycle
+constexpr int32_t kArcMinSweep = 45;  // Minimum arc length (degrees) - larger for visible rotation
+constexpr int32_t kArcMaxSweep = 270; // Maximum arc length (degrees)
 
 // Debug: set to true to log animation values
-constexpr bool DEBUG_SPINNER = false;
+constexpr bool kDebugSpinner = false;
 } // namespace
 
 /**
@@ -51,17 +51,17 @@ static int32_t get_responsive_px(const char* token_name, int32_t fallback) {
 static int32_t g_last_start = 0;
 static int32_t g_last_end = 0;
 
-// Clamp an angle so the sweep (from..to) never falls below ARC_MIN_SWEEP.
+// Clamp an angle so the sweep (from..to) never falls below kArcMinSweep.
 // At animation repeat boundaries the two independent animations can desync
 // by one frame, creating an invalid negative sweep that crashes NEON blend.
 static int32_t clamp_sweep(int32_t angle, int32_t reference, bool angle_is_start) {
     int32_t sweep = angle_is_start ? (reference - angle) : (angle - reference);
     if (sweep < 0)
         sweep += 360;
-    if (sweep >= ARC_MIN_SWEEP)
+    if (sweep >= kArcMinSweep)
         return angle;
 
-    int32_t clamped = angle_is_start ? (reference - ARC_MIN_SWEEP) : (reference + ARC_MIN_SWEEP);
+    int32_t clamped = angle_is_start ? (reference - kArcMinSweep) : (reference + kArcMinSweep);
     if (clamped < 0)
         clamped += 360;
     if (clamped >= 360)
@@ -73,7 +73,7 @@ static void arc_anim_start_angle(void* obj, int32_t value) {
     value = clamp_sweep(value, g_last_end, /*angle_is_start=*/true);
     g_last_start = value;
 
-    if (DEBUG_SPINNER) {
+    if (kDebugSpinner) {
         static int counter = 0;
         static int32_t min_sweep = 999, max_sweep = 0;
         int32_t cur_sweep = g_last_end - value;
@@ -132,7 +132,7 @@ static void spinner_delete_cb(lv_event_t* e) {
  * - Fast in the middle (arc shrinks as start catches up)
  * - Slow at the end (arc stabilizes, then repeats)
  *
- * End angle offset by ARC_MAX_SWEEP ensures arc is never zero.
+ * End angle offset by kArcMaxSweep ensures arc is never zero.
  *
  * @param arc The arc object to animate
  */
@@ -154,8 +154,8 @@ static void start_material_spinner_animations(lv_obj_t* arc) {
     lv_anim_init(&anim_end);
     lv_anim_set_var(&anim_end, arc);
     lv_anim_set_exec_cb(&anim_end, arc_anim_end_angle);
-    lv_anim_set_duration(&anim_end, SWEEP_DURATION_MS * 2);
-    lv_anim_set_values(&anim_end, ARC_MIN_SWEEP, ARC_MIN_SWEEP + 360);
+    lv_anim_set_duration(&anim_end, kSweepDurationMs * 2);
+    lv_anim_set_values(&anim_end, kArcMinSweep, kArcMinSweep + 360);
     lv_anim_set_repeat_count(&anim_end, LV_ANIM_REPEAT_INFINITE);
     // Aggressive ease-out: (0, 0, 0.2, 1) - very fast start, very slow end
     lv_anim_set_path_cb(&anim_end, lv_anim_path_custom_bezier3);
@@ -169,7 +169,7 @@ static void start_material_spinner_animations(lv_obj_t* arc) {
     lv_anim_init(&anim_start);
     lv_anim_set_var(&anim_start, arc);
     lv_anim_set_exec_cb(&anim_start, arc_anim_start_angle);
-    lv_anim_set_duration(&anim_start, SWEEP_DURATION_MS * 2);
+    lv_anim_set_duration(&anim_start, kSweepDurationMs * 2);
     lv_anim_set_values(&anim_start, 0, 360);
     lv_anim_set_repeat_count(&anim_start, LV_ANIM_REPEAT_INFINITE);
     // Aggressive ease-in: (0.8, 0, 1, 1) - very slow start, very fast end
@@ -184,8 +184,8 @@ static void start_material_spinner_animations(lv_obj_t* arc) {
     lv_anim_init(&anim_rot);
     lv_anim_set_var(&anim_rot, arc);
     lv_anim_set_exec_cb(&anim_rot, arc_anim_rotation);
-    lv_anim_set_duration(&anim_rot, ROTATION_DURATION_MS); // ~1.5s for full rotation
-    lv_anim_set_values(&anim_rot, 270, 270 + 360);         // Start at top, go full circle
+    lv_anim_set_duration(&anim_rot, kRotationDurationMs); // ~1.5s for full rotation
+    lv_anim_set_values(&anim_rot, 270, 270 + 360);        // Start at top, go full circle
     lv_anim_set_repeat_count(&anim_rot, LV_ANIM_REPEAT_INFINITE);
     lv_anim_set_path_cb(&anim_rot, lv_anim_path_linear); // Constant rotation speed
     lv_anim_start(&anim_rot);
@@ -254,7 +254,7 @@ static void* ui_spinner_create(lv_xml_parser_state_t* state, const char** attrs)
 
     // Set initial arc angles (will be animated immediately)
     // start=0, end=270 gives a large initial arc
-    lv_arc_set_angles(arc, 0, ARC_MAX_SWEEP);
+    lv_arc_set_angles(arc, 0, kArcMaxSweep);
 
     // animated="false" leaves a static arc: a busy mark that never repaints, for screens
     // that cannot afford a continuous partial redraw.

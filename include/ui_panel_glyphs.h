@@ -35,7 +35,7 @@ class GlyphsPanel : public PanelBase {
      * @note Dependencies are passed for interface consistency with PanelBase,
      *       but this panel doesn't require printer connectivity.
      */
-    GlyphsPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    GlyphsPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     ~GlyphsPanel() override = default;
 

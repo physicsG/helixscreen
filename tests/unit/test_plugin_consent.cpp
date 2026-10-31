@@ -64,4 +64,45 @@ TEST_CASE("a hostile-looking but valid name stays on the header line", "[plugin]
     CHECK(msg.find("full control") != std::string::npos);
 }
 
+namespace {
+MenuItemDecl menu_item(const char* id, MenuKind k) {
+    MenuItemDecl d;
+    d.id = id;
+    d.menu = k;
+    return d;
+}
+} // namespace
+
+TEST_CASE("the menu targets line names each menu once, in menu order", "[plugin][consent]") {
+    Manifest m;
+    m.menu_items = {menu_item("a", MenuKind::FilamentSlot), menu_item("b", MenuKind::PrintFile),
+                    menu_item("c", MenuKind::FilamentSlot)};
+    CHECK(menu_targets_line(m) == "Adds to: Print details, Filament slot menu");
+    m.menu_items.push_back(menu_item("d", MenuKind::Tile));
+    m.menu_items.push_back(menu_item("e", MenuKind::Spool));
+    CHECK(menu_targets_line(m) ==
+          "Adds to: Print details, Filament slot menu, Spool menu, Its home tile");
+}
+
+TEST_CASE("no menu items, no menu targets line", "[plugin][consent]") {
+    Manifest m;
+    m.name = "Plain";
+    m.version = "1";
+    CHECK(menu_targets_line(m).empty());
+    CHECK(consent_message(m, {}).find("Adds to") == std::string::npos);
+}
+
+TEST_CASE("the consent message ends with the menu targets, updates included", "[plugin][consent]") {
+    Manifest m;
+    m.name = "Orca";
+    m.version = "1.2.0";
+    m.permissions = {Permission::Http};
+    m.menu_items = {menu_item("a", MenuKind::PrintFile)};
+    std::string msg = consent_message(m, {});
+    CHECK(msg.find("internet") < msg.find("Adds to: Print details"));
+    CHECK(msg.substr(msg.rfind('\n') + 1) == "Adds to: Print details");
+    CHECK(consent_message(m, {Permission::Http}).find("Adds to: Print details") !=
+          std::string::npos);
+}
+
 #endif // HELIX_HAS_PLUGINS

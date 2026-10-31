@@ -32,6 +32,7 @@ WidgetState* widget_state(lua_State* L) {
 }
 
 int widget_register(lua_State* L) {
+    forbid_in_check(L, "helix.widget");
     PluginContext& ctx = context(L);
     std::string local = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);

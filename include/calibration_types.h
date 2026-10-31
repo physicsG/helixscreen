@@ -20,45 +20,45 @@
 
 /// Z travel per full turn (mm) for every thread Klipper's `screw_thread` accepts.
 /// Mirrors the `threads_factor` table in Klipper's screws_tilt_adjust.py.
-constexpr float SCREW_PITCH_M3_MM = 0.5f;
-constexpr float SCREW_PITCH_M4_MM = 0.7f;
-constexpr float SCREW_PITCH_M5_MM = 0.8f;
-constexpr float SCREW_PITCH_M6_MM = 1.0f;
+constexpr float kScrewPitchM3Mm = 0.5f;
+constexpr float kScrewPitchM4Mm = 0.7f;
+constexpr float kScrewPitchM5Mm = 0.8f;
+constexpr float kScrewPitchM6Mm = 1.0f;
 
 /// Pitch assumed when `screw_thread` is unreadable — Klipper's own default (CW-M3).
-constexpr float SCREW_PITCH_DEFAULT_MM = SCREW_PITCH_M3_MM;
+constexpr float kScrewPitchDefaultMm = kScrewPitchM3Mm;
 
 /// Corner-to-corner bed spread at or below which the bed counts as level.
 /// Expressed in mm because a clock-minute is a different physical distance on
 /// every thread pitch (5 min is 0.042 mm on M3 but 0.083 mm on M6).
-constexpr float SCREW_LEVEL_TOLERANCE_MM = 0.05f;
+constexpr float kScrewLevelToleranceMm = 0.05f;
 
 /// Adjustment magnitude above which a screw is drawn as severe rather than warned.
-constexpr float SCREW_SEVERE_ADJUSTMENT_MM = 0.25f;
+constexpr float kScrewSevereAdjustmentMm = 0.25f;
 
 /**
  * @brief Z travel per full turn for a Klipper `screw_thread` value
  *
  * Accepts the full config token ("CW-M4", "CCW-M6") or a bare thread ("M5").
- * Falls back to SCREW_PITCH_DEFAULT_MM when the value is missing or unparseable.
+ * Falls back to kScrewPitchDefaultMm when the value is missing or unparseable.
  */
 [[nodiscard]] inline float screw_thread_pitch_mm(const std::string& screw_thread) {
     size_t m = screw_thread.find_last_of("mM");
     if (m != std::string::npos && m + 1 < screw_thread.length()) {
         switch (screw_thread[m + 1]) {
         case '3':
-            return SCREW_PITCH_M3_MM;
+            return kScrewPitchM3Mm;
         case '4':
-            return SCREW_PITCH_M4_MM;
+            return kScrewPitchM4Mm;
         case '5':
-            return SCREW_PITCH_M5_MM;
+            return kScrewPitchM5Mm;
         case '6':
-            return SCREW_PITCH_M6_MM;
+            return kScrewPitchM6Mm;
         default:
             break;
         }
     }
-    return SCREW_PITCH_DEFAULT_MM;
+    return kScrewPitchDefaultMm;
 }
 
 /**
@@ -71,7 +71,7 @@ constexpr float SCREW_SEVERE_ADJUSTMENT_MM = 0.25f;
  */
 [[nodiscard]] inline int screw_minutes_for_mm(float distance_mm, float pitch_mm) {
     if (!(pitch_mm > 0.0f)) {
-        pitch_mm = SCREW_PITCH_DEFAULT_MM;
+        pitch_mm = kScrewPitchDefaultMm;
     }
     int minutes = static_cast<int>(std::lround(distance_mm / pitch_mm * 60.0f));
     return minutes != 0 ? minutes : (distance_mm < 0.0f ? -1 : 1);
@@ -79,29 +79,13 @@ constexpr float SCREW_SEVERE_ADJUSTMENT_MM = 0.25f;
 
 /// Level tolerance in clock-minutes for a given thread pitch (the single source
 /// of truth — every threshold in the screws-tilt UI derives from this).
-[[nodiscard]] inline int screw_level_tolerance_minutes(float pitch_mm = SCREW_PITCH_DEFAULT_MM) {
-    return screw_minutes_for_mm(SCREW_LEVEL_TOLERANCE_MM, pitch_mm);
+[[nodiscard]] inline int screw_level_tolerance_minutes(float pitch_mm = kScrewPitchDefaultMm) {
+    return screw_minutes_for_mm(kScrewLevelToleranceMm, pitch_mm);
 }
 
 /// Magnitude in clock-minutes above which an adjustment is drawn as severe.
-[[nodiscard]] inline int screw_severe_adjustment_minutes(float pitch_mm = SCREW_PITCH_DEFAULT_MM) {
-    return screw_minutes_for_mm(SCREW_SEVERE_ADJUSTMENT_MM, pitch_mm);
-}
-
-/**
- * @brief Flip the leading CW↔CCW direction token in an adjustment string
- *
- * Rewrites `"CW 01:15"` → `"CCW 01:15"` and `"CCW 00:30"` → `"CW 00:30"`
- * in place. No-op if the string doesn't begin with a direction token (e.g.
- * already stripped, empty, or malformed). Used by the screws-tilt parser
- * to apply the printer-database `screws_tilt_direction` override.
- */
-inline void flip_screws_tilt_direction(std::string& adjustment) {
-    if (adjustment.rfind("CCW", 0) == 0) {
-        adjustment.replace(0, 3, "CW");
-    } else if (adjustment.rfind("CW", 0) == 0) {
-        adjustment.replace(0, 2, "CCW");
-    }
+[[nodiscard]] inline int screw_severe_adjustment_minutes(float pitch_mm = kScrewPitchDefaultMm) {
+    return screw_minutes_for_mm(kScrewSevereAdjustmentMm, pitch_mm);
 }
 
 /**
@@ -145,15 +129,13 @@ inline void flip_screws_tilt_direction(std::string& adjustment) {
 }
 
 /**
- * @brief Render a SIGNED turn as a full instruction ("Tighten 1/4 turn")
+ * @brief Render a turn as a full instruction ("Tighten 1/4 turn")
  *
- * CW (positive) tightens, CCW (negative) loosens, matching the convention in
- * signed_adjustment_minutes(). Direction words come from the caller's own sign,
- * so a printer-database direction override must already have been applied.
+ * @param tighten From the corner's height, never from Klipper's CW/CCW: see
+ *                ScrewTiltResult::needs_tightening().
  */
-[[nodiscard]] inline std::string describe_screw_turn(int signed_minutes) {
-    const std::string amount = describe_screw_turn_amount(std::abs(signed_minutes));
-    return (signed_minutes >= 0 ? "Tighten " : "Loosen ") + amount;
+[[nodiscard]] inline std::string describe_screw_turn(int total_minutes, bool tighten) {
+    return (tighten ? "Tighten " : "Loosen ") + describe_screw_turn_amount(std::abs(total_minutes));
 }
 
 /**
@@ -241,41 +223,54 @@ struct ScrewTiltResult {
     }
 
     /**
-     * @brief Get user-friendly adjustment description
+     * @brief Whether this screw is tightened (rather than loosened) to level the bed
      *
-     * Converts "CW 00:18" to "Tighten 1/4 turn", "CCW 01:30" to "Loosen 1 turn", etc.
-     * Mapping is CW→Tighten, CCW→Loosen. This assumes the adjustment string
-     * already reflects what the user should physically do — printer-specific
-     * corrections (e.g. Flashforge AD5M's inverted SCREWS_TILT output) are
-     * applied at parse time in screws_tilt_parser.cpp, not here.
+     * Tightening a bed screw compresses its spring and pulls that corner down, so a
+     * corner probing higher than the reference tightens and a lower one loosens.
+     * Klipper's CW/CCW cannot answer this: it says which way to turn the knob
+     * (CW decreases the nozzle gap), and whether that way tightens depends on
+     * where the knob sits.
+     */
+    [[nodiscard]] bool needs_tightening(float reference_z) const {
+        return z_height > reference_z;
+    }
+
+    /**
+     * @brief Get user-friendly adjustment description ("Tighten 1/4 turn")
      *
      * @param in_spec Whether this screw is inside the level window, as decided
      *                by evaluate_screw_level() — a per-screw magnitude test is
      *                not enough to answer that (see ScrewLevelReport::in_spec).
+     * @param reference_z The reference screw's probed height; without it the
+     *                    verb is unknowable and Klipper's raw string is shown.
      * @return Human-friendly adjustment string
      */
-    [[nodiscard]] std::string friendly_adjustment(bool in_spec) const {
+    [[nodiscard]] std::string friendly_adjustment(bool in_spec,
+                                                  std::optional<float> reference_z) const {
         if (is_reference) {
             return "Reference";
         }
         if (in_spec) {
             return "Level";
         }
-
-        bool is_clockwise = adjustment.find("CW") == 0 && adjustment.find("CCW") != 0;
-        bool is_counter = adjustment.find("CCW") == 0;
-        int total_minutes = adjustment_minutes();
-
-        const std::string amount = describe_screw_turn_amount(total_minutes);
-
-        if (is_clockwise) {
-            return "Tighten " + amount;
-        } else if (is_counter) {
-            return "Loosen " + amount;
+        if (!reference_z || !signed_adjustment_minutes()) {
+            return adjustment;
         }
-        return adjustment;
+        return describe_screw_turn(adjustment_minutes(), needs_tightening(*reference_z));
     }
 };
+
+/// The probed height every other screw is levelled against, or nullopt when no
+/// result is marked as Klipper's base.
+[[nodiscard]] inline std::optional<float>
+reference_screw_z(const std::vector<ScrewTiltResult>& results) {
+    for (const auto& r : results) {
+        if (r.is_reference) {
+            return r.z_height;
+        }
+    }
+    return std::nullopt;
+}
 
 /**
  * @brief Outcome of judging a full set of screw results
@@ -319,7 +314,7 @@ struct ScrewLevelReport {
  */
 [[nodiscard]] inline ScrewLevelReport
 evaluate_screw_level(const std::vector<ScrewTiltResult>& results,
-                     float pitch_mm = SCREW_PITCH_DEFAULT_MM) {
+                     float pitch_mm = kScrewPitchDefaultMm) {
     ScrewLevelReport report;
     report.tolerance_minutes = screw_level_tolerance_minutes(pitch_mm);
     report.in_spec.assign(results.size(), false);
@@ -400,11 +395,12 @@ struct ScrewRecenterHint {
     bool available = false; ///< False means Klipper's advice is already the cheap one
     size_t screw_index = 0; ///< Index into results: the ONE screw to move instead
     int signed_minutes = 0; ///< Its adjustment, CW positive, CCW negative
+    bool tighten = false;   ///< Moving it toward the others means tightening it
     size_t replaces = 0;    ///< How many screws Klipper's advice would have moved
 };
 
 /// One full turn in clock-minutes. Pitch-independent: the notation is turns:minutes.
-inline constexpr int SCREW_MINUTES_PER_TURN = 60;
+inline constexpr int kScrewMinutesPerTurn = 60;
 
 /**
  * @brief Suggest moving the reference screw instead of all the others
@@ -460,13 +456,17 @@ suggest_screw_recentering(const std::vector<ScrewTiltResult>& results,
     const int common = (sorted.size() % 2 == 1) ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 
     // Only worth interrupting the user for a turn they would actually notice.
-    if (std::abs(common) <= SCREW_MINUTES_PER_TURN) {
+    if (std::abs(common) <= kScrewMinutesPerTurn) {
         return hint;
     }
 
     hint.available = true;
     hint.screw_index = ref_index;
     hint.signed_minutes = -common; // move the datum the other way instead
+    // The others agree within tolerance, so any one of them stands for the plane
+    // the datum has to meet.
+    const size_t other_index = ref_index == 0 ? 1 : 0;
+    hint.tighten = !results[other_index].needs_tightening(results[ref_index].z_height);
     hint.replaces = others.size();
     return hint;
 }

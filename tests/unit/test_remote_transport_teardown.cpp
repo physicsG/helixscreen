@@ -18,9 +18,12 @@
 
 namespace {
 
-/// Parallel shards run concurrently, so each process needs its own names.
+/// Parallel shards run concurrently, so each process needs its own names. The
+/// port band sits below the kernel's ephemeral range (32768+), where any outgoing
+/// connection on the host can already hold a port, and apart from
+/// test_remote_http_transport_gate.cpp's band.
 int test_port() {
-    return 30000 + static_cast<int>(getpid() % 10000);
+    return 25000 + static_cast<int>(getpid() % 5000);
 }
 
 std::string test_socket_path() {

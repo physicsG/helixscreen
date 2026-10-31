@@ -39,20 +39,41 @@ SUITE_TIMEOUT ?= 3600
 TIMEOUT_KILL_AFTER ?= 30
 timeout_run = $(if $(TIMEOUT_CMD),$(TIMEOUT_CMD) -k $(TIMEOUT_KILL_AFTER) $(1))
 
+# helix-tests warns at startup when the sources changed since its link
+# (tests/test_helpers/stale_binary_check.h). A run make starts follows the build
+# that just brought the binary up to date, so the check would only cost a git
+# scan per shard; a run typed at the shell keeps it.
+export HELIX_TESTS_NO_STALE_CHECK ?= 1
+
+# Where the helix-tests stale-binary stamp and the list of files it covers live.
+TEST_STAMP_DIR = $(OBJ_DIR)
+TEST_STAMP_BASE = $(TEST_STAMP_DIR)/$(notdir $(TEST_BIN))
+
 # Where per-shard logs land. Kept (not deleted) whenever a shard fails, crashes,
 # or times out, so there is something to read afterwards — see diagnose_shards.
 # Override to collect artifacts elsewhere, e.g. SHARD_ARTIFACT_ROOT=$(PWD)/build
 # in CI so the logs are inside the workspace and get uploaded.
 SHARD_ARTIFACT_ROOT ?= /tmp
 
-# How many times diagnose_shards re-runs a suspect shard sequentially.
+# How many times diagnose_shards re-runs a suspect shard in each triage stage
+# (scripts/triage_shard.sh; TRIAGE_BUDGET caps the total time).
 #
 # Must be >1: a single re-run cannot tell a real fault from an intermittent one
-# in either direction. A ~10% crash passes one retry ~90% of the time and used
-# to be reported as a confirmed FLAKE; conversely one reproduction was reported
-# as "a real fault, not a flake" on a single sample. Repeating turns the verdict
-# into an observed rate. Raise it when chasing something rare.
+# in either direction. A ~10% crash passes one retry ~90% of the time, and one
+# reproduction is a single sample. Repeating turns the verdict into an observed
+# rate. Raise it when chasing something rare.
 SHARD_RETRIES ?= 3
+
+# Seconds diagnose_shards spends triaging every failed shard of one sweep
+# together. A broken header fails most shards at once, and triaging each in
+# turn would take an hour; past this the remaining shards are still named and
+# listed, but not re-run.
+TRIAGE_TOTAL_BUDGET ?= 900
+
+# 1 fails a shard that exits on a signal after all its assertions passed (a
+# crash in teardown or at exit). CI fails it, since its step checks only the
+# exit status, so land-gate sets this; the dev-loop sweep warns and triages it.
+SHARD_CRASH_FAILS ?= 0
 
 # Shard count for the [slow] tier in test-all and test-slow. Deliberately far
 # below NPROCS: most [slow] cases wait on wall-clock deadlines, and a busy box
@@ -82,13 +103,16 @@ SHARD_CONCURRENCY ?= $(eval SHARD_CONCURRENCY := $(shell echo $$(($(JOBS_CLAIMED
 # Each shard is wrapped in a timeout to prevent infinite hangs
 # Each shard log starts with a host/nproc/git/ts header so flakes (e.g. #1121)
 # are attributable to a shard/host instead of re-litigated each run.
+# Each shard also records the case it is in to <shard>.progress, which
+# triage_shard.sh reads to say where a killed shard was.
 # Output is prefixed with [shard N] for clarity
 define run_tests_parallel
 	echo "$(CYAN)Running $(or $(2),$(NPROCS)) test shards, at most $(SHARD_CONCURRENCY) at once (timeout=$(SHARD_TIMEOUT)s)...$(RESET)"; \
+	mkdir -p "$(SHARD_ARTIFACT_ROOT)"; \
 	shard_dir=$$(mktemp -d "$(SHARD_ARTIFACT_ROOT)/helix-shards-XXXXXX"); \
 	export shard_dir; \
 	run_shard() { \
-		(echo "=== shard $$1/$(or $(2),$(NPROCS)) host=$$(hostname) nproc=$$(nproc 2>/dev/null || echo '?') git=$$(git rev-parse --short HEAD 2>/dev/null || echo unknown) ts=$$(date -Iseconds) order=$(or $(3),decl seed=0)"; $(call timeout_run,$(SHARD_TIMEOUT)) $(TEST_BIN) $(1) $(3) --shard-count $(or $(2),$(NPROCS)) --shard-index $$1 2>&1; echo $$? > "$$shard_dir/$$1.exit") | \
+		(echo "=== shard $$1/$(or $(2),$(NPROCS)) host=$$(hostname) nproc=$$(nproc 2>/dev/null || echo '?') git=$$(git rev-parse --short HEAD 2>/dev/null || echo unknown) ts=$$(date -Iseconds) order=$(or $(3),decl seed=0)"; HELIX_TEST_PROGRESS_FILE="$$shard_dir/$$1.progress" $(call timeout_run,$(SHARD_TIMEOUT)) $(TEST_BIN) $(1) $(3) --shard-count $(or $(2),$(NPROCS)) --shard-index $$1 2>&1; echo $$? > "$$shard_dir/$$1.exit") | \
 			tee "$$shard_dir/$$1.log" | sed "s/^/[shard $$1] /"; \
 	}; \
 	run_batch() { for s in "$$@"; do run_shard "$$s" & done; wait; }; \
@@ -129,7 +153,12 @@ define run_tests_parallel
 					failed=1; suspect="$$suspect $$i"; \
 				elif [ "$$ec" -gt 128 ] 2>/dev/null; then \
 					sig=$$((ec - 128)); \
-					echo "$(YELLOW)⚠ Shard $$i crashed after its assertions passed (signal $$sig)$(RESET)"; \
+					if [ "$(SHARD_CRASH_FAILS)" = 1 ]; then \
+						echo "$(RED)$(BOLD)✗ Shard $$i crashed after its assertions passed (signal $$sig)$(RESET)"; \
+						failed=1; \
+					else \
+						echo "$(YELLOW)⚠ Shard $$i crashed after its assertions passed (signal $$sig)$(RESET)"; \
+					fi; \
 					suspect="$$suspect $$i"; \
 				else \
 					echo "$(RED)$(BOLD)✗ Shard $$i failed (exit $$ec)$(RESET)"; \
@@ -151,16 +180,16 @@ endef
 
 # Post-mortem for shards that failed, crashed, or timed out.
 #
-# Exists because the harness used to delete its scratch dir unconditionally: a
-# shard could abort *after* every assertion passed and leave nothing to read,
-# so "is this my diff or a flake?" cost a manual re-run cycle every time. Now
-# the evidence survives and the question is answered inline.
-#
-# For each suspect shard: keep its log, name the tests it ran, and re-run it
-# alone. A shard that is green in isolation but red under a full parallel run
-# is a load/timing flake, not a fault in the diff under review — and adding or
-# removing ANY test reshuffles Catch2's shard composition, so the shard number
-# moving between runs is not evidence either.
+# The scratch dir survives any failure, so the evidence is there to read. For
+# each suspect shard scripts/triage_shard.sh names the failing case(s) and
+# re-runs them alone, alone on one pinned CPU, as the same shard again, and as
+# the same shard pinned, then prints one verdict: fails alone, fails only
+# pinned (timing), fails only in shard composition (order dependence or leaked
+# state, with the exact repro command), or did not reproduce. An idle re-run
+# with free cores is the one condition a timing flake never fails under, which
+# is what the pinned runs are for. Adding or removing ANY test reshuffles
+# Catch2's shard composition, so the shard number moving between runs is not
+# evidence either way.
 #
 # Args: $(1) = shard dir, $(2) = space-separated shard indices, $(3) = filter,
 #       $(4) = the shard count the run used, $(5) = its Catch2 order flags
@@ -168,49 +197,12 @@ define diagnose_shards
 	echo ""; \
 	echo "$(CYAN)$(BOLD)── shard diagnostics ──$(RESET)"; \
 	echo "$(CYAN)logs preserved: $(1)$(RESET)"; \
+	triage_deadline=$$(( $$(date +%s) + $(TRIAGE_TOTAL_BUDGET) )); \
 	for s in $(2); do \
 		echo ""; \
 		echo "$(BOLD)shard $$s$(RESET)"; \
-		$(TEST_BIN) $(3) $(5) --shard-count $(4) --shard-index $$s --list-tests --reporter xml 2>/dev/null \
-			| python3 scripts/catch2_shard_tests.py > "$(1)/$$s.tests" 2>/dev/null || true; \
-		n=$$(wc -l < "$(1)/$$s.tests" 2>/dev/null | tr -d ' '); \
-		echo "  ran $${n:-?} test case(s) → $(1)/$$s.tests ($(TEST_BIN) --input-file replays it)"; \
-		fails=$$(grep -oE '^[A-Za-z0-9_/.-]+\.cpp:[0-9]+: FAILED' "$(1)/$$s.log" 2>/dev/null \
-			| sed 's/: FAILED$$//' | sort -u | tr '\n' ' '); \
-		if [ -n "$$fails" ]; then \
-			echo "  failing assertion(s): $$fails"; \
-		else \
-			echo "  no FAILED marker — died after its assertions passed (teardown/static dtor)"; \
-		fi; \
-		printf '  reproduce: %s %s %s--shard-count %s --shard-index %s\n' \
-			"$(TEST_BIN)" '$(3)' "$(if $(5),$(5) )" "$(4)" "$$s"; \
-		echo "  $(CYAN)re-running this shard sequentially x$(SHARD_RETRIES)…$(RESET)"; \
-		hits=0; last_rc=0; \
-		for attempt in $$(seq 1 $(SHARD_RETRIES)); do \
-			if $(call timeout_run,$(SHARD_TIMEOUT)) $(TEST_BIN) $(3) $(5) \
-					--shard-count $(4) --shard-index $$s > "$(1)/$$s.retry.log" 2>&1; then \
-				: ; \
-			else \
-				last_rc=$$?; hits=$$((hits+1)); \
-				cp -f "$(1)/$$s.retry.log" "$(1)/$$s.repro.log" 2>/dev/null || true; \
-			fi; \
-		done; \
-		if [ $$hits -eq 0 ]; then \
-			echo "  $(YELLOW)→ did not reproduce in $(SHARD_RETRIES) sequential re-runs$(RESET)"; \
-			echo "     Consistent with a load/timing flake under parallel shards, but an"; \
-			echo "     intermittent fault can also pass $(SHARD_RETRIES) times — this does not"; \
-			echo "     prove the diff is clean. Raise SHARD_RETRIES to sample harder."; \
-			echo "     (shard composition shifts whenever tests are added or removed)"; \
-		else \
-			echo "  $(RED)$(BOLD)→ reproduced $$hits/$(SHARD_RETRIES) sequential re-runs (last exit $$last_rc)$(RESET)"; \
-			echo "     Sequential means no sibling shards ran concurrently. The shard still"; \
-			echo "     ran ALL $${n:-?} of its test cases in one process, so this does NOT"; \
-			echo "     isolate the named test — a leak from an earlier test in the same"; \
-			echo "     shard lands on whichever test runs next. Confirm by running the"; \
-			echo "     named test on its own before blaming it."; \
-			echo "     repro log: $(1)/$$s.repro.log"; \
-			tail -25 "$(1)/$$s.repro.log" | sed 's/^/     | /'; \
-		fi; \
+		TRIAGE_RETRIES=$(SHARD_RETRIES) TRIAGE_TIMEOUT=$(SHARD_TIMEOUT) TRIAGE_DEADLINE=$$triage_deadline \
+			scripts/triage_shard.sh "$(TEST_BIN)" "$(1)" "$$s" "$(4)" $(3) $(5); \
 	done; \
 	echo ""
 endef
@@ -298,82 +290,30 @@ DNS_RESOLV_OBJ := $(OBJ_DIR)/tests/dns_resolv.o
 # AUTOMATIC APP OBJECT DISCOVERY
 # ============================================================================
 # Include ALL application objects except those that conflict with tests.
-# This replaces ~150 lines of manual object listings that needed constant updates.
+# A test double for a filtered object may be inert, or the object may be
+# linked; it may not be a copy of the logic (tests/CLAUDE.md).
 #
 # Exclusions (add files here ONLY if they cause linker conflicts):
 #
-# Group 1: App entry point and globals
+# Group 1: App entry point
 # - main.o: Has main() function, tests have their own entry point
-# - app_globals.o: Contains global subjects/state, ui_test_utils.o provides stubs
 #
-# Group 2: Files where ui_test_utils.o provides stub implementations
-# - ui_notification.o: Needs get_notification_subject() from app_globals.o
-# - ui_toast.o, ui_toast_manager.o: ui_test_utils.o provides stub toast functions
-# - ui_notification_manager.o: ui_test_utils.o stubs notification functions
-# ui_text_input.o WAS here too, stubbed by a hand-written copy in ui_test_utils.cpp
-# that registered its own <text_input> widget. Same drift as ui_emergency_stop.o:
-# the copy never grew bind_text two-way binding, the multiline pre-scan,
-# show_clear_button/clear_callback or KeyboardManager::register_textarea(), so every
-# <text_input> in the 31 ui_xml files that use one was exercised as the fake. The real
-# object is linked now and registers itself through the shipped ui_text_input_init().
-#
-# ui_emergency_stop.o WAS here, stubbed by a hand-written copy in
-# ui_test_utils.cpp. That copy silently drifted from production — it kept
-# mutating recovery state inline after show_recovery_for() was changed to
-# marshal to the main thread — so the "unified recovery dialog" tests were
-# asserting against the duplicate rather than the shipped code. The real object
-# is linked now and the copy is gone.
-#
-# Group 3: Test-specific conflicts
+# Group 2: Test-specific conflicts
 # - ui_switch.o: test_ui_switch.cpp includes the .cpp directly for unit testing
 # - ui_button.o: test_ui_button_defer_reuse.cpp includes the .cpp directly to
 #   reach anonymous-namespace internals (defer_button_contrast_update, #924)
 #
-# Group 4: remote_client.o — undocumented, and no conflict was found
+# Group 3: remote_client.o — undocumented, and no conflict was found
 #   `nm -g --defined-only` over remote_client.o intersected against every object
 #   under $(OBJ_DIR)/tests/ yields the empty set, and nothing in the test link
 #   references it, so it is inert either way. Left excluded only because nothing
 #   needs it; it is NOT load-bearing. Drop it from this list the moment a test
 #   wants helix::RemoteClient.
 #
-# NOT excluded any more — application.o and its four link-time dependencies.
-#   These were listed here with no rationale, which left Application (app
-#   lifecycle, shutdown, teardown, printer-state init — four of the five
-#   "Critical Paths" in CLAUDE.md) structurally untestable: nothing in the test
-#   binary could even name it. The stated rule for this list is "ONLY if they
-#   cause linker conflicts", so the claim was checked symbol by symbol:
-#
-#     object                    strong symbols also defined by a test object
-#     ------------------------  -------------------------------------------
-#     application.o             helix_notify_app_backgrounded/_foregrounded
-#     moonraker_manager.o       MoonrakerManager::connect, ::macro_analysis
-#     subject_initializer.o     (none)
-#     panel_factory.o           (none)
-#     remote_control_server.o   (none)
-#
-#   Four real duplicates, all of them test-side stubs standing in for the
-#   production code that is now linked, so all four stubs were deleted
-#   (tests/test_fixtures.cpp, tests/ui_test_utils.cpp). The other three objects
-#   had no conflict at all — they are here because application.o references
-#   SubjectInitializer, PanelFactory and RemoteControlServer and the link needs
-#   their definitions.
-#
-#   Un-excluding them leaves 8 symbols that application.o pulls in from objects
-#   still on this list (app_globals.o, ui_notification.o); ui_test_utils.cpp now
-#   stubs those alongside its existing app_globals stubs.
-#
-#   lvgl_initializer.o was also removed: no such source or object has ever
-#   existed in the tree, so the entry filtered nothing.
-#
 # Everything else is automatically included - new files just work!
 
 TEST_APP_OBJS := $(filter-out \
     $(OBJ_DIR)/main.o \
-    $(OBJ_DIR)/app_globals.o \
-    $(OBJ_DIR)/ui/ui_notification.o \
-    $(OBJ_DIR)/ui/ui_toast.o \
-    $(OBJ_DIR)/ui/ui_toast_manager.o \
-    $(OBJ_DIR)/ui/ui_notification_manager.o \
     $(OBJ_DIR)/ui/ui_switch.o \
     $(OBJ_DIR)/ui/ui_button.o \
     $(OBJ_DIR)/remote/remote_client.o \
@@ -479,7 +419,7 @@ test: test-build
 # the reflex this target exists to replace, so a typo must not reach it. The
 # guard is a parse-time conditional so a bare `make t` fails without first
 # building a binary it has no filter to run.
-.PHONY: t unit-sweep full-test-run test-run
+.PHONY: t unit-sweep full-test-run land-gate test-run
 ifeq ($(strip $(F)),)
 t:
 	@echo "$(YELLOW)make t needs a filter.$(RESET)"; \
@@ -519,6 +459,18 @@ unit-sweep: test-build
 full-test-run:
 	$(Q)TEST_HOST="$(TEST_HOST)" MAKE="$(MAKE)" scripts/full-test-run.sh
 
+# land-gate: the pre-landing gate - what CI will judge the branch on, run before
+# it reaches main. The C++ suite once, in CI's shard layout only (CI_SHARDS,
+# build.yml's 8 shards across its two test legs: which tests share a process
+# decides what a use-after-free corrupts), bats, CI's tests/ui slice
+# and the moonraker plugin tests, and the generated-artefact freshness checks.
+# The C++ lane goes to the test host as full-test-run's does (TEST_HOST); the
+# rest run here in parallel. Prints a PASS/FAIL table; scripts/land-gate.sh.
+CI_SHARDS ?= 8
+
+land-gate:
+	$(Q)TEST_HOST="$(TEST_HOST)" CI_SHARDS="$(CI_SHARDS)" MAKE="$(MAKE)" scripts/land-gate.sh
+
 # ----------------------------------------------------------------------------
 # test-run: a signpost that refuses
 # ----------------------------------------------------------------------------
@@ -547,6 +499,9 @@ test-run:
 	echo "      make full-test-run     unit sweep + bats shell suite, ~2m"; \
 	echo "         25s idle, minutes on a loaded box, and only worth asking once"; \
 	echo "         the feature is finished."; \
+	echo ""; \
+	echo "  $(CYAN)May this land on main - will CI go green?$(RESET)"; \
+	echo "      make land-gate         C++ in CI's shard layout + bats + tests/ui + freshness, ~10m"; \
 	echo ""; \
 	echo "A full run cannot tell you your feature works, only that something else broke."; \
 	echo "Cadence table: tests/CLAUDE.md, 'What to run when'."; \
@@ -656,22 +611,27 @@ test-kiauh:
 # scripts/parallel-jobs-file.sh as its parallel, which hands GNU parallel the
 # file instead; parallel re-reads it as the suite runs. With no file, one
 # slot runs serially and more run at the fixed count.
+# BATS_REQUIRED=1 turns a missing bats into a failure instead of a skip, for a
+# gate that must not report a suite it never ran; BATS_BIN names the bats to run.
+BATS_BIN ?= bats
+BATS_REQUIRED ?=
+
 test-shell:
 	$(ECHO) "$(CYAN)$(BOLD)Running shell tests (bats)...$(RESET)"
-	@if command -v bats >/dev/null 2>&1; then \
+	@if command -v "$(BATS_BIN)" >/dev/null 2>&1; then \
 		START_TIME=$$(date +%s); \
 		if command -v parallel >/dev/null 2>&1; then \
 			jobs_dir=$$(mktemp -d); \
-			HELIX_JOBS_FILE=$$jobs_dir/slots scripts/helix-claim hold --grow "$$jobs_dir/slots" -- \
+			BATS_BIN="$(BATS_BIN)" HELIX_JOBS_FILE=$$jobs_dir/slots scripts/helix-claim hold --grow "$$jobs_dir/slots" -- \
 				sh -c 'if [ -f "$$HELIX_JOBS_FILE" ]; then \
-					exec bats --jobs 2 --parallel-binary-name "$$PWD/scripts/parallel-jobs-file.sh" \
+					exec "$$BATS_BIN" --jobs 2 --parallel-binary-name "$$PWD/scripts/parallel-jobs-file.sh" \
 						--no-parallelize-within-files "$$@"; fi; \
-				[ "$$JOBPOOL_SLOTS" -gt 1 ] || exec bats "$$@"; \
-				exec bats --jobs "$$JOBPOOL_SLOTS" --no-parallelize-within-files "$$@"' bats tests/shell/; \
+				[ "$$JOBPOOL_SLOTS" -gt 1 ] || exec "$$BATS_BIN" "$$@"; \
+				exec "$$BATS_BIN" --jobs "$$JOBPOOL_SLOTS" --no-parallelize-within-files "$$@"' bats tests/shell/; \
 			STATUS=$$?; \
 			rm -f "$$jobs_dir"/*; rmdir "$$jobs_dir"; \
 		else \
-			bats tests/shell/; \
+			"$(BATS_BIN)" tests/shell/; \
 			STATUS=$$?; \
 		fi; \
 		END_TIME=$$(date +%s); \
@@ -681,6 +641,10 @@ test-shell:
 			exit $$STATUS; \
 		fi; \
 		echo "$(GREEN)$(BOLD)✓ Shell tests passed in $${DURATION}s$(RESET)"; \
+	elif [ "$(BATS_REQUIRED)" = 1 ]; then \
+		echo "$(RED)$(BOLD)✗ $(BATS_BIN) not found, and BATS_REQUIRED=1: a gate cannot pass a suite it never ran$(RESET)"; \
+		echo "  Install with: brew install bats-core (macOS) or apt install bats (Linux)"; \
+		exit 1; \
 	else \
 		echo "$(YELLOW)⚠ bats not found - skipping shell tests$(RESET)"; \
 		echo "  Install with: brew install bats-core (macOS) or apt install bats (Linux)"; \
@@ -774,6 +738,28 @@ test-ui-pytest:
 	$(VENV_PYTHON) -m pytest tests/ui/ -v; \
 	$(call report_test_result,Out-of-process UI tests)
 
+# CI's slice of the same suite, exactly as .github/workflows/build.yml's
+# "Run out-of-process UI tests" step runs it: no goldens (machine-sensitive
+# pixels) and no [slow] screen sweeps (nightly). tests/shell/test_land_gate.bats
+# fails when the two invocations drift apart. Headless, so no window or sound
+# reaches the desktop; one pool slot, since the cases boot one app at a time.
+UI_CI_PYTEST_ARGS := tests/ui/ -v --ignore=tests/ui/test_screens.py -m "not slow"
+
+test-ui-ci:
+	$(ECHO) "$(CYAN)$(BOLD)Running out-of-process UI tests, CI's slice (pytest $(UI_CI_PYTEST_ARGS))...$(RESET)"
+	@if [ ! -x "$(VENV_PYTHON)" ]; then \
+		echo "$(RED)$(BOLD)✗ Python venv not found — run 'make venv-setup' first$(RESET)"; \
+		exit 1; \
+	fi
+	@if [ ! -x "$(BIN_DIR)/helix-screen" ]; then \
+		echo "$(RED)$(BOLD)✗ $(BIN_DIR)/helix-screen not built — run 'make' first$(RESET)"; \
+		exit 1; \
+	fi
+	@START_TIME=$$(date +%s); \
+	HELIX_HEADLESS=1 SDL_VIDEODRIVER=dummy scripts/helix-claim hold -n 1 -- \
+		$(VENV_PYTHON) -m pytest $(UI_CI_PYTEST_ARGS); \
+	$(call report_test_result,Out-of-process UI tests (CI slice))
+
 # ============================================================================
 # Moonraker Plugin Tests (pytest, moonraker-plugin/tests/)
 # ============================================================================
@@ -790,6 +776,18 @@ test-plugin:
 	@START_TIME=$$(date +%s); \
 	$(VENV_PYTHON) -m pytest moonraker-plugin/tests/ -v; \
 	$(call report_test_result,Moonraker plugin tests)
+
+# The script-side tooling's pytest suite, as quality.yml's "Run Python script
+# tests" step runs it.
+test-python:
+	$(ECHO) "$(CYAN)$(BOLD)Running Python script tests (pytest, tests/python/)...$(RESET)"
+	@if [ ! -x "$(VENV_PYTHON)" ]; then \
+		echo "$(RED)$(BOLD)✗ Python venv not found — run 'make venv-setup' first$(RESET)"; \
+		exit 1; \
+	fi
+	@START_TIME=$$(date +%s); \
+	$(VENV_PYTHON) -m pytest tests/python/ -v --tb=short; \
+	$(call report_test_result,Python script tests)
 
 # ============================================================================
 # Convenience Test Targets - Run tests by component
@@ -926,32 +924,53 @@ else
 # whose archive predates the current libhv patches links it silently. Both are
 # filtered out of the command line — the archive is already in LDFLAGS, and
 # repeating it changes link order.
-$(TEST_BIN): $(TEST_CORE_DEPS) \
-             $(TEST_LVGL_DEPS) \
-             $(TEST_APP_OBJS) \
-             $(TEST_TOOL_OBJS) \
-             $(DNS_RESOLV_OBJ) \
-             $(MOCK_OBJS) \
-             $(LV_MARKDOWN_OBJS) \
-             $(QUIRC_OBJS) \
-             $(LUA_OBJS) \
-             $(FONT_OBJS) \
-             $(TRANS_OBJS) \
-             $(OBJCPP_OBJS) \
-             $(LIBHV_LIB) \
-             $(LIBHV_JSON_HEADER) \
-             $(TEST_PLATFORM_DEPS)
+TEST_LINK_INPUTS = $(TEST_CORE_DEPS) $(TEST_LVGL_DEPS) $(TEST_APP_OBJS) $(TEST_TOOL_OBJS) \
+                   $(DNS_RESOLV_OBJ) $(MOCK_OBJS) $(LV_MARKDOWN_OBJS) $(QUIRC_OBJS) \
+                   $(LUA_OBJS) $(FONT_OBJS) $(OBJCPP_OBJS) \
+                   $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(TEST_PLATFORM_DEPS)
+
+# The source tree this build compiles, measured once as this make starts and
+# before anything compiles, so an edit saved mid-build is not recorded as
+# built. Only the files the link is built from count (the objects' .d files,
+# scripts/test_link_sources.py): an app-only source such as src/main.cpp is
+# not in the binary, and a stamp covering it would warn that `make test`
+# cannot fix. The link compiles it in (tests/test_helpers/stale_binary_check.h).
+ifneq ($(filter $(TEST_BIN),$(MAKECMDGOALS)),)
+TEST_STAMP_MKDIR := $(shell mkdir -p $(TEST_STAMP_DIR))
+$(file >$(TEST_STAMP_BASE).stamp-objs,$(filter %.o,$(TEST_LINK_INPUTS)))
+TEST_TREE_STAMP_AT_START := $(shell python3 scripts/test_link_sources.py $(OBJ_DIR) \
+    < $(TEST_STAMP_BASE).stamp-objs > $(TEST_STAMP_BASE).stamp-paths.next 2>/dev/null && \
+    scripts/tree_stamp.sh --paths $(TEST_STAMP_BASE).stamp-paths.next 2>/dev/null)
+endif
+
+$(TEST_BIN): $(TEST_LINK_INPUTS)
 	$(call check_abi_unchanged)
 	$(Q)mkdir -p $(BIN_DIR)
 	$(ECHO) "$(MAGENTA)$(BOLD)[LD]$(RESET) helix-tests"
 	@# The object list goes through a response file: inline, the recipe line
 	@# exceeds Linux's 128 KB per-argument limit once object paths grow (the
 	@# ASAN build's do), and bash refuses it with "Argument list too long".
-	$(file >$(OBJ_DIR)/$(notdir $@).objs,$(filter-out %.a %.h %.hh %.hpp %.hxx,$(sort $^)))
+	$(file >$(OBJ_DIR)/$(notdir $@).objs,$(filter-out %.a %.h %.hh %.hpp %.hxx,$(sort $^)) $(TEST_STAMP_BASE).tree-stamp.o)
+	@# Compile in the stamp taken as this make started, and the list of files it
+	@# covers, which the binary re-measures at startup. A list that is not a
+	@# prerequisite never forces a relink by itself.
+	$(Q)stamp='$(TEST_TREE_STAMP_AT_START)'; \
+	cp -f $(TEST_STAMP_BASE).stamp-paths.next $(TEST_STAMP_BASE).stamp-paths 2>/dev/null || stamp=unknown; \
+	printf 'const char helix_build_tree_stamp[] = "%s";\nconst char helix_build_tree_stamp_paths[] = "%s";\n' \
+		"$${stamp:-unknown}" "$(TEST_STAMP_BASE).stamp-paths" > $(TEST_STAMP_BASE).tree-stamp.c && \
+	$(CC) $(CFLAGS) -c $(TEST_STAMP_BASE).tree-stamp.c -o $(TEST_STAMP_BASE).tree-stamp.o
 	$(Q)$(CXX) $(CXXFLAGS) @$(OBJ_DIR)/$(notdir $@).objs -o $@ $(LDFLAGS) || { \
 		echo "$(RED)$(BOLD)✗ Test linking failed!$(RESET)"; \
 		exit 1; \
 	}
+	@# A source saved while this make compiled may or may not be in the binary.
+	@# Its stamp names the tree as the build started, so the binary warns; dating
+	@# the binary back makes the next `make test` relink and re-stamp it.
+	$(Q)now=$$(scripts/tree_stamp.sh --paths $(TEST_STAMP_BASE).stamp-paths 2>/dev/null); \
+	if [ -n '$(TEST_TREE_STAMP_AT_START)' ] && [ "$$now" != '$(TEST_TREE_STAMP_AT_START)' ]; then \
+		touch -t 200001010000 $@; \
+		echo "$(YELLOW)⚠ sources changed during the build: the next make test relinks helix-tests$(RESET)"; \
+	fi
 	$(ECHO) "$(GREEN)✓ Unit test binary ready$(RESET)"
 endif
 
@@ -961,19 +980,28 @@ endif
 .PHONY: FORCE
 FORCE:
 
+# The compiler and flags of each tests/ object rule, without -c and -o; $(1)
+# takes what the recipe adds and its .ccj leaves out. mk/rules.mk explains the
+# shape, and print-compile-command (Makefile) prints these for a tests/ source.
+TEST_COMPILE = $(CXX) $(CXXFLAGS) $(1) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF)
+TEST_APP_COMPILE = $(CXX) $(CXXFLAGS) $(1) $(FORCED_INCLUDE) -I$(TEST_DIR) -I$(TEST_UNIT_DIR)/application $(INCLUDES) $(LV_CONF)
+TEST_MOCK_COMPILE = $(CXX) $(CXXFLAGS) $(1) $(FORCED_INCLUDE) -I$(TEST_MOCK_DIR) $(INCLUDES) $(LV_CONF)
+TEST_MAIN_COMPILE = $(CXX) $(CXXFLAGS) $(1) -I$(TEST_DIR)
+CATCH2_COMPILE = $(CXX) $(CXXFLAGS) $(1)
+
 # Compile test main (Catch2 runner)
 # Note: No DEPFLAGS for Catch2 infrastructure - rarely changes
-$(TEST_MAIN_OBJ): $(TEST_DIR)/test_main.cpp $(ABI_STAMP)
+$(TEST_MAIN_OBJ): $(TEST_DIR)/test_main.cpp $(TEST_DIR)/test_helpers/stale_binary_check.h $(ABI_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[TEST-MAIN]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) -I$(TEST_DIR) -c $< -o $@
+	$(Q)$(call TEST_MAIN_COMPILE) -c $< -o $@
 
 # Compile Catch2 amalgamated source
 # Note: No DEPFLAGS - this is third-party code that never changes
 $(CATCH2_OBJ): $(TEST_DIR)/catch_amalgamated.cpp
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[CATCH2]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(Q)$(call CATCH2_COMPILE) -c $< -o $@
 
 # Test compile rules depend on libhv-generated headers ($(LIBHV_JSON_HEADER))
 # and the LVGL patch stamp so a fresh `make test-asan` / `make test-tsan` (without a prior
@@ -984,32 +1012,32 @@ $(CATCH2_OBJ): $(TEST_DIR)/catch_amalgamated.cpp
 $(UI_TEST_UTILS_OBJ): $(TEST_DIR)/ui_test_utils.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[UI-TEST]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_COMPILE,$(TEST_WARN_FLAGS) $(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_COMPILE),$<,$@)
 
 # Compile LVGL test fixture (shared base class for UI tests)
 # Uses DEPFLAGS to track header dependencies
 $(LVGL_TEST_FIXTURE_OBJ): $(TEST_DIR)/lvgl_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[LVGL-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_COMPILE,$(TEST_WARN_FLAGS) $(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_COMPILE),$<,$@)
 
 # Compile HelixScreen test fixture (base class that resets process singletons)
 # Uses DEPFLAGS to track header dependencies
 $(HELIX_TEST_FIXTURE_OBJ): $(TEST_DIR)/helix_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[HELIX-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_COMPILE,$(TEST_WARN_FLAGS) $(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_COMPILE),$<,$@)
 
 # Compile test fixtures (reusable fixtures with mock initialization helpers)
 # Uses DEPFLAGS to track header dependencies
 $(TEST_FIXTURES_OBJ): $(TEST_DIR)/test_fixtures.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[TEST-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_COMPILE,$(TEST_WARN_FLAGS) $(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_COMPILE),$<,$@)
 
 # Compile LVGL UI test fixture (full UI integration test fixture)
 # Uses DEPFLAGS to track header dependencies
@@ -1017,8 +1045,8 @@ $(TEST_FIXTURES_OBJ): $(TEST_DIR)/test_fixtures.cpp $(LIBHV_LIB) $(LIBHV_JSON_HE
 $(LVGL_UI_TEST_FIXTURE_OBJ): $(TEST_DIR)/lvgl_ui_test_fixture.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(CYAN)[UI-FIXTURE]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_COMPILE,$(TEST_WARN_FLAGS) $(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_COMPILE),$<,$@)
 
 # Warnings promoted to errors for TEST code only.
 #
@@ -1040,16 +1068,16 @@ TEST_WARN_FLAGS := -Werror=type-limits
 $(OBJ_DIR)/tests/%.o: $(TEST_UNIT_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[TEST]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_COMPILE,$(TEST_WARN_FLAGS) $(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_COMPILE),$<,$@)
 
 # Compile application subdirectory test sources
 # Emits .ccj fragment for incremental compile_commands.json generation
 $(OBJ_DIR)/tests/application/%.o: $(TEST_UNIT_DIR)/application/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(BLUE)[TEST-APP]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(TEST_WARN_FLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) -I$(TEST_UNIT_DIR)/application $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_DIR) -I$(TEST_UNIT_DIR)/application $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_APP_COMPILE,$(TEST_WARN_FLAGS) $(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_APP_COMPILE),$<,$@)
 
 # Compile libhv dns_resolv.c for test_dns_resolver
 # rules.mk makes dns_resolv.c depend on PATCHES_STAMP, which creates it.
@@ -1067,8 +1095,8 @@ $(DNS_RESOLV_OBJ): $(LIBHV_DIR)/base/dns_resolv.c $(LIBHV_LIB)
 $(OBJ_DIR)/tests/mocks/%.o: $(TEST_MOCK_DIR)/%.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(YELLOW)[MOCK]$(RESET) $<"
-	$(Q)$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(FORCED_INCLUDE) -I$(TEST_MOCK_DIR) $(INCLUDES) $(LV_CONF) -c $< -o $@
-	$(call emit-compile-command,$(CXX),$(CXXFLAGS) $(FORCED_INCLUDE) -I$(TEST_MOCK_DIR) $(INCLUDES) $(LV_CONF),$<,$@)
+	$(Q)$(call TEST_MOCK_COMPILE,$(DEPFLAGS)) -c $< -o $@
+	$(call emit-compile-command,$(call TEST_MOCK_COMPILE),$<,$@)
 
 # ============================================================================
 # Sanitizer Targets (Memory Safety Testing)
@@ -1210,7 +1238,10 @@ TEST_TSAN_BIN := $(BIN_DIR)/helix-tests-tsan
 # attaches to those targets too. `override` is what makes it survive there: the
 # same invocation passes CXXFLAGS on the command line, and a command-line
 # variable discards every makefile assignment to it without the keyword.
-$(TEST_BIN): override CXXFLAGS += -DHELIX_HAS_ACE=1 -DHELIX_HAS_QIDI=1 -DHELIX_HAS_SNAPMAKER=1
+# print-compile-command (Makefile) adds TEST_BIN_CXXFLAGS to every tests/ source
+# itself: it runs outside this target, where the inheritance does not reach.
+TEST_BIN_CXXFLAGS := -DHELIX_HAS_ACE=1 -DHELIX_HAS_QIDI=1 -DHELIX_HAS_SNAPMAKER=1
+$(TEST_BIN): override CXXFLAGS += $(TEST_BIN_CXXFLAGS)
 
 # Run a sanitizer binary in Catch2 shards, $(3) at a time, each into
 # $$shard_dir/<i>.log with its exit status in <i>.exit. The caller creates
@@ -1288,6 +1319,10 @@ TSAN_SHARD_JOBS ?= $(shell n=$$(nproc 2>/dev/null || echo 4); if [ $$n -gt 16 ];
 # A shard that dies on the upstream reporter abort is re-run, but ONLY when its
 # log carries the CHECK and no sanitizer report at all. A shard that found a
 # genuine race is never retried, so this cannot turn a real finding green.
+# The abort is tied to which tests share a process, so an identical re-run
+# repeats it: scripts/tsan_resplit_shard.sh re-runs the shard's tests split in
+# two, then four, then eight pieces (one round per retry), and only the pieces
+# that abort again go unchecked.
 TSAN_SHARD_RETRIES ?= 3
 
 test-tsan: test-tsan-build
@@ -1304,19 +1339,16 @@ test-tsan: test-tsan-build
 		if [ "$$ec" = "0" ]; then continue; fi; \
 		if grep -q 'CHECK failed' "$$shard_dir/$$i.log" 2>/dev/null && \
 		   ! grep -qE '$(TSAN_REPORT_RE)' "$$shard_dir/$$i.log" 2>/dev/null; then \
-			recovered=0; \
-			for attempt in $$(seq 1 $(TSAN_SHARD_RETRIES)); do \
-				echo "$(YELLOW)⚠ TSAN shard $$i hit the upstream reporter abort (no findings); retry $$attempt/$(TSAN_SHARD_RETRIES)$(RESET)"; \
-				if TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" $(TEST_TSAN_BIN) "$(TSAN_FILTER)" \
-					--shard-count $(TSAN_SHARDS) --shard-index $$i > "$$shard_dir/$$i.log" 2>&1; then \
-					recovered=1; break; \
-				fi; \
-				if grep -qE '$(TSAN_REPORT_RE)' "$$shard_dir/$$i.log" 2>/dev/null; then break; fi; \
-			done; \
-			if [ $$recovered -eq 1 ]; then continue; fi; \
-			inconclusive="$$inconclusive $$i"; \
-			echo "$(YELLOW)$(BOLD)⚠ TSAN shard $$i still aborting after $(TSAN_SHARD_RETRIES) retries; its tests went UNCHECKED$(RESET)"; \
-			continue; \
+			echo "$(YELLOW)⚠ TSAN shard $$i hit the upstream reporter abort (no findings); re-running it in smaller pieces$(RESET)"; \
+			TSAN_OPTIONS="$(TSAN_RUN_OPTIONS)" scripts/tsan_resplit_shard.sh $(TEST_TSAN_BIN) "$(TSAN_FILTER)" \
+				$(TSAN_SHARDS) $$i "$$shard_dir/$$i.log" $(TSAN_SHARD_RETRIES); \
+			case $$? in \
+				0) continue ;; \
+				4) inconclusive="$$inconclusive $$i"; \
+				   echo "$(YELLOW)$(BOLD)⚠ TSAN shard $$i: pieces still aborting after $(TSAN_SHARD_RETRIES) rounds; their tests went UNCHECKED (named in the log)$(RESET)"; \
+				   continue ;; \
+			esac; \
+			echo "$(RED)$(BOLD)✗ TSAN shard $$i failed when re-run in pieces$(RESET)"; rc=1; continue; \
 		fi; \
 		echo "$(RED)$(BOLD)✗ TSAN shard $$i exited $$ec$(RESET)"; rc=$$ec; \
 	done; \
@@ -1324,8 +1356,8 @@ test-tsan: test-tsan-build
 	rm -rf "$$shard_dir"; \
 	if [ -n "$$inconclusive" ]; then \
 		echo "$(YELLOW)$(BOLD)⚠ TSAN: shard(s)$$inconclusive were INCONCLUSIVE (upstream reporter abort, see #1293).$(RESET)"; \
-		echo "$(YELLOW)  Those shards reported no race before dying, so nothing is being hidden -$(RESET)"; \
-		echo "$(YELLOW)  but their tests were not checked. Set TSAN_STRICT=1 to fail on this.$(RESET)"; \
+		echo "$(YELLOW)  The aborting pieces reported no race before dying, so nothing is being hidden -$(RESET)"; \
+		echo "$(YELLOW)  but the tests the log names as UNCHECKED were not checked. Set TSAN_STRICT=1 to fail on this.$(RESET)"; \
 		if [ -n "$(TSAN_STRICT)" ]; then rc=1; fi; \
 	fi; \
 	( exit $$rc ); \
@@ -1479,7 +1511,7 @@ tsan-app:
 # Test Help
 # ============================================================================
 
-.PHONY: help-test test-kiauh test-shell test-xml test-ui-pytest test-plugin test-serial test-hidden test-hidden-list test-asan test-asan-build test-tsan test-tsan-build test-asan-one test-tsan-one clean-sanitizers
+.PHONY: help-test test-kiauh test-shell test-xml test-ui-pytest test-ui-ci test-plugin test-python test-serial test-hidden test-hidden-list test-asan test-asan-build test-tsan test-tsan-build test-asan-one test-tsan-one clean-sanitizers
 help-test:
 	@if [ -t 1 ] && [ -n "$(TERM)" ] && [ "$(TERM)" != "dumb" ]; then \
 		B='$(BOLD)'; G='$(GREEN)'; Y='$(YELLOW)'; C='$(CYAN)'; X='$(RESET)'; \
@@ -1493,6 +1525,7 @@ help-test:
 	echo "  $${G}test$${X}                 - Build tests (does not run)"; \
 	echo "  $${G}unit-sweep$${X}           - C++ unit tests, sharded in PARALLEL"; \
 	echo "  $${G}full-test-run$${X}        - unit-sweep + bats shell suite (the completion gate)"; \
+	echo "  $${G}land-gate$${X}            - C++ in CI's 8-shard layout + bats + tests/ui + freshness (before landing)"; \
 	echo "  $${G}test-run$${X}             - Signpost only: refuses, names the target that fits"; \
 	echo "  $${G}test-serial$${X}          - Run tests sequentially (for debugging)"; \
 	echo "  $${G}test-smoke$${X}           - Quick smoke test (~30s) for rapid iteration"; \
@@ -1509,6 +1542,8 @@ help-test:
 	echo "  $${G}test-shell$${X}           - Shell/installer tests (bats)"; \
 	echo "  $${G}dev-timing$${X}           - Measured cost of every build and suite"; \
 	echo "  $${G}test-plugin$${X}          - Moonraker plugin tests (pytest)"; \
+	echo "  $${G}test-ui-ci$${X}           - Out-of-process UI tests, CI's slice (pytest)"; \
+	echo "  $${G}test-python$${X}          - Python script tests (pytest, tests/python/)"; \
 	echo ""; \
 	echo "$${C}Geometry Tests:$${X}"; \
 	echo ""; \
@@ -1547,16 +1582,11 @@ help-test:
 # it costs a whole suite pass, so test-vacuous and test-order-dependence both
 # consume this file rather than each producing their own.
 SUITE_REPORT ?= $(BUILD_DIR)/suite-report.xml
-# ~[subprocess] and ~[socket_discovery] are not about speed: those cases fork,
-# and the child shares the parent's report file description. Their writes
-# interleave with Catch2's XML mid-element, so the report comes out structurally
-# corrupt ("not well-formed (invalid token)") even though the run passes and
-# even though --out keeps test stdout away from it. Verified per-tag: a report
-# of [subprocess] alone is malformed, [socket_discovery] alone is malformed,
-# [splash] (which also forks) is clean. Every gate that reads a report is
-# blocked by this, so the report excludes them and they are judged by the suite
-# itself. See prestonbrown/helixscreen#1375.
-VACUOUS_FILTER ?= ~[.]~[slow]~[subprocess]~[socket_discovery]
+# The report is one file description shared with every child a test forks, and
+# Catch2's XML writer flushes after each element. A Catch2 assertion evaluated in
+# a forked child therefore writes into the parent's report mid-element, so tests
+# keep every assertion on the parent side of the fork (tests/CLAUDE.md).
+VACUOUS_FILTER ?= ~[.]~[slow]
 # Ratchet. May fall, never rise. Crash canaries and compile-time-only cases are
 # exempted by name in scripts/vacuous_test_baseline.txt, not counted here.
 # The nightly reads this through print-vacuous-max rather than repeating the
@@ -1608,10 +1638,10 @@ check-tautology:
 TAUTOLOGY_MAX ?= 0
 # One ratchet per signal, so fixing one kind cannot buy slack for another. Each
 # may fall, never rise; an unnamed signal (shadow-include, mirror-comment)
-# allows 0. stub-logic is tests/ui_test_utils.cpp standing in for app_globals.o,
-# ui_notification.o and ui_toast_manager.o.
+# allows 0. stub-logic is a branching stand-in for an object this file filters
+# out of the test link.
 MIRROR_MAX_REDEFINED_SYMBOL ?= 0
-MIRROR_MAX_STUB_LOGIC ?= 27
+MIRROR_MAX_STUB_LOGIC ?= 0
 MIRROR_MAX_ARGS = --max redefined-symbol=$(MIRROR_MAX_REDEFINED_SYMBOL) \
 	--max stub-logic=$(MIRROR_MAX_STUB_LOGIC)
 
@@ -1644,9 +1674,16 @@ cov-diff: cov-build cov-run
 # ---- mutation --------------------------------------------------------------
 # Reverts each changed hunk in turn and looks for red. A src/ or include/ hunk
 # costs a compile plus a link; a ui_xml/, assets/config/ or scripts/ hunk costs
-# only its suite, since nothing has to be rebuilt to see it. Scope a heavy range
-# with --limit N or --tests. It answers CLEAN only when it examined the whole
-# change: a path it cannot mutate is reported NOT COVERED and the run exits 3.
+# only its suite, since nothing has to be rebuilt to see it. Each changed file
+# runs against its own tests (--tests-for, else the test files naming it, else
+# --tests). It answers CLEAN only when it examined the whole change: a path it
+# cannot mutate is reported NOT COVERED and the run exits 3. Capped at 30
+# minutes (--release lifts it), and by default it mutates only what changed
+# since the last commit a run proved (--whole-branch for all of it).
+# scripts/mutate-diff.sh hands the run to the test host where this host cannot
+# make the reflink copies parallel workers need (MUTATE_LOCAL=1 stays here).
 .PHONY: mutate-diff
+# `+` hands the jobserver's descriptors down, so the builds the gate runs join
+# this make's job budget instead of falling back to -j1.
 mutate-diff:
-	$(Q)python3 scripts/mutate_diff.py $(MUTATE_ARGS)
+	+$(Q)scripts/mutate-diff.sh $(MUTATE_ARGS)

@@ -66,15 +66,15 @@
         </text_tiny>
 
         <!-- ============ Unsupported system ============ -->
-        <!-- buf_type 0 = no Happy Hare, AFC or pressure-sensor data. This section is the dialog's
+        <!-- buf_type 0 = no buffer rows and no pressure-sensor data. This section is the dialog's
              whole body there. -->
         <lv_obj name="unsupported_section" width="100%" height="content" flex_flow="column" style_pad_gap="#space_xs">
           <bind_flag_if_not_eq subject="buf_type" flag="hidden" ref_value="0"/>
           <text_small name="unsupported_text" width="100%" bind_text="buf_unsupported" long_mode="wrap"/>
         </lv_obj>
 
-        <!-- ============ Happy Hare section ============ -->
-        <lv_obj name="hh_section" width="100%" height="content" flex_flow="column" style_pad_gap="#space_xs">
+        <!-- ============ Sync drive section (buf_type 1) ============ -->
+        <lv_obj name="sync_drive_section" width="100%" height="content" flex_flow="column" style_pad_gap="#space_xs">
           <bind_flag_if_not_eq subject="buf_type" flag="hidden" ref_value="1"/>
 
           <!-- Spool motor row -->
@@ -98,17 +98,17 @@
           </lv_obj>
         </lv_obj>
 
-        <!-- ============ AFC section ============ -->
-        <lv_obj name="afc_section" width="100%" height="content" flex_flow="column" style_pad_gap="#space_xs">
+        <!-- ============ Unit buffer section (buf_type 2) ============ -->
+        <lv_obj name="unit_buffer_section" width="100%" height="content" flex_flow="column" style_pad_gap="#space_xs">
           <bind_flag_if_not_eq subject="buf_type" flag="hidden" ref_value="2"/>
 
           <!-- State row -->
-          <text_small name="afc_state_label" width="100%" bind_text="buf_afc_state" long_mode="wrap"/>
+          <text_small name="buffer_state_label" width="100%" bind_text="buf_state" long_mode="wrap"/>
 
           <!-- Distance row -->
           <lv_obj name="distance_row" width="100%" height="content" flex_flow="row" style_pad_gap="#space_sm">
             <bind_flag_if_eq subject="buf_show_distance" flag="hidden" ref_value="0"/>
-            <text_small name="afc_distance_label" width="100%" bind_text="buf_afc_distance" long_mode="wrap"/>
+            <text_small name="fault_distance_label" width="100%" bind_text="buf_fault_distance" long_mode="wrap"/>
           </lv_obj>
         </lv_obj>
 

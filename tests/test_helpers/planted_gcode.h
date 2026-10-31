@@ -64,6 +64,11 @@ class PlantedGcode {
         return std::remove(path_.c_str()) == 0;
     }
 
+    /// The file on this host.
+    const std::string& path() const {
+        return path_;
+    }
+
     /// The basename, the way a listing of the file's directory reports it.
     std::string name() const {
         return std::filesystem::path(path_).filename().string();

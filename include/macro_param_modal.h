@@ -57,14 +57,17 @@ class MacroParamModal : public Modal {
     /// @param parent Parent object (usually lv_screen_active())
     /// @param macro_name Display name for the subtitle
     /// @param on_execute Called when user clicks Run with parsed KEY=VALUE pairs
+    /// @param prefill KEY=VALUE pairs the text starts with
     void show_for_unknown_params(lv_obj_t* parent, const std::string& macro_name,
-                                 MacroExecuteCallback on_execute);
+                                 MacroExecuteCallback on_execute,
+                                 const std::map<std::string, std::string>& prefill = {});
 
     /// Show the modal in save mode: same field list as show_for_macro(),
     /// prefilled with @p record's values, titled "Default Parameters", primary
     /// button "Save", plus an "Ask for parameters" toggle below the fields.
     /// Saving hands the filled record to @p on_save; the macro is NOT run.
-    /// KNOWN_PARAMS macros only - there is no field list to save otherwise.
+    /// Empty @p params (an UNKNOWN macro) edits the free-form KEY=VALUE text
+    /// show_for_unknown_params() runs with instead of a field list.
     void show_for_defaults(lv_obj_t* parent, const std::string& macro_name,
                            const std::vector<MacroParam>& params,
                            const MacroParamDefaultRecord& record, MacroParamSaveCallback on_save);
@@ -79,6 +82,9 @@ class MacroParamModal : public Modal {
     void on_show() override;
     void on_ok() override;
     void on_cancel() override;
+    /// Every close, answered or not, drops the widget pointers and the static
+    /// instance pointer: the widgets are about to be deleted.
+    void on_hide() override;
 
   private:
     friend struct MacroParamModalTestAccess;
@@ -98,6 +104,9 @@ class MacroParamModal : public Modal {
     void dismiss();
     void populate_param_fields();
     MacroParamResult collect_values() const;
+    /// Raw mode: warns about the first token that is not KEY=VALUE and returns
+    /// true, so Run and Save refuse instead of dropping what the user typed.
+    bool refuse_unparsed_raw_text() const;
     void on_save_clicked();
 
     static MacroParamModal* s_active_instance_;

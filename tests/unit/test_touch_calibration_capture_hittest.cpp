@@ -31,8 +31,8 @@ namespace {
 
 // Micro-tier geometry that reproduces the Q2: 40px header (ui_get_responsive_
 // header_height for <400px), targets at 20%/78% of height.
-constexpr int32_t MICRO_W = 480;
-constexpr int32_t MICRO_H = 272;
+constexpr int32_t kMicroW = 480;
+constexpr int32_t kMicroH = 272;
 
 lv_obj_t* hit_at(lv_obj_t* screen, int32_t x, int32_t y) {
     lv_point_t p{x, y};
@@ -74,7 +74,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // header + ext_click_area=20 that pulls the Back button's hit area down over
     // the top-row targets — the exact device condition. Restored/deleted at end.
     lv_display_t* prev_display = lv_display_get_default();
-    lv_display_t* disp = lv_display_create(MICRO_W, MICRO_H);
+    lv_display_t* disp = lv_display_create(kMicroW, kMicroH);
     REQUIRE(disp != nullptr);
     lv_display_set_default(disp);
     lv_obj_t* screen = lv_obj_create(nullptr);
@@ -102,7 +102,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // registered in the unit-test XML scope; pin it deterministically).
     lv_obj_set_align(root, LV_ALIGN_TOP_LEFT);
     lv_obj_set_pos(root, 0, 0);
-    lv_obj_set_size(root, MICRO_W, MICRO_H);
+    lv_obj_set_size(root, kMicroW, kMicroH);
 
     // Apply the real header setup: 40px height + ext_click_area on back_button.
     lv_obj_t* header = lv_obj_find_by_name(root, "overlay_header");
@@ -112,13 +112,13 @@ TEST_CASE_METHOD(XMLTestFixture,
     // --- Drive the panel into POINT_1 capture ----------------------------------
     helix::TouchCalibrationPanel* panel = overlay.get_panel();
     REQUIRE(panel != nullptr);
-    panel->set_screen_size(MICRO_W, MICRO_H);
+    panel->set_screen_size(kMicroW, kMicroH);
     panel->start(); // -> POINT_1
 
     // POINT_1 state: shows crosshair + capture surface + Cancel chip.
     lv_subject_t* state = lv_xml_get_subject(nullptr, "touch_cal_state");
     REQUIRE(state != nullptr);
-    lv_subject_set_int(state, 1); // STATE_POINT_1
+    lv_subject_set_int(state, 1); // kStatePoint1
 
     lv_obj_update_layout(screen);
 
@@ -206,7 +206,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // in VERIFY. A single bind_flag_if must drive it. Regression: Accept
     // unclickable after #1029 lifted the capture surface to screen foreground.
     {
-        lv_subject_set_int(state, 4); // STATE_VERIFY
+        lv_subject_set_int(state, 4); // kStateVerify
         lv_obj_update_layout(screen);
         INFO("capture surface in VERIFY hidden=" << lv_obj_has_flag(capture, LV_OBJ_FLAG_HIDDEN));
         CHECK(lv_obj_has_flag(capture, LV_OBJ_FLAG_HIDDEN));

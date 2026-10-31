@@ -65,30 +65,30 @@
 
 namespace {
 
-constexpr char NVS_NAMESPACE[] = "wifi";
-constexpr char NVS_KEY_SSID[] = "ssid";
-constexpr char NVS_KEY_PSK[] = "psk";
+constexpr char kNvsNamespace[] = "wifi";
+constexpr char kNvsKeySsid[] = "ssid";
+constexpr char kNvsKeyPsk[] = "psk";
 
 // R4: assoc-timeout — historical flake stalled association ~75s on some
 // boots. 15s comfortably bounds a stalled attempt (successful assoc is
 // typically <5s) while giving weak-signal joins real room before we abort
 // and retry.
-constexpr uint64_t ASSOC_TIMEOUT_US = 15'000'000; // 15s
+constexpr uint64_t kAssocTimeoutUs = 15'000'000; // 15s
 
 // R4: bounded backoff between reconnect attempts after a disconnect. Doubles
 // from the floor up to the cap, then holds — never a permanent giving-up
 // (graceful degradation keeps retrying in the background indefinitely).
-constexpr uint64_t RETRY_BACKOFF_FLOOR_US = 2'000'000; // 2s
-constexpr uint64_t RETRY_BACKOFF_CAP_US = 30'000'000;  // 30s
-constexpr int RETRY_BACKOFF_MAX_SHIFT = 4;             // 2s * 2^4 = 32s (clamped to cap)
+constexpr uint64_t kRetryBackoffFloorUs = 2'000'000; // 2s
+constexpr uint64_t kRetryBackoffCapUs = 30'000'000;  // 30s
+constexpr int kRetryBackoffMaxShift = 4;             // 2s * 2^4 = 32s (clamped to cap)
 
 // Bounds internal RAM for scan-result caching regardless of how many APs are
 // in range (R constraint: "no unbounded scan-result accumulation").
-constexpr uint16_t MAX_SCAN_RESULTS = 24;
+constexpr uint16_t kMaxScanResults = 24;
 
 // Disconnects tolerated from an access point steering chose before falling back
 // to joining by signal. One failed association is common and not a verdict.
-constexpr int PINNED_JOIN_ATTEMPTS = 3;
+constexpr int kPinnedJoinAttempts = 3;
 
 int rssi_to_percent(int8_t rssi) {
     // Common linear mapping: -100dBm floor -> 0%, -50dBm ceiling -> 100%.
@@ -191,7 +191,7 @@ bool wifi_backend_esp_hw_bringup_allowed() {
 // connect_network()) that ever opens the "wifi" namespace for writing.
 void wifi_backend_esp_clear_stored_credentials() {
     nvs_handle_t h;
-    esp_err_t rc = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t rc = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
     if (rc != ESP_OK) {
         spdlog::warn("[WifiBackend] esp32: nvs_open('wifi') failed clearing credentials: {}",
                      esp_err_to_name(rc));
@@ -199,8 +199,8 @@ void wifi_backend_esp_clear_stored_credentials() {
     }
     // ESP_ERR_NVS_NOT_FOUND on either key is fine (already absent) — no
     // separate check needed, nvs_commit() below is what actually matters.
-    nvs_erase_key(h, NVS_KEY_SSID);
-    nvs_erase_key(h, NVS_KEY_PSK);
+    nvs_erase_key(h, kNvsKeySsid);
+    nvs_erase_key(h, kNvsKeyPsk);
     esp_err_t crc = nvs_commit(h);
     if (crc != ESP_OK) {
         spdlog::warn("[WifiBackend] esp32: nvs_commit failed clearing credentials: {}",
@@ -512,7 +512,7 @@ class WifiBackendEsp : public WifiBackend {
     std::atomic<bool> own_disconnect_pending_{false};
 
     // Access point associations are held to after steering away from a
-    // stalling one; guarded by cfg_mutex_. After PINNED_JOIN_ATTEMPTS
+    // stalling one; guarded by cfg_mutex_. After kPinnedJoinAttempts
     // unrequested disconnects in a row it is dropped and the station joins by
     // signal. That join cannot honour the avoid list: the driver can be held
     // to one BSSID but cannot exclude one, and finding another first would
@@ -543,13 +543,13 @@ class WifiBackendEsp : public WifiBackend {
     // stored (possibly user-set) value.
     void load_or_seed_credentials() {
         nvs_handle_t h;
-        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) != ESP_OK) {
             spdlog::warn("[WifiBackend] esp32: nvs_open('wifi') failed — no stored credentials");
             return;
         }
 
         std::string ssid, psk;
-        esp_err_t ssid_rc = nvs_read_string(h, NVS_KEY_SSID, ssid);
+        esp_err_t ssid_rc = nvs_read_string(h, kNvsKeySsid, ssid);
         if (ssid_rc == ESP_ERR_NVS_NOT_FOUND) {
             // Never seeded, never user-set. Seed ONCE from Kconfig (may be
             // empty in a dev build without sdkconfig.local — that's fine,
@@ -557,8 +557,8 @@ class WifiBackendEsp : public WifiBackend {
             ssid = CONFIG_HELIX_HIL_WIFI_SSID;
             psk = CONFIG_HELIX_HIL_WIFI_PASS;
             if (!ssid.empty()) {
-                nvs_set_str(h, NVS_KEY_SSID, ssid.c_str());
-                nvs_set_str(h, NVS_KEY_PSK, psk.c_str());
+                nvs_set_str(h, kNvsKeySsid, ssid.c_str());
+                nvs_set_str(h, kNvsKeyPsk, psk.c_str());
                 nvs_commit(h);
                 spdlog::info("[WifiBackend] esp32: seeded first-boot WiFi SSID from Kconfig "
                              "default ('{}')",
@@ -568,7 +568,7 @@ class WifiBackendEsp : public WifiBackend {
                              "seed — station will wait for Settings > Network");
             }
         } else if (ssid_rc == ESP_OK) {
-            nvs_read_string(h, NVS_KEY_PSK, psk); // best-effort; empty = open network
+            nvs_read_string(h, kNvsKeyPsk, psk); // best-effort; empty = open network
             spdlog::info("[WifiBackend] esp32: using stored WiFi SSID '{}' from NVS",
                          helix::redact::ssid(ssid));
         } else {
@@ -585,14 +585,14 @@ class WifiBackendEsp : public WifiBackend {
 
     void nvs_write_creds(const std::string& ssid, const std::string& password) {
         nvs_handle_t h;
-        esp_err_t rc = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+        esp_err_t rc = nvs_open(kNvsNamespace, NVS_READWRITE, &h);
         if (rc != ESP_OK) {
             spdlog::warn("[WifiBackend] esp32: nvs_open('wifi') failed persisting credentials: {}",
                          esp_err_to_name(rc));
             return;
         }
-        nvs_set_str(h, NVS_KEY_SSID, ssid.c_str());
-        nvs_set_str(h, NVS_KEY_PSK, password.c_str());
+        nvs_set_str(h, kNvsKeySsid, ssid.c_str());
+        nvs_set_str(h, kNvsKeyPsk, password.c_str());
         esp_err_t crc = nvs_commit(h);
         if (crc != ESP_OK) {
             spdlog::warn("[WifiBackend] esp32: nvs_commit failed persisting credentials: {}",
@@ -644,7 +644,7 @@ class WifiBackendEsp : public WifiBackend {
             return;
         }
         esp_timer_stop(assoc_timeout_timer_); // ignore ESP_ERR_INVALID_STATE (not running)
-        esp_timer_start_once(assoc_timeout_timer_, ASSOC_TIMEOUT_US);
+        esp_timer_start_once(assoc_timeout_timer_, kAssocTimeoutUs);
     }
 
     void cancel_assoc_timeout() {
@@ -657,9 +657,8 @@ class WifiBackendEsp : public WifiBackend {
         if (!retry_timer_ || !has_ssid_configured()) {
             return;
         }
-        int shift = std::min(retry_count_.load(), RETRY_BACKOFF_MAX_SHIFT);
-        uint64_t backoff_us =
-            std::min<uint64_t>(RETRY_BACKOFF_FLOOR_US << shift, RETRY_BACKOFF_CAP_US);
+        int shift = std::min(retry_count_.load(), kRetryBackoffMaxShift);
+        uint64_t backoff_us = std::min<uint64_t>(kRetryBackoffFloorUs << shift, kRetryBackoffCapUs);
         esp_timer_stop(retry_timer_);
         esp_timer_start_once(retry_timer_, backoff_us);
     }
@@ -754,7 +753,7 @@ class WifiBackendEsp : public WifiBackend {
         bool unpinned = false;
         {
             std::lock_guard<std::mutex> lock(cfg_mutex_);
-            if (pinned_bssid_ && ++pinned_join_failures_ >= PINNED_JOIN_ATTEMPTS) {
+            if (pinned_bssid_ && ++pinned_join_failures_ >= kPinnedJoinAttempts) {
                 pinned_bssid_.reset();
                 unpinned = true;
             }
@@ -762,7 +761,7 @@ class WifiBackendEsp : public WifiBackend {
         if (unpinned) {
             spdlog::info("[WifiBackend] esp32: steered-to access point failed {} times; rejoining "
                          "by signal",
-                         PINNED_JOIN_ATTEMPTS);
+                         kPinnedJoinAttempts);
             apply_wifi_config_locked();
         }
 
@@ -827,7 +826,7 @@ class WifiBackendEsp : public WifiBackend {
     static void on_link_drop(int64_t silence_ms) {
         WifiBackendEsp* self = s_steering_backend.load();
         if (!self || !self->steer_timer_ ||
-            silence_ms < helix::WifiApSteering::LINK_STALL_SILENCE_MS) {
+            silence_ms < helix::WifiApSteering::kLinkStallSilenceMs) {
             return;
         }
         self->pending_drop_silence_ms_.store(silence_ms);
@@ -864,7 +863,7 @@ class WifiBackendEsp : public WifiBackend {
         }
         spdlog::info("[WifiBackend] esp32: Moonraker link silent {}ms before the drop via {} "
                      "({}/{} stalled drops)",
-                     silence_ms, ap, drops, helix::WifiApSteering::LINK_STALL_DROPS);
+                     silence_ms, ap, drops, helix::WifiApSteering::kLinkStallDrops);
         if (!leave) {
             return;
         }
@@ -934,7 +933,7 @@ class WifiBackendEsp : public WifiBackend {
         }
         spdlog::info("[WifiBackend] esp32: steering from {} to {} ({} dBm), avoiding {} for {} min",
                      from, helix::redact::mac(helix::format_bssid(*pick)), rssi, from,
-                     helix::WifiApSteering::AVOID_MS / 60'000);
+                     helix::WifiApSteering::kAvoidMs / 60'000);
         {
             std::lock_guard<std::mutex> lock(cfg_mutex_);
             pinned_bssid_ = *pick;
@@ -954,7 +953,7 @@ class WifiBackendEsp : public WifiBackend {
     void on_scan_done() {
         uint16_t num = 0;
         esp_wifi_scan_get_ap_num(&num);
-        num = std::min(num, MAX_SCAN_RESULTS);
+        num = std::min(num, kMaxScanResults);
 
         std::vector<wifi_ap_record_t> records(num);
         if (num > 0) {

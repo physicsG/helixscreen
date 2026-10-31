@@ -36,7 +36,6 @@ qc_xml_linter() {
 #     (which would otherwise leave dangling refs resolving against a stale
 #     snapshot), or a staged change to a schema input the linter cannot see.
 #     Only those rare paths pay the 0.5s `make` startup.
-echo "🧩 Running helix-xml-linter..."
 
 XML_LINTER_SCHEMA_PATH="tools/xml-linter/schema/schema.json"
 
@@ -89,9 +88,12 @@ else
   XML_LINT_TRIGGERS="all"
 fi
 
-if [ -z "$XML_LINT_TRIGGERS" ]; then
-  echo "ℹ️  No XML linter inputs staged"
-elif ! command -v python3 >/dev/null 2>&1; then
+# Nothing staged that the schema or the lint reads: say nothing at all, since
+# the trigger admits every src/ .cpp commit for the content greps above.
+[ -n "$XML_LINT_TRIGGERS" ] || return 0
+echo "🧩 Running helix-xml-linter..."
+
+if ! command -v python3 >/dev/null 2>&1; then
   echo "⚠️  python3 not found — skipping XML lint"
 else
   # A deleted const can leave a dangling ref that still resolves against the
@@ -127,7 +129,7 @@ else
     SCHEMA_BEFORE_REGEN=$(mktemp "${TMPDIR:-/tmp}/helix_schema_before.XXXXXX")
     cp "$XML_LINTER_SCHEMA_PATH" "$SCHEMA_BEFORE_REGEN"
 
-    if make regen-xml-schema >/tmp/regen_xml_schema.out 2>&1; then
+    if "$(qc_make)" regen-xml-schema >/tmp/regen_xml_schema.out 2>&1; then
       SCHEMA_WAS_STALE=false
       cmp -s "$SCHEMA_BEFORE_REGEN" "$XML_LINTER_SCHEMA_PATH" || SCHEMA_WAS_STALE=true
       rm -f "$SCHEMA_BEFORE_REGEN"
@@ -187,4 +189,7 @@ echo ""
   return $EXIT_CODE
 }
 
-QC_TRIGGER_qc_xml_linter="$QC_TRIGGER_XML"
+# The XML half of the trigger plus every schema input SCHEMA_INPUT_STAGED reads:
+# without them here the driver skips the gate before that test can see them.
+# A src/ .cpp reaches the gate only for the two cheap content greps above.
+QC_TRIGGER_qc_xml_linter="$QC_TRIGGER_XML"'|^src/.*\.cpp$|^assets/config/themes/defaults/|^lib/helix-xml$|^mk/tools\.mk$'

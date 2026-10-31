@@ -4,179 +4,156 @@
 #include "filament_sensor_manager.h"
 
 #include "ui_error_reporting.h"
-#include "ui_update_queue.h"
 
 #include "ams_state.h"
 #include "app_constants.h"
 #include "app_globals.h"
-#include "config.h"
 #include "i_moonraker_api.h"
 #include "json_utils.h"
 #include "print_lifecycle_state.h"
 #include "printer_discovery.h"
+#include "printer_hardware.h"
 #include "printer_state.h"
-#include "runtime_config.h" // backend_owns_runout_during_job()
 #include "spdlog/fmt/fmt.h"
 #include "spdlog/spdlog.h"
-#include "static_subject_registry.h"
 #include "text_io.h"
 
 #include <algorithm>
 #include <cctype>
 
-// CRITICAL: Subject updates trigger lv_obj_invalidate() which asserts if called
-// during LVGL rendering. WebSocket callbacks run on libhv's event loop thread,
-// not the main LVGL thread. Subject updates are deferred to the main thread
-// through lifetime_.token().defer() to avoid the "Invalidate area not allowed
-// during rendering" assertion, and dropped once deinit_subjects() runs.
+// Subject updates go through publish(): status frames arrive on libhv's event
+// loop thread, and a subject set there would invalidate widgets during LVGL
+// rendering. publish() defers refresh_subjects() to the main thread through the
+// lifetime token, and drops it once deinit_subjects() has run.
 
 namespace helix {
+
+using sensors::SensorEntry;
+
+namespace {
+
+[[nodiscard]] FilamentSensorRole filament_role(const SensorEntry& sensor) {
+    return sensors::role_of<FilamentSensorRole>(sensor);
+}
+
+[[nodiscard]] FilamentSensorType type_of(const SensorEntry& sensor) {
+    return static_cast<FilamentSensorType>(sensor.type);
+}
+
+[[nodiscard]] constexpr uint8_t role_id(FilamentSensorRole role) {
+    return static_cast<uint8_t>(role);
+}
+
+/// Translation key of a role's Settings dropdown option.
+[[nodiscard]] constexpr const char* settings_label(FilamentSensorRole role) {
+    switch (role) {
+    case FilamentSensorRole::RUNOUT:
+        return "Runout";
+    case FilamentSensorRole::TOOLHEAD:
+        return "Toolhead";
+    case FilamentSensorRole::ENTRY:
+        return "Entry";
+    case FilamentSensorRole::NONE:
+        break;
+    }
+    return "None";
+}
+
+/// FNV-1a, for the signatures that tell a refresh whether its inputs moved.
+class Fnv1a {
+  public:
+    void mix(uint32_t v) {
+        h_ ^= v;
+        h_ *= 16777619u;
+    }
+    void mix(const std::string& s) {
+        for (char c : s) {
+            mix(static_cast<unsigned char>(c));
+        }
+    }
+    [[nodiscard]] uint32_t value() const {
+        return h_;
+    }
+
+  private:
+    uint32_t h_ = 2166136261u;
+};
+
+} // namespace
 
 // ============================================================================
 // Singleton
 // ============================================================================
+
+FilamentSensorManager::Options FilamentSensorManager::make_options() {
+    Options o;
+    o.name = "FilamentSensorManager";
+    o.kinds = {hw::ObjectKind::FilamentSwitch, hw::ObjectKind::FilamentMotion};
+    o.count_subject = "filament_sensor_count";
+    o.revision_subject = "filament_sensor_revision";
+    o.config_key = "filament_sensors";
+    o.settings_section = "filament";
+    for (const auto& r : kFilamentSensorRoles) {
+        // Every assignable role has one holder; RUNOUT has one per lane, a rule
+        // set_role() applies itself.
+        const bool assignable = r.value != FilamentSensorRole::NONE;
+        o.roles.push_back({role_id(r.value), r.id, settings_label(r.value),
+                           /*exclusive=*/assignable, /*offered=*/true});
+    }
+    for (const auto& t : kFilamentSensorTypes) {
+        o.types.push_back({static_cast<uint8_t>(t.value), t.id, t.display});
+    }
+    return o;
+}
+
+bool FilamentSensorManager::listed_in_settings(const SensorEntry& entry) const {
+    return is_standalone_filament_sensor(get_printer_state().get_discovery(), entry.display_name,
+                                         AmsState::instance().filament_hardware_absent());
+}
+
+sensors::SensorRowView FilamentSensorManager::row(size_t index) const {
+    sensors::SensorRowView view = SensorManager::row(index);
+    // Enabled means nothing for a sensor with no role.
+    if (view.role == role_id(FilamentSensorRole::NONE)) {
+        view.toggle = sensors::RowToggle::None;
+    }
+    return view;
+}
 
 FilamentSensorManager& FilamentSensorManager::instance() {
     static FilamentSensorManager instance;
     return instance;
 }
 
-FilamentSensorManager::FilamentSensorManager() : startup_time_(std::chrono::steady_clock::now()) {}
-
-FilamentSensorManager::~FilamentSensorManager() = default;
-
-// ============================================================================
-// Discovery, Status and Config
-// ============================================================================
-
-namespace {
-nlohmann::json sensor_config_json(const FilamentSensorConfig& sensor) {
-    nlohmann::json sensor_json;
-    sensor_json["klipper_name"] = sensor.klipper_name;
-    sensor_json["role"] = role_to_config_string(sensor.role);
-    sensor_json["enabled"] = sensor.enabled;
-    sensor_json["type"] = type_to_config_string(sensor.type);
-    if (sensor.lane >= 0) {
-        sensor_json["lane"] = sensor.lane;
-    }
-    return sensor_json;
-}
-
-// The AMS slot a sensor watches, or -1 when it watches none (a single-extruder
-// "runout" sensor), in which case the caller must NOT lane-scope it. An explicit
-// "lane" in the sensor's config wins; otherwise the Snapmaker U1 name
-// "e<N>_filament" (motion or switch form) encodes slot N.
-[[nodiscard]] int lane_index_for_sensor(const FilamentSensorConfig& sensor) {
-    if (sensor.lane >= 0) {
-        return sensor.lane;
-    }
-    const std::string& sensor_name = sensor.sensor_name;
-    // Match "e<N>_filament" where <N> is one or more digits.
-    if (sensor_name.size() < 3 || sensor_name.front() != 'e') {
-        return -1;
-    }
-    size_t pos = 1;
-    int value = 0;
-    while (pos < sensor_name.size() && std::isdigit(static_cast<unsigned char>(sensor_name[pos]))) {
-        value = value * 10 + (sensor_name[pos] - '0');
-        ++pos;
-    }
-    if (pos == 1) {
-        return -1; // no digits after 'e'
-    }
-    if (sensor_name.compare(pos, std::string::npos, "_filament") != 0) {
-        return -1;
-    }
-    return value;
-}
-} // namespace
-
-nlohmann::json FilamentSensorManager::save_config() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    // Build and return the config JSON
-    // Also save to file for legacy compatibility
-    nlohmann::json config;
-    config["master_enabled"] = master_enabled_;
-
-    nlohmann::json sensors_array = nlohmann::json::array();
-    for (const auto& sensor : sensors_) {
-        sensors_array.push_back(sensor_config_json(sensor));
-    }
-    config["sensors"] = sensors_array;
-
-    return config;
-}
+FilamentSensorManager::FilamentSensorManager()
+    : SensorManager(make_options()), startup_time_(std::chrono::steady_clock::now()) {}
 
 // ============================================================================
-// Initialization
+// Discovery and Config
 // ============================================================================
 
-void FilamentSensorManager::init_subjects() {
-    if (subjects_initialized_) {
-        return;
+void FilamentSensorManager::on_entries_changed() {
+    // A sensor missing from this discovery keeps its reading for a later
+    // reconnect, marked unavailable; its lane goes with its entry.
+    auto listed = [this](const std::string& name) {
+        return std::any_of(entries_locked().begin(), entries_locked().end(),
+                           [&](const SensorEntry& e) { return e.klipper_name == name; });
+    };
+    for (const auto& sensor : entries_locked()) {
+        readings_[sensor.klipper_name].available = true;
     }
-
-    spdlog::trace("[FilamentSensorManager] Initializing subjects");
-
-    // Initialize all subjects with SubjectManager for automatic cleanup
-    // Role-state encoding (filament_runout_detected, filament_toolhead_detected,
-    // filament_entry_detected, filament_probe_triggered):
-    //   -1 = no sensor configured for this role (hide indicator entirely)
-    //    0 = sensor enabled, no filament / not triggered (empty/red)
-    //    1 = sensor enabled, filament present / triggered (loaded/green)
-    //    2 = sensor configured but DISABLED (master toggle off or per-sensor
-    //        enabled=false) — render as "off/unknown" so the user can see
-    //        runout protection is inactive instead of mistaking a hidden
-    //        indicator for "everything is fine".
-    UI_MANAGED_SUBJECT_INT(runout_detected_, -1, "filament_runout_detected", subjects_);
-    // Print-scoped runout: same encoding as filament_runout_detected but
-    // considers only the active print's used tools (lane truth). Driven by
-    // PrintStatusPanel via set_scoped_runout(); the in-print badge binds this.
-    UI_MANAGED_SUBJECT_INT(scoped_runout_, -1, "filament_runout_scoped", subjects_);
-    UI_MANAGED_SUBJECT_INT(toolhead_detected_, -1, "filament_toolhead_detected", subjects_);
-    UI_MANAGED_SUBJECT_INT(entry_detected_, -1, "filament_entry_detected", subjects_);
-    UI_MANAGED_SUBJECT_INT(probe_triggered_, -1, "filament_probe_triggered", subjects_);
-    UI_MANAGED_SUBJECT_INT(any_runout_, 0, "filament_any_runout", subjects_);
-    UI_MANAGED_SUBJECT_INT(motion_active_, 0, "filament_motion_active", subjects_);
-    UI_MANAGED_SUBJECT_INT(master_enabled_subject_, master_enabled_ ? 1 : 0,
-                           "filament_master_enabled", subjects_);
-    UI_MANAGED_SUBJECT_INT(sensor_count_, 0, "filament_sensor_count", subjects_);
-    UI_MANAGED_SUBJECT_INT(config_revision_, 0, "filament_sensor_config_revision", subjects_);
-
-    subjects_initialized_ = true;
-
-    // Self-register cleanup — ensures deinit runs before lv_deinit()
-    StaticSubjectRegistry::instance().register_deinit(
-        "FilamentSensorManager", []() { FilamentSensorManager::instance().deinit_subjects(); });
-
-    spdlog::trace("[FilamentSensorManager] Subjects initialized");
+    for (auto& [name, reading] : readings_) {
+        if (!listed(name)) {
+            reading.available = false;
+        }
+    }
+    prune_vanished_locked(lanes_);
 }
 
-void FilamentSensorManager::deinit_subjects() {
-    if (!subjects_initialized_) {
-        return;
-    }
-
-    lifetime_.invalidate();
-
-    spdlog::trace("[FilamentSensorManager] Deinitializing subjects");
-
-    // Deinitialize all subjects to disconnect observers before lv_deinit()
-    subjects_.deinit_all();
-
-    subjects_initialized_ = false;
-    spdlog::trace("[FilamentSensorManager] Subjects deinitialized");
-}
-
-void FilamentSensorManager::discover_sensors(const std::vector<std::string>& klipper_sensor_names) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
+void FilamentSensorManager::on_discovered(const PrinterDiscovery& /*hw*/) {
     // Reset grace period timer - now anchored to Moonraker connection, not app startup
     // This ensures we wait for sensor state to stabilize AFTER connection is established
     startup_time_ = std::chrono::steady_clock::now();
-
-    spdlog::debug("[FilamentSensorManager] Discovering {} sensors", klipper_sensor_names.size());
 
     // A dwell measures how long one sensor has been clear. Rediscovery may not
     // return that sensor at all, and the stabilization grace restarts here
@@ -185,241 +162,139 @@ void FilamentSensorManager::discover_sensors(const std::vector<std::string>& kli
     observed_runouts_.clear();
     initial_status_received_ = false;
 
-    std::vector<FilamentSensorConfig> discovered;
-    for (const auto& klipper_name : klipper_sensor_names) {
-        std::string sensor_name;
-        FilamentSensorType type = FilamentSensorType::SWITCH; // Default, overwritten by parse
-
-        if (!parse_klipper_name(klipper_name, sensor_name, type)) {
-            spdlog::warn("[FilamentSensorManager] Failed to parse sensor name: {}", klipper_name);
-            continue;
-        }
-
-        FilamentSensorConfig config(klipper_name, sensor_name, type);
+    std::set<std::string> now;
+    for (auto& sensor : entries_locked()) {
+        now.insert(sensor.klipper_name);
+        // Values kept across a reconnect are a baseline, not a report.
+        readings_[sensor.klipper_name].reported = false;
 
         // Auto-assign RUNOUT role if sensor name suggests it's a runout sensor
-        // (e.g., "runout", "fsensor_runout", "runout_sensor")
-        // Only assign if no other sensor already has RUNOUT role
-        std::string lower_name = sensor_name;
-        lower_name = helix::text_io::to_lower(lower_name);
-        if (lower_name.find("runout") != std::string::npos) {
+        // (e.g., "runout", "fsensor_runout", "runout_sensor"), only to a name
+        // new to this manager and only if no other sensor already has RUNOUT.
+        const std::string lower_name = helix::text_io::to_lower(sensor.display_name);
+        if (known_.count(sensor.klipper_name) == 0 &&
+            lower_name.find("runout") != std::string::npos) {
             const bool runout_already_assigned =
-                std::any_of(discovered.begin(), discovered.end(),
-                            [](const auto& s) { return s.role == FilamentSensorRole::RUNOUT; });
+                std::any_of(entries_locked().begin(), entries_locked().end(), [](const auto& s) {
+                    return filament_role(s) == FilamentSensorRole::RUNOUT;
+                });
             if (!runout_already_assigned) {
-                config.role = FilamentSensorRole::RUNOUT;
+                sensor.role = role_id(FilamentSensorRole::RUNOUT);
                 spdlog::debug(
                     "[FilamentSensorManager] Auto-assigned RUNOUT role to '{}' based on name",
-                    sensor_name);
+                    sensor.display_name);
             }
         }
-
-        discovered.push_back(config);
-        spdlog::debug("[FilamentSensorManager] Discovered sensor: {} (type: {})", sensor_name,
-                      type == FilamentSensorType::MOTION ? "motion" : "switch");
+        spdlog::debug("[FilamentSensorManager] Discovered sensor: {} (type: {})",
+                      sensor.display_name,
+                      type_of(sensor) == FilamentSensorType::MOTION ? "motion" : "switch");
     }
-
-    // A sensor missing from this discovery keeps its state for a later reconnect.
-    sensors_.reconcile(std::move(discovered), /*keep_missing=*/true);
-    // Values kept across a reconnect are a baseline, not a report.
-    for (const auto& sensor : sensors_) {
-        sensors_.state_at(sensor.klipper_name).reported = false;
-    }
-
-    // Update sensor count subject
-    if (subjects_initialized_) {
-        lv_subject_set_int(&sensor_count_, static_cast<int>(sensors_.size()));
-    }
-
-    spdlog::debug("[FilamentSensorManager] Discovered {} filament sensors", sensors_.size());
+    known_ = std::move(now);
+    spdlog::debug("[FilamentSensorManager] Discovered {} filament sensors",
+                  entries_locked().size());
 }
 
-bool FilamentSensorManager::has_sensors() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return !sensors_.empty();
+void FilamentSensorManager::read_entry_extra(SensorEntry& entry, const nlohmann::json& saved) {
+    const auto lane = saved.find("lane");
+    if (lane == saved.end()) {
+        return;
+    }
+    if (lane->is_number_integer() && json_util::as_int(*lane, -1) >= 0) {
+        lanes_[entry.klipper_name] = json_util::as_int(*lane, -1);
+    } else {
+        spdlog::warn("[FilamentSensorManager] {}: ignoring lane {} (expected "
+                     "a slot index, 0 or more)",
+                     entry.klipper_name, json_util::safe_dump(*lane));
+    }
+}
+
+void FilamentSensorManager::write_entry_extra(const SensorEntry& entry, nlohmann::json& out) const {
+    if (const auto lane = lanes_.find(entry.klipper_name);
+        lane != lanes_.end() && lane->second >= 0) {
+        out["lane"] = lane->second;
+    }
+}
+
+void FilamentSensorManager::read_extra_settings(const nlohmann::json& saved) {
+    master_enabled_ = true;
+    const auto master = saved.find("master_enabled");
+    if (master != saved.end() && master->is_boolean()) {
+        master_enabled_ = json_util::as_bool(*master, true);
+    }
+    spdlog::debug("[FilamentSensorManager] Config loaded, master_enabled={}", master_enabled_);
+}
+
+void FilamentSensorManager::write_extra_settings(nlohmann::json& out) const {
+    out["master_enabled"] = master_enabled_;
 }
 
 std::vector<FilamentSensorConfig> FilamentSensorManager::get_sensors() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return sensors_.configs(); // Return thread-safe copy
-}
-
-size_t FilamentSensorManager::sensor_count() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return sensors_.size();
-}
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-void FilamentSensorManager::load_config_from_file() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    spdlog::debug("[FilamentSensorManager] Loading config from file");
-
-    Config* config = Config::get_instance();
-
-    // Build path using default printer prefix
-    std::string base_path = config->df() + "filament_sensors";
-
-    // Load master enable
-    master_enabled_ = config->get<bool>(base_path + "/master_enabled", true);
-    if (subjects_initialized_) {
-        lv_subject_set_int(&master_enabled_subject_, master_enabled_ ? 1 : 0);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
+    std::vector<FilamentSensorConfig> out;
+    for (const auto& sensor : entries_locked()) {
+        FilamentSensorConfig config(sensor.klipper_name, sensor.display_name, type_of(sensor));
+        config.role = filament_role(sensor);
+        config.enabled = sensor.enabled;
+        const auto lane = lanes_.find(sensor.klipper_name);
+        config.lane = lane != lanes_.end() ? lane->second : -1;
+        out.push_back(std::move(config));
     }
+    return out;
+}
 
-    // Load per-sensor config. A wrong-typed field stops the load here and
-    // leaves the remaining sensors on their in-memory config; the subjects
-    // are still updated below.
-    const json* sensors_node = config->try_get_json(base_path + "/sensors");
-    if (sensors_node != nullptr && sensors_node->is_array()) {
-        for (const auto& sensor_json : *sensors_node) {
-            if (!sensor_json.contains("klipper_name")) {
-                continue;
-            }
-            if (!sensor_json["klipper_name"].is_string()) {
-                spdlog::debug("[FilamentSensorManager] No sensor config found: {}",
-                              "klipper_name is not a string");
-                break;
-            }
+void FilamentSensorManager::set_role(std::string_view klipper_name, uint8_t role_value) {
+    const auto role = static_cast<FilamentSensorRole>(role_value);
+    bool assigned_found = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex());
+        auto& sensors = entries_locked();
+        const auto assigned =
+            std::find_if(sensors.begin(), sensors.end(),
+                         [&](const SensorEntry& s) { return s.klipper_name == klipper_name; });
 
-            std::string klipper_name = sensor_json["klipper_name"].get<std::string>();
-            auto* sensor = sensors_.find(klipper_name);
-
-            if (sensor) {
-                // Update existing sensor config
-                if (sensor_json.contains("role")) {
-                    if (!sensor_json["role"].is_string()) {
-                        spdlog::debug("[FilamentSensorManager] No sensor config found: {}",
-                                      "role is not a string");
-                        break;
-                    }
-                    sensor->role = role_from_config_string(sensor_json["role"].get<std::string>());
+        // A role has one holder, except RUNOUT, which has one per lane: assigning it
+        // clears it from any other sensor watching the same lane, and from every
+        // sensor watching none. Heads with a sensor each keep one RUNOUT holder
+        // apiece. The other roles' readers look up a single holder.
+        if (role != FilamentSensorRole::NONE) {
+            const int assigned_lane =
+                assigned != sensors.end() ? lane_index_for_sensor(*assigned) : -1;
+            for (auto& sensor : sensors) {
+                const int lane = lane_index_for_sensor(sensor);
+                const bool shares_lane = role != FilamentSensorRole::RUNOUT || assigned_lane < 0 ||
+                                         lane < 0 || lane == assigned_lane;
+                if (filament_role(sensor) == role && sensor.klipper_name != klipper_name &&
+                    shares_lane) {
+                    spdlog::debug("[FilamentSensorManager] Clearing role {} from {}",
+                                  role_to_config_string(role), sensor.display_name);
+                    sensor.role = role_id(FilamentSensorRole::NONE);
                 }
-                if (sensor_json.contains("enabled")) {
-                    if (!sensor_json["enabled"].is_boolean()) {
-                        spdlog::debug("[FilamentSensorManager] No sensor config found: {}",
-                                      "enabled is not a boolean");
-                        break;
-                    }
-                    sensor->enabled = sensor_json["enabled"].get<bool>();
-                }
-                if (auto lane = sensor_json.find("lane"); lane != sensor_json.end()) {
-                    if (lane->is_number_integer() && lane->get<int>() >= 0) {
-                        sensor->lane = lane->get<int>();
-                    } else {
-                        spdlog::warn("[FilamentSensorManager] {}: ignoring lane {} (expected "
-                                     "a slot index, 0 or more)",
-                                     klipper_name, json_util::safe_dump(*lane));
-                    }
-                }
-                spdlog::debug("[FilamentSensorManager] Loaded config for {}: role={}, enabled={}",
-                              klipper_name, role_to_config_string(sensor->role), sensor->enabled);
             }
         }
-    }
 
-    update_subjects();
-
-    // Log final state of all sensors at INFO for debugging
-    spdlog::debug("[FilamentSensorManager] Config loaded, master_enabled={}", master_enabled_);
-    for (const auto& sensor : sensors_) {
-        spdlog::debug("[FilamentSensorManager]   {} -> role={}, enabled={}", sensor.klipper_name,
-                      role_to_config_string(sensor.role), sensor.enabled);
-    }
-}
-
-void FilamentSensorManager::save_config_to_file() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    spdlog::debug("[FilamentSensorManager] Saving config to file");
-
-    Config* config = Config::get_instance();
-
-    // Build path using default printer prefix
-    std::string base_path = config->df() + "filament_sensors";
-
-    // Build filament_sensors config
-    json fs_config;
-    fs_config["master_enabled"] = master_enabled_;
-
-    json sensors_array = json::array();
-    for (const auto& sensor : sensors_) {
-        sensors_array.push_back(sensor_config_json(sensor));
-    }
-    fs_config["sensors"] = sensors_array;
-
-    // Set the config using JSON pointer path
-    config->get_json(base_path) = fs_config;
-    config->save();
-
-    spdlog::info("[FilamentSensorManager] Config saved to file");
-}
-
-void FilamentSensorManager::set_sensor_role(const std::string& klipper_name,
-                                            FilamentSensorRole role) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    // A role has one holder, except RUNOUT, which has one per lane: assigning it
-    // clears it from any other sensor watching the same lane, and from every
-    // sensor watching none. Heads with a sensor each keep one RUNOUT holder
-    // apiece. The other roles' readers look up a single holder.
-    if (role != FilamentSensorRole::NONE) {
-        const auto* assigned = sensors_.find(klipper_name);
-        const int assigned_lane = assigned ? lane_index_for_sensor(*assigned) : -1;
-        for (auto& sensor : sensors_) {
-            const int lane = lane_index_for_sensor(sensor);
-            const bool shares_lane = role != FilamentSensorRole::RUNOUT || assigned_lane < 0 ||
-                                     lane < 0 || lane == assigned_lane;
-            if (sensor.role == role && sensor.klipper_name != klipper_name && shares_lane) {
-                spdlog::debug("[FilamentSensorManager] Clearing role {} from {}",
-                              role_to_config_string(role), sensor.sensor_name);
-                sensor.role = FilamentSensorRole::NONE;
-            }
+        if (assigned != sensors.end()) {
+            assigned->role = role_value;
+            assigned_found = true;
+            spdlog::info("[FilamentSensorManager] Set role for {} to {}", assigned->display_name,
+                         role_to_config_string(role));
         }
     }
-
-    auto* sensor = sensors_.find(klipper_name);
-    if (sensor) {
-        sensor->role = role;
-        spdlog::info("[FilamentSensorManager] Set role for {} to {}", sensor->sensor_name,
-                     role_to_config_string(role));
-        bump_config_revision();
-        update_subjects();
-    }
-}
-
-void FilamentSensorManager::set_sensor_enabled(const std::string& klipper_name, bool enabled) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    auto* sensor = sensors_.find(klipper_name);
-    if (sensor) {
-        sensor->enabled = enabled;
-        spdlog::info("[FilamentSensorManager] Set enabled for {} to {}", sensor->sensor_name,
-                     enabled);
-        bump_config_revision();
-        update_subjects();
+    if (assigned_found) {
+        publish();
     }
 }
 
 void FilamentSensorManager::set_master_enabled(bool enabled) {
     {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex());
         master_enabled_ = enabled;
     }
-
-    if (subjects_initialized_) {
-        lv_subject_set_int(&master_enabled_subject_, enabled ? 1 : 0);
-    }
-
     spdlog::info("[FilamentSensorManager] Master enabled set to {}", enabled);
-    bump_config_revision();
-    update_subjects();
+    publish();
 }
 
 bool FilamentSensorManager::is_master_enabled() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
     return master_enabled_;
 }
 
@@ -431,7 +306,7 @@ int FilamentSensorManager::arm_runout_sensors_for_bypass(IMoonrakerAPI* api) {
     if (!api) {
         return 0;
     }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     // Respect the user's global monitoring switch — arming firmware sensors
     // the user deliberately turned monitoring off for would be a settings
@@ -441,13 +316,13 @@ int FilamentSensorManager::arm_runout_sensors_for_bypass(IMoonrakerAPI* api) {
     }
 
     int armed = 0;
-    for (const auto& sensor : sensors_) {
-        // ALL runout-role sensors, not sensors_.find_by_role()'s first — on
-        // multi-lane hardware (Snapmaker U1) four sensors share the role.
-        if (sensor.role != FilamentSensorRole::RUNOUT) {
+    for (const auto& sensor : entries_locked()) {
+        // ALL runout-role sensors, not the first holder — on multi-lane
+        // hardware (Snapmaker U1) four sensors share the role.
+        if (filament_role(sensor) != FilamentSensorRole::RUNOUT) {
             continue;
         }
-        auto& state = sensors_.state_at(sensor.klipper_name);
+        auto& state = readings_[sensor.klipper_name];
         // Arm only a sensor we have observed (available = exists in Klipper)
         // that the firmware currently holds DISABLED. The state default
         // (enabled=true) is "no fresh status yet" — skip rather than guess.
@@ -465,14 +340,14 @@ int FilamentSensorManager::arm_runout_sensors_for_bypass(IMoonrakerAPI* api) {
         state.enabled = true;
         bypass_armed_.push_back(sensor.klipper_name);
         spdlog::info("[FilamentSensorManager] Bypass: armed runout sensor {} at firmware level",
-                     sensor.sensor_name);
+                     sensor.display_name);
         ++armed;
     }
     return armed;
 }
 
 int FilamentSensorManager::restore_runout_sensors_after_bypass(IMoonrakerAPI* api) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     if (bypass_armed_.empty()) {
         return 0;
@@ -488,29 +363,26 @@ int FilamentSensorManager::restore_runout_sensors_after_bypass(IMoonrakerAPI* ap
         // Only restore sensors still present in our config: sending
         // SET_FILAMENT_SENSOR for a removed Klipper object errors, and the
         // error surfaces as an unexplained toast.
-        const auto* sensor = sensors_.find(name);
-        if (!sensor) {
+        const auto sensor =
+            std::find_if(entries_locked().begin(), entries_locked().end(),
+                         [&](const SensorEntry& s) { return s.klipper_name == name; });
+        if (sensor == entries_locked().end()) {
             continue;
         }
         send_firmware_sensor_enable(api, *sensor, false);
-        if (auto* st = sensors_.state(name)) {
+        if (auto* st = state(name)) {
             st->enabled = false;
         }
         spdlog::info("[FilamentSensorManager] Bypass: restored runout sensor {} to disabled",
-                     sensor->sensor_name);
+                     sensor->display_name);
         ++restored;
     }
     bypass_armed_.clear();
     return restored;
 }
 
-bool FilamentSensorManager::has_bypass_armed_sensors() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return !bypass_armed_.empty();
-}
-
 void FilamentSensorManager::set_moonraker_api(IMoonrakerAPI* api) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
     api_ = api;
     spdlog::debug("[FilamentSensorManager] Moonraker API {} for bypass arming",
                   api ? "set" : "cleared");
@@ -532,12 +404,11 @@ void FilamentSensorManager::on_bypass_active_changed(bool active) {
 }
 
 void FilamentSensorManager::send_firmware_sensor_enable(IMoonrakerAPI* api,
-                                                        const FilamentSensorConfig& sensor,
-                                                        bool enabled) {
+                                                        const SensorEntry& sensor, bool enabled) {
     // SET_FILAMENT_SENSOR takes the bare sensor name — the part after the
     // `[filament_switch_sensor ...]` / `[filament_motion_sensor ...]` section
-    // prefix — which is exactly FilamentSensorConfig::sensor_name
-    // (parse_klipper_name's split at discovery). Same convention Creality's
+    // prefix — which is exactly SensorEntry::display_name (the instance the
+    // hardware object table splits off at discovery). Same convention Creality's
     // own macros use (`SET_FILAMENT_SENSOR SENSOR=filament_sensor ENABLE=0`).
     // The command is the builtin's name, renamed when a macro wraps it, so a
     // wrapper never records the toggle as a user setting.
@@ -546,7 +417,7 @@ void FilamentSensorManager::send_firmware_sensor_enable(IMoonrakerAPI* api,
     const char* what = enabled ? "arm" : "restore";
     api->execute_gcode(
         fmt::format("{} SENSOR={} ENABLE={}", api->hardware().sensor_toggle_command(),
-                    sensor.sensor_name, enabled ? 1 : 0),
+                    sensor.display_name, enabled ? 1 : 0),
         []() {},
         [what](const MoonrakerError& err) {
             spdlog::warn("[FilamentSensorManager] Bypass sensor {} failed: {}", what, err.message);
@@ -559,7 +430,7 @@ void FilamentSensorManager::send_firmware_sensor_enable(IMoonrakerAPI* api,
 // ============================================================================
 
 bool FilamentSensorManager::is_filament_detected(FilamentSensorRole role) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     if (!master_enabled_ || role == FilamentSensorRole::NONE) {
         return false;
@@ -574,7 +445,7 @@ bool FilamentSensorManager::is_filament_detected(FilamentSensorRole role) const 
         return false;
     }
 
-    auto* st = sensors_.state(config->klipper_name);
+    auto* st = state(config->klipper_name);
     if (!st || !st->available) {
         return false;
     }
@@ -583,7 +454,7 @@ bool FilamentSensorManager::is_filament_detected(FilamentSensorRole role) const 
 }
 
 bool FilamentSensorManager::is_sensor_available(FilamentSensorRole role) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     if (!master_enabled_ || role == FilamentSensorRole::NONE) {
         return false;
@@ -596,20 +467,12 @@ bool FilamentSensorManager::is_sensor_available(FilamentSensorRole role) const {
         return false;
     }
 
-    auto* st = sensors_.state(config->klipper_name);
+    auto* st = state(config->klipper_name);
     return st && st->available;
 }
 
-std::optional<FilamentSensorState>
-FilamentSensorManager::get_sensor_state(FilamentSensorRole role) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    const auto* state = sensors_.role_state(role);
-    return state ? std::optional(*state) : std::nullopt;
-}
-
 bool FilamentSensorManager::has_any_runout() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     // Grace-period gate intentionally NOT applied here. Toast suppression for
     // the initial Moonraker status burst lives in update_from_status. Blocking
@@ -622,18 +485,18 @@ bool FilamentSensorManager::has_any_runout() const {
         return false;
     }
 
-    for (const auto& sensor : sensors_) {
+    for (const auto& sensor : entries_locked()) {
         if (!monitors_runout(sensor)) {
             spdlog::trace(
                 "[FilamentSensorManager] has_any_runout: skipping {} (enabled={}, role={})",
-                sensor.sensor_name, sensor.enabled, role_to_config_string(sensor.role));
+                sensor.display_name, sensor.enabled, role_to_config_string(filament_role(sensor)));
             continue;
         }
 
-        auto* st = sensors_.state(sensor.klipper_name);
+        auto* st = state(sensor.klipper_name);
         if (st && st->available && !st->filament_detected) {
             spdlog::debug("[FilamentSensorManager] has_any_runout: TRUE - {} ({}) has no filament",
-                          sensor.sensor_name, role_to_config_string(sensor.role));
+                          sensor.display_name, role_to_config_string(filament_role(sensor)));
             return true;
         }
     }
@@ -642,7 +505,11 @@ bool FilamentSensorManager::has_any_runout() const {
 }
 
 bool FilamentSensorManager::has_real_runout() const {
-    // Snapshot the sensors that report no filament, then release mutex_ before
+    return real_runout_lane().has_value();
+}
+
+std::optional<int> FilamentSensorManager::real_runout_lane() const {
+    // Snapshot the sensors that report no filament, then release the mutex before
     // asking AmsState anything. AmsState calls into this class from under its own
     // recursive lock, so taking its lock from inside ours closes an ABBA cycle
     // (TSan: lock-order-inversion). Only the snapshot needs our lock; the runout
@@ -655,27 +522,35 @@ bool FilamentSensorManager::has_real_runout() const {
     };
     std::vector<Candidate> candidates;
     {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex());
 
         if (!master_enabled_) {
-            return false;
+            return std::nullopt;
         }
 
-        for (const auto& sensor : sensors_) {
+        for (const auto& sensor : entries_locked()) {
             if (!monitors_runout(sensor)) {
                 continue;
             }
 
-            auto* st = sensors_.state(sensor.klipper_name);
+            auto* st = state(sensor.klipper_name);
             if (!st || !st->available || st->filament_detected) {
                 continue; // sensor present and filament detected -> not a runout
             }
-            candidates.push_back(
-                {sensor.sensor_name, sensor.role, lane_index_for_sensor(sensor), !st->enabled});
+            candidates.push_back({sensor.display_name, filament_role(sensor),
+                                  lane_index_for_sensor(sensor), !st->enabled});
         }
     }
 
     AmsBackend* backend = AmsState::instance().get_backend();
+    // The lane being fed. A backend that cannot name one (none picked, a
+    // bypass, more than one current lane) reports a negative value.
+    const int current_slot = backend ? backend->get_current_slot() : -1;
+    // A sensor's lane is a slot index for a lane sensor, but a tool index for
+    // a per-toolhead sensor on a multi-extruder system whose slots outnumber
+    // its tools. Matching either index counts as being fed, so a sensor is set
+    // aside only when it can be neither.
+    const int current_tool = backend ? backend->get_current_tool() : -1;
 
     for (const auto& sensor : candidates) {
         // This sensor reports no filament. Decide whether it is a real runout.
@@ -694,10 +569,21 @@ bool FilamentSensorManager::has_real_runout() const {
                 continue;
             }
 
-            // A stood-down sensor counts only for the lane it ran out on. Once
-            // the firmware has moved the print to another lane, the empty one
-            // it left behind is not what a later pause is about.
-            if (sensor.stood_down && backend->get_current_slot() != lane) {
+            // A runout is about the lane being fed. Every other lane's sensor
+            // is idle, whatever the backend says sits in that lane: a head
+            // whose filament waits in its feeder, never loaded to the nozzle,
+            // reads empty at its own switch without anything running out.
+            const bool fed = lane == current_slot || lane == current_tool;
+            if (current_slot >= 0 && !fed) {
+                spdlog::debug("[FilamentSensorManager] has_real_runout: ignoring {} - lane {} "
+                              "is not the one being fed (slot {}, tool {})",
+                              sensor.sensor_name, lane, current_slot, current_tool);
+                continue;
+            }
+
+            // A stood-down sensor counts only while its lane is the one being
+            // fed. With no lane named, nothing says it still is.
+            if (sensor.stood_down && !fed) {
                 spdlog::debug("[FilamentSensorManager] has_real_runout: ignoring {} - stood "
                               "down, and lane {} is no longer the current one",
                               sensor.sensor_name, lane);
@@ -722,10 +608,10 @@ bool FilamentSensorManager::has_real_runout() const {
 
         spdlog::debug("[FilamentSensorManager] has_real_runout: TRUE - {} ({}) lost filament",
                       sensor.sensor_name, role_to_config_string(sensor.role));
-        return true;
+        return lane;
     }
 
-    return false;
+    return std::nullopt;
 }
 
 namespace {
@@ -747,7 +633,7 @@ int slot_for_tool(int tool, const std::map<int, int>& remap,
 
 FilamentSensorManager::ScopedRunoutScan FilamentSensorManager::scan_required_lanes(
     const std::set<int>& tools_used, const std::map<int, int>& remap, bool read_stood_down) const {
-    // Caller holds mutex_ (recursive). Single source of truth for both
+    // Caller holds the mutex (recursive). Single source of truth for both
     // find_empty_required_lanes() and compute_scoped_runout_value() — dedups the
     // runout-config lookup, backend fetch, availability gate, and per-lane scan.
     ScopedRunoutScan scan;
@@ -779,8 +665,7 @@ FilamentSensorManager::ScopedRunoutScan FilamentSensorManager::scan_required_lan
         // caller can fall back to the unscoped behavior (non-AMS printers).
         // A sensor the firmware stood down has no reading worth falling back
         // to (Klipper is not acting on it), so it leaves the badge hidden.
-        if (auto* st = sensors_.state(runout_cfg->klipper_name);
-            st && st->available && st->enabled) {
+        if (auto* st = state(runout_cfg->klipper_name); st && st->available && st->enabled) {
             scan.sensor_available = true;
             scan.aggregate_detected = st->filament_detected;
         }
@@ -826,17 +711,17 @@ FilamentSensorManager::ScopedRunoutScan FilamentSensorManager::scan_required_lan
         // watching that slot is. A firmware stand-down leaves the reading live,
         // which the pre-print check relies on while every head is held down.
         if (!scan.backend->slot_status_tracks_filament()) {
-            for (const auto& sensor : sensors_) {
-                if (sensor.role != FilamentSensorRole::RUNOUT || !sensor.enabled ||
+            for (const auto& sensor : entries_locked()) {
+                if (filament_role(sensor) != FilamentSensorRole::RUNOUT || !sensor.enabled ||
                     lane_index_for_sensor(sensor) != slot) {
                     continue;
                 }
-                auto* st = sensors_.state(sensor.klipper_name);
+                auto* st = state(sensor.klipper_name);
                 if (st && st->available && (read_stood_down || st->enabled) &&
                     !st->filament_detected) {
                     spdlog::debug("[FilamentSensorManager] required tool {} -> lane {} is empty "
                                   "({} reads no filament)",
-                                  tool, slot, sensor.sensor_name);
+                                  tool, slot, sensor.display_name);
                     scan.empty_lanes.emplace_back(tool, slot);
                     break;
                 }
@@ -850,7 +735,7 @@ FilamentSensorManager::ScopedRunoutScan FilamentSensorManager::scan_required_lan
 std::vector<std::pair<int, int>>
 FilamentSensorManager::find_empty_required_lanes(const std::set<int>& tools_used,
                                                  const std::map<int, int>& remap) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     const ScopedRunoutScan scan = scan_required_lanes(tools_used, remap, /*read_stood_down=*/true);
 
@@ -878,7 +763,7 @@ bool print_scopes_runout_badge(PrintJobState state) {
 
 int FilamentSensorManager::compute_scoped_runout_value(const std::set<int>& tools_used,
                                                        const std::map<int, int>& remap) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     const ScopedRunoutScan scan = scan_required_lanes(tools_used, remap, /*read_stood_down=*/false);
 
@@ -907,27 +792,90 @@ int FilamentSensorManager::compute_scoped_runout_value(const std::set<int>& tool
     return scan.empty_lanes.empty() ? 1 : 0;
 }
 
-bool FilamentSensorManager::is_motion_active() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+std::optional<ClogMotionSensor>
+FilamentSensorManager::clog_motion_sensor(int active_lane, bool filament_hardware_absent) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex());
 
     if (!master_enabled_) {
-        return false;
+        return std::nullopt;
     }
 
-    for (const auto& sensor : sensors_) {
-        if (sensor.type != FilamentSensorType::MOTION || !sensor.enabled) {
+    // An AMS-owned sensor is hidden from Settings > Filament sensors, so the
+    // user cannot have enabled it there, and its backend may run it as a
+    // presence switch outside a print, where an empty head would read jammed.
+    const auto& discovery = get_printer_state().get_discovery();
+    const SensorEntry* first = nullptr;
+    const SensorEntry* first_armed = nullptr;
+    const SensorEntry* first_stopped = nullptr;
+    const SensorEntry* on_lane = nullptr;
+    for (const auto& sensor : entries_locked()) {
+        if (type_of(sensor) != FilamentSensorType::MOTION || !sensor.enabled ||
+            !is_standalone_filament_sensor(discovery, sensor.display_name,
+                                           filament_hardware_absent)) {
             continue;
         }
-
-        auto* st = sensors_.state(sensor.klipper_name);
-        if (st && st->available && st->enabled) {
-            // Motion sensor is active when Klipper reports it as enabled
-            // and we've seen recent detection events
-            return true;
+        const auto* st = state(sensor.klipper_name);
+        if (!st || !st->available) {
+            continue;
+        }
+        if (!first) {
+            first = &sensor;
+        }
+        if (!first_armed && st->enabled) {
+            first_armed = &sensor;
+        }
+        if (!first_stopped && st->enabled && !st->filament_detected) {
+            first_stopped = &sensor;
+        }
+        if (!on_lane && active_lane >= 0 && lane_index_for_sensor(sensor) == active_lane) {
+            on_lane = &sensor;
         }
     }
 
-    return false;
+    // With no sensor on the active lane, the worst reading speaks: an encoder
+    // only stops seeing movement when its own extruder feeds, so an idle head
+    // keeps reading detected and cannot mask the jammed one.
+    const SensorEntry* pick = on_lane         ? on_lane
+                              : first_stopped ? first_stopped
+                              : first_armed   ? first_armed
+                                              : first;
+    if (!pick) {
+        return std::nullopt;
+    }
+    const auto* st = state(pick->klipper_name);
+    ClogMotionSensor out;
+    out.sensor_name = pick->display_name;
+    out.armed = st->enabled;
+    out.filament_moving = st->filament_detected;
+    return out;
+}
+
+int FilamentSensorManager::motion_signature() const {
+    // FNV-1a over everything clog_motion_sensor() reads, so the subject moves
+    // exactly when a fresh pick could come out differently.
+    Fnv1a h;
+    h.mix(master_enabled_ ? 1u : 0u);
+    for (const auto& sensor : entries_locked()) {
+        if (type_of(sensor) != FilamentSensorType::MOTION) {
+            continue;
+        }
+        h.mix(sensor.klipper_name);
+        const auto* st = state(sensor.klipper_name);
+        h.mix((sensor.enabled ? 1u : 0u) | (st && st->available ? 2u : 0u) |
+              (st && st->enabled ? 4u : 0u) | (st && st->filament_detected ? 8u : 0u) |
+              (static_cast<uint32_t>(lane_index_for_sensor(sensor) + 1) << 4));
+    }
+    return static_cast<int>(h.value());
+}
+
+uint32_t FilamentSensorManager::config_signature() const {
+    Fnv1a h;
+    h.mix(master_enabled_ ? 1u : 0u);
+    for (const auto& sensor : entries_locked()) {
+        h.mix(sensor.klipper_name);
+        h.mix(static_cast<uint32_t>(sensor.role) | (sensor.enabled ? 0x100u : 0u));
+    }
+    return h.value();
 }
 
 // ============================================================================
@@ -939,7 +887,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
     // (similar to USB manager - users don't need to be told filament is present)
     auto now = std::chrono::steady_clock::now();
     bool within_grace_period =
-        (now - startup_time_) < AppConstants::Startup::SENSOR_STABILIZATION_PERIOD;
+        (now - startup_time_) < app_constants::startup::kSensorStabilizationPeriod;
 
     // Collect notifications to send after releasing lock (avoid deadlock)
     struct Notification {
@@ -957,8 +905,9 @@ void FilamentSensorManager::update_from_status(const json& status) {
     std::vector<FilamentSensorRole> dwell_expired_removals;
     StateChangeCallback callback_copy;
     bool any_changed = false;
+    bool need_subject_update = false;
 
-    // Read AMS state BEFORE taking mutex_. AmsState notifies this class from under
+    // Read AMS state BEFORE taking the mutex. AmsState notifies this class from under
     // its own recursive lock (sync_from_backend -> on_bypass_active_changed), so
     // acquiring AmsState's lock from inside ours closes an ABBA cycle that TSan
     // reports as a potential deadlock. These are whole-printer advisory flags, not
@@ -972,21 +921,24 @@ void FilamentSensorManager::update_from_status(const json& status) {
     const auto lifecycle = get_printer_state().print_state().get_print_lifecycle();
     const bool job_owns_machine = job_holds_machine(lifecycle);
     const AmsType backend_type = AmsState::instance().primary_type().value_or(AmsType::NONE);
-    // AD5X-IFS auto-unloads filament back into the IFS between prints. The head
-    // sensor going empty when the printer is idle is firmware behaviour, not a
-    // user-facing event. "Between prints" is the lifecycle's Idle/terminal side,
-    // not merely "not PRINTING": a head-empty during a pre-print block is not
-    // the firmware's idle auto-unload and must not be swallowed.
-    const bool ad5x_idle_unload = backend_type == AmsType::AD5X_IFS && !job_owns_machine;
+    const BackendTraits backend_traits =
+        AmsState::instance().primary_traits().value_or(BackendTraits{});
+    // A backend whose firmware unloads filament back to its hub between prints
+    // (AD5X IFS) makes the head sensor going empty while idle firmware behaviour,
+    // not a user-facing event. "Between prints" is the lifecycle's Idle/terminal
+    // side, not merely "not PRINTING": a head-empty during a pre-print block is
+    // not the firmware's idle auto-unload and must not be swallowed.
+    const bool idle_unload_expected =
+        backend_traits.unloads_to_hub_between_prints && !job_owns_machine;
     // While a job holds the machine, a backend that raises its own runout fault
     // owns the runout surface for that phase: its prompt is already telling the
     // user what happened, with recovery actions derived from live hardware, so
     // the sensor-edge toast restates it (#1388). Ownership-scoped, never a
     // blanket muzzle: on a backend with no error hook of its own, and with no
-    // backend at all, this toast is the only runout signal there is. The
-    // per-backend table lives in backend_owns_runout_during_job().
+    // backend at all, this toast is the only runout signal there is.
+    // The backend declares that through raises_runout_fault_during_job.
     const bool runout_surface_owned_during_job =
-        job_owns_machine && backend_owns_runout_during_job(backend_type);
+        job_owns_machine && backend_traits.raises_runout_fault_during_job;
     // A tool change pulls filament off the toolhead sensor and feeds the next
     // lane past it. At the edge that is identical to a runout; only duration
     // separates them. Where a backend could be changing tools and a job holds
@@ -1003,7 +955,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
 
     // Phase 1: Update state under lock, collect notifications
     {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex());
 
         // Copy callback for use outside lock
         callback_copy = state_change_callback_;
@@ -1014,7 +966,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
         }
 
         // Process filament_switch_sensor updates
-        for (const auto& sensor : sensors_) {
+        for (const auto& sensor : entries_locked()) {
             // Build the Klipper object key (e.g., "filament_switch_sensor fsensor")
             std::string key = sensor.klipper_name;
 
@@ -1024,7 +976,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
             }
 
             const auto& sensor_data = status[key];
-            auto& state = sensors_.state_at(sensor.klipper_name);
+            auto& state = readings_[sensor.klipper_name];
             FilamentSensorState old_state = state;
             state.reported = true;
 
@@ -1067,13 +1019,13 @@ void FilamentSensorManager::update_from_status(const json& status) {
                         spdlog::debug(
                             "[FilamentSensorManager] Bypass: {} reported disabled by firmware — "
                             "dropped from the armed set",
-                            sensor.sensor_name);
+                            sensor.display_name);
                     }
                 }
             }
 
             // Motion sensors have additional fields
-            if (sensor.type == FilamentSensorType::MOTION) {
+            if (type_of(sensor) == FilamentSensorType::MOTION) {
                 if (auto it = sensor_data.find("detection_count");
                     it != sensor_data.end() && it->is_number_integer()) {
                     state.detection_count = it->get<int>();
@@ -1088,13 +1040,13 @@ void FilamentSensorManager::update_from_status(const json& status) {
                 }
 
                 // Log at WARN if this is a runout (filament gone) on an active sensor
-                if (!state.filament_detected && sensor.role != FilamentSensorRole::NONE &&
+                if (!state.filament_detected && filament_role(sensor) != FilamentSensorRole::NONE &&
                     sensor.enabled && state.enabled) {
                     spdlog::warn("[FilamentSensorManager] RUNOUT: {} ({}) filament gone",
-                                 sensor.sensor_name, role_to_config_string(sensor.role));
+                                 sensor.display_name, role_to_config_string(filament_role(sensor)));
                 } else {
                     spdlog::debug("[FilamentSensorManager] Sensor {} state changed: {} -> {}",
-                                  sensor.sensor_name,
+                                  sensor.display_name,
                                   old_state.filament_detected ? "detected" : "empty",
                                   state.filament_detected ? "detected" : "empty");
                 }
@@ -1102,10 +1054,10 @@ void FilamentSensorManager::update_from_status(const json& status) {
                 // Queue notification for after lock release
                 Notification notif;
                 notif.klipper_name = sensor.klipper_name;
-                notif.sensor_name = sensor.sensor_name;
+                notif.sensor_name = sensor.display_name;
                 notif.old_state = old_state;
                 notif.new_state = state;
-                notif.role = sensor.role;
+                notif.role = filament_role(sensor);
                 // Toasts are suppressed during the startup grace period, wizard
                 // setup, and active AMS filament operations (load/unload moves
                 // filament past sensors intentionally, generating spurious
@@ -1113,7 +1065,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
                 // filament backend owns the runout surface for that phase (its
                 // own prompt already tells the story; see #1388). A backend that
                 // owns nothing, and no backend at all, keeps the toast: there it
-                // is the only runout signal. ams_active, ad5x_idle_unload and
+                // is the only runout signal. ams_active, idle_unload_expected and
                 // runout_surface_owned_during_job were read above, before the
                 // lock. The runout ROLE is preserved either way, so runout
                 // detection and its subjects still fire in-print; only the
@@ -1141,14 +1093,14 @@ void FilamentSensorManager::update_from_status(const json& status) {
                 // carries the runout.
                 if (!state.filament_detected && old_state.reported && old_state.enabled &&
                     job_owns_machine && !ams_active && sensor.enabled &&
-                    sensor.role != FilamentSensorRole::NONE) {
+                    filament_role(sensor) != FilamentSensorRole::NONE) {
                     observed_runouts_.insert(sensor.klipper_name);
                 }
                 notif.should_toast = !within_grace_period && !is_wizard_active() && !ams_active &&
-                                     !ad5x_idle_unload && !post_unload_removal &&
+                                     !idle_unload_expected && !post_unload_removal &&
                                      !runout_surface_owned_during_job && master_enabled_ &&
                                      observed_while_monitoring && sensor.enabled &&
-                                     sensor.role != FilamentSensorRole::NONE;
+                                     filament_role(sensor) != FilamentSensorRole::NONE;
                 // A removal that owes a dwell is recorded, not announced. A
                 // refill inside the dwell drops the record and silences the
                 // insertion with it: nothing was said, so nothing needs saying.
@@ -1159,34 +1111,33 @@ void FilamentSensorManager::update_from_status(const json& status) {
                     notif.should_toast = false;
                     spdlog::debug("[FilamentSensorManager] Holding removal toast for {} - {}s "
                                   "dwell, a tool change refills before it expires",
-                                  sensor.sensor_name, RUNOUT_TOAST_DWELL.count());
+                                  sensor.display_name, kRunoutToastDwell.count());
                 } else if (state.filament_detected &&
                            pending_removal_toast_.erase(sensor.klipper_name) > 0) {
                     notif.should_toast = false;
                     spdlog::debug(
                         "[FilamentSensorManager] {} refilled inside the dwell - not a runout",
-                        sensor.sensor_name);
+                        sensor.display_name);
                 }
                 if (within_grace_period && master_enabled_ && sensor.enabled &&
-                    sensor.role != FilamentSensorRole::NONE) {
+                    filament_role(sensor) != FilamentSensorRole::NONE) {
                     spdlog::debug("[FilamentSensorManager] Suppressing startup toast for {}",
-                                  sensor.sensor_name);
+                                  sensor.display_name);
                 } else if (ams_active && master_enabled_ && sensor.enabled &&
-                           sensor.role != FilamentSensorRole::NONE) {
+                           filament_role(sensor) != FilamentSensorRole::NONE) {
                     spdlog::debug(
                         "[FilamentSensorManager] Suppressing toast during AMS operation for {}",
-                        sensor.sensor_name);
-                } else if (ad5x_idle_unload && master_enabled_ && sensor.enabled &&
-                           sensor.role != FilamentSensorRole::NONE) {
-                    spdlog::debug(
-                        "[FilamentSensorManager] Suppressing AD5X idle-unload toast for {}",
-                        sensor.sensor_name);
+                        sensor.display_name);
+                } else if (idle_unload_expected && master_enabled_ && sensor.enabled &&
+                           filament_role(sensor) != FilamentSensorRole::NONE) {
+                    spdlog::debug("[FilamentSensorManager] Suppressing idle-unload toast for {}",
+                                  sensor.display_name);
                 } else if (runout_surface_owned_during_job && master_enabled_ && sensor.enabled &&
-                           sensor.role != FilamentSensorRole::NONE) {
+                           filament_role(sensor) != FilamentSensorRole::NONE) {
                     spdlog::debug(
                         "[FilamentSensorManager] Suppressing toast for {} - {} owns the runout "
                         "surface during the job",
-                        sensor.sensor_name, ams_type_to_string(backend_type));
+                        sensor.display_name, ams_type_to_string(backend_type));
                 }
                 notifications.push_back(notif);
             }
@@ -1206,7 +1157,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
         // itself has gone quiet - during a print Moonraker pushes status far
         // faster than the dwell, so the toast lands within a tick of coming due.
         for (auto it = pending_removal_toast_.begin(); it != pending_removal_toast_.end();) {
-            auto* state_it = sensors_.state(it->first);
+            auto* state_it = state(it->first);
             // Refilled, or gone from the sensor set: nothing left to confirm.
             if (!state_it || state_it->filament_detected) {
                 it = pending_removal_toast_.erase(it);
@@ -1223,7 +1174,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
                 it = pending_removal_toast_.erase(it);
                 continue;
             }
-            if (now - it->second < RUNOUT_TOAST_DWELL) {
+            if (now - it->second < kRunoutToastDwell) {
                 ++it;
                 continue;
             }
@@ -1236,22 +1187,21 @@ void FilamentSensorManager::update_from_status(const json& status) {
                 continue;
             }
             auto cfg =
-                std::find_if(sensors_.begin(), sensors_.end(), [&](const FilamentSensorConfig& s) {
-                    return s.klipper_name == it->first;
-                });
+                std::find_if(entries_locked().begin(), entries_locked().end(),
+                             [&](const SensorEntry& s) { return s.klipper_name == it->first; });
             if (state_it && !state_it->enabled) {
                 // Stood down mid-dwell: the sensor stopped monitoring, so the
                 // removal it was confirming is no longer ours to announce.
                 spdlog::debug("[FilamentSensorManager] Dropping dwell toast for {} - firmware "
                               "stood the sensor down",
                               it->first);
-            } else if (cfg != sensors_.end() && master_enabled_ && cfg->enabled &&
-                       cfg->role != FilamentSensorRole::NONE) {
-                dwell_expired_removals.push_back(cfg->role);
+            } else if (cfg != entries_locked().end() && master_enabled_ && cfg->enabled &&
+                       filament_role(*cfg) != FilamentSensorRole::NONE) {
+                dwell_expired_removals.push_back(filament_role(*cfg));
                 spdlog::warn("[FilamentSensorManager] RUNOUT CONFIRMED: {} ({}) still clear "
                              "after {}s",
-                             cfg->sensor_name, role_to_config_string(cfg->role),
-                             RUNOUT_TOAST_DWELL.count());
+                             cfg->display_name, role_to_config_string(filament_role(*cfg)),
+                             kRunoutToastDwell.count());
             }
             it = pending_removal_toast_.erase(it);
         }
@@ -1259,24 +1209,14 @@ void FilamentSensorManager::update_from_status(const json& status) {
         // Always update subjects on first status (initial_status_received_ handles this)
         // and on any state change. Without this, subjects stay at -1 ("no sensor")
         // when the initial Moonraker status matches the default state (filament_detected=true).
-        bool need_subject_update = any_changed || !initial_status_received_;
+        need_subject_update = any_changed || !initial_status_received_;
         initial_status_received_ = true;
-
-        if (need_subject_update) {
-            if (sync_mode_) {
-                // In test mode, update subjects synchronously
-                spdlog::info("[FilamentSensorManager] sync_mode: updating subjects synchronously");
-                update_subjects();
-            } else {
-                // Deferred to the main LVGL thread; dropped after deinit_subjects().
-                spdlog::debug("[FilamentSensorManager] async_mode: deferring via lifetime token");
-                lifetime_.token().defer("FilamentSensorManager::update_subjects", [] {
-                    FilamentSensorManager::instance().update_subjects_on_main_thread();
-                });
-            }
-        }
     }
     // Lock released here
+
+    if (need_subject_update) {
+        publish();
+    }
 
     // Phase 2: Send notifications without holding lock (prevents deadlock)
     for (const auto& notif : notifications) {
@@ -1302,7 +1242,7 @@ void FilamentSensorManager::update_from_status(const json& status) {
 }
 
 void FilamentSensorManager::set_state_change_callback(StateChangeCallback callback) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex());
     state_change_callback_ = std::move(callback);
 }
 
@@ -1310,16 +1250,124 @@ void FilamentSensorManager::set_state_change_callback(StateChangeCallback callba
 // LVGL Subjects
 // ============================================================================
 
+bool FilamentSensorManager::parse_status(const nlohmann::json& /*status*/) {
+    return false;
+}
+
+void FilamentSensorManager::register_subjects(SubjectManager& subjects) {
+    // Role-state encoding (filament_runout_detected, filament_toolhead_detected,
+    // filament_entry_detected):
+    //   -1 = no sensor configured for this role (hide indicator entirely)
+    //    0 = sensor enabled, no filament (empty/red)
+    //    1 = sensor enabled, filament present (loaded/green)
+    //    2 = sensor configured but DISABLED (master toggle off or per-sensor
+    //        enabled=false) — render as "off/unknown" so the user can see
+    //        runout protection is inactive instead of mistaking a hidden
+    //        indicator for "everything is fine".
+    UI_MANAGED_SUBJECT_INT(runout_detected_, -1, "filament_runout_detected", subjects);
+    // Print-scoped runout: same encoding as filament_runout_detected but
+    // considers only the active print's used tools (lane truth). Driven by
+    // PrintStatusPanel via set_scoped_runout(); the in-print badge binds this.
+    UI_MANAGED_SUBJECT_INT(scoped_runout_, -1, "filament_runout_scoped", subjects);
+    UI_MANAGED_SUBJECT_INT(toolhead_detected_, -1, "filament_toolhead_detected", subjects);
+    UI_MANAGED_SUBJECT_INT(entry_detected_, -1, "filament_entry_detected", subjects);
+    UI_MANAGED_SUBJECT_INT(any_runout_, 0, "filament_any_runout", subjects);
+    UI_MANAGED_SUBJECT_INT(motion_signature_, 0, "filament_motion_signature", subjects);
+    UI_MANAGED_SUBJECT_INT(master_enabled_subject_, is_master_enabled() ? 1 : 0,
+                           "filament_master_enabled", subjects);
+    UI_MANAGED_SUBJECT_INT(config_revision_, 0, "filament_sensor_config_revision", subjects);
+    published_config_signature_.reset();
+}
+
+void FilamentSensorManager::refresh_subjects() {
+    // Read everything under the lock, set subjects after releasing it: an
+    // observer may call back into this manager from another thread's lock
+    // order (AmsState's clog meter reads clog_motion_sensor()).
+    int runout = -1;
+    int toolhead = -1;
+    int entry = -1;
+    int any_runout_value = 0;
+    int signature = 0;
+    bool master = true;
+    uint32_t config = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex());
+
+        // Helper to get subject value for a role. See register_subjects() for
+        // the -1/0/1/2 encoding rationale.
+        auto get_role_value = [this](FilamentSensorRole role) -> int {
+            // The monitoring pick skips sensors the firmware stood down: with
+            // several sensors sharing a role (multi-head hardware), a stood-down
+            // parked head must not speak for the role while the running head
+            // reports filament.
+            const auto* config = find_monitoring_config_by_role(role);
+            if (!config) {
+                return -1; // No sensor configured for this role — hide
+            }
+
+            // A configured sensor that is turned off (master toggle or per-sensor)
+            // surfaces as "disabled" so the user sees runout protection is OFF
+            // rather than seeing a hidden indicator and assuming all is well.
+            if (!master_enabled_ || !config->enabled) {
+                return 2; // Configured but disabled
+            }
+
+            auto* st = state(config->klipper_name);
+            if (!st || !st->available) {
+                return -1; // Sensor transiently unavailable — hide (not the same
+                           // as user-disabled; treat as no-opinion)
+            }
+
+            // When every holder is stood down the fallback holder's live reading
+            // shows: the subject is the sensor tile's display, and a firmware
+            // stand-down is not a user-visible "protection off" state. Runout
+            // decisions do not read this value; they ask monitors_runout().
+            return st->filament_detected ? 1 : 0;
+        };
+
+        runout = get_role_value(FilamentSensorRole::RUNOUT);
+        toolhead = get_role_value(FilamentSensorRole::TOOLHEAD);
+        entry = get_role_value(FilamentSensorRole::ENTRY);
+
+        // Suppress any_runout during startup grace period to avoid false modal triggers
+        // (Moonraker may report sensors as "empty" before Klipper fully initializes)
+        const bool in_grace = is_in_startup_grace_period();
+        const bool runout_now = has_any_runout();
+        any_runout_value = (in_grace || !runout_now) ? 0 : 1;
+        if (in_grace && runout_now) {
+            spdlog::info(
+                "[FilamentSensorManager] Suppressing runout modal during startup grace period");
+        }
+        signature = motion_signature();
+        master = master_enabled_;
+        config = config_signature();
+    }
+
+    // The revision ticks before the readings move, so an observer of both reads
+    // a reading that moves with it as configuration, not a physical event.
+    if (published_config_signature_ && *published_config_signature_ != config) {
+        lv_subject_set_int(&config_revision_, lv_subject_get_int(&config_revision_) + 1);
+    }
+    published_config_signature_ = config;
+
+    lv_subject_set_int(&master_enabled_subject_, master ? 1 : 0);
+    lv_subject_set_int(&runout_detected_, runout);
+    lv_subject_set_int(&toolhead_detected_, toolhead);
+    lv_subject_set_int(&entry_detected_, entry);
+    lv_subject_set_int(&any_runout_, any_runout_value);
+    lv_subject_set_int(&motion_signature_, signature);
+
+    spdlog::trace("[FilamentSensorManager] Subjects updated: runout={}, toolhead={}, entry={}, "
+                  "any_runout={}",
+                  runout, toolhead, entry, any_runout_value);
+}
+
 lv_subject_t* FilamentSensorManager::get_runout_detected_subject() {
     return &runout_detected_;
 }
 
-lv_subject_t* FilamentSensorManager::get_scoped_runout_subject() {
-    return &scoped_runout_;
-}
-
 void FilamentSensorManager::set_scoped_runout(int value) {
-    if (!subjects_initialized_) {
+    if (!subjects_initialized()) {
         return;
     }
     // Caller (PrintStatusPanel) drives this on the main LVGL thread.
@@ -1338,179 +1386,82 @@ lv_subject_t* FilamentSensorManager::get_any_runout_subject() {
     return &any_runout_;
 }
 
-lv_subject_t* FilamentSensorManager::get_motion_active_subject() {
-    return &motion_active_;
-}
-
-lv_subject_t* FilamentSensorManager::get_master_enabled_subject() {
-    return &master_enabled_subject_;
+lv_subject_t* FilamentSensorManager::get_motion_signature_subject() {
+    return &motion_signature_;
 }
 
 lv_subject_t* FilamentSensorManager::get_config_revision_subject() {
     return &config_revision_;
 }
 
-void FilamentSensorManager::bump_config_revision() {
-    if (subjects_initialized_) {
-        lv_subject_set_int(&config_revision_, lv_subject_get_int(&config_revision_) + 1);
-    }
-}
-
-lv_subject_t* FilamentSensorManager::get_sensor_count_subject() {
-    return &sensor_count_;
-}
-
-lv_subject_t* FilamentSensorManager::get_probe_triggered_subject() {
-    return &probe_triggered_;
-}
-
-bool FilamentSensorManager::is_probe_triggered() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    if (!master_enabled_) {
-        return false;
-    }
-
-    const auto* config = sensors_.find_by_role(FilamentSensorRole::Z_PROBE);
-    if (!config || !config->enabled) {
-        return false;
-    }
-
-    auto* st = sensors_.state(config->klipper_name);
-    if (!st || !st->available) {
-        return false;
-    }
-
-    return st->filament_detected;
-}
-
 bool FilamentSensorManager::is_in_startup_grace_period() const {
     auto now = std::chrono::steady_clock::now();
-    return (now - startup_time_) < AppConstants::Startup::SENSOR_STABILIZATION_PERIOD;
+    return (now - startup_time_) < app_constants::startup::kSensorStabilizationPeriod;
 }
 
 // ============================================================================
 // Private Helpers
 // ============================================================================
 
-bool FilamentSensorManager::parse_klipper_name(const std::string& klipper_name,
-                                               std::string& sensor_name,
-                                               FilamentSensorType& type) const {
-    const std::string switch_prefix = "filament_switch_sensor ";
-    const std::string motion_prefix = "filament_motion_sensor ";
-
-    if (klipper_name.rfind(switch_prefix, 0) == 0) {
-        sensor_name = klipper_name.substr(switch_prefix.length());
-        type = FilamentSensorType::SWITCH;
-        return !sensor_name.empty();
+int FilamentSensorManager::lane_index_for_sensor(const SensorEntry& sensor) const {
+    if (const auto lane = lanes_.find(sensor.klipper_name);
+        lane != lanes_.end() && lane->second >= 0) {
+        return lane->second;
     }
-
-    if (klipper_name.rfind(motion_prefix, 0) == 0) {
-        sensor_name = klipper_name.substr(motion_prefix.length());
-        type = FilamentSensorType::MOTION;
-        return !sensor_name.empty();
+    const std::string& sensor_name = sensor.display_name;
+    // Match "e<N>_filament" where <N> is one or more digits.
+    if (sensor_name.size() < 3 || sensor_name.front() != 'e') {
+        return -1;
     }
-
-    return false;
+    size_t pos = 1;
+    int value = 0;
+    while (pos < sensor_name.size() && std::isdigit(static_cast<unsigned char>(sensor_name[pos]))) {
+        value = value * 10 + (sensor_name[pos] - '0');
+        ++pos;
+    }
+    if (pos == 1) {
+        return -1; // no digits after 'e'
+    }
+    if (sensor_name.compare(pos, std::string::npos, "_filament") != 0) {
+        return -1;
+    }
+    return value;
 }
 
-bool FilamentSensorManager::monitors_runout(const FilamentSensorConfig& config) const {
-    if (!config.enabled || config.role == FilamentSensorRole::NONE) {
+FilamentSensorState* FilamentSensorManager::state(const std::string& klipper_name) {
+    const auto it = readings_.find(klipper_name);
+    return it == readings_.end() ? nullptr : &it->second;
+}
+
+const FilamentSensorState* FilamentSensorManager::state(const std::string& klipper_name) const {
+    const auto it = readings_.find(klipper_name);
+    return it == readings_.end() ? nullptr : &it->second;
+}
+
+bool FilamentSensorManager::monitors_runout(const SensorEntry& sensor) const {
+    if (!sensor.enabled || filament_role(sensor) == FilamentSensorRole::NONE) {
         return false;
     }
-    auto* st = sensors_.state(config.klipper_name);
-    return st && (st->enabled || observed_runouts_.count(config.klipper_name) > 0);
+    auto* st = state(sensor.klipper_name);
+    return st && (st->enabled || observed_runouts_.count(sensor.klipper_name) > 0);
 }
 
-const FilamentSensorConfig*
+const SensorEntry*
 FilamentSensorManager::find_monitoring_config_by_role(FilamentSensorRole role) const {
-    const FilamentSensorConfig* fallback = nullptr;
-    for (const auto& sensor : sensors_) {
-        if (sensor.role != role) {
+    const SensorEntry* fallback = nullptr;
+    for (const auto& sensor : entries_locked()) {
+        if (filament_role(sensor) != role) {
             continue;
         }
         if (!fallback) {
             fallback = &sensor;
         }
-        auto* st = sensors_.state(sensor.klipper_name);
+        auto* st = state(sensor.klipper_name);
         if (st && st->enabled) {
             return &sensor;
         }
     }
     return fallback;
-}
-
-void FilamentSensorManager::update_subjects() {
-    if (!subjects_initialized_) {
-        return;
-    }
-
-    // Helper to get subject value for a role. See init_subjects() for the
-    // -1/0/1/2 encoding rationale.
-    auto get_role_value = [this](FilamentSensorRole role) -> int {
-        // The monitoring pick skips sensors the firmware stood down: with
-        // several sensors sharing a role (multi-head hardware), a stood-down
-        // parked head must not speak for the role while the running head
-        // reports filament.
-        const auto* config = find_monitoring_config_by_role(role);
-        if (!config) {
-            return -1; // No sensor configured for this role — hide
-        }
-
-        // A configured sensor that is turned off (master toggle or per-sensor)
-        // surfaces as "disabled" so the user sees runout protection is OFF
-        // rather than seeing a hidden indicator and assuming all is well.
-        if (!master_enabled_ || !config->enabled) {
-            return 2; // Configured but disabled
-        }
-
-        auto* st = sensors_.state(config->klipper_name);
-        if (!st || !st->available) {
-            return -1; // Sensor transiently unavailable — hide (not the same
-                       // as user-disabled; treat as no-opinion)
-        }
-
-        // When every holder is stood down the fallback holder's live reading
-        // shows: the subject is the sensor tile's display, and a firmware
-        // stand-down is not a user-visible "protection off" state. Runout
-        // decisions do not read this value; they ask monitors_runout().
-        return st->filament_detected ? 1 : 0;
-    };
-
-    // Update per-role subjects
-    lv_subject_set_int(&runout_detected_, get_role_value(FilamentSensorRole::RUNOUT));
-    lv_subject_set_int(&toolhead_detected_, get_role_value(FilamentSensorRole::TOOLHEAD));
-    lv_subject_set_int(&entry_detected_, get_role_value(FilamentSensorRole::ENTRY));
-    lv_subject_set_int(&probe_triggered_, get_role_value(FilamentSensorRole::Z_PROBE));
-
-    // Update aggregate subjects
-    // Suppress any_runout during startup grace period to avoid false modal triggers
-    // (Moonraker may report sensors as "empty" before Klipper fully initializes)
-    bool in_grace = is_in_startup_grace_period();
-    int any_runout_value = (in_grace || !has_any_runout()) ? 0 : 1;
-    if (in_grace && has_any_runout()) {
-        spdlog::info(
-            "[FilamentSensorManager] Suppressing runout modal during startup grace period");
-    }
-    lv_subject_set_int(&any_runout_, any_runout_value);
-    lv_subject_set_int(&motion_active_, is_motion_active() ? 1 : 0);
-
-    spdlog::trace("[FilamentSensorManager] Subjects updated: runout={}, toolhead={}, entry={}, "
-                  "probe={}, any_runout={}",
-                  lv_subject_get_int(&runout_detected_), lv_subject_get_int(&toolhead_detected_),
-                  lv_subject_get_int(&entry_detected_), lv_subject_get_int(&probe_triggered_),
-                  lv_subject_get_int(&any_runout_));
-}
-
-void FilamentSensorManager::set_sync_mode(bool enabled) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    sync_mode_ = enabled;
-}
-
-void FilamentSensorManager::update_subjects_on_main_thread() {
-    // Called from the deferred update on the main LVGL thread
-    // It's safe to update subjects here without causing render-phase assertions
-    update_subjects();
 }
 
 } // namespace helix

@@ -130,6 +130,15 @@ class CapabilityOverrides {
     [[nodiscard]] bool is_available(const std::string& name) const;
 
     /**
+     * @brief Whether the user turned a capability on that detection did not find
+     *
+     * True only for an ENABLE override on a capability auto-detection reports
+     * absent. ENABLE on a detected capability changes nothing, so it is not
+     * "forced".
+     */
+    [[nodiscard]] bool is_forced_on(const std::string& name) const;
+
+    /**
      * @brief Check bed mesh availability (with overrides)
      */
     [[nodiscard]] bool has_bed_mesh() const {

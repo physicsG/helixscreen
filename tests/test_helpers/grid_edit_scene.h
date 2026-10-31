@@ -23,8 +23,8 @@ namespace helix {
 struct GridEditScene {
     /// The widget's span: one authored cell on each axis, which is
     /// TRACKS_PER_CELL tracks. Spans are in tracks everywhere.
-    static constexpr int COLSPAN = GridLayout::TRACKS_PER_CELL;
-    static constexpr int ROWSPAN = GridLayout::TRACKS_PER_CELL;
+    static constexpr int kColspan = GridLayout::TRACKS_PER_CELL;
+    static constexpr int kRowspan = GridLayout::TRACKS_PER_CELL;
 
     lv_obj_t* container = nullptr;
     lv_obj_t* widget = nullptr;
@@ -46,7 +46,7 @@ struct GridEditScene {
         // uses. 715x475 is the one size near this fixture's display that gives
         // Medium a 12x8 grid AND divides into exact 55px tracks, so there is no
         // LVGL remainder distribution to muddy the pixel arithmetic.
-        constexpr int CELL_PX = 55;
+        constexpr int kCellPx = 55;
         constexpr int content_w = 715;
         constexpr int content_h = 475;
         const auto dims = GridLayout::get_dimensions(UiBreakpoint::Medium, content_w, content_h);
@@ -54,8 +54,8 @@ struct GridEditScene {
         const int nrows = dims.rows;
         REQUIRE(ncols == 12);
         REQUIRE(nrows == 8);
-        REQUIRE(content_w == ncols * CELL_PX + (ncols - 1) * gutter);
-        REQUIRE(content_h == nrows * CELL_PX + (nrows - 1) * gutter);
+        REQUIRE(content_w == ncols * kCellPx + (ncols - 1) * gutter);
+        REQUIRE(content_h == nrows * kCellPx + (nrows - 1) * gutter);
 
         container = lv_obj_create(parent);
         lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
@@ -72,8 +72,8 @@ struct GridEditScene {
         widget = lv_obj_create(container);
         lv_obj_set_name(widget, "temperature");
         lv_obj_remove_flag(widget, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, COLSPAN, LV_GRID_ALIGN_STRETCH, 0,
-                             ROWSPAN);
+        lv_obj_set_grid_cell(widget, LV_GRID_ALIGN_STRETCH, 0, kColspan, LV_GRID_ALIGN_STRETCH, 0,
+                             kRowspan);
         lv_obj_update_layout(container);
 
         // Widget lives on page 1: PanelWidgetConfig::load() appends registry
@@ -92,8 +92,8 @@ struct GridEditScene {
                                  {"enabled", true},
                                  {"col", 0},
                                  {"row", 0},
-                                 {"colspan", COLSPAN},
-                                 {"rowspan", ROWSPAN}}}}}}}});
+                                 {"colspan", kColspan},
+                                 {"rowspan", kRowspan}}}}}}}});
 
         auto& mgr = PanelWidgetManager::instance();
         mgr.get_widget_config(panel_id).mark_dirty();
@@ -103,7 +103,7 @@ struct GridEditScene {
         // A widget ID parse_widget_array() doesn't recognise is dropped
         // silently, which would make commit_resize_with_snap() bail at its
         // find_config_index_for_widget() guard and never start an animation.
-        REQUIRE(config->page_entries(PAGE_INDEX).size() == 1);
+        REQUIRE(config->page_entries(kPageIndex).size() == 1);
     }
 
     ~GridEditScene() {
@@ -113,7 +113,7 @@ struct GridEditScene {
     GridEditScene(const GridEditScene&) = delete;
     GridEditScene& operator=(const GridEditScene&) = delete;
 
-    static constexpr size_t PAGE_INDEX = 1;
+    static constexpr size_t kPageIndex = 1;
 };
 
 } // namespace helix

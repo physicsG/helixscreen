@@ -212,3 +212,26 @@ TEST_CASE_METHOD(LVGLUITestFixture, "text_on_primary reads on the primary fill i
     REQUIRE(light != dark);
     check_mode(false); // and back, which also restores the fixture's light mode
 }
+
+// #text_on_danger is the same token for a solid #danger fill (a faulted tool
+// switcher cell).
+TEST_CASE_METHOD(LVGLUITestFixture, "text_on_danger reads on the danger fill in both modes",
+                 "[theme]") {
+    REQUIRE(lv_xml_register_component_from_data(
+                "text_on_danger_probe",
+                "<component><view extends=\"lv_obj\" style_text_color=\"#text_on_danger\""
+                " style_bg_color=\"#danger\"/></component>") == LV_RESULT_OK);
+    for (const bool dark : {false, true, false}) {
+        CAPTURE(dark);
+        theme_manager_apply_theme(theme_manager_get_active_theme(), dark);
+        helix::ui::UpdateQueue::instance().drain();
+        lv_obj_t* probe = static_cast<lv_obj_t*>(
+            lv_xml_create(lv_screen_active(), "text_on_danger_probe", nullptr));
+        REQUIRE(probe != nullptr);
+        const lv_color_t fg = lv_obj_get_style_text_color(probe, LV_PART_MAIN);
+        const lv_color_t want = theme_manager_get_contrast_adjusted_text(
+            theme_manager_get_color("text"), theme_manager_get_color("danger"));
+        CHECK(lv_color_to_u32(fg) == lv_color_to_u32(want));
+        lv_obj_delete(probe);
+    }
+}

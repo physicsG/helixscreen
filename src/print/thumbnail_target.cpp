@@ -15,7 +15,7 @@
 namespace helix {
 
 // LVGL 9 color format constant (magic comes from lv_image_dsc.h)
-static constexpr uint8_t COLOR_FORMAT_ARGB8888 = 0x10;
+static constexpr uint8_t kColorFormatArgb8888 = 0x10;
 
 namespace {
 
@@ -38,7 +38,7 @@ void ThumbnailProcessor::set_card_size_hint(int card_width, int card_height) {
 
 ThumbnailTarget ThumbnailProcessor::get_target_for_card(int card_width, int card_height) {
     ThumbnailTarget target;
-    target.color_format = COLOR_FORMAT_ARGB8888;
+    target.color_format = kColorFormatArgb8888;
 
     if (card_width <= 0 || card_height <= 0) {
         target.width = 120;
@@ -62,7 +62,7 @@ ThumbnailTarget ThumbnailProcessor::get_target_for_card(int card_width, int card
 ThumbnailTarget ThumbnailProcessor::get_target_for_resolution(int width, int height,
                                                               ThumbnailSize size) {
     ThumbnailTarget target;
-    target.color_format = COLOR_FORMAT_ARGB8888;
+    target.color_format = kColorFormatArgb8888;
 
     // Defensive: treat invalid dimensions as smallest breakpoint
     if (width <= 0 || height <= 0) {

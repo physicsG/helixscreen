@@ -24,7 +24,7 @@
 namespace helix::ui {
 
 /// Name of the global subject carrying the user's "Animations" preference.
-inline constexpr const char* ANIMATIONS_SUBJECT_NAME = "settings_animations_enabled";
+inline constexpr const char* kAnimationsSubjectName = "settings_animations_enabled";
 
 /**
  * @brief The preference subject, or nullptr when it has not been registered yet.
@@ -34,7 +34,7 @@ inline constexpr const char* ANIMATIONS_SUBJECT_NAME = "settings_animations_enab
  *              XML parsers pass their component's scope instead.
  */
 inline lv_subject_t* animations_pref_subject(lv_xml_component_scope_t* scope = nullptr) {
-    return lv_xml_get_subject(scope, ANIMATIONS_SUBJECT_NAME);
+    return lv_xml_get_subject(scope, kAnimationsSubjectName);
 }
 
 /**

@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Print status panel content, shared by the landscape and portrait panels:
+     the job tile and the printer tile, then the strip across the bottom.
+     PrintStatusLayoutFitter measures overlay_content and publishes
+     ps_arrangement (0 side by side, 1 job tile above printer tile, split
+     236:196 as decide_print_status_tile_layout() splits it).
+     The job tile is the preview card while printing; during pre-print the
+     start-sequence checklist covers it. -->
+<component>
+  <styles>
+    <style name="tiles_side" layout="flex" flex_flow="row"/>
+    <style name="tiles_stacked" layout="flex" flex_flow="column"/>
+    <style name="job_side" flex_grow="1"/>
+    <style name="job_stacked" flex_grow="236"/>
+    <style name="printer_side" flex_grow="1"/>
+    <style name="printer_stacked" flex_grow="196"/>
+  </styles>
+  <view extends="lv_obj"
+        width="100%" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="column"
+        style_pad_gap="#space_md" scrollable="false">
+    <lv_obj name="ps_tiles"
+            width="100%" flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0"
+            style_pad_gap="#space_md" scrollable="false">
+      <bind_style_if_eq name="tiles_side" subject="ps_arrangement" ref_value="0"/>
+      <bind_style_if_eq name="tiles_stacked" subject="ps_arrangement" ref_value="1"/>
+      <lv_obj name="ps_job_tile"
+              width="100%" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+        <bind_style_if_eq name="job_side" subject="ps_arrangement" ref_value="0"/>
+        <bind_style_if_eq name="job_stacked" subject="ps_arrangement" ref_value="1"/>
+        <print_status_preview_card width="100%" height="100%"/>
+        <print_status_job_checklist name="ps_job_checklist" ignore_layout="true">
+          <bind_flag_if_eq subject="preparing_visible" flag="hidden" ref_value="0"/>
+        </print_status_job_checklist>
+      </lv_obj>
+      <print_status_printer_tile name="ps_printer_tile" width="100%" height="100%">
+        <bind_style_if_eq name="printer_side" subject="ps_arrangement" ref_value="0"/>
+        <bind_style_if_eq name="printer_stacked" subject="ps_arrangement" ref_value="1"/>
+      </print_status_printer_tile>
+    </lv_obj>
+    <print_status_strip name="ps_strip"/>
+  </view>
+</component>

@@ -83,6 +83,50 @@ static const std::unordered_map<std::string, std::array<const char*, 12>> k_mont
        u8"11月", u8"12月"}}},
 };
 
+// Full month names indexed by tm_mon, in the form a long date uses (Russian takes the
+// genitive). Chinese and Japanese long dates are numeric and need none.
+static const std::unordered_map<std::string, std::array<const char*, 12>> k_month_full = {
+    {"en",
+     {{"January", "February", "March", "April", "May", "June", "July", "August", "September",
+       "October", "November", "December"}}},
+    {"de",
+     {{"Januar", "Februar", u8"März", "April", "Mai", "Juni", "Juli", "August", "September",
+       "Oktober", "November", "Dezember"}}},
+    {"fr",
+     {{"janvier", u8"février", "mars", "avril", "mai", "juin", "juillet", u8"août", "septembre",
+       "octobre", "novembre", u8"décembre"}}},
+    {"es",
+     {{"enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre",
+       "octubre", "noviembre", "diciembre"}}},
+    {"it",
+     {{"gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto",
+       "settembre", "ottobre", "novembre", "dicembre"}}},
+    {"pt",
+     {{"janeiro", "fevereiro", u8"março", "abril", "maio", "junho", "julho", "agosto", "setembro",
+       "outubro", "novembro", "dezembro"}}},
+    {"ru",
+     {{u8"января", u8"февраля", u8"марта", u8"апреля", u8"мая", u8"июня", u8"июля", u8"августа",
+       u8"сентября", u8"октября", u8"ноября", u8"декабря"}}},
+};
+
+// Full weekday names indexed by tm_wday (0 = Sunday)
+static const std::unordered_map<std::string, std::array<const char*, 7>> k_day_full = {
+    {"en", {{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}}},
+    {"de", {{"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"}}},
+    {"fr", {{"dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"}}},
+    {"es", {{"domingo", "lunes", "martes", u8"miércoles", "jueves", "viernes", u8"sábado"}}},
+    {"it",
+     {{"domenica", u8"lunedì", u8"martedì", u8"mercoledì", u8"giovedì", u8"venerdì", "sabato"}}},
+    {"pt",
+     {{"domingo", "segunda-feira", u8"terça-feira", "quarta-feira", "quinta-feira", "sexta-feira",
+       u8"sábado"}}},
+    {"ru",
+     {{u8"воскресенье", u8"понедельник", u8"вторник", u8"среда", u8"четверг", u8"пятница",
+       u8"суббота"}}},
+    {"zh", {{u8"星期日", u8"星期一", u8"星期二", u8"星期三", u8"星期四", u8"星期五", u8"星期六"}}},
+    {"ja", {{u8"日曜日", u8"月曜日", u8"火曜日", u8"水曜日", u8"木曜日", u8"金曜日", u8"土曜日"}}},
+};
+
 // ---------------------------------------------------------------------------
 // Format pattern groups
 // ---------------------------------------------------------------------------
@@ -95,10 +139,10 @@ enum class DatePatternGroup {
 };
 
 enum class ModifiedDatePatternGroup {
-    EN,         // "{mon} {dd} {time}"
-    DE,         // "{dd}. {mon} {time}"
-    ROMANCE_RU, // "{dd} {mon} {time}"
-    CJK,        // "{mm}/{dd} {time}"
+    EN,         // "{mon} {dd}"
+    DE,         // "{dd}. {mon}"
+    ROMANCE_RU, // "{dd} {mon}"
+    CJK,        // "{mm}/{dd}"
 };
 
 static DatePatternGroup get_date_pattern(const std::string& lang) {
@@ -127,38 +171,42 @@ static ModifiedDatePatternGroup get_modified_date_pattern(const std::string& lan
 // Helpers to get day/month name (system locale or fallback)
 // ---------------------------------------------------------------------------
 
-static std::string get_day_name(const struct tm* tm_info) {
+/// A localized name: the system locale's strftime `format` when it is active, else the
+/// active language's fallback table (English when it has none), `index` clamped to the table.
+template <size_t N>
+static std::string
+localized_name(const struct tm* tm_info, const char* format,
+               const std::unordered_map<std::string, std::array<const char*, N>>& table,
+               int index) {
     if (s_use_system_locale) {
-        char buf[32];
-        strftime(buf, sizeof(buf), "%a", tm_info);
+        char buf[64];
+        strftime(buf, sizeof(buf), format, tm_info);
         return buf;
     }
-
-    auto it = k_day_abbr.find(s_current_lang);
-    if (it == k_day_abbr.end()) {
-        it = k_day_abbr.find("en");
+    auto it = table.find(s_current_lang);
+    if (it == table.end()) {
+        it = table.find("en");
     }
-    int wday = tm_info->tm_wday;
-    if (wday < 0 || wday > 6)
-        wday = 0;
-    return it->second[static_cast<size_t>(wday)];
+    if (index < 0 || index >= static_cast<int>(N)) {
+        index = 0;
+    }
+    return it->second[static_cast<size_t>(index)];
+}
+
+static std::string get_day_name(const struct tm* tm_info) {
+    return localized_name(tm_info, "%a", k_day_abbr, tm_info->tm_wday);
 }
 
 static std::string get_month_name(const struct tm* tm_info) {
-    if (s_use_system_locale) {
-        char buf[32];
-        strftime(buf, sizeof(buf), "%b", tm_info);
-        return buf;
-    }
+    return localized_name(tm_info, "%b", k_month_abbr, tm_info->tm_mon);
+}
 
-    auto it = k_month_abbr.find(s_current_lang);
-    if (it == k_month_abbr.end()) {
-        it = k_month_abbr.find("en");
-    }
-    int mon = tm_info->tm_mon;
-    if (mon < 0 || mon > 11)
-        mon = 0;
-    return it->second[static_cast<size_t>(mon)];
+static std::string get_month_full_name(const struct tm* tm_info) {
+    return localized_name(tm_info, "%B", k_month_full, tm_info->tm_mon);
+}
+
+static std::string get_day_full_name(const struct tm* tm_info) {
+    return localized_name(tm_info, "%A", k_day_full, tm_info->tm_wday);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +215,10 @@ static std::string get_month_name(const struct tm* tm_info) {
 
 std::string locale_current_language() {
     return s_current_lang;
+}
+
+bool locale_uses_system_locale() {
+    return s_use_system_locale;
 }
 
 namespace {
@@ -192,8 +244,10 @@ void apply_locale(const std::string& lang_code) {
     s_current_lang = lang_code;
     s_use_system_locale = false;
 
-    // English works fine with C locale strftime
+    // English works fine with C locale strftime. A language set earlier may have left LC_TIME
+    // on its own locale, whose %p is empty in most of them.
     if (lang_code == "en") {
+        std::setlocale(LC_TIME, "C");
         spdlog::info("locale: language='en', using C locale (English default)");
         return;
     }
@@ -240,6 +294,59 @@ void locale_set_language(const std::string& lang_code) {
         fn(lang_code);
 }
 
+std::string format_localized_weekday_abbr(const struct tm* tm_info) {
+    if (!tm_info) {
+        return {};
+    }
+    return get_day_name(tm_info);
+}
+
+std::string format_localized_weekday(const struct tm* tm_info) {
+    if (!tm_info) {
+        return {};
+    }
+    return get_day_full_name(tm_info);
+}
+
+std::string format_localized_long_date(const struct tm* tm_info) {
+    if (!tm_info) {
+        return helix::format::UNAVAILABLE;
+    }
+
+    const int dd = tm_info->tm_mday;
+    const int mm = tm_info->tm_mon + 1;
+    const int yyyy = tm_info->tm_year + 1900;
+
+    char buf[96];
+
+    switch (get_date_pattern(s_current_lang)) {
+    case DatePatternGroup::EN:
+        // "October 21, 2019"
+        snprintf(buf, sizeof(buf), "%s %d, %d", get_month_full_name(tm_info).c_str(), dd, yyyy);
+        break;
+    case DatePatternGroup::DE:
+        // "21. Oktober 2019"
+        snprintf(buf, sizeof(buf), "%d. %s %d", dd, get_month_full_name(tm_info).c_str(), yyyy);
+        break;
+    case DatePatternGroup::ROMANCE_RU:
+        if (s_current_lang == "es" || s_current_lang == "pt") {
+            // "21 de octubre de 2019"
+            snprintf(buf, sizeof(buf), "%d de %s de %d", dd, get_month_full_name(tm_info).c_str(),
+                     yyyy);
+        } else {
+            // "21 octobre 2019"
+            snprintf(buf, sizeof(buf), "%d %s %d", dd, get_month_full_name(tm_info).c_str(), yyyy);
+        }
+        break;
+    case DatePatternGroup::CJK:
+        // "2019年10月21日"
+        snprintf(buf, sizeof(buf), u8"%d年%d月%d日", yyyy, mm, dd);
+        break;
+    }
+
+    return buf;
+}
+
 std::string format_localized_date(const struct tm* tm_info) {
     if (!tm_info) {
         return helix::format::UNAVAILABLE;
@@ -274,38 +381,44 @@ std::string format_localized_date(const struct tm* tm_info) {
     return buf;
 }
 
-std::string format_localized_modified_date(const struct tm* tm_info) {
+std::string format_localized_month_day(const struct tm* tm_info) {
     if (!tm_info) {
         return helix::format::UNAVAILABLE;
     }
 
     std::string mon = get_month_name(tm_info);
-    std::string time_str = format_time(tm_info);
     int dd = tm_info->tm_mday;
     int mm = tm_info->tm_mon + 1;
 
-    char buf[64];
+    char buf[48];
 
     switch (get_modified_date_pattern(s_current_lang)) {
     case ModifiedDatePatternGroup::EN:
-        // "Feb 28 2:30 PM"
-        snprintf(buf, sizeof(buf), "%s %d %s", mon.c_str(), dd, time_str.c_str());
+        // "Feb 28"
+        snprintf(buf, sizeof(buf), "%s %d", mon.c_str(), dd);
         break;
     case ModifiedDatePatternGroup::DE:
-        // "28. Feb. 14:30"
-        snprintf(buf, sizeof(buf), "%d. %s %s", dd, mon.c_str(), time_str.c_str());
+        // "28. Feb."
+        snprintf(buf, sizeof(buf), "%d. %s", dd, mon.c_str());
         break;
     case ModifiedDatePatternGroup::ROMANCE_RU:
-        // "28 févr. 14:30"
-        snprintf(buf, sizeof(buf), "%d %s %s", dd, mon.c_str(), time_str.c_str());
+        // "28 févr."
+        snprintf(buf, sizeof(buf), "%d %s", dd, mon.c_str());
         break;
     case ModifiedDatePatternGroup::CJK:
-        // "2/28 14:30"
-        snprintf(buf, sizeof(buf), "%d/%d %s", mm, dd, time_str.c_str());
+        // "2/28"
+        snprintf(buf, sizeof(buf), "%d/%d", mm, dd);
         break;
     }
 
     return buf;
+}
+
+std::string format_localized_modified_date(const struct tm* tm_info) {
+    if (!tm_info) {
+        return helix::format::UNAVAILABLE;
+    }
+    return format_localized_month_day(tm_info) + " " + format_time(tm_info);
 }
 
 std::string format_localized_short_date(const struct tm* tm_info) {

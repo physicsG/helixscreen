@@ -5,6 +5,7 @@
 
 #include "hv/WebSocketClient.h"
 #include "json_utils.h"
+#include "moonraker_auth.h"
 #include "rpc_error_correlation.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -16,13 +17,13 @@ namespace helix {
 
 RequestId MoonrakerRequestTracker::send(hv::WebSocketClient& ws, const std::string& method,
                                         const json& params,
-                                        std::function<void(const json&)> success_cb,
-                                        std::function<void(const MoonrakerError&)> error_cb,
+                                        helix::SharedCallback<void(const json&)> success_cb,
+                                        helix::SharedCallback<void(const MoonrakerError&)> error_cb,
                                         uint32_t timeout_ms, bool silent,
                                         std::optional<rpc_error_policy::CallerIntent> intent) {
     // Atomically fetch and increment to avoid race condition in concurrent calls
     // Note: request_id_ starts at 0, but we increment FIRST, so actual IDs start at 1
-    // This ensures we never return 0 (INVALID_REQUEST_ID) for a valid request
+    // This ensures we never return 0 (kInvalidRequestId) for a valid request
     RequestId id = request_id_.fetch_add(1) + 1;
 
     // Create pending request
@@ -46,7 +47,7 @@ RequestId MoonrakerRequestTracker::send(hv::WebSocketClient& ws, const std::stri
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
 
-        if (pending_requests_.size() >= MAX_PENDING_REQUESTS) {
+        if (pending_requests_.size() >= kMaxPendingRequests) {
             spdlog::warn("[Request Tracker] Pending request queue full ({} requests), "
                          "rejecting {} (id={})",
                          pending_requests_.size(), method, id);
@@ -57,7 +58,7 @@ RequestId MoonrakerRequestTracker::send(hv::WebSocketClient& ws, const std::stri
                 spdlog::error("[INTERNAL] "
                               "[Request Tracker] Request ID {} already has a registered callback",
                               id);
-                return INVALID_REQUEST_ID;
+                return kInvalidRequestId;
             }
             pending_requests_.insert({id, request});
             spdlog::trace(
@@ -76,7 +77,7 @@ RequestId MoonrakerRequestTracker::send(hv::WebSocketClient& ws, const std::stri
                 spdlog::error("[Request Tracker] Queue-full error callback threw: {}", e.what());
             }
         }
-        return INVALID_REQUEST_ID;
+        return kInvalidRequestId;
     }
 
     // Build and send JSON-RPC message with the registered ID
@@ -97,10 +98,10 @@ RequestId MoonrakerRequestTracker::send(hv::WebSocketClient& ws, const std::stri
     int result = ws.send(payload);
     spdlog::trace("[Request Tracker] send({}) returned {}", method, result);
 
-    // Return the request ID on success, or INVALID_REQUEST_ID on send failure
+    // Return the request ID on success, or kInvalidRequestId on send failure
     if (result < 0) {
         // Send failed - remove pending request and invoke error callback
-        std::function<void(const MoonrakerError&)> error_callback_copy;
+        helix::SharedCallback<void(const MoonrakerError&)> error_callback_copy;
         std::string method_name;
         {
             std::lock_guard<std::mutex> lock(requests_mutex_);
@@ -122,7 +123,7 @@ RequestId MoonrakerRequestTracker::send(hv::WebSocketClient& ws, const std::stri
                 spdlog::error("[Request Tracker] Error callback threw exception: {}", e.what());
             }
         }
-        return INVALID_REQUEST_ID;
+        return kInvalidRequestId;
     }
 
     return id;
@@ -166,8 +167,8 @@ bool MoonrakerRequestTracker::route_response(const json& msg,
     spdlog::trace("[Request Tracker] Got response for id={}", id);
 
     // Copy callbacks out before invoking to avoid deadlock
-    std::function<void(const json&)> success_cb;
-    std::function<void(const MoonrakerError&)> error_cb;
+    helix::SharedCallback<void(const json&)> success_cb;
+    helix::SharedCallback<void(const MoonrakerError&)> error_cb;
     std::string method_name;
     bool has_error = false;
     rpc_error_policy::CallerIntent request_intent;
@@ -211,8 +212,10 @@ bool MoonrakerRequestTracker::route_response(const json& msg,
 
     // Invoke callbacks outside the lock to avoid deadlock
     if (has_error) {
-        // Check if error toasts should be suppressed (e.g., during shutdown)
-        bool suppress_toast = suppress_error_toast && suppress_error_toast();
+        // Check if error toasts should be suppressed (e.g., during shutdown). A printer that
+        // refused our login fails every request; its one Login Required message says why.
+        bool suppress_toast =
+            (suppress_error_toast && suppress_error_toast()) || moonraker_auth::unauthorized();
 
         // Who reports this error is one decision with one implementation —
         // helix::rpc_error_policy::decide(), shared with the mock's inline gcode
@@ -281,7 +284,7 @@ bool MoonrakerRequestTracker::route_response(const json& msg,
 }
 
 bool MoonrakerRequestTracker::cancel(RequestId id) {
-    if (id == INVALID_REQUEST_ID) {
+    if (id == kInvalidRequestId) {
         return false;
     }
 
@@ -304,7 +307,7 @@ void MoonrakerRequestTracker::check_timeouts(helix::MoonrakerEventCallback emit_
         std::string method_name;
         uint32_t timeout_ms;
         bool silent;
-        std::function<void()> error_callback;
+        helix::SharedCallback<void()> error_callback;
     };
     std::vector<TimeoutInfo> timed_out;
 
@@ -391,7 +394,7 @@ void MoonrakerRequestTracker::check_timeouts(helix::MoonrakerEventCallback emit_
     // to 1275 of the 2000 lines in a debug bundle's ring buffer, capping its
     // reach at ~3.5 h of mostly nothing (bundle 3Q2GB74K). So the debug line
     // additionally requires the oldest request to have aged past
-    // PENDING_LOG_MIN_AGE_MS — below that the queue is working, not stuck. The
+    // kPendingLogMinAgeMs — below that the queue is working, not stuck. The
     // warn path is unaffected: a request past its warn age always logs.
     //
     // The warn age is per-method, because "old" is not one number. A blocking
@@ -400,16 +403,15 @@ void MoonrakerRequestTracker::check_timeouts(helix::MoonrakerEventCallback emit_
     // healthy waiting, which at 30 s made the tracker the single loudest thing
     // in an AFC user's log (77 warnings in one bundle, every one of them normal).
     if (pending_count > 0) {
-        const uint32_t warn_age = oldest_method == "printer.gcode.script"
-                                      ? PENDING_WARN_AGE_GCODE_MS
-                                      : PENDING_WARN_AGE_MS;
+        const uint32_t warn_age =
+            oldest_method == "printer.gcode.script" ? kPendingWarnAgeGcodeMs : kPendingWarnAgeMs;
         const bool warn = oldest_age_ms > warn_age;
         const auto now = std::chrono::steady_clock::now();
         const bool signature_changed = pending_count != last_logged_pending_count_ ||
                                        oldest_method != last_logged_oldest_method_ ||
                                        warn != last_logged_was_warn_;
         const bool warn_refresh = warn && now - last_warn_log_ >= std::chrono::seconds(10);
-        const bool old_enough = warn || oldest_age_ms >= PENDING_LOG_MIN_AGE_MS;
+        const bool old_enough = warn || oldest_age_ms >= kPendingLogMinAgeMs;
 
         if (old_enough && (signature_changed || warn_refresh)) {
             if (warn) {
@@ -449,7 +451,7 @@ void MoonrakerRequestTracker::check_timeouts(helix::MoonrakerEventCallback emit_
 void MoonrakerRequestTracker::cleanup_all() {
     // Two-phase pattern: collect callbacks under lock, invoke outside lock
     // This prevents deadlock if callback tries to send new request
-    std::vector<std::function<void()>> cleanup_callbacks;
+    std::vector<helix::SharedCallback<void()>> cleanup_callbacks;
 
     // Phase 1: Copy callbacks and clear map (under lock)
     {

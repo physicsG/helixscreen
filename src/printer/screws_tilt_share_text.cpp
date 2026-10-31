@@ -17,17 +17,17 @@ std::string format_screw_share_z(const ScrewTiltResult& screw) {
 
 std::string format_screw_share_adjustment(const ScrewTiltResult& screw, const char* base_label) {
     if (screw.is_reference) {
-        return base_label ? base_label : SCREWS_TILT_SHARE_BASE_LABEL;
+        return base_label ? base_label : kScrewsTiltShareBaseLabel;
     }
     std::string adjustment(helix::text_io::trim(screw.adjustment));
     if (adjustment.empty()) {
-        return SCREWS_TILT_SHARE_NO_ADJUSTMENT;
+        return kScrewsTiltShareNoAdjustment;
     }
     return adjustment;
 }
 
 std::string build_screws_tilt_share_text(const std::vector<ScrewTiltResult>& results) {
-    std::string out = SCREWS_TILT_SHARE_HEADER;
+    std::string out = kScrewsTiltShareHeader;
 
     if (results.empty()) {
         out += "\n(no results)";

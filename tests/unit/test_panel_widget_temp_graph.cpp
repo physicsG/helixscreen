@@ -1,9 +1,17 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_modal.h"
+#include "ui_swatch.h"
+#include "ui_update_queue.h"
+
 #include "../../include/ui_overlay_temp_graph.h"
 #include "../../include/ui_temp_graph.h"
 #include "../../src/ui/panel_widgets/temp_graph_widget.h"
+#include "../lvgl_test_fixture.h"
+#include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/discovery_of_objects.h"
+#include "../test_helpers/sensors_forget.h"
 #include "../ui_test_utils.h"
 #include "grid_layout.h"
 #include "lvgl/lvgl.h"
@@ -70,13 +78,9 @@ class helix::TempGraphWidgetTestAccess {
 };
 
 // Reuse the same lightweight fixture as test_temp_graph.cpp
-class TempGraphFeatureFixture {
+class TempGraphFeatureFixture : public LVGLTestFixture {
   public:
     TempGraphFeatureFixture() {
-        lv_init_safe();
-        lv_display_t* disp = lv_display_create(800, 480);
-        alignas(64) static lv_color_t buf1[800 * 10];
-        lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
         screen = lv_obj_create(NULL);
     }
 
@@ -218,7 +222,7 @@ TEST_CASE("TempGraphWidget: registered in widget registry", "[temp_graph][panel_
     REQUIRE(def->min_rowspan == 2);
     // A band widget: capped only by the widest grid the engine builds, so a
     // default layout can run it the full width of an ultrawide or 4K panel.
-    REQUIRE(def->max_colspan == GridLayout::MAX_TRACKS);
+    REQUIRE(def->max_colspan == GridLayout::kMaxTracks);
     REQUIRE(def->max_rowspan == 8);
     REQUIRE(def->hardware_gate_subject == nullptr);
 }
@@ -581,7 +585,7 @@ TEST_CASE("TempGraphWidget::features_for_size edge cases", "[temp_graph][panel_w
 
 TEST_CASE("TempGraphWidget::attach() seed extents yield everything but readouts",
           "[temp_graph][panel_widget][features]") {
-    // Mirrors the constexpr SEED_WIDTH_PX/SEED_HEIGHT_PX in
+    // Mirrors the constexpr kSeedWidthPx/kSeedHeightPx in
     // TempGraphWidget::attach() (temp_graph_widget.cpp) — the measured
     // 800x480 two-span (colspan=2/rowspan=2) extents used to seed
     // initial_features, so the tier is Medium by construction.
@@ -591,11 +595,11 @@ TEST_CASE("TempGraphWidget::attach() seed extents yield everything but readouts"
     // both axes, and withholds the readouts that need the widest band. A
     // change to features_for_size() or to these seed values should fail this
     // test rather than silently changing the widget's pre-resize state.
-    constexpr int SEED_WIDTH_PX = 233;
-    constexpr int SEED_HEIGHT_PX = 230;
+    constexpr int kSeedWidthPx = 233;
+    constexpr int kSeedHeightPx = 230;
 
     uint32_t f =
-        TempGraphWidget::features_for_size(SEED_WIDTH_PX, SEED_HEIGHT_PX, UiBreakpoint::Medium);
+        TempGraphWidget::features_for_size(kSeedWidthPx, kSeedHeightPx, UiBreakpoint::Medium);
 
     uint32_t expected = TEMP_GRAPH_FEATURE_LINES | TEMP_GRAPH_FEATURE_TARGET_LINES |
                         TEMP_GRAPH_FEATURE_LEGEND | TEMP_GRAPH_FEATURE_Y_AXIS |
@@ -762,6 +766,12 @@ TEST_CASE("sensor_display_name maps Klipper names to user-facing labels",
     // populated in the global test PrinterState — these labels are derived
     // unconditionally).
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("heater_bed") == "Bed");
+    // Every listed kind loses its type prefix; a humidity chip names its chip instead.
+    REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("temperature_sensor mcu_temp") ==
+            "Mcu temp");
+    REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("bme280 chamber_air") ==
+            "Chamber air (BME280)");
+    REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("tmc2240 stepper_x") == "Stepper x");
     REQUIRE(TempGraphWidgetTestAccess::sensor_display_name("chamber") == "Chamber");
 
     // Pre-discovery / no extruder yet known: derived from suffix.
@@ -1028,7 +1038,9 @@ TEST_CASE("TempGraphWidget: default config lists aux heaters but not the chamber
     // The chamber is the "chamber" row; its own sensor listed again would plot
     // the chamber twice.
     auto& tsm = sensors::TemperatureSensorManager::instance();
-    tsm.discover({"temperature_sensor chamber", "heater_generic filament_dryer"});
+    helix::test::SensorsForget forget;
+    tsm.discover(
+        helix::test::discovery_of({"temperature_sensor chamber", "heater_generic filament_dryer"}));
 
     TempGraphWidget widget("test_default_chamber_skip");
     const auto& config = TempGraphWidgetTestAccess::build_default_config(widget);
@@ -1041,6 +1053,94 @@ TEST_CASE("TempGraphWidget: default config lists aux heaters but not the chamber
     };
     CHECK(has("heater_generic filament_dryer"));
     CHECK_FALSE(has("temperature_sensor chamber"));
+}
 
-    tsm.discover({});
+// ============================================================================
+// Config modal: series colour swatches
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "TempGraphWidget config: series colours are painter circles that cycle",
+                 "[temp_graph][panel_widget][config][swatch]") {
+    TempGraphWidget widget("test_swatch");
+    nlohmann::json config = {
+        {"sensors",
+         {
+             {{"name", "extruder"},
+              {"enabled", true},
+              {"color", lv_color_to_u32(kTempGraphSeriesColors[2]) & 0xFFFFFF}},
+         }}};
+    widget.set_config(config);
+    REQUIRE(widget.on_edit_configure());
+    helix::ui::UpdateQueue::instance().drain();
+
+    lv_obj_t* dialog = ModalStack::instance().top_dialog();
+    REQUIRE(dialog != nullptr);
+    lv_obj_t* swatch = lv_obj_find_by_name(dialog, "sensor_swatch_0");
+    REQUIRE(swatch != nullptr);
+    lv_obj_t* disc = lv_obj_find_by_name(swatch, "color_swatch_disc");
+    REQUIRE(disc != nullptr);
+    CHECK(helix::ui::has_swatch_paint(disc));
+    CHECK(lv_obj_get_style_radius(disc, LV_PART_MAIN) == LV_RADIUS_CIRCLE);
+    CHECK(lv_color_eq(helix::ui::swatch_color_of(disc), kTempGraphSeriesColors[2]));
+
+    lv_obj_send_event(swatch, LV_EVENT_CLICKED, nullptr);
+    CHECK(lv_color_eq(helix::ui::swatch_color_of(disc), kTempGraphSeriesColors[3]));
+}
+
+// ============================================================================
+// Config modal: rows are the XML temp_graph_series_row bound to subjects
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "TempGraphWidget config: one bound row per series, switches and follow save",
+                 "[temp_graph][panel_widget][config][rows]") {
+    TempGraphWidget widget("test_rows");
+    widget.set_config({{"sensors",
+                        {
+                            {{"name", "extruder"}, {"enabled", true}},
+                            {{"name", "heater_bed"}, {"enabled", true}},
+                        }}});
+    REQUIRE(widget.on_edit_configure());
+    helix::ui::UpdateQueue::instance().drain();
+
+    lv_obj_t* dialog = ModalStack::instance().top_dialog();
+    REQUIRE(dialog != nullptr);
+
+    lv_obj_t* name0 = lv_obj_find_by_name(dialog, "sensor_name_0");
+    lv_obj_t* name1 = lv_obj_find_by_name(dialog, "sensor_name_1");
+    REQUIRE(name0 != nullptr);
+    REQUIRE(name1 != nullptr);
+    CHECK(std::string(lv_label_get_text(name0)) ==
+          TempGraphWidgetTestAccess::sensor_display_name("extruder"));
+    CHECK(std::string(lv_label_get_text(name1)) == "Bed");
+    CHECK(lv_obj_find_by_name(dialog, "sensor_name_2") == nullptr);
+
+    lv_obj_t* sw0 = lv_obj_find_by_name(dialog, "sensor_switch_0");
+    lv_obj_t* sw1 = lv_obj_find_by_name(dialog, "sensor_switch_1");
+    REQUIRE(sw0 != nullptr);
+    REQUIRE(sw1 != nullptr);
+    CHECK(lv_obj_has_state(sw0, LV_STATE_CHECKED));
+    CHECK(lv_obj_has_state(sw1, LV_STATE_CHECKED));
+
+    // The user turns the bed off and follow on.
+    lv_obj_remove_state(sw1, LV_STATE_CHECKED);
+    lv_obj_send_event(sw1, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_t* follow = lv_obj_find_by_name(dialog, "follow_switch");
+    REQUIRE(follow != nullptr);
+    lv_obj_add_state(follow, LV_STATE_CHECKED);
+    lv_obj_send_event(follow, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    lv_obj_t* ok = lv_obj_find_by_name(dialog, "btn_primary");
+    REQUIRE(ok != nullptr);
+    lv_obj_send_event(ok, LV_EVENT_CLICKED, nullptr);
+    helix::ui::UpdateQueue::instance().drain();
+
+    const auto& saved = TempGraphWidgetTestAccess::get_config(widget);
+    REQUIRE(saved["sensors"].size() == 2);
+    CHECK(saved["sensors"][0]["name"] == "extruder");
+    CHECK(saved["sensors"][0]["enabled"] == true);
+    CHECK(saved["sensors"][1]["name"] == "heater_bed");
+    CHECK(saved["sensors"][1]["enabled"] == false);
+    CHECK(saved["follow_overlay"] == true);
 }

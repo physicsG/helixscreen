@@ -25,6 +25,7 @@
 #include "../test_fixtures.h"
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
+#include "ams_state.h"
 #include "clog_detection_config_modal.h"
 #include "helix-xml/src/xml/lv_xml.h"
 
@@ -114,6 +115,27 @@ TEST_CASE_METHOD(XMLTestFixture, "Clog config hides mode/length when the backend
     // Tear the widget tree down before `modal` (and its subjects) go out of
     // scope — the bindings above observe subjects the modal owns.
     lv_obj_delete(dlg);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "Clog config hides the danger threshold for a motion sensor",
+                 "[clog][gate][xml][motion][1823]") {
+    auto& ams = helix::AmsState::instance();
+    ams.init_subjects(true);
+    ClogDetectionConfigModal modal("clog_detection", "home");
+    REQUIRE(register_component("components/clog_detection_config_modal"));
+    lv_obj_t* dlg = create_component("clog_detection_config_modal");
+    REQUIRE(dlg != nullptr);
+    lv_obj_t* threshold = lv_obj_find_by_name(dlg, "threshold_section");
+    REQUIRE(threshold != nullptr);
+    lv_subject_t* mode = ams.get_clog_meter_mode_subject();
+
+    lv_subject_set_int(mode, 4); // Motion: a state has no danger band
+    CHECK(lv_obj_has_flag(threshold, LV_OBJ_FLAG_HIDDEN));
+    lv_subject_set_int(mode, 1); // Encoder
+    CHECK_FALSE(lv_obj_has_flag(threshold, LV_OBJ_FLAG_HIDDEN));
+
+    lv_obj_delete(dlg);
+    lv_subject_set_int(mode, 0);
 }
 
 TEST_CASE("Save sends the detection length only when the user moved it", "[clog][gate]") {

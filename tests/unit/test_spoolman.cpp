@@ -1971,8 +1971,8 @@ TEST_CASE("sort_spools_by_recency sorts spools with no usable timestamp last",
 
     // The dated spool wins however old it is; undated ones fall to id tie-break.
     CHECK(spools[0].id == 62);
-    CHECK(spool_recency_key(spools[1]) == SPOOL_RECENCY_NONE);
-    CHECK(spool_recency_key(spools[2]) == SPOOL_RECENCY_NONE);
+    CHECK(spool_recency_key(spools[1]) == kSpoolRecencyNone);
+    CHECK(spool_recency_key(spools[2]) == kSpoolRecencyNone);
     CHECK(ids_of(spools) == std::vector<int>{62, 61, 60});
 }
 

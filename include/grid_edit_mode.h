@@ -257,7 +257,7 @@ class GridEditMode {
     /// gesture holds. Otherwise the gesture's first pressing cycle decides
     /// its grab latch from the selection standing at the press: a press on
     /// the selected widget, its grab band included, arms, and travel past
-    /// DRAG_THRESHOLD_PX starts a drag or a resize. Any other press selects
+    /// kDragThresholdPx starts a drag or a resize. Any other press selects
     /// the widget under the pointer on that first cycle, and no later cycle
     /// of the gesture selects again.
     void handle_pressing(lv_event_t* e);
@@ -578,11 +578,11 @@ class GridEditMode {
     /// the time between reads rather than per read.
     uint32_t drag_step_tick_ = 0;
     /// One-shot flip a majority crossing requested, due
-    /// CROSS_PAGE_CROSSING_DELAY_MS after the crossing, and its direction.
+    /// kCrossPageCrossingDelayMs after the crossing, and its direction.
     /// Dwell changes never cancel it.
     lv_timer_t* crossing_flip_timer_ = nullptr;
     int crossing_flip_dir_ = 0;
-    /// One-shot flip counting CROSS_PAGE_DWELL_MS while the pointer stays in an
+    /// One-shot flip counting kCrossPageDwellMs while the pointer stays in an
     /// edge zone, toward cross_page_.dwell_dir.
     lv_timer_t* dwell_flip_timer_ = nullptr;
 
@@ -630,7 +630,7 @@ class GridEditMode {
     LatticeKey lattice_key_{};
 
     // Drag threshold: track press origin, only start real drag after movement
-    static constexpr int DRAG_THRESHOLD_PX = 12;
+    static constexpr int kDragThresholdPx = 12;
     /// A press on the selected widget is armed, watching for the drag threshold.
     bool press_armed_ = false;
     /// Where the grab's press armed: the arming cycle's point, or the point

@@ -3,8 +3,6 @@
 
 #include "clog_meter_model.h"
 
-#include "ui_update_queue.h"
-
 #include "ams_state.h"
 #include "observer_factory.h"
 
@@ -43,11 +41,7 @@ ClogMeterModel::ClogMeterModel(Callback on_change) : on_change_(std::move(on_cha
 }
 
 ClogMeterModel::~ClogMeterModel() {
-    // Freeze the queue around teardown so a background enqueue cannot land
-    // between the drain and the observer resets.
-    auto freeze = UpdateQueue::instance().scoped_freeze();
-    UpdateQueue::instance().drain();
-
+    // The observers are immediate, so nothing of this model waits in the queue.
     mode_obs_.reset();
     value_obs_.reset();
     warning_obs_.reset();

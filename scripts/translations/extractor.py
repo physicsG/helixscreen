@@ -282,6 +282,14 @@ ADJACENT_LITERALS_GROUP = r'((?:"(?:[^"\\]|\\.)*"\s*)+)'
 # the translation gates can enumerate the real runtime keys rather than
 # re-deriving the pattern.
 LV_TR_RUN_RE = re.compile(r"lv_tr\s*\(\s*" + ADJACENT_LITERALS_GROUP)
+# helix::ui::tr_plural(one_key, other_key, n): both keys are translation keys,
+# and the singular may be nullptr. Group 1 is the singular run (None for
+# nullptr), group 2 the plural run. Exported for the format-specifier gate.
+_ADJACENT_LITERALS_RUN = r'(?:"(?:[^"\\]|\\.)*"\s*)+'
+TR_PLURAL_RUN_RE = re.compile(
+    r"\btr_plural\s*\(\s*(?:nullptr|(" + _ADJACENT_LITERALS_RUN + r"))\s*,\s*("
+    + _ADJACENT_LITERALS_RUN + r")"
+)
 CPP_TRANSLATABLE_PATTERNS = [
     # lv_tr("text") - explicitly marked for translation (handles escaped quotes
     # and adjacent literal concatenation across multiple lines)
@@ -290,6 +298,11 @@ CPP_TRANSLATABLE_PATTERNS = [
     # the lookup happens later at the call site via lv_tr(). See
     # include/translation_loader.h.
     r"TR_NOOP\s*\(\s*" + ADJACENT_LITERALS_GROUP,
+    # tr_plural("1 thing", "%d things", n) - both keys, singular first; see
+    # include/i18n_plural.h.
+    r"\btr_plural\s*\(\s*" + ADJACENT_LITERALS_GROUP,
+    r"\btr_plural\s*\(\s*(?:nullptr|" + _ADJACENT_LITERALS_RUN + r")\s*,\s*"
+    + ADJACENT_LITERALS_GROUP,
     # lv_label_set_text(label, "text")
     r"lv_label_set_text\s*\([^,]+,\s*" + ADJACENT_LITERALS_GROUP,
     # return "Status Text"  (for status strings) — single literal only.
@@ -720,7 +733,7 @@ def extract_strings_from_cpp(cpp_path: Path) -> Set[str]:
             continue
         # lv_tr() and TR_NOOP() are both explicit marks: the heuristics below
         # (a format string, a short unit) do not second-guess them.
-        is_lv_tr = "lv_tr" in pattern or "TR_NOOP" in pattern
+        is_lv_tr = "lv_tr" in pattern or "TR_NOOP" in pattern or "tr_plural" in pattern
         is_adjacent = ADJACENT_LITERALS_GROUP in pattern
         for match in re.finditer(pattern, content):
             # The key must equal what the compiler produces, not the source form.

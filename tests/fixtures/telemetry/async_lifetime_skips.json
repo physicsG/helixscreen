@@ -1,0 +1,20 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "event": "async_lifetime_skips",
+  "is_shutdown": false,
+  "other_count": 0,
+  "schema_version": 3,
+  "tags": [
+    {
+      "count": 1,
+      "tag": "Envelope::cb"
+    }
+  ],
+  "timestamp": "<timestamp>",
+  "total_skips": 1,
+  "uptime_sec": 0
+}

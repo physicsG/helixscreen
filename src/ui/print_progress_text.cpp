@@ -26,8 +26,6 @@ void PrintProgressText::init_subjects(SubjectManager& subjects) {
     UI_MANAGED_SUBJECT_STRING(remaining_subject_, remaining_buf_, "0h 00m", "print_remaining",
                               subjects);
     UI_MANAGED_SUBJECT_STRING(eta_subject_, eta_buf_, "", "print_eta", subjects);
-    UI_MANAGED_SUBJECT_STRING(speed_subject_, speed_buf_, "100%", "print_speed_text", subjects);
-    UI_MANAGED_SUBJECT_STRING(flow_subject_, flow_buf_, "100%", "print_flow_text", subjects);
 }
 
 void PrintProgressText::refresh_layer() {
@@ -59,22 +57,14 @@ void PrintProgressText::refresh_filament_used() {
 }
 
 void PrintProgressText::refresh_speed_flow() {
-    auto text = helix::tune::status_speed_flow_text(
-        DisplaySettingsManager::instance().get_speed_flow_physical_units(),
-        lifecycle_.speed_percent(), lifecycle_.flow_percent(),
-        lv_subject_get_int(printer_state_.motion_state().get_live_velocity_subject()),
-        lv_subject_get_int(printer_state_.motion_state().get_live_extruder_velocity_subject()),
+    auto& motion = printer_state_.motion_state();
+    const double flow = helix::tune::volumetric_flow_mm3_s(
+        lv_subject_get_int(motion.get_live_extruder_velocity_subject()),
         printer_state_.get_discovery().filament_diameter_mm());
-    // The extruder velocity observer fires several times a second; only a
-    // changed string is worth a relabel.
-    if (text.speed != speed_buf_) {
-        std::snprintf(speed_buf_, sizeof(speed_buf_), "%s", text.speed.c_str());
-        lv_subject_copy_string(&speed_subject_, speed_buf_);
-    }
-    if (text.flow != flow_buf_) {
-        std::snprintf(flow_buf_, sizeof(flow_buf_), "%s", text.flow.c_str());
-        lv_subject_copy_string(&flow_subject_, flow_buf_);
-    }
+    std::snprintf(
+        speed_buf_, sizeof(speed_buf_), "%s",
+        helix::tune::live_rates_text(lv_subject_get_int(motion.get_live_velocity_subject()), flow)
+            .c_str());
 }
 
 void PrintProgressText::show_elapsed(int seconds) {

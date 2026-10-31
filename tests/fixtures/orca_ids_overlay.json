@@ -1,0 +1,5 @@
+[
+  {"id": "acme-abs", "type": "ABS-GF"},
+  {"id": "acme-asa", "orca_id": "OVERLAY_ASA"},
+  {"id": "user-tpu", "brand": "User", "name": "TPU", "type": "TPU", "orca_id": "OVERLAY_TAKEN"}
+]

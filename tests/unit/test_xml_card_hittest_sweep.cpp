@@ -9,6 +9,7 @@
 // Companion to test_print_file_card_hittest.cpp. Regression: prestonbrown/helixscreen#1101
 
 #include "ui_severity_card.h"
+#include "ui_swatch.h"
 
 #include "../test_fixtures.h"
 
@@ -117,6 +118,9 @@ TEST_CASE_METHOD(XMLTestFixture, "nozzle_temp_bed_row: value area routes clicks 
 // small indicator's tap target.
 TEST_CASE_METHOD(XMLTestFixture, "ams_current_tool: colour swatch routes clicks to root",
                  "[xml][hittest][sweep]") {
+    helix::ui::register_swatch_paint_widget();
+    REQUIRE(register_component("components/color_swatch"));
+    REQUIRE(register_component("components/color_dot"));
     REQUIRE(register_component("ams_current_tool"));
     lv_obj_t* root = create_component("ams_current_tool");
     REQUIRE(root != nullptr);
@@ -131,21 +135,43 @@ TEST_CASE_METHOD(XMLTestFixture, "ams_current_tool: colour swatch routes clicks 
     check_reaches_root(test_screen(), root, swatch, "color_swatch");
 }
 
-// ui_panel_notification_history.cpp:163 attaches CLICKED to the item root
-// (and explicitly re-adds LV_OBJ_FLAG_CLICKABLE) for entries carrying an action.
+// A history row whose entry carries an action is clickable through its
+// has_action subject, and its event_cb fires on the item root.
 TEST_CASE_METHOD(XMLTestFixture, "notification_history_item: body routes clicks to item root",
                  "[xml][hittest][sweep]") {
-    ui_severity_card_register();
     REQUIRE(register_component("notification_history_item"));
-    const char* attrs[] = {"severity",  "info",  "title", "Filament runout", "message", "Slot 1",
-                           "timestamp", "12:01", nullptr};
+    lv_subject_t severity{}, has_message{}, has_action{}, title_subj{}, message_subj{}, time_subj{};
+    char title_buf[32], message_buf[32], time_buf[16];
+    lv_subject_init_int(&severity, 0);
+    lv_subject_init_int(&has_message, 1);
+    lv_subject_init_int(&has_action, 1);
+    lv_subject_init_string(&title_subj, title_buf, nullptr, sizeof(title_buf), "Filament runout");
+    lv_subject_init_string(&message_subj, message_buf, nullptr, sizeof(message_buf), "Slot 1");
+    lv_subject_init_string(&time_subj, time_buf, nullptr, sizeof(time_buf), "12:01");
+    lv_xml_register_subject(nullptr, "hittest_row_severity", &severity);
+    lv_xml_register_subject(nullptr, "hittest_row_has_message", &has_message);
+    lv_xml_register_subject(nullptr, "hittest_row_has_action", &has_action);
+    lv_xml_register_subject(nullptr, "hittest_row_title", &title_subj);
+    lv_xml_register_subject(nullptr, "hittest_row_message", &message_subj);
+    lv_xml_register_subject(nullptr, "hittest_row_time", &time_subj);
+    const char* attrs[] = {"severity_subject",
+                           "hittest_row_severity",
+                           "title_subject",
+                           "hittest_row_title",
+                           "message_subject",
+                           "hittest_row_message",
+                           "has_message_subject",
+                           "hittest_row_has_message",
+                           "timestamp_subject",
+                           "hittest_row_time",
+                           "has_action_subject",
+                           "hittest_row_has_action",
+                           nullptr};
     lv_obj_t* item = create_component("notification_history_item", attrs);
     REQUIRE(item != nullptr);
     lv_obj_set_width(item, 400);
     lv_obj_update_layout(item);
-
-    // The panel makes the root clickable when the entry has an action.
-    lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
+    REQUIRE(lv_obj_has_flag(item, LV_OBJ_FLAG_CLICKABLE));
 
     lv_obj_t* title = lv_obj_find_by_name(item, "item_title");
     lv_obj_t* message = lv_obj_find_by_name(item, "item_message");
@@ -154,4 +180,15 @@ TEST_CASE_METHOD(XMLTestFixture, "notification_history_item: body routes clicks 
 
     check_reaches_root(test_screen(), item, title, "item_title");
     check_reaches_root(test_screen(), item, message, "item_message");
+
+    lv_obj_delete(item);
+    for (const char* name :
+         {"hittest_row_severity", "hittest_row_has_message", "hittest_row_has_action",
+          "hittest_row_title", "hittest_row_message", "hittest_row_time"}) {
+        lv_xml_unregister_subject(nullptr, name);
+    }
+    for (lv_subject_t* subj :
+         {&severity, &has_message, &has_action, &title_subj, &message_subj, &time_subj}) {
+        lv_subject_deinit(subj);
+    }
 }

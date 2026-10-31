@@ -43,7 +43,7 @@ class PlrOfferLifetimeFixture : public LVGLUITestFixture {
         auto& ps = get_printer_state();
         ps.init_subjects();
 
-        subject_ = ps.print_state().get_pl_env_valid_subject();
+        subject_ = ps.print_state().get_plr_snapshot_valid_subject();
         REQUIRE(subject_ != nullptr);
         baseline_observers_ = lv_ll_get_len(&subject_->subs_ll);
 

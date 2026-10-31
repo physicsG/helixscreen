@@ -95,7 +95,7 @@ TEST_CASE_METHOD(XMLTestFixture, "lane_state subject bounds-checks its index",
                  "[ams][lane_state][subject]") {
     AmsState::instance().init_subjects(true);
     CHECK(AmsState::instance().get_slot_lane_state_subject(-1) == nullptr);
-    CHECK(AmsState::instance().get_slot_lane_state_subject(AmsState::MAX_SLOTS) == nullptr);
+    CHECK(AmsState::instance().get_slot_lane_state_subject(AmsState::kMaxSlots) == nullptr);
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "lane_state follows the single-slot update path",

@@ -6,6 +6,7 @@
 
 #include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
+#include "system_settings_manager.h"
 #include "theme_manager.h"
 
 #include <cstring>
@@ -18,6 +19,7 @@ using helix::ui::format_file_size;
 using helix::ui::format_modified_date;
 using helix::ui::format_print_time;
 using helix::ui::format_relative_time;
+using helix::ui::format_uptime;
 
 // ============================================================================
 // format_print_time() Tests
@@ -207,6 +209,32 @@ TEST_CASE("UI Utils: format_relative_time", "[ui_utils][format][i18n]") {
         REQUIRE(format_relative_time(86400000) == "1 day ago");   // exactly 1 day
         REQUIRE(format_relative_time(172800000) == "2 days ago"); // 2 days
         REQUIRE(format_relative_time(604800000) == "7 days ago"); // 1 week
+    }
+}
+
+// ============================================================================
+// format_uptime() Tests
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "UI Utils: format_uptime", "[ui_utils][format][i18n][1939]") {
+    struct RestoreEnglish {
+        ~RestoreEnglish() {
+            helix::SystemSettingsManager::instance().set_language("en");
+        }
+    } restore_english;
+    helix::SystemSettingsManager::instance().set_language("en");
+
+    SECTION("English") {
+        CHECK(format_uptime(-1) == "Up: --");
+        CHECK(format_uptime(42 * 60) == "Up: 42m");
+        CHECK(format_uptime(3 * 3600 + 12 * 60) == "Up: 3h 12m");
+        CHECK(format_uptime(3 * 86400 + 14 * 3600 + 5 * 60) == "Up: 3d 14h");
+    }
+
+    SECTION("Translated") {
+        helix::SystemSettingsManager::instance().set_language("de");
+        CHECK(format_uptime(3 * 3600 + 12 * 60) == "Betriebszeit: 3 Std 12 Min");
+        CHECK(format_uptime(3 * 86400 + 14 * 3600) == "Betriebszeit: 3 Tg. 14 Std");
     }
 }
 
@@ -566,4 +594,63 @@ TEST_CASE_METHOD(LVGLTestFixture,
     CHECK(lv_obj_get_child_count(container) == 0);
 
     lv_display_remove_event_cb_with_user_data(disp, count_layout_pass, nullptr);
+}
+
+// ============================================================================
+// store_until_deleted()
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "UI Utils: store_until_deleted clears the slot when the object dies",
+                 "[ui_utils][store_until_deleted]") {
+    lv_obj_t* slot = nullptr;
+    lv_obj_t* obj = lv_obj_create(test_screen());
+    helix::ui::store_until_deleted(&slot, obj);
+    CHECK(slot == obj);
+
+    lv_obj_delete(obj);
+    CHECK(slot == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "UI Utils: store_until_deleted ignores the death of an object the slot has left",
+                 "[ui_utils][store_until_deleted]") {
+    lv_obj_t* slot = nullptr;
+    lv_obj_t* a = lv_obj_create(test_screen());
+    lv_obj_t* b = lv_obj_create(test_screen());
+    helix::ui::store_until_deleted(&slot, a);
+    helix::ui::store_until_deleted(&slot, b);
+
+    lv_obj_delete(a);
+    CHECK(slot == b);
+
+    lv_obj_delete(b);
+    CHECK(slot == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "UI Utils: store_until_deleted registers one handler per object",
+                 "[ui_utils][store_until_deleted]") {
+    lv_obj_t* slot = nullptr;
+    lv_obj_t* obj = lv_obj_create(test_screen());
+    const uint32_t base = lv_obj_get_event_count(obj);
+
+    helix::ui::store_until_deleted(&slot, obj);
+    CHECK(lv_obj_get_event_count(obj) == base + 1);
+    helix::ui::store_until_deleted(&slot, obj);
+    CHECK(lv_obj_get_event_count(obj) == base + 1);
+
+    lv_obj_delete(obj);
+    CHECK(slot == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "UI Utils: store_until_deleted with nullptr stores nullptr",
+                 "[ui_utils][store_until_deleted]") {
+    lv_obj_t* slot = nullptr;
+    lv_obj_t* obj = lv_obj_create(test_screen());
+    helix::ui::store_until_deleted(&slot, obj);
+    helix::ui::store_until_deleted(&slot, nullptr);
+    CHECK(slot == nullptr);
+
+    lv_obj_delete(obj);
+    CHECK(slot == nullptr);
 }

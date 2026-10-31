@@ -22,7 +22,7 @@
 namespace helix {
 
 // Brother QL raster row width: 90 bytes = 720 pixels for QL-800/810W/820NWB
-static constexpr int RASTER_ROW_BYTES = 90;
+static constexpr int kRasterRowBytes = 90;
 
 struct BrotherQLPrinter::Impl {};
 

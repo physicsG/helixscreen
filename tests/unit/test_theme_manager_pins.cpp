@@ -61,10 +61,11 @@ std::set<std::string> token_names() {
         names.insert(std::string(name) + "_light");
         names.insert(std::string(name) + "_dark");
     }
-    for (const char* name : {"border_radius", "border_width", "border_opacity", "shadow_intensity",
-                             "shadow_opa", "shadow_offset_y", "shadow_cast", "overlay_shadow_opa",
-                             "overlay_width_transient", "overlay_width_destination", "nav_width",
-                             "font_body", "font_small", "font_heading", "text_on_primary"}) {
+    for (const char* name :
+         {"border_radius", "border_width", "border_opacity", "shadow_intensity", "shadow_opa",
+          "shadow_offset_y", "shadow_cast", "overlay_shadow_opa", "overlay_width_transient",
+          "overlay_width_destination", "nav_width", "font_body", "font_small", "font_heading",
+          "text_on_primary", "text_on_danger", "chart_measured"}) {
         names.insert(name);
     }
     for (int i = 1; i <= 8; ++i) {
@@ -159,6 +160,20 @@ TEST_CASE_METHOD(LVGLUITestFixture, "theme constants match the golden snapshot",
     }
 }
 
+// theme_manager_init scans every top-level ui_xml file, component-local <consts> included,
+// and the global scope is first-registration-wins. A case that inits the theme without
+// globals.xml loaded would otherwise let timelapse_video_card's px card_height (220)
+// shadow globals.xml's 80% for the rest of the process.
+TEST_CASE_METHOD(LVGLTestFixture, "theme init on a bare fixture leaves globals.xml consts winning",
+                 "[theme_pins][theme]") {
+    const bool original_dark = theme_manager_is_dark_mode();
+    theme_manager_init(lv_display_get_default(), original_dark);
+
+    const char* card_height = lv_xml_get_const_silent(nullptr, "card_height");
+    REQUIRE(card_height != nullptr);
+    CHECK(std::string(card_height) == "80%");
+}
+
 TEST_CASE_METHOD(LVGLUITestFixture, "theme_changed generation bumps on apply and toggle",
                  "[theme_pins][theme]") {
     RestoreTheme restore;
@@ -214,7 +229,8 @@ void noop_cb(lv_observer_t*, lv_subject_t*) {}
 TEST_CASE_METHOD(LVGLUITestFixture, "theme subjects exist once the theme is initialized",
                  "[theme_pins][theme]") {
     std::vector<lv_subject_t*> subjects;
-    for (const char* name : {"ui_breakpoint", "ui_breakpoint_v", "ui_is_portrait"}) {
+    for (const char* name :
+         {"ui_breakpoint", "ui_breakpoint_v", "ui_is_portrait", "ui_is_ultrawide"}) {
         lv_subject_t* s = lv_xml_get_subject(nullptr, name);
         REQUIRE(s != nullptr);
         subjects.push_back(s);
@@ -248,6 +264,8 @@ TEST_CASE_METHOD(LVGLTestFixture,
     subs.breakpoint_v_ready = true;
     lv_subject_init_int(&subs.is_portrait, 0);
     subs.is_portrait_ready = true;
+    lv_subject_init_int(&subs.is_ultrawide, 0);
+    subs.is_ultrawide_ready = true;
     for (size_t i = 0; i < subs.kSwatchCount; ++i) {
         lv_subject_init_string(&subs.swatch_desc[i], subs.swatch_bufs[i], nullptr,
                                subs.kSwatchBufSize, "x");
@@ -255,7 +273,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     subs.swatch_ready = true;
 
     std::vector<lv_subject_t*> all = {&subs.changed, &subs.breakpoint, &subs.breakpoint_v,
-                                      &subs.is_portrait};
+                                      &subs.is_portrait, &subs.is_ultrawide};
     for (auto& s : subs.swatch_desc)
         all.push_back(&s);
     for (lv_subject_t* s : all) {
@@ -272,6 +290,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     CHECK_FALSE(subs.breakpoint_ready);
     CHECK_FALSE(subs.breakpoint_v_ready);
     CHECK_FALSE(subs.is_portrait_ready);
+    CHECK_FALSE(subs.is_ultrawide_ready);
     CHECK_FALSE(subs.swatch_ready);
     CHECK(subs.generation == 0);
 

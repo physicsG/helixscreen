@@ -39,7 +39,7 @@ namespace {
 // Deliberately NOT benchy_thumbnail_white.png: that is the no-thumbnail
 // placeholder AND the subject's initial value, so publishing it would be a
 // no-op write that never fires the observer these cases are about.
-constexpr const char* THUMB_PATH = "A:assets/images/printer_400.png";
+constexpr const char* kThumbPath = "A:assets/images/printer_400.png";
 
 /// Owns a PrintStatusPanel with a thumbnail widget attached, which is what the
 /// XML build normally supplies. Without it the observer's image branch — the
@@ -93,7 +93,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     // A late publish belonging to the PREVIOUS print.
-    state().print_state().set_print_thumbnail("previous.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("previous.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
 
     // The stamp is the self-sealing half: claiming current.gcode is on screen
@@ -108,13 +108,13 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     report_filename("current.gcode");
     helix::ui::UpdateQueue::instance().drain();
 
-    state().print_state().set_print_thumbnail("current.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("current.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
 
     // The identity check must not degenerate into ignoring everything: the
     // matching publish still has to land, and displayed_file_ must record what
     // is ACTUALLY shown.
-    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
+    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPath);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "current.gcode");
 }
 
@@ -124,10 +124,10 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     // PrintStartController pre-sets a USB thumbnail before the filename observer
     // fires. With no effective filename yet there is nothing to compare against,
     // so the value must still be taken.
-    state().print_state().set_print_thumbnail("usb_model.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("usb_model.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
 
-    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
+    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPath);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "usb_model.gcode");
 }
 
@@ -142,13 +142,13 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
 // proxy for it.
 
 // A second real asset, so both publishes resolve and the two are distinguishable.
-constexpr const char* THUMB_PATH_B = "A:assets/images/filament_spool.png";
+constexpr const char* kThumbPathB = "A:assets/images/filament_spool.png";
 
 TEST_CASE_METHOD(PrintStatusThumbFixture,
                  "PrintStatusPanel: an externally started print invalidates the preview marker",
                  "[print_status][thumbnail]") {
     report_filename("printA.gcode");
-    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::displayed_file(panel()) == "printA.gcode");
 
@@ -161,9 +161,9 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) != "printA.gcode");
 
     // And the new print's thumbnail must be adopted once it lands.
-    state().print_state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printB.gcode", kThumbPathB);
     helix::ui::UpdateQueue::instance().drain();
-    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH_B);
+    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPathB);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "printB.gcode");
 }
 
@@ -186,19 +186,19 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     // describing the incoming filename.
     state().print_state().set_print_identity_override("printA.gcode");
     report_filename("printA.gcode");
-    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
-    REQUIRE(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
+    REQUIRE(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPath);
 
     // Next print starts externally, so nothing re-points the override at it.
     report_filename("printB.gcode");
-    state().print_state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printB.gcode", kThumbPathB);
     helix::ui::UpdateQueue::instance().drain();
 
     // The override no longer describes the incoming file, so it must be dropped
     // rather than pinning the panel to the previous print.
     CHECK(PrintStatusPanelTestAccess::identity_override(panel()).empty());
-    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH_B);
+    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPathB);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "printB.gcode");
 }
 
@@ -228,10 +228,10 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     helix::ui::UpdateQueue::instance().drain();
 
     // The manager publishes under the resolved original, as it always does.
-    state().print_state().set_print_thumbnail("Widget.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("Widget.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
 
-    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == THUMB_PATH);
+    CHECK(PrintStatusPanelTestAccess::cached_thumbnail_path(panel()) == kThumbPath);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "Widget.gcode");
 }
 
@@ -246,17 +246,17 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     // observer alone would leave the previous print's image on screen and let
     // the src assertion pass for the wrong reason.
     report_filename("printA.gcode");
-    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printA.gcode", kThumbPathB);
     helix::ui::UpdateQueue::instance().drain();
-    REQUIRE(PrintStatusPanelTestAccess::displayed_src(panel()) == THUMB_PATH_B);
+    REQUIRE(PrintStatusPanelTestAccess::displayed_src(panel()) == kThumbPathB);
 
-    state().print_state().set_print_thumbnail("Widget.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("Widget.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
 
     report_filename(".helix_temp/modified_1748_Widget.gcode");
     helix::ui::UpdateQueue::instance().drain();
 
-    CHECK(PrintStatusPanelTestAccess::displayed_src(panel()) == THUMB_PATH);
+    CHECK(PrintStatusPanelTestAccess::displayed_src(panel()) == kThumbPath);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "Widget.gcode");
 }
 
@@ -282,7 +282,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     const std::string placeholder = helix::PrinterPrintState::no_thumbnail_placeholder();
 
     report_filename("printA.gcode");
-    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::displayed_file(panel()) == "printA.gcode");
 
@@ -301,9 +301,9 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) != "printB.gcode");
 
     // The real image still lands when the fetch completes.
-    state().print_state().set_print_thumbnail("printB.gcode", THUMB_PATH_B);
+    state().print_state().set_print_thumbnail("printB.gcode", kThumbPathB);
     helix::ui::UpdateQueue::instance().drain();
-    CHECK(PrintStatusPanelTestAccess::displayed_src(panel()) == THUMB_PATH_B);
+    CHECK(PrintStatusPanelTestAccess::displayed_src(panel()) == kThumbPathB);
     CHECK(PrintStatusPanelTestAccess::displayed_file(panel()) == "printB.gcode");
 }
 
@@ -320,7 +320,7 @@ TEST_CASE_METHOD(PrintStatusThumbFixture,
     const std::string placeholder = helix::PrinterPrintState::no_thumbnail_placeholder();
 
     report_filename("printA.gcode");
-    state().print_state().set_print_thumbnail("printA.gcode", THUMB_PATH);
+    state().print_state().set_print_thumbnail("printA.gcode", kThumbPath);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(PrintStatusPanelTestAccess::displayed_file(panel()) == "printA.gcode");
 

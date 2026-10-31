@@ -300,14 +300,14 @@ Log source: `message.txt`, systemd `journalctl` capture around Apr 16 21:14 loca
    [Prerendered] Using printer image: assets/images/printers/prerendered/voron-24r2-300.bin
    ```
    `helix::find_readable("printer_database.json")` (src/application/data_root_resolver.cpp:87) checks the writable user config dir first, then falls back to `<data_dir>/assets/config/printer_database.json`. An install upgraded from before the config/assets split can end up with neither path populated (seed never re-extracted, user config cleaned). The error text reports the user-path it would *prefer* — not that the seed is missing.
-   **Note**: the `qidi_plus_4` preset **does exist** (`assets/config/printer_database.json:2227-2320`) and specifies `"image": "qidi-plus-4.png"`, which also exists at `assets/images/printers/qidi-plus-4.png`. Fix the DB-not-loading issue and detection + image should just work — no new assets needed for this printer.
+   **Note**: the `qidi_plus_4` preset **does exist** (`assets/config/printer_database.json`, id `qidi_plus_4`) and specifies `"image": "qidi-plus-4.png"`, which also exists at `assets/images/printers/qidi-plus-4.png`. Fix the DB-not-loading issue and detection + image should just work — no new assets needed for this printer.
 
 3. **Translation gaps (German)**
    ```
    lv_translation_get: `Pair Bluetooth Scanner` tag is not found
    lv_translation_get: `?` tag is not found
    ```
-   `Pair Bluetooth Scanner` needs a translation key + German string. The `?` tag looks like a placeholder leaking from the Spoolman/filament side — worth tracking separately.
+   `Pair Bluetooth Scanner` has a German string (`Bluetooth-Scanner koppeln`); the log predates it. The `?` tag looks like a placeholder leaking from the Spoolman/filament side — worth tracking separately.
 
 4. **InputScanner: paired but no evdev**
    ```
@@ -352,7 +352,7 @@ Given the data above, a `qidi-plus4` entry in `printer_database.json` should cov
     "z_offset_calibration_strategy": "beacon_autocal",
     "kinematics": "corexy",
     "capabilities": {
-      "ams_type": "qidi_box",                            // already planned per QIDI_SUPPORT.md
+      "ams_type": "qidi_box",                            // set in the shipped entry
       "ams_slots_default": 4,
       "filament_runout_sensor": true,
       "filament_width_sensor": true,
@@ -363,7 +363,7 @@ Given the data above, a `qidi-plus4` entry in `printer_database.json` should cov
       "aux_cooling_fan": true,
       "exhaust_fan": true
     },
-    "image": "qidi-plus4-305.bin",                       // need asset
+    "image": "qidi-plus-4.png",                          // ships; .bin prerenders are generated on-device
     "detection": {
       "hostnames": ["qidiplus4", "qidi-plus4", "qidi_plus_4"],
       "required_objects": ["heater_generic chamber"],
@@ -373,9 +373,7 @@ Given the data above, a `qidi-plus4` entry in `printer_database.json` should cov
 }
 ```
 
-**Open assets needed** before shipping the preset:
-- Prerendered 3D image at the standard sizes (mirror the AD5M/Voron recipe in `assets/images/printers/prerendered/`)
-- A source PNG in `assets/images/printers/` for the runtime fallback path
+No assets are missing: `assets/images/printers/qidi-plus-4.png` ships, and `PrinterCache` generates the prerendered `.bin` on-device at first use.
 
 ---
 
@@ -383,14 +381,14 @@ Given the data above, a `qidi-plus4` entry in `printer_database.json` should cov
 
 ### Short-term (ship independently of hardware access)
 
-1. **Treat Kalico as Klipper** in app-name checks — verify whether this is already done; if not, extend the accepted list to include `Kalico`.
+1. ~~Treat Kalico as Klipper~~ — nothing to do: detection has no app-name gate (see [Implication for detection](#implication-for-detection)).
 2. **Investigate "slots=6" mystery.** Code inspection (`src/printer/ams_backend_happy_hare.cpp:465-475`) shows slots are **not** defaulted to 6 — they're initialized from `gate_status.size()`. And `num_gates` parsing at lines 393-442 correctly reads `printer.configfile.settings.mmu.num_gates` in all forms (int/string/array), including string `"4"` → single 4-slot unit at lines 969-976. So the 6 has to come from:
    - the `gate_status` array actually being length 6 (possible if Happy Hare exposes a longer array than `num_gates` declares — check `printer.mmu.gate_status` in a fresh Moonraker dump from this user), **or**
    - a transient pre-status default before `gate_status` arrives (needs runtime trace).
-   Next step: ask the user for `curl http://qidiplus4/printer/objects/query?mmu` to see the live `gate_status` / `num_gates` payload.
+   Next step: the live `gate_status` / `num_gates` payload from `curl http://qidiplus4/printer/objects/query?mmu`. A Plus 4 + Happy Hare owner seeing the wrong slot count can attach it to a [new issue](https://github.com/prestonbrown/helixscreen/issues/new).
 3. **Fill out existing `qidi_plus_4` preset** — it only has `image`, `print_start_profile`, `ams_type`, `notes`, and heuristics. Add explicit specs: `build_volume`, `hotend_max_temp`, `bed_max_temp`, `chamber` (present, heated, max_temp), `kinematics: "corexy"`, `probe_type: "beacon_contact"`, `z_offset_calibration_strategy`. The missing-specs pattern is shared across all QIDI entries (`qidi_x_plus_3` has the same gaps) — fix the schema once, apply everywhere.
 4. **Prerendered image pipeline**: PNG `qidi-plus-4.png` exists; `assets/images/printers/prerendered/` is empty (pipeline generates `.bin` on-device at first use via `PrinterCache`). No action needed here unless we decide to ship prerendered `.bin` files for cold-start performance.
-5. **Add `Pair Bluetooth Scanner` translation key** and a German string (`Bluetooth-Scanner koppeln`).
+5. ~~Add `Pair Bluetooth Scanner` translation key~~ — done: `translations/de.yml` carries `Bluetooth-Scanner koppeln`.
 6. **Happy Hare → QIDI Box heuristic**: when `mmu_machine.filament_heater` is set AND the gcode namespace contains `BOX_PRINT_START`, label the UI as **"QIDI Box (via Happy Hare)"**. This distinguishes from stock Happy Hare on a Voron/Blackbox 8-track install.  *No existing code does this — macro scan lives in `printer_detector.cpp:577-579` for preset matching only; AMS backend choice is static from `printer_database.json` (`src/printer/ams_backend_qidi.cpp:22-58`).*
 
 ### Blocked on test hardware (for later)

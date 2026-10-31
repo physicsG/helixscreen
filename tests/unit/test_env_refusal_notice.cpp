@@ -211,9 +211,8 @@ TEST_CASE("env-refusal: a complete handoff stays exact at the cap size", "[1712]
 
 // ============================================================================
 // surface_env_refusal_from_launcher: the glue, observed at the notification
-// hooks the test binary substitutes for ui_notification_warning() and
-// ui_notification_warning_sticky(). Both stubs hand the hook the JOINED
-// "message - detail" string.
+// hooks for ui_notification_warning() and ui_notification_warning_sticky().
+// Both hand the hook the JOINED "message - detail" history row.
 // ============================================================================
 
 namespace {
@@ -243,7 +242,7 @@ struct EnvVarGuard {
 
 /// Collect everything the app surfaces through the warning channels while $1
 /// runs, split by channel: timed (auto-dismissing) vs sticky (stays until
-/// closed). The stubs call the hooks synchronously, so no drain is needed.
+/// closed). The hooks run on the calling thread, so no drain is needed.
 struct Surfaced {
     std::vector<std::string> timed;
     std::vector<std::string> sticky;

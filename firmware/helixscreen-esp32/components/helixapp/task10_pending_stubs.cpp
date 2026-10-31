@@ -36,7 +36,7 @@
 
 namespace {
 // Non-fatal: log the call and return. Every Moonraker ErrorCallback in this file
-// is std::function<void(const MoonrakerError&)>, so callers that carry one route
+// is helix::SharedCallback<void(const MoonrakerError&)>, so callers that carry one route
 // through task10_unimplemented_err() below to surface failure to the UI.
 [[maybe_unused]] void task10_unimplemented(const char* sym) {
     ESP_LOGE("helixapp", "task10 stub: %s", sym);
@@ -46,7 +46,8 @@ namespace {
 // unavailable" instead of hanging on a response that will never arrive. Does NOT
 // call any SuccessCallback — that would signal a false success.
 [[maybe_unused]] void
-task10_unimplemented_err(const char* sym, const std::function<void(const MoonrakerError&)>& err) {
+task10_unimplemented_err(const char* sym,
+                         const helix::SharedCallback<void(const MoonrakerError&)>& err) {
     task10_unimplemented(sym);
     if (err) {
         MoonrakerError e;
@@ -138,6 +139,14 @@ void MoonrakerTimelapseAPI::get_last_frame_info(std::function<void(const LastFra
 
 void MoonrakerTimelapseAPI::get_webcam_list(WebcamListCallback, ErrorCallback) {
     task10_unimplemented("MoonrakerTimelapseAPI::get_webcam_list");
+}
+
+void MoonrakerTimelapseAPI::post_webcam(const nlohmann::json&, WebcamCallback, ErrorCallback) {
+    task10_unimplemented("MoonrakerTimelapseAPI::post_webcam");
+}
+
+void MoonrakerTimelapseAPI::delete_webcam(const WebcamInfo&, SuccessCallback, ErrorCallback) {
+    task10_unimplemented("MoonrakerTimelapseAPI::delete_webcam");
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +256,12 @@ void MoonrakerSpoolmanAPI::search_spoolman_external_filaments(const std::string&
                                                               helix::ExternalFilamentListCallback,
                                                               ErrorCallback err) {
     task10_unimplemented_err("MoonrakerSpoolmanAPI::search_spoolman_external_filaments", err);
+}
+
+void MoonrakerSpoolmanAPI::set_spoolman_filament_extra_number(int, const std::string&,
+                                                              const std::string&, double,
+                                                              SuccessCallback, ErrorCallback err) {
+    task10_unimplemented_err("MoonrakerSpoolmanAPI::set_spoolman_filament_extra_number", err);
 }
 
 // (further symbols appended here as later tasks' link passes demand them)

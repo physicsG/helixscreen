@@ -34,19 +34,19 @@ namespace gcode {
 // ====== Named Constants (rendering parameters) ======
 
 // Specular material defaults (plastic-like sheen)
-constexpr float DEFAULT_SPECULAR_INTENSITY = 0.25f;
-constexpr float DEFAULT_SPECULAR_SHININESS = 48.0f;
+constexpr float kDefaultSpecularIntensity = 0.25f;
+constexpr float kDefaultSpecularShininess = 48.0f;
 
 // Specular clamp ranges
-constexpr float MIN_SPECULAR_INTENSITY = 0.0f;
-constexpr float MAX_SPECULAR_INTENSITY = 1.0f;
-constexpr float MIN_SPECULAR_SHININESS = 1.0f;
-constexpr float MAX_SPECULAR_SHININESS = 128.0f;
+constexpr float kMinSpecularIntensity = 0.0f;
+constexpr float kMaxSpecularIntensity = 1.0f;
+constexpr float kMinSpecularShininess = 1.0f;
+constexpr float kMaxSpecularShininess = 128.0f;
 
 // Lighting intensities
-constexpr float CAMERA_LIGHT_INTENSITY = 0.6f;
-constexpr float FILL_LIGHT_INTENSITY = 0.2f;
-constexpr float AMBIENT_INTENSITY = 0.25f;
+constexpr float kCameraLightIntensity = 0.6f;
+constexpr float kFillLightIntensity = 0.2f;
+constexpr float kAmbientIntensity = 0.25f;
 
 // Still and incremental frames render into an FBO this many times the widget
 // size and come back down through a 2x2 box filter (blit_to_lvgl); moving
@@ -54,17 +54,17 @@ constexpr float AMBIENT_INTENSITY = 0.25f;
 constexpr float kStillSupersample = 2.0f;
 
 // Default filament color (#26A69A teal)
-constexpr glm::vec4 DEFAULT_FILAMENT_COLOR{0.15f, 0.65f, 0.60f, 1.0f};
+constexpr glm::vec4 kDefaultFilamentColor{0.15f, 0.65f, 0.60f, 1.0f};
 
 // Ghost layer default opacity (out of 255)
 /// ~2% opacity: ghost layers should barely be visible. Keep it at 3 or above: a
 /// ghost fragment over a solid pixel tops out near 255 - opacity, and 2 or 1
 /// would land on the excluded (253) or selected (254) alpha tag.
-constexpr uint8_t DEFAULT_GHOST_OPACITY = 5;
+constexpr uint8_t kDefaultGhostOpacity = 5;
 
 // Frame-skip epsilon for float comparisons
-constexpr float ANGLE_EPSILON = 1e-5f;
-constexpr float ZOOM_EPSILON = 1e-3f;
+constexpr float kAngleEpsilon = 1e-5f;
+constexpr float kZoomEpsilon = 1e-3f;
 
 /// Return type for get_options()
 struct RenderingOptions {
@@ -302,6 +302,7 @@ class GCodeGLESRenderer {
     bool init_gl();
 #if !LV_USE_SDL
     bool try_egl_display(void* native_display, const char* label);
+    bool create_egl_context(void* egl_display, const char* label, bool owns_display);
 #endif
     bool compile_shaders();
     bool create_fbo(int width, int height);
@@ -468,8 +469,11 @@ class GCodeGLESRenderer {
     void* egl_display_ = nullptr; // EGLDisplay
     void* egl_context_ = nullptr; // EGLContext
     void* egl_surface_ = nullptr; // EGLSurface (PBuffer for non-surfaceless drivers)
-    void* gbm_device_ = nullptr;  // struct gbm_device*
-    int drm_fd_ = -1;             // DRM file descriptor (owned by us)
+    // False when egl_display_ is the display backend's own EGLDisplay: the renderer
+    // only adds a context to it, and terminating it would take the screen with it.
+    bool owns_egl_display_ = true;
+    void* gbm_device_ = nullptr; // struct gbm_device*
+    int drm_fd_ = -1;            // DRM file descriptor (owned by us)
 #endif
     bool gl_initialized_ = false;
     bool gl_init_failed_ = false;   // Prevents repeated init attempts
@@ -585,9 +589,9 @@ class GCodeGLESRenderer {
     /// headless tests, which register no tokens.
     selection::Palette sel_palette_;
     mutable std::mutex palette_mutex_; ///< Guards geometry color palette reads/writes
-    glm::vec4 filament_color_{DEFAULT_FILAMENT_COLOR};
-    float specular_intensity_ = DEFAULT_SPECULAR_INTENSITY;
-    float specular_shininess_ = DEFAULT_SPECULAR_SHININESS;
+    glm::vec4 filament_color_{kDefaultFilamentColor};
+    float specular_intensity_ = kDefaultSpecularIntensity;
+    float specular_shininess_ = kDefaultSpecularShininess;
     bool debug_face_colors_ = false;
     bool show_travels_ = false;
     bool show_extrusions_ = true;
@@ -602,8 +606,8 @@ class GCodeGLESRenderer {
     // ====== Ghost / Progress ======
 
     int progress_layer_ = -1;
-    lv_opa_t ghost_opacity_ = DEFAULT_GHOST_OPACITY;
-    GhostRenderMode ghost_render_mode_ = DEFAULT_GHOST_RENDER_MODE;
+    lv_opa_t ghost_opacity_ = kDefaultGhostOpacity;
+    GhostRenderMode ghost_render_mode_ = kDefaultGhostRenderMode;
     float content_offset_y_percent_ = 0.0f;
 
     // ====== Frame Skip ======

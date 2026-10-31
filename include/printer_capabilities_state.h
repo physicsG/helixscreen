@@ -42,23 +42,36 @@ enum class Capability : uint8_t {
     HasChamberHeater,       ///< active chamber heater
     HasChamberHeaterDiagnostics, ///< chamber heater exposes backend diagnostics
     HasChamberFilterFan,         ///< chamber filter fan (output_pin)
+    HasChamberTargetRoute,       ///< chamber target settable around the gcode queue
     HasChamberElementTemp,       ///< backend reports the heating element's temperature
     HasChamberDryer,             ///< backend runs a filament-drying cycle
+    HasChamberAirRecirculate,    ///< firmware offers the recirculate chamber air mode
+    HasChamberAirExhaust,        ///< firmware offers the exhaust chamber air mode
+    HasChamberAirOff,            ///< firmware offers the chamber air off mode
     HasChamber,                  ///< chamber sensor OR heater
     HasScrewsTilt,               ///< screws_tilt_adjust
     HasExcludeObject,            ///< [exclude_object]
+    HasLayerPause,               ///< macros that pause a running print at a layer
     HasToolOffsetCal,            ///< automatic tool offset calibration
     HideManualZCalibration,      ///< tool offset calibration also sets the reference tool's Z
     HasPaCal,                    ///< firmware measures pressure advance
+    HasStepperResonanceCal,      ///< firmware calibrates stepper resonance (vertical artifacts)
     HasWebcam,                   ///< an enabled webcam is configured
     WebcamCount,                 ///< named webcams (what a picker can offer)
     HasExtraFans,                ///< controllable fans beyond part cooling
     PowerDeviceCount,            ///< power devices (0 = none)
     SensorCount,                 ///< Moonraker sensors (0 = none)
+    HasShakeTune,                ///< Klippain Shake&Tune macros
+    HasHeatSoak,                 ///< heat soak macro, after the user override
+    HasFanFeedback,              ///< fan tachometer feedback (fan_feedback)
+    HasLedEffects,               ///< [led_effect] sections
+    EnclosureTopFitted,          ///< 1 = firmware reports a removable enclosure top fitted;
+                                 ///< 0 = removed, not reported yet, or no such report
+    HardwareGeneration,          ///< bumped whenever discovery or kinematics changes
     Count
 };
 
-inline constexpr size_t CAPABILITY_COUNT = static_cast<size_t>(Capability::Count);
+inline constexpr size_t kCapabilityCount = static_cast<size_t>(Capability::Count);
 
 /**
  * @brief Manages printer capability subjects for UI feature visibility
@@ -211,17 +224,35 @@ class PrinterCapabilitiesState {
     /// (prestonbrown/helixscreen#1730). Resolved by PrinterState.
     void set_bed_drying(bool enclosed, bool can_bed_dry);
 
+    /// Whether the firmware reports a removable enclosure top fitted, from a
+    /// status frame (include/enclosure_top.h). set_hardware() clears it.
+    /// Main thread only.
+    void set_enclosure_top_fitted(bool fitted);
+
+    /// The last enclosure-top report; false before any.
+    [[nodiscard]] bool enclosure_top_fitted() const {
+        return capability_value(Capability::EnclosureTopFitted) != 0;
+    }
+
     /** @brief Override chamber sensor capability after manual assignment resolution */
     void set_has_chamber_sensor(bool available);
 
     /** @brief Override chamber heater capability after manual assignment resolution */
     void set_has_chamber_heater(bool available);
 
+    /// Whether the printer has a chamber heater, detected or manually assigned.
+    [[nodiscard]] bool has_chamber_heater() const {
+        return capability_value(Capability::HasChamberHeater) != 0;
+    }
+
     /** @brief Set chamber-heater diagnostics capability (backend diagnostics object resolved) */
     void set_has_chamber_heater_diagnostics(bool available);
 
     /** @brief Set chamber filter-fan capability (backend filter pin resolved) */
     void set_has_chamber_filter_fan(bool available);
+
+    /** @brief Set chamber target-route capability (backend names a set-target method) */
+    void set_has_chamber_target_route(bool available);
 
     /** @brief Set chamber element-temperature capability (backend reports one) */
     void set_has_chamber_element_temp(bool available);
@@ -273,10 +304,28 @@ class PrinterCapabilitiesState {
     // Subject accessors
     // ========================================================================
 
+    /// Announce that discovered hardware changed (a new discovery, new kinematics).
+    void bump_hardware_generation();
+
+    /// Death signal for every capability subject; pass it to observe<V>().
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
+
     /// The subject for one capability. Valid once init_subjects() has run.
     lv_subject_t* subject(Capability cap) const {
         return const_cast<lv_subject_t*>(&capability_subjects_[static_cast<size_t>(cap)]);
     }
+
+    /// What the Tool Offsets entry does on this printer, translated
+    /// (`printer_tool_offset_cal_description`). Valid once init_subjects() has run.
+    lv_subject_t* tool_offset_cal_description_subject() {
+        return &tool_offset_cal_description_;
+    }
+
+    /// Re-render the translated strings this state holds in the new language.
+    /// Main thread.
+    void on_language_changed();
 
     /**
      * @brief Set speaker availability from local sound backend detection.
@@ -347,7 +396,7 @@ class PrinterCapabilitiesState {
     /// on a K2 Plus (2026-08-24): SpoolmanManager's observer watches this flag's
     /// falling edge and drops the identity cache behind every slot's vendor and
     /// material. Latch instead, and seed init_subjects() from what we already know.
-    std::array<std::optional<int>, CAPABILITY_COUNT> pending_capability_values_{};
+    std::array<std::optional<int>, kCapabilityCount> pending_capability_values_{};
 
     /// Write a capability subject, or latch the value when subjects do not exist.
     void set_capability(Capability cap, int value);
@@ -369,7 +418,15 @@ class PrinterCapabilitiesState {
     /// stepper_z position_endstop from configfile.settings (microns)
     int stepper_z_endstop_microns_ = 0;
 
-    std::array<lv_subject_t, CAPABILITY_COUNT> capability_subjects_{};
+    std::array<lv_subject_t, kCapabilityCount> capability_subjects_{};
+    lv_subject_t tool_offset_cal_description_{};
+    char tool_offset_cal_description_buf_[160] = {};
+    /// The untranslated description set_hardware() chose; rendered through
+    /// lv_tr() at init, on set_hardware() and on a language change.
+    const char* tool_offset_cal_description_key_ = "";
+
+    /// Write the description in the current language, once the subject exists.
+    void render_tool_offset_cal_description();
     std::vector<WebcamInfo> webcams_; // every enabled webcam, Moonraker order
     std::string webcam_stream_url_;   // auto-pick: MJPEG stream URL
     std::string webcam_snapshot_url_; // snapshot URL

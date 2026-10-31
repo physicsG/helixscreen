@@ -20,10 +20,18 @@
 # parents of HELIX_TEST_TREES_HOST and HELIX_TEST_TREES. Mirrors, the ccache and
 # the --commit checkout all live under it, so the container holds nothing worth
 # keeping and recreating it loses nothing.
+#
+# The container gets a memory limit with no swap: HELIX_TEST_MEMORY (a docker
+# size such as 96g), else 60% of the host's memory. A build that outgrows it is
+# killed inside the container rather than taking down the host's own services,
+# and test-host-run.sh sizes -j from that limit. Every run applies it, so an
+# existing container picks up a changed value without --recreate.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/build_hosts.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/build_hosts.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/ccache_shared.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/ccache_shared.sh"
 require_build_host HELIX_TEST_HOST || exit 2
 
 RECREATE=0 CLONE=0
@@ -97,10 +105,22 @@ if sudo -n docker inspect "$CONTAINER" >/dev/null 2>&1; then
     sudo -n docker inspect -f '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' "$CONTAINER" |
         grep -qF "\$abs:$WORK" || {
             echo "✗ $CONTAINER does not mount \$abs at $WORK; --recreate replaces it" >&2; exit 1; }
-else
-    # CMD in the image is sleep infinity.
-    sudo -n docker run -d --name "$CONTAINER" -v "\$abs:$WORK" -w "$WORK" "$IMAGE" >/dev/null
+    # Without an init, every process docker exec leaves behind stays a zombie, and
+    # anything that walks /proc (the wpa backend's tests do) slows by orders of magnitude.
+    [ "\$(sudo -n docker inspect -f '{{.HostConfig.Init}}' "$CONTAINER")" = true ] ||
+        echo "⚠ $CONTAINER runs without --init and accumulates zombies; --recreate replaces it" >&2
 fi
+mem="${HELIX_TEST_MEMORY:-}"
+[ -n "\$mem" ] || mem="\$(awk '/^MemTotal:/ {printf "%dk", \$2 * 0.6}' /proc/meminfo)"
+if ! sudo -n docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    # CMD in the image is sleep infinity, which reaps nothing: --init does.
+    sudo -n docker run -d --init --name "$CONTAINER" -v "\$abs:$WORK" -w "$WORK" \
+        --memory "\$mem" --memory-swap "\$mem" --pids-limit 16384 "$IMAGE" >/dev/null
+else
+    sudo -n docker update --memory "\$mem" --memory-swap "\$mem" --pids-limit 16384 "$CONTAINER" >/dev/null ||
+        echo "⚠ could not set $CONTAINER's memory limit to \$mem" >&2
+fi
+echo "→ $CONTAINER memory limit \$mem, no swap"
 sudo -n docker start "$CONTAINER" >/dev/null
 REMOTE
 
@@ -110,6 +130,10 @@ if [ "$CLONE" = 1 ]; then
     on_host "sudo -n docker exec $CONTAINER bash -lc '[ -d $WORKDIR/.git ] || git clone -q --recurse-submodules $url $WORKDIR'" ||
         die "clone failed: the container needs to reach $url without credentials"
 fi
+
+step "ccache at $CCACHE shared by every tree under $WORK"
+on_host "$(ccache_shared_cmd "$CONTAINER" "$CCACHE" apply "$WORK" "$HELIX_TEST_CCACHE_SIZE")" ||
+    die "could not apply the shared ccache settings in $CONTAINER"
 
 # Ask the compiler that does the linking, not PATH: clang resolves ld.mold from
 # its own program directory first, so a stale /usr/bin/ld.mold wins the link

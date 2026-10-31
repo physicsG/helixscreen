@@ -58,7 +58,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini bar mode: width bands pick bar wid
     // Resolve the container's real width BEFORE any slot data triggers the
     // first rebuild — rebuild_bars() reads lv_obj_get_content_width() at call
     // time, so an unresolved (still-zero) container would clamp every bar
-    // down to MIN_BAR_WIDTH_PX regardless of the width_px band under test.
+    // down to kMinBarWidthPx regardless of the width_px band under test.
     lv_obj_update_layout(w);
     fill_slots(w, 8);
 
@@ -138,7 +138,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: cell width derives fro
     ui_ams_mini_status_init();
 
     // Same width_px hint into both, only the real parent width differs.
-    constexpr int HINT_PX = 300;
+    constexpr int kHintPx = 300;
     auto lay_out_in = [this](int parent_w) {
         lv_obj_t* parent = lv_obj_create(test_screen());
         lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
@@ -149,7 +149,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: cell width derives fro
         lv_obj_t* w = ui_ams_mini_status_create(parent, 60);
         helix::ui::UpdateQueue::instance().drain();
         fill_slots(w, 6); // width-limited, not data-limited
-        ui_ams_mini_status_set_width(w, HINT_PX);
+        ui_ams_mini_status_set_width(w, kHintPx);
         helix::ui::UpdateQueue::instance().drain();
         lv_obj_update_layout(parent);
 
@@ -168,8 +168,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ams_mini spool mode: cell width derives fro
         return std::pair<int, std::vector<int>>{avail, widths};
     };
 
-    auto [narrow_avail, narrow_cells] = lay_out_in(HINT_PX);
-    auto [wide_avail, wide_cells] = lay_out_in(HINT_PX * 2);
+    auto [narrow_avail, narrow_cells] = lay_out_in(kHintPx);
+    auto [wide_avail, wide_cells] = lay_out_in(kHintPx * 2);
 
     REQUIRE(narrow_avail > 0);
     REQUIRE(wide_avail > narrow_avail);

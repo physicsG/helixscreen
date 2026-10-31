@@ -14,7 +14,7 @@
   <view name="panel_widget_firmware_restart"
         extends="lv_obj" height="100%" flex_grow="1" style_pad_all="0" scrollable="false">
     <home_action_tile width="100%"
-                      height="100%" icon="refresh" icon_variant="secondary" label="Restart"
+                      height="100%" icon="cog_refresh" icon_variant="secondary" label="Restart"
                       callback="firmware_restart_clicked" button_name="firmware_restart_button_home"
                       icon_name="firmware_restart_icon" tile_icon_subject="$tile_icon_subject"
                       tile_label_subject="$tile_label_subject" tile_dir_subject="$tile_dir_subject"

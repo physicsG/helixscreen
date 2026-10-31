@@ -1,0 +1,5 @@
+PRINT_START
+G1 X1
+
+G1 X2
+

@@ -180,9 +180,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "control buttons size labels for the transie
     // "Resuming..." is wider than the steady labels; a button sized only for
     // Pause/Resume overflows the moment a resume is in flight.
     const int resuming =
-        static_cast<int>(helix::ui::text_width(lv_tr(helix::ui::CONTROL_LABEL_RESUMING), font));
+        static_cast<int>(helix::ui::text_width(lv_tr(helix::ui::kControlLabelResuming), font));
     const int resume =
-        static_cast<int>(helix::ui::text_width(lv_tr(helix::ui::CONTROL_LABEL_RESUME), font));
+        static_cast<int>(helix::ui::text_width(lv_tr(helix::ui::kControlLabelResume), font));
     REQUIRE(resuming > resume);
     CHECK(h.widget().button_need_px() > resuming);
 }

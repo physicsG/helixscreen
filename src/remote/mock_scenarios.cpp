@@ -230,6 +230,7 @@ static std::vector<MockScenario> clog_scenarios() {
                          h.fault_detection_enabled = true;
                          h.error_sensitivity = 7.0f;
                          h.state = "Trailing";
+                         h.motion = BufferMotion::Trailing;
                          h.distance_to_fault = 1.5f; // close to the threshold
                          m.set_unit_buffer_health(0, h);
                      });
@@ -288,6 +289,7 @@ static std::vector<MockScenario> clog_scenarios() {
                          h.fault_detection_enabled = true;
                          h.error_sensitivity = 7.0f;
                          h.state = "Trailing";
+                         h.motion = BufferMotion::Trailing;
                          h.distance_to_fault = 1.5f;
                          m.set_unit_buffer_health(0, h);
                      });

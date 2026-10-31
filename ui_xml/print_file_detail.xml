@@ -5,23 +5,23 @@
   <!-- Print File Detail View - Full overlay showing file details and print options -->
   <!-- Uses reactive subjects for file data (no API properties needed) -->
   <styles>
-    <!-- Chip row height, per breakpoint. The row IS the chip height (filament_swatch
-         is height="100%" of it), and the two bands inside split it minus the 1px
-         divider and ~2px/side of theme chrome. What must fit is font_small's line
-         box per tier (globals.xml): 22px at Medium (800x480), 24 at Large (1024x600),
-         27 at XLarge (1280x720+). A glyph centers in that line box, so a band of
-         ~0.78x the line box shows the full digit (17px band vs 22px box measured
-         clean at 800x480). 40px gives a 17px band - fine through Large; XLarge's
-         27px box needs the 48px row (21px band). Bound styles rather than a height
-         attribute so the pair always covers every tier (the settings-row responsive
-         pattern; a bare height attr would fight the bound style's precedence). -->
-    <style name="mapping_rows_standard" height="40"/>
-    <style name="mapping_rows_tall" height="48"/>
     <!-- Dim the chips, never the whole card. The header carries the mismatch
          and empty-slot lamps and the help cue, all of which still mean something
          when a remap is unavailable, and a card dimmed through LV_STATE_DISABLED
          also stops receiving touches. -->
     <style name="mapping_rows_unmappable" opa="128"/>
+    <!-- Filament card shapes. Stacked: the FILAMENTS header on top, the chips
+         on a row of their own under it. Inline (small portrait, where the
+         preview and the options compete for one column): title, chips and the
+         tap cue share ONE row, giving the chip row's height back to the
+         options. Paired so every size is covered; inline width or flex_flow
+         attributes on these widgets would win over the bound styles. -->
+    <style name="fil_card_stacked" layout="flex" flex_flow="column"/>
+    <style name="fil_card_inline" layout="flex" flex_flow="row" flex_cross_place="center"/>
+    <style name="fil_head_stacked" width="100%"/>
+    <style name="fil_head_inline" width="content"/>
+    <style name="fil_chips_stacked" width="100%" flex_grow="0"/>
+    <style name="fil_chips_inline" width="0" flex_grow="1"/>
     <!-- Landscape: preview column left, options column right. Portrait: the
          preview block on top, options below, both full width. Paired so each
          orientation is always covered; inline attributes would win over them.
@@ -44,6 +44,13 @@
     <style name="btn_row_portrait" height="#button_height"/>
     <style name="delete_btn_landscape" width="#button_height_lg"/>
     <style name="delete_btn_portrait" width="#button_height"/>
+    <!-- With a plugin declaring a print_file item the row is three square icon
+         buttons (Delete, more, Print), centred; without one Print takes the rest
+         of the row with its label. -->
+    <style name="btn_row_icons" flex_main_place="center"/>
+    <style name="print_btn_wide" flex_grow="1"/>
+    <style name="print_btn_square_landscape" width="#button_height_lg" flex_grow="0"/>
+    <style name="print_btn_square_portrait" width="#button_height" flex_grow="0"/>
   </styles>
   <view name="detail_view_root"
         extends="lv_obj" width="#overlay_width_transient" height="100%" align="right_mid" style_bg_opa="255"
@@ -103,14 +110,37 @@
                spinner for that long reads as a hung app). The row itself takes no
                taps, so the gap between button and pill reaches the preview. -->
           <lv_obj name="detail_top_left_row"
-                  width="content" height="content" align="top_left" x="#space_md" y="#space_md" flex_flow="row"
-                  style_flex_cross_place="center" style_pad_all="0" style_pad_gap="#space_sm" style_bg_opa="0"
-                  style_border_width="0" scrollable="false" clickable="false">
+                  width="100%" height="content" align="top_left" y="#space_md" flex_flow="row_wrap"
+                  style_flex_cross_place="center" style_pad_top="0" style_pad_bottom="0" style_pad_left="#space_md"
+                  style_pad_right="#space_md" style_pad_gap="#space_sm" style_bg_opa="0" style_border_width="0"
+                  scrollable="false" clickable="false">
             <exclude_objects_button name="btn_detail_objects"
                                     callback="on_print_select_detail_objects"
                                     hidden_when="detail_exclude_available eq 0"
                                     count_text_subject="detail_exclude_pick_count_text"
                                     count_hidden_when="detail_exclude_pick_count eq 0"/>
+            <!-- Sliced colors: recolours the 3D preview with each tool's own
+                 slicer color instead of the matched lane's (apply_preview_colors()
+                 reads detail_prefer_sliced_colors). Same disc as the skip-objects
+                 button; on, it fills with the accent. Offered only while the
+                 LIVE viewer is what is on screen, because that is the only thing
+                 it recolours: mode 0 means the viewer is not the active preview,
+                 and no first frame means the slicer thumbnail still covers it.
+                 One expression, so the two reasons cannot be ORed apart;
+                 invert="true" reads as "show when". -->
+            <lv_obj name="sliced_colors_toggle"
+                    width="#icon_button_size_lg" height="#icon_button_size_lg" style_bg_color="#card_bg"
+                    style_bg_opa="180" style_bg_color-checked="#primary" style_bg_opa-checked="255"
+                    style_radius="#icon_button_radius_lg" style_border_width="0" style_pad_all="0" checkable="true"
+                    scrollable="false" state_trickle="true">
+              <style name="styles.press_wash" selector="pressed"/>
+              <bind_flag_if cond="detail_gcode_viewer_mode eq 1 and detail_viewer_first_frame eq 1"
+                            flag="hidden" invert="true"/>
+              <bind_state_if_eq subject="detail_prefer_sliced_colors" state="checked" ref_value="1"/>
+              <event_cb trigger="value_changed" callback="on_toggle_sliced_colors"/>
+              <icon src="palette"
+                    size="sm" variant="muted" align="center" clickable="false" style_text_color-checked="#text"/>
+            </lv_obj>
             <lv_obj name="detail_loading_overlay"
                     width="content" height="content" flex_flow="row" style_flex_cross_place="center"
                     style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_border_width="0" scrollable="false">
@@ -118,6 +148,46 @@
               <bind_flag_if_eq subject="detail_gcode_loading" flag="hidden" ref_value="0"/>
               <spinner size="xs"/>
               <text_small name="detail_loading_label" bind_text="detail_gcode_progress_text"/>
+            </lv_obj>
+            <!-- Plate of a sliced .3mf: the preview, time and filament follow
+                 the plate shown, and Print prints it. The arrows show with
+                 several sliced plates, with where the shown one sits among
+                 them beside its name; with one, only its name or number. A
+                 long plate name ends in an ellipsis at plate_label_max_width,
+                 which leaves the arrows room on the narrowest preview card of
+                 each size; when the buttons beside it leave too little room,
+                 the row wraps the stepper onto a line of its own. -->
+            <lv_obj name="detail_plate_stepper"
+                    width="content" height="#icon_button_size_lg" style_max_width="100%" flex_flow="row"
+                    style_flex_cross_place="center" style_pad_left="0" style_pad_right="0" style_pad_top="0"
+                    style_pad_bottom="0" style_border_width="0" scrollable="false" hidden="true">
+              <style name="styles.metadata_strip"/>
+              <bind_flag_if_lt subject="selected_plate_count" flag="hidden" ref_value="1"/>
+              <lv_obj name="btn_plate_prev"
+                      width="#icon_button_size_lg" height="100%" clickable="true" scrollable="false" style_pad_all="0"
+                      style_bg_opa="0" style_border_width="0" style_radius="#border_radius">
+                <style name="styles.press_wash" selector="pressed"/>
+                <bind_flag_if_lt subject="selected_plate_count" flag="hidden" ref_value="2"/>
+                <event_cb trigger="clicked" callback="on_print_select_plate_prev"/>
+                <icon src="chevron_left" size="sm" variant="text" align="center" clickable="false" event_bubble="true"/>
+              </lv_obj>
+              <text_small name="detail_plate_label"
+                          bind_text="selected_plate_text" style_max_width="#plate_label_max_width" long_mode="dots"
+                          style_pad_left="#space_sm"/>
+              <!-- Where the plate sits among several ("2/3"). Never shortened:
+                   the name gives way first. -->
+              <text_small name="detail_plate_position"
+                          bind_text="selected_plate_position" style_text_color="#text_muted" style_pad_right="#space_sm">
+                <bind_flag_if_lt subject="selected_plate_count" flag="hidden" ref_value="2"/>
+              </text_small>
+              <lv_obj name="btn_plate_next"
+                      width="#icon_button_size_lg" height="100%" clickable="true" scrollable="false" style_pad_all="0"
+                      style_bg_opa="0" style_border_width="0" style_radius="#border_radius">
+                <style name="styles.press_wash" selector="pressed"/>
+                <bind_flag_if_lt subject="selected_plate_count" flag="hidden" ref_value="2"/>
+                <event_cb trigger="clicked" callback="on_print_select_plate_next"/>
+                <icon src="chevron_right" size="sm" variant="text" align="center" clickable="false" event_bubble="true"/>
+              </lv_obj>
             </lv_obj>
           </lv_obj>
           <!-- No-thumbnail placeholder - responsive hero-size glyph shown when file has no real thumbnail.
@@ -267,35 +337,31 @@
                           text="Bypass active — this print runs on the external spool." clickable="false" flex_grow="1"/>
             </ui_card>
 
-            <!-- Sliced colors toggle. Belongs to the 3D PREVIEW, not the chips:
-                 apply_preview_colors() uses detail_prefer_sliced_colors to pick
-                 which mappings feed the viewer (sliced = each tool's own slicer
-                 color; actual = the matched-lane colors). It lives in the options
-                 column, not under the preview: in landscape the preview card is
-                 flex_grow=1 in the left column, where a row under it would steal
-                 render height, and in portrait its height is set by the measured
-                 fit rather than the flex. -->
-            <lv_obj name="sliced_colors_row"
-                    width="100%" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_xs"
-                    style_flex_main_place="space_between" style_flex_cross_place="center" style_pad_bottom="#space_sm"
-                    scrollable="false">
-              <!-- Offered only while the LIVE viewer is what is on screen, because
-                   that is the only thing the toggle recolours. Two ways to be inert,
-                   so ONE expression rather than two stacked bindings: mode 0 means
-                   the viewer is not the active preview (viewer_hidden above), and no
-                   first frame means the slicer thumbnail is still drawn over it
-                   (thumbnail_hidden above). invert="true" reads as "show when". -->
-              <bind_flag_if cond="detail_gcode_viewer_mode eq 1 and detail_viewer_first_frame eq 1"
-                            flag="hidden" invert="true"/>
-              <text_small name="sliced_colors_label" text="Sliced colors"/>
-              <ui_switch name="sliced_colors_toggle" size="small">
-                <bind_state_if_eq subject="detail_prefer_sliced_colors" state="checked" ref_value="1"/>
-                <event_cb trigger="value_changed" callback="on_toggle_sliced_colors"/>
-              </ui_switch>
-            </lv_obj>
+            <!-- File-fits-printer findings, one line each: a move past the
+                 travel, a heater past its limit or a missing tool blocks (danger),
+                 a nozzle mismatch warns, another printer model is a note (info).
+                 Text and severity come from PrintSelectDetailView::refresh_fit_check(). -->
+            <ui_card name="fit_check_card"
+                     width="100%" style_pad_hor="0" style_pad_ver="#space_xs" style_pad_gap="#space_xs"
+                     style_border_width="0" style_bg_color="#elevated_bg" flex_flow="row" style_flex_cross_place="start"
+                     scrollable="false" clickable="false">
+              <bind_flag_if_eq subject="detail_fit_check_severity" flag="hidden" ref_value="0"/>
+              <icon name="fit_check_block_icon" src="alert_octagon" size="sm" variant="danger" clickable="false">
+                <bind_flag_if_not_eq subject="detail_fit_check_severity" flag="hidden" ref_value="3"/>
+              </icon>
+              <icon name="fit_check_warn_icon" src="alert" size="sm" variant="warning" clickable="false">
+                <bind_flag_if_not_eq subject="detail_fit_check_severity" flag="hidden" ref_value="2"/>
+              </icon>
+              <icon name="fit_check_note_icon" src="info_circle" size="sm" variant="info" clickable="false">
+                <bind_flag_if_not_eq subject="detail_fit_check_severity" flag="hidden" ref_value="1"/>
+              </icon>
+              <text_small name="fit_check_label"
+                          width="0" flex_grow="1" bind_text="detail_fit_check_text" clickable="false"/>
+            </ui_card>
 
-            <!-- Filament card. ONE chip surface for every AMS backend: the card
-                 renders stacked filament_swatch chips from its own mappings store.
+            <!-- Filament card. ONE chip surface for every AMS backend: one
+                 filament_swatch chip per used tool, bound to the subjects the card
+                 publishes from its own mappings store.
                  Visibility is the C++-owned filament_mapping_visible subject,
                  published after each FilamentMappingCard::update(). Tapping opens
                  the remap picker, and the chevron says so.
@@ -308,8 +374,9 @@
                  backend is stopped by on_color_card_clicked()'s own guard, not by
                  the flag. Tracked; do not read this binding as authoritative. -->
             <ui_card name="filament_mapping_card"
-                     width="100%" style_pad_ver="#space_md" style_pad_gap="#space_xs" style_bg_color="#elevated_bg"
-                     flex_flow="column">
+                     width="100%" style_pad_ver="#space_sm" style_pad_gap="#space_xs" style_bg_color="#elevated_bg">
+              <bind_style_if name="fil_card_stacked" cond="ui_is_portrait eq 0 or ui_breakpoint ge 2"/>
+              <bind_style_if name="fil_card_inline" cond="ui_is_portrait eq 1 and ui_breakpoint lt 2"/>
               <bind_flag_if_eq subject="filament_mapping_visible" flag="hidden" ref_value="0"/>
               <!-- Hidden in queue mode: the mapping is not saved with the job, it
                    is recomputed against the lanes loaded when the job starts. The
@@ -317,88 +384,79 @@
                    reasons), so no C++ writer composes them. -->
               <bind_flag_if_eq subject="print_select_button_mode" flag="hidden" ref_value="1"/>
               <bind_flag_if_eq subject="color_card_remappable" flag="clickable" ref_value="1"/>
-              <lv_obj width="100%"
+              <lv_obj name="color_card_header"
                       height="content" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
                       style_flex_cross_place="center" scrollable="false" clickable="false" event_bubble="true">
+                <bind_style_if name="fil_head_stacked" cond="ui_is_portrait eq 0 or ui_breakpoint ge 2"/>
+                <bind_style_if name="fil_head_inline" cond="ui_is_portrait eq 1 and ui_breakpoint lt 2"/>
                 <text_small text="FILAMENTS" clickable="false" event_bubble="true"/>
-                <icon name="filament_mismatch_icon"
-                      src="alert" size="sm" variant="warning" clickable="false" event_bubble="true">
-                  <bind_flag_if_eq subject="filament_mismatch" flag="hidden" ref_value="0"/>
-                </icon>
-                <!-- DANGER, and a different glyph from the mismatch triangle beside
-                     it. These two lamps were never visible at once while they lived
-                     in mutually exclusive cards; one card puts them side by side, and
-                     two identical amber triangles say "something is wrong" twice
-                     without saying which thing. Severity matches the canonical
-                     mapping in ui_preflight_check_modal.cpp's severity_visual():
-                     EmptySlot is close/danger, a material mismatch is alert/warning.
-                     An empty lane BLOCKS the print; a mismatch only advises. -->
-                <icon name="empty_tools_warning_icon"
-                      src="close" size="sm" variant="danger" clickable="false" event_bubble="true">
-                  <bind_flag_if_eq subject="empty_tools_warning" flag="hidden" ref_value="0"/>
-                </icon>
-                <!-- Spacer: pushes the tap cue to the trailing edge without giving
-                     the label a width that would fight the icons. -->
-                <lv_obj name="color_card_header_spacer"
-                        width="content" height="1" flex_grow="1" style_pad_all="0" style_bg_opa="0"
-                        style_border_width="0" scrollable="false" clickable="false" event_bubble="true"/>
-                <!-- The tap cue. Same chevron every tappable row in the app uses
-                     (setting_action_row.xml, ams_edit_overlay.xml), so it reads as
-                     "this opens something" without a label to translate. -->
-                <icon name="color_card_remap_chevron"
-                      src="chevron_right" size="sm" variant="secondary" clickable="false" event_bubble="true">
-                  <bind_flag_if_eq subject="color_card_remappable" flag="hidden" ref_value="0"/>
-                </icon>
-                <!-- Takes the chevron's place when a remap is unavailable or will
-                     cost something. Its own clickable object, never a bubbling chip:
-                     the card greys itself with LV_STATE_DISABLED and LVGL delivers
-                     no pointer events to a disabled object, so an icon relying on
-                     the card's handler would be dead exactly when it is needed. -->
-                <icon name="color_card_remap_help" src="help_circle" size="sm" variant="secondary" clickable="true">
-                  <bind_flag_if_eq subject="color_card_remap_help_visible" flag="hidden" ref_value="0"/>
-                  <event_cb trigger="clicked" callback="on_color_card_remap_help"/>
+                <!-- Holds the header at the tap cue's height while the cue is out
+                   of the flow (stacked), so the title stays centred on the cue's
+                   line. Inline, the cue is in the row and this goes. -->
+                <icon name="color_card_header_strut"
+                      src="chevron_right" size="sm" variant="secondary" style_opa="0" clickable="false"
+                      event_bubble="true">
+                  <bind_flag_if cond="ui_is_portrait eq 1 and ui_breakpoint lt 2" flag="hidden"/>
                 </icon>
               </lv_obj>
               <!-- height is FIXED, not "content": the filament_swatch chips inside are
-                   height="100%" and collapse to zero in a content-height parent. And
-                   flex_flow is "row", not "row_wrap": at a fixed height a wrapped
-                   second row is clipped. The card caps the chips at what fits and
-                   renders a "+N" pill for the rest (see rebuild_compact_view). -->
-              <!-- SIZE_OK: the bound styles in this file's <styles> block ARE the chip
-                   height (40 through Large, 48 at XLarge+). filament_swatch is
+                   height="100%" and collapse to zero in a content-height parent. The
+                   chips sit in one row; the card caps them at what fits and shows a
+                   "+N" pill for the rest (FilamentMappingCard::publish_chips). -->
+              <!-- #filament_chip_row_height IS the chip height. filament_swatch is
                    height="100%" and resolves against this row's CONTENT box, so padding
                    here shortens the chips instead of growing the row - the card is flex
                    column with style_pad_gap, which is what spaces this from the header. -->
               <lv_obj name="filament_mapping_rows"
-                      width="100%" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
+                      height="#filament_chip_row_height" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
                       style_flex_main_place="center" scrollable="false" clickable="false" event_bubble="true">
-                <bind_style_if_lt name="mapping_rows_standard" subject="ui_breakpoint" ref_value="5"/>
-                <bind_style_if_ge name="mapping_rows_tall" subject="ui_breakpoint" ref_value="5"/>
+                <bind_style_if name="fil_chips_stacked" cond="ui_is_portrait eq 0 or ui_breakpoint ge 2"/>
+                <bind_style_if name="fil_chips_inline" cond="ui_is_portrait eq 1 and ui_breakpoint lt 2"/>
                 <bind_style_if_eq name="mapping_rows_unmappable" subject="color_card_remap_needs_setup" ref_value="1"/>
                 <bind_flag_if_eq subject="detail_mapping_ready" flag="hidden" ref_value="0"/>
-                <!-- Chips added dynamically in C++ (clickable=false + event_bubble=true
-                     on filament_swatch) so a tap reaches this card. -->
+                <filament_chip_row name="filament_chip_row"/>
               </lv_obj>
               <!-- Skeleton: two chip-sized placeholders shown only until the
                    authoritative tool set exists; a cache hit never shows this.
                    Height, flow and alignment all mirror filament_mapping_rows above,
                    so nothing moves when detail_mapping_ready flips. -->
-              <!-- SIZE_OK: skeleton row height mirrors filament_mapping_rows' bound
-                   styles (same two, so it tracks the breakpoint the same way) -->
               <lv_obj name="mapping_skeleton"
-                      width="100%" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
+                      height="#filament_chip_row_height" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
                       style_flex_main_place="center" scrollable="false" clickable="false" event_bubble="true">
-                <bind_style_if_lt name="mapping_rows_standard" subject="ui_breakpoint" ref_value="5"/>
-                <bind_style_if_ge name="mapping_rows_tall" subject="ui_breakpoint" ref_value="5"/>
+                <bind_style_if name="fil_chips_stacked" cond="ui_is_portrait eq 0 or ui_breakpoint ge 2"/>
+                <bind_style_if name="fil_chips_inline" cond="ui_is_portrait eq 1 and ui_breakpoint lt 2"/>
                 <bind_flag_if_eq subject="detail_mapping_ready" flag="hidden" ref_value="1"/>
-                <!-- SIZE_OK: chip width mirrors filament_swatch.xml's literal 40 -->
-                <lv_obj width="40"
-                        height="100%" style_radius="4" style_bg_color="#card_bg" style_bg_opa="100" clickable="false"
-                        event_bubble="true"/>
-                <!-- SIZE_OK: chip width mirrors filament_swatch.xml's literal 40 -->
-                <lv_obj width="40"
-                        height="100%" style_radius="4" style_bg_color="#card_bg" style_bg_opa="100" clickable="false"
-                        event_bubble="true"/>
+                <lv_obj width="#filament_chip_width"
+                        height="100%" style_radius="#space_sm" style_bg_color="#card_bg" style_bg_opa="100"
+                        clickable="false" event_bubble="true"/>
+                <lv_obj width="#filament_chip_width"
+                        height="100%" style_radius="#space_sm" style_bg_color="#card_bg" style_bg_opa="100"
+                        clickable="false" event_bubble="true"/>
+              </lv_obj>
+              <!-- The tap cue, last in the card so it ends the inline row. Stacked,
+                   it leaves the flow and sits at the top right, on the header's
+                   line. -->
+              <lv_obj name="color_card_header_end"
+                      width="content" height="content" align="top_right" style_pad_all="0" style_bg_opa="0"
+                      style_border_width="0" flex_flow="row" style_flex_cross_place="center" scrollable="false"
+                      clickable="false" event_bubble="true">
+                <bind_flag_if cond="ui_is_portrait eq 0 or ui_breakpoint ge 2" flag="ignore_layout"/>
+                <!-- The tap cue. Same chevron every tappable row in the app uses
+                       (setting_action_row.xml, ams_edit_overlay.xml), so it reads as
+                       "this opens something" without a label to translate. -->
+                <icon name="color_card_remap_chevron"
+                      src="chevron_right" size="sm" variant="secondary" clickable="false" event_bubble="true">
+                  <bind_flag_if_eq subject="color_card_remappable" flag="hidden" ref_value="0"/>
+                </icon>
+                <!-- Takes the chevron's place when a remap is unavailable or will
+                       cost something. Its own clickable object, never a bubbling chip:
+                       the card greys itself with LV_STATE_DISABLED and LVGL delivers
+                       no pointer events to a disabled object, so an icon relying on
+                       the card's handler would be dead exactly when it is needed. -->
+                <icon name="color_card_remap_help" src="help_circle" size="sm" variant="secondary" clickable="true">
+                  <bind_flag_if_eq subject="color_card_remap_help_visible" flag="hidden" ref_value="0"/>
+                  <event_cb trigger="clicked" callback="on_color_card_remap_help"/>
+                </icon>
               </lv_obj>
             </ui_card>
 
@@ -408,7 +466,7 @@
                  populate_option_rows). The card is hidden when no preprint
                  options apply, via has_any_preprint_options. -->
             <ui_card name="options_card"
-                     width="100%" style_pad_ver="0" style_pad_gap="#space_sm" flex_flow="column"
+                     width="100%" style_pad_ver="#space_sm" style_pad_gap="#space_sm" flex_flow="column"
                      style_bg_color="#elevated_bg">
               <bind_flag_if_eq subject="has_any_preprint_options" flag="hidden" ref_value="0"/>
               <!-- Hidden in queue mode when Moonraker starts the next job by
@@ -442,17 +500,19 @@
           </lv_obj>
         </lv_obj>
         <!-- Pre-print time estimate; hidden entirely while no estimate exists,
-             because an empty string still occupies a row. -->
+             because an empty string still occupies a row, and at micro and tiny,
+             where the options column needs that row more. -->
         <text_small name="prep_time_estimate"
                     width="100%" bind_text="preprint_estimate_text" style_text_color="#text_muted"
                     style_text_align="center" style_pad_bottom="#space_xs">
-          <bind_flag_if_eq subject="preprint_estimate_visible" flag="hidden" ref_value="0"/>
+          <bind_flag_if cond="preprint_estimate_visible eq 0 or ui_breakpoint lt 2" flag="hidden"/>
         </text_small>
 
         <!-- Button row -->
         <lv_obj name="button_row" width="100%" style_pad_all="0" style_pad_gap="#button_padding" flex_flow="row">
           <bind_style_if_eq name="btn_row_landscape" subject="ui_is_portrait" ref_value="0"/>
           <bind_style_if_eq name="btn_row_portrait" subject="ui_is_portrait" ref_value="1"/>
+          <bind_style_if_eq name="btn_row_icons" subject="print_detail_has_plugin_items" ref_value="1"/>
           <!-- Delete button (icon-only). Hidden for a USB stick file: delete
                targets Moonraker's storage, and sticks are often mounted read-only. -->
           <ui_button name="delete_button" height="100%" variant="danger" icon="trash_can_outline">
@@ -461,14 +521,27 @@
             <bind_flag_if_eq subject="print_source_is_usb" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="on_print_select_delete_button"/>
           </ui_button>
+          <!-- Plugin actions for this file, shown while an enabled plugin declares
+               a print_file menu item. -->
+          <ui_button name="more_button" height="100%" variant="secondary" icon="dots_vertical">
+            <bind_style_if_eq name="delete_btn_landscape" subject="ui_is_portrait" ref_value="0"/>
+            <bind_style_if_eq name="delete_btn_portrait" subject="ui_is_portrait" ref_value="1"/>
+            <bind_flag_if_eq subject="print_detail_has_plugin_items" flag="hidden" ref_value="0"/>
+            <event_cb trigger="clicked" callback="on_print_select_more_button"/>
+          </ui_button>
           <!-- Print button - primary action styling (disabled when print in progress).
                Label and icon follow the mode subjects: "Print" + printer icon idle,
                "Add to Queue" + the queue's clock icon while another print holds the
                machine and Moonraker has the job_queue component (the same tap then
                routes to the queue path). -->
           <ui_button name="print_button"
-                     height="100%" bind_text="print_select_button_label" flex_grow="1" icon="print"
-                     bind_icon="print_select_button_icon">
+                     height="100%" bind_text="print_select_button_label" icon="print"
+                     bind_icon="print_select_button_icon" label_hidden_cond="print_detail_has_plugin_items eq 1">
+            <bind_style_if_eq name="print_btn_wide" subject="print_detail_has_plugin_items" ref_value="0"/>
+            <bind_style_if name="print_btn_square_landscape"
+                           cond="print_detail_has_plugin_items eq 1 and ui_is_portrait eq 0"/>
+            <bind_style_if name="print_btn_square_portrait"
+                           cond="print_detail_has_plugin_items eq 1 and ui_is_portrait eq 1"/>
             <event_cb trigger="clicked" callback="on_print_select_print_button"/>
             <bind_state_if_eq subject="print_select_can_print" state="disabled" ref_value="0"/>
           </ui_button>

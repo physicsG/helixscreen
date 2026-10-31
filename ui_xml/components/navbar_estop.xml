@@ -7,8 +7,8 @@
        it can stay bright and tappable above overlay and modal backdrops, which
        dim the rest of the navbar (NavigationManager keeps it in place). -->
   <view extends="ui_button"
-        width="#nav_estop_size" height="#nav_estop_size" style_radius="9999" variant="danger" focusable="false"
-        hidden="true">
+        width="#nav_estop_size" height="#nav_estop_size" ext_click_area="#nav_estop_reach" style_radius="9999"
+        variant="danger" focusable="false" hidden="true">
     <bind_flag_if_eq subject="estop_visible" flag="hidden" ref_value="0"/>
     <icon src="alert_octagon" size="sm" variant="text" align="center" clickable="false" event_bubble="true"/>
     <event_cb trigger="clicked" callback="emergency_stop_clicked"/>

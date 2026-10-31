@@ -1,0 +1,75 @@
+{
+    "_attribution": "test fixture for the spool editor's family/variant/brand queries",
+    "filaments": [
+        {
+            "id": "generic-pla",
+            "brand": "Generic",
+            "name": "PLA",
+            "type": "PLA",
+            "source": "test"
+        },
+        {
+            "id": "generic-pla-cf",
+            "brand": "Generic",
+            "name": "PLA-CF",
+            "type": "PLA-CF",
+            "source": "test"
+        },
+        {
+            "id": "generic-pla-plus",
+            "brand": "Generic",
+            "name": "PLA+",
+            "type": "PLA+",
+            "source": "test"
+        },
+        {
+            "id": "generic-silk-pla",
+            "brand": "Generic",
+            "name": "Silk PLA",
+            "type": "Silk PLA",
+            "source": "test"
+        },
+        {
+            "id": "generic-rpla",
+            "brand": "Generic",
+            "name": "rPLA",
+            "type": "rPLA",
+            "source": "test"
+        },
+        {
+            "id": "creality-hyper-pla",
+            "brand": "Creality",
+            "name": "Hyper PLA",
+            "type": "PLA-HS",
+            "source": "test"
+        },
+        {
+            "id": "polymaker-pla-pro",
+            "brand": "Polymaker",
+            "name": "PLA Pro",
+            "type": "PLA",
+            "source": "test"
+        },
+        {
+            "id": "polymaker-petg",
+            "brand": "Polymaker",
+            "name": "PETG",
+            "type": "PETG",
+            "source": "test"
+        },
+        {
+            "id": "esun-petg-hf",
+            "brand": "eSUN",
+            "name": "PETG HF",
+            "type": "PETG+HF",
+            "source": "test"
+        },
+        {
+            "id": "vendorx-proprietary",
+            "brand": "VendorX",
+            "name": "Proprietary Blend",
+            "type": "SnapSpeed",
+            "source": "test"
+        }
+    ]
+}

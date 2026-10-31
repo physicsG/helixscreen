@@ -11,7 +11,9 @@
 #include "helix_version.h" // HELIX_VERSION for server.connection.identify
 #include "http_lane_queue.h"
 #include "json_utils.h"
+#include "klippy_notification.h"
 #include "link_liveness.h"
+#include "moonraker_auth.h"
 #include "psram_thread_stack.h"
 
 #include <spdlog/spdlog.h>
@@ -33,23 +35,28 @@ int64_t now_us() {
 
 // WS text/continuation opcodes we reassemble; everything else (binary, ping,
 // pong, close) is handled by the component or ignored.
-constexpr uint8_t OP_TEXT = 0x01;
-constexpr uint8_t OP_CONTINUATION = 0x00;
-constexpr uint8_t OP_PONG = 0x0A;
-constexpr uint8_t OP_CONTROL_BIT = 0x08; // close, ping, pong
+constexpr uint8_t kOpText = 0x01;
+constexpr uint8_t kOpContinuation = 0x00;
+constexpr uint8_t kOpPong = 0x0A;
+constexpr uint8_t kOpControlBit = 0x08; // close, ping, pong
 
 std::atomic<EspMoonrakerClient::LinkDropObserver> s_link_drop_observer{nullptr};
+std::atomic<const EspMoonrakerClient::KlippyStateSink*> s_klippy_state_sink{nullptr};
 
 std::function<bool()> s_before_transport_start;
-std::function<void()> s_transport_stall_handler;
+helix::SharedCallback<void()> s_transport_stall_handler;
 } // namespace
 
 void EspMoonrakerClient::set_link_drop_observer(LinkDropObserver observer) {
     s_link_drop_observer.store(observer);
 }
 
+void EspMoonrakerClient::set_klippy_state_sink(const KlippyStateSink* sink) {
+    s_klippy_state_sink.store(sink);
+}
+
 EspMoonrakerClient::EspMoonrakerClient()
-    : transport_({[this](const char* what, std::function<void()> job) {
+    : transport_({[this](const char* what, helix::SharedCallback<void()> job) {
                       post_transport_job(what, std::move(job));
                   },
                   [this](const std::string& url) { return create_transport(url); },
@@ -94,7 +101,7 @@ EspMoonrakerClient::EspMoonrakerClient()
         .skip_unhandled_events = true,
     };
     if (esp_timer_create(&targs, &housekeeping_timer_) == ESP_OK) {
-        esp_timer_start_periodic(housekeeping_timer_, HOUSEKEEPING_PERIOD_US);
+        esp_timer_start_periodic(housekeeping_timer_, kHousekeepingPeriodUs);
     } else {
         ESP_LOGE(TAG, "failed to create housekeeping timer");
         housekeeping_timer_ = nullptr;
@@ -146,8 +153,8 @@ EspMoonrakerClient::~EspMoonrakerClient() {
 // Connection lifecycle
 // ---------------------------------------------------------------------------
 
-int EspMoonrakerClient::connect(const char* url, std::function<void()> on_connected,
-                                std::function<void()> on_disconnected) {
+int EspMoonrakerClient::connect(const char* url, helix::SharedCallback<void()> on_connected,
+                                helix::SharedCallback<void()> on_disconnected) {
     if (!url) {
         ESP_LOGE(TAG, "connect: null url");
         return -1;
@@ -189,28 +196,31 @@ int EspMoonrakerClient::connect(const char* url, std::function<void()> on_connec
 esp_websocket_client_handle_t EspMoonrakerClient::create_transport(const std::string& url) {
     esp_websocket_client_config_t cfg = {};
     cfg.uri = url.c_str();
-    // 4096 default is too small once nlohmann is on the callback path.
-    // 8192 is measurement-backed: discovery (the deepest json work on this
-    // task) peaks at ~6.5KB, deterministic across 44 forced-reconnect
-    // cycles — see WS_TASK_STACK_BYTES and the watermark log in
-    // discovery_subscribe, which reports the live margin every cycle.
-    cfg.task_stack = WS_TASK_STACK_BYTES;
+    // 4096 default is too small once nlohmann is on the callback path; see
+    // kWsTaskStackBytes for the measured peak.
+    cfg.task_stack = kWsTaskStackBytes;
     // Bounds the per-DATA-event chunk, not the message; we reassemble.
     cfg.buffer_size = 32768;
     // Capped so no connect attempt waits out a full unreachable-host timeout — see
-    // MAX_NETWORK_TIMEOUT_MS (which also documents what the cap does not cover: DNS
+    // kMaxNetworkTimeoutMs (which also documents what the cap does not cover: DNS
     // resolution ahead of it).
     cfg.network_timeout_ms =
-        static_cast<int>(std::min(connection_timeout_ms_, MAX_NETWORK_TIMEOUT_MS));
+        static_cast<int>(std::min(connection_timeout_ms_, kMaxNetworkTimeoutMs));
     cfg.ping_interval_sec = 10;
     // Two ping intervals' worth of missed PONGs before giving up, safely under the 60s
     // request timeout, so a connection that goes silent becomes an ordinary disconnect
     // and auto-reconnect.
-    cfg.pingpong_timeout_sec = PING_PONG_TIMEOUT_SEC;
+    cfg.pingpong_timeout_sec = kPingPongTimeoutSec;
     // The component's own auto-reconnect restarts transport structures from inside its
     // own task, which trips a spinlock assert; reconnection is driven from the transport
     // worker instead.
     cfg.disable_auto_reconnect = true;
+    // init copies the header block, so it only has to outlive this call.
+    std::string headers;
+    if (const std::string key = helix::moonraker_auth::key_for_url(url); !key.empty()) {
+        headers = std::string(helix::moonraker_auth::kApiKeyHeader) + ": " + key + "\r\n";
+        cfg.headers = headers.c_str();
+    }
 
     esp_websocket_client_handle_t ws = esp_websocket_client_init(&cfg);
     if (!ws) {
@@ -222,7 +232,7 @@ esp_websocket_client_handle_t EspMoonrakerClient::create_transport(const std::st
     return ws;
 }
 
-void EspMoonrakerClient::post_transport_job(const char* what, std::function<void()> job) {
+void EspMoonrakerClient::post_transport_job(const char* what, helix::SharedCallback<void()> job) {
     std::unique_lock<std::mutex> lock(transport_mutex_);
     // With no transport there is nothing to stop, so a job cannot block the caller: run it
     // here. The boot connect then allocates the websocket task in the same order, and on
@@ -240,10 +250,10 @@ void EspMoonrakerClient::post_transport_job(const char* what, std::function<void
         // RAM is what the websocket task itself needs.
         pthread_attr_t attr;
         pthread_attr_init(&attr);
-        pthread_attr_setstacksize(&attr, TRANSPORT_WORKER_STACK_BYTES);
+        pthread_attr_setstacksize(&attr, kTransportWorkerStackBytes);
         int rc;
         {
-            PsramThreadStackScope psram_stack("ws_transport", TRANSPORT_WORKER_STACK_BYTES);
+            PsramThreadStackScope psram_stack("ws_transport", kTransportWorkerStackBytes);
             rc = pthread_create(&transport_worker_, &attr,
                                 &EspMoonrakerClient::transport_worker_main, this);
         }
@@ -268,7 +278,7 @@ void* EspMoonrakerClient::transport_worker_main(void* self) {
 
 void EspMoonrakerClient::transport_worker_loop() {
     for (;;) {
-        std::pair<const char*, std::function<void()>> job;
+        std::pair<const char*, helix::SharedCallback<void()>> job;
         {
             std::unique_lock<std::mutex> lock(transport_mutex_);
             transport_cv_.wait(lock,
@@ -300,7 +310,7 @@ void EspMoonrakerClient::set_before_transport_start(std::function<bool()> check)
     s_before_transport_start = std::move(check);
 }
 
-void EspMoonrakerClient::set_transport_stall_handler(std::function<void()> handler) {
+void EspMoonrakerClient::set_transport_stall_handler(helix::SharedCallback<void()> handler) {
     s_transport_stall_handler = std::move(handler);
 }
 
@@ -477,6 +487,13 @@ void EspMoonrakerClient::ws_event_trampoline(void* arg, esp_event_base_t /*base*
 
 void EspMoonrakerClient::on_ws_connected() {
     ESP_LOGI(TAG, "connected to %s", url_.c_str());
+    // Every session passes through here before its first frame, on the task that
+    // delivers its frames. A retired transport's close can land after the next
+    // session's frames have started, so the close is not where this belongs.
+    if (const KlippyStateSink* sink = s_klippy_state_sink.load()) {
+        sink->session_started();
+    }
+    discovery_completed_.store(false);
     pongs_this_connection_ = 0;
     last_pong_us_.store(esp_timer_get_time());
     dead_link_reported_.store(false);
@@ -498,11 +515,15 @@ void EspMoonrakerClient::on_ws_connected() {
     was_connected_ = true;
     lost_notified_ = false;
 
+    invoke_connected_callbacks();
+}
+
+void EspMoonrakerClient::invoke_connected_callbacks() {
     if (on_connected_) {
         on_connected_();
     }
 
-    std::vector<std::pair<std::string, std::function<void()>>> observers;
+    std::vector<std::pair<std::string, helix::SharedCallback<void()>>> observers;
     {
         std::lock_guard<std::mutex> lock(observers_mutex_);
         observers.reserve(connected_observers_.size());
@@ -595,22 +616,22 @@ void EspMoonrakerClient::on_ws_data(const esp_websocket_event_data_t* d) {
     }
     // The component reports a read that timed out partway through a frame as a zero-length
     // event carrying that frame's opcode, so only bytes or a control frame are traffic.
-    if (d->data_len > 0 || (d->op_code & OP_CONTROL_BIT) != 0) {
+    if (d->data_len > 0 || (d->op_code & kOpControlBit) != 0) {
         last_rx_us_.store(esp_timer_get_time());
     }
-    if (d->op_code == OP_PONG) {
+    if (d->op_code == kOpPong) {
         ++pongs_this_connection_;
         last_pong_us_.store(esp_timer_get_time());
         return;
     }
     // Only text (0x01) and its continuation frames (0x00) carry JSON-RPC.
-    if (d->op_code != OP_TEXT && d->op_code != OP_CONTINUATION) {
+    if (d->op_code != kOpText && d->op_code != kOpContinuation) {
         return;
     }
 
     if (d->payload_offset == 0) {
         rx_buf_.clear();
-        rx_skip_ = (static_cast<size_t>(d->payload_len) > MAX_MESSAGE_BYTES);
+        rx_skip_ = (static_cast<size_t>(d->payload_len) > kMaxMessageBytes);
         if (rx_skip_) {
             ESP_LOGE(TAG, "dropping %d-byte message (cap 256KB)", d->payload_len);
         } else if (!helix::http::try_reserve(rx_buf_, static_cast<size_t>(d->payload_len))) {
@@ -634,7 +655,7 @@ void EspMoonrakerClient::on_ws_data(const esp_websocket_event_data_t* d) {
             const int64_t t0 = esp_timer_get_time();
             dispatch_message(rx_buf_.data(), rx_buf_.size());
             const int64_t ms = (esp_timer_get_time() - t0) / 1000;
-            if (ms >= SLOW_DISPATCH_LOG_MS) {
+            if (ms >= kSlowDispatchLogMs) {
                 ESP_LOGW(TAG, "slow dispatch: %lldms for a %u-byte message: %.60s", ms,
                          static_cast<unsigned>(rx_buf_.size()), rx_buf_.c_str());
             }
@@ -642,7 +663,7 @@ void EspMoonrakerClient::on_ws_data(const esp_websocket_event_data_t* d) {
         rx_buf_.clear();
         // A one-off large reply (configfile.settings is ~150KB) must not pin
         // its peak capacity in PSRAM for the rest of the session.
-        if (rx_buf_.capacity() > RX_BUF_KEEP_BYTES) {
+        if (rx_buf_.capacity() > kRxBufKeepBytes) {
             rx_buf_.shrink_to_fit();
         }
         rx_skip_ = false;
@@ -659,8 +680,8 @@ void EspMoonrakerClient::dispatch_message(const char* buf, size_t len) {
     // Response (has "id") → request tracker.
     if (msg.contains("id") && msg["id"].is_number_integer()) {
         uint64_t id = msg["id"].get<uint64_t>();
-        std::function<void(const json&)> success_cb;
-        std::function<void(const MoonrakerError&)> error_cb;
+        helix::SharedCallback<void(const json&)> success_cb;
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb;
         std::string method;
         bool silent = false;
         bool found = false;
@@ -702,6 +723,28 @@ void EspMoonrakerClient::dispatch_message(const char* buf, size_t len) {
     // Notification (has "method") → notify + method + bed-mesh callbacks.
     if (msg.contains("method") && msg["method"].is_string()) {
         dispatch_notification(msg, /*include_method_callbacks=*/true);
+        on_klippy_notification(msg["method"].get<std::string>());
+    }
+}
+
+void EspMoonrakerClient::on_klippy_notification(const std::string& method) {
+    // No printer.info poll follows a disconnect here: a Klippy that comes back
+    // into an error reads SHUTDOWN until notify_klippy_ready, which rediscovers.
+    const std::optional<KlippyNotification> klippy =
+        classify_klippy_notification(method, discovery_completed_.load());
+    if (!klippy) {
+        return;
+    }
+    ESP_LOGI(TAG, "%s", method.c_str());
+    if (const KlippyStateSink* sink = s_klippy_state_sink.load()) {
+        sink->state_reported(klippy->state);
+    }
+    if (klippy->abandon_requests) {
+        fail_pending_requests();
+    }
+    emit_event(klippy->event);
+    if (klippy->rediscover) {
+        invoke_connected_callbacks();
     }
 }
 
@@ -711,8 +754,8 @@ void EspMoonrakerClient::dispatch_notification(const json& msg, bool include_met
     }
     std::string method = msg["method"].get<std::string>();
 
-    std::vector<std::function<void(const json&)>> to_invoke;
-    std::function<void(const json&)> bed_mesh_cb;
+    std::vector<helix::SharedCallback<void(const json&)>> to_invoke;
+    helix::SharedCallback<void(const json&)> bed_mesh_cb;
     {
         std::lock_guard<std::mutex> lock(callbacks_mutex_);
         if (method == "notify_status_update" || method == "notify_filelist_changed") {
@@ -777,7 +820,7 @@ void EspMoonrakerClient::housekeeping_trampoline(void* arg) {
     {
         std::lock_guard<std::mutex> lock(self->state_mutex_);
         if (self->state_ == ConnectionState::RECONNECTING &&
-            (now_us() - self->reconnecting_since_us_) > RECONNECTING_TO_FAILED_US) {
+            (now_us() - self->reconnecting_since_us_) > kReconnectingToFailedUs) {
             to_failed = true;
         }
     }
@@ -794,11 +837,11 @@ void EspMoonrakerClient::process_timeouts() {
         std::string method;
         uint32_t timeout_ms;
         bool silent;
-        std::function<void(const MoonrakerError&)> cb;
+        helix::SharedCallback<void(const MoonrakerError&)> cb;
         MoonrakerError err;
     };
     std::vector<TimedOut> timed_out;
-    std::vector<std::function<void()>> failed;
+    std::vector<helix::SharedCallback<void()>> failed;
     const int64_t now = now_us();
     size_t pending_n = 0;
     int64_t oldest_age_us = 0;
@@ -833,11 +876,11 @@ void EspMoonrakerClient::process_timeouts() {
         }
     }
     // Rx-stall tripwire: a request is waiting and nothing at all (not even a
-    // PONG) has arrived for RX_STALL_LOG_US. Heap is logged beside it because a
+    // PONG) has arrived for kRxStallLogUs. Heap is logged beside it because a
     // WiFi/lwIP buffer shortage and a dead path look identical from here.
     const int64_t last_rx = last_rx_us_.load();
-    if (pending_n > 0 && last_rx > 0 && now - last_rx > RX_STALL_LOG_US &&
-        now - last_stall_log_us_ > RX_STALL_LOG_US) {
+    if (pending_n > 0 && last_rx > 0 && now - last_rx > kRxStallLogUs &&
+        now - last_stall_log_us_ > kRxStallLogUs) {
         last_stall_log_us_ = now;
         ESP_LOGW(TAG,
                  "rx stall: %llds since last frame, %u pending (oldest '%s' %llds), %u stale "
@@ -853,7 +896,7 @@ void EspMoonrakerClient::process_timeouts() {
     // both directions: late PONGs on a weak link with frames still arriving are not dead.
     const int64_t last_pong = last_pong_us_.load();
     if (get_connection_state() == ConnectionState::CONNECTED &&
-        net::link_dead(now, last_pong, last_rx_us_.load(), LINK_DEAD_US) &&
+        net::link_dead(now, last_pong, last_rx_us_.load(), kLinkDeadUs) &&
         !dead_link_reported_.exchange(true)) {
         ESP_LOGW(TAG,
                  "no PONG for %llds and no frame for %llds on a live connection (%u pending, %u "
@@ -898,7 +941,7 @@ void EspMoonrakerClient::process_timeouts() {
     // Stopping a transport that never connected can mean waiting out its connect attempt
     // (a host that does not answer), so it gets longer before it counts as stuck.
     const int64_t stall_us =
-        transport_.retiring_unconnected() ? TRANSPORT_STALL_UNCONNECTED_US : TRANSPORT_STALL_US;
+        transport_.retiring_unconnected() ? kTransportStallUnconnectedUs : kTransportStallUs;
     // Reported once per job: the handler may decline to restart (the restart cap), and the
     // job stays stuck until its websocket task gives up.
     if (job_started != 0 && now_us() - job_started > stall_us &&
@@ -936,7 +979,7 @@ int EspMoonrakerClient::send_envelope(const json& envelope) {
         return -1;
     }
     int sent = esp_websocket_client_send_text(ws, payload.data(), static_cast<int>(payload.size()),
-                                              pdMS_TO_TICKS(SEND_TIMEOUT_MS));
+                                              pdMS_TO_TICKS(kSendTimeoutMs));
     return sent;
 }
 
@@ -960,15 +1003,16 @@ int EspMoonrakerClient::send_jsonrpc(const std::string& method, const json& para
 }
 
 RequestId EspMoonrakerClient::send_jsonrpc(const std::string& method, const json& params,
-                                           std::function<void(const json&)> cb) {
+                                           helix::SharedCallback<void(const json&)> cb) {
     return send_jsonrpc(method, params, std::move(cb), nullptr, 0, false);
 }
 
-RequestId EspMoonrakerClient::send_jsonrpc(const std::string& method, const json& params,
-                                           std::function<void(const json&)> success_cb,
-                                           std::function<void(const MoonrakerError&)> error_cb,
-                                           uint32_t timeout_ms, bool silent,
-                                           std::optional<rpc_error_policy::CallerIntent> intent) {
+RequestId
+EspMoonrakerClient::send_jsonrpc(const std::string& method, const json& params,
+                                 helix::SharedCallback<void(const json&)> success_cb,
+                                 helix::SharedCallback<void(const MoonrakerError&)> error_cb,
+                                 uint32_t timeout_ms, bool silent,
+                                 std::optional<rpc_error_policy::CallerIntent> intent) {
     // CallerIntent governs who surfaces a failed request's error (caller
     // callback vs the tracker's generic toast) on the desktop client, where
     // both surfaces exist. The shim has exactly one surface — error_cb — so
@@ -982,22 +1026,23 @@ RequestId EspMoonrakerClient::send_jsonrpc(const std::string& method, const json
         if (error_cb) {
             error_cb(MoonrakerError::connection_lost(method));
         }
-        return INVALID_REQUEST_ID;
+        return kInvalidRequestId;
     }
     return track_and_send(method, params, std::move(success_cb), std::move(error_cb), timeout_ms,
                           silent);
 }
 
-RequestId EspMoonrakerClient::track_and_send(const std::string& method, const json& params,
-                                             std::function<void(const json&)> success_cb,
-                                             std::function<void(const MoonrakerError&)> error_cb,
-                                             uint32_t timeout_ms, bool silent) {
+RequestId
+EspMoonrakerClient::track_and_send(const std::string& method, const json& params,
+                                   helix::SharedCallback<void(const json&)> success_cb,
+                                   helix::SharedCallback<void(const MoonrakerError&)> error_cb,
+                                   uint32_t timeout_ms, bool silent) {
     RequestId id = next_request_id_.fetch_add(1) + 1;
 
     bool queue_full = false;
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
-        if (pending_.size() >= MAX_PENDING_REQUESTS) {
+        if (pending_.size() >= kMaxPendingRequests) {
             queue_full = true;
         } else {
             Pending req;
@@ -1012,7 +1057,7 @@ RequestId EspMoonrakerClient::track_and_send(const std::string& method, const js
     }
 
     if (queue_full) {
-        ESP_LOGW(TAG, "request queue full (%zu), rejecting %s", MAX_PENDING_REQUESTS,
+        ESP_LOGW(TAG, "request queue full (%zu), rejecting %s", kMaxPendingRequests,
                  method.c_str());
         if (error_cb) {
             MoonrakerError err;
@@ -1021,7 +1066,7 @@ RequestId EspMoonrakerClient::track_and_send(const std::string& method, const js
             err.message = "Request queue full — too many pending requests";
             error_cb(err);
         }
-        return INVALID_REQUEST_ID;
+        return kInvalidRequestId;
     }
 
     json rpc;
@@ -1035,7 +1080,7 @@ RequestId EspMoonrakerClient::track_and_send(const std::string& method, const js
     int result = send_envelope(rpc);
     if (result < 0) {
         // Send failed — drop the pending entry and report connection_lost.
-        std::function<void(const MoonrakerError&)> cb_copy;
+        helix::SharedCallback<void(const MoonrakerError&)> cb_copy;
         {
             std::lock_guard<std::mutex> lock(requests_mutex_);
             auto it = pending_.find(id);
@@ -1047,7 +1092,7 @@ RequestId EspMoonrakerClient::track_and_send(const std::string& method, const js
         if (cb_copy) {
             cb_copy(MoonrakerError::connection_lost(method));
         }
-        return INVALID_REQUEST_ID;
+        return kInvalidRequestId;
     }
     return id;
 }
@@ -1060,7 +1105,7 @@ int EspMoonrakerClient::gcode_script(const std::string& gcode) {
 
 void EspMoonrakerClient::get_gcode_store(
     int count, std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-    std::function<void(const MoonrakerError&)> on_error) {
+    helix::SharedCallback<void(const MoonrakerError&)> on_error) {
     json params = {{"count", count}};
     send_jsonrpc(
         "server.gcode_store", params,
@@ -1086,7 +1131,7 @@ void EspMoonrakerClient::get_gcode_store(
 
 void EspMoonrakerClient::get_temperature_store(
     std::function<void(const TemperatureStore&)> on_success,
-    std::function<void(const MoonrakerError&)> on_error) {
+    helix::SharedCallback<void(const MoonrakerError&)> on_error) {
     json params = {{"include_monitors", false}};
     send_jsonrpc(
         "server.temperature_store", params,
@@ -1131,10 +1176,11 @@ void EspMoonrakerClient::get_temperature_store(
 // excluded from the ESP image (helixapp/app_srcs.txt). The one portable piece —
 // PrinterDiscovery::parse_objects() — is reused as-is.
 //
-// v1 (Core+AMS) drops the desktop steps that only feed the About screen / webcam
-// / power UI: 2nd server.info (Moonraker version, Spoolman, webcam), printer.info
-// hostname, machine.system_info OS/arch, MCU last_stats queries, and
-// machine.device_power / server.sensors probes.
+// The Moonraker version comes from the readiness gate's server.info and the Klipper
+// version from printer.info, both shown on the Printer Manager. v1 (Core+AMS) drops
+// the desktop steps that only feed the About screen / webcam / power UI: Spoolman and
+// webcam detection, printer.info hostname, machine.system_info OS/arch, MCU last_stats
+// queries, and machine.device_power / server.sensors probes.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -1391,8 +1437,9 @@ json build_subscription_objects(const PrinterDiscovery& hw) {
 
 } // namespace
 
-void EspMoonrakerClient::discover_printer(std::function<void()> on_complete,
-                                          std::function<void(const std::string&)> on_error) {
+void EspMoonrakerClient::discover_printer(
+    helix::SharedCallback<void()> on_complete,
+    helix::SharedCallback<void(const std::string&)> on_error) {
     if (!is_connected()) {
         if (on_error) {
             on_error("not connected");
@@ -1421,8 +1468,9 @@ void EspMoonrakerClient::discover_printer(std::function<void()> on_complete,
 
     // Share the user callbacks across the nested chain; every terminal path clears
     // discovery_in_flight_ exactly once (discovery_fail, or the subscribe success).
-    auto done = std::make_shared<std::function<void()>>(std::move(on_complete));
-    auto fail = std::make_shared<std::function<void(const std::string&)>>(std::move(on_error));
+    auto done = std::make_shared<helix::SharedCallback<void()>>(std::move(on_complete));
+    auto fail =
+        std::make_shared<helix::SharedCallback<void(const std::string&)>>(std::move(on_error));
 
     json identify_params = {{"client_name", "HelixScreen"},
                             {"version", HELIX_VERSION},
@@ -1464,9 +1512,11 @@ void EspMoonrakerClient::discovery_gate_klippy(DiscoveryDone done, DiscoveryFail
                 return;
             }
             std::string klippy_state = "unknown";
-            if (resp.contains("result") && resp["result"].contains("klippy_state") &&
-                resp["result"]["klippy_state"].is_string()) {
-                klippy_state = resp["result"]["klippy_state"].get<std::string>();
+            std::string moonraker_version = "unknown";
+            if (const json* result = helix::json_util::find_member(resp, "result")) {
+                klippy_state = helix::json_util::safe_string(*result, "klippy_state", "unknown");
+                moonraker_version =
+                    helix::json_util::safe_string(*result, "moonraker_version", "unknown");
             }
             spdlog::debug("[helixnet] Klippy state gate: {}", klippy_state);
             // "ready" and "shutdown" both expose valid Klipper objects; anything
@@ -1477,7 +1527,8 @@ void EspMoonrakerClient::discovery_gate_klippy(DiscoveryDone done, DiscoveryFail
                 discovery_fail(fail, MoonrakerEventType::DISCOVERY_DEFERRED, reason, generation);
                 return;
             }
-            discovery_query_objects(std::move(done), std::move(fail), generation);
+            discovery_query_objects(std::move(done), std::move(fail), generation,
+                                    std::move(moonraker_version));
         },
         [this, done, fail, generation](const MoonrakerError& err) {
             if (helix::is_stale_generation(generation, connection_generation_.load())) {
@@ -1489,13 +1540,14 @@ void EspMoonrakerClient::discovery_gate_klippy(DiscoveryDone done, DiscoveryFail
 }
 
 void EspMoonrakerClient::discovery_query_objects(DiscoveryDone done, DiscoveryFail fail,
-                                                 uint64_t generation) {
+                                                 uint64_t generation,
+                                                 std::string moonraker_version) {
     // Step c — printer.objects.list → parse_objects() → fire on_hardware_discovered_.
     // silent=true suppresses the error toast if Klippy vanished between the gate and
     // this call.
     send_jsonrpc(
         "printer.objects.list", json(),
-        [this, done, fail, generation](const json& resp) {
+        [this, done, fail, generation, moonraker_version](const json& resp) {
             if (helix::is_stale_generation(generation, connection_generation_.load())) {
                 return;
             }
@@ -1524,6 +1576,7 @@ void EspMoonrakerClient::discovery_query_objects(DiscoveryDone done, DiscoveryFa
             PrinterDiscovery snapshot;
             {
                 std::lock_guard<std::mutex> lock(hardware_mutex_);
+                hardware_.set_moonraker_version(moonraker_version);
                 spdlog::info("[helixnet] discovered {} heaters, {} sensors, {} fans, {} leds, "
                              "{} filament sensors",
                              hardware_.heaters().size(), hardware_.sensors().size(),
@@ -1537,7 +1590,7 @@ void EspMoonrakerClient::discovery_query_objects(DiscoveryDone done, DiscoveryFa
                 hw_cb(snapshot);
             }
 
-            discovery_subscribe(std::move(done), std::move(fail), generation);
+            discovery_printer_info(std::move(done), std::move(fail), generation);
         },
         [this, done, fail, generation](const MoonrakerError& err) {
             if (helix::is_stale_generation(generation, connection_generation_.load())) {
@@ -1545,6 +1598,35 @@ void EspMoonrakerClient::discovery_query_objects(DiscoveryDone done, DiscoveryFa
             }
             spdlog::error("[helixnet] printer.objects.list request failed: {}", err.message);
             discovery_request_failed(fail, err, generation);
+        },
+        0,     // default timeout
+        true); // silent
+}
+
+void EspMoonrakerClient::discovery_printer_info(DiscoveryDone done, DiscoveryFail fail,
+                                                uint64_t generation) {
+    // Step c2 — printer.info for the Klipper version and the Kalico marker. Best-effort:
+    // a printer that cannot answer still gets its subscription, with the version unknown.
+    send_jsonrpc(
+        "printer.info", json(),
+        [this, done, fail, generation](const json& resp) {
+            if (helix::is_stale_generation(generation, connection_generation_.load())) {
+                return;
+            }
+            if (const json* result = helix::json_util::find_member(resp, "result")) {
+                std::lock_guard<std::mutex> lock(hardware_mutex_);
+                hardware_.apply_printer_info(*result);
+                spdlog::info("[helixnet] {} {}", hardware_.firmware_name(),
+                             hardware_.software_version());
+            }
+            discovery_subscribe(std::move(done), std::move(fail), generation);
+        },
+        [this, done, fail, generation](const MoonrakerError& err) {
+            if (helix::is_stale_generation(generation, connection_generation_.load())) {
+                return;
+            }
+            spdlog::warn("[helixnet] printer.info failed (continuing): {}", err.message);
+            discovery_subscribe(std::move(done), std::move(fail), generation);
         },
         0,     // default timeout
         true); // silent
@@ -1601,22 +1683,15 @@ void EspMoonrakerClient::discovery_subscribe(DiscoveryDone done, DiscoveryFail f
                 done_cb(snap, initial_status);
             }
 
-            // Permanent telemetry, not scaffolding: uxTaskGetStackHighWaterMark
-            // reports the MINIMUM free stack space this (this reconnect
-            // cycle's freshly created — see connect()'s F8 comment) websocket
-            // task has ever had since it started, in bytes. Logged here
-            // because discovery is the heaviest, most deeply-nested json
-            // work this task does per cycle (identify/gate/query_objects/
-            // subscribe, ending here). If this ever reports < 8192 the old
-            // (pre-fix) budget would have overflowed — confirming the
-            // heap-corruption soak hypothesis retroactively; if it stays
-            // comfortably high across churn, that hypothesis is wrong and
-            // this line is the tripwire evidence for whatever the hunt
-            // turns to next.
+            // uxTaskGetStackHighWaterMark reports the least free stack this
+            // connection's websocket task has had since it started, in bytes.
+            // Logged here because discovery is the deepest work this task does
+            // per connection (identify/gate/query_objects/subscribe, ending here).
             spdlog::info("[helixnet] ws task stack watermark: {} bytes free of {}",
-                         uxTaskGetStackHighWaterMark(nullptr), WS_TASK_STACK_BYTES);
+                         uxTaskGetStackHighWaterMark(nullptr), kWsTaskStackBytes);
 
             discovery_in_flight_.store(false);
+            discovery_completed_.store(true);
             if (*done) {
                 (*done)();
             }
@@ -1705,7 +1780,7 @@ void EspMoonrakerClient::set_on_discovery_complete(
     on_discovery_complete_ = std::move(cb);
 }
 
-void EspMoonrakerClient::set_bed_mesh_callback(std::function<void(const json&)> callback) {
+void EspMoonrakerClient::set_bed_mesh_callback(helix::SharedCallback<void(const json&)> callback) {
     std::lock_guard<std::mutex> lock(callbacks_mutex_);
     bed_mesh_callback_ = std::move(callback);
 }
@@ -1714,9 +1789,10 @@ void EspMoonrakerClient::set_bed_mesh_callback(std::function<void(const json&)> 
 // Subscriptions & method callbacks
 // ---------------------------------------------------------------------------
 
-SubscriptionId EspMoonrakerClient::register_notify_update(std::function<void(const json&)> cb) {
+SubscriptionId
+EspMoonrakerClient::register_notify_update(helix::SharedCallback<void(const json&)> cb) {
     if (!cb) {
-        return INVALID_SUBSCRIPTION_ID;
+        return kInvalidSubscriptionId;
     }
     SubscriptionId id = next_subscription_id_.fetch_add(1) + 1;
     std::lock_guard<std::mutex> lock(callbacks_mutex_);
@@ -1731,7 +1807,7 @@ bool EspMoonrakerClient::unsubscribe_notify_update(SubscriptionId id) {
 
 void EspMoonrakerClient::register_method_callback(const std::string& method,
                                                   const std::string& handler_name,
-                                                  std::function<void(const json&)> cb) {
+                                                  helix::SharedCallback<void(const json&)> cb) {
     std::lock_guard<std::mutex> lock(callbacks_mutex_);
     method_callbacks_[method][handler_name] = std::move(cb);
 }
@@ -1764,9 +1840,9 @@ void EspMoonrakerClient::dispatch_status_update(const json& status, bool from_ca
 // ---------------------------------------------------------------------------
 
 void EspMoonrakerClient::add_connected_observer(const std::string& handler_name,
-                                                std::function<void()> cb) {
+                                                helix::SharedCallback<void()> cb) {
     bool fire_now = false;
-    std::function<void()> immediate;
+    helix::SharedCallback<void()> immediate;
     {
         std::lock_guard<std::mutex> lock(observers_mutex_);
         connected_observers_[handler_name] = cb;
@@ -1843,7 +1919,7 @@ bool EspMoonrakerClient::is_disconnect_modal_suppressed() const {
 // ---------------------------------------------------------------------------
 
 bool EspMoonrakerClient::cancel_request(RequestId id) {
-    if (id == INVALID_REQUEST_ID) {
+    if (id == kInvalidRequestId) {
         return false;
     }
     std::lock_guard<std::mutex> lock(requests_mutex_);

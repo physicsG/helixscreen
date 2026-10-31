@@ -13,10 +13,7 @@
         style_pad_all="#space_sm" style_radius="#border_radius" flex_flow="row" style_flex_cross_place="center"
         style_pad_gap="#space_sm" clickable="true" scrollable="false">
     <style name="selected_style" selector="checked"/>
-    <!-- Color swatch circle -->
-    <lv_obj name="color_swatch"
-            width="20" height="20" style_radius="10" style_bg_color="#text_muted" style_bg_opa="255" clickable="false"
-            scrollable="false" style_border_width="#border_width"/>
+    <color_dot name="color_swatch" color="#text_muted"/>
     <!-- Material - Name (single line) -->
     <text_body name="filament_material" flex_grow="1" text="PLA" long_mode="dots" clickable="false"/>
     <!-- Temperature info -->

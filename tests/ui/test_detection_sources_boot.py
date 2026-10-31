@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """App-startup wiring of the stock detection sources (#1378).
 
-Application is not linked into the unit-test binary (app_globals.o is
-filtered out of TEST_APP_OBJS), so the registration block in
-Application::init_panel_subjects() is only observable in a real boot. This
+The registration block in Application::init_panel_subjects() runs only in a
+real boot, so it is only observable there. This
 starts one at debug level and asserts the K2 source announced itself: the
 "not capable" line on a non-K2 host, the capable one on a K2.
 """

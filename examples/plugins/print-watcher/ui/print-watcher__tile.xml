@@ -5,8 +5,9 @@
        event beside it; two rows replace the glance with the recent-events
        list; four columns add the destination line. The status footer's icon
        carries the severity color; muted swaps the glyph to volume_off.
-       Every label that can carry a filename is bounded and ellipsized, so a
-       long name dots off instead of running under the text beside it. -->
+       Every label that can carry a filename is bounded and scrolls, so a
+       long name stays inside its label instead of running under the text
+       beside it. -->
   <view extends="lv_obj"
         width="100%" height="100%" clickable="true" style_pad_all="#space_sm" style_pad_gap="#space_xs"
         flex_flow="column" scrollable="false">
@@ -59,7 +60,7 @@
         <lv_label name="print-watcher__last_event"
                   width="100%" bind_text="print-watcher__last_event" long_mode="scroll" style_text_font="#font_small"
                   style_text_color="#text"/>
-        <text_xs name="print-watcher__last_file" width="100%%" bind_text="print-watcher__last_file" long_mode="scroll">
+        <text_xs name="print-watcher__last_file" width="100%" bind_text="print-watcher__last_file" long_mode="scroll">
           <bind_flag_if_eq subject="print-watcher__room" flag="hidden" ref_value="0"/>
         </text_xs>
       </lv_obj>
@@ -69,7 +70,7 @@
             width="100%" flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xxs"
             style_flex_main_place="space_around" scrollable="false" style_bg_opa="0" style_border_width="0">
       <bind_flag_if_eq subject="print-watcher__log_zone" flag="hidden" ref_value="0"/>
-      <text_small name="print-watcher__empty_log" text="No events yet">
+      <text_small name="print-watcher__empty_log" text="No events yet" translation_tag="No events yet">
         <bind_flag_if_eq subject="print-watcher__has_events" flag="hidden" ref_value="1"/>
       </text_small>
       <lv_obj width="100%"

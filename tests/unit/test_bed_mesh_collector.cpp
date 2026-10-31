@@ -433,6 +433,18 @@ TEST_CASE("parse_adapted_probe_count extracts N*M from Klipper line",
         REQUIRE(*n == 16);
     }
 
+    SECTION("Stock Klipper bed_mesh.py form, parenthesized") {
+        auto n = helix::parse_adapted_probe_count("// Adapted probe count: (7,7)");
+        REQUIRE(n.has_value());
+        REQUIRE(*n == 49);
+    }
+
+    SECTION("KAMP verbose macro form, trailing period") {
+        auto n = helix::parse_adapted_probe_count("// Adapted probe count: 5,4.");
+        REQUIRE(n.has_value());
+        REQUIRE(*n == 20);
+    }
+
     SECTION("With gcode_response // prefix") {
         auto n = helix::parse_adapted_probe_count("// Adapted probe count: 5,3");
         REQUIRE(n.has_value());
@@ -807,8 +819,8 @@ TEST_CASE("CC1 COSMOS mesh replay counts the 81 mesh points, not the standalone 
     for (const auto& line : lines) {
         if (auto p = helix::parse_probe_position(line)) {
             const bool seen = std::any_of(distinct.begin(), distinct.end(), [&](const auto& q) {
-                return std::fabs(p->x - q.x) <= helix::PROBE_POSITION_TOLERANCE_MM &&
-                       std::fabs(p->y - q.y) <= helix::PROBE_POSITION_TOLERANCE_MM;
+                return std::fabs(p->x - q.x) <= helix::kProbePositionToleranceMm &&
+                       std::fabs(p->y - q.y) <= helix::kProbePositionToleranceMm;
             });
             if (!seen) {
                 distinct.push_back(*p);

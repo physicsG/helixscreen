@@ -25,10 +25,10 @@ namespace {
 // (entry_y = y_off + height × -0.12, gestures up at the spool grid). The canvas
 // child is extended above the widget by this much so absolute-coord
 // draws land in the buffer instead of being clipped.
-constexpr float CANVAS_TOP_OVERHANG_RATIO = 0.15f;
+constexpr float kCanvasTopOverhangRatio = 0.15f;
 
 int32_t layered_overhang(int32_t widget_h) {
-    return LV_MAX(50, static_cast<int32_t>(widget_h * CANVAS_TOP_OVERHANG_RATIO));
+    return LV_MAX(50, static_cast<int32_t>(widget_h * kCanvasTopOverhangRatio));
 }
 
 // A 1x1 transparent buffer the canvas points at while it owns no real one, so
@@ -46,7 +46,7 @@ void layered_destroy_buffers(FilamentPathData* data) {
     helix::safe_draw_buf_destroy(data->layers.overlay_buf, "fp_ovl");
 }
 
-constexpr int ALLOC_RETRIES = 5;
+constexpr int kAllocRetries = 5;
 
 // Size the canvas buffer to w x h. Returns true when the canvas has a buffer of
 // exactly that size.
@@ -82,7 +82,7 @@ bool layered_ensure_buffers(lv_obj_t* obj, FilamentPathData* data, int32_t w, in
             // coalesced refresh), and only the first failure of each run warns.
             const int kb = w * h * 4 / 1024;
             if (ls.alloc_retries_left > 0) {
-                if (ls.alloc_retries_left == ALLOC_RETRIES)
+                if (ls.alloc_retries_left == kAllocRetries)
                     spdlog::warn("[FilamentPath] No memory for a {}x{} path canvas ({} KB); "
                                  "retrying",
                                  w, h, kb);
@@ -102,7 +102,7 @@ bool layered_ensure_buffers(lv_obj_t* obj, FilamentPathData* data, int32_t w, in
             lv_canvas_set_draw_buf(ls.overlay_canvas, ls.overlay_buf);
     }
 
-    ls.alloc_retries_left = ALLOC_RETRIES;
+    ls.alloc_retries_left = kAllocRetries;
     ls.canvas_w = w;
     ls.canvas_h = h;
     ls.overlay_dirty = true;
@@ -260,9 +260,9 @@ bool layered_setup_canvases(lv_obj_t* obj, FilamentPathData* data) {
     int32_t w = lv_obj_get_width(obj);
     int32_t h = lv_obj_get_height(obj);
     if (w <= 0)
-        w = DEFAULT_WIDTH;
+        w = kDefaultWidth;
     if (h <= 0)
-        h = DEFAULT_HEIGHT;
+        h = kDefaultHeight;
     int32_t overhang = layered_overhang(h);
     int32_t total_h = h + overhang;
 
@@ -280,7 +280,7 @@ bool layered_setup_canvases(lv_obj_t* obj, FilamentPathData* data) {
         return false;
     }
     data->layers.overlay_canvas = c;
-    data->layers.alloc_retries_left = ALLOC_RETRIES;
+    data->layers.alloc_retries_left = kAllocRetries;
 
     lv_obj_set_size(c, w, total_h);
     lv_obj_set_pos(c, 0, -overhang);

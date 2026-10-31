@@ -38,16 +38,16 @@ struct PluckWindow {
 class PluckDetector {
   public:
     /// Minimum strength, as a multiple of the noise floor, for a strike to count.
-    static constexpr float MIN_RMS_RATIO = 9.0f;
+    static constexpr float kMinRmsRatio = 9.0f;
     /// Skip past the impact transient before analysing.
-    static constexpr float SKIP_MS = 40.0f;
+    static constexpr float kSkipMs = 40.0f;
     /// Length of ring-down to analyse.
-    static constexpr float ANALYZE_MS = 500.0f;
+    static constexpr float kAnalyzeMs = 500.0f;
 
     /// Sub-window the temporal shape checks measure the envelope in.
-    static constexpr float ENVELOPE_SEGMENT_MS = 10.0f;
+    static constexpr float kEnvelopeSegmentMs = 10.0f;
     /// How far before the loudest sub-window to sample the pre-strike level.
-    static constexpr float ONSET_LOOKBACK_MS = 20.0f;
+    static constexpr float kOnsetLookbackMs = 20.0f;
     /// Peak-to-pre-strike RMS ratio a pluck must clear.
     ///
     /// Measured by the exhaustive alignment sweep in
@@ -67,35 +67,35 @@ class PluckDetector {
     /// verdict was reached on, and asserts the floor - it did not until
     /// 2026-08-24, so for a while this comment cited a test that measured only
     /// harmonic_concentration and the margin could have eroded to zero
-    /// unobserved. The same was true of MAX_DECAY_RISE and
-    /// MAX_DECAY_END_RATIO below; all three are read back now.
-    static constexpr float MIN_ONSET_RISE = 3.0f;
+    /// unobserved. The same was true of kMaxDecayRise and
+    /// kMaxDecayEndRatio below; all three are read back now.
+    static constexpr float kMinOnsetRise = 3.0f;
     /// Sub-windows the post-onset envelope is split into.
-    static constexpr int DECAY_SEGMENTS = 4;
+    static constexpr int kDecaySegments = 4;
     /// How much louder a decay sub-window may be than the one before it.
-    /// Worst case 1.06x across the alignment sweep (see MIN_ONSET_RISE), which
+    /// Worst case 1.06x across the alignment sweep (see kMinOnsetRise), which
     /// asserts it. decay_rise() is the quantity, exposed so the sweep can read
     /// it rather than infer it from an accept/reject outcome.
-    static constexpr float MAX_DECAY_RISE = 1.5f;
+    static constexpr float kMaxDecayRise = 1.5f;
     /// Last sub-window as a fraction of the first. 0.13-0.20 across the
     /// alignment sweep, which asserts the ceiling; a steady tone reads 0.98
     /// and the weak-pluck capture, which never rang, reads 0.79.
-    static constexpr float MAX_DECAY_END_RATIO = 0.5f;
+    static constexpr float kMaxDecayEndRatio = 0.5f;
     /// Shortest post-onset region the decay check can judge. An event whose
     /// onset lands at the very end of the window has no envelope to read, and
     /// "cannot tell" must mean rejected here - that is what an event ramping
     /// up into the future looks like.
-    static constexpr float MIN_DECAY_SPAN_MS = 100.0f;
+    static constexpr float kMinDecaySpanMs = 100.0f;
     /// Post-onset signal a window needs before it is worth resolving at all.
     ///
-    /// extract_ringdown() always returns ANALYZE_MS of samples, padding the
+    /// extract_ringdown() always returns kAnalyzeMs of samples, padding the
     /// front with whatever preceded the strike when the strike landed late.
-    /// At 70% of ANALYZE_MS that padding cannot outweigh the ring-down.
+    /// At 70% of kAnalyzeMs that padding cannot outweigh the ring-down.
     /// Measured on tests/fixtures/belt_plucks/ spliced into a live stream:
     /// 350-400 ms accepts every capture that clears the energy gate, and by
     /// 450 ms the window has slid so far that a 500 ms capture has run out
     /// and the analysis starts reading past its end.
-    static constexpr float MIN_RINGDOWN_MS = 350.0f;
+    static constexpr float kMinRingdownMs = 350.0f;
 
     /// Broadband RMS with per-axis DC removed. Static so callers can measure a
     /// buffer without owning a detector.
@@ -115,14 +115,14 @@ class PluckDetector {
     ///
     /// Operates on the live detection window (the buffer being watched for a
     /// strike, onset included) - not on an extracted ring-down. A ring-down
-    /// has already decayed for SKIP_MS+ before the caller ever sees it, so its
+    /// has already decayed for kSkipMs+ before the caller ever sees it, so its
     /// RMS reads several times lower than the detection window that triggered
     /// it. Feeding extract_ringdown() output back into this rejects strikes
     /// that were genuinely firm.
     [[nodiscard]] float rms_ratio(const AccelSample* samples, size_t count) const;
 
     /// True if this window is strong enough to analyse. Same detection-window
-    /// contract as rms_ratio() - see its comment. MIN_RMS_RATIO was calibrated
+    /// contract as rms_ratio() - see its comment. kMinRmsRatio was calibrated
     /// against detection windows across 60 captures; it is not meaningful
     /// against a ring-down.
     [[nodiscard]] bool passes_gate(const AccelSample* samples, size_t count) const;
@@ -132,14 +132,14 @@ class PluckDetector {
     ///
     /// This is the loudest SAMPLE. For a plucked string that is its attack
     /// transient, which is what makes the rise anchored here large - see
-    /// MIN_ONSET_RISE for the measured range. For broadband energy it is
+    /// kMinOnsetRise for the measured range. For broadband energy it is
     /// instead a random draw somewhere inside the event, so an onset located
     /// this way can sit tens of samples past a thump's true leading edge
     /// (measured: 62).
     static size_t find_onset(const AccelSample* samples, size_t count);
 
     /// The measured peak-to-pre-strike RMS ratio - the quantity
-    /// MIN_ONSET_RISE is a threshold on. Exposed so a test can measure the
+    /// kMinOnsetRise is a threshold on. Exposed so a test can measure the
     /// margin a real capture actually has, rather than only whether it passed.
     ///
     /// Returns 0 when the rise cannot be judged (window too short, or the
@@ -154,19 +154,19 @@ class PluckDetector {
     /// Operates on the live DETECTION WINDOW, like rms_ratio() and
     /// passes_gate(): the evidence is the quiet that came BEFORE the strike,
     /// and an extracted ring-down has already thrown that away. A window whose
-    /// STRIKE sits within ONSET_LOOKBACK_MS of its start returns false - there
+    /// STRIKE sits within kOnsetLookbackMs of its start returns false - there
     /// is nothing to compare against, and a steady tone looks exactly like
     /// that.
     ///
     /// The reference is taken from the strike, located by find_onset(), and
     /// not from the loudest segment: on a real capture the loudest 10 ms
     /// frequently lands after the strike, which puts a peak-anchored reference
-    /// inside the ring-down. See the note on MIN_ONSET_RISE.
+    /// inside the ring-down. See the note on kMinOnsetRise.
     [[nodiscard]] static bool has_sharp_onset(const AccelSample* samples, size_t count,
                                               float sample_rate);
 
     /// True when the window holds enough signal after the onset to be worth
-    /// resolving - at least MIN_RINGDOWN_MS of it.
+    /// resolving - at least kMinRingdownMs of it.
     ///
     /// A firm strike trips the energy gate as soon as its leading edge enters
     /// the window, before there is any envelope to read. The answer to false
@@ -184,13 +184,13 @@ class PluckDetector {
                                              float sample_rate);
 
     /// The measured last-segment-over-first-segment ratio - the quantity
-    /// MAX_DECAY_END_RATIO is a threshold on. Exposed for the same reason as
+    /// kMaxDecayEndRatio is a threshold on. Exposed for the same reason as
     /// onset_rise(): a caller diagnosing a rejection wants the number, not
     /// only whether it passed.
     ///
     /// Locates its own onset, so it reads the same on a detection window and
     /// on an extracted ring-down. Returns -1.0f when the ratio cannot be
-    /// judged (window too short, or the onset lands within DECAY_SEGMENTS
+    /// judged (window too short, or the onset lands within kDecaySegments
     /// samples of the window's end) - a sentinel rather than 0.0f, since 0
     /// would misreport as "decayed to nothing" on a window has_pluck_decay()
     /// would have rejected outright for lack of evidence.
@@ -200,7 +200,7 @@ class PluckDetector {
     /**
      * @brief Largest step-up between consecutive post-onset envelope sub-windows
      *
-     * The quantity MAX_DECAY_RISE is a threshold on. Exposed rather than left
+     * The quantity kMaxDecayRise is a threshold on. Exposed rather than left
      * inside has_pluck_decay() so the alignment sweep can read back the margin
      * it actually has, the same way it reads back harmonic_concentration().
      *
@@ -212,7 +212,7 @@ class PluckDetector {
                                           float sample_rate);
 
     /// True if the envelope after the onset falls the way a plucked string's
-    /// does: each sub-window no more than MAX_DECAY_RISE louder than the one
+    /// does: each sub-window no more than kMaxDecayRise louder than the one
     /// before, and the last well below the first.
     ///
     /// Locates its own onset, so it reads the same on a detection window and
@@ -222,7 +222,7 @@ class PluckDetector {
                                               float sample_rate);
 
     /// Locate the strongest transient in `buffer` and extract the ring-down
-    /// beginning SKIP_MS after it.
+    /// beginning kSkipMs after it.
     static bool extract_ringdown(const std::vector<AccelSample>& buffer, float sample_rate,
                                  PluckWindow* out);
 

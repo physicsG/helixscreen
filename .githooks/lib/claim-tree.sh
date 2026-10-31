@@ -44,7 +44,11 @@ claim_tree() {
         printf '  Proceeding anyway (advisory). HELIX_CLAIM_STRICT=1 to refuse.\n\n' >&2
         return 0
     fi
-    scripts/helix-claim take "$_tree" "$1" \
-        --pid "$PPID" --note "git hook running; may take many minutes" >/dev/null 2>&1
+    # A refusal (exit 1) is the advisory outcome and stays quiet; a usage error
+    # (exit 2) means the call itself is wrong and must not vanish.
+    _rc=0
+    _err=$(scripts/helix-claim take "$_tree" "$1" \
+        --pid "$PPID" --ack-red-main --note "git hook running; may take many minutes" 2>&1 >/dev/null) || _rc=$?
+    [ "$_rc" -ne 2 ] || printf '%s\n' "$_err" >&2
     return 0
 }

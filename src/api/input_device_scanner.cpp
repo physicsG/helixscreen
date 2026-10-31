@@ -577,20 +577,19 @@ std::vector<ScannedDevice> find_hid_keyboard_devices() {
                                      read_device_blacklist_from_config());
 }
 
-std::vector<ScannedDevice> find_hid_keyboard_devices(const std::string& dev_base,
-                                                     const std::string& sysfs_base,
-                                                     const std::string& configured_vendor_product,
-                                                     const std::vector<std::string>& blacklist) {
-    if (configured_vendor_product.empty()) {
-        return find_hid_keyboard_devices(dev_base, sysfs_base, blacklist);
-    }
+std::optional<ScannedDevice>
+find_configured_hid_device(const std::string& dev_base, const std::string& sysfs_base,
+                           const std::string& configured_vendor_product,
+                           const std::vector<std::string>& blacklist) {
+    if (configured_vendor_product.empty())
+        return std::nullopt;
 
     // Parse "vendor:product" string
     auto colon = configured_vendor_product.find(':');
     if (colon == std::string::npos) {
         spdlog::warn("[InputScanner] Invalid configured_vendor_product format: {}",
                      configured_vendor_product);
-        return find_hid_keyboard_devices(dev_base, sysfs_base, blacklist);
+        return std::nullopt;
     }
     std::string target_vendor = configured_vendor_product.substr(0, colon);
     std::string target_product = configured_vendor_product.substr(colon + 1);
@@ -598,7 +597,7 @@ std::vector<ScannedDevice> find_hid_keyboard_devices(const std::string& dev_base
     // Scan for the configured device
     auto dir = std::unique_ptr<DIR, decltype(&closedir)>(opendir(dev_base.c_str()), closedir);
     if (!dir)
-        return find_hid_keyboard_devices(dev_base, sysfs_base, blacklist);
+        return std::nullopt;
 
     struct dirent* entry;
     while ((entry = readdir(dir.get())) != nullptr) {
@@ -630,12 +629,28 @@ std::vector<ScannedDevice> find_hid_keyboard_devices(const std::string& dev_base
             spdlog::info("[InputScanner] Found configured scanner device: {} ({}) "
                          "vendor={} product={}",
                          device_path, name, vendor, product);
-            return {{device_path, name, event_num}};
+            return ScannedDevice{device_path, name, event_num};
         }
     }
 
-    spdlog::info("[InputScanner] Configured device {}:{} not found, falling back to auto-detect",
-                 target_vendor, target_product);
+    return std::nullopt;
+}
+
+std::vector<ScannedDevice> find_hid_keyboard_devices(const std::string& dev_base,
+                                                     const std::string& sysfs_base,
+                                                     const std::string& configured_vendor_product,
+                                                     const std::vector<std::string>& blacklist) {
+    if (configured_vendor_product.empty()) {
+        return find_hid_keyboard_devices(dev_base, sysfs_base, blacklist);
+    }
+
+    if (auto dev = find_configured_hid_device(dev_base, sysfs_base, configured_vendor_product,
+                                              blacklist)) {
+        return {*dev};
+    }
+
+    spdlog::info("[InputScanner] Configured device {} not found, falling back to auto-detect",
+                 configured_vendor_product);
     return find_hid_keyboard_devices(dev_base, sysfs_base, blacklist);
 }
 

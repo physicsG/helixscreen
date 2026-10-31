@@ -3,9 +3,13 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "moonraker_api.h"
 #include "moonraker_client.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -215,7 +219,6 @@ class MoonrakerRestAPIMock : public MoonrakerRestAPI {
     void wled_get_strips(RestCallback on_success, ErrorCallback on_error) override;
     void wled_set_strip(const std::string& strip, const std::string& action, int brightness,
                         int preset, SuccessCallback on_success, ErrorCallback on_error) override;
-    void wled_get_status(RestCallback on_success, ErrorCallback on_error) override;
     void get_server_config(RestCallback on_success, ErrorCallback on_error) override;
 
     // ========================================================================
@@ -265,7 +268,7 @@ class MoonrakerRestAPIMock : public MoonrakerRestAPI {
 
   private:
     bool hold_wled_strips_ = false;
-    std::vector<std::function<void()>> held_wled_strips_;
+    std::vector<helix::SharedCallback<void()>> held_wled_strips_;
 
     /// Mock WLED strip on/off states (strip_id -> is_on)
     std::map<std::string, bool> mock_wled_states_;
@@ -340,6 +343,15 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
     void download_file_tail(const std::string& root, const std::string& path, size_t max_bytes,
                             StringCallback on_success, ErrorCallback on_error) override;
 
+    void download_file_range(const std::string& root, const std::string& path, uint64_t offset,
+                             size_t len, StringCallback on_success, ErrorCallback on_error,
+                             CancelFlag cancelled = nullptr) override;
+
+    /// download_file_range() calls served so far.
+    [[nodiscard]] int range_reads() const {
+        return range_reads_.load();
+    }
+
     void download_file_to_path(const std::string& root, const std::string& path,
                                const std::string& dest_path, StringCallback on_success,
                                ErrorCallback on_error,
@@ -350,7 +362,22 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
 
     void upload_file_with_name(const std::string& root, const std::string& path,
                                const std::string& filename, const std::string& content,
-                               SuccessCallback on_success, ErrorCallback on_error) override;
+                               SuccessCallback on_success, ErrorCallback on_error,
+                               UploadLane lane = UploadLane::Fast) override;
+
+    /// One upload_file_with_name() call, as served.
+    struct NamedUploadRecord {
+        std::string root;
+        std::string path;
+        std::string filename;
+        std::string content;
+        UploadLane lane = UploadLane::Fast;
+    };
+
+    /// Every upload_file_with_name() the mock has served, in call order.
+    [[nodiscard]] const std::vector<NamedUploadRecord>& named_uploads() const {
+        return named_uploads_;
+    }
 
     void upload_file_from_path(const std::string& root, const std::string& dest_path,
                                const std::string& local_path, SuccessCallback on_success,
@@ -408,6 +435,28 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
         hold_path_uploads_ = hold;
     }
 
+    /// Make later ranged reads (download_file_partial(), download_file_range())
+    /// wait: neither callback runs until release_held_range_reads().
+    void mock_hold_range_reads(bool hold = true) {
+        hold_range_reads_ = hold;
+    }
+
+    /// Answer the first @p n held ranged reads (all of them by default), in
+    /// the order they were asked.
+    void release_held_range_reads(size_t n = SIZE_MAX) {
+        n = std::min(n, held_range_reads_.size());
+        std::vector<helix::SharedCallback<void()>> reads(held_range_reads_.begin(),
+                                                         held_range_reads_.begin() + n);
+        held_range_reads_.erase(held_range_reads_.begin(), held_range_reads_.begin() + n);
+        for (auto& read : reads) {
+            read();
+        }
+    }
+
+    [[nodiscard]] size_t held_range_reads() const {
+        return held_range_reads_.size();
+    }
+
     /// Complete every held upload with success.
     void release_held_path_uploads() {
         auto held = std::move(held_path_uploads_);
@@ -435,7 +484,7 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
 
     /// Fallback path prefixes to search (from various CWDs)
     /// Note: Base directory is RuntimeConfig::TEST_GCODE_DIR (defined in runtime_config.h)
-    static const std::vector<std::string> PATH_PREFIXES;
+    static const std::vector<std::string> kPathPrefixes;
 
     /// One config-root download lookup shared by the transfer entry points.
     /// HELIX_MOCK_PLUGINS_DIR serves helixscreen/plugins/<rel> from a local folder; the
@@ -449,11 +498,20 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
     [[nodiscard]] ConfigRootFile lookup_config_root(const std::string& root,
                                                     const std::string& path) const;
 
+    /// The ranged read behind download_file_partial() and download_file_range():
+    /// @p len bytes at @p offset of a config-root file or a test file.
+    void read_range(const std::string& root, const std::string& path, uint64_t offset, size_t len,
+                    const char* op, StringCallback on_success, ErrorCallback on_error);
+    void serve_range(const std::string& root, const std::string& path, uint64_t offset, size_t len,
+                     const char* op, const StringCallback& on_success,
+                     const ErrorCallback& on_error);
+
     /// Injected config root: full relative path -> content. Empty = use disk.
     std::map<std::string, std::string> config_files_;
 
     /// Recorded upload_file_from_path() calls (test spy)
     std::vector<PathUploadRecord> path_uploads_;
+    std::vector<NamedUploadRecord> named_uploads_;
     /// Recorded download_file_to_path() destinations (test spy)
     std::vector<std::string> download_destinations_;
     /// When set, upload_file_from_path() reports failure instead of success
@@ -461,6 +519,9 @@ class MoonrakerFileTransferAPIMock : public MoonrakerFileTransferAPI {
     bool hold_path_uploads_ = false;
     bool no_local_copies_ = false;
     std::vector<SuccessCallback> held_path_uploads_;
+    bool hold_range_reads_ = false;
+    std::vector<helix::SharedCallback<void()>> held_range_reads_;
+    std::atomic<int> range_reads_{0};
 };
 
 /**
@@ -501,10 +562,10 @@ class MoonrakerFileAPIMock : public MoonrakerFileAPI {
 /**
  * @brief Mock Job API covering the endpoints MoonrakerClientMock does not serve
  *
- * Only start_modified_print() is intercepted: it reaches Moonraker through the
- * HelixPrint plugin's server.helix.print_modified, which the client mock's RPC
- * registry has no handler for. start_print() is recorded and then forwarded to
- * the real implementation, so the mock print simulation still runs.
+ * Only start_modified_print() and start_edited_print() are intercepted: they
+ * reach Moonraker through the HelixPrint plugin's server.helix.print_modified
+ * and print_edited, which the client mock's RPC registry has no handler for. start_print() is
+ * recorded and then forwarded to the real implementation, so the mock print simulation still runs.
  */
 namespace helix {
 
@@ -533,6 +594,25 @@ class MoonrakerJobAPIMock : public MoonrakerJobAPI {
                               const std::vector<std::string>& modifications,
                               ModifiedPrintCallback on_success, ErrorCallback on_error) override;
 
+    /// One recorded start_edited_print() call
+    struct EditedPrintRecord {
+        std::string original_filename;
+        std::string temp_file_path;
+        json edits;
+        std::vector<std::string> modifications;
+        uint64_t file_size = 0;
+    };
+
+    void start_edited_print(const std::string& original_filename, const std::string& temp_file_path,
+                            const json& edits, const std::vector<std::string>& modifications,
+                            uint64_t file_size, ModifiedPrintCallback on_success,
+                            ErrorCallback on_error) override;
+
+    /// Recorded start_edited_print() calls, in call order
+    [[nodiscard]] const std::vector<EditedPrintRecord>& edited_prints() const {
+        return edited_prints_;
+    }
+
     /// Filenames handed to start_print(), in call order
     [[nodiscard]] const std::vector<std::string>& started_prints() const {
         return started_prints_;
@@ -543,16 +623,31 @@ class MoonrakerJobAPIMock : public MoonrakerJobAPI {
         return modified_prints_;
     }
 
-    /// Make every later start_modified_print() call on_error instead of
-    /// on_success. The call is still recorded.
+    /// Make every later start_modified_print() and start_edited_print() call
+    /// on_error instead of on_success. The call is still recorded.
     void mock_fail_modified_prints(bool fail = true) {
         fail_modified_prints_ = fail;
+    }
+
+    /// Make every later start_edited_print() call on_error with @p error (nullopt: answer
+    /// as fail_modified_prints says). The call is still recorded.
+    void mock_edited_print_error(std::optional<MoonrakerError> error) {
+        edited_print_error_ = std::move(error);
+    }
+
+    /// Make every later start_modified_print() call on_error with @p error (nullopt: answer
+    /// as fail_modified_prints says). The call is still recorded.
+    void mock_modified_print_error(std::optional<MoonrakerError> error) {
+        modified_print_error_ = std::move(error);
     }
 
   private:
     std::vector<std::string> started_prints_;
     std::vector<ModifiedPrintRecord> modified_prints_;
+    std::vector<EditedPrintRecord> edited_prints_;
     bool fail_modified_prints_ = false;
+    std::optional<MoonrakerError> edited_print_error_;
+    std::optional<MoonrakerError> modified_print_error_;
 };
 
 } // namespace helix
@@ -587,10 +682,10 @@ class MoonrakerAPIMock : public MoonrakerAPI {
     // ========================================================================
 
     helix::SubscriptionId
-    subscribe_notifications(std::function<void(const json&)> callback) override;
+    subscribe_notifications(helix::SharedCallback<void(const json&)> callback) override;
     bool unsubscribe_notifications(helix::SubscriptionId id) override;
     void register_method_callback(const std::string& method, const std::string& name,
-                                  std::function<void(const json&)> callback) override;
+                                  helix::SharedCallback<void(const json&)> callback) override;
     bool unregister_method_callback(const std::string& method, const std::string& name) override;
     void suppress_disconnect_modal(uint32_t duration_ms) override;
 
@@ -605,7 +700,7 @@ class MoonrakerAPIMock : public MoonrakerAPI {
     }
     void get_gcode_store(int count,
                          std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-                         std::function<void(const MoonrakerError&)> on_error) override;
+                         helix::SharedCallback<void(const MoonrakerError&)> on_error) override;
 
     // ========================================================================
     // Overridden Power Device Methods (return mock data)
@@ -763,9 +858,6 @@ class MoonrakerAPIMock : public MoonrakerAPI {
 
     // Mock power device states (for toggle testing)
     std::map<std::string, bool> mock_power_states_;
-
-    // Mock subscription ID counter
-    helix::SubscriptionId mock_next_subscription_id_ = 100;
 
     // Test spy state for suppress_disconnect_modal()
     size_t suppress_disconnect_modal_calls_ = 0;

@@ -59,7 +59,7 @@ elif [ ! -f "$HELIX_XML_TEST_BUILD_DIR/CMakeCache.txt" ]; then
   echo "   Run 'make test-xml' once by hand to enable this gate."
 else
   SECTION_START=$(date +%s)
-  if make test-xml >/tmp/test_xml.out 2>&1; then
+  if "$(qc_make)" test-xml >/tmp/test_xml.out 2>&1; then
     printf "✅ helix-xml submodule tests passed"
     section_time $SECTION_START
     echo ""

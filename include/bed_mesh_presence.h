@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <vector>
+
 #include "hv/json.hpp"
 
 namespace helix {
@@ -14,6 +16,16 @@ inline bool probed_matrix_has_mesh(const nlohmann::json& matrix) {
     }
     for (const auto& row : matrix) {
         if (row.is_array() && !row.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The same verdict for a parsed matrix: a mesh is present when any row holds a point.
+inline bool probed_matrix_has_mesh(const std::vector<std::vector<float>>& matrix) {
+    for (const auto& row : matrix) {
+        if (!row.empty()) {
             return true;
         }
     }

@@ -10,7 +10,15 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cstdint>
 #include <functional>
+
+/// Scope a dual-scope split button acts on. The values are the dropdown
+/// indices, so they must match the option order in shutdown_modal.xml
+/// ("Both\nPrinter\nScreen").
+namespace helix {
+enum class ShutdownScope : uint32_t { Both = 0, Printer = 1, Screen = 2 };
+} // namespace helix
 
 /**
  * @file ui_shutdown_modal.h
@@ -65,10 +73,13 @@ class ShutdownModal : public Modal {
     }
 
     /// Dual-scope (separate hosts) — six distinct callbacks: Both, Printer, Screen.
+    /// Both split buttons open on @p default_scope every time the modal shows.
     void set_dual_callbacks(ActionCallback both_shutdown, ActionCallback both_reboot,
                             ActionCallback printer_shutdown, ActionCallback printer_reboot,
-                            ActionCallback screen_shutdown, ActionCallback screen_reboot) {
+                            ActionCallback screen_shutdown, ActionCallback screen_reboot,
+                            helix::ShutdownScope default_scope) {
         mode_ = Mode::Dual;
+        default_scope_ = default_scope;
         on_both_shutdown_cb_ = std::move(both_shutdown);
         on_both_reboot_cb_ = std::move(both_reboot);
         on_printer_shutdown_cb_ = std::move(printer_shutdown);
@@ -121,16 +132,15 @@ class ShutdownModal : public Modal {
         // from a clicked button and recover the owning modal instance.
         if (dialog_) {
             lv_obj_set_user_data(dialog_, this);
-            // Reset split-button selections to "Both" each time the dual-scope
-            // modal opens — XML's selected="0" only applies at parse time, so
-            // a leftover "Printer" selection from a previous open would persist
-            // otherwise.
+            // XML's selected= applies only at parse time, so without this a
+            // scope the user narrowed to on a previous open would persist.
             if (mode_ == Mode::Dual) {
+                const auto index = static_cast<uint32_t>(default_scope_);
                 if (lv_obj_t* sb = lv_obj_find_by_name(dialog_, "split_restart")) {
-                    ui_split_button_set_selected(sb, 0);
+                    ui_split_button_set_selected(sb, index);
                 }
                 if (lv_obj_t* sb = lv_obj_find_by_name(dialog_, "split_shutdown")) {
-                    ui_split_button_set_selected(sb, 0);
+                    ui_split_button_set_selected(sb, index);
                 }
             }
         }
@@ -139,6 +149,7 @@ class ShutdownModal : public Modal {
   private:
     enum class Mode { Single, Dual };
     Mode mode_ = Mode::Single;
+    helix::ShutdownScope default_scope_ = helix::ShutdownScope::Screen;
 
     ActionCallback on_screen_shutdown_cb_;
     ActionCallback on_screen_reboot_cb_;

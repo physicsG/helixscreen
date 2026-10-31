@@ -19,6 +19,7 @@ import import_orca_filaments as imp  # noqa: E402
 
 FIX = str(scripts_dir / "fixtures" / "orca")
 FIX_COLLISION = str(scripts_dir / "fixtures" / "orca_collision")
+FIX_VENDOR_PACK = str(scripts_dir / "fixtures" / "orca_vendor_pack")
 
 
 def load_fixtures():
@@ -43,12 +44,11 @@ def test_first_scalar_handles_nil_and_arrays():
 def test_map_type_known_and_unknown(monkeypatch):
     """map_type() looks the type up, and falls back to the raw value.
 
-    Every one of TYPE_MAP's 17 entries is currently an identity mapping (X: X),
-    so asserting map_type("PLA") == "PLA" passes whether the lookup happened or
-    the function simply returned its argument -- the two branches are
-    indistinguishable against the real table. Patch in one genuinely
-    non-identity entry (same technique as test_build_catalog_returns_raw_
-    library_types) so the remap and the fallback produce different answers.
+    Most of TYPE_MAP's entries are identity mappings (X: X), so asserting
+    map_type("PLA") == "PLA" passes whether the lookup happened or the function
+    simply returned its argument. Patch in a non-identity entry (same technique
+    as test_build_catalog_returns_raw_library_types) so the remap and the
+    fallback produce different answers without depending on the real table.
     """
     monkeypatch.setitem(imp.TYPE_MAP, "PET-CF", "CARBON-PET")
 
@@ -130,6 +130,52 @@ def test_build_catalog_is_deterministic():
     assert json.dumps(a) == json.dumps(b)               # stable order + shape
 
 
+def _write_library(root, profiles):
+    lib = root / "OrcaFilamentLibrary" / "filament"
+    lib.mkdir(parents=True)
+    for i, p in enumerate(profiles):
+        (lib / f"p{i}.json").write_text(json.dumps({"type": "filament", **p}))
+    return str(root)
+
+
+def _orca_ids(tmp_path, profiles):
+    cat, _ = imp.build_catalog(_write_library(tmp_path, profiles), [], type_ranges={})
+    assert not [k for p in cat for k in p if k.startswith("_")]  # no bookkeeping keys ship
+    return {p["name"]: p.get("orca_id") for p in cat}
+
+
+def test_inherited_filament_id_shared_by_two_products_is_dropped(tmp_path):
+    ids = _orca_ids(tmp_path, [
+        {"name": "Acme PLA @base", "instantiation": "false", "filament_id": "ACME00",
+         "filament_vendor": ["Acme"], "filament_type": ["PLA"]},
+        {"name": "Acme PLA Matte @System", "inherits": "Acme PLA @base", "instantiation": "true"},
+        {"name": "Acme PLA Silk @System", "inherits": "Acme PLA @base", "instantiation": "true"},
+    ])
+    assert ids == {"PLA Matte": None, "PLA Silk": None}
+
+
+def test_own_filament_id_stands_beside_a_sibling_that_inherits_it(tmp_path):
+    ids = _orca_ids(tmp_path, [
+        {"name": "Acme PLA @base", "instantiation": "false", "filament_id": "ACME00",
+         "filament_vendor": ["Acme"], "filament_type": ["PLA"]},
+        {"name": "Acme PLA @System", "inherits": "Acme PLA @base", "instantiation": "true",
+         "filament_id": "ACME00"},
+        {"name": "Acme PLA Matte @System", "inherits": "Acme PLA @base", "instantiation": "true"},
+        {"name": "Acme PLA Silk @System", "inherits": "Acme PLA @base", "instantiation": "true",
+         "filament_id": "ACME02"},
+    ])
+    assert ids == {"PLA": "ACME00", "PLA Matte": None, "PLA Silk": "ACME02"}
+
+
+def test_inherited_filament_id_of_a_single_product_template_is_kept(tmp_path):
+    ids = _orca_ids(tmp_path, [
+        {"name": "Acme ASA @base", "instantiation": "false", "filament_id": "ACME10",
+         "filament_vendor": ["Acme"], "filament_type": ["ASA"]},
+        {"name": "Acme ASA @System", "inherits": "Acme ASA @base", "instantiation": "true"},
+    ])
+    assert ids == {"ASA": "ACME10"}
+
+
 def test_slug_preserves_plus_suffix():
     # "PLA+" must NOT collapse to the same slug as "PLA" — distinct products.
     assert imp._slug("Generic", "PLA+") != imp._slug("Generic", "PLA")
@@ -162,8 +208,66 @@ def test_build_catalog_scopes_inherits_to_library_avoiding_vendor_base_collision
     assert product["nozzle"] == 280
 
 
+def _vendor_pack_catalog():
+    cat, library_types = imp.build_catalog(
+        FIX_VENDOR_PACK, [], type_ranges={"ASA": (240, 270), "Silk PLA": (200, 230)},
+        vendor_packs=("Eryone",))
+    return {(p["brand"], p["name"]): p for p in cat}, library_types
+
+
+def test_build_catalog_imports_listed_vendor_pack_only():
+    by_key, _ = _vendor_pack_catalog()
+    assert ("Eryone", "PLA") in by_key
+    assert ("Eryone", "ASA") in by_key
+    assert ("Generic", "PLA") in by_key                 # the library still imports
+    assert not any(brand == "Qidi" for brand, _ in by_key)  # unlisted pack stays out
+    # Templates are not products.
+    assert ("Eryone", "Standard PLA") not in by_key
+
+
+def test_vendor_pack_skips_printer_and_nozzle_variants():
+    by_key, _ = _vendor_pack_catalog()
+    eryone = [k for k in by_key if k[0] == "Eryone"]
+    assert len(eryone) == len(set(eryone))
+    # The base profile's 265, not the "@0.2 nozzle" variant's 250.
+    assert by_key[("Eryone", "ASA")]["nozzle"] == 265
+
+
+def test_vendor_pack_same_type_child_keeps_parent_material_facts():
+    by_key, _ = _vendor_pack_catalog()
+    pla = by_key[("Eryone", "PLA")]
+    assert pla["type"] == "PLA"
+    assert pla["nozzle"] == 220
+    assert (pla["nozzle_min"], pla["nozzle_max"]) == (180, 260)
+    assert pla["density"] == 1.24
+    assert pla["orca_id"] == "EFL90"
+
+
+def test_vendor_pack_retyped_child_drops_parent_material_facts():
+    # Eryone ASA inherits a PLA template. Its own nozzle and bed temps stand, but
+    # the PLA range, density and textured-plate temp are facts about PLA.
+    by_key, _ = _vendor_pack_catalog()
+    asa = by_key[("Eryone", "ASA")]
+    assert asa["type"] == "ASA"
+    assert asa["bed"] == 110                            # not the PLA textured 60
+    assert "density" not in asa                         # not PLA's 1.24
+    assert (asa.get("nozzle_min"), asa.get("nozzle_max")) == (None, None)  # thin: ASA type range
+
+
+def test_vendor_pack_silk_maps_to_catalog_silk_type():
+    by_key, _ = _vendor_pack_catalog()
+    assert by_key[("Eryone", "Silk PLA")]["type"] == "Silk PLA"
+
+
+def test_vendor_pack_types_stay_out_of_library_types():
+    # orca_library_types is what Orca can match a lane's material against on any
+    # printer; a vendor pack's types are only visible on that vendor's printers.
+    _, library_types = _vendor_pack_catalog()
+    assert library_types == ["PLA"]
+
+
 def test_build_catalog_guards_against_id_collisions():
-    # _merge_cfs_seed recomputes every seed id from brand+name, so a seed entry's
+    # _merge_seed recomputes every seed id from brand+name, so a seed entry's
     # DECLARED id can never collide on its own -- the collision that _dedupe_ids
     # actually guards against is two different (brand, name) pairs that slug to the
     # same string. Here "Polymaker-ABS"/"Pro" and Orca's "Polymaker"/"ABS Pro" both
@@ -225,7 +329,7 @@ def test_build_product_never_emits_a_degenerate_range():
 
 
 def test_assert_no_degenerate_ranges_rejects_any_source():
-    # The catch-all gate. cfs_seed entries write nozzle_min/nozzle_max straight
+    # The catch-all gate. seed entries write nozzle_min/nozzle_max straight
     # through without going near build_product(), so this is the only check that
     # covers every product regardless of where it came from.
     import pytest
@@ -243,7 +347,7 @@ def test_assert_no_degenerate_ranges_rejects_any_source():
 # Seed merge (the duplicate Generic/PETG-CF defect)
 # ---------------------------------------------------------------------------
 
-def test_merge_cfs_seed_folds_into_orca_despite_type_disagreement():
+def test_merge_seed_folds_into_orca_despite_type_disagreement():
     # Orca labels their Generic PETG-CF profile with filament_type "PETG". The seed
     # entry is correctly typed "PETG-CF". Keying the merge on type made these two
     # different products, so the seed appended and _dedupe_ids renamed it
@@ -255,7 +359,7 @@ def test_merge_cfs_seed_folds_into_orca_despite_type_disagreement():
                  "type": "PETG", "nozzle": 255, "orca_id": "OGFG99", "source": "orca"}]
     seed = [{"id": "generic-generic-petg-cf", "brand": "Generic", "name": "Generic PETG-CF",
              "type": "PETG-CF", "codes": {"cfs": "00014"}, "source": "cfs-seed"}]
-    imp._merge_cfs_seed(products, seed)
+    imp._merge_seed(products, seed)
 
     assert len(products) == 1
     p = products[0]
@@ -265,7 +369,7 @@ def test_merge_cfs_seed_folds_into_orca_despite_type_disagreement():
     assert p["codes"]["cfs"] == "00014"  # seed's CFS code folded in, not lost
 
 
-def test_merge_cfs_seed_still_appends_unmatched_entries():
+def test_merge_seed_still_appends_unmatched_entries():
     # The relaxed key must not swallow seed entries that have no Orca counterpart
     # (CFS-only variants, and the helix-seed placeholders that make a
     # filament_database.h type reachable in the picker).
@@ -277,24 +381,24 @@ def test_merge_cfs_seed_still_appends_unmatched_entries():
         {"id": "creality-cr-abs", "brand": "Creality", "name": "CR-ABS",
          "type": "ABS", "codes": {"cfs": "07001"}, "source": "cfs-seed"},
     ]
-    imp._merge_cfs_seed(products, seed)
+    imp._merge_seed(products, seed)
 
     by_id = {p["id"]: p for p in products}
     assert set(by_id) == {"generic-pla", "generic-ppa", "creality-cr-abs"}
     assert by_id["creality-cr-abs"]["codes"]["cfs"] == "07001"
 
 
-def test_merge_cfs_seed_does_not_clobber_an_existing_orca_code():
+def test_merge_seed_does_not_clobber_an_existing_orca_code():
     products = [{"id": "generic-pla", "brand": "Generic", "name": "PLA", "type": "PLA",
                  "codes": {"cfs": "99999"}, "source": "orca"}]
     seed = [{"id": "x", "brand": "Generic", "name": "PLA", "type": "PLA",
              "codes": {"cfs": "00001", "other": "abc"}, "source": "cfs-seed"}]
-    imp._merge_cfs_seed(products, seed)
+    imp._merge_seed(products, seed)
     assert len(products) == 1
     assert products[0]["codes"] == {"cfs": "99999", "other": "abc"}
 
 
-def test_merge_cfs_seed_does_not_fold_plus_variant_into_base():
+def test_merge_seed_does_not_fold_plus_variant_into_base():
     # _name_key stripped "+" along with every other non-alnum character, so a seed
     # entry named "PLA+" normalized to the same key as Orca's "PLA" and merged --
     # the seed's type then won (by design, see the disagreement test above), which
@@ -305,7 +409,7 @@ def test_merge_cfs_seed_does_not_fold_plus_variant_into_base():
                  "type": "PLA", "source": "orca"}]
     seed = [{"id": "generic-pla-plus", "brand": "Generic", "name": "PLA+",
              "type": "PLA+", "codes": {"cfs": "10001"}, "source": "cfs-seed"}]
-    imp._merge_cfs_seed(products, seed)
+    imp._merge_seed(products, seed)
 
     by_id = {p["id"]: p for p in products}
     assert set(by_id) == {"generic-pla", "generic-pla-plus"}
@@ -400,12 +504,12 @@ def test_main_carries_the_types_table_through_a_regen(tmp_path, monkeypatch):
     seed.write_text("[]")
     seen = {}
 
-    def fake_build(orca, cfs_seed, type_ranges, library_marker="x"):
+    def fake_build(orca, seed, type_ranges, library_marker="x"):
         seen["ranges"] = type_ranges
         return [], []
 
     monkeypatch.setattr(imp, "build_catalog", fake_build)
-    assert imp.main(["--orca", FIX, "--cfs-seed", str(seed), "--out", str(out)]) == 0
+    assert imp.main(["--orca", FIX, "--seed", str(seed), "--out", str(out)]) == 0
     assert seen["ranges"] == {"ABS": (245, 265)}
     assert json.loads(out.read_text())["types"] == types
 
@@ -416,7 +520,7 @@ def test_main_refuses_an_output_without_a_types_table(tmp_path):
     seed = tmp_path / "seed.json"
     seed.write_text("[]")
     try:
-        imp.main(["--orca", FIX, "--cfs-seed", str(seed), "--out", str(out)])
+        imp.main(["--orca", FIX, "--seed", str(seed), "--out", str(out)])
     except SystemExit:
         pass
     else:

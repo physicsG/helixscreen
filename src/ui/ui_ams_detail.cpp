@@ -3,6 +3,8 @@
 
 #include "ui_ams_detail.h"
 
+#include "ui_ams_edit_follow_up.h"
+#include "ui_ams_lane_spool.h"
 #include "ui_ams_slot.h"
 #include "ui_bypass_spool_widget.h"
 #include "ui_effects.h"
@@ -17,12 +19,15 @@
 #include "buffer_reading.h"
 #include "clog_meter_geometry.h"
 #include "display_numbering.h"
-#include "filament_op_dispatch.h"      // EXTERNAL_SPOOL_SLOT: the bypass sentinel
+#include "filament_op_dispatch.h"      // kExternalSpoolSlot: the bypass sentinel
 #include "filament_op_slot_resolver.h" // clear_spool_blocked_by_print: the print guard
 #include "filament_tube_stroker.h"
+#include "panel_widget_size.h"
 #include "printer_detector.h"
 #include "printer_state.h" // PrinterState, complete for get_print_lifecycle()
+#include "sort_small.h"
 #include "theme_manager.h"
+#include "tool_change_request.h"
 #include "ui/ams_drawing_utils.h"
 
 #include <spdlog/spdlog.h>
@@ -34,6 +39,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // ============================================================================
@@ -49,16 +55,16 @@ namespace tray = helix::ui::tray;
 
 namespace {
 
-constexpr int CAP_POINTS = 17;
-constexpr int MAX_LIDS = AMS_DETAIL_MAX_SLOTS;
+constexpr int kCapPoints = 17;
+constexpr int kMaxLids = kAmsDetailMaxSlots;
 
 // Opacities of the faces and glass, dark theme first.
 struct TrayOpacities {
     lv_opa_t front, edge, shell, glass, cap, glass_edge;
     float sheen;
 };
-constexpr TrayOpacities DARK_OPA{140, 140, 204, 15, 36, 153, 0.26f};
-constexpr TrayOpacities LIGHT_OPA{140, 153, 204, 13, 26, 140, 0.60f};
+constexpr TrayOpacities kDarkOpa{140, 140, 204, 15, 36, 153, 0.26f};
+constexpr TrayOpacities kLightOpa{140, 153, 204, 13, 26, 140, 0.60f};
 
 struct TrayColors {
     lv_color_t front, wall, floor, back, side, edge, shell, glass, glass_edge;
@@ -75,9 +81,9 @@ struct TrayState {
     float lid_h = 0;
     float lane_half = 0;
     int lane_count = 0;
-    float lane_x[AMS_DETAIL_MAX_SLOTS] = {}; // front-plane slot centres
+    float lane_x[kAmsDetailMaxSlots] = {}; // front-plane slot centres
     TrayColors color{};
-    TrayOpacities opa = DARK_OPA;
+    TrayOpacities opa = kDarkOpa;
 };
 
 TrayState s_tray;
@@ -103,7 +109,7 @@ TrayColors load_tray_colors(bool dark) {
 void load_tray_look() {
     const bool dark = theme_manager_is_dark_mode();
     s_tray.color = load_tray_colors(dark);
-    s_tray.opa = dark ? DARK_OPA : LIGHT_OPA;
+    s_tray.opa = dark ? kDarkOpa : kLightOpa;
 }
 
 lv_point_precise_t to_screen(lv_point_t origin, tray::PointF p) {
@@ -152,8 +158,8 @@ void edge(lv_layer_t* layer, lv_point_t origin, tray::PointF a, tray::PointF b, 
 /// One lid: its two caps and their convex hull.
 struct Lid {
     tray::TrayBox box; // fl/fr are the lid's ends
-    tray::PointF left[CAP_POINTS], right[CAP_POINTS];
-    tray::PointF hull[2 * CAP_POINTS];
+    tray::PointF left[kCapPoints], right[kCapPoints];
+    tray::PointF hull[2 * kCapPoints];
     int hull_n = 0;
 };
 
@@ -165,24 +171,24 @@ void build_lid(const tray::TrayBox& unit_box, float lid_h, float x0, float x1, L
     lid.box = unit_box;
     lid.box.fl = x0;
     lid.box.fr = x1;
-    tray::cap_polyline(unit_box, lid_h, x0, lid.left, CAP_POINTS);
-    tray::cap_polyline(unit_box, lid_h, x1, lid.right, CAP_POINTS);
+    tray::cap_polyline(unit_box, lid_h, x0, lid.left, kCapPoints);
+    tray::cap_polyline(unit_box, lid_h, x1, lid.right, kCapPoints);
     // Monotone-chain hull; the right cap is the left one shifted along x.
-    tray::PointF pts[2 * CAP_POINTS];
-    for (int i = 0; i < CAP_POINTS; ++i) {
+    tray::PointF pts[2 * kCapPoints];
+    for (int i = 0; i < kCapPoints; ++i) {
         pts[i] = lid.left[i];
-        pts[CAP_POINTS + i] = lid.right[i];
+        pts[kCapPoints + i] = lid.right[i];
     }
-    std::sort(pts, pts + 2 * CAP_POINTS, [](tray::PointF a, tray::PointF b) {
+    helix::sort_small(pts, pts + 2 * kCapPoints, [](tray::PointF a, tray::PointF b) {
         return a.x < b.x || (a.x == b.x && a.y < b.y);
     });
     int k = 0;
-    for (int i = 0; i < 2 * CAP_POINTS; ++i) {
+    for (int i = 0; i < 2 * kCapPoints; ++i) {
         while (k >= 2 && cross(lid.hull[k - 2], lid.hull[k - 1], pts[i]) <= 0)
             --k;
         lid.hull[k++] = pts[i];
     }
-    for (int i = 2 * CAP_POINTS - 2, lower = k + 1; i >= 0; --i) {
+    for (int i = 2 * kCapPoints - 2, lower = k + 1; i >= 0; --i) {
         while (k >= lower && cross(lid.hull[k - 2], lid.hull[k - 1], pts[i]) <= 0)
             --k;
         lid.hull[k++] = pts[i];
@@ -234,7 +240,7 @@ void tray_back_draw_cb(lv_event_t* e) {
         return;
     // The tinted interior shell, then the back wall again: it stands in front
     // of the lid's lower interior.
-    float x0[MAX_LIDS], x1[MAX_LIDS];
+    float x0[kMaxLids], x1[kMaxLids];
     const int lids = lid_spans(x0, x1);
     Lid lid;
     for (int i = 0; i < lids; ++i) {
@@ -248,7 +254,7 @@ void tray_back_draw_cb(lv_event_t* e) {
 /// The sheen: one diffuse band, a horizontal gradient per row.
 void draw_sheen(lv_layer_t* layer, lv_point_t o, const Lid& lid) {
     tray::SheenSpan span{};
-    tray::SheenRow rows[tray::SHEEN_MAX_ROWS];
+    tray::SheenRow rows[tray::kSheenMaxRows];
     const int n = tray::sheen_rows(lid.box, s_tray.lid_h, s_tray.opa.sheen, span, rows);
     const float width = span.x1 - span.x0;
     if (n == 0 || width < 1)
@@ -300,7 +306,7 @@ void tray_front_draw_cb(lv_event_t* e) {
     for (const auto& ab : edges)
         edge(layer, o, ab[0], ab[1], c.edge, s_tray.opa.edge);
 
-    float x0[MAX_LIDS], x1[MAX_LIDS];
+    float x0[kMaxLids], x1[kMaxLids];
     const int lids = lid_spans(x0, x1);
     Lid lid;
     const TrayOpacities& a = s_tray.opa;
@@ -308,13 +314,13 @@ void tray_front_draw_cb(lv_event_t* e) {
         build_lid(s_tray.box, s_tray.lid_h, x0[i], x1[i], lid);
         if (!simple) {
             fill_convex(layer, o, lid.hull, lid.hull_n, c.glass, a.glass);
-            fill_convex(layer, o, lid.right, CAP_POINTS, c.glass, a.cap);
+            fill_convex(layer, o, lid.right, kCapPoints, c.glass, a.cap);
             draw_sheen(layer, o, lid);
         }
         stroke(layer, o, lid.hull, lid.hull_n, true, c.glass_edge, a.glass_edge);
-        stroke(layer, o, lid.right, CAP_POINTS, false, c.glass_edge,
+        stroke(layer, o, lid.right, kCapPoints, false, c.glass_edge,
                (lv_opa_t)(a.glass_edge * 7 / 10));
-        stroke(layer, o, lid.left, CAP_POINTS, false, c.glass_edge,
+        stroke(layer, o, lid.left, kCapPoints, false, c.glass_edge,
                (lv_opa_t)(a.glass_edge * 3 / 10));
     }
 }
@@ -334,17 +340,85 @@ bool spool_centre(lv_obj_t* slot, lv_point_t origin, float& x, float& y, int32_t
     return true;
 }
 
-/// Lay a widget's top-left at (x, y) in absolute coords by translation, so the
-/// flex layout around it is untouched.
-void translate_to(lv_obj_t* obj, int32_t x, int32_t y, bool move_x) {
+void clear_translate(lv_obj_t* obj) {
     lv_obj_set_style_translate_x(obj, 0, LV_PART_MAIN);
     lv_obj_set_style_translate_y(obj, 0, LV_PART_MAIN);
-    lv_obj_update_layout(obj);
+}
+
+// Tool changers have no housing around their spools.
+bool unit_has_physical_tray() {
+    auto* backend = helix::AmsState::instance().get_backend(0);
+    return !backend || backend->has_physical_tray();
+}
+
+/// The lid the unit's climate data calls for: any reading gets glass. Asked
+/// in flat style too, where per-lane readings show without the box.
+tray::LidMode unit_lid_mode(int unit_index) {
+    auto* backend = helix::AmsState::instance().get_backend(0);
+    helix::AmsUnit unit;
+    bool dryer = false;
+    if (backend) {
+        const helix::AmsSystemInfo info = backend->get_system_info();
+        const int u = unit_index >= 0 ? unit_index : 0;
+        if (u < static_cast<int>(info.units.size()))
+            unit = info.units[u];
+        dryer = backend->get_dryer_info(u).supported;
+    }
+    return tray::lid_mode(unit, unit_has_physical_tray(), dryer);
+}
+
+/// Under per-lane lids each lane's humidity sits above its label.
+void show_lane_humidity(lv_obj_t* const slot_widgets[], int n, tray::LidMode lid) {
+    for (int i = 0; i < n; ++i) {
+        if (slot_widgets[i])
+            ui_ams_slot_set_lane_humidity_visible(slot_widgets[i], lid == tray::LidMode::PerLane);
+    }
+}
+
+// Flat spools are drawn without the box, as on a unit with no housing.
+bool draws_tray() {
+    return unit_has_physical_tray() && helix::ui::ams_spool_style_3d();
+}
+
+/// With no box to stand against, the environment pill stands just past the
+/// last lane's spool and badge, as tall as the spools and level with them.
+void place_env_pill_beside_spools(lv_obj_t* pill, lv_obj_t* container,
+                                  lv_obj_t* const slot_widgets[], int n) {
+    if (!pill || lv_obj_has_flag(pill, LV_OBJ_FLAG_HIDDEN))
+        return;
+    clear_translate(pill);
+    int32_t top = INT32_MAX, bottom = INT32_MIN, lanes_right = INT32_MIN;
+    for (int i = 0; i < n; ++i) {
+        lv_obj_t* spool =
+            slot_widgets[i] ? lv_obj_find_by_name(slot_widgets[i], "spool_graphic") : nullptr;
+        if (!spool)
+            continue;
+        lv_area_t a;
+        lv_obj_get_coords(spool, &a);
+        top = std::min(top, a.y1);
+        bottom = std::max(bottom, a.y2);
+        lanes_right = std::max(lanes_right, a.x2);
+        if (lv_obj_t* badge = ui_ams_slot_get_status_badge(slot_widgets[i])) {
+            lv_obj_get_coords(badge, &a);
+            lanes_right = std::max(lanes_right, a.x2);
+        }
+    }
+    if (top > bottom) {
+        lv_obj_remove_local_style_prop(pill, LV_STYLE_HEIGHT, LV_PART_MAIN);
+        return;
+    }
+    // The badge layer clips at the container's edge.
+    lv_area_t c;
+    lv_obj_get_coords(container, &c);
+    lanes_right = std::min(lanes_right, c.x2);
+    // DECLARATIVE_OK: measured layout; the pill is as tall as the spools beside it
+    lv_obj_set_height(pill, bottom - top + 1);
+    lv_obj_update_layout(pill);
     lv_area_t a;
-    lv_obj_get_coords(obj, &a);
-    if (move_x)
-        lv_obj_set_style_translate_x(obj, x - a.x1, LV_PART_MAIN);
-    lv_obj_set_style_translate_y(obj, y - a.y1, LV_PART_MAIN);
+    lv_obj_get_coords(pill, &a);
+    const int32_t left = lanes_right + 1 + theme_manager_get_spacing("space_xs");
+    lv_obj_set_style_translate_x(pill, std::min<int32_t>(0, left - a.x1), LV_PART_MAIN);
+    lv_obj_set_style_translate_y(pill, top - a.y1, LV_PART_MAIN);
 }
 
 } // namespace
@@ -473,11 +547,11 @@ AmsDetailSlotResult ams_detail_create_slots(AmsDetailWidgets& w, lv_obj_t* slot_
 }
 
 void helix::ui::ams_detail_sync_slot_states(lv_obj_t* slot_widgets[], int slot_count) {
-    auto* backend = helix::AmsState::instance().get_backend();
-    if (!backend) {
+    const auto info = helix::AmsState::instance().system_info();
+    if (!info) {
         return;
     }
-    ams_detail_sync_slot_states(slot_widgets, slot_count, backend->get_system_info());
+    ams_detail_sync_slot_states(slot_widgets, slot_count, *info);
 }
 
 void helix::ui::ams_detail_sync_slot_states(lv_obj_t* slot_widgets[], int slot_count,
@@ -546,6 +620,15 @@ void helix::ui::ams_detail_sync_lane_entry(lv_obj_t* canvas, lv_obj_t* slot_grid
         lv_obj_get_coords(s_tray.container, &c);
         lv_obj_get_coords(slot_grid, &g);
         offset = c.y1 + (int32_t)std::lround(s_tray.box.fb) - g.y1;
+    } else if (slot_grid && !draws_tray()) {
+        // With no housing the lanes leave from under the spools' flanges.
+        lv_obj_update_layout(slot_grid);
+        lv_area_t g;
+        lv_obj_get_coords(slot_grid, &g);
+        float x = 0, y = 0;
+        int32_t size = 0;
+        if (spool_centre(slot_grid, {g.x1, g.y1}, x, y, size))
+            offset = (int32_t)std::lround(y + tray::kSpoolFlangeRadius * size);
     }
     ui_filament_path_canvas_set_lane_entry(canvas, offset);
 }
@@ -572,17 +655,22 @@ bool helix::ui::ams_detail_error_in_view(const helix::AmsSystemInfo& info, int u
 }
 
 AmsSlotLayout helix::ui::ams_detail_slot_layout(int32_t available_width, int slot_count) {
-    auto* backend = helix::AmsState::instance().get_backend(0);
-    if (backend && !backend->has_physical_tray())
+    if (!unit_has_physical_tray())
         return calculate_ams_slot_layout(available_width, slot_count);
     const float spool = (float)theme_manager_get_spacing("ams_slot_spool_size");
     if (spool <= 0)
         return calculate_ams_slot_layout(available_width, slot_count);
+    // Flat spools keep the unit's compact row with no box to clear: a ring,
+    // its badge slack and a gap apart.
+    if (!draws_tray())
+        return calculate_ams_slot_layout(available_width, slot_count,
+                                         (int32_t)spool + helix::ui::kAmsLaneSpoolBadgeMarginPx +
+                                             theme_manager_get_spacing("space_xs"));
     // The box reaches past the outer slots: its first lid starts S/4 - 1 left of
     // the row (for any pitch), and its right side face ends S/4 right of it.
-    // The readout's gap is its own margin in the row. Spools stand at the
-    // tray's pitch rather than spreading across the width, centered with the box.
-    const float skew = tray::DEPTH_SKEW * tray::box_depth(spool);
+    // Spools stand at the tray's pitch rather than spreading across the width,
+    // centered with the box.
+    const float skew = tray::kDepthSkew * tray::box_depth(spool);
     const int32_t lead = (int32_t)std::ceil(std::max(0.0f, skew / 4 - 1));
     const int32_t tail = (int32_t)std::ceil(skew / 4);
     AmsSlotLayout layout =
@@ -608,11 +696,16 @@ void ams_detail_update_tray(AmsDetailWidgets& w, lv_obj_t* const slot_widgets[],
     if (!w.slot_tray || !w.slot_grid)
         return;
     s_tray.valid = false;
+    lv_obj_t* container = lv_obj_get_parent(w.slot_grid);
 
-    // Tool changers don't have a physical tray/housing
-    auto* backend = helix::AmsState::instance().get_backend(0);
-    if (backend && !backend->has_physical_tray()) {
+    if (!draws_tray()) {
         lv_obj_add_flag(w.slot_tray, LV_OBJ_FLAG_HIDDEN);
+        if (!container || !slot_widgets || slot_count <= 0)
+            return;
+        const int n = std::min(slot_count, kAmsDetailMaxSlots);
+        show_lane_humidity(slot_widgets, n, unit_lid_mode(unit_index));
+        lv_obj_update_layout(container);
+        place_env_pill_beside_spools(w.env_indicator, container, slot_widgets, n);
         return;
     }
     lv_obj_remove_flag(w.slot_tray, LV_OBJ_FLAG_HIDDEN);
@@ -628,36 +721,19 @@ void ams_detail_update_tray(AmsDetailWidgets& w, lv_obj_t* const slot_widgets[],
     lv_obj_remove_event_cb(w.slot_tray, tray_front_draw_cb);
     lv_obj_add_event_cb(w.slot_tray, tray_front_draw_cb, LV_EVENT_DRAW_POST, nullptr);
 
-    lv_obj_t* container = lv_obj_get_parent(w.slot_grid);
     if (!container || !slot_widgets || slot_count <= 0)
         return;
-    const int n = std::min(slot_count, AMS_DETAIL_MAX_SLOTS);
+    const int n = std::min(slot_count, kAmsDetailMaxSlots);
 
-    // Any climate data gets glass.
-    helix::AmsUnit unit;
-    bool dryer = false;
-    if (backend) {
-        const helix::AmsSystemInfo info = backend->get_system_info();
-        const int u = unit_index >= 0 ? unit_index : 0;
-        if (u < static_cast<int>(info.units.size()))
-            unit = info.units[u];
-        dryer = backend->get_dryer_info(u).supported;
-    }
-    const tray::LidMode lid = tray::lid_mode(unit, true, dryer);
-    const bool per_lane = lid == tray::LidMode::PerLane;
-
-    // Under per-lane lids each lane's humidity sits above its label.
-    for (int i = 0; i < n; ++i) {
-        if (slot_widgets[i])
-            ui_ams_slot_set_lane_humidity_visible(slot_widgets[i], per_lane);
-    }
+    const tray::LidMode lid = unit_lid_mode(unit_index);
+    show_lane_humidity(slot_widgets, n, lid);
     lv_obj_update_layout(container);
     lv_area_t c;
     lv_obj_get_coords(container, &c);
     const lv_point_t origin = {c.x1, c.y1};
 
     // Spools as laid out: front-plane centres sit S/2 left of the drawn ones.
-    float cx[AMS_DETAIL_MAX_SLOTS], cy_sum = 0;
+    float cx[kAmsDetailMaxSlots], cy_sum = 0;
     int32_t spool_size = 0;
     for (int i = 0; i < n; ++i) {
         float y = 0;
@@ -666,22 +742,22 @@ void ams_detail_update_tray(AmsDetailWidgets& w, lv_obj_t* const slot_widgets[],
         cy_sum += y;
     }
     const float size = (float)spool_size;
-    const float flange_ry = tray::SPOOL_FLANGE_RADIUS * size;
+    const float flange_ry = tray::kSpoolFlangeRadius * size;
     tray::TrayBox box{};
     box.depth = tray::box_depth(size);
     box.rise = tray::box_rise(box.depth);
     box.back_extra = (float)theme_manager_get_spacing("space_md");
-    const float skew = tray::DEPTH_SKEW * box.depth;
+    const float skew = tray::kDepthSkew * box.depth;
     for (int i = 0; i < n; ++i)
         s_tray.lane_x[i] = cx[i] - skew / 2;
     const float spacing = n > 1 ? s_tray.lane_x[1] - s_tray.lane_x[0] : tray::spool_pitch(size);
     const float half = tray::lane_lid_half_width(spacing, box);
 
     // The spools stand on the floor: their mid-depth centre is RISE/2 above the
-    // front-plane centre, whose flange bottom sits SPOOL_FLOOR_GAP above FB.
-    box.fb = cy_sum / n + flange_ry + tray::SPOOL_FLOOR_GAP + box.rise / 2;
+    // front-plane centre, whose flange bottom sits kSpoolFloorGap above FB.
+    box.fb = cy_sum / n + flange_ry + tray::kSpoolFloorGap + box.rise / 2;
     lv_obj_update_layout(w.slot_grid);
-    const float front_h = std::max(20.0f, lv_obj_get_height(w.slot_grid) / 4.0f);
+    const float front_h = std::max(20.0f, lv_obj_get_height(w.slot_grid) / 6.0f);
     box.ft = box.fb - front_h;
     box.fl = s_tray.lane_x[0] - half;
     box.fr = s_tray.lane_x[n - 1] + half;
@@ -712,6 +788,8 @@ void ams_detail_update_tray(AmsDetailWidgets& w, lv_obj_t* const slot_widgets[],
             lv_area_t la;
             lv_obj_get_coords(label, &la);
             lv_obj_set_style_translate_y(label, label_bottom - la.y2, LV_PART_MAIN);
+            if (lv_obj_t* name = lv_obj_find_by_name(slot_widgets[i], "name_label"))
+                lv_obj_set_style_translate_y(name, label_bottom - la.y2, LV_PART_MAIN);
             if (lv_obj_t* row = ui_ams_slot_get_lane_humidity(slot_widgets[i]))
                 lv_obj_set_style_translate_y(row, label_bottom - la.y2, LV_PART_MAIN);
         }
@@ -727,11 +805,41 @@ void ams_detail_update_tray(AmsDetailWidgets& w, lv_obj_t* const slot_widgets[],
         if (lowest != INT32_MIN)
             lv_obj_set_style_translate_y(w.labels_layer, label_bottom - lowest, LV_PART_MAIN);
     }
-    // The unit readout stands beside the drum, right of the back-right corner.
+    // Each lane's number sits on the box front, never below it.
+    if (w.badge_layer) {
+        lv_area_t layer;
+        lv_obj_get_coords(w.badge_layer, &layer);
+        const float inset = (float)theme_manager_get_spacing("space_xxs");
+        for (int i = 0; i < n; ++i) {
+            lv_obj_t* badge = ui_ams_slot_get_status_badge(slot_widgets[i]);
+            if (!badge || lv_obj_get_parent(badge) != w.badge_layer)
+                continue;
+            lv_obj_update_layout(badge);
+            const tray::PointF p =
+                tray::lane_badge_origin(box, s_tray.lane_x[i], half, (float)lv_obj_get_width(badge),
+                                        (float)lv_obj_get_height(badge), inset);
+            // The badge's own translate offsets it from its position.
+            lv_obj_set_pos(badge,
+                           origin.x + (int32_t)std::lround(p.x) - layer.x1 -
+                               lv_obj_get_style_translate_x(badge, LV_PART_MAIN),
+                           origin.y + (int32_t)std::lround(p.y) - layer.y1 -
+                               lv_obj_get_style_translate_y(badge, LV_PART_MAIN));
+        }
+    }
+
+    // The environment pill stands against the box's right end, as tall as the box.
     if (w.env_indicator && !lv_obj_has_flag(w.env_indicator, LV_OBJ_FLAG_HIDDEN)) {
-        const tray::PointF br_t = tray::tray_faces(box).back_wall[1];
-        translate_to(w.env_indicator, origin.x + (int32_t)std::lround(br_t.x) + gap,
-                     origin.y + (int32_t)std::lround(top) - 4, true);
+        const int32_t pill_top = origin.y + (int32_t)std::lround(top);
+        const int32_t pill_bottom = origin.y + (int32_t)std::lround(box.fb);
+        const int32_t box_right = origin.x + (int32_t)std::lround(tray::pill_left_x(box));
+        // DECLARATIVE_OK: measured layout; the pill is as tall as the box it stands against
+        lv_obj_set_height(w.env_indicator, std::max<int32_t>(0, pill_bottom - pill_top + 1));
+        clear_translate(w.env_indicator);
+        lv_obj_update_layout(w.env_indicator);
+        lv_area_t a;
+        lv_obj_get_coords(w.env_indicator, &a);
+        lv_obj_set_style_translate_x(w.env_indicator, box_right - a.x1, LV_PART_MAIN);
+        lv_obj_set_style_translate_y(w.env_indicator, pill_top - a.y1, LV_PART_MAIN);
     }
 
     lv_obj_invalidate(container);
@@ -747,13 +855,17 @@ void ams_detail_update_labels(AmsDetailWidgets& w, lv_obj_t* slot_widgets[], int
     helix::ui::safe_clean_children(w.labels_layer);
 
     int32_t slot_spacing = layout.slot_width - layout.overlap;
+    const int32_t label_width =
+        helix::ui::ams_stagger_label_width(slot_spacing, helix::widget_size::current_breakpoint(),
+                                           theme_manager_get_spacing("space_xs"));
 
     for (int i = 0; i < slot_count; ++i) {
         if (slot_widgets[i]) {
             // Formula matches slot_grid flex positions, plus centering offset
             int32_t slot_center_x =
                 layout.centering_offset + layout.slot_width / 2 + i * slot_spacing;
-            ui_ams_slot_move_label_to_layer(slot_widgets[i], w.labels_layer, slot_center_x);
+            ui_ams_slot_move_label_to_layer(slot_widgets[i], w.labels_layer, slot_center_x,
+                                            label_width);
         }
     }
 
@@ -770,6 +882,7 @@ void ams_detail_update_badges(AmsDetailWidgets& w, lv_obj_t* slot_widgets[], int
     helix::ui::safe_clean_children(w.badge_layer);
 
     int32_t slot_spacing = layout.slot_width - layout.overlap;
+    lv_obj_update_layout(w.badge_layer);
 
     for (int i = 0; i < slot_count; ++i) {
         if (slot_widgets[i]) {
@@ -787,11 +900,11 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
         return;
 
     auto* backend = helix::AmsState::instance().get_backend();
-    if (!backend)
+    const auto info = helix::AmsState::instance().system_info();
+    if (!backend || !info)
         return;
 
-    ams_detail_setup_path_canvas(canvas, slot_grid, unit_index, backend,
-                                 backend->get_system_info());
+    ams_detail_setup_path_canvas(canvas, slot_grid, unit_index, backend, *info);
 }
 
 // NAMESPACE_OK: an overload of the global three-argument ams_detail_setup_path_canvas
@@ -839,6 +952,13 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
         topo = helix::PathTopology::HUB;
     ui_filament_path_canvas_set_topology(canvas, static_cast<int>(topo));
     ui_filament_path_canvas_set_hub_on_toolhead(canvas, backend->hub_on_toolhead());
+    // A unit the overview joins to no nozzle (an unwired hub) ends at its hub
+    // here too: the overview's own rule decides both. A hub mounted on the head feeds
+    // it by construction, and the all-units view always reaches a toolhead.
+    const bool linear_hub = topo == helix::PathTopology::HUB || topo == helix::PathTopology::LINEAR;
+    const bool feeds_toolhead = !linear_hub || unit_index < 0 || backend->hub_on_toolhead() ||
+                                helix::ui::unit_feeds_toolhead(info, backend, unit_index);
+    ui_filament_path_canvas_set_feeds_toolhead(canvas, feeds_toolhead);
 
     // A unit-scoped view asks its own unit; the all-units view asks whether any has one.
     bool has_toolhead_sensor = false;
@@ -873,10 +993,6 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
         active_slot = (local_active >= 0 && local_active < slot_count) ? local_active : -1;
     }
     ui_filament_path_canvas_set_active_slot(canvas, active_slot);
-
-    // Which head is on the carriage. A unit-scoped HUB view draws one nozzle and
-    // cannot otherwise say whether it is the mounted one.
-    ui_filament_path_canvas_set_mounted_tool(canvas, info.mounted_tool);
 
     // Set filament color from active slot
     int global_active = (unit_index >= 0) ? active_slot + slot_offset : active_slot;
@@ -928,18 +1044,8 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     // Plumb per-slot metadata (mapped_tool, extruder identity, hub routing) to
     // path canvas. The extruder name is what actually names a toolhead; the
     // mapped_tool alias stays as the fallback for backends that publish neither.
-    //
-    // mapped_tool and the extruder identity go to the WHOLE-SYSTEM view too
-    // (slot_offset 0, every slot): the badges are the same rule there, and the
-    // toolhead menu reads the tapped badge's number back off the canvas, so an
-    // unplumbed view would badge a remapped lane with its lane index and the
-    // menu would act on the head that number really names. Only hub routing is
-    // a per-unit property and stays unit-scoped.
-    {
-        const helix::AmsUnit* unit =
-            (unit_index >= 0 && unit_index < static_cast<int>(info.units.size()))
-                ? &info.units[static_cast<size_t>(unit_index)]
-                : nullptr;
+    if (unit_index >= 0 && unit_index < static_cast<int>(info.units.size())) {
+        const auto& unit = info.units[unit_index];
         std::vector<int> extruder_tools(static_cast<size_t>(slot_count), -1);
         for (int i = 0; i < slot_count; ++i) {
             int gi = slot_offset + i;
@@ -948,8 +1054,8 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
             if (const auto n = helix::tool_number_for_extruder(slot.extruder_name)) {
                 extruder_tools[static_cast<size_t>(i)] = *n;
             }
-            if (unit && i < static_cast<int>(unit->lane_is_hub_routed.size())) {
-                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit->lane_is_hub_routed[i]);
+            if (i < static_cast<int>(unit.lane_is_hub_routed.size())) {
+                ui_filament_path_canvas_set_slot_hub_routed(canvas, i, unit.lane_is_hub_routed[i]);
             }
         }
         ui_filament_path_canvas_set_extruder_tools(canvas, extruder_tools.data(), slot_count);
@@ -966,9 +1072,12 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
             color = backend->get_slot_info(global_idx).color_rgb;
         }
         ui_filament_path_canvas_set_slot_filament(canvas, i, static_cast<int>(slot_seg), color);
+        const std::string caption = helix::ui::upstream_lane_caption(info, *backend, global_idx);
+        ui_filament_path_canvas_set_slot_upstream(canvas, i,
+                                                  caption.empty() ? nullptr : caption.c_str());
     }
 
-    // The buffer box: AFC buffer health, Happy Hare sync feedback, or a
+    // The buffer box: a unit buffer's health, a system buffer's motion, or a
     // filament pressure sensor, tinted by the buffer bands.
     const helix::ui::BufferBoxState box = helix::ui::ams_detail_buffer_box(info, unit_index);
     ui_filament_path_canvas_set_buffer_fault_state(canvas, box.fault);
@@ -980,14 +1089,20 @@ void ams_detail_setup_path_canvas(lv_obj_t* canvas, lv_obj_t* slot_grid, int uni
     // until it is selected, and drawing it anyway put a loaded lane's material
     // on the bypass node (#1229 defect 5).
     auto ext_spool = helix::AmsState::instance().get_external_spool_info();
-    const bool show_bypass_spool =
-        ext_spool.has_value() && helix::ui::bypass_node_visible_for(backend, info);
+    const bool show_bypass_spool = ext_spool.has_value() && feeds_toolhead &&
+                                   helix::ui::bypass_node_visible_for(backend, info);
     ui_filament_path_canvas_set_bypass_has_spool(canvas, show_bypass_spool);
     if (show_bypass_spool) {
         ui_filament_path_canvas_set_bypass_color(canvas, ext_spool->color_rgb);
     }
 
-    spdlog::debug("[AmsDetail] Path canvas configured: slots={}, unit={}", slot_count, unit_index);
+    lv_area_t toolhead{}, canvas_area{};
+    const bool has_toolhead = ui_filament_path_canvas_get_toolhead_box(canvas, &toolhead);
+    lv_obj_get_coords(canvas, &canvas_area);
+    spdlog::debug("[AmsDetail] Path canvas configured: slots={}, unit={}, canvas y {}..{}, "
+                  "toolhead y {}..{}",
+                  slot_count, unit_index, canvas_area.y1, canvas_area.y2,
+                  has_toolhead ? toolhead.y1 : -1, has_toolhead ? toolhead.y2 : -1);
 }
 
 void ams_detail_pre_show_env_indicator(AmsDetailWidgets& w, int unit_index) {
@@ -999,23 +1114,9 @@ void ams_detail_pre_show_env_indicator(AmsDetailWidgets& w, int unit_index) {
     lv_obj_set_user_data(w.env_indicator, reinterpret_cast<void*>(static_cast<intptr_t>(u)));
 
     auto* backend = helix::AmsState::instance().get_backend();
-    // Backend capability alone is not enough once units within one system
-    // differ: on multiACE the ACEs have sensors and the U1 itself does not.
-    // The component already hides itself via bind_flag_if_eq on $visible, so
-    // showing unconditionally here would UNDO that binding for a sensor-less
-    // unit and leave an empty badge until the subject next changed.
-    lv_subject_t* vis = helix::AmsState::instance().get_env_ind_visible_subject(u);
-    const bool unit_has_env = !vis || lv_subject_get_int(vis) != 0;
-    if (backend && backend->has_environment_sensors() && unit_has_env) {
+    if (backend && backend->has_environment_sensors()) {
         lv_obj_remove_flag(w.env_indicator, LV_OBJ_FLAG_HIDDEN);
-        // Force layout on the root (flex row container) so the indicator's
-        // content width is resolved before slot creation reads available_width.
-        if (w.root) {
-            lv_obj_update_layout(w.root);
-            int32_t indicator_w = lv_obj_get_width(w.env_indicator);
-            spdlog::debug("[AmsDetail] Pre-showed env indicator (width={}px) for flex layout",
-                          indicator_w);
-        }
+        spdlog::debug("[AmsDetail] Pre-showed env indicator for unit {}", u);
     } else {
         lv_obj_add_flag(w.env_indicator, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1030,29 +1131,21 @@ namespace ui {
 
 BufferBoxState ams_detail_buffer_box(const AmsSystemInfo& info, int unit_index) {
     BufferBoxState box;
-    // The AFC buffer rows describe one unit: the one asked for, else the one
-    // the system reading came from.
+    // A unit's buffer describes one unit: the one asked for, else the one the
+    // system reading came from. Without one, a buffer serving the whole system.
+    const auto motion_state = [](BufferMotion m) {
+        return m == BufferMotion::Advancing ? 1 : m == BufferMotion::Trailing ? 2 : 0;
+    };
     const AmsUnit* unit = info.get_unit(buffer_view_unit(info, unit_index));
     if (unit && unit->buffer_health) {
         const BufferHealth& h = *unit->buffer_health;
         box.present = true;
-        if (h.state == "Advancing") {
-            box.state = 1;
-        } else if (h.state == "Trailing") {
-            box.state = 2;
-        }
+        box.state = motion_state(h.motion);
         box.fault = static_cast<int>(buffer_fault_status(h));
     }
-    if (!box.present && info.type == AmsType::HAPPY_HARE) {
-        const auto& sf = info.sync_feedback_state;
-        if (!sf.empty() && sf != "disabled") {
-            box.present = true;
-            if (sf == "compressed") {
-                box.state = 1;
-            } else if (sf == "tension") {
-                box.state = 2;
-            }
-        }
+    if (!box.present && info.system_buffer_motion) {
+        box.present = true;
+        box.state = motion_state(*info.system_buffer_motion);
     }
 
     const BufferReading reading = buffer_reading(info, unit_index);
@@ -1083,13 +1176,24 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
     switch (action) {
     case MenuAction::EJECT:
     case MenuAction::RECOVER_POSITION:
-    case MenuAction::SELECT_GATE:
     case MenuAction::CHECK_GATE:
     case MenuAction::PRELOAD:
     case MenuAction::CLEAR_SPOOL:
+    case MenuAction::MOUNT:
+    case MenuAction::PARK:
         break;
     default:
         return false; // caller's own switch owns it
+    }
+
+    // This function is public and takes a raw slot index, so the bypass sentinel
+    // reaches it. The external spool is not one of the backend's lanes: it carries
+    // no number to name, apply_user_edit() refuses the index, and a printer with no
+    // filament system has one too, so it clears through its own store first.
+    if (action == MenuAction::CLEAR_SPOOL && slot == kExternalSpoolSlot) {
+        AmsState::instance().commit_external_spool_edit(SlotInfo{});
+        NOTIFY_INFO(lv_tr("External spool cleared"));
+        return true;
     }
 
     AmsBackend* backend = AmsState::instance().get_backend();
@@ -1124,13 +1228,18 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
         break;
     }
 
-    case MenuAction::SELECT_GATE: {
-        AmsError error = backend->select_gate(slot);
-        if (error.result != AmsResult::SUCCESS) {
-            notify_ams_error(error, lv_tr("Select slot failed"));
+    case MenuAction::MOUNT: {
+        // The toolhead tap's own verdict: refusals and the paused-job
+        // confirmation are the same as from any other tool control.
+        if (const auto head = backend->head_for_slot(slot)) {
+            offer_tool_change(get_printer_state(), *head);
         }
         break;
     }
+
+    case MenuAction::PARK:
+        request_tool_park(get_printer_state());
+        break;
 
     case MenuAction::CHECK_GATE: {
         AmsError error = backend->check_gate(slot);
@@ -1149,16 +1258,6 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
     }
 
     case MenuAction::CLEAR_SPOOL: {
-        // This function is public and takes a raw slot index, so the bypass
-        // sentinel reaches it. The external spool is not one of the backend's
-        // lanes: it carries no number to name, and apply_user_edit() refuses the
-        // index, so it clears through its own store instead.
-        if (slot == EXTERNAL_SPOOL_SLOT) {
-            AmsState::instance().commit_external_spool_edit(SlotInfo{});
-            NOTIFY_INFO(lv_tr("External spool cleared"));
-            break;
-        }
-
         // The menu greys its Clear button for this case, but this function is
         // public and its callers can hold a menu built before the print
         // started, so the guard here is the authority: the lane a job is
@@ -1180,7 +1279,7 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
         SlotInfo original = backend->get_slot_info(slot);
         SlotInfo cleared = original;
         cleared.material.clear();
-        cleared.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+        cleared.color_rgb = kAmsDefaultSlotColor;
         cleared.color_name.clear();
         cleared.multi_color_hexes.clear();
         cleared.brand.clear();
@@ -1195,6 +1294,7 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
         cleared.total_weight_g = -1;
         auto error = AmsState::instance().commit_slot_edit(slot, original, cleared);
         if (error.success() || error.partially_applied) {
+            helix::ui::offer_edit_follow_up(slot, original, cleared);
             // The commit clears what an edit can state - and, unlinked, a
             // colour pick, a typed weight or a colour name never engages as a
             // clear, so the statement leaves the lane's standing user record
@@ -1209,7 +1309,8 @@ bool ams_dispatch_backend_action(AmsContextMenu::MenuAction action, int slot,
             backend->clear_slot_override(slot);
         }
         if (error.success()) {
-            NOTIFY_INFO(lv_tr("{} spool cleared"), helix::ui::backend_lane_label(*backend, slot));
+            NOTIFY_INFO(lv_tr("{} spool cleared"),
+                        helix::ui::lane_label(backend->lane_noun(), slot));
         } else {
             notify_ams_error(error, lv_tr("Clear failed"));
         }
@@ -1230,7 +1331,7 @@ namespace {
 /// already answered the question the notice asked.
 struct InsertOfferSnapshot {
     std::string material;
-    uint32_t color_rgb = AMS_DEFAULT_SLOT_COLOR;
+    uint32_t color_rgb = kAmsDefaultSlotColor;
     int spoolman_id = 0;
 
     static InsertOfferSnapshot of(const SlotInfo& info) {
@@ -1256,6 +1357,11 @@ std::unordered_map<int, InsertOffer>& insert_offers() {
     return offers;
 }
 
+std::unordered_set<int>& insert_prompt_claims() {
+    static std::unordered_set<int> claims;
+    return claims;
+}
+
 void clear_if_lane_unchanged(int slot) {
     auto& offers = insert_offers();
     const auto it = offers.find(slot);
@@ -1276,9 +1382,31 @@ void clear_if_lane_unchanged(int slot) {
 
 void reset_insert_offers_for_test() {
     insert_offers().clear();
+    insert_prompt_claims().clear();
+}
+
+void claim_insert_prompt(int slot) {
+    insert_prompt_claims().insert(slot);
+}
+
+void release_insert_prompt(int slot) {
+    insert_prompt_claims().erase(slot);
+}
+
+void release_all_insert_prompts() {
+    insert_prompt_claims().clear();
+}
+
+bool insert_prompt_claimed(int slot) {
+    return insert_prompt_claims().count(slot) != 0;
 }
 
 void offer_clear_after_unverified_insert(int slot) {
+    if (insert_prompt_claimed(slot)) {
+        spdlog::debug("[AMS] Slot {} insert belongs to the slot editor; no same-spool notice",
+                      slot);
+        return;
+    }
     AmsBackend* backend = AmsState::instance().get_backend();
     if (!backend ||
         clear_spool_blocked_by_print(get_printer_state().print_state().get_print_lifecycle(),

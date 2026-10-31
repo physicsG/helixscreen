@@ -43,18 +43,18 @@ json upstream_medusahc_objects() {
                         "toolhead", "gcode_move", "configfile"});
 }
 
-/// Object list from a MedusaHC fork that folded the dock sensing into its own
-/// extra: [medusahc] carries all seven switch pins and there is no pin_watch and
-/// no klipper-toolchanger left. Verbatim shape from debug bundle 6QWNVZY5
-/// (topi314/MedusaHC on a DuCR10, HelixScreen 0.99.116), trimmed to what
-/// detection reads.
-json fork_medusahc_objects() {
-    return json::array(
-        {"medusahc",         "medusahc_calibrate", "gcode_macro T0", "gcode_macro T1",
-         "gcode_macro T2",   "gcode_macro T3",     "gcode_macro T4", "gcode_macro T5",
-         "gcode_macro OPEN", "gcode_macro CLOSE",  "servo opener",   "extruder",
-         "extruder1",        "extruder2",          "extruder3",      "extruder4",
-         "extruder5",        "toolhead",           "gcode_move",     "configfile"});
+/// Object list of Irbis3D's Python controller running without
+/// klipper-toolchanger: [pin_watch io] reads the docks, [medusahc] owns the
+/// swap, and the machine's own T<n> macros drive it. Trimmed to what detection
+/// reads.
+json controller_tn_objects() {
+    return json::array({"pin_watch io",     "medusahc",          "medusahc_calibrate",
+                        "gcode_macro T0",   "gcode_macro T1",    "gcode_macro T2",
+                        "gcode_macro T3",   "gcode_macro T4",    "gcode_macro T5",
+                        "gcode_macro OPEN", "gcode_macro CLOSE", "servo my_servo",
+                        "extruder",         "extruder1",         "extruder2",
+                        "extruder3",        "extruder4",         "extruder5",
+                        "toolhead",         "gcode_move",        "configfile"});
 }
 
 } // namespace
@@ -131,23 +131,34 @@ TEST_CASE("MedusaHC capability resets between parses", "[printer_discovery][medu
 // The changer that runs without klipper-toolchanger
 // ============================================================================
 
-TEST_CASE("a MedusaHC with neither pin_watch nor toolchanger is still a changer",
+TEST_CASE("a MedusaHC without klipper-toolchanger is still a changer",
           "[printer_discovery][medusahc]") {
     PrinterDiscovery hw;
-    hw.parse_objects(fork_medusahc_objects());
+    hw.parse_objects(controller_tn_objects());
 
     REQUIRE(helix::toolchanger_addon::present(hw));
     CHECK(hw.has_medusahc());
+    CHECK(hw.has_pin_watch());
     // The [toolchanger] object genuinely is not there. The flag says what the
     // object list said, and nothing else may quietly widen it.
     CHECK_FALSE(hw.has_tool_changer());
-    CHECK_FALSE(hw.has_pin_watch());
+}
+
+TEST_CASE("[medusahc] without pin_watch is not a MedusaHC", "[printer_discovery][medusahc]") {
+    // The dock sensors are what the add-on reads; with no pin_watch there is
+    // nothing to read them from.
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array(
+        {"medusahc", "gcode_macro T0", "gcode_macro T1", "extruder", "extruder1", "toolhead"}));
+
+    CHECK(hw.has_medusahc());
+    CHECK_FALSE(helix::toolchanger_addon::present(hw));
 }
 
 TEST_CASE("a changer without tool objects still registers a tool changer AMS",
           "[printer_discovery][medusahc]") {
     PrinterDiscovery hw;
-    hw.parse_objects(fork_medusahc_objects());
+    hw.parse_objects(controller_tn_objects());
 
     REQUIRE(hw.mmu_type() == AmsType::TOOL_CHANGER);
     REQUIRE(hw.detected_ams_systems().size() == 1);
@@ -157,7 +168,7 @@ TEST_CASE("a changer without tool objects still registers a tool changer AMS",
 TEST_CASE("tools are enumerated from the extruders when there are no tool objects",
           "[printer_discovery][medusahc]") {
     PrinterDiscovery hw;
-    hw.parse_objects(fork_medusahc_objects());
+    hw.parse_objects(controller_tn_objects());
 
     // One hot end per extruder heater, which is what a hotend changer is. The
     // names are the G-code tool numbers the machine's own T<n> macros use.
@@ -243,7 +254,7 @@ TEST_CASE("MedusaHC detection never displaces another AMS system",
             json::array({"extruder", "extruder1", "gcode_macro T0", "gcode_macro T1"}));
 
         // Two hot ends make this a multi-tool printer under the general rule
-        // (tests/unit/test_multi_tool_detection.cpp). What must not happen is
+        // (the multi-tool section at the end of this file). What must not happen is
         // the MedusaHC provider claiming it: that turns on dock sensors and a
         // feeder the machine does not have.
         REQUIRE_FALSE(helix::toolchanger_addon::present(hw));
@@ -263,4 +274,68 @@ TEST_CASE("MedusaHC detection never displaces another AMS system",
         REQUIRE(systems.size() == 1);
         REQUIRE(systems[0].type == AmsType::HAPPY_HARE);
     }
+}
+
+// ============================================================================
+// The general multi-tool rule: more than one hot end, whoever built it
+//
+// Tool counts come from three sources, in descending authority: the [tool N]
+// objects klipper-toolchanger creates, a changer extra's own count, and, for a
+// machine presenting one heater and one extruder motor per tool, the extruder
+// heater count. The third is the only signal a printer whose changer ships
+// neither klipper-toolchanger nor a recognised extra gives off. Registering
+// AmsType::TOOL_CHANGER for those gives them slots, per-tool spool identity and
+// the filament panel's tool selector (prestonbrown/helixscreen#1350).
+// ============================================================================
+
+namespace {
+
+/// A dual-extruder machine with no filament system and no changer module: two
+/// hot ends, T0/T1 macros, nothing else to go on.
+json dual_extruder_objects() {
+    return json::array({"extruder", "extruder1", "gcode_macro T0", "gcode_macro T1", "heater_bed",
+                        "toolhead", "gcode_move", "configfile"});
+}
+
+} // namespace
+
+TEST_CASE("extruder heaters name the tools when no tool objects exist",
+          "[printer_discovery][multitool]") {
+    PrinterDiscovery hw;
+    hw.parse_objects(dual_extruder_objects());
+
+    REQUIRE(hw.tool_names().size() == 2);
+    CHECK(hw.tool_names()[0] == "T0");
+    CHECK(hw.tool_names()[1] == "T1");
+}
+
+TEST_CASE("a single hot end is not a multi-tool printer", "[printer_discovery][multitool]") {
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array({"extruder", "heater_bed", "gcode_macro T0", "toolhead"}));
+
+    CHECK(hw.tool_names().empty());
+    CHECK(hw.mmu_type() == AmsType::NONE);
+    CHECK(hw.detected_ams_systems().empty());
+}
+
+TEST_CASE("a mixing hotend's extruder_stepper is not a second tool",
+          "[printer_discovery][multitool]") {
+    // Chimera/cyclops: one [extruder] heater plus [extruder_stepper] sections.
+    // One hot end, so one tool, and the enumeration must not see the steppers.
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array(
+        {"extruder", "extruder_stepper e1", "extruder_stepper e2", "heater_bed", "toolhead"}));
+
+    CHECK(hw.tool_names().empty());
+    CHECK(hw.detected_ams_systems().empty());
+}
+
+TEST_CASE("a filament system on a multi-extruder machine keeps its own backend",
+          "[printer_discovery][multitool]") {
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array({"mmu", "extruder", "extruder1", "heater_bed", "toolhead"}));
+
+    REQUIRE(hw.mmu_type() == AmsType::HAPPY_HARE);
+    REQUIRE(hw.detected_ams_systems().size() == 1);
+    CHECK(hw.detected_ams_systems()[0].type == AmsType::HAPPY_HARE);
 }

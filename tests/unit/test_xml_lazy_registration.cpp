@@ -123,6 +123,23 @@ TEST_CASE_METHOD(LazyXmlFixture, "a name with no XML file still fails to create"
     CHECK_FALSE(is_registered("lazy_probe_absent"));
 }
 
+TEST_CASE_METHOD(LazyXmlFixture,
+                 "a component wrapping an unregistered same-named widget fails to create",
+                 "[xml][lazy]") {
+    // temp_display.xml's shape: the view extends the C++ widget the file is named after.
+    write("lazy_probe_wraps_widget.xml",
+          "<component><view extends=\"lazy_probe_wraps_widget\"/></component>");
+    write("lazy_probe_wraps_widget_user.xml", "<component><view extends=\"lv_obj\">"
+                                              "<lazy_probe_wraps_widget name=\"inner\"/>"
+                                              "</view></component>");
+
+    CHECK(lv_xml_create(test_screen(), "lazy_probe_wraps_widget", nullptr) == nullptr);
+    auto* user = static_cast<lv_obj_t*>(
+        lv_xml_create(test_screen(), "lazy_probe_wraps_widget_user", nullptr));
+    REQUIRE(user != nullptr);
+    CHECK(lv_obj_find_by_name(user, "inner") == nullptr);
+}
+
 TEST_CASE_METHOD(LazyXmlFixture, "first use registers the active layout variant's copy",
                  "[xml][lazy]") {
     write("lazy_probe_variant.xml", component_with_label("base"));

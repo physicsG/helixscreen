@@ -130,7 +130,7 @@ TEST_CASE_METHOD(CjkFontManagerFixture, "CjkFontManager: unload clears fallback 
 }
 
 // The bake (scripts/regen_text_fonts.sh) and the mapping tables
-// (REGULAR_FONTS/BOLD_FONTS/LIGHT_FONTS in cjk_font_manager.cpp) are two
+// (kRegularFonts/kBoldFonts/kLightFonts in cjk_font_manager.cpp) are two
 // hand-maintained lists that must name the same faces. A face compiled with
 // no mapping entry renders CJK text as tofu; a mapping entry naming a bin
 // that was never baked (or has since been removed) silently loads nothing

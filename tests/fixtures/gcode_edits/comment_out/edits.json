@@ -1,0 +1,13 @@
+{
+  "description": "Comment out one checked line, with the reason annotation",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "BED_MESH_CALIBRATE",
+      "action": "comment_out",
+      "args": {
+        "comment": "Disabled Bed mesh"
+      }
+    }
+  ]
+}

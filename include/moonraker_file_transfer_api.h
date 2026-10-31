@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 
@@ -40,11 +41,11 @@ class IMoonrakerClient;
  *       [](const std::string& content) { ... },
  *       [](const auto& err) { ... });
  */
-class MoonrakerFileTransferAPI : public ITransfersAPI {
+class MoonrakerFileTransferAPI : public helix::ITransfersAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
-    using StringCallback = std::function<void(const std::string&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
+    using StringCallback = helix::SharedCallback<void(const std::string&)>;
 
     /**
      * @brief Progress callback for file transfer operations
@@ -125,6 +126,10 @@ class MoonrakerFileTransferAPI : public ITransfersAPI {
                                StringCallback on_success, ErrorCallback on_error,
                                CancelFlag cancelled = nullptr) override;
 
+    void download_file_range(const std::string& root, const std::string& path, uint64_t offset,
+                             size_t len, StringCallback on_success, ErrorCallback on_error,
+                             CancelFlag cancelled = nullptr) override;
+
     /**
      * @brief Download a file directly to disk (streaming, low memory)
      *
@@ -150,6 +155,7 @@ class MoonrakerFileTransferAPI : public ITransfersAPI {
     /// reads suffix ranges; the ESP32 lane does neither.
     bool supports_local_copies() const override;
     bool supports_tail_reads() const override;
+    bool supports_range_reads() const override;
 
     /**
      * @brief Download a thumbnail image and cache it locally
@@ -209,7 +215,8 @@ class MoonrakerFileTransferAPI : public ITransfersAPI {
      */
     void upload_file_with_name(const std::string& root, const std::string& path,
                                const std::string& filename, const std::string& content,
-                               SuccessCallback on_success, ErrorCallback on_error) override;
+                               SuccessCallback on_success, ErrorCallback on_error,
+                               UploadLane lane = UploadLane::Fast) override;
 
     /**
      * @brief Upload file from local filesystem path (streaming, low memory)

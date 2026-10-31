@@ -379,8 +379,8 @@ TEST_CASE("bypass widget: gated on ams_supports_bypass", "[ams][bypass-home]") {
     // (prestonbrown/helixscreen#1559).
     CHECK(def->colspan == 2);
     CHECK(def->rowspan == 2);
-    CHECK(def->max_colspan == helix::GridLayout::MAX_TRACKS);
-    CHECK(def->max_rowspan == helix::GridLayout::MAX_TRACKS);
+    CHECK(def->max_colspan == helix::GridLayout::kMaxTracks);
+    CHECK(def->max_rowspan == helix::GridLayout::kMaxTracks);
     // opt-in tile, like the ams row
     CHECK_FALSE(def->default_enabled);
 }

@@ -57,6 +57,12 @@ TEST_CASE("compose_filament_label: joins brand, name and material", "[filament][
                 "Polymaker Ambrosia Pink PLA");
     }
 
+    SECTION("a separator joins the parts that remain") {
+        REQUIRE(compose_filament_label("Polymaker", "Ambrosia Pink", "PLA", " / ") ==
+                "Polymaker / Ambrosia Pink / PLA");
+        REQUIRE(compose_filament_label("eSUN", "eSUN PLA+", "PLA+", " / ") == "eSUN PLA+");
+    }
+
     SECTION("brand plus material with no name") {
         REQUIRE(compose_filament_label("Polymaker", "", "PLA") == "Polymaker PLA");
     }

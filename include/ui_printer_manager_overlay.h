@@ -16,12 +16,17 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
+#include "capability_chip_text.h"
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
 #include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
+#include <array>
 #include <string>
+#include <vector>
 
 /**
  * @class PrinterManagerOverlay
@@ -124,6 +129,22 @@ class PrinterManagerOverlay : public OverlayBase {
      */
     void refresh_printer_info();
 
+    /**
+     * @brief Recompute every capability chip's text and the overlay-owned
+     *        visibility subjects from the current printer
+     *
+     * Runs once per activation, so a printer switched while the overlay was
+     * closed never shows the previous printer's details, and again whenever
+     * discovery, a backend or a count a chip shows changes while it is open.
+     */
+    void refresh_capability_chips();
+
+    /// Schedule one refresh_capability_chips(); further requests before it runs join it.
+    void request_chip_refresh();
+
+    /// Observe what the chips read; replaces any earlier observers and asks for one refresh.
+    void observe_chip_inputs();
+
     //
     // === Subject State ===
     //
@@ -133,6 +154,23 @@ class PrinterManagerOverlay : public OverlayBase {
     lv_subject_t printer_manager_name_{};
     lv_subject_t printer_manager_model_{};
     lv_subject_t helix_version_{};
+
+    /// One string subject per capability chip, in CapChip order.
+    static constexpr size_t kChipTextLen = 96;
+    std::array<lv_subject_t, helix::kCapChipCount> chip_text_{};
+    std::array<std::array<char, kChipTextLen>, helix::kCapChipCount> chip_text_bufs_{};
+
+    /// Visibility for chips whose fact has no app-wide subject.
+    lv_subject_t has_kinematics_{};
+    lv_subject_t has_build_volume_{};
+    lv_subject_t has_filament_system_{};
+    lv_subject_t has_tool_changer_{};
+    lv_subject_t has_mcus_{};
+
+    /// Everything a chip's text or visibility reads that can change while open.
+    std::vector<ObserverGuard> chip_input_observers_;
+    bool chip_refresh_pending_ = false;
+    int chip_refresh_count_ = 0; ///< refreshes run, for tests
 
     char name_buf_[128] = {};
     char model_buf_[128] = {};

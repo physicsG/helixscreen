@@ -32,6 +32,25 @@ TEST_CASE("snapmaker prefs: every field reads out of a full frame", "[snapmaker]
     REQUIRE(p.end_unload_filament == std::vector<bool>{false, true, false, true});
 }
 
+TEST_CASE("snapmaker prefs: the per-head soft-filament flags read and survive a delta",
+          "[snapmaker][prefs][end_unload]") {
+    // The end macro never unloads a soft-filament head, whatever the list says.
+    auto held = read_print_preferences(ptc({{"filament_soft", {false, true, 0, 1}}}));
+    REQUIRE(held.filament_soft == std::vector<bool>{false, true, false, true});
+    // A flag about the loaded filament is not a setting to offer.
+    REQUIRE(held.empty());
+
+    held.merge(read_print_preferences(ptc({{"end_led_turn_off", true}})));
+    REQUIRE(held.filament_soft == std::vector<bool>{false, true, false, true});
+    held.merge(read_print_preferences(ptc({{"filament_soft", {true, false, false, false}}})));
+    REQUIRE(held.filament_soft == std::vector<bool>{true, false, false, false});
+
+    // Read-only: the write never carries it.
+    PrintPreferences changes;
+    changes.filament_soft = {true};
+    REQUIRE(write_print_preferences_gcode(changes).empty());
+}
+
 TEST_CASE("snapmaker prefs: a field the frame omits stays nullopt", "[snapmaker][prefs]") {
     // Moonraker sends deltas. Silence is not an off.
     auto p = read_print_preferences(ptc({{"end_led_turn_off", true}}));

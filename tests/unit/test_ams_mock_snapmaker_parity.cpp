@@ -219,3 +219,41 @@ TEST_CASE("A non-Snapmaker mock keeps the base capability answers",
     CHECK(mock.lane_noun() == helix::ui::LaneNoun::Gate);
     // The BackendTraits answers are pinned in test_ams_backend_traits.cpp.
 }
+
+TEST_CASE("Mock Snapmaker lanes publish their entry sensor like the U1",
+          "[ams][snapmaker][mock][entry_sensor]") {
+    AmsBackendMock mock(4);
+    mock.set_snapmaker_mode(true);
+    SnapmakerProbe real;
+    REQUIRE(real.slot_has_prep_sensor(0));
+    for (int i = 0; i < 4; i++) {
+        CAPTURE(i);
+        CHECK(mock.slot_has_prep_sensor(i) == real.slot_has_prep_sensor(i));
+    }
+
+    // A feeder holding filament its toolhead has not taken reads at the entry.
+    mock.set_slot_at_feeder(2);
+    CHECK(mock.get_slot_filament_segment(2) == PathSegment::PREP);
+    CHECK(mock.get_slot_filament_segment(1) == PathSegment::NOZZLE);
+}
+
+TEST_CASE("Mock tool changer publishes no entry sensor", "[ams][mock][entry_sensor]") {
+    AmsBackendMock mock(4);
+    mock.set_tool_changer_mode(true);
+    for (int i = 0; i < 4; i++)
+        CHECK_FALSE(mock.slot_has_prep_sensor(i));
+}
+
+TEST_CASE("Mock toolhead sensors match the backends they stand in for",
+          "[ams][snapmaker][mock][entry_sensor]") {
+    // The mock stands in for a running U1, whose heads have reported their
+    // filament switches.
+    AmsBackendMock u1(4);
+    u1.set_snapmaker_mode(true);
+    CHECK(u1.get_system_info().units[0].has_toolhead_sensor);
+
+    // klipper-toolchanger publishes no per-tool filament sensor.
+    AmsBackendMock tc(4);
+    tc.set_tool_changer_mode(true);
+    CHECK_FALSE(tc.get_system_info().units[0].has_toolhead_sensor);
+}

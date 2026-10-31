@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <translations languages="de">
   <!-- Event words the app catalog already carries (Started, Paused, Completed,
-       Cancelled, Failed) are not repeated here: t() falls through this pack to
+       Canceled, Failed) are not repeated here: t() falls through this pack to
        the app's, so only plugin-specific strings live below. -->
   <translation tag="Resumed" de="Fortgesetzt"/>
   <translation tag="armed" de="aktiv"/>
@@ -13,7 +13,9 @@
   <translation tag="want token@chatid" de="token@chatid erwartet"/>
   <translation tag="want an http(s) URL" de="Eine http(s)-URL angeben"/>
   <translation tag="unknown service" de="Unbekannter Dienst"/>
-  <translation tag="no answer" de="keine Antwort"/>
+  <translation tag="network error" de="Netzwerkfehler"/>
+  <translation tag="not a valid ntfy topic" de="Kein gültiges ntfy-Topic"/>
+  <translation tag="Test" de="Test"/>
   <translation tag="(not set)" de="(nicht gesetzt)"/>
   <translation tag="No events yet" de="Noch keine Ereignisse"/>
   <translation tag="Events" de="Ereignisse"/>

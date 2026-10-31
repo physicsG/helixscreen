@@ -30,11 +30,11 @@
 
 namespace {
 
-constexpr const char* MODE_SUBJECT = "semantic_font_test_mode";
+constexpr const char* kModeSubject = "semantic_font_test_mode";
 
 /// One text_small with a compact-font bind, one without, one with an inline
 /// font attribute — the three ways a text_* widget's font can be decided.
-constexpr const char* FIXTURE_XML = R"(<component>
+constexpr const char* kFixtureXml = R"(<component>
   <styles>
     <style name="compact_text" text_font="#font_xs"/>
   </styles>
@@ -54,7 +54,7 @@ lv_subject_t& mode_subject() {
     static bool registered = false;
     if (!registered) {
         lv_subject_init_int(&subject, 0);
-        lv_xml_register_subject(nullptr, MODE_SUBJECT, &subject);
+        lv_xml_register_subject(nullptr, kModeSubject, &subject);
         registered = true;
     }
     return subject;
@@ -64,7 +64,7 @@ lv_subject_t& mode_subject() {
 lv_obj_t* create_fixture(lv_obj_t* parent) {
     static bool registered = false;
     if (!registered) {
-        REQUIRE(lv_xml_register_component_from_data("semantic_font_fixture", FIXTURE_XML) ==
+        REQUIRE(lv_xml_register_component_from_data("semantic_font_fixture", kFixtureXml) ==
                 LV_RESULT_OK);
         registered = true;
     }

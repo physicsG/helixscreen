@@ -4,11 +4,11 @@
 #include "ui_clog_meter.h"
 
 #include "ui_progress_arc.h"
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "clog_meter_geometry.h"
 #include "lvgl/lvgl.h"
+#include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
 
@@ -16,8 +16,17 @@ namespace helix::ui {
 
 // Arc size = percentage of card width. The stroke comes from the shared
 // helix_progress_arc helper's diameter tier, not from here.
-constexpr int32_t ARC_WIDTH_PCT = 18; // arc is 18% of card width
-constexpr int32_t MIN_ARC_SIZE = 24;
+constexpr int32_t kArcWidthPct = 18; // arc is 18% of card width
+constexpr int32_t kMinArcSize = 24;
+
+namespace {
+/// The loaded card the meter sizes against: clog_meter sits in the card's
+/// loaded_body, which lays the meters beside or below the material name.
+lv_obj_t* card_of(lv_obj_t* meter_root) {
+    lv_obj_t* body = lv_obj_get_parent(meter_root);
+    return body ? lv_obj_get_parent(body) : nullptr;
+}
+} // namespace
 
 UiClogMeter::UiClogMeter(lv_obj_t* parent) {
     if (!parent) {
@@ -48,9 +57,9 @@ UiClogMeter::UiClogMeter(lv_obj_t* parent) {
     // would leave dangling bind_style observers on the still-live arc.
     helix::ui::attach_progress_arc_owned(arc_, arc_container_);
 
-    // Attach SIZE_CHANGED callback on the loaded card (root_'s parent)
+    // Attach SIZE_CHANGED callback on the loaded card
     // to dynamically size the arc container to fill available height
-    lv_obj_t* card = lv_obj_get_parent(root_);
+    lv_obj_t* card = card_of(root_);
     if (card) {
         // SIZE_CHANGED is a layout event — cannot be registered via XML <event_cb>
         lv_obj_add_event_cb(card, on_card_size_changed, LV_EVENT_SIZE_CHANGED, this);
@@ -67,15 +76,10 @@ UiClogMeter::UiClogMeter(lv_obj_t* parent) {
 }
 
 UiClogMeter::~UiClogMeter() {
-    // Freeze update queue around observer teardown to prevent race with
-    // WebSocket thread enqueueing deferred callbacks between drain and destroy
-    auto freeze = UpdateQueue::instance().scoped_freeze();
-    UpdateQueue::instance().drain();
-
     // Remove SIZE_CHANGED callback to prevent dangling this pointer
     // The card is reached through root_, so root_ must still be alive to ask.
     if (root_ && lv_is_initialized() && lv_obj_is_valid(root_)) {
-        helix::ui::remove_event_cb_if_alive(lv_obj_get_parent(root_), on_card_size_changed, this);
+        helix::ui::remove_event_cb_if_alive(card_of(root_), on_card_size_changed, this);
     }
 
     // Before the widget pointers below are cleared: its callback calls apply(),
@@ -170,7 +174,7 @@ void UiClogMeter::resize_arc() {
         return;
     in_resize_ = true;
 
-    lv_obj_t* card = lv_obj_get_parent(root_);
+    lv_obj_t* card = card_of(root_);
     if (!card) {
         in_resize_ = false;
         return;
@@ -178,9 +182,14 @@ void UiClogMeter::resize_arc() {
 
     lv_obj_update_layout(card);
 
-    // Arc size = percentage of card width (responsive to breakpoint)
+    // Arc size = percentage of card width, capped so a full-width card (a portrait
+    // panel) keeps a small arc
     const int32_t card_w = lv_obj_get_content_width(card);
-    const int32_t arc_size = LV_MAX(card_w * ARC_WIDTH_PCT / 100, MIN_ARC_SIZE);
+    const int32_t arc_max = theme_manager_get_spacing("ams_clog_arc_max");
+    int32_t arc_size = card_w * kArcWidthPct / 100;
+    if (arc_max > 0)
+        arc_size = LV_MIN(arc_size, arc_max);
+    arc_size = LV_MAX(arc_size, kMinArcSize);
 
     // Skip if already at target size
     if (lv_obj_get_width(arc_) == arc_size && lv_obj_get_height(arc_) == arc_size) {

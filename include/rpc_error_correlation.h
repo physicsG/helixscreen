@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 
 /**
@@ -51,5 +52,26 @@ bool was_recently_handled(const std::string& message);
 
 /// Clear all recorded messages — for tests.
 void clear_for_test();
+
+/// The gcode error router's offer to explain an RPC error itself, from the
+/// `!!` broadcast copy of it. Returns false to decline. Returning true takes
+/// `report` (the caller's own report of the error), which the router runs if
+/// its explanation has not surfaced in time: the copy can be lost in transit.
+using BroadcastClaimant =
+    std::function<bool(const std::string& message, std::function<void()>& report)>;
+
+/// Install the router's claimant; `owner` identifies it for the matching
+/// clear. Main thread only.
+void set_broadcast_claimant(const void* owner, BroadcastClaimant claimant);
+
+/// Remove the claimant, if `owner` installed the current one. Main thread only.
+void clear_broadcast_claimant(const void* owner);
+
+/// Report the RPC error carrying `message` through `report`, unless the router
+/// will present a classifier's own explanation of the same rejection, in which
+/// case the raw report would be a second message: then `report` runs only if
+/// that explanation never surfaces. With no router attached `report` runs now.
+/// Main thread only.
+void report_unless_explained(const std::string& message, std::function<void()> report);
 
 } // namespace helix::rpc_error_correlation

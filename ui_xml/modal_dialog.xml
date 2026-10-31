@@ -14,6 +14,7 @@
     <prop name="hide_warning" type="string" default="true"/>
     <prop name="hide_error" type="string" default="true"/>
     <prop name="hide_secondary" type="string" default="true"/>
+    <prop name="primary_variant" type="string" default="primary"/>
   </api>
   <!-- Dialog card (backdrop created programmatically) -->
   <view name="modal_dialog"
@@ -42,6 +43,7 @@
     <!-- Shared footer row: the cancel button (and its divider) stay hidden
          unless hide_secondary is "false". Callbacks are wired
          programmatically per-instance, not via XML. -->
-    <modal_button_row hide_secondary="$hide_secondary" primary_text="$primary_text" secondary_text="$secondary_text"/>
+    <modal_button_row hide_secondary="$hide_secondary"
+                      primary_text="$primary_text" secondary_text="$secondary_text" primary_variant="$primary_variant"/>
   </view>
 </component>

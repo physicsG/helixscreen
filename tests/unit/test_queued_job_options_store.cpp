@@ -60,9 +60,7 @@ class QueueOptionsStoreFixture : public LVGLTestFixture {
     /// queued callback can queue one more round (get -> prune -> post); drain
     /// repeatedly the way JobQueueStalenessFixture does.
     void pump(int rounds = 10) {
-        for (int i = 0; i < rounds; ++i) {
-            UpdateQueueTestAccess::drain(UpdateQueue::instance());
-        }
+        UpdateQueueTestAccess::drain_all(UpdateQueue::instance(), rounds);
     }
 
     /// Reads the stored option map straight from the (mock) database. The

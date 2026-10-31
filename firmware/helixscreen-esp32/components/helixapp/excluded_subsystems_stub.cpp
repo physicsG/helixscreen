@@ -47,6 +47,7 @@
 #include "ui_panel_calibration_zoffset.h"
 #include "ui_panel_input_shaper.h"
 #include "ui_panel_screws_tilt.h"
+#include "ui_stepper_resonance_cal_modal.h"
 #include "ui_toast_manager.h"
 #include "ui_wizard_preferences.h"
 
@@ -85,7 +86,7 @@ TimelapseVideosOverlay& get_global_timelapse_videos() {
 // ===========================================================================
 
 // src/ui/ui_overlay_timelapse_videos.cpp
-void init_global_timelapse_videos(IMoonrakerAPI*) {}
+void init_global_timelapse_videos(helix::IMoonrakerAPI*) {}
 void open_timelapse_videos() {}
 
 // src/ui/ui_overlay_timelapse_videos.cpp, helix::ui entry points. Kept code calls
@@ -119,7 +120,7 @@ bool timelapse_viewer_available() {
 // the no-op bodies leave no binding unsatisfied.
 //
 // src/ui/ui_overlay_timelapse_install.cpp
-TimelapseInstallOverlay::TimelapseInstallOverlay(IMoonrakerAPI* api) : api_(api) {}
+TimelapseInstallOverlay::TimelapseInstallOverlay(helix::IMoonrakerAPI* api) : api_(api) {}
 void TimelapseInstallOverlay::register_callbacks() {}
 lv_obj_t* TimelapseInstallOverlay::create(lv_obj_t*) {
     return nullptr;
@@ -132,11 +133,11 @@ TimelapseInstallOverlay& get_global_timelapse_install() {
     static TimelapseInstallOverlay overlay(nullptr);
     return overlay;
 }
-void init_global_timelapse_install(IMoonrakerAPI*) {}
+void init_global_timelapse_install(helix::IMoonrakerAPI*) {}
 void open_timelapse_install() {}
 
 // src/ui/ui_overlay_timelapse_settings.cpp
-TimelapseSettingsOverlay::TimelapseSettingsOverlay(IMoonrakerAPI* api) : api_(api) {}
+TimelapseSettingsOverlay::TimelapseSettingsOverlay(helix::IMoonrakerAPI* api) : api_(api) {}
 void TimelapseSettingsOverlay::register_callbacks() {}
 lv_obj_t* TimelapseSettingsOverlay::create(lv_obj_t*) {
     return nullptr;
@@ -147,7 +148,7 @@ TimelapseSettingsOverlay& get_global_timelapse_settings() {
     static TimelapseSettingsOverlay overlay(nullptr);
     return overlay;
 }
-void init_global_timelapse_settings(IMoonrakerAPI*) {}
+void init_global_timelapse_settings(helix::IMoonrakerAPI*) {}
 void open_timelapse_settings() {}
 
 // src/printer/timelapse_state.cpp — the four subjects it registers are bound
@@ -237,6 +238,14 @@ void init_zoffset_event_callbacks() {}
 namespace helix::ui {
 void init_tool_offset_row_handler() {
     lv_xml_register_event_cb(nullptr, "on_tool_offset_row_clicked", esp32_staged_feature_row_cb);
+}
+
+// src/ui/ui_stepper_resonance_cal_modal.cpp — same staged-row treatment: the
+// row tracks printer_has_stepper_resonance_cal, written by the KEPT
+// stepper_resonance_cal::resolve().
+void init_stepper_resonance_cal_row_handler() {
+    lv_xml_register_event_cb(nullptr, "on_stepper_resonance_cal_clicked",
+                             esp32_staged_feature_row_cb);
 }
 
 // src/ui/ui_panel_calibration_tool_offset.cpp (DEFINE_GLOBAL_PANEL) — the

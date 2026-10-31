@@ -1,0 +1,13 @@
+{
+  "description": "A range comments out every line in it; a line already a comment stays as it is",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "",
+      "action": "comment_out",
+      "args": {
+        "end_line": 4
+      }
+    }
+  ]
+}

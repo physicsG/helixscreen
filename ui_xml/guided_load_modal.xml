@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Guided filament load: the steps a printer's stock load wizard leaves to its screen.
+     guided_load_view: 0 = push filament in, 1 = working, 2 = is filament coming out. -->
+<component>
+  <view name="guided_load_modal"
+        extends="ui_dialog" width="85%" height="content" align="center" flex_flow="column" style_flex_main_place="start"
+        style_pad_gap="0">
+    <lv_obj name="content_container"
+            width="100%" height="content" style_max_height="#dialog_content_max" scrollable="true"
+            style_pad_all="#space_lg" flex_flow="column" style_flex_cross_place="center" style_pad_gap="#space_md">
+      <lv_obj width="100%"
+              height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm"
+              style_flex_main_place="center" style_flex_cross_place="center">
+        <icon src="filament" size="md" variant="primary"/>
+        <text_heading text="Load Filament"/>
+      </lv_obj>
+
+      <!-- View 0: waiting for the hand push -->
+      <text_body name="push_text"
+                 width="100%" long_mode="wrap" style_text_align="center"
+                 text="Push the filament into the extruder until it stops. It is gripped automatically, or tap Extrude.">
+        <bind_flag_if_not_eq subject="guided_load_view" flag="hidden" ref_value="0"/>
+      </text_body>
+
+      <!-- View 1: a step is running -->
+      <lv_obj name="working_container"
+              width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_md"
+              style_flex_cross_place="center">
+        <bind_flag_if_not_eq subject="guided_load_view" flag="hidden" ref_value="1"/>
+        <spinner size="lg" align="center"/>
+        <text_body width="100%" style_text_align="center" text="Extruding..."/>
+      </lv_obj>
+
+      <!-- View 2: did new filament reach the nozzle -->
+      <text_body name="confirm_text"
+                 width="100%" long_mode="wrap" style_text_align="center"
+                 text="Is new filament coming out of the nozzle?">
+        <bind_flag_if_not_eq subject="guided_load_view" flag="hidden" ref_value="2"/>
+      </text_body>
+    </lv_obj>
+
+    <modal_button_row name="push_buttons"
+                      secondary_name="btn_cancel_push" secondary_text="Cancel"
+                      secondary_callback="on_guided_load_cancel" primary_name="btn_extrude" primary_text="Extrude"
+                      primary_callback="on_guided_load_extrude" primary_moves_machine="true">
+      <bind_flag_if_not_eq subject="guided_load_view" flag="hidden" ref_value="0"/>
+    </modal_button_row>
+
+    <modal_button_row name="working_buttons"
+                      hide_secondary="true" primary_name="btn_cancel_working" primary_text="Cancel"
+                      primary_variant="secondary" primary_callback="on_guided_load_cancel">
+      <bind_flag_if_not_eq subject="guided_load_view" flag="hidden" ref_value="1"/>
+    </modal_button_row>
+
+    <modal_button_row name="confirm_buttons"
+                      secondary_name="btn_extrude_more" secondary_text="Extrude more"
+                      secondary_callback="on_guided_load_extrude" primary_name="btn_done" primary_text="Done"
+                      primary_callback="on_guided_load_done" primary_moves_machine="true">
+      <bind_flag_if_not_eq subject="guided_load_view" flag="hidden" ref_value="2"/>
+    </modal_button_row>
+  </view>
+</component>

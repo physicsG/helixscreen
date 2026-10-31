@@ -6,6 +6,7 @@
 #include "ui_modal.h"
 
 #include "preflight_validator.h"
+#include "subject_managed_panel.h"
 
 #include <functional>
 #include <vector>
@@ -24,9 +25,9 @@ namespace helix::ui {
  *   - the actually-seated slot color swatch (or an "EMPTY" label)
  *   - a severity glyph (✓ / ⚠ / ✗)
  * plus an explanation line and three actions:
- *   - Remap…       (tertiary; only when the active backend supports remap)
- *   - Cancel       (secondary)
- *   - Print Anyway (primary)
+ *   - Map Filament… (tertiary; only when the active backend supports remap)
+ *   - Cancel        (secondary)
+ *   - Print Anyway  (primary)
  *
  * Seated color/material is looked up from
  * AmsState::collect_available_slots() by ToolCheck::mapped_slot — the
@@ -39,6 +40,9 @@ namespace helix::ui {
 class PreflightCheckModal : public Modal {
   public:
     using Action = std::function<void()>;
+
+    PreflightCheckModal();
+    ~PreflightCheckModal() override;
 
     const char* get_name() const override {
         return "Preflight Check";
@@ -56,9 +60,14 @@ class PreflightCheckModal : public Modal {
     void set_on_force(Action a) {
         on_force_ = std::move(a);
     }
-    /// "Remap…" callback (only invoked when the Remap button is shown).
+    /// "Map Filament…" callback (only invoked when the Map Filament button is shown).
     void set_on_remap(Action a) {
         on_remap_ = std::move(a);
+    }
+    /// Runs once the modal closes, however it closed, after any Print Anyway
+    /// or Remap callback.
+    void set_on_closed(Action a) {
+        on_closed_ = std::move(a);
     }
 
   protected:
@@ -71,19 +80,37 @@ class PreflightCheckModal : public Modal {
     void on_cancel() override { // Cancel
         hide();
     }
-    void on_tertiary() override { // Remap…
+    void on_tertiary() override { // Map Filament…
         if (on_remap_)
             on_remap_();
         hide();
     }
+    void on_hide() override {
+        if (auto closed = std::move(on_closed_)) {
+            on_closed_ = nullptr;
+            closed();
+        }
+    }
 
   private:
+    /// Write the file's material to the slot material_fix() names, then close:
+    /// the next Print checks again against what the slot now holds.
+    void apply_material_fix();
+    static void on_set_material_cb(lv_event_t* e);
+
     void build_rows(lv_obj_t* list);
     lv_obj_t* create_tool_row(lv_obj_t* list, const helix::ToolCheck& check,
                               const std::vector<helix::AvailableSlot>& slots);
 
     helix::PreflightResult result_;
-    Action on_force_, on_remap_;
+    Action on_force_, on_remap_, on_closed_;
+
+    SubjectManager subjects_;
+    lv_subject_t fix_shown_subject_{};
+    lv_subject_t fix_text_subject_{};
+    char fix_text_buf_[96] = {0};
+    /// The shown modal the material-fix button acts on; one at a time.
+    static PreflightCheckModal* active_instance_;
 };
 
 } // namespace helix::ui

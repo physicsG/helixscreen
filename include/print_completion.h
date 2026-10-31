@@ -10,9 +10,9 @@
 #include <string>
 
 // Forward declarations
-class IMoonrakerAPI;
 
 namespace helix {
+class IMoonrakerAPI;
 
 /**
  * @brief Initialize print completion notification system
@@ -125,9 +125,10 @@ CompletionStats build_completion_stats(int duration_secs, int estimated_secs, in
                                        int filament_mm);
 
 /**
- * @brief Clean up stale .helix_temp files on startup
+ * @brief Clean up stale staged copies on startup
  *
- * Deletes all files in the .helix_temp directory on Moonraker.
+ * Deletes all files in every staging directory on Moonraker
+ * (gcode::staging_dirs(): .helix_temp and helix_staging).
  * These are temp files created when modifying G-code for prints.
  * Should be called after Moonraker connection is established.
  *

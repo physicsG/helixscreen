@@ -4,8 +4,22 @@
   "progress_mode": "weighted",
   "adaptive_meshing": true,
   "position_signals": true,
-  "cfs_signals": true,
   "signal_formats": [],
+  "tag_patterns": [
+    {
+      "pattern": "^(?=.*(?:num:|velocity:))(?:(?!percent).)*percent[: ]*\\s*\\+?([0-9]+(?:\\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|\\.[0-9]+(?:[eE][+-]?[0-9]+)?)",
+      "case_sensitive": true,
+      "phase": "PURGING",
+      "message": "Purging",
+      "progress_group": 1
+    },
+    {
+      "pattern": "\\[box\\] cut sensor detected|\\[box\\] cut to return|BOX_LOAD_MATERIAL",
+      "case_sensitive": true,
+      "phase": "INITIALIZING",
+      "message": "Loading Filament..."
+    }
+  ],
   "response_patterns": [
     {
       "pattern": "Rehoming Z|_handle_home_rails_begin|x_park = ",

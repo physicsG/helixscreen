@@ -80,9 +80,7 @@
               height="content" flex_grow="2" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs"
               scrollable="false">
         <text_small text="Color"/>
-        <lv_obj name="color_grid"
-                width="100%" height="content" flex_flow="row_wrap" style_pad_all="#space_xs" style_pad_gap="#space_xs"
-                scrollable="false"/>
+        <tile_color_grid name="color_grid" swatch_callback="fav_macro_config_color_cb"/>
       </lv_obj>
     </lv_obj>
 

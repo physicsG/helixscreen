@@ -50,12 +50,13 @@ inline constexpr const char* kStateRoots[] = {
     // symlinks /data whole into Moonraker's gcodes root, and Moonraker's
     // listings hide dot-entries. The plain name stays for devices the rename
     // has not reached yet.
-    "/data/.helixscreen",               // AD5M, on the durable ext4 mount
-    "/data/helixscreen",                // AD5M state root before the dot rename
-    "/usr/data/helixscreen-state",      // K1, K1C
-    "/user-resource/helixscreen-state", // CC1
-    "/userdata/helixscreen-state",      // Snapmaker U1
-    "/srv/helixscreen-state",           // AD5X
+    "/data/.helixscreen",                     // AD5M, on the durable ext4 mount
+    "/data/helixscreen",                      // AD5M state root before the dot rename
+    "/usr/data/helixscreen-state",            // K1, K1C
+    "/user-resource/helixscreen-state",       // CC1
+    "/userdata/helixscreen-state",            // Snapmaker U1
+    "/srv/helixscreen-state",                 // AD5X
+    "/opt/config/mod_data/helixscreen-state", // AD5X Forge-X, in the mod's durable config dir
 };
 // AD5X and AD5M ZMOD put their LOG under the mod's own tree so the mod's
 // archiver collects it. That path is gated on an AD5X layout actually being

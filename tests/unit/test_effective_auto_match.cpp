@@ -16,9 +16,10 @@
  *     a picker the user reaches, and that picker carries the auto-color toggle.
  *     Its setting therefore wins both ways.
  *   - A backend that can honor the choice by NEITHER route (ACE) has no picker
- *     anywhere, so nothing can flip the persisted preference. It must always
- *     auto-match on color+type: honoring the persisted default (FALSE) there
- *     falls back to positional matching and picks the wrong lane.
+ *     anywhere, so nothing can flip the persisted preference, and the persisted
+ *     default (FALSE) is nobody's choice. It always auto-matches on color+type.
+ *     Its Print seed does not depend on this: AmsState::seed_tool_mappings()
+ *     seeds each tool on the slot the firmware routes it to.
  *
  * The predicate used to be `caps.editable` alone, which put the Snapmaker U1 in
  * the second bucket. That stopped being true when every remap-capable backend
@@ -154,9 +155,8 @@ TEST_CASE_METHOD(AutoMatchFixture,
                  "NEITHER route always auto-matches",
                  "[auto_match][print_select][detail_view][ams]") {
     // ACE: no editable mapping card, no pre-print send. Nothing reaches a picker,
-    // so nothing can have flipped the persisted preference — and the persisted
-    // default (FALSE) would fall back to positional matching, which on a
-    // one-nozzle-many-lane system picks the wrong lane.
+    // so nothing can have flipped the persisted preference, and its default
+    // (FALSE) is no user's choice.
     helix::ui::PrintSelectDetailView view;
     install_backend(Shape::NeitherRoute);
 

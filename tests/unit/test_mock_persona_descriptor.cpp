@@ -60,7 +60,7 @@ json initial_status(MoonrakerClientMock& mock) {
 
 TEST_CASE_METHOD(LVGLTestFixture, "Every persona reports its descriptor on every mock path",
                  "[mock][persona][descriptor]") {
-    for (const auto& p : helix::mock::PERSONAS) {
+    for (const auto& p : helix::mock::kPersonas) {
         DYNAMIC_SECTION(p.id) {
             const std::string id(p.id);
             PersonaEnv env(id.c_str());
@@ -99,7 +99,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Every persona reports its descriptor on every
                 const json& config = st["configfile"]["config"];
                 if (d.omit & helix::mock::default_object::CARTOGRAPHER)
                     CHECK_FALSE(config.contains("cartographer"));
-                if (d.omit & helix::mock::default_object::LED_EFFECTS)
+                if (d.omit & helix::mock::default_object::kLedEffects)
                     CHECK_FALSE(config.contains("led_effect rainbow"));
             }
 
@@ -132,21 +132,21 @@ TEST_CASE_METHOD(LVGLTestFixture, "Every persona reports its descriptor on every
             CHECK(hw.hostname() == std::string(d.hostname));
 
             using namespace helix::mock::default_object;
-            if (d.omit & HAPPY_HARE_MMU)
+            if (d.omit & kHappyHareMmu)
                 CHECK_FALSE(lists(objs, "mmu"));
-            if (d.omit & BME280_CHAMBER)
+            if (d.omit & kBme280Chamber)
                 CHECK_FALSE(lists(objs, "bme280 chamber"));
-            if (d.omit & HTU21D_DRYER)
+            if (d.omit & kHtu21dDryer)
                 CHECK_FALSE(lists(objs, "htu21d dryer"));
-            if (d.omit & EBB_CAN_MCU)
+            if (d.omit & kEbbCanMcu)
                 CHECK_FALSE(lists(objs, "mcu EBBCan"));
             if (d.omit & CHAMBER_SENSOR)
                 CHECK_FALSE(lists(objs, "temperature_sensor chamber"));
-            if (d.omit & WIDTH_SENSOR)
+            if (d.omit & kWidthSensor)
                 CHECK_FALSE(lists(objs, "hall_filament_width_sensor"));
-            if (d.omit & RUNOUT_SENSOR)
+            if (d.omit & kRunoutSensor)
                 CHECK_FALSE(lists(objs, "filament_switch_sensor runout_sensor"));
-            if (d.omit & LED_EFFECTS)
+            if (d.omit & kLedEffects)
                 CHECK_FALSE(lists(objs, "led_effect rainbow"));
             if (d.omit & CARTOGRAPHER) {
                 CHECK_FALSE(lists(objs, "cartographer"));
@@ -154,7 +154,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Every persona reports its descriptor on every
             }
             if (d.omit & CHAMBER_SENSOR)
                 CHECK_FALSE(frame.contains("temperature_sensor chamber"));
-            if (d.omit & WIDTH_SENSOR)
+            if (d.omit & kWidthSensor)
                 CHECK_FALSE(frame.contains("hall_filament_width_sensor"));
             // Without a chamber sensor or a heater of its own, no chamber heater reports.
             if ((d.omit & CHAMBER_SENSOR) && !lists(objs, "heater_generic chamber_heater"))
@@ -186,6 +186,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "Omitted defaults drop only the persona's own 
         CHECK(lists(objs, "htu21d dryer"));
         CHECK(lists(objs, "mcu EBBCan"));
         CHECK(lists(objs, "temperature_sensor chamber"));
+        CHECK(lists(objs, "temperature_sensor mcu_temp"));
+        CHECK(lists(objs, "temperature_sensor raspberry_pi"));
+        CHECK(lists(objs, "exclude_object"));
+        CHECK(mock.hardware().has_exclude_object());
         CHECK(lists(objs, "hall_filament_width_sensor"));
         CHECK(lists(objs, "filament_switch_sensor runout_sensor"));
         CHECK(lists(objs, "led_effect rainbow"));
@@ -202,7 +206,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Width sensor status follows the persona on ev
             const auto* p = helix::mock::find_persona(id);
             REQUIRE(p != nullptr);
             const bool has_width =
-                helix::mock::inherits_default(p->type, helix::mock::default_object::WIDTH_SENSOR);
+                helix::mock::inherits_default(p->type, helix::mock::default_object::kWidthSensor);
 
             std::mutex mu;
             std::vector<json> frames;

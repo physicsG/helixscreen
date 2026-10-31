@@ -1,0 +1,74 @@
+diff --git a/base/hsocket.h b/base/hsocket.h
+--- a/base/hsocket.h
++++ b/base/hsocket.h
+@@ -157,6 +157,15 @@
+ 
+ // @return connfd
+ // ResolveAddr -> socket -> nonblocking -> connect
++// PATCH NOTE(helixscreen): one hook sees every outbound TCP socket after
++// socket() and before connect(), so a host can steer a connection onto a
++// particular network (Android: android_setsocknetwork for LAN peers) without
++// rebinding the whole process. Covers Connect*(), TcpClient (WebSocketClient)
++// and AsyncHttpClient. NULL, the default, does nothing.
++typedef void (*hv_outbound_socket_hook_t)(int fd, const struct sockaddr* peer);
++HV_EXPORT void hv_set_outbound_socket_hook(hv_outbound_socket_hook_t hook);
++HV_EXPORT void hv_run_outbound_socket_hook(int fd, const struct sockaddr* peer);
++
+ HV_EXPORT int Connect(const char* host, int port, int nonblock DEFAULT(0));
+ // Connect(host, port, 1)
+ HV_EXPORT int ConnectNonblock(const char* host, int port);
+diff --git a/base/hsocket.c b/base/hsocket.c
+--- a/base/hsocket.c
++++ b/base/hsocket.c
+@@ -248,6 +248,21 @@
+     return socket_errno_negative(sockfd);
+ }
+ 
++// PATCH NOTE(helixscreen): set once by the host, read from any connecting
++// thread, hence the atomic builtins (libhv builds as C99, without <stdatomic.h>).
++static hv_outbound_socket_hook_t s_outbound_socket_hook = NULL;
++
++void hv_set_outbound_socket_hook(hv_outbound_socket_hook_t hook) {
++    __atomic_store_n(&s_outbound_socket_hook, hook, __ATOMIC_RELEASE);
++}
++
++void hv_run_outbound_socket_hook(int fd, const struct sockaddr* peer) {
++    hv_outbound_socket_hook_t hook = __atomic_load_n(&s_outbound_socket_hook, __ATOMIC_ACQUIRE);
++    if (hook) {
++        hook(fd, peer);
++    }
++}
++
+ static int sockaddr_connect(sockaddr_u* peeraddr, int nonblock) {
+     // socket -> nonblocking -> connect
+     int ret = 0;
+@@ -256,6 +271,7 @@
+         perror("socket");
+         goto error;
+     }
++    hv_run_outbound_socket_hook(connfd, &peeraddr->sa);
+ 
+     if (nonblock) {
+         nonblocking(connfd);
+diff --git a/evpp/TcpClient.h b/evpp/TcpClient.h
+--- a/evpp/TcpClient.h
++++ b/evpp/TcpClient.h
+@@ -80,6 +80,7 @@
+             perror("socket");
+             return -2;
+         }
++        hv_run_outbound_socket_hook(connfd, remote_addr);
+ 
+         hio_t* io = hio_get(hl, connfd);
+         assert(io != NULL);
+diff --git a/http/client/AsyncHttpClient.cpp b/http/client/AsyncHttpClient.cpp
+--- a/http/client/AsyncHttpClient.cpp
++++ b/http/client/AsyncHttpClient.cpp
+@@ -60,6 +60,7 @@
+             perror("socket");
+             return -30;
+         }
++        hv_run_outbound_socket_hook(connfd, &peeraddr.sa);
+         hio_t* connio = hio_get(EventLoopThread::hloop(), connfd);
+         assert(connio != NULL);
+         hio_set_peeraddr(connio, &peeraddr.sa, sockaddr_len(&peeraddr));

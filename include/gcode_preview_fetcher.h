@@ -5,8 +5,8 @@
  * @file gcode_preview_fetcher.h
  * @brief Gets a print's G-code onto local disk for the preview viewer.
  *
- * Acquisition only: the render-mode gates, the cache path, the QIDI native .3mf
- * shadow lookup, the metadata size check, the streaming-safety check and the
+ * Acquisition only: the render-mode gates, the cache path, the firmware .3mf
+ * extract lookup, the metadata size check, the streaming-safety check and the
  * download. It touches no widget; the owner turns the two outcomes into
  * display changes.
  *
@@ -36,6 +36,7 @@ class GcodePreviewFetcher {
         Disabled,       ///< Thumbnail Only, or 3D rendering switched off
         NoCacheDir,     ///< nowhere writable to put the copy
         TooLarge,       ///< the file would not fit the device's memory to render
+        TooExpensive,   ///< Auto mode: the preview would cost this board too much CPU now
         MetadataFailed, ///< the size lookup failed and no cached copy could stand in
         NoGcode,        ///< a .3mf whose extracted G-code the printer does not expose
         NoLocalCopies,  ///< the transport cannot write a local copy at all
@@ -123,7 +124,7 @@ class GcodePreviewFetcher {
         return req->generation != generation_;
     }
 
-    void list_qidi_shadow(const RequestPtr& req);
+    void list_firmware_extract(const RequestPtr& req);
     void lookup_metadata(const RequestPtr& req, const std::string& metadata_target,
                          const std::string& root, const std::string& download_target);
     void stream_if_safe(const RequestPtr& req, const std::string& root,

@@ -1,0 +1,10 @@
+{
+    "type": "filament",
+    "name": "Eryone PLA",
+    "inherits": "Eryone Standard PLA",
+    "instantiation": "true",
+    "filament_id": "EFL90",
+    "hot_plate_temp": [
+        "60"
+    ]
+}

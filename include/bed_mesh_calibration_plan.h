@@ -20,7 +20,7 @@ namespace bed_mesh {
 /// The profile Klipper stores a mesh in when BED_MESH_CALIBRATE names none.
 /// Klipper refuses `BED_MESH_PROFILE SAVE=default`, so a mesh only gets there by
 /// being probed there.
-inline constexpr const char* DEFAULT_PROFILE = "default";
+inline constexpr const char* kDefaultProfile = "default";
 
 /// What to send for a calibration the user named before probing, and where the
 /// finished mesh ends up.
@@ -78,12 +78,12 @@ struct CalibrationPlan {
 /// ` PROFILE=<name>` for a named profile, empty for the default one, which is
 /// what BED_MESH_CALIBRATE writes when given no profile.
 [[nodiscard]] inline std::string profile_arg(const std::string& name) {
-    return name == DEFAULT_PROFILE ? std::string() : " PROFILE=" + gcode_param_value(name);
+    return name == kDefaultProfile ? std::string() : " PROFILE=" + gcode_param_value(name);
 }
 
 /// Does Klipper refuse a `BED_MESH_PROFILE SAVE` under @p name?
 [[nodiscard]] inline bool save_is_refused_for(const std::string& name) {
-    return name == DEFAULT_PROFILE;
+    return name == kDefaultProfile;
 }
 
 /// Is @p line Klipper declining a `BED_MESH_PROFILE SAVE`? It says so on the
@@ -192,7 +192,7 @@ inline std::string named_profile(const std::string& command) {
         }
         plan.writes_profile = already;
     } else {
-        plan.writes_profile = DEFAULT_PROFILE;
+        plan.writes_profile = kDefaultProfile;
     }
 
     if (plan.writes_profile != name && !save_is_refused_for(name)) {
@@ -258,11 +258,11 @@ struct CalibrationCheck {
         }
         return {CalibrationOutcome::Copy, plan.writes_profile, plan.copy_to};
     }
-    if (plan.writes_profile != DEFAULT_PROFILE && changed(DEFAULT_PROFILE)) {
+    if (plan.writes_profile != kDefaultProfile && changed(kDefaultProfile)) {
         if (save_is_refused_for(plan.name)) {
-            return {CalibrationOutcome::Stored, {}, DEFAULT_PROFILE};
+            return {CalibrationOutcome::Stored, {}, kDefaultProfile};
         }
-        return {CalibrationOutcome::Copy, DEFAULT_PROFILE, plan.name};
+        return {CalibrationOutcome::Copy, kDefaultProfile, plan.name};
     }
     return {CalibrationOutcome::NotStored, {}, {}};
 }
@@ -279,7 +279,7 @@ profiles_replaced_by(const CalibrationPlan& plan, const std::vector<std::string>
         return std::find(stored.begin(), stored.end(), profile) != stored.end();
     };
     std::vector<std::string> replaced;
-    if (plan.name != DEFAULT_PROFILE && is_stored(plan.name)) {
+    if (plan.name != kDefaultProfile && is_stored(plan.name)) {
         replaced.push_back(plan.name);
     }
     if (plan.writes_profile != plan.name && is_stored(plan.writes_profile)) {

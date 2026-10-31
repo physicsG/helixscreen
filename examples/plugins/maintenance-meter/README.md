@@ -1,5 +1,11 @@
 # maintenance-meter
 
+HelixScreen ships these meters as a built-in home widget, **Maintenance**, in the
+widget catalog's System category; it takes over this plugin's saved hours and
+intervals the first time each printer connects. The built-in widget offers a fixed
+list of intervals, so an interval not on it snaps to the nearest choice. This plugin
+stays as an example of the plugin API.
+
 Hour meters for consumable parts - a HEPA filter, a nozzle, linear rails -
 as one adaptive home tile. Elapsed hours accrue from print time, persist on
 the screen, and survive restarts; a ring gauge shows the meter closest to
@@ -14,10 +20,13 @@ and the step-by-step build of this plugin is the tutorial:
 - `helix.storage.get` / `helix.storage.set`: the whole state under one key,
   every field validated on load with a fallback, because the store is
   user-editable bytes on disk. This is the plugin's one permission.
-- `helix.printer.watch` + `helix.timer.every`: the printer state arrives by
-  watch, the clock by timer; a tick while printing accrues one interval to
-  every enabled meter. Crossing the interval fires a due toast once - a
-  `notified` latch in the store re-arms only on reset.
+- `helix.printer.get` + `helix.printer.watch` + `helix.timer.every`: a watch
+  reports changes only, so `get` seeds the state at load; the clock is a
+  timer. A tick while printing on a live connection accrues one interval to
+  every enabled meter (`print_state` keeps its last value when the printer
+  drops, so `connected` gates the tick too). Crossing the interval fires a
+  due toast once - a `notified` latch in the store re-arms on reset or when
+  a raised interval puts the due point ahead of the hours again.
 - `helix.settings.get` / `helix.settings.on_change`: intervals are declared
   settings; an interval of 0 hides that meter everywhere, through a
   per-meter visibility subject the tile rows and overlay cards both bind.
@@ -42,8 +51,12 @@ Then Settings > Plugins > Maintenance Meters > enable (it asks to keep its
 own data on the screen), and add the tile from the home panel's widget
 catalog, under the Plugins category. To watch it accrue, run with
 `HELIX_MOCK_AUTO_PRINT=1 --sim-speed 6`: a print starts within seconds and
-each minute of it lands in the meters. Seed interesting values by writing
-`plugin-data/maintenance-meter.json` in the config directory - set a
+each real minute of it lands in the meters. The tick is a real-time
+timer, so under `--sim-speed 6` the mock print runs six times faster than
+the meters accrue: a simulated minute of print adds about ten seconds.
+Seed interesting values by writing `plugin-data/maintenance-meter.json` in
+the config directory with the plugin disabled or the app stopped (a running
+plugin keeps its own copy and overwrites the file on its next tick) - set a
 meter's `used` just under its `interval` to see the due toast and the
 warning color.
 

@@ -7,16 +7,20 @@
 #include "refresh_period_hold_test_access.h"
 #include "screensaver_base.h"
 #include "screensaver_pipes.h"
+#include "screensaver_sim_saver.h"
 #include "screensaver_starfield.h"
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "misc/lv_timer_private.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <vector>
+
+#include "../catch_amalgamated.hpp"
 
 // Test-only seam (prestonbrown/helixscreen#1591). The screensavers keep their
 // draw buffers, timers and simulation state private, and what the tests pin (the
@@ -108,6 +112,30 @@ class SaverTestAccess {
     }
 };
 
+/// Reaches the simulation inside any SimSaver, to read it or move its clocks.
+class SimSaverTestAccess {
+  public:
+    template <typename Sim> static Sim& sim(SimSaver<Sim>& saver) {
+        return saver.sim_;
+    }
+    template <typename Sim> static const Sim& sim(const SimSaver<Sim>& saver) {
+        return saver.sim_;
+    }
+};
+
+/// Runs `timer`'s callback once, as lv_timer_handler() does when it comes due.
+inline void fire_timer(lv_timer_t* timer) {
+    REQUIRE(timer != nullptr);
+    REQUIRE(timer->timer_cb != nullptr);
+    timer->timer_cb(timer);
+}
+
+/// Moves LVGL's clock on `ms` and runs one frame of `saver`.
+inline void advance_saver(const SaverBase& saver, uint32_t ms) {
+    lv_tick_inc(ms);
+    fire_timer(SaverTestAccess::timer(saver));
+}
+
 /// Leaves the global refresh hold released with no configured period, on entry and however
 /// the test exits: the configured period is level 0's frame period for every saver started.
 struct ScopedGlobalRefreshHold {
@@ -152,10 +180,13 @@ template <typename Saver> LevelZeroPeriods level_zero_periods(uint32_t configure
 
 } // namespace helix::ui
 
+using helix::ui::advance_saver;
+using helix::ui::fire_timer;
 using helix::ui::level_zero_periods;
 using helix::ui::LevelZeroPeriods;
 using helix::ui::SaverTestAccess;
 using helix::ui::ScopedGlobalRefreshHold;
+using helix::ui::SimSaverTestAccess;
 
 class FlyingToasterScreensaverTestAccess {
   public:
@@ -251,45 +282,35 @@ class StarfieldScreensaverTestAccess {
 
 class PipesScreensaverTestAccess {
   public:
-    struct PipeState {
-        int x;
-        int y;
-        int z;
-        int dir;
-        int segment_count;
-        bool alive;
-
-        bool operator==(const PipeState& o) const {
-            return x == o.x && y == o.y && z == o.z && dir == o.dir &&
-                   segment_count == o.segment_count && alive == o.alive;
-        }
-    };
-
-    static int max_segments() {
-        return PipesScreensaver::MAX_SEGMENTS;
+    static const helix::ui::PipesSim& sim(const PipesScreensaver& ss) {
+        return ss.sim_;
     }
 
-    static int total_segments(const PipesScreensaver& ss) {
-        return ss.total_segments_;
+    static std::array<helix::ui::PipeState, helix::ui::kPipesActive>
+    pipes(const PipesScreensaver& ss) {
+        return ss.sim_.screen().pipes();
     }
 
-    static void set_total_segments(PipesScreensaver& ss, int total) {
-        ss.total_segments_ = total;
-    }
-
-    static std::vector<PipeState> pipes(const PipesScreensaver& ss) {
-        std::vector<PipeState> out;
-        for (const auto& p : ss.pipes_) {
-            out.push_back(
-                {p.pos.x, p.pos.y, p.pos.z, static_cast<int>(p.dir), p.segment_count, p.alive});
-        }
-        return out;
-    }
-
-    /// True when both savers hold the same grid occupancy, pipes and camera.
+    /// True when both savers hold the same grid occupancy (every node), pipes, view and phase.
     static bool same_scene(const PipesScreensaver& a, const PipesScreensaver& b) {
-        return std::memcmp(a.grid_, b.grid_, sizeof(a.grid_)) == 0 &&
-               std::memcmp(a.cam_pos_, b.cam_pos_, sizeof(a.cam_pos_)) == 0 && pipes(a) == pipes(b);
+        const helix::ui::PipesGrid& ga = a.sim_.screen().grid();
+        const helix::ui::PipesGrid& gb = b.sim_.screen().grid();
+        const helix::ui::PipeGridDims da = ga.dims();
+        const helix::ui::PipeGridDims db = gb.dims();
+        if (da.x != db.x || da.y != db.y || da.z != db.z) {
+            return false;
+        }
+        for (int z = 0; z < da.z; z++) {
+            for (int y = 0; y < da.y; y++) {
+                for (int x = 0; x < da.x; x++) {
+                    if (ga.empty({x, y, z}) != gb.empty({x, y, z})) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return pipes(a) == pipes(b) && a.sim_.yrot_deg() == b.sim_.yrot_deg() &&
+               a.sim_.phase() == b.sim_.phase();
     }
 };
 

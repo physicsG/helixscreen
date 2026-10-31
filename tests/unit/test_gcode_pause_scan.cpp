@@ -251,17 +251,17 @@ G1 X30 Y30 E3
     REQUIRE(index.build_from_file(file.path()));
 
     const auto& stats = index.get_stats();
-    REQUIRE(stats.scheduled_pauses.size() == 2);
-    REQUIRE(stats.has_m73);
+    REQUIRE(stats.pause_scan->pauses.size() == 2);
+    REQUIRE(stats.pause_scan->axis == ProgressAxis::SlicerTime);
 
-    const ScheduledPause& first = stats.scheduled_pauses[0];
+    const ScheduledPause& first = stats.pause_scan->pauses[0];
     REQUIRE(first.kind == PauseKind::FilamentChange);
     REQUIRE(first.slicer_fraction == Approx(0.10f));
     REQUIRE(first.byte_fraction ==
             Approx(static_cast<float>(first.file_offset) / static_cast<float>(stats.total_bytes)));
     REQUIRE(first.file_offset > 0);
 
-    const ScheduledPause& second = stats.scheduled_pauses[1];
+    const ScheduledPause& second = stats.pause_scan->pauses[1];
     REQUIRE(second.kind == PauseKind::Macro);
     REQUIRE(second.slicer_fraction == Approx(0.60f));
     REQUIRE(second.layer_index > first.layer_index);
@@ -278,8 +278,8 @@ G1 X20 Y20 E2
     GCodeLayerIndex index;
     REQUIRE(index.build_from_file(file.path()));
 
-    REQUIRE(index.get_stats().scheduled_pauses.empty());
-    REQUIRE_FALSE(index.get_stats().has_m73);
+    REQUIRE(index.get_stats().pause_scan->pauses.empty());
+    REQUIRE(index.get_stats().pause_scan->axis == ProgressAxis::BytePosition);
 }
 
 TEST_CASE("GCodeLayerIndex - a pause before the first layer has layer -1",
@@ -293,6 +293,120 @@ G1 X10 Y10 E1
     GCodeLayerIndex index;
     REQUIRE(index.build_from_file(file.path()));
 
-    REQUIRE(index.get_stats().scheduled_pauses.size() == 1);
-    REQUIRE(index.get_stats().scheduled_pauses[0].layer_index == -1);
+    REQUIRE(index.get_stats().pause_scan->pauses.size() == 1);
+    REQUIRE(index.get_stats().pause_scan->pauses[0].layer_index == -1);
+}
+
+TEST_CASE("PauseScan - reported layer extraction", "[gcode][pause_scan][layer_pause]") {
+    CHECK(reported_current_layer("SET_PRINT_STATS_INFO CURRENT_LAYER=12") == 12);
+    CHECK(reported_current_layer("set_print_stats_info current_layer=3 ; c") == 3);
+    CHECK(reported_current_layer("SET_PRINT_STATS_INFO TOTAL_LAYER=240 CURRENT_LAYER=0") == 0);
+    CHECK(reported_current_layer("  SET_PRINT_STATS_INFO CURRENT_LAYER=7\r") == 7);
+    // No CURRENT_LAYER, a commented one, a malformed value, another command.
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFO TOTAL_LAYER=240").has_value());
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFO ; CURRENT_LAYER=4").has_value());
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFO CURRENT_LAYER=").has_value());
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFO CURRENT_LAYER=4x").has_value());
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFOX CURRENT_LAYER=4").has_value());
+    CHECK_FALSE(reported_current_layer("; SET_PRINT_STATS_INFO CURRENT_LAYER=4").has_value());
+    CHECK_FALSE(reported_current_layer("M117 SET_PRINT_STATS_INFO CURRENT_LAYER=4").has_value());
+}
+
+TEST_CASE("PauseScan - layer marks carry both axis fractions", "[gcode][pause_scan][layer_pause]") {
+    PauseScan scan;
+    scan.begin(1000);
+    scan.feed_line("SET_PRINT_STATS_INFO TOTAL_LAYER=3 CURRENT_LAYER=0", 0, -1);
+    scan.feed_line("SET_PRINT_STATS_INFO CURRENT_LAYER=1", 100, 0);
+    scan.feed_line("M73 P40 R10", 200, 0);
+    scan.feed_line("SET_PRINT_STATS_INFO CURRENT_LAYER=2", 400, 1);
+    // A repeat of the same layer keeps the first mark only.
+    scan.feed_line("SET_PRINT_STATS_INFO CURRENT_LAYER=2", 450, 1);
+    scan.feed_line("SET_PRINT_STATS_INFO CURRENT_LAYER=3", 800, 2);
+
+    const auto result = scan.result();
+    REQUIRE(result.layer_marks.size() == 4);
+    CHECK(result.axis == ProgressAxis::SlicerTime);
+    CHECK(result.pauses.empty());
+
+    const LayerMark* two = find_layer_mark(result, 2);
+    REQUIRE(two != nullptr);
+    CHECK(two->byte_fraction == Approx(0.40f));
+    CHECK(two->slicer_fraction == Approx(0.40f));
+    const LayerMark* one = find_layer_mark(result, 1);
+    REQUIRE(one != nullptr);
+    CHECK(one->byte_fraction == Approx(0.10f));
+    CHECK(one->slicer_fraction == Approx(0.0f));
+    CHECK(display_fraction(*one, ProgressAxis::BytePosition) == Approx(0.10f));
+    CHECK(display_fraction(*one, ProgressAxis::SlicerTime) == Approx(0.0f));
+    CHECK(find_layer_mark(result, 9) == nullptr);
+
+    // A new pass starts empty.
+    scan.begin(10);
+    CHECK(scan.layer_marks().empty());
+}
+
+TEST_CASE("GCodeLayerIndex - layer marks ride the layer scan", "[gcode][pause_scan][layer_pause]") {
+    std::string gcode = R"(SET_PRINT_STATS_INFO TOTAL_LAYER=2
+;LAYER_CHANGE
+SET_PRINT_STATS_INFO CURRENT_LAYER=1
+G1 Z0.2 F1000
+G1 X10 Y10 E1
+;LAYER_CHANGE
+SET_PRINT_STATS_INFO CURRENT_LAYER=2
+G1 Z0.4 F1000
+G1 X20 Y20 E2
+)";
+
+    TempPauseScanGCode file(gcode);
+    GCodeLayerIndex index;
+    REQUIRE(index.build_from_file(file.path()));
+    REQUIRE(index.get_stats().pause_scan != nullptr);
+    const auto& scan = *index.get_stats().pause_scan;
+    REQUIRE(scan.layer_marks.size() == 2);
+    CHECK(scan.layer_marks[0].layer == 1);
+    CHECK(scan.layer_marks[1].layer == 2);
+    CHECK(scan.layer_marks[1].byte_fraction > scan.layer_marks[0].byte_fraction);
+}
+
+TEST_CASE("PauseScan - a carriage return ends the layer scan",
+          "[gcode][pause_scan][layer_pause][1703]") {
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFO TOTAL_LAYER=50\r").has_value());
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFO TOTAL_LAYER=50\r\n").has_value());
+    CHECK_FALSE(reported_current_layer("SET_PRINT_STATS_INFO\r").has_value());
+    CHECK(reported_current_layer("SET_PRINT_STATS_INFO CURRENT_LAYER=3\r") == 3);
+    CHECK(reported_current_layer("SET_PRINT_STATS_INFO CURRENT_LAYER=3\r\n") == 3);
+    CHECK(reported_current_layer("SET_PRINT_STATS_INFO TOTAL_LAYER=50\r CURRENT_LAYER=4") == 4);
+
+    PauseScan scan;
+    scan.begin(200);
+    scan.feed_line("SET_PRINT_STATS_INFO TOTAL_LAYER=2\r", 0, -1);
+    scan.feed_line("SET_PRINT_STATS_INFO CURRENT_LAYER=1\r", 40, 0);
+    scan.feed_line("M600\r", 80, 0);
+    scan.feed_line("SET_PRINT_STATS_INFO CURRENT_LAYER=2\r", 100, 1);
+    REQUIRE(scan.layer_marks().size() == 2);
+    CHECK(scan.layer_marks()[0].layer == 1);
+    CHECK(scan.layer_marks()[1].layer == 2);
+    CHECK(scan.pauses().size() == 1);
+}
+
+TEST_CASE("GCodeLayerIndex - a CRLF file still records layer marks",
+          "[gcode][pause_scan][layer_pause][1703]") {
+    std::string gcode = "SET_PRINT_STATS_INFO TOTAL_LAYER=2\r\n"
+                        ";LAYER_CHANGE\r\n"
+                        "SET_PRINT_STATS_INFO CURRENT_LAYER=1\r\n"
+                        "G1 Z0.2 F1000\r\n"
+                        "G1 X10 Y10 E1\r\n"
+                        ";LAYER_CHANGE\r\n"
+                        "SET_PRINT_STATS_INFO CURRENT_LAYER=2\r\n"
+                        "G1 Z0.4 F1000\r\n"
+                        "G1 X20 Y20 E2\r\n";
+
+    TempPauseScanGCode file(gcode);
+    GCodeLayerIndex index;
+    REQUIRE(index.build_from_file(file.path()));
+    REQUIRE(index.get_stats().pause_scan != nullptr);
+    const auto& scan = *index.get_stats().pause_scan;
+    REQUIRE(scan.layer_marks.size() == 2);
+    CHECK(scan.layer_marks[0].layer == 1);
+    CHECK(scan.layer_marks[1].layer == 2);
 }

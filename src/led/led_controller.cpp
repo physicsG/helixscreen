@@ -8,6 +8,7 @@
 #include "color_utils.h"
 #include "config.h"
 #include "device_display_name.h"
+#include "hardware_object_table.h"
 #include "helix/xml/scoped_subject_registry.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
@@ -51,7 +52,7 @@ uint32_t parse_json_color(const nlohmann::json& j, uint32_t default_val) {
 helix::led::LedStripInfo macro_device_info(const helix::led::LedMacroInfo& macro) {
     helix::led::LedStripInfo info;
     info.name = macro.display_name;
-    info.id = helix::led::MACRO_STRIP_PREFIX + macro.display_name;
+    info.id = helix::led::kMacroStripPrefix + macro.display_name;
     info.backend = helix::led::LedBackendType::MACRO;
     info.supports_color = false;
     info.supports_white = false;
@@ -234,9 +235,10 @@ void LedController::discover_from_hardware(const helix::PrinterDiscovery& hardwa
     // Populate native backend from discovered LEDs
     for (const auto& led_id : hardware.leds()) {
         // Check if this is an output_pin (not a native LED strip)
-        if (led_id.rfind("output_pin ", 0) == 0) {
+        const auto led_class = helix::hw::classify_object(led_id);
+        if (led_class.kind == helix::hw::ObjectKind::OutputPinLed) {
             LedStripInfo pin;
-            const std::string display = helix::prettify_name(led_id.substr(11));
+            const std::string display = helix::prettify_name(led_class.instance);
             pin.name = display;
             pin.id = led_id;
             pin.backend = LedBackendType::OUTPUT_PIN;
@@ -259,16 +261,18 @@ void LedController::discover_from_hardware(const helix::PrinterDiscovery& hardwa
 
         // The display name is the object name without its type prefix
         std::string raw_name;
-        if (led_id.rfind("neopixel ", 0) == 0) {
-            raw_name = led_id.substr(9);
+        const bool named =
+            led_class.kind == helix::hw::ObjectKind::Led && !led_class.instance.empty();
+        if (named && led_class.chip == helix::hw::kLedChipNeopixel) {
+            raw_name = led_class.instance;
             strip.supports_color = true; // Addressable: RGB(W); no rgb pins in configfile
             strip.supports_white = true; // Until its color_order is read
-        } else if (led_id.rfind("dotstar ", 0) == 0) {
-            raw_name = led_id.substr(8);
+        } else if (named && led_class.chip == helix::hw::kLedChipDotstar) {
+            raw_name = led_class.instance;
             strip.supports_color = true; // Addressable RGB; no rgb pins in configfile
             strip.supports_white = false;
-        } else if (led_id.rfind("led ", 0) == 0) {
-            raw_name = led_id.substr(4);
+        } else if (named) {
+            raw_name = led_class.instance;
             // Generic [led]: white-only until the configfile parse proves RGB pins
             // exist (update_pin_config sets both flags from the pins present).
             strip.supports_white = true;
@@ -346,7 +350,7 @@ void LedController::migrate_legacy_selection() {
     if (legacy_selection_.empty()) {
         return;
     }
-    const nlohmann::json* existing = cfg->try_get_json(cfg->df() + AUTO_STATE_STRIPS_PATH);
+    const nlohmann::json* existing = cfg->try_get_json(cfg->df() + kAutoStateStripsPath);
     if (existing != nullptr && existing->is_array()) {
         return;
     }
@@ -381,7 +385,7 @@ void LedController::discover_wled_strips() {
                 [self = data->self, gen = data->gen]() { self->settle_wled_discovery(gen); });
             delete data;
         },
-        WLED_DISCOVERY_TIMEOUT_MS,
+        kWledDiscoveryTimeoutMs,
         new Timeout{lifetime_.token(), this, gen}); // TIMER_DTOR_OK: LifetimeToken-guarded one-shot
     lv_timer_set_repeat_count(timer, 1);
 
@@ -471,12 +475,9 @@ void LedController::apply_configfile(const nlohmann::json& configfile_config) {
     if (configfile_config.is_object()) {
         for (auto it = configfile_config.begin(); it != configfile_config.end(); ++it) {
             const std::string& key = it.key();
-            for (const char* prefix :
-                 {"led ", "led_effect ", "neopixel", "dotstar", "output_pin "}) {
-                if (key.rfind(prefix, 0) == 0) {
-                    configfile_config_[key] = it.value();
-                    break;
-                }
+            const auto kind = helix::hw::classify_section(key, it.value()).kind;
+            if (helix::hw::is_led(kind) || kind == helix::hw::ObjectKind::LedEffect) {
+                configfile_config_[key] = it.value();
             }
         }
     }
@@ -610,7 +611,7 @@ bool require_api(const IMoonrakerAPI* api, const char* call, const std::string& 
 }
 
 /// The MoonrakerError adapter every backend hands the API.
-std::function<void(const MoonrakerError&)>
+helix::SharedCallback<void(const MoonrakerError&)>
 forward_error(const NativeBackend::ErrorCallback& on_error) {
     return [on_error](const MoonrakerError& err) {
         if (on_error) {
@@ -659,8 +660,12 @@ void NativeBackend::update_pin_config(const nlohmann::json& config_section) {
         // Addressable strips name no channel pins: a neopixel has W where its
         // color_order says so (Klipper's default is GRB, and a chain may list one
         // order per LED), and a dotstar never has W.
-        const bool neopixel = strip.id.rfind("neopixel ", 0) == 0;
-        if (neopixel || strip.id.rfind("dotstar ", 0) == 0) {
+        const auto strip_class = helix::hw::classify_object(strip.id);
+        const bool addressable = strip_class.kind == helix::hw::ObjectKind::Led &&
+                                 strip_class.chip != helix::hw::kLedChipGeneric &&
+                                 !strip_class.instance.empty();
+        const bool neopixel = addressable && strip_class.chip == helix::hw::kLedChipNeopixel;
+        if (addressable) {
             strip.supports_color = true;
             strip.supports_white = neopixel && color_order_has_white(led_cfg);
             strip.pin_config_known = true;
@@ -1104,7 +1109,7 @@ bool WledBackend::has_strip_state(const std::string& strip_id) const {
     return strip_states_.count(strip_id) > 0;
 }
 
-void WledBackend::poll_status(std::function<void()> on_complete) {
+void WledBackend::poll_status(helix::SharedCallback<void()> on_complete) {
     if (!api_) {
         spdlog::debug("[WledBackend] poll_status: no API available");
         if (on_complete)
@@ -1485,7 +1490,7 @@ void LedController::load_config() {
     // match them: an unprefixed macro name gains "macro:", a deleted macro drops.
     for (auto& s : legacy_selection_) {
         if (!is_macro_strip_id(s) && find_macro(configured_macros_, s) != nullptr) {
-            s = MACRO_STRIP_PREFIX + s;
+            s = kMacroStripPrefix + s;
         }
     }
     legacy_selection_.erase(std::remove_if(legacy_selection_.begin(), legacy_selection_.end(),
@@ -1835,7 +1840,7 @@ void LedController::update_from_status(const nlohmann::json& status) {
     }
 }
 
-void LedController::refresh_wled_state(std::function<void()> on_done) {
+void LedController::refresh_wled_state(helix::SharedCallback<void()> on_done) {
     auto tok = lifetime_.token();
     wled_.poll_status([this, tok, on_done]() {
         tok.defer("LedController::wled_state", [this, on_done]() {
@@ -1950,7 +1955,7 @@ std::string LedController::first_available_strip() const {
     // "macro:" ID that backend_for_strip resolves to nothing)
     for (const auto& macro : configured_macros_) {
         if (macro.type != MacroLedType::PRESET && !macro.display_name.empty()) {
-            return MACRO_STRIP_PREFIX + macro.display_name;
+            return kMacroStripPrefix + macro.display_name;
         }
     }
 
@@ -2185,16 +2190,16 @@ void LedController::seed_auto_paired_macros() {
         used_names.insert(m.display_name);
     }
 
-    static constexpr const char* ON_SUFFIX = "_ON";
-    static constexpr size_t ON_SUFFIX_LEN = 3;
+    static constexpr const char* kOnSuffix = "_ON";
+    static constexpr size_t kOnSuffixLen = 3;
 
     bool added = false;
     for (const auto& on_macro : discovered_led_macros_) {
-        if (on_macro.size() <= ON_SUFFIX_LEN ||
-            on_macro.compare(on_macro.size() - ON_SUFFIX_LEN, ON_SUFFIX_LEN, ON_SUFFIX) != 0) {
+        if (on_macro.size() <= kOnSuffixLen ||
+            on_macro.compare(on_macro.size() - kOnSuffixLen, kOnSuffixLen, kOnSuffix) != 0) {
             continue;
         }
-        const std::string base = on_macro.substr(0, on_macro.size() - ON_SUFFIX_LEN);
+        const std::string base = on_macro.substr(0, on_macro.size() - kOnSuffixLen);
         const std::string off_macro = base + "_OFF";
         if (available.count(off_macro) == 0 || seeded.count(base) != 0 ||
             claimed.count(on_macro) != 0 || claimed.count(off_macro) != 0) {

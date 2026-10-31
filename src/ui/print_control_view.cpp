@@ -17,14 +17,22 @@ ControlButtonView compute_control_button_view(const ControlButtonInputs& in) {
     const bool preparing = (in.lifecycle == PrintState::Preparing);
 
     // Stop routes host-side exactly when we hold a job the printer has not
-    // taken. CANCEL_PRINT to an idle printer is worse than useless: AbortManager
-    // reads the terminal state as proof the cancel succeeded while the queued
-    // start_print still fires.
-    v.stop_retires_preparing = in.has_preparing_job && !printer_has_the_job;
+    // been sent. CANCEL_PRINT to a printer with nothing coming is worse than
+    // useless: AbortManager reads the terminal state as proof the cancel
+    // succeeded. Once the start is sent, withdrawing locally stops nothing, so
+    // the cancel goes to the printer even though it has not reported the job.
+    const bool unclaimed = in.has_preparing_job && !printer_has_the_job;
+    if (unclaimed) {
+        v.stop_route = in.start_sent ? StopRoute::CancelSentStart : StopRoute::RetirePreparing;
+    }
 
     // Cancel keeps one promise - the print does not happen - in both
-    // architectures. Retiring needs no printer macro, so it is not gated on one.
-    v.stop_enabled = v.stop_retires_preparing || (printer_has_the_job && in.cancel_available);
+    // architectures. Neither preparing route is gated on the cancel macro:
+    // retiring needs none, and refusing a sent start's cancel would leave that
+    // start unstoppable from here. A cancel already in flight leaves nothing for
+    // a second tap to do.
+    v.stop_enabled =
+        !in.cancel_requested && (unclaimed || (printer_has_the_job && in.cancel_available));
 
     // Pause is disabled for the whole preparing window, including the half where
     // Klipper is already reporting `printing` because pre-print work lives inside
@@ -40,21 +48,21 @@ ControlButtonView compute_control_button_view(const ControlButtonInputs& in) {
 
     switch (in.pending) {
     case PendingAction::Pausing:
-        v.primary_icon = CONTROL_ICON_HOURGLASS;
-        v.primary_label = CONTROL_LABEL_PAUSING;
+        v.primary_icon = kControlIconHourglass;
+        v.primary_label = kControlLabelPausing;
         break;
     case PendingAction::Resuming:
-        v.primary_icon = CONTROL_ICON_HOURGLASS;
-        v.primary_label = CONTROL_LABEL_RESUMING;
+        v.primary_icon = kControlIconHourglass;
+        v.primary_label = kControlLabelResuming;
         break;
     case PendingAction::None:
         // RAW_PRINT_STATE_OK: which macro the button would send.
         if (in.job_state == helix::PrintJobState::PAUSED) {
-            v.primary_icon = CONTROL_ICON_PLAY;
-            v.primary_label = CONTROL_LABEL_RESUME;
+            v.primary_icon = kControlIconPlay;
+            v.primary_label = kControlLabelResume;
         } else {
-            v.primary_icon = CONTROL_ICON_PAUSE;
-            v.primary_label = CONTROL_LABEL_PAUSE;
+            v.primary_icon = kControlIconPause;
+            v.primary_label = kControlLabelPause;
         }
         break;
     }

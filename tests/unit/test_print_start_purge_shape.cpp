@@ -49,7 +49,7 @@ TEST_CASE("Purge shape: stationary sustained flow is a purge, the shapes around 
             }));
         }
         SECTION("flow shorter than the sustain window") {
-            CHECK_FALSE(run(t, static_cast<int>(helix::PURGE_FLOW_SUSTAIN_MS) - 250,
+            CHECK_FALSE(run(t, static_cast<int>(helix::kPurgeFlowSustainMs) - 250,
                             [&](int, double& x, double& y, double& z, bool& f) {
                                 x = s.x, y = s.y, z = s.z, f = true;
                             }));

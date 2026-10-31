@@ -26,13 +26,13 @@
 namespace helix {
 
 /// Label used for the reference screw inside the QR payload (untranslated).
-inline constexpr const char* SCREWS_TILT_SHARE_BASE_LABEL = "base";
+inline constexpr const char* kScrewsTiltShareBaseLabel = "base";
 
 /// Placeholder for a non-reference screw that reported no adjustment string.
-inline constexpr const char* SCREWS_TILT_SHARE_NO_ADJUSTMENT = "--";
+inline constexpr const char* kScrewsTiltShareNoAdjustment = "--";
 
 /// First line of the QR payload — identifies what the scanned text is.
-inline constexpr const char* SCREWS_TILT_SHARE_HEADER = "HelixScreen bed screw results";
+inline constexpr const char* kScrewsTiltShareHeader = "HelixScreen bed screw results";
 
 /**
  * @brief Format one screw's probed Z height for display/serialization
@@ -52,7 +52,7 @@ inline constexpr const char* SCREWS_TILT_SHARE_HEADER = "HelixScreen bed screw r
  */
 [[nodiscard]] std::string
 format_screw_share_adjustment(const ScrewTiltResult& screw,
-                              const char* base_label = SCREWS_TILT_SHARE_BASE_LABEL);
+                              const char* base_label = kScrewsTiltShareBaseLabel);
 
 /**
  * @brief Build the full plain-text payload encoded into the QR code

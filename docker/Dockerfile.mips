@@ -85,6 +85,14 @@ RUN useradd -m builder && \
 USER builder
 WORKDIR /tmp/ct-ng-build
 COPY --chown=builder:builder mips-ct-ng.config .config
+# crosstool-NG's own musl download from musl.libc.org fails on GitHub's runners
+# often enough to fail a release, so the tarball is fetched here (retrying, then
+# from a mirror) into ct-ng's local tarball directory, ${HOME}/src, which ct-ng
+# checks before it downloads anything.
+COPY fetch.sh /usr/local/bin/fetch
+RUN mkdir -p "$HOME/src" && \
+    { fetch https://musl.libc.org/releases/musl-1.2.4.tar.gz "$HOME/src/musl-1.2.4.tar.gz" || \
+      fetch https://sources.buildroot.net/musl/musl-1.2.4.tar.gz "$HOME/src/musl-1.2.4.tar.gz"; }
 RUN ct-ng olddefconfig && \
     ct-ng build
 

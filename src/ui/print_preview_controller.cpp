@@ -7,6 +7,7 @@
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
+#include "file_analysis.h"
 #include "gcode_preview_setup.h"
 #include "print_status_preview_decision.h"
 #include "system/crash_handler.h"
@@ -37,7 +38,7 @@ PrintPreviewController::PrintPreviewController(std::string log_tag, PrinterState
     : log_tag_(std::move(log_tag)), printer_state_(printer_state), lifecycle_(lifecycle),
       host_(std::move(host)), fetcher_(log_tag_) {
     fetcher_.set_rendered_probe(
-        [this]() { return gcode_viewer_ && ui_gcode_viewer_has_content(gcode_viewer_); });
+        [this]() { return gcode_viewer_ && helix::ui::gcode_viewer_has_content(gcode_viewer_); });
 }
 
 PrintPreviewController::~PrintPreviewController() {
@@ -51,7 +52,7 @@ void PrintPreviewController::attach_widgets(lv_obj_t* thumbnail, lv_obj_t* viewe
 
 void PrintPreviewController::detach_widgets() {
     if (gcode_viewer_ && lv_obj_is_valid(gcode_viewer_)) {
-        ui_gcode_viewer_set_load_callback(gcode_viewer_, nullptr, nullptr);
+        helix::ui::gcode_viewer_set_load_callback(gcode_viewer_, nullptr, nullptr);
     }
     gcode_viewer_ = nullptr;
     print_thumbnail_ = nullptr;
@@ -178,10 +179,11 @@ bool PrintPreviewController::is_load_for_effective_print(const std::string& prin
     return print_filename == printer_state_.print_state().get_effective_print_filename();
 }
 
-void PrintPreviewController::load_file(const char* file_path, const std::string& print_filename) {
+void PrintPreviewController::load_file(const char* file_path, const std::string& print_filename,
+                                       std::string layer_index_sidecar) {
     // A fetch that started for the print showing when it was requested can
     // reach this point after the print has moved on - the metadata lookup and
-    // the download both cross the network. Calling ui_gcode_viewer_load_file()
+    // the download both cross the network. Calling helix::ui::gcode_viewer_load_file()
     // here would replace whatever the viewer currently shows with this stale
     // print's geometry, so route to ensure_current() instead: it
     // reconciles against whichever print is effective NOW.
@@ -202,12 +204,13 @@ void PrintPreviewController::load_file(const char* file_path, const std::string&
     spdlog::debug("[{}] Loading G-code file: {}", log_tag_, file_path);
 
     // Register callback to be notified when loading completes
-    ui_gcode_viewer_set_load_callback(gcode_viewer_, &PrintPreviewController::on_viewer_loaded,
-                                      this);
+    helix::ui::gcode_viewer_set_load_callback(gcode_viewer_,
+                                              &PrintPreviewController::on_viewer_loaded, this);
 
     // Start loading the file
     gcode_load_filename_ = print_filename;
-    ui_gcode_viewer_load_file(gcode_viewer_, file_path);
+    helix::ui::gcode_viewer_set_layer_index_sidecar(gcode_viewer_, std::move(layer_index_sidecar));
+    helix::ui::gcode_viewer_load_file(gcode_viewer_, file_path);
 }
 
 void PrintPreviewController::on_viewer_loaded(lv_obj_t* viewer, void* user_data, bool success) {
@@ -229,13 +232,18 @@ void PrintPreviewController::on_viewer_loaded(lv_obj_t* viewer, void* user_data,
     }
 
     if (!success) {
-        spdlog::error("[{}] G-code load failed", self->log_tag_);
+        if (helix::ui::gcode_viewer_load_skipped_for_cost(viewer)) {
+            spdlog::info("[{}] G-code preview skipped: too costly on this board now",
+                         self->log_tag_);
+        } else {
+            spdlog::error("[{}] G-code load failed", self->log_tag_);
+        }
         self->lifecycle_.set_gcode_loaded(false);
         return;
     }
 
     // Get layer count from loaded geometry
-    int max_layer = ui_gcode_viewer_get_max_layer(viewer);
+    int max_layer = helix::ui::gcode_viewer_get_max_layer(viewer);
     if (max_layer >= 0)
         spdlog::debug("[{}] G-code loaded: {} layers", self->log_tag_, max_layer);
     else
@@ -255,11 +263,9 @@ void PrintPreviewController::on_viewer_loaded(lv_obj_t* viewer, void* user_data,
     // lands after the print switched publishes a list that does not
     // match the new print, and its markers stay hidden.
     {
-        std::vector<helix::gcode::ScheduledPause> pauses;
-        helix::gcode::ProgressAxis axis = helix::gcode::ProgressAxis::BytePosition;
-        if (helix::ui_gcode_viewer_get_scheduled_pauses(viewer, pauses, axis)) {
-            self->printer_state_.print_state().set_scheduled_pauses(std::move(pauses), axis,
-                                                                    self->gcode_load_filename_);
+        if (auto scan = helix::ui::gcode_viewer_get_pause_scan(viewer)) {
+            self->printer_state_.print_state().set_pause_scan(std::move(scan),
+                                                              self->gcode_load_filename_);
         }
     }
 
@@ -281,11 +287,11 @@ void PrintPreviewController::on_viewer_loaded(lv_obj_t* viewer, void* user_data,
     // Force layout recalculation now that viewer is visible
     lv_obj_update_layout(viewer);
     // Reset camera to fit model to new viewport dimensions
-    ui_gcode_viewer_reset_camera(viewer);
+    helix::ui::gcode_viewer_reset_camera(viewer);
 
     // Set print progress to current layer (not 0!) when joining a print in progress.
     // Read directly from PrinterState subjects to get the latest values.
-    int viewer_max_layer = ui_gcode_viewer_get_max_layer(viewer);
+    int viewer_max_layer = helix::ui::gcode_viewer_get_max_layer(viewer);
     int current_layer =
         lv_subject_get_int(self->printer_state_.print_state().get_print_layer_current_subject());
     int total_layers =
@@ -323,7 +329,7 @@ void PrintPreviewController::on_viewer_loaded(lv_obj_t* viewer, void* user_data,
     auto ctx = std::make_unique<ViewerProgressCtx>(ViewerProgressCtx{viewer, viewer_layer});
     helix::ui::queue_update<ViewerProgressCtx>(std::move(ctx), [](ViewerProgressCtx* c) {
         if (c->viewer && lv_obj_is_valid(c->viewer)) {
-            ui_gcode_viewer_set_print_progress(c->viewer, c->layer);
+            helix::ui::gcode_viewer_set_print_progress(c->viewer, c->layer);
         }
     });
 
@@ -335,7 +341,7 @@ void PrintPreviewController::on_viewer_loaded(lv_obj_t* viewer, void* user_data,
     // Prints are started from PrintSelectPanel via the Print button.
     // This callback is for loading G-code into the viewer for visualization only.
     spdlog::debug("[{}] G-code loaded for viewing: {}", self->log_tag_,
-                  ui_gcode_viewer_get_filename(viewer));
+                  helix::ui::gcode_viewer_get_filename(viewer));
 }
 
 void PrintPreviewController::load_for_viewing(const std::string& filename) {
@@ -365,13 +371,32 @@ void PrintPreviewController::load_for_viewing(const std::string& filename) {
         return;
     }
 
+    // A .3mf started from here prints as G-code of its own; that is what renders.
+    const std::string source = helix::gcode::preview_gcode_for(
+        filename, lv_subject_get_string(printer_state_.print_state().get_print_filename_subject()));
+    if (source != filename) {
+        spdlog::debug("[{}] Previewing '{}', the G-code printing for '{}'", log_tag_, source,
+                      filename);
+    }
     fetcher_.fetch(
-        filename, [this, filename](const std::string& path) { load_file(path.c_str(), filename); },
+        source,
+        [this, filename, source](const std::string& path) {
+            // A current analysis record's layer index spares a streaming load
+            // its own pass over the file.
+            helix::with_layer_index_sidecar(
+                api_,
+                printer_state_.plugin_status_state().plugin_feature(helix::kFileAnalysisFeature,
+                                                                    helix::kFileAnalysisMinVersion),
+                source, helix::ui::gcode_viewer_would_stream(gcode_viewer_, path),
+                lifetime_.token(), [this, filename, path](std::string sidecar) {
+                    load_file(path.c_str(), filename, std::move(sidecar));
+                });
+        },
         [this](helix::ui::GcodePreviewFetcher::Unavailable) { host_.show_viewer(false); });
 }
 
 bool PrintPreviewController::apply_tool_colors() {
-    if (!gcode_viewer_ || !ui_gcode_viewer_has_content(gcode_viewer_)) {
+    if (!gcode_viewer_ || !helix::ui::gcode_viewer_has_content(gcode_viewer_)) {
         return false;
     }
 
@@ -386,7 +411,7 @@ bool PrintPreviewController::apply_tool_colors() {
     // underway the question is "what mapping IS in effect", and the firmware
     // answers it exactly — so inferring it here was guessing at something already
     // known, and the guess is what forced the special cases.
-    if (ui_gcode_viewer_apply_ams_tool_colors(gcode_viewer_)) {
+    if (helix::ui::gcode_viewer_apply_ams_tool_colors(gcode_viewer_)) {
         return true;
     }
 
@@ -485,7 +510,7 @@ void PrintPreviewController::ensure_current() {
     // destroy-on-close / memory-reclaim cycle. This is what makes re-entry
     // self-healing.
     bool thumbnail_has_src = print_thumbnail_ && lv_image_get_src(print_thumbnail_) != nullptr;
-    bool gcode_has_content = gcode_viewer_ && ui_gcode_viewer_has_content(gcode_viewer_);
+    bool gcode_has_content = gcode_viewer_ && helix::ui::gcode_viewer_has_content(gcode_viewer_);
 
     bool want_viewer = lifecycle_.want_viewer();
 
@@ -514,14 +539,14 @@ void PrintPreviewController::ensure_current() {
     // seconds while the printer is still preparing, and the viewer keeps
     // rendering what it holds until then, so without this the user watches the
     // last print's model for the whole deferral (#1337-adjacent report: "the
-    // image from the previous print is displayed first"). ui_gcode_viewer_clear()
+    // image from the previous print is displayed first"). helix::ui::gcode_viewer_clear()
     // fires the clear callback, which flips the view mode back to the thumbnail,
     // so the fallback the user lands on is this print's slicer preview.
     if (action.clear_gcode && gcode_viewer_) {
         spdlog::debug("[{}] Clearing stale G-code geometry (viewer holds another print, "
                       "desired '{}')",
                       log_tag_, desired);
-        ui_gcode_viewer_clear(gcode_viewer_);
+        helix::ui::gcode_viewer_clear(gcode_viewer_);
     }
 
     if (action.load_thumbnail && print_thumbnail_ &&

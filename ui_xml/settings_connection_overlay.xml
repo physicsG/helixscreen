@@ -2,7 +2,7 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Connection Settings Overlay -->
-<!-- How this screen reaches the network and its printers: network, printers, Moonraker host -->
+<!-- How this screen reaches its printers and the network: printers, network, Moonraker host, screen sharing -->
 <component>
   <view name="settings_connection_overlay" extends="overlay_panel" title="Connection" bg_color="#screen_bg">
     <!-- Content Area - no padding, rows handle their own -->
@@ -10,6 +10,12 @@
             width="100%" flex_grow="1" style_pad_top="0" style_pad_left="0" style_pad_right="0"
             style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
       <setting_group name="group_connection">
+        <!-- ================================================================== -->
+        <!-- PRINTERS -->
+        <!-- ================================================================== -->
+        <setting_action_row name="row_printers"
+                            label="Printers" icon="printer_3d" description="Manage configured printers"
+                            callback="on_printers_clicked"/>
         <!-- ================================================================== -->
         <!-- NETWORK SETTINGS (hidden on Android where OS manages WiFi) -->
         <!-- ================================================================== -->
@@ -20,17 +26,27 @@
                               callback="on_network_clicked"/>
         </lv_obj>
         <!-- ================================================================== -->
-        <!-- PRINTERS -->
-        <!-- ================================================================== -->
-        <setting_action_row name="row_printers"
-                            label="Printers" icon="printer_3d" description="Manage configured printers"
-                            callback="on_printers_clicked"/>
-        <!-- ================================================================== -->
         <!-- HOST -->
         <!-- ================================================================== -->
         <setting_action_row name="row_printer_host"
                             label="Host" icon="lan" bind_description="printer_host_value"
                             callback="on_change_host_clicked"/>
+        <!-- ================================================================== -->
+        <!-- API KEY (edited beside the host, in the same dialog) -->
+        <!-- ================================================================== -->
+        <setting_action_row name="row_printer_api_key"
+                            label="API Key" icon="lock" bind_description="printer_api_key_value"
+                            callback="on_change_host_clicked"/>
+        <!-- ================================================================== -->
+        <!-- SCREEN SHARING (hidden where the firmware serves the screen itself) -->
+        <!-- ================================================================== -->
+        <lv_obj name="container_screen_sharing" width="100%" style_pad_all="0" scrollable="false">
+          <bind_flag_if_eq subject="remote_screen_available" flag="hidden" ref_value="0"/>
+          <setting_action_row name="row_screen_sharing"
+                              label="Screen Sharing" icon="webcam"
+                              description="Watch and control this screen from a browser"
+                              callback="on_screen_sharing_clicked"/>
+        </lv_obj>
       </setting_group>
     </lv_obj>
   </view>

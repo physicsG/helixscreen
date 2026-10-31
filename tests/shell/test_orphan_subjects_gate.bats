@@ -162,6 +162,21 @@ EOF
     contains "0 of 1 registered" "$output"
 }
 
+@test "a subject a layout file requires is not an orphan" {
+    cat > "$ROOT/src/demo.cpp" <<'EOF'
+void init_subjects() {
+    lv_xml_register_subject(nullptr, "gate_subject", &gate_);
+    lv_xml_register_subject(nullptr, "dead_subject", &dead_);
+}
+EOF
+    mkdir -p "$ROOT/assets/config"
+    printf '{"cells": [{"id": "w", "requires": ["gate_subject"], "note": "dead_subject"}]}\n' \
+        > "$ROOT/assets/config/default_layout.json"
+    run_gate
+    contains "dead_subject" "$output"
+    contains "1 of 2 registered" "$output"
+}
+
 @test "a SUBJECT_OK opt-out on the call is honoured" {
     # The annotation rides the call or its continuation lines, not the line
     # above it: clang-format wraps these calls, and honouring the preceding

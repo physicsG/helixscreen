@@ -11,15 +11,15 @@
 namespace {
 // Every directory name under ui_xml/ that can hold a layout override. Content
 // subdirectories (components/, translations/) are deliberately absent.
-constexpr const char* VARIANT_DIRS[] = {"micro_portrait", "tiny_portrait", "portrait",
+constexpr const char* kVariantDirs[] = {"micro_portrait", "tiny_portrait", "portrait",
                                         "ultrawide",      "micro",         "tiny"};
 } // namespace
 
 namespace helix {
 
 bool LayoutManager::is_variant_dir(const std::string& dir) {
-    return std::find(std::begin(VARIANT_DIRS), std::end(VARIANT_DIRS), dir) !=
-           std::end(VARIANT_DIRS);
+    return std::find(std::begin(kVariantDirs), std::end(kVariantDirs), dir) !=
+           std::end(kVariantDirs);
 }
 
 LayoutManager& LayoutManager::instance() {
@@ -108,6 +108,10 @@ bool LayoutManager::has_override(const std::string& filename) const {
     return !active_variant_dir(filename).empty();
 }
 
+bool is_ultrawide_aspect(int width, int height) {
+    return height > 0 && width * 2 > height * 5;
+}
+
 LayoutType detect_layout_type(int width, int height) {
     float ratio = static_cast<float>(width) / static_cast<float>(height);
     int max_dim = std::max(width, height);
@@ -120,7 +124,7 @@ LayoutType detect_layout_type(int width, int height) {
         }
         return (width >= height) ? LayoutType::TINY : LayoutType::TINY_PORTRAIT;
     }
-    if (ratio > 2.5f) {
+    if (is_ultrawide_aspect(width, height)) {
         return LayoutType::ULTRAWIDE;
     }
     if (ratio < 0.8f) {
@@ -132,6 +136,15 @@ LayoutType detect_layout_type(int width, int height) {
 bool is_portrait_layout(LayoutType type) {
     return type == LayoutType::PORTRAIT || type == LayoutType::TINY_PORTRAIT ||
            type == LayoutType::MICRO_PORTRAIT;
+}
+
+LayoutType app_layout_type(int width, int height) {
+    const LayoutManager& lm = LayoutManager::instance();
+    return lm.is_initialized() ? lm.type() : detect_layout_type(width, height);
+}
+
+bool app_layout_is_portrait(int width, int height) {
+    return is_portrait_layout(app_layout_type(width, height));
 }
 
 LayoutType LayoutManager::detect(int width, int height) const {

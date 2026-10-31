@@ -65,12 +65,12 @@ static void signal_handler(int sig) {
 }
 
 // Default screen dimensions (can be overridden via command line)
-static constexpr int DEFAULT_WIDTH = 800;
-static constexpr int DEFAULT_HEIGHT = 480;
+static constexpr int kDefaultWidth = 800;
+static constexpr int kDefaultHeight = 480;
 
 // Splash timing
-static constexpr int FADE_DURATION_MS = 1000; // Fade-in duration
-static constexpr int FRAME_DELAY_US = 16000;  // ~60 FPS
+static constexpr int kFadeDurationMs = 1000; // Fade-in duration
+static constexpr int kFrameDelayUs = 16000;  // ~60 FPS
 
 // Defense-in-depth self-timeout. helix-screen normally signals SIGUSR1 once
 // discovery completes (or its 8s timeout fires); the watchdog also reaps us
@@ -82,7 +82,7 @@ static constexpr int FRAME_DELAY_US = 16000;  // ~60 FPS
 // launches and can exceed this cap, so the gate writes a heartbeat/status file
 // that extends our lifetime while it is actively progressing (see
 // include/splash_status.h). Absent that file we keep the legacy fixed cap.
-static constexpr int MAX_LIFETIME_SEC = 30;
+static constexpr int kMaxLifetimeSec = 30;
 
 // Path of the boot-status file the launcher/init gate writes while it waits.
 // Each rewrite is a heartbeat; the first line is the message we display.
@@ -116,10 +116,9 @@ static int read_config_brightness(int default_value = 100) {
 }
 
 // Background colors for each mode
-static constexpr uint32_t BG_COLOR_DARK = 0x121212;    // App theme dark background
-static constexpr uint32_t BG_COLOR_3D_DARK = 0x2D2D2D; // 3D splash dark (sampled from image edges)
-static constexpr uint32_t BG_COLOR_3D_LIGHT =
-    0xDBDBDF; // 3D splash light (sampled from image edges)
+static constexpr uint32_t kBgColorDark = 0x121212;    // App theme dark background
+static constexpr uint32_t kBgColor3dDark = 0x2D2D2D;  // 3D splash dark (sampled from image edges)
+static constexpr uint32_t kBgColor3dLight = 0xDBDBDF; // 3D splash light (sampled from image edges)
 
 // Configured dark_mode, or default_value when unset
 static bool read_config_dark_mode(bool default_value = true) {
@@ -146,8 +145,8 @@ static void parse_args(int argc, char** argv, int& width, int& height, int& rota
             rotation = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: helix-splash [-w width] [-h height] [-r rotation]\n");
-            printf("  -w <width>    Screen width (default: %d)\n", DEFAULT_WIDTH);
-            printf("  -h <height>   Screen height (default: %d)\n", DEFAULT_HEIGHT);
+            printf("  -w <width>    Screen width (default: %d)\n", kDefaultWidth);
+            printf("  -h <height>   Screen height (default: %d)\n", kDefaultHeight);
             printf("  -r <degrees>  Display rotation: 0, 90, 180, 270 (default: from config)\n");
             exit(0);
         }
@@ -189,7 +188,7 @@ static lv_obj_t* create_splash_ui(lv_obj_t* screen, int width, int height, bool 
 
     if (use_3d || use_3d_png) {
         // 3D splash: prerendered bin (full-screen) or source PNG (centered + scaled)
-        uint32_t bg_color = dark_mode ? BG_COLOR_3D_DARK : BG_COLOR_3D_LIGHT;
+        uint32_t bg_color = dark_mode ? kBgColor3dDark : kBgColor3dLight;
         lv_obj_set_style_bg_color(screen, lv_color_hex(bg_color), 0);
         lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
@@ -230,7 +229,7 @@ static lv_obj_t* create_splash_ui(lv_obj_t* screen, int width, int height, bool 
             lv_anim_init(&anim);
             lv_anim_set_var(&anim, img);
             lv_anim_set_values(&anim, LV_OPA_TRANSP, LV_OPA_COVER);
-            lv_anim_set_duration(&anim, FADE_DURATION_MS);
+            lv_anim_set_duration(&anim, kFadeDurationMs);
             lv_anim_set_path_cb(&anim, lv_anim_path_ease_in);
             lv_anim_set_exec_cb(&anim, fade_anim_cb);
             lv_anim_start(&anim);
@@ -241,7 +240,7 @@ static lv_obj_t* create_splash_ui(lv_obj_t* screen, int width, int height, bool 
     }
 
     // Fallback: original centered logo approach
-    lv_obj_set_style_bg_color(screen, lv_color_hex(BG_COLOR_DARK), 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(kBgColorDark), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
     // Create container for logo (will be animated)
@@ -293,7 +292,7 @@ static lv_obj_t* create_splash_ui(lv_obj_t* screen, int width, int height, bool 
         lv_anim_init(&anim);
         lv_anim_set_var(&anim, container);
         lv_anim_set_values(&anim, LV_OPA_TRANSP, LV_OPA_COVER);
-        lv_anim_set_duration(&anim, FADE_DURATION_MS);
+        lv_anim_set_duration(&anim, kFadeDurationMs);
         lv_anim_set_path_cb(&anim, lv_anim_path_ease_in);
         lv_anim_set_exec_cb(&anim, fade_anim_cb);
         lv_anim_start(&anim);
@@ -342,8 +341,8 @@ int main(int argc, char** argv) {
             height = res.height;
             fprintf(stderr, "helix-splash: Auto-detected resolution: %dx%d\n", width, height);
         } else {
-            width = DEFAULT_WIDTH;
-            height = DEFAULT_HEIGHT;
+            width = kDefaultWidth;
+            height = kDefaultHeight;
             fprintf(stderr, "helix-splash: Using default resolution: %dx%d\n", width, height);
         }
     }
@@ -362,7 +361,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    rotation = helix::standalone_rotation(rotation);
+    rotation = helix::standalone_rotation(rotation, width, height);
     if (rotation != 0) {
         lv_display_set_rotation(display, degrees_to_lv_rotation(rotation));
         // Update dimensions to match rotated resolution for splash layout
@@ -413,7 +412,7 @@ int main(int argc, char** argv) {
     // This must happen AFTER create_display (which opens the framebuffer)
     // but BEFORE we render the splash UI
     // Use 3D splash bg color if available, otherwise dark theme bg
-    uint32_t clear_color = dark_mode ? BG_COLOR_3D_DARK : BG_COLOR_3D_LIGHT;
+    uint32_t clear_color = dark_mode ? kBgColor3dDark : kBgColor3dLight;
     if (backend->clear_framebuffer(clear_color | 0xFF000000)) {
         fprintf(stderr, "helix-splash: Framebuffer cleared\n");
     }
@@ -469,14 +468,14 @@ int main(int argc, char** argv) {
     // those stripes out and the logo visibly wipes down the screen "line by
     // line". The splash now exits promptly (splash_should_continue + SIGUSR1),
     // so it is not running long enough for loop CPU to matter.
-    const int frame_delay_us = FRAME_DELAY_US;
+    const int frame_delay_us = kFrameDelayUs;
 
     // Boot-status heartbeat: the init gate rewrites the status file while it
     // waits for Moonraker. We treat each observed change (mtime or size) as a
     // heartbeat — recorded in the MONOTONIC clock so an NTP jump mid-boot can't
     // make a live heartbeat look stale — and extend our lifetime accordingly.
     const std::string status_path = splash_status_path();
-    const helix::splash::SplashLifetimePolicy life_policy{MAX_LIFETIME_SEC, 180};
+    const helix::splash::SplashLifetimePolicy life_policy{kMaxLifetimeSec, 180};
     struct stat status_prev {};
     bool have_status_prev = false;
     long last_heartbeat_mono = -1;

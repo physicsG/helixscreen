@@ -10,11 +10,12 @@ RESULT line in the format summarize.py reads.
 import re
 import sys
 
+from perfstats import HISTOGRAM_US, histogram_percentile
+
 BIN = re.compile(r"^(\d+)\s+(\d+)\s*$")
 TOTAL = re.compile(r"^#\s*Total:\s*(\d+)")
 OVERFLOWS = re.compile(r"^#\s*Histogram Overflows:\s*(\d+)")
 MAX_LATENCY = re.compile(r"^#\s*Max Latencies:\s*(\d+)")
-HISTOGRAM_US = 20000
 
 
 def parse_histogram(lines):
@@ -42,27 +43,15 @@ def parse_histogram(lines):
     return counts, overflow, total_reported, max_us
 
 
-def percentile(counts, overflow, fraction):
-    """Smallest bin holding `fraction` of the samples; HISTOGRAM_US when it falls in the overflow."""
-    total = sum(counts.values()) + overflow
-    if total == 0:
-        return -1
-    need = total * fraction
-    running = 0
-    for us in sorted(counts):
-        running += counts[us]
-        if running >= need:
-            return us
-    return HISTOGRAM_US
-
-
 def result_line(lines, arm, label, raw):
     fields = dict(re.findall(r"(\w+)=(\S+)", raw))
     counts, overflow, total_reported, max_us = parse_histogram(lines)
     total = sum(counts.values()) + overflow
     return (f"RESULT arm={arm} saver={label} samples={total} total_reported={total_reported} "
-            f"p50_us={percentile(counts, overflow, .5)} p99_us={percentile(counts, overflow, .99)} "
-            f"p999_us={percentile(counts, overflow, .999)} max_us={max_us if max_us is not None else -1} "
+            f"p50_us={histogram_percentile(counts, overflow, .5)} "
+            f"p99_us={histogram_percentile(counts, overflow, .99)} "
+            f"p999_us={histogram_percentile(counts, overflow, .999)} "
+            f"max_us={max_us if max_us is not None else -1} "
             f"overflow_gt20ms={overflow} helix_cpu={fields.get('helix_cpu', '-1')}% "
             f"saver_started={fields.get('saver_started', '-1')} "
             f"saver_stopped_midrun={fields.get('saver_stopped_midrun', '-1')} "

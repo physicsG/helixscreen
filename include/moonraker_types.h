@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include "ui_filename_utils.h"
+
+#include "helix_plugin_features.h"
 #include "json_fwd.h"
 #include "text_io.h"
 
@@ -319,12 +322,6 @@ select_thumbnail(const std::vector<ThumbnailInfo>& thumbnails, int target_w, int
 
 namespace helix {
 
-/// The directory a gcodes-root path sits in: "sub/dir/Foo.gcode" -> "sub/dir", "Foo.gcode" -> "".
-[[nodiscard]] inline std::string gcode_dir_of(const std::string& gcode_path) {
-    const auto slash = gcode_path.find_last_of('/');
-    return slash == std::string::npos ? std::string() : gcode_path.substr(0, slash);
-}
-
 /**
  * @brief Which of a file's thumbnails to fetch for a box, as a path from the gcodes root
  *
@@ -371,6 +368,12 @@ struct FileMetadata {
                           // empty as "unknown" (do NOT assume all-zero).
     double first_layer_bed_temp = 0.0;
     double first_layer_extr_temp = 0.0;
+    double nozzle_diameter = 0.0; ///< mm, the slicer's; 0 when the file states none
+    /// mm by extruder (`nozzle_diameter_list`, which some Moonraker forks add); empty when absent.
+    std::vector<double> nozzle_diameter_list;
+    /// Each filament's nozzle flow type as the file writes it (`filament_volume_type`, which
+    /// some Moonraker forks add); empty when absent.
+    std::vector<std::string> filament_volume_types;
     uint64_t gcode_start_byte = 0;
     uint64_t gcode_end_byte = 0;
     std::string uuid;                      // Slicer-generated UUID (for history matching)
@@ -392,6 +395,9 @@ struct WebcamInfo {
     bool flip_horizontal = false; ///< Moonraker's own flip, applied before any user transform
     bool flip_vertical = false;
     int target_fps = 15; ///< Configured frame rate (Moonraker default 15)
+    /// Registered by a built-in screen server (its extra_data carries the marker), so
+    /// it stays recognizable whatever the user renames it to.
+    bool screen_server = false;
     /// Empty when the camera can be shown. Otherwise why discovery ruled it
     /// out — its serving process is not running, or its absolute snapshot URL
     /// did not answer — so the auto-pick skips it and a picker can say so.
@@ -449,6 +455,17 @@ struct PowerDevice {
 /**
  * @brief Result from start_modified_print() API call
  */
+namespace helix {
+/// What the HelixPrint plugin's status says about itself (server.helix.status).
+struct HelixPluginInfo {
+    bool present = false;      ///< the component answered, enabled or not
+    bool available = false;    ///< installed and enabled
+    std::string symlink_dir;   ///< where it links a modified print; empty when not reported
+    std::string version;       ///< the plugin's PLUGIN_VERSION; empty when it did not answer
+    PluginFeatureMap features; ///< its `features` map; empty for a plugin that predates it
+};
+} // namespace helix
+
 struct ModifiedPrintResult {
     std::string original_filename; ///< Original file path
     std::string print_filename;    ///< Symlink path used for printing

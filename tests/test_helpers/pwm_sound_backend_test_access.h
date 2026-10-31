@@ -37,13 +37,13 @@ class PWMSoundBackendTestAccess {
     }
 
     /// Test knob: park after N consecutive silent buffers (default
-    /// PCM_PARK_SILENT_BUFFERS). Call before set_render_source().
+    /// kPcmParkSilentBuffers). Call before set_render_source().
     static void set_park_silent_buffers(PWMSoundBackend& b, int n) {
         b.park_silent_buffers_ = n;
     }
 
     /// True once the loop has parked the channel (duty 0, enable 0) and is
-    /// only polling the render source every PCM_PARK_POLL_NS.
+    /// only polling the render source every kPcmParkPollNs.
     static bool parked(const PWMSoundBackend& b) {
         return b.parked_.load();
     }

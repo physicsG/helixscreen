@@ -15,8 +15,11 @@
 #include "ui_print_preparation_manager.h"
 #include "ui_update_queue.h"
 
+#include "../test_helpers/planted_gcode.h"
 #include "../test_helpers/print_preparation_manager_test_access.h"
+#include "../test_helpers/print_start_grace.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/queued_job_starter_test_access.h"
 #include "../test_helpers/scoped_env.h"
 #include "gcode_ops_detector.h"
 #include "lvgl_test_fixture.h"
@@ -25,9 +28,12 @@
 #include "moonraker_client_mock.h"
 #include "preprint_skip_wrappers.h"
 #include "printer_state.h"
+#include "queued_job_start.h"
+#include "text_io.h"
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -35,6 +41,8 @@
 using helix::skip_wrappers::Op;
 using nlohmann::json;
 using Access = PrintPreparationManagerTestAccess;
+using helix::queue::QueuedJobOptions;
+using helix::queue::QueuedJobStarter;
 
 namespace {
 
@@ -314,4 +322,64 @@ TEST_CASE("the mock without the knob has no wrappers", "[skip_wrappers][mock]") 
     CHECK(mock.skip_wrapper_sections().empty());
     CHECK(mock.skip_wrapper_status().empty());
     CHECK_FALSE(mock.consume_skip(Op::Qgl));
+}
+
+// ============================================================================
+// A queued job started from the home tile
+// ============================================================================
+
+namespace {
+
+/// Start part.gcode through a QueuedJobStarter driving the fixture's manager,
+/// with @p saved answering its options. The planted file has one tool, no
+/// palette and no printer-stopping command, so every file gate passes.
+void start_queued_part(SkipToggleFixture& f, QueuedJobOptions saved) {
+    helix::test::wait_out_print_start_grace();
+    // Its footer names its one tool, so no whole-file read is needed.
+    helix::PlantedGcode file("part.gcode", "", "G28\n; filament used [g] = 1.50\n");
+    QueuedJobStarter starter(f.state, f.api.get());
+    QueuedJobStarterTestAccess::set_prep(starter, &f.manager);
+    starter.start_with_options(helix::JobQueueEntry{"0001", "part.gcode", 0.0, 0.0},
+                               std::move(saved));
+    for (int i = 0; i < 6; ++i) {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+    REQUIRE(starter.in_flight()); // the start is out, waiting on its gcode answers
+}
+
+/// Whether a line of any script sent so far is exactly @p line. The pre-start
+/// block goes out as one multi-line script.
+bool sent(const SkipToggleFixture& f, const std::string& line) {
+    for (const auto& script : f.api->sent) {
+        for (std::string_view l : helix::text_io::lines(script, '\n')) {
+            if (l == line) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(SkipToggleFixture, "a queued job's saved options reach the start",
+                 "[queued_job_start][skip_wrappers][preprint]") {
+    wrappers_loaded();
+    gates_open();
+
+    start_queued_part(*this, QueuedJobOptions{"part.gcode", {{"qgl", false}}});
+
+    CHECK(sent(*this, "SET_GCODE_VARIABLE MACRO=_HELIX_PREP VARIABLE=run_qgl VALUE=0"));
+    CHECK(sent(*this, "SET_GCODE_VARIABLE MACRO=_HELIX_PREP VARIABLE=run_bed_mesh VALUE=1"));
+}
+
+TEST_CASE_METHOD(SkipToggleFixture, "a job with nothing saved starts with the defaults",
+                 "[queued_job_start][skip_wrappers][preprint]") {
+    wrappers_loaded();
+    gates_open();
+
+    start_queued_part(*this, QueuedJobOptions{});
+
+    CHECK(sent(*this, "SET_GCODE_VARIABLE MACRO=_HELIX_PREP VARIABLE=run_qgl VALUE=1"));
+    CHECK_FALSE(sent(*this, "SET_GCODE_VARIABLE MACRO=_HELIX_PREP VARIABLE=run_qgl VALUE=0"));
 }

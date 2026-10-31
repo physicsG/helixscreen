@@ -131,7 +131,7 @@ struct MaterialAlias {
  * @brief Common material name aliases
  */
 // clang-format off
-inline constexpr MaterialAlias MATERIAL_ALIASES[] = {
+inline constexpr MaterialAlias kMaterialAliases[] = {
     {"Nylon",        "PA"},
     {"Nylon-CF",     "PA-CF"},
     {"Nylon-GF",     "PA-GF"},
@@ -144,7 +144,7 @@ inline constexpr MaterialAlias MATERIAL_ALIASES[] = {
 // clang-format on
 
 /// Number of aliases in the database
-inline constexpr size_t ALIAS_COUNT = sizeof(MATERIAL_ALIASES) / sizeof(MATERIAL_ALIASES[0]);
+inline constexpr size_t kAliasCount = sizeof(kMaterialAliases) / sizeof(kMaterialAliases[0]);
 
 /**
  * @brief Resolve a material alias to its canonical name
@@ -155,7 +155,7 @@ inline std::string_view resolve_alias(std::string_view name) {
     std::string name_lower(name);
     name_lower = helix::text_io::to_lower(name_lower);
 
-    for (const auto& alias : MATERIAL_ALIASES) {
+    for (const auto& alias : kMaterialAliases) {
         std::string alias_lower(alias.alias);
         alias_lower = helix::text_io::to_lower(alias_lower);
 
@@ -377,7 +377,7 @@ inline std::optional<DryingPreset> get_drying_preset_for_material(std::string_vi
 /// Filament diameter assumed when the printer has not reported its own
 /// ([extruder] filament_diameter).
 // NAMESPACE_OK: extends filament::, the material table's existing namespace
-inline constexpr float DEFAULT_DIAMETER_MM = 1.75f;
+inline constexpr float kDefaultDiameterMm = 1.75f;
 
 /// Filament cross-section in mm², pi * (d/2)^2
 // NAMESPACE_OK: extends filament::, the material table's existing namespace
@@ -394,7 +394,7 @@ inline float cross_section_mm2(float diameter_mm) {
  * @return Length in meters
  */
 inline float weight_to_length_m(float weight_g, float density,
-                                float diameter_mm = DEFAULT_DIAMETER_MM) {
+                                float diameter_mm = kDefaultDiameterMm) {
     // mass / density is cm³; x1000 is mm³, / area is mm of filament
     const float length_mm = (weight_g / density) * 1000.0f / cross_section_mm2(diameter_mm);
     return length_mm / 1000.0f;
@@ -408,7 +408,7 @@ inline float weight_to_length_m(float weight_g, float density,
  * @return Mass in grams, or 0 if density or length is not positive
  */
 inline float length_to_weight_g(float length_mm, float density,
-                                float diameter_mm = DEFAULT_DIAMETER_MM) {
+                                float diameter_mm = kDefaultDiameterMm) {
     if (density <= 0.0f || length_mm <= 0.0f) {
         return 0.0f;
     }
@@ -458,7 +458,7 @@ struct GroupHumidityRange {
 };
 
 // clang-format off
-inline constexpr GroupHumidityRange GROUP_HUMIDITY_RANGES[] = {
+inline constexpr GroupHumidityRange kGroupHumidityRanges[] = {
     //  group          good   warn
     {"PLA",            50.0f, 65.0f},  // Tolerant; moisture shows as surface fuzz
     {"PETG",           40.0f, 55.0f},
@@ -481,10 +481,10 @@ inline constexpr GroupHumidityRange GROUP_HUMIDITY_RANGES[] = {
  * Deliberately tiny. An entry here is only justified when a material's moisture
  * sensitivity is genuinely unlike the rest of its compat group — not merely a
  * different number someone once typed. Anything that can be expressed at group
- * level belongs in GROUP_HUMIDITY_RANGES above.
+ * level belongs in kGroupHumidityRanges above.
  */
 // clang-format off
-inline constexpr GroupHumidityRange MATERIAL_HUMIDITY_OVERRIDES[] = {
+inline constexpr GroupHumidityRange kMaterialHumidityOverrides[] = {
     //  material       good   warn
     // Water-soluble supports dissolve in ambient humidity, so they need a far
     // tighter band than the PLA group they print alongside and are grouped with.
@@ -517,7 +517,7 @@ inline std::optional<MaterialComfortRange> get_comfort_range(const std::string& 
     result.material = mat->name;
 
     bool have_humidity = false;
-    for (const auto& ovr : MATERIAL_HUMIDITY_OVERRIDES) {
+    for (const auto& ovr : kMaterialHumidityOverrides) {
         if (std::string_view(ovr.group) == std::string_view(mat->name)) {
             result.max_humidity_good = ovr.max_humidity_good;
             result.max_humidity_warn = ovr.max_humidity_warn;
@@ -526,7 +526,7 @@ inline std::optional<MaterialComfortRange> get_comfort_range(const std::string& 
         }
     }
     if (!have_humidity) {
-        for (const auto& gr : GROUP_HUMIDITY_RANGES) {
+        for (const auto& gr : kGroupHumidityRanges) {
             if (std::string_view(gr.group) == std::string_view(mat->compat_group)) {
                 result.max_humidity_good = gr.max_humidity_good;
                 result.max_humidity_warn = gr.max_humidity_warn;
@@ -576,10 +576,10 @@ inline std::optional<MaterialComfortRange> get_comfort_range(const std::string& 
  * must be removed rather than rotting.
  *
  * Making one of these selectable is a one-line addition to
- * scripts/fixtures/cfs_seed.json plus removing it here.
+ * scripts/fixtures/filament_seed.json plus removing it here.
  */
 // clang-format off
-inline constexpr const char* RESOLUTION_ONLY_MATERIALS[] = {
+inline constexpr const char* kResolutionOnlyMaterials[] = {
     // No supported printer's stock hotend reaches these temperatures; the rows
     // exist so an externally-supplied string still resolves to sane data rather
     // than inheriting a 0 °C bed. (PPS/PPS-CF, the reachable end of HIGH_TEMP,
@@ -598,15 +598,15 @@ inline constexpr const char* RESOLUTION_ONLY_MATERIALS[] = {
 // clang-format on
 
 /// Number of resolution-only materials
-inline constexpr size_t RESOLUTION_ONLY_COUNT =
-    sizeof(RESOLUTION_ONLY_MATERIALS) / sizeof(RESOLUTION_ONLY_MATERIALS[0]);
+inline constexpr size_t kResolutionOnlyCount =
+    sizeof(kResolutionOnlyMaterials) / sizeof(kResolutionOnlyMaterials[0]);
 
 /**
  * @brief Is this material deliberately absent from the product catalog?
  * @param name Material name (exact `types` spelling)
  */
 inline bool is_resolution_only(std::string_view name) {
-    for (const auto* m : RESOLUTION_ONLY_MATERIALS) {
+    for (const auto* m : kResolutionOnlyMaterials) {
         if (std::string_view(m) == name) {
             return true;
         }

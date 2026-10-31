@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "helix/xml/indexed_subject_pool.h"
 #include "led/led_auto_state.h"
 #include "lvgl/lvgl.h"
 #include "overlay_base.h"
@@ -102,6 +103,8 @@ class LedSettingsOverlay : public OverlayBase {
     void handle_action_type_changed(const std::string& state_key, int dropdown_index);
     void handle_brightness_changed(const std::string& state_key, int value);
     void handle_color_selected(const std::string& state_key, uint32_t color);
+    void handle_color_swatch_clicked(lv_obj_t* swatch, int preset_index);
+    void publish_auto_color_presets();
     void handle_effect_selected(const std::string& state_key, const std::string& name);
     void handle_wled_preset_selected(const std::string& state_key, int preset_id);
     void handle_macro_selected(const std::string& state_key, const std::string& gcode);
@@ -112,6 +115,14 @@ class LedSettingsOverlay : public OverlayBase {
     lv_subject_t auto_state_enabled_subject_{};
     lv_subject_t led_on_at_start_subject_{};
     lv_subject_t print_macros_drive_leds_subject_{};
+    /// The colour presets every auto-state row's swatches show
+    /// (led_auto_color_swatches.xml), and which one each row has picked.
+    lv_subject_t auto_preset_count_{};
+    helix::xml::IndexedSubjectPool auto_preset_color_pool_{
+        "led_auto_preset_color", helix::xml::IndexedSubjectPool::Type::Color};
+    /// One per kStateRows entry: the preset index ringed, or -1.
+    helix::xml::IndexedSubjectPool auto_color_selected_pool_{
+        "led_auto_color_sel", helix::xml::IndexedSubjectPool::Type::Int};
     std::vector<std::string> action_type_options_; // Maps dropdown index to action type string
     int editing_macro_index_ = -1;                 // -1 = no macro device being edited
 };

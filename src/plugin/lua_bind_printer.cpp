@@ -6,6 +6,7 @@
 #include "connection_state.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lua_bindings.h"
+#include "printer_state.h"
 
 namespace helix::plugin {
 
@@ -47,7 +48,15 @@ struct FieldValue {
     PrinterValueKind kind;
     int32_t i = 0;
     std::string s = {};
+    bool nil = false;
 };
+
+// Klipper's state is unknown while Moonraker is away: the subject holds
+// whatever it last heard, or its startup default.
+bool moonraker_connected() {
+    lv_subject_t* conn = lv_xml_get_subject(nullptr, "printer_connection_state");
+    return conn && lv_subject_get_int(conn) == static_cast<int>(helix::ConnectionState::CONNECTED);
+}
 
 FieldValue read_field(const PrinterField& f, lv_subject_t* subject) {
     FieldValue v{f.kind};
@@ -55,10 +64,16 @@ FieldValue read_field(const PrinterField& f, lv_subject_t* subject) {
         v.s = lv_subject_get_string(subject);
     else
         v.i = lv_subject_get_int(subject);
+    if (f.kind == PrinterValueKind::KlippyState)
+        v.nil = !moonraker_connected();
     return v;
 }
 
 int push_field(lua_State* L, const FieldValue& v) {
+    if (v.nil) {
+        lua_pushnil(L);
+        return 1;
+    }
     switch (v.kind) {
     case PrinterValueKind::Bool:
         lua_pushboolean(L, v.i == static_cast<int>(helix::ConnectionState::CONNECTED));
@@ -71,6 +86,9 @@ int push_field(lua_State* L, const FieldValue& v) {
         break;
     case PrinterValueKind::DeciDegrees:
         lua_pushnumber(L, v.i / 10.0);
+        break;
+    case PrinterValueKind::KlippyState:
+        lua_pushstring(L, helix::klippy_state_name(static_cast<helix::KlippyState>(v.i)));
         break;
     }
     return 1;
@@ -98,6 +116,7 @@ int printer_get(lua_State* L) {
 }
 
 int printer_watch(lua_State* L) {
+    forbid_in_check(L, "helix.printer.watch");
     std::string name = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
     const PrinterField* f = find_field(name);
@@ -125,6 +144,7 @@ int printer_watch(lua_State* L) {
 const std::vector<PrinterField>& printer_fields() {
     static const std::vector<PrinterField> kFields{
         {"connected", "printer_connection_state", PrinterValueKind::Bool},
+        {"klippy_state", "klippy_state", PrinterValueKind::KlippyState},
         {"print_state", "print_state", PrinterValueKind::String},
         {"progress", "print_progress", PrinterValueKind::Int},
         {"filename", "print_filename", PrinterValueKind::String},

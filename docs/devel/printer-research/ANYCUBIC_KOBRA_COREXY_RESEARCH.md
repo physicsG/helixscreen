@@ -234,21 +234,21 @@ HelixScreen already has a complete ACE backend:
 - `src/printer/ams_backend_ace.cpp`
 
 **Features:**
-- Polls REST at 500ms intervals
-- Thread-safe state caching
+- WebSocket subscription to the native `filament_hub` object (Rinkhals/GoKlipper) or the `ace` / `ace_instance_N` objects (community drivers)
+- REST polling at ~500ms on the community fallback path only
 - Load/unload filament (`ACE_CHANGE_TOOL`)
-- Dryer control (35-70°C)
+- Dryer control (35-55°C)
 - 4-slot hub topology
 
-**REST Endpoints:**
-- `GET /server/ace/info` - System info
+**REST Endpoints (community fallback only, see [`FILAMENT_BACKEND_ACE.md`](../FILAMENT_BACKEND_ACE.md)):**
+- `GET /server/ace/info` - System info (optional)
 - `GET /server/ace/status` - Current state
 - `GET /server/ace/slots` - Slot details
 
 ### What Would Be Needed
 
 1. **Rinkhals Installation** - Provides Moonraker
-2. **klipper-go Differences** - May need REST polling for some objects
+2. **klipper-go Differences** - none for the ACE: GoKlipper's `filament_hub` is subscribed over WebSocket like any Klipper object
 3. **Display Options**:
    - **External**: HelixScreen on Pi connected to Moonraker
    - **On-printer**: Replace stock UI (challenging - weak CPU/RAM)
@@ -324,7 +324,7 @@ Add to printer.cfg:
 ### Target Configuration
 - **AnyCubic Kobra S1 Combo** (CoreXY, enclosed)
 - **Rinkhals firmware** for Moonraker
-- **ACE Pro** already supported (install the ValgACE Moonraker component for REST access)
+- **ACE Pro** supported natively through the `filament_hub` object; Rinkhals needs no extra component
 
 ### Integration Path
 1. **External HelixScreen** device (Pi + touchscreen)
@@ -332,8 +332,6 @@ Add to printer.cfg:
 3. ACE backend handles ACE Pro
 
 ### Challenges
-- klipper-go WebSocket differences
-- May need REST polling (like ACE does)
 - Limited onboard resources for direct printer install
 
 ---

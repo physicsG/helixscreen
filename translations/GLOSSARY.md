@@ -31,8 +31,7 @@ translation agents (the relevant column is injected into their prompts).
   idea for the printing end rather than the filament position.
 - **Loanword policy for these four.** `Gate` is Happy Hare's English term of art
   and stays untranslated in de, es, fr, it and pt; ja transliterates it (`ゲート`),
-  zh translates it (`通道`), and ru translates it (`Шлюз`, a native Russian
-  noun for a sluice; the transliteration would be `Гейт`). The evidence:
+  zh translates it (`通道`), ru transliterates to Cyrillic (`Шлюз`). The evidence:
   Happy Hare ships no translations at all and its own touchscreen frontend
   hardcodes English "Gate", mainsail's German translator kept and compounded it
   (`Gate-Zuweisung`), and Bambu's own catalogue keeps English `slot` in de (23/23),
@@ -40,10 +39,7 @@ translation agents (the relevant column is injected into their prompts).
   So those locales demonstrably take English hardware nouns in this domain.
   Gate and Lane in es, fr, it, ja and pt rest on NO direct evidence - there is
   almost no native-language writing about these projects - so they are defaults,
-  not findings, and a native speaker may overturn any of them. One Russian
-  speaker consulted 2026-09-13 suggested `канал` for slot/lane (unsure) and
-  personally keeps the English terms; `Шлюз`/`Канал` stand until a confident
-  native ruling replaces them.
+  not findings, and a native speaker may overturn any of them.
 - **Do not reason from OrcaSlicer or wiki.bambulab.com.** Orca is a fork with its
   own catalogue and disagrees with Bambu (it ships fr `Emplacement` and pt_BR
   `Espaço`, neither of which Bambu uses). The Bambu wiki is self-declared machine
@@ -61,6 +57,14 @@ translation agents (the relevant column is injected into their prompts).
   same 1:1 physical position, matching the U1's own firmware UI. Reuse each
   locale's existing `feeder`/`toolhead` rendering (established from other
   strings using those English words) rather than coining a new one.
+- **Endless Spool**, **Filament Mapping**, **Assigned Tool** are three different
+  features and must stay three different phrases. Endless Spool switches to
+  another spool when one runs out (its per-slot field is "Backup Slot" / "Backup
+  Lane" / "Backup Gate"). Filament Mapping is the per-print choice of which slot
+  feeds each tool the file uses, done by rewriting the file or by the firmware.
+  Assigned Tool is the printer's own persistent tool-to-slot table. A vendor
+  toggle keeps the vendor's name for its own setting (Creality "Auto-Refill",
+  Snapmaker "Auto-Replenish", zMod "Infinite Spool Mode").
 - **Spool**: the physical spool noun — keep one rendering per locale.
 - **Light**: ambiguous (theme "Light" vs LED light) — translate by context; not
   a fixed glossary term.
@@ -95,6 +99,14 @@ translation agents (the relevant column is injected into their prompts).
 | Feeders | Zuführungen | Alimentadores | Alimentateurs | Alimentatori | フィーダー | Alimentadores | Фидеры | 送料器 |
 | Tools | Werkzeuge | Herramientas | Outils | Strumenti | ツール | Ferramentas | Инструменты | 工具 |
 | Toolheads | Werkzeugköpfe | Cabezales | Têtes d'outil | Testine | ツールヘッド | Cabeçotes | Печатающие головки | 工具头 |
+
+### Filament features
+
+| English | de | es | fr | it | ja | pt | ru | zh |
+|---|---|---|---|---|---|---|---|---|
+| Endless Spool | Endlosspule | Bobina infinita | Bobine infinie | Bobina infinita | エンドレススプール | Carretel infinito | Бесконечная катушка | 无限料盘 |
+| Filament Mapping | Filament-Zuordnung | Mapeo de Filamento | Mappage du filament | Mappatura filamento | フィラメントマッピング | Mapeamento de Filamento | Сопоставление филамента | 耗材映射 |
+| Assigned Tool | Zugewiesenes Werkzeug | Herramienta asignada | Outil attribué | Strumento assegnato | 割り当てツール | Ferramenta atribuída | Назначенный инструмент | 已分配工具 |
 
 ### Actions
 

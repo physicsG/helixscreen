@@ -61,14 +61,14 @@ ChannelVersionRelation compare_channel_version(const std::string& installed,
 
 namespace helix {
 class IMoonrakerClient;
-}
-class IMoonrakerAPI; // NAMESPACE_OK: forward-declares the global interface
+class IMoonrakerAPI;
+} // namespace helix
 
 /**
  * @brief Async update checker for HelixScreen
  *
  * Checks the R2 CDN manifest (GitHub releases API as fallback) to determine if
- * a newer version is available. Rate-limited to one check per MIN_CHECK_INTERVAL.
+ * a newer version is available. Rate-limited to one check per kMinCheckInterval.
  *
  * Usage:
  * @code
@@ -86,7 +86,7 @@ class IMoonrakerAPI; // NAMESPACE_OK: forward-declares the global interface
  */
 class UpdateChecker {
   public:
-    static constexpr const char* DEFAULT_R2_BASE_URL = "https://releases.helixscreen.org";
+    static constexpr const char* kDefaultR2BaseUrl = "https://releases.helixscreen.org";
 
     /**
      * @brief Release information from GitHub
@@ -156,7 +156,7 @@ class UpdateChecker {
      * Spawns background thread to fetch the channel manifest.
      * Callback is invoked on LVGL thread when check completes.
      *
-     * Rate limited: If called within MIN_CHECK_INTERVAL of last check,
+     * Rate limited: If called within kMinCheckInterval of last check,
      * returns cached result immediately instead of making a new request.
      *
      * @param callback Optional callback for result notification
@@ -209,11 +209,13 @@ class UpdateChecker {
     void on_channel_changed();
 
     /**
-     * @brief Point moonraker.conf's [update_manager helixscreen] at the app's channel
+     * @brief Reconcile moonraker.conf's [update_manager helixscreen] with the app's channel
      *
      * Mainsail and Fluidd offer whatever that stanza's `channel:` names, so a stale one
-     * offers a beta install a "stable" downgrade. Rewrites the line only when a stanza
-     * with a channel line exists and disagrees, then restarts Moonraker, which reads its
+     * offers a beta install a "stable" downgrade. Which side moved is judged against the
+     * channel the two last agreed on (decide_moonraker_channel_sync()): a hand edit of the
+     * stanza is adopted as the app's channel, and an app change rewrites the line, only
+     * when a stanza with a channel line exists, then restarts Moonraker, which reads its
      * config only at startup. While a job holds the machine the file is still written
      * but the restart is skipped, so the change lands at Moonraker's next start. Called
      * on every Moonraker discovery and whenever the effective channel changes. Main
@@ -356,6 +358,23 @@ class UpdateChecker {
     static std::string install_failure_detail(const std::vector<std::string>& lines);
 
     /**
+     * @brief install_failure_detail() made safe for telemetry: paths, hosts, IPs
+     *        and the device's own names removed, at most 120 bytes.
+     *
+     * @param identifiers The device's host name and login, removed wherever they
+     *                    appear as a word.
+     */
+    static std::string
+    install_failure_telemetry_detail(const std::vector<std::string>& lines,
+                                     const std::vector<std::string>& identifiers);
+
+    /**
+     * @brief `host` when the update path downloads from it (our release hosts and
+     *        GitHub's), "other" for any other host, empty for empty.
+     */
+    static std::string telemetry_release_host(const std::string& host);
+
+    /**
      * @brief Probe the init destination with a real new-file write, before the
      *        archive download.
      * @param init_dir The directory the service definition installs into
@@ -373,6 +392,17 @@ class UpdateChecker {
     static std::string service_dest_probe_error(const std::string& init_dir);
 
     /**
+     * @brief Whether @p init_dir already holds a HelixScreen service definition
+     *        (any non-hidden entry whose name contains "helixscreen").
+     *
+     * A SysV self-update keeps the installed init script as it is, so a failed
+     * service_dest_probe_error() only blocks the update when there is no script
+     * to keep. install.sh's check_service_dest_space makes the exact call
+     * (it also knows about a root migration or a stale hooks path to rewrite).
+     */
+    static bool service_definition_installed(const std::string& init_dir);
+
+    /**
      * @brief The directory the service definition installs into on this host.
      * @return "/etc/systemd/system" when systemd runs, "/etc/init.d" for SysV,
      *         "" when neither shape is present (a dev machine; the installer's
@@ -382,6 +412,17 @@ class UpdateChecker {
      * aims at the filesystem the installer will actually write.
      */
     static std::string init_service_dest_dir();
+
+    /**
+     * @brief Whether an in-app update writes the service destination, so the
+     *        pre-download probe applies.
+     *
+     * Only a root app installs directly, and under systemd it runs inside the
+     * unit's ProtectSystem=strict sandbox: /etc is read-only even for root, and
+     * a self-update writes no unit (the unit's root ExecStartPre refreshes it
+     * on restart). SysV root installs may rewrite their init script.
+     */
+    static bool update_writes_service_dest(bool is_root, bool systemd_init);
 
     std::string get_platform_asset_name() const;
 
@@ -453,11 +494,33 @@ class UpdateChecker {
      */
     static const char* moonraker_channel_name(UpdateChannel channel);
 
+    /// What a moonraker.conf channel sync does with the stanza it read.
+    enum class MoonrakerChannelSync {
+        Write,      ///< Rewrite the stanza to the app's channel
+        Adopt,      ///< The stanza was edited by hand: take its channel into the app
+        RecordOnly, ///< Already agreeing: remember the channel, touch nothing
+        Leave,      ///< A hand edit to a channel the app has no name for
+    };
+
+    /**
+     * @brief Decide which side of a moonraker.conf channel disagreement moved
+     *
+     * @param app         moonraker_channel_name() of the app's effective channel
+     * @param conf        the stanza's `channel:` value, empty when it has none
+     * @param last_synced the channel the two last agreed on, empty when unknown
+     *
+     * Only a stanza that moved away from @p last_synced while the app stayed put counts
+     * as a hand edit; anything else, including no record at all, lets the app win.
+     */
+    static MoonrakerChannelSync decide_moonraker_channel_sync(const std::string& app,
+                                                              const std::string& conf,
+                                                              const std::string& last_synced);
+
     /**
      * @brief Resolve the R2 base URL the next check will actually use.
      *
      * Reads r2_url from the trusted update_urls.json, falls back to
-     * DEFAULT_R2_BASE_URL when unset, and strips trailing slashes. Single
+     * kDefaultR2BaseUrl when unset, and strips trailing slashes. Single
      * source of truth for that resolution:
      * check_for_updates() caches its result into cached_r2_base_url_, and
      * refresh_config_snapshot() stores it for off-thread readers.
@@ -675,12 +738,34 @@ class UpdateChecker {
      */
     void report_result(Status status, std::optional<ReleaseInfo> info, const std::string& error);
 
+    /// Report what a check that fetched @p info concludes for a build at @p current_version:
+    /// available, a downgrade, up to date, or an Error carrying the release when it has
+    /// no build for this board.
+    void report_fetched_release(ReleaseInfo info, const std::string& current_version);
+
     /// Last hop of sync_moonraker_channel(): restart Moonraker unless a job holds the
     /// machine or update_manager is busy. @p gen is the sync's moonraker_sync_generation_.
-    void restart_moonraker_for_channel(IMoonrakerAPI& api, uint64_t gen);
+    void restart_moonraker_for_channel(helix::IMoonrakerAPI& api, uint64_t gen);
     /// sync_moonraker_channel() with this install's directory supplied; the stanza's
     /// `path:` must resolve to it.
     void sync_moonraker_channel_for(const std::string& install_root);
+    /// Take @p conf_channel, a hand edit of the stanza, as the app's update channel the
+    /// way a Settings change does, without writing it back to moonraker.conf.
+    void adopt_moonraker_channel(const std::string& conf_channel);
+    /// on_channel_changed() short of the moonraker.conf sync.
+    void recheck_for_channel();
+
+#ifdef __ANDROID__
+    /**
+     * @brief On a Play install, report what Google Play will serve instead of the manifest
+     *
+     * @param manifest The fetched manifest release (empty version if the fetch failed)
+     * @param manifest_error Why the manifest fetch failed (empty on success)
+     * @return true if the check was reported here; false for a non-Play install,
+     *         whose manifest result the caller reports as usual
+     */
+    bool report_play_verdict(ReleaseInfo manifest, const std::string& manifest_error);
+#endif
 
     void init_subjects();
 
@@ -692,7 +777,7 @@ class UpdateChecker {
 
     // Rate limiting
     std::chrono::steady_clock::time_point last_check_time_{};
-    static constexpr auto MIN_CHECK_INTERVAL = std::chrono::minutes{10};
+    static constexpr auto kMinCheckInterval = std::chrono::minutes{10};
 
     // Threading
     std::thread worker_thread_;
@@ -735,6 +820,9 @@ class UpdateChecker {
         std::string version;
         bool is_downgrade = false;
         std::string error;
+        /// Error only: the release named by `version` has no build for this board.
+        /// The text is composed at render time, where lv_tr is safe.
+        bool no_build_for_board = false;
     };
     ShownVersionText shown_{};
     void render_version_text();
@@ -847,6 +935,57 @@ class UpdateChecker {
 namespace helix {
 bool parse_github_release(const std::string& json_str, UpdateChecker::ReleaseInfo& info,
                           std::string& error);
+
+/// parse_github_release() for a build whose asset may sit under any of
+/// @p asset_keys, tried in order (helix::platform::release_asset_keys()).
+bool parse_github_release(const std::string& json_str, UpdateChecker::ReleaseInfo& info,
+                          std::string& error, const std::vector<std::string>& asset_keys);
+
+/**
+ * @brief Parse a release manifest (R2 and dev channel schema) into ReleaseInfo
+ *
+ * The asset is the entry under the first of @p asset_keys the manifest lists.
+ * A manifest listing none of them parses like a GitHub release with no matching
+ * asset: the version is filled in and download_url stays empty (see
+ * release_has_build_for_this_board()).
+ *
+ * @param json_str Manifest body
+ * @param info Parsed release info, download URLs included on success
+ * @param error Failure reason
+ * @param asset_keys Keys this build's asset may sit under, best match first
+ * @return true when the manifest names a version
+ */
+bool parse_release_manifest(const std::string& json_str, UpdateChecker::ReleaseInfo& info,
+                            std::string& error, const std::vector<std::string>& asset_keys);
+
+/// True when @p info carries a download under one of @p asset_keys, or the build has
+/// no asset keys at all (an Android APK updates outside the release assets). A release
+/// without one cannot be installed here, and borrowing another board's asset would
+/// brick it.
+bool release_has_build_for(const UpdateChecker::ReleaseInfo& info,
+                           const std::vector<std::string>& asset_keys);
+
+/// release_has_build_for() with this build's helix::platform::release_asset_keys().
+bool release_has_build_for_this_board(const UpdateChecker::ReleaseInfo& info);
+
+/// The refusal shown for release @p version when it has no download for @p board_name
+/// ("FlashForge Creator 5"). Translated with lv_tr, so main thread only.
+std::string no_build_message(const std::string& version, const std::string& board_name);
+
+/// What a check that fetched @p info concludes on a build at @p installed. A newer or
+/// older release with no download for this board is an Error, the same version is
+/// UpToDate whether or not it has one.
+struct CheckOutcome {
+    UpdateChecker::Status status = UpdateChecker::Status::UpToDate;
+    bool is_downgrade = false; ///< UpdateAvailable only: the channel is behind the install
+};
+CheckOutcome decide_check_outcome(const std::string& installed,
+                                  const UpdateChecker::ReleaseInfo& info);
+
+/// decide_check_outcome() for a build whose asset may sit under any of @p asset_keys.
+CheckOutcome decide_check_outcome(const std::string& installed,
+                                  const UpdateChecker::ReleaseInfo& info,
+                                  const std::vector<std::string>& asset_keys);
 
 /**
  * @brief Strip a leading 'v' or 'V' from a GitHub release tag

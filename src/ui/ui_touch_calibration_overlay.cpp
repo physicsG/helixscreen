@@ -73,7 +73,7 @@ TouchCalibrationOverlay::TouchCalibrationOverlay() {
         // this panel's mapping will not be able to press it on the next pass
         // either, and the countdown put them straight back into capture with no
         // way out (#943).
-        if (++unattended_verify_rounds_ >= MAX_UNATTENDED_VERIFY_ROUNDS) {
+        if (++unattended_verify_rounds_ >= kMaxUnattendedVerifyRounds) {
             abort_session(lv_tr("Calibration kept timing out. Your previous settings were kept."));
             return;
         }
@@ -153,7 +153,7 @@ TouchCalibrationOverlay::TouchCalibrationOverlay() {
 
         // Shares the timeout's budget: a fast-revert also sends the user back
         // into capture without them asking, so on its own it is the same loop.
-        if (++unattended_verify_rounds_ >= MAX_UNATTENDED_VERIFY_ROUNDS) {
+        if (++unattended_verify_rounds_ >= kMaxUnattendedVerifyRounds) {
             abort_session(lv_tr("Touch input did not track the new calibration. "
                                 "Your previous settings were kept."));
             return;
@@ -199,7 +199,7 @@ void TouchCalibrationOverlay::init_subjects() {
     spdlog::debug("[{}] Initializing subjects", get_name());
 
     // State subject: 0=IDLE, 1=POINT_1, 2=POINT_2, 3=POINT_3, 4=VERIFY, 5=COMPLETE
-    UI_MANAGED_SUBJECT_INT(state_subject_, STATE_IDLE, "touch_cal_state", subjects_);
+    UI_MANAGED_SUBJECT_INT(state_subject_, kStateIdle, "touch_cal_state", subjects_);
 
     // Instruction text subject
     UI_MANAGED_SUBJECT_STRING(instruction_subject_, instruction_buffer_, "Tap anywhere to begin",
@@ -292,7 +292,7 @@ void TouchCalibrationOverlay::before_show() {
     unattended_verify_rounds_ = 0;
     hold_repeat_count_ = 0;
 
-    lv_subject_set_int(&state_subject_, STATE_IDLE);
+    lv_subject_set_int(&state_subject_, kStateIdle);
     update_instruction_text();
     update_crosshair_position();
 
@@ -364,15 +364,15 @@ void TouchCalibrationOverlay::on_activate() {
     // (independent of content layout — the capture surface is screen-absolute).
     raised_cancel_ = helix::ui::raise_control_above_capture(overlay_root_, "cancel_chip");
     if (raised_cancel_.obj) {
-        constexpr lv_coord_t CANCEL_CHIP_INSET = 12;
+        constexpr lv_coord_t kCancelChipInset = 12;
         lv_obj_t* scr = lv_screen_active();
         lv_obj_update_layout(scr);
         lv_coord_t chip_h = lv_obj_get_height(raised_cancel_.obj);
         // Absolute screen-corner placement (align is TOP_LEFT so set_pos is
         // absolute, not an offset from an alignment anchor).
         lv_obj_set_align(raised_cancel_.obj, LV_ALIGN_TOP_LEFT);
-        lv_obj_set_pos(raised_cancel_.obj, CANCEL_CHIP_INSET,
-                       lv_obj_get_height(scr) - chip_h - CANCEL_CHIP_INSET);
+        lv_obj_set_pos(raised_cancel_.obj, kCancelChipInset,
+                       lv_obj_get_height(scr) - chip_h - kCancelChipInset);
     }
 
     // Initialize crosshair position if calibrating
@@ -485,7 +485,7 @@ void TouchCalibrationOverlay::handle_accept_clicked() {
 
     // Accept in panel (transitions to COMPLETE state)
     controller_.panel()->accept();
-    lv_subject_set_int(&state_subject_, STATE_COMPLETE);
+    lv_subject_set_int(&state_subject_, kStateComplete);
 
     // Invoke completion callback with success
     if (completion_callback_ && !callback_invoked_) {
@@ -563,12 +563,12 @@ void TouchCalibrationOverlay::handle_back_clicked() {
 }
 
 void TouchCalibrationOverlay::handle_hold_abort() {
-    if (++hold_repeat_count_ < HOLD_ABORT_REPEATS) {
+    if (++hold_repeat_count_ < kHoldAbortRepeats) {
         return;
     }
     hold_repeat_count_ = 0;
     spdlog::info("[{}] Press-and-hold abort", get_name());
-    abort_session(lv_tr("Calibration cancelled."));
+    abort_session(lv_tr("Calibration canceled."));
 }
 
 // Reached from three places that all run inside an LVGL dispatch: the Cancel
@@ -643,26 +643,26 @@ void TouchCalibrationOverlay::update_state_subject() {
     }
 
     auto state = controller_.panel()->get_state();
-    int state_value = STATE_IDLE;
+    int state_value = kStateIdle;
 
     switch (state) {
     case helix::TouchCalibrationPanel::State::IDLE:
-        state_value = STATE_IDLE;
+        state_value = kStateIdle;
         break;
     case helix::TouchCalibrationPanel::State::POINT_1:
-        state_value = STATE_POINT_1;
+        state_value = kStatePoint1;
         break;
     case helix::TouchCalibrationPanel::State::POINT_2:
-        state_value = STATE_POINT_2;
+        state_value = kStatePoint2;
         break;
     case helix::TouchCalibrationPanel::State::POINT_3:
-        state_value = STATE_POINT_3;
+        state_value = kStatePoint3;
         break;
     case helix::TouchCalibrationPanel::State::VERIFY:
-        state_value = STATE_VERIFY;
+        state_value = kStateVerify;
         break;
     case helix::TouchCalibrationPanel::State::COMPLETE:
-        state_value = STATE_COMPLETE;
+        state_value = kStateComplete;
         break;
     }
 
@@ -739,7 +739,7 @@ void TouchCalibrationOverlay::update_crosshair_position() {
     const helix::Point target = controller_.active_target_position();
 
     // Center crosshair on target
-    lv_obj_set_pos(crosshair_, target.x - CROSSHAIR_HALF_SIZE, target.y - CROSSHAIR_HALF_SIZE);
+    lv_obj_set_pos(crosshair_, target.x - kCrosshairHalfSize, target.y - kCrosshairHalfSize);
 
     spdlog::debug("[{}] Crosshair positioned at ({}, {}) for step {}", get_name(), target.x,
                   target.y, step);

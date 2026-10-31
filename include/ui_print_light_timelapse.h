@@ -14,10 +14,10 @@
 #include <vector>
 
 // Forward declarations
-class IMoonrakerAPI;
 namespace helix {
+class IMoonrakerAPI;
 class PrinterState;
-}
+} // namespace helix
 
 /**
  * @file ui_print_light_timelapse.h
@@ -45,8 +45,8 @@ class PrintLightTimelapseControls {
     /**
      * @brief Initialize subjects for XML binding
      *
-     * Registers light_button_icon, timelapse_button_icon, timelapse_button_label
-     * subjects and XML event callbacks.
+     * Registers the light_button_icon and timelapse_button_icon subjects and
+     * the light XML event callback.
      */
     void init_subjects();
 
@@ -61,7 +61,7 @@ class PrintLightTimelapseControls {
      * @brief Set the Moonraker API for sending commands
      * @param api Pointer to IMoonrakerAPI (can be nullptr for mock mode)
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -99,7 +99,7 @@ class PrintLightTimelapseControls {
     // === Dependencies ===
     //
 
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     //
     // === Subject Management ===
@@ -123,9 +123,7 @@ class PrintLightTimelapseControls {
 
     bool timelapse_enabled_ = false;
     lv_subject_t timelapse_button_subject_{};
-    lv_subject_t timelapse_label_subject_{};
     char timelapse_button_buf_[8] = ""; // MDI video/video-off icon
-    char timelapse_label_buf_[16] = "Off";
 
     helix::AsyncLifetimeGuard lifetime_;
 };

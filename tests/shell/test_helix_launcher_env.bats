@@ -685,13 +685,149 @@ run_launcher_as_root() {
 @test "env file whose owner or mode cannot be read is refused, not assumed safe" {
     cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
     make_fake_stat
+    make_fake_ls
     printf 'MOONRAKER_HOST=never-loaded\n' > "$MOCK_INSTALL/config/helixscreen.env"
     env -u MOONRAKER_HOST \
-        PATH="$BATS_TEST_TMPDIR/fakebin:$PATH" FAKE_STAT_FAIL=1 \
+        PATH="$BATS_TEST_TMPDIR/fakebin:$PATH" FAKE_STAT_FAIL=1 FAKE_LS_RAW= \
         "$MOCK_INSTALL/bin/helix-launcher.sh" --print-env MOONRAKER_HOST \
         > "$BATS_TEST_TMPDIR/value.out" 2> "$BATS_TEST_TMPDIR/refuse.log"
     [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "" ]
     grep -q "cannot determine owner/mode" "$BATS_TEST_TMPDIR/refuse.log"
+}
+
+# =============================================================================
+# No stat at all: Forge-X's BusyBox (AD5M) ships without the applet, so the
+# trust gate reads owner, mode and link count from `ls -lnLd` instead.
+# =============================================================================
+
+# A stat that is not there: BusyBox answers a missing applet like this.
+make_no_stat() {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+    printf '#!/bin/sh\necho "stat: applet not found" >&2\nexit 127\n' \
+        > "$BATS_TEST_TMPDIR/fakebin/stat"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/stat"
+}
+
+# Fake ls answering `ls -lnLd PATH` in BusyBox's column layout from
+# FAKE_LS_PERM / FAKE_LS_NLINK / FAKE_LS_UID; FAKE_LS_RAW (set, even empty)
+# replaces the whole line. Every other invocation reaches the real ls.
+make_fake_ls() {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+    cat > "$BATS_TEST_TMPDIR/fakebin/ls" <<FAKE
+#!/bin/sh
+if [ "\$1" = "-lnLd" ]; then
+    if [ -n "\${FAKE_LS_RAW+x}" ]; then
+        [ -n "\$FAKE_LS_RAW" ] && echo "\$FAKE_LS_RAW"
+        exit 0
+    fi
+    echo "\${FAKE_LS_PERM:--rw-r--r--}    \${FAKE_LS_NLINK:-1} \${FAKE_LS_UID:-0}        0              42 Oct 15 12:00 \$2"
+    exit 0
+fi
+exec $(command -v ls) "\$@"
+FAKE
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ls"
+}
+
+run_launcher_no_stat() {
+    env -u MOONRAKER_HOST PATH="$BATS_TEST_TMPDIR/fakebin:$PATH" "$@" \
+        "$MOCK_INSTALL/bin/helix-launcher.sh" --print-env MOONRAKER_HOST \
+        > "$BATS_TEST_TMPDIR/value.out" 2> "$BATS_TEST_TMPDIR/gate.log"
+}
+
+@test "with no stat, a root-owned 0644 env file is read from ls and loads" {
+    cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
+    make_no_stat
+    make_fake_ls
+    printf 'MOONRAKER_HOST=busybox-ls.local\n' > "$MOCK_INSTALL/config/helixscreen.env"
+    run_launcher_no_stat FAKE_LS_UID=0 FAKE_LS_PERM=-rw-r--r--
+    [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "busybox-ls.local" ]
+    [ ! -s "$BATS_TEST_TMPDIR/gate.log" ]
+}
+
+@test "with no stat, a group-writable env file owned by a third user is refused" {
+    cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
+    make_no_stat
+    make_fake_ls
+    printf 'MOONRAKER_HOST=never-loaded\n' > "$MOCK_INSTALL/config/helixscreen.env"
+    run_launcher_no_stat FAKE_LS_UID=12345 FAKE_LS_PERM=-rw-rw-r--
+    [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "" ]
+    grep -q "owned by uid 12345" "$BATS_TEST_TMPDIR/gate.log"
+}
+
+@test "with no stat, a write bit read from ls refuses when the repair does not take" {
+    # The fake ls keeps reporting group write after the chmod, so this passes
+    # only if the letters convert to the octal mode the write-bit mask reads.
+    cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
+    make_no_stat
+    make_fake_ls
+    printf 'MOONRAKER_HOST=never-loaded\n' > "$MOCK_INSTALL/config/helixscreen.env"
+    run_launcher_no_stat FAKE_LS_UID=0 FAKE_LS_PERM=-rw-rw-r--
+    [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "" ]
+    grep -q "mode 664) is group- or world-writable" "$BATS_TEST_TMPDIR/gate.log"
+}
+
+@test "with no stat, an unparseable ls listing is refused, not assumed safe" {
+    cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
+    make_no_stat
+    make_fake_ls
+    printf 'MOONRAKER_HOST=never-loaded\n' > "$MOCK_INSTALL/config/helixscreen.env"
+    run_launcher_no_stat "FAKE_LS_RAW=ls: unrecognized option: n"
+    [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "" ]
+    grep -q "cannot determine owner/mode" "$BATS_TEST_TMPDIR/gate.log"
+    run_launcher_no_stat FAKE_LS_UID=root FAKE_LS_PERM=-rw-r--r--
+    [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "" ]
+    grep -q "cannot determine owner/mode" "$BATS_TEST_TMPDIR/gate.log"
+    run_launcher_no_stat FAKE_LS_UID=0 FAKE_LS_PERM=-rw-r--r-x-
+    [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "" ]
+    grep -q "cannot determine owner/mode" "$BATS_TEST_TMPDIR/gate.log"
+}
+
+@test "ls permission letters convert to the octal mode stat would print" {
+    make_fake_ls
+    export PATH="$BATS_TEST_TMPDIR/fakebin:$PATH"
+    . "$BATS_TEST_TMPDIR/env_parse.sh"
+    local perm want
+    while read -r perm want; do
+        [ "$(FAKE_LS_UID=7 FAKE_LS_NLINK=3 FAKE_LS_PERM="$perm" helix_ls_stat /x)" = "7 $want 3" ] ||
+            { echo "$perm -> $(FAKE_LS_UID=7 FAKE_LS_NLINK=3 FAKE_LS_PERM="$perm" helix_ls_stat /x), want $want"; return 1; }
+    done <<'CASES'
+-rw-r--r-- 644
+-rw-rw-rw- 666
+---------- 0
+-rwxr-xr-x 755
+-rwsr-xr-x 4755
+-rwSr--r-- 4644
+-rwxr-sr-x 2755
+-rw-r-Sr-- 2644
+drwxrwxrwt 1777
+drwxr-xr-T 1754
+-rwsr-sr-t 7755
+-rw-r--r--. 644
+-rw-r--r--+ 644
+lrwxrwxrwx 777
+CASES
+    [ "$(FAKE_LS_NLINK=2 helix_env_nlink /x)" = "2" ]
+    [ "$(FAKE_LS_UID=0 FAKE_LS_PERM=-rw-r--r-- helix_env_stat /x)" = "0 644" ]
+    [ -z "$(FAKE_LS_RAW='total 0' helix_ls_stat /x)" ]
+    [ -z "$(FAKE_LS_NLINK=x helix_ls_stat /x)" ]
+}
+
+@test "with no stat, BusyBox's own ls passes a symlinked 0644 env file" {
+    command -v busybox >/dev/null 2>&1 || skip "busybox not installed"
+    busybox ls -lnLd / >/dev/null 2>&1 || skip "this busybox has no ls -lnLd"
+    cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
+    make_no_stat
+    printf '#!/bin/sh\nexec busybox ls "$@"\n' > "$BATS_TEST_TMPDIR/fakebin/ls"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ls"
+    mkdir -p "$BATS_TEST_TMPDIR/printer_data/config/helixscreen"
+    printf 'MOONRAKER_HOST=forge-x.local\n' \
+        > "$BATS_TEST_TMPDIR/printer_data/config/helixscreen/helixscreen.env"
+    chmod 644 "$BATS_TEST_TMPDIR/printer_data/config/helixscreen/helixscreen.env"
+    ln -s "$BATS_TEST_TMPDIR/printer_data/config/helixscreen/helixscreen.env" \
+        "$MOCK_INSTALL/config/helixscreen.env"
+    run_launcher_no_stat
+    [ "$(cat "$BATS_TEST_TMPDIR/value.out")" = "forge-x.local" ]
+    [ ! -s "$BATS_TEST_TMPDIR/gate.log" ]
 }
 
 # The launcher's --print-env answer for NAME, with the env file holding the
@@ -862,6 +998,80 @@ print_env_from_file() {
             missing="$missing $k"
     done
     [ -z "$missing" ] || fail "template keys the parse refuses:$missing"
+}
+
+# Keys docs/devel tells users to put in helixscreen.env: an
+# `echo "KEY=..." >> .../helixscreen.env` line, or a KEY=value line in the
+# block under a `# In helixscreen.env` comment (up to a blank line or fence).
+devel_doc_env_keys() {
+    find "$WORKTREE_ROOT/docs/devel" -name '*.md' -exec awk '
+        /^```/ { inblk = 0; next }
+        /^[ \t]*#[ \t]*In helixscreen\.env/ { inblk = 1; next }
+        /^[ \t]*$/ { inblk = 0; next }
+        /echo[ \t]+["'"'"']?[A-Z][A-Z0-9_]*=.*>>.*helixscreen\.env/ {
+            s = $0; sub(/.*echo[ \t]+["'"'"']?/, "", s); sub(/=.*/, "", s); print s; next
+        }
+        inblk && /^[ \t]*(export[ \t]+)?[A-Z][A-Z0-9_]*=/ {
+            s = $0; sub(/^[ \t]*(export[ \t]+)?/, "", s); sub(/=.*/, "", s); print s
+        }' {} + | sort -u
+}
+
+@test "every env-file setting the docs name is on the allowlist" {
+    # A documented setting the parse refuses is one users write to no effect.
+    # docs/user names a setting as `NAME=value` or as the first cell of a
+    # variable table (gcode macro names in JSON examples are neither);
+    # docs/devel names one where it tells users to write it into the file.
+    local user devel k missing=""
+    user=$(grep -rhoE '(\b(HELIX|MOONRAKER|MALLOC)_[A-Z0-9_]*[A-Z0-9]=|^\| *`(HELIX|MOONRAKER|MALLOC)_[A-Z0-9_]*[A-Z0-9]`)' \
+        "$WORKTREE_ROOT/docs/user" | sed 's/^| *`//; s/`$//; s/=$//' | sort -u)
+    [ -n "$user" ] || fail "no keys extracted from docs/user"
+    echo "$user" | grep -qx HELIX_TOUCH_MIN_X || fail "extraction missed a table key"
+    echo "$user" | grep -qx HELIX_DPI || fail "extraction missed a NAME= key"
+    devel=$(devel_doc_env_keys)
+    echo "$devel" | grep -qx HELIX_TOUCH_CAL_DEBOUNCE || fail "extraction missed an echo >> key"
+    echo "$devel" | grep -qx HELIX_BOOT_RESPAWN_MAX || fail "extraction missed an 'In helixscreen.env' key"
+    for k in $user $devel; do
+        sh -c ". '$BATS_TEST_TMPDIR/env_parse.sh'; helix_env_key_allowed '$k'" ||
+            missing="$missing $k"
+    done
+    [ -z "$missing" ] || fail "documented settings the parse refuses:$missing"
+}
+
+@test "boot respawn, log ring and calibration debounce settings take bounded integers" {
+    local kv k
+    for kv in HELIX_BOOT_RESPAWN_MAX=0 HELIX_BOOT_RESPAWN_MAX=10 HELIX_BOOT_RESPAWN_WINDOW=300 \
+        HELIX_BOOT_RESPAWN_DELAY=0 HELIX_BOOT_RESPAWN_DELAY=60 HELIX_LOG_RING_LINES=500 \
+        HELIX_LOG_RING_LINES=100000 HELIX_TOUCH_CAL_DEBOUNCE=0 HELIX_TOUCH_CAL_DEBOUNCE=1; do
+        k="${kv%%=*}"
+        [ "$(print_env_from_file "$k" "$kv")" = "${kv#*=}" ] || fail "$kv was not exported"
+    done
+    for kv in HELIX_BOOT_RESPAWN_MAX=11 HELIX_BOOT_RESPAWN_MAX=-1 HELIX_BOOT_RESPAWN_WINDOW=301 \
+        HELIX_BOOT_RESPAWN_DELAY=61 HELIX_BOOT_RESPAWN_DELAY=3s HELIX_LOG_RING_LINES=0 \
+        HELIX_LOG_RING_LINES=100001 HELIX_LOG_RING_LINES=99999999999999999999 \
+        HELIX_TOUCH_CAL_DEBOUNCE=2 HELIX_TOUCH_CAL_DEBOUNCE=01; do
+        k="${kv%%=*}"
+        [ "$(print_env_from_file "$k" "$kv")" = "" ] || fail "$kv was exported"
+        grep -q "$k must be" "$BATS_TEST_TMPDIR/parse.log" || fail "$kv refused without a reason"
+    done
+}
+
+@test "the touch calibration settings the user docs list load" {
+    local kv k
+    for kv in HELIX_TOUCH_MIN_X=500 HELIX_TOUCH_MAX_X=3580 HELIX_TOUCH_MIN_Y=3200 \
+        HELIX_TOUCH_MAX_Y=900 HELIX_DEBUG_TOUCHES=1; do
+        k="${kv%%=*}"
+        [ "$(print_env_from_file "$k" "$kv")" = "${kv#*=}" ] || fail "$k was not exported"
+    done
+}
+
+@test "HELIX_OOM_SCORE_ADJ takes 0-1000, never a negative score" {
+    [ "$(print_env_from_file HELIX_OOM_SCORE_ADJ 'HELIX_OOM_SCORE_ADJ=0')" = "0" ] || fail "0 refused"
+    [ "$(print_env_from_file HELIX_OOM_SCORE_ADJ 'HELIX_OOM_SCORE_ADJ=500')" = "500" ] || fail "500 refused"
+    [ "$(print_env_from_file HELIX_OOM_SCORE_ADJ 'HELIX_OOM_SCORE_ADJ=1000')" = "1000" ] || fail "1000 refused"
+    [ "$(print_env_from_file HELIX_OOM_SCORE_ADJ 'HELIX_OOM_SCORE_ADJ=-500')" = "" ] || fail "-500 exported"
+    grep -q "HELIX_OOM_SCORE_ADJ must be 0-1000" "$BATS_TEST_TMPDIR/parse.log" || fail "no refusal logged"
+    [ "$(print_env_from_file HELIX_OOM_SCORE_ADJ 'HELIX_OOM_SCORE_ADJ=1001')" = "" ] || fail "1001 exported"
+    [ "$(print_env_from_file HELIX_OOM_SCORE_ADJ 'HELIX_OOM_SCORE_ADJ=050')" = "" ]
 }
 
 @test "--print-env takes the same names the file parse does" {
@@ -1186,7 +1396,7 @@ assert_extracted() {
 # itself); the layout probes resolve under HELIX_AD5X_PROBE_ROOT pointing at a
 # sandbox fake root — these tests must never create /ZMOD or /usr/prog on the
 # build host. Pinned to the SAME truth table as the C++ predicate
-# helix::ad5x_mod_layout_present() (tests/unit/test_platform_info.cpp).
+# helix::flashforge_mod_tree() (tests/unit/test_platform_info.cpp).
 # =============================================================================
 
 # Echo the resulting MALLOC_CHECK_ (empty when the block left it unset) for a

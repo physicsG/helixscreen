@@ -2,6 +2,8 @@
 
 How to get HelixScreen onto an Elegoo Centauri Carbon: flash the community [OpenCentauri COSMOS](https://docs.opencentauri.cc/klipper-conversion/cosmos/cosmos/) firmware first, then install HelixScreen on top of it.
 
+> **Easy installer:** the [HelixScreen easy installer](https://helixscreen.org/installer/) does not handle this printer yet. See [what works today](easy-installer-unsupported.md#elegoo-centauri-carbon).
+
 ## Tested With
 
 > **Tested and working.** Prebuilt binaries ship in releases and the installer has auto-detection support. Requires the community [OpenCentauri COSMOS firmware](https://docs.opencentauri.cc/klipper-conversion/cosmos/cosmos/); stock Elegoo firmware is not supported (no SSH, no Klipper, no Moonraker).
@@ -110,6 +112,8 @@ The uninstaller reverses the `gui-switcher` registration, including the allowlis
 
 - **Slice with the COSMOS printer profile.** Elegoo's stock Centauri Carbon start G-code calls `M729`, and COSMOS turns `M729` into an emergency stop (26.08 shows "Use COSMOS OrcaSlicer profile (or COSMOS start/end machine gcode)"; 26.07 shows "Use COSMOS start/end machine gcode"). A file sliced with the stock profile halts the printer as soon as it starts, and Klipper needs a `FIRMWARE_RESTART`. Re-slice with the COSMOS OrcaSlicer profile, whose start G-code is a single `PRINT_START EXTRUDER=... BED=... CHAMBER=...` line
 - **Moonraker listens on port `80`** on COSMOS directly (no nginx). Enter `80` as the port at the wizard's connection step; the `7125` default does not apply on this printer
+- **Rebooting and shutting down from HelixScreen** works on every COSMOS version. HelixScreen powers the printer down itself instead of asking Moonraker, because Moonraker on COSMOS stable tries to use `sudo`, which COSMOS does not have. Rebooting from Mainsail or Fluidd on COSMOS stable fails with a `sudo` error for the same reason; reboot from the printer's screen instead
+- **Moonruster** (a Rust replacement for Moonraker that some COSMOS users install to free memory) works with HelixScreen, but it cannot load Moonraker add-ons written in Python, so the [HelixPrint plugin](helixprint-plugin.md) and Moonraker-Timelapse do not run under it. HelixScreen works without them
 - **Factory white-balance calibration**: the `cc1` preset ships with per-channel panel gain so colors look neutral out of the box on the Centauri Carbon's 4.3" panel. No manual tuning needed
 - **The `config-manager` allowlist**: COSMOS's `config-manager` has a fixed allowlist for the `screen_ui` slot. The installer handles this automatically via an init-script wrapper so HelixScreen can be selected without patching COSMOS itself; the uninstaller fully reverses it
 

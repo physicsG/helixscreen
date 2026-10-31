@@ -29,7 +29,7 @@
 #   checkable here and is not reported.
 #
 # KNOWN BLIND SPOT
-#   Icon names built or chosen in C++ (POWER_ICONS[], favorite-macro configs,
+#   Icon names built or chosen in C++ (kPowerIcons[], favorite-macro configs,
 #   anything passed to lookup_codepoint() from a string variable) are outside
 #   this gate. Those call sites mostly validate against the table already —
 #   see favorite_macro_widget.cpp — which is the C++-side equivalent.

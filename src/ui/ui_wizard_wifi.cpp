@@ -9,7 +9,6 @@
 #include "ui_keyboard_manager.h"
 #include "ui_modal.h"
 #include "ui_subject_registry.h"
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "config.h"
@@ -471,10 +470,8 @@ void WizardWifiStep::clear_network_list() {
         lv_indev_reset(indev, network_list_container_);
     }
 
-    // Freeze queue to prevent background thread from enqueueing callbacks
-    // targeting children we're about to delete
-    auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-    helix::ui::UpdateQueue::instance().drain();
+    // Queued scan and connect results hold no row pointers: they rebuild the
+    // list or look widgets up by name, so the rows need no drain first.
 
     int32_t child_count = static_cast<int32_t>(lv_obj_get_child_count(network_list_container_));
     spdlog::debug("[{}] Network list has {} children", get_name(), child_count);

@@ -18,6 +18,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/print_select_panel_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
@@ -40,10 +41,12 @@ class RootsCountingClient : public MoonrakerClientMock {
   public:
     std::atomic<int> roots_requests{0};
 
-    helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms, bool silent,
-        std::optional<helix::rpc_error_policy::CallerIntent> intent) override {
+    helix::RequestId
+    send_jsonrpc(const std::string& method, const json& params,
+                 helix::SharedCallback<void(const json&)> success_cb,
+                 helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms,
+                 bool silent,
+                 std::optional<helix::rpc_error_policy::CallerIntent> intent) override {
         if (method != "server.files.roots") {
             return MoonrakerClientMock::send_jsonrpc(method, params, std::move(success_cb),
                                                      std::move(error_cb), timeout_ms, silent,
@@ -84,9 +87,7 @@ class GcodeRootFixture : public LVGLUITestFixture {
     }
 
     void settle() {
-        for (int i = 0; i < 4; ++i) {
-            UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
     }
 };
 

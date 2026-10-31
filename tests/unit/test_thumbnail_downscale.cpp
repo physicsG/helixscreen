@@ -38,30 +38,30 @@ uint8_t alpha_at(const std::vector<uint8_t>& out, ThumbnailDims d, int x, int y)
 TEST_CASE("fit_thumbnail keeps aspect inside the box and never upscales",
           "[thumbnail][downscale]") {
     // The print-status thumbnail box at 800x480.
-    constexpr int BOX_W = 377;
-    constexpr int BOX_H = 260;
-    const ThumbnailDims square = helix::fit_thumbnail(300, 300, BOX_W, BOX_H);
+    constexpr int kBoxW = 377;
+    constexpr int kBoxH = 260;
+    const ThumbnailDims square = helix::fit_thumbnail(300, 300, kBoxW, kBoxH);
     CHECK(square.w == 260);
     CHECK(square.h == 260);
     // 16:9 fills the box's width rather than shrinking to fit a 260 square.
-    const ThumbnailDims wide = helix::fit_thumbnail(640, 360, BOX_W, BOX_H);
+    const ThumbnailDims wide = helix::fit_thumbnail(640, 360, kBoxW, kBoxH);
     CHECK(wide.w == 377);
     CHECK(wide.h == 212);
-    const ThumbnailDims very_wide = helix::fit_thumbnail(1000, 500, BOX_W, BOX_H);
+    const ThumbnailDims very_wide = helix::fit_thumbnail(1000, 500, kBoxW, kBoxH);
     CHECK(very_wide.w == 377);
     CHECK(very_wide.h == 188);
     // Taller than the box's ratio: height binds.
-    const ThumbnailDims tall = helix::fit_thumbnail(200, 400, BOX_W, BOX_H);
+    const ThumbnailDims tall = helix::fit_thumbnail(200, 400, kBoxW, kBoxH);
     CHECK(tall.w == 130);
     CHECK(tall.h == 260);
     // Already inside the box: kept as is.
-    const ThumbnailDims small = helix::fit_thumbnail(320, 180, BOX_W, BOX_H);
+    const ThumbnailDims small = helix::fit_thumbnail(320, 180, kBoxW, kBoxH);
     CHECK(small.w == 320);
     CHECK(small.h == 180);
-    CHECK(helix::fit_thumbnail(1000, 1, BOX_W, BOX_H).h == 1);
-    CHECK(helix::fit_thumbnail(0, 300, BOX_W, BOX_H).w == 0);
+    CHECK(helix::fit_thumbnail(1000, 1, kBoxW, kBoxH).h == 1);
+    CHECK(helix::fit_thumbnail(0, 300, kBoxW, kBoxH).w == 0);
     CHECK(helix::rgb565a8_size({260, 260}) == 202800);
-    CHECK(helix::rgb565a8_size({BOX_W, BOX_H}) == 294060);
+    CHECK(helix::rgb565a8_size({kBoxW, kBoxH}) == 294060);
 }
 
 TEST_CASE("downscale packs RGB565 then an alpha plane", "[thumbnail][downscale]") {

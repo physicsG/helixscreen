@@ -145,7 +145,7 @@ Override the automatic display backend detection.
 |----------|-------|
 | **Values** | `sdl`, `drm`, `fbdev`, `egl` |
 | **Default** | `fbdev` (CPU rendering, maximum compatibility) |
-| **File** | `src/api/display_backend.cpp`, `scripts/helix-launcher.sh#select_binary` |
+| **File** | `src/api/display_backend.cpp`, `scripts/helix-launcher.sh#app_display_backend` |
 
 **Backend comparison:**
 
@@ -158,9 +158,11 @@ Override the automatic display backend detection.
 
 The `drm` backend uses DRM (Direct Rendering Manager) dumb buffers with a vsynced page flip, which avoids tearing that a plain memory copy can show. Rendering itself is CPU-based on both `drm` and `fbdev`. The `fbdev` backend is the safe default that works everywhere, including SPI displays that lack DRM support.
 
-`egl` is different in kind from the other three: it names a **separate binary**, `helix-screen-egl`, not a runtime switch inside one. Which of LVGL's two DRM drivers a binary carries is compiled in, so the launcher picks a binary rather than a mode. Setting `HELIX_DISPLAY_BACKEND=egl` tells `scripts/helix-launcher.sh` to run that binary without probing first; the launcher then exports `HELIX_DISPLAY_BACKEND=drm` for the app itself, because the EGL binary still presents through LVGL's DRM driver.
+`egl` is the DRM backend presenting through LVGL's EGL driver instead of dumb buffers. The Pi builds link both drivers into `helix-screen`, and the app picks one from this variable; a binary without the EGL path (x86, every single-binary platform) logs that and auto-detects. Setting `HELIX_DISPLAY_BACKEND=egl` tells `scripts/helix-launcher.sh` to take the EGL rung without probing first.
 
-Left unset, the launcher runs `helix-screen-egl --probe-egl` and takes the EGL rung only when that exits 0, which requires a hardware renderer — a context that resolves to llvmpipe is refused, since it would spend CPU to save CPU. A board whose probe declines steps down to `drm`, never straight to `fbdev`. See `docs/devel/GPU_ACCELERATION.md` for what the rung is worth per board.
+Left unset on a board with a `/dev/dri/card*`, the launcher runs `helix-screen --probe-egl` and exports `egl` only when that exits 0, which requires a hardware renderer — a context that resolves to llvmpipe is refused, since it would spend CPU to save CPU. A board whose probe declines steps down to `drm`, never straight to `fbdev`; a crash steps down one rung the same way (`egl` to `drm`, `drm` to `fbdev`). A build with no rungs answers the probe with 2 and auto-detects. See `docs/devel/GPU_ACCELERATION.md` for what the rung is worth per board.
+
+The Pi and x86 builds are one binary with no load-time dependency on libdrm, libinput, libEGL, libGLESv2 or libgbm: they load at runtime (`mk/implib.mk`, `include/gpu_libs.h`). On a system missing any of them, `drm` and `egl` report unavailable and the app falls back to `fbdev` in-process. `HELIX_DRI_DIR` replaces `/dev/dri` for the launcher's card check, for tests.
 
 ```bash
 # Force SDL backend (useful for debugging on embedded systems)
@@ -384,6 +386,8 @@ HELIX_FORCE_ROTATION_PROBE=1 ./build/bin/helix-screen
 - Saves the confirmed rotation to `/display/rotate` in `settings.json`
 - Sets `/display/rotation_probed` flag so it doesn't re-run on subsequent boots
 - Skips entirely if: rotation is already configured (config, env var, or CLI), or the probe has already run
+- Never shows on a board whose orientation is already known: the kernel's `panel_orientation`, else the board's mount (`upright_rotation` in `src/application/display_metrics.cpp#kKnownPanels`; 270° on the K1, K1C and K1 Max), which applies only when the framebuffer is the geometry that mount was measured on (480x800 for the K1). That rotation is saved the same way, with no prompt
+- `HELIX_FORCE_ROTATION_PROBE=1` skips the board's mount, so the probe runs on a board that resolved wrongly. A kernel `panel_orientation` still applies
 - Runs after translations are loaded (Phase 8c) so probe strings are translatable via `lv_tr()`
 
 **The probe cannot be driven by `helix-screen ctl`.** It blocks in startup Phase 8b, and the
@@ -551,6 +555,16 @@ HELIX_REQUIRE_POINTER=0 ./build/bin/helix-screen -vv
 
 Note the asymmetry: only the literal strings `0` and `false` disable the requirement. `HELIX_REQUIRE_POINTER=no` leaves it enabled.
 
+### `HELIX_REMOTE_SCREEN`
+
+Set to `firmware` by a platform hook whose firmware serves the screen to browsers itself. The built-in screen server (`docs/devel/REMOTE_SCREEN.md`) then never starts and its Settings > Connection > Screen Sharing row stays hidden. `HELIX_REMOTE_SCREEN_FB0` implies the same.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `firmware`; anything else is ignored |
+| **Default** | Unset: the built-in server is available |
+| **File** | `src/application/remote_screen_service.cpp` (`remote_screen_firmware_provides`) |
+
 ### `HELIX_REMOTE_SCREEN_FB0`
 
 Mirror every rendered frame into a framebuffer device in addition to the normal display output. Set by the Snapmaker U1 platform hook so the firmware's `fb-http` snapshot daemon — which reads `/dev/fb0` — keeps serving the remote-screen view while HelixScreen renders through its own backend.
@@ -574,7 +588,7 @@ Force the screensaver to start immediately instead of waiting for the idle timeo
 
 | Property | Value |
 |----------|-------|
-| **Values** | A saver name from `include/screensaver_registry.h#"SCREENSAVERS[]"` (`toasters`, `starfield`, `pipes`, `bounce`, `fireworks`), or `1` / any other value (uses the configured type, falling back to flying toasters) |
+| **Values** | A saver name from `include/screensaver_registry.h#"kScreensavers[]"` (`toasters`, `starfield`, `pipes`, `bounce`, `fireworks`, `logo`, `maze`, `hyperspace`, `flipclock`, `fireflies`, `aqua`, `highfly`), `random` (a random saver the board can run), or `1` / any other value (uses the configured type, falling back to flying toasters). A saver stored as too heavy for the board runs its fallback, as the idle screen would (`docs/devel/SCREENSAVERS.md` § "The gate") |
 | **Default** | Unset — normal idle-timeout behavior |
 | **File** | `src/application/display_manager.cpp`, names in `include/screensaver_registry.h` |
 
@@ -586,7 +600,7 @@ HELIX_SCREENSAVER_NOW=starfield ./build/bin/helix-screen --test -vv
 HELIX_SCREENSAVER_NOW=1 ./build/bin/helix-screen --test -vv
 ```
 
-Requires a build with `HELIX_ENABLE_SCREENSAVER` — the whole block is `#ifdef`-ed out otherwise, and the variable is then ignored.
+Requires a build with screensavers (`HELIX_ENABLE_SCREENSAVER` defined and non-zero; the ESP32 firmware defines it as 0). Without them the whole block is compiled out and the variable is ignored.
 
 ### `HELIX_REFR_PERIOD_MS`
 
@@ -634,7 +648,7 @@ Level 0 frame period of every screensaver, for manual testing: the saver draws a
 HELIX_SCREENSAVER_REFR_PERIOD_MS=0 HELIX_SCREENSAVER_NOW=1 ./build/bin/helix-screen --test -vv
 ```
 
-Requires a build with `HELIX_ENABLE_SCREENSAVER`.
+Requires a build with screensavers (`HELIX_ENABLE_SCREENSAVER` non-zero).
 
 ### `HELIX_SCREENSAVER_BUDGET_PCT`
 
@@ -651,11 +665,11 @@ Replaces the screensaver gate's CPU budget, as a whole percent of one core. Each
 HELIX_SCREENSAVER_BUDGET_PCT=5 HELIX_SCREENSAVER_NOW=toasters ./build/bin/helix-screen --test -vv
 ```
 
-Requires a build with `HELIX_ENABLE_SCREENSAVER`.
+Requires a build with screensavers (`HELIX_ENABLE_SCREENSAVER` non-zero).
 
 ### `HELIX_SCREENSAVER_LEVEL`
 
-Runs every saver that starts at this quality level and turns the gate off for that run: no step-down and no stored level. Level 0 is the most expensive. A level past the saver's ladder is ignored with a warning, and the stored level is used. Read when a saver starts.
+Runs every saver that starts at this quality level and turns the gate off for that run: no step-down and no stored level. A saver stored as too heavy runs too, with no fallback, and the settings dropdown offers it. Level 0 is the most expensive. A level past the saver's ladder is ignored with a warning, and the stored level is used. Read when a saver starts.
 
 | Property | Value |
 |----------|-------|
@@ -668,7 +682,22 @@ Runs every saver that starts at this quality level and turns the gate off for th
 HELIX_SCREENSAVER_LEVEL=1 HELIX_SCREENSAVER_NOW=pipes ./build/bin/helix-screen --test -vv
 ```
 
-Requires a build with `HELIX_ENABLE_SCREENSAVER`.
+Requires a build with screensavers (`HELIX_ENABLE_SCREENSAVER` non-zero).
+
+### `HELIX_GLASS`
+
+Forces the glass gate's verdict for this run. `1` makes the Glass Effects row show in Settings > Appearance and glass draw when it is switched on, even on a board that would fail (16 bpp, a limited tier, a software-rotated display) or whose probe failed; `0` hides the row and keeps the UI flat even where a probe passed. The stored probe record is neither read for the decision nor written. Read once, when the gate starts after boot.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1` or `0` |
+| **Default** | Unset: the gate decides from the board and the probe stored at `/display/glass_probe` |
+| **Invalid** | Anything else is ignored with a warning |
+| **File** | `include/glass_gate.h#glass_env_force`, `src/ui/glass_gate.cpp` |
+
+```bash
+HELIX_GLASS=1 HELIX_HEADLESS=1 SDL_VIDEODRIVER=dummy ./build/bin/helix-screen --test -vv
+```
 
 ### `HELIX_LOOP_MIN_SLEEP_MS`
 
@@ -683,7 +712,7 @@ Shortest sleep the main loop takes between `lv_timer_handler()` calls. The loop 
 
 ### `HELIX_EGL_VSYNC`
 
-EGL presentation mode on the DRM backend (`helix-screen-egl`). By default the flush waits for the in-flight flip, so every rendered frame reaches the screen; the cost is that the LVGL thread blocks for up to one refresh interval inside the flush. `0` turns the wait off: a frame finished while the previous page flip is still in flight then waits as pending, and the next frame replaces it before it is ever shown, so an animation can skip frames or leave its last frame unshown. Flips are latched to vblank either way, so neither mode tears.
+EGL presentation mode on the DRM backend (`HELIX_DISPLAY_BACKEND=egl`). By default the flush waits for the in-flight flip, so every rendered frame reaches the screen; the cost is that the LVGL thread blocks for up to one refresh interval inside the flush. `0` turns the wait off: a frame finished while the previous page flip is still in flight then waits as pending, and the next frame replaces it before it is ever shown, so an animation can skip frames or leave its last frame unshown. Flips are latched to vblank either way, so neither mode tears.
 
 | Property | Value |
 |----------|-------|
@@ -696,7 +725,7 @@ The dumb-buffer DRM binary (`helix-screen`) already waits for every page flip; t
 
 ### `HELIX_EGL_PARTIAL_UPLOAD`
 
-How much of each frame the EGL presentation path (`helix-screen-egl`) copies into the display texture. By default only the areas LVGL flushed are uploaded. `0` uploads the whole buffer every frame, however little of it changed. The first frame, a frame into a recreated or resized texture, and the frame after pixels changed outside the flush path still upload the whole buffer: the flush callback put back after the splash or a panel power-off, and a color transform change.
+How much of each frame the EGL presentation path (`HELIX_DISPLAY_BACKEND=egl`) copies into the display texture. By default only the areas LVGL flushed are uploaded. `0` uploads the whole buffer every frame, however little of it changed. The first frame, a frame into a recreated or resized texture, and the frame after pixels changed outside the flush path still upload the whole buffer: the flush callback put back after the splash or a panel power-off, and a color transform change.
 
 Uploading a sub-rectangle needs `GL_UNPACK_ROW_LENGTH` (OpenGL ES 3, or `GL_EXT_unpack_subimage` on OpenGL ES 2). A GL driver without it keeps uploading whole frames and logs a warning. A driver may also make an upload wait while the previous frame still draws from the texture; `0` is the way out on such a driver.
 
@@ -711,7 +740,7 @@ A stale region after waking the panel or leaving the splash is the failure to lo
 
 ### `HELIX_EGL_XRGB`
 
-Pixel format of the display on the EGL presentation path (`helix-screen-egl`). LVGL's 32 bpp format is XRGB8888, whose fourth byte LVGL leaves undefined, and this path would present that byte as alpha (`docs/devel/GPU_ACCELERATION.md` § "The alpha trap"). By default the display stays XRGB8888 and the display shader ignores the fourth byte, and LVGL then skips clearing each area before redrawing it. `0` switches the display to ARGB8888 so LVGL keeps the byte a real alpha instead.
+Pixel format of the display on the EGL presentation path (`HELIX_DISPLAY_BACKEND=egl`). LVGL's 32 bpp format is XRGB8888, whose fourth byte LVGL leaves undefined, and this path would present that byte as alpha (`docs/devel/GPU_ACCELERATION.md` § "The alpha trap"). By default the display stays XRGB8888 and the display shader ignores the fourth byte, and LVGL then skips clearing each area before redrawing it. `0` switches the display to ARGB8888 so LVGL keeps the byte a real alpha instead.
 
 | Property | Value |
 |----------|-------|
@@ -899,7 +928,7 @@ Press-debounce for the calibration wizard. **On by default.** The calibration st
 |----------|-------------|---------|
 | `HELIX_TOUCH_CAL_DEBOUNCE` | Capture-on-press / commit-on-release debounce. Set to `0` to opt out to the legacy sample-on-press path. | Enabled |
 
-**How it works:** `on_press()` captures the press point without sampling; `on_release()` commits it. A commit within **150 ms** (`REFRACTORY_MS`) of the previous committed sample is treated as bounce and dropped. A **600 ms** (`STALL_COMMIT_MS`) stall timer commits a pending press for controllers that never deliver a clean release, so calibration can never wedge. Setting `HELIX_TOUCH_CAL_DEBOUNCE=0` restores the exact legacy behavior — sample on every press, release is a no-op — for A/B testing on real hardware.
+**How it works:** `on_press()` captures the press point without sampling; `on_release()` commits it. A commit within **150 ms** (`kRefractoryMs`) of the previous committed sample is treated as bounce and dropped. A **600 ms** (`kStallCommitMs`) stall timer commits a pending press for controllers that never deliver a clean release, so calibration can never wedge. Setting `HELIX_TOUCH_CAL_DEBOUNCE=0` restores the exact legacy behavior — sample on every press, release is a no-op — for A/B testing on real hardware.
 
 **Composes with `HELIX_DEBUG_TOUCH`:** set both to capture the validation evidence in a debug bundle — `HELIX_DEBUG_TOUCH=1` logs one `[TouchDebug] sample N/3 …` line per recorded sample, and with debounce on you also get `[TouchDebug] dropped bounce sample, dt=…ms` for each collapsed burst press.
 
@@ -1067,9 +1096,7 @@ HELIX_SSAO=0 ./build/bin/helix-screen --test --gcode-file model.gcode -vv &
 
 **Performance.** The outline pass is ~2 ms per cache revalidation, measured on a
 real AD5M. The antialiasing is not minimal:
-Wu's algorithm measures about **6.1x** the aliased rasterization cost
-(`tests/unit/test_gcode_raster_bench.cpp`, run with
-`./build/bin/helix-tests "[raster_bench]"`). On the 135,197-segment test plate
+Wu's algorithm measures about **6.1x** the aliased rasterization cost. On the 135,197-segment test plate
 that is roughly 29 ms aliased against 178 ms antialiased, and the adaptive
 controller settles at 49 layers per frame instead of 22 - so a preview appears
 about 2.2x faster with antialiasing off. That is why the constrained tier keeps
@@ -1196,6 +1223,24 @@ device deployment should ever need it.
 |----------|-------|
 | **Values** | Absolute directory path to use in place of `/sys/class/net` |
 | **Default** | Unset — the real `/sys/class/net` |
+| **File** | `src/api/wifi_backend_wpa_supplicant.cpp` |
+
+### `HELIX_WPA_PROC_ROOT`
+
+Override the process table the wpa backend scans for a running
+`wpa_supplicant` (its `-O`, `-c` and `-i` arguments).
+
+Each `start()` walks every PID's `cmdline` several times. On a device that is
+a few hundred files; on a host carrying tens of thousands of processes, such as
+a container that never reaps its zombies, it is seconds, and `start()` gives
+initialization 5 s. The fake-supplicant unit tests
+(`tests/test_helpers/wpa_fake_supplicant.h`) pin it to an empty directory so
+their timing does not depend on the host. No device deployment should need it.
+
+| Property | Value |
+|----------|-------|
+| **Values** | Absolute directory path to use in place of `/proc` |
+| **Default** | Unset — the real `/proc` |
 | **File** | `src/api/wifi_backend_wpa_supplicant.cpp` |
 
 ### `HELIX_NETD_SOCKET`
@@ -1436,9 +1481,23 @@ skip ineffective, ~10ms after coalescing equal-height column runs, with ~47% of 
 outright. Most of the original cost was `lv_canvas_finish_layer()` rasterising 456 separate
 single-column fills, not the pixels themselves.
 
+### `HELIX_SWEEP_PREVIEW_OFF`
+
+Turn the live sweep preview off for one run: the Input Shaper panel and wizard step MEASURING
+charts and the Belt Tension chart draw nothing while the sweep runs, and the CSV curve appears
+at the end as it does without a stream. It exists for measuring what the preview costs on a
+board (the on/off CPU comparison in `BELT_TENSION.md` § Live preview), so it is a temporary
+override and not a setting. Logged once at info: `[LiveSweepPreview] HELIX_SWEEP_PREVIEW_OFF set`.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1`, `true`, `yes` or `on` (the `env_flag` set) |
+| **Default** | Unset, preview on wherever a stream is reachable |
+| **File** | `src/calibration/live_sweep_preview.cpp` (`LiveSweepPreview::arm`) |
+
 ### `HELIX_BELT_CAPTURE_DIR`
 
-Write every resolved pluck event from the live belt tuner (`BeltListenSession`) to disk, in the
+Write every resolved pluck event from the pluck belt tuner's `BeltListenSession` to disk, in the
 same format `tests/fixtures/belt_plucks/` already uses. Diagnostic only, for the reference-machine
 hardware pass: every threshold in `PluckDetector` and `pitch_estimator` was measured against a
 small, fixed capture set, and the algorithm has since been tuned against that same set. This is
@@ -1460,12 +1519,9 @@ Filenames carry an incrementing sequence number so same-second events cannot col
 | **Default** | Unset |
 | **File** | `include/belt_capture.h`, `src/calibration/belt_capture.cpp`, `src/calibration/belt_listen_session.cpp` |
 
-```bash
-mkdir -p /tmp/belt-captures
-HELIX_BELT_CAPTURE_DIR=/tmp/belt-captures ./build/bin/helix-screen --test -vv
-# ... drive the belt tuner (ctl navigate belt_tension, or physically pluck on real hardware) ...
-ls /tmp/belt-captures
-```
+No screen runs a `BeltListenSession` (`BELT_TUNER.md`: the pluck libraries back no UI), so the
+app writes nothing here whatever the variable says; the writer serves a harness or test that
+drives a session itself. The Belt Tension screen's sweeps never pass through it.
 
 Each rendered file's header extends the existing `sample_rate_hz=` / `rms_over_noise_floor=` line
 with the verdict fields (`verdict=`, `onset_rise=`, `decay_end_ratio=`, `harmonic_concentration=`,
@@ -1564,7 +1620,7 @@ HELIX_HOT_RELOAD=0 ./build/bin/helix-screen --test -vv
 ```
 
 **How it works:**
-1. On startup, recursively scans `ui_xml/` and records file modification times (skips `translations/` and `.claude-recall/`)
+1. On startup, recursively scans `ui_xml/` and records file modification times (skips `translations/`)
 2. Every 500ms, checks all tracked XML files for mtime changes
 3. On change: reads the file and validates XML well-formedness on the polling thread (no LVGL state touched). If the file is mid-write (truncated, briefly empty during atomic rename) or has a syntax error, the reload is deferred — the existing UI stays live and the next poll retries. Mtime cache is not updated on failure.
 4. If valid: queues `lv_xml_component_unregister()` + `lv_xml_register_component_from_data()` on the LVGL main thread, then fires `NavigationManager::rebuild_active_views()` which tears down + recreates the active panel, all overlays, and the top modal.
@@ -1718,6 +1774,26 @@ HELIX_CRASH_TEST=1 ./helix-screen -vv
 ```
 
 **Do not combine with `--test`.** The crash handler is *not* installed in test mode (crashes during development are deliberately not recorded), but this variable is checked unconditionally afterwards — so `--test` gives you a bare segfault with no crash report, which is not what you were trying to verify.
+
+### `HELIX_LVGL_THREAD_CHECK`
+
+What to do when an LVGL entry point is called from a thread other than the LVGL (main) thread. The checked entry points are every subject write (`lv_subject_set_int`/`_float`/`_pointer`/`_color`, `lv_subject_copy_string`, `lv_subject_snprintf`) and `lv_subject_notify`, `lv_timer_create`/`lv_timer_delete` (which covers `lv_async_call` and `lv_obj_delete_async`), and `lv_obj_delete`/`lv_obj_clean`.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `off` (or `0`), `report`, `abort`; anything else keeps the default |
+| **Default** | `report` under `--test` and in `helix-tests`; `off` otherwise |
+| **File** | `src/system/lvgl_thread_check.cpp` (hook), `patches/lvgl_thread_check_hook.patch` (call sites) |
+
+`report` writes one stderr block per distinct call site (the entry point, the thread's name and a backtrace) and an `[LvglThreadCheck]` error line to the log, then carries on. `abort` writes the first one and calls `abort()`, so the run fails at the call that crossed the thread.
+
+```bash
+# Make the first off-thread LVGL call fatal
+HELIX_LVGL_THREAD_CHECK=abort ./build/bin/helix-screen --test -vv
+HELIX_LVGL_THREAD_CHECK=abort ./build/bin/helix-tests '[tag]'
+```
+
+The backtrace names only exported symbols; resolve the `(+0x...)` offsets against the same binary with `nm -C`. **Release builds compile the check out** of LVGL (`LV_HELIX_THREAD_CHECK` in `lv_conf.h` is unset under `HELIX_RELEASE_BUILD`, and the ESP32 firmware never sets it), so the variable does nothing on a shipped device.
 
 ### `HELIX_STRICT_OVERLAY_CHECK`
 
@@ -1930,7 +2006,7 @@ Detection only — nothing is killed. A deadlocked UI thread leaves the process 
 | Property | Value |
 |----------|-------|
 | **Values** | `0`–`3600` seconds. `0` disables detection. Out-of-range and unparseable values are ignored with a warning. |
-| **Default** | `60` (`MainLoopHangDetector::DEFAULT_THRESHOLD_MS`) |
+| **Default** | `60` (`MainLoopHangDetector::kDefaultThresholdMs`) |
 | **File** | `src/application/application.cpp` (wiring), `include/main_loop_heartbeat.h` (logic) |
 
 ```bash
@@ -1951,7 +2027,7 @@ Read by `init_early()`, not by `init()`: the ring is allocated before the config
 
 | Property | Value |
 |----------|-------|
-| **Values** | Positive integer (message count). Zero, negative, and unparseable values are ignored. |
+| **Values** | Positive integer (message count). Zero, negative, and unparseable values are ignored. `helixscreen.env` takes `1`-`100000`. |
 | **Default** | Scales with total RAM: `clamp(total_ram_mb × 16, 2000, 20000)` |
 | **File** | `src/system/logging_init.cpp` (`ring_capacity_for_ram()`) |
 
@@ -2000,7 +2076,7 @@ The variable is read twice, because the ring is installed by `init_early()` and 
 
 ### `HELIX_LOG_ROTATE_BYTES` / `HELIX_LOG_ROTATE_FILES`
 
-Tune rotating-file-log sizing on constrained-flash platforms. Together they cap total log disk usage at roughly `BYTES × FILES`.
+Tune rotating-file-log sizing on constrained-flash platforms. Together they cap total log disk usage at roughly `kBytes × FILES`.
 
 | Property | Value |
 |----------|-------|
@@ -2370,7 +2446,7 @@ SSL_CERT_FILE=/usr/data/ca-certificates.crt ./build/bin/helix-screen
 
 The store is resolved on the first such request and logged as `[TLS] Verifying our servers against <path>`. Servers are checked for chain and hostname but not for validity dates, because printers often boot with a 1970 clock. A store that exists but cannot be loaded trusts nothing, so those requests fail with `[TLS] Certificate for '<host>' rejected: ...`. With no store at all the app logs a warning and connects unverified.
 
-Telemetry also refuses to send when no store is found: on devices with no CA bundle at all (AD5M stock firmware), glibc's NSS resolver can `SIGSEGV` during the SSL handshake. The check runs once and is cached, so setting the variable after startup does not re-enable sends.
+Telemetry also refuses to send when no store is found: on devices with no CA bundle at all (AD5M stock firmware), glibc's NSS resolver can `SIGSEGV` during the SSL handshake. The check runs once and is cached, so setting the variable after startup does not re-enable sends. On Android, telemetry, crash reports and debug bundle uploads go through the platform's own HTTPS stack, which needs no CA bundle on disk, so these variables do not apply to them and telemetry always has a transport (`src/system/ingest_client.cpp#transport_available`).
 
 ---
 
@@ -2451,14 +2527,15 @@ Launcher-only knobs for splash handling, scheduling priority, and boot-time resp
 | `HELIX_NO_SPLASH` | `1` disables the splash entirely — no `--splash-pid`, no `--splash-bin`, no heartbeat write. For debugging. | `0` |
 | `HELIX_NICE` | Nice value applied to the launcher (children inherit it) when co-hosted with Klipper/Moonraker. `0` disables the renice. | `10` |
 | `HELIX_OOM_SCORE_ADJ` | `oom_score_adj` that `helix-screen` applies to itself when co-hosted with Klipper/Moonraker, so the OOM killer takes the UI instead of Klipper. `0` disables. Clamped to the kernel's `[-1000, 1000]`. | `300` |
-| `HELIX_BOOT_RESPAWN_MAX` | Max boot-time respawns after an early death. `0` disables the self-heal. | `0` (disabled) |
-| `HELIX_BOOT_RESPAWN_WINDOW` | Seconds after launch within which a death counts as "lost the boot race" rather than a deliberate quit. | `25` |
-| `HELIX_BOOT_RESPAWN_DELAY` | Seconds to wait before each respawn. | `3` |
+| `HELIX_BOOT_RESPAWN_MAX` | Max boot-time respawns after an early death, `0`-`10`. `0` disables the self-heal. | `0` (disabled) |
+| `HELIX_BOOT_RESPAWN_WINDOW` | Seconds after launch, `0`-`300`, within which a death counts as "lost the boot race" rather than a deliberate quit. | `25` |
+| `HELIX_BOOT_RESPAWN_DELAY` | Seconds to wait before each respawn, `0`-`60`. | `3` |
 
 **Usage Notes:**
 - The renice only happens when `helix_klipper_co_hosted` is true — a standalone display (remote Sonic Pad, dev workstation, kiosk pointed at a network printer) is never deprioritized. Raising nice is unprivileged, so it works as the non-root service user.
 - `helix_klipper_co_hosted` reads `/proc/<pid>/cmdline` directly rather than calling `pgrep`. `pgrep` is absent entirely on some BusyBox rootfs — Forge-X on the AD5M ships none — and the old socket fallback checked only `/tmp/klippy_uds` and `/tmp/moonraker.sock`, which Forge-X does not use (its klippy socket is `/tmp/uds`). Both probes missed there, so the UI ran at nice 0 against Klipper on exactly the boards this protects. `HELIX_PROC_ROOT` overrides the scan root for tests.
-- The co-host patterns match the klippy.py and moonraker.py script names, plus `moonraker-env` and `-m moonraker`. They are deliberately narrow: a bare `moonraker` would also match a standalone kiosk started as `helix-screen --moonraker ws://host:7125`, which must stay at nice 0.
+- The co-host patterns match the klippy.py and moonraker.py script names, plus `moonraker-env` and `-m moonraker`, and RustiCC's Rust replacements on the CC1, `rusticc` and `moonruster` (by path or bare name, never as a substring of an argument). They are deliberately narrow: a bare `moonraker` would also match a standalone kiosk started as `helix-screen --moonraker ws://host:7125`, which must stay at nice 0. The socket fallback checks `/tmp/klippy_uds`, `/tmp/moonraker.sock`, RustiCC's `/run/moonraker.sock` and Forge-X's `/tmp/uds`.
+- The renice covers the whole process. Independently of it, the G-code preview's background workers (index scan, ghost pass, prefetch, viewer build) lower their own threads to nice 19 through `helix::make_background_thread` (`include/helix_thread.h`), so they yield to the UI and to Klipper even on a stack the launcher does not recognise.
 - `HELIX_OOM_SCORE_ADJ` is **exported** by the launcher, not applied by it. `oom_score_adj` is inherited across `fork` and preserved across `exec`, so setting it in the launcher would mark the launcher shell and `helix-watchdog` too — and killing the watchdog is what stops `helix-screen` from coming back. `helix-screen` writes it to `/proc/self/oom_score_adj` instead. Raising the value is unprivileged; only lowering it below 0 needs `CAP_SYS_RESOURCE`.
 - Measured on an AD5M (110 MB total, Forge-X 1.4.0): every process sat at `oom_score_adj` 0, leaving the OOM kill order Moonraker (score 156), Klipper (92), `helix-screen` (69) — exactly backwards, since `helix-screen` is the only one with a supervisor behind it.
 - The boot-respawn self-heal exists for firmwares that send `helix-screen` a single SIGTERM during a busy boot. `helix-screen` handles SIGTERM with a fast `_exit(0)` expecting a supervisor to restart it — on an unsupervised SysV boot (no `helix-watchdog`; BusyBox init does not respawn S99 children) that one signal is permanent. On the Snapmaker U1 that also strands the device off-network, since `helix-screen` owns the WiFi association.

@@ -314,9 +314,13 @@ local function render()
     if w > 8 and hgt > 8 then
         local r = math.floor(math.min(w, hgt * 0.66) / 2) - 6
         if r < 12 then r = 12 end
-        local m = worst()
-        ring(c, math.floor(w / 2), math.floor(hgt / 2), r,
-             frac(m), state_color(m))
+        local m = worst() -- nil when every interval is 0
+        if m then
+            ring(c, math.floor(w / 2), math.floor(hgt / 2), r,
+                 frac(m), state_color(m))
+        else
+            ring(c, math.floor(w / 2), math.floor(hgt / 2), r, 0, "primary")
+        end
     end
     c:commit()
 end
@@ -342,9 +346,10 @@ local big_name = helix.subject.string("big_name", "")
 
 Two rules:
 
-- **Centered text is a label.** Canvas text is positioned by pixel offset
-  against a font the sandbox cannot measure; a label with `align="center"`
-  is positioned by the layout engine that owns the font. The ring center
+- **Centered text is a label.** Canvas text sits at the pixel offset the
+  list was staged with; `helix.ui.text_width` can compute that offset, but
+  a label with `align="center"` is positioned by the layout engine that owns
+  the font and follows it when the font changes. The ring center
   and the label center are the same point because the canvas fills the
   zone and both center on it.
 - **When the number does not fit, drop it; never relocate it.** Below a
@@ -368,7 +373,7 @@ cells and pixels every time the tile is placed or resized:
 helix.widget("tile", {
     on_size = function(cols, rows, w, h)
         compact:set(w < 190 and 1 or 0)
-        if cols >= 2 and rows == 1 then
+        if cols >= 2 and rows < 2 then
             list_zone:set(1)   -- a row per meter beside the dial
             bars_visible:set(0)
         elseif rows >= 2 then
@@ -378,7 +383,7 @@ helix.widget("tile", {
             list_zone:set(0)
             bars_visible:set(0)
         end
-        render()
+        redraw_all()
     end,
 })
 ```
@@ -398,8 +403,9 @@ The ladder, and the reasoning behind each rung:
 - **The stroke scales with the ring** - 6px at a dashboard radius, 4 and
   3 as the ring shrinks - so a 70px micro cell does not carry a band
   sized for a 4x2 tile.
-- **One render function, one commit.** Every path ends in `render()`,
-  which rebuilds the whole display list from current state. There is no
+- **One redraw, whole display lists.** Every path ends in `redraw_all()`,
+  which re-derives the subjects and rebuilds each canvas's display list
+  from current state (the full plugin defines it in step 7). There is no
   incremental patching and no stale pixels to reason about.
 
 ![A 1x1 tile at medium resolution](../images/mm-1x1-crop.png)
@@ -407,6 +413,10 @@ The ladder, and the reasoning behind each rung:
 ![The same tile at micro resolution](../images/mm-1x1-micro.png)
 
 ![The 2x1 tier adds one row per meter](../images/mm-2x1-medium.png)
+
+![A 2x1 tile at micro resolution drops to the narrower layout](../images/mm-2x1-micro.png)
+
+![The 2x2 tier puts a bar per meter below the dial](../images/mm-2x2-medium.png)
 
 ## Step 6: the overlay
 
@@ -417,6 +427,8 @@ helix.ui.on("open", function()
     helix.ui.overlay("maintenance-meter__detail", { title = "Maintenance" })
 end)
 ```
+
+![The detail overlay](../images/mm-overlay-medium.png)
 
 The overlay component is a stack of `ui_card` rows, one per meter. Each
 card repeats the dial pattern at a fixed size - a 56x56 zone with the ring
@@ -429,7 +441,7 @@ button passes an argument through `user_data` with a colon:
            style_pad_all="#space_xs">
   <event_cb trigger="clicked" callback="plugin_event"
             user_data="maintenance-meter__reset:filter"/>
-  <lv_label text="Reset HEPA" style_text_font="#font_small"
+  <lv_label text="Reset" style_text_font="#font_small"
             style_text_color="#text"/>
 </lv_button>
 ```
@@ -477,17 +489,24 @@ An update that adds a permission parks the plugin at *needs approval*
 until the user re-enables it; that is the system working, not a failure.
 
 ```lua
+-- A stored hour count: a finite, non-negative number, else `default`.
+local function stored_hours(v, default)
+    local n = tonumber(v)
+    if n and n >= 0 and n < 1e7 then return n end
+    return default
+end
+
 local function load_state()
     local saved = helix.storage.get("state")
     if type(saved) ~= "table" then return end
-    total_h = tonumber(saved.total_h) or 0.0
+    total_h = stored_hours(saved.total_h, 0.0)
     local stored = saved.meters
     if type(stored) ~= "table" then return end
     for _, m in ipairs(METERS) do
         local s = stored[m.key]
         if type(s) == "table" then
-            m.used = tonumber(s.used) or 0.0
-            m.reset_at = s.reset_at
+            m.used = stored_hours(s.used, 0.0)
+            m.reset_at = stored_hours(s.reset_at, nil)
             m.notified = s.notified == true
         end
     end
@@ -496,20 +515,34 @@ end
 
 Every field is validated on load with a fallback, because the store is
 user-editable bytes on disk: a hand-edited file, an older version's
-shape, or a truncated write must degrade to defaults, never fault.
+shape, or a truncated write must degrade to defaults, never fault. A
+string where a number belongs reaches `string.format` and raises at the
+top level of `main.lua`, which fails the whole plugin load, so even
+`reset_at` goes through `stored_hours`.
 
 **Accrual.** The printer state arrives by watch, the clock by timer; a
-tick while printing adds one interval to every enabled meter and the
-screen total:
+tick while printing on a live connection adds one interval to every
+enabled meter and the screen total. A watch reports changes only, never
+the current value, so `helix.printer.get` seeds the flag - without it, a
+plugin enabled or reloaded mid-print would accrue nothing until the next
+state change. `print_state` also keeps its last value when the printer
+drops, so the tick checks `connected` as well:
 
 ```lua
-local printing = false
+local printing = helix.printer.get("print_state") == "printing"
 helix.printer.watch("print_state", function(v)
     printing = (v == "printing")
 end)
 
+local function redraw_all()
+    refresh_derived()
+    render()
+    render_bars()
+    for i in ipairs(rings) do draw_ring(i) end
+end
+
 local function tick()
-    if not printing then return end
+    if not (printing and helix.printer.get("connected")) then return end
     total_h = total_h + TICK_H
     for _, m in ipairs(METERS) do
         if enabled(m) then
@@ -528,7 +561,8 @@ helix.timer.every(TICK_MS, tick)
 ```
 
 The `notified` latch is what makes the toast polite: crossing the
-interval announces once, and only a reset re-arms it. The store write
+interval announces once, and only a reset or a raised interval (below)
+re-arms it. The store write
 rides the host's debounce (about half a second, one write per burst), so
 a tick-a-minute cadence is one small write per minute.
 
@@ -541,6 +575,11 @@ subject:
 for i, m in ipairs(METERS) do
     helix.settings.on_change(m.setting, function(v)
         m.interval = v or 0
+        -- A raised interval puts the due point ahead of the hours again.
+        if m.used < m.interval and m.notified then
+            m.notified = false
+            save_state()
+        end
         redraw_all()
     end)
 end

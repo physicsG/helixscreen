@@ -19,13 +19,13 @@ std::vector<uint8_t> phomemo_build_raster(const LabelBitmap& bitmap, const Label
     cmd.push_back(0x1B);
     cmd.push_back(0x4E);
     cmd.push_back(0x0D);
-    cmd.push_back(PHOMEMO_DEFAULT_SPEED);
+    cmd.push_back(kPhomemoDefaultSpeed);
 
     // Print density: ESC N 04 <density>
     cmd.push_back(0x1B);
     cmd.push_back(0x4E);
     cmd.push_back(0x04);
-    cmd.push_back(PHOMEMO_DEFAULT_DENSITY);
+    cmd.push_back(kPhomemoDefaultDensity);
 
     // Media type: 1F 11 <type>
     cmd.push_back(0x1F);

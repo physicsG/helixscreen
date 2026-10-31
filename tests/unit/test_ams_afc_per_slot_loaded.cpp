@@ -14,7 +14,7 @@
  * offered Recover on a lane that only reached the hub.
  *
  * Backends now declare per-slot authority explicitly; AFC claims it, so the
- * predicate reads SlotStatus::LOADED — which parse_afc_stepper already derives
+ * predicate reads SlotStatus::LOADED — which apply_lane_status already derives
  * from tool_loaded — instead of the aggregate.
  *
  * Fixture values are the live BoxTurtle at 192.168.1.112: lane1 tool_loaded
@@ -23,12 +23,14 @@
  * tripped.
  */
 
-#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_backend_mock.h"
+#include "ams_tool_topology.h"
 #include "ams_types.h"
+#include "test_helpers/afc_test_access.h"
 
 #include <string>
+#include <vector>
 
 #include "../catch_amalgamated.hpp"
 
@@ -37,7 +39,7 @@ using namespace helix;
 namespace helix {
 
 /// Feeds the real Moonraker status path so the parse chain under test is the
-/// production one (parse_afc_state -> parse_afc_stepper -> parse_afc_extruder).
+/// production one (apply_afc_state -> apply_lane_status -> apply_extruder_object).
 class AfcPerSlotLoadedHelper : public AmsBackendAfc {
   public:
     AfcPerSlotLoadedHelper() : AmsBackendAfc(nullptr, nullptr) {
@@ -258,5 +260,37 @@ TEST_CASE("AFC slot_has_filament_at_toolhead reports the extruder sensors for th
         afc.feed(extruder(true, true, "lane1"));
         CHECK_FALSE(afc.slot_has_filament_at_toolhead(-1));
         CHECK_FALSE(afc.slot_has_filament_at_toolhead(99));
+    }
+}
+
+// ============================================================================
+// Which lane each head holds (prestonbrown/helixscreen#1811)
+// ============================================================================
+
+TEST_CASE("AFC topology marks the lane seated in each head, mounted or parked",
+          "[ams][afc][ams-topology][seated-lane]") {
+    // lane1 feeds extruder directly; lanes 2-4 feed extruder1 through a hub.
+    // extruder is mounted on lane1, and the parked extruder1 holds lane3.
+    AfcPerSlotLoadedHelper afc;
+    auto on = [](nlohmann::json lane, const char* extruder) {
+        lane["extruder"] = extruder;
+        return lane;
+    };
+    afc.feed_stepper("lane1", on(tooled_lane(), "extruder"));
+    afc.feed_stepper("lane2", on(idle_lane(), "extruder1"));
+    afc.feed_stepper("lane3", on(tooled_lane(), "extruder1"));
+    afc.feed_stepper("lane4", on(hub_loaded_lane(), "extruder1"));
+
+    auto topo = helix::build_ams_topology(&afc, 0);
+    REQUIRE(topo.has_value());
+    REQUIRE(topo->tool_extruder ==
+            std::vector<std::string>{"extruder", "extruder1", "extruder1", "extruder1"});
+    CHECK(topo->tool_seated == std::vector<bool>{true, false, true, false});
+
+    SECTION("a lane leaving its head leaves the head holding nothing") {
+        afc.feed_stepper("lane3", on(idle_lane(), "extruder1"));
+        topo = helix::build_ams_topology(&afc, 0);
+        REQUIRE(topo.has_value());
+        CHECK(topo->tool_seated == std::vector<bool>{true, false, false, false});
     }
 }

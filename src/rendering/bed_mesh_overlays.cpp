@@ -7,6 +7,7 @@
 
 #include "ui_fonts.h"
 
+#include "bed_grid.h"
 #include "bed_mesh_buffer.h"
 #include "bed_mesh_coordinate_transform.h"
 #include "bed_mesh_internal.h"
@@ -26,28 +27,27 @@
 namespace {
 
 // Rendering opacity values
-constexpr lv_opa_t GRID_LINE_OPACITY = LV_OPA_70;      // Wireframe over the mesh surface
-constexpr lv_opa_t REFERENCE_GRID_OPACITY = LV_OPA_60; // Floor and wall grids
+constexpr lv_opa_t kGridLineOpacity = LV_OPA_70;      // Wireframe over the mesh surface
+constexpr lv_opa_t kReferenceGridOpacity = LV_OPA_60; // Floor and wall grids
 
 // Visibility margin for partially visible geometry
-constexpr int VISIBILITY_MARGIN_PX = 10;
+constexpr int kVisibilityMarginPx = 10;
 
 // Label positioning
-constexpr double Z_LABEL_ABOVE_CEILING = 32.0; // Z label offset above ceiling
+constexpr double kZLabelAboveCeiling = 32.0; // Z label offset above ceiling
 
-// Grid spacing in millimeters for reference grids
-constexpr double GRID_SPACING_MM = 50.0;
+constexpr double kGridSpacingMm = helix::kBedGridSpacingMm;
 
 // Number of segments for Z-axis grid divisions
-constexpr int Z_AXIS_SEGMENT_COUNT = 5;
+constexpr int kZAxisSegmentCount = 5;
 
 // Axis label offset from edge (world units)
-constexpr double AXIS_LABEL_OFFSET = 50.0; // Distance from grid edge to axis letter labels
+constexpr double kAxisLabelOffset = 50.0; // Distance from grid edge to axis letter labels
 
 // Small-canvas handling.
 //
-// The separation between the numeric tick labels (TICK_LABEL_OUTWARD_OFFSET, 20
-// world units) and the X/Y axis letters (AXIS_LABEL_OFFSET, 50) is expressed in
+// The separation between the numeric tick labels (kTickLabelOutwardOffset, 20
+// world units) and the X/Y axis letters (kAxisLabelOffset, 50) is expressed in
 // WORLD units, so it shrinks with the canvas — while the labels themselves are
 // fixed pixel boxes drawn in a fixed-size font. Below roughly 300px the 30 world
 // units between them project to only a few pixels and the axis letter lands on
@@ -57,24 +57,24 @@ constexpr double AXIS_LABEL_OFFSET = 50.0; // Distance from grid edge to axis le
 // Keyed on canvas size rather than the UI breakpoint on purpose: this canvas is
 // flex-sized, so it can be small on a large display too, and render_axis_labels()
 // is already handed canvas_width/canvas_height.
-constexpr int SMALL_CANVAS_MAX_PX = 300;
-constexpr double AXIS_LABEL_OFFSET_SMALL = 110.0; // Clears the tick row when projected small
-constexpr int AXIS_LABEL_HALF_SIZE_SMALL = 5;     // 5px half-size to match the 10px font
+constexpr int kSmallCanvasMaxPx = 300;
+constexpr double kAxisLabelOffsetSmall = 110.0; // Clears the tick row when projected small
+constexpr int kAxisLabelHalfSizeSmall = 5;      // 5px half-size to match the 10px font
 
 /// True when the canvas is too small for world-unit label separation to survive
 /// projection. Uses the smaller dimension: the mesh is drawn isometrically, so a
 /// short canvas crowds the labels just as much as a narrow one.
 static bool is_small_canvas(int canvas_width, int canvas_height) {
-    return std::min(canvas_width, canvas_height) < SMALL_CANVAS_MAX_PX;
+    return std::min(canvas_width, canvas_height) < kSmallCanvasMaxPx;
 }
 
 // Tick label dimensions (pixels)
-constexpr int TICK_LABEL_WIDTH_DECIMAL = 40; // Wider for decimal values (e.g., "-0.25")
-constexpr int TICK_LABEL_WIDTH_INTEGER = 30; // Narrower for integers (e.g., "100")
-constexpr int TICK_LABEL_HEIGHT = 12;
+constexpr int kTickLabelWidthDecimal = 40; // Wider for decimal values (e.g., "-0.25")
+constexpr int kTickLabelWidthInteger = 30; // Narrower for integers (e.g., "100")
+constexpr int kTickLabelHeight = 12;
 
 // Axis label dimensions
-constexpr int AXIS_LABEL_HALF_SIZE = 7; // 7px half-size = 14px label area
+constexpr int kAxisLabelHalfSize = 7; // 7px half-size = 14px label area
 
 /**
  * Check if point is visible on canvas (with margin for partially visible geometry)
@@ -86,7 +86,7 @@ constexpr int AXIS_LABEL_HALF_SIZE = 7; // 7px half-size = 14px label area
  * @return true if point is visible or partially visible
  */
 static inline bool is_point_visible(int x, int y, int canvas_width, int canvas_height,
-                                    int margin = VISIBILITY_MARGIN_PX) {
+                                    int margin = kVisibilityMarginPx) {
     return x >= -margin && x < canvas_width + margin && y >= -margin && y < canvas_height + margin;
 }
 
@@ -95,7 +95,7 @@ static inline bool is_point_visible(int x, int y, int canvas_width, int canvas_h
  * @return true if either endpoint is visible (line may be partially visible)
  */
 static inline bool is_line_visible(int x1, int y1, int x2, int y2, int canvas_width,
-                                   int canvas_height, int margin = VISIBILITY_MARGIN_PX) {
+                                   int canvas_height, int margin = kVisibilityMarginPx) {
     return is_point_visible(x1, y1, canvas_width, canvas_height, margin) ||
            is_point_visible(x2, y2, canvas_width, canvas_height, margin);
 }
@@ -155,7 +155,28 @@ BedExtent compute_bed_extent(const bed_mesh_renderer_t* renderer) {
     double z_max_world = mesh_z_to_world_z(renderer->mesh_max_z, renderer->cached_z_center,
                                            renderer->view_state.z_scale);
     ext.walls = compute_wall_bounds(z_min_world, z_max_world, ext.half_width, ext.half_height);
+    ext.circular = renderer->circular_bed;
     return ext;
+}
+
+ReferenceGridFrame reference_grid_frame(const BedExtent& ext) {
+    ReferenceGridFrame f{};
+    f.line_x_first = std::ceil(ext.x_min_mm / kGridSpacingMm) * kGridSpacingMm;
+    f.line_x_last = std::floor(ext.x_max_mm / kGridSpacingMm) * kGridSpacingMm;
+    f.line_y_first = std::ceil(ext.y_min_mm / kGridSpacingMm) * kGridSpacingMm;
+    f.line_y_last = std::floor(ext.y_max_mm / kGridSpacingMm) * kGridSpacingMm;
+    if (ext.circular) {
+        f.edge_x_min = ext.x_min_mm;
+        f.edge_x_max = ext.x_max_mm;
+        f.edge_y_min = ext.y_min_mm;
+        f.edge_y_max = ext.y_max_mm;
+    } else {
+        f.edge_x_min = f.line_x_first;
+        f.edge_x_max = f.line_x_last;
+        f.edge_y_min = f.line_y_first;
+        f.edge_y_max = f.line_y_last;
+    }
+    return f;
 }
 
 HeatmapLayout compute_heatmap_layout(int rows, int cols, int canvas_width, int canvas_height) {
@@ -265,25 +286,21 @@ void render_axis_labels(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, 
     }
 
     const BedExtent ext = compute_bed_extent(renderer);
+    const ReferenceGridFrame frame = reference_grid_frame(ext);
 
-    // Round to first/last grid line positions (must match wall positions)
-    double x_grid_start = std::ceil(ext.x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double x_grid_end = std::floor(ext.x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_start = std::ceil(ext.y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-
-    // Convert grid bounds to world coordinates (must match wall positioning)
-    double x_min_world = printer_x_to_world_x(x_grid_start, ext.center_x, ext.coord_scale);
-    double x_max_world = printer_x_to_world_x(x_grid_end, ext.center_x, ext.coord_scale);
+    // Wall positions in world coordinates
+    double x_min_world = printer_x_to_world_x(frame.edge_x_min, ext.center_x, ext.coord_scale);
+    double x_max_world = printer_x_to_world_x(frame.edge_x_max, ext.center_x, ext.coord_scale);
     double y_max_world =
-        printer_y_to_world_y(y_grid_start, ext.center_y, ext.coord_scale); // Y inverted
+        printer_y_to_world_y(frame.edge_y_min, ext.center_y, ext.coord_scale); // Y inverted
     double floor_z = ext.walls.floor_z;
 
     // Configure label drawing style. On a small canvas the letters drop to the
     // same 10px font the tick numbers use and are pushed further out, so the
     // projected gap between the two rows stays larger than the glyphs.
     const bool small_canvas = is_small_canvas(canvas_width, canvas_height);
-    const double axis_label_offset = small_canvas ? AXIS_LABEL_OFFSET_SMALL : AXIS_LABEL_OFFSET;
-    const int axis_label_half = small_canvas ? AXIS_LABEL_HALF_SIZE_SMALL : AXIS_LABEL_HALF_SIZE;
+    const double axis_label_offset = small_canvas ? kAxisLabelOffsetSmall : kAxisLabelOffset;
+    const int axis_label_half = small_canvas ? kAxisLabelHalfSizeSmall : kAxisLabelHalfSize;
 
     lv_draw_label_dsc_t label_dsc;
     lv_draw_label_dsc_init(&label_dsc);
@@ -333,7 +350,7 @@ void render_axis_labels(lv_layer_t* layer, const bed_mesh_renderer_t* renderer, 
     // Z label: At the top of Z axis, ABOVE the wall ceiling where tick labels end
     // Position at front-left corner (grid-aligned)
     double z_axis_top =
-        ext.walls.ceiling_z + Z_LABEL_ABOVE_CEILING; // Position above the highest tick
+        ext.walls.ceiling_z + kZLabelAboveCeiling; // Position above the highest tick
     bed_mesh_point_3d_t z_pos = bed_mesh_projection_project_3d_to_2d(
         x_min_world, y_max_world, z_axis_top, canvas_width, canvas_height, &renderer->view_state);
 
@@ -373,8 +390,8 @@ void draw_axis_tick_label(lv_layer_t* layer, lv_draw_label_dsc_t* label_dsc, int
     label_area.x1 = screen_x + offset_x;
     label_area.y1 = screen_y + offset_y;
     label_area.x2 =
-        label_area.x1 + (use_decimals ? TICK_LABEL_WIDTH_DECIMAL : TICK_LABEL_WIDTH_INTEGER);
-    label_area.y2 = label_area.y1 + TICK_LABEL_HEIGHT;
+        label_area.x1 + (use_decimals ? kTickLabelWidthDecimal : kTickLabelWidthInteger);
+    label_area.y2 = label_area.y1 + kTickLabelHeight;
 
     // Let LVGL handle clipping via the layer's clip area
     lv_draw_label(layer, label_dsc, &label_area);
@@ -392,18 +409,19 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
     const double coord_scale = ext.coord_scale;
     const WallBounds& bounds = ext.walls;
 
-    // Round to first/last grid line positions (must match wall positions from
-    // render_reference_grids)
-    double x_grid_start = std::ceil(ext.x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double x_grid_end = std::floor(ext.x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_start = std::ceil(ext.y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_end = std::floor(ext.y_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
+    const ReferenceGridFrame frame = reference_grid_frame(ext);
+    const double x_grid_start = frame.line_x_first;
+    const double x_grid_end = frame.line_x_last;
+    const double y_grid_start = frame.line_y_first;
+    const double y_grid_end = frame.line_y_last;
 
-    // Convert grid bounds to world coordinates (must match wall positioning)
-    double x_min_world = helix::mesh::printer_x_to_world_x(x_grid_start, bed_center_x, coord_scale);
-    double x_max_world = helix::mesh::printer_x_to_world_x(x_grid_end, bed_center_x, coord_scale);
-    double y_max_world =
-        helix::mesh::printer_y_to_world_y(y_grid_start, bed_center_y, coord_scale); // Y inverted
+    // Wall positions in world coordinates
+    double x_min_world =
+        helix::mesh::printer_x_to_world_x(frame.edge_x_min, bed_center_x, coord_scale);
+    double x_max_world =
+        helix::mesh::printer_x_to_world_x(frame.edge_x_max, bed_center_x, coord_scale);
+    double y_max_world = helix::mesh::printer_y_to_world_y(frame.edge_y_min, bed_center_y,
+                                                           coord_scale); // Y inverted
     double floor_z = bounds.floor_z;
 
     // Configure label drawing style (smaller font than axis letters)
@@ -416,20 +434,20 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
     label_dsc.text_local = 1; // Tell LVGL to copy text (we use stack buffers)
 
     // Use same spacing as grid lines (50mm) for tick labels
-    double tick_spacing = GRID_SPACING_MM;
+    double tick_spacing = kGridSpacingMm;
 
     // World-space offset to push tick labels OUTWARD from grid edges (prevents overlap)
-    constexpr double TICK_LABEL_OUTWARD_OFFSET = 20.0; // World units away from grid edge
+    constexpr double kTickLabelOutwardOffset = 20.0; // World units away from grid edge
 
     // X-axis tick label offsets: at front edge (at floor level, centered beneath tick)
-    constexpr int X_LABEL_OFFSET_X = -15; // Center label beneath tick
-    constexpr int X_LABEL_OFFSET_Y = 0;   // At floor level
+    constexpr int kXLabelOffsetX = -15; // Center label beneath tick
+    constexpr int kXLabelOffsetY = 0;   // At floor level
     // Y-axis tick label offsets: at right edge (same pattern as X)
-    constexpr int Y_LABEL_OFFSET_X = -15; // Center label beneath tick
-    constexpr int Y_LABEL_OFFSET_Y = 0;   // At floor level
+    constexpr int kYLabelOffsetX = -15; // Center label beneath tick
+    constexpr int kYLabelOffsetY = 0;   // At floor level
     // Z-axis tick label offsets: to the left of the axis line (closer to wall)
-    constexpr int Z_LABEL_OFFSET_X = -38;
-    constexpr int Z_LABEL_OFFSET_Y = -6;
+    constexpr int kZLabelOffsetX = -38;
+    constexpr int kZLabelOffsetY = -6;
 
     // Draw X-axis tick labels along FRONT edge of the grid, pushed outward
     // Only label every other tick (0, 100, 200... not 50, 150, 250) to reduce crowding
@@ -439,10 +457,10 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
             double x_world = helix::mesh::printer_x_to_world_x(x_mm, bed_center_x, coord_scale);
             // Push outward from front edge (+Y direction in world space)
             bed_mesh_point_3d_t tick = bed_mesh_projection_project_3d_to_2d(
-                x_world, y_max_world + TICK_LABEL_OUTWARD_OFFSET, floor_z, canvas_width,
+                x_world, y_max_world + kTickLabelOutwardOffset, floor_z, canvas_width,
                 canvas_height, &renderer->view_state);
-            draw_axis_tick_label(layer, &label_dsc, tick.screen_x, tick.screen_y, X_LABEL_OFFSET_X,
-                                 X_LABEL_OFFSET_Y, x_mm, canvas_width, canvas_height);
+            draw_axis_tick_label(layer, &label_dsc, tick.screen_x, tick.screen_y, kXLabelOffsetX,
+                                 kXLabelOffsetY, x_mm, canvas_width, canvas_height);
         }
         x_tick_index++;
     }
@@ -455,10 +473,10 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
             double y_world = helix::mesh::printer_y_to_world_y(y_mm, bed_center_y, coord_scale);
             // Push outward from right edge (+X direction in world space)
             bed_mesh_point_3d_t tick = bed_mesh_projection_project_3d_to_2d(
-                x_max_world + TICK_LABEL_OUTWARD_OFFSET, y_world, floor_z, canvas_width,
+                x_max_world + kTickLabelOutwardOffset, y_world, floor_z, canvas_width,
                 canvas_height, &renderer->view_state);
-            draw_axis_tick_label(layer, &label_dsc, tick.screen_x, tick.screen_y, Y_LABEL_OFFSET_X,
-                                 Y_LABEL_OFFSET_Y, y_mm, canvas_width, canvas_height);
+            draw_axis_tick_label(layer, &label_dsc, tick.screen_x, tick.screen_y, kYLabelOffsetX,
+                                 kYLabelOffsetY, y_mm, canvas_width, canvas_height);
         }
         y_tick_index++;
     }
@@ -467,9 +485,9 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
     // Use x_min_world and y_max_world (grid-aligned positions)
 
     // Generate 3 evenly-spaced Z labels along the wall (reduced from 5 to avoid crowding)
-    constexpr int NUM_Z_LABELS = 3;
-    for (int i = 0; i < NUM_Z_LABELS; i++) {
-        double t = static_cast<double>(i) / (NUM_Z_LABELS - 1);
+    constexpr int kNumZLabels = 3;
+    for (int i = 0; i < kNumZLabels; i++) {
+        double t = static_cast<double>(i) / (kNumZLabels - 1);
         double z_world = bounds.floor_z + t * (bounds.ceiling_z - bounds.floor_z);
 
         // Convert world Z back to mesh Z for display, adding back the normalization
@@ -480,8 +498,8 @@ void render_numeric_axis_ticks(lv_layer_t* layer, const bed_mesh_renderer_t* ren
 
         bed_mesh_point_3d_t tick = bed_mesh_projection_project_3d_to_2d(
             x_min_world, y_max_world, z_world, canvas_width, canvas_height, &renderer->view_state);
-        draw_axis_tick_label(layer, &label_dsc, tick.screen_x, tick.screen_y, Z_LABEL_OFFSET_X,
-                             Z_LABEL_OFFSET_Y, z_mm, canvas_width, canvas_height, true);
+        draw_axis_tick_label(layer, &label_dsc, tick.screen_x, tick.screen_y, kZLabelOffsetX,
+                             kZLabelOffsetY, z_mm, canvas_width, canvas_height, true);
     }
 }
 
@@ -495,37 +513,76 @@ void render_grid_lines(PixelBuffer& buf, const bed_mesh_renderer_t* renderer, in
         return;
     }
 
-    constexpr uint8_t grid_alpha = GRID_LINE_OPACITY;
+    constexpr uint8_t grid_alpha = kGridLineOpacity;
 
     // Use cached projected screen coordinates (SOA arrays)
     const auto& screen_x = renderer->projected_screen_x;
     const auto& screen_y = renderer->projected_screen_y;
 
-    // Draw horizontal grid lines (connect points in same row)
+    // A round bed's surface stops at the circle inscribed in the mesh area, so
+    // its wireframe does too.
+    const bool round = renderer->circular_bed && renderer->geometry_computed;
+    const RoundBed circle =
+        inscribed_round_bed(renderer->mesh_area_min_x, renderer->mesh_area_max_x,
+                            renderer->mesh_area_min_y, renderer->mesh_area_max_y);
+    auto printer_xy = [&](int row, int col) {
+        return BedPoint{renderer->mesh_area_min_x +
+                            col * (renderer->mesh_area_max_x - renderer->mesh_area_min_x) /
+                                (renderer->cols - 1),
+                        renderer->mesh_area_min_y +
+                            row * (renderer->mesh_area_max_y - renderer->mesh_area_min_y) /
+                                (renderer->rows - 1)};
+    };
+
+    auto draw_segment = [&](int r1, int c1, int r2, int c2) {
+        int p1_x = screen_x[static_cast<size_t>(r1)][static_cast<size_t>(c1)];
+        int p1_y = screen_y[static_cast<size_t>(r1)][static_cast<size_t>(c1)];
+        int p2_x = screen_x[static_cast<size_t>(r2)][static_cast<size_t>(c2)];
+        int p2_y = screen_y[static_cast<size_t>(r2)][static_cast<size_t>(c2)];
+        if (round) {
+            const BedPoint a = printer_xy(r1, c1);
+            const BedPoint b = printer_xy(r2, c2);
+            const auto t = segment_in_round_bed(a, b, circle);
+            if (!t) {
+                return;
+            }
+            if (t->first > 0.0 || t->second < 1.0) {
+                const double za = renderer->mesh[static_cast<size_t>(r1)][static_cast<size_t>(c1)];
+                const double zb = renderer->mesh[static_cast<size_t>(r2)][static_cast<size_t>(c2)];
+                auto project_at = [&](double s) {
+                    return bed_mesh_projection_project_3d_to_2d(
+                        printer_x_to_world_x(a.x + s * (b.x - a.x), renderer->bed_center_x,
+                                             renderer->coord_scale),
+                        printer_y_to_world_y(a.y + s * (b.y - a.y), renderer->bed_center_y,
+                                             renderer->coord_scale),
+                        mesh_z_to_world_z(za + s * (zb - za), renderer->cached_z_center,
+                                          renderer->view_state.z_scale),
+                        canvas_width, canvas_height, &renderer->view_state);
+                };
+                const auto q1 = project_at(t->first);
+                const auto q2 = project_at(t->second);
+                p1_x = q1.screen_x;
+                p1_y = q1.screen_y;
+                p2_x = q2.screen_x;
+                p2_y = q2.screen_y;
+            }
+        }
+        if (is_line_visible(p1_x, p1_y, p2_x, p2_y, canvas_width, canvas_height)) {
+            buf.draw_line(p1_x, p1_y, p2_x, p2_y, line_r, line_g, line_b, grid_alpha);
+        }
+    };
+
+    // Horizontal grid lines (connect points in same row)
     for (int row = 0; row < renderer->rows; row++) {
         for (int col = 0; col < renderer->cols - 1; col++) {
-            int p1_x = screen_x[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p1_y = screen_y[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p2_x = screen_x[static_cast<size_t>(row)][static_cast<size_t>(col + 1)];
-            int p2_y = screen_y[static_cast<size_t>(row)][static_cast<size_t>(col + 1)];
-
-            if (is_line_visible(p1_x, p1_y, p2_x, p2_y, canvas_width, canvas_height)) {
-                buf.draw_line(p1_x, p1_y, p2_x, p2_y, line_r, line_g, line_b, grid_alpha);
-            }
+            draw_segment(row, col, row, col + 1);
         }
     }
 
-    // Draw vertical grid lines (connect points in same column)
+    // Vertical grid lines (connect points in same column)
     for (int col = 0; col < renderer->cols; col++) {
         for (int row = 0; row < renderer->rows - 1; row++) {
-            int p1_x = screen_x[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p1_y = screen_y[static_cast<size_t>(row)][static_cast<size_t>(col)];
-            int p2_x = screen_x[static_cast<size_t>(row + 1)][static_cast<size_t>(col)];
-            int p2_y = screen_y[static_cast<size_t>(row + 1)][static_cast<size_t>(col)];
-
-            if (is_line_visible(p1_x, p1_y, p2_x, p2_y, canvas_width, canvas_height)) {
-                buf.draw_line(p1_x, p1_y, p2_x, p2_y, line_r, line_g, line_b, grid_alpha);
-            }
+            draw_segment(row, col, row + 1, col);
         }
     }
 }
@@ -536,53 +593,58 @@ void render_reference_grids(PixelBuffer& buf, const bed_mesh_renderer_t* rendere
         return;
     }
 
-    constexpr uint8_t ref_alpha = REFERENCE_GRID_OPACITY;
+    constexpr uint8_t ref_alpha = kReferenceGridOpacity;
 
     // Printer-bed extent, not mesh extent: the mesh floats inside the walls
     const BedExtent ext = compute_bed_extent(renderer);
-    const double x_max_mm = ext.x_max_mm;
-    const double y_max_mm = ext.y_max_mm;
+    const ReferenceGridFrame frame = reference_grid_frame(ext);
     const double bed_center_x = ext.center_x;
     const double bed_center_y = ext.center_y;
     const double coord_scale = ext.coord_scale;
+    const double x_grid_start = frame.line_x_first;
+    const double x_grid_end = frame.line_x_last;
+    const double y_grid_start = frame.line_y_first;
+    const double y_grid_end = frame.line_y_last;
 
-    // Round to first/last grid line positions (aligned to GRID_SPACING_MM)
-    double x_grid_start = std::ceil(ext.x_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double x_grid_end = std::floor(x_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_start = std::ceil(ext.y_min_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-    double y_grid_end = std::floor(y_max_mm / GRID_SPACING_MM) * GRID_SPACING_MM;
-
-    // Convert grid bounds to world coordinates for wall positioning
-    double x_min = printer_x_to_world_x(x_grid_start, bed_center_x, coord_scale);
-    double x_max = printer_x_to_world_x(x_grid_end, bed_center_x, coord_scale);
-    double y_min = printer_y_to_world_y(y_grid_end, bed_center_y, coord_scale);   // Y inverted
-    double y_max = printer_y_to_world_y(y_grid_start, bed_center_y, coord_scale); // Y inverted
+    // Wall positions in world coordinates
+    double x_min = printer_x_to_world_x(frame.edge_x_min, bed_center_x, coord_scale);
+    double x_max = printer_x_to_world_x(frame.edge_x_max, bed_center_x, coord_scale);
+    double y_min = printer_y_to_world_y(frame.edge_y_max, bed_center_y, coord_scale); // Y inverted
+    double y_max = printer_y_to_world_y(frame.edge_y_min, bed_center_y, coord_scale); // Y inverted
     double z_floor = ext.walls.floor_z;
     double z_ceiling = ext.walls.ceiling_z;
 
+    auto floor_line = [&](double x1_mm, double y1_mm, double x2_mm, double y2_mm) {
+        draw_axis_line_to_buffer(buf, line_r, line_g, line_b, ref_alpha,
+                                 printer_x_to_world_x(x1_mm, bed_center_x, coord_scale),
+                                 printer_y_to_world_y(y1_mm, bed_center_y, coord_scale), z_floor,
+                                 printer_x_to_world_x(x2_mm, bed_center_x, coord_scale),
+                                 printer_y_to_world_y(y2_mm, bed_center_y, coord_scale), z_floor,
+                                 canvas_width, canvas_height, &renderer->view_state);
+    };
+
     // ========== 1. BOTTOM GRID (XY plane at Z=z_floor) ==========
-    for (double x_mm = x_grid_start; x_mm <= x_max_mm + 0.001; x_mm += GRID_SPACING_MM) {
-        double x_world = helix::mesh::printer_x_to_world_x(x_mm, bed_center_x, coord_scale);
-        draw_axis_line_to_buffer(buf, line_r, line_g, line_b, ref_alpha, x_world, y_min, z_floor,
-                                 x_world, y_max, z_floor, canvas_width, canvas_height,
-                                 &renderer->view_state);
+    // Outline: the floor rectangle, or the circle inscribed in the bed.
+    for (const auto& seg :
+         helix::bed_outline_segments(frame.edge_x_min, frame.edge_x_max, frame.edge_y_min,
+                                     frame.edge_y_max, ext.circular)) {
+        floor_line(seg.x1, seg.y1, seg.x2, seg.y2);
     }
-    for (double y_mm = y_grid_start; y_mm <= y_max_mm + 0.001; y_mm += GRID_SPACING_MM) {
-        double y_world = helix::mesh::printer_y_to_world_y(y_mm, bed_center_y, coord_scale);
-        draw_axis_line_to_buffer(buf, line_r, line_g, line_b, ref_alpha, x_min, y_world, z_floor,
-                                 x_max, y_world, z_floor, canvas_width, canvas_height,
-                                 &renderer->view_state);
+    for (const auto& seg :
+         helix::bed_grid_lines(frame.edge_x_min, frame.edge_x_max, frame.edge_y_min,
+                               frame.edge_y_max, kGridSpacingMm, ext.circular)) {
+        floor_line(seg.x1, seg.y1, seg.x2, seg.y2);
     }
 
     // ========== 2. BACK WALL GRID (XZ plane at Y=y_min) ==========
-    for (double x_mm = x_grid_start; x_mm <= x_max_mm + 0.001; x_mm += GRID_SPACING_MM) {
+    for (double x_mm = x_grid_start; x_mm <= x_grid_end + 0.001; x_mm += kGridSpacingMm) {
         double x_world = helix::mesh::printer_x_to_world_x(x_mm, bed_center_x, coord_scale);
         draw_axis_line_to_buffer(buf, line_r, line_g, line_b, ref_alpha, x_world, y_min, z_floor,
                                  x_world, y_min, z_ceiling, canvas_width, canvas_height,
                                  &renderer->view_state);
     }
     double wall_z_range = z_ceiling - z_floor;
-    double wall_z_spacing = wall_z_range / Z_AXIS_SEGMENT_COUNT;
+    double wall_z_spacing = wall_z_range / kZAxisSegmentCount;
     if (wall_z_spacing < 0.5)
         wall_z_spacing = wall_z_range / 3.0;
     for (double z = z_floor; z <= z_ceiling + 0.01; z += wall_z_spacing) {
@@ -591,7 +653,7 @@ void render_reference_grids(PixelBuffer& buf, const bed_mesh_renderer_t* rendere
     }
 
     // ========== 3. LEFT WALL GRID (YZ plane at X=x_min) ==========
-    for (double y_mm = y_grid_start; y_mm <= y_max_mm + 0.001; y_mm += GRID_SPACING_MM) {
+    for (double y_mm = y_grid_start; y_mm <= y_grid_end + 0.001; y_mm += kGridSpacingMm) {
         double y_world = helix::mesh::printer_y_to_world_y(y_mm, bed_center_y, coord_scale);
         draw_axis_line_to_buffer(buf, line_r, line_g, line_b, ref_alpha, x_min, y_world, z_floor,
                                  x_min, y_world, z_ceiling, canvas_width, canvas_height,

@@ -37,7 +37,7 @@ class IMoonrakerClient;
 // Color palette — shared across all temp graph consumers
 // ============================================================================
 
-static constexpr int TEMP_GRAPH_PALETTE_SIZE = 8;
+static constexpr int kTempGraphPaletteSize = 8;
 
 /// Nord-inspired palette: nozzle red, bed cyan, chamber green, then 5 more.
 ///
@@ -50,7 +50,7 @@ static constexpr int TEMP_GRAPH_PALETTE_SIZE = 8;
 ///
 /// This array is the only definition. Anything needing a series color indexes
 /// it rather than repeating a literal.
-extern const lv_color_t TEMP_GRAPH_SERIES_COLORS[TEMP_GRAPH_PALETTE_SIZE];
+extern const lv_color_t kTempGraphSeriesColors[kTempGraphPaletteSize];
 
 /// Series color at @p index as 0xRRGGBB, wrapping the palette.
 ///

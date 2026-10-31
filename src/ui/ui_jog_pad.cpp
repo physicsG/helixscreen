@@ -23,8 +23,8 @@ using namespace helix;
 // Home button: 0% - 25%
 // Inner zone (1mm): 25% - 60%
 // Outer zone (10mm): 60% - 100%
-static constexpr float HOME_ZONE_RATIO = 0.25f;
-static constexpr float INNER_ZONE_BOUNDARY_RATIO = 0.60f; // Inner/outer zone boundary
+static constexpr float kHomeZoneRatio = 0.25f;
+static constexpr float kInnerZoneBoundaryRatio = 0.60f; // Inner/outer zone boundary
 
 // Responsive font selection using theme system
 // Returns icon font for home button (radius-based for icon sizing)
@@ -110,8 +110,8 @@ static jog_pad_state_t* get_state(lv_obj_t* obj) {
 // all call this before reading the cached fields, so the math can never drift.
 static void jog_pad_recompute_zones(jog_pad_state_t* st, int32_t radius) {
     st->radius_px = radius;
-    st->home_radius_px = (int32_t)(radius * HOME_ZONE_RATIO);
-    st->inner_boundary_px = (int32_t)(radius * INNER_ZONE_BOUNDARY_RATIO);
+    st->home_radius_px = (int32_t)(radius * kHomeZoneRatio);
+    st->inner_boundary_px = (int32_t)(radius * kInnerZoneBoundaryRatio);
 }
 
 // Helper: Load colors from semantic theme tokens
@@ -289,7 +289,7 @@ static void jog_pad_draw_cb(lv_event_t* e) {
     lv_coord_t center_y = obj_coords.y1 + height / 2;
     lv_coord_t radius = width / 2;
 
-    // Zone boundary: Inner circle at INNER_ZONE_BOUNDARY_RATIO of total radius
+    // Zone boundary: Inner circle at kInnerZoneBoundaryRatio of total radius
     jog_pad_recompute_zones(state, radius);
     lv_coord_t inner_boundary = state->inner_boundary_px;
 
@@ -711,7 +711,7 @@ static void jog_pad_click_cb(lv_event_t* e) {
     if (!zone.on_pad)
         return;
 
-    // Home button: center at HOME_ZONE_RATIO
+    // Home button: center at kHomeZoneRatio
     if (zone.home) {
         if (state->home_callback) {
             state->home_callback(state->home_user_data);
@@ -836,7 +836,7 @@ void ui_jog_pad_set_home_callback(lv_obj_t* obj, jog_pad_home_cb_t cb, void* use
 
 void ui_jog_pad_set_mode(lv_obj_t* obj, JogMode mode) {
     jog_pad_state_t* state = get_state(obj);
-    if (state && static_cast<int>(mode) >= 0 && static_cast<int>(mode) < JOG_MODE_COUNT) {
+    if (state && static_cast<int>(mode) >= 0 && static_cast<int>(mode) < kJogModeCount) {
         state->current_mode = mode;
     }
 }

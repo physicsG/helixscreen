@@ -9,6 +9,7 @@
 #include "ui_frequency_response_chart.h"
 #include "ui_modal.h"
 #include "ui_nav.h"
+#include "ui_shaper_sweep_chart.h"
 #include "ui_timer_guard.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
@@ -42,7 +43,7 @@
 using namespace helix;
 
 // Shaper overlay colors (distinct, visible on dark bg) — shared by chart and legend
-static constexpr uint32_t SHAPER_OVERLAY_COLORS[] = {
+static constexpr uint32_t kShaperOverlayColors[] = {
     0x4FC3F7, // light blue
     0x66BB6A, // green
     0xFFA726, // orange
@@ -55,8 +56,8 @@ static constexpr uint32_t SHAPER_OVERLAY_COLORS[] = {
     0x8D6E63, // brown
     0x78909C, // blue-grey
 };
-static constexpr size_t NUM_SHAPER_COLORS =
-    sizeof(SHAPER_OVERLAY_COLORS) / sizeof(SHAPER_OVERLAY_COLORS[0]);
+static constexpr size_t kNumShaperColors =
+    sizeof(kShaperOverlayColors) / sizeof(kShaperOverlayColors[0]);
 
 // ============================================================================
 // GLOBAL INSTANCE AND ROW CLICK HANDLER
@@ -198,16 +199,16 @@ void InputShaperPanel::init_subjects() {
     auto init_cmp_row = [this](ComparisonRow& row, const char* prefix, size_t idx) {
         char name[48];
         snprintf(name, sizeof(name), "is_%s_cmp_%zu_type", prefix, idx);
-        UI_MANAGED_SUBJECT_STRING_N(row.type, row.type_buf, CMP_TYPE_BUF, "", name, subjects_);
+        UI_MANAGED_SUBJECT_STRING_N(row.type, row.type_buf, kCmpTypeBuf, "", name, subjects_);
         snprintf(name, sizeof(name), "is_%s_cmp_%zu_freq", prefix, idx);
-        UI_MANAGED_SUBJECT_STRING_N(row.freq, row.freq_buf, CMP_VALUE_BUF, "", name, subjects_);
+        UI_MANAGED_SUBJECT_STRING_N(row.freq, row.freq_buf, kCmpValueBuf, "", name, subjects_);
         snprintf(name, sizeof(name), "is_%s_cmp_%zu_vib", prefix, idx);
-        UI_MANAGED_SUBJECT_STRING_N(row.vib, row.vib_buf, CMP_VALUE_BUF, "", name, subjects_);
+        UI_MANAGED_SUBJECT_STRING_N(row.vib, row.vib_buf, kCmpValueBuf, "", name, subjects_);
         snprintf(name, sizeof(name), "is_%s_cmp_%zu_accel", prefix, idx);
-        UI_MANAGED_SUBJECT_STRING_N(row.accel, row.accel_buf, CMP_VALUE_BUF, "", name, subjects_);
+        UI_MANAGED_SUBJECT_STRING_N(row.accel, row.accel_buf, kCmpValueBuf, "", name, subjects_);
     };
 
-    for (size_t i = 0; i < MAX_SHAPERS; i++) {
+    for (size_t i = 0; i < kMaxShapers; i++) {
         init_cmp_row(x_cmp_[i], "x", i);
         init_cmp_row(y_cmp_[i], "y", i);
     }
@@ -237,6 +238,10 @@ void InputShaperPanel::init_subjects() {
                               "is_measuring_step_label", subjects_);
     UI_MANAGED_SUBJECT_INT(is_measuring_progress_, 0, "is_measuring_progress", subjects_);
     UI_MANAGED_SUBJECT_INT(is_measuring_has_progress_, 0, "is_measuring_has_progress", subjects_);
+    UI_MANAGED_SUBJECT_INT(is_measuring_has_chart_, 0, "is_measuring_has_chart", subjects_);
+    sweep_chart_.set_on_curve_changed([this](bool has_curve) {
+        lv_subject_set_int(&is_measuring_has_chart_, has_curve ? 1 : 0);
+    });
 
     // Per-axis result display subjects
     UI_MANAGED_SUBJECT_INT(is_results_has_x_, 0, "is_results_has_x", subjects_);
@@ -296,20 +301,19 @@ void InputShaperPanel::init_subjects() {
 
     // Legend shaper label subjects (one per axis, updated on chip toggle)
     UI_MANAGED_SUBJECT_STRING_N(is_x_legend_shaper_label_, is_x_legend_shaper_label_buf_,
-                                CHIP_LABEL_BUF, "", "is_x_legend_shaper_label", subjects_);
+                                kChipLabelBuf, "", "is_x_legend_shaper_label", subjects_);
     UI_MANAGED_SUBJECT_STRING_N(is_y_legend_shaper_label_, is_y_legend_shaper_label_buf_,
-                                CHIP_LABEL_BUF, "", "is_y_legend_shaper_label", subjects_);
+                                kChipLabelBuf, "", "is_y_legend_shaper_label", subjects_);
 
     // Chip label and active subjects
     auto init_chip = [this](ChipRow& chip, const char* axis, size_t idx) {
         char name[48];
         snprintf(name, sizeof(name), "is_%s_chip_%zu_label", axis, idx);
-        UI_MANAGED_SUBJECT_STRING_N(chip.label, chip.label_buf, CHIP_LABEL_BUF, "", name,
-                                    subjects_);
+        UI_MANAGED_SUBJECT_STRING_N(chip.label, chip.label_buf, kChipLabelBuf, "", name, subjects_);
         snprintf(name, sizeof(name), "is_%s_chip_%zu_active", axis, idx);
         UI_MANAGED_SUBJECT_INT(chip.active, 0, name, subjects_);
     };
-    for (size_t i = 0; i < MAX_SHAPERS; i++) {
+    for (size_t i = 0; i < kMaxShapers; i++) {
         init_chip(x_chips_[i], "x", i);
         init_chip(y_chips_[i], "y", i);
     }
@@ -340,6 +344,7 @@ void InputShaperPanel::deinit_subjects() {
     // Same for the analysis elapsed timer: it writes the step label subject on
     // every tick, so it must not survive the subjects it refreshes.
     cancel_analysis_display();
+    sweep_chart_.stop();
 
     deinit_subjects_base(subjects_);
 }
@@ -428,6 +433,8 @@ void InputShaperPanel::on_activate() {
                             }));
     }
 
+    query_preview_facts();
+
     // Auto-start calibration for testing (env var)
     if (std::getenv("INPUT_SHAPER_AUTO_START")) {
         spdlog::info("[InputShaper] Auto-starting X calibration (INPUT_SHAPER_AUTO_START set)");
@@ -454,6 +461,16 @@ void InputShaperPanel::on_deactivating(DeactivateReason reason) {
     if (reason == DeactivateReason::Suspended) {
         return;
     }
+
+    // A rebuild frees the whole widget tree without firing on_ui_destroyed(),
+    // and every chart's objects are children of hosts inside that tree. Drop
+    // them here while the tree is still alive; create() makes the results
+    // charts again and the next sweep makes the live chart lazily.
+    if (reason == DeactivateReason::Rebuild) {
+        on_ui_destroyed();
+    }
+
+    stop_preview();
 
     // Cancel any in-progress calibration
     if (state_ == State::MEASURING && calibrator_) {
@@ -485,6 +502,10 @@ void InputShaperPanel::cleanup() {
     cancel_analysis_display();
 
     // Destroy chart widgets
+    sweep_chart_.destroy();
+    if (subjects_initialized_) {
+        lv_subject_set_int(&is_measuring_has_chart_, 0);
+    }
     if (x_chart_.chart) {
         ui_frequency_response_chart_destroy(x_chart_.chart);
         x_chart_.chart = nullptr;
@@ -505,6 +526,10 @@ void InputShaperPanel::cleanup() {
 
 void InputShaperPanel::on_ui_destroyed() {
     // Destroy chart widgets (native C structs, not LVGL children)
+    sweep_chart_.destroy();
+    if (subjects_initialized_) {
+        lv_subject_set_int(&is_measuring_has_chart_, 0);
+    }
     if (x_chart_.chart) {
         ui_frequency_response_chart_destroy(x_chart_.chart);
         x_chart_.chart = nullptr;
@@ -694,7 +719,7 @@ double InputShaperPanel::before_damping_ratio(char axis) const {
         (axis == 'X') ? config_before_.damping_ratio_x : config_before_.damping_ratio_y;
     // Klipper reports the ratio only when the config sets one; zero means
     // default (shaper_defs.py DEFAULT_DAMPING_RATIO).
-    return dr > 0.0f ? static_cast<double>(dr) : calibration::SHAPER_DEFAULT_DAMPING_RATIO;
+    return dr > 0.0f ? static_cast<double>(dr) : calibration::kShaperDefaultDampingRatio;
 }
 
 void InputShaperPanel::continue_calibrate_all_y() {
@@ -750,6 +775,7 @@ void InputShaperPanel::start_calibration(char axis) {
     cancel_analysis_display(); // no elapsed label from a previous run
     set_state(State::MEASURING);
     spdlog::info("[InputShaper] Starting calibration for axis {}", axis);
+    begin_axis_preview(axis);
 
     // Delegate to calibrator. lifetime_.bg_cb marshals each callback to the main
     // thread and drops it if the panel has been torn down; cal_tok additionally
@@ -758,11 +784,12 @@ void InputShaperPanel::start_calibration(char axis) {
         axis,
         lifetime_.bg_cb(
             "InputShaperPanel::calibration_progress",
-            [this, cal_tok](int percent, ShaperCalibrationPhase phase) {
+            [this, cal_tok](int percent, ShaperCalibrationPhase phase, float freq_hz) {
                 if (cal_tok.expired()) {
                     spdlog::debug("[InputShaper] Discarding stale progress callback");
                     return;
                 }
+                sweep_chart_.on_progress(phase, freq_hz);
                 lv_subject_set_int(&is_measuring_progress_, percent);
                 // The phase comes from the collector — the percentage cannot be
                 // used to infer it, because a sweep whose range we guessed short
@@ -821,6 +848,40 @@ void InputShaperPanel::start_calibration(char axis) {
 // ANALYSIS-PHASE DISPLAY (spinner + elapsed-seconds label)
 // ============================================================================
 
+void InputShaperPanel::query_preview_facts() {
+    if (!api_) {
+        return;
+    }
+    helix::calibration::query_live_sweep_facts(
+        *api_, lifetime_.bg_cb("InputShaperPanel::preview_facts",
+                               [this](helix::calibration::LiveSweepFacts facts) {
+                                   preview_facts_ = std::move(facts);
+                               }));
+}
+
+void InputShaperPanel::begin_axis_preview(char axis) {
+    lv_obj_t* host =
+        overlay_root_
+            ? helix::ui::find_required(overlay_root_, "chart_container_measuring", get_name())
+            : nullptr;
+    // Where the layout hides the chart, nothing streams: no target arms nothing.
+    const bool fits =
+        helix::ui::live_chart_layout_fits("input_shaper_panel", "is_measuring_chart_fits");
+    const auto target = fits ? helix::calibration::live_sweep_target(
+                                   preview_facts_, axis == 'X' ? helix::calibration::SweepAxis::X
+                                                               : helix::calibration::SweepAxis::Y)
+                             : std::nullopt;
+    if (!sweep_chart_.begin(host, axis, target)) {
+        spdlog::debug("[InputShaper] No live chart for axis {} (socket {}, reachable {})", axis,
+                      preview_facts_.socket_path, preview_facts_.socket_reachable);
+    }
+}
+
+void InputShaperPanel::stop_preview() {
+    sweep_chart_.clear();
+    lv_subject_set_int(&is_measuring_has_chart_, 0);
+}
+
 void InputShaperPanel::begin_analysis_display() {
     lv_subject_set_int(&is_measuring_has_progress_, 0);
     analysis_elapsed_.begin(&is_measuring_step_label_, [](uint32_t elapsed_seconds) {
@@ -836,6 +897,7 @@ void InputShaperPanel::cancel_calibration() {
     spdlog::info("[InputShaper] Abort clicked, sending emergency stop + firmware restart");
     calibrate_all_mode_ = false;
     calibration_lifetime_.invalidate(); // Discard any in-flight async callbacks
+    stop_preview();
 
     // E-stop + firmware restart: klippy comes back, so this is an expected
     // reconnect, not a fault
@@ -1079,6 +1141,12 @@ void InputShaperPanel::on_calibration_result(const InputShaperResult& result) {
 
     spdlog::info("[InputShaper] Calibration complete: {} @ {:.1f} Hz (vib: {:.1f}%)",
                  result.shaper_type, result.shaper_freq, result.vibrations);
+    if (calibrate_all_mode_ && result.axis == 'X') {
+        // X's CSV curve holds the chart until Y's first preview points replace it.
+        sweep_chart_.show_curve(result.freq_response);
+    } else {
+        stop_preview();
+    }
 
     // Surface a non-blocking warning when the recommendation succeeded but the
     // frequency-response chart data couldn't be read (e.g. Klipper's /tmp CSV
@@ -1160,6 +1228,7 @@ void InputShaperPanel::on_calibration_error(const std::string& message) {
     }
 
     spdlog::error("[InputShaper] Calibration error: {}", message);
+    stop_preview();
 
     // Reset Calibrate All mode on error to prevent stale state on retry
     calibrate_all_mode_ = false;
@@ -1247,7 +1316,7 @@ void InputShaperPanel::clear_results() {
     x_result_ = InputShaperResult{};
 
     // Clear comparison table subjects
-    for (size_t i = 0; i < MAX_SHAPERS; i++) {
+    for (size_t i = 0; i < kMaxShapers; i++) {
         lv_subject_copy_string(&x_cmp_[i].type, "");
         lv_subject_copy_string(&x_cmp_[i].freq, "");
         lv_subject_copy_string(&x_cmp_[i].vib, "");
@@ -1426,7 +1495,7 @@ void InputShaperPanel::populate_axis_result(char axis, const InputShaperResult& 
     lv_subject_set_int(&recommended_row, -1); // Reset
     lv_subject_set_int(&num_shapers, static_cast<int>(result.all_shapers.size()));
 
-    for (size_t i = 0; i < MAX_SHAPERS; i++) {
+    for (size_t i = 0; i < kMaxShapers; i++) {
         if (i < result.all_shapers.size()) {
             const auto& opt = result.all_shapers[i];
 
@@ -1436,11 +1505,11 @@ void InputShaperPanel::populate_axis_result(char axis, const InputShaperResult& 
                 type_upper += " *";
                 lv_subject_set_int(&recommended_row, static_cast<int>(i));
             }
-            snprintf(cmp[i].type_buf, CMP_TYPE_BUF, "%s", type_upper.c_str());
+            snprintf(cmp[i].type_buf, kCmpTypeBuf, "%s", type_upper.c_str());
             lv_subject_copy_string(&cmp[i].type, cmp[i].type_buf);
 
             // Frequency
-            helix::format::format_frequency_hz(opt.frequency, cmp[i].freq_buf, CMP_VALUE_BUF);
+            helix::format::format_frequency_hz(opt.frequency, cmp[i].freq_buf, kCmpValueBuf);
             lv_subject_copy_string(&cmp[i].freq, cmp[i].freq_buf);
 
             // Vibration with quality description
@@ -1455,12 +1524,12 @@ void InputShaperPanel::populate_axis_result(char axis, const InputShaperResult& 
                     quality_word = quality;
                 }
             }
-            snprintf(cmp[i].vib_buf, CMP_VALUE_BUF, "%.1f%% %s", opt.vibrations,
+            snprintf(cmp[i].vib_buf, kCmpValueBuf, "%.1f%% %s", opt.vibrations,
                      quality_word.c_str());
             lv_subject_copy_string(&cmp[i].vib, cmp[i].vib_buf);
 
             // Max accel
-            snprintf(cmp[i].accel_buf, CMP_VALUE_BUF, "%.0f", opt.max_accel);
+            snprintf(cmp[i].accel_buf, kCmpValueBuf, "%.0f", opt.max_accel);
             lv_subject_copy_string(&cmp[i].accel, cmp[i].accel_buf);
         } else {
             // Clear unused rows
@@ -1556,7 +1625,7 @@ void InputShaperPanel::populate_axis_delta(char axis, const InputShaperResult& r
     if (new_curve.empty()) {
         new_curve = calibration::shaper_transfer_curve(
             result.shaper_type, static_cast<double>(result.shaper_freq),
-            calibration::SHAPER_DEFAULT_DAMPING_RATIO, bins);
+            calibration::kShaperDefaultDampingRatio, bins);
     }
     const double residual_new = calibration::residual_vibration_percent(psd, new_curve);
     if (residual_new < 0.0) {
@@ -1591,7 +1660,8 @@ void InputShaperPanel::create_chart_widgets() {
         x_chart_.chart = ui_frequency_response_chart_create(x_container);
         if (x_chart_.chart) {
             ui_frequency_response_chart_configure_for_platform(x_chart_.chart, tier);
-            ui_frequency_response_chart_set_freq_range(x_chart_.chart, 0.0f, 200.0f);
+            ui_frequency_response_chart_set_freq_range(x_chart_.chart, 0.0f,
+                                                       helix::ui::kShaperChartMaxHz);
         }
     }
 
@@ -1602,7 +1672,8 @@ void InputShaperPanel::create_chart_widgets() {
         y_chart_.chart = ui_frequency_response_chart_create(y_container);
         if (y_chart_.chart) {
             ui_frequency_response_chart_configure_for_platform(y_chart_.chart, tier);
-            ui_frequency_response_chart_set_freq_range(y_chart_.chart, 0.0f, 200.0f);
+            ui_frequency_response_chart_set_freq_range(y_chart_.chart, 0.0f,
+                                                       helix::ui::kShaperChartMaxHz);
         }
     }
 
@@ -1651,11 +1722,14 @@ void InputShaperPanel::populate_chart(char axis, const InputShaperResult& result
 
     // Find max amplitude for Y range
     float max_amp = *std::max_element(amps.begin(), amps.end());
-    ui_frequency_response_chart_set_amplitude_range(chart_data.chart, 0.0f, max_amp * 1.1f);
+    ui_frequency_response_chart_set_amplitude_range(chart_data.chart, 0.0f,
+                                                    max_amp * helix::ui::kShaperChartHeadroom);
 
     // Add raw PSD series (always visible, semi-transparent light color)
-    chart_data.raw_series_id =
-        ui_frequency_response_chart_add_series(chart_data.chart, "Raw PSD", lv_color_hex(0xB0B0B0));
+    chart_data.raw_series_id = ui_frequency_response_chart_add_series(
+        chart_data.chart, "Raw PSD", helix::ui::shaper_raw_psd_color());
+    ui_frequency_response_chart_set_series_style(chart_data.chart, chart_data.raw_series_id,
+                                                 kFrMeasuredCurveStyle);
     ui_frequency_response_chart_set_data(chart_data.chart, chart_data.raw_series_id, freqs.data(),
                                          amps.data(), freqs.size());
 
@@ -1668,16 +1742,16 @@ void InputShaperPanel::populate_chart(char axis, const InputShaperResult& result
     }
 
     // Add shaper overlay series
-    for (size_t i = 0; i < chart_data.shaper_curves.size() && i < MAX_SHAPERS; i++) {
+    for (size_t i = 0; i < chart_data.shaper_curves.size() && i < kMaxShapers; i++) {
         const auto& curve = chart_data.shaper_curves[i];
 
         // Set chip label (uppercase name)
         std::string upper_name = helix::text_io::to_upper(curve.name);
-        snprintf(chips[i].label_buf, CHIP_LABEL_BUF, "%s", upper_name.c_str());
+        snprintf(chips[i].label_buf, kChipLabelBuf, "%s", upper_name.c_str());
         lv_subject_copy_string(&chips[i].label, chips[i].label_buf);
 
         // Add chart series (initially hidden except recommended)
-        lv_color_t color = lv_color_hex(SHAPER_OVERLAY_COLORS[i % NUM_SHAPER_COLORS]);
+        lv_color_t color = lv_color_hex(kShaperOverlayColors[i % kNumShaperColors]);
         chart_data.shaper_series_ids[i] =
             ui_frequency_response_chart_add_series(chart_data.chart, curve.name.c_str(), color);
 
@@ -1700,16 +1774,16 @@ void InputShaperPanel::populate_chart(char axis, const InputShaperResult& result
     }
 
     // Clear unused chips
-    for (size_t i = chart_data.shaper_curves.size(); i < MAX_SHAPERS; i++) {
+    for (size_t i = chart_data.shaper_curves.size(); i < kMaxShapers; i++) {
         chips[i].label_buf[0] = '\0';
         lv_subject_copy_string(&chips[i].label, chips[i].label_buf);
         lv_subject_set_int(&chips[i].active, 0);
     }
 
-    // Hide the chips with no curve behind them (the XML has a fixed MAX_SHAPERS
+    // Hide the chips with no curve behind them (the XML has a fixed kMaxShapers
     // of them, and empty outlines read as broken)
     lv_subject_set_int(&num_chips,
-                       static_cast<int>(std::min(chart_data.shaper_curves.size(), MAX_SHAPERS)));
+                       static_cast<int>(std::min(chart_data.shaper_curves.size(), kMaxShapers)));
 
     // Overlay the live-before setting as a second shaper curve so the old
     // notch is comparable against the fresh fit on the same spectrum. Drawn
@@ -1780,7 +1854,7 @@ void InputShaperPanel::clear_chart(char axis) {
             ui_frequency_response_chart_remove_series(chart_data.chart, chart_data.raw_series_id);
             chart_data.raw_series_id = -1;
         }
-        for (size_t i = 0; i < MAX_SHAPERS; i++) {
+        for (size_t i = 0; i < kMaxShapers; i++) {
             if (chart_data.shaper_series_ids[i] >= 0) {
                 ui_frequency_response_chart_remove_series(chart_data.chart,
                                                           chart_data.shaper_series_ids[i]);
@@ -1799,7 +1873,7 @@ void InputShaperPanel::clear_chart(char axis) {
     chart_data.shaper_curves.clear();
 
     // Clear chip labels
-    for (size_t i = 0; i < MAX_SHAPERS; i++) {
+    for (size_t i = 0; i < kMaxShapers; i++) {
         chips[i].label_buf[0] = '\0';
         lv_subject_copy_string(&chips[i].label, chips[i].label_buf);
         lv_subject_set_int(&chips[i].active, 0);
@@ -1807,7 +1881,7 @@ void InputShaperPanel::clear_chart(char axis) {
 }
 
 void InputShaperPanel::select_shaper_overlay(char axis, int index) {
-    if (index < 0 || index >= static_cast<int>(MAX_SHAPERS))
+    if (index < 0 || index >= static_cast<int>(kMaxShapers))
         return;
 
     auto& chart_data = (axis == 'X') ? x_chart_ : y_chart_;
@@ -1822,7 +1896,7 @@ void InputShaperPanel::select_shaper_overlay(char axis, int index) {
         return;
 
     const int previous = chart_data.selected_shaper;
-    if (previous >= 0 && previous < static_cast<int>(MAX_SHAPERS) &&
+    if (previous >= 0 && previous < static_cast<int>(kMaxShapers) &&
         chart_data.shaper_series_ids[previous] >= 0) {
         ui_frequency_response_chart_show_series(chart_data.chart,
                                                 chart_data.shaper_series_ids[previous], false);
@@ -1855,12 +1929,12 @@ void InputShaperPanel::update_legend(char axis) {
 
     if (active_idx >= 0) {
         // Copy chip label text (already uppercase) to legend label
-        snprintf(legend_label_buf, CHIP_LABEL_BUF, "%s", chips[active_idx].label_buf);
+        snprintf(legend_label_buf, kChipLabelBuf, "%s", chips[active_idx].label_buf);
         lv_subject_copy_string(&legend_label, legend_label_buf);
 
         // Update dot color to match the active shaper's series color
         if (legend_dot) {
-            lv_color_t color = lv_color_hex(SHAPER_OVERLAY_COLORS[active_idx % NUM_SHAPER_COLORS]);
+            lv_color_t color = lv_color_hex(kShaperOverlayColors[active_idx % kNumShaperColors]);
             lv_obj_set_style_bg_color(legend_dot, color, LV_PART_MAIN);
         }
     } else {
@@ -1952,7 +2026,7 @@ void InputShaperPanel::inject_demo_results() {
         for (size_t i = 0; i < shapers.size(); i++) {
             transfer[i] =
                 calibration::shaper_transfer_curve(shapers[i].type, shapers[i].frequency,
-                                                   calibration::SHAPER_DEFAULT_DAMPING_RATIO, bins);
+                                                   calibration::kShaperDefaultDampingRatio, bins);
         }
 
         for (size_t bin = 0; bin < bins.size(); bin++) {

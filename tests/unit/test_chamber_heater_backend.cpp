@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "chamber_heater_backend.h"
 
+#include <cmath>
+
 #include "../catch_amalgamated.hpp"
 
 using namespace helix::chamber;
@@ -545,4 +547,83 @@ TEST_CASE("panda_breath parse: the drying cycle", "[chamber][backend][dryer][129
     auto negative = pb->parse_diagnostics(nlohmann::json{{"remaining_seconds", -5}});
     REQUIRE(negative.has_value());
     CHECK(negative->drying_remaining_s == 0);
+}
+
+TEST_CASE("dragonbreath rejection codes classify at the border", "[chamber][backend][rejection]") {
+    const auto* db = backend_by_id("dragonbreath");
+    REQUIRE(db != nullptr);
+    auto parse = [db](const nlohmann::json& frame) {
+        auto d = db->parse_diagnostics(frame);
+        REQUIRE(d.has_value());
+        return *d;
+    };
+
+    SECTION("each vendor code lands on one generic kind and cause") {
+        struct Row {
+            const char* code;
+            CommandRejection kind;
+            RefusalCause cause;
+        };
+        const Row rows[] = {
+            {"countermanded", CommandRejection::Refused, RefusalCause::TurnedOff},
+            {"fault_latched", CommandRejection::Refused, RefusalCause::Fault},
+            {"inhibited", CommandRejection::Refused, RefusalCause::Inhibited},
+            {"conflict_retries_exhausted", CommandRejection::Conflict, RefusalCause::Unspecified},
+            {"missing_lease_id", CommandRejection::Refused, RefusalCause::Unspecified},
+            {"lease_lost", CommandRejection::Refused, RefusalCause::Unspecified},
+            {"heater_busy", CommandRejection::Refused, RefusalCause::Unspecified},
+            {"invalid_command", CommandRejection::Refused, RefusalCause::Unspecified},
+            {"revision_conflict", CommandRejection::Conflict, RefusalCause::Unspecified},
+            {"auth_failed", CommandRejection::Auth, RefusalCause::Unspecified},
+            {"heater_inhibited", CommandRejection::Refused, RefusalCause::Inhibited},
+            {"heater_fault", CommandRejection::Refused, RefusalCause::Fault},
+            {"power_off", CommandRejection::Refused, RefusalCause::TurnedOff},
+            {"device_offline", CommandRejection::Refused, RefusalCause::Unspecified},
+            {"something_new", CommandRejection::Refused, RefusalCause::Unspecified},
+            {"", CommandRejection::None, RefusalCause::Unspecified},
+        };
+        for (const auto& r : rows) {
+            INFO("code=" << r.code);
+            const auto d = parse({{"protocol_error_code", r.code}});
+            REQUIRE(d.rejection.has_value());
+            CHECK(*d.rejection == r.kind);
+            CHECK(d.refusal_cause.value_or(RefusalCause::Unspecified) == r.cause);
+            CHECK(d.rejection_code.value_or("?") == r.code);
+        }
+    }
+
+    SECTION("seq and requested target engage only when carried") {
+        const auto d = parse({{"protocol_error", "revision_conflict"},
+                              {"protocol_error_code", "revision_conflict"},
+                              {"protocol_error_seq", 3},
+                              {"protocol_error_target", 60.0}});
+        CHECK(d.rejection_seq.value_or(-1) == 3);
+        CHECK(d.rejection_target_c.value_or(0.0) == Catch::Approx(60.0));
+
+        const auto delta = parse({{"protocol_error_seq", 4}});
+        CHECK_FALSE(delta.rejection.has_value());
+        CHECK(delta.rejection_seq.value_or(-1) == 4);
+        CHECK_FALSE(delta.rejection_target_c.has_value());
+
+        const auto null_target = parse({{"protocol_error_target", nullptr}});
+        REQUIRE(null_target.rejection_target_c.has_value());
+        CHECK(std::isnan(*null_target.rejection_target_c));
+    }
+
+    SECTION("an older glue's free-text error is never a rejection") {
+        const auto d = parse({{"protocol_error", "revision_conflict"}});
+        CHECK_FALSE(d.rejection.has_value());
+        CHECK(d.link_error.value_or("") == "revision_conflict");
+
+        // Its clearing still reports that nothing is outstanding.
+        const auto cleared = parse({{"protocol_error", ""}});
+        REQUIRE(cleared.rejection.has_value());
+        CHECK(*cleared.rejection == CommandRejection::None);
+    }
+
+    SECTION("only the appliance has a route around the gcode queue") {
+        CHECK(db->set_target_method() == "printer.dragonbreath.set_target");
+        CHECK(backend_by_id("generic")->set_target_method().empty());
+        CHECK(backend_by_id("panda_breath")->set_target_method().empty());
+    }
 }

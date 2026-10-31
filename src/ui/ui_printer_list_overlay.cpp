@@ -124,16 +124,11 @@ void PrinterListOverlay::populate_printer_list() {
         return;
     }
 
+    // Resetting the observer drops its queued callbacks, the only queued work
+    // that reaches the rows, so the clean below needs no drain.
     active_dot_observer_.reset();
     active_dot_.reset();
-
-    // Clean existing children before repopulating (freeze queue to prevent
-    // background thread from enqueuing callbacks between drain and destroy)
-    {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-        helix::ui::safe_clean_children(container);
-    }
+    helix::ui::safe_clean_children(container);
 
     for (const auto& id : printer_ids) {
         bool is_active = (id == active_id);

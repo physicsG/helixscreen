@@ -27,7 +27,7 @@ flowchart TB
     end
     U3 -->|last step| NET["app_net pthread, 24KB<br/>WiFi bring-up, portal, exits"]
     NET -->|WiFi up + thread gone| CONN["connect on UI thread"]
-    CONN --> WS["websocket_task, 8KB internal<br/>frames, discovery, callbacks"]
+    CONN --> WS["websocket_task, 10KB internal<br/>frames, discovery, callbacks"]
     WS -->|ui_queue_update| U5
     U5 -.->|flush_cb stages chunks| SH[("PSRAM shadow FB")]
     PR["present task, prio 10<br/>vsync-aligned blit"] -->|only writer| FB[("scan-out FB, PSRAM")]
@@ -65,10 +65,11 @@ records each file left out with its reason. What stays out is the Linux shell ar
 `DisplayManager`, `PrinterSession`, `main.cpp`, the libhv `MoonrakerClient`, crash handling, mDNS, Bluetooth,
 remote screen and the ctl server) and the subsystems the panel cannot afford or has no hardware for. Those
 subsystems compile out through the definitions in `components/helixapp/CMakeLists.txt`: `HELIX_HAS_CAMERA`,
-`GCODE_VIEWER`, `BED_MESH_3D`, `LABEL_PRINTER`, `PLUGINS`, `TIMELAPSE_VIEWER`, `SOUND`, `BELT_TUNER`, `HIDPI_FONTS`
-and `CJK` are 0, `HELIX_ENABLE_SCREENSAVER` is 0, and the filament backends (`CFS`, `IFS`, `ACE`, `QIDI`,
-`SNAPMAKER`) are 1. Every gate is written out even when its value is the obvious one, because an undefined
-`HELIX_HAS_X` reads as 0 in `#if` and would drop a feature with nobody deciding to. Shared code that needs a
+`GCODE_VIEWER`, `BED_MESH_3D`, `LABEL_PRINTER`, `PLUGINS`, `TIMELAPSE_VIEWER`, `BELT_TUNER`, `HIDPI_FONTS`,
+`TOOLHEAD_WIDGET` (the home Toolhead widget; the Motion panel stays), `IMAGE_TAGGER` and `CJK` are 0, and
+`HELIX_ENABLE_SCREENSAVER` is 0. Every other gate, the filament backends (`CFS`, `IFS`, `ACE`, `QIDI`,
+`SNAPMAKER`) among them, keeps its default from `include/helix_features.h`, which `lvgl_pch.h` brings into every
+source. `HELIX_HAS_SOUND` is a presence flag and is left undefined, so the sound paths compile to their stubs. Shared code that needs a
 firmware arm tests `HELIX_PLATFORM_ESP32`, or `ESP_PLATFORM` where an IDF header is involved.
 
 Excluded files leave holes that kept files still reach. Three kinds of filler cover them, and the difference
@@ -122,9 +123,9 @@ What must be internal, and why:
 - **The two 32KB RGB bounce buffers** and the presenter's 16KB staging band: DMA and the refill ISR read them.
 - **LVGL's 38.4KB draw buffer** (`firmware/helixscreen-esp32/main/lvgl_glue.c#"static uint8_t s_draw_buf1"`),
   static so it is reserved at link time.
-- **The WebSocket task's 8KB stack**
-  (`firmware/helixscreen-esp32/components/helixnet/esp_moonraker_client.h#WS_TASK_STACK_BYTES`), sized from a
-  measured ~6.5KB peak.
+- **The WebSocket task's 10KB stack**
+  (`firmware/helixscreen-esp32/components/helixnet/esp_moonraker_client.h#kWsTaskStackBytes`), sized from a
+  measured ~7.1KB peak that does not grow with the printer's object count.
 - **The WiFi driver's buffers**: `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` moves most of WiFi and lwIP to PSRAM, and
   static TX/RX buffer counts make the rest deterministic.
 
@@ -132,8 +133,15 @@ Everything else is pushed out. A large static in firmware-compiled code carries 
 ([`include/helix_psram_attr.h`](../../../include/helix_psram_attr.h)), which is `EXT_RAM_BSS_ATTR` here and empty
 on every other platform: `AmsState`'s instance
 (`src/printer/ams_state.cpp#"static HELIX_PSRAM_BSS AmsState instance"`), the filament path planner's scratch
-(`src/ui/ui_filament_path_topology.cpp#plan_scratch`), `PrinterState`, `TelemetryManager` and `UpdateChecker`. Only
-for statics first touched after boot and never reached by DMA or an ISR. A thread that does not need internal RAM
+(`src/ui/ui_filament_path_topology.cpp#plan_scratch`), `PrinterState`, `SettingsManager`
+(`src/system/settings_manager.cpp#"static HELIX_PSRAM_BSS SettingsManager instance"`), `TelemetryManager`, `UpdateChecker`, the theme's XML
+subjects (`src/ui/theme_manager.cpp#subjects`), and the subjects and hint buffers of the AMS sidebar and context
+menu (`src/ui/ui_ams_sidebar.cpp`, `src/ui/ui_ams_context_menu.cpp`). The
+home widgets follow the same rule: the module-level subjects and text buffers of the toolhead, host health,
+dryer, bed mesh tile and tool switcher widgets, the dryer model's subjects, and the `BedMeshState` and `PerformanceState` singletons
+they read are `HELIX_PSRAM_BSS` (`src/ui/panel_widgets/toolhead_widget.cpp`, `src/printer/bed_mesh_state.cpp#instance`,
+`src/system/performance_state.cpp#instance`), because the subjects and buffers of a handful of widgets are
+enough together to push `.dram0.bss` over its ceiling. Only for statics first touched after boot and never reached by DMA or an ISR. A thread that does not need internal RAM
 gets a PSRAM stack through `PsramThreadStackScope`
 ([`include/psram_thread_stack.h`](../../../include/psram_thread_stack.h)), which also bars that thread from storage
 (`helix::fs::forbid_storage_on_this_thread`), because a flash operation on a PSRAM stack faults. The HTTP lane, the
@@ -144,6 +152,9 @@ cannot spare, so on the firmware a `submit()` to them never runs.
 Two numbers in `size_budget.json` hold the line: `dram_bss_max_bytes` and `dram_data_max_bytes` cap the
 `.dram0.bss` and `.dram0.data` sections at their measured size plus 2KB. The comment there is the reason: statics
 come out of the same internal heap the WiFi driver starts in, and 14KB more is enough to stop it associating.
+When `scripts/check_esp32_size.py` fails a ceiling it lists the eight largest inputs of the section by size,
+input section and object, so the static that crossed it is named; a new widget is the usual cause, and the fix
+is the attribute, not a higher ceiling.
 
 Heap telemetry follows one rule: while the panel scans out, read counters, never walk.
 `heap_caps_get_largest_free_block()` on PSRAM walks every block with interrupts masked for 20-30ms, the bounce
@@ -160,8 +171,9 @@ steady state.
 |------|-------|-----------------|
 | `ui` pthread | 40KB internal | LVGL, every panel, every subject, `UpdateQueue` drain, `MoonrakerManager::process_notifications()`/`process_timeouts()` |
 | `present` | 4KB internal, prio 10 | The only writer of the scan-out framebuffer |
+| `touch` | 3KB PSRAM, prio 6 | Reads the GT911 every 10ms and queues touch edges for LVGL; the only I2C user after boot |
 | `app_net` pthread | 24KB internal, exits | WiFi bring-up, the provisioning portal, a bounded 20s wait for association |
-| `websocket_task` | 8KB internal | Frame reassembly, JSON-RPC dispatch, discovery steps, every client callback |
+| `websocket_task` | 10KB internal | Frame reassembly, JSON-RPC dispatch, discovery steps, every client callback |
 | `ws_transport` pthread | 6KB PSRAM | Every websocket stop, destroy, init and start, in order |
 | `http_lane` pthread | 16KB PSRAM | Capped GETs for thumbnails and small files |
 | `esp_timer` / `sys_evt` | 6KB / 4KB internal | Client housekeeping (timeouts, reconnect execution); WiFi events |
@@ -177,7 +189,7 @@ task (the websocket task), and consumers hop to the UI through `ui_queue_update(
 client, the rule is that no websocket task ever stops itself and the UI thread never waits on one. A disconnect on
 the websocket task only records reconnect intent; the stop/start runs as a job on the `ws_transport` worker
 (`TransportLifecycle`), and sends from the UI thread are bounded at 3s
-(`firmware/helixscreen-esp32/components/helixnet/esp_moonraker_client.h#UI_STALL_BUDGET_MS`) so an unreachable
+(`firmware/helixscreen-esp32/components/helixnet/esp_moonraker_client.h#kUiStallBudgetMs`) so an unreachable
 printer reads as slow, never frozen.
 
 ### Boot sequence, and why its order is fixed
@@ -206,7 +218,7 @@ splits the heap for the next one. The order is chosen so the large, unavoidable 
 5. Once `app_boot_ui()` returns, `ota_health_confirm()` marks the image valid
    (`firmware/helixscreen-esp32/main/ota_health.c#ota_health_confirm`) and the render loop starts.
 6. The first Moonraker connect waits for **both** WiFi up and `app_net` gone (`include/boot_connect_handoff.h`):
-   the WebSocket task's 8KB stack allocated while `app_net`'s 24KB is still held would split the largest block for
+   the WebSocket task's 10KB stack allocated while `app_net`'s 24KB is still held would split the largest block for
    the rest of the session. A 20ms UI-thread poll answers Connect once, and the connect itself runs from the
    `UpdateQueue` drain like every other.
 
@@ -235,10 +247,13 @@ bandwidth. So tearing is solved in software (`main/lvgl_glue.c`, its header comm
   of one cycle and half of the next.
 
 Scrolling uses the retained shadow: `include/scroll_blit.h` moves pixels already in the shadow and renders only the
-strip that scrolled in. Touch is the GT911 through `esp_lcd_touch`, polled by LVGL; a failed probe leaves the panel
-display-only with a startup toast instead of aborting. The render loop sleeps 5-50ms between `lv_timer_handler()`
-calls and logs `slow ui cycle` and `slow refresh cycle` above 100ms, because a long cycle starves the polled touch
-indev and drops taps.
+strip that scrolled in. Touch is the GT911 through `esp_lcd_touch`. The controller keeps only its latest frame and a
+UI cycle can run for hundreds of milliseconds, so a `touch` task reads it every 10ms and queues each press, move and
+release (`firmware/helixscreen-esp32/main/touch_edge_queue.h`); LVGL's indev read takes them one at a time with
+`continue_reading` set, so fast typing reaches the keyboard whole however slow the frame. A second finger landing
+before the first lifts is queued as a release and a press. A failed probe leaves the panel display-only with a
+startup toast instead of aborting. The render loop sleeps 5-50ms between `lv_timer_handler()` calls and logs
+`slow ui cycle` and `slow refresh cycle` above 100ms, because taps wait out a long cycle.
 
 The sdkconfig choices that keep rendering alive are measured and commented in place: 80MHz octal PSRAM (at 40MHz
 the bounce refill misses continuously), 64-byte data cache lines, a 32KB instruction cache, QIO flash, and
@@ -264,7 +279,7 @@ XML binds for square overlay corners, and overlays built under the "Loading..." 
   the panel, and G-code header thumbnail extraction is off
   (`include/thumbnail_cache.h#gcode_thumbnail_extraction_available`).
 - **A capped file list.** Print Files keeps the 50 newest files
-  (`src/ui/ui_panel_print_select.cpp#"constexpr size_t ESP32_MAX_FILE_COUNT"`).
+  (`src/ui/ui_panel_print_select.cpp#"constexpr size_t kEsp32MaxFileCount"`).
 
 ### Networking
 
@@ -287,8 +302,9 @@ unless `CONFIG_HELIX_AMS_HTTP_POLL_BACKENDS` is on (`http_poll_ams_backends_supp
 WiFi is the shared `WiFiManager` over `wifi_backend_esp.cpp`: credentials in NVS, an all-channel scan that joins
 the strongest AP of the SSID, modem sleep off. With no stored SSID, `app_net` runs the SoftAP captive portal
 (`firmware/helixscreen-esp32/components/helixapp/provisioning_esp.h#provisioning_run_portal`) while the not-ready
-UI shows instructions. There is no mDNS: the printer address is typed into Settings, or seeded on first boot from
-`CONFIG_HELIX_HIL_MOONRAKER_URL` in a git-ignored `sdkconfig.local`. The wall clock comes from SNTP, or from
+UI shows instructions. There is no mDNS: the printer address is typed into Settings (whose host modal lists the printers
+the LAN sweep finds, three PSRAM-stack pthreads from `components/helixapp/lan_sweep_esp.cpp`; chapter 13), or
+seeded on first boot from `CONFIG_HELIX_HIL_MOONRAKER_URL` in a git-ignored `sdkconfig.local`. The wall clock comes from SNTP, or from
 Moonraker's HTTP `Date` header on a LAN with no internet (`wall_clock_esp.h`).
 
 ### Storage, settings and printers
@@ -337,7 +353,7 @@ connected clears the streak
 (`firmware/helixscreen-esp32/components/helixapp/app_boot.cpp#"void app_boot_tick(void) {"`).
 
 The serial console is the diagnostic surface (`main/serial_snapshot.h`): `snap` streams the shadow framebuffer as
-deflated, CRC-checked lines that `scripts/esp32_serial_snapshot.py` turns into a PNG, `tap X Y` injects a touch,
+deflated, CRC-checked lines that `scripts/esp32_serial_snapshot.py` turns into a PNG, `tap X Y` injects a touch (`down X Y` / `up` for overlapping fingers),
 and `notes` prints the notification history. Logs carry the tripwires: `[scanout] underruns` (bounce refills that
 missed), `[present] late blit` (a frame shown torn), `slow ui cycle`, `rx stall`, the `[heap:*]` milestones and the
 `[stack:steady-60s]` watermarks for the two IDF tasks that run app code. `CONFIG_HELIX_LOG_STRIP_DEBUG` compiles

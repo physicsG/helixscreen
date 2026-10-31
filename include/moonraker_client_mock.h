@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include "accel_batch_source_mock.h"
+#include "async_lifetime_guard.h"
 #include "axis.h"
+#include "helix_shared_callback.h"
 #include "mock_persona.h"
 #include "moonraker_client.h"
 #include "moonraker_client_mock_spoolman.h"
@@ -49,8 +52,8 @@ class SimSpeed;
 // Forward declaration for internal handler registry
 namespace mock_internal {
 using MethodHandler =
-    std::function<bool(MoonrakerClientMock*, const json&, std::function<void(const json&)>,
-                       std::function<void(const MoonrakerError&)>)>;
+    std::function<bool(MoonrakerClientMock*, const json&, helix::SharedCallback<void(const json&)>,
+                       helix::SharedCallback<void(const MoonrakerError&)>)>;
 } // namespace mock_internal
 
 /// Failure modes the TEST_RESONANCES simulation can be switched to.
@@ -158,6 +161,16 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      *               simulated-time consumer shares, helix::sim::clamp_speed())
      */
     void set_simulation_speedup(double factor);
+
+    /**
+     * @brief Set the pause connect() takes before reporting CONNECTED
+     *
+     * Process-wide, in simulated milliseconds (scaled by sim_speed()). The
+     * --test app keeps the default; the unit-test binary sets 0, because
+     * connect() blocks its caller for the whole pause and no test waits on it.
+     */
+    static void set_connect_delay_ms(int ms);
+    static int connect_delay_ms();
 
     /**
      * @brief Get current simulation speedup factor
@@ -320,8 +333,8 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param on_disconnected Callback stored but never invoked in mock
      * @return Always returns 0 (success)
      */
-    int connect(const char* url, std::function<void()> on_connected,
-                std::function<void()> on_disconnected) override;
+    int connect(const char* url, helix::SharedCallback<void()> on_connected,
+                helix::SharedCallback<void()> on_disconnected) override;
 
     /**
      * @brief Run the real discovery sequence under discovery_mutex_
@@ -331,9 +344,9 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * discovery_'s name lists that the simulation thread reads under the lock.
      * The callbacks run after the lock is released.
      */
-    void
-    discover_printer(std::function<void()> on_complete,
-                     std::function<void(const std::string& reason)> on_error = nullptr) override;
+    void discover_printer(
+        helix::SharedCallback<void()> on_complete,
+        helix::SharedCallback<void(const std::string& reason)> on_error = nullptr) override;
 
     /**
      * @brief Simulate WebSocket disconnection (no real network I/O)
@@ -374,7 +387,7 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @return Always returns 0 (success)
      */
     helix::RequestId send_jsonrpc(const std::string& method, const json& params,
-                                  std::function<void(const json&)> cb) override;
+                                  helix::SharedCallback<void(const json&)> cb) override;
 
     /**
      * @brief Simulate JSON-RPC request with success/error callbacks
@@ -393,8 +406,9 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @return Always returns 0 (success)
      */
     helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override;
 
@@ -514,6 +528,17 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @param target Target temperature in Celsius
      */
     void set_chamber_target(double target);
+
+    /**
+     * @brief A chamber target arriving by the appliance's route around the
+     *        gcode queue (or by gcode, for the same heater)
+     *
+     * With HELIX_MOCK_DRAGONBREATH_REJECT set, the appliance turns every target
+     * down: the heater target stays 0 and the status object reports the
+     * rejection. Otherwise the target is taken and any rejection cleared.
+     * @return the route's reply, {"accepted", "reason", "seq"}
+     */
+    json chamber_route_set_target(double target);
 
     // ========== Test Helpers ==========
 
@@ -746,6 +771,16 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
         return resonance_hz_per_sec_;
     }
 
+    /// Whether `[resonance_tester]` reports probe_points (at the bed centre,
+    /// 20 mm up). Klipper requires them; off reproduces a fork that omits them.
+    void set_resonance_probe_points(bool reported) {
+        resonance_probe_points_ = reported;
+    }
+
+    /// `configfile.settings.resonance_tester` as the query and subscribe
+    /// responses report it.
+    [[nodiscard]] json resonance_tester_settings() const;
+
     /**
      * @name TEST_RESONANCES belt simulation
      * @{
@@ -758,6 +793,16 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /// toward the other path's, so the defaults start with a visible delta.
     void set_belt_peaks_hz(float a_hz, float b_hz);
 
+    /// Script one path's peak across its sweeps after the first, full or
+    /// windowed; the last entry holds once the list runs out. A NaN entry
+    /// writes a featureless curve (floor plus noise, no peak). While either
+    /// path has a script, no sweep applies the re-measure walk.
+    void set_belt_tune_script(char path_letter, std::vector<float> peaks_hz);
+
+    /// Parse and apply a `<A|B>:<hz|flat>,...` script (HELIX_MOCK_BELT_TUNE_SCRIPT).
+    /// Bad items are skipped with a warning; a bad path letter drops the spec.
+    void apply_belt_tune_script(const std::string& spec);
+
     /// Switch the next TEST_RESONANCES to a failure mode (NONE = normal).
     void set_belt_failure(BeltMockFailure f) {
         belt_failure_ = f;
@@ -768,6 +813,23 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     void set_belt_line_interval_ms(uint32_t ms) {
         belt_line_interval_ms_ = ms;
     }
+
+    /// SHAPER_CALIBRATE plays whole-Hz sweep lines at the cadence
+    /// TEST_RESONANCES uses (hz_per_sec and the sim speed) instead of the
+    /// compact 20-line transcript, so the live preview has a sweep to follow.
+    /// MoonrakerManager turns it on for the app; unit tests keep the compact one.
+    void set_shaper_sweep_realtime(bool realtime) {
+        shaper_sweep_realtime_ = realtime;
+    }
+
+    /// What the sweep this mock started last resonates like, matching the CSV
+    /// it will write. Defaults until a sweep starts.
+    [[nodiscard]] helix::calibration::MockSweepResponse active_sweep_response() const;
+
+    /// The live preview's stream for a sweep of this mock: MockAccelBatchSource
+    /// over active_sweep_response() at this mock's sim speed.
+    [[nodiscard]] std::unique_ptr<helix::calibration::IAccelBatchSource>
+    make_accel_batch_source(const helix::calibration::SweepPlan& plan) const;
 
     /**
      * @brief Path the next TEST_RESONANCES for @p name writes
@@ -891,6 +953,31 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /// Status of `_HELIX_PREP` and of the leveling objects' `applied`, keyed by
     /// object. Empty when the file is not loaded.
     [[nodiscard]] json skip_wrapper_status() const;
+
+    /// HELIX_MOCK_LAYER_PAUSE (default on): the client.cfg layer-pause macros.
+    [[nodiscard]] static bool layer_pause_macros_loaded();
+    /// `gcode_macro SET_PRINT_STATS_INFO` with the schedule; empty when off.
+    [[nodiscard]] json layer_pause_status() const;
+    /// Add the three macros' objects to an objects list when loaded.
+    static void append_layer_pause_objects(json& objects);
+    /// The simulated print reached a new layer: fire a scheduled pause.
+    void layer_pause_on_layer(int previous_layer, int current_layer);
+    /// CANCEL_PRINT clears both schedules, as client.cfg's does.
+    void reset_layer_pause();
+
+    /// HELIX_MOCK_PLR with HELIX_MOCK_HELIX_PLUGIN: the plugin's `plr`
+    /// feature entry for server.helix.status; null when the knob is off.
+    /// `enabled` follows a written `helix-screen` / `plr_user`, on by default.
+    [[nodiscard]] json mock_plr_feature_entry();
+    /// A power-loss snapshot is on record: the newest history job reads
+    /// `interrupted` until a discard or a resume clears it.
+    [[nodiscard]] bool mock_plr_interrupted() const;
+    /// The plugin's saving switch: a written `plr_user.enabled`, else on.
+    [[nodiscard]] bool mock_plr_saving();
+    /// Answer one server.helix.plr.* request (moonraker_client_mock_plr.cpp).
+    void mock_plr_request(const std::string& method, const json& params,
+                          helix::SharedCallback<void(const json&)> success_cb,
+                          helix::SharedCallback<void(const MoonrakerError&)> error_cb);
 
     /// A print-start step reaching its wrapper: true, and the flag restored,
     /// when a skip was set for it.
@@ -1088,6 +1175,11 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
         return !active_bed_mesh_.probed_matrix.empty();
     }
 
+    /// Whether the printer reports motors-sync's `motors_sync` object (an AWD
+    /// printer; HELIX_MOCK_OBJECTS="motors_sync" adds it to any persona). Its
+    /// simulated print start then runs a motor sync after homing.
+    [[nodiscard]] bool has_motors_sync() const;
+
     /**
      * @brief Serve configfile.settings.bed_mesh.probe_count from objects.query
      *
@@ -1158,6 +1250,14 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /// MoonrakerClientMock*, not members.
     bool led_effect_enabled(const std::string& object_name) const;
 
+    /// An extruder's pressure advance K and smooth time, as SET_PRESSURE_ADVANCE
+    /// last left them. An extruder never set reads the config default.
+    struct PressureAdvance {
+        double advance = 0.04;
+        double smooth_time = 0.04;
+    };
+    PressureAdvance pressure_advance_for(const std::string& extruder) const;
+
     /// Current mock offset for a tool on one axis, in mm. Seeded distinct per
     /// tool AND per axis and updated by SET_TOOL_PARAMETER, so a value set
     /// earlier in the session survives into a later status snapshot instead of
@@ -1193,9 +1293,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      *
      * @return true if the script was handled here (the callbacks are owned)
      */
-    bool simulate_tool_offset_calibration(const std::string& script,
-                                          std::function<void(const nlohmann::json&)> success_cb,
-                                          std::function<void(const MoonrakerError&)> error_cb);
+    bool
+    simulate_tool_offset_calibration(const std::string& script,
+                                     helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+                                     helix::SharedCallback<void(const MoonrakerError&)> error_cb);
 
     /**
      * @brief Simulate an automatic pressure-advance run
@@ -1209,8 +1310,89 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * @return true if the script was handled here
      */
     bool simulate_pa_calibration(const std::string& script,
-                                 std::function<void(const nlohmann::json&)> success_cb,
-                                 std::function<void(const MoonrakerError&)> error_cb);
+                                 helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+                                 helix::SharedCallback<void(const MoonrakerError&)> error_cb);
+
+    /**
+     * @brief Simulate the Snapmaker U1's EXTRUDER_OFFSET_ACTION_* steps, when
+     *        @p script is one of them
+     *
+     * Each step blocks like the firmware's: the rpc is answered a beat later on
+     * an lv_timer. The firmware's state gate is modelled too: every step but
+     * PRESTART refuses with its coded fault until PRESTART entered the
+     * calibration state, and EXIT leaves it. A head's PROBE_CALIBRATE writes a
+     * new extruder_offset, which the objects query then reports.
+     *
+     * HELIX_MOCK_NOZZLE_CAL_PLATE_REFUSE=<n> makes the first n plate checks
+     * report the PEI sheet still on the bed; HELIX_MOCK_NOZZLE_CAL_FAIL=<n> makes
+     * head n's probe fail.
+     *
+     * @return true if the script was handled here (the callbacks are owned)
+     */
+    bool simulate_nozzle_offset_calibration(
+        const std::string& script, helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb);
+
+    /**
+     * @brief Answer an INDX command that blocks for minutes on the real
+     *        printer (INDX_CALIBRATE, INDX_FAN_CALIBRATE, TC_CYCLE_ALL)
+     *
+     * The command runs at once; the rpc is answered later on an lv_timer,
+     * scaled by the simulation speed, so a screen tracking it is observable.
+     * A refusal answers at once.
+     *
+     * @return true if the script was handled here (the callbacks are owned)
+     */
+    bool simulate_indx_blocking(const std::string& script,
+                                helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+                                helix::SharedCallback<void(const MoonrakerError&)> error_cb);
+
+    /// A printer.gcode.script run line by line, as Klipper runs it.
+    struct GcodeScriptRun {
+        int result = 0;
+        std::string error; ///< The first rejected line's message
+        /// Where the script resumes once the MedusaHC swap a line started has
+        /// ended; npos when every line ran.
+        size_t resume_at = std::string::npos;
+    };
+    /// Run @p script from byte @p start, stopping after a line that starts a
+    /// MedusaHC swap.
+    GcodeScriptRun run_gcode_script_lines(const std::string& script, size_t start);
+    /// Answer a printer.gcode.script rpc with what its lines did.
+    void answer_gcode_script(const std::string& script, const GcodeScriptRun& run,
+                             const helix::rpc_error_policy::CallerIntent& intent,
+                             const helix::SharedCallback<void(const nlohmann::json&)>& success_cb,
+                             const helix::SharedCallback<void(const MoonrakerError&)>& error_cb);
+    /**
+     * @brief Hold a printer.gcode.script reply until the MedusaHC swap its
+     *        script started has ended.
+     *
+     * The controller's _wait_for_tool() blocks the command until the docks
+     * confirm the tool or time out. A failure outside a print answers with the
+     * controller's message and runs nothing after it; a success, or a failure
+     * that paused a print, runs the rest of the script and then answers.
+     */
+    void hold_medusa_reply(std::string script, size_t resume_at,
+                           helix::rpc_error_policy::CallerIntent intent,
+                           helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+                           helix::SharedCallback<void(const MoonrakerError&)> error_cb);
+    /// klipper-toolchanger's tool_number as pin_watch's sync_toolchanger keeps
+    /// it: the docks' tool when they name one, -1 (UNSELECT_TOOL) when they do
+    /// not, and while printing an unnamed reading leaves it alone.
+    int sync_medusa_toolchanger_tool();
+    /// Tools the MedusaHC variant carries: six on medusahc-tn, four otherwise.
+    [[nodiscard]] static int medusa_tool_count();
+    static constexpr int kMedusaMaxTools = 6;
+    /// MHC_RESUME refuses to re-pick a tool whose nozzle is at or below this.
+    static constexpr int kMedusaResumeMinNozzleC = 190;
+
+    /// The U1 persona's extruder_offset for head @p head (0-3), as the
+    /// objects query reports it.
+    [[nodiscard]] std::array<double, 3> nozzle_offset(int head) const;
+
+    /// Whether the simulated firmware holds the offset calibration state
+    /// (PRESTART ran, EXIT has not). machine_state_manager.main_state reports it.
+    [[nodiscard]] bool nozzle_calibration_active() const;
 
     /// The inverse: which axis a PARAMETER= names, or nullopt for any other
     /// tool parameter (the mock models only the three offsets).
@@ -1286,9 +1468,41 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /**
      * @brief `[pin_watch io]` status: `{"current_tool": int}`.
      *
-     * Empty object for the FORK variant (no pin_watch) and for NONE.
+     * Empty object for NONE.
      */
     nlohmann::json pin_watch_status_json() const;
+    /// The macro state the MedusaHC controller keeps beside [medusahc]:
+    /// `gcode_macro _TOOL_OFFSET`, `gcode_macro _GLOBAL_STATE` and
+    /// `save_variables`, keyed by object name. Empty when not a MedusaHC mock.
+    nlohmann::json medusa_macro_status_json() const;
+    /// The nozzle temperature of hot end @p tool: the live extruder for tool 0,
+    /// secondary_extruder_temp() for the rest.
+    [[nodiscard]] double medusa_nozzle_temp(int tool) const;
+    /// Secondary extruder @p index (1..5)'s reading and target. They start
+    /// apart (extruder1 heating, extruder2 at temperature, extruder3 cooling,
+    /// the rest cold) so each heating state shows, and follow their targets
+    /// like the primary: SET_HEATER_TEMPERATURE HEATER=extruder<n> sets one.
+    [[nodiscard]] double secondary_extruder_temp(int index) const;
+    [[nodiscard]] double secondary_extruder_target(int index) const;
+
+    /**
+     * @brief U1 `defect_detection` status: the module's stored config, which
+     *        is what its get_status() returns.
+     *
+     * Empty object for every persona but the U1. main_enable and
+     * clean_bed.enable follow DEFECT_DETECTION_CONFIG MAIN_ENABLE=0|1 and
+     * CLEAN_BED_ENABLE=0|1.
+     */
+    nlohmann::json defect_detection_status() const;
+
+    /**
+     * @brief U1 `purifier` status: the top module's air purifier, whose
+     *        power_detected is the top being fitted.
+     *
+     * Empty object for every persona but the U1. power_detected is true unless
+     * HELIX_MOCK_ENCLOSURE_TOP=0.
+     */
+    nlohmann::json purifier_status() const;
 
   private:
     // Test visibility into the chamber-key cache and the synchronous initial
@@ -1300,14 +1514,25 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
         std::chrono::steady_clock::time_point due;
         std::string line;
         bool is_final;
-        std::function<void(const nlohmann::json&)> success_cb;
-        std::function<void(const MoonrakerError&)> error_cb;
+        helix::SharedCallback<void(const nlohmann::json&)> success_cb;
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb;
     };
     /// HELIX_MOCK_PA_FAIL=1 makes the run refuse with a realistic runout
     /// message. The refusal path is otherwise unreachable in mock mode, and it
     /// is one of the states the panel handles most visibly.
     std::vector<PendingPaLine> pending_pa_lines_;
     mutable std::mutex pa_cal_mutex_;
+
+    /// U1 offset calibration state: whether PRESTART entered the firmware's
+    /// calibration state, how many plate checks are still to refuse, and each
+    /// head's extruder_offset. Under nozzle_cal_mutex_.
+    bool nozzle_cal_active_ = false;
+    int nozzle_cal_plate_refusals_ = 0;
+    std::array<std::array<double, 3>, 4> nozzle_offsets_{{{0.073, -0.037, 0.0},
+                                                          {0.089, 0.037, 0.099},
+                                                          {0.012, 0.019, 0.272},
+                                                          {-0.089, -0.016, 0.060}}};
+    mutable std::mutex nozzle_cal_mutex_;
     void service_pending_pa_lines();
 
     /**
@@ -1343,31 +1568,42 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /**
      * @brief Which MedusaHC shipping configuration the mock emulates.
      *
-     * MedusaHC is a hotend changer bolted onto klipper-toolchanger. The Python
-     * extra that publishes [medusahc] lives outside the hardware repo and has
-     * two independent implementations whose objects and status schemas differ
-     * (see docs/devel/FILAMENT_BACKEND_MEDUSAHC.md). Emulating only one would
-     * leave toolchanger_addon's schema discrimination unexercised outside the
-     * unit tests, so the mock can produce either.
+     * Irbis3D's Python controller runs with or without klipper-toolchanger (see
+     * docs/devel/FILAMENT_BACKEND_MEDUSAHC.md). Each variant emits the object set
+     * its configuration has, so toolchanger_addon's detection and swap command
+     * routing run outside the unit tests too.
      */
-    enum class MedusaVariant {
-        NONE,       ///< Not a MedusaHC mock
-        CONTROLLER, ///< Irbis3D MedusaHC-Python-Controller: MHC_* + legacy aliases
-        FORK,       ///< topi314/MedusaHC: [medusahc] alone, forked status schema
-    };
+    using MedusaVariant = helix::mock::MedusaVariant;
 
     /**
      * @brief MedusaHC variant selected by HELIX_MOCK_AMS, or NONE.
      *
-     * "medusahc"/"medusa"/"mhc" select CONTROLLER (the Irbis3D implementation);
-     * "medusahc-fork" selects topi314's. Unlike is_mock_toolchanger(), these values do NOT
-     * build an AmsBackendMock: try_create_mock() declines them so real discovery
-     * runs and the production AmsBackendToolChanger drives the mock objects.
+     * "medusahc"/"medusa"/"mhc" select CONTROLLER, "medusahc-ktc" CONTROLLER_KTC and
+     * "medusahc-tn" CONTROLLER_TN
+     * (helix::mock::medusa_variant). Unlike
+     * is_mock_toolchanger(), these values do NOT build an AmsBackendMock:
+     * try_create_mock() declines them so real discovery runs and the production
+     * AmsBackendToolChanger drives the mock objects.
      */
     static MedusaVariant mock_medusa_variant();
 
+    /**
+     * @brief Someone puts the hot ends back by hand: @p tool seated on the
+     * carriage (-1 for none) and every other one in its dock.
+     *
+     * The dock switches then agree, so pin_watch's current_tool is definite
+     * again. The controller's sensor_error latch is NOT touched: only its next
+     * operation clears it.
+     */
+    void medusa_place_tools_by_hand(int tool);
+
     /// Convenience: mock_medusa_variant() != MedusaVariant::NONE.
     bool is_mock_medusahc() const;
+
+    /// configfile sections a MedusaHC persona adds, as Klipper reports them in
+    /// both settings and config: the upstream example RESUME, which runs
+    /// MHC_RESUME. Empty for any other persona.
+    [[nodiscard]] json medusa_config_sections() const;
 
   private:
     /**
@@ -1581,12 +1817,17 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
      * torn down mid-playback frees both and on_done never runs.
      */
     void play_console_lines(std::vector<std::string> lines, uint32_t interval_ms,
-                            std::function<void()> on_done);
+                            helix::SharedCallback<void()> on_done);
 
     /// play_console_lines() for ticks that do more than print one line: each
     /// step runs on its own tick, then on_done on the tick after the last.
-    void play_console_steps(std::vector<std::function<void()>> steps, uint32_t interval_ms,
-                            std::function<void()> on_done);
+    void play_console_steps(std::vector<helix::SharedCallback<void()>> steps, uint32_t interval_ms,
+                            helix::SharedCallback<void()> on_done);
+
+    /// Milliseconds between whole-Hz "Testing frequency" lines: the
+    /// set_belt_line_interval_ms() override, else one simulated second per
+    /// hz_per_sec Hz shortened by the sim speed. Shared by both sweeps.
+    [[nodiscard]] uint32_t sweep_line_interval_ms() const;
 
     /**
      * @brief Dispatch TEST_RESONANCES response sequence
@@ -1694,6 +1935,20 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     }
     [[nodiscard]] bool update_manager_busy() const {
         return update_manager_busy_;
+    }
+
+    /// Test helper: what server.helix.analysis answers for @p filename (its
+    /// `result`); a null @p result forgets it, and such a file answers pending.
+    void set_mock_file_analysis(const std::string& filename, const json& result) {
+        if (result.is_null()) {
+            mock_file_analysis_.erase(filename);
+        } else {
+            mock_file_analysis_[filename] = result;
+        }
+    }
+    [[nodiscard]] json mock_file_analysis(const std::string& filename) const {
+        const auto it = mock_file_analysis_.find(filename);
+        return it == mock_file_analysis_.end() ? json(nullptr) : it->second;
     }
 
     /// Test helper: the Moonraker database the server.database.* handlers serve.
@@ -1861,8 +2116,8 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     // counts. Guarded by fault_mutex_; callbacks never run under it.
     struct HeldRequest {
         json params;
-        std::function<void(const json&)> success_cb;
-        std::function<void(const MoonrakerError&)> error_cb;
+        helix::SharedCallback<void(const json&)> success_cb;
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb;
     };
     std::map<std::string, MoonrakerError> fail_next_;
     std::set<std::string> defer_next_;
@@ -1873,6 +2128,7 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     // Unlocked: the handlers answer on the calling thread, and every caller of
     // the database and Spoolman routes is on the main thread.
     json mock_db_ = json::object();
+    std::map<std::string, json> mock_file_analysis_;
     MockSpoolmanServer spoolman_;
 
     // One-shot forced error injection for printer.gcode.script (test helper).
@@ -1959,6 +2215,20 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     std::atomic<double> print_progress_{0.0}; // 0.0 to 1.0
     /// Last layer announced on the console. Sim thread only.
     int last_console_layer_ = 0;
+    int layer_pause_last_layer_ = 0; ///< status thread only
+    /// server.helix.plr.* state: the snapshot is kept until a discard or a
+    /// committed resume, and each plan request issues a new plan id. Main
+    /// thread only, like every mock RPC handler.
+    bool plr_snapshot_cleared_ = false;
+    int plr_plan_seq_ = 0;
+    std::string plr_plan_id_;
+    /// server.helix.plr.mesh_include state: printer.cfg's include line, as
+    /// the add/remove actions leave it.
+    bool plr_mesh_include_ = false;
+    std::atomic<bool> layer_pause_next_{false};
+    std::atomic<int> layer_pause_next_armed_at_{0}; ///< layer the request arrived on
+    std::atomic<bool> layer_pause_at_enable_{false};
+    std::atomic<int> layer_pause_at_layer_{0};
     std::atomic<int> speed_factor_{100}; // Percentage
     std::atomic<int> flow_factor_{100};  // Percentage
     std::atomic<int> fan_speed_{0};      // 0-255
@@ -2029,6 +2299,10 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     struct LedColor {
         double r = 0.0, g = 0.0, b = 0.0, w = 0.0;
     };
+    /// Guarded by pressure_advance_mutex_.
+    std::map<std::string, PressureAdvance> pressure_advance_;
+    mutable std::mutex pressure_advance_mutex_;
+
     std::map<std::string, LedColor> led_states_; // LED name -> color
     mutable std::mutex led_mutex_;               // Protects led_states_
     /// Klipper object names of the enabled LED effects. SET_LED_EFFECT is
@@ -2045,6 +2319,8 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
 
     // G-code offset tracking
     std::atomic<double> gcode_offset_z_{0.0}; // Z offset from SET_GCODE_OFFSET
+    std::atomic<double> gcode_offset_x_{0.0}; // X offset (MHC_TOOL_OFFSET applies X/Y/Z)
+    std::atomic<double> gcode_offset_y_{0.0};
     /// Per-tool offsets, indexed by tool number then axis, driven by
     /// SET_TOOL_PARAMETER. Seeded DISTINCT rather than all-zero, per tool and
     /// per axis: an all-zero seed makes "every tool reads the same value" (or
@@ -2095,12 +2371,13 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
         NONE = 0,
         PRINT_START_MARKER = 1, // "PRINT_START" detected
         HOMING = 2,             // "G28" dispatched
-        HEATING_BED = 3,        // "M190 S60" dispatched
-        HEATING_NOZZLE = 4,     // "M109 S210" dispatched
-        QGL = 5,                // "QUAD_GANTRY_LEVEL" dispatched
-        BED_MESH = 6,           // "BED_MESH_CALIBRATE" dispatched
-        PURGING = 7,            // "VORON_PURGE" dispatched
-        LAYER_1 = 8             // "SET_PRINT_STATS_INFO CURRENT_LAYER=1" dispatched
+        MOTOR_SYNC = 3,         // "Motors synchronization started", with motors_sync only
+        HEATING_BED = 4,        // "M190 S60" dispatched
+        HEATING_NOZZLE = 5,     // "M109 S210" dispatched
+        QGL = 6,                // "QUAD_GANTRY_LEVEL" dispatched
+        BED_MESH = 7,           // "BED_MESH_CALIBRATE" dispatched
+        PURGING = 8,            // "VORON_PURGE" dispatched
+        LAYER_1 = 9             // "SET_PRINT_STATS_INFO CURRENT_LAYER=1" dispatched
     };
     std::atomic<uint8_t> simulated_print_start_phase_{0};
 
@@ -2141,21 +2418,52 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     std::unordered_map<std::string, mock_internal::MethodHandler> method_handlers_;
 
     // Simulation parameters (realistic heating rates)
-    static constexpr double ROOM_TEMP = 25.0;
-    static constexpr double EXTRUDER_HEAT_RATE = 3.0;     // °C/sec when heating
-    static constexpr double EXTRUDER_COOL_RATE = 1.5;     // °C/sec when cooling
-    static constexpr double BED_HEAT_RATE = 1.0;          // °C/sec when heating
-    static constexpr double BED_COOL_RATE = 0.3;          // °C/sec when cooling
-    static constexpr double CHAMBER_HEAT_RATE = 0.3;      // °C/sec when heating (slower than bed)
-    static constexpr double CHAMBER_COOL_RATE = 0.1;      // °C/sec when cooling
-    static constexpr int SIMULATION_INTERVAL_MS = 250;    // Physics tick interval
-    static constexpr int NOTIFICATION_INTERVAL_TICKS = 4; // Dispatch every 4 ticks (~1s)
+    static constexpr double kRoomTemp = 25.0;
+    static constexpr double kExtruderHeatRate = 3.0; // °C/sec when heating
+    static constexpr double kExtruderCoolRate = 1.5; // °C/sec when cooling
+    /// One simulation step of @p dt simulated seconds for every secondary
+    /// extruder: toward its target, or toward room temperature when off.
+    void advance_secondary_extruders(double dt);
+    struct SecondaryExtruder {
+        double temperature = kRoomTemp;
+        double target = 0.0;
+    };
+    /// Index 0 is the primary (extruder_temp_), unused here. Guarded by
+    /// secondary_extruders_mutex_.
+    std::array<SecondaryExtruder, 6> secondary_extruders_{{{kRoomTemp, 0.0},
+                                                           {150.0, 250.0},
+                                                           {248.0, 250.0},
+                                                           {200.0, 0.0},
+                                                           {kRoomTemp, 0.0},
+                                                           {kRoomTemp, 0.0}}};
+    mutable std::mutex secondary_extruders_mutex_;
+    static constexpr double kBedHeatRate = 1.0;          // °C/sec when heating
+    static constexpr double kBedCoolRate = 0.3;          // °C/sec when cooling
+    static constexpr double kChamberHeatRate = 0.3;      // °C/sec when heating (slower than bed)
+    static constexpr double kChamberCoolRate = 0.1;      // °C/sec when cooling
+    static constexpr int kSimulationIntervalMs = 250;    // Physics tick interval
+    static constexpr int kNotificationIntervalTicks = 4; // Dispatch every 4 ticks (~1s)
 
     // Mock service availability flags (initialized from env vars in constructor)
     bool mock_spoolman_enabled_{true};     ///< Controlled by HELIX_MOCK_SPOOLMAN env var
     std::vector<WebcamInfo> mock_webcams_; ///< Published at discovery; HELIX_MOCK_WEBCAMS
-    bool accelerometer_available_{true};   ///< Accelerometer available for input shaper tests
-    bool input_shaper_configured_{true};   ///< Input shaper configured for config query tests
+
+  public:
+    /// Entries added through server.webcams.post_item, listed after the HELIX_MOCK_WEBCAMS
+    /// ones. Keyed by uid, or by name, like Moonraker's own registry.
+    struct PostedWebcams {
+        std::mutex mutex;
+        std::vector<nlohmann::json> items;
+        int next_uid = 0;
+    };
+    PostedWebcams& posted_webcams() {
+        return posted_webcams_;
+    }
+
+  private:
+    PostedWebcams posted_webcams_;
+    bool accelerometer_available_{true}; ///< Accelerometer available for input shaper tests
+    bool input_shaper_configured_{true}; ///< Input shaper configured for config query tests
     /// Staged input shaper values served while configured (see
     /// set_input_shaper_values); defaults mirror the mock's original payload.
     std::string shaper_type_x_{"mzv"};
@@ -2170,32 +2478,90 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     json extra_config_settings_ = json::object();   ///< set_config_settings_section() sections
     std::atomic<int> skip_flags_[3] = {1, 1, 1};    ///< `_HELIX_PREP` run_* by skip_wrappers::Op
     json object_status_overrides_ = json::object(); ///< set_object_status() statuses
-    double resonance_min_freq_{5.0};   ///< [resonance_tester] min_freq the mock reports/sweeps
-    double resonance_max_freq_{135.0}; ///< [resonance_tester] max_freq the mock reports/sweeps
-    double resonance_hz_per_sec_{1.0}; ///< [resonance_tester] hz_per_sec the mock reports/sweeps
+    double resonance_min_freq_{5.0};    ///< [resonance_tester] min_freq the mock reports/sweeps
+    double resonance_max_freq_{135.0};  ///< [resonance_tester] max_freq the mock reports/sweeps
+    double resonance_hz_per_sec_{1.0};  ///< [resonance_tester] hz_per_sec the mock reports/sweeps
+    bool resonance_probe_points_{true}; ///< [resonance_tester] reports probe_points
     /// Simulated belt peaks, index 0 = path A ('1,1'), 1 = path B ('1,-1').
     float belt_peaks_hz_[2]{110.0f, 98.0f};
     /// Measurements taken per path; every one after the first walks that
     /// path's peak toward the other's, so repeated tuning converges.
     int belt_measure_count_[2]{0, 0};
+    /// Per-path scripted peaks for every sweep after the first (NaN = flat)
+    /// and the next entry to play.
+    std::vector<float> belt_script_[2];
+    size_t belt_script_pos_[2]{0, 0};
     BeltMockFailure belt_failure_{BeltMockFailure::NONE};
     /// 0 = derive the line interval from hz_per_sec and the sim speed.
     uint32_t belt_line_interval_ms_{0};
+    bool shaper_sweep_realtime_{false};
+    /// Set where a sweep is dispatched, read where the preview attaches.
+    mutable std::mutex sweep_response_mutex_;
+    helix::calibration::MockSweepResponse sweep_response_;
 
     bool mmu_enabled_{true}; ///< MMU available (default true for existing tests)
 
     // --- MedusaHC swap simulation -------------------------------------------
-    // Driven from gcode_script() (SELECT_TOOL / UNSELECT_TOOL / the feeder
-    // macros) and advanced by temperature_simulation_loop(), so a swap moves
-    // through its phases on the wire the way the real controller reports them
-    // instead of snapping to the final state. Atomics: written on the main
-    // thread from gcode_script(), read and advanced on the simulation thread.
-    std::atomic<int> medusa_current_tool_{0};      ///< Tool physically on the head, -1 none
-    std::atomic<int> medusa_target_tool_{-1};      ///< Tool the running swap is fetching, -1 none
-    std::atomic<int> medusa_phase_{0};             ///< 0 idle, 1 dropping, 2 picking
-    std::atomic<int> medusa_phase_ticks_{0};       ///< Sim ticks left in the current phase
-    std::atomic<bool> medusa_feeder_open_{false};  ///< Servo gripper released
-    std::atomic<bool> medusa_sensor_error_{false}; ///< Docks cannot say what is mounted
+    // Driven from gcode_script() (the swap, unmount and feeder commands) and
+    // advanced by temperature_simulation_loop(), so an operation moves through
+    // the phases the real controller reports instead of snapping to its end.
+    // Written from the caller's thread and the simulation thread, read by the
+    // RPC handlers on any thread: every field sits behind medusa_mutex_.
+    enum class MedusaPhase { Idle, Changing, Dropping, Picking };
+    struct MedusaSim {
+        int carriage_tool = 0; ///< Hot end physically on the carriage, -1 none
+        /// A dock whose switch reads seated though its hot end is not in it,
+        /// -1 none. pin_watch then cannot tell which tool is mounted (-2).
+        int stuck_dock = -1;
+        /// [medusahc].target_tool: the last operation's tool, kept after it ends.
+        int target_tool = -1;
+        int pick_tool = -1;            ///< What the running operation picks up, -1 none
+        bool close_after_drop = false; ///< DROP_TOOL / UNSELECT_TOOL re-grip after parking
+        MedusaPhase phase = MedusaPhase::Idle;
+        int phase_ticks = 0; ///< Notifications left in the current phase
+        bool feeder_open = false;
+        /// [medusahc].sensor_error and last_error: set when an operation fails,
+        /// cleared only when the next one begins.
+        bool op_failed = false;
+        std::string last_error;
+        int redock_ticks = -1; ///< Notifications until the simulated hand re-dock, -1 none
+        /// Set when a command arms a phase: the script that sent it stops there.
+        bool swap_armed = false;
+        /// `toolchanger`.tool_number as pin_watch last synced it, and the
+        /// pin reading it synced from.
+        int toolchanger_tool = 0;
+        int toolchanger_reading = 0;
+        bool toolchanger_synced = false;
+        /// [medusahc].layer, from MHC_LAYER_SET.
+        int layer = 0;
+        /// `_GLOBAL_STATE`: the tool RESUME re-picks (PAUSE saves the mounted
+        /// one, SET and DROP their own), and the failed-change flag MHC_ERROR
+        /// sets while a print is active.
+        int global_target_tool = -1;
+        int error_state = 0;
+        /// The swap MHC_RESUME started: the print continues once it succeeds.
+        bool resume_after_swap = false;
+        /// `_TOOL_OFFSET` t<n>_off_{x,y,z}, by tool then axis.
+        std::array<std::array<double, 3>, kMedusaMaxTools> offsets{};
+        /// save_variables' variables (t<n>_gcode_<axis>_offset and anything else saved).
+        nlohmann::json saved_variables = nlohmann::json::object();
+    };
+    /// A printer.gcode.script reply held until the swap its script started ends.
+    struct MedusaReply {
+        std::string script;
+        size_t resume_at = 0;
+        helix::rpc_error_policy::CallerIntent intent{};
+        helix::SharedCallback<void(const nlohmann::json&)> success_cb;
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb;
+    };
+    mutable std::mutex medusa_mutex_;
+    MedusaSim medusa_;
+    std::optional<MedusaReply> medusa_reply_; ///< Behind medusa_mutex_
+    /// Held replies are answered on the main thread; a mock destroyed first
+    /// drops them.
+    helix::AsyncLifetimeGuard medusa_reply_lifetime_;
+    int medusa_swap_fail_tool_ = -1;       ///< HELIX_MOCK_MEDUSA_SWAP_FAIL, set in the ctor
+    int medusa_redock_notifications_ = -1; ///< HELIX_MOCK_MEDUSA_REDOCK_S, set in the ctor
 
     // --- Z-Mod (Creator 5 Pro) mock hardware ----------------------------------
     // Same shape as the MedusaHC block above: gcode_script() writes on the
@@ -2209,9 +2575,61 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     std::array<std::pair<std::string, std::string>, 4> zmod_slots_{
         {{"PLA", "FFFFFF"}, {"PETG", "0ACC38"}, {"ABS", "161616"}, {"PLA", "F72224"}}};
 
-    /// Arm a swap to `tool` (-1 unmounts whatever is on the head). Opens the
-    /// feeder and enters the drop phase; advance_medusa_swap() does the rest.
-    void start_medusa_swap(int tool);
+    /// Begin a swap to `tool` (MHC_SET), or with -1 park whatever is on the head
+    /// (MHC_DROP; @p close_after re-grips the filament afterwards, as DROP_TOOL
+    /// does). Clears the failure latch, as the controller's _begin() does;
+    /// advance_medusa_swap() does the rest.
+    void start_medusa_swap(int tool, bool close_after = true);
+    /// pin_watch's current_tool for the simulated pins. Caller holds medusa_mutex_.
+    [[nodiscard]] int medusa_pin_tool_locked() const;
+    /// The controller's _fail(): latch the error and end the operation. Caller
+    /// holds medusa_mutex_, and pauses a running print once it has let go.
+    void medusa_fail_locked(std::string message);
+    /// The controller's `operation` word for @p phase.
+    static const char* medusa_operation_word(MedusaPhase phase);
+    /// Whether the last command armed a swap phase; clears the flag.
+    bool take_medusa_swap_armed();
+    /// Finish a held reply once its swap has ended (main thread).
+    void complete_medusa_reply(MedusaReply reply, bool failed, bool print_active,
+                               const std::string& message);
+
+    // --- Bondtech INDX mock hardware (moonraker_client_mock_indx.cpp) ----------
+    // The macro state Bondtech's upstream macros publish (save_variables and
+    // gcode_macro variables), driven by T<n> / CHANGE_TOOL / PARK_TOOL.
+    // Written from gcode_script(), read by the RPC handlers and the
+    // simulation thread: all behind indx_mutex_.
+    struct IndxMockState {
+        int tool_count = 6;
+        int active_tool = 0;
+        int toolchange_count = 0;
+        int seat_suspect = -1;
+        int toolhead_state = 0; ///< 0 locked, 2 open
+        bool docks_calibrated = true;
+        std::vector<int> no_heat_tools{5};
+        bool spool_macros = false;   ///< T<n> declares spool_id and sets the active spool
+        bool kalico = false;         ///< [indx] in configfile only, not in the objects list
+        bool unrecognized = false;   ///< CHANGE_TOOL missing
+        std::vector<int> spool_ids;  ///< Per tool, with spool_macros
+        std::string mode = "normal"; ///< _TOOLCHANGE_VARS.mode
+        /// Per tool: the X, Y, Z offset its calibration measured.
+        std::vector<std::array<double, 3>> offsets;
+        double global_z = -0.05; ///< save_variables global_z_offset
+    };
+    mutable std::mutex indx_mutex_;
+    IndxMockState indx_;
+    /// The INDX frame last sent, so a change sends only what moved.
+    nlohmann::json indx_published_;
+
+    /// Read the HELIX_MOCK_INDX_* knobs into indx_.
+    void read_indx_knobs();
+    /// Objects and configfile sections an INDX printer lists.
+    void append_indx_objects(nlohmann::json& objects) const;
+    [[nodiscard]] nlohmann::json indx_config_sections() const;
+    /// Send the INDX objects when they differ from the last frame sent.
+    void publish_indx_if_changed();
+    /// Park the mounted tool, then pick up @p tool (none for -1) and heat it
+    /// to @p target_c when it has a hotend: the end of every change macro.
+    void run_indx_change(int tool, double target_c);
 
     /// Advance the armed swap by one notification interval. No-op when idle.
     void advance_medusa_swap();
@@ -2224,11 +2642,15 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     // status parse sees the same transitions a real U1 sends. State starts at
     // the rig's resting mix (heads 0/2 loaded, 1/3 preloaded) so the sibling
     // channel each frame carries alongside the touched one reads plausibly.
-    static constexpr int U1_CHANNELS = 4;
-    std::array<std::string, static_cast<size_t>(U1_CHANNELS)> u1_channel_state_{
+    static constexpr int kU1Channels = 4;
+    std::array<std::string, static_cast<size_t>(kU1Channels)> u1_channel_state_{
         "load_finish", "preload_finish", "load_finish", "preload_finish"};
-    std::array<bool, static_cast<size_t>(U1_CHANNELS)> u1_filament_detected_{true, true, true,
+    std::array<bool, static_cast<size_t>(kU1Channels)> u1_filament_detected_{true, true, true,
                                                                              true};
+    /// defect_detection main_enable and clean_bed.enable, switched by
+    /// DEFECT_DETECTION_CONFIG.
+    std::atomic<bool> u1_defect_main_enable_{true};
+    std::atomic<bool> u1_clean_bed_enable_{true};
 
     /// One feeder command line: walk the named channel through its states.
     /// HELIX_MOCK_BATCH_FAIL_SLOT=<n> swaps that channel's terminal for its
@@ -2240,6 +2662,8 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /// present-but-partial channel object resets the fields the backend's
     /// delta parse would otherwise carry forward.
     void publish_u1_channel_frame(int ext);
+    /// One filament_feed side's channels object, both of its channels whole.
+    [[nodiscard]] nlohmann::json u1_feed_side_json(int ext) const;
 
     // --- Standalone IFS module mock -----------------------------------------
     // HELIX_MOCK_AMS=ifs-module: pushes the module's objects (ifs /
@@ -2258,6 +2682,38 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     /// Apply one IFS-module gcode command token. @return true when the token
     /// was one of ours (the caller then stops walking the generic chain).
     bool apply_ifs_module_gcode(const std::string& cmd, const std::string& gcode);
+
+    // --- multiACE mock hardware ----------------------------------------------
+    // HELIX_MOCK_AMS=multiace: pushes the U1's own objects plus a plain `ace`
+    // so real discovery builds the PRODUCTION AmsBackendMultiAce and runs it
+    // against the engine-shaped frames served here — try_create_mock()
+    // declines this value, the same rule as the MedusaHC / IFS-module / CFS
+    // modes. Pair with HELIX_MOCK_PRINTER=snapmaker_u1. HELIX_MOCK_MULTIACE_MODE
+    // picks head|multi and HELIX_MOCK_MULTIACE_UNITS the connected unit count
+    // (1-4); ACE_LOAD_HEAD / ACE_UNLOAD_HEAD answer by routing a head to its
+    // bay (or clearing it) and walking the head's channel_state the way
+    // multiACE's shadow filament_feed does.
+    /// Apply one ACE_* engine command. @return true when the line was one.
+    bool apply_multiace_gcode(const std::string& gcode);
+
+    /// Routed bay per head ((ace idx, bay), none when the head is unloaded).
+    std::array<std::pair<int, int>, 4> multiace_route_{{{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}}};
+    /// The engine's swap phase word, walked while a routed load runs.
+    std::string multiace_swap_phase_{"idle"};
+    /// HELIX_MOCK_MULTIACE_UNITS, read once at start (1-4).
+    int multiace_units_{1};
+    /// HELIX_MOCK_MULTIACE_MODE, read once at start ("head" | "multi").
+    std::string multiace_mode_{"head"};
+    /// Whether @p head is fed from the side feeder: head mode wires one unit
+    /// per head, so heads past the unit count have no ACE. Caller holds
+    /// multiace_mutex_.
+    [[nodiscard]] bool multiace_head_is_feeder(int head) const {
+        return multiace_mode_ != "multi" && head >= multiace_units_;
+    }
+    /// Guards the fields above across the simulation and gcode threads.
+    mutable std::mutex multiace_mutex_;
+    /// Read the two HELIX_MOCK_MULTIACE_* knobs into the members (idempotent).
+    void read_multiace_knobs();
 
     // --- CFS mock (K1 stock dialect) ----------------------------------------
     // HELIX_MOCK_AMS=cfs: pushes the `box` object so real discovery sets
@@ -2316,14 +2772,42 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
         return cfs_loaded_slot_.load() >= 0;
     }
 
+    // --- multiACE mock hardware (public: the frame builder is what the
+    // parity test reads, beside the sibling mock-hardware builders above). ---
+    bool is_mock_multiace() const;
+    /// The `ace` object frame, the engine's get_status() shape.
+    [[nodiscard]] nlohmann::json multiace_status_json() const;
+
+    // --- Bondtech INDX mock hardware (public for the mock tests) ---
+    bool is_mock_indx() const;
+    /// The simulated extruder target (0 = off).
+    [[nodiscard]] double extruder_target() const {
+        return extruder_target_.load();
+    }
+    /// Every INDX status object, keyed as Klipper names them.
+    [[nodiscard]] nlohmann::json indx_status_json() const;
+
+    /// display_status.message as the mock publishes it now: the last M117 once one was
+    /// sent (an empty one included), else the print-start chatter for the current phase,
+    /// else null.
+    [[nodiscard]] json current_display_message() const;
+    /// The M117 a typical PRINT_START macro shows during a simulated print-start step
+    /// (a SimulatedPrintStartPhase value).
+    static const char* print_start_display_message(uint8_t simulated_phase);
+
   private:
     // --- gcode_script() handlers (moonraker_client_mock_gcode*.cpp) -----------
     // One handler per command family. A handler returns a code to end the
     // script, or std::nullopt to let the checks after it see the same line.
     using GcodeResult = std::optional<int>;
     GcodeResult gcode_skip_wrappers(const std::string& gcode);
+    GcodeResult gcode_layer_pause(const std::string& gcode);
     GcodeResult gcode_ifs_module(const std::string& gcode);
     GcodeResult gcode_medusa(const std::string& gcode);
+    GcodeResult gcode_indx(const std::string& gcode);
+    /// RESPOND: echoes MSG on the console the way Klipper's [respond] does, so
+    /// an action prompt a script raises reaches the screen.
+    GcodeResult gcode_respond(const std::string& gcode);
     GcodeResult gcode_zmod(const std::string& gcode);
     GcodeResult gcode_cfs(const std::string& gcode);
     GcodeResult gcode_openams(const std::string& script);
@@ -2363,6 +2847,7 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     GcodeResult gcode_shaper_calibrate(const std::string& gcode);
     GcodeResult gcode_test_resonances(const std::string& gcode);
     GcodeResult gcode_set_led(const std::string& gcode);
+    GcodeResult gcode_set_pressure_advance(const std::string& gcode);
     GcodeResult gcode_probe_calibrate(const std::string& gcode);
     GcodeResult gcode_testz(const std::string& gcode);
     GcodeResult gcode_accept(const std::string& gcode);
@@ -2373,6 +2858,12 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     GcodeResult gcode_stop_led_effects(const std::string& gcode);
     /// Lane in the nozzle (1-4, 0 = none) — the module's `ifs_loaded` record.
     std::atomic<int> ifs_module_loaded_{0};
+    /// The module's `ifs_at_hub` record (1-4, 0 = none): the lane holding the
+    /// shared path.
+    std::atomic<int> ifs_module_at_hub_{0};
+    /// Whether the toolhead switch reads filament. Separate from ifs_loaded,
+    /// which the firmware can lose while filament stays in the head.
+    std::atomic<bool> ifs_module_head_loaded_{false};
     /// Per-lane silk presence bitmask, bit i = lane i+1.
     std::atomic<uint8_t> ifs_module_presence_{0x0F};
     /// Slot -> {type, bare-hex colour}; IFS_SET_MATERIAL writes land here.
@@ -2411,6 +2902,12 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     std::atomic<bool> dragonbreath_fault_{false};
     std::atomic<bool> dragonbreath_offline_{false};
     std::atomic<bool> dragonbreath_external_{false};
+    /// HELIX_MOCK_DRAGONBREATH_REJECT: the vendor code every chamber target is
+    /// refused with ("" = targets are accepted). Written once at construction.
+    std::string dragonbreath_reject_code_;
+    std::atomic<int> dragonbreath_reject_seq_{0};
+    std::atomic<double> dragonbreath_reject_target_{0.0};
+    std::atomic<bool> dragonbreath_rejection_outstanding_{false};
     std::atomic<bool> panda_breath_offline_{false};
     std::atomic<bool> panda_breath_auto_{false};
 
@@ -2423,7 +2920,7 @@ class MoonrakerClientMock : public helix::MoonrakerClient {
     // leak report showed surviving the suite).
     struct CalibrationTimer {
         lv_timer_t* timer = nullptr;
-        std::function<void()> free_payload;
+        helix::SharedCallback<void()> free_payload;
     };
     std::vector<CalibrationTimer> calibration_timers_;
 

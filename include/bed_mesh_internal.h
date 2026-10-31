@@ -73,6 +73,7 @@ struct bed_mesh_renderer {
     double bed_center_y;    // (bed_min_y + bed_max_y) / 2
     double coord_scale;     // World units per mm (normalizes bed to target world size)
     bool geometry_computed; // True if bed_center and coord_scale are valid
+    bool circular_bed;      // Round bed (delta): the circle inscribed in the bed bounds
 
     // Color range configuration
     bool auto_color_range;

@@ -14,6 +14,7 @@
 #include "../test_helpers/print_start_profile_test_access.h"
 #include "print_start_profile.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -66,8 +67,11 @@ TEST_CASE("PrintStartProfile: forge_x profile loads with signal formats", "[prof
     // If forge_x.json is missing, we'll get the default profile
     // Only run forge_x-specific tests if we actually loaded it
     if (profile->name().find("Forge") != std::string::npos) {
-        SECTION("Profile has sequential progress mode") {
-            REQUIRE(profile->progress_mode() == PrintStartProfile::ProgressMode::SEQUENTIAL);
+        SECTION("Profile has weighted progress mode") {
+            // The order of a Forge-X start varies with its settings (KAMP,
+            // print_leveling, mesh validation, cleaning), so the ETA engine
+            // sizes the phases rather than a fixed sequence.
+            REQUIRE(profile->progress_mode() == PrintStartProfile::ProgressMode::WEIGHTED);
         }
 
         SECTION("Profile has signal formats") {
@@ -506,19 +510,18 @@ TEST_CASE("PrintStartProfile: forge_x response patterns match temperature wait l
         REQUIRE(result.message.find("60") != std::string::npos);
     }
 
-    SECTION("Extruder temperature wait line with capture group") {
-        REQUIRE(profile->try_match_pattern("// Wait extruder temperature to reach 210", result));
-        REQUIRE(result.phase == PrintStartPhase::HEATING_NOZZLE);
-        // $1 should be substituted with "210"
-        REQUIRE(result.message.find("210") != std::string::npos);
+    SECTION("The extruder wait line names no phase") {
+        // The same line announces the heat to print temperature and the
+        // cool-down to 120C for probing; the phase object tells them apart.
+        REQUIRE_FALSE(profile->try_match_pattern(
+            "// Wait extruder temperature to reach 120 C\u00ba", result));
+        REQUIRE_FALSE(
+            profile->try_match_pattern("// Wait extruder temperature to reach 265", result));
     }
 
     SECTION("Different temperature values") {
         REQUIRE(profile->try_match_pattern("// Wait bed temperature to reach 110", result));
         REQUIRE(result.message.find("110") != std::string::npos);
-
-        REQUIRE(profile->try_match_pattern("// Wait extruder temperature to reach 250", result));
-        REQUIRE(result.message.find("250") != std::string::npos);
     }
 
     SECTION("Non-matching lines") {
@@ -538,13 +541,11 @@ TEST_CASE("PrintStartProfile: progress mode detection", "[profile][print]") {
         REQUIRE(profile->progress_mode() == PrintStartProfile::ProgressMode::WEIGHTED);
     }
 
-    SECTION("Forge-X profile uses sequential mode") {
-        auto profile = get_forge_x_profile();
+    SECTION("Artillery M1 profile uses sequential mode") {
+        auto profile = PrintStartProfile::load("artillery_m1");
         REQUIRE(profile != nullptr);
-
-        if (profile->name().find("Forge") != std::string::npos) {
-            REQUIRE(profile->progress_mode() == PrintStartProfile::ProgressMode::SEQUENTIAL);
-        }
+        REQUIRE(profile->name() == "Artillery M1 Pro");
+        REQUIRE(profile->progress_mode() == PrintStartProfile::ProgressMode::SEQUENTIAL);
     }
 }
 
@@ -696,8 +697,8 @@ TEST_CASE("PrintStartProfile: capture group substitution in message templates",
     }
 
     SECTION("Capture group with large number") {
-        REQUIRE(profile->try_match_pattern("// Wait extruder temperature to reach 300", result));
-        REQUIRE(result.message.find("300") != std::string::npos);
+        REQUIRE(profile->try_match_pattern("// Wait bed temperature to reach 110", result));
+        REQUIRE(result.message.find("110") != std::string::npos);
     }
 }
 
@@ -930,6 +931,12 @@ TEST_CASE("PrintStartProfile: snapmaker_u1 action-code signals route to correct 
         {"// Success: Set action code DETECT_PLATE", PrintStartPhase::BED_MESH,
          "Detecting plate..."},
         {"// Success: Set action code PRINT_PREEXTRUDING", PrintStartPhase::PURGING, "Priming..."},
+        // --- the mesh (evidence: gcode_store 2026-10-16 21:53:52..21:55:26): a
+        //     60 s bed soak with a countdown, four corner probes, then the mesh ---
+        {"// Success: Set action code BED_PREHEATING", PrintStartPhase::SOAKING, "Heat Soaking..."},
+        {"// Success: Set action code BED_PRESCANNING", PrintStartPhase::BED_MESH,
+         "Validating bed mesh..."},
+        {"// Success: Set action code BED_LEVELING", PrintStartPhase::BED_MESH, "Bed mesh..."},
         // --- "Changed main state to PRINTING with action" verb
         //     (evidence: gcode_store 23:23:26) ---
         {"// Success: Changed main state to PRINTING with action PRINT_BED_DETECTING",
@@ -938,6 +945,12 @@ TEST_CASE("PrintStartProfile: snapmaker_u1 action-code signals route to correct 
          PrintStartPhase::INITIALIZING, "Checking extruders..."},
         {"// Success: Changed main state to PRINTING with action DETECT_PLATE",
          PrintStartPhase::BED_MESH, "Detecting plate..."},
+        {"// Success: Changed main state to PRINTING with action BED_PREHEATING",
+         PrintStartPhase::SOAKING, "Heat Soaking..."},
+        {"// Success: Changed main state to PRINTING with action BED_PRESCANNING",
+         PrintStartPhase::BED_MESH, "Validating bed mesh..."},
+        {"// Success: Changed main state to PRINTING with action BED_LEVELING",
+         PrintStartPhase::BED_MESH, "Bed mesh..."},
     };
 
     for (const auto& c : cases) {
@@ -988,36 +1001,26 @@ TEST_CASE("PrintStartProfile: snapmaker_u1 response patterns match real preprint
         "// trigger_mcu_pos: {'stepper_x': -97378, 'stepper_y': 4660}", result));
     REQUIRE(result.phase == PrintStartPhase::HOMING);
 
-    // Initial single-point Z touch right AFTER homing, BEFORE bed mesh — it
-    // fires at the very start of the sequence (evidence: gcode_store 23:23:14
-    // "// probe_start_x: 5.32188, probe_start_y: 4.87969", immediately after
-    // the trigger_mcu_pos homing lines and ~3.5 min before the actual mesh).
-    // It used to be mislabelled "Z Calibration..." under BED_MESH, which made
-    // the UI show bed-mesh-flavoured text during homing. It now belongs to
-    // HOMING / "Probing Z...".
-    REQUIRE(
-        profile->try_match_pattern("// probe_start_x: 5.32188, probe_start_y: 4.87969", result));
+    // G28 X Y ends with the precise-CoreXY diagonal probe, which prints
+    // "// probe_start_x:" under a second 1 s after the trigger_mcu_pos lines
+    // (capture 2026-10-16, 21:48:29.469 then 21:48:30.282). trigger_mcu_pos
+    // already shows "Homing axes...", so the line maps to nothing.
+    REQUIRE_FALSE(
+        profile->try_match_pattern("// probe_start_x: 5.41250, probe_start_y: 4.79219", result));
+
+    // "// z offset:" opens every G28 Z: after each tool pick (G28 Z I140 J140,
+    // the new tool's coil touching the bed centre at 140,140) and once more
+    // before the mesh at (129.915,125.560). Neither is a mesh point: the
+    // mesh's first point is (33.742,28.487), after BED_LEVELING (capture
+    // 2026-10-16, 21:49:08.965 and 21:53:38.040). The line also follows
+    // BED_LEVELING by 1 ms (21:55:26.591); the collector keeps the mesh then.
+    REQUIRE(profile->try_match_pattern("// z offset: -0.05", result));
     REQUIRE(result.phase == PrintStartPhase::HOMING);
     REQUIRE(result.message == "Probing Z...");
 
-    // End-of-mesh marker (evidence: gcode_store
-    // "// z_mesh_complete: 0.02573436601557052"). The per-probe "probe at x:..."
-    // lines are consumed by the collector's mesh counter, not the profile;
-    // z_mesh_complete is the END boundary in the response stream.
-    REQUIRE(profile->try_match_pattern("// z_mesh_complete: 0.02573436601557052", result));
-    REQUIRE(result.phase == PrintStartPhase::BED_MESH);
-    REQUIRE(result.message == "Bed mesh...");
-
-    // Mesh START boundary — bed_mesh.py emits "// z offset:" right before the
-    // first mesh probe (evidence: gcode_store 20:21:26 "// z offset: -0.05",
-    // immediately preceding "// probe at x: 129.915, y: 125.560 is z=..."). This
-    // relabels the display from the prior BED_MESH sub-phase ("Detecting plate")
-    // to "Bed mesh" at the moment the real mesh begins — fixing the device bug
-    // where only the END marker fired and the stale label persisted through the
-    // whole mesh.
-    REQUIRE(profile->try_match_pattern("// z offset: -0.05", result));
-    REQUIRE(result.phase == PrintStartPhase::BED_MESH);
-    REQUIRE(result.message == "Bed mesh...");
+    // "// z_mesh_complete:" ends that same G28 Z (it re-bases the mesh to the
+    // active tool); BED_MESH_CALIBRATE never prints it, so it names no phase.
+    REQUIRE_FALSE(profile->try_match_pattern("// z_mesh_complete: 0.2980673660155705", result));
 
     // Negative cases — these must NOT match. FEED_AUTO / FLOW_CALIBRATE /
     // BED_MESH_CALIBRATE / *_CLEAN_NOZZLE are klippy-internal only and never
@@ -1148,6 +1151,113 @@ TEST_CASE("PrintStartProfile: creality_k2 keeps the M109 latch that the heater c
     REQUIRE(result.phase == PrintStartPhase::HEATING_NOZZLE);
 }
 
+// Every input line below is verbatim from a K2 Plus klippy.log capture
+// (2026-08-18, three prints; see PRINT_START_PROFILES.md for the source).
+// The K2 narrates through [GCODE]/[DEBUG] respond echoes when started from
+// a path that enables them, and stays fully silent otherwise - which is why
+// the profile also enables position_signals.
+TEST_CASE("PrintStartProfile: creality_k2 matches captured narration", "[profile][print][k2]") {
+    auto profile = get_creality_k2_profile();
+    REQUIRE(profile != nullptr);
+    REQUIRE(profile->name().find("K2") != std::string::npos);
+
+    PrintStartProfile::MatchResult result;
+
+    SECTION("Homing rails echo") {
+        REQUIRE(profile->try_match_pattern("[DEBUG]_handle_home_rails_begin", result));
+        REQUIRE(result.phase == PrintStartPhase::HOMING);
+    }
+
+    SECTION("Nozzle clear counter") {
+        REQUIRE(profile->try_match_pattern("[NOZZLE_CLEAR] START NOZZLE_CLEAR COUNT:0", result));
+        REQUIRE(result.phase == PrintStartPhase::CLEANING);
+    }
+
+    SECTION("Box nozzle clean") {
+        REQUIRE(profile->try_match_pattern("[GCODE]BOX_NOZZLE_CLEAN", result));
+        REQUIRE(result.phase == PrintStartPhase::CLEANING);
+        // It runs right after the print-temperature purge position, so it
+        // owns nothing: the purge around it is the real one.
+        REQUIRE(result.owns.empty());
+    }
+
+    SECTION("The pre-mesh nozzle clear owns its own purge") {
+        // NOZZLE_CLEAR (prtouch_v3) parks at the CFS extrude position and
+        // pushes filament to check flow before it wipes, so the
+        // BOX_GO_TO_EXTRUDE_POS and the extrusion inside it are the clean's.
+        REQUIRE(profile->try_match_pattern("[NOZZLE_CLEAR] START NOZZLE_CLEAR COUNT:0", result));
+        REQUIRE(result.phase == PrintStartPhase::CLEANING);
+        REQUIRE(result.owns == std::vector<PrintStartPhase>{PrintStartPhase::PURGING});
+    }
+
+    SECTION("The clear's finish line opens no step") {
+        REQUIRE(profile->try_match_pattern("[NOZZLE_CLEAR] FINISH NOZZLE_CLEAR", result));
+        REQUIRE(result.phase == PrintStartPhase::CLEANING);
+        REQUIRE(result.owns.empty());
+    }
+
+    SECTION("Pre-wipe nozzle heat uses TEMPERATURE_WAIT, not M109") {
+        // The K2 heats to its wipe temperature with M104 + TEMPERATURE_WAIT;
+        // the M109 echoes only appear after the wiper. Without this pattern
+        // the heating phase is invisible until late in the chain.
+        REQUIRE(profile->try_match_pattern(
+            "[GCODE]TEMPERATURE_WAIT SENSOR=extruder MINIMUM=175 MAXIMUM=185", result));
+        REQUIRE(result.phase == PrintStartPhase::HEATING_NOZZLE);
+    }
+
+    SECTION("CFS flush position is the purge marker") {
+        // BOX_MATERIAL_FLUSH / flush_* never appear in any capture; the box's
+        // move to the extrude position is what marks the flush stretch.
+        REQUIRE(profile->try_match_pattern("[GCODE]BOX_GO_TO_EXTRUDE_POS", result));
+        REQUIRE(result.phase == PrintStartPhase::PURGING);
+    }
+
+    SECTION("BED_MESH_CLEAR must NOT announce the mesh phase") {
+        // The K2 emits BED_MESH_CLEAR three times per start (mesh validation,
+        // pre-nozzle-clean hygiene, pre-print) and again at end of print.
+        // Mapping it to BED_MESH would enter the phase on every hygiene clear.
+        // Mesh entry comes from the bed-mesh presence flap and position
+        // inference instead.
+        REQUIRE_FALSE(profile->try_match_pattern("[GCODE]BED_MESH_CLEAR", result));
+    }
+
+    SECTION("Our own pre-start command echo announces no phase") {
+        // The bed_mesh pre-print option sends BED_MESH_CALIBRATE_START_PRINT
+        // ahead of START_PRINT, and the K2 echoes it back. It carries
+        // BED_TEMP, EXTRUDER_TEMP and a BED_MESH_CALIBRATE prefix, so a
+        // pattern list keyed on those bare tokens enters three phases before
+        // the printer has done anything. apply_profile_match() only fires
+        // once per phase, so the premature entry also consumes the real one,
+        // pins phase_enter_times_ for the history, and sets real_signal_seen_.
+        REQUIRE_FALSE(profile->try_match_pattern(
+            "[GCODE]BED_MESH_CALIBRATE_START_PRINT GCODE_FILE='bench.gcode' "
+            "BED_TEMP=60 EXTRUDER_TEMP=220",
+            result));
+    }
+
+    SECTION("Real bed heat still announces HEATING_BED") {
+        REQUIRE(profile->try_match_pattern("[GCODE]M190 S60", result));
+        REQUIRE(result.phase == PrintStartPhase::HEATING_BED);
+    }
+
+    SECTION("Real mesh calibrate still announces BED_MESH") {
+        REQUIRE(profile->try_match_pattern("[GCODE]BED_MESH_CALIBRATE", result));
+        REQUIRE(result.phase == PrintStartPhase::BED_MESH);
+    }
+
+    SECTION("Adaptive mesh calibrate still announces BED_MESH") {
+        REQUIRE(profile->try_match_pattern("[GCODE]BED_MESH_CALIBRATE PROFILE=adaptive ADAPTIVE=1",
+                                           result));
+        REQUIRE(result.phase == PrintStartPhase::BED_MESH);
+    }
+
+    SECTION("Position inference enabled") {
+        // Captured starts with [GCODE] echo disabled narrate nothing at all;
+        // the silent window needs the position classifier.
+        REQUIRE(profile->position_signals());
+    }
+}
+
 TEST_CASE("PrintStartProfile: creality_k2 uses adaptive meshing", "[profile][print][k2][mesh]") {
     auto profile = get_creality_k2_profile();
     REQUIRE(profile != nullptr);
@@ -1204,11 +1314,12 @@ TEST_CASE("PrintStartProfile: forge_x declares its phase object",
     REQUIRE(profile->has_phase_object());
     REQUIRE(profile->phase_object_name() == "operation_context");
     REQUIRE(profile->phase_object_field() == "current_state");
+    // current_state is the innermost context's state; context_types names
+    // which step it belongs to.
+    REQUIRE(profile->phase_object_context_field() == "context_types");
 
     const auto objects = profile->required_status_objects();
-    // The phase object plus the status-signal rules' toolhead (pinned in the
-    // status-signal tests below).
-    REQUIRE(objects.size() == 2);
+    REQUIRE(objects.size() == 1);
     REQUIRE(objects[0] == "operation_context");
 }
 
@@ -1365,23 +1476,36 @@ TEST_CASE("PrintStartProfile: forge_x state patterns map the mod's state strings
     REQUIRE(profile->name().find("Forge") != std::string::npos);
 
     struct StateRow {
-        const char* state;
+        const char* state; ///< "<innermost context type>/<current_state>"
         PrintStartPhase phase;
         const char* message;
     };
 
+    // The whole Forge-X 1.4.2 START_PRINT vocabulary that names a phase.
     // clang-format off
     const StateRow rows[] = {
-        {"HOMING",    PrintStartPhase::HOMING,       "Homing..."},
-        {"HEATING",   PrintStartPhase::HEATING_BED,  "Heating Bed..."},
-        {"CLEANING",  PrintStartPhase::CLEANING,     "Cleaning Nozzle..."},
-        {"LEVELING",  PrintStartPhase::BED_MESH,     "Bed Mesh..."},
-        {"MESHING",   PrintStartPhase::BED_MESH,     "Bed Mesh..."},
-        {"PARKING",   PrintStartPhase::INITIALIZING, "Preparing..."},
-        {"PRIMING",   PrintStartPhase::PURGING,      "Priming nozzle..."},
-        {"PURGING",   PrintStartPhase::PURGING,      "Priming nozzle..."},
-        {"PRINTING",  PrintStartPhase::COMPLETE,     "Starting print..."},
-        {"FINISHING", PrintStartPhase::COMPLETE,     "Starting print..."},
+        {"print/CHECKING FILE",               PrintStartPhase::INITIALIZING,   "Verifying file..."},
+        {"print/HOMING",                      PrintStartPhase::HOMING,         "Homing..."},
+        {"nozzle_clean/HOMING",               PrintStartPhase::HOMING,         "Homing..."},
+        {"nozzle_clean/HEATING",              PrintStartPhase::HEATING_BED,    "Heating..."},
+        {"kamp/HEATING",                      PrintStartPhase::HEATING_BED,    "Heating..."},
+        {"bed_level/HEATING",                 PrintStartPhase::HEATING_BED,    "Heating..."},
+        {"nozzle_clean/HEATING BED",          PrintStartPhase::HEATING_BED,    "Heating Bed..."},
+        {"print/HEATING BED",                 PrintStartPhase::HEATING_BED,    "Heating Bed..."},
+        {"nozzle_clean/HEATING NOZZLE",       PrintStartPhase::HEATING_NOZZLE, "Heating Nozzle..."},
+        {"print/HEATING NOZZLE",              PrintStartPhase::HEATING_NOZZLE, "Heating Nozzle..."},
+        {"nozzle_clean/PREPARING TO CLEAN",   PrintStartPhase::CLEANING,       "Preparing to clean..."},
+        {"nozzle_clean/CLEANING",             PrintStartPhase::CLEANING,       "Cleaning nozzle..."},
+        {"nozzle_clean/COOLING NOZZLE",       PrintStartPhase::CLEANING,       "Cooling for probing..."},
+        {"nozzle_clean/FINISHING",            PrintStartPhase::CLEANING,       "Finishing clean..."},
+        {"kamp/COOLING NOZZLE",               PrintStartPhase::HEATING_NOZZLE, "Cooling for probing..."},
+        {"kamp/LEVELING",                     PrintStartPhase::BED_MESH,       "Creating bed mesh..."},
+        {"bed_level/LEVELING",                PrintStartPhase::BED_MESH,       "Creating bed mesh..."},
+        {"mesh_validation/CHECKING MESH",     PrintStartPhase::BED_MESH,       "Validating bed mesh..."},
+        {"print/PARKING",                     PrintStartPhase::HEATING_NOZZLE, "Preparing..."},
+        {"print/RESUMING HEAT",               PrintStartPhase::HEATING_NOZZLE, "Reheating..."},
+        {"print/PRIMING",                     PrintStartPhase::PURGING,        "Priming nozzle..."},
+        {"print/PRINTING",                    PrintStartPhase::COMPLETE,       "Starting print..."},
     };
     // clang-format on
 
@@ -1393,10 +1517,174 @@ TEST_CASE("PrintStartProfile: forge_x state patterns map the mod's state strings
         CHECK(result.message == row.message);
     }
 
-    // States the profile has no mapping for must not match anything.
+    // States that name no phase of their own. FINISHING ends a nested step
+    // mid-pre-print, the print context's LEVELING only decides how to level
+    // (the mesh runs later in its own context), and the profile states mean
+    // no mesh runs at all. Bare states without a context never match.
+    const char* unmapped[] = {
+        "bed_level/FINISHING",
+        "auto_bed_level/FINISHING",
+        "print/LEVELING",
+        "print/LOADING PROFILE",
+        "print/USING LOADED PROFILE",
+        "print/SKIPPING LEVELING",
+        "print/COOLING NOZZLE",
+        "nozzle_clean/COOLING BED",
+        "FINISHING",
+        "PRINTING",
+        "LEVELING",
+        "HOMING",
+        "/PRINTING",
+        "kamp/PRINTING",
+        "nozzle_clean/FINISHING CLEAN",
+        "",
+    };
+    for (const char* state : unmapped) {
+        CAPTURE(state);
+        PrintStartProfile::MatchResult result;
+        REQUIRE_FALSE(profile->try_match_state(state, result));
+    }
+
+    // Only the print context's PRINTING completes the pre-print.
+    for (const auto& row : rows) {
+        CAPTURE(row.state);
+        CHECK(
+            (row.phase != PrintStartPhase::COMPLETE || std::string(row.state) == "print/PRINTING"));
+    }
+}
+
+TEST_CASE("PrintStartProfile: forge_x console patterns name only positive steps",
+          "[profile][print][pattern]") {
+    auto profile = get_forge_x_profile();
+    REQUIRE(profile != nullptr);
+    REQUIRE(profile->name().find("Forge") != std::string::npos);
+
     PrintStartProfile::MatchResult result;
-    REQUIRE_FALSE(profile->try_match_state("STANDBY", result));
-    REQUIRE_FALSE(profile->try_match_state("", result));
+    REQUIRE(profile->try_match_pattern("info Cleaning nozzle with a priming line", result));
+    CHECK(result.phase == PrintStartPhase::PURGING);
+    REQUIRE(profile->try_match_pattern("// Clean to X: -10, Z: -2.0158333331508258", result));
+    CHECK(result.phase == PrintStartPhase::CLEANING);
+
+    // Lines from the 1.4.2 capture that name no step, or name one that has
+    // not started yet (KAMP announces itself minutes before its mesh).
+    const char* silent[] = {
+        "// Initiating KAMP bed leveling",
+        "info Started stock nozzle cleaning 265.0/105.0",
+        "info Cleaning Z-Offsets:",
+        "// Temperature waiting done.",
+        "!! Detected bed pressure. Please ensure the bed is clean!",
+        "// Starting Smart Park...",
+        "// Smart Park location: 110.0,100.0,10.0.",
+        "// Mesh Bed Leveling Complete",
+        "info Algorithm: LINE_PURGE",
+        "HOMING",
+    };
+    for (const char* line : silent) {
+        CAPTURE(line);
+        REQUIRE_FALSE(profile->try_match_pattern(line, result));
+    }
+}
+
+TEST_CASE("PrintStartProfile: a context field qualifies the state the patterns match",
+          "[profile][print][phase_object]") {
+    using nlohmann::json;
+    CHECK(PrintStartProfile::innermost_context(json::array({"print", "kamp", "nozzle_clean"})) ==
+          "nozzle_clean");
+    CHECK(PrintStartProfile::innermost_context(json::array({"print"})) == "print");
+    CHECK(PrintStartProfile::innermost_context(json("kamp")) == "kamp");
+    CHECK(PrintStartProfile::innermost_context(json::array()).empty());
+    CHECK(PrintStartProfile::innermost_context(json(nullptr)).empty());
+    CHECK(PrintStartProfile::innermost_context(json(3)).empty());
+    CHECK(PrintStartProfile::innermost_context(json::array({"print", 7})).empty());
+    CHECK(PrintStartProfile::qualify_state("kamp", "LEVELING") == "kamp/LEVELING");
+    CHECK(PrintStartProfile::qualify_state("", "LEVELING") == "/LEVELING");
+
+    auto profile = PrintStartProfileTestAccess::parse(json::parse(
+        R"({"name":"ctx","phase_object":)"
+        R"({"object":"operation_context","field":"current_state","context_field":"context_types"}})"));
+    REQUIRE(profile != nullptr);
+    REQUIRE(profile->has_phase_object());
+    CHECK(profile->phase_object_context_field() == "context_types");
+    // The context rides in the same object, so nothing more is subscribed.
+    CHECK(profile->required_status_objects() == std::vector<std::string>{"operation_context"});
+}
+
+TEST_CASE("PrintStartProfile: a phase object without a context field matches bare states",
+          "[profile][print][phase_object]") {
+    auto plain = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+        R"({"name":"plain","phase_object":{"object":"operation_context","field":"current_state"}})"));
+    REQUIRE(plain != nullptr);
+    REQUIRE(plain->has_phase_object());
+    CHECK(plain->phase_object_context_field().empty());
+    CHECK(get_default_profile()->phase_object_context_field().empty());
+}
+
+TEST_CASE("PrintStartProfile: a pattern may say its probes are not mesh points",
+          "[profile][print][phase_object]") {
+    auto profile = PrintStartProfileTestAccess::parse(
+        nlohmann::json::parse(R"({"name":"cp","state_patterns":[)"
+                              R"({"pattern":"^check$","phase":"BED_MESH","counts_probes":false},)"
+                              R"({"pattern":"^mesh$","phase":"BED_MESH"},)"
+                              R"({"pattern":"^odd$","phase":"BED_MESH","counts_probes":"no"}]})"));
+    REQUIRE(profile != nullptr);
+    PrintStartProfile::MatchResult result;
+    REQUIRE(profile->try_match_state("check", result));
+    CHECK_FALSE(result.counts_probes);
+    REQUIRE(profile->try_match_state("mesh", result));
+    CHECK(result.counts_probes);
+    // A non-boolean keeps the default.
+    REQUIRE(profile->try_match_state("odd", result));
+    CHECK(result.counts_probes);
+
+    REQUIRE(get_forge_x_profile()->try_match_state("mesh_validation/CHECKING MESH", result));
+    CHECK_FALSE(result.counts_probes);
+    REQUIRE(get_forge_x_profile()->try_match_state("kamp/LEVELING", result));
+    CHECK(result.counts_probes);
+}
+
+TEST_CASE("PrintStartProfile: a pattern may own the phases its step emits",
+          "[profile][print][owns]") {
+    auto profile = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+        R"({"name":"own","response_patterns":[)"
+        R"({"pattern":"^clear$","phase":"CLEANING","owns":["PURGING","purging"]},)"
+        R"({"pattern":"^wipe$","phase":"CLEANING"},)"
+        R"({"pattern":"^odd$","phase":"CLEANING","owns":"PURGING"},)"
+        R"({"pattern":"^bad$","phase":"CLEANING","owns":["NOT_A_PHASE",3,"CLEANING","IDLE"]}]})"));
+    REQUIRE(profile != nullptr);
+    PrintStartProfile::MatchResult result;
+    REQUIRE(profile->try_match_pattern("clear", result));
+    CHECK(result.owns == std::vector<PrintStartPhase>{PrintStartPhase::PURGING});
+    REQUIRE(profile->try_match_pattern("wipe", result));
+    CHECK(result.owns.empty());
+    // Not an array: ignored whole.
+    REQUIRE(profile->try_match_pattern("odd", result));
+    CHECK(result.owns.empty());
+    // Unknown names, non-strings, the step's own phase and IDLE own nothing.
+    REQUIRE(profile->try_match_pattern("bad", result));
+    CHECK(result.owns.empty());
+}
+
+TEST_CASE("PrintStartProfile: a malformed context field drops the phase object",
+          "[profile][print][phase_object]") {
+    for (const char* cf : {R"("")", "3", "null", R"(["context_types"])"}) {
+        CAPTURE(cf);
+        auto profile = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+            std::string(
+                R"({"name":"bad","phase_object":)"
+                R"({"object":"operation_context","field":"current_state","context_field":)") +
+            cf + "}}"));
+        REQUIRE(profile != nullptr);
+        CHECK_FALSE(profile->has_phase_object());
+        CHECK(profile->phase_object_context_field().empty());
+        CHECK(profile->required_status_objects().empty());
+    }
+
+    // A context field without the rest of the declaration declares nothing.
+    auto no_field = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+        R"({"name":"nofield","phase_object":{"object":"operation_context","context_field":"x"}})"));
+    REQUIRE(no_field != nullptr);
+    CHECK_FALSE(no_field->has_phase_object());
+    CHECK(no_field->phase_object_context_field().empty());
 }
 
 TEST_CASE("PrintStartProfile: state patterns stay separate from console patterns",
@@ -1407,14 +1695,14 @@ TEST_CASE("PrintStartProfile: state patterns stay separate from console patterns
 
     PrintStartProfile::MatchResult result;
 
-    // A bare state string is not a console line: the response_patterns must
-    // not pick it up (forge_x's only console patterns are the temperature
-    // wait echoes).
-    REQUIRE_FALSE(profile->try_match_pattern("HOMING", result));
+    // A state key is not a console line: the response_patterns must not pick
+    // it up.
+    REQUIRE_FALSE(profile->try_match_pattern("print/HOMING", result));
 
     // And a console line must not be re-interpreted as state input - the
     // state matcher receives the object's field, nothing else.
-    REQUIRE(profile->try_match_state("HOMING", result));
+    REQUIRE_FALSE(profile->try_match_state("info Cleaning nozzle with a priming line", result));
+    REQUIRE(profile->try_match_state("print/HOMING", result));
     REQUIRE(result.phase == PrintStartPhase::HOMING);
 }
 
@@ -1495,54 +1783,15 @@ TEST_CASE("PrintStartProfile: malformed state_patterns entries are skipped",
 // narrate their pre-print get phase inference from physics instead of regexes.
 // ============================================================================
 
-TEST_CASE("PrintStartProfile: forge_x declares its status-signal rules",
+TEST_CASE("PrintStartProfile: forge_x declares no status-signal rules",
           "[profile][print][status_signals]") {
     auto profile = get_forge_x_profile();
     REQUIRE(profile != nullptr);
-    // Strict on purpose: the JSON ships with the repo, so missing rules here
-    // are a regression, not an environment gap.
     REQUIRE(profile->name().find("Forge") != std::string::npos);
 
-    const auto& rules = profile->status_signals();
-    REQUIRE(rules.size() == 2);
-
-    // at_cutter: both axes negative means the head is at the filament cutter
-    // (the IFS tool-change window) - positionally unambiguous, so it carries a
-    // higher weight than any narration of the same phase.
-    const auto& cutter = rules[0];
-    REQUIRE(cutter.name == "at_cutter");
-    REQUIRE(cutter.object == "toolhead");
-    REQUIRE(cutter.phase == PrintStartPhase::PURGING);
-    REQUIRE(cutter.message == "Changing filament...");
-    REQUIRE(cutter.weight == 30);
-    REQUIRE(cutter.when.size() == 2);
-    REQUIRE(cutter.when[0].field == "position");
-    REQUIRE(cutter.when[0].index == 0);
-    REQUIRE(cutter.when[0].op == PrintStartProfile::StatusPredicate::Op::LT);
-    REQUIRE(cutter.when[0].value == 0.0);
-    REQUIRE(cutter.when[1].field == "position");
-    REQUIRE(cutter.when[1].index == 1);
-    REQUIRE(cutter.when[1].op == PrintStartProfile::StatusPredicate::Op::LT);
-    REQUIRE(cutter.when[1].value == 0.0);
-
-    // at_chute: the rear of the bed is the filament-handling zone - every back
-    // wall station means the same thing, so the weight stays moderate.
-    const auto& chute = rules[1];
-    REQUIRE(chute.name == "at_chute");
-    REQUIRE(chute.object == "toolhead");
-    REQUIRE(chute.phase == PrintStartPhase::PURGING);
-    REQUIRE(chute.message == "Purging...");
-    REQUIRE(chute.when.size() == 1);
-    REQUIRE(chute.when[0].field == "position");
-    REQUIRE(chute.when[0].index == 1);
-    REQUIRE(chute.when[0].op == PrintStartProfile::StatusPredicate::Op::GT);
-    REQUIRE(chute.when[0].value == 225.0);
-
-    // Both rules watch toolhead; the union with the phase object dedupes.
-    const auto objects = profile->required_status_objects();
-    REQUIRE(objects.size() == 2);
-    REQUIRE(objects[0] == "operation_context");
-    REQUIRE(objects[1] == "toolhead");
+    // An AD5M has no filament cutter or chute, and its bed runs -110..110:
+    // a both-axes-negative rule fires on the mesh's first point (-105,-105).
+    REQUIRE(profile->status_signals().empty());
 }
 
 TEST_CASE("PrintStartProfile: default profile carries only the heating and extrusion rules",
@@ -1746,4 +1995,125 @@ TEST_CASE("PrintStartProfile: status-signal predicate ops table",
     CHECK(result.phase == PrintStartPhase::HEATING_BED);
     CHECK(result.message == "and holds");
     CHECK(result.progress == 7);
+}
+
+// ============================================================================
+// Tag patterns
+// ============================================================================
+
+TEST_CASE("PrintStartProfile: tag patterns are their own list", "[profile][print][tag]") {
+    auto profile = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+        R"({"name":"tags",)"
+        R"("tag_patterns":[{"pattern":"LOAD_UNIT","phase":"INITIALIZING","message":"Loading"}],)"
+        R"("response_patterns":[{"pattern":"G28","phase":"HOMING","weight":10}]})"));
+    REQUIRE(profile != nullptr);
+    PrintStartProfile::MatchResult result;
+
+    REQUIRE(profile->try_match_tag("// LOAD_UNIT 2", result));
+    CHECK(result.phase == PrintStartPhase::INITIALIZING);
+    CHECK(result.message == "Loading");
+    CHECK(result.reported_percent == -1);
+
+    CHECK_FALSE(profile->try_match_tag("G28", result));
+    CHECK_FALSE(profile->try_match_pattern("// LOAD_UNIT 2", result));
+}
+
+TEST_CASE("PrintStartProfile: a tag's progress comes from the group it names",
+          "[profile][print][tag]") {
+    auto profile = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+        R"j({"name":"progress","tag_patterns":[)j"
+        R"j({"pattern":"flush ([0-9.]+)","phase":"PURGING","message":"Purging",)j"
+        R"j("progress_group":1},)j"
+        R"j({"pattern":"wipe ([0-9.]+)","phase":"CLEANING","progress_group":2},)j"
+        R"j({"pattern":"rinse","phase":"PURGING"}]})j"));
+    REQUIRE(profile != nullptr);
+    PrintStartProfile::MatchResult result;
+
+    SECTION("a value at or below 1.5 is a fraction") {
+        REQUIRE(profile->try_match_tag("flush 0.42", result));
+        CHECK(result.reported_percent == 42);
+        REQUIRE(profile->try_match_tag("flush 1.5", result));
+        CHECK(result.reported_percent == 100);
+    }
+
+    SECTION("a larger value is already a percent, clamped") {
+        REQUIRE(profile->try_match_tag("flush 75", result));
+        CHECK(result.reported_percent == 75);
+        REQUIRE(profile->try_match_tag("flush 250", result));
+        CHECK(result.reported_percent == 100);
+    }
+
+    SECTION("a group the pattern does not have reports nothing") {
+        REQUIRE(profile->try_match_tag("wipe 0.5", result));
+        CHECK(result.reported_percent == -1);
+    }
+
+    SECTION("a match without progress clears the last one") {
+        REQUIRE(profile->try_match_tag("flush 0.5", result));
+        REQUIRE(profile->try_match_tag("rinse", result));
+        CHECK(result.reported_percent == -1);
+    }
+}
+
+TEST_CASE("PrintStartProfile: percent_from_report", "[profile][print][tag]") {
+    CHECK(PrintStartProfile::percent_from_report(0.0) == 0);
+    CHECK(PrintStartProfile::percent_from_report(0.005) == 1);
+    CHECK(PrintStartProfile::percent_from_report(1.0) == 100);
+    CHECK(PrintStartProfile::percent_from_report(2.0) == 2);
+    CHECK(PrintStartProfile::percent_from_report(99.6) == 100);
+    CHECK(PrintStartProfile::percent_from_report(1e9) == 100);
+    CHECK(PrintStartProfile::percent_from_report(-0.5) == -1);
+    CHECK(PrintStartProfile::percent_from_report(std::nan("")) == -1);
+}
+
+TEST_CASE("PrintStartProfile: case_sensitive compiles a pattern without ICase",
+          "[profile][print][pattern]") {
+    auto profile = PrintStartProfileTestAccess::parse(nlohmann::json::parse(
+        R"({"name":"case",)"
+        R"("response_patterns":[)"
+        R"({"pattern":"BOX_LOAD","phase":"INITIALIZING","case_sensitive":true},)"
+        R"({"pattern":"g28","phase":"HOMING","case_sensitive":"yes"}]})"));
+    REQUIRE(profile != nullptr);
+    PrintStartProfile::MatchResult result;
+
+    CHECK(profile->try_match_pattern("BOX_LOAD", result));
+    CHECK_FALSE(profile->try_match_pattern("box_load", result));
+    // A non-boolean value is ignored: the pattern stays case-insensitive.
+    CHECK(profile->try_match_pattern("G28", result));
+}
+
+TEST_CASE("PrintStartProfile: the K2 profiles' tag patterns read the K2 tag stream",
+          "[profile][print][tag][k2]") {
+    for (const char* name : {"creality_k2", "k2_improvements"}) {
+        auto profile = PrintStartProfile::load(name);
+        REQUIRE(profile != nullptr);
+        if (profile->is_default()) {
+            SKIP(std::string(name) + ".json not available");
+        }
+        INFO(name);
+        PrintStartProfile::MatchResult result;
+
+        REQUIRE(
+            profile->try_match_tag("// num: 0, velocity: 575.000000, percent 0.500000", result));
+        CHECK(result.phase == PrintStartPhase::PURGING);
+        CHECK(result.reported_percent == 50);
+        REQUIRE(profile->try_match_tag("// num: 0, velocity: 23.0, percent: 75", result));
+        CHECK(result.reported_percent == 75);
+        REQUIRE(profile->try_match_tag("// velocity: 23.0 percent 1.000000", result));
+        CHECK(result.reported_percent == 100);
+
+        // "percent" alone, or with no number after it, is not the purge tag.
+        CHECK_FALSE(profile->try_match_tag("// percent 0.5", result));
+        CHECK_FALSE(profile->try_match_tag("// num: 3, percent done", result));
+
+        for (const char* line :
+             {"// [box] cut sensor detected", "// [box] cut to return", "BOX_LOAD_MATERIAL"}) {
+            REQUIRE(profile->try_match_tag(line, result));
+            CHECK(result.phase == PrintStartPhase::INITIALIZING);
+            CHECK(result.message == "Loading Filament...");
+            CHECK(result.reported_percent == -1);
+        }
+        CHECK_FALSE(profile->try_match_tag("box_load_material", result));
+        CHECK_FALSE(profile->try_match_tag("// probe at 190.000,8.000 is z=-0.580000", result));
+    }
 }

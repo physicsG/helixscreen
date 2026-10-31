@@ -86,13 +86,13 @@ size_t calculate_streaming_threshold(size_t available_memory_kb, int threshold_p
     float threshold_ratio = static_cast<float>(threshold_percent) / 100.0f;
     size_t max_memory_bytes = available_memory_kb * 1024 * threshold_ratio;
 
-    // Work backwards: max_file_size * EXPANSION_FACTOR = max_memory_bytes
-    // So max_file_size = max_memory_bytes / EXPANSION_FACTOR
-    size_t max_file_size = max_memory_bytes / GCodeMemoryLimits::EXPANSION_FACTOR;
+    // Work backwards: max_file_size * kExpansionFactor = max_memory_bytes
+    // So max_file_size = max_memory_bytes / kExpansionFactor
+    size_t max_file_size = max_memory_bytes / GCodeMemoryLimits::kExpansionFactor;
 
     spdlog::trace("[GCodeStreaming] Threshold calculation: {}MB RAM × {}% / {}x = {}MB max file",
                   available_memory_kb / 1024, threshold_percent,
-                  GCodeMemoryLimits::EXPANSION_FACTOR, max_file_size / (1024 * 1024));
+                  GCodeMemoryLimits::kExpansionFactor, max_file_size / (1024 * 1024));
 
     return max_file_size;
 }

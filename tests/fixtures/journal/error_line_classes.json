@@ -1,0 +1,30 @@
+{
+  "_comment": "Printer event journal: each `!!` line or shutdown reason with the class both classifiers must give it (moonraker-plugin/helix_journal.py classify_error, src/printer/printer_event_journal.cpp classify_journal_error) and whether it reports a lost MCU. Read by moonraker-plugin/tests/test_helix_journal.py and tests/unit/test_printer_event_journal.cpp.",
+  "cases": [
+    {"line": "!! Lost communication with MCU 'mcu'", "class": "mcu", "mcu_disconnect": true},
+    {"line": "Lost communication with MCU 'nhk'", "class": "mcu", "mcu_disconnect": true},
+    {"line": "!! mcu 'mcu': Unable to connect", "class": "mcu", "mcu_disconnect": true},
+    {"line": "!! MCU 'mcu' shutdown: Timer too close", "class": "mcu", "mcu_disconnect": false},
+    {"line": "!! Missed scheduling of next digital out event", "class": "mcu", "mcu_disconnect": false},
+    {"line": "!! Rescheduled timer in the past", "class": "mcu", "mcu_disconnect": false},
+    {"line": "!! Heater extruder not heating at expected rate", "class": "heater", "mcu_disconnect": false},
+    {"line": "!! MCU 'mcu' shutdown: ADC out of range", "class": "heater", "mcu_disconnect": false},
+    {"line": "!! Thermocouple reader fault", "class": "heater", "mcu_disconnect": false},
+    {"line": "!! Must home axis first: 120.000 0.000 5.000 [0.000]", "class": "homing", "mcu_disconnect": false},
+    {"line": "!! No trigger on z after full movement", "class": "homing", "mcu_disconnect": false},
+    {"line": "!! Endstop x still triggered after retract", "class": "homing", "mcu_disconnect": false},
+    {"line": "!! Probe triggered prior to movement", "class": "homing", "mcu_disconnect": false},
+    {"line": "!! Move out of range: 251.000 10.000 0.200 [12.000]", "class": "move", "mcu_disconnect": false},
+    {"line": "!! Move exceeds maximum extrusion (0.800mm^2 vs 0.640mm^2)", "class": "move", "mcu_disconnect": false},
+    {"line": "!! Extrude below minimum temp", "class": "move", "mcu_disconnect": false},
+    {"line": "!! Extrude only move too long (120.000mm vs 50.000mm)", "class": "move", "mcu_disconnect": false},
+    {"line": "!! Filament runout detected on lane 2", "class": "filament", "mcu_disconnect": false},
+    {"line": "!! {\"code\":\"key849\",\"msg\":\"Retract failed\",\"values\":[1,\"A\"]}", "class": "firmware", "mcu_disconnect": false},
+    {"line": "!!   {\"code\": \"key298\", \"msg\": \"mcu bridge\"}", "class": "firmware", "mcu_disconnect": false},
+    {"line": "!! Unknown command:\"FOO_BAR\"", "class": "command", "mcu_disconnect": false},
+    {"line": "!! Error evaluating 'gcode_macro PRINT_START:gcode': UndefinedError", "class": "command", "mcu_disconnect": false},
+    {"line": "!!{\"not\":\"an envelope\"}", "class": "other", "mcu_disconnect": false},
+    {"line": "!! Something nobody planned for", "class": "other", "mcu_disconnect": false},
+    {"line": "!!", "class": "other", "mcu_disconnect": false}
+  ]
+}

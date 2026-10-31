@@ -7,13 +7,13 @@
 #include "performance_source.h"
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 namespace perf {
 
 /**
@@ -27,11 +27,53 @@ namespace perf {
  */
 class MoonrakerPerformanceSource : public IPerformanceSource {
   public:
+    /// Free-space reading from a server.files.get_directory response, in whole MB.
+    struct DiskUsageMb {
+        uint32_t total_mb = 0;
+        uint32_t free_mb = 0;
+    };
+
+    /// The `disk_usage` block of the response's `result`, or nullopt when it is absent
+    /// or carries no usable byte counts.
+    static std::optional<DiskUsageMb> parse_disk_usage(const json& response);
+
+    /// How often the gcodes disk is re-read. Free space moves slowly, so it rides the
+    /// host sample stream at this cadence instead of adding a timer.
+    static constexpr std::chrono::seconds kDiskPollInterval{60};
+
+    /// Whether a disk read should go out now: never without a consumer, never while one is
+    /// in flight and recent, and otherwise when forced or the poll interval has passed.
+    static constexpr bool disk_read_due(bool wanted, bool in_flight,
+                                        std::chrono::steady_clock::duration since_last,
+                                        bool force) {
+        if (!wanted)
+            return false;
+        if (in_flight && since_last < kDiskPollInterval)
+            return false;
+        return force || since_last >= kDiskPollInterval;
+    }
+
+    /// Reads that return no usable disk usage in a row. The third clears the published
+    /// figure, so a disk that stopped answering does not show its last value forever.
+    struct DiskMissCounter {
+        static constexpr int kLimit = 3;
+        int misses = 0;
+        /// True exactly when this read is the one that reaches the limit.
+        bool record(bool ok) {
+            if (ok) {
+                misses = 0;
+                return false;
+            }
+            return ++misses == kLimit;
+        }
+    };
+
     explicit MoonrakerPerformanceSource(IMoonrakerAPI* api);
     ~MoonrakerPerformanceSource() override;
 
     void start() override;
     void stop() override;
+    void set_disk_wanted(bool wanted) override;
     void set_callback(SampleCallback cb) override {
         cb_ = std::move(cb);
     }
@@ -47,6 +89,10 @@ class MoonrakerPerformanceSource : public IPerformanceSource {
     /// notify_status_update registration in start().
     void run_initial_handshake();
 
+    /// Read the gcodes disk's free space once when disk_read_due() says so.
+    void fetch_disk_usage(bool force);
+    void note_disk_read(bool ok);
+
     /// Called on main thread for each MCU status payload.
     void on_mcu_status_update(const std::string& object_name, const json& payload);
 
@@ -57,6 +103,11 @@ class MoonrakerPerformanceSource : public IPerformanceSource {
     SampleCallback cb_;
     AsyncLifetimeGuard lifetime_;
     bool running_ = false;
+
+    bool disk_wanted_ = false;
+    bool disk_request_in_flight_ = false;
+    DiskMissCounter disk_misses_;
+    std::chrono::steady_clock::time_point last_disk_request_;
 
     /// Accumulated sample — updated by both proc_stat and MCU callbacks.
     PerfSample latest_;

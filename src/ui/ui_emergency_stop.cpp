@@ -15,6 +15,7 @@
 #include "app_globals.h"
 #include "fault_modal_registry.h"
 #include "gcode_error_router.h"
+#include "helix_psram_attr.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "print_lifecycle_state.h"
@@ -89,7 +90,7 @@ bool deadline_pending(const std::atomic<uint32_t>& deadline_ms) {
 /// arm_recovery_recheck(): the three guards it declines on (setup wizard,
 /// restart in flight, AbortManager) clear on human and firmware timescales, so
 /// polling faster only burns timer ticks.
-constexpr uint32_t RECOVERY_RECHECK_RETRY_MS = 2000;
+constexpr uint32_t kRecoveryRecheckRetryMs = 2000;
 
 /// How many declined re-checks before the latch stops re-arming (~30s at the
 /// cadence above). One of those guards has no bound of its own - the setup
@@ -97,15 +98,24 @@ constexpr uint32_t RECOVERY_RECHECK_RETRY_MS = 2000;
 /// the rest of the process is not a useful way to say so. The reason stays
 /// latched past the cap, so a later suppression window still hands it back. The
 /// restart guard is bounded separately by
-/// RecoverySuppression::RESTART_FLAG_TIMEOUT, which expires inside this budget.
-constexpr int RECOVERY_RECHECK_MAX_RETRIES = 15;
+/// recovery_suppression::kRestartFlagTimeout, which expires inside this budget.
+constexpr int kRecoveryRecheckMaxRetries = 15;
+
+/// Whether a restart that answered with @p err may still be under way. Klipper
+/// going down fails every pending request with CONNECTION_LOST, the restart's
+/// own reply among them, and a TIMEOUT says nothing either way; only an answer
+/// that proves the command never reached Klipper ends the restart.
+bool restart_may_be_running(const MoonrakerError& err) {
+    return err.type == MoonrakerErrorType::CONNECTION_LOST ||
+           err.type == MoonrakerErrorType::TIMEOUT;
+}
 
 } // namespace
 
 using helix::ui::observe;
 
 EmergencyStopOverlay& EmergencyStopOverlay::instance() {
-    static EmergencyStopOverlay instance;
+    static HELIX_PSRAM_BSS EmergencyStopOverlay instance;
     return instance;
 }
 
@@ -141,6 +151,7 @@ void EmergencyStopOverlay::init_subjects() {
     // Register click callbacks for XML event binding
     register_xml_callbacks({
         {"emergency_stop_clicked", emergency_stop_clicked},
+        {"lock_screen_estop_clicked", lock_screen_estop_clicked},
         {"estop_dialog_cancel_clicked", estop_dialog_cancel_clicked},
         {"estop_dialog_confirm_clicked", estop_dialog_confirm_clicked},
         {"recovery_restart_klipper_clicked", recovery_restart_klipper_clicked},
@@ -298,11 +309,21 @@ void EmergencyStopOverlay::create() {
                 return;
             }
 
-            if (klippy_state == KlippyState::SHUTDOWN) {
+            if (klippy_state == KlippyState::STARTUP) {
+                if (self->restart_in_progress()) {
+                    self->restart_saw_startup_.store(true, std::memory_order_relaxed);
+                }
+            } else if (klippy_state == KlippyState::SHUTDOWN ||
+                       klippy_state == KlippyState::ERROR) {
+                // A restart that came back up into a fault is over: the user
+                // needs the recovery dialog and the Firmware Restart it offers.
+                if (self->restart_saw_startup_.load(std::memory_order_relaxed)) {
+                    self->end_restart_window();
+                }
                 // Unified recovery path - all suppression checks are in show_recovery_for()
-                self->show_recovery_for(RecoveryReason::SHUTDOWN);
-            } else if (klippy_state == KlippyState::ERROR) {
-                self->show_recovery_for(RecoveryReason::ERROR);
+                self->show_recovery_for(klippy_state == KlippyState::SHUTDOWN
+                                            ? RecoveryReason::SHUTDOWN
+                                            : RecoveryReason::ERROR);
             } else if (klippy_state == KlippyState::READY) {
                 // Auto-dismiss recovery dialog when Klipper is back to READY
                 // NOTE: Must defer to main thread - observer may fire from WebSocket thread
@@ -327,7 +348,7 @@ void EmergencyStopOverlay::create() {
                     // behind it is only a backstop for the restart that
                     // never gets here; a READY still ends the window
                     // immediately.
-                    inst.restart_expires_at_.store(0, std::memory_order_relaxed);
+                    inst.end_restart_window();
 
                     // Klippy came back, so anything the suppression window
                     // was holding describes a state that no longer exists.
@@ -347,16 +368,11 @@ void EmergencyStopOverlay::create() {
 
                     // Guard against async callback firing after display destruction
                     if (inst.recovery_dialog_) {
-                        if (!ModalStack::instance().backdrop_for(inst.recovery_dialog_)) {
-                            // Dialog was dismissed externally — clear stale pointer
-                            inst.recovery_dialog_ = nullptr;
-                        } else {
-                            spdlog::info("[KlipperRecovery] Klipper is READY, dismissing recovery "
-                                         "dialog");
-                            inst.dismiss_recovery_dialog();
-                            helix::ui::notifications::show_transient_success(lv_tr("Printer ready"),
-                                                                             3000);
-                        }
+                        spdlog::info("[KlipperRecovery] Klipper is READY, dismissing recovery "
+                                     "dialog");
+                        inst.dismiss_recovery_dialog();
+                        helix::ui::notifications::show_transient_success(lv_tr("Printer ready"),
+                                                                         3000);
                     } else if (expected_restart) {
                         // The restart completed with the dialog suppressed
                         // by its initiating flow, so still say so. A transient
@@ -409,11 +425,22 @@ void EmergencyStopOverlay::update_visibility() {
 void EmergencyStopOverlay::handle_click() {
     spdlog::info("[EmergencyStop] Button clicked");
 
-    if (require_confirmation_) {
-        show_confirmation_dialog();
-    } else {
+    if (!require_confirmation_) {
         execute_emergency_stop();
+    } else if (confirmation_dialog_) {
+        // Its own confirmation is the one modal that leaves the navbar E-Stop
+        // in front of its backdrop (show_confirmation_dialog), so the button
+        // can be pressed again while the dialog is up. Pressing it twice means it.
+        spdlog::info("[EmergencyStop] Second press while confirming - stopping");
+        confirm_emergency_stop();
+    } else {
+        show_confirmation_dialog();
     }
+}
+
+void EmergencyStopOverlay::confirm_emergency_stop() {
+    dismiss_confirmation_dialog();
+    execute_emergency_stop();
 }
 
 void EmergencyStopOverlay::execute_emergency_stop() {
@@ -455,7 +482,6 @@ void EmergencyStopOverlay::execute_emergency_stop() {
 }
 
 void EmergencyStopOverlay::show_confirmation_dialog() {
-    // Don't show if already visible
     if (confirmation_dialog_) {
         spdlog::debug("[EmergencyStop] Confirmation dialog already visible");
         return;
@@ -463,14 +489,21 @@ void EmergencyStopOverlay::show_confirmation_dialog() {
 
     spdlog::debug("[EmergencyStop] Showing confirmation dialog");
 
-    // Create dialog via Modal system (handles backdrop, z-order, animations)
-    confirmation_dialog_ = helix::ui::modal_show("estop_confirmation_dialog");
+    // Create dialog via Modal system (handles backdrop, z-order, animations).
+    // The bare factory never reports a backdrop tap or ESC back here, so the
+    // handle clears itself when the dialog is freed; a handle left set would
+    // read as "already visible" and swallow every later press.
+    helix::ui::store_until_deleted(&confirmation_dialog_,
+                                   helix::ui::modal_show("estop_confirmation_dialog"));
 
     if (!confirmation_dialog_) {
         spdlog::error("[EmergencyStop] Failed to create confirmation dialog, executing directly");
         execute_emergency_stop();
         return;
     }
+    // Every other modal covers the navbar; this one must not, or the second
+    // press on the E-Stop lands on the backdrop and closes the dialog instead.
+    Modal::set_covers_chrome(confirmation_dialog_, false);
 
     spdlog::info("[EmergencyStop] Confirmation dialog shown");
 }
@@ -495,8 +528,10 @@ void EmergencyStopOverlay::show_recovery_dialog() {
     spdlog::info("[KlipperRecovery] Creating recovery dialog (reason: {})",
                  recovery_reason_str(recovery_reason_));
 
-    // Use Modal system — backdrop is created programmatically
-    recovery_dialog_ = helix::ui::modal_show("klipper_recovery_dialog");
+    // Use Modal system — backdrop is created programmatically. Cleared when freed,
+    // like confirmation_dialog_, so a manual dismiss never blocks the next one.
+    helix::ui::store_until_deleted(&recovery_dialog_,
+                                   helix::ui::modal_show("klipper_recovery_dialog"));
     spdlog::debug("[KlipperRecovery] Dialog created, recovery_dialog_={}",
                   static_cast<void*>(recovery_dialog_));
 
@@ -578,18 +613,6 @@ bool EmergencyStopOverlay::show_recovery_for_main(RecoveryReason reason) {
         return false;
     }
 
-    // A backdrop tap dismisses the dialog through Modal::hide() without going
-    // through dismiss_recovery_dialog(), so recovery_dialog_ can still point at a
-    // modal that already left the stack. Drop the stale pointer first and let the
-    // rest of this function build a fresh dialog — the next SHUTDOWN or
-    // DISCONNECTED after a manual dismiss must still reach the user.
-    if (recovery_dialog_ && !ModalStack::instance().backdrop_for(recovery_dialog_)) {
-        spdlog::debug("[KlipperRecovery] Previous dialog was dismissed externally, "
-                      "clearing stale reference");
-        recovery_dialog_ = nullptr;
-        recovery_reason_ = RecoveryReason::NONE;
-    }
-
     // If dialog is still showing, update reason if it's worse (SHUTDOWN -> DISCONNECTED means
     // can't restart)
     if (recovery_dialog_) {
@@ -623,11 +646,7 @@ bool EmergencyStopOverlay::show_recovery_for_main(RecoveryReason reason) {
         auto& inst = EmergencyStopOverlay::instance();
         // Guard: dialog may have been shown by another deferred call in the meantime
         if (inst.recovery_dialog_) {
-            if (ModalStack::instance().backdrop_for(inst.recovery_dialog_)) {
-                return;
-            }
-            // Dialog was dismissed externally — clear stale pointer
-            inst.recovery_dialog_ = nullptr;
+            return;
         }
         spdlog::info("[KlipperRecovery] Showing recovery dialog (reason: {})",
                      recovery_reason_str(inst.recovery_reason_));
@@ -718,18 +737,18 @@ void EmergencyStopOverlay::recovery_recheck_cb(lv_timer_t* /*timer*/) {
     inst.pending_recovery_reason_.compare_exchange_strong(expected, pending,
                                                           std::memory_order_relaxed);
 
-    if (++inst.recovery_recheck_retries_ > RECOVERY_RECHECK_MAX_RETRIES) {
+    if (++inst.recovery_recheck_retries_ > kRecoveryRecheckMaxRetries) {
         spdlog::warn("[KlipperRecovery] {} still blocked after {} re-checks - staying latched, "
                      "no further re-arm",
                      recovery_reason_str(static_cast<RecoveryReason>(pending)),
-                     RECOVERY_RECHECK_MAX_RETRIES);
+                     kRecoveryRecheckMaxRetries);
         return;
     }
 
     spdlog::debug("[KlipperRecovery] Re-check {} declined, retrying in {}ms",
                   recovery_reason_str(static_cast<RecoveryReason>(pending)),
-                  RECOVERY_RECHECK_RETRY_MS);
-    inst.arm_recovery_recheck_in(RECOVERY_RECHECK_RETRY_MS);
+                  kRecoveryRecheckRetryMs);
+    inst.arm_recovery_recheck_in(kRecoveryRecheckRetryMs);
 }
 
 void EmergencyStopOverlay::suppress_recovery_dialog(uint32_t duration_ms) {
@@ -746,14 +765,20 @@ bool EmergencyStopOverlay::is_recovery_suppressed() const {
 void EmergencyStopOverlay::begin_restart_window() {
     // Callable from any thread for the same reason suppress_recovery_dialog()
     // is: one atomic store of a deadline.
-    restart_expires_at_.store(lv_tick_get() + RecoverySuppression::RESTART_FLAG_TIMEOUT,
+    restart_saw_startup_.store(false, std::memory_order_relaxed);
+    restart_expires_at_.store(lv_tick_get() + recovery_suppression::kRestartFlagTimeout,
                               std::memory_order_relaxed);
     spdlog::debug("[KlipperRecovery] Restart in flight for up to {}ms",
-                  RecoverySuppression::RESTART_FLAG_TIMEOUT);
+                  recovery_suppression::kRestartFlagTimeout);
 }
 
 bool EmergencyStopOverlay::restart_in_progress() const {
     return deadline_pending(restart_expires_at_);
+}
+
+void EmergencyStopOverlay::end_restart_window() {
+    restart_expires_at_.store(0, std::memory_order_relaxed);
+    restart_saw_startup_.store(false, std::memory_order_relaxed);
 }
 
 bool EmergencyStopOverlay::is_expected_restart() const {
@@ -811,11 +836,26 @@ void EmergencyStopOverlay::update_recovery_dialog_content() {
     lv_subject_set_int(&recovery_has_code_, code.empty() ? 0 : 1);
 }
 
+// A second restart sent while Klipper is still coming up from the first can
+// leave it halted on a serial port the first one still holds.
+bool EmergencyStopOverlay::refuse_restart_in_flight() {
+    if (!restart_in_progress()) {
+        return false;
+    }
+    spdlog::warn("[KlipperRecovery] Restart refused: one is already in flight");
+    ToastManager::instance().show(ToastSeverity::WARNING, lv_tr("A restart is already in progress"),
+                                  3000);
+    return true;
+}
+
 void EmergencyStopOverlay::restart_klipper() {
     if (!api_) {
         spdlog::error("[KlipperRecovery] Cannot restart: API not available");
         ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("Restart failed: not connected"),
                                       4000);
+        return;
+    }
+    if (refuse_restart_in_flight()) {
         return;
     }
 
@@ -832,6 +872,9 @@ void EmergencyStopOverlay::restart_klipper() {
         },
         [](const MoonrakerError& err) {
             spdlog::error("[KlipperRecovery] Klipper restart failed: {}", err.message);
+            if (!restart_may_be_running(err)) {
+                EmergencyStopOverlay::instance().end_restart_window();
+            }
             // The callback can run on the WebSocket thread; the toast is main-thread only.
             helix::ui::run_on_main("error_toast", [err]() {
                 ToastManager::instance().show(
@@ -850,6 +893,9 @@ void EmergencyStopOverlay::firmware_restart() {
                                       4000);
         return;
     }
+    if (refuse_restart_in_flight()) {
+        return;
+    }
 
     // Suppress recovery dialog during restart - Klipper briefly enters SHUTDOWN
     begin_restart_window();
@@ -864,12 +910,15 @@ void EmergencyStopOverlay::firmware_restart() {
     // before from the user's perspective.
     helix::PrinterRecoveryService recovery(api_);
     recovery.recover(
-        []() {
+        [](helix::RecoveryOutcome) {
             spdlog::info("[KlipperRecovery] Recovery initiated");
             // Toast will update when klippy_state changes to READY
         },
         [](const MoonrakerError& err) {
             spdlog::error("[KlipperRecovery] Recovery failed: {}", err.message);
+            if (!restart_may_be_running(err)) {
+                EmergencyStopOverlay::instance().end_restart_window();
+            }
             // The callback can run on the WebSocket thread; the toast is main-thread only.
             helix::ui::run_on_main("error_toast", [err]() {
                 ToastManager::instance().show(
@@ -888,6 +937,15 @@ void EmergencyStopOverlay::emergency_stop_clicked(lv_event_t* e) {
     EmergencyStopOverlay::instance().handle_click();
 }
 
+void EmergencyStopOverlay::lock_screen_estop_clicked(lv_event_t* e) {
+    LV_UNUSED(e);
+    // The lock screen sits on lv_layer_top, above any modal, so a confirmation
+    // dialog would open hidden behind it. The lock guards against casual input,
+    // not an emergency: stop at once.
+    spdlog::info("[EmergencyStop] E-Stop clicked from lock screen - skipping confirmation");
+    EmergencyStopOverlay::instance().execute_emergency_stop();
+}
+
 void EmergencyStopOverlay::estop_dialog_cancel_clicked(lv_event_t* e) {
     LV_UNUSED(e);
     spdlog::debug("[EmergencyStop] Cancel clicked - aborting E-Stop");
@@ -897,15 +955,17 @@ void EmergencyStopOverlay::estop_dialog_cancel_clicked(lv_event_t* e) {
 void EmergencyStopOverlay::estop_dialog_confirm_clicked(lv_event_t* e) {
     LV_UNUSED(e);
     spdlog::debug("[EmergencyStop] Confirm clicked - executing E-Stop");
-    auto& instance = EmergencyStopOverlay::instance();
-    instance.dismiss_confirmation_dialog();
-    instance.execute_emergency_stop();
+    EmergencyStopOverlay::instance().confirm_emergency_stop();
 }
 
 void EmergencyStopOverlay::recovery_restart_klipper_clicked(lv_event_t* e) {
     LV_UNUSED(e);
     spdlog::debug("[KlipperRecovery] Restart Klipper clicked");
     auto& instance = EmergencyStopOverlay::instance();
+    // A refused tap keeps the dialog, the user's only way to retry.
+    if (instance.refuse_restart_in_flight()) {
+        return;
+    }
     instance.dismiss_recovery_dialog();
     instance.restart_klipper();
 }
@@ -914,6 +974,10 @@ void EmergencyStopOverlay::recovery_firmware_restart_clicked(lv_event_t* e) {
     LV_UNUSED(e);
     spdlog::debug("[KlipperRecovery] Firmware Restart clicked");
     auto& instance = EmergencyStopOverlay::instance();
+    // A refused tap keeps the dialog, the user's only way to retry.
+    if (instance.refuse_restart_in_flight()) {
+        return;
+    }
     instance.dismiss_recovery_dialog();
     instance.firmware_restart();
 }
@@ -972,9 +1036,9 @@ namespace ui {
 void begin_expected_klippy_restart(std::string message) {
     // The suppression writes are atomic deadline stores, safe right here on
     // any thread; the toast is LVGL-facing so it hops to the main thread.
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::LONG);
     if (auto* api = get_moonraker_api()) {
-        api->suppress_disconnect_modal(EXPECTED_RESTART_DISCONNECT_MODAL_MS);
+        api->suppress_disconnect_modal(kExpectedRestartDisconnectModalMs);
     }
     // By value, because the toast is shown on a later main-thread tick. The
     // previous `const char*` captured the POINTER into the deferred lambda, so

@@ -1,6 +1,8 @@
 # Installing HelixScreen on the Flashforge Adventurer 5M / 5M Pro
 
-Everything you need to run HelixScreen on a Flashforge Adventurer 5M or 5M Pro (AD5M): install, update, service control, and uninstall. HelixScreen runs directly on the printer's stock 4.3" touchscreen, replacing GuppyScreen (on Forge-X) or KlipperScreen (on Klipper Mod).
+Everything you need to run HelixScreen on a Flashforge Adventurer 5M or 5M Pro (AD5M): install, update, service control, and uninstall. HelixScreen runs directly on the printer's stock 4.3" touchscreen, replacing GuppyScreen (on Forge-X), KlipperScreen (on Klipper Mod) or the stock screen (on ZMOD).
+
+> **Easy installer:** the [HelixScreen easy installer](https://helixscreen.org/installer/) can update HelixScreen on a Forge-X Adventurer 5M from a desktop app. Installing the firmware mod and a first install are still done by hand with this guide.
 
 > **Tested versions:** Most thoroughly tested on Forge-X 1.4.0 with Flashforge firmware 3.1.5. Other versions may work fine.
 
@@ -14,8 +16,11 @@ Everything you need to run HelixScreen on a Flashforge Adventurer 5M or 5M Pro (
   - Network connection
 
 - **Software:**
-  - Custom Klipper firmware: [Forge-X](https://github.com/DrA1ex/ff5m) **or** [Klipper Mod](https://github.com/xblax/flashforge_ad5m_klipper_mod)
-  - SSH access to the printer (usually `root@<printer-ip>`)
+  - A firmware mod that gives you Klipper, Moonraker and root access. Stock Flashforge firmware cannot run HelixScreen. Pick one:
+    - [Forge-X](https://github.com/DrA1ex/ff5m) (**recommended**): the setup HelixScreen is tested on most
+    - [ZMOD](https://github.com/ghzserg/zmod): turns HelixScreen on with one command, no SSH needed
+    - [Klipper Mod](https://github.com/xblax/flashforge_ad5m_klipper_mod): still works, but no longer actively developed
+  - SSH access to the printer (usually `root@<printer-ip>`), except on ZMOD
   - About 100MB free disk space
 
 ### Firmware Variants
@@ -26,10 +31,21 @@ The installer automatically detects which firmware you're running and configures
 |----------|----------|------------------|-------------|
 | **Forge-X** | GuppyScreen | `/opt/helixscreen/` | `S90helixscreen` |
 | **Klipper Mod** | KlipperScreen | `/root/printer_software/helixscreen/` | `S80helixscreen` |
+| **ZMOD** | Stock screen | `/srv/helixscreen/` | `S80helixscreen` |
 
 > Klipper Mod **v00.06 and newer** installs to `/opt/helixscreen/` (still `S80helixscreen`); `/root/printer_software/helixscreen/` is the v00.05-and-older location.
 
 On Klipper Mod, swapping KlipperScreen for HelixScreen frees a substantial chunk of the AD5M's limited RAM; see [Memory Constraints](#memory-constraints) below.
+
+### Step 0: Install a Firmware Mod
+
+Every mod installs the same way stock firmware updates do: a file on a FAT32 USB stick, inserted before you power the printer on. Each mod lists the stock firmware versions it supports, so check yours first (on the printer: **Settings > About**).
+
+**Forge-X (recommended).** Supports stock firmware 2.6.5 through 5.1.x. Follow the [Forge-X install guide](https://github.com/DrA1ex/ff5m/blob/main/docs/INSTALL.md), including its notes on downgrading and the `-Factory` image if your version needs one. Then set it up for HelixScreen as described in [Forge-X: Set Up GUPPY Mode First](#forge-x-set-up-guppy-mode-first) below, and install HelixScreen with [Option 1](#option-1-automated-install-recommended).
+
+**ZMOD.** Supports stock firmware 2.7.5 and newer. Follow the [ZMOD install guide](https://wiki.zmod.link/Setup/), then turn HelixScreen on as described in [ZMOD: Turn HelixScreen On](#zmod-turn-helixscreen-on). There is no SSH step.
+
+> **Already running the old `prestonbrown/ff5m` image?** It is Forge-X with HelixScreen already installed, and it is no longer maintained. HelixScreen keeps working and updates normally (see [Updating](#updating)). For newer Forge-X versions, follow [upstream Forge-X](https://github.com/DrA1ex/ff5m)'s update instructions.
 
 ### Forge-X: Set Up GUPPY Mode First
 
@@ -46,21 +62,21 @@ For everything the installer then changes on Forge-X, see [What the Installer Do
 
 ## Installation
 
-> **Important:** Installing HelixScreen replaces your current screen UI (GuppyScreen on Forge-X, KlipperScreen on Klipper Mod). Make sure you have a backup method to access your printer (SSH, Mainsail/Fluidd web interface).
+> **Important:** Installing HelixScreen replaces your current screen UI (GuppyScreen on Forge-X, KlipperScreen on Klipper Mod, the stock screen on ZMOD). Make sure you have a backup method to access your printer (SSH, Mainsail/Fluidd web interface).
 
-### Option 1: Ready-Made Firmware Image (Easiest)
+### ZMOD: Turn HelixScreen On
 
-We maintain a [ready-made firmware image](https://github.com/prestonbrown/ff5m), a fork of Forge-X 1.4.0 with HelixScreen pre-configured. This is the fastest way to get up and running:
+ZMOD installs and updates HelixScreen itself, through Moonraker's update manager. It takes three steps. Open Fluidd or Mainsail in a browser (`http://<printer-ip>`) and use the console for the commands.
 
-1. Download the image from [github.com/prestonbrown/ff5m](https://github.com/prestonbrown/ff5m)
-2. Copy it to a USB flash drive
-3. Insert the flash drive into your AD5M or AD5M Pro and install
+1. Run `ENABLE_EXTRA_PLUGINS` in the console. This adds ZMOD's list of third-party plugins to Moonraker, which includes the `helixscreen` update-manager entry, and reboots the printer. It does not install HelixScreen yet.
+2. When the printer is back, open the update manager in Fluidd or Mainsail and update **helixscreen**. ZMOD starts it at version v0.0.1, so the current release shows as an update; applying it downloads `helixscreen-ad5m.zip` into `/srv/helixscreen`.
+3. Run `DISPLAY_OFF HELIX=1` in the console. This turns the stock screen off and selects HelixScreen as the replacement, then reboots. Do this only after step 2: if no HelixScreen files are installed yet, the printer comes up with no screen at all.
 
-That's it: no SSH, no manual commands. HelixScreen will be ready to go after the firmware installs.
+From then on, HelixScreen updates through the same update manager entry. Because ZMOD manages HelixScreen, update and remove it through ZMOD rather than with the installer commands on this page. To go back to the stock screen, run `DISPLAY_ON`.
 
-> If you already have Forge-X or Klipper Mod installed and prefer to add HelixScreen manually, continue with the options below.
+> **Read ZMOD's warning first.** With the stock screen off, the printer no longer runs the stock screen's print start and end routines, so bed leveling, Z-offset and your slicer's start and end G-code work differently. See ZMOD's [DISPLAY_OFF documentation](https://github.com/ghzserg/zmod/blob/main/docs/en/System.md) before you switch.
 
-### Option 2: Automated Install (Recommended)
+### Option 1: Automated Install (Recommended)
 
 The AD5M uses BusyBox, which doesn't support HTTPS downloads directly. This is a **two-step process**:
 1. Download on your local computer (Steps 1-2)
@@ -106,7 +122,7 @@ sh /data/install.sh --local /data/helixscreen-ad5m.zip
 
 The install script automatically detects your firmware (Forge-X or Klipper Mod) and installs to the correct location.
 
-### Option 3: Manual Install (Advanced)
+### Option 2: Manual Install (Advanced)
 
 <details>
 <summary>Forge-X Manual Installation</summary>
@@ -124,9 +140,10 @@ scp -O helixscreen-ad5m.zip root@<printer-ip>:/data/
 # SSH into printer
 ssh root@<printer-ip>
 
-# Extract to /opt (Forge-X location)
-cd /opt
-unzip -q /data/helixscreen-ad5m.zip
+# Extract to /opt/helixscreen (Forge-X location). The zip has no folder
+# inside it, so give unzip the destination folder.
+mkdir -p /opt/helixscreen
+unzip -q /data/helixscreen-ad5m.zip -d /opt/helixscreen
 
 # Stop GuppyScreen
 /opt/config/mod/.root/S80guppyscreen stop 2>/dev/null || true
@@ -162,9 +179,10 @@ scp -O helixscreen-ad5m.zip root@<printer-ip>:/mnt/data/
 # SSH into printer
 ssh root@<printer-ip>
 
-# Extract to /root/printer_software (Klipper Mod location)
-cd /root/printer_software
-unzip -q /mnt/data/helixscreen-ad5m.zip
+# Extract to /root/printer_software/helixscreen (Klipper Mod location). The
+# zip has no folder inside it, so give unzip the destination folder.
+mkdir -p /root/printer_software/helixscreen
+unzip -q /mnt/data/helixscreen-ad5m.zip -d /root/printer_software/helixscreen
 
 # Stop KlipperScreen
 /etc/init.d/S80klipperscreen stop 2>/dev/null || true
@@ -298,7 +316,7 @@ scp -O helixscreen-ad5m.zip root@<printer-ip>:/data/
 /root/printer_software/helixscreen/install.sh --local /data/helixscreen-ad5m.zip --update
 ```
 
-This preserves your configuration and updates to the latest version. For the Windows transfer alternatives, see the note in [Step 2 of the automated install](#option-2-automated-install-recommended).
+This preserves your configuration and updates to the latest version. For the Windows transfer alternatives, see the note in [Step 2 of the automated install](#option-1-automated-install-recommended).
 
 ### Update to a Specific Version
 
@@ -307,6 +325,8 @@ Download the specific version archive from [GitHub Releases](https://github.com/
 ---
 
 ## Uninstalling
+
+> **On ZMOD:** switch back to the stock screen by running `DISPLAY_ON` (see [ZMOD: Turn HelixScreen On](#zmod-turn-helixscreen-on)). The commands below are for Forge-X and Klipper Mod.
 
 ### Automated Uninstall (Recommended)
 

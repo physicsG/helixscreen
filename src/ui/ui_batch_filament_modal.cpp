@@ -6,7 +6,9 @@
 #include "ams_backend.h"
 #include "ams_state.h"
 #include "ams_types.h"
+#include "app_globals.h"
 #include "display_numbering.h"
+#include "filament_op_execute.h"
 #include "filament_op_slot_resolver.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -67,13 +69,29 @@ void init_direction_subjects() {
 }
 // clang-format on
 
-bool BatchFilamentModal::show_owned(bool for_load) {
+bool BatchFilamentModal::show_owned(HeadPickOp op, Confirm on_confirm) {
     init_direction_subjects();
 
     // One lv_tr() per literal: the extractor cannot see keys chosen inside a
-    // ternary, and every key already exists in translations.
-    const char* title = for_load ? lv_tr("Load filament") : lv_tr("Unload filament");
-    const char* action = for_load ? lv_tr("Load") : lv_tr("Unload");
+    // ternary.
+    const char* title = lv_tr("Load into which tool?");
+    const char* action = lv_tr("Load");
+    switch (op) {
+    case HeadPickOp::Load:
+        break;
+    case HeadPickOp::Unload:
+        title = lv_tr("Unload which tool?");
+        action = lv_tr("Unload");
+        break;
+    case HeadPickOp::Mount:
+        title = lv_tr("Mount which tool?");
+        action = lv_tr("Mount");
+        break;
+    case HeadPickOp::SeatByHand:
+        title = lv_tr("Seat which tool by hand?");
+        action = lv_tr("Seat");
+        break;
+    }
     // Copy first, publish second: set_pointer fires observers synchronously,
     // and they read the buffer, so the owned strings must already hold the new
     // text when they do.
@@ -83,42 +101,16 @@ bool BatchFilamentModal::show_owned(bool for_load) {
     lv_subject_set_pointer(&s_action_text, s_action_owned.data());
 
     auto modal = std::make_unique<BatchFilamentModal>();
-    modal->for_load_ = for_load;
+    modal->op_ = op;
+    modal->on_confirm_ = std::move(on_confirm);
     if (!modal->show(lv_screen_active())) {
         return false; // the unique_ptr frees the never-shown instance
     }
+    // Read the backdrop before the move: argument evaluation order is
+    // unspecified, and GCC moves the unique_ptr out first.
     lv_obj_t* backdrop = modal->backdrop();
     ModalStack::instance().assume_ownership(backdrop, std::move(modal));
     return true;
-}
-
-bool BatchFilamentModal::head_can_act(std::optional<bool> at_toolhead,
-                                      std::optional<bool> lane_presence, bool for_load) {
-    const bool loaded_here = at_toolhead.value_or(false);
-    if (!for_load) {
-        return loaded_here;
-    }
-    return !loaded_here && lane_presence.value_or(true);
-}
-
-std::vector<bool>
-BatchFilamentModal::prefill_selection(const std::vector<std::optional<bool>>& at_toolhead,
-                                      const std::vector<std::optional<bool>>& lane_presence,
-                                      bool for_load) {
-    std::vector<bool> ticked;
-    ticked.reserve(at_toolhead.size());
-    for (size_t i = 0; i < at_toolhead.size(); ++i) {
-        ticked.push_back(head_can_act(
-            at_toolhead[i], i < lane_presence.size() ? lane_presence[i] : std::nullopt, for_load));
-    }
-    return ticked;
-}
-
-bool BatchFilamentModal::any_head_for_direction(
-    const std::vector<std::optional<bool>>& at_toolhead,
-    const std::vector<std::optional<bool>>& lane_presence, bool for_load) {
-    const std::vector<bool> ticked = prefill_selection(at_toolhead, lane_presence, for_load);
-    return std::any_of(ticked.begin(), ticked.end(), [](bool tick) { return tick; });
 }
 
 std::vector<int> BatchFilamentModal::selected_slots(const std::vector<std::string>& keys) {
@@ -135,17 +127,49 @@ std::vector<int> BatchFilamentModal::selected_slots(const std::vector<std::strin
     return slots;
 }
 
-std::string BatchFilamentModal::row_label(LaneNoun noun, int slot, const SlotInfo& info,
-                                          std::optional<bool> present, bool at_toolhead) {
-    const std::string lane = lane_label(noun, slot);
+namespace {
+
+/// What is in the lane and where it stands, or empty when nothing can be said.
+std::string contents_suffix(const SlotInfo& info, std::optional<bool> present, bool at_toolhead) {
     if (!info.material.empty()) {
         const char* where = at_toolhead ? lv_tr("loaded") : lv_tr("ready to load");
-        return lane + " (" + info.material + " - " + where + ")"; // material: no i18n
+        return " (" + info.material + " - " + where + ")"; // material: no i18n
     }
     if (present && !*present) {
-        return lane + " (" + lv_tr("Empty") + ")";
+        return std::string(" (") + lv_tr("Empty") + ")";
     }
-    return lane;
+    return {};
+}
+
+} // namespace
+
+std::string BatchFilamentModal::row_label(LaneNoun noun, int slot, const SlotInfo& info,
+                                          std::optional<bool> present, bool at_toolhead) {
+    return lane_label(noun, slot) + contents_suffix(info, present, at_toolhead);
+}
+
+bool BatchFilamentModal::row_at_toolhead(const AmsBackend& backend, int head, int slot) {
+    if (slot < 0) {
+        return false;
+    }
+    // One slot per head: a head known to hold filament holds this slot's.
+    return backend.can_unload_from_toolhead(slot) ||
+           (backend.get_topology() == PathTopology::PARALLEL &&
+            backend.head_has_filament(head).value_or(false));
+}
+
+std::string BatchFilamentModal::head_row_label(const HeadRowText& text) {
+    std::string label = lane_label(text.head_noun, text.head);
+    if (text.show_slot && text.slot >= 0) {
+        label += " \u00b7 " + lane_label(text.slot_noun, text.slot);
+    }
+    if (!text.reason.empty()) {
+        return label + " (" + text.reason + ")";
+    }
+    if (text.slot < 0) {
+        return label;
+    }
+    return label + contents_suffix(text.info, text.present, text.at_toolhead);
 }
 
 BatchFilamentModal::EligibilitySift
@@ -171,104 +195,99 @@ BatchFilamentModal::sift_eligible(const std::vector<int>& selected,
     return out;
 }
 
-BatchFilamentModal::BatchRowSource BatchFilamentModal::collect_rows(const AmsBackend& backend) {
-    BatchRowSource rows;
-    const int total = backend.get_system_info().total_slots;
-    rows.slots.reserve(static_cast<size_t>(total));
-    rows.lane_presence.reserve(static_cast<size_t>(total));
-    rows.at_toolhead.reserve(static_cast<size_t>(total));
-    rows.unloadable.reserve(static_cast<size_t>(total));
-    for (int slot = 0; slot < total; ++slot) {
-        rows.slots.push_back(backend.get_slot_info(slot));
-        rows.lane_presence.push_back(slot_presence(rows.slots.back()));
-        const bool loaded = backend.can_unload_from_toolhead(slot);
-        rows.at_toolhead.push_back(loaded);
-        rows.unloadable.push_back(loaded || backend.slot_filament_parked_in_toolhead(slot));
-    }
-    return rows;
-}
-
 void BatchFilamentModal::on_show() {
-    // btn_primary runs the direction this picker was opened in; btn_secondary
-    // is a real Cancel: Modal::on_cancel() just hides.
+    // btn_primary hands the chosen rows over; btn_secondary is a real Cancel:
+    // Modal::on_cancel() just hides.
     wire_ok_button("btn_primary");
     wire_cancel_button("btn_secondary");
 
     AmsBackend* backend = AmsState::instance().get_backend();
     lv_obj_t* container = find_widget("batch_multiselect");
     if (!backend || !container) {
-        spdlog::warn("[BatchFilamentModal] {} — picker left empty",
+        spdlog::warn("[HeadPicker] {} — picker left empty",
                      backend ? "batch_multiselect not found" : "no backend");
         return;
     }
 
-    const BatchRowSource rows = collect_rows(*backend);
-    const std::vector<bool> ticked =
-        prefill_selection(rows.heads_for(for_load_), rows.lane_presence, for_load_);
+    const FilamentHeadView view = read_filament_head_view(backend, get_printer_state());
+    rows_ = decide_head_picker_rows(view, op_);
 
+    HeadRowText text;
+    text.head_noun = backend->tool_noun();
+    text.slot_noun = backend->lane_noun();
     std::vector<MultiSelectItem> items;
-    items.reserve(rows.slots.size());
-    const AmsSystemInfo sys = backend->get_system_info();
-    for (size_t slot = 0; slot < rows.slots.size(); ++slot) {
-        if (sys.slot_absent(static_cast<int>(slot))) {
-            continue; // a box that is not on the bus has no heads to pick
-        }
+    items.reserve(rows_.size());
+    for (const HeadPickRow& row : rows_) {
+        text.head = row.head;
+        text.slot = row.slot;
+        // A slot is worth naming where several can feed the head, or where
+        // the machine has one head and the slot is the whole answer.
+        text.show_slot = !single_select(op_) && (view.heads.size() == 1 || row.slot != row.head);
+        text.reason = row.enabled ? std::string() : row.reason;
+        text.info = row.slot >= 0 ? backend->get_slot_info(row.slot) : SlotInfo{};
+        text.present = row.slot >= 0 ? slot_presence(text.info) : std::nullopt;
+        text.at_toolhead = row_at_toolhead(*backend, row.head, row.slot);
         items.push_back(
-            {std::to_string(slot),
-             row_label(backend->lane_noun(), static_cast<int>(slot), rows.slots[slot],
-                       rows.lane_presence[slot], rows.at_toolhead[slot].value_or(false)),
-             ticked[slot]});
+            {std::to_string(row.head), head_row_label(text), row.preselected, row.enabled});
     }
     multiselect_.attach(container);
+    multiselect_.set_max_selected(
+        single_select(op_) ? 1 : static_cast<size_t>(std::max(view.max_heads_per_op, 1)));
     multiselect_.set_items(items);
-    spdlog::debug("[BatchFilamentModal] {} row(s) populated", items.size());
+    spdlog::debug("[HeadPicker] {} row(s) populated", items.size());
 }
 
 void BatchFilamentModal::on_ok() {
-    dispatch(for_load_);
+    const std::vector<int> heads = selected_slots(multiselect_.get_selected_keys());
+    std::vector<HeadPickRow> chosen;
+    for (int head : heads) {
+        for (const HeadPickRow& row : rows_) {
+            if (row.head == head && row.enabled) {
+                chosen.push_back(row);
+            }
+        }
+    }
+    if (chosen.empty()) {
+        NOTIFY_WARNING("{}", lv_tr("Select at least one"));
+        return; // keep the picker open: nothing was chosen
+    }
+    // Moved out before hide(): hiding can free this instance.
+    Confirm confirm = std::move(on_confirm_);
+    hide();
+    if (confirm) {
+        confirm(chosen);
+    }
 }
 
-void BatchFilamentModal::dispatch(bool load) {
-    AmsBackend* backend = AmsState::instance().get_backend();
-    if (!backend) {
-        NOTIFY_WARNING("{}", lv_tr("Multi-Filament System not available"));
-        hide();
-        return;
-    }
-
-    const std::vector<int> slots = selected_slots(multiselect_.get_selected_keys());
-    if (slots.empty()) {
-        NOTIFY_WARNING("{}", lv_tr("Select at least one"));
-        return; // keep the picker open — nothing was dispatched
-    }
-
+bool BatchFilamentModal::dispatch_batch(AmsBackend& backend, const std::vector<int>& slots,
+                                        bool load) {
     std::vector<AmsBackend::FilamentOpEligibility> per_slot;
-    const AmsSystemInfo sys = backend->get_system_info();
+    const AmsSystemInfo sys = backend.get_system_info();
     per_slot.reserve(static_cast<size_t>(sys.total_slots));
     for (int slot = 0; slot < sys.total_slots; ++slot) {
-        per_slot.push_back(backend->slot_op_eligibility(slot, load));
+        per_slot.push_back(backend.slot_op_eligibility(slot, load));
     }
     const EligibilitySift sift = sift_eligible(slots, per_slot);
     if (sift.dropped >= 0) {
         // Name the first head we are dropping and why; a batch that silently
         // shrinks is worse than one that explains itself.
-        NOTIFY_WARNING("{} {}: {}", lv_tr("Skipped"),
-                       lane_label(backend->lane_noun(), sift.dropped),
+        NOTIFY_WARNING("{} {}: {}", lv_tr("Skipped"), lane_label(backend.lane_noun(), sift.dropped),
                        lv_tr(filament_op_eligibility_reason(sift.drop_reason)));
     }
     if (sift.eligible.empty()) {
-        return; // keep the picker open — nothing was dispatched
+        return false;
     }
 
-    spdlog::info("[BatchFilamentModal] {} batch on {} slot(s)", load ? "Load" : "Unload",
+    spdlog::info("[HeadPicker] {} batch on {} slot(s)", load ? "Load" : "Unload",
                  sift.eligible.size());
-    AmsError error = load ? backend->load_filament_batch(sift.eligible)
-                          : backend->unload_filament_batch(sift.eligible);
+    AmsError error = load ? backend.load_filament_batch(sift.eligible)
+                          : backend.unload_filament_batch(sift.eligible);
     if (!error.success()) {
         helix::ui::notify_ams_error(error, load ? lv_tr("Batch load failed")
                                                 : lv_tr("Batch unload failed"));
+        return false;
     }
-    hide();
+    return true;
 }
 
 } // namespace helix::ui

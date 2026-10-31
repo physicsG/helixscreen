@@ -18,7 +18,7 @@ using helix::HttpBindDecision;
 
 namespace {
 // 32 hex chars - the shape `openssl rand -hex 16` produces.
-constexpr const char* STRONG = "9f2c41ab7e0d6835c1a4be97f30d5e62";
+constexpr const char* kStrong = "9f2c41ab7e0d6835c1a4be97f30d5e62";
 } // namespace
 
 // --- bind policy --------------------------------------------------------
@@ -37,8 +37,8 @@ TEST_CASE("http bind: off-box bind is refused without a token", "[remote][ctl][h
 }
 
 TEST_CASE("http bind: a token admits an off-box bind", "[remote][ctl][http]") {
-    REQUIRE(decide_http_bind("0.0.0.0", STRONG) == HttpBindDecision::Allow);
-    REQUIRE(decide_http_bind("192.168.1.50", STRONG) == HttpBindDecision::Allow);
+    REQUIRE(decide_http_bind("0.0.0.0", kStrong) == HttpBindDecision::Allow);
+    REQUIRE(decide_http_bind("192.168.1.50", kStrong) == HttpBindDecision::Allow);
 }
 
 TEST_CASE("http bind: a guessable token does not admit an off-box bind", "[remote][ctl][http]") {
@@ -56,26 +56,26 @@ TEST_CASE("http bind: the host must be a numeric IPv4 address", "[remote][ctl][h
     REQUIRE(decide_http_bind("localhost", "") == HttpBindDecision::InvalidHost);
     REQUIRE(decide_http_bind("", "") == HttpBindDecision::InvalidHost);
     REQUIRE(decide_http_bind("999.1.1.1", "") == HttpBindDecision::InvalidHost);
-    REQUIRE(decide_http_bind("::1", STRONG) == HttpBindDecision::InvalidHost);
+    REQUIRE(decide_http_bind("::1", kStrong) == HttpBindDecision::InvalidHost);
 }
 
 // --- request auth -------------------------------------------------------
 
 TEST_CASE("http auth: the configured bearer token is accepted", "[remote][ctl][http]") {
-    REQUIRE(http_token_matches(STRONG, std::string("Bearer ") + STRONG));
+    REQUIRE(http_token_matches(kStrong, std::string("Bearer ") + kStrong));
     // RFC 7235 auth schemes are case-insensitive.
-    REQUIRE(http_token_matches(STRONG, std::string("bearer ") + STRONG));
-    REQUIRE(http_token_matches(STRONG, std::string("BEARER ") + STRONG));
+    REQUIRE(http_token_matches(kStrong, std::string("bearer ") + kStrong));
+    REQUIRE(http_token_matches(kStrong, std::string("BEARER ") + kStrong));
 }
 
 TEST_CASE("http auth: anything else is rejected", "[remote][ctl][http]") {
-    REQUIRE_FALSE(http_token_matches(STRONG, ""));
-    REQUIRE_FALSE(http_token_matches(STRONG, "Bearer wrong"));
+    REQUIRE_FALSE(http_token_matches(kStrong, ""));
+    REQUIRE_FALSE(http_token_matches(kStrong, "Bearer wrong"));
     // A correct token with no scheme is still not a bearer credential.
-    REQUIRE_FALSE(http_token_matches(STRONG, STRONG));
-    REQUIRE_FALSE(http_token_matches(STRONG, std::string("Basic ") + STRONG));
+    REQUIRE_FALSE(http_token_matches(kStrong, kStrong));
+    REQUIRE_FALSE(http_token_matches(kStrong, std::string("Basic ") + kStrong));
     // A prefix of the token must not pass.
-    REQUIRE_FALSE(http_token_matches(STRONG, "Bearer 9f2c41ab"));
+    REQUIRE_FALSE(http_token_matches(kStrong, "Bearer 9f2c41ab"));
 }
 
 TEST_CASE("http auth: an unconfigured token fails closed", "[remote][ctl][http]") {

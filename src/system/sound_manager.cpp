@@ -460,9 +460,9 @@ std::shared_ptr<SoundBackend> SoundManager::create_backend() {
 #endif
 
 #ifdef HELIX_HAS_JZ_PWM
-    // AD5X piezo via the jz_pwm DMA engine, exec'd through fx-pwm. Probed
-    // at runtime, not just gated: /dev/jz_pwm and the fx-pwm binary are
-    // both present only on the AD5X rig install, so other machines fall
+    // The FlashForge MIPS boards' piezo via the jz_pwm DMA engine, exec'd
+    // through fx-pwm. Probed at runtime, not just gated: /dev/jz_pwm and the
+    // fx-pwm binary are both present only on a FlashForge rig install, so other machines fall
     // through and remote-UI installs keep the M300 path below.
     if (JzPwmSoundBackend::available()) {
         auto jz_backend = std::make_shared<JzPwmSoundBackend>();
@@ -517,6 +517,10 @@ void SoundManager::load_theme(const std::string& name) {
             }
         }
     }
+}
+
+bool SoundManager::plays_startup_sound(bool test_mode) {
+    return !test_mode;
 }
 
 bool SoundManager::is_ui_sound(const std::string& name) {

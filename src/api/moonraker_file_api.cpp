@@ -4,12 +4,14 @@
 #include "moonraker_file_api.h"
 
 #include "ui_error_reporting.h"
+#include "ui_filename_utils.h"
 
 #include "i_moonraker_client.h"
 #include "json_utils.h"
 #include "moonraker_api_internal.h"
 #include "spdlog/spdlog.h"
 #include "text_io.h"
+#include "three_mf_conversions.h"
 #include "try_reserve.h"
 
 using namespace moonraker_internal;
@@ -192,6 +194,23 @@ void MoonrakerFileAPI::prune_expired_metascan_cooldown_locked(
     }
 }
 
+void MoonrakerFileAPI::get_archive_conversions(ArchiveConversionsCallback on_success,
+                                               ErrorCallback on_error) {
+    client_.send_jsonrpc(
+        "server.helix.3mf_conversions", json::object(),
+        [on_success](const json& response) {
+            const auto it = response.find("result");
+            const auto conversions =
+                helix::three_mf::parse_conversions(it != response.end() ? *it : json::object());
+            if (on_success) {
+                on_success(conversions);
+            }
+        },
+        on_error,
+        0,     // timeout_ms: use default
+        true); // silent: a printer without the converter answers an error
+}
+
 void MoonrakerFileAPI::metascan_file(const std::string& filename, FileMetadataCallback on_success,
                                      ErrorCallback on_error, bool silent) {
     // Validate filename path
@@ -268,7 +287,7 @@ void MoonrakerFileAPI::metascan_file(const std::string& filename, FileMetadataCa
         0,     // timeout_ms: use default
         silent // silent: suppress RPC_ERROR events (default true)
     );
-    if (id == helix::INVALID_REQUEST_ID) {
+    if (id == helix::kInvalidRequestId) {
         // The tracker's duplicate-id registration branch returns invalid
         // without invoking any callback; every other invalid return has
         // already delivered a CONNECTION_LOST error (and cleared above).
@@ -433,9 +452,7 @@ std::optional<std::vector<FileInfo>> MoonrakerFileAPI::parse_file_list(const jso
             info.path = get_string(item, "path");
             if (!info.path.empty()) {
                 // filename is the last component of the path
-                size_t last_slash = info.path.rfind('/');
-                info.filename = (last_slash != std::string::npos) ? info.path.substr(last_slash + 1)
-                                                                  : info.path;
+                info.filename = helix::gcode::get_filename_basename(info.path);
             } else {
                 info.filename = get_string(item, "filename");
             }
@@ -592,6 +609,28 @@ FileMetadata MoonrakerFileAPI::parse_file_metadata(const json& response) {
     // Temperature info
     metadata.first_layer_bed_temp = helix::json_util::safe_double(result, "first_layer_bed_temp");
     metadata.first_layer_extr_temp = helix::json_util::safe_double(result, "first_layer_extr_temp");
+    metadata.nozzle_diameter = helix::json_util::safe_double(result, "nozzle_diameter");
+
+    // Per-extruder nozzles and per-filament nozzle flow types, which only some
+    // Moonraker forks add. A diameter list with an entry that is not a positive
+    // number says nothing: the fit check compares every diameter it holds.
+    if (const json* list = helix::json_util::find_member(result, "nozzle_diameter_list");
+        list != nullptr && list->is_array()) {
+        for (const auto& d : *list) {
+            const double v = helix::json_util::as_double(d, -1.0);
+            if (v <= 0.0) {
+                metadata.nozzle_diameter_list.clear();
+                break;
+            }
+            metadata.nozzle_diameter_list.push_back(v);
+        }
+    }
+    if (const json* types = helix::json_util::find_member(result, "filament_volume_type");
+        types != nullptr && types->is_array()) {
+        for (const auto& t : *types) {
+            metadata.filament_volume_types.push_back(t.is_string() ? t.get<std::string>() : "");
+        }
+    }
 
     // G-code info
     metadata.gcode_start_byte = helix::json_util::safe_uint64(result, "gcode_start_byte");

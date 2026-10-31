@@ -14,6 +14,9 @@
     <prop name="callback" type="string" default=""/>
     <prop name="disabled" type="string" default=""/>
     <prop name="disabled_ref_value" type="string" default="1"/>
+    <!-- "true" for a switch that commands the printer: it greys while anything
+         forbids motion, like every other moves_machine control. -->
+    <prop name="moves_machine" type="string" default="false"/>
   </api>
   <styles>
     <style name="label_enabled" text_color="#text"/>
@@ -69,7 +72,7 @@
       </lv_obj>
     </lv_obj>
     <!-- Right side: Switch toggle -->
-    <ui_switch name="toggle" size="small">
+    <ui_switch name="toggle" size="small" moves_machine="$moves_machine">
       <bind_state_if_eq subject="$subject" state="checked" ref_value="1"/>
       <bind_state_if_eq subject="$disabled" state="disabled" ref_value="$disabled_ref_value"/>
       <event_cb trigger="value_changed" callback="$callback"/>

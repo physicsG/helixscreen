@@ -17,6 +17,7 @@
 #include "format_utils.h"
 #include "hardware_validator.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "i18n_plural.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_state.h"
 #include "system_settings_manager.h"
@@ -160,11 +161,12 @@ TEST_CASE_METHOD(PrintSelectPanelFixture,
     drain();
 
     char want[64];
-    std::snprintf(want, sizeof(want), lv_tr("%u layers"), 50u);
+    std::snprintf(want, sizeof(want), helix::ui::tr_plural("1 layer", "%u layers", 50u), 50u);
     REQUIRE(std::string(want) != "50 layers");
     row = PrintSelectPanelTestAccess::find_file(*panel_, fetched.name());
     blank = PrintSelectPanelTestAccess::find_file(*panel_, pending.name());
     CHECK(row->layer_count_str == want);
+    CHECK(row->layer_count_str == "50 слоёв");
     CHECK(blank->layer_count_str.empty());
 
     SystemSettingsManager::instance().set_language("en");

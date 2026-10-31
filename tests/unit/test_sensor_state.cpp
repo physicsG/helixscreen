@@ -4,6 +4,11 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/update_queue_test_access.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+#include "printer_discovery.h"
+#include "printer_state.h"
 #include "sensor_state.h"
 
 #include "../catch_amalgamated.hpp"
@@ -69,19 +74,19 @@ TEST_CASE_METHOD(LVGLTestFixture, "SensorState tracks sensors", "[sensor_state]"
     }
 
     SECTION("get_sensor_info returns correct info") {
-        auto* info = state.get_sensor_info("tasmota_power");
-        REQUIRE(info != nullptr);
+        const auto info = state.get_sensor_info("tasmota_power");
+        REQUIRE(info.has_value());
         REQUIRE(info->friendly_name == "Tasmota Power Meter");
         REQUIRE(info->type == "MQTT");
         REQUIRE(info->value_keys.size() == 4);
 
-        auto* temp_info = state.get_sensor_info("temp_probe");
-        REQUIRE(temp_info != nullptr);
+        const auto temp_info = state.get_sensor_info("temp_probe");
+        REQUIRE(temp_info.has_value());
         REQUIRE(temp_info->friendly_name == "Chamber Probe");
         REQUIRE(temp_info->type == "DS18B20");
         REQUIRE(temp_info->value_keys.size() == 1);
 
-        REQUIRE(state.get_sensor_info("nonexistent") == nullptr);
+        REQUIRE_FALSE(state.get_sensor_info("nonexistent").has_value());
     }
 
     SECTION("re-discovery replaces sensors") {
@@ -143,4 +148,138 @@ TEST_CASE("SensorState format_value", "[sensor_state]") {
 
     // energy
     REQUIRE(SensorState::format_value("energy", 4250) == "42.5 kWh");
+}
+
+namespace {
+
+/// Mock API wired to a mock client, subscribed to notify_sensor_update.
+struct SensorStateFeed {
+    MoonrakerClientMock client{MoonrakerClientMock::PrinterType::VORON_24};
+    PrinterState printer_state;
+    std::unique_ptr<MoonrakerAPIMock> api;
+
+    SensorStateFeed() {
+        printer_state.init_subjects(false);
+        api = std::make_unique<MoonrakerAPIMock>(client, printer_state);
+        SensorState::instance().subscribe(*api);
+    }
+    ~SensorStateFeed() {
+        SensorState::instance().unsubscribe(*api);
+    }
+    void notify(const json& values) {
+        client.dispatch_method_callback(
+            "notify_sensor_update",
+            {{"method", "notify_sensor_update"}, {"params", json::array({values})}});
+    }
+    static void drain() {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    }
+};
+
+const std::vector<SensorInfo> kTwoMeters = {
+    {"meter_a", "Meter A", "INA219", {"power", "voltage"}},
+    {"meter_b", "Meter B", "MQTT", {"power"}},
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture, "SensorState applies notify_sensor_update on the main thread",
+                 "[sensor_state]") {
+    SensorStateFeed feed;
+    auto& state = SensorState::instance();
+    state.set_sensors(kTwoMeters);
+
+    SensorStateFeed::drain(); // set_sensors' own refresh must not mask the notify path
+    SubjectLifetime lt;
+    auto* power = state.get_value_subject("meter_a", "power", lt);
+    REQUIRE(power != nullptr);
+
+    feed.notify({{"meter_a", {{"power", 15.2}, {"voltage", 230.0}}}, {"ghost", {{"power", 1.0}}}});
+    CHECK(lv_subject_get_int(power) == 0);
+    SensorStateFeed::drain();
+    CHECK(lv_subject_get_int(power) == 1520);
+    CHECK(lv_subject_get_int(state.get_value_subject("meter_a", "voltage", lt)) == 23000);
+    CHECK(state.get_value_subject("ghost", "power", lt) == nullptr);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "SensorState notify after deinit is dropped", "[sensor_state]") {
+    SensorStateFeed feed;
+    auto& state = SensorState::instance();
+    state.set_sensors(kTwoMeters);
+
+    feed.notify({{"meter_a", {{"power", 99.0}}}});
+    state.deinit_subjects();
+    SensorStateFeed::drain();
+
+    CHECK(state.sensor_ids().empty());
+    SubjectLifetime lt;
+    CHECK(state.get_value_subject("meter_a", "power", lt) == nullptr);
+
+    state.set_sensors(kTwoMeters);
+    CHECK(lv_subject_get_int(state.get_value_subject("meter_a", "power", lt)) == 0);
+    SensorStateFeed::drain();
+    CHECK(lv_subject_get_int(state.get_value_subject("meter_a", "power", lt)) == 0);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "SensorState reconnect with fewer sensors removes their subjects",
+                 "[sensor_state]") {
+    auto& state = SensorState::instance();
+    state.set_sensors(kTwoMeters);
+
+    SubjectLifetime kept_lt;
+    SubjectLifetime gone_lt;
+    auto* kept = state.get_value_subject("meter_a", "power", kept_lt);
+    REQUIRE(kept != nullptr);
+    REQUIRE(state.get_value_subject("meter_b", "power", gone_lt) != nullptr);
+    REQUIRE(state.get_value_subject("meter_a", "voltage", kept_lt) != nullptr);
+    SubjectLifetime voltage_lt;
+    state.get_value_subject("meter_a", "voltage", voltage_lt);
+
+    state.set_sensors({{"meter_a", "Meter A", "INA219", {"power"}}});
+
+    CHECK(state.sensor_ids() == std::vector<std::string>{"meter_a"});
+    CHECK(state.sensor_count() == 1);
+    CHECK_FALSE(*gone_lt);
+    CHECK_FALSE(*voltage_lt);
+    SubjectLifetime lt;
+    CHECK(state.get_value_subject("meter_b", "power", lt) == nullptr);
+    CHECK(state.get_value_subject("meter_a", "voltage", lt) == nullptr);
+    CHECK(state.get_value_subject("meter_a", "power", lt) == kept);
+    CHECK_FALSE(state.get_sensor_info("meter_b").has_value());
+
+    state.deinit_subjects();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "SensorState set_sensors applies initial values at once",
+                 "[sensor_state]") {
+    auto& state = SensorState::instance();
+    state.set_sensors(kTwoMeters, {{"meter_a", {{"power", 15.2}, {"voltage", 230.1}}},
+                                   {"meter_b", {{"power", "n/a"}}}});
+
+    SubjectLifetime lt;
+    CHECK(lv_subject_get_int(state.get_value_subject("meter_a", "power", lt)) == 1520);
+    CHECK(lv_subject_get_int(state.get_value_subject("meter_a", "voltage", lt)) == 23010);
+    CHECK(lv_subject_get_int(state.get_value_subject("meter_b", "power", lt)) == 0);
+
+    state.deinit_subjects();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "SensorState is the last registry entry and ignores discover()",
+                 "[sensor_state][sensor_manager_base]") {
+    const auto& managers = helix::sensors::sensor_managers();
+    REQUIRE_FALSE(managers.empty());
+    CHECK(managers.back() == &SensorState::instance());
+
+    auto& state = SensorState::instance();
+    state.set_sensors(kTwoMeters);
+    helix::PrinterDiscovery hw;
+    state.discover(hw);
+    CHECK(state.sensor_count() == 2);
+    CHECK_FALSE(state.rediscovers_on_config());
+
+    state.deinit_subjects();
 }

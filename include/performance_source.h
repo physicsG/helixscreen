@@ -24,10 +24,12 @@ struct PerfSample {
     std::optional<float> host_cpu_pct;    ///< 0..100
     std::optional<float> host_cpu_temp_c; ///< °C
     std::optional<uint32_t> host_mem_free_mb;
-    std::optional<float> host_mem_pct_used; ///< 0..100
-    uint32_t host_throttle_bits = 0;        ///< Pi bitmask; 0 = no flags ever set
-    std::string host_throttle_text;         ///< empty unless bits != 0
-    std::vector<McuStat> mcus;              ///< sorted by name
+    std::optional<float> host_mem_pct_used;     ///< 0..100
+    std::optional<uint32_t> host_disk_total_mb; ///< gcodes disk, from a slow poll
+    std::optional<uint32_t> host_disk_free_mb;
+    uint32_t host_throttle_bits = 0; ///< Pi bitmask; 0 = no flags ever set
+    std::string host_throttle_text;  ///< empty unless bits != 0
+    std::vector<McuStat> mcus;       ///< sorted by name
 };
 
 /// Strategy interface — Moonraker in prod, /proc + synthetic in test/mock.
@@ -42,6 +44,10 @@ class IPerformanceSource {
 
     /// Stop and tear down (idempotent). Must be safe to call from main thread.
     virtual void stop() = 0;
+
+    /// Whether anything on screen shows the gcodes disk's free space. A source that must
+    /// spend a request to learn it reads it only while this is true.
+    virtual void set_disk_wanted(bool /*wanted*/) {}
 
     /// Set the on-main-thread callback that receives each sample.
     /// Sources are responsible for deferring bg-thread work to main via

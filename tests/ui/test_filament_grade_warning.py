@@ -24,8 +24,13 @@ one because a tool reaches a lane by colour match and then by POSITIONAL
 fallback over the file's whole palette -- the calibration cube's used tool is
 T2, so it lands on lane 3, not lane 1. See MOCK_ENVIRONMENT_VARIABLES.md.
 
+The cube is sliced for a centre-origin bed, which is the geometry the mock
+Voron models, so it passes the print-start fit check untouched. Each app here
+plants a fresh-mtime copy (HELIX_MOCK_GCODE_DIR); that makes it print-select
+card 0, and its metadata and tools are the cube's own.
+
 Mutation check (measured 2026-08-18, not assumed):
-  - VARIANT_AFFIXES[]: flip CF's `filled` column to false
+  - kVariantAffixes[]: flip CF's `filled` column to false
     -> both filled_lane tests fail, and they fail by the dialog never appearing
        at all: PLA-CF now reads as unfilled, grades_match() accepts the lane,
        and the print simply starts. test_matching_lane still passes, which is
@@ -53,11 +58,12 @@ from helix.app import HelixApp, HelixCtlError  # noqa: E402
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BINARY = Path(os.environ.get("HELIX_UI_BINARY", str(_REPO_ROOT / "build" / "bin" / "helix-screen")))
 
-# The print-select grid, whose card order conftest pins by normalizing fixture
-# mtimes. Card 0 is the calibration cube: single used tool, plain PLA.
+# The print-select grid, newest first. Card 0 is the planted copy of the
+# calibration cube (single used tool, plain PLA), newer than every pinned fixture.
 _CARD0 = ("s/app_layout_0/content_area/panel_container/print_select_panel"
           "/card_view_container/card_root[0]")
-_CARD0_NAME = "xyz-10mm-calibration-cube"
+_CARD0_NAME = "grade-cube-on-bed"
+_CUBE = _REPO_ROOT / "assets" / "test_gcodes" / "xyz-10mm-calibration-cube.gcode"
 # By name, not by path: the modal's screen index depends on how many screens
 # the instance has created, so an "s/5/..." path is per-instance and breaks the
 # moment a test boots its own app.
@@ -66,16 +72,36 @@ _DIALOG_MESSAGE = "dialog_message"
 _DIALOG_PRIMARY = "btn_primary"
 
 
+def _plant_cube_on_bed(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    text = _CUBE.read_text(encoding="utf-8", errors="surrogateescape")
+    planted = directory / f"{_CARD0_NAME}.gcode"
+    planted.write_text(text, encoding="utf-8", errors="surrogateescape")
+    return planted
+
+
+def _app_with_the_planted_cube(tmp_path, extra_env: dict[str, str]):
+    if not _BINARY.exists():
+        pytest.skip(f"{_BINARY} not built - run `make -j`")
+    gcode_dir = tmp_path / "gcodes"
+    _plant_cube_on_bed(gcode_dir)
+    return HelixApp(binary=_BINARY,
+                    socket_path=tmp_path / "control.sock",
+                    log_path=tmp_path / "app.log",
+                    extra_env={"HELIX_MOCK_GCODE_DIR": str(gcode_dir), **extra_env})
+
+
 @pytest.fixture
 def filled_lane_app(tmp_path):
     """An instance whose every AMS lane holds PLA-CF."""
-    if not _BINARY.exists():
-        pytest.skip(f"{_BINARY} not built - run `make -j`")
-    app = HelixApp(binary=_BINARY,
-                   socket_path=tmp_path / "control.sock",
-                   log_path=tmp_path / "app.log",
-                   extra_env={"HELIX_MOCK_AMS_STATE": "grade"})
-    with app:
+    with _app_with_the_planted_cube(tmp_path, {"HELIX_MOCK_AMS_STATE": "grade"}) as app:
+        yield app
+
+
+@pytest.fixture
+def default_lane_app(tmp_path):
+    """An instance with the default mock lanes, which hold plain filament."""
+    with _app_with_the_planted_cube(tmp_path, {}) as app:
         yield app
 
 
@@ -130,8 +156,8 @@ def _tap_print_on_the_pla_cube(app) -> None:
     app.wait_idle()
     shown = app.text(f"{_CARD0}/metadata_overlay/filename_label")
     assert shown == _CARD0_NAME, (
-        f"print-select card 0 is {shown!r}, not the plain-PLA fixture these tests "
-        "drive; conftest's mtime pinning may have changed")
+        f"print-select card 0 is {shown!r}, not the planted plain-PLA cube these "
+        "tests drive; HELIX_MOCK_GCODE_DIR may not have reached the mock")
     app.click(_CARD0)
     app.wait_idle()
     # The filament card is the observable end of the metadata load the gates read.
@@ -167,9 +193,9 @@ def test_filled_lane_still_maps_and_the_warning_is_click_through(filled_lane_app
     assert filled_lane_app.text(_DIALOG_PRIMARY) == "Start Anyway"
 
 
-def test_matching_lane_shows_no_grade_dialog(helix_app):
+def test_matching_lane_shows_no_grade_dialog(default_lane_app):
     """The default mock's lanes hold plain filament: no grade dialog."""
-    _tap_print_on_the_pla_cube(helix_app)
+    _tap_print_on_the_pla_cube(default_lane_app)
 
     # This fixture does raise the ordinary material dialog against the default
     # lanes (the cube's used tool falls through to an ASA lane), which is the
@@ -177,4 +203,4 @@ def test_matching_lane_shows_no_grade_dialog(helix_app):
     # Asserted as an equality rather than "not the grade title": a dialog that
     # failed to appear, or a stale one left by another test, would satisfy the
     # negative form.
-    assert helix_app.text(_DIALOG_TITLE) == "Material Mismatch"
+    assert default_lane_app.text(_DIALOG_TITLE) == "Material Mismatch"

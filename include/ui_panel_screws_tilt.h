@@ -14,8 +14,8 @@
 
 namespace helix {
 class IMoonrakerClient;
-}
 class IMoonrakerAPI;
+} // namespace helix
 
 /**
  * @file ui_panel_screws_tilt.h
@@ -119,7 +119,7 @@ class ScrewsTiltPanel : public OverlayBase {
      * @param client Moonraker client for sending commands
      * @param api Moonraker API for calculate_screws_tilt()
      */
-    void set_client(helix::IMoonrakerClient* client, IMoonrakerAPI* api) {
+    void set_client(helix::IMoonrakerClient* client, helix::IMoonrakerAPI* api) {
         client_ = client;
         api_ = api;
     }
@@ -174,6 +174,7 @@ class ScrewsTiltPanel : public OverlayBase {
     void populate_results(const std::vector<ScrewTiltResult>& results);
     void clear_results();
     void update_screw_diagram();
+    void create_tilt_surface();
     void create_screw_indicator(size_t index, const ScrewTiltResult& screw, bool in_spec,
                                 bool is_worst);
     [[nodiscard]] lv_color_t get_adjustment_color(const ScrewTiltResult& screw, bool in_spec,
@@ -191,11 +192,14 @@ class ScrewsTiltPanel : public OverlayBase {
     // Widget references
     // Note: overlay_root_ inherited from OverlayBase
     helix::IMoonrakerClient* client_ = nullptr;
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     // Results UI elements
     lv_obj_t* bed_diagram_container_ = nullptr;
     lv_obj_t* results_instruction_ = nullptr;
+
+    // Bed surface shaded by height, beneath the indicators
+    lv_obj_t* tilt_surface_ = nullptr;
 
     // Dynamic screw indicators (bed diagram only - positions vary)
     std::vector<lv_obj_t*> screw_indicators_;
@@ -204,30 +208,33 @@ class ScrewsTiltPanel : public OverlayBase {
     std::array<lv_obj_t*, 4> screw_dots_ = {nullptr, nullptr, nullptr, nullptr};
 
     // Subjects for reactive screw list (4 slots max)
-    static constexpr size_t MAX_SCREWS = 4;
-    static constexpr size_t SCREW_NAME_BUF_SIZE = 32;
-    static constexpr size_t SCREW_ADJ_BUF_SIZE = 24; // "Tighten ¼ turn" etc.
+    static constexpr size_t kMaxScrews = 4;
+    static constexpr size_t kScrewNameBufSize = 32;
+    static constexpr size_t kScrewAdjBufSize = 24; // "Tighten ¼ turn" etc.
 
-    std::array<lv_subject_t, MAX_SCREWS> screw_visible_subjects_{};
-    std::array<lv_subject_t, MAX_SCREWS> screw_name_subjects_{};
-    std::array<lv_subject_t, MAX_SCREWS> screw_adjustment_subjects_{};
+    std::array<lv_subject_t, kMaxScrews> screw_visible_subjects_{};
+    std::array<lv_subject_t, kMaxScrews> screw_name_subjects_{};
+    std::array<lv_subject_t, kMaxScrews> screw_adjustment_subjects_{};
 
     // Fixed char arrays for string subjects (LVGL requires stable buffers)
-    char screw_name_bufs_[MAX_SCREWS][SCREW_NAME_BUF_SIZE] = {};
-    char screw_adj_bufs_[MAX_SCREWS][SCREW_ADJ_BUF_SIZE] = {};
+    char screw_name_bufs_[kMaxScrews][kScrewNameBufSize] = {};
+    char screw_adj_bufs_[kMaxScrews][kScrewAdjBufSize] = {};
 
     // Subjects for status labels
-    static constexpr size_t PROBE_COUNT_BUF_SIZE = 64;
-    static constexpr size_t ERROR_MSG_BUF_SIZE = 256;
+    static constexpr size_t kProbeCountBufSize = 64;
+    static constexpr size_t kErrorMsgBufSize = 256;
     lv_subject_t probe_count_subject_{};
     lv_subject_t error_message_subject_{};
     lv_subject_t recenter_hint_subject_{};   ///< Alternative that turns fewer screws
     lv_subject_t recenter_hint_available_{}; ///< 1 when the hint is worth showing
     lv_subject_t results_is_leveled_subject_{};
-    char probe_count_buf_[PROBE_COUNT_BUF_SIZE] = {};
-    char error_message_buf_[ERROR_MSG_BUF_SIZE] = {};
-    static constexpr size_t RECENTER_HINT_BUF_SIZE = 160;
-    char recenter_hint_buf_[RECENTER_HINT_BUF_SIZE] = {};
+    lv_subject_t tilt_spread_subject_{}; ///< "Corners differ by 0.23 mm"
+    static constexpr size_t kTiltSpreadBufSize = 64;
+    char tilt_spread_buf_[kTiltSpreadBufSize] = {};
+    char probe_count_buf_[kProbeCountBufSize] = {};
+    char error_message_buf_[kErrorMsgBufSize] = {};
+    static constexpr size_t kRecenterHintBufSize = 160;
+    char recenter_hint_buf_[kRecenterHintBufSize] = {};
 
     // Screw data
     std::vector<ScrewTiltResult> screw_results_;
@@ -236,7 +243,7 @@ class ScrewsTiltPanel : public OverlayBase {
     ScrewLevelReport level_report_;
 
     /// Bed screw pitch from configfile; Klipper's M3 default until the query lands.
-    float screw_pitch_mm_ = SCREW_PITCH_DEFAULT_MM;
+    float screw_pitch_mm_ = kScrewPitchDefaultMm;
 
     // Tracking
     int probe_count_ = 0;
@@ -248,6 +255,11 @@ class ScrewsTiltPanel : public OverlayBase {
 // Global instance accessor
 // Defined out of line: the ESP32 build, which excludes this panel, supplies its own.
 ScrewsTiltPanel& get_global_screws_tilt_panel();
+
+/// Open the Screws Tilt panel over @p parent_screen, wired to the active API.
+namespace helix::ui {
+void open_screws_tilt_panel(lv_obj_t* parent_screen);
+} // namespace helix::ui
 
 /**
  * @brief Register XML event callbacks for screws tilt panel

@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  Pressure-advance tuner tokens. The -/+ buttons are the screen's whole point
+  during a print: big enough to hit without looking away from the tower.
+-->
+<component>
+  <consts>
+    <px name="pa_tune_nudge_w_micro" value="72"/>
+    <px name="pa_tune_nudge_w_tiny" value="88"/>
+    <px name="pa_tune_nudge_w_small" value="100"/>
+    <px name="pa_tune_nudge_w_medium" value="140"/>
+    <px name="pa_tune_nudge_w_large" value="160"/>
+    <px name="pa_tune_nudge_w_xlarge" value="180"/>
+
+    <px name="pa_tune_nudge_h_micro" value="56"/>
+    <px name="pa_tune_nudge_h_tiny" value="72"/>
+    <px name="pa_tune_nudge_h_small" value="88"/>
+    <px name="pa_tune_nudge_h_medium" value="120"/>
+    <px name="pa_tune_nudge_h_large" value="140"/>
+    <px name="pa_tune_nudge_h_xlarge" value="160"/>
+  </consts>
+</component>

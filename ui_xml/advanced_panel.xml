@@ -28,9 +28,9 @@
        container runs no layout at all and all three buttons land on top of
        each other at the same y. -->
   <styles>
-    <style name="estop_bar_row" layout="flex" flex_flow="row"/>
+    <style name="estop_bar_row" layout="flex" flex_flow="row_wrap"/>
     <style name="estop_bar_column" layout="flex" flex_flow="column"/>
-    <style name="estop_btn_inline" flex_grow="1"/>
+    <style name="estop_btn_inline" flex_grow="1" min_width="content" pad_hor="#space_sm"/>
     <style name="estop_btn_stacked" width="100%" flex_grow="0"/>
   </styles>
   <view name="advanced_panel"
@@ -64,11 +64,19 @@
                             label="Print History" icon="clock" description="View print statistics and job history">
           <event_cb trigger="clicked" callback="on_history_row_clicked"/>
         </setting_action_row>
+        <!-- Notification History: the way in when no bell widget is on the home screen -->
+        <lv_obj name="container_notification_history" width="100%" style_pad_all="0" scrollable="false">
+          <bind_flag_if_eq subject="advanced_show_notification_history" flag="hidden" ref_value="0"/>
+          <setting_action_row name="row_notification_history"
+                              label="Notification History" icon="notifications" description="Alerts and printer events">
+            <event_cb trigger="clicked" callback="status_notification_history_clicked"/>
+          </setting_action_row>
+        </lv_obj>
         <!-- Spoolman (hidden if not connected) -->
         <lv_obj name="container_spoolman" width="100%" style_pad_all="0" scrollable="false">
           <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="0"/>
           <setting_action_row name="row_spoolman"
-                              label="Spoolman" icon="inventory" description="Filament tracking and inventory">
+                              label="Spoolman" icon="spoolman" description="Filament tracking and inventory">
             <event_cb trigger="clicked" callback="on_advanced_spoolman"/>
           </setting_action_row>
         </lv_obj>
@@ -83,7 +91,7 @@
         <!-- Fallback message when Spoolman not available -->
         <lv_obj name="container_no_spoolman" width="100%" style_pad_all="0" scrollable="false">
           <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="1"/>
-          <setting_info_row name="row_no_spoolman" label="Spoolman" icon="inventory" value="Not configured"/>
+          <setting_info_row name="row_no_spoolman" label="Spoolman" icon="spoolman" value="Not configured"/>
         </lv_obj>
       </setting_group>
       <!-- ================================================================== -->
@@ -124,8 +132,15 @@
           </setting_action_row>
         </lv_obj>
 
+        <!-- HelixPrint Plugin overview: what the installed plugin runs -->
+        <setting_action_row name="row_helix_plugin_overview"
+                            label="HelixPrint Plugin" icon="puzzle_outline"
+                            description="Version and what the plugin runs">
+          <bind_flag_if_not_eq subject="helix_plugin_installed" flag="hidden" ref_value="1"/>
+          <event_cb trigger="clicked" callback="on_helix_plugin_overview_clicked"/>
+        </setting_action_row>
         <!-- HelixPrint Plugin (INSTALLED - show Uninstall row) -->
-        <!-- Shows ONLY when value == 1 (installed), hidden otherwise (-1 or 0) -->
+        <!-- Shows ONLY when value == 1 (installed and enabled), hidden otherwise (-1 or 0) -->
         <lv_obj name="container_helix_plugin_uninstall"
                 width="100%" height="content" style_pad_top="0" style_pad_left="0" style_pad_bottom="0"
                 scrollable="false">
@@ -205,27 +220,36 @@
           <bind_flag_if_eq subject="printer_has_pa_cal" flag="hidden" ref_value="0"/>
           <event_cb trigger="clicked" callback="on_calibration_pa"/>
         </setting_action_row>
-        <!-- Tool Offsets (tool changers with the calibration macro only) -->
-        <beta_feature>
-          <setting_action_row name="row_tool_offsets"
-                              label="Tool Offsets" icon="axis_arrow"
-                              description="Measure every tool's XYZ offset automatically">
-            <bind_flag_if_eq subject="printer_has_tool_offset_cal" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="on_tool_offset_row_clicked"/>
-          </setting_action_row>
-        </beta_feature>
+        <!-- Pressure advance tuned by eye on a live test print: any Klipper extruder -->
+        <setting_action_row name="row_pa_tuning"
+                            label="Pressure Advance Tuning" icon="gauge"
+                            description="Print a test tower and tune K by eye">
+          <event_cb trigger="clicked" callback="on_pa_tuning_clicked"/>
+        </setting_action_row>
+        <!-- Tool Offsets (printers with a tool offset calibration) -->
+        <setting_action_row name="row_tool_offsets"
+                            label="Tool Offsets" icon="axis_arrow"
+                            bind_description="printer_tool_offset_cal_description">
+          <bind_flag_if_eq subject="printer_has_tool_offset_cal" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="on_tool_offset_row_clicked"/>
+        </setting_action_row>
+        <!-- Vertical Artifact Compensation (firmwares with a stepper resonance
+             calibration; helix::stepper_resonance_cal decides) -->
+        <setting_action_row name="row_stepper_resonance_cal"
+                            label="Vertical Artifact Compensation" icon="sine_wave"
+                            description="Tune the motors to remove fine vertical lines">
+          <bind_flag_if_eq subject="printer_has_stepper_resonance_cal" flag="hidden" ref_value="0"/>
+          <event_cb trigger="clicked" callback="on_stepper_resonance_cal_clicked"/>
+        </setting_action_row>
         <!-- Belt Tension (hidden if no accelerometer) -->
-        <beta_feature>
-          <setting_action_row name="row_belt_tension"
-                              label="Belt Tension" icon="vibrate"
-                              description="Compare belt paths with a resonance sweep">
-            <!-- One binding, both conditions (two flag bindings on a widget
-                 fight): an accelerometer, and a kinematics whose two diagonals
-                 are the two belt paths (corexy, limited_corexy). -->
-            <bind_flag_if cond="printer_has_accelerometer eq 0 or printer_supports_belt_compare eq 0" flag="hidden"/>
-            <event_cb trigger="clicked" callback="on_belt_tension_row_clicked"/>
-          </setting_action_row>
-        </beta_feature>
+        <setting_action_row name="row_belt_tension"
+                            label="Belt Tension" icon="vibrate" description="Compare belt paths with a resonance sweep">
+          <!-- One binding, both conditions (two flag bindings on a widget
+               fight): an accelerometer, and a kinematics whose two diagonals
+               are the two belt paths (corexy, limited_corexy). -->
+          <bind_flag_if cond="printer_has_accelerometer eq 0 or printer_supports_belt_compare eq 0" flag="hidden"/>
+          <event_cb trigger="clicked" callback="on_belt_tension_row_clicked"/>
+        </setting_action_row>
         <!-- Probe Management (hidden if no probe) -->
         <setting_action_row name="row_probe"
                             label="Probe Management" icon="target"
@@ -240,9 +264,8 @@
                needs a probe, and steps aside for automatic tool offset
                calibration only where the database says that routine covers
                the reference tool's Z too (see the same bind in
-               controls_panel.xml), but only while that beta screen is
-               actually shown, or turning beta features off would hide both. -->
-          <bind_flag_if cond="printer_has_probe eq 0 or (printer_has_tool_offset_cal eq 1 and show_beta_features eq 1 and hide_manual_z_calibration eq 1)"
+               controls_panel.xml). -->
+          <bind_flag_if cond="printer_has_probe eq 0 or (printer_has_tool_offset_cal eq 1 and hide_manual_z_calibration eq 1)"
                         flag="hidden"/>
           <event_cb trigger="clicked" callback="on_zoffset_row_clicked"/>
         </setting_action_row>
@@ -298,7 +321,7 @@
         <event_cb trigger="clicked" callback="advanced_restart_klipper_clicked"/>
       </ui_button>
       <ui_button name="advanced_firmware_restart_btn"
-                 height="#button_height_sm" icon="update" text="Firmware Restart" variant="secondary">
+                 height="#button_height_sm" icon="cog_refresh" text="Firmware Restart" variant="secondary">
         <bind_style_if name="estop_btn_stacked" cond="ui_is_portrait"/>
         <bind_style_if name="estop_btn_inline" cond="ui_is_portrait" invert="true"/>
         <event_cb trigger="clicked" callback="advanced_firmware_restart_clicked"/>

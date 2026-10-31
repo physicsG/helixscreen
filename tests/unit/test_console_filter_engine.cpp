@@ -17,7 +17,7 @@ namespace {
 // Real samples captured from a Creality K2 Plus running stock firmware (Apr 2026).
 // These are the format strings emitted by motor_control_wrapper.cpython-39.so via
 // gcode.respond_info() — Klipper prepends "// " when broadcasting on the GCode console.
-constexpr const char* K2_NOISE_SAMPLES[] = {
+constexpr const char* kK2NoiseSamples[] = {
     "// data_send:b'\\x83\\x05\\x00\\x06\\x02F' "
     "recv_result:b'\\xf7\\x83\\x07\\x00\\x06\\x00\\x00\\x96C\\t'",
     "// "
@@ -31,7 +31,7 @@ constexpr const char* K2_NOISE_SAMPLES[] = {
 };
 
 // Lines that must NEVER be filtered (real GCode responses).
-constexpr const char* GCODE_KEEP_SAMPLES[] = {
+constexpr const char* kGcodeKeepSamples[] = {
     "ok",
     "ok T:210.0 /210.0 B:60.0 /60.0",
     "// probe at 50.000,50.000 is z=0.123",
@@ -106,7 +106,7 @@ TEST_CASE("ConsoleFilter: remove drops only exact (type, text) match", "[console
 
 TEST_CASE("ConsoleFilter: empty engine never filters", "[console_filter]") {
     ConsoleFilterEngine eng;
-    for (const char* line : K2_NOISE_SAMPLES) {
+    for (const char* line : kK2NoiseSamples) {
         CHECK_FALSE(eng.should_filter(line));
     }
 }
@@ -153,7 +153,7 @@ TEST_CASE("ConsoleFilter: K2 firmware-noise preset suppresses all known samples"
     // with "// sys" + Chinese characters that the firmware uses for these messages.
     eng.add("prefix:// sys\xe5\x8f\x82\xe6\x95\xb0\xe6\x93\x8d\xe4\xbd\x9c");
 
-    for (const char* sample : K2_NOISE_SAMPLES) {
+    for (const char* sample : kK2NoiseSamples) {
         INFO("sample: " << sample);
         CHECK(eng.should_filter(sample));
     }
@@ -167,7 +167,7 @@ TEST_CASE("ConsoleFilter: K2 preset never suppresses real GCode responses",
     eng.add("prefix:// send float_bytes:");
     eng.add("prefix:// sys\xe5\x8f\x82\xe6\x95\xb0\xe6\x93\x8d\xe4\xbd\x9c");
 
-    for (const char* line : GCODE_KEEP_SAMPLES) {
+    for (const char* line : kGcodeKeepSamples) {
         INFO("line: " << line);
         CHECK_FALSE(eng.should_filter(line));
     }
@@ -203,7 +203,7 @@ ConsoleFilterEngine shipped_engine_for(const char* printer_name) {
 TEST_CASE("ConsoleFilter: shipped K2 preset filters all known noise samples",
           "[console_filter][k2][preset]") {
     ConsoleFilterEngine eng = shipped_engine_for("Creality K2 Plus");
-    for (const char* sample : K2_NOISE_SAMPLES) {
+    for (const char* sample : kK2NoiseSamples) {
         INFO("sample: " << sample);
         CHECK(eng.should_filter(sample));
     }
@@ -212,7 +212,7 @@ TEST_CASE("ConsoleFilter: shipped K2 preset filters all known noise samples",
 TEST_CASE("ConsoleFilter: shipped K2 preset preserves real GCode responses",
           "[console_filter][k2][preset]") {
     ConsoleFilterEngine eng = shipped_engine_for("Creality K2 Plus");
-    for (const char* line : GCODE_KEEP_SAMPLES) {
+    for (const char* line : kGcodeKeepSamples) {
         INFO("line: " << line);
         CHECK_FALSE(eng.should_filter(line));
     }

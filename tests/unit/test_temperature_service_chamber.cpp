@@ -3,9 +3,10 @@
 
 /**
  * @file test_temperature_service_chamber.cpp
- * @brief The filament mini graph charts the chamber sensor PrinterState resolved.
+ * @brief The filament mini graph charts the chamber sensor PrinterState resolved,
+ *        and each heater's display text renders an unset target as "—".
  *
- * The rule itself is pinned in test_chamber_heater_assignment.cpp.
+ * The chamber sensor rule itself is pinned in test_chamber_heater_assignment.cpp.
  */
 
 #include "../lvgl_test_fixture.h"
@@ -21,6 +22,7 @@
 
 #include <initializer_list>
 #include <memory>
+#include <string>
 
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
@@ -101,4 +103,31 @@ TEST_CASE_METHOD(LVGLTestFixture,
         CHECK(graph.series_id_for("temperature_sensor chamber") != SeriesId::None);
         CHECK(graph.series_id_for("temperature_sensor box") == SeriesId::None);
     }
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "TemperatureService: an unset target reads as a dash from the first frame",
+                 "[temperature_service][temp_format]") {
+    MiniGraphHarness h;
+    h.service->init_subjects();
+
+    for (auto type :
+         {helix::HeaterType::Nozzle, helix::HeaterType::Bed, helix::HeaterType::Chamber}) {
+        auto& heater = h.service->heater(type);
+        const std::string initial = lv_subject_get_string(&heater.display_subject);
+        CHECK(initial.find("—") != std::string::npos);
+        CHECK(initial.find("/ 0") == std::string::npos);
+
+        // The first update must not change the text for the same state: init and
+        // update render through one formatter.
+        h.service->set_heater(type, heater.current, heater.target);
+        CHECK(std::string(lv_subject_get_string(&heater.display_subject)) == initial);
+    }
+
+    h.service->set_heater(helix::HeaterType::Nozzle, 2100, 0);
+    CHECK(std::string(lv_subject_get_string(
+              &h.service->heater(helix::HeaterType::Nozzle).display_subject)) == "210 / —");
+    h.service->set_heater(helix::HeaterType::Nozzle, 2100, 2150);
+    CHECK(std::string(lv_subject_get_string(
+              &h.service->heater(helix::HeaterType::Nozzle).display_subject)) == "210 / 215");
 }

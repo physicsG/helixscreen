@@ -127,8 +127,8 @@ bool heap_snapshot_age_is_plausible(long age_ms, int uptime_sec) {
     }
     // uptime is truncated to whole seconds, so allow a couple of seconds of
     // slack before calling an age impossible.
-    constexpr long SLACK_MS = 2000;
-    return age_ms <= static_cast<long>(uptime_sec) * 1000 + SLACK_MS;
+    constexpr long kSlackMs = 2000;
+    return age_ms <= static_cast<long>(uptime_sec) * 1000 + kSlackMs;
 }
 
 // =============================================================================
@@ -187,6 +187,7 @@ CrashReporter::CrashReport CrashReporter::collect_report() {
     report.signal_name = crash_data.value("signal_name", "UNKNOWN");
     report.app_version = crash_data.value("app_version", "unknown");
     report.timestamp = crash_data.value("timestamp", "");
+    report.recorded_by = crash_data.value("recorded_by", "");
     report.uptime_sec = crash_data.value("uptime_sec", 0);
 
     if (crash_data.contains("exception"))
@@ -326,6 +327,7 @@ CrashReporter::CrashReport CrashReporter::collect_report() {
     report.platform = diag.identity.platform_key;
     report.printer_model = diag.identity.printer_model;
     report.mod_flavor = diag.identity.mod_flavor;
+    report.board = diag.identity.board;
     report.config_dir = diag.paths.config_dir;
     report.cache_dir = diag.paths.cache_dir;
     report.cache_tier = diag.paths.cache_tier;
@@ -412,6 +414,9 @@ nlohmann::json CrashReporter::report_to_json(const CrashReport& report) {
     j["signal_name"] = report.signal_name;
     j["app_version"] = report.app_version;
     j["timestamp"] = report.timestamp;
+    if (!report.recorded_by.empty()) {
+        j["recorded_by"] = report.recorded_by;
+    }
     j["uptime_seconds"] = report.uptime_sec;
     j["backtrace"] = report.backtrace;
     j["platform"] = report.platform;
@@ -421,6 +426,7 @@ nlohmann::json CrashReporter::report_to_json(const CrashReport& report) {
     j["ram_mb"] = report.ram_total_mb;
     j["cpu_cores"] = report.cpu_cores;
     j["mod_flavor"] = report.mod_flavor;
+    j["board"] = report.board;
     // Paths can embed a username, and this JSON reaches a public GitHub issue,
     // so they pass through the same redaction the debug bundle applies to the
     // same values; the local text report keeps them raw.
@@ -580,6 +586,9 @@ std::string CrashReporter::report_to_text(const CrashReport& report) {
     ss << "Version:   " << report.app_version << "\n";
     ss << "Timestamp: " << report.timestamp << "\n";
     ss << "Uptime:    " << report.uptime_sec << " seconds\n";
+    if (!report.recorded_by.empty()) {
+        ss << "Recorded:  by the " << report.recorded_by << " (no backtrace)\n";
+    }
     if (!report.exception_what.empty()) {
         ss << "Exception: " << report.exception_what << "\n";
     }
@@ -649,7 +658,7 @@ std::string CrashReporter::report_to_text(const CrashReport& report) {
     }
 
     ss << "--- System Info ---\n";
-    ss << "Platform:  " << report.platform << "\n";
+    ss << "Platform:  " << report.platform << " / " << report.board << "\n";
     ss << "Mod:       " << report.mod_flavor << "\n";
     ss << "RAM:       " << report.ram_total_mb << " MB\n";
     ss << "CPU Cores: " << report.cpu_cores << "\n";
@@ -725,8 +734,12 @@ std::string CrashReporter::generate_github_url(const CrashReport& report) {
     body << "## Crash Summary\n";
     body << "- **Signal:** " << report.signal << " (" << report.signal_name << ")\n";
     body << "- **Version:** " << report.app_version << "\n";
-    body << "- **Platform:** " << report.platform << " (" << report.mod_flavor << ")\n";
+    body << "- **Platform:** " << report.platform << " / " << report.board << " ("
+         << report.mod_flavor << ")\n";
     body << "- **Uptime:** " << report.uptime_sec << "s\n";
+    if (!report.recorded_by.empty()) {
+        body << "- **Recorded by:** " << report.recorded_by << " (no backtrace)\n";
+    }
     if (!report.exception_what.empty()) {
         body << "- **Exception:** " << report.exception_what << "\n";
     }
@@ -935,7 +948,7 @@ const char* crash_worker_url() {
     if (const char* u = std::getenv("HELIX_CRASH_WORKER_URL")) {
         return u;
     }
-    return CrashReporter::CRASH_WORKER_URL;
+    return CrashReporter::kCrashWorkerUrl;
 }
 
 } // namespace

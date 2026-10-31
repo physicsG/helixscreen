@@ -1,27 +1,28 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# EGL link — the GPU presentation rung
+# EGL presentation path — the GPU rung, linked into the DRM binary
 #
-# Included when ENABLE_EGL_RUNG=yes. Produces a third binary beside the DRM and
-# fbdev ones:
+# Included when ENABLE_EGL_RUNG=yes. The DRM binary $(TARGET) carries LVGL's
+# two DRM drivers side by side, and the app picks one at startup:
 #
-#   helix-screen-egl    LVGL presents through EGL/GBM on the GPU
-#   helix-screen        LVGL presents into DRM dumb buffers            (default)
-#   helix-screen-fbdev  LVGL presents into /dev/fb0
+#   HELIX_DISPLAY_BACKEND=egl   LVGL presents through EGL/GBM on the GPU
+#   HELIX_DISPLAY_BACKEND=drm   LVGL presents into DRM dumb buffers  (default)
 #
-# scripts/helix-launcher.sh picks between them at boot by running
-# `helix-screen-egl --probe-egl`, which exits 0 only on real GPU hardware.
+# scripts/helix-launcher.sh chooses between them at boot by running
+# `helix-screen --probe-egl`, which exits 0 only on real GPU hardware.
 #
-# Only a few translation units read the EGL config macros, so this links the
-# DRM build's objects and recompiles just those. The app, the widgets and all
-# of LVGL's core are byte-identical between the two configurations: nothing
-# outside src/api/display_backend_drm.cpp and LVGL's own drivers references
-# LV_USE_OPENGLES, LV_LINUX_DRM_USE_EGL or LV_USE_EGL.
+# Which driver LVGL compiles is a config macro, so the EGL one is a second
+# compile of the few translation units that read it: LVGL's DRM and OpenGL ES
+# drivers and src/api/display_backend_drm.cpp. Nothing else under src/,
+# include/ or LVGL's core references LV_USE_OPENGLES, LV_LINUX_DRM_USE_EGL or
+# LV_USE_EGL, so the rest of the binary is shared.
 #
-# Build output:
-#   $(BIN_DIR)/helix-screen-egl
-
-EGL_TARGET := $(BIN_DIR)/helix-screen-egl
+# The two compiles define four of the same public LVGL functions. The EGL
+# compile renames its copies (EGL_SYMBOL_RENAMES) in the driver and in the
+# backend that calls them alike, so each backend binds to its own driver.
+# DisplayBackendDRM sits in an inline namespace chosen by the same macro
+# (include/display_backend_drm.h), and the EGL one is reached only through
+# make_drm_egl_backend().
 
 EGL_VARIANT_DIR := $(BUILD_DIR)/egl-variant
 EGL_LVGL_VARIANT_DIR := $(EGL_VARIANT_DIR)/lvgl
@@ -31,9 +32,17 @@ EGL_LVGL_VARIANT_DIR := $(EGL_VARIANT_DIR)/lvgl
 # that — so setting either of those directly does nothing.
 EGL_DEFINE := -DHELIX_ENABLE_OPENGLES
 
-EGL_APP_CXXFLAGS := $(CXXFLAGS) $(EGL_DEFINE)
-EGL_LVGL_CFLAGS := $(SUBMODULE_CFLAGS) $(EGL_DEFINE)
-EGL_LVGL_CXXFLAGS := $(SUBMODULE_CXXFLAGS) -fpermissive $(EGL_DEFINE)
+# Every public function both DRM drivers define. A fifth one makes the link
+# fail with a duplicate definition, which is the cue to add it here.
+EGL_SYMBOL_RENAMES := \
+    -Dlv_linux_drm_create=lv_linux_drm_egl_create \
+    -Dlv_linux_drm_set_file=lv_linux_drm_egl_set_file \
+    -Dlv_linux_drm_set_mode_cb=lv_linux_drm_egl_set_mode_cb \
+    -Dlv_linux_drm_get_fd=lv_linux_drm_egl_get_fd
+
+EGL_APP_CXXFLAGS := $(CXXFLAGS) $(EGL_DEFINE) $(EGL_SYMBOL_RENAMES)
+EGL_LVGL_CFLAGS := $(SUBMODULE_CFLAGS) $(EGL_DEFINE) $(EGL_SYMBOL_RENAMES)
+EGL_LVGL_CXXFLAGS := $(SUBMODULE_CXXFLAGS) -fpermissive $(EGL_DEFINE) $(EGL_SYMBOL_RENAMES)
 
 # =============================================================================
 # LVGL driver objects that change with the config
@@ -51,10 +60,13 @@ EGL_LVGL_VARIANT_SRCS := $(filter-out $(EGL_LVGL_SHADER_SRC), \
 EGL_LVGL_VARIANT_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(EGL_LVGL_VARIANT_DIR)/%.o,$(EGL_LVGL_VARIANT_SRCS))
 EGL_LVGL_SHADER_OBJ := $(EGL_LVGL_VARIANT_DIR)/src/drivers/opengles/assets/lv_opengles_shader.o
 
-# The base-build objects these replace.
-EGL_LVGL_REPLACED := $(patsubst $(LVGL_DIR)/%.c,$(OBJ_DIR)/lvgl/%.o, \
-    $(EGL_LVGL_VARIANT_SRCS) $(EGL_LVGL_SHADER_SRC))
-EGL_LVGL_OBJS := $(filter-out $(EGL_LVGL_REPLACED),$(LVGL_OBJS))
+# The dumb-buffer driver and the shared mode helpers come from the base build.
+# Their EGL compiles are an empty translation unit and a duplicate of the base
+# object, so neither is linked.
+EGL_LVGL_LINKED_OBJS := $(EGL_LVGL_SHADER_OBJ) $(filter-out \
+    $(EGL_LVGL_VARIANT_DIR)/src/drivers/display/drm/lv_linux_drm.o \
+    $(EGL_LVGL_VARIANT_DIR)/src/drivers/display/drm/lv_linux_drm_common.o, \
+    $(EGL_LVGL_VARIANT_OBJS))
 
 $(EGL_LVGL_VARIANT_DIR)/%.o: $(LVGL_DIR)/%.c lv_conf.h $(PATCHES_STAMP) $(ABI_STAMP) | $(PATCH_MARKER_STAMP)
 	$(Q)mkdir -p $(dir $@)
@@ -75,12 +87,10 @@ $(EGL_LVGL_SHADER_OBJ): $(EGL_LVGL_SHADER_SRC) lv_conf.h $(PATCHES_STAMP) $(ABI_
 # App objects that change with the config
 # =============================================================================
 # display_backend_drm.cpp is the whole list: it is the only file under src/ or
-# include/ that reads an EGL config macro. It guards the dumb-buffer-only entry
-# points, which do not exist once the EGL driver is the one compiled.
+# include/ that reads an EGL config macro. The base build's compile of it stays
+# in the link as the dumb-buffer backend.
 
 EGL_APP_VARIANT_OBJS := $(EGL_VARIANT_DIR)/display_backend_drm.o
-EGL_APP_REPLACED := $(OBJ_DIR)/api/display_backend_drm.o
-EGL_APP_OBJS := $(filter-out $(EGL_APP_REPLACED),$(APP_OBJS))
 
 $(EGL_VARIANT_DIR)/display_backend_drm.o: src/api/display_backend_drm.cpp $(LIBHV_LIB) $(PATCHES_STAMP) $(ABI_STAMP) | $(EGL_VARIANT_DIR) $(PATCH_MARKER_STAMP)
 	$(ECHO) "$(CYAN)[CXX/egl]$(RESET) $<"
@@ -92,36 +102,18 @@ $(EGL_VARIANT_DIR):
 # =============================================================================
 # Link
 # =============================================================================
-# Serialised behind the other binaries with an order-only prerequisite. Each
-# whole-program link peaks at multiple GB, and three of them at once under
-# `make -j` is how a Pi release build gets OOM-killed. Ordering costs nothing:
-# the EGL link reuses objects the DRM link already needed.
-ifdef PI_DUAL_LINK
-EGL_LINK_AFTER := $(FBDEV_TARGET)
-else
-EGL_LINK_AFTER := $(TARGET)
-endif
+# Extra prerequisites of the DRM link in mk/rules.mk, whose recipe links $^.
+# The fbdev link leaves them out (mk/pi-dual-link.mk): it carries no GPU path.
+EGL_PATH_OBJS := $(EGL_APP_VARIANT_OBJS) $(EGL_LVGL_LINKED_OBJS)
 
-$(EGL_TARGET): $(APP_C_OBJS) $(EGL_APP_OBJS) $(EGL_APP_VARIANT_OBJS) $(APP_MODULE_OBJS) \
-               $(REMOTE_LINENOISE_OBJ) $(OBJCPP_OBJS) \
-               $(EGL_LVGL_OBJS) $(EGL_LVGL_VARIANT_OBJS) $(EGL_LVGL_SHADER_OBJ) \
-               $(HELIX_XML_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(LV_MARKDOWN_OBJS) $(QUIRC_OBJS) \
-               $(LUA_OBJS) \
-               $(FONT_OBJS) $(TRANS_OBJS) $(APP_DNS_RESOLV_OBJ) $(WPA_DEPS) \
-               | $(EGL_LINK_AFTER)
-	$(Q)mkdir -p $(BIN_DIR)
-	$(ECHO) "$(MAGENTA)$(BOLD)[LD/egl]$(RESET) $@"
-	$(Q)$(CXX) $(CXXFLAGS) $(filter-out %.a %.h %.hh %.hpp %.hxx,$^) -o $@ $(LDFLAGS) || { \
-		echo "$(RED)$(BOLD)✗ EGL linking failed!$(RESET)"; \
-		exit 1; \
-	}
+$(TARGET): $(EGL_PATH_OBJS)
 
 # =============================================================================
 # Verification — the stale-object trap has no other symptom
 # =============================================================================
-# If the variant objects did not make it into the link, the binary still builds,
-# still runs, and silently presents through dumb buffers while the launcher
-# believes it is on the GPU. Nothing else distinguishes the two.
+# If the EGL objects did not make it into the link, the binary still builds and
+# still runs, and HELIX_DISPLAY_BACKEND=egl finds no EGL backend and presents
+# through dumb buffers while the launcher believes it is on the GPU.
 #
 # The tell is the GLES shader source. lv_opengles_shader.c holds its GLSL in
 # string literals, so a binary that really carries the OpenGL ES driver has the
@@ -131,32 +123,17 @@ $(EGL_TARGET): $(APP_C_OBJS) $(EGL_APP_OBJS) $(EGL_APP_VARIANT_OBJS) $(APP_MODUL
 # would pass by finding nothing rather than by checking anything.
 EGL_SHADER_TOKEN := u_SwapRB
 
-.PHONY: verify-egl strip-egl
+.PHONY: verify-egl
 
-verify-egl: $(EGL_TARGET) $(TARGET)
-	@echo "Verifying EGL binary actually carries the OpenGL ES driver..."
-	@if ! strings -a $(EGL_TARGET) | grep -q '$(EGL_SHADER_TOKEN)'; then \
-		echo "$(RED)ERROR: $(EGL_TARGET) carries no GLES shaders — it was linked"; \
-		echo "       against the base build's objects and presents through dumb"; \
-		echo "       buffers. Check the egl-variant object paths.$(RESET)"; \
+verify-egl: $(TARGET)
+	@echo "Verifying $(TARGET) carries the OpenGL ES driver..."
+	@if ! strings -a $(TARGET) | grep -q '$(EGL_SHADER_TOKEN)'; then \
+		echo "$(RED)ERROR: $(TARGET) carries no GLES shaders — the EGL path's"; \
+		echo "       objects did not reach the link, and HELIX_DISPLAY_BACKEND=egl"; \
+		echo "       would present through dumb buffers. Check EGL_PATH_OBJS.$(RESET)"; \
 		exit 1; \
 	fi
-	@if strings -a $(TARGET) | grep -q '$(EGL_SHADER_TOKEN)'; then \
-		echo "$(RED)ERROR: $(TARGET) carries GLES shaders — the base build picked"; \
-		echo "       up EGL objects it should not have.$(RESET)"; \
-		exit 1; \
-	fi
-	@echo "$(GREEN)✓ EGL binary carries the GPU path; base binary does not$(RESET)"
-
-strip-egl: verify-egl
-ifeq ($(STRIP_BINARY),yes)
-	$(Q)$(NM_CMD) -nC $(EGL_TARGET) > $(EGL_TARGET).sym 2>/dev/null || true
-	$(Q)$(OBJCOPY_CMD) --only-keep-debug $(EGL_TARGET) $(EGL_TARGET).debug
-	$(Q)$(STRIP_CMD) $(EGL_TARGET)
-	@echo "Stripped: $(EGL_TARGET)"
-else
-	@echo "STRIP_BINARY not set — skipping strip of $(EGL_TARGET)"
-endif
+	@echo "$(GREEN)✓ $(TARGET) carries the EGL presentation path$(RESET)"
 
 -include $(wildcard $(EGL_VARIANT_DIR)/*.d)
 -include $(shell find $(EGL_LVGL_VARIANT_DIR) -name '*.d' 2>/dev/null)

@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<component>
+  <view extends="lv_obj" width="#consts-demo__card_w" height="#consts-demo__gap">
+    <lv_obj width="10" height="10">
+      <bind_flag_if_eq subject="ui_breakpoint" flag="hidden" ref_value="0"/>
+    </lv_obj>
+  </view>
+</component>

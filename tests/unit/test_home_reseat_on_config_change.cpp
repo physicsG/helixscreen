@@ -32,7 +32,7 @@ using helix_test::ScopedWidgetFactory;
 
 namespace {
 
-constexpr int TPC = helix::GridLayout::TRACKS_PER_CELL;
+constexpr int kTpc = helix::GridLayout::TRACKS_PER_CELL;
 
 struct StubWidget : PanelWidget {
     std::string id_;
@@ -56,7 +56,7 @@ helix::WidgetFactory stub_factory() {
 
 nlohmann::json entry(const char* id, bool enabled, int col, int row) {
     return {{"id", id},   {"enabled", enabled}, {"col", col},
-            {"row", row}, {"colspan", TPC},     {"rowspan", TPC}};
+            {"row", row}, {"colspan", kTpc},    {"rowspan", kTpc}};
 }
 
 /// The widgets on a second page: the main page also takes every registry widget its
@@ -95,11 +95,11 @@ TEST_CASE_METHOD(XMLTestFixture,
     lv_xml_register_component_from_data(
         "test_home_reseat_stub",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
     ScopedWidgetFactory a("shutdown", stub_factory());
     ScopedWidgetFactory b("lock", stub_factory());
     ScopedHomeLayout home;
-    home.set(layout({entry("shutdown", true, 0, 0), entry("lock", true, 2 * TPC, 0)}));
+    home.set(layout({entry("shutdown", true, 0, 0), entry("lock", true, 2 * kTpc, 0)}));
 
     HomePanel& panel = get_global_home_panel();
     lv_obj_t* main_container = lv_obj_create(test_screen());
@@ -118,13 +118,13 @@ TEST_CASE_METHOD(XMLTestFixture,
     REQUIRE(lock != nullptr);
 
     // Same widgets, swapped: the tiles move, nothing is rebuilt.
-    home.set(layout({entry("shutdown", true, 2 * TPC, 0), entry("lock", true, 0, 0)}));
+    home.set(layout({entry("shutdown", true, 2 * kTpc, 0), entry("lock", true, 0, 0)}));
     PanelWidgetManager::instance().notify_config_changed("home");
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_update_layout(container);
     CHECK(lv_obj_find_by_name(container, "shutdown") == shutdown);
     CHECK(lv_obj_find_by_name(container, "lock") == lock);
-    CHECK(lv_obj_get_style_grid_cell_column_pos(shutdown, LV_PART_MAIN) == 2 * TPC);
+    CHECK(lv_obj_get_style_grid_cell_column_pos(shutdown, LV_PART_MAIN) == 2 * kTpc);
     CHECK(lv_obj_get_style_grid_cell_column_pos(lock, LV_PART_MAIN) == 0);
 
     // A widget that saved its config applied it in place: the next change rebuilds, even
@@ -134,7 +134,7 @@ TEST_CASE_METHOD(XMLTestFixture,
         saver.set_panel_id("home");
         saver.save_widget_config_for_test({{"style", "compact"}});
     }
-    home.set(layout({entry("shutdown", true, 0, 0), entry("lock", true, 2 * TPC, 0)}));
+    home.set(layout({entry("shutdown", true, 0, 0), entry("lock", true, 2 * kTpc, 0)}));
     PanelWidgetManager::instance().notify_config_changed("home");
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_update_layout(container);
@@ -145,7 +145,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     REQUIRE(shutdown != nullptr);
 
     // One widget dropped: the page is built again.
-    home.set(layout({entry("shutdown", true, 2 * TPC, 0), entry("lock", false, 0, 0)}));
+    home.set(layout({entry("shutdown", true, 2 * kTpc, 0), entry("lock", false, 0, 0)}));
     PanelWidgetManager::instance().notify_config_changed("home");
     helix::ui::UpdateQueue::instance().drain();
     lv_obj_update_layout(container);
@@ -155,7 +155,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     CHECK(rebuilt != shutdown);
 
     // Same widget, new per-widget config: built again with it.
-    nlohmann::json configured = entry("shutdown", true, 2 * TPC, 0);
+    nlohmann::json configured = entry("shutdown", true, 2 * kTpc, 0);
     configured["config"] = {{"style", "compact"}};
     home.set(layout({configured, entry("lock", false, 0, 0)}));
     PanelWidgetManager::instance().notify_config_changed("home");

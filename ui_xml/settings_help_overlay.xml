@@ -2,7 +2,7 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Help & About Overlay Panel -->
-<!-- Debug bundle upload, Discord, documentation, and about/version info -->
+<!-- Debug bundle upload, Discord, Getting Started and User Guide links, and about/version info -->
 <component>
   <view name="settings_help_overlay" extends="overlay_panel" title="Help &amp; About" bg_color="#screen_bg">
     <!-- Content Area - no padding, rows handle their own -->
@@ -21,9 +21,12 @@
         <setting_action_row name="row_discord"
                             label="Discord Community" icon="message" description="Get help and share feedback"
                             callback="on_discord_clicked"/>
-        <setting_action_row name="row_docs"
-                            label="Documentation" icon="book" description="Guides and reference"
-                            callback="on_docs_clicked"/>
+        <setting_action_row name="row_getting_started"
+                            label="Getting Started" icon="lightbulb_outline"
+                            description="Setup, navigation and gestures" callback="on_getting_started_clicked"/>
+        <setting_action_row name="row_user_guide"
+                            label="User Guide" icon="book" description="Every screen and setting explained"
+                            callback="on_user_guide_clicked"/>
         <setting_action_row name="row_about"
                             label="About" icon="info" description="Version and printer info" callback="on_about_clicked"/>
       </setting_group>

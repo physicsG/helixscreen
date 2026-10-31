@@ -29,7 +29,7 @@ enum class RecoveryReason {
 };
 
 /// Recovery dialog suppression durations (milliseconds)
-namespace RecoverySuppression {
+namespace helix::recovery_suppression {
 static constexpr uint32_t SHORT = 5000;   ///< Brief operations (settings switch)
 static constexpr uint32_t NORMAL = 10000; ///< Standard restarts (firmware restart, power toggle)
 /// Extended operations (calibration, service install).
@@ -74,8 +74,8 @@ static constexpr uint32_t EXTRA = 30000; ///< Multi-step operations (PID→MPC m
 /// did - hides every subsequent shutdown for the life of the process. Same
 /// preference as the LONG comment above: a spurious dialog over a silently-eaten
 /// shutdown.
-static constexpr uint32_t RESTART_FLAG_TIMEOUT = EXTRA;
-} // namespace RecoverySuppression
+static constexpr uint32_t kRestartFlagTimeout = EXTRA;
+} // namespace helix::recovery_suppression
 
 /**
  * @brief Emergency stop visibility coordinator
@@ -116,7 +116,7 @@ class EmergencyStopOverlay {
      * @param printer_state Reference to helix::PrinterState for print job state
      * @param api Pointer to IMoonrakerAPI for emergency_stop() calls
      */
-    void init(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    void init(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     /**
      * @brief Initialize subjects for XML binding
@@ -188,7 +188,7 @@ class EmergencyStopOverlay {
      *
      * @param duration_ms How long to suppress (default LONG)
      */
-    void suppress_recovery_dialog(uint32_t duration_ms = RecoverySuppression::LONG);
+    void suppress_recovery_dialog(uint32_t duration_ms = helix::recovery_suppression::LONG);
 
     /**
      * @brief Check if recovery dialog suppression is active
@@ -230,7 +230,7 @@ class EmergencyStopOverlay {
 
     // Dependencies (set via init())
     helix::PrinterState* printer_state_ = nullptr;
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     // Confirmation requirement (set via set_require_confirmation())
     bool require_confirmation_ = false;
@@ -257,6 +257,10 @@ class EmergencyStopOverlay {
     // WebSocket thread), read on the LVGL main thread.
     std::atomic<uint32_t> restart_expires_at_{0};
 
+    // Klippy reported STARTUP since the restart window opened, so a SHUTDOWN or
+    // ERROR now is where the restart landed, not the stop on its way down.
+    std::atomic<bool> restart_saw_startup_{false};
+
     // Skip the first klippy_state observer fire — it carries the subject's
     // default (SHUTDOWN) before Moonraker has reported real state. A real
     // shutdown at startup is delivered separately via the
@@ -280,7 +284,7 @@ class EmergencyStopOverlay {
     // observer fires on a transition and MoonrakerEventRoute::RecoveryShutdown
     // on an event. A host that goes down and STAYS down produces exactly one of
     // each, so a suppression window covering them did not delay the dialog, it
-    // removed it - which is the "silently-eaten shutdown" RecoverySuppression's
+    // removed it - which is the "silently-eaten shutdown" recovery_suppression's
     // own comment says to prefer a spurious dialog over. Atomic for the same
     // reason as suppress_recovery_until_: latched from whichever thread called
     // show_recovery_for(), read on the main thread.
@@ -329,6 +333,7 @@ class EmergencyStopOverlay {
     // Event handlers
     void handle_click();
     void execute_emergency_stop();
+    void confirm_emergency_stop(); ///< Close the confirmation, then stop
     void show_confirmation_dialog();
     void dismiss_confirmation_dialog();
     friend class EmergencyStopOverlayTestAccess;
@@ -336,7 +341,7 @@ class EmergencyStopOverlay {
     void show_recovery_dialog();
 
     /// Start treating klippy's next SHUTDOWN as a user-initiated restart, for
-    /// RecoverySuppression::RESTART_FLAG_TIMEOUT or until klippy reports READY,
+    /// recovery_suppression::kRestartFlagTimeout or until klippy reports READY,
     /// whichever comes first. Safe from any thread - one atomic store.
     void begin_restart_window();
 
@@ -344,6 +349,9 @@ class EmergencyStopOverlay {
     /// a restart that never reports READY stops counting on its own rather than
     /// suppressing every recovery dialog for the rest of the process.
     bool restart_in_progress() const;
+
+    /// Stop treating a restart as in flight. Safe from any thread.
+    void end_restart_window();
 
     /// Arm the one-shot re-check for the current suppression deadline, and reset
     /// the decline budget. Main thread only - it calls lv_timer_create().
@@ -374,11 +382,24 @@ class EmergencyStopOverlay {
     bool show_recovery_for_main(RecoveryReason reason);
     void dismiss_recovery_dialog();
     void update_recovery_dialog_content();
+    /// While a restart is in flight, toast that one is and return true, so the
+    /// caller sends nothing. Main thread only.
+    bool refuse_restart_in_flight();
     void restart_klipper();
+
+  public:
+    /// Restart Klipper firmware: the platform-correct sequence (a plain
+    /// printer.firmware_restart where that is right), guarded against a
+    /// restart already in flight, with the recovery dialogs suppressed for
+    /// the restart window. The restart is machine-moving, so a caller offers
+    /// it behind its own confirmation - the home panel's Firmware Restart
+    /// row is the shape to follow.
     void firmware_restart();
 
+  private:
     // Static callbacks
     static void emergency_stop_clicked(lv_event_t* e);
+    static void lock_screen_estop_clicked(lv_event_t* e);
     static void estop_dialog_cancel_clicked(lv_event_t* e);
     static void estop_dialog_confirm_clicked(lv_event_t* e);
     static void recovery_restart_klipper_clicked(lv_event_t* e);
@@ -394,10 +415,10 @@ namespace helix {
 namespace ui {
 
 /// Disconnect-modal suppression window armed by begin_expected_klippy_restart().
-/// Mirrors RecoverySuppression::LONG - the reconnect blip from a klippy restart
+/// Mirrors recovery_suppression::LONG - the reconnect blip from a klippy restart
 /// resolves in roughly the same span as the recovery-dialog window. 15 s is the
 /// value input-shaper armed before the helper existed; it is uniform now.
-constexpr uint32_t EXPECTED_RESTART_DISCONNECT_MODAL_MS = 15000;
+constexpr uint32_t kExpectedRestartDisconnectModalMs = 15000;
 
 /**
  * @brief Initiate an action that will restart Klipper

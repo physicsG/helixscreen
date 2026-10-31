@@ -113,10 +113,12 @@ assert 'github.ref' in group, 'group never falls back to the ref: %s' % group
 # A run that outlives the gap between two pushes never reports on main, and main
 # then reads green because it was never measured rather than because it passed.
 # Short workflows are not listed: they finish inside the gap, so cancelling them
-# costs nothing.
+# costs nothing. Code Quality is listed anyway: a release needs it green on the
+# commit it cuts from, and a cancelled run is no verdict.
 @test "the long-running workflows do not cancel their in-flight run on main" {
     local checked=0
-    for wf in .github/workflows/build.yml .github/workflows/esp32-build.yml; do
+    for wf in .github/workflows/build.yml .github/workflows/esp32-build.yml \
+              .github/workflows/quality.yml; do
         [ -f "$wf" ] || fail "$wf: missing"
         checked=$((checked + 1))
         run python3 -c "
@@ -130,5 +132,5 @@ assert 'refs/heads/main' in cancel, (
 "
         [ "$status" -eq 0 ] || fail "$wf: $output"
     done
-    [ "$checked" -eq 2 ] || fail "examined $checked workflows, expected 2"
+    [ "$checked" -eq 3 ] || fail "examined $checked workflows, expected 3"
 }

@@ -3,11 +3,13 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "i_moonraker_api.h"
 #include "thumbnail_load_context.h"
 #include "thumbnail_processor.h"
 #include "thumbnail_rules.h"
 #include "thumbnail_write_journal.h"
+#include "zip_reader.h"
 
 #include <atomic>
 #include <chrono>
@@ -83,7 +85,7 @@ struct ThumbnailRequest {
     helix::ThumbnailSource source = helix::ThumbnailSource::Moonraker;
     helix::ThumbnailTarget target;
     time_t source_modified = 0;
-    IMoonrakerAPI* api = nullptr;
+    helix::IMoonrakerAPI* api = nullptr;
     ThumbnailFormat format = ThumbnailFormat::Prescaled;
 };
 
@@ -92,22 +94,22 @@ class ThumbnailCache {
 
   public:
     /// Default cache subdirectory name (appended to base cache dir)
-    static constexpr const char* CACHE_SUBDIR = "helix_thumbs";
+    static constexpr const char* kCacheSubdir = "helix_thumbs";
 
     /// Minimum cache size (5 MB) - floor for very constrained systems
-    static constexpr size_t MIN_CACHE_SIZE = 5 * 1024 * 1024;
+    static constexpr size_t kMinCacheSize = 5 * 1024 * 1024;
 
     /// Default maximum cache size (20 MB) - conservative for AD5M, override via config
-    static constexpr size_t DEFAULT_MAX_CACHE_SIZE = 20 * 1024 * 1024;
+    static constexpr size_t kDefaultMaxCacheSize = 20 * 1024 * 1024;
 
     /// Default percentage of available disk space to use for cache
-    static constexpr double DEFAULT_DISK_PERCENT = 0.05; // 5%
+    static constexpr double kDefaultDiskPercent = 0.05; // 5%
 
     /// Default critical disk threshold (5 MB) - conservative for AD5M
-    static constexpr size_t DEFAULT_DISK_CRITICAL = 5 * 1024 * 1024;
+    static constexpr size_t kDefaultDiskCritical = 5 * 1024 * 1024;
 
     /// Default low disk threshold (20 MB) - conservative for AD5M
-    static constexpr size_t DEFAULT_DISK_LOW = 20 * 1024 * 1024;
+    static constexpr size_t kDefaultDiskLow = 20 * 1024 * 1024;
 
     /// Callback for successful thumbnail fetch (receives LVGL-ready path with "A:" prefix)
     ///
@@ -116,17 +118,17 @@ class ThumbnailCache {
     /// FAILURE through this success channel, handing back the raw PNG. It still
     /// renders, just without the pre-scale, and callers could not previously
     /// tell the two apart.
-    using SuccessCallback = std::function<void(const std::string& path, bool degraded)>;
+    using SuccessCallback = helix::SharedCallback<void(const std::string& path, bool degraded)>;
 
     /// Callback for failed thumbnail fetch (receives error message)
-    using ErrorCallback = std::function<void(const std::string& error)>;
+    using ErrorCallback = helix::SharedCallback<void(const std::string& error)>;
 
     /**
      * @brief Default constructor - auto-sizes based on available disk space
      *
      * Creates cache directory if it doesn't exist.
      * Cache size is calculated as:
-     *   clamp(available_space * 5%, MIN_CACHE_SIZE, MAX_CACHE_SIZE)
+     *   clamp(available_space * 5%, kMinCacheSize, MAX_CACHE_SIZE)
      */
     ThumbnailCache();
 
@@ -154,6 +156,18 @@ class ThumbnailCache {
      * @return `{cache_dir}/` + helix::thumbnail_file_name(hash, nullptr)
      */
     [[nodiscard]] std::string get_cache_path(const std::string& cache_id) const;
+
+    /**
+     * @brief What is already cached for a cache id, without touching it
+     *
+     * The pre-scaled .bin for @p target, else the full PNG, else empty. Read only: no LRU
+     * bump, no freshness check, no invalidation, no fetch, so a caller that must cause no
+     * side effect (a screensaver start) can ask.
+     *
+     * @return LVGL path ("A:...") or empty
+     */
+    [[nodiscard]] std::string peek(const std::string& cache_id,
+                                   const helix::ThumbnailTarget& target) const;
 
     /**
      * @brief Get LVGL path if thumbnail is already cached
@@ -218,8 +232,8 @@ class ThumbnailCache {
      *
      * @note Callbacks may be invoked from background thread - use ui_queue_update() for UI updates
      */
-    void fetch(IMoonrakerAPI* api, const std::string& relative_path, SuccessCallback on_success,
-               ErrorCallback on_error, time_t source_modified = 0);
+    void fetch(helix::IMoonrakerAPI* api, const std::string& relative_path,
+               SuccessCallback on_success, ErrorCallback on_error, time_t source_modified = 0);
 
     /**
      * @brief Fetch a thumbnail described by a request, guarded by a load context
@@ -423,7 +437,7 @@ class ThumbnailCache {
      *
      * @note Falls back to PNG on pre-scaling failure - display still works, just slower
      */
-    void fetch_optimized(IMoonrakerAPI* api, const std::string& relative_path,
+    void fetch_optimized(helix::IMoonrakerAPI* api, const std::string& relative_path,
                          const helix::ThumbnailTarget& target, SuccessCallback on_success,
                          ErrorCallback on_error, time_t source_modified = 0);
 
@@ -483,7 +497,7 @@ class ThumbnailCache {
     /// Rate limit for the free-space syscall. Reached twice per fetch_optimized()
     /// on the main thread; free space does not change fast enough to warrant a
     /// statfs per thumbnail.
-    static constexpr int64_t DISK_PROBE_INTERVAL_MS = 2000;
+    static constexpr int64_t kDiskProbeIntervalMs = 2000;
 
     /// Guards the disk-probe cache only. Deliberately NOT mutex_: get_disk_pressure()
     /// is called from inside evict_locked(), which already holds mutex_.
@@ -572,7 +586,7 @@ class ThumbnailCache {
     /// may disagree with the directory, at a cost of one walk per this many
     /// checks instead of one per check. Ordered map, so a rescan is also what
     /// re-establishes exact totals after any anomaly.
-    static constexpr size_t INDEX_RECONCILE_INTERVAL = 64;
+    static constexpr size_t kIndexReconcileInterval = 64;
 
     /// Rebuild the index from the filesystem. The only O(cache) path left.
     /// @pre mutex_ is held.
@@ -654,7 +668,7 @@ class ThumbnailCache {
      * 3. $HOME/.cache/helix (if HOME is set and writable)
      * 4. /tmp/helix_cache (fallback for systems without home dir)
      *
-     * @return Absolute path to the cache base directory (not including CACHE_SUBDIR)
+     * @return Absolute path to the cache base directory (not including kCacheSubdir)
      */
     static std::string determine_cache_dir();
 
@@ -708,7 +722,7 @@ ThumbnailCache& get_thumbnail_cache();
 namespace helix {
 
 /// Header size that covers every slicer's embedded-thumbnail comment block.
-constexpr size_t GCODE_THUMBNAIL_HEADER_BYTES = 100 * 1024;
+constexpr size_t kGcodeThumbnailHeaderBytes = 100 * 1024;
 
 /// Error-text prefix marking a PERMANENT extraction verdict: the gcode header
 /// was read and contains no embedded thumbnails. Every other failure flavor
@@ -716,7 +730,7 @@ constexpr size_t GCODE_THUMBNAIL_HEADER_BYTES = 100 * 1024;
 /// so consumers keying a negative cache off extraction errors match THIS
 /// prefix, nothing else. Compared by prefix so the message still carries the
 /// path.
-inline constexpr const char* GCODE_THUMBNAIL_NONE_EMBEDDED = "no embedded thumbnails in ";
+inline constexpr const char* kGcodeThumbnailNoneEmbedded = "no embedded thumbnails in ";
 
 /// Whether a gcode-header extraction can deliver a thumbnail on this platform.
 /// The ESP32 keeps no disk thumbnail cache (save_raw_png() refuses to write), so
@@ -750,5 +764,19 @@ void fetch_thumbnail_from_gcode(const std::string& gcode_path, size_t max_header
                                 ThumbnailLoadContext ctx,
                                 ThumbnailCache::SuccessCallback on_success,
                                 ThumbnailCache::ErrorCallback on_error);
+
+/**
+ * @brief A thumbnail stored inside an archive on the printer: a .3mf's plate render
+ *
+ * The sibling of fetch_thumbnail_from_gcode() for an image that is an entry of
+ * @p archive_path: served from the cache when it holds this entry for an
+ * archive no newer than @p source_modified, else read with one ranged read,
+ * cached as ThumbnailSource::ArchiveEntry and prescaled. Same callback contract.
+ */
+void fetch_thumbnail_from_archive(const std::string& archive_path, const zip::ZipEntry& entry,
+                                  time_t source_modified, IMoonrakerAPI* api,
+                                  const ThumbnailTarget& target, ThumbnailLoadContext ctx,
+                                  ThumbnailCache::SuccessCallback on_success,
+                                  ThumbnailCache::ErrorCallback on_error);
 
 } // namespace helix

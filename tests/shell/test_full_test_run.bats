@@ -11,10 +11,15 @@ GATE="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/full-test-run.sh"
 
 setup() {
     load helpers
+    # The make stub never reaches the real make or the jobpool shim, and refuses to nest.
+    export JOBPOOL=0
+    unset FAKE_MAKE_DEPTH
     export TMPDIR="$BATS_TEST_TMPDIR"
     export CALLS="$BATS_TEST_TMPDIR/calls"
     # <target> exits with $MAKE_<target>_RC (unit_sweep, test_shell), default 0.
     mock_command_script fake-make '
+[ "${FAKE_MAKE_DEPTH:-0}" -lt 1 ] || { echo "fake-make re-entered" >&2; exit 97; }
+export FAKE_MAKE_DEPTH=$((${FAKE_MAKE_DEPTH:-0} + 1))
 for a in "$@"; do case "$a" in -*) ;; *) t=$a ;; esac; done
 echo "make $t" >> "$CALLS"
 case "$t" in
@@ -170,4 +175,26 @@ wait'
     HELIX_TEST_HOST=fromenv.invalid TEST_HOST=1 run "$GATE"
     [ "$status" -eq 0 ]
     contains "unit sweep on fromenv.invalid" "$output"
+}
+
+@test "a candidate-list test host is resolved once, and the gate works on the pick" {
+    mock_command_script ssh 'for a; do [ "$a" = true ] && break; h=$a; done
+echo "$h" >> "$BATS_TEST_TMPDIR/ssh-log"
+case "$h" in up.*) exit 0 ;; *) exit 255 ;; esac'
+    HELIX_TEST_HOST=dead.invalid,up.invalid HOST_PROBE_RC=0 run "$GATE"
+    [ "$status" -eq 0 ]
+    contains "→ HELIX_TEST_HOST=up.invalid" "$output"
+    contains "unit sweep on up.invalid" "$output"
+    grep -qx "host-run sweep" "$CALLS"
+    [ "$(cat "$BATS_TEST_TMPDIR/ssh-log")" = "$(printf 'dead.invalid\nup.invalid')" ]
+}
+
+@test "automatic mode with no candidate answering runs here, without probing the link" {
+    mock_command_script ssh 'exit 255'
+    HELIX_TEST_HOST=dead.invalid,dead2.invalid HOST_PROBE_RC=0 run "$GATE"
+    [ "$status" -eq 0 ]
+    contains "no candidate answered" "$output"
+    contains "the test host is unreachable" "$output"
+    grep -qx "make unit-sweep" "$CALLS"
+    refute_grep "host-run" "$CALLS"
 }

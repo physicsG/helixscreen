@@ -20,8 +20,8 @@
 namespace helix {
 
 // Default screen dimensions used when invalid values are provided
-constexpr int DEFAULT_SCREEN_WIDTH = 800;
-constexpr int DEFAULT_SCREEN_HEIGHT = 480;
+constexpr int kDefaultScreenWidth = 800;
+constexpr int kDefaultScreenHeight = 480;
 
 TouchCalibrationPanel::TouchCalibrationPanel()
     : debounce_enabled_(RuntimeConfig::touch_cal_debounce()) {}
@@ -68,9 +68,9 @@ void TouchCalibrationPanel::set_screen_size(int width, int height) {
     // Validate screen dimensions - reject zero or negative values
     if (width <= 0 || height <= 0) {
         spdlog::warn("[TouchCalibrationPanel] Invalid screen size {}x{}, using defaults {}x{}",
-                     width, height, DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT);
-        screen_width_ = DEFAULT_SCREEN_WIDTH;
-        screen_height_ = DEFAULT_SCREEN_HEIGHT;
+                     width, height, kDefaultScreenWidth, kDefaultScreenHeight);
+        screen_width_ = kDefaultScreenWidth;
+        screen_height_ = kDefaultScreenHeight;
         return;
     }
     screen_width_ = width;
@@ -91,14 +91,14 @@ void TouchCalibrationPanel::set_screen_size(int width, int height) {
 Point TouchCalibrationPanel::compute_target_position(int step) const {
     switch (step) {
     case 0:
-        return {static_cast<int>(screen_width_ * TARGET_0_X_RATIO),
-                static_cast<int>(screen_height_ * TARGET_0_Y_RATIO)};
+        return {static_cast<int>(screen_width_ * kTarget0XRatio),
+                static_cast<int>(screen_height_ * kTarget0YRatio)};
     case 1:
-        return {static_cast<int>(screen_width_ * TARGET_1_X_RATIO),
-                static_cast<int>(screen_height_ * TARGET_1_Y_RATIO)};
+        return {static_cast<int>(screen_width_ * kTarget1XRatio),
+                static_cast<int>(screen_height_ * kTarget1YRatio)};
     case 2:
-        return {static_cast<int>(screen_width_ * TARGET_2_X_RATIO),
-                static_cast<int>(screen_height_ * TARGET_2_Y_RATIO)};
+        return {static_cast<int>(screen_width_ * kTarget2XRatio),
+                static_cast<int>(screen_height_ * kTarget2YRatio)};
     default:
         return Point{0, 0};
     }
@@ -328,9 +328,9 @@ bool TouchCalibrationPanel::compute_median_point(Point& out, Point& out_raw, boo
         }
     }
 
-    if (static_cast<int>(valid_x.size()) < MIN_VALID_SAMPLES) {
+    if (static_cast<int>(valid_x.size()) < kMinValidSamples) {
         spdlog::warn("[TouchCalibrationPanel] Only {}/{} valid samples (need {})", valid_x.size(),
-                     sample_count_, MIN_VALID_SAMPLES);
+                     sample_count_, kMinValidSamples);
         return false;
     }
 
@@ -340,10 +340,10 @@ bool TouchCalibrationPanel::compute_median_point(Point& out, Point& out_raw, boo
     // Reject if samples have excessive spread (noisy controller)
     int x_spread = valid_x.back() - valid_x.front();
     int y_spread = valid_y.back() - valid_y.front();
-    if (x_spread > MAX_SAMPLE_SPREAD || y_spread > MAX_SAMPLE_SPREAD) {
+    if (x_spread > kMaxSampleSpread || y_spread > kMaxSampleSpread) {
         spdlog::warn("[TouchCalibrationPanel] Sample spread too large "
                      "(x_spread={}, y_spread={}, max={})",
-                     x_spread, y_spread, MAX_SAMPLE_SPREAD);
+                     x_spread, y_spread, kMaxSampleSpread);
         return false;
     }
 
@@ -371,7 +371,7 @@ bool TouchCalibrationPanel::compute_median_point(Point& out, Point& out_raw, boo
             spdlog::warn("[TouchDebug]   valid[{}]: ({},{})", i, valid_x[i], valid_y[i]);
         }
         spdlog::warn("[TouchDebug]   spread: x={}, y={} (max={})", x_spread, y_spread,
-                     MAX_SAMPLE_SPREAD);
+                     kMaxSampleSpread);
         spdlog::warn("[TouchDebug]   median: ({},{})", out.x, out.y);
     }
 
@@ -384,7 +384,7 @@ TouchCalibrationPanel::Progress TouchCalibrationPanel::get_progress() const {
     Progress p{};
     p.state = state_;
     p.current_sample = sample_count_;
-    p.total_samples = SAMPLES_REQUIRED;
+    p.total_samples = kSamplesRequired;
 
     switch (state_) {
     case State::POINT_1:
@@ -415,7 +415,7 @@ void TouchCalibrationPanel::add_sample(Point raw, const Point* device_raw) {
         return;
     }
 
-    if (sample_count_ < SAMPLES_REQUIRED) {
+    if (sample_count_ < kSamplesRequired) {
         sample_buffer_[sample_count_] = {raw.x, raw.y, device_raw ? device_raw->x : 0,
                                          device_raw ? device_raw->y : 0, device_raw != nullptr};
         sample_count_++;
@@ -423,18 +423,18 @@ void TouchCalibrationPanel::add_sample(Point raw, const Point* device_raw) {
         if (is_touch_debug_enabled()) {
             auto p = get_progress();
             spdlog::warn("[TouchDebug] sample {}/{} for point {}: raw=({},{}){}", sample_count_,
-                         SAMPLES_REQUIRED, p.point_num, raw.x, raw.y,
+                         kSamplesRequired, p.point_num, raw.x, raw.y,
                          is_bad_sample(raw) ? " REJECTED" : "");
         }
 
         // Only fire progress callback for intermediate samples, not the final
         // one that triggers state transition (avoids showing "touch 6 of 5")
-        if (sample_count_ < SAMPLES_REQUIRED && sample_progress_callback_) {
+        if (sample_count_ < kSamplesRequired && sample_progress_callback_) {
             sample_progress_callback_();
         }
     }
 
-    if (sample_count_ >= SAMPLES_REQUIRED) {
+    if (sample_count_ >= kSamplesRequired) {
         Point median;
         Point raw_median;
         bool has_raw_median = false;
@@ -443,7 +443,7 @@ void TouchCalibrationPanel::add_sample(Point raw, const Point* device_raw) {
 
         // Reset the per-point sample count BEFORE invoking the success/failure
         // callbacks. Those callbacks refresh the "touch N of 3" instruction
-        // label; if the count were still at SAMPLES_REQUIRED when they run, the
+        // label; if the count were still at kSamplesRequired when they run, the
         // label would render "touch 4 of 3" (current_sample + 1). Clearing first
         // means any UI refresh the callbacks trigger sees a fresh count of 0.
         reset_samples();
@@ -502,7 +502,7 @@ void TouchCalibrationPanel::commit_pending(uint32_t now) {
     // sample is capacitive bounce, not a deliberate tap. Drop it. The very first
     // commit of a session has no prior sample to bounce off of, so it always
     // passes (has_committed_ arms the window).
-    if (has_committed_ && now - last_sample_ms_ < REFRACTORY_MS) {
+    if (has_committed_ && now - last_sample_ms_ < kRefractoryMs) {
         press_pending_ = false;
         if (is_touch_debug_enabled()) {
             spdlog::debug("[TouchDebug] dropped bounce sample, dt={}ms", now - last_sample_ms_);
@@ -518,16 +518,16 @@ void TouchCalibrationPanel::commit_pending(uint32_t now) {
 
 void TouchCalibrationPanel::commit_pending_if_stale(uint32_t now) {
     // Fallback for panels that never deliver a clean RELEASED: commit a press
-    // that has been outstanding at least STALL_COMMIT_MS so calibration cannot
+    // that has been outstanding at least kStallCommitMs so calibration cannot
     // wedge forever.
-    if (press_pending_ && (now - press_time_ms_ >= STALL_COMMIT_MS)) {
+    if (press_pending_ && (now - press_time_ms_ >= kStallCommitMs)) {
         commit_pending(now);
     }
 }
 
 void TouchCalibrationPanel::start_stall_timer() {
     stop_stall_timer();
-    stall_timer_ = lv_timer_create(stall_timer_cb, STALL_COMMIT_MS, this);
+    stall_timer_ = lv_timer_create(stall_timer_cb, kStallCommitMs, this);
     lv_timer_set_repeat_count(stall_timer_, 1);
 }
 
@@ -700,9 +700,9 @@ void TouchCalibrationPanel::start_fast_revert_timer() {
     stop_fast_revert_timer();
     verify_raw_touch_count_ = 0;
     verify_onscreen_touch_count_ = 0;
-    fast_revert_timer_ = lv_timer_create(fast_revert_timer_cb, FAST_REVERT_CHECK_MS, this);
+    fast_revert_timer_ = lv_timer_create(fast_revert_timer_cb, kFastRevertCheckMs, this);
     lv_timer_set_repeat_count(fast_revert_timer_, 1);
-    spdlog::debug("[TouchCalibrationPanel] Started fast-revert timer ({}ms)", FAST_REVERT_CHECK_MS);
+    spdlog::debug("[TouchCalibrationPanel] Started fast-revert timer ({}ms)", kFastRevertCheckMs);
 }
 
 void TouchCalibrationPanel::stop_fast_revert_timer() {

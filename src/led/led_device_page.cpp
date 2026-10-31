@@ -82,11 +82,11 @@ namespace {
 /// between the two. A white's dimmest channel stays near or above 0.42 of its
 /// brightest (a warm white mixed from RGB); Red, the most washed-out default
 /// preset whose green does sit between, reaches 0.27.
-constexpr double WHITE_MIN_CHANNEL_RATIO = 0.38;
+constexpr double kWhiteMinChannelRatio = 0.38;
 /// Steps a read-back green may stray outside the red-blue span and still count.
-constexpr int WHITE_GREEN_SLACK = 6;
+constexpr int kWhiteGreenSlack = 6;
 /// Per-channel steps of drift a read-back color still counts as the same preset.
-constexpr int PRESET_MATCH_TOLERANCE = 12;
+constexpr int kPresetMatchTolerance = 12;
 
 int channel(uint32_t rgb, int shift) {
     return static_cast<int>((rgb >> shift) & 0xFF);
@@ -109,9 +109,9 @@ LookRing ring_for_look(uint32_t rgb, double w, WhiteMode strip_white,
                        const std::vector<uint32_t>& presets) {
     const uint32_t shown = full_scale(rgb, w);
     const int r = channel(shown, 16), g = channel(shown, 8), b = channel(shown, 0);
-    const bool neutral = std::min({r, g, b}) >= WHITE_MIN_CHANNEL_RATIO * 255.0 &&
-                         g >= std::min(r, b) - WHITE_GREEN_SLACK &&
-                         g <= std::max(r, b) + WHITE_GREEN_SLACK;
+    const bool neutral = std::min({r, g, b}) >= kWhiteMinChannelRatio * 255.0 &&
+                         g >= std::min(r, b) - kWhiteGreenSlack &&
+                         g <= std::max(r, b) + kWhiteGreenSlack;
     LookRing ring;
     if (strip_white != WhiteMode::None && neutral) {
         double best = 1e9;
@@ -137,7 +137,7 @@ LookRing ring_for_look(uint32_t rgb, double w, WhiteMode strip_white,
         for (int shift : {16, 8, 0}) {
             worst = std::max(worst, std::abs(channel(p, shift) - channel(shown, shift)));
         }
-        if (worst <= PRESET_MATCH_TOLERANCE) {
+        if (worst <= kPresetMatchTolerance) {
             ring.swatch = static_cast<int>(i);
             break;
         }

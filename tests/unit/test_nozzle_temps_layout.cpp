@@ -40,22 +40,22 @@ constexpr NozzleRowWidths widths(int long_px, int short_px, int number_px, int i
     return {long_px, short_px, number_px, icon_px};
 }
 
-constexpr NozzleRowWidths BASE_NORMAL = widths(157, 138, 75, 60);
-constexpr NozzleRowWidths BASE_COMPACT = widths(133, 118, 62, 48);
-constexpr NozzleRowWidths HEATED_NORMAL = widths(187, 168, 68, 53);
-constexpr NozzleRowWidths HEATED_COMPACT = widths(155, 140, 57, 43);
+constexpr NozzleRowWidths kBaseNormal = widths(157, 138, 75, 60);
+constexpr NozzleRowWidths kBaseCompact = widths(133, 118, 62, 48);
+constexpr NozzleRowWidths kHeatedNormal = widths(187, 168, 68, 53);
+constexpr NozzleRowWidths kHeatedCompact = widths(155, 140, 57, 43);
 // de/ru: the position label is the wider spelling, so the long form wins at
 // every width and the fallbacks have to work without swapping spellings.
-constexpr NozzleRowWidths WIDE_NORMAL = widths(157, 207, 75, 60);
-constexpr NozzleRowWidths WIDE_COMPACT = widths(127, 167, 62, 48);
+constexpr NozzleRowWidths kWideNormal = widths(157, 207, 75, 60);
+constexpr NozzleRowWidths kWideCompact = widths(127, 167, 62, 48);
 
 /// Per-line stack heights as measured: base 15 (title + padding + rounding),
 /// one row line + inter-row pad at each font. Five stacked items (4 extruders
 /// + bed) come to 150px normal / 130px compact, the live numbers.
-constexpr NozzleStackHeights TALL{15, 27, 23};
+constexpr NozzleStackHeights kTall{15, 27, 23};
 
 /// The unknown-height (pre-layout) contract: no vertical constraint.
-constexpr int ANY_H = 0;
+constexpr int kAnyH = 0;
 
 } // namespace
 
@@ -65,7 +65,7 @@ TEST_CASE("Narrow 480px-panel tile stays one column holding the short spelling",
           "[nozzle][layout]") {
     // 2*138 + 12 = 288 > 196 → one column, wide enough for the long row.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(196, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(196, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.columns == 1);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
     CHECK(d.use_compact_font == false);
@@ -75,14 +75,14 @@ TEST_CASE("Two short columns when both plus the gap fit", "[nozzle][layout]") {
     // 2*138 + 12 = 288 <= avail → two columns of 138, each holding short(138)
     // exactly at the split boundary.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(288, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(288, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.columns == 2);
     REQUIRE(d.label_mode == NozzleLabelMode::Short);
 }
 
 TEST_CASE("Single extruder never splits into two columns", "[nozzle][layout]") {
     NozzleLayoutDecision d =
-        decide_nozzle_layout(500, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 1, TALL);
+        decide_nozzle_layout(500, kAnyH, 12, kBaseNormal, kBaseCompact, 1, kTall);
     REQUIRE(d.columns == 1);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
 }
@@ -90,23 +90,24 @@ TEST_CASE("Single extruder never splits into two columns", "[nozzle][layout]") {
 TEST_CASE("One pixel below the split boundary stays a single column", "[nozzle][layout]") {
     // One pixel under the 2*138 + 12 = 288 split → single column, holds long.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(287, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(287, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.columns == 1);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
 }
 
 TEST_CASE("Zero rows clamps to a single column", "[nozzle][layout]") {
     NozzleLayoutDecision d =
-        decide_nozzle_layout(500, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 0, TALL);
+        decide_nozzle_layout(500, kAnyH, 12, kBaseNormal, kBaseCompact, 0, kTall);
     REQUIRE(d.columns == 1);
 }
 
 TEST_CASE("Degenerate width returns the safe single-column long default", "[nozzle][layout]") {
-    NozzleLayoutDecision d = decide_nozzle_layout(0, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+    NozzleLayoutDecision d =
+        decide_nozzle_layout(0, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.columns == 1);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
     CHECK(d.use_compact_font == false);
-    d = decide_nozzle_layout(-50, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+    d = decide_nozzle_layout(-50, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
     CHECK(d.use_compact_font == false);
 }
@@ -117,7 +118,7 @@ TEST_CASE("Degenerate width returns the safe single-column long default", "[nozz
 
 TEST_CASE("A wide column keeps the long spelling at the normal font", "[nozzle][layout]") {
     NozzleLayoutDecision d =
-        decide_nozzle_layout(200, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(200, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.columns == 1);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
     CHECK(d.use_compact_font == false);
@@ -125,14 +126,14 @@ TEST_CASE("A wide column keeps the long spelling at the normal font", "[nozzle][
 
 TEST_CASE("One pixel below the long spelling uses the short spelling", "[nozzle][layout]") {
     NozzleLayoutDecision d =
-        decide_nozzle_layout(156, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(156, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.label_mode == NozzleLabelMode::Short);
     CHECK(d.use_compact_font == false);
 }
 
 TEST_CASE("Equal-width forms keep the long label when neither fits", "[nozzle][layout]") {
-    NozzleLayoutDecision d = decide_nozzle_layout(160, ANY_H, 12, widths(157, 157, 88, 73),
-                                                  widths(133, 133, 82, 69), 4, TALL);
+    NozzleLayoutDecision d = decide_nozzle_layout(160, kAnyH, 12, widths(157, 157, 88, 73),
+                                                  widths(133, 133, 82, 69), 4, kTall);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
 }
 
@@ -142,7 +143,7 @@ TEST_CASE("The normal tier's number outranks the compact tier's spelling", "[noz
     // normal font wins before any compact rung is even consulted — the font a
     // row is drawn in follows the tile's height, not its width.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(130, ANY_H, 12, WIDE_NORMAL, WIDE_COMPACT, 4, TALL);
+        decide_nozzle_layout(130, kAnyH, 12, kWideNormal, kWideCompact, 4, kTall);
     REQUIRE(d.label_mode == NozzleLabelMode::Number);
     CHECK(d.use_compact_font == false);
 }
@@ -151,7 +152,7 @@ TEST_CASE("Two columns are gated on the narrower spelling, not the compact one",
           "[nozzle][layout]") {
     // de: 2*long(150) + 12 = 312 <= 400 → two columns of 194 >= 150 long.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(400, ANY_H, 12, WIDE_NORMAL, WIDE_COMPACT, 4, TALL);
+        decide_nozzle_layout(400, kAnyH, 12, kWideNormal, kWideCompact, 4, kTall);
     REQUIRE(d.columns == 2);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
 }
@@ -163,27 +164,31 @@ TEST_CASE("A short tile drops to the compact font however wide it is", "[nozzle]
     // Width alone would keep the long spelling at the normal font (200 >=
     // 150), but the normal stack (150) does not fit 120 of height; the
     // compact stack (130) does.
-    NozzleLayoutDecision d = decide_nozzle_layout(200, 120, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+    NozzleLayoutDecision d =
+        decide_nozzle_layout(200, 120, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
     CHECK(d.use_compact_font == true);
 }
 
 TEST_CASE("A tall tile keeps the normal font at the same width", "[nozzle][layout]") {
-    NozzleLayoutDecision d = decide_nozzle_layout(200, 160, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+    NozzleLayoutDecision d =
+        decide_nozzle_layout(200, 160, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.label_mode == NozzleLabelMode::Long);
     CHECK(d.use_compact_font == false);
 }
 
 TEST_CASE("The height boundary is exact", "[nozzle][layout]") {
-    CHECK(decide_nozzle_layout(200, 150, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL).use_compact_font ==
-          false);
-    CHECK(decide_nozzle_layout(200, 149, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL).use_compact_font ==
-          true);
+    CHECK(
+        decide_nozzle_layout(200, 150, 12, kBaseNormal, kBaseCompact, 4, kTall).use_compact_font ==
+        false);
+    CHECK(
+        decide_nozzle_layout(200, 149, 12, kBaseNormal, kBaseCompact, 4, kTall).use_compact_font ==
+        true);
 }
 
 TEST_CASE("An unknown height imposes no vertical constraint", "[nozzle][layout]") {
     NozzleLayoutDecision d =
-        decide_nozzle_layout(200, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(200, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(d.use_compact_font == false);
 }
 
@@ -198,14 +203,14 @@ TEST_CASE("Growing the height grows the font at the 2-unit column", "[nozzle][la
     // TINY height (102 < compact stack 130): compact tier → number (85 <=
     // 104). Same label, small font.
     NozzleLayoutDecision tiny =
-        decide_nozzle_layout(104, 102, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(104, 102, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(tiny.label_mode == NozzleLabelMode::Number);
     CHECK(tiny.use_compact_font == true);
 
     // Rowspan 3 (161 >= 150): the normal tier opens, and its first rung the
     // column holds is the NUMBER at the normal font — the font grows.
     NozzleLayoutDecision grown =
-        decide_nozzle_layout(104, 161, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(104, 161, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(grown.label_mode == NozzleLabelMode::Number);
     CHECK(grown.use_compact_font == false);
 }
@@ -216,7 +221,7 @@ TEST_CASE("The number at the normal font beats the spelling at the compact font"
     // though it holds neither spelling — so the number at the NORMAL font
     // wins before any compact rung is consulted.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(120, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(120, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.label_mode == NozzleLabelMode::Number);
     CHECK(d.use_compact_font == false);
 
@@ -224,7 +229,7 @@ TEST_CASE("The number at the normal font beats the spelling at the compact font"
     // the floor — the compact number row (62) sits above the normal icon, so
     // that band always belongs to the normal tier's icon.
     NozzleLayoutDecision narrower =
-        decide_nozzle_layout(55, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(55, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(narrower.label_mode == NozzleLabelMode::None);
     CHECK(narrower.use_compact_font == true);
 }
@@ -235,14 +240,14 @@ TEST_CASE("The icon rung only serves where nothing labeled fits", "[nozzle][layo
     // (spelling 138/157, number 75, icon 60), the compact number (62) misses
     // too, and the compact icon (48 <= 59) is the floor.
     NozzleLayoutDecision floor =
-        decide_nozzle_layout(59, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(59, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(floor.label_mode == NozzleLabelMode::None);
     CHECK(floor.use_compact_font == true);
 }
 
 TEST_CASE("Below the compact icon row there is nothing left to drop", "[nozzle][layout]") {
     NozzleLayoutDecision d =
-        decide_nozzle_layout(42, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(42, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(d.label_mode == NozzleLabelMode::None);
     CHECK(d.use_compact_font == true);
 }
@@ -256,7 +261,7 @@ TEST_CASE("The reported one-grid-square Russian tile shows the number", "[nozzle
     // value — fits at the normal font (68 <= 104) and the tile is tall, so
     // the reported tile shows number + current temp at the FULL font.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(104, 215, 12, HEATED_NORMAL, HEATED_COMPACT, 4, TALL);
+        decide_nozzle_layout(104, 215, 12, kHeatedNormal, kHeatedCompact, 4, kTall);
     REQUIRE(d.columns == 1);
     CHECK(d.label_mode == NozzleLabelMode::Number);
     CHECK(d.use_compact_font == false);
@@ -267,11 +272,11 @@ TEST_CASE("Heated values trade the spelling down to the number, same tier", "[no
     // font; heated widens it past the column and the number row takes over —
     // still the normal font, still a label, no overlap.
     NozzleLayoutDecision idle =
-        decide_nozzle_layout(163, 215, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(163, 215, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(idle.label_mode == NozzleLabelMode::Long);
     CHECK(idle.use_compact_font == false);
     NozzleLayoutDecision heated =
-        decide_nozzle_layout(163, 215, 12, HEATED_NORMAL, HEATED_COMPACT, 4, TALL);
+        decide_nozzle_layout(163, 215, 12, kHeatedNormal, kHeatedCompact, 4, kTall);
     CHECK(heated.label_mode == NozzleLabelMode::Number);
     CHECK(heated.use_compact_font == false);
 }
@@ -281,7 +286,8 @@ TEST_CASE("A tile shorter than both stacks keeps the best label the column fits"
     // 104x102: the compact stack (130) overflows 102, but a labeled row is
     // the same height as an unlabeled one, so the ladder still serves the
     // number at the compact font rather than dropping to icons.
-    NozzleLayoutDecision d = decide_nozzle_layout(104, 102, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+    NozzleLayoutDecision d =
+        decide_nozzle_layout(104, 102, 12, kBaseNormal, kBaseCompact, 4, kTall);
     CHECK(d.label_mode == NozzleLabelMode::Number);
     CHECK(d.use_compact_font == true);
 }
@@ -290,7 +296,7 @@ TEST_CASE("Two columns never shrink the font", "[nozzle][layout]") {
     // The split is gated on the narrower spelling fitting twice at the normal
     // font, so a two-column layout is always a normal-tier layout.
     NozzleLayoutDecision d =
-        decide_nozzle_layout(288, ANY_H, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+        decide_nozzle_layout(288, kAnyH, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.columns == 2);
     CHECK(d.use_compact_font == false);
     CHECK(d.label_mode == NozzleLabelMode::Short);
@@ -302,7 +308,8 @@ TEST_CASE("Two columns wrap the stack, keeping the normal tier on a short tile",
     // into two columns, the five items wrap to 3 lines (96px at the normal
     // font), and 110 of height is enough for the wrapped stack where the
     // single-column model (150) would have vetoed the normal tier.
-    NozzleLayoutDecision d = decide_nozzle_layout(288, 110, 12, BASE_NORMAL, BASE_COMPACT, 4, TALL);
+    NozzleLayoutDecision d =
+        decide_nozzle_layout(288, 110, 12, kBaseNormal, kBaseCompact, 4, kTall);
     REQUIRE(d.columns == 2);
     CHECK(d.label_mode == NozzleLabelMode::Short);
     CHECK(d.use_compact_font == false);

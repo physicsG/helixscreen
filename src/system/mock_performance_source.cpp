@@ -3,6 +3,7 @@
 #include "mock_performance_source.h"
 
 #include "memory_utils.h"
+#include "mock_disk_usage.h"
 
 #include <spdlog/spdlog.h>
 
@@ -105,6 +106,9 @@ bool MockPerformanceSource::read_host_stats(PerfSample& out) {
     if (read_thermal(t)) {
         out.host_cpu_temp_c = t;
     }
+    const helix::mock::DiskMb disk = helix::mock::gcodes_disk_mb();
+    out.host_disk_total_mb = static_cast<uint32_t>(disk.total);
+    out.host_disk_free_mb = static_cast<uint32_t>(disk.free);
     return true;
 }
 

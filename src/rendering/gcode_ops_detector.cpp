@@ -142,8 +142,8 @@ void GCodeOpsDetector::init_default_patterns() {
     // All patterns are now defined in a single place (operation_patterns.h)
     // and used by both GCodeOpsDetector and PrintStartAnalyzer.
 
-    for (size_t i = 0; i < OPERATION_KEYWORDS_COUNT; ++i) {
-        const auto& kw = OPERATION_KEYWORDS[i];
+    for (size_t i = 0; i < kOperationKeywordsCount; ++i) {
+        const auto& kw = kOperationKeywords[i];
 
         // Determine embedding type based on pattern characteristics
         // G-codes and direct Klipper commands = DIRECT_COMMAND
@@ -156,7 +156,8 @@ void GCodeOpsDetector::init_default_patterns() {
             pattern == "QUAD_GANTRY_LEVEL" || pattern == "QGL" ||
             pattern.find("Z_TILT") == 0 || // Z_TILT, Z_TILT_ADJUST
             pattern.find("SET_HEATER_TEMPERATURE") == 0 ||
-            pattern.find("SKEW") == 0) { // SKEW_PROFILE, SET_SKEW
+            pattern.find("SKEW") == 0 || // SKEW_PROFILE, SET_SKEW
+            pattern == "SYNC_MOTORS") {
             embedding = OperationEmbedding::DIRECT_COMMAND;
         }
 
@@ -182,7 +183,7 @@ ScanResult GCodeOpsDetector::scan_file(const std::string& filepath) const {
     return scan_lines([&file](std::string& line) { return file.next(line); });
 }
 
-ScanResult GCodeOpsDetector::scan_content(const std::string& content) const {
+ScanResult GCodeOpsDetector::scan_content(std::string_view content) const {
     auto records = helix::text_io::lines(content);
     auto it = records.begin();
     const auto end = records.end();
@@ -217,8 +218,11 @@ template <typename NextLine> ScanResult GCodeOpsDetector::scan_lines(NextLine ne
             break;
         }
 
-        // Check for first extrusion (stop scanning)
-        if (config_.stop_at_first_extrusion && is_first_extrusion(line)) {
+        const bool first_extrusion = !result.first_extrusion_offset && is_first_extrusion(line);
+        if (first_extrusion) {
+            result.first_extrusion_offset = byte_offset;
+        }
+        if (config_.stop_at_first_extrusion && first_extrusion) {
             spdlog::debug("[GCodeOpsDetector] First extrusion at line {}, stopping", line_number);
             break;
         }
@@ -302,10 +306,17 @@ void GCodeOpsDetector::check_line(const std::string& line, size_t line_number, s
         }
 
         if (found) {
-            // Check if we already have this operation type (avoid duplicates)
-            bool already_detected = std::any_of(
-                result.operations.begin(), result.operations.end(),
-                [&pattern](const DetectedOperation& op) { return op.type == pattern.type; });
+            result.operation_commands.emplace(pattern.type,
+                                              helix::text_io::to_upper(command_word(trimmed)));
+
+            // One operation per type: per file, or per line when every
+            // occurrence is kept (two keywords of one type can match one line).
+            bool already_detected =
+                std::any_of(result.operations.begin(), result.operations.end(),
+                            [&](const DetectedOperation& op) {
+                                return op.type == pattern.type &&
+                                       (!config_.every_occurrence || op.byte_offset == byte_offset);
+                            });
 
             if (!already_detected) {
                 DetectedOperation op;
@@ -329,44 +340,18 @@ void GCodeOpsDetector::check_line(const std::string& line, size_t line_number, s
 }
 
 bool GCodeOpsDetector::is_first_extrusion(const std::string& line) const {
-    // Look for G1 with positive E value (actual extrusion, not retract)
-    // Must start with G1 (or have whitespace before it)
-    size_t g1_pos = line.find("G1");
-    if (g1_pos == std::string::npos) {
-        // Also check for G1 at start after whitespace
-        size_t start = line.find_first_not_of(" \t");
-        if (start == std::string::npos) {
-            return false;
-        }
-        if (line.substr(start, 2) != "G1") {
-            return false;
-        }
-    }
-
-    // Find E parameter
-    size_t e_pos = line.find(" E");
-    if (e_pos == std::string::npos) {
-        e_pos = line.find("\tE");
-    }
-    if (e_pos == std::string::npos) {
+    if (helix::text_io::to_upper(command_word(line)) != "G1") {
         return false;
     }
-
-    // Extract value after E
-    std::string e_str;
-    for (size_t i = e_pos + 2; i < line.size(); i++) {
-        char c = line[i];
-        if (c == '-' || c == '.' || std::isdigit(c)) {
-            e_str += c;
-        } else {
-            break;
+    std::string_view params(line);
+    params = params.substr(0, params.find(';'));
+    for (std::string_view token : helix::text_io::split_ws(params)) {
+        if (token.size() > 1 && (token[0] == 'E' || token[0] == 'e')) {
+            const auto e_val = helix::text_io::parse_leading<float>(token.substr(1));
+            return e_val && *e_val > 0.001f; // Positive extrusion
         }
     }
-    if (e_str.empty()) {
-        return false;
-    }
-    const auto e_val = helix::text_io::parse_leading<float>(e_str);
-    return e_val && *e_val > 0.001f; // Positive extrusion
+    return false;
 }
 
 bool GCodeOpsDetector::is_layer_marker(const std::string& line) const {

@@ -17,9 +17,26 @@
 
 namespace helix {
 
+SensorState::Options SensorState::make_options() {
+    Options o;
+    o.name = "SensorState";
+    o.count_subject = "sensor_state_count";
+    o.revision_subject = "sensor_state_revision";
+    // Fed by server.sensors, not by PrinterDiscovery.
+    o.from_printer_discovery = false;
+    return o;
+}
+
+SensorState::SensorState() : SensorManager(make_options()) {}
+
 SensorState& SensorState::instance() {
     static SensorState s;
     return s;
+}
+
+std::string SensorState::subject_key(const std::string& sensor_id, const std::string& key) {
+    // Unit separator: cannot occur in a Moonraker sensor id or value key.
+    return sensor_id + '\x1f' + key;
 }
 
 int SensorState::to_centi_units(const std::string& key, double value) {
@@ -79,141 +96,138 @@ bool SensorState::is_energy_sensor(const SensorInfo& info) {
 }
 
 void SensorState::set_sensors(const std::vector<SensorInfo>& sensors) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    // Tear down existing subjects (freeze queue to prevent new callbacks during teardown).
-    // Do NOT drain() here — it processes arbitrary queued callbacks re-entrantly from
-    // within process_pending(), which can trigger UI rebuilds (e.g. NozzleTempsWidget
-    // rebuild_rows) while subjects are in a half-torn-down state (#746). The
-    // SubjectLifetime mechanism and weak_alive tokens in deferred lambdas already
-    // ensure stale callbacks safely no-op after subjects are freed.
-    if (subjects_initialized_) {
-        lifetime_.invalidate();
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        for (auto& [id, entry] : sensors_) {
-            for (auto& [key, subj] : entry.value_subjects) {
-                if (subj->lifetime)
-                    *subj->lifetime = false; // Signal death (#816)
-                subj->lifetime.reset();
-            }
-        }
-        for (auto& [id, entry] : sensors_) {
-            for (auto& [key, subj] : entry.value_subjects) {
-                if (subj->initialized) {
-                    lv_subject_deinit(&subj->subject);
-                    subj->initialized = false;
-                }
-            }
-        }
-        sensors_.clear();
-    }
-
-    // Create new sensor entries with subjects
-    for (const auto& info : sensors) {
-        SensorEntry entry;
-        entry.info = info;
-
-        for (const auto& key : info.value_keys) {
-            auto dyn = std::make_unique<DynamicIntSubject>();
-            lv_subject_init_int(&dyn->subject, 0);
-            dyn->initialized = true;
-            dyn->lifetime = std::make_shared<bool>(true);
-            entry.value_subjects.emplace(key, std::move(dyn));
-        }
-
-        spdlog::trace("[SensorState] Created subjects for '{}': {} keys", info.id,
-                      info.value_keys.size());
-
-        sensors_.emplace(info.id, std::move(entry));
-    }
-
-    // Register with StaticSubjectRegistry on first init
-    if (!subjects_initialized_) {
-        subjects_initialized_ = true;
-        StaticSubjectRegistry::instance().register_deinit(
-            "SensorState", []() { SensorState::instance().deinit_subjects(); });
-    }
-
-    spdlog::info("[SensorState] Initialized {} sensors", sensors.size());
+    set_sensors(sensors, nlohmann::json::object());
 }
 
 void SensorState::set_sensors(const std::vector<SensorInfo>& sensors,
                               const nlohmann::json& initial_values) {
-    // Create subjects first
-    set_sensors(sensors);
+    // The subjects must exist before they are filled; this is the first
+    // moment SensorState has anything to show.
+    init_subjects();
 
-    // Apply initial values atomically (already on UI thread, subjects just created)
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (auto it = initial_values.begin(); it != initial_values.end(); ++it) {
-        const std::string& sensor_id = it.key();
-        auto sit = sensors_.find(sensor_id);
-        if (sit == sensors_.end())
-            continue;
-
-        for (auto vit = it.value().begin(); vit != it.value().end(); ++vit) {
-            if (!vit.value().is_number())
+    std::vector<sensors::SensorEntry> entries;
+    entries.reserve(sensors.size());
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex());
+        infos_.clear();
+        for (const auto& info : sensors) {
+            sensors::SensorEntry entry;
+            entry.klipper_name = info.id;
+            entry.display_name = info.friendly_name;
+            entry.available = true;
+            entries.push_back(std::move(entry));
+            infos_[info.id] = info;
+        }
+        for (auto it = readings_.begin(); it != readings_.end();) {
+            it = infos_.count(it->first) ? std::next(it) : readings_.erase(it);
+        }
+        for (auto it = initial_values.begin(); it != initial_values.end(); ++it) {
+            if (!infos_.count(it.key()) || !it.value().is_object()) {
                 continue;
+            }
+            for (auto vit = it.value().begin(); vit != it.value().end(); ++vit) {
+                if (vit.value().is_number()) {
+                    readings_[it.key()][vit.key()] =
+                        to_centi_units(vit.key(), vit.value().get<double>());
+                }
+            }
+        }
+        sync_subjects_locked();
+    }
+    reconcile(std::move(entries));
 
-            auto kit = sit->second.value_subjects.find(vit.key());
-            if (kit == sit->second.value_subjects.end() || !kit->second->initialized)
-                continue;
+    // Initial values land now rather than on the deferred refresh, so a widget
+    // built right after discovery already reads them.
+    refresh_subjects();
 
-            double raw = vit.value().get<double>();
-            int centi = to_centi_units(vit.key(), raw);
-            lv_subject_set_int(&kit->second->subject, centi);
-            spdlog::trace("[SensorState] Initial value {}.{} = {}", sensor_id, vit.key(), centi);
+    spdlog::info("[SensorState] Initialized {} sensors", sensors.size());
+}
+
+void SensorState::sync_subjects_locked() {
+    std::vector<std::string> keep;
+    for (const auto& [id, info] : infos_) {
+        for (const auto& key : info.value_keys) {
+            keep.push_back(subject_key(id, key));
+        }
+    }
+    subjects_by_key_.remove_missing(keep);
+    for (const auto& key : keep) {
+        SubjectLifetime unused;
+        subjects_by_key_.get_or_create(key, 0, unused);
+    }
+}
+
+void SensorState::register_subjects(SubjectManager& /*subjects*/) {}
+
+bool SensorState::parse_status(const nlohmann::json& /*status*/) {
+    // server.sensors arrives as notify_sensor_update, not in a status frame.
+    return false;
+}
+
+void SensorState::refresh_subjects() {
+    struct Reading {
+        std::string key;
+        int centi;
+    };
+    std::vector<Reading> readings;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex());
+        sync_subjects_locked();
+        for (const auto& [id, values] : readings_) {
+            for (const auto& [key, centi] : values) {
+                readings.push_back({subject_key(id, key), centi});
+            }
+        }
+    }
+    for (const auto& r : readings) {
+        SubjectLifetime unused;
+        lv_subject_t* subject = subjects_by_key_.find(r.key, unused);
+        if (subject != nullptr && lv_subject_get_int(subject) != r.centi) {
+            lv_subject_set_int(subject, r.centi);
         }
     }
 }
 
+void SensorState::on_deinit_subjects() {
+    subjects_by_key_.clear();
+    infos_.clear();
+    readings_.clear();
+    entries_locked().clear();
+}
+
 lv_subject_t* SensorState::get_value_subject(const std::string& sensor_id, const std::string& key,
                                              SubjectLifetime& lt) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    auto sit = sensors_.find(sensor_id);
-    if (sit == sensors_.end()) {
+    std::lock_guard<std::recursive_mutex> lock(mutex());
+    lv_subject_t* subject = subjects_by_key_.find(subject_key(sensor_id, key), lt);
+    if (subject == nullptr) {
         lt.reset();
-        return nullptr;
     }
-
-    auto kit = sit->second.value_subjects.find(key);
-    if (kit == sit->second.value_subjects.end() || !kit->second->initialized) {
-        lt.reset();
-        return nullptr;
-    }
-
-    lt = kit->second->lifetime;
-    return &kit->second->subject;
+    return subject;
 }
 
 std::vector<std::string> SensorState::sensor_ids() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
+    std::lock_guard<std::recursive_mutex> lock(mutex());
     std::vector<std::string> ids;
-    ids.reserve(sensors_.size());
-    for (const auto& [id, entry] : sensors_) {
-        ids.push_back(id);
+    ids.reserve(entries_locked().size());
+    for (const auto& entry : entries_locked()) {
+        ids.push_back(entry.klipper_name);
     }
     return ids;
 }
 
-const SensorInfo* SensorState::get_sensor_info(const std::string& sensor_id) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    auto it = sensors_.find(sensor_id);
-    if (it != sensors_.end()) {
-        return &it->second.info;
-    }
-    return nullptr;
+std::optional<SensorInfo> SensorState::get_sensor_info(const std::string& sensor_id) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex());
+    auto it = infos_.find(sensor_id);
+    return it != infos_.end() ? std::optional<SensorInfo>(it->second) : std::nullopt;
 }
 
 std::vector<std::string> SensorState::energy_sensor_ids() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
+    std::lock_guard<std::recursive_mutex> lock(mutex());
     std::vector<std::string> ids;
-    for (const auto& [id, entry] : sensors_) {
-        if (is_energy_sensor(entry.info)) {
-            ids.push_back(id);
+    for (const auto& entry : entries_locked()) {
+        auto it = infos_.find(entry.klipper_name);
+        if (it != infos_.end() && is_energy_sensor(it->second)) {
+            ids.push_back(entry.klipper_name);
         }
     }
     return ids;
@@ -243,83 +257,32 @@ void SensorState::on_sensor_update(const nlohmann::json& msg) {
         return;
     }
 
-    auto tok = lifetime_.token();
-
-    for (auto it = params.begin(); it != params.end(); ++it) {
-        const std::string& sensor_id = it.key();
-        const auto& values = it.value();
-
-        if (!values.is_object()) {
-            continue;
-        }
-
-        for (auto vit = values.begin(); vit != values.end(); ++vit) {
-            const std::string& key = vit.key();
-            if (!vit.value().is_number()) {
+    bool changed = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex());
+        for (auto it = params.begin(); it != params.end(); ++it) {
+            if (!it.value().is_object() || !infos_.count(it.key())) {
                 continue;
             }
-
-            double raw_value = vit.value().get<double>();
-            int centi = to_centi_units(key, raw_value);
-
-            tok.defer("SensorState::on_sensor_update", [this, sensor_id, key, centi]() {
-                std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-                auto sit = sensors_.find(sensor_id);
-                if (sit == sensors_.end()) {
-                    return;
+            for (auto vit = it.value().begin(); vit != it.value().end(); ++vit) {
+                if (!vit.value().is_number()) {
+                    continue;
                 }
-
-                auto kit = sit->second.value_subjects.find(key);
-                if (kit == sit->second.value_subjects.end() || !kit->second->initialized) {
-                    return;
+                int centi = to_centi_units(vit.key(), vit.value().get<double>());
+                auto& slot = readings_[it.key()];
+                auto cur = slot.find(vit.key());
+                if (cur == slot.end() || cur->second != centi) {
+                    slot[vit.key()] = centi;
+                    changed = true;
                 }
-
-                if (lv_subject_get_int(&kit->second->subject) != centi) {
-                    lv_subject_set_int(&kit->second->subject, centi);
-                    spdlog::trace("[SensorState] Updated {}.{} = {}", sensor_id, key, centi);
-                }
-            });
-        }
-    }
-}
-
-void SensorState::deinit_subjects() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    if (!subjects_initialized_) {
-        return;
-    }
-
-    spdlog::debug("[SensorState] Deinitializing subjects");
-
-    lifetime_.invalidate();
-
-    // Freeze queue to prevent new callbacks between drain and subject destruction
-    auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-    helix::ui::UpdateQueue::instance().drain();
-
-    // Phase 1: signal death then expire lifetime tokens (#816)
-    for (auto& [id, entry] : sensors_) {
-        for (auto& [key, subj] : entry.value_subjects) {
-            if (subj->lifetime)
-                *subj->lifetime = false;
-            subj->lifetime.reset();
-        }
-    }
-
-    // Phase 2: deinit subjects and clear map
-    for (auto& [id, entry] : sensors_) {
-        for (auto& [key, subj] : entry.value_subjects) {
-            if (subj->initialized) {
-                lv_subject_deinit(&subj->subject);
-                subj->initialized = false;
             }
         }
     }
-    sensors_.clear();
-
-    subjects_initialized_ = false;
+    // Subjects are written on the main thread by refresh_subjects(); a refresh
+    // queued before deinit_subjects() is dropped.
+    if (changed) {
+        publish();
+    }
 }
 
 } // namespace helix

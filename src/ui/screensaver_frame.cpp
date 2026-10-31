@@ -33,4 +33,15 @@ void merge_dirty_areas(std::vector<DirtyRect>& areas, size_t max_areas) {
     }
 }
 
+void reduce_dirty(std::vector<DirtyRect>& areas, size_t max_areas, int32_t w, int32_t h) {
+    merge_dirty_areas(areas, max_areas);
+    int64_t covered_px = 0;
+    for (const DirtyRect& r : areas) {
+        covered_px += r.area();
+    }
+    if (covers_whole_canvas(covered_px, w, h)) {
+        areas.assign(1, DirtyRect::whole(w, h));
+    }
+}
+
 } // namespace helix::ui

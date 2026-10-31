@@ -39,7 +39,7 @@ endif
 # Add platform-specific libraries for display backend
 ifneq ($(UNAME_S),Darwin)
     # Linux: may need DRM/input libraries
-    ifeq ($(DISPLAY_BACKEND),drm)
+    ifeq ($(DISPLAY_BACKEND)-$(DLOPEN_GPU_LIBS),drm-)
         SPLASH_LDFLAGS += -ldrm -linput
         ifneq ($(filter yes,$(ENABLE_OPENGLES) $(ENABLE_GLES_3D)),)
             SPLASH_LDFLAGS += -lEGL -lGLESv2 -lgbm -ldl
@@ -87,12 +87,22 @@ SPLASH_EXTRA_OBJS := \
     $(BUILD_DIR)/splash/ui_notification_stub.o \
     $(BUILD_DIR)/splash/drm_mode_matching.o \
     $(BUILD_DIR)/splash/fbdev_size_helper.o \
+    $(BUILD_DIR)/splash/fbdev_signal_clear.o \
     $(BUILD_DIR)/splash/pending_startup_warnings.o \
     $(BUILD_DIR)/splash/log_redact.o \
     $(BUILD_DIR)/splash/platform_info.o \
+    $(BUILD_DIR)/splash/board_identity.o \
+    $(BUILD_DIR)/splash/display_metrics.o \
+    $(BUILD_DIR)/splash/platform_table.o \
     $(BUILD_DIR)/splash/prerender_size_class.o \
     $(BUILD_DIR)/splash/splash_asset_choice.o \
     $(BUILD_DIR)/splash/helix_lvgl_anomaly_stub.o
+
+# Display and GPU libraries load at runtime in a DLOPEN_GPU_LIBS build (mk/implib.mk).
+ifeq ($(DLOPEN_GPU_LIBS),yes)
+    SPLASH_EXTRA_OBJS += $(IMPLIB_OBJS)
+    SPLASH_LDFLAGS += -ldl
+endif
 
 # Compile config for splash (with HELIX_SPLASH_ONLY to guard get_runtime_config dependency)
 $(BUILD_DIR)/splash/config.o: src/system/config.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
@@ -147,6 +157,11 @@ $(BUILD_DIR)/splash/fbdev_size_helper.o: src/api/fbdev_size_helper.cpp $(LIBHV_L
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
+# Signal-safe framebuffer blank (registered by display_backend_fbdev.cpp)
+$(BUILD_DIR)/splash/fbdev_signal_clear.o: src/api/fbdev_signal_clear.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
 # PendingStartupWarnings queue (referenced by both display backends). Added for #766.
 $(BUILD_DIR)/splash/pending_startup_warnings.o: src/system/pending_startup_warnings.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
@@ -166,6 +181,21 @@ $(BUILD_DIR)/splash/ui_notification_stub.o: tools/ui_notification_stub.cpp $(LIB
 # default fit via the mod-layout probe on the unified MIPS build, so the probe
 # implementation is a hard link dependency here too. Zero deps beyond spdlog.
 $(BUILD_DIR)/splash/platform_info.o: src/system/platform_info.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# platform_info.cpp answers board questions through board_identity, which keys on the
+# platform table, so both are link dependencies of every binary that links it.
+$(BUILD_DIR)/splash/board_identity.o: src/system/board_identity.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# standalone_rotation() falls back to the board's known panel mount.
+$(BUILD_DIR)/splash/display_metrics.o: src/application/display_metrics.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
+	@echo "[CXX] $< (splash)"
+	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/splash/platform_table.o: src/system/platform_table.cpp $(ABI_STAMP) | $(BUILD_DIR)/splash
 	@echo "[CXX] $< (splash)"
 	$(Q)$(CXX) $(SPLASH_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 

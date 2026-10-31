@@ -27,7 +27,7 @@ class BedCoordMapper {
   public:
     /// Minimum expanded size (in px) for a bbox_to_rect() touch target, so a
     /// tiny bbox still maps to a tappable on-screen target.
-    static constexpr float MIN_TOUCH_TARGET_PX = 28.0f;
+    static constexpr float kMinTouchTargetPx = 28.0f;
 
     BedCoordMapper(float bed_w_mm, float bed_h_mm, int viewport_w_px, int viewport_h_px,
                    float origin_x = 0.0f, float origin_y = 0.0f);

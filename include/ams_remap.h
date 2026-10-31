@@ -55,6 +55,37 @@ namespace printer {
 }
 
 /**
+ * @brief Does this strategy carry out every lane a seed names, guesses included?
+ *
+ * GcodeRewrite and PrePrintSend send each mapped tool that leaves its routed
+ * head, so a seed's free-lane guess (MatchReason::FREE_LANE_FALLBACK) prints as
+ * shown. Native writes only the user's picks and real colour matches to the
+ * printer's table, and None writes nothing, so a guess shown there would name a
+ * lane the print never uses. Seeds for those refuse the guess
+ * (FreeLaneGuess::Refused) and keep the tool on its routed lane.
+ */
+[[nodiscard]] inline bool remap_carries_out_seed(AmsBackend::RemapStrategy strategy) {
+    return strategy == AmsBackend::RemapStrategy::GcodeRewrite ||
+           strategy == AmsBackend::RemapStrategy::PrePrintSend;
+}
+
+/**
+ * @brief Does an ordinary Print carry out a pick stored on the print detail card?
+ *
+ * Native writes the stored picks to the printer's table at print start, and
+ * PrePrintSend sends them before PRINT_START, so a pick recorded inline prints
+ * as shown. GcodeRewrite carries out a pick only through the mapping modal's
+ * apply, which rewrites the job and prints it there and then; the Print button
+ * prints the file as sliced. None carries out nothing.
+ *
+ * The question a surface asks before it records a pick that waits for Print.
+ */
+[[nodiscard]] inline bool print_carries_out_stored_pick(AmsBackend::RemapStrategy strategy) {
+    return strategy == AmsBackend::RemapStrategy::Native ||
+           strategy == AmsBackend::RemapStrategy::PrePrintSend;
+}
+
+/**
  * @brief Can this backend carry out an explicit user tool->lane choice, now?
  *
  * THE question generic code should ask. Both halves matter: a backend built to

@@ -56,9 +56,9 @@ class AdvancedPanel : public PanelBase {
      * @param printer_state Reference to helix::PrinterState
      * @param api Pointer to IMoonrakerAPI
      */
-    AdvancedPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    AdvancedPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
-    ~AdvancedPanel() override = default;
+    ~AdvancedPanel() override;
 
     //
     // === PanelBase Implementation ===
@@ -101,6 +101,13 @@ class AdvancedPanel : public PanelBase {
      */
     void on_activate() override;
 
+    /// Release this panel's XML subjects; safe to call more than once.
+    void deinit_subjects();
+
+    /// Offer to install the HelixPrint plugin (the install modal). Also the
+    /// Install action of a plugin_feature_toggle_row.
+    void handle_helix_plugin_install_clicked();
+
   private:
     // Test-only access to the plugin uninstall flow.
     friend struct helix::ui::AdvancedPanelTestAccess;
@@ -114,8 +121,8 @@ class AdvancedPanel : public PanelBase {
     void handle_console_clicked();
     void handle_history_clicked();
     void handle_pid_tuning_clicked();
+    void handle_pa_tuning_clicked();
     void handle_timelapse_setup_clicked();
-    void handle_helix_plugin_install_clicked();
     void handle_helix_plugin_uninstall_clicked();
 
     void handle_helix_macros_install_clicked();
@@ -123,20 +130,16 @@ class AdvancedPanel : public PanelBase {
 
     /// job_holds_machine subject as a bool: PRINTING, PAUSED, or a
     /// host-side Preparing block — everything a Klipper restart would kill.
-    bool macro_job_holds_machine() const;
+    bool job_holds_machine_now() const;
 
     /// The confirmed half of the uninstall row: runs the uninstaller and
     /// reports the outcome. Blocks this thread while the script runs.
     void run_helix_plugin_uninstall();
 
-    /// The install modal's completion: a successful script run restarts
-    /// Moonraker, and the reconnect's plugin check then reports what loaded.
-    void on_helix_plugin_install_finished(bool success);
-
-    /// Restart Moonraker so a plugin install or uninstall takes effect. The
-    /// script runs under the service's NoNewPrivileges and cannot sudo, so
-    /// Moonraker is asked to restart itself.
-    void restart_moonraker_for_plugin();
+    /// Restart Moonraker so a plugin install or uninstall takes effect; the
+    /// reconnect's plugin check then reports what loaded. Returns whether a
+    /// restart was requested.
+    bool restart_moonraker_for_plugin();
 
     /// The confirmed half of both macro rows: stages the files, then either
     /// restarts Klipper right away (no active print) or marks the restart
@@ -236,6 +239,16 @@ class AdvancedPanel : public PanelBase {
     ShutdownModal shutdown_modal_;
 
     //
+    // === Notification History Row ===
+    //
+
+    /// 1 while no notifications widget holds a cell on the home screen, which
+    /// leaves this row as the only way into notification history.
+    lv_subject_t show_notification_history_subject_{};
+    SubjectManager subjects_;
+    void refresh_notification_history_row();
+
+    //
     // === Cached Overlay Panels ===
     //
 };
@@ -255,4 +268,4 @@ AdvancedPanel& get_global_advanced_panel();
  * @param printer_state Reference to helix::PrinterState
  * @param api Pointer to IMoonrakerAPI
  */
-void init_global_advanced_panel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+void init_global_advanced_panel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);

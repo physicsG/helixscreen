@@ -80,6 +80,30 @@ TEST_CASE("Single tool, nothing loaded → -1 (Unload stays disabled)", "[filame
     CHECK(resolve_op_button_slot(sys, /*selected_tool=*/0, /*tool_count=*/1) == -1);
 }
 
+TEST_CASE("AD5X IFS module: an unaccounted toolhead resolves to the active head, not the "
+          "selected tool's lane",
+          "[filament][op_slot][1324]") {
+    // Live AD5X (standalone IFS module): four virtual tools with an identity
+    // tool->slot map, filament at the toolhead, and no lane claiming it
+    // (ifs_loaded=0, current_slot=-1). The dropdown always names a tool, so the
+    // map alone hands back that tool's lane, which is not the one in the nozzle.
+    AmsSystemInfo sys = make_sys(/*tool_map=*/{0, 1, 2, 3}, /*current_slot=*/-1);
+    for (int tool = 0; tool < 4; ++tool) {
+        CAPTURE(tool);
+        CHECK(resolve_op_button_slot(sys, tool, /*tool_count=*/4,
+                                     /*toolhead_unaccounted=*/true) == helix::ui::kActiveHeadSlot);
+        CHECK(resolve_op_button_slot(sys, tool, /*tool_count=*/4,
+                                     /*toolhead_unaccounted=*/false) == tool);
+    }
+}
+
+TEST_CASE("An unaccounted toolhead never outranks the bypass spool", "[filament][op_slot][1324]") {
+    AmsSystemInfo sys =
+        make_sys(/*tool_map=*/{0, 1, 2, 3}, /*current_slot=*/helix::ui::kExternalSpoolSlot);
+    CHECK(resolve_op_button_slot(sys, /*selected_tool=*/0, /*tool_count=*/4,
+                                 /*toolhead_unaccounted=*/true) == helix::ui::kExternalSpoolSlot);
+}
+
 TEST_CASE("Toolchanger: multi-tool, no map → tool index == slot index", "[filament][op_slot]") {
     // A real toolchanger must keep per-tool selection: selecting tool 2 gates on
     // slot 2, NOT on current_slot (which is the *active* tool's lane).
@@ -122,13 +146,13 @@ TEST_CASE("Bypass: the external spool outranks any tool->slot map", "[filament][
     // a lane; no map entry can describe it, so it has to short-circuit.
     AmsSystemInfo bypassed = make_sys(/*tool_map=*/{0, 1, 2, 3}, /*current_slot=*/-2);
     CHECK(resolve_op_button_slot(bypassed, /*selected_tool=*/0, /*tool_count=*/1) ==
-          helix::ui::EXTERNAL_SPOOL_SLOT);
+          helix::ui::kExternalSpoolSlot);
 
     // AFC/Happy Hare reach the same sentinel by a different road (bypass_state /
     // the selector position), and a non-identity remap must not rescue a lane.
     AmsSystemInfo remapped = make_sys(/*tool_map=*/{3, 2, 1, 0}, /*current_slot=*/-2);
     CHECK(resolve_op_button_slot(remapped, /*selected_tool=*/0, /*tool_count=*/4) ==
-          helix::ui::EXTERNAL_SPOOL_SLOT);
+          helix::ui::kExternalSpoolSlot);
 
     // The guard rail: with bypass OFF the map still wins, exactly as before.
     // This is the BoxTurtle contract above and must not become collateral.

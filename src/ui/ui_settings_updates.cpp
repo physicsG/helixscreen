@@ -23,9 +23,30 @@
 #include "system/android_update_source.h"
 
 #include <SDL.h>
+#elif defined(HELIX_PLATFORM_X86_DESKTOP)
+#include "system/release_page.h"
+
+#include <SDL.h>
 #endif
 
 namespace helix::settings {
+
+#if defined(__ANDROID__) || defined(HELIX_PLATFORM_X86_DESKTOP)
+namespace {
+/// The release the update check is offering, for builds that open a page
+/// instead of running the tarball updater.
+helix::OfferedRelease offered_release() {
+    auto& checker = UpdateChecker::instance();
+    helix::OfferedRelease offered;
+    if (auto info = checker.get_cached_update()) {
+        offered.tag_name = info->tag_name;
+        offered.version = info->version;
+    }
+    offered.on_github = checker.get_channel() != UpdateChecker::UpdateChannel::Dev;
+    return offered;
+}
+} // namespace
+#endif
 
 void UpdatesSettingsOverlay::register_callbacks() {
     register_xml_callbacks({
@@ -92,6 +113,7 @@ void UpdatesSettingsOverlay::register_callbacks() {
              // apply one itself. The command is the whole payload; without it the row
              // states a problem and offers nothing. The QR points at the docs for the
              // longer story.
+             const std::string url = helix::docs_url("upgrading/");
              helix::ui::InfoQrModal::show_owned({
                  .icon = "console",
                  .title = lv_tr("Update from a Terminal"),
@@ -103,8 +125,8 @@ void UpdatesSettingsOverlay::register_callbacks() {
                  .message = lv_tr("Run the HelixScreen installer with --update from a "
                                   "terminal on this printer. Scan for the command for "
                                   "your platform."),
-                 .url = "https://helixscreen.org/docs/guide/getting-started/",
-                 .url_text = "helixscreen.org/docs",
+                 .url = url,
+                 .url_text = helix::docs_url_text(url),
              });
          }},
         {"on_update_download_start",
@@ -133,24 +155,37 @@ void UpdatesSettingsOverlay::show_update_download_modal(bool start_immediately) 
 #ifdef __ANDROID__
     // Android never runs the tarball updater. Every install intent (the Install
     // Update row and the "New Version Available" notification) opens wherever this
-    // APK came from: the Play listing for a Play install, the GitHub release for a
-    // sideload.
+    // APK came from: Play's in-app update flow (or its listing) for a Play install,
+    // the GitHub release for a sideload.
     if (helix::is_android_platform()) {
         const std::string installer = helix::android::installer_package();
-        auto& checker = UpdateChecker::instance();
-        helix::android::OfferedRelease offered;
-        if (auto info = checker.get_cached_update()) {
-            offered.tag_name = info->tag_name;
-            offered.version = info->version;
+        if (helix::android::installed_by_play(installer) && helix::android::start_play_update()) {
+            spdlog::info("[UpdatesSettings] Installer '{}', starting the Play update flow",
+                         installer);
+            (void)start_immediately;
+            return;
         }
-        offered.on_github = checker.get_channel() != UpdateChecker::UpdateChannel::Dev;
-        const std::string url = helix::android::update_url(installer, offered);
+        const std::string url = helix::android::update_url(installer, offered_release());
         spdlog::info("[UpdatesSettings] Installer '{}', opening {}", installer, url);
         if (SDL_OpenURL(url.c_str()) != 0) {
             spdlog::warn("[UpdatesSettings] Opening {} failed: {}", url, SDL_GetError());
             if (url == helix::android::kPlayStoreMarketUrl) {
                 SDL_OpenURL(helix::android::kPlayStoreWebUrl);
             }
+        }
+        (void)start_immediately;
+        return;
+    }
+#elif defined(HELIX_PLATFORM_X86_DESKTOP)
+    // The desktop build never rewrites its own install: every install intent opens
+    // the release page in the user's browser, where they download the new tarball.
+    {
+        const std::string url = helix::release_page_url(offered_release());
+        spdlog::info("[UpdatesSettings] Desktop build, opening {}", url);
+        if (SDL_OpenURL(url.c_str()) != 0) {
+            spdlog::warn("[UpdatesSettings] Opening {} failed: {}", url, SDL_GetError());
+            ToastManager::instance().show(ToastSeverity::WARNING,
+                                          lv_tr("Could not open a browser for the update"), 4000);
         }
         (void)start_immediately;
         return;
@@ -167,6 +202,15 @@ void UpdatesSettingsOverlay::show_update_download_modal(bool start_immediately) 
     if (update_download_modal_ && !lv_obj_is_valid(update_download_modal_)) {
         update_download_modal_ = nullptr;
     }
+
+    if (!download_status_observer_) {
+        auto& checker = UpdateChecker::instance();
+        download_status_observer_ = helix::ui::observe<int>(
+            checker.download_status_subject(), this,
+            [](UpdatesSettingsOverlay* self, int status) { self->on_download_status(status); },
+            checker.get_subjects_lifetime());
+    }
+    download_modal_closed_by_user_ = false;
 
     if (!update_download_modal_) {
         // Clear any stale Error/Complete status carried over from a prior
@@ -192,7 +236,27 @@ void UpdatesSettingsOverlay::show_update_download_modal(bool start_immediately) 
                                                      text);
 }
 
+void UpdatesSettingsOverlay::on_download_status(int status) {
+    if (status != static_cast<int>(UpdateChecker::DownloadStatus::Error) ||
+        download_modal_closed_by_user_) {
+        return;
+    }
+    // Asked of the stack, not the pointer: a dismissed dialog stays a valid
+    // object for its exit animation, and its address can be reused after.
+    const auto& stack = ModalStack::instance();
+    lv_obj_t* backdrop =
+        update_download_modal_ ? stack.backdrop_for(update_download_modal_) : nullptr;
+    if (backdrop && !stack.is_exiting(backdrop)) {
+        return;
+    }
+    // Reopened as-is: the status, text and error are already the failure's, and
+    // the modal binds straight to them.
+    spdlog::info("[UpdatesSettings] Update failed after its dialog closed - reopening it");
+    update_download_modal_ = helix::ui::modal_show("update_download_modal");
+}
+
 void UpdatesSettingsOverlay::hide_update_download_modal() {
+    download_modal_closed_by_user_ = true;
     if (update_download_modal_) {
         helix::ui::modal_hide(update_download_modal_);
         update_download_modal_ = nullptr;

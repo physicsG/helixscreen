@@ -8,43 +8,33 @@
 #if HELIX_HAS_CAMERA
 
 #include "app_globals.h"
+#include "helix_version.h"
+#include "hv/hssl.h"
 #include "hv/requests.h"
 #include "i_moonraker_api.h"
 #include "printer_state.h"
+#include "scope_exit.h"
 #include "spdlog/spdlog.h"
 #include "stb_image.h"
+#include "system/platform_tls.h"
 #include "webcam_selection.h"
+
+#ifdef __ANDROID__
+#include "system/http_android.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <dlfcn.h>
+#include <new>
 #include <string_view>
 
 // TurboJPEG pixel format and flag constants (avoid header dependency)
-static constexpr int TJ_PIXELFORMAT_BGR = 1;
-static constexpr int TJ_FLAG_FASTDCT = 2048;
+static constexpr int kTjPixelformatBgr = 1;
+static constexpr int kTjFlagFastdct = 2048;
 
 namespace helix {
-
-namespace {
-
-/// Runs a callable when the enclosing scope unwinds, on every path including
-/// exceptions. Local to this file — nothing else in the tree needs one yet.
-template <typename F> class ScopeExit {
-  public:
-    explicit ScopeExit(F fn) : fn_(std::move(fn)) {}
-    ~ScopeExit() {
-        fn_();
-    }
-    ScopeExit(const ScopeExit&) = delete;
-    ScopeExit& operator=(const ScopeExit&) = delete;
-
-  private:
-    F fn_;
-};
-
-} // namespace
 
 // ============================================================================
 // Construction / Destruction
@@ -113,10 +103,14 @@ CameraFrame CameraStream::latest_running_frame(const WebcamInfo& feed, int max_w
 
 CameraStream::~CameraStream() {
     stop();
-    // Only clean up turbojpeg if stop() successfully joined the thread.
-    // If the thread was detached (join timeout), it may still be calling
-    // turbojpeg functions — dlclose would unmap the code and crash.
+    // Only clean up buffers and turbojpeg if stop() successfully joined the
+    // thread. If the thread was detached (join timeout), it may still be
+    // writing frames and calling turbojpeg functions — dlclose would unmap
+    // the code and crash.
     if (!thread_detached_) {
+        // stop() frees only what a stream thread left behind. A decoder that
+        // never ran one (decode_snapshot()'s throwaway) owns its frames too.
+        free_buffers();
         if (tj_ && fn_destroy_) {
             fn_destroy_(tj_);
             tj_ = nullptr;
@@ -171,6 +165,17 @@ bool CameraStream::configure_from_printer(std::string& stream_url, std::string& 
     return true;
 }
 
+CameraStream::FetchMode CameraStream::choose_fetch_mode(const std::string& stream_url,
+                                                        const std::string& snapshot_url,
+                                                        bool http_client_has_tls) {
+    // The platform TLS bridge makes one-shot requests and cannot carry an
+    // endless MJPEG response.
+    if (!stream_url.empty() && !needs_platform_tls(stream_url, http_client_has_tls)) {
+        return FetchMode::Stream;
+    }
+    return snapshot_url.empty() ? FetchMode::None : FetchMode::Snapshot;
+}
+
 void CameraStream::start(const std::string& stream_url, const std::string& snapshot_url,
                          FrameCallback on_frame, ErrorCallback on_error) {
     // A worker that exited on its own leaves running_ false but the std::thread
@@ -185,6 +190,7 @@ void CameraStream::start(const std::string& stream_url, const std::string& snaps
     on_frame_ = std::move(on_frame);
     on_error_ = std::move(on_error);
     stream_fail_count_ = 0;
+    snapshot_fail_count_ = 0;
     running_.store(true);
     {
         std::lock_guard<std::mutex> reg(g_streams_mutex);
@@ -193,15 +199,29 @@ void CameraStream::start(const std::string& stream_url, const std::string& snaps
 
     spdlog::info("[CameraStream] Starting — stream={}, snapshot={}", stream_url_, snapshot_url_);
 
-    if (!stream_url_.empty()) {
+#ifdef __ANDROID__
+    const bool http_client_has_tls = HV_WITH_SSL;
+#else
+    // No platform bridge to fall back to: an https stream goes to libhv as is.
+    const bool http_client_has_tls = true;
+#endif
+    const FetchMode mode = choose_fetch_mode(stream_url_, snapshot_url_, http_client_has_tls);
+    if (mode != FetchMode::Stream && !stream_url_.empty()) {
+        spdlog::info("[CameraStream] {} needs TLS the HTTP client lacks; the platform bridge "
+                     "is one-shot, so snapshots are polled instead",
+                     stream_url_);
+    }
+
+    if (mode == FetchMode::Stream) {
         spdlog::info("[CameraStream] Using MJPEG streaming mode");
         stream_thread_ = helix::make_thread(&CameraStream::stream_thread_func, this);
-    } else if (!snapshot_url_.empty()) {
-        spdlog::info("[CameraStream] Using snapshot mode (interval={}ms)", SNAPSHOT_INTERVAL_MS);
+    } else if (mode == FetchMode::Snapshot) {
+        spdlog::info("[CameraStream] Using snapshot mode (interval={}ms)", kSnapshotIntervalMs);
         stream_thread_ = helix::make_thread(&CameraStream::snapshot_poll_loop, this);
     } else {
-        spdlog::warn("[CameraStream] No stream or snapshot URL provided");
+        spdlog::warn("[CameraStream] No usable stream or snapshot URL provided");
         running_.store(false);
+        report_error(lifetime_.token(), "Camera unavailable");
     }
 }
 
@@ -239,14 +259,18 @@ void CameraStream::stop() {
     bool thread_joined = true;
     if (stream_thread_.joinable()) {
         auto joined = std::make_shared<std::atomic<bool>>(false);
+        // The helper owns the worker and nothing of `this`: on timeout only the
+        // helper is detached, so no thread is ever detached while another joins
+        // it (bionic aborts on that), and the helper can outlive this object.
+        auto worker = std::make_shared<std::thread>(std::move(stream_thread_));
         // Under thread exhaustion this constructor can throw
         // std::system_error(EAGAIN). Destructor paths must not let it
         // escape — detach the stream thread and skip the timed join.
         std::thread join_helper;
         bool helper_spawned = false;
         try {
-            join_helper = helix::make_thread([this, joined]() {
-                stream_thread_.join();
+            join_helper = helix::make_thread([worker, joined]() {
+                worker->join();
                 joined->store(true);
             });
             helper_spawned = true;
@@ -254,21 +278,23 @@ void CameraStream::stop() {
             spdlog::warn("[CameraStream] Failed to spawn join_helper ({}) — "
                          "detaching stream thread",
                          e.what());
-            stream_thread_.detach();
+            worker->detach();
             thread_joined = false;
             thread_detached_ = true;
         }
         if (helper_spawned) {
-            constexpr auto JOIN_TIMEOUT = std::chrono::seconds(5);
-            constexpr auto CANCEL_INTERVAL = std::chrono::milliseconds(200);
-            auto deadline = std::chrono::steady_clock::now() + JOIN_TIMEOUT;
+            constexpr auto kCancelInterval = std::chrono::milliseconds(200);
+            auto deadline = std::chrono::steady_clock::now() + join_timeout_;
 
             while (!joined->load()) {
                 if (std::chrono::steady_clock::now() > deadline) {
-                    spdlog::error("[CameraStream] Thread join timed out after 5s, "
-                                  "detaching (lifetime_ guard prevents UAF)");
+                    // The worker still uses `this` (running_, recv_buf_, its
+                    // exit-path ScopeExit) with no lifetime_ check. Every owner
+                    // must see was_detached() and leak this object, never free it.
+                    spdlog::error("[CameraStream] Thread join timed out after {}ms, "
+                                  "detaching (owner must leak this stream)",
+                                  join_timeout_.count());
                     join_helper.detach();
-                    stream_thread_.detach();
                     thread_joined = false;
                     thread_detached_ = true;
                     break;
@@ -281,7 +307,7 @@ void CameraStream::stop() {
                         req->Cancel();
                     }
                 }
-                std::this_thread::sleep_for(CANCEL_INTERVAL);
+                std::this_thread::sleep_for(kCancelInterval);
             }
 
             if (join_helper.joinable()) {
@@ -378,14 +404,14 @@ void CameraStream::stream_thread_func() {
         got_stream_data_.store(false);
         bool ever_connected = false;
 
-        while (running_.load() && stream_fail_count_ < MAX_STREAM_FAILURES) {
+        while (running_.load() && stream_fail_count_ < kMaxStreamFailures) {
             auto req = std::make_shared<HttpRequest>();
             req->method = HTTP_GET;
             req->url = stream_url_;
             // Short timeout until the first successful connection, then long
             // timeout for the persistent stream. MJPEG responses are infinite —
             // the timeout just drives periodic reconnection.
-            int timeout = ever_connected ? STREAM_TIMEOUT_SEC : STREAM_CONNECT_TIMEOUT_SEC;
+            int timeout = ever_connected ? kStreamTimeoutSec : kStreamConnectTimeoutSec;
             req->timeout = timeout;
             spdlog::debug(
                 "[CameraStream] Attempting stream connection to {} (timeout={}s, attempt={})",
@@ -488,7 +514,7 @@ void CameraStream::stream_thread_func() {
             boundary_.clear();
             got_stream_data_.store(false);
 
-            if (running_.load() && stream_fail_count_ < MAX_STREAM_FAILURES) {
+            if (running_.load() && stream_fail_count_ < kMaxStreamFailures) {
                 // Brief backoff before reconnecting
                 int backoff_ms = std::min(1000 * stream_fail_count_, 5000);
                 if (backoff_ms > 0) {
@@ -500,7 +526,7 @@ void CameraStream::stream_thread_func() {
         }
 
         // Fall back to snapshot mode if streaming failed
-        if (running_.load() && stream_fail_count_ >= MAX_STREAM_FAILURES) {
+        if (running_.load() && stream_fail_count_ >= kMaxStreamFailures) {
             spdlog::warn("[CameraStream] Stream failed {} times, falling back to snapshot mode",
                          stream_fail_count_);
             if (!snapshot_url_.empty()) {
@@ -608,15 +634,23 @@ void CameraStream::snapshot_poll_loop() {
     // destroyed, the token detects invalidation for safe checking.
     auto poll_token = lifetime_.token();
 
-    spdlog::info("[CameraStream] Starting snapshot poll loop (interval={}ms)",
-                 SNAPSHOT_INTERVAL_MS);
+    spdlog::info("[CameraStream] Starting snapshot poll loop (interval={}ms)", kSnapshotIntervalMs);
 
     // L081_OK: loop conditions on the thread the owner joins; no LVGL below.
     while (!poll_token.expired_no_lvgl() && running_.load()) {
-        fetch_snapshot();
+        // As the thread entry this loop has no outer handler, and an escaping
+        // throw is std::terminate. An allocation failure is one failed snapshot.
+        try {
+            fetch_snapshot();
+        } catch (const std::bad_alloc& e) {
+            spdlog::error("[CameraStream] Out of memory fetching a snapshot: {}", e.what());
+            if (!poll_token.expired_no_lvgl()) { // L081_OK: guards members, not LVGL
+                note_snapshot_failure(poll_token);
+            }
+        }
         // Sleep in small increments to check running_ flag
         for (int i = 0;
-             i < SNAPSHOT_INTERVAL_MS / 100 && !poll_token.expired_no_lvgl() && running_.load();
+             i < kSnapshotIntervalMs / 100 && !poll_token.expired_no_lvgl() && running_.load();
              i++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -650,18 +684,36 @@ void CameraStream::fetch_snapshot() {
 
     spdlog::trace("[CameraStream] Fetching snapshot from {}", snapshot_url_);
 
-    auto req = std::make_shared<HttpRequest>();
-    req->method = HTTP_GET;
-    req->url = snapshot_url_;
-    req->timeout = STREAM_TIMEOUT_SEC;
-
-    // Store weak reference for cancellation by stop()
+    std::string body;
+    bool fetched = false;
+#ifdef __ANDROID__
+    if (needs_platform_tls(snapshot_url_, HV_WITH_SSL)) {
+        fetched =
+            android::https_get_bytes(snapshot_url_, HELIX_USER_AGENT, kPlatformSnapshotTimeoutSec,
+                                     kMaxPlatformSnapshotBytes, body);
+    } else
+#endif
     {
-        std::lock_guard<std::mutex> lock(req_mutex_);
-        active_req_ = req; // weak_ptr assignment from shared_ptr
-    }
+        auto req = std::make_shared<HttpRequest>();
+        req->method = HTTP_GET;
+        req->url = snapshot_url_;
+        req->timeout = kStreamTimeoutSec;
 
-    auto resp = requests::request(req);
+        // Store weak reference for cancellation by stop()
+        {
+            std::lock_guard<std::mutex> lock(req_mutex_);
+            active_req_ = req; // weak_ptr assignment from shared_ptr
+        }
+
+        auto resp = requests::request(req);
+        if (resp && resp->status_code >= 200 && resp->status_code < 300) {
+            fetched = true;
+            body = std::move(resp->body);
+        } else {
+            spdlog::debug("[CameraStream] Snapshot fetch failed (status={})",
+                          resp ? static_cast<int>(resp->status_code) : -1);
+        }
+    }
 
     // After the blocking HTTP call, stop() may have run and the CameraStream
     // may be destroyed (detached thread). Check lifetime BEFORE touching members.
@@ -674,19 +726,22 @@ void CameraStream::fetch_snapshot() {
         return;
     }
 
-    if (!resp || resp->status_code < 200 || resp->status_code >= 300) {
-        spdlog::debug("[CameraStream] Snapshot fetch failed (status={})",
-                      resp ? static_cast<int>(resp->status_code) : -1);
+    auto* data = reinterpret_cast<const uint8_t*>(body.data());
+    if (!fetched || body.empty() || !decode_jpeg(data, body.size())) {
+        note_snapshot_failure(snap_token);
         return;
     }
+    snapshot_fail_count_ = 0;
+    deliver_frame();
+}
 
-    if (resp->body.empty()) {
-        return;
-    }
-
-    auto* data = reinterpret_cast<const uint8_t*>(resp->body.data());
-    if (decode_jpeg(data, resp->body.size())) {
-        deliver_frame();
+void CameraStream::note_snapshot_failure(const helix::LifetimeToken& token) {
+    // Without a message a view waiting on its first frame spins forever. One
+    // report per run of failures; a decoded frame starts a new run.
+    if (++snapshot_fail_count_ == kMaxSnapshotFailures) {
+        spdlog::warn("[CameraStream] {} snapshots in a row failed from {}", snapshot_fail_count_,
+                     snapshot_url_);
+        report_error(token, "Snapshot unavailable");
     }
 }
 
@@ -933,9 +988,9 @@ bool CameraStream::decode_jpeg(const uint8_t* data, size_t len) {
     // A valid JPEG needs SOI (2) + at least one marker segment (4) + EOI (2) = 8 bytes minimum.
     // In practice, camera frames should be much larger — reject suspiciously tiny payloads
     // that can cause NULL dereferences inside turbojpeg (see issue #552).
-    constexpr size_t MIN_JPEG_SIZE = 64;
-    if (len < MIN_JPEG_SIZE || data[0] != 0xFF || data[1] != 0xD8) {
-        spdlog::debug("[CameraStream] Invalid JPEG data (len={}, need >= {})", len, MIN_JPEG_SIZE);
+    constexpr size_t kMinJpegSize = 64;
+    if (len < kMinJpegSize || data[0] != 0xFF || data[1] != 0xD8) {
+        spdlog::debug("[CameraStream] Invalid JPEG data (len={}, need >= {})", len, kMinJpegSize);
         return false;
     }
     // After SOI, the next byte must be 0xFF (start of a marker segment).
@@ -991,7 +1046,7 @@ bool CameraStream::decode_jpeg_turbojpeg(const uint8_t* data, size_t len) {
         auto* dst = static_cast<uint8_t*>(back_buf_->data);
         int dst_stride = static_cast<int>(back_buf_->header.stride);
         if (fn_decompress_(tj_, data, static_cast<unsigned long>(len), dst, decode_w, dst_stride,
-                           decode_h, TJ_PIXELFORMAT_BGR, TJ_FLAG_FASTDCT) != 0) {
+                           decode_h, kTjPixelformatBgr, kTjFlagFastdct) != 0) {
             spdlog::debug("[CameraStream] JPEG decode failed: {}", fn_get_error_(tj_));
             return false;
         }
@@ -1005,7 +1060,7 @@ bool CameraStream::decode_jpeg_turbojpeg(const uint8_t* data, size_t len) {
         }
 
         if (fn_decompress_(tj_, data, static_cast<unsigned long>(len), decode_temp_.get(), decode_w,
-                           src_stride, decode_h, TJ_PIXELFORMAT_BGR, TJ_FLAG_FASTDCT) != 0) {
+                           src_stride, decode_h, kTjPixelformatBgr, kTjFlagFastdct) != 0) {
             spdlog::debug("[CameraStream] JPEG decode failed: {}", fn_get_error_(tj_));
             return false;
         }

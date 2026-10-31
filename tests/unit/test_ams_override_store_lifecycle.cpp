@@ -102,7 +102,8 @@ helix::SlotInfo unlinked_user_edit() {
 
 class StoreBackedHappyHare : public helix::AmsBackendHappyHare {
   public:
-    explicit StoreBackedHappyHare(IMoonrakerAPI* api) : helix::AmsBackendHappyHare(api, nullptr) {
+    explicit StoreBackedHappyHare(helix::IMoonrakerAPI* api)
+        : helix::AmsBackendHappyHare(api, nullptr) {
         std::vector<std::string> gates{"0", "1", "2", "3"};
         helix::HappyHareTestAccess::slots(*this).initialize("MMU", gates);
         system_info_.total_slots = 4;
@@ -116,7 +117,7 @@ class StoreBackedHappyHare : public helix::AmsBackendHappyHare {
     helix::AmsError execute_gcode(const std::string&) override {
         return helix::AmsErrorHelper::success();
     }
-    helix::AmsError execute_gcode(const std::string&, std::function<void()>) override {
+    helix::AmsError execute_gcode(const std::string&, helix::SharedCallback<void()>) override {
         return helix::AmsErrorHelper::success();
     }
 
@@ -162,7 +163,7 @@ class StoreBackedHappyHare : public helix::AmsBackendHappyHare {
 
 class StoreBackedAfc : public helix::AmsBackendAfc {
   public:
-    explicit StoreBackedAfc(IMoonrakerAPI* api) : helix::AmsBackendAfc(api, nullptr) {
+    explicit StoreBackedAfc(helix::IMoonrakerAPI* api) : helix::AmsBackendAfc(api, nullptr) {
         std::vector<std::string> lanes{"lane1", "lane2", "lane3", "lane4"};
         helix::AfcTestAccess::initialize_slots(*this, lanes);
         system_info_.total_slots = 4;
@@ -176,7 +177,7 @@ class StoreBackedAfc : public helix::AmsBackendAfc {
     helix::AmsError execute_gcode(const std::string&) override {
         return helix::AmsErrorHelper::success();
     }
-    helix::AmsError execute_gcode(const std::string&, std::function<void()>) override {
+    helix::AmsError execute_gcode(const std::string&, helix::SharedCallback<void()>) override {
         return helix::AmsErrorHelper::success();
     }
 
@@ -208,7 +209,7 @@ class StoreBackedAce : public helix::AmsBackendAce {
     /// Unlike the AFC and Happy Hare fixtures above, this one needs a client:
     /// AmsBackendAce::on_started() sends its Klipper query through client_
     /// without a null guard.
-    StoreBackedAce(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
+    StoreBackedAce(helix::IMoonrakerAPI* api, helix::IMoonrakerClient* client)
         : helix::AmsBackendAce(api, client) {
         running_ = true;
     }
@@ -220,7 +221,7 @@ class StoreBackedAce : public helix::AmsBackendAce {
     helix::AmsError execute_gcode(const std::string&) override {
         return helix::AmsErrorHelper::success();
     }
-    helix::AmsError execute_gcode(const std::string&, std::function<void()>) override {
+    helix::AmsError execute_gcode(const std::string&, helix::SharedCallback<void()>) override {
         return helix::AmsErrorHelper::success();
     }
 

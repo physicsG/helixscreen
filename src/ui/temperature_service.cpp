@@ -17,6 +17,7 @@
 #include "active_material_provider.h"
 #include "app_constants.h"
 #include "app_globals.h"
+#include "chamber_stall_prompt.h"
 #include "filament_database.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -81,35 +82,35 @@ TemperatureService::TemperatureService(PrinterState& printer_state, IMoonrakerAP
     auto& nozzle = heaters_[idx(HeaterType::Nozzle)];
     nozzle.config = {.type = HeaterType::Nozzle,
                      .name = "Nozzle",
-                     .color = helix::TEMP_GRAPH_SERIES_COLORS[0], // nozzle
+                     .color = helix::kTempGraphSeriesColors[0], // nozzle
                      .temp_range_max = 320.0f,
                      .y_axis_increment = 80,
                      .presets = nozzle_presets,
                      .keypad_range = {0.0f, 350.0f}};
     nozzle.cooling_threshold_deci = 400; // 40°C
     nozzle.klipper_name = "extruder";    // Updated dynamically for multi-extruder
-    nozzle.min_temp = AppConstants::Temperature::DEFAULT_MIN_TEMP;
-    nozzle.max_temp = AppConstants::Temperature::DEFAULT_NOZZLE_MAX;
+    nozzle.min_temp = app_constants::temperature::kDefaultMinTemp;
+    nozzle.max_temp = app_constants::temperature::kDefaultNozzleMax;
 
     // ── Bed config ──────────────────────────────────────────────────────
     auto& bed = heaters_[idx(HeaterType::Bed)];
     bed.config = {.type = HeaterType::Bed,
                   .name = "Bed",
-                  .color = helix::TEMP_GRAPH_SERIES_COLORS[1], // bed
+                  .color = helix::kTempGraphSeriesColors[1], // bed
                   .temp_range_max = 140.0f,
                   .y_axis_increment = 35,
                   .presets = bed_presets,
                   .keypad_range = {0.0f, 150.0f}};
     bed.cooling_threshold_deci = 350; // 35°C
     bed.klipper_name = "heater_bed";
-    bed.min_temp = AppConstants::Temperature::DEFAULT_MIN_TEMP;
-    bed.max_temp = AppConstants::Temperature::DEFAULT_BED_MAX;
+    bed.min_temp = app_constants::temperature::kDefaultMinTemp;
+    bed.max_temp = app_constants::temperature::kDefaultBedMax;
 
     // ── Chamber config ──────────────────────────────────────────────────
     auto& chamber = heaters_[idx(HeaterType::Chamber)];
     chamber.config = {.type = HeaterType::Chamber,
                       .name = "Chamber",
-                      .color = helix::TEMP_GRAPH_SERIES_COLORS[2], // chamber
+                      .color = helix::kTempGraphSeriesColors[2], // chamber
                       .temp_range_max = 80.0f,
                       .y_axis_increment = 20,
                       .presets = chamber_presets,
@@ -175,6 +176,7 @@ TemperatureService::TemperatureService(PrinterState& printer_state, IMoonrakerAP
     // Register XML event callbacks (BEFORE any lv_xml_create calls)
     register_xml_callbacks({
         {"on_chamber_fault_reset_clicked", on_chamber_fault_reset_clicked},
+        {"on_chamber_retry_target_clicked", on_chamber_retry_target_clicked},
         {"on_chamber_filter_fan_clicked", on_chamber_filter_fan_clicked},
         {"on_chamber_dryer_start_clicked", on_chamber_dryer_start_clicked},
         {"on_chamber_dryer_stop_clicked", on_chamber_dryer_stop_clicked},
@@ -213,7 +215,7 @@ void TemperatureService::on_temp_changed(HeaterType type, int temp_deci) {
     }
 
     // Throttle live graph updates to 1 Hz
-    if (now_ms - h.last_graph_update_ms < GRAPH_SAMPLE_INTERVAL_MS) {
+    if (now_ms - h.last_graph_update_ms < kGraphSampleIntervalMs) {
         return;
     }
     h.last_graph_update_ms = now_ms;
@@ -241,9 +243,9 @@ void TemperatureService::recompute_chamber_target() {
     auto& chamber = heaters_[idx(HeaterType::Chamber)];
 
     // Derive both the effective target and the control mode from the data-layer
-    // subjects, which fold in the cooling-fan resting target so M141 S0 reads as
-    // Off (effective 0) rather than a deliberate "Maintaining" set at the resting
-    // temperature.
+    // subjects, which fold in the cooling-fan resting target so M141 S0 (and a
+    // deliberate set equal to it) reads as Resting (Auto) rather than a
+    // deliberate "Maintaining" set.
     chamber.target = lv_subject_get_int(
         printer_state_.temperature_state().get_chamber_effective_target_subject());
     chamber.chamber_mode =
@@ -264,15 +266,15 @@ void TemperatureService::update_display(HeaterType type) {
     }
 
     auto& h = heaters_[idx(type)];
-    int current_deg = deci_to_degrees_f(h.current);
-    int target_deg = deci_to_degrees_f(h.target);
+    char text[sizeof(h.display_buf)];
+    format_display(h, text, sizeof(text));
+    lv_subject_copy_string(&h.display_subject, text);
+}
 
-    if (target_deg > 0) {
-        snprintf(h.display_buf.data(), h.display_buf.size(), "%d / %d", current_deg, target_deg);
-    } else {
-        snprintf(h.display_buf.data(), h.display_buf.size(), "%d / —", current_deg);
-    }
-    lv_subject_copy_string(&h.display_subject, h.display_buf.data());
+void TemperatureService::format_display(const HeaterState& h, char* buf, size_t size) {
+    helix::ui::temperature::format_temperature_pair(static_cast<int>(deci_to_degrees_f(h.current)),
+                                                    static_cast<int>(deci_to_degrees_f(h.target)),
+                                                    buf, size, /*with_unit=*/false);
 }
 
 void TemperatureService::update_status(HeaterType type) {
@@ -351,17 +353,16 @@ void TemperatureService::init_subjects() {
                                         "chamber_status_state"};
     const char* heating_names[] = {"nozzle_heating", "bed_heating", "chamber_heating"};
 
-    for (int i = 0; i < helix::HEATER_TYPE_COUNT; ++i) {
+    for (int i = 0; i < helix::kHeaterTypeCount; ++i) {
         auto& h = heaters_[i];
 
-        // Format initial display string
-        int current_deg = deci_to_degrees_f(h.current);
-        int target_deg = deci_to_degrees_f(h.target);
-        snprintf(h.display_buf.data(), h.display_buf.size(), "%d / %d°C", current_deg, target_deg);
+        // The macro copies the initial value INTO display_buf, so it is
+        // formatted elsewhere: a copy of a buffer onto itself is undefined.
+        char initial[sizeof(h.display_buf)];
+        format_display(h, initial, sizeof(initial));
 
-        // Initialize subjects
         UI_MANAGED_SUBJECT_STRING_N(h.display_subject, h.display_buf.data(), h.display_buf.size(),
-                                    h.display_buf.data(), display_names[i], subjects_);
+                                    initial, display_names[i], subjects_);
         UI_MANAGED_SUBJECT_STRING_N(h.status_subject, h.status_buf.data(), h.status_buf.size(), "",
                                     status_names[i], subjects_);
         UI_MANAGED_SUBJECT_INT(h.status_state_subject, 0, status_state_names[i], subjects_);
@@ -369,7 +370,7 @@ void TemperatureService::init_subjects() {
     }
 
     subjects_initialized_ = true;
-    spdlog::debug("[TempPanel] Subjects initialized for {} heater types", helix::HEATER_TYPE_COUNT);
+    spdlog::debug("[TempPanel] Subjects initialized for {} heater types", helix::kHeaterTypeCount);
 }
 
 void TemperatureService::deinit_subjects() {
@@ -417,6 +418,26 @@ void TemperatureService::on_chamber_fault_reset_clicked(lv_event_t* /*e*/) {
         tc->reset_chamber_fault();
     } else {
         spdlog::warn("[TempPanel] chamber fault reset clicked with no controller registered");
+    }
+}
+
+// The route around the gcode queue when there is one, since a refused
+// target often matters most while a wait holds that queue. Gcode only with no
+// job holding the machine: during one it would queue behind the wait.
+void TemperatureService::on_chamber_retry_target_clicked(lv_event_t* /*e*/) {
+    if (helix::ui::ChamberStallPrompt::retry()) {
+        return;
+    }
+    auto* tc = get_temperature_controller();
+    const double target = helix::ui::ChamberStallPrompt::retry_target_c();
+    lv_subject_t* job = get_printer_state().print_state().get_job_holds_machine_subject();
+    if (job && lv_subject_get_int(job) != 0) {
+        spdlog::warn("[TempPanel] chamber retry during a job with no route around the queue");
+        NOTIFY_WARNING("{}", lv_tr("The heater can't be changed while the printer is waiting."));
+    } else if (tc && target > 0) {
+        tc->set_target(helix::HeaterType::Chamber, target);
+    } else {
+        spdlog::warn("[TempPanel] chamber retry clicked with no target to resend");
     }
 }
 
@@ -530,10 +551,10 @@ void TemperatureService::setup_mini_combined_graph(lv_obj_t* container) {
     // pinned to whichever extruder was active at first setup.
     mini_graph_container_ = container;
 
-    static constexpr int MINI_GRAPH_POINTS = 300;
+    static constexpr int kMiniGraphPoints = 300;
 
     helix::TempGraphControllerConfig config;
-    config.point_count = MINI_GRAPH_POINTS;
+    config.point_count = kMiniGraphPoints;
     config.axis_size = "xs";
     uint32_t features = TEMP_GRAPH_FEATURE_LINES | TEMP_GRAPH_FEATURE_TARGET_LINES |
                         TEMP_GRAPH_FEATURE_Y_AXIS | TEMP_GRAPH_FEATURE_X_AXIS |
@@ -594,7 +615,7 @@ void TemperatureService::setup_mini_combined_graph(lv_obj_t* container) {
         std::make_unique<helix::TempGraphController>(container, std::move(config));
 
     spdlog::debug("[TempPanel] Mini combined graph created with {} point capacity",
-                  MINI_GRAPH_POINTS);
+                  kMiniGraphPoints);
 }
 
 void TemperatureService::register_heater_graph(ui_temp_graph_t* graph, SeriesId series_id,

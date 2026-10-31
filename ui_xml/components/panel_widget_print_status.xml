@@ -9,6 +9,22 @@
          (CLAUDE.md rule #6). -->
     <style name="library_body_gap_default" pad_gap="#space_xs"/>
     <style name="library_body_gap_wide" pad_gap="#space_md"/>
+    <!-- library_actions as one column of buttons, or as two rows of icon-only
+         buttons when stacking would make them too short to tap
+         (print_status_library_grid). Each cell is a full-width row of the
+         column; in two rows, flex_grow shares a row between its cells, the cell
+         print_status_library_wrap_at names starts the second row (so a lone
+         last cell takes all of it), each half-height cell holds its button
+         against the middle so the rows sit together, and the cells' own
+         vertical padding is the gap between the rows. Grid icons drop a size to
+         fit the shorter buttons. -->
+    <style name="library_actions_column" layout="flex" flex_flow="column" pad_row="#space_xs"/>
+    <style name="library_actions_grid" layout="flex" flex_flow="row_wrap" pad_row="0"/>
+    <style name="library_cell_column" width="100%" layout="flex" pad_top="0" pad_bottom="0" flex_main_place="center"/>
+    <style name="library_cell_grid" height="50%" pad_top="#space_xxs" pad_bottom="#space_xxs"/>
+    <style name="library_cell_grid_top" layout="flex" flex_main_place="end"/>
+    <style name="library_cell_grid_bottom" layout="flex" flex_main_place="start"/>
+    <style name="library_icon_grid" text_font="#icon_font_xs"/>
   </styles>
   <view extends="ui_card" width="100%" height="100%">
     <bind_state_if_not_eq subject="printer_connection_state" state="disabled" ref_value="2"/>
@@ -40,52 +56,108 @@
                   width="40%" height="100%" src="A:assets/images/benchy_thumbnail_white.png" inner_align="contain"
                   clickable="false" event_bubble="true"/>
         <!-- Action list. Container hides when every row is hidden so the thumbnail
-             can expand; C++ also adjusts width + flex alignment on that transition. -->
+             can expand; C++ also adjusts width + flex alignment on that transition.
+             Each row's cell takes an equal share of the column and centers its
+             button, which fills the cell up to button_height: a short card shrinks
+             the buttons to fit, a tall one grows them to full touch height and
+             spaces them out with what is left. Where that would leave them too
+             short to tap, C++ re-flows them into two rows of icons
+             (print_status_library_grid), and drops every label at once when any
+             one does not fit beside its icon (print_status_library_icon_only). -->
         <lv_obj name="library_actions"
-                height="100%" flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_top="#space_xxs"
-                style_pad_bottom="#space_xxs" style_pad_gap="#space_xs" style_flex_main_place="space_evenly"
-                scrollable="false" clickable="false" event_bubble="true">
+                height="100%" flex_grow="1" style_pad_all="0" style_pad_column="#space_xs" scrollable="false"
+                clickable="false" event_bubble="true">
           <bind_flag_if_eq subject="print_status_actions_hidden" flag="hidden" ref_value="1"/>
-          <ui_button name="library_row_files"
-                     width="100%" height="#button_height_sm" flex_grow="1" style_max_height="#button_height_sm"
-                     variant="outline" layout="row">
+          <bind_style name="library_actions_grid" subject="print_status_library_grid" ref_value="1"/>
+          <bind_style name="library_actions_column" subject="print_status_library_grid" ref_value="0"/>
+          <lv_obj name="library_row_files_cell"
+                  flex_grow="1" style_pad_left="0" style_pad_right="0" flex_flow="column" scrollable="false"
+                  clickable="false" event_bubble="true">
             <bind_flag_if_eq subject="print_status_files_hidden" flag="hidden" ref_value="1"/>
-            <icon src="folder" size="sm" clickable="false" event_bubble="true">
-              <bind_flag_if_eq subject="print_status_column_mode" flag="hidden" ref_value="1"/>
-            </icon>
-            <text_small text="Print Files" clickable="false" event_bubble="true"/>
-            <event_cb trigger="clicked" callback="library_files_cb"/>
-          </ui_button>
-          <ui_button name="library_row_last"
-                     width="100%" height="#button_height_sm" flex_grow="1" style_max_height="#button_height_sm"
-                     variant="outline" layout="row">
+            <bind_style name="library_cell_grid" subject="print_status_library_grid" ref_value="1"/>
+            <bind_style name="library_cell_column" subject="print_status_library_grid" ref_value="0"/>
+            <bind_flag_if_eq subject="print_status_library_wrap_at" flag="flex_in_new_track" ref_value="0"/>
+            <bind_style_if name="library_cell_grid_top" cond="print_status_library_wrap_at gt 0"/>
+            <bind_style_if name="library_cell_grid_bottom"
+                           cond="print_status_library_wrap_at ge 0 and print_status_library_wrap_at le 0"/>
+            <ui_button name="library_row_files"
+                       width="100%" height="100%" style_max_height="#button_height" variant="outline" layout="row">
+              <icon name="library_files_icon" src="folder" size="sm" clickable="false" event_bubble="true">
+                <bind_flag_if cond="print_status_column_mode eq 1 and print_status_library_icon_only eq 0" flag="hidden"/>
+                <bind_style name="library_icon_grid" subject="print_status_library_grid" ref_value="1"/>
+              </icon>
+              <text_small name="library_files_label" text="Print Files" clickable="false" event_bubble="true">
+                <bind_flag_if_eq subject="print_status_library_icon_only" flag="hidden" ref_value="1"/>
+              </text_small>
+              <event_cb trigger="clicked" callback="library_files_cb"/>
+            </ui_button>
+          </lv_obj>
+          <lv_obj name="library_row_last_cell"
+                  flex_grow="1" style_pad_left="0" style_pad_right="0" flex_flow="column" scrollable="false"
+                  clickable="false" event_bubble="true">
             <bind_flag_if_eq subject="print_status_last_hidden" flag="hidden" ref_value="1"/>
-            <icon src="clock" size="sm" clickable="false" event_bubble="true">
-              <bind_flag_if_eq subject="print_status_column_mode" flag="hidden" ref_value="1"/>
-            </icon>
-            <text_small name="library_last_label" text="Reprint Last" clickable="false" event_bubble="true"/>
-            <event_cb trigger="clicked" callback="library_last_cb"/>
-          </ui_button>
-          <ui_button name="library_row_recent"
-                     width="100%" height="#button_height_sm" flex_grow="1" style_max_height="#button_height_sm"
-                     variant="outline" layout="row">
+            <bind_style name="library_cell_grid" subject="print_status_library_grid" ref_value="1"/>
+            <bind_style name="library_cell_column" subject="print_status_library_grid" ref_value="0"/>
+            <bind_flag_if_eq subject="print_status_library_wrap_at" flag="flex_in_new_track" ref_value="1"/>
+            <bind_style_if name="library_cell_grid_top" cond="print_status_library_wrap_at gt 1"/>
+            <bind_style_if name="library_cell_grid_bottom"
+                           cond="print_status_library_wrap_at ge 0 and print_status_library_wrap_at le 1"/>
+            <ui_button name="library_row_last"
+                       width="100%" height="100%" style_max_height="#button_height" variant="outline" layout="row">
+              <icon name="library_last_icon" src="clock" size="sm" clickable="false" event_bubble="true">
+                <bind_flag_if cond="print_status_column_mode eq 1 and print_status_library_icon_only eq 0" flag="hidden"/>
+                <bind_style name="library_icon_grid" subject="print_status_library_grid" ref_value="1"/>
+              </icon>
+              <text_small name="library_last_label" text="Reprint Last" clickable="false" event_bubble="true">
+                <bind_flag_if_eq subject="print_status_library_icon_only" flag="hidden" ref_value="1"/>
+              </text_small>
+              <event_cb trigger="clicked" callback="library_last_cb"/>
+            </ui_button>
+          </lv_obj>
+          <lv_obj name="library_row_recent_cell"
+                  flex_grow="1" style_pad_left="0" style_pad_right="0" flex_flow="column" scrollable="false"
+                  clickable="false" event_bubble="true">
             <bind_flag_if_eq subject="print_status_recent_hidden" flag="hidden" ref_value="1"/>
-            <icon src="star" size="sm" clickable="false" event_bubble="true">
-              <bind_flag_if_eq subject="print_status_column_mode" flag="hidden" ref_value="1"/>
-            </icon>
-            <text_small text="Recent Prints" clickable="false" event_bubble="true"/>
-            <event_cb trigger="clicked" callback="library_recent_cb"/>
-          </ui_button>
-          <ui_button name="library_row_queue"
-                     width="100%" height="#button_height_sm" flex_grow="1" style_max_height="#button_height_sm"
-                     variant="outline" layout="row">
+            <bind_style name="library_cell_grid" subject="print_status_library_grid" ref_value="1"/>
+            <bind_style name="library_cell_column" subject="print_status_library_grid" ref_value="0"/>
+            <bind_flag_if_eq subject="print_status_library_wrap_at" flag="flex_in_new_track" ref_value="2"/>
+            <bind_style_if name="library_cell_grid_top" cond="print_status_library_wrap_at gt 2"/>
+            <bind_style_if name="library_cell_grid_bottom"
+                           cond="print_status_library_wrap_at ge 0 and print_status_library_wrap_at le 2"/>
+            <ui_button name="library_row_recent"
+                       width="100%" height="100%" style_max_height="#button_height" variant="outline" layout="row">
+              <icon name="library_recent_icon" src="star" size="sm" clickable="false" event_bubble="true">
+                <bind_flag_if cond="print_status_column_mode eq 1 and print_status_library_icon_only eq 0" flag="hidden"/>
+                <bind_style name="library_icon_grid" subject="print_status_library_grid" ref_value="1"/>
+              </icon>
+              <text_small name="library_recent_label" text="Recent Prints" clickable="false" event_bubble="true">
+                <bind_flag_if_eq subject="print_status_library_icon_only" flag="hidden" ref_value="1"/>
+              </text_small>
+              <event_cb trigger="clicked" callback="library_recent_cb"/>
+            </ui_button>
+          </lv_obj>
+          <lv_obj name="library_row_queue_cell"
+                  flex_grow="1" style_pad_left="0" style_pad_right="0" flex_flow="column" scrollable="false"
+                  clickable="false" event_bubble="true">
             <bind_flag_if_eq subject="print_status_queue_hidden" flag="hidden" ref_value="1"/>
-            <icon src="progress_clock" size="sm" clickable="false" event_bubble="true">
-              <bind_flag_if_eq subject="print_status_column_mode" flag="hidden" ref_value="1"/>
-            </icon>
-            <text_small name="library_queue_label" text="Job Queue" clickable="false" event_bubble="true"/>
-            <event_cb trigger="clicked" callback="library_queue_cb"/>
-          </ui_button>
+            <bind_style name="library_cell_grid" subject="print_status_library_grid" ref_value="1"/>
+            <bind_style name="library_cell_column" subject="print_status_library_grid" ref_value="0"/>
+            <bind_flag_if_eq subject="print_status_library_wrap_at" flag="flex_in_new_track" ref_value="3"/>
+            <bind_style_if name="library_cell_grid_top" cond="print_status_library_wrap_at gt 3"/>
+            <bind_style_if name="library_cell_grid_bottom"
+                           cond="print_status_library_wrap_at ge 0 and print_status_library_wrap_at le 3"/>
+            <ui_button name="library_row_queue"
+                       width="100%" height="100%" style_max_height="#button_height" variant="outline" layout="row">
+              <icon name="library_queue_icon" src="progress_clock" size="sm" clickable="false" event_bubble="true">
+                <bind_flag_if cond="print_status_column_mode eq 1 and print_status_library_icon_only eq 0" flag="hidden"/>
+                <bind_style name="library_icon_grid" subject="print_status_library_grid" ref_value="1"/>
+              </icon>
+              <text_small name="library_queue_label" text="Job Queue" clickable="false" event_bubble="true">
+                <bind_flag_if_eq subject="print_status_library_icon_only" flag="hidden" ref_value="1"/>
+              </text_small>
+              <event_cb trigger="clicked" callback="library_queue_cb"/>
+            </ui_button>
+          </lv_obj>
         </lv_obj>
       </lv_obj>
       <!-- Klipper display_status.message (M117). Collapses to zero height when
@@ -166,19 +238,7 @@
                         inner_align="contain" clickable="false" event_bubble="true"/>
             </lv_obj>
             <!-- PREPARING info (visible when print_start_phase != 0) -->
-            <lv_obj name="print_card_preparing_info"
-                    width="100%" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
-                    style_flex_cross_place="center" style_pad_gap="#space_xs" scrollable="false" hidden="true"
-                    clickable="false" event_bubble="true">
-              <bind_flag_if_eq subject="print_start_phase" flag="hidden" ref_value="0"/>
-              <text_body text="Preparing Print" clickable="false" event_bubble="true"/>
-              <progress_bar name="print_start_bar"
-                            width="90%" bind_value="print_start_progress" clickable="false" event_bubble="true"/>
-              <text_small bind_text="print_start_message" clickable="false" event_bubble="true"/>
-              <text_small name="print_start_eta"
-                          bind_text="print_start_time_left" style_text_color="#text_muted" clickable="false"
-                          event_bubble="true"/>
-            </lv_obj>
+            <print_start_preparing_info name="print_card_preparing_info"/>
             <!-- PRINTING info (visible when print_show_progress != 0) -->
             <lv_obj name="print_card_info"
                     width="100%" style_pad_all="0" flex_flow="column" style_flex_main_place="center"

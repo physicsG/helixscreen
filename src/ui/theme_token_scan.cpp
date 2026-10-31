@@ -14,9 +14,16 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <sys/stat.h>
 #include <unordered_map>
 #include <vector>
 
@@ -29,13 +36,6 @@ const char* ui_xml_dir() {
 
 } // namespace helix::theme_detail
 
-// Expat callback data for extracting name→value pairs with a specific suffix
-struct SuffixValueParserData {
-    const char* element_type;                              // "color", "px", or "string"
-    const char* suffix;                                    // "_light", "_small", etc.
-    std::unordered_map<std::string, std::string>* results; // Output: base_name → value
-};
-
 // Helper: check if string ends with suffix
 static bool ends_with_suffix(const char* str, const char* suffix) {
     size_t str_len = strlen(str);
@@ -45,141 +45,221 @@ static bool ends_with_suffix(const char* str, const char* suffix) {
     return strcmp(str + str_len - suffix_len, suffix) == 0;
 }
 
-// Parser callback for ALL elements of a given type (no suffix matching)
-struct AllElementParserData {
-    const char* element_type;
-    std::unordered_map<std::string, std::string>* token_values;
+namespace {
+
+/// One element carrying both a name= and a value= attribute, in document order.
+struct XmlToken {
+    std::string element;
+    std::string name;
+    std::string value;
 };
 
-static void XMLCALL all_element_start(void* userData, const XML_Char* name, const XML_Char** atts) {
-    auto* data = static_cast<AllElementParserData*>(userData);
-    if (strcmp(name, data->element_type) != 0)
-        return;
+using XmlTokens = std::vector<XmlToken>;
 
+/// What stat() says about a file. Any field moving means the bytes may have.
+struct FileStamp {
+    dev_t dev = 0;
+    ino_t ino = 0;
+    off_t size = 0;
+    int64_t mtime_ns = 0;
+    int64_t ctime_ns = 0;
+
+    bool operator==(const FileStamp& o) const {
+        return dev == o.dev && ino == o.ino && size == o.size && mtime_ns == o.mtime_ns &&
+               ctime_ns == o.ctime_ns;
+    }
+};
+
+struct CachedFile {
+    FileStamp stamp;
+    // False while the file was modified too recently for its stamp to prove
+    // anything: a same-size rewrite inside one timestamp tick leaves every
+    // field equal. Such an entry is re-parsed on every lookup.
+    bool trusted = false;
+    std::shared_ptr<const XmlTokens> tokens;
+};
+
+// How old a file's last change must be, when it is parsed, before its stamp is
+// trusted to detect the next change. Above the coarsest common timestamp tick:
+// FAT and exFAT record mtime in 2s steps.
+constexpr int64_t kRacyWindowNs = 3'000'000'000;
+std::atomic<int64_t> g_racy_window_ns{kRacyWindowNs};
+
+#if !defined(HELIX_PLATFORM_ESP32)
+
+int64_t to_ns(const struct timespec& ts) {
+    return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+}
+
+std::optional<FileStamp> stat_file(const char* filepath) {
+    struct stat st {};
+    if (::stat(filepath, &st) != 0)
+        return std::nullopt;
+    FileStamp stamp;
+    stamp.dev = st.st_dev;
+    stamp.ino = st.st_ino;
+    stamp.size = st.st_size;
+#if defined(__APPLE__)
+    stamp.mtime_ns = to_ns(st.st_mtimespec);
+    stamp.ctime_ns = to_ns(st.st_ctimespec);
+#else
+    stamp.mtime_ns = to_ns(st.st_mtim);
+    stamp.ctime_ns = to_ns(st.st_ctim);
+#endif
+    return stamp;
+}
+
+int64_t realtime_now_ns() {
+    struct timespec ts {};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return to_ns(ts);
+}
+#endif
+
+std::atomic<int> g_token_file_parses{0};
+
+void XMLCALL collect_token_start(void* user_data, const XML_Char* name, const XML_Char** attrs) {
     const char* elem_name = nullptr;
     const char* elem_value = nullptr;
-    for (int i = 0; atts[i]; i += 2) {
-        if (strcmp(atts[i], "name") == 0)
-            elem_name = atts[i + 1];
-        else if (strcmp(atts[i], "value") == 0)
-            elem_value = atts[i + 1];
-    }
-    if (elem_name && elem_value) {
-        (*data->token_values)[elem_name] = elem_value;
-    }
-}
-
-// Expat element start handler - extracts name and value for matching elements
-static void XMLCALL suffix_value_element_start(void* user_data, const XML_Char* name,
-                                               const XML_Char** attrs) {
-    SuffixValueParserData* data = static_cast<SuffixValueParserData*>(user_data);
-
-    if (strcmp(name, data->element_type) != 0)
-        return;
-
-    // Extract both name and value attributes
-    const char* const_name = nullptr;
-    const char* const_value = nullptr;
     for (int i = 0; attrs[i]; i += 2) {
         if (strcmp(attrs[i], "name") == 0)
-            const_name = attrs[i + 1];
-        if (strcmp(attrs[i], "value") == 0)
-            const_value = attrs[i + 1];
+            elem_name = attrs[i + 1];
+        else if (strcmp(attrs[i], "value") == 0)
+            elem_value = attrs[i + 1];
     }
-
-    // Skip if either attribute is missing
-    if (!const_name || !const_value)
-        return;
-
-    // Check if name ends with the target suffix
-    if (ends_with_suffix(const_name, data->suffix)) {
-        // Extract base name (without suffix)
-        size_t base_len = strlen(const_name) - strlen(data->suffix);
-        std::string base_name(const_name, base_len);
-
-        // Store in results (overwrites any existing value - last-wins)
-        (*data->results)[base_name] = const_value;
+    if (elem_name && elem_value) {
+        static_cast<XmlTokens*>(user_data)->push_back({name, elem_name, elem_value});
     }
 }
 
-/// Read a top-level XML file whole, for the token-discovery passes.
-///
-/// Discovery makes roughly 25 passes and each one re-reads every file. That is
-/// free on a desktop filesystem; on SPI-flash LittleFS it costs minutes of boot
-/// and trips the watchdog, so the bytes are cached there. Making discovery
-/// single-pass would retire the cache.
-static std::string tm_read_xml_file(const char* filepath) {
-#if defined(HELIX_PLATFORM_ESP32)
-    static std::unordered_map<std::string, std::string> cache;
-    auto cached = cache.find(filepath);
-    if (cached != cache.end()) {
-        return cached->second;
+/// Every name/value element in the file, or nullptr when it cannot be read.
+/// A parse error keeps the elements before it.
+std::shared_ptr<const XmlTokens> parse_file_tokens(const char* filepath) {
+    std::optional<std::string> content = helix::text_io::read_file(filepath);
+    if (!content)
+        return nullptr;
+    g_token_file_parses.fetch_add(1, std::memory_order_relaxed);
+
+    auto tokens = std::make_shared<XmlTokens>();
+    if (content->empty())
+        return tokens;
+
+    XML_Parser parser = XML_ParserCreate(nullptr);
+    if (!parser) {
+        spdlog::error("[Theme] Failed to create XML parser for {}", filepath);
+        return tokens;
     }
-#endif
-    std::string content = helix::text_io::read_file(filepath).value_or("");
+    XML_SetUserData(parser, tokens.get());
+    XML_SetElementHandler(parser, collect_token_start, nullptr);
+    if (XML_Parse(parser, content->c_str(), static_cast<int>(content->size()), XML_TRUE) ==
+        XML_STATUS_ERROR) {
+        spdlog::trace("[Theme] XML parse error in {} line {}: {}", filepath,
+                      XML_GetCurrentLineNumber(parser), XML_ErrorString(XML_GetErrorCode(parser)));
+    }
+    XML_ParserFree(parser);
+    return tokens;
+}
+
+/// The file's tokens, parsed once and reused while the file is unchanged.
+///
+/// Discovery makes roughly 25 passes over ui_xml/ per theme init or layout
+/// refresh, and every LVGL test case refreshes the layout. Reusing the parse
+/// makes a pass over an unchanged tree one stat per file, while a live edit
+/// still moves the stat and is re-read. ESP32 serves ui_xml from a read-only
+/// image, so its entries are never revalidated.
+std::shared_ptr<const XmlTokens> file_tokens(const char* filepath) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, CachedFile> cache;
+
 #if defined(HELIX_PLATFORM_ESP32)
-    cache.emplace(filepath, content);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = cache.find(filepath);
+        if (it != cache.end())
+            return it->second.tokens;
+    }
+    auto tokens = parse_file_tokens(filepath);
+    if (tokens) {
+        std::lock_guard<std::mutex> lock(mutex);
+        cache[filepath] = CachedFile{{}, true, tokens};
+    }
+    return tokens;
+#else
+    const std::optional<FileStamp> stamp = stat_file(filepath);
+    if (!stamp) {
+        std::lock_guard<std::mutex> lock(mutex);
+        cache.erase(filepath);
+        return nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = cache.find(filepath);
+        if (it != cache.end() && it->second.trusted && it->second.stamp == *stamp)
+            return it->second.tokens;
+    }
+
+    // Stamped before the read: a write that lands mid-read moves the stamp, so
+    // the next lookup re-parses rather than keeping what this read saw.
+    const int64_t now_ns = realtime_now_ns();
+    auto tokens = parse_file_tokens(filepath);
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!tokens) {
+        cache.erase(filepath);
+        return nullptr;
+    }
+    const int64_t last_change_ns = std::max(stamp->mtime_ns, stamp->ctime_ns);
+    cache[filepath] = CachedFile{
+        *stamp, now_ns - last_change_ns > g_racy_window_ns.load(std::memory_order_relaxed), tokens};
+    return tokens;
 #endif
-    return content;
+}
+
+} // namespace
+
+int64_t helix::theme_detail::set_token_racy_window_ns(int64_t ns) {
+    return g_racy_window_ns.exchange(ns, std::memory_order_relaxed);
+}
+
+int theme_manager_token_file_parse_count() {
+    return g_token_file_parses.load(std::memory_order_relaxed);
 }
 
 void theme_manager_parse_xml_file_for_all(
     const char* filepath, const char* element_type,
     std::unordered_map<std::string, std::string>& token_values) {
-    if (!filepath)
+    if (!filepath || !element_type)
         return;
 
-    const std::string xml_content = tm_read_xml_file(filepath);
-    if (xml_content.empty())
+    const auto tokens = file_tokens(filepath);
+    if (!tokens)
         return;
 
-    AllElementParserData parser_data = {element_type, &token_values};
-    XML_Parser parser = XML_ParserCreate(nullptr);
-    if (!parser)
-        return;
-
-    XML_SetUserData(parser, &parser_data);
-    XML_SetElementHandler(parser, all_element_start, nullptr);
-    XML_Parse(parser, xml_content.c_str(), static_cast<int>(xml_content.size()), XML_TRUE);
-    XML_ParserFree(parser);
+    for (const XmlToken& token : *tokens) {
+        if (token.element == element_type)
+            token_values[token.name] = token.value;
+    }
 }
 
 void theme_manager_parse_xml_file_for_suffix(
     const char* filepath, const char* element_type, const char* suffix,
     std::unordered_map<std::string, std::string>& token_values) {
-    // Handle NULL filepath gracefully
-    if (!filepath) {
-        spdlog::trace("[Theme] parse_xml_file_for_suffix: NULL filepath");
+    if (!filepath || !element_type || !suffix) {
+        spdlog::trace("[Theme] parse_xml_file_for_suffix: NULL argument");
         return;
     }
 
-    const std::string xml_content = tm_read_xml_file(filepath);
-    if (xml_content.empty()) {
+    const auto tokens = file_tokens(filepath);
+    if (!tokens) {
         spdlog::trace("[Theme] Could not open {} for suffix parsing", filepath);
         return;
     }
 
-    // Handle empty file
-    if (xml_content.empty()) {
-        return;
+    for (const XmlToken& token : *tokens) {
+        if (token.element != element_type || !ends_with_suffix(token.name.c_str(), suffix))
+            continue;
+        // Last-wins: a later element, or a later file, overwrites the base name.
+        token_values[token.name.substr(0, token.name.size() - strlen(suffix))] = token.value;
     }
-
-    SuffixValueParserData parser_data = {element_type, suffix, &token_values};
-    XML_Parser parser = XML_ParserCreate(nullptr);
-    if (!parser) {
-        spdlog::error("[Theme] Failed to create XML parser for {}", filepath);
-        return;
-    }
-    XML_SetUserData(parser, &parser_data);
-    XML_SetElementHandler(parser, suffix_value_element_start, nullptr);
-
-    if (XML_Parse(parser, xml_content.c_str(), static_cast<int>(xml_content.size()), XML_TRUE) ==
-        XML_STATUS_ERROR) {
-        spdlog::trace("[Theme] XML parse error in {} line {}: {}", filepath,
-                      XML_GetCurrentLineNumber(parser), XML_ErrorString(XML_GetErrorCode(parser)));
-        // Continue with partial results (don't clear token_values)
-    }
-    XML_ParserFree(parser);
 }
 
 std::vector<std::string> theme_manager_find_xml_files(const char* directory, bool recursive) {

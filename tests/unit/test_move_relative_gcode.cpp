@@ -323,7 +323,7 @@ TEST_CASE("generate_relative_move_gcode: fixed-trimmed number bytes", "[motion][
         return s;
     };
     for (double v : gcode_format_values()) {
-        if (std::abs(v) <= helix::AxisMove::EPSILON_MM) {
+        if (std::abs(v) <= helix::AxisMove::kEpsilonMm) {
             continue;
         }
         INFO("value=" << v);

@@ -20,9 +20,12 @@
 //   in-memory thumbnail fetch" the Task 10 plan entry describes — Task 11
 //   ("new design" print-select) reuses this same primitive directly for real
 //   thumbnail bytes (root="gcodes", path=the resolved .thumbs/ path, capped
-//   at HARD_CAP_BYTES), it just isn't wired to a UI yet.
+//   at kHardCapBytes), it just isn't wired to a UI yet.
 //
-// ITransfersAPI::download_file — REAL, capped at WHOLE_FILE_CAP_BYTES and
+// ITransfersAPI::download_file_range — REAL: the same lane with the range
+// moved off the start, which a sliced .3mf's thumbnail and summary need.
+//
+// ITransfersAPI::download_file — REAL, capped at kWholeFileCapBytes and
 // erroring above it: small config files such as AFC.cfg, read into memory.
 //
 // ITransfersAPI::get_file_metadata / metascan_file are IFilesAPI (NOT this
@@ -84,11 +87,11 @@ constexpr char TAG[] = "esp_rest_api";
 // becomes %XX. libhv's HUrl isn't part of the ESP32 build, so this is a small
 // standalone equivalent (no ESP-IDF/libhv dependency, just <cctype>/<cstdio>).
 std::string esp_url_escape_path(const std::string& path) {
-    static constexpr char UNRESERVED[] = "/.-_";
+    static constexpr char kUnreserved[] = "/.-_";
     std::string out;
     out.reserve(path.size());
     for (unsigned char c : path) {
-        if (std::isalnum(c) || std::strchr(UNRESERVED, static_cast<char>(c)) != nullptr) {
+        if (std::isalnum(c) || std::strchr(kUnreserved, static_cast<char>(c)) != nullptr) {
             out += static_cast<char>(c);
         } else {
             char buf[4];
@@ -104,7 +107,7 @@ std::string esp_url_escape_path(const std::string& path) {
 // (e.g. Snapmaker's optional call_rest_post action) must fail gracefully, not
 // abort/reset the board.
 void esp_rest_unimplemented_err(const char* sym,
-                                const std::function<void(const MoonrakerError&)>& err) {
+                                const helix::SharedCallback<void(const MoonrakerError&)>& err) {
     ESP_LOGE(TAG, "esp_rest_api stub: %s", sym);
     if (err) {
         MoonrakerError e;
@@ -138,8 +141,8 @@ bool esp_is_safe_endpoint(const std::string& endpoint) {
 // (a handful of scalar fields + a small slots array) without being wasteful
 // of the lane's PSRAM accumulation buffer. EspHttpLane fails loud rather than
 // silently truncating an over-cap response (see esp_http_lane.cpp).
-constexpr size_t REST_GET_CAP_BYTES = 16 * 1024;
-constexpr size_t WHOLE_FILE_CAP_BYTES = 64 * 1024;
+constexpr size_t kRestGetCapBytes = 16 * 1024;
+constexpr size_t kWholeFileCapBytes = 64 * 1024;
 } // namespace
 
 // ============================================================================
@@ -191,6 +194,45 @@ void MoonrakerFileTransferAPI::download_file_partial(const std::string& root,
     }
 }
 
+// Bytes from inside a file: the same lane with the range moved off the start.
+// A sliced .3mf's thumbnail and summary come out of its archive this way.
+void MoonrakerFileTransferAPI::download_file_range(const std::string& root, const std::string& path,
+                                                   uint64_t offset, size_t len,
+                                                   StringCallback on_success,
+                                                   ErrorCallback on_error, CancelFlag cancelled) {
+    on_success = helix::http_epoch::guard_reply(on_success, on_error, "download_file_range");
+    if (moonraker_internal::reject_invalid_path(path, "download_file_range", on_error))
+        return;
+    if (moonraker_internal::reject_invalid_file_root(root, "download_file_range", on_error))
+        return;
+    if (http_base_url_.empty() || len == 0) {
+        moonraker_internal::report_error(
+            on_error, MoonrakerErrorType::CONNECTION_LOST, "download_file_range",
+            len == 0 ? "length must be non-zero" : "HTTP base URL not configured");
+        return;
+    }
+
+    std::string url = http_base_url_ + "/server/files/" + root + "/" + esp_url_escape_path(path);
+    bool queued = helix::http::EspHttpLane::instance().submit_get(
+        url, len,
+        [on_success](std::string& body) {
+            if (on_success) {
+                on_success(body);
+            }
+        },
+        [on_error](const std::string& message) {
+            moonraker_internal::report_error(on_error, MoonrakerErrorType::UNKNOWN,
+                                             "download_file_range", message);
+        },
+        std::move(cancelled), offset);
+
+    if (!queued) {
+        moonraker_internal::report_error(on_error, MoonrakerErrorType::QUEUE_FULL,
+                                         "download_file_range",
+                                         "HTTP request could not be queued — try again");
+    }
+}
+
 // --- Asserting stubs: not reachable from the v1 print-select surface (see
 // file header). download_file_to_path is additionally hard-banned by R3
 // regardless of reachability: its contract IS file materialization. ---
@@ -214,12 +256,12 @@ void MoonrakerFileTransferAPI::download_file(const std::string& root, const std:
 
     std::string url = http_base_url_ + "/server/files/" + root + "/" + esp_url_escape_path(path);
     bool queued = helix::http::EspHttpLane::instance().submit_get(
-        url, WHOLE_FILE_CAP_BYTES + 1,
+        url, kWholeFileCapBytes + 1,
         [on_success, on_error](std::string& body) {
-            if (body.size() > WHOLE_FILE_CAP_BYTES) {
+            if (body.size() > kWholeFileCapBytes) {
                 moonraker_internal::report_error(
                     on_error, MoonrakerErrorType::UNKNOWN, "download_file",
-                    "file exceeds the " + std::to_string(WHOLE_FILE_CAP_BYTES) +
+                    "file exceeds the " + std::to_string(kWholeFileCapBytes) +
                         "-byte in-memory cap");
                 return;
             }
@@ -259,6 +301,10 @@ bool MoonrakerFileTransferAPI::supports_tail_reads() const {
     return false;
 }
 
+bool MoonrakerFileTransferAPI::supports_range_reads() const {
+    return true;
+}
+
 void MoonrakerFileTransferAPI::download_file_to_path(const std::string&, const std::string&,
                                                      const std::string&, StringCallback,
                                                      ErrorCallback on_error, ProgressCallback) {
@@ -278,7 +324,8 @@ void MoonrakerFileTransferAPI::upload_file(const std::string&, const std::string
 
 void MoonrakerFileTransferAPI::upload_file_with_name(const std::string&, const std::string&,
                                                      const std::string&, const std::string&,
-                                                     SuccessCallback, ErrorCallback on_error) {
+                                                     SuccessCallback, ErrorCallback on_error,
+                                                     UploadLane) {
     esp_rest_unimplemented_err("MoonrakerFileTransferAPI::upload_file_with_name", on_error);
 }
 
@@ -331,7 +378,7 @@ void MoonrakerRestAPI::call_rest_get(const std::string& endpoint, RestCallback o
     ESP_LOGD(TAG, "call_rest_get: %s", url.c_str());
 
     bool queued = helix::http::EspHttpLane::instance().submit_get(
-        url, REST_GET_CAP_BYTES,
+        url, kRestGetCapBytes,
         [on_complete](std::string& body) {
             RestResponse resp;
             resp.success = true;
@@ -389,10 +436,6 @@ void MoonrakerRestAPI::wled_get_strips(RestCallback on_success, ErrorCallback) {
 void MoonrakerRestAPI::wled_set_strip(const std::string&, const std::string&, int, int,
                                       SuccessCallback, ErrorCallback on_error) {
     esp_rest_unimplemented_err("MoonrakerRestAPI::wled_set_strip", on_error);
-}
-
-void MoonrakerRestAPI::wled_get_status(RestCallback, ErrorCallback on_error) {
-    esp_rest_unimplemented_err("MoonrakerRestAPI::wled_get_status", on_error);
 }
 
 void MoonrakerRestAPI::get_server_config(RestCallback, ErrorCallback on_error) {

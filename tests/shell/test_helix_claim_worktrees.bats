@@ -30,10 +30,6 @@ setup() {
     OWNER=$!
 }
 
-teardown() {
-    [ -n "${OWNER:-}" ] && kill "$OWNER" 2>/dev/null
-    return 0
-}
 
 @test "a claim taken in the main tree is LIVE from a linked worktree" {
     "$CLAIM" take worktree:mainrepo "held by main" --pid "$OWNER" >/dev/null
@@ -241,4 +237,151 @@ teardown() {
     "$CLAIM" take worktree:mainrepo "held" --pid "$OWNER" >/dev/null
     run "$CLAIM" check worktree:mainrepo
     contains "owner=$(hostname)-$OWNER pid=$OWNER" "$output"
+}
+
+# A subagent runs as a descendant of the session that holds worktree:<tree>.
+# It is the same owner, so its own build: take must not be refused.
+@test "a descendant of the worktree: holder may take build: on the same tree" {
+    run bash -c '
+        "$1" take worktree:mainrepo "parent session" --pid $$ >/dev/null || exit 10
+        bash -c '"'"'"$1" take build:mainrepo "subagent build"'"'"' _ "$1"
+        rc=$?
+        "$1" release worktree:mainrepo >/dev/null
+        exit $rc' _ "$CLAIM"
+    [ "$status" -eq 0 ]
+    contains "CLAIMED build:" "$output"
+}
+
+@test "a descendant of the build: holder may take worktree: on the same tree" {
+    run bash -c '
+        "$1" take build:mainrepo "parent build" --pid $$ >/dev/null || exit 10
+        bash -c '"'"'"$1" take worktree:mainrepo "subagent edit"'"'"' _ "$1"
+        rc=$?
+        "$1" release build:mainrepo >/dev/null
+        exit $rc' _ "$CLAIM"
+    [ "$status" -eq 0 ]
+}
+
+@test "an unrelated session is still refused build: under another's worktree: claim" {
+    "$CLAIM" take worktree:mainrepo "parent session" --pid "$OWNER" >/dev/null
+    run bash -c '"$1" take build:mainrepo "stranger"' _ "$CLAIM"
+    [ "$status" -ne 0 ]
+    contains "REFUSED" "$output"
+}
+
+@test "held-by-other treats an ancestor holder as the same session, for the resource and its sibling" {
+    run bash -c '
+        "$1" take worktree:mainrepo "parent session" --pid $$ >/dev/null || exit 10
+        bash -c '"'"'"$1" held-by-other worktree:mainrepo; a=$?; "$1" held-by-other build:mainrepo; b=$?; exit $((a + b))'"'"' _ "$1"
+        rc=$?
+        "$1" release worktree:mainrepo >/dev/null
+        exit $rc' _ "$CLAIM"
+    # Both queries report "not held by another" (exit 1 each).
+    [ "$status" -eq 2 ]
+}
+
+@test "held-by-other still reports an unrelated holder" {
+    "$CLAIM" take worktree:mainrepo "stranger" --pid "$OWNER" >/dev/null
+    run bash -c '"$1" held-by-other worktree:mainrepo' _ "$CLAIM"
+    [ "$status" -eq 0 ]
+    run bash -c '"$1" held-by-other build:mainrepo' _ "$CLAIM"
+    [ "$status" -eq 0 ]
+}
+
+# A process reparented to init (a detached `( make land-gate ) &` whose shell
+# exited) has no ancestor to match, but it still carries its session's id. The
+# id stands for the session only on a claim the session itself owns: one taken
+# with --session, whose pid is the long-lived `claude` process.
+
+# session_holder <resource> [env assignments...]: a stand-in `claude` process
+# takes <resource> with --session and stays alive, so the claim reads LIVE.
+session_holder() {
+    local res=$1; shift
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+    ln -sf "$(command -v bash)" "$BATS_TEST_TMPDIR/fakebin/claude"
+    env "$@" "$BATS_TEST_TMPDIR/fakebin/claude" -c \
+        '"$1" take "$2" "session edit" --session >/dev/null || exit 1; exec sleep 120' \
+        _ "$CLAIM" "$res" &
+    SESSION_HOLDER=$!
+    local i
+    for i in $(seq 100); do
+        "$CLAIM" check "$res" >/dev/null 2>&1 || return 0
+        sleep 0.05
+    done
+    echo "session holder never claimed $res" >&2
+    return 1
+}
+
+teardown() {
+    [ -n "${OWNER:-}" ] && kill "$OWNER" 2>/dev/null
+    [ -n "${SESSION_HOLDER:-}" ] && kill "$SESSION_HOLDER" 2>/dev/null
+    return 0
+}
+
+@test "a claim records whether the session or a pid owns it" {
+    session_holder worktree:mainrepo HELIX_SESSION_ID=sess-x
+    grep -q '"owner_kind": "session"' .helix-claims/worktree_mainrepo.json
+    "$CLAIM" take device:k2plus "deploy" --pid "$OWNER" >/dev/null
+    grep -q '"owner_kind": "pid"' .helix-claims/device_k2plus.json
+}
+
+@test "a non-ancestor carrying a session-owned holder's id is the same owner" {
+    session_holder worktree:mainrepo HELIX_SESSION_ID=sess-x
+    run env HELIX_SESSION_ID=sess-x "$CLAIM" take build:mainrepo "gate" --pid 1
+    [ "$status" -eq 0 ]
+    contains "CLAIMED build:" "$output"
+}
+
+@test "a pid-owned holder with the caller's session id is not the same owner" {
+    # A gate's build: claim, and a subagent of the same session taking the tree
+    # under it: sharing an id must not let it write under a live build.
+    HELIX_SESSION_ID=sess-x "$CLAIM" take build:mainrepo "gate" --pid "$OWNER" >/dev/null
+    run env HELIX_SESSION_ID=sess-x "$CLAIM" take worktree:mainrepo "subagent edit" --pid 1
+    [ "$status" -ne 0 ]
+    contains "REFUSED" "$output"
+}
+
+@test "a session-owned holder with another session id refuses a non-ancestor" {
+    session_holder worktree:mainrepo HELIX_SESSION_ID=sess-x
+    run env HELIX_SESSION_ID=sess-y "$CLAIM" take build:mainrepo "gate" --pid 1
+    [ "$status" -ne 0 ]
+    contains "REFUSED" "$output"
+}
+
+@test "CLAUDE_CODE_SESSION_ID wins over HELIX_SESSION_ID, for the writer and the matcher" {
+    session_holder worktree:mainrepo CLAUDE_CODE_SESSION_ID=sess-c HELIX_SESSION_ID=sess-h
+    grep -q '"session_id": "sess-c"' .helix-claims/worktree_mainrepo.json
+    run env CLAUDE_CODE_SESSION_ID=sess-c HELIX_SESSION_ID=other \
+        "$CLAIM" take build:mainrepo "gate" --pid 1
+    [ "$status" -eq 0 ]
+    "$CLAIM" release build:mainrepo --force >/dev/null
+    run env HELIX_SESSION_ID=sess-h "$CLAIM" take build:mainrepo "gate" --pid 1
+    [ "$status" -ne 0 ]
+}
+
+@test "HELIX_SESSION_ID alone stands for a session outside Claude" {
+    session_holder worktree:mainrepo HELIX_SESSION_ID=opencode-7
+    run env HELIX_SESSION_ID=opencode-7 "$CLAIM" take build:mainrepo "gate" --pid 1
+    [ "$status" -eq 0 ]
+}
+
+@test "two claims with no session id are not one owner" {
+    session_holder worktree:mainrepo
+    run env -u HELIX_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+        "$CLAIM" take build:mainrepo "gate" --pid 1
+    [ "$status" -ne 0 ]
+    contains "REFUSED" "$output"
+}
+
+@test "held-by-other and check treat a session-owned holder's id as the same owner" {
+    session_holder worktree:mainrepo HELIX_SESSION_ID=sess-x
+    run env HELIX_SESSION_ID=sess-x "$CLAIM" held-by-other worktree:mainrepo
+    [ "$status" -eq 1 ]
+    run env HELIX_SESSION_ID=sess-x "$CLAIM" held-by-other build:mainrepo
+    [ "$status" -eq 1 ]
+    run env HELIX_SESSION_ID=sess-x "$CLAIM" check build:mainrepo
+    [ "$status" -eq 0 ]
+    contains "FREE" "$output"
+    run env HELIX_SESSION_ID=sess-y "$CLAIM" held-by-other build:mainrepo
+    [ "$status" -eq 0 ]
 }

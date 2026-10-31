@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "moonraker_client_mock.h"
 
 namespace helix {
@@ -26,6 +27,30 @@ class MoonrakerClientMockTestAccess {
     // thread that make connect()-based assertions racy.
     static void dispatch_initial_state(MoonrakerClientMock& c) {
         c.dispatch_initial_state();
+    }
+
+    // The standalone IFS module mock's pushed objects, as the simulation tick
+    // publishes them, and its toolhead switch reading.
+    static nlohmann::json ifs_module_status(const MoonrakerClientMock& c) {
+        return c.ifs_module_status_json();
+    }
+    static nlohmann::json ifs_module_vars(const MoonrakerClientMock& c) {
+        return c.ifs_module_vars_json();
+    }
+    // The CFS `box` frame the mock publishes, as HELIX_MOCK_CFS_BOXES shapes it.
+    static nlohmann::json cfs_box_status(const MoonrakerClientMock& c) {
+        return c.cfs_box_status_json();
+    }
+    static bool ifs_module_head_loaded(const MoonrakerClientMock& c) {
+        return c.ifs_module_head_loaded_.load();
+    }
+
+    // One notification interval of the MedusaHC swap simulation.
+    static void advance_secondary_extruders(MoonrakerClientMock& c, double dt) {
+        c.advance_secondary_extruders(dt);
+    }
+    static void advance_medusa(MoonrakerClientMock& c) {
+        c.advance_medusa_swap();
     }
 
     // Simulation-loop iterations begun so far. Once it reads n + 1, iteration
@@ -63,6 +88,26 @@ class MoonrakerClientMockTestAccess {
     static void set_method_handler(MoonrakerClientMock& c, const std::string& method,
                                    mock_internal::MethodHandler handler) {
         c.method_handlers_[method] = std::move(handler);
+    }
+
+    // Answer every directory listing with a disk that has no free space, as
+    // Moonraker reports disk_usage beside any gcodes directory's entries.
+    static void report_full_disk(MoonrakerClientMock& c) {
+        set_method_handler(
+            c, "server.files.get_directory",
+            [](MoonrakerClientMock*, const nlohmann::json&,
+               helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+               helix::SharedCallback<void(const MoonrakerError&)>) -> bool {
+                if (success_cb) {
+                    success_cb(nlohmann::json{
+                        {"result",
+                         {{"dirs", nlohmann::json::array()},
+                          {"files", nlohmann::json::array()},
+                          {"disk_usage",
+                           {{"total", 1ULL << 30}, {"used", 1ULL << 30}, {"free", 0}}}}}});
+                }
+                return true;
+            });
     }
 };
 

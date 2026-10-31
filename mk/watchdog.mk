@@ -45,7 +45,7 @@ endif
 # Add platform-specific libraries for display backend
 ifneq ($(UNAME_S),Darwin)
     # Linux: may need DRM/input libraries
-    ifeq ($(DISPLAY_BACKEND),drm)
+    ifeq ($(DISPLAY_BACKEND)-$(DLOPEN_GPU_LIBS),drm-)
         WATCHDOG_LDFLAGS += -ldrm -linput
         ifneq ($(filter yes,$(ENABLE_OPENGLES) $(ENABLE_GLES_3D)),)
             WATCHDOG_LDFLAGS += -lEGL -lGLESv2 -lgbm -ldl
@@ -91,6 +91,7 @@ WATCHDOG_EXTRA_OBJS := $(BUILD_DIR)/watchdog/config.o \
                        $(BUILD_DIR)/watchdog/backlight_backend.o \
                        $(BUILD_DIR)/watchdog/data_root_resolver.o \
                        $(BUILD_DIR)/watchdog/helix_paths.o \
+                       $(BUILD_DIR)/watchdog/crash_record.o \
                        $(BUILD_DIR)/watchdog/text_io.o \
                        $(BUILD_DIR)/watchdog/helix_fs.o \
                        $(BUILD_DIR)/watchdog/logging_init.o \
@@ -99,10 +100,20 @@ WATCHDOG_EXTRA_OBJS := $(BUILD_DIR)/watchdog/config.o \
                        $(BUILD_DIR)/watchdog/ui_notification_stub.o \
                        $(BUILD_DIR)/watchdog/drm_mode_matching.o \
                        $(BUILD_DIR)/watchdog/fbdev_size_helper.o \
+                       $(BUILD_DIR)/watchdog/fbdev_signal_clear.o \
                        $(BUILD_DIR)/watchdog/pending_startup_warnings.o \
                        $(BUILD_DIR)/watchdog/log_redact.o \
                        $(BUILD_DIR)/watchdog/platform_info.o \
+                       $(BUILD_DIR)/watchdog/board_identity.o \
+                       $(BUILD_DIR)/watchdog/display_metrics.o \
+                       $(BUILD_DIR)/watchdog/platform_table.o \
                        $(BUILD_DIR)/watchdog/helix_lvgl_anomaly_stub.o
+
+# Display and GPU libraries load at runtime in a DLOPEN_GPU_LIBS build (mk/implib.mk).
+ifeq ($(DLOPEN_GPU_LIBS),yes)
+    WATCHDOG_EXTRA_OBJS += $(IMPLIB_OBJS)
+    WATCHDOG_LDFLAGS += -ldl
+endif
 
 # Compile config for watchdog (with HELIX_WATCHDOG to guard get_runtime_config dependency)
 $(BUILD_DIR)/watchdog/config.o: src/system/config.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
@@ -138,6 +149,11 @@ $(BUILD_DIR)/watchdog/data_root_resolver.o: src/application/data_root_resolver.c
 # Compile helix_paths for watchdog (pure path primitives; data_root_resolver.cpp
 # calls helix::paths::strip_trailing_slash).
 $(BUILD_DIR)/watchdog/helix_paths.o: src/system/helix_paths.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# The record the watchdog writes for a child killed by a signal it did not handle
+$(BUILD_DIR)/watchdog/crash_record.o: src/system/crash_record.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
@@ -198,6 +214,11 @@ $(BUILD_DIR)/watchdog/fbdev_size_helper.o: src/api/fbdev_size_helper.cpp $(LIBHV
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
+# Signal-safe framebuffer blank (registered by display_backend_fbdev.cpp)
+$(BUILD_DIR)/watchdog/fbdev_signal_clear.o: src/api/fbdev_signal_clear.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
 # PendingStartupWarnings queue (referenced by both display backends). Added for #766.
 $(BUILD_DIR)/watchdog/pending_startup_warnings.o: src/system/pending_startup_warnings.cpp $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
@@ -207,6 +228,21 @@ $(BUILD_DIR)/watchdog/pending_startup_warnings.o: src/system/pending_startup_war
 # default fit via the mod-layout probe on the unified MIPS build, so the probe
 # implementation is a hard link dependency here too. Zero deps beyond spdlog.
 $(BUILD_DIR)/watchdog/platform_info.o: src/system/platform_info.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# platform_info.cpp answers board questions through board_identity, which keys on the
+# platform table, so both are link dependencies of every binary that links it.
+$(BUILD_DIR)/watchdog/board_identity.o: src/system/board_identity.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+# standalone_rotation() falls back to the board's known panel mount.
+$(BUILD_DIR)/watchdog/display_metrics.o: src/application/display_metrics.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
+	@echo "[CXX] $< (watchdog)"
+	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/watchdog/platform_table.o: src/system/platform_table.cpp $(ABI_STAMP) | $(BUILD_DIR)/watchdog
 	@echo "[CXX] $< (watchdog)"
 	$(Q)$(CXX) $(WATCHDOG_CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 

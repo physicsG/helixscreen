@@ -1,0 +1,96 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Sensor Row Component -->
+<!-- One row for every Settings > Sensors section: name, live state, optional role dropdown, optional toggle -->
+<!-- Row data comes from the sensor_<section>_row_<field>_<index> subjects; role_options lists the section's role labels as translation keys -->
+<!-- A row whose role is not one of role_options shows unset_role_dropdown instead: the same options plus a trailing "-" that stands
+     selected, so no real role reads as chosen and picking any of them is a change on every input device -->
+<component>
+  <api>
+    <prop name="section" type="string" default=""/>
+    <prop name="index" type="string" default="0"/>
+    <prop name="role_options" type="string" default=""/>
+    <prop name="icon" type="string" default="electric_switch"/>
+  </api>
+  <styles>
+    <!-- The "-" placeholder is not the held role, so it is not drawn; held_role_label names the role instead -->
+    <style name="held_text_hidden" text_opa="0"/>
+  </styles>
+  <view name="sensor_row"
+        extends="lv_obj" width="100%" height="content" style_bg_opa="0" style_border_width="0"
+        style_pad_left="#space_sm" style_pad_right="#space_sm" style_pad_top="#space_md" style_pad_bottom="#space_md"
+        scrollable="false" flex_flow="column" style_pad_gap="#space_sm">
+    <!-- Top Row: Name + live state -->
+    <lv_obj width="100%"
+            height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_main_place="space_between"
+            style_flex_cross_place="center">
+      <lv_obj height="content"
+              style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
+              style_pad_gap="#space_sm" flex_grow="1">
+        <icon src="$icon" size="sm" variant="primary"/>
+        <text_body name="name_label" bind_text="sensor_${section}_row_name_${index}" long_mode="dots" flex_grow="1"/>
+      </lv_obj>
+      <text_small name="state_label" bind_text="sensor_${section}_row_state_${index}">
+        <bind_flag_if_eq subject="sensor_${section}_row_has_state_${index}" flag="hidden" ref_value="0"/>
+        <bind_style_if_eq name="styles.chip_text_warning" subject="sensor_${section}_row_alert_${index}" ref_value="1"/>
+      </text_small>
+    </lv_obj>
+    <!-- Detail line -->
+    <text_small name="detail_label" width="100%" long_mode="dots" bind_text="sensor_${section}_row_detail_${index}">
+      <bind_flag_if_eq subject="sensor_${section}_row_has_detail_${index}" flag="hidden" ref_value="0"/>
+    </text_small>
+    <!-- Bottom Row: Role dropdown + toggle -->
+    <lv_obj width="100%"
+            height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_main_place="space_between"
+            style_flex_cross_place="center">
+      <lv_obj name="role_group"
+              height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
+              style_pad_gap="#space_sm" flex_grow="1">
+        <bind_flag_if cond="sensor_${section}_row_has_role_${index} eq 0 and sensor_${section}_row_has_held_role_${index} eq 0"
+                      flag="hidden"/>
+        <text_small text="Role:"/>
+        <!-- A held role the dropdown does not offer: shown as text until the user picks an option -->
+        <text_small name="held_role_label" bind_text="sensor_${section}_row_held_role_${index}">
+          <bind_flag_if_eq subject="sensor_${section}_row_has_held_role_${index}" flag="hidden" ref_value="0"/>
+        </text_small>
+        <!-- Grows to the longest role label ("Flow Compensation") where the row has room -->
+        <lv_dropdown name="role_dropdown"
+                     height="36" flex_grow="1" style_max_width="240" options="$role_options" options_tag="$role_options"
+                     style_radius="#border_radius" bind_selected="sensor_${section}_row_role_${index}">
+          <bind_flag_if cond="sensor_${section}_row_has_role_${index} eq 0 or sensor_${section}_row_role_set_${index} eq 0"
+                        flag="hidden"/>
+          <event_cb trigger="value_changed" callback="on_sensor_row_role_changed" user_data="${section}:${index}"/>
+        </lv_dropdown>
+        <lv_dropdown name="unset_role_dropdown"
+                     height="36" flex_grow="1" style_max_width="240" options="${role_options}&#10;-"
+                     options_tag="${role_options}&#10;-" style_radius="#border_radius"
+                     bind_selected="sensor_${section}_row_role_${index}">
+          <bind_flag_if cond="sensor_${section}_row_has_role_${index} eq 0 or sensor_${section}_row_role_set_${index} eq 1"
+                        flag="hidden"/>
+          <bind_style_if_eq name="held_text_hidden" subject="sensor_${section}_row_has_held_role_${index}" ref_value="1"/>
+          <event_cb trigger="value_changed" callback="on_sensor_row_role_changed" user_data="${section}:${index}"/>
+        </lv_dropdown>
+      </lv_obj>
+      <lv_obj name="row_toggle_group"
+              height="content" style_pad_all="0" scrollable="false" flex_flow="row" style_flex_cross_place="center"
+              style_pad_gap="#space_sm">
+        <bind_flag_if_eq subject="sensor_${section}_row_toggle_kind_${index}" flag="hidden" ref_value="0"/>
+        <text_small name="toggle_enabled_label" text="Enabled">
+          <bind_flag_if_not_eq subject="sensor_${section}_row_toggle_kind_${index}" flag="hidden" ref_value="1"/>
+        </text_small>
+        <text_small name="toggle_invert_label" text="Invert">
+          <bind_flag_if_not_eq subject="sensor_${section}_row_toggle_kind_${index}" flag="hidden" ref_value="2"/>
+        </text_small>
+        <ui_switch name="row_toggle" size="small">
+          <bind_state_if_eq subject="sensor_${section}_row_toggle_${index}" state="checked" ref_value="1"/>
+          <event_cb trigger="value_changed" callback="on_sensor_row_toggle_changed" user_data="${section}:${index}"/>
+        </ui_switch>
+      </lv_obj>
+    </lv_obj>
+    <!-- Between rows only: the last row of a card has nothing below it to divide from -->
+    <divider_horizontal name="row_divider" style_margin_top="#space_xs">
+      <bind_flag_if_eq subject="sensor_${section}_row_has_next_${index}" flag="hidden" ref_value="0"/>
+    </divider_horizontal>
+  </view>
+</component>

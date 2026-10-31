@@ -31,7 +31,7 @@ bool LVGLTestFixture::s_queue_initialized = false;
 // Size: width * 10 lines for partial rendering mode
 // IMPORTANT: Must be aligned to LV_DRAW_BUF_ALIGN (typically 4 or 8 bytes)
 // Using alignas(64) for maximum compatibility with all platforms
-alignas(64) static lv_color_t s_display_buf[TEST_DISPLAY_WIDTH * 10];
+alignas(64) static lv_color_t s_display_buf[kTestDisplayWidth * 10];
 
 /**
  * @brief Flush callback for virtual display (no-op for testing)
@@ -93,8 +93,8 @@ void LVGLTestFixture::reclaim_display() {
     }
     const int32_t w = lv_display_get_horizontal_resolution(s_display);
     const int32_t h = lv_display_get_vertical_resolution(s_display);
-    if (w != TEST_DISPLAY_WIDTH || h != TEST_DISPLAY_HEIGHT) {
-        lv_display_set_resolution(s_display, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT);
+    if (w != kTestDisplayWidth || h != kTestDisplayHeight) {
+        lv_display_set_resolution(s_display, kTestDisplayWidth, kTestDisplayHeight);
         geometry_moved = true;
     }
     if (lv_display_get_default() != s_display) {
@@ -194,12 +194,18 @@ void LVGLTestFixture::ensure_lvgl_initialized() {
         lv_init_safe();
 
         // Create virtual display for headless testing
-        s_display = lv_display_create(TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT);
+        s_display = lv_display_create(kTestDisplayWidth, kTestDisplayHeight);
         if (s_display != nullptr) {
             lv_display_set_buffers(s_display, s_display_buf, nullptr, sizeof(s_display_buf),
                                    LV_DISPLAY_RENDER_MODE_PARTIAL);
             lv_display_set_flush_cb(s_display, test_display_flush_cb);
         }
+        // The app registers globals.xml before the theme. The global scope is
+        // first-registration-wins, so a theme init that ran first would let a
+        // component-local const of the same name (card_height) shadow it for the
+        // rest of the process.
+        lv_xml_register_component_from_file("A:ui_xml/globals.xml");
+
         // The fixture base swept the display list before this one existed, and
         // the first test to run is entitled to the same guarantee as the rest.
         ensure_displays_never_block_on_flush();
@@ -223,33 +229,12 @@ lv_obj_t* LVGLTestFixture::create_test_screen() {
     return m_test_screen;
 }
 
-// Advances LVGL's virtual clock. Real elapsed time is ~ms/5, and zero below the
-// 50ms sleep threshold — never build a wall-clock wait out of this. wait_until()
-// is the helper that also yields to other threads.
+// Advances LVGL's virtual clock only, so it costs CPU and no real time. Another
+// thread gets no guaranteed time slice from it; wait_until() is the helper that
+// yields to other threads.
 void LVGLTestFixture::process_lvgl(int ms) {
-    if (ms <= 0) {
-        return;
-    }
-
-    // Process in small increments for more accurate timing
-    constexpr int tick_interval_ms = 5;
-    int elapsed = 0;
-
-    while (elapsed < ms) {
-        // Advance LVGL tick (needed for animations and time-based logic)
-        lv_tick_inc(tick_interval_ms);
-
-        // Use the safe timer handler which drains the UpdateQueue,
-        // normalizes timer timestamps, and pauses the queue timer
-        // during lv_timer_handler() to prevent infinite loops.
-        lv_timer_handler_safe();
-
-        elapsed += tick_interval_ms;
-
-        // Small sleep to avoid busy-waiting in longer waits
-        if (ms > 50) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+    if (ms > 0) {
+        UITest::advance_ms(static_cast<uint32_t>(ms));
     }
 }
 
@@ -282,5 +267,16 @@ bool LVGLTestFixture::wait_until(const std::function<bool()>& condition, uint32_
     }
 
     spdlog::warn("[LVGLTestFixture] wait_until() timed out after {}ms", timeout_ms);
+    return false;
+}
+
+bool LVGLTestFixture::advance_until(const std::function<bool()>& condition, uint32_t budget_ms,
+                                    uint32_t step_ms) {
+    if (UITest::advance_until(condition, budget_ms, step_ms)) {
+        return true;
+    }
+    spdlog::warn("[LVGLTestFixture] advance_until() ran {}ms of virtual time without the "
+                 "condition holding",
+                 budget_ms);
     return false;
 }

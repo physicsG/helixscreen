@@ -78,6 +78,7 @@ json filament_json(const FilamentInfo& f) {
 MoonrakerError spoolman_error(int status) {
     const char* reason = status == 404   ? "Not Found"
                          : status == 422 ? "Unprocessable Entity"
+                         : status == 400 ? "Bad Request"
                                          : "Internal Server Error";
     const int code = status == 404 ? -32601 : status;
     return MoonrakerError::from_json_rpc({{"code", code}, {"message", reason}},
@@ -384,7 +385,7 @@ json MockSpoolmanServer::spool_json(const SpoolInfo& s) const {
                                   ? json(s.bed_temp_recommended)
                                   : one_temp(s.bed_temp_min, s.bed_temp_max)},
         {"external_id", nullptr},
-        {"extra", json::object()}};
+        {"extra", filament_extra(s.filament_id)}};
     filament["vendor"] = (!s.vendor.empty() || s.vendor_id > 0)
                              ? vendor_json(VendorInfo{s.vendor_id, s.vendor})
                              : json(nullptr);
@@ -408,6 +409,16 @@ json MockSpoolmanServer::spool_json(const SpoolInfo& s) const {
             {"extra", json::object()}};
 }
 
+json MockSpoolmanServer::filament_extra(int filament_id) const {
+    auto it = filament_extra_.find(filament_id);
+    return it == filament_extra_.end() ? json::object() : it->second;
+}
+
+bool MockSpoolmanServer::filament_field_defined(const std::string& key) const {
+    return std::any_of(filament_fields_.begin(), filament_fields_.end(),
+                       [&key](const json& f) { return f.value("key", "") == key; });
+}
+
 SpoolInfo* MockSpoolmanServer::find_spool(int id) {
     auto it = std::find_if(spools_.begin(), spools_.end(),
                            [id](const SpoolInfo& s) { return s.id == id; });
@@ -423,6 +434,11 @@ bool MockSpoolmanServer::proxy(const json& params, json& result, MoonrakerError&
     const std::string query = q == std::string::npos ? "" : full_path.substr(q + 1);
 
     spdlog::debug("[MockSpoolman] {} {}", method, full_path);
+
+    auto with_extra = [this](json filament, int filament_id) {
+        filament["extra"] = filament_extra(filament_id);
+        return filament;
+    };
 
     auto not_found = [&err](const std::string& kind, int id) {
         spdlog::debug("[MockSpoolman] 404: no {} with ID {}", kind, id);
@@ -453,6 +469,12 @@ bool MockSpoolmanServer::proxy(const json& params, json& result, MoonrakerError&
             return true;
         }
         if (method == "PATCH") {
+            if (refuse_spool_patch_key && body.contains(*refuse_spool_patch_key)) {
+                spdlog::debug("[MockSpoolman] 500: refusing PATCH of spool {} carrying '{}'", *id,
+                              *refuse_spool_patch_key);
+                err = spoolman_error(500);
+                return false;
+            }
             if (body.size() == 1 && body.contains("remaining_weight") &&
                 body["remaining_weight"].is_number()) {
                 weight_updates.push_back({*id, body["remaining_weight"].get<double>()});
@@ -576,19 +598,42 @@ bool MockSpoolmanServer::proxy(const json& params, json& result, MoonrakerError&
         return true;
     }
 
+    if (method == "GET" && path == "/v1/field/filament") {
+        result = filament_fields_;
+        return true;
+    }
+    if (method == "POST" && path.rfind("/v1/field/filament/", 0) == 0) {
+        const std::string key = path.substr(std::string("/v1/field/filament/").size());
+        defined_filament_fields.emplace_back(key, body);
+        json field = body;
+        field["key"] = key;
+        field["entity_type"] = "filament";
+        bool replaced = false;
+        for (auto& existing : filament_fields_) {
+            if (existing.value("key", "") == key) {
+                existing = field;
+                replaced = true;
+            }
+        }
+        if (!replaced) {
+            filament_fields_.push_back(field);
+        }
+        result = filament_fields_;
+        return true;
+    }
     if (method == "GET" && path == "/v1/filament") {
         result = json::array();
         const std::string vendor_filter = query_value(query, "vendor.id");
         if (vendor_filter.empty()) {
             for (const auto& f : filament_list()) {
-                result.push_back(filament_json(f));
+                result.push_back(with_extra(filament_json(f), f.id));
             }
             return true;
         }
         const int vendor_id = std::atoi(vendor_filter.c_str());
         for (const auto& f : filament_list()) {
             if (f.vendor_id == vendor_id) {
-                result.push_back(filament_json(f));
+                result.push_back(with_extra(filament_json(f), f.id));
             }
         }
         return true;
@@ -630,14 +675,48 @@ bool MockSpoolmanServer::proxy(const json& params, json& result, MoonrakerError&
             }
         }
         filaments_.push_back(filament);
-        result = filament_json(filament);
+        result = with_extra(filament_json(filament), filament.id);
         return true;
     }
     if (auto id = id_after(path, "/v1/filament/")) {
+        if (method == "GET") {
+            if (next_filament_get_result) {
+                result = *next_filament_get_result;
+                next_filament_get_result.reset();
+                return true;
+            }
+            for (const auto& f : filament_list()) {
+                if (f.id == *id) {
+                    result = with_extra(filament_json(f), f.id);
+                    return true;
+                }
+            }
+            const bool on_a_spool =
+                std::any_of(spools_.begin(), spools_.end(),
+                            [&id](const SpoolInfo& sp) { return sp.filament_id == *id; });
+            if (on_a_spool || filament_extra_.count(*id) > 0) {
+                result = {{"id", *id}, {"extra", filament_extra(*id)}};
+                return true;
+            }
+            return not_found("filament", *id);
+        }
         if (method == "PATCH") {
             filament_updates.push_back({*id, body});
             if (!temps_valid(body, err)) {
                 return false;
+            }
+            if (body.contains("extra") && body["extra"].is_object()) {
+                // Spoolman refuses a key with no field definition.
+                for (auto it = body["extra"].begin(); it != body["extra"].end(); ++it) {
+                    if (!filament_field_defined(it.key())) {
+                        spdlog::debug("[MockSpoolman] 400: unknown extra field {}", it.key());
+                        err = spoolman_error(400);
+                        return false;
+                    }
+                }
+                // Older Spoolman replaces the whole dict, the stricter of the two
+                // behaviours a writer has to survive.
+                filament_extra_[*id] = body["extra"];
             }
             result = {{"id", *id}};
             for (auto& f : filaments_) {
@@ -657,7 +736,7 @@ bool MockSpoolmanServer::proxy(const json& params, json& result, MoonrakerError&
                                 ? 0
                                 : static_cast<int>(body["settings_bed_temp"].get<double>());
                     }
-                    result = filament_json(f);
+                    result = with_extra(filament_json(f), f.id);
                 }
             }
             return true;

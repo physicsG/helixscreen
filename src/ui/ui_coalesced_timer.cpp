@@ -63,11 +63,12 @@ void CoalescedTimer::schedule_once(std::function<void()> cb) {
 }
 
 void CoalescedTimer::cancel() {
-    if (timer_) {
+    // After lv_deinit() the timer is already freed, so only the pointer is dropped.
+    if (timer_ && lv_is_initialized()) {
         lv_timer_set_user_data(timer_, nullptr);
         lv_timer_cancel_safe(timer_);
-        timer_ = nullptr;
     }
+    timer_ = nullptr;
     callback_ = nullptr;
 }
 

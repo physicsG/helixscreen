@@ -23,10 +23,12 @@ struct DisplaySleepHost {
     const std::unique_ptr<BacklightBackend>& backlight;
     lv_display_t* const& display;
     const bool& shutting_down;
-    /// Swallows the wake touch so it cannot trigger UI actions.
-    std::function<void()> gate_input;
+    /// Ends the press LVGL is tracking on every pointer and makes each wait for its release.
+    std::function<void()> cancel_pointer_presses;
     /// Re-installs a flush callback on the display and forces a full upload.
     std::function<void(lv_display_flush_cb_t)> restore_flush_cb;
+    /// Someone is watching through the remote screen server; empty means nobody can.
+    std::function<bool()> remote_viewer_active;
 };
 
 /// How the panel is darkened and dimmed, resolved by the owner at init.
@@ -52,6 +54,10 @@ struct DisplaySleepConfig {
 class DisplaySleepController {
   public:
     explicit DisplaySleepController(DisplaySleepHost host);
+    ~DisplaySleepController();
+
+    DisplaySleepController(const DisplaySleepController&) = delete;
+    DisplaySleepController& operator=(const DisplaySleepController&) = delete;
 
     void configure(const DisplaySleepConfig& config);
 
@@ -66,6 +72,11 @@ class DisplaySleepController {
 
     /// Leaves the panel usable for the next process.
     void restore_on_shutdown();
+
+    /// Stops LVGL from drawing for the rest of this process: no wake, touch or
+    /// shutdown path turns the flush back on. For a host power-off already under
+    /// way, so the black frame written after it holds until init stops us.
+    void hold_flush_for_power_off();
 
     /// Drops state that points into LVGL objects lv_deinit() is about to free.
     void abandon_lvgl_state();
@@ -86,11 +97,12 @@ class DisplaySleepController {
         return m_use_hardware_blank;
     }
 
-    /// A press arrived. While asleep or dimmed it requests a wake; returns true when the
-    /// press must be absorbed (asleep) so LVGL never sees it.
+    /// A press arrived. While asleep, dimmed or showing a screensaver it requests a wake and
+    /// returns true: the press is the wake touch, which the caller hides from LVGL until it
+    /// lifts (helix::WakeTouchLatch).
     bool note_press(int x, int y);
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     /// Starts @p type as a settings preview; the next touch dismisses it without auto-lock.
     void preview_screensaver(int type);
 #endif
@@ -122,7 +134,10 @@ class DisplaySleepController {
 
     bool m_display_sleeping = false;
     bool m_display_dimmed = false;
-    bool m_wake_requested = false; // set by note_press() while asleep or dimmed
+    bool m_wake_requested = false;     // set by note_press() while asleep or dimmed
+    bool m_remote_sleep_held = false;  // a remote viewer is keeping an overdue sleep at dim
+    bool m_remote_viewer_seen = false; // the previous tick saw a remote viewer
+    bool m_wake_from_input = false;    // wake() is running for the user's touch or activity
     int m_dim_timeout_sec = 600;
     int m_dim_brightness_percent = 30;
 
@@ -145,8 +160,9 @@ class DisplaySleepController {
 
     lv_display_flush_cb_t m_saved_flush_cb_for_sleep = nullptr;
     bool m_flush_suppressed_for_sleep = false;
+    bool m_flush_held_for_power_off = false;
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     bool m_screensaver_active = false;
     bool m_screensaver_is_preview = false;
     /// Tick the preview started at, so the click that launched it cannot dismiss it.

@@ -23,6 +23,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/scoped_runtime_config.h"
+#include "../test_helpers/wifi_manager_test_access.h"
 #include "../test_helpers/wizard_wifi_test_access.h"
 #include "wifi_backend_mock.h"
 #include "wifi_manager.h"
@@ -35,9 +36,9 @@ using Access = WizardWifiStepTestAccess;
 
 namespace {
 
-/// An SSID no mock backend stocks, so connect_network() refuses it
-/// synchronously and the step's deferred failure body is queued on the spot —
-/// an in-flight join with no thread and no wait.
+/// An SSID no mock backend stocks, so connect_network() refuses it at once
+/// and the step's deferred failure body is queued as soon as the manager's
+/// control lane answers: an in-flight join with no backend thread and no wait.
 constexpr const char* kUnknownSsid = "NoSuchNetwork";
 
 class WizardWifiTeardownFixture : public LVGLUITestFixture {
@@ -87,6 +88,11 @@ class WizardWifiTeardownFixture : public LVGLUITestFixture {
         return lv_subject_get_int(&Access::wifi_connecting(step));
     }
 
+    /// Lets the join answer and every body it queues run.
+    void settle() {
+        REQUIRE(helix::WiFiManagerTestAccess::settle(*manager_));
+    }
+
   private:
     WizardWifiStep step_;
     std::shared_ptr<helix::WiFiManager> manager_;
@@ -104,7 +110,7 @@ TEST_CASE_METHOD(WizardWifiTeardownFixture, "cleanup() expires a connect result 
     // never answered or a body that was never queued.
     Access::password_connect_clicked(s);
     REQUIRE(connecting(s) == 1); // queued, not yet run
-    helix::ui::UpdateQueue::instance().drain();
+    settle();
     REQUIRE(connecting(s) == 0); // the deferred body ran and cleared it
 
     // Now the same sequence with the step torn down between the click and the
@@ -113,7 +119,7 @@ TEST_CASE_METHOD(WizardWifiTeardownFixture, "cleanup() expires a connect result 
     REQUIRE(connecting(s) == 1);
 
     s.cleanup();
-    helix::ui::UpdateQueue::instance().drain();
+    settle();
 
     // Still 1: the body's first statement never ran. Delete
     // lifetime_.invalidate() from cleanup() and this reads 0.

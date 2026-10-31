@@ -114,6 +114,17 @@ void ui_button_set_icon(lv_obj_t* btn, const char* icon_name);
 void ui_button_set_label_hidden(lv_obj_t* btn, bool hidden);
 
 /**
+ * @brief Show or hide the internal icon of a ui_button
+ *
+ * The icon's counterpart of ui_button_set_label_hidden(): the label stays and
+ * takes the row alone. Safe to call on any lv_obj; returns silently if not a
+ * ui_button or if the button has no icon. XML spelling: icon_hidden_subject +
+ * icon_hidden_if_eq.
+ */
+// NAMESPACE_OK: joins this header's global ui_button_* free-function API
+void ui_button_set_icon_hidden(lv_obj_t* btn, bool hidden);
+
+/**
  * @brief Restack a ui_button icon-over-label (or back to icon-beside-label)
  *
  * stacked=true applies the create-time icon_position="top" recipe: column flex,
@@ -134,6 +145,15 @@ void ui_button_set_stacked(lv_obj_t* btn, bool stacked);
  * and for callers that need to inspect/animate the icon slot.
  */
 lv_obj_t* ui_button_get_icon(lv_obj_t* btn);
+
+/**
+ * @brief Get the text label of a ui_button
+ *
+ * Returns nullptr if the button has no label (icon-only) or is not a ui_button.
+ * For callers that measure the button's text, such as a menu sizing its card.
+ */
+// NAMESPACE_OK: joins this header's global ui_button_* free-function API
+lv_obj_t* ui_button_get_label(lv_obj_t* btn);
 
 /**
  * @brief Get the op-state spinner arc of a ui_button, if one exists

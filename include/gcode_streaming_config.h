@@ -113,7 +113,7 @@ std::string get_streaming_config_description();
  * Kept as a pure function of its three inputs so both answers are testable in a
  * binary that is itself compiled with 3D enabled.
  *
- * @param screen_opted_out    The screen called ui_gcode_viewer_disable_streaming().
+ * @param screen_opted_out    The screen called helix::ui::gcode_viewer_disable_streaming().
  * @param build_has_3d        This build can render 3D (ENABLE_3D_RENDERER).
  * @param streaming_for_size  should_use_gcode_streaming() for this file.
  * @return true if the viewer should stream.

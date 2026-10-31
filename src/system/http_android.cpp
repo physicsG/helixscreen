@@ -10,6 +10,8 @@
 #include <spdlog/spdlog.h>
 
 #include <SDL.h>
+#include <algorithm>
+#include <cstdint>
 #include <jni.h>
 
 namespace helix::android {
@@ -30,31 +32,54 @@ bool jstring_to_string(JNIEnv* env, jstring value, std::string& out) {
     return true;
 }
 
+/// A HelixActivity static method and the JNIEnv to call it on.
+struct BridgeMethod {
+    JNIEnv* env = nullptr;
+    jclass cls = nullptr;
+    jmethodID method = nullptr;
+};
+
+/// Look up HelixActivity.@p name. SDL_AndroidGetJNIEnv attaches the calling
+/// thread to the JavaVM if needed, so this is safe from any worker thread.
+/// Returns false with @p error set when the bridge is unavailable.
+bool find_bridge_method(const char* name, const char* signature, BridgeMethod& out,
+                        std::string& error) {
+    out.env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    if (!out.env) {
+        spdlog::error("[http_android] Failed to get JNI env");
+        error = "JNI env unavailable";
+        return false;
+    }
+    out.cls = helix_activity_class(out.env);
+    if (!out.cls) {
+        error = "HelixActivity class not found";
+        return false;
+    }
+    out.method = out.env->GetStaticMethodID(out.cls, name, signature);
+    if (!out.method) {
+        spdlog::error("[http_android] Failed to find {} method", name);
+        out.env->ExceptionClear();
+        error = std::string(name) + " method not found";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 std::pair<int, std::string> https_get(const std::string& url, const std::string& user_agent,
                                       const std::string& accept, int timeout_sec) {
-    // SDL_AndroidGetJNIEnv attaches the calling thread to the JavaVM if needed,
-    // so this is safe from the UpdateChecker worker thread.
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    if (!env) {
-        spdlog::error("[http_android] Failed to get JNI env");
-        return {0, "JNI env unavailable"};
+    BridgeMethod bridge;
+    std::string error;
+    if (!find_bridge_method(
+            "httpsGet",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;", bridge,
+            error)) {
+        return {0, error};
     }
-
-    jclass cls = helix_activity_class(env);
-    if (!cls) {
-        return {0, "HelixActivity class not found"};
-    }
-
-    jmethodID method = env->GetStaticMethodID(
-        cls, "httpsGet",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;");
-    if (!method) {
-        spdlog::error("[http_android] Failed to find httpsGet method");
-        env->ExceptionClear();
-        return {0, "httpsGet method not found"};
-    }
+    JNIEnv* env = bridge.env;
+    jclass cls = bridge.cls;
+    jmethodID method = bridge.method;
 
     jstring j_url = env->NewStringUTF(url.c_str());
     jstring j_ua = env->NewStringUTF(user_agent.c_str());
@@ -109,26 +134,17 @@ std::pair<int, std::string>
 https_post_binary(const std::string& url, const std::vector<unsigned char>& body,
                   const std::string& content_type, const std::string& content_encoding,
                   const std::string& user_agent, const std::string& api_key, int timeout_sec) {
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    if (!env) {
-        spdlog::error("[http_android] Failed to get JNI env");
-        return {0, "JNI env unavailable"};
+    BridgeMethod bridge;
+    std::string error;
+    if (!find_bridge_method("httpsPostBinary",
+                            "(Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;"
+                            "Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;",
+                            bridge, error)) {
+        return {0, error};
     }
-
-    jclass cls = helix_activity_class(env);
-    if (!cls) {
-        return {0, "HelixActivity class not found"};
-    }
-
-    jmethodID method =
-        env->GetStaticMethodID(cls, "httpsPostBinary",
-                               "(Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;"
-                               "Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/String;");
-    if (!method) {
-        spdlog::error("[http_android] Failed to find httpsPostBinary method");
-        env->ExceptionClear();
-        return {0, "httpsPostBinary method not found"};
-    }
+    JNIEnv* env = bridge.env;
+    jclass cls = bridge.cls;
+    jmethodID method = bridge.method;
 
     jstring j_url = env->NewStringUTF(url.c_str());
     jbyteArray j_body = env->NewByteArray(static_cast<jsize>(body.size()));
@@ -192,6 +208,51 @@ https_post_binary(const std::string& url, const std::vector<unsigned char>& body
         status = 0;
     }
     return {status, result.substr(newline + 1)};
+}
+
+bool https_get_bytes(const std::string& url, const std::string& user_agent, int timeout_sec,
+                     size_t max_bytes, std::string& body) {
+    BridgeMethod bridge;
+    std::string error;
+    if (!find_bridge_method("httpsGetBytes", "(Ljava/lang/String;Ljava/lang/String;II)[B", bridge,
+                            error)) {
+        return false;
+    }
+    JNIEnv* env = bridge.env;
+
+    jstring j_url = env->NewStringUTF(url.c_str());
+    jstring j_ua = env->NewStringUTF(user_agent.c_str());
+    if (!j_url || !j_ua) {
+        if (j_url)
+            env->DeleteLocalRef(j_url);
+        if (j_ua)
+            env->DeleteLocalRef(j_ua);
+        env->ExceptionClear();
+        return false;
+    }
+
+    auto j_result = static_cast<jbyteArray>(env->CallStaticObjectMethod(
+        bridge.cls, bridge.method, j_url, j_ua, static_cast<jint>(timeout_sec),
+        static_cast<jint>(std::min<size_t>(max_bytes, INT32_MAX))));
+
+    env->DeleteLocalRef(j_url);
+    env->DeleteLocalRef(j_ua);
+
+    // The Java side returns null for a non-2xx answer or any failure, and logs why.
+    if (!j_result || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        if (j_result)
+            env->DeleteLocalRef(j_result);
+        return false;
+    }
+
+    const jsize len = env->GetArrayLength(j_result);
+    body.resize(static_cast<size_t>(len));
+    if (len > 0) {
+        env->GetByteArrayRegion(j_result, 0, len, reinterpret_cast<jbyte*>(body.data()));
+    }
+    env->DeleteLocalRef(j_result);
+    return true;
 }
 
 } // namespace helix::android

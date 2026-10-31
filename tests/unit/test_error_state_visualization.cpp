@@ -1,6 +1,8 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_update_queue.h"
+
 #include "../helix_test_fixture.h"
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
@@ -217,6 +219,11 @@ namespace helix {
 // Re-use the test helper from test_ams_backend_afc.cpp pattern
 class AfcErrorStateHelper : public AmsBackendAfc {
   public:
+    // A message frame queues its toast decision for the main thread.
+    ~AfcErrorStateHelper() override {
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
     AfcErrorStateHelper() : AmsBackendAfc(nullptr, nullptr) {}
 
     void initialize_test_lanes_with_slots(int count) {
@@ -238,7 +245,7 @@ class AfcErrorStateHelper : public AmsBackendAfc {
             slot.global_index = i;
             slot.status = SlotStatus::AVAILABLE;
             slot.mapped_tool = i;
-            slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+            slot.color_rgb = kAmsDefaultSlotColor;
             unit.slots.push_back(slot);
         }
 
@@ -389,7 +396,7 @@ TEST_CASE("AFC lane error: empty errored lane is EMPTY, not present", "[ams][afc
     // tool whose AFC lane has no spool) leaves the live lane in status "Error"
     // with prep=false, load=false, spool_id=null. The AMS panel must show the
     // lane as empty, NOT as "filament present, not loaded". Regression for the
-    // catch-all in parse_afc_stepper that previously defaulted unknown statuses
+    // catch-all in apply_lane_status that previously defaulted unknown statuses
     // (including "Error") to AVAILABLE -> is_present() == true.
     helix::AfcErrorStateHelper helper;
     helper.initialize_test_lanes_with_slots(4); // slots start AVAILABLE
@@ -476,6 +483,7 @@ TEST_CASE("AFC buffer health: parsed to unit level from buffer update",
     REQUIRE(info.units[0].buffer_health->fault_detection_enabled == true);
     REQUIRE(info.units[0].buffer_health->distance_to_fault == Catch::Approx(25.5f));
     REQUIRE(info.units[0].buffer_health->state == "Advancing");
+    CHECK(info.units[0].buffer_health->motion == helix::BufferMotion::Advancing);
 
     // Slots should NOT have buffer health (it's unit-level now)
     REQUIRE_FALSE(helper.get_slot(0)->error.has_value());
@@ -514,6 +522,25 @@ TEST_CASE("AFC buffer health: fault_detection_enabled false stored on unit",
     const auto& info = helper.get_system_info();
     REQUIRE(info.units[0].buffer_health.has_value());
     REQUIRE(info.units[0].buffer_health->fault_detection_enabled == false);
+    CHECK(info.units[0].buffer_health->motion == helix::BufferMotion::Trailing);
+}
+
+TEST_CASE("AFC buffer health: a state with no direction has no motion",
+          "[ams][afc][buffer_health]") {
+    helix::AfcErrorStateHelper helper;
+    helper.initialize_test_lanes_with_slots(4);
+    helper.set_buffer_names({"Turtle_1"});
+
+    nlohmann::json buffer_data;
+    buffer_data["state"] = "Advancing";
+    buffer_data["lanes"] = nlohmann::json::array({"lane1"});
+    helper.feed_afc_buffer("Turtle_1", buffer_data);
+    helper.feed_afc_buffer("Turtle_1", {{"state", "Idle"}});
+
+    const auto& info = helper.get_system_info();
+    REQUIRE(info.units[0].buffer_health.has_value());
+    CHECK(info.units[0].buffer_health->state == "Idle");
+    CHECK(info.units[0].buffer_health->motion == helix::BufferMotion::Unknown);
 }
 
 // ============================================================================
@@ -541,7 +568,7 @@ class HappyHareErrorStateHelper : public AmsBackendHappyHare {
             slot.global_index = i;
             slot.status = SlotStatus::AVAILABLE;
             slot.mapped_tool = i;
-            slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+            slot.color_rgb = kAmsDefaultSlotColor;
             unit.slots.push_back(slot);
         }
 
@@ -558,7 +585,7 @@ class HappyHareErrorStateHelper : public AmsBackendHappyHare {
             auto* entry = HappyHareTestAccess::slots(*this).get_mut(i);
             if (entry) {
                 entry->info.status = SlotStatus::AVAILABLE;
-                entry->info.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+                entry->info.color_rgb = kAmsDefaultSlotColor;
             }
         }
     }

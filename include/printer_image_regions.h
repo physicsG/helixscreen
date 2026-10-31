@@ -72,7 +72,7 @@ enum class TagPrompt { Nozzle, PartFan, BedLeft, BedRight, Chamber, Light, Done 
 /// optional ones (part fan, chamber, light) can be skipped, and undo steps back.
 class ImageTagSession {
   public:
-    static constexpr int PROMPT_COUNT = 6;
+    static constexpr int kPromptCount = 6;
 
     TagPrompt prompt() const {
         return static_cast<TagPrompt>(step_);
@@ -81,7 +81,7 @@ class ImageTagSession {
         return step_;
     }
     bool done() const {
-        return step_ == PROMPT_COUNT;
+        return step_ == kPromptCount;
     }
     bool can_skip() const;
     bool can_undo() const {
@@ -95,7 +95,7 @@ class ImageTagSession {
     ImageRegions regions(int natural_w, int natural_h) const;
 
   private:
-    std::optional<NormPoint> points_[PROMPT_COUNT];
+    std::optional<NormPoint> points_[kPromptCount];
     int step_ = 0;
 };
 

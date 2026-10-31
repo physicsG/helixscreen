@@ -34,11 +34,11 @@ struct LevelingProbePoint {
 
 /// Probe and toolhead XY land on the configured point to the step, so this
 /// only absorbs float formatting; real mesh spacing is tens of millimetres.
-inline constexpr double LEVELING_POINT_TOLERANCE_MM = 1.5;
+inline constexpr double kLevelingPointToleranceMm = 1.5;
 
 /// Index of the configured point at (x, y), or -1 when none is within tolerance.
 inline int leveling_point_index(const std::vector<LevelingProbePoint>& points, double x, double y,
-                                double tolerance_mm = LEVELING_POINT_TOLERANCE_MM) {
+                                double tolerance_mm = kLevelingPointToleranceMm) {
     for (size_t i = 0; i < points.size(); ++i) {
         if (std::fabs(points[i].x - x) <= tolerance_mm &&
             std::fabs(points[i].y - y) <= tolerance_mm) {

@@ -7,16 +7,13 @@
  *
  * Run with: ./build/bin/helix-tests "[app_globals][restart]"
  *
- * app_request_restart_service() itself cannot run here: app_globals.o is kept out
- * of the test link (mk/tests.mk) and ui_test_utils.cpp stubs the entry point, so
- * calling it would exercise a no-op. The decision it routes on is a pure function
- * in include/app_globals.h, which links with no object file at all, so that is
- * what these drive.
+ * app_request_restart_service() itself is not driven here: it acts on the whole
+ * process (quit, or re-exec in place). The decision it routes on is a pure
+ * function in include/app_globals.h, so that is what these drive.
  *
  * What is at stake: getting this wrong under a supervisor leaves TWO instances
  * running — the supervisor starts a fresh one while the old process also re-execs
- * itself. The previous version of this file only round-tripped setenv/getenv and
- * would have passed with the whole function deleted.
+ * itself.
  */
 
 #include "app_globals.h"

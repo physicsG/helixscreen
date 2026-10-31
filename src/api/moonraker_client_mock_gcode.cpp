@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../tests/mocks/mock_printer_state.h"
+#include "gcode_parser.h"
 #include "moonraker_client_mock.h"
 #include "moonraker_client_mock_internal.h"
+#include "text_io.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -55,8 +58,20 @@ std::string normalize_gcode_command_case(const std::string& raw) {
 // command token exactly — a bare T<n> must not be confused with a temperature
 // parameter elsewhere in a line.
 MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_ifs_module(const std::string& gcode) {
-    const size_t ifs_token_end = gcode.find_first_of(" \t");
-    if (apply_ifs_module_gcode(gcode.substr(0, ifs_token_end), gcode)) {
+    // One script can carry several commands, one per line.
+    bool handled = false;
+    size_t start = 0;
+    while (start < gcode.size()) {
+        size_t end = gcode.find('\n', start);
+        if (end == std::string::npos) {
+            end = gcode.size();
+        }
+        const std::string line = gcode.substr(start, end - start);
+        const size_t ifs_token_end = line.find_first_of(" \t");
+        handled |= apply_ifs_module_gcode(line.substr(0, ifs_token_end), line);
+        start = end + 1;
+    }
+    if (handled) {
         return 0;
     }
     return std::nullopt;
@@ -80,32 +95,248 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_medusa(const std::st
         }
     };
 
-    if (cmd == "OPEN" || cmd == "MHC_OPEN") {
-        medusa_feeder_open_.store(true);
-        spdlog::info("[MoonrakerClientMock] MedusaHC feeder opened ({})", cmd);
+    const int count = medusa_tool_count();
+    auto reject = [&](std::string message) -> GcodeResult {
+        std::lock_guard<std::mutex> lock(gcode_error_mutex_);
+        last_gcode_error_ = std::move(message);
+        return 1;
+    };
+    // The controller's _begin() refuses an operation while another runs.
+    auto swap = [&](int tool, bool close_after) -> GcodeResult {
+        MedusaPhase phase;
+        {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            phase = medusa_.phase;
+        }
+        if (phase != MedusaPhase::Idle) {
+            return reject(fmt::format("MedusaHC is busy: {}", medusa_operation_word(phase)));
+        }
+        start_medusa_swap(tool, close_after);
+        return 0;
+    };
+
+    // NAME=value, value up to the next blank; empty when absent.
+    auto param = [&](const char* name) -> std::string {
+        const std::string key = std::string(" ") + name + "=";
+        const size_t at = gcode.find(key);
+        if (at == std::string::npos) {
+            return {};
+        }
+        const size_t start = at + key.size();
+        const size_t end = gcode.find_first_of(" \t", start);
+        return gcode.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    };
+    auto out_of_range = [&](int tool) {
+        return reject(fmt::format("Tool T{} is outside configured range T0..T{}", tool, count - 1));
+    };
+
+    // MHC_variables.cfg state: _TOOL_OFFSET's t<n>_off_<axis>, and _GLOBAL_STATE's
+    // target_tool / error_state the PAUSE and RESUME macros read and write.
+    if (cmd == "SET_GCODE_VARIABLE") {
+        const std::string macro = param("MACRO");
+        const std::string variable = param("VARIABLE");
+        const std::string value = param("VALUE");
+        if (macro == "_TOOL_OFFSET") {
+            int tool = -1;
+            char axis = 0;
+            if (std::sscanf(variable.c_str(), "t%d_off_%c", &tool, &axis) != 2 || tool < 0 ||
+                tool >= count || (axis != 'x' && axis != 'y' && axis != 'z')) {
+                return reject(fmt::format("Unknown gcode_macro variable '{}'", variable));
+            }
+            const double v = helix::text_io::parse_leading<double>(value).value_or(0.0);
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            medusa_.offsets[static_cast<size_t>(tool)][static_cast<size_t>(axis - 'x')] = v;
+            return 0;
+        }
+        if (macro == "_GLOBAL_STATE") {
+            const int v = helix::text_io::parse_leading<int>(value).value_or(0);
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            if (variable == "target_tool") {
+                medusa_.global_target_tool = v;
+            } else if (variable == "error_state") {
+                medusa_.error_state = v;
+            }
+            return 0;
+        }
+        return std::nullopt;
+    }
+    if (cmd == "SAVE_VARIABLE") {
+        const std::string variable = param("VARIABLE");
+        const auto v = helix::text_io::parse_leading<double>(param("VALUE"));
+        std::lock_guard<std::mutex> lock(medusa_mutex_);
+        if (v) {
+            medusa_.saved_variables[variable] = *v;
+        } else {
+            medusa_.saved_variables[variable] = param("VALUE");
+        }
         return 0;
     }
-    if (cmd == "CLOSE" || cmd == "MHC_CLOSE") {
-        medusa_feeder_open_.store(false);
-        spdlog::info("[MoonrakerClientMock] MedusaHC feeder closed ({})", cmd);
+    // _apply_offset(): SET_GCODE_OFFSET X/Y/Z, absolute. The mock's gcode_move
+    // models Z only.
+    if (cmd == "MHC_TOOL_OFFSET" || cmd == "_TOOL_OFFSET_T") {
+        const int tool = helix::text_io::parse_leading<int>(param("T")).value_or(-1);
+        if (tool < 0 || tool >= count) {
+            return out_of_range(tool);
+        }
+        // The controller's _apply_offset(): SET_GCODE_OFFSET X Y Z, absolute.
+        std::array<double, 3> xyz{};
+        {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            xyz = medusa_.offsets[static_cast<size_t>(tool)];
+        }
+        gcode_offset_x_.store(xyz[0]);
+        gcode_offset_y_.store(xyz[1]);
+        gcode_offset_z_.store(xyz[2]);
+        dispatch_status_update(
+            json{{"gcode_move", {{"homing_origin", {xyz[0], xyz[1], xyz[2], 0.0}}}}});
+        spdlog::info("[MoonrakerClientMock] MHC_TOOL_OFFSET T{}: X={:.3f} Y={:.3f} Z={:.3f}", tool,
+                     xyz[0], xyz[1], xyz[2]);
         return 0;
+    }
+    if (cmd == "MHC_LAYER_SET" || cmd == "_LAYER_SET") {
+        if (auto layer = helix::text_io::parse_leading<int>(param("L"))) {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            medusa_.layer = *layer;
+        }
+        return 0;
+    }
+    // MHC_CLEAN brushes the mounted nozzle; it never changes the operation.
+    if (cmd == "MHC_CLEAN" || cmd == "CLEAN") {
+        int mounted = -2;
+        {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            mounted = medusa_pin_tool_locked();
+        }
+        if (mounted < 0) {
+            dispatch_gcode_response("// MHC_CLEAN: no tool installed");
+        } else {
+            spdlog::info("[MoonrakerClientMock] MedusaHC cleaned T{}'s nozzle", mounted);
+        }
+        return 0;
+    }
+    // The documented PAUSE macro: a manual pause saves the mounted tool as the
+    // one RESUME returns to; after a failed change SET/DROP already named it.
+    if (cmd == "PAUSE") {
+        const MockPrintPhase phase = print_phase_.load();
+        if (phase == MockPrintPhase::PRINTING || phase == MockPrintPhase::PREHEAT) {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            if (medusa_.error_state == 0) {
+                medusa_.global_target_tool = medusa_pin_tool_locked();
+            }
+        }
+        return std::nullopt;
+    }
+    // The documented RESUME macro: while paused, only MHC_RESUME T=<target_tool>.
+    if (cmd == "RESUME" || cmd == "MHC_RESUME") {
+        if (print_phase_.load() != MockPrintPhase::PAUSED) {
+            if (cmd == "MHC_RESUME") {
+                dispatch_gcode_response("// MHC_RESUME: printer is not paused");
+                return 0;
+            }
+            return std::nullopt;
+        }
+        int tool = -1;
+        bool error_recovery = false;
+        int mounted = -2;
+        {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            tool = cmd == "RESUME" ? medusa_.global_target_tool
+                                   : helix::text_io::parse_leading<int>(param("T")).value_or(-1);
+            error_recovery = medusa_.error_state != 0;
+            mounted = medusa_pin_tool_locked();
+        }
+        if (tool < 0 || tool >= count) {
+            return out_of_range(tool);
+        }
+        const bool prepare = error_recovery || mounted != tool;
+        if (prepare && medusa_nozzle_temp(tool) <= kMedusaResumeMinNozzleC) {
+            return reject(fmt::format("MHC_RESUME: heat T{} above {}C before resuming", tool,
+                                      kMedusaResumeMinNozzleC));
+        }
+        if (!prepare) {
+            resume_print_internal();
+            return 0;
+        }
+        const GcodeResult started = swap(tool, /*close_after=*/true);
+        if (started && *started == 0) {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            medusa_.resume_after_swap = true;
+        }
+        return started;
+    }
+
+    if (cmd == "OPEN" || cmd == "MHC_OPEN" || cmd == "CLOSE" || cmd == "MHC_CLOSE") {
+        const bool open = cmd.find("OPEN") != std::string::npos;
+        {
+            std::lock_guard<std::mutex> lock(medusa_mutex_);
+            medusa_.feeder_open = open;
+        }
+        spdlog::info("[MoonrakerClientMock] MedusaHC feeder {} ({})", open ? "opened" : "closed",
+                     cmd);
+        return 0;
+    }
+    // The Irbis3D controller's own swap and its SET macro, which validate T.
+    if (cmd == "MHC_SET" || cmd == "SET") {
+        const int tool = tool_param();
+        if (tool < 0 || tool >= count) {
+            return reject(
+                fmt::format("Tool T{} is outside configured range T0..T{}", tool, count - 1));
+        }
+        return swap(tool, /*close_after=*/true);
     }
     if (cmd == "SELECT_TOOL") {
-        start_medusa_swap(tool_param());
+        // TOOL="tool T<n>" names the tool object; T=<n> is a tool number.
+        int tool = tool_param();
+        if (const size_t named = gcode.find("TOOL=\"tool T"); named != std::string::npos) {
+            tool = helix::text_io::parse_leading<int>(gcode.substr(named + 12)).value_or(-1);
+        }
+        if (tool >= 0) {
+            return swap(tool, /*close_after=*/true);
+        }
         return 0;
+    }
+    // MHC_DROP parks and leaves the gripper open; DROP_TOOL is MHC_DROP then
+    // MHC_CLOSE.
+    if (cmd == "MHC_DROP" || cmd == "_DROP") {
+        return swap(-1, /*close_after=*/false);
     }
     if (cmd == "UNSELECT_TOOL" || cmd == "DROP_TOOL") {
-        start_medusa_swap(-1);
-        return 0;
+        return swap(-1, /*close_after=*/true);
     }
-    // Bare T<n>: what the fork registers when it runs the swap itself.
-    if (cmd.size() >= 2 && cmd[0] == 'T' &&
-        std::all_of(cmd.begin() + 1, cmd.end(),
-                    [](unsigned char c) { return std::isdigit(c) != 0; })) {
-        start_medusa_swap(std::stoi(cmd.substr(1)));
-        return 0;
+    // Bare T<n>: a T<n> macro running SET T=<n> on the controller alone, or
+    // klipper-toolchanger's T<n> beside it.
+    if (cmd.size() == 2 && cmd[0] == 'T' && cmd[1] >= '0' && cmd[1] < '0' + count) {
+        return swap(cmd[1] - '0', /*close_after=*/true);
     }
     return std::nullopt;
+}
+
+MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_respond(const std::string& gcode) {
+    if (!is_command(gcode, "RESPOND")) {
+        return std::nullopt;
+    }
+    // Klipper's prefixes: TYPE=command is "//", error is "!!", echo (the
+    // default) is "echo:". MSG is quoted when it holds spaces.
+    std::string type = "echo";
+    if (const size_t t = gcode.find("TYPE="); t != std::string::npos) {
+        const size_t end = gcode.find_first_of(" \t", t + 5);
+        type = gcode.substr(t + 5, end == std::string::npos ? std::string::npos : end - t - 5);
+        std::transform(type.begin(), type.end(), type.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    }
+    std::string msg;
+    const size_t m = gcode.find("MSG=");
+    if (m != std::string::npos) {
+        if (m + 4 < gcode.size() && gcode[m + 4] == '"') {
+            const size_t close = gcode.rfind('"');
+            msg = close > m + 4 ? gcode.substr(m + 5, close - m - 5) : gcode.substr(m + 5);
+        } else {
+            msg = gcode.substr(m + 4);
+        }
+    }
+    const char* prefix = type == "command" ? "// " : (type == "error" ? "!! " : "echo: ");
+    dispatch_gcode_response(prefix + msg);
+    return 0;
 }
 
 // CFS commands (HELIX_MOCK_AMS=cfs). The calibration commands match on the
@@ -209,11 +440,36 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_openams_line(const s
     return std::nullopt;
 }
 
-// Snapmaker U1 feeder commands. Unconditional: AUTO_FEEDING is U1-only
-// vocabulary, so no mock printer mode needs to arm it, and no other printer's
-// script can contain the token.
+// Snapmaker U1 commands. Unconditional: AUTO_FEEDING, PARK_EXTRUDER and
+// DEFECT_DETECTION_CONFIG are U1-only vocabulary, so no mock printer mode
+// needs to arm them, and no other printer's script can contain the tokens.
 MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_u1_feeding(const std::string& gcode) {
     if (apply_u1_feeding_gcode(gcode)) {
+        return 0;
+    }
+    if (apply_multiace_gcode(gcode)) {
+        return 0;
+    }
+    if (is_command(gcode, "DEFECT_DETECTION_CONFIG")) {
+        if (has_token(gcode, "CLEAN_BED_ENABLE=0")) {
+            u1_clean_bed_enable_ = false;
+        } else if (has_token(gcode, "CLEAN_BED_ENABLE=1")) {
+            u1_clean_bed_enable_ = true;
+        }
+        if (has_token(gcode, "MAIN_ENABLE=0")) {
+            u1_defect_main_enable_ = false;
+        } else if (has_token(gcode, "MAIN_ENABLE=1")) {
+            u1_defect_main_enable_ = true;
+        }
+        spdlog::info("[MoonrakerClientMock] U1 DEFECT_DETECTION_CONFIG: main_enable={} "
+                     "clean_bed.enable={}",
+                     u1_defect_main_enable_.load(), u1_clean_bed_enable_.load());
+        return 0;
+    }
+    // "Detach Toolhead": the head goes back to its dock and nothing is
+    // published about it here, since the mock carries no U1 extruder pins.
+    if (is_command(gcode, "PARK_EXTRUDER")) {
+        spdlog::info("[MoonrakerClientMock] U1 PARK_EXTRUDER: active toolhead docked");
         return 0;
     }
     return std::nullopt;
@@ -231,7 +487,27 @@ MoonrakerClientMock::gcode_heater_temperature(const std::string& gcode) {
         target = std::stod(gcode.substr(target_pos + 7));
     }
 
-    if (gcode.find("HEATER=extruder") != std::string::npos) {
+    std::string heater_name;
+    if (size_t pos = gcode.find("HEATER="); pos != std::string::npos) {
+        const size_t start = pos + 7;
+        const size_t end = gcode.find_first_of(" \t\n", start);
+        heater_name = gcode.substr(start, end == std::string::npos ? end : end - start);
+    }
+    int secondary = -1;
+    if (heater_name.size() > 8 && heater_name.rfind("extruder", 0) == 0) {
+        secondary = helix::text_io::parse_leading<int>(heater_name.substr(8)).value_or(-1);
+    }
+    if (secondary >= 1) {
+        {
+            std::lock_guard<std::mutex> lock(secondary_extruders_mutex_);
+            if (secondary < static_cast<int>(secondary_extruders_.size())) {
+                secondary_extruders_[static_cast<size_t>(secondary)].target = target;
+            }
+        }
+        reset_idle_timeout();
+        spdlog::info("[MoonrakerClientMock] {} target set to {}°C", heater_name, target);
+        dispatch_status_update({{heater_name, {{"target", target}}}});
+    } else if (heater_name == "extruder") {
         set_extruder_target(target);
         reset_idle_timeout();
         spdlog::info("[MoonrakerClientMock] Extruder target set to {}°C", target);
@@ -253,7 +529,10 @@ MoonrakerClientMock::gcode_heater_temperature(const std::string& gcode) {
         // "HEATER=dragonbreath" for backend-named ones (a hard-coded
         // "chamber" comparison silently ignores those).
         const std::string bare = chamber_heater_bare_name();
-        if (!bare.empty() && gcode.find("HEATER=" + bare) != std::string::npos) {
+        if (!bare.empty() && gcode.find("HEATER=" + bare) != std::string::npos &&
+            !dragonbreath_reject_code_.empty()) {
+            chamber_route_set_target(target);
+        } else if (!bare.empty() && gcode.find("HEATER=" + bare) != std::string::npos) {
             set_chamber_target(target);
             reset_idle_timeout();
             spdlog::info("[MoonrakerClientMock] Chamber target set to {}°C", target);
@@ -517,10 +796,10 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_move(const std::stri
     // Position limits: the persona's stepper travel. Z allows slight negative
     // for probe calibration.
     const auto axis_max = helix::mock::descriptor(printer_type_).axis_max;
-    constexpr double X_MIN = mock_internal::MOCK_BED_X_MIN;
-    constexpr double Y_MIN = mock_internal::MOCK_BED_Y_MIN;
-    constexpr double Z_MIN = -0.5;
-    const double X_MAX = axis_max.x, Y_MAX = axis_max.y, Z_MAX = axis_max.z;
+    const auto axis_min = helix::mock::descriptor(printer_type_).axis_min;
+    const double kXMin = axis_min.x, kYMin = axis_min.y;
+    constexpr double kZMin = -0.5;
+    const double kXMax = axis_max.x, kYMax = axis_max.y, Z_MAX = axis_max.z;
 
     // Helper lambda to parse axis value from gcode string
     auto parse_axis = [&gcode](char axis) -> std::pair<bool, double> {
@@ -560,13 +839,13 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_move(const std::stri
     // Check limits (like real Klipper)
     bool out_of_range = false;
     std::string error_detail;
-    if (target_x < X_MIN || target_x > X_MAX) {
+    if (target_x < kXMin || target_x > kXMax) {
         error_detail = "Move out of range: X=" + std::to_string(target_x);
         out_of_range = true;
-    } else if (target_y < Y_MIN || target_y > Y_MAX) {
+    } else if (target_y < kYMin || target_y > kYMax) {
         error_detail = "Move out of range: Y=" + std::to_string(target_y);
         out_of_range = true;
-    } else if (target_z < Z_MIN || target_z > Z_MAX) {
+    } else if (target_z < kZMin || target_z > Z_MAX) {
         error_detail = "Move out of range: Z=" + std::to_string(target_z);
         out_of_range = true;
     }
@@ -696,6 +975,7 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_resume(const std::st
 // CANCEL_PRINT - Cancel current print
 MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_cancel_print(const std::string&) {
     cancel_print_internal();
+    reset_layer_pause();
     return std::nullopt;
 }
 
@@ -804,6 +1084,39 @@ MoonrakerClientMock::gcode_set_fan_speed(const std::string& gcode) {
 }
 
 // LED control - SET_LED LED=<name> RED=<0-1> GREEN=<0-1> BLUE=<0-1> [WHITE=<0-1>]
+MoonrakerClientMock::PressureAdvance
+MoonrakerClientMock::pressure_advance_for(const std::string& extruder) const {
+    std::lock_guard<std::mutex> lock(pressure_advance_mutex_);
+    auto it = pressure_advance_.find(extruder);
+    return it == pressure_advance_.end() ? PressureAdvance{} : it->second;
+}
+
+MoonrakerClientMock::GcodeResult
+MoonrakerClientMock::gcode_set_pressure_advance(const std::string& gcode) {
+    // Klipper defaults EXTRUDER to the active one; the mock prints on "extruder".
+    const std::string extruder =
+        helix::gcode::gcode_param_value(gcode, "EXTRUDER").value_or("extruder");
+    PressureAdvance pa = pressure_advance_for(extruder);
+    if (auto v = helix::gcode::gcode_param_value(gcode, "ADVANCE")) {
+        pa.advance = std::max(0.0, std::strtod(v->c_str(), nullptr));
+    }
+    if (auto v = helix::gcode::gcode_param_value(gcode, "SMOOTH_TIME")) {
+        pa.smooth_time = std::max(0.0, std::strtod(v->c_str(), nullptr));
+    }
+    {
+        std::lock_guard<std::mutex> lock(pressure_advance_mutex_);
+        pressure_advance_[extruder] = pa;
+    }
+    spdlog::info("[MoonrakerClientMock] SET_PRESSURE_ADVANCE {} ADVANCE={:.4f} SMOOTH_TIME={:.4f}",
+                 extruder, pa.advance, pa.smooth_time);
+    dispatch_status_update(
+        {{extruder, {{"pressure_advance", pa.advance}, {"smooth_time", pa.smooth_time}}}});
+    // Klipper's own acknowledgement, so console consumers see the same text.
+    dispatch_gcode_response(fmt::format("pressure_advance: {:.6f}", pa.advance));
+    dispatch_gcode_response(fmt::format("pressure_advance_smooth_time: {:.6f}", pa.smooth_time));
+    return std::nullopt;
+}
+
 MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_set_led(const std::string& gcode) {
     // Parse LED name
     std::string led_name;
@@ -1121,10 +1434,17 @@ int MoonrakerClientMock::gcode_script(const std::string& raw_gcode) {
     GcodeResult r;
 
     gcode_skip_wrappers(g);
+    gcode_layer_pause(g);
     if (is_mock_ifs_module() && (r = gcode_ifs_module(g))) {
         return *r;
     }
     if (is_mock_medusahc() && (r = gcode_medusa(g))) {
+        return *r;
+    }
+    if (is_mock_indx() && (r = gcode_indx(g))) {
+        return *r;
+    }
+    if ((r = gcode_respond(raw_gcode))) {
         return *r;
     }
     if (printer_type_ == PrinterType::FLASHFORGE_CREATOR5_ZMOD && (r = gcode_zmod(g))) {
@@ -1240,6 +1560,10 @@ int MoonrakerClientMock::gcode_script(const std::string& raw_gcode) {
     if (has_token(g, "TEST_RESONANCES")) {
         gcode_test_resonances(g);
     }
+    if (has_token(g, "STEPPER_BUZZ")) {
+        // force_move is always loaded; the buzz moves nothing the mock tracks.
+        spdlog::info("[MoonrakerClientMock] STEPPER_BUZZ: {}", g);
+    }
     if (has_token(g, "SET_INPUT_SHAPER")) {
         spdlog::info("[MoonrakerClientMock] SET_INPUT_SHAPER: {}", g);
     }
@@ -1248,7 +1572,7 @@ int MoonrakerClientMock::gcode_script(const std::string& raw_gcode) {
         dispatch_measure_axes_noise_response();
     }
     if (has_token(g, "SET_PRESSURE_ADVANCE")) {
-        spdlog::warn("[MoonrakerClientMock] STUB: SET_PRESSURE_ADVANCE NOT IMPLEMENTED");
+        gcode_set_pressure_advance(g);
     }
     if (has_token(g, "SET_LED")) {
         gcode_set_led(g);

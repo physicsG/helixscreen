@@ -19,6 +19,12 @@ _HELIX_MOONRAKER_SOURCED=1
 #   points KLIPPER_CONFIG_DIR there for platform=cc1, so the dynamic probe below
 #   normally wins; the static entry is the safety net for a COSMOS box that was
 #   not detected as cc1 (forced --platform, future Elegoo model, etc.).
+# Creality K2 note:
+#   procd starts Moonraker with -c /usr/share/moonraker/moonraker.conf, which
+#   find_moonraker_conf reads from the running process. The static entry, last
+#   so no other layout's vendor copy can shadow its own conf, covers a K2 whose
+#   Moonraker is stopped. The path is Creality's vendor package, K2-only in
+#   practice: K1 keeps its conf under /usr/data, listed above it.
 MOONRAKER_CONF_PATHS="
 /home/pi/printer_data/config/moonraker.conf
 /home/biqu/printer_data/config/moonraker.conf
@@ -30,6 +36,7 @@ MOONRAKER_CONF_PATHS="
 /usr/data/config/printer_data/config/moonraker.conf
 /usr/data/printer_data/config/moonraker.conf
 /etc/klipper/config/moonraker.conf
+/usr/share/moonraker/moonraker.conf
 "
 
 # Common Moonraker SOURCE roots (the checkout/package that holds the Python
@@ -89,7 +96,30 @@ find_moonraker_update_manager_dir() {
         done
     done
 
+    # Last, the running Moonraker itself, seen through its own root: Forge-X
+    # runs it in a chroot (/data/.mod/.forge-x) that no static path names.
+    local pkg
+    pkg=$(running_moonraker_package_dir)
+    if [ -n "$pkg" ] && [ -d "$pkg/components/update_manager" ]; then
+        echo "$pkg/components/update_manager"
+        return 0
+    fi
+
     echo ""
+}
+
+# Print the running Moonraker's python package directory (the one holding
+# moonraker.py) as a path from here. Empty when no Moonraker is running, or
+# when it runs as a module (python -m moonraker), which names no file.
+running_moonraker_package_dir() {
+    local script
+    script=$(running_moonraker_process | sed -n 2p)
+    # A relative script path names nothing from here.
+    case "$script" in
+        /*) ;;
+        *) echo ""; return 0 ;;
+    esac
+    echo "$(running_moonraker_root)$(dirname "$script")"
 }
 
 # Probe whether the installed Moonraker honours release_info.json's asset_name.
@@ -169,6 +199,14 @@ find_moonraker_conf() {
         fi
     fi
 
+    # The conf the running Moonraker loads, from its command line.
+    local loaded
+    loaded=$(running_moonraker_conf)
+    if [ -n "$loaded" ] && ! host_path_is_mod_owned "$loaded"; then
+        echo "$loaded"
+        return 0
+    fi
+
     # Static fallback
     for conf in $MOONRAKER_CONF_PATHS; do
         if [ -f "$conf" ] && ! host_path_is_mod_owned "$conf"; then
@@ -185,6 +223,28 @@ find_moonraker_conf() {
 has_update_manager_section() {
     local conf="$1"
     grep -q '^\[update_manager helixscreen\]' "$conf" 2>/dev/null
+}
+
+# Print each file holding [update_manager helixscreen] among moonraker.conf @1
+# and the files its [include] lines reach, one per line; nothing when none does.
+# Some firmware keeps the web UIs' updater stanzas in an included mainsail.conf.
+update_manager_stanza_files() {
+    helix_conf_files_matching "$1" "$(running_moonraker_root)" '^\[update_manager helixscreen\]'
+}
+
+# True, after a warning, when config file @1, which holds section @2, belongs
+# to the firmware mod: the mod's own files are never edited here.
+conf_left_to_mod() {
+    host_path_is_mod_owned "$1" || return 1
+    log_warn "$2 is in $1, which the firmware mod owns - leaving it in place"
+}
+
+# update_manager_stanza_files @1 without the firmware mod's files, each of
+# which is warned about and left out: the stanza files the installer may edit.
+update_manager_editable_stanza_files() {
+    update_manager_stanza_files "$1" | while IFS= read -r _umes_file; do
+        conf_left_to_mod "$_umes_file" "[update_manager helixscreen]" || printf '%s\n' "$_umes_file"
+    done
 }
 
 # The channel Moonraker's type:web updater should follow. Moonraker accepts
@@ -276,8 +336,12 @@ migrate_to_web_type() {
 
     log_info "Migrating update_manager to type: web..."
 
-    # Remove old section
-    remove_update_manager_section "$conf" 2>/dev/null || true
+    # Remove old section. Adding the web section after a failed removal would
+    # leave two [update_manager helixscreen] sections, which Moonraker rejects.
+    if ! remove_update_manager_section "$conf" 2>/dev/null; then
+        log_warn "Could not remove the old update_manager section; leaving it as it is"
+        return 1
+    fi
 
     # Add new web section
     add_update_manager_section "$conf"
@@ -435,10 +499,16 @@ disable_system_updates_on_buildroot() {
     log_note "Disabled OS package updates in $conf (no OS package manager)"
 }
 
-# Remove unsupported options from the helixscreen update_manager section.
-# type: web only supports: type, channel, repo, path.
-# Options like persistent_files, managed_services, and install_script are
-# not supported and cause Moonraker to log "unparsed config option" warnings.
+# Remove options that do not belong in the helixscreen update_manager section.
+# managed_services and install_script are not read by a type: web stanza, so
+# Moonraker logs an "unparsed config option" warning for each.
+# persistent_files IS read by type: web, but Moonraker matches it against
+# top-level entry names of path: only (no globs, no nested paths), and our
+# release zip ships a top-level config/. Listing config would restore the saved
+# directory to config/config after extraction; a nested entry such as
+# config/settings.json never matches. It therefore cannot preserve anything
+# useful and is removed. User config survives through the symlinks into
+# printer_data/config/helixscreen/ instead (setup_config_symlink).
 # Args: $1 = moonraker.conf path
 # Point an existing stanza's `path:` at INSTALL_DIR.
 # The value is interpolated once, when the section is first added, and nothing
@@ -551,19 +621,23 @@ cleanup_unsupported_options() {
     log_success "Cleaned up unsupported options from moonraker.conf"
 }
 
-# Write release_info.json if not already present
-# Moonraker type:web needs this file to detect installed version
+# Write release_info.json naming the installed binary's version. Moonraker
+# type:web and the installer's "Update <from> -> <to>" line both read it, and a
+# tree updated by copying files in keeps whatever version it was first written
+# with, so a file naming another version is rewritten.
 write_release_info() {
     local release_info="${INSTALL_DIR}/release_info.json"
-
-    if [ -f "$release_info" ]; then
-        return 0
-    fi
 
     # Try to detect version from binary
     local version=""
     if [ -x "${INSTALL_DIR}/bin/helix-screen" ]; then
         version=$("${INSTALL_DIR}/bin/helix-screen" --version 2>/dev/null | head -n 1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+[^ ]*' || echo "")
+    fi
+
+    if [ -f "$release_info" ]; then
+        # No version to compare against: keep what is there.
+        [ -n "$version" ] || return 0
+        [ "$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$release_info" | head -n 1)" = "$version" ] && return 0
     fi
 
     if [ -z "$version" ]; then
@@ -715,26 +789,24 @@ _remove_helix_print_inline() {
         log_warn "$target is a regular file, not a symlink this installer created - leaving it in place"
     fi
 
-    local conf
+    local conf section_conf
     conf=$(find_moonraker_conf)
-    if [ -n "$conf" ] && grep -q '^\[helix_print\]' "$conf" 2>/dev/null; then
+    [ -n "$conf" ] || return 0
+    # Every file Moonraker reads the plugin's sections from: the conf and its
+    # includes. That covers the [update_manager helix_print] a git-clone
+    # install of the plugin wrote.
+    for section_conf in $(helix_print_owned_files "$conf" "$(running_moonraker_root)"); do
+        conf_left_to_mod "$section_conf" "[helix_print]" && continue
         local fs
-        fs=$(file_sudo "$conf")
-        $fs cp "$conf" "${conf}.bak.helixscreen-uninstall" 2>/dev/null || true
-        log_info "Removing [helix_print] section from $conf..."
-        local prog='
-            /^\[helix_print\]/ { skip = 1; next }
-            /^\[/ { skip = 0 }
-            !skip { print }
-        '
-        # The program is passed as an argument rather than interpolated into the
-        # -c string, so its $0 and $1 stay awk's and are never expanded by a shell.
-        if $fs sh -c 'awk "$1" "$2" > "$2.helixtmp" && mv "$2.helixtmp" "$2"' sh "$prog" "$conf"; then
-            log_success "Removed [helix_print] section from $conf"
+        fs=$(file_sudo "$section_conf")
+        $fs cp "$section_conf" "${section_conf}.bak.helixscreen-uninstall" 2>/dev/null || true
+        log_info "Removing HelixPrint sections from $section_conf..."
+        if helix_rewrite_conf "$section_conf" "$HELIX_PRINT_STRIP_AWK" "$fs"; then
+            log_success "Removed HelixPrint sections from $section_conf"
         else
-            log_warn "Could not remove [helix_print] from $conf - edit it by hand, backup at ${conf}.bak.helixscreen-uninstall"
+            log_warn "Could not remove HelixPrint sections from $section_conf - edit it by hand, backup at ${section_conf}.bak.helixscreen-uninstall"
         fi
-    fi
+    done
 }
 
 # Remove the HelixPrint Moonraker plugin: the helix_print.py symlink in
@@ -762,7 +834,7 @@ remove_moonraker_plugin() {
     conf=$(find_moonraker_conf)
 
     local has_section=false
-    if [ -n "$conf" ] && grep -q '^\[helix_print\]' "$conf" 2>/dev/null; then
+    if [ -n "$conf" ] && [ -n "$(helix_print_owned_files "$conf" "$(running_moonraker_root)")" ]; then
         has_section=true
     fi
 
@@ -792,42 +864,58 @@ remove_moonraker_plugin() {
     return 0
 }
 
-# Restart Moonraker to pick up configuration changes.
-#
-# The init script name varies by firmware, and knowing only systemd plus the K1's
-# S56moonraker_service meant this fell off the end silently on everything else.
-# On a CC1 that made the moonraker.conf edit take effect at the user's next
-# reboot instead of at install time, which reads as "an update spontaneously
-# changed my printer" (verified: the CC1 has no systemctl, no
-# S56moonraker_service, and its script is /etc/init.d/moonraker).
-#
-# HELIX_INITD_DIR is the same seam camera.sh uses, so the BATS suite can point
-# this at a temp dir rather than needing a writable /etc/init.d.
-# Always returns 0 — a failed restart must never abort an install.
-restart_moonraker() {
-    local initd script
+# The URL this host reaches Moonraker at (moonraker_local_url): the port comes
+# from the platform's own moonraker.conf, which on a mod host is the mod's file
+# holding [server], else from whatever find_moonraker_conf finds.
+installer_moonraker_url() {
+    local conf
+    conf="$(klipper_config_dir)"
+    conf="${conf:+${conf}/moonraker.conf}"
+    [ -n "$conf" ] && [ -f "$conf" ] || conf=$(find_moonraker_conf)
+    moonraker_local_url "$conf" "$(running_moonraker_root)"
+}
 
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet moonraker 2>/dev/null; then
-        log_info "Restarting Moonraker to apply configuration..."
-        run_logged $SUDO systemctl restart moonraker || true
-        return 0
+# Moonraker loads the HelixPrint plugin from INSTALL_DIR/moonraker-plugin, so a
+# Moonraker running as a user other than INSTALL_DIR's owner needs search on
+# INSTALL_DIR and read on the plugin tree, which an install under umask 077
+# leaves it neither of. Adds exactly that: search, never list, on INSTALL_DIR,
+# and on the plugin tree 0755 directories with files readable by all
+# (executables keep their x). INSTALL_DIR/config, when it is a directory of its
+# own, is closed to other users, since the search bit lets anyone reach a path
+# inside INSTALL_DIR they can name and config/ holds the API key and pairing
+# secrets. Nothing above INSTALL_DIR, which the installer did not make, and
+# nothing else inside it changes. A root Moonraker reads everything; with none
+# running there is no user to open the tree to; a mod payload root is the mod's.
+open_plugin_to_moonraker() {
+    local plugin="${INSTALL_DIR}/moonraker-plugin" uid owner s
+    [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] && return 0
+    [ -d "$plugin" ] || return 0
+    uid=$(running_moonraker_ids)
+    uid="${uid%% *}"
+    case "$uid" in '' | 0) return 0 ;; esac
+    # shellcheck disable=SC2012  # BusyBox find has no -printf; ls -n is the portable numeric owner
+    owner=$(ls -ldn "$INSTALL_DIR" 2>/dev/null | awk '{ print $3 }')
+    [ "$uid" != "$owner" ] || return 0
+    log_info "Moonraker runs as uid ${uid}: making the HelixPrint plugin readable to it"
+    s=$(file_sudo "$INSTALL_DIR")
+    if [ -d "$INSTALL_DIR/config" ] && [ ! -L "$INSTALL_DIR/config" ]; then
+        $s chmod go-rwx "$INSTALL_DIR/config" ||
+            log_warn "Could not close ${INSTALL_DIR}/config to other users"
     fi
+    if ! { $s chmod go+x "$INSTALL_DIR" && $s chmod -R go+rX "$plugin"; }; then
+        log_warn "Could not open ${plugin} to Moonraker; installing the plugin will refuse until it can read it"
+    fi
+    return 0
+}
 
-    # SysV/procd firmware. S56moonraker_service is Creality K1/Simple AF; a plain
-    # "moonraker" covers COSMOS (CC1) and the rest.
-    initd="${HELIX_INITD_DIR:-/etc/init.d}"
-    for script in "${initd}/S56moonraker_service" "${initd}/moonraker" \
-                  "/etc/init.d/S56moonraker_service" "/etc/init.d/moonraker"; do
-        if [ -x "$script" ] || [ -f "$script" ]; then
-            log_info "Restarting Moonraker to apply configuration..."
-            if ! $SUDO "$script" restart 2>/dev/null; then
-                log_warn "Could not restart Moonraker - you may need to restart it manually"
-            fi
-            return 0
-        fi
-    done
-
-    log_warn "Could not find a way to restart Moonraker - restart it manually for the configuration change to take effect."
+# Restart Moonraker to pick up configuration changes: moonraker_restart's
+# config change, over Moonraker's HTTP API at installer_moonraker_url. It
+# reports what it did and what is left to the user, a Moonraker that is not
+# running or a print holding the restart off included. Always returns 0: a
+# restart that did not happen must never abort an install.
+restart_moonraker() {
+    log_info "Restarting Moonraker to apply configuration..."
+    moonraker_restart config "$(installer_moonraker_url)" log_info log_warn || :
     return 0
 }
 
@@ -839,12 +927,15 @@ detect_moonraker_integration() {
     local conf asvc
     MOONRAKER_ADDS=""
     [ "${1:-}" = "ad5m" ] && return 0
+    # A desktop install talks to a printer elsewhere; this box's Moonraker,
+    # if it has one, does not manage it.
+    [ "${1:-}" = "x86-desktop" ] && return 0
     [ "${HELIX_MOD_PAYLOAD:-}" = "1" ] && return 0
 
     conf=$(find_moonraker_conf)
     [ -n "$conf" ] || return 0
 
-    if ! has_update_manager_section "$conf" \
+    if [ -z "$(update_manager_stanza_files "$conf")" ] \
         && [ "$(moonraker_asset_name_support)" != "unsupported" ]; then
         MOONRAKER_ADDS="update-manager"
     fi
@@ -883,9 +974,9 @@ configure_moonraker_updates() {
 
     # --auto-update is refused for every payload install, wherever the root
     # sits. Moonraker's type:web updater rmtree()s `path:` before extracting
-    # and the generated stanza carries no persistent_files, so it destroys the
-    # config/ and platform/ preservation the payload contract exists to
-    # provide - and config/ lives inside the root. Where the root sits changes
+    # persistent_files matches only top-level names of path:, so nothing can
+    # keep the config/ and platform/ preservation the payload contract exists
+    # to provide - and config/ lives inside the root. Where the root sits changes
     # nothing: a payload's lifecycle belongs to the mod's OTA, not to a second
     # updater that cannot see the contract. The option is refused, not the
     # install; completing without the updater armed is the safe outcome,
@@ -897,8 +988,6 @@ configure_moonraker_updates() {
         log_error "Moonraker's type:web updater replaces the whole root on update, destroying"
         log_error "the config/ and platform/ preservation the payload contract provides."
         log_error "The mod's own OTA updates a payload install; arm nothing else against it."
-        # TODO(#1505): a persistent_files-aware stanza could make a payload
-        # root safe for --auto-update; refused until that is decided.
         return 0
     fi
 
@@ -929,6 +1018,15 @@ configure_moonraker_updates() {
 
     log_info "Using moonraker.conf at: $conf"
 
+    # The stanza may sit in a file the conf includes rather than in the conf.
+    # Every check and rewrite below goes to the files Moonraker reads it from;
+    # appending one to the conf would leave two for Moonraker to merge. A
+    # stanza in the firmware mod's files counts as present but is never edited.
+    local stanza_files editable_files stanza_conf
+    stanza_files=$(update_manager_stanza_files "$conf")
+    editable_files=$(update_manager_editable_stanza_files "$conf")
+    stanza_conf=$(printf '%s\n' "$editable_files" | sed -n 1p)
+
     # Gate on Moonraker's asset_name support before arming the one-click
     # updater (prestonbrown/helixscreen#993). On a Moonraker that ignores
     # asset_name, the Update button in Mainsail/Fluidd rmtree()s the install
@@ -950,10 +1048,14 @@ configure_moonraker_updates() {
         # The gun may already be loaded from an earlier install that ran before
         # this gate existed -- unload it.
         local removed_stale=0
-        if has_update_manager_section "$conf"; then
+        if [ -n "$editable_files" ]; then
             log_warn "Removing the existing [update_manager helixscreen] section."
-            remove_update_manager_section
-            removed_stale=1
+            local stale_file
+            while IFS= read -r stale_file; do
+                _remove_update_manager_section_from "$stale_file" && removed_stale=1
+            done <<STALE_FILES
+$editable_files
+STALE_FILES
         fi
 
         # These two are orthogonal to the updater and must not regress just
@@ -983,8 +1085,9 @@ configure_moonraker_updates() {
 
     # Migrate old git_repo or zip config to type: web
     # (type: zip shows perpetual UP-TO-DATE in Mainsail — see mainsail-crew/mainsail#2444)
-    if has_old_git_repo_section "$conf" || has_old_zip_section "$conf"; then
-        migrate_to_web_type "$conf"
+    if [ -n "$stanza_conf" ] \
+        && { has_old_git_repo_section "$stanza_conf" || has_old_zip_section "$stanza_conf"; }; then
+        migrate_to_web_type "$stanza_conf" || true
         # Where the OS has no package manager, silence the provider warnings.
         disable_system_updates_on_buildroot "$conf"
         ensure_moonraker_asvc "$conf"
@@ -992,19 +1095,26 @@ configure_moonraker_updates() {
         return 0
     fi
 
-    if has_update_manager_section "$conf"; then
-        log_info "update_manager section already exists in $conf"
+    if [ -n "$stanza_files" ]; then
         # Set by the sync_* rewrites below; Moonraker reads its config only at
         # startup, so a rewritten stanza needs a restart before Mainsail sees it.
         _UPDATE_MANAGER_SYNCED=""
-        # path: is only ever written when the section is first added, so an
-        # install that has moved leaves it naming the tree we left behind.
-        sync_update_manager_path "$conf"
-        # channel: likewise — rewrite it to whatever this update resolved to.
-        sync_update_manager_channel "$conf"
-        # Remove options not supported by type: web (persistent_files,
-        # managed_services, install_script) that cause Moonraker warnings.
-        cleanup_unsupported_options "$conf"
+        local stanza_file
+        while IFS= read -r stanza_file; do
+            [ -n "$stanza_file" ] || continue
+            log_info "update_manager section already exists in $stanza_file"
+            # path: is only ever written when the section is first added, so an
+            # install that has moved leaves it naming the tree we left behind.
+            sync_update_manager_path "$stanza_file"
+            # channel: likewise — rewrite it to whatever this update resolved to.
+            sync_update_manager_channel "$stanza_file"
+            # Remove managed_services and install_script (unread by type: web,
+            # warned about as unparsed) and persistent_files (read, but it matches
+            # top-level names only and cannot preserve our config/ layout).
+            cleanup_unsupported_options "$stanza_file"
+        done <<STANZA_FILES
+$editable_files
+STANZA_FILES
         # Where the OS has no package manager, silence the provider warnings.
         disable_system_updates_on_buildroot "$conf"
         # Still ensure asvc is correct even if section already exists
@@ -1022,15 +1132,33 @@ configure_moonraker_updates() {
     restart_moonraker
 }
 
-# Remove update_manager section from moonraker.conf
+# Remove [update_manager helixscreen] from conf @1, or with no argument from
+# every file Moonraker reads it from: find_moonraker_conf and the files its
+# [include] lines reach. A mod-owned file is left in place with a warning.
 # Called during uninstallation
+# Returns: 1 when a file needed the edit and could not take it (left whole)
 remove_update_manager_section() {
-    local conf
-    conf=$(find_moonraker_conf)
-
-    if [ -z "$conf" ]; then
-        return 0
+    if [ -n "${1:-}" ]; then
+        _remove_update_manager_section_from "$1"
+        return
     fi
+    local conf stanza_file rc=0
+    conf=$(find_moonraker_conf)
+    [ -n "$conf" ] || return 0
+    while IFS= read -r stanza_file; do
+        [ -n "$stanza_file" ] || continue
+        _remove_update_manager_section_from "$stanza_file" || rc=1
+    done <<STANZA_FILES
+$(update_manager_editable_stanza_files "$conf")
+STANZA_FILES
+    return $rc
+}
+
+# Remove [update_manager helixscreen] and the comment block the installer
+# writes above it from conf @1.
+# Returns: 1 when the file needed the edit and could not take it (left whole)
+_remove_update_manager_section_from() {
+    local conf="$1"
 
     if ! has_update_manager_section "$conf"; then
         return 0
@@ -1079,9 +1207,10 @@ remove_update_manager_section() {
         }
         END { for (j = 1; j <= n; j++) print buf[j] }
     '
-    # The program is passed as an argument rather than interpolated into the
-    # -c string, so its $0 and $1 stay awk's and are never expanded by a shell.
-    $fs sh -c 'awk "$1" "$2" > "$2.helixtmp" && mv "$2.helixtmp" "$2"' sh "$prog" "$conf"
+    if ! helix_rewrite_conf "$conf" "$prog" "$fs"; then
+        log_warn "Could not remove the update_manager section from $conf - edit it by hand, backup at ${conf}.bak.helixscreen-uninstall"
+        return 1
+    fi
 
     log_success "Removed update_manager section from $conf"
 }

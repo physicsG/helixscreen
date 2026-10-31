@@ -46,6 +46,12 @@ struct WidgetCategoryDef {
     const char* icon;            // Icon name from ui_icon_codepoints.h
 };
 
+/// What a widget describes: the printer, or the screen it runs on. A layout
+/// published for other screens carries only printer-scoped widgets.
+enum class WidgetScope { Printer, Screen };
+
+/// One widget's registry entry. `scope` decides whether the widget describes
+/// the printer or the screen it runs on.
 struct PanelWidgetDef {
     const char* id;                    // Stable string for JSON config
     const char* display_name;          // For settings overlay UI
@@ -107,6 +113,10 @@ struct PanelWidgetDef {
     WidgetFactory factory = nullptr;       // nullptr = pure XML or externally managed
     SubjectInitFn init_subjects = nullptr; // Called before XML creation; must be idempotent
 
+    /// Last so the table's positional initialisers reach it only through the
+    /// two fields above it.
+    WidgetScope scope = WidgetScope::Printer;
+
     // Resolved accessors (0 = "use default colspan/rowspan")
     int effective_min_colspan() const {
         return min_colspan > 0 ? min_colspan : colspan;
@@ -133,6 +143,10 @@ const WidgetCategoryDef* find_widget_category(WidgetCategory id);
 
 const std::vector<PanelWidgetDef>& get_all_widget_defs();
 const PanelWidgetDef* find_widget_def(std::string_view id);
+
+/// True when `widget_id` (a `base:N` instance id included) names a registered
+/// screen-scoped widget. Unknown ids, plugins among them, are not.
+bool is_screen_scoped(const std::string& widget_id);
 size_t widget_def_count();
 void register_widget_factory(std::string_view id, WidgetFactory factory);
 void register_widget_subjects(std::string_view id, SubjectInitFn init_fn);

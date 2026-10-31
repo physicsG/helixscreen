@@ -254,22 +254,17 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 static constexpr const char* kSeverityIconNames[] = {"icon_info", "icon_success", "icon_warning",
                                                      "icon_error"};
 
-/// The components carrying a four-icon severity column that finalize drives.
-/// Both are near twins, so both need the same glyph guarantees.
-static constexpr const char* kSeverityRowComponents[] = {"hardware_issue_row",
-                                                         "notification_history_item"};
-
-/// Build one of those rows at the given severity and finalize it.
-static lv_obj_t* make_severity_row(lv_obj_t* parent, const char* component, const char* severity) {
+/// Build a hardware_issue_row at the given severity and finalize it.
+static lv_obj_t* make_severity_row(lv_obj_t* parent, const char* severity) {
     const char* attrs[] = {"severity", severity, nullptr};
-    lv_obj_t* row = static_cast<lv_obj_t*>(lv_xml_create(parent, component, attrs));
+    lv_obj_t* row = static_cast<lv_obj_t*>(lv_xml_create(parent, "hardware_issue_row", attrs));
     if (row) {
         ui_severity_card_finalize(row);
     }
     return row;
 }
 
-/// The name of the single icon left visible on a finalized row.
+/// The name of the single icon left visible on a row.
 static std::string visible_icon_name(lv_obj_t* row) {
     std::string found;
     for (const char* name : kSeverityIconNames) {
@@ -283,6 +278,21 @@ static std::string visible_icon_name(lv_obj_t* row) {
     return found;
 }
 
+/// Glyphs of the warning and error icons on @p warning_row and @p error_row.
+static void require_distinct_critical_glyphs(lv_obj_t* warning_row, lv_obj_t* error_row) {
+    lv_obj_t* warning_icon = lv_obj_find_by_name(warning_row, "icon_warning");
+    lv_obj_t* error_icon = lv_obj_find_by_name(error_row, "icon_error");
+    REQUIRE(warning_icon != nullptr);
+    REQUIRE(error_icon != nullptr);
+
+    std::string warning_glyph = lv_label_get_text(warning_icon);
+    std::string error_glyph = lv_label_get_text(error_icon);
+
+    REQUIRE_FALSE(warning_glyph.empty());
+    REQUIRE_FALSE(error_glyph.empty());
+    REQUIRE(warning_glyph != error_glyph);
+}
+
 TEST_CASE_METHOD(LVGLUITestFixture, "ui_severity_card: finalize unhides one icon per severity",
                  "[reactive-severity][hardware]") {
     struct Expectation {
@@ -294,42 +304,119 @@ TEST_CASE_METHOD(LVGLUITestFixture, "ui_severity_card: finalize unhides one icon
                                  {"error", "icon_error"},
                                  {"success", "icon_success"}};
 
-    for (const char* component : kSeverityRowComponents) {
-        for (const auto& c : cases) {
-            INFO("component=" << component << " severity=" << c.severity);
-            lv_obj_t* row = make_severity_row(test_screen(), component, c.severity);
-            REQUIRE(row != nullptr);
+    for (const auto& c : cases) {
+        INFO("severity=" << c.severity);
+        lv_obj_t* row = make_severity_row(test_screen(), c.severity);
+        REQUIRE(row != nullptr);
 
-            REQUIRE(visible_icon_name(row) == c.icon_name);
+        REQUIRE(visible_icon_name(row) == c.icon_name);
 
-            lv_obj_delete(row);
-        }
+        lv_obj_delete(row);
     }
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
                  "ui_severity_card: critical and warning rows use distinct glyphs",
                  "[reactive-severity][hardware]") {
-    for (const char* component : kSeverityRowComponents) {
-        INFO("component=" << component);
-        lv_obj_t* warning_row = make_severity_row(test_screen(), component, "warning");
-        lv_obj_t* error_row = make_severity_row(test_screen(), component, "error");
-        REQUIRE(warning_row != nullptr);
-        REQUIRE(error_row != nullptr);
+    lv_obj_t* warning_row = make_severity_row(test_screen(), "warning");
+    lv_obj_t* error_row = make_severity_row(test_screen(), "error");
+    REQUIRE(warning_row != nullptr);
+    REQUIRE(error_row != nullptr);
 
-        lv_obj_t* warning_icon = lv_obj_find_by_name(warning_row, "icon_warning");
-        lv_obj_t* error_icon = lv_obj_find_by_name(error_row, "icon_error");
-        REQUIRE(warning_icon != nullptr);
-        REQUIRE(error_icon != nullptr);
+    require_distinct_critical_glyphs(warning_row, error_row);
 
-        std::string warning_glyph = lv_label_get_text(warning_icon);
-        std::string error_glyph = lv_label_get_text(error_icon);
+    lv_obj_delete(warning_row);
+    lv_obj_delete(error_row);
+}
 
-        REQUIRE_FALSE(warning_glyph.empty());
-        REQUIRE_FALSE(error_glyph.empty());
-        REQUIRE(warning_glyph != error_glyph);
+// ============================================================================
+// notification_history_item: the same four-icon column, bound to a subject
+// ============================================================================
+// A history row is built by <repeat> with its severity in a per-row int
+// subject (0 info, 1 success, 2 warning, 3 error), so the icon and the left
+// border follow the subject rather than a finalize pass.
+// ============================================================================
 
-        lv_obj_delete(warning_row);
-        lv_obj_delete(error_row);
+namespace {
+
+/// One notification_history_item bound to subjects this struct owns.
+struct BoundHistoryRow {
+    explicit BoundHistoryRow(lv_obj_t* parent, int severity_value) {
+        // Each row gets its own names, as each <repeat> row does.
+        static int next_id = 0;
+        const std::string suffix = std::to_string(next_id++);
+        severity_name = "severity_test_row_severity_" + suffix;
+        title_name = "severity_test_row_title_" + suffix;
+        lv_subject_init_int(&severity, severity_value);
+        lv_subject_init_string(&title, title_buf, nullptr, sizeof(title_buf), "Row");
+        lv_xml_register_subject(nullptr, severity_name.c_str(), &severity);
+        lv_xml_register_subject(nullptr, title_name.c_str(), &title);
+        const char* attrs[] = {"severity_subject", severity_name.c_str(), "title_subject",
+                               title_name.c_str(), nullptr};
+        row = static_cast<lv_obj_t*>(lv_xml_create(parent, "notification_history_item", attrs));
     }
+    ~BoundHistoryRow() {
+        if (row) {
+            lv_obj_delete(row);
+        }
+        lv_xml_unregister_subject(nullptr, severity_name.c_str());
+        lv_xml_unregister_subject(nullptr, title_name.c_str());
+        lv_subject_deinit(&severity);
+        lv_subject_deinit(&title);
+    }
+    BoundHistoryRow(const BoundHistoryRow&) = delete;
+    BoundHistoryRow& operator=(const BoundHistoryRow&) = delete;
+
+    std::string severity_name;
+    std::string title_name;
+    lv_subject_t severity{};
+    lv_subject_t title{};
+    char title_buf[16]{};
+    lv_obj_t* row = nullptr;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "notification_history_item: the severity subject picks one icon and the border",
+                 "[reactive-severity][notification_history]") {
+    struct Expectation {
+        int severity;
+        const char* icon_name;
+        const char* color_token;
+    };
+    const Expectation cases[] = {{0, "icon_info", "info"},
+                                 {1, "icon_success", "success"},
+                                 {2, "icon_warning", "warning"},
+                                 {3, "icon_error", "danger"}};
+
+    for (const auto& c : cases) {
+        INFO("severity=" << c.severity);
+        BoundHistoryRow bound(test_screen(), c.severity);
+        REQUIRE(bound.row != nullptr);
+
+        CHECK(visible_icon_name(bound.row) == c.icon_name);
+        CHECK(lv_color_eq(lv_obj_get_style_border_color(bound.row, LV_PART_MAIN),
+                          theme_manager_get_color(c.color_token)));
+    }
+
+    // A row the <repeat> rebinds to another entry follows its subject.
+    BoundHistoryRow bound(test_screen(), 0);
+    REQUIRE(bound.row != nullptr);
+    REQUIRE(visible_icon_name(bound.row) == "icon_info");
+    lv_subject_set_int(&bound.severity, 3);
+    CHECK(visible_icon_name(bound.row) == "icon_error");
+    CHECK(lv_color_eq(lv_obj_get_style_border_color(bound.row, LV_PART_MAIN),
+                      theme_manager_get_color("danger")));
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "notification_history_item: critical and warning rows use distinct glyphs",
+                 "[reactive-severity][notification_history]") {
+    BoundHistoryRow warning(test_screen(), 2);
+    BoundHistoryRow error(test_screen(), 3);
+    REQUIRE(warning.row != nullptr);
+    REQUIRE(error.row != nullptr);
+
+    require_distinct_critical_glyphs(warning.row, error.row);
 }

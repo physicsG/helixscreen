@@ -4,9 +4,8 @@
 
 #include <string>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 /// Sync printer display name with Mainsail/Fluidd via Moonraker database API.
 /// All callbacks are delivered on the UI thread via queue_update().

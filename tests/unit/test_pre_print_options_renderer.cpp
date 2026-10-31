@@ -379,6 +379,26 @@ TEST_CASE_METHOD(LVGLUITestFixture, "PrePrintOptionsRenderer: label_key wins ove
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PrePrintOptionsRenderer: a phase toggle reads as its phase's step name",
+                 "[print_file_detail][pre_print_options][label]") {
+    const auto label = [](const std::string& id, bool adaptive = false) {
+        PrePrintOption opt;
+        opt.id = id;
+        opt.adaptive_active = adaptive;
+        return PrePrintOptionsRenderer::label_for(opt);
+    };
+    CHECK(label("qgl") == "Quad gantry level");
+    CHECK(label("z_tilt") == "Z tilt");
+    CHECK(label("nozzle_clean") == "Cleaning nozzle");
+    CHECK(label("purge_line") == "Purge");
+
+    // The bed mesh row names its variant, not the phase.
+    CHECK(label("bed_mesh") == "Auto Bed Mesh");
+    CHECK(label("bed_mesh", true) == "Adaptive Bed Mesh");
+    CHECK(label("timelapse") == "Record Timelapse");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
                  "PrePrintOptionsRenderer: clear() drops rows and resets subjects",
                  "[print_file_detail][pre_print_options]") {
     PrePrintOptionsRenderer renderer;
@@ -653,7 +673,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
-                 "PrePrintOptionsRenderer: Snapmaker U1 live DB renders four preference toggles",
+                 "PrePrintOptionsRenderer: Snapmaker U1 live DB renders three preference toggles",
                  "[print_file_detail][pre_print_options][db][snapmaker_u1]") {
     // Every U1 row drives SET_PRINT_PREFERENCES, which is a setter: an absent
     // parameter leaves the stored preference at its previous value, so each
@@ -661,9 +681,13 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // silently keep the old setting.
     auto set = PrinterDetector::get_pre_print_option_set("Snapmaker U1");
     REQUIRE_FALSE(set.empty());
-    REQUIRE(set.options.size() == 4);
+    REQUIRE(set.options.size() == 3);
 
-    for (const char* id : {"bed_mesh", "shaper_calibrate", "flow_calibrate", "u1_timelapse"}) {
+    // Input shaping is never offered as a pre-print step.
+    REQUIRE(set.find("shaper_calibrate") == nullptr);
+    REQUIRE_FALSE(set.declares_capability("shaper_calibrate"));
+
+    for (const char* id : {"bed_mesh", "flow_calibrate", "u1_timelapse"}) {
         CAPTURE(id);
         const PrePrintOption* opt = set.find(id);
         REQUIRE(opt != nullptr);
@@ -695,7 +719,6 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
 TEST_CASE("PrePrintOptionsRenderer: default icon per option id", "[pre_print_options][icons]") {
     CHECK(PrePrintOptionsRenderer::default_icon_for("bed_mesh") == "grid_large");
-    CHECK(PrePrintOptionsRenderer::default_icon_for("shaper_calibrate") == "sine_wave");
     CHECK(PrePrintOptionsRenderer::default_icon_for("flow_calibrate") == "gauge");
     CHECK(PrePrintOptionsRenderer::default_icon_for("timelapse") == "camera_timer");
     CHECK(PrePrintOptionsRenderer::default_icon_for("u1_timelapse") == "camera_timer");
@@ -734,41 +757,47 @@ TEST_CASE_METHOD(LVGLUITestFixture, "PrePrintOptionsRenderer: a tap on a tile to
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
-                 "PrePrintOptionsRenderer: the check tab clears the label and icon boxes",
+                 "PrePrintOptionsRenderer: the label wraps beside the icon slot, inside the pill",
                  "[print_file_detail][pre_print_options]") {
     PrePrintOptionsRenderer renderer;
     lv_obj_t* container = lv_obj_create(test_screen());
-    lv_obj_set_size(container, 400, 200);
+    // Narrow enough that "Auto Bed Mesh" needs more than two lines.
+    lv_obj_set_size(container, 160, 200);
     renderer.populate(container, make_multi_category_set(), nullptr, nullptr);
 
     lv_obj_t* tile = renderer.get_toggle("bed_mesh");
     REQUIRE(tile != nullptr);
-    lv_obj_t* tab = lv_obj_find_by_name(tile, "check_tab");
-    lv_obj_t* label = lv_obj_find_by_name(tile, "label");
+    lv_obj_t* slot = lv_obj_find_by_name(tile, "icon_slot");
     lv_obj_t* icon = lv_obj_find_by_name(tile, "icon");
-    REQUIRE(tab != nullptr);
-    REQUIRE(label != nullptr);
+    lv_obj_t* check = lv_obj_find_by_name(tile, "check");
+    lv_obj_t* label = lv_obj_find_by_name(tile, "label");
+    REQUIRE(slot != nullptr);
     REQUIRE(icon != nullptr);
+    REQUIRE(check != nullptr);
+    REQUIRE(label != nullptr);
     lv_obj_update_layout(tile);
 
-    // All comparisons in screen coordinates: parent-relative getters would
-    // mix the tab's frame (the tile) with the tile's frame (the screen).
-    lv_area_t tile_a, tab_a, label_a, icon_a;
+    lv_area_t tile_a, slot_a, icon_a, check_a, label_a;
     lv_obj_get_coords(tile, &tile_a);
-    lv_obj_get_coords(tab, &tab_a);
-    lv_obj_get_coords(label, &label_a);
+    lv_obj_get_coords(slot, &slot_a);
     lv_obj_get_coords(icon, &icon_a);
+    lv_obj_get_coords(check, &check_a);
+    lv_obj_get_coords(label, &label_a);
 
-    // The tab lives at the bottom of the icon column, below the icon and
-    // left of the label, so it can never sit over the label's first line.
-    CHECK(tab_a.x2 <= label_a.x1);
-    CHECK(icon_a.y2 <= tab_a.y1);
+    // The icon and the check share the slot, so toggling never moves the label.
+    CHECK(check_a.x1 >= slot_a.x1);
+    CHECK(check_a.x2 <= slot_a.x2);
+    CHECK(icon_a.x1 >= slot_a.x1);
+    CHECK(icon_a.x2 <= slot_a.x2);
+    CHECK(slot_a.x2 <= label_a.x1);
 
-    // It floats inside the outline: clear of the border on both sides it
-    // touches, by the border width plus at least a 2px gap.
-    const lv_coord_t inset = lv_obj_get_style_border_width(tile, LV_PART_MAIN) + 2;
-    CHECK(tab_a.x1 >= tile_a.x1 + inset);
-    CHECK(tab_a.y2 <= tile_a.y2 - inset);
+    // The label is capped at two lines and stays inside the pill.
+    const int32_t line_h = lv_font_get_line_height(lv_obj_get_style_text_font(label, LV_PART_MAIN));
+    CHECK(lv_obj_get_height(label) > line_h);
+    CHECK(lv_obj_get_height(label) <= 2 * line_h);
+    CHECK(label_a.y1 >= tile_a.y1);
+    CHECK(label_a.y2 <= tile_a.y2);
+    CHECK(label_a.x2 <= tile_a.x2);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
@@ -780,42 +809,42 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     lv_obj_t* tile = renderer.get_toggle("bed_mesh"); // default on
     REQUIRE(tile != nullptr);
-    lv_obj_t* tab = lv_obj_find_by_name(tile, "check_tab");
-    lv_obj_t* label = lv_obj_find_by_name(tile, "label");
     lv_obj_t* icon = lv_obj_find_by_name(tile, "icon");
-    REQUIRE(tab != nullptr);
-    REQUIRE(label != nullptr);
+    lv_obj_t* check = lv_obj_find_by_name(tile, "check");
+    lv_obj_t* label = lv_obj_find_by_name(tile, "label");
     REQUIRE(icon != nullptr);
-    CHECK(lv_obj_has_state(tile, LV_STATE_CHECKED)); // subject observer applied it
-    CHECK(lv_obj_has_state(tab, LV_STATE_CHECKED));  // state_trickle
+    REQUIRE(check != nullptr);
+    REQUIRE(label != nullptr);
+    CHECK(lv_obj_has_state(tile, LV_STATE_CHECKED));  // subject observer applied it
+    CHECK(lv_obj_has_state(check, LV_STATE_CHECKED)); // state_trickle, through the slot
     CHECK(std::string(lv_label_get_text(label)) == "Auto Bed Mesh");
 
-    // Resolved styles, not just state flags: the tile's look rides
+    // Resolved styles, not just state flags: the pill's look rides
     // state-selector styles, which silently no-op if the selector spelling
-    // drifts.
-    lv_obj_t* check = lv_obj_get_child(tab, 0);
-    REQUIRE(check != nullptr);
-    CHECK(lv_obj_get_style_bg_opa(tab, LV_PART_MAIN) == 255);
+    // drifts. On: the primary-tinted fill and outline, the check in place of
+    // the icon, a full-strength label.
+    const lv_color_t primary = theme_manager_get_color("primary");
+    CHECK(lv_color_eq(lv_obj_get_style_bg_color(tile, LV_PART_MAIN), primary));
+    CHECK(lv_obj_get_style_bg_opa(tile, LV_PART_MAIN) < 255);
+    CHECK(lv_obj_get_style_bg_opa(tile, LV_PART_MAIN) > 0);
+    CHECK(lv_color_eq(lv_obj_get_style_border_color(tile, LV_PART_MAIN), primary));
     CHECK(lv_obj_get_style_opa(check, LV_PART_MAIN) == 255);
-    CHECK(lv_color_eq(lv_obj_get_style_border_color(tile, LV_PART_MAIN),
-                      theme_manager_get_color("primary")));
-    const lv_color_t icon_checked = lv_obj_get_style_text_color(icon, LV_PART_MAIN);
+    CHECK(lv_obj_get_style_opa(icon, LV_PART_MAIN) == 0);
     CHECK(lv_color_eq(lv_obj_get_style_text_color(label, LV_PART_MAIN),
                       theme_manager_get_color("text")));
 
+    // Off: an opaque card-colored outline, the icon back, a muted label.
     renderer.set_state("bed_mesh", 0);
     process_lvgl(10);
     CHECK_FALSE(lv_obj_has_state(tile, LV_STATE_CHECKED));
-    CHECK_FALSE(lv_obj_has_state(tab, LV_STATE_CHECKED));
-    // Off is an empty outlined box, not an absent one, and a muted label.
-    CHECK(lv_obj_get_style_opa(tab, LV_PART_MAIN) == 255);
-    CHECK(lv_obj_get_style_bg_opa(tab, LV_PART_MAIN) == 0);
-    CHECK(lv_obj_get_style_opa(check, LV_PART_MAIN) == 0);
-    CHECK(lv_color_eq(lv_obj_get_style_border_color(tab, LV_PART_MAIN),
-                      theme_manager_get_color("text_muted")));
-    CHECK(lv_color_eq(lv_obj_get_style_text_color(label, LV_PART_MAIN),
-                      theme_manager_get_color("text_muted")));
+    CHECK_FALSE(lv_obj_has_state(check, LV_STATE_CHECKED));
+    CHECK(lv_color_eq(lv_obj_get_style_bg_color(tile, LV_PART_MAIN),
+                      theme_manager_get_color("card_bg")));
+    CHECK(lv_obj_get_style_bg_opa(tile, LV_PART_MAIN) == 255);
     CHECK(lv_color_eq(lv_obj_get_style_border_color(tile, LV_PART_MAIN),
                       theme_manager_get_color("border")));
-    CHECK_FALSE(lv_color_eq(lv_obj_get_style_text_color(icon, LV_PART_MAIN), icon_checked));
+    CHECK(lv_obj_get_style_opa(check, LV_PART_MAIN) == 0);
+    CHECK(lv_obj_get_style_opa(icon, LV_PART_MAIN) == 255);
+    CHECK(lv_color_eq(lv_obj_get_style_text_color(label, LV_PART_MAIN),
+                      theme_manager_get_color("text_muted")));
 }

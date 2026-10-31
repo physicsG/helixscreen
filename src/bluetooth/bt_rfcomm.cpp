@@ -63,7 +63,7 @@ extern "C" int helix_bt_connect_rfcomm(helix_bt_context* ctx, const char* mac, i
         return -err;
     }
 
-    if (fd & helix::bluetooth::BLE_HANDLE_TAG) {
+    if (fd & helix::bluetooth::kBleHandleTag) {
         close(fd);
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->last_error = "RFCOMM fd collides with the BLE handle range";

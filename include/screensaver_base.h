@@ -2,13 +2,14 @@
 
 #pragma once
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "screensaver.h"
 #include "screensaver_canvas.h"
 #include "screensaver_frame.h"
 #include "screensaver_frame_timer.h"
 #include "screensaver_overlay.h"
+#include "screensaver_sim_contract.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -21,14 +22,6 @@ namespace helix::ui {
 
 class SaverTestAccess;
 
-/// Levels on the starfield and pipes ladder.
-inline constexpr size_t TWO_LEVEL_COUNT = 2;
-
-/// Frame period of `level` on that ladder: 16 ms, then 33 ms.
-constexpr uint32_t two_level_period_ms(size_t level) {
-    return level == 0 ? SAVER_FAST_PERIOD : 33;
-}
-
 /**
  * @brief Sequences the parts every screensaver runs on
  *
@@ -36,8 +29,10 @@ constexpr uint32_t two_level_period_ms(size_t level) {
  * sets the start level, calls on_start() and starts the frame timer at the level's period.
  * Each frame calls on_frame() and invalidates the dirty areas it returns. stop() cancels the
  * timer, hides and frees the canvas, queues the overlay for deletion and calls on_stop().
- * A saver implements the on_* hooks and its ladder, most expensive level first. A level change
- * also moves the display refresh while ScreensaverManager holds it (RefreshPeriodHold::follow).
+ * A saver implements the on_* hooks and its ladder, most expensive level first (a table of
+ * rows with a period_ms reads through ladder_period()). A level change also moves the display
+ * refresh while ScreensaverManager holds it (RefreshPeriodHold::follow). A saver that runs a
+ * simulation derives from SimSaver (screensaver_sim_saver.h), which implements the hooks.
  */
 class SaverBase : public Screensaver {
   public:

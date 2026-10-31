@@ -3,7 +3,7 @@
 
 #include "ui_change_host_modal.h"
 
-#include "ui_emergency_stop.h"
+#include "ui_next_tick.h"
 #include "ui_printer_list_overlay.h"
 #include "ui_printer_switch_menu.h"
 #include "ui_update_queue.h"
@@ -13,9 +13,12 @@
 #include "host_identity.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
+#include "lan_sweep.h"
 #include "lvgl/lvgl.h"
 #include "moonraker_events.h"
 #include "moonraker_manager.h"
+#include "platform_info.h"
+#include "printer_discovery_list.h"
 #include "printer_retarget.h"
 #include "printer_state.h"
 #include "text_io.h"
@@ -87,15 +90,19 @@ bool ChangeHostModal::show_modal(lv_obj_t* parent, AddCallback on_add) {
     Config* config = Config::get_instance();
     std::string host =
         adding ? std::string{} : config->get<std::string>(config->df() + "moonraker_host", "");
-    int port = adding ? 7125 : config->get<int>(config->df() + "moonraker_port", 7125);
+    int port =
+        adding ? helix::kDefaultMoonrakerPort
+               : config->get<int>(config->df() + "moonraker_port", helix::kDefaultMoonrakerPort);
 
     lv_subject_copy_string(&host_ip_subject_, host.c_str());
     lv_subject_copy_string(&host_port_subject_, std::to_string(port).c_str());
+    // The key belongs to the active printer's entry; a printer being added has none yet.
+    const std::string api_key = adding ? std::string{} : active_printer_credential().api_key;
+    lv_subject_copy_string(&api_key_subject_, api_key.c_str());
 
     bool result = show(parent);
     if (result && dialog()) {
         // Reset state
-        client_borrowed_ = false;
         lv_subject_set_int(&testing_subject_, 0);
         lv_subject_set_int(&validated_subject_, 0);
         update_save_lock();
@@ -114,11 +121,22 @@ bool ChangeHostModal::show_modal(lv_obj_t* parent, AddCallback on_add) {
             helix::ui::modal_register_keyboard(dialog(), port_input);
         }
 
+        // Named for the shared reveal button, which looks for its sibling by this name.
+        lv_obj_t* key_input = helix::ui::find_required(dialog(), "password_input", get_name());
+        if (key_input) {
+            helix::ui::modal_register_keyboard(dialog(), key_input);
+        }
+
         // Observe text input changes to invalidate validation when user edits.
         // Using ObserverGuard for RAII cleanup instead of lv_subject_add_observer_obj
         // which relies on widget deletion timing (unsafe during exit animation).
         host_ip_observer_ = ObserverGuard(&host_ip_subject_, on_input_changed_cb, nullptr);
         host_port_observer_ = ObserverGuard(&host_port_subject_, on_input_changed_cb, nullptr);
+        api_key_observer_ = ObserverGuard(&api_key_subject_, on_input_changed_cb, nullptr);
+        // Adding an observer notifies it once; the field still holds the filled-in port.
+        port_origin_ = helix::PortOrigin::FilledIn;
+
+        start_discovery();
     }
 
     return result;
@@ -136,19 +154,14 @@ void ChangeHostModal::on_hide() {
     // Base class already called lifetime_.invalidate()
 
     active_instance_ = nullptr;
-
-    // A test left the client on the typed host. Every way out but Save puts it back on the
-    // saved one; deferred past the exit animation like Save's reconnect.
-    if (client_borrowed_) {
-        client_borrowed_ = false;
-        helix::ui::queue_update("ChangeHostModal::restore_saved_host",
-                                [] { reconnect_active_printer(); });
-    }
+    stop_discovery();
+    connection_test_.cancel();
 
     // Remove observers NOW rather than relying on auto-removal when dialog
     // widget is deleted after exit animation.
     host_ip_observer_.reset();
     host_port_observer_.reset();
+    api_key_observer_.reset();
 
     spdlog::debug("[ChangeHostModal] on_hide");
 }
@@ -163,19 +176,23 @@ void ChangeHostModal::init_subjects() {
 
     lv_subject_init_string(&host_ip_subject_, host_ip_buf_, nullptr, sizeof(host_ip_buf_), "");
     lv_subject_init_string(&host_port_subject_, host_port_buf_, nullptr, sizeof(host_port_buf_),
-                           "7125");
+                           std::to_string(kDefaultMoonrakerPort).c_str());
+    lv_subject_init_string(&api_key_subject_, api_key_buf_, nullptr, sizeof(api_key_buf_), "");
     lv_subject_init_int(&testing_subject_, 0);
     lv_subject_init_int(&validated_subject_, 0);
     lv_subject_init_int(&adding_subject_, 0);
     lv_subject_init_int(&save_locked_subject_, 1);
+    lv_subject_init_int(&discovery_active_subject_, 0);
 
     // Register subjects for XML binding
     subjects_.publish("change_host_ip", &host_ip_subject_);
     subjects_.publish("change_host_port", &host_port_subject_);
+    subjects_.publish("change_host_api_key", &api_key_subject_);
     subjects_.publish("change_host_testing", &testing_subject_);
     subjects_.publish("change_host_validated", &validated_subject_);
     subjects_.publish("change_host_adding", &adding_subject_);
     subjects_.publish("change_host_save_locked", &save_locked_subject_);
+    subjects_.publish("change_host_discovery_active", &discovery_active_subject_);
 
     subjects_initialized_ = true;
     spdlog::trace("[ChangeHostModal] Subjects initialized");
@@ -189,6 +206,7 @@ void ChangeHostModal::deinit_subjects() {
     // calling reset() (which does lv_observer_remove) on a dead subject = crash.
     host_ip_observer_.release();
     host_port_observer_.release();
+    api_key_observer_.release();
 
     subjects_.deinit_all();
 
@@ -213,78 +231,60 @@ void ChangeHostModal::handle_test_connection() {
         return;
     }
 
-    IMoonrakerClient* client = get_moonraker_client();
-    if (!client) {
-        set_status("icon_close_circle", "danger", "Client not available");
-        return;
-    }
-
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::NORMAL);
-    client->disconnect();
-    client_borrowed_ = true;
-
-    // Cancel any in-flight test callbacks, get fresh token
-    lifetime_.invalidate();
-    auto token = lifetime_.token();
-
     lv_subject_set_int(&testing_subject_, 1);
     set_status("icon_question_circle", "text_muted", "Testing connection...");
 
-    client->set_connection_timeout(5000);
-
-    std::string ws_url = "ws://" + std::string(ip) + ":" + port_clean + "/websocket";
-    std::string http_url = "http://" + std::string(ip) + ":" + port_clean;
-
-    // Set HTTP base URL BEFORE connect: MoonrakerClient's on_connected handlers
-    // (proc_stats initial fetch, performance source, etc.) fire REST calls as
-    // soon as the WS opens. Without this, every test connection logs a burst of
-    // "HTTP base URL not configured" errors until the subsequent Save triggers
-    // manager->connect() (which sets it again). See bundle TV95LJGN.
-    if (IMoonrakerAPI* api = get_moonraker_api()) {
-        api->set_http_base_url(http_url);
-    }
-
-    int result = client->connect(
-        ws_url.c_str(),
-        [this, token]() {
-            token.defer("ChangeHostModal::dispatch_test_success", [this]() { on_test_success(); });
+    // The live client stays on the saved printer: only Save moves it.
+    const std::string host(helix::text_io::trim(ip));
+    connection_test_.start(
+        host, moonraker_ports_to_try(port_clean, port_origin_),
+        [this, host](const MoonrakerConnectionTest::Result& result) {
+            if (result.reached) {
+                on_test_success(host, result);
+            } else {
+                on_test_failure(result);
+            }
         },
-        [this, token]() {
-            token.defer("ChangeHostModal::dispatch_test_failure", [this]() { on_test_failure(); });
-        });
-
-    client->set_auto_reconnect(false);
-
-    if (result != 0) {
-        spdlog::error("[ChangeHostModal] Failed to initiate test connection: {}", result);
-        set_status("icon_close_circle", "danger", "Error starting connection test");
-        lv_subject_set_int(&testing_subject_, 0);
-    }
+        entered_api_key());
 }
 
-void ChangeHostModal::on_test_success() {
-    // Already on main thread — caller dispatches via tok.defer (see handle_test).
-    spdlog::info("[ChangeHostModal] Test connection successful");
+void ChangeHostModal::on_test_success(const std::string& host,
+                                      const MoonrakerConnectionTest::Result& result) {
+    spdlog::info("[ChangeHostModal] Moonraker answered at {}:{}", host, result.port);
 
     if (!is_visible())
         return;
 
-    set_status("icon_check_circle", "success", "Connection successful!");
+    // A fallback port is where Moonraker answered, so the field and Save carry it.
+    const std::string port_text = std::to_string(result.port);
+    if (sanitize_port(lv_subject_get_string(&host_port_subject_)) != port_text) {
+        port_set_by_app_ = true;
+        lv_subject_copy_string(&host_port_subject_, port_text.c_str());
+        port_set_by_app_ = false;
+    }
+
     lv_subject_set_int(&testing_subject_, 0);
+    if (result.login_required) {
+        // Saving an address Moonraker refuses would leave the screen empty.
+        set_status("icon_close_circle", result.key_sent ? "danger" : "warning",
+                   connection_test_status(host, result).c_str());
+        return;
+    }
+    set_status("icon_check_circle", "success", connection_test_status(host, result).c_str());
     lv_subject_set_int(&validated_subject_, 1);
     update_save_lock();
 
     spdlog::info("[ChangeHostModal] Test passed, Save button enabled");
 }
 
-void ChangeHostModal::on_test_failure() {
-    // Already on main thread — caller dispatches via tok.defer (see handle_test).
+void ChangeHostModal::on_test_failure(const MoonrakerConnectionTest::Result& result) {
     spdlog::warn("[ChangeHostModal] Test connection failed");
 
     if (!is_visible())
         return;
 
-    set_status("icon_close_circle", "danger", "Connection failed");
+    set_status("icon_close_circle", "danger",
+               connect_failure_status(result.failure, result.tried).c_str());
     lv_subject_set_int(&testing_subject_, 0);
 
     spdlog::debug("[ChangeHostModal] Test failed, keeping Save disabled");
@@ -303,7 +303,15 @@ bool ChangeHostModal::input_valid(const char* ip, const std::string& port_clean)
         set_status("icon_close_circle", "danger", "Invalid port (must be 1-65535)");
         return false;
     }
+    if (const std::string problem = api_key_problem(entered_api_key()); !problem.empty()) {
+        set_status("icon_close_circle", "danger", problem.c_str());
+        return false;
+    }
     return true;
+}
+
+std::string ChangeHostModal::entered_api_key() {
+    return std::string(helix::text_io::trim(lv_subject_get_string(&api_key_subject_)));
 }
 
 void ChangeHostModal::handle_save() {
@@ -342,8 +350,8 @@ void ChangeHostModal::handle_save() {
         return;
     }
 
-    // Save to config. The client reconnects to the new host, so there is nothing to restore.
-    client_borrowed_ = false;
+    // Save to config; the completion callback moves the client to it.
+    set_active_printer_api_key(entered_api_key());
     store_active_printer_address(host, port);
 
     // Close modal first — on_hide() removes observers and clears state
@@ -361,17 +369,11 @@ void ChangeHostModal::handle_save() {
 }
 
 void ChangeHostModal::commit_add(const std::string& host, int port) {
-    // A switch retargets the client itself, so the hand-back waits for the caller and runs
-    // only when it did not switch: a declined or unsaved switch leaves the client on the
-    // saved printer, and an add that switches cycles the transport once.
-    const bool borrowed = std::exchange(client_borrowed_, false);
+    // The caller runs on the next tick, outside any UpdateQueue drain, where a switch runs
+    // in place and its answer is final.
     hide();
     auto on_add = add_callback_;
-    helix::ui::queue_update("ChangeHostModal::handle_add", [on_add, host, port, borrowed]() {
-        if (!on_add(host, port) && borrowed) {
-            reconnect_active_printer();
-        }
-    });
+    helix::ui::run_next_tick([on_add, host, port]() { on_add(host, port); });
 }
 
 void ChangeHostModal::update_save_lock() {
@@ -422,12 +424,21 @@ void ChangeHostModal::set_status(const char* icon_name, const char* color_token,
 // Input Change Observer
 // ============================================================================
 
-void ChangeHostModal::on_input_changed_cb(lv_observer_t* /*observer*/, lv_subject_t* /*subject*/) {
+void ChangeHostModal::on_input_changed_cb(lv_observer_t* /*observer*/, lv_subject_t* subject) {
+    if (active_instance_) {
+        // The modal's own write of a probed port is not an edit.
+        if (active_instance_->port_set_by_app_) {
+            return;
+        }
+        if (subject == &active_instance_->host_port_subject_) {
+            active_instance_->port_origin_ = helix::PortOrigin::Typed;
+        }
+    }
     // A status line describes the address it was shown for, so an edit clears it.
     if (active_instance_) {
         active_instance_->set_status(nullptr, nullptr, "");
     }
-    // Reset validation when user edits host or port after a successful test
+    // Reset validation when user edits the host, port or key after a successful test
     lv_subject_t* validated = lv_xml_get_subject(nullptr, "change_host_validated");
     if (validated && lv_subject_get_int(validated) != 0) {
         lv_subject_set_int(validated, 0);
@@ -449,6 +460,7 @@ void ChangeHostModal::register_callbacks() {
     lv_xml_register_event_cb(nullptr, "on_change_host_test", on_test_connection_cb);
     lv_xml_register_event_cb(nullptr, "on_change_host_save", on_save_cb);
     lv_xml_register_event_cb(nullptr, "on_change_host_cancel", on_cancel_cb);
+    lv_xml_register_event_cb(nullptr, "on_change_host_printer_picked", on_printer_picked_cb);
 
     callbacks_registered_ = true;
     spdlog::trace("[ChangeHostModal] Callbacks registered");
@@ -470,6 +482,75 @@ void ChangeHostModal::on_cancel_cb(lv_event_t* /*e*/) {
     if (active_instance_) {
         active_instance_->handle_cancel();
     }
+}
+
+void ChangeHostModal::on_printer_picked_cb(lv_event_t* e) {
+    if (active_instance_) {
+        auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_target(e));
+        active_instance_->handle_printer_picked(lv_dropdown_get_selected(dropdown));
+    }
+}
+
+// ============================================================================
+// Printer Discovery
+// ============================================================================
+
+void ChangeHostModal::start_discovery() {
+    stop_discovery();
+    discovery_ = helix::make_printer_discovery();
+    lv_subject_set_int(&discovery_active_subject_, discovery_ ? 1 : 0);
+    if (!discovery_) {
+        return;
+    }
+    show_discovered({});
+    // Discovery calls back on the main thread; stop_discovery() runs before this modal
+    // hides or goes away.
+    auto tok = discovery_lifetime_.token();
+    discovery_->start_discovery([this, tok](const std::vector<helix::DiscoveredPrinter>& found) {
+        if (tok.expired()) {
+            return;
+        }
+        show_discovered(found);
+    });
+}
+
+void ChangeHostModal::stop_discovery() {
+    discovery_lifetime_.invalidate();
+    if (discovery_) {
+        discovery_->stop_discovery();
+        discovery_.reset();
+    }
+    discovered_.clear();
+}
+
+void ChangeHostModal::show_discovered(const std::vector<helix::DiscoveredPrinter>& printers) {
+    discovered_ = printers;
+    if (!dialog()) {
+        return;
+    }
+    lv_obj_t* dropdown = helix::ui::find_required(dialog(), "printer_dropdown", get_name());
+    if (dropdown) {
+        const bool searching = discovery_ && discovery_->is_discovering();
+        lv_dropdown_set_options(dropdown,
+                                helix::discovered_printer_options(printers, searching).c_str());
+    }
+}
+
+void ChangeHostModal::handle_printer_picked(uint32_t selected) {
+    const helix::DiscoveredPrinter* picked = helix::discovered_printer_at(discovered_, selected);
+    if (!picked) {
+        return;
+    }
+    spdlog::info("[ChangeHostModal] Picked discovered printer {}:{}", picked->ip_address,
+                 picked->port);
+    const std::string host = picked->ip_address;
+    const std::string port = std::to_string(picked->port);
+    lv_subject_copy_string(&host_ip_subject_, host.c_str());
+    // The discovered port is where Moonraker answered, not something the user typed.
+    port_set_by_app_ = true;
+    lv_subject_copy_string(&host_port_subject_, port.c_str());
+    port_set_by_app_ = false;
+    port_origin_ = helix::PortOrigin::Discovered;
 }
 
 // ============================================================================
@@ -526,6 +607,12 @@ bool failure_still_current(const std::string& printer_id) {
            !(client && client->get_connection_state() == ConnectionState::CONNECTED);
 }
 
+/// Offers @p moved, the printer found at a new address, in place of the plain prompt.
+/// Returns false when there is nothing to offer.
+bool offer_moved_address(const std::string& title, const std::string& message,
+                         const std::optional<DiscoveredPrinter>& moved,
+                         const helix::ui::ConfirmOptions& opts);
+
 void present_connection_failed(const std::string& title, const std::string& message,
                                const std::optional<DiscoveredPrinter>& moved) {
     // Reconnect first: a wedged transport (reported on Android, where the
@@ -579,28 +666,7 @@ void present_connection_failed(const std::string& title, const std::string& mess
     };
     opts.cancel_text = lv_tr("Change Address");
 
-    // Offered, never adopted silently: a hostname is not unique, and a lookalike printer
-    // answering while this one is off would otherwise take its jobs.
-    if (moved) {
-        const std::string address = fmt::format("{}:{}", moved->ip_address, moved->port);
-        const std::string body =
-            message + "\n\n" + fill_placeholders(lv_tr("Found {} at {}."), {moved->name, address});
-        auto use_new = [host = moved->ip_address, port = static_cast<int>(moved->port),
-                        printer_id = Config::get_instance()->get_active_printer_id()] {
-            // The prompt can outlive a printer switch; the address belongs to this one only.
-            if (!failure_still_current(printer_id)) {
-                spdlog::info("[ChangeHost] Not applying {}:{}: the printer changed or "
-                             "reconnected while the prompt was open",
-                             host, port);
-                return;
-            }
-            store_active_printer_address(host, port);
-            // Past the prompt's exit animation, like the host modal's Save.
-            helix::ui::queue_update("ChangeHost::use_rediscovered",
-                                    [] { retarget_printer_connection(); });
-        };
-        helix::ui::modal_confirm(title.c_str(), body.c_str(), ModalSeverity::Error,
-                                 lv_tr("Use New Address"), use_new, opts);
+    if (offer_moved_address(title, message, moved, opts)) {
         return;
     }
 
@@ -631,7 +697,7 @@ DeferredFailure& deferred_failure() {
     return d;
 }
 
-constexpr uint32_t CHOOSER_POLL_MS = 300;
+constexpr uint32_t kChooserPollMs = 300;
 
 void defer_connection_failed(const std::string& title, const std::string& message,
                              const std::optional<DiscoveredPrinter>& moved) {
@@ -666,7 +732,7 @@ void defer_connection_failed(const std::string& title, const std::string& messag
             }
             present_connection_failed(pending.title, pending.message, pending.moved);
         },
-        CHOOSER_POLL_MS, nullptr);
+        kChooserPollMs, nullptr);
     lv_timer_set_repeat_count(d.timer, 1);
 }
 
@@ -677,6 +743,48 @@ void route_connection_failed(const std::string& title, const std::string& messag
         return;
     }
     present_connection_failed(title, message, moved);
+}
+
+// ----------------------------------------------------------------------------
+// Rediscovery: an mDNS browse for the printer at a new address. The firmware has no
+// mDNS (its MdnsDiscovery is inert) and no inet_pton, so there it is compiled out and
+// the prompt always shows the address it has.
+// ----------------------------------------------------------------------------
+
+} // namespace
+
+#if !defined(HELIX_PLATFORM_ESP32)
+
+namespace {
+
+bool offer_moved_address(const std::string& title, const std::string& message,
+                         const std::optional<DiscoveredPrinter>& moved,
+                         const helix::ui::ConfirmOptions& opts) {
+    // Offered, never adopted silently: a hostname is not unique, and a lookalike printer
+    // answering while this one is off would otherwise take its jobs.
+    if (!moved) {
+        return false;
+    }
+    const std::string address = fmt::format("{}:{}", moved->ip_address, moved->port);
+    const std::string body =
+        message + "\n\n" + fill_placeholders(lv_tr("Found {} at {}."), {moved->name, address});
+    auto use_new = [host = moved->ip_address, port = static_cast<int>(moved->port),
+                    printer_id = Config::get_instance()->get_active_printer_id()] {
+        // The prompt can outlive a printer switch; the address belongs to this one only.
+        if (!failure_still_current(printer_id)) {
+            spdlog::info("[ChangeHost] Not applying {}:{}: the printer changed or "
+                         "reconnected while the prompt was open",
+                         host, port);
+            return;
+        }
+        store_active_printer_address(host, port);
+        // Past the prompt's exit animation, like the host modal's Save.
+        helix::ui::queue_update("ChangeHost::use_rediscovered",
+                                [] { retarget_printer_connection(); });
+    };
+    helix::ui::modal_confirm(title.c_str(), body.c_str(), ModalSeverity::Error,
+                             lv_tr("Use New Address"), use_new, opts);
+    return true;
 }
 
 std::string normalized_hostname(std::string name) {
@@ -719,10 +827,10 @@ void finish_rediscovery() {
 
     Config* cfg = Config::get_instance();
     const std::string host = cfg->get<std::string>(cfg->df() + "moonraker_host", "");
-    const int port = cfg->get<int>(cfg->df() + "moonraker_port", 7125);
+    const int port = cfg->get<int>(cfg->df() + "moonraker_port", helix::kDefaultMoonrakerPort);
     const auto moved =
         find_moved_printer(found, host, port,
-                           {cfg->get<std::string>(cfg->df() + wizard::HOSTNAME, ""),
+                           {cfg->get<std::string>(cfg->df() + wizard::kHostname, ""),
                             cfg->get<std::string>(cfg->df() + wizard::PRINTER_NAME, "")});
     if (moved) {
         spdlog::info("[ChangeHost] {}:{} unreachable; mDNS finds '{}' at {}:{}", host, port,
@@ -736,22 +844,21 @@ void finish_rediscovery() {
 }
 
 /// Browses once before the prompt shows, so it can offer the printer's new address.
-void begin_connection_failed(const std::string& title, const std::string& message) {
+/// Returns false when there is nothing to browse and the prompt should show now.
+bool start_rediscovery(const std::string& title, const std::string& message) {
     Rediscovery& r = rediscovery();
     Config* cfg = Config::get_instance();
     const std::string host = cfg->get<std::string>(cfg->df() + "moonraker_host", "");
     if (!r.source || host.empty() || helix::is_moonraker_on_same_host(host)) {
-        route_connection_failed(title, message, std::nullopt);
-        return;
+        return false;
     }
     if (r.mdns) {
         spdlog::debug("[ChangeHost] A browse is already in flight for this failure");
-        return;
+        return true;
     }
     r.mdns = r.source();
     if (!r.mdns) {
-        route_connection_failed(title, message, std::nullopt);
-        return;
+        return false;
     }
     r.title = title;
     r.message = message;
@@ -760,8 +867,9 @@ void begin_connection_failed(const std::string& title, const std::string& messag
     r.mdns->start_discovery({});
     // TIMER_DTOR_OK: process-lifetime state with no owner object; a one-shot LVGL deletes.
     lv_timer_t* t =
-        lv_timer_create([](lv_timer_t*) { finish_rediscovery(); }, REDISCOVERY_WINDOW_MS, nullptr);
+        lv_timer_create([](lv_timer_t*) { finish_rediscovery(); }, kRediscoveryWindowMs, nullptr);
     lv_timer_set_repeat_count(t, 1);
+    return true;
 }
 
 } // namespace
@@ -769,14 +877,6 @@ void begin_connection_failed(const std::string& title, const std::string& messag
 std::optional<DiscoveredPrinter> find_moved_printer(const std::vector<DiscoveredPrinter>& found,
                                                     const std::string& saved_host, int saved_port,
                                                     const std::vector<std::string>& identities) {
-#if defined(HELIX_PLATFORM_ESP32)
-    // The firmware never browses for a moved printer, and its libc has no inet_pton.
-    (void)found;
-    (void)saved_host;
-    (void)saved_port;
-    (void)identities;
-    return std::nullopt;
-#else
     // A saved name re-resolves to wherever the printer went; swapping it for the literal IP
     // mDNS reports would trade an address that heals for one that cannot.
     in_addr v4{};
@@ -807,12 +907,47 @@ std::optional<DiscoveredPrinter> find_moved_printer(const std::vector<Discovered
         return std::nullopt;
     }
     return *moved;
-#endif
 }
 
 void set_printer_rediscovery_source(std::function<std::unique_ptr<IMdnsDiscovery>()> source) {
     rediscovery().source = std::move(source);
 }
+
+#else // HELIX_PLATFORM_ESP32
+
+namespace {
+
+bool offer_moved_address(const std::string&, const std::string&,
+                         const std::optional<DiscoveredPrinter>&,
+                         const helix::ui::ConfirmOptions&) {
+    return false;
+}
+
+bool start_rediscovery(const std::string&, const std::string&) {
+    return false;
+}
+
+} // namespace
+
+std::optional<DiscoveredPrinter> find_moved_printer(const std::vector<DiscoveredPrinter>&,
+                                                    const std::string&, int,
+                                                    const std::vector<std::string>&) {
+    return std::nullopt;
+}
+
+void set_printer_rediscovery_source(std::function<std::unique_ptr<IMdnsDiscovery>()>) {}
+
+#endif // HELIX_PLATFORM_ESP32
+
+namespace {
+
+void begin_connection_failed(const std::string& title, const std::string& message) {
+    if (!start_rediscovery(title, message)) {
+        route_connection_failed(title, message, std::nullopt);
+    }
+}
+
+} // namespace
 
 void drop_held_connection_failed() {
     DeferredFailure& d = deferred_failure();

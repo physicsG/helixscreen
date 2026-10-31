@@ -40,6 +40,21 @@ end
 -- truth, whichever surface made the change.
 local t = helix.i18n.t
 
+-- The destination is a credential (a ntfy topic, a bot token, a webhook
+-- path), so the screen shows only where it points: the host and the last four
+-- characters. The generated settings row is the one place that edits it.
+local function masked_dest(service, dest)
+    if dest == "" then return t("(not set)") end
+    local host = "ntfy.sh"
+    if service == "Telegram" then
+        host = "api.telegram.org"
+    else
+        local authority = dest:match("^https?://([^/?#]+)")
+        if authority then host = authority:match("[^@]+$") end
+    end
+    return #dest > 8 and (host .. "/..." .. dest:sub(-4)) or host
+end
+
 local function mirror_settings()
     muted:set(helix.settings.get("muted") == true and 1 or 0)
     word:set(t(helix.settings.get("muted") == true and "muted" or "armed"))
@@ -47,8 +62,7 @@ local function mirror_settings()
         ev_on[e]:set(helix.settings.get("ev_" .. e) == false and 0 or 1)
     end
     local service = helix.settings.get("service") or "ntfy"
-    local dest = helix.settings.get("dest") or ""
-    dest_line:set(service .. " \u{00B7} " .. (dest ~= "" and dest or t("(not set)")))
+    dest_line:set(service .. " \u{00B7} " .. masked_dest(service, helix.settings.get("dest") or ""))
     local hints = {
         ntfy = "A topic name (my-printer), or a full URL to a self-hosted server",
         Discord = "A webhook URL: https://discord.com/api/webhooks/...",
@@ -68,19 +82,21 @@ end
 -- result once the post settles.
 local ring = {}
 local tile_cols, tile_rows = 1, 1
+-- Rows the tile has room for; a tile under four columns shows the newest few.
+local visible_rows = 3
 
 -- The event zone beside the bell needs something in it: before the first
 -- event (or after a reload with an empty ring) the bell centers across the
 -- whole tile instead of hugging a blank half.
 local function apply_event_zone()
-    event_zone:set(tile_cols >= 2 and tile_rows == 1 and 1 or 0)
+    event_zone:set(tile_cols >= 2 and tile_rows < 2 and 1 or 0)
 end
 
 local function refresh_log()
-    last_event:set(ring[1] and ring[1].title or "")
+    last_event:set(ring[1] and t(ring[1].title) or "")
     last_file:set(ring[1] and ring[1].file or "")
     for i = 1, LOG_ROWS do
-        local e = ring[i]
+        local e = i <= visible_rows and ring[i] or nil
         if e then
             log_on[i]:set(1)
             log_ev[i]:set(t(e.title))
@@ -120,8 +136,13 @@ local function service_target()
         return nil, "destination not set"
     end
     if service == "ntfy" then
-        local url = dest:match("^https?://") and dest or ("https://ntfy.sh/" .. dest)
-        return { url = url, kind = "ntfy" }
+        if dest:match("^https?://") then
+            return { url = dest, kind = "ntfy" }
+        end
+        if not dest:match("^[%w_-]+$") then
+            return nil, "not a valid ntfy topic"
+        end
+        return { url = "https://ntfy.sh/" .. dest, kind = "ntfy" }
     elseif service == "Discord" then
         if not dest:match("^https://discord%.com/api/webhooks/") and
            not dest:match("^https://discordapp%.com/api/webhooks/") then
@@ -144,11 +165,17 @@ local function service_target()
     return nil, "unknown service"
 end
 
+-- The filename leaves the screen only when the user allows it, whichever
+-- service carries it.
+local function shared_file(e)
+    return helix.settings.get("include_filename") ~= false and e.file or ""
+end
+
 local function message_for(e)
     -- A composed event reads "Event: file (pct)"; the test button's message
     -- already says what it is, so it carries no event-word prefix.
     if e.raw then return t(e.raw) end
-    local file = helix.settings.get("include_filename") ~= false and e.file or ""
+    local file = shared_file(e)
     local what = t(e.title)
     if file ~= "" then what = what .. ": " .. file end
     if e.pct then
@@ -161,6 +188,9 @@ local function drain()
     if sending then return end
     local e = table.remove(queue, 1)
     if not e then return end
+    -- Muting also holds events queued before it; only the test button, an
+    -- explicit request, goes through.
+    if e.key ~= "test" and helix.settings.get("muted") == true then return drain() end
     local target, err = service_target()
     if not target then
         e.result = "bad dest"
@@ -183,17 +213,21 @@ local function drain()
         body = helix.json.encode({ chat_id = target.chat, text = msg })
         headers = { ["Content-Type"] = "application/json" }
     else
-        body = helix.json.encode({ event = e.key, filename = e.file, progress = e.pct })
+        local file = shared_file(e)
+        body = helix.json.encode({ event = e.key, filename = file ~= "" and file or nil,
+                                   progress = e.pct })
         headers = { ["Content-Type"] = "application/json" }
     end
-    local res, perr = helix.http.post(target.url, { body = body, headers = headers })
+    -- A transport error names the request URL, which carries the credential,
+    -- so only its status code or a fixed phrase is ever shown or logged.
+    local res = helix.http.post(target.url, { body = body, headers = headers })
     sending = false
     if res and res.status and res.status >= 200 and res.status < 300 then
         e.result = "sent"
         set_status(1, "sent")
     else
         e.result = "failed"
-        local why = perr or ((res and res.status) and ("HTTP " .. res.status) or "no answer")
+        local why = (res and res.status) and ("HTTP " .. res.status) or "network error"
         set_status(2, why)
         helix.log.warn("notify failed: " .. why)
     end
@@ -211,8 +245,12 @@ end
 -- edge is one event.
 local TITLES = {
     started = "Started", resumed = "Resumed", paused = "Paused",
-    completed = "Completed", cancelled = "Cancelled", failed = "Failed",
+    completed = "Completed", cancelled = "Canceled", failed = "Failed",
 }
+
+-- A print ends only if one was running: the state a printer rests in after
+-- its last job ("complete", "cancelled", "error") is not a new event.
+local RUNNING = { printing = true, paused = true }
 
 local function classify(prev, cur)
     if cur == prev then return nil end
@@ -220,17 +258,38 @@ local function classify(prev, cur)
         return prev == "paused" and "resumed" or "started"
     end
     if cur == "paused" then return "paused" end
+    if not RUNNING[prev] then return nil end
     if cur == "complete" then return "completed" end
     if cur == "cancelled" then return "cancelled" end
     if cur == "error" then return "failed" end
     return nil
 end
 
+-- Plugins load before the printer connects, so the first state reported after
+-- a (re)connect is the printer's current state, not something that happened.
+-- It becomes the baseline silently; the window ends on a timer because an
+-- idle printer reports no change at all.
+local SETTLE_MS = 5000
+local settling = false
+local settle_timer = nil
+
+helix.printer.watch("connected", function(up)
+    if settle_timer then settle_timer:cancel() end
+    settling = up
+    settle_timer = nil
+    if up then
+        settle_timer = helix.timer.after(SETTLE_MS, function()
+            settling = false
+            settle_timer = nil
+        end)
+    end
+end)
+
 local prev_state = helix.printer.get("print_state")
 helix.printer.watch("print_state", function(cur)
     local ev = classify(prev_state, cur)
     prev_state = cur
-    if not ev then return end
+    if not ev or settling then return end
     if helix.settings.get("ev_" .. ev) == false then return end
     if helix.settings.get("muted") == true then return end
     enqueue({
@@ -251,12 +310,9 @@ helix.widget("tile", {
         -- in the header, micro-height tiers have no room for it
         word_vis:set((w < 190 and hgt >= 80) and 1 or 0)
         tile_cols, tile_rows = cols, rows
+        visible_rows = (cols >= 4) and LOG_ROWS or 3
         if rows >= 2 then
             log_zone:set(1)
-            local n = (cols >= 4) and LOG_ROWS or 3
-            for i = 1, LOG_ROWS do
-                log_on[i]:set(i <= n and (ring[i] ~= nil) and 1 or 0)
-            end
             dest_row_on:set(cols >= 4 and 1 or 0)
         else
             log_zone:set(0)

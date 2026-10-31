@@ -45,13 +45,13 @@
 namespace helix::ui {
 
 // Database keys for settings persistence
-static constexpr const char* DB_NAMESPACE = "helix-screen";
-static constexpr const char* DB_KEY_SYNC_ENABLED = "spoolman_sync_enabled";
-static constexpr const char* DB_KEY_REFRESH_INTERVAL = "spoolman_weight_refresh_interval";
+static constexpr const char* kDbNamespace = "helix-screen";
+static constexpr const char* kDbKeySyncEnabled = "spoolman_sync_enabled";
+static constexpr const char* kDbKeyRefreshInterval = "spoolman_weight_refresh_interval";
 
 // Legacy keys (pre-rename migration)
-static constexpr const char* LEGACY_DB_KEY_SYNC_ENABLED = "ams_spoolman_sync_enabled";
-static constexpr const char* LEGACY_DB_KEY_REFRESH_INTERVAL = "ams_weight_refresh_interval";
+static constexpr const char* kLegacyDbKeySyncEnabled = "ams_spoolman_sync_enabled";
+static constexpr const char* kLegacyDbKeyRefreshInterval = "ams_weight_refresh_interval";
 
 // ============================================================================
 // DESTRUCTOR
@@ -68,11 +68,11 @@ SpoolmanOverlay::~SpoolmanOverlay() = default;
 void SpoolmanOverlay::init_subjects() {
     init_subjects_guarded([this]() {
         // Initialize sync enabled subject (default: true/enabled)
-        UI_MANAGED_SUBJECT_INT(sync_enabled_subject_, DEFAULT_SYNC_ENABLED ? 1 : 0,
+        UI_MANAGED_SUBJECT_INT(sync_enabled_subject_, kDefaultSyncEnabled ? 1 : 0,
                                "ams_spoolman_sync_enabled", subjects_);
 
         // Initialize refresh interval subject (default: 30 seconds)
-        UI_MANAGED_SUBJECT_INT(refresh_interval_subject_, DEFAULT_REFRESH_INTERVAL_SECONDS,
+        UI_MANAGED_SUBJECT_INT(refresh_interval_subject_, kDefaultRefreshIntervalSeconds,
                                "ams_spoolman_refresh_interval", subjects_);
 
         // Initialize scanner device status subject
@@ -210,28 +210,28 @@ void SpoolmanOverlay::load_from_database() {
     // apply_sync() touches subjects plus SpoolmanManager's LVGL poll timer — every
     // callback below must be marshalled to the main thread.
     api_->database_get_item(
-        DB_NAMESPACE, DB_KEY_SYNC_ENABLED,
+        kDbNamespace, kDbKeySyncEnabled,
         lifetime_.bg_cb("SpoolmanOverlay::load_sync",
                         [this, apply_sync, parse_sync](const nlohmann::json& value) {
-                            apply_sync(parse_sync(value, DEFAULT_SYNC_ENABLED));
+                            apply_sync(parse_sync(value, kDefaultSyncEnabled));
                         }),
         lifetime_.bg_cb("SpoolmanOverlay::load_sync_missing", [this, apply_sync,
                                                                parse_sync](const MoonrakerError&) {
             // New key not found — try legacy key
             api_->database_get_item(
-                DB_NAMESPACE, LEGACY_DB_KEY_SYNC_ENABLED,
+                kDbNamespace, kLegacyDbKeySyncEnabled,
                 lifetime_.bg_cb("SpoolmanOverlay::load_sync_legacy",
                                 [this, apply_sync, parse_sync](const nlohmann::json& value) {
-                                    bool enabled = parse_sync(value, DEFAULT_SYNC_ENABLED);
+                                    bool enabled = parse_sync(value, kDefaultSyncEnabled);
                                     apply_sync(enabled);
                                     // Migrate to new key
                                     save_sync_enabled(enabled);
                                     spdlog::info("[{}] Migrated {} -> {}", get_name(),
-                                                 LEGACY_DB_KEY_SYNC_ENABLED, DB_KEY_SYNC_ENABLED);
+                                                 kLegacyDbKeySyncEnabled, kDbKeySyncEnabled);
                                 }),
                 lifetime_.bg_cb("SpoolmanOverlay::load_sync_default",
                                 [this, apply_sync](const MoonrakerError&) {
-                                    apply_sync(DEFAULT_SYNC_ENABLED);
+                                    apply_sync(kDefaultSyncEnabled);
                                 }));
         }));
 
@@ -247,30 +247,30 @@ void SpoolmanOverlay::load_from_database() {
 
     // Load refresh interval — try new key, fall back to legacy key
     api_->database_get_item(
-        DB_NAMESPACE, DB_KEY_REFRESH_INTERVAL,
+        kDbNamespace, kDbKeyRefreshInterval,
         lifetime_.bg_cb("SpoolmanOverlay::load_interval",
                         [this, apply_interval, parse_interval](const nlohmann::json& value) {
-                            apply_interval(parse_interval(value, DEFAULT_REFRESH_INTERVAL_SECONDS));
+                            apply_interval(parse_interval(value, kDefaultRefreshIntervalSeconds));
                         }),
         lifetime_.bg_cb(
             "SpoolmanOverlay::load_interval_missing",
             [this, apply_interval, parse_interval](const MoonrakerError&) {
                 // New key not found — try legacy key
                 api_->database_get_item(
-                    DB_NAMESPACE, LEGACY_DB_KEY_REFRESH_INTERVAL,
+                    kDbNamespace, kLegacyDbKeyRefreshInterval,
                     lifetime_.bg_cb(
                         "SpoolmanOverlay::load_interval_legacy",
                         [this, apply_interval, parse_interval](const nlohmann::json& value) {
-                            int interval = parse_interval(value, DEFAULT_REFRESH_INTERVAL_SECONDS);
+                            int interval = parse_interval(value, kDefaultRefreshIntervalSeconds);
                             apply_interval(interval);
                             // Migrate to new key
                             save_refresh_interval(interval);
                             spdlog::info("[{}] Migrated {} -> {}", get_name(),
-                                         LEGACY_DB_KEY_REFRESH_INTERVAL, DB_KEY_REFRESH_INTERVAL);
+                                         kLegacyDbKeyRefreshInterval, kDbKeyRefreshInterval);
                         }),
                     lifetime_.bg_cb("SpoolmanOverlay::load_interval_default",
                                     [this, apply_interval](const MoonrakerError&) {
-                                        apply_interval(DEFAULT_REFRESH_INTERVAL_SECONDS);
+                                        apply_interval(kDefaultRefreshIntervalSeconds);
                                     }));
             }));
 }
@@ -282,7 +282,7 @@ void SpoolmanOverlay::save_sync_enabled(bool enabled) {
     }
 
     api_->database_post_item(
-        DB_NAMESPACE, DB_KEY_SYNC_ENABLED, enabled,
+        kDbNamespace, kDbKeySyncEnabled, enabled,
         [this, enabled]() {
             spdlog::info("[{}] Saved sync_enabled={} to database", get_name(), enabled);
         },
@@ -298,7 +298,7 @@ void SpoolmanOverlay::save_refresh_interval(int interval_seconds) {
     }
 
     api_->database_post_item(
-        DB_NAMESPACE, DB_KEY_REFRESH_INTERVAL, interval_seconds,
+        kDbNamespace, kDbKeyRefreshInterval, interval_seconds,
         [this, interval_seconds]() {
             spdlog::info("[{}] Saved refresh_interval={} to database", get_name(),
                          interval_seconds);
@@ -464,7 +464,7 @@ void SpoolmanOverlay::handle_connect_clicked() {
     trim(port);
 
     if (port.empty())
-        port = DEFAULT_SPOOLMAN_PORT;
+        port = kDefaultSpoolmanPort;
 
     if (!SpoolmanSetup::validate_host(host)) {
         set_setup_status(lv_tr("Please enter an IP address or hostname."), true);
@@ -1341,7 +1341,7 @@ void SpoolmanOverlay::restart_and_verify() {
     lifetime_.defer("SpoolmanOverlay::restart_status",
                     [this]() { set_setup_status(lv_tr("Restarting Moonraker...")); });
 
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::LONG);
 
     auto token = lifetime_.token();
     api_->restart_moonraker(
@@ -1499,7 +1499,7 @@ void SpoolmanOverlay::remove_spoolman_config() {
                 tok.defer("SpoolmanOverlay::remove_uploaded", [this]() {
                     set_setup_status(lv_tr("Restarting Moonraker..."));
                     EmergencyStopOverlay::instance().suppress_recovery_dialog(
-                        RecoverySuppression::LONG);
+                        recovery_suppression::LONG);
                     auto tok2 = lifetime_.token();
                     api_->restart_moonraker(
                         [this, tok2]() {

@@ -20,6 +20,10 @@
     <prop name="hide_close" type="string" default="true"/>
     <!-- Empty default resolves to the registered no-op callback (xml_registration.cpp) — no warning. -->
     <prop name="close_callback" type="string" default=""/>
+    <prop name="close_user_data" type="string" default=""/>
+    <prop name="icon_name" type="string" default="header_icon"/>
+    <prop name="title_name" type="string" default="header_title"/>
+    <prop name="close_name" type="string" default="btn_close"/>
   </api>
   <styles>
     <style name="mh_pad_std" pad_left="#space_lg" pad_right="#space_md" pad_top="#space_lg" pad_bottom="#space_sm"/>
@@ -30,14 +34,14 @@
         scrollable="false">
     <bind_style_if_eq name="mh_pad_micro" subject="ui_breakpoint" ref_value="0"/>
     <bind_style_if_ge name="mh_pad_std" subject="ui_breakpoint" ref_value="1"/>
-    <icon name="header_icon" src="$icon_src" size="md" variant="$icon_variant" hidden="$hide_icon"/>
-    <text_heading name="header_title"
+    <icon name="$icon_name" src="$icon_src" size="md" variant="$icon_variant" hidden="$hide_icon"/>
+    <text_heading name="$title_name"
                   text="$title" translation_tag="$title_tag" bind_text="$title_subject" style_text_align="left"
                   flex_grow="1"/>
-    <ui_button name="btn_close"
+    <ui_button name="$close_name"
                width="#button_height_sm" height="#button_height_sm" hidden="$hide_close" icon="close" variant="ghost"
                focusable="false">
-      <event_cb trigger="clicked" callback="$close_callback"/>
+      <event_cb trigger="clicked" callback="$close_callback" user_data="$close_user_data"/>
     </ui_button>
   </view>
 </component>

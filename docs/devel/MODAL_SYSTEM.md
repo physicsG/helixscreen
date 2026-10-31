@@ -32,6 +32,11 @@ Modal class (C++ RAII lifecycle, show/hide, button wiring)
 5. The **ModalStack** tracks the backdrop/dialog pair for z-ordering
 6. On hide, an **exit animation** plays, then both backdrop and dialog are destroyed
 
+**An open modal covers the navbar, E-stop included.** `ModalStack` holds the screen chrome under
+its backdrops (`helix::ui::set_chrome_covered()`), so a tap meant to dismiss the modal cannot land
+on a navbar button. The one exception is the E-stop's own confirmation, which calls
+`Modal::set_covers_chrome(dialog, false)` so a second press on the E-stop reaches the button.
+
 Backdrops are always created in C++ -- never in XML. This avoids the old pattern of inline XML backdrops that caused double-backdrop bugs and inconsistent behavior.
 
 ---
@@ -214,12 +219,23 @@ The Modal destructor auto-hides if visible, so storing a `Modal` subclass as a m
 |------|---------|------------|
 | `on_show()` | no-op | After modal is created and visible |
 | `on_hide()` | no-op | Before modal is destroyed |
-| `on_ok()` | `hide()` | When primary button is clicked |
-| `on_cancel()` | `hide()` | When secondary button is clicked |
-| `on_tertiary()` | `hide()` | Third button clicked |
-| `on_quaternary()` | `hide()` | Fourth button clicked |
-| `on_quinary()` | `hide()` | Fifth button clicked |
-| `on_senary()` | `hide()` | Sixth button clicked |
+| `on_dismissed()` | no-op | After `on_hide()`, when the close was not a button's answer: backdrop tap, hot reload, a system sweep, or a programmatic `hide()` |
+| `on_ok()` | `hide(ButtonPress)` | When primary button is clicked |
+| `on_cancel()` | `hide(ButtonPress)` | When secondary button is clicked |
+| `on_escape()` | `on_cancel()` | On ESC. Override it to close without acting (`hide(EscKey)`) when Cancel commits something: Abort, Resume, a saved preference |
+| `on_tertiary()` | `hide(ButtonPress)` | Third button clicked |
+| `on_quaternary()` | `hide(ButtonPress)` | Fourth button clicked |
+| `on_quinary()` | `hide(ButtonPress)` | Fifth button clicked |
+| `on_senary()` | `hide(ButtonPress)` | Sixth button clicked |
+
+**`on_dismissed()` is where a subclass resolves state its buttons were meant to resolve.**
+A button's answer closes with `hide(ModalCloseReason::ButtonPress)`; every other close reaches
+`on_dismissed()` once. Override it when the caller holds a pending guard or the dialog previews a
+change it must revert: `ExcludeObjectModal` reports a cancel, `LanAuthPromptModal` drops the
+request, `FilamentMappingModal` reverts the auto-color-map toggle. Cleanup that must run on every
+close, answered or not, belongs in `on_hide()` (`MacroParamModal` drops its widget pointers
+there). A button handler that closes the dialog passes `ButtonPress`, or its close reads as a
+dismissal.
 
 ### Button Wiring Helpers
 
@@ -507,6 +523,24 @@ class ControlsPanel {
 - **Owner tracking**: Records the `Modal*` that shows each dialog, so a dialog can be traced back to the C++ instance behind it
 
 You should not interact with `ModalStack` directly. Use the `Modal` class API instead.
+
+### Modals stay above overlays
+
+Modals and overlays are both children of the active screen, so their order on screen is
+the order they were created. `NavigationManager::push_overlay` therefore raises every
+visible modal back above the overlay it just brought forward
+(`ModalStack::raise_visible_to_foreground`), and closing a modal raises the ones still
+visible. An overlay pushed while a dialog is up appears beneath it.
+
+### Tags: app modals and plugin dialogs
+
+Each stack entry may carry a tag: empty for the app's own modals, the plugin id for a
+plugin dialog or confirm (`ModalStack::set_tag`). `has_visible_untagged()` answers "is an
+app dialog up", and `top_visible_tag()` names the plugin whose dialog is on top. Plugin
+surfaces wait while any app cover is up, which `include/ui_presentation_gate.h#app_blocked`
+decides (untagged modals, the PIN pad's external cover, the lock screen, the abort and
+busy screens). App code never waits: an app modal always opens on top. The plugin side is
+`PLUGIN_DEVELOPMENT.md` §8, Presentation order.
 
 ### Why the stack records an owner
 

@@ -24,9 +24,9 @@
 
 namespace {
 
-constexpr uint32_t NOMINAL_MS = LV_DEF_REFR_PERIOD;
-constexpr uint32_t SLOW_MS = 300;
-constexpr int SCROLL_THROW = 25;
+constexpr uint32_t kNominalMs = LV_DEF_REFR_PERIOD;
+constexpr uint32_t kSlowMs = 300;
+constexpr int kScrollThrow = 25;
 
 /// Finger speed of 1 px/ms.
 constexpr int px_per_read(uint32_t period_ms) {
@@ -45,14 +45,14 @@ struct Glide {
 Glide flick(lv_obj_t* screen, uint32_t period_ms) {
     lv_obj_t* list = lv_obj_create(screen);
     lv_obj_set_pos(list, 0, 0);
-    lv_obj_set_size(list, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT);
+    lv_obj_set_size(list, kTestDisplayWidth, kTestDisplayHeight);
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_t* content = lv_obj_create(list);
-    lv_obj_set_size(content, TEST_DISPLAY_WIDTH, 5000);
+    lv_obj_set_size(content, kTestDisplayWidth, 5000);
     lv_obj_update_layout(screen);
 
     helix_test::ScopedPointerIndev pointer;
-    lv_indev_set_scroll_throw(pointer.indev(), SCROLL_THROW);
+    lv_indev_set_scroll_throw(pointer.indev(), kScrollThrow);
 
     int y = 420;
     pointer.press(400, y);
@@ -93,24 +93,24 @@ Jittered flick_jittered(lv_obj_t* screen, int32_t start, bool down,
                         const std::vector<uint32_t>& frames_ms) {
     lv_obj_t* list = lv_obj_create(screen);
     lv_obj_set_pos(list, 0, 0);
-    lv_obj_set_size(list, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT);
+    lv_obj_set_size(list, kTestDisplayWidth, kTestDisplayHeight);
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_t* content = lv_obj_create(list);
-    lv_obj_set_size(content, TEST_DISPLAY_WIDTH, 5000);
+    lv_obj_set_size(content, kTestDisplayWidth, 5000);
     lv_obj_update_layout(screen);
     lv_obj_scroll_to_y(list, start, LV_ANIM_OFF);
 
     helix_test::ScopedPointerIndev pointer;
-    lv_indev_set_scroll_throw(pointer.indev(), SCROLL_THROW);
+    lv_indev_set_scroll_throw(pointer.indev(), kScrollThrow);
 
     int y = down ? 60 : 420;
     pointer.press(400, y);
-    for (uint32_t t = 0; t < 300; t += NOMINAL_MS) {
-        lv_tick_inc(NOMINAL_MS);
-        y += down ? px_per_read(NOMINAL_MS) : -px_per_read(NOMINAL_MS);
+    for (uint32_t t = 0; t < 300; t += kNominalMs) {
+        lv_tick_inc(kNominalMs);
+        y += down ? px_per_read(kNominalMs) : -px_per_read(kNominalMs);
         pointer.move(400, y);
     }
-    lv_tick_inc(NOMINAL_MS);
+    lv_tick_inc(kNominalMs);
     const int32_t released_at = lv_obj_get_scroll_y(list);
     pointer.release(400, y);
 
@@ -136,8 +136,8 @@ Jittered flick_jittered(lv_obj_t* screen, int32_t start, bool down,
 
 TEST_CASE_METHOD(LVGLTestFixture, "Scroll throw glides the same distance at any frame rate",
                  "[indev][scroll_throw]") {
-    const Glide nominal = flick(test_screen(), NOMINAL_MS);
-    const Glide slow = flick(test_screen(), SLOW_MS);
+    const Glide nominal = flick(test_screen(), kNominalMs);
+    const Glide slow = flick(test_screen(), kSlowMs);
 
     INFO("nominal vect " << nominal.vect_ori << " total " << nominal.total << " at 600ms "
                          << nominal.at_600ms);
@@ -165,13 +165,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "Scroll throw glides the same distance at any 
 TEST_CASE_METHOD(LVGLTestFixture,
                  "Scroll throw at the nominal period matches LVGL's per-step recurrence",
                  "[indev][scroll_throw]") {
-    const Glide nominal = flick(test_screen(), NOMINAL_MS);
+    const Glide nominal = flick(test_screen(), kNominalMs);
 
     // One step per period: decay by scroll_throw percent, then move by the result.
     int32_t v = nominal.vect_ori;
     int32_t expected = 0;
     while (v != 0) {
-        v = v * (100 - SCROLL_THROW) / 100;
+        v = v * (100 - kScrollThrow) / 100;
         expected += v;
     }
     CHECK(nominal.total == -expected);
@@ -179,7 +179,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
 TEST_CASE_METHOD(LVGLTestFixture, "Scroll throw under frame jitter matches the nominal period",
                  "[indev][scroll_throw]") {
-    const std::vector<uint32_t> stock{NOMINAL_MS};
+    const std::vector<uint32_t> stock{kNominalMs};
     const std::vector<uint32_t> jitter{34, 35, 40};
 
     SECTION("the glide covers the same distance") {

@@ -14,7 +14,7 @@
 // Shared by test_recovery_modal_presenter.cpp and test_ams_error_bridge.cpp so
 // the two test files do not each define the friend struct (ODR).
 struct RecoveryModalPresenterTestAccess {
-    /// The body of the modal's gcode callback. present()'s lambda forwards to
+    /// The body of the modal's action callback. present()'s lambda forwards to
     /// this and does nothing else, so calling it is the button tap.
     static void tap(helix::ui::RecoveryModalPresenter& p, const std::string& gcode) {
         p.on_recovery_tapped(gcode);
@@ -23,10 +23,10 @@ struct RecoveryModalPresenterTestAccess {
         return p.preheat_timer_ != nullptr;
     }
     /// The user closing the modal with a dismiss-only button. That is exactly
-    /// what ActionPromptModal::handle_button_click does for an action whose
-    /// gcode is empty (#1172): a ButtonPress hide that runs no gcode callback,
-    /// which is why the presenter learns it from the modal's dismiss callback.
-    /// Backdrop taps and ESC reach the same callback.
+    /// what RecoveryFaultModal does for an action whose gcode is empty (#1172):
+    /// a ButtonPress hide that runs no action callback, which is why the
+    /// presenter learns it from the modal's dismiss callback. Backdrop taps and
+    /// ESC reach the same callback.
     static void user_dismiss(helix::ui::RecoveryModalPresenter& p) {
         if (p.modal_) {
             p.modal_->hide(ModalCloseReason::ButtonPress);

@@ -23,7 +23,7 @@ using print_status_preview_test::PrintStatusPreviewFixture;
 
 namespace {
 
-constexpr const char* PRINT_A = "pause_markers_demo.gcode";
+constexpr const char* kPrintA = "pause_markers_demo.gcode";
 
 /// The one cached preview copy in the fixture's private cache directory, or
 /// empty when there is none.
@@ -60,25 +60,25 @@ class ScopedMoonrakerHost {
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a download that lands after the tree is destroyed shows nothing",
                  "[print_status][preview_fetch][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
+    report_print(kPrintA);
+    start_fetch(kPrintA);
 
     PrintStatusPanelTestAccess::ui_destroyed(*panel_);
-    land_dropped(PRINT_A);
+    land_dropped(kPrintA);
 
     CHECK(gcode_displayed_file().empty());
-    CHECK_FALSE(ui_gcode_viewer_has_content(viewer_));
+    CHECK_FALSE(helix::ui::gcode_viewer_has_content(viewer_));
 }
 
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a cached copy of the wrong size is downloaded again",
                  "[print_status][preview_fetch][slow]") {
-    report_print(PRINT_A);
+    report_print(kPrintA);
 
     // Seed the cache with a copy the server's file cannot match.
-    start_fetch(PRINT_A);
+    start_fetch(kPrintA);
     const auto cache_root = cache_.dir;
-    REQUIRE(transfers_.release(PRINT_A));
+    REQUIRE(transfers_.release(kPrintA));
     drain();
     const auto copy = cached_copy(cache_root);
     REQUIRE_FALSE(copy.empty());
@@ -88,7 +88,7 @@ TEST_CASE_METHOD(PrintStatusPreviewFixture,
     }
 
     const size_t held_before = transfers_.held_count();
-    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, PRINT_A);
+    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, kPrintA);
     drain();
 
     CHECK(transfers_.held_count() == held_before + 1);
@@ -97,12 +97,12 @@ TEST_CASE_METHOD(PrintStatusPreviewFixture,
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a cached copy of the right size is not downloaded again",
                  "[print_status][preview_fetch][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
-    land(PRINT_A);
+    report_print(kPrintA);
+    start_fetch(kPrintA);
+    land(kPrintA);
     REQUIRE_FALSE(cached_copy(cache_.dir).empty());
 
-    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, PRINT_A);
+    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, kPrintA);
     drain();
 
     CHECK(transfers_.held_count() == 0);
@@ -111,67 +111,67 @@ TEST_CASE_METHOD(PrintStatusPreviewFixture,
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a metadata failure leaves a rendered preview on screen",
                  "[print_status][preview_fetch][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
-    land(PRINT_A);
-    REQUIRE(ui_gcode_viewer_has_content(viewer_));
+    report_print(kPrintA);
+    start_fetch(kPrintA);
+    land(kPrintA);
+    REQUIRE(helix::ui::gcode_viewer_has_content(viewer_));
 
     helix::ScopedEnv metadata_fails("HELIX_MOCK_METADATA_404", "1");
-    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, PRINT_A);
+    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, kPrintA);
     drain();
 
-    CHECK(ui_gcode_viewer_has_content(viewer_));
-    CHECK(gcode_displayed_file() == PRINT_A);
+    CHECK(helix::ui::gcode_viewer_has_content(viewer_));
+    CHECK(gcode_displayed_file() == kPrintA);
     CHECK(transfers_.held_count() == 0);
 }
 
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: closing and reopening mid-download keeps one transfer",
                  "[print_status][preview_fetch][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
+    report_print(kPrintA);
+    start_fetch(kPrintA);
 
     // Destroy-on-close, then the reopened tree asks for the same file again.
     PrintStatusPanelTestAccess::ui_destroyed(*panel_);
     PrintStatusPanelTestAccess::set_gcode_viewer(*panel_, viewer_);
-    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, PRINT_A);
+    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, kPrintA);
     drain();
 
     CHECK(transfers_.held_count() == 1);
 
     // The one transfer serves the reopened tree.
-    land(PRINT_A);
-    CHECK(gcode_displayed_file() == PRINT_A);
+    land(kPrintA);
+    CHECK(gcode_displayed_file() == kPrintA);
 }
 
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a download started before a close is not loaded into a new tree",
                  "[print_status][preview_fetch][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
+    report_print(kPrintA);
+    start_fetch(kPrintA);
 
     PrintStatusPanelTestAccess::ui_destroyed(*panel_);
     PrintStatusPanelTestAccess::set_gcode_viewer(*panel_, viewer_);
-    land_dropped(PRINT_A);
+    land_dropped(kPrintA);
 
     CHECK(gcode_displayed_file().empty());
-    CHECK_FALSE(ui_gcode_viewer_has_content(viewer_));
+    CHECK_FALSE(helix::ui::gcode_viewer_has_content(viewer_));
 }
 
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: another printer's copy of a same-named file is not reused",
                  "[print_status][preview_fetch][slow]") {
-    report_print(PRINT_A);
+    report_print(kPrintA);
     {
         ScopedMoonrakerHost first("printer-one.local");
-        start_fetch(PRINT_A);
-        land(PRINT_A);
+        start_fetch(kPrintA);
+        land(kPrintA);
         REQUIRE_FALSE(cached_copy(cache_.dir).empty());
     }
 
     ScopedMoonrakerHost second("printer-two.local");
     const size_t held_before = transfers_.held_count();
-    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, PRINT_A);
+    PrintStatusPanelTestAccess::load_gcode_for_viewing(*panel_, kPrintA);
     drain();
 
     CHECK(transfers_.held_count() == held_before + 1);

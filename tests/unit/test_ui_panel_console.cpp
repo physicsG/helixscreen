@@ -226,7 +226,7 @@ TEST_CASE("Console: format_timestamp() with zero uses current time", "[ui][times
 
 TEST_CASE("Console: command history deque operations", "[ui][command_history]") {
     std::deque<std::string> history;
-    constexpr size_t MAX_HISTORY = 20;
+    constexpr size_t kMaxHistory = 20;
 
     SECTION("push and recall") {
         history.push_front("G28");
@@ -242,12 +242,12 @@ TEST_CASE("Console: command history deque operations", "[ui][command_history]") 
     SECTION("overflow at MAX_HISTORY") {
         for (int i = 0; i < 25; i++) {
             history.push_front("CMD_" + std::to_string(i));
-            if (history.size() > MAX_HISTORY) {
+            if (history.size() > kMaxHistory) {
                 history.pop_back();
             }
         }
 
-        REQUIRE(history.size() == MAX_HISTORY);
+        REQUIRE(history.size() == kMaxHistory);
         REQUIRE(history[0] == "CMD_24"); // Most recent
         // Oldest should be CMD_5 (0-4 were popped)
         REQUIRE(history.back() == "CMD_5");
@@ -505,18 +505,18 @@ TEST_CASE("Console: find_entry_by_id returns null once the entry is pruned", "[u
 TEST_CASE("Console: pruned ids are never reused by later entries", "[ui][tap_to_paste]") {
     std::deque<GcodeEntry> entries;
     uint64_t next_id = 1;
-    constexpr size_t CAP = 4;
+    constexpr size_t kCap = 4;
 
     std::vector<uint64_t> retired;
     for (int i = 0; i < 20; i++) {
         push(entries, next_id, "CMD_" + std::to_string(i));
-        while (entries.size() > CAP) {
+        while (entries.size() > kCap) {
             retired.push_back(entries.front().id);
             entries.pop_front();
         }
     }
 
-    REQUIRE(entries.size() == CAP);
+    REQUIRE(entries.size() == kCap);
     REQUIRE_FALSE(retired.empty());
 
     // This is the safety property that makes an integer id safe where a raw

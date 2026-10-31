@@ -19,8 +19,10 @@
 #include "printer_discovery.h"
 #include "test_helpers/ad5x_ifs_test_access.h"
 #include "test_helpers/backend_user_edit.h"
+#include "test_helpers/mock_printer.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -102,7 +104,14 @@ class TestableModuleBackend : public AmsBackendAd5xIfs {
         captured_gcodes.push_back(gcode);
         return helix::AmsErrorHelper::success();
     }
-    helix::AmsError execute_gcode(const std::string& gcode, std::function<void()>) override {
+    helix::AmsError execute_gcode(const std::string& gcode,
+                                  helix::SharedCallback<void()>) override {
+        captured_gcodes.push_back(gcode);
+        return helix::AmsErrorHelper::success();
+    }
+    helix::AmsError execute_gcode(const std::string& gcode, helix::SharedCallback<void()>,
+                                  helix::SharedCallback<void(const MoonrakerError&)>,
+                                  bool) override {
         captured_gcodes.push_back(gcode);
         return helix::AmsErrorHelper::success();
     }
@@ -425,7 +434,7 @@ TEST_CASE("AD5X IFS module identity returns when the plugin contract demotes",
 
         Ad5xIfsTestAccess::on_gcode_response_line(backend, "// Unknown command:\"_IFS_VARS\"");
 
-        CHECK(Ad5xIfsTestAccess::tool_map(backend)[6] == AmsBackendAd5xIfs::UNMAPPED_PORT);
+        CHECK(Ad5xIfsTestAccess::tool_map(backend)[6] == AmsBackendAd5xIfs::kUnmappedPort);
     }
 
     SECTION("a live wire table owns the map and survives the demote") {
@@ -552,6 +561,207 @@ TEST_CASE("AD5X IFS module ifs_loaded is the seated authority", "[ams][ad5x_ifs]
     CHECK(backend.get_current_slot() < 0);
 }
 
+TEST_CASE("AD5X IFS module's own lane record outranks the remembered seated lane",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    // At boot the module reports active_channel=0 with the head loaded, which is
+    // its normal idle state, while the remembered lane names lane 4 and the
+    // module's save_variables name lane 2.
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    Ad5xIfsTestAccess::set_persisted_seated_slot(backend, 3);
+    const json lane2_vars{
+        {"save_variables", {{"variables", {{"ifs_loaded", 2}, {"ifs_at_hub", 2}}}}}};
+
+    SECTION("save_variables before the module latches") {
+        Ad5xIfsTestAccess::handle_status(backend, lane2_vars);
+        Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2, 3, 4}));
+    }
+    SECTION("save_variables after the module latches") {
+        Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2, 3, 4}));
+        Ad5xIfsTestAccess::handle_status(backend, lane2_vars);
+        Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2, 3, 4}));
+    }
+
+    REQUIRE(Ad5xIfsTestAccess::module_live(backend));
+    CHECK(Ad5xIfsTestAccess::seated_chan(backend) == 2);
+    CHECK(backend.get_current_slot() == 1);
+    // The remembered lane is corrected so a later boot cannot bring lane 4 back.
+    CHECK(Ad5xIfsTestAccess::persisted_seated_slot(backend) == std::optional<int>(1));
+
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.unload_filament(-1).success());
+    CHECK(backend.has_gcode("IFS_UNLOAD SLOT=2"));
+    CHECK_FALSE(backend.has_gcode_containing("SLOT=4"));
+}
+
+TEST_CASE("AD5X IFS module with nothing recorded does not seat the remembered lane",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    // ifs_loaded=0 is the module saying no load completed; the remembered lane is
+    // dropped and the at-hub lane, the module's own record, names the lane.
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    Ad5xIfsTestAccess::set_persisted_seated_slot(backend, 3);
+    Ad5xIfsTestAccess::handle_status(
+        backend, json{{"save_variables", {{"variables", {{"ifs_loaded", 0}, {"ifs_at_hub", 2}}}}}});
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2, 3, 4}));
+
+    CHECK(Ad5xIfsTestAccess::seated_chan(backend) == 0);
+    CHECK_FALSE(Ad5xIfsTestAccess::persisted_seated_slot(backend).has_value());
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.unload_filament(-1).success());
+    CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_UNLOAD SLOT=2"});
+}
+
+TEST_CASE("AD5X IFS module with no lane record keeps the remembered-lane fallback",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    // No ifs_loaded row at all: the remembered lane is the only record.
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    Ad5xIfsTestAccess::set_persisted_seated_slot(backend, 3);
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2, 3, 4}));
+
+    CHECK(Ad5xIfsTestAccess::seated_chan(backend) == 4);
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.unload_filament(-1).success());
+    CHECK(backend.has_gcode("IFS_UNLOAD SLOT=4"));
+}
+
+TEST_CASE("AD5X IFS module ignores an ifs_loaded that names no real lane",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    // A save_variables-only update, with no ifs frame after it to re-derive the
+    // seated lane, must not seat a lane the IFS does not have.
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2}));
+    REQUIRE(Ad5xIfsTestAccess::module_live(backend));
+
+    Ad5xIfsTestAccess::handle_status(
+        backend, json{{"save_variables", {{"variables", {{"ifs_loaded", 5}}}}}});
+    CHECK(Ad5xIfsTestAccess::seated_chan(backend) == 0);
+    CHECK(backend.get_current_slot() < 0);
+    backend.captured_gcodes.clear();
+    (void)backend.unload_filament(-1);
+    CHECK_FALSE(backend.has_gcode_containing("SLOT=5"));
+}
+
+TEST_CASE("AD5X IFS module keeps the ifs_loaded lane while another lane's eject engages",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    // Lane 2 is loaded; an IFS_EJECT of lane 3 moves active_channel to 3 while
+    // lane 3 still reads present. The seated lane must stay on lane 2.
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(2, {2, 3}));
+    Ad5xIfsTestAccess::handle_status(
+        backend, json{{"save_variables", {{"variables", {{"ifs_loaded", 2}}}}}});
+    REQUIRE(Ad5xIfsTestAccess::seated_chan(backend) == 2);
+
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(3, {2, 3}));
+    CHECK(Ad5xIfsTestAccess::seated_chan(backend) == 2);
+    CHECK(backend.get_current_slot() == 1);
+    backend.captured_gcodes.clear();
+    REQUIRE(backend.unload_filament(-1).success());
+    CHECK(backend.has_gcode("IFS_UNLOAD SLOT=2"));
+    CHECK_FALSE(backend.has_gcode_containing("SLOT=3"));
+}
+
+TEST_CASE("AD5X IFS module beside a plugin keeps following active_channel",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    // A lessWaste/bambufy swap need not run IFS_LOAD, so ifs_loaded can lag on
+    // a plugin rig; neither the seated lane nor the remembered lane follows it.
+    AmsBackendAd5xIfs backend(nullptr, nullptr);
+    Ad5xIfsTestAccess::set_ifs_macro_confirmed_missing(backend, false);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    Ad5xIfsTestAccess::handle_status(
+        backend,
+        json{{"save_variables",
+              {{"variables", {{"bambufy_tools", json::array({1, 2, 3, 4})}, {"ifs_loaded", 2}}}}}});
+    REQUIRE(Ad5xIfsTestAccess::has_ifs_vars(backend));
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(3, {2, 3}));
+    REQUIRE(Ad5xIfsTestAccess::module_live(backend));
+
+    CHECK(Ad5xIfsTestAccess::seated_chan(backend) == 3);
+    CHECK(Ad5xIfsTestAccess::persisted_seated_slot(backend) == std::optional<int>(2));
+}
+
+TEST_CASE("AD5X IFS module writes the remembered lane only when ifs_loaded changes",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    MockPrinter mock_printer;
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::inject_override_store(
+        backend, std::make_unique<helix::ams::FilamentSlotOverrideStore>(&mock_printer.api, "ifs"));
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    const json lane2_vars{{"save_variables", {{"variables", {{"ifs_loaded", 2}}}}}};
+
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2}));
+    Ad5xIfsTestAccess::handle_status(backend, lane2_vars);
+    const int posts = mock_printer.client.call_count("server.database.post_item");
+    REQUIRE(posts == 1);
+    CHECK(mock_printer.client.mock_db_get("lane_data", "seated") == json(1));
+
+    for (int i = 0; i < 5; ++i) {
+        Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2}));
+        Ad5xIfsTestAccess::handle_status(backend, lane2_vars);
+    }
+    CHECK(mock_printer.client.call_count("server.database.post_item") == posts);
+}
+
+TEST_CASE("AD5X IFS module eject of its loaded lane names a temperature when the module "
+          "has none",
+          "[ams][ad5x_ifs][ifs_module][1897]") {
+    // The head reads empty but ifs_loaded still names a lane (a runout tail
+    // cleared, then a restart). IFS_EJECT of the module's loaded lane clears the
+    // extruder and takes its temperature from TEMP=, else the slot's material,
+    // else the nozzle target; with none of them it raises an error.
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2, 3}));
+    Ad5xIfsTestAccess::handle_status(backend, module_materials_frame());
+    Ad5xIfsTestAccess::set_head_switch(backend, true, false);
+    Ad5xIfsTestAccess::set_head_filament(backend, false);
+
+    const auto record = [&](int ifs_loaded) {
+        Ad5xIfsTestAccess::handle_status(
+            backend, json{{"save_variables", {{"variables", {{"ifs_loaded", ifs_loaded}}}}}});
+        Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2, 3}));
+        backend.captured_gcodes.clear();
+    };
+
+    SECTION("an unlabelled loaded lane on a cold nozzle gets the fallback temperature") {
+        record(3);
+        REQUIRE(Ad5xIfsTestAccess::seated_chan(backend) == 3);
+        REQUIRE(backend.unload_filament(-1).success());
+        CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_EJECT SLOT=3 TEMP=220"});
+    }
+    SECTION("a nozzle the user already heated keeps its target") {
+        record(3);
+        Ad5xIfsTestAccess::handle_status(
+            backend, json{{"extruder", {{"target", 255.0}, {"temperature", 30.0}}}});
+        REQUIRE(backend.unload_filament(-1).success());
+        CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_EJECT SLOT=3 TEMP=255"});
+    }
+    SECTION("a labelled loaded lane leaves the temperature to the module's material") {
+        record(2);
+        REQUIRE(backend.unload_filament(-1).success());
+        CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_EJECT SLOT=2"});
+    }
+    SECTION("an unlabelled lane that is not the loaded one needs no temperature") {
+        record(1);
+        REQUIRE(backend.eject_lane(2).success());
+        CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_EJECT SLOT=3"});
+    }
+}
+
 TEST_CASE("AD5X IFS module driver_error surfaces as ERROR", "[ams][ad5x_ifs][ifs_module]") {
     AmsBackendAd5xIfs backend(nullptr, nullptr);
     Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {}, "ready"));
@@ -582,6 +792,294 @@ TEST_CASE("AD5X IFS module activity tracks an externally-started op",
     CHECK(Ad5xIfsTestAccess::action(backend) == helix::AmsAction::UNLOADING);
 }
 
+TEST_CASE("AD5X IFS module slotless unload names a lane the module can retract",
+          "[ams][ad5x_ifs][ifs_module][1324]") {
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    // Filament at the head that no lane claims: the module reports no active
+    // channel while lanes 1 and 2 hold filament and the head switch reads present.
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2}));
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    REQUIRE(Ad5xIfsTestAccess::module_live(backend));
+    REQUIRE(backend.get_current_slot() < 0);
+    REQUIRE(Ad5xIfsTestAccess::seated_chan(backend) == 0);
+    REQUIRE(backend.toolhead_filament_unaccounted() == std::optional<bool>(true));
+    backend.captured_gcodes.clear();
+
+    SECTION("a remembered lane that still holds filament is unloaded by number") {
+        Ad5xIfsTestAccess::set_persisted_seated_slot(backend, 1);
+        CHECK(backend.unload_lane_question().lanes.empty());
+        REQUIRE(backend.unload_filament(-1).success());
+        CHECK(backend.has_gcode("IFS_UNLOAD SLOT=2"));
+        CHECK_FALSE(backend.has_gcode("IFS_UNLOAD"));
+    }
+    SECTION("with no remembered lane the present lanes are offered and nothing is sent") {
+        Ad5xIfsTestAccess::set_persisted_seated_slot(backend, std::nullopt);
+        CHECK(backend.unload_lane_question().lanes == std::vector<int>{0, 1});
+        const helix::AmsError err = backend.unload_filament(-1);
+        CHECK_FALSE(err.success());
+        CHECK(backend.captured_gcodes.empty());
+        CHECK(Ad5xIfsTestAccess::action(backend) == helix::AmsAction::IDLE);
+    }
+    SECTION("a remembered lane that has since emptied is not trusted") {
+        Ad5xIfsTestAccess::set_persisted_seated_slot(backend, 3);
+        CHECK(backend.unload_lane_question().lanes == std::vector<int>{0, 1});
+        CHECK_FALSE(backend.unload_filament(-1).success());
+        CHECK(backend.captured_gcodes.empty());
+    }
+    SECTION("an explicit lane is sent as given") {
+        Ad5xIfsTestAccess::set_persisted_seated_slot(backend, std::nullopt);
+        REQUIRE(backend.unload_filament(0).success());
+        CHECK(backend.has_gcode("IFS_UNLOAD SLOT=1"));
+    }
+}
+
+TEST_CASE("AD5X IFS module offers no lane choice when a lane is accounted for",
+          "[ams][ad5x_ifs][ifs_module][1324]") {
+    TestableModuleBackend backend;
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(2, {1, 2}));
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    REQUIRE(backend.get_current_slot() == 1);
+    CHECK(backend.unload_lane_question().lanes.empty());
+
+    SECTION("an empty head needs no lane either") {
+        Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, {1, 2}));
+        Ad5xIfsTestAccess::set_head_switch(backend, true, false);
+        Ad5xIfsTestAccess::set_persisted_seated_slot(backend, std::nullopt);
+        CHECK(backend.unload_lane_question().lanes.empty());
+    }
+}
+
+namespace {
+
+using Verdict = AmsBackendAd5xIfs::UnloadLaneVerdict;
+
+AmsBackendAd5xIfs::UnloadLaneDecision table_verdict(bool module, int recorded, int at_hub,
+                                                    std::array<bool, 4> present, bool head = true) {
+    AmsBackendAd5xIfs::UnloadLaneInputs in;
+    in.module = module;
+    in.recorded_lane = recorded;
+    in.at_hub_lane = at_hub;
+    in.present = present;
+    in.head_loaded = head;
+    return AmsBackendAd5xIfs::decide_unload_lane(in);
+}
+
+} // namespace
+
+TEST_CASE("AD5X IFS decides how a toolhead unload finds its lane", "[ams][ad5x_ifs][1324]") {
+    // Rows that read the same on both firmwares.
+    const bool module = GENERATE(true, false);
+    CAPTURE(module);
+    SECTION("an empty head is not a toolhead unload") {
+        CHECK(table_verdict(module, 1, 1, {true, true, false, false}, /*head=*/false).verdict ==
+              Verdict::NotToolhead);
+    }
+    SECTION("row 1: a record names the lane, even one reading empty") {
+        const auto d = table_verdict(module, 2, 0, {true, false, false, false});
+        CHECK(d.verdict == Verdict::UnloadLane);
+        CHECK(d.lane == 2);
+    }
+    SECTION("rows 3 and 6: one lane holding filament is confirmed, never assumed") {
+        const auto d = table_verdict(module, -1, -1, {false, false, true, false});
+        CHECK(d.verdict == Verdict::ConfirmLane);
+        CHECK(d.lane == 2);
+    }
+    SECTION("rows 4 and 6: several lanes holding filament are picked from") {
+        const auto d = table_verdict(module, -1, -1, {true, false, true, true});
+        CHECK(d.verdict == Verdict::PickLane);
+        CHECK(d.lane == -1);
+    }
+    SECTION("row 5: no lane holding filament asks to confirm an extruder-only clear") {
+        CHECK(table_verdict(module, -1, -1, {false, false, false, false}).verdict ==
+              Verdict::ConfirmClear);
+    }
+
+    SECTION("row 2: the module's at-hub lane is unloaded when it still holds filament") {
+        const auto d = table_verdict(true, -1, 3, {true, false, false, true});
+        CHECK(d.verdict == Verdict::UnloadLane);
+        CHECK(d.lane == 3);
+    }
+    SECTION("row 2: a record outranks the at-hub lane") {
+        const auto d = table_verdict(true, 0, 3, {true, false, false, true});
+        CHECK(d.verdict == Verdict::UnloadLane);
+        CHECK(d.lane == 0);
+    }
+    SECTION("row 2: an at-hub lane reading empty is not trusted") {
+        CHECK(table_verdict(true, -1, 3, {true, true, false, false}).verdict == Verdict::PickLane);
+        CHECK(table_verdict(true, -1, 3, {false, false, false, false}).verdict ==
+              Verdict::ConfirmClear);
+    }
+    SECTION("row 2: native ZMOD keeps no at-hub record, so it is ignored") {
+        const auto d = table_verdict(false, -1, 3, {false, false, false, true});
+        CHECK(d.verdict == Verdict::ConfirmLane);
+        CHECK(d.lane == 3);
+    }
+    SECTION("an out-of-range at-hub lane is ignored") {
+        CHECK(table_verdict(true, -1, 7, {true, false, false, false}).verdict ==
+              Verdict::ConfirmLane);
+    }
+}
+
+namespace {
+
+/// The module with filament at the head and nothing recorded in ifs_loaded.
+void seat_unrecorded_module(TestableModuleBackend& backend, std::vector<int> lanes, int at_hub) {
+    Ad5xIfsTestAccess::set_running(backend, true);
+    Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(0, std::move(lanes)));
+    Ad5xIfsTestAccess::handle_status(
+        backend,
+        json{{"save_variables", {{"variables", {{"ifs_loaded", 0}, {"ifs_at_hub", at_hub}}}}}});
+    Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+    Ad5xIfsTestAccess::set_head_filament(backend, true);
+    Ad5xIfsTestAccess::set_persisted_seated_slot(backend, std::nullopt);
+    REQUIRE(Ad5xIfsTestAccess::module_live(backend));
+    REQUIRE(backend.get_current_slot() < 0);
+    backend.captured_gcodes.clear();
+}
+
+} // namespace
+
+TEST_CASE("AD5X IFS module unloads the lane holding the hub without asking",
+          "[ams][ad5x_ifs][ifs_module][1324]") {
+    TestableModuleBackend backend;
+    seat_unrecorded_module(backend, {1, 2, 3}, /*at_hub=*/2);
+
+    CHECK(backend.unload_lane_question().lanes.empty());
+    REQUIRE(backend.unload_filament(-1).success());
+    CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_UNLOAD SLOT=2"});
+
+    SECTION("an at-hub lane that has emptied asks instead") {
+        TestableModuleBackend emptied;
+        seat_unrecorded_module(emptied, {1, 3}, /*at_hub=*/2);
+        CHECK(emptied.unload_lane_question().lanes == std::vector<int>{0, 2});
+        CHECK_FALSE(emptied.unload_filament(-1).success());
+        CHECK(emptied.captured_gcodes.empty());
+    }
+}
+
+TEST_CASE("AD5X IFS module asks to confirm the one lane holding filament",
+          "[ams][ad5x_ifs][ifs_module][1324]") {
+    TestableModuleBackend backend;
+    seat_unrecorded_module(backend, {3}, /*at_hub=*/0);
+
+    const helix::UnloadLaneQuestion question = backend.unload_lane_question();
+    CHECK(question.lanes == std::vector<int>{2});
+    CHECK_FALSE(question.confirm_clear_toolhead);
+    // Never dispatched on the inference alone.
+    CHECK_FALSE(backend.unload_filament(-1).success());
+    CHECK(backend.captured_gcodes.empty());
+
+    SECTION("a confirmed lane is unloaded by number") {
+        REQUIRE(backend.unload_filament(2).success());
+        CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_UNLOAD SLOT=3"});
+    }
+}
+
+TEST_CASE("AD5X IFS module clears the extruder alone when no lane can be named",
+          "[ams][ad5x_ifs][ifs_module][1324]") {
+    const std::string clear220 = "_IFS_SENSOR_RESUME\n_IFS_CLEAR_EXTRUDER TEMP=220";
+    SECTION("the clear restores the toolhead sensor, then clears and retracts no lane") {
+        TestableModuleBackend backend;
+        seat_unrecorded_module(backend, {1, 2}, /*at_hub=*/0);
+        REQUIRE(backend.unload_filament(helix::kClearToolheadSlot).success());
+        CHECK(backend.captured_gcodes == std::vector<std::string>{clear220});
+        CHECK(Ad5xIfsTestAccess::action(backend) != helix::AmsAction::IDLE);
+    }
+    SECTION("no lane holding filament asks to confirm the clear, and never clears unasked") {
+        TestableModuleBackend backend;
+        seat_unrecorded_module(backend, {}, /*at_hub=*/0);
+        const helix::UnloadLaneQuestion question = backend.unload_lane_question();
+        CHECK(question.lanes.empty());
+        CHECK(question.confirm_clear_toolhead);
+        const helix::AmsError err = backend.unload_filament(-1);
+        CHECK_FALSE(err.success());
+        CHECK(err.result == helix::AmsResult::WRONG_STATE);
+        CHECK(backend.captured_gcodes.empty());
+        REQUIRE(backend.unload_filament(helix::kClearToolheadSlot).success());
+        CHECK(backend.captured_gcodes == std::vector<std::string>{clear220});
+    }
+    SECTION("a nozzle the user already heated keeps its target") {
+        TestableModuleBackend backend;
+        seat_unrecorded_module(backend, {}, /*at_hub=*/0);
+        Ad5xIfsTestAccess::handle_status(
+            backend, json{{"extruder", {{"target", 255.0}, {"temperature", 30.0}}}});
+        REQUIRE(backend.unload_filament(helix::kClearToolheadSlot).success());
+        CHECK(backend.captured_gcodes ==
+              std::vector<std::string>{"_IFS_SENSOR_RESUME\n_IFS_CLEAR_EXTRUDER TEMP=255"});
+    }
+    SECTION("an empty head has nothing to clear") {
+        TestableModuleBackend backend;
+        seat_unrecorded_module(backend, {1, 2}, /*at_hub=*/0);
+        Ad5xIfsTestAccess::set_head_switch(backend, true, false);
+        Ad5xIfsTestAccess::set_head_filament(backend, false);
+        CHECK_FALSE(backend.unload_filament(helix::kClearToolheadSlot).success());
+        CHECK(backend.captured_gcodes.empty());
+    }
+    SECTION("an empty head never turns the clear into a cold eject of the recorded lane") {
+        // A record can name a lane while the switch reads empty; the empty-head
+        // routing would cold-eject that lane, which "clear the toolhead" never means.
+        TestableModuleBackend backend;
+        seat_unrecorded_module(backend, {1, 2}, /*at_hub=*/0);
+        Ad5xIfsTestAccess::handle_status(
+            backend, json{{"save_variables", {{"variables", {{"ifs_loaded", 2}}}}}});
+        Ad5xIfsTestAccess::set_head_switch(backend, true, false);
+        Ad5xIfsTestAccess::set_head_filament(backend, false);
+        REQUIRE(Ad5xIfsTestAccess::seated_chan(backend) == 2);
+        const helix::AmsError err = backend.unload_filament(helix::kClearToolheadSlot);
+        CHECK_FALSE(err.success());
+        CHECK(err.result == helix::AmsResult::WRONG_STATE);
+        CHECK(backend.captured_gcodes.empty());
+    }
+}
+
+TEST_CASE("AD5X IFS module never sends a bare IFS_UNLOAD", "[ams][ad5x_ifs][ifs_module][1324]") {
+    // Bare, the module's IFS_UNLOAD falls back on its own records; Helix always
+    // names the lane or sends the explicit clear, in every row of the table.
+    struct Row {
+        const char* name;
+        int active;
+        std::vector<int> lanes;
+        int ifs_loaded;
+        int at_hub;
+    };
+    const std::vector<Row> rows = {
+        {"active lane", 2, {1, 2}, 2, 2},    {"recorded lane", 0, {1, 2}, 2, 2},
+        {"at-hub lane", 0, {1, 2, 3}, 0, 3}, {"one lane", 0, {3}, 0, 0},
+        {"several lanes", 0, {1, 4}, 0, 0},  {"no lanes", 0, {}, 0, 0},
+    };
+    int unloads_sent = 0;
+    for (const Row& row : rows) {
+        CAPTURE(row.name);
+        for (const int slot : {-1, 0, 1, 2, 3, helix::kClearToolheadSlot}) {
+            CAPTURE(slot);
+            TestableModuleBackend backend;
+            Ad5xIfsTestAccess::set_running(backend, true);
+            Ad5xIfsTestAccess::handle_status(backend, module_ifs_frame(row.active, row.lanes));
+            Ad5xIfsTestAccess::handle_status(
+                backend, json{{"save_variables",
+                               {{"variables",
+                                 {{"ifs_loaded", row.ifs_loaded}, {"ifs_at_hub", row.at_hub}}}}}});
+            Ad5xIfsTestAccess::set_head_switch(backend, true, true);
+            Ad5xIfsTestAccess::set_head_filament(backend, true);
+            Ad5xIfsTestAccess::set_persisted_seated_slot(backend, std::nullopt);
+            backend.captured_gcodes.clear();
+            (void)backend.unload_filament(slot);
+            for (const std::string& g : backend.captured_gcodes) {
+                if (g.rfind("IFS_UNLOAD", 0) == 0) {
+                    ++unloads_sent;
+                    CHECK(g.rfind("IFS_UNLOAD SLOT=", 0) == 0);
+                }
+            }
+        }
+    }
+    // The sweep reached the unload dispatch, not only refusals and ejects.
+    CHECK(unloads_sent >= 6);
+}
+
 TEST_CASE("AD5X IFS module ops dispatch the module's macros", "[ams][ad5x_ifs][ifs_module]") {
     TestableModuleBackend backend;
     Ad5xIfsTestAccess::set_running(backend, true);
@@ -601,9 +1099,9 @@ TEST_CASE("AD5X IFS module ops dispatch the module's macros", "[ams][ad5x_ifs][i
         CHECK(backend.has_gcode("IFS_UNLOAD SLOT=2"));
         CHECK_FALSE(backend.has_gcode_containing("_IFS_REMOVE_CURRENT_PRUTOK"));
     }
-    SECTION("unload whatever is active sends it bare") {
+    SECTION("unload whatever is active names the active lane") {
         REQUIRE(backend.unload_filament(-1).success());
-        CHECK(backend.has_gcode("IFS_UNLOAD"));
+        CHECK(backend.captured_gcodes == std::vector<std::string>{"IFS_UNLOAD SLOT=2"});
     }
     SECTION("cold lane eject") {
         REQUIRE(backend.eject_lane(0).success());
@@ -669,19 +1167,6 @@ TEST_CASE("AD5X IFS module poll stand-down", "[ams][ad5x_ifs][ifs_module]") {
     // And a manual resync is a no-op rather than a re-read.
     backend.request_resync();
     CHECK(Ad5xIfsTestAccess::zcolor_schedule_count(backend) == before);
-}
-
-TEST_CASE("AD5X IFS module colour normalisation", "[ams][ad5x_ifs][ifs_module]") {
-    CHECK(Ad5xIfsTestAccess::normalize_module_color("#A03CF7") == "A03CF7");
-    CHECK(Ad5xIfsTestAccess::normalize_module_color("A03CF7") == "A03CF7");
-    CHECK(Ad5xIfsTestAccess::normalize_module_color("#F80") == "FF8800");
-    CHECK(Ad5xIfsTestAccess::normalize_module_color("#ff8800") == "FF8800");
-    // Not-a-colour returns empty, which the apply path reads as "no reading"
-    // — never as black.
-    CHECK(Ad5xIfsTestAccess::normalize_module_color("").empty());
-    CHECK(Ad5xIfsTestAccess::normalize_module_color("#12345").empty());
-    CHECK(Ad5xIfsTestAccess::normalize_module_color("#GGGGGG").empty());
-    CHECK(Ad5xIfsTestAccess::normalize_module_color(std::string()).empty());
 }
 
 TEST_CASE_METHOD(LVGLTestFixture,

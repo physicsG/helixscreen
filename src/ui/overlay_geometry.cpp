@@ -24,10 +24,9 @@ const char* nav_width_suffix(int32_t hor_res, int32_t ver_res) {
     // a full-height vertical strip, so its width must track the short vertical
     // extent — not the horizontal resolution, which would otherwise select the
     // widest 'large' bar and waste the horizontal space the grid wants. Detect
-    // ultrawide from the aspect ratio directly (the >2.5:1 threshold mirrors
-    // LayoutManager::detect) rather than via LayoutManager, which is not yet
-    // initialised when this runs at startup.
-    const bool ultrawide = ver_res > 0 && hor_res > ver_res * 5 / 2;
+    // ultrawide from the aspect ratio directly rather than via LayoutManager,
+    // which is not yet initialised when this runs at startup.
+    const bool ultrawide = is_ultrawide_aspect(hor_res, ver_res);
     if (ver_res <= UI_BREAKPOINT_MICRO_MAX)
         return "_micro";
     if (ultrawide)

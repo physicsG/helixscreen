@@ -102,7 +102,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AutoInject cuts the walk at a home widget t
     lv_obj_t* tile = lv_obj_create(root);
     lv_obj_set_size(tile, 240, 200);
     lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(tile, helix::PANEL_WIDGET_TILE_FLAG);
+    lv_obj_add_flag(tile, helix::kPanelWidgetTileFlag);
     lv_obj_t* inner = add_vscroll(tile, 20);
 
     // A page-level container beside the tile must still qualify, or the cut is
@@ -136,7 +136,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AutoInject skips a tile whose own root scro
     lv_obj_set_size(root, 480, 320);
 
     lv_obj_t* tile = add_vscroll(root, 20); // overflows; would qualify unmarked
-    lv_obj_add_flag(tile, helix::PANEL_WIDGET_TILE_FLAG);
+    lv_obj_add_flag(tile, helix::kPanelWidgetTileFlag);
 
     lv_obj_update_layout(root);
     inj.on_root_shown(root);
@@ -257,4 +257,39 @@ TEST_CASE_METHOD(LVGLUITestFixture, "AutoInject does not re-walk for a list fill
 
     inj.shutdown();
     process_lvgl(20);
+}
+
+// An lv_image is scrollable by default and reports its SOURCE size as its content,
+// so a 200px picture shown at 160px "overflows" by 40px. It draws scaled to its box
+// and ignores the scroll offset, so a gutter there would page nothing and sit on top
+// of the picture (the Printer Manager image on an 800x480 panel).
+TEST_CASE_METHOD(LVGLUITestFixture, "AutoInject skips an image larger than its box",
+                 "[page_scroll_buttons][ui]") {
+    auto& dsm = helix::DisplaySettingsManager::instance();
+    dsm.init_subjects();
+    auto& inj = PageScrollAutoInject::instance();
+    inj.shutdown();
+    inj.init();
+    dsm.set_page_scroll_buttons(true);
+
+    lv_draw_buf_t* src = lv_draw_buf_create(200, 200, LV_COLOR_FORMAT_RGB565, 0);
+    REQUIRE(src != nullptr);
+
+    lv_obj_t* root = lv_obj_create(test_screen());
+    lv_obj_set_size(root, 480, 320);
+    lv_obj_t* img = lv_image_create(root);
+    lv_image_set_src(img, src);
+    lv_obj_set_size(img, 160, 160);
+    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CONTAIN);
+    lv_obj_update_layout(root);
+    REQUIRE(lv_obj_get_scroll_bottom(img) > 0); // the overflow the walk must ignore
+
+    inj.on_root_shown(root);
+    CHECK(lv_obj_find_by_name(img, "up") == nullptr);
+    CHECK(inj.managed_count() == 0);
+
+    inj.shutdown();
+    lv_obj_delete(root);
+    process_lvgl(20);
+    lv_draw_buf_destroy(src);
 }

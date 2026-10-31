@@ -124,6 +124,15 @@ std::vector<ScannedDevice>
 find_hid_keyboard_devices(const std::string& dev_base, const std::string& sysfs_base,
                           const std::vector<std::string>& blacklist = {});
 
+/// Find the USB/BT HID device whose VID:PID matches configured_vendor_product
+/// ("vendor:product"). Returns nullopt when the id is empty or malformed, the
+/// device is not attached, or it is in `blacklist`. Never substitutes another
+/// keyboard, so a result proves the configured device is present.
+std::optional<ScannedDevice>
+find_configured_hid_device(const std::string& dev_base, const std::string& sysfs_base,
+                           const std::string& configured_vendor_product,
+                           const std::vector<std::string>& blacklist = {});
+
 /// Like find_hid_keyboard_devices(), but if configured_vendor_product is non-empty
 /// (format "vendor:product", e.g. "1a2c:4c5e"), the matching device is returned
 /// as the sole result with highest priority. Falls back to name-based priority

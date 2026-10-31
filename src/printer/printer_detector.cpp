@@ -8,16 +8,20 @@
 #include "app_globals.h"
 #include "config.h"
 #include "data_root_resolver.h"
+#include "filament_sensor_manager.h"
 #include "helix_fs.h"
 #include "json_utils.h"
 #include "klipper_extruder_naming.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "print_start_analyzer.h"
 #include "printer_discovery.h"
+#include "printer_image_variants.h"
 #include "printer_state.h"
 #include "probe_preparation.h"
+#include "probe_sensor_manager.h"
 #include "text_io.h"
 #include "thermal_rate_model.h"
+#include "width_sensor_manager.h"
 #include "wizard_config_paths.h"
 
 #include <spdlog/spdlog.h>
@@ -41,6 +45,21 @@ using json = nlohmann::json;
 using namespace helix;
 
 namespace hfs = helix::fs;
+
+float helix::printable_axis_span(float min, float max) {
+    if (min < 0.0f && -min * 2.0f < max) {
+        return max;
+    }
+    return max - min;
+}
+
+float BuildVolume::printable_x() const {
+    return declared_bed_x > 0.0f ? declared_bed_x : printable_axis_span(x_min, x_max);
+}
+
+float BuildVolume::printable_y() const {
+    return declared_bed_y > 0.0f ? declared_bed_y : printable_axis_span(y_min, y_max);
+}
 
 // ============================================================================
 // JSON Database Loader with User Extensions Support
@@ -512,7 +531,7 @@ bool check_build_volume_range(const BuildVolume& volume, const json& heuristic) 
 
 namespace {
 // Special return value: -1 means "exclude this printer entirely"
-constexpr int HEURISTIC_EXCLUDE = -1;
+constexpr int kHeuristicExclude = -1;
 
 // Execute a single heuristic and return confidence (0 = no match, -1 = exclude)
 int execute_heuristic(const json& heuristic, const PrinterHardwareData& hardware) {
@@ -545,7 +564,7 @@ int execute_heuristic(const json& heuristic, const PrinterHardwareData& hardware
         if (!has_pattern(field_data, pattern)) {
             spdlog::debug("[PrinterDetector] Excluded by {}: '{}' absent from {}", type, pattern,
                           field);
-            return HEURISTIC_EXCLUDE;
+            return kHeuristicExclude;
         }
     } else if (type == "led_exclude" || type == "sensor_exclude" || type == "fan_exclude" ||
                type == "object_exclude") {
@@ -557,7 +576,7 @@ int execute_heuristic(const json& heuristic, const PrinterHardwareData& hardware
         if (has_pattern(field_data, pattern)) {
             spdlog::debug("[PrinterDetector] Excluded by {}: '{}' present in {}", type, pattern,
                           field);
-            return HEURISTIC_EXCLUDE;
+            return kHeuristicExclude;
         }
     } else if (type == "hostname_exclude") {
         // If hostname matches this pattern, exclude this printer entirely
@@ -565,7 +584,7 @@ int execute_heuristic(const json& heuristic, const PrinterHardwareData& hardware
         std::string pattern = helix::json_util::safe_string(heuristic, "pattern");
         if (has_pattern(field_data, pattern)) {
             spdlog::debug("[PrinterDetector] Excluded by {} pattern '{}'", type, pattern);
-            return HEURISTIC_EXCLUDE;
+            return kHeuristicExclude;
         }
     } else if (type == "fan_combo") {
         // Multiple patterns must all be present
@@ -600,7 +619,7 @@ int execute_heuristic(const json& heuristic, const PrinterHardwareData& hardware
             std::string pattern_lower = helix::text_io::to_lower(pattern);
             if (kinematics_lower.find(pattern_lower) != std::string::npos) {
                 spdlog::debug("[PrinterDetector] Excluded by kinematics '{}'", pattern);
-                return HEURISTIC_EXCLUDE;
+                return kHeuristicExclude;
             }
         }
     } else if (type == "object_exists") {
@@ -735,7 +754,7 @@ int execute_heuristic(const json& heuristic, const PrinterHardwareData& hardware
                 if (macro_lower.find(pattern_lower) != std::string::npos) {
                     if (type == "macro_exclude") {
                         spdlog::debug("[PrinterDetector] Excluded by macro '{}' ", macro_name);
-                        return HEURISTIC_EXCLUDE;
+                        return kHeuristicExclude;
                     }
                     spdlog::debug("[PrinterDetector] Matched macro '{}' (confidence: {})",
                                   macro_name, confidence);
@@ -778,7 +797,7 @@ PrinterDetectionResult execute_printer_heuristics(const json& printer,
         declares_kinematics = declares_kinematics || is_kinematics;
 
         int confidence = execute_heuristic(heuristic, hardware);
-        if (confidence == HEURISTIC_EXCLUDE) {
+        if (confidence == kHeuristicExclude) {
             spdlog::debug("[PrinterDetector] {} excluded by heuristic: {}", printer_name,
                           helix::json_util::safe_string(heuristic, "reason"));
             return {"", 0, "", 0};
@@ -832,8 +851,8 @@ PrinterDetectionResult execute_printer_heuristics(const json& printer,
 
     // Combined scoring: base + bonus for additional matches
     // 3 points per extra match, capped at 12 (4 extra matches worth)
-    constexpr int BONUS_PER_EXTRA_MATCH = 3;
-    constexpr int MAX_BONUS = 12;
+    constexpr int kBonusPerExtraMatch = 3;
+    constexpr int kMaxBonus = 12;
 
     int base_confidence = identifying->confidence;
     // The bonus stacks identifying evidence only. Corroborating evidence
@@ -843,7 +862,7 @@ PrinterDetectionResult execute_printer_heuristics(const json& printer,
     // tiebreak in another form.
     const int identifying_matches = static_cast<int>(std::count_if(
         matches.begin(), matches.end(), [](const auto& m) { return !m.corroborating; }));
-    const int bonus = std::min((identifying_matches - 1) * BONUS_PER_EXTRA_MATCH, MAX_BONUS);
+    const int bonus = std::min((identifying_matches - 1) * kBonusPerExtraMatch, kMaxBonus);
     int combined = std::min(base_confidence + bonus, 100);
 
     // A separator volume names the model inside a family the entry's other
@@ -856,7 +875,7 @@ PrinterDetectionResult execute_printer_heuristics(const json& printer,
     // did not earn (prestonbrown/helixscreen#1606). A window leading as
     // identifying evidence already carries its weight and adds nothing here.
     int separation = 0;
-    if (!identifying->volume_based && base_confidence >= PrinterDetector::AUTOSAVE_MIN_CONFIDENCE) {
+    if (!identifying->volume_based && base_confidence >= PrinterDetector::kAutosaveMinConfidence) {
         for (const auto& m : matches) {
             if (m.separator) {
                 separation = m.confidence;
@@ -995,7 +1014,7 @@ PrinterDetectionResult PrinterDetector::detect(const PrinterHardwareData& hardwa
             for (auto it = candidates.begin() + 1; it != candidates.end(); ++it) {
                 const bool separated =
                     best_match.lead_over(it->result.confidence, it->result.uncapped_confidence) >=
-                    DETECT_MIN_MARGIN;
+                    kDetectMinMargin;
                 const bool same_machine =
                     std::any_of(listed.begin(), listed.end(),
                                 [&](const ScoredCandidate* c) { return it->same_outcome_as(*c); });
@@ -1050,10 +1069,10 @@ const json* printer_member(const std::string& printer_name, const char* field) {
     return printer ? helix::json_util::find_member(*printer, field) : nullptr;
 }
 
-/// A boolean field of the entry named `printer_name`, false when either is absent.
-bool printer_flag(const std::string& printer_name, const char* field) {
+/// A boolean field of the entry named `printer_name`, @p fallback when either is absent.
+bool printer_flag(const std::string& printer_name, const char* field, bool fallback = false) {
     const json* printer = find_printer_entry(printer_name);
-    return printer != nullptr && helix::json_util::safe_bool(*printer, field, false);
+    return printer ? helix::json_util::safe_bool(*printer, field, fallback) : fallback;
 }
 
 /// One string field of the entry named `printer_name`, or "" when either is absent.
@@ -1070,7 +1089,19 @@ std::string printer_field(const std::string& printer_name, const char* field) {
 // ============================================================================
 
 std::string PrinterDetector::get_image_for_printer(const std::string& printer_name) {
-    return printer_field(printer_name, "image");
+    return get_image_for_printer(printer_name, helix::printer_images::HardwareFacts{});
+}
+
+std::string
+PrinterDetector::get_image_for_printer(const std::string& printer_name,
+                                       const helix::printer_images::HardwareFacts& facts) {
+    const json* printer = find_printer_entry(printer_name);
+    std::string image = printer ? helix::printer_images::select_image(*printer, facts) : "";
+    spdlog::debug("[PrinterDetector] image for '{}' ({} filament system(s), enclosure top {}, "
+                  "chamber heater {}): '{}'",
+                  printer_name, facts.filament_systems.size(), facts.enclosure_top,
+                  facts.has_chamber_heater, image);
+    return image;
 }
 
 namespace {
@@ -1217,11 +1248,11 @@ std::string PrinterDetector::apply_preset_with_variants(helix::Config* config,
     // Match the variant suffix exactly (preset name ends with `_forgex`) rather
     // than substring — a future preset whose name happens to contain "_forgex"
     // for unrelated reasons should not silently disable ZMOD detection.
-    static constexpr const char* FORGE_X_SUFFIX = "_forgex";
-    constexpr size_t FORGE_X_LEN = 7; // strlen("_forgex")
+    static constexpr const char* kForgeXSuffix = "_forgex";
+    constexpr size_t kForgeXLen = 7; // strlen("_forgex")
     bool preset_is_forgex =
-        preset.size() >= FORGE_X_LEN &&
-        preset.compare(preset.size() - FORGE_X_LEN, FORGE_X_LEN, FORGE_X_SUFFIX) == 0;
+        preset.size() >= kForgeXLen &&
+        preset.compare(preset.size() - kForgeXLen, kForgeXLen, kForgeXSuffix) == 0;
     auto has_object = [&objects](const char* name) {
         return std::find(objects.begin(), objects.end(), name) != objects.end();
     };
@@ -1254,6 +1285,7 @@ std::string PrinterDetector::apply_preset_with_variants(helix::Config* config,
     }
 
     config->set_preset(applied);
+    helix::reload_sensor_roles_after_preset();
     return applied;
 }
 
@@ -1579,6 +1611,14 @@ bool PrinterDetector::hide_manual_z_calibration(const std::string& printer_name)
     return printer_flag(printer_name, "hide_manual_z_calibration");
 }
 
+bool PrinterDetector::z_offset_persists(const std::string& printer_name) {
+    return printer_flag(printer_name, "z_offset_persists", true);
+}
+
+bool PrinterDetector::tool_change_resets_z_offset(const std::string& printer_name) {
+    return printer_flag(printer_name, "tool_change_resets_z_offset");
+}
+
 // ============================================================================
 // Probe Type Lookup
 // ============================================================================
@@ -1587,9 +1627,34 @@ std::string PrinterDetector::get_probe_type(const std::string& printer_name) {
     return printer_field(printer_name, "probe_type");
 }
 
-std::string PrinterDetector::get_bed_mesh_calibrate_gcode(const std::string& printer_name) {
+namespace {
+
+/// `calibration.<key>` as a string, empty when the entry, its calibration object
+/// or the key is absent.
+std::string calibration_string(const std::string& printer_name, const char* key) {
     const json* calibration = printer_member(printer_name, "calibration");
-    return calibration ? helix::json_util::safe_string(*calibration, "bed_mesh_gcode") : "";
+    return calibration ? helix::json_util::safe_string(*calibration, key) : "";
+}
+
+/// `calibration.<key>` is literally true.
+bool calibration_flag(const std::string& printer_name, const char* key) {
+    const json* calibration = printer_member(printer_name, "calibration");
+    const json* flag = calibration ? helix::json_util::find_member(*calibration, key) : nullptr;
+    return flag != nullptr && flag->is_boolean() && flag->get<bool>();
+}
+
+} // namespace
+
+std::string PrinterDetector::get_bed_mesh_calibrate_gcode(const std::string& printer_name) {
+    return calibration_string(printer_name, "bed_mesh_gcode");
+}
+
+std::string PrinterDetector::get_screws_tilt_gcode(const std::string& printer_name) {
+    return calibration_string(printer_name, "screws_tilt_gcode");
+}
+
+bool PrinterDetector::get_screws_tilt_self_prepares(const std::string& printer_name) {
+    return calibration_flag(printer_name, "screws_tilt_self_prepares");
 }
 
 // ============================================================================
@@ -1597,11 +1662,7 @@ std::string PrinterDetector::get_bed_mesh_calibrate_gcode(const std::string& pri
 // ============================================================================
 
 bool PrinterDetector::get_bed_mesh_self_prepares(const std::string& printer_name) {
-    const json* calibration = printer_member(printer_name, "calibration");
-    const json* flag = calibration
-                           ? helix::json_util::find_member(*calibration, "bed_mesh_self_prepares")
-                           : nullptr;
-    return flag != nullptr && flag->is_boolean() && flag->get<bool>();
+    return calibration_flag(printer_name, "bed_mesh_self_prepares");
 }
 
 std::string PrinterDetector::get_print_start_profile(const std::string& printer_name) {
@@ -1643,7 +1704,7 @@ std::map<std::string, float> PrinterDetector::get_thermal_rates(const std::strin
     if (configured == nullptr || !configured->is_object()) {
         return rates;
     }
-    const auto& persisted = ThermalRateManager::PERSISTED_HEATERS;
+    const auto& persisted = ThermalRateManager::kPersistedHeaters;
     for (const auto& [heater, rate] : configured->items()) {
         if (std::find(persisted.begin(), persisted.end(), heater) == persisted.end()) {
             spdlog::warn("[PrinterDetector] Ignoring thermal rate for '{}' on '{}': not a heater "
@@ -1672,6 +1733,26 @@ std::string PrinterDetector::get_toolhead_style(const std::string& printer_name)
 
 bool PrinterDetector::is_enclosed(const std::string& printer_name) {
     return printer_flag(printer_name, "enclosed");
+}
+
+helix::calibration::BeltTensionerKind
+PrinterDetector::get_belt_tensioner(const std::string& printer_name) {
+    using helix::calibration::BeltTensionerKind;
+    const std::string kind = printer_field(printer_name, "belt_tensioner");
+    if (kind == "screw")
+        return BeltTensionerKind::SCREW;
+    if (kind == "spring")
+        return BeltTensionerKind::SPRING;
+    return BeltTensionerKind::UNKNOWN;
+}
+
+bool PrinterDetector::klipper_hides_dot_dirs(const std::string& printer_name) {
+    return printer_flag(printer_name, "klipper_hides_dot_dirs");
+}
+
+std::optional<helix::PlrDbBlock> PrinterDetector::get_plr_block(const std::string& printer_name) {
+    const json* printer = find_printer_entry(printer_name);
+    return printer ? helix::plr_parse_db_block(*printer) : std::nullopt;
 }
 
 // ============================================================================
@@ -1805,7 +1886,9 @@ bool PrinterDetector::auto_detect_and_save(const helix::PrinterDiscovery& discov
         // installs without this hook).
         std::string saved_preset = get_preset_for_name(saved_type);
         if (!saved_preset.empty()) {
-            config->apply_preset_file(saved_preset);
+            if (config->apply_preset_file(saved_preset)) {
+                helix::reload_sensor_roles_after_preset();
+            }
         }
         // Apply the saved type to PrinterState for the same reason the
         // detected-type path does: it is what resolves the pre-print option
@@ -1828,7 +1911,7 @@ bool PrinterDetector::auto_detect_and_save(const helix::PrinterDiscovery& discov
                      "runner-up '{}' at {}%, margin {}, {} tied; need >={}% and margin >={})",
                      result.type_name, result.confidence, result.runner_up_type_name,
                      result.runner_up_confidence, result.margin(), result.tied_count,
-                     AUTOSAVE_MIN_CONFIDENCE, DETECT_MIN_MARGIN);
+                     kAutosaveMinConfidence, kDetectMinMargin);
 
         // Handing an ambiguous field back to the user assumes a step that asks.
         // A platform package seeds its preset into settings.json, and the wizard
@@ -1947,22 +2030,10 @@ nlohmann::json database_rules() {
 
 } // namespace helix::probe_prep
 
-std::string PrinterDetector::screws_tilt_direction_override() {
-    Config* config = Config::get_instance();
-    std::string printer_name =
-        config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
-    if (printer_name.empty()) {
-        return "";
-    }
-    const std::string value =
-        helix::text_io::to_lower(printer_field(printer_name, "screws_tilt_direction"));
-    return (value == "cw" || value == "ccw") ? value : "";
-}
-
 bool PrinterDetector::meets_autosave_threshold(const PrinterDetectionResult& result) {
     if (result.type_name.empty() || !result.detected())
         return false;
-    return result.confidence >= AUTOSAVE_MIN_CONFIDENCE && !result.ambiguous();
+    return result.confidence >= kAutosaveMinConfidence && !result.ambiguous();
 }
 
 const char* PrinterDetector::mismatch_decision_name(MismatchDecision decision) {
@@ -2032,12 +2103,12 @@ PrinterDetector::classify_type_mismatch(const std::string& saved_type,
     // distinguishable in the log from a real candidate that scored short.
     if (detected_type.empty())
         return MismatchDecision::NoDetection;
-    if (detected_confidence < MISMATCH_MIN_CONFIDENCE)
+    if (detected_confidence < kMismatchMinConfidence)
         return MismatchDecision::ConfidenceTooLow;
     // Ordered after the confidence test and before everything else: "scored 92
     // and so did four other models" is a different diagnosis from "scored 68",
     // and a debug bundle has to be able to tell them apart.
-    if (detected_margin < DETECT_MIN_MARGIN)
+    if (detected_margin < kDetectMinMargin)
         return MismatchDecision::Ambiguous;
     if (detected_type == saved_type)
         return MismatchDecision::MatchesSavedType;
@@ -2057,4 +2128,74 @@ PrinterDetector::classify_type_mismatch(const std::string& saved_type,
     }
     return classify_type_mismatch(saved_type, detected.type_name, detected.confidence, flag_value,
                                   detected.margin());
+}
+
+PrinterDetector::TypeRelationResult
+PrinterDetector::relate_types(const std::vector<VariantEntry>& entries,
+                              const std::string& saved_type, const std::string& detected_type) {
+    auto by_name = [&](const std::string& name) -> const VariantEntry* {
+        for (const auto& entry : entries) {
+            if (entry.name == name) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    };
+    // The base entry's name for a usable variant, "" for a base entry or a
+    // variant whose link does not resolve or that names nothing to show.
+    auto base_of = [&](const VariantEntry* entry) -> std::string {
+        if (entry == nullptr || entry->variant_of.empty() || entry->variant_label.empty()) {
+            return {};
+        }
+        for (const auto& candidate : entries) {
+            if (candidate.id == entry->variant_of && candidate.variant_of.empty()) {
+                return candidate.name;
+            }
+        }
+        return {};
+    };
+
+    TypeRelationResult result;
+    const VariantEntry* saved = by_name(saved_type);
+    const VariantEntry* detected = by_name(detected_type);
+    if (saved == nullptr || detected == nullptr || saved == detected) {
+        return result;
+    }
+    const std::string saved_base = base_of(saved);
+    const std::string detected_base = base_of(detected);
+
+    if (saved_base.empty() && detected_base == saved->name) {
+        result.relation = TypeRelation::DetectedVariant;
+        result.base = saved->name;
+    } else if (detected_base.empty() && saved_base == detected->name) {
+        result.relation = TypeRelation::SavedVariant;
+        result.base = detected->name;
+    } else if (!saved_base.empty() && saved_base == detected_base) {
+        result.relation = TypeRelation::SiblingVariants;
+        result.base = saved_base;
+    } else {
+        return result;
+    }
+    if (!saved_base.empty()) {
+        result.saved_label = saved->variant_label;
+    }
+    if (!detected_base.empty()) {
+        result.detected_label = detected->variant_label;
+    }
+    return result;
+}
+
+PrinterDetector::TypeRelationResult
+PrinterDetector::relate_types(const std::string& saved_type, const std::string& detected_type) {
+    std::vector<VariantEntry> entries;
+    if (const json* printers = database_printers()) {
+        entries.reserve(printers->size());
+        for (const auto& printer : *printers) {
+            entries.push_back({helix::json_util::safe_string(printer, "id"),
+                               helix::json_util::safe_string(printer, "name"),
+                               helix::json_util::safe_string(printer, "variant_of"),
+                               helix::json_util::safe_string(printer, "variant_label")});
+        }
+    }
+    return relate_types(entries, saved_type, detected_type);
 }

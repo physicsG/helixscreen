@@ -20,14 +20,14 @@ TEST_CASE("aggregator starts empty and uncommitted", "[belt_tension][pluck_aggre
 
 TEST_CASE("aggregator does not commit before the threshold", "[belt_tension][pluck_aggregate]") {
     PluckAggregator agg;
-    for (size_t i = 1; i < PluckAggregator::COMMIT_AFTER; ++i) {
+    for (size_t i = 1; i < PluckAggregator::kCommitAfter; ++i) {
         agg.add(86.0f);
         INFO("after " << i << " plucks");
         CHECK(agg.count() == i);
         CHECK_FALSE(agg.committed());
     }
     agg.add(86.0f);
-    CHECK(agg.count() == PluckAggregator::COMMIT_AFTER);
+    CHECK(agg.count() == PluckAggregator::kCommitAfter);
     CHECK(agg.committed());
 }
 

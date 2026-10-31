@@ -24,10 +24,10 @@ using helix::PathSegment;
 namespace {
 
 const lv_color_t IDLE = lv_color_hex(0x555555);
-const lv_color_t BG = lv_color_hex(0x202020);
-const lv_color_t ACCENT = lv_color_hex(0x3399FF);
+const lv_color_t kBg = lv_color_hex(0x202020);
+const lv_color_t kAccent = lv_color_hex(0x3399FF);
 constexpr uint32_t ACTIVE = 0xE53935;
-constexpr uint32_t OWL = 0x1E88E5;
+constexpr uint32_t kOwl = 0x1E88E5;
 constexpr lv_area_t AREA = {0, 0, 399, 399};
 
 // Two HUB units (a Box Turtle and a Night Owl) on one toolhead, both with hub
@@ -49,8 +49,8 @@ std::unique_ptr<SystemPathData> multi() {
     d->filament_segment = PathSegment::NOZZLE;
     d->unit_hub_triggered[0] = true;
     d->color_idle = IDLE;
-    d->color_bg = BG;
-    d->color_accent = ACCENT;
+    d->color_bg = kBg;
+    d->color_accent = kAccent;
     d->color_error = lv_color_hex(0xFF0000);
     d->color_hub_bg = lv_color_hex(0x333333);
     return d;
@@ -116,6 +116,19 @@ TEST_CASE("Overview plan: each unit's route is continuous with a clamp band on i
         CHECK_FALSE(plan.routes[1].style[i].filled);
 }
 
+TEST_CASE("Overview plan: a unit stem placed past the canvas edge is drawn on the canvas",
+          "[system_path][filament_path]") {
+    // A card laid out wider than the canvas reports a center the canvas cannot reach.
+    auto d = multi();
+    d->unit_x_positions[1] = 1000;
+    const PathPlan& plan = plan_of(*d);
+    const SysLayout L = compute_sys_layout(*d, AREA);
+    REQUIRE(plan.route_count == 2);
+    const pg::PathPoint stem = seg_start(plan.routes[1].path.segs[0]);
+    CHECK(stem.x <= (float)(L.x_off + L.width));
+    CHECK(stem.x > (float)d->unit_x_positions[0]);
+}
+
 TEST_CASE("Overview layout: the toolheads stand on their glyph-bottom line",
           "[system_path][filament_path]") {
     auto d = multi();
@@ -145,17 +158,17 @@ TEST_CASE("Overview plan: hub bands take the detail view's four states",
     SECTION("Loaded: triggered on an inactive unit, in its loaded lane's color") {
         d->unit_hub_triggered[1] = true;
         d->unit_lane_segment[1] = PathSegment::OUTPUT;
-        d->unit_lane_color[1] = OWL;
+        d->unit_lane_color[1] = kOwl;
         const PathPlan& plan = plan_of(*d);
         const SensorBand* band = stem_band(plan, 300);
         REQUIRE(band != nullptr);
         CHECK(band->state == BandState::Loaded);
-        CHECK(lv_color_eq(band->fill, lv_color_hex(OWL)));
+        CHECK(lv_color_eq(band->fill, lv_color_hex(kOwl)));
         // Its tube is filled down to the combiner, in the lane color, plain walls.
         const Route& r = plan.routes[1];
         CHECK(r.style[0].filled);
         CHECK(r.style[0].wall == TubeWall::Plain);
-        CHECK(lv_color_eq(r.style[r.path.count - 1].bore, lv_color_hex(OWL)));
+        CHECK(lv_color_eq(r.style[r.path.count - 1].bore, lv_color_hex(kOwl)));
     }
     SECTION("Loaded with no lane reporting a color takes the wall color") {
         d->unit_hub_triggered[1] = true;
@@ -207,7 +220,7 @@ TEST_CASE("Overview plan: an active bypass joins the trunk at the merge",
     auto d = multi();
     d->has_bypass = true;
     d->bypass_active = true;
-    d->bypass_color = OWL;
+    d->bypass_color = kOwl;
     d->active_unit = -1;
     d->unit_hub_triggered[0] = false;
     const PathPlan& plan = plan_of(*d);
@@ -223,7 +236,55 @@ TEST_CASE("Overview plan: an active bypass joins the trunk at the merge",
     CHECK(near(merge, (float)L.center_x, merge.y));
     CHECK(near(seg_end(bypass.path.segs[bypass.path.count - 1]), (float)L.center_x, 326, 0.5f));
     CHECK(bypass.style[bypass.path.count - 1].filled);
-    CHECK(lv_color_eq(bypass.style[bypass.path.count - 1].bore, lv_color_hex(OWL)));
+    CHECK(lv_color_eq(bypass.style[bypass.path.count - 1].bore, lv_color_hex(kOwl)));
+}
+
+TEST_CASE("Overview plan: a span too short to clamp into yields its midpoint",
+          "[system_path][filament_path]") {
+    CHECK(clamp_span(10, 5, 20) == 10);
+    CHECK(clamp_span(10, 15, 20) == 15);
+    CHECK(clamp_span(10, 25, 20) == 20);
+    CHECK(clamp_span(30, 0, 10) == 20);
+    CHECK(clamp_span(30, 50, 10) == 20);
+}
+
+TEST_CASE("Overview plan: a bypass spool on a canvas too narrow for it stays centred",
+          "[system_path][filament_path]") {
+    auto d = multi();
+    d->unit_count = 1;
+    d->unit_x_positions[0] = 20;
+    d->has_bypass = true;
+    constexpr lv_area_t kNarrow = {0, 0, 39, 399};
+    const BypassGeometry g = compute_bypass_geometry(*d, kNarrow);
+    CHECK(g.bypass_x == 20);
+}
+
+TEST_CASE("Overview plan: tool routes on a short canvas stay between their ends",
+          "[system_path][filament_path]") {
+    auto d = multi();
+    d->unit_count = 1;
+    d->unit_x_positions[0] = 200;
+    d->unit_topology[0] = 2;
+    d->unit_tool_count[0] = 3;
+    d->total_tools = 3;
+    d->active_tool = 1;
+    constexpr lv_area_t kShort = {0, 0, 399, 59};
+    PathPlan plan;
+    OverviewBoxes boxes;
+    plan_overview(*d, compute_sys_layout(*d, kShort), plan, boxes);
+    REQUIRE(plan.route_count == 3);
+    for (int i = 0; i < plan.route_count; i++) {
+        CAPTURE(i);
+        const Route& r = plan.routes[i];
+        CHECK(contiguous(r.path));
+        const float top = seg_start(r.path.segs[0]).y;
+        const float bottom = seg_end(r.path.segs[r.path.count - 1]).y;
+        for (int k = 0; k < r.path.count; k++) {
+            CAPTURE(k);
+            CHECK(seg_end(r.path.segs[k]).y >= top - 0.5f);
+            CHECK(seg_end(r.path.segs[k]).y <= bottom + 0.5f);
+        }
+    }
 }
 
 TEST_CASE("Overview plan: toolchanger tools each get a continuous route to their nozzle",
@@ -276,12 +337,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "Overview canvas: the error setter reaches the
     ui_system_path_canvas_set_error_segment(canvas, static_cast<int>(PathSegment::OUTPUT));
     CHECK(stem_band(plan_of(*data), 100)->state == BandState::Error);
 
-    ui_system_path_canvas_set_unit_lane(canvas, 1, static_cast<int>(PathSegment::OUTPUT), OWL);
+    ui_system_path_canvas_set_unit_lane(canvas, 1, static_cast<int>(PathSegment::OUTPUT), kOwl);
     ui_system_path_canvas_set_unit_hub_sensor(canvas, 1, true, true);
     const SensorBand* owl = stem_band(plan_of(*data), 300);
     REQUIRE(owl != nullptr);
     CHECK(owl->state == BandState::Loaded);
-    CHECK(lv_color_eq(owl->fill, lv_color_hex(OWL)));
+    CHECK(lv_color_eq(owl->fill, lv_color_hex(kOwl)));
 
     lv_obj_delete(canvas);
 }
@@ -543,7 +604,7 @@ std::unique_ptr<SystemPathData> scrolled_off_fleet(int count, int first_group_si
     d->active_unit = -1;
     d->filament_loaded = false;
     d->filament_segment = PathSegment::NONE;
-    for (int u = 0; u < count && u < SystemPathData::MAX_UNITS; u++) {
+    for (int u = 0; u < count && u < SystemPathData::kMaxUnits; u++) {
         const bool first = u < first_group_size;
         d->unit_x_positions[u] = 1000 + 150 * u;
         d->unit_topology[u] = 1;
@@ -567,7 +628,7 @@ TEST_CASE("Overview plan: a hub group with every card scrolled off still draws i
     CAPTURE(count, split);
     auto d = scrolled_off_fleet(count, split);
     // Every unit has a slot in the canvas's per-unit arrays.
-    REQUIRE(count <= SystemPathData::MAX_UNITS);
+    REQUIRE(count <= SystemPathData::kMaxUnits);
     const auto p = plan_boxes(*d);
     REQUIRE(p->plan.dropped == 0);
 

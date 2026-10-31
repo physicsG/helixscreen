@@ -7,7 +7,7 @@
 namespace helix {
 
 // Friend access to ToolSwitcherWidget's print gate. Both members are reachable
-// in production only by tapping a pill on an attached home-panel widget, which
+// in production only by tapping the tile on an attached home-panel widget, which
 // needs a mounted XML tree, a sized grid cell and a live touch event — none of
 // which say anything useful about the policy being asserted.
 //
@@ -30,16 +30,43 @@ class ToolSwitcherTestAccess {
         widget.handle_tool_selected(tool_index);
     }
 
-    /// The pill list refresh_print_gating() greys. Writable so a test can hand
-    /// it plain buttons instead of standing up a mounted XML tree.
-    static std::vector<lv_obj_t*>& pills(ToolSwitcherWidget& widget) {
-        return widget.pill_buttons_;
+    /// The verdict the widget last published.
+    static std::string head_temp_text(const ToolSwitcherWidget& widget, int head) {
+        return widget.head_temp_text(head);
+    }
+    static bool head_hot(const ToolSwitcherWidget& widget, int head) {
+        return widget.head_hot(head);
     }
 
-    /// Compact-mode label refresh_print_gating() greys. Nullable read so a
-    /// teardown test can assert it was dropped alongside the pills.
-    static lv_obj_t* compact_label(const ToolSwitcherWidget& widget) {
-        return widget.compact_label_;
+    static ToolSwitcherLayout layout(const ToolSwitcherWidget& widget) {
+        return widget.layout_;
+    }
+
+    /// The tile the widget is attached to, or null once it is gone.
+    static lv_obj_t* tile_root(const ToolSwitcherWidget& widget) {
+        return widget.widget_obj_;
+    }
+
+    /// The funnel every Park tap reaches.
+    static void park(ToolSwitcherWidget& widget) {
+        widget.handle_park_requested();
+    }
+
+    /// Raise the compact form's tool picker, as a tap on the compact tile does.
+    static void show_picker(ToolSwitcherWidget& widget) {
+        widget.show_tool_picker();
+    }
+
+    static void hide_picker(ToolSwitcherWidget& widget) {
+        widget.picker_.hide();
+    }
+
+    /// The picker's tool list, or null while the picker is hidden.
+    static lv_obj_t* picker_list(ToolSwitcherWidget& widget) {
+        if (!widget.picker_.is_visible() || !widget.parent_screen_) {
+            return nullptr;
+        }
+        return lv_obj_find_by_name(widget.parent_screen_, "tool_list");
     }
 };
 

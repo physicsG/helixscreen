@@ -26,8 +26,32 @@
     <px name="ams_right_col_w_micro" value="145"/>
     <px name="ams_right_col_w_tiny" value="145"/>
     <px name="ams_right_col_w_small" value="200"/>
-    <px name="ams_right_col_w_medium" value="240"/>
-    <px name="ams_right_col_w_large" value="240"/>
+    <px name="ams_right_col_w_medium" value="280"/>
+    <px name="ams_right_col_w_large" value="300"/>
+    <px name="ams_right_col_w_xlarge" value="330"/>
+
+    <!-- The sidebar action buttons' label from medium up: medium's body face at
+         every size, since the column grows less than the type does, and the
+         side padding the longest label leaves ("Configurações" at medium). -->
+    <string name="ams_action_label_font_micro" value="noto_sans_12"/>
+    <string name="ams_action_label_font_tiny" value="noto_sans_12"/>
+    <string name="ams_action_label_font_small" value="noto_sans_14"/>
+    <string name="ams_action_label_font_medium" value="noto_sans_18"/>
+    <string name="ams_action_label_font_large" value="noto_sans_18"/>
+    <string name="ams_action_label_font_xlarge" value="noto_sans_18"/>
+    <string name="ams_action_label_font_xxlarge" value="noto_sans_24"/>
+    <px name="ams_action_pad_hor_small" value="4"/>
+    <px name="ams_action_pad_hor_medium" value="1"/>
+    <px name="ams_action_pad_hor_large" value="6"/>
+    <px name="ams_action_pad_hor_xlarge" value="8"/>
+
+    <!-- A meter tile's reading on the loaded card: bold, one step above the
+         caption under it (font_small's size). -->
+    <string name="ams_tile_value_font_small" value="noto_sans_bold_14"/>
+    <string name="ams_tile_value_font_medium" value="noto_sans_bold_16"/>
+    <string name="ams_tile_value_font_large" value="noto_sans_bold_18"/>
+    <string name="ams_tile_value_font_xlarge" value="noto_sans_bold_20"/>
+    <string name="ams_tile_value_font_xxlarge" value="noto_sans_bold_24"/>
 
     <!-- ===================================================================== -->
     <!-- Unit paging (the overview's unit view, ams_overview_panel.xml)         -->
@@ -45,17 +69,59 @@
     <px name="ams_page_dot_size_medium" value="10"/>
     <px name="ams_page_dot_size_large" value="12"/>
 
-    <!-- Least width of the environment chip beside a spool box: its passive reading (icon
-         and "30C" over icon and "25%") at each size. The drying readout is narrower, and
-         without this floor the box beside it moves by the difference as the dryer starts
-         and stops, or as a screen pages from one unit to the next. -->
-    <px name="ams_env_chip_min_w_micro" value="42"/>
-    <px name="ams_env_chip_min_w_tiny" value="52"/>
-    <px name="ams_env_chip_min_w_small" value="58"/>
-    <px name="ams_env_chip_min_w_medium" value="68"/>
-    <px name="ams_env_chip_min_w_large" value="78"/>
-    <px name="ams_env_chip_min_w_xlarge" value="90"/>
-    <px name="ams_env_chip_min_w_xxlarge" value="110"/>
+    <!-- Largest the loaded strip's clog arc grows: 18% of the strip's width up to
+         this, so a full-width portrait strip keeps a small arc. At or above the
+         landscape strip's own 18% at each size. -->
+    <px name="ams_clog_arc_max_micro" value="24"/>
+    <px name="ams_clog_arc_max_tiny" value="24"/>
+    <px name="ams_clog_arc_max_small" value="40"/>
+    <px name="ams_clog_arc_max_medium" value="40"/>
+    <px name="ams_clog_arc_max_large" value="48"/>
+
+    <!-- Portrait AMS panels: the path canvas's height under the spool box. Capped so
+         the diagram ends at the toolhead and the rest of the screen goes to the
+         sidebar below it. Keyed on the narrow axis: micro 272x480, tiny 320x480,
+         medium 480x800, large 600x1024. -->
+    <px name="ams_portrait_path_h_micro" value="125"/>
+    <px name="ams_portrait_path_h_tiny" value="125"/>
+    <px name="ams_portrait_path_h_small" value="200"/>
+    <px name="ams_portrait_path_h_medium" value="166"/>
+    <px name="ams_portrait_path_h_large" value="300"/>
+
+    <!-- One line of font_small: the loaded strip's position and name lines. -->
+    <px name="ams_loaded_name_line_h_micro" value="15"/>
+    <px name="ams_loaded_name_line_h_tiny" value="15"/>
+    <px name="ams_loaded_name_line_h_small" value="18"/>
+    <px name="ams_loaded_name_line_h_medium" value="22"/>
+    <px name="ams_loaded_name_line_h_large" value="24"/>
+    <px name="ams_loaded_name_line_h_xlarge" value="28"/>
+    <px name="ams_loaded_name_line_h_xxlarge" value="36"/>
+
+    <!-- One line of font_body_bold: the loaded strip's position line from medium up.
+         _small is only the required base tier; nothing below medium shows the line. -->
+    <px name="ams_loaded_title_line_h_small" value="20"/>
+    <px name="ams_loaded_title_line_h_medium" value="25"/>
+    <px name="ams_loaded_title_line_h_large" value="28"/>
+    <px name="ams_loaded_title_line_h_xlarge" value="33"/>
+    <px name="ams_loaded_title_line_h_xxlarge" value="44"/>
+
+    <!-- The loaded strip's spool, from medium up: about two text lines tall.
+         _small is only the required base tier; below medium the spool is hidden. -->
+    <px name="ams_loaded_spool_size_small" value="36"/>
+    <px name="ams_loaded_spool_size_medium" value="44"/>
+    <px name="ams_loaded_spool_size_large" value="48"/>
+    <px name="ams_loaded_spool_size_xlarge" value="56"/>
+    <px name="ams_loaded_spool_size_xxlarge" value="72"/>
+
+    <!-- One line of font_heading: the AMS headers' system / unit name, which
+         ellipsizes on that one line. -->
+    <px name="ams_header_name_line_h_micro" value="19"/>
+    <px name="ams_header_name_line_h_tiny" value="22"/>
+    <px name="ams_header_name_line_h_small" value="27"/>
+    <px name="ams_header_name_line_h_medium" value="34"/>
+    <px name="ams_header_name_line_h_large" value="38"/>
+    <px name="ams_header_name_line_h_xlarge" value="44"/>
+    <px name="ams_header_name_line_h_xxlarge" value="54"/>
 
     <!-- Unit / system logo in the AMS screens' headers -->
     <px name="ams_header_logo_size_small" value="20"/>

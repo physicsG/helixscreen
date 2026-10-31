@@ -12,6 +12,7 @@
 #include "grid_layout.h"
 #include "i_moonraker_api.h"
 #include "panel_widget_registry.h"
+#include "src/ui/panel_widgets/content_chrome.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -25,7 +26,7 @@ namespace {
 /// server.gcode_store rows asked for. More than MAX_LINES because filtering
 /// runs before trimming, and a chatty printer's temperature reports would
 /// otherwise crowd the real lines out.
-constexpr int FETCH_COUNT = 100;
+constexpr int kFetchCount = 100;
 
 const lv_font_t* row_font() {
     const lv_font_t* font = theme_manager_get_font("font_mono");
@@ -115,7 +116,7 @@ void GCodeConsoleWidget::on_size_changed(int colspan, int rowspan, int width_px,
     sizing_.measure_and_publish(width_px, height_px);
 
     const lv_font_t* font = row_font();
-    const int line_h = font ? static_cast<int>(lv_font_get_line_height(font)) : 0;
+    const int line_h = line_px(font);
     // One extra so a partial row fills the top edge instead of leaving a gap.
     max_rows_ = line_h > 0 ? static_cast<size_t>(height_px / line_h) + 1 : MAX_LINES;
 
@@ -187,7 +188,7 @@ void GCodeConsoleWidget::fetch_history() {
         return;
     }
     api->get_gcode_store(
-        FETCH_COUNT,
+        kFetchCount,
         [this, token = lifetime_.token()](const std::vector<GcodeStoreEntry>& stored) {
             std::vector<Entry> entries;
             entries.reserve(stored.size());
@@ -286,7 +287,7 @@ void GCodeConsoleWidget::clicked_cb(lv_event_t* e) {
     // Both faces share this callback, so the owner comes from the tile root
     // rather than from whichever child was tapped.
     lv_obj_t* obj = lv_event_get_current_target_obj(e);
-    while (obj && !lv_obj_has_flag(obj, PANEL_WIDGET_TILE_FLAG)) {
+    while (obj && !lv_obj_has_flag(obj, kPanelWidgetTileFlag)) {
         obj = lv_obj_get_parent(obj);
     }
     auto* self = obj ? static_cast<GCodeConsoleWidget*>(lv_obj_get_user_data(obj)) : nullptr;

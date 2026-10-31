@@ -49,7 +49,7 @@ void BackgroundGhostBuilder::start(GCodeStreamingController* controller,
     spdlog::info("[GhostBuilder] Starting background ghost build for {} layers",
                  total_layers_.load());
 
-    worker_ = helix::make_thread(&BackgroundGhostBuilder::worker_thread, this);
+    worker_ = helix::make_background_thread(&BackgroundGhostBuilder::worker_thread, this);
 }
 
 void BackgroundGhostBuilder::cancel() {
@@ -106,7 +106,7 @@ void BackgroundGhostBuilder::worker_thread() {
         auto last_ns = last_user_request_ns_.load();
         auto last_request =
             std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(last_ns));
-        while ((now - last_request) < YIELD_DURATION && !cancelled_.load()) {
+        while ((now - last_request) < kYieldDuration && !cancelled_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             now = std::chrono::steady_clock::now();
             last_ns = last_user_request_ns_.load();
@@ -151,7 +151,7 @@ const LayerIndexStats GCodeStreamingController::empty_stats_{};
 // =============================================================================
 
 GCodeStreamingController::GCodeStreamingController()
-    : cache_(GCodeLayerCache::DEFAULT_BUDGET_NORMAL) {
+    : cache_(GCodeLayerCache::kDefaultBudgetNormal) {
     // Select cache budget tier based on total system RAM
     auto mem = get_system_memory_info();
     const GCodeLayerCache::BudgetTier tier =
@@ -161,7 +161,7 @@ GCodeStreamingController::GCodeStreamingController()
 
     // Enable adaptive mode on constrained/normal devices (not desktop)
     if (!mem.is_good_device()) {
-        cache_.set_adaptive_mode(true, 15, MIN_CACHE_BUDGET, tier.budget_bytes);
+        cache_.set_adaptive_mode(true, 15, kMinCacheBudget, tier.budget_bytes);
     }
 
     spdlog::info("[StreamingController] {} device (total: {}MB, available: {}MB), "
@@ -173,7 +173,7 @@ GCodeStreamingController::GCodeStreamingController()
 }
 
 GCodeStreamingController::GCodeStreamingController(size_t cache_budget_bytes)
-    : cache_(std::max(cache_budget_bytes, MIN_CACHE_BUDGET)) {
+    : cache_(std::max(cache_budget_bytes, kMinCacheBudget)) {
     spdlog::debug("[StreamingController] Created with {:.1f}MB cache budget",
                   static_cast<double>(cache_budget_bytes) / (1024 * 1024));
     register_memory_responder();
@@ -317,6 +317,7 @@ void GCodeStreamingController::open_file_async(const std::string& filepath,
     // gcode file can fail — surface that as a failed load, not a crash.
     index_future_ = std::async(std::launch::async, [this, filepath]() { // THREAD_OK: below
         helix::install_thread_altstack();
+        helix::lower_current_thread_priority();
         bool success = false;
         try {
             if (index_worker_gate) {
@@ -530,7 +531,8 @@ void GCodeStreamingController::start_prefetch_worker() {
     if (prefetch_thread_.joinable() || stop_prefetch_) {
         return;
     }
-    prefetch_thread_ = helix::make_thread(&GCodeStreamingController::prefetch_worker, this);
+    prefetch_thread_ =
+        helix::make_background_thread(&GCodeStreamingController::prefetch_worker, this);
 }
 
 void GCodeStreamingController::stop_prefetch_worker(bool permanent) {
@@ -654,6 +656,17 @@ float GCodeStreamingController::get_layer_z(size_t layer_index) const {
     return index_.get_layer_z(layer_index);
 }
 
+uint32_t GCodeStreamingController::get_layer_line_count(size_t layer_index) const {
+    if (!index_.is_valid() || layer_index >= index_.get_layer_count()) {
+        return 0;
+    }
+    return index_.get_entry(layer_index).line_count;
+}
+
+bool GCodeStreamingController::evict_layer(size_t layer_index) {
+    return cache_.evict(layer_index);
+}
+
 int GCodeStreamingController::find_layer_at_z(float z) const {
     return index_.find_layer_at_z(z);
 }
@@ -686,13 +699,13 @@ size_t GCodeStreamingController::get_cache_budget() const {
 }
 
 void GCodeStreamingController::set_cache_budget(size_t budget_bytes) {
-    cache_.set_memory_budget(std::max(budget_bytes, MIN_CACHE_BUDGET));
+    cache_.set_memory_budget(std::max(budget_bytes, kMinCacheBudget));
 }
 
 void GCodeStreamingController::set_adaptive_cache(bool enable) {
     if (enable) {
         // Use current budget as max (respects device tier set at construction)
-        cache_.set_adaptive_mode(true, 15, MIN_CACHE_BUDGET, cache_.memory_budget_bytes());
+        cache_.set_adaptive_mode(true, 15, kMinCacheBudget, cache_.memory_budget_bytes());
     } else {
         cache_.set_adaptive_mode(false);
     }
@@ -775,22 +788,18 @@ std::vector<ToolpathSegment> GCodeStreamingController::load_layer(size_t layer_i
     // move for vase-mode G-code.
     parser.set_use_layer_markers(index_.uses_layer_markers());
 
-    // Walk lines directly out of the byte buffer into a reused scratch string. Feeding an
-    // istringstream instead would hold three copies of the layer bytes simultaneously
-    // (vector + temporary std::string + the stream's internal buffer).
+    // Hand the parser views straight into the byte buffer: no copy per line.
     // Line splitting matches std::getline: '\n' terminated and excluded, any trailing '\r'
     // left on the line for the parser to trim, final line without a newline still parsed.
     const char* data = reinterpret_cast<const char*>(bytes.data());
     const size_t byte_count = bytes.size();
-    std::string line;
     size_t pos = 0;
 
     while (pos < byte_count) {
         const void* nl = std::memchr(data + pos, '\n', byte_count - pos);
         size_t line_end =
             nl ? static_cast<size_t>(static_cast<const char*>(nl) - data) : byte_count;
-        line.assign(data + pos, line_end - pos);
-        parser.parse_line(line);
+        parser.parse_line(std::string_view(data + pos, line_end - pos));
         pos = nl ? line_end + 1 : byte_count;
     }
 
@@ -828,17 +837,57 @@ bool GCodeStreamingController::build_index() {
     // FileDataSource returns its original filepath; sources that stage data on
     // disk return the staged path once ensure_indexable() has materialized it
     std::string file_path = data_source_->indexable_file_path();
+    index_mb_per_cpu_s_.store(0.0, std::memory_order_relaxed);
+    index_abandoned_for_cost_.store(false, std::memory_order_relaxed);
+
+    if (!layer_index_sidecar_.empty() && !file_path.empty()) {
+        const std::string sidecar = std::move(layer_index_sidecar_);
+        layer_index_sidecar_.clear();
+        if (index_.build_from_sidecar(sidecar, data_source_->file_size(),
+                                      layer_index_file_hash(file_path), file_path)) {
+            index_progress_.store(1.0f);
+            return true;
+        }
+        spdlog::info("[StreamingController] The plugin's layer index does not match this file; "
+                     "indexing it");
+    }
 
     if (!file_path.empty()) {
+        const int64_t cpu_start = helix::thread_cpu_ns();
         // Publish real indexing progress. Before this the atomic went 0.0 to
         // 1.0 with nothing in between, so get_index_progress() could only ever
         // drive an indeterminate spinner — on a 133MB print that is 69 seconds
         // of a UI that looks hung. Storing an atomic from the scan thread is
         // the whole cost; the UI polls it on its own clock.
-        return index_.build_from_file(file_path, [this](float fraction) {
-            index_progress_.store(fraction);
-            return !index_cancel_requested_.load(std::memory_order_relaxed);
-        });
+        float scanned_fraction = 0.0f;
+        const bool built =
+            index_.build_from_file(file_path, [this, cpu_start, &scanned_fraction](float fraction) {
+                scanned_fraction = fraction;
+                index_progress_.store(fraction);
+                if (index_cost_guard_) {
+                    const double cpu_s =
+                        static_cast<double>(helix::thread_cpu_ns() - cpu_start) / 1e9;
+                    if (!index_cost_guard_(fraction, cpu_s)) {
+                        index_abandoned_for_cost_.store(true, std::memory_order_relaxed);
+                        return false;
+                    }
+                }
+                return !index_cancel_requested_.load(std::memory_order_relaxed);
+            });
+        // A scan the cost guard stopped still measured the board over the part
+        // it read, which is what lets the next decision be made before download.
+        const bool abandoned = index_abandoned_for_cost_.load(std::memory_order_relaxed);
+        if (built || abandoned) {
+            const double cpu_s = static_cast<double>(helix::thread_cpu_ns() - cpu_start) / 1e9;
+            const double size = static_cast<double>(data_source_->file_size());
+            const double scanned = built ? size : size * scanned_fraction;
+            if (cpu_s > 0.0 && (scanned >= static_cast<double>(kMinRateSampleBytes) ||
+                                cpu_s >= kMinRateSampleCpuS)) {
+                index_mb_per_cpu_s_.store(scanned / (1024.0 * 1024.0) / cpu_s,
+                                          std::memory_order_relaxed);
+            }
+        }
+        return built;
     }
 
     // Sources without file path (e.g., MemoryDataSource) cannot be indexed

@@ -13,8 +13,6 @@
 // translation units each defining their own version of the class would be an
 // ODR violation.
 //
-//  - recompute_aux_composites(): the measurement-only entry point for the fan
-//    row's composite visibility, which otherwise needs a laid-out widget tree.
 //  - set_thumbnail_widget(): stands in for the XML build, which is what
 //    normally assigns print_thumbnail_. The shared-subject observer only
 //    touches the image when that pointer is non-null, so a test that leaves it
@@ -56,14 +54,51 @@ class PrintStatusPanelTestAccess {
     static void hide_exclude(PrintStatusPanel& panel) {
         panel.hide_exclude_map_view();
     }
+    static bool exclude_open(const PrintStatusPanel& panel) {
+        return panel.exclude_mode_.is_open();
+    }
 
     /// The G-code viewer the XML build found, or null once the tree is gone.
     static lv_obj_t* gcode_viewer(const PrintStatusPanel& panel) {
         return panel.gcode_viewer_;
     }
 
-    static void recompute_aux_composites(PrintStatusPanel& panel, int density, bool aux_present) {
-        panel.layout_fitter_.recompute_aux_composites_for_measurement(density, aux_present);
+    /// The printer tile's chips and the job tile's checklist.
+    static helix::ui::PrintStatusTiles& tiles(PrintStatusPanel& panel) {
+        return panel.tiles_;
+    }
+
+    /// The preview card's camera stream exists (it may still be connecting).
+    static bool camera_streaming(const PrintStatusPanel& panel) {
+#if HELIX_HAS_CAMERA
+        return panel.camera_view_.has_stream();
+#else
+        (void)panel;
+        return false;
+#endif
+    }
+
+    /// Start the preview card's camera as an active, showing panel does.
+    static void start_preview_camera(PrintStatusPanel& panel) {
+        panel.start_preview_camera();
+    }
+
+    /// A More menu row's tap, by its PrintStatusMoreMenu action.
+    static void more_action(PrintStatusPanel& panel, int action) {
+        panel.handle_more_action(action);
+    }
+
+    /// What the preview controller calls to put the G-code render up or down.
+    static void show_gcode_viewer(PrintStatusPanel& panel, bool show) {
+        panel.show_gcode_viewer(show);
+    }
+
+    /// The More button's tap, raising the menu below @p anchor.
+    static void open_more_menu(PrintStatusPanel& panel, lv_obj_t* anchor) {
+        panel.handle_more_clicked(anchor);
+    }
+    static helix::ui::PrintStatusMoreMenu& more_menu(PrintStatusPanel& panel) {
+        return panel.more_menu_;
     }
 
     static void set_thumbnail_widget(PrintStatusPanel& panel, lv_obj_t* image) {
@@ -93,6 +128,14 @@ class PrintStatusPanelTestAccess {
     }
     static const std::string& current_print_filename(const PrintStatusPanel& panel) {
         return panel.current_print_filename_;
+    }
+
+    /// Reprint through @p controller, standing in for the one
+    /// print_start_controller_for() hands out.
+    static void reprint_through(PrintStatusPanel& panel,
+                                helix::ui::PrintStartController& controller,
+                                const helix::gcode::ReprintTarget& target) {
+        panel.reprint_through(controller, target);
     }
 
     static void set_filename(PrintStatusPanel& panel, const char* filename) {

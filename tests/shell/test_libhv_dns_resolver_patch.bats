@@ -22,6 +22,8 @@
 # functions in isolation and so could not catch this — the gap was the wiring.
 # These tests lock both the patch contents and the self-healing guard.
 
+load helpers
+
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     PATCH="$REPO_ROOT/patches/libhv-dns-resolver-fallback.patch"
@@ -146,8 +148,7 @@ setup() {
     # parallel build can reach the compile before patches apply and die with
     # "No rule to make target 'lib/libhv/base/dns_resolv.c'". `help` has no
     # prerequisites, so -pn prints the database without walking the graph.
-    cd "$REPO_ROOT" || return 1
     local db
-    db="$(make -pn help CROSS_COMPILE= 2>/dev/null)"
+    db="$(make_db CROSS_COMPILE=)"
     grep -qE '^lib/libhv/base/dns_resolv\.c:.*\.patches-applied( |$)' <<<"$db"
 }

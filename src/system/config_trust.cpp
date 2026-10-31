@@ -78,7 +78,7 @@ bool starts_with_dir(const std::string& path, const std::string& dir) {
 
 UpdateUrls read_update_urls() {
     UpdateUrls urls;
-    const std::string path = AppConstants::Update::state_dir() + "/update_urls.json";
+    const std::string path = app_constants::update::state_dir() + "/update_urls.json";
 
     // stat dereferences a symlink, so the file judged is the file read.
     struct stat st {};

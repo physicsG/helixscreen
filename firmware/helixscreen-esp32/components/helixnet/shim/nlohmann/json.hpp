@@ -6902,6 +6902,20 @@ struct container_input_adapter_factory< ContainerType,
 }
        };
 
+// HELIX LOCAL CHANGE: a std::string parses through the same const char* input adapter as
+// a C string, so the firmware carries one lexer and parser instantiation instead of a
+// second one keyed on std::string::const_iterator.
+template<>
+struct container_input_adapter_factory<std::string, void>
+{
+    using adapter_type = iterator_input_adapter<const char*>;
+
+    static adapter_type create(const std::string& container)
+    {
+        return adapter_type(container.data(), container.data() + container.size());
+    }
+};
+
 }  // namespace container_input_adapter_factory_impl
 
 template<typename ContainerType>

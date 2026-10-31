@@ -85,9 +85,9 @@ class PointerFrameHook {
     using LastRawReader = bool (*)(lv_indev_t* indev, int* x, int* y);
 
 #if LV_USE_EVDEV
-    static constexpr LastRawReader EVDEV_LAST_RAW = lv_evdev_get_last_raw;
+    static constexpr LastRawReader kEvdevLastRaw = lv_evdev_get_last_raw;
 #else
-    static constexpr LastRawReader EVDEV_LAST_RAW = nullptr;
+    static constexpr LastRawReader kEvdevLastRaw = nullptr;
 #endif
 
     PointerFrameHook() = default;
@@ -138,7 +138,7 @@ class PointerFrameHook {
                                               bool opened_by_evdev,
                                               lv_indev_t** owner_slot = nullptr,
                                               const std::string& sysfs_base = "/sys/class/input",
-                                              LastRawReader evdev_last_raw = EVDEV_LAST_RAW) {
+                                              LastRawReader evdev_last_raw = kEvdevLastRaw) {
         const input::PointerKind kind = input::pointer_kind_for_device(device_path, sysfs_base);
         RawPosition raw_position;
         if (opened_by_evdev && evdev_last_raw != nullptr) {

@@ -13,19 +13,22 @@ namespace helix::detection {
  *
  * Observes the print-state-enum subject. On a transition INTO PAUSED, it reads
  * print_stats.exception (already parsed by PrinterPrintState) and, when the
- * exception code maps to a spaghetti defect (U1 code 2), emits a DetectionEvent.
- * The firmware self-pauses on the same snapshot, so already_paused is always true.
+ * exception is the defect_detection module's spaghetti (code 2) or dirty-bed
+ * (code 1) report, emits a DetectionEvent. The firmware self-pauses on the
+ * same snapshot, so already_paused is always true.
+ *
+ * The module's pre-print bed check is switched with DEFECT_DETECTION_CONFIG
+ * CLEAN_BED_ENABLE and read back from the defect_detection status object,
+ * whose get_status() returns the module's stored config.
  */
 class U1StockSource : public DetectionSource {
   public:
     explicit U1StockSource(helix::PrinterState* state) : state_(state) {}
 
-    /// Unique registration key. Exposed so DetectionManager can match on id()
-    /// and static_cast instead of dynamic_cast — the firmware builds -fno-rtti.
-    static constexpr const char* SOURCE_ID = "u1_stock";
+    static constexpr const char* kSourceId = "u1_stock";
 
     std::string id() const override {
-        return SOURCE_ID;
+        return kSourceId;
     }
     bool available() const override {
         return capable_;
@@ -45,16 +48,28 @@ class U1StockSource : public DetectionSource {
     void set_capable(bool v) {
         capable_ = v;
     }
+    /// Capable exactly while the printer lists the defect_detection module.
+    void on_objects_listed(const std::vector<std::string>& objects) override;
 
     /// DEFECT_DETECTION_CONFIG NOODLE_SENSITIVITY=low, the stock firmware's
     /// one-step-down sensitivity command.
     void tune() override;
+
+    bool explains_current_pause() const override;
+
+    bool has_bed_check() const override {
+        return capable_;
+    }
+    void read_bed_check(BedCheckReadCallback done) override;
+    void set_bed_check(bool enabled, BedCheckSetCallback done) override;
 
     /// Install the print-state observer. Called once.
     void start();
 
   private:
     void evaluate();
+    /// The defect kind the latched exception reports, Unknown when none.
+    DetectionKind latched_kind() const;
 
     helix::PrinterState* state_ = nullptr;
     Callback cb_;

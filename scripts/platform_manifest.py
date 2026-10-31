@@ -12,12 +12,16 @@ mk/images.mk, which asks it which splash classes a platform needs:
 
     scripts/platform_manifest.py splash-3d-sizes k2   -> medium
     scripts/platform_manifest.py splash-3d-sizes k1   -> medium small
+    scripts/platform_manifest.py splash-3d-sizes mips -> medium small (its candidate boards)
     scripts/platform_manifest.py splash-3d-sizes pi   -> (empty: every class)
 """
 
 import json
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from translation_packs import UNLOADED_TRANSLATION_FILES  # noqa: E402
 
 MANIFEST_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -101,21 +105,65 @@ def printer_image_size(manifest, width):
     return _first_match(manifest["size_classes"]["printer_image"], width, 0, "size")
 
 
+def candidate_panels(manifest, platform_id):
+    """The panels this package can land on, as manifest-shaped entries.
+
+    A fixed panel is its own only candidate. A variable panel that names
+    `candidates` is one binary serving several known boards, so its package
+    needs exactly what those boards need. A candidate is either another
+    platform's id, which brings that platform's package hedges with it, or an
+    inline panel for a board with no platform entry of its own. An empty list
+    means the panel is unbounded: user-supplied hardware of any size.
+    """
+    entry = platform(manifest, platform_id)
+    if has_fixed_panel(entry):
+        return [entry]
+    out = []
+    for cand in entry.get("panel", {}).get("candidates", []):
+        if isinstance(cand, str):
+            resolved = platform(manifest, cand)
+            name = cand
+        else:
+            resolved = {"panel": cand}
+            name = cand.get("board", "inline panel")
+        if not has_fixed_panel(resolved):
+            raise ManifestError(f"{platform_id}: candidate {name!r} has no fixed panel")
+        out.append(resolved)
+    return out
+
+
+def _union(lists):
+    out = []
+    for items in lists:
+        for item in items:
+            if item not in out:
+                out.append(item)
+    return out
+
+
 def splash_3d_classes_for(manifest, platform_id):
     """Every 3D splash class a platform's package must contain.
 
     An empty list means "no restriction, generate all of them" - the right answer
     for a platform whose panel is not known until runtime.
     """
-    entry = platform(manifest, platform_id)
-    if not has_fixed_panel(entry):
-        return []
-    width, height = effective_resolution(entry)
-    classes = [splash_class(manifest, width, height)]
-    for extra in entry.get("package", {}).get("extra_splash_3d_classes", []):
-        if extra not in classes:
-            classes.append(extra)
-    return classes
+    per_panel = []
+    for entry in candidate_panels(manifest, platform_id):
+        classes = [splash_class(manifest, *effective_resolution(entry))]
+        per_panel.append(classes + entry.get("package", {}).get("extra_splash_3d_classes", []))
+    return _union(per_panel)
+
+
+def printer_image_sizes_for(manifest, platform_id):
+    """Every prerendered printer tier a platform's package must contain.
+
+    Empty for an unbounded panel, which keeps every tier.
+    """
+    per_panel = []
+    for entry in candidate_panels(manifest, platform_id):
+        size = printer_image_size(manifest, effective_resolution(entry)[0])
+        per_panel.append([size] + entry.get("package", {}).get("extra_printer_image_sizes", []))
+    return sorted(_union(per_panel))
 
 
 def _kb(paths):
@@ -139,12 +187,12 @@ def prune_assets(manifest, platform_id, root, dry_run=False):  # noqa: C901
     build/ happens to hold, so a tree left over from another platform's build
     ships with it. This is the step that actually bounds the payload.
 
-    Returns (removed_paths, notes). A platform whose panel is unknown until
-    runtime keeps everything.
+    Returns (removed_paths, notes). A platform whose panel is unbounded keeps
+    every size class and its source PNGs.
     """
     entry = platform(manifest, platform_id)
     notes = []
-    doomed_pre = []
+    doomed = []
 
     # Tracker music is playable only where the tracker player is compiled in.
     # This is asked of the PLATFORM, not of the host running the release, which
@@ -153,21 +201,30 @@ def prune_assets(manifest, platform_id, root, dry_run=False):  # noqa: C901
         sounds = os.path.join(root, "assets", "sounds")
         if os.path.isdir(sounds):
             for dirpath, _dirnames, filenames in os.walk(sounds):
-                doomed_pre.extend(os.path.join(dirpath, n) for n in filenames)
+                doomed.extend(os.path.join(dirpath, n) for n in filenames)
             notes.append("dropped assets/sounds: no tracker player on this platform")
 
-    if not has_fixed_panel(entry):
-        freed = _kb(doomed_pre)
-        if not dry_run:
-            _remove_all(doomed_pre, root)
-        notes.append("panel is not known until runtime; keeping every size class")
-        notes.append(f"removed {len(doomed_pre)} file(s), {freed} KB")
-        return doomed_pre, notes
+    # Translation files no locale loads (translation_packs.py).
+    translations = os.path.join(root, "ui_xml", "translations")
+    for name in UNLOADED_TRANSLATION_FILES:
+        path = os.path.join(translations, name)
+        if os.path.isfile(path):
+            doomed.append(path)
+            notes.append(f"dropped ui_xml/translations/{name}: no locale loads it")
 
-    width, _ = effective_resolution(entry)
-    keep_classes = set(splash_3d_classes_for(manifest, platform_id))
-    keep_size = printer_image_size(manifest, width)
-    doomed = []
+    keep_classes = splash_3d_classes_for(manifest, platform_id)
+    keep_sizes = printer_image_sizes_for(manifest, platform_id)
+
+    if not keep_sizes:
+        # generate_cached_printer_image() reads the source PNG whenever the home
+        # widget is larger than the biggest tier, which an unbounded panel can be.
+        freed = _kb(doomed)
+        if not dry_run:
+            _remove_all(doomed, root)
+        notes.append("panel is not known until runtime; keeping every size class and the "
+                     "source PNGs the image cache reads above the largest render")
+        notes.append(f"removed {len(doomed)} file(s), {freed} KB")
+        return doomed, notes
 
     # Splash canvases and logos for classes this panel cannot select.
     splash_dir = os.path.join(root, "assets", "images", "prerendered")
@@ -181,38 +238,39 @@ def prune_assets(manifest, platform_id, root, dry_run=False):  # noqa: C901
         if cls is not None and cls not in keep_classes:
             doomed.append(os.path.join(splash_dir, name))
 
-    # Printer art at the other size.
+    # Printer art at sizes no candidate panel selects.
     printer_dir = os.path.join(root, "assets", "images", "printers")
     prerendered = os.path.join(printer_dir, "prerendered")
-    have_bin = set()
+    have_bin = {size: set() for size in keep_sizes}
     for name in sorted(os.listdir(prerendered)) if os.path.isdir(prerendered) else []:
         if not name.endswith(".bin"):
             continue
         stem, _, size = name[:-len(".bin")].rpartition("-")
         if not size.isdigit():
             continue
-        if int(size) == keep_size:
-            have_bin.add(stem)
+        if int(size) in have_bin:
+            have_bin[int(size)].add(stem)
         else:
             doomed.append(os.path.join(prerendered, name))
 
     # Source PNGs are a fallback for a printer with no render. Dropping them is
-    # only safe where every one of them has a render at the size being kept;
+    # only safe where every one of them has a render at every size being kept;
     # otherwise that printer would silently degrade to the generic image.
+    sizes_text = "/".join(str(s) for s in keep_sizes) + "px"
     pngs = []
     if os.path.isdir(printer_dir):
         pngs = [n for n in sorted(os.listdir(printer_dir)) if n.endswith(".png")]
-    uncovered = [n for n in pngs if n[:-len(".png")] not in have_bin]
+    uncovered = [n for n in pngs
+                 if any(n[:-len(".png")] not in stems for stems in have_bin.values())]
     if pngs and not uncovered:
         doomed.extend(os.path.join(printer_dir, n) for n in pngs)
-        notes.append(f"dropped {len(pngs)} source PNG(s); every one has a {keep_size}px render")
+        notes.append(f"dropped {len(pngs)} source PNG(s); every one has a {sizes_text} render")
     elif uncovered:
         notes.append(
-            f"kept source PNGs: {len(uncovered)} printer(s) have no {keep_size}px render "
+            f"kept source PNGs: {len(uncovered)} printer(s) lack a {sizes_text} render "
             f"({', '.join(uncovered[:3])}{'...' if len(uncovered) > 3 else ''})")
 
-    notes.insert(0, f"keeping splash {sorted(keep_classes)} and {keep_size}px printer art")
-    doomed = doomed_pre + doomed
+    notes.insert(0, f"keeping splash {sorted(keep_classes)} and {sizes_text} printer art")
     freed = _kb(doomed)
     if not dry_run:
         _remove_all(doomed, root)

@@ -16,9 +16,8 @@
 
 #include "hv/json.hpp"
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 /**
  * @brief Singleton tracking power device state from Moonraker
@@ -39,7 +38,9 @@ class PowerDeviceState {
     /// Unregister callback and clean up subjects
     void unsubscribe(IMoonrakerAPI& api);
 
-    /// Set discovered devices (called from discovery sequence)
+    /// Set discovered devices (called from discovery sequence). A device already
+    /// tracked keeps its subject and lifetime and takes the new values in place;
+    /// only devices that appeared or disappeared are created or torn down.
     void set_devices(const std::vector<PowerDevice>& devices);
 
     /// Get status subject for a device (0=off, 1=on, 2=locked). Returns nullptr if not found.
@@ -61,11 +62,11 @@ class PowerDeviceState {
   private:
     PowerDeviceState() = default;
     ~PowerDeviceState() {
-        // Release observer without touching LVGL — during process exit,
-        // static destruction order is undefined and the observed subject
-        // (from PrinterState) may already be destroyed. deinit_subjects()
-        // handles proper cleanup during normal lifecycle.
-        print_state_observer_.release();
+        // Static destruction order is undefined, so PrinterState's subject may
+        // already be gone. The observer carries PrinterState's subjects
+        // lifetime, which its destructor marks dead, so reset() skips the
+        // removal in that case and still frees the observer's context.
+        print_state_observer_.reset();
     }
 
     void on_power_changed(const nlohmann::json& msg);
@@ -80,6 +81,10 @@ class PowerDeviceState {
         SubjectLifetime lifetime;
         int raw_status = 0; ///< 0=off, 1=on (before lock evaluation)
     };
+
+    /// Publish @p info's raw status, or 2 (locked) when it is a powered
+    /// locked_while_printing device and a job holds the machine.
+    void publish_effective_status(DeviceInfo& info);
 
     std::unordered_map<std::string, DeviceInfo> devices_;
     ObserverGuard print_state_observer_;

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -15,7 +16,7 @@
 namespace helix::ui {
 
 /// Frame period, in ms, of every saver's most expensive level: one refresh of a 60 Hz panel.
-inline constexpr uint32_t SAVER_FAST_PERIOD = 16;
+inline constexpr uint32_t kSaverFastPeriod = 16;
 
 /**
  * @brief Most areas a saver invalidates in one frame
@@ -26,7 +27,7 @@ inline constexpr uint32_t SAVER_FAST_PERIOD = 16;
  * the cap sits above the starfield's full population (150 stars) and leaves the rest of
  * the buffer for UI invalidations.
  */
-inline constexpr size_t SAVER_MAX_DIRTY_AREAS = 160;
+inline constexpr size_t kSaverMaxDirtyAreas = 160;
 
 /**
  * @brief Dirty coverage at or above which invalidating the whole canvas is cheaper
@@ -35,7 +36,7 @@ inline constexpr size_t SAVER_MAX_DIRTY_AREAS = 160;
  * double-buffered display copies the untouched remainder out of the previous buffer in strips
  * every frame, while a full-canvas invalidation leaves it nothing to sync.
  */
-inline constexpr int64_t SAVER_WHOLE_CANVAS_PERCENT = 90;
+inline constexpr int64_t kSaverWholeCanvasPercent = 90;
 
 /// How a FrameTarget stores its pixels.
 enum class PixelFormat : uint8_t {
@@ -101,8 +102,28 @@ struct DirtyRect {
         add(other.x1, other.y1, other.x2, other.y2);
     }
 
+    /// True when the two share a pixel. Nothing intersects an empty box.
+    constexpr bool intersects(const DirtyRect& o) const {
+        return !empty() && !o.empty() && x1 <= o.x2 && o.x1 <= x2 && y1 <= o.y2 && o.y1 <= y2;
+    }
+
     bool operator==(const DirtyRect& o) const {
         return x1 == o.x1 && y1 == o.y1 && x2 == o.x2 && y2 == o.y2;
+    }
+
+    /// Every pixel of a `w` x `h` frame.
+    static constexpr DirtyRect whole(int32_t w, int32_t h) {
+        return {0, 0, w - 1, h - 1};
+    }
+
+    /// The part inside a `w` x `h` frame; empty when none of it is.
+    constexpr DirtyRect clipped(int32_t w, int32_t h) const {
+        if (empty()) {
+            return {};
+        }
+        const DirtyRect c{std::max<int32_t>(x1, 0), std::max<int32_t>(y1, 0), std::min(x2, w - 1),
+                          std::min(y2, h - 1)};
+        return c.empty() ? DirtyRect{} : c;
     }
 };
 
@@ -115,7 +136,7 @@ constexpr bool covers_whole_canvas(int64_t covered_px, int32_t w, int32_t h) {
     if (canvas <= 0) {
         return false;
     }
-    return covered_px * 100 >= canvas * SAVER_WHOLE_CANVAS_PERCENT;
+    return covered_px * 100 >= canvas * kSaverWholeCanvasPercent;
 }
 
 /// One-box form of the coverage rule: a single box covers its own pixels.
@@ -131,5 +152,46 @@ constexpr bool covers_whole_canvas(const DirtyRect& bounds, int32_t w, int32_t h
  * holds. A `max_areas` of 0 is read as 1.
  */
 void merge_dirty_areas(std::vector<DirtyRect>& areas, size_t max_areas);
+
+/**
+ * @brief A frame's dirty list as the canvas invalidates it
+ *
+ * merge_dirty_areas() to `max_areas`, then, when what is left covers enough of a `w` x `h`
+ * frame (covers_whole_canvas()), the one box DirtyRect::whole(w, h). A saver that needs this
+ * decision before the canvas makes it (to redraw text over what changed) calls it itself; the
+ * canvas reaches the same answer from the reduced list.
+ */
+void reduce_dirty(std::vector<DirtyRect>& areas, size_t max_areas, int32_t w, int32_t h);
+
+/// Pixels a `px`-pixel extent takes when every `scale` (> 0) pixels draw as one, rounded up.
+constexpr int32_t scaled_extent(int32_t px, int32_t scale) {
+    return (px + scale - 1) / scale;
+}
+
+/// `v` rounded to the nearest pixel, halves away from zero.
+inline int32_t round_px(float v) {
+    return static_cast<int32_t>(std::lround(v));
+}
+
+/**
+ * @brief Row `y` of `frame` as pixels of type `Px`: uint16_t for RGB565, uint32_t for XRGB8888
+ *
+ * A word's bytes are the frame's bytes only on a little-endian CPU, which every target is.
+ */
+template <typename Px> Px* frame_row(const FrameTarget& frame, int32_t y) {
+    static_assert(sizeof(Px) == 2 || sizeof(Px) == 4, "a frame pixel is 2 or 4 bytes");
+    static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+                  "pixels are written as little-endian words");
+    return reinterpret_cast<Px*>(frame.data + static_cast<size_t>(y) * frame.stride);
+}
+
+/// Calls `f` with a value of `format`'s pixel type, uint16_t{} for RGB565 or uint32_t{} for
+/// XRGB8888, so a drawing loop is written once as a template over that type.
+template <typename F> decltype(auto) with_pixel_type(PixelFormat format, F&& f) {
+    if (format == PixelFormat::RGB565) {
+        return f(uint16_t{});
+    }
+    return f(uint32_t{});
+}
 
 } // namespace helix::ui

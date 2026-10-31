@@ -24,7 +24,7 @@ namespace helix {
 struct ThumbnailTarget;
 
 /// The largest side any thumbnail decode accepts (a 4K source).
-inline constexpr int THUMBNAIL_MAX_SOURCE_DIMENSION = 4096;
+inline constexpr int kThumbnailMaxSourceDimension = 4096;
 
 /// What a thumbnail byte stream actually is, read from its magic bytes.
 enum class ImageFormat : uint8_t { Unknown, Png, Jpeg, Qoi };
@@ -48,7 +48,7 @@ enum class ImageFormat : uint8_t { Unknown, Png, Jpeg, Qoi };
  * @brief The bytes as a PNG, which is what every file the cache names `.png` must be
  *
  * A PNG passes through; a complete JPEG is re-encoded (desktop only, up to
- * THUMBNAIL_MAX_SOURCE_DIMENSION a side). Empty for anything else, including
+ * kThumbnailMaxSourceDimension a side). Empty for anything else, including
  * QOI, and for a JPEG that is cut short or cannot be re-encoded: LVGL picks its decoder by
  * extension, so a JPEG saved as `.png` renders blank.
  */
@@ -62,6 +62,7 @@ enum class ThumbnailSource : uint8_t {
     GcodeExtract, ///< id = gcode path whose header the PNG was extracted from
     Usb,          ///< id = gcode path on a USB stick
     Timelapse,    ///< id = timelapse video filename
+    ArchiveEntry, ///< id = "<archive path>#<entry name>": an image inside a .3mf
 };
 
 /// The string every artifact of (source, id) is hashed from.

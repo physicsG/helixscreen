@@ -116,15 +116,15 @@ TEST_CASE("Concurrent thumbnail decode survives eviction unlinking beneath it",
 
     // Small enough that eviction fires on essentially every pass, which is the
     // state the reporter's device was in (22 MB against a 20 MB limit).
-    constexpr size_t CACHE_LIMIT_BYTES = 256 * 1024;
-    ThumbnailCache cache(CACHE_LIMIT_BYTES);
+    constexpr size_t kCacheLimitBytes = 256 * 1024;
+    ThumbnailCache cache(kCacheLimitBytes);
 
     auto& processor = helix::ThumbnailProcessor::instance();
     processor.set_cache_dir(scoped.path().string());
 
-    constexpr int DECODER_THREADS = 4;
-    constexpr int EVICTOR_THREADS = 2;
-    constexpr int ROUNDS = 40;
+    constexpr int kDecoderThreads = 4;
+    constexpr int kEvictorThreads = 2;
+    constexpr int kRounds = 40;
 
     // Mixed targets on purpose: the crash window had 164/200/300 in flight at
     // once, so every worker writes a differently-sized .bin into one directory.
@@ -136,23 +136,23 @@ TEST_CASE("Concurrent thumbnail decode survives eviction unlinking beneath it",
     std::atomic<int> decodes{0};
 
     std::vector<std::thread> evictors;
-    evictors.reserve(EVICTOR_THREADS);
-    for (int e = 0; e < EVICTOR_THREADS; ++e) {
+    evictors.reserve(kEvictorThreads);
+    for (int e = 0; e < kEvictorThreads; ++e) {
         evictors.emplace_back([&] {
             // set_max_size() is the public entry point that runs an eviction
             // pass; same idiom as test_thumbnail_cache_concurrency.cpp. The
             // value never changes, so all churn comes from the pass itself.
             while (!stop.load(std::memory_order_relaxed)) {
-                cache.set_max_size(CACHE_LIMIT_BYTES);
+                cache.set_max_size(kCacheLimitBytes);
             }
         });
     }
 
     std::vector<std::thread> decoders;
-    decoders.reserve(DECODER_THREADS);
-    for (int t = 0; t < DECODER_THREADS; ++t) {
+    decoders.reserve(kDecoderThreads);
+    for (int t = 0; t < kDecoderThreads; ++t) {
         decoders.emplace_back([&, t] {
-            for (int r = 0; r < ROUNDS; ++r) {
+            for (int r = 0; r < kRounds; ++r) {
                 const auto& target = targets[static_cast<size_t>((t + r) % targets.size())];
                 // Distinct source identifiers so each thread hashes to its own
                 // output filename most of the time, and collides sometimes —

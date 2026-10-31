@@ -3,7 +3,7 @@
 
 #include "filament_display_name.h"
 
-#include "operation_patterns.h"
+#include "text_io.h"
 
 #include <cctype>
 #include <initializer_list>
@@ -105,7 +105,7 @@ bool material_is_redundant(const std::string& name, const std::string& material)
             continue;
         }
         saw_token = true;
-        if (!contains_ci(name, material.substr(start, i - start))) {
+        if (!helix::text_io::contains_ignore_case(name, material.substr(start, i - start))) {
             return false;
         }
     }
@@ -126,8 +126,12 @@ std::string first_non_blank(std::initializer_list<std::string_view> candidates) 
 
 } // namespace
 
+bool name_states_material(std::string_view name, std::string_view material) {
+    return material_is_redundant(normalize_ws(name), normalize_ws(material));
+}
+
 std::string compose_filament_label(std::string_view brand, std::string_view name,
-                                   std::string_view material) {
+                                   std::string_view material, std::string_view separator) {
     const std::string brand_part = normalize_ws(brand);
     const std::string name_part = normalize_ws(name);
     const std::string material_part = normalize_ws(material);
@@ -135,15 +139,15 @@ std::string compose_filament_label(std::string_view brand, std::string_view name
     // Brand keeps word-boundary matching (arbitrary strings — "Sun" must not
     // match inside "Sunlu"); material uses containment (closed vocabulary).
     const bool brand_redundant = contains_word(name_part, brand_part);
-    const bool material_redundant = material_is_redundant(name_part, material_part);
+    const bool material_redundant = name_states_material(name_part, material_part);
 
     std::string label;
-    const auto append = [&label](const std::string& part) {
+    const auto append = [&label, separator](const std::string& part) {
         if (part.empty()) {
             return;
         }
         if (!label.empty()) {
-            label.push_back(' ');
+            label += separator;
         }
         label += part;
     };
@@ -178,6 +182,37 @@ FilamentLabelParts resolve_filament_label_parts(const SlotInfo& slot, const Spoo
     parts.material = first_non_blank({slot.material, id_material});
     parts.name = first_non_blank({slot.spool_name, id_name, slot.color_name, color_fallback});
     return parts;
+}
+
+std::string slot_card_name(const SlotInfo& slot, const SpoolIdentity* identity) {
+    const SpoolIdentity* id = (identity != nullptr && identity->valid()) ? identity : nullptr;
+    const std::string_view id_name = id ? std::string_view(id->filament_name) : std::string_view();
+    return normalize_ws(first_non_blank({slot.spool_name, id_name, slot.product_name}));
+}
+
+SlotCardLines slot_card_lines(std::string_view name, std::string_view material,
+                              std::string_view material_text, int total_count, bool lane_empty) {
+    SlotCardLines lines;
+    const bool crowded = total_count > kSlotCardMaxTwoLineCount;
+    const std::string name_part = normalize_ws(name);
+    if (lane_empty || crowded || name_part.empty()) {
+        lines.lower = std::string(material_text);
+        if (crowded && !lane_empty) {
+            lines.lower =
+                std::string(text_io::utf8_prefix(lines.lower, kSlotCardCrowdedMaterialBytes));
+        }
+        return lines;
+    }
+    // The name rides above even when it states the material: the card is a
+    // spool wide, so a name standing in for the material ellipsizes to its
+    // first few letters and the material is lost.
+    if (normalize_ws(material).empty()) {
+        lines.lower = name_part;
+        return lines;
+    }
+    lines.name = name_part;
+    lines.lower = std::string(material_text);
+    return lines;
 }
 
 std::string resolve_filament_label(const SlotInfo& slot, const SpoolIdentity* identity,

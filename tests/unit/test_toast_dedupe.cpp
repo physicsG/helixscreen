@@ -2,62 +2,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ui_panel_common.h"
 #include "ui_toast_manager.h"
+#include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/toast_manager_test_access.h"
 #include "lvgl/src/core/lv_obj_draw_private.h"
 #include "lvgl/src/misc/lv_area_private.h"
+#include "pending_startup_warnings.h"
 
 #include <string>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
-
-// Friend accessor (L065): reach ToastManager privates without test-only
-// methods on the production class.
-class ToastManagerTestAccess {
-  public:
-    static void inject(ToastManager& tm, ToastSeverity sev, const char* msg, bool exiting) {
-        ToastManager::ToastInstance inst;
-        inst.severity = sev;
-        inst.message = msg;
-        inst.is_exiting = exiting;
-        tm.active_.push_back(std::move(inst));
-    }
-    static void inject_widget(ToastManager& tm, lv_obj_t* widget, ToastSeverity sev,
-                              const char* msg) {
-        ToastManager::ToastInstance inst;
-        inst.widget = widget;
-        inst.severity = sev;
-        inst.message = msg;
-        tm.active_.push_back(std::move(inst));
-    }
-    static void inject_action(ToastManager& tm, ToastSeverity sev, const char* msg,
-                              toast_action_callback_t cb, void* user_data) {
-        ToastManager::ToastInstance inst;
-        inst.severity = sev;
-        inst.message = msg;
-        inst.action_cb = cb;
-        inst.action_user_data = user_data;
-        tm.active_.push_back(std::move(inst));
-    }
-    static bool refresh_action_duplicate(ToastManager& tm, ToastSeverity sev, const char* msg,
-                                         toast_action_callback_t cb, void* user_data) {
-        return tm.refresh_duplicate(sev, msg, cb, user_data);
-    }
-    static ToastManager::ToastList::iterator find_owning_toast(ToastManager& tm, lv_obj_t* node) {
-        return tm.find_owning_toast(node);
-    }
-    static ToastManager::ToastList::iterator list_end(ToastManager& tm) {
-        return tm.active_.end();
-    }
-    static bool refresh_duplicate(ToastManager& tm, ToastSeverity sev, const char* msg) {
-        return tm.refresh_duplicate(sev, msg);
-    }
-    static void clear(ToastManager& tm) {
-        tm.active_.clear();
-    }
-};
 
 TEST_CASE("Toast dedupe: identical active toast is refreshed, not duplicated", "[toast][dedupe]") {
     auto& tm = ToastManager::instance();
@@ -217,9 +174,9 @@ class ScopedUnknownAttrCounter {
 
 // A typo'd attribute name in a component's XML is silently ignored by the
 // engine: the style value never applies and the only trace is an "Unknown
-// attribute ... (typo?)" warning per render. ToastManager is stubbed out of
-// the test link, so build the registered component the way it does —
-// lv_xml_create with the toast's props — and pin the engine log clean: every
+// attribute ... (typo?)" warning per render. Build the registered component
+// the way ToastManager does — lv_xml_create with the toast's props — and pin
+// the engine log clean: every
 // style attribute on the card, shadow offset included, must be a name a
 // parser claims.
 TEST_CASE_METHOD(LVGLUITestFixture, "toast_notification renders without engine attribute warnings",
@@ -236,8 +193,8 @@ TEST_CASE_METHOD(LVGLUITestFixture, "toast_notification renders without engine a
     lv_obj_delete(toast);
 }
 
-// The real ToastManager is not in the test link; the toast is built the way it
-// builds one, into a stack sized and anchored like its own.
+// The toast is built the way ToastManager builds one, into a stack sized and
+// anchored like its own, so the redraw can be measured without its animation.
 TEST_CASE_METHOD(LVGLUITestFixture, "A new toast redraws only the area it ends up in",
                  "[toast][xml]") {
     lv_obj_t* stack = lv_obj_create(lv_layer_top());
@@ -274,4 +231,33 @@ TEST_CASE_METHOD(LVGLUITestFixture, "A new toast redraws only the area it ends u
     }
 
     lv_obj_delete(stack);
+}
+
+// A toast shown before init() waits in PendingStartupWarnings for the drain
+// that follows init(), rather than being built before init() has registered
+// its close-button callback and teardown. The component is registered here,
+// so a toast built anyway would be visible.
+TEST_CASE_METHOD(LVGLUITestFixture, "ToastManager queues a toast shown before init()", "[toast]") {
+    auto& tm = ToastManager::instance();
+    REQUIRE_FALSE(tm.is_initialized());
+
+    tm.show_with_detail(ToastSeverity::WARNING, "before init", "detail line", 4000);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK_FALSE(tm.is_visible());
+
+    std::vector<std::string> queued;
+    helix::PendingStartupWarnings::instance().drain(
+        [&queued](helix::PendingStartupWarnings::Severity sev, const std::string& m, uint32_t d) {
+            CHECK(sev == helix::PendingStartupWarnings::Severity::WARNING);
+            CHECK(d == 4000);
+            queued.push_back(m);
+        });
+    CHECK(queued == std::vector<std::string>{"before init - detail line"});
+
+    tm.init();
+    tm.show(ToastSeverity::INFO, "after init", 4000);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(tm.is_visible());
+
+    tm.deinit_subjects();
 }

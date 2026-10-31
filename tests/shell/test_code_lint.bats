@@ -183,7 +183,7 @@ setup() {
 
 # --- Concrete Moonraker types must not leak outside the network layer (Plan 3) ---
 # Every consumer of the Moonraker network layer now depends on the interfaces
-# (helix::IMoonrakerClient, IMoonrakerAPI, and the ten IXxxAPI sub-API
+# (helix::IMoonrakerClient, helix::IMoonrakerAPI, and the ten helix::IXxxAPI sub-API
 # interfaces in include/i_moonraker_sub_apis.h), not the concrete classes. The
 # concretes live behind MoonrakerManager, which owns them via
 # std::unique_ptr<MoonrakerAPI> (the concrete facade; the mock inherits it) /
@@ -204,7 +204,7 @@ setup() {
 #
 # Compile-time-only exceptions NOT covered by this lint (by design, not by
 # gap): a consumer references a concrete-class static constexpr timeout
-# (MoonrakerJobAPI::CANCEL_TIMEOUT_MS) and the MoonrakerAdvancedAPI::MPCResult
+# (MoonrakerJobAPI::kCancelTimeoutMs) and the MoonrakerAdvancedAPI::MPCResult
 # qualified-name alias. These aren't runtime polymorphism — MPCResult and the
 # calibration timeouts are defined on IAdvancedAPI and reach the concrete class
 # by inheritance or a `using` alias, so old qualified references keep resolving
@@ -241,7 +241,7 @@ moonraker_concrete_pattern() {
     echo "Concrete Moonraker types referenced outside the network layer:"
     printf '%s\n' "$offenders"
     echo
-    echo "Consumers depend on the interfaces only: IMoonrakerAPI (include/i_moonraker_api.h),"
+    echo "Consumers depend on the interfaces only: helix::IMoonrakerAPI (include/i_moonraker_api.h),"
     echo "helix::IMoonrakerClient (include/i_moonraker_client.h), and the ten sub-API"
     echo "interfaces in include/i_moonraker_sub_apis.h. The concretes live behind"
     echo "MoonrakerManager (include/moonraker_manager.h), which constructs them."
@@ -291,14 +291,15 @@ check_switch_printer_clears_caches() {
         return 1
     fi
 
-    teardown_line=$(printf '%s\n' "$body" | grep -n 'm_restart.teardown()' | head -1 | cut -d: -f1)
+    # tear_down() is the flow's guarded wrapper around the m_restart.teardown hook.
+    teardown_line=$(printf '%s\n' "$body" | grep -nE '^[[:space:]]*tear_down\(\);' | head -1 | cut -d: -f1)
     if [ -z "$teardown_line" ]; then
-        echo "switch_printer() does not call m_restart.teardown()"
+        echo "switch_printer() does not call tear_down()"
         return 1
     fi
 
     if [ "$clear_line" -ge "$teardown_line" ]; then
-        echo "PrinterCacheRegistry::invalidate_all() must precede m_restart.teardown()"
+        echo "PrinterCacheRegistry::invalidate_all() must precede tear_down()"
         return 1
     fi
     return 0
@@ -325,7 +326,7 @@ check_switch_printer_clears_caches() {
     # values on the way down, so position matters as much as presence.
     local mutated="${BATS_TEST_TMPDIR}/application_late_clear.cpp"
     sed -e 's@^    PrinterCacheRegistry::instance().invalidate_all();@@' \
-        -e 's@^    m_restart.teardown();@    m_restart.teardown();\n    PrinterCacheRegistry::instance().invalidate_all();@' \
+        -e 's@^    tear_down();@    tear_down();\n    PrinterCacheRegistry::instance().invalidate_all();@' \
         src/application/printer_switch_flow.cpp > "$mutated"
 
     run check_switch_printer_clears_caches "$mutated"
@@ -347,11 +348,11 @@ check_switch_printer_clears_caches() {
 
 @test "the switch_printer cache-invalidation gate fails when teardown is missing" {
     local mutated="${BATS_TEST_TMPDIR}/application_no_teardown.cpp"
-    grep -v '^    m_restart.teardown();' src/application/printer_switch_flow.cpp > "$mutated"
+    grep -v '^    tear_down();' src/application/printer_switch_flow.cpp > "$mutated"
 
     run check_switch_printer_clears_caches "$mutated"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"m_restart.teardown"* ]]
+    [[ "$output" == *"does not call tear_down()"* ]]
 }
 
 # --- No RTTI code shapes (the firmware builds -fno-rtti) ---
@@ -708,6 +709,65 @@ SHAPES
     lacks "make_thread" "$output"
 }
 
+# --- WiFiManager is built only by get_wifi_manager() ---
+#
+# ~WiFiManager waits, unbounded, for the WiFi control call in progress: the
+# lane worker dereferences the manager for the whole call, so a bounded wait
+# would free it under the worker. That wait is safe only because no production
+# code destroys a WiFiManager: get_wifi_manager()'s instance is never freed.
+# Any other owner in app code would put a wedged wpa_supplicant on its
+# destructor's path. Unavoidable? // WIFI_MANAGER_OWNER_OK: <reason>
+wifi_manager_owner_pattern() {
+    printf '%s' '(make_shared|make_unique)<(helix::)?WiFiManager>|new[[:space:]]+(helix::)?WiFiManager[[:space:]]*[({]|(^|[^_[:alnum:]:])(helix::)?WiFiManager[[:space:]]+[_[:alpha:]][_[:alnum:]]*[[:space:]]*[({;]'
+}
+
+wifi_manager_owner_lint_files() {
+    git ls-files --cached --others --exclude-standard src include firmware |
+        grep -E '\.(cpp|h)$'
+}
+
+check_wifi_manager_single_owner() {
+    local offenders
+    # shellcheck disable=SC2046  # paths have no spaces; word splitting is intended
+    offenders=$(code_offenders "$(wifi_manager_owner_pattern)" WIFI_MANAGER_OWNER_OK $(wifi_manager_owner_lint_files))
+    [ -z "$offenders" ] && return 0
+    echo "WiFiManager built outside get_wifi_manager() (its destructor can wait forever on a wedged daemon):"
+    printf '%s\n' "$offenders"
+    echo "Use helix::get_wifi_manager(). Unavoidable? // WIFI_MANAGER_OWNER_OK: <reason>"
+    return 1
+}
+
+@test "app code builds WiFiManager only through get_wifi_manager()" {
+    run check_wifi_manager_single_owner
+    [ "$status" -eq 0 ]
+}
+
+@test "the WiFiManager owner gate catches constructions and stays quiet on uses and opt-outs" {
+    local f="${BATS_TEST_TMPDIR}/wifi_owner_shapes.cpp"
+    cat > "$f" <<'SHAPES'
+auto wm = std::make_shared<WiFiManager>(true);
+auto wm = std::make_unique<helix::WiFiManager>(std::move(b));
+auto* wm = new WiFiManager(true);
+WiFiManager wm(std::move(b));
+helix::WiFiManager wm;
+std::shared_ptr<WiFiManager> get_wifi_manager();
+explicit WiFiManager(bool silent = false);
+WiFiManager::~WiFiManager() {
+friend class WiFiManagerTestAccess;
+WiFiManager* manager = static_cast<WiFiManager*>(p);
+// std::make_shared<WiFiManager>() in a comment
+auto wm = std::make_shared<WiFiManager>(true); // WIFI_MANAGER_OWNER_OK: the one owner
+SHAPES
+    run code_offenders "$(wifi_manager_owner_pattern)" WIFI_MANAGER_OWNER_OK "$f"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 5 ]
+    lacks "get_wifi_manager" "$output"
+    lacks "explicit" "$output"
+    lacks "TestAccess" "$output"
+    lacks "static_cast" "$output"
+    lacks "OWNER_OK" "$output"
+}
+
 # --- lv_subject_t declarations are value-initialized ---
 #
 # A subject that has not been through lv_subject_init_*() must read as
@@ -754,7 +814,7 @@ check_subjects_value_initialized() {
     local f="${BATS_TEST_TMPDIR}/subject_shapes.h"
     cat > "$f" <<'SHAPES'
     lv_subject_t bare_;
-    lv_subject_t slots_[MAX_SLOTS];
+    lv_subject_t slots_[kMaxSlots];
     std::array<lv_subject_t, 4> rows_;
     lv_subject_t
         split_bare_; ///< clang-format moved the name
@@ -765,7 +825,7 @@ check_subjects_value_initialized() {
     lv_subject_t grid_[2][3];
     std::array<lv_subject_t, static_cast<size_t>(Kind::Count)> cast_rows_;
     lv_subject_t braced_{};
-    lv_subject_t braced_slots_[MAX_SLOTS]{};
+    lv_subject_t braced_slots_[kMaxSlots]{};
     std::array<lv_subject_t, 4> braced_rows_{};
     std::array<lv_subject_t, static_cast<size_t>(Kind::Count)> braced_cast_rows_{};
     lv_subject_t
@@ -1155,6 +1215,72 @@ EOF
     [ -z "$output" ]
 }
 
+# --- One LVGL display per test process --------------------------------------
+#
+# LVGLTestFixture owns the test binary's display. A test that creates another
+# and keeps it makes that one the default, so every responsive decision after
+# it (breakpoints, px tokens, fonts) reads a geometry production never sees,
+# and every later lv_timer_handler() refreshes it too. A display made in a
+# static initializer is worse: it exists in every process the file links into,
+# whether or not one of its cases runs (prestonbrown/helixscreen#1943).
+#
+# File-level on purpose. A test that needs a second display for its own body
+# (a flush-wait probe, a rotation case) deletes it in the same file; the gate
+# asks only that each lv_display_create has an lv_display_delete beside it.
+# tests/lvgl_test_fixture.cpp makes the one display that is meant to live.
+
+# Calls on a line of their own count; comment lines that name one do not.
+display_calls() {
+    grep -E "$1[[:space:]]*\\(" "$2" | grep -cvE '^[[:space:]]*(//|\*)'
+}
+
+unreleased_display_files() {
+    local f creates deletes
+    for f in $(grep -rlE 'lv_display_create[[:space:]]*\(' "$@" 2>/dev/null); do
+        [[ "$f" == */lvgl_test_fixture.cpp ]] && continue
+        creates=$(display_calls lv_display_create "$f")
+        deletes=$(display_calls lv_display_delete "$f")
+        [ "$deletes" -lt "$creates" ] && echo "$f"
+    done
+    return 0
+}
+
+@test "every test display beside the fixture's is deleted in the same file" {
+    run unreleased_display_files tests/ --include='*.cpp' --include='*.h'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || fail "derive from LVGLTestFixture instead of creating a display: $output"
+}
+
+@test "the display gate fires on a kept display and stays quiet on a deleted one" {
+    local d="${BATS_TEST_TMPDIR}/displays"
+    mkdir -p "$d/tests"
+    cat > "$d/kept.cpp" <<'EOF'
+struct Init {
+    Init() { lv_display_t* disp = lv_display_create(800, 480); (void)disp; }
+};
+static Init init;
+EOF
+    cat > "$d/prose.cpp" <<'EOF'
+// The fixture builds its display with a bare lv_display_create(), no driver.
+ * lv_display_create() is never called here.
+EOF
+    cat > "$d/scoped.cpp" <<'EOF'
+TEST_CASE("a second display for one body") {
+    lv_display_t* disp = lv_display_create(64, 32);
+    lv_display_delete(disp);
+}
+EOF
+    cat > "$d/tests/lvgl_test_fixture.cpp" <<'EOF'
+void ensure() { s_display = lv_display_create(800, 480); }
+EOF
+    run unreleased_display_files "$d" --include='*.cpp'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kept.cpp"* ]] || fail "kept display not reported: $output"
+    lacks "scoped.cpp" "$output"
+    lacks "prose.cpp" "$output"
+    lacks "lvgl_test_fixture.cpp" "$output"
+}
+
 # --- AmsState is initialized with its XML names, always -------------------------
 #
 # AmsState is a process-wide singleton, so a single init_subjects(false) -
@@ -1385,10 +1511,10 @@ check_deinit_all_does_not_log() {
     local out='' err=''
     # `make -C <dir>` implies --print-directory and exports it through MAKEFLAGS,
     # so an inner make launched under one writes "Entering/Leaving directory" to
-    # STDOUT around the echoed value. --no-print-directory cancels that inherited
-    # -w; -s alone does not. make's stderr is kept for the failure message: a red
+    # STDOUT around the echoed value. scratch_make's --no-print-directory cancels
+    # that inherited -w; -s alone does not. make's stderr is kept for the failure message: a red
     # here must say what make said.
-    out="$(make --no-print-directory -s print-vacuous-max \
+    out="$(scratch_make -s print-vacuous-max \
         2>"$BATS_TEST_TMPDIR/vacuous-max.err")" || true
     [[ "$out" =~ ^[0-9]+$ ]] && return 0
     err="$(cat "$BATS_TEST_TMPDIR/vacuous-max.err")" || true
@@ -1458,14 +1584,14 @@ check_observer_guard_move_clears_cleanup() {
 }
 
 @test "ObserverGuard's move paths clear the moved-from cleanup" {
-    run check_observer_guard_move_clears_cleanup include/ui_observer_guard.h
+    run check_observer_guard_move_clears_cleanup src/ui/ui_observer_guard.cpp
     [ "$status" -eq 0 ]
 }
 
 @test "the ObserverGuard move gate fires when std::move comes back" {
-    local mutated="${BATS_TEST_TMPDIR}/ui_observer_guard_moved.h"
+    local mutated="${BATS_TEST_TMPDIR}/ui_observer_guard_moved.cpp"
     sed -e 's@std::exchange(other\.cleanup_, nullptr)@std::move(other.cleanup_)@' \
-        include/ui_observer_guard.h > "$mutated"
+        src/ui/ui_observer_guard.cpp > "$mutated"
 
     run check_observer_guard_move_clears_cleanup "$mutated"
     [ "$status" -eq 1 ]
@@ -1473,9 +1599,9 @@ check_observer_guard_move_clears_cleanup() {
 }
 
 @test "the ObserverGuard move gate fails closed when a move path disappears" {
-    local mutated="${BATS_TEST_TMPDIR}/ui_observer_guard_dropped.h"
+    local mutated="${BATS_TEST_TMPDIR}/ui_observer_guard_dropped.cpp"
     awk '/cleanup_.*other\.cleanup_/ && !seen { seen = 1; next } { print }' \
-        include/ui_observer_guard.h > "$mutated"
+        src/ui/ui_observer_guard.cpp > "$mutated"
 
     run check_observer_guard_move_clears_cleanup "$mutated"
     [ "$status" -eq 1 ]
@@ -3211,10 +3337,10 @@ own_endpoint_http_offenders() {
             echo "${f#"$root"/}: names one of our hosts but sends without tls::trusted_*"
         fi
     done
-    awk '/= worker_url\(\);|= WORKER_URL;/ { on = 1; seen = 1 }
+    awk '/= worker_url\(\);|= kWorkerUrl;/ { on = 1; seen = 1 }
          on && /^[^\/]*(requests::|HttpClient)/ { print "debug_bundle_collector.cpp:" FNR ": " $0 }
          on && /^}/ { on = 0 }
-         END { if (!seen) print "debug_bundle_collector.cpp: upload to WORKER_URL not found" }' \
+         END { if (!seen) print "debug_bundle_collector.cpp: upload to kWorkerUrl not found" }' \
         "$root/src/system/debug_bundle_collector.cpp"
     grep -rnF '["X-API-Key"]' "$root/src" | grep -v '^[^:]*/src/system/ingest_client\.cpp:' |
         sed 's|$| (ingest uploads go through helix::ingest::post)|'
@@ -3232,7 +3358,7 @@ own_endpoint_http_offenders() {
     printf '    // requests::request is fine in a comment\n' > "$d/update_checker.cpp"
     printf '    auto r = requests::request(req);\n' > "$d/telemetry_manager.cpp"
     printf '    hv::HttpClient cli;\n' > "$d/crash_reporter.cpp"
-    printf '    req->headers["X-API-Key"] = API_KEY;\n' > "$d/ingest_client.cpp"
+    printf '    req->headers["X-API-Key"] = kApiKey;\n' > "$d/ingest_client.cpp"
     mkdir -p "$d/../ui"
     printf 'auto u = "https://api.github.com/x";\nauto r = requests::get(u);\n' > "$d/../ui/rogue.cpp"
     printf 'auto u = "https://helixscreen.org/x";\nauto r = helix::tls::trusted_request(q);\n' \
@@ -3317,10 +3443,213 @@ own_endpoint_http_offenders() {
 # thumbnail decode, per file-detail open and per print-status build.
 
 @test "per-event ESP32 paths read free PSRAM, never walk the heap" {
-    local files="include/esp_psram_thumbnail.h src/system/memory_utils.cpp src/ui/ui_panel_print_select.cpp src/print/active_print_media_manager.cpp src/ui/ui_panel_print_status.cpp"
+    local files="include/esp_psram_thumbnail.h include/tinfl_inflate.h src/system/memory_utils.cpp src/ui/ui_panel_print_select.cpp src/print/active_print_media_manager.cpp src/ui/ui_panel_print_status.cpp"
     run bash -c "grep -n 'heap_caps_get_largest_free_block\|heap_caps_get_info' $files | grep -v ':[0-9]*: *//'"
     [ "$status" -eq 1 ]  # grep returns 1 when no matches found
 
-    run grep -n 'heap_caps_get_free_size(MALLOC_CAP_SPIRAM)' include/esp_psram_thumbnail.h
+    # The thumbnail decode's allocator: its free_bytes() gates every decode.
+    run grep -n 'heap_caps_get_free_size(MALLOC_CAP_SPIRAM)' include/tinfl_inflate.h
     [ "$status" -eq 0 ]
+}
+
+# --- Home-widget flex styles must switch the layout on ---
+# flex_flow / flex_main_place on a style only configure a flex layout the object
+# already has. A bind_style that sets them without layout="flex" leaves the children
+# on the default layout, stacked at the top-left corner on top of each other.
+
+home_widget_flex_styles_without_layout() {
+    grep -nE '<style [^>]*(flex_flow|flex_main_place)=' "$@" | grep -v 'layout="flex"'
+}
+
+@test "home-widget styles that set flex_flow or flex_main_place also set layout flex" {
+    run home_widget_flex_styles_without_layout ui_xml/components/panel_widget_*.xml \
+        ui_xml/components/speed_flow_part.xml ui_xml/components/chamber_dryer_row.xml \
+        ui_xml/components/host_health_mcu_row.xml
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "the home-widget flex-style gate fires on a style without layout flex" {
+    local d="${BATS_TEST_TMPDIR}/flex_style"
+    mkdir -p "$d"
+    printf '%s\n' '<style name="x_inline" flex_flow="row" flex_main_place="start"/>' > "$d/bad.xml"
+    run home_widget_flex_styles_without_layout "$d/bad.xml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"x_inline"* ]]
+}
+
+# --- Vendor branches in generic code ---
+# A vendor name belongs to one module per capability (.claude/rules/vendor-abstraction.md).
+# The ratchet lets counts fall and never rise.
+
+@test "no new vendor branches in generic code" {
+    run python3 scripts/check_vendor_branches.py
+    [ "$status" -eq 0 ]
+}
+
+@test "the vendor-branch gate catches each shape and honours VENDOR_OK" {
+    local root="$BATS_TEST_TMPDIR/root"
+    mkdir -p "$root/src/ui" "$root/scripts"
+    : > "$root/scripts/vendor_branch_baseline.txt"
+    cat > "$root/src/ui/x.cpp" <<'CPP'
+#if defined(HELIX_PLATFORM_K2)
+#endif
+bool a(AmsType t) { return t == AmsType::CFS; }
+bool b() { return flashforge_machine_id().has_value(); }
+CPP
+    run python3 scripts/check_vendor_branches.py --root "$root"
+    [ "$status" -eq 1 ]
+    contains "x.cpp:platform-macro" "$output"
+    contains "x.cpp:amstype-branch" "$output"
+    contains "x.cpp:board-probe" "$output"
+
+    cat > "$root/src/ui/x.cpp" <<'CPP'
+// VENDOR_OK: test
+#if defined(HELIX_PLATFORM_K2)
+#endif
+// VENDOR_OK: test
+bool a(AmsType t) { return t == AmsType::CFS; }
+bool b() { return flashforge_machine_id().has_value(); } // VENDOR_OK: test
+CPP
+    run python3 scripts/check_vendor_branches.py --root "$root"
+    [ "$status" -eq 0 ]
+}
+
+# The ratchet compares per-file counts to the baseline.
+@test "the vendor-branch gate fails above a nonzero baseline and passes at or below it" {
+    local root="$BATS_TEST_TMPDIR/ratchet"
+    mkdir -p "$root/src/ui"
+    printf 'bool a(AmsType t) { return t == AmsType::CFS; }\nbool b(AmsType t) { return t != AmsType::AFC; }\n' \
+        > "$root/src/ui/x.cpp"
+    printf '1 src/ui/x.cpp:amstype-branch\n' > "$root/base.txt"
+    run python3 scripts/check_vendor_branches.py --root "$root" --baseline "$root/base.txt"
+    [ "$status" -eq 1 ] || fail "two branches over a baseline of one passed"
+    printf '2 src/ui/x.cpp:amstype-branch\n' > "$root/base.txt"
+    run python3 scripts/check_vendor_branches.py --root "$root" --baseline "$root/base.txt"
+    [ "$status" -eq 0 ] || fail "two branches at a baseline of two failed: $output"
+    printf '3 src/ui/x.cpp:amstype-branch\n' > "$root/base.txt"
+    run python3 scripts/check_vendor_branches.py --root "$root" --baseline "$root/base.txt"
+    [ "$status" -eq 0 ] || fail "below baseline failed: $output"
+    contains "lowered" "$output"
+}
+
+@test "the vendor-branch gate is quiet on AmsType::NONE and on build-shape macros" {
+    local root="$BATS_TEST_TMPDIR/quiet"
+    mkdir -p "$root/src/ui"
+    cat > "$root/src/ui/x.cpp" <<'CPP'
+bool a(AmsType t) { return t == AmsType::NONE; }
+#if defined(HELIX_PLATFORM_ESP32)
+#endif
+CPP
+    run python3 scripts/check_vendor_branches.py --root "$root"
+    [ "$status" -eq 0 ] || fail "quiet cases reported: $output"
+}
+
+@test "the vendor-branch gate reads multi-line conditionals and honours VENDOR_OK above them" {
+    local root="$BATS_TEST_TMPDIR/multi"
+    mkdir -p "$root/src/ui"
+    printf '#if defined(HELIX_PLATFORM_K2) || \\\n    defined(HELIX_PLATFORM_K1)\n#endif\n' > "$root/src/ui/x.cpp"
+    run python3 scripts/check_vendor_branches.py --root "$root"
+    [ "$status" -eq 1 ] || fail "multi-line conditional not counted"
+    printf '// VENDOR_OK: test\n#if defined(HELIX_PLATFORM_K2) || \\\n    defined(HELIX_PLATFORM_K1)\n#endif\n' > "$root/src/ui/x.cpp"
+    run python3 scripts/check_vendor_branches.py --root "$root"
+    [ "$status" -eq 0 ] || fail "VENDOR_OK above a multi-line conditional ignored: $output"
+}
+
+@test "the vendor-branch gate catches a name() compare written either way round" {
+    local root="$BATS_TEST_TMPDIR/names"
+    mkdir -p "$root/src/ui"
+    printf 'bool a(X* x) { return "AFC" == x->name(); }\nbool b(X x) { return x.name() == "AFC"; }\n' > "$root/src/ui/x.cpp"
+    run python3 scripts/check_vendor_branches.py --root "$root"
+    [ "$status" -eq 1 ] || fail "name() compares not counted"
+    contains "2 branch" "$output"
+}
+
+# A device action naming a guided flow is refused when the flow is unregistered, so every
+# boot path that registers XML components must also register every family of flows the
+# guided-flow header declares.
+@test "every boot path registers the guided device flows" {
+    local f fn
+    local -a families
+    mapfile -t families < <(grep -oE 'register_[a-z0-9_]+_device_flows\(\);' include/ui_guided_device_flow.h |
+        grep -v '^register_builtin_')
+    [ "${#families[@]}" -ge 2 ] || fail "found ${#families[@]} flow families in include/ui_guided_device_flow.h"
+    for fn in "${families[@]}"; do
+        run grep -cE "^[[:space:]]*${fn%();},\$" src/ui/ui_guided_device_flow.cpp
+        [ "$output" = "1" ] || fail "register_builtin_guided_device_flows() does not run ${fn%;}"
+    done
+    for f in src/application/application.cpp firmware/helixscreen-esp32/components/helixapp/app_boot.cpp; do
+        run grep -cF "register_builtin_guided_device_flows();" "$f"
+        [ "$output" = "1" ] || fail "$f does not call register_builtin_guided_device_flows()"
+    done
+}
+
+# A tap binds clicked; a hold handler that acts ends its press with
+# helix::ui::end_press() (docs/devel/LVGL9_XML_GUIDE.md § "Tap and hold").
+# short_clicked is never a tap's trigger: LVGL skips it after any press that ran
+# past the long-press time, whether or not a hold handler acted, so a slow tap on
+# a short_clicked widget does nothing. Names every XML trigger and C++ registration.
+short_clicked_taps() {
+    grep -rnE 'trigger="short_clicked"' "$1" --include='*.xml' 2>/dev/null
+    grep -rnE 'lv_obj_add_event_cb\([^;]*LV_EVENT_SHORT_CLICKED' "$2" --include='*.cpp' \
+        --include='*.h' 2>/dev/null
+    return 0
+}
+
+@test "no tap binds short_clicked" {
+    run short_clicked_taps ui_xml/ src/
+    [ "$status" -eq 0 ]
+    [ -z "$output" ] || fail "$output"
+}
+
+@test "the short_clicked gate fires on an XML trigger and a C++ registration" {
+    local d="${BATS_TEST_TMPDIR}/short_clicked"
+    mkdir -p "$d/xml" "$d/src"
+    printf '%s\n' '<lv_obj><event_cb trigger="short_clicked" callback="on_tap"/></lv_obj>' \
+        > "$d/xml/offender.xml"
+    printf '%s\n' 'void f(lv_obj_t* o) { lv_obj_add_event_cb(o, cb, LV_EVENT_SHORT_CLICKED, nullptr); }' \
+        > "$d/src/offender.cpp"
+    run short_clicked_taps "$d/xml" "$d/src"
+    [ "$status" -eq 0 ]
+    contains "offender.xml" "$output"
+    contains "offender.cpp" "$output"
+}
+
+# --- A test that needs the built app skips through require_app ---
+# build.yml's compile job finds the files to run against its fresh binary by
+# their require_app calls (tests/shell/helpers.bash). A file that skips on a
+# missing app with its own `skip` is skipped by the Shell Tests job and never
+# picked up by the compile job, so it runs nowhere in CI.
+app_skip_offenders() { # <bats files...>
+    grep -nE '(^|[|&;[:space:]])skip([[:space:]]|$)' "$@" | grep -E 'helix-screen|build/bin/' || true
+}
+
+@test "a shell test that needs the built app skips through require_app" {
+    local files offenders
+    files=$(ls tests/shell/*.bats | grep -v '/test_code_lint\.bats$')
+    # shellcheck disable=SC2086  # paths have no spaces
+    offenders=$(app_skip_offenders $files)
+    if [ -n "$offenders" ]; then
+        echo "These skip on a missing app without require_app, so CI runs them nowhere:"
+        echo "$offenders"
+        return 1
+    fi
+    # shellcheck disable=SC2086
+    [ -n "$(grep -lE '^[[:space:]]*require_app[[:space:]]' $files)" ]
+}
+
+@test "the app-skip lint catches a hand-rolled skip and passes require_app" {
+    local f="$BATS_TEST_TMPDIR/shapes.bats"
+    cat >"$f" <<'SHAPES'
+    [ -x "$BIN" ] || skip "helix-screen missing"
+    [ -x ./build/bin/helix-screen ] || skip "no app"
+    require_app "$BIN"
+    [ -x "$PY" ] || skip "translations venv not set up"
+    # the skip_count of helix-screen frames
+    ./build/bin/helix-screen --test --skip-wizard
+SHAPES
+    run app_skip_offenders "$f"
+    [ "${#lines[@]}" -eq 2 ]
+    lacks "require_app" "$output"
+    lacks "venv" "$output"
 }

@@ -3,10 +3,17 @@
 
 #include "ui_exclude_object_badges.h"
 
+#include "ui_text.h"
+
 #include "display_numbering.h"
 #include "gcode_parser.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_excluded_objects_state.h"
+#include "src/ui/panel_widgets/content_chrome.h"
+#include "text_io.h"
 #include "theme_manager.h"
+
+#include <spdlog/fmt/fmt.h>
 
 namespace helix::ui {
 
@@ -62,6 +69,35 @@ std::vector<ObjectBadge> compute_object_badges(const PrinterExcludedObjectsState
     return badges;
 }
 
+std::string object_display_name(const std::string& name, int defined_index, const lv_font_t* font) {
+    if (!name.empty() && font_renders_text(font, name.c_str())) {
+        return name;
+    }
+    if (defined_index < 0) {
+        return lv_tr("Object");
+    }
+    return fmt::format(fmt::runtime(lv_tr("Object {}")), lane_number_text(defined_index));
+}
+
+int defined_object_index(const std::vector<std::string>& defined, const std::string& name) {
+    const std::string wanted = helix::text_io::to_upper(name);
+    for (size_t i = 0; i < defined.size(); ++i) {
+        if (helix::text_io::to_upper(defined[i]) == wanted) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+std::string object_display_name(const std::vector<std::string>& defined, const std::string& name,
+                                const lv_font_t* font) {
+    return object_display_name(name, defined_object_index(defined, name), font);
+}
+
+std::string object_message_name(const std::vector<std::string>& defined, const std::string& name) {
+    return object_display_name(defined, name, theme_manager_get_font("font_body"));
+}
+
 lv_color_t object_badge_color(int defined_index) {
     return theme_manager_get_object_palette_color(defined_index);
 }
@@ -76,7 +112,7 @@ const lv_font_t* object_badge_font() {
 
 int32_t object_badge_diameter() {
     const lv_font_t* font = object_badge_font();
-    return font ? lv_font_get_line_height(font) : 0;
+    return helix::line_px(font);
 }
 
 static int look_subject_int(lv_subject_t* subject) {

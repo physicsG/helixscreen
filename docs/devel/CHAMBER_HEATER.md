@@ -80,7 +80,7 @@ The chamber ships with the printer. Klipper exposes the pair directly:
 - `heater_generic chamber_heater` — the heating element (HEATING setpoint)
 - `temperature_fan chamber_fan` — chamber cooling (MAINTAINING setpoint)
 
-The printer's own `M141`/`M191` macros split the setpoint across the pair: above 40°C the target lands on the heater, at or below 40°C it parks on the cooling fan with the heater at 0. `M141 S0` resets the fan to its **configured resting target** (`target_temp` in the fan's config section — 35°C on our K2), not to literal 0. HelixScreen mirrors this split in `chamber_effective_setpoint()` (`include/ui_temperature_utils.h`) and routes chamber sets through `M141` when the printer defines the macro (`chamber_uses_m141()`), falling back to raw `SET_HEATER_TEMPERATURE` / `SET_TEMPERATURE_FAN_TARGET` otherwise.
+The printer's own `M141`/`M191` macros split the setpoint across the pair: above 40°C the target lands on the heater, at or below 40°C it parks on the cooling fan with the heater at 0. `M141 S0` resets the fan to its **configured resting target** (`target_temp` in the fan's config section — 35°C on our K2), not to literal 0. `M141 S0` and a deliberate set equal to the resting value are **byte-identical on the wire** (heater target 0, fan target at resting), so HelixScreen labels that state `Resting` rather than guessing: the target number always displays, and the status glyph is the circled-A auto indicator instead of the Maintaining check — the machine's standing behavior, not a deliberate set. HelixScreen mirrors this split in `chamber_effective_setpoint()` (`include/ui_temperature_utils.h`) and routes chamber sets through `M141` when the printer defines the macro and it is not known to leave the chamber heater alone (`chamber_uses_m141()`), falling back to raw `SET_HEATER_TEMPERATURE` / `SET_TEMPERATURE_FAN_TARGET` otherwise. Where `configfile` exposes the macro's body, `MacroParamCache::macro_sets_target()` reads it, following the macros it calls: a body that never sets the chamber heater is some other macro named `M141` (a Voron macro set uses it for an exhaust-fan target alone), and routing a heater set through it never heats. A body Klipper hides, as the K2's is, keeps `M141`.
 
 These printers need no diagnostics backend — the generic backend matches by keyword and provides no diagnostics surface; the standard status fields are the diagnostics.
 
@@ -191,6 +191,9 @@ generic kinds above; they are deliberately not subjects, so nothing can bind a v
 | `chamber_dryer_active` | int 0/1 | A drying cycle is running on the appliance |
 | `chamber_dryer_text` | string | The running cycle's readout, "41/55°C  3:12 left" ("" when idle): live chamber temp against the cycle's target, then the appliance's own countdown |
 | `printer_has_chamber_dryer` | int 0/1 | Capability: the dryer row, from the backend's `dryer_capabilities().supported` |
+| `chamber_heater_command_rejected` | int 0/1 | The heater turned down the last target we sent and has not taken one since (see "Refused Targets") |
+| `printer_has_chamber_target_route` | int 0/1 | Capability: the backend names a set-target route around the gcode queue (`set_target_method()`) |
+| `chamber_heater_rejection_text` | string | Translated sentence for the classified rejection ("" when none): what the banner and the chamber prompt show |
 
 Capability setters round-trip through `PrinterCapabilitiesState`; `set_hardware` raises them exactly when the backend provides the corresponding surface. Backends differ in what they publish, so each readout column on the card follows its own capability — a permanently blank row tells the user nothing. The External badge sits in its own Mode column rather than beside the element temperature, so it survives a backend that reports no element.
 
@@ -217,13 +220,87 @@ Two distinct mechanisms, both informational in v1 — HelixScreen never fights a
 
 ---
 
+## Refused Targets
+
+An appliance can turn a target down: another controller changed it between our read and
+our write, it was switched off on the unit, it is faulted or inhibited, or it rejected the
+printer's credentials. The glue then zeroes the heater target, and a start gcode that
+follows with `TEMPERATURE_WAIT` on the chamber waits forever.
+
+- **Border.** `parse_diagnostics()` fills `rejection` (`CommandRejection`: None, Conflict,
+  Refused, Auth), `refusal_cause` (`RefusalCause`: TurnedOff, Fault, Inhibited,
+  Unspecified), `rejection_seq` (one per rejection, never reset) and `rejection_target_c`.
+  DragonBreath reads `protocol_error_code` (stable codes: `countermanded`, `fault_latched`,
+  `inhibited`, `auth_failed`, `conflict_retries_exhausted`, `invalid_command`,
+  `missing_lease_id`, `lease_lost`, `heater_busy`, or a raw firmware code),
+  `protocol_error_seq` and `protocol_error_target`; the glue clears them on the next target
+  intent. A glue that sends only the free-text `protocol_error` never raises a rejection,
+  but its clearing does report none outstanding.
+- **Latch.** `PrinterTemperatureState` sets `chamber_heater_command_rejected` on the first
+  report (logged at warn), bumps an internal event count on every later `seq`, and clears
+  when the device reports none outstanding or the heater target follows the requested one
+  (any new nonzero target when none was reported).
+- **Route around the queue.** `set_target_method()` names a JSON-RPC method taking
+  `{"target": °C}` that does not wait on the gcode mutex (DragonBreath:
+  `printer.dragonbreath.set_target`). `TemperatureController` sends chamber targets through
+  it; a "method not found" answer switches chamber targets to gcode for the session.
+  `parse_chamber_route_reply()` reads the answer: `accepted` true, false or null, with
+  `pending` true when the route stopped waiting on the device (still trying, not a failure),
+  reason `superseded` (a newer target governs, not a failure) and `klipper_shutdown` (the
+  printer is shut down). A retry (`retry_chamber_target()`) never falls back to gcode, since
+  that would queue behind the wait it is meant to release.
+- **Device wait.** A backend may report the device's own wait on the chamber
+  (`wait_active`, `wait_target_c`; DragonBreath's `wait_active` / `wait_target`, set
+  while its M191 waits and cleared on every exit). `PrinterTemperatureState` exposes them
+  as `chamber_wait_active()` / `chamber_wait_target_c()`.
+- **Pre-print label.** While a heater wait keeps reporting, `PrintStartCollector` labels it
+  "Waiting for chamber <cur> / <target>°C" when the wait is the chamber's. The command at
+  the print position settles it when it is one: with a chamber heater configured, `M191`
+  or a `TEMPERATURE_WAIT` whose `SENSOR` is the chamber heater itself (`wait_names_chamber_heater()`,
+  `include/chamber_wait_line.h`; read again whenever the position moves). With no chamber
+  heater, `M191` is some macro's wait and names nothing. Otherwise, with
+  the nozzle and bed at target: the device reports its own wait (its target), the chamber
+  heater is heating toward a target, or, once the wait has outlasted `kChamberWaitSettle`
+  (M109 settling) with the chamber heater at 0 ("Waiting for chamber <cur>°C"), the heater
+  refused its target. Any other wait (a heat soak on a chamber sensor, with or without a
+  heater beside it, or a probe coil) keeps the announced phase. It raises
+  `print_start_chamber_wait` on `PrinterPrintState` while this tick reads the wait as the
+  chamber's.
+- **Prompt.** `ChamberStallPrompt` (`include/chamber_stall_prompt.h`) asks the pure
+  `ChamberStallArbiter`: a chamber wait while rejected prompts once per rejection; a chamber
+  wait at target 0 with no rejection prompts once per job; a rejection with no job toasts.
+  The prompt closes itself when the job ends, the wait clears (the chamber reached its
+  temperature from any source) or the heater takes a target. Try Again resends the
+  reported target (else the last chamber target this app sent, else the waiting command's
+  own temperature), stays open and shows the route's outcome; it is hidden without a target
+  or a route. Keep waiting dismisses.
+- **Which wait, which cancel.** The prompt reads the line the print is executing
+  (`virtual_sdcard.file_position`, then a 256-byte range before it) with
+  `classify_chamber_wait_line()`. They end differently, so `chamber_cancel_path()` picks
+  Cancel print's sequence:
+
+  | Waiting command | Cancel print |
+  |-----------------|--------------|
+  | `M191` | target 0 by the route (the module's wait loop ends on it), then `printer.print.cancel` (`AbortManager::Entry::Cancel`, no queue probe, no emergency stop) |
+  | `TEMPERATURE_WAIT ... MINIMUM=` | only M112 + FIRMWARE_RESTART end it: a confirmation saying so, then `AbortManager::Entry::EmergencyStop` |
+  | anything else (a macro holding the wait, an unreadable file) | as M191; if the cancel then times out, `AbortManager` escalates only per the user's cancel-escalation setting |
+
+  The device's own wait report, when present, counts as `M191` with its target and needs
+  no file read.
+- **Banner.** `chamber_fault_banner` shows the rejection when nothing faulted is behind it,
+  with Retry when the backend has a route (`printer_has_chamber_target_route`). Retry sends
+  by the route; gcode only when no job holds the machine. The banner is on the
+  print-status panel at MEDIUM and up.
+
+---
+
 ## Adding a Chamber-Heater Backend
 
 One file + one registry line + one test + one mock shape. The vendor-abstraction test: adding a second appliance must touch exactly the files below — if you find yourself editing the status parser, the subscription builder, *and* the panel, the abstraction is missing something.
 
 1. **Create `src/printer/chamber_heater_backend_<name>.cpp`** — subclass `ChamberHeaterBackend` (see `chamber_heater_backend_panda_breath.cpp` for the minimal shape, `chamber_heater_backend_dragonbreath.cpp` for the full diagnostics parse). Implement `id()`, `discovery_confidence()`, and the capability questions; return `std::nullopt` from `parse_diagnostics()` until the status schema is hardware-verified. Give the file a `// VENDOR_OK:` header comment.
 
-2. **Register it** in the `REG` vector in `chamber_heater_backend_generic.cpp` (`registry()`), plus the `<name>_backend_instance()` free-function pattern the existing backends use. The Makefile picks the new `.cpp` up by wildcard; also add it to `components/helixapp/app_srcs.txt` (ESP32 manifest — the pre-commit gate fails the link otherwise).
+2. **Register it** in the `kReg` vector in `chamber_heater_backend_generic.cpp` (`registry()`), plus the `<name>_backend_instance()` free-function pattern the existing backends use. The Makefile picks the new `.cpp` up by wildcard; also add it to `components/helixapp/app_srcs.txt` (ESP32 manifest — the pre-commit gate fails the link otherwise).
 
 3. **Add a `parse_diagnostics` test** in `tests/unit/test_chamber_heater_backend.cpp` — a live nominal payload, a faulted/edge variant, and a foreign-payload rejection (mirror the three DragonBreath cases).
 
@@ -248,9 +325,30 @@ HELIX_MOCK_OBJECTS="heater_generic dragonbreath dragonbreath output_pin dragonbr
 ./build/bin/helix-tests "[chamber][actions]" # fault reset + filter fan gcode
 ```
 
-Per-file: `test_chamber_heater_backend.cpp` (match/parse), `test_chamber_heater_discovery.cpp` (discovery hook), `test_chamber_diagnostics_subjects.cpp`, `test_chamber_ceiling_actions.cpp`, `test_chamber_mock_appliances.cpp`, `test_chamber_panel_diagnostics.cpp`, `test_chamber_temperature.cpp`, `test_chamber_mode_icon_label_parity.cpp`.
+Per-file: `test_chamber_heater_backend.cpp` (match/parse), `test_printer_discovery.cpp` (discovery hook, keyword ranking), `test_chamber_diagnostics_subjects.cpp`, `test_chamber_ceiling_actions.cpp`, `test_chamber_mock_appliances.cpp`, `test_chamber_panel_diagnostics.cpp`, `test_chamber_temperature.cpp`, `test_chamber_mode_icon_label_parity.cpp`.
 
 ---
+
+## Chamber Air Modes
+
+Separate from heating: some enclosed printers route chamber air one of two ways with a set
+of fans the firmware drives together. HelixScreen names the mode and sends the firmware's
+macro; which fans run at which speed is the firmware's.
+
+| Piece | Where |
+|-------|-------|
+| Capability | `include/chamber_air_modes.h` (`helix::chamber_air`): `enum class AirMode { Recirculate, Exhaust, Off }`, `bool supported(hw)`, `std::vector<AirMode> modes(hw)`, `bool offers(hw, AirMode)`, `std::string mode_gcode(hw, AirMode)`, `const char* mode_id(AirMode)`, `std::optional<AirMode> parse_mode_id(std::string_view)`, `std::string provider_name(hw)` |
+| Providers | `kProviders` in `src/printer/chamber_air_modes.cpp`: a detection predicate and one macro per mode. A mode is offered only while its macro is defined. Z-Mod on the Creator 5 is the first row (`AIR_CIRCULATION_INTERNAL` / `_EXTERNAL` / `_STOP`) |
+| Subjects | `printer_has_chamber_air_recirculate`, `printer_has_chamber_air_exhaust`, `printer_has_chamber_air_off` (`PrinterCapabilitiesState`) |
+| UI | the **Chamber air** row in `ui_xml/fan_control_overlay.xml`; one callback, `on_chamber_air_mode_clicked`, whose `user_data` is the `mode_id` (`src/ui/ui_fan_control_overlay.cpp`) |
+| Tests | `[chamber_air]` in `tests/unit/test_chamber_air_modes.cpp` |
+
+**No active mode.** A mode macro sets several fans once, and every fan stays individually
+adjustable afterwards, so the fan speeds cannot be read back as a mode. The buttons are
+actions, never a selection. A firmware that publishes its mode would add a reader to its
+row and a subject, not a speed heuristic.
+
+Adding a second firmware is one row in `chamber_air_modes.cpp`.
 
 ## Verification Log
 

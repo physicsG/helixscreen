@@ -29,6 +29,8 @@ struct PageParams {
     uint32_t bits_per_pixel = 8;           // 8 for SGRAY, 24 for SRGB
     uint32_t num_colors = 1;               // 1 for SGRAY, 3 for SRGB
     std::string media_type = "stationery"; // PWG media type keyword
+    std::string page_size_name;            // PWG media size name, e.g. "iso_a4_210x297mm"
+    uint32_t total_page_count = 1;         // Pages in the document; 0 = unknown
 };
 
 /// Generate a complete PWG Raster document from a full-page bitmap.

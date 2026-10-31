@@ -21,7 +21,7 @@ namespace helix::ui {
  * Modes:
  *   1 = encoder (0-100 clog%), color gradient from safe to danger
  *   2 = flowguard (symmetrical, -100..+100 tangle..clog)
- *   3 = AFC buffer (0-100 fault proximity)
+ *   3 = buffer fault countdown (0-100 fault proximity)
  *
  * The home widget draws the same subjects as a horizontal scale instead — see
  * UiClogBar (ui_clog_bar.h). This class had a second "fill mode" presentation

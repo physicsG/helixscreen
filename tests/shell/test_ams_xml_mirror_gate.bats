@@ -57,7 +57,7 @@ EOF
     sed -i '/^        helix::xml::register_subject_in_current_scope(name_buf, &slot_error_severity_\[i\]);$/d' "$SRC"
     run python3 "$SCRIPT" --file "$SRC"
     [ "$status" -eq 1 ]
-    contains "ams_slot_%d_error_severity[MAX_SLOTS]" "$output"
+    contains "ams_slot_%d_error_severity[kMaxSlots]" "$output"
 }
 
 @test "a mirror entry commented out is caught" {

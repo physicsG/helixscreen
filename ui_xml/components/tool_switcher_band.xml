@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- A head's filament colour across the foot of its cell: the one band every
+     tool switcher cell draws (rail segment, face, picker cell). The widget
+     sizes it per surface (tool_switcher_band() decides): the lower part of the
+     cell carrying the material name where one small line fits, else a plain
+     bar. The fill paints through the swatch painter (ui_swatch.h): the
+     contrast edge, a multi-colour spool's split and the filament's finish. A
+     neutral band shows where the colour is unknown, with no text. The caller
+     lays it out as the last child of a column. -->
+<component>
+  <api>
+    <!-- The surface's band height and labelled subjects. -->
+    <prop name="band_h" type="string" default="tool_switcher_band_h"/>
+    <prop name="band_labelled" type="string" default="tool_switcher_band_labelled"/>
+    <prop name="color" type="string" default=""/>
+    <prop name="colors" type="string" default=""/>
+    <prop name="finish" type="string" default=""/>
+    <prop name="has_color" type="string" default=""/>
+    <prop name="text" type="string" default=""/>
+    <prop name="text_color" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" style_radius="0" style_border_width="0" style_pad_all="0" style_bg_opa="255"
+        style_bg_color="#border" clickable="false" event_bubble="true" scrollable="false">
+    <bind_style_prop prop="height" subject="$band_h"/>
+    <swatch_paint name="tool_switcher_band_fill"
+                  width="100%" height="100%" style_radius="0" bind_color="$color" bind_colors="$colors"
+                  bind_finish="$finish">
+      <bind_flag_if_eq subject="$has_color" flag="hidden" ref_value="0"/>
+    </swatch_paint>
+    <text_small name="tool_switcher_band_text"
+                width="content" style_max_width="100%" style_pad_hor="#space_xxs" align="center" long_mode="dots"
+                bind_text="$text" clickable="false" event_bubble="true">
+      <bind_style_prop prop="text_color" subject="$text_color"/>
+      <bind_flag_if cond="${band_labelled} eq 0 or ${has_color} eq 0" flag="hidden"/>
+    </text_small>
+  </view>
+</component>

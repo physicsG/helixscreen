@@ -318,13 +318,22 @@ void PluginSettingsOverlay::on_row_changed(RowBinding& b, lv_obj_t* target) {
     if (value == b.stored)
         return;
     PluginHost* host = PluginHost::live();
-    if (host && host->set_setting(plugin_id_, b.key, value)) {
-        b.stored = std::move(value);
+    // On success b.stored already follows the write: set_setting reports it through
+    // show_setting, including a handler that rewrote the value.
+    if (host && host->set_setting(plugin_id_, b.key, value))
         return;
-    }
     spdlog::warn("[PluginSettings] {}: refused write to '{}'; restoring the row", plugin_id_,
                  b.key);
     apply_row_state(b);
+}
+
+void PluginSettingsOverlay::show_setting(const std::string& key, const json& value) {
+    for (auto& b : bindings_) {
+        if (b.key != key || b.stored == value)
+            continue;
+        b.stored = value;
+        apply_row_state(b);
+    }
 }
 
 void PluginSettingsOverlay::on_row_action(const RowBinding& b) {

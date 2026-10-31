@@ -30,6 +30,7 @@ void report_off_main(const char* caller);
 bool shutting_down();
 
 using helix::ui::copy_string_if_changed;
+using helix::ui::set_int_if_changed;
 
 /// The error state a lane bar's status line draws from: the same derivation
 /// both current consumers (AMS overview mini bars, mini status) compute from

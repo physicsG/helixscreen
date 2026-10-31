@@ -13,6 +13,7 @@
 #include "test_helpers/gcode_layer_renderer_test_access.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -476,7 +477,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "render_layers_to_cache emits gcode breadcrumb
     lv_canvas_set_buffer(canvas, canvas_buf, 200, 200, LV_COLOR_FORMAT_ARGB8888);
     lv_area_t clip = {0, 0, 199, 199};
 
-    // The first WARMUP_FRAMES (2) render() calls skip heavy caching; loop past
+    // The first kWarmupFrames (2) render() calls skip heavy caching; loop past
     // them so the solid-cache path (render_layers_to_cache) runs at least once.
     for (int i = 0; i < 5; ++i) {
         lv_layer_t layer;
@@ -516,7 +517,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "render_layers_to_cache emits gcode breadcrumb
 
 namespace {
 
-constexpr int PICK_CANVAS = 200;
+constexpr int kPickCanvas = 200;
 
 // Mirror of the renderer's own projection so these tests can name a click point
 // in world millimetres instead of hard-coded pixels. auto_fit() feeds
@@ -526,15 +527,15 @@ constexpr int PICK_CANVAS = 200;
 // coordinate, so only FRONT can show the drawn-Z clamp moving a footprint.
 glm::ivec2 project_expected(const AABB& fit_box, float x, float y, float z = 0.0f,
                             ViewMode view = ViewMode::TOP_DOWN) {
-    auto fit = compute_auto_fit(fit_box, view, PICK_CANVAS, PICK_CANVAS);
+    auto fit = compute_auto_fit(fit_box, view, kPickCanvas, kPickCanvas);
     ProjectionParams params;
     params.view_mode = view;
     params.scale = fit.scale;
     params.offset_x = fit.offset_x;
     params.offset_y = fit.offset_y;
     params.offset_z = fit.offset_z;
-    params.canvas_width = PICK_CANVAS;
-    params.canvas_height = PICK_CANVAS;
+    params.canvas_width = kPickCanvas;
+    params.canvas_height = kPickCanvas;
     return project(params, x, y, z);
 }
 
@@ -544,7 +545,7 @@ bool xy_inside(const AABB& box, float x, float y) {
 
 // Topmost (smallest) screen y over a box's 8 projected corners - the same
 // reduction the picker's stage 1 does. Derived rather than hand-picked because
-// which corner wins is not obvious: FRONT's SIN_H is sin(-45°), so the vertical
+// which corner wins is not obvious: FRONT's kSinH is sin(-45°), so the vertical
 // term peaks at MAX x and MAX y, and guessing min y silently produces a point
 // that is still inside the box.
 int projected_top_y(const AABB& fit_box, const AABB& box, ViewMode view) {
@@ -670,7 +671,7 @@ class TempPickGCodeFile {
 void configure(GCodeLayerRenderer& renderer, const ParsedGCodeFile& gcode, int layer,
                GCodeLayerRenderer::ViewMode view = GCodeLayerRenderer::ViewMode::TOP_DOWN) {
     renderer.set_gcode(&gcode);
-    renderer.set_canvas_size(PICK_CANVAS, PICK_CANVAS);
+    renderer.set_canvas_size(kPickCanvas, kPickCanvas);
     GCodeLayerRendererTestAccess::set_view_mode(renderer, view);
     renderer.auto_fit();
     renderer.set_current_layer(layer);
@@ -845,11 +846,11 @@ TEST_CASE("pick_object_at in streaming mode walks past uncached layers",
 
     GCodeLayerRenderer renderer;
     renderer.set_streaming_controller(&controller);
-    renderer.set_canvas_size(PICK_CANVAS, PICK_CANVAS);
+    renderer.set_canvas_size(kPickCanvas, kPickCanvas);
     GCodeLayerRendererTestAccess::set_view_mode(renderer, GCodeLayerRenderer::ViewMode::TOP_DOWN);
     renderer.auto_fit();
 
-    // Cache only the bottom of the file. DEFAULT_PREFETCH_RADIUS is 3, so
+    // Cache only the bottom of the file. kDefaultPrefetchRadius is 3, so
     // everything above layer 3 stays uncached and try_get_layer_segments()
     // returns null there - the downward walk has to skip it, never seek.
     (void)controller.get_layer_segments(0);
@@ -1293,7 +1294,7 @@ TEST_CASE("swapping to a different file with the same object count re-maps",
 
 namespace {
 
-// Drive enough frames to get past WARMUP_FRAMES and run the solid cache path,
+// Drive enough frames to get past kWarmupFrames and run the solid cache path,
 // then report how many canvas pixels are near-white and how many are painted.
 // Drive frames until the progressive solid cache reports it is complete.
 //
@@ -1317,7 +1318,7 @@ void drive_until_cached(GCodeLayerRenderer& renderer, lv_obj_t* canvas) {
         lv_canvas_finish_layer(canvas, &layer);
         lv_timer_handler_safe();
     };
-    // WARMUP_FRAMES deliberately skips heavy caching; get past it first.
+    // kWarmupFrames deliberately skips heavy caching; get past it first.
     for (int i = 0; i < 3; ++i) {
         frame();
     }
@@ -1834,18 +1835,34 @@ namespace {
 /// File source whose range reads cost a fixed wall-clock slice. The batch
 /// budget has to hold whatever a layer load costs, and real parse time varies
 /// too much between machines to assert against.
+/// Simulated time a SlowReadSource has spent reading; the batch box reads it.
+std::atomic<int64_t> g_read_clock_ms{0};
+
+std::chrono::steady_clock::time_point read_clock() {
+    return std::chrono::steady_clock::time_point{} +
+           std::chrono::milliseconds(g_read_clock_ms.load());
+}
+
+/// A file source whose every read costs @p per_read of simulated time, on
+/// the clock the batch box is given instead of the host's.
 class SlowReadSource : public FileDataSource {
   public:
     SlowReadSource(const std::string& path, std::chrono::milliseconds per_read)
         : FileDataSource(path), per_read_(per_read) {}
 
     std::vector<char> read_range(uint64_t offset, uint32_t length) override {
-        std::this_thread::sleep_for(per_read_);
+        reads_.fetch_add(1);
+        g_read_clock_ms.fetch_add(per_read_.count());
         return FileDataSource::read_range(offset, length);
+    }
+
+    int reads() const {
+        return reads_.load();
     }
 
   private:
     std::chrono::milliseconds per_read_;
+    std::atomic<int> reads_{0};
 };
 
 std::string make_many_layer_gcode(int layers) {
@@ -1861,13 +1878,15 @@ std::string make_many_layer_gcode(int layers) {
 
 TEST_CASE_METHOD(LVGLTestFixture, "solid-cache batches are time-boxed against slow layer loads",
                  "[layer_renderer][streaming][budget]") {
-    // 60 layers at 5 ms per read: an unbounced batch pinned at 60 layers
-    // costs ~300 ms of main thread; a time-boxed one stops after a few.
+    // 60 layers at 5 ms per read against the 8 ms box: an unboxed batch pinned
+    // at 60 layers reads all 60; a time-boxed one stops once a load has spent
+    // the budget.
     TempPickGCodeFile file(make_many_layer_gcode(60));
 
     GCodeStreamingController controller;
-    REQUIRE(controller.open_source(
-        std::make_unique<SlowReadSource>(file.path(), std::chrono::milliseconds(5))));
+    auto source = std::make_unique<SlowReadSource>(file.path(), std::chrono::milliseconds(5));
+    SlowReadSource* reads = source.get();
+    REQUIRE(controller.open_source(std::move(source)));
 
     GCodeLayerRenderer renderer;
     renderer.set_streaming_controller(&controller);
@@ -1875,15 +1894,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "solid-cache batches are time-boxed against sl
     renderer.set_canvas_size(200, 200);
 
     GCodeLayerRendererTestAccess::pin_layers_per_frame(renderer, 100);
+    GCodeLayerRendererTestAccess::set_batch_clock(renderer, &read_clock);
 
-    const auto start = std::chrono::steady_clock::now();
+    const int before = reads->reads();
     const int last = GCodeLayerRendererTestAccess::render_solid_batch(renderer, 0, 59, 200, 200);
-    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() - start)
-                                .count();
+    INFO("reads during the batch: " << reads->reads() - before);
 
-    // The box must cut the batch short of all 60 layers, and the call must
-    // cost a fraction of the unboxed 300 ms.
-    REQUIRE(last < 59);
-    REQUIRE(elapsed_ms < 150);
+    CHECK(last == 1);
 }

@@ -108,13 +108,13 @@ nlohmann::json snapmaker_decision_params(const PendingRequest& req, bool approve
     return params;
 }
 
-const Provider PROVIDERS[] = {
+const Provider kProviders[] = {
     {"Snapmaker", "notify_client_access", "server.client_manager.approve", parse_snapmaker,
      snapmaker_decision_params},
 };
 
 const Provider* provider_for_notification(const std::string& method) {
-    for (const Provider& p : PROVIDERS) {
+    for (const Provider& p : kProviders) {
         if (method == p.notification) {
             return &p;
         }
@@ -123,7 +123,7 @@ const Provider* provider_for_notification(const std::string& method) {
 }
 
 const Provider* provider_by_name(const std::string& name) {
-    for (const Provider& p : PROVIDERS) {
+    for (const Provider& p : kProviders) {
         if (name == p.name) {
             return &p;
         }
@@ -136,8 +136,8 @@ const Provider* provider_by_name(const std::string& name) {
 const std::vector<std::string>& notification_methods() {
     static const std::vector<std::string> methods = [] {
         std::vector<std::string> m;
-        m.reserve(std::size(PROVIDERS));
-        for (const Provider& p : PROVIDERS) {
+        m.reserve(std::size(kProviders));
+        for (const Provider& p : kProviders) {
             m.emplace_back(p.notification);
         }
         return m;

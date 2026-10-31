@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
@@ -45,10 +46,10 @@ class IMoonrakerClient;
  *   rest.call_rest_get("/server/ace/status",
  *       [](const RestResponse& resp) { ... });
  */
-class MoonrakerRestAPI : public IRestAPI {
+class MoonrakerRestAPI : public helix::IRestAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using RestCallback = std::function<void(const RestResponse&)>;
 
     /**
@@ -100,7 +101,8 @@ class MoonrakerRestAPI : public IRestAPI {
     /**
      * @brief Get list of discovered WLED strips via Moonraker bridge
      *
-     * GET /machine/wled/strips - Returns WLED devices configured in moonraker.conf.
+     * GET /machine/wled/strips - Returns every WLED strip configured in moonraker.conf
+     * with its current status (on/off, brightness, active preset).
      *
      * @param on_success Callback with RestResponse containing strip data
      * @param on_error Error callback
@@ -122,17 +124,6 @@ class MoonrakerRestAPI : public IRestAPI {
      */
     void wled_set_strip(const std::string& strip, const std::string& action, int brightness,
                         int preset, SuccessCallback on_success, ErrorCallback on_error) override;
-
-    /**
-     * @brief Get WLED strip status via Moonraker bridge
-     *
-     * GET /machine/wled/strips - Returns current state of all WLED strips
-     * including on/off status, brightness, and active preset.
-     *
-     * @param on_success Callback with RestResponse containing status data
-     * @param on_error Error callback
-     */
-    void wled_get_status(RestCallback on_success, ErrorCallback on_error) override;
 
     /**
      * @brief Fetch server configuration from Moonraker

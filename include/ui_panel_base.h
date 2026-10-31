@@ -24,8 +24,8 @@
 // Forward declarations
 namespace helix {
 class PrinterState;
-}
 class IMoonrakerAPI;
+} // namespace helix
 
 // Include for SubjectManager (needed for deinit_subjects_base)
 #include "subject_managed_panel.h"
@@ -83,7 +83,7 @@ class PanelBase : public ViewLifecycleBase {
      * @param printer_state Reference to PrinterState singleton
      * @param api Pointer to IMoonrakerAPI (may be nullptr if not connected)
      */
-    PanelBase(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    PanelBase(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     /**
      * @brief Virtual destructor - cleans up registered observers
@@ -180,7 +180,7 @@ class PanelBase : public ViewLifecycleBase {
      *
      * @param api New API pointer (may be nullptr)
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -208,7 +208,7 @@ class PanelBase : public ViewLifecycleBase {
     //
 
     helix::PrinterState& printer_state_;
-    IMoonrakerAPI* api_;
+    helix::IMoonrakerAPI* api_;
 
     //
     // === Panel State ===

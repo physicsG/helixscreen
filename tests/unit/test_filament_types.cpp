@@ -21,7 +21,7 @@ using helix::printer::FilamentCatalog;
 
 namespace {
 
-constexpr const char* ASSET = "assets/filaments.json";
+constexpr const char* kAsset = "assets/filaments.json";
 
 struct TypesFixture : HelixTestFixture {
     fs::path dir;
@@ -45,14 +45,14 @@ struct TypesFixture : HelixTestFixture {
 };
 
 size_t asset_type_count() {
-    std::ifstream f(ASSET);
+    std::ifstream f(kAsset);
     return nlohmann::json::parse(f)["types"].size();
 }
 
 } // namespace
 
 TEST_CASE_METHOD(TypesFixture, "every shipped type row loads from the asset", "[filament][types]") {
-    filament::load_materials_from(ASSET, "");
+    filament::load_materials_from(kAsset, "");
     const auto table = filament::materials();
     REQUIRE(table->size() == asset_type_count());
     REQUIRE(table->size() > 50);
@@ -91,7 +91,7 @@ TEST_CASE_METHOD(TypesFixture, "a corrupt asset leaves an empty table", "[filame
 TEST_CASE_METHOD(TypesFixture, "an overlay entry patches only the fields it names",
                  "[filament][types]") {
     auto overlay = write("user.json", R"({"types": [{"name": "pla", "bed": 65, "chamber": 0}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
 
     auto pla = filament::find_material("PLA");
     REQUIRE(pla);
@@ -108,7 +108,7 @@ TEST_CASE_METHOD(TypesFixture, "an overlay entry with a new name defines a type"
     auto overlay = write("user.json", R"({"types": [
         {"name": "PEKK", "nozzle_min": 330, "nozzle_max": 360, "bed": 120}
     ]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
 
     auto pekk = filament::find_material("pekk");
     REQUIRE(pekk);
@@ -129,14 +129,14 @@ TEST_CASE_METHOD(TypesFixture, "a new type may name an existing compat group",
         {"name": "Tough PLA", "nozzle_min": 205, "nozzle_max": 235, "bed": 60,
          "compat_group": "PLA"}
     ]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     CHECK(filament::are_materials_compatible("Tough PLA", "PLA"));
 }
 
 TEST_CASE_METHOD(TypesFixture, "overlay type entries without a name are skipped",
                  "[filament][types]") {
     auto overlay = write("user.json", R"({"types": [{"bed": 90}, 7, {"name": ""}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     CHECK(filament::materials()->size() == asset_type_count());
     CHECK(filament::find_material("PLA")->bed_temp == 60);
 }
@@ -144,7 +144,7 @@ TEST_CASE_METHOD(TypesFixture, "overlay type entries without a name are skipped"
 TEST_CASE_METHOD(TypesFixture, "a bare-array overlay carries products and adds no types",
                  "[filament][types]") {
     auto overlay = write("user.json", R"([{"id": "x", "brand": "B", "name": "N", "type": "PLA"}])");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     CHECK(filament::materials()->size() == asset_type_count());
 }
 
@@ -152,11 +152,11 @@ TEST_CASE_METHOD(TypesFixture, "a name handed out survives a reload", "[filament
     auto overlay = write(
         "user.json",
         R"({"types": [{"name": "PEKK", "nozzle_min": 330, "nozzle_max": 360, "compat_group": "PAEK"}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     const char* group = filament::get_compatibility_group("PEKK");
     REQUIRE(group != nullptr);
 
-    filament::load_materials_from(ASSET, "");
+    filament::load_materials_from(kAsset, "");
     CHECK(std::string(group) == "PAEK");
     CHECK_FALSE(filament::find_material("PEKK"));
 }
@@ -167,9 +167,9 @@ TEST_CASE_METHOD(TypesFixture, "catalog products inherit from a user-defined typ
         "types": [{"name": "PEKK", "nozzle_min": 330, "nozzle_max": 360, "bed": 120}],
         "filaments": [{"id": "acme-pekk", "brand": "Acme", "name": "PEKK", "type": "PEKK"}]
     })");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
 
-    auto cat = FilamentCatalog::load_with_overlay(ASSET, overlay);
+    auto cat = FilamentCatalog::load_with_overlay(kAsset, overlay);
     const auto* p = cat.resolve_id("acme-pekk");
     REQUIRE(p != nullptr);
     CHECK(p->nozzle_min == 330);
@@ -181,9 +181,9 @@ TEST_CASE_METHOD(TypesFixture, "catalog products inherit from a user-defined typ
 TEST_CASE_METHOD(TypesFixture, "catalog products inherit a patched shipped type",
                  "[filament][types][filament_catalog]") {
     auto overlay = write("user.json", R"({"types": [{"name": "ABS", "chamber": 60}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
 
-    auto cat = FilamentCatalog::load_with_overlay(ASSET, overlay);
+    auto cat = FilamentCatalog::load_with_overlay(kAsset, overlay);
     const auto* p = cat.resolve_id("creality-cr-abs");
     REQUIRE(p != nullptr);
     CHECK(p->chamber_temp_c == 60);
@@ -218,7 +218,7 @@ TEST_CASE_METHOD(TypesFixture, "a null in a type patch keeps the shipped value",
                  "[filament][types][hand_edit]") {
     // merge_patch reads null as "delete", which would zero the field.
     auto overlay = write("user.json", R"({"types": [{"name": "PLA", "nozzle_max": null}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     auto pla = filament::find_material("PLA");
     REQUIRE(pla);
     CHECK(pla->nozzle_max == 220);
@@ -228,7 +228,7 @@ TEST_CASE_METHOD(TypesFixture, "a null in a type patch keeps the shipped value",
 TEST_CASE_METHOD(TypesFixture, "a quoted number in a type patch keeps the shipped value",
                  "[filament][types][hand_edit]") {
     auto overlay = write("user.json", R"({"types": [{"name": "PLA", "nozzle_min": "205"}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     auto pla = filament::find_material("PLA");
     REQUIRE(pla);
     CHECK(pla->nozzle_min == 190);
@@ -240,7 +240,7 @@ TEST_CASE_METHOD(TypesFixture, "a new type with no nozzle_max is skipped",
     // Kept, it would preheat to the midpoint of 200 and 0.
     auto overlay =
         write("user.json", R"({"types": [{"name": "MyPLA", "nozzle_min": 200, "bed": 60}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     CHECK_FALSE(filament::find_material("MyPLA"));
     CHECK(filament::materials()->size() == asset_type_count());
 }
@@ -251,7 +251,7 @@ TEST_CASE_METHOD(TypesFixture, "a new type with a reversed nozzle range is skipp
         {"name": "Backwards", "nozzle_min": 260, "nozzle_max": 230, "bed": 60},
         {"name": "Fine", "nozzle_min": 230, "nozzle_max": 230, "bed": 60}
     ]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     CHECK_FALSE(filament::find_material("Backwards"));
     CHECK(filament::find_material("Fine"));
 }
@@ -259,7 +259,7 @@ TEST_CASE_METHOD(TypesFixture, "a new type with a reversed nozzle range is skipp
 TEST_CASE_METHOD(TypesFixture, "a new type with no nozzle_min is skipped",
                  "[filament][types][hand_edit]") {
     auto overlay = write("user.json", R"({"types": [{"name": "MaxOnly", "nozzle_max": 230}]})");
-    filament::load_materials_from(ASSET, overlay);
+    filament::load_materials_from(kAsset, overlay);
     CHECK_FALSE(filament::find_material("MaxOnly"));
 }
 

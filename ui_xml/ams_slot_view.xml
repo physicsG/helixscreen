@@ -9,9 +9,12 @@
     Dynamic elements (spool canvas, observers, color updates) are created in C++.
 
     Named children accessible via lv_obj_find_by_name():
-    - material_label: text_small showing material type (PLA, PETG, etc.)
+    - name_label: text_small showing the spool name (Bone White) above the material
+    - material_label: text_small showing material type (PLA, PETG, etc.), or the name
+      alone when the lane has no material
     - lane_humidity: per-lane climate under a per-lane lid: thermometer +
-      lane_temp_text when the lane reports a temperature, droplet + lane_humidity_text
+      lane_temp_text when the lane reports a temperature, lane_humidity_icon (a
+      humidity_drop the C++ fills to the reading) + lane_humidity_text
     - lane_remaining: measured remaining length, under the spool
     - spool_container: holds the lane spool widget and the badges
     - lane_spool: ams_lane_spool widget (spool graphic, empty placeholder,
@@ -34,7 +37,6 @@
         style_radius="#border_radius">
     <style name="styles.press_wash" selector="pressed"/>
 
-    <!-- Material label at top (PLA, PETG, etc.) -->
     <!-- Per-lane climate under a per-lane lid: the droplet says it is humidity, not
          filament remaining. Temperature stacks above it, since side by side the pair
          is wider than a lane. Shown and moved with the material label by the AMS detail view. -->
@@ -54,13 +56,21 @@
               width="content" height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
               style_pad_gap="#space_xxs" style_bg_opa="0" style_border_width="0" scrollable="false" clickable="false"
               event_bubble="true">
-        <icon name="lane_humidity_icon" src="water" size="sm" variant="secondary" clickable="false" event_bubble="true"/>
+        <humidity_drop name="lane_humidity_icon" size="sm" clickable="false" event_bubble="true"/>
         <text_small name="lane_humidity_text" text="" clickable="false" event_bubble="true"/>
       </lv_obj>
     </lv_obj>
 
+    <!-- Spool name over material. Both span the slot and hold one line (ams_slot pins the
+         height to the font's line), so a long name ellipsizes instead of wrapping into the
+         spool. The name line hides when there is no name, the lane is Empty, or 5+ slots
+         share the row; the material line then reads as it does alone. -->
+    <text_small name="name_label"
+                width="100%" text="" translation_tag="" style_text_color="#text" style_text_align="center"
+                long_mode="dots" hidden="true" scrollable="false" clickable="true" event_bubble="true"/>
     <text_small name="material_label"
-                text="--" style_text_color="#text" style_text_letter_space="1" clickable="true" event_bubble="true"/>
+                width="100%" text="--" style_text_color="#text" style_text_letter_space="1" style_text_align="center"
+                long_mode="dots" scrollable="false" clickable="true" event_bubble="true"/>
 
     <!-- Spool container - holds the lane spool widget and the badges -->
     <!-- Size is set dynamically in C++ based on space_lg token -->
@@ -102,6 +112,30 @@
         <!-- Tool number label (T0, T1, etc.) -->
         <text_small name="tool_badge_label"
                     text="" align="center" style_text_color="#text" clickable="false" event_bubble="true"/>
+      </lv_obj>
+
+      <!-- Drying badge, on the spool face right of its hub, where the dry-box view's
+           neighbouring spools cannot cover it: this lane's part in a drying cycle, on a dryer that
+           heats lanes one by one. Same icons as the environment overlay's zone tabs:
+           clock queued, heat waves drying, check done, cross cancelled. C++ shows the
+           badge and the one icon for the state; idle shows nothing. -->
+      <lv_obj name="drying_badge"
+              width="#ams_slot_status_badge_size" height="#ams_slot_status_badge_size" align="center"
+              style_translate_x="#ams_slot_status_badge_size" style_radius="10" style_bg_color="#ams_badge_bg"
+              style_bg_opa="255" style_border_width="#ams_slot_badge_border_w" style_border_color="#card_bg"
+              style_pad_all="0" scrollable="false" clickable="false" event_bubble="true" hidden="true">
+        <icon name="drying_badge_queued"
+              src="progress_clock" size="xs" variant="secondary" align="center" clickable="false" event_bubble="true"
+              hidden="true"/>
+        <icon name="drying_badge_active"
+              src="heat_wave" size="xs" variant="warning" align="center" clickable="false" event_bubble="true"
+              hidden="true"/>
+        <icon name="drying_badge_complete"
+              src="check_circle" size="xs" variant="success" align="center" clickable="false" event_bubble="true"
+              hidden="true"/>
+        <icon name="drying_badge_cancelled"
+              src="close_circle" size="xs" variant="danger" align="center" clickable="false" event_bubble="true"
+              hidden="true"/>
       </lv_obj>
 
     </lv_obj>

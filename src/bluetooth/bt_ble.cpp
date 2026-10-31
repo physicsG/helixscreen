@@ -9,7 +9,7 @@
  * D-Bus method calls per chunk.
  *
  * Also implements the unified helix_bt_disconnect() that handles both
- * RFCOMM fds and BLE handles (tagged with BLE_HANDLE_TAG).
+ * RFCOMM fds and BLE handles (tagged with kBleHandleTag).
  *
  * All sd-bus operations are serialized through the shared BusThread so they
  * never race with discovery, pairing, or other plugin bus users.
@@ -328,7 +328,7 @@ static int ble_store_connection(helix_bt_context* ctx,
     if (slot == table.end())
         slot = table.insert(table.end(), nullptr);
     *slot = std::move(conn);
-    return helix::bluetooth::BLE_HANDLE_TAG | static_cast<int>(slot - table.begin());
+    return helix::bluetooth::kBleHandleTag | static_cast<int>(slot - table.begin());
 }
 
 /// The live connection behind a handle, or null for a stale or foreign handle.
@@ -336,7 +336,7 @@ static std::shared_ptr<helix_bt_context::BleConnection> ble_find_connection(heli
                                                                             int handle) {
     if (!helix::bluetooth::is_ble_handle(handle))
         return nullptr;
-    size_t index = static_cast<size_t>(handle & ~helix::bluetooth::BLE_HANDLE_TAG);
+    size_t index = static_cast<size_t>(handle & ~helix::bluetooth::kBleHandleTag);
     std::lock_guard<std::mutex> lock(ctx->ble_mutex);
     if (index >= ctx->ble_connections.size())
         return nullptr;
@@ -767,7 +767,7 @@ extern "C" void helix_bt_disconnect(helix_bt_context* ctx, int handle) {
         // taken; that only happens when the bus thread is already gone.
         if (!conn->notify_slot) {
             std::lock_guard<std::mutex> lock(ctx->ble_mutex);
-            ctx->ble_connections[static_cast<size_t>(handle & ~helix::bluetooth::BLE_HANDLE_TAG)]
+            ctx->ble_connections[static_cast<size_t>(handle & ~helix::bluetooth::kBleHandleTag)]
                 .reset();
         }
 

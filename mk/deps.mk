@@ -41,17 +41,6 @@ endif
 		git config core.hooksPath .githooks; \
 		echo "$(GREEN)✓ Git pre-commit hooks enabled (auto-format with clang-format)$(RESET)"; \
 	fi
-	@# Auto-register the lesson-stats merge driver. .gitattributes marks
-	@# .claude-recall/*.json as merge=recall-stats; with no driver configured
-	@# git quietly falls back to a text merge, so the counters conflict any
-	@# time two branches both cited a lesson. (Setting the .name key without
-	@# .driver is worse - that combination aborts the merge outright.) Config
-	@# is shared across worktrees, so registering once covers all of them.
-	@if [ -f "scripts/recall_stats_merge.py" ] && [ -z "$$(git config merge.recall-stats.driver 2>/dev/null)" ]; then \
-		git config merge.recall-stats.name "recall lesson-stats union merge"; \
-		git config merge.recall-stats.driver "python3 scripts/recall_stats_merge.py %O %A %B"; \
-		echo "$(GREEN)✓ Lesson-stats merge driver registered (counters merge additively)$(RESET)"; \
-	fi
 	@# Auto-register the "ours" merge driver. .gitattributes marks README.md
 	@# merge=ours because this fork's README is its own document, not a patched
 	@# copy of upstream's - see the comment there. Same trap as above: the .name
@@ -436,9 +425,6 @@ endif
 	$(Q)cp $(LIBHV_OBJDIR)/lib/libhv.a $(BUILD_DIR)/lib/libhv.a 2>/dev/null || \
 		cp $(LIBHV_DIR)/lib/libhv.a $(BUILD_DIR)/lib/libhv.a 2>/dev/null || \
 		cp $(LIBHV_DIR)/libhv.a $(BUILD_DIR)/lib/libhv.a
-	@# libhv's own build installs the include/hv/ copies our -isystem path
-	@# resolves to, so the tracked header set is only complete once this ran.
-	$(call record_abi_stamp)
 	$(ECHO) "$(GREEN)✓ libhv built: $(BUILD_DIR)/lib/libhv.a$(RESET)"
 
 # Build libnl from submodule (autotools)
@@ -532,9 +518,8 @@ sdl2-build:
 	$(ECHO) "$(CYAN)Building SDL2 from submodule...$(RESET)"
 	$(Q)mkdir -p $(SDL2_BUILD_DIR)
 ifeq ($(UNAME_S),Darwin)
-	$(Q)cd $(SDL2_BUILD_DIR) && \
-		MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) \
-		cmake .. \
+	$(Q)MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) \
+		cmake -S $(SDL2_DIR) -B $(SDL2_BUILD_DIR) \
 			-DCMAKE_BUILD_TYPE=Release \
 			-DCMAKE_OSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) \
 			-DSDL_SHARED=OFF \
@@ -543,8 +528,7 @@ ifeq ($(UNAME_S),Darwin)
 			-DSDL_TESTS=OFF
 	$(Q)MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) cmake --build $(SDL2_BUILD_DIR) --config Release
 else
-	$(Q)cd $(SDL2_BUILD_DIR) && \
-		cmake .. \
+	$(Q)cmake -S $(SDL2_DIR) -B $(SDL2_BUILD_DIR) \
 			-DCMAKE_BUILD_TYPE=Release \
 			-DSDL_SHARED=OFF \
 			-DSDL_STATIC=ON \

@@ -7,6 +7,7 @@ byte-preserved. Also round-trips a real ui_xml/ file through xml.etree to
 confirm the minified output still parses and carries identical text/attrs.
 """
 
+import json
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -175,6 +176,40 @@ def test_stage_config_ships_printer_presets(tmp_path):
 
     staged = tmp_path / "out" / "assets" / "config" / "presets"
     assert sorted(p.name for p in staged.iterdir()) == ["ad5m_pro_forgex.json"]
+
+
+def test_stage_config_ships_the_default_layout_minified(tmp_path):
+    config = tmp_path / "assets" / "config"
+    config.mkdir(parents=True)
+    table = {"version": 1, "tiers": {"small": {"cols": 4, "rows": [{"id": "a"}]}}}
+    (config / "default_layout.json").write_text(json.dumps(table, indent=4), encoding="utf-8")
+
+    total = stage_config(tmp_path / "assets", tmp_path / "out")
+
+    staged = tmp_path / "out" / "assets" / "config" / "default_layout.json"
+    text = staged.read_text(encoding="utf-8")
+    assert json.loads(text) == table
+    assert "\n" not in text and ": " not in text
+    assert total >= len(text.encode("utf-8"))
+
+
+def test_stage_config_ships_panel_widget_seeds_when_present(tmp_path):
+    seed = tmp_path / "assets" / "config" / "panel_widgets" / "k1" / "home.json"
+    seed.parent.mkdir(parents=True)
+    seed.write_text('{\n  "widgets": []\n}', encoding="utf-8")
+
+    stage_config(tmp_path / "assets", tmp_path / "out")
+
+    staged = tmp_path / "out" / "assets" / "config" / "panel_widgets" / "k1" / "home.json"
+    assert json.loads(staged.read_text(encoding="utf-8")) == {"widgets": []}
+
+
+def test_stage_config_without_seeds_stages_no_panel_widgets_dir(tmp_path):
+    (tmp_path / "assets" / "config").mkdir(parents=True)
+
+    stage_config(tmp_path / "assets", tmp_path / "out")
+
+    assert not (tmp_path / "out" / "assets" / "config" / "panel_widgets").exists()
 
 
 def test_stage_printer_images_generates_absent_renditions(tmp_path):

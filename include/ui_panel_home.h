@@ -30,7 +30,7 @@ struct HomePanelTestAccess; // test-only friend (tests/test_helpers/)
 
 class HomePanel : public PanelBase {
   public:
-    HomePanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    HomePanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
     ~HomePanel() override;
 
     void init_subjects() override;
@@ -198,6 +198,13 @@ class HomePanel : public PanelBase {
     /// lists, the page observer, the carousel_host children (async-deleted),
     /// the object pointers into them and the page subject. carousel_host_ stays.
     void teardown_carousel();
+    /// Deactivate and detach every page's widgets, drop the pages and the page
+    /// observer. The LVGL objects are left to the caller.
+    void release_pages();
+    /// Run every queued update, as a page population or teardown must before it
+    /// deletes objects that queued work may still point at. False when that
+    /// work rebuilt the carousel: the caller's page pointers are stale.
+    [[nodiscard]] bool drain_keeps_carousel();
     void on_page_changed(int new_page);
     /// The page-deletion confirmation's action: remove the edit session's page,
     /// leave edit mode, and rebuild the carousel on the next tick through
@@ -208,7 +215,11 @@ class HomePanel : public PanelBase {
     /// through the same on_edit_pages_changed() rebuild, on the next tick.
     void add_page_from_slot();
     void update_arrow_visibility(int page);
-    void populate_page(int page_index, bool force);
+    /// Build page @p page_index's widgets. False when queued work run by its
+    /// drain rebuilt the carousel (every page is refilled on the next tick) or
+    /// freed the panel: the caller's page list is stale, and it must return
+    /// without touching the panel.
+    [[nodiscard]] bool populate_page(int page_index, bool force);
     /// Re-seats every page in place when the new config holds the same widgets with the
     /// same config and only placement differs (a printer switch between printers whose
     /// layouts differ in placement only). False, having changed nothing, when any page
@@ -278,6 +289,10 @@ class HomePanel : public PanelBase {
     static void on_home_grid_released(lv_event_t* e);
     /// PRESS_LOST and INDEV_RESET: LVGL took a press away without a RELEASED.
     static void on_home_grid_press_cancelled(lv_event_t* e);
+
+    /// Expires whenever the carousel is built or torn down, so a token taken
+    /// before a drain tells whether queued work replaced the pages under it.
+    helix::AsyncLifetimeGuard carousel_lifetime_;
 
     /// Guards the carousel rebuilds this panel runs on the next tick. Declared
     /// last, so it expires before any other member is destroyed.

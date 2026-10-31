@@ -9,7 +9,7 @@
 #include "../catch_amalgamated.hpp"
 
 // Realistic AFC.cfg content for test fixtures
-static const std::string AFC_CFG_CONTENT = R"(# AFC Configuration
+static const std::string kAfcCfgContent = R"(# AFC Configuration
 [AFC]
 tool_start: extruder
 tool_end: extruder
@@ -30,7 +30,7 @@ extruder: extruder
 hub: Turtle_1
 )";
 
-static const std::string AFC_MACRO_VARS_CONTENT = R"([gcode_macro AFC_MacroVars]
+static const std::string kAfcMacroVarsContent = R"([gcode_macro AFC_MacroVars]
 variable_ramming_volume: 0
 variable_unloading_speed_start: 80
 variable_cooling_tube_length: 15
@@ -60,7 +60,7 @@ TEST_CASE("AfcConfigManager parser access returns usable reference", "[afc_confi
     AfcConfigManager mgr(nullptr);
 
     // Parse content directly into the parser
-    REQUIRE(mgr.parser().parse(AFC_CFG_CONTENT));
+    REQUIRE(mgr.parser().parse(kAfcCfgContent));
 
     // Verify we can read parsed values
     CHECK(mgr.parser().get("AFC", "tool_start") == "extruder");
@@ -70,7 +70,7 @@ TEST_CASE("AfcConfigManager parser access returns usable reference", "[afc_confi
 
 TEST_CASE("AfcConfigManager const parser access", "[afc_config]") {
     AfcConfigManager mgr(nullptr);
-    mgr.parser().parse(AFC_CFG_CONTENT);
+    mgr.parser().parse(kAfcCfgContent);
 
     const auto& const_mgr = mgr;
     CHECK(const_mgr.parser().get("AFC", "tool_end") == "extruder");
@@ -95,7 +95,7 @@ TEST_CASE("AfcConfigManager dirty tracking - mark then clear via discard", "[afc
     AfcConfigManager mgr(nullptr);
 
     // Simulate a load by setting content directly
-    mgr.load_from_string(AFC_CFG_CONTENT, "AFC/AFC.cfg");
+    mgr.load_from_string(kAfcCfgContent, "AFC/AFC.cfg");
 
     mgr.mark_dirty();
     CHECK(mgr.has_unsaved_changes());
@@ -112,7 +112,7 @@ TEST_CASE("AfcConfigManager discard reverts to original content", "[afc_config]"
     AfcConfigManager mgr(nullptr);
 
     // Load content
-    mgr.load_from_string(AFC_CFG_CONTENT, "AFC/AFC.cfg");
+    mgr.load_from_string(kAfcCfgContent, "AFC/AFC.cfg");
 
     // Verify original values
     CHECK(mgr.parser().get_int("AFC_hub Turtle_1", "afc_bowden_length") == 450);
@@ -156,7 +156,7 @@ TEST_CASE("AfcConfigManager is_loaded initially false", "[afc_config]") {
 
 TEST_CASE("AfcConfigManager is_loaded true after load_from_string", "[afc_config]") {
     AfcConfigManager mgr(nullptr);
-    mgr.load_from_string(AFC_CFG_CONTENT, "AFC/AFC.cfg");
+    mgr.load_from_string(kAfcCfgContent, "AFC/AFC.cfg");
     CHECK(mgr.is_loaded());
 }
 
@@ -164,10 +164,10 @@ TEST_CASE("AfcConfigManager loaded_filename tracks filename", "[afc_config]") {
     AfcConfigManager mgr(nullptr);
     CHECK(mgr.loaded_filename().empty());
 
-    mgr.load_from_string(AFC_CFG_CONTENT, "AFC/AFC.cfg");
+    mgr.load_from_string(kAfcCfgContent, "AFC/AFC.cfg");
     CHECK(mgr.loaded_filename() == "AFC/AFC.cfg");
 
-    mgr.load_from_string(AFC_MACRO_VARS_CONTENT, "AFC/AFC_Macro_Vars.cfg");
+    mgr.load_from_string(kAfcMacroVarsContent, "AFC/AFC_Macro_Vars.cfg");
     CHECK(mgr.loaded_filename() == "AFC/AFC_Macro_Vars.cfg");
 }
 
@@ -177,7 +177,7 @@ TEST_CASE("AfcConfigManager loaded_filename tracks filename", "[afc_config]") {
 
 TEST_CASE("AfcConfigManager full workflow: parse, modify, discard, verify", "[afc_config]") {
     AfcConfigManager mgr(nullptr);
-    mgr.load_from_string(AFC_CFG_CONTENT, "AFC/AFC.cfg");
+    mgr.load_from_string(kAfcCfgContent, "AFC/AFC.cfg");
 
     // Read sections
     auto sections = mgr.parser().get_sections_matching("AFC_stepper");
@@ -204,7 +204,7 @@ TEST_CASE("AfcConfigManager full workflow: parse, modify, discard, verify", "[af
 
 TEST_CASE("AfcConfigManager with AFC_Macro_Vars content", "[afc_config]") {
     AfcConfigManager mgr(nullptr);
-    mgr.load_from_string(AFC_MACRO_VARS_CONTENT, "AFC/AFC_Macro_Vars.cfg");
+    mgr.load_from_string(kAfcMacroVarsContent, "AFC/AFC_Macro_Vars.cfg");
 
     CHECK(mgr.is_loaded());
     CHECK(mgr.parser().get_int("gcode_macro AFC_MacroVars", "variable_ramming_volume") == 0);
@@ -217,7 +217,7 @@ TEST_CASE("AfcConfigManager with AFC_Macro_Vars content", "[afc_config]") {
 
 TEST_CASE("AfcConfigManager serialize produces saveable content", "[afc_config]") {
     AfcConfigManager mgr(nullptr);
-    mgr.load_from_string(AFC_CFG_CONTENT, "AFC/AFC.cfg");
+    mgr.load_from_string(kAfcCfgContent, "AFC/AFC.cfg");
 
     // Modify a value
     mgr.parser().set("AFC_hub Turtle_1", "afc_bowden_length", "500");
@@ -240,13 +240,13 @@ TEST_CASE("AfcConfigManager load_from_string resets previous state", "[afc_confi
     AfcConfigManager mgr(nullptr);
 
     // First load
-    mgr.load_from_string(AFC_CFG_CONTENT, "AFC/AFC.cfg");
+    mgr.load_from_string(kAfcCfgContent, "AFC/AFC.cfg");
     mgr.parser().set("AFC", "tool_start", "extruder1");
     mgr.mark_dirty();
     CHECK(mgr.has_unsaved_changes());
 
     // Second load should reset everything
-    mgr.load_from_string(AFC_MACRO_VARS_CONTENT, "AFC/AFC_Macro_Vars.cfg");
+    mgr.load_from_string(kAfcMacroVarsContent, "AFC/AFC_Macro_Vars.cfg");
     CHECK_FALSE(mgr.has_unsaved_changes());
     CHECK(mgr.loaded_filename() == "AFC/AFC_Macro_Vars.cfg");
     CHECK_FALSE(mgr.parser().has_section("AFC"));

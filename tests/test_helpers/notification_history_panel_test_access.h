@@ -13,4 +13,9 @@ class NotificationHistoryPanelTestAccess {
     static void handle_history_version_change(NotificationHistoryPanel& panel, int32_t version) {
         panel.handle_history_version_change(version);
     }
+
+    /// What tapping a history entry carrying @p action runs.
+    static void dispatch_action(NotificationHistoryPanel& panel, const char* action) {
+        panel.dispatch_action(action);
+    }
 };

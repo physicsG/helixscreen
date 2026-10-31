@@ -33,3 +33,6 @@ const uint8_t* lvgl_glue_frame(uint32_t* w, uint32_t* h, size_t* stride);
 /// True on the UI pthread, and before it has started (nothing else can touch
 /// LVGL then). The app core's main-thread check never records a thread here.
 bool helix_on_ui_task(void);
+
+/// The UI pthread's configured stack size in bytes.
+size_t lvgl_glue_ui_stack_bytes(void);

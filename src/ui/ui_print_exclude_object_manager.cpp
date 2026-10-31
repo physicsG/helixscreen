@@ -4,6 +4,7 @@
 #include "ui_print_exclude_object_manager.h"
 
 #include "ui_error_reporting.h"
+#include "ui_exclude_object_badges.h"
 #include "ui_gcode_viewer.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
@@ -24,7 +25,7 @@ namespace helix::ui {
 // ============================================================================
 
 /// Undo window duration in milliseconds
-constexpr uint32_t EXCLUDE_UNDO_WINDOW_MS = 5000;
+constexpr uint32_t kExcludeUndoWindowMs = 5000;
 
 // ============================================================================
 // PrintExcludeObjectManager Implementation
@@ -77,7 +78,8 @@ void PrintExcludeObjectManager::init() {
 
     // Register long-press callback on gcode viewer
     if (gcode_viewer_) {
-        ui_gcode_viewer_set_object_long_press_callback(gcode_viewer_, on_object_long_pressed, this);
+        helix::ui::gcode_viewer_set_object_long_press_callback(gcode_viewer_,
+                                                               on_object_long_pressed, this);
         spdlog::debug("[PrintExcludeObjectManager] Registered long-press callback");
     }
 
@@ -98,7 +100,7 @@ void PrintExcludeObjectManager::deinit() {
 
     // Unregister long-press callback
     if (gcode_viewer_ && lv_is_initialized()) {
-        ui_gcode_viewer_set_object_long_press_callback(gcode_viewer_, nullptr, nullptr);
+        helix::ui::gcode_viewer_set_object_long_press_callback(gcode_viewer_, nullptr, nullptr);
     }
 
     // Observer cleanup happens automatically via ObserverGuard destructor
@@ -110,14 +112,15 @@ void PrintExcludeObjectManager::deinit() {
 void PrintExcludeObjectManager::set_gcode_viewer(lv_obj_t* gcode_viewer) {
     // Unregister from old viewer
     if (gcode_viewer_ && initialized_ && lv_is_initialized()) {
-        ui_gcode_viewer_set_object_long_press_callback(gcode_viewer_, nullptr, nullptr);
+        helix::ui::gcode_viewer_set_object_long_press_callback(gcode_viewer_, nullptr, nullptr);
     }
 
     gcode_viewer_ = gcode_viewer;
 
     // Register on new viewer
     if (gcode_viewer_ && initialized_) {
-        ui_gcode_viewer_set_object_long_press_callback(gcode_viewer_, on_object_long_pressed, this);
+        helix::ui::gcode_viewer_set_object_long_press_callback(gcode_viewer_,
+                                                               on_object_long_pressed, this);
         spdlog::debug(
             "[PrintExcludeObjectManager] Re-registered long-press callback on new viewer");
     }
@@ -188,8 +191,10 @@ void PrintExcludeObjectManager::handle_object_long_press(const char* object_name
         handle_exclude_cancelled();
     });
 
+    const std::string shown = object_message_name(
+        printer_state_.excluded_objects_state().get_defined_objects(), object_name);
     std::string message = fmt::format(
-        lv_tr("Stop printing \"{}\"?\n\nThis cannot be undone after 5 seconds."), object_name);
+        lv_tr("Stop printing \"{}\"?\n\nThis cannot be undone after 5 seconds."), shown);
     const char* attrs[] = {"title", lv_tr("Exclude Object?"), "message", message.c_str(), nullptr};
 
     if (!exclude_modal_.show(lv_screen_active(), attrs)) {
@@ -219,7 +224,7 @@ void PrintExcludeObjectManager::handle_exclude_confirmed() {
     if (gcode_viewer_) {
         std::unordered_set<std::string> visual_excluded = excluded_objects_;
         visual_excluded.insert(pending_exclude_object_);
-        ui_gcode_viewer_set_excluded_objects(gcode_viewer_, visual_excluded);
+        helix::ui::gcode_viewer_set_excluded_objects(gcode_viewer_, visual_excluded);
         spdlog::debug("[PrintExcludeObjectManager] Updated viewer with visual exclusion");
     }
 
@@ -227,11 +232,14 @@ void PrintExcludeObjectManager::handle_exclude_confirmed() {
     if (exclude_undo_timer_) {
         lv_timer_delete(exclude_undo_timer_);
     }
-    exclude_undo_timer_ = lv_timer_create(exclude_undo_timer_cb, EXCLUDE_UNDO_WINDOW_MS, this);
+    exclude_undo_timer_ = lv_timer_create(exclude_undo_timer_cb, kExcludeUndoWindowMs, this);
     lv_timer_set_repeat_count(exclude_undo_timer_, 1);
 
     // Show toast with "Undo" action button
-    std::string toast_msg = "Excluding \"" + pending_exclude_object_ + "\"...";
+    const std::string toast_msg = fmt::format(
+        fmt::runtime(lv_tr("Excluding \"{}\"...")),
+        object_message_name(printer_state_.excluded_objects_state().get_defined_objects(),
+                            pending_exclude_object_));
     ToastManager::instance().show_with_action(
         ToastSeverity::WARNING, toast_msg.c_str(), "Undo",
         [](void* user_data) {
@@ -240,10 +248,10 @@ void PrintExcludeObjectManager::handle_exclude_confirmed() {
                 self->handle_exclude_undo();
             }
         },
-        this, EXCLUDE_UNDO_WINDOW_MS);
+        this, kExcludeUndoWindowMs);
 
     spdlog::info("[PrintExcludeObjectManager] Started {}ms undo window for '{}'",
-                 EXCLUDE_UNDO_WINDOW_MS, pending_exclude_object_);
+                 kExcludeUndoWindowMs, pending_exclude_object_);
 }
 
 void PrintExcludeObjectManager::handle_exclude_cancelled() {
@@ -256,7 +264,7 @@ void PrintExcludeObjectManager::handle_exclude_cancelled() {
     // Clear selection in viewer
     if (gcode_viewer_) {
         std::unordered_set<std::string> empty_set;
-        ui_gcode_viewer_set_highlighted_objects(gcode_viewer_, empty_set);
+        helix::ui::gcode_viewer_set_highlighted_objects(gcode_viewer_, empty_set);
     }
 }
 
@@ -277,14 +285,14 @@ void PrintExcludeObjectManager::handle_exclude_undo() {
 
     // Restore visual state - remove from visual exclusion
     if (gcode_viewer_) {
-        ui_gcode_viewer_set_excluded_objects(gcode_viewer_, excluded_objects_);
+        helix::ui::gcode_viewer_set_excluded_objects(gcode_viewer_, excluded_objects_);
     }
 
     // Clear pending
     pending_exclude_object_.clear();
 
     // Show confirmation that undo succeeded
-    ToastManager::instance().show(ToastSeverity::SUCCESS, lv_tr("Exclusion cancelled"), 2000);
+    ToastManager::instance().show(ToastSeverity::SUCCESS, lv_tr("Exclusion canceled"), 2000);
 }
 
 // ============================================================================
@@ -395,7 +403,7 @@ void PrintExcludeObjectManager::on_excluded_objects_changed() {
         if (!pending_exclude_object_.empty()) {
             visual_excluded.insert(pending_exclude_object_);
         }
-        ui_gcode_viewer_set_excluded_objects(gcode_viewer_, visual_excluded);
+        helix::ui::gcode_viewer_set_excluded_objects(gcode_viewer_, visual_excluded);
         spdlog::debug("[PrintExcludeObjectManager] Updated viewer with {} excluded objects",
                       visual_excluded.size());
     }
@@ -422,7 +430,7 @@ void PrintExcludeObjectManager::on_print_state_changed(helix::PrintJobState stat
     // Refresh the viewer so any red-ghosted objects that never made it to
     // excluded_objects_ revert to normal rendering.
     if (gcode_viewer_) {
-        ui_gcode_viewer_set_excluded_objects(gcode_viewer_, excluded_objects_);
+        helix::ui::gcode_viewer_set_excluded_objects(gcode_viewer_, excluded_objects_);
     }
 }
 
@@ -450,10 +458,14 @@ void PrintExcludeObjectManager::on_exclude_rpc_error(const std::string& object_n
     auto defer_tok = lifetime_.token();
     defer_tok.defer("PrintExcludeObjectManager::exclude_error", [this, object_name, err]() {
         awaiting_confirmation_.erase(object_name);
-        NOTIFY_ERROR(lv_tr("Failed to exclude '{}': {}"), object_name, err.localized_message());
+        NOTIFY_ERROR(
+            lv_tr("Failed to exclude '{}': {}"),
+            object_message_name(printer_state_.excluded_objects_state().get_defined_objects(),
+                                object_name),
+            err.localized_message());
 
         if (gcode_viewer_) {
-            ui_gcode_viewer_set_excluded_objects(gcode_viewer_, excluded_objects_);
+            helix::ui::gcode_viewer_set_excluded_objects(gcode_viewer_, excluded_objects_);
             spdlog::debug("[PrintExcludeObjectManager] Reverted visual exclusion for '{}'",
                           object_name);
         }

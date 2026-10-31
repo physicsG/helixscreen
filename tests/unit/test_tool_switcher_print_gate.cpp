@@ -25,8 +25,13 @@
  * backend relaxation invisible (see test_ams_paused_filament_ops.cpp).
  */
 
+#include "ui_modal.h"
+
 #include "../lvgl_test_fixture.h"
+#include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/modal_answer.h"
 #include "../test_helpers/print_state_test_drivers.h"
+#include "../test_helpers/tool_switcher_rig.h"
 #include "../test_helpers/tool_switcher_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
@@ -34,6 +39,7 @@
 #include "ams_state.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
+#include "safety_settings_manager.h"
 #include "tool_state.h"
 
 #include <memory>
@@ -45,79 +51,9 @@ using namespace helix;
 
 namespace {
 
-/// Backend double: the tool map is what makes ToolState delegate to the backend
-/// instead of the Tn gcode fallback, and change_tool() answers straight from a
-/// flag so the refusal has somewhere to travel FROM. self_homes is settable
-/// because it is the input that decides whether PAUSED is allowed.
-///
-/// change_tool() deliberately does NOT chain to AmsBackendMock: the mock runs
-/// the change on its own thread and emits slot events, whose deferred AmsState
-/// writes can outlive this fixture's teardown and land in a LATER test's
-/// async-lifetime skip window (test_filament_dispatch_surfaces.cpp counts those
-/// exactly). Nothing here asserts simulated motion, only the dispatch result.
-class GateBackend : public AmsBackendMock {
-  public:
-    explicit GateBackend(int slots) : AmsBackendMock(slots) {}
-
-    bool self_homes = false;
-    bool tool_change_should_fail = false;
-    int change_tool_calls = 0;
-
-    BackendTraits traits() const override {
-        BackendTraits t = AmsBackendMock::traits();
-        t.filament_ops_self_home = self_homes;
-        return t;
-    }
-
-    AmsError change_tool(int /*tool_number*/) override {
-        ++change_tool_calls;
-        if (tool_change_should_fail) {
-            return AmsError(AmsResult::TOOL_CHANGE_FAILED, "forced failure",
-                            "Tool change did not complete", "Check the filament path and retry");
-        }
-        return AmsErrorHelper::success();
-    }
-};
-
 struct ToolSwitcherGateFixture : public LVGLTestFixture {
     ToolSwitcherGateFixture() {
         printer_state.init_subjects(false);
-
-        ToolState::instance().deinit_subjects();
-        ToolState::instance().init_subjects(false);
-        helix::PrinterDiscovery hw;
-        nlohmann::json objects =
-            nlohmann::json::array({"toolchanger", "tool T0", "tool T1", "tool T2", "extruder",
-                                   "extruder1", "extruder2", "heater_bed", "gcode_move"});
-        hw.parse_objects(objects);
-        ToolState::instance().init_tools(hw);
-        REQUIRE(ToolState::instance().tool_count() == 3);
-
-        auto backend_owned = std::make_unique<GateBackend>(3);
-        backend_owned->set_tool_changer_mode(true);
-        backend_owned->set_operation_delay(0);
-        REQUIRE(backend_owned->start());
-        backend = backend_owned.get();
-        AmsState::instance().deinit_subjects();
-        AmsState::instance().init_subjects(true);
-        AmsState::instance().set_backend(std::move(backend_owned));
-
-        helix::ui::set_test_notification_warning_hook(
-            [this](const std::string& msg) { warnings.push_back(msg); });
-        helix::ui::set_test_notification_error_hook(
-            [this](const std::string& msg) { errors.push_back(msg); });
-    }
-
-    ~ToolSwitcherGateFixture() override {
-        helix::ui::set_test_notification_warning_hook(nullptr);
-        helix::ui::set_test_notification_error_hook(nullptr);
-        if (backend) {
-            backend->wait_for_operation_thread();
-            backend->stop();
-        }
-        AmsState::instance().deinit_subjects();
-        ToolState::instance().deinit_subjects();
-        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     void set_print_state(helix::PrintJobState s) {
@@ -131,9 +67,10 @@ struct ToolSwitcherGateFixture : public LVGLTestFixture {
     }
 
     helix::PrinterState printer_state;
-    GateBackend* backend = nullptr;
-    std::vector<std::string> warnings;
-    std::vector<std::string> errors;
+    ToolChangerRig rig{3};
+    GateBackend* backend = rig.backend;
+    std::vector<std::string>& warnings = rig.warnings;
+    std::vector<std::string>& errors = rig.errors;
 };
 
 } // namespace
@@ -249,20 +186,20 @@ TEST_CASE_METHOD(ToolSwitcherGateFixture, "PAUSED refuses on a self-homing backe
 // The greying has to track the print state LIVE
 //
 // PanelWidget instances are recycled across home-panel rebuilds, so the gate is
-// applied from attach() (via the print-state observer) and from both rebuild
-// paths. Registering the observer only in on_size_changed() would leave a reused
-// instance correct on first build and stale forever after.
+// published from attach() (via the print-state observer) and from every size
+// change. Registering the observer only in on_size_changed() would leave a
+// reused instance correct on first build and stale forever after.
 // ============================================================================
 
-TEST_CASE_METHOD(ToolSwitcherGateFixture, "pills grey and un-grey as the print state changes",
+TEST_CASE_METHOD(ToolSwitcherGateFixture,
+                 "the published gate follows the print state as it changes",
                  "[ams][tool-switcher][safety]") {
     lv_obj_t* host = lv_obj_create(lv_screen_active());
     ToolSwitcherWidget widget(printer_state);
     widget.attach(host, lv_screen_active());
 
-    auto& pills = ToolSwitcherTestAccess::pills(widget);
-    pills.push_back(lv_obj_create(host));
-    pills.push_back(lv_obj_create(host));
+    lv_subject_t* blocked = lv_xml_get_subject(nullptr, "tool_switcher_change_blocked");
+    REQUIRE(blocked != nullptr);
 
     // observe<int>() defers through the UpdateQueue, so the gate lands on
     // the next tick — drain before asserting.
@@ -272,23 +209,20 @@ TEST_CASE_METHOD(ToolSwitcherGateFixture, "pills grey and un-grey as the print s
 
     set_print_state(helix::PrintJobState::PRINTING);
     tick();
-    for (lv_obj_t* pill : pills) {
-        CHECK(lv_obj_has_state(pill, LV_STATE_DISABLED));
-    }
+    CHECK(lv_subject_get_int(blocked) == 1);
 
     // PAUSED on a backend that does not self-home is the recovery workflow —
-    // greying it there would hide the backend relaxation entirely.
+    // blocking it there would hide the backend relaxation entirely.
     set_print_state(helix::PrintJobState::PAUSED);
     tick();
-    for (lv_obj_t* pill : pills) {
-        CHECK_FALSE(lv_obj_has_state(pill, LV_STATE_DISABLED));
-    }
+    CHECK(lv_subject_get_int(blocked) == 0);
 
+    set_print_state(helix::PrintJobState::PRINTING);
+    tick();
+    REQUIRE(lv_subject_get_int(blocked) == 1);
     set_print_state(helix::PrintJobState::STANDBY);
     tick();
-    for (lv_obj_t* pill : pills) {
-        CHECK_FALSE(lv_obj_has_state(pill, LV_STATE_DISABLED));
-    }
+    CHECK(lv_subject_get_int(blocked) == 0);
 
     widget.detach();
     lv_obj_delete(host);
@@ -308,4 +242,162 @@ TEST_CASE_METHOD(ToolSwitcherGateFixture, "inactive print states never block a t
         CAPTURE(static_cast<int>(s));
         CHECK(ToolSwitcherTestAccess::refusal(widget).success());
     }
+}
+
+// ============================================================================
+// Park (prestonbrown/helixscreen#1784)
+// ============================================================================
+
+TEST_CASE_METHOD(ToolSwitcherGateFixture, "Park docks the mounted tool when the machine is free",
+                 "[ams][tool-switcher][1784]") {
+    set_print_state(helix::PrintJobState::STANDBY);
+    REQUIRE(ToolState::instance().active_tool_index() >= 0);
+
+    ToolSwitcherWidget widget(printer_state);
+    ToolSwitcherTestAccess::park(widget);
+
+    CHECK(backend->park_calls == 1);
+    CHECK(warnings.empty());
+    CHECK(errors.empty());
+}
+
+TEST_CASE_METHOD(ToolSwitcherGateFixture,
+                 "Park is refused, with a reason, while a job holds the machine",
+                 "[ams][tool-switcher][1784]") {
+    // PAUSED too, unlike a tool change: resuming with the tool docked prints
+    // nothing.
+    auto state = GENERATE(helix::PrintJobState::PRINTING, helix::PrintJobState::PAUSED);
+    set_print_state(state);
+
+    ToolSwitcherWidget widget(printer_state);
+    ToolSwitcherTestAccess::park(widget);
+
+    CHECK(backend->park_calls == 0);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0].find("Cannot park while a print is active") != std::string::npos);
+}
+
+TEST_CASE_METHOD(ToolSwitcherGateFixture, "Park does nothing with the carriage already empty",
+                 "[ams][tool-switcher][1784]") {
+    set_print_state(helix::PrintJobState::STANDBY);
+    ToolState::instance().update_from_status(
+        nlohmann::json{{"toolchanger", {{"tool_number", -1}}}});
+    REQUIRE(ToolState::instance().active_tool_index() == -1);
+
+    ToolSwitcherWidget widget(printer_state);
+    ToolSwitcherTestAccess::park(widget);
+
+    CHECK(backend->park_calls == 0);
+}
+
+TEST_CASE_METHOD(ToolSwitcherGateFixture, "Park is never sent to a backend that cannot park",
+                 "[ams][tool-switcher][1784]") {
+    set_print_state(helix::PrintJobState::STANDBY);
+    backend->can_park = false;
+
+    ToolSwitcherWidget widget(printer_state);
+    ToolSwitcherTestAccess::park(widget);
+
+    CHECK(backend->park_calls == 0);
+}
+
+// ============================================================================
+// A sheet left open when a print starts (prestonbrown/helixscreen#1784)
+//
+// The sheet is raised while the machine is free, so nothing about it was
+// refused when it opened. A print that starts while it is up must still refuse
+// whatever it offers, through the same refusals as every other tap.
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "a sheet left open when a print starts refuses the head and Park it offers",
+                 "[ams][tool-switcher][tool_switcher][1784]") {
+    ToolChangerRig rig(3);
+    helix::test::set_wire_state(state(), helix::PrintJobState::STANDBY);
+    PanelWidgetHarness<ToolSwitcherWidget> h(test_screen(), state());
+    process_lvgl(30);
+    h.resize(2, 2, 160, 60);
+    process_lvgl(30);
+
+    lv_obj_send_event(h.child("tool_switcher_face"), LV_EVENT_CLICKED, nullptr);
+    REQUIRE(h.widget().has_overlay_open());
+    lv_obj_t* list = ToolSwitcherTestAccess::picker_list(h.widget());
+    REQUIRE(list != nullptr);
+    REQUIRE(lv_obj_get_child_count(list) == 3);
+    lv_obj_t* head_row = lv_obj_get_child(list, 1);
+    lv_obj_t* park_row = lv_obj_find_by_name(lv_obj_get_parent(list), "tool_park_btn");
+    REQUIRE(head_row != nullptr);
+    REQUIRE(park_row != nullptr);
+
+    helix::test::set_wire_state(state(), helix::PrintJobState::PRINTING);
+    process_lvgl(30);
+    REQUIRE(h.widget().has_overlay_open());
+
+    SECTION("a head row") {
+        lv_obj_send_event(head_row, LV_EVENT_CLICKED, nullptr);
+        CHECK(rig.backend->change_tool_calls == 0);
+        REQUIRE(rig.warnings.size() == 1);
+        CHECK(rig.warnings[0].find("Cannot run filament operation while printing") !=
+              std::string::npos);
+    }
+    SECTION("the Park row") {
+        lv_obj_send_event(park_row, LV_EVENT_CLICKED, nullptr);
+        CHECK(rig.backend->park_calls == 0);
+        REQUIRE(rig.warnings.size() == 1);
+        CHECK(rig.warnings[0].find("Cannot park while a print is active") != std::string::npos);
+    }
+    CHECK_FALSE(h.widget().has_overlay_open());
+}
+
+// ============================================================================
+// Confirm tool changes
+// ============================================================================
+
+namespace {
+
+struct ToolSwitcherConfirmFixture : public LVGLUITestFixture {
+    ToolSwitcherConfirmFixture() {
+        helix::test::set_wire_state(state(), helix::PrintJobState::STANDBY);
+    }
+    ToolChangerRig rig{3};
+};
+
+} // namespace
+
+TEST_CASE_METHOD(ToolSwitcherConfirmFixture, "with Confirm tool changes on, a head tap asks first",
+                 "[ams][tool-switcher][tool-change][confirm]") {
+    SafetySettingsManager::instance().set_tool_change_require_confirmation(true);
+    ToolSwitcherWidget widget(state());
+    ToolSwitcherTestAccess::select_tool(widget, 1);
+
+    CHECK(rig.backend->change_tool_calls == 0);
+    REQUIRE(ModalStack::instance().top_dialog() != nullptr);
+
+    SECTION("confirming changes tool") {
+        helix::test::answer_top_modal("btn_primary");
+        CHECK(rig.backend->change_tool_calls == 1);
+        CHECK(rig.backend->last_tool == 1);
+    }
+    SECTION("cancelling changes nothing") {
+        helix::test::answer_top_modal("btn_secondary");
+        CHECK(rig.backend->change_tool_calls == 0);
+    }
+}
+
+TEST_CASE_METHOD(ToolSwitcherConfirmFixture,
+                 "a paused print asks once whether Confirm tool changes is on or off",
+                 "[ams][tool-switcher][tool-change][confirm][paused]") {
+    const bool confirm = GENERATE(false, true);
+    CAPTURE(confirm);
+    SafetySettingsManager::instance().set_tool_change_require_confirmation(confirm);
+    helix::test::set_wire_state(state(), helix::PrintJobState::PAUSED);
+    rig.backend->self_homes = false;
+
+    ToolSwitcherWidget widget(state());
+    ToolSwitcherTestAccess::select_tool(widget, 1);
+    CHECK(rig.backend->change_tool_calls == 0);
+    helix::test::answer_top_modal("btn_primary");
+    CHECK(rig.backend->change_tool_calls == 1);
+    // One dialog, not the paused one stacked over the plain one.
+    CHECK(ModalStack::instance().stack_empty());
 }

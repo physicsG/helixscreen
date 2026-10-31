@@ -224,7 +224,7 @@ bool boot_leaves_pre_migration_copy(helix::ConfigFootprint footprint, int versio
     helix::Config cfg;
     cfg.set_storage(helix::make_file_config_storage(path, footprint));
     cfg.init(path);
-    REQUIRE(cfg.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(cfg.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
     const bool exists = fs::exists(path + ".pre-migration");
     cfg.clear_path();
     return exists;
@@ -232,13 +232,13 @@ bool boot_leaves_pre_migration_copy(helix::ConfigFootprint footprint, int versio
 } // namespace
 
 TEST_CASE("small-footprint storage keeps no .pre-migration copy", "[config][storage]") {
-    constexpr int migrating = helix::CURRENT_CONFIG_VERSION - 1;
+    constexpr int migrating = helix::kCurrentConfigVersion - 1;
     REQUIRE(boot_leaves_pre_migration_copy(helix::ConfigFootprint::Standard, migrating, false));
     REQUIRE_FALSE(boot_leaves_pre_migration_copy(helix::ConfigFootprint::Small, migrating, false));
     // One an earlier build left behind goes on the next boot, migrating or not.
     REQUIRE_FALSE(boot_leaves_pre_migration_copy(helix::ConfigFootprint::Small, migrating, true));
     REQUIRE_FALSE(boot_leaves_pre_migration_copy(helix::ConfigFootprint::Small,
-                                                 helix::CURRENT_CONFIG_VERSION, true));
+                                                 helix::kCurrentConfigVersion, true));
 }
 
 // A below-floor document is replaced by defaults and its copy is the only one

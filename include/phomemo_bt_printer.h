@@ -24,7 +24,7 @@ class PhomemoBluetoothPrinter : public ILabelPrinter {
   private:
     std::string mac_;
     std::string transport_ = "ble";
-    static constexpr const char* PHOMEMO_WRITE_UUID = "0000ff02-0000-1000-8000-00805f9b34fb";
+    static constexpr const char* kPhomemoWriteUuid = "0000ff02-0000-1000-8000-00805f9b34fb";
 };
 
 } // namespace helix::label

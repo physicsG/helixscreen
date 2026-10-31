@@ -26,15 +26,15 @@ namespace helix::http {
 // during Task 10 (see esp32p4-task-10-report.md) plus margin. Enforced
 // regardless of what a caller asks for — protects the PSRAM accumulation
 // buffer even if a future caller passes an unbounded request.
-inline constexpr size_t HARD_CAP_BYTES = 512 * 1024;
+inline constexpr size_t kHardCapBytes = 512 * 1024;
 
 // Clamps a caller's requested max_bytes to the lane's hard ceiling. A
 // requested size of 0 means "no explicit cap" (the caller wants the whole
 // response, up to whatever the lane allows), which also resolves to the hard
 // ceiling rather than an unbounded fetch.
 inline constexpr size_t clamp_fetch_cap(size_t requested_max_bytes) {
-    if (requested_max_bytes == 0 || requested_max_bytes > HARD_CAP_BYTES) {
-        return HARD_CAP_BYTES;
+    if (requested_max_bytes == 0 || requested_max_bytes > kHardCapBytes) {
+        return kHardCapBytes;
     }
     return requested_max_bytes;
 }
@@ -43,7 +43,7 @@ inline constexpr size_t clamp_fetch_cap(size_t requested_max_bytes) {
 // Range request, the length of the range) sizes it exactly; an unknown one
 // (<= 0) starts small and grows. Allocating the whole cap up front holds
 // 512 KB of PSRAM for a 5 KB thumbnail and fragments the heap.
-inline constexpr size_t UNKNOWN_LENGTH_START_BYTES = 16 * 1024;
+inline constexpr size_t kUnknownLengthStartBytes = 16 * 1024;
 
 inline constexpr size_t initial_buffer_bytes(size_t cap, long long content_length) {
     if (content_length > 0) {
@@ -51,7 +51,7 @@ inline constexpr size_t initial_buffer_bytes(size_t cap, long long content_lengt
                    ? static_cast<size_t>(content_length)
                    : cap;
     }
-    return UNKNOWN_LENGTH_START_BYTES < cap ? UNKNOWN_LENGTH_START_BYTES : cap;
+    return kUnknownLengthStartBytes < cap ? kUnknownLengthStartBytes : cap;
 }
 
 // The next buffer size once @p current is full: doubled, never past @p cap.
@@ -65,7 +65,7 @@ using helix::try_reserve;
 
 // A transport read that returned for lack of data within its own timeout, as
 // distinct from the end of the body (0) and a failure (any other negative).
-inline constexpr int TRANSPORT_AGAIN = -0x7FFF;
+inline constexpr int kTransportAgain = -0x7FFF;
 
 // How long one fetch may take, and how long its body may go without a byte.
 // A link that stops delivering mid-body must not hold the lane forever.
@@ -77,7 +77,7 @@ struct LaneDeadlines {
 // Most one transport read asks for. A read keeps going until it fills what it
 // was asked for, so on a trickling link an unbounded one would hold off the
 // deadlines and the cancel check for the whole remaining body.
-inline constexpr int BODY_READ_CHUNK = 1024;
+inline constexpr int kBodyReadChunk = 1024;
 
 enum class BodyRead { Ok, AllocFailed, ReadFailed, OverCap, Stalled, TimedOut, Cancelled };
 
@@ -85,7 +85,7 @@ enum class BodyRead { Ok, AllocFailed, ReadFailed, OverCap, Stalled, TimedOut, C
 // Content-Length sizes the first buffer, growing up to the cap otherwise. A
 // full cap with more still coming is OverCap, never a truncated success.
 // @p t provides `int read(char*, int)` (bytes, 0 at the end of the body,
-// TRANSPORT_AGAIN for no data yet, other negatives for failure) and `bool
+// kTransportAgain for no data yet, other negatives for failure) and `bool
 // complete()`; @p now returns milliseconds. A set @p cancelled stops the read
 // before the next byte.
 template <class Transport, class Now>
@@ -122,7 +122,7 @@ BodyRead read_capped_body(Transport& t, size_t cap, long long content_length, st
         }
         body.resize(room()); // within capacity: no allocation
         const int want =
-            static_cast<int>(std::min(body.size() - total, static_cast<size_t>(BODY_READ_CHUNK)));
+            static_cast<int>(std::min(body.size() - total, static_cast<size_t>(kBodyReadChunk)));
         const int n = t.read(&body[total], want);
         const int64_t at = now();
         if (n > 0) {
@@ -130,7 +130,7 @@ BodyRead read_capped_body(Transport& t, size_t cap, long long content_length, st
             last_progress = at;
         } else if (n == 0) {
             break; // the body is complete
-        } else if (n != TRANSPORT_AGAIN) {
+        } else if (n != kTransportAgain) {
             result = BodyRead::ReadFailed;
             break;
         }

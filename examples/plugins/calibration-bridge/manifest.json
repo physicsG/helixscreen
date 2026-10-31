@@ -9,6 +9,16 @@
     "moonraker_write"
   ],
   "widgets": [],
+  "menu_items": [
+    {
+      "id": "calibrate",
+      "menu": "print_file",
+      "label": "Calibrate with this file",
+      "icon": "tune",
+      "handler": "calibrate_file",
+      "check": "can_calibrate_file"
+    }
+  ],
   "settings": [
     {
       "key": "companion_url",

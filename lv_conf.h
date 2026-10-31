@@ -32,7 +32,7 @@
  * Pi (DRM) and desktop (SDL) stay at 32-bit ARGB8888. */
 #if defined(HELIX_PLATFORM_AD5M) || defined(HELIX_PLATFORM_CC1) || \
     defined(HELIX_PLATFORM_MIPS) || defined(HELIX_PLATFORM_K1) || \
-    defined(HELIX_PLATFORM_AD5X) || defined(HELIX_PLATFORM_K2) || \
+    defined(HELIX_PLATFORM_K2) || \
     defined(HELIX_PLATFORM_SNAPMAKER_U1)
     #define LV_COLOR_DEPTH 16
 #else
@@ -418,6 +418,13 @@
 #endif
 #define LV_USE_ASSERT_MEM_INTEGRITY 0   /*Check the integrity of `lv_mem` after critical operations. (Slow)*/
 #define LV_USE_ASSERT_OBJ           0   /*Check the object's type and existence (e.g. not deleted). (Slow)*/
+
+/*Call helix_lvgl_thread_check() (src/system/lvgl_thread_check.cpp) at the subject, timer and
+ *object-delete entry points, so --test and the unit tests catch LVGL calls made off the LVGL
+ *thread (lvgl_thread_check_hook.patch). Release builds compile the checks out.*/
+#ifndef HELIX_RELEASE_BUILD
+#define LV_HELIX_THREAD_CHECK       1
+#endif
 
 /*Add a custom handler when assert happens e.g. to restart the MCU*/
 #define LV_ASSERT_HANDLER_INCLUDE "lvgl_assert_handler.h"
@@ -917,7 +924,7 @@
  * (dlopen), otherwise via stb_image (header-only, zero deps). */
 #if !defined(HELIX_PLATFORM_AD5M) && !defined(HELIX_PLATFORM_CC1) && \
     !defined(HELIX_PLATFORM_MIPS) && !defined(HELIX_PLATFORM_K1) && \
-    !defined(HELIX_PLATFORM_AD5X) && !defined(HELIX_PLATFORM_K2) && \
+    !defined(HELIX_PLATFORM_K2) && \
     !defined(HELIX_PLATFORM_SNAPMAKER_U1)
 #define HELIX_HAS_CAMERA 1
 #else

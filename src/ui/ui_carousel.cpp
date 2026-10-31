@@ -139,7 +139,7 @@ void carousel_scroll_end_cb(lv_event_t* e) {
     }
 
     CarouselState* state = static_cast<CarouselState*>(lv_obj_get_user_data(container));
-    if (!state || state->magic != CarouselState::MAGIC) {
+    if (!state || state->magic != CarouselState::kMagic) {
         return;
     }
 
@@ -251,7 +251,7 @@ void carousel_press_cb(lv_event_t* e) {
     }
 
     CarouselState* state = static_cast<CarouselState*>(lv_obj_get_user_data(container));
-    if (!state || state->magic != CarouselState::MAGIC) {
+    if (!state || state->magic != CarouselState::kMagic) {
         return;
     }
 
@@ -276,7 +276,7 @@ void carousel_release_cb(lv_event_t* e) {
     }
 
     CarouselState* state = static_cast<CarouselState*>(lv_obj_get_user_data(container));
-    if (!state || state->magic != CarouselState::MAGIC) {
+    if (!state || state->magic != CarouselState::kMagic) {
         return;
     }
 
@@ -293,7 +293,7 @@ void carousel_release_cb(lv_event_t* e) {
 void carousel_delete_cb(lv_event_t* e) {
     lv_obj_t* obj = lv_event_get_target_obj(e);
     CarouselState* state = static_cast<CarouselState*>(lv_obj_get_user_data(obj));
-    if (!state || state->magic != CarouselState::MAGIC) {
+    if (!state || state->magic != CarouselState::kMagic) {
         return;
     }
 
@@ -465,7 +465,7 @@ CarouselState* ui_carousel_get_state(lv_obj_t* obj) {
         return nullptr;
     }
     CarouselState* state = static_cast<CarouselState*>(lv_obj_get_user_data(obj));
-    if (!state || state->magic != CarouselState::MAGIC) {
+    if (!state || state->magic != CarouselState::kMagic) {
         return nullptr;
     }
     return state;

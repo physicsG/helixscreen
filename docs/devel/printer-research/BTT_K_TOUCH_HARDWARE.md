@@ -62,7 +62,7 @@ LCD timings (from `pt_board.h`, verified working on K-Touch): PCLK 14.8MHz activ
 ## K-Touch-specific unknowns
 
 - Battery gauge / charge-state signal — **NOT on the touch I²C bus** (probe scan found only the GT911 at 0x5D). Either an ADC pin, a second I²C bus, or not readable at all (dumb charger IC).
-- USB-drive "Expansion Interface" wiring (likely the S3's native USB-OTG peripheral on GPIO 19/20, since the Type-C data lines go to the CH340)
+- USB-drive "Expansion Interface" wiring (likely the S3's native USB-OTG peripheral on GPIO 19/20, since the Type-C data lines go to the CH340). The firmware stubs `UsbManager` out (`firmware/helixscreen-esp32/components/helixapp/helixapp_platform_stubs.cpp#UsbManager`, whose comment says the board has no USB-host wiring), but no probe or schematic backs that claim: it records that the firmware carries no USB-host driver, not how the port is wired
 - Magnetic dock pinout (power only, or data?)
 
 ## Stock firmware backup

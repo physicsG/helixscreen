@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- An inert layout wrapper inside a tile: no fill, border or padding, not
+     scrollable, not clickable, and bubbling every press to the tile that owns
+     the gesture. The scrollable/clickable/event_bubble flags are not style
+     properties, so this is a component rather than an entry in styles.xml.
+     Size, flex and gap attributes go on the usage. -->
+<component>
+  <view extends="lv_obj"
+        style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false" clickable="false"
+        event_bubble="true"/>
+</component>

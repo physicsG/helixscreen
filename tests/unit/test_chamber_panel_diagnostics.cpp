@@ -27,6 +27,7 @@
 #include "ui_update_queue.h"
 
 #include "../test_fixtures.h"
+#include "../test_helpers/scoped_geometry.h"
 #include "app_globals.h"
 #include "chamber_heater_backend.h"
 #include "lvgl/src/widgets/label/lv_label_private.h" // lv_label_t::dot_begin: the ellipsization signal
@@ -48,6 +49,8 @@
 
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
+
+using helix::test::ScopedGeometry;
 
 using helix::PrinterTemperatureState;
 using helix::TemperatureController;
@@ -194,34 +197,6 @@ nlohmann::json faulted_dragonbreath_status() {
       "output_pin dragonbreath_filter": {"value": 1.0}})");
 }
 
-/// Drives the fixture display to a geometry and refreshes the derived layout
-/// state (ui_breakpoint / ui_is_portrait / token tiers), restoring both on the
-/// way out: the same discipline as test_is_portrait_subject.cpp's
-/// RestoreDisplayConsts: theme_manager writes into a SHARED XML scope, so a
-/// stale tier would decide layout for every later test in this binary.
-class ScopedGeometry {
-  public:
-    ScopedGeometry(int32_t w, int32_t h)
-        : disp_(lv_display_get_default()), w0_(lv_display_get_horizontal_resolution(disp_)),
-          h0_(lv_display_get_vertical_resolution(disp_)) {
-        lv_display_set_resolution(disp_, w, h);
-        theme_manager_refresh_layout_constants(disp_);
-    }
-
-    ~ScopedGeometry() {
-        lv_display_set_resolution(disp_, w0_, h0_);
-        theme_manager_refresh_layout_constants(disp_);
-    }
-
-    ScopedGeometry(const ScopedGeometry&) = delete;
-    ScopedGeometry& operator=(const ScopedGeometry&) = delete;
-
-  private:
-    lv_display_t* disp_;
-    int32_t w0_;
-    int32_t h0_;
-};
-
 /// Builds the real temp_graph_overlay.xml with its component dependencies,
 /// in the same shape production's xml_registration.cpp uses. temp_graph_mode
 /// is a TempGraphOverlay-owned subject in production; the fixture registers a
@@ -272,6 +247,8 @@ class ChamberOverlayFixture : public XMLTestFixture {
         // XML resolves them: same registration TemperatureService performs.
         lv_xml_register_event_cb(nullptr, "on_chamber_fault_reset_clicked",
                                  TemperatureService::on_chamber_fault_reset_clicked);
+        lv_xml_register_event_cb(nullptr, "on_chamber_retry_target_clicked",
+                                 TemperatureService::on_chamber_retry_target_clicked);
         lv_xml_register_event_cb(nullptr, "on_chamber_filter_fan_clicked",
                                  TemperatureService::on_chamber_filter_fan_clicked);
         lv_xml_register_event_cb(nullptr, "on_chamber_dryer_start_clicked",
@@ -435,12 +412,55 @@ TEST_CASE_METHOD(ChamberOverlayFixture,
         // device is not a device reporting a fault.
         CHECK(hidden(lv_obj_find_by_name(overlay_, "fault_reason_label")));
 
-        // Back online with nothing faulted: banner drops, Reset returns.
+        // Back online with nothing faulted: banner drops; Reset returns with
+        // the next fault.
         set_xml_int("chamber_heater_offline", 0);
         helix::ui::UpdateQueue::instance().drain();
-
         CHECK(hidden(lv_obj_find_by_name(overlay_, "fault_banner")));
+
+        set_xml_int("chamber_heater_fault", 1);
+        helix::ui::UpdateQueue::instance().drain();
         CHECK_FALSE(hidden(lv_obj_find_by_name(overlay_, "reset_fault_button")));
+        set_xml_int("chamber_heater_fault", 0);
+    }
+
+    SECTION("a refused target banners its reason with Retry, and a fault outranks it") {
+        set_xml_int("chamber_heater_fault", 0);
+        set_xml_int("chamber_heater_inhibited", 0);
+        set_xml_int("chamber_heater_offline", 0);
+        set_xml_string("chamber_heater_rejection_text", "The heater didn't accept the command.");
+        set_xml_int("printer_has_chamber_target_route", 1);
+        set_xml_int("chamber_heater_command_rejected", 1);
+        helix::ui::UpdateQueue::instance().drain();
+
+        CHECK_FALSE(hidden(lv_obj_find_by_name(overlay_, "fault_banner")));
+        lv_obj_t* reason = lv_obj_find_by_name(overlay_, "rejection_reason_label");
+        REQUIRE(reason != nullptr);
+        CHECK_FALSE(hidden(reason));
+        CHECK(std::string(lv_label_get_text(reason)) == "The heater didn't accept the command.");
+        CHECK_FALSE(hidden(lv_obj_find_by_name(overlay_, "retry_target_button")));
+        CHECK(hidden(lv_obj_find_by_name(overlay_, "reset_fault_button")));
+        CHECK(hidden(lv_obj_find_by_name(overlay_, "fault_reason_label")));
+
+        // Retry needs the route around the queue a chamber wait may hold.
+        set_xml_int("printer_has_chamber_target_route", 0);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(hidden(lv_obj_find_by_name(overlay_, "retry_target_button")));
+        set_xml_int("printer_has_chamber_target_route", 1);
+        helix::ui::UpdateQueue::instance().drain();
+
+        // A fault behind the refusal is what Reset clears; Retry would only
+        // be refused again.
+        set_xml_int("chamber_heater_fault", 1);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(hidden(lv_obj_find_by_name(overlay_, "retry_target_button")));
+        CHECK(hidden(reason));
+        CHECK_FALSE(hidden(lv_obj_find_by_name(overlay_, "reset_fault_button")));
+
+        set_xml_int("chamber_heater_fault", 0);
+        set_xml_int("chamber_heater_command_rejected", 0);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(hidden(lv_obj_find_by_name(overlay_, "fault_banner")));
     }
 
     SECTION("no diagnostics capability hides the block, keeps the card") {

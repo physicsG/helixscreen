@@ -20,7 +20,7 @@ setup() {
 # killed by the pid it recorded: it would otherwise hold the output pipe open.
 make_t() {
     local rc=0
-    (cd "$REPO" && timeout 25 make --no-print-directory -o test-build TEST_BIN="$FAKE_BIN" \
+    (cd "$(scratch_tree)" && timeout 25 make --no-print-directory -o test-build TEST_BIN="$FAKE_BIN" \
         F='[x]' "$@" t) || rc=$?
     if [ -f "$STUB_PID" ]; then kill -KILL "$(cat "$STUB_PID")" 2>/dev/null || true; fi
     return "$rc"

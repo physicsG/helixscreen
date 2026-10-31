@@ -157,10 +157,9 @@ class WizardFilamentSensorSelectStep : public helix::wizard::Step {
     }
 
   private:
-    /**
-     * @brief Check if a sensor name indicates it's managed by AMS
-     */
-    static bool is_ams_sensor(const std::string& name);
+    /// is_standalone_filament_sensor() against the current discovery: the
+    /// filter Settings > Sensors lists by too.
+    static bool is_standalone(const std::string& name);
 
     /// Cancel an armed deferred-refresh timer. Safe to call when none is armed.
     void cancel_refresh_timer();

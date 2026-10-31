@@ -3,12 +3,15 @@
 
 #include "ui_spaghetti_detection_modal.h"
 
+#include "ui_resume_dispatch.h"
 #include "ui_toast_manager.h"
 
 #include "abort_manager.h"
 #include "app_globals.h"
 #include "display_manager.h"
 #include "i_moonraker_api.h"
+#include "observer_factory.h"
+#include "printer_state.h"
 #include "settings_manager.h"
 #include "static_subject_registry.h"
 
@@ -113,7 +116,94 @@ void SpaghettiDetectionModal::request_camera_frame(const helix::CameraFrameSourc
 
 namespace helix::detection {
 
+bool BedCheckModal::job_still_paused() const {
+    if (!bound_) {
+        return true;
+    }
+    auto& ps = get_printer_state().print_state();
+    // RAW_PRINT_STATE_OK: the printer's own paused state is what the bed check
+    // left behind; nothing the app committed to stands in for it.
+    const bool paused = lv_subject_get_int(ps.get_print_state_enum_subject()) ==
+                        static_cast<int>(PrintJobState::PAUSED);
+    const char* current = lv_subject_get_string(ps.get_print_filename_subject());
+    return paused && current && bound_filename_ == current;
+}
+
+void BedCheckModal::on_show() {
+    wire_ok_button("btn_primary");
+    wire_tertiary_button("btn_tertiary");
+    wire_quaternary_button("btn_quaternary");
+    if (!bound_) {
+        return;
+    }
+    // RAW_PRINT_STATE_OK: the dialog answers the printer's pause, so it closes
+    // on the wire state leaving PAUSED.
+    pause_observer_ = helix::ui::observe_print_state<BedCheckModal>(
+        get_printer_state().print_state().get_print_state_enum_subject(), this,
+        [](BedCheckModal* self, PrintJobState state) {
+            if (state != PrintJobState::PAUSED && self->is_visible()) {
+                spdlog::info("[BedCheckModal] the print left the pause - closing");
+                self->hide();
+            }
+        },
+        get_printer_state().get_subjects_lifetime());
+}
+
+void BedCheckModal::on_hide() {
+    pause_observer_.reset();
+}
+
+void BedCheckModal::act_on_job(const Action& action, const char* what) {
+    if (!job_still_paused()) {
+        spdlog::warn("[BedCheckModal] {} refused: the printer is no longer paused on '{}'", what,
+                     bound_filename_);
+        ToastManager::instance().show(ToastSeverity::WARNING,
+                                      lv_tr("That print is no longer paused"), 4000);
+    } else if (action) {
+        action();
+    }
+    hide();
+}
+
+void BedCheckModal::on_ok() {
+    act_on_job(on_restart_, "Restart");
+}
+
+void BedCheckModal::on_quaternary() {
+    act_on_job(on_cancel_print_, "Cancel");
+}
+
+namespace {
+void present_bed_check(const DetectionEvent& e) {
+    spdlog::info("[Detection] bed check stopped the print: {}", e.message);
+    if (auto* dm = DisplayManager::instance()) {
+        dm->wake_display();
+    }
+    auto modal = std::make_unique<BedCheckModal>();
+    // The job is the one paused now; Restart reprints that file even if the
+    // printer reports another by the time the user answers (it then refuses).
+    const std::string filename =
+        lv_subject_get_string(get_printer_state().print_state().get_print_filename_subject());
+    modal->bind_to_paused_job(filename);
+    modal->set_on_restart([filename] {
+        helix::ui::restart_print_from_beginning(get_moonraker_api(), filename, "[BedCheck]",
+                                                nullptr);
+    });
+    modal->set_on_cancel_print([] { helix::AbortManager::instance().start_abort(); });
+    modal->set_on_disable_check([] {
+        DetectionManager::instance().set_bed_check_enabled(false, [] {
+            ToastManager::instance().show(ToastSeverity::INFO, lv_tr("Bed check turned off"), 4000);
+        });
+    });
+    Modal::show_owned(std::move(modal), lv_screen_active());
+}
+} // namespace
+
 void present_detection(const DetectionEvent& e, DetectionPolicy p) {
+    if (e.kind == DetectionKind::DirtyBed) {
+        present_bed_check(e);
+        return;
+    }
     using DetectionResponse = helix::detection::DetectionResponse;
     const auto response = DetectionManager::instance().response_for(p);
     if (response == DetectionResponse::Suppressed)

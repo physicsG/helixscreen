@@ -85,6 +85,43 @@ static helix::label::BrotherQLMedia query_brother_media_tcp(const std::string& h
     return media;
 }
 
+void save_discovered_network_printer(const DiscoveredPrinter& printer,
+                                     const std::string& protocol) {
+    const bool is_ipp = protocol == "ipp";
+    const int port = (is_ipp && printer.port == 0) ? 631 : printer.port;
+
+    auto& settings = LabelPrinterSettingsManager::instance();
+    settings.set_printer_address(printer.ip_address);
+    settings.set_printer_port(port);
+    settings.set_printer_protocol(protocol);
+    settings.set_ipp_resource_path(is_ipp ? printer.resource_path : "");
+}
+
+DiscoveredPrinterPick pick_discovered_printer(const std::vector<RankedNetworkPrinter>& ranked,
+                                              const std::string& saved_ip,
+                                              const std::string& saved_protocol,
+                                              bool may_auto_pick) {
+    DiscoveredPrinterPick pick;
+    for (size_t i = 0; i < ranked.size(); ++i) {
+        if (ranked[i].ip_address == saved_ip && ranked[i].protocol == saved_protocol) {
+            pick.show = static_cast<int>(i);
+            break;
+        }
+    }
+    if (may_auto_pick && !ranked.empty() && pick.show != 0) {
+        pick.select = 0;
+        pick.show = 0;
+    }
+    return pick;
+}
+
+void apply_ipp_target(IppPrinter& printer) {
+    const auto& settings = LabelPrinterSettingsManager::instance();
+    printer.set_target(settings.get_printer_address(),
+                       static_cast<uint16_t>(settings.get_printer_port()),
+                       settings.get_ipp_resource_path());
+}
+
 void print_spool_label(const SpoolInfo& spool, PrintCallback callback) {
     auto& settings = LabelPrinterSettingsManager::instance();
     const std::string type = settings.get_printer_type();
@@ -145,8 +182,7 @@ void print_spool_label(const SpoolInfo& spool, PrintCallback callback) {
 
     if (is_ipp) {
         static IppPrinter ipp_printer;
-        ipp_printer.set_target(settings.get_printer_address(), settings.get_printer_port(),
-                               "ipp/print");
+        apply_ipp_target(ipp_printer);
         ipp_printer.set_sheet_template(size_idx);
         ipp_printer.set_label_count(settings.get_label_count());
         ipp_printer.print(bitmap, label_size, callback);

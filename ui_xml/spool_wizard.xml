@@ -156,10 +156,9 @@
         <ui_card name="summary_card"
                  width="100%" height="content" style_pad_all="#space_sm" flex_flow="row" style_pad_gap="#space_sm"
                  style_flex_cross_place="center">
-          <lv_obj name="summary_color_swatch" width="28" height="28" style_radius="14" style_bg_opa="255">
-            <bind_style_prop prop="bg_color" subject="wizard_summary_color"/>
-            <bind_style_if_eq name="styles.contrast_edge" subject="wizard_summary_edge" ref_value="1"/>
-          </lv_obj>
+          <color_dot name="summary_color_swatch"
+                     color_subject="wizard_summary_color" colors_subject="wizard_summary_colors"
+                     finish_subject="wizard_summary_finish" size="#swatch_grid_size"/>
           <lv_obj height="content"
                   flex_grow="1" flex_flow="column" style_pad_all="0" style_pad_gap="0" scrollable="false">
             <text_small name="summary_vendor" bind_text="wizard_summary_vendor"/>

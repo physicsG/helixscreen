@@ -9,6 +9,7 @@
  * config, platform, XDG, HOME, /var/tmp, /tmp fallbacks.
  */
 
+#include "../test_helpers/scoped_env.h"
 #include "app_globals.h"
 
 #include <cstdlib>
@@ -32,36 +33,12 @@ static void cleanup_dir(const std::string& path) {
     std::filesystem::remove_all(path, ec);
 }
 
-// RAII guard for env vars - restores original value on destruction
-namespace {
-struct EnvGuard {
-    std::string name;
-    std::string original;
-    bool was_set;
-
-    explicit EnvGuard(const char* env_name) : name(env_name) {
-        const char* val = std::getenv(env_name);
-        was_set = (val != nullptr);
-        if (was_set)
-            original = val;
-    }
-
-    ~EnvGuard() {
-        if (was_set) {
-            setenv(name.c_str(), original.c_str(), 1);
-        } else {
-            unsetenv(name.c_str());
-        }
-    }
-};
-} // namespace
-
 // ============================================================================
 // get_helix_cache_dir() Tests
 // ============================================================================
 
 TEST_CASE("get_helix_cache_dir HELIX_CACHE_DIR override", "[cache]") {
-    EnvGuard guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv guard("HELIX_CACHE_DIR");
     std::string tmpdir = make_test_tmpdir("env_override");
 
     SECTION("Uses HELIX_CACHE_DIR when set") {
@@ -88,7 +65,7 @@ TEST_CASE("get_helix_cache_dir HELIX_CACHE_DIR override", "[cache]") {
 }
 
 TEST_CASE("get_helix_cache_dir falls through on empty env", "[cache]") {
-    EnvGuard helix_guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv helix_guard("HELIX_CACHE_DIR");
     unsetenv("HELIX_CACHE_DIR");
 
     std::string result = get_helix_cache_dir("fallthrough_test");
@@ -101,7 +78,7 @@ TEST_CASE("get_helix_cache_dir falls through on empty env", "[cache]") {
 }
 
 TEST_CASE("get_helix_cache_dir falls through on invalid env path", "[cache]") {
-    EnvGuard guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv guard("HELIX_CACHE_DIR");
     // Set to a path that can't be created (nested under /nonexistent)
     setenv("HELIX_CACHE_DIR", "/nonexistent/readonly/cache", 1);
 
@@ -161,7 +138,7 @@ static std::string unique_subdir(const std::string& label) {
 }
 
 TEST_CASE("peek_helix_cache_dir resolves without creating", "[cache]") {
-    EnvGuard guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv guard("HELIX_CACHE_DIR");
     std::string tmpdir = make_test_tmpdir("peek_nocreate");
     setenv("HELIX_CACHE_DIR", tmpdir.c_str(), 1);
     const std::string sub = unique_subdir("nocreate");
@@ -180,7 +157,7 @@ TEST_CASE("peek_helix_cache_dir resolves without creating", "[cache]") {
 }
 
 TEST_CASE("peek agrees with get, and only get creates", "[cache]") {
-    EnvGuard guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv guard("HELIX_CACHE_DIR");
     std::string tmpdir = make_test_tmpdir("peek_agrees");
     setenv("HELIX_CACHE_DIR", tmpdir.c_str(), 1);
     const std::string sub = unique_subdir("agrees");
@@ -200,7 +177,7 @@ TEST_CASE("peek agrees with get, and only get creates", "[cache]") {
 }
 
 TEST_CASE("get_helix_cache_dir creates only the winning tier", "[cache]") {
-    EnvGuard guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv guard("HELIX_CACHE_DIR");
     std::string tmpdir = make_test_tmpdir("only_winner");
     setenv("HELIX_CACHE_DIR", tmpdir.c_str(), 1);
     const std::string sub = unique_subdir("winner");
@@ -223,7 +200,7 @@ TEST_CASE("a candidate under an unwritable parent is skipped, not created", "[ca
         return;
     }
 
-    EnvGuard guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv guard("HELIX_CACHE_DIR");
     std::string locked = make_test_tmpdir("locked_parent");
     std::filesystem::permissions(locked, std::filesystem::perms::owner_read |
                                              std::filesystem::perms::owner_exec);
@@ -343,8 +320,8 @@ TEST_CASE("the sweep reclaims NOTHING on a host build", "[cache]") {
     // rung defined, the XDG/HOME rung IS the live cache, so a sweep that ran
     // here would treat a developer's real ~/.cache/helix as stale. Seed every
     // lower rung and require all of them to survive.
-    EnvGuard cache_guard("HELIX_CACHE_DIR");
-    EnvGuard xdg_guard("XDG_CACHE_HOME");
+    helix::ScopedEnv cache_guard("HELIX_CACHE_DIR");
+    helix::ScopedEnv xdg_guard("XDG_CACHE_HOME");
 
     std::string root = make_test_tmpdir("sweep_noop");
     setenv("HELIX_CACHE_DIR", (root + "/pinned").c_str(), 1);
@@ -381,7 +358,7 @@ bool all_viable(const std::string&) {
 std::vector<CacheCandidate> device_shape() {
     return {
         {"/usr/data/helixscreen/cache/helix_thumbs", "HELIX_CACHE_DIR", false},
-        {"/usr/data/helixscreen/cache/helix_thumbs", "MIPS", true},
+        {"/usr/data/helixscreen-state/cache/helix_thumbs", "k1", true},
         {"/root/.cache/helix/helix_thumbs", nullptr, false},
         {"/var/tmp/helix_helix_thumbs", nullptr, false},
         {"/tmp/helix_helix_thumbs", nullptr, false},
@@ -405,7 +382,7 @@ TEST_CASE("select_stale_paths never reclaims a deliberate rung", "[cache]") {
     std::vector<CacheCandidate> c = {
         {"/pinned/helix_thumbs", "HELIX_CACHE_DIR", false},
         {"/configured/helix_thumbs", "config", false},
-        {"/platform/helix_thumbs", "MIPS", true},
+        {"/platform/helix_thumbs", "k1", true},
         {"/home/dev/.cache/helix/helix_thumbs", nullptr, false},
     };
     const std::vector<std::string> stale = select_stale_paths(c, all_viable);
@@ -526,4 +503,84 @@ TEST_CASE("migrate_state_root drops empty legacy scaffolding", "[cache]") {
     REQUIRE(std::filesystem::exists(current + "/logs/marker"));
 
     cleanup_dir(root);
+}
+
+// ---------------------------------------------------------------------------
+// board_cache_candidates() - the platform rung is a per-board table
+// ---------------------------------------------------------------------------
+
+#include "board_identity.h"
+#include "platform_info.h"
+
+using helix::FlashForgeModTree;
+using helix::board::Board;
+using helix::cache_internal::board_cache_candidates;
+
+namespace {
+/// The paths of @p rungs, in order, after checking each is a labelled platform rung.
+std::vector<std::string> rung_paths(const std::vector<CacheCandidate>& rungs, Board board) {
+    std::vector<std::string> out;
+    for (const auto& c : rungs) {
+        CHECK(c.platform);
+        CHECK(std::string(c.tier) == helix::board::info(board).key);
+        out.push_back(c.path);
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("board_cache_candidates names each board's rung", "[cache]") {
+    using V = std::vector<std::string>;
+    auto paths = [](Board b, FlashForgeModTree t) {
+        return rung_paths(board_cache_candidates(b, t, "x"), b);
+    };
+
+    CHECK(paths(Board::Ad5m, FlashForgeModTree::None) == V{"/data/.helixscreen/cache/x"});
+    CHECK(paths(Board::Cc1, FlashForgeModTree::None) ==
+          V{"/user-resource/helixscreen-state/cache/x"});
+    CHECK(paths(Board::K2, FlashForgeModTree::None) ==
+          V{"/mnt/UDISK/helixscreen-state/cache/x", "/usr/data/helixscreen-state/cache/x"});
+    CHECK(paths(Board::K1, FlashForgeModTree::None) == V{"/usr/data/helixscreen-state/cache/x"});
+    CHECK(paths(Board::SnapmakerU1, FlashForgeModTree::None) ==
+          V{"/userdata/helixscreen-state/cache/x"});
+    CHECK(paths(Board::Generic, FlashForgeModTree::None).empty());
+
+    // The FlashForge MIPS boards split on the mod tree: Z-Mod keeps state under /srv,
+    // Forge-X under the mod's own durable config directory.
+    for (Board b : {Board::Ad5x, Board::Creator5, Board::Creator5Pro}) {
+        INFO("board: " << helix::board::info(b).key);
+        CHECK(paths(b, FlashForgeModTree::Zmod) == V{"/srv/helixscreen-state/cache/x"});
+        CHECK(paths(b, FlashForgeModTree::None) == V{"/srv/helixscreen-state/cache/x"});
+        CHECK(paths(b, FlashForgeModTree::ForgeX) ==
+              V{"/opt/config/mod_data/helixscreen-state/cache/x"});
+    }
+}
+
+#include "helix_install_roots.h"
+
+TEST_CASE("every board's cache rung lives under a known state root", "[cache]") {
+    // A state root missing from kStateRoots is logs and crash files a debug bundle cannot
+    // find, and a tree the uninstaller never sweeps.
+    for (int i = 0; i < helix::board::kBoardCount; ++i) {
+        for (FlashForgeModTree tree :
+             {FlashForgeModTree::None, FlashForgeModTree::Zmod, FlashForgeModTree::ForgeX}) {
+            const Board board = static_cast<Board>(i);
+            for (const auto& rung : board_cache_candidates(board, tree, "x")) {
+                bool known = false;
+                for (const char* root : helix::kStateRoots) {
+                    known = known || rung.path.rfind(std::string(root) + "/", 0) == 0;
+                }
+                INFO("board " << helix::board::info(board).key << " rung " << rung.path);
+                CHECK(known);
+            }
+        }
+    }
+}
+
+TEST_CASE("the Forge-X state root is a known state root", "[cache]") {
+    bool found = false;
+    for (const char* root : helix::kStateRoots) {
+        found = found || std::string(root) == "/opt/config/mod_data/helixscreen-state";
+    }
+    CHECK(found);
 }

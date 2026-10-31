@@ -5,6 +5,7 @@
 
 #include "helix_thread.h"
 #include "helix_version.h"
+#include "system/crash_record.h"
 
 #include <spdlog/spdlog.h>
 
@@ -178,7 +179,7 @@ static unsigned int s_previous_tag_capacity = 0;
 static volatile const unsigned int* s_previous_tag_next = nullptr;
 
 /// Ring of recent ERROR-level log lines (registered by the logging sink). Each
-/// entry is crash_handler::ERROR_LOG_ENTRY_LEN bytes, NUL-terminated; newest slot
+/// entry is crash_handler::kErrorLogEntryLen bytes, NUL-terminated; newest slot
 /// is (*s_error_log_next - 1) % s_error_log_capacity. Storage is process-
 /// lifetime (a singleton sink), so these pointers never dangle.
 static const char* s_error_log_ring = nullptr;
@@ -253,8 +254,8 @@ struct BreadcrumbSlot {
 /// bundles since 2026-04-29 captured ≤80 crumbs each, but the new
 /// instrumentation adds ~6 per Print Status reactivation, and tick
 /// crumbs are still cheap to absorb at this size.
-static constexpr size_t BREADCRUMB_RING_SIZE = 256;
-static BreadcrumbSlot s_breadcrumb_ring[BREADCRUMB_RING_SIZE] = {};
+static constexpr size_t kBreadcrumbRingSize = 256;
+static BreadcrumbSlot s_breadcrumb_ring[kBreadcrumbRingSize] = {};
 
 /// Monotonically-incrementing write index. Modulo ring size gives slot.
 /// Wraps at 2^32 — at 100 crumbs/sec that's ~500 days, acceptable.
@@ -278,11 +279,11 @@ static size_t copy_truncated(char* dst, size_t dst_size, const char* src) noexce
     return i;
 }
 
-/// Saved previous signal actions for restoration
-static struct sigaction s_old_sigsegv = {};
-static struct sigaction s_old_sigabrt = {};
-static struct sigaction s_old_sigbus = {};
-static struct sigaction s_old_sigfpe = {};
+using helix::crash_record::kCrashSignals;
+static constexpr size_t kCrashSignalCount = sizeof(kCrashSignals) / sizeof(kCrashSignals[0]);
+
+/// Saved previous signal actions for restoration, one per kCrashSignals entry
+static struct sigaction s_old_actions[kCrashSignalCount] = {};
 
 /// Mirror of glibc's private `struct abort_msg_s`. `__libc_message()` mmaps one
 /// of these, writes the abort reason ("free(): invalid pointer", "double free
@@ -442,22 +443,6 @@ static char* ptr_to_hex(char* buf, size_t buf_size, uintptr_t value) {
     return p;
 }
 
-/// Async-signal-safe: get the signal name string
-static const char* signal_name(int sig) {
-    switch (sig) {
-    case SIGSEGV:
-        return "SIGSEGV";
-    case SIGABRT:
-        return "SIGABRT";
-    case SIGBUS:
-        return "SIGBUS";
-    case SIGFPE:
-        return "SIGFPE";
-    default:
-        return "UNKNOWN";
-    }
-}
-
 /// Async-signal-safe: map signal + code to a human-readable name
 static const char* get_fault_code_name(int sig, int code) {
     if (sig == SIGSEGV) {
@@ -486,6 +471,30 @@ static const char* get_fault_code_name(int sig, int code) {
             return "FPE_FLTDIV";
         case FPE_FLTOVF:
             return "FPE_FLTOVF";
+        default:
+            return "UNKNOWN";
+        }
+    } else if (sig == SIGILL) {
+        switch (code) {
+        case ILL_ILLOPC:
+            return "ILL_ILLOPC";
+        case ILL_ILLOPN:
+            return "ILL_ILLOPN";
+        case ILL_ILLADR:
+            return "ILL_ILLADR";
+        case ILL_ILLTRP:
+            return "ILL_ILLTRP";
+        case ILL_PRVOPC:
+            return "ILL_PRVOPC";
+        default:
+            return "UNKNOWN";
+        }
+    } else if (sig == SIGTRAP) {
+        switch (code) {
+        case TRAP_BRKPT:
+            return "TRAP_BRKPT";
+        case TRAP_TRACE:
+            return "TRAP_TRACE";
         default:
             return "UNKNOWN";
         }
@@ -518,7 +527,7 @@ static void write_kv_long(int fd, const char* key, long value, char* num_buf, si
 /// check at the call site.
 ///
 /// Bounds checks: fp must be word-aligned, monotonically increasing up the
-/// stack, and inside [sp, sp + MAX_STACK_SIZE). On ARM32 we additionally
+/// stack, and inside [sp, sp + kMaxStackSize). On ARM32 we additionally
 /// require saved_lr to fall inside the binary .text range — function
 /// prologues without a standard FP (leaf libc routines, inline asm) can
 /// plant a saved_fp value that walks into unrelated memory, and the .text
@@ -591,8 +600,8 @@ HELIX_NO_SANITIZE_ADDRESS static uintptr_t read_stack_word(uintptr_t base, size_
 
 static int fp_walk_backtrace(int fd, uintptr_t initial_fp, uintptr_t sp, uintptr_t word_size) {
 #if defined(__aarch64__) || defined(__x86_64__) || defined(__arm__)
-    constexpr uintptr_t MAX_STACK_SIZE = 16 * 1024 * 1024;
-    constexpr int MAX_FRAMES = 48;
+    constexpr uintptr_t kMaxStackSize = 16 * 1024 * 1024;
+    constexpr int kMaxFrames = 48;
 
     if (initial_fp == 0 || sp == 0 || word_size == 0)
         return 0;
@@ -603,14 +612,14 @@ static int fp_walk_backtrace(int fd, uintptr_t initial_fp, uintptr_t sp, uintptr
     // 0xff000000, so sp + 16MB silently wraps to ~0x00Cxxxxx and every
     // `fp + 8 > stack_hi` check spuriously trips, killing the walk on the
     // first iteration.
-    uintptr_t stack_hi = sp + MAX_STACK_SIZE;
+    uintptr_t stack_hi = sp + kMaxStackSize;
     if (stack_hi < sp) {
         stack_hi = ~static_cast<uintptr_t>(0);
     }
     uintptr_t fp = initial_fp;
     uintptr_t prev_fp = 0;
 
-    for (int i = 0; i < MAX_FRAMES; ++i) {
+    for (int i = 0; i < kMaxFrames; ++i) {
         if ((fp & (word_size - 1)) != 0)
             break;
         if (fp < sp || fp + 2 * word_size > stack_hi)
@@ -704,7 +713,7 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
 
     // Write signal name
     safe_write(fd, "name:");
-    safe_write(fd, signal_name(sig));
+    safe_write(fd, helix::crash_record::signal_name(sig));
     safe_write(fd, "\n");
 
     // Write version
@@ -981,11 +990,11 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
     if (s_previous_tag_ring && s_previous_tag_capacity > 0 && s_previous_tag_next) {
         unsigned int next = *s_previous_tag_next;
         // Labels for up to 8 slots; caller typically registers 4.
-        static const char* const LABELS[] = {
+        static const char* const kLabels[] = {
             "queue_prev:",  "queue_prev2:", "queue_prev3:", "queue_prev4:",
             "queue_prev5:", "queue_prev6:", "queue_prev7:", "queue_prev8:",
         };
-        const unsigned int label_count = sizeof(LABELS) / sizeof(LABELS[0]);
+        const unsigned int label_count = sizeof(kLabels) / sizeof(kLabels[0]);
         const unsigned int limit =
             s_previous_tag_capacity < label_count ? s_previous_tag_capacity : label_count;
         for (unsigned int i = 0; i < limit; ++i) {
@@ -994,7 +1003,7 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
             const char* prev = const_cast<const char*>(s_previous_tag_ring[idx]);
             if (!prev)
                 break; // Unfilled slot — rest of the ring is empty.
-            safe_write(fd, LABELS[i]);
+            safe_write(fd, kLabels[i]);
             safe_write(fd, prev);
             // Append " (xN)" when the producer coalesced N>1 consecutive
             // identical tags into this slot. Skip the suffix for N<=1 to keep
@@ -1019,20 +1028,20 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
     // are pre-formatted + NUL-terminated by the sink, so the handler only reads.
     if (s_error_log_ring && s_error_log_capacity > 0 && s_error_log_next) {
         unsigned int next = *s_error_log_next;
-        static const char* const ERR_LABELS[] = {
+        static const char* const kErrLabels[] = {
             "recent_error:",  "recent_error2:", "recent_error3:", "recent_error4:",
             "recent_error5:", "recent_error6:", "recent_error7:", "recent_error8:",
         };
-        const unsigned int label_count = sizeof(ERR_LABELS) / sizeof(ERR_LABELS[0]);
+        const unsigned int label_count = sizeof(kErrLabels) / sizeof(kErrLabels[0]);
         const unsigned int limit =
             s_error_log_capacity < label_count ? s_error_log_capacity : label_count;
         for (unsigned int i = 0; i < limit; ++i) {
             unsigned int idx = (next + s_error_log_capacity - 1 - i) % s_error_log_capacity;
             const char* entry =
-                s_error_log_ring + static_cast<size_t>(idx) * crash_handler::ERROR_LOG_ENTRY_LEN;
+                s_error_log_ring + static_cast<size_t>(idx) * crash_handler::kErrorLogEntryLen;
             if (entry[0] == '\0')
                 break; // Unfilled slot — rest of the ring is empty.
-            safe_write(fd, ERR_LABELS[i]);
+            safe_write(fd, kErrLabels[i]);
             safe_write(fd, entry);
             safe_write(fd, "\n");
         }
@@ -1212,8 +1221,8 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
         // CPSR bit 5 (T) = 1 when the crashing function was running in
         // Thumb state. GCC's -fno-omit-frame-pointer uses r7 as FP in
         // Thumb and r11 (arm_fp) in ARM mode. Both with 2-word frame layout.
-        constexpr unsigned long CPSR_THUMB_BIT = 0x20;
-        if (uctx->uc_mcontext.arm_cpsr & CPSR_THUMB_BIT) {
+        constexpr unsigned long kCpsrThumbBit = 0x20;
+        if (uctx->uc_mcontext.arm_cpsr & kCpsrThumbBit) {
             fp_reg = uctx->uc_mcontext.arm_r7;
         } else {
             fp_reg = uctx->uc_mcontext.arm_fp;
@@ -1238,20 +1247,20 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
         uintptr_t sp = 0;
 #if defined(__arm__)
         sp = uctx->uc_mcontext.arm_sp;
-        constexpr int WORD_SIZE = 4;
+        constexpr int kWordSize = 4;
 #elif defined(__aarch64__)
         sp = static_cast<uintptr_t>(uctx->uc_mcontext.sp);
-        constexpr int WORD_SIZE = 8;
+        constexpr int kWordSize = 8;
 #elif defined(__x86_64__)
         sp = static_cast<uintptr_t>(uctx->uc_mcontext.gregs[REG_RSP]);
-        constexpr int WORD_SIZE = 8;
+        constexpr int kWordSize = 8;
 #elif defined(__mips__)
         sp = static_cast<uintptr_t>(uctx->uc_mcontext.gregs[29]);
-        constexpr int WORD_SIZE = 4;
+        constexpr int kWordSize = 4;
 #else
-        constexpr int WORD_SIZE = 0;
+        constexpr int kWordSize = 0;
 #endif
-        if (sp != 0 && WORD_SIZE != 0) {
+        if (sp != 0 && kWordSize != 0) {
             safe_write(fd, "stack_base:");
             safe_write(fd, ptr_to_hex(hex_buf, sizeof(hex_buf), sp));
             safe_write(fd, "\n");
@@ -1259,14 +1268,14 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
             // Scan up to 256 words (1-2 KB of stack) for better coverage on
             // 64-bit archs with larger frames. Raw stk: dump kept to 128 words
             // to bound output size.
-            constexpr int DUMP_WORDS = 128;
-            constexpr int SCAN_WORDS = 256;
+            constexpr int kDumpWords = 128;
+            constexpr int kScanWords = 256;
 
             auto read_word = [&](int i) -> uintptr_t {
-                return read_stack_word(sp, static_cast<size_t>(i), WORD_SIZE);
+                return read_stack_word(sp, static_cast<size_t>(i), kWordSize);
             };
 
-            for (int i = 0; i < DUMP_WORDS; ++i) {
+            for (int i = 0; i < kDumpWords; ++i) {
                 safe_write(fd, "stk:");
                 safe_write(fd, ptr_to_hex(hex_buf, sizeof(hex_buf), read_word(i)));
                 safe_write(fd, "\n");
@@ -1277,7 +1286,7 @@ static void crash_signal_handler(int sig, siginfo_t* info, void* ucontext) {
             // symbolizes these — at least one frame is usually a real return addr.
             if (s_text_start != 0 && s_text_end > s_text_start) {
                 safe_write(fd, "bt_source:stack_scan\n");
-                for (int i = 0; i < SCAN_WORDS; ++i) {
+                for (int i = 0; i < kScanWords; ++i) {
                     uintptr_t word = read_word(i);
                     if (word >= s_text_start && word < s_text_end) {
                         safe_write(fd, "bt:");
@@ -1610,7 +1619,7 @@ static uint32_t breadcrumb_now_ms() noexcept {
 
 void crash_handler::breadcrumb::note(const char* category, const char* subject) noexcept {
     uint32_t i = s_breadcrumb_idx.fetch_add(1, std::memory_order_relaxed);
-    BreadcrumbSlot& slot = s_breadcrumb_ring[i % BREADCRUMB_RING_SIZE];
+    BreadcrumbSlot& slot = s_breadcrumb_ring[i % kBreadcrumbRingSize];
 
     // Invalidate the slot while we overwrite it, so a concurrent reader sees
     // "empty" rather than a mix of old and new strings.
@@ -1626,9 +1635,9 @@ void crash_handler::breadcrumb::note(const char* category, const char* subject) 
 void crash_handler::breadcrumb::dump_to_fd(int fd) noexcept {
     char num_buf[32];
     uint32_t end = s_breadcrumb_idx.load(std::memory_order_acquire);
-    uint32_t start = (end > BREADCRUMB_RING_SIZE) ? end - BREADCRUMB_RING_SIZE : 0;
+    uint32_t start = (end > kBreadcrumbRingSize) ? end - kBreadcrumbRingSize : 0;
     for (uint32_t i = start; i < end; ++i) {
-        const BreadcrumbSlot& slot = s_breadcrumb_ring[i % BREADCRUMB_RING_SIZE];
+        const BreadcrumbSlot& slot = s_breadcrumb_ring[i % kBreadcrumbRingSize];
         uint32_t ts = __atomic_load_n(&slot.ts_ms, __ATOMIC_ACQUIRE);
         if (ts == 0)
             continue;
@@ -1648,7 +1657,7 @@ void crash_handler::breadcrumb::dump_to_fd(int fd) noexcept {
 void crash_handler::breadcrumb::note(const char* category, const char* subject,
                                      long detail) noexcept {
     uint32_t i = s_breadcrumb_idx.fetch_add(1, std::memory_order_relaxed);
-    BreadcrumbSlot& slot = s_breadcrumb_ring[i % BREADCRUMB_RING_SIZE];
+    BreadcrumbSlot& slot = s_breadcrumb_ring[i % kBreadcrumbRingSize];
 
     __atomic_store_n(&slot.ts_ms, 0u, __ATOMIC_RELAXED);
 
@@ -1766,10 +1775,9 @@ void crash_handler::install(const std::string& crash_file_path) {
     // SA_ONSTACK: run on the alternate stack above
     sa.sa_flags = SA_RESETHAND | SA_SIGINFO | SA_ONSTACK;
 
-    sigaction(SIGSEGV, &sa, &s_old_sigsegv);
-    sigaction(SIGABRT, &sa, &s_old_sigabrt);
-    sigaction(SIGBUS, &sa, &s_old_sigbus);
-    sigaction(SIGFPE, &sa, &s_old_sigfpe);
+    for (size_t i = 0; i < kCrashSignalCount; ++i) {
+        sigaction(kCrashSignals[i], &sa, &s_old_actions[i]);
+    }
 
     s_installed = 1;
     spdlog::info("[CrashHandler] Installed signal handlers (crash file: {})", s_crash_path);
@@ -1786,10 +1794,9 @@ void crash_handler::uninstall() {
     }
 
     // Restore previous handlers
-    sigaction(SIGSEGV, &s_old_sigsegv, nullptr);
-    sigaction(SIGABRT, &s_old_sigabrt, nullptr);
-    sigaction(SIGBUS, &s_old_sigbus, nullptr);
-    sigaction(SIGFPE, &s_old_sigfpe, nullptr);
+    for (size_t i = 0; i < kCrashSignalCount; ++i) {
+        sigaction(kCrashSignals[i], &s_old_actions[i], nullptr);
+    }
 
     s_installed = 0;
     s_crash_path[0] = '\0';
@@ -1896,6 +1903,8 @@ nlohmann::json crash_handler::read_crash_file(const std::string& crash_file_path
                 }
             } else if (key == "name") {
                 result["signal_name"] = value;
+            } else if (key == "recorded_by") {
+                result["recorded_by"] = value;
             } else if (key == "version") {
                 result["app_version"] = value;
             } else if (key == "timestamp") {

@@ -3,8 +3,8 @@
 
 #include "../test_helpers/config_dir_guard.h"
 #include "../test_helpers/printer_image_regions_test_access.h"
+#include "callout_layout.h"
 #include "printer_image_regions.h"
-#include "src/ui/panel_widgets/callout_layout.h"
 
 #include <cstdint>
 #include <filesystem>

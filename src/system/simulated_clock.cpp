@@ -23,7 +23,7 @@ struct ClockState {
     bool anchored = false;
     std::chrono::steady_clock::time_point real_anchor{};
     SimulatedClock::duration elapsed{};
-    double factor = MIN_SPEED;
+    double factor = kMinSpeed;
 };
 
 ClockState& clock_state() {

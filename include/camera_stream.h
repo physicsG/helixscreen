@@ -211,6 +211,16 @@ class CameraStream {
      */
     static CameraFrame latest_running_frame(const WebcamInfo& feed, int max_w, int max_h);
 
+    /// How a stream with these URLs fetches frames.
+    enum class FetchMode { Stream, Snapshot, None };
+
+    /// MJPEG when there is a stream URL the HTTP client can carry, else snapshot
+    /// polling when there is a snapshot URL. Without client TLS an https stream
+    /// cannot stream: snapshots then go through the platform's one-shot TLS
+    /// bridge instead (see needs_platform_tls()).
+    static FetchMode choose_fetch_mode(const std::string& stream_url,
+                                       const std::string& snapshot_url, bool http_client_has_tls);
+
     void start(const std::string& stream_url, const std::string& snapshot_url,
                FrameCallback on_frame, ErrorCallback on_error = nullptr);
     void stop();
@@ -240,6 +250,7 @@ class CameraStream {
     void stream_thread_func();
     void snapshot_poll_loop();
     void fetch_snapshot();
+    void note_snapshot_failure(const helix::LifetimeToken& token);
     bool decode_jpeg(const uint8_t* data, size_t len);
     bool decode_jpeg_turbojpeg(const uint8_t* data, size_t len);
     bool decode_jpeg_stb(const uint8_t* data, size_t len);
@@ -309,13 +320,21 @@ class CameraStream {
     std::atomic<bool> running_{false};
     std::atomic<bool> got_stream_data_{false}; // Set by http_cb when data arrives
     int stream_fail_count_ = 0;
+    int snapshot_fail_count_ = 0;  // consecutive; touched only by the worker thread
     bool thread_detached_ = false; // Set by stop() if thread join times out
+    std::chrono::milliseconds join_timeout_{kJoinTimeout}; // stop()'s wait for the worker
     std::thread stream_thread_;
 
-    static constexpr int MAX_STREAM_FAILURES = 3;
-    static constexpr int SNAPSHOT_INTERVAL_MS = 2000;
-    static constexpr int STREAM_CONNECT_TIMEOUT_SEC = 5; // Initial connection attempt
-    static constexpr int STREAM_TIMEOUT_SEC = 300;       // Active stream — reconnects on timeout
+    static constexpr int kMaxStreamFailures = 3;
+    static constexpr int kSnapshotIntervalMs = 2000;
+    static constexpr int kMaxSnapshotFailures = 3;
+    static constexpr std::chrono::seconds kJoinTimeout{5};
+    // A platform-TLS snapshot cannot be cancelled by stop(); its deadline stays
+    // under the join wait so stop() never has to detach the worker for it.
+    static constexpr int kPlatformSnapshotTimeoutSec = 4;
+    static_assert(std::chrono::seconds(kPlatformSnapshotTimeoutSec) < kJoinTimeout);
+    static constexpr int kStreamConnectTimeoutSec = 5; // Initial connection attempt
+    static constexpr int kStreamTimeoutSec = 300;      // Active stream — reconnects on timeout
 
     // libturbojpeg runtime loading (dlopen) — nullptr if unavailable
     void* tj_lib_ = nullptr; // dlopen handle
@@ -339,6 +358,11 @@ class CameraStream {
     TjGetErrorStr2_t fn_get_error_ = nullptr;
     TjGetScalingFactors_t fn_get_scaling_factors_ = nullptr;
 };
+
+/// How a camera view turns @p cam: the camera widget's rotation and flips
+/// when it shows that camera, else Moonraker's own flips. Main thread.
+/// Defined in camera_frame.cpp, beside the widget config it reads.
+CameraStream::Transform camera_view_transform(const WebcamInfo& cam);
 
 } // namespace helix
 

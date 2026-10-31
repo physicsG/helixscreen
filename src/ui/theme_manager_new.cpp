@@ -173,11 +173,26 @@ void ThemeManager::register_style_configs() {
 
 void ThemeManager::apply_palette(const ThemePalette& palette) {
     current_palette_ = palette;
+    current_palette_.glass = glass_;
+    current_palette_.dark = dark_mode_;
     for (auto& entry : styles_) {
         if (entry.configure) {
             lv_style_reset(&entry.style);
-            entry.configure(&entry.style, palette);
+            entry.configure(&entry.style, current_palette_);
         }
+    }
+}
+
+void ThemeManager::set_glass(bool on) {
+    if (glass_ == on) {
+        return;
+    }
+    glass_ = on;
+    if (initialized_) {
+        // A preview keeps showing the palette being previewed, now with glass.
+        const ThemePalette palette = current_palette_;
+        apply_palette(palette);
+        lv_obj_report_style_change(nullptr);
     }
 }
 

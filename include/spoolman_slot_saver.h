@@ -13,9 +13,8 @@
 
 #include "hv/json.hpp"
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 /**
  * @brief Describes what changed between original and edited SlotInfo
@@ -97,7 +96,7 @@ class SpoolmanSlotSaver {
     using ErrorCallback = std::function<void(const MoonrakerError&)>;
 
     /// Weight comparison threshold for float equality
-    static constexpr float WEIGHT_THRESHOLD = 0.1f;
+    static constexpr float kWeightThreshold = 0.1f;
 
     /**
      * @brief Construct a SpoolmanSlotSaver
@@ -105,7 +104,7 @@ class SpoolmanSlotSaver {
      * @param filament_diameter_mm Diameter a filament this saver creates is filed with
      */
     explicit SpoolmanSlotSaver(IMoonrakerAPI* api,
-                               float filament_diameter_mm = filament::DEFAULT_DIAMETER_MM);
+                               float filament_diameter_mm = filament::kDefaultDiameterMm);
 
     /**
      * @brief Compare two SlotInfo structs and detect what changed
@@ -120,7 +119,7 @@ class SpoolmanSlotSaver {
      * @brief Check whether a slot has enough metadata to identify a Spoolman filament.
      *
      * Complete = non-empty brand, non-empty material, and a non-default color
-     * (AMS_DEFAULT_SLOT_COLOR gray means "color not set").
+     * (kAmsDefaultSlotColor gray means "color not set").
      */
     static bool is_filament_complete(const SlotInfo& slot);
 
@@ -138,7 +137,7 @@ class SpoolmanSlotSaver {
      * Per-spool fields (remaining_weight, price, lot_nr, comment, location,
      * spool_weight) go into @p spool_patch; the shared-filament field color_hex
      * goes into @p filament_patch. A field is emitted only when it differs from the
-     * original (weights beyond WEIGHT_THRESHOLD, price beyond 0.001). Shared by
+     * original (weights beyond kWeightThreshold, price beyond 0.001). Shared by
      * the AMS edit overlay's spool-edit save and the standalone SpoolEditModal.
      */
     static void build_spool_patches(const SpoolInfo& original, const SpoolInfo& edited,
@@ -252,8 +251,3 @@ class SpoolmanSlotSaver {
 };
 
 } // namespace helix
-
-// Bring SpoolmanSlotSaver into global scope for convenience (matches project convention)
-using helix::ChangeSet;
-using helix::SaveResult;
-using helix::SpoolmanSlotSaver;

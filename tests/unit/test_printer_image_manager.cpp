@@ -8,15 +8,24 @@
 
 #include "../../include/lvgl_image_writer.h"
 #include "../../include/printer_image_manager.h"
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/config_dir_guard.h"
 #include "../test_helpers/printer_image_regions_test_access.h"
+#include "../test_helpers/typed_mock_backend.h"
+#include "ams_state.h"
+#include "app_globals.h"
+#include "config.h"
 #include "lvgl/lvgl.h"
+#include "printer_detector.h"
 #include "printer_image_regions.h"
+#include "printer_state.h"
+#include "wizard_config_paths.h"
 
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -647,4 +656,151 @@ TEST_CASE("PrinterImageManager import and delete clear the image's user tags",
     CHECK(helix::lookup_user_image_regions("custom:test-printer", 300, 225) == nullptr);
     CHECK(helix::lookup_user_image_regions("voron-v2", 300, 225) != nullptr);
     helix::unload_image_regions();
+}
+
+namespace {
+
+/// A Creality K2 configured, no filament system registered; restores both after.
+struct DetectedK2Fixture : LVGLTestFixture {
+    DetectedK2Fixture() {
+        AmsState::instance().clear_backends();
+        AmsState::instance().init_subjects(true);
+        PrinterImageManager::instance().set_active_image("");
+        Config* config = Config::get_instance();
+        config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "Creality K2");
+    }
+    ~DetectedK2Fixture() override {
+        AmsState::instance().clear_backends();
+        Config* config = Config::get_instance();
+        config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
+        PrinterImageManager::instance().set_active_image("");
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(DetectedK2Fixture, "PrinterImageManager detected image follows image_variants",
+                 "[printer_image_manager][printer_image_variants]") {
+    auto& pim = PrinterImageManager::instance();
+    const std::string plain = pim.get_detected_image_path(800);
+    REQUIRE(plain.find("creality-k2") != std::string::npos);
+    CHECK(plain.find("creality-k2-cfs") == std::string::npos);
+
+    AmsState::instance().add_backend(std::make_unique<test::TypedMockBackend>(AmsType::CFS));
+    const std::string with_cfs = pim.get_detected_image_path(800);
+    CHECK(with_cfs.find("creality-k2-cfs") != std::string::npos);
+    CHECK(pim.get_displayed_image_path(800) == with_cfs);
+
+    AmsState::instance().clear_backends();
+    CHECK(pim.get_detected_image_path(800) == plain);
+}
+
+TEST_CASE_METHOD(DetectedK2Fixture,
+                 "PrinterImageManager every K2-family printer shows its own CFS picture",
+                 "[printer_image_manager][printer_image_variants]") {
+    // Every K2 model takes a CFS on top. The models differ in size, so each one's
+    // picture shows the CFS in proportion to that printer.
+    const std::map<std::string, std::string> cfs_image = {
+        {"Creality K2", "creality-k2-cfs"},
+        {"Creality K2 Pro", "creality-k2-pro-cfs"},
+        {"Creality K2 Plus", "creality-k2-plus-cfs"},
+        {"Creality K2 Plus (k2-improvements)", "creality-k2-plus-cfs"},
+        {"Creality K2 Pro (k2-improvements)", "creality-k2-pro-cfs"},
+    };
+    std::vector<std::string> k2_family;
+    for (const auto& name : PrinterDetector::get_list_names()) {
+        if (name.rfind("Creality K2", 0) == 0) {
+            k2_family.push_back(name);
+        }
+    }
+    REQUIRE(k2_family.size() == cfs_image.size());
+
+    AmsState::instance().add_backend(std::make_unique<test::TypedMockBackend>(AmsType::CFS));
+    auto& pim = PrinterImageManager::instance();
+    Config* config = Config::get_instance();
+    for (const auto& name : k2_family) {
+        INFO(name);
+        const auto expected = cfs_image.find(name);
+        REQUIRE(expected != cfs_image.end());
+        config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, name);
+        // The PNG, or a prerendered tier of it ("<name>-300.bin").
+        const std::string stem =
+            std::filesystem::path(pim.get_detected_image_path(800)).stem().string();
+        CHECK((stem == expected->second || stem == expected->second + "-300" ||
+               stem == expected->second + "-150"));
+    }
+}
+
+TEST_CASE_METHOD(DetectedK2Fixture, "PrinterImageManager custom image wins over an image variant",
+                 "[printer_image_manager][printer_image_variants]") {
+    auto& pim = PrinterImageManager::instance();
+    // Declared after cfg so it unwinds first, while the directory still exists.
+    struct ClearActive {
+        PrinterImageManager& pim;
+        ~ClearActive() {
+            pim.set_active_image("");
+        }
+    };
+    const ConfigDirGuard cfg("pim_custom_beats_variant");
+    const ClearActive clear_active{pim};
+    pim.init(cfg.dir.string());
+    AmsState::instance().add_backend(std::make_unique<test::TypedMockBackend>(AmsType::CFS));
+    REQUIRE(pim.get_displayed_image_path(800).find("creality-k2-cfs") != std::string::npos);
+
+    const std::string image = cfg.dir.string() + "/my-k2.bmp";
+    write_test_png(image);
+    const auto imported = pim.import_image(image);
+    REQUIRE(imported.success);
+    pim.set_active_image(imported.id);
+
+    const std::string displayed = pim.get_displayed_image_path(800);
+    CHECK(displayed.find("my-k2") != std::string::npos);
+    CHECK(displayed.find("creality-k2") == std::string::npos);
+}
+
+TEST_CASE_METHOD(DetectedK2Fixture,
+                 "PrinterImageManager a filament system that reports no hardware shows the plain "
+                 "image",
+                 "[printer_image_manager][printer_image_variants][1904]") {
+    auto& pim = PrinterImageManager::instance();
+    const std::string plain = pim.get_detected_image_path(800);
+    REQUIRE(plain.find("creality-k2-cfs") == std::string::npos);
+
+    auto backend = std::make_unique<test::TypedMockBackend>(AmsType::CFS);
+    auto* cfs = backend.get();
+    cfs->set_hardware_absent(true);
+    AmsState::instance().add_backend(std::move(backend));
+    REQUIRE_FALSE(cfs->get_system_info().presents_filament_system());
+    CHECK(pim.get_detected_image_path(800) == plain);
+
+    // A unit reporting in presents the system, and the picture follows it.
+    cfs->set_hardware_absent(false);
+    CHECK(pim.get_detected_image_path(800).find("creality-k2-cfs") != std::string::npos);
+}
+
+TEST_CASE_METHOD(DetectedK2Fixture,
+                 "PrinterImageManager a Snapmaker U1 with its top fitted shows the top",
+                 "[printer_image_manager][printer_image_variants][enclosure_top]") {
+    Config* config = Config::get_instance();
+    config->set<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "Snapmaker U1");
+    auto& caps = get_printer_state().capabilities_state();
+    caps.set_enclosure_top_fitted(false);
+    caps.set_has_chamber_heater(false);
+
+    auto& pim = PrinterImageManager::instance();
+    const std::string plain = pim.get_detected_image_path(800);
+    REQUIRE(plain.find("snapmaker-u1") != std::string::npos);
+    CHECK(plain.find("snapmaker-u1-tophat") == std::string::npos);
+
+    caps.set_enclosure_top_fitted(true);
+    CHECK(pim.get_detected_image_path(800).find("snapmaker-u1-tophat") != std::string::npos);
+
+    caps.set_enclosure_top_fitted(false);
+    CHECK(pim.get_detected_image_path(800) == plain);
+
+    // A chamber heater alone shows the same picture.
+    caps.set_has_chamber_heater(true);
+    CHECK(pim.get_detected_image_path(800).find("snapmaker-u1-tophat") != std::string::npos);
+    caps.set_has_chamber_heater(false);
+    CHECK(pim.get_detected_image_path(800) == plain);
 }

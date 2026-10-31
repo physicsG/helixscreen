@@ -46,10 +46,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_required_names import call_args, strip_comments  # noqa: E402
 
-XML_REF_RE = re.compile(r'\b(?:[a-z_]*callback|event_cb)="([^"]*)"')
+XML_REF_RE = re.compile(r'\b(?:[a-z0-9_]*callback|event_cb)="([^"]*)"')
 # C++ naming a callback through a component's `$..._callback` prop:
 # lv_xml_create(parent, "comp", {"click_callback", "on_x", nullptr}).
-CPP_ATTR_REF_RE = re.compile(r'"[a-z_]*callback"\s*,\s*"(\w+)"')
+CPP_ATTR_REF_RE = re.compile(r'"[a-z0-9_]*callback"\s*,\s*"(\w+)"')
 ENTRY_RE = re.compile(r'\{\s*"([A-Za-z_]\w*)"\s*,')
 
 

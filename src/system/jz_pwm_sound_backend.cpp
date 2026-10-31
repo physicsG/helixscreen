@@ -2,6 +2,7 @@
 
 #include "jz_pwm_sound_backend.h"
 
+#include "board_identity.h"
 #include "env_knobs.h"
 #include "helix_thread.h"
 #include "note_event.h"
@@ -191,12 +192,12 @@ bool jz_voice_should_flush(bool dirty, double ms_since_flush, double ms_since_ca
     return ms_since_flush >= flush_interval_ms;
 }
 
+bool JzPwmSoundBackend::board_admits_piezo() {
+    return helix::board::current_info().has_jz_pwm_piezo;
+}
+
 bool JzPwmSoundBackend::available() {
-    // The Ingenic PWM device node exists on every Ingenic board, K1 series
-    // included, where its channels drive things other than the piezo (the
-    // K1C's backlight among them). Only the AD5X mod install wires fx-pwm
-    // to the buzzer, so the probe runs there and nowhere else.
-    if (!helix::ad5x_mod_layout_present())
+    if (!board_admits_piezo())
         return false;
     if (access(kDevice, F_OK) != 0)
         return false;

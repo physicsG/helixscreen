@@ -21,7 +21,7 @@ const char* print_state_name(PrintState s) {
     case PrintState::Complete:
         return "Complete";
     case PrintState::Cancelled:
-        return "Cancelled";
+        return "Canceled";
     case PrintState::Error:
         return "Error";
     }

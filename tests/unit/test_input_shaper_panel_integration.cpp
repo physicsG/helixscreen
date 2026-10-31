@@ -28,6 +28,8 @@
 #include "../test_helpers/printer_state_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
+#include "lvgl/src/misc/lv_area_private.h" // lv_area_intersect
+#include "theme_manager.h"
 
 #include <spdlog/sinks/ringbuffer_sink.h>
 #include <spdlog/spdlog.h>
@@ -586,4 +588,396 @@ TEST_CASE_METHOD(InputShaperDeltaFixture, "Per-axis result population",
     // The Y card stayed empty.
     CHECK(subject_string("is_result_y_shaper").empty());
     CHECK(subject_int("is_y_num_shapers") == 0);
+}
+
+// ============================================================================
+// Live sweep chart in MEASURING (prestonbrown/helixscreen#1812)
+// ============================================================================
+
+#include "../test_helpers/sweep_preview_fakes.h"
+#include "resonance_console.h"
+
+namespace {
+
+/// Runs the panel against the mock's transcript with a manual stream source
+/// fed by ConsoleLedFeeder.
+class InputShaperPreviewFixture : public InputShaperDeltaFixture {
+  public:
+    InputShaperPreviewFixture() {
+        ispta::InputShaperPanelTestAccess::set_preview_source_factory(
+            *panel_, helix::calibration::test::manual_factory(log_));
+        ispta::InputShaperPanelTestAccess::set_overlay_root(*panel_, view_);
+        set_reachable(true);
+        mock_client_.register_method_callback(
+            "notify_gcode_response", "preview_fixture", [this](const nlohmann::json& msg) {
+                const auto line = msg["params"][0].get<std::string>();
+                if (const auto hz = parse_testing_frequency(line)) {
+                    latest_hz_ = *hz;
+                }
+            });
+    }
+
+    ~InputShaperPreviewFixture() override {
+        mock_client_.unregister_method_callback("notify_gcode_response", "preview_fixture");
+        panel_->on_ui_destroyed();
+        ispta::InputShaperPanelTestAccess::set_preview_source_factory(*panel_, nullptr);
+        ispta::InputShaperPanelTestAccess::set_overlay_root(*panel_, nullptr);
+        ispta::InputShaperPanelTestAccess::set_parent_screen(*panel_, nullptr);
+    }
+
+    void set_reachable(bool reachable) {
+        LiveSweepFacts facts;
+        facts.socket_path = "/tmp/k.sock";
+        facts.socket_reachable = reachable;
+        facts.cfg.accel_chip = "adxl345";
+        facts.cfg.from_printer = true;
+        ispta::InputShaperPanelTestAccess::set_preview_facts(*panel_, facts);
+    }
+
+    /// One mock tick, then samples up to the latest console frequency.
+    void tick() {
+        lv_tick_inc(100);
+        lv_timer_handler_safe();
+        helix::ui::UpdateQueue::instance().drain();
+        feeder_.feed(log_, latest_hz_);
+    }
+
+    bool run_until(const std::function<bool()>& done, int max_ticks = 600) {
+        for (int i = 0; i < max_ticks && !done(); ++i) {
+            tick();
+        }
+        return done();
+    }
+
+    [[nodiscard]] const helix::ui::ShaperSweepChart& chart() const {
+        return ispta::InputShaperPanelTestAccess::sweep_chart(*panel_);
+    }
+
+    /// Every clean point's column value is on the drawn curve. STANDARD
+    /// stores 200 of the 201-slot grid, so one point may be picked out.
+    [[nodiscard]] bool chart_shows(SweepColumn column) const {
+        if (chart().chart() == nullptr || chart().preview().points().empty()) {
+            return false;
+        }
+        const auto amps = ui_frequency_response_chart_get_series_amplitudes(chart().chart(), 0);
+        int missing = 0;
+        for (const auto& p : chart().preview().points()) {
+            if (!p.clean) {
+                continue;
+            }
+            const float v = sweep_column_value(p, column);
+            if (std::find(amps.begin(), amps.end(), v) == amps.end()) {
+                ++missing;
+            }
+        }
+        return missing <= 1;
+    }
+
+    helix::calibration::test::SourceLog log_;
+    helix::calibration::test::ConsoleLedFeeder feeder_;
+    float latest_hz_ = 0.0f;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "the measuring view draws the live sweep",
+                 "[input_shaper][panel][preview]") {
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return log_.created == 1; }));
+    CHECK(log_.accel_chip == "adxl345");
+    CHECK(log_.plan.freq_start_hz == 5.0f);
+    CHECK(log_.plan.freq_end_hz == 135.0f);
+    CHECK(log_.plan.hz_per_sec == 1.0f);
+
+    REQUIRE(run_until([&] { return subject_int("is_measuring_has_chart") == 1; }));
+    CHECK(panel_state() == 1);
+    CHECK(chart_shows(SweepColumn::X));
+
+    // Analyzing: the stream is finishing or done, the curve stays up.
+    REQUIRE(run_until(
+        [&] { return subject_string("is_measuring_step_label").rfind("Analyzing", 0) == 0; }));
+    CHECK(chart().has_curve());
+    CHECK(subject_int("is_measuring_has_chart") == 1);
+
+    REQUIRE(run_until([&] { return panel_state() == 2; }));
+    CHECK(log_.stopped == log_.created);
+    CHECK(subject_int("is_measuring_has_chart") == 0);
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "Calibrate All gives Y a fresh live sweep",
+                 "[input_shaper][panel][preview]") {
+    panel_->handle_calibrate_all_clicked();
+    // Once a curve is up, the chart never goes blank while measuring: X's CSV
+    // curve holds it between X's result and Y's first points.
+    bool shown = false;
+    bool blanked = false;
+    auto watch = [&] {
+        const int has = subject_int("is_measuring_has_chart");
+        shown = shown || has == 1;
+        blanked = blanked || (shown && has == 0 && panel_state() == 1);
+    };
+    REQUIRE(run_until([&] {
+        watch();
+        return log_.created == 2;
+    }));
+    CHECK(subject_int("is_measuring_has_chart") == 1);
+    REQUIRE(run_until([&] {
+        watch();
+        return !chart().preview().points().empty();
+    }));
+    CHECK(chart_shows(SweepColumn::Y));
+    CHECK_FALSE(blanked);
+    REQUIRE(run_until([&] { return panel_state() == 2; }));
+    CHECK(log_.created == 2);
+    CHECK(log_.stopped == 2);
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "no live sweep without klippy's socket",
+                 "[input_shaper][panel][preview]") {
+    set_reachable(false);
+    bool ever_shown = false;
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] {
+        ever_shown = ever_shown || subject_int("is_measuring_has_chart") == 1;
+        return panel_state() == 2;
+    }));
+    CHECK(log_.created == 0);
+    CHECK_FALSE(ever_shown);
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "aborting the sweep stops the live stream",
+                 "[input_shaper][panel][preview]") {
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return subject_int("is_measuring_has_chart") == 1; }));
+    panel_->handle_cancel_clicked();
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(log_.created >= 1);
+    CHECK(log_.stopped == log_.created);
+    CHECK(subject_int("is_measuring_has_chart") == 0);
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "no stream where the layout hides the live chart",
+                 "[input_shaper][panel][preview]") {
+    lv_subject_t* fits = lv_xml_find_subject(lv_xml_component_get_scope("input_shaper_panel"),
+                                             "is_measuring_chart_fits");
+    REQUIRE(fits != nullptr);
+    CHECK(helix::ui::live_chart_layout_fits("input_shaper_panel", "is_measuring_chart_fits"));
+    lv_subject_set_int(fits, 0);
+    CHECK_FALSE(helix::ui::live_chart_layout_fits("input_shaper_panel", "is_measuring_chart_fits"));
+
+    panel_->handle_calibrate_x_clicked();
+    const bool done = run_until([&] { return panel_state() == 2; });
+    lv_subject_set_int(fits, 1);
+    REQUIRE(done);
+    CHECK(log_.created == 0);
+    // An absent gate reads as fitting.
+    CHECK(helix::ui::live_chart_layout_fits("input_shaper_panel", "no_such_gate"));
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture,
+                 "a rebuild drops the live chart with the tree it lived in",
+                 "[input_shaper][panel][preview]") {
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return subject_int("is_measuring_has_chart") == 1; }));
+    REQUIRE(chart().chart() != nullptr);
+
+    // What a hot reload does: free the whole widget tree and create it again.
+    // The live chart is a child of a host inside that tree.
+    ispta::InputShaperPanelTestAccess::set_parent_screen(*panel_, test_screen());
+    REQUIRE(panel_->rebuild());
+    view_ = panel_->get_root();
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(chart().chart() == nullptr);
+    CHECK(log_.stopped == log_.created);
+    CHECK(subject_int("is_measuring_has_chart") == 0);
+
+    // Stop and leave after the rebuild touch only the new tree.
+    panel_->handle_cancel_clicked();
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(chart().chart() == nullptr);
+    CHECK(lv_obj_find_by_name(view_, "chart_container_measuring") != nullptr);
+}
+
+#include "moonraker_api_mock.h"
+
+TEST_CASE_METHOD(InputShaperPreviewFixture,
+                 "opening the panel asks the printer for klippy's socket",
+                 "[input_shaper][panel][preview]") {
+    // Nothing seeds the facts: the panel learns them from the mock printer.
+    ispta::InputShaperPanelTestAccess::set_preview_facts(*panel_, LiveSweepFacts{});
+    MoonrakerAPIMock mock_api(mock_client_, printer_state_);
+    panel_->set_api(&mock_client_, &mock_api);
+    panel_->on_activate();
+    helix::ui::UpdateQueue::instance().drain();
+
+    panel_->handle_calibrate_x_clicked();
+    const bool streamed = run_until([&] { return log_.created == 1; });
+    CHECK(log_.accel_chip == "adxl345");
+    const bool finished = run_until([&] { return panel_state() == 2; });
+    panel_->set_api(&mock_client_, api_.get());
+    CHECK(streamed);
+    CHECK(finished);
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "dropping the panel's subjects stops the live stream",
+                 "[input_shaper][panel][preview]") {
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return log_.created == 1 && log_.last != nullptr; }));
+    REQUIRE(log_.stopped == 0);
+    panel_->deinit_subjects();
+    CHECK(log_.stopped == log_.created);
+    panel_->init_subjects();
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "cleanup frees the live chart and stops its stream",
+                 "[input_shaper][panel][preview]") {
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return subject_int("is_measuring_has_chart") == 1; }));
+    REQUIRE(chart().chart() != nullptr);
+    panel_->cleanup();
+    CHECK(chart().chart() == nullptr);
+    CHECK(log_.stopped == log_.created);
+    CHECK(subject_int("is_measuring_has_chart") == 0);
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "a sweep error stops the live stream",
+                 "[input_shaper][panel][preview]") {
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return subject_int("is_measuring_has_chart") == 1; }));
+    REQUIRE(log_.stopped == 0);
+    mock_client_.dispatch_gcode_response("!! Move out of range: 0.000 400.000 10.000 [0.000]");
+    REQUIRE(run_until([&] { return panel_state() == 3; }));
+    CHECK(log_.stopped == log_.created);
+    CHECK(subject_int("is_measuring_has_chart") == 0);
+}
+
+TEST_CASE_METHOD(InputShaperPreviewFixture,
+                 "the results chart draws its raw PSD like the live curve",
+                 "[input_shaper][panel][preview]") {
+    // The results charts exist only in a created view.
+    ispta::InputShaperPanelTestAccess::set_parent_screen(*panel_, test_screen());
+    REQUIRE(panel_->rebuild());
+    view_ = panel_->get_root();
+    helix::ui::UpdateQueue::instance().drain();
+    // The rebuild's activation asked this fixture's API, which has no socket.
+    set_reachable(true);
+
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return subject_int("is_measuring_has_chart") == 1; }));
+    REQUIRE(chart().chart() != nullptr);
+    const auto live = ui_frequency_response_chart_get_series_style(chart().chart(), 0);
+    const lv_color_t live_color = ui_frequency_response_chart_get_series_color(chart().chart(), 0);
+    REQUIRE(live.fill);
+
+    REQUIRE(run_until([&] { return panel_state() == 2; }));
+    auto* results = ispta::InputShaperPanelTestAccess::results_chart(*panel_, 'X');
+    REQUIRE(results != nullptr);
+    const int raw = ispta::InputShaperPanelTestAccess::raw_series_id(*panel_, 'X');
+    REQUIRE(raw >= 0);
+    const auto style = ui_frequency_response_chart_get_series_style(results, raw);
+    CHECK(style.line_width == live.line_width);
+    CHECK(style.glow == live.glow);
+    CHECK(style.fill == live.fill);
+    CHECK(lv_color_eq(ui_frequency_response_chart_get_series_color(results, raw), live_color));
+}
+
+namespace {
+
+/// The part of @p obj a user can see: its box clipped by every scrolling or
+/// clipping ancestor.
+lv_area_t visible_area(lv_obj_t* obj) {
+    lv_area_t area;
+    lv_obj_get_coords(obj, &area);
+    for (lv_obj_t* p = lv_obj_get_parent(obj); p != nullptr; p = lv_obj_get_parent(p)) {
+        lv_area_t parent_area;
+        lv_obj_get_coords(p, &parent_area);
+        if (!lv_area_intersect(&area, &area, &parent_area)) {
+            return lv_area_t{0, 0, -1, -1};
+        }
+    }
+    return area;
+}
+
+bool fully_visible(lv_obj_t* obj) {
+    lv_area_t box;
+    lv_obj_get_coords(obj, &box);
+    const lv_area_t seen = visible_area(obj);
+    return seen.x1 == box.x1 && seen.y1 == box.y1 && seen.x2 == box.x2 && seen.y2 == box.y2;
+}
+
+bool overlaps(lv_obj_t* a, lv_obj_t* b) {
+    lv_area_t aa;
+    lv_area_t bb;
+    lv_area_t common;
+    lv_obj_get_coords(a, &aa);
+    lv_obj_get_coords(b, &bb);
+    return lv_area_intersect(&common, &aa, &bb);
+}
+
+} // namespace
+
+TEST_CASE_METHOD(InputShaperPreviewFixture, "the results view's legend, colors and table fit",
+                 "[input_shaper][panel][results]") {
+    ispta::InputShaperPanelTestAccess::set_parent_screen(*panel_, test_screen());
+    REQUIRE(panel_->rebuild());
+    view_ = panel_->get_root();
+    helix::ui::UpdateQueue::instance().drain();
+    set_reachable(true);
+
+    panel_->handle_calibrate_x_clicked();
+    REQUIRE(run_until([&] { return subject_int("is_measuring_has_chart") == 1; }));
+    REQUIRE(chart().chart() != nullptr);
+    const lv_color_t measured = theme_manager_get_color("chart_measured");
+    CHECK(lv_color_eq(ui_frequency_response_chart_get_series_color(chart().chart(), 0), measured));
+
+    REQUIRE(run_until([&] { return panel_state() == 2; }));
+    lv_obj_update_layout(view_);
+
+    SECTION("the measured curve and its legend dot take chart_measured") {
+        auto* results = ispta::InputShaperPanelTestAccess::results_chart(*panel_, 'X');
+        REQUIRE(results != nullptr);
+        const int raw = ispta::InputShaperPanelTestAccess::raw_series_id(*panel_, 'X');
+        REQUIRE(raw >= 0);
+        CHECK(lv_color_eq(ui_frequency_response_chart_get_series_color(results, raw), measured));
+        CHECK(lv_color_eq(
+            lv_obj_get_style_bg_color(view_widget(view_, "legend_x_measured_dot"), LV_PART_MAIN),
+            measured));
+    }
+
+    SECTION("the legend shows in full on the opened results, clear of Save") {
+        lv_obj_t* save = view_widget(view_, "btn_save");
+        for (const char* name : {"legend_x_measured_dot", "legend_x_measured_label",
+                                 "legend_x_shaper_dot", "chart_container_x"}) {
+            lv_obj_t* w = view_widget(view_, name);
+            INFO(name);
+            CHECK(fully_visible(w));
+            CHECK_FALSE(overlaps(w, save));
+        }
+    }
+
+    SECTION("every comparison table row fits its table") {
+        lv_obj_t* table = view_widget(view_, "shaper_table_x");
+        lv_area_t table_box;
+        lv_obj_get_coords(table, &table_box);
+        const uint32_t rows = lv_obj_get_child_count(table);
+        int checked = 0;
+        for (uint32_t r = 0; r < rows; ++r) {
+            lv_obj_t* row = lv_obj_get_child(table, static_cast<int32_t>(r));
+            if (lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN) || lv_obj_get_child_count(row) < 4) {
+                continue;
+            }
+            lv_area_t row_box;
+            lv_obj_get_coords(row, &row_box);
+            const int32_t content_right =
+                row_box.x2 - lv_obj_get_style_pad_right(row, LV_PART_MAIN);
+            lv_area_t last;
+            lv_obj_get_coords(lv_obj_get_child(row, -1), &last);
+            INFO("row " << r << " last cell ends at " << last.x2 << ", content at " << content_right
+                        << ", table at " << table_box.x2);
+            CHECK(last.x2 <= content_right);
+            CHECK(row_box.x2 <= table_box.x2);
+            ++checked;
+        }
+        CHECK(checked >= 6);
+    }
 }

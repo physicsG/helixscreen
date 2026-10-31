@@ -77,15 +77,15 @@ class BeltStreamClient {
     /// No batch within this long means the stream died. Klipper emits roughly
     /// ten batches a second, so two seconds is twenty missed batches - long
     /// enough that scheduling jitter on a loaded printer board cannot trip it.
-    static constexpr uint32_t STALL_TIMEOUT_MS = 2000;
+    static constexpr uint32_t kStallTimeoutMs = 2000;
 
     /// Read buffer handed to libhv. Its 8 KB default is smaller than one
     /// 13-15 KB batch frame, so every frame would span at least two reads.
-    static constexpr size_t READ_BUFFER_BYTES = 32 * 1024;
+    static constexpr size_t kReadBufferBytes = 32 * 1024;
 
     /// The `method` we ask klippy to stamp on every batch. Chosen to be
     /// distinctive so a batch cannot be confused with any other traffic.
-    static constexpr const char* BATCH_METHOD = "helix_belt_batch";
+    static constexpr const char* kBatchMethod = "helix_belt_batch";
 
     BeltStreamClient();
     ~BeltStreamClient();

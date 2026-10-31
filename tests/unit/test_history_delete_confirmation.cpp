@@ -19,6 +19,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/history_list_panel_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "moonraker_api.h"
 #include "moonraker_client_mock.h"
@@ -41,8 +42,9 @@ class RecordingClient : public MoonrakerClientMock {
     RecordingClient() : MoonrakerClientMock(MoonrakerClientMock::PrinterType::VORON_24) {}
 
     helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override {
         methods.push_back(method);
@@ -63,7 +65,7 @@ class RecordingClient : public MoonrakerClientMock {
     std::vector<std::string> methods;
 };
 
-constexpr const char* DELETE_JOB = "server.history.delete_job";
+constexpr const char* kDeleteJob = "server.history.delete_job";
 
 PrintHistoryJob job(const std::string& filename) {
     PrintHistoryJob j;
@@ -100,9 +102,7 @@ class HistoryDeleteFixture : public LVGLUITestFixture {
     }
 
     static void settle() {
-        for (int i = 0; i < 8; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     static void press(lv_obj_t* dialog, const char* name) {
@@ -129,7 +129,7 @@ TEST_CASE_METHOD(HistoryDeleteFixture, "History delete asks before touching the 
     lv_obj_t* dialog = HistoryListPanelTestAccess::delete_dialog(panel);
     REQUIRE(dialog != nullptr);
     CHECK(Modal::get_top() == dialog);
-    CHECK(client.count(DELETE_JOB) == 0);
+    CHECK(client.count(kDeleteJob) == 0);
 
     // A second tap while the dialog is up must not stack another one.
     HistoryListPanelTestAccess::handle_delete(panel);
@@ -138,7 +138,7 @@ TEST_CASE_METHOD(HistoryDeleteFixture, "History delete asks before touching the 
     press(dialog, "btn_primary");
     settle();
 
-    CHECK(client.count(DELETE_JOB) == 1);
+    CHECK(client.count(kDeleteJob) == 1);
     CHECK(HistoryListPanelTestAccess::delete_dialog(panel) == nullptr);
 }
 
@@ -161,7 +161,7 @@ TEST_CASE_METHOD(HistoryDeleteFixture,
     process_lvgl(50);
     settle();
 
-    CHECK(client.count(DELETE_JOB) == 0);
+    CHECK(client.count(kDeleteJob) == 0);
     // The guard is released, so the button works again.
     CHECK(HistoryListPanelTestAccess::delete_dialog(panel) == nullptr);
     HistoryListPanelTestAccess::handle_delete(panel);
@@ -179,8 +179,9 @@ class ParkingClient : public MoonrakerClientMock {
     ParkingClient() : MoonrakerClientMock(MoonrakerClientMock::PrinterType::VORON_24) {}
 
     helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override {
         if (method == "server.history.list") {
@@ -191,7 +192,7 @@ class ParkingClient : public MoonrakerClientMock {
                                                  std::move(error_cb), timeout_ms, silent, intent);
     }
 
-    std::function<void(const json&)> parked;
+    helix::SharedCallback<void(const json&)> parked;
 };
 
 class HistoryFetchLifetimeFixture : public LVGLUITestFixture {
@@ -213,9 +214,7 @@ class HistoryFetchLifetimeFixture : public LVGLUITestFixture {
     }
 
     static void settle() {
-        for (int i = 0; i < 8; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     /// One completed job, in the shape `server.history.list` returns.

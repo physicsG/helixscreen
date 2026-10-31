@@ -25,12 +25,12 @@ TEST_CASE("MoonrakerClientMock satisfies helix::IMoonrakerClient interface", "[c
 // Pins: helix::IMoonrakerClient exposes the full consumer surface (Plan 3 Task 2).
 // clang-format off
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::register_notify_update),
-                             helix::SubscriptionId (helix::IMoonrakerClient::*)(std::function<void(const json&)>)>);
+                             helix::SubscriptionId (helix::IMoonrakerClient::*)(helix::SharedCallback<void(const json&)>)>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::unsubscribe_notify_update),
                              bool (helix::IMoonrakerClient::*)(helix::SubscriptionId)>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::register_method_callback),
                              void (helix::IMoonrakerClient::*)(const std::string&, const std::string&,
-                                                               std::function<void(const json&)>)>);
+                                                               helix::SharedCallback<void(const json&)>)>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::unregister_method_callback),
                              bool (helix::IMoonrakerClient::*)(const std::string&, const std::string&)>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::dispatch_status_update),
@@ -42,7 +42,7 @@ static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::refresh_subscrip
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::get_connection_state),
                              helix::ConnectionState (helix::IMoonrakerClient::*)() const>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::add_connected_observer),
-                             void (helix::IMoonrakerClient::*)(const std::string&, std::function<void()>)>);
+                             void (helix::IMoonrakerClient::*)(const std::string&, helix::SharedCallback<void()>)>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::remove_connected_observer),
                              bool (helix::IMoonrakerClient::*)(const std::string&)>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::force_reconnect),
@@ -88,6 +88,6 @@ static_assert(
                    void (helix::IMoonrakerClient::*)(
                        std::function<void(const helix::PrinterDiscovery&, const json&)>)>);
 static_assert(std::is_same_v<decltype(&helix::IMoonrakerClient::set_bed_mesh_callback),
-                             void (helix::IMoonrakerClient::*)(std::function<void(const json&)>)>);
+                             void (helix::IMoonrakerClient::*)(helix::SharedCallback<void(const json&)>)>);
 // clang-format on
 #endif

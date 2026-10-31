@@ -24,6 +24,7 @@
 #include "../../include/printer_discovery.h"
 #include "../../include/printer_state.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
 
 #include <atomic>
@@ -37,20 +38,6 @@
 using namespace helix;
 
 namespace {
-
-struct LVGLInitializerPACal {
-    LVGLInitializerPACal() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-static LVGLInitializerPACal lvgl_init;
 
 /// A discovery populated the way Moonraker's object list would populate it.
 PrinterDiscovery with_objects(const std::vector<std::string>& objects) {
@@ -192,7 +179,7 @@ TEST_CASE("PA plausibility band brackets a healthy direct-drive value", "[pa_cal
 // Collector
 // ============================================================================
 
-class PACalibrateTestFixture {
+class PACalibrateTestFixture : public LVGLTestFixture {
   public:
     PACalibrateTestFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
         state_.init_subjects(false);

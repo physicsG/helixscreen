@@ -18,25 +18,25 @@
 namespace helix::bluetooth {
 
 /// Target service UUID prefixes (8-char hex)
-inline constexpr const char* SPP_UUID_PREFIX = "00001101";
-inline constexpr const char* PHOMEMO_BLE_UUID_PREFIX = "0000ff00";
+inline constexpr const char* kSppUuidPrefix = "00001101";
+inline constexpr const char* kPhomemoBleUuidPrefix = "0000ff00";
 /// Niimbot Transparent UART service UUID (full 128-bit, matched by prefix)
-inline constexpr const char* NIIMBOT_BLE_UUID_PREFIX = "e7810a71";
+inline constexpr const char* kNiimbotBleUuidPrefix = "e7810a71";
 /// MakeID BLE service UUID (full 128-bit, matched by prefix)
-inline constexpr const char* MAKEID_BLE_UUID_PREFIX = "0000abf0";
+inline constexpr const char* kMakeidBleUuidPrefix = "0000abf0";
 
 /// Check if a UUID string matches one of our target label printer service UUIDs.
 /// Comparison is case-insensitive on the first 8 hex characters (the UUID16 prefix).
 inline bool is_label_printer_uuid(const char* uuid) {
     if (!uuid)
         return false;
-    if (strncasecmp(uuid, SPP_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kSppUuidPrefix, 8) == 0)
         return true;
-    if (strncasecmp(uuid, PHOMEMO_BLE_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kPhomemoBleUuidPrefix, 8) == 0)
         return true;
-    if (strncasecmp(uuid, NIIMBOT_BLE_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kNiimbotBleUuidPrefix, 8) == 0)
         return true;
-    if (strncasecmp(uuid, MAKEID_BLE_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kMakeidBleUuidPrefix, 8) == 0)
         return true;
     return false;
 }
@@ -45,11 +45,11 @@ inline bool is_label_printer_uuid(const char* uuid) {
 inline bool uuid_is_ble(const char* uuid) {
     if (!uuid)
         return false;
-    if (strncasecmp(uuid, PHOMEMO_BLE_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kPhomemoBleUuidPrefix, 8) == 0)
         return true;
-    if (strncasecmp(uuid, NIIMBOT_BLE_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kNiimbotBleUuidPrefix, 8) == 0)
         return true;
-    if (strncasecmp(uuid, MAKEID_BLE_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kMakeidBleUuidPrefix, 8) == 0)
         return true;
     return false;
 }
@@ -65,7 +65,7 @@ struct PrinterBrand {
 
 // Shared table of known label printer brands.
 // Phomemo M/Q series support both BLE and SPP but need SPP for printing.
-inline constexpr PrinterBrand KNOWN_BRANDS[] = {
+inline constexpr PrinterBrand kKnownBrands[] = {
     // Brother QL/PT/TD/RJ series — SPP only
     {"QL-", false, true, false, false},
     {"PT-", false, true, false, false},
@@ -110,7 +110,7 @@ inline const PrinterBrand* find_brand(const char* name) {
     if (!name || !name[0])
         return nullptr;
 
-    for (const auto& brand : KNOWN_BRANDS) {
+    for (const auto& brand : kKnownBrands) {
         if (strncasecmp(name, brand.prefix, strlen(brand.prefix)) == 0)
             return &brand;
     }

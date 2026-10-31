@@ -3,6 +3,7 @@
 
 #include "active_spool_widget.h"
 
+#include "ui_ams_edit_follow_up.h"
 #include "ui_ams_edit_overlay.h"
 #include "ui_color_picker.h"
 #include "ui_error_reporting.h"
@@ -213,7 +214,7 @@ void ActiveSpoolWidget::update_spool_display() {
         spool_color = lv_color_hex(active->color_rgb);
         if (total_weight > 0) {
             fill_level = remaining_weight / total_weight;
-            fill_level = LV_CLAMP(fill_level, 0.0f, 1.0f);
+            fill_level = LV_CLAMP(0.0f, fill_level, 1.0f);
         } else {
             fill_level = 1.0f; // No weight data -- show full
         }
@@ -224,7 +225,12 @@ void ActiveSpoolWidget::update_spool_display() {
 
     // Update the active spool canvas
     if (active_spool) {
-        ui_spool_canvas_set_color(active_spool, spool_color);
+        if (has_spool && source_slot)
+            helix::ui::spool_canvas_set_filament(active_spool, active->color_rgb,
+                                                 source_slot->multi_color_hexes,
+                                                 helix::ui::swatch_finish_of(*source_slot));
+        else
+            ui_spool_canvas_set_color(active_spool, spool_color);
         ui_spool_canvas_set_fill_level(active_spool, fill_level);
         // Semi-transparent when no spool assigned
         lv_obj_set_style_opa(active_spool, has_spool ? LV_OPA_COVER : LV_OPA_40, 0);
@@ -311,6 +317,9 @@ void ActiveSpoolWidget::handle_clicked() {
                     SlotInfo original = be->get_slot_info(current);
                     AmsError err =
                         AmsState::instance().commit_slot_edit(current, original, result.slot_info);
+                    if (err.success() || err.partially_applied) {
+                        helix::ui::offer_edit_follow_up(current, original, result.slot_info);
+                    }
                     if (!err.success()) {
                         helix::ui::notify_ams_error(err);
                     }

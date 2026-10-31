@@ -8,6 +8,7 @@
  * wizard step counting logic used for Android conditionalization.
  */
 
+#include "board_identity.h"
 #include "platform_info.h"
 #include "wizard_step.h"
 #include "wizard_step_logic.h"
@@ -273,17 +274,20 @@ TEST_CASE("is_printer_embedded is overridable for tests", "[platform]") {
     set_printer_embedded_override(-1);
 }
 
-TEST_CASE("is_printer_embedded matches this build's platform", "[platform]") {
+TEST_CASE("is_printer_embedded follows the board", "[platform]") {
     set_printer_embedded_override(-1);
 
-#if defined(HELIX_PLATFORM_AD5M) || defined(HELIX_PLATFORM_AD5X) || defined(HELIX_PLATFORM_K1) ||  \
-    defined(HELIX_PLATFORM_CC1) || defined(HELIX_PLATFORM_SNAPMAKER_U1) ||                         \
-    defined(HELIX_PLATFORM_K2) || defined(HELIX_PLATFORM_MIPS)
-    CHECK(is_printer_embedded());
-#else
-    // Desktop, x86 and Pi builds: the printer may be anywhere on the network.
+    board::set_current_override(board::Board::Generic);
     CHECK_FALSE(is_printer_embedded());
-#endif
+
+    for (board::Board b :
+         {board::Board::Ad5m, board::Board::Ad5x, board::Board::Creator5, board::Board::Creator5Pro,
+          board::Board::K1, board::Board::K2, board::Board::Cc1, board::Board::SnapmakerU1}) {
+        board::set_current_override(b);
+        INFO("board: " << board::info(b).key);
+        CHECK(is_printer_embedded());
+    }
+    board::set_current_override(std::nullopt);
 }
 
 // An override must not leak into the platform answer for the OTHER predicate —

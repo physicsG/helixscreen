@@ -225,9 +225,9 @@ echo 4 > /sys/class/graphics/fb0/blank
 | **ZMOD Support** | Yes | Yes |
 
 ### Key Differences for HelixScreen
-1. **No Forge-X** - current installer won't work
+1. **No Forge-X** - HelixScreen installs through ZMOD instead
 2. **Different architecture** - different binary builds
-3. **IFS system** - new UI components needed
+3. **IFS system** - driven by the dedicated `AmsBackendAd5xIfs` filament backend
 4. **No chamber LEDs** - removes that control
 
 ---
@@ -320,4 +320,8 @@ the IFS backend is the one heavy asset). The identified structural exit for the
 IFS backend's 7,200-line protocol client is an upstream `get_status()` on
 `zmod_ifs`/`zmod_color` — live-verified 2026-08-24 that both objects answer
 `objects/query` with empty status (no `get_status`), which is the root cause of
-all JSON/dialog-echo polling. Patch preparation is in flight.
+all JSON/dialog-echo polling. The patch merged upstream as ghzserg/z_ad5x#12
+and ships in ZMOD 1.7.3 and later; with it both objects expose the same keys as
+`IFS_STATUS` / `GET_ZCOLOR SILENT=1`. The IFS backend subscribes to them when
+`objects/list` carries them, and retiring the remaining polls is tracked in
+[#1344](https://github.com/prestonbrown/helixscreen/issues/1344).

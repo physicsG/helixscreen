@@ -36,6 +36,7 @@
 #include "ui_panel_spoolman.h"
 #include "ui_printer_status_icon.h"
 #include "ui_probe_overlay.h"
+#include "ui_stepper_resonance_cal_modal.h"
 #include "ui_update_queue.h"
 #include "ui_wizard.h"
 
@@ -44,24 +45,35 @@
 #include "ams_state.h"
 #include "app_globals.h"
 #include "bed_drying_controller.h"
+#include "bed_mesh_state.h"
+#include "chamber_stall_prompt.h"
+#include "filament_accounting_controller.h"
 #include "filament_catalog.h"
 #include "filament_database.h"
+#include "filament_op_heater.h"
 #include "filament_variants.h"
 #include "lock_manager.h"
 #include "lvgl/lvgl.h"
 #include "material_settings_manager.h"
 #include "panel_widget_manager.h"
 #include "plr_offer_controller.h"
+#include "plugin_status_refresh.h"
 #include "preset_materials.h"
 #include "print_completion.h"
 #include "print_control_buttons.h"
+#include "print_photos_controller.h"
 #include "print_start_navigation.h"
+#include "printer_image_manager.h"
 #include "printer_state.h"
 #include "runtime_config.h"
-#include "sensor_managers.h"
+#include "sensor_manager.h"
 #include "settings_manager.h"
 #include "spoolman_manager.h"
 #include "standard_macros.h"
+#include "standing_print_options_controller.h"
+#if HELIX_HAS_CAMERA
+#include "camera_frame.h"
+#endif
 #include "system/telemetry_manager.h"
 #include "temperature_controller.h"
 #include "temperature_service.h"
@@ -77,7 +89,17 @@
 #include <memory>
 
 SubjectInitializer::SubjectInitializer() = default;
-SubjectInitializer::~SubjectInitializer() = default;
+// PanelWidgetManager outlives this object, and the next printer's widget subjects read
+// their shared resources before that printer's SubjectInitializer registers its own, so a
+// slot left naming an object freed here is dereferenced on every printer switch.
+SubjectInitializer::~SubjectInitializer() {
+    auto& widgets = helix::PanelWidgetManager::instance();
+    widgets.unregister_shared_resource<helix::IMoonrakerAPI>(m_registered_api);
+    widgets.unregister_shared_resource<TemperatureService>(m_temp_control_panel.get());
+    widgets.unregister_shared_resource<helix::BedDryingController>(m_bed_drying.get());
+    widgets.unregister_shared_resource<helix::TemperatureController>(m_temp_controller.get());
+    widgets.unregister_shared_resource<helix::ui::FilamentOpHeater>(m_filament_op_heater.get());
+}
 
 void SubjectInitializer::init_core_and_state() {
     spdlog::debug("[SubjectInitializer] Initializing core and state subjects...");
@@ -117,6 +139,10 @@ void SubjectInitializer::init_core_and_state() {
     // after all three, and before any panel XML binds the name.
     helix::zoffset::init_save_available_subject();
 
+    // The active bed mesh's stats, read by BedMeshPanel's XML and the home tile. They
+    // exist from here, so neither depends on the panel having been opened.
+    helix::BedMeshState::instance().init_subjects();
+
     // Phase 4: Navigation subjects — MUST register AFTER PrinterState/AmsState
     // so that in reverse deinit order, NavigationManager cleans up its observers
     // on PrinterState subjects BEFORE PrinterState deinits those subjects.
@@ -125,7 +151,7 @@ void SubjectInitializer::init_core_and_state() {
     spdlog::debug("[SubjectInitializer] Core and state subjects initialized");
 }
 
-void SubjectInitializer::init_panels(IMoonrakerAPI* api,
+void SubjectInitializer::init_panels(helix::IMoonrakerAPI* api,
                                      const RuntimeConfig& /* runtime_config */) {
     spdlog::debug("[SubjectInitializer] Initializing panel subjects (api={})...",
                   api ? "valid" : "nullptr");
@@ -156,6 +182,8 @@ void SubjectInitializer::init_core_subjects() {
     PrinterStatusIcon::instance().init_subjects();  // Printer icon state
     helix::ui::notification_init_subjects();        // Notification badge subjects
     helix::LockManager::instance().init_subjects(); // Lock screen pin_set subject
+    // HomePanel observes it from its constructor, which runs in init_panels().
+    helix::PrinterImageManager::instance().init_subjects();
 
     // Quick-preset material name/temperature subjects. MUST be here in core
     // init: the filament panel, the three temp panels and the temp graph
@@ -202,10 +230,16 @@ void SubjectInitializer::init_ams_subjects() {
 
     // Initialize sensor manager subjects BEFORE panels so XML bindings can work
     // Note: Each manager self-registers cleanup with StaticSubjectRegistry in init_subjects()
-    helix::sensors::for_each_sensor_manager([](auto& m) { m.init_subjects(); });
+    for (auto* m : helix::sensors::sensor_managers()) {
+        m->init_subjects();
+    }
+
+    // The clog meter falls back to a filament motion sensor, whose subjects
+    // exist only from here.
+    helix::AmsState::instance().install_motion_sensor_observer();
 }
 
-void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
+void SubjectInitializer::init_panel_subjects(helix::IMoonrakerAPI* api) {
     spdlog::trace("[SubjectInitializer] Initializing panel subjects");
 
     // Initialize widget-owned subjects before any panel XML is created.
@@ -271,6 +305,7 @@ void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
     init_belt_tension_row_handler();
     init_zoffset_row_handler();
     helix::ui::init_tool_offset_row_handler();
+    helix::ui::init_stepper_resonance_cal_row_handler();
     init_zoffset_event_callbacks();
     init_probe_row_handler();
 
@@ -321,10 +356,38 @@ void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
     get_global_zoffset_cal_panel().init_subjects();
 #endif
 
+    init_temperature_control(api);
+
+    // Inject TemperatureService into dependent panels
+    // (HomePanel widgets get it via PanelWidgetManager::shared_resource<TemperatureService>())
+    get_global_controls_panel().set_temp_control_panel(m_temp_control_panel.get());
+    get_global_print_status_panel().set_temp_control_panel(m_temp_control_panel.get());
+    get_global_filament_panel().set_temp_control_panel(m_temp_control_panel.get());
+    get_global_pid_cal_panel().set_temp_control_panel(m_temp_control_panel.get());
+
+    // E-Stop overlay — cleanup self-registered inside init_subjects()
+    EmergencyStopOverlay::instance().init_subjects();
+
+    // AbortManager subjects — cleanup self-registered inside init_subjects()
+    helix::AbortManager::instance().init_subjects();
+
+    // ActivePrintMediaManager needs API for thumbnail loading
+    if (api) {
+        helix::get_active_print_media_manager().set_api(api);
+    }
+}
+
+void SubjectInitializer::init_temperature_control(helix::IMoonrakerAPI* api) {
     // TemperatureController (owned by SubjectInitializer — stateless wiring, no subjects)
     m_temp_controller = std::make_unique<helix::TemperatureController>(get_printer_state(), api);
     helix::PanelWidgetManager::instance().register_shared_resource<helix::TemperatureController>(
         m_temp_controller.get());
+
+    // The nozzle heat around every filament op. Here, not on a panel: the
+    // surface that asks (a tile's dialog) is often gone before the nozzle is hot.
+    m_filament_op_heater = std::make_unique<helix::ui::FilamentOpHeater>(get_printer_state());
+    helix::PanelWidgetManager::instance().register_shared_resource<helix::ui::FilamentOpHeater>(
+        m_filament_op_heater.get());
 
     // Drying on the heated bed (prestonbrown/helixscreen#1730). restore() brings
     // back a persisted spools-on-the-bed latch before any panel can move the
@@ -358,29 +421,12 @@ void SubjectInitializer::init_panel_subjects(IMoonrakerAPI* api) {
     m_temp_control_panel->set_controller(m_temp_controller.get());
     m_temp_control_panel->init_subjects();
 
-    // Inject TemperatureService into dependent panels
-    // (HomePanel widgets get it via PanelWidgetManager::shared_resource<TemperatureService>())
-    get_global_controls_panel().set_temp_control_panel(m_temp_control_panel.get());
-    get_global_print_status_panel().set_temp_control_panel(m_temp_control_panel.get());
-    get_global_filament_panel().set_temp_control_panel(m_temp_control_panel.get());
-    get_global_pid_cal_panel().set_temp_control_panel(m_temp_control_panel.get());
-
     // Register shared resources on PanelWidgetManager for self-registered widget factories
     helix::PanelWidgetManager::instance().register_shared_resource<TemperatureService>(
         m_temp_control_panel.get());
     if (api) {
-        helix::PanelWidgetManager::instance().register_shared_resource<IMoonrakerAPI>(api);
-    }
-
-    // E-Stop overlay — cleanup self-registered inside init_subjects()
-    EmergencyStopOverlay::instance().init_subjects();
-
-    // AbortManager subjects — cleanup self-registered inside init_subjects()
-    helix::AbortManager::instance().init_subjects();
-
-    // ActivePrintMediaManager needs API for thumbnail loading
-    if (api) {
-        helix::get_active_print_media_manager().set_api(api);
+        helix::PanelWidgetManager::instance().register_shared_resource<helix::IMoonrakerAPI>(api);
+        m_registered_api = api;
     }
 }
 
@@ -395,10 +441,33 @@ void SubjectInitializer::init_observers() {
     m_observers.push_back(helix::init_print_start_navigation_observer());
 
     // Power-loss-recovery offer controller. Registered unconditionally — the
-    // pure plr_should_offer() self-guards non-Snapmaker printers (pl_env_valid
-    // stays false on every other backend). Owns its own observers; RAII cleanup
-    // on SubjectInitializer teardown.
+    // pure plr_should_offer() self-guards printers without a recovery backend.
+    // Owns its own observers; RAII cleanup on SubjectInitializer teardown.
     m_plr_offer_controller = std::make_unique<helix::ui::PlrOfferController>();
+
+    // A print held by a chamber wait while the chamber heater is not heating
+    // gets a prompt with a way out; a rejection outside a print gets a toast.
+    m_chamber_stall_prompt = std::make_unique<helix::ui::ChamberStallPrompt>();
+
+    // Standing print options: kept in Moonraker for the plugin's print hooks,
+    // and sent by this screen at a foreign job start when the plugin cannot.
+    m_standing_print_options = std::make_unique<helix::StandingPrintOptionsController>();
+
+    // Filament accounting: the spool map the plugin switches the active spool
+    // from, and this screen's switch at a tool change when the plugin cannot.
+    m_filament_accounting = std::make_unique<helix::FilamentAccountingController>();
+
+    // The plugin's feature map, read again at each job start and on the
+    // plugin's word, so every plugin-or-fallback choice reads it current.
+    m_plugin_status_refresh = std::make_unique<helix::PluginStatusRefresh>();
+
+    // Camera photos in history, taken by this screen when the plugin cannot.
+    // A build without a camera has no snapshot to take, so the plugin takes
+    // every photo and there is nothing for a controller here to do.
+#if HELIX_HAS_CAMERA
+    m_print_photos =
+        std::make_unique<helix::PrintPhotosController>(helix::live_camera_sources().fetch);
+#endif
 
     // Print outcome telemetry observer (records anonymous print stats when telemetry enabled)
     m_observers.push_back(TelemetryManager::instance().init_print_outcome_observer());
@@ -499,9 +568,9 @@ void SubjectInitializer::init_usb_manager(const RuntimeConfig& runtime_config) {
             (void)drive;
 
             // Suppress toast for drives detected within 3 seconds of startup
-            constexpr auto GRACE_PERIOD = std::chrono::seconds(3);
+            constexpr auto kGracePeriod = std::chrono::seconds(3);
             auto now = std::chrono::steady_clock::now();
-            bool within_grace_period = (now - usb_setup_time) < GRACE_PERIOD;
+            bool within_grace_period = (now - usb_setup_time) < kGracePeriod;
 
             if (event == UsbEvent::DRIVE_INSERTED) {
                 if (!within_grace_period) {

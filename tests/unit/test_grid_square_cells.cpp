@@ -14,6 +14,7 @@
 
 #include "ui_breakpoint.h"
 
+#include "../test_helpers/measured_grids.h"
 #include "grid_layout.h"
 
 #include <cmath>
@@ -28,44 +29,8 @@ using helix::GridLayout;
 
 namespace {
 
-/// One measured geometry: a resolution, the home grid container's content box
-/// at that resolution, the gutter (space_xs at that breakpoint), and the grid
-/// the sizing model is expected to produce.
-///
-/// content_w/content_h/gutter were read off a live instance per resolution —
-/// `HELIX_SCREEN_SIZE=<WxH> helix-screen --test -vv`, then the
-/// `[PanelWidgetManager] Grid layout:` and `Track geometry:` lines. The content
-/// box is a property of the panel chrome and does not change with the track
-/// count, so it is stable data to pin against.
-struct Geometry {
-    const char* name;
-    int panel_w, panel_h;
-    int content_w, content_h;
-    int gutter;
-    int cols, rows;
-};
-
-// clang-format off
-const std::vector<Geometry> kMeasured = {
-    //  name                        panel        content     gut   grid
-    {"micro 480x272",            480,  272,   430,  264,   2,   12,  8},
-    {"micro portrait 272x480",   272,  480,   264,  394,   2,    8, 12},
-    {"tiny 480x320",             480,  320,   418,  312,   2,   10,  8},
-    {"tiny portrait 320x480",    320,  480,   312,  394,   2,    8, 10},
-    {"small 480x400",            480,  400,   414,  388,   4,   10, 10},
-    {"small portrait 400x480",   400,  480,   388,  390,   4,   10, 10},
-    {"medium 800x480",           800,  480,   710,  466,   5,   12,  8},
-    {"portrait 480x800",         480,  800,   466,  664,   5,    8, 12},
-    {"large 1024x600",          1024,  600,   904,  584,   6,   16, 10},
-    {"large portrait 600x1024",  600, 1024,   584,  868,   6,   10, 14},
-    {"xlarge 1280x720",         1280,  720,  1128,  700,   8,   16, 10},
-    {"xlarge portrait 720x1280", 720, 1280,   700, 1120,   8,   10, 16},
-    {"ultrawide 1920x440",      1920,  440,  1832,  428,   4,   46, 10},
-    {"ultratall 440x1920",       440, 1920,   428, 1768,   4,   10, 44},
-    {"ultratall 320x1480",       320, 1480,   312, 1332,   2,    8, 34},
-    {"ultrawide 1480x320",      1480,  320,  1418,  312,   2,   36,  8},
-};
-// clang-format on
+using Geometry = helix::test::MeasuredGrid;
+const std::vector<Geometry>& kMeasured = helix::test::kMeasuredGrids;
 
 UiBreakpoint bp_of(const Geometry& g) {
     return breakpoint_for(std::min(g.panel_w, g.panel_h));
@@ -78,7 +43,7 @@ GridDimensions dims_of(const Geometry& g) {
 /// Landscape/portrait pairs, as indices into kMeasured. Every entry is a real
 /// measurement of the same panel in both orientations.
 const std::vector<std::pair<size_t, size_t>> kRotationPairs = {
-    {0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}, {10, 11}, {12, 13}, {15, 14},
+    {0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}, {10, 11}, {12, 13}, {15, 14}, {16, 18},
 };
 
 } // namespace
@@ -160,16 +125,16 @@ TEST_CASE("square cells: rotating a panel transposes its grid to within one cell
 
 TEST_CASE("square cells: no measured geometry reaches either track clamp",
           "[grid_layout][square]") {
-    // MIN_TRACKS is a degenerate-display guard and MAX_TRACKS is a memory
+    // kMinTracks is a degenerate-display guard and kMaxTracks is a memory
     // ceiling. A real geometry landing on either means the cell size no longer
     // controls the grid and the aspect invariant above is being met by accident.
     for (const auto& g : kMeasured) {
         auto d = dims_of(g);
         INFO(g.name << " -> " << d.cols << "x" << d.rows);
-        CHECK(d.cols > GridLayout::MIN_TRACKS);
-        CHECK(d.rows > GridLayout::MIN_TRACKS);
-        CHECK(d.cols < GridLayout::MAX_TRACKS);
-        CHECK(d.rows < GridLayout::MAX_TRACKS);
+        CHECK(d.cols > GridLayout::kMinTracks);
+        CHECK(d.rows > GridLayout::kMinTracks);
+        CHECK(d.cols < GridLayout::kMaxTracks);
+        CHECK(d.rows < GridLayout::kMaxTracks);
     }
 }
 
@@ -177,12 +142,12 @@ TEST_CASE("square cells: the track clamps bound both ends", "[grid_layout][squar
     // Asserted directly rather than through a panel, because no panel reaches
     // them. Both bounds are whole cells, so clamping never yields an odd count.
     auto tiny = GridLayout::get_dimensions(UiBreakpoint::Medium, 1, 1);
-    CHECK(tiny.cols == GridLayout::MIN_TRACKS);
-    CHECK(tiny.rows == GridLayout::MIN_TRACKS);
+    CHECK(tiny.cols == GridLayout::kMinTracks);
+    CHECK(tiny.rows == GridLayout::kMinTracks);
 
     auto huge = GridLayout::get_dimensions(UiBreakpoint::Micro, 100000, 100000);
-    CHECK(huge.cols == GridLayout::MAX_TRACKS);
-    CHECK(huge.rows == GridLayout::MAX_TRACKS);
+    CHECK(huge.cols == GridLayout::kMaxTracks);
+    CHECK(huge.rows == GridLayout::kMaxTracks);
 }
 
 TEST_CASE("square cells: an unmeasured content box falls to the track floor",
@@ -191,14 +156,14 @@ TEST_CASE("square cells: an unmeasured content box falls to the track floor",
     // consumer asking then gets the floor, deliberately and identically on both
     // axes, rather than a plausible-looking grid derived from nothing.
     auto zero = GridLayout::get_dimensions(UiBreakpoint::Medium, 0, 0);
-    CHECK(zero.cols == GridLayout::MIN_TRACKS);
-    CHECK(zero.rows == GridLayout::MIN_TRACKS);
+    CHECK(zero.cols == GridLayout::kMinTracks);
+    CHECK(zero.rows == GridLayout::kMinTracks);
 
     // Negative extents come from an inverted or unresolved lv_area_t and must
     // not wrap into a huge track count.
     auto negative = GridLayout::get_dimensions(UiBreakpoint::Medium, -800, -480);
-    CHECK(negative.cols == GridLayout::MIN_TRACKS);
-    CHECK(negative.rows == GridLayout::MIN_TRACKS);
+    CHECK(negative.cols == GridLayout::kMinTracks);
+    CHECK(negative.rows == GridLayout::kMinTracks);
 }
 
 TEST_CASE("square cells: each axis takes the nearest whole cell, not the largest that fits",

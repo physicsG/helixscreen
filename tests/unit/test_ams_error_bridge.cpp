@@ -437,7 +437,7 @@ void park_printer_idle() {
 /// AFC emits `!! <msg>` and AFC_logger.error() queues the byte-identical
 /// string, so the router's detail and the backend's operation_detail are the
 /// same string. That equality is what the correlation matches on.
-constexpr const char* AFC_FAULT = "lane1 filament failed to trigger toolhead sensor";
+constexpr const char* kAfcFault = "lane1 filament failed to trigger toolhead sensor";
 } // namespace
 
 TEST_CASE_METHOD(LVGLUITestFixture,
@@ -449,7 +449,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     auto& ams = AmsState::instance();
     ams.init_subjects(true);
     auto backend = std::make_unique<ErrorReportingBackend>(4); // current_error() == nullopt
-    backend->set_operation_detail(AFC_FAULT);
+    backend->set_operation_detail(kAfcFault);
     ams.set_backend(std::move(backend));
 
     park_action_idle(*this);
@@ -463,7 +463,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // Klipper's broadcast lands first — AFC emits `!!` before it calls
     // pause_print(), so this is the real ordering on hardware.
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + AFC_FAULT);
+    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + kAfcFault);
 
     // Then AFC's status delta raises error_state and the action edges to ERROR.
     ams.set_action(AmsAction::ERROR);
@@ -472,7 +472,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     REQUIRE_FALSE(presenter.is_visible()); // toast path: no modal to see
     CHECK(toasts.messages().size() == 1);  // the router's, not two
-    CHECK(toasts.messages()[0].find(AFC_FAULT) != std::string::npos);
+    CHECK(toasts.messages()[0].find(kAfcFault) != std::string::npos);
 
     ams.set_backend(nullptr);
 }
@@ -500,7 +500,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     ToastCapture toasts;
 
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + AFC_FAULT);
+    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + kAfcFault);
 
     ams.set_action(AmsAction::ERROR);
     helix::ui::UpdateQueue::instance().drain();
@@ -510,7 +510,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     bool saw_router = false;
     bool saw_bridge = false;
     for (const auto& m : toasts.messages()) {
-        saw_router |= m.find(AFC_FAULT) != std::string::npos;
+        saw_router |= m.find(kAfcFault) != std::string::npos;
         saw_bridge |= m.find("Unloading lane 2 (timed out)") != std::string::npos;
     }
     CHECK(saw_router);
@@ -531,7 +531,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     auto& ams = AmsState::instance();
     ams.init_subjects(true);
     auto backend = std::make_unique<ErrorReportingBackend>(4);
-    backend->set_operation_detail(AFC_FAULT);
+    backend->set_operation_detail(kAfcFault);
     ams.set_backend(std::move(backend));
 
     park_action_idle(*this);
@@ -547,7 +547,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     REQUIRE(toasts.messages().size() == 1); // the fallback fired
 
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + AFC_FAULT);
+    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + kAfcFault);
     process_lvgl(300);
 
     CHECK(toasts.messages().size() == 1);
@@ -569,7 +569,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     auto& ams = AmsState::instance();
     ams.init_subjects(true);
     auto backend = std::make_unique<ErrorReportingBackend>(4);
-    backend->set_operation_detail(AFC_FAULT);
+    backend->set_operation_detail(kAfcFault);
     ams.set_backend(std::move(backend));
 
     park_action_idle(*this);
@@ -585,7 +585,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     REQUIRE(toasts.messages().size() == 1); // fallback claimed the fault
 
     helix::GcodeErrorRouter router(nullptr, nullptr, presenter);
-    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + AFC_FAULT);
+    GcodeErrorRouterTestAccess::process_line(router, std::string("!! ") + kAfcFault);
     process_lvgl(300);
 
     CHECK(presenter.is_visible()); // modal still shown despite the prior claim
@@ -666,8 +666,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 // ams_action_detail change, and AmsState::recompute_action_detail() notifies on
 // any strcmp difference — so a latched fault re-reaches present() on every
 // cosmetic wording change the backend makes. Meanwhile a dismiss-only event
-// carries a single {"OK", ""} action, and ActionPromptModal treats an empty
-// gcode as "close, send nothing": the tap never reaches the presenter's gcode
+// carries a single {"OK", ""} action, and RecoveryFaultModal treats an empty
+// gcode as "close, send nothing": the tap never reaches the presenter's action
 // callback. With the presenter's only dedup keyed on the modal still being
 // visible, the dialog the user just closed came straight back.
 // ============================================================================

@@ -277,22 +277,17 @@ HelixScreen can be deployed to the U1 without modifying the read-only base firmw
 
 This is the current deployment method used by `make deploy-snapmaker-u1`:
 
-1. Install [PAXX Extended Firmware](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware) for SSH access
-2. Enable SSH via firmware config web UI
-3. Deploy via `make deploy-snapmaker-u1 SNAPMAKER_U1_HOST=<ip>`
-4. The installer disables the stock UI binary (`chmod -x /usr/bin/gui`) and installs a HelixScreen launcher at `/etc/init.d/S99screen` (in the writable overlay); HelixScreen starts on `/dev/fb0`. `lmd` (camera/timelapse supervisor) keeps running.
+1. Enable SSH: the **Root access** option on stock firmware 1.2+, or [PAXX Extended Firmware](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware) (SSH on by default). See [Firmware Requirements](#firmware-requirements)
+2. Deploy via `make deploy-snapmaker-u1 SNAPMAKER_U1_HOST=<ip>`
+3. The installer disables the stock UI binary (`chmod -x /usr/bin/gui`) and hooks the firmware's own boot launcher (`S99screen`, `S99fb-http` or `S99input-event-daemon`, preserved as `*.stock`; see [How HelixScreen takes over the display](#how-helixscreen-takes-over-the-display)); HelixScreen starts on `/dev/fb0`. `lmd` (camera/timelapse supervisor) keeps running.
 
 **To revert**: run the uninstaller (re-enables `/usr/bin/gui` and restores the launcher), or manually `chmod +x /usr/bin/gui && rm -rf /userdata/helixscreen`, then reboot. The stock UI binary is on the read-only SquashFS rootfs and is only disabled, never deleted — but note that the init-script changes and the binary's exec bit **are** modified (in the reversible overlay), so a plain reboot alone will not bring the stock UI back.
 
 ### Level 2: SysV Init Override (Persistent, Reversible)
 
-The U1 uses SysV init (not systemd). A persistent override would:
+Level 1 is already persistent: the boot-launcher hook it installs lives in the `/oem/.debug` overlay and survives reboot. A standalone HelixScreen init script in `/etc/init.d/` does **not** work on its own, because the boot glob is frozen from the SquashFS before the overlay mounts (see the boot-glob trap under [How HelixScreen takes over the display](#how-helixscreen-takes-over-the-display)), which is why the installer delegates from a script the SquashFS already ships.
 
-1. Create a HelixScreen init script in `/etc/init.d/` (writable overlay)
-2. Optionally chmod -x the stock `S99screen` script (reversible since overlay)
-3. HelixScreen starts on boot; stock UI stays dormant
-
-**To revert**: Remove the init script override and reboot. Stock UI resumes from the read-only base.
+**To revert**: run the uninstaller, which restores each hooked launcher from its `*.stock` copy and the exec bit on `/usr/bin/gui`, then reboot.
 
 ### Level 3: Extended Firmware Overlay (Cleanest, Reversible)
 
@@ -363,23 +358,71 @@ When the U1 is detected, the printer database record provides these metadata fie
 | `probe_type` | `eddy_current` |
 | `toolhead_style` | `snapmaker_u1` |
 | `preset` | `snapmaker_u1` |
-| `z_offset_calibration_strategy` | `probe_calibrate` |
+| `z_offset_calibration_strategy` | `firmware_managed` |
+| `z_offset_persists` | `false` |
+| `tool_change_resets_z_offset` | `true` |
 
 The `snapmaker_u1` preset causes the first-run wizard to auto-skip hardware steps that do not apply to the U1 (e.g., probe wiring, toolhead identification).
 
+**Z-offset adjustments are temporary.** HelixScreen offers no Save Z Offset step on
+the U1 (`firmware_managed`), and the firmware does not persist a `SET_GCODE_OFFSET`
+adjustment either. Each head keeps its own stored offset (`extruder.gcode_offset`,
+set by the firmware's own `PROBE_XYZ_OFFSET_CALIBRATE SAVE_INFO=1`), and activating a
+head re-applies that offset with an absolute `SET_GCODE_OFFSET X= Y= Z=`
+(the firmware's `active_gcode_offset()` in its klippy kinematics/extruder.py, called
+from its virtual_sdcard.py on each tool change). A babystep therefore lasts until the next tool change or the end of the
+print, and Print Tune says so (`ZOffsetTuneHint::TEMPORARY_TOOL_CHANGE`).
+
+`Z_OFFSET_APPLY_PROBE` is no way out either (measured on the device): it writes the
+first head's coil section and folds the active head's per-head offset into it, so it is
+not a save of the babystep and HelixScreen never sends it here.
+
 ## Print Start Tracking
 
-HelixScreen uses the `snapmaker_u1` print start profile (`config/print_start_profiles/snapmaker_u1.json`) to track progress through the startup sequence. The profile uses weighted progress mode with these phases:
+HelixScreen uses the `snapmaker_u1` print start profile (`assets/config/print_start_profiles/snapmaker_u1.json`) in weighted progress mode, so each phase's share of the bar comes from the ETA engine rather than the profile. The U1's PRINT_START is inlined into the slicer gcode, and the profile reads the firmware's own action codes (`// Success: Set action code <CODE>` and `// Success: Changed main state to PRINTING with action <CODE>`) plus two console lines:
 
-1. Homing (10%)
-2. Bed heating (20%)
-3. Nozzle heating (20%)
-4. Z tilt adjust (15%)
-5. Bed mesh calibration (15%)
-6. Nozzle cleaning (10%)
-7. Purging (10%)
+| Signal | Phase | Label |
+|--------|-------|-------|
+| `// trigger_mcu_pos: {` (G28 X/Y) | HOMING | Homing axes... |
+| `// z offset: ` (the G28 Z touch, after every tool pick and before the mesh) | HOMING | Probing Z... |
+| `PRINT_SWITCH_CHECKING` | INITIALIZING | Checking extruders... |
+| `PRINT_AUTO_FEEDING` / `PRINT_REPLENISHING` | INITIALIZING | Loading filament... / Replenishing filament... |
+| `PRINT_BED_DETECTING`, `DETECT_PLATE` | BED_MESH | Inspecting bed... / Detecting plate... |
+| `BED_PREHEATING` (the firmware's bed soak) | SOAKING | Heat Soaking... |
+| `BED_PRESCANNING` (four corners) | BED_MESH | Validating bed mesh... |
+| `BED_LEVELING` | BED_MESH | Bed mesh... (its message change restarts the probe count) |
+| `PRINT_PREEXTRUDING` | PURGING | Priming... |
+| `PRINT_RESUMING` | INITIALIZING | Resuming print... |
 
-The progress bar updates as each phase completes, so you can see exactly where your printer is in its startup routine.
+`// z_mesh_complete:` also comes from G28 Z, so it maps to nothing. Heating has no pattern: while an M109/M190/TEMPERATURE_WAIT reports, the collector reads the command at `virtual_sdcard.file_position` and names the heater it waits on (`PRINT_START_PROFILES.md`, the heater-wait row of the test table). The first model layer, not an action code, ends the pre-print.
+
+### The print position fills the silent steps
+
+The nozzle cleans and the prime line say nothing on the console, so the profile sets `scripted_start` and the collector follows `virtual_sdcard.file_position` through the start block the slicer wrote (`PRINT_START_PROFILES.md`, `scripted_start`). Each `*_CLEAN_NOZZLE*` line shows "Cleaning Nozzle...", each `G28 Z` "Probing Z...", `BED_MESH_CALIBRATE` "Bed mesh..." and the first extruding `G1` "Purging...". The action codes above still name the steps inside a line (the soak, the corners, the mesh, the plate), and arrive before the frame naming the line. The profile's `start_block_owned_lines` says which command prints which, taken from the console captures: `BED_MESH_CALIBRATE` prints BED_PREHEATING, BED_PRESCANNING, BED_LEVELING and a `// z offset:` touch, and `G28` prints `// trigger_mcu_pos:` and `// z offset:`. The clean macros print no code at all, so none is listed for them.
+
+What one print showed, read-only from the printer at 1 Hz on 2026-10-17 (`tests/fixtures/u1_bmcu_*`, one head, reported as T1). The position is where the print stood; the clean macros queue their moves and return, so the position passes their line at once and stands on the next while they run.
+
+| s | Position (byte, line) | Console | Shown |
+|---|---|---|---|
+| 0 | 12961 `G28 X Y` | `trigger_mcu_pos` | HOMING, Homing axes... |
+| 26 | 13011 `DEFECT_DETECTION_DETECT_BED` | `PRINT_BED_DETECTING`, five samples | BED_MESH, Inspecting bed... |
+| 87 | 13339 `SM_PRINT_AUTO_FEED EXTRUDER=1` | `PRINT_SWITCH_CHECKING`, `PRINT_AUTO_FEEDING`; an M109 to 280 inside the feed | INITIALIZING, Loading filament..., the nozzle wait at 94-115 s |
+| 144 | 13743 `M109 T0 S170` | wait reports, nozzle cooling 256 -> 172 | HEATING_NOZZLE |
+| 187 | 13790 (past 13756 `ROUGHLY_CLEAN_NOZZLE_WITH_DISCARD`) | none | CLEANING |
+| 190 | 13824 `G28 Z I140 J140` | `// z offset:`, probes at 140,140 | HOMING, Probing Z... |
+| 209 | 13879 `DETECT_BED_PLATE` | `DETECT_PLATE` | BED_MESH, Detecting plate... |
+| 224 | 13992 `M109 S210` | wait reports | HEATING_NOZZLE |
+| 234-249 | 14023-14197 (past 14002 `ROUGHLY_CLEAN_NOZZLE`, then on 14057 `FINELY_CLEAN_NOZZLE_STAGE_1` and 14197 `_STAGE_2`) | the stage probes at y 276.5 | CLEANING |
+| 249 | 14271 `M109 S170` | wait reports, cooling 194 -> 170 | HEATING_NOZZLE |
+| 264 | 14281 `M190 S100` | wait reports, bed 90 -> 99 | HEATING_BED (from the next fallback tick, 270 s) |
+| 319 | 14316 `G28 Z` | `// z offset:`, probes at the mesh's corner | HOMING, Probing Z... |
+| 340 | 14818 `M109 S260` (the position never stood on 14559 `BED_MESH_CALIBRATE`) | `print_task_config configuration does not do auto-leveling` | HEATING_NOZZLE |
+| 360 | 14840 `G1 X110 E15 F360` | none | PURGING |
+| 376 | 16178, the first layer | | |
+
+That print ran no mesh, so it cannot answer whether an `ADAPTIVE=0` mesh's point count can be read ahead of time: there was no `BED_PRESCANNING`, `BED_LEVELING` or `PRINT_PREEXTRUDING`, and no probe table. The start block names the grid itself (`PROBE_COUNT=4,4 ADAPTIVE=0`), so a print with auto-leveling on would settle it. The `BED_PREHEATING` soak runs inside the mesh line, which is what keeps "Heat Soaking..." up when the position reaches it.
+
+Each phase's history entry is the time it showed, summed over its visits (`PREPRINT_PREDICTION.md`, Phase Timing Tracking): that print records HOMING 67 s, BED_MESH 74 s, CLEANING 18 s and PURGING 17 s. INITIALIZING (the feed) and the heater waits are not recorded as phases.
 
 ## Pre-Print Flow Calibration (Pressure Advance)
 
@@ -505,7 +548,7 @@ The primary source for filament info. Populated by the stock firmware's task man
 | `filament_entangle_detect` | `false` | ❌ | Entangle detection enabled |
 | `filament_entangle_sen` | `"medium"` | ❌ | Sensitivity level |
 | `flow_calibrate` | `false` | ❌ | Flow calibration pre-print option |
-| `shaper_calibrate` | `false` | ❌ | Input shaper calibration pre-print option |
+| `shaper_calibrate` | `false` | ❌ | Stored by the firmware but read by nothing on the printer. Not offered as a pre-print option, never sent (`FILAMENT_BACKEND_SNAPMAKER_U1.md`, `SET_PRINT_PREFERENCES`) |
 | `time_lapse_camera` | `false` | ❌ | Timelapse pre-print option |
 | `auto_bed_leveling` | `false` | ❌ | ABL pre-print option |
 
@@ -559,7 +602,9 @@ Subscribed only when `mmu_type()` reports SnapSwap; the screws-tilt code reads i
 
 ### `defect_detection` — Print defect detection (NOT SUBSCRIBED)
 
-AI-based print defect detection system. The status object itself is not subscribed; HelixScreen consumes detection through `print_stats.exception` instead: on a confirmed defect (custom `exception` sub-object, `code: 2` = spaghetti/noodle) the firmware pauses the print itself, and `U1StockSource` reports it to `DetectionManager` (`include/detection_manager.h`) with `already_paused` set. Sources only report: `DetectionManager::response_for()` classifies the event from the settings in Settings > Safety & Alerts (**Spaghetti Detection**, exposed to XML as the `detection_available` subject). **Pause on Detection** is hidden on a U1 (the `detection_pause_applicable` subject is 0): the firmware pauses by itself and no HelixScreen setting can prevent that, so the row only exists for sources whose pause HelixScreen sends. Every confirmed U1 detection therefore shows the response modal (Resume / Abort / Tune / Turn off detection) even under a warn-only policy: a print the firmware already paused cannot be left on a vanishing toast. The U1 firmware keeps no preference HelixScreen can read, so the first capable start seeds the settings with the defaults (detection on) and they are HelixScreen's from then on. Capability is gated by probing `printer.objects.list` for `defect_detection` after the WebSocket connects (probing at init would latch false forever).
+AI-based print defect detection system. The status object itself is not subscribed (it is queried once per connect for the bed check's state); HelixScreen consumes detection through `print_stats.exception` instead: on a confirmed defect (custom `exception` sub-object, `code: 2` = spaghetti/noodle) the firmware pauses the print itself, and `U1StockSource` reports it to `DetectionManager` (`include/detection_manager.h`) with `already_paused` set. Sources only report: `DetectionManager::response_for()` classifies the event from the settings in Settings > Safety & Alerts (**Spaghetti Detection**, exposed to XML as the `detection_available` subject). **Pause on Detection** is hidden on a U1 (the `detection_pause_applicable` subject is 0): the firmware pauses by itself and no HelixScreen setting can prevent that, so the row only exists for sources whose pause HelixScreen sends. Every confirmed U1 detection therefore shows the response modal (Resume / Abort / Tune / Turn off detection) even under a warn-only policy: a print the firmware already paused cannot be left on a vanishing toast. The first capable start seeds the Spaghetti Detection settings with the defaults (detection on) and they are HelixScreen's from then on. Capability is gated by probing `printer.objects.list` for `defect_detection` after the WebSocket connects (probing at init would latch false forever).
+
+**Bed clear check (code 1).** Before a print the module runs the camera's `item` detection over the bed (`DEFECT_DETECTION_DETECT_BED`); when it scores above its threshold it raises exception 532 code 1 "detected dirty bed", pauses, and deactivates `virtual_sdcard`, so the print cannot resume. False positives happen on a clear bed. `U1StockSource` reports it as a `DirtyBed` event and `present_detection()` shows the bed check modal (Restart print / Cancel print / Turn off bed check) whatever the Spaghetti Detection settings say, since the print needs a decision either way. Restart takes the same path as the "Print Was Terminated" restart (`helix::ui::restart_print_from_beginning()`): `SDCARD_RESET_FILE` + `CANCEL_PRINT_BASE`, then the file again. The source also answers `explains_current_pause()` for any 532 defect pause, which keeps the runout guidance dialog and the "Filament Runout" pause reason away from it (`include/non_filament_pause.h`). The check is switched with `DEFECT_DETECTION_CONFIG CLEAN_BED_ENABLE=0|1`, which the firmware persists in its own config file; its `get_status()` returns that same stored config, so the **Bed Clear Check** row in Settings > Safety & Alerts reads `clean_bed.enable` from a `printer.objects.query` after each capability probe instead of assuming a default. The `defect_detection/config` webhook only writes: it returns nothing to read back.
 
 | Field | Example | Notes |
 |-------|---------|-------|
@@ -612,7 +657,7 @@ We welcome additional testers with Snapmaker U1 hardware — **especially anyone
 3. **Stock testers:** after install, **reboot** and confirm HelixScreen comes back up on its own (this exercises the `S99input-event-daemon` boot hook) — please report success/failure.
    - Or build from source: `make snapmaker-u1-docker` then `make deploy-snapmaker-u1-fg SNAPMAKER_U1_HOST=<ip>`
 4. Report: Does the wizard appear? Does touch work? Can you connect to Moonraker? Do tool changes work?
-5. File issues at the HelixScreen GitHub repository
+5. Report in a [new issue](https://github.com/prestonbrown/helixscreen/issues/new), stating the firmware (stock or PAXX) and its version
 
 ## Related Resources
 

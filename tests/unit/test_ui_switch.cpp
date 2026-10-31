@@ -316,3 +316,116 @@ TEST_CASE("API contracts and guarantees", "[ui_switch][api][contract]") {
         REQUIRE(parse_size_preset("xl", &preset) == false);
     }
 }
+
+// ============================================================================
+// Touch Target Tests
+// ============================================================================
+
+TEST_CASE("A tap anywhere on the drawn switch reaches it", "[ui_switch][touch]") {
+    SwitchTest fixture;
+
+    lv_obj_t* screen = lv_obj_create(nullptr);
+    lv_obj_set_size(screen, 800, 480);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(screen, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t* sw = ui_switch_create_themed(screen, "small");
+    REQUIRE(sw != nullptr);
+    lv_obj_update_layout(screen);
+
+    lv_area_t a;
+    lv_obj_get_coords(sw, &a);
+    const int32_t cx = (a.x1 + a.x2) / 2;
+    const int32_t cy = (a.y1 + a.y2) / 2;
+    const int32_t margin = SIZE_SMALL.vert_margin;
+    REQUIRE(margin > 0);
+
+    // Inside the margin the knob paints into: above, below and past the end.
+    const lv_point_t above{cx, a.y1 - margin + 1};
+    const lv_point_t below{cx, a.y2 + margin - 1};
+    const lv_point_t past_end{a.x2 + SIZE_SMALL.horiz_margin - 1, cy};
+    CHECK(lv_indev_search_obj(screen, const_cast<lv_point_t*>(&above)) == sw);
+    CHECK(lv_indev_search_obj(screen, const_cast<lv_point_t*>(&below)) == sw);
+    CHECK(lv_indev_search_obj(screen, const_cast<lv_point_t*>(&past_end)) == sw);
+
+    // Beyond the reserved margin the tap belongs to whatever is there.
+    const lv_point_t outside{cx, a.y1 - margin - 2};
+    CHECK(lv_indev_search_obj(screen, const_cast<lv_point_t*>(&outside)) != sw);
+
+    lv_obj_delete(screen);
+}
+
+namespace {
+
+/// A flex row the way settings rows lay a switch out beside a neighbour.
+lv_obj_t* make_row(lv_obj_t* screen, int32_t gap) {
+    lv_obj_t* row = lv_obj_create(screen);
+    lv_obj_set_size(row, 600, 80);
+    lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(row, gap, LV_PART_MAIN);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return row;
+}
+
+/// space_sm at the 800x480 breakpoint, the gap the WiFi row uses.
+constexpr int32_t kRowGap = 7;
+
+} // namespace
+
+TEST_CASE("A switch's touch area never takes a tap from its neighbour", "[ui_switch][touch]") {
+    SwitchTest fixture;
+    lv_obj_t* screen = lv_obj_create(nullptr);
+    lv_obj_set_size(screen, 800, 480);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    const int32_t gap = GENERATE(int32_t{0}, kRowGap);
+    const bool button_neighbour = GENERATE(false, true);
+    CAPTURE(gap, button_neighbour);
+
+    lv_obj_t* row = make_row(screen, gap);
+    lv_obj_t* neighbour = button_neighbour ? lv_button_create(row) : lv_label_create(row);
+    if (!button_neighbour) {
+        lv_label_set_text(neighbour, "WiFi");
+        lv_obj_add_flag(neighbour, LV_OBJ_FLAG_CLICKABLE);
+    }
+    lv_obj_set_size(neighbour, 120, 70);
+    lv_obj_t* sw = ui_switch_create_themed(row, "small");
+    REQUIRE(sw != nullptr);
+    lv_obj_update_layout(screen);
+
+    lv_area_t n;
+    lv_obj_get_coords(neighbour, &n);
+    lv_area_t a;
+    lv_obj_get_coords(sw, &a);
+    const int32_t cy = (a.y1 + a.y2) / 2;
+
+    // The neighbour's own last column, right beside the switch.
+    const lv_point_t in_neighbour{n.x2, cy};
+    CHECK(lv_indev_search_obj(screen, const_cast<lv_point_t*>(&in_neighbour)) == neighbour);
+    // And the switch still takes the tap just short of its track.
+    const lv_point_t before_track{a.x1 - 1, cy};
+    CHECK(lv_indev_search_obj(screen, const_cast<lv_point_t*>(&before_track)) == sw);
+
+    lv_obj_delete(screen);
+}
+
+TEST_CASE("A switch outside a flex or grid layout keeps its track as its target",
+          "[ui_switch][touch]") {
+    SwitchTest fixture;
+    lv_obj_t* screen = lv_obj_create(nullptr);
+    lv_obj_set_size(screen, 800, 480);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* sw = ui_switch_create_themed(screen, "small");
+    REQUIRE(sw != nullptr);
+    lv_obj_center(sw);
+    lv_obj_update_layout(screen);
+
+    lv_area_t a;
+    lv_obj_get_coords(sw, &a);
+    const lv_point_t above{(a.x1 + a.x2) / 2, a.y1 - 2};
+    CHECK(lv_indev_search_obj(screen, const_cast<lv_point_t*>(&above)) != sw);
+
+    lv_obj_delete(screen);
+}

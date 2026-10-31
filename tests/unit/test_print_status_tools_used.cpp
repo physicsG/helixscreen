@@ -85,15 +85,15 @@ class ToolsUsedFixture : public LVGLTestFixture {
                                         lv_obj_t** out_viewer = nullptr) {
         StreamingModeGuard streaming(mode);
 
-        lv_obj_t* viewer = ui_gcode_viewer_create(lv_screen_active());
+        lv_obj_t* viewer = helix::ui::gcode_viewer_create(lv_screen_active());
         REQUIRE(viewer != nullptr);
         lv_obj_set_size(viewer, 240, 240);
         lv_obj_update_layout(viewer);
 
         g_load_done = false;
         g_load_ok = false;
-        ui_gcode_viewer_set_load_callback(viewer, on_load_done, nullptr);
-        ui_gcode_viewer_load_file(viewer, path.c_str());
+        helix::ui::gcode_viewer_set_load_callback(viewer, on_load_done, nullptr);
+        helix::ui::gcode_viewer_load_file(viewer, path.c_str());
 
         // Both paths finish on a worker and report through the UpdateQueue, so
         // this needs real sleeps as well as virtual ticks - process_lvgl()
@@ -101,11 +101,11 @@ class ToolsUsedFixture : public LVGLTestFixture {
         REQUIRE(wait_until([] { return g_load_done; }, /*timeout_ms=*/60000));
         REQUIRE(g_load_ok);
 
-        std::set<int> tools = ui_gcode_viewer_get_tools_used(viewer);
+        std::set<int> tools = helix::ui::gcode_viewer_get_tools_used(viewer);
         if (out_viewer) {
             *out_viewer = viewer;
         } else {
-            ui_gcode_viewer_clear(viewer);
+            helix::ui::gcode_viewer_clear(viewer);
             lv_obj_delete(viewer);
             process_lvgl(50);
         }
@@ -152,7 +152,7 @@ TEST_CASE_METHOD(ToolsUsedFixture, "A single-tool file still answers {0} when st
 TEST_CASE_METHOD(ToolsUsedFixture, "PrintStatusPanel reads the tool set through the viewer",
                  "[gcode][viewer][tools_used][slow]") {
     // The panel is where the two consumers actually ask. Going back to
-    // ui_gcode_viewer_get_parsed_file() here re-empties both of them on exactly
+    // helix::ui::gcode_viewer_get_parsed_file() here re-empties both of them on exactly
     // the printers that stream, with the viewer-level answer still correct.
     const std::string asset = find_test_asset("u1_4color_ring.gcode");
     REQUIRE_FALSE(asset.empty());
@@ -180,7 +180,7 @@ TEST_CASE_METHOD(ToolsUsedFixture, "PrintStatusPanel reads the tool set through 
         panel.deinit_subjects();
     }
 
-    ui_gcode_viewer_clear(viewer);
+    helix::ui::gcode_viewer_clear(viewer);
     lv_obj_delete(viewer);
     process_lvgl(50);
 }

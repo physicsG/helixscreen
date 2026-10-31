@@ -58,6 +58,7 @@
 #   check_orphan_subjects.py --repo-root DIR      # scan a tree other than this one
 
 import argparse
+import json
 import pathlib
 import re
 import sys
@@ -303,6 +304,33 @@ def collect_xml_refs(root: pathlib.Path) -> set[str]:
     return refs
 
 
+def collect_layout_gates(root: pathlib.Path) -> set[str]:
+    """Subjects a layout file names in a `requires` list.
+
+    PanelWidgetManager observes each one to decide whether a home widget may
+    stand in its cell, so naming it there reads it.
+    """
+    names: set[str] = set()
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "requires" and isinstance(value, list):
+                    names.update(v for v in value if isinstance(v, str) and IDENT_RE.fullmatch(v))
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    for path in (root / "assets" / "config").glob("*.json"):
+        try:
+            walk(json.loads(path.read_text(errors="ignore")))
+        except ValueError:
+            continue
+    return names
+
+
 def mask_registrations(text: str) -> str:
     """Blank out every registration call, preserving offsets and line breaks.
 
@@ -414,7 +442,7 @@ def main() -> int:
 
     root = args.repo_root.resolve() if args.repo_root else repo_root()
     registered, members, owned = collect_registrations(root)
-    bound = collect_xml_refs(root)
+    bound = collect_xml_refs(root) | collect_layout_gates(root)
     read_text = collect_read_text(root)
     # A member published under several names is read when any of them is bound.
     bound_members = {om for n in bound if n in registered for om in owned.get(n, ())}

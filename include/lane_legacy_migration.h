@@ -41,6 +41,11 @@ void file_kept_identity(LaneId lane, int slot_index, const FilamentSlotOverride&
 bool file_outside_edit_if_newer(LaneId lane, const LaneDataRecord& entry, Observation obs,
                                 bool write_in_flight);
 
+/// Whether @p obs, read out of another tool's record, names a spool @p lane
+/// does not hold: a rebinding, which file_outside_edit_if_newer() files on a
+/// lane cleared of what described the old spool.
+[[nodiscard]] bool outside_record_rebinds(LaneId lane, const Observation& obs);
+
 /// Classify every lane_data record @p store's last load_blocking() parsed and
 /// file each onto its lane.
 ///

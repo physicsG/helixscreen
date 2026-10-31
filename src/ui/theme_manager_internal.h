@@ -22,6 +22,14 @@ namespace helix::theme_detail {
 /// under the mount the firmware configured via helix::set_asset_root().
 const char* ui_xml_dir();
 
+/// Set how old a file's last change must be, when token discovery parses it,
+/// before its stat is trusted to detect the next change; returns the previous
+/// window. A file changed more recently is re-parsed on every lookup, since a
+/// same-size rewrite inside one timestamp tick leaves its stat unchanged. A
+/// negative window trusts a file the moment it is written, which is how a test
+/// pins parse reuse on files it just created.
+int64_t set_token_racy_window_ns(int64_t ns);
+
 /// The size ladder in tier order (index == UiBreakpoint tier, Micro..XXLarge).
 /// Every place that names a tier suffix derives from this one list.
 inline constexpr const char* kSizeSuffixes[] = {"_micro", "_tiny",   "_small",  "_medium",
@@ -141,6 +149,11 @@ struct ThemeSubjects {
     /// portrait": 480x800 and 800x480 can land on the same one.
     lv_subject_t is_portrait{};
     bool is_portrait_ready = false;
+
+    /// 1 for the ultrawide class (wider than 2.5:1), 0 otherwise. Its tier
+    /// follows the short axis, so ui_breakpoint calls a 1920x440 panel small.
+    lv_subject_t is_ultrawide{};
+    bool is_ultrawide_ready = false;
 
     /// Theme-editor swatch descriptions, bound by name from XML.
     lv_subject_t swatch_desc[kSwatchCount]{};

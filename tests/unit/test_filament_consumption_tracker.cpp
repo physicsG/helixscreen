@@ -50,9 +50,9 @@ TEST_CASE("set_external_spool_info_in_memory does not write settings", "[filamen
     // Set up an isolated config directory so settings writes don't leak.
     std::string temp_dir = helix::test::unique_temp_dir("helix_fct_test");
     std::filesystem::create_directories(temp_dir);
-    std::filesystem::remove(AppConstants::Update::config_backup_fallback());
-    std::filesystem::remove(AppConstants::Update::legacy_config_backup_fallback());
-    std::filesystem::remove(AppConstants::Update::env_backup_fallback());
+    std::filesystem::remove(app_constants::update::config_backup_fallback());
+    std::filesystem::remove(app_constants::update::legacy_config_backup_fallback());
+    std::filesystem::remove(app_constants::update::env_backup_fallback());
     Config::get_instance()->init(temp_dir + "/settings.json");
     SettingsManager::instance().clear_external_spool_info();
 

@@ -30,6 +30,7 @@ GLOSSARY_GROUPS: dict[str, list[str]] = {
         "Slot", "Lane", "Gate", "Feeder", "Tool", "Toolhead",
         "Slots", "Lanes", "Gates", "Feeders", "Tools", "Toolheads",
     ],
+    "Filament features": ["Endless Spool", "Filament Mapping", "Assigned Tool"],
     "Actions": [
         "Save", "Cancel", "Close", "Delete", "Edit", "Retry",
         "Install", "Uninstall", "Update", "Print", "Pause", "Resume",
@@ -102,6 +103,14 @@ translation agents (the relevant column is injected into their prompts).
   same 1:1 physical position, matching the U1's own firmware UI. Reuse each
   locale's existing `feeder`/`toolhead` rendering (established from other
   strings using those English words) rather than coining a new one.
+- **Endless Spool**, **Filament Mapping**, **Assigned Tool** are three different
+  features and must stay three different phrases. Endless Spool switches to
+  another spool when one runs out (its per-slot field is "Backup Slot" / "Backup
+  Lane" / "Backup Gate"). Filament Mapping is the per-print choice of which slot
+  feeds each tool the file uses, done by rewriting the file or by the firmware.
+  Assigned Tool is the printer's own persistent tool-to-slot table. A vendor
+  toggle keeps the vendor's name for its own setting (Creality "Auto-Refill",
+  Snapmaker "Auto-Replenish", zMod "Infinite Spool Mode").
 - **Spool**: the physical spool noun — keep one rendering per locale.
 - **Light**: ambiguous (theme "Light" vs LED light) — translate by context; not
   a fixed glossary term.

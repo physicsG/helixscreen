@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "async_lifetime_guard.h"
 #include "gcode_preview_fetcher.h"
 #include "lvgl.h"
 #include "print_lifecycle_state.h"
@@ -95,8 +96,9 @@ class PrintPreviewController {
     void load_for_viewing(const std::string& filename);
 
     /// Load the local file @p file_path into the viewer as print @p print_filename's
-    /// G-code.
-    void load_file(const char* file_path, const std::string& print_filename);
+    /// G-code. @p layer_index_sidecar: the plugin's layer index for it, or empty.
+    void load_file(const char* file_path, const std::string& print_filename,
+                   std::string layer_index_sidecar = {});
 
     /// Re-color the viewer's extrusion with the AMS lane colors.
     bool apply_tool_colors();
@@ -167,6 +169,8 @@ class PrintPreviewController {
     /// Main-thread only (its destructor drops the LVGL image cache entry).
     std::shared_ptr<EspPsramThumbnail> esp_thumbnail_;
 #endif
+
+    AsyncLifetimeGuard lifetime_;
 };
 
 } // namespace helix::ui

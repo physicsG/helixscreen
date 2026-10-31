@@ -66,7 +66,7 @@ namespace helix {
 /**
  * @brief Filename for the HelixScreen macros config file
  */
-constexpr const char* HELIX_MACROS_FILENAME = "helix_macros.cfg";
+constexpr const char* kHelixMacrosFilename = "helix_macros.cfg";
 
 /**
  * @brief Status of HelixScreen macro installation

@@ -91,7 +91,7 @@ struct PollHarness {
             out = runner_stdout;
             return runner_exit;
         });
-        src.set_submitter([](std::function<void()> work) { work(); });
+        src.set_submitter([](helix::SharedCallback<void()> work) { work(); });
         src.set_callback([this](const DetectionEvent& e) { events.push_back(e); });
         if (!config_path.empty())
             src.set_config_path_for_test(config_path);
@@ -133,7 +133,7 @@ TEST_CASE_METHOD(XMLTestFixture, "K2StockSource gates polling on the detection t
                  "[detection][k2]") {
     // SettingsManager subjects start uninitialized in the unit suite (an
     // uninitialized subject reads as the true fallback and ignores setters),
-    // so rebuild them from Config the way test_detection_settings.cpp does.
+    // so rebuild them from Config.
     ConfigTestAccess::data(*Config::get_instance()).erase("detection");
     SettingsManager::instance().deinit_subjects();
     SettingsManager::instance().init_subjects();
@@ -251,7 +251,7 @@ TEST_CASE_METHOD(XMLTestFixture, "K2StockSource reports the printer's ai_control
                  "[detection][k2]") {
     // start() reads the ai_control file once, so each section writes the value
     // it exercises and builds the source against that file.
-    static constexpr const char* AI_JSON = "/tmp/helix_k2_aicontrol_test.json";
+    static constexpr const char* kAiJson = "/tmp/helix_k2_aicontrol_test.json";
     auto make_harness = [&](std::optional<int> ai_switch, std::optional<int> pause_print) {
         json ai{{"pastaTime", 25}, {"pastaTruth", 77}};
         if (ai_switch.has_value())
@@ -261,10 +261,10 @@ TEST_CASE_METHOD(XMLTestFixture, "K2StockSource reports the printer's ai_control
         // Closed before the source is built: start() reads the file in the
         // PollHarness constructor, and an unflushed ofstream is an empty file.
         {
-            std::ofstream f(AI_JSON);
+            std::ofstream f(kAiJson);
             f << json{{"ai_control", ai}}.dump();
         }
-        return std::make_unique<PollHarness>(&state(), AI_JSON);
+        return std::make_unique<PollHarness>(&state(), kAiJson);
     };
 
     SECTION("switch 0: preference says detection off") {
@@ -288,18 +288,18 @@ TEST_CASE_METHOD(XMLTestFixture, "K2StockSource reports the printer's ai_control
         CHECK(pref->pause);
     }
 
-    std::remove(AI_JSON);
+    std::remove(kAiJson);
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "K2StockSource reports, never pauses the print itself",
                  "[detection][k2]") {
-    static constexpr const char* AI_JSON = "/tmp/helix_k2_aicontrol_test.json";
+    static constexpr const char* kAiJson = "/tmp/helix_k2_aicontrol_test.json";
     {
-        std::ofstream f(AI_JSON);
+        std::ofstream f(kAiJson);
         f << json{{"ai_control", {{"pastaTime", 25}, {"pastaTruth", 77}, {"pausePrint", 1}}}}
                  .dump();
     }
-    PollHarness h(&state(), AI_JSON);
+    PollHarness h(&state(), kAiJson);
     h.runner_stdout = "label: 1 prob: 0.903177 x:1 y:2 w:3 h:4\n";
     set_print_state(state(), "printing");
     // The pause decision belongs to the settings and the presenter above the
@@ -312,7 +312,7 @@ TEST_CASE_METHOD(XMLTestFixture, "K2StockSource reports, never pauses the print 
     // HelixScreen does the pausing for this source, so the pause-on-detect
     // setting governs it (drives the settings row's visibility subject).
     CHECK_FALSE(h.src.self_pauses());
-    std::remove(AI_JSON);
+    std::remove(kAiJson);
 }
 
 TEST_CASE("K2StockSource refresh_capability re-probes without a restart", "[detection][k2]") {

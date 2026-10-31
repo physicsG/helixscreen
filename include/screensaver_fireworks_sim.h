@@ -32,14 +32,14 @@ struct FireworksLevel {
 };
 
 /// The ladder, most expensive level first. A requested level applies when the next shell launches.
-inline constexpr FireworksLevel FIREWORKS_LEVELS[] = {
-    {SAVER_FAST_PERIOD, 150, 5, 6},
+inline constexpr FireworksLevel kFireworksLevels[] = {
+    {kSaverFastPeriod, 150, 5, 6},
     {33, 150, 5, 6},
     {33, 90, 3, 4},
     {50, 50, 0, 3},
 };
 
-inline constexpr size_t FIREWORKS_LEVEL_COUNT = std::size(FIREWORKS_LEVELS);
+inline constexpr size_t kFireworksLevelCount = std::size(kFireworksLevels);
 
 /// When shells launch. The defaults are the show's pacing; tests shorten them.
 struct FireworksPacing {
@@ -54,12 +54,26 @@ struct FireworksPacing {
 
 class FireworksSim {
   public:
-    /// Most shells in flight plus bursts burning, at any level.
-    static constexpr size_t MAX_BURSTS = 6;
-    /// Faint fixed stars in the sky.
-    static constexpr int STAR_COUNT = 80;
+    static constexpr const auto& kLevels = kFireworksLevels;
 
-    enum class BurstKind : uint8_t { PEONY, CHRYSANTHEMUM, WILLOW, RING };
+    /// Most shells in flight plus bursts burning, at any level.
+    static constexpr size_t kMaxBursts = 6;
+    /// Faint fixed stars in the sky.
+    static constexpr int kStarCount = 80;
+
+    /// PALM throws a few heavy gold comets that arc and droop like fronds; CROSSETTE's stars
+    /// each split into a cross of four; STROBE's stars hang and blink white.
+    enum class BurstKind : uint8_t {
+        PEONY,
+        CHRYSANTHEMUM,
+        WILLOW,
+        RING,
+        PALM,
+        CROSSETTE,
+        STROBE,
+    };
+    static constexpr uint8_t kBurstKindCount = 7;
+    static constexpr uint8_t kAllKinds = (1u << kBurstKindCount) - 1;
 
     /**
      * @brief Lays out the sky for `frame`, sizes the spark pool for `level`, and paints the sky
@@ -82,6 +96,12 @@ class FireworksSim {
     /// Runs at `level` (clamped to the ladder) from the next shell launch on.
     void request_level(size_t level);
 
+    /// Shells launch only as kinds whose bit (1 << BurstKind) is set in `mask`; an empty mask
+    /// means every kind.
+    void set_kinds(uint8_t mask) {
+        kinds_ = (mask & kAllKinds) != 0 ? static_cast<uint8_t>(mask & kAllKinds) : kAllKinds;
+    }
+
     /// Level the show runs at now.
     size_t level() const {
         return level_;
@@ -97,6 +117,8 @@ class FireworksSim {
 
     /// Frees the spark pool and the sky layout.
     void clear();
+    /// Bytes the spark pool and the sky layout hold.
+    size_t heap_bytes() const;
 
     /// Background at (x, y) inside the frame: the hills, a star, or the sky gradient.
     Rgb sky_at(int32_t x, int32_t y) const;
@@ -106,6 +128,7 @@ class FireworksSim {
         SPARK_ALIVE = 1u << 0,
         SPARK_DRAWN = 1u << 1,     ///< drawn in the last frame, so the next frame erases it
         SPARK_DRAWN_BIG = 1u << 2, ///< drawn 2x2 in the last frame
+        SPARK_SPLIT = 1u << 3,     ///< a crossette fragment, which never splits again
     };
 
     struct Spark {
@@ -155,6 +178,8 @@ class FireworksSim {
     void advance(uint32_t step_ms, std::minstd_rand& rng);
     void launch(std::minstd_rand& rng);
     void burst(const Rocket& rocket, std::minstd_rand& rng);
+    void split(Spark& spark, std::minstd_rand& rng);
+    BurstKind pick_kind(std::minstd_rand& rng) const;
     Spark* take_spark();
     size_t in_flight() const;
     int32_t next_gap_ms(std::minstd_rand& rng) const;
@@ -174,6 +199,7 @@ class FireworksSim {
     FireworksPacing pacing_{};
     size_t level_ = 0;
     size_t pending_level_ = 0;
+    uint8_t kinds_ = kAllKinds;
     int32_t w_ = 0;
     int32_t h_ = 0;
     float scale_ = 1.0f;
@@ -187,8 +213,8 @@ class FireworksSim {
 
     std::vector<Spark> sparks_;
     size_t next_spark_ = 0;
-    Burst bursts_[MAX_BURSTS]{};
-    Rocket rockets_[MAX_BURSTS]{};
+    Burst bursts_[kMaxBursts]{};
+    Rocket rockets_[kMaxBursts]{};
 
     int32_t launch_in_ms_ = 0;
     int32_t finale_in_ms_ = 0;

@@ -82,12 +82,56 @@ the render mutex: axis letters and tick labels in 3D (`render_axis_labels`,
 `render_numeric_axis_ticks`), the border, touched-cell highlight and Z tooltip in 2D
 (`render_heatmap_overlay`). The panel turns rendering off while hidden
 (`ui_bed_mesh_set_async_mode(false)`), which frees both buffers; with rendering off the
-widget draws nothing.
+widget draws nothing unless static mode is on ([below](#static-mode-one-frame-no-thread)).
 
 The reference-grid extent (bed bounds once `bed_mesh_renderer_set_bounds` has run, the mesh
 index grid otherwise) and the wall floor/ceiling come from one function,
 `src/rendering/bed_mesh_overlays.cpp#compute_bed_extent`, shared by the FOV fit, the grids
 and the labels, so labels cannot drift off the walls.
+
+### Static mode: one frame, no thread
+
+`ui_bed_mesh_set_static_mode(widget, true)` (`include/ui_bed_mesh.h`) makes a `<bed_mesh>`
+widget draw a non-interactive picture without a `BedMeshRenderThread`. It exists for the home
+bed-mesh tile, which must not hold two frame buffers and a thread for a thumbnail.
+
+- **Render on change, blit otherwise.** The draw callback calls `refresh_static_frame()`
+  (`src/ui/ui_bed_mesh.cpp#refresh_static_frame`), which renders on the main thread into one
+  `PixelBuffer` through the same `bed_mesh_renderer_render_to_buffer` only when something marked
+  it dirty: new mesh data, bounds, a render mode change (`ui_bed_mesh_redraw()` and
+  `ui_bed_mesh_set_render_mode()` both mark it), a different widget size, or a new theme
+  generation, since the frame bakes the theme colours in. Every other draw blits the cached
+  frame, and the 2D overlay (`render_heatmap_overlay`) is drawn over it as in async mode.
+- **A running render thread takes precedence.** The static path is reached only when
+  `data->render_thread` is null, so the Bed Mesh panel's async mode and a static widget do not
+  contend. Turning static mode off frees the cached frame.
+- **The 3D fallback is sticky.** A 3D frame (`!info.heatmap`) that takes longer than the
+  widget's budget (`kDefaultStaticRenderBudgetMs`, 150 ms) sets `static_3d_banned`, forces the
+  renderer to `Force2D` and re-renders the 2D heatmap in the same call. After that
+  `ui_bed_mesh_set_render_mode()` rewrites any request other than `Force2D` to `Force2D`, so a
+  slow board pays for one 3D frame and never a second. The ban belongs to that widget instance.
+  `ui_bed_mesh_static_3d_banned()` reports it, `ui_bed_mesh_static_render_ms()` and
+  `ui_bed_mesh_static_render_count()` report the last cost and the number of renders (the
+  count is how a test proves an unchanged mesh costs no render), and
+  `ui_bed_mesh_set_static_render_budget_ms_for_test()` shrinks the budget.
+- **The consumer asks for 3D only where it can afford it.** `BedMeshTileWidget` turns static
+  mode on in `attach()` and requests `Force3D` only at the Large rung on the standard platform
+  tier; every other rung, and any widget whose canvas reports the ban, requests `Force2D`
+  (`src/ui/panel_widgets/bed_mesh_tile_widget.cpp#feed_map`). It feeds the canvas again only
+  when `bed_mesh_version` changed, and mesh updates wait while the home panel is covered.
+
+### Mesh state and statistics
+
+`helix::BedMeshState` (`include/bed_mesh_state.h`) is the active bed mesh as the rest of the UI
+reads it. It exists from connect (`PrinterSession` attaches it to the API, so the Bed Mesh panel
+never has to have been opened) and publishes loaded or not, profile name, grid size, extremes,
+range and profile count as subjects, plus `bed_mesh_version`, which bumps on every applied
+update. `helix::compute_mesh_stats()` (`include/bed_mesh_stats.h`) is the one pure function that
+turns a parsed `BedMeshProfile` into a `MeshStats` (min, max and mean Z, range, grid size, and the
+printer coordinates of the extremes). `BedMeshState::apply()` publishes it, `BedMeshPanel`
+normalises the matrix it hands the renderer with the same mean, and the home tile classifies the
+range with `helix::status::mesh_flatness_status()` (`include/value_status.h`), so the figure the
+panel shows and the colour the tile draws cannot disagree.
 
 ### Coordinate Space Transformations
 
@@ -138,7 +182,7 @@ struct bed_mesh_renderer {
     std::vector<std::vector<int>> projected_screen_y;
 
     // View state
-    bed_mesh_view_state_t view_state;  // Rotation, FOV, centering
+    bed_mesh_view_state_t view_state;  // Rotation, kFov, centering
 };
 ```
 
@@ -196,7 +240,7 @@ struct bed_mesh_quad_3d_t {
 4. Per-Frame Rendering (30-60 FPS)
    ↓
    ┌─────────────────────────────────────────┐
-   │ a) Update view state (rotation, FOV)    │
+   │ a) Update view state (rotation, kFov)    │
    │ b) Project vertices → screen coords     │ ← 0.01ms (<1%)
    │ c) Sort quads by depth (painter's alg)  │ ← 0.02ms (<1%)
    │ d) Rasterize quads (fill triangles)     │ ← 45-75ms (94-99%)
@@ -751,7 +795,7 @@ gprof build/bin/helix-screen gmon.out > profile.txt
 // Larger = less perspective distortion
 
 #define BED_MESH_CAMERA_ZOOM_LEVEL 1.176
-// FOV scale factor (1/0.85 from previous constant)
+// kFov scale factor (1/0.85 from previous constant)
 // Controls field of view (larger = wider angle)
 
 // Z-axis scaling
@@ -785,7 +829,7 @@ gprof build/bin/helix-screen gmon.out > profile.txt
 // Canvas Y position for Z=0 plane (0=top, 0.5=center, 1=bottom)
 
 // Color gradient LUT
-#define COLOR_GRADIENT_LUT_SIZE 1024
+#define kColorGradientLutSize 1024
 // Number of pre-computed color samples in gradient lookup table
 // Higher = more precision, but more memory (1024 = 4 KB)
 ```

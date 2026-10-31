@@ -15,10 +15,10 @@
 namespace helix {
 
 // Moonraker database coordinates for external UI clients
-static constexpr const char* MAINSAIL_NAMESPACE = "mainsail";
-static constexpr const char* MAINSAIL_KEY = "general.printername";
-static constexpr const char* FLUIDD_NAMESPACE = "fluidd";
-static constexpr const char* FLUIDD_KEY = "general.instanceName";
+static constexpr const char* kMainsailNamespace = "mainsail";
+static constexpr const char* kMainsailKey = "general.printername";
+static constexpr const char* kFluiddNamespace = "fluidd";
+static constexpr const char* kFluiddKey = "general.instanceName";
 
 /// Seed the config section @p printer_base (a Config::df() taken when the name was asked for)
 /// with the resolved name, and show it if that printer is still the active one: a name can
@@ -46,7 +46,7 @@ static void seed_name(const std::string& name, const char* source,
 static void try_fluidd_then_hostname(IMoonrakerAPI* api, const std::string& hostname,
                                      const std::string& printer_base) {
     api->database_get_item(
-        FLUIDD_NAMESPACE, FLUIDD_KEY,
+        kFluiddNamespace, kFluiddKey,
         [hostname, printer_base](const nlohmann::json& fluidd_value) {
             std::string name;
             if (fluidd_value.is_string()) {
@@ -101,7 +101,7 @@ void PrinterNameSync::resolve(IMoonrakerAPI* api, const std::string& hostname) {
 
     // Try Mainsail first, then Fluidd, then hostname
     api->database_get_item(
-        MAINSAIL_NAMESPACE, MAINSAIL_KEY,
+        kMainsailNamespace, kMainsailKey,
         [api, hostname, printer_base](const nlohmann::json& value) {
             std::string name;
             if (value.is_string()) {
@@ -132,14 +132,14 @@ void PrinterNameSync::write_back(IMoonrakerAPI* api, const std::string& name) {
         return;
 
     api->database_post_item(
-        MAINSAIL_NAMESPACE, MAINSAIL_KEY, name,
+        kMainsailNamespace, kMainsailKey, name,
         [name]() { spdlog::debug("[PrinterNameSync] Wrote '{}' to Mainsail DB", name); },
         [](const MoonrakerError& err) {
             spdlog::warn("[PrinterNameSync] Failed to write to Mainsail DB: {}", err.message);
         });
 
     api->database_post_item(
-        FLUIDD_NAMESPACE, FLUIDD_KEY, name,
+        kFluiddNamespace, kFluiddKey, name,
         [name]() { spdlog::debug("[PrinterNameSync] Wrote '{}' to Fluidd DB", name); },
         [](const MoonrakerError& err) {
             spdlog::warn("[PrinterNameSync] Failed to write to Fluidd DB: {}", err.message);

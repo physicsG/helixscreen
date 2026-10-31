@@ -129,6 +129,11 @@ TEST_CASE_METHOD(XMLTestFixture,
         {"Maintaining: at ceiling", 2000, 2000, ChamberMode::Maintaining},
         {"Maintaining: tolerance boundary, still neutral", 2020, 2000, ChamberMode::Maintaining},
         {"Maintaining: above ceiling", 2100, 2000, ChamberMode::Maintaining},
+        // Resting classifies exactly like Maintaining (cooling ceiling), so the
+        // label/icon pair must also agree there; only the status glyph differs.
+        {"Resting: far below standing target", 0, 2000, ChamberMode::Resting},
+        {"Resting: at standing target", 2000, 2000, ChamberMode::Resting},
+        {"Resting: above standing target", 2100, 2000, ChamberMode::Resting},
     };
 
     for (const auto& c : cases) {

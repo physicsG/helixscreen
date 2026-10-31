@@ -40,7 +40,7 @@ struct QueryRecordingClient : public MoonrakerClientMock {
     std::vector<std::set<std::string>> queries;
 
     helix::RequestId send_jsonrpc(const std::string& method, const json& params,
-                                  std::function<void(const json&)> cb) override {
+                                  helix::SharedCallback<void(const json&)> cb) override {
         if (method == "printer.objects.query" && params.contains("objects")) {
             std::set<std::string> names;
             for (auto it = params["objects"].begin(); it != params["objects"].end(); ++it) {

@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
@@ -42,13 +43,13 @@ class PrinterState;
  *       []() { ... },
  *       [](const auto& err) { ... });
  */
-class MoonrakerMotionAPI : public IMotionAPI {
+class MoonrakerMotionAPI : public helix::IMotionAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
 
     /// Homing timeout: 5 minutes for G28 on large printers
-    static constexpr uint32_t HOMING_TIMEOUT_MS = 300000;
+    static constexpr uint32_t kHomingTimeoutMs = 300000;
 
     /**
      * @brief Constructor

@@ -1,532 +1,219 @@
-// Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
 #if HELIX_HAS_SNAPMAKER
 
 #include "ams_backend_snapmaker.h"
+#include "multiace_status.h"
 
 #include <array>
-#include <map>
+#include <chrono>
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace helix {
 
-class MultiAceTestAccess;
-
 /**
  * @file ams_backend_multiace.h
- * @brief decay71/multiACE — 1-4 Anycubic ACE units bolted onto a Snapmaker U1
+ * @brief A Snapmaker U1 with multiACE: ACE Pro units upstream of its heads.
  *
- * multiACE does not replace the U1's filament handling, it feeds it. The four
- * SnapSwap toolheads stay exactly what they were — `print_task_config`, the
- * `channel_state` load latch, the motion/port sensors, the native load model —
- * and each head is independently either on its stock feeder or fed from one of
- * the ACE units. So this derives from AmsBackendSnapmaker rather than forking
- * it: unit 0 remains the U1's four heads with all of that behaviour intact, and
- * units 1..N are the ACE hardware.
+ * The U1 stays the printer. Its four heads, `T<n>`, channel_state, pre-print
+ * remap, preferences and resume all stay AmsBackendSnapmaker's, on global
+ * slots 0..3. Each ACE unit multiACE reports becomes one more unit whose four
+ * bays sit at multiace::bay_global(ace, bay); a bay feeds the head its mode
+ * routes it to. The engine is driven through its gcode contract only
+ * (docs/devel/FILAMENT_BACKEND_MULTIACE.md).
  *
- * ## What the `ace` Klipper object carries
- *
- * Everything needed arrives over the WebSocket via MultiAce.get_status(); the
- * optional FastAPI service is not required.
- *
- * - `mode` — "head" (an ACE binds to ONE head and all its slots feed that head)
- *   or "multi" (slot *s* of every ACE feeds head *s*). This changes the
- *   slot→head mapping, so per-unit topology genuinely differs by mode.
- * - `device_count`, `active_device`
- * - `head_ace` / `head_feeder` / `head_manual` — per-head source *kind*, keyed
- *   by head index as a STRING ("0".."3"), not an int.
- * - `head_source[h]` — `{ace_index, slot}` when the head is ACE-fed, else null.
- * - `aces[]` — per-unit inventory: connected, temp, humidity, `gate_status[]`,
- *   `slots[]`, dryer state.
- *
- * ## Why the dispatch override exists
- *
- * An ACE-fed head must be driven with `ACE_LOAD_HEAD` / `ACE_UNLOAD_HEAD`, not
- * the U1's native path. The ACE performs the retract, so the U1's own
- * channel_state ends an unload at `preload_finish` and never reports
- * `unload_finish`. Heads on their stock feeder keep the inherited native path.
- *
- * @see docs/devel/plans/2026-08-09-snapmaker-u1-multiace-plan.md § 4 Phase 2
- * @see tests/fixtures/snapmaker_u1/u1-multiace-head-mode-idle.json
+ * Until a frame shows api_version 1 and a multi or head mode, this backend
+ * answers exactly as the base does: no ACE units, the stock feed path.
  */
 class AmsBackendMultiAce : public AmsBackendSnapmaker {
-    friend class MultiAceTestAccess;
-
   public:
     AmsBackendMultiAce(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
-    ~AmsBackendMultiAce() override = default;
 
-    /// Upper bound on ACE units multiACE supports.
-    static constexpr int MAX_ACE_UNITS = 4;
-    /// Slots per ACE unit (Pro / Pro 2 are both 4-bay).
-    static constexpr int ACE_SLOTS_PER_UNIT = 4;
-
-    [[nodiscard]] AmsType get_type() const override {
-        return AmsType::MULTIACE;
-    }
-
-    /// The U1's answers, with two differences. Every ACE reports temperature
-    /// and humidity; unit 0 is the U1 itself and has no sensor, which the
-    /// per-unit indicator already accounts for. And the firmware's batch feed
-    /// drives AUTO_FEEDING per head, which is the wrong command for a head an
-    /// ACE feeds, so the batch affordance is withheld.
-    static constexpr BackendTraits kTraits = [] {
-        BackendTraits t = AmsBackendSnapmaker::kTraits;
-        t.has_environment_sensors = true;
-        t.supports_batch_filament_ops = false;
-        return t;
-    }();
-    [[nodiscard]] BackendTraits traits() const override {
-        return kTraits;
-    }
-
-    /**
-     * @brief How a given U1 head is fed.
-     *
-     * Mirrors multiACE's own three-way split. UNKNOWN is the pre-first-frame
-     * answer and must not be confused with FEEDER — before `ace` has been seen
-     * we do not yet know, and guessing FEEDER would dispatch the native path to
-     * a head the ACE actually owns.
-     */
-    enum class HeadSource { UNKNOWN, FEEDER, ACE, MANUAL };
-
-    /// Per-unit topology. The base falls back to the SYSTEM-wide answer, which
-    /// is PARALLEL here (the U1's four heads) — so without this override an ACE
-    /// unit in head mode drew as a parallel fan instead of the combiner it
-    /// physically is. Note `compute_system_tool_layout()` prefers the backend's
-    /// answer over `AmsUnit::topology`, so populating the struct alone is not
-    /// enough; it has to be answered here too.
+    /// Unit 0 is the heads (PARALLEL). An ACE unit is a HUB in head mode, its
+    /// four bays merging into the one head wired to it, and PARALLEL in multi
+    /// mode, bay s feeding head s.
     [[nodiscard]] PathTopology get_unit_topology(int unit_index) const override;
 
-    /// An ACE-fed head's spool is described by the ACE, not by the U1 — see the
-    /// base declaration. Returns the ACE's global unit index for such a head,
-    /// nullopt for a feeder head or any ACE bay (those describe themselves).
-    [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override;
+    [[nodiscard]] PathSegment get_slot_filament_segment(int slot_index) const override;
 
-    /// The ACE bay behind an ACE-fed head, as a global slot index. Pairs with
-    /// slot_identity_owner_unit() so the head and its bay share one spool
-    /// number instead of each consuming one.
-    [[nodiscard]] std::optional<int> slot_identity_owner_slot(int slot_index) const override;
+    /// The bay routed to an ACE-fed head is that head lane's spool: the head
+    /// shows the bay's filament, not a spool of its own. nullopt everywhere
+    /// else, bays included (a bay is where its spool lives).
+    [[nodiscard]] std::optional<int> upstream_slot(int slot_index) const override;
 
-    /// How head @p head is fed, per the last `ace` frame.
-    [[nodiscard]] HeadSource head_source_kind(int head) const;
+    /// Bays number the spools 1-based in global order; a routed head wears
+    /// its bay's number so the two lanes count one spool, and the numbers on
+    /// the lanes that hold their own spools stay consecutive.
+    [[nodiscard]] int spool_display_number(int slot_index) const override;
 
-    /// See AmsBackend::change_tool_completes_load(). True for the U1's own four
-    /// heads, whose filament sits at the head already -- `T{n}` really is the
-    /// whole load there. False for every ACE bay: mounting the head the bay
-    /// feeds moves the carriage and feeds nothing, and the bay has to be named
-    /// (`ACE_LOAD_HEAD HEAD=h ACE=a SLOT=s`).
-    [[nodiscard]] bool change_tool_completes_load(int slot_index) const override {
-        return slot_index < NUM_TOOLS;
-    }
-
-    /// An ACE bay, split out of its GLOBAL slot index.
-    ///
-    /// Global layout: slots 0..3 are the U1's heads (unit 0), then each ACE
-    /// contributes ACE_SLOTS_PER_UNIT bays in unit order. `head` is the head
-    /// THIS BAY feeds — in head mode the one head its ACE is bound to, in multi
-    /// mode the same-numbered head — or -1 when nothing is bound. It is the same
-    /// rule that gives the bay its `mapped_tool`, by construction: both go
-    /// through bay_feeds_head_locked(). They used to be two hand-written copies,
-    /// and the dispatch copy only knew head mode, so in multi mode a bay's Load
-    /// either named the wrong head or refused a perfectly valid bay.
-    struct BaySource {
-        int ace_index = -1; ///< multiACE's own 0-based device index
-        int bay = -1;       ///< Bay within that ACE
-        int head = -1;      ///< Head this bay feeds, or -1
-    };
-    /// nullopt when @p slot_index is a head rather than a bay, or out of range.
-    [[nodiscard]] std::optional<BaySource> bay_source(int slot_index) const;
-
-    /// The U1's own step model, plus the two things an ACE adds to it.
-    ///
-    /// UNLOAD: the last step names its destination when the head being unloaded
-    /// is ACE-fed. The filament does not just leave the nozzle, it travels back
-    /// into the ACE, and that step lasts for most of the operation. A rename,
-    /// not an added step: the firmware drives it (unload step 3).
-    ///
-    /// LOAD_SWAP: swap_step_model(), because on an ACE-fed head a swap is one
-    /// operation with two halves. The base has no swap of its own (a plain U1
-    /// lane is PARALLEL and feeds its own nozzle) and answers LOAD_SWAP with
-    /// the load model.
-    [[nodiscard]] OperationStepModel get_operation_step_model(StepOperationType op) const override;
-
-    /// Positions on the bay-swap step bar: the unload model's four steps, then
-    /// the load half's Feed, Extrude and Purge. The load half's own Home,
-    /// Select and Heat have no row: the head is already mounted and hot.
-    static constexpr int SWAP_STEP_RETRACT = 3;
-    static constexpr int SWAP_STEP_FEED = 4;
-    static constexpr int SWAP_STEP_EXTRUDE = 5;
-    static constexpr int SWAP_STEP_PURGE = 6;
-
-    /// The step bar of a bay swap on an ACE-fed head. Static so a simulated
-    /// backend shows the bar that ships.
-    [[nodiscard]] static OperationStepModel swap_step_model();
-
-    /// Does loading @p slot_index have to retract what is at its head first?
-    ///
-    /// Answered per BAY, which is the only place the question has a real answer:
-    /// the base rule reads the SYSTEM's `filament_loaded` / `current_slot`, which
-    /// on a U1 describe the mounted carriage and say nothing about which bay is
-    /// seated at the head this bay feeds. Heads and feeder lanes keep the base
-    /// answer.
-    ///
-    /// Shares one implementation with do_load_filament()'s pre-unload, so the
-    /// command that goes out and the bar that is drawn cannot disagree.
+    /// A bay into a head holding another bay is not a swap for the screen to
+    /// sequence: do_load_filament() sends the head's unload ahead of the load.
     [[nodiscard]] bool needs_unload_before_load(const AmsSystemInfo& info,
                                                 int target_slot) const override;
 
-    /// A BAY is actively loaded when it is the one currently feeding a head.
-    ///
-    /// The base rule is `slot_index == get_current_slot()`, and the current slot
-    /// is a HEAD (3), so no bay ever matched and a loaded bay drew exactly like
-    /// its idle neighbours. Answered only for bays: the U1's own heads keep the
-    /// inherited rule. Deliberately NOT done by claiming
-    /// has_per_slot_loaded_authority(), which would switch the heads over to a
-    /// per-slot latch as a side effect.
-    [[nodiscard]] bool slot_is_actively_loaded(int slot_index) const override;
-
-    // Dryer. multiACE exposes parameterised commands -- ACE_DRY ACE=n [TEMP=]
-    // [DURATION=] and ACE_STOP_DRYING [ACE=n] -- so temperature and duration are
-    // set live, with no config edit and no Klipper restart. (The ACED__DRY_START_n
-    // macros in multiACE's macro table are the parameterless Fluidd buttons and
-    // are NOT what this uses.)
-    [[nodiscard]] DryerInfo get_dryer_info(int unit = 0) const override;
-    AmsError start_drying(float temp_c, int duration_min, int fan_pct = -1, int unit = 0) override;
-    AmsError stop_drying(int unit = 0) override;
-
-    // Humidity-controlled drying. `ACE_SET_AUTO_DRY ACE=n ...` takes each field
-    // independently, so arming the rule never restates thresholds the user set
-    // elsewhere. Its full surface, read off multiACE's own web UI rather than
-    // guessed (see the plan's § "Auto-dry"):
-    //   ACE=n [ENABLE=0|1] [TEMP=35..80] [RH_START=5..95] [RH_END=1..94]
-    //         [MASTER=<ace idx|-1>] [ADD_TIME=0..600]
-    [[nodiscard]] AutoDryInfo get_auto_dry_info(int unit = 0) const override;
-    AmsError set_auto_dry_enabled(bool enabled, int unit = 0) override;
-
-    /// Which (unit, slot) is seated at head @p head, or nullopt when the head is
-    /// not ACE-fed. `unit_index` is the GLOBAL unit index (ace_index + 1), since
-    /// unit 0 is the U1 itself.
-    struct SeatedSource {
-        int unit_index = -1; ///< Global AmsUnit index (ace_index + 1)
-        int ace_index = -1;  ///< multiACE's own 0-based device index
-        int slot = -1;       ///< Slot within that ACE
-    };
-    [[nodiscard]] std::optional<SeatedSource> seated_source(int head) const;
-
-    /// A bay's readiness is the ACE's to state, and an ACE-fed head's feeder
-    /// channel is not what moves its filament, so neither is judged from the
-    /// U1's channel fields. Stock feeder heads keep the inherited answer.
+    /// A batch load is refused into ACE-fed heads (the engine sequences its
+    /// own swaps), so the picker must not offer them as eligible.
     [[nodiscard]] FilamentOpEligibility slot_op_eligibility(int slot_index,
                                                             bool load) const override;
 
-    // A spool edit addresses a SLOT, and the bays are slots 4 and up. The
-    // inherited implementations address a U1 head and write the edit through
-    // to the U1's firmware; a bay has neither, so its edit is kept on the slot
-    // and in the override store only.
+    /// A head slot feeds itself; a bay feeds the head its mode routes it to,
+    /// and an unrouted bay feeds none.
+    [[nodiscard]] std::optional<int> head_for_slot(int slot) const override;
+    /// An ACE-fed head's source is its one routed bay; with several bays wired
+    /// to it, the bay loaded into it now, else none. A head the ACE does not
+    /// feed is its own source.
+    [[nodiscard]] std::optional<int> head_source_slot(int head,
+                                                      const AmsSystemInfo& info) const override;
+
+    /// Also drops a bay load waiting behind its head's unload: the restart
+    /// ended that unload, so the load's second step must not follow it.
+    void on_klipper_restarted() override;
+
+    [[nodiscard]] bool can_unload_from_toolhead(int slot_index) const override;
+    [[nodiscard]] bool slot_has_filament_at_toolhead(int slot_index) const override;
+    [[nodiscard]] bool slot_is_actively_loaded(int slot_index) const override;
+
+    /// Unit 0 has no dryer; every ACE unit has the ACE Pro's.
+    [[nodiscard]] DryerInfo get_dryer_info(int unit = 0) const override;
+    AmsError start_drying(float temp_c, int duration_min, int fan_pct = -1, int unit = 0) override;
+    AmsError stop_drying(int unit = 0) override;
+    AmsError update_drying(float temp_c = -1, int duration_min = -1, int fan_pct = -1,
+                           int unit = 0) override;
+    [[nodiscard]] std::vector<DryingPreset> get_drying_presets() const override;
+
+    /// multiACE raises its own faults coded (id 525, a 200-band code, the head
+    /// as index); they are filed as a filament error on that head. Everything
+    /// else is the base's.
+    [[nodiscard]] std::optional<helix::ErrorEvent>
+    classify_error(const std::string& raw_line, const helix::ClassifyContext& ctx) const override;
+
+    /// A bay edit lands on the bay's own SlotInfo and the shared override
+    /// store, keyed by the global slot index; nothing is written to the engine,
+    /// whose own spool table never sees the edit (phase 4). A head keeps the
+    /// base's path, which also writes the head's firmware record.
     AmsError apply_user_edit(int slot_index, const SlotInfo& info,
                              const helix::ams::Observation& declared) override;
     AmsError sync_external_identity(int slot_index, const SlotInfo& info) override;
+    /// The store, lane and SlotInfo halves of the same clear; a bay has no
+    /// head firmware record to drop and no tag product line to restate.
     void clear_slot_override(int slot_index) override;
 
   protected:
+    AmsError do_load_filament(int slot_index) override;
+    AmsError do_unload_filament(int slot_index) override;
+    AmsError do_select_slot(int slot_index) override;
+    /// Only the four heads are tools; the bay indices beyond them are not.
+    AmsError do_change_tool(int tool_number) override;
+    AmsError do_park_active_tool() override;
+    AmsError do_filament_batch(const std::vector<int>& slots, bool load) override;
+
+    [[nodiscard]] bool head_is_upstream_fed_locked(int head) const override;
+    [[nodiscard]] bool preload_finish_ends_unload_locked(int head) const override;
+    /// While the engine is active, Resume never sends the stock AUTO_FEEDING load.
+    [[nodiscard]] bool resume_may_refeed_locked(int head) const override;
+    void apply_extension_locked(const nlohmann::json& status, bool& changed) override;
+
+    /// The base frame parse, then the deferred bay load it may release.
     void handle_status(const nlohmann::json& status) override;
+
     const char* backend_log_tag() const override {
         return "[AMS multiACE]";
     }
 
-    // ACE-fed heads take the ACE command path; feeder heads fall through to the
-    // inherited native U1 path. See the class comment.
-    AmsError do_load_filament(int slot_index) override;
-    AmsError do_unload_filament(int slot_index) override;
-
-    // `T{n}` names a head. The inherited implementations bound the index by
-    // the slot count, which here includes the bays, and the firmware routes
-    // T4 and up through its extruder map to some head.
-    AmsError do_select_slot(int slot_index) override;
-    AmsError do_change_tool(int tool_number) override;
-
-    /// See kTraits: the batch feed is the stock feeder's command.
-    AmsError do_filament_batch(const std::vector<int>& slots, bool load) override;
-
-    /// True for an ACE-fed head: `ACE_UNLOAD_HEAD` hands the retract to the
-    /// ACE, so the U1's channel_state stops at preload_finish and
-    /// `unload_finish` never arrives. A feeder or manual head runs the native
-    /// sequence and keeps the stock answer.
-    [[nodiscard]] bool preload_finish_ends_unload(int head) const override {
-        // Reads head_kind_ directly: the caller holds mutex_.
-        return head >= 0 && head < NUM_TOOLS && head_kind_[head] == HeadSource::ACE;
-    }
-
-    /// True while the unload half of a swap this backend dispatched is running
-    /// on @p head: do_load_filament() queued `ACE_UNLOAD_HEAD` and
-    /// `ACE_LOAD_HEAD` back to back, so the end of the unload is a boundary
-    /// inside one operation.
-    [[nodiscard]] bool unload_continues_into_load(int head) const override {
-        return swap_in_flight_head_ == head && head >= 0 && !swap_load_half_started_;
-    }
-
-    /// During a swap, the position on swap_step_model()'s bar; otherwise the
-    /// inherited per-direction index.
-    [[nodiscard]] int step_phase_locked(int head,
-                                        const snapmaker::ChannelStateInfo& info) const override;
-    [[nodiscard]] std::optional<AmsAction> step_action_locked() const override;
-
-    /// The one network call fetch_slot_overrides() makes, split out so a test
-    /// can hold the callbacks and complete them in an order of its choosing --
-    /// the in-flight/re-issue rule is not observable any other way. Production
-    /// asks Moonraker's file API for `extended/multiace/slot_overrides.json`.
-    /// Both callbacks may run on a BACKGROUND thread.
-    virtual void download_slot_overrides(std::function<void(const std::string&)> on_success,
-                                         std::function<void(const MoonrakerError&)> on_error);
-
   private:
-    /// Which head ACE @p ace_index actually FEEDS, or -1. Caller must hold mutex_.
-    ///
-    /// multiACE's own `aceHeadForAce()` reverse lookup, and it MUST test the
-    /// head's source kind as well as the index: `head_ace` names an ACE for
-    /// every head, not just the ones it feeds — a live U1 reports
-    /// `{0:0, 1:1, 2:2, 3:0}` — so matching on the index alone picks head 0, a
-    /// stock feeder head, for ACE 0's bays. That is exactly how a bay load was
-    /// dispatched to the wrong toolhead, and the rule was written out twice.
-    [[nodiscard]] int head_fed_by_ace_locked(int ace_index) const;
+    static constexpr int kHeads = multiace::kHeadCount;
 
-    /// Which head bay @p bay of ACE @p ace_index feeds, or -1. Caller must hold
-    /// mutex_. THE rule for the slot->head relation, and the only copy of it:
-    /// rebuild_ace_units_locked() writes it into `mapped_tool`, bay_source()
-    /// hands it to the dispatchers as `BaySource::head`.
-    ///
-    /// Head mode: the one head the ACE is bound to (head_ace, falling back to
-    /// whatever of this ACE is seated when the wiring map has not arrived).
-    /// Multi mode: bay s feeds head s -- multiACE's own web UI sends
-    /// `ACE_LOAD_HEAD HEAD=<slot>` there, and its aceHeadForAce() reverse lookup
-    /// is used ONLY under `state.mode === "head"`.
-    [[nodiscard]] int bay_feeds_head_locked(int ace_index, int bay) const;
+    /// The engine contract is in force: api_version 1 in multi or head mode.
+    /// Caller holds mutex_.
+    [[nodiscard]] bool active_locked() const;
 
-    /// bay_source() without the lock. Caller must hold mutex_.
-    [[nodiscard]] std::optional<BaySource> bay_source_locked(int slot_index) const;
+    /// Head @p head is fed by an ACE. Caller holds mutex_.
+    [[nodiscard]] bool ace_fed_locked(int head) const;
 
-    /// THE swap rule, and the only copy of it: loading a bay onto a head that
-    /// already holds a DIFFERENT bay has to retract that one first. Caller must
-    /// hold mutex_. False for a head, an unbound bay, or a bay already seated.
-    [[nodiscard]] bool bay_load_needs_unload_locked(int slot_index) const;
+    /// The bay routed to @p head, when one is and its load did not fail.
+    /// Caller holds mutex_.
+    [[nodiscard]] std::optional<std::pair<int, int>> routed_bay_locked(int head) const;
 
-    /// The head the last dispatched load/unload NAMED, or -1 for none yet.
-    ///
-    /// get_operation_step_model() needs to know which head the operation is
-    /// about, and it takes no slot argument: the sidebar asks it for a whole
-    /// bar, not per slot. `current_slot`, the head on the CARRIAGE, is the same
-    /// head only in `mode="head"`. In `mode="multi"` bay *s* feeds head *s*, so
-    /// a bay whose head is not mounted would read the wrong head's source kind.
-    int op_target_head_ = -1;
+    /// The head bay @p global feeds, when @p global names a bay of a unit
+    /// this backend shows. Caller holds mutex_.
+    [[nodiscard]] std::optional<int> head_for_global_locked(int global) const;
 
-    /// The firmware has reported the in-flight swap running. A dispatched swap
-    /// still reads IDLE until the firmware picks the gcode up, so only an idle
-    /// action seen after this is set means the swap is over.
-    bool swap_progress_seen_ = false;
+    /// Position in units_ of the unit whose idx is @p ace, or -1.
+    [[nodiscard]] int unit_position_locked(int ace) const;
 
-    /// The head a UI-initiated swap is running on, or -1.
-    ///
-    /// Set by do_load_filament() when it emits the pre-unload, cleared once the
-    /// operation is over. While set, the step index is published as a position
-    /// on swap_step_model()'s bar.
-    int swap_in_flight_head_ = -1;
+    /// The ACE unit an AmsUnit index names, or nullptr for unit 0 and indices
+    /// beyond the units shown. Caller holds mutex_.
+    [[nodiscard]] const multiace::Unit* unit_for_index_locked(int unit_index) const;
 
-    /// The swap's load half has begun. Until then the end of the unload is a
-    /// boundary inside the operation (unload_continues_into_load()).
-    bool swap_load_half_started_ = false;
+    /// Replaces every unit after unit 0 from the held engine state, and
+    /// total_slots with them. Caller holds mutex_.
+    void rebuild_units_locked();
 
-    /// Advance and retire the swap latch from the state the U1 parse left.
-    /// Caller must hold mutex_; runs after AmsBackendSnapmaker::handle_status().
-    ///
-    /// It synthesizes no step: the gap between the halves is a few seconds of
-    /// `inited` because the next bay is already staged at its gate, so the bar
-    /// holds on the retract step across it.
-    void apply_swap_phase_locked();
-
-    /// Parse the `ace` object. Caller must hold mutex_.
-    void parse_ace_object_locked(const nlohmann::json& ace, bool& changed);
-    /// Resolve each bay's spool through `spool_binding` -> `spools`. Caller must
-    /// hold mutex_. See AceUnitState::BaySpool for why this is not `slots[]`.
-    void parse_spool_table_locked(const nlohmann::json& ace, bool& changed);
-
-    /// Per-bay identity that multiACE keeps in a FILE, not in its Klipper object.
-    ///
-    /// `slot_overrides.json` is what multiACE's own web UI resolves from — every
-    /// bay it reports comes back `source: "override"` — and it covers bays the
-    /// spool table does not: a bay can carry a material and colour with no spool
-    /// bound to it at all, which read as empty here until this was added.
-    ///
-    /// Fetched over Moonraker's file API rather than multiACE's optional FastAPI
-    /// service, so it needs nothing installed beyond multiACE itself.
-    struct BayOverride {
-        bool set = false;
-        std::string material;
-        std::string brand;
-        std::optional<uint32_t> color_rgb;
+    /// A bay load waiting on its head's unload. ACE_LOAD_HEAD feeds nothing
+    /// into a head that still holds filament, so the load is sent only once a
+    /// frame shows the head empty: head_source[head] null and the load latch
+    /// clear. An OK from the unload is not that proof; it starts a grace
+    /// window, and a head still occupied when the window closes drops the load.
+    struct PendingBayLoad {
+        int head = -1;
+        std::pair<int, int> bay{-1, -1};
+        uint64_t id = 0;
+        bool unload_answered = false;
+        std::chrono::steady_clock::time_point unload_answered_at{};
     };
-    using OverrideMap = std::array<std::array<BayOverride, ACE_SLOTS_PER_UNIT>, MAX_ACE_UNITS>;
 
-    /// Pure, and static so it can run on the HTTP thread without touching `this`.
-    [[nodiscard]] static OverrideMap parse_slot_overrides(const std::string& content);
-    /// Ask Moonraker for the file. Main thread; applies its result via the
-    /// lifetime token.
-    void fetch_slot_overrides();
-    /// Rebuild units 1..N from the parsed ACE inventory. Caller must hold mutex_.
-    void rebuild_ace_units_locked();
+    /// How long after the unload's answer the frames have to show the head
+    /// empty. Moonraker batches status, so the frame can trail the answer.
+    static constexpr std::chrono::seconds kPendingLoadGrace{15};
 
-    /// multiACE's `mode`: true when one ACE binds to one head (all its slots
-    /// feed that head) rather than slot *s* feeding head *s*.
-    bool head_mode_ = true;
-    int device_count_ = 0;
+    /// Drops a pending bay load: another filament op owns the heads now.
+    void cancel_pending_load(const char* why);
 
-    /// multiACE's own swap telemetry, off the `ace` object. Used ONLY to say
-    /// "the ACE is doing something the U1 cannot see" -- it drives the
-    /// indeterminate busy label, never a step index and never a gate. The
-    /// `swap_phase` string is captured for the log and for classify-time error
-    /// text; its enumeration is unknown (every capture so far is "idle"), so
-    /// nothing branches on a specific value.
-    bool ace_swap_in_progress_ = false;
-    std::string ace_swap_phase_ = "idle";
-    /// `ace.status`, system-wide. "ready" is the known idle value.
-    std::string ace_status_ = "ready";
-    /// `last_swap_result.ts`, or < 0 before the first frame carrying one. The
-    /// block PERSISTS across sessions, so only a change of timestamp is an
-    /// event; the first value seen is history and is recorded, not surfaced.
-    double last_swap_ts_ = -1.0;
+    /// Sends the pending bay load when this frame shows its head empty, and
+    /// drops it, raising kEventError, once its grace window has closed, the
+    /// engine stops driving the units, or a print holds the heads. Main
+    /// thread, mutex_ not held.
+    void advance_pending_load();
 
-    std::array<HeadSource, NUM_TOOLS> head_kind_{
-        {HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN, HeadSource::UNKNOWN}};
-    /// The two source maps as LAST SEEN, per head, nullopt until a frame has
-    /// carried that map. Klippy diffs the `ace` object per field, and
-    /// `head_manual` and `head_feeder` are separate fields: toggling a head
-    /// between ACE and MANUAL resends `head_manual` alone while `head_feeder`,
-    /// value-identical, is omitted. Deciding the kind from the frame's maps
-    /// alone read the absent one as "false for every head" and relabelled the
-    /// stock-feeder heads ACE-fed. The decision has to be made from the union
-    /// of what is known, so both maps are cached and re-derived from here.
-    std::array<std::optional<bool>, NUM_TOOLS> head_manual_{};
-    std::array<std::optional<bool>, NUM_TOOLS> head_feeder_{};
-    std::array<std::optional<SeatedSource>, NUM_TOOLS> head_seated_{};
-    /// Which ACE feeds each head, off `head_ace`. Meaningful ONLY once
-    /// head_kind_ says the head is ACE-fed — head_ace names an ACE for every
-    /// head, including ones on their stock feeder. Unlike head_seated_ this
-    /// survives an empty head, so it is what the wiring questions ask.
-    std::array<int, NUM_TOOLS> head_ace_index_{{-1, -1, -1, -1}};
+    /// Why head @p head cannot take a lane load now, or nullopt: filament
+    /// already at the head, or for a head the ACE does not feed, the U1's own
+    /// feeder preconditions. Takes mutex_ itself.
+    [[nodiscard]] std::optional<AmsError> head_load_refusal(int head, bool ace_head) const;
 
-    /// Per-ACE inventory as last parsed, indexed by multiACE's ace_index.
-    struct AceUnitState {
-        bool connected = false;
-        /// Wire protocol generation ("v1" / "v2") — the only field that says
-        /// which ACE model this is. See ace_model_name().
-        std::string protocol;
-        int temp = 0;
-        int humidity = 0;
-        /// Live dryer state, straight off `aces[].dryer_status`.
-        bool drying = false;
-        int dryer_target_c = 0;
-        int dryer_duration_min = 0;
-        int dryer_remaining_min = 0;
-        /// Humidity-controlled drying, off `aces[].auto_dry` and its sibling
-        /// `auto_dry_running`. `has_auto_dry` is what gates the UI: a unit that
-        /// has never reported the block has no auto-dry at all, which is a
-        /// different thing from one reporting it disabled.
-        bool has_auto_dry = false;
-        bool auto_dry_enabled = false;
-        bool auto_dry_running = false;
-        float auto_dry_rh_start = 0.0f;
-        float auto_dry_rh_end = 0.0f;
-        int auto_dry_temp_c = 0;
-        /// multiACE's own ACE index of the followed unit, or -1 for none.
-        int auto_dry_master = -1;
-        int auto_dry_add_time_min = 0;
-        std::array<bool, ACE_SLOTS_PER_UNIT> gate_present{{false, false, false, false}};
-        std::array<std::string, ACE_SLOTS_PER_UNIT> material{};
-        /// What the user entered in multiACE, resolved from `spools` through
-        /// `spool_binding`. This — not `slots[].material` — is where a bay's
-        /// identity actually lives: the inline fields are only filled from RFID
-        /// and read empty on every non-RFID spool.
-        struct BaySpool {
-            bool bound = false;
-            std::string material;
-            std::string vendor;
-            std::string label;
-            std::string sku;
-            int spoolman_id = 0;
-            std::optional<uint32_t> color_rgb;
-            // No weight here on purpose — Spoolman owns remaining AND total, and
-            // multiACE's `weight_g` is only a copy of it. See where this is applied.
+    // Engine state, merged across delta frames. All under mutex_.
+    std::optional<int> api_version_;
+    multiace::Mode mode_ = multiace::Mode::UNKNOWN;
+    std::array<int, kHeads> head_ace_{0, 1, 2, 3};
+    std::array<bool, kHeads> head_feeder_{};
+    std::array<bool, kHeads> head_manual_{};
+    std::array<std::optional<multiace::HeadSource>, kHeads> head_source_{};
+    std::vector<multiace::Unit> units_;
+    bool swap_in_progress_ = false;
+    bool unload_all_active_ = false;
+    std::string swap_phase_;
+    multiace::LastSwap last_swap_;
+    int64_t event_seq_ = -1;
+    /// api_version mismatch already logged, so a stream of frames logs once.
+    bool api_mismatch_logged_ = false;
 
-            // Every field, so a vendor-only edit counts as a change. The
-            // hand-written comparison this replaces listed five of the seven
-            // and left `vendor` out -- correcting a spool's brand in multiACE
-            // updated the cache and told nobody, and the bay kept its old
-            // brand until something else moved.
-            bool operator==(const BaySpool& o) const {
-                return bound == o.bound && material == o.material && vendor == o.vendor &&
-                       label == o.label && sku == o.sku && spoolman_id == o.spoolman_id &&
-                       color_rgb == o.color_rgb;
-            }
-            bool operator!=(const BaySpool& o) const {
-                return !(*this == o);
-            }
-        };
-        std::array<BaySpool, ACE_SLOTS_PER_UNIT> spool{};
-        /// nullopt = the ACE reported no colour, so keep SlotInfo's default
-        /// rather than painting the slot black.
-        std::array<std::optional<uint32_t>, ACE_SLOTS_PER_UNIT> color_rgb{};
+    /// Under mutex_.
+    std::optional<PendingBayLoad> pending_load_;
+    uint64_t next_pending_id_ = 1;
 
-        /// Whole-state equality, so the parser can say whether a frame actually
-        /// moved anything. It used to mark every `aces` entry as changed
-        /// unconditionally, and Klippy resends the whole array whenever one
-        /// element ticks -- so a dryer's temperature ramp forced a full
-        /// AmsState resync and UI rebuild for the length of every dry cycle.
-        bool operator==(const AceUnitState& o) const {
-            return connected == o.connected && protocol == o.protocol && temp == o.temp &&
-                   humidity == o.humidity && drying == o.drying &&
-                   dryer_target_c == o.dryer_target_c &&
-                   dryer_duration_min == o.dryer_duration_min &&
-                   dryer_remaining_min == o.dryer_remaining_min && has_auto_dry == o.has_auto_dry &&
-                   auto_dry_enabled == o.auto_dry_enabled &&
-                   auto_dry_running == o.auto_dry_running &&
-                   auto_dry_rh_start == o.auto_dry_rh_start &&
-                   auto_dry_rh_end == o.auto_dry_rh_end && auto_dry_temp_c == o.auto_dry_temp_c &&
-                   auto_dry_master == o.auto_dry_master &&
-                   auto_dry_add_time_min == o.auto_dry_add_time_min &&
-                   gate_present == o.gate_present && material == o.material && spool == o.spool &&
-                   color_rgb == o.color_rgb;
-        }
-        bool operator!=(const AceUnitState& o) const {
-            return !(*this == o);
-        }
-    };
-    std::array<AceUnitState, MAX_ACE_UNITS> ace_units_{};
+    /// head_source load-failure notices staged under mutex_ by
+    /// apply_extension_locked() and emitted by handle_status() outside it.
+    /// Under mutex_.
+    std::vector<std::string> pending_load_failed_errors_;
 
-    /// multiACE's spool table, keyed by spool id, and the bay->id bindings.
-    /// Cached SEPARATELY because the two arrive independently: a frame that
-    /// moves a spool between bays carries `spool_binding` and no `spools`, so
-    /// resolving them together lost every detail on the next binding change.
-    std::map<std::string, AceUnitState::BaySpool> spool_table_;
-    std::array<std::array<std::string, ACE_SLOTS_PER_UNIT>, MAX_ACE_UNITS> bay_spool_id_{};
-
-    /// Last fetched contents of slot_overrides.json, and the `ace.event_seq`
-    /// that fetch was for. The file is not on the WebSocket, so event_seq — which
-    /// multiACE bumps on its own state changes — is what says it may have moved.
-    OverrideMap slot_overrides_{};
-    int64_t overrides_fetched_seq_ = -1;
-    bool override_fetch_in_flight_ = false;
-    /// "A fetch is owed." Set under mutex_ when a frame's event_seq outruns
-    /// overrides_fetched_seq_, and CONSUMED only by the fetch that actually goes
-    /// out (fetch_slot_overrides(), which must be called with the lock dropped).
-    /// While a fetch is in flight the flag stays set, and whichever completion
-    /// handler lands next re-issues it. It used to be cleared by the caller
-    /// before the fetch was attempted, so a second event_seq that arrived during
-    /// the download was recorded as fetched and never was: the pre-edit file was
-    /// applied and the bay showed a stale material until some unrelated bump.
-    bool override_refetch_wanted_ = false;
+  protected:
+    /// kPendingLoadGrace, held per backend so a test can close the window.
+    /// Under mutex_.
+    std::chrono::milliseconds pending_load_grace_{kPendingLoadGrace};
 };
 
 } // namespace helix

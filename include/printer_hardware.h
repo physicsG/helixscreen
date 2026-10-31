@@ -73,6 +73,8 @@ class PrinterHardware {
     /**
      * @brief Guess the most likely hotend heater
      *
+     * Chooses only among heaters the HotendHeater role's is_candidate accepts.
+     *
      * Priority order:
      * 1. Exact match: "extruder" (Klipper's canonical [extruder] section)
      * 2. Exact match: "extruder0"
@@ -138,10 +140,10 @@ class PrinterHardware {
      * Priority order:
      * 1. Exact match: "fan" (Klipper's canonical [fan] section)
      * 2. Substring match: any fan containing "part" (e.g., "fan_generic part_cooling")
-     * 3. Fallback: first fan in list (if no better match)
+     * 3. Fallback: first candidate fan in list (if no better match)
      *
-     * Avoids auxiliary fans (bed_fans, exhaust, nevermore, controller_fan)
-     * by prioritizing the canonical "fan" name.
+     * Chooses only among fans the PartFan role's is_candidate accepts, so
+     * auto-controlled heater, controller and temperature fans are never guessed.
      *
      * @return Part cooling fan name or empty string if none found
      */
@@ -151,14 +153,14 @@ class PrinterHardware {
      * @brief Guess the most likely chamber fan (internal air circulation)
      *
      * Chamber fans are used for internal air circulation in enclosed printers.
-     * Common examples include bed fans, Nevermore filters, and recirculating filters.
+     * Common examples include Nevermore filters and recirculating filters. Chooses
+     * only among fans the ChamberFan role's is_candidate accepts.
      *
      * Priority order:
      * 1. Exact match: "chamber_fan"
      * 2. Substring priority chain:
      *    - "chamber" - chamber air circulation
      *    - "nevermore" - popular Klipper recirculating filter
-     *    - "bed_fans" - BTT Pi naming convention
      *    - "filter" - air filtration
      * 3. Return empty if no match (optional hardware)
      *
@@ -250,10 +252,10 @@ class PrinterHardware {
     /**
      * @brief Check if a filament sensor is managed by an AMS system.
      *
-     * Consults the detected AMS backend in @p discovery and falls back to
-     * substring matching against well-known AMS keywords (mmu, afc, ercf,
-     * gate, lane, hub, buffer, turtle, ...) when no specific backend is
-     * detected or the backend's named sensors don't match.
+     * Matches the filament systems' own keywords
+     * (AmsBackend::sensor_name_names_filament_system) and generic
+     * multi-material keywords (gate, lane, hub, buffer, ...) whatever was
+     * detected, then consults the detected AMS backend in @p discovery.
      *
      * Each backend owns the recognition of its named (keyword-free) sensors via
      * a static owns_filament_sensor(); this method dispatches through
@@ -267,17 +269,21 @@ class PrinterHardware {
      *
      * Backend-specific suppression is conditional on @p discovery.has_mmu()
      * so legitimate user sensors with conventional names (e.g. an "extruder"
-     * runout switch on a non-AMS printer) stay visible.
+     * runout switch on a non-AMS printer) stay visible. It is also dropped when
+     * @p filament_hardware_absent: the running backend has reported that
+     * nothing stands behind its firmware object (AmsState::filament_hardware_absent),
+     * so a name it would claim is the printer's own sensor. The flag must come
+     * from the backend of @p discovery's mmu_type(), whose claim it lifts.
      */
     static bool is_ams_sensor(const std::string& sensor_name,
-                              const helix::PrinterDiscovery& discovery);
+                              const helix::PrinterDiscovery& discovery,
+                              bool filament_hardware_absent);
 
   private:
     /**
      * Substring-only fallback used internally by the public overload above.
      * Catches AMS-naming keywords even when no backend is detected via the
-     * Klipper object list (defense in depth for ERCF, BoxTurtle without AFC,
-     * etc.). Callers should always go through the public overload.
+     * Klipper object list. Callers should always go through the public overload.
      */
     static bool is_ams_sensor_substring(const std::string& sensor_name);
 
@@ -303,3 +309,13 @@ class PrinterHardware {
     static std::string find_not_containing(const std::vector<std::string>& vec,
                                            const std::vector<std::string>& avoid_substrings);
 };
+
+/// Whether a filament sensor stands alone rather than belonging to an AMS: the
+/// one filter Settings > Sensors and the filament sensor wizard both list by.
+/// @p sensor_name may carry its "filament_switch_sensor " prefix or not.
+/// @p filament_hardware_absent as PrinterHardware::is_ams_sensor takes it.
+[[nodiscard]] inline bool is_standalone_filament_sensor(const helix::PrinterDiscovery& hw,
+                                                        const std::string& sensor_name,
+                                                        bool filament_hardware_absent) {
+    return !PrinterHardware::is_ams_sensor(sensor_name, hw, filament_hardware_absent);
+}

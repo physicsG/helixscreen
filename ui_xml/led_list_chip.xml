@@ -12,8 +12,8 @@
         height="#led_chip_height" variant="ghost" style_radius="#led_chip_height" style_min_width="#led_chip_min_width"
         style_pad_left="#space_md" style_pad_right="#space_md" ext_click_area="#led_chip_gap_half">
     <!-- Idle first, active after: the later style wins while it is enabled. -->
-    <style name="styles.led_chip_idle"/>
-    <bind_style_if_eq name="styles.led_chip_active" subject="led_active_chip" ref_value="$index"/>
+    <style name="styles.chip_idle"/>
+    <bind_style_if_eq name="styles.chip_active" subject="led_active_chip" ref_value="$index"/>
     <text_body bind_text="$label_subject" align="center" clickable="false" event_bubble="true"/>
     <event_cb trigger="clicked" callback="led_list_chip_cb" user_data="$index"/>
   </view>

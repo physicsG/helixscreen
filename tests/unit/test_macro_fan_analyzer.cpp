@@ -9,7 +9,7 @@ using namespace helix;
 using json = nlohmann::json;
 
 // Real K1C M106 macro (simplified)
-static const char* K1C_M106_MACRO = R"(
+static const char* kK1cM106Macro = R"(
 {% set fans = printer["gcode_macro PRINTER_PARAM"].fans|int %}
 {% set fan = 0 %}
 {% set value = 0 %}
@@ -35,7 +35,7 @@ SET_PIN PIN=fan2 VALUE={value|int}
 {% endif %}
 )";
 
-static const char* K1C_M107_MACRO = R"(
+static const char* kK1cM107Macro = R"(
 {% set fans = printer["gcode_macro PRINTER_PARAM"].fans|int %}
 {% if params.P is defined %}
 {% if params.P|int < fans %}
@@ -49,7 +49,7 @@ SET_PIN PIN=fan2 VALUE=0
 {% endif %}
 )";
 
-static const char* K1C_M141_MACRO = R"(
+static const char* kK1cM141Macro = R"(
 {% if 'S' in params|upper %}
 {% if printer["temperature_fan chamber_fan"].speed > 0.0 %}
 SET_PIN PIN=fan1 VALUE=255
@@ -66,8 +66,8 @@ SET_TEMPERATURE_FAN_TARGET TEMPERATURE_FAN=chamber_fan TARGET=35
 
 TEST_CASE("MacroFanAnalyzer: extracts fan indices from M106 macro", "[macro_fan_analyzer]") {
     json config;
-    config["gcode_macro m106"]["gcode"] = K1C_M106_MACRO;
-    config["gcode_macro m107"]["gcode"] = K1C_M107_MACRO;
+    config["gcode_macro m106"]["gcode"] = kK1cM106Macro;
+    config["gcode_macro m107"]["gcode"] = kK1cM107Macro;
 
     MacroFanAnalyzer analyzer;
     auto result = analyzer.analyze(config);
@@ -85,7 +85,7 @@ TEST_CASE("MacroFanAnalyzer: extracts fan indices from M106 macro", "[macro_fan_
 
 TEST_CASE("MacroFanAnalyzer: extracts role hints from M141 macro", "[macro_fan_analyzer]") {
     json config;
-    config["gcode_macro m141"]["gcode"] = K1C_M141_MACRO;
+    config["gcode_macro m141"]["gcode"] = kK1cM141Macro;
 
     MacroFanAnalyzer analyzer;
     auto result = analyzer.analyze(config);

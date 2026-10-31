@@ -4,8 +4,10 @@
 #pragma once
 
 #include "async_lifetime_guard.h"
+#include "lan_sweep.h"
 #include "lvgl/lvgl.h"
 #include "mdns_discovery.h"
+#include "utils/network_validation.h"
 #include "wizard_step.h"
 
 #include <atomic>
@@ -171,19 +173,24 @@ class WizardConnectionStep : public helix::wizard::Step {
     // Screen instance
     lv_obj_t* screen_root_ = nullptr;
 
-    // Subjects (6 total)
+    // Subjects
     lv_subject_t connection_ip_{};
     lv_subject_t connection_port_{};
     lv_subject_t connection_status_icon_{};
     lv_subject_t connection_status_text_{};
     lv_subject_t connection_testing_{};
     lv_subject_t connection_discovering_{};
+    /// Moonraker API key, for a printer whose Moonraker requires a login.
+    lv_subject_t connection_api_key_{};
+    /// 1 shows the API key field: the printer refused a test for want of one, or has one saved.
+    lv_subject_t connection_login_required_{};
 
     // String buffers (must be persistent)
     char connection_ip_buffer_[128];
     char connection_port_buffer_[8];
     char connection_status_icon_buffer_[8];
     char connection_status_text_buffer_[256];
+    char connection_api_key_buffer_[80];
 
     // State tracking (main thread only)
     bool connection_validated_ = false;
@@ -203,17 +210,44 @@ class WizardConnectionStep : public helix::wizard::Step {
     /// AD5M/CC1 over wifi, so this is ~6x headroom; it is also deliberately
     /// under MoonrakerRequestTracker's 60 s per-request timeout, which would
     /// otherwise stack across identify → server.info → printer.objects.list.
-    static constexpr uint32_t DISCOVERY_WATCHDOG_MS = 30000;
+    static constexpr uint32_t kDiscoveryWatchdogMs = 30000;
 
     // Watchdog state — main thread only (created, fired and cancelled there)
-    uint32_t discovery_watchdog_ms_ = DISCOVERY_WATCHDOG_MS;
+    uint32_t discovery_watchdog_ms_ = kDiscoveryWatchdogMs;
     lv_timer_t* discovery_watchdog_timer_ = nullptr;
     bool discovery_in_flight_ = false;
 
     // Saved values for async callback - protected by mutex for thread-safe access
     mutable std::mutex saved_values_mutex_;
-    std::string saved_ip_;   // Protected by saved_values_mutex_
-    std::string saved_port_; // Protected by saved_values_mutex_
+    std::string saved_ip_;      // Protected by saved_values_mutex_
+    std::string saved_port_;    // Protected by saved_values_mutex_
+    std::string saved_api_key_; // Protected by saved_values_mutex_
+
+    // Where the port field's value came from (main thread only); moonraker_ports_to_try()
+    // decides from it. Reset to FilledIn by cleanup().
+    helix::PortOrigin port_origin_ = helix::PortOrigin::FilledIn;
+    /// Set while the app writes the port field, so the write is not taken for typing.
+    bool port_set_by_app_ = false;
+    /// The ports the last test tried, for the failure message.
+    std::vector<int> tried_ports_;
+    /// Test Connection's HTTP check, and the auto-probe's.
+    helix::MoonrakerConnectionTest connection_test_;
+
+    /// Write @p port to the port subject and field without marking it typed.
+    void set_port_field(const std::string& port);
+
+    /// A probe found Moonraker on @p port: record it and show it in the port field.
+    void adopt_probed_port(int port);
+
+    /// The API key field, trimmed; blank means the printer takes none.
+    std::string entered_api_key();
+
+    /// Moonraker at @p ip answered the test but refused it: show the key field and why.
+    void show_login_required(const std::string& ip,
+                             const helix::MoonrakerConnectionTest::Result& result);
+
+    /// Writes the tested address and API key to the active printer's settings.
+    void save_connection(const std::string& ip, const std::string& port);
 
     // Event handler implementations
     void handle_test_connection_clicked();
@@ -223,6 +257,11 @@ class WizardConnectionStep : public helix::wizard::Step {
     // Async callback handlers (called from WebSocket callbacks, marshal via tok.defer)
     void on_connection_success(const helix::LifetimeToken& tok);
     void on_connection_failure(const helix::LifetimeToken& tok);
+    /// Shows a failed test for @p kind with the ports tried, and keeps Next shut.
+    void show_connection_failure(helix::ConnectFailureKind kind);
+    /// Connects the live client to saved_ip_:saved_port_, the address a test confirmed,
+    /// for the hardware discovery the next steps need.
+    void connect_confirmed(const helix::LifetimeToken& tok, bool auto_probe, uint32_t timeout_ms);
 
     // Helper to set status icon and text imperatively with appropriate colors
     enum class StatusVariant { None, Success, Warning, Danger };
@@ -301,15 +340,21 @@ class WizardConnectionStep : public helix::wizard::Step {
     static void on_test_connection_clicked_static(lv_event_t* e);
     static void on_ip_input_changed_static(lv_event_t* e);
     static void on_port_input_changed_static(lv_event_t* e);
+    static void on_api_key_input_changed_cb(lv_event_t* e);
     static void auto_probe_timer_cb(lv_timer_t* timer);
     static void discovery_watchdog_timer_cb(lv_timer_t* timer);
+
+    /// Gates discovery callbacks. Separate from lifetime_, which every connection attempt
+    /// invalidates while discovery keeps running.
+    helix::AsyncLifetimeGuard discovery_lifetime_;
 
     // mDNS discovery (injectable for testing)
     std::unique_ptr<helix::IMdnsDiscovery> mdns_discovery_;
     std::vector<helix::DiscoveredPrinter> discovered_printers_;
 
     // Subjects for mDNS UI
-    lv_subject_t mdns_status_{}; ///< "Scanning..." / "Found N printer(s)"
+    lv_subject_t mdns_status_{};      ///< "Scanning..." / "Found N printer(s)"
+    lv_subject_t discovery_active_{}; ///< 1 while printer discovery runs (shows the section)
     char mdns_status_buffer_[64];
 
     // mDNS callbacks

@@ -10,22 +10,6 @@
 namespace helix::printer {
 
 /**
- * @brief What a zone is doing, from the firmware's per-gate drying states.
- *
- * `Queued` is its own answer rather than a shade of `Active`: a backend that caps
- * simultaneous heaters leaves later zones waiting, and a waiting zone shown as idle reads
- * as a control that did nothing. `Cancelled` and `Complete` likewise differ - one answers
- * "someone stopped it", the other "it finished".
- */
-enum class ZoneDryingState : int {
-    Idle = 0,     ///< Not part of any cycle
-    Queued = 1,   ///< In the cycle, waiting for a concurrency slot
-    Active = 2,   ///< Heater on now
-    Complete = 3, ///< Ran to the end
-    Cancelled = 4 ///< Stopped before finishing
-};
-
-/**
  * @brief One filament environment: the gates that share a heater and a sensor.
  *
  * Hardware does not divide environments the way it divides units. A QuattroBox
@@ -73,6 +57,9 @@ struct EnvironmentZone {
 derive_environment_zones(const std::vector<std::string>& per_gate_heaters,
                          const std::vector<std::string>& per_gate_sensors, int gate_count,
                          const std::vector<std::string>& per_gate_state = {});
+
+/// One gate's firmware drying string as a state; anything undefined reads as Idle.
+[[nodiscard]] ZoneDryingState zone_drying_state_from_firmware(const std::string& s);
 
 /**
  * @brief Reduce a zone's gates to one state.

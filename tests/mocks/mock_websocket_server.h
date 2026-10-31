@@ -188,6 +188,13 @@ class MockWebSocketServer {
         return connection_count_.load();
     }
 
+    /// @p name from the most recent connection's upgrade request, "" if it had none.
+    std::string last_upgrade_header(const std::string& name) const {
+        std::lock_guard<std::mutex> lock(channels_mutex_);
+        const auto it = last_upgrade_headers_.find(name);
+        return it == last_upgrade_headers_.end() ? std::string{} : it->second;
+    }
+
     /**
      * @brief Get total number of requests received
      */
@@ -222,6 +229,7 @@ class MockWebSocketServer {
 
     std::vector<WebSocketChannelPtr> channels_;
     mutable std::mutex channels_mutex_;
+    http_headers last_upgrade_headers_; ///< Guarded by channels_mutex_.
 
     std::vector<std::string> received_methods_;
     mutable std::mutex methods_mutex_;

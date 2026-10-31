@@ -9,6 +9,7 @@
 #include "json_utils.h"
 #include "moonraker_validation.h"
 #include "spdlog/spdlog.h"
+#include "webcam_selection.h"
 
 #include <iomanip>
 #include <sstream>
@@ -295,13 +296,7 @@ void MoonrakerTimelapseAPI::get_webcam_list(WebcamListCallback on_success, Error
             std::vector<WebcamInfo> webcams;
             if (response.contains("result") && response["result"].contains("webcams")) {
                 for (const auto& cam : response["result"]["webcams"]) {
-                    WebcamInfo info;
-                    info.name = cam.value("name", "");
-                    info.service = cam.value("service", "");
-                    info.snapshot_url = cam.value("snapshot_url", "");
-                    info.stream_url = cam.value("stream_url", "");
-                    info.uid = cam.value("uid", "");
-                    info.enabled = cam.value("enabled", true);
+                    WebcamInfo info = webcam::parse_webcam_entry(cam);
                     if (info.enabled) {
                         webcams.push_back(std::move(info));
                     }
@@ -310,6 +305,41 @@ void MoonrakerTimelapseAPI::get_webcam_list(WebcamListCallback on_success, Error
             spdlog::debug("[Timelapse API] Found {} enabled webcam(s)", webcams.size());
             if (on_success)
                 on_success(webcams);
+        },
+        on_error);
+}
+
+void MoonrakerTimelapseAPI::post_webcam(const json& item, WebcamCallback on_success,
+                                        ErrorCallback on_error) {
+    spdlog::debug("[Timelapse API] post_webcam({} uid={})",
+                  json_util::safe_string(item, "name", ""),
+                  json_util::safe_string(item, "uid", ""));
+    client_.send_jsonrpc(
+        "server.webcams.post_item", item,
+        [on_success](const json& response) {
+            if (!on_success)
+                return;
+            const json* stored = nullptr;
+            const auto result = response.find("result");
+            if (result != response.end() && result->is_object()) {
+                const auto entry = result->find("webcam");
+                if (entry != result->end())
+                    stored = &*entry;
+            }
+            on_success(webcam::parse_webcam_entry(stored ? *stored : json::object()));
+        },
+        on_error);
+}
+
+void MoonrakerTimelapseAPI::delete_webcam(const WebcamInfo& cam, SuccessCallback on_success,
+                                          ErrorCallback on_error) {
+    spdlog::debug("[Timelapse API] delete_webcam({} uid={})", cam.name, cam.uid);
+    const json key = cam.uid.empty() ? json{{"name", cam.name}} : json{{"uid", cam.uid}};
+    client_.send_jsonrpc(
+        "server.webcams.delete_item", key,
+        [on_success](const json&) {
+            if (on_success)
+                on_success();
         },
         on_error);
 }

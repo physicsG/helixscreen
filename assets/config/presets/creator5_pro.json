@@ -4,9 +4,15 @@
   "display": {
     "rotate": 90,
     "rotation_probed": true,
-    "animations_enabled": false
+    "animations_enabled": false,
+    "backlight_enable_ioctl": false
   },
   "printer": {
+    "input": {
+      "scroll_limit": 10,
+      "scroll_throw": 25,
+      "scroll_guard": true
+    },
     "heaters": {
       "bed": "heater_bed",
       "hotend": "extruder",

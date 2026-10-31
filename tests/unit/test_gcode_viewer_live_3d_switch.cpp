@@ -80,13 +80,13 @@ std::unique_ptr<ParsedGCodeFile> make_two_tool_file() {
 }
 
 lv_obj_t* make_2d_viewer_with(lv_obj_t* parent, std::unique_ptr<ParsedGCodeFile> file) {
-    lv_obj_t* viewer = ui_gcode_viewer_create(parent);
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
     lv_obj_set_size(viewer, 400, 300);
     lv_obj_update_layout(viewer);
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
     helix::test_access::gcode_viewer_install_loaded_file(viewer, std::move(file));
-    REQUIRE(ui_gcode_viewer_is_using_2d_mode(viewer));
+    REQUIRE(helix::ui::gcode_viewer_is_using_2d_mode(viewer));
     return viewer;
 }
 
@@ -102,13 +102,13 @@ TEST_CASE_METHOD(LVGLTestFixture,
     lv_obj_t* viewer = make_2d_viewer_with(parent, make_two_tool_file());
 
     // Applied while the 3D renderer has no mesh to write them into.
-    ui_gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
+    helix::ui::gcode_viewer_set_tool_colors(viewer, {kLaneT0, kLaneT1});
 
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
     helix::test_access::gcode_viewer_wait_for_build(viewer);
     helix::ui::UpdateQueue::instance().drain();
 
-    CHECK_FALSE(ui_gcode_viewer_is_using_2d_mode(viewer));
+    CHECK_FALSE(helix::ui::gcode_viewer_is_using_2d_mode(viewer));
     const auto palette = helix::test_access::gcode_viewer_3d_palette(viewer);
     REQUIRE_FALSE(palette.empty());
     auto has = [&palette](uint32_t rgb) {
@@ -132,21 +132,21 @@ TEST_CASE_METHOD(LVGLTestFixture,
                  "thread building",
                  "[gcode_viewer][gcode][render_mode]") {
     lv_obj_t* parent = lv_obj_create(lv_screen_active());
-    lv_obj_t* viewer = ui_gcode_viewer_create(parent);
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
     lv_obj_set_size(viewer, 400, 300);
     lv_obj_update_layout(viewer);
 
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Layer2D);
     helix::test_access::gcode_viewer_install_loaded_file(viewer, make_over_budget_file());
-    REQUIRE(ui_gcode_viewer_is_using_2d_mode(viewer));
+    REQUIRE(helix::ui::gcode_viewer_is_using_2d_mode(viewer));
     const uint32_t children_before = lv_obj_get_child_count(viewer);
 
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
 
     // The build has not been answered on the calling thread: the viewer is in
     // 3D, waiting on geometry, with the loading spinner up meanwhile.
-    CHECK_FALSE(ui_gcode_viewer_is_using_2d_mode(viewer));
+    CHECK_FALSE(helix::ui::gcode_viewer_is_using_2d_mode(viewer));
     CHECK(lv_obj_get_child_count(viewer) == children_before + 1);
 
     helix::test_access::gcode_viewer_wait_for_build(viewer);
@@ -155,7 +155,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     CHECK(lv_obj_get_child_count(viewer) == children_before);
 
     // Refused: this file draws in 2D, and the user's choice of 3D survives it.
-    CHECK(ui_gcode_viewer_is_using_2d_mode(viewer));
+    CHECK(helix::ui::gcode_viewer_is_using_2d_mode(viewer));
     CHECK(helix::test_access::gcode_viewer_render_mode(viewer) == GcodeViewerRenderMode::Render3D);
 
     lv_obj_delete(parent);
@@ -166,11 +166,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "a live 3D switch installs the geometry it bui
     lv_obj_t* parent = lv_obj_create(lv_screen_active());
     lv_obj_t* viewer = make_2d_viewer_with(parent, make_two_tool_file());
 
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
     helix::test_access::gcode_viewer_wait_for_build(viewer);
     helix::ui::UpdateQueue::instance().drain();
 
-    CHECK_FALSE(ui_gcode_viewer_is_using_2d_mode(viewer));
+    CHECK_FALSE(helix::ui::gcode_viewer_is_using_2d_mode(viewer));
     CHECK_FALSE(helix::test_access::gcode_viewer_3d_palette(viewer).empty());
 
     lv_obj_delete(parent);
@@ -181,12 +181,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "a live 3D build result for a replaced file is
     lv_obj_t* parent = lv_obj_create(lv_screen_active());
     lv_obj_t* viewer = make_2d_viewer_with(parent, make_two_tool_file());
 
-    ui_gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, GcodeViewerRenderMode::Render3D);
     // The result is built and queued before the file it describes goes away.
     helix::test_access::gcode_viewer_wait_for_build(viewer);
 
     SECTION("by a clear") {
-        ui_gcode_viewer_clear(viewer);
+        helix::ui::gcode_viewer_clear(viewer);
     }
     SECTION("by another file") {
         helix::test_access::gcode_viewer_install_loaded_file(viewer, make_two_tool_file());

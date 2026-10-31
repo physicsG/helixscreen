@@ -7,7 +7,9 @@
 #include "ams_backend.h"
 #include "ams_types.h"
 #include "display_numbering.h"
+#include "filament_action_set.h"
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,51 +17,31 @@
 namespace helix::ui {
 
 /**
- * @brief Picker modal for batch filament load/unload
+ * @brief The head picker: which heads a Load, Unload, Mount or seat-by-hand acts on.
  *
- * Shown on backends whose toolheads feed independently
- * (AmsBackend::supports_batch_filament_ops()): one row per slot, and the
- * primary button dispatches the whole ticked set as one firmware script in the
- * direction the picker was opened in.
+ * One row per head (decide_head_picker_rows()), naming the slot the op will
+ * use. A row the backend cannot serve is shown disabled with its reason. The
+ * selection is capped at the backend's max_heads_per_filament_op(), one for a
+ * single_select() op. The picker decides nothing itself: its primary button hands the
+ * chosen rows to the caller, which dispatches.
  */
 class BatchFilamentModal : public Modal {
   public:
-    /// One-shot owned show in ONE direction: create, name the title and the
-    /// primary button after the direction, prefill from the active backend,
-    /// and hand the instance to ModalStack, which frees it when its entry
-    /// goes. The sidebar's Load and Unload buttons each open this.
-    static bool show_owned(bool for_load);
+    using Confirm = std::function<void(const std::vector<HeadPickRow>& chosen)>;
+
+    /// One-shot owned show for @p op: create, name the title and the primary
+    /// button after it, build the rows from the active backend, and hand the
+    /// instance to ModalStack, which frees it when its entry goes.
+    static bool show_owned(HeadPickOp op, Confirm on_confirm);
 
     const char* get_name() const override {
-        return "Batch Filament";
+        return "Head Picker";
     }
     const char* component_name() const override {
         return "batch_filament_modal";
     }
 
-    // Pure: can this head act in this direction? Unload needs its filament at
-    // the toolhead; load needs filament in the lane AND not at the toolhead,
-    // because feeding an empty lane is the no-op the firmware refuses. nullopt
-    // lane presence (backend publishes none) reads as loadable: the backend's
-    // eligibility check refuses an empty lane at dispatch, so the picker does
-    // not guess. nullopt at_toolhead reads as not loaded (never unloadable).
-    static bool head_can_act(std::optional<bool> at_toolhead, std::optional<bool> lane_presence,
-                             bool for_load);
-
-    // Pure: which rows start ticked, exactly the heads that can act in this
-    // direction (head_can_act per row).
-    static std::vector<bool>
-    prefill_selection(const std::vector<std::optional<bool>>& at_toolhead,
-                      const std::vector<std::optional<bool>>& lane_presence, bool for_load);
-
-    // Pure: does any head offer this direction? prefill_selection folded to a
-    // single bool, so the sidebar's Load/Unload gating and the picker's
-    // prefills cannot disagree about which direction a head serves.
-    static bool any_head_for_direction(const std::vector<std::optional<bool>>& at_toolhead,
-                                       const std::vector<std::optional<bool>>& lane_presence,
-                                       bool for_load);
-
-    // Pure: multiselect keys are slot indices as decimal strings.
+    // Pure: multiselect keys are head indices as decimal strings.
     static std::vector<int> selected_slots(const std::vector<std::string>& keys);
 
     // Pure: row text. The lane name, plus what is in the lane and where it
@@ -70,6 +52,28 @@ class BatchFilamentModal : public Modal {
     // are named in the row.
     static std::string row_label(LaneNoun noun, int slot, const SlotInfo& info,
                                  std::optional<bool> present, bool at_toolhead);
+
+    /// What one head row says: the head, the slot it names where that is not
+    /// the head's own, then either why the row is disabled or the slot's
+    /// contents (row_label()'s suffix).
+    struct HeadRowText {
+        LaneNoun head_noun = LaneNoun::Tool;
+        LaneNoun slot_noun = LaneNoun::Slot;
+        int head = -1;
+        int slot = -1;
+        bool show_slot = false;
+        SlotInfo info;
+        std::optional<bool> present;
+        bool at_toolhead = false;
+        std::string reason;
+    };
+    static std::string head_row_label(const HeadRowText& text);
+
+    /// Whether @p head's row reads its @p slot as loaded rather than ready to
+    /// load: the slot is at the toolhead, or, where each head has one slot, the
+    /// backend knows the head holds filament (a docked hot end keeps the strand
+    /// its load fed).
+    static bool row_at_toolhead(const AmsBackend& backend, int head, int slot);
 
     // Pure: the selected slots the backend says can take this operation,
     // plus the first one it refused and why. Eligibility is
@@ -86,40 +90,21 @@ class BatchFilamentModal : public Modal {
     sift_eligible(const std::vector<int>& selected,
                   const std::vector<AmsBackend::FilamentOpEligibility>& per_slot);
 
-    /// What each picker row needs from the backend. Lane presence answers the
-    /// label ("what is in this lane"); toolhead state answers the ticks. They
-    /// disagree on a lane holding filament that has not been fed to the nozzle.
-    /// at_toolhead is "loaded to the nozzle" (the Load direction's question);
-    /// unloadable adds filament parked in the toolhead short of it, which a
-    /// heated unload still acts on.
-    struct BatchRowSource {
-        std::vector<SlotInfo> slots;
-        std::vector<std::optional<bool>> lane_presence;
-        std::vector<std::optional<bool>> at_toolhead;
-        std::vector<std::optional<bool>> unloadable;
-
-        /// The toolhead answer head_can_act() reads for this direction.
-        [[nodiscard]] const std::vector<std::optional<bool>>& heads_for(bool for_load) const {
-            return for_load ? at_toolhead : unloadable;
-        }
-    };
-
-    // Pure: gather every row's inputs. Extracted so the gathering itself is
-    // testable against a backend whose lane and toolhead answers disagree.
-    static BatchRowSource collect_rows(const AmsBackend& backend);
+    /// Run @p slots as one batch on @p backend: drop the slots it says cannot
+    /// take the op (naming the first), then send the rest together.
+    /// @return true when a batch was sent
+    static bool dispatch_batch(AmsBackend& backend, const std::vector<int>& slots, bool load);
 
   protected:
     void on_show() override;
 
-    /// btn_primary: dispatches the direction the picker was opened in.
+    /// btn_primary: hands the chosen rows to the caller.
     void on_ok() override;
 
   private:
-    void dispatch(bool load);
-
-    /// The direction the sidebar opened this picker in: names the title, the
-    /// primary button, the prefill and the dispatch verb.
-    bool for_load_ = false;
+    HeadPickOp op_ = HeadPickOp::Load;
+    Confirm on_confirm_;
+    std::vector<HeadPickRow> rows_;
 
     UiMultiselect multiselect_;
 };

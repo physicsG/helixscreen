@@ -29,7 +29,7 @@ The Creality K1C and K1 Max are high-speed CoreXY printers running Klipper on an
 | Attribute | Value |
 |-----------|-------|
 | **Size** | 4.3 inches |
-| **Resolution** | 480 x 400 pixels |
+| **Resolution** | 480 x 800 pixels (portrait, 32bpp fbdev) |
 | **Type** | Full-color capacitive touchscreen |
 | **Interface** | Framebuffer at `/dev/fb0` |
 | **Touch Input** | evdev-based |
@@ -52,7 +52,7 @@ The Creality K1C and K1 Max are high-speed CoreXY printers running Klipper on an
 ### Operating System
 - **Creality OS** - custom Linux built on Buildroot 2020.02.1
 - **Python**: 3.8.2
-- **glibc**: 2.26
+- **glibc**: 2.29
 - **Klipper**: Creality fork (dated 2022, missing upstream features)
 
 ### Partition Layout
@@ -170,7 +170,7 @@ max_accel: 20000
 ```
 
 ### No Multi-Extruder/Toolchanger
-K1 series are **single extruder** printers. Third-party solutions like **Co Print KCM** can add multi-material.
+K1 series are **single extruder** printers. Creality's official CFS upgrade adds multi-material (see [CREALITY_CFS_K1_INTERNALS.md](CREALITY_CFS_K1_INTERNALS.md)); third-party solutions like **Co Print KCM** also exist.
 
 ---
 
@@ -179,7 +179,7 @@ K1 series are **single extruder** printers. Third-party solutions like **Co Prin
 ### Stock Display System
 - **Framebuffer**: `/dev/fb0`
 - **Framework**: LVGL (suspected based on reverse engineering)
-- **Resolution**: 480 x 400
+- **Resolution**: 480 x 800 (portrait)
 
 Display can be accessed directly:
 ```bash

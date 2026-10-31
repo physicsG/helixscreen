@@ -101,8 +101,9 @@ class PickStartFixture : private helix::PrintSelectGlobalStateReset,
     void hold_print_start() {
         helix::MoonrakerClientMockTestAccess::set_method_handler(
             mock_client_, "printer.print.start",
-            [this](MoonrakerClientMock*, const json&, std::function<void(const json&)> success_cb,
-                   std::function<void(const MoonrakerError&)> error_cb) -> bool {
+            [this](MoonrakerClientMock*, const json&,
+                   helix::SharedCallback<void(const json&)> success_cb,
+                   helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
                 held_start = std::move(success_cb);
                 held_error = std::move(error_cb);
                 return true;
@@ -158,8 +159,8 @@ class PickStartFixture : private helix::PrintSelectGlobalStateReset,
 
     helix::PlantedGcode file_{"pick_start.gcode", "", kPlate};
     helix::ui::PrintSelectDetailView* detail = nullptr;
-    std::function<void(const json&)> held_start;
-    std::function<void(const MoonrakerError&)> held_error;
+    helix::SharedCallback<void(const json&)> held_start;
+    helix::SharedCallback<void(const MoonrakerError&)> held_error;
     std::vector<std::string> infos;
     std::vector<std::string> warnings;
 };
@@ -313,8 +314,8 @@ TEST_CASE_METHOD(PickStartFixture, "A refused queue add keeps the picks",
     bool asked = false;
     helix::MoonrakerClientMockTestAccess::set_method_handler(
         mock_client_, "server.job_queue.post_job",
-        [&asked](MoonrakerClientMock*, const json&, std::function<void(const json&)>,
-                 std::function<void(const MoonrakerError&)> error_cb) -> bool {
+        [&asked](MoonrakerClientMock*, const json&, helix::SharedCallback<void(const json&)>,
+                 helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
             asked = true;
             error_cb(MoonrakerError::unknown("refused", "server.job_queue.post_job"));
             return true;
@@ -331,11 +332,12 @@ TEST_CASE_METHOD(PickStartFixture, "A refused queue add keeps the picks",
 TEST_CASE_METHOD(PickStartFixture, "A queue add answered after another file opened keeps its picks",
                  "[print_select][pre_start_exclude][start][job_queue]") {
     QueueMode queue(*this, api_.get(), mock_client_);
-    std::function<void(const json&)> held_add;
+    helix::SharedCallback<void(const json&)> held_add;
     helix::MoonrakerClientMockTestAccess::set_method_handler(
         mock_client_, "server.job_queue.post_job",
-        [&held_add](MoonrakerClientMock*, const json&, std::function<void(const json&)> success_cb,
-                    std::function<void(const MoonrakerError&)>) -> bool {
+        [&held_add](MoonrakerClientMock*, const json&,
+                    helix::SharedCallback<void(const json&)> success_cb,
+                    helix::SharedCallback<void(const MoonrakerError&)>) -> bool {
             held_add = std::move(success_cb);
             return true;
         });
@@ -417,6 +419,39 @@ const char* kToolPlate = "; HEADER\n"
                          "T1\n";
 
 } // namespace
+
+TEST_CASE_METHOD(PickStartFixture, "The remap modal's OK lays only its picks over the card",
+                 "[print_select][remap][routing]") {
+    // The modal hands back the rows as they stood when it opened. A row the user
+    // did not touch may have followed the printer since; only the pick is news.
+    helix::test::RegisteredBackend<helix::AmsBackendMock> ams{4};
+    const auto strategy = GENERATE(helix::AmsBackend::RemapStrategy::Native,
+                                   helix::AmsBackend::RemapStrategy::PrePrintSend);
+    ams->set_remap_strategy(strategy);
+    drain();
+
+    std::vector<helix::ToolMapping> current(2);
+    current[0].tool_index = 0;
+    current[0].mapped_slot = 3; // followed the printer while the modal was open
+    current[0].reason = helix::ToolMapping::MatchReason::FIRMWARE_MAPPING;
+    current[1].tool_index = 1;
+    current[1].mapped_slot = 1;
+    current[1].reason = helix::ToolMapping::MatchReason::FIRMWARE_MAPPING;
+    detail->set_filament_mappings(current);
+
+    std::vector<helix::ToolMapping> from_modal = current;
+    from_modal[0].mapped_slot = 0; // the snapshot the modal opened with
+    from_modal[1].mapped_slot = 2;
+    from_modal[1].user_picked = true;
+    PrintSelectPanelTestAccess::apply_remap(*panel_, from_modal);
+
+    const auto stored = detail->get_filament_mappings();
+    REQUIRE(stored.size() == 2);
+    CHECK(stored[0].mapped_slot == 3);
+    CHECK_FALSE(stored[0].user_picked);
+    CHECK(stored[1].mapped_slot == 2);
+    CHECK(stored[1].user_picked);
+}
 
 TEST_CASE_METHOD(PickStartFixture, "A rewritten-remap start carries the picks after confirmation",
                  "[print_select][pre_start_exclude][start][remap]") {

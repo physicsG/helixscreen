@@ -12,9 +12,9 @@
  * operation while printing" and never "Pause the print first, then load,
  * unload, or change filament" — the only half that tells them what to do.
  *
- * These tests assert the rendered OUTPUT, not that a function exists: the test
- * notification stubs (tests/ui_test_utils.cpp) hand the hook exactly the text
- * the toast is given, joined the same way the notification-history row is.
+ * These tests assert the rendered OUTPUT, not that a function exists: the
+ * notification hooks (tests/ui_test_utils.h) receive the notification-history
+ * row the call adds, which joins the toast's two lines.
  */
 
 #include "ui_error_reporting.h"

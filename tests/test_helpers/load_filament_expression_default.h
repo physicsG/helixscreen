@@ -6,7 +6,7 @@ namespace helix::test {
 /// A LOAD_FILAMENT gcode_macro body exactly as configfile.settings reports it on
 /// an OpenCentauri COSMOS printer. Its only parameter, EXTRUDER_TEMP, defaults to
 /// a printer-side variable lookup (global.extruder_temp.loading), not a number.
-inline constexpr const char* LOAD_FILAMENT_EXPRESSION_DEFAULT = R"GCODE(
+inline constexpr const char* kLoadFilamentExpressionDefault = R"GCODE(
 {% set global = printer['gcode_macro _global_var'] %}
 {% set target = params.EXTRUDER_TEMP | default(global.extruder_temp.loading) | int %}
 {% set settings = printer['gcode_macro _COSMOS_SETTINGS']|default({}) %}

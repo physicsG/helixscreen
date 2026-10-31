@@ -18,11 +18,10 @@
 #include <unordered_set>
 #include <vector>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 class PrinterState;
-}
+} // namespace helix
 
 namespace helix {
 
@@ -47,6 +46,10 @@ struct LightIconLook {
 /// On while any target is on, at the brightest one's level, in the first lit
 /// color-capable target's hue.
 LightIconLook light_icon_look(const std::vector<led::DeviceState>& states);
+
+/// Acknowledge a tap on a light whose state nothing will report: @p icon shows
+/// the lamp color, fades, then returns to the color it had before the flash.
+void flash_light_icon(lv_obj_t* icon);
 
 /// One light button: on the home grid it drives the device its `led` config
 /// names, "all" for every switchable device, or the chamber light when unset.
@@ -82,7 +85,7 @@ class LedWidget : public TiledPanelWidget {
         return const_cast<const char**>(attrs_.data());
     }
 
-    /// Point this button at @p key (a device id or LIGHT_BUTTON_ALL) and save it.
+    /// Point this button at @p key (a device id or kLightButtonAll) and save it.
     void select_light(const std::string& key);
 
     /// The device ids a tap switches.
@@ -166,7 +169,6 @@ class LedWidget : public TiledPanelWidget {
 
     void handle_light_toggle();
     void update_light_icon();
-    void flash_light_icon();
     void bind_led();
     void show_led_picker();
 };

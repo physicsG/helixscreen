@@ -28,7 +28,7 @@ using json = nlohmann::json;
 /// How long stop() will wait for the loop thread to close the socket. Runs on
 /// the LVGL thread, so it is a UI freeze budget, not a generous one: the queued
 /// close is a handful of syscalls and normally lands in microseconds.
-constexpr auto TEARDOWN_TIMEOUT = std::chrono::seconds(2);
+constexpr auto kTeardownTimeout = std::chrono::seconds(2);
 
 /// Milliseconds on the same clock the stall timer compares against.
 uint64_t now_ms() {
@@ -217,7 +217,7 @@ bool BeltStreamClient::start(const std::string& socket_path, const std::string& 
 }
 
 bool BeltStreamClient::attach() {
-    read_buf_.resize(READ_BUFFER_BYTES);
+    read_buf_.resize(kReadBufferBytes);
 
     io_ = hio_get(loop_thread_->loop()->loop(), fd_.load());
     if (io_ == nullptr) {
@@ -244,9 +244,9 @@ bool BeltStreamClient::attach() {
                 {"method", endpoint_},
                 {"params",
                  {{"sensor", sensor_key_},
-                  {"response_template", {{"method", std::string(BATCH_METHOD)}}}}}};
+                  {"response_template", {{"method", std::string(kBatchMethod)}}}}}};
     std::string framed = req.dump();
-    framed.push_back(KlippyFrameDecoder::FRAME_TERMINATOR);
+    framed.push_back(KlippyFrameDecoder::kFrameTerminator);
 
     if (hio_write(io_, framed.data(), framed.size()) < 0) {
         report_error("failed to send the accelerometer subscribe request");
@@ -263,13 +263,13 @@ bool BeltStreamClient::attach() {
 }
 
 void BeltStreamClient::arm_stall_timer() {
-    // Half the timeout, so a stall is noticed within STALL_TIMEOUT_MS..1.5x.
+    // Half the timeout, so a stall is noticed within kStallTimeoutMs..1.5x.
     stall_timer_ = loop_thread_->loop()->setInterval(
-        static_cast<int>(STALL_TIMEOUT_MS / 2), [this](hv::TimerID) {
+        static_cast<int>(kStallTimeoutMs / 2), [this](hv::TimerID) {
             if (stall_reported_ || stopping_.load() || !running_.load()) {
                 return;
             }
-            if (now_ms() - last_batch_ms_.load() <= STALL_TIMEOUT_MS) {
+            if (now_ms() - last_batch_ms_.load() <= kStallTimeoutMs) {
                 return;
             }
             // Latch rather than killing the timer from inside its own callback:
@@ -368,7 +368,7 @@ void BeltStreamClient::handle_frame(std::string_view frame) {
     }
 
     if (!doc.contains("method") || !doc["method"].is_string() ||
-        doc["method"].get<std::string>() != BATCH_METHOD) {
+        doc["method"].get<std::string>() != kBatchMethod) {
         return; // Not ours.
     }
 
@@ -495,7 +495,7 @@ void BeltStreamClient::stop() {
         // satisfied, and a single wait_for would freeze the UI for the whole
         // budget on a loop that had already exited.
         bool closed = false;
-        const auto deadline = std::chrono::steady_clock::now() + TEARDOWN_TIMEOUT;
+        const auto deadline = std::chrono::steady_clock::now() + kTeardownTimeout;
         while (std::chrono::steady_clock::now() < deadline) {
             if (fut.wait_for(std::chrono::milliseconds(20)) == std::future_status::ready) {
                 closed = true;

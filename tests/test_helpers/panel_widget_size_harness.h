@@ -31,6 +31,18 @@ struct HarnessConfig {
     nlohmann::json value;
 };
 
+/// Every box from @p w_from x @p h_from to @p w_to x @p h_to, a pixel apart. Hold one
+/// axis (from == to) to sweep the other.
+inline std::vector<std::pair<int, int>> box_sweep(int w_from, int w_to, int h_from, int h_to) {
+    std::vector<std::pair<int, int>> boxes;
+    for (int w = w_from; w <= w_to; ++w) {
+        for (int h = h_from; h <= h_to; ++h) {
+            boxes.emplace_back(w, h);
+        }
+    }
+    return boxes;
+}
+
 /// The XML-component + resize half of a harness, without the widget instance.
 ///
 /// Split out so the registry-driven harness below reuses the create/attach and
@@ -77,7 +89,37 @@ class PanelWidgetHarnessBase {
         return obj_;
     }
 
+    /// Each of @p boxes, as "WxH", whose drawn parts change when it is decided a second
+    /// time. A verdict that reads the parts the last one left visible settles only there.
+    std::vector<std::string> unsettled_boxes(const std::vector<std::pair<int, int>>& boxes) {
+        std::vector<std::string> unsettled;
+        for (const auto& [w, h] : boxes) {
+            resize(1, 1, w, h);
+            const std::string first = drawn_parts(obj_);
+            resize(1, 1, w, h);
+            if (drawn_parts(obj_) != first) {
+                unsettled.push_back(std::to_string(w) + "x" + std::to_string(h));
+            }
+        }
+        return unsettled;
+    }
+
   protected:
+    /// The names of @p obj's drawn descendants, depth first.
+    static std::string drawn_parts(lv_obj_t* obj) {
+        std::string parts;
+        const uint32_t count = lv_obj_get_child_count(obj);
+        for (uint32_t i = 0; i < count; ++i) {
+            lv_obj_t* child = lv_obj_get_child(obj, static_cast<int32_t>(i));
+            if (lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))
+                continue;
+            if (const char* name = lv_obj_get_name(child))
+                parts.append(name).append(" ");
+            parts += drawn_parts(child);
+        }
+        return parts;
+    }
+
     /// Resolve the component name from the widget, build it from XML, and
     /// attach. From the widget, not "panel_widget_" + id(): fan_stack selects
     /// between stack and carousel components, and favorite_macro's id carries
@@ -218,6 +260,13 @@ class RegistryWidgetHarness : public PanelWidgetHarnessBase {
     /// False when the XML component could not be built at all.
     bool created() const {
         return created_;
+    }
+
+    /// What the grid does once the tile is on screen; a no-op for a pure-XML widget.
+    void activate() {
+        if (owned_) {
+            owned_->on_activate();
+        }
     }
 
   private:
@@ -417,8 +466,13 @@ inline void walk(lv_obj_t* o, const std::string& path, const OverflowExceptions&
 
     // Content that the layout kept inside the box by shifting it: the children
     // are all in bounds, and the box still cannot show them all at once.
-    const int32_t sb = lv_obj_get_scroll_bottom(o);
-    const int32_t sr = lv_obj_get_scroll_right(o);
+    // An image reports its source's natural size as its self size whatever its box
+    // draws, so a thumbnail scaled to fit (inner_align contain) still shows as scrollable. Its
+    // box is still held to the parent by the geometry check below.
+    const bool is_image = lv_obj_check_type(o, &lv_image_class) &&
+                          lv_image_get_inner_align(o) == LV_IMAGE_ALIGN_CONTAIN;
+    const int32_t sb = is_image ? 0 : lv_obj_get_scroll_bottom(o);
+    const int32_t sr = is_image ? 0 : lv_obj_get_scroll_right(o);
     if (sb > 0) {
         r.findings.push_back(
             {OverflowKind::Scroll, path, "scroll_bottom " + std::to_string(sb) + "px"});

@@ -66,7 +66,7 @@ namespace {
 /// last value is what makes discovery automatic: create() returns nullptr for
 /// anything it does not know, so an added type is picked up the moment the
 /// factory learns to build it, and no list in this file needs touching.
-constexpr int AMS_TYPE_PROBE_LIMIT = 64;
+constexpr int kAmsTypeProbeLimit = 64;
 
 /// Backends create() must produce in THIS build. Only three are compiled
 /// unconditionally (Happy Hare, AFC, Tool Changer); every vendor-specific
@@ -75,21 +75,21 @@ constexpr int AMS_TYPE_PROBE_LIMIT = 64;
 /// silently goes stale each time another backend becomes gateable. Still a
 /// lower bound that catches "create() silently stopped producing anything" -
 /// it is NOT the coverage list; the loops below cover whatever exists.
-constexpr int EXPECTED_BACKEND_COUNT = 3
+constexpr int kExpectedBackendCount = 3
 #if HELIX_HAS_IFS
-                                       + 1
+                                      + 1
 #endif
 #if HELIX_HAS_CFS
-                                       + 1
+                                      + 1
 #endif
 #if HELIX_HAS_ACE
-                                       + 1
+                                      + 1
 #endif
 #if HELIX_HAS_QIDI
-                                       + 1
+                                      + 1
 #endif
 #if HELIX_HAS_SNAPMAKER
-                                       + 1
+                                      + 1
 #endif
     ;
 
@@ -206,7 +206,7 @@ struct FactoryGateFixture : public LVGLTestFixture {
     /// Every AmsType this build can actually produce.
     std::vector<helix::AmsType> buildable_types() {
         std::vector<helix::AmsType> types;
-        for (int raw = 1; raw < AMS_TYPE_PROBE_LIMIT; ++raw) {
+        for (int raw = 1; raw < kAmsTypeProbeLimit; ++raw) {
             const auto type = static_cast<helix::AmsType>(raw);
             if (helix::AmsBackend::create(type, api.get(), &mock_client)) {
                 types.push_back(type);
@@ -235,7 +235,7 @@ TEST_CASE_METHOD(FactoryGateFixture, "AmsBackend::create builds a distinct backe
                  "[ams][safety][factory]") {
     const auto types = buildable_types();
     CAPTURE(types.size());
-    CHECK(types.size() >= EXPECTED_BACKEND_COUNT);
+    CHECK(types.size() >= kExpectedBackendCount);
 
     for (helix::AmsType type : types) {
         CAPTURE(helix::ams_type_to_string(type));
@@ -272,7 +272,7 @@ TEST_CASE_METHOD(FactoryGateFixture,
             ++checked;
         }
     }
-    CHECK(checked >= EXPECTED_BACKEND_COUNT * static_cast<int>(motion_ops().size()));
+    CHECK(checked >= kExpectedBackendCount * static_cast<int>(motion_ops().size()));
 }
 
 // ============================================================================
@@ -435,5 +435,5 @@ TEST_CASE_METHOD(FactoryGateFixture, "the backend refusal matches print_blocks_f
     }
     // Guards against a loop that compared nothing: 3 states over at least the
     // unconditionally-built backends.
-    CHECK(compared >= EXPECTED_BACKEND_COUNT * 3);
+    CHECK(compared >= kExpectedBackendCount * 3);
 }

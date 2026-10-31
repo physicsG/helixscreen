@@ -33,6 +33,13 @@ PANELS=(
     "advanced:advanced"
     "print-select:print-select"
 
+    # Home edit mode
+    "home-widget-catalog:widget-catalog"
+    "home-widget-catalog-category:widget-catalog-category"
+
+    # Filament systems
+    "ams:ams"
+
     # Control overlays
     "controls-motion:motion"
     "controls-temperature:nozzle-temp"

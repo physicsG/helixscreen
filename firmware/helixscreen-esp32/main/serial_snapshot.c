@@ -2,14 +2,18 @@
 #include "serial_snapshot.h"
 
 #include "app_boot.h"
+#include "console_command.h"
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_private/freertos_debug.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lvgl.h"
 #include "lvgl_glue.h"
 #include "mbedtls/base64.h"
 #include "miniz.h"
+#include "src/core/lv_global.h"
 #include "touch_input.h"
 
 #include <stdatomic.h>
@@ -19,6 +23,7 @@
 static const char* TAG = "serial_snapshot";
 static atomic_bool s_requested;
 static atomic_bool s_notes_requested;
+static atomic_bool s_stack_requested;
 static atomic_int s_resend_line = -1;
 
 // Reads the console UART through its driver: without one, nothing delivers
@@ -35,17 +40,31 @@ static void reader_task(void* arg) {
         const int c = byte;
         if (c == '\r' || c == '\n') {
             line[len] = '\0';
-            int x = 0;
-            int y = 0;
-            int seq = 0;
-            if (strcmp(line, "snap") == 0) {
+            const console_cmd cmd = console_parse_line(line);
+            switch (cmd.kind) {
+            case CONSOLE_CMD_SNAP:
                 atomic_store(&s_requested, true);
-            } else if (strcmp(line, "notes") == 0) {
+                break;
+            case CONSOLE_CMD_NOTES:
                 atomic_store(&s_notes_requested, true);
-            } else if (sscanf(line, "snapline %d", &seq) == 1) {
-                atomic_store(&s_resend_line, seq);
-            } else if (sscanf(line, "tap %d %d", &x, &y) == 2) {
-                touch_input_inject_tap(x, y);
+                break;
+            case CONSOLE_CMD_STACK:
+                atomic_store(&s_stack_requested, true);
+                break;
+            case CONSOLE_CMD_SNAPLINE:
+                atomic_store(&s_resend_line, cmd.a);
+                break;
+            case CONSOLE_CMD_TAP:
+                touch_input_inject_tap(cmd.a, cmd.b);
+                break;
+            case CONSOLE_CMD_DOWN:
+                touch_input_inject_down(cmd.a, cmd.b);
+                break;
+            case CONSOLE_CMD_UP:
+                touch_input_inject_up();
+                break;
+            case CONSOLE_CMD_NONE:
+                break;
             }
             len = 0;
         } else if (len < sizeof(line) - 1) {
@@ -112,11 +131,69 @@ static void print_line(size_t seq) {
     printf("SNAP:%s%08lx %.*s\n", seq_text, (unsigned long)crc, (int)n, b64);
 }
 
+// One "TASK:" line per FreeRTOS task, fewest free stack bytes first: the
+// least free since the task started, and the span of its stack. The span can
+// read up to 15 bytes under the depth the task was created with, since the
+// port aligns the stack's top to 16 bytes. A task that exits between the
+// state read and its snapshot leaves its own row unreliable and nothing
+// worse: the memory of a freed TCB stays mapped.
+static void print_task_stacks(void) {
+    // Room for a few tasks created between the count and the state read.
+    const UBaseType_t room = uxTaskGetNumberOfTasks() + 4;
+    TaskStatus_t* tasks = heap_caps_malloc(room * sizeof(TaskStatus_t), MALLOC_CAP_SPIRAM);
+    if (!tasks) {
+        printf("TASK: no memory for %u task records\n", (unsigned)room);
+        return;
+    }
+    const UBaseType_t n = uxTaskGetSystemState(tasks, room, NULL);
+    for (UBaseType_t i = 1; i < n; ++i) {
+        const TaskStatus_t t = tasks[i];
+        UBaseType_t j = i;
+        for (; j > 0 && tasks[j - 1].usStackHighWaterMark > t.usStackHighWaterMark; --j) {
+            tasks[j] = tasks[j - 1];
+        }
+        tasks[j] = t;
+    }
+    for (UBaseType_t i = 0; i < n; ++i) {
+        unsigned size = 0;
+        TaskSnapshot_t snap;
+        if (vTaskGetSnapshot(tasks[i].xHandle, &snap) == pdTRUE && tasks[i].pxStackBase &&
+            snap.pxEndOfStack > tasks[i].pxStackBase) {
+            size = (unsigned)((const uint8_t*)snap.pxEndOfStack -
+                              (const uint8_t*)tasks[i].pxStackBase) +
+                   1u;
+        }
+        printf("TASK: %-16.16s min_free=%u size=%u prio=%u\n", tasks[i].pcTaskName,
+               (unsigned)tasks[i].usStackHighWaterMark, size, (unsigned)tasks[i].uxCurrentPriority);
+    }
+    printf("TASK: %u tasks\n", (unsigned)n);
+    heap_caps_free(tasks);
+}
+
 static size_t line_count(void) {
     return (s_dump_len + SNAP_LINE_BYTES - 1) / SNAP_LINE_BYTES;
 }
 
 void serial_snapshot_poll(void) {
+    if (atomic_exchange(&s_stack_requested, false)) {
+        // The high-water mark is the least free stack since boot, so it covers
+        // every screen drawn so far, not just the one showing now.
+        // The internal and PSRAM minimums are likewise the lowest since boot.
+        lv_cache_t* img_cache = LV_GLOBAL_DEFAULT()->img_cache;
+        printf("STACK: ui min_free=%u of %u; internal free=%u largest=%u min_free=%u; "
+               "psram free=%u largest=%u min_free=%u; imgcache=%u of %u\n",
+               (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)lvgl_glue_ui_stack_bytes(),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+               (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
+               img_cache ? (unsigned)lv_cache_get_size(img_cache, NULL) : 0u,
+               img_cache ? (unsigned)lv_cache_get_max_size(img_cache, NULL) : 0u);
+        print_task_stacks();
+        printf("TOUCH: dropped_taps=%u\n", touch_input_dropped_taps());
+    }
     if (atomic_exchange(&s_notes_requested, false)) {
         app_boot_print_notifications();
     }

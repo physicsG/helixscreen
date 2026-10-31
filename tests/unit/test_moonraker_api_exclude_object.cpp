@@ -22,6 +22,7 @@
 #include "../../include/moonraker_client.h"
 #include "../../include/moonraker_client_mock.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
 
 #include <chrono>
@@ -31,27 +32,6 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-// ============================================================================
-// Global LVGL Initialization (called once)
-// ============================================================================
-
-namespace {
-struct LVGLInitializerExcludeObject {
-    LVGLInitializerExcludeObject() {
-        // Only initialize if not already done
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerExcludeObject lvgl_init;
-} // namespace
 
 // ============================================================================
 // Test Fixtures
@@ -62,7 +42,7 @@ static LVGLInitializerExcludeObject lvgl_init;
  *
  * Uses a disconnected MoonrakerClient - validation happens before network I/O.
  */
-class ExcludeObjectTestFixture {
+class ExcludeObjectTestFixture : public LVGLTestFixture {
   public:
     ExcludeObjectTestFixture() {
         // Initialize printer state
@@ -114,7 +94,7 @@ class ExcludeObjectTestFixture {
  *
  * Uses MoonrakerClientMock to verify G-code is sent correctly.
  */
-class ExcludeObjectMockTestFixture {
+class ExcludeObjectMockTestFixture : public LVGLTestFixture {
   public:
     ExcludeObjectMockTestFixture() : mock_client(MoonrakerClientMock::PrinterType::VORON_24) {
         // Initialize printer state
@@ -389,6 +369,84 @@ TEST_CASE_METHOD(ExcludeObjectTestFixture, "exclude_object accepts valid object 
         if (error_called) {
             REQUIRE(captured_error.type != MoonrakerErrorType::VALIDATION_ERROR);
         }
+    }
+}
+
+TEST_CASE_METHOD(ExcludeObjectTestFixture, "exclude_object accepts non-ASCII slicer names",
+                 "[security][valid][print][exclude_utf8]") {
+    auto expect_valid = [this](const std::string& name) {
+        reset_callbacks();
+        api->exclude_object(
+            name, [this]() { this->success_callback(); },
+            [this](const MoonrakerError& err) { this->error_callback(err); });
+        if (error_called) {
+            REQUIRE(captured_error.type != MoonrakerErrorType::VALIDATION_ERROR);
+        }
+    };
+
+    SECTION("Chinese object name from OrcaSlicer") {
+        expect_valid("\xE6\xB5\x8B\xE8\xAF\x95\xE4\xBB\xB6.stl_id_0_copy_0"); // 测试件
+    }
+
+    SECTION("Japanese and accented Latin names") {
+        expect_valid("\xE3\x83\x86\xE3\x82\xB9\xE3\x83\x88-1"); // テスト-1
+        expect_valid("Pi\xC3\xA8"
+                     "ce_d\xC3\xA9"
+                     "tach\xC3\xA9"
+                     "e"); // Pièce_détachée
+    }
+
+    SECTION("Four-byte codepoint") {
+        expect_valid("Part_\xF0\x9F\x9A\x80"); // U+1F680
+    }
+}
+
+TEST_CASE_METHOD(ExcludeObjectTestFixture, "exclude_object rejects malformed UTF-8 names",
+                 "[security][injection][print][exclude_utf8]") {
+    // Malformed UTF-8 cannot be serialized into the JSON-RPC request.
+    auto expect_rejected = [this](const std::string& name) {
+        reset_callbacks();
+        api->exclude_object(
+            name, [this]() { this->success_callback(); },
+            [this](const MoonrakerError& err) { this->error_callback(err); });
+        REQUIRE(error_called);
+        REQUIRE(captured_error.type == MoonrakerErrorType::VALIDATION_ERROR);
+    };
+
+    SECTION("Lone continuation byte") {
+        expect_rejected("Part\x80");
+    }
+    SECTION("Truncated sequence at end") {
+        expect_rejected("Part\xE6\xB5");
+    }
+    SECTION("Lead byte followed by ASCII") {
+        expect_rejected("Part\xE6;G28");
+    }
+    SECTION("Overlong encoding") {
+        expect_rejected("Part\xE0\x82\xA9"); // U+00A9 in three bytes
+    }
+    SECTION("UTF-16 surrogate half") {
+        expect_rejected("Part\xED\xA0\x80");
+    }
+    SECTION("Codepoint above U+10FFFF") {
+        expect_rejected("Part\xF4\x90\x80\x80");
+    }
+    SECTION("C1 control character") {
+        expect_rejected("Part\xC2\x85G28"); // U+0085 NEXT LINE
+    }
+    SECTION("Unicode line separator") {
+        expect_rejected("Part\xE2\x80\xA8G28"); // U+2028
+    }
+    SECTION("Unicode whitespace Klipper strips or splits on") {
+        expect_rejected("Part\xC2\xA0");             // U+00A0 NO-BREAK SPACE
+        expect_rejected("Part\xE1\x9A\x80x");        // U+1680
+        expect_rejected("Part\xE1\xA0\x8Ex");        // U+180E
+        expect_rejected("Part\xE2\x80\x80x");        // U+2000
+        expect_rejected("Part\xE2\x80\x8Ax");        // U+200A
+        expect_rejected("Part\xE2\x80\xA9x");        // U+2029
+        expect_rejected("Part\xE2\x80\xAFx");        // U+202F
+        expect_rejected("Part\xE2\x81\x9Fx");        // U+205F
+        expect_rejected("\xE6\xB5\x8B\xE3\x80\x80"); // 测 then U+3000 IDEOGRAPHIC SPACE
     }
 }
 

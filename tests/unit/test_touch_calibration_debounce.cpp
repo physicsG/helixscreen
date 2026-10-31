@@ -12,7 +12,7 @@
  *
  * The fix: capture the press point on on_press(), commit it on on_release() (or
  * a stall-timeout fallback), gated by a release-IMMUNE time refractory. A second
- * commit within REFRACTORY_MS of the last committed sample is bounce and is
+ * commit within kRefractoryMs of the last committed sample is bounce and is
  * dropped. The behavior is ON by default; HELIX_TOUCH_CAL_DEBOUNCE=0 opts out to
  * the legacy sample-on-press path for A/B testing on real hardware.
  *
@@ -92,7 +92,7 @@ TEST_CASE_METHOD(DebounceFixture,
     REQUIRE(panel_->get_state() == TouchCalibrationPanel::State::POINT_1);
 
     // press@0 / release@5 / press@8 / release@12 / press@15 / release@20 — all
-    // within REFRACTORY_MS of the first commit.
+    // within kRefractoryMs of the first commit.
     advance_to(0);
     panel_->on_press(Point{100, 120});
     advance_to(5);
@@ -133,7 +133,7 @@ TEST_CASE_METHOD(DebounceFixture, "Debounce: deliberate well-spaced taps fill a 
 // ---------------------------------------------------------------------------
 // Case: noise rejection must reset the sample count BEFORE the failure callback
 // runs (#943/#986). The failure callback refreshes the "touch N of 3"
-// instruction label; if it observed current_sample still at SAMPLES_REQUIRED,
+// instruction label; if it observed current_sample still at kSamplesRequired,
 // the "(current_sample + 1) of total" math renders "touch 4 of 3".
 // ---------------------------------------------------------------------------
 TEST_CASE_METHOD(DebounceFixture,
@@ -150,7 +150,7 @@ TEST_CASE_METHOD(DebounceFixture,
     });
 
     // Three well-spaced taps (so all commit) at WIDELY different points — the
-    // sample spread exceeds MAX_SAMPLE_SPREAD so compute_median_point fails.
+    // sample spread exceeds kMaxSampleSpread so compute_median_point fails.
     advance_to(0);
     tap(Point{100, 120});
     advance_to(200);
@@ -164,13 +164,13 @@ TEST_CASE_METHOD(DebounceFixture,
 }
 
 // ---------------------------------------------------------------------------
-// Case 3: Threshold guard — taps spaced JUST over REFRACTORY_MS all commit.
+// Case 3: Threshold guard — taps spaced JUST over kRefractoryMs all commit.
 // ---------------------------------------------------------------------------
 TEST_CASE_METHOD(DebounceFixture, "Debounce: taps just over the refractory window all commit",
                  "[touch][calibration][debounce]") {
     panel_->start();
 
-    const uint32_t spacing = 160; // > REFRACTORY_MS (150)
+    const uint32_t spacing = 160; // > kRefractoryMs (150)
     REQUIRE(spacing > TouchCalibrationPanelTestAccess::refractory_ms());
 
     uint32_t t = 0;
@@ -200,7 +200,7 @@ TEST_CASE_METHOD(DebounceFixture, "Debounce: stall-timeout commits a press with 
     REQUIRE(TouchCalibrationPanelTestAccess::press_pending(*panel_) == true);
 
     // The stall fallback (driven here as the timer would) commits once the press
-    // has been outstanding past STALL_COMMIT_MS.
+    // has been outstanding past kStallCommitMs.
     TouchCalibrationPanelTestAccess::commit_pending_if_stale(*panel_, 650);
 
     REQUIRE(sample_count() == 1);
@@ -220,7 +220,7 @@ TEST_CASE_METHOD(DebounceFixture, "Debounce: full 3-point flow reaches VERIFY",
         for (int s = 0; s < 3; ++s) {
             advance_to(t);
             tap(p);
-            t += 200; // comfortably > REFRACTORY_MS
+            t += 200; // comfortably > kRefractoryMs
         }
     }
 

@@ -19,6 +19,11 @@ bool cache_crash_marker_path_for_signal(const std::string& path);
 /// never cached.
 void clear_crash_marker_signal_safe();
 
+/// Delete the crash-restart marker at @p path. Never throws: a marker that is
+/// absent is the clean-shutdown norm, and one that cannot be removed (a
+/// read-only install, a directory the user cannot write) is logged and left.
+void clear_crash_marker(const std::string& path) noexcept;
+
 /// Path of the crash-restart marker, in the writable config dir.
 const std::string& crash_marker_path();
 

@@ -16,6 +16,10 @@
 // Example: F02DC -> F3 B0 8B 9C
 //
 // Source: https://pictogrammers.com/library/mdi/
+//
+// Glyphs MDI lacks (brand marks) sit in the U+FE000 block, outside the formula
+// above; they come from assets/fonts/helix-custom-icons.ttf, merged into the
+// same faces by scripts/regen_mdi_fonts.sh (CUSTOM_ICONS).
 // =============================================================================
 
 namespace helix::ui::icon {
@@ -30,7 +34,7 @@ struct IconMapping {
 
 // Complete icon mapping table
 // Sorted alphabetically by name for efficient binary search
-static const IconMapping ICON_MAP[] = {
+static const IconMapping kIconMap[] = {
     // Alert/Status icons
     {"alert",              "\xF3\xB0\x80\xA6"},  // F0026 alert/triangle-exclamation
     {"alert_circle",       "\xF3\xB0\x80\xA8"},  // F0028 alert-circle
@@ -94,6 +98,7 @@ static const IconMapping ICON_MAP[] = {
     {"code_tags",          "\xF3\xB0\x85\xB4"},  // F0174 code-tags
     {"cog",                "\xF3\xB0\x92\x93"},  // F0493 cog/settings
     {"cog_outline",        "\xF3\xB0\xA2\xBB"},  // F08BB cog-outline
+    {"cog_refresh",        "\xF3\xB1\x91\x9E"},  // F145E cog-refresh
     {"console",            "\xF3\xB0\x86\x8D"},  // F018D console/terminal
     {"content_copy",       "\xF3\xB0\x86\x8F"},  // F018F content-copy (duplicate)
     {"coolant_temperature","\xF3\xB0\x8F\x88"},  // F03C8 coolant-temperature
@@ -124,9 +129,11 @@ static const IconMapping ICON_MAP[] = {
     // Fan icons
     {"fan",                "\xF3\xB0\x88\x90"},  // F0210 fan
     {"fan_off",            "\xF3\xB0\xA0\x9D"},  // F081D fan-off
-    {"filament",           "\xF3\xB0\xB9\x9B"},  // F0E5B printer-3d-nozzle
-    {"filament_alert",     "\xF3\xB1\x87\x80"},  // F11C0 printer-3d-nozzle-alert
-    {"filament_outline",   "\xF3\xB0\xB9\x9C"},  // F0E5C printer-3d-nozzle-outline
+    {"filament",           "\xF3\xBE\x80\x81"},  // FE001 spool (custom glyph)
+    {"filament_alert",     "\xF3\xBE\x80\x83"},  // FE003 spool-alert (custom glyph)
+    {"filament_outline",   "\xF3\xBE\x80\x82"},  // FE002 spool-outline (custom glyph)
+    {"filament_sensor",    "\xF3\xB0\xB9\x9B"},  // F0E5B printer-3d-nozzle
+    {"filament_sensor_alert", "\xF3\xB1\x87\x80"},  // F11C0 printer-3d-nozzle-alert
     {"filter",             "\xF3\xB0\x88\xB2"},  // F0232 filter (funnel)
     {"fine_tune",          "\xF3\xB0\x98\xAE"},  // F062E tune
     {"fire",               "\xF3\xB0\x88\xB8"},  // F0238 fire
@@ -202,6 +209,9 @@ static const IconMapping ICON_MAP[] = {
     {"move",               "\xF3\xB0\x81\x8C"},  // F004C arrow-expand-all
     {"network",            "\xF3\xB0\x88\x80"},  // F0200 ethernet (network)
     {"notifications",      "\xF3\xB0\x82\x9A"},  // F009A bell
+    {"nozzle",             "\xF3\xB0\xB9\x9B"},  // F0E5B printer-3d-nozzle
+    {"nozzle_alert",       "\xF3\xB1\x87\x80"},  // F11C0 printer-3d-nozzle-alert
+    {"nozzle_outline",     "\xF3\xB0\xB9\x9C"},  // F0E5C printer-3d-nozzle-outline
 
     {"palette",            "\xF3\xB0\x8F\x98"},  // F03D8 palette (color sensors)
 
@@ -244,6 +254,7 @@ static const IconMapping ICON_MAP[] = {
     {"radiator",           "\xF3\xB0\x90\xB8"},  // F0438 radiator
     {"redo",               "\xF3\xB0\x91\x8E"},  // F044E redo (clockwise arrow - tighten)
     {"refresh",            "\xF3\xB0\x91\x90"},  // F0450 refresh
+    {"remote_desktop",     "\xF3\xB0\xA2\xB9"},  // F08B9 remote-desktop (screen driven from a browser)
     {"restart",            "\xF3\xB0\x9C\x89"},  // F0709 restart
     {"resume",             "\xF3\xB0\x90\x8C"},  // F040C play-circle (resume)
     {"robot",              "\xF3\xB0\x9A\xA9"},  // F06A9 robot (auto-controlled)
@@ -267,7 +278,7 @@ static const IconMapping ICON_MAP[] = {
     {"speed_down",         "\xF3\xB0\xBE\x86"},  // F0F86 speedometer-slow
     {"speed_up",           "\xF3\xB0\xBE\x85"},  // F0F85 speedometer-medium
     {"spirit_level",       "\xF3\xB1\x93\xB1"},  // F14F1 spirit-level (QGL/Z-Tilt)
-    {"spoolman",           "\xF3\xB0\x88\xAF"},  // F022F film (same as filament)
+    {"spoolman",           "\xF3\xBE\x80\x80"},  // FE000 Spoolman logo (custom glyph)
     {"star",               "\xF3\xB0\x93\x8E"},  // F04CE star (favorites/recent)
     {"stop",               "\xF3\xB0\x93\x9B"},  // F04DB stop
     {"swap_horizontal",    "\xF3\xB0\x93\xA1"},  // F04E1 swap-horizontal
@@ -346,7 +357,7 @@ static const IconMapping ICON_MAP[] = {
 // clang-format on
 
 // Number of icons in the mapping table
-static constexpr size_t ICON_MAP_SIZE = sizeof(ICON_MAP) / sizeof(ICON_MAP[0]);
+static constexpr size_t kIconMapSize = sizeof(kIconMap) / sizeof(kIconMap[0]);
 
 /**
  * @brief Look up an icon codepoint by name
@@ -359,14 +370,14 @@ inline const char* lookup_codepoint(const char* name) {
 
     // Binary search for efficiency (table is sorted alphabetically)
     size_t left = 0;
-    size_t right = ICON_MAP_SIZE;
+    size_t right = kIconMapSize;
 
     while (left < right) {
         size_t mid = left + (right - left) / 2;
-        int cmp = strcmp(name, ICON_MAP[mid].name);
+        int cmp = strcmp(name, kIconMap[mid].name);
 
         if (cmp == 0) {
-            return ICON_MAP[mid].codepoint;
+            return kIconMap[mid].codepoint;
         } else if (cmp < 0) {
             right = mid;
         } else {

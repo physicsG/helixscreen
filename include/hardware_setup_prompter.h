@@ -6,13 +6,20 @@
 #include "lvgl/lvgl.h"
 #include "wizard_step.h" // helix::wizard::StepId
 
+#include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace helix {
 
 class AsyncLifetimeGuard;
 class PrinterDiscovery;
+
+/// Notification-history action id that reopens the printer type mismatch review.
+inline constexpr const char* kReviewPrinterTypeAction = "review_printer_type";
+inline constexpr const char* kMismatchToastClosedAction = "type_mismatch_closed";
 
 /// Which hardware prompt a discovery pass launches. At most one per pass: the gates
 /// below make the three reasons mutually exclusive.
@@ -53,6 +60,10 @@ class HardwareSetupPrompter {
     HardwareSetupPrompter(AsyncLifetimeGuard& lifetime, std::function<lv_obj_t*()> screen,
                           std::function<IMoonrakerAPI*()> api)
         : lifetime_(lifetime), screen_(std::move(screen)), api_(std::move(api)) {}
+    ~HardwareSetupPrompter();
+
+    HardwareSetupPrompter(const HardwareSetupPrompter&) = delete;
+    HardwareSetupPrompter& operator=(const HardwareSetupPrompter&) = delete;
 
     /// A discovery cycle is starting: a reconnect may offer the reconfig wizard again.
     void begin_discovery_cycle() {
@@ -69,9 +80,10 @@ class HardwareSetupPrompter {
         /// a reconnect cannot re-ask. The persisted per-printer marker stops it across
         /// sessions: cleared as soon as the user answers either way.
         bool deferred_prompt_shown = false;
-        /// The saved-vs-detected type mismatch warning shows at most once per session,
-        /// whichever button dismisses it. The persisted TYPE_MISMATCH_SHOWN_FOR flag covers
-        /// cross-boot. Not re-armed on reconnect, only on a new printer.
+        /// The saved-vs-detected type mismatch warning (toast + history entry) is raised
+        /// at most once per session. The persisted TYPE_MISMATCH_SHOWN_FOR flag, written
+        /// by an answer in the review modal or by closing the toast (both mean "keep my
+        /// type"), covers cross-boot. Not re-armed on reconnect, only on a new printer.
         bool type_mismatch_shown = false;
     };
     Guards guards;
@@ -91,14 +103,51 @@ class HardwareSetupPrompter {
     /// internally; safe to call from a main-thread on_complete.
     void reapply_hardware_roles();
 
+    /// Open the Choose Model / Keep current review for the mismatch warning numbered
+    /// @p generation. Reached from that warning's toast button and history entry. Shows
+    /// nothing, and says so at info, when that warning is no longer the pending one (a
+    /// printer switch or a newer warning replaced it), or the saved type has since
+    /// changed or been settled.
+    void show_type_mismatch_review(uint32_t generation);
+
+    /// Remote-control demo: raise the mismatch warning for these names without the
+    /// detection that decides it. @p open_review opens the review at once, skipping
+    /// the saved-type checks a demo's names would fail against the mock's config.
+    void show_type_mismatch_demo(const std::string& detected, int confidence,
+                                 const std::string& saved, bool open_review);
+
   private:
+    friend class HardwareSetupPrompterTestAccess;
+
+    /// What the review modal says, captured when the warning fires so a later tap from
+    /// notification history still has it.
+    struct TypeMismatchReview {
+        std::string detected;
+        int confidence = 0;
+        std::string saved;
+    };
+
     void launch_reconfig_wizard(std::vector<wizard::StepId> steps);
     void prompt_deferred_hardware_setup(std::vector<wizard::StepId> steps);
     void launch_deferred_hardware_setup();
     void settle_deferred_hardware_setup();
     void maybe_warn_type_mismatch(const PrinterDiscovery& hardware);
+    void warn_type_mismatch(TypeMismatchReview review);
+    /// Build the review modal for the pending warning, unless one is already open.
+    void open_type_mismatch_review();
     void launch_type_reidentify_wizard();
     void settle_type_mismatch_warning();
+    /// A user-closed mismatch toast settles the warning: keep the saved type
+    /// and stop asking, exactly like the review modal's "Keep current".
+    void settle_type_mismatch_on_close(uint32_t generation);
+    /// Whether warning @p generation is still the live, unanswered one for the
+    /// saved type. A spent warning is dropped here; @p what names the caller in
+    /// the log line that says why nothing happened.
+    bool pending_review_current(uint32_t generation, const char* what);
+    /// Run @p launch once the confirming modal's exit animation is over. One launch is
+    /// pending at a time; the destructor cancels it.
+    void launch_after_modal_exit(void (HardwareSetupPrompter::*launch)());
+    void cancel_launch_timer();
 
     AsyncLifetimeGuard& lifetime_;
     std::function<lv_obj_t*()> screen_;
@@ -106,6 +155,18 @@ class HardwareSetupPrompter {
 
     // Steps the deferred offer runs if accepted, held for the confirm callback's timer.
     std::vector<wizard::StepId> pending_steps_;
+
+    std::optional<TypeMismatchReview> pending_review_;
+    /// Numbers each warning; bumped by every warning and by a printer switch, so a
+    /// toast or history entry left from an earlier one cannot open a later review.
+    uint32_t review_generation_ = 0;
+    bool review_handler_registered_ = false;
+    /// The review modal is up: set when it opens, cleared by either button and by any
+    /// other dismissal.
+    bool review_open_ = false;
+
+    lv_timer_t* launch_timer_ = nullptr;
+    void (HardwareSetupPrompter::*pending_launch_)() = nullptr;
 };
 
 } // namespace helix

@@ -6,7 +6,9 @@
 #include "hv/hurl.h"
 #include "i_moonraker_client.h"
 #include "json_utils.h"
+#include "text_io.h"
 
+#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 #include <chrono>
@@ -66,6 +68,12 @@ SpoolInfo helix::spoolman_detail::parse_spool_info(const nlohmann::json& spool_j
         info.nozzle_temp_min = info.nozzle_temp_max = info.nozzle_temp_recommended;
         info.bed_temp_min = info.bed_temp_max = info.bed_temp_recommended;
 
+        if (filament.contains("extra") && filament["extra"].is_object()) {
+            if (auto k = parse_extra_number(filament["extra"], kSpoolmanPaExtraKey)) {
+                info.pressure_advance = static_cast<float>(*k);
+            }
+        }
+
         // Fallback: use filament definition weight when spool initial_weight is null/0.
         // Spoolman's initial_weight is optional; filament.weight is the canonical
         // net weight for this filament type.
@@ -86,6 +94,42 @@ SpoolInfo helix::spoolman_detail::parse_spool_info(const nlohmann::json& spool_j
     }
 
     return info;
+}
+
+std::optional<double> helix::spoolman_detail::parse_extra_number(const nlohmann::json& extra,
+                                                                 const std::string& key) {
+    if (!extra.is_object()) {
+        return std::nullopt;
+    }
+    auto it = extra.find(key);
+    if (it == extra.end()) {
+        return std::nullopt;
+    }
+    if (it->is_number()) {
+        return it->get<double>();
+    }
+    if (!it->is_string()) {
+        return std::nullopt;
+    }
+    // The stored string is itself JSON: a bare number, or a quoted one for a
+    // text field.
+    const auto decoded = nlohmann::json::parse(it->get<std::string>(), nullptr, false);
+    if (decoded.is_number()) {
+        return decoded.get<double>();
+    }
+    if (decoded.is_string()) {
+        return helix::text_io::parse_leading<double>(decoded.get<std::string>());
+    }
+    return std::nullopt;
+}
+
+std::string helix::spoolman_detail::encode_extra_number(const std::string& field_type,
+                                                        double value) {
+    const std::string number = fmt::format("{:.4f}", value);
+    if (field_type == "text") {
+        return nlohmann::json(number).dump();
+    }
+    return number;
 }
 
 std::optional<ExternalFilament>
@@ -366,6 +410,74 @@ void MoonrakerSpoolmanAPI::update_spoolman_filament(int filament_id,
             if (on_success) {
                 on_success();
             }
+        },
+        on_error);
+}
+
+void MoonrakerSpoolmanAPI::set_spoolman_filament_extra_number(
+    int filament_id, const std::string& key, const std::string& display_name, double value,
+    SuccessCallback on_success, ErrorCallback on_error) {
+    spdlog::info("[SpoolmanAPI] Setting filament {} extra '{}' to {}", filament_id, key, value);
+
+    // Older Spoolman (0.22 among them) replaces a filament's whole extra dict on
+    // PATCH, so the write carries every key the filament already has.
+    auto patch = [this, filament_id, key, value, on_success,
+                  on_error](const std::string& field_type) {
+        json get_params;
+        get_params["request_method"] = "GET";
+        get_params["path"] = "/v1/filament/" + std::to_string(filament_id);
+        client_.send_jsonrpc(
+            "server.spoolman.proxy", get_params,
+            [this, filament_id, key, value, field_type, on_success,
+             on_error](const json& response) {
+                // Without the filament there is nothing to merge into, and an
+                // older Spoolman would take the one-key dict as all there is.
+                if (!response.contains("result") || !response["result"].is_object()) {
+                    spdlog::warn("[SpoolmanAPI] Filament {} read back no object; not writing",
+                                 filament_id);
+                    if (on_error) {
+                        on_error(MoonrakerError::unknown("Spoolman returned no filament to update",
+                                                         "server.spoolman.proxy"));
+                    }
+                    return;
+                }
+                nlohmann::json extra = nlohmann::json::object();
+                const auto& filament = response["result"];
+                const auto it = filament.find("extra");
+                if (it != filament.end() && it->is_object()) {
+                    extra = *it;
+                }
+                extra[key] = spoolman_detail::encode_extra_number(field_type, value);
+                nlohmann::json body;
+                body["extra"] = extra;
+                update_spoolman_filament(filament_id, body, on_success, on_error);
+            },
+            on_error);
+    };
+
+    json list_params;
+    list_params["request_method"] = "GET";
+    list_params["path"] = "/v1/field/filament";
+    client_.send_jsonrpc(
+        "server.spoolman.proxy", list_params,
+        [this, key, display_name, patch, on_error](const json& response) {
+            if (response.contains("result") && response["result"].is_array()) {
+                for (const auto& field : response["result"]) {
+                    if (safe_string(field, "key") == key) {
+                        // Write in whatever type the field already has: a user
+                        // who defined it as text gets text, never a type change.
+                        patch(safe_string(field, "field_type"));
+                        return;
+                    }
+                }
+            }
+            json define_params;
+            define_params["request_method"] = "POST";
+            define_params["path"] = "/v1/field/filament/" + key;
+            define_params["body"] = {{"name", display_name}, {"field_type", "float"}};
+            client_.send_jsonrpc(
+                "server.spoolman.proxy", define_params,
+                [patch](const json& /*response*/) { patch("float"); }, on_error);
         },
         on_error);
 }

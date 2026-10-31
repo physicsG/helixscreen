@@ -20,7 +20,7 @@ namespace helix::ui {
  * Follows the same spacer-based virtualization pattern as PrintSelectListView.
  *
  * ## Key Features:
- * - Fixed widget pool (POOL_SIZE rows created once)
+ * - Fixed widget pool (kPoolSize rows created once)
  * - Leading/trailing spacers for smooth scroll virtualization
  * - Imperative row updates (no per-row subjects)
  * - Spool canvas color, weight, percentage, low stock, active indicator
@@ -31,8 +31,8 @@ namespace helix::ui {
  */
 class SpoolmanListView : public ContainerDeleteNet {
   public:
-    static constexpr int POOL_SIZE = 20;  ///< Fixed pool of spool row widgets
-    static constexpr int BUFFER_ROWS = 2; ///< Extra rows above/below viewport
+    static constexpr int kPoolSize = 20;  ///< Fixed pool of spool row widgets
+    static constexpr int kBufferRows = 2; ///< Extra rows above/below viewport
 
     /// Cached child widget pointers for a pool row (avoids lv_obj_find_by_name per scroll)
     struct RowWidgets {

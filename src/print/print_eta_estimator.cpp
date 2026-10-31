@@ -25,7 +25,7 @@ int PrintEtaEstimator::remaining_seconds(const PrintEtaInputs& in) {
     }
 
     if (progress < 1) {
-        return NO_ESTIMATE;
+        return kNoEstimate;
     }
 
     // Too early to extrapolate: a handful of seconds against a whole job turns
@@ -39,11 +39,11 @@ int PrintEtaEstimator::remaining_seconds(const PrintEtaInputs& in) {
             static_cast<double>(in.print_duration_s) * (100 - progress) / progress;
 
         // Early on, damp the extrapolation toward the slicer's estimate. The
-        // weight falls to zero at BLEND_BELOW_PCT, so the two agree at the
+        // weight falls to zero at kBlendBelowPct, so the two agree at the
         // handover and the number does not jump as the blend switches off.
-        if (progress < BLEND_BELOW_PCT && in.slicer_estimate_s > 0) {
+        if (progress < kBlendBelowPct && in.slicer_estimate_s > 0) {
             const double slicer_weight =
-                static_cast<double>(BLEND_BELOW_PCT - progress) / BLEND_BELOW_PCT;
+                static_cast<double>(kBlendBelowPct - progress) / kBlendBelowPct;
             const double slicer_remaining =
                 static_cast<double>(in.slicer_estimate_s) * (100.0 - progress) / 100.0;
             raw_remaining =
@@ -68,7 +68,7 @@ int PrintEtaEstimator::remaining_seconds(const PrintEtaInputs& in) {
         return in.slicer_estimate_s * (100 - progress) / 100;
     }
 
-    return NO_ESTIMATE;
+    return kNoEstimate;
 }
 
 } // namespace helix

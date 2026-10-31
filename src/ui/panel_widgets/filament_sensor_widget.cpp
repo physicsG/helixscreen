@@ -6,6 +6,7 @@
 #include "ui_event_safety.h"
 #include "ui_resume_dispatch.h"
 #include "ui_settings_sensors.h"
+#include "ui_unload_lane_choice.h"
 
 #include "ams_backend.h"
 #include "ams_state.h"
@@ -329,14 +330,29 @@ void FilamentSensorWidget::show_tap_modal(bool status_only) {
 
 void FilamentSensorWidget::dispatch_load() {
     AmsBackend* backend = AmsState::instance().get_backend();
-    // No slot picker on this tile either — mirrors PrintStatusWidget::dispatch_load().
-    const int slot = backend ? backend->get_current_slot() : -1;
+    // No slot picker on this tile: the runout names its head.
+    const int slot = helix::ui::runout_target_slot(
+        backend, helix::FilamentSensorManager::instance().real_runout_lane(), /*load=*/true);
     helix::ui::execute_filament_load(backend, slot, "[FilamentSensorWidget]");
 }
 
 void FilamentSensorWidget::dispatch_unload() {
     AmsBackend* backend = AmsState::instance().get_backend();
-    const int slot = backend ? backend->get_current_slot() : -1;
+    const int slot = helix::ui::runout_target_slot(
+        backend, helix::FilamentSensorManager::instance().real_runout_lane(), /*load=*/false);
+
+    // A backend that cannot name the lane in the toolhead asks first, the same
+    // question every other Unload asks.
+    if (slot < 0) {
+        lv_obj_t* dialog = tap_modal_.dialog();
+        helix::ui::FilamentOpSurface surface;
+        surface.log_tag = "[FilamentSensorWidget]";
+        if (helix::ui::ask_lane_then_unload(
+                backend, dialog ? lv_obj_find_by_name(dialog, "btn_unload_filament") : nullptr,
+                surface, lifetime_.token())) {
+            return;
+        }
+    }
 
     // unload_target_is_loaded()'s is_current_slot arm is what makes this
     // reachable during a runout: the lane's own sensor clears while filament
@@ -381,7 +397,7 @@ void FilamentSensorWidget::rebind_source() {
             (void)self;
             lv_subject_set_int(&tile_state_subject_, value);
         },
-        FilamentSensorManager::instance().get_subjects_lifetime());
+        FilamentSensorManager::instance().subjects_lifetime());
 }
 
 } // namespace helix

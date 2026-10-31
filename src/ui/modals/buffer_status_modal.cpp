@@ -43,10 +43,10 @@ lv_subject_t BufferStatusModal::gear_sync_value_subject_;
 char BufferStatusModal::gear_sync_buf_[32]{};
 lv_subject_t BufferStatusModal::flow_value_subject_;
 char BufferStatusModal::flow_buf_[32]{};
-lv_subject_t BufferStatusModal::afc_state_subject_;
-char BufferStatusModal::afc_state_buf_[128]{};
-lv_subject_t BufferStatusModal::afc_distance_subject_;
-char BufferStatusModal::afc_distance_buf_[128]{};
+lv_subject_t BufferStatusModal::state_subject_;
+char BufferStatusModal::state_buf_[128]{};
+lv_subject_t BufferStatusModal::fault_distance_subject_;
+char BufferStatusModal::fault_distance_buf_[128]{};
 
 BufferStatusModal::BufferStatusModal() {
     init_subjects();
@@ -85,10 +85,9 @@ void BufferStatusModal::init_subjects() {
     lv_subject_init_string(&gear_sync_value_subject_, gear_sync_buf_, nullptr,
                            sizeof(gear_sync_buf_), "");
     lv_subject_init_string(&flow_value_subject_, flow_buf_, nullptr, sizeof(flow_buf_), "");
-    lv_subject_init_string(&afc_state_subject_, afc_state_buf_, nullptr, sizeof(afc_state_buf_),
-                           "");
-    lv_subject_init_string(&afc_distance_subject_, afc_distance_buf_, nullptr,
-                           sizeof(afc_distance_buf_), "");
+    lv_subject_init_string(&state_subject_, state_buf_, nullptr, sizeof(state_buf_), "");
+    lv_subject_init_string(&fault_distance_subject_, fault_distance_buf_, nullptr,
+                           sizeof(fault_distance_buf_), "");
 
     lv_xml_register_subject(nullptr, "buf_type", &type_subject_);
     lv_xml_register_subject(nullptr, "buf_show_meter", &show_meter_subject_);
@@ -105,8 +104,8 @@ void BufferStatusModal::init_subjects() {
     lv_xml_register_subject(nullptr, "buf_espooler_value", &espooler_value_subject_);
     lv_xml_register_subject(nullptr, "buf_gear_sync_value", &gear_sync_value_subject_);
     lv_xml_register_subject(nullptr, "buf_flow_value", &flow_value_subject_);
-    lv_xml_register_subject(nullptr, "buf_afc_state", &afc_state_subject_);
-    lv_xml_register_subject(nullptr, "buf_afc_distance", &afc_distance_subject_);
+    lv_xml_register_subject(nullptr, "buf_state", &state_subject_);
+    lv_xml_register_subject(nullptr, "buf_fault_distance", &fault_distance_subject_);
 
     subjects_initialized_ = true;
 }
@@ -132,21 +131,27 @@ helix::BufferReading BufferStatusModal::populate(const helix::AmsSystemInfo& inf
     lv_subject_copy_string(&target_subject_, helix::buffer_target_text(r).c_str());
     lv_subject_copy_string(&trace_caption_subject_, helix::buffer_trace_caption(r));
 
-    if (info.type == helix::AmsType::HAPPY_HARE) {
+    switch (helix::ams_type_traits(info.type).buffer_rows) {
+    case helix::AmsBufferRows::SyncDrive: {
         lv_subject_set_int(&type_subject_, 1);
 
-        // eSpooler
-        if (!info.espooler_state.empty()) {
-            lv_subject_set_int(&show_espooler_subject_, 1);
-            if (info.espooler_state == "rewind") {
-                lv_subject_copy_string(&espooler_value_subject_, lv_tr("Rewinding"));
-            } else if (info.espooler_state == "assist") {
-                lv_subject_copy_string(&espooler_value_subject_, lv_tr("Assisting"));
-            } else {
-                lv_subject_copy_string(&espooler_value_subject_, info.espooler_state.c_str());
-            }
-        } else {
+        // Spool motor
+        switch (info.spool_motor) {
+        case helix::SpoolMotorAction::None:
             lv_subject_set_int(&show_espooler_subject_, 0);
+            break;
+        case helix::SpoolMotorAction::Rewinding:
+            lv_subject_set_int(&show_espooler_subject_, 1);
+            lv_subject_copy_string(&espooler_value_subject_, lv_tr("Rewinding"));
+            break;
+        case helix::SpoolMotorAction::Assisting:
+            lv_subject_set_int(&show_espooler_subject_, 1);
+            lv_subject_copy_string(&espooler_value_subject_, lv_tr("Assisting"));
+            break;
+        case helix::SpoolMotorAction::Other:
+            lv_subject_set_int(&show_espooler_subject_, 1);
+            lv_subject_copy_string(&espooler_value_subject_, info.espooler_state.c_str());
+            break;
         }
 
         // Gear sync
@@ -165,11 +170,12 @@ helix::BufferReading BufferStatusModal::populate(const helix::AmsSystemInfo& inf
         } else {
             lv_subject_set_int(&show_flow_subject_, 0);
         }
-
-    } else if (info.type == helix::AmsType::AFC) {
+        break;
+    }
+    case helix::AmsBufferRows::UnitBuffer: {
         lv_subject_set_int(&type_subject_, 2);
 
-        // AFC's rows describe one unit's buffer: the one asked for, else the
+        // These rows describe one unit's buffer: the one asked for, else the
         // one the reading came from.
         const int unit_index = helix::buffer_view_unit(info, effective_unit);
         bool found_health = false;
@@ -180,25 +186,28 @@ helix::BufferReading BufferStatusModal::populate(const helix::AmsSystemInfo& inf
                 found_health = true;
 
                 // State
-                if (!bh.state.empty()) {
-                    if (bh.state == "Advancing") {
-                        lv_subject_copy_string(&afc_state_subject_,
-                                               lv_tr("Feeding filament forward"));
-                    } else if (bh.state == "Trailing") {
-                        lv_subject_copy_string(&afc_state_subject_, lv_tr("Pulling filament back"));
-                    } else {
+                switch (bh.motion) {
+                case helix::BufferMotion::Advancing:
+                    lv_subject_copy_string(&state_subject_, lv_tr("Feeding filament forward"));
+                    break;
+                case helix::BufferMotion::Trailing:
+                    lv_subject_copy_string(&state_subject_, lv_tr("Pulling filament back"));
+                    break;
+                case helix::BufferMotion::Unknown:
+                    if (!bh.state.empty()) {
                         auto s = fmt::format("{}: {}", lv_tr("State"), bh.state);
-                        lv_subject_copy_string(&afc_state_subject_, s.c_str());
+                        lv_subject_copy_string(&state_subject_, s.c_str());
+                    } else {
+                        lv_subject_copy_string(&state_subject_, "");
                     }
-                } else {
-                    lv_subject_copy_string(&afc_state_subject_, "");
+                    break;
                 }
 
                 // Distance
                 if (bh.fault_detection_enabled && bh.distance_to_fault >= 0) {
                     auto d = fmt::format("{:.1f} mm {}", bh.distance_to_fault,
                                          lv_tr("remaining before clog detection triggers"));
-                    lv_subject_copy_string(&afc_distance_subject_, d.c_str());
+                    lv_subject_copy_string(&fault_distance_subject_, d.c_str());
                     lv_subject_set_int(&show_distance_subject_, 1);
                 } else {
                     lv_subject_set_int(&show_distance_subject_, 0);
@@ -206,21 +215,27 @@ helix::BufferReading BufferStatusModal::populate(const helix::AmsSystemInfo& inf
             }
         }
         if (!found_health) {
-            lv_subject_copy_string(&afc_state_subject_, lv_tr("No buffer data available"));
+            lv_subject_copy_string(&state_subject_, lv_tr("No buffer data available"));
             lv_subject_set_int(&show_distance_subject_, 0);
         }
-    } else if (r.source == helix::BufferSource::Fps) {
-        // A pressure sensor outside AFC (OpenAMS): the reading is all there is.
-        lv_subject_set_int(&type_subject_, 3);
-    } else {
-        // Neither buffer backend. Stock CFS, AD5X IFS, tool changers, ACE,
-        // Snapmaker and QIDI report none of this. Every body section binds
-        // hidden unless buf_type is 1, 2 or 3, so this message is the dialog's
-        // whole body. The modal is reachable from the AMS panel as well as the
-        // tile, so it has to answer rather than rely on the tile's gate.
-        lv_subject_set_int(&type_subject_, 0);
-        lv_subject_copy_string(&unsupported_subject_,
-                               lv_tr("This filament system does not report buffer or flow data."));
+        break;
+    }
+    case helix::AmsBufferRows::None:
+        if (r.source == helix::BufferSource::Fps) {
+            // A pressure sensor with no rows of its own (OpenAMS): the reading
+            // is all there is.
+            lv_subject_set_int(&type_subject_, 3);
+        } else {
+            // No buffer this system reports. Every body section binds hidden
+            // unless buf_type is 1, 2 or 3, so this message is the dialog's
+            // whole body. The modal is reachable from the AMS panel as well as
+            // the tile, so it has to answer rather than rely on the tile's gate.
+            lv_subject_set_int(&type_subject_, 0);
+            lv_subject_copy_string(
+                &unsupported_subject_,
+                lv_tr("This filament system does not report buffer or flow data."));
+        }
+        break;
     }
     return r;
 }
@@ -239,8 +254,8 @@ void BufferStatusModal::on_show() {
     // (which runs in Modal::show and forces all labels white on dark backgrounds)
     if (dialog()) {
         auto muted = theme_manager_get_color("text_muted");
-        static const char* label_names[] = {"lbl_espooler", "lbl_gear_sync", "lbl_clog",
-                                            "lbl_flow",     "lbl_afc_clog",  nullptr};
+        static const char* label_names[] = {"lbl_espooler", "lbl_gear_sync", "lbl_clog", "lbl_flow",
+                                            nullptr};
         for (const char** name = label_names; *name; ++name) {
             lv_obj_t* lbl = lv_obj_find_by_name(dialog(), *name);
             if (lbl)

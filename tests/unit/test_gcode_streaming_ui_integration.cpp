@@ -54,7 +54,7 @@ class TempGCodeFile {
 };
 
 // Multi-layer G-code for testing
-const std::string MULTI_LAYER_GCODE = R"(
+const std::string kMultiLayerGcode = R"(
 ; Test file for streaming integration
 G28
 G1 Z0.3 F1000
@@ -138,7 +138,7 @@ TEST_CASE("GCodeStreamingConfig decision logic", "[gcode][streaming][config]") {
 // =============================================================================
 
 TEST_CASE("GCodeLayerRenderer streaming integration", "[gcode][streaming][renderer]") {
-    TempGCodeFile temp_file(MULTI_LAYER_GCODE);
+    TempGCodeFile temp_file(kMultiLayerGcode);
 
     SECTION("renderer starts with no data source") {
         GCodeLayerRenderer renderer;
@@ -284,7 +284,7 @@ TEST_CASE("Streaming controller prefetch integration", "[gcode][streaming]") {
 // =============================================================================
 
 TEST_CASE("Streaming controller async open integration", "[gcode][streaming][async]") {
-    TempGCodeFile temp_file(MULTI_LAYER_GCODE);
+    TempGCodeFile temp_file(kMultiLayerGcode);
 
     SECTION("async open completes and renderer can be attached") {
         GCodeStreamingController controller;
@@ -324,7 +324,7 @@ TEST_CASE("Streaming controller async open integration", "[gcode][streaming][asy
 // =============================================================================
 
 TEST_CASE("Ghost mode behavior in streaming mode", "[gcode][streaming][renderer]") {
-    TempGCodeFile temp_file(MULTI_LAYER_GCODE);
+    TempGCodeFile temp_file(kMultiLayerGcode);
     GCodeStreamingController controller;
     REQUIRE(controller.open_file(temp_file.path()));
 

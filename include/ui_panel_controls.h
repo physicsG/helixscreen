@@ -69,7 +69,7 @@ class ControlsPanel : public PanelBase {
      * @param printer_state Reference to helix::PrinterState
      * @param api Pointer to IMoonrakerAPI (may be nullptr)
      */
-    ControlsPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    ControlsPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     ~ControlsPanel() override;
 
@@ -172,7 +172,7 @@ class ControlsPanel : public PanelBase {
     char nozzle_temp_buf_[32] = {};
     lv_subject_t nozzle_pct_subject_{};
     lv_subject_t nozzle_status_subject_{}; ///< duty text ("" = none)
-    char nozzle_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = {};
+    char nozzle_status_buf_[helix::ui::temperature::kHeaterStatusBufBytes] = {};
     lv_subject_t nozzle_status_state_subject_{}; ///< HeaterStatusState int
 
     // Bed temperature display
@@ -180,12 +180,12 @@ class ControlsPanel : public PanelBase {
     char bed_temp_buf_[32] = {};
     lv_subject_t bed_pct_subject_{};
     lv_subject_t bed_status_subject_{}; ///< duty text ("" = none)
-    char bed_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = {};
+    char bed_status_buf_[helix::ui::temperature::kHeaterStatusBufBytes] = {};
     lv_subject_t bed_status_state_subject_{}; ///< HeaterStatusState int
 
     // Chamber temperature display
     lv_subject_t chamber_status_subject_{}; ///< duty text ("" = none)
-    char chamber_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = {};
+    char chamber_status_buf_[helix::ui::temperature::kHeaterStatusBufBytes] = {};
     lv_subject_t chamber_status_state_subject_{}; ///< HeaterStatusState int
 
     // Heating icon animators (nozzle/bed/chamber), bound from the panel's own
@@ -200,6 +200,11 @@ class ControlsPanel : public PanelBase {
     char more_sensors_buf_[48] = {};
     lv_subject_t more_sensors_count_{};
     void update_more_sensors();
+
+    // Calibration & Tools grid: cells sized for the tiles visible after layout,
+    // fitted to the grid's own box (fit_tile_grid); labels only where they fit
+    lv_subject_t calib_grid_labels_{};
+    static void update_calib_grid(lv_obj_t* grid);
 
     // Fan speed display
     lv_subject_t fan_speed_subject_{};
@@ -417,8 +422,8 @@ class ControlsPanel : public PanelBase {
 
     /// Hands the shared success/error callbacks to whichever API entry point
     /// runs this quick action's command.
-    using QuickActionDispatch =
-        std::function<void(IMoonrakerAPI::SuccessCallback, IMoonrakerAPI::ErrorCallback)>;
+    using QuickActionDispatch = std::function<void(helix::IMoonrakerAPI::SuccessCallback,
+                                                   helix::IMoonrakerAPI::ErrorCallback)>;
 
     /**
      * @brief Run one guarded quick action end to end.

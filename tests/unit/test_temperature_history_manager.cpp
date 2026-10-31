@@ -21,6 +21,8 @@
 #include "../../include/temperature_sensor_manager.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
+#include "../test_helpers/discovery_of_objects.h"
 #include "../test_helpers/temperature_history_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
@@ -38,31 +40,10 @@
 using namespace helix;
 using namespace helix::ui;
 // ============================================================================
-// Global LVGL Initialization
-// ============================================================================
-
-namespace {
-struct LVGLInitializerTempHistory {
-    LVGLInitializerTempHistory() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerTempHistory lvgl_init;
-} // namespace
-
-// ============================================================================
 // Test Fixture
 // ============================================================================
 
-class TemperatureHistoryManagerTestFixture {
+class TemperatureHistoryManagerTestFixture : public LVGLTestFixture {
     static bool queue_initialized;
 
   public:
@@ -275,21 +256,21 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
 TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
                  "TemperatureHistoryManager evicts oldest samples at HISTORY_SIZE",
                  "[temperature_history]") {
-    // Given: we fill the buffer with HISTORY_SIZE samples
+    // Given: we fill the buffer with kHistorySize samples
     int64_t base_ts = now_ms();
 
-    for (int i = 0; i < TemperatureHistoryManager::HISTORY_SIZE; ++i) {
-        int64_t ts = base_ts + (i * TemperatureHistoryManager::SAMPLE_INTERVAL_MS);
+    for (int i = 0; i < TemperatureHistoryManager::kHistorySize; ++i) {
+        int64_t ts = base_ts + (i * TemperatureHistoryManager::kSampleIntervalMs);
         bool stored = TemperatureHistoryManagerTestAccess::add_sample(*manager_, "extruder",
                                                                       2000 + i, 2100, ts);
         REQUIRE(stored);
     }
 
-    REQUIRE(manager_->get_sample_count("extruder") == TemperatureHistoryManager::HISTORY_SIZE);
+    REQUIRE(manager_->get_sample_count("extruder") == TemperatureHistoryManager::kHistorySize);
 
     // When: we add one more sample
-    int64_t overflow_ts = base_ts + (TemperatureHistoryManager::HISTORY_SIZE *
-                                     TemperatureHistoryManager::SAMPLE_INTERVAL_MS);
+    int64_t overflow_ts = base_ts + (TemperatureHistoryManager::kHistorySize *
+                                     TemperatureHistoryManager::kSampleIntervalMs);
     // 3999 deci (399.9°C): a distinct in-range sentinel. NOT 9999 — the history
     // recorder now rejects temp_deci > 4000 (bogus/disconnect spike, the upper
     // analog of the drop-to-0 floor reject), so an out-of-range value would be
@@ -298,8 +279,8 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
                                                                            3999, 2100, overflow_ts);
     REQUIRE(overflow_stored);
 
-    // Then: count stays at HISTORY_SIZE (oldest evicted)
-    REQUIRE(manager_->get_sample_count("extruder") == TemperatureHistoryManager::HISTORY_SIZE);
+    // Then: count stays at kHistorySize (oldest evicted)
+    REQUIRE(manager_->get_sample_count("extruder") == TemperatureHistoryManager::kHistorySize);
 
     // And: newest sample is present
     auto samples = manager_->get_samples("extruder");
@@ -466,7 +447,7 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
         for (int i = 0; i < 100 && !stop; ++i) {
             TemperatureHistoryManagerTestAccess::add_sample(
                 *manager_, "extruder", 2000 + i, 2100,
-                ts + (i * TemperatureHistoryManager::SAMPLE_INTERVAL_MS));
+                ts + (i * TemperatureHistoryManager::kSampleIntervalMs));
             writes_completed++;
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
@@ -684,12 +665,12 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
     // min_temp: -100 so Klipper tolerates it. Every sample is rejected, which
     // used to mean every sample was logged: 19,098 of 20,000 crash-ring lines
     // in bundle 6QWNVZY5 were this one message.
-    constexpr int64_t SAMPLES = 600; // ten minutes at 1 Hz
+    constexpr int64_t kSamples = 600; // ten minutes at 1 Hz
     const int64_t base = now_ms();
     const int64_t lines_before =
         TemperatureHistoryManagerTestAccess::reject_log(*manager_).log_events();
 
-    for (int64_t i = 0; i < SAMPLES; ++i) {
+    for (int64_t i = 0; i < kSamples; ++i) {
         const bool stored = TemperatureHistoryManagerTestAccess::add_sample(
             *manager_, "extruder4", -700, 0, base + i * 1000);
         // Rejection behaviour itself is unchanged.
@@ -700,7 +681,7 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
     const auto& policy = TemperatureHistoryManagerTestAccess::reject_log(*manager_);
 
     // Every drop is still accounted for...
-    CHECK(policy.dropped_in_run("extruder4") == SAMPLES);
+    CHECK(policy.dropped_in_run("extruder4") == kSamples);
     // ...but the recorder asked for only a handful of lines, not 600.
     const int64_t lines = policy.log_events() - lines_before;
     CHECK(lines > 0);
@@ -742,7 +723,7 @@ TEST_CASE_METHOD(TemperatureHistoryManagerTestFixture,
     auto& tsm = helix::sensors::TemperatureSensorManager::instance();
     tsm.init_subjects();
     tsm.set_sync_mode(true);
-    tsm.discover({"heater_generic filament_dryer"});
+    tsm.discover(helix::test::discovery_of({"heater_generic filament_dryer"}));
     // A manager built after discovery subscribes to what discovery found. (The
     // fixture's was built before the sensor manager's subjects existed here.)
     manager_ = std::make_unique<TemperatureHistoryManager>(printer_state_);

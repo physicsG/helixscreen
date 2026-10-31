@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- Filament sensor indicator - nozzle icon showing sensor state -->
+<!-- Filament sensor indicator - sensor icon showing sensor state -->
 <component>
   <api>
     <!-- Per-instance rung subject from the owning tile. Empty by default, so
@@ -19,20 +19,20 @@
         extends="lv_obj" width="content" height="content" style_pad_all="0" scrollable="false">
     <!-- Hidden only when no sensor configured (value=-1) -->
     <bind_flag_if_eq subject="$subject" flag="hidden" ref_value="-1"/>
-    <!-- Loaded: green nozzle -->
-    <icon src="filament" size="$size" variant="success">
+    <!-- Loaded: green sensor -->
+    <icon src="filament_sensor" size="$size" variant="success">
       <bind_tile_rung ladder="icon" subject="$rung_subject"/>
 
       <bind_flag_if_not_eq subject="$subject" flag="hidden" ref_value="1"/>
     </icon>
-    <!-- Empty: red nozzle-alert -->
-    <icon src="filament_alert" size="$size" variant="danger">
+    <!-- Empty: red sensor-alert -->
+    <icon src="filament_sensor_alert" size="$size" variant="danger">
       <bind_tile_rung ladder="icon" subject="$rung_subject"/>
 
       <bind_flag_if_not_eq subject="$subject" flag="hidden" ref_value="0"/>
     </icon>
-    <!-- Sensor disabled: muted nozzle (runout protection is off) -->
-    <icon src="filament" size="$size" variant="disabled">
+    <!-- Sensor disabled: muted sensor (runout protection is off) -->
+    <icon src="filament_sensor" size="$size" variant="disabled">
       <bind_tile_rung ladder="icon" subject="$rung_subject"/>
 
       <bind_flag_if_not_eq subject="$subject" flag="hidden" ref_value="2"/>

@@ -30,6 +30,11 @@ setup() {
     mock_command_script "killall" 'exit 0'
     mock_command_script "setterm" 'exit 0'
 
+    # No DRM card, so the launcher never runs helix-screen --probe-egl and
+    # every launch counted is a real one, whatever /dev/dri this host has.
+    export HELIX_DRI_DIR="$BATS_TEST_TMPDIR/dri"
+    mkdir -p "$HELIX_DRI_DIR"
+
     export MOCK_INSTALL="$BATS_TEST_TMPDIR/helixscreen"
     mkdir -p "$MOCK_INSTALL/bin" "$MOCK_INSTALL/config"
 

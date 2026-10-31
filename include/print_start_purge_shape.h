@@ -28,11 +28,11 @@ namespace helix {
 /// rejects more load and tool-change pushes; shorter shows the purge sooner.
 /// Three seconds outlasts the stop-start pushes of a load while a blob or chute
 /// purge, which runs for many seconds, still shows near its start.
-inline constexpr uint64_t PURGE_FLOW_SUSTAIN_MS = 3000;
+inline constexpr uint64_t kPurgeFlowSustainMs = 3000;
 
 /// XY drift, from the flow's first sample, that still counts as the head
 /// holding still. Absorbs position rounding only; a purge line leaves it at once.
-inline constexpr double PURGE_XY_STILL_MM = 1.0;
+inline constexpr double kPurgeXyStillMm = 1.0;
 
 /**
  * @brief Tracks one stretch of forward extrusion with the head held still
@@ -43,11 +43,11 @@ inline constexpr double PURGE_XY_STILL_MM = 1.0;
  */
 class PurgeFlowTracker {
   public:
-    /// @return true while the current stretch has lasted PURGE_FLOW_SUSTAIN_MS
+    /// @return true while the current stretch has lasted kPurgeFlowSustainMs
     bool note_sample(uint64_t ms, bool extruding_forward, double x, double y, double z) {
         const bool continues = start_ms_ && extruding_forward &&
-                               std::fabs(x - x0_) <= PURGE_XY_STILL_MM &&
-                               std::fabs(y - y0_) <= PURGE_XY_STILL_MM && z >= last_z_;
+                               std::fabs(x - x0_) <= kPurgeXyStillMm &&
+                               std::fabs(y - y0_) <= kPurgeXyStillMm && z >= last_z_;
         if (!continues) {
             start_ms_.reset();
             if (extruding_forward) {
@@ -57,7 +57,7 @@ class PurgeFlowTracker {
             }
         }
         last_z_ = z;
-        return start_ms_ && ms - *start_ms_ >= PURGE_FLOW_SUSTAIN_MS;
+        return start_ms_ && ms - *start_ms_ >= kPurgeFlowSustainMs;
     }
 
     void reset() {

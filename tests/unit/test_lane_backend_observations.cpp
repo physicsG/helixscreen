@@ -134,8 +134,8 @@ class RefusedGcodeAfc : public AmsBackendAfc {
     bool refuse_set_color = false;
     bool refuse_set_material = false;
 
-    helix::AmsError execute_gcode(const std::string& gcode, std::function<void()>,
-                                  std::function<void(const MoonrakerError&)> on_error,
+    helix::AmsError execute_gcode(const std::string& gcode, helix::SharedCallback<void()>,
+                                  helix::SharedCallback<void(const MoonrakerError&)> on_error,
                                   bool /*silent*/ = true) override {
         const bool refused = (refuse_set_color && gcode.rfind("SET_COLOR ", 0) == 0) ||
                              (refuse_set_material && gcode.rfind("SET_MATERIAL ", 0) == 0);
@@ -239,7 +239,7 @@ void init_afc_lanes(AmsBackendAfc& backend) {
 /// One AFC lane_data payload, the Moonraker DB snapshot, keyed by lane name.
 void feed_afc_lane_data(AmsBackendAfc& backend, const nlohmann::json& lane_data) {
     std::lock_guard<std::mutex> lock(AfcTestAccess::mutex(backend));
-    AfcTestAccess::parse_lane_data(backend, lane_data);
+    AfcTestAccess::apply_lane_data(backend, helix::afc::parse_lane_data(lane_data));
 }
 
 /// One AFC_stepper lane object, delivered the way Moonraker delivers it: a
@@ -1005,7 +1005,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "clearing the colour keeps the guard the write
     // its own - yet firmware still holds the green it was given and restates
     // it on every frame, which is still the echo of our earlier write.
     auto cleared = harness->get_slot_info(0);
-    cleared.color_rgb = helix::AMS_DEFAULT_SLOT_COLOR;
+    cleared.color_rgb = helix::kAmsDefaultSlotColor;
     helix::test::edit_slot_as_user(*harness, 0, cleared);
 
     feed_afc_lane(*harness, "lane1", {{"color", "#00FF00"}});
@@ -1147,7 +1147,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     const auto info = harness->get_slot_info(0);
     CHECK(info.material.empty());
-    CHECK(info.color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    CHECK(info.color_rgb == helix::kAmsDefaultSlotColor);
     CHECK(info.remaining_weight_g == -1.0F);
     CHECK(info.total_weight_g == -1.0F);
     CHECK(info.brand.empty());
@@ -1518,7 +1518,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "an unreadable colour leaves AFC's record stan
     const auto cleared = lane_sources(harness.lane(1));
     REQUIRE(cleared.vendor_cache.has_value());
     CHECK_FALSE(cleared.vendor_cache->color_rgb.has_value());
-    CHECK(harness->get_slot_info(1).color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    CHECK(harness->get_slot_info(1).color_rgb == helix::kAmsDefaultSlotColor);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "Happy Hare splits gate status from gate metadata",
@@ -1768,7 +1768,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "an unreadable Happy Hare colour leaves the re
     const auto cleared = lane_sources(harness.lane(0));
     REQUIRE(cleared.vendor_cache.has_value());
     CHECK_FALSE(cleared.vendor_cache->color_rgb.has_value());
-    CHECK(harness->get_slot_info(0).color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    CHECK(harness->get_slot_info(0).color_rgb == helix::kAmsDefaultSlotColor);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "Happy Hare files the colour its numeric gate map states",
@@ -2957,7 +2957,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Snapmaker files no colour for a tag that carr
     SnapmakerHarness harness(nullptr, nullptr);
 
     // A tag with an identity but no ARGB_COLOR. SnapmakerRfidInfo::color_rgb
-    // rests on AMS_DEFAULT_SLOT_COLOR, which is that struct's "no reading" and
+    // rests on kAmsDefaultSlotColor, which is that struct's "no reading" and
     // not a grey a vendor printed on a spool.
     feed_filament_detect(*harness, nlohmann::json{
                                        {"state", nlohmann::json::array({1, 1})},
@@ -2983,7 +2983,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Snapmaker files no colour for a tag that carr
     CHECK_FALSE(lane.vendor_cache->brand.has_value());
     // The sentinel still reaches SlotInfo, so the record's silence is the only
     // place the difference between "grey" and "no reading" survives.
-    CHECK(harness->get_slot_info(0).color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    CHECK(harness->get_slot_info(0).color_rgb == helix::kAmsDefaultSlotColor);
 
     const auto silent = lane_sources(harness.lane(1));
     REQUIRE(silent.vendor_cache.has_value());
@@ -3079,7 +3079,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a tool changer senses docking and declares no
     // asserted here because they are what a read-back of the merged struct
     // would have filed.
     CHECK(harness->get_slot_info(0).spool_name == "T0");
-    CHECK(harness->get_slot_info(0).color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    CHECK(harness->get_slot_info(0).color_rgb == helix::kAmsDefaultSlotColor);
     CHECK_FALSE(lane.vendor_cache.has_value());
 
     const auto second = lane_sources(harness.lane(1));
@@ -3221,10 +3221,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker tag that stops naming a vendor re
     REQUIRE(harness->get_slot_info(0).spool_name == "Silk");
 
     // The firmware spelling "NONE". The record retracts, because whole-record
-    // replacement means it states what THIS read said. SlotInfo keeps the old
-    // value, because its guards test the literal and it has no way to say "no
-    // longer stated". This is the one input where the two layers disagree, and
-    // the disagreement is deliberate.
+    // replacement means it states what THIS read said, and the spool name
+    // retracts with it: firmware stores NONE for a write that sent no product
+    // line, so a kept name would outlive the spool it described. SlotInfo's
+    // brand keeps the old value, because its guard tests the literal and
+    // print_task_config restates the vendor on its own.
     feed_filament_detect(*harness, nlohmann::json{
                                        {"state", nlohmann::json::array({1})},
                                        {"info", nlohmann::json::array({nlohmann::json{
@@ -3241,11 +3242,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker tag that stops naming a vendor re
     CHECK_FALSE(spelled_none.vendor_cache->brand.has_value());
     CHECK_FALSE(spelled_none.vendor_cache->product_name.has_value());
     CHECK(harness->get_slot_info(0).brand == "Snapmaker");
-    CHECK(harness->get_slot_info(0).spool_name == "Silk");
+    CHECK(harness->get_slot_info(0).spool_name.empty());
 
-    // An ABSENT key is the other spelling of the same silence, and here the two
-    // layers agree: both guards let the empty string through to SlotInfo, so it
-    // blanks rather than keeping.
+    // An ABSENT key is the other spelling of the same silence, and both layers
+    // blank on it.
     feed_filament_detect(*harness, nlohmann::json{
                                        {"state", nlohmann::json::array({1})},
                                        {"info", nlohmann::json::array({nlohmann::json{
@@ -3317,204 +3317,23 @@ TEST_CASE_METHOD(LVGLTestFixture, "Snapmaker's print_task_config writes identity
     CHECK(*lane.vendor_cache->color_rgb == 0xED2C2Cu);
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "Snapmaker's own write-back does not return as a vendor reading",
+TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker edit leaves the tag's next reading whole",
                  "[lane][ingest][snapmaker]") {
-    // The write-back needs a real API behind it: /printer/filament_detect/set
-    // is only POSTed when one is attached, and that POST is what the parse has
-    // to recognise on the way back.
+    // A user edit reaches firmware as SET_PRINT_FILAMENT_CONFIG, which writes
+    // print_task_config and nothing the tag reader reports. So the tag's next
+    // reading on the same spool is the tag's, even where it states exactly
+    // what the user typed.
     MockPrinter mock_printer;
     auto& api = mock_printer.api;
 
     SnapmakerHarness harness(&api, nullptr);
 
     const auto tag_uid = nlohmann::json::array({144, 32, 196, 2});
-
     feed_filament_detect(*harness, nlohmann::json{
                                        {"state", nlohmann::json::array({1})},
                                        {"info", nlohmann::json::array({nlohmann::json{
                                                     {"MAIN_TYPE", "PLA"},
                                                     {"MANUFACTURER", "Snapmaker"},
-                                                    {"SUB_TYPE", "Silk"},
-                                                    {"ARGB_COLOR", 0xFFED2C2C},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    const auto read = lane_sources(harness.lane(0));
-    REQUIRE(read.vendor_cache.has_value());
-    REQUIRE(read.vendor_cache->color_rgb.has_value());
-    CHECK(*read.vendor_cache->color_rgb == 0xED2C2Cu);
-
-    // The user edits through the production path, which POSTs VENDOR /
-    // MAIN_TYPE / SUB_TYPE / RGB_1 into filament_detect.info.
-    auto edit = harness->get_slot_info(0);
-    edit.brand = "Polymaker";
-    edit.material = "PETG";
-    edit.spool_name = "Matte";
-    edit.color_rgb = 0x00FF00u;
-    REQUIRE(helix::test::apply_edit(*harness, 0, edit).success());
-    REQUIRE(api.rest_mock().mock_get_post_history().size() == 1);
-    REQUIRE(api.rest_mock().mock_get_post_history()[0].endpoint == "/printer/filament_detect/set");
-
-    // Firmware reports the write back through the same object the tag uses,
-    // with the same key spellings, on the same physical spool. WEIGHT is the
-    // control: nothing POSTs it, so it is a genuine reading and must still be
-    // filed while the four echoed fields are withheld.
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PETG"},
-                                                    {"MANUFACTURER", "Polymaker"},
-                                                    {"SUB_TYPE", "Matte"},
-                                                    {"ARGB_COLOR", 0xFF00FF00},
-                                                    {"WEIGHT", 1000},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    const auto echoed = lane_sources(harness.lane(0));
-    REQUIRE(echoed.vendor_cache.has_value());
-    REQUIRE(echoed.vendor_cache->total_weight_g.has_value());
-    CHECK(*echoed.vendor_cache->total_weight_g == 1000.0F);
-    CHECK_FALSE(echoed.vendor_cache->material.has_value());
-    CHECK_FALSE(echoed.vendor_cache->brand.has_value());
-    CHECK_FALSE(echoed.vendor_cache->product_name.has_value());
-    CHECK_FALSE(echoed.vendor_cache->color_rgb.has_value());
-
-    // The same tag, re-read, reporting what is physically printed on it rather
-    // than what we wrote. The UID has not moved, so the echo is still
-    // outstanding, but these values are not the ones we sent and the guard
-    // must let every one of them through. Suppressing on the mere existence of
-    // an outstanding write, instead of on an exact value match, would lose a
-    // genuine reading here.
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PLA"},
-                                                    {"MANUFACTURER", "Snapmaker"},
-                                                    {"SUB_TYPE", "Silk"},
-                                                    {"ARGB_COLOR", 0xFFED2C2C},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    const auto reasserted = lane_sources(harness.lane(0));
-    REQUIRE(reasserted.vendor_cache.has_value());
-    CHECK(reasserted.vendor_cache->material == "PLA");
-    CHECK(reasserted.vendor_cache->brand == "Snapmaker");
-    CHECK(reasserted.vendor_cache->product_name == "Silk");
-    REQUIRE(reasserted.vendor_cache->color_rgb.has_value());
-    CHECK(*reasserted.vendor_cache->color_rgb == 0xED2C2Cu);
-
-    // A different CARD_UID is a different physical spool, so the same values
-    // are now a tag stating them rather than firmware repeating us.
-    feed_filament_detect(*harness,
-                         nlohmann::json{
-                             {"state", nlohmann::json::array({1})},
-                             {"info", nlohmann::json::array({nlohmann::json{
-                                          {"MAIN_TYPE", "PETG"},
-                                          {"MANUFACTURER", "Polymaker"},
-                                          {"SUB_TYPE", "Matte"},
-                                          {"ARGB_COLOR", 0xFF00FF00},
-                                          {"CARD_UID", nlohmann::json::array({9, 9, 9, 9})},
-                                      }})},
-                         });
-
-    const auto swapped = lane_sources(harness.lane(0));
-    REQUIRE(swapped.vendor_cache.has_value());
-    CHECK(swapped.vendor_cache->material == "PETG");
-    CHECK(swapped.vendor_cache->brand == "Polymaker");
-    CHECK(swapped.vendor_cache->product_name == "Matte");
-    REQUIRE(swapped.vendor_cache->color_rgb.has_value());
-    CHECK(*swapped.vendor_cache->color_rgb == 0x00FF00u);
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "clearing a Snapmaker spool ends its echo suppression",
-                 "[lane][ingest][snapmaker]") {
-    // The write-back needs a real API behind it: the POST is what arms the
-    // guard, and the clear has to end what that edit armed.
-    MockPrinter mock_printer;
-    auto& api = mock_printer.api;
-
-    SnapmakerHarness harness(&api, nullptr);
-
-    const auto tag_uid = nlohmann::json::array({144, 32, 196, 2});
-
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PLA"},
-                                                    {"MANUFACTURER", "Snapmaker"},
-                                                    {"ARGB_COLOR", 0xFFED2C2C},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    auto edit = harness->get_slot_info(0);
-    edit.material = "PETG";
-    edit.color_rgb = 0x00FF00u;
-    REQUIRE(helix::test::apply_edit(*harness, 0, edit).success());
-    REQUIRE(api.rest_mock().mock_get_post_history().size() == 1);
-
-    // The echo, still on the same tag: withheld.
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PETG"},
-                                                    {"ARGB_COLOR", 0xFF00FF00},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-    const auto echoed = lane_sources(harness.lane(0));
-    CHECK_FALSE(echoed.vendor_cache->material.has_value());
-    CHECK_FALSE(echoed.vendor_cache->color_rgb.has_value());
-
-    // The Clear Spool gesture funnels through clear_slot_override. The spool
-    // is being emptied deliberately, so the same frame afterwards is the
-    // machine's own state, not an echo to hide.
-    harness->clear_slot_override(0);
-
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PETG"},
-                                                    {"ARGB_COLOR", 0xFF00FF00},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    const auto after = lane_sources(harness.lane(0));
-    REQUIRE(after.vendor_cache.has_value());
-    CHECK(after.vendor_cache->material == "PETG");
-    REQUIRE(after.vendor_cache->color_rgb.has_value());
-    CHECK(*after.vendor_cache->color_rgb == 0x00FF00u);
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker write firmware refused withholds nothing",
-                 "[lane][ingest][snapmaker]") {
-    // Stock firmware carries no /printer/filament_detect/set, so the POST 404s
-    // and the values never reach the machine. Nothing is going to echo them,
-    // and a guard left armed would withhold the tag's own reading of those
-    // fields until the spool changes.
-    MockPrinter mock_printer;
-    auto& api = mock_printer.api;
-
-    RestResponse not_found;
-    not_found.success = false;
-    not_found.status_code = 404;
-    not_found.error = "Not Found";
-    api.rest_mock().mock_queue_post_response("/printer/filament_detect/set", not_found);
-
-    SnapmakerHarness harness(&api, nullptr);
-
-    const auto tag_uid = nlohmann::json::array({144, 32, 196, 2});
-
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PLA"},
-                                                    {"MANUFACTURER", "Snapmaker"},
-                                                    {"SUB_TYPE", "Silk"},
                                                     {"ARGB_COLOR", 0xFFED2C2C},
                                                     {"CARD_UID", tag_uid},
                                                 }})},
@@ -3523,25 +3342,15 @@ TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker write firmware refused withholds 
     auto edit = harness->get_slot_info(0);
     edit.brand = "Polymaker";
     edit.material = "PETG";
-    edit.spool_name = "Matte";
     edit.color_rgb = 0x00FF00u;
     REQUIRE(helix::test::apply_edit(*harness, 0, edit).success());
-    REQUIRE(api.rest_mock().mock_get_post_history().size() == 1);
+    CHECK(api.rest_mock().mock_get_post_history().empty());
 
-    // The refusal reaches the guard through the response callback, which
-    // marshals to the main thread before touching the backend.
-    helix::ui::UpdateQueue::instance().drain();
-
-    // The same physical spool, read again, now stating exactly what the user
-    // typed: they typed what the tag already said, or another writer put it
-    // there. With no write outstanding these are the tag's statement, and the
-    // WEIGHT alongside them is the control that a record was filed at all.
     feed_filament_detect(*harness, nlohmann::json{
                                        {"state", nlohmann::json::array({1})},
                                        {"info", nlohmann::json::array({nlohmann::json{
                                                     {"MAIN_TYPE", "PETG"},
                                                     {"MANUFACTURER", "Polymaker"},
-                                                    {"SUB_TYPE", "Matte"},
                                                     {"ARGB_COLOR", 0xFF00FF00},
                                                     {"WEIGHT", 1000},
                                                     {"CARD_UID", tag_uid},
@@ -3550,139 +3359,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker write firmware refused withholds 
 
     const auto read = lane_sources(harness.lane(0));
     REQUIRE(read.vendor_cache.has_value());
-    REQUIRE(read.vendor_cache->total_weight_g.has_value());
-    CHECK(*read.vendor_cache->total_weight_g == 1000.0F);
     CHECK(read.vendor_cache->material == "PETG");
     CHECK(read.vendor_cache->brand == "Polymaker");
-    CHECK(read.vendor_cache->product_name == "Matte");
     REQUIRE(read.vendor_cache->color_rgb.has_value());
     CHECK(*read.vendor_cache->color_rgb == 0x00FF00u);
-}
-
-TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker refusal answers only the edit it was sent for",
-                 "[lane][ingest][snapmaker]") {
-    // Two saves in a row: the first POST is refused, and its failure answer
-    // marshals to the main thread only after the second save has staged its
-    // own declaration. The refusal belongs to the first edit, so it may not
-    // cancel the second's guard.
-    MockPrinter mock_printer;
-    auto& api = mock_printer.api;
-
-    RestResponse not_found;
-    not_found.success = false;
-    not_found.status_code = 404;
-    not_found.error = "Not Found";
-    api.rest_mock().mock_queue_post_response("/printer/filament_detect/set", not_found);
-
-    SnapmakerHarness harness(&api, nullptr);
-
-    const auto tag_uid = nlohmann::json::array({144, 32, 196, 2});
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PLA"},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    auto first = harness->get_slot_info(0);
-    first.material = "PETG";
-    REQUIRE(helix::test::apply_edit(*harness, 0, first).success());
-    REQUIRE(api.rest_mock().mock_get_post_history().size() == 1);
-
-    // The second save is accepted; it restages the slot before the first's
-    // refusal is delivered.
-    RestResponse ok;
-    ok.success = true;
-    ok.status_code = 200;
-    ok.data = {{"result", "ok"}};
-    api.rest_mock().mock_queue_post_response("/printer/filament_detect/set", ok);
-    auto second = harness->get_slot_info(0);
-    second.material = "ABS";
-    REQUIRE(helix::test::apply_edit(*harness, 0, second).success());
-
-    // The refusal of the first edit arrives now.
-    helix::ui::UpdateQueue::instance().drain();
-
-    // Firmware repeats the second write back on the same spool. WEIGHT is the
-    // control that a record was filed at all; the material is an echo of the
-    // edit whose write is still outstanding and must not file.
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "ABS"},
-                                                    {"WEIGHT", 1000},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    const auto echoed = lane_sources(harness.lane(0));
-    REQUIRE(echoed.vendor_cache.has_value());
-    REQUIRE(echoed.vendor_cache->total_weight_g.has_value());
-    CHECK(*echoed.vendor_cache->total_weight_g == 1000.0F);
-    CHECK_FALSE(echoed.vendor_cache->material.has_value());
-}
-
-TEST_CASE_METHOD(LVGLTestFixture,
-                 "Snapmaker withholds only the fields the user moved, not the whole write-back",
-                 "[lane][ingest][snapmaker]") {
-    MockPrinter mock_printer;
-    auto& api = mock_printer.api;
-
-    SnapmakerHarness harness(&api, nullptr);
-
-    const auto tag_uid = nlohmann::json::array({144, 32, 196, 2});
-    const auto tag = nlohmann::json{
-        {"state", nlohmann::json::array({1})},
-        {"info", nlohmann::json::array({nlohmann::json{
-                     {"MAIN_TYPE", "PLA"},
-                     {"MANUFACTURER", "Snapmaker"},
-                     {"SUB_TYPE", "Silk"},
-                     {"ARGB_COLOR", 0xFFED2C2C},
-                     {"CARD_UID", tag_uid},
-                 }})},
-    };
-
-    feed_filament_detect(*harness, tag);
-
-    // The user changes the COLOUR and nothing else. commit_slot_edit files a
-    // strict delta, so LocalUser will hold the colour alone.
-    auto edit = harness->get_slot_info(0);
-    REQUIRE(edit.brand == "Snapmaker");
-    REQUIRE(edit.material == "PLA");
-    REQUIRE(edit.spool_name == "Silk");
-    edit.color_rgb = 0x00FF00u;
-    REQUIRE(helix::test::apply_edit(*harness, 0, edit).success());
-
-    // apply_user_edit POSTs the whole merged struct, so VENDOR / MAIN_TYPE /
-    // SUB_TYPE went out carrying the tag's own strings.
-    const auto history = api.rest_mock().mock_get_post_history();
-    REQUIRE(history.size() == 1);
-    const nlohmann::json body = history[0].body["info"];
-    REQUIRE(body["VENDOR"].get<std::string>() == "Snapmaker");
-    REQUIRE(body["MAIN_TYPE"].get<std::string>() == "PLA");
-    REQUIRE(body["SUB_TYPE"].get<std::string>() == "Silk");
-
-    // Firmware reports all four back. Only the colour is the user's
-    // declaration; the other three are the tag's own values making a round
-    // trip, and no other source holds them, so they must be filed.
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PLA"},
-                                                    {"MANUFACTURER", "Snapmaker"},
-                                                    {"SUB_TYPE", "Silk"},
-                                                    {"ARGB_COLOR", 0xFF00FF00},
-                                                    {"CARD_UID", tag_uid},
-                                                }})},
-                                   });
-
-    const auto lane = lane_sources(harness.lane(0));
-    REQUIRE(lane.vendor_cache.has_value());
-    CHECK(lane.vendor_cache->material == "PLA");
-    CHECK(lane.vendor_cache->brand == "Snapmaker");
-    CHECK(lane.vendor_cache->product_name == "Silk");
-    CHECK_FALSE(lane.vendor_cache->color_rgb.has_value());
+    REQUIRE(read.vendor_cache->total_weight_g.has_value());
+    CHECK(*read.vendor_cache->total_weight_g == 1000.0F);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "a Spoolman link declares the binding, not the values it carries",
@@ -4269,7 +3951,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a Qidi palette grey is the no-colour sentinel
         *harness, nlohmann::json{{"box_count", 1}, {"color_slot0", 1}, {"color_slot1", 2}});
 
     // The palette row reaches the slot, because the Box did name a colour id.
-    REQUIRE(harness->get_slot_info(0).color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    REQUIRE(harness->get_slot_info(0).color_rgb == helix::kAmsDefaultSlotColor);
 
     const auto grey = lane_sources(harness.lane(0));
     REQUIRE(grey.vendor_cache.has_value());
@@ -4497,7 +4179,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "the mock's colour sentinel is not a grey anyb
     REQUIRE(harness->sync_external_identity(0, black).success());
 
     auto colourless = harness->get_slot_info(1);
-    colourless.color_rgb = helix::AMS_DEFAULT_SLOT_COLOR;
+    colourless.color_rgb = helix::kAmsDefaultSlotColor;
     colourless.material = "Grey-PLA";
     REQUIRE(harness->sync_external_identity(1, colourless).success());
 
@@ -4533,7 +4215,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "the factory mock is registered before it star
 
     REQUIRE(ams.backend_count() == 1);
 
-    // A backend answers INVALID_LANE_ID for every slot until registration
+    // A backend answers kInvalidLaneId for every slot until registration
     // stamps its index, so a population published before that lands on no lane
     // and every record here reads empty.
     const auto lane = lane_sources(helix::ams::lane_id_for(0, 0));
@@ -4614,25 +4296,6 @@ class StartedStorelessToolChanger : public AmsBackendToolChanger {
 class ResyncableAfc : public AmsBackendAfc {
   public:
     using AmsBackendAfc::AmsBackendAfc;
-
-    [[nodiscard]] bool firmware_publishes_lane_identity() const override {
-        return false;
-    }
-
-    helix::ams::FilamentSlotOverrideStore* lane_record_store() override {
-        return store_.get();
-    }
-
-    std::unique_ptr<helix::ams::FilamentSlotOverrideStore> store_;
-};
-
-/// A Snapmaker backend a resync can run on, the same two gates flipped. The
-/// case below reaches the guard through the production edit path, so the
-/// consult has to find AmsBackendSnapmaker's own override to withhold
-/// anything.
-class ResyncableSnapmaker : public AmsBackendSnapmaker {
-  public:
-    using AmsBackendSnapmaker::AmsBackendSnapmaker;
 
     [[nodiscard]] bool firmware_publishes_lane_identity() const override {
         return false;
@@ -5010,52 +4673,6 @@ TEST_CASE_METHOD(LVGLTestFixture, "a stale stored record does not release a live
     CHECK_FALSE(echoed.vendor_cache->material.has_value());
 }
 
-TEST_CASE_METHOD(LVGLTestFixture, "Snapmaker's resync consults its own echo guard",
-                 "[lane][ingest][resync][snapmaker]") {
-    // The edit's guard is armed on the way to a real POST, so this reaches it
-    // through the production path rather than staging by hand.
-    MockPrinter mock_printer;
-    auto& api = mock_printer.api;
-
-    // The real backend answers firmware_publishes_lane_identity() == true, so
-    // only the flipped gates below can bring a resync to its guard. Finding
-    // nothing there would file the stored echo whole.
-    RegisteredBackend<ResyncableSnapmaker> harness(&api, nullptr);
-
-    feed_filament_detect(*harness, nlohmann::json{
-                                       {"state", nlohmann::json::array({1})},
-                                       {"info", nlohmann::json::array({nlohmann::json{
-                                                    {"MAIN_TYPE", "PLA"},
-                                                    {"MANUFACTURER", "Snapmaker"},
-                                                    {"ARGB_COLOR", 0xFFED2C2C},
-                                                }})},
-                                   });
-
-    auto edit = harness->get_slot_info(0);
-    edit.material = "PETG";
-    edit.color_rgb = 0x00FF00u;
-    REQUIRE(helix::test::apply_edit(*harness, 0, edit).success());
-    REQUIRE(api.rest_mock().mock_get_post_history().size() == 1);
-
-    // A stored record carrying exactly what the edit wrote. The vendor is the
-    // control: nothing declared it, so it files and proves the resync read
-    // the document.
-    LaneDataDb db;
-    db.seed("T0",
-            nlohmann::json{
-                {"lane", "0"}, {"material", "PETG"}, {"color", "#00FF00"}, {"vendor", "Prusa"}});
-    harness->store_ = db.store("snapmaker", helix::ams::LaneKeyStyle::Tool);
-
-    harness->request_resync();
-    helix::ui::UpdateQueue::instance().drain();
-
-    const auto echoed = lane_sources(harness.lane(0));
-    REQUIRE(echoed.remembered.has_value());
-    CHECK(echoed.remembered->brand == "Prusa");
-    CHECK_FALSE(echoed.remembered->material.has_value());
-    CHECK_FALSE(echoed.remembered->color_rgb.has_value());
-}
-
 // --- The six that do not ---------------------------------------------------
 
 TEST_CASE_METHOD(LVGLTestFixture,
@@ -5295,7 +4912,7 @@ const CachedSlotBackend kCachedSlotBackends[] = {
          harness->set_discovered_tools({"T0", "T1"});
          feed_toolchanger(
              *harness, nlohmann::json{{"toolchanger", {{"status", "ready"}, {"tool_number", 0}}}});
-         expect_repaint_shows_filing(*harness, harness.lane(0), helix::AMS_DEFAULT_SLOT_COLOR);
+         expect_repaint_shows_filing(*harness, harness.lane(0), helix::kAmsDefaultSlotColor);
      }},
 };
 
@@ -5322,10 +4939,365 @@ TEST_CASE_METHOD(LVGLTestFixture,
     filed.spoolman_id = 7;
     filed.color_rgb = kFiledColor;
     helix::ams::ingest(harness.lane(0), filed);
-    REQUIRE(harness->get_slot_info(0).color_rgb == helix::AMS_DEFAULT_SLOT_COLOR);
+    REQUIRE(harness->get_slot_info(0).color_rgb == helix::kAmsDefaultSlotColor);
 
     feed_toolchanger(*harness,
                      nlohmann::json{{"toolchanger", {{"status", "ready"}, {"tool_number", 0}}}});
 
     CHECK(harness->get_slot_info(0).color_rgb == kFiledColor);
+}
+
+// Clear Spool hands the lane back to the machine. The spool name goes with the
+// user's record, and what stands afterwards is the product line the tag itself
+// states, or nothing.
+TEST_CASE_METHOD(LVGLTestFixture, "clearing a Snapmaker spool restates the tag's product line",
+                 "[lane][ingest][snapmaker][spool_name]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+    SnapmakerHarness harness(&api, nullptr);
+
+    SECTION("an untagged spool keeps no name") {
+        feed_filament_detect(*harness, nlohmann::json{
+                                           {"state", nlohmann::json::array({1})},
+                                           {"info", nlohmann::json::array({nlohmann::json{
+                                                        {"MAIN_TYPE", "NONE"},
+                                                        {"SUB_TYPE", "NONE"},
+                                                    }})},
+                                       });
+        auto edit = harness->get_slot_info(0);
+        edit.brand = "Generic";
+        edit.material = "ASA";
+        edit.spool_name = "SnapSpeed";
+        helix::test::edit_slot_as_user(*harness, 0, edit);
+        REQUIRE(harness->get_slot_info(0).spool_name == "SnapSpeed");
+
+        harness->clear_slot_override(0);
+        CHECK(harness->get_slot_info(0).spool_name.empty());
+    }
+
+    SECTION("a tagged spool gets the tag's line back") {
+        feed_filament_detect(*harness,
+                             nlohmann::json{
+                                 {"state", nlohmann::json::array({1})},
+                                 {"info", nlohmann::json::array({nlohmann::json{
+                                              {"MAIN_TYPE", "PLA"},
+                                              {"MANUFACTURER", "Snapmaker"},
+                                              {"SUB_TYPE", "Silk"},
+                                              {"CARD_UID", nlohmann::json::array({1, 2, 3, 4})},
+                                          }})},
+                             });
+        auto edit = harness->get_slot_info(0);
+        edit.spool_name = "Bench reel";
+        helix::test::edit_slot_as_user(*harness, 0, edit);
+        REQUIRE(harness->get_slot_info(0).spool_name == "Bench reel");
+
+        harness->clear_slot_override(0);
+        CHECK(harness->get_slot_info(0).spool_name == "Silk");
+    }
+}
+
+// ============================================================================
+// Tag readings: what each tag-reading backend keeps of the tag under an edit
+// ============================================================================
+
+using helix::ams::TagField;
+
+TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker card's reading outlives a user's colour",
+                 "[lane][snapmaker][tag_reading]") {
+    SnapmakerHarness harness(nullptr, nullptr);
+    const nlohmann::json card{
+        {"state", nlohmann::json::array({1})},
+        {"info", nlohmann::json::array({nlohmann::json{
+                     {"MAIN_TYPE", "PLA"},
+                     {"MANUFACTURER", "Snapmaker"},
+                     {"SUB_TYPE", "Matte"},
+                     {"ARGB_COLOR", 0xFFED2C2C},
+                     {"HOTEND_MIN_TEMP", 190},
+                     {"HOTEND_MAX_TEMP", 220},
+                     {"BED_TEMP", 60},
+                     {"WEIGHT", 1000},
+                     {"COLOR_NUMS", 2},
+                     {"RGB_1", 0xED2C2C},
+                     {"RGB_2", 0x00FF00},
+                     {"CARD_UID", nlohmann::json::array({144, 32, 196, 2})},
+                 }})},
+    };
+    feed_filament_detect(*harness, card);
+
+    const auto tag = harness->tag_reading(0);
+    REQUIRE(tag.has_value());
+    CHECK(tag->material == "PLA");
+    CHECK(tag->brand == "Snapmaker");
+    CHECK(tag->product_name == "Matte");
+    CHECK(tag->color_rgb == std::optional<uint32_t>(0xED2C2Cu));
+    CHECK(tag->multi_color_hexes == "#ED2C2C,#00FF00");
+    CHECK(tag->nozzle_temp_min == std::optional<int>(190));
+    CHECK(tag->nozzle_temp_max == std::optional<int>(220));
+    CHECK(tag->bed_temp == std::optional<int>(60));
+    CHECK(tag->total_weight_g == std::optional<float>(1000.0F));
+    CHECK(harness->get_slot_info(0).multi_color_hexes == "#ED2C2C,#00FF00");
+    CHECK(harness->tag_provenance(0).from_tag(TagField::Color));
+    CHECK(harness->tag_provenance(0).from_tag(TagField::Material));
+
+    // Picking one colour replaces the multi-colour, and the tag's next read
+    // leaves the pick standing.
+    auto edit = harness->get_slot_info(0);
+    edit.color_rgb = 0x123456u;
+    edit.multi_color_hexes.clear();
+    helix::test::edit_slot_as_user(*harness, 0, edit);
+    feed_filament_detect(*harness, card);
+
+    const auto shown = harness->get_slot_info(0);
+    CHECK(shown.color_rgb == 0x123456u);
+    CHECK(shown.multi_color_hexes.empty());
+    REQUIRE(harness->tag_reading(0).has_value());
+    CHECK(harness->tag_reading(0)->color_rgb == std::optional<uint32_t>(0xED2C2Cu));
+    const auto p = harness->tag_provenance(0);
+    CHECK_FALSE(p.from_tag(TagField::Color));
+    CHECK(p.from_tag(TagField::Material));
+
+    const auto reset = helix::ams::reset_to_tag(shown, *harness->tag_reading(0));
+    CHECK(reset.color_rgb == 0xED2C2Cu);
+    CHECK(reset.multi_color_hexes == "#ED2C2C,#00FF00");
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker entry with no card behind it is no tag reading",
+                 "[lane][snapmaker][tag_reading]") {
+    SnapmakerHarness harness(nullptr, nullptr);
+    feed_filament_detect(*harness, nlohmann::json{
+                                       {"state", nlohmann::json::array({1})},
+                                       {"info", nlohmann::json::array({nlohmann::json{
+                                                    {"MAIN_TYPE", "PLA"},
+                                                    {"VENDOR", "Generic"},
+                                                    {"ARGB_COLOR", 0xFFED2C2C},
+                                                    {"CARD_UID", 0},
+                                                }})},
+                                   });
+    CHECK_FALSE(harness->tag_reading(0).has_value());
+    CHECK_FALSE(harness->tag_provenance(0).any());
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a CFS bay's tag reading outlives a user's edit",
+                 "[lane][cfs][tag_reading]") {
+    CfsHarness harness(nullptr, nullptr);
+    const nlohmann::json box = flat_box(nlohmann::json::array({nlohmann::json{{"index", 0},
+                                                                              {"material", "PETG"},
+                                                                              {"brand", "Creality"},
+                                                                              {"color", "#ED2C2C"},
+                                                                              {"present", true}}}));
+    feed_cfs_box(*harness, box);
+
+    REQUIRE(harness->tag_reading(0).has_value());
+    CHECK(harness->tag_reading(0)->material == "PETG");
+    CHECK(harness->tag_provenance(0).from_tag(TagField::Brand));
+
+    auto edit = harness->get_slot_info(0);
+    edit.material = "ABS";
+    edit.color_rgb = 0x00FF00u;
+    helix::test::edit_slot_as_user(*harness, 0, edit);
+    feed_cfs_box(*harness, box);
+
+    const auto shown = harness->get_slot_info(0);
+    REQUIRE(shown.material == "ABS");
+    REQUIRE(shown.color_rgb == 0x00FF00u);
+    const auto tag = harness->tag_reading(0);
+    REQUIRE(tag.has_value());
+    CHECK(tag->material == "PETG");
+    CHECK(tag->color_rgb == std::optional<uint32_t>(0xED2C2Cu));
+    const auto p = harness->tag_provenance(0);
+    CHECK_FALSE(p.from_tag(TagField::Material));
+    CHECK_FALSE(p.from_tag(TagField::Color));
+    CHECK(p.from_tag(TagField::Brand));
+
+    const auto reset = helix::ams::reset_to_tag(shown, *tag);
+    CHECK(reset.material == "PETG");
+    CHECK(reset.color_rgb == 0xED2C2Cu);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ACE keeps only an identified read as the tag's",
+                 "[lane][ace][tag_reading]") {
+    AceHarness harness(nullptr, nullptr);
+    const auto frame = [](const nlohmann::json& rfid) {
+        return nlohmann::json{
+            {"slots", nlohmann::json::array({nlohmann::json{
+                          {"status", "ready"},
+                          {"color", nlohmann::json::array({237, 44, 44})},
+                          {"type", "PETG"},
+                          {"temp_min", 230},
+                          {"temp_max", 250},
+                          {"rfid", rfid},
+                      }})},
+        };
+    };
+
+    SECTION("an identified read is kept and outlives a user's edit") {
+        feed_ace(*harness, frame(2));
+        const auto tag = harness->tag_reading(0);
+        REQUIRE(tag.has_value());
+        CHECK(tag->material == "PETG");
+        CHECK(tag->color_rgb == std::optional<uint32_t>(0xED2C2Cu));
+        CHECK(tag->nozzle_temp_max == std::optional<int>(250));
+
+        auto edit = harness->get_slot_info(0);
+        edit.color_rgb = 0x00FF00u;
+        helix::test::edit_slot_as_user(*harness, 0, edit);
+        feed_ace(*harness, frame(2));
+        CHECK(harness->get_slot_info(0).color_rgb == 0x00FF00u);
+        CHECK(harness->tag_reading(0)->color_rgb == std::optional<uint32_t>(0xED2C2Cu));
+        CHECK_FALSE(harness->tag_provenance(0).from_tag(TagField::Color));
+        CHECK(harness->tag_provenance(0).from_tag(TagField::Material));
+
+        // A finished read that found no tag ends it.
+        feed_ace(*harness, frame(1));
+        CHECK_FALSE(harness->tag_reading(0).has_value());
+    }
+    SECTION("the hub's own memory is no tag") {
+        feed_ace(*harness, frame(false));
+        CHECK_FALSE(harness->tag_reading(0).has_value());
+        feed_ace(*harness, frame(0));
+        CHECK_FALSE(harness->tag_reading(0).has_value());
+    }
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ACE's REST bridge leaves a user's edit standing",
+                 "[lane][ace][tag_reading]") {
+    AceHarness harness(nullptr, nullptr);
+    const nlohmann::json slots{
+        {"slots", nlohmann::json::array({nlohmann::json{{"status", "ready"},
+                                                        {"color", "#ED2C2C"},
+                                                        {"material", "PETG"},
+                                                        {"temp_min", 230},
+                                                        {"temp_max", 250},
+                                                        {"rfid", 2}}})},
+    };
+    AceTestAccess::parse_slots(*harness, slots);
+    REQUIRE(harness->get_slot_info(0).color_rgb == 0xED2C2Cu);
+    REQUIRE(harness->get_slot_info(0).nozzle_temp_max == 250);
+
+    auto edit = harness->get_slot_info(0);
+    edit.color_rgb = 0x00FF00u;
+    edit.material = "ABS";
+    edit.nozzle_temp_min = 240;
+    edit.nozzle_temp_max = 260;
+    helix::test::edit_slot_as_user(*harness, 0, edit);
+    AceTestAccess::parse_slots(*harness, slots);
+
+    const auto shown = harness->get_slot_info(0);
+    CHECK(shown.color_rgb == 0x00FF00u);
+    CHECK(shown.material == "ABS");
+    CHECK(shown.nozzle_temp_min == 240);
+    CHECK(shown.nozzle_temp_max == 260);
+    REQUIRE(harness->tag_reading(0).has_value());
+    CHECK(harness->tag_reading(0)->material == "PETG");
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "ACE's REST bridge keeps the hub's temps under a colour edit",
+                 "[lane][ace][tag_reading]") {
+    AceHarness harness(nullptr, nullptr);
+    const auto slots = [](int temp_min, int temp_max) {
+        return nlohmann::json{
+            {"slots", nlohmann::json::array({nlohmann::json{{"status", "ready"},
+                                                            {"color", "#ED2C2C"},
+                                                            {"material", "PETG"},
+                                                            {"temp_min", temp_min},
+                                                            {"temp_max", temp_max}}})},
+        };
+    };
+
+    SECTION("a colour-only edit leaves the temperatures the hub's") {
+        AceTestAccess::parse_slots(*harness, slots(230, 250));
+        auto edit = harness->get_slot_info(0);
+        edit.color_rgb = 0x00FF00u;
+        helix::test::edit_slot_as_user(*harness, 0, edit);
+        AceTestAccess::parse_slots(*harness, slots(235, 255));
+        CHECK(harness->get_slot_info(0).nozzle_temp_min == 235);
+        CHECK(harness->get_slot_info(0).nozzle_temp_max == 255);
+    }
+    SECTION("a record loaded at a restart leaves the temperatures the hub's") {
+        // The stored record keeps a nozzle temperature for every edit, so it
+        // is no declaration of one.
+        helix::ams::FilamentSlotOverride ovr;
+        ovr.material = "PETG";
+        ovr.color_rgb = 0x00FF00u;
+        ovr.color_set = true;
+        ovr.nozzle_temp = 240;
+        AceTestAccess::seed_override(*harness, 0, ovr);
+        AceTestAccess::parse_slots(*harness, slots(235, 255));
+        CHECK(harness->get_slot_info(0).nozzle_temp_min == 235);
+        CHECK(harness->get_slot_info(0).nozzle_temp_max == 255);
+    }
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a restart forgets the box's tag readings",
+                 "[lane][cfs][qidi][tag_reading]") {
+    SECTION("CFS") {
+        CfsHarness harness(nullptr, nullptr);
+        feed_cfs_box(
+            *harness,
+            flat_box(nlohmann::json::array({nlohmann::json{
+                {"index", 0}, {"material", "PETG"}, {"color", "#ED2C2C"}, {"present", true}}})));
+        REQUIRE(harness->tag_reading(0).has_value());
+        CfsTestAccess::call_on_started(*harness);
+        CHECK_FALSE(harness->tag_reading(0).has_value());
+    }
+    SECTION("QIDI") {
+        QidiHarness harness(nullptr, nullptr);
+        QidiBoxTestAccess::apply_filas_list(*harness, qidi_tables());
+        QidiBoxTestAccess::parse_vars(*harness, nlohmann::json{{"box_count", 1},
+                                                               {"filament_slot0", 40},
+                                                               {"color_slot0", 9},
+                                                               {"vendor_slot0", 8}});
+        REQUIRE(harness->tag_reading(0).has_value());
+        QidiBoxTestAccess::start_load(*harness);
+        CHECK_FALSE(harness->tag_reading(0).has_value());
+    }
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a Snapmaker tag leaving takes its multi-colour with it",
+                 "[lane][snapmaker][tag_reading]") {
+    SnapmakerHarness harness(nullptr, nullptr);
+    feed_filament_detect(*harness,
+                         nlohmann::json{
+                             {"state", nlohmann::json::array({1})},
+                             {"info", nlohmann::json::array({nlohmann::json{
+                                          {"MAIN_TYPE", "PLA"},
+                                          {"ARGB_COLOR", 0xFFED2C2C},
+                                          {"COLOR_NUMS", 2},
+                                          {"RGB_1", 0xED2C2C},
+                                          {"RGB_2", 0x00FF00},
+                                          {"CARD_UID", nlohmann::json::array({1, 2, 3, 4})},
+                                      }})},
+                         });
+    REQUIRE(harness->get_slot_info(0).multi_color_hexes == "#ED2C2C,#00FF00");
+
+    feed_filament_detect(*harness, nlohmann::json{
+                                       {"state", nlohmann::json::array({1})},
+                                       {"info", nlohmann::json::array({nlohmann::json{
+                                                    {"MAIN_TYPE", "NONE"},
+                                                    {"CARD_UID", 0},
+                                                }})},
+                                   });
+    CHECK(harness->get_slot_info(0).multi_color_hexes.empty());
+    CHECK_FALSE(harness->tag_reading(0).has_value());
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "AFC's colour scan is the lane's tag reading",
+                 "[lane][afc][tag_reading]") {
+    AfcHarness harness(nullptr, nullptr);
+    init_afc_lanes(*harness);
+    feed_afc_lane(
+        *harness, "lane1",
+        nlohmann::json{{"color", "#FFFFFF"}, {"material", "PLA"}, {"td1_color", "FF8800"}});
+
+    const auto tag = harness->tag_reading(0);
+    REQUIRE(tag.has_value());
+    CHECK(tag->color_rgb == std::optional<uint32_t>(0xFF8800u));
+    CHECK_FALSE(tag->material.has_value());
+    CHECK_FALSE(harness->tag_provenance(0).from_tag(TagField::Color));
+
+    const auto reset = helix::ams::reset_to_tag(harness->get_slot_info(0), *tag);
+    CHECK(reset.color_rgb == 0xFF8800u);
+    CHECK(reset.material == "PLA");
+
+    CHECK_FALSE(harness->tag_reading(1).has_value());
 }

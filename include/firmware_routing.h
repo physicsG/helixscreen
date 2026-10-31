@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <utility>
 #include <vector>
 
 namespace helix {
@@ -8,11 +9,14 @@ namespace helix {
 /**
  * @brief The physical head a logical tool routes to with NO remap applied.
  *
- * This is the firmware's own DEFAULT map, and it is not the same thing as the
- * firmware's CURRENT map. Two AMS shapes exist and they disagree:
+ * This is the firmware's own DEFAULT map: what it routes a print by when
+ * nothing remaps it for that print. Three AMS shapes exist and they disagree:
  *
- *   - lane-per-tool (AFC, Happy Hare, klipper-toolchanger, CFS, QIDI, ACE):
- *     tool N owns lane N. An 8-lane AFC maps lanes 0..7 to T0..T7.
+ *   - lane-per-tool (AFC, Happy Hare, klipper-toolchanger, CFS, QIDI, ACE,
+ *     OpenAMS): tool N owns lane N unless a standing table on the printer says
+ *     otherwise. An AFC, Happy Hare or CFS remap, an OpenAMS group's serving
+ *     slot and an ACEPRO slot's tool number are tables the firmware routes by,
+ *     so that table is the default (AmsBackend::firmware_default_routing()).
  *   - fixed-head (Snapmaker U1): four physical heads and up to 32 logical
  *     tools, so the table is [0,1,2,3,0,0,...] - measured live on a U1.
  *   - table-driven (FlashForge AD5X IFS): an arbitrary 16-entry tool->port map
@@ -26,11 +30,9 @@ namespace helix {
  * Deliberately a plain value with no AMS dependency, so FilamentMapper stays
  * pure and every rule over it is testable without a backend.
  *
- * @note NOT the live map. AmsSystemInfo::tool_to_slot_map carries what the
- *       firmware is doing right now; this carries what it would do unaided.
- *       Conflating the two is the bug this type exists to prevent - and the
- *       live map is not even uniformly available (an AFC tracks it, a U1
- *       freezes it at 1:1 while its real map lives elsewhere).
+ * @note Not always AmsSystemInfo::tool_to_slot_map. That is the default only
+ *       where the firmware publishes and keeps it; a U1 freezes it at 1:1 while
+ *       its real map lives elsewhere, and a per-print map is not a default.
  */
 struct FirmwareRouting {
     /// head_for_tool[tool] = physical head, or -1 for "this tool has no head".
@@ -40,9 +42,13 @@ struct FirmwareRouting {
     /// Head for tools past the end of the table. -1 means unmapped.
     int fallback_head = -1;
 
+    /// The firmware picks each tool's lane itself when the print starts, so no
+    /// tool has a head before then and nothing may claim one.
+    bool chosen_at_print = false;
+
     /// Physical head for @p tool, or -1 when the tool has none.
     [[nodiscard]] int head(int tool) const {
-        if (tool < 0) {
+        if (tool < 0 || chosen_at_print) {
             return -1;
         }
         if (head_for_tool.empty()) {
@@ -57,6 +63,25 @@ struct FirmwareRouting {
     /// Lane-per-tool: tool N owns lane N, with no upper bound.
     [[nodiscard]] static FirmwareRouting identity() {
         return {};
+    }
+
+    /// No tool has a head until the firmware picks one at print time.
+    [[nodiscard]] static FirmwareRouting picked_at_print() {
+        FirmwareRouting routing;
+        routing.chosen_at_print = true;
+        return routing;
+    }
+
+    /// A standing tool -> head table: @p table where it names any tool, tools
+    /// past its end unmapped; identity where it is empty.
+    [[nodiscard]] static FirmwareRouting from_table(std::vector<int> table) {
+        if (table.empty()) {
+            return identity();
+        }
+        FirmwareRouting routing;
+        routing.head_for_tool = std::move(table);
+        routing.fallback_head = -1;
+        return routing;
     }
 
     /// Fixed-head machine: heads 0..@p head_count-1, everything beyond on

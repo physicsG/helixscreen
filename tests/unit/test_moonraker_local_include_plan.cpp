@@ -41,12 +41,12 @@ std::vector<ProcMatch> k2_procs() {
     };
 }
 
-const char* K2_ROOT = "/mnt/UDISK/printer_data/config";
+const char* kK2Root = "/mnt/UDISK/printer_data/config";
 
 } // namespace
 
 TEST_CASE("K2: plan names the vendor config and an absolute include", "[local_include]") {
-    auto plan = plan_local_include(k2_procs(), K2_ROOT);
+    auto plan = plan_local_include(k2_procs(), kK2Root);
 
     REQUIRE(plan.viable);
     CHECK(plan.vendor_config_abs == "/usr/share/moonraker/moonraker.conf");
@@ -64,7 +64,7 @@ TEST_CASE("plan derives the config from -d when there is no -c", "[local_include
     std::vector<ProcMatch> procs = {
         {455, "python3 /opt/moonraker/moonraker.py -d /var/lib/printer_data"}};
 
-    auto plan = plan_local_include(procs, K2_ROOT);
+    auto plan = plan_local_include(procs, kK2Root);
 
     REQUIRE(plan.viable);
     CHECK(plan.vendor_config_abs == "/var/lib/printer_data/config/moonraker.conf");
@@ -74,7 +74,7 @@ TEST_CASE("plan prefers -c over -d when both are given", "[local_include]") {
     std::vector<ProcMatch> procs = {
         {455, "python3 moonraker.py -d /var/lib/printer_data -c /etc/moonraker/moonraker.conf"}};
 
-    auto plan = plan_local_include(procs, K2_ROOT);
+    auto plan = plan_local_include(procs, kK2Root);
 
     REQUIRE(plan.viable);
     CHECK(plan.vendor_config_abs == "/etc/moonraker/moonraker.conf");
@@ -99,7 +99,7 @@ TEST_CASE("a config sitting directly in the writable root is not a local-write c
     std::vector<ProcMatch> procs = {
         {455, "python3 moonraker.py -c /mnt/UDISK/printer_data/config/moonraker.conf"}};
 
-    CHECK_FALSE(plan_local_include(procs, K2_ROOT).viable);
+    CHECK_FALSE(plan_local_include(procs, kK2Root).viable);
 }
 
 TEST_CASE("a config in a subdirectory of the writable root is not a local-write case",
@@ -107,7 +107,7 @@ TEST_CASE("a config in a subdirectory of the writable root is not a local-write 
     std::vector<ProcMatch> procs = {
         {455, "python3 moonraker.py -c /mnt/UDISK/printer_data/config/vendor/moonraker.conf"}};
 
-    CHECK_FALSE(plan_local_include(procs, K2_ROOT).viable);
+    CHECK_FALSE(plan_local_include(procs, kK2Root).viable);
 }
 
 TEST_CASE("a sibling directory sharing the root's prefix is still a local-write case",
@@ -116,7 +116,7 @@ TEST_CASE("a sibling directory sharing the root's prefix is still a local-write 
     std::vector<ProcMatch> procs = {
         {455, "python3 moonraker.py -c /mnt/UDISK/printer_data/config_backup/moonraker.conf"}};
 
-    auto plan = plan_local_include(procs, K2_ROOT);
+    auto plan = plan_local_include(procs, kK2Root);
     REQUIRE(plan.viable);
     CHECK(plan.vendor_config_abs == "/mnt/UDISK/printer_data/config_backup/moonraker.conf");
 }
@@ -126,19 +126,19 @@ TEST_CASE("klippy alone is not evidence of where Moonraker's config lives", "[lo
                                           "/mnt/UDISK/printer_data/config/printer.cfg -l "
                                           "/mnt/UDISK/printer_data/logs/klippy.log"}};
 
-    auto plan = plan_local_include(procs, K2_ROOT);
+    auto plan = plan_local_include(procs, kK2Root);
 
     CHECK_FALSE(plan.viable);
     CHECK_FALSE(plan.error.empty());
 }
 
 TEST_CASE("no local processes at all is not viable", "[local_include]") {
-    CHECK_FALSE(plan_local_include({}, K2_ROOT).viable);
+    CHECK_FALSE(plan_local_include({}, kK2Root).viable);
 }
 
 TEST_CASE("a moonraker process with no path flags is not viable", "[local_include]") {
     std::vector<ProcMatch> procs = {{455, "python3 /usr/share/moonraker/moonraker/moonraker.py"}};
-    auto plan = plan_local_include(procs, K2_ROOT);
+    auto plan = plan_local_include(procs, kK2Root);
     CHECK_FALSE(plan.viable);
     CHECK_FALSE(plan.error.empty());
 }
@@ -160,7 +160,7 @@ TEST_CASE("a relative config root is rejected", "[local_include]") {
 TEST_CASE("a relative -c value is rejected", "[local_include]") {
     // Same reason in the other direction: we would write to the wrong file.
     std::vector<ProcMatch> procs = {{455, "python3 moonraker.py -c moonraker.conf"}};
-    CHECK_FALSE(plan_local_include(procs, K2_ROOT).viable);
+    CHECK_FALSE(plan_local_include(procs, kK2Root).viable);
 }
 
 TEST_CASE("a trailing slash on the config root does not double up", "[local_include]") {

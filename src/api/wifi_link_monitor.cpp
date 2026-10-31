@@ -142,7 +142,7 @@ LinkEvent classify_link_change(const LinkSample* prev, const LinkSample& cur) {
         return LinkEvent::FrequencyChanged;
     }
     if (prev->radio.rssi_dbm && cur.radio.rssi_dbm &&
-        *prev->radio.rssi_dbm - *cur.radio.rssi_dbm >= RSSI_DROP_DB) {
+        *prev->radio.rssi_dbm - *cur.radio.rssi_dbm >= kRssiDropDb) {
         return LinkEvent::RssiDrop;
     }
     return LinkEvent::None;
@@ -150,7 +150,7 @@ LinkEvent classify_link_change(const LinkSample* prev, const LinkSample& cur) {
 
 bool link_info_allowed(LinkEvent ev, int64_t now_s, std::optional<int64_t> last_info_s) {
     return ev == LinkEvent::Reconnected || !last_info_s ||
-           now_s - *last_info_s >= LINK_INFO_MIN_INTERVAL_S;
+           now_s - *last_info_s >= kLinkInfoMinIntervalS;
 }
 
 void LinkHistory::push(const LinkSample& s) {
@@ -172,6 +172,25 @@ nlohmann::json link_history_to_json(const LinkHistory& history, bool frequency_a
     return out;
 }
 
+std::optional<LinkSample> link_sample_from_status(const WifiBackend::ConnectionStatus& status,
+                                                  int64_t uptime_s,
+                                                  std::string_view proc_net_wireless,
+                                                  std::string_view netdev) {
+    if (status.unresponsive) {
+        return std::nullopt;
+    }
+    LinkSample s;
+    s.uptime_s = uptime_s;
+    s.connected = status.connected;
+    if (status.connected) {
+        s.frequency_mhz = status.frequency_mhz;
+        if (auto radio = parse_proc_net_wireless(proc_net_wireless, netdev)) {
+            s.radio = *radio;
+        }
+    }
+    return s;
+}
+
 WifiLinkMonitor& WifiLinkMonitor::instance() {
     static WifiLinkMonitor inst;
     return inst;
@@ -181,7 +200,7 @@ void WifiLinkMonitor::start() {
     if (timer_) {
         return;
     }
-    timer_.reset(lv_timer_create(&WifiLinkMonitor::timer_cb, POLL_INTERVAL_MS, this));
+    timer_.reset(lv_timer_create(&WifiLinkMonitor::timer_cb, kPollIntervalMs, this));
     poll();
 }
 
@@ -201,28 +220,28 @@ void WifiLinkMonitor::poll() {
     }
     const std::string netdev = wifi->netdev_name();
     const bool freq_ok = wifi->reports_frequency();
-    wifi->get_status_async(lifetime_.token(),
-                           [this, netdev, freq_ok](const WifiBackend::ConnectionStatus& st) {
-                               LinkSample s;
-                               s.uptime_s = uptime_seconds();
-                               s.connected = st.connected;
-                               if (st.connected) {
-                                   s.frequency_mhz = st.frequency_mhz;
-                                   // /proc is a kernel table read, not a device round trip; absent
-                                   // off Linux.
-                                   std::ifstream f("/proc/net/wireless");
-                                   std::stringstream buf;
-                                   buf << f.rdbuf();
-                                   if (auto radio = parse_proc_net_wireless(buf.str(), netdev)) {
-                                       s.radio = *radio;
-                                   }
-                               }
-                               {
-                                   std::lock_guard<std::mutex> lock(mutex_);
-                                   frequency_available_ = freq_ok;
-                               }
-                               record(s);
-                           });
+    wifi->get_status_async(
+        lifetime_.token(), [this, netdev, freq_ok](const WifiBackend::ConnectionStatus& st) {
+            std::string proc;
+            if (st.connected && !st.unresponsive) {
+                // /proc is a kernel table read, not a device round trip; absent
+                // off Linux.
+                std::ifstream f("/proc/net/wireless");
+                std::stringstream buf;
+                buf << f.rdbuf();
+                proc = buf.str();
+            }
+            const auto sample = link_sample_from_status(st, uptime_seconds(), proc, netdev);
+            if (!sample) {
+                spdlog::debug("[WifiLink] WiFi control unresponsive — no sample");
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                frequency_available_ = freq_ok;
+            }
+            record(*sample);
+        });
 }
 
 void WifiLinkMonitor::record(const LinkSample& s) {

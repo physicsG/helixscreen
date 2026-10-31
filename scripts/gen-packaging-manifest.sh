@@ -44,7 +44,7 @@ ROOTS=(ui_xml assets config)
 # LC_ALL=C gives a stable, locale-independent sort.
 #
 # Hidden dirs (name starting with '.') are skipped — they hold dev-only state
-# that should never ship (.git, .claude-recall, .DS_Store sidecars, etc.).
+# that should never ship (.git, .DS_Store sidecars, etc.).
 # `find -name '.*' -prune` prunes the directory AND its subtree.
 for root in "${ROOTS[@]}"; do
     if [ -d "$root" ]; then

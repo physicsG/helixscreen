@@ -33,27 +33,27 @@ using helix::test::mouse_key_caps;
 namespace {
 
 /// Where the touch driver says the panel was touched, in the panel's own frame.
-constexpr lv_point_t TOUCH_ON_PANEL{100, 50};
+constexpr lv_point_t kTouchOnPanel{100, 50};
 /// Where the mouse driver has accumulated its motion to.
-constexpr lv_point_t MOUSE_POSITION{300, 200};
+constexpr lv_point_t kMousePosition{300, 200};
 
 void touch_driver_read(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
-    data->point = TOUCH_ON_PANEL;
+    data->point = kTouchOnPanel;
     data->state = LV_INDEV_STATE_PRESSED;
 }
 
 void mouse_driver_read(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
-    data->point = MOUSE_POSITION;
+    data->point = kMousePosition;
     data->state = LV_INDEV_STATE_RELEASED;
 }
 
 /// A mouse far down a portrait picture, past the unrotated display's height.
-constexpr lv_point_t MOUSE_DOWN_PORTRAIT{400, 700};
+constexpr lv_point_t kMouseDownPortrait{400, 700};
 
-/// The point an evdev mouse's driver reports for MOUSE_DOWN_PORTRAIT: bounded by
+/// The point an evdev mouse's driver reports for kMouseDownPortrait: bounded by
 /// the unrotated display.
 void portrait_mouse_driver_read(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
-    data->point = {MOUSE_DOWN_PORTRAIT.x, TEST_DISPLAY_HEIGHT - 1};
+    data->point = {kMouseDownPortrait.x, kTestDisplayHeight - 1};
     data->state = LV_INDEV_STATE_RELEASED;
 }
 
@@ -63,8 +63,8 @@ int g_evdev_raw_reads = 0;
 /// driver's bound.
 bool fake_evdev_last_raw(lv_indev_t* /*indev*/, int* x, int* y) {
     ++g_evdev_raw_reads;
-    *x = MOUSE_DOWN_PORTRAIT.x;
-    *y = MOUSE_DOWN_PORTRAIT.y;
+    *x = kMouseDownPortrait.x;
+    *y = kMouseDownPortrait.y;
     return true;
 }
 
@@ -114,8 +114,8 @@ class PointerFrameHookFixture : public LVGLTestFixture {
         return point;
     }
 
-    static constexpr int32_t PANEL_W = TEST_DISPLAY_WIDTH;
-    static constexpr int32_t PANEL_H = TEST_DISPLAY_HEIGHT;
+    static constexpr int32_t kPanelW = kTestDisplayWidth;
+    static constexpr int32_t kPanelH = kTestDisplayHeight;
     lv_display_t* disp = nullptr;
     PointerFrameHook hook;
     std::vector<lv_indev_t*> created;
@@ -150,11 +150,11 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
                  "Under plane rotation a mouse keeps its position and touch turns with the picture",
                  "[display][indev][rotation]") {
     REQUIRE(disp != nullptr);
-    REQUIRE(lv_display_get_horizontal_resolution(disp) == PANEL_W);
-    REQUIRE(lv_display_get_vertical_resolution(disp) == PANEL_H);
+    REQUIRE(lv_display_get_horizontal_resolution(disp) == kPanelW);
+    REQUIRE(lv_display_get_vertical_resolution(disp) == kPanelH);
     // The plane path leaves LVGL's own rotation at zero.
     REQUIRE(lv_display_get_rotation(disp) == LV_DISPLAY_ROTATION_0);
-    hook.set_plane_rotation(180, PANEL_W, PANEL_H);
+    hook.set_plane_rotation(180, kPanelW, kPanelH);
 
     lv_indev_t* touch = make_pointer(touch_driver_read);
     lv_indev_t* mouse = make_pointer(mouse_driver_read);
@@ -162,19 +162,19 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
     REQUIRE(hook.install(mouse, PointerKind::Relative));
 
     const lv_point_t touched = read(touch);
-    CHECK(touched.x == PANEL_W - 1 - TOUCH_ON_PANEL.x);
-    CHECK(touched.y == PANEL_H - 1 - TOUCH_ON_PANEL.y);
+    CHECK(touched.x == kPanelW - 1 - kTouchOnPanel.x);
+    CHECK(touched.y == kPanelH - 1 - kTouchOnPanel.y);
 
     const lv_point_t pointed = read(mouse);
-    CHECK(pointed.x == MOUSE_POSITION.x);
-    CHECK(pointed.y == MOUSE_POSITION.y);
+    CHECK(pointed.x == kMousePosition.x);
+    CHECK(pointed.y == kMousePosition.y);
 }
 
 TEST_CASE_METHOD(PointerFrameHookFixture,
                  "Under LVGL rotation a mouse keeps its position and touch turns with the picture",
                  "[display][indev][rotation]") {
     REQUIRE(disp != nullptr);
-    hook.set_plane_rotation(0, PANEL_W, PANEL_H);
+    hook.set_plane_rotation(0, kPanelW, kPanelH);
     lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_180);
 
     lv_indev_t* touch = make_pointer(touch_driver_read);
@@ -184,12 +184,12 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
 
     // LVGL's own rotation step turns the touch sample.
     const lv_point_t touched = read(touch);
-    CHECK(touched.x == PANEL_W - 1 - TOUCH_ON_PANEL.x);
-    CHECK(touched.y == PANEL_H - 1 - TOUCH_ON_PANEL.y);
+    CHECK(touched.x == kPanelW - 1 - kTouchOnPanel.x);
+    CHECK(touched.y == kPanelH - 1 - kTouchOnPanel.y);
 
     const lv_point_t pointed = read(mouse);
-    CHECK(pointed.x == MOUSE_POSITION.x);
-    CHECK(pointed.y == MOUSE_POSITION.y);
+    CHECK(pointed.x == kMousePosition.x);
+    CHECK(pointed.y == kMousePosition.y);
 }
 
 TEST_CASE_METHOD(PointerFrameHookFixture,
@@ -199,26 +199,26 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
     lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_90);
     // The position is on the picture but past the unrotated display's height,
     // where the driver's own point stops.
-    REQUIRE(MOUSE_DOWN_PORTRAIT.x < lv_display_get_horizontal_resolution(disp));
-    REQUIRE(MOUSE_DOWN_PORTRAIT.y < lv_display_get_vertical_resolution(disp));
-    REQUIRE(MOUSE_DOWN_PORTRAIT.y >= PANEL_H);
+    REQUIRE(kMouseDownPortrait.x < lv_display_get_horizontal_resolution(disp));
+    REQUIRE(kMouseDownPortrait.y < lv_display_get_vertical_resolution(disp));
+    REQUIRE(kMouseDownPortrait.y >= kPanelH);
 
     lv_indev_t* touch = make_pointer(touch_driver_read);
     lv_indev_t* mouse = make_pointer(portrait_mouse_driver_read);
     REQUIRE(hook.install(touch, PointerKind::PanelAbsolute));
     REQUIRE(hook.install(mouse, PointerKind::Relative, [](int& x, int& y) {
-        x = MOUSE_DOWN_PORTRAIT.x;
-        y = MOUSE_DOWN_PORTRAIT.y;
+        x = kMouseDownPortrait.x;
+        y = kMouseDownPortrait.y;
         return true;
     }));
 
     const lv_point_t touched = read(touch);
-    CHECK(touched.x == PANEL_H - 1 - TOUCH_ON_PANEL.y);
-    CHECK(touched.y == TOUCH_ON_PANEL.x);
+    CHECK(touched.x == kPanelH - 1 - kTouchOnPanel.y);
+    CHECK(touched.y == kTouchOnPanel.x);
 
     const lv_point_t pointed = read(mouse);
-    CHECK(pointed.x == MOUSE_DOWN_PORTRAIT.x);
-    CHECK(pointed.y == MOUSE_DOWN_PORTRAIT.y);
+    CHECK(pointed.x == kMouseDownPortrait.x);
+    CHECK(pointed.y == kMouseDownPortrait.y);
 }
 
 TEST_CASE_METHOD(PointerFrameHookFixture, "A mouse pushed past the picture's edge stops at it",
@@ -242,7 +242,7 @@ TEST_CASE_METHOD(PointerFrameHookFixture, "A mouse pushed past the picture's edg
 TEST_CASE_METHOD(PointerFrameHookFixture, "An unrotated display passes every sample through",
                  "[display][indev][rotation]") {
     REQUIRE(disp != nullptr);
-    hook.set_plane_rotation(0, PANEL_W, PANEL_H);
+    hook.set_plane_rotation(0, kPanelW, kPanelH);
 
     lv_indev_t* touch = make_pointer(touch_driver_read);
     lv_indev_t* mouse = make_pointer(mouse_driver_read);
@@ -250,12 +250,12 @@ TEST_CASE_METHOD(PointerFrameHookFixture, "An unrotated display passes every sam
     REQUIRE(hook.install(mouse, PointerKind::Relative));
 
     const lv_point_t touched = read(touch);
-    CHECK(touched.x == TOUCH_ON_PANEL.x);
-    CHECK(touched.y == TOUCH_ON_PANEL.y);
+    CHECK(touched.x == kTouchOnPanel.x);
+    CHECK(touched.y == kTouchOnPanel.y);
 
     const lv_point_t pointed = read(mouse);
-    CHECK(pointed.x == MOUSE_POSITION.x);
-    CHECK(pointed.y == MOUSE_POSITION.y);
+    CHECK(pointed.x == kMousePosition.x);
+    CHECK(pointed.y == kMousePosition.y);
 }
 
 TEST_CASE_METHOD(PointerFrameHookFixture,
@@ -301,7 +301,7 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
 
     helix::CalibrationContext ctx;
     helix::TouchCalibration cal;
-    helix::install_calibration_wrapper(touch, ctx, cal, PANEL_W, PANEL_H);
+    helix::install_calibration_wrapper(touch, ctx, cal, kPanelW, kPanelH);
     REQUIRE(hook.install(touch, PointerKind::PanelAbsolute, {}, &owner));
     REQUIRE(hook.install(mouse, PointerKind::Relative, {}, &mouse_owner));
     REQUIRE(owner == touch);
@@ -366,7 +366,7 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
                  "[display][indev][rotation]") {
     MockInputTree tree("pointer_frame_hook_kind");
     add_pi3b_pointers(tree);
-    hook.set_plane_rotation(180, PANEL_W, PANEL_H);
+    hook.set_plane_rotation(180, kPanelW, kPanelH);
 
     lv_indev_t* touch = make_pointer(touch_driver_read);
     lv_indev_t* mouse = make_pointer(mouse_driver_read);
@@ -378,12 +378,12 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
     REQUIRE(hook.fronts(mouse));
 
     const lv_point_t touched = read(touch);
-    CHECK(touched.x == PANEL_W - 1 - TOUCH_ON_PANEL.x);
-    CHECK(touched.y == PANEL_H - 1 - TOUCH_ON_PANEL.y);
+    CHECK(touched.x == kPanelW - 1 - kTouchOnPanel.x);
+    CHECK(touched.y == kPanelH - 1 - kTouchOnPanel.y);
 
     const lv_point_t pointed = read(mouse);
-    CHECK(pointed.x == MOUSE_POSITION.x);
-    CHECK(pointed.y == MOUSE_POSITION.y);
+    CHECK(pointed.x == kMousePosition.x);
+    CHECK(pointed.y == kMousePosition.y);
 }
 
 TEST_CASE_METHOD(PointerFrameHookFixture,
@@ -405,14 +405,14 @@ TEST_CASE_METHOD(PointerFrameHookFixture,
     g_evdev_raw_reads = 0;
     const lv_point_t pointed = read(evdev_mouse);
     CHECK(g_evdev_raw_reads > 0);
-    CHECK(pointed.x == MOUSE_DOWN_PORTRAIT.x);
-    CHECK(pointed.y == MOUSE_DOWN_PORTRAIT.y);
+    CHECK(pointed.x == kMouseDownPortrait.x);
+    CHECK(pointed.y == kMouseDownPortrait.y);
 
     // Another driver's data is never read as lv_evdev's, so its own bounded
     // point is what LVGL gets.
     g_evdev_raw_reads = 0;
     const lv_point_t bounded = read(other_mouse);
     CHECK(g_evdev_raw_reads == 0);
-    CHECK(bounded.x == MOUSE_DOWN_PORTRAIT.x);
-    CHECK(bounded.y == PANEL_H - 1);
+    CHECK(bounded.x == kMouseDownPortrait.x);
+    CHECK(bounded.y == kPanelH - 1);
 }

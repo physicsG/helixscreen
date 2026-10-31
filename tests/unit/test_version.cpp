@@ -1,6 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "helix_version.h"
 #include "version.h"
 
 #include <fstream>
@@ -692,4 +693,29 @@ TEST_CASE("to_string() round-trips a prerelease", "[version][to_string][prerelea
         REQUIRE(v.has_value());
         CHECK(to_string(*v) == text);
     }
+}
+
+// ============================================================================
+// helix::docs_url() tests
+// ============================================================================
+
+TEST_CASE("helix::docs_url() opens the running release line's docs", "[version][docs_url]") {
+    REQUIRE(helix::docs_url(1, 1, "guide/") == "https://helixscreen.org/1.1/guide/");
+    REQUIRE(helix::docs_url(1, 0, "guide/getting-started/") ==
+            "https://helixscreen.org/1.0/guide/getting-started/");
+    REQUIRE(helix::docs_url(2, 10, "upgrading/") == "https://helixscreen.org/2.10/upgrading/");
+
+    SECTION("the one-argument form uses this build's major.minor") {
+        REQUIRE(helix::docs_url("guide/") ==
+                helix::docs_url(HELIX_VERSION_MAJOR, HELIX_VERSION_MINOR, "guide/"));
+    }
+}
+
+TEST_CASE("helix::docs_url_text() drops the scheme and trailing slash", "[version][docs_url]") {
+    REQUIRE(helix::docs_url_text("https://helixscreen.org/1.1/guide/") ==
+            "helixscreen.org/1.1/guide");
+    REQUIRE(helix::docs_url_text("https://helixscreen.org/1.1/guide") ==
+            "helixscreen.org/1.1/guide");
+    REQUIRE(helix::docs_url_text("helixscreen.org/x/") == "helixscreen.org/x");
+    REQUIRE(helix::docs_url_text("") == "");
 }

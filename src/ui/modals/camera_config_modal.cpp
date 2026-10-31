@@ -54,17 +54,17 @@ void CameraConfigModal::init_subjects() {
 
     lv_subject_init_int(&source_count_, 0);
     subjects_.publish("cam_source_count", &source_count_);
-    for (size_t i = 0; i < MAX_ROWS; ++i) {
+    for (size_t i = 0; i < kMaxRows; ++i) {
         char key[40];
         lv_subject_init_int(&source_active_[i], 0);
         std::snprintf(key, sizeof(key), "cam_source_%zu_active", i);
         subjects_.publish(key, &source_active_[i]);
         lv_subject_init_string(&source_name_[i], source_name_buf_[i].data(), nullptr,
-                               SOURCE_TEXT_LEN, "");
+                               kSourceTextLen, "");
         std::snprintf(key, sizeof(key), "cam_source_%zu_name", i);
         subjects_.publish(key, &source_name_[i]);
         lv_subject_init_string(&source_note_[i], source_note_buf_[i].data(), nullptr,
-                               SOURCE_TEXT_LEN, "");
+                               kSourceTextLen, "");
         std::snprintf(key, sizeof(key), "cam_source_%zu_note", i);
         subjects_.publish(key, &source_note_[i]);
     }
@@ -147,7 +147,7 @@ void CameraConfigModal::publish_sources(const std::vector<WebcamInfo>& cams) {
 
     source_names_.clear();
     for (const auto& cam : cams) {
-        if (cam.name.empty() || source_names_.size() >= MAX_SOURCES)
+        if (cam.name.empty() || source_names_.size() >= kMaxSources)
             continue; // The local-probe entry has no name; nothing to pick
         source_names_.push_back(cam.name);
         size_t row = source_names_.size();
@@ -162,7 +162,7 @@ void CameraConfigModal::publish_sources(const std::vector<WebcamInfo>& cams) {
         }
         lv_subject_copy_string(&source_note_[row], note);
     }
-    for (size_t row = source_names_.size() + 1; row < MAX_ROWS; ++row) {
+    for (size_t row = source_names_.size() + 1; row < kMaxRows; ++row) {
         lv_subject_copy_string(&source_name_[row], "");
         lv_subject_copy_string(&source_note_[row], "");
     }
@@ -183,7 +183,7 @@ void CameraConfigModal::select_source(int index) {
 
 void CameraConfigModal::sync_source_subjects() {
     bool any = false;
-    for (size_t row = 1; row < MAX_ROWS; ++row) {
+    for (size_t row = 1; row < kMaxRows; ++row) {
         bool active = row <= source_names_.size() && source_names_[row - 1] == source_;
         any = any || active;
         lv_subject_set_int(&source_active_[row], active ? 1 : 0);

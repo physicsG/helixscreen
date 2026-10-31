@@ -38,8 +38,8 @@ enum class CarouselSwipe {
 } // namespace helix::ui
 
 struct CarouselState {
-    static constexpr uint32_t MAGIC = 0x43415231; // "CAR1"
-    uint32_t magic{MAGIC};
+    static constexpr uint32_t kMagic = 0x43415231; // "CAR1"
+    uint32_t magic{kMagic};
     lv_obj_t* scroll_container = nullptr;
     lv_obj_t* indicator_row = nullptr;
     std::vector<lv_obj_t*> real_tiles;

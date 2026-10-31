@@ -14,7 +14,9 @@
  */
 
 #include "ams_types.h"
-#include "filament_database.h" // filament::DEFAULT_DIAMETER_MM
+#include "filament_database.h" // filament::kDefaultDiameterMm
+#include "fit_check.h"
+#include "hardware_object_table.h"
 #include "leveling_probe_points.h"
 #include "openams_api.h" // OpenAMS claims only a manager speaking its API
 #include "preprint_skip_wrappers.h"
@@ -23,7 +25,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -49,7 +53,14 @@ enum class ScrewsTiltDialect {
 
 class PrinterDiscovery {
   public:
-    PrinterDiscovery() = default;
+    // Defined in the .cpp: the class is large, and inline copies of these in
+    // every caller cost firmware flash.
+    PrinterDiscovery();
+    PrinterDiscovery(const PrinterDiscovery&);
+    PrinterDiscovery(PrinterDiscovery&&) noexcept;
+    PrinterDiscovery& operator=(const PrinterDiscovery&);
+    PrinterDiscovery& operator=(PrinterDiscovery&&) noexcept;
+    ~PrinterDiscovery();
 
     /**
      * @brief Parse Klipper objects from printer.objects.list response
@@ -159,6 +170,29 @@ class PrinterDiscovery {
     }
 
     // ========================================================================
+    // Classified objects and config sections
+    // ========================================================================
+
+    /// Objects from printer.objects.list whose class is one of @p kinds, in discovery order.
+    [[nodiscard]] std::vector<std::string>
+    objects_of(const std::vector<hw::ObjectKind>& kinds) const;
+
+    /// Every named object with its kind, in discovery order (Unknown kinds included).
+    [[nodiscard]] std::vector<std::pair<std::string, hw::ObjectKind>> object_kinds() const;
+
+    /// Config sections (configfile.config keys) whose class is one of @p kinds, in config order.
+    [[nodiscard]] std::vector<std::string>
+    sections_of(const std::vector<hw::ObjectKind>& kinds) const;
+
+    /// Body of a classified config section recorded by parse_config_keys(), or nullptr.
+    [[nodiscard]] const nlohmann::json* section(std::string_view name) const;
+
+    /// Every MCU object ("mcu", "mcu toolhead", ...) in discovery order.
+    [[nodiscard]] std::vector<std::string> mcus() const {
+        return objects_of({hw::ObjectKind::Mcu});
+    }
+
+    // ========================================================================
     // Capability Flags
     // ========================================================================
 
@@ -234,6 +268,23 @@ class PrinterDiscovery {
     /// The object's name as reported, for subscribing to it.
     [[nodiscard]] const std::string& medusahc_object_name() const {
         return medusahc_object_name_;
+    }
+
+    /// The INDX toolboard module is configured: an `indx` object, or an
+    /// `[indx]` configfile section. What it means is helix::indx's business.
+    [[nodiscard]] bool has_indx() const {
+        return has_indx_;
+    }
+
+    /// The `save_variables` object exists.
+    [[nodiscard]] bool has_save_variables() const {
+        return has_save_variables_;
+    }
+
+    /// A `spoollink` object, or a `[spoollink]` configfile section. What it
+    /// means is helix::printer_switches_active_spool()'s business.
+    [[nodiscard]] bool has_spoollink() const {
+        return has_spoollink_;
     }
 
     [[nodiscard]] const std::string& pin_watch_object_name() const {
@@ -386,6 +437,11 @@ class PrinterDiscovery {
         is_kalico_ = kalico;
     }
 
+    /// The firmware's own name, as people know it: "Kalico" for that fork, else "Klipper".
+    [[nodiscard]] const char* firmware_name() const {
+        return is_kalico_ ? "Kalico" : "Klipper";
+    }
+
     [[nodiscard]] bool supports_leveling() const {
         return has_qgl() || has_z_tilt() || has_bed_mesh();
     }
@@ -407,6 +463,17 @@ class PrinterDiscovery {
         return mmu_type_;
     }
 
+    /// @brief A filament system of @p type is on this printer: it is the
+    /// detected system, or one that discovery found loaded beside it.
+    [[nodiscard]] bool has_filament_system(AmsType type) const {
+        if (type == AmsType::NONE) {
+            return false;
+        }
+        return mmu_type_ == type ||
+               std::find(coexisting_systems_.begin(), coexisting_systems_.end(), type) !=
+                   coexisting_systems_.end();
+    }
+
     /// @brief Physical slot count for a detected QIDI Box (0 if none).
     ///
     /// Derived from the number of `box_stepper slot<N>` objects in
@@ -414,6 +481,22 @@ class PrinterDiscovery {
     /// Returns 0 when mmu_type() != QIDI_BOX.
     [[nodiscard]] int qidi_box_slot_count() const {
         return qidi_box_slot_count_;
+    }
+
+    /// @brief Every filament-system object inventory discovery keeps, for code
+    /// that must cover all of them without naming each system (the hardware
+    /// fingerprint). A new inventory list joins here beside its member.
+    [[nodiscard]] std::vector<const std::vector<std::string>*> filament_system_inventories() const {
+        return {&afc_lane_names_,   &afc_hub_names_,      &afc_unit_object_names_,
+                &afc_buffer_names_, &afc_extruder_names_, &mmu_encoder_names_,
+                &mmu_servo_names_,  &ace_object_names_};
+    }
+
+    /// @brief Every filament-system presence flag and count, for the same
+    /// purpose. A new flag or count joins here beside its member.
+    [[nodiscard]] std::vector<int> filament_system_facts() const {
+        return {has_snapmaker_, has_afc_lite_,        has_zmod_afclite_,
+                has_indx_,      has_openams_manager_, qidi_box_slot_count_};
     }
 
     /// @brief All detected AMS/filament systems (may include multiple backends)
@@ -447,9 +530,26 @@ class PrinterDiscovery {
         return afc_buffer_names_;
     }
 
+    [[nodiscard]] const std::vector<std::string>& afc_extruder_names() const {
+        return afc_extruder_names_;
+    }
+
     [[nodiscard]] const std::vector<std::string>& tool_names() const {
         return tool_names_;
     }
+
+    /**
+     * @brief Put the tools in the order klipper-toolchanger numbers them.
+     *
+     * A tool's position in tool_names() is its slot, and slot i is selected and
+     * labelled as tool number i, so the list follows Klipper's numbering rather
+     * than the names: `[tool Right]` numbered 0 comes before `[tool Left]`
+     * numbered 1. @p toolchanger_status is the toolchanger object's status,
+     * whose tool_names are in tool-number order. Tools it does not list (no
+     * tool_number) follow in name order. A status with no tool_names leaves the
+     * list as discovered.
+     */
+    void order_tools_by_number(const nlohmann::json& toolchanger_status);
 
     /// @brief Alias for tool_names() - compatibility with PrinterCapabilities API
     [[nodiscard]] const std::vector<std::string>& get_tool_names() const {
@@ -480,7 +580,7 @@ class PrinterDiscovery {
     /// @brief Klipper object names of every detected ACE unit.
     ///
     /// One of `filament_hub` (native GoKlipper), `ace` (community drivers), or
-    /// one-or-more `ace_instance_N` (Kobra S1 mainline-Python fork, #1107).
+    /// one-or-more `ace_instance_N` (the ACEPRO driver, #1107).
     /// The discovery sequence subscribes each of these so the ACE backend gets
     /// live status. Empty when mmu_type() != AmsType::ACE.
     [[nodiscard]] const std::vector<std::string>& ace_object_names() const {
@@ -555,21 +655,41 @@ class PrinterDiscovery {
     }
 
     /**
-     * @brief Read the filament diameter from [extruder] filament_diameter
+     * @brief Read [extruder] filament_diameter and nozzle_diameter
      *
-     * A missing, null or non-positive value leaves the current diameter.
+     * A missing, null or non-positive value leaves the current one.
      *
      * @param settings JSON object from a configfile.settings response
      */
-    void parse_filament_diameter(const nlohmann::json& settings) {
+    void parse_extruder_dimensions(const nlohmann::json& settings) {
         const auto extruder = settings.find("extruder");
         if (extruder == settings.end() || !extruder->is_object()) {
             return;
         }
-        const auto d = extruder->find("filament_diameter");
-        if (d != extruder->end() && d->is_number() && d->get<float>() > 0.0f) {
-            filament_diameter_mm_ = d->get<float>();
-        }
+        auto read_positive = [&extruder](const char* key, float& out) {
+            const auto v = extruder->find(key);
+            if (v != extruder->end() && v->is_number() && v->get<float>() > 0.0f) {
+                out = v->get<float>();
+            }
+        };
+        read_positive("filament_diameter", filament_diameter_mm_);
+        read_positive("nozzle_diameter", nozzle_diameter_mm_);
+    }
+
+    /// Nozzle diameter in mm, [extruder] nozzle_diameter.
+    [[nodiscard]] float nozzle_diameter_mm() const {
+        return nozzle_diameter_mm_;
+    }
+
+    /// Read the limits the file-fits-printer check compares a file with.
+    /// @param settings JSON object from a configfile.settings response
+    void parse_fit_limits(const nlohmann::json& settings) {
+        fit_machine_ = fit_machine_from_settings(settings);
+    }
+
+    /// The printer's limits from its config; unset until the config was read.
+    [[nodiscard]] const std::optional<FitMachine>& fit_machine() const {
+        return fit_machine_;
     }
 
     /// Filament diameter in mm the extruder is configured for.
@@ -619,6 +739,34 @@ class PrinterDiscovery {
     }
 
     /**
+     * @brief Read the Z probe's XY offset from the nozzle
+     *
+     * From x_offset/y_offset of the first Klipper Z probe section present:
+     * [probe], [bltouch], [smart_effector], [load_cell_probe], Kalico's
+     * [dockable_probe], or a [probe_eddy_current <name>]. An axis the section omits is 0, Klipper's
+     * default. No such section leaves the offset unknown.
+     *
+     * @param settings JSON object from a configfile.settings response
+     */
+    void parse_probe_xy_offset(const nlohmann::json& settings);
+
+    /// Read whether the firmware runs its print-start macro before streaming
+    /// the file (start_macro_injection.h).
+    ///
+    /// @param settings JSON object from a configfile.settings response
+    void parse_start_macro_injection(const nlohmann::json& settings);
+
+    /// True when the firmware runs its print-start macro before the file's first line.
+    [[nodiscard]] bool firmware_runs_start_macro_before_file() const {
+        return firmware_runs_start_macro_before_file_;
+    }
+
+    /// The Z probe's XY offset from the nozzle; nullopt when no probe section is configured.
+    [[nodiscard]] const std::optional<ProbeXYOffset>& probe_xy_offset() const {
+        return probe_xy_offset_;
+    }
+
+    /**
      * @brief Resolve the command that toggles a filament sensor in firmware
      *
      * A [gcode_macro SET_FILAMENT_SENSOR] wrapper must rename the builtin
@@ -637,6 +785,24 @@ class PrinterDiscovery {
     [[nodiscard]] std::string sensor_toggle_command() const {
         return sensor_toggle_command_.empty() ? std::string("SET_FILAMENT_SENSOR")
                                               : sensor_toggle_command_;
+    }
+
+    /**
+     * @brief Record the builtin a [gcode_macro SCREWS_TILT_CALCULATE] wrapper renamed
+     *
+     * Some firmware replaces SCREWS_TILT_CALCULATE with a macro that answers in its
+     * own terms. A printer database entry can then run Klipper's calculation under
+     * its renamed name; with no wrapper there is nothing to bypass.
+     *
+     * @param settings JSON object from a configfile.settings response
+     * @return true when a wrapper's rename_existing was found and stored
+     */
+    bool parse_screws_tilt_builtin(const nlohmann::json& settings);
+
+    /// Klipper's SCREWS_TILT_CALCULATE under the name a wrapper gave it, or empty
+    /// when no wrapper replaces the command. See parse_screws_tilt_builtin().
+    [[nodiscard]] const std::string& screws_tilt_builtin() const {
+        return screws_tilt_builtin_;
     }
 
     /// Macros reaching a command that leaves the host DOWN, from
@@ -801,6 +967,14 @@ class PrinterDiscovery {
     }
 
     /**
+     * @brief Take the Klipper version and the Kalico marker from printer.info's result
+     *
+     * A missing or non-string software_version reads as "unknown". Call after
+     * parse_objects(), which clears both.
+     */
+    void apply_printer_info(const nlohmann::json& result);
+
+    /**
      * @brief Set kinematics type from toolhead subscription
      */
     void set_kinematics(const std::string& kinematics) {
@@ -915,7 +1089,23 @@ class PrinterDiscovery {
         return false;
     }
 
-    // Hardware lists
+    struct ClassifiedName {
+        std::string name;
+        hw::ObjectClass cls;
+    };
+    struct ClassifiedSection {
+        std::string name;
+        hw::ObjectClass cls;
+        nlohmann::json body;
+    };
+
+    /// Recomputes the bucket lists below from objects_.
+    void rebuild_buckets();
+
+    std::vector<ClassifiedName> objects_;     ///< every named object, classified once
+    std::vector<ClassifiedSection> sections_; ///< config sections with a known class
+
+    // Hardware lists: views of objects_, rebuilt by rebuild_buckets()
     std::vector<std::string> heaters_;
     std::vector<std::string> fans_;
     std::vector<std::string> load_cells_;
@@ -928,7 +1118,8 @@ class PrinterDiscovery {
     std::vector<std::string> afc_hub_names_;
     std::vector<std::string>
         afc_unit_object_names_; // Full names: "AFC_BoxTurtle Turtle_1", "AFC_OpenAMS AMS_1"
-    std::vector<std::string> afc_buffer_names_; // Buffer suffixes: "TN", "TN1", etc.
+    std::vector<std::string> afc_buffer_names_;   // Buffer suffixes: "TN", "TN1", etc.
+    std::vector<std::string> afc_extruder_names_; // [AFC_extruder <name>]: "extruder", ...
     std::vector<std::string> tool_names_;
     std::vector<std::string> filament_sensor_names_;
     std::vector<std::string> width_sensor_objects_;
@@ -947,6 +1138,7 @@ class PrinterDiscovery {
     std::vector<skip_wrappers::Op> skip_wrappable_;
     std::vector<skip_wrappers::Op> skip_active_;
     std::string sensor_toggle_command_; ///< Empty = the SET_FILAMENT_SENSOR builtin
+    std::string screws_tilt_builtin_;   ///< Empty = no SCREWS_TILT_CALCULATE wrapper
     std::unordered_set<std::string> helix_macros_;
     std::string nozzle_clean_macro_;
     std::string purge_line_macro_;
@@ -964,11 +1156,17 @@ class PrinterDiscovery {
     bool has_afc_lite_ = false;
     bool has_zmod_afclite_ = false;
     bool has_tool_changer_ = false;
+    /// Filament systems present beside the detected mmu_type_ (a tool changer
+    /// carrying another system's lanes).
+    std::vector<AmsType> coexisting_systems_;
     bool has_auto_feeding_batch_ = false;
     bool has_pin_watch_ = false;
     std::string pin_watch_object_name_;
     bool has_medusahc_ = false;
     std::string medusahc_object_name_;
+    bool has_indx_ = false;
+    bool has_save_variables_ = false;
+    bool has_spoollink_ = false;
     bool has_chamber_heater_ = false;
     bool has_chamber_sensor_ = false;
     std::string chamber_sensor_name_;
@@ -982,8 +1180,13 @@ class PrinterDiscovery {
                                              ///< independent of the heater pick: in COOLING mode
                                              ///< the K2 M141 macro parks the setpoint on this fan's
                                              ///< target, not the heater's.
-    float filament_diameter_mm_ = filament::DEFAULT_DIAMETER_MM; ///< [extruder] filament_diameter
+    float filament_diameter_mm_ = filament::kDefaultDiameterMm; ///< [extruder] filament_diameter
+    static constexpr float kDefaultNozzleDiameterMm = 0.4f;
+    float nozzle_diameter_mm_ = kDefaultNozzleDiameterMm;   ///< [extruder] nozzle_diameter
+    std::optional<FitMachine> fit_machine_;                 ///< configfile limits for the fit check
     std::vector<LevelingProbePoint> leveling_probe_points_; ///< [quad_gantry_level]/[z_tilt] points
+    std::optional<ProbeXYOffset> probe_xy_offset_;          ///< Z probe x_offset/y_offset
+    bool firmware_runs_start_macro_before_file_ = false;    ///< start_macro_injection.h
     int chamber_fan_resting_deci_ = 0; ///< Cooling fan's configured resting/off target
                                        ///< (decidegrees), from configfile.settings
                                        ///< target_temp. 0 = unknown. M141 S0 returns here.
@@ -1007,8 +1210,6 @@ class PrinterDiscovery {
     bool has_speaker_ = false;
     bool has_fan_feedback_ = false;
     bool is_kalico_ = false;
-    /// Set by `ace_bg_swap` / `ace_tipform`, which only multiACE registers.
-    bool has_multiace_markers_ = false;
     AmsType mmu_type_ = AmsType::NONE;
     std::vector<DetectedAmsSystem> detected_ams_systems_;
 
@@ -1030,8 +1231,8 @@ class PrinterDiscovery {
 } // namespace helix
 
 // Forward declarations for init_subsystems_from_hardware (global scope)
-class IMoonrakerAPI;
 namespace helix {
+class IMoonrakerAPI;
 class IMoonrakerClient;
 class PrinterState;
 } // namespace helix
@@ -1051,16 +1252,15 @@ namespace helix {
 void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerAPI* api,
                                    IMoonrakerClient* client);
 
+/// Re-reads the filament, probe and width sensor config. A preset assigns sensor roles after
+/// discovery has already loaded that config, so every path that applies a preset calls this
+/// or the sensors keep the roles inferred from their names until the next restart.
+/// UI thread only.
+void reload_sensor_roles_after_preset();
+
 /// Saves Klipper's hostname for the active printer, writing only when it changed. The
 /// connection-failed prompt re-finds the printer over mDNS by it (#1217).
 void remember_printer_hostname(const std::string& hostname);
-
-/**
- * @brief The objects TemperatureSensorManager tracks: temperature_sensor /
- *        temperature_fan / tmc objects plus every heater_generic (filament
- *        dryers, auxiliary heaters). Extruders and the bed are PrinterState's.
- */
-std::vector<std::string> temperature_sensor_objects(const PrinterDiscovery& hardware);
 
 /**
  * @brief Case-insensitive search of Klipper object names

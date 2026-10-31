@@ -9,6 +9,7 @@
 #include "../test_helpers/printer_state_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
+#include "display_settings_manager.h"
 #include "format_utils.h"
 #include "print_history_manager.h"
 #include "printer_discovery.h"
@@ -71,11 +72,13 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter writes layer and time",
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_layer_text"))) == "Layer 42 / 213");
-    // elapsed=42m, total=42m+2h14m=2h56m. Sub-hour durations carry no "0h" —
-    // helix::format::duration_padded drops the hours field below one hour.
+                lv_xml_get_subject(nullptr, "print_status_layer_text"))) == "42 / 213");
+    // Sub-hour durations carry no "0h": helix::format::duration_padded drops
+    // the hours field below one hour.
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_time_text"))) == "42m / 2h 56m");
+                lv_xml_get_subject(nullptr, "print_status_elapsed_text"))) == "42m");
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_remaining_text"))) == "2h 14m");
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter time text omits hours under an hour",
@@ -89,12 +92,14 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter time text omits hours unde
     FormatterScope fs;
 
     lv_subject_set_int(ps.print_state().get_print_elapsed_subject(), 45 * 60);
-    lv_subject_set_int(ps.print_state().get_print_time_left_subject(), 0);
+    lv_subject_set_int(ps.print_state().get_print_time_left_subject(), 30 * 60);
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
-    // A hand-rolled "%dh %02dm" renders this as "0h 45m / 0h 45m".
+    // A hand-rolled "%dh %02dm" renders these as "0h 45m" and "0h 30m".
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_time_text"))) == "45m / 45m");
+                lv_xml_get_subject(nullptr, "print_status_elapsed_text"))) == "45m");
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_remaining_text"))) == "30m");
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter filament text switches unit at 1000mm",
@@ -112,13 +117,13 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter filament text switches uni
     lv_subject_set_int(ps.print_state().get_print_filament_used_subject(), 850);
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_filament_text"))) == "Filament: 850mm");
+                lv_xml_get_subject(nullptr, "print_status_filament_text"))) == "850mm");
 
     // Above 1000000mm it switches to kilometres rather than "1200.0m".
     lv_subject_set_int(ps.print_state().get_print_filament_used_subject(), 1200000);
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_filament_text"))) == "Filament: 1.20km");
+                lv_xml_get_subject(nullptr, "print_status_filament_text"))) == "1.20km");
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter seeds initial values on construction",
@@ -140,7 +145,7 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter seeds initial values on co
 
     // No drain needed — seed calls are synchronous in the constructor
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_layer_text"))) == "Layer 100 / 200");
+                lv_xml_get_subject(nullptr, "print_status_layer_text"))) == "100 / 200");
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter layer text omits total when zero",
@@ -162,7 +167,7 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter layer text omits total whe
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_layer_text"))) == "Layer 7");
+                lv_xml_get_subject(nullptr, "print_status_layer_text"))) == "7");
 }
 
 // The panel's richest layer path (on_print_layer_changed) marks progress-derived
@@ -187,8 +192,10 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter layer text marks estimates
     lv_subject_set_int(ps.print_state().get_print_layer_total_subject(), 213);
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
-    REQUIRE(std::string(lv_subject_get_string(lv_xml_get_subject(
-                nullptr, "print_status_layer_text"))) == "Layer ~42 / 213 (24.0mm)");
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_layer_text"))) == "~42 / 213");
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_layer_z_text"))) == "· 24.0mm");
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter filament text empty when zero",
@@ -222,7 +229,7 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter filament text formatted in
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
 
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_filament_text"))) == "Filament: 2.5m");
+                lv_xml_get_subject(nullptr, "print_status_filament_text"))) == "2.5m");
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter nozzle text (decidegree rounding)",
@@ -274,7 +281,7 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter multi-extruder label and g
     REQUIRE(ts.extruder_count() == 1);
     REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "print_status_multi_tool")) == 0);
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_nozzle_tool_label"))) == "");
+                lv_xml_get_subject(nullptr, "print_status_nozzle_badge_text"))) == "");
 
     // Two extruders — gate=1, label tracks active (default index = 0)
     auto dual = discovery_with({"extruder", "extruder1", "heater_bed", "fan"});
@@ -283,14 +290,14 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter multi-extruder label and g
     REQUIRE(ts.extruder_count() == 2);
     REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "print_status_multi_tool")) == 1);
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_nozzle_tool_label"))) == "Tool 1");
+                lv_xml_get_subject(nullptr, "print_status_nozzle_badge_text"))) == "1");
 
     // Back to single — gate=0, label cleared
     ts.init_tools(single);
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
     REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "print_status_multi_tool")) == 0);
     REQUIRE(std::string(lv_subject_get_string(
-                lv_xml_get_subject(nullptr, "print_status_nozzle_tool_label"))) == "");
+                lv_xml_get_subject(nullptr, "print_status_nozzle_badge_text"))) == "");
 }
 
 // =============================================================================
@@ -405,10 +412,10 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter re-renders its text on a l
 
     FormatterScope fs;
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
-    REQUIRE(subject_text("print_status_layer_text") == "Layer 7");
+    REQUIRE(subject_text("print_status_layer_text") == "7");
     REQUIRE(subject_text("print_status_idle_when") == "Completed 2h ago");
     REQUIRE(subject_text("print_status_idle_meta") == "12.5m filament • 1h");
-    REQUIRE(subject_text("print_status_filament_text") == "Filament: 1.5m");
+    REQUIRE(subject_text("print_status_filament_text") == "1.5m");
 
     auto& settings = SystemSettingsManager::instance();
     settings.set_language("ru");
@@ -417,12 +424,13 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter re-renders its text on a l
     // below would pass against English.
     REQUIRE(std::string(lv_tr("Completed {}h ago")) != "Completed {}h ago");
 
-    CHECK(subject_text("print_status_layer_text") == std::string(lv_tr("Layer")) + " 7");
+    // The layer and filament values sit beside icons, with no words to translate.
+    CHECK(subject_text("print_status_layer_text") == "7");
     CHECK(subject_text("print_status_idle_when") == fmt::format(lv_tr("Completed {}h ago"), 2));
     CHECK(subject_text("print_status_idle_meta") ==
           fmt::format(lv_tr("{} filament • {}"), "12.5m", helix::format::duration(3600)));
     CHECK(helix::format::duration(3600) != "1h");
-    CHECK(subject_text("print_status_filament_text") == std::string(lv_tr("Filament")) + ": 1.5m");
+    CHECK(subject_text("print_status_filament_text") == "1.5m");
 
     settings.set_language("en");
     UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
@@ -492,7 +500,7 @@ TEST_CASE("describe_last_print: only a completed job says Completed",
 
     auto cancelled = job_with(PrintJobStatus::CANCELLED, start, end);
     REQUIRE(describe_last_print(cancelled, kNow).when ==
-            std::string(lv_tr("Cancelled")) + " • " + relative(kNow - end));
+            std::string(lv_tr("Canceled")) + " • " + relative(kNow - end));
 
     auto failed = job_with(PrintJobStatus::ERROR, start, end);
     REQUIRE(describe_last_print(failed, kNow).when ==
@@ -573,12 +581,12 @@ TEST_CASE("describe_last_print: an end_time ahead of the clock reads as just now
           "[print_status][last_print]") {
     auto job = job_with(PrintJobStatus::CANCELLED, kNow - 600.0, kNow + 120.0);
     REQUIRE(describe_last_print(job, kNow).when ==
-            std::string(lv_tr("Cancelled")) + " • " + relative(0.0));
+            std::string(lv_tr("Canceled")) + " • " + relative(0.0));
 }
 
 TEST_CASE("status_to_label names every job status", "[print_status][last_print][history]") {
     REQUIRE(std::string(status_to_label(PrintJobStatus::COMPLETED)) == "Completed");
-    REQUIRE(std::string(status_to_label(PrintJobStatus::CANCELLED)) == "Cancelled");
+    REQUIRE(std::string(status_to_label(PrintJobStatus::CANCELLED)) == "Canceled");
     REQUIRE(std::string(status_to_label(PrintJobStatus::ERROR)) == "Failed");
     REQUIRE(std::string(status_to_label(PrintJobStatus::IN_PROGRESS)) == "In Progress");
     REQUIRE(std::string(status_to_label(PrintJobStatus::UNKNOWN)) == "Unknown");
@@ -616,4 +624,48 @@ TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter idle tile on an interrupte
         REQUIRE(subject_text("print_status_idle_when") == lv_tr("Failed"));
         REQUIRE(subject_text("print_status_idle_meta").empty());
     }
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter speed/flow text shows live rates",
+                 "[print_status][formatter]") {
+    PrintStatusWidget::destroy_formatter_for_test();
+
+    PrinterState& ps = get_printer_state();
+    PrinterStateTestAccess::reset(ps);
+    ps.init_subjects(false);
+
+    FormatterScope fs;
+
+    // The card shows the physical rates even with the percent preference set.
+    REQUIRE_FALSE(DisplaySettingsManager::instance().get_speed_flow_physical_units());
+
+    lv_subject_set_int(ps.motion_state().get_live_velocity_subject(), 187);
+    lv_subject_set_int(ps.motion_state().get_live_extruder_velocity_subject(), 500); // 5 mm/s
+    UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
+
+    // 5 mm/s of 1.75 mm filament: 5 * pi * 0.875^2 = 12.03 mm³/s.
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_speed_text"))) == "187 mm/s");
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_flow_text"))) == "· 12.0 mm\xC2\xB3/s");
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "DetailedFormatter seeds the live rates on construction",
+                 "[print_status][formatter]") {
+    PrintStatusWidget::destroy_formatter_for_test();
+
+    PrinterState& ps = get_printer_state();
+    PrinterStateTestAccess::reset(ps);
+    ps.init_subjects(false);
+
+    // Rates already moving before the card exists, as on a widget added mid-print.
+    lv_subject_set_int(ps.motion_state().get_live_velocity_subject(), 187);
+    lv_subject_set_int(ps.motion_state().get_live_extruder_velocity_subject(), 500);
+
+    FormatterScope fs;
+
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_speed_text"))) == "187 mm/s");
+    REQUIRE(std::string(lv_subject_get_string(
+                lv_xml_get_subject(nullptr, "print_status_flow_text"))) == "· 12.0 mm\xC2\xB3/s");
 }

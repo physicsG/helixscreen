@@ -12,6 +12,7 @@ using helix::PrintJobState;
 using helix::ui::compute_control_button_view;
 using helix::ui::ControlButtonInputs;
 using helix::ui::PendingAction;
+using helix::ui::StopRoute;
 
 namespace {
 
@@ -83,7 +84,7 @@ TEST_CASE("control view: idle disables both buttons", "[print_control_view]") {
         auto v = compute_control_button_view(in);
         REQUIRE_FALSE(v.primary_enabled);
         REQUIRE_FALSE(v.stop_enabled);
-        REQUIRE_FALSE(v.stop_retires_preparing);
+        REQUIRE(v.stop_route == StopRoute::Abort);
     }
 }
 
@@ -158,7 +159,7 @@ TEST_CASE("control view: Cancel is enabled during a host-side preparing window",
     // works, making that path unreachable by touch.
     auto v = compute_control_button_view(preparing_host_side());
     REQUIRE(v.stop_enabled);
-    REQUIRE(v.stop_retires_preparing);
+    REQUIRE(v.stop_route == StopRoute::RetirePreparing);
 }
 
 TEST_CASE("control view: Cancel during host-side preparing needs no cancel macro",
@@ -169,7 +170,7 @@ TEST_CASE("control view: Cancel during host-side preparing needs no cancel macro
     in.cancel_available = false;
     auto v = compute_control_button_view(in);
     REQUIRE(v.stop_enabled);
-    REQUIRE(v.stop_retires_preparing);
+    REQUIRE(v.stop_route == StopRoute::RetirePreparing);
 }
 
 TEST_CASE("control view: Cancel is enabled during a firmware-side preparing window",
@@ -177,7 +178,7 @@ TEST_CASE("control view: Cancel is enabled during a firmware-side preparing wind
     auto v = compute_control_button_view(preparing_firmware_side());
     REQUIRE(v.stop_enabled);
     // The printer holds the job, so this one routes through CANCEL_PRINT.
-    REQUIRE_FALSE(v.stop_retires_preparing);
+    REQUIRE(v.stop_route == StopRoute::Abort);
 }
 
 TEST_CASE("control view: Pause is disabled in BOTH preparing architectures",
@@ -197,7 +198,7 @@ TEST_CASE("control view: the two preparing architectures agree on every affordan
     REQUIRE(host.primary_enabled == firmware.primary_enabled);
     REQUIRE(host.stop_enabled == firmware.stop_enabled);
     // Only the mechanism differs, and that is deliberately not user-visible.
-    REQUIRE(host.stop_retires_preparing != firmware.stop_retires_preparing);
+    REQUIRE(host.stop_route != firmware.stop_route);
 }
 
 TEST_CASE("control view: Pause re-enables once preparation hands off to printing",
@@ -223,6 +224,43 @@ TEST_CASE("control view: an externally started print in PRINT_START cannot retir
     auto in = preparing_firmware_side();
     in.has_preparing_job = false;
     auto v = compute_control_button_view(in);
-    REQUIRE_FALSE(v.stop_retires_preparing);
+    REQUIRE(v.stop_route == StopRoute::Abort);
     REQUIRE(v.stop_enabled);
+}
+
+// ============================================================================
+// A start the printer was sent but has not reported (#1890)
+//
+// Some firmwares run the whole print-start sequence inside SDCARD_PRINT_FILE,
+// so print_stats stays idle while the printer homes, heats and probes. The
+// start is already on the printer: withdrawing it locally stops nothing.
+// ============================================================================
+
+TEST_CASE("control view: Cancel after the start was sent goes to the printer",
+          "[print_control_view][preparing]") {
+    auto in = preparing_host_side();
+    in.start_sent = true;
+    auto v = compute_control_button_view(in);
+    REQUIRE(v.stop_enabled);
+    REQUIRE(v.stop_route == StopRoute::CancelSentStart);
+}
+
+TEST_CASE("control view: a sent start's Cancel needs no cancel macro",
+          "[print_control_view][preparing]") {
+    auto in = preparing_host_side();
+    in.start_sent = true;
+    in.cancel_available = false;
+    REQUIRE(compute_control_button_view(in).stop_enabled);
+}
+
+TEST_CASE("control view: a cancel in flight disables Stop", "[print_control_view][preparing]") {
+    auto sent = preparing_host_side();
+    sent.start_sent = true;
+    sent.cancel_requested = true;
+    CHECK_FALSE(compute_control_button_view(sent).stop_enabled);
+
+    // The printer reporting the job before the cancel lands changes nothing.
+    auto taken = printing();
+    taken.cancel_requested = true;
+    CHECK_FALSE(compute_control_button_view(taken).stop_enabled);
 }

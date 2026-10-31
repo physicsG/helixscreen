@@ -171,6 +171,10 @@ PreparingExitAction decide_preparing_exit_action(PreparingExit reason) {
         // A print is running - ours, or the one that superseded ours. Say
         // nothing and leave the heaters alone.
         break;
+    case PreparingExit::EndedByPrinter:
+        // The printer's terminal state reaches the completion observer, which
+        // reports it; the printer's own end gcode owns the heaters.
+        break;
     case PreparingExit::Cancelled:
         action.notify_cancelled = true;
         action.cool_down = true;
@@ -266,7 +270,7 @@ static void show_rich_completion_modal(PrintJobState state, const char* filename
     case PrintJobState::CANCELLED:
         icon_src = "cancel";
         icon_variant = "warning";
-        title = "Print Cancelled";
+        title = "Print Canceled";
         break;
     case PrintJobState::ERROR:
         icon_src = "alert";
@@ -441,13 +445,18 @@ static void on_print_state_changed_for_notification(lv_observer_t* observer,
             if (auto* dm = DisplayManager::instance()) {
                 dm->wake_display();
             }
-            char message[128];
             ToastSeverity severity = (current == PrintJobState::COMPLETE) ? ToastSeverity::SUCCESS
                                                                           : ToastSeverity::WARNING;
-            snprintf(message, sizeof(message), "Print %s: %s",
-                     (current == PrintJobState::COMPLETE) ? "complete" : "cancelled",
-                     display_name.c_str());
-            ToastManager::instance().show(severity, message, 5000);
+            std::string message = std::string("Print ") +
+                                  ((current == PrintJobState::COMPLETE) ? "complete" : "canceled") +
+                                  ": " + display_name;
+            // Empty for a completed print (decide_print_stop_reason).
+            const char* reason = lv_subject_get_string(
+                get_printer_state().print_state().get_print_stop_reason_subject());
+            if (reason && *reason) {
+                message += std::string(" - ") + reason;
+            }
+            ToastManager::instance().show(severity, message.c_str(), 5000);
             break;
         }
 
@@ -476,7 +485,7 @@ void apply_preparing_exit(PreparingExit reason) {
     const PreparingExitAction action = decide_preparing_exit_action(reason);
 
     if (action.notify_cancelled) {
-        NOTIFY_INFO(lv_tr("Print cancelled"));
+        NOTIFY_INFO(lv_tr("Print canceled"));
     } else if (action.notify_failure) {
         NOTIFY_ERROR(lv_tr("Print did not start"));
     }
@@ -526,52 +535,48 @@ void cleanup_stale_helix_temp_files(IMoonrakerAPI* api) {
         return;
     }
 
-    // List files in .helix_temp directory
-    // Note: Moonraker returns ALL files in root, not just the path we request
-    // We must filter by path prefix ourselves
-    api->files().list_files(
-        "gcodes", ".helix_temp", false,
-        [api](const std::vector<FileInfo>& files) {
-            // Filter to only files actually in .helix_temp/
-            int cleanup_count = 0;
-            for (const auto& file : files) {
-                if (file.is_dir) {
-                    continue;
+    // Every staging directory: a printer's copies sit in the visible one when
+    // its Klipper cannot print from a dot-directory, and either may hold
+    // leftovers from before that was known.
+    for (const std::string& dir : helix::gcode::staging_dirs()) {
+        // Moonraker returns ALL files in root, not just the path requested, so
+        // the listing is filtered by path prefix here.
+        api->files().list_files(
+            "gcodes", dir, false,
+            [api, dir](const std::vector<FileInfo>& files) {
+                const std::string prefix = dir + "/";
+                int cleanup_count = 0;
+                for (const auto& file : files) {
+                    if (file.is_dir || file.path.rfind(prefix, 0) != 0) {
+                        continue;
+                    }
+                    cleanup_count++;
+
+                    // Moonraker's delete_file requires full path including root
+                    std::string filepath = "gcodes/" + file.path;
+                    api->files().delete_file(
+                        filepath,
+                        [filepath]() {
+                            spdlog::debug("[PrintComplete] Deleted stale temp file: {}", filepath);
+                        },
+                        [filepath](const MoonrakerError& err) {
+                            spdlog::warn("[PrintComplete] Failed to delete stale temp file {}: {}",
+                                         filepath, err.message);
+                        });
                 }
 
-                // Only process files that are actually in .helix_temp/
-                // file.path contains the relative path from root (e.g.,
-                // ".helix_temp/modified_123.gcode")
-                if (file.path.find(".helix_temp/") != 0) {
-                    continue; // Not in .helix_temp directory
+                if (cleanup_count > 0) {
+                    spdlog::info("[PrintComplete] Cleaning up {} stale temp files from {}",
+                                 cleanup_count, dir);
+                } else {
+                    spdlog::debug("[PrintComplete] No stale temp files to clean up in {}", dir);
                 }
-
-                cleanup_count++;
-
-                // Moonraker's delete_file requires full path including root
-                std::string filepath = "gcodes/" + file.path;
-                api->files().delete_file(
-                    filepath,
-                    [filepath]() {
-                        spdlog::debug("[PrintComplete] Deleted stale temp file: {}", filepath);
-                    },
-                    [filepath](const MoonrakerError& err) {
-                        spdlog::warn("[PrintComplete] Failed to delete stale temp file {}: {}",
-                                     filepath, err.message);
-                    });
-            }
-
-            if (cleanup_count > 0) {
-                spdlog::info("[PrintComplete] Cleaning up {} stale temp files from .helix_temp",
-                             cleanup_count);
-            } else {
-                spdlog::debug("[PrintComplete] No stale temp files to clean up");
-            }
-        },
-        [](const MoonrakerError& err) {
-            // Directory doesn't exist or can't be listed - that's fine
-            spdlog::debug("[PrintComplete] No .helix_temp directory to clean: {}", err.message);
-        });
+            },
+            [dir](const MoonrakerError& err) {
+                // Directory doesn't exist or can't be listed - that's fine
+                spdlog::debug("[PrintComplete] No {} directory to clean: {}", dir, err.message);
+            });
+    }
 }
 
 } // namespace helix

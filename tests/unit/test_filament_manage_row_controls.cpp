@@ -25,6 +25,7 @@
 #include "theme_manager.h"
 #include "tool_state.h"
 
+#include <algorithm>
 #include <lvgl.h>
 #include <memory>
 #include <string>
@@ -154,17 +155,16 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Cool Down keeps its grid cell while nothing
     CHECK_FALSE(lv_obj_has_state(cooldown, LV_STATE_DISABLED));
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "Closed tool dropdown spells the 1-based tool number",
-                 "[filament][ui][tool]") {
+TEST_CASE_METHOD(LVGLUITestFixture, "Closed tool dropdown names the tool as G-code does",
+                 "[filament][ui][tool][1769]") {
     ManageRowHarness h(*this, {"extruder", "extruder1"}, AmsType::NONE);
 
     lv_obj_t* dd = TA::extruder_dropdown(*h.panel);
     REQUIRE(dd != nullptr);
 
-    // A generated tool name collapses to the lane number in the closed text.
     const char* closed = lv_dropdown_get_text(dd);
     REQUIRE(closed != nullptr);
-    CHECK(std::string(closed) == "1");
+    CHECK(std::string(closed) == "T0");
 
     // The active tool moving to the second head moves the closed text with it.
     lv_subject_set_int(ToolState::instance().get_active_tool_subject(), 1);
@@ -172,7 +172,40 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Closed tool dropdown spells the 1-based too
     REQUIRE(lv_dropdown_get_selected(dd) == 1);
     closed = lv_dropdown_get_text(dd);
     REQUIRE(closed != nullptr);
-    CHECK(std::string(closed) == "2");
+    CHECK(std::string(closed) == "T1");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "Closed tool dropdown keeps T<n> for a configured tool name",
+                 "[filament][ui][tool][1769]") {
+    // The closed control is as narrow as a tool switcher segment, so it reads
+    // the G-code name; the open list carries each configured name beside it.
+    ManageRowHarness h(*this, {"toolchanger", "tool Left", "tool Right", "extruder", "extruder1"},
+                       AmsType::NONE);
+
+    lv_obj_t* dd = TA::extruder_dropdown(*h.panel);
+    REQUIRE(dd != nullptr);
+    REQUIRE(ToolState::instance().tool_count() == 2);
+    REQUIRE(ToolState::instance().tools()[0].name == "Left");
+
+    const char* closed = lv_dropdown_get_text(dd);
+    REQUIRE(closed != nullptr);
+    CHECK(std::string(closed) == "T0");
+    const char* options = lv_dropdown_get_options(dd);
+    REQUIRE(options != nullptr);
+    CHECK(std::string(options) == "Left (T0)\nRight (T1)");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "Open tool list names each tool's G-code name beside it",
+                 "[filament][ui][tool][1769]") {
+    // The open list sizes itself to its widest option, so it always has room
+    // for the full form; the closed control stays the G-code name above.
+    ManageRowHarness h(*this, {"extruder", "extruder1"}, AmsType::NONE);
+
+    lv_obj_t* dd = TA::extruder_dropdown(*h.panel);
+    REQUIRE(dd != nullptr);
+    const char* options = lv_dropdown_get_options(dd);
+    REQUIRE(options != nullptr);
+    CHECK(std::string(options) == "Tool 1 (T0)\nTool 2 (T1)");
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
@@ -321,4 +354,69 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     REQUIRE(spacer != nullptr);
     CHECK(lv_subject_get_int(spacer) == 0);
     REQUIRE(lv_obj_find_by_name(h.root, "portrait_column") == nullptr);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "Closed tool dropdown reads None with the carriage empty",
+                 "[filament][ui][tool]") {
+    ManageRowHarness h(*this, {"extruder", "extruder1"}, AmsType::NONE);
+    lv_obj_t* dd = TA::extruder_dropdown(*h.panel);
+    REQUIRE(dd != nullptr);
+    lv_subject_set_int(ToolState::instance().get_active_tool_subject(), 1);
+    h.fx.process_lvgl(30);
+    REQUIRE(std::string(lv_dropdown_get_text(dd)) == "T1");
+
+    // A park leaves no tool on the carriage: the last one is not selected.
+    lv_subject_set_int(ToolState::instance().get_active_tool_subject(), -1);
+    h.fx.process_lvgl(30);
+    CHECK(std::string(lv_dropdown_get_text(dd)) == "None");
+}
+
+namespace {
+
+/// Every descendant of @p root whose name is in @p names, hidden or not.
+void collect_named(lv_obj_t* root, const std::vector<std::string>& names,
+                   std::vector<lv_obj_t*>& out) {
+    for (uint32_t i = 0; i < lv_obj_get_child_count(root); ++i) {
+        lv_obj_t* child = lv_obj_get_child(root, static_cast<int32_t>(i));
+        const char* name = lv_obj_get_name(child);
+        if (name && std::find(names.begin(), names.end(), name) != names.end()) {
+            out.push_back(child);
+        }
+        collect_named(child, names, out);
+    }
+}
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture, "Filament panel nozzle heat controls dim while heat is blocked",
+                 "[filament][ui][indx][heat]") {
+    const int portrait_mode = GENERATE(0, 1);
+    CAPTURE(portrait_mode);
+    lv_subject_t* portrait = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    REQUIRE(portrait != nullptr);
+    lv_subject_set_int(portrait, portrait_mode);
+    ui_ams_mini_status_init();
+    ManageRowHarness h(*this, {"extruder"}, AmsType::NONE);
+    lv_subject_t* blocked = AmsState::instance().get_nozzle_heat_blocked_subject();
+
+    const std::vector<std::string> names = {"preset_pla", "preset_petg",  "preset_abs",
+                                            "preset_tpu", "preset_spool", "nozzle_target_temp"};
+    std::vector<lv_obj_t*> controls;
+    collect_named(h.root, names, controls);
+    // Five presets and the nozzle target, whichever layout this orientation built.
+    REQUIRE(controls.size() >= names.size());
+
+    lv_subject_set_int(blocked, 1);
+    h.fx.process_lvgl(30);
+    for (lv_obj_t* obj : controls) {
+        CAPTURE(lv_obj_get_name(obj));
+        CHECK(lv_obj_get_style_opa(obj, LV_PART_MAIN) < LV_OPA_COVER);
+    }
+    lv_subject_set_int(blocked, 0);
+    h.fx.process_lvgl(30);
+    for (lv_obj_t* obj : controls) {
+        CAPTURE(lv_obj_get_name(obj));
+        CHECK(lv_obj_get_style_opa(obj, LV_PART_MAIN) == LV_OPA_COVER);
+    }
+    lv_subject_set_int(portrait, 0);
 }

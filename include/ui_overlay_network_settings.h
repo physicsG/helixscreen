@@ -62,6 +62,7 @@
 #include "wifi_backend.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -186,6 +187,11 @@ class NetworkSettingsOverlay : public OverlayBase {
     lv_subject_t wifi_only_24ghz_{};       // 1 if hardware only supports 2.4GHz
     lv_subject_t wifi_can_forget_{};       // 1 if the backend can forget a saved network
     lv_subject_t wifi_can_toggle_radio_{}; // 1 if the backend can move the radio
+    lv_subject_t wifi_toggle_locked_{};    // 1 while the switch must not take a tap
+    lv_subject_t wifi_can_set_country_{};  // 1 if the backend can set the regulatory country
+    lv_subject_t wifi_country_index_{};    // country dropdown selection (0 = not set)
+    lv_subject_t wifi_unresponsive_{};     // 1 while WiFi control stops answering (rows show
+                                           // the last known state)
     lv_subject_t connected_ssid_{};
     lv_subject_t ip_address_{};
     lv_subject_t mac_address_{};
@@ -280,6 +286,10 @@ class NetworkSettingsOverlay : public OverlayBase {
     void cancel_wlan_toggle_backstop();
     lv_timer_t* wlan_toggle_backstop_ = nullptr;
     bool wlan_toggle_requested_ = false;
+    // While a radio change is in flight the switch shows the requested state and
+    // stays locked until the radio answers, so a second tap cannot queue the
+    // opposite change behind the first.
+    void set_wlan_toggle_in_flight(bool in_flight);
     void handle_wlan_toggle_off_confirm();
     void handle_wlan_toggle_off_cancel();
     void handle_refresh_clicked();
@@ -287,6 +297,7 @@ class NetworkSettingsOverlay : public OverlayBase {
     void handle_add_other_clicked();
     void handle_network_item_clicked(lv_event_t* e);
     void handle_network_settings_forget();
+    void handle_country_changed(lv_event_t* e);
     void handle_network_forget_confirm();
     void handle_network_forget_cancel();
 
@@ -304,6 +315,26 @@ class NetworkSettingsOverlay : public OverlayBase {
     // downs/ups the OTHER transport too, so the ethernet row is as stale as
     // the wifi one until re-queried (prestonbrown/helixscreen#1398).
     void refresh_transport_status();
+    // Reads the radio's country off the UI thread and applies it to the
+    // country row: selection, visibility and the 5 GHz hint.
+    void refresh_country();
+    // Sets the 2.4 GHz-only indicator from the radio's band support, which a
+    // scan can raise after the overlay opened.
+    void refresh_band_capability();
+    // Sets the 5 GHz hint from the radio's band support and its country, and
+    // re-shows the country choice with it.
+    void apply_country_hint();
+    // What the closed country dropdown reads for selection @p index.
+    void show_country_choice(int index, bool hint_5ghz);
+    // Fills the country list in the current language and re-shows the choice.
+    void fill_country_options();
+    static void on_country_language_changed(lv_event_t* e);
+    // Removes the dropdown's language handler, whose user_data is this object.
+    void detach_country_dropdown();
+    lv_obj_t* country_dropdown_ = nullptr;
+    std::string country_button_text_;
+    bool country_hint_5ghz_ = false;           // 5 GHz radio left in the world domain
+    std::optional<std::string> radio_country_; // country the radio runs under, once read
 
     /// Ethernet refresh coalescing: at most one daemon probe in flight, with
     /// one trailing refresh armed while one runs (a flapping link or a

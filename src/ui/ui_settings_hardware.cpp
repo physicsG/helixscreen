@@ -3,7 +3,6 @@
 
 #include "ui_settings_hardware.h"
 
-#include "ui_ams_device_operations_overlay.h"
 #include "ui_callback_helpers.h"
 #include "ui_nav.h"
 #include "ui_panel_power.h"
@@ -23,7 +22,7 @@
 // Defined in src/ui/panel_widgets/camera_widget.cpp; that directory is not on
 // the include path, so forward-declare rather than including the header.
 namespace helix {
-void open_standalone_camera_fullscreen(lv_obj_t* parent_screen);
+bool open_standalone_camera_fullscreen(lv_obj_t* parent_screen);
 }
 #endif
 
@@ -42,11 +41,6 @@ void HardwareSettingsOverlay::register_callbacks() {
              spdlog::debug("[HardwareSettingsOverlay] Camera support disabled in this build");
 #endif
          }},
-        {"on_ams_settings_clicked",
-         [](lv_event_t*) {
-             auto& overlay = helix::ui::get_ams_device_operations_overlay();
-             overlay.show(get_hardware_settings_overlay().parent_screen_);
-         }},
         {"on_fans_settings_clicked",
          [](lv_event_t*) {
              get_fan_settings_overlay().show(get_hardware_settings_overlay().parent_screen_);
@@ -61,13 +55,7 @@ void HardwareSettingsOverlay::register_callbacks() {
          }},
         {"on_power_devices_clicked",
          [](lv_event_t*) {
-             lv_obj_t* overlay = get_global_power_panel().get_or_create_overlay(
-                 get_hardware_settings_overlay().parent_screen_);
-             if (overlay) {
-                 helix::nav::push_overlay(overlay);
-             } else {
-                 spdlog::error("[HardwareSettingsOverlay] Failed to open Power panel");
-             }
+             helix::ui::open_power_panel(get_hardware_settings_overlay().parent_screen_);
          }},
         {"on_spoolman_settings_clicked",
          [](lv_event_t*) {

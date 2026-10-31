@@ -18,7 +18,7 @@ namespace helix {
  */
 class BorderRadiusSizes {
   public:
-    static constexpr int SIZE_COUNT = 8;
+    static constexpr int kSizeCount = 8;
 
     struct SizeEntry {
         const char* name;
@@ -27,7 +27,7 @@ class BorderRadiusSizes {
     };
 
     static constexpr int count() {
-        return SIZE_COUNT;
+        return kSizeCount;
     }
 
     static const char* name(int index) {
@@ -47,7 +47,7 @@ class BorderRadiusSizes {
      * "_xxlarge"
      */
     static int pixels(int index, const char* suffix) {
-        return button_pixels(std::min(clamp_index(index), SIZE_COUNT - 2), suffix);
+        return button_pixels(std::min(clamp_index(index), kSizeCount - 2), suffix);
     }
 
     /// Button radius: the table value, including "Full".
@@ -70,7 +70,7 @@ class BorderRadiusSizes {
         int best = 0;
         int best_dist = INT_MAX;
         // Compare against XXLarge column (index 6)
-        for (int i = 0; i < SIZE_COUNT; ++i) {
+        for (int i = 0; i < kSizeCount; ++i) {
             int ref = table()[i].pixels[6]; // xxlarge
             if (ref == 9999)
                 continue; // skip "Full" for distance calc
@@ -83,8 +83,8 @@ class BorderRadiusSizes {
         return best;
     }
 
-    static const std::array<SizeEntry, SIZE_COUNT>& table() {
-        static constexpr std::array<SizeEntry, SIZE_COUNT> t = {{
+    static const std::array<SizeEntry, kSizeCount>& table() {
+        static constexpr std::array<SizeEntry, kSizeCount> t = {{
             //                micro tiny small med  large xl   xxl
             {"None", {{0, 0, 0, 0, 0, 0, 0}}},
             {"Minimal", {{1, 1, 2, 3, 4, 4, 4}}},
@@ -100,7 +100,7 @@ class BorderRadiusSizes {
 
   private:
     static int clamp_index(int index) {
-        return std::clamp(index, 0, SIZE_COUNT - 1);
+        return std::clamp(index, 0, kSizeCount - 1);
     }
 
     static int breakpoint_index(const char* suffix) {

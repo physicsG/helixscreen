@@ -55,7 +55,7 @@ struct EntryFixture : public LVGLUITestFixture {
 
         helix::ui::destroy_static_panels();
         drain();
-        std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+        std::array<lv_obj_t*, kUiPanelCount> panels{};
         for (auto& p : panels) {
             p = lv_obj_create(test_screen());
         }
@@ -146,7 +146,7 @@ TEST_CASE_METHOD(EntryFixture,
     helix::test::ScopedHomeLayout layout(
         nlohmann::json::array({helix::test::placed_light("led", 0)}));
     auto* cfg = Config::get_instance();
-    cfg->set(cfg->df() + LIGHT_BUTTON_PENDING_PATH, std::string("neopixel sb_leds"));
+    cfg->set(cfg->df() + kLightButtonPendingPath, std::string("neopixel sb_leds"));
     auto& ctrl = LedController::instance();
     PrintLightTimelapseControls controls;
     controls.handle_light_button();
@@ -157,27 +157,27 @@ TEST_CASE_METHOD(EntryFixture,
 
 TEST_CASE_METHOD(EntryFixture, "the print-status light icon shows the home light button's light",
                  "[led][entry][light_button]") {
-    constexpr const char* BULB_OFF = "\xF3\xB0\x8C\xB6";
-    constexpr const char* BULB_ON = "\xF3\xB0\x9B\xA8";
+    constexpr const char* kBulbOff = "\xF3\xB0\x8C\xB6";
+    constexpr const char* kBulbOn = "\xF3\xB0\x9B\xA8";
     helix::test::ScopedHomeLayout layout(
         nlohmann::json::array({helix::test::placed_light("led", 0)}));
     auto* cfg = Config::get_instance();
-    cfg->set(cfg->df() + LIGHT_BUTTON_PENDING_PATH, std::string("neopixel sb_leds"));
+    cfg->set(cfg->df() + kLightButtonPendingPath, std::string("neopixel sb_leds"));
     auto& ctrl = LedController::instance();
     PrintLightTimelapseControls controls;
     controls.init_subjects();
     lv_subject_t* icon = lv_xml_get_subject(nullptr, "light_button_icon");
     REQUIRE(icon != nullptr);
     drain();
-    REQUIRE(std::string(lv_subject_get_string(icon)) == BULB_OFF);
+    REQUIRE(std::string(lv_subject_get_string(icon)) == kBulbOff);
 
     ctrl.update_from_status({{"neopixel chamber_light", {{"color_data", {{1.0, 1.0, 1.0, 0.0}}}}}});
     drain();
-    CHECK(std::string(lv_subject_get_string(icon)) == BULB_OFF);
+    CHECK(std::string(lv_subject_get_string(icon)) == kBulbOff);
 
     ctrl.update_from_status({{"neopixel sb_leds", {{"color_data", {{1.0, 1.0, 1.0, 0.0}}}}}});
     drain();
-    CHECK(std::string(lv_subject_get_string(icon)) == BULB_ON);
+    CHECK(std::string(lv_subject_get_string(icon)) == kBulbOn);
 }
 
 TEST_CASE_METHOD(
@@ -185,28 +185,28 @@ TEST_CASE_METHOD(
     "with no home light button, the print-status light button shows the chamber light's state",
     "[led][entry]") {
     helix::test::ScopedHomeLayout layout(nlohmann::json::array());
-    constexpr const char* BULB_OFF = "\xF3\xB0\x8C\xB6";
-    constexpr const char* BULB_ON = "\xF3\xB0\x9B\xA8";
+    constexpr const char* kBulbOff = "\xF3\xB0\x8C\xB6";
+    constexpr const char* kBulbOn = "\xF3\xB0\x9B\xA8";
     auto& ctrl = LedController::instance();
     PrintLightTimelapseControls controls;
     controls.init_subjects();
     lv_subject_t* icon = lv_xml_get_subject(nullptr, "light_button_icon");
     REQUIRE(icon != nullptr);
     drain();
-    REQUIRE(std::string(lv_subject_get_string(icon)) == BULB_OFF);
+    REQUIRE(std::string(lv_subject_get_string(icon)) == kBulbOff);
 
     // Another light coming on is not the chamber light.
     ctrl.update_from_status({{"neopixel sb_leds", {{"color_data", {{1.0, 1.0, 1.0, 0.0}}}}}});
     drain();
-    CHECK(std::string(lv_subject_get_string(icon)) == BULB_OFF);
+    CHECK(std::string(lv_subject_get_string(icon)) == kBulbOff);
 
     ctrl.update_from_status({{"neopixel chamber_light", {{"color_data", {{1.0, 1.0, 1.0, 0.0}}}}}});
     drain();
-    CHECK(std::string(lv_subject_get_string(icon)) == BULB_ON);
+    CHECK(std::string(lv_subject_get_string(icon)) == kBulbOn);
 
     ctrl.update_from_status({{"neopixel chamber_light", {{"color_data", {{0.0, 0.0, 0.0, 0.0}}}}}});
     drain();
-    CHECK(std::string(lv_subject_get_string(icon)) == BULB_OFF);
+    CHECK(std::string(lv_subject_get_string(icon)) == kBulbOff);
 
     controls.deinit_subjects();
 }

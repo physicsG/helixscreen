@@ -209,14 +209,14 @@ print(d)' "$1" "$2"
 }
 
 @test "seed_update_channel: a version-derived beta channel lands in an absent settings.json" {
-    _R2_CHANNEL_FROM_VERSION=yes
+    _R2_CHANNEL_TO_SEED=yes
     seed_update_channel
     [ "$(json_get "$SETTINGS_FILE" update/channel)" = "1" ]
 }
 
 @test "seed_update_channel: fills the channel without touching the rest of the user's settings" {
     printf '{"config_version": 9, "update": {"auto": true}, "language": "de"}\n' > "$SETTINGS_FILE"
-    _R2_CHANNEL_FROM_VERSION=yes
+    _R2_CHANNEL_TO_SEED=yes
     seed_update_channel
     [ "$(json_get "$SETTINGS_FILE" update/channel)" = "1" ]
     [ "$(json_get "$SETTINGS_FILE" update/auto)" = "True" ]
@@ -226,7 +226,7 @@ print(d)' "$1" "$2"
 
 @test "seed_update_channel: never replaces a channel the user already chose" {
     printf '{"update": {"channel": 2}}\n' > "$SETTINGS_FILE"
-    _R2_CHANNEL_FROM_VERSION=yes
+    _R2_CHANNEL_TO_SEED=yes
     seed_update_channel
     [ "$(json_get "$SETTINGS_FILE" update/channel)" = "2" ]
 }
@@ -237,7 +237,7 @@ print(d)' "$1" "$2"
     mkdir -p "$HELIX_STATE_VAR_LIB" "$KLIPPER_HOME/.helixscreen"
     printf '{"config_version": 27, "language": "de"}\n' > "$HELIX_STATE_VAR_LIB/settings.json.backup"
     printf '{"config_version": 27}\n' > "$KLIPPER_HOME/.helixscreen/settings.json.backup"
-    _R2_CHANNEL_FROM_VERSION=yes
+    _R2_CHANNEL_TO_SEED=yes
 
     seed_update_channel
 
@@ -252,7 +252,7 @@ print(d)' "$1" "$2"
     # Every legacy backup predates the settings.json rename at config_version 8.
     printf '{"config_version": 8, "language": "de"}\n' > "$HELIX_STATE_VAR_LIB/helixconfig.json.backup"
     printf '{"config_version": 7, "update": {"channel": 0}}\n' > "$KLIPPER_HOME/.helixscreen/helixconfig.json.backup"
-    _R2_CHANNEL_FROM_VERSION=yes
+    _R2_CHANNEL_TO_SEED=yes
 
     seed_update_channel
 
@@ -278,7 +278,7 @@ print(d)' "$1" "$2"
 @test "seed_update_channel: a channel the backup already names stays" {
     mkdir -p "$HELIX_STATE_VAR_LIB"
     printf '{"config_version": 27, "update": {"channel": 0}}\n' > "$HELIX_STATE_VAR_LIB/settings.json.backup"
-    _R2_CHANNEL_FROM_VERSION=yes
+    _R2_CHANNEL_TO_SEED=yes
 
     seed_update_channel
 
@@ -290,7 +290,7 @@ print(d)' "$1" "$2"
     mkdir -p "$pd"
     printf '{"config_version": 9}\n' > "$pd/settings.json"
     ln -s "$pd/settings.json" "$SETTINGS_FILE"
-    _R2_CHANNEL_FROM_VERSION=yes
+    _R2_CHANNEL_TO_SEED=yes
 
     seed_update_channel
 
@@ -346,7 +346,7 @@ print(d)' "$1" "$2"
 }
 
 @test "seed_update_channel: no-op when the channel did not come from the version" {
-    unset _R2_CHANNEL_FROM_VERSION
+    unset _R2_CHANNEL_TO_SEED
     seed_update_channel
     [ ! -e "$SETTINGS_FILE" ]
 }
@@ -363,4 +363,16 @@ print(d)' "$1" "$2"
     PATH="$saved_path"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# --- detect_printer_via_moonraker() default binary path ---
+
+@test "detect via moonraker: runs the installed bin/helix-screen by default" {
+    unset HELIX_SCREEN_BIN
+    mkdir -p "$INSTALL_DIR/bin"
+    printf '#!/bin/sh\necho %s\n' "'{\"preset\":\"k1c\"}'" > "$INSTALL_DIR/bin/helix-screen"
+    chmod +x "$INSTALL_DIR/bin/helix-screen"
+    run detect_printer_via_moonraker
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"preset":"k1c"}' ]
 }

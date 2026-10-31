@@ -43,12 +43,12 @@ void throw_indev_read_cb(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
 
 /// Virtual-clock step between synthetic reads, fine enough that the drag below
 /// registers as motion rather than one teleport.
-constexpr int READ_STEP_MS = 10;
+constexpr int kReadStepMs = 10;
 
 void send(lv_indev_t* indev, int x, int y, lv_indev_state_t state) {
     g_throw_indev_state.point = {x, y};
     g_throw_indev_state.state = state;
-    lv_tick_inc(READ_STEP_MS);
+    lv_tick_inc(kReadStepMs);
     lv_indev_read(indev);
 }
 

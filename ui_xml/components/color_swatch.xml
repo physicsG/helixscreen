@@ -1,52 +1,80 @@
 <?xml version="1.0"?>
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The app's one color swatch (LEDs overlay rows, filament and theme preset grids).
+<!-- The app's one color swatch: every pure colour the UI shows (LED colours and
+     white tones, filament and theme preset grids, spool and slot colours, tool
+     dots) is one of these. docs/devel/COLOR_SWATCHES.md.
 
      The swatch is its whole touch target: a transparent circle padded by the
      selection ring's reach, holding a round disc of its color. The ring is the
      holder's border, drawn inside the swatch, so no row or grid clips it. The
-     holder carries the color as its (transparent) bg_color too, which is what a
-     click handler reads back from the event target. Its hit area reaches `hit`
-     past its edge, half the gap to its neighbour.
+     disc paints through the swatch painter (<swatch_paint>, ui_swatch.h): the
+     light/dark contrast edge, a multi-colour split and the filament's finish.
+     A click handler reads the colour back with helix::ui::swatch_color_of().
 
-     Props:
-       index             the swatch's position; the callback's user_data
+     Props (all optional):
+       index             the swatch's position; the callback's user_data and the
+                         selected_subject value that rings it
        color_subject     color subject for the fill
-       edge_subject      int subject, 1 where the fill blends into the current theme's surface
+       color             a fixed fill (a #token or hex) when there is no subject
+       colors_subject    string subject of comma-separated hex colours; two or
+                         more draw the spool's multi-colour split
+       finish_subject    string subject naming the filament ("PLA Silk"); its
+                         finish (silk, matte, marble, sparkle) is drawn
+       fill              a style for the disc (a gradient fill: custom_color_swatch)
        selected_subject  int subject naming the ringed index; empty for no ring
        callback          click handler
+       clickable         "false" for a swatch that only shows a colour
+       bubble            "true" to pass its clicks on to the parent (a swatch
+                         inside a tappable row)
        size, hit         touch size and hit reach tokens
        reach, ring       the ring's reach (the disc's inset) and its style; the
-                         dense grids pass a thinner pair so their discs stay large -->
+                         dense grids pass a thinner pair so their discs stay large.
+                         A display dot passes reach="0" and no selected_subject. -->
 <component>
   <api>
     <prop name="index" type="string" default="0"/>
-    <prop name="color_subject" type="string"/>
-    <prop name="edge_subject" type="string"/>
+    <prop name="color_subject" type="string" default=""/>
+    <prop name="color" type="string" default=""/>
+    <prop name="colors_subject" type="string" default=""/>
+    <prop name="finish_subject" type="string" default=""/>
+    <prop name="fill" type="string" default="disc_plain"/>
     <prop name="selected_subject" type="string" default=""/>
-    <prop name="callback" type="string"/>
+    <prop name="callback" type="string" default=""/>
+    <prop name="clickable" type="string" default="true"/>
+    <prop name="bubble" type="string" default="false"/>
     <prop name="size" type="string" default="#led_swatch_size"/>
     <prop name="hit" type="string" default="#led_swatch_gap_half"/>
     <prop name="reach" type="string" default="#led_ring_reach"/>
     <prop name="ring" type="string" default="styles.led_swatch_ring"/>
   </api>
+  <gradients>
+    <conical name="swatch_rainbow" center="50% 50%" angle="0 360">
+      <stop color="#FF4D4D" offset="0"/>
+      <stop color="#FFB347" offset="36"/>
+      <stop color="#FFF35C" offset="72"/>
+      <stop color="#4CD787" offset="109"/>
+      <stop color="#3DD6F5" offset="145"/>
+      <stop color="#4D7CFF" offset="182"/>
+      <stop color="#A66BFF" offset="218"/>
+      <stop color="#FF4D4D" offset="255"/>
+    </conical>
+  </gradients>
   <styles>
     <style name="disc_plain" border_width="0"/>
+    <!-- The hue wheel of custom_color_swatch. -->
+    <style name="disc_rainbow" border_width="0" bg_grad="swatch_rainbow"/>
   </styles>
   <view extends="lv_obj"
-        width="$size" height="$size" clickable="true" scrollable="false" ext_click_area="$hit" style_pad_all="$reach">
+        width="$size" height="$size" clickable="$clickable" event_bubble="$bubble" scrollable="false"
+        ext_click_area="$hit" style_pad_all="$reach">
     <style name="styles.led_ring_holder"/>
-    <bind_style_prop prop="bg_color" subject="$color_subject"/>
     <bind_style_if_eq name="$ring" subject="$selected_subject" ref_value="$index"/>
-    <lv_obj name="color_swatch_disc"
-            width="100%" height="100%" style_radius="9999" style_bg_opa="255" clickable="false" event_bubble="true"
-            scrollable="false">
-      <!-- No inline border: it would outrank the light-theme edge bound after it. -->
-      <style name="disc_plain"/>
-      <bind_style_prop prop="bg_color" subject="$color_subject"/>
-      <bind_style_if_eq name="styles.contrast_edge" subject="$edge_subject" ref_value="1"/>
-    </lv_obj>
+    <swatch_paint name="color_swatch_disc"
+                  width="100%" height="100%" color="$color" bind_color="$color_subject" bind_colors="$colors_subject"
+                  bind_finish="$finish_subject">
+      <style name="$fill"/>
+    </swatch_paint>
     <event_cb trigger="clicked" callback="$callback" user_data="$index"/>
   </view>
 </component>

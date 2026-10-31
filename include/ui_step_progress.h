@@ -60,6 +60,28 @@ void ui_step_progress_set_completed(lv_obj_t* widget, int step_index);
 void ui_step_progress_set_label(lv_obj_t* widget, int step_index, const char* new_label);
 
 /**
+ * Show only the current step's label: a single caption centred under the row,
+ * every step's own label hidden. For a horizontal row too narrow for one label
+ * per step. The caption follows set_current(), set_completed() and set_label().
+ *
+ * @param widget Step progress widget
+ * @param on true for the caption, false for a label under every step
+ */
+// NAMESPACE_OK: the widget's C API, beside its siblings
+void ui_step_progress_set_current_label_only(lv_obj_t* widget, bool on);
+
+/// The caption label in current-label-only mode, or nullptr.
+// NAMESPACE_OK: the widget's C API, beside its siblings
+lv_obj_t* ui_step_progress_get_caption(lv_obj_t* widget);
+
+/**
+ * Which step the caption names: the active step; with none active, the last one
+ * completed; with none completed either, the first. -1 for no steps.
+ */
+// NAMESPACE_OK: the widget's C API, beside its siblings
+int ui_step_progress_caption_step(const helix::StepState* states, int step_count);
+
+/**
  * Test-only introspection: return the connector line object drawn between step
  * circle @p index and @p index+1, or nullptr if it has not been created yet.
  * Exposed for rendering tests that assert connector geometry after layout.

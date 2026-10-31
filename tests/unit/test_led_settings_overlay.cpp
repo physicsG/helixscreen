@@ -7,12 +7,18 @@
  *        Automatic LED Control's "Applies to" row drives its own targets.
  */
 
+#include "ui_nav_manager.h"
 #include "ui_settings_led.h"
+#include "ui_swatch.h"
+#include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "helix-xml/src/xml/lv_xml.h"
 #include "led/led_auto_state.h"
 #include "led/led_controller.h"
+#include "static_panel_registry.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -82,4 +88,85 @@ TEST_CASE_METHOD(LVGLTestFixture, "Applies to keeps a target that is not discove
     as.set_strips({});
     as.save_config();
     ctrl.deinit();
+}
+
+namespace {
+
+class LedSettingsSwatchFixture : public LVGLUITestFixture {
+  protected:
+    LedSettingsSwatchFixture() {
+        for (auto& p : panels_)
+            p = lv_obj_create(lv_screen_active());
+        NavigationManager::instance().set_panels(panels_.data());
+        auto& ctrl = helix::led::LedController::instance();
+        ctrl.deinit();
+        ctrl.init(nullptr, nullptr);
+    }
+
+    ~LedSettingsSwatchFixture() override {
+        StaticPanelRegistry::instance().destroy_all();
+        settle();
+        auto& as = helix::led::LedAutoState::instance();
+        as.set_mapping("idle", {});
+        as.save_config();
+        helix::led::LedController::instance().deinit();
+    }
+
+    void settle() {
+        for (int i = 0; i < 5; ++i) {
+            helix::ui::UpdateQueue::instance().drain();
+            process_lvgl(50);
+        }
+    }
+
+    static int selected_for_idle() {
+        lv_subject_t* s = lv_xml_get_subject(nullptr, "led_auto_color_sel_0");
+        REQUIRE(s != nullptr);
+        return lv_subject_get_int(s);
+    }
+
+    std::array<lv_obj_t*, kUiPanelCount> panels_{};
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LedSettingsSwatchFixture,
+                 "LED settings: an auto-state colour row is painter swatches with a ring",
+                 "[led][settings][swatch]") {
+    const auto& presets = helix::led::LedController::instance().color_presets();
+    REQUIRE(presets.size() >= 3);
+    helix::led::LedStateAction action;
+    action.action_type = "color";
+    action.color = presets[1];
+    helix::led::LedAutoState::instance().set_mapping("idle", action);
+
+    auto& overlay = helix::settings::get_led_settings_overlay();
+    REQUIRE(overlay.show(lv_screen_active()));
+    settle();
+    lv_obj_t* ctx = lv_obj_find_by_name(lv_screen_active(), "ctx_idle");
+    REQUIRE(ctx != nullptr);
+
+    for (size_t i = 0; i < presets.size(); ++i) {
+        INFO("preset " << i);
+        const std::string name = "led_auto_swatch_" + std::to_string(i);
+        lv_obj_t* swatch = lv_obj_find_by_name(ctx, name.c_str());
+        REQUIRE(swatch != nullptr);
+        lv_obj_t* disc = lv_obj_find_by_name(swatch, "color_swatch_disc");
+        REQUIRE(disc != nullptr);
+        CHECK(helix::ui::has_swatch_paint(disc));
+        CHECK(lv_obj_get_style_radius(disc, LV_PART_MAIN) == LV_RADIUS_CIRCLE);
+        CHECK((lv_color_to_u32(helix::ui::swatch_color_of(swatch)) & 0xFFFFFF) == presets[i]);
+    }
+    CHECK(selected_for_idle() == 1);
+
+    // A tap picks that preset for the row and moves the ring, with no rebuild.
+    lv_obj_t* third = lv_obj_find_by_name(ctx, "led_auto_swatch_2");
+    REQUIRE(third != nullptr);
+    lv_obj_send_event(third, LV_EVENT_CLICKED, nullptr);
+    settle();
+    const auto* mapping = helix::led::LedAutoState::instance().get_mapping("idle");
+    REQUIRE(mapping != nullptr);
+    CHECK(mapping->color == presets[2]);
+    CHECK(selected_for_idle() == 2);
+    CHECK(lv_obj_find_by_name(ctx, "led_auto_swatch_2") == third);
 }

@@ -17,6 +17,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/panel_widget_overlay_cache_test_access.h"
 #include "../test_helpers/panel_widget_size_harness.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "console_line.h"
 #include "moonraker_api_mock.h"
@@ -52,9 +53,7 @@ class ConsoleTailFixture : public LVGLUITestFixture {
     }
 
     static void drain() {
-        for (int i = 0; i < 4; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     MoonrakerClientMock client_{MoonrakerClientMock::PrinterType::VORON_24};

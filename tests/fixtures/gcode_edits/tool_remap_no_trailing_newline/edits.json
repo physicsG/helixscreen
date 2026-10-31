@@ -1,0 +1,15 @@
+{
+  "description": "A remapped file without a final newline keeps it that way",
+  "edits": [
+    {
+      "line_number": 0,
+      "expect_raw_line": "",
+      "action": "tool_remap",
+      "args": {
+        "map": {
+          "1": 3
+        }
+      }
+    }
+  ]
+}

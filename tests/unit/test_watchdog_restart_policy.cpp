@@ -61,9 +61,9 @@ TEST_CASE("Exec failure exit codes are distinct and collision-free", "[watchdog]
     const int permanent = exec_failure_exit_code(ENOENT);
     const int unknown = exec_failure_exit_code(EINVAL);
 
-    REQUIRE(transient == EXEC_FAILED_TRANSIENT_EXIT);
-    REQUIRE(permanent == EXEC_FAILED_PERMANENT_EXIT);
-    REQUIRE(unknown == EXEC_FAILED_UNCLASSIFIED_EXIT);
+    REQUIRE(transient == kExecFailedTransientExit);
+    REQUIRE(permanent == kExecFailedPermanentExit);
+    REQUIRE(unknown == kExecFailedUnclassifiedExit);
 
     std::set<int> codes{transient, permanent, unknown};
     CHECK(codes.size() == 3); // all three must be tellable apart by the parent
@@ -72,7 +72,7 @@ TEST_CASE("Exec failure exit codes are distinct and collision-free", "[watchdog]
         INFO("reserved exit code " << code);
         CHECK(code != 0);  // 0 means "clean exit, restart silently"
         CHECK(code != 1);  // helix-screen's own startup-failure exit
-        CHECK(code != 42); // RESTART_LOOP_EXIT_CODE — the watchdog's surrender signal
+        CHECK(code != 42); // kRestartLoopExitCode — the watchdog's surrender signal
         // 128..159 is the crash handler's exit(128 + signum) encoding; a code in
         // that range would be re-read as a signal and pop the recovery dialog.
         CHECK_FALSE((code >= 128 && code <= 159));
@@ -103,8 +103,8 @@ TEST_CASE("Restart backoff grows exponentially and is capped", "[watchdog][resta
     CHECK(restart_backoff_seconds(3) == 12);
     CHECK(restart_backoff_seconds(4) == 24);
     CHECK(restart_backoff_seconds(5) == 48);
-    CHECK(restart_backoff_seconds(6) == RESTART_BACKOFF_MAX_SEC);
-    CHECK(restart_backoff_seconds(50) == RESTART_BACKOFF_MAX_SEC);
+    CHECK(restart_backoff_seconds(6) == kRestartBackoffMaxSec);
+    CHECK(restart_backoff_seconds(50) == kRestartBackoffMaxSec);
 
     // Never regresses, never runs away, never returns a zero/negative sleep
     // (a zero sleep would busy-loop the supervisor).
@@ -113,7 +113,7 @@ TEST_CASE("Restart backoff grows exponentially and is capped", "[watchdog][resta
         int d = restart_backoff_seconds(n);
         INFO("attempt " << n);
         CHECK(d > 0);
-        CHECK(d <= RESTART_BACKOFF_MAX_SEC);
+        CHECK(d <= kRestartBackoffMaxSec);
         CHECK(d >= prev);
         prev = d;
     }
@@ -121,24 +121,24 @@ TEST_CASE("Restart backoff grows exponentially and is capped", "[watchdog][resta
 
 TEST_CASE("Permanent and unclassified failures still give up quickly", "[watchdog][restart]") {
     for (auto cls : {ExecFailureClass::PERMANENT, ExecFailureClass::NONE}) {
-        for (int n = 1; n <= RESTART_LOOP_MAX_FAILURES; ++n) {
+        for (int n = 1; n <= kRestartLoopMaxFailures; ++n) {
             INFO("failure " << n);
             CHECK(decide_restart_action(cls, n, 0).action == RestartAction::RETRY_BACKOFF);
         }
-        CHECK(decide_restart_action(cls, RESTART_LOOP_MAX_FAILURES + 1, 0).action ==
+        CHECK(decide_restart_action(cls, kRestartLoopMaxFailures + 1, 0).action ==
               RestartAction::GIVE_UP);
         // No cooldown reprieve for these: retrying provably cannot help.
-        CHECK(decide_restart_action(cls, RESTART_LOOP_MAX_FAILURES + 1, 5).action ==
+        CHECK(decide_restart_action(cls, kRestartLoopMaxFailures + 1, 5).action ==
               RestartAction::GIVE_UP);
     }
 }
 
 TEST_CASE("Transient failures do not spend the fast give-up budget", "[watchdog][restart]") {
     // This is the exact incident: six consecutive ENOEXEC launches. Under the
-    // old policy the sixth returned RESTART_LOOP_EXIT_CODE and the screen
+    // old policy the sixth returned kRestartLoopExitCode and the screen
     // stayed black until the user power-cycled the printer.
     const auto cls = classify_exec_errno(ENOEXEC);
-    for (int n = 1; n <= RESTART_LOOP_MAX_FAILURES + 1; ++n) {
+    for (int n = 1; n <= kRestartLoopMaxFailures + 1; ++n) {
         INFO("transient failure " << n);
         CHECK(decide_restart_action(cls, n, 0).action == RestartAction::RETRY_BACKOFF);
     }
@@ -148,19 +148,20 @@ TEST_CASE("Transient budget rolls into cooldown, not surrender", "[watchdog][res
     const auto cls = ExecFailureClass::TRANSIENT;
 
     // Last attempt inside the backoff budget.
-    CHECK(decide_restart_action(cls, TRANSIENT_MAX_FAILURES, 0).action ==
+    CHECK(decide_restart_action(cls, kTransientMaxFailures, 0).action ==
           RestartAction::RETRY_BACKOFF);
 
     // One past it: slow down, do not surrender.
-    RestartDecision cooldown = decide_restart_action(cls, TRANSIENT_MAX_FAILURES + 1, 0);
+    RestartDecision cooldown = decide_restart_action(cls, kTransientMaxFailures + 1, 0);
     CHECK(cooldown.action == RestartAction::COOLDOWN_RETRY);
-    CHECK(cooldown.delay_seconds == TRANSIENT_COOLDOWN_SEC);
+    CHECK(cooldown.delay_seconds == kTransientCooldownSec);
 
     // Cooldown rounds are bounded but generous.
-    CHECK(decide_restart_action(cls, TRANSIENT_MAX_FAILURES + 1, TRANSIENT_MAX_COOLDOWN_ROUNDS - 1)
+    CHECK(decide_restart_action(cls, kTransientMaxFailures + 1, kTransientMaxCooldownRounds - 1)
               .action == RestartAction::COOLDOWN_RETRY);
-    CHECK(decide_restart_action(cls, TRANSIENT_MAX_FAILURES + 1, TRANSIENT_MAX_COOLDOWN_ROUNDS)
-              .action == RestartAction::GIVE_UP);
+    CHECK(
+        decide_restart_action(cls, kTransientMaxFailures + 1, kTransientMaxCooldownRounds).action ==
+        RestartAction::GIVE_UP);
 }
 
 TEST_CASE("Transient policy outlasts a long calibration", "[watchdog][restart]") {
@@ -187,7 +188,7 @@ TEST_CASE("Transient policy outlasts a long calibration", "[watchdog][restart]")
     }
 
     INFO("total retry window: " << total << "s across " << cooldowns << " cooldown rounds");
-    CHECK(cooldowns == TRANSIENT_MAX_COOLDOWN_ROUNDS);
+    CHECK(cooldowns == kTransientMaxCooldownRounds);
     CHECK(total > 60 * 60);      // at least an hour of patience
     CHECK(total < 12 * 60 * 60); // but still bounded — the loop must terminate
 }
@@ -207,18 +208,18 @@ TEST_CASE("Repeated deliberate failures reach the give-up budget", "[watchdog][r
     RestartFailureCounters counters;
 
     int count = 0;
-    for (int i = 0; i <= RESTART_LOOP_MAX_FAILURES; ++i) {
+    for (int i = 0; i <= kRestartLoopMaxFailures; ++i) {
         count = counters.record(ExecFailureClass::NONE);
     }
 
-    REQUIRE(count > RESTART_LOOP_MAX_FAILURES);
+    REQUIRE(count > kRestartLoopMaxFailures);
     REQUIRE(decide_restart_action(ExecFailureClass::NONE, count, counters.cooldown_rounds).action ==
             RestartAction::GIVE_UP);
 }
 
 TEST_CASE("A launch that ran clears the failure history", "[watchdog][restart]") {
     RestartFailureCounters counters;
-    for (int i = 0; i < RESTART_LOOP_MAX_FAILURES; ++i) {
+    for (int i = 0; i < kRestartLoopMaxFailures; ++i) {
         counters.record(ExecFailureClass::NONE);
     }
 
@@ -232,12 +233,12 @@ TEST_CASE("Transient and deliberate failures spend separate budgets", "[watchdog
     // a deliberate exit must not spend the transient one.
     RestartFailureCounters counters;
 
-    for (int i = 0; i < TRANSIENT_MAX_FAILURES; ++i) {
+    for (int i = 0; i < kTransientMaxFailures; ++i) {
         counters.record(ExecFailureClass::TRANSIENT);
     }
     REQUIRE(counters.record(ExecFailureClass::NONE) == 1);
 
-    for (int i = 0; i < RESTART_LOOP_MAX_FAILURES; ++i) {
+    for (int i = 0; i < kRestartLoopMaxFailures; ++i) {
         counters.record(ExecFailureClass::NONE);
     }
     REQUIRE(counters.record(ExecFailureClass::TRANSIENT) == 1);
@@ -247,13 +248,13 @@ TEST_CASE("A spent transient budget cools down, then gives up", "[watchdog][rest
     RestartFailureCounters counters;
 
     int count = 0;
-    for (int i = 0; i <= TRANSIENT_MAX_FAILURES; ++i) {
+    for (int i = 0; i <= kTransientMaxFailures; ++i) {
         count = counters.record(ExecFailureClass::TRANSIENT);
     }
     REQUIRE(decide_restart_action(ExecFailureClass::TRANSIENT, count, counters.cooldown_rounds)
                 .action == RestartAction::COOLDOWN_RETRY);
 
-    counters.cooldown_rounds = TRANSIENT_MAX_COOLDOWN_ROUNDS;
+    counters.cooldown_rounds = kTransientMaxCooldownRounds;
     REQUIRE(decide_restart_action(ExecFailureClass::TRANSIENT, count, counters.cooldown_rounds)
                 .action == RestartAction::GIVE_UP);
 }

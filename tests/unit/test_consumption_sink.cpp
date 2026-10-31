@@ -152,7 +152,7 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture,
     // stands, not bake the resolved view into the stored record.
     helix::ams::Observation metered(helix::ams::ObservationSource::Metered);
     metered.remaining_weight_g = 500.0f;
-    helix::ams::ingest(helix::ams::BYPASS_LANE_ID, metered);
+    helix::ams::ingest(helix::ams::kBypassLaneId, metered);
 
     sink.flush();
 
@@ -194,7 +194,7 @@ TEST_CASE_METHOD(ExternalSpoolSinkFixture, "ExternalSpoolSink: linking mid-print
 
     // Paused, not counting: the bypass lane carries no Metered record, and the
     // shown weight is the binding's own, not a local decrement of it.
-    CHECK_FALSE(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).metered.has_value());
+    CHECK_FALSE(helix::ams::lane_sources(helix::ams::kBypassLaneId).metered.has_value());
     auto shown = helix::AmsState::instance().get_external_spool_info();
     REQUIRE(shown.has_value());
     CHECK(shown->remaining_weight_g == 1000.0f);

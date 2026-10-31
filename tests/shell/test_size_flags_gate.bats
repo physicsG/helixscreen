@@ -25,7 +25,7 @@ CONTROL_TARGET="pi"
 mkvar() {
     local target="$1" var="$2"
     shift 2
-    make -n PLATFORM_TARGET="$target" CROSS_COMPILE= CC=gcc CXX=g++ "$@" "print-var-$var" 2>/dev/null
+    scratch_make -n PLATFORM_TARGET="$target" CROSS_COMPILE= CC=gcc CXX=g++ "$@" "print-var-$var" 2>/dev/null
 }
 
 @test "size flags: class targets build mock-free" {

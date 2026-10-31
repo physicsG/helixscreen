@@ -54,6 +54,49 @@ FilterFanDriver classify_filter_fan_driver(const std::string& raw) {
     return FilterFanDriver::Device;
 }
 
+/// Vendor rejection code -> generic kind and, for a refusal, its cause, by the
+/// words the code is built from. The glue's stable codes (countermanded,
+/// fault_latched, inhibited, auth_failed, conflict_retries_exhausted,
+/// invalid_command, missing_lease_id, lease_lost, heater_busy) and any raw
+/// firmware code it passes through all land this way. A code we cannot place
+/// is still the heater declining: Refused.
+struct ClassifiedRejection {
+    CommandRejection kind = CommandRejection::None;
+    RefusalCause cause = RefusalCause::Unspecified;
+};
+
+ClassifiedRejection classify_rejection(const std::string& raw) {
+    if (raw.empty()) {
+        return {};
+    }
+    std::string lower;
+    lower.reserve(raw.size());
+    for (char c : raw) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    auto has = [&lower](const char* needle) { return lower.find(needle) != std::string::npos; };
+    if (has("conflict") || has("revision") || has("stale")) {
+        return {CommandRejection::Conflict, RefusalCause::Unspecified};
+    }
+    if (has("auth") || has("token") || has("forbidden") || has("password") || has("credential")) {
+        return {CommandRejection::Auth, RefusalCause::Unspecified};
+    }
+    if (has("inhibit") || has("cooldown")) {
+        return {CommandRejection::Refused, RefusalCause::Inhibited};
+    }
+    if (has("fault")) {
+        return {CommandRejection::Refused, RefusalCause::Fault};
+    }
+    // A device that did not answer is not one that was switched off.
+    if (has("offline") || has("unreachable") || has("timeout")) {
+        return {CommandRejection::Refused, RefusalCause::Unspecified};
+    }
+    if (has("countermand") || has("off") || has("disabled") || has("manual") || has("standby")) {
+        return {CommandRejection::Refused, RefusalCause::TurnedOff};
+    }
+    return {CommandRejection::Refused, RefusalCause::Unspecified};
+}
+
 class DragonbreathBackend : public ChamberHeaterBackend {
   public:
     std::string_view id() const override {
@@ -77,6 +120,12 @@ class DragonbreathBackend : public ChamberHeaterBackend {
     }
     std::string_view fault_reset_gcode() const override {
         return "DRAGONBREATH_RESET";
+    }
+    // The glue's dragonbreath/set_target webhook, which Moonraker proxies as a
+    // printer endpoint. It runs outside the gcode mutex, so it reaches the
+    // heater while a TEMPERATURE_WAIT on it holds the queue.
+    std::string_view set_target_method() const override {
+        return "printer.dragonbreath.set_target";
     }
     // ptc_temp rides in every status frame.
     bool reports_element_temp() const override {
@@ -102,11 +151,25 @@ class DragonbreathBackend : public ChamberHeaterBackend {
         // cannot hinge on one field (ptc_temp alone drops every delta that
         // mentions only the fan). Any dragonbreath-specific key marks the
         // frame ours; generic heater keys (temperature/target) never do.
-        static const char* const DB_FIELDS[] = {
-            "ptc_temp", "fault",  "inhibited",   "fault_reason", "fan_percent",   "fan_reason",
-            "mode",     "source", "lease_owned", "connected",    "protocol_error"};
+        static const char* const kDbFields[] = {"ptc_temp",
+                                                "fault",
+                                                "inhibited",
+                                                "fault_reason",
+                                                "fan_percent",
+                                                "fan_reason",
+                                                "mode",
+                                                "source",
+                                                "lease_owned",
+                                                "connected",
+                                                "protocol_error",
+                                                "protocol_error_code",
+                                                "protocol_error_seq",
+                                                "protocol_error_target",
+                                                "protocol_error_message",
+                                                "wait_active",
+                                                "wait_target"};
         bool known_field = false;
-        for (const char* f : DB_FIELDS) {
+        for (const char* f : kDbFields) {
             if (status.contains(f)) {
                 known_field = true;
                 break;
@@ -161,6 +224,39 @@ class DragonbreathBackend : public ChamberHeaterBackend {
             d.link_error = status["protocol_error"].is_string()
                                ? status["protocol_error"].get<std::string>()
                                : std::string();
+        }
+        // The heater's answer to our last target. The glue holds a rejection
+        // until the next command intent and clears it to "". The code is the
+        // machine-readable reason; a glue too old to send one reports only a
+        // free-text protocol_error, which stays a link complaint, except that
+        // its clearing to "" is still a report that nothing is outstanding.
+        if (status.contains("protocol_error_code")) {
+            const auto& code = status["protocol_error_code"];
+            d.rejection_code = code.is_string() ? code.get<std::string>() : std::string();
+            const ClassifiedRejection c = classify_rejection(*d.rejection_code);
+            d.rejection = c.kind;
+            d.refusal_cause = c.cause;
+        } else if (status.contains("protocol_error") && d.link_error && d.link_error->empty()) {
+            d.rejection = CommandRejection::None;
+            d.refusal_cause = RefusalCause::Unspecified;
+        }
+        if (status.contains("protocol_error_seq")) {
+            const auto& seq = status["protocol_error_seq"];
+            d.rejection_seq = seq.is_number_integer() ? seq.get<int>() : 0;
+        }
+        if (status.contains("protocol_error_target")) {
+            const auto& t = status["protocol_error_target"];
+            d.rejection_target_c = t.is_number() ? t.get<double>() : NAN;
+        }
+        // The glue's M191 wait: set when it starts, following a newer target,
+        // cleared on every exit.
+        if (status.contains("wait_active")) {
+            d.wait_active =
+                status["wait_active"].is_boolean() ? status["wait_active"].get<bool>() : false;
+        }
+        if (status.contains("wait_target")) {
+            d.wait_target_c =
+                status["wait_target"].is_number() ? status["wait_target"].get<double>() : NAN;
         }
         // Externally driven: heater active, but neither klipper source nor our
         // lease. Computed from three inputs, so it is an answer only when the

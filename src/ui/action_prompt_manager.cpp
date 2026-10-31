@@ -8,6 +8,8 @@
 
 #include "action_prompt_manager.h"
 
+#include "color_utils.h"
+
 #include <spdlog/spdlog.h>
 
 #include <cstddef>
@@ -19,7 +21,7 @@ namespace {
 
 // Every command the protocol defines, LONGEST FIRST so that a prefix match can
 // never pick "prompt_button" out of "prompt_button_group_start".
-constexpr std::string_view ACTION_COMMANDS[] = {
+constexpr std::string_view kActionCommands[] = {
     "prompt_button_group_start",
     "prompt_button_group_end",
     "prompt_footer_button",
@@ -41,7 +43,7 @@ constexpr std::string_view ACTION_COMMANDS[] = {
 /// command this build does not know yet than a glued title, and mis-splitting it
 /// would silently route it to the wrong handler.
 size_t glued_command_length(std::string_view token) {
-    for (std::string_view cmd : ACTION_COMMANDS) {
+    for (std::string_view cmd : kActionCommands) {
         if (token.size() <= cmd.size() || token.compare(0, cmd.size(), cmd) != 0) {
             continue;
         }
@@ -166,21 +168,29 @@ PromptButton ActionPromptManager::parse_button_spec(const std::string& spec) {
         button.gcode = button.label;
     }
 
-    // Field 2 = color
+    // Field 2 = a named style (primary/secondary/info/warning/error) or a hex
+    // fill color. Fluidd, Mainsail and Z-Mod send the hex here; no named style
+    // is spelled with hex digits alone, so the two cannot collide.
     if (parts.size() > 2) {
-        button.color = parts[2];
+        if (parse_hex_color(parts[2])) {
+            button.hex_color = parts[2];
+        } else {
+            button.color = parts[2];
+        }
     }
 
-    // Field 3 = hex_color (raw hex override, e.g., "7c4b00")
-    if (parts.size() > 3 && !parts[3].empty()) {
+    // Field 3 = the older spelling of the hex fill; when it is a color it wins.
+    if (parts.size() > 3 && parse_hex_color(parts[3])) {
         button.hex_color = parts[3];
-        // A hex-carrying button is a color tile; ZMOD labels its color-grid
-        // tiles with a "_" placeholder (sometimes padded). Rendering the
-        // placeholder paints a dash across every swatch, so a label that
-        // carries no information is dropped.
-        if (!button.label.empty() && button.label.find_first_not_of(" _-") == std::string::npos) {
-            button.label.clear();
-        }
+    }
+
+    // A hex-carrying button is a color tile; ZMOD labels its color-grid tiles
+    // with a "_" placeholder (sometimes padded). Rendering the placeholder
+    // paints a dash across every swatch, so a label that carries no
+    // information is dropped.
+    if (!button.hex_color.empty() && !button.label.empty() &&
+        button.label.find_first_not_of(" _-") == std::string::npos) {
+        button.label.clear();
     }
 
     return button;

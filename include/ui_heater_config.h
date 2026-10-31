@@ -20,7 +20,7 @@
  */
 namespace helix {
 enum class HeaterType { Nozzle = 0, Bed = 1, Chamber = 2 };
-constexpr int HEATER_TYPE_COUNT = 3;
+constexpr int kHeaterTypeCount = 3;
 
 /**
  * @brief Preset target temperatures (°C) for a single heater.
@@ -32,7 +32,7 @@ constexpr int HEATER_TYPE_COUNT = 3;
  */
 struct HeaterPresets {
     int off = 0;
-    std::array<int, presets::PRESET_COUNT> material{};
+    std::array<int, presets::kPresetCount> material{};
 };
 } // namespace helix
 

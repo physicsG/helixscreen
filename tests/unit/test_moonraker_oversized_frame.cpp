@@ -7,7 +7,7 @@
  *
  * The onmessage trampoline holds callback_lifecycle_mutex_ SHARED for as long as
  * on_ws_message() runs. on_ws_message() used to react to a frame over
- * MAX_MESSAGE_SIZE by calling disconnect() inline, and disconnect() takes that
+ * kMaxMessageSize by calling disconnect() inline, and disconnect() takes that
  * same mutex EXCLUSIVE. std::shared_mutex is neither recursive nor upgradeable,
  * so the thread blocked handing the lock to itself: the libhv event loop stopped
  * being serviced entirely and every later request timed out with no clue why.
@@ -33,10 +33,10 @@ namespace {
 
 // Nothing listens here, so connect() fails fast. Distinct from the ports the
 // other client tests use so a stray listener cannot influence this one.
-constexpr const char* DEAD_URL = "ws://127.0.0.1:19993/websocket";
+constexpr const char* kDeadUrl = "ws://127.0.0.1:19993/websocket";
 
-// on_ws_message()'s MAX_MESSAGE_SIZE is 5 MB; comfortably over it.
-constexpr size_t OVERSIZED_BYTES = 6 * 1024 * 1024;
+// on_ws_message()'s kMaxMessageSize is 5 MB; comfortably over it.
+constexpr size_t kOversizedBytes = 6 * 1024 * 1024;
 
 } // namespace
 
@@ -51,10 +51,10 @@ TEST_CASE_METHOD(HelixTestFixture,
     // connect() is what installs the onmessage trampoline (install-once), which
     // is the half that takes the shared lock. Without it there is no lock to
     // collide with and the test proves nothing.
-    client.connect(DEAD_URL, []() {}, []() {});
+    client.connect(kDeadUrl, []() {}, []() {});
     REQUIRE(client.onmessage != nullptr);
 
-    const std::string huge(OVERSIZED_BYTES, 'x');
+    const std::string huge(kOversizedBytes, 'x');
 
     // Drive the trampoline from a helper thread so a regression fails the
     // assertion instead of hanging the whole suite.

@@ -74,6 +74,9 @@ class WizardWifiStepTestAccess {
     static lv_subject_t& wifi_enabled(WizardWifiStep& step) {
         return step.wifi_enabled_;
     }
+    static void clear_list(WizardWifiStep& step) {
+        step.clear_network_list();
+    }
     static lv_obj_t* network_list(WizardWifiStep& step) {
         return step.network_list_container_;
     }

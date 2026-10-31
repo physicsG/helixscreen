@@ -3,6 +3,7 @@
 
 #include "spoolman_types.h"
 
+#include "filament_variants.h"
 #include "text_io.h"
 
 #include <spdlog/spdlog.h>
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -254,7 +256,7 @@ int64_t spool_recency_key(const SpoolInfo& spool) {
         return *used;
     if (made)
         return *made;
-    return SPOOL_RECENCY_NONE;
+    return kSpoolRecencyNone;
 }
 
 void sort_spools_by_recency(std::vector<SpoolInfo>& spools) {
@@ -269,4 +271,47 @@ void sort_spools_by_recency(std::vector<SpoolInfo>& spools) {
             return ka > kb;
         return a.id > b.id; // deterministic tie-break; no churn across refreshes
     });
+}
+
+namespace {
+
+std::vector<std::string> recent_distinct(const std::vector<SpoolInfo>& spools,
+                                         std::string SpoolInfo::*field) {
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for (const auto& spool : spools) {
+        const std::string& raw = spool.*field;
+        if (raw.empty()) {
+            continue;
+        }
+        if (seen.insert(helix::text_io::to_lower(raw)).second) {
+            out.push_back(raw);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+// NAMESPACE_OK: beside sort_spools_by_recency at file scope
+std::vector<std::string> recent_material_families(const std::vector<SpoolInfo>& spools) {
+    // Families, not raw materials: "PLA-CF" and "Silk PLA" both count as PLA,
+    // one recents entry — the same reduction the editor's family chips use.
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for (const auto& spool : spools) {
+        if (spool.material.empty()) {
+            continue;
+        }
+        const std::string family = filament::display_family(spool.material);
+        if (seen.insert(helix::text_io::to_lower(family)).second) {
+            out.push_back(family);
+        }
+    }
+    return out;
+}
+
+// NAMESPACE_OK: beside sort_spools_by_recency at file scope
+std::vector<std::string> recent_brands(const std::vector<SpoolInfo>& spools) {
+    return recent_distinct(spools, &SpoolInfo::vendor);
 }

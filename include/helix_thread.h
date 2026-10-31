@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <cerrno>
 #include <cstddef>
+#include <cstdint>
+#include <ctime>
 #include <functional>
 #include <thread>
 #include <utility>
@@ -13,6 +16,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #define HELIX_THREAD_ALTSTACK 1
+#endif
+
+#ifdef __linux__
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #endif
 
 // Header-only so the dlopen()ed Bluetooth plugin, which links none of the
@@ -91,6 +99,63 @@ template <typename F, typename... Args> std::thread make_thread(F&& f, Args&&...
     return std::thread(
         [](auto&& fn, auto&&... a) {
             install_thread_altstack();
+            std::invoke(std::move(fn), std::move(a)...);
+        },
+        std::forward<F>(f), std::forward<Args>(args)...);
+}
+
+/// CPU time the calling thread has used, in nanoseconds; 0 where the clock is
+/// unavailable (ESP-IDF's newlib defines no per-thread CPU clock). Measures work
+/// done rather than time waited, so a thread preempted by Klipper is not charged
+/// for it.
+inline int64_t thread_cpu_ns() noexcept {
+#ifdef CLOCK_THREAD_CPUTIME_ID
+    timespec ts{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) {
+        return 0;
+    }
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+#else
+    return 0;
+#endif
+}
+
+/// Nice value for work nobody is waiting on: G-code indexing, preview ghosts,
+/// prefetch. Nice rather than SCHED_IDLE because the UI thread joins these
+/// workers on cancel; a SCHED_IDLE thread can be starved indefinitely while
+/// Klipper keeps the CPU busy, and the join would freeze the UI with it.
+inline constexpr int kBackgroundThreadNice = 19;
+
+/// Lower the calling thread, and only it, to kBackgroundThreadNice.
+///
+/// On a printer's own board helix-screen shares two slow cores with Klipper.
+/// The launcher nices the whole process only when it recognizes the control
+/// stack beside it; this holds for the heavy workers whatever the launcher
+/// decided. Raising a nice value needs no privileges. A thread already at or
+/// above the target is left alone. Returns whether the thread now runs at
+/// kBackgroundThreadNice or lower priority; false on hosts without per-thread
+/// nice (macOS), where the work runs at its default priority.
+inline bool lower_current_thread_priority() noexcept {
+#ifdef __linux__
+    const auto tid = static_cast<id_t>(::syscall(SYS_gettid));
+    errno = 0;
+    const int current = ::getpriority(PRIO_PROCESS, tid);
+    if (errno == 0 && current >= kBackgroundThreadNice) {
+        return true;
+    }
+    return ::setpriority(PRIO_PROCESS, tid, kBackgroundThreadNice) == 0;
+#else
+    return false;
+#endif
+}
+
+/// make_thread() for background work that must yield the CPU to the UI and to
+/// Klipper: the thread lowers its own priority before running f.
+template <typename F, typename... Args> std::thread make_background_thread(F&& f, Args&&... args) {
+    return std::thread(
+        [](auto&& fn, auto&&... a) {
+            install_thread_altstack();
+            lower_current_thread_priority();
             std::invoke(std::move(fn), std::move(a)...);
         },
         std::forward<F>(f), std::forward<Args>(args)...);

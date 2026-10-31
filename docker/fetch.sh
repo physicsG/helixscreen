@@ -47,8 +47,7 @@
 #                        and one line per download, without the progress bar
 #                        that would otherwise spam the CI log.
 #
-# Not covered here: integrity. Only Dockerfile.ad5x checksums what it downloads.
-# Pinning a sha256 for the ARM, Bootlin, OpenSSL and zlib tarballs would also
+# Not covered here: integrity. Pinning a sha256 for the ARM, Bootlin, OpenSSL and zlib tarballs would also
 # catch a silently corrupt transfer, and is worth doing separately.
 
 set -eu

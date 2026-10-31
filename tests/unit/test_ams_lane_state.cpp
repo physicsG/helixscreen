@@ -17,8 +17,8 @@
 using helix::SlotInfo;
 using helix::SlotStatus;
 
-using helix::ui::ASSUMED_FILL_LEVEL;
 using helix::ui::classify_lane;
+using helix::ui::kAssumedFillLevel;
 using helix::ui::lane_fill_level;
 using helix::ui::lane_has_identity;
 using helix::ui::LaneState;
@@ -27,7 +27,7 @@ namespace {
 /// Every value SlotStatus can take, so "exhaustive" below is literal.
 /// name_of()'s switch has no default arm, so adding a status makes the
 /// compiler point here rather than letting it go untested.
-constexpr SlotStatus ALL_STATUSES[] = {
+constexpr SlotStatus kAllStatuses[] = {
     SlotStatus::UNKNOWN, SlotStatus::EMPTY,   SlotStatus::AVAILABLE,
     SlotStatus::LOADED,  SlotStatus::BLOCKED, SlotStatus::FROM_BUFFER,
 };
@@ -56,7 +56,7 @@ static_assert(classify_lane(SlotStatus::EMPTY, true, false) == LaneState::Ghoste
 static_assert(classify_lane(SlotStatus::EMPTY, false, false) == LaneState::Empty);
 
 TEST_CASE("Lane classification is exhaustively pinned", "[ams][lane_state]") {
-    for (SlotStatus status : ALL_STATUSES) {
+    for (SlotStatus status : kAllStatuses) {
         for (bool identity : {false, true}) {
             for (bool weights : {false, true}) {
                 INFO("status=" << name_of(status) << " identity=" << identity
@@ -162,7 +162,7 @@ TEST_CASE("Fill level: tracked ratio, else the assumed constant", "[ams][lane_st
         SlotInfo s;
         s.status = SlotStatus::AVAILABLE;
         s.material = "PETG";
-        CHECK(lane_fill_level(s) == Catch::Approx(ASSUMED_FILL_LEVEL));
+        CHECK(lane_fill_level(s) == Catch::Approx(kAssumedFillLevel));
     }
     SECTION("a ghosted lane keeps its last known fill") {
         // Deliberate reversal of a106413f6 (#1071). Safe only because the whole
@@ -178,7 +178,7 @@ TEST_CASE("Fill level: tracked ratio, else the assumed constant", "[ams][lane_st
         SlotInfo s;
         s.status = SlotStatus::EMPTY;
         s.material = "PETG";
-        CHECK(lane_fill_level(s) == Catch::Approx(ASSUMED_FILL_LEVEL));
+        CHECK(lane_fill_level(s) == Catch::Approx(kAssumedFillLevel));
     }
     SECTION("an unassigned empty lane has no fill") {
         SlotInfo s;

@@ -17,10 +17,10 @@ mkdir -p "$HELIX_PERF_SCRATCH/strace"
 echo "$ARM run=$RUN start $(date '+%F %T') $(perf_ssh "$HELIX_PERF_INSTALL/bin/helix-screen --version 2>&1 | head -n 1")" >> "$OUT"
 
 for workload in $WORKLOADS; do
-    type=$(perf_saver_type "$workload") || exit 2
-    result=$(perf_run_remote "$PERF_HERE/pi3b_measure.sh" "TYPE=$type" 2>&1)
+    saver=$(perf_saver_name "$workload") || exit 2
+    result=$(perf_run_remote "$PERF_HERE/pi3b_measure.sh" "SAVER=$saver" 2>&1)
     echo "$result" | grep -E '^(CPU|STOPPED_MIDRUN|STARTED)' | sed "s/^/$ARM run=$RUN $workload /" >> "$OUT"
-    if [ "$type" -ne 0 ]; then
+    if [ "$saver" != off ]; then
         trace=$HELIX_PERF_SCRATCH/strace/$ARM-r$RUN-$workload.txt
         perf_run_remote "$PERF_HERE/pi3b_service.sh" ACTION=collect FILE=/tmp/hm_strace.txt > "$trace"
         python3 "$PERF_HERE/flips.py" "$trace" | sed "s/^/$ARM run=$RUN $workload /" >> "$OUT"

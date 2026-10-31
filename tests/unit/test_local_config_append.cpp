@@ -72,7 +72,7 @@ size_t file_count(const fs::path& dir) {
 
 /// What the plan hands the writer, and the line it must produce from it.
 const char* TARGET = "/mnt/UDISK/printer_data/config/helixscreen.conf";
-const char* INCLUDE = "[include /mnt/UDISK/printer_data/config/helixscreen.conf]";
+const char* kInclude = "[include /mnt/UDISK/printer_data/config/helixscreen.conf]";
 
 /// A trimmed-down but real stock K2 moonraker.conf.
 const char* VENDOR = "[server]\n"
@@ -100,7 +100,7 @@ TEST_CASE("append preserves every byte of the vendor config", "[local_append]") 
     const std::string after = helix::text_io::read_file(path).value_or("");
     // Everything that was there is still there, unmodified, at the front.
     CHECK(after.rfind(VENDOR, 0) == 0);
-    CHECK(after.find(INCLUDE) != std::string::npos);
+    CHECK(after.find(kInclude) != std::string::npos);
     CHECK(after.size() > std::string(VENDOR).size());
 }
 
@@ -121,7 +121,7 @@ TEST_CASE("append is idempotent — a second call changes nothing", "[local_appe
 TEST_CASE("append recognises the include even with odd spacing", "[local_append]") {
     TempDir tmp;
     const std::string path = tmp.file("moonraker.conf");
-    write_file(path, std::string("   ") + INCLUDE + "   \n[server]\n");
+    write_file(path, std::string("   ") + kInclude + "   \n[server]\n");
     const std::string before = helix::text_io::read_file(path).value_or("");
 
     std::string err;
@@ -138,7 +138,7 @@ TEST_CASE("a different include target is not mistaken for ours", "[local_append]
     REQUIRE(append_include_to_local_config(path, TARGET, err));
 
     const std::string after = helix::text_io::read_file(path).value_or("");
-    CHECK(after.find(INCLUDE) != std::string::npos);
+    CHECK(after.find(kInclude) != std::string::npos);
     CHECK(after.find("[include helixscreen.conf]") != std::string::npos);
 }
 
@@ -163,7 +163,7 @@ TEST_CASE("a config with no trailing newline still gets a well-formed include", 
 
     const std::string after = helix::text_io::read_file(path).value_or("");
     // The include must start its own line, or it becomes part of "host: 0.0.0.0".
-    CHECK(after.find(std::string("\n") + INCLUDE) != std::string::npos);
+    CHECK(after.find(std::string("\n") + kInclude) != std::string::npos);
     CHECK(after.rfind("[server]\nhost: 0.0.0.0", 0) == 0);
 }
 
@@ -247,7 +247,7 @@ TEST_CASE("a symlinked config is followed, not replaced", "[local_append]") {
     // The link survives as a link, and the file it names got the include.
     CHECK(fs::is_symlink(fs::symlink_status(link)));
     CHECK(fs::read_symlink(link).string() == real);
-    CHECK(helix::text_io::read_file(real).value_or("").find(INCLUDE) != std::string::npos);
+    CHECK(helix::text_io::read_file(real).value_or("").find(kInclude) != std::string::npos);
     CHECK(helix::text_io::read_file(real).value_or("").rfind(VENDOR, 0) == 0);
 
     // And no temp file was left in either name's directory.
@@ -299,7 +299,7 @@ TEST_CASE("the appended config is readable back in full after the rename", "[loc
     std::string err;
     REQUIRE(append_include_to_local_config(path, TARGET, err));
 
-    const std::string expect = std::string(VENDOR) + INCLUDE + "\n";
+    const std::string expect = std::string(VENDOR) + kInclude + "\n";
     CHECK(helix::text_io::read_file(path).value_or("") == expect);
     CHECK(fs::file_size(path) == expect.size());
 }

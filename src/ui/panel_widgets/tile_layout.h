@@ -47,6 +47,9 @@ struct TileRungMetrics {
     int value_h = 0;
     int label_w = 0;
     int label_h = 0;
+    /// A line under the label that a column draws with it and a row never does;
+    /// 0 for none. Its width is not measured: it ellipsizes to the tile.
+    int detail_h = 0;
 };
 
 struct TileVerdict {
@@ -79,8 +82,9 @@ inline bool tile_candidate_fits(const TileRungMetrics& m, TileDirection dir, Til
     int need_h = 0;
     if (dir == TileDirection::Column) {
         need_w = std::max({m.icon_w, value_w, label_w});
-        need_h =
-            m.icon_h + (has_value ? gap_px + value_h : 0) + (cand.label ? gap_px + label_h : 0);
+        const int detail_h = cand.label && m.detail_h > 0 ? gap_px + m.detail_h : 0;
+        need_h = m.icon_h + (has_value ? gap_px + value_h : 0) +
+                 (cand.label ? gap_px + label_h : 0) + detail_h;
     } else {
         const int side_w = std::max(value_w, label_w);
         need_w = m.icon_w + (side_w > 0 ? gap_px + side_w : 0);

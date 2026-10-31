@@ -36,13 +36,10 @@ name: Prune stale ccaches
 #     they never age out while CI is running.
 
 on:
-  # Prune right after a push to main creates a new generation, so the extra
-  # copies exist for minutes rather than until the next scheduled run.
-  workflow_run:
-    workflows: ["Build"]
-    types: [completed]
-    branches: [main]
-  # Safety net, and it runs before ccache-warm's 06:00 so the warmer has room.
+  # build.yml calls this (workflow_call below) as soon as a push to main or
+  # release/** has saved its new generation, so the superseded copies exist for
+  # minutes. The schedule is the safety net, and it runs before ccache-warm's
+  # 06:00 so the warmer has room.
   schedule:
     - cron: '30 5 * * *'
   workflow_dispatch:
@@ -56,7 +53,8 @@ on:
         type: boolean
         default: false
   # Called as the first job of ccache-warm.yml, so a manual warm right before
-  # cutting a release frees space before the warmer tries to save ~1.6 GB x 3.
+  # cutting a release frees space before the warmer tries to save its caches,
+  # and from build.yml's prune-ccache job after every push that saves one.
   workflow_call:
     inputs:
       dry_run:
@@ -97,7 +95,6 @@ jobs:
         # NOT listed, and therefore never touched by this job:
         #   ccache-release-*  the whole point of the exercise
         #   deps-*, gradle-*  keyed by content hash, so they are self-limiting
-        #   ccache-android-*  small, and managed by ccache-action
         # Order does not matter: each cache is assigned to its LONGEST matching
         # prefix, so ccache-nightly-macos-* does not fall into ccache-nightly-*.
         PREFIXES: >-
@@ -107,7 +104,8 @@ jobs:
            "ccache-nightly-macos-",
            "ccache-nightly-",
            "ccache-asan-",
-           "ccache-tsan-"]
+           "ccache-tsan-",
+           "ccache-android-debug-ubuntu-22.04-"]
         # Generations to keep per (ref, family). One is all restore-keys can
         # ever reach; the rest are unreachable ballast.
         KEEP: 1
@@ -118,13 +116,19 @@ jobs:
         # set, i.e. only after every platform in its matrix has saved a fresh
         # generation. Listed per platform rather than as a bare
         # "ccache-release-" because the trailing dash is what stops
-        # ccache-release-pi- from swallowing ccache-release-pi32-. A warmed
-        # platform missing from this list keeps the old behaviour -- its
-        # generations accumulate -- rather than being mis-grouped with another.
+        # ccache-release-pi- from swallowing ccache-release-pi32-. Android is
+        # listed per ABI for the same reason: a bare ccache-release-android-
+        # would make the three ABI caches one family and keep only the newest
+        # of them. A warmed platform missing from this list keeps the old
+        # behaviour -- its generations accumulate -- rather than being
+        # mis-grouped with another.
         if [ "$INCLUDE_RELEASE" = "yes" ]; then
           PREFIXES=$(jq -c '. + ["ccache-release-pi-",
                                  "ccache-release-pi32-",
-                                 "ccache-release-x86-"]' <<<"$PREFIXES")
+                                 "ccache-release-x86-",
+                                 "ccache-release-android-arm64-v8a-",
+                                 "ccache-release-android-armeabi-v7a-",
+                                 "ccache-release-android-x86_64-"]' <<<"$PREFIXES")
           echo "Release families included in this prune: $PREFIXES"
         fi
 
@@ -180,7 +184,7 @@ jobs:
           # bug in it once did, so refuse outright rather than trust the filter:
           # a wrongly deleted ccache-release-* is a cold, timing-out release.
           case "$key" in
-            deps-*|gradle-*|ccache-android-*)
+            deps-*|gradle-*)
               echo "::error::Refusing to delete protected cache $key - the selection logic is wrong"
               exit 1
               ;;

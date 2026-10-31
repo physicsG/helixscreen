@@ -14,6 +14,7 @@
 #include "app_globals.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
+#include "moonraker_error.h"
 #include "printer_state.h"
 #include "probe_preparation.h"
 #include "probe_sensor_manager.h"
@@ -548,7 +549,7 @@ void ProbeOverlay::handle_probe_accuracy() {
 
     // PROBE_ACCURACY defaults to 10 samples (not the [probe] config's samples= which is for
     // regular probing). We pass SAMPLES= explicitly so progress tracking matches.
-    static constexpr int PROBE_ACCURACY_SAMPLES = 10;
+    static constexpr int kProbeAccuracySamples = 10;
 
     std::string gcode;
     if (!all_homed) {
@@ -582,11 +583,11 @@ void ProbeOverlay::handle_probe_accuracy() {
     const uint32_t prep_timeout_ms = helix::probe_prep::append_preparation(
         gcode, helix::probe_prep::Operation::ProbeAccuracy, "PROBE_ACCURACY");
 
-    gcode += fmt::format("PROBE_ACCURACY SAMPLES={}", PROBE_ACCURACY_SAMPLES);
+    gcode += fmt::format("PROBE_ACCURACY SAMPLES={}", kProbeAccuracySamples);
 
     // Reset progress state
     probe_acc_sample_count_ = 0;
-    probe_acc_total_samples_ = PROBE_ACCURACY_SAMPLES;
+    probe_acc_total_samples_ = kProbeAccuracySamples;
 
     // Set initial state and show modal
     lv_subject_set_int(&probe_acc_state_, 1); // PROBING
@@ -668,7 +669,7 @@ void ProbeOverlay::handle_probe_accuracy() {
                 spdlog::error("[Probe] PROBE_ACCURACY error: {}", line);
                 api->unregister_method_callback("notify_gcode_response", handler_name);
 
-                std::string error_msg = line;
+                std::string error_msg = MoonrakerError::friendly_error_line(line);
                 helix::ui::queue_update("ProbeOverlay::handle_probe_accuracy", [error_msg]() {
                     get_global_probe_overlay().set_accuracy_error(error_msg);
                 });
@@ -682,7 +683,7 @@ void ProbeOverlay::handle_probe_accuracy() {
         },
         [api = api_, handler_name = probe_acc_handler_name_,
          backstop_ms =
-             IAdvancedAPI::PROBING_TIMEOUT_MS + prep_timeout_ms](const MoonrakerError& err) {
+             IAdvancedAPI::kProbingTimeoutMs + prep_timeout_ms](const MoonrakerError& err) {
             // A dropped socket or an RPC timeout is not a probe result: the
             // printer may still be measuring, and its result lines arrive on
             // the same stream the handler is registered on. Keep listening
@@ -704,7 +705,7 @@ void ProbeOverlay::handle_probe_accuracy() {
                 get_global_probe_overlay().set_accuracy_error(err.localized_message());
             });
         },
-        IAdvancedAPI::PROBING_TIMEOUT_MS + prep_timeout_ms);
+        IAdvancedAPI::kProbingTimeoutMs + prep_timeout_ms);
 }
 
 void ProbeOverlay::show_accuracy_results(const std::string& results_line) {
@@ -815,10 +816,9 @@ void ProbeOverlay::handle_bed_mesh() {
 #if defined(HELIX_PLATFORM_ESP32)
     // Secondary entry to bed-mesh calibration (excluded, null-vtable stub on v1).
     helix::ui::show_feature_unavailable_toast();
-    return;
+#else
+    helix::ui::open_bed_mesh_panel(lv_display_get_screen_active(nullptr));
 #endif
-
-    get_global_bed_mesh_panel().show(lv_display_get_screen_active(nullptr));
 }
 
 // ============================================================================

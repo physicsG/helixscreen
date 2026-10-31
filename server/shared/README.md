@@ -1,0 +1,1 @@
+Code shared by the crash worker and the telemetry worker: GitHub App installation tokens and the GitHub API fetch wrapper (`github.ts`), and Resend email delivery with HTML escaping (`email.ts`). Both workers import these files by relative path and wrangler's esbuild bundles them into each worker, so nothing here may depend on a worker's `Env` or on either worker's modules.

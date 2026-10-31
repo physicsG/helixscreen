@@ -49,6 +49,10 @@ case "$1" in
     exec)
         case "$*" in
             *pgrep*)
+                # MOCK_LIVE_MAKE_DIR: a make (an orphan) runs in that tree.
+                if [ -n "${MOCK_LIVE_MAKE_DIR:-}" ]; then
+                    case "$*" in *"$MOCK_LIVE_MAKE_DIR|"*) exit 0 ;; esac
+                fi
                 # MOCK_PGREP_HITS: the first poll sees a live make, and
                 # records what the mirror held at that moment.
                 if [ -n "${MOCK_PGREP_HITS:-}" ]; then
@@ -68,7 +72,22 @@ case "$1" in
                     exec bash -c "$3"
                 fi
                 exit 1 ;;
-            *) echo "[docker-exec] $*" >> "$MOCK_DOCKER_LOG" ;;
+            *"base64 -d"*)
+                # MOCK_CCACHE_DIR: run the ccache settings command here, against
+                # that cache; its last argument is the bash -c script.
+                echo "[docker-exec] $*" >> "$MOCK_DOCKER_LOG"
+                if [ -n "${MOCK_CCACHE_DIR:-}" ]; then
+                    for a in "$@"; do last=$a; done
+                    CCACHE_DIR=$MOCK_CCACHE_DIR exec bash -c "$last"
+                fi ;;
+            *) echo "[docker-exec] $*" >> "$MOCK_DOCKER_LOG"
+               # MOCK_SWEEP_FAILS=<mirror>: the sweep fails and leaves a
+               # failing shard log in that mirror, as the real one does.
+               if [ -n "${MOCK_SWEEP_FAILS:-}" ]; then
+                   mkdir -p "$MOCK_SWEEP_FAILS/build/shard-artifacts/helix-shards-T1"
+                   echo "hung in: a teardown case" > "$MOCK_SWEEP_FAILS/build/shard-artifacts/helix-shards-T1/92.log"
+                   exit 2
+               fi ;;
         esac ;;
     *) echo "unhandled docker call: $*" >&2; exit 1 ;;
 esac
@@ -111,6 +130,29 @@ mirror_of() { echo "$HELIX_TEST_TREES_HOST/$1"; }
     # The job runs in the mirror, not in the shared commit checkout.
     grep -qF -- "-w /work/trees/tree-a " "$MOCK_DOCKER_LOG"
     refute_grep "git reset" "$MOCK_DOCKER_LOG"
+}
+
+@test "every run applies the shared ccache settings in the container and checks they cover the mirror" {
+    command -v ccache >/dev/null || skip "ccache is not installed"
+    local t
+    t=$(make_tree tree-a)
+    export MOCK_CCACHE_DIR="$BATS_TEST_TMPDIR/ccache"
+    mkdir -p "$MOCK_CCACHE_DIR"
+    cd "$t"
+    run "$TEST_HOST_RUN" test '[x]'
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    contains "→ ccache base_dir: /work (was unset)" "$output"
+    lacks "is not a prefix" "$output"
+    grep -qx 'base_dir = /work' "$MOCK_CCACHE_DIR/ccache.conf"
+    grep -qx 'hash_dir = false' "$MOCK_CCACHE_DIR/ccache.conf"
+    grep -qx 'max_size = 200G' "$MOCK_CCACHE_DIR/ccache.conf"
+    grep -qF -- "check /work/trees/tree-a" "$MOCK_DOCKER_LOG"
+
+    # A cache whose base_dir drifted is put back on the next run.
+    CCACHE_DIR=$MOCK_CCACHE_DIR ccache --set-config base_dir=/elsewhere
+    run "$TEST_HOST_RUN" test '[x]'
+    [ "$status" -eq 0 ]
+    contains "→ ccache base_dir: /work (was /elsewhere)" "$output"
 }
 
 @test "a file deleted locally is gone from the mirror after the next sync" {
@@ -242,11 +284,11 @@ hold_lock() { # <lock file> <ready marker>: prints the holder pid
     "$TEST_HOST_RUN" test >"$out" 2>&1 &
     runner=$!
     wait_for_line "no jobpool on" "$out"
-    refute_grep "MemAvailable" "$out"
+    refute_grep "available to" "$out"
     kill "$holder"
     wait "$holder" 2>/dev/null || true
     wait "$runner"
-    grep -q "MemAvailable" "$out"
+    grep -q "available to" "$out"
 }
 
 @test "the provenance line and log name carry -dirty and the diff hash only when dirty" {
@@ -308,7 +350,7 @@ make_mirror() { # <name> <age in days>
     [ ! -e "$HELIX_TEST_TREES_HOST/old" ]
     [ -d "$HELIX_TEST_TREES_HOST/fresh" ]
     [ -d "$HELIX_TEST_TREES_HOST/busy" ]
-    contains "removed old" "$output"
+    contains "removed mirror old" "$output"
 
     # DAYS is honoured: a 1-day-old mirror goes at --prune 0.
     run "$TEST_HOST_RUN" --prune 0
@@ -362,6 +404,20 @@ make_mirror() { # <name> <age in days>
     [ "$status" -eq 0 ]
     run "$TEST_HOST_RUN" --probe
     [ "$status" -eq 0 ]
+    contains "estimated sync" "$output"
+}
+
+@test "--probe: measures the link where date has no nanoseconds (BSD date)" {
+    mock_command ping "64 bytes from testhost: icmp_seq=1 ttl=64 time=40.5 ms"
+    # BSD date prints %N literally.
+    mock_command_script date 'echo "1793107829N"'
+    unset HELIX_TEST_PROBE_BYTES_PER_SEC
+    local t
+    t=$(make_tree tree-a)
+    cd "$t"
+    run "$TEST_HOST_RUN" --probe
+    lacks "value too great" "$output"
+    lacks "unknown job" "$output"
     contains "estimated sync" "$output"
 }
 
@@ -556,4 +612,380 @@ case " $* " in *" --files-from="*) exit "${MOCK_RSYNC_RC:-0}" ;; esac'
         contains "$HELIX_BUILD_HOSTS_FILE" "$output"
     done
     [ ! -e "$BATS_TEST_TMPDIR/ssh-called" ]
+}
+
+@test "a candidate-list test host runs on the first host that answers, never the list itself" {
+    export HELIX_TEST_HOST=dead.local,good.lan
+    local t hosts="$BATS_TEST_TMPDIR/ssh-hosts"
+    t=$(make_tree tree-a)
+    cd "$t"
+    # The setup mock, recording each host it is asked for; dead.local refuses.
+    mock_command_script ssh '
+while [ $# -gt 0 ]; do
+    case "$1" in -o) shift 2 ;; -*) shift ;; *) break ;; esac
+done
+echo "$1" >> "'"$hosts"'"
+case "$1" in
+    dead.local) echo "ssh: connect to host dead.local port 22: Connection refused" >&2; exit 255 ;;
+esac
+shift
+exec bash -c "$*"'
+
+    run "$TEST_HOST_RUN" test '[x]'
+    [ "$status" -eq 0 ]
+    contains "HELIX_TEST_HOST=good.lan (not answering: dead.local: refused)" "$output"
+    contains "good.lan:helix-test" "$output"
+    # Past the one refused probe, every ssh goes to good.lan.
+    [ "$(head -1 "$hosts")" = dead.local ]
+    [ "$(tail -n +2 "$hosts" | sort -u)" = good.lan ]
+}
+
+# --- content-compared sync, seeding a new mirror, per-tree mutate checkouts ---
+
+mtime_of() { stat -c %Y "$1"; }
+
+# Gives a mirror a build that counts as warm: a linked helix-tests and a
+# dependency file naming the mirror's own container path, both an hour old.
+warm_build() { # <tree name>
+    local m="$HELIX_TEST_TREES_HOST/$1"
+    mkdir -p "$m/build/bin" "$m/build/obj"
+    echo bin > "$m/build/bin/helix-tests"
+    printf '/work/trees/%s/build/obj/x.o: src/x.c /work/trees/%s-1.0/keep.h\n' "$1" "$1" > "$m/build/obj/x.d"
+    printf "{'d':'/work/trees/%s','i':\"-I/work/trees/%s:x\"}\n" "$1" "$1" > "$m/build/obj/x.ccj"
+    touch -d '1 hour ago' "$m/build/bin/helix-tests" "$m/build/obj/x.d"
+}
+
+@test "the sync compares content: a new local time alone rewrites nothing, a change with an old time is rewritten" {
+    local t m before
+    t=$(make_tree tree-a)
+    m=$(mirror_of tree-a)
+    cd "$t"
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    touch -d '2 hours ago' "$m/tracked.txt"
+    before=$(mtime_of "$m/tracked.txt")
+
+    touch "$t/tracked.txt"
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    [ "$(mtime_of "$m/tracked.txt")" -eq "$before" ]
+
+    # An edit whose local time is older than any object the mirror built.
+    echo changed > "$t/tracked.txt"
+    touch -d '2001-01-01' "$t/tracked.txt"
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    [ "$(cat "$m/tracked.txt")" = changed ]
+    [ "$(mtime_of "$m/tracked.txt")" -gt "$before" ]
+}
+
+@test "a run records the HEAD it synced in the mirror" {
+    local t
+    t=$(make_tree tree-a)
+    cd "$t"
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    [ "$(cat "$(mirror_of tree-a)/.helix-mirror-head")" = "$(git rev-parse HEAD)" ]
+}
+
+@test "a new tree's mirror is seeded from the nearest warm mirror, and the sync makes its files exact" {
+    local a b c ma mb
+    a=$(make_tree tree-a)
+    echo gone > "$a/only-in-a.txt"
+    echo same > "$a/same.txt"
+    git -C "$a" add only-in-a.txt same.txt
+    git -C "$a" commit -qm a --no-verify
+    # tree-c: three commits away from a's fork point; tree-b: one commit past a.
+    git -C "$a" worktree add -q -b c "$BATS_TEST_TMPDIR/tree-c" HEAD~1
+    c=$BATS_TEST_TMPDIR/tree-c
+    for i in 1 2 3; do echo "$i" > "$c/c$i.txt"; git -C "$c" add "c$i.txt"; git -C "$c" commit -qm "c$i" --no-verify; done
+    git -C "$a" worktree add -q -b b "$BATS_TEST_TMPDIR/tree-b"
+    b=$BATS_TEST_TMPDIR/tree-b
+    git -C "$b" rm -q only-in-a.txt
+    echo b-edit > "$b/tracked.txt"
+    git -C "$b" commit -qam b --no-verify
+
+    (cd "$a" && "$TEST_HOST_RUN" test >/dev/null)
+    (cd "$c" && "$TEST_HOST_RUN" test >/dev/null)
+    warm_build tree-a
+    warm_build tree-c
+    ma=$(mirror_of tree-a); mb=$(mirror_of tree-b)
+    touch -d '3 hours ago' "$ma/same.txt" "$ma/tracked.txt"
+    # The far mirror ran last: history decides, not recency.
+    touch -d '2 days ago' "$ma/.helix-mirror-files"
+
+    cd "$b"
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    contains "seeded tree-b's mirror from tree-a" "$output"
+    [ -e "$mb/build/bin/helix-tests" ]
+    # The seed's dependency file names this mirror's path; a sibling's path that
+    # merely starts the same way is left alone, and its time is kept.
+    [ "$(cat "$mb/build/obj/x.d")" = "/work/trees/tree-b/build/obj/x.o: src/x.c /work/trees/tree-a-1.0/keep.h" ]
+    [ "$(mtime_of "$mb/build/obj/x.d")" -eq "$(mtime_of "$ma/build/obj/x.d")" ]
+    [ "$(cat "$mb/build/obj/x.ccj")" = "{'d':'/work/trees/tree-b','i':\"-I/work/trees/tree-b:x\"}" ]
+    # The files are exact: b's edit, a's extra file gone, an unchanged file
+    # keeps the seed's time while a changed one is newer than the seed's build.
+    [ "$(cat "$mb/tracked.txt")" = b-edit ]
+    [ ! -e "$mb/only-in-a.txt" ]
+    [ "$(mtime_of "$mb/same.txt")" -eq "$(mtime_of "$ma/same.txt")" ]
+    [ "$(mtime_of "$mb/tracked.txt")" -gt "$(mtime_of "$mb/build/bin/helix-tests")" ]
+    [ "$(cat "$mb/.helix-mirror-head")" = "$(git -C "$b" rev-parse HEAD)" ]
+    # The seed itself is untouched, and nothing temporary is left behind.
+    [ "$(cat "$ma/build/obj/x.d")" = "/work/trees/tree-a/build/obj/x.o: src/x.c /work/trees/tree-a-1.0/keep.h" ]
+    [ ! -e "$mb+seeding" ]
+
+    # A mirror that has a build/ is never seeded again, nor looks for a seed.
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    lacks "seed" "$output"
+}
+
+@test "a busy seed is passed over, and with no idle one the run builds cold" {
+    local a b holder
+    a=$(make_tree tree-a)
+    git -C "$a" worktree add -q -b b "$BATS_TEST_TMPDIR/tree-b"
+    b=$BATS_TEST_TMPDIR/tree-b
+    (cd "$a" && "$TEST_HOST_RUN" test >/dev/null)
+    warm_build tree-a
+    holder=$(hold_lock "$HELIX_TEST_LOCK_DIR/helix-test-host-run.tree-tree-a.lock" "$BATS_TEST_TMPDIR/ready")
+    wait_for_file "$BATS_TEST_TMPDIR/ready"
+    cd "$b"
+    run "$TEST_HOST_RUN" test
+    kill "$holder"; wait "$holder" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    contains "seed candidate tree-a is busy" "$output"
+    contains "building cold" "$output"
+    [ ! -e "$(mirror_of tree-b)/build" ]
+}
+
+@test "HELIX_TEST_SEED=0 starts a new mirror cold" {
+    local a b
+    a=$(make_tree tree-a)
+    git -C "$a" worktree add -q -b b "$BATS_TEST_TMPDIR/tree-b"
+    b=$BATS_TEST_TMPDIR/tree-b
+    (cd "$a" && "$TEST_HOST_RUN" test >/dev/null)
+    warm_build tree-a
+    cd "$b"
+    HELIX_TEST_SEED=0 run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    lacks "seed" "$output"
+    [ ! -e "$(mirror_of tree-b)/build" ]
+}
+
+@test "seeding a mirror prunes mirrors unused for HELIX_TEST_PRUNE_DAYS" {
+    local a b
+    a=$(make_tree tree-a)
+    git -C "$a" worktree add -q -b b "$BATS_TEST_TMPDIR/tree-b"
+    b=$BATS_TEST_TMPDIR/tree-b
+    (cd "$a" && "$TEST_HOST_RUN" test >/dev/null)
+    warm_build tree-a
+    make_mirror ancient 30
+    cd "$b"
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    contains "pruned (unused for 14 days) mirror ancient" "$output"
+    [ ! -e "$HELIX_TEST_TREES_HOST/ancient" ]
+    [ -d "$(mirror_of tree-a)" ]
+}
+
+# A pushed tree for mutate: the remote-tracking ref is what the push check reads.
+pushed_tree() { # <name>
+    local t
+    t=$(make_tree "$1")
+    git -C "$t" update-ref refs/remotes/origin/main HEAD
+    echo "$t"
+}
+
+# The shared --commit checkout, as the host sees it: beside the mirror root.
+shared_checkout() {
+    local s="$BATS_TEST_TMPDIR/helixscreen"
+    mkdir -p "$s/.git" "$s/build/obj"
+    touch "$s/.git/index"
+    printf '/work/helixscreen/build/obj/x.o: src/x.c\n' > "$s/build/obj/x.d"
+    echo "$s"
+}
+
+@test "mutate runs in this tree's own checkout, copied from the shared one, under a lock of its own" {
+    local t m
+    t=$(pushed_tree tree-a)
+    shared_checkout >/dev/null
+    m=$BATS_TEST_TMPDIR/mutate/tree-a
+    cd "$t"
+    run "$TEST_HOST_RUN" mutate --tests '[x]'
+    [ "$status" -eq 0 ]
+    contains "seeded /work/mutate/tree-a from helixscreen" "$output"
+    [ -d "$m/.git" ]
+    [ "$(cat "$m/build/obj/x.d")" = "/work/mutate/tree-a/build/obj/x.o: src/x.c" ]
+    grep -qF -- "-w /work/mutate/tree-a " "$MOCK_DOCKER_LOG"
+    refute_grep "-w /work/helixscreen " "$MOCK_DOCKER_LOG"
+    grep -q "held by pid .*: mutate tree-a-" "$HELIX_TEST_LOCK_DIR/helix-test-host-run.mutate-tree-a.lock"
+    # The copied index is refreshed before the reset, so git rewrites only what differs.
+    local refresh reset
+    refresh=$(grep -nF "git update-index -q --refresh" "$MOCK_DOCKER_LOG" | head -1 | cut -d: -f1)
+    reset=$(grep -nF "git reset --hard" "$MOCK_DOCKER_LOG" | head -1 | cut -d: -f1)
+    [ -n "$refresh" ] && [ "$refresh" -lt "$reset" ]
+}
+
+@test "two trees mutate at once: one tree's checkout and the shared one being busy do not stop another" {
+    local a b h1 h2
+    a=$(pushed_tree tree-a)
+    b=$(pushed_tree tree-b)
+    shared_checkout >/dev/null
+    mkdir -p "$BATS_TEST_TMPDIR/mutate/tree-b/.git"
+    h1=$(hold_lock "$HELIX_TEST_LOCK_DIR/helix-test-host-run.mutate-tree-a.lock" "$BATS_TEST_TMPDIR/ready1")
+    h2=$(hold_lock "$HELIX_TEST_LOCK_DIR/helix-zeus-run-helixscreen.lock" "$BATS_TEST_TMPDIR/ready2")
+    wait_for_file "$BATS_TEST_TMPDIR/ready1"; wait_for_file "$BATS_TEST_TMPDIR/ready2"
+    cd "$b"
+    run timeout 20 "$TEST_HOST_RUN" mutate
+    kill "$h1" "$h2"; wait "$h1" "$h2" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    lacks "busy" "$output"
+    grep -qF -- "-w /work/mutate/tree-b " "$MOCK_DOCKER_LOG"
+}
+
+@test "a new mutate checkout copies the newest idle one, and waits when every one is busy" {
+    local t holder out runner
+    t=$(pushed_tree tree-c)
+    shared_checkout >/dev/null
+    mkdir -p "$BATS_TEST_TMPDIR/mutate/tree-a/.git"
+    echo from-a > "$BATS_TEST_TMPDIR/mutate/tree-a/marker"
+    touch -d '1 day ago' "$BATS_TEST_TMPDIR/helixscreen/.git"
+    cd "$t"
+    run "$TEST_HOST_RUN" mutate
+    [ "$status" -eq 0 ]
+    contains "seeded /work/mutate/tree-c from tree-a" "$output"
+    [ "$(cat "$BATS_TEST_TMPDIR/mutate/tree-c/marker")" = from-a ]
+
+    rm -rf "$BATS_TEST_TMPDIR/mutate/tree-c"
+    holder=$(hold_lock "$HELIX_TEST_LOCK_DIR/helix-test-host-run.mutate-tree-a.lock" "$BATS_TEST_TMPDIR/ready")
+    wait_for_file "$BATS_TEST_TMPDIR/ready"
+    local h2
+    h2=$(hold_lock "$HELIX_TEST_LOCK_DIR/helix-zeus-run-helixscreen.lock" "$BATS_TEST_TMPDIR/ready2")
+    wait_for_file "$BATS_TEST_TMPDIR/ready2"
+    out="$BATS_TEST_TMPDIR/waiting.log"
+    "$TEST_HOST_RUN" mutate >"$out" 2>&1 &
+    runner=$!
+    wait_for_line "every mutate checkout is busy" "$out"
+    [ ! -e "$BATS_TEST_TMPDIR/mutate/tree-c" ]
+    kill "$holder"; wait "$holder" 2>/dev/null || true
+    wait "$runner"
+    kill "$h2"; wait "$h2" 2>/dev/null || true
+    [ -d "$BATS_TEST_TMPDIR/mutate/tree-c/.git" ]
+}
+
+@test "mutate on an unpushed commit still refuses, before any checkout is made" {
+    local t
+    t=$(make_tree tree-a)
+    shared_checkout >/dev/null
+    cd "$t"
+    run "$TEST_HOST_RUN" mutate
+    [ "$status" -ne 0 ]
+    contains "push it first" "$output"
+    [ ! -e "$BATS_TEST_TMPDIR/mutate/tree-a" ]
+}
+
+@test "--prune and --drop cover mutate checkouts too" {
+    mkdir -p "$BATS_TEST_TMPDIR/mutate/old/.git" "$BATS_TEST_TMPDIR/mutate/fresh/.git" "$BATS_TEST_TMPDIR/mutate/gone/.git"
+    touch -d '20 days ago' "$BATS_TEST_TMPDIR/mutate/old/.git/index"
+    touch "$BATS_TEST_TMPDIR/mutate/fresh/.git/index" "$BATS_TEST_TMPDIR/mutate/gone/.git/index"
+    make_mirror gone 0
+    run "$TEST_HOST_RUN" --prune
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/mutate/old" ]
+    [ -d "$BATS_TEST_TMPDIR/mutate/fresh" ]
+    contains "removed mutate checkout old" "$output"
+    run "$TEST_HOST_RUN" --drop gone
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/mutate/gone" ]
+    [ ! -e "$HELIX_TEST_TREES_HOST/gone" ]
+    [ -d "$BATS_TEST_TMPDIR/mutate/fresh" ]
+}
+
+@test "a seed candidate with an orphaned build running in it is passed over" {
+    local a b
+    a=$(make_tree tree-a)
+    git -C "$a" worktree add -q -b b "$BATS_TEST_TMPDIR/tree-b"
+    b=$BATS_TEST_TMPDIR/tree-b
+    (cd "$a" && "$TEST_HOST_RUN" test >/dev/null)
+    warm_build tree-a
+    cd "$b"
+    MOCK_LIVE_MAKE_DIR=/work/trees/tree-a run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    contains "seed candidate tree-a has an orphaned build running" "$output"
+    [ ! -e "$(mirror_of tree-b)/build" ]
+}
+
+@test "a mirror without a recorded HEAD is no seed, and its next run stamps its files once" {
+    local a b ma
+    a=$(make_tree tree-a)
+    git -C "$a" worktree add -q -b b "$BATS_TEST_TMPDIR/tree-b"
+    b=$BATS_TEST_TMPDIR/tree-b
+    (cd "$a" && "$TEST_HOST_RUN" test >/dev/null)
+    warm_build tree-a
+    ma=$(mirror_of tree-a)
+    rm "$ma/.helix-mirror-head"
+    touch -d '3 hours ago' "$ma/tracked.txt"
+    (cd "$b" && run "$TEST_HOST_RUN" test && [ "$status" -eq 0 ] && lacks "seeded" "$output")
+    [ ! -e "$(mirror_of tree-b)/build" ]
+
+    cd "$a"
+    run "$TEST_HOST_RUN" test
+    [ "$status" -eq 0 ]
+    contains "predates content-compared syncs" "$output"
+    [ "$(mtime_of "$ma/tracked.txt")" -gt "$(mtime_of "$ma/build/bin/helix-tests")" ]
+    [ -e "$ma/.helix-mirror-head" ]
+    # Once only: the HEAD it now records ends it.
+    touch -d '3 hours ago' "$ma/tracked.txt"
+    run "$TEST_HOST_RUN" test
+    lacks "predates" "$output"
+    [ "$(mtime_of "$ma/tracked.txt")" -lt "$(mtime_of "$ma/build/bin/helix-tests")" ]
+}
+
+@test "a run waits for a copy into its mirror that a killed run left going" {
+    local t out runner holder
+    t=$(make_tree tree-a)
+    holder=$(hold_lock "$HELIX_TEST_LOCK_DIR/helix-test-host-run.seed-tree-tree-a.lock" "$BATS_TEST_TMPDIR/ready")
+    wait_for_file "$BATS_TEST_TMPDIR/ready"
+    out="$BATS_TEST_TMPDIR/waiting.log"
+    (cd "$t" && HELIX_TEST_SEED=0 "$TEST_HOST_RUN" test >"$out" 2>&1) &
+    runner=$!
+    wait_for_line "a copy into tree-a is still running" "$out"
+    sleep 0.5
+    [ ! -e "$(mirror_of tree-a)/tracked.txt" ]
+    kill "$holder"; wait "$holder" 2>/dev/null || true
+    wait "$runner"
+    [ -e "$(mirror_of tree-a)/tracked.txt" ]
+}
+
+@test "prune leaves a copy in progress alone and collects one a dead run left a day ago" {
+    mkdir -p "$HELIX_TEST_TREES_HOST/new+seeding" "$HELIX_TEST_TREES_HOST/dead+seeding"
+    touch -d '30 days ago' "$HELIX_TEST_TREES_HOST/new+seeding/.helix-mirror-files"
+    touch -d '2 days ago' "$HELIX_TEST_TREES_HOST/dead+seeding"
+    run "$TEST_HOST_RUN" --prune 0
+    [ "$status" -eq 0 ]
+    [ -d "$HELIX_TEST_TREES_HOST/new+seeding" ]
+    [ ! -e "$HELIX_TEST_TREES_HOST/dead+seeding" ]
+}
+
+@test "a failed sweep brings its failing shards' logs back to the local tree" {
+    local t m
+    t=$(make_tree tree-s)
+    m=$(mirror_of tree-s)
+    cd "$t"
+    MOCK_SWEEP_FAILS="$m" run "$TEST_HOST_RUN" sweep
+    [ "$status" -ne 0 ]
+    [ "$(cat "$t/build/shard-artifacts/helix-shards-T1/92.log")" = "hung in: a teardown case" ]
+    contains "failing shards' logs copied here: build/shard-artifacts/helix-shards-T1" "$output"
+    # The sweep keeps them inside the mirror, where they outlive the container.
+    grep -qF "SHARD_ARTIFACT_ROOT=build/shard-artifacts" "$MOCK_DOCKER_LOG"
+}
+
+@test "a passing sweep copies nothing back" {
+    local t
+    t=$(make_tree tree-p)
+    cd "$t"
+    run "$TEST_HOST_RUN" sweep
+    [ "$status" -eq 0 ]
+    [ ! -e "$t/build/shard-artifacts" ]
 }

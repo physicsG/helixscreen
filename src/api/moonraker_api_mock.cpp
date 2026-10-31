@@ -13,6 +13,7 @@
 #include "moonraker_client_mock_internal.h"
 #include "plugin_source_app.h"
 #include "power_device_state.h"
+#include "print_photos.h"
 #include "runtime_config.h"
 #include "screws_tilt_parser.h"
 #include "sensor_state.h"
@@ -46,7 +47,7 @@
 using namespace helix;
 
 // Static initialization of path prefixes for fallback search
-const std::vector<std::string> MoonrakerFileTransferAPIMock::PATH_PREFIXES = {
+const std::vector<std::string> MoonrakerFileTransferAPIMock::kPathPrefixes = {
     "",      // From project root: assets/test_gcodes/
     "../",   // From build/: ../assets/test_gcodes/
     "../../" // From build/bin/: ../../assets/test_gcodes/
@@ -119,16 +120,18 @@ MoonrakerTimelapseAPIMock& MoonrakerAPIMock::timelapse_mock() {
 // ============================================================================
 
 SubscriptionId
-MoonrakerAPIMock::subscribe_notifications(std::function<void(const json&)> /*callback*/) {
-    return mock_next_subscription_id_++;
+MoonrakerAPIMock::subscribe_notifications(helix::SharedCallback<void(const json&)> callback) {
+    // The mock client fans every status update out to the notification callbacks, so a
+    // listener such as BedMeshState follows the mock printer as it would a real one.
+    return MoonrakerAPI::subscribe_notifications(std::move(callback));
 }
 
-bool MoonrakerAPIMock::unsubscribe_notifications(SubscriptionId /*id*/) {
-    return true;
+bool MoonrakerAPIMock::unsubscribe_notifications(SubscriptionId id) {
+    return MoonrakerAPI::unsubscribe_notifications(id);
 }
 
 void MoonrakerAPIMock::register_method_callback(const std::string& method, const std::string& name,
-                                                std::function<void(const json&)> callback) {
+                                                helix::SharedCallback<void(const json&)> callback) {
     // The mock client dispatches notifications itself, so listeners reach them.
     MoonrakerAPI::register_method_callback(method, name, std::move(callback));
 }
@@ -146,7 +149,7 @@ void MoonrakerAPIMock::suppress_disconnect_modal(uint32_t duration_ms) {
 
 void MoonrakerAPIMock::get_gcode_store(
     int /*count*/, std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-    std::function<void(const MoonrakerError&)> /*on_error*/) {
+    helix::SharedCallback<void(const MoonrakerError&)> /*on_error*/) {
     if (on_success) {
         double now = static_cast<double>(std::time(nullptr));
         std::vector<GcodeStoreEntry> entries = {
@@ -177,7 +180,7 @@ std::string MoonrakerFileTransferAPIMock::find_test_file(const std::string& file
         return planted + "/" + filename;
     }
 
-    for (const auto& prefix : PATH_PREFIXES) {
+    for (const auto& prefix : kPathPrefixes) {
         std::string path = prefix + std::string(TEST_GCODE_DIR) + "/" + filename;
 
         if (fs::exists(path)) {
@@ -255,8 +258,7 @@ void MoonrakerFileAPIMock::list_files(const std::string& root, const std::string
         for (const auto& [file_path, content] : config_files_) {
             FileInfo info;
             info.path = file_path;
-            auto slash = file_path.rfind('/');
-            info.filename = (slash == std::string::npos) ? file_path : file_path.substr(slash + 1);
+            info.filename = helix::gcode::get_filename_basename(file_path);
             info.size = content.size();
             info.is_dir = false;
             listing.push_back(info);
@@ -343,6 +345,12 @@ void helix::MoonrakerJobAPIMock::start_modified_print(const std::string& origina
                  "{} modification(s)",
                  original_filename, temp_file_path, modifications.size());
 
+    if (modified_print_error_) {
+        if (on_error) {
+            on_error(*modified_print_error_);
+        }
+        return;
+    }
     if (fail_modified_prints_) {
         if (on_error) {
             on_error(MoonrakerError::unknown("Mock plugin rejected: " + temp_file_path,
@@ -360,6 +368,86 @@ void helix::MoonrakerJobAPIMock::start_modified_print(const std::string& origina
         on_success(result);
     }
 }
+
+void helix::MoonrakerJobAPIMock::start_edited_print(
+    const std::string& original_filename, const std::string& temp_file_path, const json& edits,
+    const std::vector<std::string>& modifications, uint64_t file_size,
+    ModifiedPrintCallback on_success, ErrorCallback on_error) {
+    if (refused_by_spool_latch("server.helix.print_edited", on_error)) {
+        return;
+    }
+    edited_prints_.push_back({original_filename, temp_file_path, edits, modifications, file_size});
+
+    spdlog::info("[MoonrakerAPIMock] Mock start_edited_print: original='{}', temp='{}', "
+                 "{} edit(s)",
+                 original_filename, temp_file_path, edits.size());
+
+    if (edited_print_error_) {
+        if (on_error) {
+            on_error(*edited_print_error_);
+        }
+        return;
+    }
+    if (fail_modified_prints_) {
+        if (on_error) {
+            on_error(MoonrakerError::unknown("Mock plugin rejected: " + temp_file_path,
+                                             "start_edited_print"));
+        }
+        return;
+    }
+
+    if (on_success) {
+        ModifiedPrintResult result;
+        result.original_filename = original_filename;
+        result.print_filename = original_filename;
+        result.temp_filename = temp_file_path;
+        result.status = "printing";
+        on_success(result);
+    }
+}
+
+namespace {
+
+/// The toolchanger persona's firmware filament tables: the U1's `filament_parameters`
+/// module keeps one per nozzle config under the config root, and the persona advertises
+/// that module, so --test reads them the way a real U1 is read.
+std::optional<std::string> mock_toolchanger_config_file(const std::string& path) {
+    static const std::map<std::string, std::string> kFiles = {
+        {"snapmaker/filament_para_standard_04.json",
+         R"({"version": "1.0.0", "hard_filaments_max_flow_k": 0.4,
+ "generic_PLA_generic_load_temp": 250, "generic_PLA_generic_unload_temp": 250,
+ "generic_PETG_generic_load_temp": 270, "generic_PETG_generic_unload_temp": 270,
+ "generic_ABS_generic_load_temp": 280, "generic_ABS_generic_unload_temp": 280,
+ "generic_TPU_95A HF_load_temp": 250, "generic_TPU_95A HF_unload_temp": 250,
+ "generic_TPU_95A HF_is_soft": true})"},
+        {"snapmaker/filament_para_standard_02.json",
+         R"({"version": "1.0.0", "generic_PLA_generic_load_temp": 250,
+ "generic_PLA_generic_unload_temp": 250, "generic_PETG_generic_load_temp": 270,
+ "generic_PETG_generic_unload_temp": 270})"},
+        {"snapmaker/filament_para_standard_06.json",
+         R"({"version": "1.0.0", "generic_PLA_generic_load_temp": 250,
+ "generic_PLA_generic_unload_temp": 250, "generic_ASA_generic_load_temp": 280,
+ "generic_ASA_generic_unload_temp": 280})"},
+        {"snapmaker/filament_para_standard_08.json",
+         R"({"version": "1.0.0", "generic_PLA_generic_load_temp": 250,
+ "generic_PLA_generic_unload_temp": 250, "generic_PA6-CF_generic_load_temp": 290,
+ "generic_PA6-CF_generic_unload_temp": 290})"},
+        {"snapmaker/filament_para_high_flow_04.json",
+         R"({"version": "1.0.0", "generic_PLA_generic_load_temp": 250,
+ "generic_PLA_generic_unload_temp": 250, "generic_PETG-CF_generic_load_temp": 270,
+ "generic_PETG-CF_generic_unload_temp": 270})"},
+    };
+    if (!MoonrakerClientMock::mock_toolchanger_selected()) {
+        return std::nullopt;
+    }
+    auto it = kFiles.find(path);
+    if (it == kFiles.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+} // namespace
 
 void MoonrakerFileTransferAPIMock::download_file(const std::string& root, const std::string& path,
                                                  StringCallback on_success,
@@ -381,12 +469,22 @@ void MoonrakerFileTransferAPIMock::download_file(const std::string& root, const 
         }
         return;
     }
+    if (root == "config") {
+        if (auto content = mock_toolchanger_config_file(path)) {
+            spdlog::debug("[MoonrakerAPIMock] Serving toolchanger firmware file: {}", path);
+            if (on_success)
+                on_success(*content);
+            return;
+        }
+    }
 
     // Strip any leading directory components to get just the filename
-    std::string filename = path;
-    size_t last_slash = path.rfind('/');
-    if (last_slash != std::string::npos) {
-        filename = path.substr(last_slash + 1);
+    std::string filename = helix::gcode::get_filename_basename(path);
+    // A print photo (HELIX_MOCK_PRINT_PHOTOS) is one of two stock pictures.
+    if (root == "gcodes" && helix::is_photo_path(path)) {
+        filename = helix::photo_kind_from_path(path) == helix::kPhotoKindLayer
+                       ? "mock_print_photo_layer2.jpg"
+                       : "mock_print_photo_end.jpg";
     }
 
     spdlog::debug("[MoonrakerAPIMock] download_file: root='{}', path='{}' -> filename='{}'", root,
@@ -397,7 +495,7 @@ void MoonrakerFileTransferAPIMock::download_file(const std::string& root, const 
 
     // For timelapse root, search timelapse test directory first
     if (root == "timelapse") {
-        for (const auto& prefix : PATH_PREFIXES) {
+        for (const auto& prefix : kPathPrefixes) {
             std::string timelapse_path = prefix + "assets/test_timelapse/" + filename;
             if (std::filesystem::exists(timelapse_path)) {
                 local_path = timelapse_path;
@@ -453,30 +551,59 @@ void MoonrakerFileTransferAPIMock::download_file_partial(const std::string& root
                                                          StringCallback on_success,
                                                          ErrorCallback on_error,
                                                          CancelFlag /*cancelled*/) {
-    spdlog::debug("[MoonrakerAPIMock] download_file_partial: root='{}', path='{}', max_bytes={}",
-                  root, path, max_bytes);
+    read_range(root, path, 0, max_bytes, "download_file_partial", std::move(on_success),
+               std::move(on_error));
+}
+
+void MoonrakerFileTransferAPIMock::download_file_range(const std::string& root,
+                                                       const std::string& path, uint64_t offset,
+                                                       size_t len, StringCallback on_success,
+                                                       ErrorCallback on_error,
+                                                       CancelFlag /*cancelled*/) {
+    ++range_reads_;
+    read_range(root, path, offset, len, "download_file_range", std::move(on_success),
+               std::move(on_error));
+}
+
+void MoonrakerFileTransferAPIMock::read_range(const std::string& root, const std::string& path,
+                                              uint64_t offset, size_t len, const char* op,
+                                              StringCallback on_success, ErrorCallback on_error) {
+    if (hold_range_reads_) {
+        held_range_reads_.push_back([this, root, path, offset, len, op,
+                                     on_success = std::move(on_success),
+                                     on_error = std::move(on_error)]() {
+            serve_range(root, path, offset, len, op, on_success, on_error);
+        });
+        return;
+    }
+    serve_range(root, path, offset, len, op, on_success, on_error);
+}
+
+void MoonrakerFileTransferAPIMock::serve_range(const std::string& root, const std::string& path,
+                                               uint64_t offset, size_t len, const char* op,
+                                               const StringCallback& on_success,
+                                               const ErrorCallback& on_error) {
+    spdlog::debug("[MoonrakerAPIMock] {}: root='{}', path='{}', {} bytes at {}", op, root, path,
+                  len, offset);
 
     // Config root: serve HELIX_MOCK_PLUGINS_DIR and the injected config root by full path,
-    // mirroring the real partial download's head-range contract.
+    // mirroring the real ranged download's contract.
     const ConfigRootFile config = lookup_config_root(root, path);
     if (config.owned) {
         if (!config.content) {
             if (on_error)
-                on_error(MoonrakerError::file_not_found("download_file_partial",
-                                                        "Mock config file not found: " + path));
+                on_error(MoonrakerError::file_not_found(op, "Mock config file not found: " + path));
             return;
         }
         if (on_success)
-            on_success(config.content->substr(0, max_bytes));
+            on_success(offset < config.content->size()
+                           ? config.content->substr(static_cast<size_t>(offset), len)
+                           : std::string());
         return;
     }
 
     // Strip any leading directory components to get just the filename
-    std::string filename = path;
-    size_t last_slash = path.rfind('/');
-    if (last_slash != std::string::npos) {
-        filename = path.substr(last_slash + 1);
-    }
+    std::string filename = helix::gcode::get_filename_basename(path);
 
     // Find the test file using fallback path search
     std::string local_path = find_test_file(filename);
@@ -484,24 +611,25 @@ void MoonrakerFileTransferAPIMock::download_file_partial(const std::string& root
     if (local_path.empty()) {
         spdlog::warn("[MoonrakerAPIMock] File not found in test directories: {}", filename);
         if (on_error) {
-            MoonrakerError err = MoonrakerError::file_not_found("download_file_partial",
-                                                                "Mock file not found: " + filename);
-            on_error(err);
+            on_error(MoonrakerError::file_not_found(op, "Mock file not found: " + filename));
         }
         return;
     }
 
-    // Read up to max_bytes from the local file
+    // Read up to len bytes from offset in the local file
     std::ifstream file(local_path, std::ios::binary);
     if (file) {
         std::string content;
-        content.resize(max_bytes);
-        file.read(&content[0], static_cast<std::streamsize>(max_bytes));
-        content.resize(static_cast<size_t>(file.gcount()));
+        file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+        if (file) {
+            content.resize(len);
+            file.read(&content[0], static_cast<std::streamsize>(len));
+            content.resize(static_cast<size_t>(file.gcount()));
+        }
         file.close();
 
-        spdlog::debug("[MoonrakerAPIMock] Partial download {} ({} of {} bytes)", filename,
-                      content.size(), max_bytes);
+        spdlog::debug("[MoonrakerAPIMock] Ranged read {} ({} of {} bytes at {})", filename,
+                      content.size(), len, offset);
 
         if (on_success) {
             on_success(content);
@@ -509,9 +637,7 @@ void MoonrakerFileTransferAPIMock::download_file_partial(const std::string& root
     } else {
         spdlog::error("[MoonrakerAPIMock] Failed to read file: {}", local_path);
         if (on_error) {
-            MoonrakerError err = MoonrakerError::file_not_found(
-                "download_file_partial", "Failed to read test file: " + filename);
-            on_error(err);
+            on_error(MoonrakerError::file_not_found(op, "Failed to read test file: " + filename));
         }
     }
 }
@@ -520,11 +646,7 @@ void MoonrakerFileTransferAPIMock::download_file_tail(const std::string& root,
                                                       const std::string& path, size_t max_bytes,
                                                       StringCallback on_success,
                                                       ErrorCallback on_error) {
-    std::string filename = path;
-    size_t last_slash = path.rfind('/');
-    if (last_slash != std::string::npos) {
-        filename = path.substr(last_slash + 1);
-    }
+    std::string filename = helix::gcode::get_filename_basename(path);
 
     spdlog::debug("[MoonrakerAPIMock] download_file_tail: root='{}', path='{}', max_bytes={}", root,
                   path, max_bytes);
@@ -603,11 +725,7 @@ void MoonrakerFileTransferAPIMock::download_file_to_path(
     }
 
     // Extract just the filename from the path
-    std::string filename = path;
-    size_t last_slash = path.find_last_of('/');
-    if (last_slash != std::string::npos) {
-        filename = path.substr(last_slash + 1);
-    }
+    std::string filename = helix::gcode::get_filename_basename(path);
 
     spdlog::debug(
         "[MoonrakerAPIMock] download_file_to_path: root='{}', path='{}' -> filename='{}', "
@@ -619,7 +737,7 @@ void MoonrakerFileTransferAPIMock::download_file_to_path(
 
     // For timelapse root, search timelapse test directory first
     if (root == "timelapse") {
-        for (const auto& prefix : PATH_PREFIXES) {
+        for (const auto& prefix : kPathPrefixes) {
             std::string timelapse_path = prefix + "assets/test_timelapse/" + filename;
             if (std::filesystem::exists(timelapse_path)) {
                 local_path = timelapse_path;
@@ -628,6 +746,12 @@ void MoonrakerFileTransferAPIMock::download_file_to_path(
                 break;
             }
         }
+    }
+
+    // A file under a subdirectory of the gcodes root, as Moonraker addresses it.
+    if (local_path.empty() && root == "gcodes" &&
+        std::filesystem::exists(helix::mock::gcode_disk_path(path))) {
+        local_path = helix::mock::gcode_disk_path(path);
     }
 
     if (local_path.empty()) {
@@ -700,6 +824,18 @@ void MoonrakerFileTransferAPIMock::upload_file_from_path(
                                   std::istreambuf_iterator<char>());
         }
     }
+    // A --test run with a gcodes directory of its own (HELIX_MOCK_GCODE_DIR)
+    // keeps what it uploads there, so the printer side can list, size and
+    // serve it back as Moonraker would.
+    if (root == "gcodes" && std::getenv("HELIX_MOCK_GCODE_DIR") &&
+        !helix::mock::planted_gcode_dir().empty()) {
+        const std::filesystem::path dest =
+            std::filesystem::path(helix::mock::planted_gcode_dir()) / dest_path;
+        std::error_code ec;
+        std::filesystem::create_directories(dest.parent_path(), ec);
+        std::ofstream out(dest, std::ios::binary);
+        out << record.content;
+    }
     path_uploads_.push_back(record);
 
     spdlog::info("[MoonrakerAPIMock] Mock upload_file_from_path: root='{}', dest='{}', "
@@ -737,6 +873,18 @@ void MoonrakerFileTransferAPIMock::upload_file(const std::string& root, const st
     if (root == "config" && !config_files_.empty()) {
         config_files_[path] = content;
     }
+    // A gcode upload is kept on disk, so starting a print of it reads the
+    // file's own metadata (layer count, estimate) as Moonraker would.
+    if (root == "gcodes") {
+        const std::string& planted = helix::mock::planted_gcode_dir();
+        const std::filesystem::path dest =
+            std::filesystem::path(planted.empty() ? helix::mock::uploaded_gcode_dir() : planted) /
+            path;
+        std::error_code ec;
+        std::filesystem::create_directories(dest.parent_path(), ec);
+        std::ofstream out(dest, std::ios::binary);
+        out << content;
+    }
 
     // Mock always succeeds
     if (on_success) {
@@ -744,10 +892,14 @@ void MoonrakerFileTransferAPIMock::upload_file(const std::string& root, const st
     }
 }
 
-void MoonrakerFileTransferAPIMock::upload_file_with_name(
-    const std::string& root, const std::string& path, const std::string& filename,
-    const std::string& content, SuccessCallback on_success, ErrorCallback on_error) {
+void MoonrakerFileTransferAPIMock::upload_file_with_name(const std::string& root,
+                                                         const std::string& path,
+                                                         const std::string& filename,
+                                                         const std::string& content,
+                                                         SuccessCallback on_success,
+                                                         ErrorCallback on_error, UploadLane lane) {
     (void)on_error; // Unused - mock always succeeds
+    named_uploads_.push_back({root, path, filename, content, lane});
 
     spdlog::info(
         "[MoonrakerAPIMock] Mock upload_file_with_name: root='{}', path='{}', filename='{}', "
@@ -874,7 +1026,7 @@ void MoonrakerFileTransferAPIMock::download_thumbnail(const std::string& thumbna
     spdlog::debug("[MoonrakerAPIMock] Falling back to placeholder thumbnail");
 
     std::string placeholder_path;
-    for (const auto& prefix : PATH_PREFIXES) {
+    for (const auto& prefix : kPathPrefixes) {
         std::string test_path = prefix + "assets/images/benchy_thumbnail_white.png";
         if (fs::exists(test_path)) {
             placeholder_path = "A:" + test_path;
@@ -1015,7 +1167,7 @@ void MoonrakerRestAPIMock::wled_get_strips(RestCallback on_success, ErrorCallbac
     }
     spdlog::info("[MoonrakerAPIMock] WLED get_strips (returning mock strips from tracked state)");
 
-    // Initialize defaults if not already set (same pattern as wled_get_status)
+    // Initialize defaults if not already set
     if (mock_wled_states_.find("printer_led") == mock_wled_states_.end()) {
         mock_wled_states_["printer_led"] = true;
     }
@@ -1089,60 +1241,6 @@ void MoonrakerRestAPIMock::wled_set_strip(const std::string& strip, const std::s
     }
 }
 
-void MoonrakerRestAPIMock::wled_get_status(RestCallback on_success, ErrorCallback /*on_error*/) {
-    spdlog::info("[MoonrakerAPIMock] WLED get_status");
-
-    // Initialize default states if not already set
-    if (mock_wled_states_.find("printer_led") == mock_wled_states_.end()) {
-        mock_wled_states_["printer_led"] = true;
-    }
-    if (mock_wled_states_.find("enclosure_led") == mock_wled_states_.end()) {
-        mock_wled_states_["enclosure_led"] = false;
-    }
-    // Default presets
-    if (mock_wled_presets_.find("printer_led") == mock_wled_presets_.end()) {
-        mock_wled_presets_["printer_led"] = 2;
-    }
-    if (mock_wled_presets_.find("enclosure_led") == mock_wled_presets_.end()) {
-        mock_wled_presets_["enclosure_led"] = -1;
-    }
-    // Default brightness
-    if (mock_wled_brightness_.find("printer_led") == mock_wled_brightness_.end()) {
-        mock_wled_brightness_["printer_led"] = 200;
-    }
-    if (mock_wled_brightness_.find("enclosure_led") == mock_wled_brightness_.end()) {
-        mock_wled_brightness_["enclosure_led"] = 128;
-    }
-
-    if (on_success) {
-        RestResponse resp;
-        resp.success = true;
-        resp.status_code = 200;
-        // Same endpoint as wled_get_strips(), same result.strips envelope.
-        resp.data = {{"result",
-                      {{"strips",
-                        {{"printer_led",
-                          {{"strip", "printer_led"},
-                           {"status", mock_wled_states_["printer_led"] ? "on" : "off"},
-                           {"chain_count", 30},
-                           {"preset", mock_wled_presets_["printer_led"]},
-                           {"brightness", mock_wled_brightness_["printer_led"]},
-                           {"intensity", -1},
-                           {"speed", -1},
-                           {"error", nullptr}}},
-                         {"enclosure_led",
-                          {{"strip", "enclosure_led"},
-                           {"status", mock_wled_states_["enclosure_led"] ? "on" : "off"},
-                           {"chain_count", 60},
-                           {"preset", mock_wled_presets_["enclosure_led"]},
-                           {"brightness", mock_wled_brightness_["enclosure_led"]},
-                           {"intensity", -1},
-                           {"speed", -1},
-                           {"error", nullptr}}}}}}}};
-        on_success(resp);
-    }
-}
-
 namespace {
 const char* mock_klippy_uds_address(); // defined below, beside its socket setup
 }
@@ -1182,11 +1280,26 @@ struct SocketGuard {
     }
 };
 
+/// Accepts and closes every connection waiting on the listener. A co-location
+/// probe connects and hangs up, but its connection stays in the listen backlog
+/// until accepted, and a full backlog refuses the next connect (macOS's holds
+/// 128). Draining on each query keeps it at the probes since the last one.
+void drain_backlog(int listen_fd) {
+    for (;;) {
+        const int conn = ::accept(listen_fd, nullptr, nullptr);
+        if (conn < 0) {
+            return; // EAGAIN: nothing waiting (the listener is non-blocking)
+        }
+        ::close(conn);
+    }
+}
+
 /// A process-lifetime listening unix socket standing in for klippy's UDS.
 /// Co-location checks connect() to the address Moonraker reports, so the mock
 /// must name a socket that accepts a connection. Created once per process on
-/// first use and unlinked at exit.
+/// first use and unlinked at exit; every query drains what earlier probes left.
 const char* mock_klippy_uds_address() {
+    static int listen_fd = -1;
     static const std::string path = [] {
         const std::string p = "/tmp/helix-mock-klippy-" + std::to_string(getpid()) + ".sock";
         ::unlink(p.c_str());
@@ -1196,11 +1309,12 @@ const char* mock_klippy_uds_address() {
             addr.sun_family = AF_UNIX;
             std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
             // SOMAXCONN, never 1: connect_uds() blocks on a full backlog, and
-            // nothing ever accepts here - a tiny backlog would wedge the
-            // second co-location probe for the process lifetime.
+            // probes between two queries queue there until the next drain.
             if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0 &&
                 ::listen(fd, SOMAXCONN) == 0) {
                 static_cast<void>(fcntl(fd, F_SETFD, FD_CLOEXEC));
+                static_cast<void>(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK));
+                listen_fd = fd;
                 // Local static: its destructor unlinks at process exit.
                 static const SocketGuard guard{p, fd};
                 return p;
@@ -1209,6 +1323,9 @@ const char* mock_klippy_uds_address() {
         }
         return std::string("/nonexistent/mock-klippy.sock");
     }();
+    if (listen_fd >= 0) {
+        drain_backlog(listen_fd);
+    }
     return path.c_str();
 }
 
@@ -1258,7 +1375,7 @@ void MockScrewsTiltState::reset() {
     // Klipper reports diff = z_base - z, so a screw *above* the base prints a
     // negative diff, which is CCW on a CW-M3 thread. The adjustments below are
     // what probe_lines() emits at reset for the 0.5 mm M3 pitch the mock
-    // advertises (mock_internal::MOCK_SCREW_THREAD).
+    // advertises (mock_internal::kMockScrewThread).
     //
     // The base deliberately sits mid-range (-18 .. +10 minutes around it): that
     // is the prestonbrown/helixscreen#1225 shape, where every screw is small on
@@ -1371,7 +1488,7 @@ std::string MockScrewsTiltState::diff_to_adjustment(float diff_mm) {
     // for a positive diff on a CW-M* thread, CCW for a negative one. The mock
     // must match: emitting the opposite sign is what made --test unable to
     // reproduce the level-verdict bug (prestonbrown/helixscreen#1225).
-    const float mm_per_turn = screw_thread_pitch_mm(mock_internal::MOCK_SCREW_THREAD);
+    const float mm_per_turn = screw_thread_pitch_mm(mock_internal::kMockScrewThread);
 
     // Klipper zeroes the adjustment inside a 1 micron deadband *before* dividing
     // by the pitch, so probe noise never prints as a fraction of a turn.
@@ -1404,8 +1521,7 @@ void MoonrakerAdvancedAPIMock::calculate_screws_tilt(ScrewTiltCallback on_succes
                  mock_bed_state_.get_probe_count() + 1);
 
     // Feed the simulated console output through the SAME parser the live
-    // collector uses, so --test exercises the line parser and the printer-database
-    // screws_tilt_direction override instead of bypassing both.
+    // collector uses, so --test exercises the line parser instead of bypassing it.
     std::vector<ScrewTiltResult> results;
     for (const auto& line : mock_bed_state_.probe_lines()) {
         ScrewTiltResult result;
@@ -1506,16 +1622,24 @@ void MoonrakerRestAPIMock::call_rest_get(const std::string& endpoint, RestCallba
         }
         return;
     }
+    // A query string the test did not spell answers as the bare path.
+    const std::string path = endpoint.substr(0, endpoint.find('?'));
+    if (auto it = get_responses_.find(path); it != get_responses_.end()) {
+        if (on_complete) {
+            on_complete(it->second);
+        }
+        return;
+    }
 
     RestResponse resp;
     resp.success = true;
     resp.status_code = 200;
 
     // Return mock responses for known ACE endpoints (via ValgACE Moonraker plugin)
-    if (endpoint == "/server/ace/info") {
+    if (path == "/server/ace/info") {
         resp.data = {
             {"result", {{"model", "ACE Pro"}, {"version", "1.0.0-mock"}, {"slot_count", 4}}}};
-    } else if (endpoint == "/server/ace/status") {
+    } else if (path == "/server/ace/status") {
         resp.data = {{"result",
                       {{"loaded_slot", -1},
                        {"action", "idle"},
@@ -1525,7 +1649,7 @@ void MoonrakerRestAPIMock::call_rest_get(const std::string& endpoint, RestCallba
                          {"target_temp", 0.0},
                          {"remaining_minutes", 0},
                          {"duration_minutes", 0}}}}}};
-    } else if (endpoint == "/server/ace/slots") {
+    } else if (path == "/server/ace/slots") {
         resp.data = {{"result",
                       {{"slots",
                         {{{"status", "available"},

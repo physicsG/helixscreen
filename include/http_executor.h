@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "helix_callback.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -17,7 +19,7 @@
 namespace helix::http {
 
 /// Work item executed on a worker thread.
-using HttpWork = std::function<void()>;
+using HttpWork = helix::Callback<void()>;
 
 /// Bounded-worker executor for HTTP work. Replaces per-request std::thread
 /// spawning, which failed with EAGAIN under thread exhaustion (see commits

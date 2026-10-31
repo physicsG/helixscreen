@@ -230,11 +230,11 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "process_async racing shutdown never uses
     // Repeated because it is a timing window: with the fix every iteration is
     // clean; without it, ASAN/TSAN trip and even an uninstrumented build
     // eventually faults.
-    constexpr int ITERATIONS = 40;
-    constexpr int SUBMITTERS = 4;
+    constexpr int kIterations = 40;
+    constexpr int kSubmitters = 4;
     std::atomic<long long> slowest_ms{0};
 
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
+    for (int iter = 0; iter < kIterations; ++iter) {
         ProcHandle proc;
 
         helix::ThumbnailProcessor* raw = proc.get();
@@ -244,9 +244,9 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "process_async racing shutdown never uses
         auto resolved = std::make_shared<std::atomic<int>>(0);
         std::atomic<bool> go{false};
         std::vector<std::thread> threads;
-        threads.reserve(SUBMITTERS + 1);
+        threads.reserve(kSubmitters + 1);
 
-        for (int t = 0; t < SUBMITTERS; ++t) {
+        for (int t = 0; t < kSubmitters; ++t) {
             threads.emplace_back([raw, resolved, &go, t] {
                 while (!go.load(std::memory_order_acquire)) {
                 }
@@ -278,7 +278,7 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "process_async racing shutdown never uses
 
     INFO("slowest shutdown(): " << slowest_ms.load() << " ms");
     CHECK(slowest_ms.load() < std::chrono::milliseconds(kShutdownBound).count());
-    SUCCEED("Completed " << ITERATIONS << " shutdown races without faulting");
+    SUCCEED("Completed " << kIterations << " shutdown races without faulting");
 }
 
 TEST_CASE_METHOD(ThumbnailRaceFixture, "submit_test_task after shutdown queues nothing",
@@ -300,20 +300,20 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "submit_test_task racing shutdown never u
                  "[thumbnail][threading][1202][slow]") {
     // Same regression shape as "process_async racing shutdown" above, for
     // submit_test_task()'s own commit() call.
-    constexpr int ITERATIONS = 40;
-    constexpr int SUBMITTERS = 4;
+    constexpr int kIterations = 40;
+    constexpr int kSubmitters = 4;
     std::atomic<long long> slowest_ms{0};
 
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
+    for (int iter = 0; iter < kIterations; ++iter) {
         ProcHandle proc;
 
         helix::ThumbnailProcessor* raw = proc.get();
         auto ran = std::make_shared<std::atomic<int>>(0);
         std::atomic<bool> go{false};
         std::vector<std::thread> threads;
-        threads.reserve(SUBMITTERS + 1);
+        threads.reserve(kSubmitters + 1);
 
-        for (int t = 0; t < SUBMITTERS; ++t) {
+        for (int t = 0; t < kSubmitters; ++t) {
             threads.emplace_back([raw, ran, &go] {
                 while (!go.load(std::memory_order_acquire)) {
                 }
@@ -339,5 +339,5 @@ TEST_CASE_METHOD(ThumbnailRaceFixture, "submit_test_task racing shutdown never u
 
     INFO("slowest shutdown(): " << slowest_ms.load() << " ms");
     CHECK(slowest_ms.load() < std::chrono::milliseconds(kShutdownBound).count());
-    SUCCEED("Completed " << ITERATIONS << " shutdown races without faulting");
+    SUCCEED("Completed " << kIterations << " shutdown races without faulting");
 }

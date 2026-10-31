@@ -7,6 +7,7 @@
 
 #include "async_lifetime_guard.h"
 #include "bed_drying.h"
+#include "helix_shared_callback.h"
 #include "i_moonraker_api.h"
 #include "subject_managed_panel.h"
 
@@ -75,7 +76,8 @@ class BedDryingController {
     /// message when a move was refused or failed, or the latch could not be
     /// saved.
     void prepare(const bed_drying::Material& material, bool with_appliance,
-                 std::function<void()> on_ready, std::function<void(const std::string&)> on_error);
+                 helix::SharedCallback<void()> on_ready,
+                 helix::SharedCallback<void(const std::string&)> on_error);
 
     /// The spools are on the plate: persist the run, heat. False, with nothing
     /// heated, when the run could not be saved.
@@ -99,7 +101,8 @@ class BedDryingController {
     /// once its action has gone busy and back to idle, @p on_failed on ERROR
     /// (started = true) or when it never goes busy within kUnloadStartWindowMs
     /// (started = false). A second call replaces the first wait.
-    void await_unload(std::function<void()> on_done, std::function<void(bool started)> on_failed);
+    void await_unload(helix::SharedCallback<void()> on_done,
+                      helix::SharedCallback<void(bool started)> on_failed);
 
     /// Drop the wait without running either callback.
     void cancel_unload_wait();
@@ -145,8 +148,20 @@ class BedDryingController {
     lv_subject_t* get_state_subject() {
         return &bed_drying_state_;
     }
+    /// Death signal for every subject above, for observers outside the controller.
+    [[nodiscard]] SubjectLifetime get_subjects_lifetime() const {
+        return subjects_.get_subjects_lifetime();
+    }
     lv_subject_t* get_text_subject() {
         return &bed_drying_text_;
+    }
+    /// Whole minutes left in a running cycle, rounded up; -1 outside one.
+    lv_subject_t* get_remaining_min_subject() {
+        return &bed_drying_remaining_min_;
+    }
+    /// 0..100 through a running cycle; -1 outside one.
+    lv_subject_t* get_progress_pct_subject() {
+        return &bed_drying_progress_pct_;
     }
     /// The start modal's "I understand" checkbox; Start enables on 1.
     lv_subject_t* get_ack_subject() {
@@ -194,6 +209,8 @@ class BedDryingController {
     bool subjects_initialized_ = false;
     lv_subject_t bed_drying_state_{};
     lv_subject_t bed_drying_text_{};
+    lv_subject_t bed_drying_remaining_min_{};
+    lv_subject_t bed_drying_progress_pct_{};
     lv_subject_t bed_drying_ack_{};
     lv_subject_t bed_drying_chamber_assist_{};
     lv_subject_t bed_drying_chamber_text_{};
@@ -209,8 +226,8 @@ class BedDryingController {
     ObserverGuard unload_watch_;
     lv_timer_t* unload_timer_ = nullptr;
     bool unload_seen_busy_ = false;
-    std::function<void()> unload_done_;
-    std::function<void(bool)> unload_failed_;
+    helix::SharedCallback<void()> unload_done_;
+    helix::SharedCallback<void(bool)> unload_failed_;
 
     AsyncLifetimeGuard lifetime_;
 };

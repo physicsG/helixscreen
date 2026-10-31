@@ -79,7 +79,7 @@ TEST_CASE("resolve_chamber_light: fallback, and no devices at all", "[led][devic
 TEST_CASE("resolve_light_targets: each key shape", "[led][devices]") {
     const std::vector<std::string> sw = {"neopixel a", "neopixel b", "macro:Lamp"};
     CHECK(resolve_light_targets("", sw, "neopixel a") == std::vector<std::string>{"neopixel a"});
-    CHECK(resolve_light_targets(LIGHT_BUTTON_ALL, sw, "neopixel a") == sw);
+    CHECK(resolve_light_targets(kLightButtonAll, sw, "neopixel a") == sw);
     CHECK(resolve_light_targets("macro:Lamp", sw, "neopixel a") ==
           std::vector<std::string>{"macro:Lamp"});
 }
@@ -93,7 +93,7 @@ TEST_CASE("resolve_light_targets: an unknown id falls back to the chamber light"
 
 TEST_CASE("resolve_light_targets: nothing to drive", "[led][devices]") {
     CHECK(resolve_light_targets("", {}, "").empty());
-    CHECK(resolve_light_targets(LIGHT_BUTTON_ALL, {}, "").empty());
+    CHECK(resolve_light_targets(kLightButtonAll, {}, "").empty());
     CHECK(resolve_light_targets("neopixel gone", {}, "").empty());
 }
 
@@ -103,7 +103,7 @@ TEST_CASE("union_light_targets: union in first-seen order, chamber when no butto
     CHECK(union_light_targets({}, sw, "neopixel b") == std::vector<std::string>{"neopixel b"});
     CHECK(union_light_targets({"neopixel c", "", "neopixel c"}, sw, "neopixel b") ==
           std::vector<std::string>{"neopixel c", "neopixel b"});
-    CHECK(union_light_targets({"", LIGHT_BUTTON_ALL}, sw, "neopixel b") ==
+    CHECK(union_light_targets({"", kLightButtonAll}, sw, "neopixel b") ==
           std::vector<std::string>{"neopixel b", "neopixel a", "neopixel c"});
 }
 
@@ -132,14 +132,14 @@ TEST_CASE("plan_selection_migration: one device", "[led][migration]") {
 TEST_CASE("plan_selection_migration: every switchable device", "[led][migration]") {
     const auto m =
         plan_selection_migration({"neopixel b", "neopixel a"}, {"neopixel a", "neopixel b"});
-    CHECK(m.light_button == LIGHT_BUTTON_ALL);
+    CHECK(m.light_button == kLightButtonAll);
     CHECK(m.auto_state_strips == std::vector<std::string>{"neopixel b", "neopixel a"});
 }
 
 TEST_CASE("plan_selection_migration: an undiscovered extra id still means every device",
           "[led][migration]") {
     const auto m = plan_selection_migration({"neopixel a", "printer_led"}, {"neopixel a"});
-    CHECK(m.light_button == LIGHT_BUTTON_ALL);
+    CHECK(m.light_button == kLightButtonAll);
 }
 
 TEST_CASE("plan_selection_migration: anything else goes to auto-state only", "[led][migration]") {
@@ -161,10 +161,10 @@ TEST_CASE("toggle_target: add, remove, and the last one stays", "[led][settings]
 }
 
 TEST_CASE("migrate_color_presets", "[led][migration]") {
-    const std::vector<uint32_t> fresh(std::begin(DEFAULT_COLOR_PRESETS),
-                                      std::end(DEFAULT_COLOR_PRESETS));
-    const std::vector<uint32_t> old(std::begin(PRE_1_1_DEFAULT_COLOR_PRESETS),
-                                    std::end(PRE_1_1_DEFAULT_COLOR_PRESETS));
+    const std::vector<uint32_t> fresh(std::begin(kDefaultColorPresets),
+                                      std::end(kDefaultColorPresets));
+    const std::vector<uint32_t> old(std::begin(kPre11DefaultColorPresets),
+                                    std::end(kPre11DefaultColorPresets));
     CHECK(migrate_color_presets({}) == fresh);
     CHECK(migrate_color_presets(old) == fresh);
     auto reordered = old;

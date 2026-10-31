@@ -9,6 +9,7 @@
 #include "ui_wizard.h"
 #include "ui_wizard_helpers.h"
 
+#include "ams_state.h"
 #include "app_globals.h"
 #include "filament_sensor_manager.h"
 #include "i_moonraker_client.h"
@@ -60,11 +61,9 @@ WizardFilamentSensorSelectStep::~WizardFilamentSensorSelectStep() {
 // AMS Sensor Detection
 // ============================================================================
 
-bool WizardFilamentSensorSelectStep::is_ams_sensor(const std::string& name) {
-    // Delegate to shared implementation in PrinterHardware, passing the
-    // discovery so HH/AFC-managed sensors (extruder, toolhead,
-    // tool_start, <lane>_prep, ...) are excluded from the wizard list.
-    return PrinterHardware::is_ams_sensor(name, get_printer_state().get_discovery());
+bool WizardFilamentSensorSelectStep::is_standalone(const std::string& name) {
+    return is_standalone_filament_sensor(get_printer_state().get_discovery(), name,
+                                         helix::AmsState::instance().filament_hardware_absent());
 }
 
 void WizardFilamentSensorSelectStep::filter_standalone_sensors() {
@@ -74,7 +73,7 @@ void WizardFilamentSensorSelectStep::filter_standalone_sensors() {
     auto all_sensors = sensor_mgr.get_sensors();
 
     for (const auto& sensor : all_sensors) {
-        if (!is_ams_sensor(sensor.sensor_name)) {
+        if (is_standalone(sensor.sensor_name)) {
             standalone_sensors_.push_back(sensor);
             spdlog::debug("[{}] Found standalone sensor: {}", get_name(), sensor.sensor_name);
         } else {
@@ -345,27 +344,13 @@ size_t WizardFilamentSensorSelectStep::get_standalone_sensor_count() const {
     auto& sensor_mgr = helix::FilamentSensorManager::instance();
     auto all_sensors = sensor_mgr.get_sensors();
 
-    size_t count = 0;
-    for (const auto& sensor : all_sensors) {
-        if (!is_ams_sensor(sensor.sensor_name)) {
-            count++;
-        }
-    }
-    return count;
+    return static_cast<size_t>(
+        std::count_if(all_sensors.begin(), all_sensors.end(),
+                      [](const auto& sensor) { return is_standalone(sensor.sensor_name); }));
 }
 
 bool WizardFilamentSensorSelectStep::should_skip() const {
-    auto& sensor_mgr = helix::FilamentSensorManager::instance();
-    auto all_sensors = sensor_mgr.get_sensors();
-
-    // Count non-AMS sensors from the single source of truth
-    size_t standalone_count = 0;
-    for (const auto& sensor : all_sensors) {
-        if (!is_ams_sensor(sensor.sensor_name)) {
-            standalone_count++;
-        }
-    }
-
+    const size_t standalone_count = get_standalone_sensor_count();
     spdlog::debug("[{}] should_skip: {} standalone sensors", get_name(), standalone_count);
     return standalone_count < 2;
 }
@@ -376,11 +361,12 @@ void WizardFilamentSensorSelectStep::auto_configure_single_sensor() {
 
     // Find the single non-AMS sensor
     for (const auto& sensor : all_sensors) {
-        if (!is_ams_sensor(sensor.sensor_name)) {
+        if (is_standalone(sensor.sensor_name)) {
             spdlog::info("[{}] Auto-configuring single sensor '{}' as RUNOUT", get_name(),
                          sensor.sensor_name);
-            sensor_mgr.set_sensor_role(sensor.klipper_name, helix::FilamentSensorRole::RUNOUT);
-            sensor_mgr.save_config_to_file();
+            sensor_mgr.set_role(sensor.klipper_name,
+                                static_cast<uint8_t>(helix::FilamentSensorRole::RUNOUT));
+            sensor_mgr.save_settings();
             return;
         }
     }
@@ -404,7 +390,8 @@ void WizardFilamentSensorSelectStep::cleanup() {
         // Clear existing RUNOUT role assignments first
         for (const auto& sensor : standalone_sensors_) {
             if (sensor.role == helix::FilamentSensorRole::RUNOUT) {
-                sensor_mgr.set_sensor_role(sensor.klipper_name, helix::FilamentSensorRole::NONE);
+                sensor_mgr.set_role(sensor.klipper_name,
+                                    static_cast<uint8_t>(helix::FilamentSensorRole::NONE));
             }
         }
 
@@ -413,12 +400,13 @@ void WizardFilamentSensorSelectStep::cleanup() {
             get_klipper_name_for_index(lv_subject_get_int(&runout_sensor_selected_));
 
         if (!runout_name.empty()) {
-            sensor_mgr.set_sensor_role(runout_name, helix::FilamentSensorRole::RUNOUT);
+            sensor_mgr.set_role(runout_name,
+                                static_cast<uint8_t>(helix::FilamentSensorRole::RUNOUT));
             spdlog::info("[{}] Assigned RUNOUT role to: {}", get_name(), runout_name);
         }
 
         // Persist to disk
-        sensor_mgr.save_config_to_file();
+        sensor_mgr.save_settings();
     } else {
         spdlog::warn("[{}] Subjects not initialized, skipping role assignment", get_name());
     }

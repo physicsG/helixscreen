@@ -18,7 +18,8 @@
          4-tall column: it leaves the dryer stack 94px for 120px of controls,
          which centers its overflow and slices both the preset dropdown and the
          Start/Stop button (#1192). Wrapping to 2x2 halves the strip and buys
-         back the 26px the controls need. Set via style, not inline, because an
+         back the 26px the controls need. The lane chips' row costs the same
+         room at every breakpoint, so while it shows the list wraps there too. Set via style, not inline, because an
          inline attribute would override the bind (CRITICAL RULE #6).
          `layout` is spelled out in both: flex_flow alone sets FLEX_FLOW but not
          LAYOUT, and a container with a flow and no layout runs no layout at all
@@ -60,13 +61,59 @@
       <!-- ================================================================ -->
       <ui_card name="details_card"
                width="100%" flex_grow="1" style_radius="#border_radius" style_pad_all="#space_md" flex_flow="column"
-               style_pad_gap="#space_sm">
+               style_pad_gap="#space_xs">
 
         <!-- How much of the printer is inside this box. The header names the box the
              controls below command; this says which lanes that covers, which a view
              of one zone has no other way to show. -->
         <text_small name="zone_slots_label"
-                    width="100%" bind_text="ams_env_overlay_slots_text" style_text_color="#text_muted"/>
+                    width="100%" bind_text="ams_env_overlay_slots_text" style_text_color="#text_muted">
+          <bind_flag_if_not_eq subject="env_dry_gate_count" flag="hidden" ref_value="0"/>
+        </text_small>
+
+        <!-- Which lanes a drying start covers, on a dryer that heats lanes one by one.
+             It takes the lane line's place: the chips name the lanes too. Every chip
+             starts selected, which is the whole unit. Each chip is a full finger target
+             (#touch_target_min square); the room comes from the comfort list, which
+             wraps while the chips show, and at Micro from the comfort strip, which hides.
+             Each lane's part in a running cycle is on the zone tabs and the slot badges,
+             so the chips carry no state dot. Rotate turns the selected spools while they
+             dry. -->
+        <lv_obj name="dry_gate_row"
+                width="100%" height="content" flex_flow="row" style_flex_main_place="center"
+                style_flex_cross_place="center" style_flex_track_place="center" style_pad_all="0"
+                style_pad_gap="#space_md" scrollable="false" hidden="true">
+          <bind_flag_if_eq subject="env_dry_gate_count" flag="hidden" ref_value="0"/>
+          <!-- The label stands a label's distance (space_md) from the chips, which sit a
+               chip's distance (space_sm) from each other and from Rotate. -->
+          <text_small text="Dry" style_text_color="#text_muted"/>
+          <lv_obj name="dry_gate_controls"
+                  width="content" height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="0"
+                  style_pad_gap="#space_sm" scrollable="false">
+            <!-- Its own container, so the subject-bound repeat is the sole child. -->
+            <lv_obj name="dry_gate_chips"
+                    width="content" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm"
+                    scrollable="false">
+              <repeat count="env_dry_gate_count">
+                <zone_tab label_subject="env_dry_gate_label_${i}"
+                          active_subject="env_dry_gate_selected_${i}" tab_index="${i}"
+                          callback="on_env_dry_gate_clicked" selected_style="zone_tab_pill_selected"
+                          idle_style="zone_tab_outline_idle" content_selected_style="zone_tab_on_primary"
+                          radius="#border_radius" pad_ver="0" min_height="#touch_target_min"
+                          min_width="#touch_target_min"/>
+              </repeat>
+            </lv_obj>
+            <lv_obj name="dry_rotate_wrap"
+                    width="content" height="content" style_pad_all="0" scrollable="false" hidden="true">
+              <bind_flag_if_eq subject="env_dry_rotate_visible" flag="hidden" ref_value="0"/>
+              <zone_tab name="dry_rotate_chip"
+                        label_subject="env_dry_rotate_label" active_subject="env_dry_rotate_on"
+                        callback="on_env_dry_rotate_clicked" selected_style="zone_tab_pill_selected"
+                        idle_style="zone_tab_outline_idle" content_selected_style="zone_tab_on_primary"
+                        radius="#border_radius" pad_ver="0" min_height="#touch_target_min"/>
+            </lv_obj>
+          </lv_obj>
+        </lv_obj>
 
         <!-- Without this a queued box looks like a control that did nothing. -->
         <lv_obj name="queued_banner"
@@ -112,7 +159,11 @@
                     <bind_flag_if_eq subject="ams_env_overlay_drying_active" flag="hidden" ref_value="0"/>
                   </text_heading>
                 </lv_obj>
-                <text_small text="Temperature" style_text_color="#text_muted"/>
+                <text_small text="Temperature" style_text_color="#text_muted">
+                  <!-- At Micro and Tiny the readouts stack, and the caption under each one is
+                       the height the column does not have; the icon names the reading. -->
+                  <bind_flag_if cond="ui_breakpoint le 1" flag="hidden"/>
+                </text_small>
               </lv_obj>
 
               <!-- Humidity (only when a sensor is present) -->
@@ -123,10 +174,12 @@
                 <lv_obj width="content"
                         height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
                         style_pad_gap="#space_xs" scrollable="false">
-                  <icon src="water" size="lg" variant="primary"/>
+                  <humidity_drop name="humidity_drop" bind_value="ams_env_overlay_humidity" size="lg"/>
                   <text_heading bind_text="ams_env_overlay_humidity_text"/>
                 </lv_obj>
-                <text_small text="Humidity" style_text_color="#text_muted"/>
+                <text_small text="Humidity" style_text_color="#text_muted">
+                  <bind_flag_if cond="ui_breakpoint le 1" flag="hidden"/>
+                </text_small>
               </lv_obj>
             </lv_obj>
 
@@ -164,7 +217,7 @@
 
             <!-- Dryer Controls (visible when dryer supported) -->
             <lv_obj name="dryer_controls_section"
-                    width="100%" height="100%" style_pad_all="0" flex_flow="column" style_pad_gap="#space_md"
+                    width="100%" height="100%" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs"
                     style_flex_main_place="center" scrollable="false" hidden="true">
               <bind_flag_if_eq subject="ams_env_overlay_dryer_visible" flag="hidden" ref_value="0"/>
 
@@ -195,39 +248,34 @@
                     <event_cb trigger="clicked" callback="on_ams_env_duration_clicked"/>
                   </text_input>
                 </lv_obj>
+                <!-- Optional humidity target: the cycle also ends once the box reads at or
+                     below it. Only for a dryer that takes one; blank leaves the target to the
+                     printer's own default, which C++ shows as the placeholder when known. -->
+                <lv_obj name="humidity_target_column"
+                        width="1" height="content" flex_grow="1" style_pad_all="0" flex_flow="column"
+                        style_pad_gap="#space_xxs" scrollable="false" hidden="true">
+                  <bind_flag_if_eq subject="ams_env_overlay_humidity_target_visible" flag="hidden" ref_value="0"/>
+                  <text_small text="Target RH" style_text_color="#text_muted"/>
+                  <text_input name="humidity_target_input"
+                              width="100%" text="" placeholder_text="auto" placeholder_tag="auto" one_line="true"
+                              max_length="2">
+                    <event_cb trigger="clicked" callback="on_ams_env_humidity_target_clicked"/>
+                  </text_input>
+                </lv_obj>
               </lv_obj>
 
               <!-- Start/Stop button. Height is the responsive token, not a
                    fixed 44: this section is height="100%" and centers its
                    overflow, so 18 too-tall pixels at Micro get split evenly
                    and slice both the dropdown above and this button's own
-                   label (#1192). -->
+                   label (#1192). No vertical padding: the label centers
+                   itself, and at Micro the button is too short to fit it
+                   inside the default padding. -->
               <ui_button name="btn_start_stop"
-                         width="100%" height="#button_height" bind_text="ams_env_overlay_start_stop_text">
+                         width="100%" height="#button_height" style_pad_ver="0"
+                         bind_text="ams_env_overlay_start_stop_text">
                 <event_cb trigger="clicked" callback="on_ams_env_start_stop_clicked"/>
               </ui_button>
-
-              <!-- Humidity-controlled drying. Carries its OWN visibility rather
-                   than riding on ams_env_overlay_dryer_visible: a dryer is not
-                   necessarily an auto-dryer, and only the units that report the
-                   rule (and can actually be armed) should show the switch. The
-                   note spells out the thresholds because they are not editable
-                   here — a bare switch gives no clue what humidity it acts on. -->
-              <lv_obj name="auto_dry_section"
-                      width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs"
-                      scrollable="false" hidden="true">
-                <bind_flag_if_eq subject="ams_env_overlay_auto_dry_visible" flag="hidden" ref_value="0"/>
-                <lv_obj name="auto_dry_row"
-                        width="100%" height="content" style_pad_all="0" flex_flow="row"
-                        style_flex_main_place="space_between" style_flex_cross_place="center" scrollable="false">
-                  <text_body text="Auto-dry"/>
-                  <ui_switch name="auto_dry_toggle" size="small">
-                    <bind_state_if_eq subject="ams_env_overlay_auto_dry_on" state="checked" ref_value="1"/>
-                    <event_cb trigger="value_changed" callback="on_ams_env_auto_dry_toggled"/>
-                  </ui_switch>
-                </lv_obj>
-                <text_small bind_text="ams_env_overlay_auto_dry_text" style_text_color="#text_muted"/>
-              </lv_obj>
             </lv_obj>
 
             <!-- No Dryer / Storage Advice (visible when no dryer) -->
@@ -250,9 +298,12 @@
         <!-- humidity sensor is present (it needs humidity to compute).       -->
         <!-- ============================================================== -->
         <lv_obj name="comfort_strip"
-                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_md"
+                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
                 scrollable="false" hidden="true">
-          <bind_flag_if_not_eq subject="ams_env_overlay_humidity_visible" flag="hidden" ref_value="1"/>
+          <!-- At Micro the lane chips, a full finger target tall, take the strip's room;
+               the humidity readout above still shows. -->
+          <bind_flag_if cond="ams_env_overlay_humidity_visible ne 1 or (ui_breakpoint eq 0 and env_dry_gate_count gt 0)"
+                        flag="hidden"/>
 
           <divider_horizontal width="100%"/>
 
@@ -269,8 +320,8 @@
             <lv_obj width="content"
                     height="content" style_pad_all="0" style_flex_cross_place="start" style_pad_row="#space_xs"
                     style_pad_column="#space_md" scrollable="false">
-              <bind_style_if_eq name="comfort_list_micro" subject="ui_breakpoint" ref_value="0"/>
-              <bind_style_if_ge name="comfort_list_wide" subject="ui_breakpoint" ref_value="1"/>
+              <bind_style_if name="comfort_list_micro" cond="ui_breakpoint le 1 or env_dry_gate_count gt 0"/>
+              <bind_style_if name="comfort_list_wide" cond="ui_breakpoint ge 2 and env_dry_gate_count eq 0"/>
 
               <lv_obj name="comfort_row_0"
                       width="content" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"

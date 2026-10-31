@@ -15,10 +15,10 @@
 #include "async_lifetime_guard.h" // for helix::internal::on_main_thread()
 #include "esp_heap_caps.h"
 #include "lvgl.h"
-#include "miniz.h" // the ROM's streaming inflater
 #include "thumbnail_downscale.h"
 #include "thumbnail_png_stream.h"
 #include "thumbnail_slot_pool.h"
+#include "tinfl_inflate.h"
 
 #include <lvgl/src/misc/cache/instance/lv_image_cache.h> // lv_image_cache_drop()
 
@@ -148,31 +148,7 @@ class EspPsramThumbnail {
 
   private:
     /// The ROM's tinfl and PSRAM, for decode_png_thumbnail().
-    struct RomInflate {
-        using Decompressor = tinfl_decompressor;
-        static constexpr size_t WINDOW = TINFL_LZ_DICT_SIZE;
-        static void init(Decompressor* d) {
-            tinfl_init(d);
-        }
-        static int step(Decompressor* d, const uint8_t* in, size_t* in_size, uint8_t* window,
-                        uint8_t* next, size_t* out_size, bool more_input) {
-            return tinfl_decompress(d, in, in_size, window, next, out_size,
-                                    TINFL_FLAG_PARSE_ZLIB_HEADER |
-                                        (more_input ? TINFL_FLAG_HAS_MORE_INPUT : 0));
-        }
-        static void* alloc(size_t size) {
-            return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-        }
-        static void free(void* p) {
-            heap_caps_free(p);
-        }
-        // Not heap_caps_get_largest_free_block(): it walks every PSRAM block
-        // with interrupts masked for 20-30ms, far longer than the panel's
-        // bounce-buffer refill can wait, so every call glitches the screen.
-        static size_t free_bytes() {
-            return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-        }
-    };
+    using RomInflate = helix::TinflInflate<true>;
 
     EspPsramThumbnail(uint8_t* data, size_t size, helix::ThumbnailDims dims) : data_(data) {
         dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;

@@ -50,7 +50,7 @@ void bypass_spool_sync_from_state(BypassSpoolWidgets& w, bool show) {
         return;
     }
     if (auto ext = ams.get_external_spool_info()) {
-        bypass_spool_set_color(w, ext->color_rgb);
+        bypass_spool_set_filament(w, *ext);
         bypass_spool_set_has_spool(w, true);
         bypass_spool_set_material(w, ext->material.c_str());
     } else {
@@ -89,11 +89,11 @@ void bypass_spool_set_visible(BypassSpoolWidgets& w, bool visible) {
 }
 
 namespace {
-constexpr int32_t BYPASS_SPOOL_SIZE = 48;
-constexpr int32_t BOX_PAD = 4;
-constexpr int32_t BOX_SIZE = BYPASS_SPOOL_SIZE + BOX_PAD * 2;
-constexpr int32_t LABEL_GAP = 4;
-constexpr int32_t LABEL_HEIGHT = 16;
+constexpr int32_t kBypassSpoolSize = 48;
+constexpr int32_t kBoxPad = 4;
+constexpr int32_t kBoxSize = kBypassSpoolSize + kBoxPad * 2;
+constexpr int32_t kLabelGap = 4;
+constexpr int32_t kLabelHeight = 16;
 } // namespace
 
 BypassSpoolWidgets bypass_spool_create(lv_obj_t* parent, lv_event_cb_t on_click, void* user_data) {
@@ -103,7 +103,7 @@ BypassSpoolWidgets bypass_spool_create(lv_obj_t* parent, lv_event_cb_t on_click,
     }
 
     w.box = lv_obj_create(parent);
-    lv_obj_set_size(w.box, BOX_SIZE, BOX_SIZE);
+    lv_obj_set_size(w.box, kBoxSize, kBoxSize);
     lv_obj_set_style_pad_all(w.box, 0, 0);
     lv_obj_set_style_bg_opa(w.box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(w.box, theme_manager_get_color("card_bg"), 0);
@@ -112,13 +112,13 @@ BypassSpoolWidgets bypass_spool_create(lv_obj_t* parent, lv_event_cb_t on_click,
     lv_obj_remove_flag(w.box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(w.box, LV_OBJ_FLAG_FLOATING);
 
-    w.spool_canvas = ui_spool_canvas_create(w.box, BYPASS_SPOOL_SIZE);
+    w.spool_canvas = ui_spool_canvas_create(w.box, kBypassSpoolSize);
     if (!w.spool_canvas) {
         lv_obj_delete(w.box);
         w = {};
         return w;
     }
-    lv_obj_set_pos(w.spool_canvas, BOX_PAD, BOX_PAD);
+    lv_obj_set_pos(w.spool_canvas, kBoxPad, kBoxPad);
 
     if (on_click) {
         lv_obj_add_flag(w.box, LV_OBJ_FLAG_CLICKABLE);
@@ -162,6 +162,18 @@ void bypass_spool_set_color(BypassSpoolWidgets& w, uint32_t color_rgb) {
     w.cached_color_rgb = color_rgb;
     ui_spool_canvas_set_color(w.spool_canvas, lv_color_hex(color_rgb));
     ui_spool_canvas_redraw(w.spool_canvas);
+}
+
+void bypass_spool_set_filament(BypassSpoolWidgets& w, const SlotInfo& slot) {
+    if (!w.spool_canvas) {
+        return;
+    }
+    // The canvas dedups on its own render key. The plain-colour cache records
+    // the colour but not as painted, so a later plain colour always repaints
+    // over the split and finish.
+    w.color_painted = false;
+    w.cached_color_rgb = slot.color_rgb;
+    spool_canvas_set_filament(w.spool_canvas, slot);
 }
 
 void bypass_spool_set_has_spool(BypassSpoolWidgets& w, bool has_spool) {
@@ -208,19 +220,19 @@ void bypass_spool_set_position(BypassSpoolWidgets& w, int32_t cx, int32_t cy) {
         return;
     }
 
-    int32_t box_left = cx - BOX_SIZE / 2;
-    int32_t box_top = cy - BOX_SIZE / 2;
+    int32_t box_left = cx - kBoxSize / 2;
+    int32_t box_top = cy - kBoxSize / 2;
     lv_obj_set_pos(w.box, box_left, box_top);
 
     if (w.bypass_label) {
         lv_obj_set_pos(w.bypass_label, cx - w.cached_bypass_label_w / 2,
-                       box_top + BOX_SIZE + LABEL_GAP);
+                       box_top + kBoxSize + kLabelGap);
     }
     if (w.material_label) {
         // Material text changes — must measure each call.
         lv_obj_update_layout(w.material_label);
         int32_t mat_w = lv_obj_get_width(w.material_label);
-        lv_obj_set_pos(w.material_label, cx - mat_w / 2, box_top - LABEL_HEIGHT - LABEL_GAP);
+        lv_obj_set_pos(w.material_label, cx - mat_w / 2, box_top - kLabelHeight - kLabelGap);
     }
 }
 

@@ -12,9 +12,14 @@
 
 #include "ui_update_queue.h"
 
+#include "chamber_air_modes.h"
+#include "layer_pause.h"
+#include "lvgl/src/others/translation/lv_translation.h"
 #include "pa_calibration.h"
+#include "printer_fan_state.h"
 #include "sound_manager.h"
 #include "state/subject_macros.h"
+#include "stepper_resonance_calibration.h"
 #include "tool_offset_calibration.h"
 #include "webcam_selection.h"
 
@@ -30,7 +35,7 @@ struct CapabilityDef {
     int initial;
 };
 
-constexpr CapabilityDef CAPABILITY_DEFS[] = {
+constexpr CapabilityDef kCapabilityDefs[] = {
     {Capability::HasQgl, "printer_has_qgl", 0},
     {Capability::HasZTilt, "printer_has_z_tilt", 0},
     {Capability::HasBedMesh, "printer_has_bed_mesh", 0},
@@ -54,25 +59,37 @@ constexpr CapabilityDef CAPABILITY_DEFS[] = {
     {Capability::HasChamberHeater, "printer_has_chamber_heater", 0},
     {Capability::HasChamberHeaterDiagnostics, "printer_has_chamber_heater_diagnostics", 0},
     {Capability::HasChamberFilterFan, "printer_has_chamber_filter_fan", 0},
+    {Capability::HasChamberTargetRoute, "printer_has_chamber_target_route", 0},
     {Capability::HasChamberElementTemp, "printer_has_chamber_element_temp", 0},
     {Capability::HasChamberDryer, "printer_has_chamber_dryer", 0},
+    {Capability::HasChamberAirRecirculate, "printer_has_chamber_air_recirculate", 0},
+    {Capability::HasChamberAirExhaust, "printer_has_chamber_air_exhaust", 0},
+    {Capability::HasChamberAirOff, "printer_has_chamber_air_off", 0},
     {Capability::HasChamber, "printer_has_chamber", 0},
     {Capability::HasScrewsTilt, "printer_has_screws_tilt", 0},
     {Capability::HasExcludeObject, "printer_has_exclude_object", 0},
+    {Capability::HasLayerPause, "printer_has_layer_pause", 0},
     {Capability::HasToolOffsetCal, "printer_has_tool_offset_cal", 0},
     {Capability::HideManualZCalibration, "hide_manual_z_calibration", 0},
     {Capability::HasPaCal, "printer_has_pa_cal", 0},
+    {Capability::HasStepperResonanceCal, "printer_has_stepper_resonance_cal", 0},
     {Capability::HasWebcam, "printer_has_webcam", 0},
     {Capability::WebcamCount, "webcam_count", 0},
     {Capability::HasExtraFans, "printer_has_extra_fans", 0},
     {Capability::PowerDeviceCount, "power_device_count", 0},
     {Capability::SensorCount, "sensor_count", 0},
+    {Capability::HasShakeTune, "printer_has_shaketune", 0},
+    {Capability::HasHeatSoak, "printer_has_heat_soak", 0},
+    {Capability::HasFanFeedback, "printer_has_fan_feedback", 0},
+    {Capability::HasLedEffects, "printer_has_led_effects", 0},
+    {Capability::EnclosureTopFitted, "printer_enclosure_top_fitted", 0},
+    {Capability::HardwareGeneration, "printer_hardware_generation", 0},
 };
-static_assert(std::size(CAPABILITY_DEFS) == CAPABILITY_COUNT);
+static_assert(std::size(kCapabilityDefs) == kCapabilityCount);
 
 constexpr bool defs_in_enum_order() {
-    for (size_t i = 0; i < CAPABILITY_COUNT; ++i) {
-        if (static_cast<size_t>(CAPABILITY_DEFS[i].cap) != i) {
+    for (size_t i = 0; i < kCapabilityCount; ++i) {
+        if (static_cast<size_t>(kCapabilityDefs[i].cap) != i) {
             return false;
         }
     }
@@ -91,7 +108,7 @@ void PrinterCapabilitiesState::init_subjects(bool register_xml) {
     spdlog::trace("[PrinterCapabilitiesState] Initializing subjects (register_xml={})",
                   register_xml);
 
-    for (const auto& def : CAPABILITY_DEFS) {
+    for (const auto& def : kCapabilityDefs) {
         lv_subject_t* s = subject(def.cap);
         lv_subject_init_int(s, def.initial);
         subjects_.register_subject(s, register_xml ? def.name : nullptr);
@@ -100,8 +117,19 @@ void PrinterCapabilitiesState::init_subjects(bool register_xml) {
         }
     }
 
+    lv_subject_init_string(&tool_offset_cal_description_, tool_offset_cal_description_buf_, nullptr,
+                           sizeof(tool_offset_cal_description_buf_), "");
+    constexpr const char* kToolOffsetCalDescription = "printer_tool_offset_cal_description";
+    subjects_.register_subject(&tool_offset_cal_description_,
+                               register_xml ? kToolOffsetCalDescription : nullptr);
+    if (register_xml) {
+        helix::xml::register_subject_in_current_scope(kToolOffsetCalDescription,
+                                                      &tool_offset_cal_description_);
+    }
+
     subjects_initialized_ = true;
     apply_pending_capability_values();
+    render_tool_offset_cal_description();
     spdlog::trace("[PrinterCapabilitiesState] Subjects initialized successfully");
 }
 
@@ -116,7 +144,7 @@ void PrinterCapabilitiesState::set_capability(Capability cap, int value) {
 int PrinterCapabilitiesState::capability_value(Capability cap) const {
     const size_t i = static_cast<size_t>(cap);
     if (!subjects_initialized_) {
-        return pending_capability_values_[i].value_or(CAPABILITY_DEFS[i].initial);
+        return pending_capability_values_[i].value_or(kCapabilityDefs[i].initial);
     }
     return lv_subject_get_int(subject(cap));
 }
@@ -125,7 +153,7 @@ void PrinterCapabilitiesState::apply_pending_capability_values() {
     // Applied AFTER subjects_initialized_ flips, so these go straight through to
     // the subjects. Observers attach later than init_subjects(), so they see the
     // real answer on their first callback rather than the hardcoded default.
-    for (size_t i = 0; i < CAPABILITY_COUNT; ++i) {
+    for (size_t i = 0; i < kCapabilityCount; ++i) {
         if (pending_capability_values_[i]) {
             lv_subject_set_int(&capability_subjects_[i], *pending_capability_values_[i]);
             pending_capability_values_[i].reset();
@@ -163,6 +191,7 @@ void PrinterCapabilitiesState::set_hardware(const PrinterDiscovery& hardware,
     set_capability(Capability::HasZTilt, overrides.has_z_tilt() ? 1 : 0);
     set_capability(Capability::HasBedMesh, overrides.has_bed_mesh() ? 1 : 0);
     set_capability(Capability::HasNozzleClean, overrides.has_nozzle_clean() ? 1 : 0);
+    set_capability(Capability::HasHeatSoak, overrides.has_heat_soak() ? 1 : 0);
 
     // Hardware capabilities (no user override support yet - set directly from detection)
     spdlog::debug("[PrinterCapabilitiesState] has_probe={} has_led={} has_accel={}",
@@ -171,6 +200,15 @@ void PrinterCapabilitiesState::set_hardware(const PrinterDiscovery& hardware,
     set_capability(Capability::HasHeaterBed, hardware.has_heater_bed() ? 1 : 0);
     set_capability(Capability::HasLed, hardware.has_led() ? 1 : 0);
     set_capability(Capability::HasAccelerometer, hardware.has_accelerometer() ? 1 : 0);
+    set_capability(Capability::HasShakeTune, hardware.has_klippain_shaketune() ? 1 : 0);
+    set_capability(Capability::HasFanFeedback, hardware.has_fan_feedback() ? 1 : 0);
+    set_capability(Capability::HasLedEffects, hardware.has_led_effects() ? 1 : 0);
+    // A new printer's report arrives in its first status frame, which discovery
+    // dispatches after this, so the previous printer's answer never carries over.
+    set_capability(Capability::EnclosureTopFitted, 0);
+
+    set_capability(Capability::HasExtraFans,
+                   PrinterFanState::count_extra_controllable_fans(hardware.fans()) > 0 ? 1 : 0);
 
     // Install M300 (Klipper gcode beeper) backend now that we know whether
     // the printer answers M300 — a beeper output_pin or an M300 macro in the
@@ -224,17 +262,33 @@ void PrinterCapabilitiesState::set_hardware(const PrinterDiscovery& hardware,
     set_capability(Capability::HasChamber,
                    (hardware.has_chamber_sensor() || hardware.has_chamber_heater()) ? 1 : 0);
 
+    // Chamber air modes: helix::chamber_air owns which printers offer which.
+    using helix::chamber_air::AirMode;
+    set_capability(Capability::HasChamberAirRecirculate,
+                   helix::chamber_air::offers(hardware, AirMode::Recirculate) ? 1 : 0);
+    set_capability(Capability::HasChamberAirExhaust,
+                   helix::chamber_air::offers(hardware, AirMode::Exhaust) ? 1 : 0);
+    set_capability(Capability::HasChamberAirOff,
+                   helix::chamber_air::offers(hardware, AirMode::Off) ? 1 : 0);
+
     // Screws tilt adjust capability
     set_capability(Capability::HasScrewsTilt, hardware.has_screws_tilt() ? 1 : 0);
     set_capability(Capability::HasExcludeObject, hardware.has_exclude_object() ? 1 : 0);
+    set_capability(Capability::HasLayerPause, helix::layer_pause::supported(hardware) ? 1 : 0);
 
     // Automatic tool offset calibration: the module owns what "can" means.
-    set_capability(Capability::HasToolOffsetCal,
-                   helix::tool_offset_calibration::supported(hardware) ? 1 : 0);
+    const auto tool_offset_procedure = helix::tool_offset_calibration::resolve_procedure(hardware);
+    set_capability(
+        Capability::HasToolOffsetCal,
+        tool_offset_procedure.kind != helix::tool_offset_calibration::ProcedureKind::None ? 1 : 0);
+    tool_offset_cal_description_key_ = tool_offset_procedure.entry_description;
+    render_tool_offset_cal_description();
 
     // Automatic pressure advance calibration. Which firmwares can measure it,
     // and how, belongs to helix::pacal - this only asks whether one matched.
     set_capability(Capability::HasPaCal, helix::pacal::is_supported(hardware) ? 1 : 0);
+    set_capability(Capability::HasStepperResonanceCal,
+                   helix::stepper_resonance_cal::resolve(hardware).present() ? 1 : 0);
 
     // Spoolman requires async check - default to 0, updated separately via set_spoolman_available()
 
@@ -245,6 +299,24 @@ void PrinterCapabilitiesState::set_hardware(const PrinterDiscovery& hardware,
                   hardware.has_firmware_retraction(), hardware.has_chamber_sensor());
     spdlog::debug("[PrinterCapabilitiesState] Hardware set (with overrides): {}",
                   overrides.summary());
+    bump_hardware_generation();
+}
+
+void PrinterCapabilitiesState::render_tool_offset_cal_description() {
+    if (!subjects_initialized_) {
+        return;
+    }
+    const char* key = tool_offset_cal_description_key_;
+    lv_subject_copy_string(&tool_offset_cal_description_, key[0] != '\0' ? lv_tr(key) : "");
+}
+
+void PrinterCapabilitiesState::on_language_changed() {
+    render_tool_offset_cal_description();
+}
+
+void PrinterCapabilitiesState::bump_hardware_generation() {
+    set_capability(Capability::HardwareGeneration,
+                   capability_value(Capability::HardwareGeneration) + 1);
 }
 
 void PrinterCapabilitiesState::set_sound_backend_available(bool available) {
@@ -370,6 +442,10 @@ void PrinterCapabilitiesState::set_bed_drying(bool enclosed, bool can_bed_dry) {
     }
 }
 
+void PrinterCapabilitiesState::set_enclosure_top_fitted(bool fitted) {
+    set_capability(Capability::EnclosureTopFitted, fitted ? 1 : 0);
+}
+
 void PrinterCapabilitiesState::set_has_chamber_sensor(bool available) {
     set_capability(Capability::HasChamberSensor, available ? 1 : 0);
     update_has_chamber();
@@ -388,6 +464,10 @@ void PrinterCapabilitiesState::set_has_chamber_heater_diagnostics(bool available
 
 void PrinterCapabilitiesState::set_has_chamber_filter_fan(bool available) {
     set_capability(Capability::HasChamberFilterFan, available ? 1 : 0);
+}
+
+void PrinterCapabilitiesState::set_has_chamber_target_route(bool available) {
+    set_capability(Capability::HasChamberTargetRoute, available ? 1 : 0);
 }
 
 void PrinterCapabilitiesState::set_has_chamber_element_temp(bool available) {

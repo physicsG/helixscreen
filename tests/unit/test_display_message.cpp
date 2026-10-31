@@ -265,9 +265,9 @@ enum class Subscription { DiscoveryReplay, Refresh };
 void apply_subscription(PrinterState& state, const json& status, Subscription kind) {
     json notification = {{"method", "notify_status_update"},
                          {"params", json::array({status, 0.0})},
-                         {WHOLE_OBJECTS_MARKER, true}};
+                         {kWholeObjectsMarker, true}};
     if (kind == Subscription::DiscoveryReplay) {
-        notification[CACHED_SNAPSHOT_MARKER] = true;
+        notification[kCachedSnapshotMarker] = true;
     }
     auto frame = parse_status_notification(notification);
     REQUIRE(frame);

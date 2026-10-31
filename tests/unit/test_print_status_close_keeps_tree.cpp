@@ -124,7 +124,7 @@ class PrintStatusCloseFixture : public LVGLUITestFixture {
         DisplaySettingsManager::instance().set_animations_enabled(false);
 
         home_widget_ = lv_obj_create(test_screen());
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = home_widget_;
         NavigationManager::instance().set_panels(panels);
 
@@ -272,7 +272,7 @@ TEST_CASE_METHOD(PrintStatusCloseFixture,
     lv_obj_t* viewer = PrintStatusPanelTestAccess::gcode_viewer(panel());
     REQUIRE(viewer != nullptr);
     // A print on screen has its viewer rendering.
-    ui_gcode_viewer_set_paused(viewer, false);
+    helix::ui::gcode_viewer_set_paused(viewer, false);
 
     NavigationManagerTestAccess::switch_to_panel(NavigationManager::instance(), PanelId::Home);
     settle();
@@ -282,7 +282,7 @@ TEST_CASE_METHOD(PrintStatusCloseFixture,
     // A hidden viewer left rendering stalls its 2D catch-up, and the stall
     // watchdog then reports a failed preview load on whatever screen is showing.
     CHECK_FALSE(PrintStatusPanelTestAccess::is_active(panel()));
-    CHECK(ui_gcode_viewer_is_paused(viewer));
+    CHECK(helix::ui::gcode_viewer_is_paused(viewer));
 }
 
 TEST_CASE_METHOD(PrintStatusCloseFixture, "A connection-loss close decides like any other close",
@@ -472,4 +472,57 @@ TEST_CASE_METHOD(PrintStatusCloseFixture,
     CAPTURE(expected);
     CHECK(capture.count_containing(expected) == 1);
     CHECK(capture.count_containing("[warning] [PrintStatusPanel] Print status tree #") == 0);
+}
+
+TEST_CASE_METHOD(PrintStatusCloseFixture,
+                 "Pushing print status with the exclude map opens the map once the panel is active",
+                 "[print_status][exclude]") {
+    set_wire_state(PrintJobState::PRINTING);
+
+    REQUIRE(PrintStatusPanel::push_overlay_with_exclude_map(test_screen()));
+    settle();
+    lv_obj_t* tree = PrintStatusPanel::get_cached_overlay();
+    REQUIRE(tree != nullptr);
+    REQUIRE(in_stack(tree));
+    CHECK(PrintStatusPanelTestAccess::is_active(panel()));
+    CHECK(PrintStatusPanelTestAccess::exclude_open(panel()));
+}
+
+TEST_CASE_METHOD(PrintStatusCloseFixture, "A plain print status push leaves the exclude map closed",
+                 "[print_status][exclude]") {
+    set_wire_state(PrintJobState::PRINTING);
+
+    lv_obj_t* tree = open_print_status();
+    settle();
+    CHECK(PrintStatusPanelTestAccess::is_active(panel()));
+    CHECK_FALSE(PrintStatusPanelTestAccess::exclude_open(panel()));
+    close_print_status(tree);
+}
+
+TEST_CASE_METHOD(PrintStatusCloseFixture,
+                 "A refused exclude-map push does not open the map on a later plain push",
+                 "[print_status][exclude]") {
+    set_wire_state(PrintJobState::PRINTING);
+
+    CHECK_FALSE(PrintStatusPanel::push_overlay_with_exclude_map(nullptr));
+    open_print_status();
+    settle();
+    CHECK_FALSE(PrintStatusPanelTestAccess::exclude_open(panel()));
+}
+
+TEST_CASE_METHOD(PrintStatusCloseFixture,
+                 "An exclude-map request does not outlive its push when the tree is destroyed",
+                 "[print_status][exclude]") {
+    set_wire_state(PrintJobState::PRINTING);
+
+    // Armed by a push, then the tree goes before the panel ever activates for it.
+    REQUIRE(PrintStatusPanel::push_overlay_with_exclude_map(test_screen()));
+    PrintStatusPanel::destroy_cached_overlay(
+        helix::ui::PrintStatusTreeDestroyCause::PanelRegistryTeardown);
+    settle();
+
+    open_print_status();
+    settle();
+    CHECK(PrintStatusPanelTestAccess::is_active(panel()));
+    CHECK_FALSE(PrintStatusPanelTestAccess::exclude_open(panel()));
 }

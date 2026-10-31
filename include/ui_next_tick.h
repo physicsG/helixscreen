@@ -4,6 +4,7 @@
 #pragma once
 
 #include "async_lifetime_guard.h"
+#include "helix_callback.h"
 #include "lvgl/lvgl.h"
 
 #include <functional>
@@ -23,11 +24,12 @@ namespace helix::ui {
 ///
 /// Main thread only. AsyncLifetimeGuard::defer() posts to the UpdateQueue
 /// instead; this runs from the LVGL timer list.
-inline void run_next_tick(std::function<void()> work) {
-    auto* ctx = new std::function<void()>(std::move(work));
+inline void run_next_tick(helix::Callback<void()> work) {
+    auto* ctx = new helix::Callback<void()>(std::move(work));
     lv_async_call(
         [](void* data) {
-            std::unique_ptr<std::function<void()>> fn(static_cast<std::function<void()>*>(data));
+            std::unique_ptr<helix::Callback<void()>> fn(
+                static_cast<helix::Callback<void()>*>(data));
             (*fn)();
         },
         ctx);
@@ -35,7 +37,7 @@ inline void run_next_tick(std::function<void()> work) {
 
 /// Token form: skipped when @p token has expired by then, so an owner
 /// destroyed or invalidated first cancels it.
-inline void run_next_tick(helix::LifetimeToken token, std::function<void()> work) {
+inline void run_next_tick(helix::LifetimeToken token, helix::Callback<void()> work) {
     run_next_tick([tok = std::move(token), w = std::move(work)]() {
         if (!tok.expired()) {
             w();

@@ -1,0 +1,17 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "bed_temp": 60,
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "duration_sec": 600,
+  "event": "print_outcome",
+  "filament_type": "PLA",
+  "filament_used_mm": 300.0,
+  "nozzle_temp": 200,
+  "outcome": "completed",
+  "phases_completed": 5,
+  "schema_version": 3,
+  "timestamp": "<timestamp>"
+}

@@ -107,7 +107,11 @@ void MacrosPanel::register_callbacks() {
                  self.handle_row_clicked(self.item_in_slot(static_cast<size_t>(*i)));
          }},
         {"on_macro_card_long_press",
-         [](lv_event_t*) { get_global_macros_panel().handle_long_press(); }},
+         [](lv_event_t* e) {
+             // A hold that enters edit mode is not also a tap that runs the macro.
+             if (get_global_macros_panel().handle_long_press())
+                 helix::ui::end_press(e);
+         }},
         {"on_macro_defaults_clicked",
          [](lv_event_t* e) {
              auto& self = get_global_macros_panel();
@@ -262,7 +266,7 @@ void MacrosPanel::on_ui_destroyed() {
 // ============================================================================
 
 bool MacrosPanel::refresh_macros() {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         // No API (early boot, or a unit test that pre-set all_macros_). Leave
         // the current list intact rather than clobbering it to empty.
@@ -311,7 +315,7 @@ helix::macros::RowValues MacrosPanel::row_values(size_t item) const {
     return helix::macros::compute_row_values(
         edit_mode_, pending_hidden_.count(macro) > 0, !cached.description.empty(),
         cached.knowledge == helix::MacroParamKnowledge::KNOWN_NO_PARAMS,
-        cached.knowledge == helix::MacroParamKnowledge::KNOWN_PARAMS);
+        helix::macro_takes_saved_defaults(cached.knowledge));
 }
 
 void MacrosPanel::fill_slot(size_t slot, size_t item) {
@@ -396,7 +400,7 @@ void MacrosPanel::layout_rows() {
         const int viewport = lv_obj_get_content_height(scroll_container_);
         const size_t needed =
             std::min(n, static_cast<size_t>((viewport + max_h + gap) / std::max(1, min_h + gap) +
-                                            1 + 2 * BUFFER_ROWS));
+                                            1 + 2 * kBufferRows));
         if (needed > slots_.size()) {
             grow_slots(needed);
         }
@@ -419,7 +423,7 @@ void MacrosPanel::update_visible(bool refill) {
     }
     const auto w = helix::ui::compute_window(lv_obj_get_scroll_y(scroll_container_),
                                              lv_obj_get_content_height(scroll_container_),
-                                             row_tops_, BUFFER_ROWS);
+                                             row_tops_, kBufferRows);
     if (!refill && w.first == shown_first_ && w.last == shown_last_) {
         return;
     }
@@ -498,7 +502,7 @@ std::string MacrosPanel::prettify_macro_name(const std::string& name) {
 // ============================================================================
 
 void MacrosPanel::fetch_params_and_execute(const std::string& macro_name) {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] No IMoonrakerAPI available - cannot fetch params", get_name());
         return;
@@ -607,13 +611,13 @@ void MacrosPanel::fetch_params_and_run(const std::string& macro_name) {
     if (decision.action == helix::MacroRunAction::Prompt) {
         param_modal_.show_for_macro(screen, macro_name, cached.params, on_result, decision.params);
     } else {
-        param_modal_.show_for_unknown_params(screen, macro_name, on_result);
+        param_modal_.show_for_unknown_params(screen, macro_name, on_result, decision.params);
     }
 }
 
 void MacrosPanel::execute_with_params(const std::string& macro_name,
                                       const helix::MacroParamResult& result) {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     helix::execute_macro_gcode(api, macro_name, result, "[MacrosPanel]",
                                get_printer_state().get_discovery());
 }
@@ -633,9 +637,9 @@ void MacrosPanel::handle_row_clicked(size_t i) {
     }
 }
 
-void MacrosPanel::handle_long_press() {
+bool MacrosPanel::handle_long_press() {
     if (edit_mode_) {
-        return;
+        return false;
     }
     // Minimal scroll-suppression: LVGL fires LONG_PRESSED on hold duration
     // alone, so a hold during a scroll drag would falsely enter edit mode.
@@ -644,14 +648,10 @@ void MacrosPanel::handle_long_press() {
     // guards arc/slider drags - not needed here).
     lv_indev_t* indev = lv_indev_active();
     if (indev && lv_indev_get_scroll_obj(indev)) {
-        return;
-    }
-    // Cancel the in-progress press so the row's click (run macro) does not
-    // fire on release now that we're switching into edit mode.
-    if (indev) {
-        lv_indev_reset(indev, nullptr);
+        return false;
     }
     enter_edit_mode();
+    return true;
 }
 
 void MacrosPanel::handle_defaults_clicked(size_t i) {
@@ -661,11 +661,10 @@ void MacrosPanel::handle_defaults_clicked(size_t i) {
     const std::string& macro = displayed_[i];
 
     auto cached = helix::MacroParamCache::instance().get(macro);
-    if (cached.knowledge != helix::MacroParamKnowledge::KNOWN_PARAMS) {
-        // No declared parameter list to edit. The button is hidden for these
-        // rows; this is the belt for a stale row index after a rebuild.
-        spdlog::debug("[{}] No saved-defaults editor for '{}' (knowledge != KNOWN_PARAMS)",
-                      get_name(), macro);
+    if (!helix::macro_takes_saved_defaults(cached.knowledge)) {
+        // The macro takes no parameters. The button is hidden for these rows;
+        // this is the belt for a stale row index after a rebuild.
+        spdlog::debug("[{}] No saved-defaults editor for '{}' (no parameters)", get_name(), macro);
         return;
     }
 

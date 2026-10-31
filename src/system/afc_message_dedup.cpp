@@ -51,10 +51,10 @@ void AfcMessageDedup::init(const std::string& config_dir) {
         // file_size from stat: a path that is not a readable regular file
         // reports here rather than as an empty parse.
         const auto size = tio::file_size(path);
-        if (size && *size > MAX_SEED_BYTES) {
+        if (size && *size > kMaxSeedBytes) {
             spdlog::warn("[AfcMessageDedup] Seed file {} is {} bytes, past the {}-byte "
                          "cap; ignoring it",
-                         path, *size, MAX_SEED_BYTES);
+                         path, *size, kMaxSeedBytes);
             return;
         }
         if (!size) {

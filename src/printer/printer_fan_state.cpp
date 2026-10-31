@@ -12,11 +12,14 @@
 
 #include "config.h"
 #include "device_display_name.h"
+#include "fan_gcode.h"
+#include "hardware_object_table.h"
 #include "hardware_role_registry.h"
 #include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "state/subject_macros.h"
 #include "text_io.h"
+#include "translation_loader.h"
 #include "unit_conversions.h"
 
 #include <spdlog/spdlog.h>
@@ -24,6 +27,49 @@
 #include <algorithm>
 
 namespace helix {
+
+const char* fan_role_label(FanRole role, FanLabelLength length) {
+    struct Spellings {
+        const char* chip;
+        const char* word;
+        const char* full;
+    };
+    static constexpr Spellings kRoles[] = {
+        {TR_NOOP("Part"), TR_NOOP("Part"), TR_NOOP("Part Fan")},
+        {TR_NOOP("HE"), TR_NOOP("Hotend"), TR_NOOP("Hotend Fan")},
+        {TR_NOOP("Chamber"), TR_NOOP("Chamber"), TR_NOOP("Chamber Fan")},
+        {TR_NOOP("Exhaust"), TR_NOOP("Exhaust"), TR_NOOP("Exhaust Fan")},
+        {TR_NOOP("Aux"), TR_NOOP("Aux"), TR_NOOP("Aux Fan")},
+    };
+    const Spellings& s = kRoles[static_cast<int>(role)];
+    switch (length) {
+    case FanLabelLength::Chip:
+        return s.chip;
+    case FanLabelLength::Word:
+        return s.word;
+    case FanLabelLength::Full:
+        return s.full;
+    }
+    return s.full;
+}
+
+const char* fan_type_label(FanType type) {
+    switch (type) {
+    case FanType::PART_COOLING:
+        return fan_role_label(FanRole::Part, FanLabelLength::Chip);
+    case FanType::HEATER_FAN:
+        return fan_role_label(FanRole::Hotend, FanLabelLength::Chip);
+    case FanType::CONTROLLER_FAN:
+        return TR_NOOP("Controller");
+    case FanType::TEMPERATURE_FAN:
+        return TR_NOOP("Temp");
+    case FanType::GENERIC_FAN:
+        return TR_NOOP("Generic");
+    case FanType::OUTPUT_PIN_FAN:
+        return TR_NOOP("Output Pin");
+    }
+    return TR_NOOP("Fan");
+}
 
 FanRoleConfig FanRoleConfig::from_config(Config* config,
                                          const std::vector<std::string>& discovered_fans) {
@@ -127,9 +173,11 @@ void PrinterFanState::update_from_status(const nlohmann::json& status) {
     // Check for other fan types in the status update
     // Moonraker sends fan objects as top-level keys: "heater_fan hotend_fan", "fan_generic xyz"
     for (const auto& [key, value] : status.items()) {
-        // Skip non-fan objects
-        if (key.rfind("heater_fan ", 0) == 0 || key.rfind("fan_generic ", 0) == 0 ||
-            key.rfind("controller_fan ", 0) == 0 || key.rfind("temperature_fan ", 0) == 0) {
+        const hw::ObjectKind kind = hw::classify_object(key).kind;
+
+        // Fan objects other than the bare part fan and output_pin fans report "speed"
+        if (hw::is_fan(kind) && kind != hw::ObjectKind::Fan &&
+            kind != hw::ObjectKind::OutputPinFan) {
             if (value.is_object() && value.contains("speed") && value["speed"].is_number()) {
                 double speed = value["speed"].get<double>();
                 update_fan_speed(key, speed);
@@ -145,7 +193,7 @@ void PrinterFanState::update_from_status(const nlohmann::json& status) {
 
         // Handle output_pin fan objects (Creality-style)
         // These report {"value": 0.0-1.0} instead of {"speed": 0.0-1.0}
-        if (key.rfind("output_pin ", 0) == 0) {
+        if (kind == hw::ObjectKind::OutputPinFan) {
             if (value.is_object() && value.contains("value") && value["value"].is_number()) {
                 double speed = value["value"].get<double>();
                 update_fan_speed(key, speed);
@@ -175,27 +223,43 @@ void PrinterFanState::update_from_status(const nlohmann::json& status) {
 }
 
 FanType PrinterFanState::classify_fan_type(const std::string& object_name) const {
+    return classify_fan_type(object_name, roles_.part_fan);
+}
+
+int PrinterFanState::count_extra_controllable_fans(const std::vector<std::string>& fan_objects,
+                                                   const std::string& configured_part_fan) {
+    int count = 0;
+    for (const auto& name : fan_objects) {
+        const FanType type = classify_fan_type(name, configured_part_fan);
+        if (type != FanType::PART_COOLING && is_fan_controllable(type)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+FanType PrinterFanState::classify_fan_type(const std::string& object_name,
+                                           const std::string& configured_part_fan) {
     if (object_name == "fan") {
         return FanType::PART_COOLING;
     }
     // Check if this fan is the wizard-configured part cooling fan
-    if (!roles_.part_fan.empty() && object_name == roles_.part_fan) {
+    if (!configured_part_fan.empty() && object_name == configured_part_fan) {
         return FanType::PART_COOLING;
     }
-    if (object_name.rfind("heater_fan ", 0) == 0) {
+    const auto cls = hw::classify_object(object_name);
+    switch (cls.kind) {
+    case hw::ObjectKind::HeaterFan:
         return FanType::HEATER_FAN;
-    } else if (object_name.rfind("controller_fan ", 0) == 0) {
+    case hw::ObjectKind::ControllerFan:
         return FanType::CONTROLLER_FAN;
-    } else if (object_name.rfind("temperature_fan ", 0) == 0) {
+    case hw::ObjectKind::TemperatureFan:
         return FanType::TEMPERATURE_FAN;
-    } else if (object_name.rfind("output_pin ", 0) == 0) {
-        // Check if the short name starts with "fan" (e.g., "output_pin fan0")
-        std::string short_name = object_name.substr(11);
-        if (short_name.rfind("fan", 0) == 0) {
-            return FanType::OUTPUT_PIN_FAN;
-        }
-        return FanType::GENERIC_FAN;
-    } else {
+    case hw::ObjectKind::OutputPinFan:
+        // A hotend-area pin is driven with the heater: shown like a heater_fan, never commanded.
+        return output_pin_fan_is_firmware_driven(cls.instance) ? FanType::HEATER_FAN
+                                                               : FanType::OUTPUT_PIN_FAN;
+    default:
         return FanType::GENERIC_FAN;
     }
 }
@@ -214,6 +278,23 @@ PrimaryFans PrinterFanState::classify_primary_fans() const {
 
     out.part = resolve_part_fan(out.part);
     out.aux = resolve_aux_fan(out.part, out.hotend);
+    return out;
+}
+
+PrimaryFanSlots PrinterFanState::possible_primary_fan_slots() const {
+    PrimaryFanSlots out;
+    bool part_cooling = false;
+    int commandable = 0, aux = 0;
+    for (const auto& fan : fans_) {
+        part_cooling |= fan.type == FanType::PART_COOLING;
+        out.hotend |= fan.type == FanType::HEATER_FAN;
+        commandable += fan.type == FanType::GENERIC_FAN || fan.type == FanType::OUTPUT_PIN_FAN;
+        aux += is_aux_fan(fan.type);
+    }
+    // resolve_part_fan() takes the configured part fan or a commandable one.
+    out.part = part_cooling || commandable > 0;
+    // Without a part cooling fan, a commandable fan always holds the part slot.
+    out.aux = aux - (!part_cooling && commandable > 0 ? 1 : 0) > 0;
     return out;
 }
 
@@ -395,20 +476,16 @@ void PrinterFanState::init_fans(const std::vector<std::string>& fan_objects,
 
     // Build role-based display name overrides for configured fans.
     // Configured fans use their role name; unconfigured fans use auto-generated names.
-    if (!roles_.part_fan.empty() && roles_.part_fan != "fan") {
-        role_display_names_[roles_.part_fan] = "Part Fan";
-    }
-    if (!roles_.hotend_fan.empty()) {
-        role_display_names_[roles_.hotend_fan] = "Hotend Fan";
-    }
-    if (!roles_.chamber_fan.empty()) {
-        role_display_names_[roles_.chamber_fan] = "Chamber Fan";
-    }
-    if (!roles_.exhaust_fan.empty()) {
-        role_display_names_[roles_.exhaust_fan] = "Exhaust Fan";
-    }
-    if (!roles_.aux_fan.empty()) {
-        role_display_names_[roles_.aux_fan] = "Aux Fan";
+    const std::pair<const std::string&, FanRole> assigned[] = {
+        {roles_.part_fan, FanRole::Part},       {roles_.hotend_fan, FanRole::Hotend},
+        {roles_.chamber_fan, FanRole::Chamber}, {roles_.exhaust_fan, FanRole::Exhaust},
+        {roles_.aux_fan, FanRole::Aux},
+    };
+    for (const auto& [object, role] : assigned) {
+        // The bare [fan] keeps its own name, "Part Cooling Fan".
+        if (!object.empty() && !(role == FanRole::Part && object == "fan")) {
+            role_display_names_[object] = fan_role_label(role, FanLabelLength::Full);
+        }
     }
 
     spdlog::trace("[PrinterFanState] Fan role config: part='{}' hotend='{}' chamber='{}' "

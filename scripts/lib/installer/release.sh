@@ -47,8 +47,10 @@ _R2_MANIFEST_TRANSPORT=""
 # Which archive format is in use for this install. Set by download_release() or
 # use_local_tarball() based on what was found/provided. Consumed by
 # extract_release() and validate_tarball() to dispatch to the right tooling.
-# Values: "zip" (preferred) or "tar.gz" (legacy fallback).
+# Values: "zip" (preferred), "tar.gz" (legacy fallback), or "tree": an
+# already-extracted package (use_package_tree), at _ARCHIVE_TREE.
 _ARCHIVE_FORMAT="tar.gz"
+_ARCHIVE_TREE=""
 
 # Version tag and platform of a DOWNLOADED archive, recorded by download_release()
 # after it normalizes the version. When set, the staged file carries them
@@ -62,6 +64,10 @@ _ARCHIVE_PLATFORM=""
 # only when download_release() has recorded a platform+version; bare otherwise.
 _archive_tmp_path() {
     local stem="helixscreen"
+    if [ "${_ARCHIVE_FORMAT:-}" = tree ]; then
+        echo "$_ARCHIVE_TREE"
+        return 0
+    fi
     if [ -n "${_ARCHIVE_PLATFORM:-}" ] && [ -n "${_ARCHIVE_VERSION:-}" ]; then
         stem="helixscreen-${_ARCHIVE_PLATFORM}-${_ARCHIVE_VERSION}"
     fi
@@ -71,16 +77,19 @@ _archive_tmp_path() {
     esac
 }
 
-# Detect whether curl supports the flags we need (not BusyBox curl).
-# BusyBox curl lacks -S, -L, --connect-timeout, --max-time, --progress-bar, etc.
-# Cache the result so we only probe once.
+# Detect whether `curl` is curl proper, with the flags we pass it. Creality K1
+# firmware ships libhv's example client as /usr/bin/curl: it answers to the name,
+# prints "curl version 1.0.0" and rejects -s, -S, -L, -o and -f. Real curl's first
+# --version output starts "curl <digit>...". Shell builtins only, so it holds on
+# a PATH with no head or grep. Cache the result so we only probe once.
 _REAL_CURL=""
 _has_real_curl() {
     if [ -z "$_REAL_CURL" ]; then
-        if command -v curl >/dev/null 2>&1 && curl --version 2>/dev/null | grep -qi "curl"; then
-            _REAL_CURL=yes
-        else
-            _REAL_CURL=no
+        _REAL_CURL=no
+        if command -v curl >/dev/null 2>&1; then
+            case "$(curl --version 2>/dev/null)" in
+                "curl "[0-9]*) _REAL_CURL=yes ;;
+            esac
         fi
     fi
     [ "$_REAL_CURL" = "yes" ]
@@ -436,19 +445,26 @@ resolve_update_channel() {
     log_info "Update channel: ${R2_CHANNEL} (read from ${settings})"
 }
 
-# An explicit --version decides the channel when nothing else has: a
-# prerelease (any '-' suffix, the same test scripts/release-channel.sh applies
-# to tags) pinned on a fresh install or one with no settings.json is a beta
-# install, and the channel written into moonraker.conf must follow it.
-# _R2_CHANNEL_FROM_VERSION tells seed_update_channel to persist it for the app.
-# Args: the requested version tag
+# The channel this run installs onto, when nothing else has decided it: a
+# prerelease version (any '-' suffix, the same test scripts/release-channel.sh
+# applies to tags) on a fresh install or one with no settings.json is a beta
+# install, and the channel written into moonraker.conf must follow it. A beta
+# or dev R2_CHANNEL from the environment is the operator naming it outright.
+# _R2_CHANNEL_TO_SEED tells seed_update_channel to persist it for the app,
+# which never replaces a channel settings.json already names.
+# Args: the version tag this run settled on
 match_channel_to_version() {
-    [ "${_R2_CHANNEL_FROM_ENV:-}" = "yes" ] && return 0
+    if [ "${_R2_CHANNEL_FROM_ENV:-}" = "yes" ]; then
+        case "$R2_CHANNEL" in
+            beta | dev) _R2_CHANNEL_TO_SEED=yes ;;
+        esac
+        return 0
+    fi
     [ "${_R2_CHANNEL_FROM_SETTINGS:-}" = "yes" ] && return 0
     case "$1" in
         *-*)
             R2_CHANNEL=beta
-            _R2_CHANNEL_FROM_VERSION=yes
+            _R2_CHANNEL_TO_SEED=yes
             log_info "Update channel: beta (${1} is a prerelease)"
             ;;
     esac
@@ -733,8 +749,12 @@ validate_archive() {
 
     # Releases should be >1MB — catch truncated downloads that nonetheless
     # parse as valid archives (e.g. an empty zip central directory).
-    local size_kb
-    size_kb=$(du -k "$archive" 2>/dev/null | cut -f1)
+    # Truncation is a question about the file's length, so measure bytes: du
+    # reports allocated blocks, which on ZFS read as one block for a file
+    # written seconds ago and stay small for a compressible one.
+    local size_bytes size_kb
+    size_bytes=$(wc -c < "$archive" 2>/dev/null)
+    size_kb=$(( ${size_bytes:-0} / 1024 ))
     if [ "${size_kb:-0}" -lt 1024 ]; then
         log_error "${context}file too small (${size_kb}KB). File may be incomplete."
         exit 1
@@ -1070,6 +1090,10 @@ probe_release() {
         PROBE_SIZE_TEXT="local file, $(file_size_text "$local_tarball")"
         return 0
     fi
+    if [ -n "${package_dir:-}" ]; then
+        PROBE_SIZE_TEXT="package next to the installer, $(_tree_size_mb "$package_dir") MB"
+        return 0
+    fi
     local zip_filename tar_filename zip_r2 tar_r2 zip_gh tar_gh zip_http tar_http
     local zip_sha tar_sha manifest_ok url answer unknown=false
     _release_candidates "$(_release_tag "$1")" "$(get_release_platform "$2")"
@@ -1090,7 +1114,45 @@ probe_release() {
         return 0
     fi
     log_error "No HelixScreen $1 release for $2."
+    print_release_with_platform_hint "$1" "$(get_release_platform "$2")"
     exit 1
+}
+
+# The release with a build for a platform, from the channel manifests in
+# stable, beta, dev order, so the least experimental one that has it wins.
+# A manifest describes only its channel's latest release. Prints the release
+# tag, or returns 1 when no manifest that could be read lists the platform.
+# Args: release platform, version tag to skip (the one that just failed)
+find_release_with_platform() {
+    local ch mver
+    for ch in stable beta dev; do
+        _fetch_channel_manifest "$ch" || continue
+        [ -n "$(echo "$_R2_MANIFEST" | parse_manifest_platform_url "$1")" ] || continue
+        mver=$(echo "$_R2_MANIFEST" | parse_manifest_version)
+        [ -n "$mver" ] || continue
+        mver=$(_release_tag "$mver")
+        [ "$mver" = "${2:-}" ] && continue
+        echo "$mver"
+        return 0
+    done
+    return 1
+}
+
+# After "No HelixScreen <v> release for <platform>": the command that installs
+# a release that has one, or the --version hint when none can be named. Only
+# names it: installing a beta the user did not ask for is their call.
+# Args: version tag that failed, release platform
+print_release_with_platform_hint() {
+    local found flags=""
+    [ "${platform:-}" = "x86-desktop" ] && flags="--desktop "
+    if found=$(find_release_with_platform "$2" "$1"); then
+        log_error "$found has a $2 build. Install it with --version $found:"
+        log_error "  curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- ${flags}--version $found"
+    else
+        log_error "Pick a release that has a $2 build and pass it with --version, for example:"
+        log_error "  curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- ${flags}--version vX.Y.Z"
+        log_error "Releases: https://github.com/${GITHUB_REPO}/releases"
+    fi
 }
 
 # Download release archive. Prefers the unversioned .zip (consumed by both this
@@ -1298,6 +1360,95 @@ use_local_tarball() {
     log_success "Using local archive (${size}, ${_ARCHIVE_FORMAT})"
 }
 
+# Stage an already-extracted package as use_local_tarball stages an archive:
+# extract_release copies the tree where it would unpack one, and every check
+# after that is the archive's. The tree itself is only read.
+use_package_tree() {
+    log_info "Using the package at $1"
+    _ARCHIVE_FORMAT="tree"
+    _ARCHIVE_TREE="$1"
+    mkdir -p "$TMP_DIR"
+    # shellcheck disable=SC2034  # consumed by common.sh error_handler (sibling module)
+    CLEANUP_TMP=true
+}
+
+# True when both paths name one directory, symlinks resolved.
+_same_dir() {
+    [ -n "$1" ] && [ -n "$2" ] || return 1
+    [ "$(host_canonical_path "$1")" = "$(host_canonical_path "$2")" ]
+}
+
+# The release package this installer was unpacked with: its own directory,
+# when that holds the payload extract_release requires and the
+# release_info.json the packaging bakes. Looked for only when nothing else
+# names what to install (--version, --local, --update, an uninstall, the
+# in-app updater), and never at a root an install lives at: the install.sh
+# inside an installed tree resolves online, since installing a tree onto
+# itself means nothing. settle_package_beside_installer checks INSTALL_DIR
+# once it is known.
+# Sets package_dir, package_version (a release tag) and package_platform (the
+# release platform its asset names); package_dir stays empty otherwise.
+detect_package_beside_installer() {
+    package_dir=""
+    package_version=""
+    package_platform=""
+    [ -z "${version:-}" ] && [ -z "${local_tarball:-}" ] || return 0
+    [ "${update_mode:-false}" != true ] && [ "${uninstall_mode:-false}" != true ] || return 0
+    _is_self_update && return 0
+
+    local dir root asset ver
+    dir=$(installer_self_dir) || return 0
+    for root in $_HELIX_KNOWN_INSTALL_DIRS ${KLIPPER_HOME:+"$KLIPPER_HOME/helixscreen"} \
+        "$(desktop_install_root 2>/dev/null || true)"; do
+        _same_dir "$dir" "$root" && return 0
+    done
+    # The tar layout's top directory. The release zip is flat, so unpacked in
+    # place its payload sits among whatever else that directory holds, and
+    # copying the directory would install all of it.
+    [ "${dir##*/}" = helixscreen ] || return 0
+    [ -f "$dir/bin/helix-screen" ] && [ -d "$dir/ui_xml" ] && [ -d "$dir/assets" ] || return 0
+    [ -f "$dir/release_info.json" ] || return 0
+    asset=$(parse_json_string_field asset_name < "$dir/release_info.json")
+    ver=$(parse_json_string_field version < "$dir/release_info.json")
+    case "$asset" in
+        helixscreen-?*.zip) ;;
+        *) return 0 ;;
+    esac
+    [ -n "$ver" ] || return 0
+
+    package_dir="$dir"
+    # shellcheck disable=SC2034  # consumed by main.sh (main)
+    package_version=$(_release_tag "$ver")
+    package_platform="${asset#helixscreen-}"
+    package_platform="${package_platform%.zip}"
+}
+
+# Once INSTALL_DIR is known: forget a package that is the install itself, and
+# refuse one built for another platform before anything is checked or
+# changed. A package's platform is the release asset it names, the one this
+# host's self-update would fetch.
+settle_package_beside_installer() {
+    [ -n "${package_dir:-}" ] || return 0
+    if _same_dir "$package_dir" "${INSTALL_DIR:-}"; then
+        package_dir=""
+        return 0
+    fi
+    local want
+    want=$(helix_self_update_asset "$platform")
+    want="${want#helixscreen-}"
+    want="${want%.zip}"
+    [ "$package_platform" = "$want" ] && return 0
+
+    log_error "This package is for ${package_platform}, but this computer needs ${want}."
+    case "$package_platform" in
+        x86-desktop) [ "$want" = x86 ] && log_error "To install it as a window on this desktop, add --desktop." ;;
+        x86) [ "$want" = x86-desktop ] && log_error "To install it as a kiosk that takes over the screen, add --kiosk." ;;
+    esac
+    log_error "Or download helixscreen-${want} from https://github.com/${GITHUB_REPO}/releases"
+    log_error "Nothing changed."
+    exit 1
+}
+
 # Validate binary architecture matches the current system
 # Args: binary_path platform
 # Returns: 0 if valid, 1 if mismatch or error
@@ -1414,7 +1565,7 @@ validate_binary_architecture() {
             expected_machine_lo="b7"
             expected_desc="AARCH64 64-bit"
             ;;
-        x86)
+        x86|x86-desktop)
             expected_class="02"
             expected_machine_lo="3e"
             expected_desc="x86_64 64-bit"
@@ -1467,8 +1618,27 @@ validate_binary_architecture() {
 # and protects nothing; that is the failure mode where the install dies
 # mid-copy with ENOSPC having reported no problem at all.
 # Verified present on BusyBox 1.29.3 (AD5M) and 1.33.2 (K2).
+#
+# Reports the larger of the allocated and the apparent size. The copy this
+# sizes lands on another filesystem, where the tree takes at least its byte
+# length, while allocation on the source can read far lower: ZFS counts a file
+# written seconds ago as one block until its transaction group commits, and a
+# compressing filesystem stores runs of zeros in almost nothing. GNU du
+# measures apparent size with --apparent-size; BusyBox du has no such option,
+# so there the allocated figure stands alone.
 _tree_size_mb() {
-    du -ms "$1" 2>/dev/null | awk '{print $1}'
+    local allocated apparent
+    allocated=$(du -ms "$1" 2>/dev/null | awk '{print $1}')
+    [ -n "$allocated" ] || return 0
+    apparent=$(du -ms --apparent-size "$1" 2>/dev/null | awk '{print $1}')
+    case "$apparent" in
+        '' | *[!0-9]*) apparent=0 ;;
+    esac
+    if [ "$apparent" -gt "$allocated" ]; then
+        echo "$apparent"
+    else
+        echo "$allocated"
+    fi
 }
 
 # Decide whether the install swap can actually be performed.
@@ -1758,9 +1928,23 @@ extract_release() {
     # Pre-flight: check TMP_DIR has enough space for extraction.
     # Archive expands ~3x, so require 3x archive size + margin.
     local archive_mb extract_required_mb tmp_available_mb
-    archive_mb=$(du -m "$archive" 2>/dev/null | awk '{print $1}')
-    [ -z "$archive_mb" ] && archive_mb=$(ls -l "$archive" | awk '{print int($5/1048576)}')
-    extract_required_mb=$(( (archive_mb * 3) + 20 ))
+    if [ "${_ARCHIVE_FORMAT:-}" = tree ]; then
+        # Already extracted: the copy needs the tree's own size.
+        archive_mb=$(_tree_size_mb "$archive")
+        case "$archive_mb" in
+            '' | *[!0-9]*)
+                log_error "Could not measure the package at $archive; nothing was copied."
+                exit 1
+                ;;
+        esac
+        extract_required_mb=$(( archive_mb + 20 ))
+    else
+        # Byte length, rounded up: allocated blocks (du) undercount a file
+        # that was just downloaded onto ZFS.
+        archive_mb=$(wc -c < "$archive" 2>/dev/null | awk '{print int(($1 + 1048575) / 1048576)}')
+        [ -z "$archive_mb" ] && archive_mb=$(ls -l "$archive" | awk '{print int($5/1048576)}')
+        extract_required_mb=$(( (archive_mb * 3) + 20 ))
+    fi
 
     local tmp_check_dir
     tmp_check_dir=$(dirname "$TMP_DIR")
@@ -1784,6 +1968,12 @@ extract_release() {
 
     local extract_ok=false
     case "${_ARCHIVE_FORMAT:-tar.gz}" in
+        tree)
+            # A copy, never a move: the tree is the user's extracted package.
+            # -R without -p: the copy belongs to whoever runs the install, as
+            # the tar path's -o does, and symlinks stay symlinks (BusyBox too).
+            cp -R "$archive" "${extract_dir}/helixscreen" && extract_ok=true
+            ;;
         zip)
             # The zip has a FLAT layout (no top-level helixscreen/ dir). That's
             # the contract with Moonraker Update Manager — it extracts straight
@@ -1863,6 +2053,16 @@ extract_release() {
     # Phase 3: Validate architecture
     if ! validate_binary_architecture "${new_install}/bin/helix-screen" "$platform"; then
         log_error "Aborting installation due to architecture mismatch."
+        rm -rf "$extract_dir"
+        exit 1
+    fi
+
+    # The desktop flavour is recognised, updated and uninstalled by the
+    # release_info.json its payload ships, so an archive that is not the
+    # desktop build (a kiosk x86 zip handed to --local) must not land there.
+    if [ "$platform" = "x86-desktop" ] && ! desktop_payload_is_ours "$new_install"; then
+        log_error "This archive is not the x86 desktop build: its release_info.json does not"
+        log_error "name $(helix_self_update_asset x86-desktop). Existing installation is untouched."
         rm -rf "$extract_dir"
         exit 1
     fi
@@ -2020,7 +2220,7 @@ extract_release() {
         # fails mid-write with ENOSPC. When tight, relocate the old install to a
         # roomy persistent partition first (option B) so the install fs has room.
         local new_install_mb install_parent install_free_mb swap_margin_mb
-        new_install_mb=$(du -ms "$new_install" 2>/dev/null | awk '{print $1}')
+        new_install_mb=$(_tree_size_mb "$new_install")
         [ -z "$new_install_mb" ] && new_install_mb=0
 
         install_parent=$(dirname "${INSTALL_DIR}")

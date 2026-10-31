@@ -15,10 +15,11 @@ namespace helix {
  * @brief Represents a discovered Moonraker printer on the local network
  */
 struct DiscoveredPrinter {
-    std::string name;       ///< Display name (hostname without .local)
-    std::string hostname;   ///< Full hostname (e.g., "voron.local")
-    std::string ip_address; ///< Resolved IPv4 address
-    uint16_t port;          ///< Service port (usually 7125)
+    std::string name;          ///< Display name (hostname without .local)
+    std::string hostname;      ///< Full hostname (e.g., "voron.local")
+    std::string ip_address;    ///< Resolved IPv4 address
+    uint16_t port;             ///< Service port (usually 7125)
+    std::string resource_path; ///< TXT "rp": the IPP queue path; empty when not advertised
 
     /**
      * @brief Equality operator for deduplication
@@ -30,6 +31,42 @@ struct DiscoveredPrinter {
         return ip_address == other.ip_address && port == other.port;
     }
 };
+
+/// Service attributes discovery keeps from a TXT record.
+struct MdnsTxtFields {
+    std::string model_name;    ///< TXT "ty" (e.g., "Brother QL-800")
+    std::string product;       ///< TXT "product"
+    std::string resource_path; ///< TXT "rp" (e.g., "printers/Canon_TS8350")
+};
+
+/// Record one TXT key/value pair. An empty value never overwrites a known one.
+inline void apply_mdns_txt_entry(MdnsTxtFields& fields, const std::string& key,
+                                 const std::string& value) {
+    if (value.empty())
+        return;
+    if (key == "ty") {
+        fields.model_name = value;
+    } else if (key == "product") {
+        fields.product = value;
+    } else if (key == "rp") {
+        fields.resource_path = value;
+    }
+}
+
+/// The printer a complete service record describes. display_name is chosen by the
+/// caller (TXT "ty" > TXT "product" > hostname).
+inline DiscoveredPrinter make_discovered_printer(const std::string& display_name,
+                                                 const std::string& hostname,
+                                                 const std::string& ip_address, uint16_t port,
+                                                 const MdnsTxtFields& txt) {
+    DiscoveredPrinter printer;
+    printer.name = display_name;
+    printer.hostname = hostname;
+    printer.ip_address = ip_address;
+    printer.port = port;
+    printer.resource_path = txt.resource_path;
+    return printer;
+}
 
 /**
  * @brief Abstract interface for mDNS discovery

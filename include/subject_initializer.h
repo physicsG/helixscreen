@@ -12,7 +12,9 @@
 #include <vector>
 
 // Forward declarations
+namespace helix {
 class IMoonrakerAPI;
+}
 class PrintSelectPanel;
 class PrintStatusPanel;
 class MotionPanel;
@@ -22,10 +24,16 @@ class UsbManager;
 namespace helix {
 class TemperatureController;
 class BedDryingController;
+class StandingPrintOptionsController;
+class FilamentAccountingController;
+class PrintPhotosController;
+class PluginStatusRefresh;
 } // namespace helix
 namespace helix::ui {
+class FilamentOpHeater;
 class PlrOfferController;
-}
+class ChamberStallPrompt;
+} // namespace helix::ui
 
 /**
  * @brief Initializes all reactive subjects for LVGL data binding
@@ -74,7 +82,7 @@ class SubjectInitializer {
      * Creates all panels with the API injected at construction time.
      * Must be called after MoonrakerManager::init().
      */
-    void init_panels(IMoonrakerAPI* api, const RuntimeConfig& runtime_config);
+    void init_panels(helix::IMoonrakerAPI* api, const RuntimeConfig& runtime_config);
 
     /**
      * @brief Initialize observers and utility subjects (phases 5-7)
@@ -132,7 +140,8 @@ class SubjectInitializer {
     void init_core_subjects();
     void init_printer_state_subjects();
     void init_ams_subjects();
-    void init_panel_subjects(IMoonrakerAPI* api);
+    void init_panel_subjects(helix::IMoonrakerAPI* api);
+    void init_temperature_control(helix::IMoonrakerAPI* api);
     void init_observers();
     void init_utility_subjects();
     void init_usb_manager(const RuntimeConfig& runtime_config);
@@ -143,9 +152,17 @@ class SubjectInitializer {
     // Owned resources
     std::unique_ptr<UsbManager> m_usb_manager;
     std::unique_ptr<helix::ui::PlrOfferController> m_plr_offer_controller;
+    std::unique_ptr<helix::ui::ChamberStallPrompt> m_chamber_stall_prompt;
+    std::unique_ptr<helix::StandingPrintOptionsController> m_standing_print_options;
+    std::unique_ptr<helix::FilamentAccountingController> m_filament_accounting;
+    std::unique_ptr<helix::PrintPhotosController> m_print_photos;
+    std::unique_ptr<helix::PluginStatusRefresh> m_plugin_status_refresh;
     std::unique_ptr<helix::TemperatureController> m_temp_controller;
+    std::unique_ptr<helix::ui::FilamentOpHeater> m_filament_op_heater;
     std::unique_ptr<helix::BedDryingController> m_bed_drying;
     std::unique_ptr<TemperatureService> m_temp_control_panel;
+    // Registered as a shared resource by this object, owned by MoonrakerManager.
+    helix::IMoonrakerAPI* m_registered_api = nullptr;
 
     // Alive guard for the USB drive callback: its weak_ptrs expire when this
     // object is destroyed, so queued callbacks that land later do nothing
@@ -158,4 +175,6 @@ class SubjectInitializer {
     BedMeshPanel* m_bed_mesh_panel = nullptr;
 
     bool m_initialized = false;
+
+    friend struct SubjectInitializerTestAccess;
 };

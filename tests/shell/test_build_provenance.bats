@@ -10,8 +10,21 @@
 
 load helpers
 
+# The git-hash cases need git to answer, as it does in a checkout, and
+# scratch_tree has no .git: it gets a repository of its own with one commit.
+setup_file() {
+    (cd "$(scratch_tree)" &&
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE sh -c '
+            git init -q &&
+            git -c user.name=bats -c user.email=bats@invalid -c core.hooksPath=/dev/null \
+                -c commit.gpgsign=false commit -q --allow-empty -m scratch')
+}
+
 setup() {
-    cd "$BATS_TEST_DIRNAME/../.." || return 1
+    cd "$(scratch_tree)" || return 1
+    # The docker targets' recipes probe for their toolchain image on lines that
+    # also name $(MAKE), which a dry run executes.
+    mock_command_script docker 'exit 0'
 }
 
 # --- HELIX_GIT_HASH override -----------------------------------------------
@@ -53,6 +66,7 @@ setup() {
     # In the repo, where git WOULD answer — the override must still win, since
     # that is exactly the container case: git resolves the wrong thing or
     # nothing, and the host already knows the right answer.
+    [ -n "$(git rev-parse --short HEAD)" ]
     run env HELIX_GIT_HASH=cafe1234 BUILD_DIR="$BATS_TEST_TMPDIR/b" ./scripts/gen-git-hash.sh
     [ "$status" -eq 0 ]
     run cat "$BATS_TEST_TMPDIR/b/generated/helix_git_hash.h"
@@ -110,6 +124,11 @@ setup() {
 @test "an inherited HELIX_GIT_HASH wins over the local git lookup" {
     # remote-sync excludes .git, so on the build host there is nothing to look
     # up; the value has to come from the machine that has the checkout.
+    local head
+    head="$(git rev-parse --short HEAD)"
+    [ -n "$head" ]
+    run make -n k1-docker
+    contains "-e HELIX_GIT_HASH=$head" "$output"
     run make -n k1-docker HELIX_GIT_HASH=feedface
     [ "$status" -eq 0 ]
     [[ "$output" == *"-e HELIX_GIT_HASH=feedface"* ]]

@@ -97,6 +97,13 @@ _is_self_update() {
     [ "${HELIX_SELF_UPDATE:-}" = "1" ]
 }
 
+# The directory the running install.sh lives in, or return 1 when it has
+# none: under `curl ... | sh` the script is stdin and $0 names the shell.
+installer_self_dir() {
+    [ -f "$0" ] || return 1
+    (cd "$(dirname "$0")" 2>/dev/null && pwd -P)
+}
+
 # Probe for a usable Python interpreter with urllib (cached). Sets _PY_BIN to
 # the first of python3/python that can import urllib.request — the baseline for
 # downloading over plain HTTP. Used as a download/extraction fallback on
@@ -171,6 +178,18 @@ path_sudo() {
     [ -w "$dir" ] && echo "" || echo "$SUDO"
 }
 
+# Remove an install-dir state file. When it is a symlink into printer_data the
+# target goes too; unlinking only the link would leave a stale ledger behind
+# that a later install reads as its own.
+# Args: $1 = path
+remove_state_file() {
+    local f="$1" t=""
+    [ -L "$f" ] && t="$(readlink "$f" 2>/dev/null)"
+    $(path_sudo "$f") rm -f "$f" 2>/dev/null || true
+    [ -n "$t" ] && { $(path_sudo "$t") rm -f "$t" 2>/dev/null || true; }
+    return 0
+}
+
 # Pin the trust properties of helixscreen.env: the launcher's env-file parse
 # evaluates the file's lines, so its owner and mode decide who can run code as
 # the launcher's user (root on every SysV firmware device). State 0644 and
@@ -235,6 +254,75 @@ klipper_config_dir() {
         return 0
     fi
     echo ""
+}
+
+# printer_data/config/helixscreen/ for this install, or empty when no Klipper
+# config dir is known. The single definition of where user config lives; the
+# installed init script and systemd unit record it for restore-user-config.sh.
+helix_pd_helix_dir() {
+    local cfg
+    cfg="$(klipper_config_dir)"
+    [ -n "$cfg" ] && echo "${cfg}/helixscreen"
+    return 0
+}
+
+# Where a ledger named $1 (a file under config/, such as .klipper_includes) can
+# be, in the order they are trusted: the install dir, then printer_data. Both
+# are the same file on a completed install (a symlink); after a web update has
+# removed the install dir, only the printer_data copy is left. With a second
+# argument the stranded-copy locations described above follow, which only the
+# disabled-services ledger needs.
+#
+# A location this run cannot resolve (no Klipper config dir known) is omitted
+# rather than probed with an empty prefix.
+# Args: $1 = ledger file name, $2 = "wide" to include the backup forms
+_ledger_candidates() {
+    local _name="$1" _pd_config="" _newest_old _rollback_mount
+    if type klipper_config_dir >/dev/null 2>&1; then
+        _pd_config="$(klipper_config_dir)"
+    fi
+    echo "${INSTALL_DIR}/config/${_name}"
+    if [ -n "$_pd_config" ]; then
+        echo "${_pd_config}/helixscreen/${_name}"
+        [ "$_name" = ".disabled_services" ] && echo "${_pd_config}/${_name}.clean-keep"
+    fi
+    [ "${2:-}" = "wide" ] || return 0
+    echo "${INSTALL_DIR}.old/config/${_name}"
+    _newest_old="$(_newest_timestamped_install_backup)"
+    [ -n "$_newest_old" ] && echo "${_newest_old}/config/${_name}"
+    for _rollback_mount in ${HELIX_ROLLBACK_CANDIDATES:-$HELIX_ROLLBACK_CANDIDATES_DEFAULT}; do
+        echo "${_rollback_mount}/helixscreen-rollback/helixscreen/config/${_name}"
+    done
+    return 0
+}
+
+# The existing copy of ledger $1, else where a new one belongs (the install
+# dir). Writers and readers both go through this, so a ledger that survived in
+# printer_data is the one that is appended to and later undone.
+# Args: $1 = ledger file name
+_ledger_path() {
+    local _candidate _list
+    _list="$(_ledger_candidates "$1")"
+    while IFS= read -r _candidate; do
+        # A .clean-keep carry is a stranded copy for the uninstaller to find,
+        # never a place to write.
+        case "$_candidate" in *.clean-keep) continue ;; esac
+        if [ -n "$_candidate" ] && [ -f "$_candidate" ]; then
+            echo "$_candidate"
+            return 0
+        fi
+    done <<EOF
+$_list
+EOF
+    echo "${INSTALL_DIR}/config/$1"
+}
+
+# Escape a value for the replacement half of a sed s||| command (backslash, the
+# delimiter and & are special there). One helper for every installer sed that
+# writes a path.
+# Args: $1 = value
+sed_escape_replacement() {
+    printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
 }
 
 # Track what we've done for cleanup
@@ -309,21 +397,30 @@ tty_can_ask() {
 
 # Ask a yes/no question. Under `curl | sh` stdin is the script, so the answer
 # comes from the controlling terminal; with neither, the default stands. An
-# empty line takes the default; end of input (Ctrl-D) is a no.
-tty_confirm() { # question default(y|n)
+# empty line takes the default; end of input (Ctrl-D) is a no, or with
+# on_eof=abort returns 2: for a question where neither answer is the safe one.
+tty_confirm() { # question default(y|n) [on_eof(abort)]
     [ "${ASSUME_YES:-false}" = true ] && return 0
     _tc_dev="${HELIX_TTY_DEVICE:-/dev/tty}"
     _tc_hint="[y/N]"; [ "$2" = y ] && _tc_hint="[Y/n]"
     _tc_ans=""
+    _tc_eof=""
     # shellcheck disable=SC2217  # open probe, see tty_can_ask
     if { true < "$_tc_dev"; } 2>/dev/null; then
         printf '%s %s ' "$1" "$_tc_hint" >&2
-        IFS= read -r _tc_ans < "$_tc_dev" || [ -n "$_tc_ans" ] || _tc_ans=n
+        IFS= read -r _tc_ans < "$_tc_dev" || [ -n "$_tc_ans" ] || _tc_eof=1
     elif [ -t 0 ]; then
         printf '%s %s ' "$1" "$_tc_hint" >&2
-        IFS= read -r _tc_ans || [ -n "$_tc_ans" ] || _tc_ans=n
+        IFS= read -r _tc_ans || [ -n "$_tc_ans" ] || _tc_eof=1
     else
         _tc_ans="$2"
+    fi
+    if [ -n "$_tc_eof" ]; then
+        if [ "${3:-}" = abort ]; then
+            _log_write "ASK $1 -> (end of input)"
+            return 2
+        fi
+        _tc_ans=n
     fi
     _log_write "ASK $1 -> ${_tc_ans:-$2}"
     case "${_tc_ans:-$2}" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
@@ -343,7 +440,25 @@ STEP_NUM=0
 STEP_OPEN=0
 STEP_TITLE=""
 STEP_DONE_TITLE=""
+STEP_PROGRESS_N=0
 _SPIN_I=0
+
+# Machine-readable progress for a driving program (--progress): one
+# tab-separated line per event on stdout, where the human output goes to
+# stderr. Tabs and newlines inside a field are flattened to single spaces so a
+# title can never split a record.
+PROGRESS=0
+# shellcheck disable=SC2034  # read and set by main.sh (_progress_result)
+PROGRESS_RESULT_SENT=0
+_progress_emit() { # kind field...
+    [ "$PROGRESS" = 1 ] || return 0
+    _pe_line="HELIX-PROGRESS"
+    for _pe_f in "$@"; do
+        _pe_f=$(printf '%s' "$_pe_f" | tr '\t\n\r' '   ')
+        _pe_line="$_pe_line$(printf '\t')$_pe_f"
+    done
+    printf '%s\n' "$_pe_line"
+}
 
 _ui_marks() {
     if [ "$UI_UTF8" = 1 ]; then
@@ -415,11 +530,13 @@ step() { # running-title [done-title]
     STEP_TITLE="$1"
     STEP_DONE_TITLE="${2:-$1}"
     STEP_OPEN=1
+    STEP_PROGRESS_N=$((STEP_NUM + 1))
+    _progress_emit step "$STEP_PROGRESS_N" "$STEP_TOTAL" start "$STEP_TITLE" ""
     _log_write "STEP $1"
     _step_redraw
 }
 
-_step_close() { # mark color word detail title
+_step_close() { # mark color word detail title status
     STEP_NUM=$((STEP_NUM + 1))
     if [ "$UI_TTY" = 1 ]; then
         if [ -n "$4" ]; then
@@ -436,6 +553,7 @@ _step_close() { # mark color word detail title
             printf '%s%s ... %s\n' "$_sc_prefix" "$5" "$3" >&2
         fi
     fi
+    _progress_emit step "$STEP_NUM" "$STEP_TOTAL" "$6" "$5" "$4"
     STEP_OPEN=0
 }
 
@@ -443,18 +561,19 @@ _step_close() { # mark color word detail title
 step_done() {
     [ "$STEP_OPEN" = 1 ] || return 0
     if [ -n "${1:-}" ]; then _log_write "DONE $STEP_DONE_TITLE ($1)"; else _log_write "DONE $STEP_DONE_TITLE"; fi
-    _step_close "$MARK_OK" "$GREEN" ok "${1:-}" "$STEP_DONE_TITLE"
+    _step_close "$MARK_OK" "$GREEN" ok "${1:-}" "$STEP_DONE_TITLE" ok
 }
 
 step_fail() {
     [ "$STEP_OPEN" = 1 ] || return 0
     _log_write "FAIL $STEP_TITLE${1:+ ($1)}"
-    _step_close "$MARK_FAIL" "$RED" FAILED "${1:-}" "$STEP_TITLE"
+    _step_close "$MARK_FAIL" "$RED" FAILED "${1:-}" "$STEP_TITLE" fail
 }
 
 step_skip() {
     [ "$STEP_OPEN" = 1 ] || return 0
     _log_write "SKIP $STEP_TITLE"
+    _progress_emit step "$STEP_PROGRESS_N" "$STEP_TOTAL" skip "$STEP_TITLE" ""
     [ "$UI_TTY" = 1 ] && printf '\r\033[K' >&2
     STEP_OPEN=0
 }
@@ -478,11 +597,14 @@ file_size_text() {
     fi
 }
 
-# Where the install log is kept: Moonraker's logs root, which Mainsail and
-# Fluidd show, else the logs/ of a state root outside the payload, which an
-# update replaces whole.
+# Where the install log is kept: the platform's own log dir when it names one
+# (set_install_paths), else Moonraker's logs root, which Mainsail and Fluidd
+# show, else the logs/ of a state root outside the payload, which an update
+# replaces whole.
 install_log_dest() {
-    if [ -n "${KLIPPER_HOME:-}" ] && [ -d "$KLIPPER_HOME/printer_data" ]; then
+    if [ -n "${INSTALL_LOG_DIR:-}" ]; then
+        printf '%s/helixscreen-install.log' "$INSTALL_LOG_DIR"
+    elif [ -n "${KLIPPER_HOME:-}" ] && [ -d "$KLIPPER_HOME/printer_data" ]; then
         printf '%s' "$KLIPPER_HOME/printer_data/logs/helixscreen-install.log"
     else
         printf '%s/logs/helixscreen-install.log' "$(install_state_root)"
@@ -775,7 +897,7 @@ _user_dir_name_ok() {
 }
 
 # Accept only scratch directories the installer created, or the staging dir the
-# in-app updater hands over via TMP_DIR (update_checker.cpp STAGING_NAME).
+# in-app updater hands over via TMP_DIR (update_checker.cpp kStagingName).
 # Mod-owned refusal is NOT here: common.sh is the bundle's first module and
 # must not call into later ones, so that guard rides detect_tmp_dir's user
 # override branch in platform.sh.
@@ -828,23 +950,79 @@ _safe_remove_tmp_dir() {
         log_warn "Refusing to rm -rf TMP_DIR='$d' (name is not an installer scratch dir); leaving it in place."
         return 0
     fi
-    # Mountpoint detection: prefer mountpoint(1); else compare the device id of
-    # the dir against its parent (differs at a mount boundary). BusyBox-safe.
+    # Mountpoint detection: the mount table and device ids always, mountpoint(1)
+    # on top where it exists. A "mount" from either refuses; a dir nothing can
+    # judge stays in place.
+    local _mount_state _mp_rc=1
+    _mount_state=$(_dir_mount_state "$d")
     if command -v mountpoint >/dev/null 2>&1; then
-        if mountpoint -q "$d"; then
-            log_warn "Refusing to rm -rf mountpoint TMP_DIR='$d' (would wipe a live partition); leaving it in place."
-            return 0
-        fi
-    else
-        local _ddev _pdev
-        _ddev=$(stat -c '%d' "$d" 2>/dev/null)
-        _pdev=$(stat -c '%d' "$d/.." 2>/dev/null)
-        if [ -n "$_ddev" ] && [ -n "$_pdev" ] && [ "$_ddev" != "$_pdev" ]; then
-            log_warn "Refusing to rm -rf mountpoint TMP_DIR='$d' (would wipe a live partition); leaving it in place."
-            return 0
-        fi
+        mountpoint -q "$d" && _mp_rc=0 || _mp_rc=$?
+        case "$_mp_rc" in
+            0) _mount_state=mount ;;
+            # util-linux answers "not a mountpoint" with 32. Any other status
+            # is an error there, and BusyBox uses 1 for both, so it settles
+            # nothing the table did not.
+            32) [ "$_mount_state" = unknown ] && _mount_state=plain ;;
+        esac
     fi
+    case "$_mount_state" in
+        plain) ;;
+        mount)
+            log_warn "Refusing to rm -rf mountpoint TMP_DIR='$d' (would wipe a live partition); leaving it in place."
+            return 0
+            ;;
+        nested)
+            log_warn "Refusing to rm -rf TMP_DIR='$d' (a filesystem is mounted inside it); leaving it in place."
+            return 0
+            ;;
+        *)
+            log_warn "Refusing to rm -rf TMP_DIR='$d' (cannot tell whether it is a mountpoint: no usable mountpoint, stat or mount table); leaving it in place."
+            return 0
+            ;;
+    esac
     rm -rf "$d"
+}
+
+# Whether DIR is a mount point: prints "mount", "nested" when a filesystem is
+# mounted somewhere below it, "plain", or "unknown" when nothing could judge
+# it. Forge-X's BusyBox may lack stat, so the mount table is read first: DIR's
+# physical path matched against field 2, which escapes space, tab and
+# backslash as \040, \011 and \134. The device id of DIR against its parent
+# backs it up where stat exists, and also catches a mount the table spells
+# through another path. An empty or unreadable table judges nothing.
+_dir_mount_state() {
+    local d="$1" mounts="${HELIX_PROC_ROOT:-/proc}/mounts" known=0
+    local phys="" esc="" lines=0 _dev _mnt _rest _ddev _pdev
+    phys=$(cd "$d" 2>/dev/null && pwd -P) || phys=""
+    if [ -n "$phys" ] && [ -r "$mounts" ]; then
+        esc=$(printf '%s\n' "$phys" | sed -e 's/\\/\\134/g' -e 's/ /\\040/g' -e 's/	/\\011/g') || esc=""
+    fi
+    if [ -n "$esc" ]; then
+        while read -r _dev _mnt _rest; do
+            lines=$((lines + 1))
+            case "$_mnt" in
+                "$esc")
+                    echo mount
+                    return 0
+                    ;;
+                "$esc"/*)
+                    echo nested
+                    return 0
+                    ;;
+            esac
+        done < "$mounts"
+        [ "$lines" -gt 0 ] && known=1
+    fi
+    _ddev=$(stat -c '%d' "$d" 2>/dev/null) || _ddev=""
+    _pdev=$(stat -c '%d' "$d/.." 2>/dev/null) || _pdev=""
+    if [ -n "$_ddev" ] && [ -n "$_pdev" ]; then
+        if [ "$_ddev" != "$_pdev" ]; then
+            echo mount
+            return 0
+        fi
+        known=1
+    fi
+    if [ "$known" = 1 ]; then echo plain; else echo unknown; fi
 }
 
 # Cleanup function for normal exit
@@ -981,9 +1159,15 @@ retire_legacy_config_backups() {
 
 # The directories Config::init searches for a rolling settings backup, one per
 # line: the StateDirectory, then each HOME/.helixscreen the service may run with
-# (config_backup_primary/fallback, include/app_constants.h).
-# Reads: KLIPPER_HOME, HELIX_STATE_VAR_LIB, HELIX_STATE_ROOT_HOME
+# (config_backup_primary/fallback, include/app_constants.h). A desktop install
+# has only its user's.
+# Reads: platform, HOME, KLIPPER_HOME, HELIX_STATE_VAR_LIB, HELIX_STATE_ROOT_HOME
 config_backup_tiers() {
+    # The desktop app runs as the user, so its backup is that user's.
+    if [ "${platform:-}" = "x86-desktop" ]; then
+        [ -n "${HOME:-}" ] && echo "${HOME%/}/.helixscreen"
+        return 0
+    fi
     echo "${HELIX_STATE_VAR_LIB:-/var/lib/helixscreen}"
     echo "${HELIX_STATE_ROOT_HOME:-/root/.helixscreen}"
     [ -n "${KLIPPER_HOME:-}" ] && echo "${KLIPPER_HOME}/.helixscreen"

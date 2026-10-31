@@ -50,9 +50,9 @@ inline void set_base_url(const std::string& base_url, bool moved) {
 /// Wraps a REST request's success callback, taken when the request starts: a reply that
 /// arrives after the epoch moved goes to @p on_error as CONNECTION_LOST instead. Safe to call
 /// from the worker thread that delivers the reply.
-template <typename Success>
-auto guard_reply(Success on_success, std::function<void(const MoonrakerError&)> on_error,
-                 std::string method) {
+/// Both callbacks keep the caller's own type, so an empty one stays empty.
+template <typename Success, typename Error>
+auto guard_reply(Success on_success, Error on_error, std::string method) {
     const uint64_t started = current();
     return [on_success = std::move(on_success), on_error = std::move(on_error),
             method = std::move(method), started](auto&&... args) {

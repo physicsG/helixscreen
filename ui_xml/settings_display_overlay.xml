@@ -78,26 +78,40 @@
                               options="Never&#10;30 seconds&#10;1 minute&#10;2 minutes&#10;5 minutes&#10;10 minutes"
                               options_tag="Never&#10;30 seconds&#10;1 minute&#10;2 minutes&#10;5 minutes&#10;10 minutes"
                               callback="on_dim_changed">
-          <bind_flag_if_eq subject="settings_has_dimming" flag="hidden" ref_value="0"/>
+          <bind_flag_if_not_eq subject="settings_dim_row_kind" flag="hidden" ref_value="1"/>
+        </setting_dropdown_row>
+        <!-- No dimmable backlight: the same dim timeout starts the screensaver -->
+        <setting_dropdown_row name="row_screensaver_after"
+                              label="Screensaver after" icon="television_classic"
+                              description="Screensaver starts after this period of inactivity"
+                              options="Never&#10;30 seconds&#10;1 minute&#10;2 minutes&#10;5 minutes&#10;10 minutes"
+                              options_tag="Never&#10;30 seconds&#10;1 minute&#10;2 minutes&#10;5 minutes&#10;10 minutes"
+                              callback="on_dim_changed">
+          <bind_flag_if_not_eq subject="settings_dim_row_kind" flag="hidden" ref_value="2"/>
         </setting_dropdown_row>
         <!-- Display Sleep -->
         <setting_dropdown_row name="row_display_sleep"
                               label="Display Sleep" icon="clock"
                               description="Screen sleeps after the selected period of inactivity"
-                              options="Never&#10;1 minute&#10;5 minutes&#10;10 minutes&#10;20 minutes&#10;30 minutes"
-                              options_tag="Never&#10;1 minute&#10;5 minutes&#10;10 minutes&#10;20 minutes&#10;30 minutes"
+                              options="Never&#10;1 minute&#10;5 minutes&#10;10 minutes&#10;20 minutes&#10;30 minutes&#10;1 hour"
+                              options_tag="Never&#10;1 minute&#10;5 minutes&#10;10 minutes&#10;20 minutes&#10;30 minutes&#10;1 hour"
                               callback="on_sleep_changed"/>
-        <!-- Screensaver -->
+        <!-- Screensaver: the full list is the translation source; DisplaySettingsOverlay
+             rebuilds the options without the savers too heavy for this board. Hidden in
+             builds without screensavers (settings_has_screensaver = 0). -->
         <setting_dropdown_row name="row_screensaver"
                               label="Screensaver" icon="television_classic" description="Show instead of dimming"
-                              options="Off&#10;Flying Toasters&#10;Starfield&#10;3D Pipes&#10;Bouncing Printer&#10;Fireworks"
-                              options_tag="Off&#10;Flying Toasters&#10;Starfield&#10;3D Pipes&#10;Bouncing Printer&#10;Fireworks"
-                              bind_selected="settings_screensaver_type" callback="on_screensaver_changed"/>
-        <!-- Test Screensaver button (hidden when Off is selected) -->
+                              options="Off&#10;Flying Toasters&#10;Starfield&#10;3D Pipes&#10;Bouncing Printer&#10;Fireworks&#10;Bouncing Logo&#10;3D Maze&#10;Hyperspace&#10;Flip Clock&#10;Fireflies&#10;Aqua Surface&#10;High Fly&#10;Random"
+                              options_tag="Off&#10;Flying Toasters&#10;Starfield&#10;3D Pipes&#10;Bouncing Printer&#10;Fireworks&#10;Bouncing Logo&#10;3D Maze&#10;Hyperspace&#10;Flip Clock&#10;Fireflies&#10;Aqua Surface&#10;High Fly&#10;Random"
+                              callback="on_screensaver_changed" hidden="true">
+          <bind_flag_if_eq subject="settings_has_screensaver" flag="hidden" ref_value="0"/>
+        </setting_dropdown_row>
+        <!-- Test Screensaver button (hidden when Off is selected). Starts hidden so it
+             stays hidden wherever the binding cannot resolve. -->
         <lv_obj name="container_test_screensaver"
                 width="100%" height="content" style_pad_left="#space_lg" style_pad_right="#space_lg"
                 style_pad_top="#space_sm" style_pad_bottom="#space_md" style_pad_gap="0" flex_flow="row"
-                style_flex_main_place="end" scrollable="false">
+                style_flex_main_place="end" scrollable="false" hidden="true">
           <bind_flag_if_eq subject="settings_screensaver_type" flag="hidden" ref_value="0"/>
           <ui_button name="btn_test_screensaver"
                      width="content" height="#button_height_sm" variant="outline" text="Test Screensaver" icon="play">

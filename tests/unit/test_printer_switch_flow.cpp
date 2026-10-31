@@ -29,6 +29,7 @@
 #include "printer_state.h"
 #include "printer_switch_flow.h"
 
+#include <algorithm>
 #include <functional>
 #include <lvgl.h>
 #include <string>
@@ -90,6 +91,7 @@ class SwitchFlowFixture : public XMLTestFixture {
                      events_.push_back("teardown");
                      active_at_teardown_ = cfg_->get_active_printer_id();
                      card_at_teardown_ = switch_card();
+                     locality_at_teardown_ = get_printer_state().moonraker_locality();
                      flushes_at_teardown_ = s_flushes;
                  },
                  [this] {
@@ -156,6 +158,11 @@ class SwitchFlowFixture : public XMLTestFixture {
         lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
         UpdateQueue::instance().drain();
         UpdateQueue::instance().drain();
+        lv_timer_handler();
+    }
+
+    long teardowns() const {
+        return std::count(events_.begin(), events_.end(), "teardown");
     }
 
     helix::Config* cfg_ = nullptr;
@@ -163,10 +170,11 @@ class SwitchFlowFixture : public XMLTestFixture {
     std::vector<std::string> events_;
     std::string active_at_teardown_;
     std::string card_at_teardown_;
+    helix::MoonrakerLocality locality_at_teardown_ = helix::MoonrakerLocality::Remote;
     int flushes_at_teardown_ = 0;
     static inline int s_flushes = 0;
     std::string card_at_rebuild_;
-    std::function<void()> on_rebuild_;
+    helix::SharedCallback<void()> on_rebuild_;
     bool rebuild_connects_ = true;
     helix::PrinterSwitchFlow flow_;
 
@@ -230,53 +238,53 @@ TEST_CASE_METHOD(SwitchFlowFixture,
 TEST_CASE_METHOD(SwitchFlowFixture,
                  "Switch flow: moving to another printer records the one left as the fallback",
                  "[multi-printer][switch_flow]") {
-    cfg_->set<int>(helix::BOOT_CRASH_STREAK_KEY, 2);
+    cfg_->set<int>(helix::kBootCrashStreakKey, 2);
 
     flow_.request_switch("beta");
 
-    CHECK(cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "") == "alpha");
-    CHECK(cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1) == 0);
+    CHECK(cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "") == "alpha");
+    CHECK(cfg_->get<int>(helix::kBootCrashStreakKey, -1) == 0);
 }
 
 TEST_CASE_METHOD(SwitchFlowFixture,
                  "Switch flow: re-picking the same printer keeps its fallback and crash run",
                  "[multi-printer][switch_flow]") {
-    cfg_->set<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "beta");
-    cfg_->set<int>(helix::BOOT_CRASH_STREAK_KEY, 2);
+    cfg_->set<std::string>(helix::kSwitchPreviousPrinterKey, "beta");
+    cfg_->set<int>(helix::kBootCrashStreakKey, 2);
     set_connection(helix::ConnectionState::DISCONNECTED);
 
     REQUIRE(flow_.request_switch("alpha"));
 
-    CHECK(cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "") == "beta");
-    CHECK(cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1) == 2);
+    CHECK(cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "") == "beta");
+    CHECK(cfg_->get<int>(helix::kBootCrashStreakKey, -1) == 2);
 }
 
 TEST_CASE_METHOD(SwitchFlowFixture,
                  "Switch flow: a switch whose save fails keeps the boot-crash record",
                  "[multi-printer][switch_flow]") {
-    cfg_->set<bool>(helix::BOOT_CONNECT_HOLD_KEY, true);
-    cfg_->set<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "gamma");
-    cfg_->set<int>(helix::BOOT_CRASH_STREAK_KEY, 2);
+    cfg_->set<bool>(helix::kBootConnectHoldKey, true);
+    cfg_->set<std::string>(helix::kSwitchPreviousPrinterKey, "gamma");
+    cfg_->set<int>(helix::kBootCrashStreakKey, 2);
     helix::ConfigTestAccess::read_only_mode(*cfg_) = true;
 
     CHECK_FALSE(flow_.request_switch("beta"));
 
     CHECK(cfg_->get_active_printer_id() == "alpha");
-    CHECK(cfg_->get<bool>(helix::BOOT_CONNECT_HOLD_KEY, false));
-    CHECK(cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "") == "gamma");
-    CHECK(cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1) == 2);
+    CHECK(cfg_->get<bool>(helix::kBootConnectHoldKey, false));
+    CHECK(cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "") == "gamma");
+    CHECK(cfg_->get<int>(helix::kBootCrashStreakKey, -1) == 2);
     CHECK(events_.empty());
 }
 
 TEST_CASE_METHOD(SwitchFlowFixture, "Switch flow: a pick clears the boot-crash connection hold",
                  "[multi-printer][switch_flow]") {
     const std::string pick = GENERATE(std::string("alpha"), std::string("beta"));
-    cfg_->set<bool>(helix::BOOT_CONNECT_HOLD_KEY, true);
+    cfg_->set<bool>(helix::kBootConnectHoldKey, true);
     set_connection(helix::ConnectionState::DISCONNECTED);
 
     flow_.request_switch(pick);
 
-    CHECK_FALSE(cfg_->get<bool>(helix::BOOT_CONNECT_HOLD_KEY, true));
+    CHECK_FALSE(cfg_->get<bool>(helix::kBootConnectHoldKey, true));
     CHECK(events_ == kFullRestart);
 }
 
@@ -424,24 +432,24 @@ TEST_CASE_METHOD(SwitchFlowFixture,
 TEST_CASE_METHOD(SwitchFlowFixture,
                  "Switch flow: adding a printer through the wizard records the one left",
                  "[multi-printer][switch_flow]") {
-    cfg_->set<bool>(helix::BOOT_CONNECT_HOLD_KEY, true);
-    cfg_->set<int>(helix::BOOT_CRASH_STREAK_KEY, 2);
+    cfg_->set<bool>(helix::kBootConnectHoldKey, true);
+    cfg_->set<int>(helix::kBootCrashStreakKey, 2);
 
     flow_.add_printer_via_wizard();
     set_wizard_cancel_callback(nullptr);
 
-    CHECK_FALSE(cfg_->get<bool>(helix::BOOT_CONNECT_HOLD_KEY, true));
-    CHECK(cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "") == "alpha");
-    CHECK(cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1) == 0);
+    CHECK_FALSE(cfg_->get<bool>(helix::kBootConnectHoldKey, true));
+    CHECK(cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "") == "alpha");
+    CHECK(cfg_->get<int>(helix::kBootCrashStreakKey, -1) == 0);
 }
 
 TEST_CASE_METHOD(SwitchFlowFixture,
                  "Switch flow: cancelling the add-printer wizard puts back the fallback and crash "
                  "run",
                  "[multi-printer][switch_flow]") {
-    cfg_->set<bool>(helix::BOOT_CONNECT_HOLD_KEY, true);
-    cfg_->set<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "beta");
-    cfg_->set<int>(helix::BOOT_CRASH_STREAK_KEY, 2);
+    cfg_->set<bool>(helix::kBootConnectHoldKey, true);
+    cfg_->set<std::string>(helix::kSwitchPreviousPrinterKey, "beta");
+    cfg_->set<int>(helix::kBootCrashStreakKey, 2);
     flow_.add_printer_via_wizard();
     set_wizard_cancel_callback(nullptr);
     REQUIRE(cfg_->get_active_printer_id() != "alpha");
@@ -449,16 +457,16 @@ TEST_CASE_METHOD(SwitchFlowFixture,
     flow_.cancel_add_printer_wizard();
 
     CHECK(cfg_->get_active_printer_id() == "alpha");
-    CHECK_FALSE(cfg_->get<bool>(helix::BOOT_CONNECT_HOLD_KEY, true));
-    CHECK(cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "") == "beta");
-    CHECK(cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1) == 2);
+    CHECK_FALSE(cfg_->get<bool>(helix::kBootConnectHoldKey, true));
+    CHECK(cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "") == "beta");
+    CHECK(cfg_->get<int>(helix::kBootCrashStreakKey, -1) == 2);
 }
 
 TEST_CASE_METHOD(SwitchFlowFixture,
                  "Switch flow: a cancel after the add-printer wizard ended restores nothing",
                  "[multi-printer][switch_flow]") {
-    cfg_->set<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "beta");
-    cfg_->set<int>(helix::BOOT_CRASH_STREAK_KEY, 2);
+    cfg_->set<std::string>(helix::kSwitchPreviousPrinterKey, "beta");
+    cfg_->set<int>(helix::kBootCrashStreakKey, 2);
     flow_.add_printer_via_wizard();
     set_wizard_cancel_callback(nullptr);
     const std::string added = cfg_->get_active_printer_id();
@@ -473,32 +481,32 @@ TEST_CASE_METHOD(SwitchFlowFixture,
         REQUIRE(flow_.request_switch("beta"));
         expected_active = "beta";
     }
-    const std::string previous = cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "");
-    const int streak = cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1);
+    const std::string previous = cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "");
+    const int streak = cfg_->get<int>(helix::kBootCrashStreakKey, -1);
 
     flow_.cancel_add_printer_wizard();
-    UpdateQueue::instance().drain();
+    lv_timer_handler();
 
     CHECK(cfg_->get_active_printer_id() == expected_active);
-    CHECK(cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "") == previous);
-    CHECK(cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1) == streak);
+    CHECK(cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "") == previous);
+    CHECK(cfg_->get<int>(helix::kBootCrashStreakKey, -1) == streak);
 }
 
 TEST_CASE_METHOD(SwitchFlowFixture,
                  "Switch flow: a wizard start whose save fails keeps the boot-crash record",
                  "[multi-printer][switch_flow]") {
-    cfg_->set<bool>(helix::BOOT_CONNECT_HOLD_KEY, true);
-    cfg_->set<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "gamma");
-    cfg_->set<int>(helix::BOOT_CRASH_STREAK_KEY, 2);
+    cfg_->set<bool>(helix::kBootConnectHoldKey, true);
+    cfg_->set<std::string>(helix::kSwitchPreviousPrinterKey, "gamma");
+    cfg_->set<int>(helix::kBootCrashStreakKey, 2);
     helix::ConfigTestAccess::read_only_mode(*cfg_) = true;
 
     flow_.add_printer_via_wizard();
 
     CHECK(cfg_->get_active_printer_id() == "alpha");
     CHECK(cfg_->get_printer_ids().size() == 2);
-    CHECK(cfg_->get<bool>(helix::BOOT_CONNECT_HOLD_KEY, false));
-    CHECK(cfg_->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "") == "gamma");
-    CHECK(cfg_->get<int>(helix::BOOT_CRASH_STREAK_KEY, -1) == 2);
+    CHECK(cfg_->get<bool>(helix::kBootConnectHoldKey, false));
+    CHECK(cfg_->get<std::string>(helix::kSwitchPreviousPrinterKey, "") == "gamma");
+    CHECK(cfg_->get<int>(helix::kBootCrashStreakKey, -1) == 2);
     CHECK(flow_.wizard_previous_printer_id().empty());
     CHECK(events_.empty());
 }
@@ -609,7 +617,7 @@ TEST_CASE_METHOD(SwitchFlowFixture,
     REQUIRE(switch_card() == "none");
 
     flow_.cancel_add_printer_wizard();
-    UpdateQueue::instance().drain();
+    lv_timer_handler();
 
     CHECK(card_at_teardown_ == "Switching to Alpha / Loading...");
     CHECK(switch_card() == "Switching to Alpha / Connecting...");
@@ -725,4 +733,190 @@ TEST_CASE_METHOD(SwitchFlowFixture,
     CHECK(card_at_rebuild_ == "Switching to Beta / Loading...");
     CHECK(switch_card() == "none");
     CHECK(helix::PrinterSwitchFlowTestAccess::connect_timeout(flow_) == nullptr);
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: leaving a printer drops the connection's locality verdict",
+                 "[multi-printer][switch_flow]") {
+    auto remote_verdict = [] {
+        get_printer_state().set_moonraker_is_remote(true);
+        UpdateQueue::instance().drain();
+        REQUIRE(get_printer_state().moonraker_locality() == helix::MoonrakerLocality::Remote);
+    };
+
+    SECTION("switching") {
+        remote_verdict();
+        flow_.request_switch("beta");
+    }
+    SECTION("adding through the wizard") {
+        remote_verdict();
+        flow_.add_printer_via_wizard();
+        set_wizard_cancel_callback(nullptr);
+    }
+    SECTION("cancelling the wizard") {
+        flow_.add_printer_via_wizard();
+        set_wizard_cancel_callback(nullptr);
+        remote_verdict();
+        flow_.cancel_add_printer_wizard();
+        lv_timer_handler();
+    }
+
+    // Read at the teardown: the rebuild after it can reconnect and settle a new verdict.
+    CHECK(locality_at_teardown_ == helix::MoonrakerLocality::Unknown);
+}
+
+// Panel code drains the UpdateQueue from its own methods; a teardown run by that drain frees
+// the panel still on the stack under it.
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: a switch queued into an UpdateQueue drain waits for the next tick",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    long inside_nested_drain = -1;
+    SECTION("a drain at the top") {
+        helix::ui::queue_update("test::request_switch", [this] { flow_.request_switch("beta"); });
+        UpdateQueue::instance().drain();
+    }
+    SECTION("a drain nested in a queued callback") {
+        helix::ui::queue_update("test::populate_page", [this, &inside_nested_drain] {
+            helix::ui::queue_update("test::request_switch",
+                                    [this] { flow_.request_switch("beta"); });
+            UpdateQueue::instance().drain();
+            inside_nested_drain = teardowns();
+        });
+        UpdateQueue::instance().drain();
+        CHECK(inside_nested_drain == 0);
+    }
+
+    CHECK(teardowns() == 0);
+    CHECK(cfg_->get_active_printer_id() == "alpha");
+
+    lv_timer_handler();
+
+    CHECK(teardowns() == 1);
+    CHECK(events_ == kFullRestart);
+    CHECK(cfg_->get_active_printer_id() == "beta");
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: adding through the wizard from an UpdateQueue drain waits for the "
+                 "next tick",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    helix::ui::queue_update("test::add_printer_via_wizard",
+                            [this] { flow_.add_printer_via_wizard(); });
+    UpdateQueue::instance().drain();
+    CHECK(teardowns() == 0);
+    CHECK(cfg_->get_active_printer_id() == "alpha");
+
+    lv_timer_handler();
+    set_wizard_cancel_callback(nullptr);
+
+    CHECK(teardowns() == 1);
+    CHECK(cfg_->get_active_printer_id() != "alpha");
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: cancelling the add-printer wizard restarts on the next tick, not in "
+                 "a drain",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    flow_.add_printer_via_wizard();
+    set_wizard_cancel_callback(nullptr);
+    REQUIRE(teardowns() == 1);
+
+    helix::ui::queue_update("test::cancel_add_printer_wizard",
+                            [this] { flow_.cancel_add_printer_wizard(); });
+    UpdateQueue::instance().drain();
+    UpdateQueue::instance().drain();
+    CHECK(teardowns() == 1);
+
+    lv_timer_handler();
+
+    CHECK(teardowns() == 2);
+    CHECK(cfg_->get_active_printer_id() == "alpha");
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: a confirmed switch restarts on the next tick, not in a drain",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    set_job(PrintJobState::PRINTING);
+    flow_.request_switch("beta");
+    lv_obj_t* dialog = Modal::get_top();
+    REQUIRE(dialog != nullptr);
+
+    lv_obj_t* btn = lv_obj_find_by_name(dialog, "btn_primary");
+    REQUIRE(btn != nullptr);
+    lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+    UpdateQueue::instance().drain();
+    UpdateQueue::instance().drain();
+    CHECK(teardowns() == 0);
+
+    lv_timer_handler();
+
+    CHECK(events_ == kFullRestart);
+    CHECK(cfg_->get_active_printer_id() == "beta");
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: of two picks made in one drain, the later one runs",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    cfg_->add_printer("gamma", nlohmann::json{{"printer_name", "Gamma"}});
+    helix::ui::queue_update("test::pick_beta", [this] { flow_.request_switch("beta"); });
+    helix::ui::queue_update("test::pick_gamma", [this] { flow_.request_switch("gamma"); });
+    UpdateQueue::instance().drain();
+
+    lv_timer_handler();
+    lv_timer_handler();
+
+    CHECK(teardowns() == 1);
+    CHECK(active_at_teardown_ == "gamma");
+    CHECK(cfg_->get_active_printer_id() == "gamma");
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: a pick made in place drops the one waiting for the tick",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    cfg_->add_printer("gamma", nlohmann::json{{"printer_name", "Gamma"}});
+    helix::ui::queue_update("test::pick_beta", [this] { flow_.request_switch("beta"); });
+    UpdateQueue::instance().drain();
+
+    REQUIRE(flow_.request_switch("gamma"));
+    lv_timer_handler();
+
+    CHECK(teardowns() == 1);
+    CHECK(cfg_->get_active_printer_id() == "gamma");
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: a wizard cancel drops a pick still waiting for the tick",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    flow_.add_printer_via_wizard();
+    set_wizard_cancel_callback(nullptr);
+    const std::string added = cfg_->get_active_printer_id();
+    REQUIRE(teardowns() == 1);
+
+    helix::ui::queue_update("test::pick_beta", [this] { flow_.request_switch("beta"); });
+    UpdateQueue::instance().drain();
+    flow_.cancel_add_printer_wizard();
+    lv_timer_handler();
+
+    CHECK(teardowns() == 2);
+    CHECK(cfg_->get_active_printer_id() == "alpha");
+    const auto ids = cfg_->get_printer_ids();
+    CHECK(std::find(ids.begin(), ids.end(), added) == ids.end());
+}
+
+TEST_CASE_METHOD(SwitchFlowFixture,
+                 "Switch flow: a pick made after a wizard cancel runs after the cancel's restart",
+                 "[multi-printer][switch_flow][lifecycle]") {
+    flow_.add_printer_via_wizard();
+    set_wizard_cancel_callback(nullptr);
+    REQUIRE(teardowns() == 1);
+
+    flow_.cancel_add_printer_wizard();
+    std::vector<std::string> active_at_each_teardown;
+    on_rebuild_ = [&] { active_at_each_teardown.push_back(active_at_teardown_); };
+    helix::ui::queue_update("test::pick_beta", [this] { flow_.request_switch("beta"); });
+    UpdateQueue::instance().drain();
+    lv_timer_handler();
+
+    CHECK(active_at_each_teardown == std::vector<std::string>{"alpha", "beta"});
+    CHECK(cfg_->get_active_printer_id() == "beta");
 }

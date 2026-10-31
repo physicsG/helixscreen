@@ -23,9 +23,8 @@ namespace helix {
 /**
  * @brief Parse one "// screw_name : x=… , y=… , z=… : adjust CW TT:MM" line
  *
- * Also handles the base screw's "// screw_name (base) : x=…" form. Applies the
- * printer-database `screws_tilt_direction` override, so the returned adjustment
- * is what the user should physically do.
+ * Also handles the base screw's "// screw_name (base) : x=…" form. The returned
+ * adjustment is Klipper's own text, unmodified.
  *
  * @param line Raw notify_gcode_response line, including its "//" prefix
  * @param out  Filled in only when the line is a screw result

@@ -21,14 +21,14 @@
 namespace {
 
 // Physics constants
-constexpr float GRAVITY = 400.0f;         // Pixels per second squared
-constexpr float AIR_RESISTANCE = 0.98f;   // Velocity multiplier per frame
-constexpr float FADE_START = 0.7f;        // Start fading at 70% lifetime
-constexpr float PARTICLE_LIFETIME = 3.0f; // Seconds
+constexpr float kGravity = 400.0f;        // Pixels per second squared
+constexpr float kAirResistance = 0.98f;   // Velocity multiplier per frame
+constexpr float kFadeStart = 0.7f;        // Start fading at 70% lifetime
+constexpr float kParticleLifetime = 3.0f; // Seconds
 constexpr int MAX_PARTICLES = 60;         // Keep particle count reasonable
 
 // Celebration colors (vibrant rainbow)
-const lv_color_t CONFETTI_COLORS[] = {
+const lv_color_t kConfettiColors[] = {
     lv_color_hex(0xFF6B6B), // Red
     lv_color_hex(0xFFE66D), // Yellow
     lv_color_hex(0x4ECDC4), // Teal
@@ -38,7 +38,7 @@ const lv_color_t CONFETTI_COLORS[] = {
     lv_color_hex(0xF7DC6F), // Gold
     lv_color_hex(0xAED6F1), // Light blue
 };
-constexpr int NUM_COLORS = sizeof(CONFETTI_COLORS) / sizeof(CONFETTI_COLORS[0]);
+constexpr int kNumColors = sizeof(kConfettiColors) / sizeof(kConfettiColors[0]);
 
 struct Particle {
     lv_obj_t* obj = nullptr;
@@ -92,13 +92,13 @@ void update_particles(ConfettiData* data) {
             continue;
 
         // Physics
-        p.vy += GRAVITY * dt;
-        p.vx *= AIR_RESISTANCE;
-        p.vy *= AIR_RESISTANCE;
+        p.vy += kGravity * dt;
+        p.vx *= kAirResistance;
+        p.vy *= kAirResistance;
         p.x += p.vx * dt;
         p.y += p.vy * dt;
         p.rotation += p.rotation_speed * dt;
-        p.life -= dt / PARTICLE_LIFETIME;
+        p.life -= dt / kParticleLifetime;
 
         // Bounce off bottom
         if (p.y > data->height - p.base_h) {
@@ -125,8 +125,8 @@ void update_particles(ConfettiData* data) {
         lv_obj_set_size(p.obj, w, h);
 
         // Fade out near end of life
-        if (p.life < FADE_START) {
-            lv_opa_t opa = (lv_opa_t)(255 * (p.life / FADE_START));
+        if (p.life < kFadeStart) {
+            lv_opa_t opa = (lv_opa_t)(255 * (p.life / kFadeStart));
             lv_obj_set_style_opa(p.obj, opa, LV_PART_MAIN);
         }
     }
@@ -243,7 +243,7 @@ void ui_confetti_burst(lv_obj_t* confetti, int count) {
         lv_obj_add_flag(p.obj, LV_OBJ_FLAG_FLOATING);
 
         // Random color
-        lv_color_t color = CONFETTI_COLORS[random_int(data->rng, 0, NUM_COLORS - 1)];
+        lv_color_t color = kConfettiColors[random_int(data->rng, 0, kNumColors - 1)];
         lv_obj_set_style_bg_color(p.obj, color, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(p.obj, LV_OPA_COVER, LV_PART_MAIN);
 

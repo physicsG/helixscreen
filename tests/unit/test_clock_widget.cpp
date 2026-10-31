@@ -367,6 +367,41 @@ TEST_CASE_METHOD(HelixTestFixture, "Locale modified date formatting", "[clock_wi
     helix::ui::locale_set_language("en");
 }
 
+TEST_CASE_METHOD(HelixTestFixture, "Locale month-day is the modified date without its time",
+                 "[clock_widget][i18n]") {
+    struct tm test_tm = {};
+    test_tm.tm_year = 126;
+    test_tm.tm_mon = 1; // February
+    test_tm.tm_mday = 28;
+    test_tm.tm_hour = 14;
+    test_tm.tm_min = 30;
+    test_tm.tm_wday = 5;
+
+    const std::string lang = GENERATE("en", "de", "fr", "ja");
+    helix::SystemSettingsManager::instance().set_language(lang);
+    helix::ui::locale_set_language(lang);
+
+    const std::string month_day = helix::ui::format_localized_month_day(&test_tm);
+    const std::string time = helix::ui::format_time(&test_tm);
+    REQUIRE(month_day.find(time) == std::string::npos);
+    REQUIRE(helix::ui::format_localized_modified_date(&test_tm) == month_day + " " + time);
+
+    if (lang == "en") {
+        REQUIRE(month_day == "Feb 28");
+    } else if (lang == "de") {
+        REQUIRE(month_day.rfind("28. ", 0) == 0);
+    } else if (lang == "fr") {
+        REQUIRE(month_day.rfind("28 ", 0) == 0);
+    } else {
+        REQUIRE(month_day == "2/28");
+    }
+
+    REQUIRE(helix::ui::format_localized_month_day(nullptr) == helix::format::UNAVAILABLE);
+
+    helix::SystemSettingsManager::instance().set_language("en");
+    helix::ui::locale_set_language("en");
+}
+
 TEST_CASE_METHOD(HelixTestFixture, "Locale date formatting: boundary day values",
                  "[clock_widget][i18n]") {
     helix::SystemSettingsManager::instance().set_language("en");

@@ -12,18 +12,20 @@
     <!-- preview_size comes from globals as #color_preview_size (responsive: 40/48/56px) -->
     <!-- sv_size, hue_height registered at runtime by register_color_picker_component_constants() -->
   </consts>
-  <!-- SIZE_OK: 470 is an absolute width, not the house 70%, because the
-       two-column layout below has a hard content floor and the swatch grid is a
-       fixed-px row_wrap that overflows rather than reflowing. Budget:
-         space_md pad 12 x2 + left column 190 + space_lg gap 20 + grid 232 = 466
-       The 232 is register_swatch_grid_constants() (src/xml_registration.cpp) at
-       6 columns; it drops to 208 on SMALL and 174 on MICRO. A percentage width
-       narrower than ~470 clips the rightmost swatch column.
+  <!-- SIZE_OK: an absolute width, not the house 70%, because the two-column
+       layout below has a hard content floor and the swatch grid is a fixed-px
+       row_wrap that overflows rather than reflowing. #color_picker_modal_width
+       is 470 on SMALL (a 480-wide panel cannot host more) and 500+ on the core
+       tiers, tracking the space_* padding growth. SMALL budget:
+         space_md pad 8 x2 + left column 190 + space_lg gap 12 + grid 248 = 466
+       The grid width is #swatch_grid_width at 6 columns of swatch + 2*hit
+       touch targets. A percentage width narrower than the budget clips the
+       rightmost swatch column.
        MICRO/TINY never see this card - ui_color_picker.cpp forces LV_PCT(100)
        and the tabbed layout below takes over. -->
   <view name="color_picker"
-        extends="ui_dialog" width="470" height="content" align="center" flex_flow="column" style_flex_main_place="start"
-        style_pad_gap="0">
+        extends="ui_dialog" width="#color_picker_modal_width" height="content" align="center" flex_flow="column"
+        style_flex_main_place="start" style_pad_gap="0">
     <!-- Header: title + close. -->
     <modal_header title="Pick Color" hide_icon="true" hide_close="false" close_callback="color_picker_close_cb"/>
     <!-- Horizontal divider -->
@@ -57,19 +59,19 @@
       <lv_obj width="190"
               height="content" style_pad_all="0" flex_flow="column" style_flex_main_place="start"
               style_flex_cross_place="start" style_pad_gap="#space_md" scrollable="false">
-        <!-- Selected color preview swatch -->
-        <lv_obj name="selected_color_preview"
-                width="#color_preview_size" height="#color_preview_size_small" style_radius="#border_radius"
-                style_bg_color="#card_bg" style_bg_opa="255" style_border_width="2" style_border_color="#text_muted"
-                style_border_opa="80" scrollable="false"/>
+        <!-- Selected colour preview: a colour area, so a rounded rect -->
+        <swatch_paint name="selected_color_preview"
+                      width="#color_preview_size" height="#color_preview_size_small" style_radius="#border_radius"
+                      color="#card_bg"/>
         <!-- HSV picker: SV square + horizontal hue bar below -->
         <ui_hsv_picker name="hsv_picker" sv_size="#sv_size" hue_height="#hue_height" gap="#space_sm"/>
       </lv_obj>
-      <!-- RIGHT COLUMN: Hex input + name + Presets (height matches left column) -->
-      <!-- Left column: 48 (preview) + 12 (gap) + 208 (hsv) = 268px -->
-      <lv_obj height="268"
-              flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="space_between"
-              style_flex_cross_place="start" style_pad_gap="0" scrollable="false">
+      <!-- RIGHT COLUMN: Hex input + name + Presets -->
+      <!-- Content-sized: the preset grid's row pitch varies with the class's
+           touch-target padding, so a fixed height would clip it on some tiers. -->
+      <lv_obj height="content"
+              flex_grow="1" style_pad_all="0" flex_flow="column" style_flex_main_place="start"
+              style_flex_cross_place="start" style_pad_gap="#space_sm" scrollable="false">
         <!-- TOP: Hex input + color name + presets label -->
         <lv_obj width="100%"
                 height="content" style_pad_all="0" flex_flow="column" style_flex_main_place="start"
@@ -95,7 +97,8 @@
              Must stay the LAST child — a reactive <if> appends its rebuilt body
              to the end of the parent's child list. -->
         <if cond="color_picker_palette eq 1">
-          <theme_swatch_grid swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"/>
+          <color_swatch_grid palette="theme"
+                             swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"/>
           <else/>
           <color_swatch_grid swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"/>
         </if>
@@ -116,10 +119,10 @@
         <!-- Only child of presets_content, so the reactive <if> ordering
              constraint is satisfied. -->
         <if cond="color_picker_palette eq 1">
-          <theme_swatch_grid width="100%"
-                             swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"
-                             swatch_size="#picker_tab_swatch_size" gap="#picker_tab_swatch_gap"
-                             gap_half="#picker_tab_swatch_gap_half"/>
+          <color_swatch_grid width="100%"
+                             palette="theme" swatch_callback="color_swatch_clicked_cb"
+                             selected_subject="color_picker_selected_swatch" swatch_size="#picker_tab_swatch_size"
+                             gap="#picker_tab_swatch_gap" gap_half="#picker_tab_swatch_gap_half"/>
           <else/>
           <color_swatch_grid width="100%"
                              swatch_callback="color_swatch_clicked_cb" selected_subject="color_picker_selected_swatch"
@@ -138,11 +141,10 @@
         <lv_obj width="content"
                 height="content" style_pad_all="0" flex_flow="column" style_flex_main_place="start"
                 style_flex_cross_place="start" style_pad_gap="#space_sm" scrollable="false">
-          <!-- Selected color preview swatch -->
-          <lv_obj name="selected_color_preview_tiny"
-                  width="#color_preview_size" height="#color_preview_size_small" style_radius="#border_radius"
-                  style_bg_color="#card_bg" style_bg_opa="255" style_border_width="2" style_border_color="#text_muted"
-                  style_border_opa="80" scrollable="false"/>
+          <!-- Selected colour preview: a colour area, so a rounded rect -->
+          <swatch_paint name="selected_color_preview_tiny"
+                        width="#color_preview_size" height="#color_preview_size_small" style_radius="#border_radius"
+                        color="#card_bg"/>
           <!-- Hex input -->
           <text_input name="hex_input_tiny"
                       width="100" height="content" max_length="9" text="#808080" placeholder_text="#hex_placeholder"

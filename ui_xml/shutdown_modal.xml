@@ -112,8 +112,10 @@
     </lv_obj>
 
     <!-- Dual-scope buttons: two split buttons (Restart, Shutdown), each with a
-         Both/Printer/Screen dropdown. Default selection is Both — the most-asked
-         dual-scope action. Dropdown lets the user narrow scope when they want. -->
+         Both/Printer/Screen dropdown. ShutdownModal::on_show applies the default
+         scope passed to set_dual_callbacks (plan_shutdown_dialog picks Screen);
+         selected="2" here only matches it at parse time. The dropdown widens the
+         scope to the printer when the user means it. -->
     <lv_obj width="100%"
             height="content" flex_flow="row" style_pad_gap="#space_sm" style_pad_left="#space_lg"
             style_pad_right="#space_lg" style_pad_top="0" style_pad_bottom="#space_lg">
@@ -121,13 +123,13 @@
 
       <ui_split_button name="split_restart"
                        variant="primary" icon="restart" flex_grow="1" text_format="Restart %s"
-                       options="Both&#10;Printer&#10;Screen" options_tag="Both&#10;Printer&#10;Screen" selected="0">
+                       options="Both&#10;Printer&#10;Screen" options_tag="Both&#10;Printer&#10;Screen" selected="2">
         <event_cb trigger="clicked" callback="on_restart_split_clicked"/>
       </ui_split_button>
 
       <ui_split_button name="split_shutdown"
                        variant="danger" icon="power" flex_grow="1" text_format="Shutdown %s"
-                       options="Both&#10;Printer&#10;Screen" options_tag="Both&#10;Printer&#10;Screen" selected="0">
+                       options="Both&#10;Printer&#10;Screen" options_tag="Both&#10;Printer&#10;Screen" selected="2">
         <event_cb trigger="clicked" callback="on_shutdown_split_clicked"/>
       </ui_split_button>
     </lv_obj>

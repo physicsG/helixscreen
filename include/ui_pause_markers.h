@@ -7,13 +7,14 @@
  *
  * Both progress surfaces that fill from `print_progress_display` can carry a
  * tick per scheduled pause found in the print's gcode (M600 / PAUSE / M601 /
- * M0; see gcode_pause_scan.h): the linear `lv_bar` and the 270-degree
- * `lv_arc`. A tick is placed at the pause's fraction on the SAME axis the bar
- * is filling on — PrinterPrintState derives that axis from the file, and
- * markers render only while the list belongs to the file being printed
- * (PrinterPrintState::pause_markers_match_current_file()). No list means no
- * ticks: an external start whose gcode was never fetched degrades to absent,
- * never to wrong.
+ * M0; see gcode_pause_scan.h), plus one for the pause scheduled at runtime
+ * (layer_pause.h), placed where the file reports that layer: the linear
+ * `lv_bar` and the 270-degree `lv_arc`. A tick is placed at the pause's
+ * fraction on the SAME axis the bar is filling on — PrinterPrintState derives
+ * that axis from the file, and markers render only while the scan belongs to
+ * the file being printed (PrinterPrintState::pause_scan_matches_current_file()).
+ * No scan means no ticks: an external start whose gcode was never fetched
+ * degrades to absent, never to wrong.
  *
  * Draw hooks have no declarative equivalent (.claude/rules/declarative-ui.md),
  * so this is a sanctioned C++ site; the ticks read live state at draw time

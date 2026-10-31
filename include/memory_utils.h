@@ -68,11 +68,11 @@ struct MemoryInfo {
     // (AD5X reports ~470MB) would mis-classify as "normal" and inherit the tight
     // 3MB/5min growth threshold meant for 256-512MB boards, spuriously warning
     // on the one-time 3D viewer load at print start.
-    static constexpr size_t TIER_CONSTRAINED_KB =
+    static constexpr size_t kTierConstrainedKb =
         256 * 1024; ///< < 256MB usable = constrained (AD5M, K1C)
-    static constexpr size_t TIER_NORMAL_KB =
+    static constexpr size_t kTierNormalKb =
         448 * 1024; ///< 256-448MB usable = normal; >=448MB (512MB-class, e.g. AD5X) = good
-    static constexpr size_t TIER_LOW_RAM_KB =
+    static constexpr size_t kTierLowRamKb =
         2ULL * 1024 * 1024; ///< <= 2GB = low-RAM tier (usually co-hosts Klipper)
 
     /// Check if available memory is low (< 64MB available right now)
@@ -82,23 +82,23 @@ struct MemoryInfo {
 
     /// Device tier: constrained (< 256MB total) - AD5M, embedded
     bool is_constrained_device() const {
-        return total_kb < TIER_CONSTRAINED_KB;
+        return total_kb < kTierConstrainedKb;
     }
 
     /// Device tier: normal (256-448MB usable) - Pi 3, low-end Pi 4
     bool is_normal_device() const {
-        return total_kb >= TIER_CONSTRAINED_KB && total_kb < TIER_NORMAL_KB;
+        return total_kb >= kTierConstrainedKb && total_kb < kTierNormalKb;
     }
 
     /// Device tier: good (>= 448MB usable) - 512MB-class (AD5X), Desktop, Pi 4 2GB+
     bool is_good_device() const {
-        return total_kb >= TIER_NORMAL_KB;
+        return total_kb >= kTierNormalKb;
     }
 
     /// Low-RAM tier (total RAM <= 2GB): these boards usually co-host Klipper
     /// and Moonraker, so memory decisions take a smaller share of what is left.
     bool is_low_ram_device() const {
-        return total_kb > 0 && total_kb <= TIER_LOW_RAM_KB;
+        return total_kb > 0 && total_kb <= kTierLowRamKb;
     }
 
     /// Get total memory in MB
@@ -131,14 +131,14 @@ MemoryInfo get_system_memory_info();
 // buffers accelerometer samples and runs an FFT that overcommits tiny hosts
 // (e.g. the 128 MB Elegoo CC1) into swap thrash, surfacing as klippy
 // "Timer Too Close" errors. Threshold chosen by the maintainer (200 MB).
-inline constexpr size_t RESONANCE_LOW_RAM_WARN_MB = 200;
+inline constexpr size_t kResonanceLowRamWarnMb = 200;
 
 // Klipper's resonance analysis child needs about 45-50 MB on armv7. Below this
 // headroom the kernel OOM-kills it and klippy wedges until a host-side restart
 // or power cycle, so the check is refused rather than warned. Measured: an AD5M
 // with 74 MB headroom survived; a CC1 with 25-30 MB did not. Headroom, not
 // total RAM, decides it: the AD5M has less RAM than the CC1 but has swap.
-inline constexpr size_t RESONANCE_MIN_HEADROOM_MB = 64;
+inline constexpr size_t kResonanceMinHeadroomMb = 64;
 
 enum class ResonanceMemory {
     OK,     ///< enough memory; start without asking
@@ -152,10 +152,10 @@ inline ResonanceMemory resonance_memory_check(const MemoryInfo& mem) {
     if (mem.total_kb == 0) {
         return ResonanceMemory::OK;
     }
-    if (mem.headroom_mb() < RESONANCE_MIN_HEADROOM_MB) {
+    if (mem.headroom_mb() < kResonanceMinHeadroomMb) {
         return ResonanceMemory::REFUSE;
     }
-    if (mem.total_mb() < RESONANCE_LOW_RAM_WARN_MB) {
+    if (mem.total_mb() < kResonanceLowRamWarnMb) {
         return ResonanceMemory::WARN;
     }
     return ResonanceMemory::OK;
@@ -166,16 +166,16 @@ inline ResonanceMemory resonance_memory_check(const MemoryInfo& mem) {
  */
 struct GCodeMemoryLimits {
     /// Minimum available RAM (KB) to even attempt 3D rendering
-    static constexpr size_t MIN_AVAILABLE_KB = 48 * 1024; // 48MB
+    static constexpr size_t kMinAvailableKb = 48 * 1024; // 48MB
 
     /// Maximum G-code file size (bytes) for 3D rendering on constrained devices
-    static constexpr size_t MAX_FILE_SIZE_CONSTRAINED = 2 * 1024 * 1024; // 2MB
+    static constexpr size_t kMaxFileSizeConstrained = 2 * 1024 * 1024; // 2MB
 
     /// Maximum G-code file size (bytes) for 3D rendering on normal devices
-    static constexpr size_t MAX_FILE_SIZE_NORMAL = 20 * 1024 * 1024; // 20MB
+    static constexpr size_t kMaxFileSizeNormal = 20 * 1024 * 1024; // 20MB
 
     /// Memory expansion factor (file size -> parsed geometry size estimate)
-    static constexpr size_t EXPANSION_FACTOR = 15;
+    static constexpr size_t kExpansionFactor = 15;
 };
 
 /**

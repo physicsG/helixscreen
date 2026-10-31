@@ -2,9 +2,10 @@
 
 The Anycubic ACE Pro is a 4-slot dryer-equipped multi-material hub (8 slots in Rinkhals
 "Combo" setups), surfaced through four different software stacks: native Anycubic
-GoKlipper via Rinkhals (primary), community ValgACE/BunnyACE REST, the unverified
-Kobra-S1 fork, and multiACE on the Snapmaker U1 (detected, deliberately declined). Topology is
-`PathTopology::HUB`; WebSocket on the native path, REST fallback.
+GoKlipper via Rinkhals (primary), community ValgACE/BunnyACE REST, the ACEPRO Klipper
+driver (one unit per daisy-chained ACE), and multiACE on the Snapmaker U1 (driven by its
+own backend, not this one). Topology is `PathTopology::HUB`; WebSocket on the native and
+ACEPRO paths, REST fallback.
 
 ## ACE (Anycubic ACE Pro)
 
@@ -17,8 +18,8 @@ whichever of these the printer is running:
 |---|-------|-----------------------------|-----------|----------|----------------|
 | 1 | **Native Anycubic GoKlipper (via Rinkhals)** | `filament_hub` printer object (config `[ace]`) | WebSocket query/subscribe | **Primary real user base** — stock Kobra 3 / 3 V2 / 3 Max / S1 / S1 Max (Combo) flashed with [Rinkhals](https://github.com/jbatonnet/Rinkhals) | ✅ Handled (parses `filament_hub`) |
 | 2 | **Community ValgACE / BunnyACE / DuckACE** | `ace` printer object + `ace_status.py` | `/server/ace/*` REST bridge | ACE Pro bolted onto a **non-Anycubic DIY printer** (niche; DuckACE abandoned) | ✅ Handled (REST fallback) |
-| 3 | **Mainline-Python Kobra-S1 fork** (`github.com/Kobra-S1/klipper-kobra-s1`) | manager `ace` object + per-unit `ace_instance_N` objects + `ace_status` Moonraker component | WebSocket query/subscribe + `/server/ace/*` REST | KS1 users replacing KobraOS with mainline Klipper (often on an external Pi) | ✅ Handled (object path: instance slots + manager `current_index`; REST: `/status` `ace_manager`) |
-| 4 | **multiACE / SnapAce** ([`decay71/multiACE`](https://github.com/decay71/multiACE)) | `ace` printer object, but a **multi-unit** `aces[]` status shape | WebSocket only (no REST bridge) | **Snapmaker U1** with 1-4 ACE Pro / ACE Pro 2 units bolted on | ⚠️ **Declined** - recognised at detection, and the Snapmaker U1 backend keeps the printer. The `aces[]` shape is unread |
+| 3 | **ACEPRO driver** ([`Kobra-S1/ACEPRO`](https://github.com/Kobra-S1/ACEPRO), a Klipper extras module) | manager `ace` object (also registered as `ace_state`) + one `ace_instance_N` object per unit + `ace_status` Moonraker component | WebSocket query/subscribe + `/server/ace/*` REST | Kobra S1 / Kobra X / Kobra 3 family on vanilla Klipper or Kalico (often on an external Pi), one or more ACE Pro / ACE 2 units | ✅ Handled (object path: one unit per instance + manager `current_index`; REST: one unit, `/status` `ace_manager`) |
+| 4 | **multiACE / SnapAce** ([`decay71/multiACE`](https://github.com/decay71/multiACE)) | `ace` printer object, but a **multi-unit** `aces[]` status shape | WebSocket only (no REST bridge) | **Snapmaker U1** with 1-4 ACE Pro / ACE Pro 2 units bolted on | ➡️ **Another backend** - recognised at detection; the Snapmaker U1 backend keeps the printer and `AmsBackendMultiAce` reads the `aces[]` shape ([FILAMENT_BACKEND_MULTIACE.md](FILAMENT_BACKEND_MULTIACE.md)) |
 
 **How to think about the four:**
 
@@ -28,12 +29,14 @@ whichever of these the printer is running:
 - **Path 2 (community)** is ACE-on-a-DIY-rig: ValgACE (active), plus the BunnyACE/DuckACE
   forks (DuckACE abandoned). Integrates through Moonraker macros/endpoints rather than a
   native Klipper object.
-- **Path 3 (KS1 fork)** is a *full Klipper firmware fork* for the Kobra S1
-  — related to the Path 2 driver concept (it too ships an `ace_status.py`) but wrapped in
-  KS1-specific cutter/purge/toolchange macros. Its live status surface is confirmed
-  (user captures, #1069; the "ACEPRO" driver at `Kobra-S1/ACEPRO` on Kalico) and handled —
-  see the Path 3 section below. Control gcode (`ACE_CHANGE_TOOL`,
-  `ACE_ENABLE/DISABLE_FEED_ASSIST`) matches what the backend already sends. Full teardown:
+- **Path 3 (ACEPRO)** is a Klipper extras driver, not a firmware fork: it runs on the
+  Kobra S1 / Kobra X / Kobra 3 family under vanilla Klipper (or Kalico), drives one or
+  more daisy-chained ACE Pro / ACE 2 units, and ships its own `ace_status.py` bridge
+  beside its toolchange macros. Its live status surface is confirmed (user captures,
+  #1069, captured on the `klipper-kobra-s1` firmware) and handled — see the Path 3
+  section below. `ACE_CHANGE_TOOL` matches what the backend sends; its slot commands
+  (`ACE_FEED`, `ACE_RETRACT`, `ACE_ENABLE/DISABLE_FEED_ASSIST`) need `INSTANCE=` beside
+  `INDEX=` (see G-code Commands below). Full teardown:
   [`printer-research/ANYCUBIC_ACE_KOBRA_S1_LOG_ANALYSIS.md`](printer-research/ANYCUBIC_ACE_KOBRA_S1_LOG_ANALYSIS.md).
 - **Path 4 (multiACE)** is ACE Pro hardware on a **Snapmaker U1**, and it is the one path
   the ACE backend is deliberately kept away from - see the section below.
@@ -45,10 +48,11 @@ whichever of these the printer is running:
 
 ### Path 4: multiACE (Snapmaker U1 + ACE Pro)
 
-> **Recognised, not driven.** A U1 that gains multiACE keeps its Snapmaker backend and its
-> four-toolhead UI; what it loses is the ACE-specific affordances, because the `aces[]` slot
-> shape is not modelled (prestonbrown/helixscreen#1426). No hardware seen; this is a source
-> read of the upstream repo (2026-09-01, v0.99.8b).
+> **Not this backend's.** A U1 that gains multiACE keeps its Snapmaker backend and its
+> four-toolhead UI, and `AmsBackendMultiAce` adds the ACE units upstream of the heads:
+> [FILAMENT_BACKEND_MULTIACE.md](FILAMENT_BACKEND_MULTIACE.md). The detection rule below is
+> what keeps `AmsBackendAce` away from it (prestonbrown/helixscreen#1426). Source read of
+> the upstream repo (2026-09-01, v0.99.8b).
 
 [multiACE](https://github.com/decay71/multiACE) hangs **1-4 Anycubic ACE Pro / ACE Pro 2
 units off a Snapmaker U1** — the U1's four toolheads each get fed from an ACE slot through
@@ -102,8 +106,8 @@ stack this chain matches runs on an unmodded U1. The yield is scoped to `AmsType
 a U1 carrying a filament system we *can* read - Happy Hare, AFC - still hands that system
 the printer.
 
-Net result: a multiACE U1 keeps the four-toolhead Snapmaker UI, and loses only the
-ACE-specific affordances.
+Net result: a multiACE U1 keeps the four-toolhead Snapmaker UI, and the factory builds
+`AmsBackendMultiAce` for it, which reads the `aces[]` shape this backend cannot.
 
 > **Do not confuse multiACE with the other U1 + ACE Pro mod.**
 > [DnG-Crafts/U1-Ace](https://github.com/DnG-Crafts/U1-Ace) registers `ace_device`, which
@@ -152,61 +156,133 @@ a per-lane multiplexer than to anything currently modelled — see
 [FILAMENT_BACKEND_SNAPMAKER_U1.md](FILAMENT_BACKEND_SNAPMAKER_U1.md) for the stock model it
 replaces.
 
-### Path 3: Kobra S1 mainline-Python / ACEPRO
+### Path 3: the ACEPRO driver
 
 Confirmed from a live rig (#1069: Kobra-S1/ACEPRO driver @ c89fe17 on Kalico, 1x ACE Pro,
-fw `V1.3.856`) — real captures, not a source read. The defining property: **the surface is
-split in two.** The top-level `ace` Klipper object is a *manager* with no slots; each unit
-publishes its own `ace_instance_N` object; and **no slot is ever reported "loaded"** — the
-manager's `current_index` is the only seat signal.
+fw `V1.3.856`) — real captures — with the multi-unit surface read from the driver's source
+(its `extras/ace` manager and instance modules). The defining property: **the surface
+is split in two.** The top-level `ace` Klipper object is a *manager* with no slots (the
+driver registers the same object a second time as `ace_state`); each unit publishes its
+own `ace_instance_N` object, a separate Klipper object, so a notify frame carries any
+subset of them; and **no slot is ever reported "loaded"** — the manager's `current_index`
+is the only seat signal.
 
 **Manager — `ace.get_status()`:**
 
 | Field | Meaning |
 |-------|---------|
-| `current_index` | **The loaded-tool signal.** Global tool index across every unit (`tool = instance*4 + local_slot` for 4-slot units); `-1` = nothing loaded. This is the fourth and last explicit seat signal `src/printer/ams_backend_ace.cpp#parse_ace_object` arbitrates, via `seat_from_global_index_locked` |
-| `target_index` | Tool being changed *toward* mid-swap (`-1` when idle). While it names an unseated tool it is `pending_target_slot` and an idle hub reads as a driver-raised action: LOADING from an empty head; swapping out a seated tool, UNLOADING (path on the outgoing lane) until `rdm_sensor` clears, then LOADING on the target lane. The sensor is made again by the incoming strand, so a per-swap latch, not the sensor alone, holds the phase (`src/printer/ams_backend_ace.cpp#apply_target_index_locked`) |
-| `ace_instances` | Unit count (1 on the captured rig) |
+| `current_index` | **The loaded-tool signal.** The driver's tool number across every unit (`tool = instance*4 + local_slot`; each slot also publishes its own `tool`); `-1` = nothing loaded. This is the fourth and last explicit seat signal `src/printer/ams_backend_ace.cpp#parse_ace_object` arbitrates, via `seat_from_tool_locked`, which finds the slot by the `tool` each slot publishes |
+| `target_index` | Tool number being changed *toward* mid-swap (`-1` when idle). While it names an unseated tool it is `pending_target_slot` and an idle hub reads as a driver-raised action: LOADING from an empty head; swapping out a seated tool, UNLOADING (path on the outgoing lane) until `rdm_sensor` clears, then LOADING on the target lane. The sensor is made again by the incoming strand, so a per-swap latch, not the sensor alone, holds the phase (`src/printer/ams_backend_ace.cpp#apply_target_index_locked`). |
+| `ace_instances` | Unit count |
 | `endless_spool_enabled`, `endless_spool_match_mode` | Endless-spool config (`false` / `"exact"` captured) |
 | `ace_pro_enabled` | Master switch; presence is the capability |
 | `toolhead_sensor`, `rdm_sensor` | Path sensors (toolhead, hub). With nothing seated, or during a driver-started swap, they place the strand: toolhead made = `TOOLHEAD`, hub only = `OUTPUT` (`#get_filament_segment`). A seated tool outside a swap answers `NOZZLE` once `target_index` is `-1` or the toolhead sensor is made; while the driver still targets it short of the toolhead (a retried feed keeps `target_index` on the current tool) the sensors place the strand. The driver persists `target_index` and can leave it latched on a loaded tool, which is why the toolhead sensor alone ends the retry. A seated tool with both sensors clear is a feed the driver paused on: `current_tool`/`current_slot` keep naming it, but it is published as not loaded and its slot is not stamped LOADED (`#path_empty_under_seat_locked`) |
 
-**Unit — `ace_instance_N.get_status()`** (the captured rig exposes `ace_instance_0`):
+**Unit — `ace_instance_N.get_status()`** (the captured rig exposes `ace_instance_0`; an ACE 2 publishes the same keys plus the ones marked ACE 2):
 
 | Field | Meaning |
 |-------|---------|
 | `status` | Unit state string (`"ready"` captured); same loading/unloading/error vocabulary the backend maps to `AmsAction` |
-| `dryer_status` | The dryer, under the `dryer_status` key (not `dryer`): `{status, target_temp, duration, remain_time}` — same nested shape as Path 1's `dryer`. Both spellings are accepted by `src/printer/ams_backend_ace.cpp#apply_dryer_state_locked` |
+| `dryer_status` / `dryer` | The dryer, `{status, target_temp, duration, remain_time}` — same nested shape as Path 1's `dryer`. A unit that has answered a status poll states it as `dryer_status`; before its first answer the driver's default carries `dryer`. Both spellings are accepted (`src/printer/ace_slot_parse.cpp#apply_dryer_state`) |
+| `humidity` (ACE 2) | The unit's humidity sensor; an ACE Pro states none. Kept on the unit's environment through frames that omit it |
+| `status_code` (ACE 2), `slots[].status_code` / `slots[].status_detail` | Device fault detail; not read |
 | `temp` | Ambient/unit temperature (top-level; feeds `DryerInfo.current_temp_c`) |
 | `slots[4]` | Per-slot inventory; each entry carries `index`, **`tool`** (its own global tool index), `status` (**inventory only** — `"ready"`/`"empty"`, never `"loaded"`), `color` (`[r,g,b]`), **`material`** (not `type`; the backend reads `material` first with `type` as the ValgACE fallback), `temp` (print temp), `rfid` |
-| `model`, `firmware`, `boot_firmware`, `protocol` (`"ace1_json"`), `usb_port`, `usb_path`, `connection_state` | Identity/telemetry (`"Anycubic Color Engine Pro"` / `"V1.3.856"` captured) |
+| `slots[].park_state` | `"unknown"` / `"parked"` / `"loaded"`, not persisted: every slot reads `"unknown"` after a driver restart. Parsed on both the object path and `/server/ace/slots` (`src/printer/ams_backend_ace.cpp#note_park_state_locked`). An absent field or any other string is `unknown`, which draws as before. An idle slot (not the seat, `target_index` `-1`, action idle) with filament present and `park_state` `"parked"` draws its strand at `OUTPUT`, the segment the hub sensor uses (`#slot_parked_at_hub_locked`). `"parked"` covers an RDM-verified park just short of the hub and a fixed-length toolhead-only unload that need not reach it; the driver does not tell them apart yet, so both draw at the hub. `"loaded"` adds nothing: the seat and the sensors place that strand. The sensors, the seat and the toolchange phase rules always win |
+| `instance` | N, the unit's place in the chain |
+| `protocol` | `"ace1_json"` (ACE Pro) or `"ace2_proto"` (ACE 2) |
+| `model`, `firmware`, `boot_firmware`, `usb_port`, `usb_path` | Identity/telemetry (`"Anycubic Color Engine Pro"` / `"V1.3.856"` captured). An ACE 2 whose device reports no model gets the driver's own label (`"ACE2 (Shared Bus)"` or `"ACE2 (<port>)"`) |
+| `connection_state` | `connected`, or `initializing` / `connecting` / `reconnecting` / `disabled`; read as the unit's link |
+| `feed_assist_slot` | The unit-local slot the driver is feed-assisting, `-1` for none. The driver turns it on at the end of a load and keeps it on through a print. The Feed Assist toggle shows it for the loaded slot (`src/printer/ams_backend_ace.cpp#feed_assist_action_locked`), carries no value until the unit has stated it, and is disabled with nothing loaded, where `ACE_ENABLE/DISABLE_FEED_ASSIST` would have no slot to mean |
 
 **How the backend reads it** (`src/printer/ams_backend_ace.cpp#on_started`,
-`#handle_status`): the slot-bearing `ace_instance_N` object is parsed first
-(`select_ace_object`), then a manager-shaped `ace` riding the same query response
-or notify frame is parsed after it — slots land first, the seat stamps onto them. Any
+`#handle_status`): the bootstrap queries every `ace_instance_N` discovery found
+(`ace_instance_0`-`3` when discovery lists none) and commits to the object path when one
+carries slots (`select_ace_object`). Every `ace_instance_N` is then unit N, parsed in
+ascending N, and a manager-shaped `ace` riding the same query response or notify frame
+is parsed after them — slots land first, the seat stamps onto them. Any
 non-empty `ace` without slots counts as the manager, since its deltas name `current_index`
 only when the seat moved (`#manager_ace_object`). A
 manager-only notify frame (e.g. `current_index` flipping to `-1` on a TR) is parsed on its
-own and clears the seat. Notify frames carry per-object deltas: a frame carrying any
-`ace_instance_N` key resolves to the lowest such instance (the one the display is
-anchored to), and a frame with no slots array at all falls back to the first non-empty
-object rather than being dropped.
+own and clears the seat. Notify frames carry per-object deltas, so a frame holds only
+the units that changed, each applied to its own unit; on the other drivers a frame with
+no slots array at all falls back to the first non-empty object rather than being dropped.
 
-**Multi-unit rigs** (`ace_instances > 1`, unobserved — every capture so far has one unit):
-the backend displays the lowest instance only. A `current_index` beyond that unit's slots
-seats the tool and marks no slot, and the active-material display falls back to the
-external-spool profile while printing from an undisplayed unit's lane.
+**Units** (`ace_instances` of them; observed with an ACE Pro and an ACE 2). The driver
+numbers its instances in USB daisy-chain order, ACE Pro units first and ACE 2 units on the
+shared bus after them, and `ace_instance_N` is unit N here, its slots numbered globally
+after the units before it (`#index_units_locked`). A delta for one instance updates that
+unit only, looked up by its number (`#ace_instance_objects`, numeric order, instances
+below `kMaxUnits`). Only an instance that carries `slots`, or the bootstrap's pick, puts
+the backend on this path: a slotless delta on a rig the REST bridge serves is ignored. A
+unit named before the ones below it have reported leaves them as four disconnected
+placeholder slots, so numbering never shifts; a placeholder no instance has reported is
+`absent` and takes no dryer or slot command, since no instance answers to its
+`INSTANCE=`. The bootstrap answer names every unit there is, so units it does not name
+are dropped (`#keep_units`), as on a restart onto a shorter chain or another driver.
+A unit created after the manager's last sensor frame takes the sensor readings already
+in hand. Every ACEPRO lane names the `extruder` and the hub `ace`: all units feed one
+toolhead through the one hub `rdm_sensor` watches.
+
+- **Names** (`#apply_unit_identities_locked`): a unit shows the short product name for
+  its `protocol`, `ACE Pro` (`ace1_json`) or `ACE Pro 2` (`ace2_proto`; anything else
+  reads `ACE Pro`), numbered `#2`, `#3` when a name repeats. Product names, so not
+  translated. The `model` string stays the unit's `name`, never its display name, and the
+  protocol words never reach the screen. Model, protocol and
+  firmware are kept per unit, apart from the units, so identity a frame states before the
+  unit's slots arrive is not lost; each unit carries its own `firmware_version`, and the
+  system version is unit 0's.
+- **Tools**: a slot's tool is the `tool` it publishes, taken only as an integer below
+  `kMaxUnits * kSlotsPerUnit` (`src/printer/ace_slot_parse.cpp#read_slot_tool`) and kept
+  as the slot's `mapped_tool`, which `sync_tool_map_from_slots` publishes in both
+  directions (`#slot_for_tool_locked`, `#tool_for_slot_locked` read it). `ACE_CHANGE_TOOL
+  TOOL=` sends that number. A slot the
+  driver has named no tool for refuses a load. A `current_index` naming a tool whose unit
+  has not reported is stated with no slot marked, and every instance frame resolves the
+  seat again, so it lands once that unit's slots arrive.
+- **Status**: each unit's `status` word is kept apart, so one unit reading `ready` does
+  not end another's `loading` (`#set_unit_action_locked`), and an IDLE resolved from them
+  (`busy` or `ready` while the driver feeds) leaves a load sent from the screen LOADING
+  until its own ack; `connection_state` sets the unit's link.
+- **Dryer**: each unit keeps its own dryer and environment, and the dryer commands name
+  it: `ACE_START_DRYING INSTANCE=N TEMP= DURATION=` and `ACE_STOP_DRYING INSTANCE=N`
+  (`#dryer_instance_argument`). **Without `INSTANCE=` the driver acts on every unit**, so
+  the backend never omits it once it has seen this driver. The limits are the ACE Pro
+  defaults (`src/printer/ace_slot_parse.cpp#ace_pro_dryer_info`): the driver checks each
+  unit against its configured `max_dryer_temperature` (60 by default) but does not
+  publish it.
 
 **REST surface** (`ace_status.py`; used when no slot-bearing object answers the initial
-query):
+query). **The REST path shows one unit only**: instance 0, at unit 0. The backend polls
+`/status?instance=0` and `/slots?instance=0` (`#kRestStatusPath`; the ValgACE bridge
+ignores the argument), reads each REST slot's `tool` as the object path does, and names
+the instance `/status` reports serving in its slot and dryer commands
+(`#ace_instance_for_unit_locked`). A chain with no instance 0 answers those polls with HTTP 200 and a
+result carrying only `error`; that counts as a failed poll (`#rest_poll_answered`): the
+inventory stands, and with no data ever the missing-bridge error surfaces.
+
+**Pushed by the HelixPrint plugin.** Where the plugin's `vendor_ace` feature is ready
+(`moonraker-plugin/helix_vendor_ace.py`), the plugin calls the same two endpoints in-process
+and broadcasts their answers as `notify_helix_vendor_state` (vendor `ace`, payload
+`{"status": ..., "slots": ...}`, `error` answers included) only when they changed. The
+plugin reports the feature ready only after a read returned data, and unavailable again
+after three failed reads in a row. While it pushes, the polling thread drops to a 30 s
+backstop (`#rest_data_poll_due`, `kVendorPushBackstop`), and `#on_vendor_state` hands each
+answer where a poll's would go: data to `#apply_rest_status` / `#apply_rest_slots`, a status
+error to `#note_rest_status_failure` (the failure count and the missing-bridge toast).
+Status frames are the tick that re-reads the plugin's state (`#refresh_vendor_push`): a
+probe on the current connection that finds the feature ready owes one poll of both
+endpoints, and anything else (no probe since a reconnect, the feature gone) puts the thread
+back on its 500 ms cadence. `on_started` / `on_stopping` reset the tracker. The rule is `vendor_state_source()` (`include/vendor_state_push.h`),
+shared with the AD5X IFS backend; the plugin side is in
+[HELIXPRINT_PLUGIN.md](HELIXPRINT_PLUGIN.md).
 
 | Endpoint | Behaviour |
 |----------|-----------|
-| `GET /server/ace/status` | `ace_instance_0.get_status()` verbatim **plus** an envelope: `instance_index`, `instances[]` (per-unit get_status), `ace_manager` (the manager fields — **`current_index` seats here**, `#parse_status_response`), `ace_instance_count`. The top-level `status` field is the action alias for the bridge's `action` |
-| `GET /server/ace/slots` | `{slots: [...]}` — same slot shape as the instance, `material` key confirmed live |
-| `GET /server/ace/info` | **404 — the endpoint does not exist on this fork.** The backend treats /info as optional and identifies the hardware from /status's model + firmware |
-| `POST /server/ace/command` | Passes `ACE_*` gcode through — `ACE_CHANGE_TOOL TOOL=`, `ACE_START_DRYING TEMP= DURATION=`, `ACE_STOP_DRYING` are source-confirmed, matching what the backend already sends |
+| `GET /server/ace/status[?instance=N]` | One instance's `get_status()` verbatim **plus** an envelope: `instance_index` (the instance served), `instances[]` (every unit's get_status), `ace_manager` (the manager fields — **`current_index` seats here**, `#parse_status_response`), `ace_instance_count`. With `?instance=N` it serves instance N. **Without it the bridge picks the instance whose number equals `current_index`** (a tool number, not an instance), else instance 0, so the served unit would change with the seat, which is why the backend always asks for instance 0. The top-level `status` field is the action alias for the bridge's `action` |
+| `GET /server/ace/slots[?instance=N]` | `{slots: [...]}` — the slots of the instance `/status` would serve for the same arguments, each with its `tool`; `material` key confirmed live |
+| `GET /server/ace/info` | **404 — this driver's bridge has no such endpoint.** The backend treats /info as optional and identifies the hardware from /status's model + firmware |
+| `POST /server/ace/command` | Passes `ACE_*` gcode through — `ACE_CHANGE_TOOL TOOL=`, `ACE_START_DRYING [INSTANCE=] TEMP= [DURATION=]`, `ACE_STOP_DRYING [INSTANCE=]` are source-confirmed, matching what the backend sends |
 
 ### History
 
@@ -216,7 +292,7 @@ The ACE backend was originally written **blind for ValgACE** (keying on a Klippe
 
 ACE is detected in two ways:
 
-1. **Object list detection**: `filament_hub` (native Anycubic/Rinkhals) **or** `ace` (community drivers) in `printer.objects.list`.
+1. **Object list detection**: `filament_hub` (native Anycubic/Rinkhals), `ace` (community drivers, and the ACEPRO manager) **or** any `ace_instance_N` (ACEPRO units) in `printer.objects.list`.
 2. **REST probe fallback**: A probe to `/server/ace/info` via `AmsState::probe_ace()` catches **community** setups where the object list is unavailable. (The native path never needs this — `filament_hub` is always in `objects.list`.)
 
 ### Native `filament_hub` Status Schema
@@ -253,6 +329,18 @@ These are the real native verbs from GoKlipper `extras_ace.go` — the backend d
 | `ACE_START_DRYING TEMP={t} DURATION={m}` | Start drying |
 | `ACE_STOP_DRYING` | Stop drying |
 
+> The ACEPRO driver resolves the unit for `ACE_FEED`, `ACE_RETRACT` and
+> `ACE_ENABLE/DISABLE_FEED_ASSIST` (and `ACE_SET_SLOT` and the other slot verbs) from
+> `T=<tool>` or `INSTANCE=<unit> INDEX=<local slot>`, and rejects `INDEX=` alone ("Must
+> specify either T=<tool> or INSTANCE=<inst> INDEX=<slot>", prestonbrown/helixscreen#1821).
+> Once the backend has seen an `ace_instance_N` object or the REST bridge's `ace_manager`,
+> `src/printer/ams_backend_ace.cpp#slot_command` sends the `INSTANCE=` form with the slot's
+> own unit's instance and its local index (on the REST path, the instance `/status`
+> serves); GoKlipper and ValgACE keep `INDEX=`. With nothing seated the commands address
+> the first slot of the first unit present, as slot 0 is on every driver; a slot on an
+> `absent` placeholder refuses them. A seated tool whose unit has not reported
+> its slots refuses them, since slot 0 would feed a second strand into its path.
+
 > Note: `ACE_RECOVER` and `ACE_RESET` are **not** native GoKlipper commands — do not send them on the native path.
 
 ### REST Endpoints (community fallback only)
@@ -268,7 +356,21 @@ These belong to ValgACE's Moonraker component (`ace_status.py`) and are used **o
 ### Threading
 
 - **Native path (`filament_hub`):** WebSocket query + subscription. State is held under `mutex_`; updates arriving on the WebSocket background thread are deferred to the main thread via `token.defer(...)` (L081-safe — never mutate UI state directly from the WS callback).
-- **Community fallback path (`ace`):** a background polling thread runs at ~500ms intervals when the backend is active, caching state under mutex protection.
+- **Community fallback path (`ace`):** a background polling thread runs at ~500ms intervals when the backend is active, caching state under mutex protection. While the HelixPrint plugin pushes the bridge's state, the thread keeps running but polls `/status` and `/slots` only every 30 s (`VendorStateTracker::pushing()` is atomic); pushes arrive on the WebSocket thread and are deferred to the main thread like every other callback.
+
+### Tag reading
+
+`tag_reading()` keeps a bay's last frame whose `rfid` says identified (`true`, or `2` in
+the integer form): material, colour, and `temp_min`/`temp_max` when the frame carries them.
+A finished read that found no tag (`false`, or `1`) or an emptied bay drops it; `0` and
+`3` are a read not finished yet and leave it standing. Both parse paths, the subscription
+and the REST bridge, record it and lay the lane's resolved identity over the hub's memory,
+so a user's edit survives either path's next poll
+(`src/printer/ams_backend_ace.cpp#note_tag_frame_locked`). The REST bridge also reports `temp_min`/`temp_max`;
+they stand unless a user edit moved the slot's temperatures this session. The stored
+record keeps a nozzle temperature for every edit, the hub's own included, so it cannot
+say which were the user's: after a restart the hub's temperatures apply again
+(`src/printer/ams_backend_ace.cpp#apply_hub_temps_locked`).
 
 ### Capabilities
 
@@ -292,7 +394,7 @@ ACE is the primary backend with integrated dryer support. The `DryerInfo` struct
 
 Drying presets are derived from the filament database via `get_default_drying_presets()`.
 
-On the native path, live dryer state (status, target temp, duration, remaining time) is parsed directly from `filament_hub.dryer`.
+On the native path, live dryer state (status, target temp, duration, remaining time) is parsed directly from `filament_hub.dryer`. On the ACEPRO driver each unit has its own dryer, addressed by `INSTANCE=` (Path 3 above).
 
 ---
 

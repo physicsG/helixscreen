@@ -52,6 +52,10 @@ enum class ParamPolicy {
     /// that already owns a dialog — a second modal would stack on top of a live
     /// one whose observers keep firing underneath it.
     Suppress,
+    /// Never raise a modal, but send the values the surface computed (and the
+    /// saved defaults). For a dispatch nobody is watching any more: the op the
+    /// user asked for still runs with the temperature they would have been offered.
+    Unattended,
 };
 
 /**

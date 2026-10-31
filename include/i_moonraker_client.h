@@ -4,6 +4,7 @@
 #pragma once
 
 #include "connection_state.h"
+#include "helix_shared_callback.h"
 #include "json_fwd.h"
 #include "moonraker_error.h"
 #include "moonraker_events.h"          // for helix::MoonrakerEventCallback
@@ -31,7 +32,7 @@ using ::json; // Make global json alias visible in this namespace
 using SubscriptionId = uint64_t;
 
 /** @brief Invalid subscription ID constant */
-inline constexpr SubscriptionId INVALID_SUBSCRIPTION_ID = 0;
+inline constexpr SubscriptionId kInvalidSubscriptionId = 0;
 
 /**
  * @brief Marker key stamped onto a synthetic notify_status_update built from a
@@ -45,7 +46,7 @@ inline constexpr SubscriptionId INVALID_SUBSCRIPTION_ID = 0;
  * else ignores it. Absent on live frames and on the mock's own synthetic
  * dispatches, which ARE the current truth for their session.
  */
-inline constexpr const char* CACHED_SNAPSHOT_MARKER = "_helix_cached_snapshot";
+inline constexpr const char* kCachedSnapshotMarker = "_helix_cached_snapshot";
 
 /**
  * @brief Marker key stamped onto a synthetic notify_status_update whose payload
@@ -58,7 +59,7 @@ inline constexpr const char* CACHED_SNAPSHOT_MARKER = "_helix_cached_snapshot";
  * discovery subscription replay (also a cached snapshot) and by a subscription
  * refresh (current, so not a cached snapshot).
  */
-inline constexpr const char* WHOLE_OBJECTS_MARKER = "_helix_whole_objects";
+inline constexpr const char* kWholeObjectsMarker = "_helix_whole_objects";
 
 /**
  * @brief Wrap a raw status object as the notify_status_update a client dispatches
@@ -72,10 +73,10 @@ inline json make_status_notification(const json& status, bool from_cached_snapsh
     json notification = {{"method", "notify_status_update"},
                          {"params", json::array({status, 0.0})}}; // [status, eventtime]
     if (from_cached_snapshot) {
-        notification[CACHED_SNAPSHOT_MARKER] = true;
+        notification[kCachedSnapshotMarker] = true;
     }
     if (whole_objects) {
-        notification[WHOLE_OBJECTS_MARKER] = true;
+        notification[kWholeObjectsMarker] = true;
     }
     return notification;
 }
@@ -102,8 +103,8 @@ class IMoonrakerClient {
     // ========================================================================
 
     /// @brief Connect to Moonraker WebSocket server
-    virtual int connect(const char* url, std::function<void()> on_connected,
-                        std::function<void()> on_disconnected) = 0;
+    virtual int connect(const char* url, helix::SharedCallback<void()> on_connected,
+                        helix::SharedCallback<void()> on_disconnected) = 0;
 
     /// @brief Disconnect from Moonraker WebSocket server
     virtual void disconnect() = 0;
@@ -120,6 +121,15 @@ class IMoonrakerClient {
     /// re-installs its own reconnect settings, regardless of this flag.
     virtual void set_auto_reconnect(bool enabled) = 0;
 
+    /// @brief Why the last connect() attempt failed before it ever opened
+    ///
+    /// Valid once on_disconnected has fired for an attempt that never connected;
+    /// connect() resets it. A transport that cannot read the socket's cause
+    /// reports Unknown, which is why this one has a body.
+    virtual ConnectFailureKind last_connect_failure() const {
+        return ConnectFailureKind::Unknown;
+    }
+
     // ========================================================================
     // JSON-RPC Protocol
     // ========================================================================
@@ -132,7 +142,7 @@ class IMoonrakerClient {
 
     /// @brief Send JSON-RPC request with one-time response callback
     virtual RequestId send_jsonrpc(const std::string& method, const json& params,
-                                   std::function<void(const json&)> cb) = 0;
+                                   helix::SharedCallback<void(const json&)> cb) = 0;
 
     /// @brief Send JSON-RPC request with success and error callbacks
     /// @param intent Explicit error-reporting intent (include/rpc_error_policy.h),
@@ -141,9 +151,9 @@ class IMoonrakerClient {
     ///        and the presence of @p error_cb.
     virtual RequestId
     send_jsonrpc(const std::string& method, const json& params,
-                 std::function<void(const json&)> success_cb,
-                 std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
-                 bool silent = false,
+                 helix::SharedCallback<void(const json&)> success_cb,
+                 helix::SharedCallback<void(const MoonrakerError&)> error_cb,
+                 uint32_t timeout_ms = 0, bool silent = false,
                  std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) = 0;
 
     /// @brief Send G-code script command
@@ -152,11 +162,12 @@ class IMoonrakerClient {
     /// @brief Fetch G-code command history from Moonraker
     virtual void
     get_gcode_store(int count, std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-                    std::function<void(const MoonrakerError&)> on_error) = 0;
+                    helix::SharedCallback<void(const MoonrakerError&)> on_error) = 0;
 
     /// @brief Fetch cached temperature history from Moonraker (server.temperature_store)
-    virtual void get_temperature_store(std::function<void(const TemperatureStore&)> on_success,
-                                       std::function<void(const MoonrakerError&)> on_error) = 0;
+    virtual void
+    get_temperature_store(std::function<void(const TemperatureStore&)> on_success,
+                          helix::SharedCallback<void(const MoonrakerError&)> on_error) = 0;
 
     // ========================================================================
     // Discovery
@@ -164,8 +175,8 @@ class IMoonrakerClient {
 
     /// @brief Perform printer auto-discovery sequence
     virtual void
-    discover_printer(std::function<void()> on_complete,
-                     std::function<void(const std::string& reason)> on_error = nullptr) = 0;
+    discover_printer(helix::SharedCallback<void()> on_complete,
+                     helix::SharedCallback<void(const std::string& reason)> on_error = nullptr) = 0;
 
     /// @brief Get discovered hardware data
     virtual PrinterDiscovery hardware() const = 0;
@@ -185,14 +196,14 @@ class IMoonrakerClient {
         std::function<void(const helix::PrinterDiscovery&, const json& initial_status)> cb) = 0;
 
     /// @brief Set callback for bed mesh updates received via WebSocket
-    virtual void set_bed_mesh_callback(std::function<void(const json&)> callback) = 0;
+    virtual void set_bed_mesh_callback(helix::SharedCallback<void(const json&)> callback) = 0;
 
     // ========================================================================
     // Subscriptions & Method Callbacks
     // ========================================================================
 
     /// @brief Register callback for status update notifications
-    virtual SubscriptionId register_notify_update(std::function<void(const json&)> cb) = 0;
+    virtual SubscriptionId register_notify_update(helix::SharedCallback<void(const json&)> cb) = 0;
 
     /// @brief Unsubscribe from status update notifications
     virtual bool unsubscribe_notify_update(SubscriptionId id) = 0;
@@ -200,7 +211,7 @@ class IMoonrakerClient {
     /// @brief Register persistent callback for specific notification methods
     virtual void register_method_callback(const std::string& method,
                                           const std::string& handler_name,
-                                          std::function<void(const json&)> cb) = 0;
+                                          helix::SharedCallback<void(const json&)> cb) = 0;
 
     /// @brief Unregister a method callback by handler name
     virtual bool unregister_method_callback(const std::string& method,
@@ -215,13 +226,13 @@ class IMoonrakerClient {
     /// @param status Raw status object to fan out
     /// @param from_cached_snapshot true when `status` was captured earlier and is
     ///        being replayed (the discovery subscription response). Stamps
-    ///        CACHED_SNAPSHOT_MARKER on the synthetic notification so liveness-
+    ///        kCachedSnapshotMarker on the synthetic notification so liveness-
     ///        sensitive consumers can refuse to regress on it. Defaults to false:
     ///        a dispatch that reflects the caller's current view — including every
     ///        mock-driven state change — is live.
     /// @param whole_objects true when `status` is a subscription response, carrying
     ///        every field of each object instead of only the changed ones. Stamps
-    ///        WHOLE_OBJECTS_MARKER.
+    ///        kWholeObjectsMarker.
     virtual void dispatch_status_update(const json& status, bool from_cached_snapshot = false,
                                         bool whole_objects = false) = 0;
 
@@ -259,7 +270,7 @@ class IMoonrakerClient {
 
     /// @brief Register an additional on-connected observer
     virtual void add_connected_observer(const std::string& handler_name,
-                                        std::function<void()> cb) = 0;
+                                        helix::SharedCallback<void()> cb) = 0;
 
     /// @brief Remove a previously-registered on-connected observer
     virtual bool remove_connected_observer(const std::string& handler_name) = 0;

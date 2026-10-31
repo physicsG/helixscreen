@@ -18,6 +18,7 @@ import { isKnownPlatform } from "../index";
 /** Every key get_platform_key() can return today. */
 const RELEASE_PLATFORMS = [
   "ad5m",
+  "android",
   "cc1",
   "esp32",
   "k2",
@@ -26,6 +27,7 @@ const RELEASE_PLATFORMS = [
   "pi32",
   "snapmaker-u1",
   "x86",
+  "x86-desktop",
 ];
 
 /** Keys no current build returns but deployed binaries still report. */

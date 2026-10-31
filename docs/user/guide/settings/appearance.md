@@ -12,7 +12,7 @@ On the Settings screen, the **Appearance** row shows the mode and the theme you'
 
 ## Dark Mode
 
-Switches between the light and dark version of your theme. **On** (dark) by default. The switch is greyed out when your theme only comes in one version (see the Modes column in [Built-in Themes](#built-in-themes)).
+Switches between the light and dark version of your theme. **On** (dark) by default. The switch is grayed out when your theme only comes in one version (see the Modes column in [Built-in Themes](#built-in-themes)).
 
 ---
 
@@ -29,6 +29,8 @@ To change your theme:
 3. If the theme has both a light and a dark version, the **Dark Mode** switch picks which one you see.
 4. Tap **Apply**. The new theme takes effect everywhere right away. No restart needed.
 
+To back out, leave the explorer without tapping **Apply**. Your previous theme comes back, in the light or dark version it was in when you opened the explorer, even if you flipped the **Dark Mode** switch while looking around.
+
 ### Built-in Themes
 
 Eighteen themes come with HelixScreen, listed alphabetically in the Theme Preset menu. Every theme has a dark version. All but the four marked **Dark only** also have a light version.
@@ -37,7 +39,7 @@ Eighteen themes come with HelixScreen, listed alphabetically in the Theme Preset
 |-------|------|-------|
 | **Ayu** | Warm gold accent with coral errors on slate | Light + dark |
 | **Catppuccin** | Soft pastels on gentle lavender | Light + dark |
-| **ChatGPT** | Understated greys with green and red status colors | Light + dark |
+| **ChatGPT** | Understated grays with green and red status colors | Light + dark |
 | **Cupertino** | Apple-style system colors on near-black | Light + dark |
 | **Dracula** | Violet on deep slate with bright green highlights | Dark only |
 | **Everforest** | Muted forest green and clay | Light + dark |
@@ -45,14 +47,14 @@ Eighteen themes come with HelixScreen, listed alphabetically in the Theme Preset
 | **Hazard** | Safety-vest yellow, warning orange and danger red on powder-black, with sharp corners and brass seams | Dark only |
 | **HelixScreen** | The default: balanced blue on charcoal | Light + dark |
 | **Kanagawa** | Soft wave-blue and gold on deep indigo | Light + dark |
-| **Material Design** | Material blues and greens on grey | Light + dark |
+| **Material Design** | Material blues and greens on gray | Light + dark |
 | **Midnight** | Near-black navy, dim and low-glare | Dark only |
 | **Nord** | Arctic blues and frost tones | Light + dark |
 | **One Dark** | The Atom editor look: blue and green on charcoal | Light + dark |
 | **Rose Pine** | Muted rose, iris and pine on soft charcoal | Light + dark |
 | **Solarized** | The classic muted scheme on deep teal | Light + dark |
 | **Tokyo Night** | City-at-night blues with pastel highlights | Light + dark |
-| **Yami** | Vivid blue on deep grey, high contrast | Dark only |
+| **Yami** | Vivid blue on deep gray, high contrast | Dark only |
 
 ### Editing a Custom Theme
 
@@ -84,13 +86,21 @@ Three buttons sit at the bottom of the editor:
 |--------|--------------|
 | **Reset** | For a built-in theme, puts the original colors back. For a theme you made, goes back to its last saved state |
 | **Save As New** | Saves your changes as a new theme and leaves the original alone |
-| **Save** | Saves over the current theme. Greyed out until you've changed something |
+| **Save** | Saves over the current theme. Grayed out until you've changed something |
 
 **Save As New** asks for a name. It suggests "*theme name* Copy". Tap **Save** and the new theme is applied and added to the Theme Preset menu.
 
 Both **Save** and **Save As New** apply the theme right away. If you try to leave the editor with unsaved changes, HelixScreen asks **Discard Changes?** first.
 
 > **Note:** Themes you make or edit are stored on the printer in `~/helixscreen/config/themes/`. They survive updates, and you can copy them to another printer.
+
+---
+
+## Glass Effects
+
+Gives buttons and panels depth and lighting: buttons look like glass you press, and cards catch light from their top-left corner. It works with every theme and keeps your theme's colors. **Off** by default.
+
+The row only appears on screens fast enough to draw it. The first time HelixScreen starts on a new screen, or after an update, it checks that quietly in the background, so the row can take a few seconds to appear. On slower hardware, 16-bit displays and screens whose picture HelixScreen has to rotate itself, it never appears and the screen stays flat.
 
 ---
 
@@ -132,10 +142,12 @@ How the print status screen draws the file that's printing.
 |--------|--------------|
 | **Auto** (default) | HelixScreen picks for your hardware: 3D where the screen can handle it, lighter views where it can't |
 | **3D View** | A 3D model of the toolpath you can turn and zoom |
-| **2D Layers** | A flat view of one layer at a time. Lighter than 3D |
+| **2D Layers** | A fixed corner view of the model, drawn layer by layer, with ledges and rims shaded so the shape reads. Lighter than 3D |
 | **Thumbnail Only** | Just the picture your slicer saved in the file. The lightest option |
 
 Pick a lighter option if the print status screen is slow on your printer.
+
+In **Auto**, a file whose preview would cost your board too much CPU shows its thumbnail instead. HelixScreen judges that from how fast it read earlier files on this board, and allows less while a print is running, so a large file never slows the printer. Pick **3D View** or **2D Layers** yourself to draw such a file anyway.
 
 ### Z Movement
 

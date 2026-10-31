@@ -22,7 +22,7 @@
  *
  * Shown from the Controls / Advanced calibration entry points when the
  * printer is a tool changer that defines klipper-toolchanger's
- * CALIBRATE_TOOL_OFFSETS macro (helix::tool_offset_calibration::supported).
+ * CALIBRATE_TOOL_OFFSETS macro (helix::tool_offset_calibration::resolve_procedure).
  * The macro owns the whole procedure - heating, selecting each tool, probing
  * it on the sensor, writing the result into the tool's gcode_x/y/z_offset -
  * so this panel runs it, follows it, and offers the one thing the macro does
@@ -73,7 +73,7 @@ class ToolOffsetCalibrationPanel : public OverlayBase {
     /// to heat from cold per tool, so a cold four-tool run is ~10 min. Expiry
     /// does not fail the run while Klipper still reports busy - see
     /// on_run_rpc_error().
-    static constexpr uint32_t CALIBRATION_TIMEOUT_MS = 900000; // 15 min
+    static constexpr uint32_t kCalibrationTimeoutMs = 900000; // 15 min
 
     ~ToolOffsetCalibrationPanel() override;
 
@@ -193,5 +193,8 @@ void init_tool_offset_row_handler();
 /// Singleton accessor (lazily created, destroyed via StaticPanelRegistry)
 // Defined out of line: the ESP32 build, which excludes this panel, supplies its own.
 ToolOffsetCalibrationPanel& get_global_tool_offset_cal_panel();
+
+/// Open the tool offset calibration panel over @p parent_screen.
+void open_tool_offset_cal_panel(lv_obj_t* parent_screen);
 
 } // namespace helix::ui

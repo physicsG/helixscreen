@@ -38,6 +38,10 @@
  *     on failure:  disarm_manual_pull_prompt();
  */
 
+namespace helix {
+class AmsBackend;
+}
+
 namespace helix::ui {
 
 /**
@@ -67,5 +71,20 @@ void manual_pull_unload_finished();
  * prompt waiting to fire on the next unrelated sensor edge.
  */
 void disarm_manual_pull_prompt();
+
+/**
+ * @brief Tell the user why a filament op cannot run on this head, when it cannot.
+ *
+ * Asks AmsBackend::head_filament_ops() for the head @p slot feeds (the active
+ * head for a negative slot). Where that direction is not automatic, raises one
+ * info toast with the backend's reason and returns true; the caller then sends
+ * nothing and heats nothing. A repeat tap folds into the toast already showing
+ * instead of stacking another. Returns false, silently, for a null backend or
+ * an automatic op.
+ *
+ * @param slot The slot the op names, or negative for "whatever is active".
+ * @param load true for Load, false for Unload.
+ */
+bool notify_if_filament_op_unavailable(const AmsBackend* backend, int slot, bool load);
 
 } // namespace helix::ui

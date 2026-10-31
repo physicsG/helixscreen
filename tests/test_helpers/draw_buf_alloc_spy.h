@@ -14,7 +14,7 @@
 /// and can refuse them to stand in for an exhausted heap.
 class BufAllocSpy {
   public:
-    static constexpr size_t BIG = 200 * 1024;
+    static constexpr size_t kBig = 200 * 1024;
 
     BufAllocSpy() : handlers_(lv_draw_buf_get_handlers()) {
         orig_malloc_ = handlers_->buf_malloc_cb;
@@ -39,7 +39,7 @@ class BufAllocSpy {
   private:
     static void* malloc_cb(size_t size, lv_color_format_t cf) {
         BufAllocSpy& s = *self_;
-        if (size < BIG)
+        if (size < kBig)
             return s.orig_malloc_(size, cf);
         ++s.attempts;
         if (s.refuse_big)

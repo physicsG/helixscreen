@@ -8,8 +8,10 @@
 #include "app_macro_activity.h"
 #include "app_motion_activity.h"
 #include "async_lifetime_guard.h"
+#include "busy_episode_owner.h"
 #include "capability_overrides.h"
 #include "hardware_validator.h"
+#include "klippy_state.h"
 #include "lvgl/lvgl.h"
 #include "print_start_phase.h"
 #include "printer_calibration_state.h"
@@ -63,20 +65,6 @@ enum class PrinterStatus {
     READY,        ///< Printer connected and ready
     PRINTING,     ///< Printer actively printing
     ERROR         ///< Printer in error state
-};
-
-/**
- * @brief Klipper firmware state (klippy_state from Moonraker)
- *
- * Represents the state of the Klipper firmware service, independent of
- * the Moonraker WebSocket connection. When klippy_state is not READY,
- * the printer cannot accept G-code commands even if Moonraker is connected.
- */
-enum class KlippyState {
-    READY = 0,    ///< Normal operation, printer ready for commands
-    STARTUP = 1,  ///< Klipper is starting up (during RESTART/FIRMWARE_RESTART)
-    SHUTDOWN = 2, ///< Emergency shutdown (M112)
-    ERROR = 3     ///< Klipper error state (check klippy.log)
 };
 
 /**
@@ -202,8 +190,8 @@ struct StatusFrame {
  *
  * params[1] is Klipper's eventtime. It is monotonic-clock derived, so it survives
  * a Klipper restart and only rewinds on a host reboot: a usable freshness key
- * within one connection. CACHED_SNAPSHOT_MARKER says the frame is a replay of an
- * earlier snapshot rather than current traffic; WHOLE_OBJECTS_MARKER says it is a
+ * within one connection. kCachedSnapshotMarker says the frame is a replay of an
+ * earlier snapshot rather than current traffic; kWholeObjectsMarker says it is a
  * subscription response rather than a delta.
  *
  * @return The frame, or nullopt for anything that is not a notify_status_update
@@ -291,6 +279,17 @@ class PrinterState {
                             bool from_cached_snapshot = false,
                             std::optional<uint64_t> frame_epoch = std::nullopt,
                             bool whole_objects = false);
+
+    /**
+     * @brief Apply a webhooks-shaped klippy status ({state, state_message}), main thread only
+     *
+     * The one path from a reported Klipper state to the klippy subjects: status
+     * frames' webhooks object and a printer.info result both land here. Arguments
+     * as update_from_status().
+     */
+    void apply_klippy_status(const json& webhooks, double eventtime = 0.0,
+                             bool from_cached_snapshot = false,
+                             std::optional<uint64_t> frame_epoch = std::nullopt);
 
     //
     // Domain components. Each owns its subjects and the state behind them;
@@ -467,6 +466,21 @@ class PrinterState {
     /// helix::is_moonraker_on_same_host() directly.
     bool is_moonraker_remote();
 
+    /// Locality verdict for the CURRENT connection: Unknown until its CONNECTED
+    /// edge calls set_moonraker_is_remote(), which sets Local or Remote. Unlike
+    /// is_moonraker_remote(), which reads 0 (local) before any verdict and
+    /// keeps the previous printer's value across a switch, this never reports
+    /// a verdict the current connection has not made. The value is current as
+    /// soon as the setter returns; the moonraker_locality subject follows
+    /// through the UI queue. Any thread.
+    helix::MoonrakerLocality moonraker_locality() const {
+        return static_cast<helix::MoonrakerLocality>(moonraker_locality_.load());
+    }
+
+    /// Back to Unknown. Called on every non-CONNECTED connection edge and on a
+    /// printer switch. Thread-safe; the subject write is deferred.
+    void clear_moonraker_locality();
+
     /**
      * @brief Set Klipper firmware state (thread-safe, async)
      *
@@ -499,8 +513,10 @@ class PrinterState {
      * notify_klippy_* message) has set the state.
      *
      * @param state KlippyState enum value
+     * @param state_message The reason reported with it (printer.info's
+     *        state_message), applied with the state; empty leaves the message alone
      */
-    void set_klippy_state_if_unseeded(KlippyState state);
+    void set_klippy_state_if_unseeded(KlippyState state, const std::string& state_message = "");
 
     /**
      * @brief Update printer capability subjects from PrinterDiscovery
@@ -633,6 +649,21 @@ class PrinterState {
      */
     void set_helix_plugin_installed(bool installed);
 
+    /// The plugin's link directory from its status (empty when not reported);
+    /// any thread.
+    void set_helix_plugin_link_dir(const std::string& dir);
+
+    /// The version the plugin reports (empty when it did not answer); any thread.
+    void set_helix_plugin_version(const std::string& version);
+
+    /// Whether the plugin answered with `enabled: False`; any thread.
+    void set_helix_plugin_disabled(bool disabled);
+
+    /// The plugin's `features` map (empty when it reported none); any thread.
+    void
+    set_helix_plugin_features(helix::PluginFeatureMap features,
+                              helix::FeatureAnnounce announce = helix::FeatureAnnounce::Always);
+
     /**
      * @brief Set how many PRINT OPTIONS rows the PRINT_START analysis adds
      *
@@ -714,8 +745,8 @@ class PrinterState {
     /**
      * @brief Like is_blocking_operation_active(), but attributes self-inflicted busy
      *
-     * Treats busy-ness attributable to the app's own recent jog activity (in
-     * flight, or acked within AppMotionActivity::GRACE_WINDOW) as NOT blocking.
+     * Treats a busy episode the app's own jog started (see BusyEpisodeOwner) as
+     * NOT blocking; motion sent into an episode someone else started is not.
      * Manual probe remains an absolute block. Guards for discretionary gcode use
      * THIS predicate so back-to-back jogs don't self-block — idle_timeout reports
      * "Printing" during any move, including our own jog (spec 2026-07-15).
@@ -744,6 +775,22 @@ class PrinterState {
     helix::AppMacroActivity& app_macro_activity() {
         return app_macro_activity_;
     }
+
+    /// Every user command execute_gcode sends, discretionary fan/temp/LED
+    /// included. Consulted ONLY by the busy-queue toast, through
+    /// is_busy_episode_app_initiated(); the blocking-op predicates never read
+    /// it, so a light tap cannot let a jog through during an external op.
+    helix::BusyEpisodeOwner& app_command_episode() {
+        return app_command_episode_;
+    }
+
+    /**
+     * @brief Whether the current idle_timeout busy episode began with the user's own command
+     *
+     * Any gcode reads "Printing" while it runs, so a burst of light taps can
+     * hold a settled busy episode up on an idle printer. Toast attribution only.
+     */
+    bool is_busy_episode_app_initiated();
 
     /**
      * @brief Get the configured (saved) z-offset in microns
@@ -851,6 +898,9 @@ class PrinterState {
     /// only — never consulted by the blocking-op predicates (see accessor).
     helix::AppMacroActivity app_macro_activity_;
 
+    /// User-command sends for busy-TOAST attribution only (see accessor).
+    helix::BusyEpisodeOwner app_command_episode_;
+
     /// Hardware validation state component (issue counts, severity, status text)
     helix::PrinterHardwareValidationState hardware_validation_state_;
 
@@ -859,6 +909,7 @@ class PrinterState {
 
     /// Network state component (connection, klippy, nav buttons)
     helix::PrinterNetworkState network_state_;
+    std::atomic<int> moonraker_locality_{static_cast<int>(helix::MoonrakerLocality::Unknown)};
 
     /// Versions state component (klipper and moonraker version strings)
     helix::PrinterVersionsState versions_state_;
@@ -915,7 +966,6 @@ class PrinterState {
     // through async_lifetime_.defer(), ensuring thread safety.
 
     friend class PrinterStateTestAccess;
-    friend class PrinterTemperatureStateTestAccess;
 
     void set_klipper_version_internal(const std::string& version);
     void set_moonraker_version_internal(const std::string& version);
@@ -932,7 +982,7 @@ class PrinterState {
 
     /// Main-thread half of set_klippy_state_if_unseeded(): re-checks the guard in
     /// the same serialized order as the webhooks parse, then applies.
-    void set_klippy_state_if_unseeded_internal(KlippyState state);
+    void set_klippy_state_if_unseeded_internal(KlippyState state, const std::string& state_message);
 
     /**
      * @brief Synthesize runtime-dependent options (timelapse, etc.) into the

@@ -63,8 +63,8 @@ class ColorPicker : public Modal {
      * they are editing.
      */
     enum class Palette : int {
-        General = 0, ///< color_swatch_grid — filament, LED, general use
-        Theme = 1,   ///< theme_swatch_grid — surface ramp + hue families
+        General = 0, ///< color_swatch_grid palette="general" — filament, LED, general use
+        Theme = 1,   ///< color_swatch_grid palette="theme" — surface ramp + hue families
     };
 
     ColorPicker();
@@ -192,17 +192,7 @@ class ColorPicker : public Modal {
 /// columns. XML renders them through the general_/theme_swatch_color_<i> pools.
 const std::vector<uint32_t>& swatch_palette(ColorPicker::Palette palette);
 
-/// Whether a swatch filled with @p rgb blends into @p surface (too little
-/// luminance contrast, dark-on-dark or light-on-light) and needs a #border edge.
-bool swatch_needs_edge(uint32_t rgb, uint32_t surface);
-
-/// swatch_needs_edge() against the current theme's panel and dialog surfaces.
-bool swatch_needs_edge_here(uint32_t rgb);
-
-/// Recomputes the grids' edge pools for the current theme.
-void refresh_swatch_edges();
-
-/// Registers the grids' color and edge pools and color_picker_selected_swatch.
+/// Registers the grids' color pools and color_picker_selected_swatch.
 /// Idempotent; call before any swatch grid is created.
 void ensure_swatch_grid_subjects();
 

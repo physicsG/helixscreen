@@ -20,15 +20,15 @@ namespace {
 // Skip 2 frames: this helper + helix_lvgl_anomaly itself.
 std::string capture_backtrace_hex() {
 #ifdef HELIX_ANOMALY_HAS_BACKTRACE
-    constexpr int MAX_FRAMES = 24;
-    constexpr int SKIP_FRAMES = 2;
-    void* frames[MAX_FRAMES];
-    int n = ::backtrace(frames, MAX_FRAMES);
+    constexpr int kMaxFrames = 24;
+    constexpr int kSkipFrames = 2;
+    void* frames[kMaxFrames];
+    int n = ::backtrace(frames, kMaxFrames);
     std::string out;
-    out.reserve(MAX_FRAMES * 16);
-    for (int i = SKIP_FRAMES; i < n; ++i) {
+    out.reserve(kMaxFrames * 16);
+    for (int i = kSkipFrames; i < n; ++i) {
         char buf[24];
-        std::snprintf(buf, sizeof(buf), "%s0x%lx", i == SKIP_FRAMES ? "" : ",",
+        std::snprintf(buf, sizeof(buf), "%s0x%lx", i == kSkipFrames ? "" : ",",
                       reinterpret_cast<unsigned long>(frames[i]));
         out += buf;
     }

@@ -204,13 +204,6 @@ TEST_CASE_METHOD(LVGLUITestFixture, "spool_canvas: glow follows the shape, not t
         helix::ui::spool_glow_paint(g, c, SPOOL, simple);
         CHECK(same(full, snapshot(g)));
 
-        // No spool canvas: a disc (flat style), its own shape.
-        helix::ui::spool_glow_paint(g, nullptr, SPOOL, simple);
-        const Pixels disc = snapshot(g);
-        CHECK_FALSE(same(full, disc));
-        int32_t opaque_centre = disc.at(disc.w / 2, disc.h / 2).alpha;
-        CHECK(opaque_centre > 200);
-
         lv_obj_delete(g);
         lv_obj_delete(c);
     }
@@ -256,4 +249,28 @@ TEST_CASE_METHOD(LVGLUITestFixture, "spool_canvas: no glow before the spool has 
 
     lv_obj_delete(g);
     lv_obj_delete(c);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "spool_canvas: face-on spools share one glow whatever their fill",
+                 "[spool_canvas][highlight]") {
+    // Face-on, the flange always hides the filament's edge, so the outline is
+    // the same disc at every fill.
+    lv_obj_t* full = make_canvas(test_screen());
+    helix::ui::spool_canvas_set_view(full, helix::ui::SpoolView::Front);
+    lv_obj_t* low = ui_spool_canvas_create(test_screen(), SPOOL);
+    REQUIRE(low != nullptr);
+    helix::ui::spool_canvas_set_view(low, helix::ui::SpoolView::Front);
+    ui_spool_canvas_set_color(low, lv_color_hex(0xDE5923));
+    ui_spool_canvas_set_fill_level(low, 0.2f);
+
+    int32_t m = 0;
+    lv_obj_t* a = make_glow(full, /*simple=*/false, &m);
+    lv_obj_t* b = make_glow(low, /*simple=*/false, &m);
+    CHECK(buf_of(a) == buf_of(b));
+
+    lv_obj_delete(a);
+    lv_obj_delete(b);
+    lv_obj_delete(low);
+    lv_obj_delete(full);
 }

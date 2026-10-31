@@ -220,10 +220,10 @@ TEST_CASE("gate threshold is exactly MIN_RMS_RATIO", "[belt_tension][pluck_detec
     auto probe = make_noise(100.0f, 2048);
     const float rms = PluckDetector::window_rms(probe.data(), probe.size());
 
-    det.set_noise_floor(rms / (PluckDetector::MIN_RMS_RATIO * 1.05f));
+    det.set_noise_floor(rms / (PluckDetector::kMinRmsRatio * 1.05f));
     CHECK(det.passes_gate(probe.data(), probe.size()));
 
-    det.set_noise_floor(rms / (PluckDetector::MIN_RMS_RATIO * 0.95f));
+    det.set_noise_floor(rms / (PluckDetector::kMinRmsRatio * 0.95f));
     CHECK_FALSE(det.passes_gate(probe.data(), probe.size()));
 }
 
@@ -244,10 +244,10 @@ TEST_CASE("gate rejects the real weak-pluck capture", "[belt_tension][pluck_dete
 TEST_CASE("firm plucks ring down well clear of a weak one",
           "[belt_tension][pluck_detect][golden]") {
     // The fixtures store extracted ring-downs, not detection windows, so they
-    // can't exercise passes_gate()/MIN_RMS_RATIO directly - see the contract
+    // can't exercise passes_gate()/kMinRmsRatio directly - see the contract
     // note on PluckDetector::rms_ratio(). What they do support is checking
     // that a firm strike's ring-down is unambiguously stronger than a weak
-    // one's, even after both have decayed the same SKIP_MS. Measured
+    // one's, even after both have decayed the same kSkipMs. Measured
     // separation is roughly 2.0-2.5x; 1.5x leaves margin without being
     // vacuous.
     auto weak = load_fixture("weak_pluck_reject.csv");
@@ -270,11 +270,11 @@ TEST_CASE("extract_ringdown skips the impact spike", "[belt_tension][pluck_detec
     PluckWindow win;
     REQUIRE(PluckDetector::extract_ringdown(buffer, sr, &win));
 
-    const size_t expected_len = static_cast<size_t>(sr * PluckDetector::ANALYZE_MS / 1000.0f);
+    const size_t expected_len = static_cast<size_t>(sr * PluckDetector::kAnalyzeMs / 1000.0f);
     CHECK(win.samples.size() == expected_len);
 
     // The window must start after the onset, not before it.
-    const float skip_s = PluckDetector::SKIP_MS / 1000.0f;
+    const float skip_s = PluckDetector::kSkipMs / 1000.0f;
     CHECK(win.samples.front().time >= buffer[static_cast<size_t>(onset)].time + skip_s * 0.9f);
 }
 
@@ -294,7 +294,7 @@ TEST_CASE("extract_ringdown fails on a buffer that is too short",
 TEST_CASE("a steady tone is rejected however loud it is", "[belt_tension][pluck_detect]") {
     // Three transients at 44-53x the floor were reported as plucks on the
     // reference machine by a maintainer who plucked nothing. Energy alone
-    // cannot tell them apart from a strike, and raising MIN_RMS_RATIO would
+    // cannot tell them apart from a strike, and raising kMinRmsRatio would
     // not have helped - this one is 50x.
     auto win = steady_tone(kWindow, 115.0f, 500.0f, 5.0f);
     auto det = detector_at(win, 50.0f);
@@ -315,7 +315,7 @@ TEST_CASE("an envelope that grows across the window is rejected", "[belt_tension
 }
 
 TEST_CASE("a genuine pluck at 12x passes the shape checks", "[belt_tension][pluck_detect]") {
-    // The guard against fixing false accepts by raising MIN_RMS_RATIO: this
+    // The guard against fixing false accepts by raising kMinRmsRatio: this
     // strike is barely over the existing gate and must still be accepted.
     auto win = plucked(kWindow, 700, 99.0f, 400.0f, 5.0f);
     auto det = detector_at(win, 12.0f);

@@ -1,0 +1,27 @@
+{
+  "provenance": "Stock QIDI Plus 5 (firmware 01.01.01.07) as the machine reports itself: /printer/objects/list, /printer/info, and the klipper-macros-qd/ config on the device.",
+  "notes": [
+    "HelixScreen's detector hostname is Moonraker's machine_name ('QIDI'); the OS hostname is 'qidi-plus5'. Neither names the model, so the bed size is what separates the Plus 5 from the Q2 (~275) and Max 4 (~390) once the QIDI family is identified.",
+    "build_volume is the stepper travel Klipper resolves from configfile (X[-7,326] = 333, Y[-5,340] = 345), which is what PrinterDiscovery::parse_build_volume() stores and build_volume_range heuristics are scored against. It is ~8mm larger than the 325x325 print area.",
+    "The main MCU is an STM32F407; the toolhead ('mcu THR') is an STM32F103xe."
+  ],
+  "heaters": ["extruder", "heater_bed", "heater_generic chamber"],
+  "sensors": ["temperature_sensor Chamber_Thermal_Protection_Sensor"],
+  "fans": ["fan_generic cooling_fan", "heater_fan hotend_fan",
+           "controller_fan chamber_fan", "controller_fan board_fan",
+           "fan_generic chamber_circulation_fan", "fan_generic auxiliary_cooling_fan"],
+  "leds": ["output_pin caselight", "neopixel RGB"],
+  "hostname": "QIDI",
+  "printer_objects": ["heater_generic chamber",
+                      "temperature_sensor Chamber_Thermal_Protection_Sensor",
+                      "probe_air", "multi_color_controller", "z_tilt", "bed_mesh",
+                      "exclude_object", "output_pin caselight", "neopixel RGB",
+                      "filament_switch_sensor filament_switch_sensor",
+                      "gcode_macro M141", "gcode_macro M191", "gcode_macro M4029",
+                      "gcode_macro CLEAR_NOZZLE"],
+  "steppers": ["stepper_x", "stepper_y", "stepper_z", "stepper_z1"],
+  "kinematics": "corexy",
+  "mcu": "stm32f407xx",
+  "mcu_list": ["stm32f407xx", "stm32f103xe"],
+  "build_volume": {"x_min": -7, "x_max": 326, "y_min": -5, "y_max": 340, "z_max": 300}
+}

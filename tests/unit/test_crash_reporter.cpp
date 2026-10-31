@@ -11,8 +11,10 @@
  */
 
 #include "system/crash_history.h"
+#include "system/crash_record.h"
 #include "system/crash_reporter.h"
 #include "system/diagnostics.h"
+#include "test_helpers/scoped_board.h"
 
 #include <chrono>
 #include <filesystem>
@@ -165,6 +167,20 @@ TEST_CASE_METHOD(CrashReporterTestFixture,
     REQUIRE(report.klipper_version.empty());
 }
 
+TEST_CASE_METHOD(CrashReporterTestFixture,
+                 "CrashReporter: a watchdog-written record says so in the report",
+                 "[crash_reporter]") {
+    REQUIRE(helix::crash_record::write_external((temp_dir_ / "crash.txt").string(), SIGILL, "1.2.3",
+                                                1707350400, "watchdog", 0));
+
+    auto report = cr.collect_report();
+    CHECK(report.signal_name == "SIGILL");
+    CHECK(report.recorded_by == "watchdog");
+    CHECK(cr.report_to_json(report)["recorded_by"] == "watchdog");
+    CHECK(cr.report_to_text(report).find("by the watchdog") != std::string::npos);
+    CHECK(cr.generate_github_url(report).find("watchdog") != std::string::npos);
+}
+
 // Regression: bundle CHUQCNAE (2026-05-05, AD5X v0.99.53) shipped a crash.txt
 // containing only "signal:\n" — the signal handler was killed mid-write before
 // the signum or any other field landed. Application::run still showed the
@@ -235,6 +251,17 @@ TEST_CASE_METHOD(CrashReporterTestFixture,
     CHECK(j.contains("config_dir"));
     CHECK(j.contains("cache_dir"));
     CHECK(j.contains("cache_tier"));
+}
+
+TEST_CASE_METHOD(CrashReporterTestFixture, "CrashReporter: crash reports carry the board",
+                 "[crash_reporter]") {
+    helix::test::ScopedBoard board(helix::board::Board::Creator5Pro);
+    write_crash_file();
+    auto report = cr.collect_report();
+
+    CHECK(report.board == "creator5-pro");
+    CHECK(cr.report_to_json(report)["board"] == "creator5-pro");
+    CHECK(cr.report_to_text(report).find(report.platform + " / creator5-pro") != std::string::npos);
 }
 
 // ============================================================================
@@ -438,6 +465,14 @@ TEST_CASE_METHOD(CrashReporterTestFixture, "CrashReporter: report_to_text includ
 // ============================================================================
 // GitHub URL Generation [crash_reporter]
 // ============================================================================
+
+TEST_CASE_METHOD(CrashReporterTestFixture, "CrashReporter: the GitHub issue body names the board",
+                 "[crash_reporter]") {
+    write_crash_file();
+    auto report = cr.collect_report();
+    report.board = "creator5-pro";
+    CHECK(cr.generate_github_url(report).find("creator5-pro") != std::string::npos);
+}
 
 TEST_CASE_METHOD(CrashReporterTestFixture, "CrashReporter: generate_github_url produces valid URL",
                  "[crash_reporter]") {

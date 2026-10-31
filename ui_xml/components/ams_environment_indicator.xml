@@ -7,17 +7,18 @@
 
     Placed to the right of the spool grid inside ams_unit_detail.
     Two display modes:
-    - Passive: thermometer icon + temp, water icon + humidity (stacked vertically)
+    - Passive: thermometer icon + temp, humidity drop + humidity (stacked vertically)
     - Drying:  heat_wave icon + drying status text (stacked vertically)
 
     Hidden when no environment data exists. Clickable to open environment overlay.
 
-    Parameterized by 7 type="subject" <api> props (see below), so each overview
+    Parameterized by 8 type="subject" <api> props (see below), so each overview
     card / detail view can bind its own per-unit subject set. Callers pass the
     expanded ams_env_ind_<i>_* (overview) or ams_env_ind_detail_* (detail) names;
     the defaults below (unit 0) apply when a prop is omitted.
     - $temp_text:        formatted temp ("24C")
     - $humidity_text:    formatted humidity ("46%")
+    - $humidity:         humidity in tenths of a percent for the drop, -1 = no reading
     - $humidity_status:  0=ok(green), 1=warn(yellow), 2=danger(red)
     - $humidity_visible: 1 when a humidity reading exists
     - $visible:          1 when environment data available
@@ -31,6 +32,7 @@
   <api>
     <prop name="temp_text" type="subject" default="ams_env_ind_0_temp_text"/>
     <prop name="humidity_text" type="subject" default="ams_env_ind_0_humidity_text"/>
+    <prop name="humidity" type="subject" default="ams_env_ind_0_humidity"/>
     <prop name="humidity_status" type="subject" default="ams_env_ind_0_humidity_status"/>
     <prop name="humidity_visible" type="subject" default="ams_env_ind_0_humidity_visible"/>
     <prop name="visible" type="subject" default="ams_env_ind_0_visible"/>
@@ -68,7 +70,7 @@
               style_flex_cross_place="center" style_pad_gap="#space_xxs" scrollable="false" clickable="false"
               event_bubble="true" hidden="true">
         <bind_flag_if_not_eq subject="$humidity_visible" flag="hidden" ref_value="1"/>
-        <icon src="water" size="sm" variant="secondary" clickable="false" event_bubble="true"/>
+        <humidity_drop name="env_humidity_drop" bind_value="$humidity" size="sm" clickable="false" event_bubble="true"/>
         <!-- OK (green/default) — visible when status=0 -->
         <text_small bind_text="$humidity_text" clickable="false" event_bubble="true" hidden="true">
           <bind_flag_if_not_eq subject="$humidity_status" flag="hidden" ref_value="0"/>

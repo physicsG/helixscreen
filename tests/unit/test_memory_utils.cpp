@@ -36,15 +36,15 @@ using namespace helix;
 namespace {
 
 /// 128MB board (Elegoo Centauri Carbon class): constrained tier, 2MB cache.
-constexpr size_t CONSTRAINED_TOTAL_KB = 128 * 1024;
+constexpr size_t kConstrainedTotalKb = 128 * 1024;
 /// 384MB board: normal tier, 16MB cache.
-constexpr size_t NORMAL_TOTAL_KB = 384 * 1024;
+constexpr size_t kNormalTotalKb = 384 * 1024;
 /// 1GB board: good tier, 32MB cache.
-constexpr size_t GOOD_TOTAL_KB = 1024 * 1024;
+constexpr size_t kGoodTotalKb = 1024 * 1024;
 
 /// Whether the resolved G-code cache directory is tmpfs/ramfs.
-constexpr bool ON_FLASH = false;
-constexpr bool ON_TMPFS = true;
+constexpr bool kOnFlash = false;
+constexpr bool kOnTmpfs = true;
 
 } // namespace
 
@@ -56,8 +56,8 @@ TEST_CASE("2D streaming safe: small file with plenty of RAM", "[memory][streamin
     int display_width = 800;
     int display_height = 480;
 
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, GOOD_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kGoodTotalKb, display_width,
+                                            display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming safe: large file with plenty of RAM", "[memory][streaming]") {
@@ -68,8 +68,8 @@ TEST_CASE("2D streaming safe: large file with plenty of RAM", "[memory][streamin
     int display_width = 800;
     int display_height = 480;
 
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, NORMAL_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kNormalTotalKb, display_width,
+                                            display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming safe: AD5M typical scenario", "[memory][streaming]") {
@@ -83,7 +83,7 @@ TEST_CASE("2D streaming safe: AD5M typical scenario", "[memory][streaming]") {
     int display_height = 480;
 
     REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, total_kb, display_width,
-                                            display_height, ON_FLASH));
+                                            display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming unsafe: insufficient RAM for requirements", "[memory][streaming]") {
@@ -94,8 +94,8 @@ TEST_CASE("2D streaming unsafe: insufficient RAM for requirements", "[memory][st
     int display_width = 800;
     int display_height = 480;
 
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming: larger display increases ghost buffer requirement",
@@ -110,12 +110,12 @@ TEST_CASE("2D streaming: larger display increases ghost buffer requirement",
     int large_height = 1080;
 
     // Small display fits: index 409 + cache 2048 + ghost 1500 + margin 3072 = 7029KB.
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, CONSTRAINED_TOTAL_KB,
-                                            small_width, small_height, ON_FLASH));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kConstrainedTotalKb,
+                                            small_width, small_height, kOnFlash));
 
     // Large display does not: same terms with ghost 8100 = 13629KB.
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, CONSTRAINED_TOTAL_KB,
-                                                  large_width, large_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kConstrainedTotalKb,
+                                                  large_width, large_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming: layer index scales with file size", "[memory][streaming]") {
@@ -126,13 +126,13 @@ TEST_CASE("2D streaming: layer index scales with file size", "[memory][streaming
 
     // 1MB file: index 81 + cache 2048 + ghost 1500 + margin 3072 = 6701KB.
     size_t small_file = 1 * 1024 * 1024;
-    REQUIRE(is_gcode_2d_streaming_safe_impl(small_file, available_kb, CONSTRAINED_TOTAL_KB,
-                                            display_width, display_height, ON_FLASH));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(small_file, available_kb, kConstrainedTotalKb,
+                                            display_width, display_height, kOnFlash));
 
     // 100MB file: index 8191 + cache 2048 + ghost 1500 + margin 3072 = 14811KB.
     size_t large_file = 100 * 1024 * 1024;
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(large_file, available_kb, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(large_file, available_kb, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming: the layer index is priced at the real entry size",
@@ -145,15 +145,15 @@ TEST_CASE("2D streaming: the layer index is priced at the real entry size",
     int display_height = 480;
 
     // Exactly at the boundary is rejected (the gate uses > not >=).
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 14811, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_FLASH));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 14812, CONSTRAINED_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 14811, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnFlash));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 14812, kConstrainedTotalKb, display_width,
+                                            display_height, kOnFlash));
 
     // A per-entry price below sizeof(StreamingLayerEntry) authorizes this file
     // at 12000KB available; the real index does not fit there.
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 12000, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 12000, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming: the layer cache is priced at this device's budget tier",
@@ -165,22 +165,22 @@ TEST_CASE("2D streaming: the layer cache is priced at this device's budget tier"
     int display_height = 480;
 
     // Constrained (2MB cache): 4572 + 2048 = 6620KB.
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 6620, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_FLASH));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 6621, CONSTRAINED_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 6620, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnFlash));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 6621, kConstrainedTotalKb, display_width,
+                                            display_height, kOnFlash));
 
     // Normal (16MB cache): 4572 + 16384 = 20956KB.
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 20956, NORMAL_TOTAL_KB, display_width,
-                                                  display_height, ON_FLASH));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 20957, NORMAL_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 20956, kNormalTotalKb, display_width,
+                                                  display_height, kOnFlash));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 20957, kNormalTotalKb, display_width,
+                                            display_height, kOnFlash));
 
     // Good (32MB cache): 4572 + 32768 = 37340KB.
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 37340, GOOD_TOTAL_KB, display_width,
-                                                  display_height, ON_FLASH));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 37341, GOOD_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 37340, kGoodTotalKb, display_width,
+                                                  display_height, kOnFlash));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 37341, kGoodTotalKb, display_width,
+                                            display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming: a RAM-backed cache directory charges the whole file",
@@ -192,15 +192,15 @@ TEST_CASE("2D streaming: a RAM-backed cache directory charges the whole file",
     int display_width = 800;
     int display_height = 480;
 
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 7440, CONSTRAINED_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 7440, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_TMPFS));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 7440, kConstrainedTotalKb, display_width,
+                                            display_height, kOnFlash));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 7440, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnTmpfs));
 
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 17679, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_TMPFS));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 17680, CONSTRAINED_TOTAL_KB, display_width,
-                                            display_height, ON_TMPFS));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 17679, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnTmpfs));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 17680, kConstrainedTotalKb, display_width,
+                                            display_height, kOnTmpfs));
 }
 
 TEST_CASE("2D streaming: 6MB file on a 128MB board with a tmpfs cache directory",
@@ -214,20 +214,20 @@ TEST_CASE("2D streaming: 6MB file on a 128MB board with a tmpfs cache directory"
     int display_width = 480;
     int display_height = 272;
 
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_TMPFS));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, CONSTRAINED_TOTAL_KB,
-                                            display_width, display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnTmpfs));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kConstrainedTotalKb,
+                                            display_width, display_height, kOnFlash));
 
     // Boundaries either way, so every term is pinned.
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 12212, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_TMPFS));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 12213, CONSTRAINED_TOTAL_KB, display_width,
-                                            display_height, ON_TMPFS));
-    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 6117, CONSTRAINED_TOTAL_KB,
-                                                  display_width, display_height, ON_FLASH));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 6118, CONSTRAINED_TOTAL_KB, display_width,
-                                            display_height, ON_FLASH));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 12212, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnTmpfs));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 12213, kConstrainedTotalKb, display_width,
+                                            display_height, kOnTmpfs));
+    REQUIRE_FALSE(is_gcode_2d_streaming_safe_impl(file_size, 6117, kConstrainedTotalKb,
+                                                  display_width, display_height, kOnFlash));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, 6118, kConstrainedTotalKb, display_width,
+                                            display_height, kOnFlash));
 }
 
 TEST_CASE("2D streaming: zero file size", "[memory][streaming][edge]") {
@@ -238,10 +238,10 @@ TEST_CASE("2D streaming: zero file size", "[memory][streaming][edge]") {
     int display_width = 800;
     int display_height = 480;
 
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, CONSTRAINED_TOTAL_KB,
-                                            display_width, display_height, ON_FLASH));
-    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, CONSTRAINED_TOTAL_KB,
-                                            display_width, display_height, ON_TMPFS));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kConstrainedTotalKb,
+                                            display_width, display_height, kOnFlash));
+    REQUIRE(is_gcode_2d_streaming_safe_impl(file_size, available_kb, kConstrainedTotalKb,
+                                            display_width, display_height, kOnTmpfs));
 }
 
 // ============================================================================

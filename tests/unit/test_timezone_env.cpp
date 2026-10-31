@@ -5,6 +5,7 @@
 // IANA timezones on devices that ship without /usr/share/zoneinfo/ (notably
 // Elegoo Centauri Carbon running OpenCentauri COSMOS).
 
+#include "test_helpers/scoped_env.h"
 #include "test_helpers/unique_temp_dir.h"
 #include "timezone_env.h"
 
@@ -43,36 +44,21 @@ fs::path make_temp_zoneinfo() {
 
 // Snapshot/restore TZ + TZDIR + working directory across tests. The fallback
 // inspects getcwd() when building the bundled path.
-struct EnvGuard {
-    std::string saved_tz;
-    std::string saved_tzdir;
-    fs::path saved_cwd;
-    bool tz_was_set = false;
-    bool tzdir_was_set = false;
+struct TimezoneScope {
+    // Declared first so it is destroyed last: the probe state is reset only
+    // after TZ and TZDIR are back to their original values.
+    struct ProbeReset {
+        ~ProbeReset() {
+            ::tzset();
+            helix::timezone_env::reset_probe_state();
+        }
+    } probe_reset;
+    helix::ScopedEnv tz{"TZ"};
+    helix::ScopedEnv tzdir{"TZDIR"};
+    fs::path saved_cwd = fs::current_path();
 
-    EnvGuard() {
-        if (const char* v = ::getenv("TZ")) {
-            saved_tz = v;
-            tz_was_set = true;
-        }
-        if (const char* v = ::getenv("TZDIR")) {
-            saved_tzdir = v;
-            tzdir_was_set = true;
-        }
-        saved_cwd = fs::current_path();
-    }
-    ~EnvGuard() {
+    ~TimezoneScope() {
         fs::current_path(saved_cwd);
-        if (tz_was_set)
-            ::setenv("TZ", saved_tz.c_str(), 1);
-        else
-            ::unsetenv("TZ");
-        if (tzdir_was_set)
-            ::setenv("TZDIR", saved_tzdir.c_str(), 1);
-        else
-            ::unsetenv("TZDIR");
-        ::tzset();
-        helix::timezone_env::reset_probe_state();
     }
 };
 
@@ -80,7 +66,7 @@ struct EnvGuard {
 
 TEST_CASE("timezone_env: falls back to bundled TZDIR when system zoneinfo missing",
           "[timezone_env]") {
-    EnvGuard guard;
+    TimezoneScope guard;
     helix::timezone_env::reset_probe_state();
 
     fs::path temp = make_temp_zoneinfo();
@@ -111,7 +97,7 @@ TEST_CASE("timezone_env: falls back to bundled TZDIR when system zoneinfo missin
 
 TEST_CASE("timezone_env: apply() with bundled TZDIR yields correct localtime offset",
           "[timezone_env]") {
-    EnvGuard guard;
+    TimezoneScope guard;
     helix::timezone_env::reset_probe_state();
 
     fs::path temp = make_temp_zoneinfo();
@@ -151,7 +137,7 @@ TEST_CASE("timezone_env: apply() with bundled TZDIR yields correct localtime off
 }
 
 TEST_CASE("timezone_env: leaves TZDIR untouched when system zoneinfo present", "[timezone_env]") {
-    EnvGuard guard;
+    TimezoneScope guard;
     helix::timezone_env::reset_probe_state();
     ::unsetenv("TZDIR");
 
@@ -166,4 +152,90 @@ TEST_CASE("timezone_env: leaves TZDIR untouched when system zoneinfo present", "
     REQUIRE(result != nullptr);
     CHECK(std::string(result).empty());
     CHECK(::getenv("TZDIR") == nullptr);
+}
+
+TEST_CASE("timezone_env: posix_offsets reads January and July offsets from a POSIX rule",
+          "[timezone_env]") {
+    using helix::timezone_env::posix_offsets;
+    int jan = 999;
+    int jul = 999;
+
+    SECTION("fixed zone") {
+        REQUIRE(posix_offsets("UTC0", jan, jul));
+        CHECK(jan == 0);
+        CHECK(jul == 0);
+        REQUIRE(posix_offsets("JST-9", jan, jul));
+        CHECK(jan == 540);
+        CHECK(jul == 540);
+    }
+    SECTION("quoted names and minute offsets") {
+        REQUIRE(posix_offsets("<+0545>-5:45", jan, jul));
+        CHECK(jan == 345);
+        CHECK(jul == 345);
+        REQUIRE(posix_offsets("<-03>3", jan, jul));
+        CHECK(jan == -180);
+        CHECK(jul == -180);
+    }
+    SECTION("northern DST is summer time in July") {
+        REQUIRE(posix_offsets("EST5EDT,M3.2.0,M11.1.0", jan, jul));
+        CHECK(jan == -300);
+        CHECK(jul == -240);
+        REQUIRE(posix_offsets("NST3:30NDT,M3.2.0,M11.1.0", jan, jul));
+        CHECK(jan == -210);
+        CHECK(jul == -150);
+        REQUIRE(posix_offsets("GMT0BST,M3.5.0/1,M10.5.0", jan, jul));
+        CHECK(jan == 0);
+        CHECK(jul == 60);
+    }
+    SECTION("southern DST is summer time in January") {
+        REQUIRE(posix_offsets("AEST-10AEDT,M10.1.0,M4.1.0/3", jan, jul));
+        CHECK(jan == 660);
+        CHECK(jul == 600);
+        REQUIRE(posix_offsets("<-04>4<-03>,M9.1.6/24,M4.1.6/24", jan, jul));
+        CHECK(jan == -180);
+        CHECK(jul == -240);
+    }
+    SECTION("an explicit DST offset is used as written") {
+        REQUIRE(posix_offsets("AAA5BBB3,M3.2.0,M11.1.0", jan, jul));
+        CHECK(jan == -300);
+        CHECK(jul == -180);
+    }
+    SECTION("malformed rules are refused") {
+        CHECK_FALSE(posix_offsets(nullptr, jan, jul));
+        CHECK_FALSE(posix_offsets("", jan, jul));
+        CHECK_FALSE(posix_offsets("EST", jan, jul));
+        CHECK_FALSE(posix_offsets("E5", jan, jul));
+        CHECK_FALSE(posix_offsets("<-03", jan, jul));
+        CHECK_FALSE(posix_offsets("EST5EDT,J60,J300", jan, jul));
+        CHECK_FALSE(posix_offsets("EST5EDT,M3.2.0", jan, jul));
+        CHECK_FALSE(posix_offsets("EST5x", jan, jul));
+    }
+}
+
+TEST_CASE("timezone_env: apply_system restores the zone the process started with",
+          "[timezone_env]") {
+    TimezoneScope guard;
+
+    SECTION("a TZ set before the first apply comes back") {
+        helix::timezone_env::reset_probe_state();
+        ::setenv("TZ", "EST5EDT", 1);
+        helix::timezone_env::apply("UTC");
+        REQUIRE(std::string(::getenv("TZ")) == "UTC");
+        helix::timezone_env::apply_system();
+        REQUIRE(::getenv("TZ") != nullptr);
+        CHECK(std::string(::getenv("TZ")) == "EST5EDT");
+    }
+    SECTION("no TZ at startup means none after") {
+        helix::timezone_env::reset_probe_state();
+        helix::timezone_env::apply("UTC");
+        helix::timezone_env::apply_system();
+        CHECK(::getenv("TZ") == nullptr);
+    }
+    SECTION("apply_system before any apply leaves TZ as it is") {
+        helix::timezone_env::reset_probe_state();
+        ::setenv("TZ", "JST-9", 1);
+        helix::timezone_env::apply_system();
+        REQUIRE(::getenv("TZ") != nullptr);
+        CHECK(std::string(::getenv("TZ")) == "JST-9");
+    }
 }

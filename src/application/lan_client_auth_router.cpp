@@ -18,7 +18,7 @@ namespace {
 
 /// Handler key for register/unregister. One key across every provider's
 /// notification - they all land in the same handler.
-constexpr const char* NOTIFY_HANDLER_NAME = "lan_client_auth";
+constexpr const char* kNotifyHandlerName = "lan_client_auth";
 
 } // namespace
 
@@ -34,7 +34,7 @@ LanClientAuthRouter::LanClientAuthRouter(IMoonrakerClient* client) : client_(cli
     // from the WebSocket thread would be the invariant-1 crash.
     for (const std::string& method : lan_auth::notification_methods()) {
         client_->register_method_callback(
-            method, NOTIFY_HANDLER_NAME,
+            method, kNotifyHandlerName,
             lifetime_.bg_cb(
                 "LanClientAuthRouter::on_request",
                 [this, method](const nlohmann::json& msg) { on_request(method, msg); }));
@@ -60,7 +60,7 @@ LanClientAuthRouter::~LanClientAuthRouter() {
         return;
     }
     for (const std::string& method : lan_auth::notification_methods()) {
-        client_->unregister_method_callback(method, NOTIFY_HANDLER_NAME);
+        client_->unregister_method_callback(method, kNotifyHandlerName);
     }
 }
 

@@ -16,6 +16,16 @@ bool touch_input_init(void);
 // from C only.
 bool touch_input_available(void);
 
-/// Press at (x, y) for a few indev reads, then release: a tap as LVGL sees it.
-/// Safe from any task.
+/// Press at (x, y) and release, queued like a tap the controller reported.
+/// Safe from any task, like the two below.
 void touch_input_inject_tap(int x, int y);
+
+/// A new finger lands at (x, y); a finger still down lifts first, as when fast
+/// typing rolls over from one key to the next.
+void touch_input_inject_down(int x, int y);
+
+/// Every injected finger lifts.
+void touch_input_inject_up(void);
+
+/// Taps dropped whole because LVGL fell a full queue behind, since boot.
+unsigned touch_input_dropped_taps(void);

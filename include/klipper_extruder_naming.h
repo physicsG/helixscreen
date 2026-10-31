@@ -81,13 +81,30 @@ namespace helix {
  * classifies as an extruder here is guaranteed to yield a number there — the
  * two can never disagree.
  *
- * Rejects `extruder_stepper` (and any other `extruder`-prefixed object that is
- * not a numbered extruder). Callers that deliberately want the looser
- * "anything extruder-ish" match — hardware discovery, sensor enumeration —
- * should keep their own prefix test rather than use this.
+ * Rejects `extruder_stepper` and any other `extruder`-prefixed object that is
+ * not a numbered extruder, such as the Snapmaker U1's
+ * `extruder_offset_calibration`. Callers that deliberately want the looser
+ * "anything extruder-ish" match, such as sensor enumeration, keep their own
+ * prefix test rather than use this.
  */
 [[nodiscard]] inline bool is_extruder_name(std::string_view name) {
     return tool_number_for_extruder(name).has_value();
+}
+
+/**
+ * @brief The Klipper extruder object name for a tool number: "extruder" for 0,
+ *        "extruderN" for N.
+ *
+ * The inverse of tool_number_for_extruder(), and the one spelling of "name
+ * head N's extruder" so a backend and a feed sequence cannot disagree about
+ * what to call it. Negative inputs read as 0, matching the bare name every
+ * caller has always used for head 0.
+ *
+ * @param tool 0-based tool number
+ * @return The extruder object name
+ */
+[[nodiscard]] inline std::string extruder_name_for_tool(int tool) {
+    return tool <= 0 ? std::string("extruder") : "extruder" + std::to_string(tool);
 }
 
 /**

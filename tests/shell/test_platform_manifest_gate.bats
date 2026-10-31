@@ -37,7 +37,7 @@ make_tree() {
     cp mk/cross.mk mk/images.mk "$TREE/mk/"
     cp scripts/lib/installer/common.sh scripts/lib/installer/platform.sh "$TREE/scripts/lib/installer/"
     cp src/system/log_collector.cpp src/system/update_checker.cpp \
-       src/system/debug_bundle_collector.cpp "$TREE/src/system/"
+       src/system/debug_bundle_collector.cpp src/system/helix_cache_dir.cpp "$TREE/src/system/"
     cp include/helix_install_roots.h "$TREE/include/"
 }
 
@@ -224,6 +224,19 @@ json.dump(d,open(p,"w"),indent=2)' "$TREE/assets/config/platforms.json"
     contains "/brand-new-mount/helixscreen" "$output"
 }
 
+@test "check_cache_rungs reports a manifest cache_dir the cascade lacks" {
+    make_tree
+    run python3 "$GATE" --quiet --root "$TREE"
+    lacks "[cache-rungs]" "$output"
+
+    python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); \
+d["platforms"]["k2"]["storage"]["cache_dir"]="/brand-new-mount/helixscreen-state/cache"; \
+json.dump(d,open(p,"w"),indent=2)' "$TREE/assets/config/platforms.json"
+    run python3 "$GATE" --quiet --root "$TREE"
+    contains "[cache-rungs]" "$output"
+    contains "/brand-new-mount/helixscreen-state/cache" "$output"
+}
+
 @test "gate: reports a platform whose panel is not hardware-verified" {
     run python3 "$GATE" --quiet
     contains "not hardware-verified" "$output"
@@ -327,7 +340,7 @@ make_stage() {
     [ -f "$STAGE/assets/images/printers/voron-v2.png" ] || fail "covered PNG pruned despite the hold"
 }
 
-@test "prune: a runtime-variable panel keeps everything" {
+@test "prune: a runtime-variable panel keeps every size class" {
     make_stage
     local before
     before="$(find "$STAGE" -type f | wc -l)"
@@ -335,6 +348,100 @@ make_stage() {
     [ "$status" -eq 0 ] || fail "prune failed: $output"
     contains "not known until runtime" "$output"
     [ "$(find "$STAGE" -type f | wc -l)" -eq "$before" ] || fail "pruned a variable-panel package"
+}
+
+@test "prune: a variable panel keeps the source PNGs the image cache reads" {
+    # generate_cached_printer_image() sources from the PNG whenever the home
+    # widget outgrows the 300px tier, which a large HDMI panel does.
+    make_stage
+    run python3 "$DERIVE" prune-assets pi "$STAGE"
+    [ "$status" -eq 0 ] || fail "prune failed: $output"
+    [ -f "$STAGE/assets/images/printers/voron-v2.png" ] || fail "pruned a PNG an unbounded panel can need"
+}
+
+@test "deriver: a package with candidate boards selects the union of their classes" {
+    run python3 "$DERIVE" splash-3d-sizes mips
+    [ "$status" -eq 0 ] || fail "command failed: $output"
+    [ "$output" = "medium small" ] || fail "mips selected '$output'"
+}
+
+@test "prune: candidate boards bound a variable panel's package" {
+    # mips is one binary for the K1 and the AD5X, both 800x480 effective.
+    make_stage
+    run python3 "$DERIVE" prune-assets mips "$STAGE"
+    [ "$status" -eq 0 ] || fail "prune failed: $output"
+    run ls "$STAGE/assets/images/prerendered"
+    contains "splash-3d-dark-medium.bin" "$output"
+    contains "splash-3d-dark-small.bin" "$output"
+    lacks "splash-3d-dark-micro.bin" "$output"
+    lacks "splash-3d-dark-xlarge.bin" "$output"
+    [ -f "$STAGE/assets/images/printers/prerendered/voron-v2-300.bin" ] || fail "pruned the tier both boards select"
+    [ -f "$STAGE/assets/images/printers/prerendered/voron-v2-150.bin" ] || fail "pruned the K1 hedge tier"
+    run ls "$STAGE/assets/images/printers"
+    lacks ".png" "$output"
+}
+
+@test "prune: candidate boards keep the PNGs when one kept tier is incomplete" {
+    make_stage
+    rm "$STAGE/assets/images/printers/prerendered/voron-v2-150.bin"
+    run python3 "$DERIVE" prune-assets mips "$STAGE"
+    [ "$status" -eq 0 ] || fail "prune failed: $output"
+    contains "kept source PNGs" "$output"
+    [ -f "$STAGE/assets/images/printers/voron-v2.png" ] || fail "dropped the PNG of a printer missing its 150px render"
+}
+
+@test "prune: a candidate without a fixed panel is an error" {
+    make_tree
+    python3 - "$TREE/assets/config/platforms.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p))
+m["platforms"]["mips"]["panel"]["candidates"] = ["k1", "pi"]
+json.dump(m, open(p, "w"))
+PY
+    run python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+import platform_manifest as pm
+try:
+    pm.splash_3d_classes_for(pm.load('$TREE/assets/config/platforms.json'), 'mips')
+except pm.ManifestError as e:
+    print('refused:', e)"
+    contains "refused: mips: candidate 'pi' has no fixed panel" "$output"
+}
+
+@test "deriver: an inline candidate panel contributes its own class and tier" {
+    # The Creator 5 boards ride the mips binary with no platform entry of their
+    # own, so their panels sit inline in the candidate list.
+    make_tree
+    python3 - "$TREE/assets/config/platforms.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p))
+m["platforms"]["mips"]["panel"]["candidates"].append(
+    {"board": "tiny-board", "width": 480, "height": 272, "rotate": 0})
+json.dump(m, open(p, "w"))
+PY
+    run python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+import platform_manifest as pm
+m = pm.load('$TREE/assets/config/platforms.json')
+print(' '.join(pm.splash_3d_classes_for(m, 'mips')), pm.printer_image_sizes_for(m, 'mips'))"
+    [ "$status" -eq 0 ] || fail "derive failed: $output"
+    contains "micro" "$output"
+    contains "[150, 300]" "$output"
+}
+
+@test "prune: drops the translation files no locale loads, on every platform" {
+    for p in pi k2; do
+        make_stage
+        mkdir -p "$STAGE/ui_xml/translations"
+        for f in translations.xml en.xml de.xml; do echo x > "$STAGE/ui_xml/translations/$f"; done
+        run python3 "$DERIVE" prune-assets "$p" "$STAGE"
+        [ "$status" -eq 0 ] || fail "$p: prune failed: $output"
+        [ ! -f "$STAGE/ui_xml/translations/translations.xml" ] || fail "$p: shipped the merged catalogue"
+        [ ! -f "$STAGE/ui_xml/translations/en.xml" ] || fail "$p: shipped the English identity pack"
+        [ -f "$STAGE/ui_xml/translations/de.xml" ] || fail "$p: pruned a locale pack the app loads"
+    done
 }
 
 @test "prune: running twice removes nothing the second time" {

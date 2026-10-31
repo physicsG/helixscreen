@@ -31,6 +31,11 @@ struct FilamentPanelTestAccess {
         p.execute_load();
     }
 
+    /// Stands in for a macro profile that needs a home, which no stock row does.
+    static void set_home_before_load_macro(FilamentPanel& p, bool home) {
+        p.home_before_load_macro_ = home;
+    }
+
     static void execute_unload(FilamentPanel& p) {
         p.execute_unload();
     }
@@ -42,11 +47,18 @@ struct FilamentPanelTestAccess {
     static void handle_unload_button(FilamentPanel& p) {
         p.handle_unload_button();
     }
+    /// The Unload handler re-entered with the user's answer to the lane question.
+    static void handle_unload_button(FilamentPanel& p, int chosen_lane) {
+        p.handle_unload_button(chosen_lane);
+    }
 
     static void handle_preset_button(FilamentPanel& p, int slot) {
         p.handle_preset_button(slot);
     }
 
+    static void confirm_custom_nozzle(FilamentPanel& p, float celsius) {
+        p.handle_custom_nozzle_confirmed(celsius);
+    }
     static void handle_spool_preset_button(FilamentPanel& p) {
         p.handle_spool_preset_button();
     }
@@ -57,6 +69,17 @@ struct FilamentPanelTestAccess {
 
     static void execute_purge(FilamentPanel& p) {
         p.execute_purge();
+    }
+
+    /// The Extrude / Retract / Purge buttons, preheat and all.
+    static void handle_extrude_button(FilamentPanel& p) {
+        p.handle_extrude_button();
+    }
+    static void handle_retract_button(FilamentPanel& p) {
+        p.handle_retract_button();
+    }
+    static void handle_purge_button(FilamentPanel& p) {
+        p.handle_purge_button();
     }
 
     /// The preset index the material buttons select (-1 = none), set without
@@ -71,10 +94,6 @@ struct FilamentPanelTestAccess {
 
     static void handle_extruder_changed(FilamentPanel& p) {
         p.handle_extruder_changed();
-    }
-
-    static void restore_heater_after_preheat(FilamentPanel& p) {
-        p.restore_heater_after_preheat();
     }
 
     static lv_obj_t* extruder_dropdown(FilamentPanel& p) {

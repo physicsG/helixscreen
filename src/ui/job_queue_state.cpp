@@ -6,12 +6,17 @@
 #include "ui_filename_utils.h"
 
 #include "connection_staleness.h"
+#include "format_utils.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
 #include "job_queue_start.h"
+#include "moonraker_types.h"
+#include "printer_print_state.h"
 #include "queued_job_options.h"
 #include "static_subject_registry.h"
 #include "subject_debug_registry.h"
+#include "thumbnail_cache.h"
+#include "thumbnail_processor.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -21,12 +26,11 @@
 #include <cstdio>
 #include <cstring>
 
-JobQueueState::JobQueueState(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
+JobQueueState::JobQueueState(helix::IMoonrakerAPI* api, helix::IMoonrakerClient* client)
     : api_(api), client_(client) {
-    std::memset(state_buffer_, 0, sizeof(state_buffer_));
-    std::memset(summary_buffer_, 0, sizeof(summary_buffer_));
     std::memset(up_next_text_buffer_, 0, sizeof(up_next_text_buffer_));
     std::memset(start_next_text_buffer_, 0, sizeof(start_next_text_buffer_));
+    std::memset(next_thumbnail_buf_, 0, sizeof(next_thumbnail_buf_));
 
     subscribe_to_notifications();
     watch_connection_state();
@@ -42,6 +46,9 @@ void JobQueueState::invalidate() {
     // store-then-queue read, so collecting a reconnect's orphans costs one
     // round trip.
     pruned_this_connect_ = false;
+    // The next job's file may have been re-sliced, or its read lost, while the
+    // socket was down: ask again on the next fetch.
+    next_media_stale_ = true;
 }
 
 void JobQueueState::watch_connection_state() {
@@ -73,16 +80,18 @@ void JobQueueState::init_subjects() {
     if (subjects_initialized_)
         return;
 
-    lv_subject_init_string(&job_queue_state_subject_, state_buffer_, nullptr, sizeof(state_buffer_),
-                           "Ready");
-    subjects_.publish("job_queue_state_text", &job_queue_state_subject_);
-
-    lv_subject_init_string(&job_queue_summary_subject_, summary_buffer_, nullptr,
-                           sizeof(summary_buffer_), "Queue empty");
-    subjects_.publish("job_queue_summary_text", &job_queue_summary_subject_);
-
     lv_subject_init_int(&job_queue_count_subject_, 0);
     subjects_.publish("job_queue_count", &job_queue_count_subject_);
+
+    lv_subject_init_int(&job_queue_run_state_subject_,
+                        static_cast<int>(helix::QueueRunState::Paused));
+    subjects_.publish("job_queue_run_state", &job_queue_run_state_subject_);
+
+    lv_subject_init_int(&job_queue_revision_subject_, 0);
+    subjects_.publish("job_queue_revision", &job_queue_revision_subject_);
+
+    lv_subject_init_int(&job_queue_start_in_flight_subject_, start_in_flight_ ? 1 : 0);
+    subjects_.publish("job_queue_start_in_flight", &job_queue_start_in_flight_subject_);
 
     lv_subject_init_string(&job_queue_up_next_text_subject_, up_next_text_buffer_, nullptr,
                            sizeof(up_next_text_buffer_), "");
@@ -92,23 +101,32 @@ void JobQueueState::init_subjects() {
                            sizeof(start_next_text_buffer_), "");
     subjects_.publish("job_queue_start_next_text", &job_queue_start_next_text_subject_);
 
+    lv_subject_init_int(&job_queue_next_estimate_subject_, 0);
+    subjects_.publish("job_queue_next_estimate", &job_queue_next_estimate_subject_);
+
+    lv_subject_init_string(&job_queue_next_thumbnail_subject_, next_thumbnail_buf_, nullptr,
+                           sizeof(next_thumbnail_buf_),
+                           helix::PrinterPrintState::no_thumbnail_placeholder());
+    subjects_.publish("job_queue_next_thumbnail", &job_queue_next_thumbnail_subject_);
+
     lv_subject_init_int(&job_queue_automatic_transition_subject_, automatic_transition_ ? 1 : 0);
     subjects_.publish("job_queue_automatic_transition", &job_queue_automatic_transition_subject_);
 
-    SubjectDebugRegistry::instance().register_subject(&job_queue_state_subject_,
-                                                      "job_queue_state_text",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&job_queue_summary_subject_,
-                                                      "job_queue_summary_text",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&job_queue_count_subject_, "job_queue_count",
-                                                      LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&job_queue_up_next_text_subject_,
-                                                      "job_queue_up_next_text",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
-    SubjectDebugRegistry::instance().register_subject(&job_queue_start_next_text_subject_,
-                                                      "job_queue_start_next_text",
-                                                      LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_count_subject_, "job_queue_count", LV_SUBJECT_TYPE_INT);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_run_state_subject_, "job_queue_run_state",
+                                 LV_SUBJECT_TYPE_INT);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_revision_subject_, "job_queue_revision",
+                                 LV_SUBJECT_TYPE_INT);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_start_in_flight_subject_, "job_queue_start_in_flight",
+                                 LV_SUBJECT_TYPE_INT);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_next_estimate_subject_, "job_queue_next_estimate",
+                                 LV_SUBJECT_TYPE_INT);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_next_thumbnail_subject_, "job_queue_next_thumbnail",
+                                 LV_SUBJECT_TYPE_STRING);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_up_next_text_subject_, "job_queue_up_next_text",
+                                 LV_SUBJECT_TYPE_STRING);
+    HELIX_SUBJECT_DEBUG_REGISTER(&job_queue_start_next_text_subject_, "job_queue_start_next_text",
+                                 LV_SUBJECT_TYPE_STRING);
 
     subjects_initialized_ = true;
 
@@ -148,7 +166,7 @@ void JobQueueState::fetch() {
 
     auto token = lifetime_.token();
     api_->queue().get_queue_status(
-        [this, token](const JobQueueStatus& status) {
+        [this, token](const helix::JobQueueStatus& status) {
             is_fetching_.store(false);
             token.defer("JobQueueState::on_queue_fetched",
                         [this, status]() { on_queue_fetched(status); });
@@ -163,12 +181,21 @@ void JobQueueState::fetch() {
         });
 }
 
-void JobQueueState::on_queue_fetched(const JobQueueStatus& status) {
+void JobQueueState::on_queue_fetched(const helix::JobQueueStatus& status) {
     // Main-thread only: fetch()'s success callback wraps this call in
     // tok.defer(), so everything below may touch subjects and LVGL state.
+    const bool jobs_changed = !std::equal(
+        cached_jobs_.begin(), cached_jobs_.end(), status.queued_jobs.begin(),
+        status.queued_jobs.end(), [](const helix::JobQueueEntry& a, const helix::JobQueueEntry& b) {
+            return a.job_id == b.job_id && a.filename == b.filename;
+        });
+    if (jobs_changed) {
+        ++jobs_revision_;
+    }
     cached_jobs_ = status.queued_jobs;
     queue_state_ = status.queue_state;
     is_loaded_ = true;
+    ever_loaded_ = true;
     // Prune once per connect, on the FIRST fetch. Which fetch triggers it is
     // irrelevant to safety: the prune reads the option store first and the
     // queue second, so an entry can only be deleted against a queue read
@@ -178,8 +205,104 @@ void JobQueueState::on_queue_fetched(const JobQueueStatus& status) {
         pruned_this_connect_ = true;
         prune_option_store();
     }
+    refresh_next_job_media();
     update_subjects();
     spdlog::debug("[JobQueueState] Updated: state={}, jobs={}", queue_state_, cached_jobs_.size());
+}
+
+void JobQueueState::refresh_next_job_media() {
+    if (cached_jobs_.empty()) {
+        clear_next_job_media();
+        return;
+    }
+    const std::string& filename = cached_jobs_.front().filename;
+    if (filename == next_media_filename_ && !next_media_stale_) {
+        return;
+    }
+    // The same job asked again keeps what it shows until the answer lands.
+    if (filename != next_media_filename_) {
+        clear_next_job_media();
+        next_media_filename_ = filename;
+    }
+    next_media_stale_ = false;
+    if (!api_) {
+        return;
+    }
+
+    auto token = lifetime_.token();
+    api_->files().get_file_metadata(
+        filename,
+        [this, token, filename](const FileMetadata& metadata) {
+            token.defer("JobQueueState::on_next_job_metadata",
+                        [this, filename, metadata]() { on_next_job_metadata(filename, metadata); });
+        },
+        [this, token, filename](const MoonrakerError& err) {
+            spdlog::debug("[JobQueueState] Metadata for next job '{}' unavailable: {}", filename,
+                          err.message);
+            // A failed read is asked again on the next fetch.
+            token.defer("JobQueueState::next_job_metadata_failed", [this, filename]() {
+                if (filename == next_media_filename_) {
+                    next_media_stale_ = true;
+                }
+            });
+        });
+}
+
+void JobQueueState::on_next_job_metadata(const std::string& filename,
+                                         const FileMetadata& metadata) {
+    // The queue may have moved on while the request was in flight.
+    if (filename != next_media_filename_) {
+        spdlog::debug("[JobQueueState] Dropping metadata for '{}': next job is now '{}'", filename,
+                      next_media_filename_);
+        return;
+    }
+    next_estimated_s_ = std::max(0, static_cast<int>(metadata.estimated_time));
+    if (subjects_initialized_) {
+        lv_subject_set_int(&job_queue_next_estimate_subject_, next_estimated_s_);
+    }
+
+#if !defined(HELIX_PLATFORM_ESP32)
+    if (!api_ || !subjects_initialized_) {
+        return;
+    }
+    const auto target =
+        helix::ThumbnailProcessor::get_target_for_display(helix::ThumbnailSize::Card);
+    const std::string thumb_path = helix::select_and_resolve_thumbnail(
+        metadata.thumbnails, helix::gcode_dir_of(filename), target.width, target.height);
+    if (thumb_path.empty()) {
+        return;
+    }
+
+    ThumbnailRequest req;
+    req.key = thumb_path;
+    req.target = target;
+    req.api = api_;
+    req.source_modified = static_cast<time_t>(metadata.modified);
+
+    // The cache answers on the main thread, and only while this owner lives
+    // and the first job has not changed since.
+    auto ctx = ThumbnailLoadContext::create(lifetime_, &next_thumbnail_generation_);
+    get_thumbnail_cache().fetch(
+        req, ctx,
+        [this](const std::string& lvgl_path, bool /*degraded*/) {
+            lv_subject_copy_string(&job_queue_next_thumbnail_subject_, lvgl_path.c_str());
+        },
+        [thumb_path](const std::string& error) {
+            spdlog::debug("[JobQueueState] Next job thumbnail '{}' failed: {}", thumb_path, error);
+        });
+#endif
+}
+
+void JobQueueState::clear_next_job_media() {
+    ++next_thumbnail_generation_;
+    next_media_filename_.clear();
+    next_estimated_s_ = 0;
+    if (!subjects_initialized_) {
+        return;
+    }
+    lv_subject_set_int(&job_queue_next_estimate_subject_, 0);
+    lv_subject_copy_string(&job_queue_next_thumbnail_subject_,
+                           helix::PrinterPrintState::no_thumbnail_placeholder());
 }
 
 void JobQueueState::fetch_automatic_transition() {
@@ -221,28 +344,8 @@ void JobQueueState::update_subjects() {
 
     int count = static_cast<int>(cached_jobs_.size());
 
-    // State text: capitalize first letter for display
-    std::string state_display = queue_state_;
-    if (!state_display.empty()) {
-        state_display[0] =
-            static_cast<char>(std::toupper(static_cast<unsigned char>(state_display[0])));
-    }
-    std::snprintf(state_buffer_, sizeof(state_buffer_), "%s", state_display.c_str());
-    lv_subject_copy_string(&job_queue_state_subject_, state_buffer_);
-
-    // Summary text
-    if (count == 0) {
-        std::snprintf(summary_buffer_, sizeof(summary_buffer_), "Queue empty");
-    } else if (count == 1) {
-        std::snprintf(summary_buffer_, sizeof(summary_buffer_), "1 job queued");
-    } else {
-        std::snprintf(summary_buffer_, sizeof(summary_buffer_), "%d jobs queued", count);
-    }
-    lv_subject_copy_string(&job_queue_summary_subject_, summary_buffer_);
-
     // Next-job display name, empty when the queue is empty, feeds both
-    // composed strings. Same settled-before-count rule as the two subjects
-    // above: count observers re-read these.
+    // composed strings. They settle before the count: count observers re-read them.
     const std::string next_display =
         cached_jobs_.empty() ? std::string{}
                              : helix::gcode::get_display_filename(cached_jobs_.front().filename);
@@ -258,12 +361,22 @@ void JobQueueState::update_subjects() {
 
     lv_subject_set_int(&job_queue_automatic_transition_subject_, automatic_transition_ ? 1 : 0);
 
+    lv_subject_set_int(&job_queue_run_state_subject_, static_cast<int>(run_state()));
+    lv_subject_set_int(&job_queue_revision_subject_, jobs_revision_);
+
     // Count goes LAST, after cached_jobs_ and both text subjects are settled.
     // It is the rebuild trigger the queue surfaces observe, and PrintStatusWidget's
     // observer runs synchronously (observe<int>) — publishing it first would
     // let that handler re-read a half-updated state. Main-thread only: the sole
     // caller is on_queue_fetched(), which fetch() reaches through tok.defer().
     lv_subject_set_int(&job_queue_count_subject_, count);
+}
+
+void JobQueueState::set_start_in_flight(bool in_flight) {
+    start_in_flight_ = in_flight;
+    if (subjects_initialized_) {
+        lv_subject_set_int(&job_queue_start_in_flight_subject_, in_flight ? 1 : 0);
+    }
 }
 
 void JobQueueState::subscribe_to_notifications() {
@@ -299,6 +412,45 @@ std::string format_start_next_text(const std::string& display_name, int queued_c
         return {};
     }
     return fmt::format(lv_tr("Start next: {}"), display_name);
+}
+
+JobQueueTileText compose_job_queue_tile_text(JobQueueTileState state,
+                                             const std::string& next_display_name, int queued_count,
+                                             int next_estimated_s, int more_count) {
+    JobQueueTileText t;
+    if (queued_count > 0) {
+        t.count = std::to_string(queued_count);
+    }
+    switch (state) {
+    case JobQueueTileState::Unavailable:
+        t.hero = lv_tr("Job queue not enabled in Moonraker");
+        break;
+    case JobQueueTileState::NotLoaded:
+        break;
+    case JobQueueTileState::Empty:
+        t.hero = lv_tr("Queue empty");
+        break;
+    case JobQueueTileState::WaitingForStart:
+        t.hero = next_display_name;
+        if (next_estimated_s > 0) {
+            t.detail = format::duration(next_estimated_s);
+        }
+        if (more_count > 0) {
+            t.more = fmt::format(lv_tr("+{} more"), more_count);
+        }
+        t.action = lv_tr("Bed clear · Start next");
+        t.action_short = lv_tr("Start next");
+        break;
+    case JobQueueTileState::AutoNext:
+    case JobQueueTileState::Printing:
+        t.hero = fmt::format(lv_tr("{} queued"), queued_count);
+        t.detail = fmt::format(lv_tr("Next: {}"), next_display_name);
+        break;
+    case JobQueueTileState::Starting:
+        t.hero = fmt::format(lv_tr("Starting {}…"), next_display_name);
+        break;
+    }
+    return t;
 }
 
 bool parse_automatic_transition(const json& rpc_response) {

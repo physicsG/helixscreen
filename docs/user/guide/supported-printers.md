@@ -52,10 +52,10 @@ The AD5X's four-color **IFS (Intelligent Filament System)** is fully integrated,
 
 **What works:**
 - **4-slot IFS** — load, unload, and select filament per slot, with per-slot color and material tracking and per-port filament-presence sensors
-- **Automatic tool-to-port mapping** for multi-color prints (T0–T15 → physical ports), correct even with slot renumbering enabled. Remapping a tool writes the printer's own tool map, so what HelixScreen shows is what the printer will do
+- **Automatic Filament Mapping** for multi-color prints (T0–T15 → physical ports), correct even with slot renumbering enabled. Mapping filament writes the printer's own tool map, so what HelixScreen shows is what the printer will do
 - **External-spool bypass mode** for feeding a spool directly — engages runout protection on the toolhead sensor automatically, and publishes the spool to OrcaSlicer as an extra lane
 - **[Spoolman](filament-tracking.md) integration** for assigning tracked spools to slots
-- **Infinite Spool Mode** reporting — when a slot runs out, the IFS automatically switches to another slot with the same filament type *and* color, if one is loaded. HelixScreen tells you this plainly on the runout screen and in the AMS panel
+- **Infinite Spool Mode** (Endless Spool) reporting — when a slot runs out, the IFS automatically switches to another slot with the same filament type *and* color, if one is loaded. HelixScreen tells you this plainly on the runout screen and in the AMS panel
 - **Firmware-managed Z-offset** — ZMOD stores the offset itself, so there is no Save step. HelixScreen shows the *stored* value while the printer is idle, where other interfaces read 0.000, and adjusts from it correctly. See [Printing → Z-Offset](printing.md#z-offset--baby-steps)
 
 **Requirements:** ZMOD firmware v1.7.0 or newer (a community firmware mod, separate from FlashForge stock). See [Installation → Adventurer 5X](install-ad5x.md).
@@ -75,7 +75,7 @@ Runs on the K1's built-in screen. K1C and K1 Max are the most thoroughly tested 
 - **Chamber heater control** on the K1 Max
 - **Optional CFS support** — with Creality's official CFS upgrade kit and firmware (v2.3.5.33+), HelixScreen detects and drives the K1-series filament system (see [Creality Filament System](filament.md#creality-filament-system-cfs))
 
-**Requirements:** Community firmware that includes Moonraker (stock K1 firmware has none) — Guilouz, Simple AF, or Guppy Mod — plus root access. See [Installation → Creality K1 Series](creality-k1c-setup.md).
+**Requirements:** Community firmware that includes Moonraker (stock K1 firmware has none) — Guilouz, Simple AF, or Guppy Mod — plus root access. See [Installation → Creality K1 Series](creality-k1c-setup.md); the [K1 series page](install-k1.md) covers the easy installer.
 
 **Status:** Supported.
 
@@ -85,14 +85,16 @@ Runs on the K1's built-in screen. K1C and K1 Max are the most thoroughly tested 
 
 ### Creality K2 / K2 Plus / K2 Pro
 
-Runs on the K2's built-in screen and, unlike the K1, **works with stock firmware and stock Moonraker**, no custom firmware required. This is the flagship CFS integration. The base K2 is detected as its own machine with its own artwork, and differs from the Plus and Pro in one way that matters here: it has no chamber heater, so there is no chamber control to show.
+Runs on the K2's built-in screen and, unlike the K1, **works with stock firmware and stock Moonraker**, no custom firmware required. This is the flagship CFS integration. The base K2 is detected as its own machine with its own artwork, and differs from the Plus and Pro in one way that matters here: it has no chamber heater, so there is no chamber control to show. With a CFS connected, the home screen picture of the base K2 shows the CFS on top of the printer.
 
 **What works:**
 - **Full CFS multi-material** — up to 4 units × 4 slots (16 colors): per-slot color, material type, and remaining filament length; per-unit temperature and humidity; load/unload
-- **Auto-refill / backup spool** switching, run by the CFS itself, and tool-to-slot color mapping. A runout always pauses the print first, and the box only swaps to another slot when auto-refill is on and that slot holds the exact same material *and* colour - otherwise the print stays paused
+- **Auto-Refill** (Endless Spool), run by the CFS itself, and Filament Mapping. A runout always pauses the print first, and the box only switches to another slot when Auto-Refill is on and that slot holds the exact same material *and* color - otherwise the print stays paused
 - **Humidity and temperature monitoring** - each CFS unit is one box on the [filament environment screen](filament.md#filament-drying-and-humidity). The CFS has no heater, so there are readings to watch but no drying controls
 - **External-spool bypass** — toggle it in the AMS panel: the CFS is stood down, the toolhead runout sensor is switched on for protection, and the spool is published to OrcaSlicer as an extra lane. See [Filament → CFS and the External Spool](filament.md#cfs-and-the-external-spool)
+- **No CFS?** A K2 without one is a single-spool printer: no filament system screens, and Load and Unload run the K2's own external-spool load and cut. See [Filament → CFS](filament.md#creality-filament-system-cfs)
 - **Chamber heater** control (K2 Pro / Plus)
+- **Hotend fan** shown in Fan Control without a dial: it runs with the heater and is never set from the screen
 - **Spaghetti detection**: HelixScreen runs the K2's own AI model on camera snapshots during a print and can pause it (see [Print Monitoring](print-monitoring.md#print-failure-detection)). Filament runout is detected and acted on by the printer's own firmware, which pauses the job; HelixScreen reports what the CFS decided and offers the recovery buttons
 
 **Requirements:** Stock firmware works out of the box. See [Installation → Creality K2 Series](install-k2.md).
@@ -100,27 +102,33 @@ Runs on the K2's built-in screen and, unlike the K1, **works with stock firmware
 **Status:** Tested — runs natively with CFS support.
 
 > **Community firmware:** the list above describes **stock** Creality firmware. Some owners replace it with a community build that swaps in its own rewritten CFS module — those are auto-detected and fully supported, including load, unload and filament changes. See [Filament → CFS](filament.md#creality-filament-system-cfs).
+>
+> On the K2 Plus community firmware (the Kalico-based port with its own CFS module), recent module versions add more:
+> - **Per-box readings**: each CFS unit shows its own temperature and humidity
+> - **Filament Mapping**: the tool-to-slot choices you make when starting a print are sent to the CFS just before the print starts, and apply to that print only. If a mapping points at a slot the CFS cannot feed from, or at a unit that has stopped answering, the print does not start and HelixScreen tells you why. Older module versions have no Filament Mapping
+> - **Disconnected units**: a CFS unit that stops answering is marked **Disconnected** on its card until it comes back
 
 > **Good to know:** The K2's portrait panel is software-rotated to landscape — that is the supported configuration. Running it un-rotated with the portrait layout is alpha and mostly untested. On this lower-power CPU, animations and 3D bed-mesh rendering may be throttled. The CFS material database is fetched from Creality's cloud.
 
 ---
 
-### QIDI Plus 4 / Q2 / Max 4
+### QIDI Plus 4 / Q2 / Plus 5 / Max 4
 
-The 4-series QIDI printers integrate the **QIDI Box** filament changer. The Q2 and Max 4 can run HelixScreen on-device; the Plus 4 (and the 3-series X-Smart 3 / X-Plus 3 / X-Max 3 / Q1 Pro) use a serial TJC display that HelixScreen can't drive on-device, so those are **remote-control only** — run HelixScreen on a separate device pointed at the printer's Moonraker.
+The 4-series QIDI printers integrate the **QIDI Box** filament changer. The Q2, Plus 5 and Max 4 can run HelixScreen on-device; the Plus 4 (and the 3-series X-Smart 3 / X-Plus 3 / X-Max 3 / Q1 Pro) use a serial TJC display that HelixScreen can't drive on-device, so those are **remote-control only** — run HelixScreen on a separate device pointed at the printer's Moonraker.
 
 **What works:**
-- **QIDI Box filament changer** (4, 8, 12, or 16 slots) — per-slot status, tool-to-slot mapping, and load / unload / change-tool control
+- **QIDI Box filament changer** (4, 8, 12, or 16 slots) — per-slot status, Filament Mapping and Assigned Tool, and load / unload / change-tool control
+- **The full stock load wizard** - a load runs QIDI's whole `M604` sequence on the screen (push the filament in, **Extrude more** or **Done**), then cools the nozzle and turns the filament sensor back on. See [Loading on a QIDI](filament.md#loading-on-a-qidi-m604)
 - **QIDI Box drying** - the box's PTC heater, its temperature and its humidity are all on the box's [filament environment screen](filament.md#filament-drying-and-humidity)
 - **Chamber heater** control on enclosed models
 - **QIDI-specific print-start tracking** (homing → bed heat → nozzle clean → Z-tilt → mesh → nozzle heat → chamber heat)
 - WiFi configuration works out of the box
 
-**Requirements:** Stock firmware works (runs standard Moonraker); community stacks like FreeDi and FreeQIDI are also supported. On-device install applies to the Q2 and Max 4 only; everything else is [remote control](../INSTALL.md#remote-screen-setup-run-on-a-separate-device).
+**Requirements:** Stock firmware works (runs standard Moonraker); community stacks like FreeDi and FreeQIDI are also supported. On-device install applies to the Q2, Plus 5 and Max 4 only; everything else is [remote control](../INSTALL.md#remote-screen-setup-run-on-a-separate-device).
 
 **Status:** Supported.
 
-> **Good to know:** HelixScreen owns no QIDI hardware — the Q2 is community-validated. The QIDI Box write path (load/unload) is still being field-validated, and Max 4 box control differs from the Q2 and is a work in progress. Installing on the printer replaces QIDI's stock screen app, which QIDI Studio box sync, QIDI cloud and QIDI Box filament edits depend on; uninstalling HelixScreen brings them back.
+> **Good to know:** HelixScreen owns no QIDI hardware — the Q2 is community-validated. The QIDI Box write path (load/unload) is still being field-validated, and Max 4 box control differs from the Q2 and is a work in progress. Installing on the printer replaces QIDI's stock screen app, which QIDI Studio box sync, QIDI cloud and QIDI Box filament edits depend on; uninstalling HelixScreen brings them back. Install steps: [QIDI](install-qidi.md).
 
 ---
 
@@ -133,13 +141,14 @@ A true 4-toolhead changer, running on the U1's built-in 3.5" screen. Each of the
 - **Per-slot filament data** — material type and sub-type, brand, and color, read from the print job even when the RFID reader is off
 - **RFID filament recognition** via the built-in reader
 - **Per-extruder feed/load state and runout handling** with automatic resume
-- **Batch load and unload**: the AMS panel's Load and Unload buttons open a picker covering several heads at once; the U1 runs its own batch command, preheating the next head while the current one finishes. See [Filament](filament.md#sidebar-right)
-- **The firmware's print preferences**: under the AMS panel's **Settings** button, in the **Print Behaviour** section: auto-replenish (and whether replenish ignores color), filament tangle detection with a low/medium/high sensitivity, per-head **Unload at end** toggles, and turning the LED off when the print ends. The toggles show the firmware's stored values and write changes back to the firmware
+- **Batch load and unload**: the AMS panel's Load and Unload buttons open a picker covering several heads at once; the U1 runs its own batch command, preheating the next head while the current one finishes. See [Filament](filament.md#sidebar)
+- **The firmware's print preferences**: under the AMS panel's **Settings** button, in the **Print Behavior** section: whether replenish ignores color, filament tangle detection with a low/medium/high sensitivity, and turning the LED off when the print ends. These show the firmware's stored values and write changes back to the firmware. Auto-Replenish is the **Endless Spool** switch on the Settings page itself
+- **Unload at end, per toolhead**: in the same section, one toggle per toolhead. The U1 forgets this choice after every print, so HelixScreen keeps it per printer and sends it with every print it starts, including Print Again and a restart from the beginning. A choice made from another app between prints is replaced by HelixScreen's. A toolhead holding soft filament such as TPU is never unloaded, as on the Snapmaker screen: its toggle is grayed out and reads off, and your choice comes back once that head holds rigid filament again. Changing a toggle during a print takes effect from the next print
 - **Pre-print options that stick**: the toggles offered before a print starts (bed mesh, input shaper, pressure advance, timelapse) read the firmware's stored settings and write your choice back to them, instead of resetting to a default every print
 - **Per-filament temperatures**: the U1 keeps its own load/unload temperature table per filament, and HelixScreen reads it: a load preheats to the temperature the firmware measured for that filament rather than a generic default
 - **Faults in plain language**: the U1's numeric fault codes arrive translated into a sentence saying what went wrong, not just the code
 - **Screws-tilt calibration** driven through the firmware, with a pre-flight check that asks you to take the PEI sheet off the bed first - probing through it gives wrong results
-- **Firmware-managed Z-offset** and dedicated print-start tracking; near-certain auto-detection
+- **Dedicated print-start tracking** and near-certain auto-detection. Z-offset baby steps are temporary: the firmware re-applies each head's own stored offset on every tool change. See [Printing → Z-Offset](printing.md#z-offset--baby-steps)
 
 **Requirements:** SSH access — either stock firmware 1.2+ (via its **Root access** option) or PAXX Extended Firmware (SSH on by default). Reinstall after any firmware update. See [Installation → Snapmaker U1](install-u1.md).
 
@@ -173,9 +182,9 @@ The **Anycubic ACE Pro** filament system is integrated on the Kobra 2 Pro, Kobra
 **What works:**
 - **Native ACE filament system** — per-slot color and material, load/unload, and [filament drying](filament.md#filament-drying-and-humidity) (the ACE has a heated drying chamber)
 
-**Requirements:** Community firmware such as [Rinkhals](https://github.com/jbatonnet/Rinkhals) (Anycubic) providing Moonraker. ACE integration needs the community `ace_status.py` Moonraker component (ValgACE) — if it's missing, HelixScreen shows a prompt telling you to install it. The Kobra S1's firmware ships a different, mainline-Python fork of that component; HelixScreen talks to it over its REST interface, so it works without the ValgACE install.
+**Requirements:** Community firmware such as [Rinkhals](https://github.com/jbatonnet/Rinkhals) (Anycubic) providing Moonraker. ACE integration needs the community `ace_status.py` Moonraker component (ValgACE) — if it's missing, HelixScreen shows a prompt telling you to install it. Printers running the [ACEPRO](https://github.com/Kobra-S1/ACEPRO) Klipper driver (Kobra S1, Kobra X and the Kobra 3 family on vanilla Klipper) need no ValgACE install either: HelixScreen reads that driver directly. With several ACE units daisy-chained on ACEPRO, each one shows as its own unit, with its own slots and its own dryer.
 
-**Status:** Community (auto-detected; not yet tested on our hardware - Kobra S1 fork support comes from captured status data, not a live machine).
+**Status:** Community (auto-detected; not yet tested on our hardware - ACEPRO support comes from captured status data and the driver's source, not a live machine).
 
 ---
 
@@ -197,7 +206,7 @@ Some filament systems aren't tied to a specific printer model — HelixScreen de
 - **AFC-Klipper** (Box Turtle, OpenAMS, ViViD)
 - **OpenAMS** on its own (klipper_openams without AFC, with its UI API installed)
 - **klipper-toolchanger** (multi-toolhead setups)
-- **MedusaHC** (hotend changer, commonly on a Duender) - detected on top of klipper-toolchanger
+- **MedusaHC** (hotend changer, commonly on a Duender) - detected from its controller and dock sensors, with or without klipper-toolchanger
 
 Full details on each are in [Filament Management](filament.md#ams--multi-material-systems).
 
@@ -215,6 +224,7 @@ If your printer isn't in the list above, it still works — it just uses generic
 - Macros, console, and the file browser / print controls
 - Firmware retraction, chamber heating, input shaper, exclude-objects, and [Spoolman](filament-tracking.md) — each when detected
 - Timelapse, when the Moonraker-Timelapse plugin is installed
+- [Screen sharing and remote control](screen-sharing.md) from a browser, and as a webcam in Mainsail and Fluidd
 
 The printer database (100+ models across Voron, RatRig, Prusa-on-Klipper, VzBot, Elegoo Neptune, Sovol, Anycubic, Artillery, FLSUN - including the S1 and S1 Pro - Kingroon, Zero G, and more) adds the finishing touches — your printer's name, image, bed size, and preset options. A printer that isn't in the database misses only those cosmetic and preset details; every control above still works.
 

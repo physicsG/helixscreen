@@ -1,20 +1,33 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_manual_pull_prompt.h"
+#include "ui_nav_manager.h"
+
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/filament_panel_macro_harness.h"
 #include "../test_helpers/filament_panel_test_access.h"
 #include "../test_helpers/preheat_widget_test_access.h"
 #include "../test_helpers/scoped_shared_resource.h"
+#include "../test_helpers/toolchanger_test_helper.h"
+#include "../ui_test_utils.h"
+#include "ams_backend_indx.h"
+#include "ams_state.h"
 #include "filament_catalog.h"
+#include "filament_op_heater.h"
+#include "filament_op_router.h"
 #include "macro_executor.h"
+#include "macro_param_cache.h"
 #include "material_settings_manager.h"
 #include "preheat_widget.h"
 #include "preset_materials.h"
+#include "printer_discovery.h"
 #include "safety_settings_manager.h"
 #include "settings_manager.h"
+#include "standard_macros.h"
 #include "temperature_controller.h"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -112,7 +125,7 @@ void press(PreheatAction action, Harness& h) {
     }
 }
 
-const Scripts ABS_TARGETS{"SET_HEATER_TEMPERATURE HEATER=extruder TARGET=250",
+const Scripts kAbsTargets{"SET_HEATER_TEMPERATURE HEATER=extruder TARGET=250",
                           "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=105"};
 
 } // namespace
@@ -153,7 +166,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     press(action, h);
 
-    Scripts expected = ABS_TARGETS;
+    Scripts expected = kAbsTargets;
     expected.push_back("HEAT_ABS");
     CHECK(h.client.gcode_script_history() == expected);
 }
@@ -175,7 +188,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     press(action, h);
 
-    CHECK(h.client.gcode_script_history() == ABS_TARGETS);
+    CHECK(h.client.gcode_script_history() == kAbsTargets);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
@@ -196,7 +209,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     press(action, h);
 
-    CHECK(h.client.gcode_script_history() == ABS_TARGETS);
+    CHECK(h.client.gcode_script_history() == kAbsTargets);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
@@ -328,6 +341,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     discover_macros(h);
     helix_test::ScopedSharedResource<helix::TemperatureController> controller(
         std::make_shared<helix::TemperatureController>(h.state, &h.api));
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(h.state));
     helix::MaterialSettingsManager::instance().set_override("ABS", abs_override("HEAT_ABS", true));
     helix::SafetySettingsManager::instance().set_allow_cold_extrude(false);
     h.set_safety_limits(170.0);
@@ -428,4 +443,237 @@ TEST_CASE("plan_material_preheat flags a macro this printer does not define",
 
     CHECK(plan.mode == helix::MaterialPreheatMode::MACRO_MISSING);
     CHECK(plan.macro == "HEAT_ABS");
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "Extrude, retract and purge heat a cold nozzle before they move filament",
+                 "[material_preheat][preheat][filament][heater]") {
+    enum class Button { Extrude, Retract, Purge };
+    const Button button = GENERATE(Button::Extrude, Button::Retract, Button::Purge);
+    CAPTURE(static_cast<int>(button));
+    Harness h;
+    // No purge macro: the panel's purge is its built-in extrude sequence.
+    helix::PrinterDiscovery bare;
+    bare.parse_objects(nlohmann::json{"extruder"});
+    StandardMacros::instance().reset();
+    StandardMacros::instance().init(bare);
+    helix_test::ScopedSharedResource<helix::TemperatureController> controller(
+        std::make_shared<helix::TemperatureController>(h.state, &h.api));
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(h.state));
+    helix::SafetySettingsManager::instance().set_allow_cold_extrude(false);
+    h.state.update_from_status({{"extruder", {{"temperature", 25.0}, {"target", 0.0}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    h.client.clear_gcode_script_history();
+
+    switch (button) {
+    case Button::Extrude:
+        PanelAccess::handle_extrude_button(*h.panel);
+        break;
+    case Button::Retract:
+        PanelAccess::handle_retract_button(*h.panel);
+        break;
+    case Button::Purge:
+        PanelAccess::handle_purge_button(*h.panel);
+        break;
+    }
+    helix::ui::UpdateQueue::instance().drain();
+
+    REQUIRE(heater.get().pending());
+    const auto& before = h.client.gcode_script_history();
+    REQUIRE(before.size() == 1);
+    CHECK(before[0].rfind("SET_HEATER_TEMPERATURE HEATER=extruder TARGET=", 0) == 0);
+
+    h.state.update_from_status({{"extruder", {{"temperature", 220.0}, {"target", 220.0}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK_FALSE(heater.get().pending());
+    CHECK(h.client.gcode_script_history().size() > 1); // the op itself went out
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "A panel Purge replaces another surface's pending load",
+                 "[material_preheat][preheat][filament][heater]") {
+    Harness h;
+    helix::PrinterDiscovery bare;
+    bare.parse_objects(nlohmann::json{"extruder"});
+    StandardMacros::instance().reset();
+    StandardMacros::instance().init(bare);
+    helix_test::ScopedSharedResource<helix::TemperatureController> controller(
+        std::make_shared<helix::TemperatureController>(h.state, &h.api));
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(h.state));
+    helix::SafetySettingsManager::instance().set_allow_cold_extrude(false);
+    h.state.update_from_status({{"extruder", {{"temperature", 25.0}, {"target", 0.0}}}});
+    helix::ui::UpdateQueue::instance().drain();
+
+    // The home tile's load is waiting on the nozzle.
+    helix::ui::execute_filament_load(nullptr, -1, "[FilamentSensorWidget]");
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(heater.get().pending());
+
+    PanelAccess::handle_purge_button(*h.panel);
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(heater.get().pending()); // replaced, not withdrawn
+    h.client.clear_gcode_script_history();
+
+    // Hot enough for whatever material the panel's preset names.
+    h.state.update_from_status({{"extruder", {{"temperature", 290.0}, {"target", 290.0}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE_FALSE(heater.get().pending());
+    // The mock records each line of a script on its own: the purge fallback's
+    // extrude is G1 E50, the load fallback's first move G1 E56.
+    const auto& sent = h.client.gcode_script_history();
+    const auto has = [&sent](const std::string& line) {
+        return std::find(sent.begin(), sent.end(), line) != sent.end();
+    };
+    CHECK(has("G1 E50 F600"));
+    CHECK_FALSE(has("G1 E56 F1200"));
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "A panel load that waited raises no prompt once the user has left the panel",
+                 "[material_preheat][preheat][filament][heater]") {
+    Harness h;
+    discover_macros(h, {"extruder", "heater_bed", "gcode_macro LOAD_FILAMENT"});
+    helix::PrinterDiscovery hardware;
+    hardware.parse_objects(nlohmann::json{"extruder", "gcode_macro LOAD_FILAMENT"});
+    StandardMacros::instance().reset();
+    StandardMacros::instance().init(hardware);
+    nlohmann::json config;
+    // LENGTH is a parameter nothing prefills, so a prompting dispatch would ask.
+    config["gcode_macro LOAD_FILAMENT"]["gcode"] =
+        "{% set t = params.TEMP|default(220)|int %}\n{% set l = params.LENGTH|default(50)|int "
+        "%}\nM109 S{t}\nG1 E{l} F300";
+    helix::MacroParamCache::instance().populate_from_configfile(config, {"LOAD_FILAMENT"});
+    int prompts = 0;
+    helix::ui::set_filament_param_prompter([&prompts](const std::string&,
+                                                      const helix::CachedMacroInfo&,
+                                                      const std::map<std::string, std::string>&,
+                                                      helix::MacroExecuteCallback) { ++prompts; });
+    helix_test::ScopedSharedResource<helix::TemperatureController> controller(
+        std::make_shared<helix::TemperatureController>(h.state, &h.api));
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(h.state));
+    helix::SafetySettingsManager::instance().set_allow_cold_extrude(false);
+    h.state.update_from_status({{"extruder", {{"temperature", 25.0}, {"target", 0.0}}},
+                                {"toolhead", {{"homed_axes", "xyz"}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    // The tap happened on the panel; the user is elsewhere when the nozzle is hot.
+    REQUIRE(NavigationManager::instance().get_active() != helix::PanelId::Filament);
+
+    PanelAccess::execute_load(*h.panel);
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(heater.get().pending());
+
+    h.state.update_from_status({{"extruder", {{"temperature", 290.0}, {"target", 290.0}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK_FALSE(heater.get().pending());
+    CHECK(prompts == 0);
+    helix::ui::set_filament_param_prompter({});
+    helix::MacroParamCache::instance().clear();
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "A panel Unload the heater does not run leaves no manual-pull prompt armed",
+                 "[material_preheat][preheat][filament][heater]") {
+    // Extrude is heating; the user taps Unload, which the heater refuses. The
+    // manual-pull prompt armed for that unload would otherwise fire on the next
+    // unrelated toolhead-sensor edge, or on the next unload's end.
+    Harness h;
+    helix::PrinterDiscovery bare;
+    bare.parse_objects(nlohmann::json{"extruder"});
+    StandardMacros::instance().reset();
+    StandardMacros::instance().init(bare);
+    helix_test::ScopedSharedResource<helix::TemperatureController> controller(
+        std::make_shared<helix::TemperatureController>(h.state, &h.api));
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(h.state));
+    helix::SafetySettingsManager::instance().set_allow_cold_extrude(false);
+    h.state.update_from_status({{"extruder", {{"temperature", 25.0}, {"target", 0.0}}}});
+    helix::ui::UpdateQueue::instance().drain();
+
+    PanelAccess::handle_extrude_button(*h.panel);
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(heater.get().pending());
+
+    PanelAccess::execute_unload(*h.panel);
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(heater.get().pending()); // refused: the extrude still heats
+
+    std::vector<std::string> toasts;
+    helix::ui::set_test_notification_info_hook(
+        [&toasts](const std::string& msg) { toasts.push_back(msg); });
+    helix::ui::manual_pull_unload_finished(); // speaks only when armed
+    helix::ui::set_test_notification_info_hook(nullptr);
+    CHECK(toasts.empty());
+}
+
+namespace {
+
+/// A shared-heater backend with no tool on the head: it refuses nozzle heat.
+std::unique_ptr<helix::AmsBackend> empty_head_indx() {
+    auto indx = std::make_unique<helix::test::GcodeCaptureBackend<helix::AmsBackendIndx>>();
+    helix::PrinterDiscovery hw;
+    hw.parse_objects(nlohmann::json::array(
+        {"indx", "save_variables", "extruder", "gcode_macro TOOL_POSITIONS",
+         "gcode_macro _TOOLCHANGE_VARS", "gcode_macro CHANGE_TOOL", "gcode_macro PARK_TOOL"}));
+    indx->set_discovery(hw);
+    indx->feed(nlohmann::json{{"save_variables", {{"variables", {{"active_tool", -1}}}}}});
+    return indx;
+}
+
+int shown_nozzle_target(Harness& h) {
+    int current = -1;
+    int target = -1;
+    h.panel->get_temp(&current, &target);
+    return target;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "A preset whose nozzle half is refused shows the printer's own target",
+                 "[material_preheat][preheat][indx][heat]") {
+    MaterialSettingsScope settings;
+    Harness h(empty_head_indx());
+    discover_macros(h);
+    helix_test::ScopedSharedResource<helix::TemperatureController> controller(
+        std::make_shared<helix::TemperatureController>(h.state, &h.api));
+    REQUIRE_FALSE(helix::AmsState::instance().nozzle_heat_blocked_reason().empty());
+
+    PanelAccess::handle_preset_button(*h.panel, 0);
+    helix::ui::UpdateQueue::instance().drain();
+
+    // The bed half still applies; the nozzle half never reached the printer.
+    CHECK(h.client.gcode_script_history() ==
+          Scripts{"SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60"});
+    CHECK(shown_nozzle_target(h) == 0);
+    helix::AmsState::instance().clear_backends();
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "A refused keypad or spool-preset nozzle target is not shown as set",
+                 "[material_preheat][preheat][indx][heat]") {
+    MaterialSettingsScope settings;
+    Harness h(empty_head_indx());
+    discover_macros(h);
+    helix_test::ScopedSharedResource<helix::TemperatureController> controller(
+        std::make_shared<helix::TemperatureController>(h.state, &h.api));
+
+    SECTION("keypad") {
+        PanelAccess::confirm_custom_nozzle(*h.panel, 230.0f);
+    }
+    SECTION("spool preset") {
+        helix::MaterialSettingsManager::instance().set_preset_material(2, "ASA");
+        helix::SlotInfo spool;
+        spool.material = "ABS";
+        helix::AmsState::instance().set_external_spool_info_in_memory(spool);
+        PanelAccess::update_spool_preset(*h.panel);
+        PanelAccess::handle_spool_preset_button(*h.panel);
+    }
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(shown_nozzle_target(h) == 0);
+    for (const auto& line : h.client.gcode_script_history()) {
+        CHECK(line.find("HEATER=extruder") == std::string::npos);
+    }
+    helix::AmsState::instance().clear_backends();
 }

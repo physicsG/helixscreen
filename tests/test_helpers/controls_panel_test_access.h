@@ -23,6 +23,13 @@ namespace helix::ui {
 struct ControlsPanelTestAccess {
     using SecondaryFanRow = ControlsPanel::SecondaryFanRow;
 
+    static void confirm_custom_nozzle(ControlsPanel& p, float celsius) {
+        p.handle_custom_nozzle_confirmed(celsius);
+    }
+    static int cached_extruder_target(const ControlsPanel& p) {
+        return p.cached_extruder_target_;
+    }
+
     static std::vector<SecondaryFanRow>& rows(ControlsPanel& p) {
         return p.secondary_fan_rows_;
     }

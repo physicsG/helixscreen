@@ -24,6 +24,8 @@ class FilamentBufferWidget : public PanelWidget {
     void attach(lv_obj_t* widget_obj, lv_obj_t* parent_screen) override;
     void detach() override;
     void on_size_changed(int colspan, int rowspan, int width_px, int height_px) override;
+    /// Refuses a width that cannot stand the slider beside the widest reading.
+    bool fits_at(int width_px, int height_px) const override;
     const char* id() const override {
         return "filament_buffer";
     }

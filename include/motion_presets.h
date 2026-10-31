@@ -10,6 +10,7 @@
 #include "printer_state.h"
 
 #include <optional>
+#include <string_view>
 
 namespace helix {
 
@@ -26,6 +27,28 @@ enum class MotionPreset {
     Front,
     FrontRight,
 };
+
+/// A preset and its stable token, as the Move tab's XML and the Toolhead widget's config
+/// name it.
+struct MotionPresetToken {
+    MotionPreset preset;
+    const char* token;
+};
+
+/// Every preset once, in grid order: the rear row, then the middle, then the front, each
+/// left to right.
+inline constexpr MotionPresetToken kMotionPresetTokens[] = {
+    {MotionPreset::RearLeft, "rear_left"},     {MotionPreset::Rear, "rear"},
+    {MotionPreset::RearRight, "rear_right"},   {MotionPreset::Left, "left"},
+    {MotionPreset::Center, "center"},          {MotionPreset::Right, "right"},
+    {MotionPreset::FrontLeft, "front_left"},   {MotionPreset::Front, "front"},
+    {MotionPreset::FrontRight, "front_right"},
+};
+
+/// The preset's token ("rear_left" ... "front_right").
+[[nodiscard]] const char* motion_preset_token(MotionPreset preset);
+/// The preset a token names; nullopt for anything else.
+[[nodiscard]] std::optional<MotionPreset> motion_preset_from_token(std::string_view token);
 
 /**
  * @brief The area Move-tab presets aim at, in G-code space
@@ -63,13 +86,13 @@ std::optional<AxisTarget> motion_preset_target(MotionPreset preset, const AxisBo
                                                bool circular_bed);
 
 /// How far inside the rear edge of the plate a park position sits.
-inline constexpr double PARK_REAR_MARGIN_MM = 10.0;
+inline constexpr double kParkRearMarginMm = 10.0;
 
 /**
  * @brief Where the toolhead parks when nothing else says: over the rear of
  *        the plate, centred in X, in G-code millimetres
  *
- * X and Y only. It never leaves the plate: PARK_REAR_MARGIN_MM inside the rear
+ * X and Y only. It never leaves the plate: kParkRearMarginMm inside the rear
  * edge, or the plate's centre line on a plate shallower than twice that.
  *
  * @param area The plate in G-code space (preset_area()).
@@ -100,14 +123,48 @@ BedCoordMapper bed_map_mapper(const AxisBounds& area, int viewport_w_px, int vie
 std::optional<AxisTarget> bed_map_target(float x_px, float y_px, const BedCoordMapper& mapper,
                                          const AxisBounds& area, bool circular_bed);
 
+/// The least clearance, in millimetres, the top of z_max must leave above a part on the
+/// bed for a lift to count as clearing it.
+inline constexpr double kPartClearanceMinMm = 1.0;
+
+/// What an XY move from the plate or a position preset does with Z first.
+struct PlateLift {
+    enum class Kind {
+        None,   ///< already at or above the floor: travel at the current Z
+        Lift,   ///< rise to `z`, then travel
+        Refuse, ///< z_max cannot clear the part on the bed: do not move
+    };
+    Kind kind = Kind::None;
+    double z = 0.0; ///< the height to rise to; meaningful for Lift only
+};
+
 /**
- * @brief Z a Bed-tab move lifts to before it travels, if any
+ * @brief The lowest Z an XY move may travel at
  *
- * A nozzle below @p clearance_mm would drag across the plate, so the move
- * rises to the clearance (capped at @p z_max) first. At or above it, or
- * when the cap leaves nothing to rise to, there is no lift.
+ * @p clearance_mm with nothing on the bed; @p part_height_mm + @p clearance_mm while a
+ * part may still be on it. Not capped: plate_lift() decides what z_max does to it.
  */
-std::optional<double> bed_map_lift_z(double current_z, double clearance_mm, double z_max);
+double plate_z_floor(double clearance_mm, std::optional<double> part_height_mm);
+
+/**
+ * @brief Decide the lift before an XY move from the plate or a position preset
+ *
+ * Lift to plate_z_floor() capped at @p z_max when below it; None when @p current_z is
+ * already within AxisMove::kEpsilonMm of that height or above. Refuse when a part is on
+ * the bed and @p z_max is less than kPartClearanceMinMm above its height.
+ */
+PlateLift plate_lift(double current_z, double clearance_mm, double z_max,
+                     std::optional<double> part_height_mm);
+
+/**
+ * @brief Clamp a downward Z target so it never goes below the floor while a part is on the bed
+ *
+ * Returns @p target_z unchanged when the bed is not @p occupied or the target is at or above
+ * plate_z_floor(); the floor otherwise. An occupied bed of unknown height (@p part_height_mm
+ * nullopt) floors at the clearance. Never raises a target that is above the floor.
+ */
+double clamp_z_down_to_floor(double target_z, double clearance_mm, bool occupied,
+                             std::optional<double> part_height_mm);
 
 /**
  * @brief Half the length of a Bed-tab crosshair guide

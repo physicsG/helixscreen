@@ -41,9 +41,9 @@ class PrintEtaEstimator {
   public:
     /// These inputs support no answer. The caller leaves its subject alone
     /// rather than publishing a zero, which would read as "finished".
-    static constexpr int NO_ESTIMATE = -1;
+    static constexpr int kNoEstimate = -1;
 
-    /// Seconds remaining, or NO_ESTIMATE. Advances the smoothing state.
+    /// Seconds remaining, or kNoEstimate. Advances the smoothing state.
     [[nodiscard]] int remaining_seconds(const PrintEtaInputs& in);
 
     /// Forget the smoothed value. A new print's first sample must not be
@@ -53,7 +53,7 @@ class PrintEtaEstimator {
   private:
     /// Below this progress the observed rate is blended with the slicer's
     /// estimate, weighted toward the slicer as progress approaches zero.
-    static constexpr int BLEND_BELOW_PCT = 15;
+    static constexpr int kBlendBelowPct = 15;
 
     double smoothed_remaining_ = 0.0;
     bool has_smoothed_ = false;

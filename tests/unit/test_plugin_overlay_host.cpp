@@ -28,7 +28,7 @@ namespace {
 /// go_back close path runs inline, and panel_stack_[0] holding a stand-in base panel.
 class OverlayFx : public LVGLUITestFixture {
   public:
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
 
     OverlayFx() {
         DisplaySettingsManager::instance().set_animations_enabled(false);

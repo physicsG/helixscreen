@@ -49,19 +49,35 @@ local function draw(c, cw, ch)
     c:commit()
 end
 
+-- Each canvas reports its size through on_size; redraws reuse the last one.
+local sizes = { spark = {}, plot = {} }
+
 local function redraw()
-    local w, h = spark:size()
-    draw(spark, w, h)
-    w, h = plot:size()
-    draw(plot, w, h)
+    draw(spark, sizes.spark.w, sizes.spark.h)
+    draw(plot, sizes.plot.w, sizes.plot.h)
 end
 
 spark:on_size(function(w, h)
+    sizes.spark.w, sizes.spark.h = w, h
     draw(spark, w, h)
 end)
 plot:on_size(function(w, h)
+    sizes.plot.w, sizes.plot.h = w, h
     draw(plot, w, h)
 end)
+
+-- The status line keeps the English key it was built from so a language
+-- switch can say it again; a raw status ("HTTP 500") has no key.
+local status_key, status_raw
+
+local function status_text()
+    return status_key and t(status_key) or status_raw or ""
+end
+
+local function set_status(key, raw)
+    status_key, status_raw = key, raw
+    status_line:set(status_text())
+end
 
 -- ---------------------------------------------------------------- age ----
 -- No wall clock in the sandbox: a one-second tick counts from the last good
@@ -78,7 +94,10 @@ local function age_string()
     if elapsed < 90 then
         return t("Updated 1m ago")
     end
-    return t("Updated %dm ago"):format(math.floor((elapsed + 30) / 60))
+    if elapsed < 3570 then
+        return t("Updated %dm ago"):format(math.floor((elapsed + 30) / 60))
+    end
+    return t("Updated %dh ago"):format(math.max(1, math.floor((elapsed + 1800) / 3600)))
 end
 
 helix.timer.every(1000, function()
@@ -91,8 +110,10 @@ end)
 
 -- ----------------------------------------------------------- settings ----
 
+-- The host (and port) alone: no scheme, userinfo, path, query or fragment.
 local function host_of(u)
-    return (u:gsub("^https?://", ""):gsub("/.*$", ""):gsub("^%w+@", ""))
+    local authority = u:gsub("^https?://", ""):match("^[^/?#]*")
+    return (authority:gsub("^.*@", ""))
 end
 
 local function refresh_source()
@@ -102,162 +123,209 @@ local function refresh_source()
     source_line:set(src .. " \u{00B7} " .. label)
 end
 
+-- The settings one poll works from, read once so a change mid-poll cannot mix
+-- two sources.
+local function read_config()
+    local function get(key)
+        return helix.settings.get(key) or ""
+    end
+    return {
+        source = helix.settings.get("source") or "Home Assistant",
+        url = get("url"),
+        token = get("token"),
+        temp_entity = get("temp_entity"),
+        humidity_entity = get("humidity_entity"),
+        temp_pointer = get("temp_pointer"),
+        humidity_pointer = get("humidity_pointer"),
+    }
+end
+
 -- Every destination is checked to its shape before anything reaches the
 -- network, so a typo is a status line, not a request to a half-parsed URL.
-local function config_error()
-    local src = helix.settings.get("source") or "Home Assistant"
-    local url = helix.settings.get("url") or ""
-    if not url:match("^https?://") then
-        return t("not configured")
+local function configured(cfg)
+    if not cfg.url:match("^https?://") then
+        return false
     end
-    if src == "Home Assistant" then
-        if (helix.settings.get("token") or "") == "" then
-            return t("not configured")
+    local keys = { "temp_pointer", "humidity_pointer" }
+    if cfg.source == "Home Assistant" then
+        if cfg.token == "" then
+            return false
         end
-        for _, key in ipairs({ "temp_entity", "humidity_entity" }) do
-            local ent = helix.settings.get(key) or ""
-            if ent ~= "" and not ent:match("^[%w_.]+$") then
-                return t("not configured")
-            end
-        end
-        if (helix.settings.get("temp_entity") or "") == "" then
-            return t("not configured")
-        end
-    else
-        for _, key in ipairs({ "temp_pointer", "humidity_pointer" }) do
-            local p = helix.settings.get(key) or ""
-            if p ~= "" and not p:match("^[%w_.]+$") then
-                return t("not configured")
-            end
-        end
-        if (helix.settings.get("temp_pointer") or "") == "" then
-            return t("not configured")
+        keys = { "temp_entity", "humidity_entity" }
+    end
+    for _, key in ipairs(keys) do
+        if cfg[key] ~= "" and not cfg[key]:match("^[%w_.]+$") then
+            return false
         end
     end
-    return nil
+    return cfg[keys[1]] ~= ""
 end
 
 -- ------------------------------------------------------------- fetch -----
 
+-- A number, or a string holding one, that is finite and small enough to print.
+local function reading(v)
+    local n = type(v) == "number" and v or (type(v) == "string" and tonumber(v)) or nil
+    if n and n == n and math.abs(n) < 1e6 then
+        return n
+    end
+    return nil
+end
+
 -- Dot-separated keys; a numeric segment indexes a JSON array from zero (the
--- decoded Lua table is one-based, so the segment shifts by one).
+-- decoded Lua table is one-based, so the segment shifts by one) and otherwise
+-- names an object key.
 local function resolve(root, path)
     local node = root
     for seg in path:gmatch("[^%.]+") do
         if type(node) ~= "table" then
             return nil
         end
-        local num = tonumber(seg)
-        local key = seg
-        if num and node[1] ~= nil then
-            key = num + 1
-        elseif num then
-            key = num
+        local nxt
+        if seg:match("^%d+$") then
+            nxt = node[tonumber(seg) + 1]
         end
-        node = node[key]
+        if nxt == nil then
+            nxt = node[seg]
+        end
+        node = nxt
     end
-    if type(node) == "number" then
-        return node
+    return reading(node)
+end
+
+-- Transport errors carry the full request URL, credentials included, so they
+-- are never shown or logged: a fixed string stands in.
+local function http_problem(r)
+    if not r then
+        return { key = "unreachable" }
     end
-    if type(node) == "string" then
-        return tonumber(node)
+    if r.status ~= 200 then
+        return { raw = ("HTTP %d"):format(r.status) }
     end
     return nil
 end
 
-local function fetch_ha(base, token)
-    local out = {}
+-- Returns the two readings (either may be nil) and a problem to report, or
+-- nil, problem when nothing was read. An entity reporting "unavailable" or
+-- "unknown" has no reading but is not an error; one failing request leaves the
+-- other entity's reading alone.
+local function fetch_ha(cfg)
+    local base = (cfg.url:gsub("/$", ""))
+    local out, problem = {}, nil
     for i, key in ipairs({ "temp_entity", "humidity_entity" }) do
-        local ent = helix.settings.get(key) or ""
+        local ent = cfg[key]
         if ent ~= "" then
-            local r, err = helix.http.get(base .. "/api/states/" .. ent,
-                { headers = { Authorization = "Bearer " .. token } })
-            if not r then
-                return nil, err
+            local r = helix.http.get(base .. "/api/states/" .. ent,
+                { headers = { Authorization = "Bearer " .. cfg.token } })
+            local p = http_problem(r)
+            if p then
+                problem = problem or p
+            else
+                local j = helix.json.decode(r.body)
+                out[i] = type(j) == "table" and reading(j.state) or nil
             end
-            if r.status ~= 200 then
-                return nil, ("HTTP %d"):format(r.status)
-            end
-            local j, jerr = helix.json.decode(r.body)
-            if not j then
-                return nil, jerr
-            end
-            local v = tonumber(j.state)
-            if not v then
-                return nil, t("bad data")
-            end
-            out[i] = v
         end
+    end
+    if out[1] == nil and out[2] == nil then
+        return nil, problem or { key = "bad data" }
+    end
+    return out, problem
+end
+
+local function fetch_json(cfg)
+    local r = helix.http.get(cfg.url)
+    local p = http_problem(r)
+    if p then
+        return nil, p
+    end
+    local j = helix.json.decode(r.body)
+    if type(j) ~= "table" then
+        return nil, { key = "bad data" }
+    end
+    local out = { resolve(j, cfg.temp_pointer), resolve(j, cfg.humidity_pointer) }
+    if out[1] == nil and out[2] == nil then
+        return nil, { key = "bad data" }
     end
     return out
 end
 
-local function fetch_json(url)
-    local r, err = helix.http.get(url)
-    if not r then
-        return nil, err
-    end
-    if r.status ~= 200 then
-        return nil, ("HTTP %d"):format(r.status)
-    end
-    local j, jerr = helix.json.decode(r.body)
-    if not j then
-        return nil, jerr
-    end
-    return { resolve(j, helix.settings.get("temp_pointer") or ""),
-             resolve(j, helix.settings.get("humidity_pointer") or "") }
-end
-
+-- A reading missing from a successful poll shows dashes rather than the
+-- previous value under a fresh age.
 local function apply(temp, rh)
-    -- Returns an error string, or nil on success, so a pcall'ed caller reads
-    -- one value either way.
+    temp_text:set(temp and ("%.1f\u{00B0}"):format(temp) or "--")
+    rh_text:set(rh and ("%d%%"):format(math.floor(rh + 0.5)) or "--")
     if temp then
-        temp_text:set(("%.1f\u{00B0}"):format(temp))
         window[#window + 1] = temp
         if #window > WINDOW_MAX then
             table.remove(window, 1)
         end
     end
-    if rh then
-        rh_text:set(("%d%%"):format(math.floor(rh + 0.5)))
-    end
-    if not temp and not rh then
-        return t("bad data")
-    end
     elapsed = 0
-    return nil
+end
+
+-- Consecutive failed polls; past STALE_AFTER the tile stops showing the old
+-- values, since small tiles have no age line to mark them stale.
+local STALE_AFTER = 3
+local failures = 0
+
+local function note_failure()
+    failures = failures + 1
+    if failures >= STALE_AFTER then
+        temp_text:set("--")
+        rh_text:set("--")
+    end
+end
+
+-- Bumped whenever a source setting changes: a poll started under an older
+-- generation never applies its result.
+local generation = 0
+local polling = false
+
+-- One poll against the current settings. Returns without applying when the
+-- settings changed meanwhile, so the caller polls again.
+local function poll_body(gen)
+    local cfg = read_config()
+    if not configured(cfg) then
+        set_status("not configured")
+        return
+    end
+    local out, problem
+    if cfg.source == "Home Assistant" then
+        out, problem = fetch_ha(cfg)
+    else
+        out, problem = fetch_json(cfg)
+    end
+    if gen ~= generation then
+        return
+    end
+    if not out then
+        set_status(problem.key, problem.raw)
+        note_failure()
+        return
+    end
+    failures = 0
+    apply(out[1], out[2])
+    set_status(problem and problem.key, problem and problem.raw)
+    age_text:set(age_string())
+    redraw()
 end
 
 local function poll_once()
-    local miss = config_error()
-    if miss then
-        status_line:set(miss)
-        return
+    if polling then
+        return -- the running poll re-reads the settings if they changed
     end
-    local src = helix.settings.get("source") or "Home Assistant"
-    local url = helix.settings.get("url") or ""
-    local out, err
-    if src == "Home Assistant" then
-        out, err = fetch_ha(url:gsub("/$", ""), helix.settings.get("token") or "")
-    else
-        out, err = fetch_json(url)
-    end
-    if out == nil then
-        status_line:set(err or t("bad data"))
-        return
-    end
-    local ok, aerr = pcall(apply, out[1], out[2])
+    polling = true
+    local ok = pcall(function()
+        local gen
+        repeat
+            gen = generation
+            poll_body(gen)
+        until gen == generation
+    end)
+    polling = false
     if not ok then
-        status_line:set(t("bad data"))
-        return
+        set_status("bad data")
     end
-    if aerr then
-        status_line:set(aerr)
-        return
-    end
-    status_line:set("")
-    age_text:set(age_string())
-    redraw()
 end
 
 -- -------------------------------------------------------------- loop -----
@@ -269,19 +337,15 @@ local function rearm()
         poll_timer:cancel()
     end
     local s = helix.settings.get("poll_s") or 60
-    poll_timer = helix.timer.every(s * 1000, function()
-        local ok, err = pcall(poll_once)
-        if not ok then
-            status_line:set(t("bad data"))
-        end
-    end)
+    poll_timer = helix.timer.every(s * 1000, poll_once)
 end
 
 for _, key in ipairs({ "source", "url", "token", "temp_entity", "humidity_entity",
                        "temp_pointer", "humidity_pointer" }) do
     helix.settings.on_change(key, function()
+        generation = generation + 1
         refresh_source()
-        pcall(poll_once)
+        poll_once()
     end)
 end
 helix.settings.on_change("poll_s", function() rearm() end)
@@ -289,7 +353,7 @@ helix.settings.on_change("poll_s", function() rearm() end)
 helix.i18n.on_change(function()
     refresh_source()
     age_text:set(age_string())
-    pcall(poll_once) -- subject-carried status re-renders in the new language
+    status_line:set(status_text())
 end)
 
 helix.widget("tile", {
@@ -307,4 +371,4 @@ end)
 
 refresh_source()
 rearm()
-poll_once() -- the top level may await: the first reading does not wait a poll
+pcall(poll_once) -- the top level may await: the first reading does not wait a poll

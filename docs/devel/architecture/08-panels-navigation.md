@@ -27,7 +27,7 @@ flowchart TB
     end
 
     subgraph STACK["panel_stack_ - z-ordered overlay stack"]
-        REG["helix::nav::register_overlay(widget, lifecycle)<br/>MUST precede push_overlay -<br/>strict mode aborts if not"]
+        kReg["helix::nav::register_overlay(widget, lifecycle)<br/>MUST precede push_overlay -<br/>strict mode aborts if not"]
         PUSH["push_overlay() - queued<br/>deactivates what it covers, snapshots backdrop,<br/>applies width class, slide-in, on_activate"]
         BACK["go_back() - queued<br/>indev reset, on_deactivate, slide-out,<br/>exactly-once restore latch"]
     end
@@ -43,7 +43,7 @@ flowchart TB
 
     NAV --> RP
     RP --> SWITCH
-    UI["any panel / widget C++"] -->|"show an overlay"| REG --> PUSH
+    UI["any panel / widget C++"] -->|"show an overlay"| kReg --> PUSH
     UI -->|"confirm / alert"| MSHOW --> MSTACK
     BACK -->|"restores"| SWITCH
     PUSH --> LIFE
@@ -60,7 +60,7 @@ flowchart TB
 | [`include/ui_nav_manager.h`](../../../include/ui_nav_manager.h) | `NavigationManager` singleton: `set_active`, `request_panel`, `push_overlay`, `go_back`, registration maps, strict-check API |
 | [`include/ui_nav_panel_registry.h`](../../../include/ui_nav_panel_registry.h) | `PanelRegistry`: the six root widgets (self-clearing `WidgetRef` slots), their instances and the lazy builder |
 | [`include/ui_nav_backdrop.h`](../../../include/ui_nav_backdrop.h) | `OverlayBackdrop`: the dismiss backdrop behind the overlay stack, snapshot or dim layer |
-| [`include/ui_navbar_button.h`](../../../include/ui_navbar_button.h) | `NavbarButton`: the E-stop and spools-on-bed buttons kept over navbar slots, above every backdrop |
+| [`include/ui_navbar_button.h`](../../../include/ui_navbar_button.h) | `NavbarButton`: the E-stop and spools-on-bed buttons kept over navbar slots, above every overlay and keypad backdrop; an open modal covers them |
 | [`ui_xml/app_layout.xml`](../../../ui_xml/app_layout.xml) | The root layout: navbar plus the six panel children, by name - what `PanelFactory` later finds |
 | [`src/ui/ui_nav_manager.cpp`](../../../src/ui/ui_nav_manager.cpp) | The stack mechanics, lifecycle dispatch, backdrop management, width classes, hot-reload rebuild |
 | [`include/panel_lifecycle.h`](../../../include/panel_lifecycle.h) | `IPanelLifecycle` - the lifecycle interface NavigationManager dispatches against, incl. `rebuild()` and `repopulate()` |
@@ -172,6 +172,65 @@ re-entry guard or a pending flag needs tier 3. [`MODAL_SYSTEM.md`](../MODAL_SYST
 
 Choosing between a modal and an overlay is a design question with a fixed answer: an overlay is a place the user navigated to and will return from (it goes on the history stack, gets a back affordance, a width class); a modal interrupts for a decision (it dims everything, ignores history, and resolves to a callback). Confirmation of a destructive action, a warning, a quick input - modal. A screen with content - overlay. When a "modal" starts needing scroll, its own navigation, or lifecycle teardown, it has become an overlay and should be moved.
 
+### The print status panel
+
+`PrintStatusPanel` (`src/ui/ui_panel_print_status.cpp`) has three regions on every size: a **job tile**, a **printer tile**, and a **strip** (progress, then Pause, Tune, More, Cancel or Reprint). `decide_print_status_tile_layout()` (`src/ui/print_status_tile_layout.cpp#decide_print_status_tile_layout`) is a pure function of the measured content box; `PrintStatusLayoutFitter` (`src/ui/print_status_layout_fitter.cpp#recompute`) feeds it and publishes `ps_arrangement`, `ps_strip_stacked` and `ps_checklist_compact`. Nothing keys off a breakpoint name, only measured pixels:
+
+- **Stacked** (portrait, height at least 500 and taller than wide): job tile above printer tile, split 236:196, strip below. Otherwise **side by side**, the two tiles half the width each.
+- **Strip** stacks progress over a row of buttons when the panel is stacked or narrower than 400 px; otherwise progress sits beside square buttons (capped so progress keeps at least 45% of the width). The strip is one card. It hides the Up next line in a row strip on the smallest breakpoint.
+- **Compact checklist** when the job tile is narrower than 180 or shorter than 170 px.
+
+**Pre-print** (`preparing_visible`): the job tile is a start-sequence checklist over the faded slicer thumbnail: done rows (check, real duration), the current row (amber, spinner, countdown), upcoming rows (muted, predicted duration). The compact form shows "Step N of M", the current step large, its countdown, and a dot per step. Rows come from `PrintStartCollector::checklist_input()` ([PREPRINT_PREDICTION.md](../PREPRINT_PREDICTION.md#the-pre-print-checklist)). A heater still climbing gets an amber chip with a progress bar; one at target shows a check. Fans that are off are hidden. The strip shows the phase, time left and the filament line.
+
+**Printing**: the job tile is the gcode preview card (corner buttons including exclude object, footer with file name, layer and Z). Its camera button swaps the art for the live feed in the same area: the panel publishes `print_status_camera_available` (webcam, remote screen, platform extras; the More menu's Camera row binds it too) and `print_status_camera_showing` (that and the persisted `print_status_show_camera` setting), runs a `CameraView` only while showing and active, and pauses the G-code viewer under it. The strip shows percent, time left, clock time of the finish, elapsed, the filament line (swatch, tool, name, tool changes) and Up next when jobs are queued.
+
+**Printer tile chips** (`include/print_status_chips.h`, one pure decision per kind; `PrintStatusTiles::update_now()` in `src/ui/ui_print_status_tiles.cpp#update_now` copies results into `ps_chip_<key>_*` subjects):
+
+| Chip | Anchor | Rules |
+|---|---|---|
+| Nozzle, bed, chamber | `nozzle`, `bed`, `chamber` | Text is `value / target` while heating or cooling, `value` while holding; tone Active while heating before the print starts, Warn while heating or cooling during it. A climbing heater carries a progress bar. Multi-tool printers prefix the active tool badge. Heater duty (`220° · 5%`) is added only where the chip, measured with it, still fits the column of the line modes. |
+| Part fan, hotend fan | `part_fan`, `nozzle` | Part fan Active while spinning. Fans at 0% are Dim, and a hotend fan at its automatic speed is Dim; both expendable. |
+| Aux fan | none | Dim and expendable at 0%. |
+| Light | `light` | Active when on, expendable when off; tap toggles. |
+| Speed + flow | none | One two-line chip, the live toolhead speed over the live volumetric flow (`tune::live_rates_text()`, `187 mm/s` over `12.0 mm³/s`), budgeted at its widest line and measured at its own height (`CalloutChipIn::h`); Warn whenever either factor is not 100%, never expendable then. The factors are Tune's to show. Opens Tune. |
+
+Fan chips lead with a role label (Part, HE, Aux) when there is room. Every chip is a tap target into the detail it summarizes. **More** holds Camera, Timelapse and Light, each under its existing visibility rule, and hides when all are hidden.
+
+The picture and chips are placed by the same engine as the home printer image, `compute_callout_layout()` (`include/callout_layout.h`), through the shared `CalloutPresenter`, so the two screens cannot drift. Its modes, published as `ps_callout_mode`:
+
+| Mode | When | What it draws |
+|---|---|---|
+| `BothSides` | both side bands (or bands above and below) fit a chip column | Chips on the side of their part (anchor x under 0.5 is left), spread evenly over the band height. Each column keeps the top-to-bottom order of its parts' points so no two leaders cross; the toolhead group (nozzle, hotend fan, part fan) stays contiguous, with the hotend fan above the nozzle chip when both sit on one point. Chips with no tagged point take the slots that leave tagged chips closest to their parts. |
+| `OneSide` | only one band fits | The picture moves to the near edge and every chip stacks in the far band. Leaders can cross the picture here. |
+| `Pinned` | no band fits | Chips sit on their points (compact, no labels), nozzle and part fan merge into one toolhead chip, overlapping chips slide apart, and a chip that lands far from its point gets a leader. Untagged chips dock in a row at the bottom. |
+| `Docked` | untagged image or custom photo | Chips line the free band or bottom edge; no leaders, no glows. |
+| `ImageOnly` | one grid cell, or the area is shorter than three chip heights | The picture alone. |
+
+Leaders are dotted and have three points: the part's point, an elbow, and the chip's inner edge. The first segment runs at 45 degrees (steeper when the chip is close), the last is always horizontal into a side-band chip (`callout_detail::leader_elbow`). Glows mark only active regions: strong while a heater climbs, a fan spins or the light is on, soft otherwise.
+
+Three rules keep the picture still and the chips readable:
+
+- **The mode follows a stable budget, not the readings.** Fit is tested against every chip the printer can ever show, each measured at a representative reading (`heater_budget_text()`: a three-digit value, heating or holding; fans at 100%; the speed/flow chip at `999 mm/s` over `999.9 mm³/s`), so a digit or a chip coming and going never moves the layout. Only the active chips get positions. A chip taller than one text line carries its own height (`CalloutChipIn::h`, 0 for one line), and every placement uses it.
+- **The picture may shrink** to keep leader lines before giving up to `Pinned`: just enough for one side, up to 40% (`kMaxImageShrinkPctOneSide`), then for both, up to 20% (`kMaxImageShrinkPctBothSides`).
+- **When chips do not fit**, a chip gives way in this order: fan labels first (the same chips, narrower), then expendable chips one at a time (hotend fan first, then the light and aux fan, then part fan and speed/flow if expendable), then `Pinned`. A chip off target, tuned or heating is never expendable. `CalloutLayout::dropped` names what was left off and `unlabeled` says labels were shed.
+
+Current limitations: a toolchanger's idle tools are not shown on this screen (only the active tool, as the badge on the nozzle chip), and the pre-print phase has no first-layer or estimated print time line.
+
+### The Motion panel's plate
+
+Two surfaces move the head by touching a top-down plate: the Motion overlay's Bed tab (`MotionPanel`, `src/ui/ui_panel_motion.cpp`) and the home Toolhead widget (chapter 09). They share every rule, in four pieces, so the two cannot drift:
+
+| Piece | What it decides |
+|---|---|
+| `include/bed_plate_context.h` | The plate area (`current_bed_plate()`), the clamp envelope (`move_clamp_bounds()`), whether the plate may move the head now (`plate_moves_allowed()`: every axis homed, nav enabled, `machine_motion_blocked` clear, no external blocking operation), the lift for the next XY move (`current_plate_lift()`), Park's own lift (`park_plate_lift()`, `park_over_plate_target()`), the Z-down floor (`clamp_z_down_to_current_floor()`) and the readout and refusal strings (`plate_lift_readout()`, `part_too_tall_text()`) |
+| `helix::BedPlateGesture` (`include/bed_plate_gesture.h`) | Press, drag and release, free of LVGL: past `kPlateDragThresholdPx` a drag streams targets with one lift decided at its start; a tap is handed back to the owner (the Bed tab moves at once, the widget shows a target and a Move here chip). Every send asks `can_move()` again |
+| `helix::ToolheadMoveSender` (`include/toolhead_move_sender.h`) | One move in flight with the newest coalesced behind it, clamped and at the jog feedrates. Each owner has its own |
+| `include/bed_plate_draw.h` | The 50 mm grid and the occupying print's outlines, drawn by `draw_bed_plate_layers()` |
+
+**The lift floor** is pure, in `include/motion_presets.h`: `plate_z_floor()` is `motion/bed_map_clearance`, plus the part's height while a print may be on the bed (`bed_part_height()`, read from `BedOccupancyState`, chapter 05). `plate_lift()` turns it into None (already above), Lift (rise first, capped at z_max) or Refuse (z_max less than `kPartClearanceMinMm` above the part), and `clamp_z_down_to_floor()` keeps a downward Z step above it. The plate, the Move tab's presets (`MotionPanel::handle_preset` sends through the gesture's `send_once()`), Park and the widget's preset slots all lift by it; jog arrows and coordinate entry do not, since they are deliberate single-axis steps. A Refuse raises `MotionPanel::notify_part_too_tall()`.
+
+**Nothing in the Motion panel homes on its own.** The coordinates disable per axis on `motion_<axis>_homed`, and the presets, Park and the Bed tab's plate on all three, in their XML (`ui_xml/motion_panel.xml`, `ui_xml/components/move_preset_grid.xml`, `ui_xml/components/motion_bed_map.xml`); the handlers re-check (`MotionPanel::open_axis_keypad`, `MotionPanel::request_axis_target`, `MotionPanel::handle_park`) rather than calling `ensure_homed_then()`. Only the explicit Home buttons send G28. Calibration and filament flows that home as part of their job are outside this rule.
+
 ## Patterns & gotchas
 
 - **Register before push, every push.** `helix::nav::register_overlay(root, this)` then `helix::nav::push_overlay(root)`. Cached overlays must re-register on re-open (navbar switches clear the map); `OverlayBase::show()` does this for you - hand-rolled opens forget.
@@ -180,12 +239,12 @@ Choosing between a modal and an overlay is a design question with a fixed answer
 - **`set_active()` vs `request_panel()`.** `set_active()` swaps the root underneath the stack; `request_panel()` is the navbar-tap semantics including gating and stack clearing. Programmatic navigation should almost always be `request_panel()` - and check its `PanelRequest` return; a `BlockedDisconnected` is a silent no-op otherwise.
 - **Ask `is_panel_on_top()` before a deferred `go_back()`.** By the time your queued callback runs, the user may have navigated on; a blind `go_back()` pops whatever they are looking at now (#1221).
 - **Filename tells you nothing.** [`ui_panel_print_status.h`](../../../include/ui_panel_print_status.h) is an `OverlayBase`; [`src/ui/ui_settings_safety.cpp`](../../../src/ui/ui_settings_safety.cpp) holds an overlay; only the base class matters. Same for XML: overlay screens are named `*_panel.xml`.
-- **Component names must match filenames.** `get_xml_component_name()` / `component_name()` return the `ui_xml/` filename without `.xml` ([`include/ui_panel_base.h#PanelBase`](../../../include/ui_panel_base.h)); a mismatch is the "panel created but empty" silent failure - the create succeeds, no component by that name exists. The six roots have a second name dependency: `PanelFactory::PANEL_NAMES` ([`include/panel_factory.h#PanelFactory`](../../../include/panel_factory.h)) must match the widget names in [`ui_xml/app_layout.xml#panel_container`](../../../ui_xml/app_layout.xml) or boot fails to find the panels.
+- **Component names must match filenames.** `get_xml_component_name()` / `component_name()` return the `ui_xml/` filename without `.xml` ([`include/ui_panel_base.h#PanelBase`](../../../include/ui_panel_base.h)); a mismatch is the "panel created but empty" silent failure - the create succeeds, no component by that name exists. The six roots have a second name dependency: `PanelFactory::kPanelNames` ([`include/panel_factory.h#PanelFactory`](../../../include/panel_factory.h)) must match the widget names in [`ui_xml/app_layout.xml#panel_container`](../../../ui_xml/app_layout.xml) or boot fails to find the panels.
 - **`persistent = true` is for overlays that outlive a navbar switch.** The print-status overlay and the temperature graph overlay (`TempGraphOverlay::before_show()`) use it. It changes what survives a navbar switch, *not* what survives a disconnect - `clear_overlay_stack()` hides every overlay, persistent included; the registration maps survive both paths, so the overlay re-opens with its lifecycle intact either way.
 - **Width class is resolved at push time, not in XML.** Destinations render full width, transient layers gapped with the backdrop showing ([`include/overlay_class.h#OverlayClass`](../../../include/overlay_class.h)); drill-downs inherit. Long-dwell screens (AMS, Print Status) override `is_destination()` so they are full width from every entry point (#1178). `reapply_overlay_widths()` after resolution changes; `set_overlay_width_unmanaged()` for deliberate oddballs like the widget catalog.
 - **Destroy-on-close frees the tree, not the class.** Subjects survive `destroy_overlay_ui()`; widgets do not. Override `on_ui_destroyed()` to null cached child pointers or the next `create()` will chase stale ones.
 - **`Modal` has both a static and an instance `show()`.** Static for XML-only, subclass instance when you need `on_ok()` logic. An instance-backed modal is hidden, never rebuilt, by hot reload - re-creating it from XML would skip `on_show()` wiring ([`include/ui_modal.h#rebuild_top`](../../../include/ui_modal.h)).
-- **The E-stop lives on the navbar, above every backdrop.** While a job holds the machine (`estop_visible`), a screen-level `navbar_estop` sits over the navbar's transparent `nav_estop_slot`; while spools are latched on the bed (`bed_drying_state`), a `navbar_drying` button sits over `nav_drying_slot` the same way. Both are `NavbarButton`s (`src/ui/ui_navbar_button.cpp#create`). Every screen-level backdrop or overlay goes up through `helix::ui::bring_to_front()` (`include/ui_effects.h#bring_to_front`), which keeps them in front, and sweeps over the screen's children skip them via `helix::ui::is_screen_chrome()`. Beside a side navbar the E-stop moves up to clear the on-screen keyboard; under a portrait bottom navbar the keyboard covers it. Screens that cover the navbar carry their own E-stop (lock screen, fullscreen camera). Anything on `lv_layer_top` is above it: the lock screen by design, and the busy overlay ("Preparing print...") during host-side G-code rewriting, when the printer is still idle.
+- **The E-stop lives on the navbar, above every overlay and keypad backdrop.** While a job holds the machine (`estop_visible`), a screen-level `navbar_estop` sits over the navbar's transparent `nav_estop_slot`; while spools are latched on the bed (`bed_drying_state`), a `navbar_drying` button sits over `nav_drying_slot` the same way. Both are `NavbarButton`s (`src/ui/ui_navbar_button.cpp#create`). Every screen-level backdrop or overlay goes up through `helix::ui::bring_to_front()` (`include/ui_effects.h#bring_to_front`), which keeps them in front, and sweeps over the screen's children skip them via `helix::ui::is_screen_chrome()`. A modal is the exception: while one is open, `ModalStack` covers the chrome (`helix::ui::set_chrome_covered()`), so its backdrop sits over the whole navbar, E-stop included, and a tap there dismisses the modal instead of reaching the button. The E-stop's own confirmation is the exception, so a second press on the E-stop reaches it (`Modal::set_covers_chrome`). The chrome comes back to the front when the last covering modal starts to close, each button raising itself (`NavbarButton::raise`) so it stays under a keyboard that covers its slot, and a button built while a modal is open goes under that modal's backdrop. Beside a side navbar the E-stop moves up to clear the on-screen keyboard; under a portrait bottom navbar the keyboard covers it. Screens that cover the navbar carry their own E-stop (lock screen, fullscreen camera). Anything on `lv_layer_top` is above it: the lock screen by design, and the busy overlay ("Preparing print...") during host-side G-code rewriting, when the printer is still idle.
 - **A second `hide()` during a modal's exit animation is a no-op.** `ModalStack` marks the entry `exiting` and ignores further hides; teardown after `lv_anim_delete_all()` also validity-checks each backdrop because an exit that never completed leaves an entry whose screen may already be gone.
 - **All navigation entry points queue.** `push_overlay`/`go_back` run their bodies inside `queue_update`; an LVGL event callback must not navigate synchronously mid-render. The widget you pushed is re-validated inside the queued body - capture raw pointers freely, but expect the skip.
 - **Teardown ordering is fixed.** `PrinterSession::teardown_printer_scope()` ([`src/application/printer_session.cpp#teardown_printer_scope`](../../../src/application/printer_session.cpp)) calls `helix::nav::shutdown()` before the panel registry is destroyed, deactivating the visible surface first, for both a printer switch and process exit; views see `DeactivateReason::Shutdown` and skip destructive actions (e.g. ABORT) on the way out.

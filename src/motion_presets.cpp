@@ -12,10 +12,10 @@ namespace {
 
 /// Rectangular beds: an edge preset sits this fraction of the axis's span
 /// in from the edge, i.e. half-span minus 10% leaves 40% of reach.
-constexpr double PRESET_INSET_FRACTION = 0.1;
+constexpr double kPresetInsetFraction = 0.1;
 
 /// Circular beds: rim presets sit at this fraction of the inscribed radius.
-constexpr double PRESET_RADIUS_FRACTION = 0.9;
+constexpr double kPresetRadiusFraction = 0.9;
 
 /// Midpoint of one axis's kinematic range. A range the printer has not sent
 /// yet has no midpoint, and a caller that guesses one aims machine motion at
@@ -104,14 +104,14 @@ std::optional<AxisTarget> motion_preset_target(MotionPreset preset, const AxisBo
         // square's corners where the round bed ends.
         const double radius = inscribed_radius(gcode_bounds);
         const double diagonal = std::sqrt(static_cast<double>(col) * col + row * row);
-        const double reach = PRESET_RADIUS_FRACTION * radius / diagonal;
+        const double reach = kPresetRadiusFraction * radius / diagonal;
         target.x = *center_x + col * reach;
         target.y = *center_y + row * reach;
     } else {
         const double reach_x =
-            (gcode_bounds.x_max - gcode_bounds.x_min) * (0.5 - PRESET_INSET_FRACTION);
+            (gcode_bounds.x_max - gcode_bounds.x_min) * (0.5 - kPresetInsetFraction);
         const double reach_y =
-            (gcode_bounds.y_max - gcode_bounds.y_min) * (0.5 - PRESET_INSET_FRACTION);
+            (gcode_bounds.y_max - gcode_bounds.y_min) * (0.5 - kPresetInsetFraction);
         target.x = *center_x + col * reach_x;
         target.y = *center_y + row * reach_y;
     }
@@ -127,7 +127,7 @@ std::optional<AxisTarget> plate_rear_park(const AxisBounds& area) {
     AxisTarget target;
     target.x = *center_x;
     target.y = std::max(static_cast<double>(*center_y),
-                        static_cast<double>(area.y_max) - PARK_REAR_MARGIN_MM);
+                        static_cast<double>(area.y_max) - kParkRearMarginMm);
     return target;
 }
 
@@ -170,12 +170,46 @@ float bed_map_guide_half_span(float offset, float half_extent, bool circular) {
     return squared > 0.0f ? std::sqrt(squared) : 0.0f;
 }
 
-std::optional<double> bed_map_lift_z(double current_z, double clearance_mm, double z_max) {
-    const double lift = std::min(clearance_mm, z_max);
-    if (current_z >= lift - AxisMove::EPSILON_MM) {
-        return std::nullopt;
+double plate_z_floor(double clearance_mm, std::optional<double> part_height_mm) {
+    return part_height_mm ? *part_height_mm + clearance_mm : clearance_mm;
+}
+
+PlateLift plate_lift(double current_z, double clearance_mm, double z_max,
+                     std::optional<double> part_height_mm) {
+    if (part_height_mm && z_max < *part_height_mm + kPartClearanceMinMm) {
+        return {PlateLift::Kind::Refuse, 0.0};
     }
-    return lift;
+    const double lift = std::min(plate_z_floor(clearance_mm, part_height_mm), z_max);
+    if (current_z >= lift - AxisMove::kEpsilonMm) {
+        return {};
+    }
+    return {PlateLift::Kind::Lift, lift};
+}
+
+double clamp_z_down_to_floor(double target_z, double clearance_mm, bool occupied,
+                             std::optional<double> part_height_mm) {
+    if (!occupied) {
+        return target_z;
+    }
+    return std::max(target_z, plate_z_floor(clearance_mm, part_height_mm));
+}
+
+const char* motion_preset_token(MotionPreset preset) {
+    for (const auto& p : kMotionPresetTokens) {
+        if (p.preset == preset) {
+            return p.token;
+        }
+    }
+    return "center";
+}
+
+std::optional<MotionPreset> motion_preset_from_token(std::string_view token) {
+    for (const auto& p : kMotionPresetTokens) {
+        if (token == p.token) {
+            return p.preset;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace helix

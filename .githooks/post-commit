@@ -1,4 +1,9 @@
 #!/bin/sh
+# Point any index entry this commit's pre-commit reformat left stale back at the
+# committed blob (lib/sync-index-to-head.sh says when and why).
+_sync="$(dirname "$0")/lib/sync-index-to-head.sh"
+[ -x "$_sync" ] && "$_sync"
+
 # Drop only the claim this commit's own git process took (pre-commit stamps the
 # claim with $PPID, the git process). A claim held by a session for work spanning
 # several commits carries that session's pid instead and must survive.

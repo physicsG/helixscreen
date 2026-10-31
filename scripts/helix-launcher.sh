@@ -33,6 +33,9 @@
 # ("label:reason" entries joined by '|', capped). The app turns them into
 # startup notifications; see docs/devel/ENVIRONMENT_VARIABLES.md.
 #
+# HELIX_LAUNCHER_PID is likewise exported, never read: it marks the processes
+# this launcher started so its exit sweep stops only those.
+#
 # All other options are passed through to helix-screen.
 #
 # Logging behavior:
@@ -75,6 +78,7 @@ helix_klipper_co_hosted() {
     # Patterns are deliberately narrow. A bare *moonraker* would also match a
     # standalone kiosk started as `helix-screen --moonraker ws://host:7125`,
     # which is precisely the not-co-hosted case that must stay at nice 0.
+    # rusticc and moonruster are RustiCC's Klipper and Moonraker on the CC1.
     for _hkc_f in "$HELIX_PROC_ROOT"/[0-9]*/cmdline; do
         [ -r "$_hkc_f" ] || continue
         # argv is NUL-separated; fold to spaces for substring matching. A
@@ -83,7 +87,8 @@ helix_klipper_co_hosted() {
         # to right, so the shell's own "cannot open" would otherwise leak.
         _hkc_cmd=$(tr '\0' ' ' 2>/dev/null < "$_hkc_f") || _hkc_cmd=""
         case " ${_hkc_cmd} " in
-            *klippy.py*|*moonraker.py*|*moonraker-env*|*" -m moonraker"*)
+            *klippy.py*|*moonraker.py*|*moonraker-env*|*" -m moonraker"*|\
+            */rusticc" "*|*" rusticc "*|*/moonruster" "*|*" moonruster "*)
                 unset _hkc_f _hkc_cmd
                 return 0
                 ;;
@@ -95,6 +100,7 @@ helix_klipper_co_hosted() {
     # PID namespace. /tmp/uds is Forge-X's klippy socket on the AD5M.
     [ -S /tmp/klippy_uds ]      && return 0
     [ -S /tmp/moonraker.sock ]  && return 0
+    [ -S /run/moonraker.sock ]  && return 0
     [ -S /tmp/uds ]             && return 0
     return 1
 }
@@ -185,10 +191,14 @@ INSTALL_DIR="$(cd "${BIN_DIR}/.." && pwd)"
 # on every boot. -c is the GNU/BusyBox spelling (the same form every installer
 # platform probe uses on the devices we ship to); BSD stat (macOS dev runs) is
 # tried second, %p because the file type bits it includes do not intersect the
-# write-bit mask below.
+# write-bit mask below. A BusyBox built without the stat applet (Forge-X on
+# the AD5M) answers from ls instead, through helix_ls_stat.
 helix_env_stat() {
     stat -L -c '%u %a' "$1" 2>/dev/null && return 0
     stat -L -f '%u %p' "$1" 2>/dev/null && return 0
+    _hes_ls=$(helix_ls_stat "$1")
+    [ -n "$_hes_ls" ] && echo "${_hes_ls% *}"
+    unset _hes_ls
     return 0
 }
 
@@ -196,33 +206,84 @@ helix_env_stat() {
 helix_env_nlink() {
     stat -L -c '%h' "$1" 2>/dev/null && return 0
     stat -L -f '%l' "$1" 2>/dev/null && return 0
+    _hes_ls=$(helix_ls_stat "$1")
+    [ -n "$_hes_ls" ] && echo "${_hes_ls##* }"
+    unset _hes_ls
+    return 0
+}
+
+# "UID MODE NLINK" of a path, symlinks followed, read from `ls -lnLd` for a
+# system with no stat at all: MODE is octal the way GNU stat's %a prints it,
+# setuid/setgid/sticky included. Prints nothing when the listing does not
+# parse, so callers refuse exactly as they do when stat fails. A trailing
+# ACL/SELinux marker (+ . @) after the permission letters is accepted.
+helix_ls_stat() {
+    _hls_line=$(ls -lnLd "$1" 2>/dev/null) || _hls_line=""
+    read -r _hls_perm _hls_nlink _hls_uid _hls_rest <<EOF
+$_hls_line
+EOF
+    _hls_out=""
+    case "$_hls_perm" in
+        ?[r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-] | ?[r-][w-][xsS-][r-][w-][xsS-][r-][w-][xtT-][.+@])
+            case "$_hls_nlink$_hls_uid" in
+                *[!0-9]*) ;;
+                *)
+                    if [ -n "$_hls_nlink" ] && [ -n "$_hls_uid" ]; then
+                        _hls_p="${_hls_perm#?}"
+                        _hls_mode=0
+                        for _hls_bit in 256 128 64 32 16 8 4 2 1; do
+                            _hls_c="${_hls_p%"${_hls_p#?}"}"
+                            _hls_p="${_hls_p#?}"
+                            case "$_hls_c" in
+                                r | w | x | s | t) _hls_mode=$((_hls_mode + _hls_bit)) ;;
+                            esac
+                            case "$_hls_bit$_hls_c" in
+                                64s | 64S) _hls_mode=$((_hls_mode + 2048)) ;;
+                                8s | 8S) _hls_mode=$((_hls_mode + 1024)) ;;
+                                1t | 1T) _hls_mode=$((_hls_mode + 512)) ;;
+                            esac
+                        done
+                        _hls_out="$_hls_uid $(printf '%o' "$_hls_mode") $_hls_nlink"
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
+    [ -n "$_hls_out" ] && echo "$_hls_out"
+    unset _hls_line _hls_perm _hls_nlink _hls_uid _hls_rest _hls_out _hls_p \
+        _hls_mode _hls_bit _hls_c
     return 0
 }
 
 # Keys the env file may set: exactly the settings it is meant to carry - every
 # key config/helixscreen.env names (a bats lint keeps the two in step), the
 # env-file settings the user docs list, the keys deploys and the init script
-# write or query, and the glibc knobs the heap-diagnostic and arena blocks
-# document as overrides. A positive list on purpose: directory keys such as
+# write or query, the glibc knobs the heap-diagnostic and arena blocks
+# document as overrides, and the launcher and app knobs docs/devel tells
+# users to set here (HELIX_OOM_SCORE_ADJ, HELIX_BOOT_RESPAWN_*,
+# HELIX_LOG_RING_LINES, HELIX_TOUCH_CAL_DEBOUNCE). A positive list on purpose: directory keys such as
 # HELIX_DATA_DIR (the app chdirs there and dlopens plugins from it) and
 # HELIX_CONFIG_DIR stay off it, as does every other name (LD_*, PATH, IFS,
 # HOME, SHELL, ENV, BASH_ENV, PYTHON*, ...).
 helix_env_key_allowed() {
     case "$1" in
         HELIX_ALSA_DEVICE | HELIX_AUTO_QUIT_MS | HELIX_AUTO_SCREENSHOT | \
-            HELIX_BACKLIGHT_DEVICE | HELIX_COLOR_SWAP_RB | HELIX_DEBUG | \
-            HELIX_DEBUG_TOUCH | HELIX_DIAGNOSTIC_UPLOADS | \
+            HELIX_BACKLIGHT_DEVICE | HELIX_BOOT_RESPAWN_DELAY | \
+            HELIX_BOOT_RESPAWN_MAX | HELIX_BOOT_RESPAWN_WINDOW | \
+            HELIX_COLOR_SWAP_RB | HELIX_DEBUG | \
+            HELIX_DEBUG_TOUCH | HELIX_DEBUG_TOUCHES | HELIX_DIAGNOSTIC_UPLOADS | \
             HELIX_DISABLE_AUTO_UPDATES | HELIX_DISPLAY_BACKEND | \
             HELIX_DISPLAY_ROTATION | HELIX_DPI | HELIX_DRM_DEVICE | \
             HELIX_FB_DEVICE | HELIX_GCODE_MODE | \
             HELIX_GCODE_STREAMING | HELIX_KEYBOARD_DEVICE | HELIX_LOG_DEST | \
-            HELIX_LOG_FILE | HELIX_LOG_LEVEL | HELIX_MOUSE_DEVICE | \
-            HELIX_NICE | HELIX_NO_SPLASH | HELIX_PWM_SOUND | HELIX_REMOTE_CONTROL | \
+            HELIX_LOG_FILE | HELIX_LOG_LEVEL | HELIX_LOG_RING_LINES | HELIX_MOUSE_DEVICE | \
+            HELIX_NICE | HELIX_NO_SPLASH | HELIX_OOM_SCORE_ADJ | HELIX_PWM_SOUND | HELIX_REMOTE_CONTROL | \
             HELIX_REMOTE_HTTP_TOKEN | HELIX_REMOTE_SOCKET | \
             HELIX_REQUIRE_POINTER | HELIX_SCREEN_SIZE | HELIX_SCROLL_GUARD | \
             HELIX_SCROLL_GUARD_COOLDOWN_MS | HELIX_SKIP_SPLASH | HELIX_SSAO | \
-            HELIX_THEME | HELIX_TOUCH_CALIBRATE | HELIX_TOUCH_DEVICE | \
-            HELIX_TOUCH_SWAP_AXES | HELIX_USB_AUTOMOUNT | \
+            HELIX_THEME | HELIX_TOUCH_CAL_DEBOUNCE | HELIX_TOUCH_CALIBRATE | HELIX_TOUCH_DEVICE | \
+            HELIX_TOUCH_MAX_X | HELIX_TOUCH_MAX_Y | HELIX_TOUCH_MIN_X | \
+            HELIX_TOUCH_MIN_Y | HELIX_TOUCH_SWAP_AXES | HELIX_USB_AUTOMOUNT | \
             MALLOC_ARENA_MAX | MALLOC_CHECK_ | MALLOC_PERTURB_ | \
             MOONRAKER_HOST | MOONRAKER_PORT)
             return 0
@@ -271,10 +332,38 @@ helix_env_value_refusal() {
             return 0
             ;;
         HELIX_NICE)
-            case "$2" in
-                [0-9] | 1[0-9]) return 1 ;;
-            esac
+            helix_env_uint_in "$2" 0 19 && return 1
             echo "must be 0-19 (a negative nice would let the UI starve Klipper)"
+            return 0
+            ;;
+        HELIX_OOM_SCORE_ADJ)
+            helix_env_uint_in "$2" 0 1000 && return 1
+            echo "must be 0-1000 (a negative score would have the OOM killer take Klipper before the UI)"
+            return 0
+            ;;
+        HELIX_BOOT_RESPAWN_MAX)
+            helix_env_uint_in "$2" 0 10 && return 1
+            echo "must be 0-10 (0 turns the boot respawn off)"
+            return 0
+            ;;
+        HELIX_BOOT_RESPAWN_WINDOW)
+            helix_env_uint_in "$2" 0 300 && return 1
+            echo "must be 0-300 seconds"
+            return 0
+            ;;
+        HELIX_BOOT_RESPAWN_DELAY)
+            helix_env_uint_in "$2" 0 60 && return 1
+            echo "must be 0-60 seconds"
+            return 0
+            ;;
+        HELIX_LOG_RING_LINES)
+            helix_env_uint_in "$2" 1 100000 && return 1
+            echo "must be 1-100000 lines"
+            return 0
+            ;;
+        HELIX_TOUCH_CAL_DEBOUNCE)
+            helix_env_uint_in "$2" 0 1 && return 1
+            echo "must be 0 or 1"
             return 0
             ;;
         HELIX_PWM_SOUND)
@@ -295,6 +384,15 @@ helix_env_value_refusal() {
             ;;
     esac
     return 1
+}
+
+# Whether $1 is a plain decimal integer from $2 to $3: digits only, no sign,
+# no leading zero, and short enough that the shell's arithmetic holds it.
+helix_env_uint_in() {
+    case "$1" in
+        '' | *[!0-9]* | 0?* | ??????????*) return 1 ;;
+    esac
+    [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
 }
 
 # The only log files the env file may aim the app at: an absolute *.log path
@@ -687,6 +785,194 @@ helix_load_env_file() {
         _helix_skipped _hes_count _hes_more _helix_env_file
 }
 
+# Process inspection for the predecessor wait and the exit sweep below. Same
+# rules as helix_klipper_co_hosted: read $HELIX_PROC_ROOT directly, never pgrep,
+# and treat a process that vanishes mid-read as gone.
+HELIX_NL='
+'
+# Binaries a launcher starts, by program name. comm is truncated to 15
+# characters, so names are taken from argv instead.
+HELIX_UI_PROGS="helix-watchdog helix-screen helix-screen-fbdev helix-screen-egl"
+
+# Sets _hps_ppid and _hps_start (clock ticks after boot) from <pid>/stat.
+# Fields are counted from the LAST ')' because comm may hold spaces and ')'.
+helix_proc_stat() {
+    _hps_ppid="" _hps_start="" _hps_line=""
+    { IFS= read -r _hps_line < "$HELIX_PROC_ROOT/$1/stat"; } 2>/dev/null || return 1
+    # shellcheck disable=SC2086  # field splitting is the point
+    set -- ${_hps_line##*) }
+    _hps_ppid=${2:-}
+    _hps_start=${20:-}
+    [ -n "$_hps_ppid" ]
+}
+
+# Sets _hpp_prog to the program a process runs: the basename of argv[0], or of
+# argv[1] when argv[0] is a shell running a script (a shebang exec or
+# `sh script`). _hpp_argv holds argv one entry per line. Both are empty for a
+# process that is gone, unreadable, or plainly something else.
+helix_proc_prog() {
+    _hpp_prog="" _hpp_argv="" _hpp_comm=""
+    # comm is a fork-free prefilter: the cmdline read below costs a process,
+    # and this runs over every PID on a board with a slow CPU.
+    { IFS= read -r _hpp_comm < "$HELIX_PROC_ROOT/$1/comm"; } 2>/dev/null || _hpp_comm=""
+    case "$_hpp_comm" in
+        ""|helix-*|sh|ash|bash|dash) ;;
+        *) return 0 ;;
+    esac
+    _hpp_argv=$(tr '\0' '\n' 2>/dev/null < "$HELIX_PROC_ROOT/$1/cmdline") || _hpp_argv=""
+    [ -n "$_hpp_argv" ] || return 0
+    _hpp_prog=${_hpp_argv%%"$HELIX_NL"*}
+    _hpp_prog=${_hpp_prog##*/}
+    case "$_hpp_prog" in
+        sh|ash|bash|dash)
+            case "$_hpp_argv" in
+                *"$HELIX_NL"*)
+                    _hpp_prog=${_hpp_argv#*"$HELIX_NL"}
+                    _hpp_prog=${_hpp_prog%%"$HELIX_NL"*}
+                    _hpp_prog=${_hpp_prog##*/}
+                    ;;
+            esac
+            ;;
+    esac
+    return 0
+}
+
+# Is any helix-watchdog or helix-screen process alive?
+helix_ui_running() {
+    for _hur_d in "$HELIX_PROC_ROOT"/[0-9]*; do
+        helix_proc_prog "${_hur_d##*/}"
+        case " $HELIX_UI_PROGS " in
+            *" $_hpp_prog "*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Is unsigned decimal $1 >= $2? 0 = yes, 1 = no, 2 = either is not a plain
+# number. Compared as text, longest first, then in 9-digit chunks, so a
+# value past 2^31 (a start time after ~248 days of uptime) still compares
+# right in a 32-bit shell's test.
+helix_uint_ge() {
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    case "$2" in ''|*[!0-9]*) return 2 ;; esac
+    if [ "${#1}" -ne "${#2}" ]; then
+        [ "${#1}" -gt "${#2}" ]
+        return
+    fi
+    _hug_a=$1 _hug_b=$2
+    while [ "${#_hug_a}" -gt 9 ]; do
+        _hug_ra=${_hug_a#?????????} _hug_rb=${_hug_b#?????????}
+        _hug_ha=${_hug_a%"$_hug_ra"} _hug_hb=${_hug_b%"$_hug_rb"}
+        if [ "$_hug_ha" != "$_hug_hb" ]; then
+            [ "$_hug_ha" -gt "$_hug_hb" ]
+            return
+        fi
+        _hug_a=$_hug_ra _hug_b=$_hug_rb
+    done
+    [ "$_hug_a" -ge "$_hug_b" ]
+}
+
+# Sets _hlp_pids to the other launchers that started before this one. Not
+# counted: this shell and its own subshells, its ancestors (a launcher that
+# runs a hook which asks this question), and the --print-env and
+# --wait-for-predecessor queries, which start nothing. A launcher that started
+# after this one is not a predecessor, so two launchers racing each other never
+# wait on each other.
+helix_launcher_predecessors() {
+    _hlp_pids="" _hlp_self_start="" _hlp_ancestors=" $$ "
+    _hlp_pid=$PPID _hlp_hops=0
+    while [ "$_hlp_pid" -gt 1 ] 2>/dev/null && [ "$_hlp_hops" -lt 64 ]; do
+        _hlp_ancestors="$_hlp_ancestors$_hlp_pid "
+        helix_proc_stat "$_hlp_pid" || break
+        _hlp_pid=$_hps_ppid
+        _hlp_hops=$((_hlp_hops + 1))
+    done
+    helix_proc_stat "$$" && _hlp_self_start=$_hps_start
+    for _hlp_d in "$HELIX_PROC_ROOT"/[0-9]*; do
+        _hlp_pid=${_hlp_d##*/}
+        case "$_hlp_ancestors" in
+            *" $_hlp_pid "*) continue ;;
+        esac
+        helix_proc_prog "$_hlp_pid"
+        [ "$_hpp_prog" = "helix-launcher.sh" ] || continue
+        case "$HELIX_NL$_hpp_argv$HELIX_NL" in
+            *"${HELIX_NL}--print-env${HELIX_NL}"*|*"${HELIX_NL}--wait-for-predecessor${HELIX_NL}"*)
+                continue ;;
+        esac
+        helix_proc_stat "$_hlp_pid" || continue
+        [ "$_hps_ppid" != "$$" ] || continue
+        # Only a start time that reads as earlier than ours counts; one that
+        # cannot be compared is not evidence of a predecessor.
+        if [ -n "$_hlp_self_start" ]; then
+            _hlp_cmp=0
+            helix_uint_ge "$_hps_start" "$_hlp_self_start" || _hlp_cmp=$?
+            [ "$_hlp_cmp" -eq 1 ] || continue
+        fi
+        _hlp_pids="${_hlp_pids:+$_hlp_pids }$_hlp_pid"
+    done
+}
+
+# Wait, bounded, for older launchers to exit. A launcher that is exiting still
+# owns the instance lock through its helix-screen, and its exit trap sweeps the
+# children it started, so starting on top of it races both. Always returns 0:
+# after the bound the caller proceeds, and helix-watchdog's restart policy
+# covers a lock that is still held.
+# HELIX_LAUNCHER_PREDECESSOR_WAIT (seconds, default 10, 0 = never wait) is an
+# environment override for tests and diagnosis, not a helixscreen.env key.
+helix_wait_for_predecessor() {
+    # $1 = "query": the UI coming back (a predecessor's respawn) also ends it.
+    _hwp_query=${1:-}
+    _hwp_bound=${HELIX_LAUNCHER_PREDECESSOR_WAIT:-10}
+    case "$_hwp_bound" in
+        ''|*[!0-9]*) _hwp_bound=10 ;;
+    esac
+    [ "$_hwp_bound" -gt 0 ] || return 0
+    _hwp_waited=0
+    helix_launcher_predecessors
+    [ -n "$_hlp_pids" ] || return 0
+    log "Waiting up to ${_hwp_bound}s for exiting launcher (PID ${_hlp_pids})"
+    while [ -n "$_hlp_pids" ]; do
+        if [ "$_hwp_waited" -ge "$_hwp_bound" ]; then
+            log "Launcher (PID ${_hlp_pids}) still running after ${_hwp_waited}s; proceeding"
+            return 0
+        fi
+        sleep 1
+        _hwp_waited=$((_hwp_waited + 1))
+        if [ "$_hwp_query" = "query" ] && helix_ui_running; then
+            log "UI came back after ${_hwp_waited}s; launcher (PID ${_hlp_pids}) is not exiting"
+            return 0
+        fi
+        helix_launcher_predecessors
+    done
+    log "Previous launcher exited after ${_hwp_waited}s"
+    return 0
+}
+
+# On exit, stop what THIS launcher started and nothing else. Every child
+# inherits HELIX_LAUNCHER_PID=$$ (exported before the first one starts), so a
+# helix-screen or splash orphaned by a SIGKILLed watchdog still carries this
+# launcher's PID, while a successor's processes carry their own launcher's. A
+# sweep by name would take the successor down with us: Z-Mod restarts the UI
+# by killing it by name and starting a new launcher while this one exits.
+helix_stop_own_children() {
+    for _hso_d in "$HELIX_PROC_ROOT"/[0-9]*; do
+        _hso_pid=${_hso_d##*/}
+        [ "$_hso_pid" != "$$" ] || continue
+        helix_proc_prog "$_hso_pid"
+        case " $HELIX_UI_PROGS helix-splash " in
+            *" $_hpp_prog "*) ;;
+            *) continue ;;
+        esac
+        _hso_env=$(tr '\0' '\n' 2>/dev/null < "$_hso_d/environ") || continue
+        case "$HELIX_NL$_hso_env$HELIX_NL" in
+            *"${HELIX_NL}HELIX_LAUNCHER_PID=$$${HELIX_NL}"*)
+                log "Stopping ${_hpp_prog} (PID ${_hso_pid}) left behind by this launcher"
+                kill "$_hso_pid" 2>/dev/null || true
+                ;;
+        esac
+    done
+}
+
 # --print-env NAME: resolve NAME exactly as the env-file read resolves it
 # (shell environment first, then the file, first definition wins) and print
 # the value, exiting before any other launcher work — no display side
@@ -706,6 +992,26 @@ if [ "${1:-}" = "--print-env" ]; then
     eval "printf '%s\n' \"\${$2:-}\""
     exit 0
 fi
+
+# --wait-for-predecessor: the platform hooks' and init script's question
+# "is the launcher in the pidfile a running UI, or one on its way out?". With a
+# helix-watchdog or helix-screen alive the UI is up, so answer at once; with
+# neither, any older launcher is exiting, so wait for it (bounded). Z-Mod's own
+# S80helixscreen reads a live launcher PID as "already running" and returns, so
+# without this wait a restart lands while the old launcher exits and leaves no
+# UI at all. A caller that asked exports HELIX_PREDECESSOR_WAITED=1, so the
+# launcher it then starts does not wait the whole bound a second time.
+if [ "${1:-}" = "--wait-for-predecessor" ]; then
+    helix_ui_running || helix_wait_for_predecessor query
+    exit 0
+fi
+
+# Unset either way: a value inherited by a later, unrelated start must not
+# skip that start's wait.
+if [ "${HELIX_PREDECESSOR_WAITED:-0}" != "1" ]; then
+    helix_wait_for_predecessor
+fi
+unset HELIX_PREDECESSOR_WAITED
 
 # Stop firmware display-management services that conflict with HelixScreen.
 # Creality SonicPad/Nebula Pad ships display-sleep.sh which polls X11 DPMS via
@@ -760,17 +1066,13 @@ for arg in "$@"; do
     esac
 done
 
-# True when every shared library a binary needs resolves on this system.
-# A GPU-linked binary on a board whose userspace has no Mesa presents exactly
-# this way, and it is cheaper to detect than a failed exec.
-libs_resolve() {
-    command -v ldd >/dev/null 2>&1 || return 0
-    ! ldd "$1" 2>/dev/null | grep -q "not found"
-}
-
-# Ask a binary whether EGL comes up on a real GPU here. Exit 0 means yes.
+# Ask a binary whether EGL comes up on a real GPU here. Exit 0 means yes, 2
+# that the binary has no display rungs to choose between, 3 that libdrm does
+# not load so only fbdev can run, anything else no.
 # Run as a separate process so a GPU bring-up that aborts cannot take the UI
 # down with it, and under a deadline so a wedged driver cannot hold up boot.
+# A binary that carries no EGL presentation path, or a system missing a GPU
+# library, refuses at once, before touching the GPU.
 probe_egl() {
     if command -v timeout >/dev/null 2>&1; then
         _pe_out=$(timeout 10 "$1" --probe-egl 2>&1)
@@ -784,97 +1086,52 @@ probe_egl() {
     return $_pe_rc
 }
 
-# Select the display binary: EGL (GPU presentation), DRM dumb buffers, fbdev.
-# Checks: env override → shared lib resolution → EGL probe → default to DRM.
+# True when the kernel exposes a DRM card, the only case with a rung above
+# fbdev to choose. HELIX_DRI_DIR stands in for /dev/dri in tests.
+has_dri_card() {
+    for _hd_card in "${HELIX_DRI_DIR:-/dev/dri}"/card*; do
+        if [ -e "$_hd_card" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The display backend to hand helix-screen; prints nothing when the app should
+# auto-detect. Three rungs: `egl` presents through EGL/OpenGL ES, `drm` through
+# DRM dumb buffers, `fbdev` into /dev/fb0. The app falls back to fbdev itself
+# when DRM or its libraries are missing, so only the top two are probed for.
 #
 # The EGL rung is taken only when the probe reports a hardware renderer.
 # Succeeding into a software rasterizer such as llvmpipe is worse than failing,
-# because it spends CPU to save CPU.
-select_binary() {
-    _sb_bin_dir=$1
-    _sb_primary="${_sb_bin_dir}/helix-screen"
-    _sb_fallback="${_sb_bin_dir}/helix-screen-fbdev"
-    _sb_egl="${_sb_bin_dir}/helix-screen-egl"
-
-    # A forced backend short-circuits every check below. Naming a rung whose
-    # binary this install does not carry falls through to normal selection.
-    case "${HELIX_DISPLAY_BACKEND:-}" in
-        fbdev)
-            if [ -x "$_sb_fallback" ]; then
-                echo "$_sb_fallback"
-                return
-            fi
-            ;;
-        egl)
-            if [ -x "$_sb_egl" ]; then
-                echo "$_sb_egl"
-                return
-            fi
-            log "HELIX_DISPLAY_BACKEND=egl but no helix-screen-egl is installed"
-            ;;
-        drm)
-            echo "$_sb_primary"
-            return
-            ;;
-    esac
-
-    # Top rung: GPU presentation, gated on probing the very binary we would run.
-    if [ -x "$_sb_egl" ] && libs_resolve "$_sb_egl"; then
-        if probe_egl "$_sb_egl"; then
-            echo "$_sb_egl"
-            return
-        fi
-        log "EGL unavailable here — using DRM dumb buffers"
-    fi
-
-    # No fallback available (non-Pi, dev builds)
-    if [ ! -x "$_sb_fallback" ]; then
-        echo "$_sb_primary"
-        return
-    fi
-
-    if ! libs_resolve "$_sb_primary"; then
-        echo "$_sb_fallback"
-        return
-    fi
-
-    echo "$_sb_primary"
-}
-
-# The display backend to hand the app for the binary select_binary() chose;
-# prints nothing when the app should auto-detect. `egl` names a binary, not a
-# backend: the app knows sdl, drm and fbdev, and the EGL binary presents
-# through LVGL's DRM driver. Which of the two DRM drivers a binary carries is
-# compiled in, not selected here. Only dual-binary installs (Pi with DRM+fbdev)
-# get one set explicitly; single-binary platforms (AD5M, K1, etc.) auto-detect.
+# because it spends CPU to save CPU. A binary built without rungs (AD5M, K1,
+# U1 and the other single-backend platforms) answers 2 and auto-detects.
 app_display_backend() {
-    _ab_bin=$1
-    _ab_fallback=$2
-    case "${HELIX_DISPLAY_BACKEND:-}" in
-        "" | egl) ;;
-        *)
-            echo "$HELIX_DISPLAY_BACKEND"
-            return
+    if [ -n "${HELIX_DISPLAY_BACKEND:-}" ]; then
+        echo "$HELIX_DISPLAY_BACKEND"
+        return
+    fi
+    has_dri_card || return 0
+    # Written so a refusal is a value, not a failure `set -e` would act on.
+    _ab_rc=0
+    probe_egl "$1" || _ab_rc=$?
+    case $_ab_rc in
+        0)
+            echo egl
             ;;
-    esac
-    case "$(basename "$_ab_bin")" in
-        helix-screen-fbdev)
+        2) ;;
+        3)
             echo fbdev
             ;;
-        helix-screen-egl)
-            echo drm
-            ;;
         *)
-            if [ -x "$_ab_fallback" ]; then
-                echo drm
-            fi
+            log "EGL unavailable here — using DRM dumb buffers"
+            echo drm
             ;;
     esac
 }
 
 SPLASH_BIN="${BIN_DIR}/helix-splash"
 WATCHDOG_BIN="${BIN_DIR}/helix-watchdog"
-FALLBACK_BIN="${BIN_DIR}/helix-screen-fbdev"
 
 # Point OpenSSL (the app's own, libhv's default context, child processes) at a CA
 # bundle. The shipped bundle comes first, matching find_ca_store() in
@@ -929,7 +1186,7 @@ fi
 # /usr/data at /opt — but the mod's git tree stays reachable and
 # .shell/platform.sh in it is the evidence. K1 shares mips and carries none of
 # the four markers, so the arch alone never arms this. Same rule as
-# helix::ad5x_mod_layout_present(). Probes resolve under
+# helix::flashforge_mod_tree(). Probes resolve under
 # HELIX_AD5X_PROBE_ROOT (default /) so the bats suite can point the predicate
 # at a sandbox root instead of touching the real filesystem.
 _ad5x_root="${HELIX_AD5X_PROBE_ROOT:-/}"
@@ -990,10 +1247,10 @@ if [ -z "${MALLOC_ARENA_MAX:-}" ] && [ -r "$HELIX_MEMINFO_FILE" ]; then
     unset _mem_total_kb
 fi
 
-# Select binary AFTER env file is sourced so HELIX_DISPLAY_BACKEND=fbdev in env file works
-MAIN_BIN=$(select_binary "${BIN_DIR}")
+MAIN_BIN="${BIN_DIR}/helix-screen"
 
-_app_backend=$(app_display_backend "${MAIN_BIN}" "${FALLBACK_BIN}")
+# Decided AFTER the env file is sourced, so HELIX_DISPLAY_BACKEND there wins
+_app_backend=$(app_display_backend "${MAIN_BIN}")
 if [ -n "$_app_backend" ]; then
     export HELIX_DISPLAY_BACKEND="$_app_backend"
 else
@@ -1109,14 +1366,24 @@ HELIX_SHUTTING_DOWN=0
 cleanup() {
     HELIX_SHUTTING_DOWN=1
     log "Shutting down..."
-    # Kill watchdog/helix-screen if we started them
-    killall helix-watchdog helix-screen helix-screen-fbdev helix-screen-egl helix-splash 2>/dev/null || true
+    # A trap runs only after the foreground child returns, so what is left is
+    # an orphan of a SIGKILLed watchdog. Never sweep by name: that is the
+    # init script's stop(), and here it would also kill a successor.
+    helix_stop_own_children
     # Remove the GUI pidfile we advertised (CC1 gui-switcher) so a stale PID
-    # can't be signalled after we exit. HELIX_GUI_PIDFILE is exported by the
-    # platform hook; unset elsewhere this is a harmless no-op.
-    [ -n "${HELIX_GUI_PIDFILE:-}" ] && rm -f "${HELIX_GUI_PIDFILE}" 2>/dev/null || true
+    # can't be signalled after we exit, unless a successor's live watchdog has
+    # already rewritten it. HELIX_GUI_PIDFILE is exported by the platform hook;
+    # unset elsewhere this is a harmless no-op.
+    if [ -n "${HELIX_GUI_PIDFILE:-}" ] && [ -f "${HELIX_GUI_PIDFILE}" ]; then
+        _gui_pid=$(cat "${HELIX_GUI_PIDFILE}" 2>/dev/null || true)
+        if [ -z "${_gui_pid}" ] || ! kill -0 "${_gui_pid}" 2>/dev/null; then
+            rm -f "${HELIX_GUI_PIDFILE}" 2>/dev/null || true
+        fi
+    fi
 }
 
+# Marks every process this launcher starts (see helix_stop_own_children).
+export HELIX_LAUNCHER_PID=$$
 trap cleanup EXIT INT TERM
 
 log "Starting main application"
@@ -1220,10 +1487,11 @@ fi
 
 # Runtime crash fallback predicate. Defined before the run loop so it is
 # available on every iteration.
-# Only retry on genuine crashes, NOT on signal-based exits (SIGTERM=143 from systemctl stop,
-# SIGKILL=137, SIGINT=130, SIGHUP=129). Crash signals: SIGABRT=134, SIGFPE=136, SIGBUS=138, SIGSEGV=139.
+# Only retry on genuine crashes, NOT on signal-based exits (SIGTERM from systemctl stop,
+# SIGKILL, SIGINT, SIGHUP). A crash signal is named rather than numbered: signal
+# numbers differ by architecture (SIGBUS is 7 on ARM and x86, 10 on MIPS).
 #
-# 42 is helix-watchdog's RESTART_LOOP_EXIT_CODE: the supervisor already retried
+# 42 is helix-watchdog's kRestartLoopExitCode: the supervisor already retried
 # and concluded the failure will not resolve itself. Re-running the whole
 # watchdog against the fbdev binary just reproduces it, so it is excluded even
 # though it falls inside the 1..127 "worth retrying" range.
@@ -1233,9 +1501,13 @@ _is_crash_exit() {
     if [ "$1" = "$WATCHDOG_GIVE_UP_EXIT_CODE" ]; then
         return 1
     fi
-    case "$1" in
-        134|136|138|139) return 0 ;;  # ABRT, FPE, BUS, SEGV
-    esac
+    if [ "$1" -gt 128 ] 2>/dev/null; then
+        _crash_sig=$(kill -l "$(($1 - 128))" 2>/dev/null)
+        case "${_crash_sig#SIG}" in
+            ILL|TRAP|ABRT|IOT|BUS|FPE|SEGV|SYS) return 0 ;;
+        esac
+        return 1
+    fi
     # Non-signal exits (1-127) are also worth retrying (e.g., GL init failure)
     [ "$1" -gt 0 ] && [ "$1" -lt 128 ]
 }
@@ -1299,36 +1571,25 @@ while :; do
     # Runtime crash fallback: step down exactly one rung and retry. A GPU
     # failure must not demote the board past DRM dumb buffers to fbdev — that
     # would hide a working middle rung behind a broken top one.
-    RETRY_BIN=""
     RETRY_BACKEND=""
-    case "$(basename "${MAIN_BIN}")" in
-        helix-screen-egl)
-            if [ -x "${BIN_DIR}/helix-screen" ]; then
-                RETRY_BIN="${BIN_DIR}/helix-screen"
-                RETRY_BACKEND=drm
-            fi
-            ;;
-        helix-screen)
-            if [ -x "${FALLBACK_BIN}" ]; then
-                RETRY_BIN="${FALLBACK_BIN}"
-                RETRY_BACKEND=fbdev
-            fi
-            ;;
+    case "${HELIX_DISPLAY_BACKEND:-}" in
+        egl) RETRY_BACKEND=drm ;;
+        drm) RETRY_BACKEND=fbdev ;;
     esac
-    if _is_crash_exit ${EXIT_CODE} && [ -n "${RETRY_BIN}" ]; then
-        log "$(basename "${MAIN_BIN}") exited with code ${EXIT_CODE}, retrying with $(basename "${RETRY_BIN}")..."
+    if _is_crash_exit ${EXIT_CODE} && [ -n "${RETRY_BACKEND}" ]; then
+        log "helix-screen (${HELIX_DISPLAY_BACKEND}) exited with code ${EXIT_CODE}, retrying with ${RETRY_BACKEND}..."
         export HELIX_DISPLAY_BACKEND="${RETRY_BACKEND}"
         if [ "${USE_WATCHDOG}" = "1" ]; then
             # shellcheck disable=SC2086
             "${WATCHDOG_BIN}" ${SPLASH_ARGS} -- \
-                "${RETRY_BIN}" ${EXTRA_FLAGS} ${PASSTHROUGH_ARGS}
+                "${MAIN_BIN}" ${EXTRA_FLAGS} ${PASSTHROUGH_ARGS}
             EXIT_CODE=$?
         else
             # shellcheck disable=SC2086
-            "${RETRY_BIN}" ${EXTRA_FLAGS} ${PASSTHROUGH_ARGS}
+            "${MAIN_BIN}" ${EXTRA_FLAGS} ${PASSTHROUGH_ARGS}
             EXIT_CODE=$?
         fi
-        log "$(basename "${RETRY_BIN}") fallback exited with code ${EXIT_CODE}"
+        log "helix-screen (${RETRY_BACKEND}) fallback exited with code ${EXIT_CODE}"
     fi
 
     _run_end=$(date +%s 2>/dev/null || echo 0)

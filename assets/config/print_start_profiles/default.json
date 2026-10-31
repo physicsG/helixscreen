@@ -9,6 +9,7 @@
   "signal_formats": [],
   "response_patterns": [
     { "pattern": "G28|Homing|Home All|homing axes|homing all", "phase": "HOMING", "message": "Homing...", "weight": 10 },
+    { "pattern": "Motors synchronization started", "phase": "MOTOR_SYNC", "message": "Syncing Motors...", "weight": 10 },
     { "pattern": "M190|M140\\s+S[1-9]|Heating bed|Heat Bed|BED_TEMP|bed.*heat", "phase": "HEATING_BED", "message": "Heating Bed...", "weight": 20 },
     { "pattern": "^Bed:\\s*[0-9]+\\s*C?$", "phase": "HEATING_BED", "message": "Heating Bed...", "weight": 20, "narrates": false },
     { "pattern": "(heat|bed|chamber).?soak|soaking|heating chamber|waiting for chamber", "phase": "SOAKING", "message": "Heat Soaking...", "weight": 20 },

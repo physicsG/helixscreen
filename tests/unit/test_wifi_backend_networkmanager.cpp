@@ -175,6 +175,10 @@ struct FakeNmcliDir {
         std::string script = R"SH(#!/bin/sh
 n=$(($(cat "$NMCLI_COUNT" 2>/dev/null || echo 0) + 1))
 echo "$n" > "$NMCLI_COUNT"
+if [ -n "$NMCLI_FAIL_ALL" ]; then
+  echo "$NMCLI_FAIL_ALL" >&2
+  exit 1
+fi
 if [ "$n" -eq 1 ] && [ "$NMCLI_FAIL_FIRST" = "1" ]; then
   echo "Error: 802-11-wireless-security.key-mgmt: property is missing." >&2
   exit 1
@@ -189,7 +193,8 @@ exit 0
         ::setenv("NMCLI_COUNT", count_file.c_str(), 1);
     }
     ~FakeNmcliDir() {
-        for (const char* var : {"NMCLI_ARGV", "NMCLI_COUNT", "NMCLI_FAIL_FIRST"}) {
+        for (const char* var :
+             {"NMCLI_ARGV", "NMCLI_COUNT", "NMCLI_FAIL_FIRST", "NMCLI_FAIL_ALL"}) {
             ::unsetenv(var);
         }
         std::error_code ec;
@@ -200,6 +205,11 @@ exit 0
     /// the backend's self-heal delete + retry path runs.
     void fail_first() {
         ::setenv("NMCLI_FAIL_FIRST", "1", 1);
+    }
+
+    /// Every invocation fails with `stderr_line` on stderr and nothing on stdout.
+    void fail_all(const char* stderr_line) {
+        ::setenv("NMCLI_FAIL_ALL", stderr_line, 1);
     }
 
     /// How many times the fake nmcli was exec'd.
@@ -936,6 +946,40 @@ TEST_CASE("NM backend implements radio power instead of inheriting the base no-o
     // opposite direction; pin the override explicitly so removing it fails.
     WifiBackend& as_base = backend;
     CHECK_FALSE(as_base.set_radio_enabled(false).success());
+}
+
+// ============================================================================
+// wpa_supplicant fallback: only when NetworkManager holds nothing
+// ============================================================================
+
+// A polkit denial is an answer FROM NetworkManager: the daemon is alive and
+// owns wlan0 and its supplicant, so wpa_supplicant must not take the radio.
+TEST_CASE("NM backend: polkit denial refuses the wpa_supplicant fallback",
+          "[network][nm][fallback]") {
+    FakeNmcliDir fake;
+    fake.fail_all("Error: Not authorized to control networking.");
+    ScopedPathPrepend path(fake.dir);
+
+    WifiBackendNetworkManager backend;
+    backend.set_silent(true);
+    WiFiError result = backend.start();
+
+    REQUIRE(result.result == WiFiResult::PERMISSION_DENIED);
+    CHECK_FALSE(backend.supports_wpa_supplicant_fallback());
+}
+
+TEST_CASE("NM backend: an unreachable daemon allows the wpa_supplicant fallback",
+          "[network][nm][fallback]") {
+    FakeNmcliDir fake;
+    fake.fail_all("Error: NetworkManager is not running.");
+    ScopedPathPrepend path(fake.dir);
+
+    WifiBackendNetworkManager backend;
+    backend.set_silent(true);
+    WiFiError result = backend.start();
+
+    REQUIRE(result.result == WiFiResult::SERVICE_NOT_RUNNING);
+    CHECK(backend.supports_wpa_supplicant_fallback());
 }
 
 #else

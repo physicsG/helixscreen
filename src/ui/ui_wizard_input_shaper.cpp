@@ -93,6 +93,11 @@ void WizardInputShaperStep::init_subjects() {
     UI_MANAGED_SUBJECT_INT(calibration_indeterminate_, 0, "wizard_input_shaper_indeterminate",
                            subjects_);
 
+    // 1 while the live chart holds a curve (shows its host)
+    UI_MANAGED_SUBJECT_INT(has_chart_, 0, "wizard_input_shaper_has_chart", subjects_);
+    sweep_chart_.set_on_curve_changed(
+        [this](bool has_curve) { lv_subject_set_int(&has_chart_, has_curve ? 1 : 0); });
+
     subjects_initialized_ = true;
     spdlog::debug("[{}] Subjects initialized", get_name());
 }
@@ -138,6 +143,44 @@ static void safe_set_analysis_phase(helix::LifetimeToken token, bool analyzing) 
                 }
             }
         });
+}
+
+// The live chart's calls, queued like the rest: progress and results arrive on
+// the WebSocket thread, and the chart is LVGL. Queued in callback order, so an
+// axis's begin_axis_preview lands ahead of its first progress report.
+static void safe_begin_axis_preview(helix::LifetimeToken token, char axis) {
+    helix::ui::queue_update("ui_wizard_input_shaper::safe_begin_axis_preview", [token, axis]() {
+        if (token.expired()) {
+            return;
+        }
+        if (WizardInputShaperStep* step = get_wizard_input_shaper_step()) {
+            step->begin_axis_preview(axis);
+        }
+    });
+}
+
+static void safe_axis_progress(helix::LifetimeToken token, ShaperCalibrationPhase phase,
+                               float freq_hz) {
+    helix::ui::queue_update("ui_wizard_input_shaper::safe_axis_progress",
+                            [token, phase, freq_hz]() {
+                                if (token.expired()) {
+                                    return;
+                                }
+                                if (WizardInputShaperStep* step = get_wizard_input_shaper_step()) {
+                                    step->on_axis_progress(phase, freq_hz);
+                                }
+                            });
+}
+
+static void safe_axis_result(helix::LifetimeToken token, const InputShaperResult& result) {
+    helix::ui::queue_update("ui_wizard_input_shaper::safe_axis_result", [token, result]() {
+        if (token.expired()) {
+            return;
+        }
+        if (WizardInputShaperStep* step = get_wizard_input_shaper_step()) {
+            step->on_axis_result(result);
+        }
+    });
 }
 
 static void safe_update_progress(helix::LifetimeToken token, int progress) {
@@ -187,6 +230,7 @@ static void safe_handle_error(helix::LifetimeToken token) {
             // An error can land mid-analysis; stop the elapsed label before it
             // overwrites the error message on its next tick, and drop the spinner.
             step->cancel_analysis_display();
+            step->stop_preview();
             lv_subject_set_int(step->get_indeterminate_subject(), 0);
             lv_subject_set_int(step->get_active_subject(), 0);
             lv_subject_set_int(step->get_started_subject(), 0);
@@ -214,6 +258,7 @@ static void begin_is_calibration_flow(WizardInputShaperStep* step) {
     lv_subject_set_int(step->get_progress_subject(), 0);
 
     auto token = step->get_lifetime_token();
+    step->query_preview_facts();
 
     // Start calibration via calibrator
     InputShaperCalibrator* calibrator = step->get_calibrator();
@@ -239,9 +284,11 @@ static void begin_is_calibration_flow(WizardInputShaperStep* step) {
                 }
                 InputShaperCalibrator* cal = step->get_calibrator();
                 if (cal) {
+                    safe_begin_axis_preview(token, 'X');
                     cal->run_calibration(
                         'X',
-                        [token](int percent, ShaperCalibrationPhase phase) {
+                        [token](int percent, ShaperCalibrationPhase phase, float freq_hz) {
+                            safe_axis_progress(token, phase, freq_hz);
                             const int bar =
                                 WizardInputShaperStep::combined_bar_value(percent, phase, false);
                             if (bar < 0) {
@@ -254,13 +301,13 @@ static void begin_is_calibration_flow(WizardInputShaperStep* step) {
                             safe_update_progress(token, bar);
                         },
                         [token](const InputShaperResult& result) {
-                            (void)result;
                             if (token.expired()) {
                                 spdlog::info("[Wizard Input Shaper] X axis returned after "
                                              "cleanup, aborting chain");
                                 return;
                             }
                             spdlog::info("[Wizard Input Shaper] X axis complete");
+                            safe_axis_result(token, result);
                             safe_update_status(token, "Calibrating Y axis...");
 
                             // Run Y axis calibration
@@ -270,9 +317,12 @@ static void begin_is_calibration_flow(WizardInputShaperStep* step) {
                             }
                             InputShaperCalibrator* cal2 = step->get_calibrator();
                             if (cal2) {
+                                safe_begin_axis_preview(token, 'Y');
                                 cal2->run_calibration(
                                     'Y',
-                                    [token](int percent, ShaperCalibrationPhase phase) {
+                                    [token](int percent, ShaperCalibrationPhase phase,
+                                            float freq_hz) {
+                                        safe_axis_progress(token, phase, freq_hz);
                                         const int bar = WizardInputShaperStep::combined_bar_value(
                                             percent, phase, true);
                                         if (bar < 0) {
@@ -283,8 +333,8 @@ static void begin_is_calibration_flow(WizardInputShaperStep* step) {
                                         safe_update_progress(token, bar);
                                     },
                                     [token](const InputShaperResult& result) {
-                                        (void)result;
                                         spdlog::info("[Wizard Input Shaper] Y axis complete");
+                                        safe_axis_result(token, result);
                                         safe_set_complete(token);
                                     },
                                     [token](const std::string& error) {
@@ -447,6 +497,12 @@ void WizardInputShaperStep::cleanup() {
     cancel_analysis_display();
     lv_subject_set_int(&calibration_indeterminate_, 0);
 
+    // The chart lives in the screen the wizard framework is about to delete.
+    sweep_chart_.destroy();
+    if (subjects_initialized_) {
+        lv_subject_set_int(&has_chart_, 0);
+    }
+
     // Cancel any in-progress calibration (local state — covers the non-active
     // path as well as defensively redundant when aborted above).
     if (calibrator_ && !aborted) {
@@ -494,7 +550,7 @@ bool WizardInputShaperStep::abort_in_progress_calibration() {
     spdlog::info("[{}] Aborting in-progress calibration (M112 + firmware_restart)", get_name());
 
     // Suppress shutdown/disconnect modals — M112 + restart triggers expected reconnect
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    EmergencyStopOverlay::instance().suppress_recovery_dialog(helix::recovery_suppression::LONG);
     if (auto* api = get_moonraker_api()) {
         api->suppress_disconnect_modal(15000);
     }
@@ -504,6 +560,7 @@ bool WizardInputShaperStep::abort_in_progress_calibration() {
     lifetime_.invalidate();
 
     calibrator_->emergency_abort();
+    stop_preview();
 
     // Reset UI back to start-able state. Step is still on-screen; user can
     // Skip via footer or click Start to retry once Klipper is back.
@@ -511,12 +568,61 @@ bool WizardInputShaperStep::abort_in_progress_calibration() {
         lv_subject_set_int(&calibration_started_, 0);
         lv_subject_set_int(&calibration_active_, 0);
         lv_subject_set_int(&calibration_progress_, 0);
-        lv_subject_copy_string(&calibration_status_, lv_tr("Cancelled"));
+        lv_subject_copy_string(&calibration_status_, lv_tr("Canceled"));
     }
     lv_subject_set_int(&wizard_show_skip, 1);
     lv_subject_set_int(&connection_test_passed, 0);
 
     return true;
+}
+
+// ============================================================================
+// Live sweep chart
+// ============================================================================
+
+void WizardInputShaperStep::query_preview_facts() {
+    helix::IMoonrakerAPI* api = get_moonraker_api();
+    if (!api) {
+        return;
+    }
+    auto token = get_lifetime_token();
+    helix::calibration::query_live_sweep_facts(
+        *api, [this, token](helix::calibration::LiveSweepFacts facts) {
+            token.defer(
+                "WizardInputShaperStep::preview_facts",
+                [this, facts = std::move(facts)]() mutable { preview_facts_ = std::move(facts); });
+        });
+}
+
+void WizardInputShaperStep::begin_axis_preview(char axis) {
+    lv_obj_t* host = screen_root_
+                         ? lv_obj_find_by_name(screen_root_, "wizard_input_shaper_chart_host")
+                         : nullptr;
+    // Where the layout hides the chart, nothing streams: no target arms nothing.
+    const bool fits =
+        helix::ui::live_chart_layout_fits("wizard_input_shaper", "wizard_input_shaper_chart_fits");
+    const auto target = fits ? helix::calibration::live_sweep_target(
+                                   preview_facts_, axis == 'X' ? helix::calibration::SweepAxis::X
+                                                               : helix::calibration::SweepAxis::Y)
+                             : std::nullopt;
+    if (!sweep_chart_.begin(host, axis, target)) {
+        spdlog::debug("[{}] No live chart for axis {}", get_name(), axis);
+    }
+}
+
+void WizardInputShaperStep::on_axis_progress(ShaperCalibrationPhase phase, float freq_hz) {
+    sweep_chart_.on_progress(phase, freq_hz);
+}
+
+void WizardInputShaperStep::on_axis_result(const InputShaperResult& result) {
+    sweep_chart_.show_curve(result.freq_response);
+}
+
+void WizardInputShaperStep::stop_preview() {
+    sweep_chart_.clear();
+    if (subjects_initialized_) {
+        lv_subject_set_int(&has_chart_, 0);
+    }
 }
 
 // ============================================================================

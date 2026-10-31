@@ -231,3 +231,30 @@ TEST_CASE("a row gives up its side inset before it draws", "[tile][layout][1559]
     const TileVerdict inset = decide_tile_layout(60, 30, kGap, kMedium, true, false, 0, 20);
     CHECK_FALSE((inset.fits && inset.direction == TileDirection::Row && inset.icon_rung >= 1));
 }
+
+TEST_CASE("a detail line under the label costs a column its height and a row nothing",
+          "[tile][layout][1805]") {
+    // Value-less, so rung 3 stacks 48+4+22 = 74 without the line and
+    // 74+4+18 = 96 with it.
+    TileRungMetrics with_detail[kTileRungs];
+    for (int r = 0; r < kTileRungs; ++r) {
+        with_detail[r] = kMedium[r];
+        with_detail[r].detail_h = 18;
+    }
+    const TileVerdict plain = decide_tile_layout(110, 96, kGap, kMedium, false, true);
+    const TileVerdict tight = decide_tile_layout(110, 95, kGap, with_detail, false, true);
+    const TileVerdict exact = decide_tile_layout(110, 96, kGap, with_detail, false, true);
+    REQUIRE(plain.direction == TileDirection::Column);
+    REQUIRE(plain.label == TileLabelRung::Label);
+    CHECK(exact.icon_rung == 3);
+    CHECK(exact.direction == TileDirection::Column);
+    CHECK(tight.icon_rung < 3);
+
+    // A row never draws the line, so a box too short to stack decides as it would without it.
+    const TileVerdict row_plain = decide_tile_layout(160, 38, kGap, kMedium, false, true);
+    const TileVerdict row_detail = decide_tile_layout(160, 38, kGap, with_detail, false, true);
+    REQUIRE(row_plain.direction == TileDirection::Row);
+    CHECK(row_detail.direction == row_plain.direction);
+    CHECK(row_detail.icon_rung == row_plain.icon_rung);
+    CHECK(row_detail.label == row_plain.label);
+}

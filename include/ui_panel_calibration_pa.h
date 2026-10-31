@@ -73,15 +73,15 @@ class PACalibrationPanel : public OverlayBase {
   public:
     /// Fixed subject slots. Chips beyond the printer's tool count are never
     /// built - <repeat> is driven by pa_cal_tool_count.
-    static constexpr int MAX_TOOLS = 4;
+    static constexpr int kMaxTools = 4;
 
-    /// Preset slots, mirroring helix::presets::PRESET_COUNT.
-    static constexpr int PRESET_SLOTS = 4;
+    /// Preset slots, mirroring helix::presets::kPresetCount.
+    static constexpr int kPresetSlots = 4;
 
     /// The two phases of a run, in order. Heating is nearly the whole wait.
-    static constexpr int PHASE_HEAT = 0;
-    static constexpr int PHASE_MEASURE = 1;
-    static constexpr int PHASE_COUNT = 2;
+    static constexpr int kPhaseHeat = 0;
+    static constexpr int kPhaseMeasure = 1;
+    static constexpr int kPhaseCount = 2;
 
     /// Everything the stage looks like follows from this one int.
     enum State : int {
@@ -95,19 +95,19 @@ class PACalibrationPanel : public OverlayBase {
     /// Nozzle bounds for the stepper. Deliberately the same span the brief
     /// states, not the heater's absolute maximum: this is a printing
     /// temperature, not a stress test.
-    static constexpr int TEMP_MIN = 170;
-    static constexpr int TEMP_MAX = 300;
-    static constexpr int TEMP_STEP = 5;
-    static constexpr int TEMP_DEFAULT = 245;
+    static constexpr int kTempMin = 170;
+    static constexpr int kTempMax = 300;
+    static constexpr int kTempStep = 5;
+    static constexpr int kTempDefault = 245;
 
     /// Considered "at target" once within this many degrees. Klipper settles
     /// slowly and the firmware command does its own final wait.
-    static constexpr float AT_TARGET_TOLERANCE_C = 2.0f;
+    static constexpr float kAtTargetToleranceC = 2.0f;
 
     /// Rough cost of the measurement itself, for the remaining-time clock.
     /// Heating dominates; this only has to stop the clock reading 0:00 for the
     /// last half-minute.
-    static constexpr int MEASURE_SECONDS_ESTIMATE = 40;
+    static constexpr int kMeasureSecondsEstimate = 40;
 
     ~PACalibrationPanel() override;
 
@@ -226,7 +226,7 @@ class PACalibrationPanel : public OverlayBase {
 
     State state_ = IDLE;
     int selected_tool_ = 0;
-    int target_temp_ = TEMP_DEFAULT;
+    int target_temp_ = kTempDefault;
     int selected_preset_ = -1;
     float result_k_ = 0.0f;
     bool have_result_ = false;
@@ -259,19 +259,19 @@ class PACalibrationPanel : public OverlayBase {
     lv_subject_t action_is_stop_{};
     lv_subject_t has_last_{};
 
-    lv_subject_t tool_selected_[MAX_TOOLS]{};
-    lv_subject_t tool_sub_[MAX_TOOLS]{};
-    char tool_sub_buf_[MAX_TOOLS][32] = {};
+    lv_subject_t tool_selected_[kMaxTools]{};
+    lv_subject_t tool_sub_[kMaxTools]{};
+    char tool_sub_buf_[kMaxTools][32] = {};
 
-    lv_subject_t preset_selected_[PRESET_SLOTS]{};
-    lv_subject_t preset_temp_[PRESET_SLOTS]{};
-    char preset_temp_buf_[PRESET_SLOTS][16] = {};
+    lv_subject_t preset_selected_[kPresetSlots]{};
+    lv_subject_t preset_temp_[kPresetSlots]{};
+    char preset_temp_buf_[kPresetSlots][16] = {};
 
-    lv_subject_t phase_state_[PHASE_COUNT]{};
-    lv_subject_t phase_name_[PHASE_COUNT]{};
-    lv_subject_t phase_meta_[PHASE_COUNT]{};
-    char phase_name_buf_[PHASE_COUNT][32] = {};
-    char phase_meta_buf_[PHASE_COUNT][32] = {};
+    lv_subject_t phase_state_[kPhaseCount]{};
+    lv_subject_t phase_name_[kPhaseCount]{};
+    lv_subject_t phase_meta_[kPhaseCount]{};
+    char phase_name_buf_[kPhaseCount][32] = {};
+    char phase_meta_buf_[kPhaseCount][32] = {};
 
     lv_subject_t temp_display_{};
     char temp_display_buf_[16] = {};
@@ -325,5 +325,8 @@ class PACalibrationPanel : public OverlayBase {
 inline PACalibrationPanel& get_global_pa_cal_panel() {
     return lazy_global<PACalibrationPanel>("PACalibrationPanel");
 }
+
+/// Open the PA calibration panel over @p parent_screen, wired to the active API.
+void open_pa_cal_panel(lv_obj_t* parent_screen);
 
 } // namespace helix::ui

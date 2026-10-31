@@ -3,13 +3,20 @@
 
 #include "action_prompt_modal.h"
 
+#include "ui_breakpoint.h"
 #include "ui_error_reporting.h"
+#include "ui_fault_path.h"
+#include "ui_swatch.h"
 
+#include "color_utils.h"
+#include "helix-xml/src/xml/lv_xml.h"
+#include "panel_widget_size.h"
 #include "sound_manager.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <optional>
 
@@ -27,47 +34,93 @@ int32_t label_width_px(const std::string& label, const lv_font_t* font) {
 }
 
 /**
- * @brief Can every button of a row show its label on one equal-width row?
- *
- * The equal-width row divides the container evenly, so it only works while the
- * widest label still fits its share. AFC's four short "Lane N" buttons do fit,
- * which is what #1043 needed; a preheat macro that offers seven "PLA 220/60"
- * material presets does not, and forcing those onto one row shrinks each cell
- * to a few dozen pixels and clips every label.
- *
- * Returns false when the container width cannot be measured yet — wrapping is
- * the safe answer, because it never clips.
+ * @brief A color tile with no text: Z-Mod's color-picker swatch (#1806).
  */
-bool equal_width_row_fits(lv_obj_t* container, const std::vector<PromptButton>& row) {
-    if (row.empty()) {
-        return false;
-    }
-    const int32_t count = static_cast<int32_t>(row.size());
+bool is_swatch(const PromptButton& btn) {
+    return btn.label.empty() && helix::parse_hex_color(btn.hex_color).has_value();
+}
 
+/**
+ * @brief Measure a row for choose_button_row_layout().
+ *
+ * The row is width=100% of a card whose own width is a percentage of the
+ * screen, so its content width is only real after a layout pass. A row that
+ * cannot be measured yet reports available 0, which wraps: the one layout that
+ * never clips.
+ */
+ButtonRowMeasure measure_button_row(lv_obj_t* row, const std::vector<PromptButton>& buttons) {
+    ButtonRowMeasure m;
+    m.count = static_cast<int32_t>(buttons.size());
+    m.all_swatches = !buttons.empty() && std::all_of(buttons.begin(), buttons.end(), is_swatch);
     const lv_font_t* font = theme_manager_get_font("font_body");
     if (font == nullptr) {
-        return false;
+        return m;
     }
-
-    // Resolve geometry: the container is width=100% of a card whose own width is
-    // a percentage of the screen, so the content width is only real after a
-    // layout pass.
-    lv_obj_update_layout(container);
-    const int32_t available = lv_obj_get_content_width(container);
-    if (available <= 0) {
-        return false;
+    for (const auto& btn : buttons) {
+        m.widest_label = std::max(m.widest_label, label_width_px(btn.label, font));
     }
+    lv_obj_update_layout(row);
+    m.available = lv_obj_get_content_width(row);
+    m.gap = lv_obj_get_style_pad_column(row, LV_PART_MAIN);
+    m.cell_pad = theme_manager_get_spacing("space_sm"); // per side, see create_button()
+    return m;
+}
 
-    const int32_t gap = lv_obj_get_style_pad_column(container, LV_PART_MAIN);
-    const int32_t cell_pad = theme_manager_get_spacing("space_sm"); // per side, see create_button()
-    const int32_t cell_width = (available - gap * (count - 1)) / count;
+/**
+ * @brief Measured inputs for sizing a grid of swatch rows, in pixels.
+ */
+struct SwatchGridGeometry {
+    int32_t card_w = 0;     ///< card width as the XML lays it out
+    int32_t card_w_max = 0; ///< widest the card may grow on this screen
+    int32_t row_inset = 0;  ///< card width minus a swatch row's content width
+    int32_t cols = 0;       ///< most swatches sharing one row
+    int32_t col_gap = 0;
+    int32_t rows = 0;      ///< swatch rows
+    int32_t free_h = 0;    ///< card height cap minus everything but the swatch rows
+    int32_t touch_min = 0; ///< touch_target_min
+    int32_t button_h = 0;  ///< button_height: the tile height when nothing constrains it
+};
 
-    for (const auto& btn : row) {
-        if (label_width_px(btn.label, font) + 2 * cell_pad > cell_width) {
-            return false;
-        }
+struct SwatchGridFit {
+    int32_t card_w = 0;
+    int32_t swatch_h = 0;
+    bool scroll = false; ///< the rows need more height than the card has left
+};
+
+/// A prompt's button height. A 480x320 screen takes the compact one, so a color
+/// prompt shows its whole swatch grid beside its text buttons and footer.
+int32_t prompt_button_height() {
+    const bool tiny = widget_size::current_breakpoint() == UiBreakpoint::Tiny;
+    return theme_manager_get_spacing(tiny ? "button_height_sm" : "button_height");
+}
+
+/**
+ * @brief Size the card and the swatch tiles to the room the screen has.
+ *
+ * The card widens only as far as it takes for every tile to be a full touch
+ * target across, never past card_w_max. Tiles keep button_height, raised to
+ * the touch target, while the free height holds that; otherwise they take
+ * the largest height that fits. Below button_height they stop shrinking and
+ * the grid scrolls instead.
+ *
+ * This is the one place touch_target_min yields on height: a color picker
+ * that shows every color at once beats one that scrolls to reach 48px tiles,
+ * so height drops toward button_height first while width still holds the
+ * touch target (prestonbrown/helixscreen#1806).
+ */
+SwatchGridFit fit_swatch_grid(const SwatchGridGeometry& g) {
+    SwatchGridFit fit;
+    const int32_t need_w = g.cols * g.touch_min + (g.cols - 1) * g.col_gap + g.row_inset;
+    fit.card_w = std::max(g.card_w, std::min(need_w, g.card_w_max));
+
+    const int32_t wanted_h = std::max(g.button_h, g.touch_min);
+    const int32_t room_h = g.rows > 0 ? g.free_h / g.rows : wanted_h;
+    fit.swatch_h = std::min(wanted_h, room_h);
+    if (fit.swatch_h < g.button_h) {
+        fit.swatch_h = g.button_h;
+        fit.scroll = true;
     }
-    return true;
+    return fit;
 }
 
 /**
@@ -113,6 +166,23 @@ std::vector<std::vector<PromptButton>> split_button_rows(const std::vector<Promp
 
 } // namespace
 
+ButtonRowLayout choose_button_row_layout(const ButtonRowMeasure& m) {
+    if (m.available <= 0 || m.count <= 0) {
+        return {};
+    }
+    const auto fits_share = [&m](int32_t cols) {
+        const int32_t cell = (m.available - m.gap * (cols - 1)) / cols;
+        return m.widest_label + 2 * m.cell_pad <= cell;
+    };
+    if (!m.all_swatches && m.count >= kPromptGridMinButtons) {
+        return {ButtonRowKind::Grid, fits_share(3) ? 3 : 2};
+    }
+    if (m.count >= 4 && fits_share(m.count)) {
+        return {ButtonRowKind::EqualRow, m.count};
+    }
+    return {};
+}
+
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
@@ -139,11 +209,12 @@ void ActionPromptModal::set_dismiss_callback(DismissCallback callback) {
 }
 
 bool ActionPromptModal::show_prompt(lv_obj_t* parent, const PromptData& data) {
-    // Store prompt data
     prompt_data_ = data;
+    // Before Modal::show(): the diagram binds its subject when the XML is built.
+    publish_fault_path();
 
-    // Show the modal via Modal base class
     if (!Modal::show(parent)) {
+        fault_path_.release();
         return false;
     }
 
@@ -154,7 +225,18 @@ bool ActionPromptModal::show_prompt(lv_obj_t* parent, const PromptData& data) {
 bool ActionPromptModal::show_owned_prompt(lv_obj_t* parent, const PromptData& data) {
     auto modal = std::make_unique<ActionPromptModal>();
     modal->prompt_data_ = data;
+    modal->publish_fault_path();
+    // A failed show frees the modal, whose hold hands the diagram back.
     return Modal::show_owned(std::move(modal), parent);
+}
+
+void ActionPromptModal::publish_fault_path() {
+    std::string text;
+    for (const auto& line : prompt_data_.text_lines) {
+        text += line;
+        text += '\n';
+    }
+    fault_path_.publish(text);
 }
 
 // ============================================================================
@@ -168,6 +250,7 @@ void ActionPromptModal::on_show() {
 
 void ActionPromptModal::on_hide() {
     clear_dynamic_content();
+    fault_path_.release();
     spdlog::debug("[ActionPromptModal] on_hide()");
     if (!dismiss_callback_) {
         return;
@@ -252,13 +335,11 @@ void ActionPromptModal::create_buttons() {
     bool has_footer_buttons = false;
     int footer_button_count = 0;
 
-    // Regular buttons go in rows inside button_container. A row of >= 4 buttons
-    // overflows the fixed-width (320px) dialog with content-sized buttons, so it
-    // becomes a non-wrapping row of equal-width cells (R2 / #1043), but only
-    // while every label still fits its share: seven "PLA 220/60" presets would
-    // get a few dozen pixels per cell and clip, so those keep row_wrap and take
-    // the extra lines they need.
+    // Regular buttons go in rows inside button_container, each laid out by
+    // choose_button_row_layout(). Grid cells get their width in fit_rows(),
+    // once the card width is final.
     bool has_regular_buttons = false;
+    RowFit rows;
     for (const auto& row_buttons : split_button_rows(prompt_data_.buttons)) {
         auto* row = static_cast<lv_obj_t*>(
             lv_xml_create(button_container, "action_prompt_button_row", nullptr));
@@ -268,12 +349,21 @@ void ActionPromptModal::create_buttons() {
             break;
         }
         has_regular_buttons = true;
-        const bool equal_width = row_buttons.size() >= 4 && equal_width_row_fits(row, row_buttons);
-        if (equal_width) {
+        const ButtonRowMeasure measure = measure_button_row(row, row_buttons);
+        const ButtonRowLayout layout = choose_button_row_layout(measure);
+        if (layout.kind == ButtonRowKind::EqualRow) {
             lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         }
         for (const auto& btn : row_buttons) {
-            create_button(btn, row, equal_width);
+            create_button(btn, row, layout.kind);
+        }
+        if (layout.kind == ButtonRowKind::Grid) {
+            rows.grid_rows.push_back({row, layout.cols});
+        } else if (layout.kind == ButtonRowKind::EqualRow && measure.all_swatches) {
+            rows.swatch_rows.push_back(row);
+            rows.swatch_cols = std::max(rows.swatch_cols, layout.cols);
+        } else if (layout.kind == ButtonRowKind::Wrap) {
+            rows.wrap_rows.push_back(row);
         }
     }
 
@@ -296,6 +386,7 @@ void ActionPromptModal::create_buttons() {
 
     // Show/hide footer based on whether there are footer buttons
     if (footer_container) {
+        lv_obj_set_height(footer_container, prompt_button_height());
         if (has_footer_buttons) {
             lv_obj_remove_flag(footer_container, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -315,10 +406,137 @@ void ActionPromptModal::create_buttons() {
     if (!has_regular_buttons) {
         lv_obj_add_flag(button_container, LV_OBJ_FLAG_HIDDEN);
     }
+
+    fit_rows(rows);
+    size_swatch_discs();
+}
+
+// DECLARATIVE_OK: measured layout. A swatch circle is as large as its tile's
+// shorter side, which only a layout pass knows.
+void ActionPromptModal::size_swatch_discs() {
+    lv_obj_t* screen = dialog_ ? lv_obj_get_parent(dialog_) : nullptr;
+    if (screen == nullptr) {
+        return;
+    }
+    lv_obj_update_layout(screen);
+    for (lv_obj_t* button : created_buttons_) {
+        lv_obj_t* disc = lv_obj_find_by_name(button, "color_swatch_disc");
+        if (disc == nullptr) {
+            continue;
+        }
+        const int32_t side =
+            std::min(lv_obj_get_content_width(button), lv_obj_get_content_height(button));
+        if (side > 0) {
+            lv_obj_set_size(disc, side, side);
+        }
+    }
+}
+
+// DECLARATIVE_OK: measured layout. The card width, grid cells, tile heights
+// and the scroll area's cap all depend on the pixels the rest of the prompt
+// leaves, which only a layout pass knows.
+void ActionPromptModal::fit_rows(const RowFit& rows) {
+    lv_obj_t* screen = dialog_ ? lv_obj_get_parent(dialog_) : nullptr;
+    lv_obj_t* scroll = find_widget("prompt_scroll");
+    if (screen == nullptr || scroll == nullptr) {
+        return;
+    }
+    lv_obj_update_layout(screen);
+
+    SwatchGridGeometry g;
+    const bool has_swatches = !rows.swatch_rows.empty() && rows.swatch_cols > 0;
+    if (has_swatches) {
+        g.card_w = lv_obj_get_width(dialog_);
+        g.card_w_max = lv_obj_get_content_width(screen) - 2 * theme_manager_get_spacing("space_lg");
+        g.row_inset = g.card_w - lv_obj_get_content_width(rows.swatch_rows.front());
+        g.cols = rows.swatch_cols;
+        g.col_gap = lv_obj_get_style_pad_column(rows.swatch_rows.front(), LV_PART_MAIN);
+        g.rows = static_cast<int32_t>(rows.swatch_rows.size());
+        g.touch_min = theme_manager_get_spacing("touch_target_min");
+        g.button_h = prompt_button_height();
+
+        const SwatchGridFit fit = fit_swatch_grid(g);
+        if (fit.card_w != g.card_w) {
+            lv_obj_set_style_max_width(dialog_, fit.card_w, LV_PART_MAIN);
+            lv_obj_set_width(dialog_, fit.card_w);
+            lv_obj_update_layout(screen); // text may rewrap at the new width
+        }
+    }
+
+    for (const GridRow& grid : rows.grid_rows) {
+        const int32_t gap = lv_obj_get_style_pad_column(grid.row, LV_PART_MAIN);
+        const int32_t cell =
+            (lv_obj_get_content_width(grid.row) - gap * (grid.cols - 1)) / grid.cols;
+        const uint32_t n = lv_obj_get_child_count(grid.row);
+        for (uint32_t i = 0; i < n; ++i) {
+            lv_obj_set_width(lv_obj_get_child(grid.row, static_cast<int32_t>(i)), cell);
+        }
+    }
+    // A content-sized button grows with its label, so one label wider than the row
+    // would widen the button past the card. Such a label keeps one line and ends in
+    // an ellipsis instead.
+    for (lv_obj_t* row : rows.wrap_rows) {
+        const int32_t row_w = lv_obj_get_content_width(row);
+        const uint32_t n = lv_obj_get_child_count(row);
+        for (uint32_t i = 0; i < n; ++i) {
+            lv_obj_t* button = lv_obj_get_child(row, static_cast<int32_t>(i));
+            lv_obj_t* label = lv_obj_get_child_by_type(button, 0, &lv_label_class);
+            const int32_t cap = row_w - lv_obj_get_style_pad_left(button, LV_PART_MAIN) -
+                                lv_obj_get_style_pad_right(button, LV_PART_MAIN);
+            if (label == nullptr || cap <= 0 || lv_obj_get_width(label) <= cap) {
+                continue;
+            }
+            lv_obj_set_size(
+                label, cap,
+                lv_font_get_line_height(lv_obj_get_style_text_font(label, LV_PART_MAIN)));
+            lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+        }
+    }
+    lv_obj_update_layout(screen);
+
+    // The card is height=content and clamps at its max_height without
+    // shrinking any child, so the room the scroll area may take is that cap
+    // less everything else on the card (including any overflow below it).
+    const int32_t cap_style = lv_obj_get_style_max_height(dialog_, LV_PART_MAIN);
+    const int32_t cap = LV_COORD_IS_PCT(cap_style)
+                            ? lv_pct_to_px(cap_style, lv_obj_get_content_height(screen))
+                            : cap_style;
+    const int32_t content_h =
+        lv_obj_get_height(dialog_) + std::max<int32_t>(0, lv_obj_get_scroll_bottom(dialog_));
+    int32_t scroll_h = lv_obj_get_height(scroll);
+    const int32_t room = cap - (content_h - scroll_h);
+
+    if (has_swatches) {
+        int32_t rows_h = 0;
+        for (lv_obj_t* row : rows.swatch_rows) {
+            rows_h += lv_obj_get_height(row);
+        }
+        g.free_h = room - (scroll_h - rows_h);
+        const SwatchGridFit fit = fit_swatch_grid(g);
+        for (lv_obj_t* row : rows.swatch_rows) {
+            const uint32_t n = lv_obj_get_child_count(row);
+            for (uint32_t i = 0; i < n; ++i) {
+                lv_obj_set_height(lv_obj_get_child(row, static_cast<int32_t>(i)), fit.swatch_h);
+            }
+        }
+        lv_obj_update_layout(screen);
+        scroll_h = lv_obj_get_height(scroll);
+        spdlog::debug("[ActionPromptModal] Swatch grid: {} rows x {}, card {}px, tiles {}px tall",
+                      g.rows, g.cols, fit.card_w, fit.swatch_h);
+    }
+
+    if (scroll_h > room) {
+        // The room can be negative when the header and footer alone fill the
+        // card; one button height stays visible so the area can still scroll.
+        const int32_t floor_h = prompt_button_height();
+        lv_obj_set_style_max_height(scroll, std::max(room, floor_h), LV_PART_MAIN);
+        spdlog::debug("[ActionPromptModal] Content {}px scrolls in {}px", scroll_h,
+                      std::max(room, floor_h));
+    }
 }
 
 void ActionPromptModal::create_button(const PromptButton& btn, lv_obj_t* container,
-                                      bool equal_width) {
+                                      ButtonRowKind kind) {
     lv_obj_t* button = lv_button_create(container);
 
     if (btn.is_footer) {
@@ -326,23 +544,22 @@ void ActionPromptModal::create_button(const PromptButton& btn, lv_obj_t* contain
         lv_obj_set_height(button, lv_pct(100));
         lv_obj_set_flex_grow(button, 1);
         lv_obj_set_style_radius(button, 0, LV_PART_MAIN);
-    } else if (equal_width) {
-        // A row of >= 4 buttons, all short enough to share it:
-        // equal-width cells on a non-wrapping row (R2 / #1043). grow=1 with
-        // width 0 lets short labels ("Lane 1".."Lane 4") share the fixed-width
-        // row instead of overflowing and wrapping. Trim the horizontal padding
-        // to space_sm so the equal cells stay compact; the label stays centered.
+    } else if (kind != ButtonRowKind::Wrap) {
+        // Equal-width cells with compact space_sm padding. On an EqualRow,
+        // grow=1 with width 0 shares the non-wrapping line (#1043); a Grid cell
+        // gets its fixed width from fit_rows() and row_wrap lines them up.
         lv_obj_set_width(button, 0);
-        lv_obj_set_height(button, theme_manager_get_spacing("button_height"));
-        lv_obj_set_flex_grow(button, 1);
+        lv_obj_set_height(button, prompt_button_height());
+        if (kind == ButtonRowKind::EqualRow) {
+            lv_obj_set_flex_grow(button, 1);
+        }
         lv_obj_set_style_pad_left(button, theme_manager_get_spacing("space_sm"), LV_PART_MAIN);
         lv_obj_set_style_pad_right(button, theme_manager_get_spacing("space_sm"), LV_PART_MAIN);
         lv_obj_set_style_radius(button, 8, LV_PART_MAIN);
     } else {
-        // Everything else: content-sized with padding, which row_wrap spreads
-        // over as many lines as the labels need (<= 3 buttons in the row, or
-        // more than three that are too wide to share one row).
-        lv_obj_set_size(button, LV_SIZE_CONTENT, theme_manager_get_spacing("button_height"));
+        // Content-sized with padding, which row_wrap spreads over as many
+        // lines as the labels need.
+        lv_obj_set_size(button, LV_SIZE_CONTENT, prompt_button_height());
         lv_obj_set_style_pad_left(button, theme_manager_get_spacing("space_lg"), LV_PART_MAIN);
         lv_obj_set_style_pad_right(button, theme_manager_get_spacing("space_lg"), LV_PART_MAIN);
         lv_obj_set_style_radius(button, 8, LV_PART_MAIN);
@@ -350,18 +567,37 @@ void ActionPromptModal::create_button(const PromptButton& btn, lv_obj_t* contain
     lv_obj_set_style_border_width(button, 0, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
 
-    // Apply button color: hex_color takes priority over named color hint
-    lv_color_t bg_color = get_button_color(btn.color);
-    if (!btn.hex_color.empty()) {
-        uint32_t hex_val = std::strtoul(btn.hex_color.c_str(), nullptr, 16);
-        bg_color = lv_color_hex(hex_val);
+    // A hex fill takes priority over the named style.
+    const std::optional<uint32_t> fill_rgb = helix::parse_hex_color(btn.hex_color);
+    const lv_color_t bg_color = fill_rgb ? lv_color_hex(*fill_rgb) : get_button_color(btn.color);
+    if (is_swatch(btn)) {
+        // A color tile with no text is a swatch: the tile stays the touch
+        // target and shows a circle of its color, which the swatch painter
+        // edges when it blends into the card. size_swatch_discs() fits the
+        // circle to the tile once the grid is laid out.
+        lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(button, 0, LV_PART_MAIN);
+        // A button's height until size_swatch_discs() measures the tile.
+        const std::string side = std::to_string(prompt_button_height());
+        const char* disc_attrs[] = {"name",  "color_swatch_disc", "align",  "center",
+                                    "width", side.c_str(),        "height", side.c_str(),
+                                    nullptr};
+        auto* disc = static_cast<lv_obj_t*>(lv_xml_create(button, "swatch_paint", disc_attrs));
+        helix::ui::apply_swatch_color(disc, *fill_rgb, "");
+    } else {
+        lv_obj_set_style_bg_color(button, bg_color, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
     }
-    lv_obj_set_style_bg_color(button, bg_color, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
 
     // Create label inside button with contrast-aware text color
     lv_obj_t* label = lv_label_create(button);
     lv_label_set_text(label, btn.label.c_str());
+    if (kind == ButtonRowKind::Grid) {
+        // A label wider than its cell ends in an ellipsis rather than spilling.
+        lv_obj_set_width(label, lv_pct(100));
+        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    }
     lv_obj_center(label);
     lv_obj_set_style_text_font(label, theme_manager_get_font("font_body"), LV_PART_MAIN);
     lv_obj_set_style_text_color(
@@ -389,7 +625,9 @@ void ActionPromptModal::create_button(const PromptButton& btn, lv_obj_t* contain
 
     spdlog::debug("[ActionPromptModal] Created button: {} (gcode: {}, color: {})", btn.label,
                   btn.gcode.empty() ? "<none>" : btn.gcode,
-                  btn.color.empty() ? "primary" : btn.color);
+                  !btn.hex_color.empty() ? btn.hex_color
+                  : btn.color.empty()    ? std::string("primary")
+                                         : btn.color);
 }
 
 lv_color_t ActionPromptModal::get_button_color(const std::string& color_name) {

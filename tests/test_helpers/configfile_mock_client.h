@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "moonraker_client_mock.h"
 
 #include <functional>
@@ -26,8 +27,8 @@ class ConfigfileMockClient : public MoonrakerClientMock {
 
     helix::RequestId send_jsonrpc(
         const std::string& method, const nlohmann::json& params,
-        std::function<void(const nlohmann::json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        helix::SharedCallback<void(const nlohmann::json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override {
         if (method == "printer.objects.query" && params.contains("objects") &&

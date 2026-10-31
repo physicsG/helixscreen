@@ -11,7 +11,12 @@
 
 #include "../fake_moonraker_client.h"
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/registered_backend.h"
+#include "../test_helpers/snapmaker_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "ams_backend_ace.h"
+#include "ams_backend_snapmaker.h"
+#include "ams_state.h"
 #include "filament_sensor_manager.h"
 #include "led/led_auto_state.h"
 #include "led/led_controller.h"
@@ -101,4 +106,57 @@ TEST_CASE_METHOD(DiscoverySubsystemsFixture,
     helix::init_subsystems_from_hardware(discovery_of({"extruder"}), nullptr, &client);
     REQUIRE(fsm.sensor_count() == 0);
     REQUIRE(wsm.sensor_count() == 0);
+}
+
+// init_tools() rebuilds the tools with T0 mounted, but a backend that already
+// reported an empty carriage owns the answer and sends no frame to restate it
+// (prestonbrown/helixscreen#1784).
+TEST_CASE_METHOD(DiscoverySubsystemsFixture,
+                 "rediscovery keeps the empty carriage a backend already reported",
+                 "[discovery][tool-state][tool_switcher][1784]") {
+    auto& ams = helix::AmsState::instance();
+    auto& ts = helix::ToolState::instance();
+    ams.init_subjects(/*register_xml=*/false);
+    const PrinterDiscovery u1 =
+        discovery_of({"extruder", "extruder1", "extruder2", "extruder3", "toolchanger",
+                      "filament_detect", "toolhead", "heater_bed", "print_task_config"});
+    {
+        helix::test::RegisteredBackend<helix::AmsBackendSnapmaker> backend(nullptr, nullptr);
+        ts.init_tools(u1);
+        helix::SnapmakerTestAccess::handle_status(
+            *backend, nlohmann::json{{"extruder", {{"state", "PARKED"}}},
+                                     {"extruder1", {{"state", "PARKED"}}},
+                                     {"extruder2", {{"state", "PARKED"}}},
+                                     {"extruder3", {{"state", "PARKED"}}},
+                                     {"toolhead", {{"extruder", "extruder2"}}}});
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        ams.sync_from_backend();
+        REQUIRE(ts.active_tool_index() == -1);
+
+        helix::init_subsystems_from_hardware(u1, nullptr, &client);
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        CHECK(ts.active_tool_index() == -1);
+        CHECK(lv_subject_get_int(ts.get_active_tool_subject()) == -1);
+    }
+    ams.deinit_subjects();
+}
+
+TEST_CASE_METHOD(DiscoverySubsystemsFixture,
+                 "rediscovery leaves T0 mounted where the carriage cannot be empty",
+                 "[discovery][tool-state][tool_switcher][1784]") {
+    auto& ams = helix::AmsState::instance();
+    auto& ts = helix::ToolState::instance();
+    ams.init_subjects(/*register_xml=*/false);
+    const PrinterDiscovery hw = discovery_of({"extruder", "extruder1", "toolhead", "heater_bed"});
+    {
+        helix::test::RegisteredBackend<helix::AmsBackendAce> backend(nullptr, nullptr);
+        REQUIRE_FALSE(backend->carriage_can_be_empty());
+        REQUIRE(backend->get_current_tool() == -1);
+
+        helix::init_subsystems_from_hardware(hw, nullptr, &client);
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        CHECK(ts.active_tool_index() == 0);
+        CHECK_FALSE(ts.backend_owns_active_tool());
+    }
+    ams.deinit_subjects();
 }

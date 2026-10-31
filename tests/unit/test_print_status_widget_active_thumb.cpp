@@ -23,6 +23,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/print_state_test_drivers.h"
+#include "../test_helpers/print_status_widget_test_access.h"
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/lvgl.h"
@@ -155,4 +156,36 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     PrintStatusWidget::destroy_formatter_for_test();
 
     CHECK(after_tick == kThumbB);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "print_status active thumbnail: publishes coalesce, detach cancels the apply",
+                 "[print_status][panel_widget][thumbnail]") {
+    std::string after_detach;
+    {
+        PrintStatusWidget widget;
+        widget.set_config({{"layout_style", "library"}});
+
+        lv_obj_t* comp = make_print_status(test_screen());
+        REQUIRE(comp != nullptr);
+        widget.attach(comp, test_screen());
+        helix::test::set_wire_state(get_printer_state(), PrintJobState::PRINTING);
+        process_lvgl(10);
+        process_lvgl(30);
+
+        CHECK_FALSE(PrintStatusWidgetTestAccess::active_apply_pending(widget));
+        get_printer_state().print_state().set_print_thumbnail("a.gcode", kThumbA);
+        get_printer_state().print_state().set_print_thumbnail("b.gcode", kThumbB);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(PrintStatusWidgetTestAccess::active_apply_pending(widget));
+
+        widget.detach();
+        CHECK_FALSE(PrintStatusWidgetTestAccess::active_apply_pending(widget));
+        process_lvgl(30);
+        after_detach = active_thumb_src(comp);
+    }
+    PrintStatusWidget::destroy_formatter_for_test();
+
+    CHECK(after_detach != kThumbA);
+    CHECK(after_detach != kThumbB);
 }

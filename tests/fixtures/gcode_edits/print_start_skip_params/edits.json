@@ -1,0 +1,14 @@
+{
+  "description": "PRINT_START gains skip parameters, checked against the scanned call",
+  "edits": [
+    {
+      "line_number": 3,
+      "expect_raw_line": "PRINT_START BED=60 EXTRUDER=210",
+      "action": "replace",
+      "args": {
+        "gcode": "PRINT_START BED=60 EXTRUDER=210 SKIP_BED_MESH=1 SKIP_QGL=1",
+        "comment": "HelixScreen: Added skip parameters"
+      }
+    }
+  ]
+}

@@ -14,6 +14,7 @@
 #include "ui_ams_slot.h"
 #include "ui_bypass_spool_widget.h"
 #include "ui_filament_path_canvas.h"
+#include "ui_humidity_drop.h"
 #include "ui_nav_manager.h"
 #include "ui_panel_ams.h"
 #include "ui_panel_ams_overview.h"
@@ -22,6 +23,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/ams_panel_test_access.h"
+#include "../test_helpers/scoped_geometry.h"
 #include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
@@ -139,7 +141,7 @@ class PagingFixture : public LVGLUITestFixture {
         DisplaySettingsManager::instance().set_animations_enabled(false);
         helix::ui::destroy_static_panels();
 
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = lv_obj_create(test_screen());
         panels[static_cast<int>(PanelId::Controls)] = lv_obj_create(test_screen());
         NavigationManager::instance().set_panels(panels);
@@ -313,11 +315,28 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: the panel opens on the overview",
     CHECK(page_count() == 0);
     CHECK(AmsPanelTestAccess::unit_cards(panel()).size() == 12);
     CHECK_FALSE(lv_obj_has_flag(named("unit_cards_row"), LV_OBJ_FLAG_HIDDEN));
+
+    // Each card's drop binds its own unit's humidity subject, not unit 0's.
+    const auto cards = AmsPanelTestAccess::unit_cards(panel());
+    const auto units = AmsPanelTestAccess::unit_card_units(panel());
+    REQUIRE(cards.size() == units.size());
+    for (size_t i = 0; i < cards.size(); ++i) {
+        if (units[i] >= AmsState::kMaxUnits)
+            continue; // past the cap a card binds the always-off placeholders
+        lv_subject_set_int(AmsState::instance().get_env_ind_humidity_subject(units[i]),
+                           (30 + units[i]) * 10);
+    }
+    for (size_t i = 0; i < cards.size(); ++i) {
+        if (units[i] >= AmsState::kMaxUnits)
+            continue;
+        lv_obj_t* drop = lv_obj_find_by_name(cards[i], "env_humidity_drop");
+        REQUIRE(drop != nullptr);
+        CHECK(helix::ui::humidity_drop_value(drop) == (30 + units[i]) * 10);
+    }
     CHECK_FALSE(lv_obj_has_flag(named("system_path_area"), LV_OBJ_FLAG_HIDDEN));
     CHECK(lv_obj_has_flag(named("unit_detail_container"), LV_OBJ_FLAG_HIDDEN));
     CHECK_FALSE(lv_obj_has_flag(named("header_title"), LV_OBJ_FLAG_HIDDEN));
     CHECK(lv_obj_has_flag(named("header_backend_suffix"), LV_OBJ_FLAG_HIDDEN));
-    CHECK(lv_obj_has_flag(named("header_title_unit_view"), LV_OBJ_FLAG_HIDDEN));
 }
 
 TEST_CASE_METHOD(PagingFixture, "Unit view: tapping a card opens that unit's page",
@@ -700,6 +719,9 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: the env chip shows the unit on scree
     lv_subject_t* humidity = lv_xml_get_subject(nullptr, "ams_env_ind_detail_humidity_text");
     REQUIRE(humidity != nullptr);
     CHECK(std::string(lv_subject_get_string(humidity)) == "40%");
+    lv_obj_t* drop = lv_obj_find_by_name(view_chip(), "env_humidity_drop");
+    REQUIRE(drop != nullptr);
+    CHECK(helix::ui::humidity_drop_value(drop) == 400);
     // Tapping the chip opens the environment of this unit.
     CHECK(reinterpret_cast<intptr_t>(lv_obj_get_user_data(view_chip())) == kOwnNumberBase + 10);
 
@@ -733,8 +755,7 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: a change in the system keeps the sho
 
     SECTION("a unit appearing late does not move the page") {
         fleet->specs.push_back({"unit_new", "fps2", false});
-        lv_subject_t* version = AmsState::instance().get_slots_version_subject();
-        lv_subject_set_int(version, lv_subject_get_int(version) + 1);
+        AmsState::instance().bump_slots_version();
         drain();
         process_lvgl(30);
         CHECK(page_count() == 13);
@@ -744,6 +765,7 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: a change in the system keeps the sho
 
     SECTION("a unit inserted ahead of the shown one moves its page, not the screen") {
         fleet->specs.insert(fleet->specs.begin(), {"unit_first", "fps", false});
+        AmsState::instance().sync_from_backend();
         AmsPanelTestAccess::resync(panel());
         CHECK(page_count() == 13);
         CHECK(page_current() == 5);
@@ -752,6 +774,7 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: a change in the system keeps the sho
 
     SECTION("the shown unit going absent clamps to a page that remains") {
         fleet->specs[4].absent = true;
+        AmsState::instance().sync_from_backend();
         AmsPanelTestAccess::resync(panel());
         CHECK(page_count() == 11);
         CHECK(page_current() == 4);
@@ -762,6 +785,7 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: a change in the system keeps the sho
     SECTION("the last unit going absent while shown clamps to the new last page") {
         go_to(11);
         fleet->specs[11].absent = true;
+        AmsState::instance().sync_from_backend();
         AmsPanelTestAccess::resync(panel());
         CHECK(page_count() == 11);
         CHECK(page_current() == 10);
@@ -937,14 +961,12 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: the hub holds still on a unit with f
 }
 
 TEST_CASE_METHOD(PagingFixture,
-                 "Unit view: a small screen's header names the unit instead of the screen",
+                 "Unit view: the header names the unit, its logo and name on one axis",
                  "[ams][pages][panel]") {
     open_at(2);
     lv_subject_t* bp = lv_xml_get_subject(nullptr, "ui_breakpoint");
     REQUIRE(bp != nullptr);
     const int original = lv_subject_get_int(bp);
-    lv_obj_t* title = named("header_title_unit_view");
-    lv_obj_t* colon = named("header_colon");
     lv_obj_t* logo = named("detail_logo");
     lv_obj_t* name = named("detail_unit_name");
 
@@ -953,12 +975,14 @@ TEST_CASE_METHOD(PagingFixture,
         lv_subject_set_int(bp, breakpoint);
         helix::ui::UpdateQueue::instance().drain();
         process_lvgl(20);
-        const bool small = breakpoint < 2;
-        // Below breakpoint 2 the title and the colon give way; the logo and name never do.
-        CHECK(lv_obj_has_flag(title, LV_OBJ_FLAG_HIDDEN) == small);
-        CHECK(lv_obj_has_flag(colon, LV_OBJ_FLAG_HIDDEN) == small);
+        lv_obj_update_layout(lv_obj_get_screen(logo));
         CHECK_FALSE(lv_obj_has_flag(logo, LV_OBJ_FLAG_HIDDEN));
         CHECK_FALSE(lv_obj_has_flag(name, LV_OBJ_FLAG_HIDDEN));
+        lv_area_t logo_box;
+        lv_area_t name_box;
+        lv_obj_get_coords(logo, &logo_box);
+        lv_obj_get_coords(name, &name_box);
+        CHECK(std::abs((logo_box.y1 + logo_box.y2) - (name_box.y1 + name_box.y2)) <= 2);
         CHECK_FALSE(lv_obj_has_flag(named("header_backend_suffix"), LV_OBJ_FLAG_HIDDEN));
         // The overview's own title is not in play.
         CHECK(lv_obj_has_flag(named("header_title"), LV_OBJ_FLAG_HIDDEN));
@@ -1018,6 +1042,22 @@ TEST_CASE_METHOD(LVGLTestFixture, "AmsState: the header's has-logo flag follows 
     ams.set_unit_page_header("Box 7", "");
     CHECK(has_logo() == 0);
     ams.set_unit_page_header("", nullptr);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "AmsState: the header's logo-color flag follows the shown unit",
+                 "[ams][pages][subjects][logo]") {
+    auto& ams = AmsState::instance();
+    ams.init_subjects(true);
+    auto is_color = [&] { return subject_value(ams.get_ams_page_unit_logo_color_subject()); };
+
+    ams.set_unit_page_header("OpenAMS 1", "A:/openams.png", true);
+    CHECK(is_color() == 1);
+    // The next unit's mono mark is tinted again.
+    ams.set_unit_page_header("Box 7", "A:/mono.png", false);
+    CHECK(is_color() == 0);
+    ams.set_unit_page_header("OpenAMS 1", "A:/openams.png", true);
+    ams.set_unit_page_header("", nullptr);
+    CHECK(is_color() == 0);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture,
@@ -1093,8 +1133,23 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: subjects that fire in one tick sync 
 
     SECTION("a sync reads the system info once") {
         auto* fleet = static_cast<PagedFleet*>(ams.get_backend());
+        ams.bump_slots_version();
         const int reads = fleet->info_reads;
         AmsPanelTestAccess::resync(panel());
+        CHECK(fleet->info_reads == reads + 1);
+    }
+
+    SECTION("a backend change reaching the open unit view costs one read") {
+        // AmsState's sync and every observer it wakes share one reading
+        // (prestonbrown/helixscreen#1777).
+        auto* fleet = static_cast<PagedFleet*>(ams.get_backend());
+        fleet->loaded_slot = 3 * kSlotsPerUnit;
+        const int version = lv_subject_get_int(ams.get_slots_version_subject());
+        const int reads = fleet->info_reads;
+        ams.sync_from_backend();
+        settle();
+        REQUIRE(lv_subject_get_int(ams.get_slots_version_subject()) != version);
+        REQUIRE(AmsPanelTestAccess::pages_refreshes(panel()) == base + 1);
         CHECK(fleet->info_reads == reads + 1);
     }
 
@@ -1115,19 +1170,22 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: refresh cost bench", "[.][bench][ams
     auto bump = [](lv_subject_t* s) { lv_subject_set_int(s, lv_subject_get_int(s) + 1); };
 
     for (int i = 0; i < 50; ++i) {
-        bump(ams.get_slots_version_subject());
+        ams.bump_slots_version();
         settle();
     }
+    auto* fleet = static_cast<PagedFleet*>(ams.get_backend());
+    const int reads = fleet->info_reads;
     auto t0 = Clock::now();
     for (int i = 0; i < kRuns; ++i) {
-        bump(ams.get_slots_version_subject());
+        ams.bump_slots_version();
         settle();
     }
     auto t1 = Clock::now();
+    const double reads_per_tick = (fleet->info_reads - reads) / double(kRuns);
     const int before = AmsPanelTestAccess::pages_refreshes(panel());
     for (int i = 0; i < kRuns; ++i) {
         bump(ams.get_units_dryer_version_subject());
-        bump(ams.get_slots_version_subject());
+        ams.bump_slots_version();
         settle();
     }
     auto t2 = Clock::now();
@@ -1135,7 +1193,30 @@ TEST_CASE_METHOD(PagingFixture, "Unit view: refresh cost bench", "[.][bench][ams
     auto us = [](auto a, auto b) {
         return std::chrono::duration<double, std::micro>(b - a).count() / kRuns;
     };
-    WARN("BENCH slots bump: " << us(t0, t1) << " us/tick");
+    WARN("BENCH slots bump: " << us(t0, t1) << " us/tick, backend reads/tick " << reads_per_tick);
     WARN("BENCH dryer+slots bump: " << us(t1, t2) << " us/tick, sync_pages runs/tick "
                                     << (after - before) / double(kRuns));
+}
+
+TEST_CASE_METHOD(PagingFixture, "Unit view in portrait: the page dots float over the canvas",
+                 "[ams][pages][panel][portrait]") {
+    helix::test::ScopedGeometry portrait(272, 480);
+    lv_subject_t* is_portrait = lv_xml_get_subject(nullptr, "ui_is_portrait");
+    REQUIRE(is_portrait != nullptr);
+    REQUIRE(lv_subject_get_int(is_portrait) == 1);
+    open_at(1);
+    lv_obj_update_layout(lv_screen_active());
+    lv_obj_t* dots = named("page_dots");
+    lv_obj_t* canvas = named("detail_path_canvas");
+    REQUIRE_FALSE(lv_obj_has_flag(dots, LV_OBJ_FLAG_HIDDEN));
+    // Floating, so the dots take no row of the unit view's height...
+    CHECK(lv_obj_has_flag(dots, LV_OBJ_FLAG_FLOATING));
+    // ...and they sit inside the canvas's bottom-left quarter.
+    lv_area_t da, ca;
+    lv_obj_get_coords(dots, &da);
+    lv_obj_get_coords(canvas, &ca);
+    CAPTURE(da.x1, da.y1, da.x2, da.y2, ca.x1, ca.y1, ca.x2, ca.y2);
+    CHECK(da.y2 <= ca.y2);
+    CHECK(da.y1 >= (ca.y1 + ca.y2) / 2);
+    CHECK(da.x2 <= (ca.x1 + ca.x2) / 2 + 1);
 }

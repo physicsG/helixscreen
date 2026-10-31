@@ -109,7 +109,7 @@ void SplashScreenManager::check_and_signal() {
     // Wait for discovery completion OR timeout before dismissing splash
     auto elapsed = elapsed_ms();
 
-    if (!m_discovery_complete && elapsed < DISCOVERY_TIMEOUT_MS) {
+    if (!m_discovery_complete && elapsed < kDiscoveryTimeoutMs) {
         return; // Keep splash showing, will retry on next frame
     }
 

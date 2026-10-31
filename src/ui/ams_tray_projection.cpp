@@ -10,12 +10,12 @@ namespace helix::ui::tray {
 
 namespace {
 constexpr float PI = 3.14159265358979f;
-constexpr int HULL_SAMPLES = 181;
+constexpr int kHullSamples = 181;
 // The band is a 7 px stroke blurred with a 5 px Gaussian.
-constexpr float SHEEN_BAND = 7.0f;
-constexpr float SHEEN_SIGMA = 5.0f;
-constexpr int SHEEN_REACH = 12; // rows either side of the centre
-constexpr int SHEEN_MIN_OPA = 2;
+constexpr float kSheenBand = 7.0f;
+constexpr float kSheenSigma = 5.0f;
+constexpr int kSheenReach = 12; // rows either side of the centre
+constexpr int kSheenMinOpa = 2;
 
 float gauss_cdf(float x) {
     return 0.5f * (1.0f + std::erf(x / std::sqrt(2.0f)));
@@ -23,24 +23,24 @@ float gauss_cdf(float x) {
 } // namespace
 
 float box_depth(float spool_size) {
-    return 2.0f * SPOOL_FLANGE_RADIUS * spool_size * (1.0f + BOX_DEPTH_MARGIN);
+    return 2.0f * kSpoolFlangeRadius * spool_size * (1.0f + kBoxDepthMargin);
 }
 
 float box_rise(float depth) {
-    return std::round(DEPTH_RISE * depth);
+    return std::round(kDepthRise * depth);
 }
 
 float spool_pitch(float spool_size) {
     // The spool canvas's own integer geometry: width between flanges plus a
     // flange ellipse each side.
-    const int width = (int)(spool_size * SPOOL_WIDTH);
-    const int flange_rx = (int)((float)(int)(spool_size * SPOOL_FLANGE_RADIUS) * DEPTH_SKEW);
+    const int width = (int)(spool_size * kSpoolWidth);
+    const int flange_rx = (int)((float)(int)(spool_size * kSpoolFlangeRadius) * kDepthSkew);
     const float footprint = (float)(width + 2 * flange_rx);
-    return std::round(footprint + DEPTH_SKEW * box_depth(spool_size) / 2.0f + PITCH_CLEARANCE);
+    return std::round(footprint + kDepthSkew * box_depth(spool_size) / 2.0f + kPitchClearance);
 }
 
 PointF proj(const TrayBox& b, float x, float y, float z) {
-    return {x + DEPTH_SKEW * z, y - b.rise * z / b.depth};
+    return {x + kDepthSkew * z, y - b.rise * z / b.depth};
 }
 
 TrayFaces tray_faces(const TrayBox& b) {
@@ -57,7 +57,7 @@ TrayFaces tray_faces(const TrayBox& b) {
 }
 
 float spool_front_cy(const TrayBox& b, float flange_ry) {
-    return b.fb - flange_ry - SPOOL_FLOOR_GAP;
+    return b.fb - flange_ry - kSpoolFloorGap;
 }
 
 PointF spool_center(const TrayBox& b, float slot_x, float flange_ry) {
@@ -65,7 +65,7 @@ PointF spool_center(const TrayBox& b, float slot_x, float flange_ry) {
 }
 
 float lid_height(const TrayBox& b, float flange_ry) {
-    return b.ft - b.back_extra / 2.0f - spool_front_cy(b, flange_ry) + flange_ry + LID_GAP;
+    return b.ft - b.back_extra / 2.0f - spool_front_cy(b, flange_ry) + flange_ry + kLidGap;
 }
 
 PointF cap_point(const TrayBox& b, float lid_h, float x_end, float theta) {
@@ -87,11 +87,22 @@ float unit_top_y(const TrayBox& b, float lid_h, bool has_lid) {
         return b.ft - b.back_extra - b.rise;
     // Both caps share the profile, so the hull's top is the profile's top.
     float top = b.ft;
-    for (int i = 0; i < HULL_SAMPLES; ++i) {
-        const float theta = PI * (float)i / (float)(HULL_SAMPLES - 1);
+    for (int i = 0; i < kHullSamples; ++i) {
+        const float theta = PI * (float)i / (float)(kHullSamples - 1);
         top = std::min(top, cap_point(b, lid_h, b.fl, theta).y);
     }
     return top;
+}
+
+PointF lane_badge_origin(const TrayBox& b, float lane_x, float lane_half, float badge_w,
+                         float badge_h, float inset) {
+    const float x = std::max(lane_x - badge_w / 2.0f, lane_x + lane_half - badge_w - inset);
+    const float y = std::max(b.ft, b.fb - badge_h - inset);
+    return {x, y};
+}
+
+float pill_left_x(const TrayBox& b) {
+    return proj(b, b.fr, b.ft, b.depth).x;
 }
 
 LidMode lid_mode(const AmsUnit& unit, bool has_physical_tray, bool dryer_supported) {
@@ -107,11 +118,11 @@ LidMode lid_mode(const AmsUnit& unit, bool has_physical_tray, bool dryer_support
 }
 
 float lane_lid_half_width(float slot_spacing, const TrayBox& b) {
-    return slot_spacing / 2.0f - DEPTH_SKEW * b.depth / 4.0f - 1.0f;
+    return slot_spacing / 2.0f - kDepthSkew * b.depth / 4.0f - 1.0f;
 }
 
 int sheen_rows(const TrayBox& b, float lid_h, float alpha, SheenSpan& span, SheenRow* rows) {
-    const float theta = SHEEN_THETA_DEG * PI / 180.0f;
+    const float theta = kSheenThetaDeg * PI / 180.0f;
     const PointF left = cap_point(b, lid_h, b.fl, theta);
     const PointF right = cap_point(b, lid_h, b.fr, theta);
     const float width = right.x - left.x;
@@ -127,12 +138,12 @@ int sheen_rows(const TrayBox& b, float lid_h, float alpha, SheenSpan& span, Shee
         return 0;
 
     int n = 0;
-    for (int k = -SHEEN_REACH; k <= SHEEN_REACH; ++k) {
+    for (int k = -kSheenReach; k <= kSheenReach; ++k) {
         const float d = (float)k;
-        const float cover = gauss_cdf((d + SHEEN_BAND / 2) / SHEEN_SIGMA) -
-                            gauss_cdf((d - SHEEN_BAND / 2) / SHEEN_SIGMA);
+        const float cover = gauss_cdf((d + kSheenBand / 2) / kSheenSigma) -
+                            gauss_cdf((d - kSheenBand / 2) / kSheenSigma);
         const long opa = std::lround(alpha * 255.0f * cover);
-        if (opa < SHEEN_MIN_OPA)
+        if (opa < kSheenMinOpa)
             continue;
         rows[n++] = {left.y + d, (uint8_t)std::min<long>(opa, 255)};
     }

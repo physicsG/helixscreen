@@ -10,7 +10,7 @@
  * throwing error_cb would propagate through libhv's onmessage handler, out of
  * Application::main_loop(), and exit the process with code 134 — appearing to
  * the watchdog as a crash and triggering the recovery dialog after
- * CRASH_LOOP_MAX_CRASHES boots.
+ * kCrashLoopMaxCrashes boots.
  *
  * Both callbacks are now wrapped: any exception is logged and swallowed.
  */

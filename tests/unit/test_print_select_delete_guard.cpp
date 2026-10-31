@@ -127,16 +127,19 @@ TEST_CASE("MoonrakerClientMock server.files.delete_file removes the file and rep
 
     // The directory listing the panel refreshes from no longer reports it.
     bool still_listed = false;
+    bool listing_answered = false;
     mock.send_jsonrpc(
         "server.files.get_directory", json{{"root", "gcodes"}},
         [&](const json& response) {
-            for (const auto& item : response.value("result", json::array())) {
+            listing_answered = response["result"]["files"].is_array();
+            for (const auto& item : response["result"]["files"]) {
                 if (item.value("path", "") == file.name()) {
                     still_listed = true;
                 }
             }
         },
         [](const MoonrakerError&) {});
+    REQUIRE(listing_answered);
     CHECK_FALSE(still_listed);
 
     // A file that is not there is an error, like real Moonraker's 404 — not a

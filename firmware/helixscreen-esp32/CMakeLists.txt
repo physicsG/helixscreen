@@ -19,6 +19,26 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # float, and one reference links all of libstdc++'s facets. No format string here
 # uses {:L}.
 idf_build_set_property(COMPILE_DEFINITIONS "FMT_USE_LOCALE=0" APPEND)
+# __FILE__ is stored in the image (the subject debug registry keeps one per
+# registration); repo-relative, it is the same name in ~7KB less flash.
+get_filename_component(HELIX_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+idf_build_set_property(COMPILE_OPTIONS "-fmacro-prefix-map=${HELIX_REPO_ROOT}/=" APPEND)
+
+# The app version is VERSION.txt, the same file the Makefile reads, so a firmware image
+# reports the version a Linux build of the same commit does. The numeric fields come from
+# the core triple, with any prerelease or build suffix cut off. helixapp and helixnet read
+# these build properties; editing VERSION.txt reconfigures.
+set(HELIX_VERSION_FILE "${CMAKE_CURRENT_LIST_DIR}/../../VERSION.txt")
+file(STRINGS "${HELIX_VERSION_FILE}" HELIX_VERSION LIMIT_COUNT 1)
+string(STRIP "${HELIX_VERSION}" HELIX_VERSION)
+if(NOT HELIX_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    message(FATAL_ERROR "VERSION.txt does not start with MAJOR.MINOR.PATCH: '${HELIX_VERSION}'")
+endif()
+idf_build_set_property(HELIX_VERSION "${HELIX_VERSION}")
+idf_build_set_property(HELIX_VERSION_MAJOR "${CMAKE_MATCH_1}")
+idf_build_set_property(HELIX_VERSION_MINOR "${CMAKE_MATCH_2}")
+idf_build_set_property(HELIX_VERSION_PATCH "${CMAKE_MATCH_3}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${HELIX_VERSION_FILE}")
 project(helixscreen_esp32)
 
 # The ELF's SHA256 beside the image. A crash prints the first nine hex digits of the

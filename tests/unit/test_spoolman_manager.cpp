@@ -13,6 +13,7 @@
 #include "ui_spoolman_overlay.h"
 #include "ui_update_queue.h"
 
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/ad5x_ifs_test_access.h"
 #include "../test_helpers/log_capture.h"
 #include "../test_helpers/registered_backend.h"
@@ -124,27 +125,11 @@ using TA = SpoolmanManagerTestAccess;
 // LVGL Init (once per translation unit, idempotent)
 // ============================================================================
 
-namespace {
-struct LVGLInitializerSpoolman {
-    LVGLInitializerSpoolman() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, nullptr, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-static LVGLInitializerSpoolman lvgl_init;
-} // namespace
-
 // ============================================================================
 // Fixture — reset singleton state between tests (L053)
 // ============================================================================
 
-struct SpoolmanFixture {
+struct SpoolmanFixture : public LVGLTestFixture {
     static bool queue_initialized;
 
     SpoolmanFixture() {
@@ -819,7 +804,7 @@ TEST_CASE_METHOD(SpoolmanLaneFixture,
 
     poll();
 
-    CHECK(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).spoolman.has_value());
+    CHECK(helix::ams::lane_sources(helix::ams::kBypassLaneId).spoolman.has_value());
     auto shown = AmsState::instance().get_external_spool_info();
     REQUIRE(shown.has_value());
     CHECK(shown->remaining_weight_g == 850.0F);
@@ -835,6 +820,36 @@ TEST_CASE_METHOD(SpoolmanLaneFixture,
     shown = AmsState::instance().get_external_spool_info();
     REQUIRE(shown.has_value());
     CHECK(shown->remaining_weight_g == 850.0F);
+}
+
+TEST_CASE_METHOD(SpoolmanLaneFixture,
+                 "SpoolmanManager: a targeted refresh re-reads a linked external spool",
+                 "[spoolman][lane][1632]") {
+    SlotInfo ext;
+    ext.spoolman_id = 1;
+    ext.material = "PLA";
+    ext.remaining_weight_g = 400.0F;
+    ext.total_weight_g = 1000.0F;
+    AmsState::instance().set_external_spool_info(ext);
+    state_polymaker_pla(server_spool(1));
+
+    lv_tick_inc(1000);
+    poll();
+    REQUIRE(AmsState::instance().get_external_spool_info()->remaining_weight_g == 850.0F);
+
+    // The user's weight edit reached the server.
+    server_spool(1).remaining_weight_g = 90.0;
+
+    // The poll that just ran holds the debounce down, so only the targeted
+    // read can carry the server's new number to the lane.
+    SpoolmanManager::instance().refresh_spoolman_weights();
+    drain();
+    REQUIRE(AmsState::instance().get_external_spool_info()->remaining_weight_g == 850.0F);
+
+    SpoolmanManager::refresh_spool(1);
+    drain();
+
+    CHECK(AmsState::instance().get_external_spool_info()->remaining_weight_g == 90.0F);
 }
 
 TEST_CASE_METHOD(SpoolmanLaneFixture,
@@ -872,12 +887,12 @@ TEST_CASE_METHOD(SpoolmanLaneFixture,
     state_polymaker_pla(server_spool(1));
 
     poll();
-    REQUIRE(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).spoolman.has_value());
+    REQUIRE(helix::ams::lane_sources(helix::ams::kBypassLaneId).spoolman.has_value());
 
     remove_server_spool(1);
     poll();
 
-    CHECK_FALSE(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).spoolman.has_value());
+    CHECK_FALSE(helix::ams::lane_sources(helix::ams::kBypassLaneId).spoolman.has_value());
     auto shown = AmsState::instance().get_external_spool_info();
     REQUIRE(shown.has_value());
     // The first poll moved the stored binding to the fetched weight, so the
@@ -903,12 +918,12 @@ TEST_CASE_METHOD(SpoolmanLaneFixture,
     // delete that follows must keep the PETG view, not revert to the stub.
     server_spool(1).material = "PETG";
     poll();
-    REQUIRE(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).spoolman.has_value());
+    REQUIRE(helix::ams::lane_sources(helix::ams::kBypassLaneId).spoolman.has_value());
 
     remove_server_spool(1);
     poll();
 
-    auto sources = helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID);
+    auto sources = helix::ams::lane_sources(helix::ams::kBypassLaneId);
     CHECK_FALSE(sources.spoolman.has_value());
     // A delete is bookkeeping, not a spool change: what the resolved view
     // carried goes back on the lane as remembered, the way a denied slot's
@@ -933,7 +948,7 @@ TEST_CASE_METHOD(SpoolmanLaneFixture,
     state_polymaker_pla(server_spool(1));
 
     poll();
-    REQUIRE(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).spoolman.has_value());
+    REQUIRE(helix::ams::lane_sources(helix::ams::kBypassLaneId).spoolman.has_value());
 
     remove_server_spool(1);
     fetch(); // the mock answers inside the call; the denial is queued, not run
@@ -951,11 +966,11 @@ TEST_CASE_METHOD(SpoolmanLaneFixture,
     s2.material = "ABS";
     s2.initial_weight_g = 750.0;
     s2.remaining_weight_g = 600.0;
-    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::BYPASS_LANE_ID, s2));
+    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::kBypassLaneId, s2));
 
     drain(); // the denial for spool 1 runs now
 
-    auto sources = helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID);
+    auto sources = helix::ams::lane_sources(helix::ams::kBypassLaneId);
     REQUIRE(sources.spoolman.has_value());
     CHECK(sources.spoolman->spoolman_id == 2);
     CHECK_FALSE(sources.remembered.has_value());
@@ -1262,7 +1277,7 @@ TEST_CASE_METHOD(SpoolmanLaneFixture,
     // saves and nothing the Spoolman fetches do.
     MoonrakerAPIMock tool_api(client, get_printer_state());
     struct AppApiScope {
-        IMoonrakerAPI* previous = get_moonraker_api();
+        helix::IMoonrakerAPI* previous = get_moonraker_api();
         ~AppApiScope() {
             set_moonraker_api(previous);
         }

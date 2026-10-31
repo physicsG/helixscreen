@@ -10,8 +10,10 @@
 #include "ui_ams_lane_spool.h"
 #include "ui_ams_slot.h"
 #include "ui_spool_canvas.h"
+#include "ui_swatch.h"
 
 #include "../test_fixtures.h"
+#include "../test_helpers/backend_user_edit.h"
 #include "../ui_test_utils.h"
 #include "ams_backend_mock.h"
 #include "ams_lane_state.h"
@@ -20,6 +22,7 @@
 #include "config.h"
 #include "filament_tube_stroker.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "static_subject_registry.h"
 #include "theme_manager.h"
 #include "ui/ams_drawing_utils.h"
 
@@ -91,7 +94,7 @@ TEST_CASE_METHOD(XMLTestFixture, "ams_lane_spool: a Ghosted lane keeps the spool
 
     lv_obj_t* graphic = part(spool, "spool_graphic");
     CHECK_FALSE(lv_obj_has_flag(graphic, LV_OBJ_FLAG_HIDDEN));
-    CHECK(lv_obj_get_style_opa(graphic, LV_PART_MAIN) == ams_draw::GHOST_OPA);
+    CHECK(lv_obj_get_style_opa(graphic, LV_PART_MAIN) == ams_draw::kGhostOpa);
     CHECK(lv_obj_has_flag(part(spool, "empty_placeholder"), LV_OBJ_FLAG_HIDDEN));
     lv_obj_delete(spool);
 }
@@ -221,9 +224,8 @@ TEST_CASE_METHOD(XMLTestFixture, "ams_slot embeds ams_lane_spool and forwards a 
     lv_obj_delete(slot);
 }
 
-// The flat style's three layers: the filament ring carries the lane color, the
-// outer flange is that color darkened, the hub sits on top.
-TEST_CASE_METHOD(XMLTestFixture, "ams_lane_spool: flat style renders concentric rings",
+// The flat style is the spool canvas seen face-on, painted in the lane color.
+TEST_CASE_METHOD(XMLTestFixture, "ams_lane_spool: flat style draws the spool face-on",
                  "[ams][lane_spool]") {
     helix::Config::get_instance()->set<std::string>("/ams/spool_style", "flat");
     ui_ams_lane_spool_register();
@@ -236,13 +238,38 @@ TEST_CASE_METHOD(XMLTestFixture, "ams_lane_spool: flat style renders concentric 
     REQUIRE(spool != nullptr);
     process_lvgl(20);
 
-    lv_obj_t* ring = part(spool, "spool_graphic");
-    CHECK_FALSE(lv_obj_check_type(ring, &lv_canvas_class)); // rings, not the 3D canvas
-    CHECK(lv_color_eq(lv_obj_get_style_bg_color(ring, LV_PART_MAIN), lv_color_hex(0xFF0000)));
-    CHECK(lv_color_eq(lv_obj_get_style_bg_color(part(spool, "spool_outer"), LV_PART_MAIN),
-                      ams_draw::darken_color(lv_color_hex(0xFF0000), 50)));
-    CHECK(part(spool, "spool_hub") != nullptr);
+    lv_obj_t* graphic = part(spool, "spool_graphic");
+    REQUIRE(lv_obj_check_type(graphic, &lv_canvas_class));
+    CHECK(helix::ui::spool_canvas_get_view(graphic) == helix::ui::SpoolView::Front);
+    CHECK(lv_color_eq(ui_spool_canvas_get_color(graphic), lv_color_hex(0xFF0000)));
+    CHECK(lv_obj_find_by_name(spool, "spool_outer") == nullptr);
+    CHECK(lv_obj_find_by_name(spool, "spool_hub") == nullptr);
     CHECK(lv_obj_has_flag(part(spool, "empty_placeholder"), LV_OBJ_FLAG_HIDDEN));
+
+    lv_obj_delete(spool);
+    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "ams_lane_spool: a flat lane dims when ghosted, hides when empty",
+                 "[ams][lane_spool]") {
+    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "flat");
+    ui_ams_lane_spool_register();
+    AmsState::instance().init_subjects(true);
+    lv_subject_t* lane = AmsState::instance().get_slot_lane_state_subject(0);
+    lv_subject_set_int(lane, static_cast<int>(helix::ui::LaneState::Ghosted));
+
+    lv_obj_t* spool = make_spool(test_screen(), 0);
+    REQUIRE(spool != nullptr);
+    process_lvgl(20);
+
+    lv_obj_t* graphic = part(spool, "spool_graphic");
+    CHECK_FALSE(lv_obj_has_flag(graphic, LV_OBJ_FLAG_HIDDEN));
+    CHECK(lv_obj_get_style_opa(graphic, LV_PART_MAIN) == ams_draw::kGhostOpa);
+
+    lv_subject_set_int(lane, static_cast<int>(helix::ui::LaneState::Empty));
+    process_lvgl(20);
+    CHECK(lv_obj_has_flag(graphic, LV_OBJ_FLAG_HIDDEN));
+    CHECK_FALSE(lv_obj_has_flag(part(spool, "empty_placeholder"), LV_OBJ_FLAG_HIDDEN));
 
     lv_obj_delete(spool);
     helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
@@ -279,7 +306,7 @@ TEST_CASE_METHOD(XMLTestFixture, "ams_lane_spool: set_size rebuilds only on a re
     process_lvgl(20);
     lv_obj_t* g3 = part(spool, "spool_graphic");
     CHECK(g3 != g2); // style flip -> rebuilt even at the same size
-    CHECK_FALSE(lv_obj_check_type(g3, &lv_canvas_class));
+    CHECK(helix::ui::spool_canvas_get_view(g3) == helix::ui::SpoolView::Front);
 
     lv_obj_delete(spool);
     helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
@@ -438,5 +465,92 @@ TEST_CASE_METHOD(XMLTestFixture, "ams_lane_spool: a running pulse is never resta
     helix::ui::ams_lane_spool_set_highlight(spool, helix::ui::SpoolHighlight::Steady);
     CHECK(lv_anim_get(glow, nullptr) == nullptr);
     CHECK(lv_obj_get_style_opa(glow, LV_PART_MAIN) == LV_OPA_COVER);
+    lv_obj_delete(spool);
+}
+
+TEST_CASE_METHOD(XMLTestFixture,
+                 "ams_lane_spool: a finish or multi-colour change under the same colour repaints",
+                 "[ams][lane_spool][swatch]") {
+    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "flat");
+    ui_ams_lane_spool_register();
+    auto& ams = AmsState::instance();
+    ams.init_subjects(true);
+    auto mock = std::make_unique<AmsBackendMock>();
+    auto* backend = mock.get();
+    backend->set_operation_delay(0);
+    ams.set_backend(std::move(mock));
+    backend->start();
+
+    SlotInfo slot = backend->get_slot_info(0);
+    slot.color_rgb = 0xFF0000;
+    slot.material = "PLA";
+    slot.product_name.clear();
+    slot.spool_name.clear();
+    slot.multi_color_hexes.clear();
+    helix::test::apply_edit(*backend, 0, slot);
+    ams.sync_from_backend();
+    lv_subject_set_int(ams.get_slot_lane_state_subject(0),
+                       static_cast<int>(helix::ui::LaneState::Present));
+
+    lv_obj_t* spool = make_spool(test_screen(), 0);
+    REQUIRE(spool != nullptr);
+    process_lvgl(20);
+    lv_obj_t* canvas = part(spool, "spool_graphic");
+    REQUIRE(helix::ui::spool_canvas_get_view(canvas) == helix::ui::SpoolView::Front);
+    const lv_draw_buf_t* buf = lv_canvas_get_draw_buf(canvas);
+    REQUIRE(buf != nullptr);
+    auto pixels = [buf] { return std::vector<uint8_t>(buf->data, buf->data + buf->data_size); };
+    const std::vector<uint8_t> plain = pixels();
+
+    // Only the finish changes; the colour subject does not.
+    slot.material = "PLA Silk";
+    helix::test::apply_edit(*backend, 0, slot);
+    ams.sync_from_backend();
+    process_lvgl(20);
+    CHECK(pixels() != plain);
+
+    // Only the multi-colour list changes: the lower-right slot (30 degrees,
+    // a quarter of the vent geometry's size out) turns to the second colour.
+    slot.multi_color_hexes = "#FF0000,#0000FF";
+    helix::test::apply_edit(*backend, 0, slot);
+    ams.sync_from_backend();
+    process_lvgl(20);
+    const float c = static_cast<float>(buf->header.w) / 2.0f;
+    const float r = 0.25f * (c - 1.0f) / 0.42f;
+    const int32_t x = static_cast<int32_t>(c + r * 0.866f);
+    const int32_t y = static_cast<int32_t>(c + r * 0.5f);
+    const lv_color32_t lower_right =
+        reinterpret_cast<const lv_color32_t*>(buf->data + y * buf->header.stride)[x];
+    CHECK(lower_right.blue > lower_right.red + 40);
+
+    lv_obj_delete(spool);
+    backend->stop();
+    ams.clear_backends();
+    helix::Config::get_instance()->set<std::string>("/ams/spool_style", "3d");
+}
+
+TEST_CASE_METHOD(XMLTestFixture,
+                 "ams_lane_spool: a printer switch's cleanup leaves no observer on a live subject",
+                 "[ams][lane_spool]") {
+    ui_ams_lane_spool_register();
+    AmsState::instance().init_subjects(true);
+    lv_subject_t* theme = theme_manager_get_changed_subject();
+    lv_subject_t* lane_state = AmsState::instance().get_slot_lane_state_subject(0);
+    REQUIRE(theme != nullptr);
+    const uint32_t theme_before = lv_ll_get_len(&theme->subs_ll);
+    const uint32_t lane_before = lv_ll_get_len(&lane_state->subs_ll);
+
+    lv_obj_t* spool = make_spool(test_screen(), 0);
+    REQUIRE(spool != nullptr);
+    process_lvgl(20);
+    REQUIRE(lv_ll_get_len(&theme->subs_ll) == theme_before + 1);
+    REQUIRE(lv_ll_get_len(&lane_state->subs_ll) > lane_before);
+
+    // Theme and AmsState subjects both outlive this cleanup here, as the theme
+    // subject does across every switch.
+    REQUIRE(StaticSubjectRegistry::instance().deinit_one(
+        "AmsLaneSpoolWidgets", StaticSubjectRegistry::Scope::PrinterSwitch));
+    CHECK(lv_ll_get_len(&theme->subs_ll) == theme_before);
+    CHECK(lv_ll_get_len(&lane_state->subs_ll) == lane_before);
     lv_obj_delete(spool);
 }

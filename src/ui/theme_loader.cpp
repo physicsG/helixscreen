@@ -8,16 +8,20 @@
 #include "exception_policy.h"
 #include "helix_fs.h"
 #include "json_utils.h"
+#include "sort_small.h"
+#include "system/sha256_util.h"
 #include "text_io.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <sys/stat.h>
 
 #include "hv/json.hpp"
@@ -124,7 +128,7 @@ ThemeModeSupport ThemeData::get_mode_support() const {
 ThemeData get_builtin_fallback_theme() {
     ThemeData theme;
     theme.name = "HelixScreen";
-    theme.filename = DEFAULT_THEME;
+    theme.filename = kDefaultTheme;
 
     // Mirrors assets/config/themes/defaults/helixscreen.json. Kept in sync by
     // hand: this copy is what runs when that file cannot be read at all.
@@ -466,6 +470,45 @@ std::optional<ThemeData> reset_theme_to_default(const std::string& filename) {
     return load_theme_from_file(defaults_path);
 }
 
+namespace {
+
+// SHA-256 of every config/themes/nord.json a release put into the user layer.
+// Those bytes are nobody's edit; the file only shadows the shipped default.
+constexpr std::array<std::string_view, 10> kShippedNordOverrides = {
+    "225cbd74a58793f15b8dc01b8ce7aa239c1dbf03a61f411249c2559f71670124",
+    "42474ef18f9c606e77a7622ca4bec346da0bb54c3d48db76e76226dfd7a3692b",
+    "535124b7c2fe3e9bd727a0de79c0686a1a50f7a14f830248ed1cf2a4c9f6c1c7",
+    "5cdcaf9183a42d09b3c7a13e284fa45836b8d8e2856a6967395e579861286205",
+    "66a0a1be7501cc3f9a17ef18a66f23b27a5f610dc398768e4ea4bb33df80c4f1",
+    "af4568955c4016a47697b92010fc7de578a9d06dacfd86e928cbb5840b2d0e40",
+    "e47e13c0fe7655a322838f31d2edf1f881b11e90431d5ce298f59834a23622d6",
+    "e75c2cea3c64e89b4b1e0aad661e9129eff3a19d7cc9343c793fbbb2fe5379f5",
+    "eb7350023524381332fabcd05756ad4fed4ed0c9f41f7f74e4b31833210de1cb",
+    "f03ddc8bd9494f56a91ea51d8358addd675b2c96d4008672037289f3c4bccbbe",
+};
+
+} // namespace
+
+bool remove_shipped_theme_override(const std::string& themes_dir) {
+    const std::string path = themes_dir + "/nord.json";
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        return false;
+    }
+    const std::string digest = compute_file_sha256(path);
+    if (std::find(kShippedNordOverrides.begin(), kShippedNordOverrides.end(), digest) ==
+        kShippedNordOverrides.end()) {
+        return false;
+    }
+    if (std::remove(path.c_str()) != 0) {
+        spdlog::warn("[ThemeLoader] Failed to remove shipped theme copy {}: {}", path,
+                     strerror(errno));
+        return false;
+    }
+    spdlog::info("[ThemeLoader] Removed shipped copy {} so the default Nord applies", path);
+    return true;
+}
+
 bool ensure_themes_directory(const std::string& themes_dir) {
     struct stat st;
 
@@ -496,6 +539,7 @@ bool ensure_themes_directory(const std::string& themes_dir) {
     // directory, which discover_themes() scans alongside this one; a file written
     // here would be a user override and would shadow the shipped theme of the
     // same name forever, freezing it at the version current when it was written.
+    remove_shipped_theme_override(themes_dir);
 
     return true;
 }
@@ -559,7 +603,7 @@ std::vector<ThemeInfo> discover_themes(const std::string& themes_dir) {
     scan_directory(defaults_dir, true);
 
     // Sort alphabetically by display name
-    std::sort(themes.begin(), themes.end(), [](const ThemeInfo& a, const ThemeInfo& b) {
+    helix::sort_small(themes.begin(), themes.end(), [](const ThemeInfo& a, const ThemeInfo& b) {
         return a.display_name < b.display_name;
     });
 

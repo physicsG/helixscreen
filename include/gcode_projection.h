@@ -36,16 +36,16 @@ namespace projection {
 // new_x = -old_y, new_y = old_x
 
 // Horizontal rotation: -45° (view from front-right corner)
-constexpr float COS_H = 0.7071f;  // cos(45°)
-constexpr float SIN_H = -0.7071f; // sin(-45°)
+constexpr float kCosH = 0.7071f;  // cos(45°)
+constexpr float kSinH = -0.7071f; // sin(-45°)
 
 // Elevation angle: 45° looking down (matches OrcaSlicer thumbnail camera)
-constexpr float COS_E = 0.7071f; // cos(45°)
-constexpr float SIN_E = 0.7071f; // sin(45°)
+constexpr float kCosE = 0.7071f; // cos(45°)
+constexpr float kSinE = 0.7071f; // sin(45°)
 
 // Isometric constants
-constexpr float ISO_ANGLE = 0.7071f; // cos(45°)
-constexpr float ISO_Y_SCALE = 0.5f;  // Y compression factor
+constexpr float kIsoAngle = 0.7071f; // cos(45°)
+constexpr float kIsoYScale = 0.5f;   // Y compression factor
 
 /// How much taller than wide a model must project before it is allowed to run
 /// under a bottom-anchored UI strip instead of being shrunk to clear it.
@@ -56,7 +56,7 @@ constexpr float ISO_Y_SCALE = 0.5f;  // Y compression factor
 /// At 2.0 a cube, a cylinder and a flat plate (h/w 1.21, 1.21, 0.76 projected)
 /// all stay fully visible, while a 10x10x50 post (3.21) keeps its size and
 /// accepts the overlap.
-constexpr float ELONGATION_LIMIT = 2.0f;
+constexpr float kElongationLimit = 2.0f;
 
 /// Thumbnail-parity framing constants: how a render is placed so it lands
 /// where the slicer thumbnail it replaces was sitting.
@@ -71,14 +71,14 @@ namespace thumbnail_parity {
 /// Vertical lift of the frame, as a fraction of canvas height. Matches the
 /// #preview_offset_y design token in ui_xml/globals.xml (-12%) that shifts the
 /// thumbnail up over the metadata strip — keep the two in sync.
-constexpr float LIFT = 0.12f;
+constexpr float kLift = 0.12f;
 
 /// Padding around the model inside the frame: limiting-axis fill
 /// 1 / (1 + 2*PADDING) = 78.1%, against the measured 72-81%.
 constexpr float PADDING = 0.14f;
 
 /// Where the model's vertical centre sits in the frame (0 = frame top).
-constexpr float CENTER_Y = 0.55f;
+constexpr float kCenterY = 0.55f;
 
 } // namespace thumbnail_parity
 
@@ -87,12 +87,12 @@ constexpr float CENTER_Y = 0.55f;
 /// How compute_auto_fit() frames a model on its canvas.
 enum class FitFraming {
     /// Fit the whole canvas. `bottom_occlusion` shrinks squat models to clear
-    /// a bottom UI strip; ones taller than ELONGATION_LIMIT x their width keep
+    /// a bottom UI strip; ones taller than kElongationLimit x their width keep
     /// the full height and run underneath it instead.
     STANDARD,
     /// Frame the model the way the slicer thumbnail beside it is framed: the
     /// square of the canvas's short side, centred, lifted by
-    /// projection::thumbnail_parity::LIFT, model centre at CENTER_Y of the
+    /// projection::thumbnail_parity::kLift, model centre at kCenterY of the
     /// frame. `padding` and `bottom_occlusion` are ignored — matching the
     /// thumbnail's size and placement is the whole point, and the thumbnail
     /// draws over the strip rather than clearing it.
@@ -147,7 +147,7 @@ struct AutoFitResult {
     /// from the same occlusion the scale above already accounts for, so the two
     /// can never disagree.
     float content_offset_y_percent = 0.0f;
-    /// True when the model projected taller than ELONGATION_LIMIT x its width
+    /// True when the model projected taller than kElongationLimit x its width
     /// and was therefore fitted to the full canvas rather than the clear area.
     bool elongated = false;
 };
@@ -180,7 +180,7 @@ float compute_content_offset_y(float content_height_px, int canvas_height_px,
                                float bottom_occlusion);
 
 /// Vertical shift, as a fraction of canvas height, for THUMBNAIL_PARITY
-/// framing: the model's centre pinned to thumbnail_parity::CENTER_Y of the
+/// framing: the model's centre pinned to thumbnail_parity::kCenterY of the
 /// lifted square, whatever the model fills — the measured thumbnails place the
 /// model centre there regardless of its height, so neither the content height
 /// nor the occlusion is an input. The 2D path applies this through
@@ -206,7 +206,7 @@ float parity_content_offset_y(int canvas_width_px, int canvas_height_px);
 ///                      padding
 /// @param bottom_occlusion Fraction of canvas height covered by UI at the bottom
 ///                      (0..1). A squat model is scaled to sit entirely above it;
-///                      one taller than ELONGATION_LIMIT x its width keeps the
+///                      one taller than kElongationLimit x its width keeps the
 ///                      full canvas and runs underneath instead. 0 disables both.
 ///                      Ignored in THUMBNAIL_PARITY.
 /// @param framing       STANDARD (default) or THUMBNAIL_PARITY
@@ -224,11 +224,11 @@ AutoFitResult compute_auto_fit(const AABB& raw_bb, ViewMode view_mode, int canva
 /// Bottom of model = darker, top = brighter. Back = slightly darker than front.
 namespace depth_shading {
 
-constexpr float MIN_BRIGHTNESS = 0.4f;        ///< Brightness at bottom (Z min)
-constexpr float BRIGHTNESS_RANGE = 0.6f;      ///< Added at top (total = 0.4 + 0.6 = 1.0)
-constexpr float BACK_FADE_MIN = 0.85f;        ///< Brightness at back (Y max)
-constexpr float BACK_FADE_RANGE = 0.15f;      ///< Added at front (total = 0.85 + 0.15 = 1.0)
-constexpr float FULL_GRADIENT_HEIGHT = 50.0f; ///< Objects shorter than this get compressed gradient
+constexpr float kMinBrightness = 0.4f;       ///< Brightness at bottom (Z min)
+constexpr float kBrightnessRange = 0.6f;     ///< Added at top (total = 0.4 + 0.6 = 1.0)
+constexpr float kBackFadeMin = 0.85f;        ///< Brightness at back (Y max)
+constexpr float kBackFadeRange = 0.15f;      ///< Added at front (total = 0.85 + 0.15 = 1.0)
+constexpr float kFullGradientHeight = 50.0f; ///< Objects shorter than this get compressed gradient
 
 } // namespace depth_shading
 
@@ -249,9 +249,9 @@ constexpr float FULL_GRADIENT_HEIGHT = 50.0f; ///< Objects shorter than this get
 /// multiply. Chosen so a black filament gains real form without a light one
 /// changing perceptibly.
 namespace depth_shading {
-constexpr float LIFT_STRENGTH = 0.40f;
-/// Bottom of compute_depth_brightness()'s range: MIN_BRIGHTNESS * BACK_FADE_MIN.
-constexpr float BRIGHTNESS_FLOOR = MIN_BRIGHTNESS * BACK_FADE_MIN;
+constexpr float kLiftStrength = 0.40f;
+/// Bottom of compute_depth_brightness()'s range: kMinBrightness * kBackFadeMin.
+constexpr float kBrightnessFloor = kMinBrightness * kBackFadeMin;
 } // namespace depth_shading
 
 /**
@@ -289,7 +289,7 @@ constexpr float BRIGHTNESS_FLOOR = MIN_BRIGHTNESS * BACK_FADE_MIN;
  * levels it had left. Proportional-to-headroom has no such trade.
  */
 inline uint8_t apply_shading(uint8_t c, float brightness) {
-    constexpr float floor_b = depth_shading::BRIGHTNESS_FLOOR;
+    constexpr float floor_b = depth_shading::kBrightnessFloor;
     float norm = (brightness - floor_b) / (1.0f - floor_b);
     if (norm < 0.0f) {
         norm = 0.0f;
@@ -299,7 +299,7 @@ inline uint8_t apply_shading(uint8_t c, float brightness) {
     }
 
     const float base = static_cast<float>(c);
-    const float lift = (255.0f - base) * norm * depth_shading::LIFT_STRENGTH;
+    const float lift = (255.0f - base) * norm * depth_shading::kLiftStrength;
     float out = base * brightness + lift;
 
     if (out < 0.0f) {
@@ -317,7 +317,7 @@ inline float compute_depth_brightness(float avg_z, float z_min, float z_max, flo
 
     // Z-height: bottom=darker, top=brighter.
     // Short objects (<50mm) get a compressed gradient so they look more uniform.
-    float brightness = depth_shading::MIN_BRIGHTNESS;
+    float brightness = depth_shading::kMinBrightness;
     float z_range = z_max - z_min;
     if (z_range > EPSILON) {
         float norm_z = (avg_z - z_min) / z_range;
@@ -325,12 +325,12 @@ inline float compute_depth_brightness(float avg_z, float z_min, float z_max, flo
             norm_z = 0.0f;
         if (norm_z > 1.0f)
             norm_z = 1.0f;
-        float height_scale = (z_range < depth_shading::FULL_GRADIENT_HEIGHT)
-                                 ? z_range / depth_shading::FULL_GRADIENT_HEIGHT
+        float height_scale = (z_range < depth_shading::kFullGradientHeight)
+                                 ? z_range / depth_shading::kFullGradientHeight
                                  : 1.0f;
-        float effective_range = depth_shading::BRIGHTNESS_RANGE * height_scale;
+        float effective_range = depth_shading::kBrightnessRange * height_scale;
         float floor =
-            depth_shading::MIN_BRIGHTNESS + depth_shading::BRIGHTNESS_RANGE - effective_range;
+            depth_shading::kMinBrightness + depth_shading::kBrightnessRange - effective_range;
         brightness = floor + effective_range * norm_z;
     }
 
@@ -342,8 +342,7 @@ inline float compute_depth_brightness(float avg_z, float z_min, float z_max, flo
             norm_y = 0.0f;
         if (norm_y > 1.0f)
             norm_y = 1.0f;
-        brightness *=
-            depth_shading::BACK_FADE_MIN + depth_shading::BACK_FADE_RANGE * (1.0f - norm_y);
+        brightness *= depth_shading::kBackFadeMin + depth_shading::kBackFadeRange * (1.0f - norm_y);
     }
 
     return brightness;
@@ -360,7 +359,7 @@ inline float compute_depth_brightness(float avg_z, float z_min, float z_max, flo
  * and so was unreachable from anything else. Three copies of the guard existed
  * with three different predicates.
  */
-inline constexpr float CLIP_SPACE_W_EPSILON = 0.0001f;
+inline constexpr float kClipSpaceWEpsilon = 0.0001f;
 
 /**
  * @brief Project a world point through an MVP to screen pixels.
@@ -380,7 +379,7 @@ inline constexpr float CLIP_SPACE_W_EPSILON = 0.0001f;
 inline std::optional<glm::vec2> project_clip_to_screen(const glm::mat4& mvp, const glm::vec3& world,
                                                        int viewport_width, int viewport_height) {
     const glm::vec4 clip = mvp * glm::vec4(world, 1.0f);
-    if (clip.w <= CLIP_SPACE_W_EPSILON) {
+    if (clip.w <= kClipSpaceWEpsilon) {
         return std::nullopt;
     }
     const glm::vec3 ndc = glm::vec3(clip) / clip.w;
@@ -436,19 +435,27 @@ inline ScreenBounds project_aabb_to_screen(const glm::mat4& mvp, const AABB& box
 }
 
 /**
- * @brief Distance from point `p` to the segment `a`-`b`, all in screen pixels.
+ * @brief The point on segment `a`-`b` nearest `p`.
  *
- * Shared by the 2D picker and the GLES picker. A degenerate segment
- * (a == b) returns the distance to that point rather than dividing by zero.
+ * Units are the caller's: screen pixels for the pickers, millimetres for
+ * crease shading. A degenerate segment (a == b) returns `a` rather than
+ * dividing by zero.
  */
-inline float point_segment_distance(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b) {
+inline glm::vec2 closest_point_on_segment(const glm::vec2& p, const glm::vec2& a,
+                                          const glm::vec2& b) {
     const glm::vec2 v = b - a;
     const float len_sq = glm::dot(v, v);
     if (len_sq <= 0.0f) {
-        return glm::length(p - a);
+        return a;
     }
     const float t = glm::clamp(glm::dot(p - a, v) / len_sq, 0.0f, 1.0f);
-    return glm::length(p - (a + t * v));
+    return a + t * v;
+}
+
+/// Distance from point `p` to the segment `a`-`b`. Shared by the 2D picker and
+/// the GLES picker.
+inline float point_segment_distance(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b) {
+    return glm::length(p - closest_point_on_segment(p, a, b));
 }
 
 } // namespace helix::gcode

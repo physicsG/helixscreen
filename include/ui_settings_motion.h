@@ -25,14 +25,16 @@
 #include "subject_managed_panel.h"
 
 // Forward declarations
-class IMoonrakerAPI; // NAMESPACE_OK: matches the global-namespace interface in i_moonraker_api.h
+namespace helix {
+class IMoonrakerAPI;
+}
 
 namespace helix::settings {
 
 /**
  * @brief One row per control. The value doubles as the user_data on each
  * setting_value_field in motion_settings_overlay.xml, so the order here
- * and the numbers there must agree. FIELD_SPECS in the .cpp is indexed by
+ * and the numbers there must agree. kFieldSpecs in the .cpp is indexed by
  * the same value.
  */
 enum class Field : int {
@@ -150,8 +152,8 @@ class MotionSettingsOverlay : public OverlayBase {
     /// Debounced SettingsManager write for slider drags: a drag fires
     /// value_changed per pixel and each write persists to disk. Indexed
     /// [XY, Z]; 0 means nothing pending (the settings clamp floor is 60).
-    static constexpr uint32_t PERSIST_DEBOUNCE_MS = 250;
-    helix::ui::CoalescedTimer persist_timer_{PERSIST_DEBOUNCE_MS};
+    static constexpr uint32_t kPersistDebounceMs = 250;
+    helix::ui::CoalescedTimer persist_timer_{kPersistDebounceMs};
     int pending_mm_min_[2]{0, 0};
 
     //
@@ -160,7 +162,7 @@ class MotionSettingsOverlay : public OverlayBase {
 
     SubjectManager subjects_;
 
-    /// One string display subject per Field, named in SUBJECT_NAMES.
+    /// One string display subject per Field, named in kSubjectNames.
     lv_subject_t display_subjects_[static_cast<size_t>(Field::Count)]{};
     char display_buffers_[static_cast<size_t>(Field::Count)][24]{};
 
@@ -187,8 +189,8 @@ void show_motion_settings_overlay();
 /// SettingsManager's step-distance clamp range, in mm. It clamps with inline
 /// literals and exposes no accessor, so this is the one spelling the keypad
 /// rules below see; keep the two in step.
-constexpr float JOG_DISTANCE_MIN_MM = 0.01f;
-constexpr float JOG_DISTANCE_MAX_MM = 200.0f;
+constexpr float kJogDistanceMinMm = 0.01f;
+constexpr float kJogDistanceMaxMm = 200.0f;
 
 /// Min/max for one row's numeric keypad.
 struct KeypadBounds {
@@ -206,11 +208,11 @@ inline KeypadBounds keypad_bounds(Field field, float inner_mm, float outer_mm) {
     case Field::FineOuter:
     case Field::CoarseOuter:
     case Field::TurboOuter:
-        return {inner_mm, JOG_DISTANCE_MAX_MM};
+        return {inner_mm, kJogDistanceMaxMm};
     case Field::FineInner:
     case Field::CoarseInner:
     case Field::TurboInner:
-        return {JOG_DISTANCE_MIN_MM, outer_mm};
+        return {kJogDistanceMinMm, outer_mm};
     default: // speed rows: passthrough of the slider range
         return {inner_mm, outer_mm};
     }

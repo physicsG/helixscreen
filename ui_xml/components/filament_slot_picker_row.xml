@@ -2,29 +2,54 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <!-- One row in the filament slot picker popup: color swatch, slot label,
-       optional material-mismatch warning. Colors, label text, warn
-       visibility, and selected-state styling are set from C++. Sizes,
-       padding, fonts, and radius live here so the row can be tuned without
-       rebuilding. -->
-  <view name="row"
-        extends="lv_obj" width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
-        style_pad_all="#space_md" style_pad_gap="#space_md" style_radius="#space_sm" scrollable="false" clickable="true">
+  <!-- One slot row in the filament slot picker, bound to the
+       filament_picker_row_<index>_* subjects FilamentSlotPicker publishes: the
+       slot's colour (or a warning ring when it is empty), its label, its
+       material, a muted reason when the picker ranks the rows, and a warning
+       when the material differs from the file's. A tap reports the row index
+       through filament_picker_row_cb. -->
+  <api>
+    <prop name="index" type="string" default="0"/>
+  </api>
+  <styles>
+    <!-- An empty bay stays selectable (mapping a tool to a bay about to be
+         loaded is legitimate) but reads as clearly not ready. -->
+    <style name="row_empty" opa="30%"/>
+  </styles>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="#space_md"
+        style_pad_gap="#space_md" style_radius="#space_sm" scrollable="false" clickable="true">
+    <style name="styles.picker_row_base"/>
     <style name="styles.press_wash" selector="pressed"/>
-    <!-- Color swatch (filled for a mapped slot, warning-bordered transparent
-         for an empty slot — handled by C++ post-config). -->
-    <lv_obj name="swatch"
-            width="#space_2xl" height="#space_2xl" style_radius="9999" style_bg_opa="255" style_bg_color="#text_muted"
-            style_border_width="1" style_border_color="#text_muted" style_border_opa="30" style_pad_all="0"
-            scrollable="false" clickable="false" event_bubble="true"/>
-    <!-- Slot description ("Turtle 1 · Slot 2: PLA"). -->
-    <lv_label name="slot_label"
-              flex_grow="1" text="" long_mode="dots" style_text_font="#font_body" style_text_color="#text"
-              clickable="false" event_bubble="true"/>
-    <!-- Material-mismatch warning (shown only when the slot's material
-         differs from the file's expected material). -->
+    <bind_style_if_eq name="styles.picker_row_selected" subject="filament_picker_row_${index}_selected" ref_value="1"/>
+    <bind_style_if_eq name="row_empty" subject="filament_picker_row_${index}_empty" ref_value="1"/>
+    <color_dot name="swatch"
+               size="#space_2xl" color_subject="filament_picker_row_${index}_color"
+               colors_subject="filament_picker_row_${index}_colors" finish_subject="filament_picker_row_${index}_finish">
+      <bind_flag_if_eq subject="filament_picker_row_${index}_empty" flag="hidden" ref_value="1"/>
+    </color_dot>
+    <lv_obj name="empty_ring"
+            width="#space_2xl" height="#space_2xl" style_radius="9999" style_bg_opa="0" style_border_width="2"
+            style_border_color="#warning" style_border_opa="255" scrollable="false" clickable="false"
+            event_bubble="true">
+      <bind_flag_if_eq subject="filament_picker_row_${index}_empty" flag="hidden" ref_value="0"/>
+    </lv_obj>
+    <!-- The position ("Lane 3", "Turtle 2 · Lane 1"). -->
+    <text_body name="slot_label"
+               flex_grow="1" bind_text="filament_picker_row_${index}_label" long_mode="dots" clickable="false"
+               event_bubble="true"/>
+    <text_body name="slot_material"
+               bind_text="filament_picker_row_${index}_material" clickable="false" event_bubble="true"/>
+    <text_small name="slot_reason"
+                bind_text="filament_picker_row_${index}_reason" style_text_color="#text_muted" clickable="false"
+                event_bubble="true">
+      <bind_flag_if_eq subject="filament_picker_has_reasons" flag="hidden" ref_value="0"/>
+    </text_small>
     <lv_label name="warn_icon"
-              hidden="true" text="#icon_triangle_exclamation" style_text_font="mdi_icons_16" style_text_color="#warning"
-              clickable="false" event_bubble="true"/>
+              text="#icon_triangle_exclamation" style_text_font="mdi_icons_16" style_text_color="#warning"
+              clickable="false" event_bubble="true">
+      <bind_flag_if_eq subject="filament_picker_row_${index}_warn" flag="hidden" ref_value="0"/>
+    </lv_label>
+    <event_cb trigger="clicked" callback="filament_picker_row_cb" user_data="$index"/>
   </view>
 </component>

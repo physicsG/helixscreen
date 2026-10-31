@@ -24,7 +24,7 @@ namespace helix::ui {
  * Similar to PrintSelectCardView but for tabular list display.
  *
  * ## Key Features:
- * - Fixed widget pool (POOL_SIZE rows created once)
+ * - Fixed widget pool (kPoolSize rows created once)
  * - Spacer-based virtualization for smooth scrolling
  * - Per-row subjects for declarative text binding
  * - Staggered entrance animation on population
@@ -90,12 +90,12 @@ class PrintSelectListView : public ContainerDeleteNet {
 
     // === Configuration ===
 
-    static constexpr int POOL_SIZE = 40;                 ///< Fixed pool of list row widgets
-    static constexpr int BUFFER_ROWS = 2;                ///< Extra rows above/below viewport
-    static constexpr int32_t ENTRANCE_DURATION_MS = 150; ///< Animation duration for row entrance
-    static constexpr int32_t STAGGER_DELAY_MS = 40;      ///< Delay between row animations
-    static constexpr int32_t SLIDE_OFFSET_Y = 15;        ///< Initial Y offset for slide animation
-    static constexpr size_t MAX_ANIMATED_ROWS = 10;      ///< Max rows to animate at once
+    static constexpr int kPoolSize = 40;                ///< Fixed pool of list row widgets
+    static constexpr int kBufferRows = 2;               ///< Extra rows above/below viewport
+    static constexpr int32_t kEntranceDurationMs = 150; ///< Animation duration for row entrance
+    static constexpr int32_t kStaggerDelayMs = 40;      ///< Delay between row animations
+    static constexpr int32_t kSlideOffsetY = 15;        ///< Initial Y offset for slide animation
+    static constexpr size_t kMaxAnimatedRows = 10;      ///< Max rows to animate at once
 
     // === Setup ===
 

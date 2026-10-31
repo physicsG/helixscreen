@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<component>
+  <consts>
+    <px name="consts-demo__card_w_micro" value="101"/>
+    <px name="consts-demo__card_w_tiny" value="102"/>
+    <px name="consts-demo__card_w_small" value="103"/>
+    <px name="consts-demo__card_w_medium" value="104"/>
+    <px name="consts-demo__card_w_large" value="105"/>
+    <px name="consts-demo__card_w_xlarge" value="106"/>
+    <px name="consts-demo__card_w_xxlarge" value="107"/>
+    <px name="consts-demo__gap" value="7"/>
+  </consts>
+  <view extends="lv_obj"/>
+</component>

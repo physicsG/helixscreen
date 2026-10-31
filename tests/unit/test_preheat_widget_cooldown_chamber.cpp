@@ -48,7 +48,7 @@ struct K2PreheatCooldownHarness {
     bool had_config_dir_ = false;
     bool had_data_dir_ = false;
     helix::Config* saved_instance_ = nullptr;
-    IMoonrakerAPI* saved_api_ = nullptr;
+    helix::IMoonrakerAPI* saved_api_ = nullptr;
 
     MoonrakerClientMock client{MoonrakerClientMock::PrinterType::VORON_24};
     MoonrakerAPI api{client, get_printer_state()};

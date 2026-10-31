@@ -59,36 +59,68 @@ perf_rsync_dir() {
     fi
 }
 
-# Runs a device-side script under bash. The password, install root, control socket and
-# every KEY=VALUE argument become the script's first lines, so none travels on a command line.
-perf_run_remote() {
+# Prints a device-side script ready for `bash -s` or `sh -s`: the password, install root,
+# control socket and every KEY=VALUE argument as its first lines, so none travels on a command
+# line, then device_lib.sh, then the script itself.
+perf_remote_script() {
     local script=$1
     shift
-    {
-        printf 'PW=%q\nINSTALL=%q\nCTL_SOCK=%q\n' "${HELIX_PERF_PASSWORD:-}" "$HELIX_PERF_INSTALL" \
-            "$HELIX_PERF_CTL_SOCK"
-        local kv
-        for kv in "$@"; do
-            printf '%s=%q\n' "${kv%%=*}" "${kv#*=}"
-        done
-        cat "$script"
-    } | perf_ssh "bash -s"
+    printf 'PW=%q\nINSTALL=%q\nCTL_SOCK=%q\n' "${HELIX_PERF_PASSWORD:-}" "$HELIX_PERF_INSTALL" \
+        "$HELIX_PERF_CTL_SOCK"
+    local kv
+    for kv in "$@"; do
+        printf '%s=%q\n' "${kv%%=*}" "${kv#*=}"
+    done
+    cat "$PERF_HERE/device_lib.sh" "$script"
 }
 
-# Settings dropdown index of a workload name. idle, off and ui run no saver.
-perf_saver_type() {
+# Runs a device-side script under bash on the device.
+perf_run_remote() {
+    perf_remote_script "$@" | perf_ssh "bash -s"
+}
+
+# Appends one gate RESULT line for <label> to $HELIX_PERF_SCRATCH/results/<arm>.txt, from the
+# histogram collected to <hist> and the GATE_RAW line the device printed (empty when none came).
+perf_record_gate() {
+    local arm=$1 run=$2 label=$3 hist=$4 raw=$5
+    python3 "$PERF_HERE/ctparse.py" "$hist" "$arm" "$label" "${raw:-GATE_RAW missing}" |
+        sed "s/^/$arm run=$run gate /" >> "$HELIX_PERF_SCRATCH/results/$arm.txt"
+}
+
+# The registry every saver name comes from. A test points it at a fixture.
+PERF_REGISTRY=${PERF_REGISTRY:-$PERF_REPO/include/screensaver_registry.h}
+
+# Every stable screensaver name, one per line: the name in each row of the kScreensavers table,
+# read from the source so a saver added there is a workload here with no edit.
+perf_saver_names() {
+    awk '/kScreensavers\[\] = \{/ {inside = 1; next}
+        inside && /^\};/ {exit}
+        inside && /ScreensaverType::/ { pending = 1 }
+        pending && match($0, /"[a-z0-9_]+"/) { print substr($0, RSTART + 1, RLENGTH - 2); pending = 0 }' \
+        "$PERF_REGISTRY" 2> /dev/null
+}
+
+# Stable screensaver name a workload runs, or off for the idle, off and ui workloads, which run
+# no saver.
+perf_saver_name() {
     case $1 in
-    idle | off | ui) echo 0 ;;
-    toasters) echo 1 ;;
-    starfield) echo 2 ;;
-    pipes) echo 3 ;;
-    bounce) echo 4 ;;
-    fireworks) echo 5 ;;
-    *)
-        echo "perf_saver_type: unknown workload '$1'" >&2
-        return 1
+    idle | off | ui)
+        echo off
+        return 0
         ;;
     esac
+    local names
+    names=$(perf_saver_names)
+    if [ -z "$names" ]; then
+        echo "perf_saver_name: no screensaver names in $PERF_REGISTRY" >&2
+        return 1
+    fi
+    if grep -qx -F -e "$1" <<< "$names"; then
+        echo "$1"
+        return 0
+    fi
+    echo "perf_saver_name: unknown workload '$1' (savers: $(tr '\n' ' ' <<< "$names"))" >&2
+    return 1
 }
 
 # EGL vsync and a 1 ms main-loop floor keep 16 ms frames even. Every device run sets both:
@@ -141,7 +173,11 @@ perf_pi3b_release() {
 # assumes where a platform's log hook writes; /var/log/messages when the app logs to syslog
 # there instead. Prints an empty line when neither is found.
 perf_app_log() {
-    perf_ssh 'log=$(for p in $(pidof helix-screen); do for f in /proc/$p/fd/*; do readlink "$f"; done; done 2>/dev/null | grep "\.log$" | head -n 1)
-if [ -z "$log" ] && grep -q helix-screen /var/log/messages 2>/dev/null; then log=/var/log/messages; fi
-echo "$log"' < /dev/null
+    {
+        cat "$PERF_HERE/device_lib.sh"
+        # shellcheck disable=SC2016 # expanded on the device
+        printf '%s\n' 'log=$(for f in /proc/$(helix_pid)/fd/*; do readlink "$f"; done 2>/dev/null | grep "\.log$" | head -n 1)' \
+            'if [ -z "$log" ] && grep -q helix-screen /var/log/messages 2>/dev/null; then log=/var/log/messages; fi' \
+            'echo "$log"'
+    } | perf_ssh "sh -s"
 }

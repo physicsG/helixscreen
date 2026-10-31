@@ -8,7 +8,11 @@
 # still carrying the ctl server) surfaces for the first time on the tag.
 #
 # usage: scripts/release-gate.sh [fast] [heavy]      (default: both)
-#   fast   VERSION.txt has a CHANGELOG entry and is not tagged yet; installer bundles build
+#   fast   VERSION.txt has a CHANGELOG entry and is not tagged yet; the Play Store "What's
+#          new" generates (a stable version needs android/whatsnew/<version>.txt);
+#          installer bundles build;
+#          release-health prints the newest beta against stable in telemetry (informational,
+#          never fails; its table is in the step log; RELEASE_HEALTH=0 skips it)
 #   heavy  per target: the packaged docker cross build, `make release-<target>` (which
 #          asserts the binary's feature stamps), splash/watchdog present, no mock symbols
 #
@@ -45,7 +49,8 @@ step() {
         echo "  FAIL: $log" >&2
         grep -E 'error:|undefined reference|\*\*\* \[' "$log" | head -n 20 >&2 || tail -n 25 "$log" >&2
     fi
-    ROWS+=("$(printf '%-4s  %-24s %6ss  %s' "$status" "$name" $((SECONDS - t0)) "$log")")
+    LAST_SECS=$((SECONDS - t0))
+    ROWS+=("$(printf '%-4s  %-24s %6ss  %s' "$status" "$name" "$LAST_SECS" "$log")")
     [ "$status" = PASS ]
 }
 
@@ -94,7 +99,18 @@ check_no_mocks() {
 
 fast() {
     step version check_version
+    step whatsnew scripts/generate-whatsnew.sh "$LOGDIR/whatsnew.txt"
     step installer "$MAKE" --no-print-directory installer
+    if [ "${RELEASE_HEALTH:-1}" = 0 ]; then
+        skip release-health "RELEASE_HEALTH=0"
+    else
+        step release-health scripts/release-health.sh
+        warnings=$(grep -c '^WARN ' "$LOGDIR/release-health.log" || true)
+        if [ "${warnings:-0}" -gt 0 ]; then
+            noun=warnings; [ "$warnings" -eq 1 ] && noun=warning
+            ROWS[$((${#ROWS[@]} - 1))]="$(printf '%-4s  %-24s %6ss  %s' PASS "release-health ($warnings $noun)" "$LAST_SECS" "$LOGDIR/release-health.log")"
+        fi
+    fi
 }
 
 heavy() {

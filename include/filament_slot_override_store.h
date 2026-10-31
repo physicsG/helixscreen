@@ -3,6 +3,7 @@
 
 #include "ams_types.h"
 #include "filament_slot_override.h"
+#include "helix_shared_callback.h"
 #include "lane_source_store.h"
 
 #include <chrono>
@@ -16,7 +17,9 @@
 
 #include "hv/json.hpp"
 
+namespace helix {
 class IMoonrakerAPI;
+}
 class FilamentSlotOverrideStoreTestAccess;
 
 namespace helix::ams {
@@ -46,7 +49,7 @@ inline LaneKeyStyle lane_key_style_for(AmsType t) {
 // third-party/corrupt records (that would vandalize a shared namespace); the
 // one-shot laneN->T<n> migration only ever touches keys HelixScreen authored.
 // Note: out-of-range slots are intentionally NOT counted — the store does not
-// know NUM_PORTS (the caller range-checks), so it cannot honestly detect them.
+// know kNumPorts (the caller range-checks), so it cannot honestly detect them.
 struct LaneDataAnomalies {
     int int_typed_lane = 0;     ///< inner "lane" is an int, not a string — OrcaSlicer drops these
     int key_inner_mismatch = 0; ///< key looks like laneN/T<n> but disagrees with the inner index
@@ -112,7 +115,7 @@ parse_namespace_document(const nlohmann::json& namespace_doc, LaneKeyStyle key_s
 /// backends, and thus real stores, without pinning a dir — cannot write
 /// filament_slot_overrides.json into the repo's config/ dir. Same role
 /// ToolState::set_config_dir() plays for tool_spools.json, and mutable for
-/// the same reason AppConstants::Update::detail::state_dir_ref() is.
+/// the same reason app_constants::update::detail::state_dir_ref() is.
 /// Write it before threads exist; afterwards it is read-only.
 namespace detail {
 inline std::string& slot_override_cache_dir_ref() {
@@ -132,9 +135,12 @@ class FilamentSlotOverrideStore {
     // Klipper plugins own lane_data, AFC deletes that whole namespace on every
     // boot and full-POSTs each lane record, and load_blocking() would otherwise
     // ingest those foreign records as if they were user overrides.
+    // migrates_legacy_namespace: the first load of an empty store copies slots forward from
+    // the pre-lane_data "helix-screen:<backend_id>_slot_overrides" blob. Only the backends that
+    // ever wrote that blob (ACE, CFS) set it.
     FilamentSlotOverrideStore(IMoonrakerAPI* api, std::string backend_id,
                               LaneKeyStyle key_style = LaneKeyStyle::Lane,
-                              std::string ns = "lane_data");
+                              std::string ns = "lane_data", bool migrates_legacy_namespace = false);
 
     /// Test-only view of the configured namespace.
     [[nodiscard]] const std::string& namespace_for_test() const {
@@ -150,7 +156,7 @@ class FilamentSlotOverrideStore {
     // exception-boundary comment on the definition.
     std::unordered_map<int, FilamentSlotOverride> load_blocking();
 
-    using ReloadCallback = std::function<void(std::unordered_map<int, LaneDataRecord>)>;
+    using ReloadCallback = helix::SharedCallback<void(std::unordered_map<int, LaneDataRecord>)>;
 
     /// Re-fetch this store's namespace and hand the parsed records to @p cb.
     ///
@@ -159,11 +165,13 @@ class FilamentSlotOverrideStore {
     /// several writers share can ask for one at any time.
     ///
     /// @p cb is never called on failure: a re-read that could not reach the
-    /// database must leave what a lane already knows standing. @p cb runs on
-    /// the API's callback thread; marshal from there.
-    void reload_async(ReloadCallback cb);
+    /// database must leave what a lane already knows standing. @p on_failure,
+    /// when given, is called instead, for a caller holding work until the read
+    /// lands. Exactly one of the two runs, on the API's callback thread;
+    /// marshal from there.
+    void reload_async(ReloadCallback cb, helix::SharedCallback<void()> on_failure = nullptr);
 
-    using SaveCallback = std::function<void(bool success, std::string error)>;
+    using SaveCallback = helix::SharedCallback<void(bool success, std::string error)>;
     void save_async(int slot_index, const FilamentSlotOverride& override, SaveCallback cb);
     void clear_async(int slot_index, SaveCallback cb);
 
@@ -183,7 +191,7 @@ class FilamentSlotOverrideStore {
     // Blocking read of lane_data/"seated" at init time (mirrors load_blocking's
     // cv.wait_for pattern + load_timeout_). Returns nullopt if absent/unreachable
     // or the stored value is not a valid 0-based lane index. The caller is
-    // responsible for range-checking against its own NUM_PORTS.
+    // responsible for range-checking against its own kNumPorts.
     std::optional<int> load_seated_slot_blocking();
 
     const std::string& backend_id() const {
@@ -199,6 +207,17 @@ class FilamentSlotOverrideStore {
     /// against.
     [[nodiscard]] const std::unordered_map<int, LaneDataRecord>& last_lane_data_records() const {
         return lane_data_records_;
+    }
+
+    /// Rewrite each record last_lane_data_records() holds through @p amend,
+    /// before anything classifies them; @p amend also gets the slot and the
+    /// raw document the record came from. Only this view changes: persisting
+    /// the repair is the caller's save.
+    void amend_loaded_records(const helix::Callback<void(int slot, FilamentSlotOverride&,
+                                                         const nlohmann::json& wire)>& amend) {
+        for (auto& [slot, entry] : lane_data_records_) {
+            amend(slot, entry.record, entry.wire);
+        }
     }
 
   private:
@@ -221,6 +240,7 @@ class FilamentSlotOverrideStore {
     // (Lane style) or "T0" (Tool style) on disk. See format_lane_key in the
     // .cpp for the exact rule.
     std::string namespace_ = "lane_data";
+    bool migrates_legacy_namespace_ = false;
     // Local timeout for load_blocking()'s cv.wait_for. Defaults to 5 seconds;
     // overridable by FilamentSlotOverrideStoreTestAccess for timeout tests.
     // Stored as milliseconds (not seconds) because tests need sub-second
@@ -303,10 +323,10 @@ struct LoadedOverrideStore {
 /// mutex across it stalls the parse path (and self-deadlocks a caller that
 /// takes a non-recursive mutex before asking). Publish the result under the
 /// lock afterwards, which is one move of each field.
-[[nodiscard]] LoadedOverrideStore make_loaded_override_store(IMoonrakerAPI* api,
-                                                             std::string backend_id, AmsType type,
-                                                             const std::string& log_tag,
-                                                             std::string ns = "lane_data");
+[[nodiscard]] LoadedOverrideStore
+make_loaded_override_store(IMoonrakerAPI* api, std::string backend_id, AmsType type,
+                           const std::string& log_tag, std::string ns = "lane_data",
+                           bool migrates_legacy_namespace = false);
 
 // =============================================================================
 // Shared firmware -> lane_data mirror helper
@@ -362,7 +382,14 @@ struct DeclaredOnLane {
 };
 
 /// What @p lane's declaring sources hold, read from the lane source store.
-[[nodiscard]] DeclaredOnLane declared_on_lane(LaneId lane);
+///
+/// With @p record, the lane's stored override, a value on the lane's user
+/// record counts only where @p record declares that field. The rest of that
+/// record is another tool's statement, filed on the user's rung at load
+/// (prestonbrown/helixscreen#1632): it yields to the next change on the lane
+/// rather than guarding the field against it.
+[[nodiscard]] DeclaredOnLane declared_on_lane(LaneId lane,
+                                              const FilamentSlotOverride* record = nullptr);
 
 /// Mirror firmware-detected color/material into `overrides[slot_index]` and
 /// fire `store->save_async` to push the resulting record to the lane_data
@@ -578,9 +605,15 @@ class SlotFingerprintTracker {
     /// The sink runs inline in observe(), under whatever lock the caller
     /// already holds there, so it may touch the caller's override map without
     /// taking its own.
-    using BaselineSink = std::function<void(int, const std::string&)>;
+    using BaselineSink = helix::SharedCallback<void(int, const std::string&)>;
     void set_baseline_sink(BaselineSink sink) {
         baseline_sink_ = std::move(sink);
+    }
+
+    /// Drop a slot's baseline, so its next observation is a first one. Pending
+    /// expectations are kept.
+    void forget_baseline(int slot_index) {
+        baseline_.erase(slot_index);
     }
 
     /// Whether an unconsumed expectation is pending for a slot.

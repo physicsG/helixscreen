@@ -422,6 +422,16 @@ size_t TipsManager::get_total_tips() {
     return tips_cache.size();
 }
 
+std::vector<std::string> TipsManager::get_all_titles() {
+    std::lock_guard<std::mutex> lock(tips_mutex);
+    std::vector<std::string> titles;
+    titles.reserve(tips_cache.size());
+    for (const auto& tip : tips_cache) {
+        titles.push_back(tip.title);
+    }
+    return titles;
+}
+
 std::string TipsManager::get_version() {
     std::lock_guard<std::mutex> lock(tips_mutex);
     // Captured at load; `data` is released once the cache is built.

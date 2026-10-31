@@ -480,3 +480,21 @@ TEST_CASE("GCodeOpsDetector - first line calling a named command", "[gcode][ops]
         CHECK_FALSE(GCodeOpsDetector::find_first_command("M729\n", {}).has_value());
     }
 }
+
+TEST_CASE("GCodeOpsDetector - every line's operation command is recorded", "[gcode][ops]") {
+    const auto result =
+        GCodeOpsDetector().scan_content("BED_MESH_CLEAR\n"
+                                        "bed_mesh_profile load=default\n"
+                                        "  BED_MESH_CALIBRATE_START_PRINT BED_TEMP=60\n"
+                                        "START_PRINT FORCE_LEVELING=true\n"
+                                        "G1 X10 E5\n"
+                                        "BED_MESH_CALIBRATE\n");
+
+    // The first line of the type is the operation; the rest are commands.
+    REQUIRE(result.get_operations(OperationType::BED_MESH).size() == 1);
+    CHECK(result.operation_commands ==
+          std::set<std::pair<OperationType, std::string>>{
+              {OperationType::BED_MESH, "BED_MESH_CLEAR"},
+              {OperationType::BED_MESH, "BED_MESH_PROFILE"},
+              {OperationType::BED_MESH, "BED_MESH_CALIBRATE_START_PRINT"}});
+}

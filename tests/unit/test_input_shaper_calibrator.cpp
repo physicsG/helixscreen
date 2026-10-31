@@ -33,6 +33,7 @@
 #include "../../include/moonraker_client_mock.h"
 #include "../../include/moonraker_error.h"
 #include "../../include/printer_state.h"
+#include "../../include/resonance_console.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
 #include "../lvgl_test_fixture.h"
@@ -188,10 +189,11 @@ class InputShaperCalibratorTestFixture : public LVGLTestFixture {
     struct ProgressEvent {
         int percent;
         ShaperCalibrationPhase phase;
+        float freq_hz;
     };
 
-    void on_progress(int percent, ShaperCalibrationPhase phase) {
-        progress_updates_.push_back({percent, phase});
+    void on_progress(int percent, ShaperCalibrationPhase phase, float freq_hz = 0.0f) {
+        progress_updates_.push_back({percent, phase, freq_hz});
     }
 
     void on_result(const InputShaperResult& result) {
@@ -248,7 +250,8 @@ class InputShaperCalibratorTestFixture : public LVGLTestFixture {
     /// Run one full resonance calibration on @p axis and wait for the result.
     bool calibrate(char axis) {
         calibrator_.run_calibration(
-            axis, [this](int pct, ShaperCalibrationPhase ph) { on_progress(pct, ph); },
+            axis,
+            [this](int pct, ShaperCalibrationPhase ph, float hz) { on_progress(pct, ph, hz); },
             [this](const InputShaperResult& r) { on_result(r); },
             [this](const std::string& err) { on_error(err); });
         return pump_until([this] { return result_received_.load() || error_received_.load(); });
@@ -443,7 +446,7 @@ TEST_CASE_METHOD(InputShaperCalibratorTestFixture,
     INFO("axis: " << axis);
 
     calibrator_.run_calibration(
-        axis, [this](int pct, ShaperCalibrationPhase ph) { on_progress(pct, ph); },
+        axis, [this](int pct, ShaperCalibrationPhase ph, float) { on_progress(pct, ph); },
         [this](const InputShaperResult& r) { on_result(r); },
         [this](const std::string& err) { on_error(err); });
 
@@ -974,4 +977,30 @@ TEST_CASE("firmware_halt_message returns empty for timeouts",
     err.message = "Request timed out after 30s";
 
     REQUIRE(InputShaperCalibrator::firmware_halt_message(err).empty());
+}
+
+TEST_CASE_METHOD(InputShaperCalibratorTestFixture,
+                 "progress reports carry the sweep frequency through the calibrator",
+                 "[calibrator][input_shaper][sweep_preview]") {
+    std::vector<float> console_hz;
+    mock_client_.register_method_callback(
+        "notify_gcode_response", "calibrator_freq_test", [&console_hz](const nlohmann::json& msg) {
+            const auto line = msg["params"][0].get<std::string>();
+            if (const auto hz = helix::calibration::parse_testing_frequency(line)) {
+                console_hz.push_back(*hz);
+            }
+        });
+    REQUIRE(calibrate('X'));
+    mock_client_.unregister_method_callback("notify_gcode_response", "calibrator_freq_test");
+
+    std::vector<float> sweep_hz;
+    for (const auto& event : progress_updates_) {
+        if (event.phase == ShaperCalibrationPhase::Sweeping) {
+            sweep_hz.push_back(event.freq_hz);
+        } else {
+            CHECK(event.freq_hz == 0.0f);
+        }
+    }
+    REQUIRE(console_hz.size() >= 20);
+    CHECK(sweep_hz == console_hz);
 }

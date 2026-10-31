@@ -245,3 +245,31 @@ TEST_CASE_METHOD(SettingGroupFixture, "setting_group: header follows whether any
         CHECK(lv_obj_has_flag(header, LV_OBJ_FLAG_HIDDEN));
     }
 }
+
+TEST_CASE_METHOD(SettingGroupFixture, "setting_group_header: badge_subject binds the badge text",
+                 "[setting_group]") {
+    REQUIRE(register_component("setting_group_header"));
+    // The XML subject registry never forgets a name, so the storage outlives the test.
+    static lv_subject_t count;
+    static bool registered = false;
+    if (!registered) {
+        lv_subject_init_int(&count, 0);
+        lv_xml_register_subject(nullptr, "setting_group_test_badge_count", &count);
+        registered = true;
+    }
+    lv_subject_set_int(&count, 4);
+
+    const char* attrs[] = {"title",       "SENSORS",       "badge_name",
+                           "bound_badge", "badge_subject", "setting_group_test_badge_count",
+                           "hide_badge",  "false",         nullptr};
+    auto* header = create_component("setting_group_header", attrs);
+    REQUIRE(header != nullptr);
+    process_lvgl(50);
+    lv_obj_t* badge = lv_obj_find_by_name(header, "bound_badge");
+    REQUIRE(badge != nullptr);
+    REQUIRE(find_label_with_text(badge, "4") != nullptr);
+
+    lv_subject_set_int(&count, 12);
+    process_lvgl(10);
+    CHECK(find_label_with_text(badge, "12") != nullptr);
+}

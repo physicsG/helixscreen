@@ -24,17 +24,17 @@ TimelapseSettingsOverlay& get_global_timelapse_settings() {
     return *instance;
 }
 
-void init_global_timelapse_settings(IMoonrakerAPI* api) {
+void init_global_timelapse_settings(helix::IMoonrakerAPI* api) {
     helix::lazy_global<TimelapseSettingsOverlay>("TimelapseSettingsOverlay", api);
     spdlog::trace("[Timelapse Settings] TimelapseSettingsOverlay initialized");
 }
 
 // Framerate mapping
-constexpr int TimelapseSettingsOverlay::FRAMERATE_VALUES[];
+constexpr int TimelapseSettingsOverlay::kFramerateValues[];
 
 int TimelapseSettingsOverlay::framerate_to_index(int framerate) {
-    for (int i = 0; i < FRAMERATE_COUNT; i++) {
-        if (FRAMERATE_VALUES[i] == framerate) {
+    for (int i = 0; i < kFramerateCount; i++) {
+        if (kFramerateValues[i] == framerate) {
             return i;
         }
     }
@@ -42,13 +42,13 @@ int TimelapseSettingsOverlay::framerate_to_index(int framerate) {
 }
 
 int TimelapseSettingsOverlay::index_to_framerate(int index) {
-    if (index >= 0 && index < FRAMERATE_COUNT) {
-        return FRAMERATE_VALUES[index];
+    if (index >= 0 && index < kFramerateCount) {
+        return kFramerateValues[index];
     }
     return 30; // Default to 30fps
 }
 
-TimelapseSettingsOverlay::TimelapseSettingsOverlay(IMoonrakerAPI* api) : api_(api) {}
+TimelapseSettingsOverlay::TimelapseSettingsOverlay(helix::IMoonrakerAPI* api) : api_(api) {}
 
 lv_obj_t* TimelapseSettingsOverlay::create(lv_obj_t* parent) {
     if (!OverlayBase::create(parent)) {

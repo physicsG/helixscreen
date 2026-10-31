@@ -145,7 +145,8 @@ std::string MoonrakerAPI::get_websocket_url() const {
     return client_.get_last_url();
 }
 
-SubscriptionId MoonrakerAPI::subscribe_notifications(std::function<void(const json&)> callback) {
+SubscriptionId
+MoonrakerAPI::subscribe_notifications(helix::SharedCallback<void(const json&)> callback) {
     return client_.register_notify_update(std::move(callback));
 }
 
@@ -158,7 +159,7 @@ std::weak_ptr<bool> MoonrakerAPI::client_lifetime_weak() const {
 }
 
 void MoonrakerAPI::register_method_callback(const std::string& method, const std::string& name,
-                                            std::function<void(const json&)> callback) {
+                                            helix::SharedCallback<void(const json&)> callback) {
     client_.register_method_callback(method, name, std::move(callback));
 }
 
@@ -172,7 +173,7 @@ void MoonrakerAPI::suppress_disconnect_modal(uint32_t duration_ms) {
 
 void MoonrakerAPI::get_gcode_store(
     int count, std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-    std::function<void(const MoonrakerError&)> on_error) {
+    helix::SharedCallback<void(const MoonrakerError&)> on_error) {
     client_.get_gcode_store(count, std::move(on_success), std::move(on_error));
 }
 
@@ -181,7 +182,7 @@ void MoonrakerAPI::get_gcode_store(
 // ============================================================================
 
 void MoonrakerAPI::database_get_item(const std::string& namespace_name, const std::string& key,
-                                     std::function<void(const json&)> on_success,
+                                     helix::SharedCallback<void(const json&)> on_success,
                                      ErrorCallback on_error) {
     json params = {{"namespace", namespace_name}, {"key", key}};
     // Silent: missing keys are expected (first-time reads before any save).
@@ -209,7 +210,7 @@ void MoonrakerAPI::database_get_item(const std::string& namespace_name, const st
 }
 
 void MoonrakerAPI::database_post_item(const std::string& namespace_name, const std::string& key,
-                                      const json& value, std::function<void()> on_success,
+                                      const json& value, helix::SharedCallback<void()> on_success,
                                       ErrorCallback on_error) {
     json params = {{"namespace", namespace_name}, {"key", key}, {"value", value}};
     client_.send_jsonrpc(
@@ -225,7 +226,7 @@ void MoonrakerAPI::database_post_item(const std::string& namespace_name, const s
 }
 
 void MoonrakerAPI::database_get_namespace(const std::string& namespace_name,
-                                          std::function<void(const json&)> on_success,
+                                          helix::SharedCallback<void(const json&)> on_success,
                                           ErrorCallback on_error) {
     // Moonraker's server.database.get_item accepts just a namespace (no key)
     // and returns the full namespace contents as a JSON object.
@@ -250,7 +251,8 @@ void MoonrakerAPI::database_get_namespace(const std::string& namespace_name,
 }
 
 void MoonrakerAPI::database_delete_item(const std::string& namespace_name, const std::string& key,
-                                        std::function<void()> on_success, ErrorCallback on_error) {
+                                        helix::SharedCallback<void()> on_success,
+                                        ErrorCallback on_error) {
     json params = {{"namespace", namespace_name}, {"key", key}};
     client_.send_jsonrpc(
         "server.database.delete_item", params,

@@ -3,14 +3,16 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <string_view>
-
-namespace helix {
-class AmsBackend;
-} // namespace helix
+#include <vector>
 
 namespace helix::ui {
+
+/// U+00B7 MIDDLE DOT, the separator between a unit name and a position inside
+/// it. Shared so every "Unit · N" label spells it the same way.
+inline constexpr const char* kUnitSeparator = "\xc2\xb7";
 
 /**
  * @brief The word a backend uses for one physical filament position.
@@ -49,16 +51,56 @@ std::string tool_label(int gcode_tool);
 bool is_generated_tool_name(std::string_view name);
 
 /**
- * @brief The closed tool dropdown's label for the tool at @p index.
+ * @brief What the tool at @p index is called on the machine.
  *
- * A generated "T<n>" name collapses to its 1-based display number ("4"); a
- * configured name is the machine's physical label and is shown verbatim
- * ("Left"). The open list keeps the full display_label ("Tool 4 · Left"), so
- * the closed control stays narrow without losing the chosen name.
+ * A configured name ("Left") is the machine's physical label and is returned
+ * verbatim; a generated "T<n>" name gets the physical position ("Tool 1").
+ * Neither carries the G-code name: tool_label_in_form() adds that.
  *
+ * @param noun what the printer calls a tool (active_tool_noun()): "Toolhead 1" on a U1
  * @return empty when @p index is negative
  */
-std::string tool_short_label(std::string_view name, int index);
+std::string tool_name_label(LaneNoun noun, std::string_view name, int index);
+
+/**
+ * @brief How much of a tool's identity a label spells.
+ *
+ * Klipper and every slicer count tools from T0, while the machine is labeled
+ * from 1. A generated name gets both when there is room, so neither number
+ * reads as the other's mistake; a narrow box gets the G-code name alone, the
+ * one a user can type.
+ */
+enum class ToolLabelForm {
+    Full, ///< "Tool 1 (T0)": the physical label with the G-code name it answers to
+    Code, ///< "T0": the G-code name alone
+};
+
+/// Every ToolLabelForm, most informative first: the order a caller tries them in.
+inline constexpr ToolLabelForm kToolLabelForms[] = {ToolLabelForm::Full, ToolLabelForm::Code};
+
+/**
+ * @brief The label for the tool at @p index in @p form.
+ *
+ * Full is tool_name_label() beside the G-code name: "Tool 1 (T0)" for a
+ * generated name, "Left (T0)" for a configured one. Code is the G-code name
+ * alone ("T0"), configured name or not.
+ *
+ * @param noun what the printer calls a tool (active_tool_noun()): "Toolhead 1 (T0)" on a U1
+ * @return empty when @p index is negative
+ */
+std::string tool_label_in_form(LaneNoun noun, std::string_view name, int index, ToolLabelForm form);
+
+/**
+ * @brief The most informative form @p fits accepts.
+ *
+ * Callers measure differently (a pill grid, a list row), so each supplies its
+ * own fit test and this owns the preference order. Every caller labels all its
+ * tools in one form, so a row of pills never mixes "Tool 1 (T0)" with "T1".
+ *
+ * @return the first form in kToolLabelForms that @p fits accepts, else Code:
+ *         a label has to say something, and Code is the shortest
+ */
+ToolLabelForm pick_tool_label_form(const std::function<bool(ToolLabelForm)>& fits);
 
 /**
  * @brief Convert a storage index to the number a user sees.
@@ -75,28 +117,36 @@ int lane_number(int index);
 /// @brief lane_number() as text, or empty when @p index is negative.
 std::string lane_number_text(int index);
 
+/**
+ * @brief Whether per-lane tool badges tell the user anything the lane numbers do not.
+ *
+ * When every tool feeds the lane of its own index (T0 into lane 1, T1 into
+ * lane 2, ...) a tool badge only repeats the lane number beside it. Badges
+ * earn their place once a tool feeds a different lane, or names no lane this
+ * system has.
+ *
+ * @param tool_to_slot tool_to_slot[tool] = global slot index, negative = unmapped
+ * @param slot_count   number of slots in the system
+ * @return false only for a non-empty identity map; an empty map proves nothing
+ */
+bool tool_badges_add_information(const std::vector<int>& tool_to_slot, int slot_count);
+
 /// @brief The translated word for @p noun ("Slot", "Lane", "Gate", "Tool").
 std::string noun_text(LaneNoun noun);
+
+/**
+ * @brief The Endless Spool field's name for @p noun: "Backup Slot", "Backup Gate".
+ *
+ * A whole translated phrase per noun, not "Backup " + noun_text(): the
+ * qualifier goes after the noun in most locales and is often compounded into it.
+ */
+std::string backup_lane_text(LaneNoun noun);
 
 /**
  * @brief A physical position: "Slot 1", "Lane 2", "Tool 4".
  * @return empty when @p index is negative
  */
 std::string lane_label(LaneNoun noun, int index);
-
-/**
- * @brief A backend slot as its badge reads: "Slot 4", "Lane 2".
- *
- * @p backend's own noun with the number the slot's badge shows. That number is
- * the slot's place among the positions holding a spool of their own
- * (AmsBackend::spool_display_number()), so a slot that only views another
- * slot's spool is named with that spool's number. Identical to
- * lane_label(backend.lane_noun(), slot_index) on every backend whose slots all
- * own their spools.
- *
- * @return empty when @p slot_index is negative
- */
-std::string backend_lane_label(const helix::AmsBackend& backend, int slot_index);
 
 /**
  * @brief The refusal a Clear Spool shows when the lane feeds the active print.
@@ -107,6 +157,16 @@ std::string backend_lane_label(const helix::AmsBackend& backend, int slot_index)
  * own word, like every other sentence that points a user at a lane.
  */
 std::string clear_spool_blocked_hint(LaneNoun noun, int index);
+
+/**
+ * @brief A position label scoped inside its named unit: "<unit> · <body>".
+ *
+ * The one composition behind every unit-qualified position ("Turtle 1 ·
+ * Slot 2", a fed lane's upstream caption "ACE 2 · 3"), so the separator and
+ * spacing cannot drift between them. An empty unit degrades to the body
+ * alone, the single-unit form.
+ */
+std::string unit_scoped_label(std::string_view unit_display_name, std::string_view body);
 
 /**
  * @brief A physical position inside a named unit: "Turtle 1 · Slot 2".
@@ -167,5 +227,11 @@ LaneNoun active_lane_noun();
  * @return the active AMS backend's tool_noun(), else LaneNoun::Tool
  */
 LaneNoun active_tool_noun();
+
+/**
+ * @brief tool_label_in_form() under active_tool_noun(): what every surface
+ *        naming a tool of the connected printer shows ("Toolhead 3 (T2)" on a U1).
+ */
+std::string active_tool_label(std::string_view name, int index, ToolLabelForm form);
 
 } // namespace helix::ui

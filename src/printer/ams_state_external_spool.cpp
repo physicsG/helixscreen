@@ -12,6 +12,7 @@
 
 #include "ams_state.h"
 #include "ams_state_internal.h"
+#include "filament_accounting_controller.h"
 #include "i_moonraker_api.h"
 #include "lane_apply.h"
 #include "lane_binding.h"
@@ -46,7 +47,7 @@ std::optional<SlotInfo> AmsState::get_external_spool_info() const {
     // user's own edits. A Spoolman record standing from an earlier binding
     // names a spool the raw record does not, so it is dropped from the copy
     // rather than resolved - the same ranking a lane's declared id gets.
-    helix::ams::LaneSources sources = helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID);
+    helix::ams::LaneSources sources = helix::ams::lane_sources(helix::ams::kBypassLaneId);
     if (sources.spoolman.has_value() &&
         sources.spoolman->spoolman_id.value_or(0) != out->spoolman_id) {
         sources.drop(helix::ams::ObservationSource::Spoolman);
@@ -63,6 +64,11 @@ void AmsState::set_external_spool_info_in_memory(const SlotInfo& info) {
 
 void AmsState::set_external_spool_info(const SlotInfo& info) {
     assert_main_thread();
+    store_external_spool_info(info);
+    notify_external_spool_changed(info);
+}
+
+void AmsState::store_external_spool_info(const SlotInfo& info) {
     // Moving the binding to a different spool retires the previous spool's
     // records: its Spoolman record, the user's pick, the kept identity and the
     // meter's count all describe a spool that is no longer bound, and resolve()
@@ -74,13 +80,12 @@ void AmsState::set_external_spool_info(const SlotInfo& info) {
     // rather than at each caller.
     const int previous_id = raw_external_spool_info().value_or(SlotInfo{}).spoolman_id;
     if (previous_id != info.spoolman_id) {
-        helix::ams::drop_previous_spool_declarations(helix::ams::BYPASS_LANE_ID);
-        helix::ams::drop_lane_source(helix::ams::BYPASS_LANE_ID,
+        helix::ams::drop_previous_spool_declarations(helix::ams::kBypassLaneId);
+        helix::ams::drop_lane_source(helix::ams::kBypassLaneId,
                                      helix::ams::ObservationSource::Metered);
     }
     in_memory_external_spool_.reset(); // Persistent write wins; let SettingsManager be the source.
     helix::SettingsManager::instance().set_external_spool_info(info);
-    notify_external_spool_changed(info);
 }
 
 void AmsState::notify_external_spool_changed(const SlotInfo& info) {
@@ -104,7 +109,7 @@ void AmsState::clear_external_spool_info() {
     helix::SettingsManager::instance().clear_external_spool_info();
     // The raw record's absence has to reach the sources that described it, or
     // resolve() keeps returning the identity the clear just removed.
-    helix::ams::reset_lane_to_machine_readings(helix::ams::BYPASS_LANE_ID);
+    helix::ams::reset_lane_to_machine_readings(helix::ams::kBypassLaneId);
     // Force notification even when color was already 0 (e.g. previous spool was
     // black, RGB=0x000000) — observers read full spool info, not just the color.
     if (lv_subject_get_int(&external_spool_color_) == 0) {
@@ -118,13 +123,17 @@ void AmsState::apply_external_spool_store(const SlotInfo& info) {
     // S5 + S7 — same emptiness predicate as the FilamentPanel completion arm
     const SlotInfo original = raw_external_spool_info().value_or(SlotInfo{});
     if (info.spoolman_id > 0 || !info.material.empty()) {
-        set_external_spool_info(info);
+        store_external_spool_info(info);
         // The edit files on the bypass lane like a slot edit files on its
-        // lane: set_external_spool_info() has already taken the previous
+        // lane: store_external_spool_info() has already taken the previous
         // spool's records with any binding move, and the user's own values
         // now stand as LocalUser.
-        helix::ams::commit_slot_edit(helix::ams::BYPASS_LANE_ID,
+        helix::ams::commit_slot_edit(helix::ams::kBypassLaneId,
                                      helix::ams::user_edit_observation(original, info));
+        // Observers re-read the resolved record, where the lane's previous
+        // LocalUser weight outranks the raw one, so they hear of the edit only
+        // once the lane carries it.
+        notify_external_spool_changed(info);
     } else {
         // Takes the lane's declarations with it, exactly as it takes the
         // stored record's identity.
@@ -151,23 +160,22 @@ void AmsState::invalidate_stale_external_identity(const SlotInfo& info) {
 void AmsState::commit_external_spool_edit(const SlotInfo& info) {
     assert_main_thread();
 
-    // S1 — match the server active spool to what we are committing
-    if (api_) {
-        if (info.spoolman_id > 0) {
+    // S1 — match the server active spool to what we are committing, only
+    // while the external spool is what feeds: set it unless the printer keeps
+    // its own assignment; an unlink clears the spool it unlinked.
+    if (api_ && external_spool_feeds()) {
+        const int previous_id = get_external_spool_info().value_or(SlotInfo{}).spoolman_id;
+        if (info.spoolman_id > 0 &&
+            helix_sets_active_spool_on_edit(get_backend(), /*external_spool=*/true)) {
             api_->spoolman().set_active_spool(
                 info.spoolman_id, []() {},
                 [](const MoonrakerError& err) {
                     spdlog::warn("[AmsState] Failed to set active spool: {}", err.message);
                 });
-        } else if (get_external_spool_info().value_or(SlotInfo{}).spoolman_id > 0) {
-            // Committing a manual entry (id=0, material set) over a linked
-            // spool intentionally clears the server link — the UI no longer
-            // shows that spool as in use, so the server must not either.
-            api_->spoolman().set_active_spool(
-                0, []() {},
-                [](const MoonrakerError& err) {
-                    spdlog::warn("[AmsState] Failed to clear active spool: {}", err.message);
-                });
+        } else if (info.spoolman_id == 0) {
+            // A manual entry (id=0, material set) over a linked spool takes
+            // the server link back too: the UI no longer shows it in use.
+            clear_active_spool_if(previous_id);
         }
     }
 
@@ -183,7 +191,9 @@ void AmsState::commit_external_spool_edit(const SlotInfo& info, std::function<vo
 
     invalidate_stale_external_identity(info);
 
-    if (api_ && info.spoolman_id > 0) {
+    const bool feeds = api_ && external_spool_feeds();
+    if (feeds && info.spoolman_id > 0 &&
+        helix_sets_active_spool_on_edit(get_backend(), /*external_spool=*/true)) {
         // Server-first: the store subset waits for the server round-trip. The
         // API callbacks fire on a background thread, so both the store write
         // and the caller's completion are marshalled to the main thread.
@@ -211,16 +221,12 @@ void AmsState::commit_external_spool_edit(const SlotInfo& info, std::function<vo
         return;
     }
 
-    // Manual entry or clear: no server identity gates the store write. The
-    // clear arm (replacing a linked spool with an empty record) still tells
-    // the server, fire-and-forget, exactly like the sync commit.
-    if (api_ && info.spoolman_id == 0 &&
-        get_external_spool_info().value_or(SlotInfo{}).spoolman_id > 0) {
-        api_->spoolman().set_active_spool(
-            0, []() {},
-            [](const MoonrakerError& err) {
-                spdlog::warn("[AmsState] Failed to clear active spool: {}", err.message);
-            });
+    // Manual entry, clear, a spool something else makes active, or one that is
+    // not feeding: no server identity gates the store write. The clear arm
+    // (replacing a linked spool with an empty record) still tells the server,
+    // fire-and-forget, exactly like the sync commit.
+    if (feeds && info.spoolman_id == 0) {
+        clear_active_spool_if(get_external_spool_info().value_or(SlotInfo{}).spoolman_id);
     }
 
     apply_external_spool_store(info);

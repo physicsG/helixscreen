@@ -13,8 +13,8 @@
 namespace helix {
 class IMoonrakerClient;
 class TemperatureController;
-} // namespace helix
 class IMoonrakerAPI;
+} // namespace helix
 class MoonrakerManager;
 #ifdef HELIX_ENABLE_MOCKS
 class MoonrakerClientMock;
@@ -64,13 +64,13 @@ void set_moonraker_client_mock(MoonrakerClientMock* client);
  * @brief Get global IMoonrakerAPI instance
  * @return Pointer to global IMoonrakerAPI (may be nullptr if not initialized)
  */
-IMoonrakerAPI* get_moonraker_api();
+helix::IMoonrakerAPI* get_moonraker_api();
 
 /**
  * @brief Set global IMoonrakerAPI instance (called by main.cpp during init)
  * @param api Pointer to IMoonrakerAPI instance
  */
-void set_moonraker_api(IMoonrakerAPI* api);
+void set_moonraker_api(helix::IMoonrakerAPI* api);
 
 /**
  * @brief Get the global TemperatureController (shared resource registered by SubjectInitializer)
@@ -409,11 +409,10 @@ std::string get_helix_cache_dir(const std::string& subdir);
  *
  * @param subdir Subdirectory name (e.g., "gcode_temp", "thumbs")
  * @param tier_out When non-null, receives a static label naming the rung that
- *        won ("HELIX_CACHE_DIR", "config", "AD5M", "CC1", "K2", "MIPS",
- *        "Android"), or nullptr for a fall-through rung (XDG, $HOME, /var/tmp,
- *        /tmp) and when nothing is usable. Which rung answered is what a
- *        diagnostic needs: the path alone cannot say whether an override, a
- *        config setting or the platform default produced it.
+ *        won ("HELIX_CACHE_DIR", "config", a board key such as "ad5m",
+ *        "k1" or "creator5-pro", "Android"), or nullptr for a fall-through rung (XDG, $HOME,
+ * /var/tmp, /tmp) and when nothing is usable. Which rung answered is what a diagnostic needs: the
+ * path alone cannot say whether an override, a config setting or the platform default produced it.
  * @return Full path the cascade resolves to, or empty string if no candidate
  *         is usable. A non-empty result may not exist yet.
  */
@@ -528,6 +527,13 @@ bool updates_externally_managed();
 // Probed once and cached; the probe is bounded so a sudoers lookup that hangs
 // (network-backed sudoers) cannot stall the caller.
 bool root_escalation_available();
+
+// Replaces the passwordless-sudo probe root_escalation_available() runs when the
+// process is not already root; nullptr restores the real one. The test binary
+// installs a probe that answers without forking sudo. Only a call made before
+// the first root_escalation_available() matters, since that answer is cached.
+// NAMESPACE_OK: joins root_escalation_available(), this header's file-scope API
+void set_root_escalation_probe(bool (*probe)());
 
 // Pure predicate: can an in-app self-update PHYSICALLY be applied to this install
 // tree? It must recognise BOTH of the routes install.sh implements, since hiding

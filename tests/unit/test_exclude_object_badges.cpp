@@ -217,7 +217,8 @@ TEST_CASE_METHOD(XMLTestFixture,
     });
 
     helix::ui::ExcludeObjectMapView view;
-    view.create(test_screen(), &state().excluded_objects_state(), 235.0f, 235.0f, {},
+    view.create(test_screen(), &state().excluded_objects_state(),
+                helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
                 helix::ui::ExcludeTapMode::ExcludeOnly, nullptr);
     REQUIRE(view.is_active());
     process_lvgl(30);
@@ -313,13 +314,13 @@ struct BadgeViewer {
     Taps taps;
 
     BadgeViewer() {
-        viewer = ui_gcode_viewer_create(lv_screen_active());
+        viewer = helix::ui::gcode_viewer_create(lv_screen_active());
         REQUIRE(viewer != nullptr);
         lv_obj_set_size(viewer, kViewerW, kViewerH);
         lv_obj_set_pos(viewer, kViewerX, kViewerY);
         lv_obj_update_layout(viewer);
-        ui_gcode_viewer_set_render_mode(viewer, helix::GcodeViewerRenderMode::Layer2D);
-        ui_gcode_viewer_set_object_tap_callback(viewer, on_tap, &taps);
+        helix::ui::gcode_viewer_set_render_mode(viewer, helix::GcodeViewerRenderMode::Layer2D);
+        helix::ui::gcode_viewer_set_object_tap_callback(viewer, on_tap, &taps);
         renderer = helix::test_access::gcode_viewer_show_2d(
             viewer, std::make_unique<ParsedGCodeFile>(make_two_squares()));
         REQUIRE(renderer != nullptr);
@@ -369,14 +370,14 @@ const glm::vec2 kRightCenter{135.0f, 75.0f};
 TEST_CASE_METHOD(LVGLTestFixture, "2D badges sit on the drawn top of their object",
                  "[exclude_badges][gcode_viewer]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_print_progress(v.viewer, 1); // drawn top: z 4
-    ui_gcode_viewer_set_object_badges(v.viewer,
-                                      {
-                                          // Taller than what is drawn: rides the current layer.
-                                          make_badge(0, "Left", kLeftCenter, 8.0f),
-                                          // Already finished below it: sits on its own top.
-                                          make_badge(1, "Right", kRightCenter, 2.0f),
-                                      });
+    helix::ui::gcode_viewer_set_print_progress(v.viewer, 1); // drawn top: z 4
+    helix::ui::gcode_viewer_set_object_badges(
+        v.viewer, {
+                      // Taller than what is drawn: rides the current layer.
+                      make_badge(0, "Left", kLeftCenter, 8.0f),
+                      // Already finished below it: sits on its own top.
+                      make_badge(1, "Right", kRightCenter, 2.0f),
+                  });
     v.draw();
 
     const auto drawn = v.drawn();
@@ -404,10 +405,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "2D badges sit on the drawn top of their objec
 TEST_CASE_METHOD(LVGLTestFixture, "A badge outside the widget is not drawn",
                  "[exclude_badges][gcode_viewer]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_object_badges(v.viewer, {
-                                                    make_badge(0, "Left", kLeftCenter),
-                                                    make_badge(1, "Far", {5000.0f, 5000.0f}),
-                                                });
+    helix::ui::gcode_viewer_set_object_badges(v.viewer,
+                                              {
+                                                  make_badge(0, "Left", kLeftCenter),
+                                                  make_badge(1, "Far", {5000.0f, 5000.0f}),
+                                              });
     v.draw();
     const auto drawn = v.drawn();
     REQUIRE(drawn.size() == 1);
@@ -418,7 +420,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "A tap on a badge picks the badge's object ove
                  "[exclude_badges][gcode_viewer][pick]") {
     BadgeViewer v;
     // "Right"'s badge drawn over Left's geometry: the badge must win.
-    ui_gcode_viewer_set_object_badges(v.viewer, {make_badge(1, "Right", kLeftCenter)});
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, {make_badge(1, "Right", kLeftCenter)});
     v.draw();
     REQUIRE(v.drawn().size() == 1);
     v.tap_local(v.drawn()[0].center);
@@ -429,10 +431,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "A tap on a badge picks the badge's object ove
 TEST_CASE_METHOD(LVGLTestFixture, "Overlapping badges: the one drawn on top is picked",
                  "[exclude_badges][gcode_viewer][pick]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_object_badges(v.viewer, {
-                                                    make_badge(0, "Under", kLeftCenter),
-                                                    make_badge(1, "Over", kLeftCenter),
-                                                });
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, {
+                                                            make_badge(0, "Under", kLeftCenter),
+                                                            make_badge(1, "Over", kLeftCenter),
+                                                        });
     v.draw();
     REQUIRE(v.drawn().size() == 2);
     v.tap_local(v.drawn()[1].center);
@@ -443,7 +445,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Overlapping badges: the one drawn on top is p
 TEST_CASE_METHOD(LVGLTestFixture, "An excluded badge is drawn but the tap goes to the geometry",
                  "[exclude_badges][gcode_viewer][pick]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_object_badges(
+    helix::ui::gcode_viewer_set_object_badges(
         v.viewer, {make_badge(1, "Right", kLeftCenter, std::nullopt, /*excluded=*/true)});
     v.draw();
     REQUIRE(v.drawn().size() == 1);
@@ -455,8 +457,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "An excluded badge is drawn but the tap goes t
 TEST_CASE_METHOD(LVGLTestFixture, "With excluded badges pickable, a tap on one picks its object",
                  "[exclude_badges][gcode_viewer][pick][pre_start_exclude]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_excluded_badges_pickable(v.viewer, true);
-    ui_gcode_viewer_set_object_badges(
+    helix::ui::gcode_viewer_set_excluded_badges_pickable(v.viewer, true);
+    helix::ui::gcode_viewer_set_object_badges(
         v.viewer, {make_badge(1, "Right", kLeftCenter, std::nullopt, /*excluded=*/true)});
     v.draw();
     REQUIRE(v.drawn().size() == 1);
@@ -468,12 +470,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "With excluded badges pickable, a tap on one p
 TEST_CASE_METHOD(LVGLTestFixture, "Clearing the badges removes them and their pick targets",
                  "[exclude_badges][gcode_viewer][pick]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_object_badges(v.viewer, {make_badge(1, "Right", kLeftCenter)});
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, {make_badge(1, "Right", kLeftCenter)});
     v.draw();
     const auto drawn = v.drawn();
     REQUIRE(drawn.size() == 1);
 
-    ui_gcode_viewer_set_object_badges(v.viewer, {});
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, {});
     CHECK(v.drawn().empty()); // before any redraw
     v.tap_local(drawn[0].center);
     REQUIRE(v.taps.names.size() == 1);
@@ -485,12 +487,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "Clearing the badges removes them and their pi
 TEST_CASE_METHOD(LVGLTestFixture, "A frame that draws nothing leaves no stale pick targets",
                  "[exclude_badges][gcode_viewer][pick]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_object_badges(v.viewer, {make_badge(1, "Right", kLeftCenter)});
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, {make_badge(1, "Right", kLeftCenter)});
     v.draw();
     const auto drawn = v.drawn();
     REQUIRE(drawn.size() == 1);
 
-    ui_gcode_viewer_set_paused(v.viewer, true);
+    helix::ui::gcode_viewer_set_paused(v.viewer, true);
     v.draw();
     CHECK(v.drawn().empty());
     v.tap_local(drawn[0].center);
@@ -502,27 +504,27 @@ TEST_CASE_METHOD(LVGLTestFixture, "Setting the same badges again does not invali
                  "[exclude_badges][gcode_viewer]") {
     BadgeViewer v;
     const std::vector<ObjectBadge> badges = {make_badge(0, "Left", kLeftCenter)};
-    ui_gcode_viewer_set_object_badges(v.viewer, badges);
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, badges);
     v.draw();
     lv_display_t* disp = lv_display_get_default();
     REQUIRE(disp->inv_p == 0);
 
-    ui_gcode_viewer_set_object_badges(v.viewer, badges);
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, badges);
     CHECK(disp->inv_p == 0);
 
     auto changed = badges;
     changed[0].excluded = true;
-    ui_gcode_viewer_set_object_badges(v.viewer, changed);
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, changed);
     CHECK(disp->inv_p > 0);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "Excluding a selected object drops its selection",
                  "[exclude_badges][gcode_viewer]") {
     BadgeViewer v;
-    ui_gcode_viewer_set_highlighted_objects(v.viewer, {"Left", "Right"});
+    helix::ui::gcode_viewer_set_highlighted_objects(v.viewer, {"Left", "Right"});
     REQUIRE(GCodeLayerRendererTestAccess::selection(*v.renderer).highlighted().count("Left") == 1);
 
-    ui_gcode_viewer_set_excluded_objects(v.viewer, {"Left"});
+    helix::ui::gcode_viewer_set_excluded_objects(v.viewer, {"Left"});
     const auto& sel = GCodeLayerRendererTestAccess::selection(*v.renderer);
     CHECK(sel.highlighted().count("Left") == 0);
     CHECK(sel.highlighted().count("Right") == 1);
@@ -596,7 +598,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "A theme switch re-resolves the badge colour
     for (int i = 0; i < 8; ++i) {
         badges.push_back(make_badge(i, "obj_" + std::to_string(i), kLeftCenter));
     }
-    ui_gcode_viewer_set_object_badges(v.viewer, badges);
+    helix::ui::gcode_viewer_set_object_badges(v.viewer, badges);
     v.draw();
     const auto before = helix::test_access::gcode_viewer_badge_texts(v.viewer);
     REQUIRE(before.size() == 8);

@@ -8,9 +8,8 @@
 #include <functional>
 #include <string>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 /// Edit-mode configuration modal for a FavoriteMacroWidget.
 /// Tabs: Macro | Appearance | Options. Immediate-apply (no Save/Cancel).
@@ -36,7 +35,6 @@ class FavoriteMacroConfigModal : public Modal {
     static void close_cb(lv_event_t* e);
     static void require_confirm_cb(lv_event_t* e);
     static void defaults_cb(lv_event_t* e);
-    static void macro_row_cb(lv_event_t* e);
     static void color_swatch_cb(lv_event_t* e);
 
   protected:
@@ -47,14 +45,13 @@ class FavoriteMacroConfigModal : public Modal {
     void persist();
     void populate_macro_list();
     void populate_icon_grid();
-    void populate_color_grid();
     void refresh_highlights();
     void select_macro(const std::string& name);
     void select_icon(const std::string& name);
     void select_color(uint32_t color);
     void select_require_confirmation(bool enabled);
-    /// Opens the macro's saved-defaults editor (KNOWN_PARAMS macros only; the
-    /// Options row is hidden otherwise). Stays open behind it.
+    /// Opens the macro's saved-defaults editor (macro_takes_saved_defaults()
+    /// macros only; the Options row is hidden otherwise). Stays open behind it.
     void open_defaults_editor();
     /// Republishes fav_macro_has_param_defaults from the configured macro's
     /// parameter knowledge.
@@ -72,7 +69,6 @@ class FavoriteMacroConfigModal : public Modal {
 
     lv_obj_t* macro_list_ = nullptr;
     lv_obj_t* icon_grid_ = nullptr;
-    lv_obj_t* color_grid_ = nullptr;
 
     /// Saved-defaults editor opened from the Options tab. Owned here so it is
     /// never shown by an already-destroyed config modal.

@@ -14,12 +14,20 @@
 
 namespace helix::ingest {
 
+bool transport_available() {
+#ifdef __ANDROID__
+    return true;
+#else
+    return !helix::tls::find_ca_store().empty();
+#endif
+}
+
 std::pair<int, std::string> post(const std::string& url, const std::string& body, int timeout_sec,
                                  const std::string& content_encoding) {
 #ifdef __ANDROID__
     const std::vector<unsigned char> bytes(body.begin(), body.end());
     return helix::android::https_post_binary(url, bytes, "application/json", content_encoding,
-                                             HELIX_USER_AGENT, API_KEY, timeout_sec);
+                                             HELIX_USER_AGENT, kApiKey, timeout_sec);
 #else
     auto req = std::make_shared<HttpRequest>();
     req->method = HTTP_POST;
@@ -30,7 +38,7 @@ std::pair<int, std::string> post(const std::string& url, const std::string& body
         req->headers["Content-Encoding"] = content_encoding;
     }
     req->headers["User-Agent"] = HELIX_USER_AGENT;
-    req->headers["X-API-Key"] = API_KEY;
+    req->headers["X-API-Key"] = kApiKey;
     req->body = body;
 
     auto resp = helix::tls::trusted_request(req);

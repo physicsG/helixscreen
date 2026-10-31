@@ -12,7 +12,9 @@
 
 #include "hv/json.hpp"
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 // Test-only accessor (declared in the test TU), forward-declared here so the
 // friend grant below can name it explicitly.

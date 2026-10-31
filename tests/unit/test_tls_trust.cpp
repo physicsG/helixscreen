@@ -11,6 +11,7 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <cerrno>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -226,6 +227,9 @@ class TlsServer {
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };
+
+/// libhv's re-send delay for the downloads here; the retry itself is unchanged.
+constexpr uint32_t kRetryDelayMs = 10;
 
 std::string ok_response(const std::string& body) {
     return "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) +
@@ -462,6 +466,271 @@ TEST_CASE("trusted_request keeps credentials on its own origin only", "[tls]") {
     CHECK(mirror_request.find("Host: 127.0.0.1:" + std::to_string(mirror.port())) !=
           std::string::npos);
     SSL_CTX_free(static_cast<SSL_CTX*>(ctx));
+}
+
+// ============================================================================
+// TransferFailure: why a request came back empty (#1813)
+// ============================================================================
+
+namespace {
+
+using helix::tls::FailureKind;
+using helix::tls::TransferFailure;
+
+/// A loopback TCP server that writes `reply` to each connection as soon as it is
+/// accepted and closes it, without reading or speaking TLS.
+class RawServer {
+  public:
+    explicit RawServer(std::string reply) : reply_(std::move(reply)) {
+        fd_ = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(addr);
+        bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        listen(fd_, 4);
+        getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len);
+        port_ = ntohs(addr.sin_port);
+        thread_ = std::thread([this] {
+            while (!stop_) {
+                pollfd p{fd_, POLLIN, 0};
+                if (poll(&p, 1, 20) <= 0)
+                    continue;
+                const int c = accept(fd_, nullptr, nullptr);
+                (void)!write(c, reply_.data(), reply_.size());
+                close(c);
+            }
+        });
+    }
+    ~RawServer() {
+        stop_ = true;
+        thread_.join();
+        close(fd_);
+    }
+    std::string url(const std::string& scheme, const std::string& path) const {
+        return scheme + "://127.0.0.1:" + std::to_string(port_) + path;
+    }
+
+  private:
+    std::string reply_;
+    int fd_ = -1;
+    int port_ = 0;
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
+
+/// A loopback port nothing listens on.
+int closed_port() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(addr);
+    bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
+    close(fd);
+    return ntohs(addr.sin_port);
+}
+
+TransferFailure download_failure(const std::string& url, const std::string& dest, void* ctx) {
+    TransferFailure failure;
+    CHECK(detail::trusted_download(url, dest, nullptr, ctx, &failure, kRetryDelayMs) == 0);
+    return failure;
+}
+
+} // namespace
+
+TEST_CASE("trusted_download names why it failed", "[tls][transfer_failure]") {
+    TempDir dir;
+    TestCert trusted("IP:127.0.0.1");
+    void* ctx = make_client_ctx({trusted.write_pem(dir), {}});
+    const std::string dest = (dir.path / "out.bin").string();
+
+    SECTION("an HTTP error status") {
+        TlsServer server(trusted, [](const std::string&, const std::string&) {
+            return std::string("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: "
+                               "close\r\n\r\n");
+        });
+        const auto f = download_failure(server.url("/missing"), dest, ctx);
+        CHECK(f.kind == FailureKind::Http);
+        CHECK(f.http_status == 404);
+        CHECK(f.host == "127.0.0.1");
+    }
+
+    SECTION("a certificate the store does not trust") {
+        TestCert stranger("IP:127.0.0.1");
+        TlsServer server(stranger,
+                         [](const std::string&, const std::string&) { return ok_response("x"); });
+        const auto f = download_failure(server.url("/f"), dest, ctx);
+        CHECK(f.kind == FailureKind::TlsCert);
+        CHECK(f.code != 0);
+        CHECK(f.http_status == -1);
+    }
+
+    SECTION("a trusted certificate for another host") {
+        TestCert wrong_name("DNS:elsewhere.test");
+        void* wrong_ctx = make_client_ctx({wrong_name.write_pem(dir), {}});
+        TlsServer server(wrong_name,
+                         [](const std::string&, const std::string&) { return ok_response("x"); });
+        const auto f = download_failure(server.url("/f"), dest, wrong_ctx);
+        CHECK(f.kind == FailureKind::TlsCert);
+        CHECK(f.code == X509_V_ERR_HOSTNAME_MISMATCH);
+        SSL_CTX_free(static_cast<SSL_CTX*>(wrong_ctx));
+    }
+
+    SECTION("a server that does not speak TLS") {
+        RawServer server("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        const auto f = download_failure(server.url("https", "/f"), dest, ctx);
+        CHECK(f.kind == FailureKind::TlsHandshake);
+    }
+
+    SECTION("a refused connection") {
+        const std::string url = "https://127.0.0.1:" + std::to_string(closed_port()) + "/f";
+        const auto f = download_failure(url, dest, ctx);
+        CHECK(f.kind == FailureKind::Connect);
+        CHECK(f.code == ECONNREFUSED);
+    }
+
+    SECTION("a body shorter than its Content-Length") {
+        TlsServer server(trusted, [](const std::string&, const std::string&) {
+            return std::string("HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: "
+                               "close\r\n\r\n0123456789");
+        });
+        const auto f = download_failure(server.url("/f"), dest, ctx);
+        CHECK(f.kind == FailureKind::ShortBody);
+        CHECK(f.http_status == 200);
+    }
+
+    SECTION("a 200 with an empty body") {
+        TlsServer server(trusted,
+                         [](const std::string&, const std::string&) { return ok_response(""); });
+        const auto f = download_failure(server.url("/f"), dest, ctx);
+        CHECK(f.kind == FailureKind::EmptyBody);
+        CHECK(f.http_status == 200);
+    }
+
+    SECTION("a 200 with an empty close-delimited body") {
+        TlsServer server(trusted, [](const std::string&, const std::string&) {
+            return std::string("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+        });
+        const auto f = download_failure(server.url("/f"), dest, ctx);
+        CHECK(f.kind == FailureKind::EmptyBody);
+    }
+
+    SECTION("a connection closed before any response") {
+        RawServer server("");
+        const auto f = download_failure(server.url("http", "/f"), dest, ctx);
+        CHECK(f.kind == FailureKind::NoResponse);
+    }
+
+    SECTION("a redirect it refuses to follow") {
+        TlsServer plain(nullptr,
+                        [](const std::string&, const std::string&) { return ok_response("p"); });
+        TlsServer server(trusted, [&](const std::string&, const std::string&) {
+            return redirect_response(plain.url("/x"));
+        });
+        const auto f = download_failure(server.url("/f"), dest, ctx);
+        CHECK(f.kind == FailureKind::Redirect);
+    }
+
+    SECTION("a destination it cannot create") {
+        TlsServer server(trusted,
+                         [](const std::string&, const std::string&) { return ok_response("x"); });
+        const auto f =
+            download_failure(server.url("/f"), (dir.path / "no-such-dir" / "out").string(), ctx);
+        CHECK(f.kind == FailureKind::FileOpen);
+        CHECK(f.code == ENOENT);
+    }
+
+    CHECK_FALSE(std::filesystem::exists(dest));
+    CHECK_FALSE(std::filesystem::exists(dest + ".download"));
+    SSL_CTX_free(static_cast<SSL_CTX*>(ctx));
+}
+
+TEST_CASE("trusted_download restarts the file when libhv retries a dropped body",
+          "[tls][transfer_failure]") {
+    // libhv re-sends a request once when the connection drops mid-response, and the
+    // retried response streams its body from the first byte again.
+    TempDir dir;
+    TestCert trusted("IP:127.0.0.1");
+    void* ctx = make_client_ctx({trusted.write_pem(dir), {}});
+    std::atomic<int> calls{0};
+    TlsServer server(trusted, [&](const std::string&, const std::string&) {
+        if (calls++ == 0)
+            return std::string("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n01234");
+        return std::string("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: "
+                           "close\r\n\r\n0123456789");
+    });
+    const std::string dest = (dir.path / "retried.bin").string();
+    TransferFailure failure;
+    CHECK(detail::trusted_download(server.url("/f"), dest, nullptr, ctx, &failure, kRetryDelayMs) ==
+          10);
+    CHECK(failure.kind == FailureKind::None);
+    CHECK(calls == 2);
+    std::ifstream in(dest);
+    std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(body == "0123456789");
+    SSL_CTX_free(static_cast<SSL_CTX*>(ctx));
+}
+
+TEST_CASE("trusted_download leaves the failure empty on success", "[tls][transfer_failure]") {
+    TempDir dir;
+    TestCert trusted("IP:127.0.0.1");
+    void* ctx = make_client_ctx({trusted.write_pem(dir), {}});
+    TlsServer server(trusted,
+                     [](const std::string&, const std::string&) { return ok_response("payload"); });
+    TransferFailure failure;
+    CHECK(detail::trusted_download(server.url("/f"), (dir.path / "ok.bin").string(), nullptr, ctx,
+                                   &failure) == 7);
+    CHECK(failure.kind == FailureKind::None);
+    SSL_CTX_free(static_cast<SSL_CTX*>(ctx));
+}
+
+TEST_CASE("classify_send_failure separates the connection stages", "[tls][transfer_failure]") {
+    using detail::classify_send_failure;
+    using detail::SendTrace;
+    const auto kind = [](int rc, SendTrace t, bool resolves) {
+        return classify_send_failure(rc, t, resolves);
+    };
+    SendTrace none;
+    SendTrace in_handshake;
+    in_handshake.handshake_started = true;
+    SendTrace after_handshake = in_handshake;
+    after_handshake.handshake_done = true;
+    SendTrace rejected = in_handshake;
+    rejected.cert_error = X509_V_ERR_CERT_UNTRUSTED;
+
+    CHECK(kind(-1, rejected, true).kind == FailureKind::TlsCert);
+    CHECK(kind(-1, rejected, true).code == X509_V_ERR_CERT_UNTRUSTED);
+    CHECK(kind(-1, in_handshake, true).kind == FailureKind::TlsHandshake);
+    CHECK(kind(1100, after_handshake, true).kind == FailureKind::Timeout);
+    CHECK(kind(1100, none, true).kind == FailureKind::Timeout);
+    CHECK(kind(-1, none, false).kind == FailureKind::Dns);
+    CHECK(kind(-ECONNREFUSED, none, true).kind == FailureKind::Connect);
+    CHECK(kind(-ECONNREFUSED, none, true).code == ECONNREFUSED);
+    CHECK(kind(-ETIMEDOUT, none, true).kind == FailureKind::Timeout);
+    CHECK(kind(ECONNRESET, after_handshake, true).kind == FailureKind::Transfer);
+    CHECK(kind(ECONNRESET, after_handshake, true).code == ECONNRESET);
+    CHECK(kind(EAGAIN, after_handshake, true).kind == FailureKind::Timeout);
+}
+
+TEST_CASE("failure_kind_name gives every kind a fixed token", "[tls][transfer_failure]") {
+    using helix::tls::failure_kind_name;
+    CHECK(std::string(failure_kind_name(FailureKind::None)).empty());
+    CHECK(std::string(failure_kind_name(FailureKind::Http)) == "http");
+    CHECK(std::string(failure_kind_name(FailureKind::TlsCert)) == "tls_cert");
+    CHECK(std::string(failure_kind_name(FailureKind::TlsHandshake)) == "tls_handshake");
+    CHECK(std::string(failure_kind_name(FailureKind::Dns)) == "dns");
+    CHECK(std::string(failure_kind_name(FailureKind::Connect)) == "connect");
+    CHECK(std::string(failure_kind_name(FailureKind::Timeout)) == "timeout");
+    CHECK(std::string(failure_kind_name(FailureKind::Transfer)) == "transfer");
+    CHECK(std::string(failure_kind_name(FailureKind::NoResponse)) == "no_response");
+    CHECK(std::string(failure_kind_name(FailureKind::ShortBody)) == "short_body");
+    CHECK(std::string(failure_kind_name(FailureKind::EmptyBody)) == "empty_body");
+    CHECK(std::string(failure_kind_name(FailureKind::Redirect)) == "redirect");
+    CHECK(std::string(failure_kind_name(FailureKind::FileOpen)) == "file_open");
+    CHECK(std::string(failure_kind_name(FailureKind::FileWrite)) == "file_write");
+    CHECK(std::string(failure_kind_name(FailureKind::FileRename)) == "file_rename");
 }
 
 #endif // WITH_OPENSSL

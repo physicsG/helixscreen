@@ -10,9 +10,6 @@
 #ifndef HELIX_MAX_FONT_TIER
 #define HELIX_MAX_FONT_TIER 6 // default: all tiers (micro=0 .. xxlarge=6)
 #endif
-#ifndef HELIX_HAS_HIDPI_FONTS
-#define HELIX_HAS_HIDPI_FONTS 0 // conservative: assume the 48/64 faces are not linked
-#endif
 
 namespace helix::system {
 
@@ -31,7 +28,7 @@ struct FontMapping {
 // ui_wizard_language_chooser.cpp. Taking either guard's faces' address
 // unconditionally would produce undefined references.
 // clang-format off
-static const FontMapping REGULAR_FONTS[] = {
+static const FontMapping kRegularFonts[] = {
     {&noto_sans_8, "noto_sans_cjk_8.bin"},
     {&noto_sans_10, "noto_sans_cjk_10.bin"},
     {&noto_sans_11, "noto_sans_cjk_11.bin"},
@@ -62,7 +59,7 @@ static const FontMapping REGULAR_FONTS[] = {
 #endif
 };
 
-static const FontMapping BOLD_FONTS[] = {
+static const FontMapping kBoldFonts[] = {
     {&noto_sans_bold_14, "noto_sans_cjk_bold_14.bin"},
     {&noto_sans_bold_16, "noto_sans_cjk_bold_16.bin"},
     {&noto_sans_bold_18, "noto_sans_cjk_bold_18.bin"},
@@ -82,7 +79,7 @@ static const FontMapping BOLD_FONTS[] = {
 #endif
 };
 
-static const FontMapping LIGHT_FONTS[] = {
+static const FontMapping kLightFonts[] = {
     {&noto_sans_light_10, "noto_sans_cjk_light_10.bin"},
     {&noto_sans_light_11, "noto_sans_cjk_light_11.bin"},
     {&noto_sans_light_12, "noto_sans_cjk_light_12.bin"},
@@ -109,7 +106,7 @@ static const FontMapping LIGHT_FONTS[] = {
 };
 // clang-format on
 
-static constexpr const char* CJK_FONT_DIR = "A:assets/fonts/cjk/";
+static constexpr const char* kCjkFontDir = "A:assets/fonts/cjk/";
 
 CjkFontManager& CjkFontManager::instance() {
     static CjkFontManager s_instance;
@@ -149,7 +146,7 @@ bool CjkFontManager::load() {
 
     auto load_set = [this](const FontMapping* mappings, size_t count) {
         for (size_t i = 0; i < count; ++i) {
-            std::string path = std::string(CJK_FONT_DIR) + mappings[i].bin_filename;
+            std::string path = std::string(kCjkFontDir) + mappings[i].bin_filename;
             lv_font_t* cjk = lv_binfont_create(path.c_str());
             if (cjk) {
                 set_fallback(mappings[i].compiled, cjk);
@@ -160,9 +157,9 @@ bool CjkFontManager::load() {
         }
     };
 
-    load_set(REGULAR_FONTS, std::size(REGULAR_FONTS));
-    load_set(BOLD_FONTS, std::size(BOLD_FONTS));
-    load_set(LIGHT_FONTS, std::size(LIGHT_FONTS));
+    load_set(kRegularFonts, std::size(kRegularFonts));
+    load_set(kBoldFonts, std::size(kBoldFonts));
+    load_set(kLightFonts, std::size(kLightFonts));
 
     if (loaded_fonts_.empty()) {
         spdlog::error("[CjkFontManager] No CJK fonts loaded — check assets/fonts/cjk/");

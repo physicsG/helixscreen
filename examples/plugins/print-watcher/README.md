@@ -25,6 +25,10 @@ worked example for a plugin overlay that controls its own settings.
 - `helix.printer.watch`: state edges classify into events against the six
   states the screen reports; the filename and progress snapshot rides the
   event, not a later read.
+  An ending (completed, cancelled, failed) needs a print that was running,
+  and the first state reported after the printer connects is a silent
+  baseline, so a screen reboot never announces the job it finds on the
+  printer.
 - `helix.settings.get`/`set`/`on_change`: the detail overlay's switches
   write through `set` - the same validation and persistence path the
   generated settings screen uses - and `on_change` mirrors every accepted
@@ -70,5 +74,9 @@ print's edges will queue real POSTs to the configured destination.
 - `i18n/de.xml` the translation pack; only strings the app catalog does
   not already say.
 
-A destination is deliberately never echoed in full on the tile: the detail
-overlay shows it, the generated settings screen edits it.
+A destination is a credential (a ntfy topic, a bot token, a webhook path), so
+neither the tile nor the overlay ever shows it in full: they show the service,
+the host and the last four characters. Failures show an HTTP status or the
+phrase "network error", never the backend's error text, which names the
+request URL and so the credential. The generated settings screen is the one
+place that edits the destination.

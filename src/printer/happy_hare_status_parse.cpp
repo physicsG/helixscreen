@@ -182,6 +182,8 @@ constexpr ParamRow kParams[] = {
     {"sync_to_extruder", "sync_to_extruder", "sync_to_extruder", "sync_to_extruder",
      ParamScope::Unit},
     {"heater_max_temp", "heater_max_temp", "heater_max_temp", "heater_max_temp", ParamScope::Unit},
+    // The HUMIDITY= target MMU_HEATER applies when a start names none. v4 only.
+    {"heater_default_dry_humidity", "", "", "heater_default_dry_humidity", ParamScope::Unit},
     // Clog detection mode, 0 off, 1 static (manual), 2 automatic, in every
     // version. In static mode the length is the calibrated clog length before
     // 3.42 and the encoder's maximum motion from 3.42 on.

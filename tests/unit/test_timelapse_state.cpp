@@ -39,6 +39,7 @@ TEST_CASE("TimelapseState: init_subjects creates valid subjects", "[timelapse_st
     REQUIRE(lv_subject_get_int(state.get_frame_count_subject()) == 0);
 
     state.deinit_subjects();
+    flush_queue();
 }
 
 TEST_CASE("TimelapseState: deinit_subjects cleans up", "[timelapse_state]") {
@@ -56,6 +57,7 @@ TEST_CASE("TimelapseState: deinit_subjects cleans up", "[timelapse_state]") {
     state.init_subjects(false);
     REQUIRE(lv_subject_get_int(state.get_frame_count_subject()) == 0);
     state.deinit_subjects();
+    flush_queue();
 }
 
 // ============================================================================

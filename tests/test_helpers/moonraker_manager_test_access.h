@@ -7,6 +7,7 @@
 #include "moonraker_manager.h"
 
 #include <memory>
+#include <mutex>
 
 namespace helix {
 
@@ -21,6 +22,22 @@ class MoonrakerManagerTestAccess {
     static void install_client(MoonrakerManager& mgr, std::unique_ptr<IMoonrakerClient> client) {
         mgr.m_client = std::move(client);
         mgr.m_initialized = true;
+    }
+
+    /// Whether a PrintStopReasonTracker is tapping the manager's client.
+    static bool tracks_stop_reason(const MoonrakerManager& mgr) {
+        return mgr.m_print_stop_reason != nullptr;
+    }
+
+    /// Queues a connection-state edge the way the client's state-change callback does,
+    /// for the next process_notifications().
+    static void queue_connection_state(MoonrakerManager& mgr, int old_state, int new_state) {
+        nlohmann::json state_change;
+        state_change["_connection_state"] = true;
+        state_change["old_state"] = old_state;
+        state_change["new_state"] = new_state;
+        std::lock_guard<std::mutex> lock(mgr.m_notification_mutex);
+        mgr.m_notification_queue.push({std::move(state_change), 0});
     }
 };
 

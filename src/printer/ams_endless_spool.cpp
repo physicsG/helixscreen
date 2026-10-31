@@ -27,13 +27,13 @@ std::string endless_spool_restriction_text(EndlessSpoolRestriction restriction) 
     case EndlessSpoolRestriction::MultiUnit:
         return lv_tr("Cannot be changed from here on a multi-unit MMU");
     case EndlessSpoolRestriction::FirmwareManaged:
-        return lv_tr("The printer's firmware chooses the backup spool itself");
+        return lv_tr("The printer's firmware chooses where to switch on runout");
     case EndlessSpoolRestriction::NotReady:
         return lv_tr("Waiting for the filament system to report its state");
     case EndlessSpoolRestriction::PluginMissing:
-        return lv_tr("No automatic backup-spool package is installed");
+        return lv_tr("No Endless Spool package is installed");
     case EndlessSpoolRestriction::PluginReadOnly:
-        return lv_tr("Configured in the backup-spool package, not from here");
+        return lv_tr("Endless Spool is configured in its package, not from here");
     }
     return {};
 }
@@ -63,7 +63,7 @@ EndlessSpoolStatus endless_spool_status(const EndlessSpoolCapabilities& caps) {
             // restriction text is what actually renders.
             out.text = endless_spool_restriction_text(caps.restriction);
             if (out.text.empty()) {
-                out.text = lv_tr("No automatic backup-spool package is installed");
+                out.text = lv_tr("No Endless Spool package is installed");
             }
         }
         return out;
@@ -72,7 +72,7 @@ EndlessSpoolStatus endless_spool_status(const EndlessSpoolCapabilities& caps) {
     switch (caps.enabled) {
     case EndlessSpoolEnabled::On:
         out.kind = EndlessSpoolStatusKind::On;
-        out.text = lv_tr("Switches to a backup spool on runout");
+        out.text = lv_tr("Switches to another spool on runout");
         break;
     case EndlessSpoolEnabled::Off:
         out.kind = EndlessSpoolStatusKind::Off;
@@ -80,16 +80,15 @@ EndlessSpoolStatus endless_spool_status(const EndlessSpoolCapabilities& caps) {
         break;
     case EndlessSpoolEnabled::Unknown:
         out.kind = EndlessSpoolStatusKind::Unknown;
-        out.text = lv_tr("Backup spool switching state unknown");
+        out.text = lv_tr("Endless Spool state unknown");
         break;
     case EndlessSpoolEnabled::OnWithoutBackup:
         // The setting is on, so this is not Off - but as loaded right now the
         // runout would still stop the print, and saying "it will switch"
         // (the On sentence) is the false promise this state exists to retract.
         out.kind = EndlessSpoolStatusKind::OnWithoutBackup;
-        out.text =
-            lv_tr("Auto-refill is on but no two slots hold matching filament, so nothing will "
-                  "switch on runout");
+        out.text = lv_tr("Endless Spool is on but no two slots hold matching filament, so nothing "
+                         "will switch on runout");
         break;
     }
 
@@ -178,18 +177,9 @@ std::vector<int> endless_spool_backup_edges(const EndlessSpoolConfig& cfg, int s
             continue;
         }
         // Undirected: project the clique onto a ring, members[i] -> members[i+1]
-        // and the last member back to the first.
-        //
-        // The projection this replaced pointed every member at the FIRST other
-        // member, which for a 4-gate Happy Hare group drew 0->1, 1->0, 2->0,
-        // 3->0 - a picture that says "slot 1 is everyone's backup", which is not
-        // what a clique means. A ring says the true thing the widget is able to
-        // say: every member hands off to another member, and following the
-        // arrows visits the whole group exactly once. Neither shape is the whole
-        // relation - see endless_spool_status()' sibling note and the
-        // ui_endless_spool_arrows widget, which has one target per source and no
-        // way to draw a pool - but only one of them privileges an arbitrary
-        // member.
+        // and the last member back to the first. Every member hands off to
+        // another member and following the edges visits the whole group, so no
+        // member is privileged as everyone's backup.
         for (size_t i = 0; i < group.members.size(); ++i) {
             assign(group.members[i], group.members[(i + 1) % group.members.size()]);
         }

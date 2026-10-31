@@ -13,34 +13,36 @@
   <!--
     AMS Current Tool Indicator
 
-    Compact display showing the currently active tool/filament during a print.
-    Used in the print status panel to name the tool that is printing.
+    Compact display of the filament the printing tool is using, in the print
+    status panel. The tool itself is named by the numbered nozzle icon in the
+    temperature card above, so this row carries only what nothing else there
+    shows: runout state, the filament's colour and its name.
 
     Features:
-    - Shows the tool's physical label (Tool 1, or Toolhead 1 where the backend
-      names the printing end differently) with filament color swatch
+    - Filament colour swatch, then the filament's name in the room the row
+      leaves it
     - Auto-hides when no AMS is available (slot_count == 0)
     - Auto-hides when no tool is active (current_tool == -1)
     - Clickable to open AMS panel for slot management
 
     Requires C++ backing (ui_ams_current_tool.cpp) to handle:
-    - Color swatch background color (from ams_current_color subject)
+    - The colour swatch's paint: the loaded filament's colour, colours and
+      finish (AmsState current_color / current_colors / current_finish)
     - Click handler to open AMS panel
 
     Binds to subjects:
-    - ams_current_tool_text: string ("Tool 1", "Toolhead 1", or the "no active tool" placeholder)
+    - ams_current_material_text: string, the loaded filament's name ("Red PLA")
     - ams_slot_count: int (0=no AMS, >0=AMS available)
     - ams_current_tool: int (negative=none, 0+=tool index) for visibility
 
     The leading glyph is filament_sensor_indicator, not a plain icon, so this
-    block carries runout state as well as lane identity — on an AMS printer it
-    is the only filament glyph in the status row, and a muted icon beside a tool
-    label says nothing about whether that tool's lane has run out. Where no sensor
-    is configured the indicator hides itself and the tool label stands alone.
+    block carries runout state as well as the filament — on an AMS printer it
+    is the only filament glyph in the status row. Where no sensor is configured
+    the indicator hides itself and the swatch leads.
   -->
   <view name="ams_current_tool"
-        extends="lv_obj" width="content" height="content" style_pad_all="0" flex_flow="row"
-        style_flex_cross_place="center" style_pad_gap="#space_sm" clickable="true" style_radius="#border_radius">
+        extends="lv_obj" width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+        style_pad_gap="#space_sm" clickable="true" style_radius="#border_radius">
     <style name="styles.press_wash" selector="pressed"/>
     <!-- Hide when no AMS available -->
     <bind_flag_if_eq subject="ams_slot_count" flag="hidden" ref_value="0"/>
@@ -50,13 +52,8 @@
     <event_cb trigger="clicked" callback="on_ams_current_tool_clicked"/>
     <!-- Filament/spool glyph, colored by runout state (see note above) -->
     <filament_sensor_indicator subject="$runout_subject" size="sm"/>
-    <!-- The tool's physical label (Tool 1, or Toolhead 1 on a backend that names
-         the printing end differently). Overwritten at runtime by the binding. -->
-    <text_small name="tool_label" text="Tool 1" bind_text="ams_current_tool_text"/>
-    <!-- Color swatch showing current filament color (color set via C++) -->
-    <lv_obj name="color_swatch"
-            width="16" height="16" style_radius="8" style_border_width="1" style_border_color="#text_muted"
-            style_border_opa="80" style_bg_color="#text_muted" style_bg_opa="255" scrollable="false" clickable="false"
-            event_bubble="true"/>
+    <!-- The loaded filament's colour, painted from C++ -->
+    <color_dot name="color_swatch" color="#text_muted" size="#space_lg"/>
+    <text_small name="material_label" flex_grow="1" bind_text="ams_current_material_text" long_mode="scroll_circular"/>
   </view>
 </component>

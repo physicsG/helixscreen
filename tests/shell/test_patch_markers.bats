@@ -206,7 +206,7 @@ EOF
     watched=$(awk -F'\t' 'NR>1 && !s[$4"/"$5]++ \
         {print ($4=="LVGL_DIR" ? "lib/lvgl" : $4=="LIBHV_DIR" ? "lib/libhv" : "lib/lua") "/" $5}' mk/patch-markers.tsv)
     grep -q '^lib/lua/' <<<"$watched"
-    deps=$(make -pn help 2>/dev/null | sed -n 's/^PATCH_MARKER_DEPS := //p' | tr ' ' '\n')
+    deps=$(make_db | sed -n 's/^PATCH_MARKER_DEPS := //p' | tr ' ' '\n')
     missing=$(printf '%s\n' "$watched" | while IFS= read -r f; do
         [ -f "$f" ] && ! grep -qxF "$f" <<<"$deps" && printf '%s ' "$f"; done; true)
     [ -z "$missing" ] || { printf 'marker files not watched: %s\n' "$missing"; return 1; }
@@ -225,7 +225,7 @@ EOF
         | while IFS= read -r f; do [ -f "$f" ] || printf '%s ' "$f"; done)
     [ -z "$missing" ] || { printf 'watched files absent, graph incomplete: %s\n' "$missing"; return 1; }
     graph="$BATS_TEST_TMPDIR/pi-graph.log"
-    make PLATFORM_TARGET=pi SKIP_OPTIONAL_DEPS=1 -n -B build/pi/.patch-markers-verified \
+    scratch_make PLATFORM_TARGET=pi SKIP_OPTIONAL_DEPS=1 -n -B build/pi/.patch-markers-verified \
         > "$graph" 2>&1 || true
     grep -q 'patch-markers-verified' "$graph" \
         || { printf 'dry run never walked the marker stamp\n'; head -5 "$graph"; return 1; }

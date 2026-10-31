@@ -1,0 +1,161 @@
+# AD5M Pro, Forge-X 1.4.2, 2026-10-15: Moonraker gcode_store responses from SDCARD_PRINT_FILE
+# (16:19:28.442) to the first layer. "HH:MM:SS.mmm text", a multi-line message joined with \n.
+16:19:28.768 File opened:AD5X_enclosure_v.1.02_Lehaiver(LAST)_ABS_1h27m.gcode Size:8116577
+16:19:28.771 File selected
+16:19:29.111 echo: START_PRINT
+16:19:29.135 // Display backlight: 50%
+16:19:31.735 info Global Z-Offset management is used. SKIP_ZOFFSET and Z_OFFSET parameters are ignored
+16:19:31.736 // Z-Offset set from global parameters: 0.10000000000000001
+16:19:31.736 info Alt. screen is being used
+16:19:31.736 info START_PRINT BED_TEMP=105.0 EXTRUDER_TEMP=265.0 FORCE_LEVELING=0 FORCE_KAMP=0 Z_OFFSET=0.0 SKIP_ZOFFSET=0 SKIP_LEVELING=0 MESH=
+16:19:31.736 info Extruder temperature: 265.0
+16:19:31.736 info Bed temperature: 105.0
+16:19:31.736 info Launching MD5 checksum verification
+16:19:31.737 INFO: Begin MD5 check...
+16:19:31.737 WARNING: No MD5 checksum found in G-code.
+16:19:37.444 // Initiating KAMP bed leveling
+16:19:37.444 info Started stock nozzle cleaning 265.0/105.0
+16:19:45.636 // Wait bed temperature to reach 105 Cº
+16:27:12.275 // Temperature waiting done.
+16:27:12.286 // Wait extruder temperature to reach 265 Cº
+16:28:01.629 // Temperature waiting done.
+16:28:01.659 !! Detected bed pressure. Please ensure the bed is clean!
+16:28:07.652 // probe at -10.000,109.000 is z=-2.170000
+16:28:08.816 // probe at -10.000,109.000 is z=-2.160000
+16:28:09.972 // probe at -10.000,109.000 is z=-2.167500
+16:28:09.978 // Result is z=-2.165833
+16:28:13.615 // probe at 20.000,109.000 is z=-2.080000
+16:28:14.773 // probe at 20.000,109.000 is z=-2.067500
+16:28:15.936 // probe at 20.000,109.000 is z=-2.092500
+16:28:15.941 // Result is z=-2.080000
+16:28:15.966 info Cleaning Z-Offsets:
+16:28:15.972      -2.1658333331508257
+16:28:15.976      -2.079999999816986
+16:28:15.980  diff: 0.08583333333383969
+16:28:15.986 // Clean to X: -10, Z: -2.0158333331508258
+16:28:17.916 // Clean to X: 20, Z: -1.9299999998169861
+16:28:19.751 // Clean to X: 0, Z: -1.9866499998173204
+16:28:21.172 // Clean to X: 20, Z: -1.9299999998169861
+16:28:22.593 // Clean to X: -10, Z: -2.1158333331508259
+16:28:24.435 // Wait extruder temperature to reach 120 Cº
+16:30:16.113 // Temperature waiting done.
+16:30:17.536 // No objects detected! Check your gcode and make sure that EXCLUDE_OBJECT_DEFINE is happening before BED_MESH_CALIBRATE is called. Defaulting to regular meshing.
+16:30:20.800 // Generating new points...
+16:30:20.805 // bed_mesh: generated points\n// Index |  Tool Adjusted  |   Probe
+16:30:20.810 // 0   | (-105.0, -105.0)| (-105.0, -105.0)
+16:30:20.814 // 1   | (-52.5, -105.0) | (-52.5, -105.0)
+16:30:20.818 // 2   | (0.0, -105.0)   | (0.0, -105.0)
+16:30:20.823 // 3   | (52.5, -105.0)  | (52.5, -105.0)
+16:30:20.827 // 4   | (105.0, -105.0) | (105.0, -105.0)
+16:30:20.828 // 5   | (105.0, -52.5)  | (105.0, -52.5)
+16:30:20.833 // 6   | (52.5, -52.5)   | (52.5, -52.5)
+16:30:20.839 // 7   | (0.0, -52.5)    | (0.0, -52.5)
+16:30:20.840 // 8   | (-52.5, -52.5)  | (-52.5, -52.5)
+16:30:20.848 // 9   | (-105.0, -52.5) | (-105.0, -52.5)
+16:30:20.848 // 10  | (-105.0, 0.0)   | (-105.0, 0.0)
+16:30:20.853 // 11  | (-52.5, 0.0)    | (-52.5, 0.0)
+16:30:20.854 // 12  | (0.0, 0.0)      | (0.0, 0.0)
+16:30:20.858 // 13  | (52.5, 0.0)     | (52.5, 0.0)
+16:30:20.860 // 14  | (105.0, 0.0)    | (105.0, 0.0)
+16:30:20.860 // 15  | (105.0, 52.5)   | (105.0, 52.5)
+16:30:20.864 // 16  | (52.5, 52.5)    | (52.5, 52.5)
+16:30:20.865 // 17  | (0.0, 52.5)     | (0.0, 52.5)
+16:30:20.870 // 18  | (-52.5, 52.5)   | (-52.5, 52.5)
+16:30:20.870 // 19  | (-105.0, 52.5)  | (-105.0, 52.5)
+16:30:20.876 // 20  | (-105.0, 105.0) | (-105.0, 105.0)
+16:30:20.879 // 21  | (-52.5, 105.0)  | (-52.5, 105.0)
+16:30:20.880 // 22  | (0.0, 105.0)    | (0.0, 105.0)
+16:30:20.885 // 23  | (52.5, 105.0)   | (52.5, 105.0)
+16:30:20.888 // 24  | (105.0, 105.0)  | (105.0, 105.0)
+16:30:25.308 // probe at -105.000,-105.000 is z=-2.025000
+16:30:26.488 // probe at -105.000,-105.000 is z=-2.015000
+16:30:27.650 // probe at -105.000,-105.000 is z=-2.000000
+16:30:31.010 // probe at -52.500,-105.000 is z=-2.022500
+16:30:32.164 // probe at -52.500,-105.000 is z=-2.010000
+16:30:33.318 // probe at -52.500,-105.000 is z=-2.012500
+16:30:36.676 // probe at 0.000,-105.000 is z=-2.062500
+16:30:37.830 // probe at 0.000,-105.000 is z=-2.062500
+16:30:39.020 // probe at 0.000,-105.000 is z=-2.057500
+16:30:42.378 // probe at 52.500,-105.000 is z=-2.030000
+16:30:43.543 // probe at 52.500,-105.000 is z=-2.025000
+16:30:44.701 // probe at 52.500,-105.000 is z=-2.040000
+16:30:48.050 // probe at 105.000,-105.000 is z=-1.917500
+16:30:49.202 // probe at 105.000,-105.000 is z=-1.897500
+16:30:50.358 // probe at 105.000,-105.000 is z=-1.907500
+16:30:53.693 // probe at 105.000,-52.500 is z=-2.050000
+16:30:54.850 // probe at 105.000,-52.500 is z=-2.040000
+16:30:56.004 // probe at 105.000,-52.500 is z=-2.020000
+16:30:59.362 // probe at 52.500,-52.500 is z=-2.055000
+16:31:00.504 // probe at 52.500,-52.500 is z=-1.992500
+16:31:01.676 // probe at 52.500,-52.500 is z=-2.050000
+16:31:05.032 // probe at 0.000,-52.500 is z=-2.030000
+16:31:06.190 // probe at 0.000,-52.500 is z=-2.035000
+16:31:07.360 // probe at 0.000,-52.500 is z=-2.020000
+16:31:10.704 // probe at -52.500,-52.500 is z=-2.007500
+16:31:11.872 // probe at -52.500,-52.500 is z=-2.002500
+16:31:13.038 // probe at -52.500,-52.500 is z=-2.045000
+16:31:16.412 // probe at -105.000,-52.500 is z=-2.107500
+16:31:17.556 // probe at -105.000,-52.500 is z=-2.055000
+16:31:18.715 // probe at -105.000,-52.500 is z=-2.055000
+16:31:22.108 // probe at -105.000,0.000 is z=-2.200000
+16:31:23.266 // probe at -105.000,0.000 is z=-2.202500
+16:31:24.422 // probe at -105.000,0.000 is z=-2.200000
+16:31:27.832 // probe at -52.500,0.000 is z=-2.132500
+16:31:28.989 // probe at -52.500,0.000 is z=-2.130000
+16:31:30.144 // probe at -52.500,0.000 is z=-2.125000
+16:31:33.536 // probe at 0.000,0.000 is z=-2.102500
+16:31:34.702 // probe at 0.000,0.000 is z=-2.072500
+16:31:35.867 // probe at 0.000,0.000 is z=-2.107500
+16:31:39.244 // probe at 52.500,0.000 is z=-2.060000
+16:31:40.400 // probe at 52.500,0.000 is z=-2.047500
+16:31:41.555 // probe at 52.500,0.000 is z=-2.055000
+16:31:44.930 // probe at 105.000,0.000 is z=-2.107500
+16:31:46.075 // probe at 105.000,0.000 is z=-2.060000
+16:31:47.245 // probe at 105.000,0.000 is z=-2.070000
+16:31:50.620 // probe at 105.000,52.500 is z=-2.107500
+16:31:51.779 // probe at 105.000,52.500 is z=-2.112500
+16:31:52.934 // probe at 105.000,52.500 is z=-2.115000
+16:31:56.324 // probe at 52.500,52.500 is z=-2.115000
+16:31:57.468 // probe at 52.500,52.500 is z=-2.052500
+16:31:58.624 // probe at 52.500,52.500 is z=-2.055000
+16:32:02.000 // probe at 0.000,52.500 is z=-2.115000
+16:32:03.159 // probe at 0.000,52.500 is z=-2.125000
+16:32:04.318 // probe at 0.000,52.500 is z=-2.130000
+16:32:07.728 // probe at -52.500,52.500 is z=-2.220000
+16:32:08.874 // probe at -52.500,52.500 is z=-2.167500
+16:32:10.031 // probe at -52.500,52.500 is z=-2.182500
+16:32:13.455 // probe at -105.000,52.500 is z=-2.240000
+16:32:14.622 // probe at -105.000,52.500 is z=-2.250000
+16:32:15.787 // probe at -105.000,52.500 is z=-2.272500
+16:32:19.259 // probe at -105.000,105.000 is z=-2.365000
+16:32:20.416 // probe at -105.000,105.000 is z=-2.370000
+16:32:21.573 // probe at -105.000,105.000 is z=-2.382500
+16:32:25.059 // probe at -52.500,105.000 is z=-2.332500
+16:32:26.204 // probe at -52.500,105.000 is z=-2.285000
+16:32:27.363 // probe at -52.500,105.000 is z=-2.290000
+16:32:30.801 // probe at 0.000,105.000 is z=-2.187500
+16:32:31.957 // probe at 0.000,105.000 is z=-2.185000
+16:32:33.116 // probe at 0.000,105.000 is z=-2.190000
+16:32:36.516 // probe at 52.500,105.000 is z=-2.100000
+16:32:37.674 // probe at 52.500,105.000 is z=-2.112500
+16:32:38.820 // probe at 52.500,105.000 is z=-2.062500
+16:32:42.200 // probe at 105.000,105.000 is z=-2.115000
+16:32:43.356 // probe at 105.000,105.000 is z=-2.115000
+16:32:44.504 // probe at 105.000,105.000 is z=-2.067500
+16:32:44.572 // Mesh Bed Leveling Complete
+16:32:44.592 // Bed Mesh state has been saved to profile [default]\n// for the current session.  The SAVE_CONFIG command will\n// update the printer config file and restart the printer.
+16:32:44.604 // Bed Mesh Validation Protection is skipped because the mesh was generated before printing.
+16:32:44.608 // Starting Smart Park...
+16:32:44.622 // Smart Park received no valid object coordinates; using safe fallback 110.0,100.0.
+16:32:44.627 // Smart Park location: 110.0,100.0,10.0.
+16:32:46.503 // Wait bed temperature to reach 105 Cº
+16:32:46.671 // Temperature waiting done.
+16:32:46.683 // Wait extruder temperature to reach 265 Cº
+16:33:22.911 // Temperature waiting done.
+16:33:23.123 info Cleaning nozzle with a priming line
+16:33:23.128 info Algorithm: LINE_PURGE
+16:33:23.134 // No objects detected! Check the gcode and make sure it includes EXCLUDE_OBJECT_DEFINE. Using the default grid. In Orca: 'Process Profile' -> 'Other' -> 'Exclude objects'
+16:33:23.138 // Using purge {zclear}
+16:33:37.580 B:105.0 /105.0 T0:265.2 /265.0 V:23.0 /0.0 W:57.0 /0.0
+16:33:37.683 // pressure_advance: 0.040000\n// pressure_advance_smooth_time: 0.040000
+16:33:37.704 // Unknown command:"TIMELAPSE_TAKE_FRAME"

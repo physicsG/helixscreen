@@ -23,6 +23,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "settings_manager.h"
+#include "storage_report.h"
 
 #include <array>
 #include <string>
@@ -86,7 +87,11 @@ TEST_CASE_METHOD(PageRowsFixture, "settings pages: every row lives on its page",
         {"settings_language_time_overlay", {"row_language", "row_timezone", "row_time_format"}},
         {"settings_touch_overlay",
          {"row_system_keyboard", "row_keep_navbar", "row_page_scroll_buttons"}},
-        {"settings_connection_overlay", {"row_network", "row_printer_host", "row_printers"}},
+        {"settings_connection_overlay",
+         {"row_network", "row_printer_host", "row_printers", "row_screen_sharing"}},
+        {"settings_screen_sharing_overlay",
+         {"row_remote_screen", "row_remote_webcam", "row_remote_control", "row_remote_pair_code",
+          "row_remote_forget"}},
         {"settings_updates_overlay",
          {"row_update_channel", "row_update_channel_dev", "row_check_updates", "row_install_update",
           "row_updates_unavailable"}},
@@ -97,6 +102,36 @@ TEST_CASE_METHOD(PageRowsFixture, "settings pages: every row lives on its page",
             CAPTURE(p.view, row);
             CHECK(has(row));
         }
+    }
+}
+
+TEST_CASE_METHOD(PageRowsFixture,
+                 "settings pages: each plugin feature's switch is on the page the overview opens",
+                 "[settings][settings_pages][plugin_feature]") {
+    // PluginFeatureHome: Devices, Safety, System > Storage, Spoolman.
+    const std::vector<Placement> placements = {
+        {"settings_hardware_overlay", {"row_print_photos"}},
+        {"settings_safety_overlay", {"row_fit_check_blocks_autostart"}},
+        {"settings_system_overlay", {"row_storage"}},
+        {"spoolman_settings", {"row_filament_accounting"}},
+        {"settings_storage_overlay", {"row_storage_auto_cleanup"}},
+    };
+    for (const auto& p : placements) {
+        build(p.view);
+        for (const char* row : p.rows) {
+            CAPTURE(p.view, row);
+            CHECK(has(row));
+        }
+    }
+}
+
+TEST_CASE_METHOD(PageRowsFixture, "settings pages: Storage has a row for every consumer",
+                 "[settings][settings_pages][plugin_storage]") {
+    build("settings_storage_overlay");
+    for (const auto& consumer : helix::storage::kConsumers) {
+        const std::string clean = std::string("storage_clean_") + consumer.key;
+        CAPTURE(clean);
+        CHECK(has(clean.c_str()));
     }
 }
 
@@ -134,7 +169,7 @@ TEST_CASE_METHOD(PageRowsFixture, "settings pages: speaker chip path opens Sound
                  "[settings][settings_pages]") {
     // Slot 0 of the navigation stack is the active main panel; an overlay pushed
     // over nothing would sit there and read as the base.
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels) {
         p = lv_obj_create(test_screen());
     }
@@ -172,8 +207,11 @@ TEST_CASE_METHOD(PageRowsFixture,
     CHECK(has("row_allow_cold_extrude"));
     CHECK(has("row_filament_auto_cooldown"));
     CHECK(has("row_filament_auto_open_editor"));
+    CHECK(has("row_ams_settings"));
     build("settings_safety_overlay");
     CHECK_FALSE(has("row_allow_cold_extrude"));
+    build("settings_hardware_overlay");
+    CHECK_FALSE(has("row_ams_settings"));
 }
 
 TEST_CASE_METHOD(PageRowsFixture, "Appearance fills the printer-visual dropdowns on activate",

@@ -1,5 +1,5 @@
 <template>
-  <div class="chart-container">
+  <div class="chart-container" :style="height ? { height: `${height}px` } : undefined">
     <Line :data="data" :options="mergedOptions" />
   </div>
 </template>
@@ -19,13 +19,18 @@ import {
   Filler
 } from 'chart.js'
 import type { ChartData, ChartOptions } from 'chart.js'
+import { mergeOptions, selectOnClick } from '@/utils/chart'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler)
 
 const props = defineProps<{
   data: ChartData<'line'>
   options?: ChartOptions<'line'>
+  /** Container height in px; 300 when absent. */
+  height?: number
 }>()
+
+const emit = defineEmits<{ select: [index: number, label: string] }>()
 
 const darkDefaults: ChartOptions<'line'> = {
   responsive: true,
@@ -54,9 +59,10 @@ const darkDefaults: ChartOptions<'line'> = {
   }
 }
 
-const mergedOptions = computed(() => {
-  return { ...darkDefaults, ...props.options } as ChartOptions<'line'>
-})
+const mergedOptions = computed((): ChartOptions<'line'> => ({
+  ...mergeOptions(darkDefaults, props.options),
+  onClick: selectOnClick((index, label) => emit('select', index, label))
+}))
 </script>
 
 <style scoped>

@@ -3,6 +3,8 @@
 
 #include "src/ui/panel_widgets/nozzle_temps_widget.h"
 
+#include <string>
+
 namespace helix {
 
 // Friend access to NozzleTempsWidget's cached row/bed widget pointers. The
@@ -28,6 +30,15 @@ class NozzleTempsTestAccess {
     static lv_obj_t* row_target_label(const NozzleTempsWidget& widget, size_t index) {
         return index < widget.extruder_rows_.size() ? widget.extruder_rows_[index].target_label
                                                     : nullptr;
+    }
+
+    static std::string row_short_name(const NozzleTempsWidget& widget, size_t index) {
+        return index < widget.extruder_rows_.size() ? widget.extruder_rows_[index].short_name
+                                                    : std::string();
+    }
+    static std::string row_long_name(const NozzleTempsWidget& widget, size_t index) {
+        return index < widget.extruder_rows_.size() ? widget.extruder_rows_[index].long_name
+                                                    : std::string();
     }
 
     static lv_obj_t* bed_temp_label(const NozzleTempsWidget& widget) {

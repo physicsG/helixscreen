@@ -27,11 +27,11 @@ float belt_match_percent(float reference_hz, float measured_hz) {
 }
 
 bool belt_frequencies_match(float a_hz, float b_hz) {
-    return std::fabs(a_hz - b_hz) < BELT_RESOLUTION_HZ;
+    return std::fabs(a_hz - b_hz) < kBeltResolutionHz;
 }
 
 bool belt_should_show_idle_hint(uint32_t ms_since_last_event) {
-    return ms_since_last_event >= IDLE_HINT_MS;
+    return ms_since_last_event >= kIdleHintMs;
 }
 
 BeltLiveData& BeltLiveData::instance() {
@@ -57,7 +57,7 @@ void BeltLiveData::set_waveform(const std::vector<AccelSample>& window) {
     mean_y /= n;
     mean_z /= n;
 
-    const size_t out_n = std::min(window.size(), TRACE_POINTS);
+    const size_t out_n = std::min(window.size(), kTracePoints);
     waveform_.assign(out_n, 0.0f);
 
     for (size_t i = 0; i < out_n; ++i) {
@@ -99,7 +99,7 @@ void BeltLiveData::set_spectrum(const std::vector<std::pair<float, float>>& psd,
     }
     spectrum_peak_hz_ = psd[peak_idx].first;
 
-    const size_t out_n = std::min(psd.size(), TRACE_POINTS);
+    const size_t out_n = std::min(psd.size(), kTracePoints);
     spectrum_.assign(out_n, 0.0f);
 
     for (size_t i = 0; i < out_n; ++i) {

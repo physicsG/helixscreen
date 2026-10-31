@@ -1,0 +1,96 @@
+{
+  "master_enabled": true,
+  "sensors": [
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor tool_start",
+      "role": "runout",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor tool_end",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor Turtle_1_expanded",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor Turtle_1_compressed",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane1_prep",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane1_load",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane2_prep",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane2_load",
+      "lane": 1,
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane3_prep",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane3_load",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane4_prep",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor lane4_load",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor Turtle_1_Hub",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor virtual_bypass",
+      "role": "none",
+      "type": "switch"
+    },
+    {
+      "enabled": true,
+      "klipper_name": "filament_switch_sensor quiet_mode",
+      "role": "none",
+      "type": "switch"
+    }
+  ]
+}

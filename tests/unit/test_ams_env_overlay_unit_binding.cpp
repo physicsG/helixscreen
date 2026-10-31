@@ -19,6 +19,7 @@
  */
 
 #include "ui_ams_environment_overlay.h"
+#include "ui_humidity_drop.h"
 #include "ui_nav_manager.h"
 #include "ui_update_queue.h"
 
@@ -122,6 +123,7 @@ void reset_overlay_singleton() {
 /// revert of the XML binding pass — the binding is where the bug lived.
 struct HumidityRowState {
     int subject = -1;
+    int drop = 0; ///< the readout drop's reading, tenths of %RH
     bool readout_hidden = true;
     bool comfort_strip_hidden = true;
 };
@@ -144,6 +146,8 @@ HumidityRowState humidity_state_for_unit(LVGLUITestFixture& fixture, int unit) {
     HumidityRowState state;
     state.subject = subject_int("ams_env_overlay_humidity_visible");
     state.readout_hidden = widget_hidden(fixture, "humidity_readout");
+    state.drop =
+        helix::ui::humidity_drop_value(lv_obj_find_by_name(fixture.test_screen(), "humidity_drop"));
     state.comfort_strip_hidden = widget_hidden(fixture, "comfort_strip");
 
     NavigationManager::instance().go_back();
@@ -170,6 +174,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // reading ("42%") was right there next to it.
     const HumidityRowState state = humidity_state_for_unit(*this, 1);
     CHECK(state.subject == 1);
+    CHECK(state.drop == 420);
     CHECK_FALSE(state.readout_hidden);
     CHECK_FALSE(state.comfort_strip_hidden);
 
@@ -190,6 +195,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // on, would show an empty humidity row for a box that has no sensor.
     const HumidityRowState state = humidity_state_for_unit(*this, 0);
     CHECK(state.subject == 0);
+    CHECK(state.drop < 0);
     CHECK(state.readout_hidden);
     CHECK(state.comfort_strip_hidden);
 

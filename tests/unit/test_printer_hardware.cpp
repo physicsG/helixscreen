@@ -134,10 +134,16 @@ TEST_CASE("PrinterHardware::guess_hotend_heater", "[printer][guessing]") {
         REQUIRE(hw.guess_hotend_heater() == "hotend_heater");
     }
 
-    SECTION("Substring match: e0_heater") {
+    SECTION("Substring match: e0") {
+        std::vector<std::string> heaters = {"heater_bed", "e0"};
+        PrinterHardware hw(heaters, sensors, fans, leds);
+        REQUIRE(hw.guess_hotend_heater() == "e0");
+    }
+
+    SECTION("A name merely containing e0 is not a hotend candidate") {
         std::vector<std::string> heaters = {"heater_bed", "e0_heater"};
         PrinterHardware hw(heaters, sensors, fans, leds);
-        REQUIRE(hw.guess_hotend_heater() == "e0_heater");
+        REQUIRE(hw.guess_hotend_heater().empty());
     }
 
     SECTION("Priority: extruder wins over extruder0") {
@@ -390,11 +396,11 @@ TEST_CASE("PrinterHardware::guess_part_cooling_fan", "[printer][guessing]") {
         REQUIRE(hw.guess_part_cooling_fan() == "part_cooling_fan");
     }
 
-    SECTION("Fallback: first fan when no 'fan' or 'part' match") {
-        std::vector<std::string> fans = {"heater_fan hotend_fan", "controller_fan",
+    SECTION("Fallback: first non-auto-controlled fan when no 'fan' or 'part' match") {
+        std::vector<std::string> fans = {"heater_fan hotend_fan", "controller_fan mcu",
                                          "nevermore_fan"};
         PrinterHardware hw(heaters, sensors, fans, leds);
-        REQUIRE(hw.guess_part_cooling_fan() == "heater_fan hotend_fan");
+        REQUIRE(hw.guess_part_cooling_fan() == "nevermore_fan");
     }
 
     SECTION("Empty fans list: returns empty string") {
@@ -502,16 +508,16 @@ TEST_CASE("PrinterHardware::guess_chamber_fan", "[printer][guessing]") {
         REQUIRE(hw.guess_chamber_fan() == "nevermore");
     }
 
-    SECTION("Substring match: 'bed_fans' (BTT Pi naming)") {
+    SECTION("'bed_fans' is not a chamber fan") {
         std::vector<std::string> fans = {"fan", "heater_fan hotend_fan", "bed_fans"};
         PrinterHardware hw(heaters, sensors, fans, leds);
-        REQUIRE(hw.guess_chamber_fan() == "bed_fans");
+        REQUIRE(hw.guess_chamber_fan().empty());
     }
 
-    SECTION("Priority: 'bed_fans' wins over 'filter'") {
+    SECTION("'filter' is chosen over a 'bed_fans' fan") {
         std::vector<std::string> fans = {"fan", "air_filter", "bed_fans"};
         PrinterHardware hw(heaters, sensors, fans, leds);
-        REQUIRE(hw.guess_chamber_fan() == "bed_fans");
+        REQUIRE(hw.guess_chamber_fan() == "air_filter");
     }
 
     SECTION("Substring match: 'filter' for air filtration") {
@@ -882,10 +888,10 @@ TEST_CASE("PrinterHardware edge cases", "[printer][guessing][edge]") {
         REQUIRE(hw.guess_bed_heater() == "extruder_bed");
     }
 
-    SECTION("Names containing but not matching: 'bed_extruder' for hotend") {
+    SECTION("Names containing but not matching: 'bed_extruder' is not a hotend candidate") {
         std::vector<std::string> heaters = {"heater_bed", "bed_extruder"};
         PrinterHardware hw(heaters, sensors, fans, leds);
-        REQUIRE(hw.guess_hotend_heater() == "bed_extruder");
+        REQUIRE(hw.guess_hotend_heater().empty());
     }
 
     SECTION("Multiple priority levels: all types present for bed") {

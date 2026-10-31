@@ -112,7 +112,14 @@ release_package_body() {
         printf '\n.PHONY: stage\nstage:\n\t$(call release-copy-xml-config,%s)\n' "$stage"
     } > "$mkfile"
 
-    run make -f "$mkfile" stage
+    # The macro copies with `cp -r` and then deletes inside the copy, so the
+    # tree it copies from is a real copy too: a symlinked source dir would land
+    # in the stage as a link, and the deletes would reach through it.
+    local src="$BATS_TEST_TMPDIR/src"
+    mkdir -p "$src"
+    cp -a ui_xml config moonraker-plugin "$src/"
+    ln -s "$PWD/scripts" "$src/scripts"
+    run make -C "$src" --no-print-directory -f "$mkfile" stage
     [ "$status" -eq 0 ] || fail "release-copy-xml-config failed: $output"
 
     [ -f "$stage/moonraker-plugin/install.sh" ] \

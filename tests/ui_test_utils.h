@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ui_notification.h"
 #include "ui_toast_manager.h"
 
 #include "lvgl/lvgl.h"
@@ -36,18 +37,6 @@
  * "lv_init: already initialized" warnings when tests run sequentially.
  */
 void lv_init_safe();
-
-/**
- * @brief Create the shared 480x320 headless display, once per process.
- *
- * Idempotent: the first call creates the display, later calls do nothing. Tests
- * that need LVGL to have somewhere to render (any fixture standing up widgets or
- * pumping the UpdateQueue) can call this instead of hand-rolling the
- * create/buffers/flush_cb dance. Three wifi fixtures each carried their own
- * copy with a private `static bool created`, so running two of them in one
- * process created two displays.
- */
-void ensure_headless_display();
 
 /**
  * @brief Let a flush wait return on every display registered so far.
@@ -112,75 +101,103 @@ void set_test_temperature_history_manager(TemperatureHistoryManager* mgr);
 namespace helix {
 namespace ui {
 
-/**
- * @brief Install a hook invoked by the test ui_notification_warning() stubs.
+/*
+ * Observation hooks over the real notification and toast objects.
  *
- * Lets a test observe whether a user-facing WiFi warning toast was emitted
- * (the production path is stubbed to a log-only no-op in tests). Pass nullptr
- * to clear. The hook receives the formatted warning message.
+ * ui_notification.o and ui_toast_manager.o are linked into the test binary.
+ * Each reports every call to one observer (helix::ui::set_notification_observer(),
+ * ToastManager::set_observer()) on the calling thread, before threading, the
+ * pre-init startup queue or the user's toast threshold decide what is shown;
+ * ui_test_utils.cpp installs both and routes each event to the hook below for
+ * its kind. A hook is empty until a test sets it; pass nullptr to clear.
+ */
+
+/**
+ * @brief Hook for timed warnings: ui_notification_warning() (message only,
+ *        never the title) and ui_notification_warning_with_detail() (the
+ *        history row, "message - detail").
  */
 void set_test_notification_warning_hook(std::function<void(const std::string&)> hook);
 
 /**
- * @brief Install a hook invoked by the test ui_notification_warning_sticky() stub.
- *
- * Separate hook from the warning one so a test can tell the sticky channel
- * (never auto-dismisses) from the timed one, not just read the text. Pass
- * nullptr to clear. The hook receives the formatted warning message.
+ * @brief Hook for ui_notification_warning_sticky(), which stays on screen until
+ *        dismissed. Separate from the warning hook so a test can tell the two
+ *        channels apart, not just read the text. Receives "message - detail".
  */
 void set_test_notification_sticky_warning_hook(std::function<void(const std::string&)> hook);
 
 /**
- * @brief Install a hook invoked by the test ui_notification_error() stub.
- *
- * Same purpose as the warning hook: user-facing error toasts are compiled out
- * of the test build, so this is the only way a test can observe that one was
- * raised. Pass nullptr to clear.
+ * @brief Hook for ui_notification_error(), ui_notification_printer_fault() and
+ *        ui_notification_error_with_detail(), modal or not.
  */
 void set_test_notification_error_hook(std::function<void(const std::string&)> hook);
 
 /**
- * @brief Install a hook invoked by the test ui_notification_info() stubs.
- *
- * Third of the same set. INFO toasts are the ones that GUIDE rather than alarm
- * ("filament is clear, pull it out"), so a test asserting that the user was told
- * what to do next has no other observation point: NotificationHistory and
- * PendingStartupWarnings both sit behind the production ui_notification_info(),
- * which this file replaces with a log-only no-op. Pass nullptr to clear.
+ * @brief Hook for ui_notification_info(). INFO notices GUIDE rather than alarm
+ *        ("filament is clear, pull it out"), so this is how a test asserts the
+ *        user was told what to do next.
  */
 void set_test_notification_info_hook(std::function<void(const std::string&)> hook);
 
 /**
- * @brief Install a hook invoked by the test ui_notification_success() stubs.
- *
- * The fourth of the set, for flows whose outcome is a success toast: a test that
- * a failure is never reported as success needs to see the success path too.
- * Pass nullptr to clear.
+ * @brief Hook for ui_notification_success(), for flows whose outcome is a
+ *        success toast: a test that a failure is never reported as success
+ *        needs to see the success path too.
  */
 void set_test_notification_success_hook(std::function<void(const std::string&)> hook);
 
 /**
- * @brief Install a hook invoked by the test ToastManager stub's show paths.
+ * @brief Hook for the history-only ui_notification_*_with_action() rows.
  *
- * Same purpose as the notification hooks, one layer down: code that calls
- * ToastManager::show() directly (deliberately bypassing ui_notification_* and
- * its history row) has no other observation point in the test binary — the
- * real ToastManager is excluded from the link. Carries the severity so a
- * wrong-severity toast fails on severity, not just wording, and the duration
- * so a sticky (0) call cannot silently read as a timed one. Pass nullptr to
- * clear.
+ * Receives the row's severity, message and action id, so a test can prove an
+ * entry was added and that tapping it would dispatch the right action.
+ */
+void set_test_notification_action_hook(
+    std::function<void(ToastSeverity, const std::string&, const std::string&)> hook);
+
+/**
+ * @brief Hook for every ui_notification_* call, as the whole event: title,
+ *        severity, history-row text, action and stickiness. Runs before the
+ *        per-kind hooks above.
+ */
+void set_test_notification_event_hook(std::function<void(const NotificationEvent&)> hook);
+
+/**
+ * @brief Hook for every ToastManager::show*() call, including the ones
+ *        ui_notification_* makes once the toast system is initialized.
+ *
+ * Carries the severity so a wrong-severity toast fails on severity, not just
+ * wording, and the duration so a sticky (0) call cannot read as a timed one.
+ * A show_with_detail() call arrives as "message - detail".
  */
 void set_test_toast_hook(std::function<void(ToastSeverity, const std::string&, uint32_t)> hook);
 
 /**
  * @brief Press the action button of the most recent action toast
  *
- * The stub ToastManager keeps the last show_with_action() callback and its
- * user_data so a test can act as the user tapping the button. Returns false
- * when no action toast has been shown since the last call or since
- * set_test_toast_hook(), which forgets the last action.
+ * Calls the last show_with_action() callback with its user_data, as the user
+ * tapping the button would. Returns false when no action toast has been shown
+ * since the last call or since set_test_toast_hook(), which forgets the last
+ * action.
  */
 bool fire_last_toast_action();
+
+/**
+ * @brief True when the most recent action toast was dismissed through
+ *        ToastManager::hide(action_callback, user_data) with its own pair.
+ *
+ * Cleared, like the last action, by set_test_toast_hook().
+ */
+bool last_action_toast_dismissed();
+bool last_shown_toast_has_closed_cb();
+
+/**
+ * @brief Clear every hook above and the recorded action toasts.
+ *
+ * HelixTestFixture::reset_all() runs it, so a hook capturing a test's stack
+ * locals cannot outlive the test case.
+ */
+void clear_test_hooks();
 
 } // namespace ui
 } // namespace helix
@@ -260,12 +277,31 @@ bool type_text(lv_obj_t* textarea, const std::string& text);
 bool send_key(uint32_t key);
 
 /**
+ * @brief Advance LVGL's VIRTUAL clock by @p ms in 5ms steps, pumping timers
+ *
+ * Never sleeps: no real time passes beyond the CPU the timers take, so another
+ * thread gets no time slice from it. The input helpers above use it, as does
+ * LVGLTestFixture::process_lvgl().
+ */
+void advance_ms(uint32_t ms);
+
+/**
+ * @brief Advance LVGL's VIRTUAL clock in @p step_ms steps until @p condition holds
+ * @return true if it held within @p budget_ms of virtual time
+ *
+ * Each step advances the tick and pumps timers, then evaluates the condition, so
+ * it runs at least once. Never sleeps, like advance_ms(): for a wait on another
+ * thread use wait_until().
+ */
+bool advance_until(const std::function<bool()>& condition, uint32_t budget_ms,
+                   uint32_t step_ms = 5);
+
+/**
  * @brief Wait @p ms of REAL time, pumping LVGL and advancing its clock in step
  *
  * Sleeps in 5ms slices, advancing the virtual tick by 5ms per slice and running
- * lv_timer_handler_safe(). Real and virtual time therefore track each other —
- * unlike LVGLTestFixture::process_lvgl(), which advances virtual time only and
- * returns in a fraction of the nominal duration.
+ * lv_timer_handler_safe(). Real and virtual time therefore track each other,
+ * unlike advance_ms().
  */
 void wait_ms(uint32_t ms);
 

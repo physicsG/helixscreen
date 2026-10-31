@@ -112,14 +112,14 @@ class HeatingIconAnimator {
 
   private:
     /// Temperature tolerance for "at target" detection in decidegrees (2°C = 20)
-    static constexpr int TEMP_TOLERANCE = 20;
+    static constexpr int kTempTolerance = 20;
 
     /// Pulse animation opacity range (80% to 100%)
-    static constexpr lv_opa_t PULSE_OPA_MIN = 204; // ~80%
-    static constexpr lv_opa_t PULSE_OPA_MAX = 255; // 100%
+    static constexpr lv_opa_t kPulseOpaMin = 204; // ~80%
+    static constexpr lv_opa_t kPulseOpaMax = 255; // 100%
 
     /// Pulse animation duration (one direction)
-    static constexpr uint32_t PULSE_DURATION_MS = 400;
+    static constexpr uint32_t kPulseDurationMs = 400;
 
     lv_obj_t* icon_ = nullptr;
     State state_ = State::Off;

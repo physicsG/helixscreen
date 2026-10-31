@@ -2,6 +2,8 @@
 
 #include "ui_print_select_path_navigator.h"
 
+#include "ui_filename_utils.h"
+
 namespace helix::ui {
 
 void PrintSelectPathNavigator::navigate_to(const std::string& dirname) {
@@ -17,14 +19,8 @@ void PrintSelectPathNavigator::navigate_up() {
         return; // Already at root
     }
 
-    size_t last_slash = current_path_.rfind('/');
-    if (last_slash == std::string::npos) {
-        // No slash - one level deep, go to root
-        current_path_.clear();
-    } else {
-        // Truncate at last slash
-        current_path_ = current_path_.substr(0, last_slash);
-    }
+    // A path with no slash is one level deep, so its parent is the root.
+    current_path_ = gcode_dir_of(current_path_);
 }
 
 } // namespace helix::ui

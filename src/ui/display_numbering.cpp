@@ -4,6 +4,7 @@
 #include "display_numbering.h"
 
 #include "ams_state.h"
+#include "i18n_plural.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 
 #include <spdlog/fmt/fmt.h>
@@ -13,8 +14,6 @@
 namespace helix::ui {
 
 namespace {
-/// U+00B7 MIDDLE DOT, the separator between a unit name and its position.
-constexpr const char* kUnitSeparator = "\xc2\xb7";
 
 /**
  * @brief The translated plural for @p noun, as a range header spells it.
@@ -58,12 +57,30 @@ bool is_generated_tool_name(std::string_view name) {
     return true;
 }
 
-std::string tool_short_label(std::string_view name, int index) {
+std::string tool_name_label(LaneNoun noun, std::string_view name, int index) {
     if (index < 0)
         return {};
     if (is_generated_tool_name(name))
-        return lane_number_text(index);
+        return lane_label(noun, index);
     return std::string(name);
+}
+
+std::string tool_label_in_form(LaneNoun noun, std::string_view name, int index,
+                               ToolLabelForm form) {
+    if (index < 0)
+        return {};
+    const std::string code = is_generated_tool_name(name) ? std::string(name) : tool_label(index);
+    if (form == ToolLabelForm::Code)
+        return code;
+    return fmt::format(lv_tr("{} ({})"), tool_name_label(noun, name, index), code);
+}
+
+ToolLabelForm pick_tool_label_form(const std::function<bool(ToolLabelForm)>& fits) {
+    for (ToolLabelForm form : kToolLabelForms) {
+        if (fits(form))
+            return form;
+    }
+    return ToolLabelForm::Code;
 }
 
 int lane_number(int index) {
@@ -97,20 +114,29 @@ std::string noun_text(LaneNoun noun) {
     return lv_tr("Slot");
 }
 
+std::string backup_lane_text(LaneNoun noun) {
+    switch (noun) {
+    case LaneNoun::Lane:
+        return lv_tr("Backup Lane");
+    case LaneNoun::Gate:
+        return lv_tr("Backup Gate");
+    case LaneNoun::Tool:
+        return lv_tr("Backup Tool");
+    case LaneNoun::Feeder:
+        return lv_tr("Backup Feeder");
+    case LaneNoun::Toolhead:
+        return lv_tr("Backup Toolhead");
+    case LaneNoun::Slot:
+        break;
+    }
+    return lv_tr("Backup Slot");
+}
+
 std::string lane_label(LaneNoun noun, int index) {
     const int n = lane_number(index);
     if (n < 0)
         return {};
     return noun_text(noun) + " " + std::to_string(n);
-}
-
-std::string backend_lane_label(const helix::AmsBackend& backend, int slot_index) {
-    if (slot_index < 0)
-        return {};
-    // spool_display_number() is already the 1-based number shown, so it is
-    // spelled directly rather than stepped back through lane_number().
-    return noun_text(backend.lane_noun()) + " " +
-           std::to_string(backend.spool_display_number(slot_index));
 }
 
 std::string clear_spool_blocked_hint(LaneNoun noun, int index) {
@@ -121,13 +147,19 @@ std::string clear_spool_blocked_hint(LaneNoun noun, int index) {
                        lane_label(noun, index));
 }
 
+std::string unit_scoped_label(std::string_view unit_display_name, std::string_view body) {
+    if (unit_display_name.empty() || body.empty())
+        return std::string(body);
+    return std::string(unit_display_name) + " " + kUnitSeparator + " " + std::string(body);
+}
+
 std::string lane_label(LaneNoun noun, std::string_view unit_display_name, int index) {
     if (unit_display_name.empty())
         return lane_label(noun, index);
     const std::string body = lane_label(noun, index);
     if (body.empty())
         return {};
-    return std::string(unit_display_name) + " " + kUnitSeparator + " " + body;
+    return unit_scoped_label(unit_display_name, body);
 }
 
 std::string lane_range_label(LaneNoun noun, int first_index, int last_index) {
@@ -144,29 +176,30 @@ std::string lane_range_label(LaneNoun noun, int first_index, int last_index) {
 
 std::string lane_count_label(LaneNoun noun, int count) {
     // Wide enough for the longest form: ru "Печатающие головки" is 35 bytes.
-    // Each lv_tr() sits inside its snprintf so the format-specifier gate sees
-    // the pair - a format held in a variable between the two is invisible to
-    // it. No default: a new enumerator must fail to compile here, not pass a
+    // Each tr_plural() sits inside its snprintf so the format-specifier gate
+    // sees the pair - a format held in a variable between the two is invisible
+    // to it. No default: a new enumerator must fail to compile here, not pass a
     // null format to snprintf.
     char buf[64];
+    const auto n = static_cast<uint64_t>(count);
     switch (noun) {
     case LaneNoun::Lane:
-        snprintf(buf, sizeof(buf), lv_tr("%d lanes"), count);
+        snprintf(buf, sizeof(buf), tr_plural(nullptr, "%d lanes", n), count);
         return buf;
     case LaneNoun::Gate:
-        snprintf(buf, sizeof(buf), lv_tr("%d gates"), count);
+        snprintf(buf, sizeof(buf), tr_plural(nullptr, "%d gates", n), count);
         return buf;
     case LaneNoun::Tool:
-        snprintf(buf, sizeof(buf), lv_tr("%d tools"), count);
+        snprintf(buf, sizeof(buf), tr_plural(nullptr, "%d tools", n), count);
         return buf;
     case LaneNoun::Feeder:
-        snprintf(buf, sizeof(buf), lv_tr("%d feeders"), count);
+        snprintf(buf, sizeof(buf), tr_plural(nullptr, "%d feeders", n), count);
         return buf;
     case LaneNoun::Toolhead:
-        snprintf(buf, sizeof(buf), lv_tr("%d toolheads"), count);
+        snprintf(buf, sizeof(buf), tr_plural(nullptr, "%d toolheads", n), count);
         return buf;
     case LaneNoun::Slot:
-        snprintf(buf, sizeof(buf), lv_tr("%d slots"), count);
+        snprintf(buf, sizeof(buf), tr_plural(nullptr, "%d slots", n), count);
         return buf;
     }
     return {};
@@ -182,6 +215,21 @@ LaneNoun active_tool_noun() {
     auto& ams = AmsState::instance();
     const auto* backend = ams.get_backend(ams.active_backend_index());
     return backend ? backend->tool_noun() : LaneNoun::Tool;
+}
+
+std::string active_tool_label(std::string_view name, int index, ToolLabelForm form) {
+    return tool_label_in_form(active_tool_noun(), name, index, form);
+}
+
+bool tool_badges_add_information(const std::vector<int>& tool_to_slot, int slot_count) {
+    if (tool_to_slot.empty())
+        return true;
+    for (size_t tool = 0; tool < tool_to_slot.size(); ++tool) {
+        const int slot = tool_to_slot[tool];
+        if (slot < 0 || slot >= slot_count || slot != static_cast<int>(tool))
+            return true;
+    }
+    return false;
 }
 
 } // namespace helix::ui

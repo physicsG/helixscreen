@@ -159,13 +159,14 @@ json future_config(int version) {
 ///
 /// Several values are deliberately set to what a migration's trigger looks for,
 /// so a replay is visible rather than a no-op:
-///   screensaver_type 1         — the v15→v16 Flying Toasters disable
+///   screensaver_type "toasters", Flying Toasters: the v15→v16 test swaps in the legacy
+///                                number 1, the only value that migration reads
 ///   sleep_backlight_off/hardware_blank — the v12→v13 / v14→v15 AD5X repair
 /// A user who deliberately chose any of these is indistinguishable, in the
 /// stored JSON, from a user who never touched it.
 json populated_config() {
     return json{
-        {"config_version", CURRENT_CONFIG_VERSION},
+        {"config_version", kCurrentConfigVersion},
         {"active_printer_id", "voronv2"},
         {"sounds_enabled", true},
         {"brightness", 50},
@@ -192,7 +193,7 @@ json populated_config() {
           {"rotate", 0},
           {"drm_device", "/dev/dri/card0"},
           {"gcode_render_mode", 1},
-          {"screensaver_type", 1},
+          {"screensaver_type", "toasters"},
           {"sleep_backlight_off", false},
           {"hardware_blank", 0}}},
         {"preset_materials",
@@ -324,20 +325,20 @@ void check_untargeted_survived(const json& doc, int stamp) {
 TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config migration: a newer config_version is not stamped down",
                  "[config][migration]") {
-    const int future = CURRENT_CONFIG_VERSION + 1;
+    const int future = kCurrentConfigVersion + 1;
     write_and_init(future_config(future));
 
     // The load must not rewrite the version to ours. Stamping it down is what
     // makes the newer build re-run already-applied migrations on its next boot.
     CHECK(config.get<int>("/config_version", -1) == future);
-    CHECK(config.get<int>("/config_version", -1) != CURRENT_CONFIG_VERSION);
+    CHECK(config.get<int>("/config_version", -1) != kCurrentConfigVersion);
 }
 
 TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config migration: a far-future config_version is still not stamped down",
                  "[config][migration]") {
     // Not just off-by-one: several devel releases' worth of drift.
-    const int future = CURRENT_CONFIG_VERSION + 7;
+    const int future = kCurrentConfigVersion + 7;
     write_and_init(future_config(future));
 
     CHECK(config.get<int>("/config_version", -1) == future);
@@ -350,7 +351,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
 TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config migration: unknown keys from a newer build survive a save",
                  "[config][migration]") {
-    const int future = CURRENT_CONFIG_VERSION + 1;
+    const int future = kCurrentConfigVersion + 1;
     write_and_init(future_config(future));
 
     // The older build reads and writes settings it knows about...
@@ -380,21 +381,21 @@ TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config migration: an older config_version is still migrated and stamped",
                  "[config][migration]") {
     // The future-version early return must not swallow the normal case.
-    json old = future_config(CURRENT_CONFIG_VERSION - 1);
+    json old = future_config(kCurrentConfigVersion - 1);
     old.erase("feature_from_the_future");
     write_and_init(old);
 
-    CHECK(config.get<int>("/config_version", -1) == CURRENT_CONFIG_VERSION);
+    CHECK(config.get<int>("/config_version", -1) == kCurrentConfigVersion);
 }
 
 TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config migration: a config already at the current version is stamped unchanged",
                  "[config][migration]") {
-    json current = future_config(CURRENT_CONFIG_VERSION);
+    json current = future_config(kCurrentConfigVersion);
     current.erase("feature_from_the_future");
     write_and_init(current);
 
-    CHECK(config.get<int>("/config_version", -1) == CURRENT_CONFIG_VERSION);
+    CHECK(config.get<int>("/config_version", -1) == kCurrentConfigVersion);
 }
 
 // ============================================================================
@@ -411,8 +412,8 @@ TEST_CASE_METHOD(MigrationFutureFixture,
     const json second = boot(first);
 
     CHECK(second == first);
-    CHECK(first["config_version"] == CURRENT_CONFIG_VERSION);
-    check_untargeted_survived(first, CURRENT_CONFIG_VERSION);
+    CHECK(first["config_version"] == kCurrentConfigVersion);
+    check_untargeted_survived(first, kCurrentConfigVersion);
 }
 
 TEST_CASE_METHOD(MigrationFutureFixture,
@@ -423,13 +424,13 @@ TEST_CASE_METHOD(MigrationFutureFixture,
     // understands only CURRENT. The guard leaves the document alone, so
     // returning to beta must find every setting exactly as it left it.
     json devel = populated_config();
-    devel["config_version"] = CURRENT_CONFIG_VERSION + 2;
+    devel["config_version"] = kCurrentConfigVersion + 2;
     devel["feature_from_the_future"] = json{{"enabled", true}, {"threshold", 42}};
 
     const json after_stable = boot(devel);
-    CHECK(after_stable["config_version"] == CURRENT_CONFIG_VERSION + 2);
+    CHECK(after_stable["config_version"] == kCurrentConfigVersion + 2);
     CHECK(after_stable["feature_from_the_future"]["threshold"] == 42);
-    check_untargeted_survived(after_stable, CURRENT_CONFIG_VERSION + 2);
+    check_untargeted_survived(after_stable, kCurrentConfigVersion + 2);
 
     // ...and back to devel. Nothing the stable build did may have disturbed the
     // document, so the two sides of the trip agree key for key.
@@ -449,7 +450,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
 // two months and to 8 within the last five, so the replay depths below are not
 // hypothetical.
 //
-// Stamps below MIN_MIGRATABLE_CONFIG_VERSION are not replayed at all: init()
+// Stamps below kMinMigratableConfigVersion are not replayed at all: init()
 // sets the document aside and starts from defaults.
 //
 // Stamp 0 is deliberately excluded: Config::init() treats config_version == 0
@@ -461,13 +462,13 @@ TEST_CASE_METHOD(MigrationFutureFixture,
                  "[config][migration][roundtrip]") {
     const json baseline = boot(populated_config());
 
-    for (int stamp = CURRENT_CONFIG_VERSION - 1; stamp >= MIN_MIGRATABLE_CONFIG_VERSION; --stamp) {
+    for (int stamp = kCurrentConfigVersion - 1; stamp >= kMinMigratableConfigVersion; --stamp) {
         const json replayed = replay_from(baseline, stamp);
 
         // The replay must re-stamp to current; a config stuck at an old version
         // would replay again on every subsequent boot.
         INFO("replayed from stamp " << stamp);
-        CHECK(replayed["config_version"] == CURRENT_CONFIG_VERSION);
+        CHECK(replayed["config_version"] == kCurrentConfigVersion);
 
         check_untargeted_survived(replayed, stamp);
     }
@@ -482,7 +483,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
     // v0.99.80 onward, i.e. the overwhelmingly common case.
     const json baseline = boot(populated_config());
 
-    for (int stamp : {CURRENT_CONFIG_VERSION - 1, 19, 18}) {
+    for (int stamp : {kCurrentConfigVersion - 1, 19, 18}) {
         INFO("replayed from stamp " << stamp);
         CHECK(replay_from(baseline, stamp) == baseline);
     }
@@ -538,20 +539,23 @@ TEST_CASE_METHOD(MigrationFutureFixture,
     } tier_guard;
     helix::config_testing::set_forced_tier_for_migration(helix::PlatformTier::BASIC);
 
-    // A current-stamp config runs no migration, so Flying Toasters standing at
-    // 1 here is the user's own choice — either they never hit v15→v16, or they
-    // hit it and re-selected the screensaver afterwards.
-    const json baseline = boot(populated_config());
+    // A current-stamp config runs no migration, so Flying Toasters standing
+    // here is the user's own choice: either they never hit v15→v16, or they
+    // hit it and re-selected the screensaver afterwards. It is the legacy number
+    // v15→v16 reads, as a backup from before v28 restored over this build holds.
+    json legacy_number = populated_config();
+    legacy_number["display"]["screensaver_type"] = 1;
+    const json baseline = boot(legacy_number);
     REQUIRE(baseline["display"]["screensaver_type"] == 1);
 
     // A rollback past the v15→v16 gate overrides that choice.
     const json replayed = replay_from(baseline, 15);
-    CHECK(replayed["display"]["screensaver_type"] == 0);
+    CHECK(replayed["display"]["screensaver_type"] == "off");
     CHECK(replayed["display"]["screensaver_migration_notice_pending"] == true);
 
     // One version later the gate is not crossed and the choice stands.
     const json safe = replay_from(baseline, 16);
-    CHECK(safe["display"]["screensaver_type"] == 1);
+    CHECK(safe["display"]["screensaver_type"] == "toasters");
     CHECK_FALSE(safe["display"].contains("screensaver_migration_notice_pending"));
 }
 
@@ -571,7 +575,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
 
     // The values they would have moved are already at their modern paths and
     // stay there across a replay of the full ladder.
-    const json replayed = replay_from(baseline, MIN_MIGRATABLE_CONFIG_VERSION);
+    const json replayed = replay_from(baseline, kMinMigratableConfigVersion);
     CHECK(replayed["display"]["rotate"] == 0);
     CHECK(replayed["input"]["touch_device"] == "/dev/input/event3");
     CHECK(replayed["input"]["calibration"]["a"] == 1.0021);
@@ -596,7 +600,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
                  "Config: a migrating boot snapshots the original document first",
                  "[config][migration][backup]") {
     json old_doc = populated_config();
-    old_doc["config_version"] = CURRENT_CONFIG_VERSION - 1;
+    old_doc["config_version"] = kCurrentConfigVersion - 1;
     const std::string original = old_doc.dump(2);
     std::ofstream(config_path) << original;
     config.init(config_path);
@@ -604,7 +608,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
     const std::string snapshot = config_path + ".pre-migration";
     REQUIRE(fs::exists(snapshot));
     CHECK(read_bytes(snapshot) == original);
-    CHECK(read_raw()["config_version"] == CURRENT_CONFIG_VERSION);
+    CHECK(read_raw()["config_version"] == kCurrentConfigVersion);
 }
 
 TEST_CASE_METHOD(MigrationFutureFixture,
@@ -614,7 +618,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
         write_and_init(populated_config());
     }
     SECTION("future version") {
-        write_and_init(future_config(CURRENT_CONFIG_VERSION + 1));
+        write_and_init(future_config(kCurrentConfigVersion + 1));
     }
     SECTION("unversioned packaged default") {
         json packaged = populated_config();
@@ -630,7 +634,7 @@ TEST_CASE_METHOD(MigrationFutureFixture,
     // A file at the config path that the injected storage does not read.
     std::ofstream(config_path) << populated_config().dump(2);
     json old_doc = populated_config();
-    old_doc["config_version"] = CURRENT_CONFIG_VERSION - 1;
+    old_doc["config_version"] = kCurrentConfigVersion - 1;
     config.set_storage(std::make_unique<helix::test::MockConfigStorage>(old_doc.dump()));
     config.init(config_path);
 
@@ -645,18 +649,18 @@ TEST_CASE_METHOD(MigrationFutureFixture,
     // version again. The copy taken before the first attempt is the original.
     const std::string snapshot = config_path + ".pre-migration";
     json old_doc = populated_config();
-    old_doc["config_version"] = CURRENT_CONFIG_VERSION - 1;
+    old_doc["config_version"] = kCurrentConfigVersion - 1;
 
     SECTION("a snapshot at the same version is kept") {
         const std::string original =
-            json{{"config_version", CURRENT_CONFIG_VERSION - 1}, {"marker", "original"}}.dump();
+            json{{"config_version", kCurrentConfigVersion - 1}, {"marker", "original"}}.dump();
         std::ofstream(snapshot) << original;
         write_and_init(old_doc);
         CHECK(read_bytes(snapshot) == original);
     }
     SECTION("a snapshot from an older version is replaced") {
         std::ofstream(snapshot) << json{
-            {"config_version", CURRENT_CONFIG_VERSION - 2},
+            {"config_version", kCurrentConfigVersion - 2},
             {"marker", "older"}}.dump();
         write_and_init(old_doc);
         CHECK(read_bytes(snapshot) == old_doc.dump(2));

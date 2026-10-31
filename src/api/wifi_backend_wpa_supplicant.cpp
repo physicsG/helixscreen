@@ -11,8 +11,14 @@
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "spdlog/fmt/fmt.h"
 #include "spdlog/spdlog.h"
+#include "system/run_capture.h"
 #include "wifi_5ghz_detection.h"
+#include "wifi_country.h"
+#include "wifi_regdomain.h"
 #include "wifi_saved_config.h"
+#include "wifi_ui_utils.h"
+
+#include <string_view>
 
 // find_network_id() is pure string parsing with no OS dependency, and its
 // declaration in the header sits outside the __APPLE__ guard so it can be
@@ -84,6 +90,15 @@ std::string validate_wpa_string(const std::string& input, const std::string& fie
     }
     return "";
 }
+
+bool is_hidden_scan_ssid(const std::string& ssid) {
+    static constexpr std::string_view kNulEscape = "\\x00";
+    std::string_view rest = ssid;
+    while (rest.substr(0, kNulEscape.size()) == kNulEscape) {
+        rest.remove_prefix(kNulEscape.size());
+    }
+    return rest.empty();
+}
 } // namespace helix::wifi::detail
 
 #if !defined(__APPLE__) && !defined(__ANDROID__)
@@ -98,9 +113,11 @@ std::string validate_wpa_string(const std::string& input, const std::string& fie
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <optional>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -238,6 +255,33 @@ ScanTrigger classify_scan_reply(const std::string& reply) {
 }
 } // namespace helix::wifi::detail
 
+/// The process table the daemon scans read. HELIX_WPA_PROC_ROOT is the test
+/// seam, like HELIX_WPA_NET_SYSFS: every scan opens each live PID's cmdline,
+/// and on a host with tens of thousands of processes (a container that never
+/// reaps its zombies) a scan costs a second, which is enough to push init_wpa()
+/// past start()'s 5 s wait.
+static std::string wpa_proc_root() {
+    const char* root = std::getenv("HELIX_WPA_PROC_ROOT");
+    return (root != nullptr && root[0] != '\0') ? std::string(root) : "/proc";
+}
+
+/// The sysfs tree interface resolution reads (rfkill switches).
+/// HELIX_WPA_SYS_ROOT is the test seam, like HELIX_WPA_PROC_ROOT.
+static std::string wpa_sys_root() {
+    const char* root = std::getenv("HELIX_WPA_SYS_ROOT");
+    return (root != nullptr && root[0] != '\0') ? std::string(root) : "/sys";
+}
+
+/// Read an rfkill node's `soft` attribute: true when soft-blocked, nullopt
+/// when it cannot be read.
+static std::optional<bool> read_rfkill_soft_blocked(const std::string& rfkill_node) {
+    std::ifstream soft_stream(rfkill_node + "/soft");
+    int soft_blocked = 0;
+    if (!(soft_stream >> soft_blocked))
+        return std::nullopt;
+    return soft_blocked == 1;
+}
+
 /// Inspect running processes for a `wpa_supplicant` daemon and return the
 /// control-interface directory it was launched with.
 ///
@@ -255,10 +299,11 @@ ScanTrigger classify_scan_reply(const std::string& reply) {
 /// its per-PID precedence/fallthrough is load-bearing, so it is left alone.
 static std::string detect_wpa_conf_path_from_proc() {
     std::error_code ec;
-    if (!fs::is_directory("/proc", ec))
+    const std::string proc = wpa_proc_root();
+    if (!fs::is_directory(proc, ec))
         return {};
 
-    for (const auto& entry : fs::directory_iterator("/proc", ec)) {
+    for (const auto& entry : fs::directory_iterator(proc, ec)) {
         if (ec)
             break;
         const std::string name = entry.path().filename().string();
@@ -289,10 +334,11 @@ static std::string detect_wpa_conf_path_from_proc() {
 
 static std::string detect_wpa_ctrl_dir_from_proc() {
     std::error_code ec;
-    if (!fs::is_directory("/proc", ec))
+    const std::string proc = wpa_proc_root();
+    if (!fs::is_directory(proc, ec))
         return {};
 
-    for (const auto& entry : fs::directory_iterator("/proc", ec)) {
+    for (const auto& entry : fs::directory_iterator(proc, ec)) {
         if (ec)
             break;
         // PID directories only.
@@ -425,6 +471,10 @@ WifiBackendWpaSupplicant::~WifiBackendWpaSupplicant() {
     // cleanup_wpa() frees conn/mon_conn while init_wpa() is still using them.
     hv::EventLoopThread::stop();
     hv::EventLoopThread::join();
+
+    // The loop freed its hio_t handles, and closed their fds, on its way out;
+    // mon_io_ points into that freed loop.
+    mon_io_ = nullptr;
 
     // Thread is now fully stopped - safe to free resources
     cleanup_wpa();
@@ -648,6 +698,7 @@ WiFiError WifiBackendWpaSupplicant::check_system_prerequisites() {
     std::vector<std::string> socket_paths = wpa_socket_dirs();
     bool socket_found = false;
     std::string accessible_socket;
+    std::string unreadable_dir;
 
     for (const auto& base_path : socket_paths) {
         if (fs::exists(base_path) && fs::is_directory(base_path)) {
@@ -681,11 +732,19 @@ WiFiError WifiBackendWpaSupplicant::check_system_prerequisites() {
                 }
             }
             if (ec && !socket_found) {
-                spdlog::debug("[WifiBackend] Permission denied iterating {}", base_path);
+                spdlog::debug("[WifiBackend] Cannot list {}: {}", base_path, ec.message());
+                if (ec == std::errc::permission_denied && unreadable_dir.empty())
+                    unreadable_dir = base_path;
             }
             if (!accessible_socket.empty())
                 break;
         }
+    }
+
+    if (!socket_found && !unreadable_dir.empty()) {
+        return WiFiErrorHelper::permission_denied("Cannot list wpa_supplicant control directory " +
+                                                  unreadable_dir +
+                                                  " - check user permissions (netdev group)");
     }
 
     if (!socket_found) {
@@ -981,11 +1040,23 @@ void WifiBackendWpaSupplicant::init_wpa() {
     }
     spdlog::trace("[WifiBackend] Monitor socket fd: {}", monfd);
 
-    // Register with libhv event loop for async I/O
-    mon_io_ = hio_get(loop()->loop(), monfd);
+    // Register a duplicate of the monitor socket with libhv. Both sides close
+    // the fd they hold - libhv in hio_close() and in hloop_free() when the loop
+    // ends, wpa_ctrl in wpa_ctrl_close() - so one shared fd would be closed
+    // twice, and the second close can land on a descriptor another thread has
+    // just been handed. dup() rather than fcntl(F_DUPFD) because the sanitizers
+    // intercept it, so their fd tables stay accurate.
+    int io_fd = ::dup(monfd);
+    if (io_fd >= 0) {
+        ::fcntl(io_fd, F_SETFD, FD_CLOEXEC);
+        mon_io_ = hio_get(loop()->loop(), io_fd);
+    }
     if (mon_io_ == nullptr) {
         LOG_ERROR_INTERNAL("Failed to register monitor socket with libhv");
         dispatch_event("INIT_FAILED", "Failed to initialize WiFi event handling");
+        if (io_fd >= 0) {
+            ::close(io_fd);
+        }
         wpa_ctrl_close(mon_conn);
         mon_conn = nullptr;
         signal_init_complete();
@@ -1032,6 +1103,8 @@ static std::string describe_conf_access(const std::string& path) {
 
 void WifiBackendWpaSupplicant::resolve_and_store_interface() {
     helix::wifi::Roots roots;
+    roots.sys = wpa_sys_root();
+    roots.proc = wpa_proc_root();
     roots.ctrl = resolve_wpa_ctrl_directory();
 
     if (roots.ctrl.empty()) {
@@ -1084,11 +1157,7 @@ void WifiBackendWpaSupplicant::resolve_and_store_interface() {
     {
         bool hw_radio_enabled = true;
         if (resolved && !resolved->rfkill_node.empty()) {
-            std::ifstream soft_stream(resolved->rfkill_node + "/soft");
-            int soft_blocked = 0;
-            if (soft_stream >> soft_blocked) {
-                hw_radio_enabled = (soft_blocked != 1);
-            }
+            hw_radio_enabled = !read_rfkill_soft_blocked(resolved->rfkill_node).value_or(false);
         }
         radio_enabled_ = hw_radio_enabled;
         spdlog::debug("[WifiBackend] radio_enabled_ seeded from hardware: {}", hw_radio_enabled);
@@ -1133,8 +1202,9 @@ void WifiBackendWpaSupplicant::cleanup_wpa() {
 
     spdlog::trace("[WifiBackend] Cleaning up wpa_supplicant connections");
 
-    // Stop libhv I/O monitoring BEFORE closing the socket
-    // This prevents callbacks on a closed fd and allows re-registration
+    // Stop libhv I/O monitoring first, so no read callback fires during the
+    // teardown below. This closes libhv's duplicate of the monitor socket; the
+    // monitor connection's own fd stays open for the DETACH.
     if (mon_io_) {
         spdlog::trace("[WifiBackend] Stopping libhv I/O monitoring");
         hio_read_stop(mon_io_);
@@ -1176,6 +1246,9 @@ std::string WifiBackendWpaSupplicant::map_event_to_callback(const std::string& e
     if (event.find("CTRL-EVENT-DISCONNECTED") != std::string::npos) {
         return "DISCONNECTED";
     }
+    if (event.find("CTRL-EVENT-REGDOM-CHANGE") != std::string::npos) {
+        return "REGDOM_CHANGE";
+    }
     // Auth failures can come in multiple forms
     if (event.find("CTRL-EVENT-SSID-TEMP-DISABLED") != std::string::npos &&
         event.find("WRONG_KEY") != std::string::npos) {
@@ -1186,7 +1259,7 @@ std::string WifiBackendWpaSupplicant::map_event_to_callback(const std::string& e
     }
 
     // Informational events - no callback needed
-    // SCAN-STARTED, BSS-ADDED, BSS-REMOVED, REGDOM-CHANGE, SIGNAL-CHANGE, etc.
+    // SCAN-STARTED, BSS-ADDED, BSS-REMOVED, REGDOM-BEACON-HINT, SIGNAL-CHANGE, etc.
     return "";
 }
 
@@ -1407,6 +1480,15 @@ WiFiError WifiBackendWpaSupplicant::get_scan_results(std::vector<WiFiNetwork>& n
 
     try {
         std::vector<WiFiNetwork> parsed = parse_scan_results(raw);
+        // A 5 GHz network in the scan proves the radio receives the band,
+        // whatever its frequency list claimed at init.
+        if (!supports_5ghz_cached_ &&
+            std::any_of(parsed.begin(), parsed.end(), [](const WiFiNetwork& net) {
+                return (net.band_mask & WIFI_BAND_5GHZ) != 0;
+            })) {
+            supports_5ghz_cached_ = true;
+            spdlog::debug("[WifiBackend] 5GHz support detected from scan results");
+        }
         networks = wifi_merge_networks_by_ssid(parsed);
         if (networks.size() < parsed.size()) {
             spdlog::debug("[WifiBackend] Deduplicated {} networks to {} unique SSIDs",
@@ -1782,15 +1864,16 @@ WiFiError WifiBackendWpaSupplicant::set_radio_enabled(bool on) {
 
     if (on) {
         // Unblock first: ENABLE_NETWORK on a soft-blocked radio associates with
-        // nothing and the user sees a toggle that flips back. When a real
-        // rfkill node exists but the unblock write fails, do NOT report
-        // success — that would let the UI claim "on" over a radio that still
-        // can't associate, exactly the bug this backend exists to fix. When
-        // there is no rfkill node at all, this is an intentional quiet
-        // degrade (association-only on/off) — leave that path alone.
+        // nothing and the user sees a toggle that flips back. A node that
+        // still reads blocked after a failed unblock write must NOT report
+        // success, or the UI claims "on" over a radio that cannot associate.
+        // A node this user cannot write but that is not blocked (a root-owned
+        // sysfs file) is the same association-only on/off as no node at all,
+        // which is also all the off path could do on it.
         const auto iface = resolved_interface();
         const bool has_rfkill_node = iface && !iface->rfkill_node.empty();
-        if (has_rfkill_node && !set_rfkill_soft_block(false)) {
+        if (has_rfkill_node && !set_rfkill_soft_block(false) &&
+            read_rfkill_soft_blocked(iface->rfkill_node).value_or(false)) {
             LOG_WARN_INTERNAL("Failed to clear rfkill soft-block on {}", iface->rfkill_node);
             return WiFiError(WiFiResult::RF_KILL_BLOCKED,
                              "Failed to clear rfkill soft-block on " + iface->rfkill_node,
@@ -2041,6 +2124,14 @@ WifiBackend::ConnectionStatus WifiBackendWpaSupplicant::get_status() {
         }
     }
 
+    // STATUS leaves out ip_address on some builds while the kernel holds one.
+    if (status.connected && status.ip_address.empty()) {
+        if (const auto iface = resolved_interface(); iface && !iface->netdev.empty()) {
+            status.ip_address = ipv4_lookup_ ? ipv4_lookup_(iface->netdev)
+                                             : helix::ui::wifi::iface_global_ipv4(iface->netdev);
+        }
+    }
+
     // Only log when status actually changes (reduces log noise)
     bool status_changed =
         (status.connected != last_logged_status_.connected ||
@@ -2056,6 +2147,48 @@ WifiBackend::ConnectionStatus WifiBackendWpaSupplicant::get_status() {
     }
 
     return status;
+}
+
+WiFiError WifiBackendWpaSupplicant::get_country(std::string& code) {
+    code.clear();
+    if (!is_running()) {
+        return WiFiError(WiFiResult::NOT_INITIALIZED, "Backend not started");
+    }
+    // The kernel's domain is what the radio runs under. wpa_supplicant's
+    // GET country reads only its own config, which is unset wherever the
+    // domain came from somewhere else (cfg80211's ieee80211_regdom, crda).
+    if (const auto kernel = helix::wifi::regdomain::read_country()) {
+        code = *kernel;
+        return WiFiErrorHelper::success();
+    }
+    const std::string reply = send_command("GET country");
+    if (reply.empty()) {
+        return WiFiErrorHelper::connection_failed("No response from wpa_supplicant GET country");
+    }
+    // "FAIL" is how wpa_supplicant says no country is configured.
+    code = helix::wifi::country::parse_wpa_get_country(reply);
+    return WiFiErrorHelper::success();
+}
+
+WiFiError WifiBackendWpaSupplicant::set_country(const std::string& code) {
+    const std::string clean = helix::wifi::country::normalize(code);
+    if (clean.empty()) {
+        return WiFiError(WiFiResult::INVALID_PARAMETERS, "Not an ISO 3166-1 alpha-2 country");
+    }
+    if (!is_running()) {
+        return WiFiError(WiFiResult::NOT_INITIALIZED, "Backend not started");
+    }
+    const std::string reply = send_command("SET country " + clean);
+    if (reply.rfind("OK", 0) != 0) {
+        return WiFiError(WiFiResult::BACKEND_ERROR,
+                         "wpa_supplicant SET country " + clean + " failed: " + reply);
+    }
+    // The setting is reapplied at every start, so a SAVE_CONFIG that does not
+    // persist costs only the window before HelixScreen starts.
+    const std::string save = send_command("SAVE_CONFIG");
+    spdlog::info("[WifiBackend] Country set to {} (SAVE_CONFIG: {})", clean,
+                 save.rfind("OK", 0) == 0 ? "ok" : "not saved");
+    return WiFiErrorHelper::success();
 }
 
 bool WifiBackendWpaSupplicant::supports_5ghz() const {
@@ -2078,21 +2211,13 @@ void WifiBackendWpaSupplicant::resolve_5ghz_support() {
 
         // Fallback: try iw phy info
         // Find phy name from /sys/class/net/wlan0/phy80211/name (or similar)
-        FILE* pipe = popen("iw phy phy0 info 2>/dev/null", "r");
-        if (pipe) {
-            std::string iw_output;
-            char buf[256];
-            while (fgets(buf, sizeof(buf), pipe)) {
-                iw_output += buf;
-            }
-            pclose(pipe);
-
-            if (wifi_parse_iw_phy_has_5ghz(iw_output)) {
-                supports_5ghz_cached_ = true;
-                supports_5ghz_resolved_ = true;
-                spdlog::debug("[WifiBackend] 5GHz support detected via iw phy info");
-                return;
-            }
+        int iw_exit = -1;
+        const std::string iw_output = helix::run_capture("iw phy phy0 info 2>/dev/null", iw_exit);
+        if (wifi_parse_iw_phy_has_5ghz(iw_output)) {
+            supports_5ghz_cached_ = true;
+            supports_5ghz_resolved_ = true;
+            spdlog::debug("[WifiBackend] 5GHz support detected via iw phy info");
+            return;
         }
 
         supports_5ghz_resolved_ = true;
@@ -2147,8 +2272,8 @@ std::vector<WiFiNetwork> WifiBackendWpaSupplicant::parse_scan_results(const std:
         // SSID may be missing entirely for hidden networks
         std::string ssid = (fields.size() >= 5) ? fields[4] : "";
 
-        // Skip hidden networks (empty or missing SSID)
-        if (ssid.empty()) {
+        // Skip hidden networks (empty, missing or zero-byte SSID)
+        if (helix::wifi::detail::is_hidden_scan_ssid(ssid)) {
             spdlog::trace("[WifiBackend] Skipping hidden network: {}", helix::redact::mac(bssid));
             continue;
         }

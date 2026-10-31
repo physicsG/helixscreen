@@ -23,7 +23,7 @@ void request_exit(IMoonrakerClient& client, const PrinterDiscovery& hw) {
 
 bool start_dialect_sequence(IMoonrakerClient& client, IMoonrakerAPI& api,
                             const PrinterDiscovery& hw, ScrewTiltCallback on_success,
-                            std::function<void(const MoonrakerError&)> on_error) {
+                            helix::SharedCallback<void(const MoonrakerError&)> on_error) {
     if (hw.screws_tilt_dialect() == ScrewsTiltDialect::SnapmakerAuto) {
         snapmaker::screws_tilt::start_sequence(client, api, std::move(on_success),
                                                std::move(on_error));
@@ -34,7 +34,7 @@ bool start_dialect_sequence(IMoonrakerClient& client, IMoonrakerAPI& api,
 
 const std::vector<const char*>& config_section_names() {
     static const std::vector<const char*> names{"screws_tilt_adjust",
-                                                snapmaker::screws_tilt::MODULE_NAME};
+                                                snapmaker::screws_tilt::kModuleName};
     return names;
 }
 

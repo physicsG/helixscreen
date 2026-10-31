@@ -4,6 +4,7 @@
 
 #include "ui_event_safety.h"
 #include "ui_toast_manager.h"
+#include "ui_unload_lane_choice.h"
 
 #include "ams_state.h"
 #include "app_globals.h"
@@ -121,7 +122,7 @@ void prepare_plate(const Material& material, bool with_appliance) {
 
 } // namespace
 
-void unload_before_drying(BedDryingController& ctrl, std::function<void()> then) {
+void unload_before_drying(BedDryingController& ctrl, helix::SharedCallback<void()> then) {
     AmsBackend* backend = AmsState::instance().get_backend();
     AmsSystemInfo info;
     int slot = -1;
@@ -152,11 +153,23 @@ void unload_before_drying(BedDryingController& ctrl, std::function<void()> then)
         ctrl.cancel_unload_wait();
     };
     surface.on_async_success = then;
+    // A preheat that ends without unloading leaves the flow with nothing to wait
+    // on, so say so rather than stall.
+    surface.on_preheat_ended = []() {
+        ToastManager::instance().show(
+            ToastSeverity::ERROR,
+            lv_tr("The unload did not start: unload by hand, then start again"), 6000);
+    };
     surface.on_refused = [then](const FilamentOpPlan&) {
         ToastManager::instance().show(ToastSeverity::INFO, lv_tr("No filament loaded to unload"),
                                       3000);
         then();
     };
+    // A backend that cannot name the lane in the toolhead asks first; a
+    // Cancel there leaves the drying unstarted.
+    if (slot < 0 && ask_lane_then_unload(backend, nullptr, surface)) {
+        return;
+    }
     execute_filament_unload(backend, slot, loaded, surface);
 }
 

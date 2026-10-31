@@ -4,6 +4,8 @@
 #include "gcode_layer_renderer.h"
 
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <thread>
 #include <utility>
 
@@ -103,10 +105,54 @@ class GCodeLayerRendererTestAccess {
         return renderer.render_layers_to_cache(from_layer, to_layer);
     }
 
+    /// One ARGB word of the solid cache, or 0 outside it / with no cache.
+    static uint32_t cache_pixel(const GCodeLayerRenderer& renderer, int x, int y) {
+        const lv_draw_buf_t* buf = renderer.cache_buf_;
+        if (!buf || x < 0 || y < 0 || x >= static_cast<int>(buf->header.w) ||
+            y >= static_cast<int>(buf->header.h)) {
+            return 0;
+        }
+        uint32_t px;
+        std::memcpy(&px, buf->data + static_cast<size_t>(y) * buf->header.stride + x * 4u, 4);
+        return px;
+    }
+
+    /// Run the silhouette outline pass the way render() does once the solid
+    /// cache is complete, so a captured cache looks like what the app shows.
+    static void apply_outline(GCodeLayerRenderer& renderer) {
+        renderer.apply_ssao();
+    }
+
     /// Pin the adaptive layer count. render_layers_to_cache reads it per call;
     /// adaptation only runs from render(), which the direct-call tests skip.
     static void pin_layers_per_frame(GCodeLayerRenderer& renderer, int layers) {
         renderer.layers_per_frame_ = layers;
+    }
+
+    /// Hand the solid-cache batch box a clock of the test's own.
+    static void set_batch_clock(GCodeLayerRenderer& renderer,
+                                GCodeLayerRenderer::BatchClock clock) {
+        renderer.batch_clock_ = clock;
+    }
+
+    /// Stop the solid-cache batch box's clock, so a batch runs every layer it
+    /// is given however long the host takes to draw them.
+    static void freeze_batch_clock(GCodeLayerRenderer& renderer) {
+        renderer.batch_clock_ = [] { return std::chrono::steady_clock::time_point{}; };
+    }
+
+    static constexpr int solid_batch_budget_ms() {
+        return GCodeLayerRenderer::kSolidBatchBudgetMs;
+    }
+
+    /// Advance the batch box's clock @p StepMs on every read, so where a batch
+    /// stops depends on the reads alone.
+    template <int StepMs> static void step_batch_clock(GCodeLayerRenderer& renderer) {
+        renderer.batch_clock_ = [] {
+            static std::chrono::steady_clock::time_point now{};
+            now += std::chrono::milliseconds(StepMs);
+            return now;
+        };
     }
 
     /// Layers the ghost worker has drawn and the layers its pass will visit.

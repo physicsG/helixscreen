@@ -5,10 +5,9 @@
 
 #include "config.h"
 #include "data_root_resolver.h"
-#include "helix_fs.h"
 #include "lv_draw_buf_guard.h"
 #include "lvgl/src/misc/cache/instance/lv_image_cache.h" // not exported by lvgl.h
-#include "text_io.h"
+#include "scoped_guard_file.h"
 
 #include <spdlog/spdlog.h>
 
@@ -22,18 +21,18 @@
 #else
 // DRM+EGL embedded: GPU blur path
 #define BACKDROP_BLUR_GPU 1
+#include "gles2_loader.h"
+#include "gpu_libs.h"
+
 #include <EGL/egl.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <fcntl.h>
 #include <gbm.h>
 #include <unistd.h>
+using namespace helix::gles2;
 #endif
 #endif
 
 namespace helix::ui {
-
-namespace hfs = fs;
 
 // ============================================================================
 // Circuit Breaker
@@ -246,7 +245,7 @@ struct GpuBlurState {
 
 static GpuBlurState s_gpu;
 
-static const char* BLUR_VERTEX_SHADER = R"(
+static const char* kBlurVertexShader = R"(
     attribute vec2 a_position;
     varying vec2 v_uv;
     void main() {
@@ -255,7 +254,7 @@ static const char* BLUR_VERTEX_SHADER = R"(
     }
 )";
 
-static const char* BLUR_FRAGMENT_SHADER = R"(
+static const char* kBlurFragmentShader = R"(
     precision mediump float;
     uniform sampler2D u_texture;
     uniform vec2 u_texel_size;
@@ -371,33 +370,19 @@ static bool init_gpu_blur(EGLDisplay current_display) {
     }
 
     // DRM device paths to try
-    static constexpr const char* DRM_DEVICES[] = {"/dev/dri/renderD128", "/dev/dri/card1",
+    static constexpr const char* kDrmDevices[] = {"/dev/dri/renderD128", "/dev/dri/card1",
                                                   "/dev/dri/card0"};
 
-    // Arm the crash-loop guard immediately before the risky Mali/EGL init. If the
-    // driver hard-faults below (an in-driver SIGSEGV that returns no error we can
-    // check), the file survives and Application promotes it to a persistent block
-    // on the next launch.
-    const std::string guard_path = helix::writable_path("gpu_blur_guard");
-    {
-        if (helix::text_io::write_file(guard_path, "1")) {
-            spdlog::debug("[Backdrop Blur] Armed GPU crash-loop guard: {}", guard_path);
-        } else {
-            spdlog::warn("[Backdrop Blur] Could not write GPU crash-loop guard: {}", guard_path);
-        }
+    // Crash-loop guard around the risky Mali/EGL init. A graceful failure (no
+    // usable GL device, EGL init error, shader/link failure) removes it on return
+    // and must not promote: the caller already sets init_failed and falls back to
+    // CPU blur this session. Only an in-driver SIGSEGV leaves it for the next launch.
+    const helix::ScopedGuardFile guard(helix::writable_path("gpu_blur_guard"));
+    if (guard.armed()) {
+        spdlog::debug("[Backdrop Blur] Armed GPU crash-loop guard: {}", guard.path());
+    } else {
+        spdlog::warn("[Backdrop Blur] Could not write GPU crash-loop guard: {}", guard.path());
     }
-
-    // Remove the guard on ANY normal return — success OR a graceful failure (no
-    // usable GL device, EGL init error, shader/link failure). Only an in-driver
-    // SIGSEGV, which unwinds no stack, leaves the file behind so the next launch
-    // can promote it to a persistent block. A graceful failure must NOT promote:
-    // the caller already sets init_failed and falls back to CPU blur this session.
-    struct GuardCleaner {
-        const std::string& path;
-        ~GuardCleaner() {
-            hfs::remove(path);
-        }
-    } guard_cleaner{guard_path};
 
     // An EGL screen already has the GPU driver loaded and a display up. Opening
     // a second device beside it loads the driver a second time, which faults
@@ -413,7 +398,7 @@ static bool init_gpu_blur(EGLDisplay current_display) {
         }
     }
 
-    for (const char* path : DRM_DEVICES) {
+    for (const char* path : kDrmDevices) {
         if (s_gpu.context != EGL_NO_CONTEXT)
             break;
         int fd = open(path, O_RDWR | O_CLOEXEC);
@@ -488,8 +473,8 @@ static bool init_gpu_blur(EGLDisplay current_display) {
     };
 
     // Compile shaders
-    GLuint vs = compile_shader(GL_VERTEX_SHADER, BLUR_VERTEX_SHADER);
-    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, BLUR_FRAGMENT_SHADER);
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, kBlurVertexShader);
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, kBlurFragmentShader);
     if (!vs || !fs) {
         if (vs)
             glDeleteShader(vs);
@@ -558,9 +543,8 @@ static bool init_gpu_blur(EGLDisplay current_display) {
 
     s_gpu.initialized = true;
 
-    // Pipeline is up — the Mali/EGL init survived. The GuardCleaner above removes
-    // the crash-loop guard as this function returns (normally), so a clean run
-    // doesn't look like a mid-init fault on the next launch.
+    // Pipeline is up. The guard above is removed as this function returns, so a
+    // clean run doesn't look like a mid-init fault on the next launch.
     spdlog::debug("[Backdrop Blur] GPU blur pipeline initialized");
     return true;
 }
@@ -602,6 +586,16 @@ static void destroy_gpu_blur() {
 static bool gpu_blur(uint8_t* data, int width, int height) {
     if (s_gpu.init_failed)
         return false;
+
+    // Nothing below may run without the GPU stack: every EGL, GBM and GL call
+    // is a trampoline into a library this system may not have.
+    using helix::gpu_libs::Lib;
+    if (!s_gpu.initialized &&
+        (!helix::gpu_libs::available_all({Lib::Egl, Lib::Gles2, Lib::Gbm, Lib::Drm}) ||
+         !helix::gles2::load(helix::gpu_libs::gles2_proc))) {
+        s_gpu.init_failed = true;
+        return false;
+    }
 
     // Save before init: init_gpu_blur() binds and then releases its own context, which
     // unbinds the caller's (LVGL's display context on the EGL backend). Losing it fails

@@ -22,6 +22,7 @@
 #   make PLATFORM_TARGET=x86   # Build for x86_64 Debian SBCs (DRM+GLES)
 #   make PLATFORM_TARGET=x86-fbdev  # Build for x86_64 Debian SBCs (fbdev fallback)
 #   make PLATFORM_TARGET=x86-both   # x86_64: compile once, link DRM + fbdev
+#   make PLATFORM_TARGET=x86-desktop # x86_64 Linux desktop: SDL window
 #   make pi-docker             # Docker-based Pi build (64-bit, DRM+GLES)
 #   make pi-fbdev-docker       # Docker-based Pi build (64-bit, fbdev fallback)
 #   make pi-all-docker         # Docker-based Pi build (both variants)
@@ -38,6 +39,7 @@
 #   make x86-docker            # Docker-based x86_64 build (DRM+GLES)
 #   make x86-fbdev-docker      # Docker-based x86_64 build (fbdev fallback)
 #   make x86-all-docker        # Docker-based x86_64 build (both variants)
+#   make x86-desktop-docker    # Docker-based x86_64 desktop build (SDL window)
 
 # =============================================================================
 # Docker Build Configuration
@@ -82,9 +84,10 @@ ifeq ($(PLATFORM_TARGET),pi)
     # Without it SIGABRT reports get garbage frames. Matches ad5x/cc1/k1/k2/snapmaker-u1.
     TARGET_CFLAGS := -march=armv8-a -fno-omit-frame-pointer -funwind-tables -I/usr/aarch64-linux-gnu/include -I/usr/include/libdrm -Wno-error=conversion -Wno-error=sign-conversion -DHELIX_RELEASE_BUILD -DHELIX_BINARY_VARIANT=\"drm\"
     DISPLAY_BACKEND := drm
-    # This binary presents through DRM dumb buffers. The GPU presentation path
-    # is a separate binary built by ENABLE_EGL_RUNG below, so that flipping this
-    # would rebuild the wrong one.
+    # The base build presents through DRM dumb buffers. ENABLE_EGL_RUNG below
+    # adds the GPU presentation path to the same binary as a second compile of
+    # the few files that read the EGL config; flipping this would make both
+    # compiles EGL.
     ENABLE_OPENGLES := no
     ENABLE_SDL := no
     ENABLE_GLES_3D := yes
@@ -97,7 +100,7 @@ ifeq ($(PLATFORM_TARGET),pi)
     # Strip binary for size - embedded targets don't need debug symbols
     STRIP_BINARY := yes
     FONT_TIERS := all
-    # Also link helix-screen-egl, which the launcher probes for and prefers.
+    # Also link the EGL presentation path, which the launcher probes for and prefers.
     ENABLE_EGL_RUNG := yes
 
 else ifeq ($(PLATFORM_TARGET),pi-fbdev)
@@ -177,7 +180,7 @@ else ifeq ($(PLATFORM_TARGET),pi32)
     BUILD_SUBDIR := pi32
     STRIP_BINARY := yes
     FONT_TIERS := all
-    # Also link helix-screen-egl, which the launcher probes for and prefers.
+    # Also link the EGL presentation path, which the launcher probes for and prefers.
     ENABLE_EGL_RUNG := yes
 
 else ifeq ($(PLATFORM_TARGET),pi32-fbdev)
@@ -701,6 +704,32 @@ else ifeq ($(PLATFORM_TARGET),x86-both)
     FONT_TIERS := all
     PI_DUAL_LINK := yes
 
+else ifeq ($(PLATFORM_TARGET),x86-desktop)
+    # -------------------------------------------------------------------------
+    # x86_64 Linux desktops - the app in an SDL window beside the user's desktop
+    # -------------------------------------------------------------------------
+    # Its own compile, never a relink of x86-both: HELIX_DISPLAY_SDL selects
+    # LV_USE_SDL in lv_conf.h, so every LVGL object differs from the DRM build.
+    # Built in the same Bullseye container as x86. SDL2 comes from lib/sdl2 and
+    # links statically; it dlopens the system's X11/Wayland/PulseAudio/ALSA
+    # libraries at runtime, so the binary needs no SDL package installed. The
+    # 3D G-code renderer resolves GLES2 the same way (gles2_loader.h): with
+    # no GLES on the machine it fails init and the viewer draws in 2D.
+    CROSS_COMPILE :=
+    TARGET_ARCH := x86_64
+    TARGET_TRIPLE := x86_64-linux-gnu
+    TARGET_CFLAGS := -march=x86-64 -funwind-tables -Wno-error=conversion -Wno-error=sign-conversion -DHELIX_RELEASE_BUILD -DHELIX_PLATFORM_X86_DESKTOP -DHELIX_BINARY_VARIANT=\"sdl\"
+    DISPLAY_BACKEND := sdl
+    ENABLE_OPENGLES := no
+    ENABLE_SDL := yes
+    ENABLE_GLES_3D := yes
+    ENABLE_SCREENSAVER := yes
+    ENABLE_EVDEV := no
+    ENABLE_SSL := yes
+    BUILD_SUBDIR := x86-desktop
+    STRIP_BINARY := yes
+    FONT_TIERS := all
+
 else ifeq ($(PLATFORM_TARGET),yocto)
     # -------------------------------------------------------------------------
     # Yocto / BitBake cross-build (OpenCentauri COSMOS → Centauri Carbon 1 today;
@@ -752,7 +781,7 @@ else ifeq ($(PLATFORM_TARGET),native)
     BUILD_SUBDIR :=
 
 else
-    $(error Unknown PLATFORM_TARGET: $(PLATFORM_TARGET). Valid options: native, pi, pi32, x86, ad5m, ad5m-br, cc1, mips, k1, ad5x, k1-dynamic, k2, snapmaker-u1, yocto)
+    $(error Unknown PLATFORM_TARGET: $(PLATFORM_TARGET). Valid options: native, pi, pi32, x86, x86-desktop, ad5m, ad5m-br, cc1, mips, k1, ad5x, k1-dynamic, k2, snapmaker-u1, yocto)
 endif
 
 # pi32 compiles against Debian armhf (armv7) headers, whose shared_ptr uses the
@@ -765,6 +794,26 @@ endif
 # libstdc++ makes the inlined code and the library one build.
 ifneq ($(filter pi32 pi32-fbdev pi32-both,$(PLATFORM_TARGET)),)
     TARGET_LDFLAGS += -static-libstdc++ -static-libgcc
+endif
+
+# The Pi and x86 targets drop unreferenced code and data at link time, as every
+# embedded target above does: each function and object gets its own section and
+# the linker keeps only what is reachable from the entry point, .init_array and
+# the dynamic exports. That is safe because nothing resolves an app symbol by
+# name at runtime: the binaries export none (no -rdynamic), the Bluetooth plugin
+# imports only from its own libraries, and Lua bindings and XML callbacks are
+# registered as function pointers.
+ifneq ($(filter pi pi-fbdev pi-both pi32 pi32-fbdev pi32-both x86 x86-fbdev x86-both x86-desktop,$(PLATFORM_TARGET)),)
+    TARGET_CFLAGS += -ffunction-sections -fdata-sections
+    TARGET_LDFLAGS += -Wl,--gc-sections
+endif
+
+# The Pi and x86 DRM builds load libdrm, libinput, libEGL, libGLESv2 and libgbm
+# at runtime instead of linking them (mk/implib.mk), so the one binary starts on
+# a system without them and falls back to fbdev. include/gpu_libs.h is the
+# runtime gate every call into them goes through.
+ifneq ($(filter pi pi-both pi32 pi32-both x86 x86-both,$(PLATFORM_TARGET)),)
+    DLOPEN_GPU_LIBS := yes
 endif
 
 # =============================================================================
@@ -982,6 +1031,10 @@ ifeq ($(DISPLAY_BACKEND),drm)
     CXXFLAGS += -DHELIX_DISPLAY_DRM -DHELIX_DISPLAY_FBDEV
     SUBMODULE_CFLAGS += -DHELIX_DISPLAY_DRM -DHELIX_DISPLAY_FBDEV
     SUBMODULE_CXXFLAGS += -DHELIX_DISPLAY_DRM -DHELIX_DISPLAY_FBDEV
+    ifeq ($(DLOPEN_GPU_LIBS),yes)
+        CFLAGS += -DHELIX_DLOPEN_GPU_LIBS
+        CXXFLAGS += -DHELIX_DLOPEN_GPU_LIBS
+    endif
     # GPU-accelerated rendering via EGL/OpenGL ES (Pi targets)
     ifeq ($(ENABLE_OPENGLES),yes)
         CFLAGS += -DHELIX_ENABLE_OPENGLES
@@ -1028,7 +1081,7 @@ endif
 # Cross-Compilation Build Targets
 # =============================================================================
 
-.PHONY: pi pi-both pi32 pi32-both ad5m ad5m-br cc1 mips k1 ad5x creator5 k1-dynamic k2 snapmaker-u1 x86 x86-both pi-docker pi32-docker ad5m-docker cc1-docker mips-docker k1-docker ad5x-docker creator5-docker k1-dynamic-docker k2-docker ustreamer-k2 snapmaker-u1-docker x86-docker x86-fbdev-docker x86-all-docker docker-toolchains docker-toolchain-snapmaker-u1 docker-toolchain-x86 cross-info ensure-docker ensure-buildx maybe-stop-colima
+.PHONY: pi pi-both pi32 pi32-both ad5m ad5m-br cc1 mips k1 ad5x creator5 k1-dynamic k2 snapmaker-u1 x86 x86-both pi-docker pi32-docker ad5m-docker cc1-docker mips-docker k1-docker ad5x-docker creator5-docker k1-dynamic-docker k2-docker ustreamer-k2 snapmaker-u1-docker x86-docker x86-fbdev-docker x86-all-docker x86-desktop-docker docker-toolchains docker-toolchain-snapmaker-u1 docker-toolchain-x86 cross-info ensure-docker ensure-buildx maybe-stop-colima
 
 # Persistent ccache for Docker builds — bind-mounts a host directory so the
 # cache survives across container runs (the container is --rm).  Per-platform
@@ -1448,38 +1501,31 @@ snapmaker-u1-docker: ensure-docker
 	$(call extract-ca-certs,snapmaker-u1)
 	@$(MAKE) --no-print-directory maybe-stop-colima
 
-x86-docker: ensure-docker
-	@echo "$(CYAN)$(BOLD)Building for x86_64 Debian via Docker...$(RESET)"
+# One recipe for every build in the x86 toolchain image.
+# $(1) = banner, $(2) = ccache dir, $(3) = PLATFORM_TARGET.
+define x86-docker-build
+	@echo "$(CYAN)$(BOLD)$(1)$(RESET)"
 	@if ! docker image inspect helixscreen/toolchain-x86 >/dev/null 2>&1; then \
 		echo "$(YELLOW)Docker image not found. Building toolchain first...$(RESET)"; \
 		$(MAKE) docker-toolchain-x86; \
 	fi
-	$(call ensure-ccache-dir,x86)
-	$(Q)scripts/pool-docker.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86) helixscreen/toolchain-x86 \
-		make PLATFORM_TARGET=x86 SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) $(DOCKER_DIAG_UPLOADS) $(DOCKER_MOCKS) -j$(NPROC_DOCKER_RUN)
+	$(call ensure-ccache-dir,$(2))
+	$(Q)scripts/pool-docker.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,$(2)) helixscreen/toolchain-x86 \
+		make PLATFORM_TARGET=$(3) SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) $(DOCKER_DIAG_UPLOADS) $(DOCKER_MOCKS) -j$(NPROC_DOCKER_RUN)
 	@$(MAKE) --no-print-directory maybe-stop-colima
+endef
+
+x86-docker: ensure-docker
+	$(call x86-docker-build,Building for x86_64 Debian via Docker...,x86,x86)
 
 x86-fbdev-docker: ensure-docker
-	@echo "$(CYAN)$(BOLD)Building x86_64 fbdev fallback via Docker...$(RESET)"
-	@if ! docker image inspect helixscreen/toolchain-x86 >/dev/null 2>&1; then \
-		echo "$(YELLOW)Docker image not found. Building toolchain first...$(RESET)"; \
-		$(MAKE) docker-toolchain-x86; \
-	fi
-	$(call ensure-ccache-dir,x86-fbdev)
-	$(Q)scripts/pool-docker.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86-fbdev) helixscreen/toolchain-x86 \
-		make PLATFORM_TARGET=x86-fbdev SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) $(DOCKER_DIAG_UPLOADS) $(DOCKER_MOCKS) -j$(NPROC_DOCKER_RUN)
-	@$(MAKE) --no-print-directory maybe-stop-colima
+	$(call x86-docker-build,Building x86_64 fbdev fallback via Docker...,x86-fbdev,x86-fbdev)
 
 x86-all-docker: ensure-docker
-	@echo "$(CYAN)$(BOLD)Building x86_64 (DRM + fbdev) via Docker...$(RESET)"
-	@if ! docker image inspect helixscreen/toolchain-x86 >/dev/null 2>&1; then \
-		echo "$(YELLOW)Docker image not found. Building toolchain first...$(RESET)"; \
-		$(MAKE) docker-toolchain-x86; \
-	fi
-	$(call ensure-ccache-dir,x86)
-	$(Q)scripts/pool-docker.sh docker run --platform linux/amd64 --rm --user $$(id -u):$$(id -g) -v "$(CURDIR)":/src $(DOCKER_HOST_CONTEXT) -w /src $(call docker-ccache-args,x86) helixscreen/toolchain-x86 \
-		make PLATFORM_TARGET=x86-both SKIP_OPTIONAL_DEPS=1 $(DOCKER_REMOTE_CONTROL) $(DOCKER_DIAG_UPLOADS) $(DOCKER_MOCKS) -j$(NPROC_DOCKER_RUN)
-	@$(MAKE) --no-print-directory maybe-stop-colima
+	$(call x86-docker-build,Building x86_64 (DRM + fbdev) via Docker...,x86,x86-both)
+
+x86-desktop-docker: ensure-docker
+	$(call x86-docker-build,Building x86_64 Linux desktop (SDL) via Docker...,x86-desktop,x86-desktop)
 
 # Stop Colima after build to free up RAM (macOS only)
 # Only stops if Colima is running and we're on macOS
@@ -1493,7 +1539,7 @@ maybe-stop-colima:
 	fi
 
 # Build Docker toolchain images
-docker-toolchains: docker-toolchain-pi docker-toolchain-pi32 docker-toolchain-ad5m docker-toolchain-ad5x docker-toolchain-cc1 docker-toolchain-k1 docker-toolchain-mips docker-toolchain-k1-dynamic docker-toolchain-k2 docker-toolchain-snapmaker-u1 docker-toolchain-x86
+docker-toolchains: docker-toolchain-pi docker-toolchain-pi32 docker-toolchain-ad5m docker-toolchain-cc1 docker-toolchain-k1 docker-toolchain-mips docker-toolchain-k1-dynamic docker-toolchain-k2 docker-toolchain-snapmaker-u1 docker-toolchain-x86
 	@echo "$(GREEN)$(BOLD)All Docker toolchains built successfully$(RESET)"
 
 docker-toolchain-pi: ensure-buildx
@@ -1507,10 +1553,6 @@ docker-toolchain-pi32: ensure-buildx
 docker-toolchain-ad5m: ensure-buildx
 	@echo "$(CYAN)Building Adventurer 5M toolchain Docker image...$(RESET)"
 	$(Q)docker buildx build --platform linux/amd64 -t helixscreen/toolchain-ad5m -f docker/Dockerfile.ad5m docker/
-
-docker-toolchain-ad5x: ensure-buildx
-	@echo "$(CYAN)Building Adventurer 5X toolchain Docker image...$(RESET)"
-	$(Q)docker buildx build -t helixscreen/toolchain-ad5x -f docker/Dockerfile.ad5x docker/
 
 docker-toolchain-cc1: ensure-buildx
 	@echo "$(CYAN)Building Centauri Carbon 1 toolchain Docker image...$(RESET)"
@@ -1676,7 +1718,7 @@ DEPLOY_RSYNC_FLAGS := -avzz --delete --checksum
 # crash_report.txt on a healthy device that triggers the "previously crashed"
 # modal on next boot. These are gitignored but gitignore doesn't affect rsync.
 DEPLOY_RUNTIME_EXCLUDES := --exclude='crash.txt' --exclude='crash_*.txt' --exclude='crash_report.txt' --exclude='.crash_restart_count' --exclude='telemetry_*.json' --exclude='tool_spools.json' --exclude='filament_slot_overrides.json' --exclude='user_filaments.json' --exclude='crash_history.json' --exclude='.helix-screen.lock'
-DEPLOY_ASSET_EXCLUDES := --exclude='test_gcodes' --exclude='gcode' --exclude='.DS_Store' --exclude='*.pyc' --exclude='settings*.json' --exclude='helixconfig*.json' --exclude='helixscreen.env' --exclude='.claude-recall' --exclude='._*' \
+DEPLOY_ASSET_EXCLUDES := --exclude='test_gcodes' --exclude='gcode' --exclude='.DS_Store' --exclude='*.pyc' --exclude='settings*.json' --exclude='helixconfig*.json' --exclude='helixscreen.env' --exclude='._*' \
 	--exclude='assets/fonts/*.c' --exclude='assets/fonts/*.ttf' --exclude='assets/fonts/*.otf' --exclude='assets/fonts/.clang-format' \
 	--exclude='*.icns' --exclude='mdi-icon-metadata.json.gz' --exclude='moonraker-plugin/tests' \
 	$(DEPLOY_RUNTIME_EXCLUDES)
@@ -1695,7 +1737,7 @@ TAR_OWNER_FLAGS := $(shell if tar --owner=0 --group=0 -cf /dev/null -T /dev/null
 	else echo --uid 0 --gid 0 --numeric-owner; fi)
 
 # Tar-compatible excludes (same patterns, different syntax)
-DEPLOY_TAR_EXCLUDES := --exclude='test_gcodes' --exclude='gcode' --exclude='.DS_Store' --exclude='*.pyc' --exclude='settings*.json' --exclude='helixconfig*.json' --exclude='helixscreen.env' --exclude='.claude-recall' --exclude='._*' \
+DEPLOY_TAR_EXCLUDES := --exclude='test_gcodes' --exclude='gcode' --exclude='.DS_Store' --exclude='*.pyc' --exclude='settings*.json' --exclude='helixconfig*.json' --exclude='helixscreen.env' --exclude='._*' \
 	--exclude='assets/fonts/*.c' --exclude='assets/fonts/*.ttf' --exclude='assets/fonts/*.otf' --exclude='assets/fonts/.clang-format' \
 	--exclude='*.icns' --exclude='mdi-icon-metadata.json.gz' --exclude='moonraker-plugin/tests' \
 	$(DEPLOY_RUNTIME_EXCLUDES)
@@ -1705,6 +1747,13 @@ DEPLOY_NO_TRACKER := --exclude='*.mod'
 # tar syntax:
 DEPLOY_TAR_NO_TRACKER := --exclude='*.mod'
 DEPLOY_ASSET_DIRS := ui_xml assets config moonraker-plugin
+
+# Binaries helix-screen now carries itself: the EGL rung and the fbdev rung.
+# An older deploy's copies would otherwise sit in bin/ as dead weight.
+# $(1) = SSH target, $(2) = install dir.
+define deploy-remove-retired-binaries
+	@ssh $(1) "rm -f $(2)/bin/helix-screen-egl $(2)/bin/helix-screen-fbdev"
+endef
 
 # Common deploy recipe (called with: $(call deploy-common,SSH_TARGET,DEPLOY_DIR,BIN_DIR))
 # Usage: $(call deploy-common,$(PI_SSH_TARGET),$(PI_DEPLOY_DIR),build/pi/bin)
@@ -1795,20 +1844,30 @@ define deploy-common
 		echo "$(DIM)Generating 3D splash images...$(RESET)"; \
 		$(MAKE) gen-splash-3d; \
 	fi
-	@# Stop running processes and prepare directory
-	@# Stop update watcher first (prevents PathChanged restart during file sync),
-	@# then stop the main service and kill any stragglers
-	ssh $(1) "sudo systemctl stop helixscreen-update.path 2>/dev/null; sudo systemctl stop helixscreen 2>/dev/null; systemctl --user stop helix-screen 2>/dev/null; killall helix-watchdog helix-screen helix-screen-egl helix-splash 2>/dev/null; sleep 0.5; killall -9 helix-watchdog helix-screen helix-screen-egl helix-splash 2>/dev/null; while pidof helix-screen helix-screen-egl helix-splash helix-watchdog >/dev/null 2>&1; do sleep 0.2; done; true"
+	@# Stop every running instance before anything is synced. A systemd unit
+	@# that cannot be stopped (non-root ssh user, sudo wants a password) ends
+	@# the deploy here: killing a Restart=always unit's process only makes
+	@# systemd respawn it from a half-synced bin/.
+	@ssh $(1) 'sh -s' < scripts/deploy-stop-app-remote.sh; rc=$$?; \
+	if [ $$rc -eq 3 ]; then \
+		echo "$(RED)Refusing to deploy: the helixscreen systemd service on $(1) is running and could not be stopped.$(RESET)"; \
+		echo "$(RED)Syncing now would let systemd restart it from a half-copied install.$(RESET)"; \
+		echo "Fix one of:"; \
+		echo "  - allow passwordless sudo for systemctl for the ssh user on the device, e.g."; \
+		echo "      echo '<user> ALL=(root) NOPASSWD: /usr/bin/systemctl' | sudo tee /etc/sudoers.d/helixscreen-deploy"; \
+		echo "  - or stop it with a TTY so sudo can prompt, then rerun the deploy:"; \
+		echo "      ssh -t $(1) 'sudo systemctl stop helixscreen-update.path helixscreen && sudo systemctl stop helixscreen-update.path'"; \
+		exit 1; \
+	elif [ $$rc -ne 0 ]; then \
+		echo "$(RED)Could not stop HelixScreen on $(1) (ssh exit $$rc) - not syncing$(RESET)"; \
+		exit 1; \
+	fi
 	ssh $(1) "mkdir -p $(2)/bin"
 	ssh $(1) "rm -f $(2)/*.xml 2>/dev/null || true"
 	@# Sync binaries and launcher to bin/
 	rsync -avzz --progress $(3)/helix-screen $(3)/helix-splash $(1):$(2)/bin/
 	@if [ -f $(3)/helix-watchdog ]; then rsync -avzz $(3)/helix-watchdog $(1):$(2)/bin/; fi
-	@# The EGL rung, on targets that build one. helix-launcher.sh probes for it
-	@# and prefers it; without this the device keeps whatever it had, and a stale
-	@# one would be probed and run in place of the binary just deployed.
-	@if [ -f $(3)/helix-screen-egl ]; then rsync -avzz $(3)/helix-screen-egl $(1):$(2)/bin/; \
-	else ssh $(1) "rm -f $(2)/bin/helix-screen-egl"; fi
+	$(call deploy-remove-retired-binaries,$(1),$(2))
 	@# Sync Bluetooth plugin if built (runtime-loaded via dlopen, same dir as binary)
 	@if [ -f $(3)/libhelix-bluetooth.so ]; then \
 		echo "$(DIM)Deploying Bluetooth plugin...$(RESET)"; \
@@ -2844,7 +2903,8 @@ define release-clean-assets
 	@# source PNGs once every printer has a render at the size being kept.
 	@# gen-splash-3d-<platform> already narrows what gets BUILT, but the copy above
 	@# takes whatever build/ happens to hold, so this is the step that bounds the
-	@# payload. A platform whose panel is unknown until runtime keeps everything.
+	@# payload. A platform whose panel is unbounded keeps every size class and the
+	@# source PNGs; one whose manifest names candidate boards ships their union.
 	$(if $(2),@$(PLATFORM_MANIFEST) prune-assets $(2) $(1))
 endef
 
@@ -2980,7 +3040,7 @@ $(UNINSTALLER_BUNDLE): scripts/bundle-uninstaller.sh $(INSTALLER_SOURCES)
 deploy-pi deploy-pi-fg deploy-pi-asan deploy-pi32 deploy-pi32-fg deploy-pi32-asan \
 deploy-ad5m deploy-ad5m-fg deploy-cc1 deploy-cc1-fg deploy-k1-fg deploy-k1-dynamic-fg: $(INSTALLER_BUNDLES)
 
-.PHONY: release-pi release-pi32 release-ad5m release-cc1 release-mips release-k1 release-ad5x release-k1-dynamic release-k2 release-snapmaker-u1 release-x86 release-all release-clean pi-fbdev-docker pi32-fbdev-docker pi-all-docker pi32-all-docker x86-fbdev-docker x86-all-docker
+.PHONY: release-pi release-pi32 release-ad5m release-cc1 release-mips release-k1 release-ad5x release-k1-dynamic release-k2 release-snapmaker-u1 release-x86 release-x86-desktop release-all release-clean pi-fbdev-docker pi32-fbdev-docker pi-all-docker pi32-all-docker x86-fbdev-docker x86-all-docker
 
 # Host CA bundle packaged when a platform has no toolchain-extracted one.
 CA_BUNDLE ?= /etc/ssl/certs/ca-certificates.crt
@@ -2996,10 +3056,7 @@ REL_LABEL.k1-dynamic := K1 Dynamic
 REL_LABEL.k2 := K2
 REL_LABEL.snapmaker-u1 := Snapmaker U1
 REL_LABEL.x86 := x86
-
-# Platforms that also ship a framebuffer-only build/<plat>-fbdev binary, which
-# becomes bin/helix-screen-fbdev.
-REL_FBDEV := pi pi32 x86
+REL_LABEL.x86-desktop := x86 Linux desktop
 
 # config/settings.json seeded from assets/config/presets/<name>.json. Platforms
 # without an entry ship the template only and the installer writes the first-run
@@ -3056,14 +3113,11 @@ endef
 define release-package
 	@echo "$(CYAN)$(BOLD)Packaging $(REL_LABEL.$(1)) release v$(VERSION)...$(RESET)"
 	$(call release-assert-features,build/$(1)/bin)
-	$(if $(filter $(1),$(REL_FBDEV)),$(call release-assert-features,build/$(1)-fbdev/bin))
 	@mkdir -p $(RELEASE_DIR)/helixscreen/bin
 	@cp build/$(1)/bin/helix-screen $(RELEASE_DIR)/helixscreen/bin/
 	@if [ -f build/$(1)/bin/helix-splash ]; then cp build/$(1)/bin/helix-splash $(RELEASE_DIR)/helixscreen/bin/; fi
 	@if [ -f build/$(1)/bin/helix-watchdog ]; then cp build/$(1)/bin/helix-watchdog $(RELEASE_DIR)/helixscreen/bin/; fi
 	@if [ -f build/$(1)/bin/libhelix-bluetooth.so ]; then cp build/$(1)/bin/libhelix-bluetooth.so $(RELEASE_DIR)/helixscreen/bin/; fi
-	@if [ -f build/$(1)/bin/helix-screen-egl ]; then cp build/$(1)/bin/helix-screen-egl $(RELEASE_DIR)/helixscreen/bin/; fi
-	$(if $(filter $(1),$(REL_FBDEV)),@if [ -f build/$(1)-fbdev/bin/helix-screen ]; then cp build/$(1)-fbdev/bin/helix-screen $(RELEASE_DIR)/helixscreen/bin/helix-screen-fbdev; fi)
 	$(release-bin-extra-$(1))
 	@cp scripts/helix-launcher.sh $(RELEASE_DIR)/helixscreen/bin/
 	$(call release-copy-xml-config,$(RELEASE_DIR)/helixscreen)
@@ -3119,11 +3173,11 @@ define release-package
 endef
 
 # Package Pi release
-release-pi: $(INSTALLER_BUNDLES) | build/pi/bin/helix-screen build/pi/bin/helix-splash build/pi-fbdev/bin/helix-screen build/pi/bin/helix-screen-egl
+release-pi: $(INSTALLER_BUNDLES) | build/pi/bin/helix-screen build/pi/bin/helix-splash
 	$(call release-package,pi)
 
 # Package Pi 32-bit release (same structure as 64-bit Pi)
-release-pi32: $(INSTALLER_BUNDLES) | build/pi32/bin/helix-screen build/pi32/bin/helix-splash build/pi32-fbdev/bin/helix-screen build/pi32/bin/helix-screen-egl
+release-pi32: $(INSTALLER_BUNDLES) | build/pi32/bin/helix-screen build/pi32/bin/helix-splash
 	$(call release-package,pi32)
 
 # Package AD5M release
@@ -3160,11 +3214,16 @@ release-snapmaker-u1: $(INSTALLER_BUNDLES) | build/snapmaker-u1/bin/helix-screen
 	$(call release-package,snapmaker-u1)
 
 # Package x86_64 Debian release (same structure as Pi)
-release-x86: $(INSTALLER_BUNDLES) | build/x86/bin/helix-screen build/x86/bin/helix-splash build/x86-fbdev/bin/helix-screen
+release-x86: $(INSTALLER_BUNDLES) | build/x86/bin/helix-screen build/x86/bin/helix-splash
 	$(call release-package,x86)
 
+# Package the x86_64 Linux desktop release: one SDL binary that opens a window,
+# and no splash or watchdog, which exist to own a framebuffer.
+release-x86-desktop: $(INSTALLER_BUNDLES) | build/x86-desktop/bin/helix-screen
+	$(call release-package,x86-desktop)
+
 # Package all releases
-release-all: release-pi release-pi32 release-ad5m release-cc1 release-mips release-k1-dynamic release-k2 release-snapmaker-u1 release-x86
+release-all: release-pi release-pi32 release-ad5m release-cc1 release-mips release-k1-dynamic release-k2 release-snapmaker-u1 release-x86 release-x86-desktop
 	@echo "$(GREEN)$(BOLD)✓ All releases packaged in $(RELEASE_DIR)/$(RESET)"
 	@ls -lh $(RELEASE_DIR)/*.tar.gz $(RELEASE_DIR)/*.zip
 
@@ -3176,7 +3235,7 @@ release-clean:
 # Aliases for package-* — trigger the full build + package workflow.
 # The legacy scripts/package.sh wrapper was deleted; these targets are now
 # the single entry point for building release artifacts.
-.PHONY: package-ad5m package-cc1 package-pi package-pi32 package-mips package-k1 package-ad5x package-k1-dynamic package-k2 package-snapmaker-u1 package-x86 package-all
+.PHONY: package-ad5m package-cc1 package-pi package-pi32 package-mips package-k1 package-ad5x package-k1-dynamic package-k2 package-snapmaker-u1 package-x86 package-x86-desktop package-all
 
 # THE marker that separates a production build from a developer one. Everything
 # a developer builds gets the helixctl server (see the ENABLE_REMOTE_CONTROL
@@ -3207,7 +3266,8 @@ package-k1-dynamic: k1-dynamic-docker gen-images gen-splash-3d-k1-dynamic gen-pr
 package-k2: k2-docker gen-images gen-splash-3d-k2 gen-printer-images release-k2
 package-snapmaker-u1: snapmaker-u1-docker gen-images gen-splash-3d-snapmaker-u1 gen-printer-images release-snapmaker-u1
 package-x86: x86-all-docker gen-images gen-splash-3d-x86 gen-printer-images release-x86
-package-all: package-ad5m package-cc1 package-pi package-pi32 package-mips package-k1-dynamic package-k2 package-snapmaker-u1 package-x86
+package-x86-desktop: x86-desktop-docker gen-images gen-splash-3d-x86-desktop gen-printer-images release-x86-desktop
+package-all: package-ad5m package-cc1 package-pi package-pi32 package-mips package-k1-dynamic package-k2 package-snapmaker-u1 package-x86 package-x86-desktop
 
 # Convenience alias (verb-target → target-verb)
 .PHONY: ad5m-deploy

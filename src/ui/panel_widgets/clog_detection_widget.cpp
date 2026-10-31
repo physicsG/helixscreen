@@ -3,7 +3,6 @@
 #include "clog_detection_widget.h"
 
 #include "ui_clog_bar.h"
-#include "ui_update_queue.h"
 
 #include "ams_state.h"
 #include "buffer_status_modal.h"
@@ -43,11 +42,7 @@ void ClogDetectionWidget::attach(lv_obj_t* widget_obj, lv_obj_t* /*parent_screen
 }
 
 void ClogDetectionWidget::detach() {
-    {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-        clog_bar_.reset();
-    }
+    clog_bar_.reset();
     widget_obj_ = nullptr;
 }
 

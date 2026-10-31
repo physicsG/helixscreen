@@ -75,7 +75,7 @@ struct LinearHubFrame {
     PathSegment fil_seg = PathSegment::NONE;
 
     // HUB merge fan: parallel diagonals per side, one 4-point polyline per lane.
-    pg::MergeLaneOut hub_fan[FilamentPathData::MAX_SLOTS];
+    pg::MergeLaneOut hub_fan[FilamentPathData::kMaxSlots];
     int32_t hub_box_w = 0; // widened entry-spread width (HUB box drawn at this)
     // HUB with the bypass hidden: hub and buffer stacked upward from the
     // toolhead glyph instead of at their ratio positions.
@@ -122,8 +122,8 @@ struct MixedFrame {
 
     // Merge fan for the hub lanes: parallel diagonals per side spread across
     // distinct hub-top entries.
-    pg::MergeLaneOut hub_fan[FilamentPathData::MAX_SLOTS];
-    int slot_to_fan[FilamentPathData::MAX_SLOTS]; // slot index -> hub-lane order (-1 none)
+    pg::MergeLaneOut hub_fan[FilamentPathData::kMaxSlots];
+    int slot_to_fan[FilamentPathData::kMaxSlots]; // slot index -> hub-lane order (-1 none)
 
     SlotRenderStates states;
 };
@@ -132,7 +132,7 @@ MixedFrame compute_mixed_frame(const FilamentPathData& data, const BaseGeometry&
 
 // PARALLEL rows: the lane entries, each tool's entry sensor, and its toolhead.
 struct ParallelRows {
-    int32_t entry_y, sensor_y, toolhead_y, tool_scale;
+    int32_t entry_y, prep_y, sensor_y, toolhead_y, tool_scale;
 };
 ParallelRows parallel_rows(const FilamentPathData& data, const BaseGeometry& g);
 
@@ -148,11 +148,11 @@ bool operator==(const SpanStyle& a, const SpanStyle& b);
 
 struct Route {
     pg::FilamentPath path;
-    SpanStyle style[pg::FilamentPath::MAX_SEGS];
-    int dropped = 0; // segments that did not fit in MAX_SEGS
+    SpanStyle style[pg::FilamentPath::kMaxSegs];
+    int dropped = 0; // segments that did not fit in kMaxSegs
 };
 
-/// Append @p piece's segments with style @p s. Segments past MAX_SEGS are
+/// Append @p piece's segments with style @p s. Segments past kMaxSegs are
 /// dropped and counted in Route::dropped; returns false when any were.
 bool route_append(Route& r, const pg::FilamentPath& piece, SpanStyle s);
 
@@ -166,16 +166,16 @@ struct SensorBand {
     bool on_box_edge = false; // straddles a hub/selector edge: painted over the box
 };
 
-inline constexpr int MAX_ROUTES = FilamentPathData::MAX_SLOTS + 2; // lanes + trunk + bypass
-inline constexpr int MAX_BANDS = 2 * FilamentPathData::MAX_SLOTS + 4;
+inline constexpr int kMaxRoutes = FilamentPathData::kMaxSlots + 2; // lanes + trunk + bypass
+inline constexpr int kMaxBands = 2 * FilamentPathData::kMaxSlots + 4;
 
 struct PathPlan {
-    Route routes[MAX_ROUTES];
+    Route routes[kMaxRoutes];
     int route_count = 0;
     int active_route = -1;
     int trunk_route = -1;  // idle trunk, when no lane owns it
     int bypass_route = -1; // bypass horizontal (and the trunk below it when active)
-    SensorBand bands[MAX_BANDS];
+    SensorBand bands[kMaxBands];
     int band_count = 0;
     int trunk_band_count = 0; // of band_count: output, merge and toolhead bands
     int dropped = 0; // segments and bands that did not fit; the plan is incomplete when > 0
@@ -227,7 +227,7 @@ struct Lane {
 /// Lane bands (prep, hub entry) stop short of the last few slots, so a full
 /// band table drops a lane band and never the trunk's output, merge or
 /// toolhead band.
-inline constexpr int TRUNK_BANDS = 3;
+inline constexpr int kTrunkBands = 3;
 enum class BandKind : uint8_t { Lane, Trunk };
 
 void reset_plan(PathPlan& out);
@@ -280,10 +280,10 @@ void paint_box_bands(lv_layer_t* layer, const PathPlan& plan, const TubePalette&
 void draw_offpage_stubs(const RenderCtx& ctx, const LinearHubFrame& f);
 
 // Clamp band: a short rounded bar across the tube.
-inline constexpr int32_t BAND_EXTRA = 10;    // band length = gauge + BAND_EXTRA
-inline constexpr int32_t BAND_THICKNESS = 4; // stroke width, round caps
+inline constexpr int32_t kBandExtra = 10;    // band length = gauge + kBandExtra
+inline constexpr int32_t kBandThickness = 4; // stroke width, round caps
 
-/// Centerline of the band bar: at ± normal * ((gauge + BAND_EXTRA)/2 - BAND_THICKNESS/2).
+/// Centerline of the band bar: at ± normal * ((gauge + kBandExtra)/2 - kBandThickness/2).
 void band_segment(const SensorBand& band, int32_t gauge, pg::PathPoint& p0, pg::PathPoint& p1);
 void draw_sensor_band(lv_layer_t* layer, const SensorBand& band, int32_t gauge, lv_color_t color);
 

@@ -2,17 +2,14 @@
 
 #pragma once
 
-#include "ui_observer_guard.h"
-#include "ui_update_queue.h"
-
-#include "async_lifetime_guard.h"
+#include "dynamic_subject_map.h"
 #include "i_moonraker_api.h"
-#include "static_subject_registry.h"
+#include "sensor_manager.h"
 
 #include <lvgl/lvgl.h>
 
-#include <memory>
-#include <mutex>
+#include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -32,19 +29,21 @@ struct SensorInfo {
 };
 
 /**
- * @brief Singleton tracking Moonraker server.sensors state
+ * @brief Moonraker server.sensors state: power and energy meters.
  *
- * Subscribes to notify_sensor_update WebSocket events and maintains
- * per-sensor, per-value LVGL subjects encoded as centi-units:
+ * Fed by set_sensors() (discovery) and notify_sensor_update WebSocket events,
+ * not by PrinterDiscovery. Keeps one int subject per (sensor, value key),
+ * encoded as centi-units:
  *   - power:   value * 100          (centi-watts)
  *   - voltage: value * 100          (centi-volts)
  *   - current: value * 100000       (centi-milliamps for mA precision)
  *   - energy:  value * 100          (centi-kilowatt-hours)
  *
- * Uses SubjectLifetime pattern for dynamic subject safety since sensors
- * can be rediscovered on reconnection.
+ * Subjects live in a DynamicSubjectMap and are rebuilt on every rediscovery, so
+ * observers use the lifetime from get_value_subject(). No roles, no persisted
+ * settings, no Settings rows.
  */
-class SensorState {
+class SensorState : public sensors::SensorManager {
   public:
     static SensorState& instance();
 
@@ -67,8 +66,8 @@ class SensorState {
     /// Get list of all tracked sensor IDs
     std::vector<std::string> sensor_ids() const;
 
-    /// Get sensor info by ID. Returns nullptr if not found.
-    const SensorInfo* get_sensor_info(const std::string& sensor_id) const;
+    /// A copy of the sensor's info, taken under the lock; empty if not found.
+    std::optional<SensorInfo> get_sensor_info(const std::string& sensor_id) const;
 
     /// Get list of sensor IDs that are energy sensors
     std::vector<std::string> energy_sensor_ids() const;
@@ -82,47 +81,27 @@ class SensorState {
     /// Format a centi-unit value to a human-readable string with units
     static std::string format_value(const std::string& key, int centi_value);
 
-    /// Clean up all LVGL subjects (called by StaticSubjectRegistry)
-    void deinit_subjects();
+  protected:
+    void register_subjects(SubjectManager& subjects) override;
+    void refresh_subjects() override;
+    bool parse_status(const nlohmann::json& status) override;
+    void on_deinit_subjects() override;
 
   private:
-    SensorState() = default;
-    ~SensorState() = default;
-
-    SensorState(const SensorState&) = delete;
-    SensorState& operator=(const SensorState&) = delete;
+    SensorState();
+    static Options make_options();
 
     void on_sensor_update(const nlohmann::json& msg);
 
-    /**
-     * @brief Wraps an lv_subject_t with lifecycle management.
-     *
-     * Values stored as centi-units (value * 100, or * 100000 for current).
-     */
-    struct DynamicIntSubject {
-        lv_subject_t subject{};
-        bool initialized = false;
-        SubjectLifetime lifetime; ///< Alive token for ObserverGuard safety
+    /// Mutex held, main thread: one subject per (sensor, key), none for vanished ones.
+    void sync_subjects_locked();
 
-        ~DynamicIntSubject() {
-            lifetime.reset();
-            if (initialized && lv_is_initialized()) {
-                lv_subject_deinit(&subject);
-            }
-            initialized = false;
-        }
-    };
+    static std::string subject_key(const std::string& sensor_id, const std::string& key);
 
-    struct SensorEntry {
-        SensorInfo info;
-        /// One DynamicIntSubject per value key (e.g. "power", "voltage")
-        std::unordered_map<std::string, std::unique_ptr<DynamicIntSubject>> value_subjects;
-    };
-
-    mutable std::recursive_mutex mutex_;
-    std::unordered_map<std::string, SensorEntry> sensors_;
-    bool subjects_initialized_ = false;
-    helix::AsyncLifetimeGuard lifetime_;
+    std::unordered_map<std::string, SensorInfo> infos_;
+    /// Latest centi-unit value per sensor id and key, applied to subjects by refresh_subjects().
+    std::unordered_map<std::string, std::map<std::string, int>> readings_;
+    sensors::DynamicSubjectMap subjects_by_key_;
 };
 
 } // namespace helix

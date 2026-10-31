@@ -32,7 +32,9 @@
 #include "display_backend_fbdev.h"
 #endif
 #include "app_constants.h"
+#include "helix_version.h"
 #include "logging_init.h"
+#include "system/crash_record.h"
 #include "watchdog_restart_policy.h"
 
 #include <spdlog/spdlog.h>
@@ -59,14 +61,14 @@
 // Constants
 // =============================================================================
 
-static constexpr int DEFAULT_WIDTH = 800;
-static constexpr int DEFAULT_HEIGHT = 480;
-static constexpr int FRAME_DELAY_US = 16000; // ~60 FPS
-static constexpr int DEFAULT_AUTO_RESTART_SEC = 30;
+static constexpr int kDefaultWidth = 800;
+static constexpr int kDefaultHeight = 480;
+static constexpr int kFrameDelayUs = 16000; // ~60 FPS
+static constexpr int kDefaultAutoRestartSec = 30;
 
 // Restart-loop detection: if the child exits non-zero (deliberate failure exit,
 // not a crash signal) too often within a short window, the watchdog gives up
-// and exits with RESTART_LOOP_EXIT_CODE so the system service manager (systemd,
+// and exits with kRestartLoopExitCode so the system service manager (systemd,
 // inittab, init script) sees the failure rather than the watchdog quietly
 // busy-restarting forever. Typical trigger: "another instance is already
 // running", config-validation failure, missing shared library — conditions that
@@ -82,10 +84,10 @@ static constexpr int DEFAULT_AUTO_RESTART_SEC = 30;
 // far larger budget — see watchdog_restart_policy.h. Under memory pressure
 // execv() of an intact binary can fail with ENOEXEC/ENOMEM; spending the small
 // budget above on those turns a passing squeeze into a permanently black screen.
-// The budget itself (RESTART_LOOP_MAX_FAILURES), the counting and the pacing
+// The budget itself (kRestartLoopMaxFailures), the counting and the pacing
 // live in the policy header so they can be unit tested on hosts that never
 // build this binary.
-static constexpr int RESTART_LOOP_EXIT_CODE = 42;
+static constexpr int kRestartLoopExitCode = 42;
 
 // Crash-loop detection (separate window from non-zero-exit loops above).
 // When the same crash signal repeats N times within M seconds, blind retry
@@ -94,18 +96,18 @@ static constexpr int RESTART_LOOP_EXIT_CODE = 42;
 // f75b961d8 family). Don't give up; instead, expand the recovery dialog to
 // offer a Safe Mode boot that defers Moonraker connection so the user can
 // reach Settings and fix the underlying state without crashing again.
-static constexpr int CRASH_LOOP_MAX_CRASHES = 3;
-static constexpr int CRASH_LOOP_WINDOW_SEC = 90;
+static constexpr int kCrashLoopMaxCrashes = 3;
+static constexpr int kCrashLoopWindowSec = 90;
 
 // UI Colors (dark theme, matches main app)
-static constexpr uint32_t BG_COLOR_DARK = 0x121212;
-static constexpr uint32_t CONTAINER_BG = 0x1E1E1E;
-static constexpr uint32_t BORDER_ERROR = 0xF44336;
+static constexpr uint32_t kBgColorDark = 0x121212;
+static constexpr uint32_t kContainerBg = 0x1E1E1E;
+static constexpr uint32_t kBorderError = 0xF44336;
 static constexpr uint32_t BUTTON_PRIMARY = 0x2196F3; // Blue - restart app
-static constexpr uint32_t BUTTON_DANGER = 0xF44336;  // Red - restart system
-static constexpr uint32_t TEXT_PRIMARY = 0xFFFFFF;
-static constexpr uint32_t TEXT_SECONDARY = 0xAAAAAA;
-static constexpr uint32_t TEXT_MUTED = 0x888888;
+static constexpr uint32_t kButtonDanger = 0xF44336;  // Red - restart system
+static constexpr uint32_t kTextPrimary = 0xFFFFFF;
+static constexpr uint32_t kTextSecondary = 0xAAAAAA;
+static constexpr uint32_t kTextMuted = 0x888888;
 
 // =============================================================================
 // Global State
@@ -174,7 +176,7 @@ static int read_auto_restart_timeout() {
     std::string path;
     const auto timeout = helix::read_settings_int("auto_restart_sec", &path);
     if (!timeout) {
-        return DEFAULT_AUTO_RESTART_SEC;
+        return kDefaultAutoRestartSec;
     }
     spdlog::debug("[Watchdog] Read auto_restart_sec={} from {}", *timeout, path);
     return *timeout;
@@ -208,8 +210,8 @@ static void print_usage(const char* program) {
             "Usage: %s [-w width] [-h height] [--splash-bin=<path>] [--splash-pid=N] -- "
             "<helix-screen> [args...]\n",
             program);
-    fprintf(stderr, "  -w <width>          Screen width (default: %d)\n", DEFAULT_WIDTH);
-    fprintf(stderr, "  -h <height>         Screen height (default: %d)\n", DEFAULT_HEIGHT);
+    fprintf(stderr, "  -w <width>          Screen width (default: %d)\n", kDefaultWidth);
+    fprintf(stderr, "  -h <height>         Screen height (default: %d)\n", kDefaultHeight);
     fprintf(stderr,
             "  -r <degrees>        Display rotation: 0, 90, 180, 270 (default: from config)\n");
     fprintf(stderr, "  --splash-bin=<path> Path to splash screen binary (optional)\n");
@@ -270,16 +272,15 @@ static volatile pid_t g_splash_pid = 0;
  * skip the external splash and let the main app show its internal LVGL splash.
  */
 static bool would_use_drm() {
-    const char* env = std::getenv("HELIX_DISPLAY_BACKEND");
-    if (env != nullptr) {
-        return strcmp(env, "drm") == 0;
-    }
-    // Auto mode: DRM is tried first in create_auto(), check if it's available
+    const auto forced = helix::parse_forced_display_backend(std::getenv("HELIX_DISPLAY_BACKEND"));
 #ifdef HELIX_DISPLAY_DRM
+    // Asked even for a forced drm or egl rung: without libdrm or a usable card
+    // the app falls back to fbdev, and skipping the splash would leave the
+    // screen black while it loads.
     DisplayBackendDRM drm;
-    return drm.is_available();
+    return helix::drm_will_own_panel(forced, drm.is_available());
 #else
-    return false;
+    return helix::drm_will_own_panel(forced, false);
 #endif
 }
 
@@ -437,6 +438,7 @@ static void cleanup_splash(pid_t splash_pid) {
  */
 static CrashInfo run_child_process(const WatchdogArgs& args, pid_t splash_pid) {
     CrashInfo crash = {};
+    const time_t started = time(nullptr);
 
     // Build argv for execv - need to own the strings for splash_pid arg
     std::vector<std::string> arg_strings;
@@ -599,6 +601,18 @@ static CrashInfo run_child_process(const WatchdogArgs& args, pid_t splash_pid) {
         crash.signal_name = strsignal(crash.signal_num);
         spdlog::warn("[Watchdog] Child killed by signal {} ({})", crash.signal_num,
                      crash.signal_name);
+        // The app's handler records the crash signals it catches; one it does not
+        // catch, or one that kills it before the handler writes, leaves no record
+        // unless this one. A stop request (TERM, KILL, INT) is not a crash, and a
+        // --test child records nothing, as the app itself does not.
+        const bool test_child = std::find(args.child_args.begin(), args.child_args.end(),
+                                          "--test") != args.child_args.end();
+        if (!test_child && helix::crash_record::is_crash_signal(crash.signal_num) &&
+            helix::crash_record::write_external(helix::writable_path("crash.txt"), crash.signal_num,
+                                                HELIX_VERSION, static_cast<long>(crash.crash_time),
+                                                "watchdog", static_cast<long>(started))) {
+            spdlog::info("[Watchdog] Wrote a crash record for signal {}", crash.signal_num);
+        }
     }
 
     return crash;
@@ -808,7 +822,7 @@ static lv_obj_t* create_button(lv_obj_t* parent, const char* text, uint32_t colo
     lv_obj_t* label = lv_label_create(btn);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_font(label, &noto_sans_bold_16, 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(kTextPrimary), 0);
     lv_obj_center(label);
 
     return btn;
@@ -827,7 +841,7 @@ static void create_crash_dialog(lv_obj_t* screen, int /*width*/, int /*height*/,
                                 const CrashInfo& crash, int auto_restart_sec,
                                 bool crash_loop_detected) {
     // Dark background
-    lv_obj_set_style_bg_color(screen, lv_color_hex(BG_COLOR_DARK), 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(kBgColorDark), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -838,10 +852,10 @@ static void create_crash_dialog(lv_obj_t* screen, int /*width*/, int /*height*/,
     lv_obj_t* container = lv_obj_create(screen);
     lv_obj_set_size(container, LV_PCT(85), LV_SIZE_CONTENT);
     lv_obj_center(container);
-    lv_obj_set_style_bg_color(container, lv_color_hex(CONTAINER_BG), 0);
+    lv_obj_set_style_bg_color(container, lv_color_hex(kContainerBg), 0);
     lv_obj_set_style_bg_opa(container, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(container, 2, 0);
-    lv_obj_set_style_border_color(container, lv_color_hex(BORDER_ERROR), 0);
+    lv_obj_set_style_border_color(container, lv_color_hex(kBorderError), 0);
     lv_obj_set_style_radius(container, 12, 0);
     lv_obj_set_style_pad_all(container, 24, 0);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
@@ -853,14 +867,14 @@ static void create_crash_dialog(lv_obj_t* screen, int /*width*/, int /*height*/,
     lv_obj_t* icon = lv_label_create(container);
     lv_label_set_text(icon, ICON_TRIANGLE_EXCLAMATION);
     lv_obj_set_style_text_font(icon, &mdi_icons_64, 0);
-    lv_obj_set_style_text_color(icon, lv_color_hex(BORDER_ERROR), 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(kBorderError), 0);
 
     // Title
     lv_obj_t* title = lv_label_create(container);
     lv_label_set_text(title,
                       crash_loop_detected ? "HelixScreen Keeps Crashing" : "HelixScreen Crashed");
     lv_obj_set_style_text_font(title, &noto_sans_bold_24, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(TEXT_PRIMARY), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(kTextPrimary), 0);
     lv_obj_set_style_pad_top(title, 16, 0);
 
     // Crash details
@@ -872,7 +886,7 @@ static void create_crash_dialog(lv_obj_t* screen, int /*width*/, int /*height*/,
         lv_label_set_text_fmt(details, "Exit code: %d", crash.exit_code);
     }
     lv_obj_set_style_text_font(details, &noto_sans_14, 0);
-    lv_obj_set_style_text_color(details, lv_color_hex(TEXT_SECONDARY), 0);
+    lv_obj_set_style_text_color(details, lv_color_hex(kTextSecondary), 0);
     lv_obj_set_style_pad_top(details, 8, 0);
 
     // Loop hint: when the same crash repeats, restarting won't help on its
@@ -885,7 +899,7 @@ static void create_crash_dialog(lv_obj_t* screen, int /*width*/, int /*height*/,
         lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(hint, LV_PCT(100));
         lv_obj_set_style_text_font(hint, &noto_sans_14, 0);
-        lv_obj_set_style_text_color(hint, lv_color_hex(TEXT_SECONDARY), 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(kTextSecondary), 0);
         lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_pad_top(hint, 12, 0);
     }
@@ -899,7 +913,7 @@ static void create_crash_dialog(lv_obj_t* screen, int /*width*/, int /*height*/,
         lv_label_set_text_fmt(g_countdown_label, "Auto-restart in %d seconds...",
                               g_countdown_seconds);
         lv_obj_set_style_text_font(g_countdown_label, &noto_sans_14, 0);
-        lv_obj_set_style_text_color(g_countdown_label, lv_color_hex(TEXT_MUTED), 0);
+        lv_obj_set_style_text_color(g_countdown_label, lv_color_hex(kTextMuted), 0);
         lv_obj_set_style_pad_top(g_countdown_label, 12, 0);
     } else {
         g_countdown_seconds = 0;
@@ -923,11 +937,11 @@ static void create_crash_dialog(lv_obj_t* screen, int /*width*/, int /*height*/,
         // Loop dialog: Safe Mode is the primary action since plain restart
         // is provably futile here.
         create_button(btn_container, "Safe Mode", BUTTON_PRIMARY, on_safe_mode_clicked);
-        create_button(btn_container, "Restart App", BUTTON_DANGER, on_restart_app_clicked);
+        create_button(btn_container, "Restart App", kButtonDanger, on_restart_app_clicked);
     } else {
         // Normal dialog: standard two-button layout.
         create_button(btn_container, "Restart App", BUTTON_PRIMARY, on_restart_app_clicked);
-        create_button(btn_container, "Restart System", BUTTON_DANGER, on_restart_system_clicked);
+        create_button(btn_container, "Restart System", kButtonDanger, on_restart_system_clicked);
     }
 }
 
@@ -1000,7 +1014,7 @@ static DialogChoice show_crash_dialog(int width, int height, int rotation, const
 
     while (g_dialog_choice == DialogChoice::NONE && !g_quit) {
         lv_timer_handler();
-        usleep(FRAME_DELAY_US);
+        usleep(kFrameDelayUs);
 
         // Update countdown every second
         uint32_t current_second = get_ticks_ms() / 1000;
@@ -1063,7 +1077,7 @@ static int run_watchdog(WatchdogArgs args) {
 
     // Rolling window of recent crash signatures (signal_num for SIGNAL crashes,
     // or exit_code for crash-handler 128..159 exits). Detecting the same
-    // signature ≥ CRASH_LOOP_MAX_CRASHES times within CRASH_LOOP_WINDOW_SEC
+    // signature ≥ kCrashLoopMaxCrashes times within kCrashLoopWindowSec
     // means the same crash is reproducing every restart — blind retry won't
     // fix it. See the CRASH_LOOP_* constants for rationale.
     struct CrashEvent {
@@ -1122,7 +1136,7 @@ static int run_watchdog(WatchdogArgs args) {
         // Written by UpdateChecker before _exit(0) after a successful update install.
         bool was_update_restart = false;
         {
-            std::string marker = AppConstants::Update::update_restart_marker_path();
+            std::string marker = helix::app_constants::update::update_restart_marker_path();
             namespace fs = std::filesystem;
             std::error_code ec;
             if (fs::exists(marker, ec) && !ec) {
@@ -1197,10 +1211,9 @@ static int run_watchdog(WatchdogArgs args) {
                 failure_count = launch_failures.record(exec_class);
                 spdlog::warn("[Watchdog] Child launch failed transiently (exit {}); "
                              "consecutive transient failures: {}/{}, cooldown rounds used {}/{}",
-                             crash.exit_code, failure_count,
-                             helix::watchdog::TRANSIENT_MAX_FAILURES,
+                             crash.exit_code, failure_count, helix::watchdog::kTransientMaxFailures,
                              launch_failures.cooldown_rounds,
-                             helix::watchdog::TRANSIENT_MAX_COOLDOWN_ROUNDS);
+                             helix::watchdog::kTransientMaxCooldownRounds);
             } else {
                 // Genuine non-zero exit (no crash): deliberate exit() with a
                 // failure code — "another instance running", config validation,
@@ -1223,17 +1236,17 @@ static int run_watchdog(WatchdogArgs args) {
                         "[Watchdog] Transient launch failures never cleared: {} cooldown "
                         "rounds exhausted (last exit code: {}). Exiting watchdog with code "
                         "{} so the service manager sees it.",
-                        launch_failures.cooldown_rounds, crash.exit_code, RESTART_LOOP_EXIT_CODE);
+                        launch_failures.cooldown_rounds, crash.exit_code, kRestartLoopExitCode);
                 } else {
                     spdlog::critical(
                         "[Watchdog] Restart loop detected: child exited non-zero {} times "
                         "in a row (last exit code: {}). Giving up to avoid busy-loop; "
                         "exiting watchdog with code {}. Investigate the underlying failure "
                         "(another instance running, bad config, missing library, etc.).",
-                        failure_count, crash.exit_code, RESTART_LOOP_EXIT_CODE);
+                        failure_count, crash.exit_code, kRestartLoopExitCode);
                 }
                 cleanup_splash(g_splash_pid);
-                return RESTART_LOOP_EXIT_CODE;
+                return kRestartLoopExitCode;
             }
 
             if (decision.action == RestartAction::COOLDOWN_RETRY) {
@@ -1242,7 +1255,7 @@ static int run_watchdog(WatchdogArgs args) {
                 spdlog::warn("[Watchdog] Transient launch failures outlasted the backoff "
                              "budget; cooling down {}s before retrying (round {}/{})",
                              decision.delay_seconds, launch_failures.cooldown_rounds,
-                             helix::watchdog::TRANSIENT_MAX_COOLDOWN_ROUNDS);
+                             helix::watchdog::kTransientMaxCooldownRounds);
             } else {
                 spdlog::warn("[Watchdog] Child exited with code {} ({}, not a crash), "
                              "restarting in {}s (failure {})",
@@ -1277,7 +1290,7 @@ static int run_watchdog(WatchdogArgs args) {
         {
             int signature = crash.was_signaled ? crash.signal_num : crash.exit_code;
             auto now = std::chrono::steady_clock::now();
-            const auto window = std::chrono::seconds(CRASH_LOOP_WINDOW_SEC);
+            const auto window = std::chrono::seconds(kCrashLoopWindowSec);
             while (!recent_crashes.empty() && (now - recent_crashes.front().at) > window) {
                 recent_crashes.pop_front();
             }
@@ -1285,22 +1298,22 @@ static int run_watchdog(WatchdogArgs args) {
         }
 
         // Loop detected when we have ≥ N entries in the window AND at least
-        // CRASH_LOOP_MAX_CRASHES of them share a signature. Same-signature
+        // kCrashLoopMaxCrashes of them share a signature. Same-signature
         // matters: alternating crashes from different bugs aren't a single
         // deterministic state, so blind retry might still help.
         bool crash_loop_detected = false;
-        if (static_cast<int>(recent_crashes.size()) >= CRASH_LOOP_MAX_CRASHES) {
+        if (static_cast<int>(recent_crashes.size()) >= kCrashLoopMaxCrashes) {
             int last_sig = recent_crashes.back().signature;
             int matches = 0;
             for (const auto& ev : recent_crashes) {
                 if (ev.signature == last_sig)
                     ++matches;
             }
-            if (matches >= CRASH_LOOP_MAX_CRASHES) {
+            if (matches >= kCrashLoopMaxCrashes) {
                 crash_loop_detected = true;
                 spdlog::critical("[Watchdog] Crash loop detected: signature {} repeated {} times "
                                  "in the last {}s. Offering Safe Mode.",
-                                 last_sig, matches, CRASH_LOOP_WINDOW_SEC);
+                                 last_sig, matches, kCrashLoopWindowSec);
             }
         }
 
@@ -1308,10 +1321,12 @@ static int run_watchdog(WatchdogArgs args) {
         spdlog::warn("[Watchdog] Crash detected, showing recovery dialog{}",
                      crash_loop_detected ? " (loop detected)" : "");
 
-        // standalone_rotation adds the kernel's panel_orientation, which args.rotation
-        // leaves out: forwarding it to the app would override the app's own probe.
+        // standalone_rotation adds the kernel's panel_orientation and the board's
+        // mount, which args.rotation leaves out: forwarding either to the app would
+        // override the app's own first-boot decision.
         DialogChoice choice =
-            show_crash_dialog(args.width, args.height, helix::standalone_rotation(args.rotation),
+            show_crash_dialog(args.width, args.height,
+                              helix::standalone_rotation(args.rotation, args.width, args.height),
                               crash, crash_loop_detected);
 
         if (choice == DialogChoice::RESTART_SYSTEM) {
@@ -1384,8 +1399,8 @@ int main(int argc, char** argv) {
         }
         // Fall back to defaults if detection failed
         if (args.width == 0 || args.height == 0) {
-            args.width = DEFAULT_WIDTH;
-            args.height = DEFAULT_HEIGHT;
+            args.width = kDefaultWidth;
+            args.height = kDefaultHeight;
             spdlog::info("[Watchdog] Using default resolution: {}x{}", args.width, args.height);
         }
     }

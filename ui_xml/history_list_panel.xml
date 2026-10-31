@@ -36,8 +36,7 @@
         <!-- Collapse/expand the filter dropdowns -->
         <ui_button name="filter_toggle"
                    width="#input_height" height="100%" variant="secondary" style_pad_all="0" clickable="true"
-                   flex_flow="row" style_flex_main_place="center" style_flex_cross_place="center"
-                   style_flex_track_place="center">
+                   flex_flow="row" style_flex_main_place="center" style_flex_cross_place="center">
           <event_cb trigger="clicked" callback="history_filters_toggle"/>
           <!-- Icon as a child (not the icon= attr) so ui_button's contrast pass
                leaves its colour alone; the accent is driven reactively by the
@@ -55,8 +54,8 @@
         <bind_flag_if_eq subject="history_filters_expanded" flag="hidden" ref_value="0"/>
         <!-- Status filter dropdown -->
         <lv_dropdown name="filter_status"
-                     options="All&#10;Completed&#10;Failed&#10;Cancelled"
-                     options_tag="All&#10;Completed&#10;Failed&#10;Cancelled" flex_grow="1">
+                     options="All&#10;Completed&#10;Failed&#10;Canceled"
+                     options_tag="All&#10;Completed&#10;Failed&#10;Canceled" flex_grow="1">
           <event_cb trigger="value_changed" callback="history_filter_status_changed"/>
         </lv_dropdown>
         <!-- Sort dropdown -->

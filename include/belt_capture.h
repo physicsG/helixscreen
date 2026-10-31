@@ -36,7 +36,7 @@ namespace helix::calibration {
 /// reason to depend back on the session header.
 enum class PluckReject {
     NONE,       ///< accepted
-    TOO_SOFT,   ///< cleared MIN_DETECTABLE_RATIO but not the strength gate
+    TOO_SOFT,   ///< cleared kMinDetectableRatio but not the strength gate
     NOT_A_PLUCK ///< strong enough, but the wrong shape or no belt tone in it
 };
 

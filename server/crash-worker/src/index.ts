@@ -21,8 +21,9 @@
 //   ADMIN_API_KEY           - Admin API key for retrieving debug bundles
 //   RESEND_API_KEY          - Resend API key for email notifications
 
+import { getInstallationToken } from "../../shared/github";
+import { escapeHtml, sendEmail } from "../../shared/email";
 import {
-  getInstallationToken,
   crashFingerprint,
   findExistingIssue,
   addDuplicateComment,
@@ -85,16 +86,6 @@ interface BundleListEntry {
     klipper_version: string;
     user_note: string;
   };
-}
-
-/** Escape HTML special characters to prevent XSS in email templates. */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 export default {
@@ -257,6 +248,7 @@ export function isVersionShapeValid(version: string): boolean {
 const KNOWN_PLATFORMS = new Set([
   // Current keys (get_platform_key()).
   "ad5m",
+  "android",
   "cc1",
   "esp32",
   "k2",
@@ -265,6 +257,7 @@ const KNOWN_PLATFORMS = new Set([
   "pi32",
   "snapmaker-u1",
   "x86",
+  "x86-desktop",
   // Retired keys, accepted while pre-unify binaries remain deployed.
   "k1", // k1 -> mips (unified MIPS package); k1-series builds report it
   "ad5x", // ad5x -> mips (unified MIPS package); AD5X builds report it
@@ -991,19 +984,7 @@ Time: ${metadata.timestamp}${metadata.user_note ? `\nUser Note: ${metadata.user_
 
 Retrieve: curl --compressed -H "X-Admin-Key: $HELIX_ADMIN_KEY" https://crash.helixscreen.org/v1/debug-bundle/${shareCode}`;
 
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ from, to: [to], subject, html, text }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Resend API ${response.status}: ${err}`);
-  }
+  await sendEmail({ apiKey: env.RESEND_API_KEY, from, to }, { subject, html, text });
 }
 
 /**

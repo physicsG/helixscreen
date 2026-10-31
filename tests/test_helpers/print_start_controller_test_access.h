@@ -14,7 +14,13 @@
 
 #include "ui_print_start_controller.h"
 
+#include "ams_state.h"
+
+#include <functional>
+#include <map>
+#include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -57,6 +63,16 @@ class PrintStartControllerTestAccess {
         return c.filament_colors_;
     }
 
+    /// The context the gates read, gathered as run_gates_from() gathers it.
+    static helix::PrintStartContext gather(const helix::ui::PrintStartController& c) {
+        return c.gather_print_start_context();
+    }
+
+    /// The name of the gate the open dialog belongs to.
+    static std::string_view open_gate_name(const helix::ui::PrintStartController& c) {
+        return c.gate_list_[c.gate_resume_index_].name;
+    }
+
     // --- print-start success hook (test_job_queue_start_guard.cpp) ---
 
     /// Fire on_print_started_, the callback the start pipeline invokes once
@@ -79,18 +95,21 @@ class PrintStartControllerTestAccess {
 
     /// Seed the snapshot apply_filament_remaps() would have taken, without
     /// needing a real print-start round trip.
-    static void seed_saved_mapping(helix::ui::PrintStartController& c, std::vector<int> mapping,
+    /// The record is AmsState's, shared by every controller; @p c is kept so
+    /// call sites read as the controller's snapshot. The type is left
+    /// unrecorded, which any backend matches.
+    static void seed_saved_mapping(helix::ui::PrintStartController& /*c*/, std::vector<int> mapping,
                                    int backend_index) {
-        c.saved_tool_mapping_ = std::move(mapping);
-        c.saved_backend_index_ = backend_index;
+        helix::AmsState::instance().set_pending_tool_map_restore(
+            backend_index, helix::AmsType::NONE, std::move(mapping));
     }
 
-    static const std::vector<int>& saved_mapping(const helix::ui::PrintStartController& c) {
-        return c.saved_tool_mapping_;
+    static const std::vector<int>& saved_mapping(const helix::ui::PrintStartController& /*c*/) {
+        return helix::AmsState::instance().pending_tool_map_restore().mapping;
     }
 
-    static int saved_backend_index(const helix::ui::PrintStartController& c) {
-        return c.saved_backend_index_;
+    static int saved_backend_index(const helix::ui::PrintStartController& /*c*/) {
+        return helix::AmsState::instance().pending_tool_map_restore().backend_index;
     }
 
     static void restore(helix::ui::PrintStartController& c) {
@@ -99,6 +118,14 @@ class PrintStartControllerTestAccess {
 
     static bool apply_remaps(helix::ui::PrintStartController& c) {
         return c.apply_filament_remaps();
+    }
+
+    /// The pre-print send execute_print_start() makes for a backend that
+    /// requires one.
+    static void send_preprint(helix::ui::PrintStartController& c, const std::set<int>& tools_used,
+                              const std::map<int, int>& remap, std::function<void()> on_done,
+                              std::function<void()> on_abort) {
+        c.send_backend_preprint_then(tools_used, remap, std::move(on_done), std::move(on_abort));
     }
 
     /// Register the restore observer the way execute_print_start() does right

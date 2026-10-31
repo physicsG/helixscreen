@@ -110,15 +110,15 @@ lv_color_t icon_text_color(lv_obj_t* icon) {
     return lv_obj_get_style_text_color(icon, LV_PART_MAIN);
 }
 
-// The animator's own tolerance (TEMP_TOLERANCE in ui_heating_animator.cpp) is
+// The animator's own tolerance (kTempTolerance in ui_heating_animator.cpp) is
 // 20 decidegrees = 2 degrees. Hardcoded here (matching the convention already
 // used in test_heating_animator_state.cpp) so the expected color is derived
 // independently rather than importing the private constant.
-constexpr int TOLERANCE_DECI = 20;
+constexpr int kToleranceDeci = 20;
 
 lv_color_t expected_color(int current_deci, int target_deci) {
     return helix::ui::temperature::get_heating_state_color(current_deci, target_deci,
-                                                           TOLERANCE_DECI);
+                                                           kToleranceDeci);
 }
 
 } // namespace
@@ -327,7 +327,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // below would call lv_observer_remove() on memory that
     // PrinterTemperatureState::deinit_subjects() already freed via
     // lv_subject_deinit(). This is the same bool-token path covered for a
-    // synthetic subject in test_observer_cleanup_ordering.cpp's #816 tests —
+    // synthetic subject in test_observer_factory.cpp's #816 tests —
     // here it runs against the real PrinterState accessors bind() uses.
     //
     // ObserverGuard::invalidate_all() is NOT involved: that is a separate,

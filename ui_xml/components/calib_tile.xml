@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    One cell of the Controls Calibration & Tools grid: a home_action_tile filling
+    a cell whose pixel size ControlsPanel::update_calib_grid sets from the
+    grid's measured box (fit_tile_grid), gaps included. calib_grid_labels says
+    whether that size has room for the label. A visibility binding on an
+    instance hides the whole cell, so the grid counts and packs only what is
+    shown.
+  -->
+  <api>
+    <prop name="icon" type="string" default="wrench"/>
+    <prop name="label" type="string" default=""/>
+    <prop name="callback" type="string" default=""/>
+    <prop name="button_name" type="string" default="calib_tile_button"/>
+    <prop name="icon_name" type="string" default="calib_tile_icon"/>
+    <prop name="moves_machine" type="string" default="false"/>
+    <prop name="disabled_cond" type="string" default="0 eq 1"/>
+  </api>
+  <view extends="lv_obj" flex_grow="0" style_pad_all="0" scrollable="false">
+    <home_action_tile width="100%"
+                      height="100%" icon="$icon" icon_variant="text" icon_size="#calib_icon_size" label="$label"
+                      callback="$callback" button_name="$button_name" icon_name="$icon_name"
+                      label_hidden_cond="calib_grid_labels eq 0" moves_machine="$moves_machine"
+                      disabled_cond="$disabled_cond"/>
+  </view>
+</component>

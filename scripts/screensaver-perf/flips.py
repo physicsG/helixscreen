@@ -11,6 +11,8 @@ import re
 import statistics
 import sys
 
+from perfstats import percentile
+
 FLIP_IOCTLS = ("DRM_IOCTL_MODE_PAGE_FLIP", "DRM_IOCTL_MODE_ATOMIC")
 TIMESTAMP = re.compile(r"(\d{10}\.\d+) ioctl")
 
@@ -31,10 +33,9 @@ def flips_line(times):
     if len(times) < 3:
         return f"FLIPS n={len(times)} insufficient"
     gaps = sorted((b - a) * 1000 for a, b in zip(times, times[1:]))
-    count = len(gaps)
 
     def quantile(p):
-        return gaps[min(count - 1, int(count * p))]
+        return percentile(gaps, p)
 
     span = times[-1] - times[0]
     return (f"FLIPS fps={(len(times) - 1) / span:.1f} p10={quantile(.1):.1f} p50={quantile(.5):.1f} "

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace helix::plugin {
 
@@ -21,7 +22,19 @@ struct Walk {
     std::string id;
     const std::vector<std::string>* components;
     std::string error;
+    int consts_depth = 0; ///< inside a <consts> block
 };
+
+/// The value elements a <consts> block holds.
+bool is_const_value_element(std::string_view el) {
+    return el == "px" || el == "int" || el == "percentage" || el == "color" || el == "string";
+}
+
+/// App subjects a plugin may read in a conditional bind: the display tier and
+/// orientation, so a plugin component can lay itself out per screen size.
+bool is_readonly_layout_subject(std::string_view s) {
+    return s == "ui_breakpoint" || s == "ui_breakpoint_v" || s == "ui_is_portrait";
+}
 
 // helix-xml resolves a child tag both as written and with an "lv_obj-" prefix
 // (lv_xml_widget_get_processor), so every element comparison happens on the
@@ -44,13 +57,27 @@ bool ends_with(std::string_view s, std::string_view tail) {
 
 // App widgets a plugin's own components may build on: chrome and presentational
 // widgets whose only name-taking attributes are the generic bind_* and name= ones
-// checked below. plugin_canvas is the plugin drawing surface; its name= is the
-// registry key its committed display list publishes under.
+// checked below. plugin_canvas is the plugin drawing surface and plugin_table the
+// plugin data table; the name= of each is the registry key its data publishes under.
 bool is_allowlisted_app_component(std::string_view name) {
     return name == "overlay_panel" || name == "ui_card" || name == "icon" ||
            name == "text_heading" || name == "text_body" || name == "text_muted" ||
            name == "text_small" || name == "text_xs" || name == "text_tiny" ||
-           name == "plugin_canvas";
+           name == "plugin_canvas" || name == "plugin_table" || name == "ui_dialog" ||
+           name == "modal_header" || name == "modal_button_row";
+}
+
+/// The props through which an allowlisted app component names its own objects.
+const std::vector<const char*>* required_object_names(std::string_view el) {
+    static const std::vector<const char*> kButtonRow = {
+        "primary_name",    "secondary_name",        "tertiary_name",
+        "quaternary_name", "tertiary_divider_name", "quaternary_divider_name"};
+    static const std::vector<const char*> kHeader = {"icon_name", "title_name", "close_name"};
+    if (el == "modal_button_row")
+        return &kButtonRow;
+    if (el == "modal_header")
+        return &kHeader;
+    return nullptr;
 }
 
 bool is_allowed_element(const Walk& w, std::string_view el) {
@@ -99,7 +126,8 @@ bool cond_identifiers_owned(std::string_view id, std::string_view expr, std::str
             while (i < expr.size() && (alnum(expr[i]) || expr[i] == '_'))
                 ++i;
             std::string_view word = expr.substr(start, i - start);
-            if (!is_word_operator(word) && !is_owned_name(id, word)) {
+            if (!is_word_operator(word) && !is_owned_name(id, word) &&
+                !is_readonly_layout_subject(word)) {
                 why = "cond may name only subjects owned by the plugin";
                 return false;
             }
@@ -123,6 +151,22 @@ void fail(Walk& w, std::string msg) {
 void on_start(void* ud, const XML_Char* name, const XML_Char** attrs) {
     auto& w = *static_cast<Walk*>(ud);
     std::string_view el = strip_lv_obj_prefix(name);
+    if (el == "consts") {
+        ++w.consts_depth;
+        return;
+    }
+    if (is_const_value_element(el)) {
+        if (w.consts_depth == 0) {
+            fail(w, "<" + std::string(name) + "> belongs inside <consts>");
+            return;
+        }
+        for (int i = 0; attrs[i]; i += 2) {
+            if (std::string_view(attrs[i]) == "name" && !is_owned_name(w.id, attrs[i + 1]))
+                fail(w, "constant '" + std::string(attrs[i + 1]) + "' must be named " + w.id +
+                            "__<name>");
+        }
+        return;
+    }
     if (!is_allowed_element(w, el)) {
         fail(w, "<" + std::string(name) + "> is not available to plugins");
         return;
@@ -138,24 +182,58 @@ void on_start(void* ud, const XML_Char* name, const XML_Char** attrs) {
             }
         }
     }
+    // App chrome that names its own objects by default must be given owned names,
+    // or a default (btn_primary, header_title) would land on screen.
+    if (const auto* required = required_object_names(el)) {
+        for (const char* prop : *required) {
+            bool given = false;
+            for (int i = 0; attrs[i] && !given; i += 2)
+                given = std::string_view(attrs[i]) == prop;
+            if (!given)
+                fail(w, "<" + std::string(el) + "> needs " + prop + "=\"" + w.id +
+                            "__<name>\": its default name is the app's");
+        }
+    }
+    // An icon source carrying the ownership separator is a plugin image icon, and a
+    // plugin draws only its own.
+    if (el == "icon") {
+        for (int i = 0; attrs[i]; i += 2) {
+            std::string_view val = attrs[i + 1];
+            if (std::string_view(attrs[i]) == "src" &&
+                val.find(kPluginNameSeparator) != std::string_view::npos &&
+                !is_owned_name(w.id, val))
+                fail(w, "src=\"" + std::string(val) + "\": an image icon must be named " + w.id +
+                            "__<name>");
+        }
+    }
     // On these elements name= declares a prop or refers to a style (style,
     // remove_style*, bind_style*); it names no object.
     bool names_object = el != "prop" && el != "style" && !starts_with(el, "remove_style") &&
                         !starts_with(el, "bind_style");
+    const bool conditional_bind =
+        starts_with(el, "bind_flag_if") || starts_with(el, "bind_style_if");
     for (int i = 0; attrs[i]; i += 2) {
         if (!names_object && std::string_view(attrs[i]) == "name")
             continue;
-        if (auto why = check_plugin_attr(w.id, attrs[i], attrs[i + 1]))
+        if (conditional_bind && std::string_view(attrs[i]) == "subject" &&
+            is_readonly_layout_subject(attrs[i + 1]))
+            continue;
+        if (auto why = check_plugin_attr(w.id, attrs[i], attrs[i + 1],
+                                         required_object_names(el) != nullptr))
             fail(w, std::move(*why));
     }
 }
 
-void on_end(void*, const XML_Char*) {}
+void on_end(void* ud, const XML_Char* name) {
+    auto& w = *static_cast<Walk*>(ud);
+    if (strip_lv_obj_prefix(name) == "consts" && w.consts_depth > 0)
+        --w.consts_depth;
+}
 
 } // namespace
 
 std::optional<std::string> check_plugin_attr(std::string_view id, std::string_view name,
-                                             std::string_view value) {
+                                             std::string_view value, bool chrome_props) {
     // Base font tokens only: a size-suffixed variant names a face AssetManager
     // registers from its tier up, so on a smaller display the XML engine
     // silently substitutes the default font.
@@ -169,10 +247,13 @@ std::optional<std::string> check_plugin_attr(std::string_view id, std::string_vi
     bool is_subject =
         name == "subject" || ends_with(name, "_subject") || starts_with(name, "bind_");
     bool is_cond = name == "cond" || ends_with(name, "_cond");
-    bool is_target = name == "user_data";
+    // The app's dialog chrome takes its objects' names and its buttons' targets
+    // through props (modal_button_row's primary_name, primary_user_data); on a
+    // plugin's own components those suffixes are ordinary props.
+    bool is_target = name == "user_data" || (chrome_props && ends_with(name, "_user_data"));
     // Screen-wide lookups by name (lv_obj_find_by_name from lv_layer_top or the
     // screen) must never resolve to a plugin object.
-    bool is_object_name = name == "name";
+    bool is_object_name = name == "name" || (chrome_props && ends_with(name, "_name"));
     if (!is_callback && !is_subject && !is_cond && !is_target && !is_object_name)
         return std::nullopt;
     if (!value.empty() && value.front() == '$')
@@ -185,10 +266,10 @@ std::optional<std::string> check_plugin_attr(std::string_view id, std::string_vi
         return std::string(name) + "=\"" + std::string(value) + "\": subject must be named " +
                std::string(id) + "__<name>";
     if (is_object_name && !is_owned_name(id, value))
-        return "name=\"" + std::string(value) + "\": object names must be " + std::string(id) +
-               "__<name>";
+        return std::string(name) + "=\"" + std::string(value) + "\": object names must be " +
+               std::string(id) + "__<name>";
     if (is_target && !is_owned_name(id, value.substr(0, value.find(':'))))
-        return "user_data=\"" + std::string(value) + "\": handler must be named " +
+        return std::string(name) + "=\"" + std::string(value) + "\": handler must be named " +
                std::string(id) + "__<name>";
     if (is_cond) {
         std::string why;

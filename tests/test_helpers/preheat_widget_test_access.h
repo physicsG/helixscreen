@@ -4,6 +4,8 @@
 
 #include "preheat_widget.h"
 
+#include <string>
+
 namespace helix {
 
 // Friend access to PreheatWidget internals that production code reaches only
@@ -49,6 +51,15 @@ class PreheatWidgetTestAccess {
 
     static void handle_apply(PreheatWidget& widget) {
         widget.handle_apply();
+    }
+
+    /// The tool-target caption update_tool_target_label() writes into @p label,
+    /// standing in for the attached tile's own label.
+    static std::string tool_target_caption(PreheatWidget& widget, lv_obj_t* label) {
+        widget.tool_target_label_ = label;
+        widget.update_tool_target_label();
+        widget.tool_target_label_ = nullptr;
+        return lv_label_get_text(label);
     }
 };
 

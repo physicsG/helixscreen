@@ -6,13 +6,8 @@
 #include "display_numbering.h"
 #include "ui/ams_drawing_utils.h"
 
-#include <map>
-#include <optional>
-#include <vector>
-
 #include "../catch_amalgamated.hpp"
 
-using helix::AmsBackendMock;
 using helix::AmsSystemInfo;
 using helix::AmsType;
 using helix::AmsUnit;
@@ -331,8 +326,12 @@ TEST_CASE("SystemToolLayout: HUB with no mapped_tool data", "[ams][tool_layout]"
 
     auto layout = compute_system_tool_layout(info, nullptr);
 
-    CHECK(layout.total_physical_tools == 1);
-    CHECK(layout.units[0].tool_count == 1);
+    // No lane names a tool, an extruder or a label: the hub converges on no
+    // head at all, so it places no nozzle (an unwired unit draws as a hub
+    // whose lanes end there, never a phantom toolhead).
+    CHECK(layout.total_physical_tools == 0);
+    CHECK(layout.units[0].tool_count == 0);
+    CHECK(layout.units[0].hub_group == -1);
 }
 
 // ============================================================================
@@ -998,248 +997,6 @@ TEST_CASE("SystemToolLayout: 2 HUB units sharing hub_tool_label=0 merge to 1 noz
 }
 
 // ============================================================================
-// Cross-unit head sharing (multiACE: an ACE feeds a head the U1 already owns)
-// ============================================================================
-
-TEST_CASE("SystemToolLayout: a unit feeding an already-owned head shares its nozzle",
-          "[ams][tool_layout][multiace]") {
-    // Snapmaker U1 + multiACE in head mode. Unit 0 is the four toolheads; unit 1
-    // is an ACE whose four bays all feed head 3. The ACE is a SOURCE for T3, not
-    // a fifth head — before this, the overview drew five nozzles and labelled T3
-    // twice on a four-head machine.
-    AmsSystemInfo info;
-    info.type = AmsType::MULTIACE;
-
-    AmsUnit u1;
-    u1.unit_index = 0;
-    u1.slot_count = 4;
-    u1.topology = PathTopology::PARALLEL;
-    for (int s = 0; s < 4; ++s) {
-        SlotInfo slot;
-        slot.slot_index = s;
-        slot.global_index = s;
-        slot.mapped_tool = s;
-        slot.extruder_name = (s == 0) ? "extruder" : ("extruder" + std::to_string(s));
-        u1.slots.push_back(slot);
-    }
-    info.units.push_back(u1);
-
-    AmsUnit ace;
-    ace.unit_index = 1;
-    ace.slot_count = 4;
-    ace.first_slot_global_index = 4;
-    ace.topology = PathTopology::HUB; // head mode: four bays, one head
-    for (int s = 0; s < 4; ++s) {
-        SlotInfo slot;
-        slot.slot_index = s;
-        slot.global_index = 4 + s;
-        slot.mapped_tool = 3; // every bay feeds T3
-        ace.slots.push_back(slot);
-    }
-    info.units.push_back(ace);
-    info.total_slots = 8;
-
-    auto layout = compute_system_tool_layout(info, nullptr);
-
-    CHECK(layout.total_physical_tools == 4); // four heads, not five
-    REQUIRE(layout.units.size() == 2);
-    CHECK(layout.units[1].first_physical_tool == 3); // the ACE points AT T3
-    CHECK(layout.units[1].tool_count == 1);
-    CHECK(layout.virtual_to_physical.at(3) == 3);
-}
-
-TEST_CASE("SystemToolLayout: multi mode shares every head with the U1",
-          "[ams][tool_layout][multiace]") {
-    // The same rig with the ACE in multi mode: bay s feeds head s. All four
-    // heads are already owned, so the ACE still adds no nozzles.
-    AmsSystemInfo info;
-    info.type = AmsType::MULTIACE;
-
-    for (int u = 0; u < 2; ++u) {
-        AmsUnit unit;
-        unit.unit_index = u;
-        unit.slot_count = 4;
-        unit.first_slot_global_index = u * 4;
-        unit.topology = PathTopology::PARALLEL;
-        for (int s = 0; s < 4; ++s) {
-            SlotInfo slot;
-            slot.slot_index = s;
-            slot.global_index = u * 4 + s;
-            slot.mapped_tool = s;
-            if (u == 0) {
-                slot.extruder_name = (s == 0) ? "extruder" : ("extruder" + std::to_string(s));
-            }
-            unit.slots.push_back(slot);
-        }
-        info.units.push_back(unit);
-    }
-    info.total_slots = 8;
-
-    auto layout = compute_system_tool_layout(info, nullptr);
-
-    CHECK(layout.total_physical_tools == 4);
-    CHECK(layout.units[1].first_physical_tool == 0);
-    CHECK(layout.units[1].tool_count == 4);
-}
-
-TEST_CASE("SystemToolLayout: a unit adding a new head still allocates",
-          "[ams][tool_layout][multiace]") {
-    // The guard that keeps ordinary multi-unit rigs untouched: unit 1 feeds one
-    // head unit 0 owns AND one it does not, so it is not purely a source and
-    // must allocate for the new head rather than silently sharing.
-    AmsSystemInfo info;
-    info.type = AmsType::AFC;
-
-    AmsUnit a;
-    a.unit_index = 0;
-    a.slot_count = 2;
-    a.topology = PathTopology::PARALLEL;
-    for (int s = 0; s < 2; ++s) {
-        SlotInfo slot;
-        slot.slot_index = s;
-        slot.global_index = s;
-        slot.mapped_tool = s; // heads 0, 1
-        a.slots.push_back(slot);
-    }
-    info.units.push_back(a);
-
-    AmsUnit b;
-    b.unit_index = 1;
-    b.slot_count = 2;
-    b.first_slot_global_index = 2;
-    b.topology = PathTopology::PARALLEL;
-    for (int s = 0; s < 2; ++s) {
-        SlotInfo slot;
-        slot.slot_index = s;
-        slot.global_index = 2 + s;
-        slot.mapped_tool = 1 + s; // head 1 (shared) and head 2 (new)
-        b.slots.push_back(slot);
-    }
-    info.units.push_back(b);
-    info.total_slots = 4;
-
-    auto layout = compute_system_tool_layout(info, nullptr);
-
-    CHECK(layout.total_physical_tools == 4); // 2 + 2, allocated as before
-}
-
-// ============================================================================
-// feeds_mask: which of its nozzles a unit actually supplies
-// ============================================================================
-
-namespace {
-/// A backend that answers only the two questions the mask needs: which slots
-/// are owned by another unit, and each unit's topology.
-class OwnedHeadsBackend : public AmsBackendMock {
-  public:
-    OwnedHeadsBackend() : AmsBackendMock(4) {}
-    std::map<int, int> owner_of; ///< global slot -> owning unit index
-    std::vector<PathTopology> topo;
-
-    [[nodiscard]] std::optional<int> slot_identity_owner_unit(int slot_index) const override {
-        auto it = owner_of.find(slot_index);
-        return it == owner_of.end() ? std::nullopt : std::optional<int>(it->second);
-    }
-    [[nodiscard]] PathTopology get_unit_topology(int unit_index) const override {
-        return unit_index >= 0 && unit_index < static_cast<int>(topo.size())
-                   ? topo[static_cast<size_t>(unit_index)]
-                   : PathTopology::PARALLEL;
-    }
-};
-
-/// U1 (four heads) plus `ace_count` head-mode ACEs; ACE k feeds head fed[k].
-AmsSystemInfo u1_with_aces(const std::vector<int>& fed) {
-    AmsSystemInfo info;
-    info.type = AmsType::MULTIACE;
-    AmsUnit u1;
-    u1.unit_index = 0;
-    u1.slot_count = 4;
-    u1.topology = PathTopology::PARALLEL;
-    for (int s = 0; s < 4; ++s) {
-        SlotInfo slot;
-        slot.slot_index = s;
-        slot.global_index = s;
-        slot.mapped_tool = s;
-        u1.slots.push_back(slot);
-    }
-    info.units.push_back(u1);
-    int next = 4;
-    for (size_t k = 0; k < fed.size(); ++k) {
-        AmsUnit ace;
-        ace.unit_index = static_cast<int>(k) + 1;
-        ace.slot_count = 4;
-        ace.first_slot_global_index = next;
-        ace.topology = PathTopology::HUB;
-        for (int s = 0; s < 4; ++s) {
-            SlotInfo slot;
-            slot.slot_index = s;
-            slot.global_index = next++;
-            slot.mapped_tool = fed[k];
-            ace.slots.push_back(slot);
-        }
-        info.units.push_back(ace);
-    }
-    info.total_slots = next;
-    return info;
-}
-} // namespace
-
-TEST_CASE("SystemToolLayout: feeds_mask clears the nozzles a unit does not supply",
-          "[ams][tool_layout][multiace]") {
-    // The U1 owns four heads; an ACE bound to head 3 supplies it. The U1's mask
-    // must drop bit 3 -- otherwise the overview draws a U1 feeder line AND the
-    // ACE's line to one nozzle, saying two things feed it -- while the ACE, a
-    // source for its own bays, keeps its one bit.
-    OwnedHeadsBackend backend;
-    backend.topo = {PathTopology::PARALLEL, PathTopology::HUB};
-    backend.owner_of[3] = 1; // head 3's identity belongs to the ACE (unit 1)
-    const auto info = u1_with_aces({3});
-
-    auto layout = compute_system_tool_layout(info, &backend);
-    REQUIRE(layout.units.size() == 2);
-    CHECK(layout.units[0].feeds_mask == 0b0111u);
-    CHECK(layout.units[1].feeds_mask == 0b1u);
-}
-
-TEST_CASE("SystemToolLayout: a unit feeding NONE of its heads gets a mask of 0",
-          "[ams][tool_layout][multiace]") {
-    // Four ACEs, one per head: the U1 supplies nothing. 0 is the true answer
-    // and must be delivered as such -- the canvas used to read 0 as "unset"
-    // and drew every U1 feeder line, the exact double-feed the mask prevents.
-    OwnedHeadsBackend backend;
-    backend.topo = {PathTopology::PARALLEL, PathTopology::HUB, PathTopology::HUB, PathTopology::HUB,
-                    PathTopology::HUB};
-    for (int h = 0; h < 4; ++h) {
-        backend.owner_of[h] = h + 1;
-    }
-    const auto info = u1_with_aces({0, 1, 2, 3});
-
-    auto layout = compute_system_tool_layout(info, &backend);
-    REQUIRE(layout.units.size() == 5);
-    CHECK(layout.units[0].feeds_mask == 0u);
-    for (size_t k = 1; k < 5; ++k) {
-        INFO("ACE unit " << k);
-        CHECK(layout.units[k].feeds_mask == 0b1u);
-    }
-}
-
-TEST_CASE("SystemToolLayout: feeds_mask is all-set with no backend or no ownership",
-          "[ams][tool_layout]") {
-    // Every ordinary system: nothing is owned elsewhere, every nozzle a unit
-    // has it also feeds.
-    const auto info = u1_with_aces({3});
-    auto layout = compute_system_tool_layout(info, nullptr);
-    REQUIRE(layout.units.size() == 2);
-    CHECK(layout.units[0].feeds_mask == 0b1111u);
-    CHECK(layout.units[1].feeds_mask == 0b1u);
-
-    OwnedHeadsBackend backend;
-    backend.topo = {PathTopology::PARALLEL, PathTopology::HUB};
-    layout = compute_system_tool_layout(info, &backend);
-    CHECK(layout.units[0].feeds_mask == 0b1111u);
-}
-
-// ============================================================================
 // Absent units: a box held at its address while off the bus
 // ============================================================================
 
@@ -1402,12 +1159,13 @@ TEST_CASE("SystemToolLayout: absent and parallel units have no hub group",
 
 TEST_CASE("Toolhead badges: several toolheads are named by extruder, never by a filament group",
           "[ams][tool_layout][hub_groups]") {
-    SECTION("with the extruder identity each lane's toolhead is T<n>, its own tool number") {
+    SECTION("with the extruder identity each lane's toolhead is E<n>") {
         const AmsSystemInfo info = two_lane_system();
         const auto layout = compute_system_tool_layout(info, nullptr);
         const auto badges = compute_tool_badge_labels(layout, info, -1, -1);
-        CHECK(badges.prefix == 'T');
-        CHECK(badges.numbers == std::vector<int>{0, 1});
+        CHECK(badges.prefix == 'E');
+        CHECK(badges.numbers ==
+              std::vector<int>{helix::ui::lane_number(0), helix::ui::lane_number(1)});
     }
 
     SECTION("with none the toolhead is its position, not the lane's group") {
@@ -1432,4 +1190,293 @@ TEST_CASE("Toolhead badges: several toolheads are named by extruder, never by a 
         REQUIRE(badges.numbers.size() == 1);
         CHECK(badges.numbers[0] == info.get_slot_global(2)->mapped_tool);
     }
+}
+
+// ============================================================================
+// A lane naming an already-placed nozzle's extruder shares that nozzle
+// ============================================================================
+
+namespace {
+
+/// The U1 shape: a PARALLEL unit of four head lanes, each naming its own
+/// Klipper extruder ("extruder", "extruder1".."extruder3").
+AmsSystemInfo head_unit_system() {
+    AmsSystemInfo info;
+    info.type = AmsType::SNAPMAKER;
+    AmsUnit& heads = info.units.emplace_back();
+    heads.unit_index = 0;
+    heads.slot_count = 4;
+    heads.first_slot_global_index = 0;
+    heads.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = s;
+        slot.mapped_tool = s;
+        slot.extruder_name = (s == 0) ? "extruder" : "extruder" + std::to_string(s);
+        heads.slots.push_back(slot);
+    }
+    return info;
+}
+
+/// One storage unit of four bays feeding @p topology routes: head mode passes
+/// HUB with every bay naming one head's extruder, multi mode passes PARALLEL
+/// with bay s naming head s's.
+AmsUnit storage_unit(int index, PathTopology topo) {
+    AmsUnit unit;
+    unit.unit_index = index;
+    unit.slot_count = 4;
+    unit.first_slot_global_index = index * 4;
+    unit.topology = topo;
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = index * 4 + s;
+        slot.mapped_tool = (topo == PathTopology::HUB) ? 1 : s;
+        slot.extruder_name = (topo == PathTopology::HUB)
+                                 ? "extruder1"
+                                 : ((s == 0) ? "extruder" : "extruder" + std::to_string(s));
+        unit.slots.push_back(slot);
+    }
+    return unit;
+}
+
+} // namespace
+
+TEST_CASE("SystemToolLayout: a HUB unit shares a PARALLEL lane's nozzle by extruder name",
+          "[ams][tool_layout]") {
+    AmsSystemInfo info = head_unit_system();
+    info.units.push_back(storage_unit(1, PathTopology::HUB));
+    info.total_slots = 8;
+
+    const auto layout = compute_system_tool_layout(info, nullptr);
+
+    // Four heads, four nozzles: the HUB unit's bays converge on head 1's
+    // existing nozzle instead of adding a fifth.
+    CHECK(layout.total_physical_tools == 4);
+    REQUIRE(layout.units.size() == 2);
+    CHECK(layout.units[1].tool_count == 1);
+    CHECK(layout.units[1].first_physical_tool == 1);
+}
+
+TEST_CASE("SystemToolLayout: a PARALLEL unit shares every placed nozzle it names",
+          "[ams][tool_layout]") {
+    AmsSystemInfo info = head_unit_system();
+    for (int u = 1; u <= 4; ++u) {
+        info.units.push_back(storage_unit(u, PathTopology::PARALLEL));
+    }
+    info.total_slots = 20;
+
+    const auto layout = compute_system_tool_layout(info, nullptr);
+
+    // Four storage units, each naming all four extruders: still four nozzles.
+    CHECK(layout.total_physical_tools == 4);
+    REQUIRE(layout.units.size() == 5);
+    for (int u = 1; u <= 4; ++u) {
+        CHECK(layout.units[static_cast<size_t>(u)].tool_count == 4);
+        CHECK(layout.units[static_cast<size_t>(u)].first_physical_tool == 0);
+    }
+}
+
+TEST_CASE("SystemToolLayout: a shared unit labels only the nozzles it feeds",
+          "[ams][tool_layout]") {
+    // Three HUB units place nozzles 0-2 (the HUB branch writes no label
+    // overrides), then a names-PARALLEL unit shares the outer two: phys 0 and
+    // phys 2, skipping phys 1. The nozzle at phys 1 belongs to the middle HUB
+    // alone, and the shared unit must not write a label on it while
+    // numbering its own two.
+    AmsSystemInfo info;
+    info.type = AmsType::AFC;
+    const char* const extruders[3] = {"extruder", "extruder1", "extruder2"};
+    for (int u = 0; u < 3; ++u) {
+        AmsUnit& hub = info.units.emplace_back();
+        hub.unit_index = u;
+        hub.slot_count = 1;
+        hub.first_slot_global_index = u;
+        hub.topology = PathTopology::HUB;
+        SlotInfo slot;
+        slot.slot_index = 0;
+        slot.global_index = u;
+        slot.mapped_tool = u;
+        slot.extruder_name = extruders[u];
+        hub.slots.push_back(slot);
+    }
+    AmsUnit& shares = info.units.emplace_back();
+    shares.unit_index = 3;
+    shares.slot_count = 2;
+    shares.first_slot_global_index = 3;
+    shares.topology = PathTopology::PARALLEL;
+    for (int s = 0; s < 2; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = 3 + s;
+        slot.mapped_tool = 7 + 2 * s; // T7 and T9
+        slot.extruder_name = (s == 0) ? "extruder" : "extruder2";
+        shares.slots.push_back(slot);
+    }
+    info.total_slots = 5;
+
+    const auto layout = compute_system_tool_layout(info, nullptr);
+
+    CHECK(layout.total_physical_tools == 3);
+    REQUIRE(layout.units.size() == 4);
+    CHECK(layout.units[3].tool_count == 2);
+    CHECK(layout.units[3].first_physical_tool == 0);
+    CHECK(layout.virtual_to_physical.at(7) == 0);
+    CHECK(layout.virtual_to_physical.at(9) == 2);
+    // The middle HUB's label on the nozzle between the two shared ones
+    // survives: no override covers it, only the label loop can clobber it.
+    REQUIRE(layout.physical_to_virtual_label.size() == 3);
+    CHECK(layout.physical_to_virtual_label[1] == 1);
+}
+
+namespace {
+
+/// A backend that answers per-lane extruder identities for a hand-built MIXED
+/// unit: the MIXED branch reads lanes through get_slot_info(), unlike the
+/// PARALLEL branch, which reads the unit's own slots.
+class NamedLanesMock : public helix::AmsBackendMock {
+  public:
+    std::map<int, std::pair<int, std::string>> lanes; // global index -> (tool, extruder)
+
+    helix::PathTopology get_unit_topology(int u) const override {
+        // The layout prefers the backend's answer over unit.topology, so the
+        // stub speaks for every unit: PARALLEL heads, then the MIXED unit.
+        return u == 1 ? helix::PathTopology::MIXED : helix::PathTopology::PARALLEL;
+    }
+    helix::SlotInfo get_slot_info(int gi) const override {
+        if (auto it = lanes.find(gi); it != lanes.end()) {
+            helix::SlotInfo slot;
+            slot.slot_index = gi;
+            slot.global_index = gi;
+            slot.mapped_tool = it->second.first;
+            slot.extruder_name = it->second.second;
+            return slot;
+        }
+        return AmsBackendMock::get_slot_info(gi);
+    }
+};
+
+} // namespace
+
+TEST_CASE("SystemToolLayout: a MIXED unit shares placed nozzles too", "[ams][tool_layout]") {
+    NamedLanesMock backend;
+    AmsSystemInfo info = head_unit_system();
+    AmsUnit& mixed = info.units.emplace_back();
+    mixed.unit_index = 1;
+    mixed.slot_count = 4;
+    mixed.first_slot_global_index = 4;
+    mixed.topology = PathTopology::MIXED;
+    mixed.lane_is_hub_routed = {false, false, true, true};
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = 4 + s;
+        slot.mapped_tool = 4 + s;
+        mixed.slots.push_back(slot);
+    }
+    info.total_slots = 8;
+    // Direct lanes: one names head 2's placed extruder, one is new. The hub
+    // lanes agree on head 1's placed extruder.
+    backend.lanes = {
+        {4, {4, "extruder1"}}, {5, {5, "extruder9"}}, {6, {6, "extruder"}}, {7, {7, "extruder"}}};
+
+    const auto layout = compute_system_tool_layout(info, &backend);
+
+    // Four placed nozzles plus the one new extruder: five, not seven.
+    CHECK(layout.total_physical_tools == 5);
+    REQUIRE(layout.units.size() == 2);
+    CHECK(layout.units[1].tool_count == 3); // two direct lanes + the hub group
+    CHECK(layout.units[1].first_physical_tool == 0);
+    CHECK(layout.virtual_to_physical.at(4) == 1); // direct, shared with head 2
+    CHECK(layout.virtual_to_physical.at(5) == 4); // direct, new
+    CHECK(layout.virtual_to_physical.at(6) == 0); // hub group on head 1's nozzle
+}
+
+// ============================================================================
+// unit_feeds_toolhead: whether a unit view draws a route on to a toolhead
+// ============================================================================
+
+TEST_CASE("SystemToolLayout: an unwired hub unit feeds no toolhead and a wired one does",
+          "[ams][tool_layout]") {
+    AmsSystemInfo info;
+    info.type = AmsType::ACE;
+
+    // Unit 0: a hub whose lanes name no tool, no extruder and no hub label.
+    AmsUnit unwired;
+    unwired.unit_index = 0;
+    unwired.slot_count = 4;
+    unwired.first_slot_global_index = 0;
+    unwired.topology = PathTopology::HUB;
+    unwired.hub_tool_label = -1;
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = s;
+        slot.mapped_tool = -1;
+        unwired.slots.push_back(slot);
+    }
+    info.units.push_back(unwired);
+
+    // Unit 1: a hub feeding extruder1.
+    AmsUnit wired;
+    wired.unit_index = 1;
+    wired.slot_count = 4;
+    wired.first_slot_global_index = 4;
+    wired.topology = PathTopology::HUB;
+    for (int s = 0; s < 4; ++s) {
+        SlotInfo slot;
+        slot.slot_index = s;
+        slot.global_index = 4 + s;
+        slot.mapped_tool = 1;
+        slot.extruder_name = "extruder1";
+        wired.slots.push_back(slot);
+    }
+    info.units.push_back(wired);
+
+    // Unit 2: a box that is not on the bus.
+    AmsUnit absent = wired;
+    absent.unit_index = 2;
+    absent.first_slot_global_index = 8;
+    absent.absent = true;
+    info.units.push_back(absent);
+    info.total_slots = 12;
+
+    SECTION("one nozzle: the overview joins every present unit to it") {
+        const auto layout = compute_system_tool_layout(info, nullptr);
+        REQUIRE(layout.total_physical_tools == 1);
+        REQUIRE(layout.units[0].tool_count == 0);
+
+        CHECK(helix::ui::unit_feeds_toolhead(info, nullptr, 0));
+        CHECK(helix::ui::unit_feeds_toolhead(info, nullptr, 1));
+        CHECK_FALSE(helix::ui::unit_feeds_toolhead(info, nullptr, 2));
+    }
+
+    SECTION("several nozzles: the unwired hub joins none") {
+        // Unit 3: a hub feeding extruder2.
+        AmsUnit second = wired;
+        second.unit_index = 3;
+        second.first_slot_global_index = 12;
+        for (int s = 0; s < 4; ++s) {
+            second.slots[static_cast<size_t>(s)].global_index = 12 + s;
+            second.slots[static_cast<size_t>(s)].mapped_tool = 2;
+            second.slots[static_cast<size_t>(s)].extruder_name = "extruder2";
+        }
+        info.units.push_back(second);
+        info.total_slots = 16;
+
+        const auto layout = compute_system_tool_layout(info, nullptr);
+        REQUIRE(layout.total_physical_tools == 2);
+        CHECK(layout.units[0].tool_count == 0);
+        CHECK(layout.units[1].tool_count == 1);
+
+        CHECK_FALSE(helix::ui::unit_feeds_toolhead(info, nullptr, 0));
+        CHECK(helix::ui::unit_feeds_toolhead(info, nullptr, 1));
+        CHECK_FALSE(helix::ui::unit_feeds_toolhead(info, nullptr, 2));
+        CHECK(helix::ui::unit_feeds_toolhead(info, nullptr, 3));
+    }
+
+    // The all-units view, and an index past the system, always end at a toolhead.
+    CHECK(helix::ui::unit_feeds_toolhead(info, nullptr, -1));
+    CHECK(helix::ui::unit_feeds_toolhead(info, nullptr, 99));
 }

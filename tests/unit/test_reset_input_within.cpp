@@ -6,9 +6,9 @@
  * @brief helix::ui::reset_input_within, the input reset a toast's teardown runs.
  *
  * ToastManager::detach_from_input resets through it before the toast's objects
- * are retired. The test binary links a stub ToastManager, so each case builds a
- * toast's shape (a root with an action button inside it) and calls the helper
- * as the teardown does, with pointer input from real indev reads.
+ * are retired. Each case builds a toast's shape (a root with an action button
+ * inside it) and calls the helper as the teardown does, with pointer input from
+ * real indev reads.
  */
 
 #include "ui_utils.h"

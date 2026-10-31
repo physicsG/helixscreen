@@ -62,9 +62,9 @@ struct PreviewAction {
  *         geometry it holds for a different file before that happens.
  */
 /// Render modes as stored in detail_gcode_viewer_mode: thumbnail, 3D, 2D.
-constexpr int PREVIEW_MODE_THUMBNAIL = 0;
-constexpr int PREVIEW_MODE_3D = 1;
-constexpr int PREVIEW_MODE_2D = 2;
+constexpr int kPreviewModeThumbnail = 0;
+constexpr int kPreviewMode3d = 1;
+constexpr int kPreviewMode2d = 2;
 
 /**
  * @brief Should the preview's viewer widget be hidden right now?
@@ -97,10 +97,10 @@ constexpr std::pair<int, int> preview_build_size(int own_w, int own_h, int paren
 }
 
 constexpr bool preview_viewer_hidden(int mode, bool has_first_frame) {
-    if (mode == PREVIEW_MODE_THUMBNAIL) {
+    if (mode == kPreviewModeThumbnail) {
         return true;
     }
-    return mode == PREVIEW_MODE_2D && !has_first_frame;
+    return mode == kPreviewMode2d && !has_first_frame;
 }
 
 inline PreviewAction decide_preview_action(const std::string& thumbnail_displayed_file,

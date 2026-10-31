@@ -199,7 +199,7 @@ TEST_CASE_METHOD(LedWidgetFixture,
     ScopedHomeLayout layout(
         nlohmann::json::array({placed_light("led", 0), placed_light("led:1", 2)}));
     auto* cfg = Config::get_instance();
-    cfg->set(cfg->df() + LIGHT_BUTTON_PENDING_PATH, std::string("neopixel sb_leds"));
+    cfg->set(cfg->df() + kLightButtonPendingPath, std::string("neopixel sb_leds"));
 
     LedWidget first("led", ps, api.get());
     LedWidget second("led:1", ps, api.get());
@@ -214,7 +214,7 @@ TEST_CASE_METHOD(LedWidgetFixture,
     CHECK(first.light_key() == "neopixel sb_leds");
     CHECK(second.light_key() == "neopixel sb_leds");
     CHECK(first.targets() == std::vector<std::string>{"neopixel sb_leds"});
-    CHECK(cfg->try_get_json(cfg->df() + LIGHT_BUTTON_PENDING_PATH)->is_null());
+    CHECK(cfg->try_get_json(cfg->df() + kLightButtonPendingPath)->is_null());
     first.detach_tile();
     second.detach_tile();
 }
@@ -268,10 +268,10 @@ TEST_CASE_METHOD(LedWidgetFixture,
                  "[led][light_button]") {
     ScopedHomeLayout layout(nlohmann::json::array());
     auto* cfg = Config::get_instance();
-    cfg->set(cfg->df() + LIGHT_BUTTON_PENDING_PATH, std::string("neopixel sb_leds"));
+    cfg->set(cfg->df() + kLightButtonPendingPath, std::string("neopixel sb_leds"));
 
     settle_light_buttons();
-    CHECK(cfg->try_get_json(cfg->df() + LIGHT_BUTTON_PENDING_PATH)->is_null());
+    CHECK(cfg->try_get_json(cfg->df() + kLightButtonPendingPath)->is_null());
 
     // A light button added to home later defaults to the chamber light.
     ScopedHomeLayout later(nlohmann::json::array({placed_light("led", 0)}));
@@ -400,7 +400,7 @@ TEST_CASE_METHOD(LedWidgetFixture,
     drain_queue();
     REQUIRE(scripts_naming(client, "chamber_light") == 0);
 
-    process_lvgl(LedController::WLED_DISCOVERY_TIMEOUT_MS + 100);
+    process_lvgl(LedController::kWledDiscoveryTimeoutMs + 100);
     drain_queue();
     CHECK(scripts_naming(client, "chamber_light") > 0);
 }
@@ -470,4 +470,61 @@ TEST_CASE_METHOD(LedWidgetFixture,
     const auto look = all.icon_look();
     CHECK(look.brightness > 0);
     CHECK_FALSE(look.has_rgb);
+}
+
+TEST_CASE_METHOD(LedWidgetFixture, "toggle_lights: switches its ids and reports the state sent",
+                 "[led][light_button]") {
+    client.clear_gcode_script_history();
+    CHECK(toggle_lights({}, "test").outcome == LightToggle::NoTarget);
+    CHECK(client.gcode_script_history().empty());
+
+    CHECK(toggle_lights({"neopixel sb_leds"}, "test").outcome == LightToggle::On);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    CHECK(scripts_naming(client, "sb_leds") == 1);
+    CHECK(scripts_naming(client, "chamber_light") == 0);
+}
+
+TEST_CASE_METHOD(LedWidgetFixture,
+                 "toggle_lights: unconfirmed only when no target reports its power",
+                 "[led][light_button]") {
+    auto& ctrl = LedController::instance();
+    // A TOGGLE macro has no readable state; a native strip has none until Klipper reports it.
+    const auto lamp = toggle_lights({"macro:Lamp"}, "test");
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    CHECK(lamp.outcome == LightToggle::On);
+    CHECK(lamp.unconfirmed);
+
+    ctrl.update_from_status({{"neopixel sb_leds", {{"color_data", {{0.0, 0.0, 0.0, 0.0}}}}}});
+    REQUIRE(ctrl.device_state("neopixel sb_leds").power == PowerState::Off);
+    const auto mixed = toggle_lights({"macro:Lamp", "neopixel sb_leds"}, "test");
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    CHECK_FALSE(mixed.unconfirmed);
+
+    CHECK_FALSE(toggle_lights({}, "test").unconfirmed);
+}
+
+TEST_CASE_METHOD(LedWidgetFixture,
+                 "toggle_lights: refuses while a light command awaits its ACK, for every button",
+                 "[led][light_button]") {
+    LedWidget w("led", ps, api.get());
+    w.set_config(nlohmann::json::object());
+    lv_obj_t* root = lv_obj_create(test_screen());
+    lv_obj_t* button = lv_obj_create(root);
+    lv_obj_add_event_cb(button, LedWidget::light_toggle_cb, LV_EVENT_CLICKED, nullptr);
+    w.attach_tile(root, test_screen());
+
+    // Not drained: its ACK has not landed.
+    LedController::instance().set_power({"neopixel sb_leds"}, true);
+    REQUIRE(LedController::instance().light_command_in_flight());
+    client.clear_gcode_script_history();
+    CHECK(toggle_lights({"neopixel chamber_light"}, "test").outcome == LightToggle::Busy);
+    lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr);
+    CHECK(client.gcode_script_history().empty());
+
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    REQUIRE_FALSE(LedController::instance().light_command_in_flight());
+    lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    CHECK(scripts_naming(client, "chamber_light") > 0);
+    w.detach_tile();
 }

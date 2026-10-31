@@ -23,7 +23,7 @@ the renderer:
 
 | Value | Mode | Notes |
 |-------|------|-------|
-| 0 | Auto | 3D where GLES is available, 2D otherwise. Default. |
+| 0 | Auto | 3D where GLES is available, 2D otherwise. Default. On an SDL build "available" is decided at runtime: the renderer resolves GLES2 from the SDL context, and a machine without it gets 2D. |
 | 1 | 3D | Only offered on `ENABLE_GLES_3D` builds |
 | 2 | 2D Layers | Software rasterizer, every platform |
 | 3 | Thumbnail Only | No toolpath rendering at all |
@@ -34,6 +34,26 @@ degrades to 2D rather than reaching anything.
 
 `HELIX_GCODE_MODE=3D|2D` overrides for one run. `3D` on a build without a 3D
 renderer falls back to 2D and says so in the log.
+
+### Auto drops to the thumbnail when a preview would cost too much
+
+In Auto, and only there, a streamed preview also has to be affordable in CPU on
+this board, because on a printer's own board that CPU comes out of Klipper's
+cores. The projected cost is one index scan of the file plus a ghost pass of
+about the same size (`include/gcode_preview_cost.h`), against a budget of 15
+CPU-seconds with the printer idle and 5 while a print runs. Over budget, the
+slicer thumbnail is shown instead, silently: no toast, a single info line in the
+log. An explicit 2D or 3D choice is the user's and is never overridden.
+
+The projection needs this board's index-scan speed, in MB of G-code per CPU
+second. It is learned from the first idle scan and stored at
+`display/gcode_preview_rate` with the board's fingerprint and the app version;
+a stored rate from another board or version is ignored. From then on a file is
+judged before anything is downloaded (`helix::ui::preview_gate()`). Before a rate
+is learned, or with no rate for the current version, the scan judges itself from
+its first 2% and a quarter-second of CPU and stops early when the projection is
+over budget. A CC1 scans about 10 MB/cpu-s: a 41 MB file previews when idle and
+shows the thumbnail mid-print.
 
 ## Shading, and what it costs
 
@@ -129,6 +149,19 @@ their buffer set changes:
 Useful when deciding whether a device tier can afford something. Note that
 process RSS cannot answer that question: cross-run RSS carries megabytes of
 noise, and `free()` does not lower it without `malloc_trim`.
+
+## Measuring preview cost on a board
+
+`helix-screen bench-gcode <file> [width height]` times what a streamed preview of
+that file costs here, without the UI: the layer index scan, the renderer's own
+ghost pass (fit, sampling, parse and raster) on a canvas of that size (default
+320x240, about a CC1's print-status preview), and single mid-file layer parses.
+It prints wall and CPU time for each. It reads no config and takes no lock, so it
+runs beside a live instance; keep the file on real storage, since `/tmp` is RAM
+on most boards. `HELIX_BENCH_REPEAT=N` repeats the ghost pass, cold each time,
+so a profiler can catch it; `HELIX_BENCH_VERBOSE=1` adds the renderer's debug
+lines (fit, sampled layer count); `HELIX_BENCH_GHOST_PNG=<path>` writes the ghost
+as the print-status screen blends it, for comparing sampling changes by eye.
 
 ## Example
 

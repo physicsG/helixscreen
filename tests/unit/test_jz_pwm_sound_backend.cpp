@@ -2,6 +2,7 @@
 
 #include "jz_pwm_sound_backend.h"
 #include "note_event.h"
+#include "test_helpers/scoped_board.h"
 
 #include <cmath>
 #include <cstdio>
@@ -354,6 +355,23 @@ TEST_CASE("backend: unavailable host reports unavailable", "[sound][jz]") {
         return;
     }
     REQUIRE_FALSE(JzPwmSoundBackend::available());
+}
+
+TEST_CASE("the jz_pwm piezo is a FlashForge MIPS fact", "[sound][jz]") {
+    using helix::board::Board;
+    // The K1 carries /dev/jz_pwm for other channels, so the board decides, not the device.
+    for (Board b : {Board::Ad5x, Board::Creator5, Board::Creator5Pro}) {
+        helix::test::ScopedBoard board(b);
+        INFO("board: " << helix::board::info(b).key);
+        CHECK(JzPwmSoundBackend::board_admits_piezo());
+    }
+    for (Board b :
+         {Board::Generic, Board::Ad5m, Board::K1, Board::K2, Board::Cc1, Board::SnapmakerU1}) {
+        helix::test::ScopedBoard board(b);
+        INFO("board: " << helix::board::info(b).key);
+        CHECK_FALSE(JzPwmSoundBackend::board_admits_piezo());
+        CHECK_FALSE(JzPwmSoundBackend::available());
+    }
 }
 
 TEST_CASE("backend: voice knobs roundtrip with clamping", "[sound][jz]") {

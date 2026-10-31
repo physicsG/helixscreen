@@ -16,6 +16,10 @@ namespace helix::plugin {
 /// One plain-words line per permission, in enum order.
 std::vector<std::string> consent_lines(const PermissionSet& perms);
 
+/// "Adds to: Print details, Filament slot menu": the app menus `m` adds items to, in
+/// MenuKind order, each named once. Empty when it adds none.
+std::string menu_targets_line(const Manifest& m);
+
 /// The consent dialog body for enabling `m`, or for approving `grown` on an
 /// update when `grown` is non-empty.
 std::string consent_message(const Manifest& m, const std::vector<Permission>& grown);

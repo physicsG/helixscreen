@@ -2,14 +2,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "ipp_protocol.h"
 #include "label_printer.h"
 #include "sheet_label_layout.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+class HttpResponse; // NAMESPACE_OK: libhv declares it globally
+
 namespace helix {
+
+namespace ipp {
+
+/// POST an encoded IPP request to http://host:port/resource_path and return the final
+/// HTTP response. Interim 1xx responses are read past (RFC 9110 15.2): some printers
+/// send an unsolicited 100 Continue before the real answer. nullptr when the connection
+/// fails or no final response arrives.
+std::shared_ptr<HttpResponse> post_request(const std::string& host, uint16_t port,
+                                           const std::string& resource_path,
+                                           const std::vector<uint8_t>& body, int timeout_s);
+
+} // namespace ipp
 
 /**
  * @brief IPP sheet label printer backend
@@ -37,9 +53,14 @@ class IppPrinter : public ILabelPrinter {
 
     // === IPP-specific API ===
 
-    /// Set the target printer (host, port, resource path from mDNS)
-    void set_target(const std::string& host, uint16_t port,
-                    const std::string& resource_path = "ipp/print");
+    /// Set the target printer (host, port, resource path from mDNS TXT "rp").
+    /// The path is normalized; an empty one targets ipp::kDefaultResourcePath.
+    void set_target(const std::string& host, uint16_t port, const std::string& resource_path);
+
+    /// The normalized resource path print() posts to
+    [[nodiscard]] const std::string& resource_path() const {
+        return resource_path_;
+    }
 
     /// Set the sheet template index (into get_sheet_templates())
     void set_sheet_template(int index);
@@ -56,7 +77,7 @@ class IppPrinter : public ILabelPrinter {
   private:
     std::string host_;
     uint16_t port_ = 631;
-    std::string resource_path_ = "ipp/print";
+    std::string resource_path_ = ipp::kDefaultResourcePath;
     int sheet_template_index_ = 0;
     int label_count_ = 1;
     int start_position_ = 0;

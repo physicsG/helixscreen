@@ -21,7 +21,7 @@ using namespace helix;
 
 namespace {
 
-const char* SUFFIXES[] = {"_micro", "_tiny", "_small", "_medium", "_large", "_xlarge", "_xxlarge"};
+const char* kSuffixes[] = {"_micro", "_tiny", "_small", "_medium", "_large", "_xlarge", "_xxlarge"};
 
 // Ordering of the icon size rungs. A higher index is a larger glyph.
 int rung_index(const std::string& rung) {
@@ -46,7 +46,7 @@ std::string lookup(const std::unordered_map<std::string, std::string>& m, const 
 } // namespace
 
 TEST_CASE("nav inactive icon size stays below the active icon size", "[theme][navbar]") {
-    for (const char* suffix : SUFFIXES) {
+    for (const char* suffix : kSuffixes) {
         auto strings = theme_manager_parse_all_xml_for_suffix("ui_xml", "string", suffix);
 
         const std::string active = lookup(strings, "icon_size");
@@ -131,4 +131,27 @@ TEST_CASE_METHOD(NavIconCrossfadeFixture,
     REQUIRE_FALSE(lv_obj_has_state(active, LV_STATE_CHECKED));
     REQUIRE(lv_obj_get_style_text_opa(active, LV_PART_MAIN) <
             lv_obj_get_style_text_opa(inactive, LV_PART_MAIN));
+}
+
+// A child is clipped to its parent's box, so an icon container narrower than its
+// button cuts the glyph's sides: on the CC1's 42px navbar the button's padding left
+// an 18px box for a 20px spool ring. The icons float centered, so the container
+// has to span the whole button.
+TEST_CASE_METHOD(NavIconCrossfadeFixture, "nav icon containers span their whole button",
+                 "[theme][navbar]") {
+    REQUIRE(navbar_ != nullptr);
+    lv_obj_set_size(navbar_, 42, 272);
+    lv_obj_update_layout(navbar_);
+
+    for (const char* pair : {"controls", "filament"}) {
+        const std::string container_name = std::string("nav_") + pair + "_icons";
+        lv_obj_t* container = icon(container_name.c_str());
+        REQUIRE(container != nullptr);
+        lv_obj_t* button = lv_obj_get_parent(container);
+        REQUIRE(button != nullptr);
+        INFO(container_name << " w=" << lv_obj_get_width(container)
+                            << ", button w=" << lv_obj_get_width(button));
+        CHECK(lv_obj_get_width(container) == lv_obj_get_width(button));
+        CHECK(lv_obj_get_height(container) == lv_obj_get_height(button));
+    }
 }

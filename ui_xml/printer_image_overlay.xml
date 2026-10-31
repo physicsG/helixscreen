@@ -87,11 +87,11 @@
                 style_pad_gap="#space_xs" scrollable="false" style_bg_opa="0" style_border_width="0" hidden="true">
           <bind_flag_if_eq subject="printer_image_tag_state" flag="hidden" ref_value="0"/>
           <ui_button name="btn_tag_parts"
-                     height="#button_height_sm" flex_grow="1" variant="secondary" icon="target" text="Tag parts">
+                     height="#button_height_sm" flex_grow="1" variant="secondary" icon="target" text="Tag Parts">
             <event_cb trigger="clicked" callback="on_printer_image_tag_parts"/>
           </ui_button>
           <ui_button name="btn_reset_tags"
-                     height="#button_height_sm" flex_grow="1" variant="secondary" text="Reset tags" hidden="true">
+                     height="#button_height_sm" flex_grow="1" variant="secondary" text="Reset Tags" hidden="true">
             <bind_flag_if cond="printer_image_tag_state ne 2" flag="hidden"/>
             <event_cb trigger="clicked" callback="on_printer_image_reset_tags"/>
           </ui_button>

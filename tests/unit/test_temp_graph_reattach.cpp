@@ -27,6 +27,7 @@
 #include "../../include/ui_temp_graph.h"
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/temp_graph_controller_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
 #include "lvgl/lvgl.h"
 #include "printer_state.h"
@@ -46,8 +47,8 @@ namespace {
 /// setup_connection_observer() by writing the real PrinterState subject; only the
 /// two enum values it compares against are named locally, because production
 /// spells them as bare literals with no shared enum to import.
-constexpr int CONN_DISCONNECTED = 0;
-constexpr int CONN_CONNECTED = 2;
+constexpr int kConnDisconnected = 0;
+constexpr int kConnConnected = 2;
 
 class TempGraphReattachFixture : public LVGLTestFixture {
   public:
@@ -76,9 +77,7 @@ class TempGraphReattachFixture : public LVGLTestFixture {
     /// callbacks queued FROM a callback (the attach fires, then the suppression
     /// clear behind them) land on the following tick.
     static void settle() {
-        for (int i = 0; i < 8; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     /// Drive a disconnect → reconnect transition past the controller's
@@ -86,9 +85,9 @@ class TempGraphReattachFixture : public LVGLTestFixture {
     static void reconnect() {
         auto* conn = get_printer_state().network_state().get_printer_connection_state_subject();
         REQUIRE(conn != nullptr);
-        lv_subject_set_int(conn, CONN_DISCONNECTED);
+        lv_subject_set_int(conn, kConnDisconnected);
         settle();
-        lv_subject_set_int(conn, CONN_CONNECTED);
+        lv_subject_set_int(conn, kConnConnected);
         settle();
     }
 };
@@ -246,4 +245,20 @@ TEST_CASE_METHOD(TempGraphReattachFixture,
 
     controller.reset();
     settle();
+}
+
+TEST_CASE_METHOD(TempGraphReattachFixture, "Detach runs no queued callback",
+                 "[temp_graph][drain_reentrancy]") {
+    TempGraphControllerConfig cfg;
+    cfg.series = {{"heater_bed", lv_color_hex(0x88C0D0), true, "Bed"}};
+    auto controller = std::make_unique<TempGraphController>(test_screen(), cfg);
+    REQUIRE(controller->is_valid());
+    settle();
+
+    bool ran = false;
+    helix::ui::UpdateQueue::instance().queue("test::drain_canary", [&ran]() { ran = true; });
+    controller->detach();
+    CHECK_FALSE(ran);
+    settle();
+    CHECK(ran);
 }

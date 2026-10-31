@@ -225,7 +225,9 @@ except ym.DuplicateTranslationKey as e:
     # subclasses carrying the quoting style back to a dumper that never sees
     # them, since every edit path here splices lines instead of re-dumping.
     # Comparing type(v).__name__ flags all 5280 of those and hides the one
-    # difference that would matter.
+    # difference that would matter. A plural entry is a mapping of CLDR
+    # categories, which ruamel returns as a CommentedMap: it hashes as its
+    # sorted (category, text) pairs.
     for mode in fast ruamel pure canonical; do
         run $PY -c "$(backend_preamble "$mode")
 import hashlib
@@ -236,7 +238,11 @@ for f in sorted(pathlib.Path('translations').glob('*.yml')):
     h.update(f'{f.name}|{d.get(\"locale\")}|{len(t)}'.encode())
     for k in sorted(t):
         v = t[k]
-        base = 'str' if isinstance(v, str) else type(v).__name__
+        if isinstance(v, dict):
+            base = 'dict'
+            v = sorted((str(c), str(form)) for c, form in v.items())
+        else:
+            base = 'str' if isinstance(v, str) else type(v).__name__
         h.update(f'{k}|{base}|{v}'.encode())
 print(h.hexdigest())
 "

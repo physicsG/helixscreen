@@ -301,7 +301,7 @@ LED configuration is stored in `settings.json` under `/printer/leds/`:
   (`LedController::migrate_legacy_selection()`), which runs on the first discovery that
   finds no `leds/auto_state/strips` saved yet. Nothing writes it back and nothing else
   reads it; the key stays on disk as it was.
-- `leds.color_presets` defaults to `DEFAULT_COLOR_PRESETS` in `include/led/led_devices.h`
+- `leds.color_presets` defaults to `kDefaultColorPresets` in `include/led/led_devices.h`
   (red, orange, green, cyan, blue, purple, pink). `migrate_color_presets()` recognises the
   untouched pre-1.1 default list and upgrades it silently; a list a user actually edited
   is left alone.
@@ -325,7 +325,7 @@ Where each of the old selection's three jobs actually lives now:
   name a WLED strip that has not been discovered yet, so `settle_light_buttons()`
   (`include/light_button_config.h`) waits while `LedController::wled_discovery_pending()`;
   a discovery settles when strips arrive, none are configured, it fails, or
-  `WLED_DISCOVERY_TIMEOUT_MS` (5s) passes, and the app re-runs the settle then.
+  `kWledDiscoveryTimeoutMs` (5s) passes, and the app re-runs the settle then.
 
 Auto-state mappings (and now its own device list) are stored **per printer** under `<Config::df()>leds/auto_state/` — i.e. `/printers/<active-printer-id>/leds/auto_state/` (mappings serialize the action under the `action` key with the color as a `#RRGGBB` string; see `LedAutoState::save_config()`):
 
@@ -362,7 +362,7 @@ The first hardware discovery that finds a saved `leds/selected_strips` but no sa
 | Old `selected_strips` | Light button gets | Auto-state target gets |
 |---|---|---|
 | Exactly one switchable device | That device (written to `leds/light_button_pending`) | The same one device |
-| Every switchable device | `LIGHT_BUTTON_ALL` (`leds/light_button_pending`) | Every switchable device |
+| Every switchable device | `kLightButtonAll` (`leds/light_button_pending`) | Every switchable device |
 | Anything else (a subset, or none of the above) | Nothing written — falls back to the chamber-light default | The old selection, unchanged |
 
 The third row is the one case users notice: a partial selection carries over to Automatic
@@ -478,12 +478,12 @@ their extra copies.
 
 - **The picker** ("This button controls") lists every switchable device
   (`LedController::switchable_ids()` — a PRESET-only macro device, which cannot be
-  toggled, is never listed) plus **All lights** (`LIGHT_BUTTON_ALL`,
+  toggled, is never listed) plus **All lights** (`kLightButtonAll`,
   `include/led/led_devices.h`). Leaving a button unconfigured (`led` empty) resolves to
   the chamber light (`resolve_light_targets("", ...)`).
 - **Resolving a tap.** `LedController::light_targets(key)` turns the widget's `led`
   value into the device id list a tap should act on: the empty key resolves through
-  `resolve_light_targets()` to the chamber light, `LIGHT_BUTTON_ALL` to every switchable
+  `resolve_light_targets()` to the chamber light, `kLightButtonAll` to every switchable
   device, any other key to that one device (falling back to the chamber light if the
   device no longer exists).
 - **The tile** shows the target's display name and a bulb in its current color when on.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "performance_state.h"
 
+#include "helix_psram_attr.h"
 #include "static_subject_registry.h"
 #include "subject_managed_panel.h"
 
@@ -13,8 +14,23 @@
 namespace helix {
 namespace perf {
 
+namespace {
+
+/// "812 MB free" below a gigabyte, "18.4 GB free" from there up.
+std::string format_disk_free_text(uint32_t free_mb) {
+    char tmp[48];
+    if (free_mb >= 1024) {
+        snprintf(tmp, sizeof(tmp), "%.1f GB free", static_cast<double>(free_mb) / 1024.0);
+    } else {
+        snprintf(tmp, sizeof(tmp), "%u MB free", free_mb);
+    }
+    return tmp;
+}
+
+} // namespace
+
 PerformanceState& PerformanceState::instance() {
-    static PerformanceState s;
+    static HELIX_PSRAM_BSS PerformanceState s;
     return s;
 }
 
@@ -30,6 +46,11 @@ void PerformanceState::init_subjects() {
     UI_MANAGED_SUBJECT_INT(s_host_mem_free_mb_, 0, "perf_host_mem_free_mb", subjects_);
     UI_MANAGED_SUBJECT_INT(s_host_mem_pct_used_, 0, "perf_host_mem_pct_used", subjects_);
     UI_MANAGED_SUBJECT_INT(s_host_mem_present_, 0, "perf_host_mem_present", subjects_);
+    UI_MANAGED_SUBJECT_INT(s_host_disk_free_mb_, 0, "perf_host_disk_free_mb",
+                           subjects_); // SUBJECT_OK: read by name in HostHealthWidget
+    UI_MANAGED_SUBJECT_INT(s_host_disk_present_, 0, "perf_host_disk_present", subjects_);
+    UI_MANAGED_SUBJECT_STRING(s_host_disk_free_text_, buf_disk_text_, "\xe2\x80\x94",
+                              "perf_host_disk_free_text", subjects_);
     UI_MANAGED_SUBJECT_INT(s_host_throttle_state_, 0, "perf_host_throttle_state", subjects_);
     UI_MANAGED_SUBJECT_STRING(s_host_throttle_text_, buf_throttle_text_, "",
                               "perf_host_throttle_text", subjects_);
@@ -89,11 +110,22 @@ void PerformanceState::set_source(std::unique_ptr<IPerformanceSource> source) {
     if (!source_)
         return;
 
+    source_->set_disk_wanted(disk_consumers_ > 0);
     auto tok = lifetime_.token();
     source_->set_callback([this, tok](const PerfSample& s) {
         tok.defer("PerformanceState::apply_sample", [this, s]() { apply_sample(s); });
     });
     source_->start();
+}
+
+void PerformanceState::add_disk_consumer() {
+    if (++disk_consumers_ == 1 && source_)
+        source_->set_disk_wanted(true);
+}
+
+void PerformanceState::remove_disk_consumer() {
+    if (disk_consumers_ > 0 && --disk_consumers_ == 0 && source_)
+        source_->set_disk_wanted(false);
 }
 
 std::vector<float> PerformanceState::read_history(const std::string& name) const {
@@ -104,9 +136,9 @@ std::vector<float> PerformanceState::read_history(const std::string& name) const
     const auto& ring = it->second;
     std::vector<float> out;
     out.reserve(ring.fill);
-    std::size_t start = (ring.fill == HISTORY_SAMPLES) ? ring.head : 0;
+    std::size_t start = (ring.fill == kHistorySamples) ? ring.head : 0;
     for (std::size_t i = 0; i < ring.fill; ++i) {
-        out.push_back(ring.data[(start + i) % HISTORY_SAMPLES]);
+        out.push_back(ring.data[(start + i) % kHistorySamples]);
     }
     return out;
 }
@@ -137,6 +169,13 @@ void PerformanceState::apply_sample(const PerfSample& s) {
     }
     set_present(s_host_mem_present_,
                 s.host_mem_free_mb.has_value() && s.host_mem_pct_used.has_value());
+
+    if (s.host_disk_free_mb) {
+        lv_subject_set_int(&s_host_disk_free_mb_, static_cast<int>(*s.host_disk_free_mb));
+        lv_subject_copy_string(&s_host_disk_free_text_,
+                               format_disk_free_text(*s.host_disk_free_mb).c_str());
+    }
+    set_present(s_host_disk_present_, s.host_disk_free_mb.has_value());
 
     lv_subject_set_int(&s_host_throttle_state_, static_cast<int>(s.host_throttle_bits));
     if (!s.host_throttle_text.empty()) {
@@ -273,8 +312,8 @@ void PerformanceState::push_history(const std::string& key, float value) {
     std::lock_guard<std::mutex> lk(history_mu_);
     auto& ring = history_[key];
     ring.data[ring.head] = value;
-    ring.head = (ring.head + 1) % HISTORY_SAMPLES;
-    if (ring.fill < HISTORY_SAMPLES)
+    ring.head = (ring.head + 1) % kHistorySamples;
+    if (ring.fill < kHistorySamples)
         ++ring.fill;
 }
 

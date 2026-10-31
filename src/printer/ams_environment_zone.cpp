@@ -19,24 +19,6 @@ const std::string& at_or_empty(const std::vector<std::string>& list, int gate) {
     return index < list.size() ? list[index] : empty;
 }
 
-ZoneDryingState state_from_firmware(const std::string& s) {
-    if (s == "active") {
-        return ZoneDryingState::Active;
-    }
-    if (s == "queued") {
-        return ZoneDryingState::Queued;
-    }
-    if (s == "complete") {
-        return ZoneDryingState::Complete;
-    }
-    // Happy Hare emits 'canceled'; its own header documents 'cancelled'. Taking both
-    // keeps an upstream correction from silently reading as Idle.
-    if (s == "canceled" || s == "cancelled") {
-        return ZoneDryingState::Cancelled;
-    }
-    return ZoneDryingState::Idle;
-}
-
 /// Live states outrank finished ones, and Cancelled outranks Complete so a zone that was
 /// stopped partway does not report as cleanly finished. Deliberately not the enum's own
 /// ordering, which stays stable for storage.
@@ -58,6 +40,24 @@ int precedence(ZoneDryingState s) {
 
 } // namespace
 
+ZoneDryingState zone_drying_state_from_firmware(const std::string& s) {
+    if (s == "active") {
+        return ZoneDryingState::Active;
+    }
+    if (s == "queued") {
+        return ZoneDryingState::Queued;
+    }
+    if (s == "complete") {
+        return ZoneDryingState::Complete;
+    }
+    // Happy Hare emits 'canceled'; its own header documents 'cancelled'. Taking both
+    // keeps an upstream correction from silently reading as Idle.
+    if (s == "canceled" || s == "cancelled") {
+        return ZoneDryingState::Cancelled;
+    }
+    return ZoneDryingState::Idle;
+}
+
 ZoneDryingState fold_zone_drying_state(const std::vector<int>& gates,
                                        const std::vector<std::string>& per_gate_state) {
     ZoneDryingState best = ZoneDryingState::Idle;
@@ -65,7 +65,8 @@ ZoneDryingState fold_zone_drying_state(const std::vector<int>& gates,
         if (gate < 0 || static_cast<size_t>(gate) >= per_gate_state.size()) {
             continue;
         }
-        const ZoneDryingState s = state_from_firmware(per_gate_state[static_cast<size_t>(gate)]);
+        const ZoneDryingState s =
+            zone_drying_state_from_firmware(per_gate_state[static_cast<size_t>(gate)]);
         if (precedence(s) > precedence(best)) {
             best = s;
         }

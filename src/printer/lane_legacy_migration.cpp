@@ -3,6 +3,8 @@
 #include "lane_legacy_migration.h"
 
 #include "filament_slot_override_store.h"
+#include "lane_apply.h"
+#include "lane_binding.h"
 #include "lane_source_store.h"
 
 #include <spdlog/spdlog.h>
@@ -37,12 +39,21 @@ void file_kept_identity(LaneId lane, int slot_index, const FilamentSlotOverride&
     file_lane_sources(lane, reloads);
 }
 
+bool outside_record_rebinds(LaneId lane, const Observation& obs) {
+    return obs.spoolman_id.has_value() && resolved_lane(lane).spoolman_id != obs.spoolman_id;
+}
+
 bool file_outside_edit_if_newer(LaneId lane, const LaneDataRecord& entry, Observation obs,
                                 bool write_in_flight) {
     if (write_in_flight || wire_authored_by_helix(entry.wire) ||
         wire_authored_by_firmware(entry.wire) ||
         !outside_edit_wins(entry.record, lane_sources(lane).local_user)) {
         return false;
+    }
+    // What described the old spool does not describe the new one. The drop
+    // runs before the filing because the filing amends what stands.
+    if (outside_record_rebinds(lane, obs)) {
+        drop_previous_spool_declarations(lane);
     }
     obs.source = ObservationSource::LocalUser;
     obs.remaining_weight_g.reset();

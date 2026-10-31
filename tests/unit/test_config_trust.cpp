@@ -22,16 +22,16 @@ namespace {
 class StateDirGuard {
   public:
     StateDirGuard()
-        : prev_(AppConstants::Update::detail::state_dir_ref()),
+        : prev_(helix::app_constants::update::detail::state_dir_ref()),
           dir_(helix::test::unique_temp_dir("helix_ct_state")) {
         std::filesystem::create_directories(dir_);
         // The trust gate refuses update_urls.json in a group/world-writable
         // directory, so pin the mode rather than trusting the umask.
         REQUIRE(::chmod(dir_.c_str(), 0755) == 0);
-        AppConstants::Update::detail::state_dir_ref() = dir_;
+        helix::app_constants::update::detail::state_dir_ref() = dir_;
     }
     ~StateDirGuard() {
-        AppConstants::Update::detail::state_dir_ref() = prev_;
+        helix::app_constants::update::detail::state_dir_ref() = prev_;
         std::error_code ec;
         std::filesystem::remove_all(dir_, ec);
     }
@@ -146,7 +146,7 @@ TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: settings.json r2_url is ignor
     auto* config = helix::Config::get_instance();
     config->set<std::string>("/update/r2_url", "https://mirror.example.com/rel");
     REQUIRE(UpdateChecker::effective_r2_base_url() ==
-            std::string(UpdateChecker::DEFAULT_R2_BASE_URL));
+            std::string(UpdateChecker::kDefaultR2BaseUrl));
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: trusted update_urls.json overrides r2 base",
@@ -161,7 +161,7 @@ TEST_CASE_METHOD(HelixTestFixture, "UpdateChecker: untrusted update_urls.json fa
     StateDirGuard guard;
     guard.write("{\"r2_url\": \"https://mirror.example.com\"}", 0666);
     REQUIRE(UpdateChecker::effective_r2_base_url() ==
-            std::string(UpdateChecker::DEFAULT_R2_BASE_URL));
+            std::string(UpdateChecker::kDefaultR2BaseUrl));
 }
 
 TEST_CASE("config_trust: log path roots", "[config-trust][log-path]") {

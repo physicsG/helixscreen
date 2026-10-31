@@ -32,7 +32,7 @@ class ScopedHomeLayout {
         auto* cfg = Config::get_instance();
         const std::string key = cfg->df() + "panel_widgets/home";
         cfg->set<nlohmann::json>(key, had_prior_ ? prior_ : nlohmann::json::object());
-        cfg->set(cfg->df() + led::LIGHT_BUTTON_PENDING_PATH, nlohmann::json());
+        cfg->set(cfg->df() + led::kLightButtonPendingPath, nlohmann::json());
         reload();
     }
     ScopedHomeLayout(const ScopedHomeLayout&) = delete;

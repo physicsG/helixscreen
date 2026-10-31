@@ -20,9 +20,9 @@
  * interpenetrating. The strings below mirror that print at this fixture's
  * 800x480.
  *
- * The status row below has the same class of hazard: a long elapsed/remaining
- * pair once ran under the percent label on its right; the eta now grows and
- * dots.
+ * The strip's time line (print_status_strip.xml) has the same class of
+ * hazard: its eta grows and dots, so a long elapsed/remaining pair shrinks it
+ * instead of pushing the elapsed time past the progress block.
  */
 
 #include "ui_panel_print_status.h"
@@ -142,12 +142,14 @@ TEST_CASE_METHOD(MetadataStripFixture,
 
     // Overflow must still degrade, not interpenetrate: with long_mode="dots"
     // the layer value's box is narrower than the full text it holds.
-    lv_label_set_text(layer, "474 / 13340 · 554.4mm plus a pathological tail");
+    // A dotted label rewrites its own text with the ellipsis, so the full
+    // width is measured from the string that was set.
+    const char* overflowing = "474 / 13340 · 554.4mm plus a pathological tail";
+    lv_label_set_text(layer, overflowing);
     lv_obj_update_layout(root_);
     REQUIRE(lv_label_get_long_mode(layer) == LV_LABEL_LONG_MODE_DOTS);
     lv_point_t full;
-    lv_text_get_size(&full, lv_label_get_text(layer),
-                     lv_obj_get_style_text_font(layer, LV_PART_MAIN),
+    lv_text_get_size(&full, overflowing, lv_obj_get_style_text_font(layer, LV_PART_MAIN),
                      lv_obj_get_style_text_letter_space(layer, LV_PART_MAIN), 0, LV_COORD_MAX,
                      LV_TEXT_FLAG_NONE);
     REQUIRE(lv_obj_get_width(layer) < full.x);
@@ -155,26 +157,24 @@ TEST_CASE_METHOD(MetadataStripFixture,
 }
 
 TEST_CASE_METHOD(MetadataStripFixture,
-                 "Metadata strip: elapsed/remaining row never runs under the percent",
+                 "Strip: a multi-day print's times stay inside the progress block",
                  "[print_status][metadata_strip]") {
     lv_obj_t* elapsed = label("print_elapsed");
     lv_obj_t* remaining = label("print_remaining");
     lv_obj_t* eta = label("print_eta");
-    lv_obj_t* percent = label("print_percent");
+    lv_obj_t* line = label("ps_strip_print_line");
 
-    // Longer than the live values that already fit with zero headroom
-    // ("16h 03m ... 8h 28m (~10:06 PM)" measured exactly 322px of a 322px
-    // slot): a multi-day print pushes the eta into the percent label.
     lv_label_set_text(elapsed, "2d 16h 03m");
     lv_label_set_text(remaining, "2d 08h 26m");
     lv_label_set_text(eta, "(~10:06 PM +1d)");
 
     lv_obj_update_layout(root_);
 
-    CAPTURE(right_edge_screen(eta), left_edge_screen(percent));
-
-    // The inner time row is a grow slot left of the percent label; whatever
-    // it holds, it must end before the percent begins. Screen coordinates,
-    // because the two labels sit under different parents.
-    REQUIRE(right_edge_screen(eta) <= left_edge_screen(percent));
+    CAPTURE(right_edge_screen(eta), left_edge_screen(elapsed), right_edge_screen(elapsed),
+            right_edge_screen(line));
+    REQUIRE(lv_obj_get_width(line) > 0);
+    // The eta yields: it ends before the elapsed time begins, and the elapsed
+    // time ends inside the line.
+    REQUIRE(right_edge_screen(eta) <= left_edge_screen(elapsed));
+    REQUIRE(right_edge_screen(elapsed) <= right_edge_screen(line));
 }

@@ -29,16 +29,18 @@
         <lv_obj name="action_buttons_row"
                 width="100%" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm"
                 scrollable="false">
-          <!-- Home Button. SIZE_OK: 44 is this row's button height; no button_height ladder has 44 at medium. -->
-          <ui_button name="btn_home" height="44" icon="home" text="Home" flex_grow="1">
+          <!-- Home Button -->
+          <ui_button name="btn_home" icon="home" text="Home" flex_grow="1">
+            <bind_state_if_eq subject="ams_device_ops_can_home" state="disabled" ref_value="0"/>
             <event_cb trigger="clicked" callback="on_ams_device_ops_home"/>
           </ui_button>
           <!-- Recover Button -->
-          <ui_button name="btn_recover" height="44" icon="refresh" text="Recover" flex_grow="1">
+          <ui_button name="btn_recover" icon="refresh" text="Recover" flex_grow="1">
+            <bind_state_if_eq subject="ams_device_ops_can_recover" state="disabled" ref_value="0"/>
             <event_cb trigger="clicked" callback="on_ams_device_ops_recover"/>
           </ui_button>
-          <!-- Abort Button. SIZE_OK: same 44px action-row height. -->
-          <ui_button name="btn_abort" height="44" icon="stop" text="Abort" flex_grow="1">
+          <!-- Abort Button -->
+          <ui_button name="btn_abort" icon="stop" text="Abort" flex_grow="1">
             <bind_state_if_eq subject="ams_device_ops_can_abort" state="disabled" ref_value="0"/>
             <event_cb trigger="clicked" callback="on_ams_device_ops_abort"/>
           </ui_button>
@@ -50,32 +52,20 @@
                 width="100%" height="content" style_pad_all="0" style_layout="flex" style_flex_flow="column"
                 scrollable="false">
           <bind_flag_if_eq subject="ams_device_ops_supports_bypass" flag="hidden" ref_value="0"/>
-          <!-- Virtual toggle (no hardware sensor) -->
-          <lv_obj name="bypass_virtual_row"
-                  width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="space_between"
-                  style_flex_cross_place="center">
+          <!-- Virtual toggle (no hardware sensor). Checked state follows the
+               live ams_bypass_active subject (the one AmsState publishes from the
+               backends), not an overlay-local snapshot: the enable can complete
+               asynchronously behind an unload-first chain, and a snapshot written
+               optimistically on "success" reports a fire-and-forget gcode as done.
+               Dims while a job owns the toolhead, same binding as
+               panel_widget_bypass.xml; the shared controller still enforces that
+               guard on every tap. -->
+          <setting_toggle_row name="bypass_virtual_row"
+                              label="Bypass Mode" icon="arrow_left_right"
+                              description="Feed filament directly to extruder" subject="ams_bypass_active"
+                              callback="on_ams_device_ops_bypass_toggled" moves_machine="true">
             <bind_flag_if_eq subject="ams_device_ops_hw_bypass_sensor" flag="hidden" ref_value="1"/>
-            <lv_obj height="content"
-                    style_pad_all="0" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
-                    scrollable="false" flex_grow="1">
-              <icon src="arrow_left_right" size="sm" variant="secondary"/>
-              <lv_obj height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
-                <text_body text="Bypass Mode"/>
-                <text_small text="Feed filament directly to extruder"/>
-              </lv_obj>
-            </lv_obj>
-            <!-- Checked state follows the live ams_bypass_active subject (the
-                 one AmsState publishes from the backends), not an overlay-local
-                 snapshot: the enable can complete asynchronously behind an
-                 unload-first chain, and a snapshot written optimistically on
-                 "success" reports a fire-and-forget gcode as done. Dims while a
-                 job owns the toolhead, same binding as panel_widget_bypass.xml;
-                 the shared controller still enforces that guard on every tap. -->
-            <ui_switch name="bypass_toggle" size="small" moves_machine="true">
-              <bind_state_if_eq subject="ams_bypass_active" state="checked" ref_value="1"/>
-              <event_cb trigger="value_changed" callback="on_ams_device_ops_bypass_toggled"/>
-            </ui_switch>
-          </lv_obj>
+          </setting_toggle_row>
           <!-- Hardware sensor indicator (read-only) -->
           <lv_obj name="bypass_hw_row"
                   width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="space_between"
@@ -94,28 +84,9 @@
           </lv_obj>
         </lv_obj>
         <!-- Auto-Heat Info Row (shown when supported) -->
-        <lv_obj name="auto_heat_row"
-                width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="start"
-                style_flex_cross_place="center" style_pad_gap="#space_sm">
+        <setting_info_row name="auto_heat_row" label="Auto-Heat on Load" icon="fire" value="On">
           <bind_flag_if_eq subject="ams_device_ops_supports_auto_heat" flag="hidden" ref_value="0"/>
-          <!-- Left side: Icon -->
-          <icon src="fire" size="sm" variant="secondary"/>
-          <!-- Middle: Label/Description -->
-          <lv_obj height="content"
-                  style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false" flex_grow="1">
-            <text_body text="Auto-Heat on Load"/>
-            <text_small text="Extruder heats automatically based on material"/>
-          </lv_obj>
-          <!-- Right side: Status indicator -->
-          <icon src="check_circle" size="sm" variant="primary"/>
-        </lv_obj>
-        <!-- AFC Unload-After-Print toggle (AFC backends only) -->
-        <setting_toggle_row name="row_afc_unload_after_print"
-                            label="Unloads After Print" icon="filament"
-                            description="AFC retracts filament from the toolhead at end of print"
-                            subject="afc_unload_after_print" callback="on_ams_afc_unload_after_print_toggled">
-          <bind_flag_if_eq subject="ams_device_ops_unload_after_print_configurable" flag="hidden" ref_value="0"/>
-        </setting_toggle_row>
+        </setting_info_row>
         <!-- Keep the bypass spool on the Multi-Filament panel even when bypass
              is disengaged. AFC publishes a virtual bypass whether or not one is
              wired, so the node is hidden by default (AFC backends only). -->
@@ -148,6 +119,15 @@
           <bind_flag_if_eq subject="ams_device_ops_printer_retains_spool_info" flag="hidden" ref_value="0"/>
           <bind_flag_if_eq subject="ams_device_ops_reports_spool_ids" flag="hidden" ref_value="0"/>
         </text_small>
+        <!-- Link a lane to the Spoolman spool its tag names when the spool is
+             seated (default on). Shown where a tag can name a spool and
+             Spoolman is configured. -->
+        <setting_toggle_row name="row_ams_tag_links_spoolman"
+                            label="Link Spools from Tags" icon="filament"
+                            description="Link a slot to the Spoolman spool its tag names"
+                            subject="ams_tag_links_spoolman" callback="on_ams_tag_links_spoolman_toggled">
+          <bind_flag_if cond="ams_device_ops_tags_name_spools and printer_has_spoolman" flag="hidden" invert="true"/>
+        </setting_toggle_row>
         <!-- Offer the bypass controls on a machine whose firmware reports none.
              Shown only while the firmware says no, so it stays available for the
              user to switch back off. Happy Hare defaults [mmu_machine] has_bypass
@@ -160,87 +140,28 @@
                             subject="ams_force_bypass_controls" callback="on_ams_force_bypass_controls_toggled">
           <bind_flag_if_eq subject="ams_device_ops_fw_supports_bypass" flag="hidden" ref_value="1"/>
         </setting_toggle_row>
-        <!-- QIDI Box eject distance (QIDI backends only) -->
-        <lv_obj name="row_qidi_eject_distance"
-                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
-                scrollable="false">
-          <bind_flag_if_eq subject="ams_device_ops_is_qidi" flag="hidden" ref_value="0"/>
-          <!-- Header: icon + label/description + current value -->
-          <lv_obj width="100%"
-                  height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="space_between"
-                  style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false">
-            <lv_obj height="content"
-                    style_pad_all="0" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
-                    scrollable="false" flex_grow="1">
-              <icon src="filament" size="sm" variant="secondary"/>
-              <lv_obj height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
-                <text_body text="Eject Distance"/>
-                <text_small text="How far filament is pushed back into the box on eject (mm)"/>
-              </lv_obj>
-            </lv_obj>
-            <text_body name="qidi_eject_distance_label" bind_text="ams_device_ops_qidi_eject_distance_display"/>
-          </lv_obj>
-          <!-- Slider -->
-          <lv_obj width="100%"
-                  height="#input_height" style_pad_left="#space_md" style_pad_right="#space_md" scrollable="false"
-                  flex_flow="row" style_flex_cross_place="center">
-            <text_small width="40" text="100"/>
-            <lv_slider name="qidi_eject_distance_slider"
-                       flex_grow="1" min_value="100" max_value="2000" value="878" style_margin_left="#space_sm"
-                       style_margin_right="#space_sm">
-              <event_cb trigger="released" callback="on_ams_qidi_eject_distance_changed"/>
-            </lv_slider>
-            <text_small width="40" text="2000"/>
-          </lv_obj>
-        </lv_obj>
-        <!-- QIDI Box eject velocity (QIDI backends only) -->
-        <lv_obj name="row_qidi_eject_velocity"
-                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_sm"
-                scrollable="false">
-          <bind_flag_if_eq subject="ams_device_ops_is_qidi" flag="hidden" ref_value="0"/>
-          <!-- Header: icon + label/description + current value -->
-          <lv_obj width="100%"
-                  height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="space_between"
-                  style_flex_cross_place="center" style_pad_gap="#space_sm" scrollable="false">
-            <lv_obj height="content"
-                    style_pad_all="0" flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm"
-                    scrollable="false" flex_grow="1">
-              <icon src="filament" size="sm" variant="secondary"/>
-              <lv_obj height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false">
-                <text_body text="Eject Velocity"/>
-                <text_small text="Speed used to push filament out of the box (mm/s)"/>
-              </lv_obj>
-            </lv_obj>
-            <text_body name="qidi_eject_velocity_label" bind_text="ams_device_ops_qidi_eject_velocity_display"/>
-          </lv_obj>
-          <!-- Slider -->
-          <lv_obj width="100%"
-                  height="#input_height" style_pad_left="#space_md" style_pad_right="#space_md" scrollable="false"
-                  flex_flow="row" style_flex_cross_place="center">
-            <text_small width="40" text="10"/>
-            <lv_slider name="qidi_eject_velocity_slider"
-                       flex_grow="1" min_value="10" max_value="300" value="100" style_margin_left="#space_sm"
-                       style_margin_right="#space_sm">
-              <event_cb trigger="released" callback="on_ams_qidi_eject_velocity_changed"/>
-            </lv_slider>
-            <text_small width="40" text="300"/>
-          </lv_obj>
-        </lv_obj>
+        <!-- Endless Spool on/off, for every backend whose firmware takes the
+             switch. Checked follows the backend's reported state, not the tap. -->
+        <setting_toggle_row name="row_endless_spool"
+                            label="Endless Spool" icon="infinity"
+                            description="Switch to a matching spool when one runs out" subject="ams_endless_spool_on"
+                            callback="on_ams_endless_spool_toggled">
+          <bind_flag_if_eq subject="ams_endless_spool_switchable" flag="hidden" ref_value="0"/>
+        </setting_toggle_row>
         <!-- Reset Endless Spool failover (shown only on backends whose
              endless-spool mapping the UI may write — AFC per-slot edges,
              single-unit Happy Hare groups, and the mock. Read-only systems
              like CFS and AD5X IFS hide the row). The base reset_endless_spool()
              loops set_endless_spool_backup(slot, -1) over every slot; Happy
-             Hare overrides it with MMU_ENDLESS_SPOOL RESET=1. Wipes ALL failover
+             Hare overrides it with MMU_ENDLESS_SPOOL RESET=1. Wipes ALL endless-spool
              config, so the tap opens a confirmation modal rather than firing
              immediately. -->
         <setting_action_row name="row_reset_endless_spool"
-                            label="Reset Endless Spool" icon="restart"
-                            description="Clear all spool failover assignments"
+                            label="Reset Endless Spool" icon="restart" description="Clear every Endless Spool backup"
                             callback="on_ams_reset_endless_spool_clicked">
           <bind_flag_if_eq subject="ams_device_ops_can_reset_endless_spool" flag="hidden" ref_value="0"/>
         </setting_action_row>
-        <!-- Status Row -->
+        <!-- Status Row: the live AMS narration, the same line the AMS panel shows -->
         <lv_obj name="status_row"
                 width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="start"
                 style_flex_cross_place="center" style_pad_gap="#space_sm">
@@ -248,7 +169,7 @@
           <lv_obj height="content"
                   style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs" scrollable="false" flex_grow="1">
             <text_body text="Status"/>
-            <text_small name="status_label" bind_text="ams_device_ops_status"/>
+            <text_small name="status_label" bind_text="ams_action_detail"/>
           </lv_obj>
         </lv_obj>
         <!-- Read-only facts the system publishes (firmware, serial, purge volume,

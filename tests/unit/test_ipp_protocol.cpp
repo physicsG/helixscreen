@@ -509,6 +509,26 @@ TEST_CASE("make_printer_uri - default port", "[label][ipp]") {
     REQUIRE(uri.find(":631") == std::string::npos);
 }
 
+TEST_CASE("make_printer_uri - CUPS queue path and empty path", "[label][ipp][ipp_rp]") {
+    REQUIRE(make_printer_uri("192.168.2.3", 631, "/printers/Canon_TS8350") ==
+            "ipp://192.168.2.3/printers/Canon_TS8350");
+    REQUIRE(make_printer_uri("192.168.2.3", 631, "") == "ipp://192.168.2.3/ipp/print");
+}
+
+// ---------------------------------------------------------------------------
+// normalize_resource_path
+// ---------------------------------------------------------------------------
+
+TEST_CASE("normalize_resource_path strips leading slashes and falls back to ipp/print",
+          "[label][ipp][ipp_rp]") {
+    CHECK(normalize_resource_path("ipp/print") == "ipp/print");
+    CHECK(normalize_resource_path("printers/Canon_TS8350") == "printers/Canon_TS8350");
+    CHECK(normalize_resource_path("/printers/Canon_TS8350") == "printers/Canon_TS8350");
+    CHECK(normalize_resource_path("//ipp/print") == "ipp/print");
+    CHECK(normalize_resource_path("") == "ipp/print");
+    CHECK(normalize_resource_path("/") == "ipp/print");
+}
+
 // ---------------------------------------------------------------------------
 // StatusCode is_success
 // ---------------------------------------------------------------------------

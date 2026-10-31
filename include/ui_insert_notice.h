@@ -28,5 +28,14 @@ void offer_clear_after_unverified_insert(int slot);
 /// Forget every lane already asked about, so a test starts with no notice pending.
 void reset_insert_offers_for_test();
 
+/// The slot editor owns this lane's insert (FilamentInsertWatcher opened it or
+/// waits on the tag reader to), so offer_clear_after_unverified_insert() stays
+/// quiet: one insert, one prompt. Held until the lane empties or the insert is
+/// dropped. Main thread only.
+void claim_insert_prompt(int slot);
+void release_insert_prompt(int slot);
+[[nodiscard]] bool insert_prompt_claimed(int slot);
+void release_all_insert_prompts();
+
 } // namespace ui
 } // namespace helix

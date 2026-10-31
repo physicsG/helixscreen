@@ -4,6 +4,7 @@
 #include "printer_hardware.h"
 
 #include "ams_backend.h"
+#include "hardware_role_registry.h"
 #include "printer_discovery.h"
 #include "text_io.h"
 
@@ -52,30 +53,52 @@ std::string PrinterHardware::find_not_containing(const std::vector<std::string>&
     return "";
 }
 
+namespace {
+
+/// The names of @p all that @p role accepts as candidates: a guess never returns
+/// anything the role registry would reject.
+std::vector<std::string> candidates_for(helix::HardwareRoleId role,
+                                        const std::vector<std::string>& all) {
+    const auto* desc = helix::role_descriptor(role);
+    if (!desc || !desc->is_candidate) {
+        return all;
+    }
+    std::vector<std::string> out;
+    for (const auto& name : all) {
+        if (desc->is_candidate(name)) {
+            out.push_back(name);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
 // ============================================================================
 // Heater Guessing
 // ============================================================================
 
 std::string PrinterHardware::guess_bed_heater() const {
-    if (heaters_.empty()) {
+    const auto heaters = candidates_for(helix::HardwareRoleId::BedHeater, heaters_);
+    if (heaters.empty()) {
         spdlog::debug("[PrinterHardware] guess_bed_heater() -> no heaters discovered");
         return "";
     }
 
     // Priority 1: Exact match for "heater_bed" - Klipper's canonical name
-    if (has_exact(heaters_, "heater_bed")) {
+    if (has_exact(heaters, "heater_bed")) {
         spdlog::debug("[PrinterHardware] guess_bed_heater() -> 'heater_bed'");
         return "heater_bed";
     }
 
     // Priority 2: Exact match for "heated_bed"
-    if (has_exact(heaters_, "heated_bed")) {
+    if (has_exact(heaters, "heated_bed")) {
         spdlog::debug("[PrinterHardware] guess_bed_heater() -> 'heated_bed'");
         return "heated_bed";
     }
 
     // Priority 3: Any heater containing "bed"
-    std::string match = find_containing(heaters_, "bed");
+    std::string match = find_containing(heaters, "bed");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_bed_heater() -> '{}'", match);
         return match;
@@ -86,39 +109,40 @@ std::string PrinterHardware::guess_bed_heater() const {
 }
 
 std::string PrinterHardware::guess_hotend_heater() const {
-    if (heaters_.empty()) {
+    const auto heaters = candidates_for(helix::HardwareRoleId::HotendHeater, heaters_);
+    if (heaters.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_heater() -> no heaters discovered");
         return "";
     }
 
     // Priority 1: Exact match for "extruder" - Klipper's canonical [extruder] section
-    if (has_exact(heaters_, "extruder")) {
+    if (has_exact(heaters, "extruder")) {
         spdlog::debug("[PrinterHardware] guess_hotend_heater() -> 'extruder'");
         return "extruder";
     }
 
     // Priority 2: Exact match for "extruder0"
-    if (has_exact(heaters_, "extruder0")) {
+    if (has_exact(heaters, "extruder0")) {
         spdlog::debug("[PrinterHardware] guess_hotend_heater() -> 'extruder0'");
         return "extruder0";
     }
 
     // Priority 3: Any heater containing "extruder"
-    std::string match = find_containing(heaters_, "extruder");
+    std::string match = find_containing(heaters, "extruder");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_heater() -> '{}'", match);
         return match;
     }
 
     // Priority 4: Any heater containing "hotend"
-    match = find_containing(heaters_, "hotend");
+    match = find_containing(heaters, "hotend");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_heater() -> '{}'", match);
         return match;
     }
 
     // Priority 5: Any heater containing "e0"
-    match = find_containing(heaters_, "e0");
+    match = find_containing(heaters, "e0");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_heater() -> '{}'", match);
         return match;
@@ -188,23 +212,24 @@ std::string PrinterHardware::guess_hotend_sensor() const {
 // ============================================================================
 
 std::string PrinterHardware::guess_hotend_fan() const {
-    if (fans_.empty()) {
+    const auto fans = candidates_for(helix::HardwareRoleId::HotendFan, fans_);
+    if (fans.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_fan() -> no fans discovered");
         return "";
     }
 
     // Priority 1: Exact matches for common heater fan names
-    if (has_exact(fans_, "heater_fan hotend_fan")) {
+    if (has_exact(fans, "heater_fan hotend_fan")) {
         spdlog::debug("[PrinterHardware] guess_hotend_fan() -> 'heater_fan hotend_fan' (exact)");
         return "heater_fan hotend_fan";
     }
-    if (has_exact(fans_, "heater_fan heat_fan")) {
+    if (has_exact(fans, "heater_fan heat_fan")) {
         spdlog::debug("[PrinterHardware] guess_hotend_fan() -> 'heater_fan heat_fan' (exact)");
         return "heater_fan heat_fan";
     }
 
     // Priority 2: Any fan containing "heater_fan" (Klipper's [heater_fan] section)
-    std::string match = find_containing(fans_, "heater_fan");
+    std::string match = find_containing(fans, "heater_fan");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_fan() -> '{}' (contains 'heater_fan')",
                       match);
@@ -212,7 +237,7 @@ std::string PrinterHardware::guess_hotend_fan() const {
     }
 
     // Priority 3: Any fan containing "hotend_fan"
-    match = find_containing(fans_, "hotend_fan");
+    match = find_containing(fans, "hotend_fan");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_fan() -> '{}' (contains 'hotend_fan')",
                       match);
@@ -220,12 +245,12 @@ std::string PrinterHardware::guess_hotend_fan() const {
     }
 
     // Priority 4: Any fan containing "heat_fan" or "heatbreak"
-    match = find_containing(fans_, "heat_fan");
+    match = find_containing(fans, "heat_fan");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_fan() -> '{}' (contains 'heat_fan')", match);
         return match;
     }
-    match = find_containing(fans_, "heatbreak");
+    match = find_containing(fans, "heatbreak");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_hotend_fan() -> '{}' (contains 'heatbreak')", match);
         return match;
@@ -237,23 +262,24 @@ std::string PrinterHardware::guess_hotend_fan() const {
 }
 
 std::string PrinterHardware::guess_part_cooling_fan() const {
-    if (fans_.empty()) {
+    const auto fans = candidates_for(helix::HardwareRoleId::PartFan, fans_);
+    if (fans.empty()) {
         spdlog::debug("[PrinterHardware] guess_part_cooling_fan() -> no fans discovered");
         return "";
     }
 
     // Priority 1: Exact match for "fan" - Klipper's canonical [fan] section
     // This is THE part cooling fan, controlled by M106/M107
-    if (has_exact(fans_, "fan")) {
+    if (has_exact(fans, "fan")) {
         spdlog::debug("[PrinterHardware] guess_part_cooling_fan() -> 'fan' (canonical)");
         return "fan";
     }
 
     // Priority 2: Any fan containing "M106" or "m106" - common naming for M106-controlled fans
     // (e.g., "fan_generic fanM106" on FlashForge printers)
-    std::string match = find_containing(fans_, "M106");
+    std::string match = find_containing(fans, "M106");
     if (match.empty()) {
-        match = find_containing(fans_, "m106");
+        match = find_containing(fans, "m106");
     }
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_part_cooling_fan() -> '{}' (contains 'M106')",
@@ -262,7 +288,7 @@ std::string PrinterHardware::guess_part_cooling_fan() const {
     }
 
     // Priority 3: Any fan containing "part" (e.g., "fan_generic part_cooling")
-    match = find_containing(fans_, "part");
+    match = find_containing(fans, "part");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_part_cooling_fan() -> '{}' (contains 'part')",
                       match);
@@ -270,47 +296,41 @@ std::string PrinterHardware::guess_part_cooling_fan() const {
     }
 
     // Fallback: first fan in list (better than nothing)
-    spdlog::debug("[PrinterHardware] guess_part_cooling_fan() -> '{}' (fallback)", fans_[0]);
-    return fans_[0];
+    spdlog::debug("[PrinterHardware] guess_part_cooling_fan() -> '{}' (fallback)", fans[0]);
+    return fans[0];
 }
 
 std::string PrinterHardware::guess_chamber_fan() const {
-    if (fans_.empty()) {
+    const auto fans = candidates_for(helix::HardwareRoleId::ChamberFan, fans_);
+    if (fans.empty()) {
         spdlog::debug("[PrinterHardware] guess_chamber_fan() -> no fans discovered");
         return "";
     }
 
     // Priority 1: Exact match for "chamber_fan"
-    if (has_exact(fans_, "chamber_fan")) {
+    if (has_exact(fans, "chamber_fan")) {
         spdlog::debug("[PrinterHardware] guess_chamber_fan() -> 'chamber_fan' (exact)");
         return "chamber_fan";
     }
 
     // Priority 2: Substring priority chain
     // "chamber" - chamber air circulation
-    std::string match = find_containing(fans_, "chamber");
+    std::string match = find_containing(fans, "chamber");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_chamber_fan() -> '{}' (contains 'chamber')", match);
         return match;
     }
 
     // "nevermore" - popular Klipper recirculating filter
-    match = find_containing(fans_, "nevermore");
+    match = find_containing(fans, "nevermore");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_chamber_fan() -> '{}' (contains 'nevermore')",
                       match);
         return match;
     }
 
-    // "bed_fans" - BTT Pi naming convention
-    match = find_containing(fans_, "bed_fans");
-    if (!match.empty()) {
-        spdlog::debug("[PrinterHardware] guess_chamber_fan() -> '{}' (contains 'bed_fans')", match);
-        return match;
-    }
-
     // "filter" - air filtration
-    match = find_containing(fans_, "filter");
+    match = find_containing(fans, "filter");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_chamber_fan() -> '{}' (contains 'filter')", match);
         return match;
@@ -322,34 +342,35 @@ std::string PrinterHardware::guess_chamber_fan() const {
 }
 
 std::string PrinterHardware::guess_exhaust_fan() const {
-    if (fans_.empty()) {
+    const auto fans = candidates_for(helix::HardwareRoleId::ExhaustFan, fans_);
+    if (fans.empty()) {
         spdlog::debug("[PrinterHardware] guess_exhaust_fan() -> no fans discovered");
         return "";
     }
 
     // Priority 1: Exact match for "exhaust_fan"
-    if (has_exact(fans_, "exhaust_fan")) {
+    if (has_exact(fans, "exhaust_fan")) {
         spdlog::debug("[PrinterHardware] guess_exhaust_fan() -> 'exhaust_fan' (exact)");
         return "exhaust_fan";
     }
 
     // Priority 2: Substring priority chain
     // "exhaust" - direct exhaust
-    std::string match = find_containing(fans_, "exhaust");
+    std::string match = find_containing(fans, "exhaust");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_exhaust_fan() -> '{}' (contains 'exhaust')", match);
         return match;
     }
 
     // "external" - external/outside venting
-    match = find_containing(fans_, "external");
+    match = find_containing(fans, "external");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_exhaust_fan() -> '{}' (contains 'external')", match);
         return match;
     }
 
     // "vent" - ventilation
-    match = find_containing(fans_, "vent");
+    match = find_containing(fans, "vent");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_exhaust_fan() -> '{}' (contains 'vent')", match);
         return match;
@@ -361,34 +382,35 @@ std::string PrinterHardware::guess_exhaust_fan() const {
 }
 
 std::string PrinterHardware::guess_aux_fan() const {
-    if (fans_.empty()) {
+    const auto fans = candidates_for(helix::HardwareRoleId::AuxFan, fans_);
+    if (fans.empty()) {
         spdlog::debug("[PrinterHardware] guess_aux_fan() -> no fans discovered");
         return "";
     }
 
     // Priority 1: Exact match for "aux_fan"
-    if (has_exact(fans_, "aux_fan")) {
+    if (has_exact(fans, "aux_fan")) {
         spdlog::debug("[PrinterHardware] guess_aux_fan() -> 'aux_fan' (exact)");
         return "aux_fan";
     }
 
     // Priority 2: Substring priority chain
     // "aux" - auxiliary (also covers the spelled-out "auxiliary")
-    std::string match = find_containing(fans_, "aux");
+    std::string match = find_containing(fans, "aux");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_aux_fan() -> '{}' (contains 'aux')", match);
         return match;
     }
 
     // "internal" - internal/case circulation
-    match = find_containing(fans_, "internal");
+    match = find_containing(fans, "internal");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_aux_fan() -> '{}' (contains 'internal')", match);
         return match;
     }
 
     // "side" - side-mounted
-    match = find_containing(fans_, "side");
+    match = find_containing(fans, "side");
     if (!match.empty()) {
         spdlog::debug("[PrinterHardware] guess_aux_fan() -> '{}' (contains 'side')", match);
         return match;
@@ -528,43 +550,22 @@ bool PrinterHardware::is_ams_sensor_substring(const std::string& sensor_name) {
     std::string lower_name = sensor_name;
     lower_name = helix::text_io::to_lower(lower_name);
 
-    // AFC (Armored Turtle Filament Changer) patterns
-    if (lower_name.find("lane") != std::string::npos)
+    // A filament system's own keywords (afc, mmu, ercf, ...) belong to the
+    // backends that drive that hardware.
+    if (helix::AmsBackend::sensor_name_names_filament_system(lower_name))
         return true;
-    if (lower_name.find("afc") != std::string::npos)
+
+    // Generic multi-material patterns
+    if (lower_name.find("lane") != std::string::npos)
         return true;
     if (lower_name.find("slot") != std::string::npos)
         return true;
     if (lower_name.find("bypass") != std::string::npos)
         return true;
-    if (lower_name.find("quiet") != std::string::npos)
-        return true;
-
-    // ERCF (Enraged Rabbit Carrot Feeder) patterns
-    if (lower_name.find("ercf") != std::string::npos)
-        return true;
     if (lower_name.find("gate") != std::string::npos)
-        return true;
-
-    // MMU2/MMU3 (Prusa Multi-Material Unit) patterns
-    if (lower_name.find("mmu") != std::string::npos)
-        return true;
-
-    // TradRack patterns
-    if (lower_name.find("trad") != std::string::npos)
-        return true;
-
-    // BoxTurtle patterns
-    if (lower_name.find("turtle") != std::string::npos)
         return true;
     if (lower_name.find("box") != std::string::npos &&
         lower_name.find("filament") != std::string::npos)
-        return true;
-
-    // Happy Hare patterns
-    if (lower_name.find("happy") != std::string::npos)
-        return true;
-    if (lower_name.find("hare") != std::string::npos)
         return true;
 
     // Generic multi-material patterns (numbered sensors)
@@ -593,12 +594,13 @@ bool PrinterHardware::is_ams_sensor_substring(const std::string& sensor_name) {
 }
 
 bool PrinterHardware::is_ams_sensor(const std::string& sensor_name,
-                                    const helix::PrinterDiscovery& discovery) {
+                                    const helix::PrinterDiscovery& discovery,
+                                    bool filament_hardware_absent) {
     if (is_ams_sensor_substring(sensor_name)) {
         return true;
     }
 
-    if (!discovery.has_mmu()) {
+    if (!discovery.has_mmu() || filament_hardware_absent) {
         return false;
     }
 

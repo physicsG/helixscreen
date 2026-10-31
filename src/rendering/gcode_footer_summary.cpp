@@ -20,7 +20,7 @@ namespace {
 // above float noise rather than at a physically meaningful weight: a tool the
 // file really uses must never be dropped (its filament check would be skipped
 // silently), while an extra chip for a tool that barely extrudes is harmless.
-constexpr double USED_GRAMS_EPSILON = 1e-9;
+constexpr double kUsedGramsEpsilon = 1e-9;
 
 // The key of a `; key = value` comment, lowercased, with the leading
 // semicolons and surrounding whitespace removed. Empty when the line has no
@@ -72,7 +72,7 @@ std::vector<double> grams_from_line(std::string_view values) {
 std::set<int> used_indices_from_grams(const std::vector<double>& grams) {
     std::set<int> used;
     for (size_t i = 0; i < grams.size(); ++i) {
-        if (grams[i] > USED_GRAMS_EPSILON) {
+        if (grams[i] > kUsedGramsEpsilon) {
             used.insert(static_cast<int>(i));
         }
     }
@@ -134,7 +134,7 @@ GcodeFooterSummary parse_gcode_footer_summary(std::string_view tail) {
 }
 
 size_t gcode_tail_window_bytes(uint64_t file_size, uint64_t gcode_end_byte) {
-    uint64_t window = GCODE_TAIL_WINDOW_DEFAULT;
+    uint64_t window = kGcodeTailWindowDefault;
 
     // A gcode_end_byte at or past EOF is nonsense (or a file with no footer at
     // all) — fall back to the fixed window rather than asking for 0 bytes.
@@ -142,7 +142,7 @@ size_t gcode_tail_window_bytes(uint64_t file_size, uint64_t gcode_end_byte) {
         window = file_size - gcode_end_byte;
     }
 
-    window = std::clamp<uint64_t>(window, GCODE_TAIL_WINDOW_MIN, GCODE_TAIL_WINDOW_MAX);
+    window = std::clamp<uint64_t>(window, kGcodeTailWindowMin, kGcodeTailWindowMax);
     if (file_size > 0) {
         window = std::min<uint64_t>(window, file_size);
     }

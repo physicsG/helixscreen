@@ -2,19 +2,10 @@
 #include "error_classify.h"
 
 #include "gcode_error_router.h" // clean_error_text
+#include "klipper_error_table.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 
 namespace helix::error_classify {
-
-namespace {
-
-ErrorSource source_for_code(const std::string& code) {
-    if (code.rfind("key", 0) == 0)
-        return ErrorSource::CFS; // Creality CFS codes
-    return ErrorSource::GENERIC;
-}
-
-} // namespace
 
 std::optional<ErrorEvent> classify(const std::string& raw_line, const ClassifyContext& ctx) {
     const GcodeErrorLine parsed = parse_gcode_error_line(raw_line);
@@ -31,50 +22,24 @@ std::optional<ErrorEvent> classify(const std::string& raw_line, const ClassifyCo
     e.raw_detail = text;
 
     std::string code;
-    GcodeErrorRouter::clean_error_text(text, code);
+    FirmwareCodeScheme scheme = FirmwareCodeScheme::Opaque;
+    GcodeErrorRouter::clean_error_text(text, code, &scheme);
     e.detail = text;
     e.code = code;
 
+    // Only error-table codes carry severity rules, and the table owns them
+    // (klipper_error_classify). Any other firmware code is shown to the user
+    // but classifies like an uncoded `!!`, so a fault raised mid-print still
+    // blocks rather than reading as a transient toast.
     if (!is_bang) { // "Error:" command error
         e.source = ErrorSource::KLIPPER;
         e.severity = ErrorSeverity::WARNING;
-    } else if (!code.empty()) {
-        e.source = source_for_code(code);
-        if (code.rfind("key8", 0) == 0) {
-            e.severity = ErrorSeverity::CRITICAL;
-            if (code == "key840") {
-                // key840 is "command not supported in the current scenario": the
-                // box is already running something else and clears when it
-                // finishes. CRITICAL would block on a decision about a healthy
-                // unit, so this stays a toast and keeps the reset reachable for
-                // the case where the box really is wedged.
-                e.severity = ErrorSeverity::WARNING;
-                e.recovery_actions.push_back(
-                    {lv_tr("Reset CFS"), "BOX_ERROR_CLEAR", "error_classify::key840_reset"});
-            } else if (code == "key843") {
-                // key843 is the RFID-read failure: most often the box answering
-                // busy while mid-operation rather than a broken tag (#1387). It
-                // self-resolves when the box frees (the deferred insert probe
-                // lands) or the user re-seats a genuinely bad tag, so the key8xx
-                // blanket CRITICAL promotion is wrong here: CRITICAL without
-                // actions routes to a blocking modal whose advice would assert
-                // one cause for all of them. A toast needs no action.
-                e.severity = ErrorSeverity::WARNING;
-            } else if (code == "key839") {
-                // key839 is "no filament at the CFS extrude position": the
-                // firmware restating the slot's emptiness that the runout flow
-                // is already prompting about (#1388). It offers no action that
-                // prompt lacks, so the blanket CRITICAL promotion just stacks a
-                // second blocking modal on one runout. WARNING routes it to a
-                // deduped toast instead.
-                e.severity = ErrorSeverity::WARNING;
-            }
-        } else if (code == "key298") {
-            e.severity = ErrorSeverity::WARNING;
-            e.recovery_actions.push_back({lv_tr("Recover"), "", "error_classify::key298_recover"});
-        } else {
-            e.severity = ErrorSeverity::WARNING;
-        }
+    } else if (!code.empty() && scheme == FirmwareCodeScheme::ErrorTable) {
+        printer::KlipperErrorClassification table = printer::klipper_error_classify(code);
+        e.source = table.source;
+        e.severity = table.severity;
+        e.title = std::move(table.title);
+        e.recovery_actions = std::move(table.recovery_actions);
     } else { // uncoded `!!` — no Klipper error code to key off
         e.source = ErrorSource::GENERIC;
         e.severity =

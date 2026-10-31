@@ -8,7 +8,6 @@
 #include "ui_nav.h"
 #include "ui_notification_manager.h"
 #include "ui_panel_common.h"
-#include "ui_severity_card.h"
 #include "ui_subject_registry.h"
 #include "ui_utils.h"
 
@@ -24,6 +23,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cstring>
+#include <map>
 #include <memory>
 
 using namespace helix;
@@ -54,9 +54,10 @@ void NotificationHistoryPanel::init_subjects() {
 
     // Has entries subject: 1 = has entries (show content), 0 = empty (show empty state)
     UI_MANAGED_SUBJECT_INT(has_entries_subject_, 0, "notification_has_entries", subjects_);
+    UI_MANAGED_SUBJECT_INT(row_count_subject_, 0, "notification_row_count", subjects_);
 
     subjects_initialized_ = true;
-    spdlog::debug("[{}] Subjects initialized (1 subject)", get_name());
+    spdlog::debug("[{}] Subjects initialized (2 subjects)", get_name());
 }
 
 void NotificationHistoryPanel::deinit_subjects() {
@@ -65,6 +66,10 @@ void NotificationHistoryPanel::deinit_subjects() {
     }
     history_version_observer_.reset();
     subjects_.deinit_all();
+    for (auto* pool : {&severity_pool_, &title_pool_, &message_pool_, &has_message_pool_,
+                       &time_pool_, &has_action_pool_}) {
+        pool->reclaim();
+    }
     subjects_initialized_ = false;
     spdlog::debug("[{}] Subjects deinitialized", get_name());
 }
@@ -127,66 +132,33 @@ void NotificationHistoryPanel::refresh() {
     // Get all entries (filter buttons removed from UI for cleaner look)
     auto entries = history_.get_all();
 
-    // Find content container
-    lv_obj_t* overlay_content = helix::ui::find_required(panel_, "overlay_content", get_name());
-    if (!overlay_content) {
-        return;
-    }
-
-    // Clear existing items from content area
-    // Action strings are freed automatically via LV_EVENT_DELETE callbacks
-    helix::ui::safe_clean_children(overlay_content);
-
     // Update has_entries subject - XML bindings handle visibility reactively
     bool has_entries = !entries.empty();
     lv_subject_set_int(&has_entries_subject_, has_entries ? 1 : 0);
 
-    // Create list items using severity_card for automatic color styling
-    for (const auto& entry : entries) {
-        // Format timestamp
-        std::string timestamp_str = format_timestamp(entry.timestamp_ms);
-
+    // Fill the rows' subjects, then publish the count: the <repeat> builds rows
+    // bound to slots that already hold their values.
+    const size_t n = entries.size();
+    for (auto* pool : {&severity_pool_, &title_pool_, &message_pool_, &has_message_pool_,
+                       &time_pool_, &has_action_pool_}) {
+        pool->ensure_size(n);
+    }
+    row_actions_.assign(n, std::string{});
+    for (size_t i = 0; i < n; ++i) {
+        const auto& entry = entries[i];
         // An untitled entry (every plain toast) leads with its message; the icon and
         // border already carry the severity, so a placeholder title says nothing.
         const bool has_title = entry.title[0] != '\0';
-
-        // Build attributes array - just pass semantic severity, widget handles colors
-        const char* attrs[] = {"severity",  severity_to_string(entry.severity),
-                               "title",     has_title ? entry.title : entry.message,
-                               "message",   has_title ? entry.message : "",
-                               "timestamp", timestamp_str.c_str(),
-                               nullptr};
-
-        // Create item from XML (severity_card sets border color automatically)
-        lv_xml_create(overlay_content, "notification_history_item", attrs);
-
-        // Find the most recently created item (last child)
-        uint32_t child_cnt = lv_obj_get_child_count(overlay_content);
-        lv_obj_t* item =
-            (child_cnt > 0) ? lv_obj_get_child(overlay_content, static_cast<int32_t>(child_cnt - 1))
-                            : nullptr;
-        if (!item) {
-            spdlog::error("[{}] Failed to create notification_history_item from XML", get_name());
-            continue;
-        }
-
-        // Finalize severity styling for children (icon text and color)
-        ui_severity_card_finalize(item);
-
-        // If entry has an action, make it clickable
-        // Store action string in the event callback's user_data (NOT lv_obj user_data,
-        // which is already used by severity_card for the severity string)
-        if (entry.action[0] != '\0') {
-            auto* ctx = new (std::nothrow) ClickContext{this, {}};
-            if (ctx) {
-                strncpy(ctx->action, entry.action, sizeof(ctx->action) - 1);
-                ctx->action[sizeof(ctx->action) - 1] = '\0';
-                lv_obj_add_event_cb(item, on_item_clicked, LV_EVENT_CLICKED, ctx);
-                lv_obj_add_event_cb(item, on_item_deleted, LV_EVENT_DELETE, ctx);
-                lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
-            }
-        }
+        const char* message = has_title ? entry.message : "";
+        severity_pool_.set_int(i, severity_index(entry.severity));
+        title_pool_.set_string(i, has_title ? entry.title : entry.message);
+        message_pool_.set_string(i, message);
+        has_message_pool_.set_int(i, message[0] != '\0' ? 1 : 0);
+        time_pool_.set_string(i, format_timestamp(entry.timestamp_ms));
+        row_actions_[i] = entry.action;
+        has_action_pool_.set_int(i, entry.action[0] != '\0' ? 1 : 0);
     }
+    lv_subject_set_int(&row_count_subject_, static_cast<int>(n));
 
     // Mark all as read
     history_.mark_all_read();
@@ -202,17 +174,17 @@ void NotificationHistoryPanel::refresh() {
 // PRIVATE HELPERS
 // ============================================================================
 
-const char* NotificationHistoryPanel::severity_to_string(ToastSeverity severity) {
+int NotificationHistoryPanel::severity_index(ToastSeverity severity) {
     switch (severity) {
     case ToastSeverity::ERROR:
-        return "error";
+        return 3;
     case ToastSeverity::WARNING:
-        return "warning";
+        return 2;
     case ToastSeverity::SUCCESS:
-        return "success";
+        return 1;
     case ToastSeverity::INFO:
     default:
-        return "info";
+        return 0;
     }
 }
 
@@ -261,18 +233,12 @@ void NotificationHistoryPanel::handle_clear_clicked() {
 // ACTION DISPATCH
 // ============================================================================
 
-void NotificationHistoryPanel::on_item_clicked(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[NotificationHistoryPanel] on_item_clicked");
-    auto* ctx = static_cast<ClickContext*>(lv_event_get_user_data(e));
-    if (ctx && ctx->panel && ctx->action[0] != '\0') {
-        ctx->panel->dispatch_action(ctx->action);
+void NotificationHistoryPanel::handle_item_clicked(size_t index) {
+    if (index < row_actions_.size() && !row_actions_[index].empty()) {
+        // Copied: dispatching closes the panel, and a refresh may replace the row.
+        const std::string action = row_actions_[index];
+        dispatch_action(action.c_str());
     }
-    LVGL_SAFE_EVENT_CB_END();
-}
-
-void NotificationHistoryPanel::on_item_deleted(lv_event_t* e) {
-    auto* ctx = static_cast<ClickContext*>(lv_event_get_user_data(e));
-    delete ctx;
 }
 
 void NotificationHistoryPanel::dispatch_action(const char* action) {
@@ -282,10 +248,48 @@ void NotificationHistoryPanel::dispatch_action(const char* action) {
         // Close notification history overlay first, then show update modal
         helix::nav::go_back();
         UpdateChecker::instance().show_update_notification();
+    } else if (auto handler = helix::ui::notification_action_handler(action)) {
+        helix::nav::go_back();
+        handler();
     } else {
         spdlog::warn("[{}] Unknown action: {}", get_name(), action);
     }
 }
+
+namespace {
+
+using ActionHandler = std::function<void(const std::string&)>;
+
+std::map<std::string, ActionHandler>& notification_action_handlers() {
+    static std::map<std::string, ActionHandler> handlers;
+    return handlers;
+}
+
+} // namespace
+
+namespace helix::ui {
+
+void set_notification_action_handler(const std::string& id, ActionHandler handler) {
+    if (handler) {
+        notification_action_handlers()[id] = std::move(handler);
+    } else {
+        notification_action_handlers().erase(id);
+    }
+}
+
+std::function<void()> notification_action_handler(const std::string& action) {
+    const auto colon = action.find(':');
+    const std::string id = action.substr(0, colon);
+    const std::string arg = colon == std::string::npos ? std::string{} : action.substr(colon + 1);
+    auto& handlers = notification_action_handlers();
+    auto it = handlers.find(id);
+    if (it == handlers.end()) {
+        return {};
+    }
+    return [handler = it->second, arg] { handler(arg); };
+}
+
+} // namespace helix::ui
 
 // ============================================================================
 // STATIC TRAMPOLINES

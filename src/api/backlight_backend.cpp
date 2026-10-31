@@ -373,24 +373,24 @@ class BacklightBackendSysfs : public BacklightBackend {
  * This is used when the kernel doesn't expose backlight via sysfs.
  *
  * Ioctl commands:
- * - 0x102 (DISP_LCD_SET_BRIGHTNESS): args = [screen, brightness, 0, 0]
- * - 0x103 (DISP_LCD_GET_BRIGHTNESS): args = [screen, 0, 0, 0]
+ * - 0x102 (kDispLcdSetBrightness): args = [screen, brightness, 0, 0]
+ * - 0x103 (kDispLcdGetBrightness): args = [screen, 0, 0, 0]
  *
  * Brightness range: 0-255 (device tree lcd_pwm_max_limit)
  */
 class BacklightBackendAllwinner : public BacklightBackend {
   public:
-    static constexpr const char* DISP_DEVICE = "/dev/disp";
+    static constexpr const char* kDispDevice = "/dev/disp";
 
     // Allwinner DISP2 ioctl commands for LCD backlight control
     // From sunxi-display2 kernel driver (not including header to avoid kernel deps)
     // See: https://linux-sunxi.org/Sunxi_disp_driver_interface
-    static constexpr unsigned long DISP_LCD_SET_BRIGHTNESS = 0x102;
-    static constexpr unsigned long DISP_LCD_GET_BRIGHTNESS = 0x103;
-    static constexpr unsigned long DISP_LCD_BACKLIGHT_ENABLE = 0x104;
-    static constexpr unsigned long DISP_LCD_BACKLIGHT_DISABLE = 0x105;
+    static constexpr unsigned long kDispLcdSetBrightness = 0x102;
+    static constexpr unsigned long kDispLcdGetBrightness = 0x103;
+    static constexpr unsigned long kDispLcdBacklightEnable = 0x104;
+    static constexpr unsigned long kDispLcdBacklightDisable = 0x105;
 
-    static constexpr int MAX_BRIGHTNESS = 255;
+    static constexpr int kMaxBrightness = 255;
 
     BacklightBackendAllwinner() {
         // Some Allwinner platforms (e.g. Elegoo CC1) invert PWM polarity when
@@ -426,7 +426,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
      * resets the PWM polarity to normal operation.
      */
     void reset_driver_state() {
-        FdGuard fd(open(DISP_DEVICE, O_RDWR));
+        FdGuard fd(open(kDispDevice, O_RDWR));
         if (fd.get() < 0) {
             return;
         }
@@ -434,7 +434,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
         unsigned long args[4] = {0, 0, 0, 0};
 
         // Disable backlight first to reset driver state
-        if (ioctl(fd.get(), DISP_LCD_BACKLIGHT_DISABLE, args) == 0) {
+        if (ioctl(fd.get(), kDispLcdBacklightDisable, args) == 0) {
             spdlog::info("[Backlight-Allwinner] Reset: DISABLE to clear driver state");
         }
 
@@ -442,13 +442,13 @@ class BacklightBackendAllwinner : public BacklightBackend {
         usleep(10000);
 
         // Re-enable backlight
-        if (ioctl(fd.get(), DISP_LCD_BACKLIGHT_ENABLE, args) == 0) {
+        if (ioctl(fd.get(), kDispLcdBacklightEnable, args) == 0) {
             spdlog::info("[Backlight-Allwinner] Reset: ENABLE after state clear");
         }
 
         // Set to max brightness initially
-        args[1] = MAX_BRIGHTNESS;
-        if (ioctl(fd.get(), DISP_LCD_SET_BRIGHTNESS, args) == 0) {
+        args[1] = kMaxBrightness;
+        if (ioctl(fd.get(), kDispLcdSetBrightness, args) == 0) {
             spdlog::info("[Backlight-Allwinner] Reset: brightness set to max");
         }
     }
@@ -458,16 +458,16 @@ class BacklightBackendAllwinner : public BacklightBackend {
             return false;
         }
 
-        FdGuard fd(open(DISP_DEVICE, O_RDWR));
+        FdGuard fd(open(kDispDevice, O_RDWR));
         if (fd.get() < 0) {
             int err = errno; // Capture immediately
-            spdlog::warn("[Backlight-Allwinner] Cannot open {}: {}", DISP_DEVICE, strerror(err));
+            spdlog::warn("[Backlight-Allwinner] Cannot open {}: {}", kDispDevice, strerror(err));
             return false;
         }
 
         // Convert percentage to 0-255 range, honoring the panel floor (#1709)
         int brightness = helix::backlight_internal::raw_from_percent(
-            percent, MAX_BRIGHTNESS,
+            percent, kMaxBrightness,
             helix::backlight_internal::backlight_floor_percent(
                 helix::backlight_internal::build_floor_percent(true,
                                                                HELIX_BACKLIGHT_FLOOR_PERCENT)));
@@ -479,7 +479,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
             // Set PWM duty cycle to 0 first - on some Allwinner variants (AD5M),
             // BACKLIGHT_DISABLE alone doesn't control the PWM output
             args[1] = 0;
-            int ret = ioctl(fd.get(), DISP_LCD_SET_BRIGHTNESS, args);
+            int ret = ioctl(fd.get(), kDispLcdSetBrightness, args);
             if (ret < 0) {
                 int err = errno;
                 spdlog::warn("[Backlight-Allwinner] ioctl SET_BRIGHTNESS(0) failed: {}",
@@ -491,7 +491,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
                 // Skipped when backlight_enable_ioctl is false — some platforms invert
                 // PWM polarity when BACKLIGHT_DISABLE is called.
                 args[1] = 0;
-                ret = ioctl(fd.get(), DISP_LCD_BACKLIGHT_DISABLE, args);
+                ret = ioctl(fd.get(), kDispLcdBacklightDisable, args);
                 if (ret < 0) {
                     int err = errno;
                     spdlog::warn("[Backlight-Allwinner] ioctl BACKLIGHT_DISABLE failed: {}",
@@ -504,7 +504,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
             if (use_enable_ioctl_) {
                 // Enable backlight first (required on AD5M before SET_BRIGHTNESS works).
                 // Skipped when backlight_enable_ioctl is false to avoid polarity issues.
-                int ret = ioctl(fd.get(), DISP_LCD_BACKLIGHT_ENABLE, args);
+                int ret = ioctl(fd.get(), kDispLcdBacklightEnable, args);
                 if (ret < 0) {
                     int err = errno;
                     spdlog::warn("[Backlight-Allwinner] ioctl BACKLIGHT_ENABLE failed: {}",
@@ -515,7 +515,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
 
             // Set brightness level
             args[1] = static_cast<unsigned long>(brightness);
-            int ret = ioctl(fd.get(), DISP_LCD_SET_BRIGHTNESS, args);
+            int ret = ioctl(fd.get(), kDispLcdSetBrightness, args);
             if (ret < 0) {
                 int err = errno;
                 spdlog::warn("[Backlight-Allwinner] ioctl SET_BRIGHTNESS failed: {}",
@@ -534,14 +534,14 @@ class BacklightBackendAllwinner : public BacklightBackend {
             return -1;
         }
 
-        FdGuard fd(open(DISP_DEVICE, O_RDONLY));
+        FdGuard fd(open(kDispDevice, O_RDONLY));
         if (fd.get() < 0) {
             return -1;
         }
 
         // ioctl args: [screen_id, 0, 0, 0]
         unsigned long args[4] = {0, 0, 0, 0};
-        int ret = ioctl(fd.get(), DISP_LCD_GET_BRIGHTNESS, args);
+        int ret = ioctl(fd.get(), kDispLcdGetBrightness, args);
 
         if (ret < 0) {
             return -1;
@@ -551,7 +551,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
         // Some other Allwinner drivers return it in ret directly
         int brightness = (ret > 0) ? ret : static_cast<int>(args[1]);
 
-        return (brightness * 100) / MAX_BRIGHTNESS;
+        return (brightness * 100) / kMaxBrightness;
     }
 
     bool is_available() const override {
@@ -570,22 +570,22 @@ class BacklightBackendAllwinner : public BacklightBackend {
     void probe_device() {
         // Check if /dev/disp exists
         struct stat st {};
-        if (stat(DISP_DEVICE, &st) != 0) {
-            spdlog::debug("[Backlight-Allwinner] {} not found", DISP_DEVICE);
+        if (stat(kDispDevice, &st) != 0) {
+            spdlog::debug("[Backlight-Allwinner] {} not found", kDispDevice);
             return;
         }
 
         // Try to open and verify ioctl works
-        FdGuard fd(open(DISP_DEVICE, O_RDONLY));
+        FdGuard fd(open(kDispDevice, O_RDONLY));
         if (fd.get() < 0) {
             int err = errno; // Capture immediately
-            spdlog::debug("[Backlight-Allwinner] Cannot open {}: {}", DISP_DEVICE, strerror(err));
+            spdlog::debug("[Backlight-Allwinner] Cannot open {}: {}", kDispDevice, strerror(err));
             return;
         }
 
         // Test GET_BRIGHTNESS to verify this is a display with backlight control
         unsigned long args[4] = {0, 0, 0, 0};
-        int ret = ioctl(fd.get(), DISP_LCD_GET_BRIGHTNESS, args);
+        int ret = ioctl(fd.get(), kDispLcdGetBrightness, args);
 
         if (ret < 0) {
             int err = errno; // Capture immediately
@@ -595,7 +595,7 @@ class BacklightBackendAllwinner : public BacklightBackend {
 
         available_ = true;
         int raw = (ret > 0) ? ret : static_cast<int>(args[1]);
-        spdlog::info("[Backlight-Allwinner] Found {} (raw brightness: {}{})", DISP_DEVICE, raw,
+        spdlog::info("[Backlight-Allwinner] Found {} (raw brightness: {}{})", kDispDevice, raw,
                      use_enable_ioctl_ ? "" : ", enable ioctl disabled");
     }
 
@@ -659,9 +659,9 @@ class BacklightBackendBrightnessCli : public BacklightBackend {
 
     // True when the Sonic Pad `brightness` helper is installed.
     static bool binary_present() {
-        static const char* PATHS[] = {"/usr/bin/brightness", "/bin/brightness",
-                                      "/usr/sbin/brightness", "/sbin/brightness"};
-        for (const char* p : PATHS) {
+        static const char* kPaths[] = {"/usr/bin/brightness", "/bin/brightness",
+                                       "/usr/sbin/brightness", "/sbin/brightness"};
+        for (const char* p : kPaths) {
             if (access(p, X_OK) == 0) {
                 return true;
             }

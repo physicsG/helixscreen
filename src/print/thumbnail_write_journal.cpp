@@ -11,12 +11,12 @@ namespace helix {
 
 void ThumbnailWriteJournal::note_write(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (pending_.size() >= MAX_PENDING) {
+    if (pending_.size() >= kMaxPending) {
         // Latch rather than log per write: an unread journal overflows once and
         // then keeps overflowing, and the reader's rescan is what clears it.
         if (!overflowed_) {
             spdlog::debug("[ThumbnailWriteJournal] {} unread writes, falling back to rescan",
-                          MAX_PENDING);
+                          kMaxPending);
         }
         overflowed_ = true;
         return;

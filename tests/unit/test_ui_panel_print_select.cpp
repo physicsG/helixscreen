@@ -808,6 +808,28 @@ TEST_CASE("Print Select: Metadata path construction", "[ui][metadata]") {
     }
 }
 
+TEST_CASE("gcode_dir_of and get_filename_basename undo join_gcode_path", "[ui][metadata]") {
+    using helix::gcode_dir_of;
+    using helix::gcode::get_filename_basename;
+    using helix::gcode::join_gcode_path;
+
+    SECTION("A bare filename sits in the root") {
+        CHECK(gcode_dir_of("benchy.gcode").empty());
+        CHECK(get_filename_basename("benchy.gcode") == "benchy.gcode");
+    }
+    SECTION("A nested path splits at its last slash") {
+        const std::string path = "projects/voron/toolhead.gcode";
+        CHECK(gcode_dir_of(path) == "projects/voron");
+        CHECK(get_filename_basename(path) == "toolhead.gcode");
+        CHECK(join_gcode_path(gcode_dir_of(path), get_filename_basename(path)) == path);
+    }
+    SECTION("A backslash is part of a name, for both halves") {
+        const std::string path = "dir/odd\\name.gcode";
+        CHECK(gcode_dir_of(path) == "dir");
+        CHECK(get_filename_basename(path) == "odd\\name.gcode");
+    }
+}
+
 TEST_CASE("thumbnail_subject_value never publishes an empty buffer",
           "[ui][print_select][thumbnail]") {
     // LVGL's lv_image_src_get_type classifies a buffer whose first byte is < 0x20
@@ -835,7 +857,7 @@ TEST_CASE("thumbnail_subject_value never publishes an empty buffer",
 //
 // The rule used to walk column counts downward and take the first that fit,
 // which always maximized columns and so always produced the narrowest legal
-// card. choose_card_columns() keeps the count landing nearest CARD_WIDTH_TARGET.
+// card. choose_card_columns() keeps the count landing nearest kCardWidthTarget.
 // ============================================================================
 
 TEST_CASE("choose_card_columns prefers the designed card width", "[print_select][layout]") {
@@ -848,8 +870,8 @@ TEST_CASE("choose_card_columns prefers the designed card width", "[print_select]
         // 5 columns still *fits* the bounds — the old rule took it precisely because
         // it fit. Pin that we now reject it.
         int five_wide = card_width_for_columns(704, 11, 5);
-        REQUIRE(five_wide >= CARD_WIDTH_MIN);
-        REQUIRE(five_wide <= CARD_WIDTH_MAX);
+        REQUIRE(five_wide >= kCardWidthMin);
+        REQUIRE(five_wide <= kCardWidthMax);
         REQUIRE(cols != 5);
     }
 
@@ -867,17 +889,17 @@ TEST_CASE("choose_card_columns prefers the designed card width", "[print_select]
             }
 
             int chosen = card_width_for_columns(width, 11, cols);
-            int chosen_distance = std::abs(chosen - CARD_WIDTH_TARGET);
+            int chosen_distance = std::abs(chosen - kCardWidthTarget);
 
             for (int other = 1; other <= 10; other++) {
                 int other_width = card_width_for_columns(width, 11, other);
-                if (other_width < CARD_WIDTH_MIN || other_width > CARD_WIDTH_MAX) {
+                if (other_width < kCardWidthMin || other_width > kCardWidthMax) {
                     continue;
                 }
                 INFO("container " << width << ": chose " << cols << " cols (" << chosen
                                   << "px), alternative " << other << " cols (" << other_width
                                   << "px)");
-                REQUIRE(chosen_distance <= std::abs(other_width - CARD_WIDTH_TARGET));
+                REQUIRE(chosen_distance <= std::abs(other_width - kCardWidthTarget));
             }
         }
     }
@@ -890,8 +912,8 @@ TEST_CASE("choose_card_columns prefers the designed card width", "[print_select]
             }
             int card = card_width_for_columns(width, 11, cols);
             INFO("container " << width << " -> " << cols << " cols, " << card << "px");
-            REQUIRE(card >= CARD_WIDTH_MIN);
-            REQUIRE(card <= CARD_WIDTH_MAX);
+            REQUIRE(card >= kCardWidthMin);
+            REQUIRE(card <= kCardWidthMax);
         }
     }
 
@@ -905,9 +927,9 @@ TEST_CASE("choose_card_columns prefers the designed card width", "[print_select]
             }
             int chosen = card_width_for_columns(width, 0, cols);
             int wider = card_width_for_columns(width, 0, cols - 1);
-            if (wider >= CARD_WIDTH_MIN && wider <= CARD_WIDTH_MAX) {
+            if (wider >= kCardWidthMin && wider <= kCardWidthMax) {
                 INFO("container " << width << ": " << cols << " cols");
-                REQUIRE(std::abs(chosen - CARD_WIDTH_TARGET) < std::abs(wider - CARD_WIDTH_TARGET));
+                REQUIRE(std::abs(chosen - kCardWidthTarget) < std::abs(wider - kCardWidthTarget));
             }
         }
     }

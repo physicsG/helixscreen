@@ -97,8 +97,10 @@ void ui_ams_slot_set_layout_info(lv_obj_t* obj, int slot_index, int total_count)
  * @param obj           The ams_slot widget
  * @param labels_layer  Target container for label/leader (should be above slots in z-order)
  * @param slot_center_x X position of slot center in labels_layer coords
+ * @param max_width     Label width in px, centered on the slot; 0 keeps its own
  */
-void ui_ams_slot_move_label_to_layer(lv_obj_t* obj, lv_obj_t* labels_layer, int32_t slot_center_x);
+void ui_ams_slot_move_label_to_layer(lv_obj_t* obj, lv_obj_t* labels_layer, int32_t slot_center_x,
+                                     int32_t max_width);
 
 /**
  * @brief Move status badge to an external container for z-ordering
@@ -133,6 +135,13 @@ void ui_ams_slot_set_lane_humidity_visible(lv_obj_t* obj, bool visible);
 // NAMESPACE_OK: the widget's C API, beside its siblings
 lv_obj_t* ui_ams_slot_get_lane_humidity(lv_obj_t* obj);
 
+/// The slot's lane-number badge, wherever it is parented, or nullptr.
+// NAMESPACE_OK: the widget's C API, beside its siblings
+lv_obj_t* ui_ams_slot_get_status_badge(lv_obj_t* obj);
+
+/// Reparents the slot's badge onto @p badge_layer at its spool corner, held
+/// inside the layer's laid-out width. Call lv_obj_update_layout() on the layer
+/// first; a layer with no width yet leaves the badge at the corner.
 void ui_ams_slot_move_badge_to_layer(lv_obj_t* obj, lv_obj_t* badge_layer, int32_t slot_center_x);
 
 /**

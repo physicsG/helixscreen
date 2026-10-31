@@ -13,12 +13,17 @@ setup() {
     # Source modules (reset source guards so each test gets a fresh load).
     # platform.sh provides helix_self_update_asset(), which write_release_info()
     # calls to resolve the Moonraker self-update asset name.
-    unset _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _HELIX_MOONRAKER_SOURCED _HELIX_PLATFORM_SOURCED
+    unset _HELIX_COMMON_SOURCED _HELIX_HOST_PROFILE_SOURCED _HELIX_MOONRAKER_SOURCED _HELIX_PLATFORM_SOURCED _HELIX_RELEASE_SOURCED
     . "$WORKTREE_ROOT/scripts/lib/installer/common.sh" 2>/dev/null || true
     # host_profile.sh: the mod-ownership guard add_update_manager_section calls
     . "$WORKTREE_ROOT/scripts/lib/installer/host_profile.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/platform.sh"
+    # helix_print_conf.sh: helix_rewrite_conf, which every conf edit goes through
+    unset _HELIX_PRINT_CONF_SOURCED
+    . "$WORKTREE_ROOT/scripts/lib/installer/helix_print_conf.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/moonraker.sh"
+    # release.sh: _has_real_curl, which moonraker_request calls
+    . "$WORKTREE_ROOT/scripts/lib/installer/release.sh"
 
     # Set required globals
     export INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen"
@@ -269,9 +274,36 @@ NET_DEPLOY_NO_ASSET='class NetDeploy(AppDeploy):
     [ "$output" = "supported" ]
 }
 
+@test "find_moonraker_update_manager_dir: finds Moonraker running in a Forge-X chroot" {
+    # The running process names /root/moonraker-env/... inside its own root,
+    # which is /data/.mod/.forge-x from here.
+    local root="$BATS_TEST_TMPDIR/fx"
+    local chroot="$root/data/.mod/.forge-x"
+    mkdir -p "$chroot/root/moonraker-env/moonraker/components/update_manager" "$root/proc/1925"
+    : > "$chroot/root/moonraker-env/moonraker/moonraker.py"
+    printf '%s\0' /root/moonraker-env/bin/python3 /root/moonraker-env/moonraker/moonraker.py \
+        -d /root/printer_data > "$root/proc/1925/cmdline"
+    ln -s "$chroot" "$root/proc/1925/root"
+    # A process merely naming the script, as a grep for it would.
+    mkdir -p "$root/proc/77"
+    printf '%s\0' grep moonraker.py > "$root/proc/77/cmdline"
+    export HELIX_PROC_ROOT="$root/proc"
+    MOONRAKER_SRC_PATHS="/nonexistent/moonraker"
+
+    run find_moonraker_update_manager_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$chroot/root/moonraker-env/moonraker/components/update_manager" ]
+
+    touch "$chroot/root/moonraker-env/moonraker/components/helix_print.py"
+    run find_helix_print_plugin
+    [ "$output" = "$chroot/root/moonraker-env/moonraker/components/helix_print.py" ]
+}
+
 @test "find_moonraker_update_manager_dir: nothing found echoes empty string" {
     MOONRAKER_SRC_PATHS="/nonexistent/moonraker"
     KLIPPER_HOME="$BATS_TEST_TMPDIR/nonexistent"
+    export HELIX_PROC_ROOT="$BATS_TEST_TMPDIR/proc-empty"
+    mkdir -p "$HELIX_PROC_ROOT"
 
     run find_moonraker_update_manager_dir
     [ "$status" -eq 0 ]
@@ -369,6 +401,60 @@ NET_DEPLOY_NO_ASSET='class NetDeploy(AppDeploy):
     # Everything else survives.
     grep -q '^\[server\]' "$conf"
     grep -q '^\[update_manager mainsail\]' "$conf"
+}
+
+# A Creality K2: procd starts Moonraker with -c /usr/share/moonraker/moonraker.conf,
+# and printer_data/config under KLIPPER_HOME=/mnt/UDISK holds no moonraker.conf.
+# Sets K2_CONF to the conf Moonraker loads.
+setup_k2_moonraker() {
+    local root="$BATS_TEST_TMPDIR/k2"
+    K2_CONF="$root/usr/share/moonraker/moonraker.conf"
+    create_moonraker_conf "$K2_CONF"
+    mkdir -p "$root/mnt/UDISK/printer_data/config" "$root/proc/28594"
+    printf '%s\0' /usr/share/moonraker-env/bin/python /usr/share/moonraker/moonraker.py \
+        -c "$K2_CONF" -l "$root/mnt/UDISK/printer_data/logs/moonraker.log" \
+        > "$root/proc/28594/cmdline"
+    export HELIX_PROC_ROOT="$root/proc"
+    KLIPPER_HOME="$root/mnt/UDISK"
+    MOONRAKER_CONF_PATHS="/nonexistent/moonraker.conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    mock_command_script "systemctl" 'exit 0'
+}
+
+@test "configure_moonraker_updates: K2 writes the stanza into the conf Moonraker's -c loads" {
+    setup_k2_moonraker
+    fake_moonraker_src "net_deploy.py" "$NET_DEPLOY_MODERN" package >/dev/null
+
+    configure_moonraker_updates "k2"
+
+    grep -q '^\[update_manager helixscreen\]' "$K2_CONF"
+    grep -q '^\[server\]' "$K2_CONF"
+}
+
+@test "configure_moonraker_updates: stock K2 Moonraker finds the loaded conf, then the gate warns" {
+    setup_k2_moonraker
+    # The K2's stock Moonraker: zip_deploy.py with no asset_name, no net_deploy.py.
+    fake_moonraker_src "zip_deploy.py" "class ZipDeploy(AppDeploy): pass" package >/dev/null
+
+    configure_moonraker_updates "k2" >"$BATS_TEST_TMPDIR/gate.log" 2>&1
+
+    grep -qF "Using moonraker.conf at: $K2_CONF" "$BATS_TEST_TMPDIR/gate.log"
+    refute_grep 'Could not find moonraker.conf' "$BATS_TEST_TMPDIR/gate.log"
+    grep -q 'predates release_info.json asset_name support' "$BATS_TEST_TMPDIR/gate.log"
+    refute_grep '^\[update_manager helixscreen\]' "$K2_CONF"
+}
+
+@test "configure_moonraker_updates: stock K2 Moonraker unloads a stanza from the conf it loads" {
+    setup_k2_moonraker
+    create_moonraker_conf_with_helix "$K2_CONF"
+    # The K2's stock Moonraker: zip_deploy.py with no asset_name, no net_deploy.py.
+    fake_moonraker_src "zip_deploy.py" "class ZipDeploy(AppDeploy): pass" package >/dev/null
+
+    configure_moonraker_updates "k2" 2>"$BATS_TEST_TMPDIR/gate.log"
+
+    refute_grep '^\[update_manager helixscreen\]' "$K2_CONF"
+    grep -q 'predates release_info.json asset_name support' "$BATS_TEST_TMPDIR/gate.log"
+    grep -q '^\[server\]' "$K2_CONF"
 }
 
 @test "configure_moonraker_updates: unsupported does not migrate an old git_repo stanza" {
@@ -610,6 +696,149 @@ NET_DEPLOY_NO_ASSET='class NetDeploy(AppDeploy):
     [ ! -e "$restarted" ]
 }
 
+# moonraker.conf that keeps the web UIs' updater stanzas in an included
+# mainsail.conf, the HelixScreen one among them. Sets INCLUDED_CONF.
+create_moonraker_conf_including_helix() {
+    local conf="$1"
+    INCLUDED_CONF="$(dirname "$conf")/mainsail.conf"
+    printf '[server]\nhost: 0.0.0.0\n\n[include mainsail.conf]\n' > "$conf"
+    printf '[update_manager helixscreen]\ntype: web\nchannel: stable\nrepo: prestonbrown/helixscreen\npath: %s\n' \
+        "$INSTALL_DIR" > "$INCLUDED_CONF"
+}
+
+@test "configure_moonraker_updates syncs the channel of a stanza moonraker.conf includes" {
+    local conf restarted="$BATS_TEST_TMPDIR/restarted"
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_including_helix "$conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    restart_moonraker() { touch "$restarted"; }
+    R2_CHANNEL=beta
+
+    configure_moonraker_updates "pi"
+
+    grep -qx 'channel: beta' "$INCLUDED_CONF"
+    # No second stanza for Moonraker to merge.
+    refute_grep '^\[update_manager helixscreen\]' "$conf"
+    [ -f "$restarted" ]
+}
+
+@test "configure_moonraker_updates finds a stanza through a glob include" {
+    local conf conf_dir
+    conf=$(setup_moonraker_home)
+    conf_dir=$(dirname "$conf")
+    mkdir -p "$conf_dir/conf.d"
+    printf '[server]\n\n[include conf.d/*.conf]\n' > "$conf"
+    printf '[update_manager helixscreen]\ntype: web\nchannel: stable\npath: %s\n' \
+        "$INSTALL_DIR" > "$conf_dir/conf.d/helix.conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    restart_moonraker() { :; }
+    R2_CHANNEL=beta
+
+    configure_moonraker_updates "pi"
+
+    grep -qx 'channel: beta' "$conf_dir/conf.d/helix.conf"
+    refute_grep '^\[update_manager helixscreen\]' "$conf"
+}
+
+@test "configure_moonraker_updates: unsupported removes a stanza moonraker.conf includes" {
+    local conf
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_including_helix "$conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    fake_moonraker_src "zip_deploy.py" "class ZipDeploy(AppDeploy): pass" >/dev/null
+    mock_command_script "systemctl" 'exit 0'
+    restart_moonraker() { :; }
+
+    configure_moonraker_updates "pi"
+
+    refute_grep '^\[update_manager helixscreen\]' "$INCLUDED_CONF"
+    grep -q '^\[include mainsail.conf\]' "$conf"
+}
+
+# moonraker.conf including a conf under a firmware mod's root, which holds a
+# stanza. Sets MOD_CONF.
+create_moonraker_conf_including_mod_stanza() {
+    local conf="$1"
+    HOST_MOD_ROOT="$BATS_TEST_TMPDIR/mod"
+    MOD_CONF="$HOST_MOD_ROOT/mod.conf"
+    mkdir -p "$HOST_MOD_ROOT"
+    printf '[server]\n\n[include %s]\n' "$MOD_CONF" > "$conf"
+    printf '[update_manager helixscreen]\ntype: web\nchannel: stable\npath: %s\n' \
+        "$INSTALL_DIR" > "$MOD_CONF"
+}
+
+@test "configure_moonraker_updates leaves a stanza in the firmware mod's files alone" {
+    local conf before
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_including_mod_stanza "$conf"
+    before=$(cat "$MOD_CONF")
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    restart_moonraker() { :; }
+    R2_CHANNEL=beta
+
+    configure_moonraker_updates "pi" 2>"$BATS_TEST_TMPDIR/out.log"
+
+    [ "$(cat "$MOD_CONF")" = "$before" ]
+    refute_grep '^\[update_manager helixscreen\]' "$conf"
+    grep -q 'which the firmware mod owns - leaving it in place' "$BATS_TEST_TMPDIR/out.log"
+}
+
+@test "configure_moonraker_updates: unsupported reports no removal of a mod-owned stanza" {
+    local conf before restarted="$BATS_TEST_TMPDIR/restarted"
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_including_mod_stanza "$conf"
+    before=$(cat "$MOD_CONF")
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    fake_moonraker_src "zip_deploy.py" "class ZipDeploy(AppDeploy): pass" >/dev/null
+    mock_command_script "systemctl" 'exit 0'
+    restart_moonraker() { touch "$restarted"; }
+
+    configure_moonraker_updates "pi" 2>"$BATS_TEST_TMPDIR/gate.log"
+
+    [ "$(cat "$MOD_CONF")" = "$before" ]
+    refute_grep 'Removing the existing' "$BATS_TEST_TMPDIR/gate.log"
+    [ ! -e "$restarted" ]
+}
+
+@test "remove_update_manager_section removes an included stanza and leaves the mod's" {
+    local conf conf_dir before
+    conf=$(setup_moonraker_home)
+    conf_dir=$(dirname "$conf")
+    create_moonraker_conf_including_mod_stanza "$conf"
+    printf '[include mainsail.conf]\n' >> "$conf"
+    printf '[update_manager helixscreen]\ntype: web\npath: %s\n' "$INSTALL_DIR" > "$conf_dir/mainsail.conf"
+    before=$(cat "$MOD_CONF")
+    MOONRAKER_CONF_PATHS="$conf"
+
+    remove_update_manager_section
+
+    refute_grep '^\[update_manager helixscreen\]' "$conf_dir/mainsail.conf"
+    [ "$(cat "$MOD_CONF")" = "$before" ]
+}
+
+@test "configure_moonraker_updates migrates an old stanza in the file moonraker.conf includes" {
+    local conf conf_dir
+    conf=$(setup_moonraker_home)
+    conf_dir=$(dirname "$conf")
+    printf '[server]\n\n[include mainsail.conf]\n' > "$conf"
+    create_moonraker_conf_with_git_repo "$conf_dir/mainsail.conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
+    restart_moonraker() { :; }
+
+    configure_moonraker_updates "pi"
+
+    [ "$(grep -c '^\[update_manager helixscreen\]' "$conf_dir/mainsail.conf")" -eq 1 ]
+    awk '/^\[update_manager helixscreen\]/{found=1; next} found && /^\[/{exit} found && /^type:/{print; exit}' \
+        "$conf_dir/mainsail.conf" | grep -qx 'type: web'
+    refute_grep '^\[update_manager helixscreen\]' "$conf"
+}
+
 # =============================================================================
 # migrate_to_web_type
 # =============================================================================
@@ -664,13 +893,37 @@ NET_DEPLOY_NO_ASSET='class NetDeploy(AppDeploy):
 # write_release_info
 # =============================================================================
 
-@test "write_release_info: already exists is a no-op" {
+@test "write_release_info: an existing file is kept when no binary reports a version" {
     echo '{"version":"v1.0.0"}' > "$INSTALL_DIR/release_info.json"
+    rm -f "$INSTALL_DIR/bin/helix-screen"
 
     run write_release_info
     [ "$status" -eq 0 ]
     # Content unchanged
     grep -q 'v1.0.0' "$INSTALL_DIR/release_info.json"
+}
+
+@test "write_release_info: an existing file naming the binary's version is a no-op" {
+    printf '{"version":"v1.2.3","asset_name":"keep-me"}' > "$INSTALL_DIR/release_info.json"
+    printf '#!/bin/sh\necho "helix-screen v1.2.3"\n' > "$INSTALL_DIR/bin/helix-screen"
+    chmod +x "$INSTALL_DIR/bin/helix-screen"
+
+    run write_release_info
+    [ "$status" -eq 0 ]
+    grep -q 'keep-me' "$INSTALL_DIR/release_info.json"
+}
+
+@test "write_release_info: a stale version is rewritten to the binary's" {
+    echo '{"project_name":"helixscreen","version":"v1.1.0-beta.1","asset_name":"helixscreen-k1.zip"}' \
+        > "$INSTALL_DIR/release_info.json"
+    printf '#!/bin/sh\necho "helix-screen v1.1.0-beta.8"\n' > "$INSTALL_DIR/bin/helix-screen"
+    chmod +x "$INSTALL_DIR/bin/helix-screen"
+    PLATFORM="pi"
+
+    write_release_info
+
+    grep -q '"v1.1.0-beta.8"' "$INSTALL_DIR/release_info.json"
+    ! grep -q 'beta.1"' "$INSTALL_DIR/release_info.json"
 }
 
 @test "write_release_info: binary not found returns 0" {
@@ -733,7 +986,7 @@ BINEOF
     MOONRAKER_CONF_PATHS="$conf"
     rm -f "$INSTALL_DIR/bin/helix-screen"
 
-    # Fixture has persistent_files — ensure_persistent_files should remove them
+    # Fixture has persistent_files — the update path should remove them
     grep -q 'persistent_files:' "$conf"
 
     configure_moonraker_updates "pi"
@@ -762,80 +1015,155 @@ BINEOF
 }
 
 # =============================================================================
-# restart_moonraker
+# restart_moonraker: the shared HTTP restart (moonraker_restart)
 # =============================================================================
 
-@test "restart_moonraker: systemctl available and moonraker active restarts" {
-    local restart_called="$BATS_TEST_TMPDIR/restart_called"
-    mock_command_script "systemctl" '
-        case "$*" in
-            *is-active*moonraker*) exit 0 ;;
-            *restart*moonraker*) touch "'"$restart_called"'"; exit 0 ;;
-            *) exit 0 ;;
-        esac
-    '
-
-    restart_moonraker
-
-    [ -f "$restart_called" ]
+# A Klipper home whose moonraker.conf serves on port $1, no Moonraker process
+# visible, Moonraker's HTTP API (mock_moonraker_http: state and request log
+# under $BATS_TEST_TMPDIR/mr), and a systemctl, sudo and service that log any
+# call to $BATS_TEST_TMPDIR/service.log.
+stage_moonraker_on_port() {
+    export KLIPPER_HOME="$BATS_TEST_TMPDIR/home"
+    mkdir -p "$KLIPPER_HOME/printer_data/config" "$BATS_TEST_TMPDIR/proc"
+    printf '[server]\nhost: 0.0.0.0\nport: %s\n' "$1" > "$KLIPPER_HOME/printer_data/config/moonraker.conf"
+    export HELIX_PROC_ROOT="$BATS_TEST_TMPDIR/proc"
+    unset MOONRAKER_URL
+    local cmd
+    for cmd in systemctl sudo service; do
+        mock_command_script "$cmd" "printf '%s %s\\n' $cmd \"\$*\" >> '$BATS_TEST_TMPDIR/service.log'; exit 1"
+    done
+    mock_moonraker_http "$BATS_TEST_TMPDIR/mr"
 }
 
-# Helper: drop a fake Moonraker init script named $1 into an overridable
-# /etc/init.d and point HELIX_INITD_DIR at it. Sets STAGED_MOONRAKER_MARKER to
-# the path the script touches when asked to restart.
-#
-# Call this directly, NOT via $(...) — a command substitution runs it in a
-# subshell, so the export would be discarded and the test would silently
-# exercise the real /etc/init.d instead.
-stage_sysv_moonraker() {
-    local name="$1"
-    local initd="$BATS_TEST_TMPDIR/etc/init.d"
-
-    STAGED_MOONRAKER_MARKER="$BATS_TEST_TMPDIR/moonraker_restarted_${name}"
-
-    mkdir -p "$initd"
-    cat > "${initd}/${name}" << MOONEOF
-#!/bin/sh
-case "\$1" in
-    restart) touch "$STAGED_MOONRAKER_MARKER" ;;
-esac
-MOONEOF
-    chmod +x "${initd}/${name}"
-    export HELIX_INITD_DIR="$initd"
+@test "installer_moonraker_url: loopback on the port moonraker.conf names" {
+    stage_moonraker_on_port 80
+    [ "$(installer_moonraker_url)" = "http://127.0.0.1:80" ]
+    MOONRAKER_URL=http://10.0.0.9:7125
+    [ "$(installer_moonraker_url)" = "http://10.0.0.9:7125" ]
 }
 
-@test "restart_moonraker: no systemctl, SysV S56 script is used (K1/Simple AF)" {
-    mock_command_script "systemctl" 'exit 1'
-    stage_sysv_moonraker "S56moonraker_service"
-
-    restart_moonraker
-
-    [ -f "$STAGED_MOONRAKER_MARKER" ]
-}
-
-@test "restart_moonraker: no systemctl, plain init.d/moonraker is used (CC1/COSMOS)" {
-    # The CC1 has no systemctl and no S56moonraker_service — its script is
-    # /etc/init.d/moonraker. Before this was handled, restart_moonraker fell off
-    # the end silently, so the installer's moonraker.conf edit did not take
-    # effect until the user happened to reboot.
-    mock_command_script "systemctl" 'exit 1'
-    stage_sysv_moonraker "moonraker"
-
-    restart_moonraker
-
-    [ -f "$STAGED_MOONRAKER_MARKER" ]
-}
-
-@test "restart_moonraker: warns and succeeds when no restart mechanism exists" {
-    mock_command_script "systemctl" 'exit 1'
-    export HELIX_INITD_DIR="$BATS_TEST_TMPDIR/etc/init.d-empty"
-    mkdir -p "$HELIX_INITD_DIR"
+@test "restart_moonraker: asks Moonraker over HTTP to restart in place, on its own port, and runs no service manager" {
+    stage_moonraker_on_port 80
+    SUDO=sudo
 
     run restart_moonraker
 
-    # Must not abort the install, and must tell the user to restart by hand
     [ "$status" -eq 0 ]
-    [[ "$output" == *"manual"* || "$output" == *"manually"* ]]
+    grep -qx 'POST http://127.0.0.1:80/server/restart' "$BATS_TEST_TMPDIR/mr/log" ||
+        fail "no in-place restart on port 80: $(cat "$BATS_TEST_TMPDIR/mr/log")"
+    [ ! -e "$BATS_TEST_TMPDIR/service.log" ] || fail "ran a service manager: $(cat "$BATS_TEST_TMPDIR/service.log")"
+    contains "Asked Moonraker to restart itself" "$output"
+    contains "Moonraker is ready" "$output"
+}
+
+@test "restart_moonraker: a Moonraker that is not running is reported, and nothing else is touched" {
+    stage_moonraker_on_port 7125
+    rm -f "$BATS_TEST_TMPDIR/mr/up"
+
+    run restart_moonraker
+
+    [ "$status" -eq 0 ] || fail "aborted the install"
+    [ "$(cat "$BATS_TEST_TMPDIR/mr/log")" = "GET http://127.0.0.1:7125/server/info" ] ||
+        fail "asked more than whether Moonraker answers: $(cat "$BATS_TEST_TMPDIR/mr/log")"
+    [ ! -e "$BATS_TEST_TMPDIR/service.log" ] || fail "ran a service manager: $(cat "$BATS_TEST_TMPDIR/service.log")"
+    contains "Moonraker is not running; start it and the change takes effect" "$output"
+}
+
+@test "restart_moonraker: with a print printing or paused, Moonraker is not asked to restart" {
+    local state
+    for state in printing paused; do
+        stage_moonraker_on_port 7125
+        : > "$BATS_TEST_TMPDIR/mr/log"
+        printf '%s' "$state" > "$BATS_TEST_TMPDIR/mr/print_state"
+
+        run restart_moonraker
+
+        [ "$status" -eq 0 ] || fail "$state: aborted the install"
+        grep -q 'print_stats' "$BATS_TEST_TMPDIR/mr/log" || fail "$state: never asked for the print state"
+        if grep -q '^POST' "$BATS_TEST_TMPDIR/mr/log"; then fail "$state: restarted Moonraker mid-print"; fi
+        contains "needs a restart after the print" "$output"
+    done
+}
+
+@test "moonraker_request: a curl impostor is never run, wget is used" {
+    # A K1's /usr/bin/curl is libhv's example client: it rejects -s and -f.
+    local curl_log="$BATS_TEST_TMPDIR/curl.log" log="$BATS_TEST_TMPDIR/wget.log"
+    mock_command_script "curl" "printf '%s\\n' \"\$*\" >> '$curl_log'; case \"\$1\" in --version) echo 'curl version 1.0.0';; esac; exit 0"
+    mock_command_script "wget" "printf '%s\\n' \"\$*\" >> '$log'; exit 0"
+
+    moonraker_request POST http://127.0.0.1:7125/server/restart 5
+
+    [ "$HTTP_STATUS" = 200 ]
+    grep -q -- "--post-data= http://127.0.0.1:7125/server/restart" "$log"
+    ! grep -q "server/restart" "$curl_log"
+}
+
+@test "moonraker_request: wget's error message gives the status, so a 401 answers and a refused connection does not" {
+    mock_command_script "curl" 'exit 127'
+    local msg
+    for msg in "wget: server returned error: HTTP/1.1 401 Unauthorized" \
+        "HTTP request sent, awaiting response... 401 Unauthorized" "ERROR 401: Unauthorized."; do
+        mock_command_script "wget" "echo '$msg' >&2; exit 1"
+        _REAL_CURL=""
+        moonraker_request GET http://127.0.0.1:7125/server/info 2 && fail "a 401 is not a success"
+        [ "$HTTP_STATUS" = 401 ] || fail "'$msg' read as '$HTTP_STATUS'"
+        moonraker_request POST http://127.0.0.1:7125/server/restart 5 && fail "a 401 is not a success"
+        [ "$HTTP_STATUS" = 401 ] || fail "POST: '$msg' read as '$HTTP_STATUS'"
+    done
+    mock_command_script "wget" "echo 'wget: unable to connect to remote host (127.0.0.1): Connection refused' >&2; exit 1"
+    moonraker_request GET http://127.0.0.1:7125/server/info 2 && fail "nothing answered"
+    [ -z "$HTTP_STATUS" ]
+}
+
+@test "moonraker_request: GNU wget tries once, and reads its status in the C locale whatever the host's" {
+    local log="$BATS_TEST_TMPDIR/wget.log"
+    mock_command_script "curl" 'exit 127'
+    # A German GNU wget words its status line its own way unless LC_ALL=C.
+    mock_command_script "wget" "case \"\$1\" in --version) echo 'GNU Wget 1.21.4 built on linux-gnu.'; exit 0;; esac
+printf '%s|%s\\n' \"\${LC_ALL:-}\" \"\$*\" >> '$log'
+if [ \"\${LC_ALL:-}\" = C ]; then echo 'HTTP request sent, awaiting response... 401 Unauthorized' >&2
+else echo 'HTTP-Anforderung gesendet, auf Antwort wird gewartet ... 401 Unauthorized' >&2; fi
+exit 1"
+    _REAL_CURL=""
+
+    LC_ALL=de_DE.UTF-8 LANG=de_DE.UTF-8 moonraker_request POST http://127.0.0.1:7125/server/restart 5 && fail "a 401 is not a success"
+    [ "$HTTP_STATUS" = 401 ] || fail "POST read as '$HTTP_STATUS': $(cat "$log")"
+    [ "$(grep -c . "$log")" -eq 1 ] || fail "POST ran wget more than once: $(cat "$log")"
+    : > "$log"
+    LC_ALL=de_DE.UTF-8 LANG=de_DE.UTF-8 moonraker_request GET http://127.0.0.1:7125/server/info 2 && fail "a 401 is not a success"
+    [ "$HTTP_STATUS" = 401 ] || fail "GET read as '$HTTP_STATUS': $(cat "$log")"
+    while IFS='|' read -r locale args; do
+        [ "$locale" = C ] || fail "wget ran in locale '$locale'"
+        case " $args " in *" --tries=1 "*) ;; *) fail "GNU wget may retry: $args" ;; esac
+    done < "$log"
+}
+
+@test "moonraker_request: a wget GET that used its whole timeout is not run again for a status" {
+    local log="$BATS_TEST_TMPDIR/wget.log"
+    mock_command_script "curl" 'exit 127'
+    mock_fake_clock
+    # Each run stands in for one that waited its full -T and heard nothing.
+    mock_command_script "wget" "[ \"\$1\" != --version ] || exit 1; echo x >> '$log'; echo \$((\$(cat '$BATS_TEST_TMPDIR/clock') + 5)) > '$BATS_TEST_TMPDIR/clock'; exit 4"
+    _REAL_CURL=""
+
+    moonraker_request GET http://127.0.0.1:7125/server/info 5 && fail "nothing answered"
+    [ -z "$HTTP_STATUS" ] || fail "status '$HTTP_STATUS'"
+    [ "$(grep -c . "$log")" -eq 1 ] || fail "ran wget $(grep -c . "$log") times"
+}
+
+@test "moonraker_request: BusyBox wget, which may reject --tries, is never given it" {
+    local log="$BATS_TEST_TMPDIR/wget.log"
+    mock_command_script "curl" 'exit 127'
+    mock_command_script "wget" "for a; do case \"\$a\" in --version | --tries* | -t) echo \"wget: unrecognized option '\$a'\" >&2; exit 1;; esac; done
+printf '%s\\n' \"\$*\" >> '$log'
+case \"\$*\" in *-O\\ -*) printf '{\"result\":{}}';; esac
+exit 0"
+    _REAL_CURL=""
+
+    moonraker_request POST http://127.0.0.1:7125/server/restart 5 || fail "POST: '$HTTP_STATUS'"
+    moonraker_request GET http://127.0.0.1:7125/server/info 2 || fail "GET: '$HTTP_STATUS'"
+    [ "$HTTP_BODY" = '{"result":{}}' ] || fail "body '$HTTP_BODY'"
+    [ "$(grep -c . "$log")" -eq 2 ] || fail "$(cat "$log")"
 }
 
 # =============================================================================
@@ -864,6 +1192,41 @@ MOONEOF
     # Other sections still present
     grep -q '^\[server\]' "$conf"
     grep -q '^\[update_manager mainsail\]' "$conf"
+}
+
+@test "remove_update_manager_section: an awk cut short by a full disk leaves moonraker.conf whole" {
+    local conf real
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_with_helix "$conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    cp "$conf" "$BATS_TEST_TMPDIR/conf.before"
+    # BusyBox awk exits 0 when its write to a full disk fails; output into a
+    # pipe comes through whole.
+    real=$(command -v awk)
+    mock_command_script "awk" "case \"\$*\" in *'update_manager helixscreen'*)
+    if [ -f /dev/stdout ]; then $real \"\$@\" | head -c 30; exit 0; fi ;; esac
+exec $real \"\$@\""
+
+    remove_update_manager_section 2>/dev/null || true
+
+    cmp -s "$BATS_TEST_TMPDIR/conf.before" "$conf" || fail "moonraker.conf replaced: $(cat "$conf")"
+    [ -z "$(find "$(dirname "$conf")" -name 'moonraker.conf.helixtmp*')" ] || fail "staging file left"
+}
+
+@test "migrate_to_web_type: a failed removal adds no second helixscreen section" {
+    local conf real
+    conf=$(setup_moonraker_home)
+    create_moonraker_conf_with_helix "$conf"
+    MOONRAKER_CONF_PATHS="$conf"
+    real=$(command -v awk)
+    mock_command_script "awk" "case \"\$*\" in *'update_manager helixscreen'*)
+    if [ -f /dev/stdout ]; then $real \"\$@\" | head -c 30; exit 0; fi ;; esac
+exec $real \"\$@\""
+
+    run migrate_to_web_type "$conf"
+
+    [ "$status" -eq 1 ]
+    [ "$(grep -c '^\[update_manager helixscreen\]' "$conf")" -eq 1 ] || fail "sections: $(cat "$conf")"
 }
 
 @test "remove_update_manager_section: only helixscreen removed, others preserved" {
@@ -1599,4 +1962,110 @@ CONF
 
     # No persistent_files to remove, so content should be unchanged
     [ "$(cat "$conf")" = "$original_content" ]
+}
+
+# =============================================================================
+# open_plugin_to_moonraker
+# =============================================================================
+
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+
+# INSTALL_DIR under a 0700 parent the installer did not make, everything in it
+# as umask 077 leaves it, and a Moonraker running with uid $1.
+stage_private_install() {
+    local uid="$1"
+    export INSTALL_DIR="$BATS_TEST_TMPDIR/userdata/helixscreen"
+    local plugin="$INSTALL_DIR/moonraker-plugin"
+    mkdir -p "$plugin/tests" "$INSTALL_DIR/config"
+    : > "$plugin/helix_print.py"
+    : > "$plugin/tests/test_x.py"
+    printf '#!/bin/sh\n' > "$plugin/install.sh"
+    : > "$INSTALL_DIR/config/settings.json"
+    chmod 0600 "$plugin/helix_print.py" "$plugin/tests/test_x.py" "$INSTALL_DIR/config/settings.json"
+    chmod 0700 "$plugin/install.sh" "$plugin/tests" "$plugin" "$INSTALL_DIR/config" "$INSTALL_DIR" \
+        "$BATS_TEST_TMPDIR/userdata"
+    export HELIX_PROC_ROOT="$BATS_TEST_TMPDIR/proc"
+    mkdir -p "$HELIX_PROC_ROOT/700"
+    printf '%s\0' python3 /home/lava/moonraker/moonraker/moonraker.py > "$HELIX_PROC_ROOT/700/cmdline"
+    printf 'Name:\tpython3\nUid:\t%s\t%s\t%s\t%s\n' "$uid" "$uid" "$uid" "$uid" > "$HELIX_PROC_ROOT/700/status"
+}
+
+@test "open_plugin_to_moonraker: opens INSTALL_DIR and the plugin to a Moonraker running as another user" {
+    stage_private_install 4242
+
+    run open_plugin_to_moonraker
+    [ "$status" -eq 0 ]
+
+    local plugin="$INSTALL_DIR/moonraker-plugin"
+    [ "$(mode_of "$INSTALL_DIR")" = 711 ] || fail "INSTALL_DIR $(mode_of "$INSTALL_DIR")"
+    [ "$(mode_of "$plugin")" = 755 ] || fail "plugin dir $(mode_of "$plugin")"
+    [ "$(mode_of "$plugin/tests")" = 755 ] || fail "plugin subdir $(mode_of "$plugin/tests")"
+    [ "$(mode_of "$plugin/helix_print.py")" = 644 ] || fail "helix_print.py $(mode_of "$plugin/helix_print.py")"
+    [ "$(mode_of "$plugin/tests/test_x.py")" = 644 ] || fail "test_x.py $(mode_of "$plugin/tests/test_x.py")"
+    [ "$(mode_of "$plugin/install.sh")" = 755 ] || fail "install.sh $(mode_of "$plugin/install.sh")"
+    # Nothing outside the plugin and nothing above INSTALL_DIR.
+    [ "$(mode_of "$BATS_TEST_TMPDIR/userdata")" = 700 ] || fail "touched the parent"
+    [ "$(mode_of "$INSTALL_DIR/config")" = 700 ] || fail "touched config/"
+    [ "$(mode_of "$INSTALL_DIR/config/settings.json")" = 600 ] || fail "touched settings.json"
+}
+
+@test "open_plugin_to_moonraker: reads the Moonraker python process, past one that only mentions moonraker.py" {
+    stage_private_install 4242
+    mkdir -p "$HELIX_PROC_ROOT/100"
+    printf '%s\0' /usr/bin/vi /home/lava/moonraker/moonraker/moonraker.py > "$HELIX_PROC_ROOT/100/cmdline"
+    printf 'Name:\tvi\nUid:\t0\t0\t0\t0\n' > "$HELIX_PROC_ROOT/100/status"
+
+    run open_plugin_to_moonraker
+    [ "$status" -eq 0 ]
+    [ "$(mode_of "$INSTALL_DIR")" = 711 ] || fail "took the editor (root) for Moonraker"
+}
+
+@test "open_plugin_to_moonraker: leaves the tree alone when Moonraker owns it, runs as root, is not running, or the root is a mod payload" {
+    local uid
+    for uid in "$(id -u)" 0 none payload; do
+        rm -rf "$BATS_TEST_TMPDIR/userdata" "$BATS_TEST_TMPDIR/proc"
+        stage_private_install "${uid%%[!0-9]*}"
+        [ "$uid" != none ] || rm -rf "$HELIX_PROC_ROOT/700"
+        if [ "$uid" = payload ]; then
+            printf 'Name:\tpython3\nUid:\t4242\t4242\t4242\t4242\n' > "$HELIX_PROC_ROOT/700/status"
+            export HELIX_MOD_PAYLOAD=1
+        fi
+        run open_plugin_to_moonraker
+        unset HELIX_MOD_PAYLOAD
+        [ "$status" -eq 0 ]
+        [ "$(mode_of "$INSTALL_DIR")" = 700 ] || fail "$uid: INSTALL_DIR opened"
+        [ "$(mode_of "$INSTALL_DIR/moonraker-plugin/helix_print.py")" = 600 ] || fail "$uid: plugin opened"
+    done
+}
+
+@test "the install path opens the plugin to Moonraker right after it sets the tree's owner" {
+    run grep -A1 '^    fix_install_ownership$' "$WORKTREE_ROOT/scripts/lib/installer/main.sh"
+    contains "open_plugin_to_moonraker" "$output"
+}
+
+@test "open_plugin_to_moonraker: INSTALL_DIR gets search only, and a world-readable settings.json stays out of other users' reach" {
+    stage_private_install 4242
+    # The archive's config/ (0755) and a settings.json the app wrote under umask 022.
+    chmod 0755 "$INSTALL_DIR/config"
+    chmod 0644 "$INSTALL_DIR/config/settings.json"
+
+    run open_plugin_to_moonraker
+    [ "$status" -eq 0 ]
+
+    [ "$(mode_of "$INSTALL_DIR")" = 711 ] || fail "INSTALL_DIR $(mode_of "$INSTALL_DIR"): other users can list it"
+    [ "$(mode_of "$INSTALL_DIR/config")" = 700 ] ||
+        fail "config/ $(mode_of "$INSTALL_DIR/config"): other users reach settings.json by name"
+    [ "$(mode_of "$INSTALL_DIR/moonraker-plugin/helix_print.py")" = 644 ] || fail "the plugin was not opened"
+}
+
+@test "open_plugin_to_moonraker: a config/ that links into printer_data is left alone" {
+    stage_private_install 4242
+    mkdir -p "$BATS_TEST_TMPDIR/printer_data/config/helixscreen"
+    chmod 0755 "$BATS_TEST_TMPDIR/printer_data/config/helixscreen"
+    rm -rf "$INSTALL_DIR/config"
+    ln -s "$BATS_TEST_TMPDIR/printer_data/config/helixscreen" "$INSTALL_DIR/config"
+
+    run open_plugin_to_moonraker
+    [ "$status" -eq 0 ]
+    [ "$(mode_of "$BATS_TEST_TMPDIR/printer_data/config/helixscreen")" = 755 ] || fail "chmodded printer_data through the link"
 }

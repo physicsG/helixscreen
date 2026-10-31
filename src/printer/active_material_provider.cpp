@@ -63,7 +63,7 @@ ActiveMaterial build_active_material(const SlotInfo& slot) {
         }
     } else {
         // Unknown material — build synthetic MaterialInfo from slot temps or defaults
-        int fallback_temp = AppConstants::Ams::DEFAULT_LOAD_PREHEAT_TEMP;
+        int fallback_temp = app_constants::ams::kDefaultLoadPreheatTemp;
         result.material_info = filament::MaterialInfo{
             .name = "",
             .nozzle_min = slot.nozzle_temp_min > 0 ? slot.nozzle_temp_min : fallback_temp,

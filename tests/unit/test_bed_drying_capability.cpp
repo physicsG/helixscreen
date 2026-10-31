@@ -24,6 +24,9 @@ TEST_CASE("the printer database marks factory-enclosed printers", "[bed_drying][
     CHECK(PrinterDetector::is_enclosed("Creality K1"));
     CHECK(PrinterDetector::is_enclosed("Snapmaker U1"));
     CHECK(PrinterDetector::is_enclosed("Voron 2.4"));
+    CHECK(PrinterDetector::is_enclosed("FLSUN S1 / S1 Pro"));
+    CHECK(PrinterDetector::is_enclosed("FLSUN T1 Pro"));
+    CHECK_FALSE(PrinterDetector::is_enclosed("FLSUN V400"));
     CHECK_FALSE(PrinterDetector::is_enclosed("Creality Ender 3"));
     CHECK_FALSE(PrinterDetector::is_enclosed("FlashForge Adventurer 5X"));
     CHECK_FALSE(PrinterDetector::is_enclosed(""));

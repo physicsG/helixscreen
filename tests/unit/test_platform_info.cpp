@@ -1,16 +1,16 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Tests for helix::ad5x_mod_layout_present — the AD5X mod-tree
-// recognition predicate (ZMOD markers or a reachable Forge-X mod tree) that
-// gates the log collector's mod_data paths and drives update_checker's mips
-// K1/AD5X runtime split. Pinned to the SAME truth table as the launcher's
+// Tests for helix::flashforge_mod_tree — the FlashForge mod-tree
+// recognition probe (ZMOD markers or a reachable Forge-X mod tree) that
+// gates the log collector's mod_data paths and, with the machine id, tells the
+// boards sharing the unified MIPS build apart. Pinned to the SAME truth table as the launcher's
 // heap-diag gate (tests/shell/test_helix_launcher_env.bats, "heap diag:"
 // cases): a Forge-X chroot carries none of the ZMOD markers, so the reachable
 // mod git tree (.shell/platform.sh) is the recognition evidence there.
 
 #include "platform_info.h"
-#include "test_helpers/ad5x_layout_fixture.h"
+#include "test_helpers/flashforge_layout_fixture.h"
 #include "test_helpers/unique_temp_dir.h"
 
 #include <cstdlib>
@@ -38,46 +38,37 @@ struct TempDirGuard {
 
 } // namespace
 
-TEST_CASE("helix::ad5x_mod_layout_present detects ZMOD by marker file", "[platform_info]") {
+TEST_CASE("flashforge_mod_tree names each layout", "[platform_info]") {
+    using helix::FlashForgeModTree;
+    using helix::test::make_flashforge_layout;
     TempDirGuard tmp;
-    REQUIRE(helix::ad5x_mod_layout_present(
-        helix::test::make_ad5x_layout(tmp.path, "zmod-marker").string()));
+    // The rig's chroot binds /usr/data at /opt, so the Forge-X mod tree is reachable
+    // under exactly one of the two spellings depending on which side of the chroot
+    // the process runs. Both must count.
+    CHECK(helix::flashforge_mod_tree(make_flashforge_layout(tmp.path, "zmod-marker").string()) ==
+          FlashForgeModTree::Zmod);
+    CHECK(helix::flashforge_mod_tree(make_flashforge_layout(tmp.path, "zmod-prog").string()) ==
+          FlashForgeModTree::Zmod);
+    CHECK(helix::flashforge_mod_tree(make_flashforge_layout(tmp.path, "forgex").string()) ==
+          FlashForgeModTree::ForgeX);
+    CHECK(helix::flashforge_mod_tree(make_flashforge_layout(tmp.path, "forgex-host").string()) ==
+          FlashForgeModTree::ForgeX);
+    CHECK(helix::flashforge_mod_tree(make_flashforge_layout(tmp.path, "plain").string()) ==
+          FlashForgeModTree::None);
+
+    CHECK(std::string(helix::flashforge_mod_tree_name(FlashForgeModTree::None)) == "none");
+    CHECK(std::string(helix::flashforge_mod_tree_name(FlashForgeModTree::Zmod)) == "ZMOD");
+    CHECK(std::string(helix::flashforge_mod_tree_name(FlashForgeModTree::ForgeX)) == "Forge-X");
 }
 
-TEST_CASE("helix::ad5x_mod_layout_present detects ZMOD by FlashForge /usr/prog dir",
-          "[platform_info]") {
-    TempDirGuard tmp;
-    REQUIRE(helix::ad5x_mod_layout_present(
-        helix::test::make_ad5x_layout(tmp.path, "zmod-prog").string()));
-}
-
-TEST_CASE("helix::ad5x_mod_layout_present detects a Forge-X chroot via the mod tree",
-          "[platform_info]") {
-    TempDirGuard tmp;
-    // The rig's chroot binds /usr/data at /opt, so the mod tree is reachable
-    // under exactly one of the two spellings depending on which side of the
-    // chroot the process runs. Both must count.
-    REQUIRE(
-        helix::ad5x_mod_layout_present(helix::test::make_ad5x_layout(tmp.path, "forgex").string()));
-    REQUIRE(helix::ad5x_mod_layout_present(
-        helix::test::make_ad5x_layout(tmp.path, "forgex-host").string()));
-}
-
-TEST_CASE("helix::ad5x_mod_layout_present rejects a plain host", "[platform_info]") {
-    TempDirGuard tmp;
-    REQUIRE_FALSE(
-        helix::ad5x_mod_layout_present(helix::test::make_ad5x_layout(tmp.path, "plain").string()));
-}
-
-TEST_CASE("helix::ad5x_mod_layout_present requires the marker kinds, not just names",
-          "[platform_info]") {
-    // /ZMOD as a DIRECTORY is not the Z-Mod marker file. The predicate checks
+TEST_CASE("flashforge_mod_tree requires the marker kinds, not just names", "[platform_info]") {
+    // /ZMOD as a DIRECTORY is not the Z-Mod marker file. The probe checks
     // S_ISREG here and the launcher uses `-f` — the two must stay in step or
-    // a stray directory arms AD5X handling on the wrong host.
+    // a stray directory arms FlashForge handling on the wrong host.
     TempDirGuard tmp;
     auto root = tmp.path / "zmod-dir";
     fs::create_directories(root / "ZMOD");
-    REQUIRE_FALSE(helix::ad5x_mod_layout_present(root.string()));
+    REQUIRE(helix::flashforge_mod_tree(root.string()) == helix::FlashForgeModTree::None);
 }
 
 namespace {
@@ -144,7 +135,12 @@ TEST_CASE("helix::flashforge_machine_display_name matches the printer DB spellin
           "FlashForge Adventurer 5X");
     CHECK(std::string(helix::flashforge_machine_display_name(helix::FlashForgeMachine::Creator5)) ==
           "FlashForge Creator 5");
-    CHECK(std::string(
-              helix::flashforge_machine_display_name(helix::FlashForgeMachine::Creator5Pro)) ==
-          "FlashForge Creator 5 Pro");
+    CHECK(std::string(helix::flashforge_machine_display_name(
+              helix::FlashForgeMachine::Creator5Pro)) == "FlashForge Creator 5 Pro");
+}
+TEST_CASE("make_flashforge_layout writes the machine id", "[platform_info][machine-id]") {
+    TempDirGuard tmp;
+    CHECK(helix::flashforge_machine_id(
+              helix::test::make_flashforge_layout(tmp.path, "zmod-prog", "Creator5Pro").string()) ==
+          helix::FlashForgeMachine::Creator5Pro);
 }

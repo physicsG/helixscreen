@@ -3,18 +3,17 @@
 
 /**
  * @file test_print_stats_widget_lifetime_totals.cpp
- * @brief The "Lifetime Print Stats" widget must report the SERVER's totals,
- *        not the sum of the capped local job cache (#1272).
+ * @brief The print stats tile's lifetime line reports the SERVER's totals, not the sum
+ *        of the capped local job cache (#1272), and the tile asks the history cache to
+ *        cover this week's bars.
  *
  * A COMPLETE load pulls at most PrintHistoryManager::kCompleteJobLimit jobs.
- * Summing that cache silently truncates every printer with a longer history —
- * the reporter saw 500 prints / 209h next to Mainsail's 764.
+ * Summing that cache silently truncates every printer with a longer history: the
+ * reporter saw 500 prints / 209h next to Mainsail's 764.
  *
  * The cap is reproduced here in miniature: a whole-list load that came back
  * exactly full at three jobs, against a mock whose history holds more, so the
- * cache sum and the server totals disagree the way they do at 500. Weekly mode
- * has no server-side equivalent (`server.history.totals` is lifetime-only) and
- * must keep using the filtered cache.
+ * cache sum and the server totals disagree the way they do at 500.
  */
 
 #include "../../include/app_globals.h"
@@ -24,10 +23,12 @@
 #include "../../include/print_history_data.h"
 #include "../../include/print_history_manager.h"
 #include "../../include/printer_state.h"
-#include "../lvgl_test_fixture.h"
+#include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/history_call_counting_api.h"
+#include "../test_helpers/panel_widget_size_harness.h"
 #include "../test_helpers/planted_gcode.h"
 #include "../test_helpers/print_history_manager_test_access.h"
+#include "print_activity.h"
 #include "src/ui/panel_widgets/print_stats_widget.h"
 
 #include <atomic>
@@ -48,26 +49,20 @@ const char* subject_text(const char* name) {
     return lv_subject_get_string(subject);
 }
 
-/// Display rule the widget uses for a duration, restated independently here so
-/// the expectation is not read back out of the implementation.
-std::string format_hours(uint64_t seconds) {
-    char buf[24];
-    unsigned long hours = static_cast<unsigned long>(seconds / 3600);
-    unsigned long mins = static_cast<unsigned long>((seconds % 3600) / 60);
-    if (hours >= 100) {
-        std::snprintf(buf, sizeof(buf), "%luh", hours);
-    } else {
-        std::snprintf(buf, sizeof(buf), "%luh %lum", hours, mins);
-    }
-    return buf;
+/// A box that holds the Wide rung, where the full lifetime line is drawn.
+constexpr int kWideW = 236;
+constexpr int kWideH = 95;
+
+/// The lifetime line the tile composes for @p totals at Wide and up.
+std::string lifetime_line(const PrintHistoryTotals& totals) {
+    return format_lifetime_line(totals, true);
 }
 
-class PrintStatsLifetimeFixture : public LVGLTestFixture {
+class PrintStatsLifetimeFixture : public LVGLUITestFixture {
   public:
     PrintStatsLifetimeFixture() : client_(MoonrakerClientMock::PrinterType::VORON_24, 1000.0) {
-        printer_state_.init_subjects(false);
         client_.connect("ws://mock/websocket", []() {}, []() {});
-        api_ = std::make_unique<helix::HistoryCallCountingMoonrakerAPI>(client_, printer_state_);
+        api_ = std::make_unique<helix::HistoryCallCountingMoonrakerAPI>(client_, state());
         manager_ = std::make_unique<PrintHistoryManager>(api_.get(), &client_);
 
         set_moonraker_api(api_.get());
@@ -75,21 +70,9 @@ class PrintStatsLifetimeFixture : public LVGLTestFixture {
 
         // Widget-owned subjects register lazily.
         PanelWidgetManager::instance().init_widget_subjects();
-        lv_subject_t* view_mode = lv_xml_get_subject(nullptr, "print_stats_view_mode");
-        REQUIRE(view_mode != nullptr);
-        lv_subject_set_int(view_mode, 0); // 0 = lifetime
     }
 
     ~PrintStatsLifetimeFixture() override {
-        // The widget's subjects outlive the case. A mode poked straight onto the
-        // subject never reaches the title the widget derives from it, so a later
-        // case would read the weekly title beside lifetime mode.
-        if (lv_subject_t* view_mode = lv_xml_get_subject(nullptr, "print_stats_view_mode")) {
-            lv_subject_set_int(view_mode, 0);
-        }
-        if (lv_subject_t* title = lv_xml_get_subject(nullptr, "print_stats_title")) {
-            lv_subject_copy_string(title, lv_tr("Lifetime Print Stats"));
-        }
         set_print_history_manager(nullptr);
         set_moonraker_api(nullptr);
         manager_.reset();
@@ -126,8 +109,19 @@ class PrintStatsLifetimeFixture : public LVGLTestFixture {
             *manager_, std::move(capped), HistoryScope::COMPLETE, static_cast<int>(n));
     }
 
+    /// The real tile tree for @p widget, sized to the Wide box and attached.
+    lv_obj_t* attach_wide_tile(PrintStatsWidget& widget) {
+        lv_obj_t* tile = static_cast<lv_obj_t*>(
+            lv_xml_create(test_screen(), "panel_widget_print_stats", nullptr));
+        REQUIRE(tile != nullptr);
+        lv_obj_set_size(tile, kWideW, kWideH);
+        lv_obj_update_layout(tile);
+        widget.attach(tile, test_screen());
+        widget.notify_size_changed(1, 1, kWideW, kWideH);
+        return tile;
+    }
+
     MoonrakerClientMock client_;
-    PrinterState printer_state_;
     std::unique_ptr<helix::HistoryCallCountingMoonrakerAPI> api_;
     std::unique_ptr<PrintHistoryManager> manager_;
 };
@@ -162,29 +156,24 @@ TEST_CASE_METHOD(PrintStatsLifetimeFixture,
     REQUIRE(cached_time < server.total_time);
 
     PrintStatsWidget widget;
-    lv_obj_t* obj = lv_obj_create(test_screen());
-    widget.attach(obj, test_screen());
+    lv_obj_t* tile = attach_wide_tile(widget);
     widget.on_activate();
 
-    const std::string expected_prints = std::to_string(server.total_jobs);
-    const std::string expected_time = format_hours(server.total_time);
+    const std::string expected = lifetime_line(server);
+    const std::string from_cache =
+        format_lifetime_line({manager_->get_jobs().size(), cached_time, 0.0}, true);
+    REQUIRE(expected != from_cache);
 
-    bool settled = wait_until([&]() {
-        return expected_prints == subject_text("print_stats_total_prints") &&
-               expected_time == subject_text("print_stats_total_time");
-    });
+    bool settled =
+        wait_until([&]() { return expected == subject_text("print_stats_support_text"); });
 
-    INFO("total_prints=" << subject_text("print_stats_total_prints") << " total_time="
-                         << subject_text("print_stats_total_time") << " (cache holds "
+    INFO("support_text=" << subject_text("print_stats_support_text") << " (cache holds "
                          << manager_->get_jobs().size() << " jobs / " << cached_time << "s)");
     CHECK(settled);
-    CHECK(expected_prints == std::string(subject_text("print_stats_total_prints")));
-    CHECK(expected_time == std::string(subject_text("print_stats_total_time")));
-    CHECK(std::to_string(server.total_time / 3600) + "h" ==
-          std::string(subject_text("print_stats_total_time_short")));
+    CHECK(expected == std::string(subject_text("print_stats_support_text")));
 
     widget.detach();
-    lv_obj_delete(obj);
+    lv_obj_delete(tile);
 }
 
 TEST_CASE_METHOD(PrintStatsLifetimeFixture,
@@ -200,21 +189,19 @@ TEST_CASE_METHOD(PrintStatsLifetimeFixture,
     // First attach: activate, then tear down before the in-flight totals reply
     // is drained, exactly as a grid rebuild does. The reply is dropped by the
     // lifetime guard — nothing may stay latched that blocks the next request.
-    lv_obj_t* first = lv_obj_create(test_screen());
-    widget.attach(first, test_screen());
+    lv_obj_t* first = attach_wide_tile(widget);
     widget.on_activate();
     widget.detach();
     lv_obj_delete(first);
 
     // Same C++ instance re-attached into the rebuilt grid (supports_reuse()).
-    lv_obj_t* second = lv_obj_create(test_screen());
-    widget.attach(second, test_screen());
+    lv_obj_t* second = attach_wide_tile(widget);
     widget.on_activate();
 
-    const std::string expected_prints = std::to_string(server.total_jobs);
+    const std::string expected = lifetime_line(server);
     bool settled =
-        wait_until([&]() { return expected_prints == subject_text("print_stats_total_prints"); });
-    INFO("total_prints=" << subject_text("print_stats_total_prints"));
+        wait_until([&]() { return expected == subject_text("print_stats_support_text"); });
+    INFO("support_text=" << subject_text("print_stats_support_text"));
     CHECK(settled);
 
     widget.detach();
@@ -222,49 +209,11 @@ TEST_CASE_METHOD(PrintStatsLifetimeFixture,
 }
 
 TEST_CASE_METHOD(PrintStatsLifetimeFixture,
-                 "print_stats weekly mode still aggregates the cached job list",
-                 "[print_stats][history][1272]") {
-    PrintHistoryTotals server = fetch_server_totals();
-    REQUIRE(server.total_jobs > 3);
-
-    load_capped_cache(3);
-
-    lv_subject_t* view_mode = lv_xml_get_subject(nullptr, "print_stats_view_mode");
-    REQUIRE(view_mode != nullptr);
-    lv_subject_set_int(view_mode, 1); // weekly
-
-    PrintStatsWidget widget;
-    lv_obj_t* obj = lv_obj_create(test_screen());
-    widget.attach(obj, test_screen());
-    widget.on_activate();
-    process_lvgl(20);
-
-    // `server.history.totals` is lifetime-only, so a 7-day window can only come
-    // from the cache. A 3-job cache stops short of the week (the mock spreads
-    // jobs one per day), so the widget pages older jobs in until it is covered.
-    REQUIRE(wait_until([&]() {
-        process_lvgl(20);
-        return manager_->covers_since(static_cast<double>(std::time(nullptr)) - 7 * 24 * 3600);
-    }));
-    process_lvgl(20);
-    const auto weekly_jobs =
-        manager_->get_jobs_since(static_cast<double>(std::time(nullptr)) - 7 * 24 * 3600).size();
-    REQUIRE(weekly_jobs > 3);
-    CHECK(std::to_string(weekly_jobs) == std::string(subject_text("print_stats_total_prints")));
-    CHECK(std::string(subject_text("print_stats_total_prints")) !=
-          std::to_string(server.total_jobs));
-
-    lv_subject_set_int(view_mode, 0);
-    widget.detach();
-    lv_obj_delete(obj);
-}
-
-TEST_CASE_METHOD(PrintStatsLifetimeFixture,
                  "print_stats escalates when the cached slice stops short of a week",
                  "[print_stats][history][coverage]") {
-    // The "N/wk" row aggregates the last seven days on every update. A startup
-    // slice that filled its page inside three days leaves the rest of that week
-    // on the printer, so activating has to pull the whole list.
+    // The seven bars reach back to the oldest local midnight. A startup slice that
+    // filled its page inside a few days leaves the rest of that week on the printer,
+    // so activating has to pull the whole list.
     const double now = static_cast<double>(std::time(nullptr));
     std::vector<PrintHistoryJob> page;
     for (int i = 0; i < PrintHistoryManager::kRecentJobLimit; ++i) {
@@ -278,12 +227,13 @@ TEST_CASE_METHOD(PrintStatsLifetimeFixture,
     // The staleness watcher is queued with the socket down and stales any cache
     // it finds when it runs, so drain it and bring the socket up first.
     process_lvgl(20);
-    lv_subject_set_int(printer_state_.network_state().get_printer_connection_state_subject(),
+    lv_subject_set_int(state().network_state().get_printer_connection_state_subject(),
                        static_cast<int>(ConnectionState::CONNECTED));
     process_lvgl(20);
     helix::PrintHistoryManagerTestAccess::set_loaded_jobs(*manager_, page, HistoryScope::RECENT,
                                                           PrintHistoryManager::kRecentJobLimit);
-    REQUIRE_FALSE(manager_->covers_since(now - 7 * 24 * 3600));
+    const double window_start = local_day_starts(static_cast<std::time_t>(now))[0];
+    REQUIRE_FALSE(manager_->covers_since(window_start));
 
     PrintStatsWidget widget;
     lv_obj_t* obj = lv_obj_create(test_screen());

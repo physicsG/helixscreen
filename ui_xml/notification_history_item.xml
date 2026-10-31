@@ -2,44 +2,66 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
+  <!-- One row of a history list (notifications, printer events), built inside a
+       <repeat> with every field bound to a per-row subject. The left border and the
+       icon carry the severity: 0 info, 1 success, 2 warning, 3 error. A row whose
+       has_action subject is 1 is clickable and fires click_callback with row_index. -->
+  <styles>
+    <style name="item_info" border_color="#info"/>
+    <style name="item_success" border_color="#success"/>
+    <style name="item_warning" border_color="#warning"/>
+    <style name="item_error" border_color="#danger"/>
+  </styles>
   <api>
-    <prop name="severity" type="string"/>
-    <!-- "error", "warning", "info", "success" -->
-    <prop name="title" type="string"/>
-    <prop name="message" type="string"/>
-    <prop name="timestamp" type="string"/>
+    <prop name="severity_subject" type="string" default=""/>
+    <prop name="title_subject" type="string" default=""/>
+    <prop name="message_subject" type="string" default=""/>
+    <prop name="has_message_subject" type="string" default=""/>
+    <prop name="timestamp_subject" type="string" default=""/>
+    <prop name="has_action_subject" type="string" default=""/>
+    <prop name="click_callback" type="string" default=""/>
+    <prop name="row_index" type="string" default=""/>
   </api>
-  <!-- Compact notification card with left color border (severity_card handles colors) -->
   <view name="notification_item"
-        extends="severity_card" width="100%" height="content" severity="$severity" style_pad_left="#space_md"
-        style_pad_right="#space_md" style_pad_top="#space_sm" style_pad_bottom="#space_sm" style_bg_color="#card_bg"
-        style_bg_opa="255" style_border_width="4" style_border_side="left" style_radius="#border_radius"
-        scrollable="false" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="start">
+        width="100%" height="content" style_pad_left="#space_md" style_pad_right="#space_md" style_pad_top="#space_sm"
+        style_pad_bottom="#space_sm" style_bg_color="#card_bg" style_bg_opa="255" style_border_width="4"
+        style_border_side="left" style_radius="#border_radius" scrollable="false" clickable="false" flex_flow="row"
+        style_flex_main_place="start" style_flex_cross_place="start">
+    <bind_style_if_eq name="item_info" subject="$severity_subject" ref_value="0"/>
+    <bind_style_if_eq name="item_success" subject="$severity_subject" ref_value="1"/>
+    <bind_style_if_eq name="item_warning" subject="$severity_subject" ref_value="2"/>
+    <bind_style_if_eq name="item_error" subject="$severity_subject" ref_value="3"/>
+    <bind_flag_if_eq subject="$has_action_subject" flag="clickable" ref_value="1"/>
+    <event_cb trigger="clicked" callback="$click_callback" user_data="$row_index"/>
     <!-- Icon column (fixed width for icon) -->
     <lv_obj width="28" style_pad_all="0" style_pad_top="#space_xxs" clickable="false" event_bubble="true">
-      <!-- Severity icons - all hidden by default, finalize() shows the correct one -->
-      <lv_label name="icon_info"
-                text="#icon_info_circle" hidden="true" style_text_font="mdi_icons_24" style_text_color="#info"/>
-      <lv_label name="icon_success"
-                text="#icon_check" hidden="true" style_text_font="mdi_icons_24" style_text_color="#success"/>
+      <lv_label name="icon_info" text="#icon_info_circle" style_text_font="mdi_icons_24" style_text_color="#info">
+        <bind_flag_if_not_eq subject="$severity_subject" flag="hidden" ref_value="0"/>
+      </lv_label>
+      <lv_label name="icon_success" text="#icon_check" style_text_font="mdi_icons_24" style_text_color="#success">
+        <bind_flag_if_not_eq subject="$severity_subject" flag="hidden" ref_value="1"/>
+      </lv_label>
       <lv_label name="icon_warning"
-                text="#icon_triangle_exclamation" hidden="true" style_text_font="mdi_icons_24"
-                style_text_color="#warning"/>
-      <lv_label name="icon_error"
-                text="#icon_alert_octagon" hidden="true" style_text_font="mdi_icons_24" style_text_color="#danger"/>
+                text="#icon_triangle_exclamation" style_text_font="mdi_icons_24" style_text_color="#warning">
+        <bind_flag_if_not_eq subject="$severity_subject" flag="hidden" ref_value="2"/>
+      </lv_label>
+      <lv_label name="icon_error" text="#icon_alert_octagon" style_text_font="mdi_icons_24" style_text_color="#danger">
+        <bind_flag_if_not_eq subject="$severity_subject" flag="hidden" ref_value="3"/>
+      </lv_label>
     </lv_obj>
     <!-- Content column (flex grow) -->
     <lv_obj flex_grow="1"
             style_pad_all="0" flex_flow="column" style_pad_gap="#space_xxs" clickable="false" event_bubble="true">
-      <!-- Headline row: the title, or the message itself for an untitled entry -->
+      <!-- Headline row: the title and the time -->
       <lv_obj width="100%"
               height="content" style_pad_all="0" style_pad_gap="#space_sm" flex_flow="row"
               style_flex_cross_place="start" clickable="false" event_bubble="true">
-        <text_body name="item_title" flex_grow="1" text="$title" long_mode="wrap"/>
-        <text_small name="item_timestamp" text="$timestamp"/>
+        <text_body name="item_title" flex_grow="1" bind_text="$title_subject" long_mode="wrap"/>
+        <text_small name="item_timestamp" bind_text="$timestamp_subject"/>
       </lv_obj>
-      <!-- Message (hidden when it was promoted to the headline) -->
-      <text_small name="item_message" width="100%" text="$message" long_mode="wrap" hidden_if_empty="$message"/>
+      <text_small name="item_message" width="100%" bind_text="$message_subject" long_mode="wrap">
+        <bind_flag_if_eq subject="$has_message_subject" flag="hidden" ref_value="0"/>
+      </text_small>
     </lv_obj>
   </view>
 </component>

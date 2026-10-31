@@ -10,16 +10,22 @@
  * ride on a guard that Stop, cleanup() and destruction expire instead.
  */
 
+#include "ui_guided_device_flow.h"
 #include "ui_panel_calibration_tool_offset.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "../toolchanger_panel_fixture.h"
 #include "app_globals.h"
 #include "moonraker_error.h"
+#include "printer_discovery.h"
 #include "printer_state.h"
+#include "settings_manager.h"
+#include "snapmaker_nozzle_offset.h"
 #include "tool_state.h"
+#include "z_offset_utils.h"
 
 #include <algorithm>
 #include <string>
@@ -126,9 +132,7 @@ TEST_CASE_METHOD(ToolCalPanelFixture,
 
     // The printer going idle is the completion.
     ps.update_from_status(json{{"idle_timeout", json{{"state", "Ready"}}}});
-    for (int pass = 0; pass < 4; ++pass) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     CHECK_FALSE(panel.is_calibration_active());
     CHECK(lv_subject_get_int(panel.get_active_subject()) == 0);
     CHECK(std::string(lv_subject_get_string(panel.get_status_subject())) ==
@@ -161,17 +165,13 @@ TEST_CASE_METHOD(ToolCalPanelFixture,
     // Idle then busy again, both before the deferred handler runs.
     ps.update_from_status(json{{"idle_timeout", json{{"state", "Ready"}}}});
     ps.update_from_status(json{{"idle_timeout", json{{"state", "Printing"}}}});
-    for (int pass = 0; pass < 4; ++pass) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     CHECK(panel.is_calibration_active());
     CHECK(lv_subject_get_int(panel.get_active_subject()) == 1);
 
     // The next real idle edge still finishes it.
     ps.update_from_status(json{{"idle_timeout", json{{"state", "Ready"}}}});
-    for (int pass = 0; pass < 4; ++pass) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     CHECK_FALSE(panel.is_calibration_active());
 
     panel.on_deactivate(DeactivateReason::NavigateAway);
@@ -242,7 +242,10 @@ TEST_CASE_METHOD(ToolCalPanelFixture, "tool offset panel: Save commits a pending
     // The SAVE_CONFIG a tool save ends in restarts Klipper, which resets
     // homing_origin: a babystep not applied in that same restart is lost, while
     // its pending delta went on being shown. Save must apply it, as the header
-    // and Controls saves do.
+    // and Controls saves do, once the user has turned Z-offset saving on.
+    auto& settings = helix::SettingsManager::instance();
+    settings.init_subjects();
+    settings.set_z_offset_save_mode(static_cast<int>(helix::zoffset::SaveMode::Show));
     helix::PrinterState& ps = get_printer_state();
     helix::PrinterStateTestAccess::pin_z_offset_strategy(
         ps, helix::ZOffsetCalibrationStrategy::PROBE_CALIBRATE);
@@ -262,6 +265,64 @@ TEST_CASE_METHOD(ToolCalPanelFixture, "tool offset panel: Save commits a pending
     const auto& hist = client->gcode_script_history();
     CHECK(hist[hist.size() - 2] == "Z_OFFSET_APPLY_PROBE");
     CHECK(hist.back() == "SAVE_CONFIG");
+
+    panel.on_deactivate(DeactivateReason::NavigateAway);
+    panel.cleanup();
+    settings.set_z_offset_save_mode(static_cast<int>(helix::zoffset::SaveMode::Auto));
+}
+
+TEST_CASE_METHOD(ToolCalPanelFixture,
+                 "tool offset panel: Save leaves the babystep alone while Z-offset saving is off",
+                 "[ui_integration][toolchanger][tool_offset_cal][save-toggle]") {
+    // A toolchanger defaults to saving off: the tool offsets still save, the
+    // machine-wide babystep is never folded into the config (#1766).
+    auto& settings = helix::SettingsManager::instance();
+    settings.init_subjects();
+    settings.set_z_offset_save_mode(static_cast<int>(helix::zoffset::SaveMode::Auto));
+    REQUIRE_FALSE(helix::zoffset::save_enabled());
+
+    helix::PrinterState& ps = get_printer_state();
+    helix::PrinterStateTestAccess::pin_z_offset_strategy(
+        ps, helix::ZOffsetCalibrationStrategy::PROBE_CALIBRATE);
+    ps.update_from_status(
+        json{{"gcode_move", json{{"homing_origin", json::array({0.0, 0.0, 0.05, 0.0})}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    helix::ToolState::instance().set_tool_offset_local(1, helix::Axis::X, -120);
+    REQUIRE_FALSE(helix::ToolState::instance().dirty_tool_indices().empty());
+
+    helix::ui::ToolOffsetCalibrationPanel panel;
+    panel.init_subjects();
+    panel.on_activate();
+    client->clear_gcode_script_history();
+    panel.send_save();
+    REQUIRE(pump_until([&] { return !client->gcode_script_history().empty(); }, 50));
+
+    const auto& hist = client->gcode_script_history();
+    CHECK(std::any_of(hist.begin(), hist.end(), [](const std::string& script) {
+        return script.find("gcode_x_offset") != std::string::npos;
+    }));
+    for (const auto& script : hist) {
+        CHECK(script.find("Z_OFFSET_APPLY") == std::string::npos);
+    }
+
+    // klipper-toolchanger commits the tool parameters with SAVE_CONFIG, whose
+    // restart resets the live offset; the unsaved babystep comes back after it.
+    auto saved = [&] {
+        const auto& h = client->gcode_script_history();
+        return std::find(h.begin(), h.end(), "SAVE_CONFIG") != h.end();
+    };
+    REQUIRE(pump_until(saved, 50));
+    ps.set_klippy_state_sync(helix::KlippyState::STARTUP);
+    ps.set_klippy_state_sync(helix::KlippyState::READY);
+    auto restored = [&] {
+        const auto& h = client->gcode_script_history();
+        return std::find(h.begin(), h.end(), "SET_GCODE_OFFSET Z=0.050") != h.end();
+    };
+    REQUIRE(pump_until(restored, 50));
+    const auto& after = client->gcode_script_history();
+    const auto save_at = std::find(after.begin(), after.end(), "SAVE_CONFIG");
+    REQUIRE(save_at != after.end());
+    CHECK(std::find(save_at, after.end(), "SET_GCODE_OFFSET Z=0.050") != after.end());
 
     panel.on_deactivate(DeactivateReason::NavigateAway);
     panel.cleanup();
@@ -322,4 +383,33 @@ TEST_CASE_METHOD(ToolCalPanelFixture, "tool offset panel: Save with nothing dirt
 
     panel.on_deactivate(DeactivateReason::NavigateAway);
     panel.cleanup();
+}
+
+TEST_CASE_METHOD(ToolCalPanelFixture,
+                 "the Calibration entry starts a printer's own guided flow instead of the panel",
+                 "[tool_offset_cal][guided-flow]") {
+    nlohmann::json objects = nlohmann::json::array({"gcode_macro _EXTRUDER_OFFSET_ACTION_PRESTART",
+                                                    "gcode_macro _EXTRUDER_OFFSET_ACTION_EXIT"});
+    for (int t = 0; t < 4; ++t) {
+        for (const char* step :
+             {"HEAT", "AUTO_CLEAN", "MANUAL_CLEAN", "WAIT_COOL", "PROBE_CALIBRATE"}) {
+            objects.push_back(std::string("gcode_macro _EXTRUDER_OFFSET_ACTION_") + step + "_T" +
+                              std::to_string(t));
+        }
+    }
+    helix::PrinterDiscovery u1;
+    u1.parse_objects(objects);
+    get_printer_state().set_hardware(u1);
+
+    int starts = 0;
+    helix::ui::register_guided_device_flow(helix::snapmaker::nozzle_offset::kGuidedFlowId,
+                                           {nullptr, [&](const std::string&) { ++starts; }});
+    helix::ui::open_tool_offset_cal_panel(test_screen());
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(starts == 1);
+    auto& caps = get_printer_state().capabilities_state();
+    CHECK(lv_subject_get_int(caps.subject(helix::Capability::HasToolOffsetCal)) == 1);
+
+    helix::ui::unregister_guided_device_flow(helix::snapmaker::nozzle_offset::kGuidedFlowId);
+    get_printer_state().set_hardware(helix::PrinterDiscovery{});
 }

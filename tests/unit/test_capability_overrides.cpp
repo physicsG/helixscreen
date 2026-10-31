@@ -326,3 +326,31 @@ TEST_CASE("CapabilityOverrides - MPC calibration support", "[printer][overrides]
     overrides.set_hardware(hardware);
     REQUIRE(overrides.supports_mpc_calibration());
 }
+
+TEST_CASE("CapabilityOverrides - is_forced_on", "[capability_overrides]") {
+    CapabilityOverrides overrides;
+
+    SECTION("ENABLE on an undetected capability is forced on") {
+        helix::PrinterDiscovery hardware;
+        overrides.set_hardware(hardware);
+        overrides.set_override(capability::QGL, OverrideState::ENABLE);
+        CHECK(overrides.is_forced_on(capability::QGL));
+    }
+
+    SECTION("ENABLE on a detected capability is not") {
+        helix::PrinterDiscovery hardware;
+        hardware.parse_objects(json{"quad_gantry_level"});
+        overrides.set_hardware(hardware);
+        overrides.set_override(capability::QGL, OverrideState::ENABLE);
+        CHECK_FALSE(overrides.is_forced_on(capability::QGL));
+    }
+
+    SECTION("AUTO and DISABLE are not") {
+        helix::PrinterDiscovery hardware;
+        overrides.set_hardware(hardware);
+        overrides.set_override(capability::QGL, OverrideState::AUTO);
+        CHECK_FALSE(overrides.is_forced_on(capability::QGL));
+        overrides.set_override(capability::QGL, OverrideState::DISABLE);
+        CHECK_FALSE(overrides.is_forced_on(capability::QGL));
+    }
+}

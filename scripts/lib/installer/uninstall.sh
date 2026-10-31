@@ -10,6 +10,23 @@
 [ -n "${_HELIX_UNINSTALL_SOURCED:-}" ] && return 0
 _HELIX_UNINSTALL_SOURCED=1
 
+# Every polkit rule file HelixScreen has installed, any version, either format.
+HELIX_POLKIT_RULE_FILES="/etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla
+/etc/polkit-1/localauthority/50-local.d/helixscreen-power.pkla
+/etc/polkit-1/rules.d/49-helixscreen-network.rules
+/etc/polkit-1/rules.d/50-helixscreen-network.rules
+/etc/polkit-1/rules.d/49-helixscreen-power.rules"
+
+# Remove the udev and polkit rules that permissions.sh and
+# config/ensure-polkit-rule.sh install.
+remove_permission_rules() {
+    local f
+    $SUDO rm -f /etc/udev/rules.d/99-helixscreen-backlight.rules
+    for f in $HELIX_POLKIT_RULE_FILES; do
+        $SUDO rm -f "$f"
+    done
+}
+
 # Sentinel paths checked by helixscreen-update.service so it refuses to fire
 # while an uninstall is in progress (closes a race where the update path unit
 # could trigger a restart between stop_service and rm -rf $INSTALL_DIR).
@@ -103,21 +120,7 @@ _newest_timestamped_install_backup() {
 # A location this run cannot resolve (no Klipper config dir known) is omitted
 # rather than probed with an empty prefix.
 _disabled_services_ledger_candidates() {
-    local _pd_config="" _newest_old _rollback_mount
-    if type klipper_config_dir >/dev/null 2>&1; then
-        _pd_config="$(klipper_config_dir)"
-    fi
-    echo "${INSTALL_DIR}/config/.disabled_services"
-    if [ -n "$_pd_config" ]; then
-        echo "${_pd_config}/helixscreen/.disabled_services"
-        echo "${_pd_config}/.disabled_services.clean-keep"
-    fi
-    echo "${INSTALL_DIR}.old/config/.disabled_services"
-    _newest_old="$(_newest_timestamped_install_backup)"
-    [ -n "$_newest_old" ] && echo "${_newest_old}/config/.disabled_services"
-    for _rollback_mount in ${HELIX_ROLLBACK_CANDIDATES:-$HELIX_ROLLBACK_CANDIDATES_DEFAULT}; do
-        echo "${_rollback_mount}/helixscreen-rollback/helixscreen/config/.disabled_services"
-    done
+    _ledger_candidates .disabled_services wide
 }
 
 # Enable a unit for the next boot. A failure is reported with the command that
@@ -227,7 +230,8 @@ reenable_disabled_services() {
 # Must run BEFORE $INSTALL_DIR is removed (the state file lives in it) and
 # touches printer_data files that live outside $INSTALL_DIR.
 undo_klipper_includes() {
-    local state_file="${INSTALL_DIR}/config/.klipper_includes"
+    local state_file
+    state_file="$(_ledger_path .klipper_includes)"
     [ -f "$state_file" ] || return 0
 
     log_info "Reverting HelixScreen Klipper config includes..."
@@ -267,6 +271,7 @@ undo_klipper_includes() {
                 ;;
         esac
     done < "$state_file"
+    remove_state_file "$state_file"
 }
 
 # Undo per-printer settings seeding recorded at install time (#986).
@@ -279,7 +284,8 @@ undo_klipper_includes() {
 # defaults therefore REMAIN in settings.json; we only remove the marker file.
 # Must run BEFORE $INSTALL_DIR is removed (the state file lives in it).
 undo_seeded_settings() {
-    local state_file="${INSTALL_DIR}/config/.seeded_settings"
+    local state_file
+    state_file="$(_ledger_path .seeded_settings)"
     [ -f "$state_file" ] || return 0
 
     log_info "Reviewing HelixScreen settings seeds..."
@@ -297,7 +303,7 @@ undo_seeded_settings() {
     done < "$state_file"
 
     # Remove only the marker; settings.json is left untouched on purpose.
-    $(path_sudo "$state_file") rm -f "$state_file" 2>/dev/null || true
+    remove_state_file "$state_file"
 }
 
 # Restore whatever screen UI HelixScreen displaced at install time, for the
@@ -686,6 +692,13 @@ uninstall() {
     printf '%b\n' "${BOLD}HelixScreen uninstaller${NC}" >&2
     log_info "Uninstalling HelixScreen..."
 
+    # A desktop install touched nothing system-wide, so its removal touches
+    # nothing either: no service, sentinel, Moonraker or sweep of other roots.
+    if [ "$platform" = "x86-desktop" ]; then
+        uninstall_desktop
+        return 0
+    fi
+
     # Drop sentinel BEFORE any destructive work.  helixscreen-update.service
     # checks for it and refuses to fire while uninstall is running, closing
     # the race where Moonraker's path unit could re-trigger a restart between
@@ -737,11 +750,7 @@ uninstall() {
         $SUDO rm -f /etc/systemd/system/helixscreen-update.path
         $SUDO rm -f /etc/systemd/system/helixscreen-update.service
         uninstall_qidi_3mf_thumbs
-        # Remove permission rules (udev, polkit)
-        $SUDO rm -f /etc/udev/rules.d/99-helixscreen-backlight.rules
-        $SUDO rm -f /etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla
-        $SUDO rm -f /etc/polkit-1/rules.d/49-helixscreen-network.rules
-        $SUDO rm -f /etc/polkit-1/rules.d/50-helixscreen-network.rules
+        remove_permission_rules
         $SUDO systemctl daemon-reload
     else
         # Stop and remove SysV init scripts (check all possible locations)
@@ -791,6 +800,12 @@ uninstall() {
         uninstall_camera_k2 "$platform" || true
     fi
 
+    # Remote screen nginx route, route file and webcam entry. Before
+    # $INSTALL_DIR is removed: its marker lives in $INSTALL_DIR/config.
+    if type remove_remote_screen_route >/dev/null 2>&1; then
+        remove_remote_screen_route || true
+    fi
+
     # Re-enable services from state file (before removing install dir)
     reenable_disabled_services
 
@@ -804,6 +819,10 @@ uninstall() {
     # Must run before $INSTALL_DIR (which holds the .seeded_settings state file)
     # is removed.
     undo_seeded_settings
+
+    # The hook key lets the update script re-deploy platform/hooks.sh; with the
+    # install gone there is nothing left for it to restore.
+    remove_state_file "$(_ledger_path .platform_hook)"
 
     # --mod-payload: this uninstall's one install target is the mod's payload
     # root (HELIX_INSTALL_DIRS gains it via helix_install_dirs_for_run below).
@@ -1026,11 +1045,7 @@ clean_old_installation() {
     $SUDO rm -f /etc/systemd/system/helixscreen-update.path
     $SUDO rm -f /etc/systemd/system/helixscreen-update.service
     uninstall_qidi_3mf_thumbs
-    # Remove permission rules (udev, polkit)
-    $SUDO rm -f /etc/udev/rules.d/99-helixscreen-backlight.rules
-    $SUDO rm -f /etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla
-    $SUDO rm -f /etc/polkit-1/rules.d/49-helixscreen-network.rules
-    $SUDO rm -f /etc/polkit-1/rules.d/50-helixscreen-network.rules
+    remove_permission_rules
     $SUDO systemctl daemon-reload 2>/dev/null || true
 
     # Remove <klipper config dir>/helixscreen/ (user config) in clean mode.

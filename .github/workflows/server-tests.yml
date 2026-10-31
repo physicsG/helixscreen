@@ -19,11 +19,15 @@ on:
       - "!claude/report-*"
     paths:
       - 'server/**'
+      # The telemetry worker's contract test reads the client's event fixtures.
+      - 'tests/fixtures/telemetry/**'
       - '.github/workflows/server-tests.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'server/**'
+      # The telemetry worker's contract test reads the client's event fixtures.
+      - 'tests/fixtures/telemetry/**'
       - '.github/workflows/server-tests.yml'
 
 # A newer push to the same branch makes an in-flight run pointless. main keys on

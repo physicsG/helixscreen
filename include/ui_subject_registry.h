@@ -92,8 +92,7 @@
         }                                                                                          \
         lv_subject_init_string(&(subject), (buffer), nullptr, sizeof(buffer), (buffer));           \
         helix::xml::register_subject_in_current_scope((name), &(subject));                         \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (name), LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);                       \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (name), LV_SUBJECT_TYPE_STRING);                  \
     } while (0)
 
 /**
@@ -124,8 +123,7 @@
         }                                                                                          \
         lv_subject_init_string(&(subject), (buffer), nullptr, (size), (buffer));                   \
         helix::xml::register_subject_in_current_scope((name), &(subject));                         \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (name), LV_SUBJECT_TYPE_STRING, __FILE__, __LINE__);                       \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (name), LV_SUBJECT_TYPE_STRING);                  \
     } while (0)
 
 /**
@@ -147,8 +145,7 @@
     do {                                                                                           \
         lv_subject_init_int(&(subject), (initial_value));                                          \
         helix::xml::register_subject_in_current_scope((name), &(subject));                         \
-        SubjectDebugRegistry::instance().register_subject(&(subject), (name), LV_SUBJECT_TYPE_INT, \
-                                                          __FILE__, __LINE__);                     \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (name), LV_SUBJECT_TYPE_INT);                     \
     } while (0)
 
 /**
@@ -170,8 +167,7 @@
     do {                                                                                           \
         lv_subject_init_pointer(&(subject), (initial_value));                                      \
         helix::xml::register_subject_in_current_scope((name), &(subject));                         \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (name), LV_SUBJECT_TYPE_POINTER, __FILE__, __LINE__);                      \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (name), LV_SUBJECT_TYPE_POINTER);                 \
     } while (0)
 
 /**
@@ -193,8 +189,7 @@
     do {                                                                                           \
         lv_subject_init_color(&(subject), (initial_value));                                        \
         helix::xml::register_subject_in_current_scope((name), &(subject));                         \
-        SubjectDebugRegistry::instance().register_subject(                                         \
-            &(subject), (name), LV_SUBJECT_TYPE_COLOR, __FILE__, __LINE__);                        \
+        HELIX_SUBJECT_DEBUG_REGISTER(&(subject), (name), LV_SUBJECT_TYPE_COLOR);                   \
     } while (0)
 
 /**
@@ -229,11 +224,22 @@ namespace helix::ui {
  *
  * A string subject initialized without a previous-value buffer notifies on
  * every copy, and a bound label then redraws even for the text it shows.
+ * @return whether the subject changed
  */
-inline void copy_string_if_changed(lv_subject_t* subject, const char* text) {
-    if (std::strcmp(lv_subject_get_string(subject), text) != 0) {
-        lv_subject_copy_string(subject, text);
-    }
+inline bool copy_string_if_changed(lv_subject_t* subject, const char* text) {
+    if (std::strcmp(lv_subject_get_string(subject), text) == 0)
+        return false;
+    lv_subject_copy_string(subject, text);
+    return true;
+}
+
+/// Write @p value into an int subject only when it differs, so a sync that finds
+/// the same value wakes no observer. Returns whether the subject changed.
+inline bool set_int_if_changed(lv_subject_t* subject, int value) {
+    if (lv_subject_get_int(subject) == value)
+        return false;
+    lv_subject_set_int(subject, value);
+    return true;
 }
 
 } // namespace helix::ui

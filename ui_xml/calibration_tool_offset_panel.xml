@@ -107,17 +107,17 @@
       <lv_obj name="tool_cal_actions"
               width="100%" height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_sm" style_bg_opa="0"
               style_border_width="0" scrollable="false">
-        <ui_button name="tool_cal_start_btn" flex_grow="3" text="Calibrate all tools" moves_machine="true">
+        <ui_button name="tool_cal_start_btn" flex_grow="3" text="Calibrate All Tools" moves_machine="true">
           <event_cb trigger="clicked" callback="on_tool_cal_start"/>
           <bind_flag_if_eq subject="tool_cal_active" flag="hidden" ref_value="1"/>
         </ui_button>
         <!-- The macro blocks Klipper's queue, so Stop is an emergency stop
              plus firmware restart - the only stop there is. -->
-        <ui_button name="tool_cal_stop_btn" flex_grow="3" variant="danger" text="Stop">
+        <ui_button name="tool_cal_stop_btn" flex_grow="3" icon="alert_octagon" variant="danger" text="Stop">
           <event_cb trigger="clicked" callback="on_tool_cal_stop"/>
           <bind_flag_if_eq subject="tool_cal_active" flag="hidden" ref_value="0"/>
         </ui_button>
-        <ui_button name="tool_cal_save_btn" flex_grow="2" variant="warning" text="Save offsets" moves_machine="true">
+        <ui_button name="tool_cal_save_btn" flex_grow="2" variant="warning" text="Save Offsets" moves_machine="true">
           <event_cb trigger="clicked" callback="on_tool_cal_save"/>
           <bind_flag_if_eq subject="any_tool_offset_dirty" flag="hidden" ref_value="0"/>
           <!-- Save restarts Klipper, so it is also refused under a run that is

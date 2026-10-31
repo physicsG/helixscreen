@@ -8,6 +8,7 @@
 
 #include "ams_state.h"
 #include "app_globals.h"
+#include "dryer_summary.h"
 #include "filament_sensor_manager.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -66,6 +67,8 @@ void BedDryingController::init_subjects() {
     }
     UI_MANAGED_SUBJECT_INT(bed_drying_state_, 0, "bed_drying_state", subjects_);
     UI_MANAGED_SUBJECT_STRING(bed_drying_text_, text_buf_, "", "bed_drying_text", subjects_);
+    UI_MANAGED_SUBJECT_INT(bed_drying_remaining_min_, -1, "bed_drying_remaining_min", subjects_);
+    UI_MANAGED_SUBJECT_INT(bed_drying_progress_pct_, -1, "bed_drying_progress_pct", subjects_);
     UI_MANAGED_SUBJECT_INT(bed_drying_ack_, 0, "bed_drying_ack", subjects_);
     UI_MANAGED_SUBJECT_INT(bed_drying_chamber_assist_, 0, "bed_drying_chamber_assist", subjects_);
     UI_MANAGED_SUBJECT_STRING(bed_drying_chamber_text_, chamber_text_buf_, "",
@@ -89,8 +92,8 @@ void BedDryingController::check_print_alarm() {
     print_alarm_raised_ = alarm;
 }
 
-void BedDryingController::await_unload(std::function<void()> on_done,
-                                       std::function<void(bool started)> on_failed) {
+void BedDryingController::await_unload(helix::SharedCallback<void()> on_done,
+                                       helix::SharedCallback<void(bool started)> on_failed) {
     drop_unload_wait();
     unload_done_ = std::move(on_done);
     unload_failed_ = std::move(on_failed);
@@ -272,8 +275,8 @@ void BedDryingController::restore() {
 }
 
 void BedDryingController::prepare(const Material& material, bool with_appliance,
-                                  std::function<void()> on_ready,
-                                  std::function<void(const std::string&)> on_error) {
+                                  helix::SharedCallback<void()> on_ready,
+                                  helix::SharedCallback<void(const std::string&)> on_error) {
     if (!api_ || record_.latched || pre_run_ == PreRun::Preparing) {
         if (on_error) {
             on_error(lv_tr("Drying is already running"));
@@ -576,9 +579,14 @@ void BedDryingController::publish() {
     check_print_alarm();
     const State s = state();
     std::string text;
+    int remaining_min = -1;
+    int progress_pct = -1;
     switch (s) {
     case State::Running: {
         const long long left = std::max(0LL, record_.end_s - now());
+        remaining_min = static_cast<int>((left + 59) / 60);
+        progress_pct = progress_pct_from(
+            remaining_min, static_cast<int>((record_.end_s - record_.start_s + 59) / 60));
         text = fmt::format("{} {}°C  {}:{:02d} {}", lv_tr("Drying on the bed"), record_.bed_c,
                            left / 3600, (left % 3600) / 60, lv_tr("left"));
         break;
@@ -604,6 +612,8 @@ void BedDryingController::publish() {
     case State::Idle:
         break;
     }
+    lv_subject_set_int(&bed_drying_remaining_min_, remaining_min);
+    lv_subject_set_int(&bed_drying_progress_pct_, progress_pct);
     lv_subject_set_int(&bed_drying_state_, static_cast<int>(s));
     if (text != lv_subject_get_string(&bed_drying_text_)) {
         lv_subject_copy_string(&bed_drying_text_, text.c_str());

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <string>
+
 /**
  * @file helix_version.h
  * @brief HelixScreen version information
@@ -88,3 +90,34 @@ inline bool helix_version_at_least(int major, int minor = 0, int patch = 0) {
         return false;
     return HELIX_VERSION_PATCH >= patch;
 }
+
+namespace helix {
+
+/**
+ * @brief helixscreen.org docs page for a release line
+ * @param page Site path below the version, e.g. "guide/" or "guide/getting-started/"
+ * @return URL like "https://helixscreen.org/1.1/guide/"
+ *
+ * The site serves every release line under its own major.minor and redirects
+ * the stable line's prefix to the root, so a screen always opens the docs that
+ * match what it runs, before and after its line is promoted.
+ */
+inline std::string docs_url(int major, int minor, const char* page) {
+    return "https://helixscreen.org/" + std::to_string(major) + "." + std::to_string(minor) + "/" +
+           page;
+}
+
+/// docs_url() for the running build's release line.
+inline std::string docs_url(const char* page) {
+    return docs_url(HELIX_VERSION_MAJOR, HELIX_VERSION_MINOR, page);
+}
+
+/// A docs URL as shown under a QR code: no scheme, no trailing slash.
+inline std::string docs_url_text(const std::string& url) {
+    std::string text = url.rfind("https://", 0) == 0 ? url.substr(8) : url;
+    if (!text.empty() && text.back() == '/')
+        text.pop_back();
+    return text;
+}
+
+} // namespace helix

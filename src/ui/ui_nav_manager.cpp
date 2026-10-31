@@ -352,7 +352,7 @@ bool NavigationManager::is_destroyed() {
 const char* NavigationManager::panel_id_to_name(PanelId id) {
     static const char* names[] = {"home_panel",     "print_select_panel", "controls_panel",
                                   "filament_panel", "settings_panel",     "advanced_panel"};
-    if (static_cast<int>(id) < UI_PANEL_COUNT) {
+    if (static_cast<int>(id) < kUiPanelCount) {
         return names[static_cast<int>(id)];
     }
     return "unknown_panel";
@@ -526,7 +526,7 @@ static int32_t overlay_slide_offset(lv_obj_t* panel, int32_t fallback) {
 }
 
 void NavigationManager::overlay_animate_slide_in(lv_obj_t* panel) {
-    const int32_t offset = overlay_slide_offset(panel, OVERLAY_SLIDE_OFFSET);
+    const int32_t offset = overlay_slide_offset(panel, kOverlaySlideOffset);
 
     // Final state when animations are off, or on a tier where a near-full-screen
     // slide plus fade costs more than the frame budget
@@ -546,7 +546,7 @@ void NavigationManager::overlay_animate_slide_in(lv_obj_t* panel) {
     lv_anim_init(&slide_anim);
     lv_anim_set_var(&slide_anim, panel);
     lv_anim_set_values(&slide_anim, offset, 0);
-    lv_anim_set_duration(&slide_anim, OVERLAY_ANIM_DURATION_MS);
+    lv_anim_set_duration(&slide_anim, kOverlayAnimDurationMs);
     lv_anim_set_path_cb(&slide_anim, lv_anim_path_ease_out);
     lv_anim_set_exec_cb(&slide_anim, overlay_translate_x);
     lv_anim_start(&slide_anim);
@@ -556,7 +556,7 @@ void NavigationManager::overlay_animate_slide_in(lv_obj_t* panel) {
     lv_anim_init(&fade_anim);
     lv_anim_set_var(&fade_anim, panel);
     lv_anim_set_values(&fade_anim, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&fade_anim, OVERLAY_ANIM_DURATION_MS);
+    lv_anim_set_duration(&fade_anim, kOverlayAnimDurationMs);
     lv_anim_set_path_cb(&fade_anim, lv_anim_path_ease_out);
     lv_anim_set_exec_cb(&fade_anim, [](void* obj, int32_t value) {
         if (!lv_obj_is_valid(static_cast<lv_obj_t*>(obj)))
@@ -592,13 +592,13 @@ void NavigationManager::overlay_animate_slide_out(lv_obj_t* panel) {
         return;
     }
 
-    const int32_t offset = overlay_slide_offset(panel, OVERLAY_SLIDE_OFFSET);
+    const int32_t offset = overlay_slide_offset(panel, kOverlaySlideOffset);
 
     lv_anim_t slide_anim;
     lv_anim_init(&slide_anim);
     lv_anim_set_var(&slide_anim, panel);
     lv_anim_set_values(&slide_anim, 0, offset);
-    lv_anim_set_duration(&slide_anim, OVERLAY_ANIM_DURATION_MS);
+    lv_anim_set_duration(&slide_anim, kOverlayAnimDurationMs);
     lv_anim_set_path_cb(&slide_anim, lv_anim_path_ease_in);
     lv_anim_set_exec_cb(&slide_anim, overlay_translate_x);
     lv_anim_set_completed_cb(&slide_anim, overlay_slide_out_complete_cb);
@@ -609,7 +609,7 @@ void NavigationManager::overlay_animate_slide_out(lv_obj_t* panel) {
     lv_anim_init(&fade_anim);
     lv_anim_set_var(&fade_anim, panel);
     lv_anim_set_values(&fade_anim, LV_OPA_COVER, LV_OPA_TRANSP);
-    lv_anim_set_duration(&fade_anim, OVERLAY_ANIM_DURATION_MS);
+    lv_anim_set_duration(&fade_anim, kOverlayAnimDurationMs);
     lv_anim_set_path_cb(&fade_anim, lv_anim_path_ease_in);
     lv_anim_set_exec_cb(&fade_anim, [](void* obj, int32_t value) {
         if (!lv_obj_is_valid(static_cast<lv_obj_t*>(obj)))
@@ -1055,7 +1055,7 @@ void NavigationManager::wire_events(lv_obj_t* navbar) {
     const char* button_names[] = {"nav_btn_home",     "nav_btn_print_select", "nav_btn_controls",
                                   "nav_btn_filament", "nav_btn_settings",     "nav_btn_advanced"};
 
-    for (int i = 0; i < UI_PANEL_COUNT; i++) {
+    for (int i = 0; i < kUiPanelCount; i++) {
         lv_obj_t* btn = lv_obj_find_by_name(navbar, button_names[i]);
 
         if (!btn) {
@@ -1145,7 +1145,7 @@ void NavigationManager::wire_status_icons(lv_obj_t* navbar) {
 }
 
 void NavigationManager::set_active(PanelId panel_id) {
-    if (static_cast<int>(panel_id) >= UI_PANEL_COUNT) {
+    if (static_cast<int>(panel_id) >= kUiPanelCount) {
         spdlog::error("[NavigationManager] Invalid panel ID: {}", static_cast<int>(panel_id));
         return;
     }
@@ -1262,7 +1262,7 @@ void NavigationManager::set_panels(lv_obj_t** panels) {
     }
 
     panels_.set_widgets(panels);
-    for (int i = 0; i < UI_PANEL_COUNT; i++) {
+    for (int i = 0; i < kUiPanelCount; i++) {
         // The panel layer owns these trees; nothing tells nav when one dies.
         // The slot clears itself, but panel_stack_ holds the widget too and
         // needs the scrub.
@@ -1285,7 +1285,7 @@ void NavigationManager::set_panels(lv_obj_t** panels) {
 }
 
 void NavigationManager::register_panel_instance(PanelId id, PanelBase* panel) {
-    if (static_cast<int>(id) >= UI_PANEL_COUNT) {
+    if (static_cast<int>(id) >= kUiPanelCount) {
         spdlog::error("[NavigationManager] Invalid panel ID for registration: {}",
                       static_cast<int>(id));
         return;
@@ -1300,7 +1300,7 @@ helix::PanelId NavigationManager::find_panel_id(const PanelBase* panel) const {
 
 void NavigationManager::replace_panel_widget(helix::PanelId id, lv_obj_t* new_widget) {
     int idx = static_cast<int>(id);
-    if (idx < 0 || idx >= UI_PANEL_COUNT)
+    if (idx < 0 || idx >= kUiPanelCount)
         return;
     // An open overlay keeps the main panel beneath it in panel_stack_; go_back()
     // must reveal the successor, not the widget it displaced (#1294).
@@ -1767,7 +1767,8 @@ void NavigationManager::push_overlay(lv_obj_t* overlay_panel, bool hide_previous
             }
 #endif
         }
-        TelemetryManager::instance().notify_overlay_opened(overlay_name);
+        TelemetryManager::instance().notify_overlay_opened(helix::overlay_telemetry_id(
+            lv_obj_get_name(overlay_panel), lc ? lc->get_name() : nullptr));
         crash_handler::breadcrumb::note("overlay+", overlay_name.c_str());
 
         // Lifecycle: Deactivate what's currently visible before showing new overlay
@@ -1816,6 +1817,8 @@ void NavigationManager::push_overlay(lv_obj_t* overlay_panel, bool hide_previous
         // Show overlay
         lv_obj_remove_flag(overlay_panel, LV_OBJ_FLAG_HIDDEN);
         helix::ui::bring_to_front(overlay_panel);
+        // Modals stay above any overlay, including one pushed while they show.
+        ModalStack::instance().raise_visible_to_foreground();
         // Claim taps landing anywhere within the panel bounds. Overlays are
         // narrower than the screen and sit in front of a full-screen, clickable
         // dismiss-backdrop. Without this, a touch that misses an interactive

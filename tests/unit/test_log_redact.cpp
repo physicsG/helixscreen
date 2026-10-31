@@ -120,12 +120,12 @@ TEST_CASE("redact::ssid is stable within a process", "[redact]") {
 TEST_CASE("redact::ssid distinguishes different networks", "[redact]") {
     // Fixed salt so the assertion is deterministic rather than depending on
     // this boot's random value.
-    constexpr uint64_t SALT = 0xC0FFEE0000000001ULL;
+    constexpr uint64_t kSalt = 0xC0FFEE0000000001ULL;
 
     std::set<std::string> tokens;
     for (const std::string s :
          {"Pretzel Logic Cafe", "Basement Lab 5G", "tin can and string", "((o))"}) {
-        tokens.insert(helix::redact::ssid_with_salt(s, SALT));
+        tokens.insert(helix::redact::ssid_with_salt(s, kSalt));
     }
     // A redactor returning a constant would leak nothing but tell you nothing.
     REQUIRE(tokens.size() == 4);
@@ -389,4 +389,141 @@ TEST_CASE("redact::ips_in_text tokens are stable within a line and distinguish h
     const std::string as_ip = helix::redact::ip_with_salt("203.0.113.5", 99);
     const std::string as_mac = helix::redact::mac_with_salt("203.0.113.5", 99);
     REQUIRE(as_ip.substr(3) != as_mac.substr(4));
+}
+
+// ============================================================================
+// telemetry_text: free text bound for anonymous telemetry (#1813)
+// ============================================================================
+
+using helix::redact::telemetry_text;
+
+TEST_CASE("redact::telemetry_text removes paths, addresses, hosts and user names",
+          "[redact][telemetry_text]") {
+    SECTION("absolute and home-relative paths") {
+        const std::string out = telemetry_text(
+            "[ERROR] Cannot write /home/alice/printer_data/config/helixscreen.env", {}, 200);
+        INFO(out);
+        CHECK_FALSE(leaks(out, "alice"));
+        CHECK_FALSE(leaks(out, "printer_data"));
+        CHECK(out == "[ERROR] Cannot write <path>");
+
+        CHECK(telemetry_text("missing ~/helixscreen/bin", {}, 200) == "missing <path>");
+        CHECK(telemetry_text("dir=/usr/data/helixscreen: not writable", {}, 200) ==
+              "dir=<path>: not writable");
+        CHECK(telemetry_text("rm '/opt/helixscreen.old' failed (exit 1):", {}, 200) ==
+              "rm '<path>' failed (exit 1):");
+    }
+
+    SECTION("IP literals of every scope") {
+        const std::string out =
+            telemetry_text("connect 192.168.1.50:7125 then 203.0.113.5 and fe80::1", {}, 200);
+        INFO(out);
+        CHECK_FALSE(leaks(out, "192.168.1.50"));
+        CHECK_FALSE(leaks(out, "203.0.113.5"));
+        CHECK_FALSE(leaks(out, "fe80::1"));
+        CHECK(out == "connect <ip> then <ip> and <ip>");
+    }
+
+    SECTION("host names, URLs and user@host") {
+        const std::string out = telemetry_text(
+            "fetch https://mirror.example.net/a?token=x from printer.local as pi@k1max.lan", {},
+            200);
+        INFO(out);
+        CHECK_FALSE(leaks(out, "mirror.example.net"));
+        CHECK_FALSE(leaks(out, "token"));
+        CHECK_FALSE(leaks(out, "printer.local"));
+        CHECK_FALSE(leaks(out, "k1max"));
+        CHECK(out == "fetch <url> from <host> as <user@host>");
+    }
+
+    SECTION("the device's own names, wherever they stand") {
+        const std::string out = telemetry_text("user prestonb on K1C-7F3A, owner=prestonb",
+                                               {"prestonb", "K1C-7F3A"}, 200);
+        INFO(out);
+        CHECK_FALSE(leaks(out, "prestonb"));
+        CHECK_FALSE(leaks(out, "K1C-7F3A"));
+        CHECK(out == "user <id> on <id>, owner=<id>");
+        // A name is replaced as a word, never inside a longer one.
+        CHECK(telemetry_text("pipeline ok", {"pipe"}, 200) == "pipeline ok");
+    }
+
+    SECTION("identifiers match in any case") {
+        CHECK(telemetry_text("on MyPrinter and myprinter", {"myprinter"}, 200) ==
+              "on <id> and <id>");
+    }
+
+    SECTION("short, generic and all-digit identifiers are ignored") {
+        CHECK(telemetry_text("pi user root printer klipper admin",
+                             {"pi", "user", "root", "printer", "klipper", "admin", "abc"},
+                             200) == "pi user root printer klipper admin");
+        // An all-digit identifier never splits an address.
+        CHECK(telemetry_text("at 10.1680.1.5 and 10.0.168.1", {"1680", "168"}, 200) ==
+              "at 10.1680.1.5 and <ip>");
+    }
+
+    SECTION("host:port and ip:port drop everything after the address") {
+        CHECK(telemetry_text("reach printer.local:7125 failed", {}, 200) == "reach <host> failed");
+        const std::string out =
+            telemetry_text("GET 192.168.1.50:7125/printer/info?api_key=abc123 401", {}, 200);
+        INFO(out);
+        CHECK_FALSE(leaks(out, "abc123"));
+        CHECK(out == "GET <ip> 401");
+    }
+
+    SECTION("scheme-less URLs") {
+        const std::string out = telemetry_text("from github.com/foo/bar?token=abc", {}, 200);
+        INFO(out);
+        CHECK_FALSE(leaks(out, "abc"));
+        CHECK(out == "from <path>");
+    }
+
+    SECTION("paths after any punctuation") {
+        for (const char* shape :
+             {"a,/home/alice/x", "->/home/alice/x", "-o/home/alice/x", "~alice/x"}) {
+            const std::string out = telemetry_text(std::string("see ") + shape, {}, 200);
+            INFO(shape << " -> " << out);
+            CHECK_FALSE(leaks(out, "alice"));
+            CHECK(out == "see <path>");
+        }
+        CHECK(telemetry_text("see </home/alice/x>", {}, 200) == "see <<path>>");
+    }
+
+    SECTION("credential values") {
+        for (const char* shape : {"pass=hunter2", "password=hunter2", "token=hunter2",
+                                  "api_key=hunter2", "secret:hunter2", "auth=hunter2",
+                                  "Authorization: Bearer hunter2", "PASSWORD= hunter2"}) {
+            const std::string out = telemetry_text(shape, {}, 200);
+            INFO(shape << " -> " << out);
+            CHECK_FALSE(leaks(out, "hunter2"));
+            CHECK(out.find("<redacted>") != std::string::npos);
+        }
+    }
+
+    SECTION("MAC addresses") {
+        const std::string out =
+            telemetry_text("wlan0 aa:bb:cc:dd:ee:0f and AA-BB-CC-DD-EE-0F", {}, 200);
+        INFO(out);
+        CHECK(out == "wlan0 <mac> and <mac>");
+    }
+
+    SECTION("diagnostic words survive") {
+        CHECK(telemetry_text("install.sh failed (exit 1): settings.json missing", {}, 200) ==
+              "install.sh failed (exit 1): settings.json missing");
+        CHECK(telemetry_text("[2/6] Downloaded ... FAILED (interrupted)", {}, 200) ==
+              "[2/6] Downloaded ... FAILED (interrupted)");
+        CHECK(telemetry_text("need 120MB, have 80MB on v1.0.3", {}, 200) ==
+              "need 120MB, have 80MB on v1.0.3");
+    }
+}
+
+TEST_CASE("redact::telemetry_text caps the length without splitting a character",
+          "[redact][telemetry_text]") {
+    CHECK(telemetry_text("abcdefghij", {}, 4) == "abcd");
+    // "é" is two bytes; a cut through it backs off to the character before.
+    CHECK(telemetry_text("abc\xC3\xA9xyz", {}, 4) == "abc");
+    // A placeholder is never left half-written.
+    CHECK(telemetry_text("bad /etc/x", {}, 7) == "bad ");
+    // A literal '<' that begins no placeholder is text, not a cut point.
+    CHECK(telemetry_text("need <100MB free", {}, 9) == "need <100");
+    CHECK(telemetry_text("", {}, 10).empty());
 }

@@ -37,9 +37,7 @@ using json = nlohmann::json;
 namespace {
 
 void drain() {
-    for (int i = 0; i < 32; ++i) {
-        helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance(), 32);
 }
 
 bool mentions(const std::string& haystack, const char* needle) {
@@ -567,7 +565,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "the mock printer's calibration runs the comma
     api.advanced().start_bed_mesh_calibrate(
         {"BED_MESH_CALIBRATE PROFILE=cold", /*self_prepares=*/false}, nullptr,
         [&done]() { done = true; }, nullptr, /*expected_probes=*/0, /*probe_samples=*/1);
-    REQUIRE(wait_until([&done]() { return done; }, 20000));
+    REQUIRE(advance_until([&done]() { return done; }, 20000));
 
     CHECK(any_sent(client.gcode_script_history(), "BED_MESH_CALIBRATE PROFILE=cold"));
     const auto& profiles = client.get_bed_mesh_profiles();

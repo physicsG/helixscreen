@@ -29,12 +29,12 @@ namespace {
 // Default gradient colors (matching original thumbnail-gradient-bg.png)
 // Diagonal gradient: bright at top-right, dark at bottom-left
 // Lightened ~50% from original (80,0) to (123,43) for better visibility
-constexpr uint8_t DEFAULT_START_GRAY = 123; // Top-right - brighter
-constexpr uint8_t DEFAULT_END_GRAY = 43;    // Bottom-left - darker
+constexpr uint8_t kDefaultStartGray = 123; // Top-right - brighter
+constexpr uint8_t kDefaultEndGray = 43;    // Bottom-left - darker
 
 // Light theme gradient colors
-constexpr uint8_t LIGHT_START_GRAY = 235; // Top-right - brighter
-constexpr uint8_t LIGHT_END_GRAY = 188;   // Bottom-left - darker
+constexpr uint8_t kLightStartGray = 235; // Top-right - brighter
+constexpr uint8_t kLightEndGray = 188;   // Bottom-left - darker
 
 // Pre-rendered gradient buffer size
 // 256x256 on normal devices, 128x128 on constrained (saves 192KB at 32 bpp, 96KB at 16 bpp)
@@ -44,17 +44,17 @@ static int32_t gradient_buffer_size() {
 }
 
 // 4x4 Bayer dither matrix (normalized to 0-15)
-constexpr uint8_t BAYER_4X4[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+constexpr uint8_t kBayer4x4[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
 
 // Maximum gradient buffer dimension (pixels per axis).
 // Caps memory on large displays — a 512x512 buffer is 1 MB at 32 bpp, 512 KB at 16 bpp.
 // COVER scaling from 512 to any panel size is visually lossless for a smooth gradient.
-static constexpr int32_t MAX_GRADIENT_DIM = 512;
+static constexpr int32_t kMaxGradientDim = 512;
 
 // User data for gradient configuration
 struct GradientData {
-    static constexpr uint32_t MAGIC = 0x47524144; // "GRAD"
-    uint32_t magic = MAGIC;
+    static constexpr uint32_t kMagic = 0x47524144; // "GRAD"
+    uint32_t magic = kMagic;
     uint8_t start_r, start_g, start_b;
     uint8_t end_r, end_g, end_b;
     bool dither;
@@ -65,7 +65,7 @@ struct GradientData {
 /// Safe cast: returns GradientData* only if magic matches, else nullptr
 static GradientData* get_gradient_data(lv_obj_t* obj) {
     auto* data = static_cast<GradientData*>(lv_obj_get_user_data(obj));
-    if (data && data->magic == GradientData::MAGIC)
+    if (data && data->magic == GradientData::kMagic)
         return data;
     return nullptr;
 }
@@ -98,7 +98,7 @@ static void parse_color_to_rgb(const char* color_str, uint8_t& r, uint8_t& g, ui
  */
 static inline int16_t bayer_threshold(int32_t x, int32_t y) {
     // Bayer value 0-15, map to -12..+11 for RGB565 quantization dithering
-    int16_t bayer_val = BAYER_4X4[y & 3][x & 3];
+    int16_t bayer_val = kBayer4x4[y & 3][x & 3];
     return (bayer_val * 24 / 16) - 12; // Scale to ±12 range
 }
 
@@ -175,8 +175,8 @@ static void apply_theme_colors(GradientData* data) {
     if (!data || !data->theme_colors)
         return;
     bool dark = theme_manager_is_dark_mode();
-    uint8_t start_gray = dark ? DEFAULT_START_GRAY : LIGHT_START_GRAY;
-    uint8_t end_gray = dark ? DEFAULT_END_GRAY : LIGHT_END_GRAY;
+    uint8_t start_gray = dark ? kDefaultStartGray : kLightStartGray;
+    uint8_t end_gray = dark ? kDefaultEndGray : kLightEndGray;
     data->start_r = data->start_g = data->start_b = start_gray;
     data->end_r = data->end_g = data->end_b = end_gray;
 }
@@ -184,7 +184,7 @@ static void apply_theme_colors(GradientData* data) {
 /**
  * @brief Recreate the gradient buffer at the widget's current dimensions
  *
- * Called on LV_EVENT_SIZE_CHANGED. Caps buffer at MAX_GRADIENT_DIM per axis
+ * Called on LV_EVENT_SIZE_CHANGED. Caps buffer at kMaxGradientDim per axis
  * and uses COVER scaling for the remainder (visually lossless on gradients).
  */
 static void gradient_resize_to_widget(lv_obj_t* obj) {
@@ -198,8 +198,8 @@ static void gradient_resize_to_widget(lv_obj_t* obj) {
         return;
 
     // Cap buffer dimensions to save memory; COVER handles the rest
-    int32_t buf_w = std::min(w, MAX_GRADIENT_DIM);
-    int32_t buf_h = std::min(h, MAX_GRADIENT_DIM);
+    int32_t buf_w = std::min(w, kMaxGradientDim);
+    int32_t buf_h = std::min(h, kMaxGradientDim);
 
     // Skip if buffer already matches
     if (data->draw_buf && data->draw_buf->header.w == buf_w && data->draw_buf->header.h == buf_h)
@@ -249,7 +249,7 @@ static void gradient_delete_cb(lv_event_t* e) {
  *
  * The widget starts with a small placeholder buffer. On LV_EVENT_SIZE_CHANGED
  * it recreates the buffer at the widget's actual dimensions (capped at
- * MAX_GRADIENT_DIM) and uses COVER scaling for the remainder.
+ * kMaxGradientDim) and uses COVER scaling for the remainder.
  *
  * By default, colors are derived from the current theme (dark/light).
  * Explicit start_color/end_color attributes override this.
@@ -470,8 +470,8 @@ lv_draw_buf_t* ui_gradient_canvas_create_buf(int32_t width, int32_t height, bool
         return nullptr;
     }
 
-    uint8_t start_gray = dark_mode ? DEFAULT_START_GRAY : LIGHT_START_GRAY;
-    uint8_t end_gray = dark_mode ? DEFAULT_END_GRAY : LIGHT_END_GRAY;
+    uint8_t start_gray = dark_mode ? kDefaultStartGray : kLightStartGray;
+    uint8_t end_gray = dark_mode ? kDefaultEndGray : kLightEndGray;
 
     render_gradient_to_buf(buf, start_gray, start_gray, start_gray, end_gray, end_gray, end_gray,
                            true);

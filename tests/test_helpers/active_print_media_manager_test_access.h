@@ -48,7 +48,7 @@ class ActivePrintMediaManagerTestAccess {
     }
 
     static int max_attempts() {
-        return ActivePrintMediaManager::MAX_THUMBNAIL_ATTEMPTS;
+        return ActivePrintMediaManager::kMaxThumbnailAttempts;
     }
 
     /// Fire the pending retry as if its lv_timer period had elapsed.

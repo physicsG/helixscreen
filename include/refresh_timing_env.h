@@ -57,21 +57,20 @@ inline bool scope_all_from_env() {
 inline RefreshTiming refresh_timing_from_env() {
     using refresh_timing_detail::ms_from_env;
     RefreshTiming t;
-    t.refr_period_ms = ms_from_env("HELIX_REFR_PERIOD_MS", RefreshTiming::MIN_PERIOD_MS,
-                                   RefreshTiming::MAX_PERIOD_MS)
+    t.refr_period_ms = ms_from_env("HELIX_REFR_PERIOD_MS", RefreshTiming::kMinPeriodMs,
+                                   RefreshTiming::kMaxPeriodMs)
                            .value_or(0);
     t.scope_all = refresh_timing_detail::scope_all_from_env();
     t.screensaver_refr_period_ms =
-        ms_from_env("HELIX_SCREENSAVER_REFR_PERIOD_MS", RefreshTiming::MIN_PERIOD_MS,
-                    RefreshTiming::MAX_PERIOD_MS, true)
-            .value_or(RefreshTiming::DEFAULT_SCREENSAVER_REFR_PERIOD_MS);
+        ms_from_env("HELIX_SCREENSAVER_REFR_PERIOD_MS", RefreshTiming::kMinPeriodMs,
+                    RefreshTiming::kMaxPeriodMs, true)
+            .value_or(RefreshTiming::kDefaultScreensaverRefrPeriodMs);
     // A set floor applies everywhere; unset, a running screensaver gets its own lower one.
-    const std::optional<uint32_t> floor =
-        ms_from_env("HELIX_LOOP_MIN_SLEEP_MS", RefreshTiming::MIN_LOOP_SLEEP_MS,
-                    RefreshTiming::MAX_LOOP_SLEEP_MS);
-    t.loop_min_sleep_ms = floor.value_or(RefreshTiming::DEFAULT_LOOP_MIN_SLEEP_MS);
+    const std::optional<uint32_t> floor = ms_from_env(
+        "HELIX_LOOP_MIN_SLEEP_MS", RefreshTiming::kMinLoopSleepMs, RefreshTiming::kMaxLoopSleepMs);
+    t.loop_min_sleep_ms = floor.value_or(RefreshTiming::kDefaultLoopMinSleepMs);
     t.screensaver_loop_min_sleep_ms =
-        floor.value_or(RefreshTiming::DEFAULT_SCREENSAVER_LOOP_MIN_SLEEP_MS);
+        floor.value_or(RefreshTiming::kDefaultScreensaverLoopMinSleepMs);
     return t;
 }
 

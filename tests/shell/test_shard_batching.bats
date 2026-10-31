@@ -5,16 +5,15 @@
 # jobpool live it launches shards in batches of three, each batch under one
 # `jobpool with-token` held for the batch's whole life, so every sweep on the
 # box together runs at most three shards per pool token. Without a pool it
-# runs each shard on its own, as it always has.
+# runs each shard on its own. A shard that exits on a signal after its
+# assertions passed warns, unless SHARD_CRASH_FAILS=1 (land-gate) fails it.
 #
 # The test binary and the pool are fakes: the binary prints which token it ran
-# under and fails or hangs on request, and the pool logs every token it hands
-# out and takes back.
+# under and fails, hangs or crashes on request, and the pool logs every token
+# it hands out and takes back.
 
 bats_require_minimum_version 1.5.0
 load helpers
-
-REPO="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 
 setup() {
     unset JOBPOOL
@@ -30,8 +29,10 @@ while [ $# -gt 0 ]; do
 done
 echo "ran under token=${FAKE_TOKEN:-none}"
 [ "$i" = "${FAIL_SHARD:-x}" ] && { echo "test cases: 1 | 1 failed"; exit 1; }
+[ -n "${HELIX_TEST_PROGRESS_FILE:-}" ] && echo "running case of shard $i" > "$HELIX_TEST_PROGRESS_FILE"
 [ "$i" = "${HANG_SHARD:-x}" ] && sleep 5
 echo "All tests passed"
+[ "$i" = "${CRASH_SHARD:-x}" ] && exit 139
 [ -n "${FAKE_TOKEN:-}" ] && echo "end $FAKE_TOKEN" >> "$POOL_LOG"
 exit 0
 EOF
@@ -61,9 +62,9 @@ EOF
 # sweep SHARDS [make overrides...]: run the shard runner alone, no build.
 sweep() {
     local n=$1; shift
-    (cd "$REPO" && make --no-print-directory TEST_BIN="$FAKE_BIN" NPROCS="$n" \
+    scratch_make TEST_BIN="$FAKE_BIN" NPROCS="$n" \
         SHARD_ARTIFACT_ROOT="$BATS_TEST_TMPDIR" SHARD_RETRIES=1 "$@" \
-        --eval 'sweep-under-test: ; @$(call run_tests_parallel,"~[.]")' sweep-under-test)
+        --eval 'sweep-under-test: ; @$(call run_tests_parallel,"~[.]")' sweep-under-test
 }
 
 token_of() { # <shard> <output>
@@ -101,6 +102,14 @@ token_of() { # <shard> <output>
     [ "$(grep -c '^give' "$POOL_LOG")" -eq 2 ]
 }
 
+@test "a timed-out shard is named by the case it was running" {
+    HANG_SHARD=2 run sweep 3 SHARD_TIMEOUT=1
+    [ "$status" -ne 0 ]
+    contains "Shard 2 failed (exit 124)" "$output"
+    contains "died inside: case of shard 2" "$output"
+    lacks "died inside: case of shard 1" "$output"
+}
+
 @test "a with-token that cannot start still runs its shards" {
     printf '#!/bin/sh\n[ "$1" = target ] && echo 4 && exit 0\nexit 1\n' > "$HELIX_JOBPOOL"
     chmod +x "$HELIX_JOBPOOL"
@@ -118,4 +127,15 @@ token_of() { # <shard> <output>
     [ ! -e "$POOL_LOG" ]
     local i
     for i in 0 1 2 3 4; do [ "$(token_of $i "$output")" = none ]; done
+}
+
+@test "a shard crashing after its assertions passed warns, and fails under SHARD_CRASH_FAILS=1" {
+    JOBPOOL=0 CRASH_SHARD=2 run sweep 4
+    [ "$status" -eq 0 ]
+    contains "Shard 2 crashed after its assertions passed (signal 11)" "$output"
+    lacks "One or more test shards failed" "$output"
+    JOBPOOL=0 CRASH_SHARD=2 run sweep 4 SHARD_CRASH_FAILS=1
+    [ "$status" -ne 0 ]
+    contains "Shard 2 crashed after its assertions passed (signal 11)" "$output"
+    contains "One or more test shards failed" "$output"
 }

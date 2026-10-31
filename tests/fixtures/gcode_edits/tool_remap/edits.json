@@ -1,0 +1,16 @@
+{
+  "description": "Swap tools 0 and 1 across every command family; comments, G-code words and unmapped tools stay",
+  "edits": [
+    {
+      "line_number": 0,
+      "expect_raw_line": "",
+      "action": "tool_remap",
+      "args": {
+        "map": {
+          "0": 1,
+          "1": 0
+        }
+      }
+    }
+  ]
+}

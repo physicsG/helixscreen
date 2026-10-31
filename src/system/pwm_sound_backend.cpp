@@ -63,7 +63,7 @@ static int64_t monotonic_now_ns() {
 /// is what the spin budget below exists to absorb, and no PWM device is driven
 /// on such a host — the backend is a device build.
 static void default_wait_until(int64_t deadline_ns, const std::function<int64_t()>& now) {
-    const int64_t sleep_target = deadline_ns - PWMSoundBackend::PCM_SPIN_BUDGET_NS;
+    const int64_t sleep_target = deadline_ns - PWMSoundBackend::kPcmSpinBudgetNs;
     if (now() < sleep_target) {
 #ifdef TIMER_ABSTIME
         struct timespec ts = to_timespec_ns(sleep_target);
@@ -177,7 +177,7 @@ float PWMSoundBackend::waveform_duty_ratio(Waveform w) {
 }
 
 int64_t PWMSoundBackend::park_probe_frames() {
-    return PCM_PARK_POLL_NS * PCM_SAMPLE_RATE / 1000000000LL;
+    return kPcmParkPollNs * kPcmSampleRate / 1000000000LL;
 }
 
 int64_t PWMSoundBackend::samples_behind(int64_t now_ns, int64_t base_ns, int64_t sample_index,
@@ -272,13 +272,13 @@ bool PWMSoundBackend::initialize() {
         fd_duty_ = fd_period_ = fd_enable_ = -1;
     }
 
-    render_buf_.resize(PCM_RENDER_BUFFER_FRAMES);
+    render_buf_.resize(kPcmRenderBufferFrames);
     park_probe_buf_.resize(static_cast<size_t>(park_probe_frames()));
 
-    // Rig-tunable audible floor (see DEFAULT_MIN_NOTE_MS): env_float falls
+    // Rig-tunable audible floor (see kDefaultMinNoteMs): env_float falls
     // back to the default on unset/empty/non-positive/unparseable values.
-    min_note_ms_ = helix::env_float("HELIX_PWM_MIN_NOTE_MS", DEFAULT_MIN_NOTE_MS,
-                                    MIN_NOTE_MS_CLAMP_LOW, MIN_NOTE_MS_CLAMP_HIGH);
+    min_note_ms_ = helix::env_float("HELIX_PWM_MIN_NOTE_MS", kDefaultMinNoteMs, kMinNoteMsClampLow,
+                                    kMinNoteMsClampHigh);
     spdlog::debug("[PWMSoundBackend] min note floor: {} ms", min_note_ms_);
 
     initialized_ = true;
@@ -478,7 +478,7 @@ void PWMSoundBackend::enter_pcm_mode() {
     if (in_pcm_mode_)
         return;
 
-    uint32_t carrier_period = static_cast<uint32_t>(1e9 / PCM_CARRIER_HZ);
+    uint32_t carrier_period = static_cast<uint32_t>(1e9 / kPcmCarrierHz);
 
     if (fd_duty_ >= 0) {
         sysfs_write_fd(fd_enable_, 0);
@@ -496,7 +496,7 @@ void PWMSoundBackend::enter_pcm_mode() {
     enabled_ = true;
     in_pcm_mode_ = true;
     spdlog::debug("[PWMSoundBackend] Entered PCM mode (carrier {}Hz, sample rate {}Hz)",
-                  PCM_CARRIER_HZ, PCM_SAMPLE_RATE);
+                  kPcmCarrierHz, kPcmSampleRate);
 }
 
 void PWMSoundBackend::exit_pcm_mode() {
@@ -614,12 +614,12 @@ void PWMSoundBackend::render_loop() {
 
     enter_pcm_mode();
 
-    const uint32_t carrier_period = static_cast<uint32_t>(1e9 / PCM_CARRIER_HZ);
-    const int64_t sample_interval_ns = 1000000000LL / PCM_SAMPLE_RATE;
+    const uint32_t carrier_period = static_cast<uint32_t>(1e9 / kPcmCarrierHz);
+    const int64_t sample_interval_ns = 1000000000LL / kPcmSampleRate;
 
     // Duty range: 0.5% to 99.5% for maximum buzzer deflection
-    static constexpr float DUTY_MIN = 0.005f;
-    static constexpr float DUTY_RANGE = 0.99f; // 0.995 - 0.005
+    static constexpr float kDutyMin = 0.005f;
+    static constexpr float kDutyRange = 0.99f; // 0.995 - 0.005
 
     // Pre-allocate duty cycle string buffer (avoid per-sample allocation)
     // Max duty value ~16000 = 5 digits + null = 6 bytes per entry
@@ -630,10 +630,10 @@ void PWMSoundBackend::render_loop() {
     // Automatic gain control: track peak and boost quiet signals
     // MOD files often have low amplitude (3-5% of full scale)
     float agc_gain = 4.0f;
-    static constexpr float AGC_TARGET = 0.85f;
-    static constexpr float AGC_MAX = 20.0f;
-    static constexpr float AGC_ATTACK = 0.001f;   // fast attack (reduce gain on peaks)
-    static constexpr float AGC_RELEASE = 0.0001f; // slow release (increase gain gradually)
+    static constexpr float kAgcTarget = 0.85f;
+    static constexpr float kAgcMax = 20.0f;
+    static constexpr float kAgcAttack = 0.001f;   // fast attack (reduce gain on peaks)
+    static constexpr float kAgcRelease = 0.0001f; // slow release (increase gain gradually)
 
     int64_t base_ns = now_fn_();
     int64_t sample_index = 0;
@@ -660,7 +660,7 @@ void PWMSoundBackend::render_loop() {
             // probe buffer and resume the moment real audio shows up.
             const size_t probe_frames = static_cast<size_t>(park_probe_frames());
             std::memset(park_probe_buf_.data(), 0, probe_frames * sizeof(float));
-            source(park_probe_buf_.data(), probe_frames, PCM_SAMPLE_RATE);
+            source(park_probe_buf_.data(), probe_frames, kPcmSampleRate);
             bool any_nonzero = false;
             for (size_t i = 0; i < probe_frames && !any_nonzero; i++) {
                 any_nonzero = park_probe_buf_[i] != 0.0f;
@@ -674,7 +674,7 @@ void PWMSoundBackend::render_loop() {
                 base_ns = now_fn_();
                 sample_index = 0;
             } else {
-                wait_until_fn_(now_fn_() + PCM_PARK_POLL_NS);
+                wait_until_fn_(now_fn_() + kPcmParkPollNs);
             }
             continue;
         }
@@ -682,7 +682,7 @@ void PWMSoundBackend::render_loop() {
         // Render a buffer of PCM samples
         size_t frames = render_buf_.size();
         std::memset(render_buf_.data(), 0, frames * sizeof(float));
-        source(render_buf_.data(), frames, PCM_SAMPLE_RATE);
+        source(render_buf_.data(), frames, kPcmSampleRate);
 
         // Find peak in this buffer for AGC (and the park detector)
         float peak = 0.0f;
@@ -697,12 +697,12 @@ void PWMSoundBackend::render_loop() {
             // Peak would clip — reduce gain quickly
             agc_gain = std::max(1.0f, 1.0f / peak);
         } else if (peak > 0.001f) {
-            float desired = AGC_TARGET / peak;
-            desired = std::min(desired, AGC_MAX);
+            float desired = kAgcTarget / peak;
+            desired = std::min(desired, kAgcMax);
             if (desired < agc_gain) {
-                agc_gain += (desired - agc_gain) * AGC_ATTACK;
+                agc_gain += (desired - agc_gain) * kAgcAttack;
             } else {
-                agc_gain += (desired - agc_gain) * AGC_RELEASE;
+                agc_gain += (desired - agc_gain) * kAgcRelease;
             }
         }
 
@@ -721,7 +721,7 @@ void PWMSoundBackend::render_loop() {
             float sample = std::clamp(render_buf_[i] * agc_gain, -1.0f, 1.0f);
             float normalized = (sample + 1.0f) / 2.0f;
             int duty = static_cast<int>(static_cast<float>(carrier_period) *
-                                        (DUTY_MIN + normalized * DUTY_RANGE));
+                                        (kDutyMin + normalized * kDutyRange));
 
             duty_offsets[i] = str_offset;
             int len = snprintf(duty_strs.data() + str_offset, 8, "%d", duty);
@@ -741,7 +741,7 @@ void PWMSoundBackend::render_loop() {
             sample_index++;
 
             if (samples_behind(now_fn_(), base_ns, sample_index, sample_interval_ns) >
-                PCM_CATCHUP_MAX_SAMPLES) {
+                kPcmCatchupMaxSamples) {
                 // Scheduling stall: skip to the sample due now instead of
                 // bursting the missed writes — the burst is what starved
                 // klippy under the old loop.

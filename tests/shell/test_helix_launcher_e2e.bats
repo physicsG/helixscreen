@@ -105,13 +105,21 @@ ENVEOF
     chmod +x "$BATS_TEST_TMPDIR/env_setup.sh"
 
     install_recording_binary helix-screen
+
+    # No DRM card unless a test adds one, so the launcher probes only when asked.
+    export HELIX_DRI_DIR="$BATS_TEST_TMPDIR/dri"
+    mkdir -p "$HELIX_DRI_DIR"
 }
 
 # Install a mock display binary that records its args and the display backend
-# it was started with, for test inspection
+# it was started with, for test inspection. Its --probe-egl answers with
+# MOCK_PROBE_RC (default 1, a binary without the EGL path) and records nothing.
 install_recording_binary() {
     cat > "$MOCK_INSTALL/bin/$1" << 'MOCKEOF'
 #!/bin/sh
+if [ "$1" = "--probe-egl" ]; then
+    exit "${MOCK_PROBE_RC:-1}"
+fi
 for arg in "$@"; do
     echo "$arg"
 done > "$MOCK_INSTALL/helix_screen_args.txt"
@@ -152,35 +160,111 @@ run_env_setup() {
 # End-to-end: the display backend the chosen binary is started with
 # =============================================================================
 
-@test "e2e: a forced EGL rung starts helix-screen-egl with drm" {
-    install_recording_binary helix-screen-egl
+# A /dev/dri stand-in with a card node, so the launcher probes for rungs.
+with_dri_card() {
+    : > "$HELIX_DRI_DIR/card0"
+}
+
+# helix-screen that appends "<binary> <backend>" per run and crashes (SIGSEGV
+# exit) on the backends named in $1.
+install_crashing_binary() {
+    cat > "$MOCK_INSTALL/bin/helix-screen" << MOCKEOF
+#!/bin/sh
+[ "\$1" = "--probe-egl" ] && exit 0
+echo "\$(basename "\$0") \${HELIX_DISPLAY_BACKEND-<unset>}" >> "$MOCK_INSTALL/runs.txt"
+case " $1 " in *" \${HELIX_DISPLAY_BACKEND:-} "*) exit 139 ;; esac
+exit 0
+MOCKEOF
+    chmod +x "$MOCK_INSTALL/bin/helix-screen"
+}
+
+run_launcher_once() {
+    cp "$LAUNCHER" "$MOCK_INSTALL/bin/helix-launcher.sh"
+    MOCK_INSTALL="$MOCK_INSTALL" sh "$MOCK_INSTALL/bin/helix-launcher.sh" >/dev/null 2>&1 || true
+}
+
+@test "e2e: a forced EGL rung starts helix-screen with egl" {
     export HELIX_DISPLAY_BACKEND=egl
 
     run launcher_backend
-    [ "$output" = "helix-screen-egl drm" ]
+    [ "$output" = "helix-screen egl" ]
 }
 
-@test "e2e: a primary whose libraries do not resolve starts helix-screen-fbdev with fbdev" {
-    install_recording_binary helix-screen-fbdev
-    mock_command_script "ldd" 'echo "	libdrm.so.2 => not found"'
-    unset HELIX_DISPLAY_BACKEND
+@test "e2e: a board whose probe succeeds starts helix-screen with egl" {
+    with_dri_card
+    export MOCK_PROBE_RC=0
 
     run launcher_backend
-    [ "$output" = "helix-screen-fbdev fbdev" ]
+    [ "$output" = "helix-screen egl" ]
 }
 
-@test "e2e: a dual-binary install starts the primary with drm" {
-    install_recording_binary helix-screen-fbdev
-    mock_command_script "ldd" 'exit 0'
-    unset HELIX_DISPLAY_BACKEND
+@test "e2e: a board whose probe declines starts helix-screen with drm" {
+    with_dri_card
+    export MOCK_PROBE_RC=1
 
     run launcher_backend
     [ "$output" = "helix-screen drm" ]
 }
 
+@test "e2e: a DRM card without libdrm starts helix-screen with fbdev" {
+    with_dri_card
+    export MOCK_PROBE_RC=3
+
+    run launcher_backend
+    [ "$output" = "helix-screen fbdev" ]
+}
+
+@test "e2e: a binary without rungs, or a board without a DRM card, auto-detects" {
+    with_dri_card
+    export MOCK_PROBE_RC=2
+    run launcher_backend
+    [ "$output" = "helix-screen <unset>" ]
+
+    rm "$HELIX_DRI_DIR/card0"
+    export MOCK_PROBE_RC=0
+    run launcher_backend
+    [ "$output" = "helix-screen <unset>" ]
+}
+
+@test "e2e: helix-screen-egl or helix-screen-fbdev left by an older release is never run" {
+    # Every update path replaces bin/ wholesale, but a stale copy must not
+    # matter if one survives: it would run an old build.
+    install_recording_binary helix-screen-fbdev
+    install_recording_binary helix-screen-egl
+    with_dri_card
+    export MOCK_PROBE_RC=0
+
+    run launcher_backend
+    [ "$output" = "helix-screen egl" ]
+
+    export HELIX_DISPLAY_BACKEND=egl
+    run launcher_backend
+    [ "$output" = "helix-screen egl" ]
+
+    export HELIX_DISPLAY_BACKEND=fbdev
+    run launcher_backend
+    [ "$output" = "helix-screen fbdev" ]
+}
+
+@test "e2e: a crash on the EGL rung retries helix-screen with drm, not fbdev" {
+    install_crashing_binary "egl"
+    with_dri_card
+    run_launcher_once
+
+    run cat "$MOCK_INSTALL/runs.txt"
+    [ "$output" = "$(printf 'helix-screen egl\nhelix-screen drm')" ]
+}
+
+@test "e2e: a crash on the DRM rung retries helix-screen with fbdev" {
+    install_crashing_binary "drm"
+    export HELIX_DISPLAY_BACKEND=drm
+    run_launcher_once
+
+    run cat "$MOCK_INSTALL/runs.txt"
+    [ "$output" = "$(printf 'helix-screen drm\nhelix-screen fbdev')" ]
+}
+
 @test "e2e: a backend the user set reaches the app unchanged" {
-    # No fbdev binary to select, so the launcher runs the primary; the user's
-    # value is still the one the app gets
     export HELIX_DISPLAY_BACKEND=fbdev
 
     run launcher_backend

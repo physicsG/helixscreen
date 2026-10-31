@@ -190,6 +190,103 @@ jobs:
           helixscreen/toolchain-${{ matrix.platform }} \
           ccache -s
 
+    # gpu-libs-hidden-smoke below runs the binary this leg built, so the check
+    # the release waits on runs every night on main as well.
+    - name: Upload x86 helix-screen for the GPU-libraries-hidden smoke
+      if: matrix.platform == 'x86'
+      uses: actions/upload-artifact@v7
+      with:
+        name: warm-x86-helix-screen
+        path: build/x86/bin/helix-screen
+        if-no-files-found: error
+        retention-days: 3
+
+  # release.yml's build-android-native, one leg per ABI through the same
+  # composite action, so each ABI's cache holds exactly the objects that
+  # release leg will look up. No packaging or signing.
+  warm-android:
+    name: Warm (Android ${{ matrix.abi }})
+    needs: [prune]
+    if: always() && github.repository == 'prestonbrown/helixscreen'
+    runs-on: ubuntu-22.04
+    # Sized for a cold ABI, the only kind this job is guaranteed to tolerate:
+    # ~30 min, so 60 is twofold margin.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Initialize submodules
+      uses: ./.github/actions/init-submodules
+
+    - name: Compile native code (release, warm cache only)
+      uses: ./.github/actions/android-native-release
+      with:
+        abi: ${{ matrix.abi }}
+        save-cache: "true"
+
+  # release.yml's gpu-libs-hidden-smoke, on the nightly x86 build. A job of its
+  # own rather than a step in the warm leg: a failed step there would also lose
+  # that leg's ccache save. It runs from a checkout, which supplies the ui_xml/
+  # and assets/ a release tarball would.
+  gpu-libs-hidden-smoke:
+    name: GPU libraries hidden (x86)
+    needs: [warm]
+    if: ${{ !cancelled() && github.repository == 'prestonbrown/helixscreen' }}
+    runs-on: ubuntu-22.04
+    # Two image-build attempts of up to 15 minutes each, then the runs.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    # On a cache miss this pulls the base image and apt packages, so a network
+    # flake would fail the smoke and red the nightly; one retry absorbs it.
+    - name: Build x86 toolchain image
+      uses: nick-fields/retry@v4
+      with:
+        timeout_minutes: 15
+        max_attempts: 2
+        retry_wait_seconds: 30
+        command: |
+          docker buildx build \
+            --cache-from type=gha,scope=toolchain-x86 \
+            --load \
+            -t helixscreen/toolchain-x86 \
+            -f docker/Dockerfile.x86 \
+            docker/
+
+    - name: Download x86 helix-screen
+      uses: actions/download-artifact@v8
+      with:
+        name: warm-x86-helix-screen
+        path: build/x86/bin
+
+    - name: Run with the GPU libraries hidden and present
+      run: |
+        chmod +x build/x86/bin/helix-screen
+        docker run --rm --network none \
+          -v "${{ github.workspace }}":/src \
+          -w /src \
+          -e GPU_SMOKE_WORK=/tmp/gpu-libs-smoke \
+          helixscreen/toolchain-x86 \
+          scripts/ci/gpu_libs_hidden_smoke.sh run build/x86/bin/helix-screen
+
   # Drop the generation this run just superseded.
   #
   # actions/cache writes its cache in a post-step at job end, so no step inside
@@ -208,7 +305,7 @@ jobs:
   # duplicates cost budget, a missing release ccache costs a release.
   prune-superseded:
     name: Drop the superseded release ccache
-    needs: [warm]
+    needs: [warm, warm-android]
     uses: ./.github/workflows/cache-prune.yml
     with:
       include_release: true

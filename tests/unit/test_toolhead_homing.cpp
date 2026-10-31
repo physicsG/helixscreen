@@ -12,6 +12,10 @@
 #include "printer_state.h"
 #include "toolhead_homing.h"
 
+#include <chrono>
+#include <optional>
+#include <thread>
+
 #include "../catch_amalgamated.hpp"
 
 TEST_CASE("toolhead_is_homed reads the live homed_axes subject", "[homing][toolhead]") {
@@ -99,6 +103,26 @@ TEST_CASE("free ensure_homed_then does not run then() synchronously when not hom
     CHECK_FALSE(ran);
 }
 
+TEST_CASE("ensure_homed_then with HomingPolicy::Always homes an already-homed toolhead",
+          "[homing][toolhead]") {
+    LVGLTestFixture fixture;
+    helix::PrinterState& state = get_printer_state();
+    state.init_subjects(false);
+    lv_subject_copy_string(state.motion_state().get_homed_axes_subject(), "xyz");
+
+    helix::AsyncLifetimeGuard guard;
+    bool ran = false;
+    std::optional<MoonrakerErrorType> error;
+    // With no API the G28 cannot be sent, so the error path proves the policy
+    // asked for one instead of skipping straight to then().
+    helix::ensure_homed_then(
+        nullptr, guard, [&ran] { ran = true; },
+        [&error](const MoonrakerError& err) { error = err.type; }, helix::HomingPolicy::Always);
+    CHECK_FALSE(ran);
+    REQUIRE(error);
+    CHECK(*error == MoonrakerErrorType::CONNECTION_LOST);
+}
+
 TEST_CASE("ensure_homed_then's continuation is not refused as someone else's busy",
           "[homing][toolhead][busy_guard]") {
     LVGLTestFixture fixture;
@@ -120,17 +144,55 @@ TEST_CASE("ensure_homed_then's continuation is not refused as someone else's bus
         &api, guard,
         [&] {
             ran = true;
-            // The homing macro is still moving the bed when G28 acks.
-            PrinterStateTestAccess::set_sustained_idle_timeout_printing(state, true);
             refused_as_external = state.is_external_blocking_operation_active();
         },
         nullptr);
+    // The G28 is seen holding idle_timeout "Printing", and the homing macro is
+    // still moving the bed past SETTLE when G28 acks. Ownership needs the send
+    // to precede the episode, so the episode is observed now and allowed to
+    // settle in real time.
+    lv_subject_set_int(state.calibration_state().get_idle_timeout_printing_subject(), 1);
+    state.calibration_state().idle_timeout_busy().set_printing(true);
+    std::this_thread::sleep_for(helix::IdleTimeoutBusy::kSettle + std::chrono::milliseconds(100));
+    REQUIRE(state.is_blocking_operation_active());
     helix::ui::UpdateQueue::instance().drain();
 
     REQUIRE(ran);
     CHECK_FALSE(refused_as_external);
 
     PrinterStateTestAccess::set_sustained_idle_timeout_printing(state, false);
+    client.stop_temperature_simulation();
+    client.disconnect();
+}
+
+TEST_CASE("ensure_homed_then's G28 ack adopts no episode that begins after it",
+          "[homing][toolhead][busy_guard]") {
+    LVGLTestFixture fixture;
+    helix::PrinterState& state = get_printer_state();
+    state.init_subjects(false);
+    state.set_klippy_state_sync(helix::KlippyState::READY);
+    lv_subject_set_int(state.print_state().get_print_state_enum_subject(),
+                       static_cast<int>(helix::PrintJobState::STANDBY));
+    lv_subject_copy_string(state.motion_state().get_homed_axes_subject(), "");
+
+    MoonrakerClientMock client{MoonrakerClientMock::PrinterType::VORON_24};
+    client.connect("ws://mock/websocket", []() {}, []() {});
+    MoonrakerAPI api{client, state};
+
+    helix::AsyncLifetimeGuard guard;
+    bool ran = false;
+    helix::ensure_homed_then(&api, guard, [&] { ran = true; }, nullptr);
+    // A homing pass longer than the grace window, then the ack.
+    std::this_thread::sleep_for(helix::BusyEpisodeOwner::kGraceWindow +
+                                std::chrono::milliseconds(100));
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(ran);
+
+    // An operation someone else starts just after the ack is not the app's.
+    const auto external = helix::BusyEpisodeOwner::clock::now() + std::chrono::milliseconds(100);
+    CHECK_FALSE(state.app_motion_activity().owns_busy_episode(external,
+                                                              external + std::chrono::seconds(1)));
+
     client.stop_temperature_simulation();
     client.disconnect();
 }

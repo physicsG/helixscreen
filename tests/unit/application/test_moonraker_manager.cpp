@@ -792,6 +792,22 @@ TEST_CASE("A printer switch freezes the UpdateQueue before it disconnects the cl
     CHECK(disconnect < drain);
 }
 
+TEST_CASE("A printer switch tears static subjects down with the switch scope",
+          "[application][shutdown][subjects][regression]") {
+    // A switch rebuilds printer state without re-running boot-time registration, so the
+    // registry must be told which teardown this is or it drops entries nothing restores.
+    // Teardown cannot be driven at runtime (see application_test_access.h), so this is a
+    // source-level contract.
+    const std::string impl = read_file("src/application/printer_session.cpp");
+    const std::string scope = extract_method_body(impl, "PrinterSession", "teardown_printer_scope");
+    REQUIRE_FALSE(scope.empty());
+    const auto call = scope.find("StaticSubjectRegistry::instance().deinit_all(");
+    REQUIRE(call != std::string::npos);
+    const std::string args = scope.substr(call, scope.find(';', call) - call);
+    CHECK(args.find("StaticSubjectRegistry::Scope::PrinterSwitch") != std::string::npos);
+    CHECK(args.find("StaticSubjectRegistry::Scope::ProcessExit") != std::string::npos);
+}
+
 TEST_CASE("should_complete_preprint - completes when the layer-zero sample is never delivered",
           "[application][print_start][regression]") {
     // notify_status_update is coalesced, so the 0 sample is not guaranteed to be
@@ -1002,6 +1018,7 @@ TEST_CASE("should_stop_collector_on_klippy_state stops on shutdown and error",
 // is true, and it is true because this observer drove the phase subject off
 // IDLE. Drives the real manager with its mock client.
 
+#include "../../test_helpers/moonraker_manager_test_access.h"
 #include "../../test_helpers/update_queue_test_access.h"
 #include "ams_state.h"
 #include "app_globals.h"
@@ -1049,6 +1066,17 @@ TEST_CASE_METHOD(ManagerCollectorArmingFixture, "shutdown clears the global clie
     REQUIRE(get_moonraker_client() != nullptr);
     mgr.shutdown();
     CHECK(get_moonraker_client() == nullptr);
+}
+
+TEST_CASE_METHOD(ManagerCollectorArmingFixture,
+                 "shutdown drops the stop-reason tracker before the client it taps",
+                 "[application][moonraker_manager][stop_reason]") {
+    // The tracker unregisters from its client when destroyed; outliving shutdown
+    // would make that call on the freed client.
+    mgr.init_print_stop_reason();
+    REQUIRE(helix::MoonrakerManagerTestAccess::tracks_stop_reason(mgr));
+    mgr.shutdown();
+    CHECK_FALSE(helix::MoonrakerManagerTestAccess::tracks_stop_reason(mgr));
 }
 
 TEST_CASE_METHOD(ManagerCollectorArmingFixture,

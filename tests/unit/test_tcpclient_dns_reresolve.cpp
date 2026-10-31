@@ -37,9 +37,9 @@ bool is_loopback(const sockaddr_u& addr) {
     }
     if (addr.sa.sa_family == AF_INET6) {
         const auto& v6 = addr.sin6.sin6_addr;
-        static constexpr unsigned char V6_LOOPBACK[16] = {0, 0, 0, 0, 0, 0, 0, 0,
+        static constexpr unsigned char kV6Loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0,
                                                           0, 0, 0, 0, 0, 0, 0, 1};
-        return std::memcmp(&v6, V6_LOOPBACK, 16) == 0;
+        return std::memcmp(&v6, kV6Loopback, 16) == 0;
     }
     return false;
 }

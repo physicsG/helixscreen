@@ -20,8 +20,28 @@ enum class ClogMeterMode : int {
     None = 0,
     Encoder = 1,   ///< 0..100 clog percentage, gradient safe -> clogged
     Flowguard = 2, ///< -100..+100, tangle at one end and clog at the other
-    Buffer = 3,    ///< 0..100 AFC buffer fault proximity
+    Buffer = 3,    ///< 0..100 buffer fault proximity
+    /// A Klipper filament_motion_sensor: a state, not a gauge. `value` is one
+    /// of the kMotion*Value constants below (#1823).
+    Motion = 4,
 };
+
+/// The three readings a filament motion sensor can give. Moving is an empty
+/// fill, jammed a full one (always with the warning flag set), and disarmed
+/// sits below the scale, so a linear renderer clamps it to empty too.
+constexpr int kMotionMovingValue = 0;
+constexpr int kMotionJammedValue = 100;
+constexpr int kMotionDisarmedValue = -1;
+
+/// The kMotion*Value a filament motion sensor's reading lands on. Klipper reports
+/// `filament_detected` false whenever the encoder has not seen movement, but that
+/// is a jam only while a print runs: outside one there is nothing to move, and a
+/// sensor some backends run as a presence switch reads empty with an empty head.
+int motion_sensor_value(bool armed, bool filament_moving, bool print_running);
+
+/// Whether a mode reports a state rather than a measurement, so it has no
+/// danger band and no peak to draw.
+bool clog_meter_is_state(int mode);
 
 /// Whether a mode's reading runs out from a centre rather than up from nothing,
 /// so its two ends mean opposite faults.
@@ -56,6 +76,7 @@ lv_color_t resolve_clog_tint(int mode, int value, int warning);
 /// Severity of the current reading, as `clog_meter_status` carries it to the
 /// status glyph. Ordered, so a renderer can compare rather than switch.
 enum class ClogMeterStatus : int {
+    Off = -1,    ///< The detector is present but not armed: it would not catch a fault
     Ok = 0,      ///< Below the danger threshold, or nothing to report
     Warning = 1, ///< At or past the threshold, but the backend has not tripped
     Fault = 2,   ///< The backend is reporting a warning: clogged, tangled, faulted
@@ -67,7 +88,8 @@ enum class ClogMeterStatus : int {
 /// pauses a print — so it always reads as a fault. Below that, a reading that
 /// has reached the danger threshold is a warning even though nothing has
 /// tripped yet, which is the whole point of showing a threshold at all.
-/// `value` is compared by magnitude so Flowguard's tangle side counts.
+/// `value` is compared by magnitude so Flowguard's tangle side counts. A
+/// disarmed motion sensor is Off.
 ClogMeterStatus clog_meter_status(int mode, int value, int warning, int danger_pct);
 
 /// Severity of an AFC buffer's fault countdown, the decision the clog meter
@@ -134,7 +156,8 @@ BufferLean buffer_lean(float bias);
 /// distance at or beyond the fault threshold collapses to zero as well
 /// (`BufferHealth::danger_value()`). Neither is a measurement, so both
 /// renderers stand a check icon in place of the reading instead of drawing an
-/// empty scale — which is what the bar did before it shared this predicate.
+/// empty scale. A motion sensor seeing filament move has nothing to report
+/// either.
 ///
 /// This is not the same as `ClogMeterMode::None`: mode 0 means there is no
 /// detection hardware at all and the whole widget hides itself from XML.

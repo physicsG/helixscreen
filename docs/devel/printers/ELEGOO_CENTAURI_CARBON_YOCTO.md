@@ -74,6 +74,43 @@ incremental builds take seconds.
 When iterating on recipe changes, edit that file directly. When it's right,
 we open a PR against `OpenCentauri/cosmos` with the updated recipe.
 
+## Moonraker on COSMOS
+
+COSMOS has no systemd and no `sudo`: it boots with SysV init (`/etc/rc6.d/K04moonraker`
+stops Moonraker through `start-stop-daemon` on reboot), `/sbin/reboot` is sysvinit's `halt`,
+and HelixScreen runs as root. Three Moonraker setups exist on these printers, and they differ
+in what HelixScreen can rely on:
+
+| Setup | `machine.reboot` / `machine.shutdown` | Python components (HelixPrint plugin, timelapse) |
+|---|---|---|
+| COSMOS stable (26.09.0 and earlier): Python Moonraker, `[machine] provider: none` | Fails: shells out to `sudo systemctl reboot`, no sudo | Load |
+| COSMOS main (since 2026-10-06, not in a release yet): Python Moonraker with a `sysvinit` machine provider | Works | Load |
+| [Moonruster](https://github.com/shawn-makes-stuff/moonruster): third-party Rust port of Moonraker, installed by the user over SSH, not shipped by COSMOS | Fails the same way under `provider: none` (logs `sudo reboot`) | **Do not load.** Its components are a fixed compiled list; any other `moonraker.conf` section logs `ModuleNotFoundError: No module named 'moonraker.components.<name>'` and becomes a startup warning |
+
+What this means for HelixScreen on a CC1:
+
+- **Power actions do not use Moonraker.** When Moonraker is on this host and the host does
+  not run systemd (`helix::host_runs_systemd()`), the shutdown dialog calls `SystemPower`
+  directly (`src/ui/panel_widgets/shutdown_widget.cpp#plan_shutdown_dialog`), so all three
+  setups reboot through `/sbin/reboot` with no Moonraker error (#1869). Mainsail and Fluidd
+  reboot buttons still go through `machine.reboot` and fail on stable COSMOS and Moonruster.
+- **The framebuffer is cleared on the way down.** Once a local reboot or shutdown is
+  dispatched, LVGL stops rendering and fb0 is written to opaque black, and the SIGTERM fast
+  exit (`include/fbdev_signal_clear.h`) writes it again, so the last frame does not show
+  through the next boot. Every SIGTERM stop blanks the panel this way, including the
+  gui-switcher hand-off to another UI and COSMOS's GUI stop before resonance calibration.
+- **If local power fails while Moonraker is connected**, HelixScreen retries through
+  `machine.reboot` / `machine.shutdown` before showing an error, for setups where the systemd
+  check reads wrong (a container without `/run/systemd`, a localhost tunnel).
+- **Under Moonruster the HelixPrint plugin is absent.** HelixScreen detects no plugin and runs
+  its no-plugin paths; the plugin installer's `[helix_print]` section only adds a Moonruster
+  startup warning. Moonruster ports Moonraker's extension (agent) API, so an out-of-process
+  plugin could work there, but the plugin is a Python component today and that would be a
+  redesign. Moonruster measured about 10 MB more `MemAvailable` on a 115 MB CC1, so expect COSMOS users to try it.
+- **Plain API clients do not care which server answers.** Moonruster reports itself as
+  Moonraker `v0.11.0-3-g9e676eb`, API 1.5.0, and HelixScreen talks to it like any Moonraker.
+  Its `Server` header reads `Moonruster/<version>` if a bug report needs telling them apart.
+
 ## Notes
 
 - `scripts/yocto-docker.sh` reads the cosmos checkout from `$YOCTO_COSMOS` (default

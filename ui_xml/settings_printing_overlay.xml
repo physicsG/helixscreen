@@ -2,8 +2,8 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Printing Settings Overlay Panel -->
-<!-- Machine limits/motion/retraction/enclosure, filament temperature and cooldown -->
-<!-- behaviour, and print extras (timelapse, macro buttons) -->
+<!-- Machine limits/motion/retraction/enclosure, multi-filament system management, -->
+<!-- filament temperature and cooldown behaviour, and print extras (timelapse, macro buttons) -->
 <!-- Uses setting_* components for consistency with main settings panel -->
 <component>
   <view name="settings_printing_overlay" extends="overlay_panel" title="Printing" bg_color="#screen_bg">
@@ -20,7 +20,7 @@
                             label="Machine Limits" icon="dashboard" description="Velocity and acceleration limits"
                             callback="on_machine_limits_clicked"/>
         <setting_action_row name="row_motion"
-                            label="Motion" icon="axis_arrow" description="Jog speeds and step distances"
+                            label="Motion" icon="axis_arrow" description="Jog layout, speeds and step distances"
                             callback="on_motion_settings_clicked"/>
         <!-- RETRACTION SETTINGS (conditional) -->
         <lv_obj name="container_firmware_retraction" width="100%" style_pad_all="0" scrollable="false">
@@ -40,6 +40,13 @@
       <!-- ================================================================== -->
       <setting_group name="group_filament">
         <setting_group_header title="FILAMENT"/>
+        <!-- MULTI-FILAMENT MANAGEMENT: same gate as the AMS sidebar's Settings button -->
+        <lv_obj name="container_ams_settings" width="100%" style_pad_all="0" scrollable="false">
+          <bind_flag_if_eq subject="ams_has_device_ops" flag="hidden" ref_value="0"/>
+          <setting_action_row name="row_ams_settings"
+                              label="Multi-Filament System Management" icon="filament"
+                              description="Quick actions, calibration, speed" callback="on_ams_settings_clicked"/>
+        </lv_obj>
         <setting_action_row name="row_material_temps"
                             label="Material Temperatures" icon="thermometer" description="Customize preset temperatures"
                             callback="on_material_temps_clicked"/>
@@ -55,6 +62,12 @@
                             label="Edit filament on insert" icon="filament"
                             description="Open the slot editor when you load a new spool"
                             subject="filament_auto_open_editor" callback="on_filament_auto_open_editor_changed"/>
+        <setting_toggle_row name="row_tool_change_confirm"
+                            label="Confirm tool changes" icon="swap_horizontal"
+                            description="Ask before switching to another tool" subject="settings_tool_change_confirm"
+                            callback="on_tool_change_confirm_changed">
+          <bind_flag_if_lt subject="tool_count" flag="hidden" ref_value="2"/>
+        </setting_toggle_row>
       </setting_group>
       <!-- ================================================================== -->
       <!-- EXTRAS -->
@@ -68,6 +81,36 @@
                               label="Timelapse" icon="camera_timer" description="Configure timelapse recording"
                               callback="on_timelapse_settings_clicked"/>
         </lv_obj>
+        <!-- POWER-LOSS RECOVERY: the plugin's plr feature, which owns its switch -->
+        <plugin_feature_toggle_row name="row_power_loss_recovery"
+                                   feature="plr" label="Power-loss recovery" icon="power_plug"
+                                   description="Saves the print position about once a second so a print can resume after a power cut. On an SD card this adds wear."
+                                   subject="plr_saving_enabled" callback="on_power_loss_recovery_changed"/>
+        <!-- RESUME MESH CARRY-OVER: the plugin's plr feature, at the version that
+             carries server.helix.plr.mesh_include. Which row shows follows the
+             plr_mesh_include subject: 0 the include is missing, 1 it is there;
+             -1 (not asked yet, or the ask failed) shows neither. -->
+        <lv_obj name="container_plr_mesh_include" width="100%" style_pad_all="0" scrollable="false">
+          <bind_flag_if_eq subject="plr_feature_state" flag="hidden" ref_value="0"/>
+          <setting_action_row name="row_plr_mesh_include_add"
+                              label="Resume reloads the saved bed mesh" icon="grid_view"
+                              description="Add [include helix-plr/*.cfg] to printer.cfg, so a resume reloads the mesh the print started with"
+                              value="Not added" callback="on_plr_mesh_include_add_clicked">
+            <bind_flag_if_not_eq subject="plr_mesh_include" flag="hidden" ref_value="0"/>
+          </setting_action_row>
+          <setting_action_row name="row_plr_mesh_include_remove"
+                              label="Resume reloads the saved bed mesh" icon="grid_view"
+                              description="Remove HelixScreen's include lines from printer.cfg; a resume then uses the printer's default mesh profile"
+                              value="Added" callback="on_plr_mesh_include_remove_clicked">
+            <bind_flag_if_not_eq subject="plr_mesh_include" flag="hidden" ref_value="1"/>
+          </setting_action_row>
+        </lv_obj>
+        <!-- START OPTIONS FOR PRINTS FROM OTHER APPS: the plugin's print_hooks feature -->
+        <plugin_feature_toggle_row name="row_print_hooks"
+                                   feature="print_hooks" label="Apply start options to prints from other apps"
+                                   icon="play_circle"
+                                   description="Sends your standing print options, such as unload at end, when a print starts from another app or the job queue."
+                                   subject="plugin_feature_on_print_hooks" callback="on_plugin_feature_switch_changed"/>
         <setting_action_row name="row_macro_buttons"
                             label="Macro Buttons" icon="script_text"
                             description="Configure quick buttons and standard macros"

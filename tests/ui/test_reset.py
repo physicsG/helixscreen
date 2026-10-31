@@ -27,7 +27,7 @@ def test_reset_is_idempotent(helix_app):
 
 def test_reset_dismisses_a_modal(helix_app):
     # Modal::hide()'s widget deletion is deferred behind a real ~150ms exit
-    # fade (MODAL_EXIT_DURATION_MS) when animations are on — wait_idle()
+    # fade (kModalExitDurationMs) when animations are on — wait_idle()
     # deliberately does not count animations (see handle_wait_idle), so an
     # `ls` taken right after reset() would race that fade. freeze() disables
     # animations, which routes Modal::hide() through its no-animation branch

@@ -28,7 +28,7 @@ using helix::bluetooth::SharedContext;
 namespace {
 
 int g_fake_ctx_storage = 0;
-helix_bt_context* const FAKE_CTX = reinterpret_cast<helix_bt_context*>(&g_fake_ctx_storage);
+helix_bt_context* const kFakeCtx = reinterpret_cast<helix_bt_context*>(&g_fake_ctx_storage);
 
 struct FakePlugin {
     std::mutex mu;
@@ -56,7 +56,7 @@ extern "C" helix_bt_context* fake_init() {
     g_fake->cv.notify_all();
     g_fake->cv.wait(lock, [] { return !g_fake->init_blocks || g_fake->init_released; });
     ++g_fake->inits;
-    return g_fake->init_fails ? nullptr : FAKE_CTX;
+    return g_fake->init_fails ? nullptr : kFakeCtx;
 }
 
 extern "C" void fake_deinit(helix_bt_context*) {
@@ -226,7 +226,7 @@ TEST_CASE("SharedContext is created once and deinited only after the last worker
     auto ctx = std::make_shared<SharedContext>();
     REQUIRE(run.start(ctx, 15000, owner.token(), record_into(seen)));
     plugin.wait_entered(1);
-    CHECK(ctx->get() == FAKE_CTX);
+    CHECK(ctx->get() == kFakeCtx);
     CHECK(plugin.count(&FakePlugin::inits) == 1);
 
     // The owner lets go mid-scan: the worker's reference keeps the context alive.

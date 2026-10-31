@@ -40,7 +40,16 @@ namespace helix {
  */
 [[nodiscard]] bool is_usable_snapshot_url(const std::string& snapshot_url);
 
+/// The name the built-in screen server registers its webcam under (#1825).
+constexpr const char* kRemoteScreenWebcamName = "HelixScreen Screen";
+/// The `extra_data` key a screen server's entry carries.
+constexpr const char* kRemoteScreenWebcamMarker = "helixscreen_screen";
+
 namespace webcam {
+
+/// A screen registered by a built-in screen server: ours, or another screen's on the
+/// same Moonraker. Never a camera feed: a screen is not a view of the printer.
+[[nodiscard]] bool is_own_screen_webcam(const WebcamInfo& cam);
 
 /// Read one `server.webcams.list` entry. Unknown or missing fields keep the
 /// WebcamInfo defaults; `unavailable_reason` is always empty here (discovery
@@ -78,6 +87,21 @@ namespace webcam {
 /// than to "No Camera".
 [[nodiscard]] std::optional<WebcamInfo> select_webcam(const std::vector<WebcamInfo>& cams,
                                                       const std::string& source);
+
+/// The camera a print's photos are taken with: of the enabled cameras with a
+/// usable snapshot URL (screens excluded), the first MJPEG one, else the
+/// first. The HelixPrint plugin applies the same rule
+/// (moonraker-plugin/helix_photos.py#pick_snapshot_url), so the plugin and
+/// the screen photograph the same camera.
+[[nodiscard]] std::optional<WebcamInfo> photo_pick(const std::vector<WebcamInfo>& cams);
+
+/// The per-view config (rotation, flip_h, flip_v) that applies to a still of
+/// the camera named @p cam_name: the camera widget's own @p widget_config when
+/// the widget shows that camera (@p widget_feed), else none, which leaves
+/// Moonraker's flips alone.
+[[nodiscard]] nlohmann::json view_config_for(const std::string& cam_name,
+                                             const std::optional<WebcamInfo>& widget_feed,
+                                             const nlohmann::json& widget_config);
 
 /// True when @p source names a camera that select_webcam() would honor. False
 /// for an empty source and for a fallback to the auto-pick.

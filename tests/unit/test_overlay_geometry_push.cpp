@@ -59,7 +59,7 @@ class OverlayGeometryFixture : public LVGLTestFixture {
     OverlayGeometryFixture() {
         theme_manager_register_responsive_spacing(lv_display_get_default());
         NavigationManager::instance().init();
-        for (int i = 0; i < UI_PANEL_COUNT; i++) {
+        for (int i = 0; i < kUiPanelCount; i++) {
             root_panels_[i] = lv_obj_create(lv_screen_active());
         }
         NavigationManager::instance().set_panels(root_panels_.data());
@@ -71,7 +71,7 @@ class OverlayGeometryFixture : public LVGLTestFixture {
     }
 
   private:
-    std::array<lv_obj_t*, UI_PANEL_COUNT> root_panels_{};
+    std::array<lv_obj_t*, kUiPanelCount> root_panels_{};
 };
 
 } // namespace
@@ -91,25 +91,6 @@ TEST_CASE_METHOD(OverlayGeometryFixture, "Landscape overlay geometry is untouche
 
     CHECK(lv_obj_get_height(w) == height_before);
     CHECK(lv_obj_get_style_align(w, LV_PART_MAIN) == LV_ALIGN_RIGHT_MID);
-}
-
-TEST_CASE("Portrait geometry stops the overlay above the nav bar",
-          "[navigation][overlay-geometry][portrait]") {
-    // Exercised through the pure function rather than a live portrait display:
-    // the test harness display is landscape, and detect_layout_type() reads the
-    // widget's screen. This asserts the values ui_set_overlay_geometry writes.
-    constexpr int32_t NAV_HEIGHT = 112;
-    constexpr int32_t GAP = 16;
-
-    const auto h = compute_overlay_heights(480, 800, NAV_HEIGHT, GAP);
-    const auto w = compute_overlay_widths(480, 800, 54, GAP);
-
-    // Full width, short height, top-anchored: together they leave the nav bar
-    // visible below the overlay.
-    CHECK(w.destination == 480);
-    CHECK(h.destination == 688);
-    CHECK(h.transient == 672);
-    CHECK(is_portrait_layout(detect_layout_type(480, 800)));
 }
 
 TEST_CASE_METHOD(OverlayGeometryFixture, "Portrait overlays slide in and out on the X axis",

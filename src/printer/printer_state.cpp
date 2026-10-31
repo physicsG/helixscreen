@@ -20,8 +20,9 @@
 #include "chamber_heater_assignment.h"
 #include "connection_state.h" // For ConnectionState enum
 #include "device_display_name.h"
+#include "enclosure_top.h"
 #include "hardware_validator.h"
-#include "i_moonraker_client.h" // for helix::CACHED_SNAPSHOT_MARKER
+#include "i_moonraker_client.h" // for helix::kCachedSnapshotMarker
 #include "json_utils.h"
 #include "lvgl.h"
 #include "lvgl/src/display/lv_display_private.h" // For rendering_in_progress check
@@ -87,7 +88,7 @@ const char* print_job_state_to_string(PrintJobState state) {
     case PrintJobState::COMPLETE:
         return "Complete";
     case PrintJobState::CANCELLED:
-        return "Cancelled";
+        return "Canceled";
     case PrintJobState::ERROR:
         return "Error";
     default:
@@ -106,6 +107,8 @@ using namespace helix;
 PrinterState::PrinterState() {
     // Load user-configured capability overrides from settings.json
     capability_overrides_.load_from_config();
+    plugin_status_state_.set_locality_source(
+        [this] { return moonraker_locality() == helix::MoonrakerLocality::Local; });
 }
 
 PrinterState::~PrinterState() {
@@ -220,7 +223,9 @@ void PrinterState::init_subjects(bool register_xml) {
     // Initialize capabilities state component (hardware capabilities, feature availability)
     capabilities_state_.init_subjects(register_xml);
 
-    // Initialize network state component (connection, klippy, nav buttons)
+    // Initialize network state component (connection, klippy, nav buttons).
+    // The locality verdict starts where its subject does.
+    moonraker_locality_.store(static_cast<int>(helix::MoonrakerLocality::Unknown));
     network_state_.init_subjects(register_xml);
 
     // Excluded objects state component (excluded_objects_version, excluded_objects set)
@@ -291,9 +296,17 @@ std::optional<StatusFrame> helix::parse_status_notification(const json& notifica
         frame.eventtime = (*params)[1].get<double>();
     }
     frame.from_cached_snapshot =
-        helix::json_util::safe_bool(notification, helix::CACHED_SNAPSHOT_MARKER);
-    frame.whole_objects = helix::json_util::safe_bool(notification, helix::WHOLE_OBJECTS_MARKER);
+        helix::json_util::safe_bool(notification, helix::kCachedSnapshotMarker);
+    frame.whole_objects = helix::json_util::safe_bool(notification, helix::kWholeObjectsMarker);
     return frame;
+}
+
+void PrinterState::apply_klippy_status(const json& webhooks, double eventtime,
+                                       bool from_cached_snapshot,
+                                       std::optional<uint64_t> frame_epoch) {
+    if (network_state_.apply_webhooks(webhooks, eventtime, from_cached_snapshot, frame_epoch)) {
+        calibration_state_.reset_klippy_volatile();
+    }
 }
 
 void PrinterState::update_from_status(const json& state, double eventtime,
@@ -330,6 +343,12 @@ void PrinterState::update_from_status(const json& state, double eventtime,
     merge_firmware_option_defaults(
         helix::preprint_prefs::read_persisted_defaults(discovery_, state));
 
+    // A removable enclosure top can come and go while connected; a frame that
+    // does not mention it keeps the last report.
+    if (auto fitted = helix::enclosure_top::fitted_from_status(discovery_, state)) {
+        capabilities_state_.set_enclosure_top_fitted(*fitted);
+    }
+
     // Delegate print updates to print state component
     print_domain_.update_from_status(state, whole_objects);
 
@@ -365,9 +384,7 @@ void PrinterState::update_from_status(const json& state, double eventtime,
 
     // Klippy state from webhooks (shutdown/error detection), gated on freshness.
     if (auto it = state.find("webhooks"); it != state.end()) {
-        if (network_state_.apply_webhooks(*it, eventtime, from_cached_snapshot, frame_epoch)) {
-            calibration_state_.reset_klippy_volatile();
-        }
+        apply_klippy_status(*it, eventtime, from_cached_snapshot, frame_epoch);
     }
 
     // Track Klipper pause_resume.is_paused (PAUSE/RESUME gcode state)
@@ -407,9 +424,22 @@ void PrinterState::set_printer_connection_state(int state, const char* message) 
 }
 
 void PrinterState::set_moonraker_is_remote(bool remote) {
+    const auto locality =
+        remote ? helix::MoonrakerLocality::Remote : helix::MoonrakerLocality::Local;
+    moonraker_locality_.store(static_cast<int>(locality));
     // Thread-safe wrapper: defer LVGL subject updates to main thread
-    async_lifetime_.defer("PrinterState::set_moonraker_is_remote", [this, remote]() {
+    async_lifetime_.defer("PrinterState::set_moonraker_is_remote", [this, remote, locality]() {
         network_state_.set_moonraker_is_remote_internal(remote);
+        network_state_.set_moonraker_locality_internal(locality);
+        plugin_status_state_.on_locality_changed();
+    });
+}
+
+void PrinterState::clear_moonraker_locality() {
+    moonraker_locality_.store(static_cast<int>(helix::MoonrakerLocality::Unknown));
+    async_lifetime_.defer("PrinterState::clear_moonraker_locality", [this]() {
+        network_state_.set_moonraker_locality_internal(helix::MoonrakerLocality::Unknown);
+        plugin_status_state_.on_locality_changed();
     });
 }
 
@@ -432,16 +462,20 @@ void PrinterState::set_klippy_state_sync(KlippyState state) {
     set_klippy_state_internal(state);
 }
 
-void PrinterState::set_klippy_state_if_unseeded(KlippyState state) {
+void PrinterState::set_klippy_state_if_unseeded(KlippyState state,
+                                                const std::string& state_message) {
     // Deferred so the "has anything live landed?" check runs on the main thread,
     // in the same serialized order as the webhooks parse. Checking on the caller's
     // thread would race: a live frame could land between the check and the apply,
     // and printer.info's older answer would win anyway.
     async_lifetime_.defer("PrinterState::set_klippy_state_if_unseeded",
-                          [this, state]() { set_klippy_state_if_unseeded_internal(state); });
+                          [this, state, state_message]() {
+                              set_klippy_state_if_unseeded_internal(state, state_message);
+                          });
 }
 
-void PrinterState::set_klippy_state_if_unseeded_internal(KlippyState state) {
+void PrinterState::set_klippy_state_if_unseeded_internal(KlippyState state,
+                                                         const std::string& state_message) {
     if (network_state_.klippy_state_from_live()) {
         spdlog::debug("[PrinterState] Ignoring printer.info klippy state {} — a live state "
                       "has already been applied",
@@ -453,6 +487,9 @@ void PrinterState::set_klippy_state_if_unseeded_internal(KlippyState state) {
     // subscription snapshot that follows it on the same connection is strictly
     // newer, so it must still be allowed to correct this value.
     set_klippy_state_internal(state);
+    if (!state_message.empty()) {
+        network_state_.set_klippy_state_message(state_message, state);
+    }
 }
 
 void PrinterState::set_klippy_state_internal(KlippyState state) {
@@ -502,6 +539,8 @@ void PrinterState::set_hardware(helix::PrinterDiscovery hardware) {
 
     // Delegate capability subject updates to capabilities_state_ component
     capabilities_state_.set_hardware(discovery_, capability_overrides_);
+    versions_state_.set_firmware_name_internal(discovery_.firmware_name());
+    print_domain_.set_layer_pause_state_object(helix::layer_pause::state_object(discovery_));
 
     // PLR resume-macro capability comes from the same snapshot, ahead of the
     // initial status dispatch that carries the interrupted flag; the offer
@@ -626,6 +665,29 @@ void PrinterState::set_helix_plugin_installed(bool installed) {
     });
 }
 
+void PrinterState::set_helix_plugin_link_dir(const std::string& dir) {
+    async_lifetime_.defer("PrinterState::set_helix_plugin_link_dir",
+                          [this, dir]() { plugin_status_state_.set_link_dir(dir); });
+}
+
+void PrinterState::set_helix_plugin_version(const std::string& version) {
+    async_lifetime_.defer("PrinterState::set_helix_plugin_version",
+                          [this, version]() { plugin_status_state_.set_version(version); });
+}
+
+void PrinterState::set_helix_plugin_disabled(bool disabled) {
+    async_lifetime_.defer("PrinterState::set_helix_plugin_disabled",
+                          [this, disabled]() { plugin_status_state_.set_disabled(disabled); });
+}
+
+void PrinterState::set_helix_plugin_features(helix::PluginFeatureMap features,
+                                             helix::FeatureAnnounce announce) {
+    async_lifetime_.defer("PrinterState::set_helix_plugin_features",
+                          [this, features = std::move(features), announce]() mutable {
+                              plugin_status_state_.set_features(std::move(features), announce);
+                          });
+}
+
 void PrinterState::set_macro_option_count(size_t count) {
     macro_option_count_ = count;
     update_gcode_modification_visibility();
@@ -681,13 +743,18 @@ bool PrinterState::is_external_blocking_operation_active() {
     if (!is_blocking_operation_active()) {
         return false;
     }
-    // idle_timeout == "Printing" during any move, including our own jog. If the
-    // app has motion in flight, acked within the grace window, or started this
-    // busy episode itself, the busy-ness is self-inflicted: let discretionary
-    // gcode through so jogs don't self-block.
-    return !app_motion_activity_.recently_active() &&
-           !app_motion_activity_.owns_busy_episode(
-               calibration_state_.idle_timeout_busy().printing_since());
+    // idle_timeout == "Printing" during any move, including our own jog. When
+    // the app's jog started this busy episode the busy-ness is self-inflicted:
+    // let discretionary gcode through so jogs don't self-block. Recent or
+    // in-flight motion alone proves nothing: a jog that slipped into an external
+    // op before it settled would vouch for the next, and that one for the next.
+    return !app_motion_activity_.owns_busy_episode(
+        calibration_state_.idle_timeout_busy().printing_since());
+}
+
+bool PrinterState::is_busy_episode_app_initiated() {
+    IdleTimeoutBusy& busy = calibration_state_.idle_timeout_busy();
+    return busy.blocking() && app_command_episode_.owns(busy.printing_since());
 }
 
 int PrinterState::get_configured_z_offset_microns() {
@@ -712,6 +779,7 @@ void PrinterState::set_kinematics(const std::string& kinematics) {
     // Belt Tension compares the two CoreXY diagonals, so only a belt-path
     // kinematics gets the feature.
     capabilities_state_.set_supports_belt_compare(belt_path_kinematics(kinematics));
+    capabilities_state_.bump_hardware_generation();
 
     // Determine if the bed moves on Z based on kinematics type:
     // - CoreXY: bed typically moves on Z (Voron 0/Trident, Bambu, AD5M, etc.)
@@ -821,14 +889,12 @@ void PrinterState::set_printer_type_internal(const std::string& type) {
     }
     refresh_bed_drying_capability();
 
-    // Apply probe type override from database (e.g., prtouch_v2 for K1 series)
-    std::string probe_type_str = PrinterDetector::get_probe_type(type);
-    if (!probe_type_str.empty()) {
-        auto probe_type = helix::sensors::probe_type_from_string(probe_type_str);
-        if (probe_type != helix::sensors::ProbeSensorType::STANDARD) {
-            helix::sensors::ProbeSensorManager::instance().set_probe_type_override(probe_type);
-        }
-    }
+    // Probe type override from the database (e.g., prtouch_v2 for K1 series). A type
+    // without one sends STANDARD, which clears the previous printer's override.
+    const std::string probe_type_str = PrinterDetector::get_probe_type(type);
+    helix::sensors::ProbeSensorManager::instance().set_probe_type_override(
+        probe_type_str.empty() ? helix::sensors::ProbeSensorType::STANDARD
+                               : helix::sensors::probe_type_from_string(probe_type_str));
 
     // Update printer_has_purge_line_ based on the option set.
     // "priming" is the option id for purge/prime line in the database (also accept legacy

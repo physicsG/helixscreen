@@ -23,9 +23,9 @@
  * These tests drive the REAL tracker and the REAL router -- not the mock's
  * inline gcode_script() dispatch -- so they exercise the production comparison.
  *
- * ui_notification_error() is a logging-only stub in the test binary (see
- * tests/ui_test_utils.cpp), so the router's toast is observed through a spdlog
- * ringbuffer sink.
+ * The router's toast is observed through the notification event hook
+ * (tests/ui_test_utils.h), counting only error notifications titled
+ * "Klipper Error", the router's title.
  */
 
 #include "ui_update_queue.h"
@@ -38,6 +38,7 @@
 #include "../test_helpers/gcode_error_router_test_access.h"
 #include "../test_helpers/log_capture.h"
 #include "../test_helpers/moonraker_request_tracker_test_access.h"
+#include "../ui_test_utils.h"
 #include "gcode_error_router.h"
 #include "moonraker_request.h"
 #include "moonraker_request_tracker.h"
@@ -107,6 +108,13 @@ class CorrelationFixture : public LVGLTestFixture {
         helix::GcodeErrorRouter router(&api, &mock, presenter);
 
         ChannelResult out;
+        int error_notifications = 0;
+        helix::ui::set_test_notification_event_hook(
+            [&error_notifications](const helix::ui::NotificationEvent& e) {
+                if (e.severity == ToastSeverity::ERROR && e.title == "Klipper Error") {
+                    ++error_notifications;
+                }
+            });
         {
             LogCapture log(512);
 
@@ -127,11 +135,12 @@ class CorrelationFixture : public LVGLTestFixture {
             process_lvgl(400);
             helix::ui::UpdateQueue::instance().drain();
 
-            out.router_toasts = log.count_containing("ui_notification_error: Klipper Error");
+            out.router_toasts = error_notifications;
             out.suppressions = log.count_containing("Suppressing deferred `!!` toast") +
                                log.count_containing("Suppressing duplicate (RPC-handled)");
         }
 
+        helix::ui::set_test_notification_event_hook(nullptr);
         mock.stop_temperature_simulation();
         rpc_error_correlation::clear_for_test();
         return out;
@@ -153,6 +162,13 @@ class CorrelationFixture : public LVGLTestFixture {
         helix::GcodeErrorRouter router(&api, &mock, presenter);
 
         ChannelResult out;
+        int error_notifications = 0;
+        helix::ui::set_test_notification_event_hook(
+            [&error_notifications](const helix::ui::NotificationEvent& e) {
+                if (e.severity == ToastSeverity::ERROR && e.title == "Klipper Error") {
+                    ++error_notifications;
+                }
+            });
         {
             LogCapture log(512);
 
@@ -186,11 +202,12 @@ class CorrelationFixture : public LVGLTestFixture {
             process_lvgl(400);
             helix::ui::UpdateQueue::instance().drain();
 
-            out.router_toasts = log.count_containing("ui_notification_error: Klipper Error");
+            out.router_toasts = error_notifications;
             out.suppressions = log.count_containing("Suppressing deferred `!!` toast") +
                                log.count_containing("Suppressing duplicate (RPC-handled)");
         }
 
+        helix::ui::set_test_notification_event_hook(nullptr);
         mock.stop_temperature_simulation();
         rpc_error_correlation::clear_for_test();
         return out;
@@ -206,9 +223,9 @@ TEST_CASE_METHOD(CorrelationFixture,
     // wording, sent identically on both channels) becomes "Must home axes
     // first" on the router side only. The RPC side records Klipper's wording,
     // so the exact-string dedup misses and BOTH toasts fire.
-    const std::string REWRITTEN = "Must home axis first";
+    const std::string kRewritten = "Must home axis first";
 
-    auto r = run_both_channels(REWRITTEN);
+    auto r = run_both_channels(kRewritten);
 
     INFO("router toasts: " << r.router_toasts << " suppressions: " << r.suppressions);
     CHECK(r.caller_cb_fired);

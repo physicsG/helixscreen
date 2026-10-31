@@ -8,12 +8,13 @@ bats_require_minimum_version 1.5.0
 BIN="./build/bin/helix-screen"
 
 setup_file() {
-    # Mirrors require_binary() in test_headless_display.bats. The Shell Tests
-    # (BATS) job checks out without submodules and never builds, so a hard
-    # failure here would only report "the CI job doesn't compile C++", not
-    # anything about ctl --json. Skipping keeps the file honest where a binary
-    # exists (every dev machine, `make pi-test`) and quiet where one cannot.
-    [ -x "$BIN" ] || skip "helix-screen not built (run 'make -j')"
+    # The Shell Tests (BATS) job checks out without submodules and never
+    # builds, so a hard failure here would only report "the CI job doesn't
+    # compile C++", not anything about ctl --json. Skipping keeps the file
+    # honest where a binary exists (every dev machine, `make pi-test`) and
+    # quiet where one cannot.
+    load helpers
+    require_app "$BIN"
 
     export SOCK="${BATS_FILE_TMPDIR}/helix-ctl.sock"
     export APP_LOG="${BATS_FILE_TMPDIR}/app.log"

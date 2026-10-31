@@ -16,7 +16,9 @@ The language for everything on screen: English, German, Spanish, French, Italian
 
 ## Timezone
 
-Your local timezone, so print finish times, time remaining and the clock widget show the right time. Most printers start out on UTC. Pick from a list of common timezones. Each one shows its offset from UTC, for example "Eastern (-5:00)". Daylight saving time is handled for you.
+Your local timezone, so print finish times, time remaining and the clock widget show the right time. **System**, the first entry, uses the timezone of the computer HelixScreen runs on, and is the default. If that is not your local time, pick from the list of common timezones. Each one shows its offset from UTC, for example "Eastern (-5:00)". Daylight saving time is handled for you.
+
+The BTT K-Touch has no System entry, because it has no timezone of its own. The Wi-Fi setup page sets it from your phone's timezone; otherwise it shows UTC until you pick one.
 
 ---
 

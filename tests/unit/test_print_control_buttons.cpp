@@ -73,7 +73,7 @@ TEST_CASE_METHOD(ControlButtonsFixture, "primary label tracks print state",
 
 // Enable state depends on StandardMacros slot availability. In the unit-test
 // harness no printer discovery runs, so the Pause/Resume/Cancel slots are
-// EMPTY (FALLBACK_MACROS has "" for all three, and init() is never called).
+// EMPTY (kFallbackMacros has "" for all three, and init() is never called).
 // The pure enable logic (active && pending==None && slot_ok) is fully covered
 // by Task 1's [print_control_view] tests; here we assert the controller wires
 // the slot-availability gate through correctly: with empty slots, the primary

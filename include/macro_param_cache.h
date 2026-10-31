@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -30,12 +31,35 @@ struct PrinterStopCall {
 /// Find the first action_emergency_stop(...) call in a gcode_macro template.
 [[nodiscard]] PrinterStopCall find_printer_stop_call(std::string_view gcode_template);
 
+/// Whether a gcode_macro template switches the Spoolman active spool: it runs
+/// SET_ACTIVE_SPOOL, or calls Moonraker's spoolman_set_active_spool remote method.
+[[nodiscard]] bool template_sets_active_spool(std::string_view gcode_template);
+
+/// What a gcode_macro template does to temperature targets.
+struct TemplateTemperatureUse {
+    /// Each target set by SET_HEATER_TEMPERATURE (`heater <name>`) or
+    /// SET_TEMPERATURE_FAN_TARGET (`temperature_fan <name>`), names lower-case.
+    /// A name Klipper has to evaluate is `*`: it may be any of that kind.
+    std::vector<std::string> targets;
+    /// The upper-case first word of each line once leading Jinja blocks are
+    /// stripped: the commands and macros the template runs.
+    std::vector<std::string> commands;
+};
+
+[[nodiscard]] TemplateTemperatureUse template_temperature_use(std::string_view gcode_template);
+
 struct CachedMacroInfo {
     MacroParamKnowledge knowledge = MacroParamKnowledge::UNKNOWN;
     std::vector<MacroParam> params;
-    std::string description;    ///< From Klipper gcode_macro description field
-    bool stops_printer = false; ///< Running the macro shuts the printer down
-    std::string stop_message;   ///< PrinterStopCall::message, when stops_printer
+    std::string description;        ///< From Klipper gcode_macro description field
+    bool stops_printer = false;     ///< Running the macro shuts the printer down
+    std::string stop_message;       ///< PrinterStopCall::message, when stops_printer
+    bool sets_active_spool = false; ///< The template switches the Spoolman active spool
+    /// The macro's `variable_<name>` config values as written, keyed by
+    /// <name>: its state as configured, before any SET_GCODE_VARIABLE.
+    std::map<std::string, std::string> variables;
+    bool has_template = false; ///< configfile carried the macro's gcode
+    TemplateTemperatureUse temperature_use;
 };
 
 /// Cache for macro parameter information, populated once during printer discovery.
@@ -57,6 +81,18 @@ class MacroParamCache {
     /// gate features that require a specific gcode_macro to be defined in the
     /// firmware (e.g. K2 AI detect needs LOAD_AI_RUN — not all variants ship it).
     [[nodiscard]] bool has_macro(const std::string& macro_name) const;
+
+    /// Whether running @p macro_name sets @p target_full_name's temperature
+    /// (`heater_generic chamber`, `temperature_fan exhaust`, `extruder`), following
+    /// the macros it calls. nullopt when that cannot be read: the macro, or one it
+    /// calls, has no body in configfile.
+    [[nodiscard]] std::optional<bool> macro_sets_target(const std::string& macro_name,
+                                                        const std::string& target_full_name) const;
+
+    /// Whether running @p macro_name runs @p command (case-insensitive), as a
+    /// line of its template or of a macro it calls. False when configfile
+    /// carried no body for it.
+    [[nodiscard]] bool macro_runs(const std::string& macro_name, const std::string& command) const;
 
     /// Upper-case names of the macros whose template stops the printer, each with
     /// its stop message (empty when not a literal).

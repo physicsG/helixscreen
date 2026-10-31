@@ -112,10 +112,10 @@ using RecordingOverlay = ReasonRecorder<BareOverlay>;
 
 /// A PanelBase stub whose XML component is a bare box, so rebuild() has
 /// something real to re-create.
-constexpr const char* REBUILD_COMPONENT = "lifetime_contract_panel";
+constexpr const char* kRebuildComponent = "lifetime_contract_panel";
 
 void register_rebuild_component() {
-    lv_xml_register_component_from_data(REBUILD_COMPONENT,
+    lv_xml_register_component_from_data(kRebuildComponent,
                                         "<component>"
                                         "<view extends=\"lv_obj\" width=\"100\" height=\"100\"/>"
                                         "</component>");
@@ -143,7 +143,7 @@ TEST_CASE_METHOD(MoonrakerTestFixture,
 TEST_CASE_METHOD(MoonrakerTestFixture,
                  "A panel that overrides nothing still loses its screen-scoped callbacks",
                  "[1516][lifecycle][navigation]") {
-    BarePanel panel(state(), &api(), REBUILD_COMPONENT);
+    BarePanel panel(state(), &api(), kRebuildComponent);
     auto token = panel.screen_token();
     REQUIRE_FALSE(token.expired());
 
@@ -274,14 +274,14 @@ TEST_CASE_METHOD(MoonrakerTestFixture, "A panel rebuild reports Rebuild, not Nav
     nav.init();
 
     lv_obj_t* widget =
-        static_cast<lv_obj_t*>(lv_xml_create(test_screen(), REBUILD_COMPONENT, nullptr));
+        static_cast<lv_obj_t*>(lv_xml_create(test_screen(), kRebuildComponent, nullptr));
     REQUIRE(widget != nullptr);
 
-    lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+    lv_obj_t* panels[kUiPanelCount] = {nullptr};
     panels[static_cast<int>(helix::PanelId::Home)] = widget;
     nav.set_panels(panels);
 
-    ReasonRecorder<BarePanel> panel(state(), &api(), REBUILD_COMPONENT);
+    ReasonRecorder<BarePanel> panel(state(), &api(), kRebuildComponent);
     panel.setup(widget, test_screen());
     nav.register_panel_instance(helix::PanelId::Home, &panel);
 

@@ -28,6 +28,7 @@
 #include "filament_sensor_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "printer_state.h"
+#include "static_panel_registry.h"
 #include "test_helpers/print_status_panel_test_access.h"
 
 #include <lvgl.h>
@@ -263,4 +264,27 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     UpdateQueue::instance().drain();
 
     SUCCEED("panel teardown completed without walking freed observer nodes");
+}
+
+// Any PrintStatusPanel registers its subjects' teardown with the registry, and that
+// teardown names the process-global panel. Run after the global is gone, or when only a
+// standalone panel ever existed, it must not construct one: a panel built inside
+// destroy_all() outlives the teardown, keeps live observers, and opens the tune overlay
+// on the next z-offset change.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "PrintStatusPanel subject teardown never builds the global panel",
+                 "[print_status][teardown][lifecycle]") {
+    StaticPanelRegistry::instance().destroy_all();
+    REQUIRE(helix::lazy_global_if_exists<PrintStatusPanel>() == nullptr);
+    {
+        PrintStatusPanel panel(state(), nullptr);
+        panel.init_subjects();
+        panel.deinit_subjects();
+    }
+    REQUIRE(StaticPanelRegistry::instance().count() > 0);
+
+    StaticPanelRegistry::instance().destroy_all();
+    UpdateQueue::instance().drain();
+    CHECK(helix::lazy_global_if_exists<PrintStatusPanel>() == nullptr);
+    CHECK(StaticPanelRegistry::instance().count() == 0);
 }

@@ -110,6 +110,9 @@ void LabelPrinterSettingsManager::set_printer_address(const std::string& addr) {
     spdlog::info("[LabelPrinterSettings] set_printer_address('{}')", addr);
 
     Config* config = Config::get_instance();
+    if (addr != get_printer_address()) {
+        config->set<std::string>("/label_printer/resource_path", "");
+    }
     config->set<std::string>("/label_printer/address", addr);
     config->save();
 
@@ -117,6 +120,18 @@ void LabelPrinterSettingsManager::set_printer_address(const std::string& addr) {
     if (subjects_initialized_) {
         lv_subject_set_int(&printer_configured_subject_, addr.empty() ? 0 : 1);
     }
+}
+
+std::string LabelPrinterSettingsManager::get_ipp_resource_path() const {
+    Config* config = Config::get_instance();
+    return config->get<std::string>("/label_printer/resource_path", "");
+}
+
+void LabelPrinterSettingsManager::set_ipp_resource_path(const std::string& path) {
+    spdlog::info("[LabelPrinterSettings] set_ipp_resource_path('{}')", path);
+    Config* config = Config::get_instance();
+    config->set<std::string>("/label_printer/resource_path", path);
+    config->save();
 }
 
 std::string LabelPrinterSettingsManager::get_printer_protocol() const {

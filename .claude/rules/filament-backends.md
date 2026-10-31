@@ -18,9 +18,11 @@ carries its protocol, data sources, G-code commands, topology and capability tab
   class (`.claude/rules/vendor-abstraction.md`).
 - **CFS on K1:** read `docs/devel/printer-research/CREALITY_CFS_K1_INTERNALS.md` first. `BOX_*` command
   semantics, deferred-failure and resume traps, staged loading, serial timeouts.
-- **MedusaHC is not a backend.** It is a klipper-toolchanger printer plus dock sensors
-  that outrank `toolchanger.tool_number` and a servo feeder:
-  `docs/devel/FILAMENT_BACKEND_MEDUSAHC.md` with `docs/devel/FILAMENT_BACKEND_TOOLCHANGER.md`.
+- **MedusaHC is not a backend.** `AmsBackendToolChanger` drives it, with or without
+  klipper-toolchanger (optional). Swaps go through the machine's own `T<n>` / `DROP_TOOL`;
+  the dock sensors (`pin_watch`, `medusahc`) are the carriage truth; a servo feeder holds
+  the filament: `docs/devel/FILAMENT_BACKEND_MEDUSAHC.md` with
+  `docs/devel/FILAMENT_BACKEND_TOOLCHANGER.md`.
 - Slot metadata store: `docs/devel/FILAMENT_SLOT_METADATA.md`. The public wire format
   is `docs/specs/filament_slots.md`.
 - **Filament boxes (heated and passive) are their own subsystem:**

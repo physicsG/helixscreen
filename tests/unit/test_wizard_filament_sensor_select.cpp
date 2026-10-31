@@ -15,13 +15,16 @@
 #include "ui_update_queue.h"
 #include "ui_wizard_filament_sensor_select.h"
 
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/filament_sensor_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
+#include "ams_state.h"
 #include "app_globals.h"
 #include "filament_sensor_manager.h"
 #include "filament_sensor_types.h"
 #include "printer_discovery.h"
+#include "printer_hardware.h"
 #include "printer_state.h"
 
 #include <spdlog/spdlog.h>
@@ -38,25 +41,9 @@ using namespace helix;
 // Test Fixture
 // ============================================================================
 
-class WizardFilamentSensorSelectTestFixture {
+class WizardFilamentSensorSelectTestFixture : public LVGLTestFixture {
   public:
     WizardFilamentSensorSelectTestFixture() {
-        // Initialize LVGL (safe version avoids "already initialized" warnings)
-        lv_init_safe();
-
-        // Create a headless display for testing
-        if (!display_created_) {
-            display_ = lv_display_create(480, 320);
-            alignas(64) static lv_color_t buf[480 * 10];
-            lv_display_set_buffers(display_, buf, nullptr, sizeof(buf),
-                                   LV_DISPLAY_RENDER_MODE_PARTIAL);
-            lv_display_set_flush_cb(display_,
-                                    [](lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-                                        lv_display_flush_ready(disp);
-                                    });
-            display_created_ = true;
-        }
-
         // Initialize FilamentSensorManager subjects (idempotent)
         sensor_mgr().init_subjects();
 
@@ -64,8 +51,8 @@ class WizardFilamentSensorSelectTestFixture {
         FilamentSensorManagerTestAccess::reset(sensor_mgr());
 
         // Anchor the wizard's AMS filter to a no-MMU baseline. The wizard
-        // consults get_printer_state().get_discovery() via the
-        // discovery-aware is_ams_sensor overload; PrinterState is a
+        // consults get_printer_state().get_discovery() through
+        // is_standalone_filament_sensor(); PrinterState is a
         // singleton, so a prior test that installed an MMU discovery
         // could otherwise flip the filter and make our "standalone"
         // expectations (e.g. "toolhead") fail. Capture the prior state
@@ -96,11 +83,11 @@ class WizardFilamentSensorSelectTestFixture {
 
     // Helper to discover test sensors (standalone, non-AMS)
     void discover_standalone_sensors(const std::vector<std::string>& sensors) {
-        sensor_mgr().discover_sensors(sensors);
+        discover_filament_sensors(sensor_mgr(), sensors);
     }
 
     // Helper to discover AMS sensors (should be filtered out)
-    // These use patterns that is_ams_sensor() will detect
+    // These use patterns is_standalone_filament_sensor() rejects
     void discover_ams_sensors() {
         std::vector<std::string> sensors = {
             "filament_switch_sensor lane_1",   // AFC lane sensor - matches "lane"
@@ -108,7 +95,7 @@ class WizardFilamentSensorSelectTestFixture {
             "filament_switch_sensor turtle_1", // BoxTurtle sensor - matches "turtle"
             "filament_switch_sensor afc_hub"   // AFC hub - matches "afc"
         };
-        sensor_mgr().discover_sensors(sensors);
+        discover_filament_sensors(sensor_mgr(), sensors);
     }
 
     // Helper to discover mixed sensors (some AMS, some standalone)
@@ -119,18 +106,14 @@ class WizardFilamentSensorSelectTestFixture {
             "filament_switch_sensor toolhead", // Standalone
             "filament_switch_sensor slot_2"    // AMS (AFC)
         };
-        sensor_mgr().discover_sensors(sensors);
+        discover_filament_sensors(sensor_mgr(), sensors);
     }
 
   private:
     helix::PrinterDiscovery saved_discovery_;
-    static lv_display_t* display_;
-    static bool display_created_;
 };
 
 // Static members
-lv_display_t* WizardFilamentSensorSelectTestFixture::display_ = nullptr;
-bool WizardFilamentSensorSelectTestFixture::display_created_ = false;
 
 // ============================================================================
 // get_standalone_sensor_count() Tests
@@ -298,7 +281,7 @@ TEST_CASE_METHOD(WizardFilamentSensorSelectTestFixture,
             "filament_switch_sensor lane_1", // AMS - should be ignored
             "filament_switch_sensor fsensor" // Standalone - should get RUNOUT
         };
-        sensor_mgr().discover_sensors(sensors);
+        discover_filament_sensors(sensor_mgr(), sensors);
 
         step.auto_configure_single_sensor();
 
@@ -455,7 +438,31 @@ TEST_CASE_METHOD(WizardFilamentSensorSelectTestFixture,
         REQUIRE(step.get_standalone_sensor_count() == 3);
 
         // Re-discover with no sensors
-        sensor_mgr().discover_sensors({});
+        discover_filament_sensors(sensor_mgr(), {});
         REQUIRE(step.get_standalone_sensor_count() == 0);
     }
+}
+
+// ============================================================================
+// One standalone filter for the wizard and Settings
+// ============================================================================
+
+TEST_CASE_METHOD(
+    WizardFilamentSensorSelectTestFixture,
+    "WizardFilamentSensorSelectStep - the wizard and overlay agree on standalone sensors",
+    "[wizard][filament][sensors]") {
+    discover_mixed_sensors();
+    WizardFilamentSensorSelectStep step;
+
+    std::vector<std::string> listed;
+    for (const auto& entry : sensor_mgr().entries()) {
+        if (sensor_mgr().listed_in_settings(entry)) {
+            listed.push_back(entry.display_name);
+        }
+        CHECK(sensor_mgr().listed_in_settings(entry) ==
+              is_standalone_filament_sensor(get_printer_state().get_discovery(), entry.klipper_name,
+                                            AmsState::instance().filament_hardware_absent()));
+    }
+    CHECK(listed == std::vector<std::string>{"runout", "toolhead"});
+    CHECK(step.get_standalone_sensor_count() == listed.size());
 }

@@ -1,0 +1,269 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    Host Health home widget. HostHealthWidget publishes host_health_rung (SizeRung),
+    host_health_show_mcu_row, host_health_status (ValueStatus), host_health_cause
+    (HealthCause) and the readings' texts; everything below binds off them. A tap opens
+    the Performance overlay.
+
+    Each rung is its own block and only the block for the current rung is shown, so a
+    rung's labels and sparklines cost nothing while another rung is drawn.
+
+    Rungs: 0 glance (a chip icon over one number, the icon and number following the
+    metric that put the host at its status), 1 strip (icon, CPU, temperature), 2 column
+    (icon, CPU, temperature, memory), 3 cell (CPU with a sparkline over temperature and
+    memory), 4 wide (CPU and memory sparkline rows; the busiest MCU replaces memory while
+    printing), 5 full (throttle line, host block, one row per MCU).
+
+    Causes: 0 none, 1 host CPU, 2 host temperature, 3 throttle, 4 MCU load, 5 MCU
+    retransmits, 6 disk free. Status: 0 normal, 1 warn, 2 danger. The cause picks the
+    Glance icon and number; each reading's own colour follows its own status
+    (host_health_cpu_status, _temp_status, _throttle_status, _disk_status), so a throttle
+    flag does not hide an amber CPU.
+  -->
+  <styles>
+    <style name="hh_warn" text_color="#warning"/>
+    <style name="hh_danger" text_color="#danger"/>
+    <style name="hh_line_warn" line_color="#warning"/>
+    <style name="hh_line_danger" line_color="#danger"/>
+  </styles>
+  <view name="panel_widget_host_health"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_xxs" scrollable="false">
+    <event_cb trigger="clicked" callback="host_health_clicked_cb"/>
+    <pass_through name="host_health_body"
+                  width="100%" height="100%" flex_flow="column" style_flex_main_place="center"
+                  style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="0" style_pad_column="0">
+
+      <!-- 0 glance: the icon and number follow the cause. -->
+      <pass_through name="host_health_glance"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if_not_eq subject="host_health_rung" flag="hidden" ref_value="0"/>
+        <icon name="host_health_glance_cpu" src="gauge" size="xs" clickable="false" event_bubble="true">
+          <bind_flag_if_gt subject="host_health_cause" flag="hidden" ref_value="1"/>
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <icon name="host_health_glance_temp" src="thermometer" size="xs" clickable="false" event_bubble="true">
+          <bind_flag_if_not_eq subject="host_health_cause" flag="hidden" ref_value="2"/>
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <icon name="host_health_glance_throttle" src="flash" size="xs" clickable="false" event_bubble="true">
+          <bind_flag_if_not_eq subject="host_health_cause" flag="hidden" ref_value="3"/>
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <icon name="host_health_glance_mcu" src="engine" size="xs" clickable="false" event_bubble="true">
+          <bind_flag_if_not_eq subject="host_health_cause" flag="hidden" ref_value="4"/>
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <icon name="host_health_glance_retx" src="swap_horizontal" size="xs" clickable="false" event_bubble="true">
+          <bind_flag_if_not_eq subject="host_health_cause" flag="hidden" ref_value="5"/>
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <icon name="host_health_glance_disk" src="sd" size="xs" clickable="false" event_bubble="true">
+          <bind_flag_if_not_eq subject="host_health_cause" flag="hidden" ref_value="6"/>
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <text_tiny name="host_health_glance_text"
+                   bind_text="host_health_glance_text" clickable="false" event_bubble="true">
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </text_tiny>
+      </pass_through>
+
+      <!-- 1 strip: icon, CPU, temperature in a row. -->
+      <pass_through name="host_health_strip"
+                    width="100%" height="content" flex_flow="row" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_column="#space_xs">
+        <bind_flag_if_not_eq subject="host_health_rung" flag="hidden" ref_value="1"/>
+        <icon name="host_health_strip_icon" src="gauge" size="xs" clickable="false" event_bubble="true">
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <text_tiny name="host_health_strip_cpu" bind_text="host_health_cpu_text" clickable="false" event_bubble="true">
+          <bind_style_if name="hh_warn" cond="host_health_cpu_status eq 1"/>
+          <bind_style_if name="hh_danger" cond="host_health_cpu_status eq 2"/>
+        </text_tiny>
+        <text_tiny name="host_health_strip_temp"
+                   bind_text="host_health_temp_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true">
+          <bind_style_if name="hh_warn" cond="host_health_temp_status eq 1"/>
+          <bind_style_if name="hh_danger" cond="host_health_temp_status eq 2"/>
+        </text_tiny>
+      </pass_through>
+
+      <!-- 2 column: icon over CPU, temperature and memory. -->
+      <pass_through name="host_health_column"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if_not_eq subject="host_health_rung" flag="hidden" ref_value="2"/>
+        <icon name="host_health_column_icon" src="gauge" size="xs" clickable="false" event_bubble="true">
+          <bind_style_if_eq name="hh_warn" subject="host_health_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_status" ref_value="2"/>
+        </icon>
+        <text_tiny name="host_health_column_cpu" bind_text="host_health_cpu_text" clickable="false" event_bubble="true">
+          <bind_style_if name="hh_warn" cond="host_health_cpu_status eq 1"/>
+          <bind_style_if name="hh_danger" cond="host_health_cpu_status eq 2"/>
+        </text_tiny>
+        <text_tiny name="host_health_column_temp"
+                   bind_text="host_health_temp_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true">
+          <bind_style_if name="hh_warn" cond="host_health_temp_status eq 1"/>
+          <bind_style_if name="hh_danger" cond="host_health_temp_status eq 2"/>
+        </text_tiny>
+        <text_tiny name="host_health_column_mem_label"
+                   text="RAM" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+        <text_tiny name="host_health_column_mem" bind_text="host_health_mem_text" clickable="false" event_bubble="true"/>
+      </pass_through>
+
+      <!-- 3 cell: CPU with a sparkline over temperature and memory. -->
+      <pass_through name="host_health_cell"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if_not_eq subject="host_health_rung" flag="hidden" ref_value="3"/>
+        <pass_through name="host_health_cell_top"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="start"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <text_body name="host_health_cell_cpu" bind_text="host_health_cpu_text" clickable="false" event_bubble="true">
+            <bind_style_if name="hh_warn" cond="host_health_cpu_status eq 1"/>
+            <bind_style_if name="hh_danger" cond="host_health_cpu_status eq 2"/>
+          </text_body>
+          <helix_sparkline name="host_health_cell_spark"
+                           height="#button_height_sm" source="host_cpu_pct" flex_grow="1" style_line_color="#primary"
+                           clickable="false" event_bubble="true">
+            <bind_style_if name="hh_line_warn" cond="host_health_cpu_status eq 1"/>
+            <bind_style_if name="hh_line_danger" cond="host_health_cpu_status eq 2"/>
+          </helix_sparkline>
+        </pass_through>
+        <text_tiny name="host_health_cell_detail"
+                   bind_text="host_health_detail_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true">
+          <bind_style_if name="hh_warn" cond="host_health_temp_status eq 1"/>
+          <bind_style_if name="hh_danger" cond="host_health_temp_status eq 2"/>
+        </text_tiny>
+      </pass_through>
+
+      <!-- 4 wide: CPU row over a memory row; the busiest MCU replaces memory while printing. -->
+      <pass_through name="host_health_wide"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if_not_eq subject="host_health_rung" flag="hidden" ref_value="4"/>
+        <pass_through name="host_health_wide_cpu_row"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="start"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <text_tiny name="host_health_wide_cpu_label"
+                     width="25%" long_mode="dots" text="CPU" style_text_color="#text_muted" clickable="false"
+                     event_bubble="true"/>
+          <helix_sparkline name="host_health_wide_cpu_spark"
+                           height="#space_lg" source="host_cpu_pct" flex_grow="1" style_line_color="#primary"
+                           clickable="false" event_bubble="true">
+            <bind_style_if name="hh_line_warn" cond="host_health_cpu_status eq 1"/>
+            <bind_style_if name="hh_line_danger" cond="host_health_cpu_status eq 2"/>
+          </helix_sparkline>
+          <text_tiny name="host_health_wide_cpu_text"
+                     bind_text="host_health_cpu_text" clickable="false" event_bubble="true">
+            <bind_style_if name="hh_warn" cond="host_health_cpu_status eq 1"/>
+            <bind_style_if name="hh_danger" cond="host_health_cpu_status eq 2"/>
+          </text_tiny>
+        </pass_through>
+        <pass_through name="host_health_wide_mem_row"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="start"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <bind_flag_if_eq subject="host_health_show_mcu_row" flag="hidden" ref_value="1"/>
+          <text_tiny name="host_health_wide_mem_label"
+                     width="25%" long_mode="dots" text="Memory" style_text_color="#text_muted" clickable="false"
+                     event_bubble="true"/>
+          <helix_sparkline name="host_health_wide_mem_spark"
+                           height="#space_lg" source="host_mem_pct_used" flex_grow="1" style_line_color="#primary"
+                           clickable="false" event_bubble="true"/>
+          <text_tiny name="host_health_wide_mem_text"
+                     bind_text="host_health_mem_text" clickable="false" event_bubble="true"/>
+        </pass_through>
+        <pass_through name="host_health_wide_mcu_row"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="start"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <bind_flag_if_eq subject="host_health_show_mcu_row" flag="hidden" ref_value="0"/>
+          <text_tiny name="host_health_wide_mcu_name"
+                     width="25%" long_mode="dots" bind_text="host_health_busiest_name" style_text_color="#text_muted"
+                     clickable="false" event_bubble="true"/>
+          <lv_bar name="host_health_wide_mcu_bar"
+                  height="#space_sm" bind_value="host_health_busiest_load" min_value="0" max_value="100" flex_grow="1"
+                  clickable="false" event_bubble="true"/>
+          <text_tiny name="host_health_wide_mcu_text"
+                     bind_text="host_health_busiest_text" clickable="false" event_bubble="true"/>
+        </pass_through>
+      </pass_through>
+
+      <!-- 5 full: throttle line, host block, then one row per MCU. -->
+      <pass_through name="host_health_full"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="start"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if_not_eq subject="host_health_rung" flag="hidden" ref_value="5"/>
+        <text_tiny name="host_health_throttle"
+                   width="100%" bind_text="perf_host_throttle_text" long_mode="dots" clickable="false"
+                   event_bubble="true">
+          <bind_flag_if_eq subject="perf_host_throttle_state" flag="hidden" ref_value="0"/>
+          <bind_style_if_eq name="hh_warn" subject="host_health_throttle_status" ref_value="1"/>
+          <bind_style_if_eq name="hh_danger" subject="host_health_throttle_status" ref_value="2"/>
+        </text_tiny>
+        <pass_through name="host_health_full_cpu_row"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="start"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <text_tiny name="host_health_full_cpu_label"
+                     width="25%" long_mode="dots" text="CPU" style_text_color="#text_muted" clickable="false"
+                     event_bubble="true"/>
+          <helix_sparkline name="host_health_full_cpu_spark"
+                           height="#space_lg" source="host_cpu_pct" flex_grow="1" style_line_color="#primary"
+                           clickable="false" event_bubble="true">
+            <bind_style_if name="hh_line_warn" cond="host_health_cpu_status eq 1"/>
+            <bind_style_if name="hh_line_danger" cond="host_health_cpu_status eq 2"/>
+          </helix_sparkline>
+          <text_tiny name="host_health_full_cpu_text"
+                     bind_text="host_health_cpu_text" clickable="false" event_bubble="true">
+            <bind_style_if name="hh_warn" cond="host_health_cpu_status eq 1"/>
+            <bind_style_if name="hh_danger" cond="host_health_cpu_status eq 2"/>
+          </text_tiny>
+        </pass_through>
+        <pass_through name="host_health_full_mem_row"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="start"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <text_tiny name="host_health_full_mem_label"
+                     width="25%" long_mode="dots" text="Memory" style_text_color="#text_muted" clickable="false"
+                     event_bubble="true"/>
+          <helix_sparkline name="host_health_full_mem_spark"
+                           height="#space_lg" source="host_mem_pct_used" flex_grow="1" style_line_color="#primary"
+                           clickable="false" event_bubble="true"/>
+          <text_tiny name="host_health_full_mem_text"
+                     bind_text="perf_host_mem_free_text" clickable="false" event_bubble="true"/>
+        </pass_through>
+        <pass_through name="host_health_full_detail_row"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="space_between"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <text_tiny name="host_health_full_temp"
+                     bind_text="host_health_temp_text" clickable="false" event_bubble="true">
+            <bind_style_if name="hh_warn" cond="host_health_temp_status eq 1"/>
+            <bind_style_if name="hh_danger" cond="host_health_temp_status eq 2"/>
+          </text_tiny>
+          <text_tiny name="host_health_full_disk"
+                     bind_text="perf_host_disk_free_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="perf_host_disk_present" flag="hidden" ref_value="0"/>
+            <bind_style_if_eq name="hh_warn" subject="host_health_disk_status" ref_value="1"/>
+          </text_tiny>
+        </pass_through>
+        <!-- HostHealthWidget builds one host_health_mcu_row per MCU the box holds. -->
+        <pass_through name="host_health_mcu_list"
+                      width="100%" height="content" flex_flow="column" style_flex_main_place="start"
+                      style_flex_cross_place="center" style_pad_row="#space_xxs">
+          <bind_flag_if_eq subject="host_health_mcu_rows" flag="hidden" ref_value="0"/>
+        </pass_through>
+      </pass_through>
+    </pass_through>
+  </view>
+</component>

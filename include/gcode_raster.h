@@ -44,7 +44,7 @@ enum class Aa { Off, On };
 enum class ChannelOrder { Bgra, Rgba };
 
 /// Upper bound on the offsets a single thick line can produce. Extrusion pixel
-/// width is clamped to MAX_EXTRUSION_PIXEL_WIDTH (8) upstream, so this is
+/// width is clamped to kMaxExtrusionPixelWidth (8) upstream, so this is
 /// generous headroom rather than a real limit.
 inline constexpr int kMaxThickLineOffsets = 32;
 

@@ -14,7 +14,9 @@
 #include <memory>
 #include <vector>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 /**
  * @file ui_fan_control_overlay.h
@@ -83,7 +85,7 @@ class FanControlOverlay : public OverlayBase {
      * @brief Set IMoonrakerAPI for sending fan commands
      * @param api Pointer to IMoonrakerAPI (may be nullptr)
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -135,7 +137,7 @@ class FanControlOverlay : public OverlayBase {
     //
 
     helix::PrinterState& printer_state_;
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     //
     // === Widget References ===

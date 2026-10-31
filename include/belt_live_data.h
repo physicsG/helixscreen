@@ -24,7 +24,7 @@ namespace helix::calibration {
 /**
  * @brief Smallest belt-to-belt difference this instrument can actually resolve
  *
- * Not a tolerance and not a preference - a physical limit. ANALYZE_MS fixes the
+ * Not a tolerance and not a preference - a physical limit. kAnalyzeMs fixes the
  * ring-down at 500 ms, and a 500 ms observation cannot resolve finer than about
  * 1/0.5 s = 2 Hz. It shows up concretely as bin quantisation: at a 2048-sample
  * window and the measured 3053 Hz stream rate the PSD bins are 1.51 Hz apart,
@@ -37,7 +37,7 @@ namespace helix::calibration {
  * below this reads as matched rather than as a difference. Zero-padding the FFT
  * would interpolate finer bins but would add no information.
  */
-inline constexpr float BELT_RESOLUTION_HZ = 2.0f;
+inline constexpr float kBeltResolutionHz = 2.0f;
 
 /**
  * @brief Quiet stretch after which the panel prompts for a pluck
@@ -46,7 +46,7 @@ inline constexpr float BELT_RESOLUTION_HZ = 2.0f;
  * machine. Long enough that a deliberate pause between strikes does not nag,
  * short enough that someone who has lost the thread gets told what to do.
  */
-inline constexpr uint32_t IDLE_HINT_MS = 8000;
+inline constexpr uint32_t kIdleHintMs = 8000;
 
 /**
  * @brief How long a rejected strike keeps saying "pluck harder"
@@ -54,7 +54,7 @@ inline constexpr uint32_t IDLE_HINT_MS = 8000;
  * Rejections are instantaneous events on a 10 Hz batch stream. Without a hold
  * the hint would appear and vanish within 100 ms, which is unreadable.
  */
-inline constexpr uint32_t REJECT_HINT_MS = 3000;
+inline constexpr uint32_t kRejectHintMs = 3000;
 
 /**
  * @brief How closely a measured belt matches the reference belt, 0-100
@@ -74,7 +74,7 @@ float belt_match_percent(float reference_hz, float measured_hz);
  *
  * The verdict wording and the match bar go through here rather than comparing
  * frequencies directly, so the UI never reports a difference smaller than
- * BELT_RESOLUTION_HZ - a difference it cannot actually measure.
+ * kBeltResolutionHz - a difference it cannot actually measure.
  */
 bool belt_frequencies_match(float a_hz, float b_hz);
 
@@ -103,7 +103,7 @@ class BeltLiveData {
 
     /// Horizontal resolution of both traces. Sized for the widest trace widget
     /// on a 1024 px panel without redrawing more points than a pixel column.
-    static constexpr size_t TRACE_POINTS = 128;
+    static constexpr size_t kTracePoints = 128;
 
     /**
      * @brief Replace the waveform trace from a detection window
@@ -112,7 +112,7 @@ class BeltLiveData {
      * bucket, matching PluckDetector::window_rms()'s definition of signal:
      * per-axis mean removed, then the three-axis norm. Gravity is a per-axis
      * DC term, so removing the mean is what keeps a 9800 mm/s^2 constant from
-     * swamping a pluck. A window shorter than TRACE_POINTS yields one point per
+     * swamping a pluck. A window shorter than kTracePoints yields one point per
      * sample rather than nothing, so the widget is never blank at the start of
      * a measurement. An empty window clears the trace.
      */

@@ -6,46 +6,44 @@
 
 #include "ams_state.h"
 #include "app_globals.h"
-#include "filament_sensor_manager.h"
-#include "humidity_sensor_manager.h"
 #include "i_moonraker_client.h"
 #include "led/led_auto_state.h"
 #include "led/led_controller.h"
-#include "load_cell_manager.h"
 #include "moonraker_api.h"
 #include "printer_name_sync.h"
-#include "probe_sensor_manager.h"
 #include "runtime_config.h"
+#include "sensor_manager.h"
 #include "spdlog/spdlog.h"
 #include "standard_macros.h"
-#include "temperature_sensor_manager.h"
 #include "tool_state.h"
-#include "width_sensor_manager.h"
-#include "width_sensor_types.h"
 #include "wizard_config_paths.h"
 
 #include <vector>
 
 namespace helix {
 
-std::vector<std::string> temperature_sensor_objects(const PrinterDiscovery& hardware) {
-    std::vector<std::string> objects = hardware.sensors();
-    for (const auto& heater : hardware.heaters()) {
-        if (heater.rfind("heater_generic ", 0) == 0)
-            objects.push_back(heater);
-    }
-    return objects;
-}
+PrinterDiscovery::PrinterDiscovery() = default;
+PrinterDiscovery::PrinterDiscovery(const PrinterDiscovery&) = default;
+PrinterDiscovery::PrinterDiscovery(PrinterDiscovery&&) noexcept = default;
+PrinterDiscovery& PrinterDiscovery::operator=(const PrinterDiscovery&) = default;
+PrinterDiscovery& PrinterDiscovery::operator=(PrinterDiscovery&&) noexcept = default;
+PrinterDiscovery::~PrinterDiscovery() = default;
 
 void remember_printer_hostname(const std::string& hostname) {
     if (hostname.empty() || hostname == "unknown") {
         return;
     }
     Config* config = Config::get_instance();
-    const std::string path = config->df() + helix::wizard::HOSTNAME;
+    const std::string path = config->df() + helix::wizard::kHostname;
     if (config->get<std::string>(path, "") != hostname) {
         config->set<std::string>(path, hostname);
         config->save();
+    }
+}
+
+void reload_sensor_roles_after_preset() {
+    for (auto* m : helix::sensors::sensor_managers()) {
+        m->load_settings();
     }
 }
 
@@ -58,34 +56,11 @@ void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerA
 
     // Sensor discovery is unconditional: an empty list is what clears the
     // previous printer's sensors on a switch.
-    auto& fsm = FilamentSensorManager::instance();
-    fsm.discover_sensors(hardware.filament_sensor_names());
-    fsm.load_config_from_file();
 
-    auto& tsm = helix::sensors::TemperatureSensorManager::instance();
-    tsm.discover(temperature_sensor_objects(hardware));
-
-    // Initialize load cell manager
-    // hardware.load_cells() returns load_cell objects
-    auto& lcm = helix::sensors::LoadCellManager::instance();
-    lcm.discover(hardware.load_cells());
-
-    // Initialize probe sensor manager
-    // Probe sensors (bltouch, cartographer, beacon, etc.) are discovered from the full objects list
-    auto& psm = helix::sensors::ProbeSensorManager::instance();
-    psm.discover(hardware.printer_objects());
-    psm.load_config_from_file();
-
-    // Initialize humidity sensor manager
-    // Humidity sensors (bme280, htu21d) are discovered from the full objects list
-    auto& hsm = helix::sensors::HumiditySensorManager::instance();
-    hsm.discover(hardware.printer_objects());
-
-    // Initialize width sensor manager
-    // Width sensors (hall/tsl1401cl filament width) are discovered from Klipper objects
-    auto& wsm = helix::sensors::WidthSensorManager::instance();
-    wsm.discover(hardware.width_sensor_objects());
-    wsm.load_config_from_file();
+    for (auto* m : helix::sensors::sensor_managers()) {
+        m->discover(hardware);
+        m->load_settings();
+    }
 
     // Initialize multi-extruder temperature tracking
     auto& printer_state = get_printer_state();
@@ -93,6 +68,11 @@ void init_subsystems_from_hardware(const PrinterDiscovery& hardware, IMoonrakerA
 
     // Initialize tool changer state from discovered hardware
     helix::ToolState::instance().init_tools(hardware);
+    // init_tools() mounts T0 and drops any backend topology. A backend started
+    // above, or still running from the last discovery, already said which head
+    // is mounted and sends nothing more until its state changes, so its answer
+    // goes back to ToolState here.
+    AmsState::instance().sync_from_backend();
 
     // Seed the per-tool offsets. Must follow init_tools(): the initial status
     // snapshot arrived before tools_ existed, so it was dropped, and Moonraker

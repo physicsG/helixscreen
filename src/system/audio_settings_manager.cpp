@@ -10,17 +10,20 @@
 #include "static_subject_registry.h"
 
 #include <algorithm>
+#include <iterator>
 
 using namespace helix;
 
 using settings::Scope;
 // Row order is AudioSettingsManager::Key.
-static constexpr settings::PersistedSetting AUDIO_SETTINGS[] = {
-    {"settings_sounds_enabled", "/sounds_enabled", Scope::Global, true, 0, 0, 1, nullptr},
-    {"settings_ui_sounds_enabled", "/ui_sounds_enabled", Scope::Global, true, 1, 0, 1, nullptr},
-    {"settings_volume", "/sounds/volume", Scope::Global, false, 80, 0, 100, nullptr},
+static constexpr settings::PersistedSetting kAudioSettings[] = {
+    {"settings_sounds_enabled", "/sounds_enabled", Scope::Global, true, 0, 0, 1, "sounds_enabled"},
+    {"settings_ui_sounds_enabled", "/ui_sounds_enabled", Scope::Global, true, 1, 0, 1,
+     "ui_sounds_enabled"},
+    {"settings_volume", "/sounds/volume", Scope::Global, false, 80, 0, 100, "volume"},
     // CompletionAlertMode: 0=Off, 1=Notification, 2=Alert
-    {"settings_completion_alert", "/completion_alert", Scope::Global, false, 2, 0, 2, nullptr},
+    {"settings_completion_alert", "/completion_alert", Scope::Global, false, 2, 0, 2,
+     "completion_alert"},
 };
 
 AudioSettingsManager& AudioSettingsManager::instance() {
@@ -28,7 +31,11 @@ AudioSettingsManager& AudioSettingsManager::instance() {
     return instance;
 }
 
-AudioSettingsManager::AudioSettingsManager() : settings_(AUDIO_SETTINGS) {
+settings::TableView AudioSettingsManager::persisted_table() {
+    return {kAudioSettings, std::size(kAudioSettings)};
+}
+
+AudioSettingsManager::AudioSettingsManager() : settings_(kAudioSettings) {
     spdlog::trace("[AudioSettingsManager] Constructor");
 }
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "screensaver_canvas.h"
 
@@ -11,7 +11,7 @@
 
 namespace helix::ui {
 
-static_assert(SAVER_MAX_DIRTY_AREAS <= LV_INV_BUF_SIZE,
+static_assert(kSaverMaxDirtyAreas <= LV_INV_BUF_SIZE,
               "a saver frame's areas must fit LVGL's invalid-area buffer");
 
 bool SaverCanvas::create(lv_obj_t* parent, int32_t w, int32_t h, lv_color_format_t cf) {
@@ -68,15 +68,11 @@ void SaverCanvas::invalidate(std::vector<DirtyRect>& areas) {
     if (!canvas_) {
         return;
     }
-    merge_dirty_areas(areas, SAVER_MAX_DIRTY_AREAS);
+    reduce_dirty(areas, kSaverMaxDirtyAreas, w_, h_);
     if (areas.empty()) {
         return;
     }
-    int64_t covered_px = 0;
-    for (const DirtyRect& r : areas) {
-        covered_px += r.area();
-    }
-    if (covers_whole_canvas(covered_px, w_, h_)) {
+    if (areas.size() == 1 && areas.front() == DirtyRect::whole(w_, h_)) {
         lv_obj_invalidate(canvas_);
         return;
     }

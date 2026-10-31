@@ -9,6 +9,11 @@
 // DRAM into external PSRAM. On every other platform it is empty, so the
 // declaration is byte-identical.
 //
+// Statics in the firmware's helixapp component reach PSRAM without it: its
+// linker fragment (components/helixapp/linker.lf) maps that whole archive's .bss
+// there. The attribute still decides placement for sources compiled into other
+// components.
+//
 // Use ONLY for large statics that are first touched at app runtime (after PSRAM
 // is initialized) and are NEVER accessed from a DMA engine or ISR. App-state
 // singletons and message/scratch buffers qualify; draw/DMA buffers and

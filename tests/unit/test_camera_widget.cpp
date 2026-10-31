@@ -11,12 +11,23 @@
 #if HELIX_HAS_CAMERA
 #include "ui_update_queue.h"
 
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/camera_stream_test_access.h"
+#include "../test_helpers/camera_widget_test_access.h"
+#include "../test_helpers/loopback_http_server.h"
 #include "camera_stream.h"
+#include "helix-xml/src/xml/lv_xml.h"
+#include "static_subject_registry.h"
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <new>
 #include <thread>
+#include <vector>
 #endif
 
 using namespace helix;
@@ -398,6 +409,206 @@ TEST_CASE_METHOD(HelixTestFixture, "CameraStream: restart after the worker gave 
     helix::ui::UpdateQueue::instance().drain();
 }
 
+TEST_CASE_METHOD(HelixTestFixture,
+                 "CameraStream: a timed-out stop leaves nothing touching the stream object",
+                 "[camera][camera_stop]") {
+    // The stream lives in raw storage so the test can destroy it, poison the
+    // bytes, and see whether anything still writes there once the wedged
+    // worker finally exits.
+    alignas(CameraStream) unsigned char storage[sizeof(CameraStream)];
+    auto* stream = new (storage) CameraStream();
+    CameraStreamTestAccess::set_join_timeout(*stream, std::chrono::milliseconds(50));
+
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    auto exited = std::make_shared<std::atomic<bool>>(false);
+    CameraStreamTestAccess::spawn_wedged_worker(*stream, release, exited);
+
+    REQUIRE_NOTHROW(stream->stop());
+    CHECK(stream->was_detached());
+    CHECK_FALSE(stream->is_running());
+    CHECK_FALSE(CameraStreamTestAccess::worker_joinable(*stream));
+
+    const size_t offset = CameraStreamTestAccess::worker_offset(*stream);
+    stream->~CameraStream();
+    constexpr unsigned char kPoison = 0xA5;
+    std::memset(storage, kPoison, sizeof(storage));
+
+    // Whatever still waits on the worker wakes now. It must own everything it
+    // touches: the CameraStream it came from is gone.
+    release->store(true);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!exited->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(exited->load());
+
+    // The helper's join returns at some point after the worker exits; nothing
+    // signals when. Watch the bytes for a full second and stop at the first write.
+    auto worker_bytes_untouched = [&] {
+        for (size_t i = offset; i < offset + sizeof(std::thread); ++i) {
+            if (storage[i] != kPoison) {
+                return false;
+            }
+        }
+        return true;
+    };
+    bool untouched = true;
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (untouched && std::chrono::steady_clock::now() < deadline) {
+        untouched = worker_bytes_untouched();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(untouched);
+
+    helix::ui::UpdateQueue::instance().drain();
+}
+
+namespace {
+
+/// A snapshot endpoint that answers 404 until told to serve a real JPEG.
+class SnapshotServer : public test::LoopbackHttpServer {
+  public:
+    SnapshotServer() {
+        std::ifstream in("assets/test_timelapse/benchy_timelapse_20260310.thumb.jpg",
+                         std::ios::binary);
+        jpeg_.assign(std::istreambuf_iterator<char>(in), {});
+        service().GET("/snapshot", [this](HttpRequest*, HttpResponse* resp) {
+            if (!serve_jpeg.load()) {
+                resp->body = "no camera";
+                return 404;
+            }
+            resp->content_type = IMAGE_JPEG;
+            resp->body = jpeg_;
+            return 200;
+        });
+        start();
+    }
+
+    std::atomic<bool> serve_jpeg{false};
+    [[nodiscard]] bool has_jpeg() const {
+        return !jpeg_.empty();
+    }
+
+  private:
+    std::string jpeg_;
+};
+
+/// Drives single snapshot fetches against a SnapshotServer and records what
+/// the stream reports, draining the deferred error callbacks after each.
+struct SnapshotFetcher {
+    CameraStream stream;
+    SnapshotServer server;
+    std::vector<std::string> errors;
+    int frames = 0;
+
+    void fetch() {
+        CameraStreamTestAccess::fetch_snapshot_once(
+            stream, server.url("/snapshot"),
+            [this](const char* msg) { errors.emplace_back(msg ? msg : ""); },
+            [this](lv_draw_buf_t*) { ++frames; });
+        helix::ui::UpdateQueue::instance().drain(); // report_error() defers to the main thread
+    }
+    void fail(int times) {
+        server.serve_jpeg.store(false);
+        for (int i = 0; i < times; ++i) {
+            fetch();
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(HelixTestFixture,
+                 "CameraStream: a snapshot feed that keeps failing reports an error once",
+                 "[camera][1891]") {
+    SnapshotFetcher f;
+    REQUIRE(f.server.started());
+    const int max = CameraStreamTestAccess::max_snapshot_failures();
+
+    f.fail(max - 1);
+    CHECK(f.errors.empty());
+
+    // A view waiting on its first frame shows this instead of spinning forever.
+    f.fail(1);
+    REQUIRE(f.errors.size() == 1);
+    CHECK_FALSE(f.errors.front().empty());
+
+    // One message per run of failures, not one per poll.
+    f.fail(2);
+    CHECK(f.errors.size() == 1);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "CameraStream: a decoded snapshot starts a new run of failures",
+                 "[camera][1891]") {
+    SnapshotFetcher f;
+    REQUIRE(f.server.started());
+    REQUIRE(f.server.has_jpeg());
+    const int max = CameraStreamTestAccess::max_snapshot_failures();
+
+    // One short of reporting, then a good frame: the count starts over.
+    f.fail(max - 1);
+    f.server.serve_jpeg.store(true);
+    f.fetch();
+    REQUIRE(f.frames == 1);
+    f.fail(max - 1);
+    CHECK(f.errors.empty());
+
+    // A run that reported, then a good frame: the next full run reports again.
+    f.fail(1);
+    REQUIRE(f.errors.size() == 1);
+    f.server.serve_jpeg.store(true);
+    f.fetch();
+    f.fail(max);
+    CHECK(f.errors.size() == 2);
+
+    // A restart starts the count over too: one short of a run, restart, then
+    // one more failure stays silent. The restart's own no-URL report is the
+    // only new message.
+    f.server.serve_jpeg.store(true);
+    f.fetch();
+    f.fail(max - 1);
+    REQUIRE(f.errors.size() == 2);
+    f.stream.start(
+        "", "", [](lv_draw_buf_t*) {},
+        [&f](const char* msg) { f.errors.emplace_back(msg ? msg : ""); });
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(f.errors.size() == 3);
+    f.fail(1);
+    CHECK(f.errors.size() == 3);
+}
+
+TEST_CASE("CameraStream: an https stream without client TLS is shown by snapshot polling",
+          "[camera][1891]") {
+    using Mode = CameraStream::FetchMode;
+    const std::string https_stream = "https://cam.example/stream";
+    const std::string https_snap = "https://cam.example/snapshot";
+    const std::string http_stream = "http://192.168.1.5/stream";
+
+    // libhv without TLS (Android): an https stream cannot be streamed.
+    CHECK(CameraStream::choose_fetch_mode(https_stream, https_snap, false) == Mode::Snapshot);
+    CHECK(CameraStream::choose_fetch_mode(https_stream, "", false) == Mode::None);
+    CHECK(CameraStream::choose_fetch_mode(http_stream, https_snap, false) == Mode::Stream);
+
+    // With client TLS, a stream URL streams whatever its scheme.
+    CHECK(CameraStream::choose_fetch_mode(https_stream, https_snap, true) == Mode::Stream);
+
+    CHECK(CameraStream::choose_fetch_mode("", https_snap, true) == Mode::Snapshot);
+    CHECK(CameraStream::choose_fetch_mode("", "", true) == Mode::None);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "CameraStream: a start with no URL at all reports an error",
+                 "[camera][1891]") {
+    CameraStream stream;
+    std::vector<std::string> errors;
+    stream.start(
+        "", "", [](lv_draw_buf_t*) {},
+        [&](const char* msg) { errors.emplace_back(msg ? msg : ""); });
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK_FALSE(stream.is_running());
+    CHECK(errors.size() == 1);
+}
+
 TEST_CASE_METHOD(HelixTestFixture, "CameraStream: snapshot fallback keeps is_running() true",
                  "[camera][1245]") {
     CameraStream stream;
@@ -434,6 +645,48 @@ TEST_CASE_METHOD(HelixTestFixture, "CameraStream: snapshot fallback keeps is_run
     CHECK_FALSE(stream.is_running());
 
     helix::ui::UpdateQueue::instance().drain();
+}
+
+// ============================================================================
+// Status subject across a printer switch
+// ============================================================================
+
+namespace {
+const char* camera_status_text() {
+    lv_subject_t* s = lv_xml_get_subject(nullptr, "camera_status_text");
+    REQUIRE(s != nullptr);
+    return lv_subject_get_string(s);
+}
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "CameraWidget: status subject re-inits to No Camera after a printer switch",
+                 "[camera][panel_widget]") {
+    init_widget_registrations();
+    const auto* def = find_widget_def("camera");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->init_subjects != nullptr);
+    StaticSubjectRegistry& registry = StaticSubjectRegistry::instance();
+    registry.deinit_one("CameraWidgetSubjects", StaticSubjectRegistry::Scope::PrinterSwitch);
+    def->init_subjects();
+
+    CameraWidget widget;
+    SECTION("after a frame cleared the status") {
+        CameraWidgetTestAccess::set_status_text(widget, "");
+    }
+    SECTION("after a stream status") {
+        CameraWidgetTestAccess::set_status_text(widget, "Stream error");
+    }
+    SECTION("after a status shown from a key") {
+        CameraWidgetTestAccess::set_status_key(widget, "Connecting Camera...");
+    }
+    REQUIRE(std::strcmp(camera_status_text(), lv_tr("No Camera")) != 0);
+
+    REQUIRE(
+        registry.deinit_one("CameraWidgetSubjects", StaticSubjectRegistry::Scope::PrinterSwitch));
+    def->init_subjects();
+
+    CHECK(std::string(camera_status_text()) == lv_tr("No Camera"));
 }
 
 #else // !HELIX_HAS_CAMERA

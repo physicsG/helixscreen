@@ -1,0 +1,107 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Print status job tile, pre-print: the start sequence over the slicer
+     thumbnail, which sits on the tile's right and fades under the text.
+     The list shows ps_step_count rows of ps_step_<i>_name / _time / _status
+     (PreprintStepStatus: 0 Done, 1 Current, 2 Upcoming). Where the tile is
+     too small for the list (ps_checklist_compact = 1) it shows the current
+     step large, its countdown and a dot per step instead. -->
+<component>
+  <styles>
+    <style name="step_done" text_color="#success"/>
+    <style name="step_current" text_color="#warning"/>
+    <style name="step_upcoming" text_color="#text_muted"/>
+    <style name="dot_done" bg_color="#success"/>
+    <style name="dot_current" bg_color="#warning"/>
+    <style name="dot_upcoming" bg_color="#text_subtle"/>
+  </styles>
+  <view extends="lv_obj"
+        width="100%" height="100%" style_bg_color="#card_bg" style_bg_opa="255" style_border_width="0"
+        style_radius="#border_radius" style_clip_corner="true" style_pad_all="#space_sm" scrollable="false"
+        clickable="false">
+    <!-- The thumbnail, large and dim on the right so the list reads over it,
+         and the fade that runs it out under the list from the left. -->
+    <lv_image name="ps_checklist_thumbnail"
+              width="65%" height="100%" ignore_layout="true" align="right_mid" bind_src="print_thumbnail_path"
+              inner_align="contain" style_image_opa="80" clickable="false"/>
+    <lv_obj name="ps_checklist_fade"
+            width="75%" height="100%" ignore_layout="true" align="left_mid" style_bg_color="#card_bg"
+            style_bg_grad_color="#card_bg" style_bg_grad_dir="hor" style_bg_main_opa="255" style_bg_grad_opa="0"
+            style_bg_main_stop="120" style_bg_grad_stop="255" style_border_width="0" style_radius="0" style_pad_all="0"
+            scrollable="false" clickable="false"/>
+
+    <!-- The list. -->
+    <lv_obj name="ps_checklist_list"
+            width="100%" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="column"
+            style_pad_gap="#space_xxs" scrollable="false" clickable="false">
+      <bind_flag_if_eq subject="ps_checklist_compact" flag="hidden" ref_value="1"/>
+      <lv_obj width="100%"
+              height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="row"
+              style_flex_cross_place="center" style_pad_gap="#space_xs" scrollable="false">
+        <text_small name="ps_checklist_file"
+                    bind_text="print_display_filename" style_text_color="#text" long_mode="dots" style_max_width="70%"/>
+        <text_small text="preparing" style_text_color="#text_muted" long_mode="dots" flex_grow="1"/>
+      </lv_obj>
+      <repeat count="8">
+        <lv_obj name="ps_step_row_${i}"
+                width="100%" height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="row"
+                style_flex_cross_place="center" style_pad_gap="#space_xs" scrollable="false">
+          <bind_flag_if cond="ps_step_count le ${i}" flag="hidden"/>
+          <lv_obj width="#spinner_xs"
+                  height="#spinner_xs" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+            <icon src="check_circle" size="xs" variant="success" align="center">
+              <bind_flag_if_not_eq subject="ps_step_${i}_status" flag="hidden" ref_value="0"/>
+            </icon>
+            <spinner size="xs" align="center" style_arc_color-indicator="#warning">
+              <bind_flag_if_not_eq subject="ps_step_${i}_status" flag="hidden" ref_value="1"/>
+            </spinner>
+            <lv_obj width="70%"
+                    height="70%" align="center" style_radius="32767" style_bg_opa="0" style_border_width="1"
+                    style_border_color="#text_muted" style_pad_all="0" scrollable="false">
+              <bind_flag_if_not_eq subject="ps_step_${i}_status" flag="hidden" ref_value="2"/>
+            </lv_obj>
+          </lv_obj>
+          <text_small name="ps_step_name_${i}" bind_text="ps_step_${i}_name" flex_grow="1" long_mode="dots">
+            <bind_style_if_eq name="step_done" subject="ps_step_${i}_status" ref_value="0"/>
+            <bind_style_if_eq name="step_current" subject="ps_step_${i}_status" ref_value="1"/>
+            <bind_style_if_eq name="step_upcoming" subject="ps_step_${i}_status" ref_value="2"/>
+          </text_small>
+          <text_small name="ps_step_time_${i}" bind_text="ps_step_${i}_time">
+            <bind_style_if_eq name="step_done" subject="ps_step_${i}_status" ref_value="0"/>
+            <bind_style_if_eq name="step_current" subject="ps_step_${i}_status" ref_value="1"/>
+            <bind_style_if_eq name="step_upcoming" subject="ps_step_${i}_status" ref_value="2"/>
+          </text_small>
+        </lv_obj>
+      </repeat>
+    </lv_obj>
+
+    <!-- The compact form: file and step N of M, the current step, its countdown, a dot per step. -->
+    <lv_obj name="ps_checklist_compact"
+            width="100%" height="100%" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="column"
+            style_pad_gap="#space_xs" scrollable="false" clickable="false" hidden="true">
+      <bind_flag_if_eq subject="ps_checklist_compact" flag="hidden" ref_value="0"/>
+      <text_small name="ps_checklist_compact_file"
+                  width="100%" bind_text="print_display_filename" style_text_color="#text_muted" long_mode="dots"/>
+      <text_small name="ps_checklist_position"
+                  width="100%" bind_text="ps_step_position_text" style_text_color="#text_muted" long_mode="dots"/>
+      <text_body name="ps_checklist_current"
+                 width="100%" bind_text="ps_step_current_name" style_text_color="#warning" long_mode="wrap"/>
+      <text_small name="ps_checklist_current_time" bind_text="ps_step_current_time" style_text_color="#warning"/>
+      <lv_obj name="ps_checklist_dots"
+              width="100%" height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="row"
+              style_pad_gap="#space_xs" scrollable="false">
+        <repeat count="8">
+          <lv_obj width="#space_sm"
+                  height="#space_sm" style_radius="32767" style_bg_opa="255" style_border_width="0" style_pad_all="0"
+                  scrollable="false">
+            <bind_flag_if cond="ps_step_count le ${i}" flag="hidden"/>
+            <bind_style_if_eq name="dot_done" subject="ps_step_${i}_status" ref_value="0"/>
+            <bind_style_if_eq name="dot_current" subject="ps_step_${i}_status" ref_value="1"/>
+            <bind_style_if_eq name="dot_upcoming" subject="ps_step_${i}_status" ref_value="2"/>
+          </lv_obj>
+        </repeat>
+      </lv_obj>
+    </lv_obj>
+  </view>
+</component>

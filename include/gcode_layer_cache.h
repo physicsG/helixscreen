@@ -41,21 +41,21 @@ class GCodeDataSource;
  *   }
  * @endcode
  *
- * Memory usage: 40 bytes per segment (BYTES_PER_SEGMENT) + cache bookkeeping
+ * Memory usage: 40 bytes per segment (kBytesPerSegment) + cache bookkeeping
  */
 class GCodeLayerCache {
   public:
     /// Memory budget for constrained devices like AD5M (2MB) - <256MB total RAM
-    static constexpr size_t DEFAULT_BUDGET_CONSTRAINED = 2 * 1024 * 1024;
+    static constexpr size_t kDefaultBudgetConstrained = 2 * 1024 * 1024;
 
     /// Memory budget for normal devices (16MB) - 256MB-512MB total RAM
-    static constexpr size_t DEFAULT_BUDGET_NORMAL = 16 * 1024 * 1024;
+    static constexpr size_t kDefaultBudgetNormal = 16 * 1024 * 1024;
 
     /// Memory budget for well-equipped devices (32MB) - >512MB total RAM
-    static constexpr size_t DEFAULT_BUDGET_GOOD = 32 * 1024 * 1024;
+    static constexpr size_t kDefaultBudgetGood = 32 * 1024 * 1024;
 
     /// Approximate bytes per segment (for estimation)
-    static constexpr size_t BYTES_PER_SEGMENT = 40;
+    static constexpr size_t kBytesPerSegment = 40;
 
     /// A RAM tier's cache budget, with the label logs use for it.
     struct BudgetTier {
@@ -75,17 +75,17 @@ class GCodeLayerCache {
         MemoryInfo mem;
         mem.total_kb = total_ram_kb;
         if (mem.is_constrained_device())
-            return {DEFAULT_BUDGET_CONSTRAINED, "constrained"};
+            return {kDefaultBudgetConstrained, "constrained"};
         if (mem.is_normal_device())
-            return {DEFAULT_BUDGET_NORMAL, "normal"};
-        return {DEFAULT_BUDGET_GOOD, "good"};
+            return {kDefaultBudgetNormal, "normal"};
+        return {kDefaultBudgetGood, "good"};
     }
 
     /**
      * @brief Construct cache with memory budget
      * @param memory_budget_bytes Maximum memory usage in bytes
      */
-    explicit GCodeLayerCache(size_t memory_budget_bytes = DEFAULT_BUDGET_NORMAL);
+    explicit GCodeLayerCache(size_t memory_budget_bytes = kDefaultBudgetNormal);
 
     ~GCodeLayerCache() = default;
 
@@ -255,7 +255,7 @@ class GCodeLayerCache {
      */
     void set_adaptive_mode(bool enabled, int target_percent = 15,
                            size_t min_budget_bytes = 1 * 1024 * 1024,
-                           size_t max_budget_bytes = DEFAULT_BUDGET_NORMAL);
+                           size_t max_budget_bytes = kDefaultBudgetNormal);
 
     /**
      * @brief Check memory pressure and adjust budget if adaptive mode enabled
@@ -366,9 +366,9 @@ class GCodeLayerCache {
     bool adaptive_enabled_{false};
     int adaptive_target_percent_{15};         ///< Target % of available RAM
     size_t adaptive_min_budget_{1024 * 1024}; ///< 1MB minimum
-    size_t adaptive_max_budget_{DEFAULT_BUDGET_NORMAL};
+    size_t adaptive_max_budget_{kDefaultBudgetNormal};
     std::chrono::steady_clock::time_point last_pressure_check_;
-    static constexpr int64_t PRESSURE_CHECK_INTERVAL_MS = 2000; ///< Check every 2 seconds max
+    static constexpr int64_t kPressureCheckIntervalMs = 2000; ///< Check every 2 seconds max
 };
 
 } // namespace gcode

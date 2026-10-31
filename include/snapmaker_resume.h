@@ -18,14 +18,4 @@ namespace helix {
 /// so sdcard state cannot discriminate terminal-vs-recoverable here.
 std::vector<TerminalMatcher> snapmaker_terminal_matchers();
 
-/// Extract the human-readable `msg` field from a Snapmaker firmware
-/// JSON-coded error, e.g.
-/// `{"coded":"0001-0531-0000-0005","msg":"...","action":"none"}`.
-/// The JSON object may be embedded inside a longer gcode error string (e.g.
-/// "!! Error executing script SDCARD_PRINT_PL_RESTORE: {...}"), so this scans
-/// for and parses the first balanced `{...}` object rather than requiring the
-/// whole string to be JSON. Returns `fallback` when no JSON object is found,
-/// the JSON is malformed, or it has no string `msg` field.
-std::string snapmaker_extract_coded_msg(const std::string& raw_error, const std::string& fallback);
-
 } // namespace helix

@@ -20,20 +20,20 @@
 #include "../catch_amalgamated.hpp"
 
 using helix::gcode::gl_draw_error_is_fatal;
-using helix::gcode::GL_ERR_INVALID_OPERATION;
-using helix::gcode::GL_ERR_OUT_OF_MEMORY;
 using helix::gcode::gl_renderer_is_denylisted;
+using helix::gcode::kGlErrInvalidOperation;
+using helix::gcode::kGlErrOutOfMemory;
 
 TEST_CASE("gl_draw_error_is_fatal triggers fallback on out-of-memory", "[gcode][gl_fallback]") {
     // GL_OUT_OF_MEMORY is the primary CB1/Mali fault signature — must fall back.
-    REQUIRE(gl_draw_error_is_fatal(GL_ERR_OUT_OF_MEMORY));
+    REQUIRE(gl_draw_error_is_fatal(kGlErrOutOfMemory));
     REQUIRE(gl_draw_error_is_fatal(0x0505)); // literal value guards against renumbering
 }
 
 TEST_CASE("gl_draw_error_is_fatal triggers fallback on invalid-operation", "[gcode][gl_fallback]") {
     // GL_INVALID_OPERATION means the command stream is in a driver-rejected
     // state; continuing to draw is unsafe.
-    REQUIRE(gl_draw_error_is_fatal(GL_ERR_INVALID_OPERATION));
+    REQUIRE(gl_draw_error_is_fatal(kGlErrInvalidOperation));
     REQUIRE(gl_draw_error_is_fatal(0x0502));
 }
 
@@ -56,8 +56,8 @@ TEST_CASE("gl_draw_error_is_fatal constants match OpenGL ES values", "[gcode][gl
     // The predicate is header-only (no GL dependency) so it is testable on
     // builds without ENABLE_GLES_3D. Pin the constants to the real GL ES
     // numbers so a typo can never silently disable the guard.
-    REQUIRE(GL_ERR_OUT_OF_MEMORY == 0x0505u);
-    REQUIRE(GL_ERR_INVALID_OPERATION == 0x0502u);
+    REQUIRE(kGlErrOutOfMemory == 0x0505u);
+    REQUIRE(kGlErrInvalidOperation == 0x0502u);
 }
 
 // ---------------------------------------------------------------------------
@@ -177,13 +177,13 @@ TEST_CASE("Software refusal and the 3D draw denylist are independent",
 
 TEST_CASE("gpu_triangle_budget caps vc4 render drivers", "[gcode][gl_fallback]") {
     using helix::gcode::gpu_triangle_budget;
-    using helix::gcode::VC4_TRIANGLE_BUDGET;
+    using helix::gcode::kVc4TriangleBudget;
 
     // "vc4-drm" is the kernel driver symlink target on a Pi 3B render node.
-    REQUIRE(gpu_triangle_budget("vc4-drm") == VC4_TRIANGLE_BUDGET);
-    REQUIRE(gpu_triangle_budget("VC4-DRM") == VC4_TRIANGLE_BUDGET);
-    REQUIRE(gpu_triangle_budget("vc4") == VC4_TRIANGLE_BUDGET);
-    REQUIRE(VC4_TRIANGLE_BUDGET == 1'000'000);
+    REQUIRE(gpu_triangle_budget("vc4-drm") == kVc4TriangleBudget);
+    REQUIRE(gpu_triangle_budget("VC4-DRM") == kVc4TriangleBudget);
+    REQUIRE(gpu_triangle_budget("vc4") == kVc4TriangleBudget);
+    REQUIRE(kVc4TriangleBudget == 1'000'000);
 }
 
 TEST_CASE("gpu_triangle_budget leaves every other driver uncapped", "[gcode][gl_fallback]") {

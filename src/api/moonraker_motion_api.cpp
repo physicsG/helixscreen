@@ -84,7 +84,7 @@ void MoonrakerMotionAPI::home_axes(const std::string& axes, SuccessCallback on_s
     std::string gcode = generate_home_gcode(axes);
     spdlog::info("[Motion API] Homing axes: {} (G-code: {})", axes.empty() ? "all" : axes, gcode);
 
-    execute_gcode(gcode, on_success, on_error, HOMING_TIMEOUT_MS);
+    execute_gcode(gcode, on_success, on_error, kHomingTimeoutMs);
 }
 
 void MoonrakerMotionAPI::move_axis(char axis, double distance, double feedrate,
@@ -340,9 +340,9 @@ std::string MoonrakerMotionAPI::generate_relative_move_gcode(double dx, double d
     // here disagreed with that gate: a cross-axis reversal nets ~1e-17 of float
     // cancellation residue onto one axis while another carries a real delta, and
     // the residue was serialized as a real term ("G0 X1e-17 Y2").
-    const bool move_x = std::abs(dx) > helix::AxisMove::EPSILON_MM;
-    const bool move_y = std::abs(dy) > helix::AxisMove::EPSILON_MM;
-    const bool move_z = std::abs(dz) > helix::AxisMove::EPSILON_MM;
+    const bool move_x = std::abs(dx) > helix::AxisMove::kEpsilonMm;
+    const bool move_y = std::abs(dy) > helix::AxisMove::kEpsilonMm;
+    const bool move_z = std::abs(dz) > helix::AxisMove::kEpsilonMm;
     if (!move_x && !move_y && !move_z) {
         return ""; // includes the all-zero case
     }
@@ -531,7 +531,7 @@ void MoonrakerMotionAPI::execute_gcode(const std::string& gcode, SuccessCallback
         ps->app_motion_activity().note_sent();
     }
 
-    std::function<void(const json&)> success_wrapper;
+    helix::SharedCallback<void(const json&)> success_wrapper;
     if (on_success || stamp) {
         success_wrapper = [on_success, ps, stamp](json) {
             if (stamp) {

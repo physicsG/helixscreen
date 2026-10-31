@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,10 @@
  * Use these for consistent temperature display across the UI:
  * - `format_temperature()` - Single temp: "210°C"
  * - `format_temperature_pair()` - Current/target: "210 / 245°C"
+ *
+ * Every current/target pair on screen reads "210 / 245°C" (spaced slash) and
+ * every unset value reads "—°C" (no space, like "245°C"). Build them with these
+ * functions rather than a format string of your own.
  *
  * ## Color-Coding Function
  *
@@ -220,20 +225,23 @@ char* format_temperature(int temp, char* buffer, size_t buffer_size);
 /**
  * @brief Format a current/target temperature pair
  *
- * Formats as "210 / 245°C" or "210 / —°C" when target is 0 (heater off).
+ * Formats as "210 / 245°C" or "210 / —°C" when no target is set (target <= 0).
  *
  * @param current Current temperature in degrees
- * @param target Target temperature in degrees (0 = heater off, shows "—")
+ * @param target Target temperature in degrees (<= 0 = heater off, shows "—")
  * @param buffer Output buffer
  * @param buffer_size Size of buffer (recommended: 24)
+ * @param with_unit false drops the "°C" ("210 / 245", "210 / —"), for a caller
+ *        that states the unit itself
  * @return Pointer to buffer for chaining convenience
  */
-char* format_temperature_pair(int current, int target, char* buffer, size_t buffer_size);
+char* format_temperature_pair(int current, int target, char* buffer, size_t buffer_size,
+                              bool with_unit = true);
 
 /**
- * @brief Format a target temperature or "— °C" when off
+ * @brief Format a target temperature or "—°C" when off
  *
- * Formats as "245°C" when target > 0, or "— °C" when target is 0 (heater off).
+ * Formats as "245°C" when target > 0, or "—°C" when target <= 0 (heater off).
  *
  * @param target Target temperature in degrees (0 = heater off)
  * @param buffer Output buffer
@@ -308,10 +316,10 @@ char* format_temperature_range(int min_temp, int max_temp, char* buffer, size_t 
 // ============================================================================
 
 /** Default tolerance for "at temperature" state detection (±degrees) */
-constexpr int DEFAULT_AT_TEMP_TOLERANCE = 2;
+constexpr int kDefaultAtTempTolerance = 2;
 
 /** The same tolerance for callers that classify in decidegrees. */
-constexpr int DEFAULT_AT_TEMP_TOLERANCE_DECI = DEFAULT_AT_TEMP_TOLERANCE * 10;
+constexpr int kDefaultAtTempToleranceDeci = kDefaultAtTempTolerance * 10;
 
 /**
  * @brief Bytes a heater status-area string needs, including its terminator.
@@ -322,7 +330,7 @@ constexpr int DEFAULT_AT_TEMP_TOLERANCE_DECI = DEFAULT_AT_TEMP_TOLERANCE * 10;
  * with a smaller buffer renders the same heater cut short while another
  * renders it whole, and the two then disagree on screen.
  */
-constexpr std::size_t HEATER_STATUS_BUF_BYTES = 64;
+constexpr std::size_t kHeaterStatusBufBytes = 64;
 
 /**
  * @brief Thermal state of a heater, shared by every consumer of the 4-state logic.
@@ -351,7 +359,7 @@ enum class HeatState {
  * @param target Target temperature (<= 0 = heater off)
  * @param tolerance Tolerance for the at-temp band (default: 2)
  */
-HeatState classify_heat_state(int current, int target, int tolerance = DEFAULT_AT_TEMP_TOLERANCE);
+HeatState classify_heat_state(int current, int target, int tolerance = kDefaultAtTempTolerance);
 
 /**
  * @brief Classify a chamber heater's thermal state, mode-aware.
@@ -374,11 +382,11 @@ HeatState classify_heat_state(int current, int target, int tolerance = DEFAULT_A
  * @param tolerance Tolerance for the at-temp/neutral band (default: 2)
  */
 HeatState classify_heat_state_with_mode(int current, int target, helix::ChamberMode mode,
-                                        int tolerance = DEFAULT_AT_TEMP_TOLERANCE);
+                                        int tolerance = kDefaultAtTempTolerance);
 
 /// A heater whose target is off but whose part is still hot enough to burn.
 /// Callers keep showing it (muted) until it cools below this.
-constexpr int RESIDUAL_HEAT_THRESHOLD_DECI = 500;
+constexpr int kResidualHeatThresholdDeci = 500;
 
 /// True while `current_deci` is above the residual-heat threshold. Independent
 /// of the target: callers decide whether an "on" heater counts.
@@ -423,7 +431,7 @@ lv_color_t get_heating_state_color(HeatState state);
  * @endcode
  */
 lv_color_t get_heating_state_color(int current_deg, int target_deg,
-                                   int tolerance = DEFAULT_AT_TEMP_TOLERANCE);
+                                   int tolerance = kDefaultAtTempTolerance);
 
 /**
  * @brief Get the icon color-variant string for a heater's thermal state
@@ -442,7 +450,7 @@ lv_color_t get_heating_state_color(int current_deg, int target_deg,
  * @return Variant string suitable for helix::ui::icon::set_variant()
  */
 const char* get_heating_state_variant(int current_deg, int target_deg,
-                                      int tolerance = DEFAULT_AT_TEMP_TOLERANCE);
+                                      int tolerance = kDefaultAtTempTolerance);
 
 // ============================================================================
 // Heater Display
@@ -471,7 +479,7 @@ struct HeaterDisplayResult {
  * produces a consistent display result used across all heater displays.
  * Includes a color field from get_heating_state_color() for one-call convenience.
  *
- * State logic (DEFAULT_AT_TEMP_TOLERANCE, matches get_heating_state_color):
+ * State logic (kDefaultAtTempTolerance, matches get_heating_state_color):
  * - target <= 0: Off
  * - current < target - tolerance: Heating
  * - current > target + tolerance: Cooling
@@ -494,7 +502,9 @@ enum class HeaterStatusState {
     None,    ///< heater off, or nothing to say
     Heating, ///< below target: flame glyph, duty in warning color
     Ready,   ///< at target (or chamber holding at/below its ceiling): check glyph
-    Cooling  ///< above target (or above the chamber ceiling): snowflake glyph
+    Cooling, ///< above target (or above the chamber ceiling): snowflake glyph
+    Auto     ///< chamber at/below its standing (resting) setpoint: circled-A glyph, the
+             ///< machine's own behavior rather than a deliberate set
 };
 
 /**
@@ -552,10 +562,16 @@ const char* build_heater_gcode(const std::string& heater_full_name, int target_d
  *
  * True when a chamber temperature command should route through the standard
  * M141 macro instead of a raw SET_HEATER_TEMPERATURE: the target heater is the
- * discovered chamber heater AND the printer defines an M141 macro.
+ * discovered chamber heater, the printer defines an M141 macro, and that macro is
+ * not known to leave the heater alone. Some macro sets use M141 for an exhaust fan
+ * alone, and routing a heater set through one of those never heats.
+ *
+ * @param m141_sets_heater MacroParamCache::macro_sets_target() for M141 and the
+ *                         chamber heater: nullopt when its body cannot be read
+ *                         (firmware that hides macro bodies), which keeps M141
  */
 bool chamber_uses_m141(const std::string& heater_full_name, const std::string& chamber_heater_name,
-                       bool m141_available);
+                       bool m141_available, std::optional<bool> m141_sets_heater);
 
 /**
  * @brief Effective chamber setpoint and control mode from the two M141 targets.

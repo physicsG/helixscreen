@@ -29,4 +29,9 @@ namespace helix {
 [[nodiscard]] std::optional<ToolTopology> build_ams_topology(AmsBackend* backend,
                                                              int backend_index);
 
+/// As above, reading slot extruders and the slot count from @p info, a
+/// snapshot of @p backend's system info the caller already holds.
+[[nodiscard]] std::optional<ToolTopology> build_ams_topology(AmsBackend* backend, int backend_index,
+                                                             const AmsSystemInfo& info);
+
 } // namespace helix

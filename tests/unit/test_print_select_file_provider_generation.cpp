@@ -18,8 +18,10 @@
  * of sending, letting us deliver them out of order deterministically.
  */
 
+#include "ui_filename_utils.h"
 #include "ui_print_select_file_provider.h"
 
+#include "../test_helpers/scoped_env.h"
 #include "../test_helpers/scoped_try_reserve_failure.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
@@ -29,8 +31,12 @@
 #include "printer_state.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -194,4 +200,81 @@ TEST_CASE_METHOD(FileProviderGenFixture,
 
     CHECK(ready_calls == 0);
     CHECK_FALSE(error.empty());
+}
+
+namespace {
+
+FileInfo entry(const std::string& name, bool dir, uint64_t size = 4096, double modified = 1000.0) {
+    FileInfo f;
+    f.filename = name;
+    f.is_dir = dir;
+    f.size = size;
+    f.modified = modified;
+    return f;
+}
+
+std::vector<std::string> names(const std::vector<PrintFileData>& files) {
+    std::vector<std::string> out;
+    for (const auto& f : files) {
+        out.push_back(f.filename);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(FileProviderGenFixture,
+                 "FileProvider leaves the app's staging directories out of the gcodes root",
+                 "[fileprovider][print_select][staging]") {
+    // The plugin's status named a visible link directory.
+    helix::gcode::set_plugin_link_dir("helix_print");
+    std::vector<std::string> delivered;
+    provider_.set_on_files_ready(
+        [&delivered](std::vector<PrintFileData>&& files) { delivered = names(files); });
+    const std::vector<FileInfo> listing = {entry("helix_staging", true), entry("helix_print", true),
+                                           entry(".helix_temp", true), entry("parts", true),
+                                           entry("a.gcode", false)};
+
+    provider_.refresh_files("");
+    api_->capturing->success_cbs.back()(listing);
+    CHECK(delivered == std::vector<std::string>{"parts", "a.gcode"});
+
+    // Deeper down, a folder of that name is the user's own.
+    provider_.refresh_files("parts");
+    api_->capturing->success_cbs.back()(listing);
+    CHECK(std::find(delivered.begin(), delivered.end(), "helix_staging") != delivered.end());
+    CHECK(std::find(delivered.begin(), delivered.end(), "helix_print") != delivered.end());
+    helix::gcode::set_plugin_link_dir("");
+}
+
+TEST_CASE_METHOD(FileProviderGenFixture,
+                 "FileProvider hands each .3mf the plates the printer has already converted",
+                 "[fileprovider][print_select][three_mf][conversions]") {
+    const std::string json_path = std::filesystem::temp_directory_path().string() +
+                                  "/helix_provider_conversions_" + std::to_string(::getpid()) +
+                                  ".json";
+    {
+        std::ofstream out(json_path);
+        out << R"({"conversions":[)"
+            << R"({"source":"X.gcode.3mf","source_mtime":1000.0,"source_size":4096,"plate":2,)"
+            << R"("output":"X_plate2.gcode","state":"pending"},)"
+            << R"({"source":"X.gcode.3mf","source_mtime":1000.0,"source_size":4096,"plate":5,)"
+            << R"("output":"X_plate5.gcode","state":"done"}]})";
+    }
+    ScopedEnv conversions("HELIX_MOCK_3MF_CONVERSIONS", json_path.c_str());
+
+    std::vector<PrintFileData> delivered;
+    provider_.set_on_files_ready(
+        [&delivered](std::vector<PrintFileData>&& files) { delivered = std::move(files); });
+    provider_.refresh_files("");
+    api_->capturing->success_cbs.back()(
+        {entry("X.gcode.3mf", false), entry("X_plate5.gcode", false)});
+
+    // One plate still pending: the archive stays listed, and its finished
+    // plate prints from the output.
+    const auto it = std::find_if(delivered.begin(), delivered.end(),
+                                 [](const auto& f) { return f.filename == "X.gcode.3mf"; });
+    REQUIRE(it != delivered.end());
+    CHECK(it->archive_outputs == std::map<int, std::string>{{5, "X_plate5.gcode"}});
+    std::remove(json_path.c_str());
 }

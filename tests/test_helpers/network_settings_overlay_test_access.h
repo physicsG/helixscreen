@@ -41,11 +41,45 @@ class NetworkSettingsOverlayTestAccess {
     static lv_subject_t& wifi_connected(NetworkSettingsOverlay& o) {
         return o.wifi_connected_;
     }
+    /// Apply a status read's answer the way the async read does.
+    static void apply_wifi_status(NetworkSettingsOverlay& o,
+                                  const WifiBackend::ConnectionStatus& status) {
+        o.apply_wifi_status(status);
+    }
+    /// The cached country dropdown, which async country reads write to.
+    static lv_obj_t* country_dropdown(NetworkSettingsOverlay& o) {
+        return o.country_dropdown_;
+    }
+    /// The country dropdown's selection subject (0 = not set).
+    static lv_subject_t& wifi_country_index(NetworkSettingsOverlay& o) {
+        return o.wifi_country_index_;
+    }
     /// The SSID the password modal is about. The handlers read it rather than
     /// taking it as an argument, so a test has to seed it.
     static void set_current_ssid(NetworkSettingsOverlay& o, const std::string& ssid) {
         strncpy(o.current_ssid_, ssid.c_str(), sizeof(o.current_ssid_) - 1);
         o.current_ssid_[sizeof(o.current_ssid_) - 1] = '\0';
+    }
+    /// Fold a radio answer back in, as the async completion and the backstop do.
+    static void finish_wlan_toggle(NetworkSettingsOverlay& o, bool requested, bool success,
+                                   bool actual) {
+        o.finish_wlan_toggle(requested, success, actual);
+    }
+    /// The wifi_hardware_available subject (0/1).
+    static lv_subject_t& wifi_hardware_available(NetworkSettingsOverlay& o) {
+        return o.wifi_hardware_available_;
+    }
+    /// The wifi_toggle_locked subject (0/1) the switch's disabled state binds to.
+    static lv_subject_t& wifi_toggle_locked(NetworkSettingsOverlay& o) {
+        return o.wifi_toggle_locked_;
+    }
+    /// The wifi_enabled subject (0/1) the switch's checked state binds to.
+    static lv_subject_t& wifi_enabled(NetworkSettingsOverlay& o) {
+        return o.wifi_enabled_;
+    }
+    /// The production handler behind the WiFi switch's value_changed.
+    static void wlan_toggle_changed(NetworkSettingsOverlay& o, lv_event_t* e) {
+        o.handle_wlan_toggle_changed(e);
     }
     /// The production handler behind the password modal's Connect button.
     static void password_connect_clicked(NetworkSettingsOverlay& o) {
@@ -71,6 +105,9 @@ class NetworkSettingsOverlayTestAccess {
                                const std::vector<WiFiNetwork>& networks) {
         o.populate_network_list(networks);
     }
+    static void clear_network_list(NetworkSettingsOverlay& o) {
+        o.clear_network_list();
+    }
     static void update_wifi_status(NetworkSettingsOverlay& o) {
         o.update_wifi_status();
     }
@@ -91,5 +128,18 @@ class NetworkSettingsOverlayTestAccess {
     }
     static lv_obj_t* networks_list(NetworkSettingsOverlay& o) {
         return o.networks_list_;
+    }
+    /// The wifi_only_24ghz subject (1 = the 2.4 GHz-only indicator shows).
+    static lv_subject_t& wifi_only_24ghz(NetworkSettingsOverlay& o) {
+        return o.wifi_only_24ghz_;
+    }
+    /// Whether the radio's country has been read since the overlay opened.
+    static bool radio_country_read(NetworkSettingsOverlay& o) {
+        return o.radio_country_.has_value();
+    }
+    /// Hand a scan's results to the overlay, as the scan callback does.
+    static void populate_network_list(NetworkSettingsOverlay& o,
+                                      const std::vector<WiFiNetwork>& networks) {
+        o.populate_network_list(networks);
     }
 };

@@ -23,8 +23,8 @@
 using namespace helix;
 using namespace helix::gcode_viewer;
 
-constexpr uint32_t DRAG_THROTTLE_MIN_FRAME_MS = 33; // ~30fps throttle during drag
-constexpr int CLICK_DISTANCE_THRESHOLD = 10;        // Pixels: distinguish click from drag
+constexpr uint32_t kDragThrottleMinFrameMs = 33; // ~30fps throttle during drag
+constexpr int kClickDistanceThreshold = 10;      // Pixels: distinguish click from drag
 
 // Helper: Check if viewer has any G-code data (full file or streaming)
 static bool has_gcode_data(const gcode_viewer_state_t* st) {
@@ -34,15 +34,15 @@ static bool has_gcode_data(const gcode_viewer_state_t* st) {
 static const char* ui_gcode_viewer_pick_object(lv_obj_t* obj, int x, int y);
 
 // Long-press threshold in milliseconds. Deliberately longer than the app-wide
-// gesture timeout (AppConstants::Input::LONG_PRESS_MS, 500ms): a hold here fires
+// gesture timeout (app_constants::input::kLongPressMs, 500ms): a hold here fires
 // EXCLUDE_OBJECT and cancels printing the object under the finger, so the gesture
 // is tuned to demand a deliberate hold and resist accidental cancels.
-constexpr uint32_t LONG_PRESS_THRESHOLD_MS = 1000;
+constexpr uint32_t kLongPressThresholdMs = 1000;
 
 /**
  * @brief Timer callback for long-press detection
  *
- * Fires after LONG_PRESS_THRESHOLD_MS if user hasn't moved the finger.
+ * Fires after kLongPressThresholdMs if user hasn't moved the finger.
  * Picks the object under the initial press position and invokes the long-press callback.
  */
 static void long_press_timer_cb(lv_timer_t* timer) {
@@ -68,7 +68,7 @@ static void long_press_timer_cb(lv_timer_t* timer) {
         // Highlight the object to provide visual feedback
         st->selected_objects.clear();
         st->selected_objects.insert(picked);
-        ui_gcode_viewer_set_highlighted_objects(obj, st->selected_objects);
+        helix::ui::gcode_viewer_set_highlighted_objects(obj, st->selected_objects);
 
         spdlog::info("[GCode Viewer] Long-press on object '{}'", picked);
 
@@ -141,7 +141,7 @@ static void gcode_viewer_press_cb(lv_event_t* e) {
             st->long_press_timer_ = nullptr;
         }
         // Start new timer for long-press detection
-        st->long_press_timer_ = lv_timer_create(long_press_timer_cb, LONG_PRESS_THRESHOLD_MS, obj);
+        st->long_press_timer_ = lv_timer_create(long_press_timer_cb, kLongPressThresholdMs, obj);
         if (st->long_press_timer_) {
             lv_timer_set_repeat_count(st->long_press_timer_, 1); // One-shot timer
         }
@@ -151,7 +151,7 @@ static void gcode_viewer_press_cb(lv_event_t* e) {
 }
 
 // Movement threshold to cancel long-press (same as click threshold)
-constexpr int LONG_PRESS_MOVE_THRESHOLD = 10;
+constexpr int kLongPressMoveThreshold = 10;
 
 /**
  * @brief Touch pressing callback - handle drag for camera rotation
@@ -193,11 +193,11 @@ static void gcode_viewer_pressing_cb(lv_event_t* e) {
     // sequence. Unlike the net displacement checked at release, this catches
     // rotate-and-return motions that settle back near the start point and must
     // NOT be treated as an object tap.
-    if (total_dx >= CLICK_DISTANCE_THRESHOLD || total_dy >= CLICK_DISTANCE_THRESHOLD) {
+    if (total_dx >= kClickDistanceThreshold || total_dy >= kClickDistanceThreshold) {
         st->gesture_moved = true;
     }
 
-    if ((total_dx >= LONG_PRESS_MOVE_THRESHOLD || total_dy >= LONG_PRESS_MOVE_THRESHOLD) &&
+    if ((total_dx >= kLongPressMoveThreshold || total_dy >= kLongPressMoveThreshold) &&
         st->long_press_timer_) {
         // User started dragging - cancel long-press
         lv_timer_delete(st->long_press_timer_);
@@ -222,7 +222,7 @@ static void gcode_viewer_pressing_cb(lv_event_t* e) {
         // Final frame is always rendered on RELEASED event
         static uint32_t last_invalidate_ms = 0;
         uint32_t now_ms = lv_tick_get();
-        if (now_ms - last_invalidate_ms >= DRAG_THROTTLE_MIN_FRAME_MS) {
+        if (now_ms - last_invalidate_ms >= kDragThrottleMinFrameMs) {
             lv_obj_invalidate(obj);
             last_invalidate_ms = now_ms;
         }
@@ -266,7 +266,7 @@ static void gcode_viewer_release_cb(lv_event_t* e) {
     int dx = abs(point.x - st->drag_start.x);
     int dy = abs(point.y - st->drag_start.y);
 
-    const int CLICK_THRESHOLD = CLICK_DISTANCE_THRESHOLD;
+    const int kClickThreshold = kClickDistanceThreshold;
 
     // Skip tap handling if long-press already fired
     if (st->long_press_fired) {
@@ -286,7 +286,7 @@ static void gcode_viewer_release_cb(lv_event_t* e) {
     // If movement was minimal, treat as click and try to pick object.
     // gesture_moved guards against rotate-and-return motions whose net
     // displacement is small but which clearly manipulated the view.
-    if (!two_finger && !st->gesture_moved && dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD &&
+    if (!two_finger && !st->gesture_moved && dx < kClickThreshold && dy < kClickThreshold &&
         has_gcode_data(st)) {
         spdlog::debug("[GCode Viewer] Click detected at ({}, {})", point.x, point.y);
         const char* picked = ui_gcode_viewer_pick_object(obj, point.x, point.y);
@@ -307,7 +307,7 @@ static void gcode_viewer_release_cb(lv_event_t* e) {
             }
 
             // Update highlighting to show all selected objects
-            ui_gcode_viewer_set_highlighted_objects(obj, st->selected_objects);
+            helix::ui::gcode_viewer_set_highlighted_objects(obj, st->selected_objects);
 
             // Invoke tap callback if registered (for exclude object UI)
             if (st->object_tap_callback) {

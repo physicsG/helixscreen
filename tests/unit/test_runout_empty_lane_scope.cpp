@@ -25,7 +25,9 @@
 #include "ui_update_queue.h"
 
 #include "../helix_test_fixture.h"
+#include "../test_helpers/filament_sensor_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "ams_backend_mock.h"
 #include "ams_backend_snapmaker.h"
 #include "ams_state.h"
 #include "ams_subscription_backend.h"
@@ -64,13 +66,13 @@ class RunoutScopeTestAccess {
     }
 
     // Set a sensor's role directly, the way load_config (settings.json restore)
-    // writes sensor->role per entry without going through set_sensor_role().
+    // writes sensor->role per entry without going through set_role().
     static void force_role(helix::FilamentSensorManager& mgr, const std::string& klipper,
                            helix::FilamentSensorRole role) {
-        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
-        for (auto& s : mgr.sensors_) {
+        std::lock_guard<std::recursive_mutex> lock(mgr.mutex());
+        for (auto& s : mgr.entries_locked()) {
             if (s.klipper_name == klipper) {
-                s.role = role;
+                s.role = static_cast<uint8_t>(role);
                 s.enabled = true;
                 return;
             }
@@ -81,10 +83,13 @@ class RunoutScopeTestAccess {
     // period already expired) so each test starts deterministic despite the
     // process-singleton.
     static void reset(helix::FilamentSensorManager& mgr) {
-        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
-        mgr.sensors_.clear();
+        mgr.set_sync_mode(true);
+        std::lock_guard<std::recursive_mutex> lock(mgr.mutex());
+        mgr.entries_locked().clear();
+        mgr.readings_.clear();
+        mgr.lanes_.clear();
+        mgr.known_.clear();
         mgr.master_enabled_ = true;
-        mgr.sync_mode_ = true;
         mgr.initial_status_received_ = false;
         mgr.startup_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(10);
     }
@@ -154,7 +159,7 @@ void setup_four_lane_sensors(FilamentSensorManager& fsm) {
     for (int i = 0; i < 4; ++i) {
         names.push_back(fmt::format("filament_motion_sensor e{}_filament", i));
     }
-    fsm.discover_sensors(names);
+    discover_filament_sensors(fsm, names);
     for (int i = 0; i < 4; ++i) {
         std::string klipper = fmt::format("filament_motion_sensor e{}_filament", i);
         RunoutScopeTestAccess::force_role(fsm, klipper, FilamentSensorRole::RUNOUT);
@@ -173,7 +178,7 @@ void setup_four_lane_sensors_no_status(FilamentSensorManager& fsm) {
     for (int i = 0; i < 4; ++i) {
         names.push_back(fmt::format("filament_motion_sensor e{}_filament", i));
     }
-    fsm.discover_sensors(names);
+    discover_filament_sensors(fsm, names);
     for (int i = 0; i < 4; ++i) {
         RunoutScopeTestAccess::force_role(
             fsm, fmt::format("filament_motion_sensor e{}_filament", i), FilamentSensorRole::RUNOUT);
@@ -243,6 +248,161 @@ TEST_CASE("has_real_runout: mixed heads 0,2 loaded + head 1 empty", "[runout][sc
     CHECK(fsm.has_real_runout());
 }
 
+TEST_CASE("real_runout_lane: the runout names the lane it came from", "[runout][scope]") {
+    HelixTestFixture fx;
+    ScopedSnapmakerBackend backend;
+    auto& fsm = FilamentSensorManager::instance();
+    setup_four_lane_sensors(fsm);
+    backend.set_lane_presence({true, true, true, false});
+
+    CHECK_FALSE(fsm.real_runout_lane().has_value());
+    fsm.update_from_status(make_sensor_status(2, false));
+    drain();
+    REQUIRE(fsm.real_runout_lane().has_value());
+    CHECK(*fsm.real_runout_lane() == 2);
+    // The empty lane's idle sensor never names itself.
+    fsm.update_from_status(make_sensor_status(3, false));
+    drain();
+    CHECK(*fsm.real_runout_lane() == 2);
+}
+
+namespace {
+
+// The Snapmaker U1 mid-print: heads 0-2 fed through to their toolheads
+// (load_finish), head 3's filament waiting in its feeder (preload_finish), so
+// every lane reads present while head 3's toolhead switch reads empty.
+json u1_feed_heads_0_to_2_loaded() {
+    auto head = [](const char* channel_state) {
+        return json{
+            {"filament_detected", true}, {"channel_state", channel_state}, {"channel_error", "ok"}};
+    };
+    return json{{"filament_feed left",
+                 json{{"extruder0", head("load_finish")}, {"extruder1", head("load_finish")}}},
+                {"filament_feed right",
+                 json{{"extruder2", head("load_finish")}, {"extruder3", head("preload_finish")}}}};
+}
+
+json u1_picked(int tool) {
+    return json{
+        {"toolhead", json{{"extruder", tool == 0 ? "extruder" : fmt::format("extruder{}", tool)}}}};
+}
+
+// A toolhead switch reading, delivered to both of its readers.
+void feed_switch(ScopedSnapmakerBackend& backend, FilamentSensorManager& fsm, int lane,
+                 bool detected) {
+    const json frame = make_sensor_status(lane, detected);
+    RunoutScopeTestAccess::handle_status(*backend.backend, frame);
+    fsm.update_from_status(frame);
+    drain();
+}
+
+void setup_u1_printing_on_head_2(ScopedSnapmakerBackend& backend, FilamentSensorManager& fsm,
+                                 bool pick_head_2) {
+    setup_four_lane_sensors(fsm);
+    RunoutScopeTestAccess::handle_status(*backend.backend, u1_feed_heads_0_to_2_loaded());
+    if (pick_head_2) {
+        RunoutScopeTestAccess::handle_status(*backend.backend, u1_picked(2));
+    }
+    for (int lane = 0; lane < 3; ++lane) {
+        feed_switch(backend, fsm, lane, true);
+    }
+    feed_switch(backend, fsm, 3, false);
+
+    AmsBackend* be = AmsState::instance().get_backend();
+    for (int lane = 0; lane < 4; ++lane) {
+        INFO("lane " << lane);
+        REQUIRE(be->get_slot_info(lane).is_present());
+    }
+}
+
+} // namespace
+
+TEST_CASE("has_real_runout: a preloaded head's empty switch is not a runout while another head "
+          "prints",
+          "[runout][scope]") {
+    HelixTestFixture fx;
+    ScopedSnapmakerBackend backend;
+    auto& fsm = FilamentSensorManager::instance();
+    setup_u1_printing_on_head_2(backend, fsm, /*pick_head_2=*/true);
+    REQUIRE(AmsState::instance().get_backend()->get_current_slot() == 2);
+
+    // Head 3's switch reads empty, so the coarse query fires.
+    CHECK(fsm.has_any_runout());
+    // Head 3 is not the lane being fed: a pause for any other reason (a dirty
+    // bed) is not a runout.
+    CHECK_FALSE(fsm.has_real_runout());
+
+    // The head being fed runs out: that is a runout.
+    feed_switch(backend, fsm, 2, false);
+    CHECK(fsm.has_real_runout());
+
+    // Refilled, and only the idle head reads empty again.
+    feed_switch(backend, fsm, 2, true);
+    CHECK_FALSE(fsm.has_real_runout());
+}
+
+TEST_CASE("has_real_runout: with no current lane every present lane still counts",
+          "[runout][scope]") {
+    HelixTestFixture fx;
+    ScopedSnapmakerBackend backend;
+    auto& fsm = FilamentSensorManager::instance();
+    setup_u1_printing_on_head_2(backend, fsm, /*pick_head_2=*/false);
+    REQUIRE(AmsState::instance().get_backend()->get_current_slot() < 0);
+
+    // Nothing names the lane being fed, so a present lane's empty switch is
+    // taken at its word.
+    CHECK(fsm.has_real_runout());
+}
+
+namespace {
+
+// The shape of a multi-extruder lane system (AFC feeding several toolheads):
+// eight lanes, four toolheads with their own e<N>_filament switch. The
+// current slot counts lanes (lane 4 feeds tool 1), while each toolhead
+// sensor's lane is its tool index.
+class MultiExtruderLanes : public AmsBackendMock {
+  public:
+    MultiExtruderLanes() : AmsBackendMock(8) {}
+    [[nodiscard]] SlotInfo get_slot_info(int slot) const override {
+        SlotInfo info;
+        if (slot >= 0 && slot < 8) {
+            info.slot_index = slot;
+            info.global_index = slot;
+            info.status = SlotStatus::AVAILABLE;
+        }
+        return info;
+    }
+    [[nodiscard]] int get_current_slot() const override {
+        return 4;
+    }
+    [[nodiscard]] int get_current_tool() const override {
+        return 1;
+    }
+};
+
+} // namespace
+
+TEST_CASE("has_real_runout: a toolhead sensor on a multi-extruder lane system follows the tool",
+          "[runout][scope]") {
+    HelixTestFixture fx;
+    AmsState::instance().set_backend(std::make_unique<MultiExtruderLanes>());
+    auto& fsm = FilamentSensorManager::instance();
+    setup_four_lane_sensors(fsm);
+
+    SECTION("the active toolhead running out is a runout, though its index is no slot's") {
+        fsm.update_from_status(make_sensor_status(1, false));
+        drain();
+        CHECK(fsm.has_real_runout());
+    }
+    SECTION("an idle toolhead's empty switch is not") {
+        fsm.update_from_status(make_sensor_status(2, false));
+        drain();
+        CHECK(fsm.has_any_runout());
+        CHECK_FALSE(fsm.has_real_runout());
+    }
+    AmsState::instance().set_backend(nullptr);
+}
+
 TEST_CASE("has_real_runout: no AMS backend -> behaves like has_any_runout", "[runout][scope]") {
     HelixTestFixture fx;
     AmsState::instance().set_backend(nullptr);
@@ -251,9 +411,10 @@ TEST_CASE("has_real_runout: no AMS backend -> behaves like has_any_runout", "[ru
     // A plain single-extruder runout sensor whose name does NOT encode a lane.
     RunoutScopeTestAccess::reset(fsm);
     fsm.set_master_enabled(true);
-    fsm.discover_sensors({"filament_switch_sensor fsensor"});
-    fsm.set_sensor_role("filament_switch_sensor fsensor", FilamentSensorRole::RUNOUT);
-    fsm.set_sensor_enabled("filament_switch_sensor fsensor", true);
+    discover_filament_sensors(fsm, {"filament_switch_sensor fsensor"});
+    fsm.set_role("filament_switch_sensor fsensor",
+                 static_cast<uint8_t>(FilamentSensorRole::RUNOUT));
+    fsm.set_enabled("filament_switch_sensor fsensor", true);
     fsm.update_from_status(
         json{{"filament_switch_sensor fsensor", json{{"filament_detected", true}}}});
     drain();
@@ -437,9 +598,10 @@ TEST_CASE("scoped runout: no AMS backend -> falls back to aggregate runout (unch
     // Plain single-extruder runout sensor, no lane mapping, no backend.
     RunoutScopeTestAccess::reset(fsm);
     fsm.set_master_enabled(true);
-    fsm.discover_sensors({"filament_switch_sensor fsensor"});
-    fsm.set_sensor_role("filament_switch_sensor fsensor", FilamentSensorRole::RUNOUT);
-    fsm.set_sensor_enabled("filament_switch_sensor fsensor", true);
+    discover_filament_sensors(fsm, {"filament_switch_sensor fsensor"});
+    fsm.set_role("filament_switch_sensor fsensor",
+                 static_cast<uint8_t>(FilamentSensorRole::RUNOUT));
+    fsm.set_enabled("filament_switch_sensor fsensor", true);
 
     // With no backend, find_empty_required_lanes returns empty (no lane truth to
     // consult) — the print-start controller falls back to the aggregate sensor

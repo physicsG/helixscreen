@@ -40,10 +40,13 @@
 #include "ui_dialog.h"
 #include "ui_gcode_viewer.h"
 #include "ui_gradient_canvas.h"
+#include "ui_guided_device_flow.h"
+#include "ui_humidity_drop.h"
 #include "ui_icon.h"
 #include "ui_nav_manager.h"
 #include "ui_notification_history.h"
 #include "ui_notification_manager.h"
+#include "ui_panel_ams.h"
 #include "ui_panel_home.h"
 #include "ui_severity_card.h"
 #include "ui_status_pill.h"
@@ -98,7 +101,6 @@
 #include "src/xml/lv_xml.h"
 #include "status_dispatch.h"
 #include "subject_initializer.h"
-#include "system/afc_message_dedup.h"
 #include "system/update_checker.h"
 #include "text_io.h"
 #include "theme_manager.h"
@@ -208,7 +210,7 @@ HostPort parse_moonraker_kconfig_url(const std::string& url) {
 
 // Register the custom C++ widgets the XML components extend. Same set as the
 // desktop register_widgets() phase (application.cpp:1517) minus the subsystems
-// gated off for v1 (camera/gcode-3D/etc.). ui_gcode_viewer_register() resolves
+// gated off for v1 (camera/gcode-3D/etc.). helix::ui::gcode_viewer_register() resolves
 // to the no-op #else branch in ui_gcode_viewer.cpp on ESP (HELIX_HAS_GCODE_
 // VIEWER=0) — it still registers a stub <gcode_viewer> widget so XML that names
 // it parses.
@@ -224,25 +226,26 @@ void register_widgets() {
     ui_severity_card_register();
     ui_dialog_register();
     ui_bed_mesh_register();
-    ui_gcode_viewer_register();
+    helix::ui::gcode_viewer_register();
     ui_gradient_canvas_register();
     helix::ui::register_helix_sparkline_widget();
+    helix::ui::register_humidity_drop_widget();
     ui_component_header_bar_init();
 }
 
 // The restart fallback of a live switch: boot connects to the active printer, with every
 // heap back at its boot state. The label is the only feedback, drawn synchronously because
 // nothing runs after it.
-// Fallback restarts since the panel last stayed connected for HEALTHY_UPTIME_US. Past the
+// Fallback restarts since the panel last stayed connected for kHealthyUptimeUs. Past the
 // cap the panel stays up and keeps reconnecting instead, so neither an unreachable printer
 // nor a weak link that connects briefly between failures becomes a boot loop.
-constexpr int MAX_FALLBACK_RESTARTS = 2;
-constexpr int64_t HEALTHY_UPTIME_US = 10LL * 60 * 1000 * 1000;
+constexpr int kMaxFallbackRestarts = 2;
+constexpr int64_t kHealthyUptimeUs = 10LL * 60 * 1000 * 1000;
 
 void restart_into_active_printer() {
     helix::Config* config = helix::Config::get_instance();
-    const int streak = config->get<int>(helix::SWITCH_RESTART_STREAK_KEY, 0);
-    if (streak >= MAX_FALLBACK_RESTARTS) {
+    const int streak = config->get<int>(helix::kSwitchRestartStreakKey, 0);
+    if (streak >= kMaxFallbackRestarts) {
         ESP_LOGE(TAG, "app_boot: %d fallback restarts without a connection; staying up", streak);
         return;
     }
@@ -259,7 +262,7 @@ void restart_into_active_printer() {
     // Counted across restarts: how often a switch fell back, and how many in a row.
     const int fallbacks = config->get<int>("/switch_restart_fallbacks", 0) + 1;
     config->set<int>("/switch_restart_fallbacks", fallbacks);
-    config->set<int>(helix::SWITCH_RESTART_STREAK_KEY, streak + 1);
+    config->set<int>(helix::kSwitchRestartStreakKey, streak + 1);
     config->save();
     ESP_LOGW(TAG, "app_boot: restarting into printer '%s' (switch fallback #%d, %d in a row)",
              config->get_active_printer_id().c_str(), fallbacks, streak + 1);
@@ -290,10 +293,9 @@ bool g_boot_auto_connect = true;
 void apply_boot_crash_guard(helix::Config* config) {
     const bool crash = reset_was_crash();
     const helix::BootPrinterChoice choice = helix::choose_boot_printer(
-        crash, config->get<int>(helix::BOOT_CRASH_STREAK_KEY, 0),
-        config->get<bool>(helix::BOOT_CONNECT_HOLD_KEY, false), config->get_active_printer_id(),
-        config->get<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, ""),
-        config->get_printer_ids());
+        crash, config->get<int>(helix::kBootCrashStreakKey, 0),
+        config->get<bool>(helix::kBootConnectHoldKey, false), config->get_active_printer_id(),
+        config->get<std::string>(helix::kSwitchPreviousPrinterKey, ""), config->get_printer_ids());
     g_boot_auto_connect = choice.auto_connect;
     if (!g_boot_auto_connect) {
         ESP_LOGW(TAG, "app_boot: connection held after repeated crashes; pick a printer");
@@ -301,42 +303,42 @@ void apply_boot_crash_guard(helix::Config* config) {
     if (!crash) {
         return;
     }
-    config->set<int>(helix::BOOT_CRASH_STREAK_KEY, choice.crash_streak);
-    config->set<bool>(helix::BOOT_CONNECT_HOLD_KEY, !choice.auto_connect);
+    config->set<int>(helix::kBootCrashStreakKey, choice.crash_streak);
+    config->set<bool>(helix::kBootConnectHoldKey, !choice.auto_connect);
     if (!choice.tripped) {
         ESP_LOGW(TAG, "app_boot: crash reset %d of %d before falling back", choice.crash_streak,
-                 helix::BOOT_CRASH_FALLBACK_THRESHOLD);
+                 helix::kBootCrashFallbackThreshold);
     } else {
         ESP_LOGE(TAG, "app_boot: '%s' crashed the panel %d times; %s",
-                 config->get_active_printer_name().c_str(), helix::BOOT_CRASH_FALLBACK_THRESHOLD,
+                 config->get_active_printer_name().c_str(), helix::kBootCrashFallbackThreshold,
                  choice.auto_connect ? "falling back to the previous printer" : "not connecting");
         if (!choice.fallback_id.empty()) {
             g_boot_crashed_printer_name = config->get_active_printer_name();
             config->set_active_printer(choice.fallback_id);
         }
-        config->set<std::string>(helix::SWITCH_PREVIOUS_PRINTER_KEY, "");
+        config->set<std::string>(helix::kSwitchPreviousPrinterKey, "");
     }
     config->save();
 }
 
-// The WebSocket task's 8 KB internal stack plus headroom. The stopped task deleted itself and
+// The WebSocket task's internal stack plus headroom. The stopped task deleted itself and
 // the idle task frees its stack, which this thread outranks, so wait one beat before looking.
-constexpr size_t WS_STACK_RESERVE_BYTES = 10 * 1024;
+constexpr size_t kWsStackReserveBytes = helix::EspMoonrakerClient::kWsTaskStackBytes + 2 * 1024;
 
 bool ws_stack_available() {
     vTaskDelay(pdMS_TO_TICKS(20));
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     ESP_LOGI(TAG, "[switch] internal free=%u largest=%u (need %u)",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)largest,
-             (unsigned)WS_STACK_RESERVE_BYTES);
-    return largest >= WS_STACK_RESERVE_BYTES;
+             (unsigned)kWsStackReserveBytes);
+    return largest >= kWsStackReserveBytes;
 }
 
 // Discovery right after a connect allocates internal RAM in a burst (at boot the largest
 // block briefly drops below 8 KB). A switch whose discovery never lands on a live connection
 // would leave the panel half-switched, so it restarts into the printer instead. An unreachable
 // printer is left to the normal reconnect loop.
-constexpr uint32_t SWITCH_DISCOVERY_TIMEOUT_MS = 30000;
+constexpr uint32_t kSwitchDiscoveryTimeoutMs = 30000;
 
 void arm_switch_watchdog() {
     static lv_timer_t* timer = nullptr;
@@ -358,13 +360,13 @@ void arm_switch_watchdog() {
             }
             if (client && client->get_connection_state() == helix::ConnectionState::CONNECTED) {
                 ESP_LOGW(TAG, "[switch] connected but no discovery after %u ms",
-                         (unsigned)SWITCH_DISCOVERY_TIMEOUT_MS);
+                         (unsigned)kSwitchDiscoveryTimeoutMs);
                 restart_into_active_printer();
                 return;
             }
             ESP_LOGW(TAG, "[switch] printer not reachable yet; reconnecting continues");
         },
-        SWITCH_DISCOVERY_TIMEOUT_MS, nullptr);
+        kSwitchDiscoveryTimeoutMs, nullptr);
     lv_timer_set_repeat_count(timer, 1);
 }
 
@@ -411,6 +413,12 @@ void wire_printer_callbacks() {
     helix::EspMoonrakerClient::set_transport_stall_handler([] {
         helix::ui::queue_update("app_boot::transport_stall", [] { restart_into_active_printer(); });
     });
+    // Both are safe on the websocket task: the reset takes its own lock, and
+    // set_klippy_state() defers the subject write to the UI thread.
+    static const helix::EspMoonrakerClient::KlippyStateSink kKlippyStateSink{
+        [] { get_printer_state().network_state().reset_klippy_state_freshness(); },
+        [](helix::KlippyState state) { get_printer_state().set_klippy_state(state); }};
+    helix::EspMoonrakerClient::set_klippy_state_sink(&kKlippyStateSink);
     switch_flow().set_connected_printer_id(helix::Config::get_instance()->get_active_printer_id());
 }
 
@@ -482,7 +490,7 @@ void mock_seed_ams() {
 void mock_push_temps() {
     static int t = 0;
     ++t;
-    // Jitter both heaters WITHIN TEMP_TOLERANCE (2.0C) of their targets so the
+    // Jitter both heaters WITHIN kTempTolerance (2.0C) of their targets so the
     // heating-icon animator stays AT_TARGET and never starts its infinite pulse.
     // A wider sweep that crosses (target - tolerance) toggles HEATING<->AT_TARGET
     // and repaints the icon at frame rate for half of every cycle — millions of
@@ -521,7 +529,7 @@ void mock_push_temps() {
 // blocks boot or the shell, and a failure at any step just logs and stops
 // (no retry — this is a manual verification aid, not production behavior).
 void run_http_hil_probe(MoonrakerManager* mgr) {
-    IMoonrakerAPI* api = mgr->api();
+    helix::IMoonrakerAPI* api = mgr->api();
     if (!api) {
         ESP_LOGW(TAG, "[http_hil] no API available — skipping probe");
         return;
@@ -589,7 +597,7 @@ void run_http_hil_probe(MoonrakerManager* mgr) {
 // Spoolman.
 void setup_discovery_callbacks_esp(MoonrakerManager& manager) {
     helix::IMoonrakerClient* client = manager.client();
-    IMoonrakerAPI* api = manager.api();
+    helix::IMoonrakerAPI* api = manager.api();
     if (!client || !api) {
         spdlog::error("app_boot: no Moonraker client or API — discovery callbacks not registered");
         return;
@@ -630,7 +638,7 @@ helix::BootConnectHandoff s_connect_handoff;
 // Given by the WiFi observer, so app_net leaves as soon as WiFi is up.
 SemaphoreHandle_t s_wifi_up_sem = nullptr;
 std::atomic<bool> s_connect_poll_armed{false};
-constexpr uint32_t CONNECT_POLL_MS = 20;
+constexpr uint32_t kConnectPollMs = 20;
 
 // The boot's Moonraker connect. Its one caller is the connect poll below, which
 // runs it once, on the UI thread.
@@ -686,7 +694,7 @@ void arm_connect_poll() {
                 }
                 lv_timer_delete(timer);
             },
-            CONNECT_POLL_MS, nullptr);
+            kConnectPollMs, nullptr);
     });
 }
 
@@ -702,14 +710,14 @@ void note_wifi_up() {
 // never held against a network that does not associate. 20s covers a successful
 // association with margin; the backend's own assoc-timeout and bounded backoff
 // retry (wifi_backend_esp.cpp) keep trying underneath either way.
-constexpr int BOOT_BOUNDED_WAIT_MS = 20000;
+constexpr int kBootBoundedWaitMs = 20000;
 
 // The connect thread's stack, one contiguous internal-RAM block claimed after
 // the UI stack and the RGB bounce buffers. What is left of the heap's largest
 // block at that point varies by about 1KB with static DRAM, and has measured
 // 31,744 bytes, so the request must stay below that. The thread logs its
 // high-water mark on exit.
-constexpr unsigned APP_NET_STACK_BYTES = 24 * 1024;
+constexpr unsigned kAppNetStackBytes = 24 * 1024;
 
 void* app_net_thread_main(void*) {
     // Opens the esp_wifi hardware bring-up gate — see wifi_backend_esp.h for
@@ -743,7 +751,7 @@ void* app_net_thread_main(void*) {
     // post-seed state (a dev sdkconfig.local Kconfig SSID, if any, has already
     // been written to NVS) rather than a never-started snapshot. If NVS still
     // has no stored SSID, stand up the SoftAP captive portal instead of
-    // silently idling for BOOT_BOUNDED_WAIT_MS below — the shell is already up
+    // silently idling for kBootBoundedWaitMs below — the shell is already up
     // (this thread starts after build_shell()), so the not-ready UI is on
     // screen throughout and the portal's own instructions modal explains what
     // to do. provisioning_run_portal() blocks until either a join succeeds
@@ -758,7 +766,7 @@ void* app_net_thread_main(void*) {
     // so the wait can end at once with WiFi down: log what was actually waited.
     const int64_t wait_start_us = esp_timer_get_time();
     if (!wifi->is_connected() && s_wifi_up_sem) {
-        xSemaphoreTake(s_wifi_up_sem, pdMS_TO_TICKS(BOOT_BOUNDED_WAIT_MS));
+        xSemaphoreTake(s_wifi_up_sem, pdMS_TO_TICKS(kBootBoundedWaitMs));
     }
 
     const bool connected = wifi->is_connected();
@@ -772,7 +780,7 @@ void* app_net_thread_main(void*) {
     // connect starts once the stack is gone, from the poll the observer armed or
     // the one armed here; a later association still connects through the observer.
     ESP_LOGI(TAG, "app_net: exiting, stack never used below %u of %u bytes free",
-             (unsigned)uxTaskGetStackHighWaterMark(nullptr), (unsigned)APP_NET_STACK_BYTES);
+             (unsigned)uxTaskGetStackHighWaterMark(nullptr), (unsigned)kAppNetStackBytes);
     s_connect_handoff.thread_exited();
     if (connected) {
         note_wifi_up();
@@ -789,7 +797,7 @@ void app_net_start() {
     s_wifi_up_sem = xSemaphoreCreateBinary();
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, APP_NET_STACK_BYTES);
+    pthread_attr_setstacksize(&attr, kAppNetStackBytes);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
     pthread_t thread;
@@ -872,9 +880,9 @@ extern "C" void app_boot_ui(void) {
     config->set_storage(
         helix::make_file_config_storage("/config/settings.json", helix::ConfigFootprint::Small));
     config->init("/config/settings.json");
-    // Remembers which AFC message each printer has already shown, so one AFC
-    // latched hours ago toasts once rather than at every boot.
-    helix::AfcMessageDedup::instance().init("/config");
+    // What filament backends remember across boots, e.g. which latched
+    // message each printer has already shown.
+    helix::AmsBackend::init_persistent_state("/config");
     apply_boot_crash_guard(config);
 
     // Task 12 R2: first-boot-only Moonraker host/port seed. If settings.json
@@ -943,6 +951,7 @@ extern "C" void app_boot_ui(void) {
     // expat parse each) — the milestone brackets it so the HIL profile can
     // separate registration cost from panel-build cost (subjects-up → home).
     helix::register_xml_components();
+    helix::ui::register_builtin_guided_device_flows();
     log_heap_milestone("xml-registered");
 
     // The bell opens the notification history panel. Registered BEFORE
@@ -1068,6 +1077,9 @@ extern "C" void app_boot_ui(void) {
     }
 
     ESP_LOGI(TAG, "helix: home panel up");
+    // The desktop's AmsErrorBridge is not in the firmware; this raises a
+    // filament fault outside a running print, AMS panel open or not.
+    helix::ui::init_ams_standing_fault_dialog();
     log_heap_milestone("home-panel-up");
     // The .bin font loads at ~2s print into the WiFi RF-cal serial dead window
     // (CH340 drops off USB); re-log them here where serial is reliable.
@@ -1105,7 +1117,7 @@ extern "C" void app_boot_tick(void) {
     // log_heap_milestone takes; the per-frame loop never may.
     // Ten minutes up and connected: a later fallback restart or crash is not part of a loop.
     static bool restart_streak_cleared = false;
-    if (!restart_streak_cleared && esp_timer_get_time() > HEALTHY_UPTIME_US && g_manager &&
+    if (!restart_streak_cleared && esp_timer_get_time() > kHealthyUptimeUs && g_manager &&
         g_manager->client() &&
         g_manager->client()->get_connection_state() == helix::ConnectionState::CONNECTED) {
         restart_streak_cleared = true;

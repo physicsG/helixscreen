@@ -45,6 +45,15 @@ bool is_usable_snapshot_url(const std::string& snapshot_url) {
 
 namespace webcam {
 
+bool is_own_screen_webcam(const WebcamInfo& cam) {
+    if (cam.screen_server) {
+        return true;
+    }
+    // Ours, or another screen's on the same Moonraker ("HelixScreen Screen (host)").
+    const std::string own = kRemoteScreenWebcamName;
+    return cam.name == own || cam.name.rfind(own + " (", 0) == 0;
+}
+
 WebcamInfo parse_webcam_entry(const nlohmann::json& entry) {
     WebcamInfo cam;
     if (!entry.is_object())
@@ -58,6 +67,9 @@ WebcamInfo parse_webcam_entry(const nlohmann::json& entry) {
     cam.flip_horizontal = json_util::safe_bool(entry, "flip_horizontal", false);
     cam.flip_vertical = json_util::safe_bool(entry, "flip_vertical", false);
     cam.target_fps = json_util::safe_int(entry, "target_fps", 15);
+    const auto extra = entry.find("extra_data");
+    cam.screen_server = extra != entry.end() && extra->is_object() &&
+                        json_util::safe_bool(*extra, kRemoteScreenWebcamMarker, false);
     return cam;
 }
 
@@ -110,6 +122,35 @@ std::optional<WebcamInfo> auto_pick(const std::vector<WebcamInfo>& cams) {
     if (!idx)
         return std::nullopt;
     return feed_for(cams[*idx]);
+}
+
+nlohmann::json view_config_for(const std::string& cam_name,
+                               const std::optional<WebcamInfo>& widget_feed,
+                               const nlohmann::json& widget_config) {
+    if (widget_feed && widget_feed->name == cam_name && widget_config.is_object()) {
+        return widget_config;
+    }
+    return nlohmann::json::object();
+}
+
+std::optional<WebcamInfo> photo_pick(const std::vector<WebcamInfo>& cams) {
+    const WebcamInfo* first = nullptr;
+    for (const auto& cam : cams) {
+        if (!cam.enabled || !cam.unavailable_reason.empty() || is_own_screen_webcam(cam) ||
+            !is_usable_snapshot_url(cam.snapshot_url)) {
+            continue;
+        }
+        if (is_mjpeg_service(cam.service) && !cam.stream_url.empty()) {
+            return cam;
+        }
+        if (first == nullptr) {
+            first = &cam;
+        }
+    }
+    if (first == nullptr) {
+        return std::nullopt;
+    }
+    return *first;
 }
 
 namespace {

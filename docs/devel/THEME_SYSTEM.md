@@ -228,7 +228,7 @@ scale = 1.0                            for dpi <= 225
 scale = 1.0 + (dpi - 225) * 0.0032118  above, capped at 2.0
 ```
 
-The deadband covers every measured printer (CC1 131, SonicPad 170, CB1 187, Pi 206, K1C/K2+ 218, AD5M 221 true DPI), so all of them resolve to exactly 1.0 and are bit-identical to an unscaled build. A 405 DPI phone resolves to 1.578.
+The deadband covers every measured printer (CC1 131, SonicPad 170, CB1 187, Pi 206, K1C/K2+ 218, AD5M 221 true DPI), so all of them resolve to exactly 1.0 and are bit-identical to an unscaled build. A 405 DPI panel drawn at its native resolution resolves to 1.578. The Android SDL driver never draws a phone that way: above 225 DPI it renders at half the native resolution or less and upscales, so the curve sees the logical pixel's DPI (a 480 DPI Galaxy Z Flip 7 at 1260x540 is 240, scale 1.048).
 
 **What the scale multiplies**
 
@@ -253,7 +253,7 @@ So DPI is resolved from trusted sources only, most trusted first:
 | Source | Notes |
 |--------|-------|
 | `--dpi <n>` / stored override | Always wins; ignored if outside the 60-700 plausibility band |
-| Platform measurement | Android only (`SDL_GetDisplayDPI`), still plausibility-checked |
+| Platform measurement | Android only (`SDL_GetDisplayDPI`), converted to the DPI of the logical surface the SDL driver draws and upscales (`DisplayMetrics::logical_dpi`), still plausibility-checked |
 | Known-panel table | Integrated panels keyed on platform: `ad5m`, `cc1`, `k1`, `k2`. Platforms driving a user-chosen display (`pi`, `pi32`, `x86`) deliberately have no entry |
 | Fallback | The 160 DPI authoring reference, i.e. scale 1.0 |
 
@@ -650,6 +650,62 @@ refresh automatically without an observer.
 
 ---
 
+## Glass appearance
+
+**Settings > Appearance > Glass Effects** layers depth and lighting over whatever theme is
+active. It is not a theme: every color glass draws is the widget's own color mixed toward white
+or black (`include/glass_shading.h`), never another hue, so it is safe on any palette and on a
+widget whose bg color was set locally.
+
+**Effective glass = the gate passed && the setting is on.** `settings_glass_effects`
+(`/display/glass_effects`) is the saved choice; `glass_available` is set only by the gate. While
+either is 0, no hook is installed and the shared styles are configured exactly as in flat mode.
+
+### How it draws
+
+Glass rewrites draw tasks, not styles (`include/glass_painter.h`). `glass_attach(obj)` sets
+`LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS` and handles `LV_EVENT_DRAW_TASK_ADDED`: each opaque flat
+fill becomes the family's gradient over the fill's resolved color, and each border becomes the
+family's rim; an outline (a focus ring) keeps its own color. A translucent fill (judged by the
+part's own bg_opa, so a disabled button's faded fill is still shaded) or one that already has a
+gradient is left alone. While glass is
+effective, `glass_set_effective()` attaches every widget on every screen and layer, and the
+theme apply callback (`helix_theme_apply`) attaches each widget as it is created, so hot reload
+and new panels are covered. `ThemeManager::set_glass()` adds the soft drop shadows and the 1px
+rim width to the Button, Card, Dialog and Pressed styles (`src/ui/style_configs.cpp`), and keeps
+them across dark/light, theme loads and previews.
+
+### Families
+
+A widget part's family comes from the shared style it carries (`glass_family_of`):
+
+| Family | Look | Who |
+|---|---|---|
+| Raised | light top edge fading to a darker bottom; flips while pressed | `Button` and the solid `Button*` roles |
+| Surface | a corner light from the part's own top-left, `kGlassGlowRadiusPx` across | `Card`, `Dialog` |
+| Recessed | dark top fading to the base | tracks, troughs, inputs |
+| None | flat | `ButtonGhost`, `ButtonTransparent`, `ButtonOutline`, everything unclassified |
+
+`glass_mark(obj, family)` overrides the styles. **Color that identifies something stays flat**:
+a filament swatch, an LED color chip, any widget whose bg comes from user or filament data calls
+`glass_mark(obj, GlassFamily::None)`. Content stays flat for the same reason: images, canvases,
+camera, gcode and 3D previews, bed mesh and graphs are never classified.
+
+### The gate
+
+`include/glass_gate.h`. `decide_glass_gate()` fails outright below 24 bpp (the display's
+color format, so a 32 bpp build on a 16 bpp framebuffer fails), on a tier
+`full_style_effects_allowed()` rejects, on a software-rotated display, and on a NanoVG build
+(`LV_USE_DRAW_NANOVG`), whose gradient renderer reads only the first two stops. Any other board is
+measured once per board fingerprint (`include/board_fingerprint.h`, shared with the screensaver
+gate) and app version: `kGlassProbeDelayMs` after boot, `measure_glass_frame_ms()` draws a glass
+frame, drop shadows included, into a hidden canvas, and a median at or under `kGlassFrameBudgetMs` passes. The record is
+stored at `/display/glass_probe`; a record from another version or board is ignored and the board
+is measured again. `HELIX_GLASS=1`/`0` forces the verdict (`docs/devel/ENVIRONMENT_VARIABLES.md`).
+The ESP32 firmware draws 16 bpp and does not compile glass.
+
+---
+
 ## Quick Reference
 
 ### Adding a New Themed Widget
@@ -734,6 +790,7 @@ file-static pattern in `theme_lvgl_apply.cpp` instead — add an `lv_style_t`, c
 | `src/ui/theme_lvgl_apply.cpp` | `helix_theme_apply()`, shared widget-part styles, palette conversions |
 | `src/ui/theme_live_recolor.cpp` | Palette walk over a live widget tree and the colour-swap maps (`set_swap_maps()`) |
 | `src/ui/theme_color_math.cpp` | Hex parsing, brightness, saturation, WCAG contrast helpers |
+| `include/glass_shading.h`, `include/glass_painter.h`, `include/glass_gate.h` | Glass appearance: the derived stops, the draw-task painter and families, the gate and live switching |
 | `src/ui/overlay_geometry.cpp` | Nav width ladder, overlay widths and heights, `ui_set_overlay_geometry()` |
 | `src/ui/theme_manager_internal.h` | `helix::theme_detail`: what these files share. Not public API |
 | `src/ui/theme_loader.cpp`, `include/theme_loader.h` | Parses theme JSON into `ThemeData` / `ModePalette` |

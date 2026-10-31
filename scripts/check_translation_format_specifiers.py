@@ -41,7 +41,7 @@ INCLUDE_DIR = REPO_ROOT / "include"
 TRANS_DIR = REPO_ROOT / "translations"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from translations.extractor import resolve_cpp_literal_run  # noqa: E402
+from translations.extractor import TR_PLURAL_RUN_RE, resolve_cpp_literal_run  # noqa: E402
 
 # A single C/printf conversion specifier (handles flags, width, precision,
 # length modifiers, and positional %N$ args). %% is excluded by the caller.
@@ -131,14 +131,21 @@ def _collect_sink_tags(sink_re, roots) -> set:
     for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         # For each sink call, scan the call's argument region (up to the next
-        # ';') for the first lv_tr literal — that's the format argument.
+        # ';') for the first lv_tr literal or tr_plural call: that's the
+        # format argument. Both of tr_plural's keys are formats, since the
+        # call hands back either one for the same arguments.
         for sink in sink_re.finditer(text):
             region = text[sink.end():sink.end() + 600]
             stmt_end = region.find(";")
             if stmt_end != -1:
                 region = region[:stmt_end]
             lit = LV_TR_LITERAL_RE.search(region)
-            if lit:
+            plural = TR_PLURAL_RUN_RE.search(region)
+            if plural and (not lit or plural.start() < lit.start()):
+                for run in plural.groups():
+                    if run:
+                        tags.add(resolve_cpp_literal_run(run))
+            elif lit:
                 tags.add(lv_tr_tag(lit))
     return tags
 
@@ -190,9 +197,27 @@ def check_unresolved_escapes(trans_dir) -> list:
         for key, val in trans.items():
             if UNRESOLVED_ESCAPE_RE.search(key):
                 problems.append((yml.stem, "key", key))
-            if isinstance(val, str) and UNRESOLVED_ESCAPE_RE.search(val):
-                problems.append((yml.stem, "value", val))
+            forms = val.values() if isinstance(val, dict) else [val]
+            for form in forms:
+                if isinstance(form, str) and UNRESOLVED_ESCAPE_RE.search(form):
+                    problems.append((yml.stem, "value", form))
     return problems
+
+
+def _forms(trans: dict, tags):
+    """(tag, translated text) for every form of every tag a locale translates.
+
+    A plural entry (a mapping of CLDR categories) yields each category's text,
+    since any of them can reach the format call with the tag's arguments.
+    """
+    for tag in tags:
+        val = trans.get(tag)
+        if isinstance(val, str):
+            yield tag, val
+        elif isinstance(val, dict):
+            for form in val.values():
+                if isinstance(form, str):
+                    yield tag, form
 
 
 def check(verbose: bool, src_roots=None, trans_dir=None) -> int:
@@ -221,10 +246,7 @@ def check(verbose: bool, src_roots=None, trans_dir=None) -> int:
     problems = []
     for locale, trans in _iter_locales(trans_dir if trans_dir else TRANS_DIR):
         # printf-style: specifier sequence (count + type) must match.
-        for tag in printf_tags:
-            val = trans.get(tag)
-            if not isinstance(val, str):
-                continue
+        for tag, val in _forms(trans, printf_tags):
             # An untranslated (empty) value is not a mismatch: at runtime LVGL
             # falls back to the tag itself (the English source), so every
             # specifier is present and snprintf reads no missing arg. Flagging
@@ -253,10 +275,7 @@ def check(verbose: bool, src_roots=None, trans_dir=None) -> int:
 
         # {fmt}-style: translation must not require MORE args than the source
         # (too many fields -> fmt::format_error thrown at runtime).
-        for tag in fmt_tags:
-            val = trans.get(tag)
-            if not isinstance(val, str):
-                continue
+        for tag, val in _forms(trans, fmt_tags):
             src_n = fmt_arg_count(tag)
             tr_n = fmt_arg_count(val)
             if tr_n > src_n:

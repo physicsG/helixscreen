@@ -4,6 +4,8 @@
 #include "../../src/ui/panel_widgets/shutdown_widget.h"
 #include "../helix_test_fixture.h"
 
+#include <string>
+
 #include "../catch_amalgamated.hpp"
 
 /**
@@ -27,38 +29,38 @@ TEST_CASE_METHOD(ShutdownFallbackFixture, "Same-host machine action failure fall
                  "[shutdown][power]") {
     SECTION("reboot failure runs the local action") {
         int calls = 0;
-        const bool handled = helix::handle_machine_power_failure(
+        const helix::PowerResult handled = helix::handle_machine_power_failure(
             "sudo: not found", /*is_reboot=*/true, /*allow_local_fallback=*/true, [&calls]() {
                 ++calls;
-                return true;
+                return helix::PowerResult::Dispatched;
             });
 
         CHECK(calls == 1);
-        CHECK(handled);
+        CHECK(handled == helix::PowerResult::Dispatched);
     }
 
     SECTION("shutdown failure runs the local action") {
         int calls = 0;
-        const bool handled = helix::handle_machine_power_failure(
+        const helix::PowerResult handled = helix::handle_machine_power_failure(
             "sudo: not found", /*is_reboot=*/false, /*allow_local_fallback=*/true, [&calls]() {
                 ++calls;
-                return true;
+                return helix::PowerResult::Dispatched;
             });
 
         CHECK(calls == 1);
-        CHECK(handled);
+        CHECK(handled == helix::PowerResult::Dispatched);
     }
 
     SECTION("a local action that itself fails reports failure") {
         int calls = 0;
-        const bool handled = helix::handle_machine_power_failure(
+        const helix::PowerResult handled = helix::handle_machine_power_failure(
             "sudo: not found", /*is_reboot=*/true, /*allow_local_fallback=*/true, [&calls]() {
                 ++calls;
-                return false;
+                return helix::PowerResult::Failed;
             });
 
         CHECK(calls == 1);
-        CHECK_FALSE(handled);
+        CHECK(handled == helix::PowerResult::Failed);
     }
 }
 
@@ -67,20 +69,54 @@ TEST_CASE_METHOD(ShutdownFallbackFixture, "Remote-printer machine action failure
     // Dual-scope "Printer" target: the failing host is NOT this one. Powering
     // this device down instead would kill the screen and leave the printer up.
     int calls = 0;
-    const bool handled = helix::handle_machine_power_failure(
+    const helix::PowerResult handled = helix::handle_machine_power_failure(
         "Klippy Request Timed Out", /*is_reboot=*/true, /*allow_local_fallback=*/false, [&calls]() {
             ++calls;
-            return true;
+            return helix::PowerResult::Dispatched;
         });
 
     CHECK(calls == 0);
-    CHECK_FALSE(handled);
+    CHECK(handled == helix::PowerResult::Failed);
 }
 
 TEST_CASE_METHOD(ShutdownFallbackFixture, "Missing local action is not invoked",
                  "[shutdown][power]") {
     // Defensive: an empty std::function must not be called even when the
     // fallback is permitted.
-    CHECK_FALSE(helix::handle_machine_power_failure("boom", /*is_reboot=*/true,
-                                                    /*allow_local_fallback=*/true, {}));
+    CHECK(helix::handle_machine_power_failure("boom", /*is_reboot=*/true,
+                                              /*allow_local_fallback=*/true,
+                                              {}) == helix::PowerResult::Failed);
+}
+
+TEST_CASE_METHOD(ShutdownFallbackFixture,
+                 "Same-host fallback refused by polkit reports the missing permission",
+                 "[shutdown][power]") {
+    int calls = 0;
+    const helix::PowerResult handled =
+        helix::handle_machine_power_failure("sudo: a password is required", /*is_reboot=*/false,
+                                            /*allow_local_fallback=*/true, [&calls]() {
+                                                ++calls;
+                                                return helix::PowerResult::NotAuthorized;
+                                            });
+
+    CHECK(calls == 1);
+    CHECK(handled == helix::PowerResult::NotAuthorized);
+}
+
+TEST_CASE("Machine power failure toast text", "[shutdown][power]") {
+    using helix::PowerResult;
+    CHECK(helix::machine_power_failure_message(PowerResult::Dispatched, false) == nullptr);
+    CHECK(std::string(helix::machine_power_failure_message(PowerResult::Failed, false)) ==
+          "Shutdown failed");
+    CHECK(std::string(helix::machine_power_failure_message(PowerResult::Failed, true)) ==
+          "Reboot failed");
+    // A refusal says what fixes it, in the screen path's words
+    for (const bool is_reboot : {false, true}) {
+        CHECK(std::string(
+                  helix::machine_power_failure_message(PowerResult::NotAuthorized, is_reboot)) ==
+              helix::screen_power_failure_message(PowerResult::NotAuthorized, is_reboot));
+        CHECK(
+            std::string(helix::machine_power_failure_message(PowerResult::NotAuthorized, is_reboot))
+                .find("not permitted") != std::string::npos);
+    }
 }

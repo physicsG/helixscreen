@@ -21,6 +21,16 @@ class FilamentSensorWidgetTestAccess {
     static RunoutGuidanceModal& tap_modal(FilamentSensorWidget& widget) {
         return widget.tap_modal_;
     }
+    /// The tile's own dispatches, as its dialog's Load / Unload / Purge run them.
+    static void dispatch_load(FilamentSensorWidget& widget) {
+        widget.dispatch_load();
+    }
+    static void dispatch_unload(FilamentSensorWidget& widget) {
+        widget.dispatch_unload();
+    }
+    static void dispatch_purge(FilamentSensorWidget& widget) {
+        widget.dispatch_purge();
+    }
 };
 
 } // namespace helix

@@ -180,16 +180,36 @@ void register_semantic_colors(lv_xml_component_scope_t* scope, const helix::Them
         register_color(names[i], i);
     }
 
-    // Text on a solid primary fill, for XML styles that paint one without a
-    // ui_button to run the contrast pass (selected pills, chips).
-    {
-        const lv_color_t on_primary = theme_manager_get_contrast_adjusted_text(
-            theme_manager_parse_hex_color(current_palette->text.c_str()),
-            theme_manager_parse_hex_color(current_palette->primary.c_str()));
-        char buf[8];
-        snprintf(buf, sizeof(buf), "#%06x", lv_color_to_u32(on_primary) & 0xFFFFFF);
-        lv_xml_set_const(scope, "text_on_primary", buf);
-    }
+    // Text on a solid primary or danger fill, for XML styles that paint one
+    // without a ui_button to run the contrast pass (selected pills, chips,
+    // faulted cells).
+    // Literal names at the call sites: the XML linter's schema extractor finds
+    // runtime consts by them.
+    auto to_hex = [](lv_color_t color, char(&buf)[8]) -> const char* {
+        snprintf(buf, sizeof(buf), "#%06x", lv_color_to_u32(color) & 0xFFFFFF);
+        return buf;
+    };
+    auto text_on = [&](const std::string& fill, char(&buf)[8]) -> const char* {
+        return to_hex(theme_manager_get_contrast_adjusted_text(
+                          theme_manager_parse_hex_color(current_palette->text.c_str()),
+                          theme_manager_parse_hex_color(fill.c_str())),
+                      buf);
+    };
+    char on_primary[8];
+    char on_danger[8];
+    lv_xml_set_const(scope, "text_on_primary", text_on(current_palette->primary, on_primary));
+    lv_xml_set_const(scope, "text_on_danger", text_on(current_palette->danger, on_danger));
+
+    // A chart's measured data curve: the primary accent, shifted only as far as
+    // it takes to read on the screen_bg plot, since some palettes pick a primary
+    // close to their own background.
+    const lv_color_t plot_bg = theme_manager_parse_hex_color(current_palette->screen_bg.c_str());
+    char measured[8];
+    lv_xml_set_const(scope, "chart_measured",
+                     to_hex(theme_manager_get_contrast_adjusted_text(
+                                theme_manager_parse_hex_color(current_palette->primary.c_str()),
+                                plot_bg, plot_bg, LV_OPA_COVER, kChartCurveContrastThreshold),
+                            measured));
 
     // Swatch descriptions for theme editor - registered as string subjects
     // so bind_text="swatch_N_desc" works in XML (consts don't resolve for bind_text)

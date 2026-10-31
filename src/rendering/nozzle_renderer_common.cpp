@@ -8,7 +8,7 @@ namespace helix {
 namespace {
 
 // Largest polygon across the traced toolheads
-constexpr int MAX_POLYGON_POINTS = 80;
+constexpr int kMaxPolygonPoints = 80;
 
 int64_t cross_product_sign(const lv_point_t& a, const lv_point_t& b, const lv_point_t& c) {
     return (int64_t)(b.x - a.x) * (c.y - a.y) - (int64_t)(b.y - a.y) * (c.x - a.x);
@@ -51,8 +51,8 @@ bool is_ear(const int* indices, int idx_cnt, int i, const lv_point_t* pts, bool 
 void nr_draw_polygon(lv_layer_t* layer, const lv_point_t* pts, int cnt, lv_color_t color) {
     if (cnt < 3)
         return;
-    if (cnt > MAX_POLYGON_POINTS)
-        cnt = MAX_POLYGON_POINTS;
+    if (cnt > kMaxPolygonPoints)
+        cnt = kMaxPolygonPoints;
 
     if (cnt == 3) {
         lv_draw_triangle_dsc_t tri_dsc;
@@ -76,7 +76,7 @@ void nr_draw_polygon(lv_layer_t* layer, const lv_point_t* pts, int cnt, lv_color
     }
     bool ccw = (winding_sum < 0);
 
-    int indices[MAX_POLYGON_POINTS];
+    int indices[kMaxPolygonPoints];
     for (int i = 0; i < cnt; i++)
         indices[i] = i;
     int idx_cnt = cnt;
@@ -143,9 +143,9 @@ void nr_draw_polygon(lv_layer_t* layer, const lv_point_t* pts, int cnt, lv_color
 void nr_draw_polygons(lv_layer_t* layer, const NrPolygon* polys, size_t count,
                       const lv_color_t* palette, int32_t cx, int32_t cy, float scale,
                       lv_point_t design_center) {
-    lv_point_t tmp[MAX_POLYGON_POINTS];
+    lv_point_t tmp[kMaxPolygonPoints];
     for (size_t p = 0; p < count; p++) {
-        int cnt = LV_MIN(polys[p].cnt, MAX_POLYGON_POINTS);
+        int cnt = LV_MIN(polys[p].cnt, kMaxPolygonPoints);
         for (int i = 0; i < cnt; i++) {
             tmp[i].x = cx + (int32_t)((polys[p].pts[i].x - design_center.x) * scale);
             tmp[i].y = cy + (int32_t)((polys[p].pts[i].y - design_center.y) * scale);

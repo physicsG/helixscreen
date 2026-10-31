@@ -61,8 +61,8 @@ const std::string& gpu_blur_guard_path() {
 }
 
 // Safe-mode marker written by the watchdog when it detects a deterministic
-// crash loop (CRASH_LOOP_MAX_CRASHES same-signature crashes within the
-// CRASH_LOOP_WINDOW_SEC window). When present at startup, the application
+// crash loop (kCrashLoopMaxCrashes same-signature crashes within the
+// kCrashLoopWindowSec window). When present at startup, the application
 // defers Moonraker connection so the user can reach Settings and clear the
 // underlying state (a stuck subscription field, bad printer URL, etc.)
 // without re-crashing on the same code path.
@@ -103,9 +103,17 @@ void clear_crash_marker_signal_safe() {
     (void)::unlink(s_crash_marker_path);
 }
 
+void clear_crash_marker(const std::string& path) noexcept {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        spdlog::warn("[Application] Could not remove crash marker {}: {}", path, ec.message());
+    }
+}
+
 bool record_start_and_check_crash_loop(const std::string& marker_path, long long now_epoch) {
-    constexpr size_t MAX_CRASH_RESTARTS = 3;
-    constexpr long long CRASH_WINDOW_SEC = 120;
+    constexpr size_t kMaxCrashRestarts = 3;
+    constexpr long long kCrashWindowSec = 120;
 
     // Read existing timestamps and filter to recent window
     std::vector<long long> recent_timestamps;
@@ -113,17 +121,17 @@ bool record_start_and_check_crash_loop(const std::string& marker_path, long long
         std::ifstream in(marker_path);
         long long ts;
         while (in >> ts) {
-            if (now_epoch - ts < CRASH_WINDOW_SEC) {
+            if (now_epoch - ts < kCrashWindowSec) {
                 recent_timestamps.push_back(ts);
             }
         }
     }
 
-    if (recent_timestamps.size() >= MAX_CRASH_RESTARTS) {
+    if (recent_timestamps.size() >= kMaxCrashRestarts) {
         spdlog::error("[Application] Crash loop detected: {} restarts within {}s - "
                       "booting in safe mode (no plugins, default home layout)",
-                      recent_timestamps.size(), CRASH_WINDOW_SEC);
-        std::filesystem::remove(marker_path);
+                      recent_timestamps.size(), kCrashWindowSec);
+        clear_crash_marker(marker_path);
         get_runtime_config()->crash_loop_safe_mode = true;
         return true;
     }

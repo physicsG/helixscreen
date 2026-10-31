@@ -4,7 +4,6 @@
 
 #include "helix-xml/src/xml/lv_xml_style.h"
 #include "lvgl/lvgl.h"
-#include "misc/lv_event_private.h" // lv_event_dsc_t::filter: no public accessor
 
 #include <cstring>
 
@@ -39,22 +38,6 @@ inline bool paints_press_wash(lv_obj_t* obj) {
     const bool pressed = paints();
     lv_obj_remove_state(obj, LV_STATE_PRESSED);
     return pressed && !at_rest;
-}
-
-/// True when @p obj carries a CLICKED handler (from XML or C++) - the part
-/// of "tapping it does something" a row's own test can see without driving
-/// the screen that owns it.
-inline bool has_clicked_handler(lv_obj_t* obj, lv_event_cb_t cb = nullptr) {
-    const uint32_t n = obj ? lv_obj_get_event_count(obj) : 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        lv_event_dsc_t* dsc = lv_obj_get_event_dsc(obj, i);
-        const uint32_t code = dsc->filter & ~static_cast<uint32_t>(LV_EVENT_PREPROCESS);
-        if ((code == LV_EVENT_CLICKED || code == LV_EVENT_ALL) &&
-            (cb == nullptr || lv_event_dsc_get_cb(dsc) == cb)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /// The clickable ancestor of the label under @p root whose text is @p text.

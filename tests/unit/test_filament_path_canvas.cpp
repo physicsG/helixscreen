@@ -14,15 +14,15 @@
 // ============================================================================
 
 namespace {
-constexpr int32_t CX = 200;
-constexpr int32_t CY = 90;
+constexpr int32_t kCx = 200;
+constexpr int32_t kCy = 90;
 constexpr int32_t W = 100;
 constexpr int32_t H = 30;
-constexpr int32_t MARGIN = 4;
+constexpr int32_t kMargin = 4;
 
 bool hit(int32_t x, int32_t y) {
     lv_point_t p{x, y};
-    return helix::ui::hub_box_hit(p, CX, CY, W, H, MARGIN);
+    return helix::ui::hub_box_hit(p, kCx, kCy, W, H, kMargin);
 }
 } // namespace
 
@@ -67,11 +67,11 @@ TEST_CASE("hub_box_hit: argument order is width-then-height", "[canvas][hit_test
     // X half-extent 60, Y half-extent 10. A point at x-offset 55, y-offset 12
     // hits only if width is used for X (55<=60) and height for Y... but 12>10
     // so it MUST miss. If args were swapped (h for X, w for Y), it would hit.
-    lv_point_t p{CX + 55, CY + 12};
-    REQUIRE_FALSE(helix::ui::hub_box_hit(p, CX, CY, 120, 20, 0));
+    lv_point_t p{kCx + 55, kCy + 12};
+    REQUIRE_FALSE(helix::ui::hub_box_hit(p, kCx, kCy, 120, 20, 0));
     // Same x-offset, y-offset 8 -> hits (within both extents).
-    lv_point_t p2{CX + 55, CY + 8};
-    REQUIRE(helix::ui::hub_box_hit(p2, CX, CY, 120, 20, 0));
+    lv_point_t p2{kCx + 55, kCy + 8};
+    REQUIRE(helix::ui::hub_box_hit(p2, kCx, kCy, 120, 20, 0));
 }
 
 // ============================================================================

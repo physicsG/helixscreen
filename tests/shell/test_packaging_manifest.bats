@@ -82,7 +82,6 @@ ui_xml" ]
         assets/config/print_start_profiles
         assets/config/themes/defaults
         assets/config/platform
-        assets/config/panel_widgets
         assets/fonts
         assets/images
         assets/sounds
@@ -101,7 +100,7 @@ ui_xml" ]
     done
 }
 
-@test "manifest excludes hidden directories (.git, .claude-recall, ...)" {
+@test "manifest excludes hidden directories (.git, .github, ...)" {
     run "$SCRIPT"
     [ "$status" -eq 0 ]
     # No line should contain a path component starting with '.'

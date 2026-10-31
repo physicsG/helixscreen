@@ -24,7 +24,7 @@ using helix::MainLoopHangDetector;
 using helix::MainLoopHeartbeat;
 
 namespace {
-constexpr uint32_t THRESHOLD_MS = 60000;
+constexpr uint32_t kThresholdMs = 60000;
 }
 
 TEST_CASE("MainLoopHeartbeat is unarmed until the loop actually ticks", "[hang][heartbeat]") {
@@ -40,7 +40,7 @@ TEST_CASE("MainLoopHeartbeat is unarmed until the loop actually ticks", "[hang][
 }
 
 TEST_CASE("MainLoopHangDetector stays quiet while the loop advances", "[hang][heartbeat]") {
-    MainLoopHangDetector d(THRESHOLD_MS);
+    MainLoopHangDetector d(kThresholdMs);
     uint64_t count = 0;
 
     // Ten minutes of healthy operation, sampled every 5s like the real loop.
@@ -52,7 +52,7 @@ TEST_CASE("MainLoopHangDetector stays quiet while the loop advances", "[hang][he
 
 TEST_CASE("MainLoopHangDetector reports once the counter stops past the threshold",
           "[hang][heartbeat]") {
-    MainLoopHangDetector d(THRESHOLD_MS);
+    MainLoopHangDetector d(kThresholdMs);
 
     REQUIRE(d.sample(1, 0) == 0);     // seed
     REQUIRE(d.sample(1, 30000) == 0); // stuck, but only 30s
@@ -64,7 +64,7 @@ TEST_CASE("MainLoopHangDetector reports once the counter stops past the threshol
 }
 
 TEST_CASE("MainLoopHangDetector reports a stall only once", "[hang][heartbeat]") {
-    MainLoopHangDetector d(THRESHOLD_MS);
+    MainLoopHangDetector d(kThresholdMs);
 
     REQUIRE(d.sample(7, 0) == 0);
     REQUIRE(d.sample(7, 60000) == 60000);
@@ -78,7 +78,7 @@ TEST_CASE("MainLoopHangDetector reports a stall only once", "[hang][heartbeat]")
 }
 
 TEST_CASE("MainLoopHangDetector re-arms after the loop recovers", "[hang][heartbeat]") {
-    MainLoopHangDetector d(THRESHOLD_MS);
+    MainLoopHangDetector d(kThresholdMs);
 
     REQUIRE(d.sample(1, 0) == 0);
     REQUIRE(d.sample(1, 60000) == 60000);
@@ -94,7 +94,7 @@ TEST_CASE("MainLoopHangDetector re-arms after the loop recovers", "[hang][heartb
 }
 
 TEST_CASE("MainLoopHangDetector honours a changed threshold", "[hang][heartbeat]") {
-    MainLoopHangDetector d(THRESHOLD_MS);
+    MainLoopHangDetector d(kThresholdMs);
     d.set_threshold_ms(10000);
 
     REQUIRE(d.sample(1, 0) == 0);
@@ -112,7 +112,7 @@ TEST_CASE("MainLoopHangDetector treats threshold 0 as disabled", "[hang][heartbe
 }
 
 TEST_CASE("MainLoopHangDetector does not fire on a first sample", "[hang][heartbeat]") {
-    MainLoopHangDetector d(THRESHOLD_MS);
+    MainLoopHangDetector d(kThresholdMs);
 
     // Seeding at a large timestamp must not read as "already stalled that long"
     // — the monitor thread starts well after process start.

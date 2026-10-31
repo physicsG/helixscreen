@@ -290,8 +290,8 @@ if [ "$FILE_MODE" = true ]; then
         for f in "${cpp_files[@]}"; do
             fname=$(basename "$f")
 
-            # Skip test files - they manage their own LVGL lifecycle without lv_deinit()
-            if [[ "$fname" == test_* ]]; then
+            # Skip test code - it manages its own LVGL lifecycle without lv_deinit()
+            if [[ "$fname" == test_* || "$f" == tests/* || "$f" == */tests/* ]]; then
                 continue
             fi
 

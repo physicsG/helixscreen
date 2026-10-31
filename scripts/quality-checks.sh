@@ -139,15 +139,26 @@ trap 'rm -rf "$QC_TMP"' EXIT
 QC_COUNTS="$QC_TMP/counts"
 QC_JOBS="${QC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
+# Milliseconds where date has %N; BSD date (macOS) prints a literal N, so it
+# falls back to whole seconds there.
+qc_now_ms() {
+  local ns
+  ns=$(date +%s%N)
+  case "$ns" in
+    *N) echo $(( $(date +%s) * 1000 )) ;;
+    *) echo $(( ns / 1000000 )) ;;
+  esac
+}
+
 qc_run_buffered() {
   local fn="$1" t0 t1
-  t0=$(date +%s)
+  t0=$(qc_now_ms)
   set +e
   "$fn" > "$QC_TMP/$fn.out" 2>&1
   echo $? > "$QC_TMP/$fn.rc"
   set -e
-  t1=$(date +%s)
-  echo $((t1 - t0)) > "$QC_TMP/$fn.time"
+  t1=$(qc_now_ms)
+  echo $((t1 - t0)) > "$QC_TMP/$fn.ms"
 }
 
 # qc_xml_linter always regenerates the schema; qc_phase2 only rewrites files
@@ -155,7 +166,20 @@ qc_run_buffered() {
 QC_SERIAL="qc_xml_tools qc_xml_linter"
 if [ "$AUTO_FIX" = true ]; then QC_SERIAL="$QC_SERIAL qc_phase2"; fi
 
-QC_ALL="qc_phase1 qc_xml_tools qc_xml_const qc_xml_attr qc_dup_names qc_xml_linter qc_xml_subtests qc_hidden_tests qc_overlay_width qc_icon_names qc_design_pixels qc_esp32_app_srcs qc_esp32_xml_bindings qc_phase2 qc_icon_font qc_mdi_codepoints qc_todo_markers qc_mem_safety qc_null_safety qc_l081 qc_net_pii qc_decl_ui qc_namespace qc_spdlog_only qc_design_tokens qc_test_mirrors qc_test_tautology qc_test_widget_registry qc_xml_create_registered qc_doc_refs qc_lvgl_event_codes qc_translation_fmt qc_base_locale qc_translation_coverage qc_plugin_i18n_shadow qc_cjk_fonts qc_shellcheck qc_installer_reachability qc_patch_drift qc_workflow_submodules qc_ams_xml_mirror qc_bats_inert qc_python_tests"
+QC_ALL="qc_phase1 qc_xml_tools qc_xml_const qc_xml_attr qc_dup_names qc_xml_linter qc_theme_artifacts qc_toolhead_census qc_xml_subtests qc_hidden_tests qc_overlay_width qc_icon_names qc_design_pixels qc_esp32_app_srcs qc_esp32_compile qc_esp32_xml_bindings qc_phase2 qc_icon_font qc_mdi_codepoints qc_todo_markers qc_mem_safety qc_null_safety qc_l081 qc_vendor_branches qc_hand_rolled_swatch qc_filament_ops_neutral qc_hold_ends_press qc_net_pii qc_decl_ui qc_namespace qc_constant_naming qc_spdlog_only qc_design_tokens qc_test_mirrors qc_test_budget qc_test_tautology qc_test_widget_registry qc_xml_create_registered qc_doc_refs qc_lvgl_event_codes qc_translation_fmt qc_base_locale qc_translation_coverage qc_plugin_i18n_shadow qc_cjk_fonts qc_shellcheck qc_installer_reachability qc_patch_drift qc_link_parity qc_feature_gates qc_workflow_submodules qc_ams_xml_mirror qc_bats_inert qc_python_tests"
+
+# Push-only gates: the repo-wide scans that would set a commit's wall clock
+# (QC_PROFILE=1 prints each gate's time). A commit waits for its slowest gate,
+# so one of these alone costs every commit seconds to minutes; pre-push and
+# land-gate run them ungated before anything reaches main.
+# HELIX_QC_ALL_AT_COMMIT=1 runs them at commit too.
+#
+# Only a lint belongs here: a failure it finds is a policy breach, not a commit
+# that fails to build or load. The slow gates a commit keeps are that kind:
+# qc_phase2 (formatting, the staged compile), qc_xml_tools and qc_xml_linter
+# (the XML the app loads at runtime) and qc_design_pixels (layout-variant
+# parity, without which a breakpoint loses the widgets its code looks up).
+QC_PUSH_ONLY="qc_python_tests qc_hidden_tests qc_decl_ui qc_translation_coverage qc_hand_rolled_swatch qc_esp32_xml_bindings qc_esp32_app_srcs qc_esp32_compile qc_translation_fmt qc_namespace qc_test_tautology qc_test_widget_registry qc_vendor_branches qc_hold_ends_press qc_test_budget"
 
 for fn in $QC_ALL; do
   # shellcheck source=/dev/null
@@ -174,16 +198,25 @@ done
 # skip a check when nothing it inspects was staged. The full run (pre-push, CI)
 # gates nothing, so this can only defer work to the push, never drop it.
 #
-# A gate that sets no QC_TRIGGER_<gate> always runs.
+# A gate that sets no QC_TRIGGER_<gate> always runs, unless it is push-only.
 qc_trigger_re() {
   local var="QC_TRIGGER_$1"
   echo "${!var:-}"
 }
 
 QC_SKIPPED=""
+QC_DEFERRED=""
 qc_wanted() {
   local re
   [ "$STAGED_ONLY" = true ] || return 0
+  case " $QC_PUSH_ONLY " in
+    *" $1 "*)
+      if [ "${HELIX_QC_ALL_AT_COMMIT:-0}" != 1 ]; then
+        QC_DEFERRED="$QC_DEFERRED $1"
+        return 1
+      fi
+      ;;
+  esac
   re="$(qc_trigger_re "$1")"
   [ -n "$re" ] || return 0
   if printf '%s\n' "$QC_STAGED_ALL" | grep -qE "$re"; then
@@ -212,17 +245,23 @@ for fn in $QC_ALL; do
   [ "$rc" != "0" ] && EXIT_CODE=1
 done
 
+if [ -n "$QC_DEFERRED" ]; then
+  echo ""
+  echo "⏩ Deferred to pre-push (slow; HELIX_QC_ALL_AT_COMMIT=1 runs them now):$QC_DEFERRED"
+fi
 if [ -n "$QC_SKIPPED" ]; then
   echo ""
   echo "⏭️  Skipped (nothing staged that they inspect):$QC_SKIPPED"
   echo "   The pre-push hook runs all of them ungated."
 fi
 
+# Every gate that ran, slowest first. The transcript cannot time them: gates run
+# in parallel and their output is replayed only once all have finished.
 if [ -n "${QC_PROFILE:-}" ]; then
-  echo ""; echo "slowest checks:"
+  echo ""; echo "gate times (ms), slowest first:"
   for fn in $QC_ALL; do
-    printf "%5ss  %s\n" "$(cat "$QC_TMP/$fn.time" 2>/dev/null || echo 0)" "$fn"
-  done | sort -rn | head -8
+    [ -f "$QC_TMP/$fn.ms" ] && printf "%7d  %s\n" "$(cat "$QC_TMP/$fn.ms")" "$fn"
+  done | sort -rn
 fi
 true
 

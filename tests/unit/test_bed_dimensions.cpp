@@ -64,3 +64,21 @@ TEST_CASE("bed_dimensions preserves origin for a coincidentally-235mm bed", "[be
     REQUIRE(d.origin_x == Catch::Approx(-5.0f));
     REQUIRE(d.origin_y == Catch::Approx(-5.0f));
 }
+
+TEST_CASE("bed_dimensions reports a delta's bed as round", "[bed_dimensions][bed_grid]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+    BuildVolume vol;
+    vol.x_min = -100.0f;
+    vol.x_max = 100.0f;
+    vol.y_min = -100.0f;
+    vol.y_max = 100.0f;
+    api.hardware().set_build_volume(vol);
+
+    api.hardware().set_kinematics("corexy");
+    CHECK_FALSE(helix::bed_dimensions(&api, nullptr).circular);
+    api.hardware().set_kinematics("delta");
+    CHECK(helix::bed_dimensions(&api, nullptr).circular);
+    // No api: no kinematics to go on.
+    CHECK_FALSE(helix::bed_dimensions(nullptr, nullptr).circular);
+}

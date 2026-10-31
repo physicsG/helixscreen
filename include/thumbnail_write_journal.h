@@ -56,7 +56,7 @@ class ThumbnailWriteJournal {
      * bound, a cache that is constructed and then never queried would let the
      * pending list grow for the life of the process.
      */
-    static constexpr size_t MAX_PENDING = 256;
+    static constexpr size_t kMaxPending = 256;
 
     /**
      * @brief Record that @p path was written

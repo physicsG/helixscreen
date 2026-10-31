@@ -31,7 +31,7 @@ struct EiFixturePoint {
 
 /// The ei(29.0) column of the K1C run: DC passes unchanged, the notch bottoms
 /// out near 29 Hz, and the EI side lobes rise again past 2x the shaper freq.
-const EiFixturePoint K1C_EI_29[] = {
+const EiFixturePoint kK1cEi29[] = {
     {0.0, 1.000},  {1.5, 0.978},  {18.5, 0.220},  {26.2, 0.026},  {29.3, 0.039},
     {37.0, 0.099}, {55.4, 0.611}, {110.9, 0.403}, {147.8, 0.149}, {184.8, 0.235},
 };
@@ -59,30 +59,30 @@ double mean_curve(const std::vector<double>& curve) {
 
 TEST_CASE("ei transfer curve matches K1C firmware output", "[shaper_response][calibration]") {
     std::vector<double> freqs;
-    for (const auto& p : K1C_EI_29) {
+    for (const auto& p : kK1cEi29) {
         freqs.push_back(p.freq);
     }
 
-    const auto curve = shaper_transfer_curve("ei", 29.0, SHAPER_DEFAULT_DAMPING_RATIO, freqs);
+    const auto curve = shaper_transfer_curve("ei", 29.0, kShaperDefaultDampingRatio, freqs);
 
     REQUIRE(curve.size() == freqs.size());
     for (size_t i = 0; i < freqs.size(); i++) {
         INFO("freq " << freqs[i] << " Hz: computed " << curve[i] << ", firmware wrote "
-                     << K1C_EI_29[i].attenuation);
-        CHECK(std::abs(curve[i] - K1C_EI_29[i].attenuation) < 0.01);
+                     << kK1cEi29[i].attenuation);
+        CHECK(std::abs(curve[i] - kK1cEi29[i].attenuation) < 0.01);
     }
 }
 
 TEST_CASE("every shaper type passes DC unchanged and notches at its frequency",
           "[shaper_response][calibration]") {
     const std::string types[] = {"zv", "zvd", "mzv", "ei", "2hump_ei", "3hump_ei"};
-    constexpr double SHAPER_FREQ = 50.0;
+    constexpr double kShaperFreq = 50.0;
 
     for (const auto& type : types) {
         INFO("shaper type " << type);
-        const std::vector<double> freqs = {0.0, SHAPER_FREQ};
+        const std::vector<double> freqs = {0.0, kShaperFreq};
         const auto curve =
-            shaper_transfer_curve(type, SHAPER_FREQ, SHAPER_DEFAULT_DAMPING_RATIO, freqs);
+            shaper_transfer_curve(type, kShaperFreq, kShaperDefaultDampingRatio, freqs);
         REQUIRE(curve.size() == 2);
 
         // A shaper must not distort steady-state motion: H(0) == 1.
@@ -101,15 +101,15 @@ TEST_CASE("higher-hump shapers suppress a wider band", "[shaper_response][calibr
     const std::vector<double> band = grid(1.25, 300.0, 240);
 
     const double mean_zv =
-        mean_curve(shaper_transfer_curve("zv", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, band));
+        mean_curve(shaper_transfer_curve("zv", 50.0, kShaperDefaultDampingRatio, band));
     const double mean_zvd =
-        mean_curve(shaper_transfer_curve("zvd", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, band));
+        mean_curve(shaper_transfer_curve("zvd", 50.0, kShaperDefaultDampingRatio, band));
     const double mean_ei =
-        mean_curve(shaper_transfer_curve("ei", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, band));
+        mean_curve(shaper_transfer_curve("ei", 50.0, kShaperDefaultDampingRatio, band));
     const double mean_2hump =
-        mean_curve(shaper_transfer_curve("2hump_ei", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, band));
+        mean_curve(shaper_transfer_curve("2hump_ei", 50.0, kShaperDefaultDampingRatio, band));
     const double mean_3hump =
-        mean_curve(shaper_transfer_curve("3hump_ei", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, band));
+        mean_curve(shaper_transfer_curve("3hump_ei", 50.0, kShaperDefaultDampingRatio, band));
 
     CHECK(mean_zv > mean_zvd);
     CHECK(mean_zv > mean_ei);
@@ -122,9 +122,9 @@ TEST_CASE("unknown shaper types degrade to an empty curve", "[shaper_response][c
 
     // Kalico smooth shapers and vendor-fork names have no ported taps; callers
     // must get an empty curve, never a crash or a fabricated line.
-    CHECK(shaper_transfer_curve("smooth_ei", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, freqs).empty());
-    CHECK(shaper_transfer_curve("creality_x", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, freqs).empty());
-    CHECK(shaper_transfer_curve("", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, freqs).empty());
+    CHECK(shaper_transfer_curve("smooth_ei", 50.0, kShaperDefaultDampingRatio, freqs).empty());
+    CHECK(shaper_transfer_curve("creality_x", 50.0, kShaperDefaultDampingRatio, freqs).empty());
+    CHECK(shaper_transfer_curve("", 50.0, kShaperDefaultDampingRatio, freqs).empty());
 }
 
 TEST_CASE("residual vibration rewards a notch placed on the peak",
@@ -141,10 +141,9 @@ TEST_CASE("residual vibration rewards a notch placed on the peak",
         psd.push_back(f > 0.0 ? 1.0 / (1.0 + df * df) : 0.0);
     }
 
-    const auto notch_on_peak =
-        shaper_transfer_curve("ei", 50.0, SHAPER_DEFAULT_DAMPING_RATIO, freqs);
+    const auto notch_on_peak = shaper_transfer_curve("ei", 50.0, kShaperDefaultDampingRatio, freqs);
     const auto notch_off_peak =
-        shaper_transfer_curve("ei", 80.0, SHAPER_DEFAULT_DAMPING_RATIO, freqs);
+        shaper_transfer_curve("ei", 80.0, kShaperDefaultDampingRatio, freqs);
 
     const double residual_on = residual_vibration_percent(psd, notch_on_peak);
     const double residual_off = residual_vibration_percent(psd, notch_off_peak);

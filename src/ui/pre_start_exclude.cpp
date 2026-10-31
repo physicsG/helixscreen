@@ -3,6 +3,7 @@
 #include "pre_start_exclude.h"
 
 #include "ui_error_reporting.h"
+#include "ui_exclude_object_badges.h"
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
@@ -31,13 +32,8 @@ bool pre_start_exclude_available(bool printer_has_exclude_object, bool is_3mf,
 
 std::string canonical_object_name(const std::vector<std::string>& defined,
                                   const std::string& name) {
-    const std::string wanted = helix::text_io::to_upper(name);
-    for (const auto& d : defined) {
-        if (helix::text_io::to_upper(d) == wanted) {
-            return d;
-        }
-    }
-    return {};
+    const int index = defined_object_index(defined, name);
+    return index < 0 ? std::string{} : defined[static_cast<size_t>(index)];
 }
 
 bool every_object_picked(const std::vector<std::string>& defined,
@@ -107,7 +103,13 @@ void report_unsent(const std::vector<std::string>& names) {
         spdlog::info("[PreStartExclude] Print ended before {} could be skipped", join_names(names));
         return;
     }
-    NOTIFY_ERROR(lv_tr("Could not skip {}"), join_names(names));
+    const auto& defined = get_printer_state().excluded_objects_state().get_defined_objects();
+    std::vector<std::string> shown;
+    shown.reserve(names.size());
+    for (const auto& n : names) {
+        shown.push_back(object_message_name(defined, n));
+    }
+    NOTIFY_ERROR(lv_tr("Could not skip {}"), join_names(shown));
 }
 
 } // namespace
@@ -158,8 +160,8 @@ void send_pre_start_exclusions(IMoonrakerAPI* api, std::vector<std::string> name
     }
 }
 
-std::function<void()> with_pre_start_exclusions(std::function<void()> on_confirmed,
-                                                std::vector<std::string> names) {
+helix::SharedCallback<void()> with_pre_start_exclusions(helix::SharedCallback<void()> on_confirmed,
+                                                        std::vector<std::string> names) {
     if (names.empty()) {
         return on_confirmed;
     }

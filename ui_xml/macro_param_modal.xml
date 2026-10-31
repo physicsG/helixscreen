@@ -3,9 +3,35 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- NOTE: Backdrop created programmatically by Modal system -->
 <component>
+  <consts>
+    <!-- Narrowest a parameter field gets before the grid drops a column. -->
+    <px name="macro_param_col_min_micro" value="140"/>
+    <px name="macro_param_col_min_tiny" value="150"/>
+    <px name="macro_param_col_min_small" value="170"/>
+    <px name="macro_param_col_min_medium" value="190"/>
+    <px name="macro_param_col_min_large" value="230"/>
+    <px name="macro_param_col_min_xlarge" value="260"/>
+    <px name="macro_param_col_min_xxlarge" value="300"/>
+    <!-- The multi-field card's cap, about three columns' worth. -->
+    <px name="macro_param_card_wide_max_micro" value="432"/>
+    <px name="macro_param_card_wide_max_tiny" value="432"/>
+    <px name="macro_param_card_wide_max_small" value="600"/>
+    <px name="macro_param_card_wide_max_medium" value="720"/>
+    <px name="macro_param_card_wide_max_large" value="840"/>
+    <px name="macro_param_card_wide_max_xlarge" value="960"/>
+    <px name="macro_param_card_wide_max_xxlarge" value="1080"/>
+  </consts>
+  <styles>
+    <!-- One field (or raw mode) keeps a compact card; two or more widen it so
+         the fields can share rows. -->
+    <style name="card_single" width="70%" max_width="400"/>
+    <style name="card_multi" width="90%" max_width="#macro_param_card_wide_max"/>
+  </styles>
   <view name="macro_param_modal"
-        extends="ui_dialog" width="70%" height="90%" style_max_width="400" align="center" flex_flow="column"
+        extends="ui_dialog" height="content" style_max_height="85%" align="center" flex_flow="column"
         style_flex_main_place="start" style_pad_gap="0" scrollable="false">
+    <bind_style_if name="card_single" cond="macro_param_modal_field_count le 1"/>
+    <bind_style_if name="card_multi" cond="macro_param_modal_field_count gt 1"/>
     <!-- Header with title and close button -->
     <lv_obj width="100%"
             height="content" style_pad_left="#space_lg" style_pad_right="#space_md" style_pad_top="#space_lg"
@@ -27,18 +53,28 @@
     </lv_obj>
     <!-- Divider below header -->
     <divider_horizontal/>
-    <!-- Scrollable param list — flex_grow fills remaining space between header and buttons -->
-    <lv_obj name="param_list"
-            width="100%" flex_grow="1" flex_flow="column" style_pad_all="#space_lg" style_pad_gap="#space_sm"
-            scrollable="true"/>
-    <!-- Save mode only: the "Ask for parameters" toggle under the fields -->
-    <lv_obj name="save_extras"
-            width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="0" scrollable="false">
-      <bind_flag_if_eq subject="macro_param_modal_save_mode" flag="hidden" ref_value="0"/>
-      <divider_horizontal/>
-      <setting_toggle_row name="ask_row"
-                          label="Ask for parameters" description="Off: runs with these values without asking"
-                          subject="macro_param_modal_ask" callback="macro_param_modal_ask_cb"/>
+    <!-- The fields (in as many columns as fit) and the save-mode toggle scroll
+         together above the buttons.
+         The card sizes to its content up to the 85% cap; past that this area
+         scrolls. Pinned budget: the header carries a subtitle line on top of
+         the standard chrome, and the two button rows (one always hidden) read
+         as a second row to the chrome-budget gate. -->
+    <lv_obj name="param_scroll"
+            width="100%" height="content" style_max_height="#dialog_content_pinned_max" flex_flow="column"
+            style_pad_all="0" style_pad_gap="0" style_bg_opa="0" style_border_width="0" scrollable="true"
+            scroll_dir="ver" scroll_snap_y="none">
+      <responsive_grid name="param_list"
+                       min_col_width="#macro_param_col_min" fit_items="true" style_pad_all="#space_lg"
+                       style_pad_column="#space_md" style_pad_row="#space_sm"/>
+      <!-- Save mode only: the "Ask for parameters" toggle under the fields -->
+      <lv_obj name="save_extras"
+              width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="0" scrollable="false">
+        <bind_flag_if_eq subject="macro_param_modal_save_mode" flag="hidden" ref_value="0"/>
+        <divider_horizontal/>
+        <setting_toggle_row name="ask_row"
+                            label="Ask for parameters" description="Off: runs with these values without asking"
+                            subject="macro_param_modal_ask" callback="macro_param_modal_ask_cb"/>
+      </lv_obj>
     </lv_obj>
     <!-- Button rows — always pinned at bottom; save mode swaps Run for Save -->
     <modal_button_row name="run_button_row"

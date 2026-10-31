@@ -39,6 +39,10 @@ class PrinterImageManager {
     /// Initialize with config directory (creates custom_images/ subdir)
     void init(const std::string& config_dir = "config");
 
+    /// Bring up the image-changed subject on its own. Idempotent; init() calls it too.
+    /// Panels observe the subject from their constructors, so it must exist before them.
+    void init_subjects();
+
     // --- Active image resolution ---
 
     /// Get the active image ID from config ("shipped:name", "custom:name", or "" for auto)
@@ -49,8 +53,13 @@ class PrinterImageManager {
     /// screen_width determines 300px vs 150px variant.
     std::string get_active_image_path(int screen_width);
 
-    /// The image the home printer widget shows: the active image, else the one
-    /// auto-detected from the configured printer type.
+    /// The auto-detected image: the configured printer type's database image,
+    /// or the first of its `image_variants` the detected hardware matches.
+    /// Main thread only (reads AmsState's backends).
+    std::string get_detected_image_path(int screen_width);
+
+    /// The image the home printer widget shows: the active image, else
+    /// get_detected_image_path().
     std::string get_displayed_image_path(int screen_width);
 
     /// Set active image ID and persist to config.
@@ -107,6 +116,17 @@ class PrinterImageManager {
     std::string get_custom_dir() const {
         return custom_dir_;
     }
+
+    /// A subject whose change can change which image auto-detection shows.
+    struct DetectionInput {
+        lv_subject_t* subject;
+        SubjectLifetime lifetime;
+    };
+    /// Every such subject: filament-system units reporting in (they register
+    /// after their backend), a removable enclosure top fitted or lifted, and a
+    /// chamber heater assigned by hand. Anything showing the displayed image
+    /// re-resolves it when one changes.
+    static std::vector<DetectionInput> detection_inputs();
 
     /// Bump the image-changed subject, so the home widget redraws the image and
     /// its callouts. set_active_image() calls it; so does anything that changes

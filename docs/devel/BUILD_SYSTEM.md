@@ -63,6 +63,8 @@ Docker images are **automatically built** on first use - no manual setup require
 | **FlashForge AD5X** | `make ad5x-docker` | MIPS32r5 (glibc) | fbdev | `build/ad5x/` |
 | **Creality K1 (dynamic)** | `make k1-dynamic-docker` | MIPS32r2 (glibc) | fbdev | `build/k1-dynamic/` |
 | **Creality K2** | `make k2-docker` | armv7-a (musl) | fbdev | `build/k2/` |
+| **x86_64 SBC / mini PC (kiosk)** | `make x86-all-docker` | x86_64 (glibc 2.31) | DRM/fbdev | `build/x86/`, `build/x86-fbdev/` |
+| **x86_64 Linux desktop (window)** | `make x86-desktop-docker` | x86_64 (glibc 2.31) | SDL2 | `build/x86-desktop/` |
 | **Native (SDL)** | `make` | Host architecture | SDL2 | `build/` |
 
 ### How It Works
@@ -125,6 +127,9 @@ Docker images are **automatically built** on first use - no manual setup require
 5. **Display Backend Selection**: Cross-compilation automatically selects the appropriate display backend:
    - **Pi / Pi32**: DRM (preferred) with fbdev fallback
    - **AD5M / CC1**: fbdev (framebuffer)
+   - **x86**: DRM with fbdev fallback (`x86-both` links both from one compile)
+   - **x86-desktop**: SDL2. A separate compile, never a relink of `x86-both`:
+     `HELIX_DISPLAY_SDL` selects `LV_USE_SDL` in `lv_conf.h`, so every LVGL object differs
 
 ### Build Targets
 
@@ -139,6 +144,8 @@ make cc1-docker          # Centauri Carbon 1 via Docker
 make k1-docker           # Creality K1 series via Docker (static/musl)
 make k1-dynamic-docker   # Creality K1 series via Docker (dynamic/glibc)
 make k2-docker           # Creality K2 series via Docker (tested on K2 Plus)
+make x86-all-docker      # x86_64 kiosk — both DRM + fbdev (single pass)
+make x86-desktop-docker  # x86_64 Linux desktop — SDL window, no service
 make docker-toolchains   # Pre-build all Docker images
 
 # Direct cross-compilation (requires toolchain installed on host)
@@ -230,6 +237,26 @@ make cross-info          # Show cross-compilation help
 - **OS**: OpenWrt 21.02-SNAPSHOT, Linux 5.4.61 armv7l, procd init (NOT systemd)
 - See `docs/devel/printers/CREALITY_K2_SUPPORT.md` for full hardware details.
 
+#### x86_64 Linux Desktop (`x86-desktop`)
+- **What it is**: the app in an SDL window beside the user's own desktop, connected to a
+  printer over the network. Released as `helixscreen-x86-desktop-<ver>.tar.gz`; the
+  installer's `--desktop` flavour installs it per user (`docs/devel/INSTALLER.md`).
+- **Toolchain**: the x86 Bullseye image (`helixscreen/toolchain-x86`), glibc 2.31, so the
+  binary runs on Debian 11 / Ubuntu 20.04 and newer.
+- **SDL2**: built statically from `lib/sdl2` (the image has no `libsdl2-dev`, so
+  `sdl2-config` is absent and the Makefile takes the submodule path). SDL dlopens X11,
+  Wayland, PulseAudio, ALSA and DBus at runtime, so none of them is a load-time
+  dependency; the image carries their headers so SDL compiles that support in.
+- **Runtime dependencies**: glibc, libstdc++, zlib and `libusb-1.0`. OpenSSL is static, as on
+  `x86`; libsystemd is not linked.
+- **3D G-code view**: GLES2 is resolved at runtime from the SDL context
+  (`include/gles2_loader.h`), so a machine without GLES falls back to the 2D renderer
+  instead of failing to start. Same for every SDL build, dev builds included.
+- **No splash or watchdog**: both exist to own a framebuffer, so `all` builds neither and
+  `strip` strips only what was built.
+- **Platform key**: `x86-desktop` (`HELIX_PLATFORM_X86_DESKTOP`). Its Install Update opens the
+  release page instead of running the tarball updater.
+
 ### Dockerfile Architecture
 
 ```
@@ -241,7 +268,6 @@ docker/
 ├── Dockerfile.k1          # K1 static toolchain (Bootlin mips32el-musl, GCC 12)
 ├── Dockerfile.k1-dynamic  # K1 dynamic toolchain (crosstool-NG, GCC 7.5, glibc 2.29)
 ├── Dockerfile.k2          # K2 toolchain (Bootlin armv7-eabihf-musl, GCC 12)
-├── Dockerfile.ad5x        # AD5X toolchain (MIPS, ZMOD)
 ├── Dockerfile.snapmaker-u1 # Snapmaker U1 toolchain
 └── Dockerfile.x86         # x86 native/container build
 ```
@@ -638,7 +664,7 @@ between ~400s and a few tens of seconds.
 
 But it only helps across worktrees if it is configured for it. The native build compiles with `-g` (debug info), and ccache's default `hash_dir=true` folds the absolute working directory into the cache key — so an object cached while building in the main tree never matches the same source compiled under `.worktrees/<name>/`. Every worktree would start stone cold.
 
-`setup-worktree.sh` fixes this once, by writing global ccache config (only when unset, so it never clobbers a value you chose):
+`setup-worktree.sh` fixes this once, by writing global ccache config through `scripts/ccache-shared-config.sh apply`, which keeps a `base_dir` that already covers `$HOME` and a larger `max_size`:
 
 | ccache setting | Set to | Why |
 |----------------|--------|-----|
@@ -660,6 +686,26 @@ ccache -s        # "Hits" should climb sharply on the 2nd+ worktree build
 ccache -p | grep -E 'base_dir|hash_dir|max_size'
 ```
 
+### The third-party header ABI stamp
+
+Our objects reach the patched LVGL, libhv and Lua headers through `-isystem`, which `-MMD` leaves
+out of the `.d` files, so a patch that moves a struct member would otherwise invalidate nothing.
+`mk/patches.mk` hashes those headers plus `patches/*.patch` with `cksum` into
+`build/.thirdparty-abi` (a prerequisite of every compile rule) and onto every compile line as
+`-DHELIX_TP_ABI=<hash>`, so ccache keys on it too. The patch step re-records the stamp after it
+rewrites the headers, and both links run `check_abi_unchanged`, which fails a link whose headers
+moved under it after the stamp was recorded.
+
+The hash reads libhv's **source** headers (`lib/libhv/evpp/TcpClient.h` and so on), never the
+`lib/libhv/include/hv/` copies the compiler actually resolves. Those copies are gitignored and
+only libhv's own build creates them, from those same sources, before any object that includes
+them compiles. Hashing them would give a cold tree (fresh clone, new worktree, test-host mirror)
+one hash on its first `make` and another on its second, and the second would recompile every
+object with no ccache hit. In a tree whose patches are already applied (every `setup-worktree.sh` tree, every test-host mirror), a cold tree's second `make` compiles nothing. A fresh clone that runs `make` before `make apply-patches` still compiles twice, because the first parse hashes the unpatched headers; so does the build after any patch edit.
+
+Editing any `patches/*.patch` still rebuilds every object: `build/.patches-applied` is a
+prerequisite of all of them, independent of this hash.
+
 ### Typical worktree workflow
 
 ```bash
@@ -673,7 +719,7 @@ cd .worktrees/my-feature
 make -j && ./build/bin/helix-screen --test -vv
 
 # 3. Run the relevant tests before committing
-make test-run
+make t F='[tag]'
 
 # 4. Commit in the worktree (it's a normal checkout on its own branch)
 git add -A && git commit -m "feat(scope): ..."
@@ -866,7 +912,7 @@ Individual clean targets are available for forcing rebuilds of specific librarie
 
 ```bash
 make libhv-clean    # Clean libhv WebSocket library artifacts
-make sdl2-clean     # Clean SDL2 CMake build directory
+make sdl2-clean     # Clean SDL2 CMake build directory ($(BUILD_DIR)/sdl2)
 make lvgl-clean     # Clean LVGL compiled objects
 make libs-clean     # Clean all library artifacts at once
 ```
@@ -878,6 +924,8 @@ make libs-clean     # Clean all library artifacts at once
 ### Test Binary Link
 
 `helix-tests` links through a response file: make's `$(file ...)` function writes the object list to `$(OBJ_DIR)/<binary>.objs` (for the plain build, `build/obj/helix-tests.objs`) and the compiler reads it as `@<that file>`. Inline, the list passes Linux's 128 KiB per-argument limit once object paths grow, as the ASAN build's do, and bash refuses the recipe with "Argument list too long".
+
+The link also compiles in `helix_build_tree_stamp`, the output of `scripts/tree_stamp.sh` taken when the test build's make starts, before anything compiles: the HEAD commit and a hash of every file the binary is built from whose content differs from it, tracked or untracked. "Built from" is the list `scripts/test_link_sources.py` derives from the link's objects and their `.d` files (`$(OBJ_DIR)/<binary>.stamp-paths`), so an app-only source such as `src/main.cpp` never marks the binary stale. At startup the binary runs `scripts/tree_stamp.sh --paths <that list> <that commit>` from its working directory and prints `WARNING: helix-tests is stale` when the answer differs, so running `./build/bin/helix-tests` after an edit without `make test` says so instead of quietly reporting the previous build's results. Measuring against the recorded commit keeps a commit of already-built edits from reading as stale. A source saved while the build ran leaves the binary stamped with the tree as the build started, and the link dates the binary back so the next `make test` relinks it. The stamp never forces a relink by itself, and `tree_stamp.sh` never writes the index (a refresh there would take `index.lock` in a shared tree). `HELIX_TESTS_NO_STALE_CHECK=1` skips the check, and `mk/tests.mk` exports it for every run make starts. `helix-screen` carries no stamp: its link rule is shared by every cross and packaging target, and `scripts/check_link_parity.py` requires the fbdev and EGL variant links to carry every object the main link has.
 
 ### Test Harness
 
@@ -964,10 +1012,29 @@ Formatting is automatically checked by the pre-commit hook (`.git/hooks/pre-comm
 3. **Prevents commit** if a formatted file could not be re-staged (partially staged hunks)
 4. **Full sweeps (pre-push, CI) fail** on any unformatted file outside `CLANG_FORMAT_BASELINE`, the list of files that predate the gate; an entry leaves the list once the file is auto-formatted on its next staging
 
+After the commit, `.githooks/post-commit` runs `.githooks/lib/sync-index-to-head.sh`.
+`git commit -- <paths>` commits from a temporary index, so a file the hook
+reformatted lands formatted in HEAD and on disk while the real index keeps the
+pre-format blob, and `git status` reads `MM`. For each committed path whose working
+tree equals HEAD but whose index entry does not, the step points the entry at HEAD's
+own blob. It never hashes the working tree, so nothing that is not already committed
+reaches the index.
+
 To bypass (not recommended):
 ```bash
 git commit --no-verify
 ```
+
+### Staged-input checks that would otherwise wait for a full run
+
+Each is path-gated, so a commit staging none of its inputs pays nothing:
+
+| Gate | Staged trigger | Cost | Catches |
+|------|----------------|------|---------|
+| `qc_esp32_compile` | a `.c`/`.cpp`/`.h`/`.hpp` under `src/`, `include/` or the firmware | ~6s for two units | host-green, ESP32-red code: `scripts/esp32_syntax_check.py --staged` compiles the staged firmware sources and one includer per staged header in the IDF image, from an index overlay (`git checkout-index` of `src/`, `include/` and the firmware, ~0.25s), so the commit's content decides and not the working tree. Never configures (pre-push does, once per CMake change); advisory skip without docker or the image |
+| `qc_toolhead_census` | `ui_xml/**/*.xml`, the census test | ~0.2s | all five XML cases of `tests/unit/test_job_holds_machine.cpp`: an unclassified control-bearing file, a stale row, a drifted or misspelled guard count, a guard in a no-machine file, a `<bind_state_*>` disabling on `print_active`, and XML naming `job_holds_machine` (`scripts/check_toolhead_census.py`) |
+| `qc_theme_artifacts` | top-level `ui_xml/*.xml`, the two artefacts | ~0.1s | `src/generated/theme_token_table.cpp` not matching the staged tokens (`make regen-tokens`), and a `tests/fixtures/theme_const_golden.txt` the token change provably invalidates (`scripts/check_theme_artifacts.py`; the fix needs the test binary, so it prints the regen command; when regenerating leaves the golden unchanged, `HELIX_GOLDEN_CURRENT=1 git commit ...` says it is current) |
+| `qc_xml_linter` | also `src/**/*.cpp`, theme defaults, `lib/helix-xml`, `mk/tools.mk` | ~0.7s when it lints; silent when nothing it reads is staged | `tools/xml-linter/schema/schema.json` stale against any extractor input |
 
 ### Pre-push Integration
 
@@ -1289,9 +1356,13 @@ Two kinds of remote machine help here, and both are optional:
   `tsan`, `mutate`) in a container: `scripts/test-host-run.sh`. It mirrors your
   working tree as it is on disk, uncommitted edits included, into a per-tree
   directory whose `build/` persists, so a warm run rebuilds only what changed.
+  A tree's first run copies the nearest warm mirror first, so it starts warm
+  too (below).
   With one configured, `make full-test-run` runs the C++ sweep there while bats
   runs locally whenever the link makes that pay (`TEST_HOST=1` forces it,
-  `TEST_HOST=0` or `HELIX_TEST_HOST_AUTO=0` keeps both local).
+  `TEST_HOST=0` or `HELIX_TEST_HOST_AUTO=0` keeps both local). `make land-gate`
+  makes the same choice for its two C++ sweeps (`scripts/lib/sweep_location.sh`
+  holds it for both gates).
 - a **remote build host** builds natively or for the cross targets:
   `make remote-native`, `make remote-test`, `make remote-pi` and siblings
   (`mk/remote.mk`, `scripts/remote-build.sh`).
@@ -1317,6 +1388,35 @@ ordinary `make` never reads the file at all. Its rules:
 - A variable set in the environment (or on the make command line) wins over
   the file. `HELIX_BUILD_HOSTS_FILE` names a different file.
 
+A host key (`REMOTE_HOST`, `HELIX_TEST_HOST`; `BUILD_HOSTS_HOST_KEYS` in the
+parser) may name several **candidates**, comma-separated, best first. Name
+every host the same way, its mDNS name, then its router DNS name, then its IP:
+
+```
+REMOTE_HOST=thelio.local,thelio.lan,192.168.1.42
+HELIX_TEST_HOST=zeus.local,zeus.lan,192.168.1.58
+```
+
+mDNS does not cross subnets, so a `.local` name can fail, or hang in the name
+lookup for good, from another network, and ssh's `ConnectTimeout` does not
+cover the lookup. Before the first ssh, `resolve_build_host` (run by
+`require_build_host`, by `--make` for a host key, and by the gates' automatic
+test-host choice) tries each candidate with `ssh -o BatchMode=yes true`, kills
+one that has not answered in 5 seconds (`HELIX_HOST_PROBE_SECS`), and takes
+the first that answers. One line on stderr names the pick and why each earlier
+candidate lost (`no such name`, `timeout`, `refused`, `auth refused`):
+
+```
+→ REMOTE_HOST=thelio.lan (not answering: thelio.local: no such name)
+```
+
+None answering is a one-line failure listing every candidate tried. The pick
+is exported, so the commands a script runs inherit it without probing again,
+and it is never saved: the next command probes afresh, because the candidate
+that answers depends on the network you are on. A single host is used as
+written and never probed. `REMOTE_USER` applies to every `REMOTE_HOST`
+candidate.
+
 Nothing has a host default: a command that needs a host you have not
 configured stops with one line naming the variable and this file, and nothing
 ever connects to a host you did not name. `make full-test-run` with no test
@@ -1324,15 +1424,18 @@ host simply runs both suites locally, without a word.
 
 | Variable | Used by | Meaning (default) |
 |----------|---------|-------------------|
-| `HELIX_TEST_HOST` | `test-host-run.sh`, `full-test-run`, `helix-claim resources`, teardown | ssh name of the test host (none) |
+| `HELIX_TEST_HOST` | `test-host-run.sh`, `full-test-run`, `land-gate`, `helix-claim resources`, teardown | ssh name of the test host, or a candidate list (none) |
 | `HELIX_TEST_CONTAINER` | same | container name (`helix-test`) |
 | `HELIX_TEST_TREES_HOST` | same | mirror root on the host, relative to the ssh user's home unless absolute (`helix-test/trees`) |
 | `HELIX_TEST_TREES` | same | the same directory inside the container (`/work/trees`) |
 | `HELIX_TEST_CCACHE` | same | ccache dir inside the container (`/work/ccache`) |
-| `HELIX_TEST_WORKDIR` | `test-host-run.sh --commit`, `mutate` | git checkout inside the container (`/work/helixscreen`) |
+| `HELIX_TEST_CCACHE_SIZE` | `test-host-run.sh`, `test-host-setup.sh` | `max_size` floor for that cache, never lowered (`200G`) |
+| `HELIX_TEST_WORKDIR` | `test-host-run.sh --commit` | the shared git checkout inside the container (`/work/helixscreen`); mutate checkouts copy it |
+| `HELIX_TEST_SEED` | `test-host-run.sh` | `0` starts a new mirror cold instead of copying the nearest warm one (`1`) |
+| `HELIX_TEST_PRUNE_DAYS` | `test-host-run.sh` | creating a mirror or mutate checkout removes those unused this many days; `0` never (`14`) |
 | `HELIX_TEST_LOCK_DIR` | `test-host-run.sh` | lock directory on the host (`/tmp`) |
-| `HELIX_TEST_HOST_AUTO` | `full-test-run` | `0` keeps an unforced gate local even with a test host configured (`1`) |
-| `REMOTE_HOST`, `REMOTE_USER` | `mk/remote.mk`, `remote-build.sh` | remote build host and optional user (none) |
+| `HELIX_TEST_HOST_AUTO` | `full-test-run`, `land-gate` | `0` keeps an unforced gate local even with a test host configured (`1`) |
+| `REMOTE_HOST`, `REMOTE_USER` | `mk/remote.mk`, `remote-build.sh` | remote build host (or a candidate list) and optional user (none) |
 | `REMOTE_DIR` | `mk/remote.mk` | rsync target on the remote for the cross targets (none). `remote-sync` rsyncs `--delete` into it, so give it a directory of its own, never a checkout you work in |
 | `REMOTE_BUILD_DIR` | `remote-build.sh` | its own clone on the remote (`~/helix-remote`), which it hard-resets and cleans every run. It works only in a directory it created (marked `.helix-remote-build`) and refuses any other |
 
@@ -1361,9 +1464,61 @@ The setup builds the image from `docker/Dockerfile.sanitizer` in your tree,
 streamed over ssh, and starts the container with the parent of
 `HELIX_TEST_TREES_HOST` mounted at the parent of `HELIX_TEST_TREES`. Re-run it
 after the Dockerfile changes; `--recreate` swaps the container for one from the
-new image. `scripts/test-host-run.sh --prune [DAYS]` removes mirrors nobody has
-synced for DAYS (14), and `teardown-worktree.sh` drops a tree's mirror with the
-tree.
+new image.
+
+**One cache for every tree.** The setup and every `test-host-run.sh` run apply
+`scripts/ccache-shared-config.sh` to `HELIX_TEST_CCACHE` (`base_dir` = the
+mounted work directory, `hash_dir=false`, `max_size` at least
+`HELIX_TEST_CCACHE_SIZE`), so mirrors, mutate checkouts and the `--commit`
+checkout reuse each other's compiles; a run whose build directory the effective
+`base_dir` does not cover prints a `⚠ ccache base_dir` warning.
+
+**Mirrors start warm.** A tree whose mirror has no `build/` yet (a new worktree)
+is seeded before its first sync: the run copies the mirror whose recorded HEAD
+is fewest commits away from yours (each run writes the HEAD it synced to
+`.helix-mirror-head` in its mirror; a mirror qualifies once it has linked
+`helix-tests`, records a HEAD, is not locked by a run, and has no orphaned
+make in it), then syncs over it, and make rebuilds only what differs. A mirror
+that predates the HEAD record rebuilds once on its next run (ccache serves most
+of it), since its file times came from the local tree. A run that is killed
+mid-copy leaves the copying shell running on the host; it holds a seed lock
+that the tree's next run waits on. On zeus a fresh worktree's first `sweep` took 15 minutes cold and
+2 minutes 20 seeded (a 28 s copy). The copy is `cp -a --reflink=auto`: on a ZFS (2.2 or later, with
+`feature@block_cloning`) or btrfs host the copy shares blocks and takes
+seconds, elsewhere it is a plain copy. A per-mirror ZFS dataset and `zfs clone`
+would cost the same, but would tie each clone to its origin's snapshot, so the
+seed could not be pruned while any clone lived. The build's own dependency
+files and compile-command fragments name the mirror's absolute path; the copy
+rewrites them to the new mirror's path. `HELIX_TEST_SEED=0` starts a mirror
+cold.
+
+The sync compares files by content (`rsync -c`) and writes a changed file with
+the test host's clock rather than its local time. That is what makes a copied
+`build/` trustworthy: an unchanged file keeps the time make last saw, and a
+changed one is always newer than its object, even when its local time is older
+(a seeded mirror, a checkout that restored an old time, two machines' clocks).
+It costs a few seconds of checksumming a run.
+
+**mutate gets a checkout per tree.** mutate needs git history, so it runs the
+pushed HEAD as `--commit` does, but in `<parent of HELIX_TEST_TREES>/mutate/<tree>`
+under that tree's own lock instead of the one shared `HELIX_TEST_WORKDIR`: two
+trees mutate at once, one tree's second mutate waits for its first. The
+checkout's first run copies the most recently used checkout (another tree's,
+or the shared one), `build/` included, and refreshes git's index before the
+reset, so only files that differ are rewritten and rebuilt. With every
+checkout busy it waits for the newest. `--commit` with any other job still
+runs in the shared checkout. The run passes `--workers auto`, so it mutates
+several hunks at once (one per 12 cores, at most 6), each in a reflink copy of
+the checkout beside it (`mutate/.<tree>.mutate-w<i>`) that the run removes when
+it ends; a run killed with SIGKILL leaves them for its tree's next run to
+replace. Its builds and test shards draw from the host's jobpool.
+
+**Cleanup.** `scripts/test-host-run.sh --prune [DAYS]` removes mirrors and
+mutate checkouts nobody has run for DAYS (14); a run that creates either one
+does the same pass with `HELIX_TEST_PRUNE_DAYS` (14, `0` never), so the copies
+do not accumulate. One whose lock is held is in use and stays. `--drop TREE`
+removes one tree's mirror and mutate checkout, and `teardown-worktree.sh` runs
+it with the tree.
 
 ## Font Generation
 
@@ -1634,7 +1789,10 @@ The build system has 30+ test targets by feature area; see **[TESTING.md](TESTIN
 | Target | What it does |
 |--------|--------------|
 | `make test` | Build tests (does **not** run them) |
-| `make test-run` | Build **and** run tests in parallel (recommended, ~4–8× faster) |
+| `make t F='[tag]'` | Build, then run one tag or case |
+| `make unit-sweep` | Build **and** run the C++ suite in parallel shards |
+| `make full-test-run` | `unit-sweep` plus the bats shell suite |
+| `make test-run` | Runs nothing: prints which of the targets above fits and exits non-zero |
 | `make test-serial` | Run sequentially (debugging thread issues) |
 | `make test-smoke` | Quick smoke subset (~30s) for rapid iteration |
 | `make test-all` | All tests incl. `[slow]` |
@@ -1692,7 +1850,7 @@ Usually invoked after editing icons/images. See **[Font Generation](#font-genera
 
 These get their own deep section above — see **[Cross-Compilation](#cross-compilation-embedded-targets)**. Shape of it:
 
-- **Build:** `make <target>-docker` (recommended, no local toolchain) or `make <target>` (needs host toolchain). Targets: `pi`, `pi32`, `ad5m`, `ad5x`, `cc1`, `k1`, `k1-dynamic`, `k2`, `snapmaker-u1`, `x86`.
+- **Build:** `make <target>-docker` (recommended, no local toolchain) or `make <target>` (needs host toolchain). Targets: `pi`, `pi32`, `ad5m`, `ad5x`, `cc1`, `k1`, `k1-dynamic`, `k2`, `snapmaker-u1`, `x86`, `x86-desktop`.
 - **Deploy + run on device:** `make <target>-test` (build + deploy + run fg), `make deploy-<target>` (background), `deploy-<target>-fg` (foreground), `deploy-<target>-bin` (binaries only, fast iteration), `<target>-ssh`.
 - **Host override:** `make deploy-pi PI_HOST=192.168.1.50`. Defaults live in `mk/cross.mk` — note `PI_HOST` actually defaults to `192.168.1.113` (the `make help-cross` text saying `helixpi.local` is stale, and `helixpi.local` does not resolve). `K2_HOST` has **no** default and must be supplied.
 - **Remote build:** two transports, and the choice matters on a slow link.
@@ -2035,7 +2193,7 @@ target in `mk/cross.mk`:
 | `PLATFORM_TARGET` | Tiers |
 |-------------------|-------|
 | `pi`, `pi-fbdev`, `pi-both`, `pi32`, `pi32-fbdev`, `pi32-both` | `all` |
-| `x86`, `x86-fbdev`, `x86-both`, `native` | `all` |
+| `x86`, `x86-fbdev`, `x86-both`, `x86-desktop`, `native` | `all` |
 | `ad5m`, `ad5m-br`, `ad5x` | `medium large` |
 | `mips` / `k1`, `k1-dynamic` | `small medium` |
 | `k2` | `large xlarge` |
@@ -2058,29 +2216,31 @@ for the high-DPI UI scale factor to step into on phone-class panels. No printer 
 declares the `xxlarge` tier, so none of them links these (~11MB of `.rodata`). Android
 does not build through this Makefile at all: `android/app/jni/CMakeLists.txt` globs
 `assets/fonts/*.c` wholesale, so every face including these six is linked, and its
-`target_compile_definitions` declares `HELIX_MAX_FONT_TIER=6` and
-`HELIX_HAS_HIDPI_FONTS=1` to match, since both macros default to a conservative fallback
-when a build path leaves them undefined (`HELIX_HAS_HIDPI_FONTS` to 0), which would
-otherwise drop these six faces' mappings and asset registrations for a build that
-did link them.
+`target_compile_definitions` declares `HELIX_MAX_FONT_TIER=6` to match, and
+`HELIX_HAS_HIDPI_FONTS` keeps its default of 1 from `include/helix_features.h`.
 
 ### Feature gates
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ENABLE_SDL` | yes (native) | SDL2 desktop display |
+| `ENABLE_SDL` | yes (native, `x86-desktop`) | SDL2 desktop display |
 | `ENABLE_OPENGLES` | no (all targets) | Requests LVGL's DRM EGL path; the #error in display_backend_drm.cpp fails the build if set without LV_USE_OPENGLES |
-| `ENABLE_GLES_3D` | yes (Linux) | 3D gcode rendering |
+| `ENABLE_GLES_3D` | yes (Linux) | 3D gcode rendering. DRM builds link `-lGLESv2`; SDL builds resolve GLES2 at runtime and link nothing |
 | `ENABLE_SCREENSAVER` | yes (desktop/Pi) | Flying toasters |
 | `ENABLE_MOCKS` | yes (no on `cc1`/`ad5m`/`ad5m-br`) | Mock backends for development |
 | `ENABLE_SSL` | per target | OpenSSL for HTTPS/WSS |
-| `HELIX_HAS_LABEL_PRINTER` | 1 | Label printer feature |
-| `HELIX_HAS_CFS` | 1 | CFS feature |
-| `HELIX_HAS_IFS` | 1 | IFS feature |
-| `HELIX_HAS_ACE` | 1 | ACE vendor backend (0 on non-Anker cross targets) |
-| `HELIX_HAS_QIDI` | 1 | QIDI Box vendor backend (0 on non-QIDI cross targets) |
-| `HELIX_HAS_SNAPMAKER` | 1 | SnapSwap vendor backend (0 except `snapmaker-u1`) |
 | `HELIX_BACKLIGHT_FLOOR_PERCENT` | 0 | Lowest visible raw backlight level, percent of the raw range. 20 on `k2`, applied only by the sysfs and Sonic Pad CLI backends (the sysfs panel on community K2 firmware renders lower levels as off, #1709); the Allwinner `/dev/disp` backend ignores it. `/display/backlight_floor_percent` in settings.json overrides it on every backend |
+
+The `HELIX_HAS_*` compile-out gates (label printing, the vendor filament systems, the G-code
+viewer, the 3D bed mesh, plugins, timelapse viewing, Belt Tension, the Toolhead widget, the
+image tagger, the hi-DPI font rungs, CJK) take their defaults from `include/helix_features.h`,
+one `#ifndef` block each. `lvgl_pch.h` brings that header into every C++ source in all three
+builds, so a gate a build does not pass keeps its default instead of reading as 0 in `#if`.
+The Makefile reads the defaults from it into make variables, `mk/cross.mk` turns gates off per
+platform, and the Android and firmware CMakeLists list only what they change.
+`scripts/check_feature_gates.py` (`qc_feature_gates`) keeps the header the one place a default
+lives. Presence flags the build sets by probing the host (`HELIX_HAS_SOUND`, `HELIX_HAS_ALSA`,
+`HELIX_HAS_SYSTEMD`, ...) are tested with `#ifdef` and are never passed as `=0`.
 
 ### Linker flags by platform
 

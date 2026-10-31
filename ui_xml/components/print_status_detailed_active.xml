@@ -22,9 +22,12 @@
       <lv_image name="detailed_thumb"
                 height="100%" flex_grow="2" src="A:assets/images/benchy_thumbnail_white.png"
                 bind_src="print_thumbnail_path" inner_align="contain" clickable="false" event_bubble="true"/>
+      <!-- Pre-print: the phase block takes the place of the arc and data columns. -->
+      <print_start_preparing_info name="detailed_preparing_info" width="content" height="100%" flex_grow="5"/>
       <lv_obj name="detailed_center_col"
               height="100%" flex_grow="2" style_pad_all="0" flex_flow="column" style_flex_cross_place="center"
               style_pad_gap="0" scrollable="false" clickable="false" event_bubble="true">
+        <bind_flag_if_not_eq subject="print_start_phase" flag="hidden" ref_value="0"/>
         <!-- Arc holder: flex_grow=1 fills column; arc + % are siblings at
              align="center" (fan_arc_core.xml pattern). C++ resize_arc_to_square
              reads this holder's dimensions and sizes the arc square. -->
@@ -52,13 +55,58 @@
               height="100%" flex_grow="3" style_pad_all="0" flex_flow="column" style_flex_main_place="center"
               style_flex_cross_place="start" style_pad_row="#space_xs" scrollable="false" clickable="false"
               event_bubble="true">
-        <text_small bind_text="print_status_layer_text" clickable="false" event_bubble="true"/>
-        <text_small bind_text="print_status_time_text" clickable="false" event_bubble="true"/>
-        <text_small name="detailed_filament_text"
-                    width="100%" bind_text="print_status_filament_text" long_mode="scroll_circular" clickable="false"
-                    event_bubble="true">
+        <bind_flag_if_not_eq subject="print_start_phase" flag="hidden" ref_value="0"/>
+        <!-- Icon + value rows, the print status panel's vocabulary. Where a row
+             has no room, its less useful piece goes: the Z height after the
+             layer count, the elapsed time before the remaining. -->
+        <lv_obj name="detailed_layer_row"
+                width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                style_pad_gap="#space_xs" scrollable="false" clickable="false" event_bubble="true">
+          <icon src="layers" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
+          <text_small name="detailed_layer_count"
+                      bind_text="print_status_layer_text" clickable="false" event_bubble="true"/>
+          <text_small name="detailed_layer_z"
+                      bind_text="print_status_layer_z_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="print_status_layer_z_fits" flag="hidden" ref_value="0"/>
+          </text_small>
+        </lv_obj>
+        <lv_obj name="detailed_time_row"
+                width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                style_pad_gap="#space_xs" scrollable="false" clickable="false" event_bubble="true">
+          <lv_obj name="detailed_elapsed_group"
+                  width="content" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                  style_pad_gap="#space_xs" scrollable="false" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="print_status_elapsed_fits" flag="hidden" ref_value="0"/>
+            <icon src="hourglass" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
+            <text_small bind_text="print_status_elapsed_text" clickable="false" event_bubble="true"/>
+            <text_small text="·" clickable="false" event_bubble="true"/>
+          </lv_obj>
+          <icon src="clock" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
+          <text_small bind_text="print_status_remaining_text" clickable="false" event_bubble="true"/>
+        </lv_obj>
+        <!-- Live head speed. A short column drops this row first, since the
+             card's other lines say how far along the print is. -->
+        <lv_obj name="detailed_speed_row"
+                width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                style_pad_gap="#space_xs" scrollable="false" clickable="false" event_bubble="true">
+          <bind_flag_if_eq subject="print_status_speed_fits" flag="hidden" ref_value="0"/>
+          <icon src="speed" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
+          <text_small name="detailed_speed_text"
+                      bind_text="print_status_speed_text" clickable="false" event_bubble="true"/>
+        </lv_obj>
+        <lv_obj name="detailed_filament_row"
+                width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
+                style_pad_gap="#space_xs" scrollable="false" clickable="false" event_bubble="true">
           <bind_flag_if_eq subject="print_status_show_filament_active" flag="hidden" ref_value="0"/>
-        </text_small>
+          <icon src="filament" size="xs" variant="secondary" clickable="false" event_bubble="true"/>
+          <text_small name="detailed_filament_text"
+                      bind_text="print_status_filament_text" flex_grow="1" long_mode="scroll_circular" clickable="false"
+                      event_bubble="true"/>
+          <!-- Live volumetric flow; a narrow row drops it after the length used. -->
+          <text_small name="detailed_flow_text" bind_text="print_status_flow_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="print_status_flow_fits" flag="hidden" ref_value="0"/>
+          </text_small>
+        </lv_obj>
       </lv_obj>
     </lv_obj>
     <!-- Temps: always a full-width row at the bottom of the card. Uses the
@@ -70,7 +118,7 @@
             style_flex_main_place="space_evenly" style_flex_cross_place="center" scrollable="false" clickable="false"
             event_bubble="true">
       <!-- Nozzle group: split into two click targets.
-           Left = picker (T0 + nozzle_icon + chevron) → tool picker.
+           Left = picker (numbered nozzle_icon + chevron) → tool picker.
            Right = temp_display → temp graph overlay (Mode::Nozzle).
            The named picker obj is matched by print_card_clicked_cb so the
            print-card click handler skips when the click originated there. -->
@@ -83,12 +131,12 @@
                 style_radius="#border_radius">
           <style name="styles.press_wash" selector="pressed"/>
           <event_cb trigger="clicked" callback="print_status_nozzle_chevron_cb"/>
-          <text_tiny bind_text="print_status_nozzle_tool_label" clickable="false" event_bubble="true">
-            <bind_flag_if_eq subject="print_status_multi_tool" flag="hidden" ref_value="0"/>
-          </text_tiny>
-          <nozzle_icon size="sm" badge_subject="" clickable="false" event_bubble="true"/>
+          <nozzle_icon size="sm"
+                       badge_subject="print_status_multi_tool" badge_text_subject="print_status_nozzle_badge_text"
+                       clickable="false" event_bubble="true"/>
+          <!-- Where the row has no room for it, the chevron and its picker go. -->
           <icon src="chevron_down" size="sm" clickable="false" event_bubble="true">
-            <bind_flag_if_eq subject="print_status_multi_tool" flag="hidden" ref_value="0"/>
+            <bind_flag_if cond="print_status_nozzle_pickable eq 0 or print_status_nozzle_picker_fits eq 0" flag="hidden"/>
           </icon>
         </lv_obj>
         <!-- Bound to formatter-driven proxy subjects so pinning to a specific tool

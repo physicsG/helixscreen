@@ -7,7 +7,7 @@
 #include "ui_icon_codepoints.h"
 #include "ui_observer_guard.h"
 #include "ui_spool_canvas.h"
-#include "ui_update_queue.h"
+#include "ui_swatch.h"
 #include "ui_utils.h"
 
 #include "ams_lane_state.h"
@@ -23,6 +23,7 @@
 #include "static_subject_registry.h"
 #include "theme_manager.h"
 #include "ui/ams_drawing_utils.h"
+#include "widget_data_registry.h"
 
 #include <spdlog/spdlog.h>
 
@@ -30,17 +31,16 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
-#include <unordered_map>
 
 using namespace helix;
 
 // ============================================================================
 // Spool visual construction (file-local)
 //
-// The layered spool graphic the widget renders: pseudo-3D canvas or flat
-// concentric rings per /ams/spool_style, plus the dashed empty-lane
+// The layered spool graphic the widget renders: a spool canvas seen from the
+// side or face-on per /ams/spool_style, plus the dashed empty-lane
 // placeholder and the error dot. Lives here rather than ams_draw because the
-// ams_lane_spool widget is its only consumer; GHOST_OPA and the error/lane
+// ams_lane_spool widget is its only consumer; kGhostOpa and the error/lane
 // badges it composes with stay shared in ams_drawing_utils.
 // ============================================================================
 
@@ -50,10 +50,7 @@ struct SpoolVisual {
     bool use_3d = true;
     int32_t spool_size = 0;
     lv_obj_t* glow = nullptr;              ///< current-lane glow layer, behind the spool (hidden)
-    lv_obj_t* canvas = nullptr;            ///< 3D-only: pseudo-3D spool canvas
-    lv_obj_t* spool_outer = nullptr;       ///< flat-only: outer flange ring
-    lv_obj_t* color_swatch = nullptr;      ///< flat-only: filament color ring
-    lv_obj_t* spool_hub = nullptr;         ///< flat-only: center hub
+    lv_obj_t* canvas = nullptr;            ///< spool canvas: side view (3D) or face-on (flat)
     lv_obj_t* empty_placeholder = nullptr; ///< dashed-circle "empty" placeholder (hidden)
     lv_obj_t* error_indicator = nullptr;   ///< error dot, top-right (hidden)
 };
@@ -81,17 +78,17 @@ static void draw_dashed_circle_cb(lv_event_t* e) {
     arc_dsc.opa = LV_OPA_20;
 
     // Draw 16 dashes of 15 degrees each with 7.5 degree gaps
-    constexpr int DASH_COUNT = 16;
-    constexpr int DASH_ANGLE = 15;
-    constexpr int GAP_ANGLE = 7; // 16 * (15 + 7) = 352 - 360
-    for (int d = 0; d < DASH_COUNT; d++) {
-        arc_dsc.start_angle = static_cast<uint16_t>(d * (DASH_ANGLE + GAP_ANGLE));
-        arc_dsc.end_angle = static_cast<uint16_t>(arc_dsc.start_angle + DASH_ANGLE);
+    constexpr int kDashCount = 16;
+    constexpr int kDashAngle = 15;
+    constexpr int kGapAngle = 7; // 16 * (15 + 7) = 352 - 360
+    for (int d = 0; d < kDashCount; d++) {
+        arc_dsc.start_angle = static_cast<uint16_t>(d * (kDashAngle + kGapAngle));
+        arc_dsc.end_angle = static_cast<uint16_t>(arc_dsc.start_angle + kDashAngle);
         lv_draw_arc(layer, &arc_dsc);
     }
 }
 
-static bool resolve_3d_spool_style() {
+bool helix::ui::ams_spool_style_3d() {
     helix::Config* cfg = helix::Config::get_instance();
     return cfg->get<std::string>("/ams/spool_style", "3d") == "3d";
 }
@@ -99,7 +96,7 @@ static bool resolve_3d_spool_style() {
 /**
  * @brief Build a spool visual into @p container, honoring /ams/spool_style.
  * @param container Parent to populate (its size is set to
- *        spool_size + AMS_LANE_SPOOL_BADGE_MARGIN_PX, square).
+ *        spool_size + kAmsLaneSpoolBadgeMarginPx, square).
  * @param spool_size Spool graphic size in px; <= 0 uses the "ams_slot_spool_size" token.
  */
 static SpoolVisual create_spool_visual(lv_obj_t* container, int32_t spool_size) {
@@ -107,7 +104,7 @@ static SpoolVisual create_spool_visual(lv_obj_t* container, int32_t spool_size) 
     if (!container)
         return sv;
     sv.container = container;
-    sv.use_3d = resolve_3d_spool_style();
+    sv.use_3d = helix::ui::ams_spool_style_3d();
 
     // Spool size is a dedicated responsive token (see ams_panel.xml consts).
     if (spool_size <= 0) {
@@ -117,7 +114,7 @@ static SpoolVisual create_spool_visual(lv_obj_t* container, int32_t spool_size) 
     }
     sv.spool_size = spool_size;
 
-    int32_t container_size = spool_size + helix::ui::AMS_LANE_SPOOL_BADGE_MARGIN_PX; // badge slack
+    int32_t container_size = spool_size + helix::ui::kAmsLaneSpoolBadgeMarginPx; // badge slack
     lv_obj_set_size(container, container_size, container_size);
 
     // Created first so it draws behind every spool layer.
@@ -129,81 +126,21 @@ static SpoolVisual create_spool_visual(lv_obj_t* container, int32_t spool_size) 
         lv_obj_set_name(sv.glow, "spool_glow");
     }
 
-    if (sv.use_3d) {
-        // ====================================================================
-        // 3D SPOOL CANVAS (Bambu-style pseudo-3D with gradients + AA)
-        // ====================================================================
-        lv_obj_t* canvas = ui_spool_canvas_create(container, spool_size);
-        if (canvas) {
-            lv_obj_align(canvas, LV_ALIGN_CENTER, 0, 0);
-            // Prevent flex layout from resizing the canvas
-            lv_obj_set_style_min_width(canvas, spool_size, LV_PART_MAIN);
-            lv_obj_set_style_min_height(canvas, spool_size, LV_PART_MAIN);
-            lv_obj_set_style_max_width(canvas, spool_size, LV_PART_MAIN);
-            lv_obj_set_style_max_height(canvas, spool_size, LV_PART_MAIN);
-            ui_spool_canvas_set_color(canvas, lv_color_hex(helix::AMS_DEFAULT_SLOT_COLOR));
-            ui_spool_canvas_set_fill_level(canvas, 1.0f);
-            lv_obj_add_flag(canvas, LV_OBJ_FLAG_EVENT_BUBBLE);
-            sv.canvas = canvas;
-            lv_obj_set_name(canvas, "spool_graphic");
-        }
-    } else {
-        // ====================================================================
-        // FLAT STYLE (skeuomorphic concentric rings)
-        // ====================================================================
-        int32_t filament_ring_size = spool_size - 8;
-        int32_t hub_size = spool_size / 3;
-
-        lv_obj_set_style_radius(container, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_shadow_width(container, 8, LV_PART_MAIN);
-        lv_obj_set_style_shadow_opa(container, LV_OPA_20, LV_PART_MAIN);
-        lv_obj_set_style_shadow_offset_y(container, 2, LV_PART_MAIN);
-        lv_obj_set_style_shadow_color(container, lv_color_black(), LV_PART_MAIN);
-
-        // Layer 1: Outer ring (flange - darker shade of filament color)
-        lv_obj_t* outer_ring = lv_obj_create(container);
-        lv_obj_set_size(outer_ring, spool_size, spool_size);
-        lv_obj_align(outer_ring, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(outer_ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(
-            outer_ring, ams_draw::darken_color(lv_color_hex(helix::AMS_DEFAULT_SLOT_COLOR), 50),
-            LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(outer_ring, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(outer_ring, 2, LV_PART_MAIN);
-        lv_obj_set_style_border_color(outer_ring, theme_manager_get_color("ams_hub"), LV_PART_MAIN);
-        lv_obj_set_style_border_opa(outer_ring, LV_OPA_50, LV_PART_MAIN);
-        lv_obj_remove_flag(outer_ring, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(outer_ring, LV_OBJ_FLAG_EVENT_BUBBLE);
-        sv.spool_outer = outer_ring;
-        lv_obj_set_name(outer_ring, "spool_outer");
-
-        // Layer 2: Main filament color ring
-        lv_obj_t* filament_ring = lv_obj_create(container);
-        lv_obj_set_size(filament_ring, filament_ring_size, filament_ring_size);
-        lv_obj_align(filament_ring, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(filament_ring, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(filament_ring, lv_color_hex(helix::AMS_DEFAULT_SLOT_COLOR),
-                                  LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(filament_ring, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(filament_ring, 0, LV_PART_MAIN);
-        lv_obj_remove_flag(filament_ring, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(filament_ring, LV_OBJ_FLAG_EVENT_BUBBLE);
-        sv.color_swatch = filament_ring;
-        lv_obj_set_name(filament_ring, "spool_graphic");
-
-        // Layer 3: Center hub
-        lv_obj_t* hub = lv_obj_create(container);
-        lv_obj_set_size(hub, hub_size, hub_size);
-        lv_obj_align(hub, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_radius(hub, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(hub, theme_manager_get_color("ams_hub"), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(hub, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(hub, 1, LV_PART_MAIN);
-        lv_obj_set_style_border_color(hub, theme_manager_get_color("ams_hub_border"), LV_PART_MAIN);
-        lv_obj_remove_flag(hub, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(hub, LV_OBJ_FLAG_EVENT_BUBBLE);
-        sv.spool_hub = hub;
-        lv_obj_set_name(hub, "spool_hub");
+    lv_obj_t* canvas = ui_spool_canvas_create(container, spool_size);
+    if (canvas) {
+        lv_obj_align(canvas, LV_ALIGN_CENTER, 0, 0);
+        // Prevent flex layout from resizing the canvas
+        lv_obj_set_style_min_width(canvas, spool_size, LV_PART_MAIN);
+        lv_obj_set_style_min_height(canvas, spool_size, LV_PART_MAIN);
+        lv_obj_set_style_max_width(canvas, spool_size, LV_PART_MAIN);
+        lv_obj_set_style_max_height(canvas, spool_size, LV_PART_MAIN);
+        if (!sv.use_3d)
+            helix::ui::spool_canvas_set_view(canvas, helix::ui::SpoolView::Front);
+        ui_spool_canvas_set_color(canvas, lv_color_hex(helix::kAmsDefaultSlotColor));
+        ui_spool_canvas_set_fill_level(canvas, 1.0f);
+        lv_obj_add_flag(canvas, LV_OBJ_FLAG_EVENT_BUBBLE);
+        sv.canvas = canvas;
+        lv_obj_set_name(canvas, "spool_graphic");
     }
 
     // Create empty slot placeholder (circle outline with plus icon, initially hidden)
@@ -258,56 +195,19 @@ static SpoolVisual create_spool_visual(lv_obj_t* container, int32_t spool_size) 
     return sv;
 }
 
-/// Update spool color (3D canvas or flat color_swatch + darkened outer flange)
-static void spool_visual_set_color(const SpoolVisual& sv, lv_color_t color) {
-    if (sv.use_3d) {
-        if (sv.canvas)
-            ui_spool_canvas_set_color(sv.canvas, color);
-    } else if (sv.color_swatch) {
-        lv_obj_set_style_bg_color(sv.color_swatch, color, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(sv.color_swatch, LV_OPA_COVER, LV_PART_MAIN);
-        if (sv.spool_outer)
-            lv_obj_set_style_bg_color(sv.spool_outer, ams_draw::darken_color(color, 50),
-                                      LV_PART_MAIN);
-    }
+/// Update the spool's filament: its colour, multi-colour split and finish, as
+/// every swatch paints them.
+static void spool_visual_set_color(const SpoolVisual& sv, uint32_t rgb,
+                                   const std::string& multi_color_hexes,
+                                   helix::ui::SwatchFinish finish) {
+    if (sv.canvas)
+        helix::ui::spool_canvas_set_filament(sv.canvas, rgb, multi_color_hexes, finish);
 }
 
-/// Update spool fill level 0.0-1.0 (3D canvas fill or flat concentric ring size)
+/// Update spool fill level 0.0-1.0
 static void spool_visual_set_fill(const SpoolVisual& sv, float fill) {
-    if (fill < 0.0f)
-        fill = 0.0f;
-    if (fill > 1.0f)
-        fill = 1.0f;
-    if (sv.use_3d) {
-        if (sv.canvas)
-            ui_spool_canvas_set_fill_level(sv.canvas, fill);
-    } else if (sv.color_swatch && sv.container && sv.spool_hub) {
-        lv_obj_update_layout(sv.container);
-        int32_t spool_w = lv_obj_get_width(sv.container);
-        int32_t hub_w = lv_obj_get_width(sv.spool_hub);
-        int32_t min_ring = hub_w + 4;
-        int32_t max_ring = spool_w - 8;
-        int32_t ring_size = min_ring + static_cast<int32_t>((max_ring - min_ring) * fill);
-        lv_obj_set_size(sv.color_swatch, ring_size, ring_size);
-        lv_obj_align(sv.color_swatch, LV_ALIGN_CENTER, 0, 0);
-    }
-}
-
-/// Toggle the empty-slot placeholder vs. the spool graphic
-static void spool_visual_set_empty(const SpoolVisual& sv, bool empty) {
-    auto show = [&](lv_obj_t* o, bool visible) {
-        if (!o)
-            return;
-        if (visible)
-            lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
-    };
-    show(sv.empty_placeholder, empty);
-    show(sv.canvas, !empty);
-    show(sv.spool_outer, !empty);
-    show(sv.color_swatch, !empty);
-    show(sv.spool_hub, !empty);
+    if (sv.canvas)
+        ui_spool_canvas_set_fill_level(sv.canvas, LV_CLAMP(0.0f, fill, 1.0f));
 }
 
 // ============================================================================
@@ -344,66 +244,66 @@ struct LaneSpoolData {
     // RAII observer handles - automatically removed when this struct is destroyed.
     ObserverGuard lane_state_observer;
     ObserverGuard color_observer;
+    ObserverGuard paint_observer; ///< the slot's multi-colour list and finish
     ObserverGuard fill_observer;
     ObserverGuard has_error_observer;
     ObserverGuard severity_observer;
     ObserverGuard theme_observer; ///< a lit glow re-reads the accent
 };
 
-static std::unordered_map<lv_obj_t*, LaneSpoolData*> s_lane_spool_registry;
+static helix::WidgetDataRegistry<LaneSpoolData> s_lane_spool_registry;
 
 static LaneSpoolData* get_lane_spool_data(lv_obj_t* obj) {
-    auto it = s_lane_spool_registry.find(obj);
-    return (it != s_lane_spool_registry.end()) ? it->second : nullptr;
+    return s_lane_spool_registry.get(obj);
 }
 
 static void register_lane_spool_data(lv_obj_t* obj, LaneSpoolData* data) {
-    s_lane_spool_registry[obj] = data;
+    s_lane_spool_registry.set(obj, data);
 }
 
 /**
  * @brief Unregister and cleanup spool data (normal widget deletion path).
  */
 static void unregister_lane_spool_data(lv_obj_t* obj) {
-    auto it = s_lane_spool_registry.find(obj);
-    if (it != s_lane_spool_registry.end()) {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-        std::unique_ptr<LaneSpoolData> data(it->second);
+    if (LaneSpoolData* registered = s_lane_spool_registry.get(obj)) {
+        std::unique_ptr<LaneSpoolData> data(registered);
         if (data) {
             // Expire a secondary backend's token before its observers (#705
             // ordering, as in ui_ams_slot.cpp).
             data->lifetime.reset();
             data->lane_state_observer.reset();
             data->color_observer.reset();
+            data->paint_observer.reset();
             data->fill_observer.reset();
             data->has_error_observer.reset();
             data->severity_observer.reset();
             data->theme_observer.reset();
         }
-        s_lane_spool_registry.erase(it);
+        s_lane_spool_registry.take(obj);
     }
 }
 
 /**
- * @brief Pre-deinit cleanup: release all spool data while widgets are still alive.
+ * @brief Teardown cleanup: drop all spool data while widgets are still alive.
  *
- * Called via StaticSubjectRegistry BEFORE lv_deinit(), mirroring
- * cleanup_all_slot_data() in ui_ams_slot.cpp.
+ * Runs at every printer switch and before lv_deinit(); same rule as
+ * cleanup_all_slot_data() in ui_ams_slot.cpp. The theme subject outlives a
+ * switch, so an observer left on it would stay attached for the rest of the process.
  */
 static void cleanup_all_lane_spool_data() {
-    for (auto& [obj, data] : s_lane_spool_registry) {
+    s_lane_spool_registry.for_each([](lv_obj_t* /*obj*/, LaneSpoolData* data) {
         if (!data)
-            continue;
+            return;
         data->lifetime.reset();
-        data->lane_state_observer.release();
-        data->color_observer.release();
-        data->fill_observer.release();
-        data->has_error_observer.release();
-        data->severity_observer.release();
-        data->theme_observer.release();
+        data->lane_state_observer.reset();
+        data->color_observer.reset();
+        data->paint_observer.reset();
+        data->fill_observer.reset();
+        data->has_error_observer.reset();
+        data->severity_observer.reset();
+        data->theme_observer.reset();
         delete data;
-    }
+    });
     s_lane_spool_registry.clear();
     spdlog::debug("[AmsLaneSpool] Pre-deinit cleanup: all lane spool data released");
 }
@@ -443,14 +343,14 @@ static void apply_highlight(LaneSpoolData* d) {
     lv_obj_remove_flag(glow, LV_OBJ_FLAG_HIDDEN);
     helix::ui::refresh_overhang_chain(glow);
     if (pulse && !pulsing) {
-        constexpr int32_t PULSE_DIM_OPA = LV_OPA_40;
-        constexpr uint32_t PULSE_DURATION_MS = 600;
+        constexpr int32_t kPulseDimOpa = LV_OPA_40;
+        constexpr uint32_t kPulseDurationMs = 600;
         lv_anim_t anim;
         lv_anim_init(&anim);
         lv_anim_set_var(&anim, glow);
-        lv_anim_set_values(&anim, PULSE_DIM_OPA, LV_OPA_COVER);
-        lv_anim_set_duration(&anim, PULSE_DURATION_MS);
-        lv_anim_set_reverse_duration(&anim, PULSE_DURATION_MS);
+        lv_anim_set_values(&anim, kPulseDimOpa, LV_OPA_COVER);
+        lv_anim_set_duration(&anim, kPulseDurationMs);
+        lv_anim_set_reverse_duration(&anim, kPulseDurationMs);
         lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
         lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
         lv_anim_set_exec_cb(&anim, glow_opa_anim_cb);
@@ -464,7 +364,7 @@ static void apply_highlight(LaneSpoolData* d) {
  * One switch over LaneState, no opacity arithmetic at the call sites:
  * - Empty: the spool graphic is hidden and the dashed placeholder shows, so
  *   the lane stays countable without claiming anything is loaded.
- * - Ghosted: the graphic renders at GHOST_OPA - the dimming is the disclaimer
+ * - Ghosted: the graphic renders at kGhostOpa - the dimming is the disclaimer
  *   that says "assigned, not present" (#1071/#1065).
  * - Present: full strength.
  *
@@ -479,7 +379,7 @@ static void apply_lane_state(LaneSpoolData* d, helix::ui::LaneState state) {
 
     const bool show_spool = state != helix::ui::LaneState::Empty;
     const lv_opa_t spool_opa =
-        (state == helix::ui::LaneState::Ghosted) ? ams_draw::GHOST_OPA : LV_OPA_COVER;
+        (state == helix::ui::LaneState::Ghosted) ? ams_draw::kGhostOpa : LV_OPA_COVER;
 
     auto set_visible = [](lv_obj_t* o, bool visible) {
         if (!o)
@@ -496,12 +396,7 @@ static void apply_lane_state(LaneSpoolData* d, helix::ui::LaneState state) {
     };
 
     set_visible(d->sv.canvas, show_spool);
-    set_visible(d->sv.spool_outer, show_spool);
-    set_visible(d->sv.color_swatch, show_spool);
-    set_visible(d->sv.spool_hub, show_spool);
     set_opa(d->sv.canvas, spool_opa);
-    set_opa(d->sv.spool_outer, spool_opa);
-    set_opa(d->sv.color_swatch, spool_opa);
     set_visible(d->sv.empty_placeholder, !show_spool);
     apply_highlight(d);
 }
@@ -510,7 +405,16 @@ static void apply_color(LaneSpoolData* d, int color_int) {
     if (!d)
         return;
     d->color_int = static_cast<uint32_t>(color_int);
-    spool_visual_set_color(d->sv, lv_color_hex(d->color_int));
+    // The colour subject carries the primary colour; the split and finish ride
+    // on the slot it names.
+    std::string multi;
+    helix::ui::SwatchFinish finish = helix::ui::SwatchFinish::Plain;
+    if (AmsBackend* backend = AmsState::instance().get_backend(d->backend_index)) {
+        const SlotInfo slot = backend->get_slot_info(d->slot_index);
+        multi = slot.multi_color_hexes;
+        finish = helix::ui::swatch_finish_of(slot);
+    }
+    spool_visual_set_color(d->sv, d->color_int, multi, finish);
 }
 
 /**
@@ -572,8 +476,14 @@ static void ams_lane_spool_event_cb(lv_event_t* e) {
  * observe<int>.
  */
 static void setup_lane_spool_observers(LaneSpoolData* data) {
-    if (data->slot_index < 0 || data->slot_index >= AmsState::MAX_SLOTS) {
+    if (data->slot_index < 0) {
         spdlog::warn("[AmsLaneSpool] Invalid slot index {}, skipping observers", data->slot_index);
+        return;
+    }
+    if (data->slot_index >= AmsState::kMaxSlots) {
+        // AmsState warns once for the whole overflow; this slot stays unbound.
+        spdlog::debug("[AmsLaneSpool] Slot {} is past the subject ceiling, left unbound",
+                      data->slot_index);
         return;
     }
 
@@ -588,6 +498,7 @@ static void setup_lane_spool_observers(LaneSpoolData* data) {
     data->lifetime.reset();
     lv_subject_t* lane_state_subject = state.get_slot_lane_state_subject(b, slot, data->lifetime);
     lv_subject_t* color_subject = state.get_slot_color_subject(b, slot, data->lifetime);
+    lv_subject_t* paint_subject = state.get_slot_paint_subject(b, slot, data->lifetime);
     lv_subject_t* fill_subject = state.get_slot_fill_subject(b, slot, data->lifetime);
     lv_subject_t* has_error_subject = state.get_slot_has_error_subject(b, slot, data->lifetime);
     lv_subject_t* severity_subject = state.get_slot_error_severity_subject(b, slot, data->lifetime);
@@ -615,6 +526,17 @@ static void setup_lane_spool_observers(LaneSpoolData* data) {
                 auto* d = get_lane_spool_data(o);
                 if (d)
                     apply_color(d, color_int);
+            },
+            lifetime);
+    }
+    if (paint_subject) {
+        // The split and finish can change under an unchanged colour.
+        data->paint_observer = observe<int>(
+            paint_subject, obj,
+            [](lv_obj_t* o, int /*paint_key*/) {
+                auto* d = get_lane_spool_data(o);
+                if (d)
+                    apply_color(d, static_cast<int>(d->color_int));
             },
             lifetime);
     }
@@ -756,6 +678,7 @@ static void ams_lane_spool_xml_apply(lv_xml_parser_state_t* state, const char** 
             if (new_index != data->slot_index) {
                 data->lane_state_observer.reset();
                 data->color_observer.reset();
+                data->paint_observer.reset();
                 data->fill_observer.reset();
                 data->has_error_observer.reset();
                 data->severity_observer.reset();
@@ -784,6 +707,7 @@ void ams_lane_spool_set_index(lv_obj_t* spool, int slot_index, int backend_index
     data->lifetime.reset();
     data->lane_state_observer.reset();
     data->color_observer.reset();
+    data->paint_observer.reset();
     data->fill_observer.reset();
     data->has_error_observer.reset();
     data->severity_observer.reset();
@@ -797,7 +721,7 @@ void ams_lane_spool_set_size(lv_obj_t* spool, int32_t spool_size) {
     auto* data = get_lane_spool_data(spool);
     if (!data || spool_size <= 0)
         return;
-    const bool style_3d = resolve_3d_spool_style();
+    const bool style_3d = helix::ui::ams_spool_style_3d();
     if (spool_size == data->sv.spool_size && style_3d == data->sv.use_3d)
         return; // already rendered at this size and style
 
@@ -851,8 +775,9 @@ void ui_ams_lane_spool_register(void) {
     // Self-register cleanup - ensures spool data is released before lv_deinit()
     // so that lv_subject_deinit() can safely remove observers from live
     // widgets (mirrors ui_ams_slot_register()).
-    StaticSubjectRegistry::instance().register_deinit("AmsLaneSpoolWidgets",
-                                                      cleanup_all_lane_spool_data);
+    StaticSubjectRegistry::instance().register_deinit(
+        "AmsLaneSpoolWidgets", cleanup_all_lane_spool_data,
+        StaticSubjectRegistry::Lifetime::ProcessRunOnSwitch);
 
     spdlog::info("[AmsLaneSpool] Registered ams_lane_spool widget with XML system");
 }

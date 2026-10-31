@@ -6,6 +6,7 @@
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
+#include "job_queue_tile_state.h"
 #include "moonraker_queue_api.h"
 #include "subject_managed_panel.h" // SubjectManager
 
@@ -14,8 +15,10 @@
 #include <string>
 #include <vector>
 
-class IMoonrakerAPI;
+struct FileMetadata; // NAMESPACE_OK: declared at global scope in moonraker_types.h
+
 namespace helix {
+class IMoonrakerAPI;
 class IMoonrakerClient;
 
 /// Parse Moonraker's `job_queue.automatic_transition` out of a `server.config`
@@ -32,6 +35,21 @@ std::string format_up_next_text(const std::string& display_name, int queued_coun
 /// "Start next: <name>" — the completion modal's secondary button. Empty on
 /// an empty queue (the button hides with it).
 std::string format_start_next_text(const std::string& display_name, int queued_count);
+
+/// The queue tile's strings for one JobQueueTileState. Fields a state does not
+/// show are empty. @p next_estimated_s of 0 means unknown. @p more_count is how many
+/// queued jobs the tile neither names nor lists; "+N more" is empty at 0.
+struct JobQueueTileText {
+    std::string hero;
+    std::string count; ///< the queued count alone, for the Strip
+    std::string detail;
+    std::string more;
+    std::string action;
+    std::string action_short;
+};
+JobQueueTileText compose_job_queue_tile_text(JobQueueTileState state,
+                                             const std::string& next_display_name, int queued_count,
+                                             int next_estimated_s, int more_count);
 } // namespace helix
 
 /**
@@ -45,7 +63,7 @@ std::string format_start_next_text(const std::string& display_name, int queued_c
  */
 class JobQueueState {
   public:
-    JobQueueState(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
+    JobQueueState(helix::IMoonrakerAPI* api, helix::IMoonrakerClient* client);
     ~JobQueueState();
 
     // Non-copyable
@@ -74,13 +92,24 @@ class JobQueueState {
     void invalidate();
 
     /// Get cached jobs
-    const std::vector<JobQueueEntry>& get_jobs() const {
+    const std::vector<helix::JobQueueEntry>& get_jobs() const {
         return cached_jobs_;
     }
 
-    /// Get queue state string
-    const std::string& get_queue_state() const {
-        return queue_state_;
+    /// Whether a queue response has ever arrived. Unlike is_loaded() it survives
+    /// invalidate(), so a dropped socket keeps showing the last known queue.
+    [[nodiscard]] bool has_ever_loaded() const {
+        return ever_loaded_;
+    }
+
+    [[nodiscard]] helix::QueueRunState run_state() const {
+        return helix::parse_queue_run_state(queue_state_);
+    }
+
+    /// Estimated print time of the first queued job, in seconds. 0 while its
+    /// metadata is unknown, absent or still loading.
+    [[nodiscard]] int next_estimated_seconds() const {
+        return next_estimated_s_;
     }
 
     /// Whether Moonraker starts the next queued job by itself on completion
@@ -92,6 +121,13 @@ class JobQueueState {
     /// store cannot participate, so UI hides it.
     bool automatic_transition() const {
         return automatic_transition_;
+    }
+
+    /// Whether the home tile's one-tap start (QueuedJobStarter) is checking
+    /// and starting the first job. Published as job_queue_start_in_flight.
+    void set_start_in_flight(bool in_flight);
+    [[nodiscard]] bool start_in_flight() const {
+        return start_in_flight_;
     }
 
     /// Initialize LVGL subjects (call before XML creation)
@@ -110,7 +146,7 @@ class JobQueueState {
   private:
     friend class JobQueueStateTestAccess;
 
-    void on_queue_fetched(const JobQueueStatus& status);
+    void on_queue_fetched(const helix::JobQueueStatus& status);
     void subscribe_to_notifications();
 
     /**
@@ -137,11 +173,18 @@ class JobQueueState {
     void update_subjects();
     void deinit_subjects();
 
-    IMoonrakerAPI* api_;
+    /// Fetch the first queued job's metadata once per change of first job.
+    void refresh_next_job_media();
+    /// Main thread. Drops an answer for a job that is no longer first.
+    void on_next_job_metadata(const std::string& filename, const FileMetadata& metadata);
+    /// Unknown estimate and the placeholder thumbnail; supersedes any load in flight.
+    void clear_next_job_media();
+
+    helix::IMoonrakerAPI* api_;
     helix::IMoonrakerClient* client_;
 
     // Cached data
-    std::vector<JobQueueEntry> cached_jobs_;
+    std::vector<helix::JobQueueEntry> cached_jobs_;
     std::string queue_state_ = "ready";
 
     /// Watches printer connection state so a dropped socket stales the queue.
@@ -149,6 +192,7 @@ class JobQueueState {
 
     // State
     bool is_loaded_ = false;
+    bool ever_loaded_ = false; // set in on_queue_fetched(), never cleared
     // Atomic so the BG callback can clear it before the defer is posted —
     // prevents UpdateQueue freeze-drops from stranding the fetch guard.
     std::atomic<bool> is_fetching_{false};
@@ -157,12 +201,10 @@ class JobQueueState {
     bool automatic_transition_loaded_ = false;
     // Option-store prune latched per connect — see on_queue_fetched().
     bool pruned_this_connect_ = false;
+    bool start_in_flight_ = false;
+    int jobs_revision_ = 0;
 
     // LVGL subjects
-    lv_subject_t job_queue_state_subject_{};
-    char state_buffer_[64];
-    lv_subject_t job_queue_summary_subject_{};
-    char summary_buffer_[128];
     // "Up next: <name> (+N)" for the print-status panel and home widget; the
     // display name of the first queued job, "" when the queue is empty.
     lv_subject_t job_queue_up_next_text_subject_{};
@@ -179,6 +221,27 @@ class JobQueueState {
     // rebuilds them, so a queue mutation that does not move this subject is
     // invisible until the next resize.
     lv_subject_t job_queue_count_subject_{};
+    // helix::QueueRunState as an int. Published before the count so a count
+    // observer reads it settled.
+    lv_subject_t job_queue_run_state_subject_{};
+    // Bumped whenever the queued jobs change, before the count. A reorder, or
+    // a remove plus an add, leaves the count where it was, so surfaces that
+    // name the jobs observe this.
+    lv_subject_t job_queue_revision_subject_{};
+    // start_in_flight_ as 0/1.
+    lv_subject_t job_queue_start_in_flight_subject_{};
+    // The first queued job's estimated time (seconds, 0 = unknown) and
+    // thumbnail path. The thumbnail is never "": it holds the placeholder
+    // until a real image is cached.
+    std::string next_media_filename_;
+    /// Set by invalidate() and by a failed read: the next fetch asks again for
+    /// the same first job.
+    bool next_media_stale_ = false;
+    int next_estimated_s_ = 0;
+    std::atomic<uint32_t> next_thumbnail_generation_{0};
+    lv_subject_t job_queue_next_estimate_subject_{};
+    lv_subject_t job_queue_next_thumbnail_subject_{};
+    char next_thumbnail_buf_[256];
     /// Owns every subject above and the death signal
     /// get_subjects_lifetime() hands out.
     SubjectManager subjects_;

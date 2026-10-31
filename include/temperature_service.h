@@ -6,7 +6,7 @@
 #include "ui_heater_config.h"
 #include "ui_observer_guard.h"
 #include "ui_temp_graph.h"
-#include "ui_temperature_utils.h" // HEATER_STATUS_BUF_BYTES
+#include "ui_temperature_utils.h" // kHeaterStatusBufBytes
 
 #include "async_lifetime_guard.h"
 #include "lvgl/lvgl.h"
@@ -23,8 +23,8 @@
 namespace helix {
 class PrinterState;
 class TemperatureController;
-} // namespace helix
 class IMoonrakerAPI;
+} // namespace helix
 class TemperatureService;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ struct HeaterState {
 
     // Subject string buffers
     std::array<char, 32> display_buf{};
-    std::array<char, helix::ui::temperature::HEATER_STATUS_BUF_BYTES> status_buf{};
+    std::array<char, helix::ui::temperature::kHeaterStatusBufBytes> status_buf{};
 
     int64_t last_graph_update_ms = 0;
 
@@ -103,7 +103,7 @@ struct HeaterState {
  */
 class TemperatureService {
   public:
-    TemperatureService(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    TemperatureService(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
     ~TemperatureService();
 
     // Non-copyable, non-movable (has reference member and LVGL subject state)
@@ -154,7 +154,7 @@ class TemperatureService {
         return heaters_[static_cast<int>(helix::HeaterType::Bed)].current;
     }
 
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -185,6 +185,7 @@ class TemperatureService {
     // Chamber-heater diagnostics card (issue #1290): both delegate to the
     // globally-registered TemperatureController — never the api directly.
     static void on_chamber_fault_reset_clicked(lv_event_t* e);
+    static void on_chamber_retry_target_clicked(lv_event_t* e);
     static void on_chamber_filter_fan_clicked(lv_event_t* e);
     static void on_chamber_dryer_start_clicked(lv_event_t* e);
     static void on_chamber_dryer_stop_clicked(lv_event_t* e);
@@ -204,15 +205,18 @@ class TemperatureService {
     // single effective setpoint + control-mode word, then refresh display/status.
     void recompute_chamber_target();
     void update_display(helix::HeaterType type);
+    /// The heater's current/target text; init_subjects() and update_display()
+    /// both render through it.
+    static void format_display(const HeaterState& h, char* buf, size_t size);
     void update_status(helix::HeaterType type);
     void update_graphs(helix::HeaterType type, float temp_deg, int64_t now_ms);
 
     helix::PrinterState& printer_state_;
-    IMoonrakerAPI* api_;
+    helix::IMoonrakerAPI* api_;
     helix::TemperatureController* controller_ = nullptr;
 
     // ── Per-heater state (indexed by HeaterType) ────────────────────────
-    std::array<HeaterState, helix::HEATER_TYPE_COUNT> heaters_;
+    std::array<HeaterState, helix::kHeaterTypeCount> heaters_;
 
     // ── Multi-extruder support (nozzle-specific) ────────────────────────
     std::string active_extruder_name_ = "extruder";
@@ -228,7 +232,7 @@ class TemperatureService {
     std::unique_ptr<helix::TempGraphController> mini_graph_controller_;
 
     // ── Graph update throttling ─────────────────────────────────────────
-    static constexpr int64_t GRAPH_SAMPLE_INTERVAL_MS = 1000;
+    static constexpr int64_t kGraphSampleIntervalMs = 1000;
 
     // ── Subject management ──────────────────────────────────────────────
     SubjectManager subjects_;

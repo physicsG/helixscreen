@@ -14,16 +14,18 @@
 #include "helix-xml/src/xml/lv_xml_widget.h"
 #include "helix-xml/src/xml/parsers/lv_xml_obj_parser.h"
 #include "helix/ui/shared_font_style.h"
+#include "helix/ui/text_metrics.h"
 #include "lvgl/lvgl.h"
 #include "printer_temperature_state.h" // helix::ChamberMode
 #include "theme_manager.h"
+#include "widget_data_registry.h"
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
-#include <unordered_map>
 
 using helix::ui::temperature::deci_to_degrees;
 using helix::ui::temperature::deci_to_degrees_f;
@@ -35,7 +37,7 @@ using helix::ui::temperature::get_heating_state_color;
 // ============================================================================
 
 /** Magic number to identify temp_display widgets ("TMP1" as ASCII) */
-static constexpr uint32_t TEMP_DISPLAY_MAGIC = 0x544D5031;
+static constexpr uint32_t kTempDisplayMagic = 0x544D5031;
 
 // ============================================================================
 // Per-widget user data
@@ -45,7 +47,7 @@ static constexpr uint32_t TEMP_DISPLAY_MAGIC = 0x544D5031;
  * @brief User data stored on each temp_display widget
  */
 struct TempDisplayData {
-    uint32_t magic = TEMP_DISPLAY_MAGIC;
+    uint32_t magic = kTempDisplayMagic;
     int current_deci = 0; // Decidegrees for precision formatting
     int current_temp = 0; // Whole degrees (public accessor + trace logging)
     int target_temp = 0;  // Whole degrees (target label text, off-state gating)
@@ -75,6 +77,11 @@ struct TempDisplayData {
     // hide_target_below_bp >= 0 — that is the only case that subscribes.
     int current_bp = 0;
 
+    // align_current: the current reading holds the width of the widest reading
+    // its face can render, right-aligned, so displays stacked in a column put
+    // their separators at one x whatever the digits are.
+    bool align_current = false;
+
     // Child label pointers for efficient updates
     lv_obj_t* current_label = nullptr;
     lv_obj_t* separator_label = nullptr;
@@ -98,11 +105,10 @@ struct TempDisplayData {
 };
 
 // Static registry for safe cleanup
-static std::unordered_map<lv_obj_t*, TempDisplayData*> s_registry;
+static helix::WidgetDataRegistry<TempDisplayData> s_registry;
 
 static TempDisplayData* get_data(lv_obj_t* obj) {
-    auto it = s_registry.find(obj);
-    return (it != s_registry.end()) ? it->second : nullptr;
+    return s_registry.get(obj);
 }
 
 // ============================================================================
@@ -200,7 +206,7 @@ static void update_heating_color(TempDisplayData* data) {
         auto mode = static_cast<helix::ChamberMode>(data->current_mode);
         auto state = helix::ui::temperature::classify_heat_state_with_mode(
             shown_deci, data->target_deci, mode,
-            helix::ui::temperature::DEFAULT_AT_TEMP_TOLERANCE_DECI);
+            helix::ui::temperature::kDefaultAtTempToleranceDeci);
         lv_color_t color = helix::ui::temperature::get_heating_state_color(state);
         lv_obj_set_style_text_color(data->current_label, color, LV_PART_MAIN);
         return;
@@ -208,8 +214,8 @@ static void update_heating_color(TempDisplayData* data) {
 
     // No mode binding (nozzle/bed): plain 4-state behavior. A heater at target=0
     // resolves to Off (muted/gray) via get_heating_state_color(current, 0).
-    lv_color_t color = get_heating_state_color(
-        shown_deci, data->target_deci, helix::ui::temperature::DEFAULT_AT_TEMP_TOLERANCE_DECI);
+    lv_color_t color = get_heating_state_color(shown_deci, data->target_deci,
+                                               helix::ui::temperature::kDefaultAtTempToleranceDeci);
     lv_obj_set_style_text_color(data->current_label, color, LV_PART_MAIN);
 }
 
@@ -230,6 +236,31 @@ static void format_target_text(TempDisplayData* data) {
         snprintf(data->target_text_buf, sizeof(data->target_text_buf), "%d", data->target_temp);
     }
     lv_subject_copy_string(&data->target_text_subject, data->target_text_buf);
+}
+
+/**
+ * Fix the current label at the width of the widest reading in its face. The
+ * face is read back from the label rather than taken from the size attribute,
+ * because a bound style (a tile rung) can retier it after creation. Writing the
+ * width re-fires LV_EVENT_STYLE_CHANGED, so it only writes on a change.
+ */
+static void apply_current_width(TempDisplayData* data) {
+    if (!data || !data->align_current || !data->current_label)
+        return;
+    const lv_font_t* font = lv_obj_get_style_text_font(data->current_label, LV_PART_MAIN);
+    const int32_t letter_space =
+        lv_obj_get_style_text_letter_space(data->current_label, LV_PART_MAIN);
+    // format_temp_number() renders "NN.N" below 100°C and "NNN" at or above it.
+    const int32_t width = std::max(helix::ui::text_width("00.0", font, letter_space),
+                                   helix::ui::text_width("000", font, letter_space));
+    if (lv_obj_get_style_width(data->current_label, LV_PART_MAIN) != width) {
+        lv_obj_set_width(data->current_label, width);
+    }
+}
+
+static void on_current_style_changed(lv_event_t* e) {
+    auto* container = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+    apply_current_width(get_data(container));
 }
 
 /** Format decidegrees as a compact number (one decimal, dropped when >= 100) */
@@ -276,10 +307,8 @@ static void on_click(lv_event_t* e) {
 /** Cleanup callback when widget is deleted */
 static void on_delete(lv_event_t* e) {
     lv_obj_t* obj = lv_event_get_target_obj(e);
-    auto it = s_registry.find(obj);
-    if (it != s_registry.end()) {
-        std::unique_ptr<TempDisplayData> data(it->second);
-        s_registry.erase(it);
+    if (TempDisplayData* registered = s_registry.take(obj)) {
+        std::unique_ptr<TempDisplayData> data(registered);
 
         // Detach child labels from ALL subjects (both external and owned) FIRST.
         // This removes observers AND their unsubscribe_on_delete_cb events from
@@ -449,6 +478,11 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
         data_ptr->hide_target_when_off = true;
     }
 
+    const char* align_current_str = lv_xml_get_value_of(attrs, "align_current");
+    if (align_current_str && strcmp(align_current_str, "true") == 0) {
+        data_ptr->align_current = true;
+    }
+
     // Parse hide_target_below_bp — drop separator+target on small screens.
     // Value is a breakpoint name (micro|tiny|small|medium|large|xlarge|xxlarge).
     const char* hide_below_str = lv_xml_get_value_of(attrs, "hide_target_below_bp");
@@ -504,13 +538,13 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
         lv_label_bind_text(data_ptr->current_label, &data_ptr->current_text_subject, nullptr);
 
     // Register data and cleanup
-    s_registry[container] = data_ptr.release();
+    s_registry.set(container, data_ptr.release());
     lv_obj_add_event_cb(container, on_delete, LV_EVENT_DELETE, nullptr);
 
     // Hook reactive target visibility once data is registered. Observer target
     // is the container so on_delete's lv_obj_remove_from_subject(container, ...)
     // removes it before TempDisplayData is freed.
-    auto* registered = s_registry[container];
+    auto* registered = s_registry.get(container);
     if (registered->hide_target_below_bp >= 0) {
         if (lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject()) {
             lv_subject_add_observer_obj(bp_subj, bp_observer_cb, container, nullptr);
@@ -545,6 +579,13 @@ static void* ui_temp_display_create_cb(lv_xml_parser_state_t* state, const char*
                          "authored",
                          rung_subject_name);
         }
+    }
+
+    if (registered->align_current) {
+        lv_obj_set_style_text_align(registered->current_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+        apply_current_width(registered);
+        lv_obj_add_event_cb(registered->current_label, on_current_style_changed,
+                            LV_EVENT_STYLE_CHANGED, container);
     }
 
     // Seed visibility from the initial state — with hide_target_when_off that
@@ -695,5 +736,5 @@ int ui_temp_display_get_target(lv_obj_t* obj) {
 
 bool ui_temp_display_is_valid(lv_obj_t* obj) {
     auto* data = get_data(obj);
-    return data && data->magic == TEMP_DISPLAY_MAGIC;
+    return data && data->magic == kTempDisplayMagic;
 }

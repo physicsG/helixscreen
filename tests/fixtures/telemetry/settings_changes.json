@@ -1,0 +1,17 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "changes": [
+    {
+      "new_value": "light",
+      "old_value": "dark",
+      "setting": "theme"
+    }
+  ],
+  "device_id": "<device_id>",
+  "event": "settings_changes",
+  "schema_version": 3,
+  "timestamp": "<timestamp>"
+}

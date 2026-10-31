@@ -65,10 +65,9 @@ enum class TempHistoryHeaterType { EXTRUDER, BED, CHAMBER };
  */
 class TemperatureHistoryManager {
   public:
-    static constexpr int HISTORY_SIZE = 1200;           ///< 20 minutes at 1Hz
-    static constexpr int64_t SAMPLE_INTERVAL_MS = 1000; ///< 1 second minimum between samples
-    static constexpr int64_t RECENT_SAMPLE_WINDOW_MS =
-        100; ///< Window for retroactive target updates
+    static constexpr int kHistorySize = 1200;             ///< 20 minutes at 1Hz
+    static constexpr int64_t kSampleIntervalMs = 1000;    ///< 1 second minimum between samples
+    static constexpr int64_t kRecentSampleWindowMs = 100; ///< Window for retroactive target updates
 
     /**
      * @brief Construct TemperatureHistoryManager with helix::PrinterState reference
@@ -128,7 +127,7 @@ class TemperatureHistoryManager {
      * @brief Get number of samples stored for a heater
      *
      * @param heater_name Heater name
-     * @return Sample count (0 to HISTORY_SIZE), 0 if heater unknown
+     * @return Sample count (0 to kHistorySize), 0 if heater unknown
      */
     [[nodiscard]] int get_sample_count(const std::string& heater_name) const;
 
@@ -179,7 +178,7 @@ class TemperatureHistoryManager {
      *
      * Used when target is set after temp in the same update cycle.
      * Updates the most recent sample's target if it was stored within
-     * RECENT_SAMPLE_WINDOW_MS milliseconds.
+     * kRecentSampleWindowMs milliseconds.
      *
      * @param heater_name Heater name
      * @param target_deci New target value
@@ -198,7 +197,7 @@ class TemperatureHistoryManager {
      * instead of filling in live over several minutes.
      *
      * For each sensor, timestamps are synthesized backward from @p now_ms at
-     * SAMPLE_INTERVAL_MS spacing so the newest seeded sample lands at @p now_ms.
+     * kSampleIntervalMs spacing so the newest seeded sample lands at @p now_ms.
      * Temperatures/targets are converted to decidegrees (×10). Powers are
      * ignored (TempSample has no power field).
      *
@@ -207,8 +206,8 @@ class TemperatureHistoryManager {
      * covers is superseded. That keeps history a restarted Klipper no longer has
      * while still discarding the near-duplicate pairs a plain merge produced
      * (a live wall-clock sample next to the synthetic 1 Hz grid). Store values
-     * pass the same sanity filter as live samples, and the newest HISTORY_SIZE
-     * are kept. This bypasses the SAMPLE_INTERVAL_MS write throttle and is
+     * pass the same sanity filter as live samples, and the newest kHistorySize
+     * are kept. This bypasses the kSampleIntervalMs write throttle and is
      * race-safe against a live sample that may already have been appended before
      * the async fetch returned.
      *
@@ -226,9 +225,9 @@ class TemperatureHistoryManager {
      * @brief Per-heater circular buffer for temperature samples
      */
     struct HeaterHistory {
-        std::array<TempSample, HISTORY_SIZE> samples{}; ///< Circular buffer
-        int write_index = 0;        ///< Next write position (0 to HISTORY_SIZE-1)
-        int count = 0;              ///< Number of samples stored (0 to HISTORY_SIZE)
+        std::array<TempSample, kHistorySize> samples{}; ///< Circular buffer
+        int write_index = 0;        ///< Next write position (0 to kHistorySize-1)
+        int count = 0;              ///< Number of samples stored (0 to kHistorySize)
         int64_t last_sample_ms = 0; ///< Timestamp of last stored sample (for throttling)
     };
 

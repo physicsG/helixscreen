@@ -21,10 +21,7 @@
  * existing klippy_state observer.
  *
  * This lives in its own translation unit rather than inside ui_notification.cpp
- * because ui_notification.o is deliberately excluded from the test link
- * (mk/tests.mk — ui_test_utils.cpp stubs it), so anything defined there is
- * unreachable from a unit test. The registry is the part with actual logic, so
- * it belongs where tests can drive the real code.
+ * so tests can drive the registry without raising notifications.
  */
 
 namespace helix::ui {

@@ -34,8 +34,8 @@
     <lv_obj width="100%"
             height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
             style_pad_bottom="#space_lg" style_bg_opa="0" style_border_width="0" scrollable="false">
-      <bind_flag_if_eq subject="afc_fault_segment" flag="hidden" ref_value="0"/>
-      <afc_fault_path name="fault_path"/>
+      <bind_flag_if_eq subject="fault_path_segment" flag="hidden" ref_value="0"/>
+      <fault_path name="fault_path"/>
     </lv_obj>
     <!-- Action buttons (wired in C++ via wire_ok/cancel_button) -->
     <modal_button_row secondary_text="Close"

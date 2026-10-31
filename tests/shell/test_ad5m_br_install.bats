@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Verify `make install DESTDIR=...` produces the expected /opt/helixscreen/ layout.
-# Uses a stub binary so we don't need a full cross-compile.
+# Uses a stub binary so we don't need a full cross-compile, in scratch_tree so
+# the stubs and the parse land in a build/ of the test's own.
 
 load helpers
 
 STAGE_DIR=""
 
 setup() {
+    cd "$(scratch_tree)" || return 1
     STAGE_DIR="$(mktemp -d)"
     # Create stub binaries so install target doesn't fail on missing files
     mkdir -p build/ad5m-br/bin

@@ -1,0 +1,96 @@
+[
+  {
+    "ace": {
+      "swap_in_progress": true,
+      "swap_phase": "load",
+      "event_seq": 1
+    },
+    "filament_feed left": {
+      "extruder1": {
+        "filament_detected": true,
+        "channel_state": "load_prepare",
+        "channel_error": "ok"
+      }
+    }
+  },
+  {
+    "ace": {
+      "swap_phase": "load",
+      "event_seq": 2
+    },
+    "filament_feed left": {
+      "extruder1": {
+        "filament_detected": true,
+        "channel_state": "load_feeding",
+        "channel_error": "ok"
+      }
+    }
+  },
+  {
+    "ace": {
+      "swap_phase": "flush"
+    },
+    "filament_feed left": {
+      "extruder1": {
+        "filament_detected": true,
+        "channel_state": "load_flushing",
+        "channel_error": "ok"
+      }
+    }
+  },
+  {
+    "ace": {
+      "swap_in_progress": false,
+      "swap_phase": "done",
+      "event_seq": 3,
+      "head_source": {
+        "0": {
+          "ace_index": 0,
+          "slot": 0,
+          "type": "PLA",
+          "color": "FF0000",
+          "brand": "Anycubic",
+          "subtype": "",
+          "load_failed": false
+        },
+        "1": {
+          "ace_index": 1,
+          "slot": 2,
+          "type": "PLA",
+          "color": "00FF00",
+          "brand": "Generic",
+          "subtype": "",
+          "load_failed": false
+        },
+        "2": {
+          "ace_index": 2,
+          "slot": 3,
+          "type": "PLA",
+          "color": "000000",
+          "brand": "Generic",
+          "subtype": "",
+          "load_failed": false
+        }
+      },
+      "last_swap_result": {
+        "head": 1,
+        "ace": 1,
+        "slot": 2,
+        "status": "ok",
+        "ts": 1760000000.0
+      }
+    },
+    "filament_feed left": {
+      "extruder1": {
+        "filament_detected": true,
+        "channel_state": "load_finish",
+        "channel_error": "ok"
+      }
+    }
+  },
+  {
+    "ace": {
+      "swap_phase": "idle"
+    }
+  }
+]

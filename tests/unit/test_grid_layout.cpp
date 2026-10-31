@@ -36,10 +36,9 @@ constexpr int kStep = 1;
 constexpr GridDimensions kGrid6x4{6, 4};
 constexpr GridDimensions kGrid8x6{8, 6};
 
-// =============================================================================
-// Descriptor array generation
-// =============================================================================
-
+// ======================================================================// Descriptor array
+// generation
+// ======================================================================
 TEST_CASE("GridLayout make_col_dsc: correct length and values", "[grid_layout][descriptor]") {
     SECTION("6 cols") {
         auto dsc = GridLayout::make_col_dsc(6);
@@ -92,10 +91,9 @@ TEST_CASE("GridLayout make_row_dsc: correct length and values", "[grid_layout][d
     }
 }
 
-// =============================================================================
-// Widget placement — successful
-// =============================================================================
-
+// ======================================================================// Widget placement —
+// successful
+// ======================================================================
 TEST_CASE("GridLayout place: single widget at origin", "[grid_layout][placement]") {
     GridLayout grid(UiBreakpoint::Micro, kGrid6x4);
     REQUIRE(grid.place({"widget_a", 0, 0, 2, 1}));
@@ -118,10 +116,8 @@ TEST_CASE("GridLayout place: widget filling entire grid", "[grid_layout][placeme
     CHECK(grid.placements().size() == 1);
 }
 
-// =============================================================================
-// Collision detection
-// =============================================================================
-
+// ======================================================================// Collision detection
+// ======================================================================
 TEST_CASE("GridLayout place: rejects overlapping placements", "[grid_layout][collision]") {
     GridLayout grid(UiBreakpoint::Tiny, kGrid6x4);
     REQUIRE(grid.place({"w1", 1, 1, 2, 2})); // occupies (1,1)-(2,2)
@@ -149,10 +145,8 @@ TEST_CASE("GridLayout can_place: returns false for occupied cells", "[grid_layou
     CHECK(grid.can_place(0, 2, 1, 1));
 }
 
-// =============================================================================
-// Out-of-bounds rejection
-// =============================================================================
-
+// ======================================================================// Out-of-bounds rejection
+// ======================================================================
 TEST_CASE("GridLayout place: rejects out-of-bounds placements", "[grid_layout][bounds]") {
     GridLayout grid(UiBreakpoint::Micro, kGrid6x4);
 
@@ -173,10 +167,8 @@ TEST_CASE("GridLayout place: rejects out-of-bounds placements", "[grid_layout][b
     CHECK(grid.place({"edge", 5, 3, 1, 1}));
 }
 
-// =============================================================================
-// find_available()
-// =============================================================================
-
+// ======================================================================// find_available()
+// ======================================================================
 TEST_CASE("GridLayout find_available: finds first open position", "[grid_layout][find]") {
     GridLayout grid(UiBreakpoint::Micro, kGrid6x4);
     grid.place({"w1", 0, 0, 2, 1});
@@ -236,10 +228,8 @@ TEST_CASE("GridLayout find_available: large widget in fragmented grid", "[grid_l
     CHECK(pos->second == 1);
 }
 
-// =============================================================================
-// remove()
-// =============================================================================
-
+// ======================================================================// remove()
+// ======================================================================
 TEST_CASE("GridLayout remove: removes existing widget", "[grid_layout][remove]") {
     GridLayout grid(UiBreakpoint::Micro, kGrid6x4);
     grid.place({"w1", 0, 0, 2, 2});
@@ -258,10 +248,8 @@ TEST_CASE("GridLayout remove: returns false for nonexistent widget", "[grid_layo
     CHECK_FALSE(grid.remove("nonexistent"));
 }
 
-// =============================================================================
-// clear()
-// =============================================================================
-
+// ======================================================================// clear()
+// ======================================================================
 TEST_CASE("GridLayout clear: removes all placements", "[grid_layout][clear]") {
     GridLayout grid(UiBreakpoint::Micro, kGrid6x4);
     grid.place({"w1", 0, 0, 1, 1});
@@ -273,10 +261,8 @@ TEST_CASE("GridLayout clear: removes all placements", "[grid_layout][clear]") {
     CHECK(grid.can_place(0, 0, 6, 4)); // full grid available
 }
 
-// =============================================================================
-// filter_for_grid()
-// =============================================================================
-
+// ======================================================================// filter_for_grid()
+// ======================================================================
 TEST_CASE("GridLayout filter_for_grid: separates fitting vs non-fitting", "[grid_layout][filter]") {
     std::vector<GridPlacement> all = {
         {"fits_1", 0, 0, 2, 2},   // fits in 6x4
@@ -307,10 +293,9 @@ TEST_CASE("GridLayout filter_for_grid: all fit in an 8x6 grid", "[grid_layout][f
     CHECK(no_fit.empty());
 }
 
-// =============================================================================
-// Breakpoint transition scenarios
-// =============================================================================
-
+// ======================================================================// Breakpoint transition
+// scenarios
+// ======================================================================
 TEST_CASE("GridLayout breakpoint transition: LARGE placement does not fit MICRO",
           "[grid_layout][transition]") {
     // A widget placed at col 7 in an 8-col (LARGE) grid should not fit in a
@@ -350,10 +335,9 @@ TEST_CASE("GridLayout breakpoint transition: LARGE placement partially fits in S
     CHECK(large_no.empty());
 }
 
-// =============================================================================
-// Instance breakpoint accessor
-// =============================================================================
-
+// ======================================================================// Instance breakpoint
+// accessor
+// ======================================================================
 TEST_CASE("GridLayout instance: breakpoint and dimensions match", "[grid_layout][instance]") {
     UiBreakpoint bps[] = {UiBreakpoint::Micro,  UiBreakpoint::Tiny,  UiBreakpoint::Small,
                           UiBreakpoint::Medium, UiBreakpoint::Large, UiBreakpoint::XLarge};
@@ -381,16 +365,15 @@ TEST_CASE("GridLayout dimensions: out-of-range breakpoints clamp to the array bo
     // table was one short — the bug that made a 1080p panel draw a 720p-sized
     // grid — so pinning XLarge here would re-encode it.
     auto above = GridLayout::get_dimensions(
-        static_cast<UiBreakpoint>(GridLayout::NUM_BREAKPOINTS + 3), kW, kH);
+        static_cast<UiBreakpoint>(GridLayout::kNumBreakpoints + 3), kW, kH);
     auto top = GridLayout::get_dimensions(UiBreakpoint::XXLarge, kW, kH);
     CHECK(above.cols == top.cols);
     CHECK(above.rows == top.rows);
 }
 
-// =============================================================================
-// PanelWidgetDef scalability constraints
-// =============================================================================
-
+// ======================================================================// PanelWidgetDef
+// scalability constraints
+// ======================================================================
 TEST_CASE("PanelWidgetDef: default (non-scalable) widget", "[widget_def][scalability]") {
     PanelWidgetDef def{};
     def.colspan = 1;
@@ -475,9 +458,18 @@ TEST_CASE("PanelWidgetDef: half-cell capability is classified per widget",
         {"tips", {true, true}},              // wrapping body text
         {"job_queue", {true, true}},         // list rows
         {"print_stats", {true, true}},       // stat rows
+        {"display_message", {true, true}},   // one scrolling line to wrapped text
         {"ams", {true, true}},               // lane slots side by side
         {"active_spool", {true, true}},      // measured compact/wide switch
         {"nozzle_temps", {true, true}},      // decide_nozzle_layout() is measured
+        {"speed_flow", {true, true}},        // decide_speed_flow_layout() is measured
+        {"dryer", {true, true}},             // decide_dryer_layout() is measured
+        {"maintenance", {true, true}},       // decide_maintenance_tile_layout() is measured
+        {"toolhead", {true, true}},          // decide_toolhead_layout() is measured
+        {"z_offset", {true, true}},          // decide_z_offset_layout() is measured
+        {"exclude_map", {true, true}},       // decide_exclude_map_layout() is measured
+        {"bed_mesh_tile", {true, true}},     // decide_bed_mesh_tile_layout() is measured
+        {"host_health", {true, true}},       // decide_host_health_layout() is measured
         {"temp_stack", {true, true}},        // 2-3 stacked readout rows
         {"fan_stack", {true, true}},         // 2-3 stacked readout rows
         {"tool_switcher", {true, true}},     // horizontal chip strip
@@ -580,10 +572,9 @@ TEST_CASE("PanelWidgetDef: half-cell defaults to off", "[widget_def][half_cell]"
     CHECK_FALSE(def.supports_half_row);
 }
 
-// =============================================================================
-// Descriptor generation with dynamic sizing
-// =============================================================================
-
+// ======================================================================// Descriptor generation
+// with dynamic sizing
+// ======================================================================
 TEST_CASE("GridLayout make_col_dsc: descriptor length matches the computed column count",
           "[grid_layout][descriptor][dynamic]") {
     // A wide, short content box, so the column count is well clear of both
@@ -611,10 +602,9 @@ TEST_CASE("GridLayout make_row_dsc: descriptor length matches the computed row c
     CHECK(dsc[expected_rows] == LV_GRID_TEMPLATE_LAST);
 }
 
-// =============================================================================
-// Minimum-first placement and growth (#1216)
-// =============================================================================
-//
+// ======================================================================// Minimum-first placement
+// and growth (#1216)
+// ======================================================================//
 // Auto-placement used to ask for the largest span that fit and step down until
 // something took. On a 3-column portrait grid that let `tips` (authored 4x2)
 // claim a reduced 3x2 — 6 of 18 cells — and the three widgets behind it were

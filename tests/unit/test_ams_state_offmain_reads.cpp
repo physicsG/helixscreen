@@ -12,6 +12,7 @@
 #include "../../src/printer/ams_state_internal.h"
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/log_capture.h"
+#include "../test_helpers/trait_probe_backend.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
@@ -87,6 +88,35 @@ TEST_CASE_METHOD(OffMainFixture, "AmsState backend type query is safe against cl
     CHECK_FALSE(ams.primary_type().has_value());
 }
 
+TEST_CASE_METHOD(OffMainFixture, "primary_traits is empty with no backend and safe off-main",
+                 "[ams][threading]") {
+    auto& ams = AmsState::instance();
+    CHECK_FALSE(ams.primary_traits().has_value());
+
+    BackendTraits owns;
+    owns.raises_runout_fault = true;
+    owns.unloads_to_hub_between_prints = true;
+    ams.add_backend(std::make_unique<helix::test::TraitProbeBackend>(owns));
+    REQUIRE(ams.primary_traits().has_value());
+    CHECK(*ams.primary_traits() == owns);
+
+    std::atomic<bool> stop{false};
+    std::thread ws([&] {
+        while (!stop.load()) {
+            (void)ams.primary_traits();
+        }
+    });
+    for (int i = 0; i < kCycles; ++i) {
+        ams.clear_backends();
+        ams.add_backend(std::make_unique<helix::test::TraitProbeBackend>(owns));
+    }
+    stop = true;
+    ws.join();
+
+    ams.clear_backends();
+    CHECK_FALSE(ams.primary_traits().has_value());
+}
+
 // Every query the WebSocket thread makes, hammered together while main runs
 // the two mutations that race them: the action edge and a reconnect's
 // clear_backends()/add_backend(). Snapmaker's status handler also stamps
@@ -101,6 +131,7 @@ TEST_CASE_METHOD(OffMainFixture, "AmsState off-main queries survive action and b
         while (!stop.load()) {
             (void)ams.is_filament_operation_active();
             (void)ams.primary_type();
+            (void)ams.primary_traits();
             (void)ams.any_filament_batch_in_flight();
             (void)ams.post_unload_runout_grace_armed();
             ams.mark_slot_unloaded(1);

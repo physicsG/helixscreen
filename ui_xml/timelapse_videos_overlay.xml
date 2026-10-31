@@ -3,6 +3,12 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Timelapse Videos Overlay - Browse, render, and play timelapse recordings -->
 <component>
+  <consts>
+    <!-- Video card width bounds: the grid fits as many columns as it can at
+         the minimum, and never stretches a card past the maximum. -->
+    <px name="timelapse_card_min_w" value="140"/>
+    <px name="timelapse_card_max_w" value="230"/>
+  </consts>
   <view name="timelapse_videos_overlay" extends="overlay_panel" title="Timelapse Videos" bg_color="#screen_bg">
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_top="0" style_pad_left="#space_lg" style_pad_right="#space_lg"
@@ -50,9 +56,9 @@
       <!-- ================================================================== -->
       <!-- VIDEO GRID -->
       <!-- ================================================================== -->
-      <lv_obj name="video_grid_container"
-              width="100%" flex_grow="1" scrollable="true" flex_flow="row_wrap" style_pad_top="#space_xs"
-              style_pad_gap="#space_sm" style_flex_main_place="start"/>
+      <responsive_grid name="video_grid_container"
+                       width="100%" flex_grow="1" scrollable="true" min_col_width="#timelapse_card_min_w"
+                       max_col_width="#timelapse_card_max_w" style_pad_top="#space_xs" style_pad_gap="#space_sm"/>
       <!-- Empty state (centered icon + text, matching plugins/print files pattern) -->
       <!-- min_height gives the box a definite height so the centering places
            actually have something to centre within; flex_grow does not resolve

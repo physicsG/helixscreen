@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "utils/network_validation.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -61,7 +63,7 @@ std::vector<std::string> parse_listeners_for_port(const std::string& proc_net_tc
  * @return False when no host could be recovered.
  */
 bool split_host_port(const std::string& base_url, std::string& host, uint16_t& port,
-                     uint16_t fallback = 7125);
+                     uint16_t fallback = helix::kDefaultMoonrakerPort);
 
 /// Collapse a raw /proc/<pid>/cmdline (NUL-separated argv) into one line.
 /// Trailing NULs are dropped; embedded ones become single spaces.

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 class PrinterState;
 
@@ -12,6 +11,7 @@ struct BedDimensions {
     float h_mm;
     float origin_x;
     float origin_y;
+    bool circular = false; ///< Round bed (delta): the circle inscribed in the box
 };
 
 /// Fallback used when no source reports a usable bed size.
@@ -28,6 +28,8 @@ BedDimensions bed_dimensions_from_volume(float x_min, float x_max, float y_min, 
 ///      the kinematic envelope, available earlier than (1) because it rides the
 ///      status subscription rather than a config query
 ///   3. 235x235 with a zero origin
+///
+/// The bed is round when the kinematics are a delta's (circular_bed_kinematics()).
 ///
 /// Either argument may be null. Do NOT add printer_database.json's
 /// `build_volume_range` as a source — that field is a detection heuristic, not

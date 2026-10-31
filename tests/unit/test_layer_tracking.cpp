@@ -775,6 +775,20 @@ TEST_CASE("Layer tracking: never-reporting printer keeps sticky false (fallback 
         /*current_layer=*/0, /*print_duration=*/5, /*seen_layer_zero=*/false));
 }
 
+TEST_CASE("A pre-print step the printer reports holds the first-extrusion fallback",
+          "[layer_tracking][print_stats]") {
+    // A priming line extrudes before the print: on a printer that reports no
+    // layers, print_duration goes positive while the firmware still says it
+    // is priming.
+    REQUIRE_FALSE(MoonrakerManager::should_complete_preprint(
+        /*printer_reports_layers=*/false, /*current_layer=*/0, /*print_duration=*/2,
+        /*seen_layer_zero=*/false, /*layer_advanced=*/false, /*in_live_preprint_step=*/true));
+    // A real first layer is authoritative whatever the step says.
+    REQUIRE(MoonrakerManager::should_complete_preprint(
+        /*printer_reports_layers=*/true, /*current_layer=*/1, /*print_duration=*/2,
+        /*seen_layer_zero=*/true, /*layer_advanced=*/false, /*in_live_preprint_step=*/true));
+}
+
 // ============================================================================
 // Z-height current-layer derivation (issue kostake#4542)
 //
@@ -839,6 +853,51 @@ TEST_CASE("Layer tracking: Z-height derivation for non-reporting slicer",
 
         // round((100-0.2)/0.2)+1 = 500, clamped to total 75.
         REQUIRE(lv_subject_get_int(state.print_state().get_print_layer_current_subject()) == 75);
+    }
+}
+
+TEST_CASE("Layer tracking: a Z-hop does not bump the height-derived layer",
+          "[layer_tracking][zheight][zhop]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    // 0.13mm layers with a 0.4mm hop: the hop reads three layers up.
+    state.update_from_status({{"print_stats", {{"state", "printing"}, {"print_duration", 100.0}}}});
+    state.print_state().set_print_layer_total(104);
+    state.print_state().set_print_layer_heights(0.13, 0.13);
+    UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
+
+    auto at = [&](double t, double z) {
+        state.update_from_status({{"print_stats", {{"print_duration", t}}},
+                                  {"gcode_move", {{"gcode_position", {10.0, 10.0, z, 0.0}}}}});
+        return lv_subject_get_int(state.print_state().get_print_layer_current_subject());
+    };
+
+    // Layer 38 sits at 0.13 + 37 * 0.13 = 4.94mm; the first reading shows at once.
+    REQUIRE(at(100.0, 4.94) == 38);
+
+    SECTION("a hop and its return leave the layer alone") {
+        REQUIRE(at(100.3, 5.34) == 38);
+        REQUIRE(at(100.9, 5.34) == 38);
+        REQUIRE(at(101.2, 4.94) == 38);
+        // Z back down well past the hop's start: nothing pending applies.
+        REQUIRE(at(103.0, 4.94) == 38);
+    }
+
+    SECTION("the next layer shows once Z has held it for the dwell") {
+        REQUIRE(at(110.0, 5.07) == 38);
+        REQUIRE(at(110.0 + kHeightLayerDwellSeconds - 0.25, 5.07) == 38);
+        REQUIRE(at(110.0 + kHeightLayerDwellSeconds, 5.07) == 39);
+    }
+
+    SECTION("a hop held through a pause never becomes a layer") {
+        // A pause park lifts Z, and print_duration stands still while paused.
+        REQUIRE(at(120.0, 15.0) == 38);
+        REQUIRE(at(120.0, 15.0) == 38);
+        REQUIRE(at(120.0, 15.0) == 38);
     }
 }
 

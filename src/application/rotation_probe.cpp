@@ -17,13 +17,13 @@ namespace helix {
 
 namespace {
 
-constexpr lv_display_rotation_t ROTATIONS[] = {LV_DISPLAY_ROTATION_0, LV_DISPLAY_ROTATION_90,
-                                               LV_DISPLAY_ROTATION_180, LV_DISPLAY_ROTATION_270};
-constexpr int ROTATION_DEGREES[] = {0, 90, 180, 270};
-constexpr int NUM_ROTATIONS = 4;
+constexpr lv_display_rotation_t kRotations[] = {LV_DISPLAY_ROTATION_0, LV_DISPLAY_ROTATION_90,
+                                                LV_DISPLAY_ROTATION_180, LV_DISPLAY_ROTATION_270};
+constexpr int kRotationDegrees[] = {0, 90, 180, 270};
+constexpr int kNumRotations = 4;
 /// Give up after this many full sweeps (e.g. an uncalibrated resistive touchscreen that
 /// cannot register taps) rather than loop forever.
-constexpr int MAX_CYCLES = 3;
+constexpr int kMaxCycles = 3;
 
 } // namespace
 
@@ -188,41 +188,41 @@ int RotationProbe::run() {
 
     // Loop until the user confirms a rotation. On real hardware the wrong rotation renders
     // unreadable text, so the user can only tap the correct one.
-    while (confirmed_rotation < 0 && cycle < MAX_CYCLES) {
+    while (confirmed_rotation < 0 && cycle < kMaxCycles) {
         cycle++;
-        for (int i = 0; i < NUM_ROTATIONS; i++) {
+        for (int i = 0; i < kNumRotations; i++) {
             // SDL cannot rotate (DIRECT render mode); everywhere else the rendering actually
             // changes on screen and the backend adjusts touch coordinates.
             if (!m_host.is_sdl) {
-                m_host.settle_rotation(ROTATIONS[i]);
+                m_host.settle_rotation(kRotations[i]);
             }
 
-            spdlog::info("[RotationProbe] testing {}° ({}x{})", ROTATION_DEGREES[i],
+            spdlog::info("[RotationProbe] testing {}° ({}x{})", kRotationDegrees[i],
                          lv_display_get_horizontal_resolution(nullptr),
                          lv_display_get_vertical_resolution(nullptr));
 
-            show_screen(Phase::Scan, ROTATION_DEGREES[i], i, NUM_ROTATIONS, m_host.scan_timeout_ms);
-            if (!wait_for_tap(Phase::Scan, m_host.scan_timeout_ms, ROTATION_DEGREES[i], i,
-                              NUM_ROTATIONS)) {
+            show_screen(Phase::Scan, kRotationDegrees[i], i, kNumRotations, m_host.scan_timeout_ms);
+            if (!wait_for_tap(Phase::Scan, m_host.scan_timeout_ms, kRotationDegrees[i], i,
+                              kNumRotations)) {
                 continue;
             }
 
-            spdlog::info("[RotationProbe] {}° tapped, confirming...", ROTATION_DEGREES[i]);
-            show_screen(Phase::Confirm, ROTATION_DEGREES[i], i, NUM_ROTATIONS,
+            spdlog::info("[RotationProbe] {}° tapped, confirming...", kRotationDegrees[i]);
+            show_screen(Phase::Confirm, kRotationDegrees[i], i, kNumRotations,
                         m_host.confirm_timeout_ms);
-            if (wait_for_tap(Phase::Confirm, m_host.confirm_timeout_ms, ROTATION_DEGREES[i], i,
-                             NUM_ROTATIONS)) {
-                confirmed_rotation = ROTATION_DEGREES[i];
+            if (wait_for_tap(Phase::Confirm, m_host.confirm_timeout_ms, kRotationDegrees[i], i,
+                             kNumRotations)) {
+                confirmed_rotation = kRotationDegrees[i];
                 spdlog::info("[RotationProbe] {}° confirmed!", confirmed_rotation);
                 break;
             }
-            spdlog::info("[RotationProbe] {}° not confirmed, continuing scan", ROTATION_DEGREES[i]);
+            spdlog::info("[RotationProbe] {}° not confirmed, continuing scan", kRotationDegrees[i]);
         }
     }
 
     if (confirmed_rotation < 0) {
         spdlog::warn("[RotationProbe] no confirmation after {} cycles, defaulting to 0°",
-                     MAX_CYCLES);
+                     kMaxCycles);
         confirmed_rotation = 0;
     }
 

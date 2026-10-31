@@ -50,6 +50,11 @@ Type=simple
 User=@@HELIX_USER@@
 Group=@@HELIX_GROUP@@
 
+# Where the user's config lives (printer_data/config/helixscreen), recorded here
+# so refresh-service-units.sh can read it back after a web update removes the
+# install dir. A comment on purpose: nothing at runtime consumes it.
+# HELIX_PD_HELIX=@@HELIX_PD_HELIX@@
+
 # Working directory for config/assets
 WorkingDirectory=@@INSTALL_DIR@@
 
@@ -94,8 +99,10 @@ ExecStartPre=+/bin/sh -c '[ -f "@@INSTALL_DIR@@/platform/hooks.sh" ] || exit 0; 
 # doesn't substitute them — they must remain literal to match a broken deployed file.
 ExecStartPre=+/bin/sh -c 'u=@@HELIX_USER@@; for f in /etc/polkit-1/localauthority/50-local.d/helixscreen-network.pkla /etc/polkit-1/rules.d/50-helixscreen-network.rules; do [ -f "$$f" ] && grep -q "@@""HELIX_USER""@@" "$$f" 2>/dev/null && sed -i "s|@@""HELIX_USER""@@|$$u|g" "$$f" || true; done'
 
-# Create NetworkManager polkit rule if missing (self-heal for installs that predate polkit support).
-# Runs as root (+prefix). Handles both .rules (Debian 12+) and .pkla (Debian 11) formats.
+# Install the polkit rules a non-root service user needs: NetworkManager access
+# (where nmcli exists) and logind power-off/reboot for the screen's own
+# Shutdown/Reboot. Runs as root (+prefix) on every start, so installs self-heal.
+# Handles both .rules (Debian 12+) and .pkla (Debian 11) formats.
 ExecStartPre=+@@INSTALL_DIR@@/config/ensure-polkit-rule.sh @@HELIX_USER@@
 
 # Fix install dir ownership for self-updates.  Initial installs (run as root)

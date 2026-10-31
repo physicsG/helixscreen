@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ui_nav_manager.h"
 #include "ui_panel_settings.h"
+#include "ui_printer_manager_overlay.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
@@ -51,9 +52,9 @@ struct RootFixture : LVGLUITestFixture {
         get_runtime_config()->use_real_wifi = false;
         get_runtime_config()->use_real_ethernet = false;
 
-        // The test binary's stub app_globals_init_subjects() (tests/ui_test_utils.cpp)
-        // never runs PrinterCapabilitiesState::init_subjects(), so printer_has_speaker
-        // is otherwise absent and the Sound row's gate resolves to nothing.
+        // Nothing in this fixture runs PrinterCapabilitiesState::init_subjects(),
+        // so printer_has_speaker is otherwise absent and the Sound row's gate
+        // resolves to nothing.
         static lv_subject_t speaker_subject;
         if (!lv_xml_get_subject(nullptr, "printer_has_speaker")) {
             lv_subject_init_int(&speaker_subject, 1);
@@ -84,11 +85,12 @@ struct RootFixture : LVGLUITestFixture {
 };
 } // namespace
 
-TEST_CASE_METHOD(RootFixture, "settings root: three groups, twelve rows, in order",
+TEST_CASE_METHOD(RootFixture, "settings root: three groups, thirteen rows, in order",
                  "[settings][settings_root]") {
     const std::vector<std::pair<const char*, std::vector<const char*>>> groups = {
         {"group_screen", {"row_display", "row_appearance", "row_touch_input", "row_sound"}},
-        {"group_printer", {"row_printing", "row_devices", "row_safety", "row_connection"}},
+        {"group_printer",
+         {"row_printer", "row_printing", "row_devices", "row_safety", "row_connection"}},
         {"group_helixscreen", {"row_language_time", "row_system", "row_updates", "row_help"}},
     };
     for (const auto& [group, rows] : groups) {
@@ -213,7 +215,7 @@ TEST_CASE_METHOD(RootFixture, "settings root: crash-loop safe mode loads no plug
 TEST_CASE_METHOD(RootFixture, "settings root: tapping Plugins opens the plugins overlay",
                  "[settings][settings_root]") {
     DisplaySettingsManager::instance().set_animations_enabled(false);
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -311,6 +313,32 @@ TEST_CASE_METHOD(RootFixture,
     // connected" until its own probe lands.
     get_global_settings_panel().refresh_status_lines();
     CHECK(status_text(root_, "row_connection") == "Ethernet");
+}
+
+TEST_CASE_METHOD(RootFixture, "settings root: tapping Printer opens the Printer Manager",
+                 "[settings][settings_root]") {
+    DisplaySettingsManager::instance().set_animations_enabled(false);
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
+    for (auto& p : panels)
+        p = lv_obj_create(lv_screen_active());
+    NavigationManager::instance().set_panels(panels.data());
+    get_global_settings_panel().setup(root_, test_screen());
+    lv_obj_t* row = find("row_printer");
+    REQUIRE(row);
+    lv_obj_send_event(row, LV_EVENT_CLICKED, nullptr);
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(50);
+    REQUIRE(NavigationManager::instance().overlay_stack_names().size() == 1);
+    CHECK(NavigationManager::instance().overlay_stack_names()[0] == "printer_manager_overlay");
+
+    NavigationManager::instance().go_back();
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(100);
+    destroy_printer_manager_overlay();
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(100);
+    DisplaySettingsManager::instance().set_animations_enabled(true);
+    CHECK(NavigationManager::instance().overlay_stack_names().empty());
 }
 
 namespace {

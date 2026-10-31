@@ -3,12 +3,14 @@
 
 #pragma once
 
+#include "board_identity.h"
 #include "env_knobs.h"
 #include "text_io.h"
 
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -163,6 +165,12 @@ struct TouchCalibration {
     /// runtime place the matrix in the pre-rotation space it executes in.
     int capture_rotation = 0;
 };
+
+/**
+ * @brief The measured factory touch fit for @p board, or nullopt when its panel has not
+ *        been characterised
+ */
+std::optional<TouchCalibration> factory_touch_fit(board::Board board);
 
 /**
  * @brief Factory touch calibration for this build's platform, if one is known

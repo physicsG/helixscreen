@@ -5,14 +5,10 @@
 
 #include "../catch_amalgamated.hpp"
 
-// NOTE ON WHAT IS ACTUALLY LINKED HERE.
-// app_globals.o is excluded from the test link; tests/ui_test_utils.cpp supplies
-// the three accessors below. So these cases pin the *interface contract* that
-// both the stub and the production body have to satisfy - never a relative path,
-// never a trailing slash, and the same answer every call (all three production
-// bodies memoize into a function-local static, so a second call that differs is
-// a real bug). The production derivation itself is covered by
-// tests/unit/application/test_data_root_resolver.cpp.
+// These pin the accessors' contract: never a relative path, never a trailing
+// slash, and the same answer every call (each body memoizes into a
+// function-local static, so a second call that differs is a real bug). The
+// derivation itself is covered by tests/unit/application/test_data_root_resolver.cpp.
 
 namespace {
 

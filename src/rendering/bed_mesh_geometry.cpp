@@ -5,6 +5,7 @@
 
 #include "bed_mesh_geometry.h"
 
+#include "bed_grid.h"
 #include "bed_mesh_coordinate_transform.h"
 #include "bed_mesh_gradient.h"
 #include "bed_mesh_internal.h"
@@ -17,6 +18,52 @@
 
 namespace helix {
 namespace mesh {
+
+namespace {
+
+/**
+ * Push @p quad, the cell [px0,px1] x [py0,py1] in printer mm. With a round bed,
+ * push only the part of the cell inside it: a fan of triangles, each a quad
+ * whose last vertex repeats its third so the rasterizer's second triangle
+ * collapses. @p vertex_at gives the surface vertex at a printer XY in the cell.
+ */
+template <typename VertexAt>
+void push_cell(std::vector<bed_mesh_quad_3d_t>& quads, const bed_mesh_quad_3d_t& quad, double px0,
+               double px1, double py0, double py1, const RoundBed* bed, VertexAt vertex_at) {
+    if (!bed) {
+        quads.push_back(quad);
+        return;
+    }
+    const std::vector<BedPoint> cell{{px0, py0}, {px1, py0}, {px1, py1}, {px0, py1}};
+    const auto poly = clip_to_round_bed(cell, *bed);
+    if (poly.empty()) {
+        return;
+    }
+    const bool whole =
+        poly.size() == cell.size() &&
+        std::equal(poly.begin(), poly.end(), cell.begin(),
+                   [](const BedPoint& a, const BedPoint& b) { return a.x == b.x && a.y == b.y; });
+    if (whole) {
+        quads.push_back(quad);
+        return;
+    }
+    for (size_t i = 1; i + 1 < poly.size(); i++) {
+        bed_mesh_quad_3d_t tri = quad;
+        tri.vertices[0] = vertex_at(poly[0]);
+        tri.vertices[1] = vertex_at(poly[i]);
+        tri.vertices[2] = vertex_at(poly[i + 1]);
+        tri.vertices[3] = tri.vertices[2];
+        const auto& c0 = tri.vertices[0].color;
+        const auto& c1 = tri.vertices[1].color;
+        const auto& c2 = tri.vertices[2].color;
+        tri.center_color = lv_color_make(static_cast<uint8_t>((c0.red + c1.red + c2.red) / 3),
+                                         static_cast<uint8_t>((c0.green + c1.green + c2.green) / 3),
+                                         static_cast<uint8_t>((c0.blue + c1.blue + c2.blue) / 3));
+        quads.push_back(tri);
+    }
+}
+
+} // namespace
 
 void generate_mesh_quads(bed_mesh_renderer_t* renderer) {
     if (!renderer || !renderer->has_mesh_data) {
@@ -33,6 +80,15 @@ void generate_mesh_quads(bed_mesh_renderer_t* renderer) {
 
     // Use cached z_center (computed once in compute_mesh_bounds)
 
+    // A round bed's mesh is probed inside the circle inscribed in the mesh area;
+    // the matrix pads the corners beyond it, so those are not drawn.
+    const bool round = renderer->circular_bed && renderer->geometry_computed;
+    const RoundBed mesh_circle =
+        inscribed_round_bed(renderer->mesh_area_min_x, renderer->mesh_area_max_x,
+                            renderer->mesh_area_min_y, renderer->mesh_area_max_y);
+    const RoundBed bed_circle = inscribed_round_bed(renderer->bed_min_x, renderer->bed_max_x,
+                                                    renderer->bed_min_y, renderer->bed_max_y);
+
     // Generate quads for each mesh cell
     for (int row = 0; row < renderer->rows - 1; row++) {
         for (int col = 0; col < renderer->cols - 1; col++) {
@@ -40,6 +96,7 @@ void generate_mesh_quads(bed_mesh_renderer_t* renderer) {
 
             // Compute base X,Y positions
             double base_x_0, base_x_1, base_y_0, base_y_1;
+            double printer_x0 = 0.0, printer_x1 = 0.0, printer_y0 = 0.0, printer_y1 = 0.0;
 
             if (renderer->geometry_computed) {
                 // Mainsail-style: Position mesh within bed using mesh_area bounds
@@ -47,18 +104,18 @@ void generate_mesh_quads(bed_mesh_renderer_t* renderer) {
                 double cols_minus_1 = static_cast<double>(renderer->cols - 1);
                 double rows_minus_1 = static_cast<double>(renderer->rows - 1);
 
-                double printer_x0 =
+                printer_x0 =
                     renderer->mesh_area_min_x +
                     col / cols_minus_1 * (renderer->mesh_area_max_x - renderer->mesh_area_min_x);
-                double printer_x1 = renderer->mesh_area_min_x +
-                                    (col + 1) / cols_minus_1 *
-                                        (renderer->mesh_area_max_x - renderer->mesh_area_min_x);
-                double printer_y0 =
+                printer_x1 = renderer->mesh_area_min_x +
+                             (col + 1) / cols_minus_1 *
+                                 (renderer->mesh_area_max_x - renderer->mesh_area_min_x);
+                printer_y0 =
                     renderer->mesh_area_min_y +
                     row / rows_minus_1 * (renderer->mesh_area_max_y - renderer->mesh_area_min_y);
-                double printer_y1 = renderer->mesh_area_min_y +
-                                    (row + 1) / rows_minus_1 *
-                                        (renderer->mesh_area_max_y - renderer->mesh_area_min_y);
+                printer_y1 = renderer->mesh_area_min_y +
+                             (row + 1) / rows_minus_1 *
+                                 (renderer->mesh_area_max_y - renderer->mesh_area_min_y);
 
                 // Convert printer coordinates to world space
                 base_x_0 = helix::mesh::printer_x_to_world_x(printer_x0, renderer->bed_center_x,
@@ -155,7 +212,23 @@ void generate_mesh_quads(bed_mesh_renderer_t* renderer) {
             quad.avg_depth = 0.0;        // Will be computed during projection
             quad.opacity = LV_OPA_COVER; // Mesh quads are fully opaque
 
-            renderer->quads.push_back(quad);
+            const auto& m = renderer->mesh;
+            const auto r0 = static_cast<size_t>(row);
+            const auto c0 = static_cast<size_t>(col);
+            auto surface_at = [&](const BedPoint& p) {
+                const double u = (p.x - printer_x0) / (printer_x1 - printer_x0);
+                const double v = (p.y - printer_y0) / (printer_y1 - printer_y0);
+                const double z = (1 - u) * (1 - v) * m[r0][c0] + u * (1 - v) * m[r0][c0 + 1] +
+                                 (1 - u) * v * m[r0 + 1][c0] + u * v * m[r0 + 1][c0 + 1];
+                return bed_mesh_vertex_3d_t{
+                    printer_x_to_world_x(p.x, renderer->bed_center_x, renderer->coord_scale),
+                    printer_y_to_world_y(p.y, renderer->bed_center_y, renderer->coord_scale),
+                    mesh_z_to_world_z(z, renderer->cached_z_center, renderer->view_state.z_scale),
+                    bed_mesh_gradient_height_to_color(z, renderer->color_min_z,
+                                                      renderer->color_max_z)};
+            };
+            push_cell(renderer->quads, quad, printer_x0, printer_x1, printer_y0, printer_y1,
+                      round ? &mesh_circle : nullptr, surface_at);
         }
     }
 
@@ -273,7 +346,14 @@ void generate_mesh_quads(bed_mesh_renderer_t* renderer) {
                 plane_quad.avg_depth = 0.0; // Will be computed during projection
                 plane_quad.opacity = renderer->zero_plane_opacity; // Translucent
 
-                renderer->quads.push_back(plane_quad);
+                auto plane_at = [&](const BedPoint& p) {
+                    return bed_mesh_vertex_3d_t{
+                        printer_x_to_world_x(p.x, renderer->bed_center_x, renderer->coord_scale),
+                        printer_y_to_world_y(p.y, renderer->bed_center_y, renderer->coord_scale),
+                        plane_world_z, plane_color};
+                };
+                push_cell(renderer->quads, plane_quad, printer_x0, printer_x1, printer_y0,
+                          printer_y1, round ? &bed_circle : nullptr, plane_at);
             }
         }
 

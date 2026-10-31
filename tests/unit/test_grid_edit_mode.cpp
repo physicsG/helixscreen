@@ -264,14 +264,14 @@ TEST_CASE("GridEditMode: clamp_span unknown widget returns at least one track",
 
 TEST_CASE("GridEditMode: clamp_span tips widget respects range", "[grid_edit][resize]") {
     // tips: colspan default=8, min=4; rowspan default=4, min=2, max=4 tracks.
-    // It is a band widget, so max_colspan is MAX_TRACKS — the input has to clear
+    // It is a band widget, so max_colspan is kMaxTracks — the input has to clear
     // the widest grid the engine will ever build for the clamp to bite.
     const auto* def = find_widget_def("tips");
     REQUIRE(def != nullptr);
     REQUIRE(def->is_scalable());
-    REQUIRE(def->effective_max_colspan() == GridLayout::MAX_TRACKS);
+    REQUIRE(def->effective_max_colspan() == GridLayout::kMaxTracks);
 
-    auto [c, r] = GridEditMode::clamp_span("tips", GridLayout::MAX_TRACKS + 8, 10);
+    auto [c, r] = GridEditMode::clamp_span("tips", GridLayout::kMaxTracks + 8, 10);
     CHECK(c == def->effective_max_colspan());
     CHECK(r == def->effective_max_rowspan());
 
@@ -1097,30 +1097,30 @@ TEST_CASE("Drag: center-based targeting for multi-cell widgets", "[grid_edit][dr
 
 TEST_CASE("Drag threshold: small movement should not start drag", "[grid_edit][drag]") {
     // The drag threshold prevents FLOATING from being set on every touch.
-    // Only movements > DRAG_THRESHOLD_PX should start a real drag.
-    constexpr int DRAG_THRESHOLD_PX = 12; // Must match GridEditMode::DRAG_THRESHOLD_PX
+    // Only movements > kDragThresholdPx should start a real drag.
+    constexpr int kDragThresholdPx = 12; // Must match GridEditMode::kDragThresholdPx
 
     // Small movement (5px diagonal) — below threshold
     int dx = 3, dy = 4; // distance = 5
-    bool exceeds = (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX);
+    bool exceeds = (dx * dx + dy * dy > kDragThresholdPx * kDragThresholdPx);
     CHECK_FALSE(exceeds);
 
     // Exactly at threshold (12px horizontal) — does NOT exceed (not strictly greater)
     dx = 12;
     dy = 0;
-    exceeds = (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX);
+    exceeds = (dx * dx + dy * dy > kDragThresholdPx * kDragThresholdPx);
     CHECK_FALSE(exceeds);
 
     // Just past threshold (13px horizontal) — exceeds
     dx = 13;
     dy = 0;
-    exceeds = (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX);
+    exceeds = (dx * dx + dy * dy > kDragThresholdPx * kDragThresholdPx);
     CHECK(exceeds);
 
     // Diagonal past threshold: 9,9 → sqrt(162) ≈ 12.7 → 162 > 144
     dx = 9;
     dy = 9;
-    exceeds = (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX);
+    exceeds = (dx * dx + dy * dy > kDragThresholdPx * kDragThresholdPx);
     CHECK(exceeds);
 }
 
@@ -1379,8 +1379,8 @@ TEST_CASE("clamp_span: asymmetric constraints", "[grid_edit][sizing]") {
     CHECK(c2 == 12); // Well inside max_colspan, passed through
     CHECK(r2 == 4);  // Clamped to max_rowspan
 
-    auto [c3, r3] = GridEditMode::clamp_span("tips", GridLayout::MAX_TRACKS + 8, 6);
-    CHECK(c3 == GridLayout::MAX_TRACKS); // Clamped to max_colspan
+    auto [c3, r3] = GridEditMode::clamp_span("tips", GridLayout::kMaxTracks + 8, 6);
+    CHECK(c3 == GridLayout::kMaxTracks); // Clamped to max_colspan
     CHECK(r3 == 4);
 }
 

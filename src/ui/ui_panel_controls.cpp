@@ -28,12 +28,14 @@
 #include "app_globals.h"
 #include "format_utils.h"
 #include "hardware_role_registry.h"
+#include "i18n_plural.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_api.h"
 #include "observer_factory.h"
 #include "operation_timeout_guard.h"
 #include "printer_state.h"
 #include "quick_action_slots.h"
+#include "sort_small.h"
 #include "standard_macros.h"
 #include "static_panel_registry.h"
 #include "subject_managed_panel.h"
@@ -41,6 +43,7 @@
 #include "temperature_sensor_manager.h"
 #include "temperature_service.h"
 #include "theme_manager.h"
+#include "tile_grid_fit.h"
 #include "tool_state.h"
 #include "ui/ui_cleanup_helpers.h"
 #include "ui/ui_widget_helpers.h"
@@ -154,6 +157,8 @@ void ControlsPanel::init_subjects() {
                               subjects_);
     UI_MANAGED_SUBJECT_INT(more_sensors_count_, 0, "controls_more_sensors_count", subjects_);
 
+    UI_MANAGED_SUBJECT_INT(calib_grid_labels_, 1, "calib_grid_labels", subjects_);
+
     // Fan speed display
     UI_MANAGED_SUBJECT_STRING(fan_speed_subject_, fan_speed_buf_, lv_tr("Off"),
                               "controls_fan_speed", subjects_);
@@ -256,6 +261,8 @@ void ControlsPanel::init_subjects() {
          [](lv_event_t*) { get_global_controls_panel().handle_calibration_screws(); }},
         {"on_calibration_motors",
          [](lv_event_t*) { get_global_controls_panel().handle_calibration_motors(); }},
+        {"on_calib_grid_layout_changed",
+         [](lv_event_t* e) { update_calib_grid(lv_event_get_current_target_obj(e)); }},
 
         {"on_controls_home_all",
          [](lv_event_t*) { get_global_controls_panel().handle_home_all(); }},
@@ -553,12 +560,12 @@ void ControlsPanel::register_observers() {
 
     // Sensor discovery can land off the main thread; the link's subjects are touched there.
     temp_sensor_count_observer_ = observe<int>(
-        helix::sensors::TemperatureSensorManager::instance().get_sensor_count_subject(), this,
+        helix::sensors::TemperatureSensorManager::instance().count_subject(), this,
         [](ControlsPanel* self, int /* count */) {
             self->object_lifetime_.defer("ControlsPanel::update_more_sensors",
                                          [self]() { self->update_more_sensors(); });
         },
-        helix::sensors::TemperatureSensorManager::instance().get_subjects_lifetime());
+        helix::sensors::TemperatureSensorManager::instance().subjects_lifetime());
 
     // Subscribe to pending Z-offset delta (for unsaved adjustment banner)
     pending_z_offset_observer_ = observe<int>(
@@ -663,7 +670,9 @@ void ControlsPanel::update_more_sensors() {
             ++count;
         }
     }
-    std::snprintf(more_sensors_buf_, sizeof(more_sensors_buf_), lv_tr("%d more sensors"), count);
+    std::snprintf(more_sensors_buf_, sizeof(more_sensors_buf_),
+                  helix::ui::tr_plural(nullptr, "%d more sensors", static_cast<uint64_t>(count)),
+                  count);
     lv_subject_copy_string(&more_sensors_subject_, more_sensors_buf_);
     lv_subject_set_int(&more_sensors_count_, count);
 }
@@ -786,10 +795,10 @@ void ControlsPanel::populate_secondary_fans() {
             secondary_fans.push_back(&fan);
         }
     }
-    std::sort(secondary_fans.begin(), secondary_fans.end(),
-              [](const helix::FanInfo* a, const helix::FanInfo* b) {
-                  return fan_display_priority(*a) < fan_display_priority(*b);
-              });
+    helix::sort_small(secondary_fans.begin(), secondary_fans.end(),
+                      [](const helix::FanInfo* a, const helix::FanInfo* b) {
+                          return fan_display_priority(*a) < fan_display_priority(*b);
+                      });
 
     constexpr int max_visible = 2;
     int visible_count = 0;
@@ -823,9 +832,11 @@ void ControlsPanel::populate_secondary_fans() {
     // Show "N additional fans >" row if there are more fans than visible
     int additional = static_cast<int>(secondary_fans.size()) - visible_count;
     if (additional > 0) {
-        char more_buf[32];
-        std::snprintf(more_buf, sizeof(more_buf), lv_tr("%d additional fan%s"), additional,
-                      additional == 1 ? "" : "s");
+        char more_buf[96];
+        std::snprintf(more_buf, sizeof(more_buf),
+                      helix::ui::tr_plural("%d additional fan", "%d additional fans",
+                                           static_cast<uint64_t>(additional)),
+                      additional);
         const char* attrs[] = {"caption", more_buf, nullptr};
         lv_xml_create(secondary_fans_list_, "controls_fan_more_row", attrs);
     }
@@ -929,10 +940,23 @@ void ControlsPanel::handle_custom_nozzle_confirmed(float value) {
     cached_extruder_target_ = helix::units::to_decidegrees(value);
 
     if (auto* c = controller()) {
-        c->set_target(helix::HeaterType::Nozzle, value,
-                      {.toast = true, .on_success = [target = static_cast<int>(value)]() {
-                           NOTIFY_SUCCESS(lv_tr("Nozzle target set to {}°C"), target);
-                       }});
+        c->set_target(
+            helix::HeaterType::Nozzle, value,
+            {.toast = true,
+             .on_success =
+                 [target = static_cast<int>(value)]() {
+                     NOTIFY_SUCCESS(lv_tr("Nozzle target set to {}°C"), target);
+                 },
+             // A refused or failed send leaves the printer's own target, which
+             // the next keypad opens on.
+             .on_error =
+                 [this](const MoonrakerError&) {
+                     object_lifetime_.defer("ControlsPanel::nozzle_target_refused", [this]() {
+                         cached_extruder_target_ =
+                             lv_subject_get_int(printer_state_.temperature_state()
+                                                    .get_active_extruder_target_subject());
+                     });
+                 }});
     }
 }
 
@@ -1034,7 +1058,7 @@ ControlsPanel::QuickActionText ControlsPanel::homing_text(const char* started) {
 void ControlsPanel::home_axes_action(const char* axes, const char* started_toast) {
     spdlog::debug("[{}] Home {} clicked", get_name(), axes[0] ? axes : "All");
     run_quick_action(
-        IMoonrakerAPI::HOMING_TIMEOUT_MS, homing_text(started_toast),
+        IMoonrakerAPI::kHomingTimeoutMs, homing_text(started_toast),
         [this, axes](IMoonrakerAPI::SuccessCallback ok, IMoonrakerAPI::ErrorCallback err) {
             api_->motion().home_axes(axes, std::move(ok), std::move(err));
         });
@@ -1062,27 +1086,27 @@ void ControlsPanel::handle_home_z() {
 
 void ControlsPanel::handle_qgl() {
     spdlog::debug("[{}] QGL clicked", get_name());
-    run_quick_action(IAdvancedAPI::LEVELING_TIMEOUT_MS,
+    run_quick_action(IAdvancedAPI::kLevelingTimeoutMs,
                      {lv_tr("Quad Gantry Level started..."), lv_tr("Quad Gantry Level complete"),
                       lv_tr("QGL timed out"),
                       lv_tr("QGL may still be running — response timed out"),
                       lv_tr("QGL failed: {}")},
                      [this](IMoonrakerAPI::SuccessCallback ok, IMoonrakerAPI::ErrorCallback err) {
                          api_->execute_gcode("QUAD_GANTRY_LEVEL", std::move(ok), std::move(err),
-                                             IAdvancedAPI::LEVELING_TIMEOUT_MS);
+                                             IAdvancedAPI::kLevelingTimeoutMs);
                      });
 }
 
 void ControlsPanel::handle_z_tilt() {
     spdlog::debug("[{}] Z-Tilt clicked", get_name());
-    run_quick_action(IAdvancedAPI::LEVELING_TIMEOUT_MS,
+    run_quick_action(IAdvancedAPI::kLevelingTimeoutMs,
                      {lv_tr("Z-Tilt Adjust started..."), lv_tr("Z-Tilt Adjust complete"),
                       lv_tr("Z-Tilt timed out"),
                       lv_tr("Z-Tilt may still be running — response timed out"),
                       lv_tr("Z-Tilt failed: {}")},
                      [this](IMoonrakerAPI::SuccessCallback ok, IMoonrakerAPI::ErrorCallback err) {
                          api_->execute_gcode("Z_TILT_ADJUST", std::move(ok), std::move(err),
-                                             IAdvancedAPI::LEVELING_TIMEOUT_MS);
+                                             IAdvancedAPI::kLevelingTimeoutMs);
                      });
 }
 
@@ -1132,31 +1156,71 @@ void ControlsPanel::handle_motors_clicked() {
     helix::ui::show_motors_off_confirm(api_, motors_confirmation_dialog_, object_lifetime_.token());
 }
 
+// DECLARATIVE_OK: measured layout. Which tiles are visible is decided by each
+// tile's own XML binding, so the count is read off the laid-out grid rather than
+// re-derived from the subjects those bindings watch; the cell size is computed
+// from the grid's measured box, gaps included, so the cells can never wrap into
+// a row the card clips. Static and found by name because the subject belongs to
+// whichever panel instance built this grid.
+void ControlsPanel::update_calib_grid(lv_obj_t* grid) {
+    lv_subject_t* labels = lv_xml_get_subject(nullptr, "calib_grid_labels");
+    if (grid == nullptr || labels == nullptr) {
+        return;
+    }
+    int visible = 0;
+    const uint32_t count = lv_obj_get_child_count(grid);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!lv_obj_has_flag(lv_obj_get_child(grid, static_cast<int32_t>(i)), LV_OBJ_FLAG_HIDDEN)) {
+            ++visible;
+        }
+    }
+    const helix::ui::TileGridFit fit = helix::ui::fit_tile_grid(
+        visible, lv_obj_get_content_width(grid), lv_obj_get_content_height(grid),
+        lv_obj_get_style_pad_column(grid, LV_PART_MAIN),
+        lv_obj_get_style_pad_row(grid, LV_PART_MAIN),
+        theme_manager_get_spacing("calib_tile_min_width"),
+        theme_manager_get_spacing("calib_tile_min_height"));
+    if (fit.tile_w <= 0 || fit.tile_h <= 0) {
+        return;
+    }
+    // This runs from the grid's own LAYOUT_CHANGED: setting an unchanged size
+    // would dirty the layout again, so only a real change is written.
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_obj_t* cell = lv_obj_get_child(grid, static_cast<int32_t>(i));
+        if (lv_obj_get_style_width(cell, LV_PART_MAIN) != fit.tile_w) {
+            lv_obj_set_width(cell, fit.tile_w);
+        }
+        if (lv_obj_get_style_height(cell, LV_PART_MAIN) != fit.tile_h) {
+            lv_obj_set_height(cell, fit.tile_h);
+        }
+    }
+    lv_subject_set_int(labels, fit.fits ? 1 : 0);
+}
+
 void ControlsPanel::handle_calibration_bed_mesh() {
 #if defined(HELIX_PLATFORM_ESP32)
     // Bed-mesh calibration is excluded from the v1 Core+AMS cut; its panel is a
     // null-vtable link stub. Toast instead of the LoadProhibited crash.
     helix::ui::show_feature_unavailable_toast();
-    return;
+#else
+    helix::ui::open_bed_mesh_panel(parent_screen_);
 #endif
-    get_global_bed_mesh_panel().show(parent_screen_);
 }
 
 void ControlsPanel::handle_calibration_tool_offsets() {
 #if defined(HELIX_PLATFORM_ESP32)
     helix::ui::show_feature_unavailable_toast();
-    return;
+#else
+    helix::ui::open_tool_offset_cal_panel(parent_screen_);
 #endif
-    helix::ui::get_global_tool_offset_cal_panel().show(parent_screen_);
 }
 
 void ControlsPanel::handle_calibration_pa() {
 #if defined(HELIX_PLATFORM_ESP32)
     helix::ui::show_feature_unavailable_toast();
-    return;
+#else
+    helix::ui::open_pa_cal_panel(parent_screen_);
 #endif
-    helix::ui::get_global_pa_cal_panel().set_api(get_moonraker_api());
-    helix::ui::get_global_pa_cal_panel().show(parent_screen_);
 }
 
 void ControlsPanel::handle_calibration_zoffset() {
@@ -1172,10 +1236,9 @@ void ControlsPanel::handle_calibration_zoffset() {
 void ControlsPanel::handle_calibration_screws() {
 #if defined(HELIX_PLATFORM_ESP32)
     helix::ui::show_feature_unavailable_toast();
-    return;
+#else
+    helix::ui::open_screws_tilt_panel(parent_screen_);
 #endif
-    get_global_screws_tilt_panel().set_client(get_moonraker_client(), get_moonraker_api());
-    get_global_screws_tilt_panel().show(parent_screen_);
 }
 
 void ControlsPanel::handle_calibration_motors() {

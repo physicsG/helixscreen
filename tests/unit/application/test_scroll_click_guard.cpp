@@ -29,7 +29,7 @@ using helix::ScrollClickGuard;
 namespace {
 
 constexpr lv_point_t DOWN{100, 100};
-constexpr lv_point_t SCROLLED{100, 200};
+constexpr lv_point_t kScrolled{100, 200};
 
 ScrollClickGuard enabled_guard(uint32_t cooldown_ms = 80) {
     ScrollClickGuard guard;
@@ -58,30 +58,30 @@ void touch(ScrollClickGuard& guard, lv_point_t to, uint32_t release_ms) {
 TEST_CASE("scroll guard suppresses a press inside the cooldown after a scroll",
           "[input][scroll_guard]") {
     auto guard = enabled_guard();
-    touch(guard, SCROLLED, 1000);
+    touch(guard, kScrolled, 1000);
 
     lv_indev_state_t state = LV_INDEV_STATE_PRESSED;
-    CHECK(guard.filter(state, SCROLLED, 1079));
+    CHECK(guard.filter(state, kScrolled, 1079));
     CHECK(state == LV_INDEV_STATE_RELEASED);
 }
 
 TEST_CASE("scroll guard delivers a press once the cooldown has passed", "[input][scroll_guard]") {
     auto guard = enabled_guard();
-    touch(guard, SCROLLED, 1000);
+    touch(guard, kScrolled, 1000);
 
-    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, SCROLLED, 1080) == LV_INDEV_STATE_PRESSED);
+    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, kScrolled, 1080) == LV_INDEV_STATE_PRESSED);
 }
 
 TEST_CASE("scroll guard delivers a held press once the cooldown runs out under it",
           "[input][scroll_guard]") {
     auto guard = enabled_guard();
-    touch(guard, SCROLLED, 1000);
+    touch(guard, kScrolled, 1000);
 
-    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, SCROLLED, 1030) == LV_INDEV_STATE_RELEASED);
-    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, SCROLLED, 1060) == LV_INDEV_STATE_RELEASED);
-    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, SCROLLED, 1090) == LV_INDEV_STATE_PRESSED);
+    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, kScrolled, 1030) == LV_INDEV_STATE_RELEASED);
+    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, kScrolled, 1060) == LV_INDEV_STATE_RELEASED);
+    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, kScrolled, 1090) == LV_INDEV_STATE_PRESSED);
     // Once delivered it is an ordinary press, so later samples of it pass too.
-    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, SCROLLED, 1120) == LV_INDEV_STATE_PRESSED);
+    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, kScrolled, 1120) == LV_INDEV_STATE_PRESSED);
 }
 
 TEST_CASE("scroll guard never suppresses a press that follows a tap", "[input][scroll_guard]") {
@@ -102,19 +102,19 @@ TEST_CASE("scroll guard counts a touch as a scroll at exactly the limit", "[inpu
 TEST_CASE("scroll guard changes nothing while disabled", "[input][scroll_guard]") {
     auto guard = enabled_guard();
     guard.enabled = false;
-    touch(guard, SCROLLED, 1000);
+    touch(guard, kScrolled, 1000);
 
     lv_indev_state_t state = LV_INDEV_STATE_PRESSED;
-    CHECK_FALSE(guard.filter(state, SCROLLED, 1001));
+    CHECK_FALSE(guard.filter(state, kScrolled, 1001));
     CHECK(state == LV_INDEV_STATE_PRESSED);
 }
 
 TEST_CASE("scroll guard measures the cooldown across a tick wrap", "[input][scroll_guard]") {
     auto guard = enabled_guard();
-    touch(guard, SCROLLED, UINT32_MAX - 10);
+    touch(guard, kScrolled, UINT32_MAX - 10);
 
-    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, SCROLLED, 20) == LV_INDEV_STATE_RELEASED);
-    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, SCROLLED, 70) == LV_INDEV_STATE_PRESSED);
+    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, kScrolled, 20) == LV_INDEV_STATE_RELEASED);
+    CHECK(feed(guard, LV_INDEV_STATE_PRESSED, kScrolled, 70) == LV_INDEV_STATE_PRESSED);
 }
 
 TEST_CASE("scroll guard settings come from config unless the environment overrides them",
@@ -224,8 +224,8 @@ class LiveChain {
 
     void scroll_and_lift() {
         sample(LV_INDEV_STATE_PRESSED, DOWN, 10);
-        sample(LV_INDEV_STATE_PRESSED, SCROLLED, 20);
-        sample(LV_INDEV_STATE_RELEASED, SCROLLED, 20);
+        sample(LV_INDEV_STATE_PRESSED, kScrolled, 20);
+        sample(LV_INDEV_STATE_RELEASED, kScrolled, 20);
     }
 
     DisplayManager mgr;
@@ -250,11 +250,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "the pointer DisplayManager sets up runs the s
     chain.scroll_and_lift();
 
     // 100 ms after the lift: past the 80 ms default, inside the configured 150.
-    const lv_indev_state_t ghost = chain.sample(LV_INDEV_STATE_PRESSED, SCROLLED, 100);
+    const lv_indev_state_t ghost = chain.sample(LV_INDEV_STATE_PRESSED, kScrolled, 100);
     CHECK(ghost == (guard_on ? LV_INDEV_STATE_RELEASED : LV_INDEV_STATE_PRESSED));
 
-    chain.sample(LV_INDEV_STATE_RELEASED, SCROLLED, 10);
-    CHECK(chain.sample(LV_INDEV_STATE_PRESSED, SCROLLED, 50) == LV_INDEV_STATE_PRESSED);
+    chain.sample(LV_INDEV_STATE_RELEASED, kScrolled, 10);
+    CHECK(chain.sample(LV_INDEV_STATE_PRESSED, kScrolled, 50) == LV_INDEV_STATE_PRESSED);
 }
 
 TEST_CASE_METHOD(LVGLTestFixture,
@@ -266,7 +266,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     REQUIRE_FALSE(DisplayManagerTestAccess::wake_requested(chain.mgr));
 
     // Inside the cooldown, so the guard would suppress this press if it ran first.
-    CHECK(chain.sample(LV_INDEV_STATE_PRESSED, SCROLLED, 30) == LV_INDEV_STATE_RELEASED);
+    CHECK(chain.sample(LV_INDEV_STATE_PRESSED, kScrolled, 30) == LV_INDEV_STATE_RELEASED);
     CHECK(DisplayManagerTestAccess::wake_requested(chain.mgr));
 
     DisplayManagerTestAccess::set_display_sleeping(chain.mgr, false);
@@ -280,12 +280,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "a live scroll_limit change reaches the scroll
 
     // 15 px of travel: a scroll at the default 10 px limit, a tap at 20 px.
     helix::InputSettingsManager::instance().set_scroll_limit(20);
-    constexpr lv_point_t SHORT_MOVE{100, 115};
+    constexpr lv_point_t kShortMove{100, 115};
     chain.sample(LV_INDEV_STATE_PRESSED, DOWN, 10);
-    chain.sample(LV_INDEV_STATE_PRESSED, SHORT_MOVE, 20);
-    chain.sample(LV_INDEV_STATE_RELEASED, SHORT_MOVE, 20);
+    chain.sample(LV_INDEV_STATE_PRESSED, kShortMove, 20);
+    chain.sample(LV_INDEV_STATE_RELEASED, kShortMove, 20);
 
-    CHECK(chain.sample(LV_INDEV_STATE_PRESSED, SHORT_MOVE, 30) == LV_INDEV_STATE_PRESSED);
+    CHECK(chain.sample(LV_INDEV_STATE_PRESSED, kShortMove, 30) == LV_INDEV_STATE_PRESSED);
 
     helix_test::reset_input_settings_to_defaults();
 }

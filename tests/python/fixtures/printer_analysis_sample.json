@@ -1,0 +1,142 @@
+{
+  "total_profiles": 40,
+  "detected_count": 29,
+  "undetected_count": 11,
+  "unique_devices": 38,
+  "model_distribution": {
+    "Voron 2.4": {
+      "profiles": 20,
+      "unique_devices": 19
+    }
+  },
+  "discriminating_names": {},
+  "undetected_clusters": [
+    {
+      "size": 6,
+      "kinematics": "corexy",
+      "build_volume_bucket": {
+        "x": 350,
+        "y": 350,
+        "z": 350
+      },
+      "mcu": "STM32H723",
+      "common_names": {
+        "macros.names": [
+          [
+            "BOX_CUT_MATERIAL",
+            95.0
+          ]
+        ],
+        "sensors.temperature_names": [
+          [
+            "chamber_temp",
+            88.0
+          ]
+        ]
+      },
+      "top_printer_objects": [
+        {
+          "name": "bed_mesh",
+          "count": 3
+        }
+      ],
+      "device_ids": [
+        "a1b2c3d4",
+        "e5f6a7b8",
+        "c9d0e1f2",
+        "03142536",
+        "47586970",
+        "8192a3b4"
+      ]
+    },
+    {
+      "size": 3,
+      "kinematics": "cartesian",
+      "build_volume_bucket": {
+        "x": 250,
+        "y": 200,
+        "z": 200
+      },
+      "mcu": "rp2040",
+      "common_names": {},
+      "top_printer_objects": [],
+      "device_ids": [
+        "11111111",
+        "22222222",
+        "33333333"
+      ]
+    }
+  ],
+  "validation_issues": [],
+  "candidate_heuristics_detected": {},
+  "candidate_heuristics_clusters": [
+    {
+      "cluster_id": 1,
+      "size": 6,
+      "kinematics": "corexy",
+      "build_volume": {
+        "x": 350,
+        "y": 350,
+        "z": 350
+      },
+      "mcu": "STM32H723",
+      "candidate_heuristics": [
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "BOX_CUT_MATERIAL",
+          "confidence": 85,
+          "reason": "Found in 95.0% of cluster (corexy 350x350mm, n=6)"
+        },
+        {
+          "type": "sensor_match",
+          "field": "sensors",
+          "pattern": "chamber_temp",
+          "confidence": 80,
+          "reason": "Found in 88.0% of cluster"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "bed_mesh",
+          "confidence": 40,
+          "reason": "Object in 3/6 devices in cluster"
+        }
+      ]
+    },
+    {
+      "cluster_id": 2,
+      "size": 3,
+      "kinematics": "cartesian",
+      "build_volume": {
+        "x": 250,
+        "y": 200,
+        "z": 200
+      },
+      "mcu": "rp2040",
+      "candidate_heuristics": [
+        {
+          "type": "macro_match",
+          "field": "macros",
+          "pattern": "BOX_CUT_MATERIAL",
+          "confidence": 85,
+          "reason": "Found in 95.0% of cluster (cartesian 350x350mm, n=3)"
+        },
+        {
+          "type": "sensor_match",
+          "field": "sensors",
+          "pattern": "chamber_temp",
+          "confidence": 80,
+          "reason": "Found in 88.0% of cluster"
+        },
+        {
+          "type": "object_exists",
+          "field": "printer_objects",
+          "pattern": "bed_mesh",
+          "confidence": 40,
+          "reason": "Object in 3/6 devices in cluster"
+        }
+      ]
+    }
+  ]
+}

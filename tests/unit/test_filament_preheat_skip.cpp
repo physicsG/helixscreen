@@ -22,7 +22,10 @@
 
 #include "../lvgl_test_fixture.h"
 #include "ams_backend_afc.h"
+#include "ams_backend_cfs.h"
 #include "ams_backend_happy_hare.h"
+#include "ams_backend_snapmaker.h"
+#include "ams_backend_toolchanger.h"
 #include "filament_macro_profiles.h"
 #include "filament_op_dispatch.h"
 #include "filament_op_execute.h"
@@ -150,11 +153,11 @@ TEST_CASE_METHOD(PreheatSkipFixture, "preheat_skip_reason: backend auto-heat, ti
     REQUIRE(helix::ui::preheat_skip_reason(swap, StandardMacroSlot::LoadFilament, &backend) ==
             PreheatSkip::BackendSelfHeats);
 
-    // An unload is not a load: no backend claims to heat for one.
+    // An unload answers to its own claim, which AFC's TOOL_UNLOAD makes too.
     FilamentOpPlan unload = plan_at(FilamentTier::AmsBackend);
     unload.ams_call = helix::ui::AmsCall::Unload;
     REQUIRE(helix::ui::preheat_skip_reason(unload, StandardMacroSlot::UnloadFilament, &backend) ==
-            PreheatSkip::None);
+            PreheatSkip::BackendSelfHeats);
 
     // The same backend is no reason to skip once bypass has dropped the op past
     // tier 1 — the backend is not what runs there.
@@ -219,19 +222,63 @@ TEST_CASE_METHOD(PreheatSkipFixture, "preheat_skip_reason: a refused plan heats 
 // needs_prerequisite_home
 // ============================================================================
 
+TEST_CASE("prerequisite_home_needed: homes only for a backend or profile that needs it",
+          "[filament][homing]") {
+    struct Row {
+        const char* what;
+        FilamentTier tier;
+        bool toolhead_homed;
+        bool backend_delegates_homing;
+        bool macro_needs_home_first;
+        bool expect_home;
+    };
+    // An unrecognized macro is the user's own and runs as it is (#1819): its
+    // body may only extrude, and a G28 in front of it leaves the head low.
+    const Row row = GENERATE(values<Row>({
+        {"unrecognized macro, unhomed", FilamentTier::Macro, false, false, false, false},
+        {"profile needing a home, unhomed", FilamentTier::Macro, false, false, true, true},
+        {"profile needing a home, already homed", FilamentTier::Macro, true, false, true, false},
+        {"backend homing for itself, unhomed", FilamentTier::AmsBackend, false, false, false, true},
+        {"backend delegating to the printer, unhomed", FilamentTier::AmsBackend, false, true, false,
+         false},
+        {"backend, already homed", FilamentTier::AmsBackend, true, false, false, false},
+        {"profile claim does not reach the backend tier", FilamentTier::AmsBackend, false, true,
+         true, false},
+        {"backend claim does not reach the macro tier", FilamentTier::Macro, false, true, true,
+         true},
+        {"raw gcode, unhomed", FilamentTier::RawGcode, false, false, true, false},
+        {"refused, unhomed", FilamentTier::Refused, false, false, true, false},
+    }));
+    INFO(row.what);
+    CHECK(helix::ui::prerequisite_home_needed(row.tier, row.toolhead_homed,
+                                              row.backend_delegates_homing,
+                                              row.macro_needs_home_first) == row.expect_home);
+}
+
 TEST_CASE_METHOD(PreheatSkipFixture,
-                 "needs_prerequisite_home: an already-homed toolhead needs nothing",
+                 "needs_prerequisite_home: an unrecognized load macro runs unhomed as it is",
                  "[filament][preheat][homing]") {
     detect_with({"LOAD_FILAMENT"});
+    REQUIRE_FALSE(helix::filament_macros::macro_needs_home_first("LOAD_FILAMENT"));
     REQUIRE_FALSE(helix::ui::needs_prerequisite_home(plan_at(FilamentTier::Macro),
                                                      StandardMacroSlot::LoadFilament, nullptr,
-                                                     /*toolhead_homed=*/true));
+                                                     /*toolhead_homed=*/false));
+}
+
+TEST_CASE_METHOD(PreheatSkipFixture,
+                 "needs_prerequisite_home: an unrecognized unload macro runs unhomed as it is",
+                 "[filament][preheat][homing]") {
+    detect_with({"UNLOAD_FILAMENT"});
+    REQUIRE_FALSE(helix::ui::needs_prerequisite_home(plan_at(FilamentTier::Macro),
+                                                     StandardMacroSlot::UnloadFilament, nullptr,
+                                                     /*toolhead_homed=*/false));
 }
 
 TEST_CASE_METHOD(PreheatSkipFixture, "needs_prerequisite_home: a macro carrying its own home",
                  "[filament][preheat][homing]") {
     // M604 opens with _CG28, so a G28 of ours in front of it adds nothing.
     detect_with({"M604"});
+    REQUIRE_FALSE(helix::filament_macros::macro_needs_home_first("M604"));
     REQUIRE_FALSE(helix::ui::needs_prerequisite_home(plan_at(FilamentTier::Macro),
                                                      StandardMacroSlot::LoadFilament, nullptr,
                                                      /*toolhead_homed=*/false));
@@ -244,25 +291,6 @@ TEST_CASE_METHOD(PreheatSkipFixture, "needs_prerequisite_home: a macro carrying 
                                                /*toolhead_homed=*/false));
 }
 
-TEST_CASE_METHOD(PreheatSkipFixture,
-                 "needs_prerequisite_home: an ordinary macro still needs a home",
-                 "[filament][preheat][homing]") {
-    detect_with({"LOAD_FILAMENT"});
-    REQUIRE(helix::ui::needs_prerequisite_home(plan_at(FilamentTier::Macro),
-                                               StandardMacroSlot::LoadFilament, nullptr,
-                                               /*toolhead_homed=*/false));
-}
-
-TEST_CASE_METHOD(PreheatSkipFixture,
-                 "needs_prerequisite_home: the raw-gcode tier never needs a home",
-                 "[filament][preheat][homing]") {
-    // The fallback extrudes and retracts E only, which Klipper runs unhomed.
-    detect_with({"M604"});
-    REQUIRE_FALSE(helix::ui::needs_prerequisite_home(plan_at(FilamentTier::RawGcode),
-                                                     StandardMacroSlot::LoadFilament, nullptr,
-                                                     /*toolhead_homed=*/false));
-}
-
 TEST_CASE_METHOD(PreheatSkipFixture, "needs_prerequisite_home: a backend that does not delegate",
                  "[filament][preheat][homing]") {
     // Happy Hare and QIDI Box both answer delegates_homing_to_printer() false;
@@ -273,4 +301,57 @@ TEST_CASE_METHOD(PreheatSkipFixture, "needs_prerequisite_home: a backend that do
     REQUIRE(helix::ui::needs_prerequisite_home(plan_at(FilamentTier::AmsBackend),
                                                StandardMacroSlot::LoadFilament, &backend,
                                                /*toolhead_homed=*/false));
+    REQUIRE_FALSE(helix::ui::needs_prerequisite_home(plan_at(FilamentTier::AmsBackend),
+                                                     StandardMacroSlot::LoadFilament, &backend,
+                                                     /*toolhead_homed=*/true));
+}
+
+TEST_CASE_METHOD(PreheatSkipFixture, "preheat_skip_reason: an unload answers to the unload claim",
+                 "[filament][preheat][skip]") {
+    FilamentOpPlan unload = plan_at(FilamentTier::AmsBackend);
+    unload.ams_call = helix::ui::AmsCall::Unload;
+
+    // Happy Hare claims neither, so the UI heats for its unload.
+    ColdBackend cold;
+    REQUIRE_FALSE(cold.supports_auto_heat_on_unload());
+    CHECK(helix::ui::preheat_skip_reason(unload, StandardMacroSlot::UnloadFilament, &cold) ==
+          PreheatSkip::None);
+
+    // AFC's TOOL_UNLOAD heats the extruder itself.
+    helix::AmsBackendAfc afc(nullptr, nullptr);
+    REQUIRE(afc.supports_auto_heat_on_unload());
+    CHECK(helix::ui::preheat_skip_reason(unload, StandardMacroSlot::UnloadFilament, &afc) ==
+          PreheatSkip::BackendSelfHeats);
+
+    // The unload claim alone is no reason to skip a load on a backend that
+    // does not claim that too.
+    helix::AmsBackendToolChanger changer(nullptr, nullptr);
+    REQUIRE_FALSE(changer.supports_auto_heat_on_unload());
+    FilamentOpPlan load = plan_at(FilamentTier::AmsBackend);
+    CHECK(helix::ui::preheat_skip_reason(load, StandardMacroSlot::LoadFilament, &changer) ==
+          PreheatSkip::None);
+}
+
+TEST_CASE_METHOD(PreheatSkipFixture, "preheat_skip_reason: an unload claim is per unload",
+                 "[filament][preheat][skip]") {
+    FilamentOpPlan unload = plan_at(FilamentTier::AmsBackend);
+    unload.ams_call = helix::ui::AmsCall::Unload;
+
+    // No CFS unload script we send heats; the bypass one ends in a raw retract.
+    helix::printer::AmsBackendCfs cfs(nullptr, nullptr);
+    unload.ams_arg = helix::ui::kExternalSpoolSlot;
+    CHECK(helix::ui::preheat_skip_reason(unload, StandardMacroSlot::UnloadFilament, &cfs) ==
+          PreheatSkip::None);
+    unload.ams_arg = 0;
+    CHECK(helix::ui::preheat_skip_reason(unload, StandardMacroSlot::UnloadFilament, &cfs) ==
+          PreheatSkip::None);
+
+    // The U1's AUTO_FEEDING unload heats; with no slot to name it falls back to
+    // the bare INNER_FILAMENT_UNLOAD leaf, which does not.
+    helix::AmsBackendSnapmaker u1(nullptr, nullptr);
+    CHECK(u1.unload_heats_hotend(0));
+    CHECK_FALSE(u1.unload_heats_hotend(-1)); // nothing loaded to resolve
+    unload.ams_arg = -1;
+    CHECK(helix::ui::preheat_skip_reason(unload, StandardMacroSlot::UnloadFilament, &u1) ==
+          PreheatSkip::None);
 }

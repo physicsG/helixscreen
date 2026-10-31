@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Storage: what fills the printer's disk, by consumer, with cleanup -->
+<component>
+  <view name="settings_storage_overlay" extends="overlay_panel" title="Storage" bg_color="#screen_bg">
+    <lv_obj name="overlay_content"
+            width="100%" flex_grow="1" style_pad_top="0" style_pad_left="0" style_pad_right="0"
+            style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
+      <!-- The gcodes volume: free space, and where the numbers come from -->
+      <setting_group name="group_storage_volume">
+        <lv_obj name="storage_summary"
+                width="100%" height="content" flex_flow="column" style_pad_left="#space_lg" style_pad_right="#space_lg"
+                style_pad_top="#space_md" style_pad_bottom="#space_md" style_pad_gap="#space_sm" style_bg_opa="0"
+                style_border_width="0" scrollable="false">
+          <text_body name="storage_measuring" width="100%" text="Measuring...">
+            <bind_flag_if_not_eq subject="storage_state" flag="hidden" ref_value="0"/>
+          </text_body>
+          <text_body name="storage_failed" width="100%" text="Could not read the printer's storage" long_mode="wrap">
+            <bind_flag_if_not_eq subject="storage_state" flag="hidden" ref_value="2"/>
+          </text_body>
+          <lv_obj name="storage_volume"
+                  width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_sm"
+                  style_bg_opa="0" style_border_width="0" scrollable="false">
+            <bind_flag_if_not_eq subject="storage_state" flag="hidden" ref_value="1"/>
+            <text_body name="storage_volume_text" width="100%" bind_text="storage_volume_text"/>
+            <lv_bar name="storage_used_bar"
+                    width="100%" height="8" bind_value="storage_used_pct" min_value="0" max_value="100"/>
+            <text_small name="storage_source"
+                        width="100%" bind_text="storage_source_text" long_mode="wrap" style_text_color="#text_muted"/>
+          </lv_obj>
+        </lv_obj>
+      </setting_group>
+      <!-- One row per consumer, in the plugin's report order -->
+      <setting_group name="group_storage_consumers">
+        <bind_flag_if_not_eq subject="storage_state" flag="hidden" ref_value="1"/>
+        <storage_consumer_row key="helix_temp" label="Print copies" icon="content_copy"/>
+        <storage_consumer_row key="3mf_outputs" label="3MF conversions" icon="cube_outline"/>
+        <storage_consumer_row key="analysis_sidecars" label="File analysis" icon="magnify_scan"/>
+        <storage_consumer_row key="photos" label="Print photos" icon="image_area"/>
+        <storage_consumer_row key="timelapse" label="Timelapse videos" icon="video"/>
+        <storage_consumer_row key="logs" label="Old logs" icon="console"/>
+        <storage_consumer_row key="thumbnails" label="Thumbnails" icon="image_area"/>
+        <storage_consumer_row key="user_gcode" label="Your files" icon="folder"/>
+        <storage_consumer_row key="plr" label="Power-loss recovery" icon="power_plug"/>
+      </setting_group>
+      <!-- AUTOMATIC CLEANUP: the plugin's storage_auto_cleanup feature -->
+      <setting_group name="group_storage_auto">
+        <plugin_feature_toggle_row name="row_storage_auto_cleanup"
+                                   feature="storage_auto_cleanup" label="Automatic cleanup" icon="delete"
+                                   description="Once a day, deletes print copies older than a week and logs older than a month. Your files, photos and timelapse videos are kept."
+                                   subject="plugin_feature_on_storage_auto_cleanup"
+                                   callback="on_plugin_feature_switch_changed"/>
+      </setting_group>
+    </lv_obj>
+  </view>
+</component>

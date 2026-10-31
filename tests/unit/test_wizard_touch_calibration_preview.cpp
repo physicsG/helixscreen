@@ -30,11 +30,11 @@ using namespace helix;
 
 namespace {
 
-constexpr int PANEL_W = 480;
-constexpr int PANEL_H = 800;
+constexpr int kPanelW = 480;
+constexpr int kPanelH = 800;
 // The kernel declares Y as 0..640 while the digitizer emits 0..799, so lv_evdev
 // scales Y up and clamps everything past raw 640 onto the bottom row.
-const TouchRangeSettings DECLARED{true, false, 0, PANEL_W - 1, 0, 640};
+const TouchRangeSettings kDeclared{true, false, 0, kPanelW - 1, 0, 640};
 
 /// lv_evdev's _evdev_calibrate(): integer scale, unconditional clamp.
 int evdev_calibrate(int v, int in_min, int in_max, int out_max) {
@@ -47,7 +47,7 @@ int evdev_calibrate(int v, int in_min, int in_max, int out_max) {
 /// Models the device's two stages: the evdev range (swap, scale, clamp) and the
 /// affine on top, each restorable the way the real backend's are.
 struct PipelineSink : ICalibrationSink {
-    TouchRangeSettings range = DECLARED;
+    TouchRangeSettings range = kDeclared;
     TouchRangeSource source = TouchRangeSource::Declared;
     TouchCalibration stored{};
     bool affine_enabled = true;
@@ -86,10 +86,10 @@ struct PipelineSink : ICalibrationSink {
     Point map(Point raw) const {
         const int sx = range.swap_axes ? raw.y : raw.x;
         const int sy = range.swap_axes ? raw.x : raw.y;
-        Point p{evdev_calibrate(sx, range.min_x, range.max_x, PANEL_W - 1),
-                evdev_calibrate(sy, range.min_y, range.max_y, PANEL_H - 1)};
+        Point p{evdev_calibrate(sx, range.min_x, range.max_x, kPanelW - 1),
+                evdev_calibrate(sy, range.min_y, range.max_y, kPanelH - 1)};
         if (affine_enabled && stored.valid) {
-            p = transform_point(stored, p, PANEL_W - 1, PANEL_H - 1);
+            p = transform_point(stored, p, kPanelW - 1, kPanelH - 1);
         }
         return p;
     }
@@ -104,7 +104,7 @@ void capture_and_preview(WizardTouchCalibrationStep& step, PipelineSink& sink) {
     WizardTouchCalibrationTestAccess::session(step).begin_capture(sink);
 
     TouchCalibrationPanel* panel = WizardTouchCalibrationTestAccess::panel(step);
-    panel->set_screen_size(PANEL_W, PANEL_H);
+    panel->set_screen_size(kPanelW, kPanelH);
     panel->start();
     for (int i = 0; i < 3; i++) {
         const Point raw = panel->get_target_position(i);
@@ -121,7 +121,7 @@ void capture_and_preview(WizardTouchCalibrationStep& step, PipelineSink& sink) {
     lv_obj_t* root = lv_obj_create(lv_screen_active());
     WizardTouchCalibrationTestAccess::invoke_calibration_complete(step, cal, root);
     lv_obj_delete(root);
-    REQUIRE(sink.range.max_y != DECLARED.max_y);
+    REQUIRE(sink.range.max_y != kDeclared.max_y);
 }
 
 void reset_stored_calibration_keys() {
@@ -143,7 +143,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     WizardTouchCalibrationTestAccess::session(step).begin_capture(sink);
 
     TouchCalibrationPanel* panel = WizardTouchCalibrationTestAccess::panel(step);
-    panel->set_screen_size(PANEL_W, PANEL_H);
+    panel->set_screen_size(kPanelW, kPanelH);
     panel->start();
     // The digitizer emits screen coordinates; the touch LVGL sees went through
     // the declared range with the affine off.
@@ -168,17 +168,17 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     INFO("preview range X(" << sink.range.min_x << ".." << sink.range.max_x << ") Y("
                             << sink.range.min_y << ".." << sink.range.max_y << ")");
     CHECK(std::abs(sink.range.min_x - 0) <= 5);
-    CHECK(std::abs(sink.range.max_x - (PANEL_W - 1)) <= 5);
+    CHECK(std::abs(sink.range.max_x - (kPanelW - 1)) <= 5);
     CHECK(std::abs(sink.range.min_y - 0) <= 5);
-    CHECK(std::abs(sink.range.max_y - (PANEL_H - 1)) <= 5);
+    CHECK(std::abs(sink.range.max_y - (kPanelH - 1)) <= 5);
     // A touch near the bottom edge, where 'Next' sits, reaches it.
     CHECK(sink.map({240, 790}).y > 750);
 
     // Back out without committing: the declared range is what the device runs,
     // and the diagnostics still say where it came from.
     WizardTouchCalibrationTestAccess::session(step).restore(sink);
-    CHECK(sink.range.max_y == DECLARED.max_y);
-    CHECK(sink.range.max_x == DECLARED.max_x);
+    CHECK(sink.range.max_y == kDeclared.max_y);
+    CHECK(sink.range.max_x == kDeclared.max_x);
     CHECK(sink.source == TouchRangeSource::Declared);
 
     lv_obj_delete(root);
@@ -194,11 +194,11 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Wizard retry re-captures under the declared
     WizardTouchCalibrationTestAccess::session(step).begin_capture(sink);
 
     // A previewed candidate re-programmed the range.
-    sink.apply_touch_range(false, 0, 0, PANEL_W - 1, PANEL_H - 1, TouchRangeSource::Stored);
+    sink.apply_touch_range(false, 0, 0, kPanelW - 1, kPanelH - 1, TouchRangeSource::Stored);
 
     WizardTouchCalibrationTestAccess::invoke_retry(step);
 
-    CHECK(sink.range.max_y == DECLARED.max_y);
+    CHECK(sink.range.max_y == kDeclared.max_y);
     CHECK_FALSE(sink.affine_enabled);
 }
 
@@ -208,11 +208,11 @@ TEST_CASE("TouchCalibrationSession: a committed range survives restore",
     TouchCalibrationSession session;
     session.begin_capture(sink);
 
-    sink.apply_touch_range(false, 0, 0, PANEL_W - 1, PANEL_H - 1, TouchRangeSource::Stored);
+    sink.apply_touch_range(false, 0, 0, kPanelW - 1, kPanelH - 1, TouchRangeSource::Stored);
     session.commit();
     session.restore(sink);
 
-    CHECK(sink.range.max_y == PANEL_H - 1);
+    CHECK(sink.range.max_y == kPanelH - 1);
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture, "Wizard cleanup after a preview restores the declared range",
@@ -224,7 +224,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Wizard cleanup after a preview restores the
 
     step.cleanup();
 
-    CHECK(sink.range.max_y == DECLARED.max_y);
+    CHECK(sink.range.max_y == kDeclared.max_y);
     CHECK(sink.source == TouchRangeSource::Declared);
     CHECK_FALSE(sink.stored.valid);
     CHECK(sink.affine_enabled);
@@ -262,10 +262,10 @@ TEST_CASE("TouchCalibrationSession: restore puts back the LIVE range, not the st
     PipelineSink sink;
     TouchCalibrationSession session;
     session.begin_capture(sink);
-    sink.apply_touch_range(false, 0, 0, PANEL_W - 1, PANEL_H - 1, TouchRangeSource::Stored);
+    sink.apply_touch_range(false, 0, 0, kPanelW - 1, kPanelH - 1, TouchRangeSource::Stored);
     session.restore(sink);
 
-    CHECK(sink.range.max_y == DECLARED.max_y);
+    CHECK(sink.range.max_y == kDeclared.max_y);
     CHECK(sink.source == TouchRangeSource::Declared);
 
     reset_stored_calibration_keys();
@@ -274,7 +274,7 @@ TEST_CASE("TouchCalibrationSession: restore puts back the LIVE range, not the st
 TEST_CASE("TouchCalibrationSession: restore reinstalls the transposed-range guess as itself",
           "[touch-calibration][session][range-fit][transposed-guess]") {
     PipelineSink sink;
-    sink.range = TouchRangeSettings{true, false, 0, PANEL_W, 0, PANEL_H};
+    sink.range = TouchRangeSettings{true, false, 0, kPanelW, 0, kPanelH};
     sink.source = TouchRangeSource::DisplaySize;
 
     TouchCalibrationSession session;
@@ -283,6 +283,6 @@ TEST_CASE("TouchCalibrationSession: restore reinstalls the transposed-range gues
     session.restore(sink);
 
     CHECK(sink.source == TouchRangeSource::DisplaySize);
-    CHECK(sink.range.max_x == PANEL_W);
-    CHECK(sink.range.max_y == PANEL_H);
+    CHECK(sink.range.max_x == kPanelW);
+    CHECK(sink.range.max_y == kPanelH);
 }

@@ -1,0 +1,13 @@
+{
+  "description": "Inject after the last line of a newline-terminated file",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "L2",
+      "action": "inject_after",
+      "args": {
+        "gcode": "M84\n"
+      }
+    }
+  ]
+}

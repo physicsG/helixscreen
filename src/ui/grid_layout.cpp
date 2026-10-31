@@ -13,26 +13,26 @@
 namespace helix {
 
 namespace {
-constexpr int GRID_TRACK_SCAN_MAX = 256;
+constexpr int kGridTrackScanMax = 256;
 
 // The track clamps are stated in tracks because that is what the grid
 // descriptor holds, but the quantiser works in whole cells, so it clamps the
 // cell count. Both bounds are whole cells, which is what lets the clamp run in
 // cell space without ever producing an odd track count.
-static_assert(GridLayout::MIN_TRACKS % GridLayout::TRACKS_PER_CELL == 0,
+static_assert(GridLayout::kMinTracks % GridLayout::TRACKS_PER_CELL == 0,
               "MIN_TRACKS must be a whole number of cells");
-static_assert(GridLayout::MAX_TRACKS % GridLayout::TRACKS_PER_CELL == 0,
+static_assert(GridLayout::kMaxTracks % GridLayout::TRACKS_PER_CELL == 0,
               "MAX_TRACKS must be a whole number of cells");
-constexpr int MIN_CELLS = GridLayout::MIN_TRACKS / GridLayout::TRACKS_PER_CELL;
-constexpr int MAX_CELLS = GridLayout::MAX_TRACKS / GridLayout::TRACKS_PER_CELL;
+constexpr int kMinCells = GridLayout::kMinTracks / GridLayout::TRACKS_PER_CELL;
+constexpr int kMaxCells = GridLayout::kMaxTracks / GridLayout::TRACKS_PER_CELL;
 } // namespace
 
 static int clamp_bp(UiBreakpoint bp) {
     int32_t v = to_int(bp);
     if (v < 0)
         return 0;
-    if (v >= GridLayout::NUM_BREAKPOINTS)
-        return GridLayout::NUM_BREAKPOINTS - 1;
+    if (v >= GridLayout::kNumBreakpoints)
+        return GridLayout::kNumBreakpoints - 1;
     return v;
 }
 
@@ -56,7 +56,7 @@ GridDimensions GridLayout::get_dimensions(UiBreakpoint bp, int content_w, int co
         helix::DisplayMetrics::active_scale());
     auto tracks = [cell](int content) {
         const int cells = (std::max(0, content) + cell / 2) / cell;
-        return GridLayout::TRACKS_PER_CELL * std::clamp(cells, MIN_CELLS, MAX_CELLS);
+        return GridLayout::TRACKS_PER_CELL * std::clamp(cells, kMinCells, kMaxCells);
     };
     return {tracks(content_w), tracks(content_h)};
 }
@@ -356,14 +356,14 @@ void GridLayout::clear() {
 }
 
 int GridLayout::gutter_px() {
-    return theme_manager_get_spacing("space_xs");
+    return theme_manager_get_spacing("home_grid_gap");
 }
 
 int grid_count_tracks(const int32_t* dsc) {
     if (dsc == nullptr) {
         return 0;
     }
-    for (int i = 0; i < GRID_TRACK_SCAN_MAX; ++i) {
+    for (int i = 0; i < kGridTrackScanMax; ++i) {
         if (dsc[i] == LV_GRID_TEMPLATE_LAST) {
             return i;
         }
@@ -435,6 +435,34 @@ std::pair<int, int> grow_span_to_fit(const std::function<bool(int, int)>& fits, 
         }
     }
     return {c, r};
+}
+
+TrackRect seat_grown_span(const TrackRect& saved, int grown_colspan, int grown_rowspan, int cols,
+                          int rows, int step_c, int step_r,
+                          const std::function<bool(const TrackRect&)>& available) {
+    const int gc = std::max(grown_colspan, saved.colspan);
+    const int gr = std::max(grown_rowspan, saved.rowspan);
+    if (gc == saved.colspan && gr == saved.rowspan) {
+        return saved;
+    }
+    const int sc = std::max(step_c, 1);
+    const int sr = std::max(step_r, 1);
+
+    // Every candidate covers the saved rectangle, so the widget only ever adds
+    // tracks around where the user put it. Smallest shift first: right and down
+    // before the origin moves at all.
+    for (int dr = 0; dr <= gr - saved.rowspan; dr += sr) {
+        for (int dc = 0; dc <= gc - saved.colspan; dc += sc) {
+            const TrackRect cand{saved.col - dc, saved.row - dr, gc, gr};
+            if (cand.col < 0 || cand.row < 0 || cand.col + gc > cols || cand.row + gr > rows) {
+                continue;
+            }
+            if (available(cand)) {
+                return cand;
+            }
+        }
+    }
+    return saved;
 }
 
 } // namespace helix

@@ -43,5 +43,8 @@ using AdvancedProgressCallback = std::function<void(int percent)>;
 /// Progress callback for resonance testing: percent plus the phase it belongs to.
 /// Separate from AdvancedProgressCallback because SHAPER_CALIBRATE is the one
 /// long operation whose UI text depends on a phase the percentage cannot encode.
-using ShaperProgressCallback = std::function<void(int percent, ShaperCalibrationPhase phase)>;
+/// freq_hz is the sweep's latest "Testing frequency" value on Sweeping reports
+/// and 0 on every other phase.
+using ShaperProgressCallback =
+    std::function<void(int percent, ShaperCalibrationPhase phase, float freq_hz)>;
 } // namespace helix

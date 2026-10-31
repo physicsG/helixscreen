@@ -19,12 +19,12 @@ using helix::cross_page_edge_zone_px;
 using helix::cross_page_note_dwell_flip;
 using helix::cross_page_past_left_border;
 using helix::cross_page_past_right_border;
-using helix::CROSS_PAGE_PUSH_CAP_SLOP_PX;
 using helix::cross_page_push_px_per_s;
 using helix::cross_page_step;
 using helix::CrossPageInput;
 using helix::CrossPageState;
 using helix::CrossPageStep;
+using helix::kCrossPagePushCapSlopPx;
 
 namespace {
 
@@ -33,19 +33,19 @@ constexpr float TRACK_800x480 = 54.58f;
 
 /// A 700px page frame, off the screen origin so no rule can pass by reading 0
 /// for an edge.
-constexpr int FRAME_X1 = 10;
-constexpr int FRAME_X2 = 709;
+constexpr int kFrameX1 = 10;
+constexpr int kFrameX2 = 709;
 
 /// A two-track widget, and one wide enough that its leading side crosses a
 /// border while the pointer is still clear of the edge zone.
-constexpr int WIDGET_W = 120;
-constexpr int WIDE_W = 400;
+constexpr int kWidgetW = 120;
+constexpr int kWideW = 400;
 
 CrossPageInput cross_move(int pointer_x, int widget_left, uint32_t elapsed_ms,
-                          int widget_w = WIDGET_W) {
+                          int widget_w = kWidgetW) {
     CrossPageInput in;
-    in.frame_x1 = FRAME_X1;
-    in.frame_x2 = FRAME_X2;
+    in.frame_x1 = kFrameX1;
+    in.frame_x2 = kFrameX2;
     in.cell_w = TRACK_800x480;
     in.pointer_x = pointer_x;
     in.widget_left = widget_left;
@@ -87,9 +87,9 @@ TEST_CASE("cross-page tuning keeps the 800x480 feel and scales with the track",
 TEST_CASE("the edge push advances by time in the zone rather than by move count",
           "[1638][grid_edit][cross_page]") {
     const int speed = cross_page_push_px_per_s(TRACK_800x480);
-    const int x = FRAME_X2 - 20;
+    const int x = kFrameX2 - 20;
     const int raw_left = x - 110; // grabbed near the widget's right side
-    REQUIRE(x >= FRAME_X2 - zone_px());
+    REQUIRE(x >= kFrameX2 - zone_px());
 
     // Pushed px after the zone entry and then moves @p steps ms apart.
     auto push_after = [&](std::initializer_list<uint32_t> steps) {
@@ -104,7 +104,7 @@ TEST_CASE("the edge push advances by time in the zone rather than by move count"
 
     const int pushed_66ms = speed * 66 / 1000;
     REQUIRE(pushed_66ms > 0);
-    REQUIRE(raw_left + pushed_66ms <= FRAME_X2 - WIDGET_W / 2); // clear of crossing and cap
+    REQUIRE(raw_left + pushed_66ms <= kFrameX2 - kWidgetW / 2); // clear of crossing and cap
 
     CHECK(push_after({66}) == pushed_66ms);
     CHECK(push_after({33, 33}) == pushed_66ms);
@@ -113,7 +113,7 @@ TEST_CASE("the edge push advances by time in the zone rather than by move count"
 
     SECTION("time before entering the zone pushes nothing, and leaving drops the push") {
         CrossPageState state;
-        const int mid = (FRAME_X1 + FRAME_X2) / 2;
+        const int mid = (kFrameX1 + kFrameX2) / 2;
         cross_page_step(state, cross_move(mid, mid - 110, 0));
         CHECK(cross_page_step(state, cross_move(x, raw_left, 1000)).widget_left == raw_left);
         CHECK(cross_page_step(state, cross_move(x, raw_left, 66)).widget_left ==
@@ -126,33 +126,33 @@ TEST_CASE("the edge push advances by time in the zone rather than by move count"
 TEST_CASE("the push caps mirror on both sides and both reach a crossing",
           "[1638][grid_edit][cross_page]") {
     SECTION("right: the cap sits the slop past the majority line") {
-        const int x = FRAME_X2 - zone_px() / 2;
+        const int x = kFrameX2 - zone_px() / 2;
         const int raw_left = x - 110; // majority inside: only the push can cross
-        const int majority_line = FRAME_X2 - WIDGET_W / 2;
+        const int majority_line = kFrameX2 - kWidgetW / 2;
         REQUIRE(raw_left < majority_line);
         CrossPageState state;
         cross_page_step(state, cross_move(x, raw_left, 0));
         const CrossPageStep out = cross_page_step(state, cross_move(x, raw_left, 10000));
-        CHECK(out.widget_left - majority_line == CROSS_PAGE_PUSH_CAP_SLOP_PX);
+        CHECK(out.widget_left - majority_line == kCrossPagePushCapSlopPx);
         CHECK(out.flip_dir == 1);
     }
 
     SECTION("left: the mirror of the right cap, so a left crossing is reachable") {
-        const int x = FRAME_X1 + zone_px() / 2;
+        const int x = kFrameX1 + zone_px() / 2;
         const int raw_left = x - 10; // majority inside: only the push can cross
-        const int majority_line = FRAME_X1 - WIDGET_W / 2;
+        const int majority_line = kFrameX1 - kWidgetW / 2;
         REQUIRE(raw_left > majority_line);
         CrossPageState state;
         cross_page_step(state, cross_move(x, raw_left, 0));
         const CrossPageStep out = cross_page_step(state, cross_move(x, raw_left, 10000));
-        CHECK(majority_line - out.widget_left == CROSS_PAGE_PUSH_CAP_SLOP_PX);
+        CHECK(majority_line - out.widget_left == kCrossPagePushCapSlopPx);
         CHECK(out.flip_dir == -1);
     }
 
     SECTION("a pointer that already carries the widget past the cap is held at it") {
-        const int x = FRAME_X2 - zone_px() / 2;
+        const int x = kFrameX2 - zone_px() / 2;
         const int raw_left = x - 10;
-        const int cap = FRAME_X2 - WIDGET_W / 2 + CROSS_PAGE_PUSH_CAP_SLOP_PX;
+        const int cap = kFrameX2 - kWidgetW / 2 + kCrossPagePushCapSlopPx;
         REQUIRE(raw_left > cap);
         CrossPageState state;
         CHECK(cross_page_step(state, cross_move(x, raw_left, 0)).widget_left == cap);
@@ -165,39 +165,39 @@ TEST_CASE("a crossing requests one flip and re-arms once the widget is back insi
     // A wide widget crossed by its leading side, the pointer clear of both
     // zones: nothing but the crossing can ask for a flip.
     SECTION("right") {
-        const int x = FRAME_X2 - zone_px() - 20;
-        const int crossed_left = FRAME_X2 - WIDE_W / 2 + 30;
-        const int inside_left = FRAME_X2 - WIDE_W / 2 - 30;
+        const int x = kFrameX2 - zone_px() - 20;
+        const int crossed_left = kFrameX2 - kWideW / 2 + 30;
+        const int inside_left = kFrameX2 - kWideW / 2 - 30;
         REQUIRE(x > crossed_left);
         REQUIRE(x - 60 > inside_left);
         CrossPageState state;
-        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, WIDE_W)).flip_dir == 1);
-        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, WIDE_W)).flip_dir == 0);
-        CHECK(cross_page_step(state, cross_move(x - 20, crossed_left - 20, 33, WIDE_W)).flip_dir ==
+        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, kWideW)).flip_dir == 1);
+        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, kWideW)).flip_dir == 0);
+        CHECK(cross_page_step(state, cross_move(x - 20, crossed_left - 20, 33, kWideW)).flip_dir ==
               0);
-        CHECK(cross_page_step(state, cross_move(x - 60, inside_left, 33, WIDE_W)).flip_dir == 0);
-        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, WIDE_W)).flip_dir == 1);
+        CHECK(cross_page_step(state, cross_move(x - 60, inside_left, 33, kWideW)).flip_dir == 0);
+        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, kWideW)).flip_dir == 1);
     }
 
     SECTION("left") {
-        const int x = FRAME_X1 + zone_px() + 20;
-        const int crossed_left = FRAME_X1 - WIDE_W / 2 - 30;
-        const int inside_left = FRAME_X1 - WIDE_W / 2 + 30;
-        REQUIRE(x < crossed_left + WIDE_W);
-        REQUIRE(x + 60 < inside_left + WIDE_W);
+        const int x = kFrameX1 + zone_px() + 20;
+        const int crossed_left = kFrameX1 - kWideW / 2 - 30;
+        const int inside_left = kFrameX1 - kWideW / 2 + 30;
+        REQUIRE(x < crossed_left + kWideW);
+        REQUIRE(x + 60 < inside_left + kWideW);
         CrossPageState state;
-        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, WIDE_W)).flip_dir == -1);
-        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, WIDE_W)).flip_dir == 0);
-        CHECK(cross_page_step(state, cross_move(x + 60, inside_left, 33, WIDE_W)).flip_dir == 0);
-        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, WIDE_W)).flip_dir == -1);
+        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, kWideW)).flip_dir == -1);
+        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, kWideW)).flip_dir == 0);
+        CHECK(cross_page_step(state, cross_move(x + 60, inside_left, 33, kWideW)).flip_dir == 0);
+        CHECK(cross_page_step(state, cross_move(x, crossed_left, 33, kWideW)).flip_dir == -1);
     }
 }
 
 TEST_CASE("the dwell starts on zone entry and stops on zone exit",
           "[1638][grid_edit][cross_page]") {
-    const int right_x = FRAME_X2 - 20;
-    const int left_x = FRAME_X1 + 20;
-    const int mid = (FRAME_X1 + FRAME_X2) / 2;
+    const int right_x = kFrameX2 - 20;
+    const int left_x = kFrameX1 + 20;
+    const int mid = (kFrameX1 + kFrameX2) / 2;
     CrossPageState state;
 
     CrossPageStep out = cross_page_step(state, cross_move(right_x, right_x - 110, 0));
@@ -223,9 +223,9 @@ TEST_CASE("the dwell starts on zone entry and stops on zone exit",
 }
 
 TEST_CASE("a flip spends the zone stay for both triggers", "[1638][grid_edit][cross_page]") {
-    const int x = FRAME_X2 - 20;
+    const int x = kFrameX2 - 20;
     const int raw_left = x - 110; // majority inside: the push crosses after a while
-    const int mid = (FRAME_X1 + FRAME_X2) / 2;
+    const int mid = (kFrameX1 + kFrameX2) / 2;
 
     SECTION("a crossing in the zone stops the dwell, and holding asks for nothing more") {
         CrossPageState state;
@@ -253,7 +253,7 @@ TEST_CASE("a flip spends the zone stay for both triggers", "[1638][grid_edit][cr
         bool crossed = false;
         for (int held_ms = 0; held_ms < 1500; held_ms += 33) {
             const CrossPageStep out = cross_page_step(state, cross_move(x, raw_left, 33));
-            crossed |= out.widget_left > FRAME_X2 - WIDGET_W / 2;
+            crossed |= out.widget_left > kFrameX2 - kWidgetW / 2;
             CHECK(out.flip_dir == 0);
             CHECK(out.dwell_dir == 0);
         }
@@ -274,11 +274,11 @@ TEST_CASE("a flip spends the zone stay for both triggers", "[1638][grid_edit][cr
 TEST_CASE("a drop creates a page anywhere on the page past the last, from the last page only "
           "past its right border, and from the first page past its left border",
           "[1638][grid_edit][cross_page]") {
-    const int x = FRAME_X2 - zone_px() - 20;
-    const int past_right = FRAME_X2 - WIDE_W / 2 + 30;
-    const int inside = FRAME_X2 - WIDE_W / 2 - 30;
-    const int past_left = FRAME_X1 - WIDE_W / 2 - 30;
-    const int left_of_zone = FRAME_X1 + zone_px() + 20;
+    const int x = kFrameX2 - zone_px() - 20;
+    const int past_right = kFrameX2 - kWideW / 2 + 30;
+    const int inside = kFrameX2 - kWideW / 2 - 30;
+    const int past_left = kFrameX1 - kWideW / 2 - 30;
+    const int left_of_zone = kFrameX1 + zone_px() + 20;
 
     struct Row {
         const char* what;
@@ -306,7 +306,7 @@ TEST_CASE("a drop creates a page anywhere on the page past the last, from the la
     };
     for (const Row& row : rows) {
         INFO(row.what);
-        CrossPageInput in = cross_move(row.pointer_x, row.widget_left, 33, WIDE_W);
+        CrossPageInput in = cross_move(row.pointer_x, row.widget_left, 33, kWideW);
         in.page_index = row.page_index;
         in.page_count = 2;
         in.has_next_page_slot = row.has_next_page_slot;

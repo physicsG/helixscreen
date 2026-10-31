@@ -38,6 +38,7 @@
 #pragma once
 
 #include "connection_state.h"
+#include "helix_shared_callback.h"
 #include "hv/Event.h" // TimerID
 #include "hv/WebSocketClient.h"
 #include "i_moonraker_client.h"
@@ -56,14 +57,17 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <vector>
 
+class HttpRequest; // NAMESPACE_OK: libhv's global type; the firmware's parse-only shim has none
+
 namespace helix {
-// SubscriptionId and INVALID_SUBSCRIPTION_ID are defined in i_moonraker_client.h
-// RequestId and INVALID_REQUEST_ID are defined in moonraker_request_tracker.h
+// SubscriptionId and kInvalidSubscriptionId are defined in i_moonraker_client.h
+// RequestId and kInvalidRequestId are defined in moonraker_request_tracker.h
 
 using ::json; // Make global json alias visible in this namespace
 
@@ -100,8 +104,8 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param on_disconnected Callback invoked when connection closes
      * @return 0 on success, non-zero on error
      */
-    int connect(const char* url, std::function<void()> on_connected,
-                std::function<void()> on_disconnected) override;
+    int connect(const char* url, helix::SharedCallback<void()> on_connected,
+                helix::SharedCallback<void()> on_disconnected) override;
 
     /**
      * @brief Disconnect from Moonraker WebSocket server
@@ -162,6 +166,10 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      */
     void set_auto_reconnect(bool enabled) override;
 
+    ConnectFailureKind last_connect_failure() const override {
+        return last_connect_failure_.load(std::memory_order_relaxed);
+    }
+
     // ========== Subscription Management ==========
 
     /**
@@ -173,7 +181,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param cb Callback function receiving parsed JSON notification
      * @return Subscription ID for later unsubscription (0 = invalid/failed)
      */
-    SubscriptionId register_notify_update(std::function<void(const json&)> cb) override;
+    SubscriptionId register_notify_update(helix::SharedCallback<void(const json&)> cb) override;
 
     /**
      * @brief Unsubscribe from status update notifications
@@ -197,7 +205,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param cb Callback function receiving parsed JSON notification
      */
     void register_method_callback(const std::string& method, const std::string& handler_name,
-                                  std::function<void(const json&)> cb) override;
+                                  helix::SharedCallback<void(const json&)> cb) override;
 
     /**
      * @brief Unregister a method callback by handler name
@@ -245,10 +253,10 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param method RPC method name
      * @param params JSON parameters object
      * @param cb Callback function receiving response JSON
-     * @return Request ID for cancellation, or INVALID_REQUEST_ID on error
+     * @return Request ID for cancellation, or kInvalidRequestId on error
      */
     RequestId send_jsonrpc(const std::string& method, const json& params,
-                           std::function<void(const json&)> cb) override;
+                           helix::SharedCallback<void(const json&)> cb) override;
 
     /**
      * @brief Send JSON-RPC request with success and error callbacks
@@ -265,11 +273,12 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      *        captured from the CALLER's own callbacks before any internal
      *        wrapping. Omit it to have the tracker infer intent from @p silent
      *        and the presence of @p error_cb.
-     * @return Request ID for cancellation, or INVALID_REQUEST_ID on error
+     * @return Request ID for cancellation, or kInvalidRequestId on error
      */
     RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override;
 
@@ -312,7 +321,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      */
     void get_gcode_store(int count,
                          std::function<void(const std::vector<GcodeStoreEntry>&)> on_success,
-                         std::function<void(const MoonrakerError&)> on_error) override;
+                         helix::SharedCallback<void(const MoonrakerError&)> on_error) override;
 
     /**
      * @brief Fetch cached temperature history from Moonraker
@@ -324,8 +333,9 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param on_success Callback with the parsed per-sensor store (oldest first)
      * @param on_error Callback for errors
      */
-    void get_temperature_store(std::function<void(const TemperatureStore&)> on_success,
-                               std::function<void(const MoonrakerError&)> on_error) override;
+    void
+    get_temperature_store(std::function<void(const TemperatureStore&)> on_success,
+                          helix::SharedCallback<void(const MoonrakerError&)> on_error) override;
 
     /**
      * @brief Parse a server.temperature_store JSON "result" object into a TemperatureStore
@@ -351,9 +361,9 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param on_complete Callback invoked when discovery completes successfully
      * @param on_error Optional callback invoked if discovery fails (e.g., Klippy not connected)
      */
-    void
-    discover_printer(std::function<void()> on_complete,
-                     std::function<void(const std::string& reason)> on_error = nullptr) override;
+    void discover_printer(
+        helix::SharedCallback<void()> on_complete,
+        helix::SharedCallback<void(const std::string& reason)> on_error = nullptr) override;
 
     /**
      * @brief Parse object list from printer.objects.list response
@@ -487,7 +497,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      *
      * @param callback Callback receiving raw bed_mesh JSON, or nullptr to disable
      */
-    void set_bed_mesh_callback(std::function<void(const json&)> callback) override {
+    void set_bed_mesh_callback(helix::SharedCallback<void(const json&)> callback) override {
         discovery_.set_bed_mesh_callback(std::move(callback));
     }
 
@@ -508,7 +518,8 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param handler_name Unique key for replace / remove
      * @param cb           Callback fired on each connection event
      */
-    void add_connected_observer(const std::string& handler_name, std::function<void()> cb) override;
+    void add_connected_observer(const std::string& handler_name,
+                                helix::SharedCallback<void()> cb) override;
 
     /**
      * @brief Remove a previously-registered on-connected observer
@@ -571,7 +582,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      *
      * Applies only to a client that has NEVER opened a socket. Once a session
      * has been established, staleness is owned by the health timer's
-     * MAX_RECONNECT_STALL_MS check instead. Default 60000ms, matching it.
+     * kMaxReconnectStallMs check instead. Default 60000ms, matching it.
      *
      * @param timeout_ms Window measured from the connect() call
      */
@@ -691,7 +702,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
      * @param cb The callback to invoke; no-op if empty.
      * @param cause Short human-readable label for log messages.
      */
-    void invoke_connected_callback(const std::function<void()>& cb, const char* cause);
+    void invoke_connected_callback(const helix::SharedCallback<void()>& cb, const char* cause);
 
     // ========== WebSocket callback trampolines (install-once) ==========
     // The inherited libhv std::function callbacks (onopen/onmessage/onclose) are
@@ -727,13 +738,13 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
 
     // Notification callbacks (protected to allow mock to trigger notifications)
     // Map of subscription ID -> callback for O(1) unsubscription
-    std::map<SubscriptionId, std::function<void(const json&)>> notify_callbacks_;
+    std::map<SubscriptionId, helix::SharedCallback<void(const json&)>> notify_callbacks_;
     std::atomic<SubscriptionId> next_subscription_id_{1}; // Start at 1 (0 = invalid)
     std::mutex callbacks_mutex_; // Protect notify_callbacks_ and method_callbacks_
 
     // Persistent method-specific callbacks (protected to allow mock to dispatch)
     // method_name : { handler_name : callback }
-    std::map<std::string, std::map<std::string, std::function<void(const json&)>>>
+    std::map<std::string, std::map<std::string, helix::SharedCallback<void(const json&)>>>
         method_callbacks_;
 
     // Discovery sequence (protected to allow mock access to hardware vectors)
@@ -771,21 +782,25 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
     mutable std::mutex state_callback_mutex_; // Protect state_change_callback_ during destruction
     uint32_t connection_timeout_ms_;
 
+    // The upgrade request libhv sends, handed over once before any open(). open() only
+    // merges headers into it, so connect() sets or erases the API key here itself.
+    std::shared_ptr<HttpRequest> upgrade_request_;
+
     // Connection parameters (from config)
     uint32_t keepalive_interval_ms_;
     uint32_t reconnect_min_delay_ms_;
     uint32_t reconnect_max_delay_ms_;
 
     // Stored connection info for force_reconnect()
-    std::string last_url_;                          // URL used in last connect()
-    std::function<void()> last_on_connected_;       // Callback from last connect()
-    std::function<void()> last_on_disconnected_;    // Callback from last connect()
-    std::function<void()> last_discovery_complete_; // Callback from last discover_printer()
-    mutable std::mutex reconnect_mutex_;            // Protect stored connection info
+    std::string last_url_;                                  // URL used in last connect()
+    helix::SharedCallback<void()> last_on_connected_;       // Callback from last connect()
+    helix::SharedCallback<void()> last_on_disconnected_;    // Callback from last connect()
+    helix::SharedCallback<void()> last_discovery_complete_; // Callback from last discover_printer()
+    mutable std::mutex reconnect_mutex_;                    // Protect stored connection info
 
     // Additional on-connected observers (multi-listener, fired alongside
     // last_on_connected_ inside invoke_connected_callback).
-    std::map<std::string, std::function<void()>> connected_observers_;
+    std::map<std::string, helix::SharedCallback<void()>> connected_observers_;
     mutable std::mutex connected_observers_mutex_;
 
     // Event handler for transport events (decouples from UI layer)
@@ -815,10 +830,13 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
     // Periodic health-check timer (runs on libhv event loop thread)
     // Checks request timeouts and reconnection staleness independently of message flow
     hv::TimerID health_timer_id_{0};
-    static constexpr int HEALTH_CHECK_INTERVAL_MS = 5000;
+    static constexpr int kHealthCheckIntervalMs = 5000;
 
     void start_health_timer();
     void stop_health_timer();
+    /// One health-timer tick: request timeouts, the Klippy state poll, reconnect
+    /// staleness. The timer calls it under callback_lifecycle_mutex_.
+    void on_health_tick();
 
     // Builds the reconn_setting_t from reconnect_min_delay_ms_/reconnect_max_delay_ms_
     // and installs it via setReconnect(). Shared by connect() and
@@ -847,7 +865,7 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
     // event loop thread, written by set_connection_state(), which any thread may
     // call — force_reconnect() drives it from the main thread.
     std::atomic<SteadyTicks> reconnect_started_at_{0};
-    static constexpr int MAX_RECONNECT_STALL_MS = 60000;
+    static constexpr int kMaxReconnectStallMs = 60000;
 
     // Initial-connection staleness detection — the never-connected counterpart
     // of the above. The health timer cannot own this: it is started from
@@ -860,7 +878,29 @@ class MoonrakerClient : public hv::WebSocketClient, public IMoonrakerClient {
     // treatment.
     std::atomic<SteadyTicks> connect_started_at_{0};
     std::atomic<bool> initial_failure_notified_{false};
+    // Written on the libhv event loop thread when a never-opened attempt closes,
+    // read by the UI thread after its on_disconnected callback.
+    std::atomic<ConnectFailureKind> last_connect_failure_{ConnectFailureKind::Unknown};
     uint32_t initial_connect_failure_ms_{60000};
+
+    /// Klippy's state is polled from printer.info after notify_klippy_disconnected,
+    /// because Moonraker announces a successful start (notify_klippy_ready) but never
+    /// a failed one: without the poll a startup error reads as SHUTDOWN forever. The
+    /// health timer drives it; it ends on a ready/shutdown/error answer, on
+    /// notify_klippy_ready, on a socket close, or after kKlippyStatePollMaxMs.
+    /// Shared with the poll's response callbacks so they never capture `this`.
+    struct KlippyStatePoll {
+        std::atomic<SteadyTicks> started_at{0}; ///< 0 = not polling
+        std::atomic<uint64_t> generation{0};    ///< Bumped on every start and stop
+        std::atomic<bool> in_flight{false};
+    };
+    std::shared_ptr<KlippyStatePoll> klippy_state_poll_ = std::make_shared<KlippyStatePoll>();
+    static constexpr int kKlippyStatePollMaxMs = 120000;
+
+    void start_klippy_state_poll();
+    void stop_klippy_state_poll(const char* why);
+    /// One poll step: sends printer.info when a poll is active and none is in flight.
+    void poll_klippy_state();
 
     // Object-destruction guard, and the only liveness guard this client has. Reset
     // ONLY in the destructor. The install-once WS trampolines capture a weak_ptr to

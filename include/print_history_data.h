@@ -9,6 +9,16 @@
 #include <string>
 #include <vector>
 
+namespace helix {
+
+/// One camera photo of a job (print_photos.h).
+struct PrintPhoto {
+    std::string kind; ///< kPhotoKindLayer or kPhotoKindEnd
+    std::string path; ///< relative to the gcodes root, inside kPhotosDir
+};
+
+} // namespace helix
+
 /**
  * @brief Time filter for history dashboard queries
  */
@@ -44,11 +54,15 @@ struct PrintHistoryJob {
     /// Printed from a copy this app rewrote: `filename` and the file fields
     /// below describe the recovered original, not what the printer ran.
     bool from_rewrite = false;
+    /// The plate the job printed when `filename` is an archive the app
+    /// extracted it from (0 otherwise): a reprint extracts that plate again.
+    int archive_plate = 0;
 
     // Metadata from G-code file
     std::string filament_type; ///< PLA, PETG, ABS, etc.
     uint32_t layer_count = 0;
     double layer_height = 0.0;
+    double object_height = 0.0; ///< Tallest object in mm (metadata.object_height); 0 when unknown
     double nozzle_temp = 0.0;
     double bed_temp = 0.0;
     std::vector<ThumbnailInfo> thumbnails; ///< All available thumbnails with dimensions
@@ -67,6 +81,10 @@ struct PrintHistoryJob {
     std::string
         timelapse_filename;     ///< Associated timelapse file (e.g., "timelapse/print_2024...mp4")
     bool has_timelapse = false; ///< True if timelapse file was found for this job
+
+    /// Camera photos its auxiliary_data links; empty when it links none (the
+    /// photo record may still list some: HistoryPhotoViewer asks for it).
+    std::vector<helix::PrintPhoto> photos;
 };
 
 namespace helix {
@@ -156,7 +174,7 @@ struct FilamentUsageByType {
     case PrintJobStatus::COMPLETED:
         return "Completed";
     case PrintJobStatus::CANCELLED:
-        return "Cancelled";
+        return "Canceled";
     case PrintJobStatus::ERROR:
         return "Failed";
     case PrintJobStatus::IN_PROGRESS:

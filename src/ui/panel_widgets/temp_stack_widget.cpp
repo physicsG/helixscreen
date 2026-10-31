@@ -47,7 +47,7 @@ namespace {
 // Text size tier for the stacked icon-above-temperature layout, and the tier
 // the fit is measured at. One name so the measurement and the applied font can
 // never drift apart.
-constexpr const char* SIZE_STACKED = "md";
+constexpr const char* kSizeStacked = "md";
 
 // Make all children of a page pass events through (not clickable, bubble to parent)
 void make_children_passthrough(lv_obj_t* parent) {
@@ -247,7 +247,7 @@ void TempStackWidget::on_size_changed(int /*colspan*/, int rowspan, int /*width_
     if (!widget_obj_ || is_carousel_mode())
         return;
 
-    static_assert(ICON_ABOVE_MIN_ROWSPAN == GridLayout::TRACKS_PER_CELL + 1,
+    static_assert(kIconAboveMinRowspan == GridLayout::TRACKS_PER_CELL + 1,
                   "The stacked layout starts one track above a whole authored cell");
 
     // Collect the rows up front: the layout decision needs the visible count
@@ -274,7 +274,7 @@ void TempStackWidget::on_size_changed(int /*colspan*/, int rowspan, int /*width_
     // LARGER text fits - asking it at the current font would promote sizes
     // that then overflow the moment the type grows with them.
     const lv_font_t* tall_text_font =
-        theme_manager_get_font(theme_manager_size_to_font_token(SIZE_STACKED, "xs"));
+        theme_manager_get_font(theme_manager_size_to_font_token(kSizeStacked, "xs"));
     const StackedRowMetrics tall_row{
         static_cast<int>(mdi_icons_24.line_height),
         tall_text_font ? static_cast<int>(tall_text_font->line_height) : 0, icon_gap_px};
@@ -286,7 +286,7 @@ void TempStackWidget::on_size_changed(int /*colspan*/, int rowspan, int /*width_
     // does on its own - the point of putting the icon on its own line is the
     // room it frees for the number underneath it.
     const bool tall_pixels = height_px >= widget_size::h_tall();
-    const char* size = icon_above ? SIZE_STACKED : (tall_pixels ? "sm" : "xs");
+    const char* size = icon_above ? kSizeStacked : (tall_pixels ? "sm" : "xs");
 
     // Get text font for this size tier
     const char* font_token = theme_manager_size_to_font_token(size, "xs");
@@ -353,34 +353,16 @@ void TempStackWidget::detach() {
 }
 
 void TempStackWidget::handle_nozzle_clicked() {
-    if (long_pressed_) {
-        long_pressed_ = false;
-        spdlog::debug("[TempStackWidget] Nozzle click suppressed (follows long-press)");
-        return;
-    }
-
     spdlog::info("[TempStackWidget] Nozzle clicked - opening temp graph overlay");
     get_global_temp_graph_overlay().open(TempGraphOverlay::Mode::Nozzle, parent_screen_);
 }
 
 void TempStackWidget::handle_bed_clicked() {
-    if (long_pressed_) {
-        long_pressed_ = false;
-        spdlog::debug("[TempStackWidget] Bed click suppressed (follows long-press)");
-        return;
-    }
-
     spdlog::info("[TempStackWidget] Bed clicked - opening temp graph overlay");
     get_global_temp_graph_overlay().open(TempGraphOverlay::Mode::Bed, parent_screen_);
 }
 
 void TempStackWidget::handle_chamber_clicked() {
-    if (long_pressed_) {
-        long_pressed_ = false;
-        spdlog::debug("[TempStackWidget] Chamber click suppressed (follows long-press)");
-        return;
-    }
-
     spdlog::info("[TempStackWidget] Chamber clicked - opening temp graph overlay");
     get_global_temp_graph_overlay().open(TempGraphOverlay::Mode::Chamber, parent_screen_);
 }

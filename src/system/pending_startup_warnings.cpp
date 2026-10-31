@@ -12,8 +12,8 @@ namespace helix {
 
 // Upper bound on the queue. A runaway pre-init loop (e.g. repeated NOTIFY_*
 // on AD5M's 107 MB budget) would otherwise OOM before ToastManager::init()
-// drains this. Drops silently past the cap; one log line is emitted.
-static constexpr size_t MAX_PENDING = 64;
+// drains this. Drops past the cap, logging once until the queue has room again.
+static constexpr size_t kMaxPending = 64;
 
 PendingStartupWarnings& PendingStartupWarnings::instance() {
     static PendingStartupWarnings s_instance;
@@ -22,12 +22,12 @@ PendingStartupWarnings& PendingStartupWarnings::instance() {
 
 void PendingStartupWarnings::enqueue(Severity severity, std::string message, uint32_t duration_ms) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (pending_.size() >= MAX_PENDING) {
-        // Log once per overflow boundary — not once per drop.
-        if (pending_.size() == MAX_PENDING) {
+    if (pending_.size() >= kMaxPending) {
+        if (!overflow_warned_) {
+            overflow_warned_ = true;
             spdlog::warn("[PendingStartupWarnings] queue full ({} entries) — "
                          "dropping subsequent early notifications",
-                         MAX_PENDING);
+                         kMaxPending);
         }
         return;
     }
@@ -54,6 +54,7 @@ void PendingStartupWarnings::drain(
     {
         std::lock_guard<std::mutex> lock(mu_);
         local.swap(pending_);
+        overflow_warned_ = false;
     }
     for (const auto& entry : local) {
         on_warning(entry.severity, entry.message, entry.duration_ms);
@@ -63,6 +64,7 @@ void PendingStartupWarnings::drain(
 void PendingStartupWarnings::clear() {
     std::lock_guard<std::mutex> lock(mu_);
     pending_.clear();
+    overflow_warned_ = false;
 }
 
 } // namespace helix

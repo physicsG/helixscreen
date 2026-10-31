@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <random>
+#include <utility>
 
 /**
  * @file screensaver_motion.h
@@ -25,18 +27,18 @@ namespace helix::ui::screensaver {
 struct MotionClock {
     /// One gap longer than this counts as this long, so after a stall the motion resumes
     /// where it stopped instead of jumping ahead.
-    static constexpr uint32_t MAX_GAP_MS = 500;
+    static constexpr uint32_t kMaxGapMs = 500;
 
     constexpr void reset(uint32_t now_ms) {
         last_ms = now_ms;
     }
 
-    /// Milliseconds since the previous reset() or advance(), at most MAX_GAP_MS.
+    /// Milliseconds since the previous reset() or advance(), at most kMaxGapMs.
     constexpr uint32_t advance(uint32_t now_ms) {
         // Unsigned subtraction stays exact across the tick wrap.
         const uint32_t gap = now_ms - last_ms;
         last_ms = now_ms;
-        return std::min(gap, MAX_GAP_MS);
+        return std::min(gap, kMaxGapMs);
     }
 
     uint32_t last_ms = 0;
@@ -113,6 +115,62 @@ inline float unit_random(std::minstd_rand& rng) {
 /// An integer in [0, n), for n > 0.
 inline int random_below(std::minstd_rand& rng, int n) {
     return static_cast<int>(rng() % static_cast<std::minstd_rand::result_type>(n));
+}
+
+/// An integer in [lo, hi], both included, for lo <= hi.
+inline int random_int(std::minstd_rand& rng, int lo, int hi) {
+    return lo + random_below(rng, hi - lo + 1);
+}
+
+/// Uniform in [lo, hi], from unit_random().
+inline float random_between(std::minstd_rand& rng, float lo, float hi) {
+    return lo + (hi - lo) * unit_random(rng);
+}
+
+/// Standard normal, by Box-Muller from two unit_random() draws.
+inline float random_normal(std::minstd_rand& rng) {
+    const float u1 = std::max(unit_random(rng), 1e-7f);
+    const float u2 = unit_random(rng);
+    return std::sqrt(-2.0f * std::log(u1)) * std::cos(6.28318530717958f * u2);
+}
+
+/// Normal with mean `mean` and standard deviation `sd`.
+inline float random_normal(std::minstd_rand& rng, float mean, float sd) {
+    return mean + sd * random_normal(rng);
+}
+
+/**
+ * @brief Shuffles [first, last) with `rng`, the same permutation on every standard library
+ *
+ * Fisher-Yates from the back: element i (n-1 down to 1) swaps with one drawn by random_below
+ * in [0, i]. std::shuffle draws through an implementation-defined distribution instead.
+ */
+template <typename It> void shuffle_in_place(std::minstd_rand& rng, It first, It last) {
+    const auto n = static_cast<size_t>(last - first);
+    for (size_t i = n; i-- > 1;) {
+        const auto j = static_cast<size_t>(random_below(rng, static_cast<int>(i + 1)));
+        std::swap(first[i], first[j]);
+    }
+}
+
+/// `x` wrapped into [0, n), for n > 0.
+constexpr int32_t wrap_index(int64_t x, int32_t n) {
+    return static_cast<int32_t>(((x % n) + n) % n);
+}
+
+/// `x` wrapped into [0, period), for period > 0. A value that rounds to `period` reads 0.
+inline float wrap_period(float x, float period) {
+    float d = std::fmod(x, period);
+    if (d < 0.0f) {
+        d += period;
+    }
+    return d >= period ? 0.0f : d;
+}
+
+/// Smoothstep of `t` clamped to [0, 1]: 3t^2 - 2t^3.
+inline float smoothstep01(float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
 }
 
 /**

@@ -164,7 +164,7 @@ size_t check_card_containment(const std::string& panel_id, const nlohmann::json&
     return cards.size();
 }
 
-const int TPC = GridLayout::TRACKS_PER_CELL;
+const int kTpc = GridLayout::TRACKS_PER_CELL;
 
 } // namespace
 
@@ -174,7 +174,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: adjacent aligned widgets share one
     lv_xml_register_component_from_data(
         "test_card_merge_stub",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     ScopedWidgetFactory a("shutdown", stub_factory());
     ScopedWidgetFactory b("lock", stub_factory());
@@ -184,14 +184,14 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: adjacent aligned widgets share one
                                {"enabled", true},
                                {"col", 0},
                                {"row", 0},
-                               {"colspan", TPC},
-                               {"rowspan", TPC}},
+                               {"colspan", kTpc},
+                               {"rowspan", kTpc}},
                               {{"id", "lock"},
                                {"enabled", true},
-                               {"col", TPC},
+                               {"col", kTpc},
                                {"row", 0},
-                               {"colspan", TPC},
-                               {"rowspan", TPC}}};
+                               {"colspan", kTpc},
+                               {"rowspan", kTpc}}};
 
     size_t cards = check_card_containment("test_card_merge_aligned", widgets, {"shutdown", "lock"},
                                           test_screen());
@@ -209,14 +209,14 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: a widget on an odd track still get
     lv_xml_register_component_from_data(
         "test_card_merge_stub",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     // The premise: this widget really is half-cell capable, so an odd track is
     // reachable by drag. If that ever changes the test is no longer meaningful.
     const auto* def = helix::find_widget_def("shutdown");
     REQUIRE(def != nullptr);
     REQUIRE(def->supports_half_col);
-    REQUIRE(TPC > 1);
+    REQUIRE(kTpc > 1);
 
     ScopedWidgetFactory a("shutdown", stub_factory());
     ScopedWidgetFactory b("lock", stub_factory());
@@ -225,16 +225,16 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: a widget on an odd track still get
     // close enough that a truncated card would land on top of it.
     nlohmann::json widgets = {{{"id", "shutdown"},
                                {"enabled", true},
-                               {"col", TPC + 1},
+                               {"col", kTpc + 1},
                                {"row", 0},
-                               {"colspan", TPC},
-                               {"rowspan", TPC}},
+                               {"colspan", kTpc},
+                               {"rowspan", kTpc}},
                               {{"id", "lock"},
                                {"enabled", true},
                                {"col", 0},
                                {"row", 0},
-                               {"colspan", TPC},
-                               {"rowspan", TPC}}};
+                               {"colspan", kTpc},
+                               {"rowspan", kTpc}}};
 
     // One empty track separates them, so they stay two components rather than
     // fusing across the gap - two cards, each covering its own widget.
@@ -251,7 +251,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: a widget 1.5 cells wide gets a car
     lv_xml_register_component_from_data(
         "test_card_merge_stub",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     // The premise: clock resizes on odd track counts and wants the shared card.
     const auto* def = helix::find_widget_def("clock");
@@ -267,7 +267,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: a widget 1.5 cells wide gets a car
                                {"col", 0},
                                {"row", 0},
                                {"colspan", 3}, // 1.5 cells
-                               {"rowspan", TPC}}};
+                               {"rowspan", kTpc}}};
 
     size_t cards =
         check_card_containment("test_card_merge_odd_span", widgets, {"clock"}, test_screen());
@@ -285,7 +285,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: a tall widget beside a short row i
     lv_xml_register_component_from_data(
         "test_card_merge_stub",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     const std::vector<std::string> merging = {"temperature",   "bed_temperature", "led",
                                               "notifications", "fan_stack",       "ams",
@@ -310,7 +310,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: a tall widget beside a short row i
         return nlohmann::json{{"id", id},   {"enabled", true},    {"col", col},
                               {"row", row}, {"colspan", colspan}, {"rowspan", rowspan}};
     };
-    const int C = TPC;
+    const int C = kTpc;
     nlohmann::json widgets = {
         at("temperature", 2 * C, 0, C, C),
         at("bed_temperature", 3 * C, 0, C, C),
@@ -337,7 +337,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: an in-place relayout replaces only
     lv_xml_register_component_from_data(
         "test_card_merge_stub",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     ScopedWidgetFactory a("shutdown", stub_factory());
     ScopedWidgetFactory b("lock", stub_factory());
@@ -357,14 +357,14 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: an in-place relayout replaces only
                              {"enabled", true},
                              {"col", 0},
                              {"row", 0},
-                             {"colspan", TPC},
-                             {"rowspan", TPC}},
+                             {"colspan", kTpc},
+                             {"rowspan", kTpc}},
                             {{"id", "lock"},
                              {"enabled", true},
-                             {"col", 2 * TPC},
+                             {"col", 2 * kTpc},
                              {"row", 0},
-                             {"colspan", TPC},
-                             {"rowspan", TPC}}}}}}}});
+                             {"colspan", kTpc},
+                             {"rowspan", kTpc}}}}}}}});
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
     mgr.clear_panel_config(panel_id);
@@ -396,19 +396,20 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: an in-place relayout replaces only
     REQUIRE(shutdown_card != nullptr);
 
     // lock moves one cell down: shutdown's card is unchanged, lock's moves.
-    REQUIRE(mgr.get_widget_config(panel_id).place_entry("lock", 1, 2 * TPC, TPC, TPC, TPC) >= 0);
+    REQUIRE(mgr.get_widget_config(panel_id).place_entry("lock", 1, 2 * kTpc, kTpc, kTpc, kTpc) >=
+            0);
     REQUIRE(mgr.relayout_tiles(panel_id, container, 1, {"lock"}, "", held));
     lv_obj_update_layout(container);
 
     CHECK(lv_obj_find_by_name(container, "shutdown") == shutdown);
     CHECK(lv_obj_find_by_name(container, "lock") == lock);
-    CHECK(lv_obj_get_style_grid_cell_row_pos(lock, LV_PART_MAIN) == TPC);
+    CHECK(lv_obj_get_style_grid_cell_row_pos(lock, LV_PART_MAIN) == kTpc);
     CHECK(card_backgrounds(container, ids).size() == 2);
     CHECK(card_behind(shutdown) == shutdown_card);
     CHECK(card_behind(lock) != nullptr);
 
     // lock beside shutdown: the two fuse into one card behind both.
-    REQUIRE(mgr.get_widget_config(panel_id).place_entry("lock", 1, TPC, 0, TPC, TPC) >= 0);
+    REQUIRE(mgr.get_widget_config(panel_id).place_entry("lock", 1, kTpc, 0, kTpc, kTpc) >= 0);
     REQUIRE(mgr.relayout_tiles(panel_id, container, 1, {"lock"}, "", held));
     lv_obj_update_layout(container);
     REQUIRE(card_backgrounds(container, ids).size() == 1);
@@ -438,9 +439,10 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: an in-place relayout replaces only
     // A tile the edit did not touch, seated off its entry (placement moved it
     // and did not write that back), refuses the in-place path: re-seating it at
     // its entry could land it on another tile.
-    lv_obj_set_grid_cell(shutdown, LV_GRID_ALIGN_STRETCH, 0, TPC, LV_GRID_ALIGN_STRETCH, TPC, TPC);
+    lv_obj_set_grid_cell(shutdown, LV_GRID_ALIGN_STRETCH, 0, kTpc, LV_GRID_ALIGN_STRETCH, kTpc,
+                         kTpc);
     CHECK_FALSE(mgr.relayout_tiles(panel_id, container, 1, {"lock"}, "", held));
-    CHECK(lv_obj_get_style_grid_cell_row_pos(shutdown, LV_PART_MAIN) == TPC);
+    CHECK(lv_obj_get_style_grid_cell_row_pos(shutdown, LV_PART_MAIN) == kTpc);
 
     mgr.clear_panel_config(panel_id);
     held.clear();
@@ -472,7 +474,7 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: re-seating every tile keeps their 
     lv_xml_register_component_from_data(
         "test_card_merge_stub",
         "<component><view extends=\"lv_obj\" width=\"100%\" height=\"100%\"/></component>");
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
 
     ScopedWidgetFactory a("shutdown", stub_factory());
     ScopedWidgetFactory b("lock", [](const std::string& wid) {
@@ -493,14 +495,14 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: re-seating every tile keeps their 
                              {"enabled", true},
                              {"col", 0},
                              {"row", 0},
-                             {"colspan", TPC},
-                             {"rowspan", TPC}},
+                             {"colspan", kTpc},
+                             {"rowspan", kTpc}},
                             {{"id", "lock"},
                              {"enabled", true},
-                             {"col", 2 * TPC},
+                             {"col", 2 * kTpc},
                              {"row", 0},
-                             {"colspan", TPC},
-                             {"rowspan", TPC}}}}}}}});
+                             {"colspan", kTpc},
+                             {"rowspan", kTpc}}}}}}}});
     auto& mgr = PanelWidgetManager::instance();
     mgr.get_widget_config(panel_id).mark_dirty();
     mgr.clear_panel_config(panel_id);
@@ -524,19 +526,19 @@ TEST_CASE_METHOD(XMLTestFixture, "Card merge: re-seating every tile keeps their 
 
     // Both move, and lock grows to two cells wide.
     auto& config = mgr.get_widget_config(panel_id);
-    REQUIRE(config.place_entry("shutdown", 1, 0, TPC, TPC, TPC) >= 0);
-    REQUIRE(config.place_entry("lock", 1, TPC, 0, 2 * TPC, TPC) >= 0);
+    REQUIRE(config.place_entry("shutdown", 1, 0, kTpc, kTpc, kTpc) >= 0);
+    REQUIRE(config.place_entry("lock", 1, kTpc, 0, 2 * kTpc, kTpc) >= 0);
     CHECK_FALSE(mgr.relayout_tiles(panel_id, container, 1, {"lock"}, "", held));
 
     REQUIRE(mgr.reseat_tiles(panel_id, container, 1, held));
     lv_obj_update_layout(container);
     CHECK(lv_obj_find_by_name(container, "shutdown") == shutdown);
     CHECK(lv_obj_find_by_name(container, "lock") == lock);
-    CHECK(lv_obj_get_style_grid_cell_row_pos(shutdown, LV_PART_MAIN) == TPC);
-    CHECK(lv_obj_get_style_grid_cell_column_pos(lock, LV_PART_MAIN) == TPC);
-    CHECK(lv_obj_get_style_grid_cell_column_span(lock, LV_PART_MAIN) == 2 * TPC);
+    CHECK(lv_obj_get_style_grid_cell_row_pos(shutdown, LV_PART_MAIN) == kTpc);
+    CHECK(lv_obj_get_style_grid_cell_column_pos(lock, LV_PART_MAIN) == kTpc);
+    CHECK(lv_obj_get_style_grid_cell_column_span(lock, LV_PART_MAIN) == 2 * kTpc);
     CHECK(lock_widget->size_calls > size_calls_before);
-    CHECK(lock_widget->last_colspan == 2 * TPC);
+    CHECK(lock_widget->last_colspan == 2 * kTpc);
 
     mgr.clear_panel_config(panel_id);
 }

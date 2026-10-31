@@ -1,0 +1,215 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- HelixScreen's screen, served by the printer itself (prestonbrown/helixscreen#1825). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HelixScreen</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #ddd;
+               font: 14px system-ui, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #screen { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none;
+            user-select: none; -webkit-user-drag: none; }
+  #screen.control { cursor: pointer; }
+  .badge { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+           background: rgba(0,0,0,.65); padding: 4px 10px; border-radius: 4px; display: none; }
+  #pair { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+          background: rgba(0,0,0,.6); }
+  #pair form { background: #222; padding: 20px 24px; border-radius: 8px; max-width: 340px;
+               text-align: center; }
+  #pair h1 { font-size: 18px; margin: 0 0 8px; }
+  #pair input { font-size: 24px; letter-spacing: 6px; width: 8.5em; text-align: center;
+                margin: 12px 0; padding: 6px; }
+  #pair button { font-size: 15px; padding: 6px 16px; }
+  #pair-error { color: #f88; min-height: 1.2em; }
+</style>
+</head>
+<body>
+<img id="screen" alt="Printer screen" draggable="false">
+<div id="status" class="badge"></div>
+<div id="viewonly" class="badge">View only</div>
+<div id="pair">
+  <form id="pair-form">
+    <h1>Pair this browser</h1>
+    <div>Enter the six-digit code the printer shows under Settings &rsaquo; Connection &rsaquo; Screen Sharing &rsaquo; Pairing Code.</div>
+    <input id="pair-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+           pattern="[0-9]{6}" required>
+    <div id="pair-error"></div>
+    <button type="submit">Pair</button>
+  </form>
+</div>
+<script>
+(function () {
+  "use strict";
+  var img = document.getElementById("screen");
+  var status = document.getElementById("status");
+  var viewonly = document.getElementById("viewonly");
+  var pair = document.getElementById("pair");
+  var pairError = document.getElementById("pair-error");
+  // The server caps its own encode rate; polling faster only returns cached frames.
+  var kPollMs = 200;
+  var kRetryMs = 1000;
+  var kInfoMs = 5000;
+  var timer = null;
+  var info = { w: 0, h: 0, control: false, paired: false };
+  // The pairing token lives in this page's storage and goes out as a header: Mainsail
+  // opened by host name frames this page from the printer's IP, another site, and a
+  // cross-site frame is sent no cookies.
+  var kTokenKey = "helix_screen_token";
+  function loadToken() { try { return localStorage.getItem(kTokenKey) || ""; } catch (e) { return ""; } }
+  function saveToken(t) { try { localStorage.setItem(kTokenKey, t); } catch (e) {} }
+  var token = loadToken();
+  function authHeaders(h) {
+    h = h || {};
+    if (token) h["X-Helix-Pair"] = token;
+    return h;
+  }
+
+  function show(el, on) { el.style.display = on ? (el === pair ? "flex" : "block") : "none"; }
+
+  function setStatus(text) {
+    status.textContent = text;
+    show(status, !!text);
+  }
+
+  // --- the picture ---------------------------------------------------------
+  function schedule(ms) {
+    clearTimeout(timer);
+    if (!document.hidden) timer = setTimeout(next, ms);
+  }
+
+  function next() {
+    var probe = new Image();
+    probe.onload = function () {
+      img.src = probe.src;
+      setStatus("");
+      schedule(kPollMs);
+    };
+    probe.onerror = function () {
+      setStatus("Waiting for the printer screen…");
+      schedule(kRetryMs);
+    };
+    // viewer=1 marks a person watching, which keeps the printer's screen from sleeping.
+    probe.src = "snapshot.jpg?viewer=1&t=" + Date.now();
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) schedule(0);
+  });
+
+  // --- what the server allows ----------------------------------------------
+  function refreshInfo() {
+    fetch("info", { cache: "no-store", headers: authHeaders() })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        info = j;
+        img.classList.toggle("control", !!(info.control && info.paired));
+        show(viewonly, !info.control);
+        show(pair, !!(info.control && !info.paired));
+      })
+      .catch(function () {});
+  }
+  setInterval(refreshInfo, kInfoMs);
+
+  // --- pairing -------------------------------------------------------------
+  document.getElementById("pair-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var code = document.getElementById("pair-code").value.trim();
+    post("pair", { code: code }).then(function (r) {
+      if (r.ok) {
+        return r.json().then(function (j) {
+          token = j.token || "";
+          saveToken(token);
+          pairError.textContent = "";
+          refreshInfo();
+        });
+      } else if (r.status === 429) {
+        pairError.textContent = "Too many tries. Wait a minute and try again.";
+      } else {
+        pairError.textContent = "That code did not match.";
+      }
+    });
+  });
+
+  function post(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json", "X-Helix-Touch": "1" }),
+      body: JSON.stringify(body)
+    });
+  }
+
+  // --- touch ---------------------------------------------------------------
+  // Events go out one at a time, in order. Moves waiting their turn collapse into
+  // the latest, so a slow link drags late rather than replaying every pixel.
+  var queue = [];
+  var sending = false;
+  var pressed = false;
+
+  function enqueue(ev) {
+    var last = queue[queue.length - 1];
+    if (ev.type === "move" && last && last.type === "move") {
+      queue[queue.length - 1] = ev;
+    } else {
+      queue.push(ev);
+    }
+    pump();
+  }
+
+  function pump() {
+    if (sending || !queue.length) return;
+    sending = true;
+    var ev = queue.shift();
+    post("touch", ev).then(function (r) {
+      if (r.status === 401 || r.status === 403) {
+        queue = [];
+        refreshInfo();
+      }
+    }).catch(function () {}).then(function () {
+      sending = false;
+      pump();
+    });
+  }
+
+  function imagePoint(e) {
+    var rect = img.getBoundingClientRect();
+    var w = img.naturalWidth || info.w, h = img.naturalHeight || info.h;
+    if (!rect.width || !rect.height || !w || !h) return null;
+    var x = Math.floor((e.clientX - rect.left) * w / rect.width);
+    var y = Math.floor((e.clientY - rect.top) * h / rect.height);
+    return { x: Math.max(0, Math.min(w - 1, x)), y: Math.max(0, Math.min(h - 1, y)) };
+  }
+
+  function canControl() { return info.control && info.paired; }
+
+  img.addEventListener("pointerdown", function (e) {
+    if (!canControl()) return;
+    var p = imagePoint(e);
+    if (!p) return;
+    e.preventDefault();
+    img.setPointerCapture(e.pointerId);
+    pressed = true;
+    enqueue({ type: "down", x: p.x, y: p.y });
+  });
+  img.addEventListener("pointermove", function (e) {
+    if (!pressed) return;
+    var p = imagePoint(e);
+    if (p) enqueue({ type: "move", x: p.x, y: p.y });
+  });
+  function release(e) {
+    if (!pressed) return;
+    pressed = false;
+    var p = imagePoint(e) || { x: 0, y: 0 };
+    enqueue({ type: "up", x: p.x, y: p.y });
+  }
+  img.addEventListener("pointerup", release);
+  img.addEventListener("pointercancel", release);
+
+  refreshInfo();
+  next();
+})();
+</script>
+</body>
+</html>

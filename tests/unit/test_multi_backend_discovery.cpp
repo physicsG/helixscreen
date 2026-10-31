@@ -83,6 +83,57 @@ TEST_CASE_METHOD(MultiBackendFixture, "PrinterDiscovery: AFC + toolchanger prefe
     REQUIRE(hw.has_tool_changer());
 }
 
+TEST_CASE_METHOD(MultiBackendFixture,
+                 "PrinterDiscovery: a toolchanger beside AFC is a coexisting filament system",
+                 "[ams][multi-backend]") {
+    helix::PrinterDiscovery hw;
+    hw.parse_objects(nlohmann::json::array({"toolchanger", "tool T0", "tool T1", "AFC",
+                                            "AFC_stepper lane1", "AFC_stepper lane2", "extruder",
+                                            "extruder1", "heater_bed", "gcode_move"}));
+
+    REQUIRE(hw.mmu_type() == helix::AmsType::AFC);
+    CHECK(hw.has_filament_system(helix::AmsType::AFC));
+    CHECK(hw.has_filament_system(helix::AmsType::TOOL_CHANGER));
+    CHECK_FALSE(hw.has_filament_system(helix::AmsType::HAPPY_HARE));
+    CHECK_FALSE(hw.has_filament_system(helix::AmsType::NONE));
+
+    // A re-parse of a printer without the toolchanger drops it again.
+    hw.parse_objects(nlohmann::json::array(
+        {"AFC", "AFC_stepper lane1", "extruder", "heater_bed", "gcode_move"}));
+    REQUIRE(hw.mmu_type() == helix::AmsType::AFC);
+    CHECK(hw.has_filament_system(helix::AmsType::AFC));
+    CHECK_FALSE(hw.has_filament_system(helix::AmsType::TOOL_CHANGER));
+}
+
+TEST_CASE_METHOD(MultiBackendFixture,
+                 "PrinterDiscovery: the detected system row carries the type's display name",
+                 "[ams][multi-backend]") {
+    helix::PrinterDiscovery hw;
+
+    SECTION("Happy Hare") {
+        hw.parse_objects(nlohmann::json::array({"mmu", "extruder", "heater_bed"}));
+        const auto& systems = hw.detected_ams_systems();
+        REQUIRE(systems.size() == 1);
+        CHECK(systems[0].type == helix::AmsType::HAPPY_HARE);
+        CHECK(systems[0].name == "Happy Hare");
+    }
+    SECTION("AFC") {
+        hw.parse_objects(nlohmann::json::array({"AFC", "AFC_stepper lane1", "extruder"}));
+        const auto& systems = hw.detected_ams_systems();
+        REQUIRE(systems.size() == 1);
+        CHECK(systems[0].type == helix::AmsType::AFC);
+        CHECK(systems[0].name == "AFC");
+    }
+    SECTION("tool changer: one row") {
+        hw.parse_objects(nlohmann::json::array(
+            {"toolchanger", "tool T0", "tool T1", "extruder", "extruder1", "heater_bed"}));
+        const auto& systems = hw.detected_ams_systems();
+        REQUIRE(systems.size() == 1);
+        CHECK(systems[0].type == helix::AmsType::TOOL_CHANGER);
+        CHECK(systems[0].name == "Tool Changer");
+    }
+}
+
 TEST_CASE_METHOD(MultiBackendFixture, "PrinterDiscovery: no AMS detected returns empty",
                  "[ams][multi-backend]") {
     helix::PrinterDiscovery hw;
@@ -93,13 +144,12 @@ TEST_CASE_METHOD(MultiBackendFixture, "PrinterDiscovery: no AMS detected returns
     REQUIRE(hw.mmu_type() == helix::AmsType::NONE);
 }
 
-// #1107: Anycubic Kobra S1 "mainline-Python ACE fork" registers its filament
-// system as `ace_instance_0` (has get_status()), NOT `ace`/`filament_hub`. The
-// config section is [ace] with ace_count=1, but only ace_instance_N appears in
-// printer.objects.list. Detection must match the ace_instance_N prefix and
-// record the object name(s) so the discovery sequence can subscribe them.
+// #1107: the ACEPRO driver registers each ACE unit as `ace_instance_N` (has
+// get_status()). A capture whose printer.objects.list shows only
+// ace_instance_N and no `ace`/`filament_hub` must still detect ACE. Detection must match the
+// ace_instance_N prefix and record the object name(s) so the discovery sequence can subscribe them.
 TEST_CASE_METHOD(MultiBackendFixture,
-                 "PrinterDiscovery: ace_instance_0 (Kobra S1 fork) detected as ACE",
+                 "PrinterDiscovery: ace_instance_0 (ACEPRO driver) detected as ACE",
                  "[ams][ace][multi-backend]") {
     helix::PrinterDiscovery hw;
     nlohmann::json objects =
@@ -111,6 +161,20 @@ TEST_CASE_METHOD(MultiBackendFixture,
     REQUIRE(systems[0].type == helix::AmsType::ACE);
     REQUIRE(hw.mmu_type() == helix::AmsType::ACE);
     REQUIRE(hw.ace_object_names() == std::vector<std::string>{"ace_instance_0"});
+}
+
+// A unit object is `ace_instance_` and its number: a name that only starts
+// with "ace_instance" is some other module's object.
+TEST_CASE_METHOD(MultiBackendFixture,
+                 "PrinterDiscovery: ace_instance without the separator is not an ACE unit",
+                 "[ams][ace][multi-backend]") {
+    helix::PrinterDiscovery hw;
+    nlohmann::json objects =
+        nlohmann::json::array({"ace_instances", "ace_instance", "extruder", "heater_bed"});
+    hw.parse_objects(objects);
+
+    CHECK(hw.ace_object_names().empty());
+    CHECK(hw.mmu_type() != helix::AmsType::ACE);
 }
 
 TEST_CASE_METHOD(MultiBackendFixture,
@@ -146,15 +210,14 @@ TEST_CASE_METHOD(MultiBackendFixture,
 //
 // A U1 running multiACE reports both `ace` and the U1's own `filament_detect`.
 // AmsBackendAce cannot read multiACE's per-unit `aces[]` slot shape, so the
-// printer goes to the multiACE backend, which keeps the U1's four heads and
-// adds the ACE units beside them. The cases below are one matrix: the rule
-// must fire on both markers together, must NOT fire on either marker alone,
-// and must not reach past ACE to a filament system we can read. Drop any one of
-// those and it becomes "ACE never wins" or "the U1 never wins".
+// Snapmaker backend has to keep the printer. The cases below are one matrix:
+// the rule must fire on both markers together, must NOT fire on either marker
+// alone, and must not reach past ACE to a filament system we can read. Drop any
+// one of those and it becomes "ACE never wins" or "the U1 never wins".
 // ----------------------------------------------------------------------------
 
 TEST_CASE_METHOD(MultiBackendFixture,
-                 "PrinterDiscovery: ace alongside filament_detect registers the multiACE backend",
+                 "PrinterDiscovery: ace alongside filament_detect keeps the Snapmaker backend",
                  "[ams][ace][snapmaker][multi-backend]") {
     helix::PrinterDiscovery hw;
     // A U1's object list with multiACE installed: the stock four-toolhead
@@ -168,33 +231,13 @@ TEST_CASE_METHOD(MultiBackendFixture,
     // typo in the object name rather than on the rule under test.
     REQUIRE(hw.ace_object_names() == std::vector<std::string>{"ace"});
 
-    REQUIRE(hw.has_mmu());
-    REQUIRE(hw.has_snapmaker());
-    REQUIRE(hw.mmu_type() == helix::AmsType::MULTIACE);
-
-    // Exactly one backend. A toolchanger with four tools is also present, so
-    // this also proves neither the plain U1 fallback nor TOOL_CHANGER was
-    // registered beside it.
-    const auto& systems = hw.detected_ams_systems();
-    REQUIRE(systems.size() == 1);
-    REQUIRE(systems[0].type == helix::AmsType::MULTIACE);
-}
-
-TEST_CASE_METHOD(MultiBackendFixture,
-                 "PrinterDiscovery: a non-bare ACE object on a U1 keeps the Snapmaker backend",
-                 "[ams][ace][snapmaker][multi-backend]") {
-    helix::PrinterDiscovery hw;
-    // Not multiACE (which registers a bare `ace`), and no ACE backend reads an
-    // Anycubic hub on a U1, so the U1's own backend keeps the printer.
-    nlohmann::json objects = nlohmann::json::array(
-        {"filament_hub", "filament_detect", "toolchanger", "tool T0", "tool T1", "tool T2",
-         "tool T3", "extruder", "extruder1", "extruder2", "extruder3", "print_task_config"});
-    hw.parse_objects(objects);
-
-    REQUIRE(hw.ace_object_names() == std::vector<std::string>{"filament_hub"});
     REQUIRE_FALSE(hw.has_mmu());
+    REQUIRE(hw.has_snapmaker());
     REQUIRE(hw.mmu_type() == helix::AmsType::SNAPMAKER);
 
+    // Exactly one backend, and it is the U1's. A toolchanger with four tools is
+    // also present, so SNAPMAKER here also proves the fallback did not slide
+    // down to TOOL_CHANGER.
     const auto& systems = hw.detected_ams_systems();
     REQUIRE(systems.size() == 1);
     REQUIRE(systems[0].type == helix::AmsType::SNAPMAKER);
@@ -342,17 +385,36 @@ TEST_CASE_METHOD(MultiBackendFixture,
     helix::PrinterDiscovery hw;
     // The C5's object list under Z-Mod 1.7.4: the four heads, the changer's
     // dock/grab buttons, zmod_color, and the afclite shim's AFC objects.
-    nlohmann::json objects = nlohmann::json::array(
-        {"AFC", "AFC_unit C5", "AFC_lane E0", "AFC_lane E1", "AFC_lane E2", "AFC_lane E3",
-         "zmod_afclite", "zmod_color", "gcode_button extruder_pos1", "gcode_button extruder_grab1",
-         "gcode_button extruder_pos2", "gcode_button extruder_grab2", "gcode_button extruder_pos3",
-         "gcode_button extruder_grab3", "gcode_button extruder_pos4", "gcode_button extruder_grab4",
-         "extruder", "extruder1", "extruder2", "extruder3", "heater_bed",
-         "heater_generic chamber_heater", "filament_switch_sensor fd_ex0",
-         "filament_switch_sensor fd_ex1", "filament_switch_sensor fd_ex2",
-         "filament_switch_sensor fd_ex3", "filament_motion_sensor fm_ex0",
-         "filament_motion_sensor fm_ex1", "filament_motion_sensor fm_ex2",
-         "filament_motion_sensor fm_ex3"});
+    nlohmann::json objects = nlohmann::json::array({"AFC",
+                                                    "AFC_unit C5",
+                                                    "AFC_lane E0",
+                                                    "AFC_lane E1",
+                                                    "AFC_lane E2",
+                                                    "AFC_lane E3",
+                                                    "zmod_afclite",
+                                                    "zmod_color",
+                                                    "gcode_button extruder_pos1",
+                                                    "gcode_button extruder_grab1",
+                                                    "gcode_button extruder_pos2",
+                                                    "gcode_button extruder_grab2",
+                                                    "gcode_button extruder_pos3",
+                                                    "gcode_button extruder_grab3",
+                                                    "gcode_button extruder_pos4",
+                                                    "gcode_button extruder_grab4",
+                                                    "extruder",
+                                                    "extruder1",
+                                                    "extruder2",
+                                                    "extruder3",
+                                                    "heater_bed",
+                                                    "heater_generic chamber_heater",
+                                                    "filament_switch_sensor fd_ex0",
+                                                    "filament_switch_sensor fd_ex1",
+                                                    "filament_switch_sensor fd_ex2",
+                                                    "filament_switch_sensor fd_ex3",
+                                                    "filament_motion_sensor fm_ex0",
+                                                    "filament_motion_sensor fm_ex1",
+                                                    "filament_motion_sensor fm_ex2",
+                                                    "filament_motion_sensor fm_ex3"});
     hw.parse_objects(objects);
 
     // The shim's own marker was seen. Its `AFC_unit C5` also trips the

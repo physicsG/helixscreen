@@ -1,10 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "ui_panel_print_status.h"
-
 #include "../helix_test_fixture.h"
-#include "../test_helpers/print_status_panel_test_access.h"
 #include "../test_helpers/printer_state_test_access.h"
 #include "app_globals.h"
 #include "printer_fan_state.h"
@@ -25,9 +22,6 @@ class PrinterFanStateTestAccess {
     }
 };
 } // namespace helix
-
-// PrintStatusPanelTestAccess lives in tests/test_helpers/ — one definition
-// only, or two TUs defining it differently would be an ODR violation.
 
 TEST_CASE_METHOD(HelixTestFixture, "classify_primary_fans picks first of each type",
                  "[fan_state][drift]") {
@@ -307,130 +301,53 @@ TEST_CASE_METHOD(
     REQUIRE(picked.aux == "fan_generic nevermore");
 }
 
-// =============================================================================
-// Integration tests: PrintStatusPanel fan subjects
-// =============================================================================
-
-// Fixture that owns a PrintStatusPanel with subjects initialized.
-// Uses the global PrinterState singleton (same as production).
-struct FanPanelFixture : public HelixTestFixture {
-    FanPanelFixture() : panel(get_printer_state(), nullptr) {
-        panel.init_subjects();
+TEST_CASE_METHOD(HelixTestFixture,
+                 "possible_primary_fan_slots answers for the fan set, not today's assignment",
+                 "[fan_state]") {
+    PrinterFanState state;
+    const auto fan = [](const char* name, FanType type) {
+        const bool commandable = type == FanType::PART_COOLING || type == FanType::GENERIC_FAN ||
+                                 type == FanType::OUTPUT_PIN_FAN;
+        return FanInfo{name, name, type, 0, commandable, std::nullopt};
+    };
+    const auto slots = [&](std::vector<FanInfo> fans) {
+        PrinterFanStateTestAccess::set_fans(state, std::move(fans));
+        return state.possible_primary_fan_slots();
+    };
+    SECTION("a part fan, a hotend fan and a generic fan fill all three") {
+        const auto s =
+            slots({fan("fan", FanType::PART_COOLING), fan("heater_fan he", FanType::HEATER_FAN),
+                   fan("fan_generic aux", FanType::GENERIC_FAN)});
+        CHECK(s.part);
+        CHECK(s.hotend);
+        CHECK(s.aux);
     }
-    // `panel` is a member of a Catch2 fixture, which is constructed on the stack.
-    // init_subjects() publishes its subjects into LVGL's process-wide XML registry
-    // by name, so letting the fixture die without deinit leaves those names
-    // resolving into this frame after it returns. The next test that builds XML
-    // binding a print_status_* name then reads a dead stack slot.
-    ~FanPanelFixture() override {
-        panel.deinit_subjects();
+    SECTION("the only commandable fan always holds the part slot") {
+        const auto s = slots({fan("fan_generic aux", FanType::GENERIC_FAN)});
+        CHECK(s.part);
+        CHECK_FALSE(s.hotend);
+        CHECK_FALSE(s.aux);
     }
-
-    PrintStatusPanel panel;
-};
-
-TEST_CASE_METHOD(HelixTestFixture, "classify_primary_fans via global PrinterState fans_ live path",
-                 "[print_status][fans]") {
-    // Drive through the global PrinterState's fan_state member (live path).
-    auto& fs = PrinterStateTestAccess::get_fan_state(get_printer_state());
-    std::vector<FanInfo> fans;
-    fans.push_back({"fan", "Part", FanType::PART_COOLING, 75, true, std::nullopt});
-    fans.push_back(
-        {"heater_fan hotend_fan", "Hotend", FanType::HEATER_FAN, 100, false, std::nullopt});
-    fans.push_back({"fan_generic exhaust", "Exhaust", FanType::GENERIC_FAN, 0, true, std::nullopt});
-    PrinterFanStateTestAccess::set_fans(fs, fans);
-
-    auto picked = fs.classify_primary_fans();
-    REQUIRE(picked.part == "fan");
-    REQUIRE(picked.hotend == "heater_fan hotend_fan");
-    REQUIRE(picked.aux == "fan_generic exhaust");
-
-    // Clear the global fan state so later tests don't see this leftover.
-    PrinterFanStateTestAccess::set_fans(fs, {});
-}
-
-TEST_CASE_METHOD(FanPanelFixture, "init_subjects registers all fan section subjects",
-                 "[print_status][fans]") {
-    // After init_subjects() the six fan-section subjects must be findable in
-    // the global XML subject registry.
-    REQUIRE(lv_xml_get_subject(nullptr, "print_status_fans_fit") != nullptr);
-    REQUIRE(lv_xml_get_subject(nullptr, "print_status_aux_fan_present") != nullptr);
-    REQUIRE(lv_xml_get_subject(nullptr, "print_status_fan_row_density") != nullptr);
-    REQUIRE(lv_xml_get_subject(nullptr, "print_status_aux_icon_visible") != nullptr);
-    REQUIRE(lv_xml_get_subject(nullptr, "print_status_aux_full_visible") != nullptr);
-    REQUIRE(lv_xml_get_subject(nullptr, "print_status_aux_short_visible") != nullptr);
-}
-
-TEST_CASE_METHOD(FanPanelFixture, "fans_fit subject defaults to 0 (hidden) after init_subjects",
-                 "[print_status][fans]") {
-    // The fan row must stay hidden (0) until recompute_fans_fit fires after
-    // the widget tree is attached.  A non-zero default would flash the row.
-    auto* s = lv_xml_get_subject(nullptr, "print_status_fans_fit");
-    REQUIRE(s != nullptr);
-    REQUIRE(lv_subject_get_int(s) == 0);
-}
-
-TEST_CASE_METHOD(FanPanelFixture,
-                 "recompute_aux_composites: density=0, aux present -> icon + full label visible",
-                 "[print_status][fans]") {
-    // density=0 (full): icon+label+val — aux_icon_visible=1, full=1, short=0
-    PrintStatusPanelTestAccess::recompute_aux_composites(panel, 0, true);
-
-    auto* icon = lv_xml_get_subject(nullptr, "print_status_aux_icon_visible");
-    auto* full = lv_xml_get_subject(nullptr, "print_status_aux_full_visible");
-    auto* shortt = lv_xml_get_subject(nullptr, "print_status_aux_short_visible");
-    REQUIRE(icon != nullptr);
-    REQUIRE(full != nullptr);
-    REQUIRE(shortt != nullptr);
-
-    REQUIRE(lv_subject_get_int(icon) == 1);
-    REQUIRE(lv_subject_get_int(full) == 1);
-    REQUIRE(lv_subject_get_int(shortt) == 0);
-}
-
-TEST_CASE_METHOD(FanPanelFixture,
-                 "recompute_aux_composites: density=1, aux present -> full only (no icon)",
-                 "[print_status][fans]") {
-    // density=1 (medium): label+val — icon hidden, full visible, short hidden
-    PrintStatusPanelTestAccess::recompute_aux_composites(panel, 1, true);
-
-    auto* icon = lv_xml_get_subject(nullptr, "print_status_aux_icon_visible");
-    auto* full = lv_xml_get_subject(nullptr, "print_status_aux_full_visible");
-    auto* shortt = lv_xml_get_subject(nullptr, "print_status_aux_short_visible");
-
-    REQUIRE(lv_subject_get_int(icon) == 0);
-    REQUIRE(lv_subject_get_int(full) == 1);
-    REQUIRE(lv_subject_get_int(shortt) == 0);
-}
-
-TEST_CASE_METHOD(FanPanelFixture, "recompute_aux_composites: density=2, aux present -> short only",
-                 "[print_status][fans]") {
-    // density=2 (compact): single-letter+val — icon hidden, full hidden, short visible
-    PrintStatusPanelTestAccess::recompute_aux_composites(panel, 2, true);
-
-    auto* icon = lv_xml_get_subject(nullptr, "print_status_aux_icon_visible");
-    auto* full = lv_xml_get_subject(nullptr, "print_status_aux_full_visible");
-    auto* shortt = lv_xml_get_subject(nullptr, "print_status_aux_short_visible");
-
-    REQUIRE(lv_subject_get_int(icon) == 0);
-    REQUIRE(lv_subject_get_int(full) == 0);
-    REQUIRE(lv_subject_get_int(shortt) == 1);
-}
-
-TEST_CASE_METHOD(FanPanelFixture,
-                 "recompute_aux_composites: no aux fan -> all hidden regardless of density",
-                 "[print_status][fans]") {
-    // When aux_present=false every composite subject must be 0.
-    for (int d : {0, 1, 2}) {
-        PrintStatusPanelTestAccess::recompute_aux_composites(panel, d, false);
-
-        auto* icon = lv_xml_get_subject(nullptr, "print_status_aux_icon_visible");
-        auto* full = lv_xml_get_subject(nullptr, "print_status_aux_full_visible");
-        auto* shortt = lv_xml_get_subject(nullptr, "print_status_aux_short_visible");
-
-        INFO("density=" << d);
-        REQUIRE(lv_subject_get_int(icon) == 0);
-        REQUIRE(lv_subject_get_int(full) == 0);
-        REQUIRE(lv_subject_get_int(shortt) == 0);
+    SECTION("a second aux-type fan beside it can fill aux") {
+        const auto s = slots({fan("fan_generic aux", FanType::GENERIC_FAN),
+                              fan("controller_fan mcu", FanType::CONTROLLER_FAN)});
+        CHECK(s.part);
+        CHECK(s.aux);
     }
+    SECTION("a hotend fan alone fills only its slot") {
+        const auto s = slots({fan("heater_fan he", FanType::HEATER_FAN)});
+        CHECK_FALSE(s.part);
+        CHECK(s.hotend);
+        CHECK_FALSE(s.aux);
+    }
+    SECTION("a promoted generic fan leaves the aux slot empty, which stays possible") {
+        auto fans = std::vector<FanInfo>{fan("fan", FanType::PART_COOLING),
+                                         fan("fan_generic aux", FanType::GENERIC_FAN)};
+        fans[1].speed_percent = 60;
+        PrinterFanStateTestAccess::set_fans(state, fans);
+        REQUIRE(state.classify_primary_fans().part == "fan_generic aux");
+        CHECK(state.classify_primary_fans().aux.empty());
+        CHECK(state.possible_primary_fan_slots().aux);
+    }
+    PrinterFanStateTestAccess::set_fans(state, {});
 }

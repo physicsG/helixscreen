@@ -11,6 +11,7 @@
  * type-check every field rather than assume presence implies a usable value.
  */
 
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
 #include "../ui_test_utils.h"
 #include "printer_print_state.h"
@@ -25,22 +26,9 @@ using json = nlohmann::json;
 
 namespace {
 
-class PlrStateTestFixture {
+class PlrStateTestFixture : public LVGLTestFixture {
   public:
     PlrStateTestFixture() {
-        lv_init_safe();
-
-        if (!display_created_) {
-            display_ = lv_display_create(480, 320);
-            alignas(64) static lv_color_t buf[480 * 10];
-            lv_display_set_buffers(display_, buf, nullptr, sizeof(buf),
-                                   LV_DISPLAY_RENDER_MODE_PARTIAL);
-            lv_display_set_flush_cb(display_, [](lv_display_t* disp, const lv_area_t*, uint8_t*) {
-                lv_display_flush_ready(disp);
-            });
-            display_created_ = true;
-        }
-
         PrinterStateTestAccess::reset(state_);
         state_.init_subjects(false);
     }
@@ -55,7 +43,7 @@ class PlrStateTestFixture {
     }
 
     bool pl_env_valid() {
-        return state_.print_state().is_pl_env_valid();
+        return state_.print_state().is_plr_snapshot_valid();
     }
 
     const std::string& pl_recovery_file() {
@@ -76,12 +64,7 @@ class PlrStateTestFixture {
 
   private:
     PrinterState state_;
-    static lv_display_t* display_;
-    static bool display_created_;
 };
-
-lv_display_t* PlrStateTestFixture::display_ = nullptr;
-bool PlrStateTestFixture::display_created_ = false;
 
 } // namespace
 
@@ -164,7 +147,7 @@ TEST_CASE_METHOD(PlrStateTestFixture,
     // The offer controller performs exactly this on a CONNECTED->not-CONNECTED
     // edge so a reconnect re-derives a genuine 0->1 pl_env_valid edge from the
     // fresh status: force the subject to 0 and drop the stale recovery file.
-    lv_subject_set_int(state().print_state().get_pl_env_valid_subject(), 0);
+    lv_subject_set_int(state().print_state().get_plr_snapshot_valid_subject(), 0);
     state().print_state().clear_pl_recovery_file();
     REQUIRE(pl_env_valid() == false);
     REQUIRE(pl_recovery_file().empty());

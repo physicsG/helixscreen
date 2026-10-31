@@ -57,11 +57,11 @@ struct TempCsvFile {
 };
 
 /// Header of a standard Klipper calibrate_shaper.py CSV (real format, no marker)
-const char* CSV_HEADER = "freq, psd_x, psd_y, psd_z, psd_xyz, zv(59.0), mzv(53.8), "
+const char* kCsvHeader = "freq, psd_x, psd_y, psd_z, psd_xyz, zv(59.0), mzv(53.8), "
                          "ei(56.2), 2hump_ei(71.8), 3hump_ei(89.6)\n";
 
 /// Realistic CSV content matching Klipper's calibrate_shaper.py output
-const char* REALISTIC_CSV =
+const char* kRealisticCsv =
     "freq, psd_x, psd_y, psd_z, psd_xyz, zv(59.0), mzv(53.8), "
     "ei(56.2), 2hump_ei(71.8), 3hump_ei(89.6)\n"
     "5.0, 1.234e-03, 2.345e-03, 1.123e-03, 4.702e-03, 0.001, 0.001, 0.001, 0.000, 0.000\n"
@@ -84,7 +84,7 @@ const char* REALISTIC_CSV =
 // ============================================================================
 
 TEST_CASE("CSV data populates frequency bins and raw PSD", "[input_shaper_chart]") {
-    TempCsvFile csv(REALISTIC_CSV);
+    TempCsvFile csv(kRealisticCsv);
     auto csv_data = parse_shaper_csv(csv.path, 'X');
 
     REQUIRE(csv_data.frequencies.size() == 12);
@@ -119,7 +119,7 @@ TEST_CASE("CSV data populates frequency bins and raw PSD", "[input_shaper_chart]
 // ============================================================================
 
 TEST_CASE("CSV data populates shaper curves", "[input_shaper_chart]") {
-    TempCsvFile csv(REALISTIC_CSV);
+    TempCsvFile csv(kRealisticCsv);
     auto csv_data = parse_shaper_csv(csv.path, 'X');
 
     REQUIRE(csv_data.shaper_curves.size() == 5);
@@ -279,7 +279,7 @@ TEST_CASE("Unusable CSV input produces no frequency data", "[input_shaper_chart]
         // rows there is nothing to plot. Only `frequencies` distinguishes this
         // from a usable file, which is why the collector gates on that and not
         // on shaper_curves.
-        TempCsvFile csv(CSV_HEADER);
+        TempCsvFile csv(kCsvHeader);
         auto csv_data = parse_shaper_csv(csv.path, 'X');
 
         CHECK(csv_data.frequencies.empty());
@@ -323,7 +323,7 @@ TEST_CASE("Unusable CSV input produces no frequency data", "[input_shaper_chart]
 // ============================================================================
 
 TEST_CASE("Shaper curves match expected count from standard Klipper CSV", "[input_shaper_chart]") {
-    TempCsvFile csv(REALISTIC_CSV);
+    TempCsvFile csv(kRealisticCsv);
     auto csv_data = parse_shaper_csv(csv.path, 'X');
 
     SECTION("5 shaper curves from standard Klipper output") {

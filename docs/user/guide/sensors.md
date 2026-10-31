@@ -1,6 +1,6 @@
 # Sensors
 
-HelixScreen discovers the sensors your printer reports to Klipper and groups them by type. Filament switch/motion sensors and filament width sensors are configurable — you assign each one a role and choose whether it's monitored. The remaining sensor types are shown as read-only information.
+HelixScreen discovers the sensors your printer reports to Klipper and groups them by type. Filament switch/motion sensors, door and button inputs, and filament width sensors are configurable: you assign each one a role, and for filament sensors choose whether it is monitored. The remaining sensor types are shown as read-only information.
 
 Open the Sensor Settings overlay from **Settings > Devices > Sensors**.
 
@@ -30,6 +30,44 @@ Each sensor row has a role dropdown. Choose how that sensor is used:
 Each sensor also has an enable toggle, which appears once a role other than **None** is assigned. Changing a role or toggle saves immediately.
 
 > The sensor's hardware kind (switch vs. motion) is detected automatically and shown on the row — it isn't something you set. Roles are what you assign.
+
+---
+
+## Inputs (Doors and Buttons)
+
+The **Inputs** section lists the on/off inputs your printer reports to Klipper as buttons: door and lid switches, front-panel buttons, and on tool-changing printers the sensors that say whether each tool sits in its dock or on the carriage. The section only appears when the printer has at least one.
+
+Each row shows the input's name and its live state:
+
+| Role | States shown |
+|------|--------------|
+| **Door** | **Opened** (in orange) or **Closed** |
+| **Other** | **Pressed** or **Released** |
+
+**--** means the printer has not reported the input yet.
+
+### Marking an input as a door
+
+An input whose name contains "door", "lid" or "cover" starts out as a **Door**. Everything else starts as **Other**. To change it:
+
+1. Open **Settings > Devices > Sensors** and scroll to **Inputs**.
+2. Tap the **Role** dropdown on the input's row.
+3. Pick **Door** or **Other**.
+
+The change saves immediately and is remembered for this printer. A printer can have more than one door: a front door and a top cover can both be **Door**.
+
+### If a closed door shows Opened
+
+Door switches are wired either way round. If a door reads **Opened** while it is shut, turn on **Invert** on that row. The switch only appears for inputs set to **Door**.
+
+### Door-open warning
+
+**Warn if a door is open**, at the top of the section, controls the door check:
+
+- Before a print starts, HelixScreen warns you if any door reads open and the print uses a material that needs a warm enclosure, like ABS or ASA. See [Door-open warning](printing.md#door-open-warning).
+- During a print of such a material, opening a door shows a short warning message. PLA and PETG prints, and prints whose materials HelixScreen can't tell, never show it. If your printer already shows its own message when a door opens (Z-Mod on the Creator 5 does), HelixScreen leaves it to the printer and does not add a second one.
+
+It is on by default when the printer has at least one door input, and off when it has none. Turn it off here if you print with the door open on purpose.
 
 ---
 
@@ -106,7 +144,7 @@ The remaining sections list sensors for information only — there's nothing to 
 | **Humidity Sensors** | Chamber and dryer humidity monitoring | BME280, HTU21D, SHT3X, AHT10, AHT20, AHT20-F |
 | **Accelerometers** | Input shaper calibration sensors | ADXL345, LIS2DW, LIS3DH, MPU9250, ICM20948 |
 | **Color Sensors** | TD-1 filament color detection | TD-1 |
-| **Temperature Sensors** | MCU, host, and auxiliary temperature monitoring, including generic heaters such as a filament dryer | MCU, Host, Aux |
+| **Temperature Sensors** | MCU, host, and auxiliary temperature monitoring, including board thermistors such as an extruder board's and generic heaters such as a filament dryer | MCU, Host, Aux |
 
 > Probes, humidity, accelerometer, color, and temperature sensors are display-only — HelixScreen shows their readings but there's nothing to set on this screen.
 

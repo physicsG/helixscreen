@@ -226,6 +226,7 @@ class RemoteControlServer {
 
     // Reset the inactivity timer / dismiss the screensaver (like a real touch)
     nlohmann::json handle_wake(const nlohmann::json& params);
+    nlohmann::json handle_preview_screensaver(const nlohmann::json& params);
 
     // Ask the app to exit its main loop (app_request_quit)
     nlohmann::json handle_shutdown(const nlohmann::json& params);

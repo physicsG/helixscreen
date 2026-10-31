@@ -19,9 +19,11 @@
 #include "log_redact.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "network_tester.h"
+#include "sort_small.h"
 #include "static_panel_registry.h"
 #include "system_settings_manager.h"
 #include "ui/ui_widget_helpers.h"
+#include "wifi_country.h"
 #include "wifi_manager.h"
 #include "wifi_radio_toggle.h"
 #include "wifi_ui_utils.h"
@@ -131,6 +133,9 @@ NetworkSettingsOverlay::~NetworkSettingsOverlay() {
         }
     }
 
+    // The dropdown's language handler reads this object and its subjects.
+    detach_country_dropdown();
+
     // Deinitialize subjects to disconnect observers
     if (subjects_initialized_) {
         subjects_.deinit_all();
@@ -141,6 +146,7 @@ NetworkSettingsOverlay::~NetworkSettingsOverlay() {
     overlay_root_ = nullptr;
     parent_screen_ = nullptr;
     networks_list_ = nullptr;
+    country_dropdown_ = nullptr;
     // NOTE: Do NOT use spdlog here - it may be destroyed during exit
 }
 
@@ -160,6 +166,10 @@ void NetworkSettingsOverlay::init_subjects() {
     UI_MANAGED_SUBJECT_INT(wifi_scanning_, 0, "wifi_scanning", subjects_);
     UI_MANAGED_SUBJECT_INT(wifi_can_forget_, 0, "wifi_can_forget", subjects_);
     UI_MANAGED_SUBJECT_INT(wifi_can_toggle_radio_, 0, "wifi_can_toggle_radio", subjects_);
+    UI_MANAGED_SUBJECT_INT(wifi_toggle_locked_, 0, "wifi_toggle_locked", subjects_);
+    UI_MANAGED_SUBJECT_INT(wifi_can_set_country_, 0, "wifi_can_set_country", subjects_);
+    UI_MANAGED_SUBJECT_INT(wifi_country_index_, 0, "wifi_country_index", subjects_);
+    UI_MANAGED_SUBJECT_INT(wifi_unresponsive_, 0, "wifi_unresponsive", subjects_);
 
     // WiFi string subjects
     UI_MANAGED_SUBJECT_STRING(connected_ssid_, ssid_buffer_, "", "connected_ssid", subjects_);
@@ -212,6 +222,8 @@ void NetworkSettingsOverlay::register_callbacks() {
         // Scoped name: the XML callback namespace is flat and other overlays have forget flows.
         {"on_network_settings_forget",
          [](lv_event_t*) { get_network_settings_overlay().handle_network_settings_forget(); }},
+        {"on_network_settings_country_changed",
+         [](lv_event_t* e) { get_network_settings_overlay().handle_country_changed(e); }},
         // Network test modal
         {"on_network_test_close",
          [](lv_event_t*) { get_network_settings_overlay().handle_network_test_close(); }},
@@ -251,20 +263,33 @@ lv_obj_t* NetworkSettingsOverlay::create(lv_obj_t* parent_screen) {
         return nullptr;
     }
 
+    // Country options are data: 249 ISO 3166 entries behind a "Not set" row.
+    country_dropdown_ =
+        helix::ui::find_required(overlay_root_, "wifi_country_dropdown", get_name());
+    if (country_dropdown_) {
+        // The hint follows the radio; refresh_country() sets it once the radio answers.
+        country_hint_5ghz_ = false;
+        radio_country_.reset();
+        fill_country_options();
+        // DECLARATIVE_OK: the options are C++-built data, rebuilt in the new language.
+        lv_obj_add_event_cb(country_dropdown_, on_country_language_changed,
+                            LV_EVENT_TRANSLATION_LANGUAGE_CHANGED, this);
+    }
+
     // Note: Back button is wired via header_bar.xml default callback (on_header_back_clicked)
 
     // Initialize WiFi manager - use global singleton
     if (!wifi_manager_) {
         wifi_manager_ = get_wifi_manager(); // Uses global singleton (already has self-reference)
         spdlog::debug("[NetworkSettingsOverlay] WiFiManager obtained from global singleton");
+    }
 
-        // Check WiFi hardware availability and update subject
-        bool hw_available = wifi_manager_->has_hardware();
-        lv_subject_set_int(&wifi_hardware_available_, hw_available ? 1 : 0);
-        if (!hw_available) {
-            spdlog::info(
-                "[NetworkSettingsOverlay] WiFi hardware not available - controls disabled");
-        }
+    // Check WiFi hardware availability and update subject
+    const bool hw_available = wifi_manager_ && wifi_manager_->has_hardware();
+    lv_subject_set_int(&wifi_hardware_available_, hw_available ? 1 : 0);
+    lv_subject_set_int(&wifi_toggle_locked_, hw_available ? 0 : 1);
+    if (!hw_available) {
+        spdlog::info("[NetworkSettingsOverlay] WiFi hardware not available - controls disabled");
     }
 
     // Initialize Ethernet manager
@@ -315,18 +340,17 @@ void NetworkSettingsOverlay::on_activate() {
     if (wifi_manager_) {
         wifi_manager_->add_state_observer(lifetime_.token(),
                                           [this]() { refresh_transport_status(); });
+        wifi_manager_->add_country_observer(lifetime_.token(), [this]() { refresh_country(); });
     }
 
     // Backend capabilities: the 2.4GHz-only indicator, and the Forget and
     // radio-toggle controls, which are hidden where the backend cannot act.
+    refresh_band_capability();
     if (wifi_manager_) {
-        bool only_24ghz = !wifi_manager_->supports_5ghz();
-        lv_subject_set_int(&wifi_only_24ghz_, only_24ghz ? 1 : 0);
-        spdlog::debug("[NetworkSettingsOverlay] WiFi band capability: {}",
-                      only_24ghz ? "2.4GHz only" : "2.4GHz + 5GHz");
         lv_subject_set_int(&wifi_can_forget_, wifi_manager_->supports_forget() ? 1 : 0);
         lv_subject_set_int(&wifi_can_toggle_radio_, wifi_manager_->supports_radio_toggle() ? 1 : 0);
     }
+    refresh_country();
 
     // Start scanning if WiFi enabled
     if (wifi_manager_ && wifi_manager_->is_enabled()) {
@@ -379,7 +403,12 @@ void NetworkSettingsOverlay::cleanup() {
     OverlayBase::cleanup();
     ++status_generation_;
 
+    // The lifetime token drops the radio's answer from here on, so nothing else
+    // would unlock the switch for the next instance of this overlay.
     cancel_wlan_toggle_backstop();
+    if (subjects_initialized_) {
+        set_wlan_toggle_in_flight(false);
+    }
 
     if (wifi_manager_) {
         wifi_manager_->stop_scan();
@@ -395,6 +424,7 @@ void NetworkSettingsOverlay::cleanup() {
     ethernet_manager_.reset();
     network_tester_.reset();
 
+    detach_country_dropdown();
     parent_screen_ = nullptr;
     networks_list_ = nullptr;
 
@@ -412,6 +442,100 @@ void NetworkSettingsOverlay::refresh_transport_status() {
     update_wifi_status();
     update_ethernet_status();
     update_any_network_connected();
+}
+
+void NetworkSettingsOverlay::refresh_band_capability() {
+    if (!wifi_manager_) {
+        return;
+    }
+    const bool only_24ghz = !wifi_manager_->supports_5ghz();
+    if (lv_subject_get_int(&wifi_only_24ghz_) == (only_24ghz ? 1 : 0)) {
+        return;
+    }
+    lv_subject_set_int(&wifi_only_24ghz_, only_24ghz ? 1 : 0);
+    spdlog::debug("[NetworkSettingsOverlay] WiFi band capability: {}",
+                  only_24ghz ? "2.4GHz only" : "2.4GHz + 5GHz");
+    if (radio_country_) {
+        apply_country_hint();
+    }
+}
+
+void NetworkSettingsOverlay::apply_country_hint() {
+    country_hint_5ghz_ =
+        wifi_manager_ && radio_country_ &&
+        helix::wifi::country::should_hint_5ghz(wifi_manager_->supports_5ghz(), *radio_country_);
+    show_country_choice(lv_subject_get_int(&wifi_country_index_), country_hint_5ghz_);
+}
+
+void NetworkSettingsOverlay::refresh_country() {
+    const bool supported = wifi_manager_ && wifi_manager_->supports_country();
+    lv_subject_set_int(&wifi_can_set_country_, supported ? 1 : 0);
+    if (!supported) {
+        return;
+    }
+    wifi_manager_->get_country_async(
+        lifetime_.token(), [this](const WiFiManager::CountryState& state) {
+            lv_subject_set_int(&wifi_country_index_,
+                               helix::wifi::country::dropdown_index(state.display));
+            // The hint follows the radio, not the saved choice: a saved
+            // country the radio refused still leaves 5 GHz scanning off.
+            radio_country_ = state.read_ok ? state.system : state.stored;
+            apply_country_hint();
+        });
+}
+
+void NetworkSettingsOverlay::on_country_language_changed(lv_event_t* e) {
+    static_cast<NetworkSettingsOverlay*>(lv_event_get_user_data(e))->fill_country_options();
+}
+
+void NetworkSettingsOverlay::detach_country_dropdown() {
+    // The tree can be deleted out from under this object, leaving the pointer freed.
+    if (country_dropdown_ && lv_is_initialized() && lv_obj_is_valid(country_dropdown_)) {
+        lv_obj_remove_event_cb_with_user_data(country_dropdown_, on_country_language_changed, this);
+    }
+    country_dropdown_ = nullptr;
+}
+
+void NetworkSettingsOverlay::fill_country_options() {
+    if (!country_dropdown_) {
+        return;
+    }
+    const std::string options = helix::wifi::country::dropdown_options(lv_tr("Not set"));
+    lv_dropdown_set_options(country_dropdown_, options.c_str());
+    // New options reset the selection to 0; the bound subject still holds it.
+    const int index = lv_subject_get_int(&wifi_country_index_);
+    lv_dropdown_set_selected(country_dropdown_, static_cast<uint32_t>(index));
+    show_country_choice(index, country_hint_5ghz_);
+}
+
+void NetworkSettingsOverlay::show_country_choice(int index, bool hint_5ghz) {
+    if (!country_dropdown_) {
+        return;
+    }
+    // The closed dropdown shows the code alone, which fits the narrowest
+    // card; the open list carries the names. Unset on a 5 GHz radio, it says
+    // what that costs.
+    if (index == 0) {
+        country_button_text_ = hint_5ghz ? lv_tr("2.4 GHz only") : lv_tr("Not set");
+    } else {
+        country_button_text_ = helix::wifi::country::code_at_dropdown_index(index);
+    }
+    // lv_dropdown keeps the pointer, so the text lives in a member.
+    lv_dropdown_set_text(country_dropdown_, country_button_text_.c_str());
+}
+
+void NetworkSettingsOverlay::handle_country_changed(lv_event_t* e) {
+    if (!wifi_manager_) {
+        return;
+    }
+    auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+    const std::string code = helix::wifi::country::code_at_dropdown_index(
+        static_cast<int>(lv_dropdown_get_selected(dropdown)));
+    spdlog::info("[{}] WiFi country selected: {}", get_name(), code.empty() ? "not set" : code);
+    show_country_choice(helix::wifi::country::dropdown_index(code), country_hint_5ghz_);
+    // A set that reaches the radio refreshes through REGDOM_CHANGE; a clear
+    // or a refusal does not, so refresh here too.
+    wifi_manager_->set_country_async(code, lifetime_.token(), [this](bool) { refresh_country(); });
 }
 
 void NetworkSettingsOverlay::update_wifi_status() {
@@ -437,6 +561,7 @@ void NetworkSettingsOverlay::update_wifi_status() {
 }
 
 void NetworkSettingsOverlay::apply_wifi_status(const WifiBackend::ConnectionStatus& status) {
+    lv_subject_set_int(&wifi_unresponsive_, status.unresponsive ? 1 : 0);
     const bool connected = status.connected;
     lv_subject_set_int(&wifi_connected_, connected ? 1 : 0);
 
@@ -576,6 +701,7 @@ void NetworkSettingsOverlay::update_test_state(NetworkTester::TestState state,
 
 void NetworkSettingsOverlay::populate_network_list(const std::vector<WiFiNetwork>& networks) {
     cached_networks_ = networks;
+    refresh_band_capability();
     if (!wifi_manager_) {
         build_network_list(cached_networks_, WifiBackend::ConnectionStatus{});
         return;
@@ -614,10 +740,10 @@ void NetworkSettingsOverlay::build_network_list(const std::vector<WiFiNetwork>& 
 
     // Sort by signal strength
     std::vector<WiFiNetwork> sorted_networks = networks;
-    std::sort(sorted_networks.begin(), sorted_networks.end(),
-              [](const WiFiNetwork& a, const WiFiNetwork& b) {
-                  return a.signal_strength > b.signal_strength;
-              });
+    helix::sort_small(sorted_networks.begin(), sorted_networks.end(),
+                      [](const WiFiNetwork& a, const WiFiNetwork& b) {
+                          return a.signal_strength > b.signal_strength;
+                      });
 
     // Connected network SSID
     const std::string& connected_ssid = status.ssid;
@@ -717,10 +843,8 @@ void NetworkSettingsOverlay::clear_network_list() {
         lv_indev_reset(indev, networks_list_);
     }
 
-    // Freeze queue to prevent background thread from enqueueing callbacks
-    // targeting children we're about to delete
-    auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-    helix::ui::UpdateQueue::instance().drain();
+    // Queued scan and connect results hold no row pointers: they rebuild the
+    // list or look widgets up by name, so the rows need no drain first.
 
     int32_t child_count = static_cast<int32_t>(lv_obj_get_child_count(networks_list_));
     for (int32_t i = child_count - 1; i >= 0; i--) {
@@ -878,6 +1002,7 @@ void NetworkSettingsOverlay::apply_wlan_toggle(bool enabled) {
     // in by finish_wlan_toggle().
     wlan_toggle_requested_ = enabled;
     lv_subject_set_int(&wifi_enabled_, enabled ? 1 : 0);
+    set_wlan_toggle_in_flight(true);
 
     if (enabled) {
         // Spinner runs from the tap until the radio is actually up and the
@@ -893,7 +1018,10 @@ void NetworkSettingsOverlay::apply_wlan_toggle(bool enabled) {
 
     arm_wlan_toggle_backstop();
 
-    auto token = lifetime_.token();
+    // The object lifetime outlives closing the overlay, so the answer still
+    // unlocks the switch and persists the radio's real state when the user has
+    // left mid-change; only cleanup() drops it.
+    auto token = object_lifetime_.token();
     wifi_manager_->set_enabled_async(enabled, token, [this, enabled](bool success, bool actual) {
         // Runs on the UI thread — set_enabled_async() delivers through the
         // token, so `this` is already known-good here.
@@ -903,6 +1031,7 @@ void NetworkSettingsOverlay::apply_wlan_toggle(bool enabled) {
 }
 
 void NetworkSettingsOverlay::finish_wlan_toggle(bool requested, bool success, bool actual) {
+    set_wlan_toggle_in_flight(false);
     auto outcome = helix::wifi::reconcile_radio_toggle(requested, success, actual);
 
     if (outcome.reverted) {
@@ -923,7 +1052,10 @@ void NetworkSettingsOverlay::finish_wlan_toggle(bool requested, bool success, bo
     // whole branch exists to eliminate.
     lv_subject_set_int(&wifi_enabled_, outcome.enabled ? 1 : 0);
 
-    if (outcome.enabled) {
+    if (outcome.enabled && !is_visible()) {
+        // Closed while the radio came up: on_activate() scans on the next open.
+        lv_subject_set_int(&wifi_scanning_, 0);
+    } else if (outcome.enabled) {
         lv_subject_set_int(&wifi_scanning_, 1);
 
         std::weak_ptr<WiFiManager> weak_mgr = wifi_manager_;
@@ -965,6 +1097,11 @@ void NetworkSettingsOverlay::finish_wlan_toggle(bool requested, bool success, bo
 
     // Update combined network status
     update_any_network_connected();
+}
+
+void NetworkSettingsOverlay::set_wlan_toggle_in_flight(bool in_flight) {
+    const bool hw_available = lv_subject_get_int(&wifi_hardware_available_) != 0;
+    lv_subject_set_int(&wifi_toggle_locked_, (!hw_available || in_flight) ? 1 : 0);
 }
 
 void NetworkSettingsOverlay::arm_wlan_toggle_backstop() {
@@ -1394,6 +1531,12 @@ void NetworkSettingsOverlay::handle_network_settings_forget() {
         [this, gen = status_generation_](const WifiBackend::ConnectionStatus& status) {
             forget_read_pending_ = false;
             if (gen != status_generation_) {
+                return;
+            }
+            // A stalled lane answers from a cache that may not know the
+            // network's name; say why nothing happens instead of doing nothing.
+            if (status.ssid.empty() && status.unresponsive) {
+                WiFiManager::notify_unresponsive();
                 return;
             }
             confirm_forget(status.ssid);

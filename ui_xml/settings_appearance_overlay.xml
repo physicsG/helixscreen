@@ -27,6 +27,12 @@
         <setting_action_row name="row_theme_settings"
                             label="Theme Colors" icon="tune" description="Explore palette and preview"
                             callback="on_theme_settings_clicked"/>
+        <!-- Glass Effects: shown only where the glass gate passed on this board -->
+        <setting_toggle_row name="row_glass_effects"
+                            label="Glass Effects" icon="layers" description="Depth and lighting on buttons and panels"
+                            subject="settings_glass_effects" callback="on_glass_effects_changed">
+          <bind_flag_if_eq subject="glass_available" flag="hidden" ref_value="0"/>
+        </setting_toggle_row>
         <!-- Animations Toggle -->
         <setting_toggle_row name="row_animations"
                             label="Animations" icon="animation" description="Enable UI motion effects"

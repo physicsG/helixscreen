@@ -46,6 +46,8 @@ class BypassWidget : public TiledPanelWidget {
     std::unique_ptr<helix::ui::AmsContextMenu> context_menu_;
     // External-spool color observer guard (reset in detach()).
     ObserverGuard spool_color_observer_;
+    /// Re-measures the tile when the spool row under its caption comes or goes.
+    ObserverGuard bypass_active_observer_;
 
     void handle_click();
 };

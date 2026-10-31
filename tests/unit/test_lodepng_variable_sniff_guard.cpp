@@ -38,15 +38,15 @@
 
 namespace {
 
-constexpr uint8_t PNG_SIGNATURE[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+constexpr uint8_t kPngSignature[8] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
 
 /// A 200x200 I1 buffer, the size InfoQrModal asks for, carrying the stale
 /// bytes the K2 crash recorded instead of a cleared palette.
 lv_draw_buf_t* buffer_with_stale_png_bytes() {
     lv_draw_buf_t* buf = lv_draw_buf_create(200, 200, LV_COLOR_FORMAT_I1, LV_STRIDE_AUTO);
     REQUIRE(buf != nullptr);
-    std::memcpy(buf->data, PNG_SIGNATURE, sizeof(PNG_SIGNATURE));
-    std::memcpy(buf->data + 16, PNG_SIGNATURE, sizeof(PNG_SIGNATURE));
+    std::memcpy(buf->data, kPngSignature, sizeof(kPngSignature));
+    std::memcpy(buf->data + 16, kPngSignature, sizeof(kPngSignature));
     return buf;
 }
 

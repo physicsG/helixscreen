@@ -42,44 +42,44 @@
 namespace fs = std::filesystem;
 
 // Cache file location
-static const std::string CACHE_FILE = "build/.xml_attr_cache";
+static const std::string kCacheFile = "build/.xml_attr_cache";
 
 // LVGL XML structure elements that are not widgets - skip validation
-static const std::unordered_set<std::string> NON_WIDGET_ELEMENTS = {
+static const std::unordered_set<std::string> kNonWidgetElements = {
     "component", "api",   "view",    "prop",     "consts",    "px",
     "styles",    "style", "subject", "subjects", "gradients", "gradient",
     "images",    "fonts", "font",    "const",    "percentage"};
 
 // XML-specific attributes that should not be validated as widget attributes
-static const std::unordered_set<std::string> XML_BUILTIN_ATTRS = {"xmlns", "version", "encoding"};
+static const std::unordered_set<std::string> kXmlBuiltinAttrs = {"xmlns", "version", "encoding"};
 
 // Common attributes that all widgets inherit from lv_obj
 // These are extracted from lv_xml_obj.c but we define them here as a fallback
 // NOTE: scroll_dir is NOT supported by LVGL XML parser - do not include it
-static const std::unordered_set<std::string> COMMON_LV_OBJ_ATTRS = {"name",
-                                                                    "x",
-                                                                    "y",
-                                                                    "width",
-                                                                    "height",
-                                                                    "align",
-                                                                    "hidden",
-                                                                    "clickable",
-                                                                    "click_focusable",
-                                                                    "checkable",
-                                                                    "scrollable",
-                                                                    "scroll_snap_x",
-                                                                    "scroll_snap_y",
-                                                                    "flex_grow",
-                                                                    "flex_flow",
-                                                                    "grid_cell_row_pos",
-                                                                    "grid_cell_row_span",
-                                                                    "grid_cell_column_pos",
-                                                                    "grid_cell_column_span",
-                                                                    "grid_cell_x_align",
-                                                                    "grid_cell_y_align"};
+static const std::unordered_set<std::string> kCommonLvObjAttrs = {"name",
+                                                                  "x",
+                                                                  "y",
+                                                                  "width",
+                                                                  "height",
+                                                                  "align",
+                                                                  "hidden",
+                                                                  "clickable",
+                                                                  "click_focusable",
+                                                                  "checkable",
+                                                                  "scrollable",
+                                                                  "scroll_snap_x",
+                                                                  "scroll_snap_y",
+                                                                  "flex_grow",
+                                                                  "flex_flow",
+                                                                  "grid_cell_row_pos",
+                                                                  "grid_cell_row_span",
+                                                                  "grid_cell_column_pos",
+                                                                  "grid_cell_column_span",
+                                                                  "grid_cell_x_align",
+                                                                  "grid_cell_y_align"};
 
 // Part suffixes used in LVGL style selectors (e.g., style_arc_width_indicator -> style_arc_width)
-static const std::vector<std::string> PART_SUFFIXES = {"_main", "_indicator", "_knob"};
+static const std::vector<std::string> kPartSuffixes = {"_main", "_indicator", "_knob"};
 
 /**
  * @brief Read entire file content into a string.
@@ -130,7 +130,7 @@ static void XMLCALL start_element(void* data, const char* name, const char** att
     std::string widget_name = name;
 
     // Skip non-widget XML structure elements
-    if (NON_WIDGET_ELEMENTS.count(widget_name) > 0) {
+    if (kNonWidgetElements.count(widget_name) > 0) {
         return;
     }
 
@@ -146,7 +146,7 @@ static void XMLCALL start_element(void* data, const char* name, const char** att
         std::string attr_name = attrs[i];
 
         // Skip XML-specific attributes
-        if (XML_BUILTIN_ATTRS.count(attr_name) > 0) {
+        if (kXmlBuiltinAttrs.count(attr_name) > 0) {
             continue;
         }
 
@@ -174,7 +174,7 @@ static void XMLCALL start_element(void* data, const char* name, const char** att
         // Handle part-specific style suffixes: style_arc_opa_main -> style_arc_opa
         // LVGL uses _main, _indicator, _knob suffixes for part-specific styles
         if (normalized_attr.substr(0, 6) == "style_") {
-            for (const auto& suffix : PART_SUFFIXES) {
+            for (const auto& suffix : kPartSuffixes) {
                 if (normalized_attr.size() > suffix.size() &&
                     normalized_attr.substr(normalized_attr.size() - suffix.size()) == suffix) {
                     normalized_attr =
@@ -287,7 +287,7 @@ static std::time_t get_newest_source_mtime() {
  * @brief Save the widget database to cache file.
  */
 static void save_cache(const xml_validator::WidgetDatabase& db, std::time_t source_mtime) {
-    std::ofstream f(CACHE_FILE);
+    std::ofstream f(kCacheFile);
     if (!f) {
         return; // Can't write cache, not fatal
     }
@@ -314,7 +314,7 @@ static void save_cache(const xml_validator::WidgetDatabase& db, std::time_t sour
  */
 static bool load_cache(xml_validator::WidgetDatabase& db, std::time_t current_source_mtime,
                        bool verbose) {
-    std::ifstream f(CACHE_FILE);
+    std::ifstream f(kCacheFile);
     if (!f) {
         return false; // No cache file
     }
@@ -539,7 +539,7 @@ static xml_validator::WidgetDatabase build_widget_database(bool verbose) {
 
     // 5. Ensure lv_obj has basic common attributes as fallback
     if (db.widget_attrs.count("lv_obj") == 0 || db.widget_attrs["lv_obj"].empty()) {
-        db.widget_attrs["lv_obj"] = COMMON_LV_OBJ_ATTRS;
+        db.widget_attrs["lv_obj"] = kCommonLvObjAttrs;
     }
 
     return db;

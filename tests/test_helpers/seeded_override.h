@@ -47,7 +47,7 @@ namespace helix::test {
 /// brand wants edit_slot_as_user() below.
 ///
 /// @p backend must be registered with AmsState, or lane_id() answers
-/// INVALID_LANE_ID and the funnels drop every record. RegisteredBackend is how
+/// kInvalidLaneId and the funnels drop every record. RegisteredBackend is how
 /// a fixture gets that.
 inline void file_override_as_lane_records(const AmsBackend& backend, int slot_index,
                                           const helix::ams::FilamentSlotOverride& ovr) {

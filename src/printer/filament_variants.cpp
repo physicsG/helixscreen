@@ -45,7 +45,7 @@ struct VariantAffix {
 /// Deliberately NOT listed: "ABS" (so "PC-ABS" keeps its own identity and its
 /// ABS_ASA compat group), "Soft"/"95A"/"85A" (TPU shore grades), "Change"
 /// (Color-Change). Adding a polymer name here would merge two real materials.
-constexpr VariantAffix VARIANT_AFFIXES[] = {
+constexpr VariantAffix kVariantAffixes[] = {
     // Fiber fills
     {"CF", true},
     {"GF", true},
@@ -74,7 +74,7 @@ constexpr VariantAffix VARIANT_AFFIXES[] = {
 /// PPA-based PAHT-CF under the same type string, at PPA temperatures and
 /// needing a hardened nozzle and sealed enclosure: verify the base resin before
 /// adding a PAHT product from a new vendor rather than assuming this mapping.
-constexpr const char* PAHT_FAMILY = "PA";
+constexpr const char* kPahtFamily = "PA";
 
 /// Explicit family mapping for names that affix-stripping alone cannot reduce,
 /// because the modifier is fused to the polymer name with no separator.
@@ -90,12 +90,12 @@ struct FamilyOverride {
     const char* name;
     const char* family;
 };
-constexpr FamilyOverride FAMILY_OVERRIDES[] = {
+constexpr FamilyOverride kFamilyOverrides[] = {
     {"PA6", "PA"},
     {"PA12", "PA"},
     {"PA66", "PA"},
     {"PA612", "PA"},
-    {"PAHT", PAHT_FAMILY},
+    {"PAHT", kPahtFamily},
     // STOP: PPA (polyphthalamide) must NEVER be normalized or aliased to PA.
     // The names are one letter apart, but it is a semi-aromatic polyamide in a
     // different processing regime — 280-310C nozzle, 100-120C bed, sealed
@@ -110,20 +110,13 @@ constexpr FamilyOverride FAMILY_OVERRIDES[] = {
     {"PET", "PET"},
 };
 
-bool iequals(std::string_view a, std::string_view b) {
-    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char ca, char cb) {
-               return std::tolower(static_cast<unsigned char>(ca)) ==
-                      std::tolower(static_cast<unsigned char>(cb));
-           });
-}
-
 bool is_separator(char c) {
     return c == '-' || c == '_' || c == ' ';
 }
 
 const VariantAffix* find_variant_affix(std::string_view token) {
-    for (const auto& affix : VARIANT_AFFIXES) {
-        if (iequals(token, affix.name)) {
+    for (const auto& affix : kVariantAffixes) {
+        if (helix::text_io::equals_ignore_case(token, affix.name)) {
             return &affix;
         }
     }
@@ -189,8 +182,8 @@ std::set<std::string> filled_affixes_of(std::string_view name);
 
 /// Explicit family override lookup, or empty if the name has no entry.
 std::string_view family_override(std::string_view name) {
-    for (const auto& row : FAMILY_OVERRIDES) {
-        if (iequals(name, row.name)) {
+    for (const auto& row : kFamilyOverrides) {
+        if (helix::text_io::equals_ignore_case(name, row.name)) {
             return row.family;
         }
     }
@@ -393,7 +386,7 @@ const std::string* find_library_type(const std::string& candidate) {
     if (exact != g_orca_library_types.end())
         return &*exact;
     for (const auto& t : g_orca_library_types) {
-        if (iequals(t, candidate))
+        if (helix::text_io::equals_ignore_case(t, candidate))
             return &t;
     }
     return nullptr;
@@ -447,7 +440,7 @@ bool materials_compatible(std::string_view a, std::string_view b) {
     if (a.empty() != b.empty()) {
         return false;
     }
-    if (iequals(a, b)) {
+    if (helix::text_io::equals_ignore_case(a, b)) {
         return true;
     }
     return are_materials_compatible(extract_base_material(a), extract_base_material(b));
@@ -463,9 +456,94 @@ bool is_filled_grade(std::string_view name) {
 
 std::string display_family(std::string_view type) {
     std::string base = extract_base_material(type);
+    // A recycled grade ("rPLA") is a material of its own to the database, but
+    // a variant of its polymer on the shelf: it files under that family.
+    if (base.size() > 1 && base[0] == 'r' && find_material(std::string_view(base).substr(1))) {
+        return base.substr(1);
+    }
     // A type we cannot reduce is its own family — one heading, one entry — so
     // user-overlay and firmware-only types stay reachable instead of vanishing.
     return base.empty() ? std::string(type) : base;
+}
+
+namespace {
+
+/// Trim leading and trailing separator characters off a token remnant.
+std::string_view trim_separators(std::string_view s) {
+    while (!s.empty() && is_separator(s.front())) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() && is_separator(s.back())) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+/// The wordy finishes spell "Silk PLA", never "PLA-Silk".
+bool variant_leads_with_word(const std::string& label) {
+    static const char* const k_leading[] = {"Silk", "Matte", "Wood", "Marble",  "Metal",
+                                            "Glow", "AERO",  "LW",   "Recycled"};
+    for (const char* word : k_leading) {
+        if (helix::text_io::equals_ignore_case(label, word)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+// NAMESPACE_OK: namespace filament, beside extract_base_material
+std::string variant_label(std::string_view type, std::string_view family) {
+    std::string_view work = helix::text_io::trim(type);
+    if (work.empty()) {
+        return "Basic";
+    }
+    // Resolve the alias first so decoration sits on the canonical spelling
+    // ("SILK" -> "Silk PLA"), the same order extract_base_material uses.
+    work = resolve_alias(work);
+    const std::string fam = family.empty() ? display_family(work) : std::string(family);
+
+    if (helix::text_io::equals_ignore_case(work, fam)) {
+        return "Basic";
+    }
+    std::string_view rem;
+    if (work.size() > fam.size() &&
+        helix::text_io::equals_ignore_case(work.substr(0, fam.size()), fam)) {
+        rem = trim_separators(work.substr(fam.size()));
+    } else if (work.size() > fam.size() &&
+               helix::text_io::equals_ignore_case(work.substr(work.size() - fam.size()), fam)) {
+        rem = trim_separators(work.substr(0, work.size() - fam.size()));
+    } else {
+        // The reduction came from the override table or an alias; the whole
+        // spelling is the variant as far as a chip can show it.
+        rem = work;
+    }
+    if (rem.empty()) {
+        return "Basic";
+    }
+    if (helix::text_io::equals_ignore_case(rem, "r")) {
+        return "Recycled";
+    }
+    return std::string(rem);
+}
+
+// NAMESPACE_OK: namespace filament, beside extract_base_material
+std::string compose_family_type(const std::string& family, const std::string& variant) {
+    if (variant.empty() || variant == "Basic") {
+        return family;
+    }
+    if (variant == "Recycled") {
+        return "r" + family;
+    }
+    if (variant_leads_with_word(variant)) {
+        return variant + " " + family;
+    }
+    // A "+" grade fuses to the polymer name ("PLA+", never "PLA-+").
+    if (variant.front() == '+') {
+        return family + variant;
+    }
+    return family + "-" + variant;
 }
 
 bool FilamentVariantsTestAccess::parse_orca_tables(const std::string& json_text,
@@ -515,7 +593,7 @@ void merge_user_orca_overrides(const std::map<std::string, std::string>& overrid
         // pick the winner, silently ignoring the user's override.
         bool replaced = false;
         for (auto it = g_orca_overrides.begin(); it != g_orca_overrides.end();) {
-            if (iequals(it->first, k)) {
+            if (helix::text_io::equals_ignore_case(it->first, k)) {
                 it = g_orca_overrides.erase(it);
                 replaced = true;
             } else {
@@ -539,7 +617,7 @@ std::string orca_match_type(std::string_view display_type) {
     // 1. Explicit override wins outright, including an intentional "" that
     //    means "this type must never be emitted".
     for (const auto& [k, v] : g_orca_overrides) {
-        if (iequals(k, work))
+        if (helix::text_io::equals_ignore_case(k, work))
             return v;
     }
     // 2. The type itself, if Orca's library carries it.
@@ -554,3 +632,61 @@ std::string orca_match_type(std::string_view display_type) {
 }
 
 } // namespace filament
+
+namespace helix {
+
+FilamentFinish filament_finish_of(std::string_view name) {
+    struct FinishWord {
+        const char* word;
+        FilamentFinish finish;
+    };
+    static constexpr FinishWord kWords[] = {
+        {"Silk", FilamentFinish::Silk},         {"Silky", FilamentFinish::Silk},
+        {"Satin", FilamentFinish::Silk},        {"Matte", FilamentFinish::Matte},
+        {"Matt", FilamentFinish::Matte},        {"Marble", FilamentFinish::Marble},
+        {"Granite", FilamentFinish::Marble},    {"Stone", FilamentFinish::Marble},
+        {"Sparkle", FilamentFinish::Sparkle},   {"Glitter", FilamentFinish::Sparkle},
+        {"Galaxy", FilamentFinish::Sparkle},    {"Shimmer", FilamentFinish::Sparkle},
+        {"Starlight", FilamentFinish::Sparkle},
+    };
+    auto is_boundary = [](char c) {
+        return filament::is_separator(c) || c == '+' || c == '/' || c == '(' || c == ')' ||
+               c == ',';
+    };
+    size_t i = 0;
+    while (i < name.size()) {
+        while (i < name.size() && is_boundary(name[i])) {
+            ++i;
+        }
+        size_t end = i;
+        while (end < name.size() && !is_boundary(name[end])) {
+            ++end;
+        }
+        const std::string_view token = name.substr(i, end - i);
+        for (const auto& w : kWords) {
+            if (helix::text_io::equals_ignore_case(token, w.word)) {
+                return w.finish;
+            }
+        }
+        i = end;
+    }
+    return FilamentFinish::None;
+}
+
+const char* filament_finish_name(FilamentFinish finish) {
+    switch (finish) {
+    case FilamentFinish::Silk:
+        return "Silk"; // i18n: do not translate
+    case FilamentFinish::Matte:
+        return "Matte"; // i18n: do not translate
+    case FilamentFinish::Marble:
+        return "Marble"; // i18n: do not translate
+    case FilamentFinish::Sparkle:
+        return "Sparkle"; // i18n: do not translate
+    case FilamentFinish::None:
+        break;
+    }
+    return "";
+}
+
+} // namespace helix

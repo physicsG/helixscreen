@@ -2,7 +2,7 @@
 
 #pragma once
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "screensaver_base.h"
 #include "screensaver_motion.h"
@@ -39,12 +39,8 @@ class FlyingToasterScreensaver : public helix::ui::SaverBase {
     bool on_start() override;
     void on_frame(uint32_t dt_ms, std::vector<helix::ui::DirtyRect>& dirty) override;
     void on_stop() override;
-    size_t ladder_size() const override {
-        return sizeof(LEVEL_PERIODS_MS) / sizeof(LEVEL_PERIODS_MS[0]);
-    }
-    uint32_t ladder_period_ms(size_t level) const override {
-        return LEVEL_PERIODS_MS[level];
-    }
+    size_t ladder_size() const override;
+    uint32_t ladder_period_ms(size_t level) const override;
     /// Applies a level at once; the lowest rung also lets go of the sprites past its cap.
     void on_level_request(size_t level) override;
 
@@ -52,12 +48,6 @@ class FlyingToasterScreensaver : public helix::ui::SaverBase {
     // Test-only seam: reads the sprites and decoded frames so frame-time-driven motion can be
     // pinned. See tests/test_helpers/screensaver_test_access.h.
     friend class FlyingToasterScreensaverTestAccess;
-
-    /// Frame period per level. Below full rate the rungs thin the sprite population instead of
-    /// slowing further, because a halved rate that still flies every sprite saves little: see
-    /// LEVEL_SPRITE_CAPS, which is indexed by the same level.
-    static constexpr uint32_t LEVEL_PERIODS_MS[] = {helix::ui::SAVER_FAST_PERIOD, 33, 33, 33};
-    /// First level that flies the capped sprite count.
 
     struct FlyingObject {
         lv_obj_t* img;

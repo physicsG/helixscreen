@@ -11,6 +11,8 @@
  * the ONE place its guards now live (AmsBackend::set_endless_spool_backup).
  */
 
+#include "ui_endless_spool_arrows.h"
+
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
 #include "ams_backend_mock.h"
@@ -874,7 +876,7 @@ TEST_CASE("endless_spool_status turns capabilities into a status line",
         const auto status = endless_spool_status(caps);
 
         CHECK(status.kind == EndlessSpoolStatusKind::On);
-        CHECK(status.text == "Switches to a backup spool on runout");
+        CHECK(status.text == "Switches to another spool on runout");
     }
 
     SECTION("Off reads as 'it will not switch' and never as unknown") {
@@ -896,7 +898,7 @@ TEST_CASE("endless_spool_status turns capabilities into a status line",
         const auto status = endless_spool_status(caps);
 
         CHECK(status.kind == EndlessSpoolStatusKind::Unknown);
-        CHECK(status.text == "Backup spool switching state unknown");
+        CHECK(status.text == "Endless Spool state unknown");
         CHECK(status.text.find("not switch") == std::string::npos);
         CHECK(status.kind != EndlessSpoolStatusKind::Off);
     }
@@ -918,10 +920,10 @@ TEST_CASE("endless_spool_status turns capabilities into a status line",
         CHECK(static_cast<int>(status.kind) != 0); // 0 is what the XML hides on
         CHECK(status.kind != EndlessSpoolStatusKind::Off);
         CHECK(status.text ==
-              "Auto-refill is on but no two slots hold matching filament, so nothing will "
-              "switch on runout\nThe printer's firmware chooses the backup spool itself");
+              "Endless Spool is on but no two slots hold matching filament, so nothing "
+              "will switch on runout\nThe printer's firmware chooses where to switch on runout");
         // The first line must not be the plain-On or plain-Off sentence.
-        CHECK(status.text.find("Switches to a backup spool") == std::string::npos);
+        CHECK(status.text.find("Switches to another spool") == std::string::npos);
         CHECK(status.text.find("Will not switch spools") == std::string::npos);
     }
 
@@ -936,8 +938,8 @@ TEST_CASE("endless_spool_status turns capabilities into a status line",
         const auto status = endless_spool_status(caps);
 
         CHECK(status.kind == EndlessSpoolStatusKind::On);
-        CHECK(status.text == "Switches to a backup spool on runout\n"
-                             "The printer's firmware chooses the backup spool itself");
+        CHECK(status.text == "Switches to another spool on runout\n"
+                             "The printer's firmware chooses where to switch on runout");
         // The reason is exactly endless_spool_restriction_text(), never a second
         // copy of the same prose.
         CHECK(status.text.find(endless_spool_restriction_text(
@@ -982,7 +984,7 @@ TEST_CASE("endless_spool_status turns capabilities into a status line",
         const auto status = endless_spool_status(caps);
 
         CHECK(status.kind == EndlessSpoolStatusKind::NeedsPlugin);
-        CHECK(status.text == "No automatic backup-spool package is installed");
+        CHECK(status.text == "No Endless Spool package is installed");
         CHECK(status.text.find("{}") == std::string::npos); // no unfilled placeholder
     }
 
@@ -995,8 +997,8 @@ TEST_CASE("endless_spool_status turns capabilities into a status line",
         caps.provider = "bambufy";
         const auto status = endless_spool_status(caps);
 
-        CHECK(status.text == "Switches to a backup spool on runout (bambufy)\n"
-                             "Configured in the backup-spool package, not from here");
+        CHECK(status.text == "Switches to another spool on runout (bambufy)\n"
+                             "Endless Spool is configured in its package, not from here");
     }
 
     SECTION("every capability corner produces text iff it produces a visible kind") {
@@ -1086,7 +1088,7 @@ TEST_CASE("Every backend's real capabilities produce a sane status line",
 
         const auto status = endless_spool_status(caps);
         CHECK(status.kind == EndlessSpoolStatusKind::On);
-        CHECK(status.text == "Switches to a backup spool on runout");
+        CHECK(status.text == "Switches to another spool on runout");
         CHECK(status.text.find('\n') == std::string::npos);
     }
 
@@ -1098,7 +1100,404 @@ TEST_CASE("Every backend's real capabilities produce a sane status line",
 
         const auto status = endless_spool_status(caps);
         CHECK(status.kind == EndlessSpoolStatusKind::Unknown);
-        CHECK(status.text == "Backup spool switching state unknown\n"
+        CHECK(status.text == "Endless Spool state unknown\n"
                              "Waiting for the filament system to report its state");
+    }
+}
+
+// =============================================================================
+// Rendering geometry - which marks the slot row draws for a relation
+// =============================================================================
+
+namespace {
+
+EndlessSpoolGroup unordered_group(std::vector<int> members) {
+    EndlessSpoolGroup g;
+    g.members = std::move(members);
+    g.ordered = false;
+    return g;
+}
+
+EndlessSpoolGroup ordered_group(std::vector<int> members) {
+    EndlessSpoolGroup g;
+    g.members = std::move(members);
+    g.ordered = true;
+    return g;
+}
+
+size_t count_kind(const std::vector<helix::ui::EndlessSpoolMark>& marks,
+                  helix::ui::EndlessSpoolMarkKind kind) {
+    return static_cast<size_t>(std::count_if(marks.begin(), marks.end(),
+                                             [kind](const auto& m) { return m.kind == kind; }));
+}
+
+const helix::ui::EndlessSpoolMark* find_mark(const std::vector<helix::ui::EndlessSpoolMark>& marks,
+                                             const std::vector<int>& slots) {
+    for (const auto& m : marks) {
+        if (m.slots == slots) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+// Every hop must read on its own: no two arrow ends in one column, and two
+// arrows whose drawn extents meet or overlap never share a height level.
+void check_hops_are_separable(const std::vector<helix::ui::EndlessSpoolMark>& marks) {
+    // Lanes are far narrower than a slot, so (slot, lane) orders left to right.
+    const auto pos = [](const helix::ui::EndlessSpoolColumn& c) { return c.slot * 64 + c.lane; };
+    for (size_t i = 0; i < marks.size(); ++i) {
+        for (size_t j = i + 1; j < marks.size(); ++j) {
+            const auto& a = marks[i];
+            const auto& b = marks[j];
+            for (const auto& ca : a.columns) {
+                for (const auto& cb : b.columns) {
+                    INFO("marks " << i << " and " << j << " share column slot " << ca.slot
+                                  << " lane " << ca.lane);
+                    CHECK(ca != cb);
+                }
+            }
+            const int a_lo = std::min(pos(a.columns.front()), pos(a.columns.back()));
+            const int a_hi = std::max(pos(a.columns.front()), pos(a.columns.back()));
+            const int b_lo = std::min(pos(b.columns.front()), pos(b.columns.back()));
+            const int b_hi = std::max(pos(b.columns.front()), pos(b.columns.back()));
+            if (std::max(a_lo, b_lo) <= std::min(a_hi, b_hi)) {
+                INFO("marks " << i << " and " << j << " meet but share level " << a.height_level);
+                CHECK(a.height_level != b.height_level);
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("Endless spool marks: unordered groups are brackets, ordered groups are arrows",
+          "[ams][endless_spool][marks]") {
+    using helix::ui::endless_spool_marks;
+    using helix::ui::EndlessSpoolMarkKind;
+
+    SECTION("an unordered three-member group is one bracket over all three, no arrows") {
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(unordered_group({1, 2, 3}));
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(marks.size() == 1);
+        CHECK(marks[0].kind == EndlessSpoolMarkKind::Bracket);
+        CHECK(marks[0].slots == std::vector<int>{1, 2, 3});
+        CHECK(marks[0].min_slot == 1);
+        CHECK(marks[0].max_slot == 3);
+        CHECK(marks[0].bar_gaps.empty());
+        // Bracket ticks drop at the slot centres.
+        CHECK(marks[0].columns ==
+              std::vector<helix::ui::EndlessSpoolColumn>{{1, 0}, {2, 0}, {3, 0}});
+        CHECK(count_kind(marks, EndlessSpoolMarkKind::Arrow) == 0);
+    }
+
+    SECTION("an unordered group's members are drawn ascending whatever order they arrive in") {
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(unordered_group({3, 0, 2}));
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(marks.size() == 1);
+        CHECK(marks[0].slots == std::vector<int>{0, 2, 3});
+    }
+
+    SECTION("an ordered pair is one arrow from source to target") {
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(ordered_group({2, 0}));
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(marks.size() == 1);
+        CHECK(marks[0].kind == EndlessSpoolMarkKind::Arrow);
+        CHECK(marks[0].slots == std::vector<int>{2, 0});
+        // The source leaves left of its slot centre, the arrowhead lands right of it.
+        REQUIRE(marks[0].columns.size() == 2);
+        CHECK(marks[0].columns[0].slot == 2);
+        CHECK(marks[0].columns[0].lane < 0);
+        CHECK(marks[0].columns[1].slot == 0);
+        CHECK(marks[0].columns[1].lane > 0);
+        CHECK(marks[0].min_slot == 0);
+        CHECK(marks[0].max_slot == 2);
+    }
+
+    SECTION("an ordered chain is one arrow per hand-off") {
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(ordered_group({0, 1, 3}));
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        CHECK(count_kind(marks, EndlessSpoolMarkKind::Arrow) == 2);
+        CHECK(find_mark(marks, {0, 1}) != nullptr);
+        CHECK(find_mark(marks, {1, 3}) != nullptr);
+    }
+
+    SECTION("AFC's overlapping ordered edges 0->2 and 1->2 stay two arrows") {
+        const auto cfg = endless_spool_config_from_edges({2, 2, -1});
+
+        const auto marks = endless_spool_marks(cfg, 3);
+
+        REQUIRE(marks.size() == 2);
+        CHECK(count_kind(marks, EndlessSpoolMarkKind::Arrow) == 2);
+        const auto* a = find_mark(marks, {0, 2});
+        const auto* b = find_mark(marks, {1, 2});
+        REQUIRE(a != nullptr);
+        REQUIRE(b != nullptr);
+        // They overlap horizontally, so they cannot share a height.
+        CHECK(a->height_level != b->height_level);
+    }
+
+    SECTION("disjoint unordered groups share the top height level") {
+        const auto cfg = endless_spool_config_from_groups({0, 0, 1, 1});
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(marks.size() == 2);
+        CHECK(count_kind(marks, EndlessSpoolMarkKind::Bracket) == 2);
+        CHECK(marks[0].height_level == 0);
+        CHECK(marks[1].height_level == 0);
+        CHECK(marks[0].bar_gaps.empty());
+        CHECK(marks[1].bar_gaps.empty());
+    }
+
+    SECTION("interleaved unordered groups stack, and the lower bar breaks where a tick crosses") {
+        // {1,3} and {2,4}: each bar spans a member of the other group.
+        const auto cfg = endless_spool_config_from_groups({-1, 0, 1, 0, 1});
+
+        const auto marks = endless_spool_marks(cfg, 5);
+
+        REQUIRE(marks.size() == 2);
+        const auto* first = find_mark(marks, {1, 3});
+        const auto* second = find_mark(marks, {2, 4});
+        REQUIRE(first != nullptr);
+        REQUIRE(second != nullptr);
+        REQUIRE(first->height_level != second->height_level);
+
+        const auto* upper = first->height_level < second->height_level ? first : second;
+        const auto* lower = upper == first ? second : first;
+        // The upper bracket's tick drops through the lower bar at the one
+        // member of the upper group lying strictly inside the lower span.
+        const int crossing = upper == first ? 3 : 2;
+        REQUIRE(lower->bar_gaps.size() == 1);
+        CHECK(lower->bar_gaps[0] == helix::ui::EndlessSpoolColumn{crossing, 0});
+        // Nothing drops through the upper bar.
+        CHECK(upper->bar_gaps.empty());
+    }
+
+    SECTION("a nested group sits under the group that spans it, with no crossings") {
+        // {0,3} spans {1,2}; the outer bar goes on top so no tick crosses a bar.
+        const auto cfg = endless_spool_config_from_groups({0, 1, 1, 0});
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        const auto* outer = find_mark(marks, {0, 3});
+        const auto* inner = find_mark(marks, {1, 2});
+        REQUIRE(outer != nullptr);
+        REQUIRE(inner != nullptr);
+        CHECK(outer->height_level < inner->height_level);
+        CHECK(outer->bar_gaps.empty());
+        CHECK(inner->bar_gaps.empty());
+    }
+
+    SECTION("an arrow's vertical breaks a bracket bar it crosses") {
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(unordered_group({0, 2}));
+        cfg.groups.push_back(ordered_group({1, 3}));
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        const auto* bracket = find_mark(marks, {0, 2});
+        const auto* arrow = find_mark(marks, {1, 3});
+        REQUIRE(bracket != nullptr);
+        REQUIRE(arrow != nullptr);
+        REQUIRE(bracket->height_level != arrow->height_level);
+        const auto* lower = bracket->height_level > arrow->height_level ? bracket : arrow;
+        const auto* upper = lower == bracket ? arrow : bracket;
+        // The upper mark's vertical inside the lower span is where the bar breaks.
+        const size_t crossing_index = upper == arrow ? 0 : 1;
+        REQUIRE(lower->bar_gaps.size() == 1);
+        CHECK(lower->bar_gaps[0] == upper->columns[crossing_index]);
+    }
+
+    SECTION("a chain's hops never share a column or, where they meet, a height level") {
+        // 0->1->2->3: slots 1 and 2 are each the target of one hop and the
+        // source of the next.
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(ordered_group({0, 1, 2, 3}));
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(count_kind(marks, EndlessSpoolMarkKind::Arrow) == 3);
+        check_hops_are_separable(marks);
+        // Neighbouring hops touch at a shared slot, so they cannot share a bar.
+        const auto* a = find_mark(marks, {0, 1});
+        const auto* b = find_mark(marks, {1, 2});
+        const auto* c = find_mark(marks, {2, 3});
+        REQUIRE((a && b && c));
+        CHECK(a->height_level != b->height_level);
+        CHECK(b->height_level != c->height_level);
+    }
+
+    SECTION("AFC's 0->2, 1->2, 3->0 keep every hop separable") {
+        const auto cfg = endless_spool_config_from_edges({2, 2, -1, 0});
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(count_kind(marks, EndlessSpoolMarkKind::Arrow) == 3);
+        check_hops_are_separable(marks);
+        // Two arrowheads land on slot 2; each gets its own column.
+        const auto* a = find_mark(marks, {0, 2});
+        const auto* b = find_mark(marks, {1, 2});
+        REQUIRE((a && b));
+        CHECK(a->columns[1] != b->columns[1]);
+        CHECK(a->columns[1].lane > 0);
+        CHECK(b->columns[1].lane > 0);
+    }
+
+    SECTION("disjoint ordered pairs still share a level") {
+        const auto cfg = endless_spool_config_from_edges({1, -1, 3, -1});
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(marks.size() == 2);
+        CHECK(marks[0].height_level == marks[1].height_level);
+    }
+
+    SECTION("a group nested in another always sits below its container") {
+        // {0,5}, {3,8}, {6,7}: {6,7} overlaps only {3,8}, so the first free
+        // level alone would lift it above the group that spans it.
+        const auto cfg = endless_spool_config_from_groups({0, -1, -1, 1, -1, 0, 2, 2, 1});
+
+        const auto marks = endless_spool_marks(cfg, 9);
+
+        REQUIRE(marks.size() == 3);
+        const auto* outer = find_mark(marks, {3, 8});
+        const auto* inner = find_mark(marks, {6, 7});
+        REQUIRE(outer != nullptr);
+        REQUIRE(inner != nullptr);
+        CHECK(outer->height_level < inner->height_level);
+        // Nothing drops through the nested bar.
+        CHECK(inner->bar_gaps.empty());
+    }
+
+    SECTION("a slot that heads two ordered groups keeps only its first successor") {
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(ordered_group({0, 1}));
+        cfg.groups.push_back(ordered_group({0, 2}));
+
+        const auto marks = endless_spool_marks(cfg, 3);
+
+        REQUIRE(marks.size() == 1);
+        CHECK(marks[0].slots == std::vector<int>{0, 1});
+        CHECK(endless_spool_backup_for(cfg, 0) == 1);
+    }
+
+    SECTION("levels clamp to what the canvas holds, and gaps follow the clamped levels") {
+        // {0,3}, {1,4}, {2,5}: each overlaps the other two.
+        const auto cfg = endless_spool_config_from_groups({0, 1, 2, 0, 1, 2});
+
+        const auto unclamped = endless_spool_marks(cfg, 6);
+        const auto* deepest = find_mark(unclamped, {2, 5});
+        REQUIRE(deepest != nullptr);
+        CHECK(deepest->height_level == 2);
+        // Ticks at 3 and 4 both drop through the deepest bar.
+        CHECK(deepest->bar_gaps.size() == 2);
+
+        helix::ui::EndlessSpoolMarkLimits limits;
+        limits.max_height_level = 1;
+        const auto marks = endless_spool_marks(cfg, 6, limits);
+
+        REQUIRE(marks.size() == 3);
+        for (const auto& m : marks) {
+            CHECK(m.height_level <= 1);
+        }
+        const auto* shared_a = find_mark(marks, {1, 4});
+        const auto* shared_b = find_mark(marks, {2, 5});
+        REQUIRE((shared_a && shared_b));
+        CHECK(shared_a->height_level == 1);
+        CHECK(shared_b->height_level == 1);
+        // Marks on one bar do not break each other: only {0,3}'s tick at 3
+        // still crosses {2,5}.
+        REQUIRE(shared_b->bar_gaps.size() == 1);
+        CHECK(shared_b->bar_gaps[0] == helix::ui::EndlessSpoolColumn{3, 0});
+    }
+
+    SECTION("lanes become pixel offsets, narrowed to stay inside the slot") {
+        const auto cfg = endless_spool_config_from_edges({2, 2, -1, 0});
+
+        // No limits: lanes have no width.
+        for (const auto& m : endless_spool_marks(cfg, 4)) {
+            for (const auto& c : m.columns) {
+                CHECK(c.offset_px == 0);
+            }
+        }
+
+        helix::ui::EndlessSpoolMarkLimits limits;
+        limits.lane_px = 10;
+        limits.slot_spacing_px = 104;
+        const auto roomy = endless_spool_marks(cfg, 4, limits);
+        const auto* a = find_mark(roomy, {0, 2});
+        REQUIRE(a != nullptr);
+        CHECK(a->columns[0].offset_px == -10);
+        CHECK(a->columns[1].offset_px == 10 * a->columns[1].lane);
+
+        // Two lanes right of slot 2 must stay inside half of a 30px spacing.
+        limits.slot_spacing_px = 30;
+        for (const auto& m : endless_spool_marks(cfg, 4, limits)) {
+            for (const auto& c : m.columns) {
+                CHECK(std::abs(c.offset_px) < limits.slot_spacing_px / 2);
+                if (c.lane != 0) {
+                    CHECK(c.offset_px != 0);
+                }
+            }
+        }
+    }
+
+    SECTION("arrowheads sharing a slot never overlap") {
+        const auto cfg = endless_spool_config_from_edges({2, 2, -1, 0});
+        for (const int32_t spacing : {104, 40, 20}) {
+            helix::ui::EndlessSpoolMarkLimits limits;
+            limits.lane_px = 10;
+            limits.slot_spacing_px = spacing;
+
+            const auto marks = endless_spool_marks(cfg, 4, limits);
+
+            const auto* a = find_mark(marks, {0, 2});
+            const auto* b = find_mark(marks, {1, 2});
+            const auto* lone = find_mark(marks, {3, 0});
+            REQUIRE((a && b && lone));
+            INFO("slot spacing " << spacing);
+            const int32_t apart = std::abs(a->columns[1].offset_px - b->columns[1].offset_px);
+            // Each wing's 2px stroke reaches 1px past the half-width.
+            CHECK((a->head_px + 1) + (b->head_px + 1) < apart);
+            CHECK(a->head_px >= 1);
+            // A slot with one arrowhead keeps the full-size head.
+            CHECK(lone->head_px == 6);
+        }
+    }
+
+    SECTION("an empty relation draws nothing") {
+        CHECK(endless_spool_marks(EndlessSpoolConfig{}, 4).empty());
+    }
+
+    SECTION("members at or beyond the slot count are ignored") {
+        EndlessSpoolConfig cfg;
+        cfg.groups.push_back(unordered_group({0, 2, 5}));
+        cfg.groups.push_back(unordered_group({1, 4}));  // one member left: no mark
+        cfg.groups.push_back(ordered_group({3, 7}));    // target off the row: no arrow
+        cfg.groups.push_back(unordered_group({-1, 3})); // negative member dropped too
+
+        const auto marks = endless_spool_marks(cfg, 4);
+
+        REQUIRE(marks.size() == 1);
+        CHECK(marks[0].slots == std::vector<int>{0, 2});
+        CHECK(marks[0].max_slot == 2);
+    }
+
+    SECTION("a slot count of zero draws nothing") {
+        const auto cfg = endless_spool_config_from_groups({0, 0});
+        CHECK(endless_spool_marks(cfg, 0).empty());
     }
 }

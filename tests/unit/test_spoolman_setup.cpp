@@ -55,7 +55,7 @@ TEST_CASE("SpoolmanSetup::build_url", "[spoolman_setup]") {
     }
 
     SECTION("uses default port constant") {
-        std::string url = SpoolmanSetup::build_url("myhost", helix::ui::DEFAULT_SPOOLMAN_PORT);
+        std::string url = SpoolmanSetup::build_url("myhost", helix::ui::kDefaultSpoolmanPort);
         CHECK(url == "http://myhost:7912");
     }
 }

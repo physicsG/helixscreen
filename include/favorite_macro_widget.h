@@ -13,9 +13,8 @@
 #include <memory>
 #include <string>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 class FavoriteMacroConfigModal;
 

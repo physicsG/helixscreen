@@ -34,17 +34,17 @@ struct PluckEvent {
  * LVGL, no threads. Callers hand it whatever AccelBatch arrives.
  *
  * @par Window size is load-bearing
- * DETECTION_WINDOW_SAMPLES is 2048 because PluckDetector::MIN_RMS_RATIO was
+ * kDetectionWindowSamples is 2048 because PluckDetector::kMinRmsRatio was
  * calibrated against 2048-sample detection windows over 60 real captures.
  * Changing the window silently invalidates the threshold.
  *
  * @par The gate runs on the detection window
- * Never on an extracted ring-down. A ring-down has decayed for SKIP_MS before
+ * Never on an extracted ring-down. A ring-down has decayed for kSkipMs before
  * anyone sees it and reads roughly three times weaker; gating on one rejects
  * strikes that were genuinely firm. See pluck_detector.h.
  *
  * @par Energy is not enough
- * Clearing MIN_RMS_RATIO says something happened, not that it was a pluck. A
+ * Clearing kMinRmsRatio says something happened, not that it was a pluck. A
  * door closing, a stepper cogging or a fan stepping through a mode all clear
  * 9x easily - three such events measured 44-53x on the reference machine and
  * were reported as plucks nobody made. The shape checks in PluckDetector and
@@ -57,8 +57,8 @@ struct PluckEvent {
  */
 class BeltListenSession {
   public:
-    /// Calibrated with MIN_RMS_RATIO. Not a free parameter - see above.
-    static constexpr size_t DETECTION_WINDOW_SAMPLES = 2048;
+    /// Calibrated with kMinRmsRatio. Not a free parameter - see above.
+    static constexpr size_t kDetectionWindowSamples = 2048;
 
     /**
      * @param span_mm Free belt span, which sets the harmonic search window
@@ -112,8 +112,8 @@ class BeltListenSession {
      * A non-zero median is NOT the same question: PluckAggregator::median()
      * returns a median of any non-empty sample set, so it is positive from the
      * first accepted pluck. Committing there would ship a single reading, and
-     * MIN_HARMONIC_CONCENTRATION is set as low as it is precisely because the
-     * committed number is a median of COMMIT_AFTER plucks - see
+     * kMinHarmonicConcentration is set as low as it is precisely because the
+     * committed number is a median of kCommitAfter plucks - see
      * pitch_estimator.h. The rule lives here rather than in the panel because
      * a UI binding is not an enforcement point: `ctl click` sends
      * LV_EVENT_CLICKED with no disabled check, so a programmatic click reaches

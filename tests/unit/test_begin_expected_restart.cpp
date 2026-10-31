@@ -106,9 +106,7 @@ class ExpectedRestartFixture : public LVGLTestFixture {
     // Drains until the queue stops producing work: the helper queues its
     // toast, and RPC callbacks hop the queue again before side effects land.
     void settle() {
-        for (int i = 0; i < 4; i++) {
-            helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance());
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 };
 

@@ -186,3 +186,36 @@ def test_a_staged_path_with_an_embedded_newline_does_not_desync_its_neighbors(tm
     assert blobs["aaa.txt"] == "aaa content 2\n"
     assert blobs[newline_rel] == "newline content\n"
     assert blobs["zzz.txt"] == "zzz content 2\n"
+
+
+def test_catfile_batch_reads_past_a_tree_without_desyncing(tmp_path):
+    _init_repo(tmp_path)
+    _write(tmp_path, "d/sub/x.txt", "inner\n")
+    _write(tmp_path, "d/y.txt", "after\n")
+    _commit(tmp_path)
+    got = dict(staged_content.catfile_batch(
+        [("sub", "HEAD:d/sub"), ("y", "HEAD:d/y.txt")], tmp_path))
+    assert got == {"y": "after\n"}
+
+
+def test_tree_files_reads_the_index_not_the_working_tree(tmp_path):
+    _init_repo(tmp_path)
+    _write(tmp_path, "ui/a.xml", "committed\n")
+    _write(tmp_path, "ui/sub/b.xml", "nested\n")
+    _commit(tmp_path)
+    _write(tmp_path, "ui/a.xml", "staged\n")
+    _stage(tmp_path)
+    _write(tmp_path, "ui/a.xml", "unstaged\n")
+    _write(tmp_path, "ui/untracked.xml", "wip\n")
+    assert dict(staged_content.tree_files(None, ("ui",), tmp_path)) == {
+        "ui/a.xml": "staged\n", "ui/sub/b.xml": "nested\n"}
+    assert dict(staged_content.tree_files("HEAD", ("ui",), tmp_path, recursive=False)) == {
+        "ui/a.xml": "committed\n"}
+
+
+def test_catfile_batch_skips_a_missing_name_containing_spaces(tmp_path):
+    _init_repo(tmp_path)
+    _write(tmp_path, "b.txt", "b\n")
+    _stage(tmp_path)
+    items = [("x", ":no such file here"), ("b", ":b.txt")]
+    assert dict(staged_content.catfile_batch(items, root=tmp_path)) == {"b": "b\n"}

@@ -34,7 +34,7 @@ TEST_CASE("HeatingIconAnimator: unattached update does not change state",
 
 TEST_CASE("HeatingIconAnimator: classifies cooling above target", "[animator][heat_state]") {
     // The pre-change state machine had no cooling branch: current far above target
-    // matched `current >= target - TEMP_TOLERANCE` and reported AT_TARGET.
+    // matched `current >= target - kTempTolerance` and reported AT_TARGET.
     REQUIRE(helix::ui::temperature::classify_heat_state(2500, 2000, 20) == HeatState::Cooling);
 }
 

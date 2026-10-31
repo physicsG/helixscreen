@@ -85,7 +85,7 @@ TEST_CASE("decoder refuses to buffer without bound", "[belt][decoder]") {
         collect(d, junk);
     }
     CHECK(d.overflowed());
-    CHECK(d.pending_bytes() <= helix::KlippyFrameDecoder::MAX_PENDING_BYTES);
+    CHECK(d.pending_bytes() <= helix::KlippyFrameDecoder::kMaxPendingBytes);
 }
 
 TEST_CASE("reset clears pending bytes and the overflow latch", "[belt][decoder]") {

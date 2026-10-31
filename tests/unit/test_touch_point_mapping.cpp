@@ -86,8 +86,8 @@ TEST_CASE_METHOD(TouchPointMappingFixture, "A gesture drag turns with LVGL's dis
         CHECK(d.x == -10);
         CHECK(d.y == 0);
         const lv_point_t mapped = map_touch_point_to_screen(touch, A);
-        CHECK(mapped.x == TEST_DISPLAY_WIDTH - 1 - A.x);
-        CHECK(mapped.y == TEST_DISPLAY_HEIGHT - 1 - A.y);
+        CHECK(mapped.x == kTestDisplayWidth - 1 - A.x);
+        CHECK(mapped.y == kTestDisplayHeight - 1 - A.y);
     }
     SECTION("270") {
         lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
@@ -99,15 +99,15 @@ TEST_CASE_METHOD(TouchPointMappingFixture, "A gesture drag turns with LVGL's dis
 
 TEST_CASE_METHOD(TouchPointMappingFixture, "A gesture drag turns with the scanout plane",
                  "[gesture][rotation]") {
-    hook.set_plane_rotation(180, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT);
+    hook.set_plane_rotation(180, kTestDisplayWidth, kTestDisplayHeight);
     REQUIRE(hook.install(touch, PointerKind::PanelAbsolute));
 
     const lv_point_t d = drag();
     CHECK(d.x == -10);
     CHECK(d.y == 0);
     const lv_point_t mapped = map_touch_point_to_screen(touch, A);
-    CHECK(mapped.x == TEST_DISPLAY_WIDTH - 1 - A.x);
-    CHECK(mapped.y == TEST_DISPLAY_HEIGHT - 1 - A.y);
+    CHECK(mapped.x == kTestDisplayWidth - 1 - A.x);
+    CHECK(mapped.y == kTestDisplayHeight - 1 - A.y);
 }
 
 TEST_CASE_METHOD(TouchPointMappingFixture, "A gesture point carries the touch calibration",
@@ -116,8 +116,8 @@ TEST_CASE_METHOD(TouchPointMappingFixture, "A gesture point carries the touch ca
     cal.valid = true;
     cal.c = 5.0f;
     cal.f = -3.0f;
-    helix::install_calibration_wrapper(touch, calibration, cal, TEST_DISPLAY_WIDTH,
-                                       TEST_DISPLAY_HEIGHT);
+    helix::install_calibration_wrapper(touch, calibration, cal, kTestDisplayWidth,
+                                       kTestDisplayHeight);
 
     const lv_point_t mapped = map_touch_point_to_screen(touch, A);
     CHECK(mapped.x == A.x + 5);
@@ -157,8 +157,8 @@ TEST_CASE_METHOD(TouchPointMappingFixture,
     CHECK(sample->kind == helix::ui::TwoFingerSample::Kind::Pinch);
     CHECK(sample->phase == helix::ui::TwoFingerSample::Phase::Recognized);
     CHECK(sample->scale == Catch::Approx(1.2f));
-    CHECK(sample->start_x == TEST_DISPLAY_WIDTH - 1 - A.x);
-    CHECK(sample->start_y == TEST_DISPLAY_HEIGHT - 1 - A.y);
+    CHECK(sample->start_x == kTestDisplayWidth - 1 - A.x);
+    CHECK(sample->start_y == kTestDisplayHeight - 1 - A.y);
     CHECK(sample->delta_x == Catch::Approx(-10.0f));
     CHECK(sample->delta_y == Catch::Approx(0.0f));
 }

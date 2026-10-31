@@ -5,7 +5,6 @@
 #include "backlight_backend.h"
 #include "display_backend.h"
 #include "display_manager.h"
-#include "misc/lv_timer_private.h" // timer_cb: identifies the wake gate's own timer
 
 #include <memory>
 
@@ -30,6 +29,25 @@ class DisplayManagerTestAccess {
 
     static void set_use_power_off(DisplayManager& dm, bool use_power_off) {
         dm.m_sleep.m_use_power_off = use_power_off;
+    }
+
+    static void schedule_brightness_reassert(DisplayManager& dm) {
+        dm.schedule_brightness_reassert();
+    }
+
+    static void apply_startup_rotation(DisplayManager& dm, const DisplayManager::Config& config) {
+        dm.apply_startup_rotation(config);
+    }
+
+    /// The size width()/height() report while no lv_display_t is attached.
+    static void set_size(DisplayManager& dm, int width, int height) {
+        dm.m_width = width;
+        dm.m_height = height;
+    }
+
+    /// The screen the resize handler is installed on, or null once it is deleted.
+    static lv_obj_t* resize_screen(const DisplayManager& dm) {
+        return dm.m_resize_screen;
     }
 
     static void set_backlight(DisplayManager& dm, std::unique_ptr<BacklightBackend> backlight) {
@@ -157,29 +175,6 @@ class DisplayManagerTestAccess {
         return dm.m_sleep.m_sleep_overlay;
     }
 
-    // The wake-touch gate wake_display() engages (#1245). Private on the
-    // manager and normally only reachable through a full wake, which also
-    // repaints; the gate is driven directly here so the assertions are about
-    // the gate alone.
-    static void disable_input_briefly(DisplayManager& dm) {
-        dm.disable_input_briefly();
-    }
-
-    // Run every pending wake-gate re-enable timer now, which re-enables the
-    // pointer indevs it disabled and deletes itself. Left armed, its 200ms
-    // would elapse inside a later case's lv_timer_handler() and enable every
-    // pointer indev in the process, including one that case disabled on purpose.
-    static void finish_input_gate() {
-        lv_timer_t* timer = lv_timer_get_next(nullptr);
-        while (timer) {
-            lv_timer_t* next = lv_timer_get_next(timer);
-            if (timer->timer_cb == &DisplayManager::reenable_input_cb) {
-                timer->timer_cb(timer);
-            }
-            timer = next;
-        }
-    }
-
     // Exercises the wake-side panel restore (power-on / unblank / overlay removal)
     // WITHOUT the post-wake repaint. Production wake_display() runs this then
     // lv_refr_now().
@@ -207,6 +202,10 @@ class DisplayManagerTestAccess {
         dm.m_sleep.m_display_sleeping = sleeping;
     }
 
+    static void set_display_dimmed(DisplayManager& dm, bool dimmed) {
+        dm.m_sleep.m_display_dimmed = dimmed;
+    }
+
     // Set by sleep_aware_read_cb when a press arrives while asleep or dimmed.
     static bool wake_requested(DisplayManager& dm) {
         return dm.m_sleep.m_wake_requested;
@@ -220,7 +219,7 @@ class DisplayManagerTestAccess {
         }
     }
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     // What check_display_sleep() records when it starts a screensaver.
     static void set_screensaver_active(DisplayManager& dm, bool active) {
         dm.m_sleep.m_screensaver_active = active;

@@ -4,25 +4,75 @@
 #pragma once
 
 #include "bed_mesh_probe_parser.h"
+#include "chamber_wait_line.h"
 #include "helix_regex.h"
 #include "i_moonraker_client.h"
 #include "leveling_probe_points.h"
+#include "preprint_checklist.h"
 #include "preprint_predictor.h"
 #include "print_start_position_classifier.h"
 #include "print_start_profile.h"
 #include "print_start_purge_shape.h"
 #include "printer_state.h"
 #include "simulated_clock.h"
+#include "start_block_steps.h"
 #include "thermal_rate_model.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
+
+namespace helix {
+struct PrintStartAnalysis;
+
+/**
+ * @brief A pre-print step that emits signals for other phases on its own
+ *
+ * A nozzle clean that parks at the purge position and pushes filament to check
+ * flow looks exactly like the purge it is not. A profile pattern declares the
+ * phases its step owns (`owns`); while the step runs, signals for them are the
+ * step's, and the display stays on it. The step's own phase and the heating
+ * it does for itself leave it running; any other step's signal ends it.
+ */
+struct OwningStep {
+    PrintStartPhase phase = PrintStartPhase::IDLE; ///< IDLE: no step owns anything
+    std::vector<PrintStartPhase> owns;
+
+    enum class Verdict {
+        Absorb, ///< the step emitted it; it names no phase change
+        Pass,   ///< applies as usual and the step runs on
+        Ends,   ///< applies as usual and the step is over
+    };
+
+    [[nodiscard]] Verdict judge(PrintStartPhase signal) const {
+        if (phase == PrintStartPhase::IDLE) {
+            return Verdict::Pass;
+        }
+        if (std::find(owns.begin(), owns.end(), signal) != owns.end()) {
+            return Verdict::Absorb;
+        }
+        switch (signal) {
+        case PrintStartPhase::IDLE:
+        case PrintStartPhase::INITIALIZING:
+        case PrintStartPhase::HEATING_BED:
+        case PrintStartPhase::SOAKING:
+        case PrintStartPhase::HEATING_NOZZLE:
+            return Verdict::Pass;
+        default:
+            return signal == phase ? Verdict::Pass : Verdict::Ends;
+        }
+    }
+};
+} // namespace helix
 
 /**
  * @file print_start_collector.h
@@ -56,11 +106,17 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     [[nodiscard]] int get_current_phase_elapsed_seconds() const;
 
     /**
-     * @brief Construct a PrintStartCollector
+     * @brief Create a PrintStartCollector
+     *
+     * Network callbacks hold references, so the last one can drop on any
+     * thread. Destruction always runs on the main thread, because the
+     * destructor deletes an LVGL timer.
+     *
      * @param client helix::IMoonrakerClient for registering callbacks
      * @param state helix::PrinterState to update with phase progress
      */
-    PrintStartCollector(helix::IMoonrakerClient& client, helix::PrinterState& state);
+    static std::shared_ptr<PrintStartCollector> create(helix::IMoonrakerClient& client,
+                                                       helix::PrinterState& state);
 
     ~PrintStartCollector();
 
@@ -100,6 +156,19 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
      *   by newlines (as built by build_pre_start_gcode_block)
      */
     void note_host_side_pre_start(const std::string& dispatched_block);
+
+    /**
+     * @brief The phases this run's start runs and skips, from its option toggles
+     *
+     * The countdown's estimate takes them as print details does, so the two
+     * agree. The phases skipped are recorded on the run's history entry, so a
+     * later estimate can tell a phase no start ran from one the phase matcher
+     * missed; a run never told records nothing, which reads as unknown. Call
+     * on the main thread, after start().
+     *
+     * @param overrides PrintStartPhase value -> whether this start runs it
+     */
+    void note_phase_overrides(helix::PreprintPhaseOverrides overrides);
 
     /**
      * @brief Stop monitoring
@@ -204,6 +273,17 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     }
 
     /**
+     * @brief Whether the printer reports a pre-print step still under way
+     *
+     * True while the latest matched context-qualified phase-object state maps
+     * to a phase short of COMPLETE (a priming line, a cool-down for probing).
+     * Such a step holds the deadline timeouts and the first-extrusion
+     * fallback. A bare phase-object state never counts: a display label
+     * outlives its step.
+     */
+    [[nodiscard]] bool in_live_preprint_step() const;
+
+    /**
      * @brief Record the printer's live bed-mesh presence
      *
      * Fed from the bed_mesh status stream. A mesh that disappears while the
@@ -270,6 +350,26 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     void set_profile(std::shared_ptr<PrintStartProfile> profile);
 
     /**
+     * @brief Hand over the PRINT_START macro analysis, the fallback source of the
+     *        checklist's expected order when the file has no inline start block
+     *
+     * Survives start(): the macro belongs to the printer, not to one run. Any thread.
+     */
+    void set_macro_analysis(const helix::PrintStartAnalysis& analysis);
+
+    /**
+     * @brief What the pre-print checklist needs, as of now
+     *
+     * Done phases in the order they were left, the current phase and its elapsed
+     * time, seconds spent per phase, the expected order (start block, else macro
+     * analysis, else empty) and the predictor's per-phase seconds. Any thread;
+     * takes state_mutex_. It changes only when print_start_phase or
+     * print_start_progress does (both are set at every phase entry), plus the
+     * elapsed time that the panel reads on its own tick.
+     */
+    [[nodiscard]] helix::PreprintChecklistInput checklist_input() const;
+
+    /**
      * @brief Get the predictor for reading predictions
      *
      * Thread-safe: the predictor is loaded on start() and gains entries on
@@ -281,7 +381,20 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
         return predictor_;
     }
 
+    /**
+     * @brief The heater a blocking wait command waits on
+     *
+     * M109 is the nozzle whichever way its temperature moves, M190 the bed,
+     * and M191 or a TEMPERATURE_WAIT on @p chamber_heater itself the chamber
+     * (SOAKING), but only with a chamber heater configured. A TEMPERATURE_WAIT on heater_bed or an
+     * extruder is that heater. Anything else names no heater: nullopt.
+     */
+    [[nodiscard]] static std::optional<helix::PrintStartPhase>
+    heater_waited_on(const helix::WaitLine& line, const std::string& chamber_heater);
+
   private:
+    PrintStartCollector(helix::IMoonrakerClient& client, helix::PrinterState& state);
+
     /**
      * @brief Handle incoming G-code response
      */
@@ -317,9 +430,17 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
      *   flag picks the quiet gate the match refreshes: narration holds every
      *   timeout, inference only the deadline timeouts (note_signal() and
      *   note_inferred_activity()).
+     * @param live_state Whether the match names the step running now rather
+     *   than an event that happened. A context-qualified phase-object state is
+     *   live: it may move the display to any phase, an earlier one included,
+     *   since the printer reports what it is doing, not a line that arrived late.
      */
     void apply_profile_match(const PrintStartProfile::MatchResult& match,
-                             bool marks_real_signal = true);
+                             bool marks_real_signal = true, bool live_state = false);
+
+    /// Judge a signal for @p phase against the owning step (helix::OwningStep):
+    /// true when the step owns it, ending the step when another step begins.
+    bool absorbed_by_owning_step(helix::PrintStartPhase phase);
 
     /// Show a gantry-leveling / Z-tilt phase inferred from the configured
     /// probe points. Inference, not narration: it never mutes the proactive
@@ -335,10 +456,43 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
      * the match through apply_profile_match(). An unchanged state string does
      * not re-fire; profiles without a phase object ignore every frame.
      *
+     * With a context field declared, the state is matched as
+     * "<innermost context>/<state>". Klipper sends only the fields that
+     * changed, so each field's last value is cached and a frame carrying
+     * either one re-matches the pair.
+     *
      * Thread-safe: runs on the WebSocket background thread, like the other
      * notify_status_update handling in start().
+     *
+     * @param seed_run Set for the answer to the query start() sends, to the
+     *   run that sent it: its values fill only the fields no frame has
+     *   delivered yet, since a frame may be newer, and it is dropped once
+     *   another run has begun.
      */
-    void handle_phase_object_status(const nlohmann::json& status);
+    void handle_phase_object_status(const nlohmann::json& status,
+                                    std::optional<uint64_t> seed_run = std::nullopt);
+
+    /// Fetch the phase object's current state and context once at start():
+    /// a context opened before the collector armed is never sent again
+    /// until it changes, and every state inside it would match without it.
+    void query_phase_object();
+
+    /// The start-up query's answer for run `run`; ignored once a later
+    /// start() has begun another run.
+    void apply_phase_object_query(const nlohmann::json& response, uint64_t run);
+
+    /// Read the print position once at start() on a printer whose firmware
+    /// runs its start macro before the file.
+    void query_start_macro_gate();
+
+    /// Follow the print position on such a printer. Returns true, once per run,
+    /// at the first position past 0 after this run has shown 0: the macro,
+    /// purge included, has returned.
+    bool note_start_macro_position(uint64_t position);
+
+    /// Bumped by every start() under state_mutex_, so an answer can tell
+    /// which run asked.
+    std::atomic<uint64_t> run_generation_{0};
 
     /**
      * @brief Check a status frame against the profile's status-signal rules
@@ -381,26 +535,16 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     bool check_helix_phase_signal(const std::string& line);
 
     /**
-     * @brief Check for K2/CFS-specific gcode tag stream signals
+     * @brief Check the line against the profile's tag patterns
      *
-     * Creality K2 and CFS-equipped printers emit a richer gcode tag stream
-     * than stock Klipper. These tags carry phase info that universal probe-
-     * line / regex heuristics can't extract precisely. Currently:
+     * Tag patterns (PrintStartProfile::try_match_tag) are lines a firmware
+     * prints to announce a step outright. A match sets the phase directly;
+     * when the line reports its own progress the message carries it and the
+     * progress follows it.
      *
-     * - `// num: N, velocity: V, percent F` (purge percent, fraction or int)
-     * - `// [box] cut sensor detected` / `// [box] cut to return` /
-     *   `BOX_LOAD_MATERIAL` (CFS filament-load events)
-     *
-     * Mapped onto the existing PrintStartPhase enum (PURGING, INITIALIZING)
-     * so the legacy `preparing_overlay` UI binds without change.
-     *
-     * Only consulted when the active profile declares cfs_signals — the
-     * vocabulary is vendor-specific and must not fire on another printer's
-     * coincidental "percent" plus "num:" output.
-     *
-     * @return true if a K2/CFS signal was detected and handled
+     * @return true if a tag pattern matched and was applied
      */
-    bool check_k2_cfs_signal(const std::string& line);
+    bool check_tag_signal(const std::string& line);
 
     /**
      * @brief Reset mesh probe counters on BED_MESH entry / sub-phase change
@@ -411,14 +555,22 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
      * Inspecting Bed). The probe counters need to reset between sub-phases
      * so the displayed "(N/M)" doesn't roll past M. Caller must hold
      * state_mutex_.
+     *
+     * @param counts_probes Whether the new BED_MESH step's probe lines are
+     *        mesh points to count (mesh_counts_probes_).
      */
     void maybe_reset_for_mesh_subphase_locked(helix::PrintStartPhase next_phase,
-                                              const std::string& next_message);
+                                              const std::string& next_message,
+                                              bool counts_probes = true);
 
     /**
      * @brief Update phase and recalculate progress (weighted mode)
+     *
+     * @param counts_mesh_probes For BED_MESH: whether its probe lines count
+     *        against a point total (see PrintStartProfile::MatchResult).
      */
-    void update_phase(helix::PrintStartPhase phase, const char* message);
+    void update_phase(helix::PrintStartPhase phase, const char* message,
+                      bool counts_mesh_probes = true);
 
     /**
      * @brief Update phase with explicit progress value (sequential mode)
@@ -444,7 +596,48 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
      * chamber. Main thread only, like everything that sets or clears a
      * wait's label.
      */
-    void relabel_heating_phase(helix::PrintStartPhase resolved, bool heater_wait = false);
+    void relabel_heating_phase(helix::PrintStartPhase resolved, bool heater_wait = false,
+                               const std::string& label = {});
+
+    /// The label a heater wait on the chamber shows: the live chamber
+    /// temperature against its target, or alone when the heater has none.
+    static std::string chamber_wait_message(int temp_deci, int target_deci);
+
+    /// Follow virtual_sdcard.file_position through the start block, on a
+    /// profile whose start sequence the slicer writes into the file. The
+    /// first position read fetches and scans the file's head. Any thread.
+    void handle_start_block_position(const nlohmann::json& status);
+    /// Fetch and scan the head of @p filename for run @p run. Main thread.
+    void request_start_block(uint64_t run, std::string filename);
+    /// Show the step run @p run reached, unless the console already named
+    /// what that line is doing. Dropped once another run has begun or the
+    /// pre-print is COMPLETE. Any thread; takes state_mutex_ itself.
+    void apply_start_block_step(const helix::StartBlockStep& step, uint64_t run);
+
+    /// Run @p apply, the phase match of console line @p line, and if it
+    /// changed the phase or message shown, stamp console_phase_time_ with it
+    /// and drop any deferred step. Takes state_mutex_ itself; @p apply must
+    /// not hold it.
+    void apply_console_phase(const std::string& line, const std::function<void()>& apply);
+    /// Show the deferred start-block step once the console grace has passed.
+    /// Any thread; takes state_mutex_ itself.
+    void flush_deferred_start_block_step();
+
+    /// Make @p phase current, crediting the time since the last change to the
+    /// phase it replaces. Caller holds state_mutex_.
+    void enter_phase_locked(helix::PrintStartPhase phase);
+    /// Time spent in @p phase this run, its visit now under way included.
+    /// Zero for IDLE, INITIALIZING and COMPLETE, which are not timed. Caller
+    /// holds state_mutex_.
+    std::chrono::seconds phase_seconds_locked(helix::PrintStartPhase phase) const;
+
+    /// Ask where the print is, and read the command there if the position
+    /// moved since the last read. Main thread.
+    void request_wait_line();
+    /// Store read @p gen's answer if no later position superseded it. Any thread.
+    void apply_wait_line(uint64_t gen, const helix::WaitLine& line);
+    /// Drop the current wait's line. Caller holds state_mutex_.
+    void forget_wait_line_locked();
 
     /// Give the phase a heater wait displaced back, if the wait's label is
     /// still the one showing. Main thread only; takes state_mutex_ itself.
@@ -466,7 +659,7 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     }
 
     /// Whether BED_MESH is showing and a probe line arrived within
-    /// MESH_PROBE_GAP_RESET. Caller must hold state_mutex_.
+    /// kMeshProbeGapReset. Caller must hold state_mutex_.
     bool mesh_probing_locked() const;
 
     /**
@@ -506,9 +699,7 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     static bool is_completion_marker(const std::string& line);
 
     /** @brief Check if a G-code response is a RESPOND-based print start completion */
-    [[nodiscard]] static bool is_respond_completion(const std::string& line) {
-        return helix::regex_search(line, respond_completion_pattern_);
-    }
+    [[nodiscard]] static bool is_respond_completion(const std::string& line);
 
     // Dependencies
     helix::IMoonrakerClient& client_;
@@ -525,6 +716,10 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
 
     // Phase tracking (protected by state_mutex_)
     std::set<helix::PrintStartPhase> detected_phases_;
+    /// Phases left behind, in the order they were left, each phase once.
+    std::vector<helix::PrintStartPhase> phases_left_;
+    /// Phases of the PRINT_START macro's detected operations, in macro order.
+    std::vector<helix::PrintStartPhase> macro_expected_phases_;
     helix::PrintStartPhase current_phase_ = helix::PrintStartPhase::IDLE;
     bool print_start_detected_ = false;
     int max_sequential_progress_ = 0; // Monotonic progress guard for sequential mode
@@ -532,7 +727,7 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
 
     /// When the printer last said something about its pre-print: a profile
     /// pattern or phase-object state matched, or a probe line arrived. Every
-    /// timeout, the ceiling included, waits for PREPRINT_QUIET_TIMEOUT past it,
+    /// timeout, the ceiling included, waits for kPreprintQuietTimeout past it,
     /// so a printer narrating a long pre-print is not cut short. Only the
     /// backstop ignores it.
     helix::sim::SimulatedClock::time_point last_signal_time_;
@@ -540,7 +735,7 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     /// When pre-print work last showed without being said: a heater climbed a
     /// degree above its highest reading under its current target, or a
     /// status-signal rule fired. The deadline timeouts wait for
-    /// PREPRINT_QUIET_TIMEOUT past it, which carries them through a silent M190
+    /// kPreprintQuietTimeout past it, which carries them through a silent M190
     /// or M109. The ceiling ignores it: a heater that never settles must not
     /// hold Preparing open.
     helix::sim::SimulatedClock::time_point last_inferred_activity_time_;
@@ -572,28 +767,28 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     // Keeping one unit is what makes the stuck-detection behaviour identical at
     // every --sim-speed, and outside --test the factor is 1.0, so these are
     // real seconds there.
-    static constexpr auto FALLBACK_TIMEOUT =
+    static constexpr auto kFallbackTimeout =
         std::chrono::seconds(300); ///< Last resort when no predictions
-    /// The ceiling: past it, a pre-print ends once PREPRINT_QUIET_TIMEOUT passes
+    /// The ceiling: past it, a pre-print ends once kPreprintQuietTimeout passes
     /// without a matched line or probe line, whatever the temperatures, so a
     /// heater that never settles still leaves Preparing. With a prediction the
-    /// ceiling is the larger of this and predicted x ABSOLUTE_TIMEOUT_MARGIN.
+    /// ceiling is the larger of this and predicted x kAbsoluteTimeoutMargin.
     /// Sits above the longest legitimate pre-print: the K2 Plus runs ~1140s
     /// (heat, ~390s mesh, purge), and a cold-start ASA soak pushes that further.
-    static constexpr auto ABSOLUTE_MAX_TIMEOUT = std::chrono::seconds(1800);
+    static constexpr auto kAbsoluteMaxTimeout = std::chrono::seconds(1800);
     /// The backstop, as a multiple of the ceiling. The one fallback that waits
     /// for nothing, so a firmware that chatters forever still leaves Preparing.
-    static constexpr int BACKSTOP_CEILING_MULTIPLE = 2;
+    static constexpr int kBackstopCeilingMultiple = 2;
     /// How long the printer must say nothing before a timeout may complete the
     /// pre-print. Longer than the gap between mesh probe points on a slow bed
     /// (the K2 spends ~5s per point, ~3s on a manual sweep) with margin for a
     /// heat-soak step that emits nothing at all.
-    static constexpr auto PREPRINT_QUIET_TIMEOUT = std::chrono::seconds(90);
-    static constexpr float ADAPTIVE_TIMEOUT_MARGIN =
+    static constexpr auto kPreprintQuietTimeout = std::chrono::seconds(90);
+    static constexpr float kAdaptiveTimeoutMargin =
         1.5f; ///< Multiply predicted total for adaptive timeout
-    static constexpr float ABSOLUTE_TIMEOUT_MARGIN =
+    static constexpr float kAbsoluteTimeoutMargin =
         2.5f; ///< Multiply predicted total for absolute ceiling
-    static constexpr int TEMP_TOLERANCE_DECIDEGREES = 50; // 5°C (temps stored as value * 10)
+    static constexpr int kTempToleranceDecidegrees = 50; // 5°C (temps stored as value * 10)
 
     // Fallback detection state (for printers without G-code layer markers)
     // Baseline values snapshot stale subject data at collector start so fallbacks
@@ -603,8 +798,11 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     std::atomic<bool> fallbacks_enabled_{false};
     std::atomic<helix::SubscriptionId> macro_subscription_id_{0};
 
-    // Phase timing for duration prediction (protected by state_mutex_)
-    std::map<int, helix::sim::SimulatedClock::time_point> phase_enter_times_;
+    // Phase timing for duration prediction (protected by state_mutex_). A
+    // phase can be shown more than once in one start (a toolchanger probes Z
+    // after every tool pick), so each keeps the sum of its visits.
+    std::map<int, helix::sim::SimulatedClock::duration> phase_time_spent_;
+    helix::sim::SimulatedClock::time_point phase_since_;
     helix::PreprintPredictor predictor_;
     int loaded_temp_bucket_{0};
     /// Which window this run is measuring. Defaults to PrinterEdge: an
@@ -618,9 +816,16 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     /// reset(), with the rest of the per-run state.
     std::vector<std::string> host_pre_start_echo_lines_;
 
+    /// The phases this run's start runs and skips, from note_phase_overrides();
+    /// reset with the rest of the per-run state.
+    std::optional<helix::PreprintPhaseOverrides> phase_overrides_;
+
     // Duration-proportional progress weights (protected by state_mutex_)
     std::map<int, float> predicted_phase_weights_; ///< Phase -> fraction of total (0.0-1.0)
     float predicted_total_seconds_ = 0.0f;         ///< Total predicted pre-print duration
+    /// Nozzle+bed heating priced at this start's targets: 0 when the heaters are
+    /// already there, nullopt until priced or when the nozzle target is unknown
+    std::optional<float> priced_heating_seconds_;
     int start_ext_temp_ = 0; ///< Extruder temp at collector start (decideg/10)
     int start_bed_temp_ = 0; ///< Bed temp at collector start (decideg/10)
     // Cached temperature readings for thread-safe access from calculate_progress_locked()
@@ -645,6 +850,10 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     // progress and per-probe time extrapolation for ETA.
     int mesh_probe_current_ = 0;
     int mesh_probe_total_ = 0;
+    /// Grid size from Klipper's "Adapted probe count" line. It can arrive just
+    /// before BED_MESH is entered, so it outlives the entry reset and seeds
+    /// mesh_probe_total_ there; cleared when the mesh phase ends.
+    int mesh_adapted_total_ = 0;
     helix::sim::SimulatedClock::time_point mesh_first_probe_time_;
     helix::sim::SimulatedClock::time_point mesh_last_probe_time_;
     float mesh_seconds_per_probe_ = 0.0f; ///< Running average from observed probe intervals
@@ -677,11 +886,11 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     std::string current_message_;
 
     /// When the last heater-wait report arrived. A wait reports once a second,
-    /// so one older than HEATER_WAIT_REPORT_GAP means no wait is blocking.
+    /// so one older than kHeaterWaitReportGap means no wait is blocking.
     /// Guarded by state_mutex_.
     helix::sim::SimulatedClock::time_point heater_wait_report_time_ =
         helix::sim::SimulatedClock::time_point::min();
-    static constexpr auto HEATER_WAIT_REPORT_GAP = std::chrono::seconds(3);
+    static constexpr auto kHeaterWaitReportGap = std::chrono::seconds(3);
 
     /// Set while a heater wait is showing in place of a firmware phase, with
     /// the phase and message it displaced. Guarded by state_mutex_.
@@ -695,6 +904,58 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     helix::sim::SimulatedClock::time_point wait_heater_arrived_at_ =
         helix::sim::SimulatedClock::time_point::min();
 
+    /// When a fallback tick first saw a wait still reporting with the nozzle
+    /// and bed at target, min() otherwise. Guarded by state_mutex_.
+    helix::sim::SimulatedClock::time_point heaters_ready_wait_since_ =
+        helix::sim::SimulatedClock::time_point::min();
+    /// How long a wait must outlast the nozzle and bed arriving before an
+    /// unheated chamber is read as what it waits on.
+    static constexpr auto kChamberWaitSettle = std::chrono::seconds(5);
+
+    /// The command a heater wait is running: the line at
+    /// virtual_sdcard.file_position, read again whenever the position moves,
+    /// since one wait can hand straight to the next with no gap in the
+    /// reports. wait_line_read_ is false until the read for
+    /// wait_line_position_ answers; wait_line_unreadable_ stops the queries
+    /// for the rest of a wait whose read failed. Guarded by state_mutex_.
+    helix::WaitLine wait_line_;
+    bool wait_line_read_ = false;
+    /// The start block's steps and how far the print is through them, on a
+    /// scripted-start profile. start_block_requested_ is set once the head
+    /// read is on its way. Guarded by state_mutex_.
+    helix::StartBlockFollower start_block_;
+    bool start_block_requested_ = false;
+    /// virtual_sdcard.file_position and print_stats.filename as this run's
+    /// status frames last carried them. Guarded by state_mutex_.
+    std::optional<uint64_t> file_position_;
+    std::string frame_filename_;
+    /// The firmware runs its start macro before the file, and this run has
+    /// not yet seen it return. Guarded by state_mutex_.
+    bool start_macro_capable_ = false;
+    /// This run has shown print position 0. Guarded by state_mutex_.
+    bool start_macro_seen_zero_ = false;
+    /// A step that reached its line within the console grace, while the
+    /// console's latest change came from a line its command does not print:
+    /// the previous command's last words. It shows once the grace passes,
+    /// unless the console changes the display again first. The console line
+    /// behind that change is console_phase_line_. Guarded by state_mutex_.
+    std::optional<helix::StartBlockStep> deferred_step_;
+    uint64_t deferred_step_run_ = 0;
+    std::string console_phase_line_;
+    /// Set to stop the head read in flight: a new run or stop().
+    std::shared_ptr<std::atomic<bool>> start_block_cancel_;
+    /// When a console line last changed the phase shown. A step whose position
+    /// arrives within kStartBlockConsoleGrace after it is the line the
+    /// console line came from: Moonraker batches status frames, so a command's
+    /// own first words reach us before the position that names its line.
+    /// Guarded by state_mutex_.
+    helix::sim::SimulatedClock::time_point console_phase_time_ =
+        helix::sim::SimulatedClock::time_point::min();
+    static constexpr auto kStartBlockConsoleGrace = std::chrono::seconds(1);
+    bool wait_line_unreadable_ = false;
+    std::optional<uint64_t> wait_line_position_;
+    uint64_t wait_line_gen_ = 0;
+
     /// Nozzle target (°C) when BED_MESH was entered. A higher target while the
     /// mesh is idle is the print-temperature heat that follows it. Guarded by
     /// state_mutex_.
@@ -704,6 +965,24 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     /// notifies on every field change in the object, so the same state
     /// re-arrives; it must not re-fire the phase. Cleared in start()/reset().
     std::string last_phase_object_state_;
+
+    /// Whether the current BED_MESH step's probe lines are mesh points to
+    /// count. False for a step that only checks a stored mesh: its probes
+    /// still show the printer working, but no "(N/M)" is shown and no point
+    /// total is fetched. Guarded by state_mutex_.
+    bool mesh_counts_probes_ = true;
+
+    /// Last value of the phase object's state and context fields seen in
+    /// any frame; nullopt until one arrives. A null or absent-in-firmware
+    /// state caches as "". Guarded by state_mutex_; cleared in start().
+    std::optional<std::string> phase_object_state_cache_;
+    std::optional<std::string> phase_object_context_cache_;
+
+    /// Phase the latest matched context-qualified phase-object state maps
+    /// to; IDLE when none has matched. While it names a pre-print step the
+    /// deadline timeouts wait for the printer to leave it. Guarded by
+    /// state_mutex_; cleared in start().
+    helix::PrintStartPhase live_object_phase_ = helix::PrintStartPhase::IDLE;
 
     /// Status-signal rules whose predicate held on the last frame carrying
     /// their object — the edge-trigger latch, keyed by rule name. A rule in
@@ -732,11 +1011,13 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     helix::LevelingDescentTracker leveling_descents_;
     /// Stationary-purge stretch fed by check_purge_shape(); guarded by state_mutex_.
     helix::PurgeFlowTracker purge_flow_;
+    /// The running step that owns other phases' signals; guarded by state_mutex_.
+    helix::OwningStep owning_step_;
 
     /// Max gap between consecutive probe lines before resetting counters.
     /// Handles printers that emit "probe at" for non-mesh operations (e.g.
     /// nozzle wipe) before the actual mesh calibration begins.
-    static constexpr auto MESH_PROBE_GAP_RESET = std::chrono::seconds(30);
+    static constexpr auto kMeshProbeGapReset = std::chrono::seconds(30);
 
     // Pre-mesh probe buffering: don't auto-enter BED_MESH from probe lines
     // until we've seen enough distinct probe POINTS to distinguish mesh
@@ -752,7 +1033,7 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     /// BOX_NOZZLE_CLEAN touches 3 points on the wipe strip, Voron 2.4 QGL
     /// touches 4 corner pads, AD5M nozzle wipe touches 1-2. Every real mesh is
     /// far larger, so 5 costs nothing on the firmwares that need this path.
-    static constexpr int MESH_PROBE_ENTRY_THRESHOLD = 5;
+    static constexpr int kMeshProbeEntryThreshold = 5;
 
     // Targets used in last compute_predicted_weights() call — used to detect
     // when heater targets change (e.g. macro issues M109 after bed-first heating)
@@ -800,7 +1081,7 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
     size_t silent_progression_idx_ = 0;
 
     // Set true the moment any real firmware signal is observed for this print
-    // (HELIX:PHASE, K2/CFS tag, profile signal/pattern/state match, PRINT_START
+    // (HELIX:PHASE, profile tag/signal/pattern/state match, PRINT_START
     // marker, or RESPOND completion). Status-signal rules are excluded: they
     // infer from the same frames the heuristic below reads, not from narration.
     // Gates the proactive temperature heuristic: once the firmware is actively
@@ -828,7 +1109,7 @@ class PrintStartCollector : public std::enable_shared_from_this<PrintStartCollec
 
     // LVGL timer for periodic ETA updates (main thread only)
     lv_timer_t* eta_timer_ = nullptr;
-    static constexpr uint32_t ETA_UPDATE_INTERVAL_MS = 5000;
+    static constexpr uint32_t kEtaUpdateIntervalMs = 5000;
 
     /**
      * @brief Update ETA display from timer callback (main thread)

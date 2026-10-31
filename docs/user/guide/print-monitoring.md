@@ -10,7 +10,7 @@ When you start a multi-color or multi-tool print, HelixScreen compares what the 
 
 This check runs automatically. You don't turn it on; it's part of starting any print on a system with a multi-slot filament backend (AMS, CFS, IFS, Box Turtle, Happy Hare, etc.). On a single-extruder printer with no such system, there are no slots to compare against, so this dialog never appears — filament presence there is handled by your runout sensor instead.
 
-**Printing from bypass is the other exception.** When bypass is engaged, filament goes straight to the extruder without passing through any slot, so there is no slot for the check to look at and every tool would read as unfed. Rather than warn about all of them, HelixScreen skips the slot checks for as long as bypass stays engaged — and tells you so: the file details show a **Bypass active** note (and, for a single-tool file, hide the filament mapping card entirely — the lanes aren't feeding this print, so there is nothing to assign), and if the material you set on the external spool doesn't match what the file was sliced for (for example, the file says ASA but the spool holds PLA), you get one **Material Mismatch** warning naming the spool. A same-material *grade* difference there — file sliced ASA-GF, spool holding plain ASA — raises the [Filament Grade Mismatch](#the-filament-grade-mismatch-dialog) warning below instead. Tap **Start Anyway** to print regardless. Disengage bypass and the slot checks come back on the next print — you don't have to restart anything.
+**Printing from bypass is the other exception.** When bypass is engaged, filament goes straight to the extruder without passing through any slot, so there is no slot for the check to look at and every tool would read as unfed. Rather than warn about all of them, HelixScreen skips the slot checks for as long as bypass stays engaged — and tells you so: the file details show a **Bypass active** note (and, for a single-tool file, hide the Filament Mapping card entirely — the lanes aren't feeding this print, so there is nothing to assign), and if the material you set on the external spool doesn't match what the file was sliced for (for example, the file says ASA but the spool holds PLA), you get one **Material Mismatch** warning naming the spool. A same-material *grade* difference there — file sliced ASA-GF, spool holding plain ASA — raises the [Filament Grade Mismatch](#the-filament-grade-mismatch-dialog) warning below instead. Tap **Start Anyway** to print regardless. Disengage bypass and the slot checks come back on the next print — you don't have to restart anything.
 
 ### What the check looks at
 
@@ -43,11 +43,11 @@ Below the rows, a short explanation calls out the first blocking problem, for ex
 
 | Button | Action |
 |--------|--------|
-| **Remap…** | Opens the tool-to-slot mapping so you can point the tool at a slot that has filament. Only shown when your filament system supports remapping — it's hidden on ACE and single-extruder (no-AMS) systems. |
+| **Map Filament…** | Opens [Filament Mapping](filament.md#filament-mapping) so you can point the tool at a slot that has filament. Only shown when your filament system supports Filament Mapping — it's hidden on ACE and single-extruder (no-AMS) systems. |
 | **Cancel** | Backs out without printing. Load or map the missing filament, then start again. |
 | **Print Anyway** | Starts the print despite the warning. Use this only if you know the check is wrong (for example, filament is physically loaded but not yet detected). |
 
-> **Note:** An empty slot is the only thing that raises this dialog. A **material or color mismatch does not stop the print** — those are advisory. They show up as a warning icon on the filament mapping card when you pick the file (see [Tool Mapping](filament.md#tool-mapping)), and if the dialog is already open for an empty slot, mismatched tools show an amber warning glyph on their row too.
+> **Note:** An empty slot is the only thing that raises this dialog. A **material or color mismatch does not stop the print** — those are advisory. They show up as an amber or red outline on that tool's chip in the FILAMENTS card when you pick the file (see [Filament Mapping](filament.md#filament-mapping)), and if the dialog is already open for an empty slot, mismatched tools show an amber warning glyph on their row too.
 
 > **Tip:** If you meant to load that filament, tap **Cancel**, sort out the slot from the [AMS panel](filament.md#ams--multi-material-systems), and start the print again — the check re-runs each time. It also re-runs the moment your filament system's state changes, so loading a slot (or engaging bypass) while the file is still open clears the warning without reopening it.
 
@@ -65,7 +65,7 @@ It lists each unmatched tool with the color and material the file wants:
 
 | Button | Action |
 |--------|--------|
-| **Cancel** | Backs out without printing. Assign the tool from [Tool Mapping](filament.md#tool-mapping), then start again. |
+| **Cancel** | Backs out without printing. Map the tool to a slot in [Filament Mapping](filament.md#filament-mapping), then start again. |
 | **Start Anyway** | Starts the print regardless. Your printer's firmware decides what to do when it reaches that tool. |
 
 The name is a little misleading — despite "Color Mismatch", a merely *wrong* color never raises it. It only appears when a tool has no matching filament at all.
@@ -74,7 +74,7 @@ Like the empty-slot check, this one is skipped while you're printing from bypass
 
 ### The Filament Grade Mismatch dialog
 
-Some filaments are the same plastic with something mixed into it. **PLA-CF** is PLA with chopped carbon fibre; **ASA-GF** is ASA with glass fibre; wood, marble, metal and glow-in-the-dark filaments carry a powder. Those all print differently from the plain version — slower, because the filler thickens the melt, and they grind away at a brass nozzle, which is why they normally want a hardened one. A slicer profile for a filled filament is not the profile for its plain counterpart.
+Some filaments are the same plastic with something mixed into it. **PLA-CF** is PLA with chopped carbon fiber; **ASA-GF** is ASA with glass fiber; wood, marble, metal and glow-in-the-dark filaments carry a powder. Those all print differently from the plain version — slower, because the filler thickens the melt, and they grind away at a brass nozzle, which is why they normally want a hardened one. A slicer profile for a filled filament is not the profile for its plain counterpart.
 
 Marketing suffixes are the opposite case. **PLA+**, **ABS+** and the like are the same plastic with a toughener, printed on the same hardware with much the same settings, and **Silk** and **Matte** are finishes rather than fillers.
 
@@ -89,11 +89,32 @@ The wording depends on which way round it is, because the risk isn't symmetric:
 
 **Buttons:** **Start Anyway** prints as-is; **Cancel** backs out so you can load the right spool.
 
-Your tool mapping is unaffected either way. HelixScreen still routes the tool to that lane, exactly as it did before — the grade difference changes what you're told, not where the filament comes from.
+Your Filament Mapping is unaffected either way. HelixScreen still routes the tool to that lane, exactly as it did before — the grade difference changes what you're told, not where the filament comes from.
+
+### The Mixed-Temperature Materials dialog
+
+Some plastics print far hotter than others. ABS, ASA, PC and nylon want a nozzle above 240°C and a warm enclosure; PLA, PVA and TPU soften not far above 60°C and print below 230°C. When one file uses a material from each end, the cooler one can be damaged by the conditions the hotter one needs.
+
+Before a print that uses two or more materials, HelixScreen checks every pair the file actually prints with. It warns when the hotter material needs a heated enclosure and the two have no nozzle temperature in common. The temperatures come from HelixScreen's filament list, the same one the Material Mismatch dialog uses.
+
+| Pair | Warns? |
+|------|--------|
+| PLA + ABS, PLA + PC, PLA + nylon (PA, PA-CF) | Yes |
+| PLA + PETG, PLA + TPU, PLA + PVA | No: none of them needs an enclosure |
+| PETG + ABS, ABS + PC | No: their nozzle temperatures overlap |
+
+What the dialog says depends on your printer:
+
+- **One nozzle** (a filament system feeding a single hotend): the cooler material goes through the same nozzle at the hotter material's temperature, where it can burn and clog the nozzle.
+- **Several nozzles** (a tool changer or a printer with two or more hotends): each material has its own nozzle, but they share the bed and the enclosure, and the heat the hotter material needs can soften the cooler one and jam its nozzle.
+
+Only the materials the file prints with count. A slicer profile often lists a material for every tool, even for a file that uses one, and those unused tools are ignored. A material name HelixScreen does not recognize never triggers the warning.
+
+**Buttons:** **Start Anyway** prints as-is; **Cancel** backs out so you can re-slice with compatible materials. The check runs on every print that mixes materials and has no setting to turn it off: choosing **Start Anyway** is how you print a combination you know works on your printer.
 
 ### The Filament In The Toolhead dialog
 
-The dialogs above compare what the *file* needs against what your slots hold. This one looks at the toolhead itself: filament is sitting in it, but no lane in your filament system reports having loaded it. That usually means leftovers — filament that was on its way in or out when an earlier job was cancelled or aborted, and never got seated in a lane. Rather than silently print on top of unknown material, HelixScreen asks first:
+The dialogs above compare what the *file* needs against what your slots hold. This one looks at the toolhead itself: filament is sitting in it, but no lane in your filament system reports having loaded it. That usually means leftovers — filament that was on its way in or out when an earlier job was canceled or aborted, and never got seated in a lane. Rather than silently print on top of unknown material, HelixScreen asks first:
 
 > *The toolhead has filament but no AMS lane reports it loaded. Pull it out manually before printing. Start anyway?*
 
@@ -133,6 +154,17 @@ The dialog names the line and the command, plus the printer's own stop message w
 
 ---
 
+## File Does Not Fit This Printer
+
+A file sliced for another printer can ask for moves this printer can't make or temperatures its heaters don't allow. Before a print starts, HelixScreen compares the file with the printer's own limits (its travel, its heaters' maximum temperatures and its tools) and stops a file that breaks one:
+
+> *Moves to X 360 mm, past this printer's 350 mm.*
+> *Re-slice the file with a profile made for this printer.*
+
+A file sliced for a different nozzle size gets the softer **Sliced for a Different Setup** warning, with **Start Anyway**. A different printer model in the slicer profile is only shown in the file details. The findings also show in the file's details before you tap Start Print; see [Does the file fit this printer?](printing.md#does-the-file-fit-this-printer).
+
+---
+
 ## Filament Runout During a Print
 
 When the runout sensor stops detecting filament during a print, **the printer's own firmware pauses the job** - that happens before HelixScreen is involved at all. HelixScreen notices the pause and shows the **Filament Runout** modal so you can recover without dropping to the console.
@@ -151,7 +183,7 @@ This modal is what handles the recovery on tool-changer and single-extruder prin
 Systems that *do* raise their own runout alert show that alert instead, so one runout never produces two dialogs. What actually happens next differs by system:
 
 - **AFC (Box Turtle) and Happy Hare** can switch to a backup slot, if you configured one and it holds compatible filament. Otherwise their alert offers the recovery buttons.
-- **Creality CFS** always pauses the print first. The box only swaps spools when auto-refill is switched on *and* another slot holds the exact same material **and** colour. If either condition is missing it says so and the print simply stays paused until you load filament and resume.
+- **Creality CFS** always pauses the print first. The box only switches spools when **Auto-Refill** is switched on *and* another slot holds the exact same material **and** color. If either condition is missing it says so and the print simply stays paused until you load filament and resume.
 - **FlashForge AD5X IFS** does not switch spools at all on stock firmware. Its alert tells you filament ran out and offers Resume, Purge, and an IFS reset.
 
 ---
@@ -194,7 +226,7 @@ The dialog offers:
 
 ## See Also
 
-- [Filament Management](filament.md) — AMS slots, tool mapping, and loading filament
+- [Filament Management](filament.md) — AMS slots, Filament Mapping, and loading filament
 - [Printing](printing.md) — Starting prints, pre-print options, and monitoring during a print
 - [Supported Printers](supported-printers.md) — Which detection and filament features each model supports
 

@@ -23,19 +23,13 @@ namespace {
 
 const char kCanvasStateKey = 0;
 const char kCanvasMeta[] = "helix.canvas";
-constexpr size_t kMaxCanvases = 8;
 constexpr int32_t kMaxStroke = 64;
 constexpr int32_t kMaxOpaPercent = 100; // opa is authored 0-100; stored as 0-255
 constexpr size_t kMaxTextBytes = 256;
-// Left uncharged so a plugin whose list has reached the cap can still run: the
-// luaL_error that reports the refused call needs Lua memory to raise into, and
-// the host's next entry into the plugin (compiling a chunk, starting a thread)
-// is how it gets the chance to clear the list. On a full heap that entry fails
-// out of memory and the runtime disables the plugin.
-constexpr size_t kRaiseRoom = 4096;
 
 struct CanvasEntry {
     std::string full;
+    size_t name_charge = 0; ///< the entry and its name, held until unload
     DisplayList pending;
     size_t pending_charge = 0;
     size_t committed_charge = 0;
@@ -287,6 +281,10 @@ void plan_tokens(DisplayList& pending, const char* color, const char* border, co
     }
 }
 
+void charge(lua_State* L, size_t bytes) {
+    charge_plugin_memory(L, bytes, "helix.canvas");
+}
+
 // Appends a fully validated primitive, charging the cap for the exact bytes
 // DisplayList::bytes() will grow by. Every raise happens before the charge, so
 // a refused call adds nothing.
@@ -307,11 +305,7 @@ void add_staged(lua_State* L, CanvasEntry* e, Staged& st, size_t units) {
     if (e->pending_charge == 0)
         growth += sizeof(DisplayList); // the list's own footprint starts charging here
 
-    LuaRuntime& rt = context(L).rt;
-    const size_t room = memory_remaining(rt);
-    if (room < kRaiseRoom || growth > room - kRaiseRoom)
-        luaL_error(L, "helix.canvas: list would exceed the plugin memory cap");
-    rt.reserve_external(growth);
+    charge(L, growth);
 
     for (const std::string& tok : st.fresh_tokens)
         e->pending.tokens.push_back(tok);
@@ -339,6 +333,7 @@ void check_color(lua_State* L, const char* tok) {
 // ---- methods --------------------------------------------------------------
 
 int m_line(lua_State* L) {
+    forbid_in_check(L, "canvas:line");
     CanvasEntry* e = handle_entry(L);
     Staged st;
     st.prim.op = CanvasOp::Line;
@@ -359,6 +354,7 @@ int m_line(lua_State* L) {
 }
 
 int m_polyline(lua_State* L) {
+    forbid_in_check(L, "canvas:polyline");
     CanvasEntry* e = handle_entry(L);
     if (lua_type(L, 2) != LUA_TTABLE)
         return luaL_error(L, "helix.canvas: polyline needs an even-length array of at least "
@@ -457,6 +453,7 @@ void parse_shape_opts(lua_State* L, int opts, DisplayList& pending, bool with_ra
 }
 
 int m_rect(lua_State* L) {
+    forbid_in_check(L, "canvas:rect");
     CanvasEntry* e = handle_entry(L);
     Staged st;
     st.prim.op = CanvasOp::Rect;
@@ -471,6 +468,7 @@ int m_rect(lua_State* L) {
 }
 
 int m_circle(lua_State* L) {
+    forbid_in_check(L, "canvas:circle");
     CanvasEntry* e = handle_entry(L);
     Staged st;
     st.prim.op = CanvasOp::Circle;
@@ -484,6 +482,7 @@ int m_circle(lua_State* L) {
 }
 
 int m_arc(lua_State* L) {
+    forbid_in_check(L, "canvas:arc");
     CanvasEntry* e = handle_entry(L);
     Staged st;
     st.prim.op = CanvasOp::Arc;
@@ -505,6 +504,7 @@ int m_arc(lua_State* L) {
 }
 
 int m_text(lua_State* L) {
+    forbid_in_check(L, "canvas:text");
     CanvasEntry* e = handle_entry(L);
     size_t len = 0;
     const char* str = luaL_checklstring(L, 4, &len);
@@ -535,6 +535,7 @@ int m_text(lua_State* L) {
 }
 
 int m_clear(lua_State* L) {
+    forbid_in_check(L, "canvas:clear");
     CanvasEntry* e = handle_entry(L);
     context(L).rt.release_external(e->pending_charge);
     e->pending_charge = 0;
@@ -543,6 +544,7 @@ int m_clear(lua_State* L) {
 }
 
 int m_commit(lua_State* L) {
+    forbid_in_check(L, "canvas:commit");
     CanvasEntry* e = handle_entry(L);
     LuaRuntime& rt = context(L).rt;
     auto list = std::make_unique<DisplayList>(std::move(e->pending));
@@ -564,6 +566,7 @@ int m_size(lua_State* L) {
 }
 
 int m_on_size(lua_State* L) {
+    forbid_in_check(L, "canvas:on_size");
     CanvasEntry* e = handle_entry(L);
     LuaRuntime& rt = context(L).rt;
     // Validate before unref, so a bad argument cannot silence a live handler.
@@ -585,6 +588,7 @@ int m_on_size(lua_State* L) {
 }
 
 int canvas_new(lua_State* L) {
+    forbid_in_check(L, "helix.canvas");
     PluginContext& ctx = context(L);
     const char* local = luaL_checkstring(L, 1);
     if (*local == '\0')
@@ -598,12 +602,14 @@ int canvas_new(lua_State* L) {
             break;
         }
     if (index == s->canvases.size()) {
-        if (s->canvases.size() >= kMaxCanvases)
-            return luaL_error(L, "helix.canvas: at most %d canvases per plugin",
-                              static_cast<int>(kMaxCanvases));
+        // No count cap: each canvas's entry and name count against the plugin's
+        // memory budget, as its lists do.
+        const size_t name_charge = sizeof(CanvasEntry) + full.size();
+        charge(L, name_charge);
         s->canvases.push_back(std::make_unique<CanvasEntry>());
         index = s->canvases.size() - 1;
         s->canvases[index]->full = full;
+        s->canvases[index]->name_charge = name_charge;
         canvas_set_size_listener(full, [s, full](int32_t, int32_t) {
             // Never enters Lua from the size event: coalesce, defer, deliver.
             if (CanvasEntry* cur = entry_of(s, full); cur && cur->size_ref != LUA_NOREF)
@@ -629,11 +635,12 @@ void install_canvas_bindings(PluginContext& ctx) {
         for (const auto& e : state->canvases) {
             canvas_set_size_listener(e->full, {});
             canvas_commit(e->full, nullptr); // an unloaded plugin's canvases go blank
+            state->rt->release_external(e->name_charge + e->pending_charge + e->committed_charge);
         }
         delete state;
     });
 
-    luaL_newmetatable(L, kCanvasMeta);
+    new_locked_metatable(L, kCanvasMeta);
     lua_newtable(L);
     static const luaL_Reg methods[] = {
         {"line", &m_line}, {"polyline", &m_polyline}, {"rect", &m_rect},   {"circle", &m_circle},

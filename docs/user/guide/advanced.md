@@ -98,11 +98,13 @@ If HelixScreen can't determine the parameters (e.g., complex Jinja2 templates), 
 If you type the same values every time, save them once:
 
 1. Open the editor: in the Macros panel, press-and-hold to enter edit mode and tap the **tune icon** on the macro's row — or, on a home panel Macro Button, open **Customize → Options → Default Parameters**
-2. Fill in the values you want remembered
+2. Fill in the values you want remembered. For a macro whose parameters HelixScreen can't determine, type them into the single text field as `KEY=VALUE` pairs separated by spaces (for example `PURGE=1 LENGTH=50`); text that isn't in that form is refused with a warning
 3. Leave **Ask for parameters** on, or switch it off
 4. Tap **Save**
 
 With **Ask for parameters** on (the default), tapping the macro still opens the form — but every field starts filled with your saved values, so you can adjust one and run. With it off, the macro runs immediately using the saved values, with no form at all.
+
+The editor is offered for any macro that takes parameters, including commands added by Klipper plugins (AFC, Happy Hare and similar) that only accept the free-form text. Macros that take no parameters have nothing to save, so they don't show it.
 
 > **Note:** The dangerous-macro confirmation is never skipped by saved defaults, and a Macro Button with "Require Confirmation?" off runs with the saved values directly. Saved defaults are kept per printer, like your hidden-macro choices.
 
@@ -157,7 +159,7 @@ Buttons are color-coded by the macro author to signal intent:
 
 > **Note:** Colors are chosen by whoever wrote the macro — they're a hint, not a rule. Always read the button label. Macro authors can also specify an exact custom color.
 
-Longer menus wrap onto multiple lines automatically, and some macros place a row of **footer buttons** across the bottom of the dialog (often used for "Cancel" or menu navigation). If a prompt is flagged as an error, a red warning icon appears next to the title.
+Some macros place a row of **footer buttons** across the bottom of the dialog (often used for "Cancel" or menu navigation). Five or more buttons in one row line up in a grid of two or three columns, and a prompt too long for the screen scrolls its text and buttons while the footer row stays in view. If a prompt is flagged as an error, a red warning icon appears next to the title.
 
 > **Tip:** Tapping any button sends its command straight to the printer and dismisses the dialog. If you're not sure what a button does, check the macro that produced the prompt — HelixScreen simply displays whatever the macro defines.
 
@@ -216,7 +218,13 @@ A locked device behaves as follows **for the whole time a job owns the printer**
 - A **lock icon** appears on the row
 - The status text reads **"Locked during print"**
 
-When no job is running, the device unlocks and toggles normally again — that includes cancelling during preparation, which unlocks the device without a print ever having started. Devices without `locked_while_printing` are never locked.
+When no job is running, the device unlocks and toggles normally again — that includes canceling during preparation, which unlocks the device without a print ever having started. Devices without `locked_while_printing` are never locked.
+
+---
+
+## HelixPrint Plugin
+
+When the HelixPrint plugin is installed, **Advanced > HelixPrint Plugin** shows its version and every feature it runs on your printer, each marked **Active**, **Off** or **Unavailable** with the reason. Tap a feature that has a setting to open the page where its switch lives, for example **Settings > Printing** for power-loss recovery. This page only shows status: the switches themselves are on those settings pages. **Install HelixPrint Plugin** and **Uninstall HelixPrint Plugin** are on the Advanced screen too. See [HelixPrint Plugin](helixprint-plugin.md) for what each feature does and how to install the plugin.
 
 ---
 
@@ -224,7 +232,7 @@ When no job is running, the device unlocks and toggles normally again — that i
 
 ![Print History](../../images/user/advanced-history.png)
 
-HelixScreen keeps a record of your completed, failed, and cancelled prints, sourced from Moonraker's job history. Open it from **Advanced > Print History**. You get a dashboard of statistics and trend charts, a searchable and sortable list of past jobs, and per-job details with reprint and delete.
+HelixScreen keeps a record of your completed, failed, and canceled prints, sourced from Moonraker's job history. Open it from **Advanced > Print History**. You get a dashboard of statistics and trend charts, a searchable and sortable list of past jobs, and per-job details with reprint and delete.
 
 See [Print History](print-history.md) for the full guide.
 
@@ -234,15 +242,33 @@ See [Print History](print-history.md) for the full guide.
 
 Review past system notifications:
 
-1. Tap the **Notifications** widget on the Home screen
+1. Tap the **Notifications** widget on the Home screen. If you have removed that widget, open **Advanced > Notification History** instead; the row appears there only while no Notifications widget is on any home page.
 2. Scroll through history
 3. Tap **Clear All** to dismiss
 
 **Color coding:**
 
 - Blue: Info
+- Green: Success
 - Yellow: Warning
 - Red: Error
+
+Some notifications can be tapped to act on them, such as an update notice that opens the update dialog.
+
+### Printer Events
+
+Notifications are what HelixScreen told you. **Printer Events** is what happened to the printer: Klipper shutting down and why, a lost connection to a controller board (MCU), Klipper disconnecting or coming back ready, a firmware restart, a print pausing and what paused it, a filament runout, error messages from the printer, and how each print ended (completed, canceled, or failed and why).
+
+1. Open Notification History, from the **Notifications** widget or **Advanced > Notification History**
+2. Tap **Printer Events** at the top
+3. The newest event is at the top. Each shows its time and, when a print was running, the file name
+
+A line under the title says where the list comes from:
+
+- **Recorded by the [HelixPrint plugin](helixprint-plugin.md)**: the printer keeps the record itself, so it includes everything that happened while no HelixScreen was connected, and every screen connected to the printer shows the same list.
+- **Recorded by this screen while connected**: without the plugin, the screen keeps its own record. When it reconnects, it fills in what it missed from what the printer still remembers (recent errors, how prints ended, and recent shutdowns). Those entries are marked **(recovered)**. Events from a long outage can be missing.
+
+There is nothing to switch on: Printer Events is always recorded.
 
 ---
 

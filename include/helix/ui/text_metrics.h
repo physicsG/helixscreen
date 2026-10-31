@@ -25,4 +25,9 @@ namespace helix::ui {
  */
 int32_t text_width(const char* txt, const lv_font_t* font, int32_t letter_space = 0);
 
+/// text_width() over the first @p len bytes of @p txt, for a caller measuring a prefix or a
+/// slice of a longer string that need not be NUL-terminated at @p len.
+int32_t text_width_n(const char* txt, uint32_t len, const lv_font_t* font,
+                     int32_t letter_space = 0);
+
 } // namespace helix::ui

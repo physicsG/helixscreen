@@ -11,7 +11,7 @@
 using helix::mock::PrinterType;
 
 namespace {
-constexpr PrinterType ALL_TYPES[] = {
+constexpr PrinterType kAllTypes[] = {
     PrinterType::VORON_24,
     PrinterType::VORON_TRIDENT,
     PrinterType::CREALITY_K1,
@@ -32,24 +32,24 @@ constexpr PrinterType ALL_TYPES[] = {
 
 TEST_CASE("Persona ids are unique and every type has a persona", "[mock][persona]") {
     std::set<std::string_view> ids;
-    for (const auto& p : helix::mock::PERSONAS) {
+    for (const auto& p : helix::mock::kPersonas) {
         CHECK(ids.insert(p.id).second);
         CHECK_FALSE(p.display_name.empty());
     }
-    for (PrinterType t : ALL_TYPES) {
+    for (PrinterType t : kAllTypes) {
         bool named = false;
-        for (const auto& p : helix::mock::PERSONAS)
+        for (const auto& p : helix::mock::kPersonas)
             named = named || p.type == t;
         INFO("PrinterType " << static_cast<int>(t));
         CHECK(named);
     }
-    CHECK(helix::mock::PERSONAS[0].id == "voron_24");
+    CHECK(helix::mock::kPersonas[0].id == "voron_24");
 }
 
 TEST_CASE("personas_one_per_type lists every type exactly once", "[mock][persona]") {
     const auto personas = helix::test::personas_one_per_type();
-    CHECK(personas.size() == std::size(ALL_TYPES));
-    for (PrinterType t : ALL_TYPES) {
+    CHECK(personas.size() == std::size(kAllTypes));
+    for (PrinterType t : kAllTypes) {
         INFO("PrinterType " << static_cast<int>(t));
         CHECK(std::count_if(personas.begin(), personas.end(),
                             [t](const auto* p) { return p->type == t; }) == 1);
@@ -77,7 +77,7 @@ TEST_CASE("resolve_persona: exact, case-sensitive match", "[mock][persona]") {
 TEST_CASE("persona_ids lists the table in order", "[mock][persona]") {
     const std::string ids = helix::mock::persona_ids();
     CHECK(ids.rfind("voron_24, voron_trident, ", 0) == 0);
-    for (const auto& p : helix::mock::PERSONAS) {
+    for (const auto& p : helix::mock::kPersonas) {
         CHECK(ids.find(std::string(p.id)) != std::string::npos);
     }
     CHECK(ids.find(", ,") == std::string::npos);
@@ -99,7 +99,7 @@ TEST_CASE("effective_mock_ams: explicit wins, else the persona default", "[mock]
 }
 
 TEST_CASE("A persona's own probe stands in for the default cartographer", "[mock][persona]") {
-    for (const auto& p : helix::mock::PERSONAS) {
+    for (const auto& p : helix::mock::kPersonas) {
         const auto d = helix::mock::descriptor(p.type);
         INFO(p.id);
         if (!d.probe.empty())

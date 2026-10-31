@@ -9,10 +9,12 @@
 #include "ui_modal.h"
 #include "ui_observer_guard.h"
 #include "ui_print_exclude_object_manager.h"
+#include "ui_print_layer_pause.h"
 #include "ui_print_light_timelapse.h"
 #include "ui_print_tune_overlay.h"
-#include "ui_temperature_utils.h" // HEATER_STATUS_BUF_BYTES
+#include "ui_widget_ref.h"
 
+#include "camera_view.h"
 #include "overlay_base.h"
 #include "print_control_buttons.h"
 #include "print_lifecycle_state.h"
@@ -22,10 +24,16 @@
 #include "ui/temperature_observer_bundle.h"
 
 // Forward declaration
-class IMoonrakerAPI;
 namespace helix {
+class IMoonrakerAPI;
+namespace ui {
+class PrintStartController;
+} // namespace ui
 struct MemoryInfo;
 } // namespace helix
+
+#include "ui_print_status_more_menu.h"
+#include "ui_print_status_tiles.h"
 
 #include "filament_mapper.h" // helix::GcodeToolInfo
 #include "print_preview_controller.h"
@@ -60,7 +68,7 @@ class PrintStatusPanel : public OverlayBase {
      * @param printer_state Reference to helix::PrinterState
      * @param api Pointer to IMoonrakerAPI (for pause/cancel commands)
      */
-    PrintStatusPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    PrintStatusPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     ~PrintStatusPanel() override;
 
@@ -138,6 +146,17 @@ class PrintStatusPanel : public OverlayBase {
      * @return true if overlay was pushed successfully
      */
     static bool push_overlay(lv_obj_t* parent_screen);
+
+    /**
+     * @brief Push the print status overlay and open the exclude-object map over its preview
+     *
+     * The home exclude_map tile's entry. The map opens once the panel is active, so its
+     * canvas is sized against a laid-out preview card. Opening only shows the map: the
+     * exclusion itself still goes through the confirmation modal and undo window.
+     *
+     * @return true if the overlay was pushed
+     */
+    static bool push_overlay_with_exclude_map(lv_obj_t* parent_screen);
 
     /**
      * @brief Get the cached overlay widget pointer, if created.
@@ -245,7 +264,7 @@ class PrintStatusPanel : public OverlayBase {
      * @brief Update IMoonrakerAPI pointer
      * @param api New API pointer (may be nullptr)
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
         preview_.set_api(api);
         if (exclude_manager_) {
@@ -330,7 +349,7 @@ class PrintStatusPanel : public OverlayBase {
     //
 
     helix::PrinterState& printer_state_;
-    IMoonrakerAPI* api_;
+    helix::IMoonrakerAPI* api_;
     lv_obj_t* parent_screen_ = nullptr;
 
     //
@@ -341,16 +360,8 @@ class PrintStatusPanel : public OverlayBase {
 
     SubjectManager subjects_; ///< RAII manager for automatic subject cleanup
 
-    lv_subject_t nozzle_status_subject_{};        ///< duty text ("" = none)
-    lv_subject_t bed_status_subject_{};           ///< duty text ("" = none)
-    lv_subject_t chamber_status_subject_{};       ///< duty text ("" = none)
-    lv_subject_t nozzle_status_state_subject_{};  ///< HeaterStatusState int
-    lv_subject_t bed_status_state_subject_{};     ///< HeaterStatusState int
-    lv_subject_t chamber_status_state_subject_{}; ///< HeaterStatusState int
     lv_subject_t
         view_toggle_icon_subject_{}; ///< MDI codepoint for btn_view_toggle_icon (cube/layers)
-    lv_subject_t
-        camera_button_label_subject_{}; ///< "Cam"/"Camera" — short form at Medium and below
 
     // Preparing state subjects
     lv_subject_t preparing_visible_subject_{};  // int: 1 if preparing, 0 otherwise
@@ -363,36 +374,26 @@ class PrintStatusPanel : public OverlayBase {
     // section; drives XML bindings that hide print_thumbnail/gradient underneath.
     lv_subject_t exclude_map_active_subject_{};
 
+    // print_status_camera_available: 1 when this screen may show the printer's
+    // camera (a webcam, a remote screen, platform extras). Shared by the
+    // preview card's camera button and the More menu's Camera row.
+    lv_subject_t camera_available_subject_{};
+    // print_status_camera_showing: 1 while the preview card shows the camera
+    // in place of the preview (available, chosen, exclude map closed).
+    lv_subject_t camera_showing_subject_{};
+    // print_status_camera_has_frame: 1 once the running stream's first frame
+    // is on screen; hides the connecting indicator.
+    lv_subject_t camera_has_frame_subject_{};
+
     // 1 once the user taps the print end overlay to dismiss it. Reset to 0
     // on new-print transitions so the next outcome's overlay appears normally.
     lv_subject_t end_overlay_dismissed_subject_{};
 
-    // Fan row adaptive-fit subject (1=row fits in the column, 0=hidden).
-    // Set by recompute_fans_fit() after every breakpoint/layout change.
-    lv_subject_t fans_fit_subject_{};
-
-    // Temperature mini-graph fit subject (1=the portrait slack band is tall
-    // enough to hold a readable graph, 0=hidden). Set by recompute_graph_fits()
-    // from the slack the preview aspect cap just computed. 0 in landscape and at
-    // every size where the cap does not bind.
-    lv_subject_t graph_fits_subject_{};
-
-    // Aux fan present subject (1=aux cluster visible, 0=hidden).
-    // Set by bind_fan_speeds() when an aux fan is discovered.
-    lv_subject_t aux_fan_present_subject_{};
-
-    // Fan row content density (0=full: icon+label+val, 1=medium: label+val,
-    // 2=compact: single-letter+val). Set by recompute_fans_density().
-    lv_subject_t fan_row_density_subject_{};
-
-    // Composite visibility subjects for the aux cluster.  Each combines
-    // aux_fan_present AND the current density tier so each aux widget only
-    // needs ONE bind_flag (satisfying [L042]).
-    lv_subject_t aux_icon_visible_subject_{};  // aux_present && density==0
-    lv_subject_t aux_full_visible_subject_{};  // aux_present && density!=2
-    lv_subject_t aux_short_visible_subject_{}; // aux_present && density==2
-
-    bool animations_enabled_ = false; ///< Cached from DisplaySettingsManager
+    // The tile arrangement PrintStatusLayoutFitter measures (ps_arrangement,
+    // ps_strip_stacked, ps_checklist_compact).
+    lv_subject_t arrangement_subject_{};
+    lv_subject_t strip_stacked_subject_{};
+    lv_subject_t checklist_compact_subject_{};
 
     // Resolved fan object names (refreshed when fans_version ticks).
     std::string part_fan_name_;
@@ -426,12 +427,8 @@ class PrintStatusPanel : public OverlayBase {
     lv_subject_t print_controls_enabled_subject_{}; ///< 1 when lifecycle.is_active()
 
     // Subject storage buffers
-    char nozzle_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = "Off";
-    char bed_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = "Off";
-    char chamber_status_buf_[helix::ui::temperature::HEATER_STATUS_BUF_BYTES] = "";
     char objects_text_buf_[32] = "";        ///< "X of Y obj" buffer
     char view_toggle_icon_buf_[8] = "";     ///< View toggle icon codepoint (cube/layers)
-    char camera_button_label_buf_[16] = ""; ///< Short/long camera label per ui_breakpoint
     char print_pause_reason_buf_[256] = ""; ///< Reason line shown under "Print Paused"
 
     //
@@ -451,6 +448,7 @@ class PrintStatusPanel : public OverlayBase {
     lv_obj_t* gcode_viewer_ = nullptr;
     lv_obj_t* print_thumbnail_ = nullptr;
     lv_obj_t* gradient_background_ = nullptr;
+    helix::ui::WidgetRef preview_camera_image_;
 
     /// What the thumbnail and G-code viewer show for the running print.
     helix::ui::PrintPreviewController preview_;
@@ -458,8 +456,13 @@ class PrintStatusPanel : public OverlayBase {
     /// The progress card's text subjects and their formatting.
     helix::ui::PrintProgressText progress_text_;
 
-    /// Measured layout: fan row fit, preview height cap, temperature mini-graph.
+    /// Measured arrangement of the job tile, printer tile and strip.
     helix::ui::PrintStatusLayoutFitter layout_fitter_;
+
+    /// The printer tile's chips and the job tile's checklist.
+    helix::ui::PrintStatusTiles tiles_;
+
+    helix::ui::PrintStatusMoreMenu more_menu_;
 
     /**
      * @brief Withholds the preparing overlay until preparation is worth showing
@@ -476,7 +479,7 @@ class PrintStatusPanel : public OverlayBase {
     void cancel_preparing_show_timer();
 
     /// How long Preparing must persist before the overlay is shown.
-    static constexpr uint32_t PREPARING_SHOW_DELAY_MS = 750;
+    static constexpr uint32_t kPreparingShowDelayMs = 750;
 
     bool complete_view_mode_ = false;
 
@@ -494,9 +497,9 @@ class PrintStatusPanel : public OverlayBase {
     // Track whether panel is currently active (visible and receiving updates)
     // Used to load gcode immediately if already active when print starts
     bool is_active_ = false;
+    bool exclude_map_requested_ = false; ///< Open the exclude map on the next activation
 
     // Control buttons (stored for enable/disable on state changes)
-    lv_obj_t* btn_timelapse_ = nullptr;
     lv_obj_t* btn_tune_ = nullptr;
     lv_obj_t* btn_cancel_ = nullptr;
 
@@ -517,6 +520,7 @@ class PrintStatusPanel : public OverlayBase {
 
     // Light/timelapse controls (extracted Phase 2 functionality)
     PrintLightTimelapseControls light_timelapse_controls_;
+    helix::ui::PrintLayerPauseControls layer_pause_controls_;
 
     // Resize callback registration flag
     bool resize_registered_ = false;
@@ -527,18 +531,20 @@ class PrintStatusPanel : public OverlayBase {
 
     void bind_fan_observers(); ///< Reclassify + rebind on fans_version
     void rebind_single_fan(ObserverGuard& guard, SubjectLifetime& lt,
-                           const std::string& object_name, const char* speed_label_widget_name,
-                           const char* icon_widget_name);
-    void update_fan_speed_display(const char* label_name, const char* icon_name, int speed);
-    void refresh_fan_animations();
+                           const std::string& object_name);
 
     void update_all_displays();
-    void update_heater_status_rows();
     void show_gcode_viewer(bool show);
+    /// Pause the G-code viewer unless it is the visible layer: shown by
+    /// gcode_viewer_mode and not covered by the camera.
+    void apply_gcode_viewer_pause();
+    /// Recompute the camera subjects from their inputs, then run the camera
+    /// stream exactly while it shows on an active panel with the display awake.
+    void update_preview_camera();
+    void start_preview_camera();
+    void stop_preview_camera();
+    void handle_camera_toggle();
     void update_button_states(); ///< Enable/disable buttons based on current print state
-
-    /// "Cam"/"Camera" per ui_breakpoint — full word only where Row 2 has room
-    void update_camera_button_label(int breakpoint_value);
 
     /// The two per-job resets, shared by the job-state edge and the
     /// exit-from-Preparing edge. A print started in-app only ever reaches the
@@ -548,27 +554,33 @@ class PrintStatusPanel : public OverlayBase {
     void update_objects_text(); ///< Update "X of Y obj" display from exclude state
     /// Publish whether the objects button shows: [exclude_object] and 2+ defined objects.
     void refresh_exclude_objects_available();
-    void
-    update_view_toggle_position(bool objects_visible); ///< Shift view toggle when objects btn shown
     void animate_badge_pop_in(lv_obj_t* badge, const char* label); ///< Pop-in animation for badges
     void animate_print_complete();  ///< Celebratory animation when print finishes
     void animate_print_cancelled(); ///< Warning animation when print is cancelled
     void animate_print_error();     ///< Error animation when print fails
     void show_exclude_map_view();   ///< Show overhead map view of print objects
     void hide_exclude_map_view();   ///< Destroy map view and restore thumbnail/gradient
+    /// Open the map a push_overlay_with_exclude_map() asked for, once the panel is active.
+    void open_pending_exclude_map();
 
     //
     // === Instance Handlers ===
     //
 
     void handle_temp_card_click();
-    void update_chamber_status();
     void recompute_end_overlay_visibility();
     void recompute_paused_overlay_visibility();
     void handle_tune_button();
     void handle_reprint_button(); ///< Reprint the cancelled file
     /// The file Reprint starts: the original, never a rewritten temp copy.
     [[nodiscard]] std::string reprint_filename() const;
+    /// reprint_filename() with the archive plate to extract, for a .3mf printed that way.
+    [[nodiscard]] helix::gcode::ReprintTarget reprint_target() const;
+    /// Reprints @p target through @p controller, which owns the pre-print step a
+    /// firmware needs (the U1's used heads) and the preparing window.
+    void reprint_through(helix::ui::PrintStartController& controller,
+                         const helix::gcode::ReprintTarget& target);
+
     void handle_files_click(); ///< Open print select while this overlay holds the screen
     void handle_resize();
 
@@ -583,10 +595,14 @@ class PrintStatusPanel : public OverlayBase {
     /// thread (observer callbacks + gcode-load paths).
     void recompute_scoped_runout();
 
-    // SIZE_CHANGED on controls_section — triggers density + fit recompute.
+    // SIZE_CHANGED on overlay_content — triggers the tile layout recompute.
     // Direct lv_obj_add_event_cb registration is correct here: SIZE_CHANGED
     // has no XML binding equivalent (only click/value events go through XML).
-    static void on_controls_size_changed(lv_event_t* e);
+    static void on_content_size_changed(lv_event_t* e);
+    static void on_printer_area_size_changed(lv_event_t* e);
+    void relayout();
+    void handle_more_clicked(lv_obj_t* anchor);
+    void handle_more_action(int action);
     void handle_fans_click();
     void handle_objects_toggle();
     void handle_view_toggle();
@@ -628,7 +644,6 @@ class PrintStatusPanel : public OverlayBase {
     ObserverGuard flow_factor_observer_;
     ObserverGuard live_velocity_observer_;
     ObserverGuard extruder_velocity_observer_;
-    ObserverGuard physical_units_observer_;
     ObserverGuard gcode_z_offset_observer_;
     ObserverGuard print_layer_observer_;
     ObserverGuard z_position_observer_;
@@ -644,18 +659,25 @@ class PrintStatusPanel : public OverlayBase {
     ObserverGuard ams_color_observer_; ///< Tracks AMS/Spoolman filament color for gcode viewer
     ObserverGuard tool_map_version_observer_; ///< Refreshes gcode viewer colors on tool remap
     ObserverGuard active_tool_observer_;    ///< Refreshes nozzle temp display with tool name prefix
-    ObserverGuard chamber_temp_observer_;   ///< Updates chamber status text
+    ObserverGuard chamber_temp_observer_;   ///< Chamber chip reading
+    ObserverGuard chamber_target_observer_; ///< Effective setpoint moved (fan-parked M141 sets)
+    ObserverGuard chamber_mode_observer_;   ///< Control mode moved (Heating/Maintaining/Resting)
     ObserverGuard print_identity_observer_; ///< Reconciles when the print's identity changes
     ObserverGuard print_thumbnail_path_observer_; ///< Updates print_thumbnail_ from shared subject
 #if defined(HELIX_PLATFORM_ESP32)
     ObserverGuard print_psram_thumb_observer_; ///< Ditto, via the PSRAM generation counter
 #endif
     ObserverGuard gcode_render_mode_observer_; ///< Watches settings changes to update viewer mode
-    ObserverGuard print_outcome_observer_;     ///< Drives show_{complete,cancelled,error}_overlay
+    /// Inputs of print_status_camera_available / _showing
+    ObserverGuard camera_webcam_observer_;
+    ObserverGuard camera_remote_observer_;
+    ObserverGuard camera_choice_observer_;
+    ObserverGuard camera_exclude_map_observer_;
+    bool display_asleep_ = false;          ///< Last display sleep edge the camera view reported
+    ObserverGuard print_outcome_observer_; ///< Drives show_{complete,cancelled,error}_overlay
     ObserverGuard end_overlay_dismissed_observer_; ///< Ditto; second input to the same recompute
-    ObserverGuard print_message_observer_;  ///< Drives pause reason text from print_stats.message
+    ObserverGuard print_stop_reason_observer_; ///< Drives pause reason text from print_stop_reason
     ObserverGuard pending_action_observer_; ///< observes PrintControlButtons' print_pending_action
-    ObserverGuard camera_label_observer_;   ///< observes ui_breakpoint → camera label length
                                             ///< for the paused overlay
 
     // Per-fan speed observers — each watches a DYNAMIC subject, so a paired
@@ -677,11 +699,8 @@ class PrintStatusPanel : public OverlayBase {
     // Static-subject observers (singleton lifetime — no SubjectLifetime token needed).
     ObserverGuard fans_version_observer_;
     ObserverGuard primary_fans_version_observer_;
-    ObserverGuard animations_enabled_observer_;
     ObserverGuard breakpoint_observer_;
-    ObserverGuard filament_sensor_count_observer_;
-    ObserverGuard ams_slot_count_observer_;
-    ObserverGuard toolchange_visible_observer_;
+    ObserverGuard job_queue_count_observer_;
     ObserverGuard scoped_runout_observer_; ///< Recomputes scoped runout badge on sensor edge
     /// ...and on AMS lane change (slots_version), which also re-pushes the
     /// viewer's per-tool colors: ams_color_observer_ only sees the ACTIVE lane
@@ -705,6 +724,11 @@ class PrintStatusPanel : public OverlayBase {
 
     /// Manages filament runout guidance (extracted from PrintStatusPanel)
     std::unique_ptr<helix::ui::FilamentRunoutHandler> runout_handler_;
+
+#if HELIX_HAS_CAMERA
+    /// The preview card's live camera; runs only while print_status_camera_showing.
+    helix::CameraView camera_view_;
+#endif
 };
 
 // Global instance accessor (needed by main.cpp)

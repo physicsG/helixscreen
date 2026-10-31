@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "system/host_census.h"
+#include "system_power.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -128,14 +129,14 @@ TEST_CASE("collect_host_census reads the distro and leaves failed units unknown 
     CHECK_FALSE(census.failed_units.has_value());
 }
 
-TEST_CASE("systemd_is_init needs the running-systemd marker, not just the binary",
-          "[bundle][1692]") {
+TEST_CASE("host_runs_systemd needs the running-systemd marker, not just the binary",
+          "[bundle][1692][power]") {
     FakeRoot box;
     box.write("usr/bin/systemctl", "");
-    CHECK_FALSE(helix::diag::systemd_is_init(box.root.string()));
+    CHECK_FALSE(helix::host_runs_systemd(box.root.string()));
 
     fs::create_directories(box.root / "run" / "systemd" / "system");
-    CHECK(helix::diag::systemd_is_init(box.root.string()));
+    CHECK(helix::host_runs_systemd(box.root.string()));
 }
 
 TEST_CASE("failed_units_from treats a silent failure as no answer", "[bundle][1692]") {

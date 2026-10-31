@@ -26,6 +26,7 @@
 
 #include "ui_update_queue.h"
 
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/scoped_runtime_config.h"
 #include "../test_helpers/wifi_manager_test_access.h"
 #include "../ui_test_utils.h"
@@ -51,16 +52,13 @@ namespace {
 
 // Test mode + headless LVGL + UpdateQueue for the duration of the test — same
 // shape as test_wifi_manager_auth_debounce.cpp's WifiDebounceFixture.
-struct ScanUnlatchFixture {
+struct ScanUnlatchFixture : LVGLTestFixture {
     ScopedRuntimeConfig scoped_config;
 
     ScanUnlatchFixture() {
         auto* rc = get_runtime_config();
         rc->test_mode = true;      // should_mock_wifi() -> true
         rc->use_real_wifi = false; // pick the idle mock backend
-        lv_init_safe();
-        ensure_headless_display();
-        helix::ui::UpdateQueue::instance().init();
     }
 
     ~ScanUnlatchFixture() {
@@ -101,6 +99,11 @@ TEST_CASE("wpa_supplicant fallback swap replaces the backend and unlatches a sca
     // Scan session live with one scan outstanding on the failing backend.
     wm->start_scan([](const std::vector<WiFiNetwork>&) {});
     REQUIRE_FALSE(WiFiManagerTestAccess::scan_should_trigger(*wm)); // the latch is set
+    // The scan request has returned and only its completion is owed. While a
+    // call is still on the lane the swap does not wait for it: it retries on a
+    // timer, and the single timer pass below would see the old backend.
+    REQUIRE(WiFiManagerTestAccess::settle(*wm));
+    REQUIRE_FALSE(WiFiManagerTestAccess::scan_should_trigger(*wm));
 
     // The underlying network service turns out to be dead: INIT_FAILED
     // schedules the deferred backend swap.

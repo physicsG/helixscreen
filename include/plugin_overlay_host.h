@@ -6,6 +6,7 @@
 #include "async_lifetime_guard.h"
 #include "lvgl/lvgl.h"
 #include "panel_lifecycle.h"
+#include "plugin_dialog.h"
 
 #include <functional>
 #include <list>
@@ -20,13 +21,32 @@ namespace helix::plugin {
 struct PluginUi {
     /// Extra attributes for lv_xml_create, already policy-checked by the caller.
     using Attrs = std::vector<std::pair<std::string, std::string>>;
-    std::function<int(const std::string& component, std::function<void()> on_closed,
-                      const Attrs& attrs)>
-        open;
+    /// What a plugin hears about one surface: it appeared, and how it ended
+    /// (exactly once).
+    struct Callbacks {
+        std::function<void()> on_open;
+        std::function<void(CloseHow)> on_close;
+    };
+    using OpenFn =
+        std::function<int(const std::string& component, Callbacks cb, const Attrs& attrs)>;
+    /// Opens a full-screen overlay, queued behind app dialogs. A handle > 0, or 0
+    /// when it could not be created.
+    OpenFn open;
+    /// Closes a shown surface, or withdraws a queued one.
     std::function<void(int handle)> close;
-    /// Overlays `plugin_id` has open, so the binding can tell a no-op open
-    /// (the component is already showing) from one that created an overlay.
+    /// Overlays `plugin_id` has shown or queued, so the binding can tell a no-op
+    /// open (the component is already requested) from a new one.
     std::function<size_t(const std::string& plugin_id)> open_count;
+    /// Opens a dialog-sized surface, queued like open().
+    OpenFn dialog;
+    /// Dialogs `plugin_id` has shown or queued.
+    std::function<size_t(const std::string& plugin_id)> dialog_count;
+    /// True while the surface is on screen.
+    std::function<bool(int handle)> is_open;
+    /// Queues a confirm or an editor (keypad, text entry): `present` shows it (false
+    /// when it could not), `cancelled` runs when it is withdrawn without showing.
+    std::function<void(std::function<bool()> present, std::function<void()> cancelled)>
+        queue_confirm;
 };
 
 /// Plugin overlays on the navigation stack. Main thread.
@@ -55,6 +75,8 @@ class PluginOverlayHost {
     /// Pops and deletes every overlay `plugin_id` has open, without running on_closed.
     void close_all(const std::string& plugin_id);
     size_t open_count(const std::string& plugin_id) const;
+    /// True while @p handle's overlay is on the navigation stack, not closing.
+    bool is_live(int handle) const;
 
   private:
     /// No-op lifecycle: plugin overlays have no activation work in this phase, but

@@ -14,6 +14,7 @@
  */
 
 #include "../../include/pending_startup_warnings.h"
+#include "../test_helpers/log_capture.h"
 
 #include <atomic>
 #include <string>
@@ -153,13 +154,13 @@ TEST_CASE("PendingStartupWarnings: concurrent enqueue is safe", "[startup_warnin
 
     // Stay under the 64-entry cap so the assertion is about thread safety, not
     // overflow behaviour (the overflow case has its own test).
-    constexpr int THREADS = 7;
-    constexpr int PER_THREAD = 8;
+    constexpr int kThreads = 7;
+    constexpr int kPerThread = 8;
 
     std::vector<std::thread> workers;
-    for (int t = 0; t < THREADS; t++) {
+    for (int t = 0; t < kThreads; t++) {
         workers.emplace_back([&q, t]() {
-            for (int i = 0; i < PER_THREAD; i++) {
+            for (int i = 0; i < kPerThread; i++) {
                 q.enqueue(PendingStartupWarnings::Severity::WARNING,
                           "t" + std::to_string(t) + "_" + std::to_string(i));
             }
@@ -171,7 +172,7 @@ TEST_CASE("PendingStartupWarnings: concurrent enqueue is safe", "[startup_warnin
 
     int count = 0;
     q.drain([&](auto, auto&, auto) { count++; });
-    REQUIRE(count == THREADS * PER_THREAD);
+    REQUIRE(count == kThreads * kPerThread);
 }
 
 TEST_CASE("PendingStartupWarnings: drops past cap, preserves earlier entries",
@@ -193,4 +194,24 @@ TEST_CASE("PendingStartupWarnings: drops past cap, preserves earlier entries",
     REQUIRE(captured.size() >= 1);
     REQUIRE(captured.size() <= 100);
     REQUIRE(captured.front() == "msg_0");
+}
+
+TEST_CASE("PendingStartupWarnings: warns once per overflow, again after a drain",
+          "[startup_warnings]") {
+    auto& q = PendingStartupWarnings::instance();
+    q.clear();
+    LogCapture log(512);
+    const auto overflow = [&q](const std::string& prefix) {
+        for (int i = 0; i < 80; i++) {
+            q.enqueue(PendingStartupWarnings::Severity::INFO, prefix + std::to_string(i));
+        }
+    };
+
+    overflow("a_");
+    CHECK(log.count_containing("queue full") == 1);
+
+    q.drain([](PendingStartupWarnings::Severity, const std::string&, uint32_t) {});
+    overflow("b_");
+    CHECK(log.count_containing("queue full") == 2);
+    q.clear();
 }

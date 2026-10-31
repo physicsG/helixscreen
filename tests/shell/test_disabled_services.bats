@@ -38,6 +38,7 @@ setup() {
     # is_rc_common_script from service.sh.
     # shellcheck disable=SC1090
     . "$WORKTREE_ROOT/scripts/lib/installer/service.sh"
+    . "$WORKTREE_ROOT/scripts/lib/installer/common.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
 }
 

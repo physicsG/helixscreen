@@ -26,21 +26,26 @@
 
 #pragma once
 
+#include "board_identity.h"
+
 #include <cstdint>
 #include <optional>
 #include <string>
 
 namespace helix {
 
-/// Physical description of a panel that is permanently attached to a platform.
+/// Physical description of a panel that is permanently attached to a board.
 ///
-/// Only platforms whose display is integrated get an entry. A Raspberry Pi, a
+/// Only boards whose display is integrated get an entry. A Raspberry Pi, a
 /// CB1, or an x86 desktop drives a user-chosen panel, so panel size is not a
-/// property of those platform keys and they are deliberately absent.
+/// property of those (Board::Generic) and they are deliberately absent.
 struct PanelSpec {
     int32_t width_px;
     int32_t height_px;
     double diagonal_mm;
+    /// Rotation in degrees that shows the UI upright in the printer's own mount,
+    /// or -1 where that is left to the first-boot rotation probe.
+    int upright_rotation = -1;
 };
 
 /// Where a resolved DPI value came from. Ordered by descending trust.
@@ -54,6 +59,15 @@ enum class DpiSource {
 struct ResolvedDpi {
     double dpi;
     DpiSource source;
+};
+
+/// Everything the UI's size follows from, decided in one place for startup and
+/// for every later change of the drawing surface.
+struct ScaleDecision {
+    ResolvedDpi resolved; ///< Per logical pixel
+    double auto_scale;    ///< From the DPI alone
+    double ui_scale;      ///< After the stored setting
+    int32_t lvgl_dpi;     ///< kReferenceDpi scaled by ui_scale, for lv_display_set_dpi
 };
 
 /// Human-readable source name, for the one startup log line that records how
@@ -109,6 +123,16 @@ class DisplayMetrics {
     /// keep today's sizing, never shrink below it.
     static double ui_scale_for_dpi(double dpi);
 
+    /// DPI of the pixels the UI draws in, when the platform presents a logical
+    /// surface smaller than the panel and upscales it (Android renders at an
+    /// integer fraction of the native resolution). @p physical_dpi is per native
+    /// pixel; the result is per logical pixel, which is what the scale curve
+    /// must see, or a surface already enlarged by the upscale is enlarged again.
+    /// Sizes are compared by diagonal so the panel's orientation does not matter.
+    /// Unknown or degenerate sizes return @p physical_dpi unchanged.
+    static double logical_dpi(double physical_dpi, int native_w, int native_h, int logical_w,
+                              int logical_h);
+
     /// Whether a measurement is inside the plausibility band.
     static bool dpi_is_plausible(double dpi);
 
@@ -118,9 +142,15 @@ class DisplayMetrics {
     /// Whether a measurement should be believed at all.
     static bool dpi_is_trustworthy(double dpi);
 
-    /// The integrated panel for a platform key, or nullopt when the platform
-    /// drives an arbitrary user-chosen display.
-    static std::optional<PanelSpec> known_panel(const std::string& platform_key);
+    /// The integrated panel for a board, or nullopt when the board drives an
+    /// arbitrary user-chosen display or its panel is unmeasured.
+    static std::optional<PanelSpec> known_panel(board::Board board);
+
+    /// The board's known panel mount (upright_rotation), or -1 when the board has
+    /// none or the live framebuffer (@p native_w x @p native_h, before rotation)
+    /// is not the panel the mount was measured on. Board::K1 is also the mips
+    /// fall-through for unrecognised boxes, so the geometry is what confirms it.
+    static int board_mount_rotation(board::Board board, int native_w, int native_h);
 
     /// DPI implied by a panel's pixel dimensions and physical diagonal.
     static double dpi_of(const PanelSpec& panel);
@@ -130,7 +160,18 @@ class DisplayMetrics {
     /// unset); @p platform_measured is a measurement from a platform we trust
     /// (Android's SDL_GetDisplayDPI), which is still plausibility-checked.
     static ResolvedDpi resolve_dpi(int user_override_dpi, std::optional<double> platform_measured,
-                                   const std::string& platform_key);
+                                   board::Board board);
+
+    /// The whole chain from measurements to scale: @p platform_native_dpi is
+    /// converted to the logical surface (logical_dpi), resolved against
+    /// @p user_override_dpi and the board (resolve_dpi), turned into the auto
+    /// scale, and then the stored @p scale_setting has its say. A surface that
+    /// changes size at runtime (a foldable folding) reruns this with its new
+    /// native and logical sizes.
+    static ScaleDecision decide_scale(int user_override_dpi,
+                                      std::optional<double> platform_native_dpi, int native_w,
+                                      int native_h, int logical_w, int logical_h,
+                                      board::Board board, int scale_setting);
 
     /// Scale an authored pixel constant. The single choke point every future
     /// physical-units caller goes through, so widening the refactor past
@@ -173,10 +214,10 @@ class DisplayMetrics {
     static void set_auto_scale(double scale);
     static double auto_scale();
 
-    /// The process-wide scale, resolved once during display init. Screens do
-    /// not resize or change DPI at runtime, so this is set exactly once and
-    /// read everywhere; it defaults to 1.0 so any code path that runs before
-    /// display init (or in a unit test) behaves exactly as it does today.
+    /// The process-wide scale, resolved during display init and again when
+    /// the drawing surface changes size (decide_scale). It defaults to 1.0 so
+    /// any code path that runs before display init (or in a unit test)
+    /// behaves exactly as it does today.
     static void set_active_scale(double scale);
     static double active_scale();
 };

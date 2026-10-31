@@ -9,7 +9,9 @@
 
 ```bash
 make test              # Build tests (does not run)
-make test-run          # Run unit tests in parallel (~4-8x faster)
+make t F='[tag]'       # Build, then run one tag or case
+make unit-sweep        # Run unit tests in parallel (~4-8x faster)
+make full-test-run     # unit-sweep plus the bats shell suite
 make test-fast         # Skip [slow] tests
 make test-serial       # Sequential (for debugging)
 make test-all          # Everything including [slow]
@@ -31,7 +33,7 @@ Tests are tagged by **feature/importance**, not layer/speed. This enables runnin
 | Tag | Count | Purpose |
 |-----|-------|---------|
 | `[core]` | ~12 | Critical tests - if these fail, the app is fundamentally broken |
-| `[slow]` | ~36 | Tests with network/timing - excluded from `test-run` |
+| `[slow]` | ~36 | Tests with network/timing - excluded from `unit-sweep` |
 | `[eventloop]` | ~2 | Uses `hv::EventLoop` - very slow, always paired with `[slow]` |
 | `[serial]` | 0 | A `[slow]` test that fails when it shares the box with other `[slow]` shards - `test-all` and `test-slow` run it alone, after the sharded tier. Add it only for a failure seen sharded and not serially |
 
@@ -102,8 +104,10 @@ These validate fundamental functionality:
 
 | Target | Behavior |
 |--------|----------|
-| `make test-run` | Parallel, excludes `[slow]` and hidden |
-| `make test-fast` | Same as test-run |
+| `make unit-sweep` | Parallel, excludes `[slow]` and hidden |
+| `make test-fast` | Same as unit-sweep |
+| `make full-test-run` | `unit-sweep` plus the bats shell suite |
+| `make test-run` | Runs nothing: prints which target fits and exits non-zero |
 | `make test-all` | Fast tests in `NPROCS` shards, then `[slow]` in `SLOW_SHARDS` (16) shards in `SLOW_ORDER` (fixed-seed shuffle), then `[slow][serial]` alone |
 | `make test-slow` | Only `[slow]`: the same two slow tiers as `test-all` |
 | `make test-eventloop` | Only `[eventloop]` tests (5-10 min) |
@@ -137,7 +141,7 @@ suite (CMake + Unity). See [helix-xml Engine Tests](#helix-xml-engine-tests-sepa
 Tests run in parallel by default using Catch2's sharding. Each shard runs in a separate process with its own LVGL instance.
 
 ```bash
-# What make test-run does internally:
+# What make unit-sweep does internally:
 for i in $(seq 0 $((NPROCS-1))); do
     ./build/bin/helix-tests "~[.] ~[slow]" --shard-count $NPROCS --shard-index $i &
 done
@@ -154,31 +158,61 @@ Use `make test-serial` when debugging failures or reading output.
 
 ### When a shard fails, crashes, or times out
 
-The harness diagnoses it for you instead of leaving you to re-run by hand. For
-each suspect shard it prints:
+The harness diagnoses it for you instead of leaving you to re-run by hand
+(`scripts/triage_shard.sh`, called from `diagnose_shards` in `mk/tests.mk`).
+For each suspect shard it names the failing case(s) and re-runs them, cheapest
+first, stopping at the first way that fails:
+
+| Stage | What runs |
+|-------|-----------|
+| `alone` | only the failing case(s), via `--input-file` |
+| `alone-pinned` | the same on one CPU (`taskset -c N`) |
+| `composition` | the whole shard again: same filter, order flags, `--shard-count`/`--shard-index` |
+| `composition-pinned` | the whole shard on one CPU |
 
 ```
 ── shard diagnostics ──
 logs preserved: /tmp/helix-shards-TINI6P
 
 shard 95
-  ran 194 test case(s) → /tmp/helix-shards-TINI6P/95.tests
-  failing assertion(s): tests/unit/test_foo.cpp:27
-  reproduce: build/bin/helix-tests "~[.] ~[slow]" --shard-count 96 --shard-index 95
-  re-running alone…
-  → REPRODUCED alone (exit 1): a real fault, not a flake
+  ran 194 test case(s) -> /tmp/helix-shards-TINI6P/95.tests (build/bin/helix-tests --input-file replays it)
+  failing assertion(s): tests/unit/test_widget_content_fits.cpp:858
+  failing case(s) -> /tmp/helix-shards-TINI6P/95.failed:
+    firmware_restart tile fits its cell
+  shard repro: build/bin/helix-tests '~[.] ~[slow]' --shard-count 96 --shard-index 95
+  alone: failed 0/3
+  alone-pinned: failed 0/3
+  composition: failed 3/3
+  verdict: fails only in shard composition: order dependence or state leaked by an earlier case
+  repro: build/bin/helix-tests '~[.] ~[slow]' --shard-count 96 --shard-index 95
 ```
 
+| Verdict | Means |
+|---------|-------|
+| `fails alone` | a real bug in the case or the code it covers |
+| `fails only pinned` | timing: the case needs a slow or contended CPU, which a loaded sweep is and an idle re-run is not |
+| `fails only in shard composition` | order dependence or state an earlier case in the shard leaked; the printed command reproduces it |
+| `did not reproduce` | not proof the diff is clean; raise `TRIAGE_RETRIES`/`TRIAGE_BUDGET` to sample harder |
+
+- **A re-run on an idle machine is the one condition a timing flake never fails
+  under**, which is why the pinned stages exist. Without `taskset` (macOS) they
+  are skipped and the output says so.
+- **Bounded.** `SHARD_RETRIES` (default 3) runs per stage, `SHARD_TIMEOUT` per
+  run (`TRIAGE_TIMEOUT`), twice that per shard (`TRIAGE_BUDGET`), and
+  `TRIAGE_TOTAL_BUDGET` (default 900s) for every failed shard of the sweep
+  together; a stage that would start past a budget is named as skipped. A run
+  that hits the timeout is reported as timed out, never as a reproduction.
+- **The pinned core** is the allowed CPU that sat idle longest over a short
+  sample (`TRIAGE_CPU` overrides), and a pinned verdict names it with the load
+  average it ran under.
 - **Logs are kept** (`$SHARD_ARTIFACT_ROOT`, default `/tmp`) whenever anything
   goes wrong, and deleted only on a fully clean run. `<n>.log` is the shard's
-  output, `<n>.tests` the test cases it ran, `<n>.retry.log` the isolation re-run.
+  output, `<n>.tests` the test cases it ran, `<n>.failed` the failing ones,
+  `<n>.<stage>.log` the re-run that reproduced it.
   Set `SHARD_ARTIFACT_ROOT=$(PWD)/build` in CI to collect them as artifacts.
-- **Each suspect shard is re-run alone.** Green in isolation but red under the
-  full parallel run means a load/timing flake, not a fault in the diff under
-  review. Red both times is real.
 - **A shard that dies with no `FAILED` marker** crashed *after* its assertions
   passed — a teardown or static-destructor fault. It is reported as a warning
-  and does not fail the run, but the log survives so it can be investigated.
+  and does not fail the run; only the composition stages can re-run it.
 
 > **Shard numbers are not stable.** Catch2 distributes test cases across shards
 > by position, so adding or removing *any* test reshuffles every shard's
@@ -189,7 +223,7 @@ shard 95
 
 ## Excluded Tests Breakdown
 
-The default `make test-run` uses filter `~[.] ~[slow]` to exclude tests that would slow down fast iteration. Here's what's excluded:
+The default `make unit-sweep` uses filter `~[.] ~[slow]` to exclude tests that would slow down fast iteration. Here's what's excluded:
 
 ### Test Count Summary
 
@@ -198,7 +232,7 @@ The default `make test-run` uses filter `~[.] ~[slow]` to exclude tests that wou
 | **Test files** | 627 | All in `tests/unit/` |
 | **TEST_CASE macros** | thousands | Individual test definitions |
 | **SECTION blocks** | thousands | Subsections within test cases |
-| **Slow tests** `[slow]` | ~200 | Excluded from `test-run` |
+| **Slow tests** `[slow]` | ~200 | Excluded from `unit-sweep` |
 | **Hidden tests** `[.]` | dozens | Require explicit invocation |
 
 *Counts drift as the suite grows — regenerate with `grep -rc` if you need exact figures.*
@@ -222,7 +256,7 @@ per-file coverage notes: `HIDDEN_TESTS_TRACKER.md`.
 
 ### Slow Tests `[slow]` (~185 tests)
 
-Slow tests are excluded from `test-run` but can be run with `make test-slow`.
+Slow tests are excluded from `unit-sweep` but can be run with `make test-slow`.
 
 | File | Count | Why Slow |
 |------|------:|----------|
@@ -288,7 +322,7 @@ Tests fall into three timing categories based on their execution characteristics
 The majority of tests complete quickly and are suitable for rapid iteration during development.
 
 ```bash
-make test-run    # Default: runs fast tests in parallel shards
+make unit-sweep  # Default: runs fast tests in parallel shards
 ```
 
 **Characteristics:**
@@ -324,7 +358,7 @@ Tests using `hv::EventLoop` for real network operations. These are the slowest t
 # Run eventloop tests specifically
 ./build/bin/helix-tests "[eventloop]" "~[.]"
 
-# These are already excluded by make test-run (via ~[slow])
+# These are already excluded by make unit-sweep (via ~[slow])
 ```
 
 **Why very slow:**
@@ -342,13 +376,13 @@ Tests using `hv::EventLoop` for real network operations. These are the slowest t
 | `test_moonraker_api_security.cpp` | 2 | API lifecycle |
 | `test_moonraker_connection_retry.cpp` | 1 | Connection retry logic |
 
-**Important:** All `[eventloop]` tests MUST also be tagged `[slow]` to ensure they are excluded from `make test-run`.
+**Important:** All `[eventloop]` tests MUST also be tagged `[slow]` to ensure they are excluded from `make unit-sweep`.
 
 ### Test Execution Matrix
 
 | Command | Fast | Slow (non-eventloop) | EventLoop | Hidden |
 |---------|:----:|:--------------------:|:---------:|:------:|
-| `make test-run` | Yes | No | No | No |
+| `make unit-sweep` | Yes | No | No | No |
 | `make test-fast` | Yes | No | No | No |
 | `make test-slow` | No | Yes | Yes | No |
 | `make test-all` | Yes | Yes | Yes | No |

@@ -7,6 +7,7 @@
 #include "macro_param_cache.h"
 #include "macro_params.h"
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
@@ -14,7 +15,9 @@
 
 #include "hv/json.hpp"
 
+namespace helix {
 class IMoonrakerAPI;
+}
 struct MoonrakerError;
 
 namespace helix {
@@ -119,7 +122,7 @@ enum class MacroRunAction {
     Run,              ///< Execute now with the returned params.
     ConfirmRun,       ///< Ask "Run X?" first, then execute with the returned params.
     Prompt,           ///< Show the parameter modal, prefilled with the returned params.
-    PromptUnknown,    ///< Show the free-form modal for a macro whose params are unknown.
+    PromptUnknown,    ///< Show the free-form modal, prefilled with the returned params.
 };
 
 /// What one caller knows about the click it is dispatching. A caller that never
@@ -160,11 +163,18 @@ struct MacroRunDecision {
 /// known_values covers every one of them, else prompts with the names it did
 /// cover plus the saved values for the rest - a full saved set still prompts,
 /// because a saved value is what the user last typed, not what they chose for
-/// this run. An UNKNOWN macro always prompts free-form. KNOWN_PARAMS always
-/// carries at least one parameter (MacroParamCache never stores an empty list
-/// as known).
+/// this run. An UNKNOWN macro always prompts free-form, prefilled with its
+/// saved values; its plain run sends them unfiltered, since it declares no
+/// names, and never sends known_values. KNOWN_PARAMS always carries at least
+/// one parameter (MacroParamCache never stores an empty list as known).
 [[nodiscard]] MacroRunDecision decide_macro_run(const CachedMacroInfo& cached,
                                                 const MacroRunRequest& req);
+
+/// Whether a macro offers a "Default Parameters" editor: a declared field list
+/// (KNOWN_PARAMS) or the free-form KEY=VALUE text an UNKNOWN macro runs with.
+/// A KNOWN_NO_PARAMS macro never prompts, so nothing would ever show or send
+/// what it saved.
+[[nodiscard]] bool macro_takes_saved_defaults(MacroParamKnowledge knowledge);
 
 /// Split a KEY=VALUE map into a MacroParamResult following the macro's declared
 /// parameter shapes: declared-variable names go to result.variables (the
@@ -224,5 +234,26 @@ enum class MacroFailureReport {
 /// @param err     The error the RPC came back with.
 [[nodiscard]] MacroFailureReport classify_macro_rpc_failure(MacroHostEffect effect,
                                                             const MoonrakerError& err);
+
+/// One gcode send whose failure is reported the macro way: a host that
+/// restarts or halts mid-command is absorbed per classify_macro_rpc_failure(),
+/// and anything else toasts "<display_name> failed".
+struct MachineGcode {
+    std::string gcode;
+    std::string log_name;     ///< For logs: the macro or routine sent
+    std::string display_name; ///< Shown in the "<name> sent" / "<name> failed" toasts
+    MacroHostEffect host_effect = MacroHostEffect::None;
+    /// 0 means IMoonrakerAPI::kMacroTimeoutMs.
+    uint32_t timeout_ms = 0;
+};
+
+/// Send @p cmd and report its outcome. A null @p api logs and sends nothing.
+void execute_machine_gcode(IMoonrakerAPI* api, const MachineGcode& cmd, const char* caller_tag);
+
+/// Start a calibration routine from a UI entry: refused with a toast while a
+/// print holds the machine, homed first (ensure_homed_then, no prompt) when
+/// @p needs_home, then execute_machine_gcode(). Main thread only.
+void start_calibration_gcode(IMoonrakerAPI* api, const MachineGcode& cmd, bool needs_home,
+                             const char* caller_tag);
 
 } // namespace helix

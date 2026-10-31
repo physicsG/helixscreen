@@ -25,11 +25,10 @@ enum class FilamentTier {
 /// Why a plan declined to dispatch. Each maps to different caller-side copy.
 enum class FilamentRefusal {
     None,
-    SelectSlot,     ///< Load: the backend wants a slot and none resolved
-    NothingLoaded,  ///< Unload: the selected slot has no filament to pull
-    AlreadyMounted, ///< The requested tool is already on the carriage
-    BypassLoaded,   ///< Load: a lane was asked for, but the bypass spool still
-                    ///< crosses the toolhead and only a hand can clear it
+    SelectSlot,    ///< Load: the backend wants a slot and none resolved
+    NothingLoaded, ///< Unload: the selected slot has no filament to pull
+    BypassLoaded,  ///< Load: a lane was asked for, but the bypass spool still
+                   ///< crosses the toolhead and only a hand can clear it
 };
 
 /// Which backend entry point tier 1 should call. Load is NOT always
@@ -47,18 +46,6 @@ struct FilamentOpPlan {
     FilamentRefusal refusal = FilamentRefusal::None;
     AmsCall ams_call = AmsCall::None;
     int ams_arg = -1; ///< Slot index, or tool number when ams_call == ChangeTool
-    /// The operation includes retracting what is already at the toolhead, so the
-    /// UI should show a SWAP rather than a fresh load.
-    ///
-    /// Separate from `ams_call` because they answer different questions. The
-    /// sidebar used to derive the display from the dispatch — `ams_call == Load`
-    /// meant fresh, anything else meant swap — which holds only while "needs an
-    /// unload first" and "is dispatched as a tool change" agree. On a multiACE
-    /// ACE bay they do not: `change_tool_completes_load()` is false there (`T3`
-    /// mounts the head and feeds nothing), so the plan is a plain Load, while the
-    /// backend still emits `ACE_UNLOAD_HEAD` before `ACE_LOAD_HEAD`. Every swap
-    /// onto an ACE-fed head therefore rendered a fresh-load bar.
-    bool is_swap = false;
 };
 
 /**
@@ -76,10 +63,6 @@ struct BackendCaps {
     /// SAME slot the plan targets. It is a per-lane question: on a MIXED unit a
     /// direct-fed lane and a hub-routed one get different answers.
     bool needs_unload_before_load = false;
-    bool is_tool_changer = false; ///< get_type() == AmsType::TOOL_CHANGER
-    /// AmsBackend::change_tool_completes_load() — answered for the SAME slot the
-    /// plan targets, because one backend can answer differently per lane.
-    bool change_tool_completes_load = true;
     /// AmsBackend::is_bypass_active(). Distinct from
     /// !requires_slot_selection_for_load(): that answer is also false for a
     /// backend that simply does not need a slot, and the two want opposite
@@ -91,6 +74,12 @@ struct BackendCaps {
     /// claims, which is what makes the active-head sentinel a resolvable
     /// unload target.
     bool toolhead_unaccounted = false;
+    /// AmsBackend::load_feeds_filament(): Load is a firmware feed into the
+    /// named head, so no other lane needs swapping out first.
+    bool load_feeds_filament = false;
+    /// AmsBackend::load_swaps_seated_lane(): Load clears the seated lane itself,
+    /// so a swap is still a Load and never a change_tool().
+    bool load_swaps_seated_lane = false;
 };
 
 /**
@@ -100,12 +89,6 @@ struct BackendCaps {
  * merely existing: its default is `!is_bypass_active()`, so bypass deliberately
  * falls through to the user's LOAD_FILAMENT macro. Preserve that — it is how a
  * bypass spool loads at all.
- *
- * The already-mounted refusal is the fix for debug bundle 9KRXZ62P: SELECT_TOOL
- * on the tool already on the carriage is a firmware no-op, and dispatching it
- * left the Load button spinning for 120 s. AmsOperationSidebar has carried this
- * guard privately since it was written; FilamentPanel and the runout handler
- * never had it.
  *
  * @param sys           Backend system info (current_slot, per-slot mapped_tool).
  * @param caps          Backend capability answers.
@@ -160,12 +143,16 @@ struct BackendCaps {
         if (target_slot < 0) {
             return {FilamentTier::Refused, FilamentRefusal::SelectSlot, AmsCall::None, -1};
         }
-        if (caps.is_tool_changer && sys.current_slot >= 0 && sys.current_slot == target_slot) {
-            return {FilamentTier::Refused, FilamentRefusal::AlreadyMounted, AmsCall::None, -1};
+        if (caps.load_feeds_filament) {
+            return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::Load, target_slot};
         }
         // Load-vs-swap: a machine that already has filament seated cannot simply
         // feed another lane. Centralized in needs_unload_before_load() so the UI
         // and backend agree (#968).
+        //
+        // Exempt: a backend whose load_filament() clears the seated lane itself
+        // (AFC's `CHANGE_TOOL LANE={n}`) gets the Load. Its change_tool() may only
+        // mount a head and move no filament.
         //
         // An unmapped target slot has no tool number to change to, so it falls
         // through to the plain load below rather than synthesising an unload.
@@ -188,22 +175,15 @@ struct BackendCaps {
         // one command per user action and lets the firmware refuse (#1229). An
         // unasked-for eject is the harm that rule exists to prevent, and it is
         // exactly what the old arm did.
-        // ...and only where that tool change IS the load. Where it is merely the
-        // first half (a multiACE ACE bay: `T3` mounts the head, `ACE_LOAD_HEAD
-        // HEAD=h ACE=a SLOT=s` feeds it), fall through to the plain load below
-        // and let the backend emit the whole sequence -- the same answer QIDI
-        // already relies on.
-        // Whether an unload is part of this operation — asked once, and NOT
-        // conflated with which command carries it (see FilamentOpPlan::is_swap).
-        const bool swap = caps.needs_unload_before_load && sys.current_slot != target_slot;
-        if (swap && caps.change_tool_completes_load) {
+        if (caps.needs_unload_before_load && !caps.load_swaps_seated_lane &&
+            sys.current_slot != target_slot) {
             const SlotInfo* slot_info = sys.get_slot_global(target_slot);
             if (slot_info && slot_info->mapped_tool >= 0) {
                 return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::ChangeTool,
-                        slot_info->mapped_tool, swap};
+                        slot_info->mapped_tool};
             }
         }
-        return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::Load, target_slot, swap};
+        return {FilamentTier::AmsBackend, FilamentRefusal::None, AmsCall::Load, target_slot};
     }
 
     if (macro_available) {
@@ -217,7 +197,7 @@ struct BackendCaps {
 /// bypass_state, Happy Hare from its selector, CFS from
 /// derive_stock_bypass_locked), so it is the one negative slot that names a real
 /// physical target rather than "nothing resolved".
-inline constexpr int EXTERNAL_SPOOL_SLOT = -2;
+inline constexpr int kExternalSpoolSlot = -2;
 
 /// Slot sentinel meaning "the active head: whatever the firmware has at the
 /// nozzle", reached when no lane resolved (current_slot is -1). The sidebar's
@@ -225,7 +205,7 @@ inline constexpr int EXTERNAL_SPOOL_SLOT = -2;
 /// both target it, and every backend's unload_filament(-1) resolves the real
 /// channel from firmware. It names a real target only while the backend
 /// reports the toolhead unaccounted (see BackendCaps::toolhead_unaccounted).
-inline constexpr int ACTIVE_HEAD_SLOT = -1;
+inline constexpr int kActiveHeadSlot = -1;
 
 /**
  * @brief Is there anything at `slot` worth unloading?
@@ -250,7 +230,7 @@ inline constexpr int ACTIVE_HEAD_SLOT = -1;
  * to answer true via their `slot == current_slot && filament_loaded` default.
  * One rule for the sentinel, so the three cannot drift.
  *
- * @param target_slot         Lane index, or EXTERNAL_SPOOL_SLOT for bypass.
+ * @param target_slot         Lane index, or kExternalSpoolSlot for bypass.
  * @param any_filament_loaded AmsSystemInfo::filament_loaded — the toolhead-wide
  *                            answer, consulted for the bypass target only.
  * @param toolhead_unaccounted AmsBackend::toolhead_filament_unaccounted(),
@@ -262,7 +242,7 @@ inline constexpr int ACTIVE_HEAD_SLOT = -1;
                                                   bool slot_filament_at_toolhead,
                                                   bool is_current_slot, bool any_filament_loaded,
                                                   bool toolhead_unaccounted = false) {
-    if (target_slot == EXTERNAL_SPOOL_SLOT) {
+    if (target_slot == kExternalSpoolSlot) {
         return any_filament_loaded;
     }
     if (target_slot < 0) {
@@ -270,7 +250,10 @@ inline constexpr int ACTIVE_HEAD_SLOT = -1;
         // that can name a real target: filament is at the toolhead and no lane
         // claims it, so the per-lane arms below have nothing to consult and the
         // backend's unaccounted answer decides on its own.
-        return target_slot == ACTIVE_HEAD_SLOT && toolhead_unaccounted;
+        // kClearToolheadSlot names the same filament: the user's "Not sure"
+        // answer for it.
+        return (target_slot == kActiveHeadSlot || target_slot == kClearToolheadSlot) &&
+               toolhead_unaccounted;
     }
     return slot_actively_loaded || slot_filament_at_toolhead || is_current_slot;
 }
@@ -286,7 +269,7 @@ inline constexpr int ACTIVE_HEAD_SLOT = -1;
  * through the tube.
  */
 [[nodiscard]] inline bool unload_needs_manual_pull(bool backend_present, int target_slot) {
-    return !backend_present || target_slot == EXTERNAL_SPOOL_SLOT;
+    return !backend_present || target_slot == kExternalSpoolSlot;
 }
 
 /**
@@ -313,17 +296,20 @@ inline constexpr int ACTIVE_HEAD_SLOT = -1;
     }
 
     if (caps.present) {
-        // EXTERNAL_SPOOL_SLOT is a target, not an absence: the backends all
+        // kExternalSpoolSlot is a target, not an absence: the backends all
         // handle it (CFS ignores the slot and runs its unload script, AFC
         // resolves the lane name to "" and sends a bare TOOL_UNLOAD, Happy Hare
-        // sends MMU_UNLOAD). ACTIVE_HEAD_SLOT joins it only while the backend
+        // sends MMU_UNLOAD). kActiveHeadSlot joins it only while the backend
         // reports the toolhead unaccounted: filament at the nozzle that no
         // lane claims, so only the backend can resolve the real channel, which
-        // every backend's unload_filament(-1) does. Any other negative slot
-        // still means "nothing resolved" and must not dispatch against whatever
-        // the firmware last touched.
-        const bool resolvable = target_slot >= 0 || target_slot == EXTERNAL_SPOOL_SLOT ||
-                                (target_slot == ACTIVE_HEAD_SLOT && caps.toolhead_unaccounted);
+        // every backend's unload_filament(-1) does. kClearToolheadSlot rides
+        // the same condition: it clears that filament without naming a lane.
+        // Any other negative slot still means "nothing resolved" and must not
+        // dispatch against whatever the firmware last touched.
+        const bool resolvable =
+            target_slot >= 0 || target_slot == kExternalSpoolSlot ||
+            ((target_slot == kActiveHeadSlot || target_slot == kClearToolheadSlot) &&
+             caps.toolhead_unaccounted);
         if (!resolvable || !target_is_loaded) {
             return {FilamentTier::Refused, FilamentRefusal::NothingLoaded, AmsCall::None, -1};
         }

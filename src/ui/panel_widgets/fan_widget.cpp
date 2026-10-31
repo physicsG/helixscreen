@@ -5,7 +5,7 @@
 
 #include "ui_event_safety.h"
 #include "ui_fan_control_overlay.h"
-#include "ui_update_queue.h"
+#include "ui_text.h"
 
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
@@ -127,8 +127,6 @@ void FanWidget::detach() {
     lifetime_.invalidate();
     picker_.hide();
     {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
         version_observer_.reset();
         speed_lifetime_.reset(); // Before observer: expire weak_ptr if subject already freed
         speed_observer_.reset();
@@ -314,6 +312,7 @@ void FanWidget::FanPicker::on_created(lv_obj_t* menu_obj) {
         lv_label_set_text(name, fan.display_name.c_str());
         lv_obj_set_flex_grow(name, 1);
         lv_label_set_long_mode(name, LV_LABEL_LONG_MODE_DOTS);
+        helix::ui::label_hold_one_line(name);
         lv_obj_set_style_text_font(name, lv_font_get_default(), 0);
 
         // Current speed

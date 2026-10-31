@@ -46,7 +46,7 @@ class DeferredHardwareFixture : public HelixTestFixture {
     MoonrakerClientMock client;
 
     DeferredHardwareFixture() {
-        ConfigTestAccess::data(config) = {{"config_version", CURRENT_CONFIG_VERSION},
+        ConfigTestAccess::data(config) = {{"config_version", kCurrentConfigVersion},
                                           {"active_printer_id", "printer-a"},
                                           {"printers",
                                            {{"printer-a", {{"moonraker_host", "192.168.1.10"}}},
@@ -68,7 +68,7 @@ class DeferredHardwareFixture : public HelixTestFixture {
 
     bool marker_key_present() {
         return ConfigTestAccess::data(config).contains(
-            json::json_pointer(config.df() + helix::WIZARD_HARDWARE_SETUP_DEFERRED));
+            json::json_pointer(config.df() + helix::kWizardHardwareSetupDeferred));
     }
 
     static std::vector<helix::StepSkip> all_visible() {
@@ -160,9 +160,9 @@ TEST_CASE_METHOD(DeferredHardwareFixture,
 
     // Storage lives under the printer node, with nothing at the root.
     CHECK(config.get<bool>(
-        std::string("/printers/printer-a/") + helix::WIZARD_HARDWARE_SETUP_DEFERRED, false));
-    CHECK_FALSE(ConfigTestAccess::data(config).contains(
-        std::string(helix::WIZARD_HARDWARE_SETUP_DEFERRED)));
+        std::string("/printers/printer-a/") + helix::kWizardHardwareSetupDeferred, false));
+    CHECK_FALSE(
+        ConfigTestAccess::data(config).contains(std::string(helix::kWizardHardwareSetupDeferred)));
 }
 
 TEST_CASE_METHOD(DeferredHardwareFixture,

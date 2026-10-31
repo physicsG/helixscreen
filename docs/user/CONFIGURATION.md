@@ -34,6 +34,7 @@ Complete reference for HelixScreen configuration options.
 - [Filament Settings](#filament-settings)
 - [Filament Sensor Settings](#filament-sensor-settings)
 - [Security Settings](#security-settings)
+- [Screen Sharing Settings](#screen-sharing-settings)
 - [Label Printer Settings](#label-printer-settings)
 - [Printer Switcher](#printer-switcher)
 - [Telemetry Settings](#telemetry-settings)
@@ -189,7 +190,7 @@ Each printer entry contains all printer-specific settings (connection details, h
 **Type:** integer
 **Default:** `2`
 **Values:** `0` (Off), `1` (Notification), `2` (Alert)
-**Description:** How HelixScreen notifies you when a print completes or is cancelled (while you're on a different screen):
+**Description:** How HelixScreen notifies you when a print completes or is canceled (while you're on a different screen):
 - `0` — **Off**: No notification (sound still plays if sounds are enabled)
 - `1` — **Notification**: Brief toast message at the top of the screen
 - `2` — **Alert**: Full-screen modal with print stats (duration, layers, filament used) and confetti for successful prints
@@ -213,6 +214,17 @@ This is different from `sounds_enabled` — that toggle mutes playback but still
 **Default:** `false`
 **Description:** Whether WiFi connectivity is expected. When `true`, HelixScreen shows connection warnings if WiFi is unavailable. Set during the wizard based on your network configuration choice.
 
+### `wifi_country`
+**Type:** string
+**Default:** `""` (not set)
+**Values:** a two-letter ISO 3166 country code such as `"US"`, `"DE"` or `"GB"`, or `""`
+**Description:** The Wi-Fi country HelixScreen applies at every start. Without one the radio stays in a restricted worldwide mode and usually can't find 5 GHz networks until it has joined a 2.4 GHz one. Empty leaves the country to your printer's system. Change via Settings > Connection > Network Settings > Country.
+
+### `wifi_country_last_seen`
+**Type:** string
+**Default:** `""`
+**Description:** The last country the Wi-Fi radio itself reported, recorded by HelixScreen. When `wifi_country` is empty and the radio starts in the restricted worldwide mode, for example after a firmware update reset it, HelixScreen sets this country again. A country the radio already reports is never changed. Not something you normally edit.
+
 ### `language`
 **Type:** string
 **Default:** `"en"`
@@ -222,7 +234,7 @@ This is different from `sounds_enabled` — that toggle mutes playback but still
 ### `beta_features`
 **Type:** boolean
 **Default:** `false`
-**Description:** Enable beta features that are still under testing. Gates rows that are still being proven on real hardware (in the Advanced panel: Tool Offsets, Belt Tension; on the Controls panel: the Tool Offsets button on tool-changing printers), the prompt that offers to install the HelixPrint Moonraker plugin, and the **Dev** entry in the Update Channel selector (Stable and Beta are offered without it). Always enabled automatically when running in `--test` mode. Can also be toggled by tapping the version button 7 times in **Settings > Help & About > About**. See the [Beta Features](guide/beta-features.md) guide for the full list.
+**Description:** Enable beta features that are still under testing. Gates the prompt that offers to install the HelixPrint Moonraker plugin, and the **Dev** entry in the Update Channel selector (Stable and Beta are offered without it). Always enabled automatically when running in `--test` mode. Can also be toggled by tapping the version button 7 times in **Settings > Help & About > About**. See the [Beta Features](guide/beta-features.md) guide for the full list.
 
 ---
 
@@ -365,7 +377,6 @@ Located in the `display` section:
   "display": {
     "animations_enabled": true,
     "time_format": 0,
-    "timezone": "UTC",
     "theme": "helixscreen",
     "rotate": 0,
     "sleep_sec": 1200,
@@ -379,6 +390,8 @@ Located in the `display` section:
     "bed_mesh_show_zero_plane": true,
     "page_scroll_buttons": false,
     "speed_flow_physical_units": false,
+    "glass_effects": false,
+    "print_status_show_camera": false,
     "ui_scale_percent": 0,
     "printer_image": ""
   }
@@ -392,6 +405,11 @@ Located in the `display` section:
 **Default:** `true`
 **Description:** Enable UI animations and transitions. Disable for better performance on slow devices.
 
+### `glass_effects`
+**Type:** boolean
+**Default:** `false`
+**Description:** Draws buttons and panels with glass depth and lighting (**Settings > Appearance > Glass Effects**). It only takes effect on a screen that passed HelixScreen's speed check; elsewhere the value is kept but the screen stays flat.
+
 ### `time_format`
 **Type:** integer
 **Default:** `0`
@@ -400,9 +418,9 @@ Located in the `display` section:
 
 ### `timezone`
 **Type:** string
-**Default:** `"UTC"`
+**Default:** absent, which follows the system's timezone (**System** in the list). The BTT K-Touch has no system timezone, so it uses UTC until you pick one; its Wi-Fi setup page picks yours from your phone's.
 **Example:** `"America/New_York"`, `"Europe/London"`
-**Description:** IANA timezone ID used for all displayed clocks and print time estimates. Set this so times shown on screen match your local time instead of UTC. Change via **Settings > Language & Time > Timezone**.
+**Description:** IANA timezone ID used for all displayed clocks and print time estimates. Set this when the system's timezone is not your local time. Change via **Settings > Language & Time > Timezone**.
 
 ### `theme`
 **Type:** string
@@ -479,18 +497,18 @@ The K2 build default applies only when the backlight is a sysfs device (`/sys/cl
 **Type:** integer
 **Default:** `-1` (automatic)
 **Values:** `-1` = automatic, `0` = never, `1` = always
-**Description:** Whether display sleep powers the screen panel down or just turns its backlight off. Automatic powers the panel down only when the screen has no brightness control; on every other screen, sleep turns the backlight off. Set `1` if your screen goes black at sleep but the backlight stays lit. Set `0` if at sleep your screen flashes colours, glows at the edges, or does not come back on when you wake it. Takes effect after a restart. See [Troubleshooting](TROUBLESHOOTING.md#screen-goes-dark-at-sleep-but-the-backlight-stays-on).
+**Description:** Whether display sleep powers the screen panel down or just turns its backlight off. Automatic powers the panel down only when the screen has no brightness control; on every other screen, sleep turns the backlight off. Set `1` if your screen goes black at sleep but the backlight stays lit. Set `0` if at sleep your screen flashes colors, glows at the edges, or does not come back on when you wake it. Takes effect after a restart. See [Troubleshooting](TROUBLESHOOTING.md#screen-goes-dark-at-sleep-but-the-backlight-stays-on).
 
 ### `screensaver_type`
-**Type:** integer
-**Default:** `1`
-**Values:** `0` = Off, `1` = Flying Toasters, `2` = Starfield, `3` = 3D Pipes, `4` = Bouncing Printer, `5` = Fireworks
-**Description:** Which screensaver plays when the screen has been idle. Choose it in **Settings > Display**. It starts at the `dim_sec` mark, alongside dimming, and stops when `sleep_sec` takes the display down. On a panel with no backlight control the screensaver is the only idle indication you get. A fresh install selects Flying Toasters on every device that has screensavers. Each screensaver checks its own cost on your device and lowers its frame rate or detail, or shows a plain black screen, if it would slow the printer (see `screensaver_levels`).
+**Type:** string
+**Default:** `"flipclock"`
+**Values:** `"off"`, `"toasters"` (Flying Toasters), `"starfield"`, `"pipes"` (3D Pipes), `"bounce"` (Bouncing Printer), `"fireworks"`, `"logo"` (Bouncing Logo), `"maze"` (3D Maze), `"hyperspace"`, `"flipclock"` (Flip Clock), `"fireflies"`, `"aqua"` (Aqua Surface), `"highfly"` (High Fly), `"random"` (a different screensaver each time)
+**Description:** Which screensaver plays when the screen has been idle. Choose it in **Settings > Display**. It starts at the `dim_sec` mark, alongside dimming, and stops when `sleep_sec` takes the display down. On a panel with no backlight control the screensaver is the only idle indication you get. A fresh install selects the Flip Clock on every device that has screensavers. Names are not case-sensitive. Older versions stored a number here (`0` = Off through `9` = Flip Clock, in the order above); a number is still read as the screensaver it stood for and is rewritten as its name on the next update. A value that names no screensaver reads as the default. Each screensaver checks its own cost on your device and lowers its frame rate or detail if it would slow the printer. One that is still too heavy is left out of the list, and another plays in its place (see `screensaver_levels`). Your choice stays saved here either way.
 
 ### `screensaver_levels`
 **Type:** object
 **Default:** absent
-**Description:** Written by HelixScreen; do not edit it. Each screensaver measures how much processor time it uses while it plays. If it would slow the printer, it lowers its frame rate or detail, and if even its lowest setting is too much it shows a plain black screen instead. The result is kept here for each screensaver, with the HelixScreen version and a description of the screen hardware, and is measured again after an update or on different hardware. Delete this entry to have every screensaver measured again.
+**Description:** Written by HelixScreen; do not edit it. Each screensaver measures how much processor time it uses while it plays. If it would slow the printer, it lowers its frame rate or detail, and steps back up once it has run comfortably for a while. If even its lowest setting is too much another screensaver plays in its place, or a plain black screen when none fits. The result is kept here for each screensaver, with the HelixScreen version and a description of the screen hardware, and is measured again after an update or on different hardware. Delete this entry to have every screensaver measured again.
 
 ### `drm_device`
 **Type:** string
@@ -545,7 +563,12 @@ The mode can be overridden per launch without touching settings. Precedence is c
 ### `speed_flow_physical_units`
 **Type:** boolean
 **Default:** `false`
-**Description:** Show speed and flow as the live toolhead speed in mm/s and the live volumetric flow in mm³/s instead of percentages, on the Print Status screen and as the leading value in the Print Tune overlay. Tapping the Speed / Flow line on Print Status, or either readout in the Tune overlay, flips it. See [Print Tune Overlay](guide/printing.md#print-tune-overlay).
+**Description:** Lead with the live toolhead speed in mm/s and the live volumetric flow in mm³/s instead of percentages, in the Print Tune overlay and the Speed / Flow home widget. Tapping either readout in the Tune overlay flips it. The Print Status speed chip always shows the live speed and flow. See [Print Tune Overlay](guide/printing.md#print-tune-overlay).
+
+### `print_status_show_camera`
+**Type:** boolean
+**Default:** `false`
+**Description:** Show the live camera in the Print Status preview card instead of the thumbnail or G-code render. The camera button in the card's corner flips it, and the choice carries over to the next print. The button appears only when the printer has a webcam and HelixScreen runs on a different machine than Klipper; on the printer's own screen the card always shows the preview. See [Camera](guide/camera.md).
 
 ### `ui_scale_percent`
 > Added in 1.1.
@@ -645,7 +668,7 @@ Located in the `input` section:
 **Type:** integer
 **Default:** `10`
 **Range:** `1` - `20` (UI-clamped)
-**Description:** Pixels of finger movement required before a gesture is treated as a scroll instead of a tap. Below this threshold LVGL still thinks you're pressing a widget, and releasing will fire a click. Above it, the press is cancelled and scroll engages.
+**Description:** Pixels of finger movement required before a gesture is treated as a scroll instead of a tap. Below this threshold LVGL still thinks you're pressing a widget, and releasing will fire a click. Above it, the press is canceled and scroll engages.
 
 - **Lower** = scroll engages sooner. Fixes phantom clicks that fire when scrolling a list with a short, slow swipe.
 - **Higher** = more deliberate gesture required. Reduces accidental scrolls when you meant to tap, but makes short-travel scrolls feel unresponsive.
@@ -711,7 +734,8 @@ Located in the `motion` section. These back the jog pad; set them from the scree
     "coarse_outer": 10.0,
     "turbo_inner": 10.0,
     "turbo_outer": 50.0,
-    "show_actual_position": false
+    "show_actual_position": false,
+    "layout": 0
   }
 }
 ```
@@ -732,6 +756,12 @@ Located in the `motion` section. These back the jog pad; set them from the scree
 **Type:** number
 **Range:** `0.01` - `200`
 **Description:** Distance in mm moved per tap, for each jog mode's inner and outer ring. Defaults: Fine 0.1/1, Coarse 1/10, Turbo 10/50. The ring labels on the jog pad show whatever you set.
+
+### `layout`
+**Type:** integer
+**Default:** `0`
+**Range:** `0` - `3`
+**Description:** The Motion screen's Jog-tab layout: `0` the jog pad, `1` Arrows, `2` Arrows + Home, `3` Axis Rows. Set from Settings > Printing > Motion > Layout.
 
 ### `show_actual_position`
 **Type:** boolean
@@ -890,6 +920,14 @@ Located in the `printer` section:
 **Values:** `0` = 0.05 mm, `1` = 0.025 mm, `2` = 0.01 mm, `3` = 0.005 mm
 **Description:** The Z-offset step size the print Tune overlay's nudge buttons use, remembered between prints. Picking a size on the overlay writes this; there is nothing to gain from editing it by hand.
 
+### `z_offset.save_mode`
+> Added in 1.1.
+
+**Type:** integer
+**Default:** `0`
+**Values:** `0` = Auto, `1` = Show, `2` = Hide
+**Description:** Whether HelixScreen offers to save Z-offset changes to the printer config. Hide removes every Save Z-Offset button (header, Controls, home widget) and the save step of Z-offset calibration; baby-stepping still works for the current session. Auto hides them on printers where each tool keeps its own Z offset (toolchangers) and shows them everywhere else. Set it from **Settings > Motion > Save Z-Offset Buttons**.
+
 ---
 
 ## LED Settings
@@ -914,7 +952,7 @@ Located in the `printer.leds` section. Startup and Automatic LED Control are con
 ### `leds.led_on_at_start`
 **Type:** boolean
 **Default:** `false`
-**Description:** Automatically turn on your lights when Klipper becomes ready — every light your Home Panel Light buttons control, or the chamber light if you haven't placed one. A WLED strip gets up to 5 seconds to answer before HelixScreen falls back to the chamber light. A copy of this key under `output` is also honoured if you have one; `printer.leds` is where HelixScreen writes it.
+**Description:** Automatically turn on your lights when Klipper becomes ready — every light your Home Panel Light buttons control, or the chamber light if you haven't placed one. A WLED strip gets up to 5 seconds to answer before HelixScreen falls back to the chamber light. A copy of this key under `output` is also honored if you have one; `printer.leds` is where HelixScreen writes it.
 
 ### `leds.startup_brightness`
 **Type:** integer
@@ -1073,7 +1111,7 @@ Connection settings are in the `printer` section:
 ### `moonraker_api_key`
 **Type:** string or false
 **Default:** `false`
-**Description:** API key if Moonraker authentication is enabled. Set to `false` if no authentication.
+**Description:** The printer's Moonraker API key, needed when Moonraker has `force_logins` enabled. HelixScreen sends it only to this printer's `moonraker_host` and `moonraker_port`. Set to `false` when Moonraker trusts the screen without one. A wrong key is worse than none, because Moonraker refuses it even from a trusted address. [How to get the key](TROUBLESHOOTING.md#unauthorized-everywhere-moonraker-requires-a-login).
 
 ### `moonraker_connection_timeout_ms`
 **Type:** integer
@@ -1231,8 +1269,8 @@ Located in the `ams` section:
 **Default:** `"3d"`
 **Values:** `"3d"`, `"flat"`
 **Description:** Filament spool visualization style:
-- `3d` - Bambu-style pseudo-3D canvas with gradients
-- `flat` - Simple concentric rings
+- `3d` - Spools drawn from the side, in 3D
+- `flat` - Spools drawn face-on, with the filament showing through the spool's vents
 
 ### Per-printer AMS settings
 
@@ -1246,14 +1284,15 @@ The remaining AMS settings are **per printer**, so they live under the printer's
         "force_bypass_controls": false,
         "always_show_bypass_spool": false,
         "keep_spool_info_on_eject": true,
-        "afc_unload_after_print": false
+        "tag_links_spoolman": true,
+        "unload_after_print": false
       }
     }
   }
 }
 ```
 
-All four have UI equivalents in **Settings > Devices > Multi-Filament System Management** - edit them there rather than by hand.
+All four have UI equivalents in **Settings > Printing > Multi-Filament System Management** - edit them there rather than by hand.
 
 #### `force_bypass_controls`
 **Type:** boolean
@@ -1274,10 +1313,15 @@ See [Filament → When Bypass Doesn't Appear](guide/filament.md#when-bypass-does
 **Default:** `true`
 **Description:** Keep a lane's spool details after it empties, so reloading the same spool after maintenance needs no re-selection. Turn it off to start fresh whenever a lane empties. Applies only to spools selected in HelixScreen; a spool assigned elsewhere (such as Mainsail) clears with the lane. To have every assigned spool remembered no matter where it was picked, use the firmware's own retention instead (AFC: `remember_spool` in AFC.cfg) - HelixScreen follows the spool the firmware reports. When that firmware retention covers every lane, it takes precedence and the matching toggle shows as disabled. The toggle (**Keep Spool Info on Eject**, in the AMS Management overlay) is shown only on systems whose firmware tracks spool ids per lane (AFC, Happy Hare); systems that detect spool swaps by tag always refresh on a swap regardless of this setting.
 
-#### `afc_unload_after_print`
+#### `tag_links_spoolman`
+**Type:** boolean
+**Default:** `true`
+**Description:** When a spool whose tag names a Spoolman spool is put in a slot, link the slot to that spool, the same as picking it by hand. A spool you pick while the same tag stays seated is kept until a spool is put in again. The toggle (**Link Spools from Tags**, in the AMS Management overlay) is shown only on systems whose tags can carry a Spoolman spool number (Creality CFS) when Spoolman is set up.
+
+#### `unload_after_print`
 **Type:** boolean
 **Default:** `false`
-**Description:** On AFC systems, retract filament back to its lane when a print finishes.
+**Description:** On AFC systems, whether your end-of-print macros unload the toolhead when a print finishes, so an empty toolhead at the next print start is expected rather than a warning. Set it with **Unload at end** in the **Print Behavior** section. Older configs stored it as `afc_unload_after_print`, which is moved to this name on upgrade.
 
 ---
 
@@ -1376,6 +1420,10 @@ For what each widget does and how big it can get, see the [Home Panel guide](gui
 | `print_status` | Print Status | Yes | No |
 | `control_buttons` | Print Controls | No | No |
 | `print_stats` | Print Stats | No | No |
+| `display_message` | Printer Message | No | No |
+| `speed_flow` | Speed / Flow | No | No |
+| `z_offset` | Z-Offset | No | No |
+| `exclude_map` | Exclude Objects | No | Klipper `[exclude_object]` |
 | `job_queue` | Job Queue | No | No |
 | `camera` | Camera | No | Webcam configured |
 | `temperature` | Nozzle Temperature | Yes | No |
@@ -1392,19 +1440,24 @@ For what each widget does and how big it can get, see the [Home Panel guide](gui
 | `active_spool` | Active Spool | No | No |
 | `filament` | Filament Sensor | Yes | Filament sensor |
 | `humidity` | Humidity | No | Humidity sensor |
+| `dryer` | Filament Dryer | No | Filament dryer |
 | `width_sensor` | Width Sensor | No | Width sensor |
 | `clog_detection` | Clog Detection | No | Clog detection hardware |
 | `favorite_macro` | Macro Button | No | No |
 | `macros` | Macros | No | No |
 | `gcode_console` | G-code Console | No | No |
 | `motion` | Motion | No | No |
+| `toolhead` | Toolhead | No | No |
+| `bed_mesh_tile` | Bed Mesh | No | Bed mesh support |
 | `tool_switcher` | Tool Switcher | No | No |
 | `power_device` | Power | No | Moonraker power device |
 | `led` | LED Light | Yes | LEDs configured |
 | `led_controls` | LED Controls | No | LEDs configured |
 | `network` | Network | No | No |
+| `host_health` | Host Health | No | Performance readings |
 | `notifications` | Notifications | Yes | No |
 | `clock` | Digital Clock | No | No |
+| `maintenance` | Maintenance | No | No |
 | `tips` | Tips | Yes | No |
 | `shutdown` | Shutdown/Reboot | No | No |
 | `firmware_restart` | Firmware Restart | No | No |
@@ -1416,7 +1469,7 @@ For what each widget does and how big it can get, see the [Home Panel guide](gui
 - Widget grid positions (`col`, `row`, `colspan`, `rowspan`) determine where each widget appears on its page, in half cells
 - Hardware-gated widgets are hidden on the Home Panel if their hardware isn't detected, even when enabled
 - New widgets are appended automatically with their default enabled state
-- Widget IDs that HelixScreen doesn't recognise are ignored
+- Widget IDs that HelixScreen doesn't recognize are ignored
 - Up to 8 pages are supported
 
 This is best configured via **Edit Mode** on the Home Panel (long-press the widget grid) rather than editing the JSON directly. See the [Home Panel guide](guide/home-panel.md) for details on adding pages and arranging widgets.
@@ -1488,7 +1541,8 @@ Located in the `safety` section:
   "safety": {
     "estop_require_confirmation": true,
     "cancel_escalation_enabled": false,
-    "cancel_escalation_timeout_seconds": 30
+    "cancel_escalation_timeout_seconds": 30,
+    "tool_change_require_confirmation": true
   }
 }
 ```
@@ -1508,6 +1562,12 @@ Located in the `safety` section:
 **Default:** `30`
 **Options:** `15`, `30`, `60`, `120`
 **Description:** How long to wait (in seconds) after sending a cancel before escalating to emergency stop. Only applies when `cancel_escalation_enabled` is `true`.
+
+### `tool_change_require_confirmation`
+**Type:** boolean
+**Default:** `true`
+**UI:** Settings > Printing > **Confirm tool changes** (shown only on printers with more than one tool)
+**Description:** Ask before switching to another tool from the home screen's tool switcher, a toolhead on the filament system's screen, or the Filament screen's tool list on printers where that list switches tools (on a filament system that feeds a single toolhead it only chooses which tool the buttons act on). When `false`, those taps switch straight away. A tool change during a paused print always asks, whatever this says.
 
 ---
 
@@ -1628,6 +1688,37 @@ Located in the `security` section. Controls the optional PIN lock screen:
 **Type:** boolean
 **Default:** `false`
 **Description:** When `true`, the screen automatically locks whenever the display sleeps and wakes, requiring your PIN to get back in. Has no effect unless `pin_hash` is set (with no PIN there is nothing to lock). Toggle via **Settings > System > Security**.
+
+---
+
+## Screen Sharing Settings
+
+Set in **Settings > Connection**; see [Screen Sharing and Remote Control](guide/screen-sharing.md). Hidden on printers whose firmware shares the screen itself.
+
+```json
+"remote_screen": {
+  "enabled": false,
+  "control": false,
+  "port": 7130
+}
+```
+
+### `remote_screen.enabled`
+**Type:** boolean
+**Default:** `false`
+**Description:** Share the screen as the **HelixScreen Screen** webcam in Mainsail and Fluidd.
+
+### `remote_screen.control`
+**Type:** boolean
+**Default:** `false`
+**Description:** Let a browser tap and drag on the screen. Only takes effect while `enabled` is on.
+
+### `remote_screen.port`
+**Type:** integer
+**Default:** `7130`
+**Description:** The port the screen is served on. Not shown in the UI. Change it only if something else on the printer already uses 7130. Where the installer set the screen up behind nginx, nginx expects 7130.
+
+`remote_screen.pair_secret` and `remote_screen.paired_tokens` hold the pairing code and the paired browsers on printers with nothing in front of Moonraker. Manage them from the screen (**Forget Paired Browsers**) rather than by hand.
 
 ---
 
@@ -1922,6 +2013,9 @@ Every successful config save maintains rolling backups in two locations:
 - `/var/lib/helixscreen/settings.json.backup` (primary — survives app reinstalls)
 - `~/.helixscreen/settings.json.backup` (fallback)
 
+The Android app keeps both copies in its own storage instead, where an app update leaves
+them alone.
+
 If `settings.json` is missing at startup (e.g., after a Moonraker update wipe),
 HelixScreen automatically restores from the most recent backup.
 
@@ -2104,6 +2198,7 @@ Environment="HELIX_TOUCH_DEVICE=/dev/input/event0"
     "bed_mesh_show_zero_plane": true,
     "page_scroll_buttons": false,
     "speed_flow_physical_units": false,
+    "print_status_show_camera": false,
     "printer_image": ""
   },
 

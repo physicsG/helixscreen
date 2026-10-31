@@ -79,7 +79,7 @@ using helix::ui::temperature::deci_to_degrees_f;
 // Shared color palette
 // ============================================================================
 
-const lv_color_t TEMP_GRAPH_SERIES_COLORS[TEMP_GRAPH_PALETTE_SIZE] = {
+const lv_color_t kTempGraphSeriesColors[kTempGraphPaletteSize] = {
     lv_color_hex(0xFF4444), // Nozzle (red)
     lv_color_hex(0x88C0D0), // Bed (cyan / nord8)
     lv_color_hex(0xA3BE8C), // Chamber (green / nord14)
@@ -92,8 +92,8 @@ const lv_color_t TEMP_GRAPH_SERIES_COLORS[TEMP_GRAPH_PALETTE_SIZE] = {
 
 uint32_t temp_graph_series_hex(int index) {
     const int slot =
-        ((index % TEMP_GRAPH_PALETTE_SIZE) + TEMP_GRAPH_PALETTE_SIZE) % TEMP_GRAPH_PALETTE_SIZE;
-    const lv_color_t c = TEMP_GRAPH_SERIES_COLORS[slot];
+        ((index % kTempGraphPaletteSize) + kTempGraphPaletteSize) % kTempGraphPaletteSize;
+    const lv_color_t c = kTempGraphSeriesColors[slot];
     return (static_cast<uint32_t>(c.red) << 16) | (static_cast<uint32_t>(c.green) << 8) |
            static_cast<uint32_t>(c.blue);
 }
@@ -153,11 +153,9 @@ void TempGraphController::detach() {
     // would come up with the suppression still latched and never sample again.
     suppress_attach_fire_ = false;
 
+    // The invalidate above drops this controller's deferred work, and resetting
+    // each observer drops its queued callbacks.
     {
-        auto freeze =
-            helix::ui::UpdateQueue::instance().scoped_freeze("TempGraphController::detach");
-        helix::ui::UpdateQueue::instance().drain();
-
         connection_observer_.reset();
         discovery_observer_.reset();
         sensor_discovery_observer_.reset();
@@ -525,7 +523,7 @@ void TempGraphController::setup_observers() {
 
         if (sensor_series > 0) {
             auto& sensor_mgr = sensors::TemperatureSensorManager::instance();
-            if (auto* sensor_count = sensor_mgr.get_sensor_count_subject()) {
+            if (auto* sensor_count = sensor_mgr.count_subject()) {
                 sensor_discovery_observer_ = observe<int>(
                     sensor_count, this,
                     [token = lifetime_.token(), gen = generation_](TempGraphController* self, int) {
@@ -533,7 +531,7 @@ void TempGraphController::setup_observers() {
                             return;
                         self->resolve_pending_series();
                     },
-                    sensor_mgr.get_subjects_lifetime());
+                    sensor_mgr.subjects_lifetime());
             }
         }
     }
@@ -651,8 +649,8 @@ bool TempGraphController::attach_series_observers(size_t i) {
                     // a spurious 0 never consumes the per-series sample slot and block
                     // the next real reading. Upper bound rejects obviously-bogus spikes
                     // (deci-degrees: 4000 = 400°C covers any nozzle).
-                    constexpr int MAX_VALID_TEMP_DECI = 4000;
-                    if (temp_deci <= 0 || temp_deci > MAX_VALID_TEMP_DECI) {
+                    constexpr int kMaxValidTempDeci = 4000;
+                    if (temp_deci <= 0 || temp_deci > kMaxValidTempDeci) {
                         si.latest_deci = 0;
                         return;
                     }

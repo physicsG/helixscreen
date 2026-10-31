@@ -1,5 +1,6 @@
 HelixScreen installer v1.0.0 (stable)
   Printer    x86 · systemd · user root
+  Mode       kiosk, takes over the screen (running as root)
   Install    v1.0.0 (stable) · local file, <size>
   Add        Moonraker update manager
 
@@ -11,7 +12,8 @@ HelixScreen installer v1.0.0 (stable)
       [WARN] Configuring the updater anyway. If Moonraker is older than v0.10.0,
       [WARN] use HelixScreen's built-in updater (Settings -> Updates) instead of
       [WARN] the Update button in Mainsail/Fluidd.
-      [WARN] Could not find a way to restart Moonraker - restart it manually for the configuration change to take effect.
+      [WARN] Moonraker did not report its print state, so this cannot check for a running print and did not restart it
+      [WARN] Restart Moonraker from Mainsail or Fluidd, or reboot the printer, for the change to take effect
 [5/6] Connected to Moonraker ... ok (update manager · config editable in Mainsail/Fluidd)
 [6/6] Started HelixScreen ... ok
 

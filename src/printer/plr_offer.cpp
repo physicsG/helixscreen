@@ -11,7 +11,8 @@ bool plr_should_offer(const PlrOfferSignals& s) {
     // separate printer-type/AMS-backend gate is required; that gate was
     // redundant on stock U1s and wrong for an AFC-modded U1 (bundle UDZJQVQZ)
     // whose AMS backend is not the Snapmaker one.
-    return s.recovery_available && s.printer_idle && !s.already_prompted && !s.wizard_active;
+    return s.recovery_available && s.printer_idle && !s.already_prompted && !s.wizard_active &&
+           !s.resume_in_progress;
 }
 
 bool plr_should_rearm(int prev_conn_state, int new_conn_state) {

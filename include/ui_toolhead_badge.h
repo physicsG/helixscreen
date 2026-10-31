@@ -48,13 +48,13 @@ enum class BadgeCorner : uint8_t { UpperLeft, LowerRight };
 /// The corner every toolhead badge takes. The filament tube enters a glyph at
 /// its top center, and an upper-left badge reaches across that column on the
 /// narrower styles.
-inline constexpr BadgeCorner TOOLHEAD_BADGE_CORNER = BadgeCorner::LowerRight;
+inline constexpr BadgeCorner kToolheadBadgeCorner = BadgeCorner::LowerRight;
 
 /// The badge rect overhanging @p corner of the glyph: a third of its width and
 /// half its height over the glyph, kept @p inset clear of the glyph's center
 /// column.
 lv_area_t toolhead_badge_rect(const GlyphBounds& glyph, int32_t width, int32_t height,
-                              int32_t inset, BadgeCorner corner = TOOLHEAD_BADGE_CORNER);
+                              int32_t inset, BadgeCorner corner = kToolheadBadgeCorner);
 
 /// True when @p badge stays off the tube column entering the glyph: x within
 /// @p tube_half of @p cx, from the top of the canvas down to @p tube_end_y.

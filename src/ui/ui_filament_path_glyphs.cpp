@@ -78,7 +78,7 @@ int32_t draw_hub_box(const RenderCtx& ctx, int32_t cx, int32_t cy, int32_t width
     // menu. The box grows, about its center, until the centered label and the
     // gear both fit inside.
     const lv_font_t* icon_font = interactive ? theme_manager_get_font("icon_font_sm") : nullptr;
-    constexpr int32_t GEAR_PAD = 2;
+    constexpr int32_t kGearPad = 2;
     int32_t gear_w = 0;
     int32_t gear_h = 0;
     if (icon_font) {
@@ -92,7 +92,7 @@ int32_t draw_hub_box(const RenderCtx& ctx, int32_t cx, int32_t cy, int32_t width
             lv_text_get_size(&lbl_sz, label, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
             label_w = lbl_sz.x;
         }
-        width = LV_MAX(width, label_w + 2 * (gear_w + 2 * GEAR_PAD));
+        width = LV_MAX(width, label_w + 2 * (gear_w + 2 * kGearPad));
     }
 
     // Background
@@ -135,7 +135,7 @@ int32_t draw_hub_box(const RenderCtx& ctx, int32_t cx, int32_t cy, int32_t width
         gear_dsc.opa = LV_OPA_COVER;
         gear_dsc.text = ICON_SETTINGS;
         gear_dsc.align = LV_TEXT_ALIGN_RIGHT;
-        lv_area_t gear_area = {box_area.x1, cy - gear_h / 2, box_area.x2 - GEAR_PAD,
+        lv_area_t gear_area = {box_area.x1, cy - gear_h / 2, box_area.x2 - kGearPad,
                                cy + gear_h / 2};
         lv_draw_label(layer, &gear_dsc, &gear_area);
     }
@@ -305,7 +305,7 @@ void draw_heat_glow(lv_layer_t* layer, int32_t cx, int32_t cy, int32_t radius, l
 // Flow particles
 // ============================================================================
 // Small bright dots flowing along an active tube segment to indicate filament
-// motion during load/unload. Dots are spaced at FLOW_DOT_SPACING and offset by
+// motion during load/unload. Dots are spaced at kFlowDotSpacing and offset by
 // flow_offset for animation.
 
 // Draw flow dots along a straight line segment
@@ -322,14 +322,14 @@ void draw_flow_dots_line(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, 
     lv_draw_arc_dsc_init(&arc_dsc);
     arc_dsc.start_angle = 0;
     arc_dsc.end_angle = 360;
-    arc_dsc.radius = static_cast<uint16_t>(FLOW_DOT_RADIUS);
-    arc_dsc.width = static_cast<uint16_t>(FLOW_DOT_RADIUS * 2);
+    arc_dsc.radius = static_cast<uint16_t>(kFlowDotRadius);
+    arc_dsc.width = static_cast<uint16_t>(kFlowDotRadius * 2);
     arc_dsc.color = dot_color;
-    arc_dsc.opa = FLOW_DOT_OPA;
+    arc_dsc.opa = kFlowDotOpa;
 
-    // Place dots along the line at FLOW_DOT_SPACING intervals
-    int32_t offset = reverse ? (FLOW_DOT_SPACING - flow_offset) : flow_offset;
-    for (float d = (float)offset; d < len; d += FLOW_DOT_SPACING) {
+    // Place dots along the line at kFlowDotSpacing intervals
+    int32_t offset = reverse ? (kFlowDotSpacing - flow_offset) : flow_offset;
+    for (float d = (float)offset; d < len; d += kFlowDotSpacing) {
         float t = d / len;
         arc_dsc.center.x = x1 + (int32_t)(dx * t);
         arc_dsc.center.y = y1 + (int32_t)(dy * t);
@@ -338,7 +338,7 @@ void draw_flow_dots_line(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, 
 }
 
 // Draw flow dots along an entire FilamentPath as a continuous stream.
-// Dots are placed at FLOW_DOT_SPACING intervals along the total path length,
+// Dots are placed at kFlowDotSpacing intervals along the total path length,
 // with flow_offset providing animation. When reverse=true (unloading), dots
 // flow from nozzle toward entry.
 void draw_flow_dots_path(lv_layer_t* layer, const pg::FilamentPath& path, lv_color_t color,
@@ -352,13 +352,13 @@ void draw_flow_dots_path(lv_layer_t* layer, const pg::FilamentPath& path, lv_col
     lv_draw_arc_dsc_init(&arc_dsc);
     arc_dsc.start_angle = 0;
     arc_dsc.end_angle = 360;
-    arc_dsc.radius = static_cast<uint16_t>(FLOW_DOT_RADIUS);
-    arc_dsc.width = static_cast<uint16_t>(FLOW_DOT_RADIUS * 2);
+    arc_dsc.radius = static_cast<uint16_t>(kFlowDotRadius);
+    arc_dsc.width = static_cast<uint16_t>(kFlowDotRadius * 2);
     arc_dsc.color = dot_color;
-    arc_dsc.opa = FLOW_DOT_OPA;
+    arc_dsc.opa = kFlowDotOpa;
 
     float start_offset = (float)flow_offset;
-    for (float d = start_offset; d < total; d += FLOW_DOT_SPACING) {
+    for (float d = start_offset; d < total; d += kFlowDotSpacing) {
         float pos = reverse ? (total - d) : d;
         pg::PathPoint pt = pg::path_point_at(path, pos);
         arc_dsc.center.x = (int32_t)lroundf(pt.x);

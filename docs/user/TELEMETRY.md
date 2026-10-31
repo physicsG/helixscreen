@@ -17,19 +17,34 @@ HelixScreen includes an optional, anonymous telemetry system that helps us under
 
 When telemetry is enabled, HelixScreen collects the following types of events:
 
+### Fields on every event
+
+Every event starts with the same few fields, so we can tell which release, platform and board it came from:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `schema_version` | Format version of the event | `3` |
+| `event` | Event type identifier | `"session"` |
+| `device_id` | Anonymized device identifier (see below) | `"a3f8c1..."` (64-char hex) |
+| `timestamp` | ISO 8601 UTC timestamp | `"2026-02-08T14:30:00Z"` |
+| `app_version` | HelixScreen version that sent it | `"1.1.0"` |
+| `app_platform` | Hardware platform | `"pi"`, `"mips"` |
+| `app_board` | Printer board, where HelixScreen can tell | `"ad5x"` |
+| `boot_id` | Random ID for this run of HelixScreen | `"9f2c41d07ab3e855"` |
+
+`boot_id` is 16 random characters generated each time HelixScreen starts. It is never saved on your device, so it cannot be traced across restarts or back to you. It only lets us tell two reports from the same run apart from reports of different runs.
+
+The tables below list each event's own fields; these shared fields are not repeated.
+
 ### Session Events
 
 Recorded once per application launch. Helps us understand the hardware landscape.
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| `schema_version` | Event schema version | `2` |
-| `event` | Event type identifier | `"session"` |
-| `device_id` | Anonymized device identifier (see below) | `"a3f8c1..."` (64-char hex) |
-| `timestamp` | ISO 8601 UTC timestamp | `"2026-02-08T14:30:00Z"` |
-| `app.version` | HelixScreen version | `"0.99.111"` |
-| `app.platform` | Hardware platform | `"rpi4"`, `"rpi5"`, `"x86_64"` |
 | `app.display` | Display resolution | `"800x480"` |
+| `app.locale` | Language setting | `"en"` |
+| `printer.detected_model` | Auto-detected printer model | `"Voron 2.4"` |
 
 ### Print Outcome Events
 
@@ -37,10 +52,6 @@ Recorded when a print finishes (success, failure, or cancellation). Helps us tra
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| `schema_version` | Event schema version | `2` |
-| `event` | Event type identifier | `"print_outcome"` |
-| `device_id` | Anonymized device identifier | `"a3f8c1..."` (64-char hex) |
-| `timestamp` | ISO 8601 UTC timestamp | `"2026-02-08T16:45:00Z"` |
 | `outcome` | Print result | `"success"`, `"failure"`, `"cancelled"` |
 | `duration_sec` | Total print duration in seconds | `3600` |
 | `phases_completed` | Print start phases completed (0-10) | `10` |
@@ -55,13 +66,8 @@ Recorded automatically when HelixScreen crashes. Picked up on the next startup. 
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| `schema_version` | Event schema version | `2` |
-| `event` | Event type identifier | `"crash"` |
-| `device_id` | Anonymized device identifier | `"a3f8c1..."` (64-char hex) |
-| `timestamp` | ISO 8601 UTC timestamp | `"2026-02-08T12:00:00Z"` |
 | `signal` | POSIX signal number | `11` |
 | `signal_name` | Signal name | `"SIGSEGV"`, `"SIGABRT"`, `"SIGBUS"`, `"SIGFPE"` |
-| `app_version` | HelixScreen version at time of crash | `"0.99.111"` |
 | `uptime_sec` | Seconds since application started | `3600` |
 | `backtrace` | Stack frame addresses (hex) | `["0x0040abcd", "0x0040ef01"]` |
 
@@ -111,16 +117,45 @@ Recorded once per session. Helps us understand user preferences so we can choose
 | `brightness_pct` | Display brightness | `80` |
 | `locale` | Language setting | `"en"` |
 | `animations_enabled` | Whether animations are on | `true` |
+| `spoolman_configured` | Whether a Spoolman server is connected | `true` |
+| `theme_changed` | Whether you picked a theme other than the default | `false` |
+| `multi_printer` | Whether more than one printer is set up | `false` |
+| `screensaver_type` | The screensaver you picked, or `off` | `"maze"` |
+
+`spoolman_configured`, `theme_changed` and `multi_printer` are yes/no answers only. They tell us how many people use these features without needing a screen visit to prove it.
 
 ### Panel Usage
 
-Recorded every 4 hours and when HelixScreen closes. Shows which screens are used most so we can focus improvement efforts. No specific actions or content are tracked. Periodic snapshots ensure data isn't lost if the application crashes.
+Recorded every 4 hours and when HelixScreen closes. Shows which screens are used most so we can focus improvement efforts. No specific actions or content are tracked.
+
+Each report covers only the time since the previous one, not a running total, so a report never repeats activity we already received. If HelixScreen is interrupted (a power cut, for instance), the activity that had not been sent yet is saved on your device and sent the next time it starts.
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| `session_duration_sec` | Total time HelixScreen was open | `14400` |
-| `panel_time_sec` | Time spent on each panel (seconds) | `{"home": 8000, "controls": 3200}` |
+| `snapshot_seq` | Report number within this run, starting at 0 | `3` |
+| `session_duration_sec` | Length of the period this report covers | `14400` |
+| `panel_time_sec` | Time spent on each panel in that period (seconds) | `{"home": 8000, "controls": 3200}` |
 | `panel_visits` | Visit count per panel | `{"home": 42, "controls": 18}` |
+| `overlay_visits` | How many times each pop-up screen was opened | `{"settings_sound_overlay": 2}` |
+| `widget_interactions` | How many times each home-screen widget was tapped | `{"temperature": 5}` |
+
+Only screen and widget names are recorded, never what you did on them.
+
+### Screensaver Usage
+
+Recorded every 4 hours and when HelixScreen closes, only for a period in which a screensaver ran. Tells us which screensavers people keep, and which ones are too heavy for their printer so we can make them lighter. Like Panel Usage, each report covers only the time since the previous one. A preview from the Test button in Display settings is not counted.
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `snapshot_seq` | Report number within this run, starting at 0 | `3` |
+| `saver_shown_sec` | How long each screensaver was on screen in that period (seconds) | `{"maze": 5400}` |
+| `saver_starts` | How many times each one started | `{"maze": 3}` |
+| `saver_woke_by_touch` | How many times a touch ended it | `{"maze": 2}` |
+| `saver_stopped_other` | How many times something else ended it: the screen going to sleep, a print finishing, a switch to another screensaver | `{"maze": 1}` |
+| `saver_too_heavy` | How many times it was too heavy for your printer even at its lightest setting, so another one took over | `{"maze": 0}` |
+| `saver_settled_levels` | How many runs ended at each setting, as name and level: 0 is the full effect, higher numbers are lighter | `{"maze:1": 3}` |
+
+When every screensaver is too heavy for your printer, a plain black screen shows instead and is counted as `black_screen`.
 
 ### Performance Snapshots
 
@@ -132,20 +167,14 @@ Recorded every hour, and once more when HelixScreen closes. Measures UI responsi
 | `frame_time_p95_ms` | 95th percentile frame time (ms) | `16` |
 | `frame_time_p99_ms` | 99th percentile frame time (ms) | `28` |
 | `dropped_frame_count` | Frames slower than 33ms | `42` |
-| `total_frame_count` | Total frames rendered | `432000` |
+| `total_frame_count` | Frames sampled in the same window as the dropped count | `1024` |
 | `worst_panel` | Panel with highest frame times | `"temperature"` |
 
 No user content is included — just timing data about how smoothly the UI renders.
 
-### Feature Adoption
+### Feature Usage
 
-Recorded once per session (5 minutes after startup). Tells us which built-in features are actually used, so we know where to invest development effort.
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| `features` | Boolean flags for each feature | `{"macros": true, "camera": false, ...}` |
-
-Features tracked: macros, filament management, camera, console, bed mesh, input shaper, manual probe, spoolman, LED control, power devices, multi-printer, themes, timelapse, favorites, PID calibration, firmware retraction.
+There is no separate feature report. Which built-in features are used is worked out from the screens and widgets listed in Panel Usage (a feature counts as used on a device when its screen was opened or its widget tapped during a reporting period), plus the three yes/no answers in the Settings Snapshot.
 
 ### Settings Changes
 
@@ -161,14 +190,19 @@ Only enumerated category values are recorded (e.g., theme names, brightness perc
 
 ### Connection Stability
 
-Recorded every 4 hours and when HelixScreen closes. Helps us understand connection reliability across different setups.
+Recorded every 4 hours and when HelixScreen closes. Helps us understand connection reliability across different setups. Like Panel Usage, each report covers only the time since the previous one.
 
 | Field | Description | Example |
 |-------|-------------|---------|
+| `snapshot_seq` | Report number within this run | `3` |
+| `session_duration_sec` | Length of the period this report covers | `14400` |
 | `connect_count` | Times connected to printer | `3` |
 | `disconnect_count` | Times disconnected | `2` |
-| `total_connected_sec` | Total connected time | `13800` |
+| `total_connected_sec` | Connected time | `13800` |
+| `total_disconnected_sec` | Disconnected time | `600` |
+| `longest_disconnect_sec` | Longest single outage (an outage that spans two reports is measured from its real start) | `420` |
 | `klippy_error_count` | Klippy error events | `1` |
+| `klippy_shutdown_count` | Klippy shutdowns | `0` |
 
 ### Print Start Context
 
@@ -285,8 +319,9 @@ This permanently removes all queued events from your device. Events that have al
 
 ### Local Queue
 - Events are stored locally in telemetry_queue.json in your config directory
-- Maximum **100 events** in the queue; oldest events are dropped when the limit is reached
+- Maximum **100 events** in the queue; when the limit is reached, a new usage or connection report is first combined with a report of the same kind already waiting, and otherwise the oldest other event is dropped to make room. Only if the queue holds nothing else that can be dropped is the new report discarded
 - Queue persists across application restarts
+- Activity that has been counted but not yet put in a report is saved to telemetry_snapshot.json in your config directory about once an hour and deleted when HelixScreen closes normally
 
 ### Transmission
 - Events are sent via **HTTPS POST** to `https://telemetry.helixscreen.org/v1/events`
@@ -309,7 +344,7 @@ Telemetry helps us make HelixScreen better in specific, measurable ways:
 - **Hardware census**: Understand what printers and features are in use to prioritize development
 - **UI engagement**: Know which features are actually used to focus improvement efforts
 - **UI performance**: Identify janky panels and frame drops across different hardware
-- **Feature adoption**: Understand which features users have never discovered
+- **Feature usage**: Understand which features users have never discovered
 - **Settings insight**: Learn which defaults work and which get changed immediately
 - **Connection reliability**: Identify and fix connectivity issues across different setups
 - **Error patterns**: Find and fix silent errors that users may never report
@@ -325,6 +360,6 @@ For developers and the technically curious:
 
 - **Implementation**: handled by the telemetry and crash-handling modules built into HelixScreen itself — no external agents, scripts, or third-party trackers are involved
 - **Crash handling**: written to keep working even while the app is crashing, so a crash is still captured and queued for sending
-- **Schema version**: `2` (all events include `schema_version` for forward compatibility)
-- **Local files**: telemetry_device.json (UUID + salt) and telemetry_queue.json (event queue) in the config directory; the enabled state is a setting in settings.json
+- **Schema version**: `3` (all events include `schema_version` for forward compatibility)
+- **Local files**: telemetry_device.json (UUID + salt), telemetry_queue.json (event queue) and telemetry_snapshot.json (usage not yet reported) in the config directory; the enabled state is a setting in settings.json
 - **Privacy policy**: [PRIVACY_POLICY.md](PRIVACY_POLICY.md)

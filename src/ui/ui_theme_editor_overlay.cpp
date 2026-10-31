@@ -14,6 +14,7 @@
 #include "ui_toast_manager.h"
 
 #include "border_radius_sizes.h"
+#include "color_utils.h"
 #include "display_settings_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "lvgl/src/others/translation/lv_translation.h"
@@ -51,6 +52,10 @@ void ThemeEditorOverlay::set_editing_dark_mode(bool is_dark) {
 // ============================================================================
 
 lv_obj_t* ThemeEditorOverlay::create(lv_obj_t* parent) {
+    // The swatches bind their colour subjects by name as the XML is built.
+    swatch_color_pool_.ensure_size(helix::ModePalette::color_names().size());
+    update_swatch_colors();
+
     // Create overlay root from XML (uses theme_editor_overlay component)
     overlay_root_ = helix::ui::create_xml_hidden(parent, "theme_editor_overlay");
     if (!overlay_root_) {
@@ -80,16 +85,6 @@ lv_obj_t* ThemeEditorOverlay::create(lv_obj_t* parent) {
         }
     }
 
-    // Find swatch widgets (swatch_0 through swatch_15)
-    lv_obj_t* swatch_list =
-        helix::ui::find_required(overlay_root_, "theme_swatch_list", get_name());
-    lv_obj_t* search_root = swatch_list ? swatch_list : overlay_root_;
-    for (size_t i = 0; i < swatch_objects_.size(); ++i) {
-        char swatch_name[16];
-        std::snprintf(swatch_name, sizeof(swatch_name), "swatch_%zu", i);
-        swatch_objects_[i] = lv_obj_find_by_name(search_root, swatch_name);
-    }
-
     spdlog::debug("[{}] Created overlay", get_name());
     return overlay_root_;
 }
@@ -99,14 +94,8 @@ void ThemeEditorOverlay::register_callbacks() {
         // Swatch click callback for color editing
         {"on_theme_swatch_clicked",
          [](lv_event_t* e) {
-             auto* target = lv_event_get_current_target_obj(e);
-             auto& overlay = get_theme_editor_overlay();
-             for (size_t i = 0; i < overlay.swatch_objects_.size(); ++i) {
-                 if (overlay.swatch_objects_[i] == target) {
-                     overlay.handle_swatch_click(static_cast<int>(i));
-                     break;
-                 }
-             }
+             get_theme_editor_overlay().handle_swatch_click(
+                 helix::ui::event_user_int(e).value_or(-1));
          }},
         // Unified slider callback for property adjustments; user_data names the property
         {"on_theme_property_changed",
@@ -181,8 +170,6 @@ void ThemeEditorOverlay::cleanup() {
         save_as_dialog_ = nullptr;
     }
 
-    // Clear swatch references (widgets will be destroyed by LVGL)
-    swatch_objects_.fill(nullptr);
     panel_ = nullptr;
 
     OverlayBase::cleanup();
@@ -202,7 +189,7 @@ void ThemeEditorOverlay::on_ui_destroyed() {
         Modal::hide(save_as_dialog_);
         save_as_dialog_ = nullptr;
     }
-    swatch_objects_.fill(nullptr);
+    swatch_color_pool_.reclaim();
     panel_ = nullptr;
 }
 
@@ -243,21 +230,15 @@ void ThemeEditorOverlay::load_theme(const std::string& filename) {
 // ============================================================================
 
 void ThemeEditorOverlay::update_swatch_colors() {
-    for (size_t i = 0; i < swatch_objects_.size(); ++i) {
-        if (!swatch_objects_[i]) {
-            continue;
-        }
-
+    for (size_t i = 0; i < swatch_color_pool_.size(); ++i) {
         // Get color from editing theme's active palette (dark or light based on mode)
         const std::string& color_hex = get_active_palette().at(i);
         if (color_hex.empty()) {
             continue;
         }
 
-        // Parse hex color and apply to swatch background
         lv_color_t color = theme_manager_parse_hex_color(color_hex.c_str());
-        lv_obj_set_style_bg_color(swatch_objects_[i], color, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(swatch_objects_[i], LV_OPA_COVER, LV_PART_MAIN);
+        swatch_color_pool_.set_color(i, lv_color_to_u32(color) & 0xFFFFFF);
 
         spdlog::trace("[{}] Set swatch {} to {}", get_name(), i, color_hex);
     }
@@ -549,7 +530,7 @@ void ThemeEditorOverlay::perform_reset_to_default() {
 // ============================================================================
 
 void ThemeEditorOverlay::handle_swatch_click(int palette_index) {
-    if (palette_index < 0 || palette_index >= static_cast<int>(swatch_objects_.size())) {
+    if (palette_index < 0 || palette_index >= static_cast<int>(swatch_color_pool_.size())) {
         spdlog::warn("[{}] handle_swatch_click: invalid index {}", get_name(), palette_index);
         return;
     }
@@ -570,16 +551,7 @@ void ThemeEditorOverlay::show_color_picker(int palette_index) {
 
     // Get current color hex from the active palette (dark or light based on mode)
     const std::string& current_hex = get_active_palette().at(palette_index);
-    uint32_t current_rgb = 0x808080; // Default gray if parsing fails
-
-    // Parse hex color (handle both "#RRGGBB" and "RRGGBB" formats)
-    if (!current_hex.empty()) {
-        const char* hex_ptr = current_hex.c_str();
-        if (hex_ptr[0] == '#') {
-            hex_ptr++;
-        }
-        current_rgb = static_cast<uint32_t>(std::strtoul(hex_ptr, nullptr, 16));
-    }
+    uint32_t current_rgb = helix::parse_hex_color(current_hex).value_or(0x808080);
 
     // Create color picker if not already created
     if (!color_picker_) {
@@ -607,12 +579,8 @@ void ThemeEditorOverlay::show_color_picker(int palette_index) {
         // Update the active palette color (dark or light based on mode)
         get_active_palette().at(editing_color_index_) = hex_buf;
 
-        // Update the swatch visual if it exists
-        if (editing_color_index_ < static_cast<int>(swatch_objects_.size()) &&
-            swatch_objects_[editing_color_index_]) {
-            lv_color_t lv_color = lv_color_hex(color_rgb);
-            lv_obj_set_style_bg_color(swatch_objects_[editing_color_index_], lv_color,
-                                      LV_PART_MAIN);
+        if (editing_color_index_ < static_cast<int>(swatch_color_pool_.size())) {
+            swatch_color_pool_.set_color(static_cast<size_t>(editing_color_index_), color_rgb);
         }
 
         // Mark dirty and preview
@@ -810,9 +778,9 @@ std::string ThemeEditorOverlay::sanitize_filename(const std::string& name) {
     }
 
     // Limit length
-    constexpr size_t MAX_FILENAME_LEN = 32;
-    if (result.size() > MAX_FILENAME_LEN) {
-        result.resize(MAX_FILENAME_LEN);
+    constexpr size_t kMaxFilenameLen = 32;
+    if (result.size() > kMaxFilenameLen) {
+        result.resize(kMaxFilenameLen);
         // Trim trailing underscore from truncation
         while (!result.empty() && result.back() == '_') {
             result.pop_back();

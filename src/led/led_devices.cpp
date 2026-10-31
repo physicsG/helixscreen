@@ -3,6 +3,7 @@
 #include "led/led_devices.h"
 
 #include "device_display_name.h"
+#include "i18n_plural.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "text_io.h"
 
@@ -16,8 +17,8 @@ namespace helix::led {
 
 namespace {
 
-constexpr const char* CHAMBER_LIGHT_NAMES[] = {"chamber_light", "chamber_LED", "case_light",
-                                               "caselight"};
+constexpr const char* kChamberLightNames[] = {"chamber_light", "chamber_LED", "case_light",
+                                              "caselight"};
 
 /// "neopixel chamber_light" -> "chamber_light"; an id without a prefix is its own name.
 std::string object_name(const std::string& id) {
@@ -42,7 +43,7 @@ bool contains(const std::vector<std::string>& v, const std::string& s) {
 
 std::string resolve_chamber_light(const std::vector<LedStripInfo>& devices,
                                   const std::string& fallback) {
-    for (const char* wanted : CHAMBER_LIGHT_NAMES) {
+    for (const char* wanted : kChamberLightNames) {
         const std::string want = light_name_key(wanted);
         for (const auto& d : devices) {
             if (d.backend != LedBackendType::NATIVE && d.backend != LedBackendType::OUTPUT_PIN) {
@@ -59,7 +60,7 @@ std::string resolve_chamber_light(const std::vector<LedStripInfo>& devices,
 std::vector<std::string> resolve_light_targets(const std::string& key,
                                                const std::vector<std::string>& switchable,
                                                const std::string& chamber) {
-    if (key == LIGHT_BUTTON_ALL) {
+    if (key == kLightButtonAll) {
         return switchable;
     }
     if (!key.empty() && contains(switchable, key)) {
@@ -113,16 +114,16 @@ SelectionMigration plan_selection_migration(const std::vector<std::string>& sele
         std::all_of(switchable.begin(), switchable.end(),
                     [&selected](const std::string& id) { return contains(selected, id); });
     if (every) {
-        m.light_button = LIGHT_BUTTON_ALL;
+        m.light_button = kLightButtonAll;
     }
     return m;
 }
 
 std::vector<uint32_t> migrate_color_presets(const std::vector<uint32_t>& saved) {
-    const std::vector<uint32_t> pre(std::begin(PRE_1_1_DEFAULT_COLOR_PRESETS),
-                                    std::end(PRE_1_1_DEFAULT_COLOR_PRESETS));
+    const std::vector<uint32_t> pre(std::begin(kPre11DefaultColorPresets),
+                                    std::end(kPre11DefaultColorPresets));
     if (saved.empty() || saved == pre) {
-        return {std::begin(DEFAULT_COLOR_PRESETS), std::end(DEFAULT_COLOR_PRESETS)};
+        return {std::begin(kDefaultColorPresets), std::end(kDefaultColorPresets)};
     }
     return saved;
 }
@@ -157,8 +158,9 @@ std::string macro_device_note(const LedMacroInfo& macro) {
         if (macro.presets.empty()) {
             return lv_tr("No presets configured");
         }
-        return fmt::format(fmt::runtime(lv_tr("{} preset{}")), macro.presets.size(),
-                           macro.presets.size() == 1 ? "" : "s");
+        return fmt::format(
+            fmt::runtime(ui::tr_plural("{} preset", "{} presets", macro.presets.size())),
+            macro.presets.size());
     }
     return {};
 }

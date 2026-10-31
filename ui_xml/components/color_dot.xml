@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- A colour that is only shown, never picked: a color_swatch with no ring,
+     no reach and no touch target of its own, whose clicks go to its row. Spool,
+     slot and tool colours in lists and rows. C++ that colours one by name calls
+     helix::ui::apply_swatch_color() on it, which paints its disc. -->
+<component>
+  <api>
+    <prop name="color_subject" type="string" default=""/>
+    <prop name="color" type="string" default=""/>
+    <prop name="colors_subject" type="string" default=""/>
+    <prop name="finish_subject" type="string" default=""/>
+    <prop name="size" type="string" default="#space_xl"/>
+  </api>
+  <view extends="color_swatch"
+        color_subject="$color_subject" color="$color" colors_subject="$colors_subject" finish_subject="$finish_subject"
+        size="$size" reach="0" hit="0" clickable="false" bubble="true"/>
+</component>

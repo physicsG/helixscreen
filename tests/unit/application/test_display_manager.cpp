@@ -19,6 +19,8 @@
 #include "runtime_config.h"
 #include "test_helpers/config_test_access.h"
 #include "test_helpers/display_manager_test_access.h"
+#include "test_helpers/scoped_board.h"
+#include "test_helpers/scoped_env.h"
 
 #include <filesystem>
 #include <fstream>
@@ -445,20 +447,20 @@ TEST_CASE("sleep_backlight_off config controls backlight behavior during sleep",
         bool had;
         // Put back the ref we found, not a recomputed $HOME/.helixscreen — the
         // test binary sandboxes this deliberately (see helix_test_fixture.cpp).
-        std::string prev_ref = AppConstants::Update::detail::backup_fallback_dir_ref();
+        std::string prev_ref = helix::app_constants::update::detail::backup_fallback_dir_ref();
         explicit HomeRedirect(const std::string& dir) : had(std::getenv("HOME") != nullptr) {
             if (had)
                 orig = std::getenv("HOME");
             setenv("HOME", dir.c_str(), 1);
-            AppConstants::Update::detail::backup_fallback_dir_ref() =
-                AppConstants::Update::sanitize_home(std::getenv("HOME")) + "/.helixscreen";
+            helix::app_constants::update::detail::backup_fallback_dir_ref() =
+                helix::app_constants::update::sanitize_home(std::getenv("HOME")) + "/.helixscreen";
         }
         ~HomeRedirect() {
             if (had)
                 setenv("HOME", orig.c_str(), 1);
             else
                 unsetenv("HOME");
-            AppConstants::Update::detail::backup_fallback_dir_ref() = prev_ref;
+            helix::app_constants::update::detail::backup_fallback_dir_ref() = prev_ref;
         }
     } home_guard(tmp_dir.string());
 
@@ -554,6 +556,29 @@ TEST_CASE_METHOD(ApplicationTestFixture,
     if (mgr.keyboard_input()) {
         lv_indev_delete(mgr.keyboard_input());
     }
+}
+
+// DisplayManager never deletes its keyboard group, so the fixture reset has to:
+// left as LVGL's default, it takes in and focuses the first widget a later test makes.
+TEST_CASE_METHOD(ApplicationTestFixture,
+                 "A keyboard group a test leaves behind is gone after the fixture reset",
+                 "[application][display][indev]") {
+    {
+        DisplayManager mgr;
+        DisplayManagerTestAccess::set_backend(mgr, std::make_unique<MockPointerBackend>());
+        DisplayManagerTestAccess::create_input_devices(mgr);
+        REQUIRE(mgr.keyboard_input() != nullptr);
+        lv_indev_delete(mgr.pointer_input());
+        lv_indev_delete(mgr.keyboard_input());
+    }
+    REQUIRE(lv_group_get_default() != nullptr);
+
+    HelixTestFixture::reset_all();
+
+    CHECK(lv_group_get_default() == nullptr);
+    lv_obj_t* button = lv_button_create(lv_screen_active());
+    CHECK_FALSE(lv_obj_has_state(button, LV_STATE_FOCUSED));
+    lv_obj_delete(button);
 }
 
 TEST_CASE_METHOD(ApplicationTestFixture,
@@ -935,4 +960,61 @@ TEST_CASE_METHOD(ApplicationTestFixture,
 
     DisplayManagerTestAccess::set_display(mgr, nullptr);
     lv_display_set_rotation(disp, prev);
+}
+
+// ============================================================================
+// First-boot orientation
+// ============================================================================
+
+TEST_CASE("a first boot reports the board's panel mount it applied", "[application][display]") {
+    helix::test::ScopedBoard board(helix::board::Board::K1);
+    helix::ScopedEnv no_force("HELIX_FORCE_ROTATION_PROBE", nullptr);
+    helix::ScopedEnv no_env_rotation("HELIX_DISPLAY_ROTATION", nullptr);
+    // No saved rotation, as on a first boot; the singleton's display block is put back.
+    struct DisplayBlockGuard {
+        nlohmann::json& data = helix::ConfigTestAccess::data(*helix::Config::get_instance());
+        nlohmann::json saved = data.contains("display") ? data["display"] : nlohmann::json();
+        DisplayBlockGuard() {
+            data["display"] = nlohmann::json::object();
+        }
+        ~DisplayBlockGuard() {
+            if (saved.is_null()) {
+                data.erase("display");
+            } else {
+                data["display"] = saved;
+            }
+        }
+    } display_block;
+
+    DisplayManager::Config config;
+    config.first_boot_probe = true;
+    config.kernel_orientation = -1;
+
+    SECTION("the K1 panel: its mount, which Application saves instead of probing") {
+        DisplayManager mgr;
+        DisplayManagerTestAccess::set_size(mgr, 480, 800);
+        DisplayManagerTestAccess::apply_startup_rotation(mgr, config);
+        CHECK(mgr.first_boot_orientation() == 270);
+    }
+    SECTION("another framebuffer: nothing known, the probe runs") {
+        DisplayManager mgr;
+        DisplayManagerTestAccess::set_size(mgr, 800, 480);
+        DisplayManagerTestAccess::apply_startup_rotation(mgr, config);
+        CHECK(mgr.first_boot_orientation() == -1);
+    }
+    SECTION("a kernel panel_orientation is what the boot applied") {
+        config.kernel_orientation = 90;
+        config.rotation = 90;
+        DisplayManager mgr;
+        DisplayManagerTestAccess::set_size(mgr, 480, 800);
+        DisplayManagerTestAccess::apply_startup_rotation(mgr, config);
+        CHECK(mgr.first_boot_orientation() == 90);
+    }
+    SECTION("not a first boot: nothing to report") {
+        config.first_boot_probe = false;
+        DisplayManager mgr;
+        DisplayManagerTestAccess::set_size(mgr, 480, 800);
+        DisplayManagerTestAccess::apply_startup_rotation(mgr, config);
+        CHECK(mgr.first_boot_orientation() == -1);
+    }
 }

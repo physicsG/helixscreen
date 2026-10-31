@@ -32,13 +32,13 @@ using nlohmann::json;
 
 namespace {
 
-constexpr const char* SNAPMAKER_NOTIFY = "notify_client_access";
+constexpr const char* kSnapmakerNotify = "notify_client_access";
 
 /// A notification frame as Moonraker puts it on the wire: the component's
 /// event payload wrapped in the params array.
 json frame(const json& payload) {
     return json{
-        {"jsonrpc", "2.0"}, {"method", SNAPMAKER_NOTIFY}, {"params", json::array({payload})}};
+        {"jsonrpc", "2.0"}, {"method", kSnapmakerNotify}, {"params", json::array({payload})}};
 }
 
 json snapmaker_payload(const std::string& client_id) {
@@ -61,7 +61,7 @@ bool contains(const std::vector<std::string>& v, const std::string& s) {
 TEST_CASE("lan auth: the notification is its own capability probe", "[lanauth]") {
     // No discovery gate exists by design — a firmware without a broker simply
     // never sends one. The router must still be told what to listen for.
-    CHECK(contains(helix::lan_auth::notification_methods(), SNAPMAKER_NOTIFY));
+    CHECK(contains(helix::lan_auth::notification_methods(), kSnapmakerNotify));
 }
 
 TEST_CASE("lan auth: a notification from no provider is ignored", "[lanauth]") {
@@ -77,7 +77,7 @@ TEST_CASE("lan auth: a notification from no provider is ignored", "[lanauth]") {
 
 TEST_CASE("lan auth: a well-formed Snapmaker request parses", "[lanauth]") {
     auto req =
-        helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(snapmaker_payload("orca-abc")));
+        helix::lan_auth::parse_request(kSnapmakerNotify, frame(snapmaker_payload("orca-abc")));
 
     REQUIRE(req);
     CHECK(req->provider == "Snapmaker");
@@ -93,7 +93,7 @@ TEST_CASE("lan auth: the request id survives arriving as a number", "[lanauth]")
     json payload = snapmaker_payload("orca-abc");
     payload["id"] = 7;
 
-    auto req = helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(payload));
+    auto req = helix::lan_auth::parse_request(kSnapmakerNotify, frame(payload));
 
     REQUIRE(req);
     CHECK(req->request_id == "7");
@@ -105,31 +105,31 @@ TEST_CASE("lan auth: a request with no client id is dropped, never answered", "[
     // the only safe response.
     json missing = snapmaker_payload("orca-abc");
     missing.erase("clientid");
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(missing)));
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify, frame(missing)));
 
     json null_id = snapmaker_payload("orca-abc");
     null_id["clientid"] = nullptr;
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(null_id)));
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify, frame(null_id)));
 
     json empty_id = snapmaker_payload("orca-abc");
     empty_id["clientid"] = "";
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(empty_id)));
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify, frame(empty_id)));
 }
 
 TEST_CASE("lan auth: malformed frames are dropped rather than crashing", "[lanauth]") {
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json::object()));
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json{{"params", json::array()}}));
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json{{"params", "not-an-array"}}));
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY,
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify, json::object()));
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify, json{{"params", json::array()}}));
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify, json{{"params", "not-an-array"}}));
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify,
                                                json{{"params", json::array({"not-an-object"})}}));
-    CHECK_FALSE(helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, json("not-an-object")));
+    CHECK_FALSE(helix::lan_auth::parse_request(kSnapmakerNotify, json("not-an-object")));
 }
 
 TEST_CASE("lan auth: missing optional fields still yield an answerable request", "[lanauth]") {
     // Only the client id is load-bearing. A firmware that omits the rest still
     // gets an answer rather than a hang.
     auto req =
-        helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(json{{"clientid", "orca-abc"}}));
+        helix::lan_auth::parse_request(kSnapmakerNotify, frame(json{{"clientid", "orca-abc"}}));
     REQUIRE(req);
     CHECK(req->request_id.empty());
     CHECK(req->app_id.empty());
@@ -143,19 +143,19 @@ TEST_CASE("lan auth: the client id prefix names the asking product", "[lanauth]"
     // Nothing else in the payload says who is asking, and the popup is asking
     // the user to trust it — so the prefix is what makes the prompt specific.
     auto orca = helix::lan_auth::parse_request(
-        SNAPMAKER_NOTIFY, frame(snapmaker_payload("orca-9bbcbf74-a264-483e-bfff-22ffd07d6f70")));
+        kSnapmakerNotify, frame(snapmaker_payload("orca-9bbcbf74-a264-483e-bfff-22ffd07d6f70")));
     REQUIRE(orca);
     CHECK(orca->requester == "Snapmaker Orca");
 
     auto app = helix::lan_auth::parse_request(
-        SNAPMAKER_NOTIFY, frame(snapmaker_payload("app-eb2b366a-464b-5a9f-97ab-dbf3e22437ca")));
+        kSnapmakerNotify, frame(snapmaker_payload("app-eb2b366a-464b-5a9f-97ab-dbf3e22437ca")));
     REQUIRE(app);
     CHECK(app->requester == "Snapmaker App");
 }
 
 TEST_CASE("lan auth: an unrecognized client is left unnamed, not guessed", "[lanauth]") {
     auto req =
-        helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(snapmaker_payload("weird-1")));
+        helix::lan_auth::parse_request(kSnapmakerNotify, frame(snapmaker_payload("weird-1")));
     REQUIRE(req);
     CHECK(req->requester.empty());
 }
@@ -166,7 +166,7 @@ TEST_CASE("lan auth: an unrecognized client is left unnamed, not guessed", "[lan
 
 TEST_CASE("lan auth: approving mirrors the stock screen's own request", "[lanauth]") {
     auto req =
-        helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(snapmaker_payload("orca-abc")));
+        helix::lan_auth::parse_request(kSnapmakerNotify, frame(snapmaker_payload("orca-abc")));
     REQUIRE(req);
 
     auto decision = helix::lan_auth::build_decision(*req, true);
@@ -187,7 +187,7 @@ TEST_CASE("lan auth: denying is an explicit answer, not a silence", "[lanauth]")
     // Denial is what turns the client's 70-second wait into an immediate
     // refusal, so it has to go on the wire like an approval does.
     auto req =
-        helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(snapmaker_payload("orca-abc")));
+        helix::lan_auth::parse_request(kSnapmakerNotify, frame(snapmaker_payload("orca-abc")));
     REQUIRE(req);
 
     auto decision = helix::lan_auth::build_decision(*req, false);
@@ -203,7 +203,7 @@ TEST_CASE("lan auth: an unknown id is omitted, not sent empty", "[lanauth]") {
     // the approval into {"state": "error"} — pairing would fail silently.
     // Omitted, it falls back to the component's own last_id.
     auto req =
-        helix::lan_auth::parse_request(SNAPMAKER_NOTIFY, frame(json{{"clientid", "orca-abc"}}));
+        helix::lan_auth::parse_request(kSnapmakerNotify, frame(json{{"clientid", "orca-abc"}}));
     REQUIRE(req);
     REQUIRE(req->request_id.empty());
 

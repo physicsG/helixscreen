@@ -20,6 +20,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/history_list_panel_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "display_settings_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
@@ -55,7 +56,7 @@ class HistoryTimelapseFixture : public LVGLUITestFixture {
         // Slot 0 of the navigation stack is the active main panel; an overlay
         // pushed over nothing would sit there and read as the base.
         home_widget_ = lv_obj_create(test_screen());
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(helix::PanelId::Home)] = home_widget_;
         NavigationManager::instance().set_panels(panels);
 
@@ -81,9 +82,7 @@ class HistoryTimelapseFixture : public LVGLUITestFixture {
     }
 
     static void settle() {
-        for (int i = 0; i < 8; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     static bool browser_open() {

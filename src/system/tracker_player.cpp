@@ -528,14 +528,14 @@ void TrackerPlayer::apply_to_backend() {
 
     // When the module has PCM samples AND the backend supports direct audio
     // rendering, render_audio() handles output. Just compute sample_speed here.
-    static constexpr double AMIGA_CLOCK = 3546895.0; // PAL clock
+    static constexpr double kAmigaClock = 3546895.0; // PAL clock
     if (module_.has_samples && backend_->supports_render_source()) {
         for (int ch = 0; ch < 4; ++ch) {
             auto& cs = channels_[static_cast<size_t>(ch)];
             if (cs.active && cs.period > 0 && cs.current_instrument &&
                 cs.current_instrument->has_sample()) {
                 // Paula chip: playback_rate = clock / period
-                cs.sample_speed = AMIGA_CLOCK / static_cast<double>(cs.period);
+                cs.sample_speed = kAmigaClock / static_cast<double>(cs.period);
             }
         }
         std::atomic_thread_fence(std::memory_order_release);
@@ -548,7 +548,7 @@ void TrackerPlayer::apply_to_backend() {
                                  ? (static_cast<float>(volume_override_) / 100.0f)
                                  : helix::AudioSettingsManager::instance().get_volume_scaled();
 
-    // Note frequency, not sample rate: AMIGA_CLOCK/period is the Paula
+    // Note frequency, not sample rate: kAmigaClock/period is the Paula
     // playback rate (8-14 kHz for typical notes) — the AD5M piezo cannot
     // reproduce it. cs.freq carries the equal-tempered note, updated per
     // tick by arpeggio/portamento/vibrato; the period ratio only covers
@@ -556,7 +556,7 @@ void TrackerPlayer::apply_to_backend() {
     auto emit_freq = [](const auto& cs) {
         float freq = cs.freq;
         if (freq <= 0.0f && cs.period > 0) {
-            freq = static_cast<float>(AMIGA_CLOCK / static_cast<double>(cs.period));
+            freq = static_cast<float>(kAmigaClock / static_cast<double>(cs.period));
         }
         return freq;
     };

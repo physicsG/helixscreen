@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- One plugin item in a context menu's column group: the same ghost button
+       as the group's own actions, so it has their height, icon and pitch. The
+       wrapper takes the tap and owns its payload (a ui_button's user data is
+       its own); the button only draws. The label and reason are plugin text and
+       travel through C++. A disabled item is greyed, with its reason under it. -->
+  <api>
+    <prop name="icon" type="string" default="puzzle_outline"/>
+    <prop name="disabled" type="string" default="false"/>
+    <prop name="no_reason" type="string" default="true"/>
+  </api>
+  <styles>
+    <style name="greyed" opa="128"/>
+  </styles>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="0"
+        style_radius="#border_radius" style_bg_opa="0" style_border_width="0" scrollable="false" clickable="true"
+        focusable="false" disabled="$disabled">
+    <style name="styles.press_wash" selector="pressed"/>
+    <style name="greyed" selector="disabled"/>
+    <ui_button name="item_button"
+               width="100%" height="#button_height_sm" icon="$icon" text=" " long_mode="dots" variant="ghost"
+               clickable="false" event_bubble="true" style_flex_main_place="start" label_align="start"/>
+    <text_small name="item_reason"
+                width="100%" text="" long_mode="wrap" hidden="$no_reason" style_text_color="#text_muted"
+                style_pad_left="#space_sm" clickable="false" event_bubble="true"/>
+    <event_cb trigger="clicked" callback="plugin_menu_row_cb"/>
+  </view>
+</component>

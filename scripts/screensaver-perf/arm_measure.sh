@@ -63,13 +63,13 @@ if [ "$BUILD" = "1" ]; then
     build_exit=$?
     "$CLAIM" release "$build_claim" >/dev/null
     echo "BUILD_EXIT=$build_exit"
-    grep -F "EGL binary carries" "$S/pi-$ARM.log"
+    grep -F "carries the EGL presentation path" "$S/pi-$ARM.log"
     if [ "$build_exit" -ne 0 ]; then
         grep -n -E "error:|✗" "$S/pi-$ARM.log" | head -n 5
         finish 1
     fi
     mkdir -p "$S/arms/$ARM"
-    cp build/pi/bin/helix-screen build/pi/bin/helix-screen-egl "$S/arms/$ARM/"
+    cp build/pi/bin/helix-screen "$S/arms/$ARM/"
     git rev-parse --short HEAD > "$S/arms/$ARM/.sha"
     BIN_FROM=$ARM
 fi

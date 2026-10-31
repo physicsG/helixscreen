@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "plr_backend.h"
 
+#include "json_utils.h"
+#include "moonraker_subscription_merge.h"
 #include "printer_discovery.h"
 #include "text_io.h"
 
@@ -16,7 +18,7 @@ namespace {
 
 /// Data roots to try for the Creality recovery sidecar. K1-class images mount
 /// user storage at /usr/data; the OpenWrt-class K2 uses /mnt/UDISK.
-constexpr std::array<const char*, 2> CREALITY_DATA_ROOTS = {"/usr/data", "/mnt/UDISK"};
+constexpr std::array<const char*, 2> kCrealityDataRoots = {"/usr/data", "/mnt/UDISK"};
 
 /// Characters that would end the gcode command or break out of the quoted
 /// `FILENAME="<f>"` value. Klipper tokenizes extended parameters with `shlex`
@@ -24,10 +26,125 @@ constexpr std::array<const char*, 2> CREALITY_DATA_ROOTS = {"/usr/data", "/mnt/U
 /// `;`/`#` are shlex comment introducers and `*` is a checksum marker, all of
 /// which older regex-path forks strip before shlex ever runs. Spaces are NOT
 /// here — that is exactly what the quoting buys us.
-constexpr const char* GCODE_PARAM_BREAKERS = "\n\r;#*=\"\\";
+constexpr const char* kGcodeParamBreakers = "\n\r;#*=\"\\";
 
 /// Path segment that ends the virtual_sdcard root in every Creality image.
-constexpr const char* GCODES_DIR_MARKER = "/gcodes/";
+constexpr const char* kGcodesDirMarker = "/gcodes/";
+
+using json = nlohmann::json;
+
+/// One recovery backend: which status fields it reads on a discovered printer,
+/// which markers select it, and its availability and recovery-file rules.
+/// The table order is the selection precedence.
+struct PlrProvider {
+    PlrBackendType backend;
+    const char* name;
+    /// Subscription objects map; an empty object when this printer cannot
+    /// carry the backend.
+    json (*status_fields)(const PrinterDiscovery& hw);
+    bool (*selects)(const PlrCapabilitySignals& caps);
+    bool (*available)(const PlrCapabilitySignals& caps, const PlrProbeSession& probe);
+    std::string (*recovery_file)(const PlrCapabilitySignals& caps, const PlrProbeSession& probe);
+};
+
+json no_status_fields(const PrinterDiscovery& /*hw*/) {
+    return json::object();
+}
+
+bool plugin_ready_with(const PlrCapabilitySignals& caps, PlrPluginBackend backend) {
+    return caps.plr_feature == PluginFeatureState::Ready && caps.plugin_backend == backend;
+}
+
+bool plugin_offers(const PlrCapabilitySignals& caps, const PlrProbeSession& /*probe*/) {
+    // The plugin decided availability itself: an interrupted newest job, a
+    // snapshot for it, an unchanged file, Klipper ready.
+    return caps.plugin_offer_available;
+}
+
+std::string plugin_recovery_file(const PlrCapabilitySignals& caps,
+                                 const PlrProbeSession& /*probe*/) {
+    return caps.plugin_offer_available ? caps.plugin_recovery_file : std::string();
+}
+
+std::string status_recovery_file(const PlrCapabilitySignals& caps,
+                                 const PlrProbeSession& /*probe*/) {
+    return caps.status_recovery_file;
+}
+
+const std::array<PlrProvider, 5>& providers() {
+    static const std::array<PlrProvider, 5> kProviders = {{
+        // Snapmaker U1 fork: virtual_sdcard.pl_env_valid is the firmware's own
+        // validation of the snapshot against MCU flash on boot, so the flag IS
+        // availability. filament_detect marks the firmware in discovery.
+        {PlrBackendType::SNAPMAKER, "snapmaker",
+         [](const PrinterDiscovery& hw) {
+             return hw.has_snapmaker()
+                        ? json{{"virtual_sdcard", json::array({"pl_env_valid", "file_path"})}}
+                        : json::object();
+         },
+         [](const PlrCapabilitySignals& caps) { return caps.snapshot_valid; },
+         [](const PlrCapabilitySignals&, const PlrProbeSession&) { return true; },
+         status_recovery_file},
+        // The plugin's print_state adapter serves the firmware layout the
+        // legacy Qidi macros also live on, and it must win there: its resume
+        // corrects the firmware's file offset, the legacy one does not.
+        {PlrBackendType::GENERIC, "plugin (print_state)", no_status_fields,
+         [](const PlrCapabilitySignals& caps) {
+             return plugin_ready_with(caps, PlrPluginBackend::QidiPrintState);
+         },
+         plugin_offers, plugin_recovery_file},
+        // Qidi stock firmware: the macro says Qidi, save_variables'
+        // was_interrupted says an interrupted print is on record; the stock
+        // firmware clears it on every normal end or cancel. The macros record
+        // no filename, so virtual_sdcard.file_path is display-only.
+        {PlrBackendType::QIDI, "qidi",
+         [](const PrinterDiscovery& hw) {
+             return plr_resume_macro_present(hw)
+                        ? json{{"save_variables", nullptr},
+                               {"virtual_sdcard", json::array({"file_path"})}}
+                        : json::object();
+         },
+         [](const PlrCapabilitySignals& caps) {
+             return caps.resume_macro && caps.interrupted_flag;
+         },
+         [](const PlrCapabilitySignals&, const PlrProbeSession&) { return true; },
+         status_recovery_file},
+        // Creality K/Ender/Hi fork: print_stats.power_loss marks the firmware,
+        // and nothing in discovery does, so every printer subscribes it;
+        // Moonraker answers it with null on the rest. Availability takes the
+        // one-shot probe. virtual_sdcard.file_path is the fallback when the
+        // sidecar names no file.
+        {PlrBackendType::CREALITY, "creality",
+         [](const PrinterDiscovery& /*hw*/) {
+             return json{{"print_stats", json::array({"power_loss"})},
+                         {"virtual_sdcard", json::array({"file_path"})}};
+         },
+         [](const PlrCapabilitySignals& caps) { return caps.probe_capable; },
+         [](const PlrCapabilitySignals&, const PlrProbeSession& probe) {
+             return plr_probe_recovery_available(probe.result);
+         },
+         [](const PlrCapabilitySignals&, const PlrProbeSession& probe) {
+             return probe.recovery_file;
+         }},
+        // The plugin's own snapshot and resume, last of all, so it never
+        // displaces a firmware's own recovery.
+        {PlrBackendType::GENERIC, "plugin", no_status_fields,
+         [](const PlrCapabilitySignals& caps) {
+             return plugin_ready_with(caps, PlrPluginBackend::Generic);
+         },
+         plugin_offers, plugin_recovery_file},
+    }};
+    return kProviders;
+}
+
+const PlrProvider* select_provider(const PlrCapabilitySignals& caps) {
+    for (const PlrProvider& p : providers()) {
+        if (p.selects(caps)) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
 
 } // namespace
 
@@ -37,7 +154,7 @@ std::string plr_creality_sdcard_relative_name(const std::string& path) {
     }
     // Preferred: the exact roots we know, so a directory that merely happens to
     // be called "gcodes" deeper in the tree cannot win.
-    for (const char* root : CREALITY_DATA_ROOTS) {
+    for (const char* root : kCrealityDataRoots) {
         std::string prefix = std::string(root) + "/printer_data/gcodes/";
         if (path.rfind(prefix, 0) == 0) {
             return path.substr(prefix.size());
@@ -46,9 +163,9 @@ std::string plr_creality_sdcard_relative_name(const std::string& path) {
     // Fallback for a relocated virtual_sdcard path: first "/gcodes/" segment.
     // First, not last — a job really stored in a "gcodes" subfolder must keep
     // that subfolder in its relative name.
-    size_t pos = path.find(GCODES_DIR_MARKER);
+    size_t pos = path.find(kGcodesDirMarker);
     if (pos != std::string::npos) {
-        return path.substr(pos + std::string(GCODES_DIR_MARKER).size());
+        return path.substr(pos + std::string(kGcodesDirMarker).size());
     }
     spdlog::warn("[PLR] Creality recovery path '{}' has no recognizable gcodes root — "
                  "sending it unchanged",
@@ -59,30 +176,81 @@ std::string plr_creality_sdcard_relative_name(const std::string& path) {
 PlrBackendType plr_select_backend(const PlrCapabilitySignals& caps) {
     // Passive markers first: choosing them never costs a side-effectful probe.
     // The markers come from different firmware forks and should never coexist,
-    // but the ordering makes the tie deterministic.
-    if (caps.snapmaker_pl_env_valid) {
-        return PlrBackendType::SNAPMAKER;
+    // but the table order makes the tie deterministic.
+    const PlrProvider* p = select_provider(caps);
+    return p != nullptr ? p->backend : PlrBackendType::NONE;
+}
+
+PlrOfferAvailability plr_offer_availability(const PlrCapabilitySignals& caps,
+                                            const PlrProbeSession& probe) {
+    PlrOfferAvailability out;
+    const PlrProvider* p = select_provider(caps);
+    if (p == nullptr) {
+        return out;
     }
-    // Both halves required: the macro says Qidi stock firmware, the variable
-    // says an interrupted print is on record.
-    if (caps.qidi_resume_macro && caps.qidi_was_interrupted) {
-        return PlrBackendType::QIDI;
+    out.backend = p->backend;
+    out.available = p->available(caps, probe);
+    out.recovery_file = p->recovery_file(caps, probe);
+    return out;
+}
+
+const char* plr_backend_name(PlrBackendType backend) {
+    switch (backend) {
+    case PlrBackendType::SNAPMAKER:
+        return "snapmaker";
+    case PlrBackendType::CREALITY:
+        return "creality";
+    case PlrBackendType::QIDI:
+        return "qidi";
+    case PlrBackendType::GENERIC:
+        return "plugin";
+    case PlrBackendType::NONE:
+        break;
     }
-    if (caps.creality_power_loss_field) {
-        return PlrBackendType::CREALITY;
-    }
-    return PlrBackendType::NONE;
+    return "none";
+}
+
+bool plr_reoffers_after_job_drop(PlrBackendType backend) {
+    // The plugin offers only when Moonraker's history calls the newest job
+    // interrupted. The firmware flags can lag the standby frame of a print that
+    // finished, so they never offer from this edge.
+    return backend == PlrBackendType::GENERIC;
 }
 
 bool plr_resume_macro_present(const PrinterDiscovery& hw) {
-    return hw.has_macro(QIDI_DETECT_MACRO) || hw.has_macro(QIDI_RESUME_GCODE);
+    return hw.has_macro(kQidiDetectMacro) || hw.has_macro(kQidiResumeGcode);
 }
 
-std::vector<std::string> plr_required_status_objects(const PrinterDiscovery& hw) {
-    if (!plr_resume_macro_present(hw)) {
-        return {};
+nlohmann::json plr_required_status_fields(const PrinterDiscovery& hw) {
+    json fields = json::object();
+    for (const PlrProvider& p : providers()) {
+        fields = merge_subscription_objects(fields, p.status_fields(hw));
     }
-    return {std::string("save_variables")};
+    return fields;
+}
+
+int plr_parse_snapshot_valid(const nlohmann::json& status) {
+    const json* sdcard = json_util::find_member(status, "virtual_sdcard");
+    if (sdcard == nullptr) {
+        return -1;
+    }
+    const json* valid = json_util::find_member(*sdcard, "pl_env_valid");
+    if (valid == nullptr || !valid->is_boolean()) {
+        return -1;
+    }
+    return valid->get<bool>() ? 1 : 0;
+}
+
+const std::string* plr_parse_recovery_file(const nlohmann::json& status) {
+    const json* sdcard = json_util::find_member(status, "virtual_sdcard");
+    if (sdcard == nullptr) {
+        return nullptr;
+    }
+    const json* path = json_util::find_member(*sdcard, "file_path");
+    if (path == nullptr || !path->is_string()) {
+        return nullptr;
+    }
+    return &path->get_ref<const std::string&>();
 }
 
 int plr_parse_interrupted_flag(const nlohmann::json& status) {
@@ -110,7 +278,7 @@ bool plr_parse_power_loss_signal(const nlohmann::json& status) {
     return pl_it != stats_it->end() && pl_it->is_number();
 }
 
-bool plr_creality_recovery_available(const PlrDetectResult& r) {
+bool plr_probe_recovery_available(const PlrDetectResult& r) {
     // `completed` is load-bearing, not a redundancy check: it certifies that the
     // probe ran this connection, which is what set print_stats.power_loss=1 in
     // firmware. See PlrDetectResult and docs/devel/POWER_LOSS_RECOVERY.md.
@@ -141,7 +309,7 @@ bool plr_is_safe_recovery_filename(const std::string& name) {
     if (name.empty()) {
         return false;
     }
-    return name.find_first_of(GCODE_PARAM_BREAKERS) == std::string::npos;
+    return name.find_first_of(kGcodeParamBreakers) == std::string::npos;
 }
 
 PlrRecoveryPlan plr_build_plan(PlrBackendType backend, const std::string& recovery_file,
@@ -155,20 +323,23 @@ PlrRecoveryPlan plr_build_plan(PlrBackendType backend, const std::string& recove
         // Passive backend: pl_env_valid already IS the firmware's own
         // validation of the snapshot, so there is nothing further to confirm.
         // The gcode carries no parameters, so the filename is display-only.
-        plan.resume_gcode = SNAPMAKER_RESUME_GCODE;
-        plan.discard_gcode = SNAPMAKER_DISCARD_GCODE;
+        plan.resume_gcode = kSnapmakerResumeGcode;
+        plan.discard_gcode = kSnapmakerDiscardGcode;
         break;
 
     case PlrBackendType::CREALITY:
         // Discard is always safe to expose — it touches no motion.
-        plan.discard_rpc_method = CREALITY_DISCARD_RPC;
+        plan.discard_rpc_method = kCrealityDiscardRpc;
+        // The restore re-homes X/Y sensorless and (on K1/KE) never re-probes
+        // Z, so the resumed layer routinely lands a millimetre or two off.
+        plan.resume_layer_approximate = true;
 
         // SAFETY GATE. Resume is authorized ONLY by a completed probe reporting
         // both states. The probe is what sets print_stats.power_loss=1, which
         // the stock sensorless-homing macro reads to choose a full Z clearance
         // lift; without it the machine lifts 0.1mm and homes X/Y through the
         // part. Leaving resume_gcode empty is the refusal.
-        if (!plr_creality_recovery_available(detect)) {
+        if (!plr_probe_recovery_available(detect)) {
             spdlog::warn("[PLR] Creality resume withheld: detect not confirmed "
                          "(completed={} file_state={} eeprom_state={})",
                          detect.completed, detect.file_state, detect.eeprom_state);
@@ -205,8 +376,16 @@ PlrRecoveryPlan plr_build_plan(PlrBackendType backend, const std::string& recove
         // which only a print that never reached a normal end or cancel leaves
         // behind. Both actions are plain macros with no parameters, so the
         // filename is display-only and may be empty.
-        plan.resume_gcode = QIDI_RESUME_GCODE;
-        plan.discard_gcode = QIDI_DISCARD_GCODE;
+        plan.resume_gcode = kQidiResumeGcode;
+        plan.discard_gcode = kQidiDiscardGcode;
+        break;
+
+    case PlrBackendType::GENERIC:
+        // The plugin renders and sends the resume itself, step by step, after
+        // the wizard's confirmations; the app only opens that flow. Discard
+        // deletes the plugin's snapshot and touches no motion.
+        plan.resume_rpc = kPlrPlanRpc;
+        plan.discard_rpc_method = kPlrDiscardRpc;
         break;
 
     case PlrBackendType::NONE:
@@ -233,9 +412,9 @@ std::string plr_parse_creality_sidecar(const std::string& json_text) {
     return it->get<std::string>();
 }
 
-std::string plr_read_creality_recovery_filename() {
-    for (const char* root : CREALITY_DATA_ROOTS) {
-        std::string path = std::string(root) + "/" + CREALITY_SIDECAR_REL_PATH;
+std::string plr_read_probe_recovery_filename() {
+    for (const char* root : kCrealityDataRoots) {
+        std::string path = std::string(root) + "/" + kCrealitySidecarRelPath;
         auto text = helix::text_io::read_file(path);
         if (!text) {
             continue;
@@ -248,7 +427,7 @@ std::string plr_read_creality_recovery_filename() {
         spdlog::debug("[PLR] Creality sidecar {} present but yielded no file_path", path);
     }
     spdlog::debug("[PLR] No readable Creality recovery sidecar (looked for {})",
-                  CREALITY_SIDECAR_REL_PATH);
+                  kCrealitySidecarRelPath);
     return {};
 }
 

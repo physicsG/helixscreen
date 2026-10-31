@@ -22,6 +22,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+
 namespace helix {
 
 PowerDeviceState& PowerDeviceState::instance() {
@@ -37,25 +39,45 @@ int PowerDeviceState::status_string_to_int(const std::string& status) {
 }
 
 void PowerDeviceState::set_devices(const std::vector<PowerDevice>& devices) {
-    // Tear down existing subjects (expire lifetime tokens first)
+    // Rediscovery runs after every Klipper restart. A device still present keeps
+    // its subject and lifetime: tiles subscribe once at attach and the home panel
+    // does not rebuild when its widget list is unchanged, so a fresh subject
+    // would leave them watching a dead one.
     if (subjects_initialized_) {
         lifetime_.invalidate();
-        // Signal death then expire lifetime tokens (#816)
-        for (auto& [name, info] : devices_) {
-            if (info.lifetime)
-                *info.lifetime = false;
-            info.lifetime.reset();
-        }
-        for (auto& [name, info] : devices_) {
-            if (info.status_subject) {
-                lv_subject_deinit(info.status_subject.get());
+        std::vector<std::string> gone;
+        for (const auto& [name, info] : devices_) {
+            const bool still_present =
+                std::any_of(devices.begin(), devices.end(),
+                            [&name = name](const PowerDevice& d) { return d.device == name; });
+            if (!still_present) {
+                gone.push_back(name);
             }
         }
-        devices_.clear();
+        for (const auto& name : gone) {
+            auto it = devices_.find(name);
+            // Signal death then expire the lifetime token before the deinit (#816)
+            if (it->second.lifetime)
+                *it->second.lifetime = false;
+            it->second.lifetime.reset();
+            if (it->second.status_subject) {
+                lv_subject_deinit(it->second.status_subject.get());
+            }
+            devices_.erase(it);
+        }
     }
 
-    // Create new device entries with subjects
     for (const auto& dev : devices) {
+        auto existing = devices_.find(dev.device);
+        if (existing != devices_.end()) {
+            // reevaluate_lock_states() below publishes the new value.
+            DeviceInfo& info = existing->second;
+            info.type = dev.type;
+            info.locked_while_printing = dev.locked_while_printing;
+            info.raw_status = status_string_to_int(dev.status);
+            continue;
+        }
+
         DeviceInfo info;
         info.name = dev.device;
         info.type = dev.type;
@@ -102,7 +124,8 @@ void PowerDeviceState::set_devices(const std::vector<PowerDevice>& devices) {
         }
     }
 
-    // Evaluate lock states with current print state
+    // Publish each device's effective status: its raw state, or locked while a job holds the
+    // machine.
     reevaluate_lock_states();
 
     spdlog::info("[PowerDeviceState] Initialized {} power devices", devices.size());
@@ -158,13 +181,7 @@ void PowerDeviceState::update_device_status(const std::string& device, const std
         if (it == devices_.end())
             return;
         it->second.raw_status = new_raw;
-        int effective = new_raw;
-        if (it->second.locked_while_printing && new_raw == 1) {
-            if (job_holds_machine(get_printer_state().print_state().get_print_lifecycle())) {
-                effective = 2;
-            }
-        }
-        lv_subject_set_int(it->second.status_subject.get(), effective);
+        publish_effective_status(it->second);
     });
 }
 
@@ -197,7 +214,7 @@ void PowerDeviceState::on_power_changed(const nlohmann::json& msg) {
         // Must set BEFORE queue_update() — notify_klippy_disconnected arrives on the same
         // WebSocket thread and checks suppression synchronously.
         if (new_raw == 0) {
-            EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::NORMAL);
+            EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::NORMAL);
         }
 
         tok.defer("PowerDeviceState::on_power_changed", [this, device_name, new_raw]() {
@@ -209,29 +226,22 @@ void PowerDeviceState::on_power_changed(const nlohmann::json& msg) {
             }
 
             it->second.raw_status = new_raw;
-
-            // Evaluate effective status (may be locked)
-            int effective = new_raw;
-            if (it->second.locked_while_printing && new_raw == 1) {
-                if (job_holds_machine(get_printer_state().print_state().get_print_lifecycle())) {
-                    effective = 2; // locked
-                }
-            }
-
-            if (lv_subject_get_int(it->second.status_subject.get()) != effective) {
-                lv_subject_set_int(it->second.status_subject.get(), effective);
-                spdlog::debug("[PowerDeviceState] Updated '{}' subject to {}", device_name,
-                              effective);
-            }
+            publish_effective_status(it->second);
         });
     }
 }
 
 void PowerDeviceState::reevaluate_lock_states() {
-    auto& ps = get_printer_state();
-    if (!ps.are_subjects_initialized()) {
+    for (auto& [name, info] : devices_) {
+        publish_effective_status(info);
+    }
+}
+
+void PowerDeviceState::publish_effective_status(DeviceInfo& info) {
+    if (!info.status_subject) {
         return;
     }
+    auto& ps = get_printer_state();
     // The LIFECYCLE subject, matching the PrintState cast below. These enums do
     // not share numbering past index 0 - PrintJobState COMPLETE is 3, PrintState
     // Paused is 3 - so reading one and interpreting it as the other compiles,
@@ -242,22 +252,17 @@ void PowerDeviceState::reevaluate_lock_states() {
     // a host-side pre-start block the printer is homing and probing under power,
     // so cutting it there is as destructive as cutting it mid-layer - and the
     // wire cannot say so.
-    const bool is_printing = job_holds_machine(ps.print_state().get_print_lifecycle());
+    const bool is_printing =
+        ps.are_subjects_initialized() && job_holds_machine(ps.print_state().get_print_lifecycle());
 
-    for (auto& [name, info] : devices_) {
-        if (!info.status_subject) {
-            continue;
-        }
+    int effective = info.raw_status;
+    if (info.locked_while_printing && info.raw_status == 1 && is_printing) {
+        effective = 2; // locked
+    }
 
-        int effective = info.raw_status;
-        if (info.locked_while_printing && info.raw_status == 1 && is_printing) {
-            effective = 2; // locked
-        }
-
-        if (lv_subject_get_int(info.status_subject.get()) != effective) {
-            lv_subject_set_int(info.status_subject.get(), effective);
-            spdlog::debug("[PowerDeviceState] Reevaluated '{}': effective={}", name, effective);
-        }
+    if (lv_subject_get_int(info.status_subject.get()) != effective) {
+        lv_subject_set_int(info.status_subject.get(), effective);
+        spdlog::debug("[PowerDeviceState] '{}' effective status {}", info.name, effective);
     }
 }
 
@@ -270,13 +275,12 @@ void PowerDeviceState::deinit_subjects() {
 
     lifetime_.invalidate();
 
-    // [L073] The observer watches PrinterState's print_lifecycle_ subject —
-    // an external subject whose lifecycle we don't control. During test runs,
-    // PrinterState may have been deinit'd and reinit'd, destroying the original
-    // subject while are_subjects_initialized() returns true (for the new one).
-    // Always release() to avoid SIGSEGV on the stale subject pointer.
-    // The zombie observer is harmless: callback hits empty devices_ map.
-    print_state_observer_.release();
+    // The observer watches PrinterState's print_lifecycle_ subject, which
+    // outlives this teardown. It carries PrinterState's subjects lifetime, so
+    // reset() detaches it from a live subject and skips the removal when
+    // PrinterState has already freed that subject; either way its context is
+    // freed. Leaving it attached would keep calling back into torn-down state.
+    print_state_observer_.reset();
 
     // Signal death then expire lifetime tokens (#816)
     for (auto& [name, info] : devices_) {

@@ -102,7 +102,7 @@ TEST_CASE_METHOD(MigrationV26Fixture, "v26 migrates a stored true to Alert",
                         {"completion_alert", true},
                         {"printers", {{"voron", {{"moonraker_host", "192.168.1.112"}}}}}});
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
     CHECK(config.get<int>("/completion_alert", -1) ==
           static_cast<int>(helix::CompletionAlertMode::ALERT));
 }
@@ -113,7 +113,7 @@ TEST_CASE_METHOD(MigrationV26Fixture, "v26 migrates a stored false to Off", "[co
                         {"completion_alert", false},
                         {"printers", {{"voron", {{"moonraker_host", "192.168.1.112"}}}}}});
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
     CHECK(config.get<int>("/completion_alert", -1) ==
           static_cast<int>(helix::CompletionAlertMode::OFF));
 }
@@ -127,7 +127,7 @@ TEST_CASE_METHOD(MigrationV26Fixture, "v26 leaves an explicit stored int alone",
                         {"completion_alert", 1},
                         {"printers", {{"voron", {{"moonraker_host", "192.168.1.112"}}}}}});
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
     CHECK(config.get<int>("/completion_alert", -1) ==
           static_cast<int>(helix::CompletionAlertMode::NOTIFICATION));
 }
@@ -140,6 +140,6 @@ TEST_CASE_METHOD(MigrationV26Fixture, "v26 leaves an absent completion_alert abs
                         {"active_printer_id", "voron"},
                         {"printers", {{"voron", {{"moonraker_host", "192.168.1.112"}}}}}});
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
     CHECK_FALSE(config.exists("/completion_alert"));
 }

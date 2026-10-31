@@ -12,6 +12,7 @@
 #include "bed_mesh_overlays.h"
 #include "bed_mesh_renderer.h"
 
+#include <cmath>
 #include <cstring>
 
 #include "../catch_amalgamated.hpp"
@@ -25,7 +26,7 @@ namespace {
 
 constexpr int W = 200;
 constexpr int H = 160;
-constexpr uint8_t BG = 7; // distinct from every gradient color
+constexpr uint8_t kBg = 7; // distinct from every gradient color
 
 struct Renderer {
     bed_mesh_renderer_t* r = bed_mesh_renderer_create();
@@ -41,12 +42,12 @@ struct Renderer {
 
 bool is_bg(const PixelBuffer& buf, int x, int y) {
     const uint8_t* px = buf.pixel_at(x, y);
-    return px[0] == BG && px[1] == BG && px[2] == BG;
+    return px[0] == kBg && px[1] == kBg && px[2] == kBg;
 }
 
 PixelBuffer render(bed_mesh_renderer_t* r) {
     PixelBuffer buf(W, H);
-    bed_mesh_render_colors_t colors{BG, BG, BG, 90, 90, 90};
+    bed_mesh_render_colors_t colors{kBg, kBg, kBg, 90, 90, 90};
     REQUIRE(bed_mesh_renderer_render_to_buffer(r, buf, colors));
     return buf;
 }
@@ -157,5 +158,130 @@ TEST_CASE("Bed extent follows the bed bounds once set, the mesh grid before", "[
     REQUIRE(after.coord_scale == Approx(m.r->coord_scale));
     REQUIRE(after.half_width == Approx(150.0 * m.r->coord_scale));
     REQUIRE(after.half_height == Approx(100.0 * m.r->coord_scale));
+}
+TEST_CASE("Rectangular reference grid ends on the outermost grid line", "[bed_mesh][bed_grid]") {
+    Renderer m;
+    bed_mesh_renderer_set_bounds(m.r, 0, 235, -10, 220, 20, 215, 20, 200);
+    const auto ext = helix::mesh::compute_bed_extent(m.r);
+    REQUIRE_FALSE(ext.circular);
+    const auto f = helix::mesh::reference_grid_frame(ext);
+    CHECK(f.line_x_first == 0.0);
+    CHECK(f.line_x_last == 200.0);
+    CHECK(f.line_y_first == 0.0);
+    CHECK(f.line_y_last == 200.0);
+    CHECK(f.edge_x_min == f.line_x_first);
+    CHECK(f.edge_x_max == f.line_x_last);
+    CHECK(f.edge_y_min == f.line_y_first);
+    CHECK(f.edge_y_max == f.line_y_last);
+}
+
+TEST_CASE("Round reference grid stands its walls at the bed edges", "[bed_mesh][bed_grid]") {
+    Renderer m;
+    bed_mesh_renderer_set_bounds(m.r, -125, 125, -125, 125, -100, 100, -100, 100, true);
+    const auto ext = helix::mesh::compute_bed_extent(m.r);
+    REQUIRE(ext.circular);
+    const auto f = helix::mesh::reference_grid_frame(ext);
+    CHECK(f.edge_x_min == -125.0);
+    CHECK(f.edge_x_max == 125.0);
+    CHECK(f.edge_y_min == -125.0);
+    CHECK(f.edge_y_max == 125.0);
+    // Ticks stay on the grid multiples inside the bed.
+    CHECK(f.line_x_first == -100.0);
+    CHECK(f.line_x_last == 100.0);
+}
+
+TEST_CASE("A round bed draws a different floor than a rectangular one", "[bed_mesh][bed_grid]") {
+    Renderer square, round;
+    bed_mesh_renderer_set_bounds(square.r, -125, 125, -125, 125, -100, 100, -100, 100);
+    bed_mesh_renderer_set_bounds(round.r, -125, 125, -125, 125, -100, 100, -100, 100, true);
+    PixelBuffer a = render(square.r);
+    PixelBuffer b = render(round.r);
+    REQUIRE(std::memcmp(a.data(), b.data(), a.stride() * H) != 0);
+}
+namespace {
+
+/// A 7x7 mesh probed over [-100,100], on a [-125,125] bed.
+struct DeltaMesh {
+    bed_mesh_renderer_t* r = bed_mesh_renderer_create();
+    float rows[7][7];
+    explicit DeltaMesh(bool circular) {
+        const float* p[7];
+        for (int i = 0; i < 7; i++) {
+            for (int j = 0; j < 7; j++) {
+                rows[i][j] = 0.05f * static_cast<float>(i - j);
+            }
+            p[i] = rows[i];
+        }
+        bed_mesh_renderer_set_mesh_data(r, p, 7, 7);
+        bed_mesh_renderer_set_zero_plane_visible(r, true);
+        bed_mesh_renderer_set_bounds(r, -125, 125, -125, 125, -100, 100, -100, 100, circular);
+    }
+    ~DeltaMesh() {
+        bed_mesh_renderer_destroy(r);
+    }
+    /// Distance from the bed centre in printer mm (bed centred on 0,0).
+    double radius_mm(const bed_mesh_vertex_3d_t& v) const {
+        return std::hypot(v.x, v.y) / r->coord_scale;
+    }
+};
+
+} // namespace
+
+TEST_CASE("A round bed's mesh and zero plane stop at their circles", "[bed_mesh][bed_grid]") {
+    DeltaMesh m(true);
+    REQUIRE_FALSE(m.r->quads.empty());
+    double mesh_reach = 0.0, plane_reach = 0.0;
+    for (const auto& q : m.r->quads) {
+        const bool surface = q.opacity == LV_OPA_COVER;
+        for (const auto& v : q.vertices) {
+            const double d = m.radius_mm(v);
+            CHECK(d <= (surface ? 100.0 : 125.0) + 1e-6);
+            (surface ? mesh_reach : plane_reach) = std::max(surface ? mesh_reach : plane_reach, d);
+        }
+    }
+    // Both reach out to their circle rather than stopping a cell short.
+    CHECK(mesh_reach == Approx(100.0).epsilon(0.01));
+    CHECK(plane_reach == Approx(125.0).epsilon(0.01));
+}
+
+TEST_CASE("A rectangular bed's mesh keeps one quad per cell, corners included",
+          "[bed_mesh][bed_grid]") {
+    DeltaMesh m(false);
+    size_t surface = 0;
+    double reach = 0.0;
+    for (const auto& q : m.r->quads) {
+        if (q.opacity == LV_OPA_COVER) {
+            surface++;
+            for (const auto& v : q.vertices) {
+                reach = std::max(reach, m.radius_mm(v));
+            }
+        }
+    }
+    CHECK(surface == 36);
+    CHECK(reach == Approx(100.0 * std::sqrt(2.0)));
+}
+TEST_CASE("A round bed's 2D heatmap leaves the padded corners blank", "[bed_mesh][bed_grid]") {
+    DeltaMesh round(true), square(false);
+    for (auto* r : {round.r, square.r}) {
+        bed_mesh_renderer_set_render_mode(r, BedMeshRenderMode::Force2D);
+    }
+    PixelBuffer rb = render(round.r);
+    PixelBuffer sb = render(square.r);
+    const auto l = helix::mesh::compute_heatmap_layout(7, 7, W, H);
+    REQUIRE(l.valid);
+    const int corner_x = l.grid_x + 2;
+    const int corner_y = l.grid_y + 2;
+    const int mid_x = l.grid_x + l.cells_x * l.cell_w / 2;
+    const int mid_y = l.grid_y + l.cells_y * l.cell_h / 2;
+
+    // The square heatmap draws the corner; the round one does not.
+    REQUIRE_FALSE(is_bg(sb, corner_x, corner_y));
+    CHECK(is_bg(rb, corner_x, corner_y));
+    CHECK_FALSE(is_bg(rb, mid_x, mid_y));
+
+    // No reading for a tap on the blank corner; the centre still reads.
+    CHECK(bed_mesh_renderer_handle_touch(square.r, corner_x, corner_y, l));
+    CHECK_FALSE(bed_mesh_renderer_handle_touch(round.r, corner_x, corner_y, l));
+    CHECK(bed_mesh_renderer_handle_touch(round.r, mid_x, mid_y, l));
 }
 #endif

@@ -30,6 +30,31 @@ class PrintStatusWidgetTestAccess {
         return &PrintStatusWidget::idle_thumb_path_subject_;
     }
 
+    static bool nozzle_picker_available(const PrintStatusWidget& widget) {
+        return widget.nozzle_picker_available();
+    }
+
+    // The nozzle fit over a detailed card built straight from its XML, which a
+    // live dashboard would otherwise have to host.
+    static void fit_nozzle_picker(PrintStatusWidget& widget, lv_obj_t* root) {
+        widget.widget_obj_ = root;
+        widget.fit_nozzle_picker();
+        widget.widget_obj_ = nullptr;
+    }
+
+    static void fit_row(PrintStatusWidget& widget, lv_obj_t* root, const char* row_name,
+                        lv_subject_t* fits) {
+        widget.widget_obj_ = root;
+        widget.fit_row(row_name, fits);
+        widget.widget_obj_ = nullptr;
+    }
+
+    static void fit_speed_row(PrintStatusWidget& widget, lv_obj_t* root) {
+        widget.widget_obj_ = root;
+        widget.fit_speed_row();
+        widget.widget_obj_ = nullptr;
+    }
+
     static void dispatch_load(PrintStatusWidget& widget) {
         widget.dispatch_load();
     }
@@ -85,6 +110,14 @@ class PrintStatusWidgetTestAccess {
 
     static lv_obj_t* active_thumb(const PrintStatusWidget& widget) {
         return widget.print_card_active_thumb_;
+    }
+
+    static bool idle_reset_pending(const PrintStatusWidget& widget) {
+        return widget.idle_reset_timer_.pending();
+    }
+
+    static bool active_apply_pending(const PrintStatusWidget& widget) {
+        return widget.active_apply_timer_.pending();
     }
 
     static lv_obj_t* library_row_last(const PrintStatusWidget& widget) {

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "calibration_types.h"
+#include "helix_shared_callback.h"
 #include "i_moonraker_api.h"
 
 #include <functional>
@@ -58,7 +59,7 @@ struct AutoScrewsTiltResults {
  */
 AutoScrewsTiltResults parse_auto_screws_tilt(const nlohmann::json& status,
                                              const nlohmann::json& config_section,
-                                             float pitch_mm = SCREW_PITCH_DEFAULT_MM);
+                                             float pitch_mm = kScrewPitchDefaultMm);
 
 namespace snapmaker {
 namespace screws_tilt {
@@ -66,34 +67,34 @@ namespace screws_tilt {
 /// machine_state_manager.main_state while the firmware holds the
 /// screws-tilt calibration state. IDLE is 0; the module defines other
 /// values HelixScreen does not model and must not name.
-inline constexpr int MAIN_STATE_SCREWS_TILT_ADJUST = 8;
+inline constexpr int kMainStateScrewsTiltAdjust = 8;
 
 /// Klipper object name, and configfile section name, of the module.
-inline constexpr const char* MODULE_NAME = "auto_screws_tilt_adjust";
+inline constexpr const char* kModuleName = "auto_screws_tilt_adjust";
 
 /// The firmware command sequence that replaces SCREWS_TILT_CALCULATE. ENTRY
 /// switches main_state to SCREWS_TILT_ADJUST; the remaining commands are
 /// valid only inside that state.
-inline constexpr const char* CMD_ENTRY = "AUTO_SCREWS_TILT_ADJUST_ENTRY";
-inline constexpr const char* CMD_HOMING = "AUTO_SCREWS_TILT_ADJUST_HOMING";
+inline constexpr const char* kCmdEntry = "AUTO_SCREWS_TILT_ADJUST_ENTRY";
+inline constexpr const char* kCmdHoming = "AUTO_SCREWS_TILT_ADJUST_HOMING";
 /// DETECT_BED_PLATE is an assertion, not a query: PRESENCE=0 asserts the PEI
 /// sheet is OFF the bed, and the firmware raises fault 530/0/11 when
 /// it is not. The wizard's AUTO_SCREWS_TILT_ADJUST_DETECT_PLATE wrapper runs
 /// it with no arguments, so PRESENCE defaults to 1 - the opposite assertion -
 /// and errors exactly when the sheet is off. PRESENCE=0 is sent directly so
 /// the command's own verdict is the gate.
-inline constexpr const char* CMD_DETECT_BED_PLATE = "DETECT_BED_PLATE PRESENCE=0";
+inline constexpr const char* kCmdDetectBedPlate = "DETECT_BED_PLATE PRESENCE=0";
 
-inline constexpr const char* CMD_PROBE_REFERENCE_POINTS =
+inline constexpr const char* kCmdProbeReferencePoints =
     "AUTO_SCREWS_TILT_ADJUST_PROBE_REFERENCE_POINTS";
 /// Restores IDLE and lifts Z. Throws inside the firmware unless main_state
 /// is SCREWS_TILT_ADJUST, so every send is gated on the state being ours.
-inline constexpr const char* CMD_EXIT = "AUTO_SCREWS_TILT_ADJUST_EXIT";
+inline constexpr const char* kCmdExit = "AUTO_SCREWS_TILT_ADJUST_EXIT";
 
 /**
  * @brief True only when the held calibration state is stale and safe to clear
  *
- * Requires main_state == MAIN_STATE_SCREWS_TILT_ADJUST and a probe_step that
+ * Requires main_state == kMainStateScrewsTiltAdjust and a probe_step that
  * is terminal or never started: nothing is running. Every other probe step
  * means work in flight - adjust_refpoint_done and adjust_wait_manual are a
  * wizard paused for a human who may be driving it from another client - and
@@ -121,8 +122,8 @@ inline constexpr const char* CMD_EXIT = "AUTO_SCREWS_TILT_ADJUST_EXIT";
 /**
  * @brief Leave the firmware calibration state, if it is ours to leave
  *
- * Reads main_state, then sends CMD_EXIT only when it is
- * MAIN_STATE_SCREWS_TILT_ADJUST: the macro throws otherwise, so an
+ * Reads main_state, then sends kCmdExit only when it is
+ * kMainStateScrewsTiltAdjust: the macro throws otherwise, so an
  * unconditional send is not a cleanup. No-op on a printer without the
  * module (the query comes back without the object). @p client must outlive
  * the round trip - it holds the callback.
@@ -135,7 +136,7 @@ void request_exit(IMoonrakerClient& client);
  * A previous session that died mid-run can leave main_state at
  * SCREWS_TILT_ADJUST, which makes unrelated firmware operations refuse.
  * When the discovery snapshot says the state is held, probe_step decides:
- * stale states get CMD_EXIT - the wizard's own exit, which also restores the
+ * stale states get kCmdExit - the wizard's own exit, which also restores the
  * configured idle timeout, clears probe_step and lifts Z; a bare state
  * restore would leave the idle timeout at the wizard's pause value, so
  * heaters and steppers never idle out. Anything in flight is left to
@@ -150,7 +151,7 @@ void reconcile_on_connect(IMoonrakerClient& client, const nlohmann::json& initia
  * Every terminal path releases the firmware calibration state.
  */
 void start_sequence(IMoonrakerClient& client, IMoonrakerAPI& api, ScrewTiltCallback on_success,
-                    std::function<void(const MoonrakerError&)> on_error);
+                    helix::SharedCallback<void(const MoonrakerError&)> on_error);
 
 } // namespace screws_tilt
 } // namespace snapmaker

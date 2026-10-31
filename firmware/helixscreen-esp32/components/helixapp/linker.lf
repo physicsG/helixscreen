@@ -1,0 +1,11 @@
+# Every zero-initialised static in the app goes to PSRAM .bss, leaving internal
+# DRAM to the WiFi driver, task stacks and the RGB bounce buffers. Nothing in
+# this component runs from an ISR, IRAM or a DMA engine, and IDF builds with
+# -mdisable-hardware-atomics when PSRAM is on, so std::atomic read-modify-write
+# on these statics takes the address-checked __atomic_* path. A static that must
+# stay internal says so with DRAM_ATTR (.dram1, not .bss).
+[mapping:helixapp]
+archive: libhelixapp.a
+entries:
+    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        * (extram_bss)

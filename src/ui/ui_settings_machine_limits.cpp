@@ -41,7 +41,7 @@ struct FieldSpec {
 };
 
 /// Indexed by MachineLimitsOverlay::Field.
-constexpr FieldSpec FIELD_SPECS[] = {
+constexpr FieldSpec kFieldSpecs[] = {
     {"max_velocity_slider", "Max Velocity", "mm/s", 1, false},
     {"max_accel_slider", "Max Acceleration", "mm/s²", 1, false},
     {"accel_to_decel_slider", "Accel to Decel", "mm/s²", 1, false},
@@ -51,7 +51,7 @@ constexpr FieldSpec FIELD_SPECS[] = {
     {"extrude_speed_slider", "Extrude Speed", "mm/s", 1, false},
 };
 
-static_assert(sizeof(FIELD_SPECS) / sizeof(FIELD_SPECS[0]) ==
+static_assert(sizeof(kFieldSpecs) / sizeof(kFieldSpecs[0]) ==
                   static_cast<size_t>(MachineLimitsOverlay::Field::Count),
               "FIELD_SPECS must have one entry per Field");
 
@@ -60,7 +60,7 @@ static_assert(sizeof(FIELD_SPECS) / sizeof(FIELD_SPECS[0]) ==
 constexpr int SCV_DIVISOR = 10;
 
 /// Decimals shown for a scaled row. One is enough for 0.5 steps.
-constexpr int SCV_DECIMALS = 1;
+constexpr int kScvDecimals = 1;
 
 bool field_in_range(int raw) {
     return raw >= 0 && raw < static_cast<int>(MachineLimitsOverlay::Field::Count);
@@ -291,7 +291,7 @@ void MachineLimitsOverlay::update_display() {
     lv_subject_copy_string(&accel_to_decel_display_subject_, a2d_buf_);
 
     // Update square corner velocity display (one decimal: it is tuned in halves)
-    helix::format::format_speed_mm_s_float(current_limits_.square_corner_velocity, SCV_DECIMALS,
+    helix::format::format_speed_mm_s_float(current_limits_.square_corner_velocity, kScvDecimals,
                                            scv_buf_, sizeof(scv_buf_));
     lv_subject_copy_string(&square_corner_velocity_display_subject_, scv_buf_);
 }
@@ -378,7 +378,7 @@ void MachineLimitsOverlay::handle_scv_changed(int slider_pos) {
     // tuned in; everything downstream works in real mm/s.
     const double value = SliderScale{SCV_DIVISOR}.to_value(slider_pos);
     current_limits_.square_corner_velocity = value;
-    helix::format::format_speed_mm_s_float(value, SCV_DECIMALS, scv_buf_, sizeof(scv_buf_));
+    helix::format::format_speed_mm_s_float(value, kScvDecimals, scv_buf_, sizeof(scv_buf_));
     lv_subject_copy_string(&square_corner_velocity_display_subject_, scv_buf_);
     schedule_apply_limits();
 }
@@ -387,7 +387,7 @@ lv_obj_t* MachineLimitsOverlay::field_slider(Field field) {
     if (!overlay_root_) {
         return nullptr;
     }
-    return lv_obj_find_by_name(overlay_root_, FIELD_SPECS[static_cast<size_t>(field)].slider_name);
+    return lv_obj_find_by_name(overlay_root_, kFieldSpecs[static_cast<size_t>(field)].slider_name);
 }
 
 void MachineLimitsOverlay::handle_field_clicked(Field field) {
@@ -397,7 +397,7 @@ void MachineLimitsOverlay::handle_field_clicked(Field field) {
         return;
     }
 
-    const FieldSpec& spec = FIELD_SPECS[static_cast<size_t>(field)];
+    const FieldSpec& spec = kFieldSpecs[static_cast<size_t>(field)];
     const SliderScale scale{spec.divisor};
 
     // Bounds come from the slider, not from a second copy in this file. A range
@@ -435,7 +435,7 @@ void MachineLimitsOverlay::handle_keypad_value(Field field, double value) {
         return;
     }
 
-    const FieldSpec& spec = FIELD_SPECS[static_cast<size_t>(field)];
+    const FieldSpec& spec = kFieldSpecs[static_cast<size_t>(field)];
     const int pos = SliderScale{spec.divisor}.to_slider_clamped(
         value, lv_slider_get_min_value(slider), lv_slider_get_max_value(slider));
     lv_slider_set_value(slider, pos, LV_ANIM_OFF);
@@ -475,7 +475,7 @@ void MachineLimitsOverlay::schedule_apply_limits() {
     // Debounce slider changes: reset/create a 250ms one-shot timer.
     // Display subjects update immediately (user sees the number change),
     // but the G-code command only fires after 250ms of inactivity.
-    static constexpr uint32_t DEBOUNCE_MS = 250;
+    static constexpr uint32_t kDebounceMs = 250;
 
     if (apply_timer_) {
         lv_timer_reset(apply_timer_);
@@ -486,7 +486,7 @@ void MachineLimitsOverlay::schedule_apply_limits() {
                 self->apply_timer_ = nullptr;
                 self->apply_limits();
             },
-            DEBOUNCE_MS, this);
+            kDebounceMs, this);
         lv_timer_set_repeat_count(apply_timer_, 1);
     }
 }

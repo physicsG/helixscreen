@@ -87,20 +87,20 @@ TEST_CASE("BusThread serializes interleaved work", "[bt][slow]") {
     std::atomic<int> max_concurrent{0};
     std::atomic<int> completed{0};
 
-    constexpr int THREADS = 3;
-    constexpr int PER_THREAD = 20;
+    constexpr int kThreads = 3;
+    constexpr int kPerThread = 20;
 
     std::vector<std::thread> submitters;
-    submitters.reserve(THREADS);
+    submitters.reserve(kThreads);
 
     // Collect futures on the main thread to avoid racing on a shared container.
     std::mutex futures_mu;
     std::vector<std::future<void>> futures;
-    futures.reserve(THREADS * PER_THREAD);
+    futures.reserve(kThreads * kPerThread);
 
-    for (int t = 0; t < THREADS; ++t) {
+    for (int t = 0; t < kThreads; ++t) {
         submitters.emplace_back([&] {
-            for (int i = 0; i < PER_THREAD; ++i) {
+            for (int i = 0; i < kPerThread; ++i) {
                 auto fut = bt.submit([&](sd_bus*) {
                     int now = in_flight.fetch_add(1) + 1;
                     int prev_max = max_concurrent.load();
@@ -129,7 +129,7 @@ TEST_CASE("BusThread serializes interleaved work", "[bt][slow]") {
         REQUIRE_NOTHROW(f.get());
     }
 
-    REQUIRE(completed.load() == THREADS * PER_THREAD);
+    REQUIRE(completed.load() == kThreads * kPerThread);
     REQUIRE(max_concurrent.load() == 1);
     REQUIRE(in_flight.load() == 0);
 
@@ -171,13 +171,13 @@ TEST_CASE("BusThread concurrent start+submit: on_thread never races thread_id_",
     for (int iter = 0; iter < 20; ++iter) {
         BusThread bt(nullptr);
         std::atomic<bool> go{false};
-        constexpr int SUBMITTERS = 4;
+        constexpr int kSubmitters = 4;
         std::vector<std::thread> threads;
         std::atomic<int> on_thread_true{0};
         std::atomic<int> on_thread_total{0};
         std::mutex fm;
         std::vector<std::future<void>> futs;
-        for (int i = 0; i < SUBMITTERS; ++i) {
+        for (int i = 0; i < kSubmitters; ++i) {
             threads.emplace_back([&] {
                 while (!go.load()) { /* spin */
                 }
@@ -197,8 +197,8 @@ TEST_CASE("BusThread concurrent start+submit: on_thread never races thread_id_",
         for (auto& f : futs)
             REQUIRE_NOTHROW(f.get());
         bt.stop();
-        REQUIRE(on_thread_total.load() == SUBMITTERS);
-        REQUIRE(on_thread_true.load() == SUBMITTERS);
+        REQUIRE(on_thread_total.load() == kSubmitters);
+        REQUIRE(on_thread_true.load() == kSubmitters);
     }
 }
 
@@ -214,9 +214,9 @@ TEST_CASE("BusThread submit racing with stop: no orphan tasks", "[bt][bus_thread
         std::vector<std::future<void>> futs;
         std::mutex fm;
         std::atomic<bool> go{false};
-        constexpr int SUBMITTERS = 3;
+        constexpr int kSubmitters = 3;
         std::vector<std::thread> threads;
-        for (int i = 0; i < SUBMITTERS; ++i) {
+        for (int i = 0; i < kSubmitters; ++i) {
             threads.emplace_back([&] {
                 while (!go.load()) { /* spin */
                 }

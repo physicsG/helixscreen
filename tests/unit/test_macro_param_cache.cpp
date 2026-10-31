@@ -302,3 +302,95 @@ TEST_CASE("MacroParamCache generation moves whenever the macro set may have chan
 
     cache.clear();
 }
+
+// ============================================================================
+// Which temperature targets a macro sets
+// ============================================================================
+
+using helix::template_temperature_use;
+
+TEST_CASE("template_temperature_use reads heater and fan targets", "[macro_param_cache][m141]") {
+    const auto use =
+        template_temperature_use("SET_HEATER_TEMPERATURE HEATER=Chamber TARGET={params.S}\n"
+                                 "  set_temperature_fan_target temperature_fan=exhaust target=30\n"
+                                 "SET_HEATER_TEMPERATURE HEATER={printer.foo.heater} TARGET=0\n");
+    CHECK(use.targets ==
+          std::vector<std::string>{"heater chamber", "temperature_fan exhaust", "heater *"});
+    CHECK(use.commands == std::vector<std::string>{"SET_HEATER_TEMPERATURE",
+                                                   "SET_TEMPERATURE_FAN_TARGET",
+                                                   "SET_HEATER_TEMPERATURE"});
+}
+
+TEST_CASE("template_temperature_use finds commands behind Jinja blocks",
+          "[macro_param_cache][m141]") {
+    const auto use = template_temperature_use("{% set s = params.S|default(0)|int %}\n"
+                                              "{% if s > 40 %} _CHAMBER_HEAT S={s} {% endif %}\n"
+                                              "{# a comment #}\n"
+                                              "RESPOND MSG=\"ok\"\n");
+    CHECK(use.targets.empty());
+    CHECK(use.commands == std::vector<std::string>{"_CHAMBER_HEAT", "RESPOND"});
+}
+
+namespace {
+
+/// A configfile with an M141 and the macros it may call. Bodies are what each
+/// test case sets; a null body leaves the macro listed but unreadable.
+void populate_m141(const nlohmann::json& macros) {
+    nlohmann::json config = nlohmann::json::object();
+    std::unordered_set<std::string> known;
+    for (const auto& [name, body] : macros.items()) {
+        known.insert(name);
+        if (!body.is_null()) {
+            config["gcode_macro " + name] = {{"gcode", body}};
+        }
+    }
+    MacroParamCache::instance().populate_from_configfile(config, known);
+}
+
+} // namespace
+
+TEST_CASE("macro_sets_target answers for the chamber heater", "[macro_param_cache][m141]") {
+    auto& cache = MacroParamCache::instance();
+    const std::string heater = "heater_generic chamber";
+
+    SECTION("a fan-only M141 never reaches the heater") {
+        populate_m141({{"M141", "SET_TEMPERATURE_FAN_TARGET temperature_fan=chamber "
+                                "target={params.S|default(0)}"}});
+        CHECK(cache.macro_sets_target("m141", heater) == std::optional<bool>(false));
+        // The fan it names is a target too, just not this one.
+        CHECK(cache.macro_sets_target("M141", "temperature_fan chamber") ==
+              std::optional<bool>(true));
+    }
+    SECTION("an M141 that sets the heater reaches it") {
+        populate_m141({{"M141", "SET_HEATER_TEMPERATURE HEATER=chamber TARGET={params.S}"}});
+        CHECK(cache.macro_sets_target("M141", heater) == std::optional<bool>(true));
+    }
+    SECTION("a heater named by a template may be this one") {
+        populate_m141({{"M141", "SET_HEATER_TEMPERATURE HEATER={h} TARGET={params.S}"}});
+        CHECK(cache.macro_sets_target("M141", heater) == std::optional<bool>(true));
+    }
+    SECTION("a call into another macro is followed") {
+        populate_m141(
+            {{"M141", "{% if params.S|int > 0 %} _CHAMBER_SET S={params.S} {% endif %}"},
+             {"_CHAMBER_SET", "SET_HEATER_TEMPERATURE HEATER=chamber TARGET={params.S}"}});
+        CHECK(cache.macro_sets_target("M141", heater) == std::optional<bool>(true));
+    }
+    SECTION("a call into a macro with no readable body is unknown") {
+        populate_m141({{"M141", "_CHAMBER_SET S={params.S}"}, {"_CHAMBER_SET", nullptr}});
+        CHECK_FALSE(cache.macro_sets_target("M141", heater).has_value());
+    }
+    SECTION("macros that call each other do not loop") {
+        populate_m141({{"M141", "_A"}, {"_A", "_B"}, {"_B", "_A"}});
+        CHECK(cache.macro_sets_target("M141", heater) == std::optional<bool>(false));
+    }
+    SECTION("an M141 with no readable body is unknown") {
+        populate_m141({{"M141", nullptr}});
+        CHECK_FALSE(cache.macro_sets_target("M141", heater).has_value());
+    }
+    SECTION("a bare heater name matches a bare HEATER=") {
+        populate_m141({{"M141", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0"}});
+        CHECK(cache.macro_sets_target("M141", "extruder") == std::optional<bool>(true));
+        CHECK(cache.macro_sets_target("M141", heater) == std::optional<bool>(false));
+    }
+    cache.clear();
+}

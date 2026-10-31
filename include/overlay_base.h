@@ -60,6 +60,7 @@
 #include <spdlog/spdlog.h>
 
 #include <functional>
+#include <optional>
 
 // Include for SubjectManager (needed for deinit_subjects_base)
 #include "subject_managed_panel.h"
@@ -323,6 +324,19 @@ class OverlayBase : public ViewLifecycleBase {
     virtual void before_show() {}
 
     /**
+     * @brief Called when a destroy_on_close() overlay leaves the stack
+     *
+     * Runs from the close callback show() registers, whatever popped the
+     * overlay (its own Back, a backdrop tap, another screen's navigation),
+     * before the tree is destroyed. An overlay that is shown again while
+     * its slide-out is still running stays open, and its next close runs
+     * this once.
+     *
+     * Default implementation does nothing.
+     */
+    virtual void on_dismissed() {}
+
+    /**
      * @brief Called after widget tree is destroyed by destroy_overlay_ui()
      *
      * Override to null derived-class widget pointers so that create()
@@ -399,6 +413,10 @@ class OverlayBase : public ViewLifecycleBase {
     /// a root freed with its screen still reads non-null in overlay_root_.
     lv_obj_t* shown_root_ = nullptr;
     helix::ui::WidgetRef shown_root_ref_;
+
+    /// Expires only with this object: destroy_overlay_ui() hands it to
+    /// teardown_overlay_ui() as the owner that must outlive its drain.
+    helix::AsyncLifetimeGuard teardown_owner_;
 };
 
 /**
@@ -446,6 +464,13 @@ struct TeardownHooks {
     std::function<void()> before_delete;
     /// Step 7 — free already queued; tree hidden and off-tree but still alive.
     std::function<void()> after_delete;
+    /// The object @p root lives in. It must outlive the step-1 drain: the
+    /// teardown keeps writing through @p root and runs the hooks after it. An
+    /// owner freed by the drain is a UI contract breach, and the teardown stops
+    /// there. Every OverlayBase passes its own (destroy_overlay_ui()), which
+    /// covers the heap-owned ones such as PluginSettingsOverlay, held by
+    /// PluginHost.
+    std::optional<helix::LifetimeToken> owner{};
 
     static TeardownHooks before(std::function<void()> fn) {
         return {std::move(fn), nullptr};
@@ -466,7 +491,9 @@ struct TeardownHooks {
  *
  * Performs, in order:
  * 1. Drains the UpdateQueue under a scoped freeze while all pointers are
- *    still valid (observe<int> callbacks capture raw panel pointers)
+ *    still valid (observe<int> callbacks capture raw panel pointers), and
+ *    stops there when that drain tore the same root down (leaving @p root
+ *    null, or pointing at a tree re-created after it)
  * 2. Unregisters the close callback and overlay instance from
  *    NavigationManager (before deletion, so a manual destroy while the panel
  *    is still stacked cannot double-invoke)
@@ -487,6 +514,11 @@ struct TeardownHooks {
  * The owner object (subjects, state) survives — only the widget tree is
  * destroyed; the next open re-creates it.
  *
+ * The owner must outlive the step-1 drain: @p root and the hooks point into it.
+ * An owner that passes TeardownHooks::owner is checked after the drain. The AMS
+ * panel teardowns pass none: their roots live in file statics and their hooks
+ * look the panel up again, so no drain can free what they write through.
+ *
  * @param root Root widget to tear down; nulled on return
  * @param owner_name Logged and breadcrumbed owner name
  * @param how Delete strategy (see TeardownDelete)
@@ -494,8 +526,9 @@ struct TeardownHooks {
  *                     null when the caller keeps no second copy, and may
  *                     point at @p root itself
  * @param hooks Owner hooks for steps 4 and 7 (either may be empty)
- * @return true if a teardown happened; false when @p root was null (no
- *         hooks run in that case)
+ * @return true if a teardown happened; false when @p root was null, or a
+ *         teardown the drain ran completed it first (no hooks run here in
+ *         either case)
  */
 bool teardown_overlay_ui(lv_obj_t*& root, const char* owner_name, TeardownDelete how,
                          lv_obj_t** cached_panel = nullptr, TeardownHooks hooks = {});

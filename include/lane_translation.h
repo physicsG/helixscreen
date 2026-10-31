@@ -42,7 +42,7 @@ enum class LegacyLockKeys {
 ///   - a binding change carries the spool's own values, so a commit that
 ///     changes spoolman_id states the binding and nothing else, in both
 ///     directions;
-///   - a cleared field lands on a sentinel (AMS_DEFAULT_SLOT_COLOR, a
+///   - a cleared field lands on a sentinel (kAmsDefaultSlotColor, a
 ///     negative weight) that means "no reading", never a chosen value;
 ///   - catalog_id and product_name arrive from the editor's auto-highlighted
 ///     product, which is why AmsEditOverlay::is_dirty() excludes them too.
@@ -72,7 +72,7 @@ enum class LegacyLockKeys {
 /// so the field comes off whatever it stood over and the machine's own
 /// reading shows through at once (prestonbrown/helixscreen#1661).
 ///
-/// Walks FIELD_ROSTER by kind, so an identity field added there joins by its
+/// Walks kFieldRoster by kind, so an identity field added there joins by its
 /// kind with no line here. Two statements are not field clears and stay: a
 /// colour's name, because a pick with no name must keep displacing a
 /// contradictory name the machine reports; and the spoolman binding, because
@@ -92,6 +92,10 @@ void withdraw_cleared_fields(Observation& standing, const Observation& edit);
 /// The record's identity as an Observation, tagged by classify_declaration().
 /// Only the fields the record actually carries are observed.
 [[nodiscard]] Observation declared_from_record(const FilamentSlotOverride& record);
+
+/// Write every field @p obs carries onto @p record, leaving the rest standing:
+/// declared_from_record() run backwards. Declarations are untouched.
+void amend_record(FilamentSlotOverride& record, const Observation& obs);
 
 /// Split a stored record into the several sources it may declare independently.
 ///
@@ -239,6 +243,9 @@ inline constexpr std::chrono::system_clock::time_point k_unknown_stamp_before =
 /// Whether @p record declares its material as the user's own choice.
 [[nodiscard]] bool declares_material(const FilamentSlotOverride& record);
 
+/// Whether @p record declares its spool name as the user's own choice.
+[[nodiscard]] bool declares_spool_name(const FilamentSlotOverride& record);
+
 /// Withdraw @p record's colour and material declarations, leaving both values
 /// where they are.
 void withdraw_color_and_material(FilamentSlotOverride& record);
@@ -258,6 +265,17 @@ void withdraw_spool_owned_declarations(FilamentSlotOverride& record);
 /// clears the binding, passes through as @p edited has it.
 [[nodiscard]] SlotInfo keep_spool_owned_identity(const SlotInfo& original, const SlotInfo& edited,
                                                  const std::optional<Observation>& spool_record);
+
+/// Blank @p edited's spool name when the edit re-declared the spool under it.
+///
+/// A spool name describes the spool the brand, material and catalog product
+/// named, a free-form name the user typed as much as a vendor's product line.
+/// An edit that moves any of them (brand and material compared without case)
+/// and leaves the name as it was would label the new spool with the old one's
+/// name. A first catalog pick is not a move: the editor adopts one on
+/// every Save. A name the edit itself changed stands, and so does any name on
+/// a linked lane, which is the spool's own. Returns true when it blanked.
+bool drop_stale_spool_name(const SlotInfo& original, SlotInfo& edited);
 
 /// The roster names, as `helix_declared` spells them, of the fields a linked
 /// spool owns that @p edited moved away from @p original and @p applied does
@@ -296,14 +314,14 @@ struct ColorReading {
 /// the key empty, and AFC's SET_COLOR with no value stores the bare prefix.
 ///
 /// This answers "what did the producer say", which is not the question
-/// is_declarable_color (declared below) answers. AMS_DEFAULT_SLOT_COLOR
+/// is_declarable_color (declared below) answers. kAmsDefaultSlotColor
 /// written on a wire is a producer stating a grey and reads as Observed here;
 /// the same value sitting in a struct is that struct's "no reading" sentinel
 /// and is refused there.
 [[nodiscard]] ColorReading read_lane_color(const std::string& raw);
 
 /// True when a colour resting in a SlotInfo-shaped struct is a reading rather
-/// than that struct's own "no colour" default. AMS_DEFAULT_SLOT_COLOR is where
+/// than that struct's own "no colour" default. kAmsDefaultSlotColor is where
 /// a cleared slot and a colourless record both land, so filing it would hand
 /// every one of them a declared grey.
 ///

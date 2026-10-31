@@ -30,7 +30,7 @@ enum class LaneState {
 /// Fill level for a lane that has filament but no weight data. One named
 /// constant instead of the bare 1.0f that used to sit in display_fill_level()
 /// and three places in ui_spool_canvas.cpp.
-inline constexpr float ASSUMED_FILL_LEVEL = 1.0f;
+inline constexpr float kAssumedFillLevel = 1.0f;
 
 /**
  * @brief Does this lane still carry an identity after being ejected?
@@ -101,7 +101,7 @@ inline constexpr float ASSUMED_FILL_LEVEL = 1.0f;
     if (slot.total_weight_g > 0.0f && slot.remaining_weight_g >= 0.0f) {
         return slot.remaining_weight_g / slot.total_weight_g;
     }
-    return ASSUMED_FILL_LEVEL;
+    return kAssumedFillLevel;
 }
 
 } // namespace helix::ui

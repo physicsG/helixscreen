@@ -543,8 +543,8 @@ _count_apply_install_steps() {
     update_mode=false clean_mode=false local_tarball=""
     [ $# -eq 0 ] || export "$@"
     local fn
-    for fn in $(declare -f apply_install install_libraries_step | grep -oE '[a-z_][a-z0-9_]*' | sort -u); do
-        case "$fn" in apply_install|install_libraries_step|step|step_done|step_skip|step_fail|plan_*|_is_self_update) continue ;; esac
+    for fn in $(declare -f apply_install install_libraries_step download_step | grep -oE '[a-z_][a-z0-9_]*' | sort -u); do
+        case "$fn" in apply_install|install_libraries_step|download_step|step|step_done|step_skip|step_fail|plan_*|_is_self_update) continue ;; esac
         [ "$(type -t "$fn")" = function ] && eval "$fn() { :; }"
     done
     platform=pi; version=v1.2.3; TMP_DIR="$BATS_TEST_TMPDIR/none"

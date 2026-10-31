@@ -36,6 +36,7 @@ struct MultiSelectItem {
     std::string key;       ///< Programmatic key (defaults to label if empty)
     std::string label;     ///< Display text
     bool selected = false; ///< Initial selection state
+    bool enabled = true;   ///< A disabled row shows dimmed and ignores taps
 };
 
 /**
@@ -114,6 +115,16 @@ class UiMultiselect {
      */
     void set_on_change(MultiSelectCallback cb);
 
+    /**
+     * @brief Cap how many rows may be selected at once (0 = no cap)
+     *
+     * A tap past a cap of one moves the selection to the tapped row; past a
+     * larger cap it is ignored.
+     */
+    void set_max_selected(size_t max) {
+        max_selected_ = max;
+    }
+
     /// Whether the widget is attached to a container
     bool is_attached() const {
         return container_ != nullptr;
@@ -129,6 +140,7 @@ class UiMultiselect {
         std::string key;
         std::string label;
         bool selected = false;
+        bool enabled = true;
         lv_obj_t* row = nullptr;
         lv_obj_t* checkbox = nullptr;
         UiMultiselect* owner = nullptr; // Back-pointer for static callback
@@ -137,6 +149,7 @@ class UiMultiselect {
     lv_obj_t* container_ = nullptr;
     std::vector<std::unique_ptr<RowData>> rows_;
     MultiSelectCallback on_change_;
+    size_t max_selected_ = 0;
 
     lv_obj_t* create_row(const MultiSelectItem& item);
     void clear_rows();

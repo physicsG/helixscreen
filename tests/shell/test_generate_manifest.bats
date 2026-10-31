@@ -128,7 +128,7 @@ teardown() {
     [ "${#output}" -eq 64 ]
 }
 
-@test "the ESP32 firmware zip never becomes a manifest platform" {
+@test "the ESP32 firmware zip is listed as esp32-ktouch with url, sha256 and size" {
     printf 'PK\003\004dummyzip' > "$TEST_DIR/helixscreen-esp32-ktouch-v0.9.5.zip"
     bash "$SCRIPT" \
         --version "0.9.5" --tag "v0.9.5" --notes "Test" \
@@ -138,7 +138,54 @@ teardown() {
 
     run jq -r '.assets | keys | join(" ")' "$TEST_DIR/manifest.json"
     [ "$status" -eq 0 ]
-    [ "$output" = "ad5m k1 pi pi32" ] || fail "manifest platforms: $output"
+    [ "$output" = "ad5m esp32-ktouch k1 pi pi32" ] || fail "manifest platforms: $output"
+
+    run jq -r '.assets["esp32-ktouch"].url' "$TEST_DIR/manifest.json"
+    [ "$output" = "https://releases.helixscreen.org/dev/helixscreen-esp32-ktouch-v0.9.5.zip" ] || fail "url: $output"
+
+    expected=$(sha256sum "$TEST_DIR/helixscreen-esp32-ktouch-v0.9.5.zip" | cut -d' ' -f1)
+    run jq -r '.assets["esp32-ktouch"].sha256' "$TEST_DIR/manifest.json"
+    [ "$output" = "$expected" ] || fail "sha256: $output"
+
+    run jq -r '.assets["esp32-ktouch"].size' "$TEST_DIR/manifest.json"
+    [ "$output" = "$(wc -c < "$TEST_DIR/helixscreen-esp32-ktouch-v0.9.5.zip" | tr -d ' ')" ] || fail "size: $output"
+
+    # An ESP32 image is flashed, never self-installed: no zip_* fields that an
+    # updater could mistake for an installable package.
+    run jq -e '.assets["esp32-ktouch"] | has("zip_url")' "$TEST_DIR/manifest.json"
+    [ "$status" -ne 0 ]
+}
+
+@test "the existing platforms are unchanged by an ESP32 zip being present" {
+    bash "$SCRIPT" --version "0.9.5" --tag "v0.9.5" --notes "Test" \
+        --dir "$TEST_DIR" --base-url "https://releases.helixscreen.org/dev" \
+        --output "$TEST_DIR/before.json"
+    printf 'PK\003\004dummyzip' > "$TEST_DIR/helixscreen-esp32-ktouch-v0.9.5.zip"
+    bash "$SCRIPT" --version "0.9.5" --tag "v0.9.5" --notes "Test" \
+        --dir "$TEST_DIR" --base-url "https://releases.helixscreen.org/dev" \
+        --output "$TEST_DIR/after.json"
+
+    run jq -n --slurpfile b "$TEST_DIR/before.json" --slurpfile a "$TEST_DIR/after.json" \
+        '($b[0].assets) == ($a[0].assets | del(.["esp32-ktouch"]))'
+    [ "$output" = "true" ]
+}
+
+@test "an ESP32 zip of another version is not listed" {
+    printf 'PK\003\004dummyzip' > "$TEST_DIR/helixscreen-esp32-ktouch-v0.9.4.zip"
+    bash "$SCRIPT" --version "0.9.5" --tag "v0.9.5" --notes "Test" \
+        --dir "$TEST_DIR" --base-url "https://releases.helixscreen.org/dev" \
+        --output "$TEST_DIR/manifest.json"
+    run jq -e '.assets | has("esp32-ktouch")' "$TEST_DIR/manifest.json"
+    [ "$status" -ne 0 ]
+}
+
+@test "a directory holding only an ESP32 zip is still an error" {
+    rm -f "$TEST_DIR"/*.tar.gz "$TEST_DIR"/*.zip
+    printf 'PK\003\004dummyzip' > "$TEST_DIR/helixscreen-esp32-ktouch-v0.9.5.zip"
+    run bash "$SCRIPT" --version "0.9.5" --tag "v0.9.5" --notes "Test" \
+        --dir "$TEST_DIR" --base-url "https://releases.helixscreen.org/dev" \
+        --output "$TEST_DIR/manifest.json"
+    [ "$status" -ne 0 ]
 }
 
 @test "--no-include-zip suppresses zip_url even when a .zip is present" {

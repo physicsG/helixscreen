@@ -72,6 +72,19 @@ constexpr bool job_holds_machine(PrintState state) {
 }
 
 /**
+ * @brief Is a print job running, paused included?
+ *
+ * Narrower than job_holds_machine(): `Preparing` is excluded, since the printer
+ * has not yet reported the job. This is when Klipper acts on a filament sensor
+ * and when a reading of no filament movement means a jam.
+ */
+namespace helix {
+constexpr bool print_job_running(PrintState state) {
+    return state == PrintState::Printing || state == PrintState::Paused;
+}
+} // namespace helix
+
+/**
  * @brief Would a print refuse a toolhead-motion filament op right now?
  *
  * The single authority for that question, in both directions. The backend gate

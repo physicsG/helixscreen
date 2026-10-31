@@ -1,0 +1,402 @@
+{
+  "buckets": {
+    "fans": [
+      "heater_fan hotend_fan",
+      "fan"
+    ],
+    "filament_sensor_names": [
+      "filament_switch_sensor runout_sensor"
+    ],
+    "has_accelerometer": true,
+    "has_fan_feedback": false,
+    "has_filament_sensors": true,
+    "has_led": true,
+    "has_led_effects": true,
+    "has_probe": true,
+    "has_speaker": true,
+    "has_width_sensors": true,
+    "heaters": [
+      "heater_bed",
+      "extruder"
+    ],
+    "leds": [
+      "neopixel chamber_led"
+    ],
+    "load_cells": [],
+    "printer_objects": [
+      "heater_bed",
+      "extruder",
+      "bed_mesh",
+      "output_pin beeper",
+      "firmware_retraction",
+      "temperature_sensor chamber",
+      "heater_fan hotend_fan",
+      "fan",
+      "temperature_sensor raspberry_pi",
+      "neopixel chamber_led",
+      "led_effect breathing",
+      "led_effect fire_comet",
+      "led_effect rainbow",
+      "led_effect static_white",
+      "exclude_object",
+      "gcode_macro START_PRINT",
+      "gcode_macro END_PRINT",
+      "gcode_macro PAUSE",
+      "gcode_macro RESUME",
+      "gcode_macro CANCEL_PRINT",
+      "gcode_macro LOAD_FILAMENT",
+      "gcode_macro UNLOAD_FILAMENT",
+      "gcode_macro BED_MESH_CALIBRATE",
+      "gcode_macro G28",
+      "gcode_macro M600",
+      "gcode_macro _SYSTEM_MACRO",
+      "gcode_macro SET_PAUSE_NEXT_LAYER",
+      "gcode_macro SET_PAUSE_AT_LAYER",
+      "gcode_macro SET_PRINT_STATS_INFO",
+      "gcode_macro LIGHTS_ON",
+      "gcode_macro LIGHTS_OFF",
+      "gcode_macro LIGHTS_TOGGLE",
+      "gcode_macro LED_PARTY",
+      "gcode_macro LED_NIGHTLIGHT",
+      "mcu",
+      "mcu EBBCan",
+      "bme280 chamber",
+      "htu21d dryer",
+      "hall_filament_width_sensor",
+      "timelapse",
+      "mmu",
+      "cartographer",
+      "probe",
+      "filament_switch_sensor runout_sensor"
+    ],
+    "sensors": [
+      "temperature_sensor chamber",
+      "temperature_sensor raspberry_pi",
+      "bme280 chamber",
+      "htu21d dryer"
+    ],
+    "width_sensor_objects": [
+      "hall_filament_width_sensor"
+    ]
+  },
+  "managers": {
+    "accel": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "adxl345",
+          "role": "none",
+          "sensor_name": "adxl345",
+          "type": "adxl345"
+        }
+      ]
+    },
+    "filament": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "filament_switch_sensor runout_sensor",
+          "role": "runout",
+          "sensor_name": "runout_sensor",
+          "type": "switch"
+        }
+      ]
+    },
+    "humidity": {
+      "count": 2,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "bme280 chamber",
+          "role": "chamber",
+          "sensor_name": "chamber",
+          "type": "bme280"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "htu21d dryer",
+          "role": "dryer",
+          "sensor_name": "dryer",
+          "type": "htu21d"
+        }
+      ]
+    },
+    "input": {
+      "count": 0,
+      "entries": []
+    },
+    "load_cell": {
+      "count": 0,
+      "entries": []
+    },
+    "probe": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "cartographer",
+          "role": "z_probe",
+          "sensor_name": "cartographer",
+          "type": "cartographer"
+        }
+      ]
+    },
+    "temperature": {
+      "count": 4,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "temperature_sensor chamber",
+          "role": "chamber",
+          "sensor_name": "chamber",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "temperature_sensor raspberry_pi",
+          "role": "host",
+          "sensor_name": "raspberry_pi",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "bme280 chamber",
+          "role": "chamber",
+          "sensor_name": "chamber",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "htu21d dryer",
+          "role": "auxiliary",
+          "sensor_name": "dryer",
+          "type": "temperature_sensor"
+        }
+      ]
+    },
+    "width": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "hall_filament_width_sensor",
+          "role": "flow_compensation",
+          "sensor_name": "hall",
+          "type": "hall"
+        }
+      ]
+    }
+  },
+  "subscriptions": {
+    "bed_mesh": [
+      "profile_name",
+      "probed_matrix",
+      "mesh_min",
+      "mesh_max",
+      "mesh_params",
+      "profiles"
+    ],
+    "bme280 chamber": [
+      "temperature",
+      "humidity"
+    ],
+    "display_status": [
+      "message",
+      "progress"
+    ],
+    "exclude_object": [
+      "objects",
+      "excluded_objects",
+      "current_object"
+    ],
+    "extruder": [
+      "temperature",
+      "target",
+      "power",
+      "pressure_advance",
+      "nozzle_diameter",
+      "nozzle_volume_type"
+    ],
+    "fan": [
+      "speed"
+    ],
+    "filament_switch_sensor runout_sensor": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "firmware_retraction": [
+      "retract_length",
+      "retract_speed",
+      "unretract_extra_length",
+      "unretract_speed"
+    ],
+    "gcode_macro SET_PRINT_STATS_INFO": [
+      "pause_next_layer",
+      "pause_at_layer"
+    ],
+    "gcode_macro START_PRINT": [
+      "preparation_done"
+    ],
+    "gcode_macro _HELIX_STATE": [
+      "print_started"
+    ],
+    "gcode_macro _START_PRINT": [
+      "print_started"
+    ],
+    "gcode_move": [
+      "gcode_position",
+      "speed",
+      "speed_factor",
+      "extrude_factor",
+      "homing_origin"
+    ],
+    "hall_filament_width_sensor": [
+      "Diameter",
+      "Raw"
+    ],
+    "heater_bed": [
+      "temperature",
+      "target",
+      "power"
+    ],
+    "heater_fan hotend_fan": [
+      "speed"
+    ],
+    "htu21d dryer": [
+      "temperature",
+      "humidity"
+    ],
+    "idle_timeout": [
+      "state"
+    ],
+    "led_effect breathing": [
+      "enabled"
+    ],
+    "led_effect fire_comet": [
+      "enabled"
+    ],
+    "led_effect rainbow": [
+      "enabled"
+    ],
+    "led_effect static_white": [
+      "enabled"
+    ],
+    "manual_probe": [
+      "is_active",
+      "z_position"
+    ],
+    "mcu": [
+      "last_stats"
+    ],
+    "mcu EBBCan": [
+      "last_stats"
+    ],
+    "mmu": [
+      "gate",
+      "tool",
+      "filament",
+      "action",
+      "reason_for_pause",
+      "filament_pos",
+      "gate_status",
+      "gate_color_rgb",
+      "gate_color",
+      "gate_material",
+      "gate_name",
+      "gate_vendor",
+      "gate_filament_name",
+      "gate_spool_id",
+      "gate_temperature",
+      "has_bypass",
+      "num_units",
+      "num_gates",
+      "unit_gate_counts",
+      "unit",
+      "ttg_map",
+      "endless_spool_groups",
+      "endless_spool_enabled",
+      "sensors",
+      "bowden_progress",
+      "clog_detection_enabled",
+      "encoder",
+      "flowguard",
+      "drying_state",
+      "sync_feedback_state",
+      "sync_feedback_bias_modelled",
+      "sync_feedback_bias_raw",
+      "sync_feedback_flow_rate",
+      "sync_drive",
+      "spoolman_support",
+      "pending_spool_id",
+      "espooler_active",
+      "espooler",
+      "tangle_prevention",
+      "num_toolchanges",
+      "slicer_tool_map",
+      "toolchange_purge_volume",
+      "leds"
+    ],
+    "motion_report": [
+      "live_position",
+      "live_velocity",
+      "live_extruder_velocity"
+    ],
+    "neopixel chamber_led": [
+      "color_data"
+    ],
+    "pause_resume": [
+      "is_paused"
+    ],
+    "print_stats": [
+      "state",
+      "filename",
+      "filament_used",
+      "print_duration",
+      "total_duration",
+      "estimated_time",
+      "info",
+      "message",
+      "power_loss"
+    ],
+    "probe": [
+      "last_query",
+      "last_z_result",
+      "z_offset"
+    ],
+    "stepper_enable": [
+      "steppers"
+    ],
+    "temperature_sensor chamber": [
+      "temperature",
+      "humidity"
+    ],
+    "temperature_sensor raspberry_pi": [
+      "temperature",
+      "humidity"
+    ],
+    "toolhead": [
+      "position",
+      "homed_axes",
+      "kinematics",
+      "extruder",
+      "max_velocity",
+      "axis_minimum",
+      "axis_maximum"
+    ],
+    "virtual_sdcard": [
+      "progress",
+      "layer",
+      "layer_count",
+      "is_active",
+      "file_position",
+      "file_path"
+    ],
+    "webhooks": [
+      "state",
+      "state_message"
+    ]
+  }
+}

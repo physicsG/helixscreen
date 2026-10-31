@@ -47,6 +47,10 @@ class SoundManager {
   public:
     static SoundManager& instance();
 
+    /// Whether boot plays the startup chime. A --test (mock) run stays silent; every other
+    /// sound still plays.
+    [[nodiscard]] static bool plays_startup_sound(bool test_mode);
+
     // Prevent copying
     SoundManager(const SoundManager&) = delete;
     SoundManager& operator=(const SoundManager&) = delete;

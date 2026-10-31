@@ -1844,3 +1844,100 @@ TEST_CASE("set_existing_value leaves duplicate stanzas alone", "[config_manager]
                             "[update_manager helixscreen]\ntype: web\n";
     CHECK(set_channel(dup, "beta") == dup);
 }
+
+// ============================================================================
+// find_section_file: where Moonraker reads a section from
+// ============================================================================
+
+namespace {
+
+constexpr const char* kHelixSection = "update_manager helixscreen";
+const std::string kStanzaText = "[update_manager helixscreen]\ntype: web\nchannel: stable\n";
+const std::string kServer = "[server]\nhost: 0.0.0.0\n";
+
+std::string find_stanza(const std::map<std::string, std::string>& files) {
+    return MoonrakerConfigManager::find_section_file(files, "moonraker.conf", kHelixSection);
+}
+
+} // namespace
+
+TEST_CASE("find_section_file reads the stanza from moonraker.conf itself",
+          "[config_manager][update_channel_sync]") {
+    CHECK(find_stanza({{"moonraker.conf", kServer + kStanzaText}}) == "moonraker.conf");
+}
+
+TEST_CASE("find_section_file follows a direct include", "[config_manager][update_channel_sync]") {
+    CHECK(find_stanza({{"moonraker.conf", kServer + "[include mainsail.conf]\n"},
+                       {"mainsail.conf", kStanzaText}}) == "mainsail.conf");
+}
+
+TEST_CASE("find_section_file resolves an include against the including file's directory",
+          "[config_manager][update_channel_sync]") {
+    // conf.d/a.conf names b.conf, which is conf.d/b.conf, never the root's b.conf.
+    CHECK(find_stanza({{"moonraker.conf", "[include conf.d/a.conf]\n"},
+                       {"conf.d/a.conf", "[include b.conf]\n"},
+                       {"conf.d/b.conf", kStanzaText},
+                       {"b.conf", "[server]\n"}}) == "conf.d/b.conf");
+}
+
+TEST_CASE("find_section_file expands a glob include", "[config_manager][update_channel_sync]") {
+    const std::map<std::string, std::string> files = {
+        {"moonraker.conf", kServer + "[include conf.d/*.conf]\n"},
+        {"conf.d/fluidd.conf", "[update_manager fluidd]\ntype: web\n"},
+        {"conf.d/helix.conf", kStanzaText},
+        {"conf.d/nested/other.conf", "[update_manager other]\n"},
+    };
+    CHECK(find_stanza(files) == "conf.d/helix.conf");
+
+    SECTION("a single star never descends into a subdirectory") {
+        auto nested = files;
+        nested.erase("conf.d/helix.conf");
+        nested["conf.d/nested/other.conf"] = kStanzaText;
+        CHECK(find_stanza(nested).empty());
+    }
+}
+
+TEST_CASE("find_section_file follows a nested include", "[config_manager][update_channel_sync]") {
+    CHECK(find_stanza({{"moonraker.conf", "[include mainsail.conf]\n"},
+                       {"mainsail.conf", "[include helix/updates.conf]\n"},
+                       {"helix/updates.conf", kStanzaText}}) == "helix/updates.conf");
+}
+
+TEST_CASE("find_section_file stops at an include cycle", "[config_manager][update_channel_sync]") {
+    CHECK(find_stanza({{"moonraker.conf", "[include a.conf]\n"},
+                       {"a.conf", "[include b.conf]\n"},
+                       {"b.conf", "[include a.conf]\n" + kStanzaText}}) == "b.conf");
+    CHECK(find_stanza({{"moonraker.conf", "[include moonraker.conf]\n" + kServer}}).empty());
+}
+
+TEST_CASE("find_section_file is empty when no file reached defines the stanza",
+          "[config_manager][update_channel_sync]") {
+    SECTION("no file defines it") {
+        CHECK(find_stanza({{"moonraker.conf", kServer + "[include mainsail.conf]\n"},
+                           {"mainsail.conf", "[update_manager mainsail]\n"}})
+                  .empty());
+    }
+    SECTION("only a file nothing includes defines it") {
+        CHECK(find_stanza({{"moonraker.conf", kServer}, {"mainsail.conf", kStanzaText}}).empty());
+    }
+    SECTION("a commented-out include reads nothing") {
+        CHECK(find_stanza({{"moonraker.conf", kServer + "#[include mainsail.conf]\n"},
+                           {"mainsail.conf", kStanzaText}})
+                  .empty());
+    }
+    SECTION("no root file") {
+        CHECK(find_stanza({{"mainsail.conf", kStanzaText}}).empty());
+    }
+}
+
+TEST_CASE("find_section_file names the file Moonraker reads the stanza from last",
+          "[config_manager][update_channel_sync]") {
+    SECTION("an include after moonraker.conf's own stanza overrides it") {
+        CHECK(find_stanza({{"moonraker.conf", kStanzaText + "[include mainsail.conf]\n"},
+                           {"mainsail.conf", kStanzaText}}) == "mainsail.conf");
+    }
+    SECTION("moonraker.conf's stanza after the include overrides the included one") {
+        CHECK(find_stanza({{"moonraker.conf", "[include mainsail.conf]\n" + kStanzaText},
+                           {"mainsail.conf", kStanzaText}}) == "moonraker.conf");
+    }
+}

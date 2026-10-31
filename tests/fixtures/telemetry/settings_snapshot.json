@@ -1,0 +1,27 @@
+{
+  "animations_enabled": false,
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "auto_update_channel": 0,
+  "boot_id": "<boot_id>",
+  "brightness_pct": 0,
+  "device_id": "<device_id>",
+  "event": "settings_snapshot",
+  "home_widgets": [
+    "<state>"
+  ],
+  "locale": "<state>",
+  "multi_printer": false,
+  "schema_version": 3,
+  "screen_blank_timeout_sec": 0,
+  "screensaver_timeout_sec": 0,
+  "screensaver_type": "<state>",
+  "sound_enabled": false,
+  "spoolman_configured": false,
+  "theme": "<state>",
+  "theme_changed": false,
+  "theme_name": "<state>",
+  "time_format": "<state>",
+  "timestamp": "<timestamp>"
+}

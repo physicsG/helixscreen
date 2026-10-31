@@ -49,6 +49,7 @@ DisplayManager* DisplayManager::instance() {
     return nullptr;
 }
 void DisplayManager::wake_display() {}
+void DisplayManager::hold_flush_for_power_off() {}
 void DisplayManager::register_resize_callback(ResizeCallback) {}
 bool DisplayManager::needs_touch_calibration() const {
     return false;
@@ -104,18 +105,21 @@ bool platform_host_power_supported() {
 
 // --- app_globals slice seam (Linux app-lifecycle hub) ------------------------
 // get_printer_state is already stubbed in audit_stubs.cpp.
+// ESP32 has no first-run wizard, so the flag stays false and setting it is a no-op.
 bool is_wizard_active() {
     return false;
 }
+void set_wizard_active(bool) {}
+void set_wizard_cancel_callback(std::function<void()>) {}
 // Real process-global storage for the Moonraker API/client pointers: app_boot
 // wires them via set_moonraker_api/client, and consumers read them back here
 // (the audit slice returned nullptr because nothing set them). set_moonraker_
 // manager lives in helixapp_platform_stubs.cpp next to get_moonraker_manager.
-static IMoonrakerAPI* g_moonraker_api = nullptr;
-IMoonrakerAPI* get_moonraker_api() {
+static helix::IMoonrakerAPI* g_moonraker_api = nullptr;
+helix::IMoonrakerAPI* get_moonraker_api() {
     return g_moonraker_api;
 }
-void set_moonraker_api(IMoonrakerAPI* api) {
+void set_moonraker_api(helix::IMoonrakerAPI* api) {
     g_moonraker_api = api;
 }
 std::string app_get_runtime_dir() {
@@ -141,7 +145,7 @@ void SpoolmanOverlay::on_activate() {}
 void SpoolmanOverlay::on_deactivating(DeactivateReason) {}
 void SpoolmanOverlay::before_show() {}
 SpoolmanOverlay& get_spoolman_overlay() {
-    static SpoolmanOverlay overlay;
+    static HELIX_PSRAM_BSS SpoolmanOverlay overlay;
     return overlay;
 }
 } // namespace ui
@@ -161,10 +165,9 @@ SpoolmanOverlay& get_spoolman_overlay() {
 // error rather than a null-vtable fault). SpoolmanSlotSaver is constructed by
 // value in ui_ams_edit_overlay.cpp, so it needs a real ctor.
 //
-// SpoolmanPanel CANNOT be raw storage: two kept call sites
-// (ui_panel_advanced.cpp handle_spoolman_clicked, the pm_chip_spoolman_clicked
-// entry in ui_printer_manager_overlay.cpp PrinterManagerOverlay::register_callbacks)
-// hand it to lazy_create_and_push_overlay, which dispatches init_subjects(),
+// SpoolmanPanel CANNOT be raw storage: the kept call site
+// (ui_panel_advanced.cpp handle_spoolman_clicked) hands it to
+// lazy_create_and_push_overlay, which dispatches init_subjects(),
 // register_callbacks() and create() on it.
 // Those are virtual, so raw storage would fault (LoadProhibited) the moment
 // the capability gate that hides both rows is lifted. So the accessor
@@ -195,7 +198,7 @@ void SpoolmanPanel::on_activate() {}
 void SpoolmanPanel::on_deactivating(DeactivateReason) {}
 
 SpoolmanPanel& get_global_spoolman_panel() {
-    static SpoolmanPanel panel;
+    static HELIX_PSRAM_BSS SpoolmanPanel panel;
     return panel;
 }
 
@@ -243,7 +246,7 @@ SpoolmanManager& SpoolmanManager::instance() {
     return *reinterpret_cast<SpoolmanManager*>(storage);
 }
 void SpoolmanManager::init_subjects() {}
-void SpoolmanManager::set_api(IMoonrakerAPI*) {}
+void SpoolmanManager::set_api(helix::IMoonrakerAPI*) {}
 void SpoolmanManager::start_spoolman_polling() {}
 void SpoolmanManager::stop_spoolman_polling() {}
 // Called by the KEPT ams_state.cpp commit_slot_edit() when an edit drops a
@@ -408,8 +411,14 @@ void DebugBundleCollector::upload_async(const BundleOptions&, ResultCallback cal
 std::string host_arch_string() {
     return std::string("xtensa");
 }
-bool ad5x_mod_layout_present(const std::string&, const char**) {
-    return false;
+std::optional<FlashForgeMachine> flashforge_machine_id(const std::string&) {
+    return std::nullopt;
+}
+FlashForgeModTree flashforge_mod_tree(const std::string&) {
+    return FlashForgeModTree::None;
+}
+const char* flashforge_mod_tree_name(FlashForgeModTree) {
+    return "none";
 }
 
 // --- IppPrinter (IPP/PWG-Raster over libhv HTTP; detached print thread) ------
@@ -506,6 +515,9 @@ void UpdateChecker::on_language_changed() {}
 void UpdateChecker::clear_cache() {}
 void UpdateChecker::start_download() {}
 void UpdateChecker::cancel_download() {}
+lv_subject_t* UpdateChecker::download_status_subject() {
+    return &download_status_subject_;
+}
 // Firmware updates are flashed whole; there is no tarball to stage.
 std::string UpdateChecker::compute_update_staging_dir(const std::string&, const std::string&) {
     return {};
@@ -542,7 +554,6 @@ ssize_t readlink(const char*, char*, size_t) {
 
 // --- DisplayManager screensaver/backlight, third batch (sysfs backlight) -----
 void DisplayManager::set_dim_timeout(int) {}
-void DisplayManager::preview_screensaver(int) {}
 void DisplayManager::set_backlight_brightness(int) {}
 bool DisplayManager::has_backlight_control() const {
     return false;

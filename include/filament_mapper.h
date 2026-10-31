@@ -2,6 +2,7 @@
 #pragma once
 
 #include "display_numbering.h"
+#include "filament_variants.h"
 #include "firmware_routing.h"
 #include "tool_mapping_origin.h"
 
@@ -72,9 +73,17 @@ struct AvailableSlot {
     /// aggregate initializers in the tests stay valid.
     float remaining_weight_g = -1.0f;
 
+    /// The loaded filament's surface finish, from its names (SlotInfo::finish()).
+    /// Kept late for the same reason multi_color_hexes is.
+    helix::FilamentFinish finish = helix::FilamentFinish::None;
+
     /// The word this slot's backend uses for one position. Defaulted so the
     /// ~200 aggregate initializers in the mapper tests stay valid.
     helix::ui::LaneNoun noun = helix::ui::LaneNoun::Slot;
+
+    /// SlotInfo::material_required: the printer will not print from this slot
+    /// until its material is set. Defaulted for the aggregate initializers.
+    bool material_required = false;
 
     /// Unique key for this slot across all backends
     SlotKey key() const {
@@ -111,6 +120,12 @@ struct ToolMapping {
         FIRMWARE_MAPPING, ///< Matched via current firmware tool-to-slot mapping
         COLOR_MATCH,      ///< Matched by closest color
         AUTO,             ///< No explicit mapping, let firmware decide
+        /// No colour matched and the routed lane was empty or taken, so the
+        /// seed settled on some other free loaded lane. A guess, not a match:
+        /// it is carried out only where every seeded lane is
+        /// (helix::printer::remap_carries_out_seed()), never written to a
+        /// printer's mapping table.
+        FREE_LANE_FALLBACK,
     };
     MatchReason reason = MatchReason::AUTO;
 
@@ -119,7 +134,7 @@ struct ToolMapping {
     /// NOTHING READS THIS TODAY. The chip's surround derives the same answer at
     /// render time from the lane it just resolved, deliberately: a verdict stored
     /// here outlives the lane it judged, because refresh_slot_data() replaces the
-    /// slot vector and rebuilds with the mappings untouched. So this field is
+    /// slot vector while a user's pick stays where it is. So this field is
     /// written for symmetry with material_mismatch and nothing else - the pair is
     /// adopted or not as a unit, which is what makes "take material, forget
     /// colour" unexpressible at a call site (see set_mismatches()).
@@ -137,6 +152,20 @@ struct ToolMapping {
     /// late field in this header is: the tests positionally aggregate-initialise
     /// this struct, and a bool inserted mid-struct silently rebinds them.
     bool color_mismatch = false;
+
+    /// True once the user chose this tool's lane (or Auto) by hand. An entry
+    /// left false is the seed's, and follows the printer when its lanes or
+    /// tool table change; one set true is kept as chosen.
+    bool user_picked = false;
+};
+
+/// Whether a seed may put a tool with no colour match and no usable routed lane
+/// on some other free loaded lane (MatchReason::FREE_LANE_FALLBACK). Refused, the
+/// tool stays on the lane the firmware routes it to, empty or shared, so
+/// preflight judges the lane that will actually print.
+enum class FreeLaneGuess {
+    Allowed,
+    Refused,
 };
 
 /// Pure logic class for computing filament-to-tool mappings.
@@ -145,13 +174,35 @@ struct ToolMapping {
 class FilamentMapper {
   public:
     /// Compute default mappings for all tools.
-    /// Priority: firmware mapping -> color match -> auto
+    /// Priority: firmware mapping -> color match -> the lane @p routing sends the
+    /// tool to -> any free loaded lane (only when @p guess allows it) -> auto
     static std::vector<ToolMapping> compute_defaults(const std::vector<GcodeToolInfo>& tools,
-                                                     const std::vector<AvailableSlot>& slots);
+                                                     const std::vector<AvailableSlot>& slots,
+                                                     const FirmwareRouting& routing = {},
+                                                     FreeLaneGuess guess = FreeLaneGuess::Allowed);
+
+    /// Replace every entry of @p current the user did not pick with @p seed's
+    /// entry for the same tool. True when anything changed.
+    static bool follow_seed(std::vector<ToolMapping>& current,
+                            const std::vector<ToolMapping>& seed);
+
+    /// Lay every entry of @p picks the user picked over @p current's entry for
+    /// the same tool, leaving the rest of @p current as it is.
+    static void apply_picks(std::vector<ToolMapping>& current,
+                            const std::vector<ToolMapping>& picks);
+
+    /// Record the user's pick for one tool: lane @p slot_index on @p backend_index, or
+    /// Auto when @p is_auto. Marks it user_picked, and re-classifies the pairing against
+    /// @p slots (a pick of Auto, or of a lane no longer present, leaves no warnings). The
+    /// mapping modal's row picker and the FILAMENTS card's chip dropdown both record a
+    /// pick through here.
+    static void pick_slot(ToolMapping& mapping, const GcodeToolInfo& tool,
+                          const std::vector<AvailableSlot>& slots, int slot_index,
+                          int backend_index, bool is_auto);
 
     /// Check if two colors are within matching tolerance.
     /// Uses weighted RGB distance (luminance-weighted) with tolerance of
-    /// COLOR_MATCH_TOLERANCE (50) units.
+    /// kColorMatchTolerance (50) units.
     static bool colors_match(uint32_t color_a, uint32_t color_b);
 
     /// The warnings that apply to pairing @p tool with the lane it resolved to.
@@ -204,21 +255,23 @@ class FilamentMapper {
     /// Toggle-aware mapping: the single place that turns the auto-color-map
     /// preference into a mapping. When @p auto_color_map is true, firmware
     /// mappings are cleared so they don't pre-empt color/type matches and
-    /// compute_defaults runs; otherwise use_current_assignments (positional).
+    /// compute_defaults runs; otherwise use_current_assignments (each tool on the
+    /// lane @p routing sends it to).
     /// This is the hoisted equivalent of FilamentMappingCard's seeding logic,
     /// so the card, the print-file swatch/preflight, and the live render all
     /// resolve the same way. Pure; no LVGL/AMS/Settings dependency (caller
     /// passes the resolved bool).
-    static std::vector<ToolMapping> effective_mappings(const std::vector<GcodeToolInfo>& tools,
-                                                       const std::vector<AvailableSlot>& slots,
-                                                       bool auto_color_map,
-                                                       const FirmwareRouting& routing = {});
+    static std::vector<ToolMapping>
+    effective_mappings(const std::vector<GcodeToolInfo>& tools,
+                       const std::vector<AvailableSlot>& slots, bool auto_color_map,
+                       const FirmwareRouting& routing = {},
+                       FreeLaneGuess guess = FreeLaneGuess::Allowed);
 
     /// Render convenience: effective_mappings + resolve_display_colors, scattered
     /// into a DENSE vector indexed by logical tool number (size = max
     /// tool_index + 1). Tool numbers not present in @p tools get 0x808080; used
     /// tools with no matched lane keep their slicer color. Ready to hand to
-    /// ui_gcode_viewer_set_tool_colors (which is logical-tool-indexed). Returns
+    /// helix::ui::gcode_viewer_set_tool_colors (which is logical-tool-indexed). Returns
     /// empty when @p tools is empty. Pure; no LVGL/AMS.
     static std::vector<uint32_t> effective_tool_colors(const std::vector<GcodeToolInfo>& tools,
                                                        const std::vector<AvailableSlot>& slots,
@@ -326,7 +379,9 @@ class FilamentMapper {
     ///
     /// Identity mappings are omitted: the firmware already routes a tool to
     /// @p routing.head(tool), so emitting them would be noise. Entries with no
-    /// real slot assignment (mapped_slot < 0) are skipped.
+    /// real slot assignment (mapped_slot < 0) are skipped, and so are entries on
+    /// a backend other than the primary (mapped_backend > 0): @p routing and the
+    /// slot numbers sent are the primary backend's.
     ///
     /// @p routing MUST be the same map the seed used, or a lane-per-tool
     /// identity reads as a genuine remap and gets emitted.
@@ -363,7 +418,15 @@ class FilamentMapper {
     [[nodiscard]] static const AvailableSlot*
     resolve_mapped_slot(const ToolMapping& mapping, const std::vector<AvailableSlot>& slots);
 
-    static constexpr int COLOR_MATCH_TOLERANCE = 50;
+    /// The lane @p mapping prints from: resolve_mapped_slot() for a pick, and for
+    /// Auto the lane @p routing sends the tool to on the primary backend, whose
+    /// routing it is. nullptr when that lane is not among @p slots. Aliases
+    /// @p slots like resolve_mapped_slot().
+    [[nodiscard]] static const AvailableSlot*
+    resolve_printing_slot(const ToolMapping& mapping, const std::vector<AvailableSlot>& slots,
+                          const FirmwareRouting& routing);
+
+    static constexpr int kColorMatchTolerance = 50;
 };
 
 } // namespace helix

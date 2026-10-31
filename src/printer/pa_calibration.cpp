@@ -57,12 +57,12 @@ struct Provider {
 /// Klipper acknowledges SET_PRESSURE_ADVANCE by echoing the applied value in
 /// this shape. A firmware that installs candidates through that command prints
 /// it once per candidate, so it can mark progress but never the result.
-constexpr const char* KLIPPER_PA_ECHO = R"(pressure_advance:\s*([0-9]*\.?[0-9]+))";
+constexpr const char* kKlipperPaEcho = R"(pressure_advance:\s*([0-9]*\.?[0-9]+))";
 
 /// Direct-drive extruders, the geometry on every machine below. The band is
 /// the one every Klipper tuning guide quotes; a result outside it is not
 /// rejected, only flagged as worth measuring again.
-constexpr SaneRange DIRECT_DRIVE{0.02f, 0.08f, "direct drive"};
+constexpr SaneRange kDirectDrive{0.02f, 0.08f, "direct drive"};
 
 // --- Snapmaker U1 flow calibrator --------------------------------------------
 //
@@ -100,7 +100,7 @@ constexpr Provider SNAPMAKER_U1{
     /*expected_attempts=*/5,
     /*applies_result=*/true,
     /*estimate_minutes=*/3,
-    DIRECT_DRIVE,
+    kDirectDrive,
     /*timeout_ms=*/600000, // 10 min: several purge cycles plus the heat-up
 };
 
@@ -124,29 +124,29 @@ constexpr Provider SNAPMAKER_U1{
 //
 // The sweep structurally cannot report outside its candidate table, so the
 // plausibility band is that table's span (defaults 0.0100..0.0400).
-constexpr SaneRange FF_CANDIDATE_SPAN{0.01f, 0.04f, "direct drive"};
+constexpr SaneRange kFfCandidateSpan{0.01f, 0.04f, "direct drive"};
 
-constexpr Provider FLASHFORGE_EBOARD{
+constexpr Provider kFlashforgeEboard{
     "FlashForge eBoard PA calibrator",
     /*detect_macro=*/nullptr,
     "ff_pa",
     "FF_PA_CALIBRATE TOOL={tool}",
     /*per_tool=*/true,
     R"(pressure_advance\s*=\s*([0-9]*\.?[0-9]+))",
-    KLIPPER_PA_ECHO,
+    kKlipperPaEcho,
     /*failure_pattern=*/"",
     /*expected_attempts=*/21, // 3 winning sweeps x 7 candidates, typically
     /*applies_result=*/false,
     /*estimate_minutes=*/5, // up to 5 sweeps of about a minute, plus heat-up
-    FF_CANDIDATE_SPAN,
+    kFfCandidateSpan,
     /*timeout_ms=*/600000, // 10 min: up to 5 sweeps (~1 min each) plus heat-up
 };
 
 /// The table. One entry per firmware that can do this.
-constexpr const Provider* PROVIDERS[] = {&SNAPMAKER_U1, &FLASHFORGE_EBOARD};
+constexpr const Provider* kProviders[] = {&SNAPMAKER_U1, &kFlashforgeEboard};
 
 const Provider* match(const PrinterDiscovery& hw) {
-    for (const Provider* p : PROVIDERS) {
+    for (const Provider* p : kProviders) {
         if (p->detect_macro && hw.has_macro(p->detect_macro)) {
             return p;
         }
@@ -203,7 +203,7 @@ std::optional<Procedure> procedure_for(const PrinterDiscovery& hw, int tool_inde
 
 SaneRange sane_range(const PrinterDiscovery& hw) {
     const Provider* p = match(hw);
-    return p ? p->range : DIRECT_DRIVE;
+    return p ? p->range : kDirectDrive;
 }
 
 bool is_plausible(const PrinterDiscovery& hw, float k) {

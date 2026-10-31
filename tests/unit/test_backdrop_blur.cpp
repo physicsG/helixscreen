@@ -275,7 +275,7 @@ TEST_CASE("darken_rgb565: scales each channel and leaves row padding alone",
 TEST_CASE_METHOD(LVGLTestFixture, "darkened backdrop on a 16-bit display is an RGB565 snapshot",
                  "[backdrop_blur][darken]") {
     lv_display_t* prev = lv_display_get_default();
-    static uint8_t draw_buf[64 * 32 * 2];
+    alignas(64) static uint8_t draw_buf[64 * 32 * 2];
     lv_display_t* disp = lv_display_create(64, 32);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(disp, draw_buf, nullptr, sizeof(draw_buf),

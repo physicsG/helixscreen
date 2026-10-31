@@ -6,17 +6,17 @@ namespace helix::calibration {
 
 /// Samples per analysis window. Matches the live meter's window, so the probe
 /// measures the work the meter will actually do.
-inline constexpr int PROBE_WINDOW_SAMPLES = 2048;
+inline constexpr int kProbeWindowSamples = 2048;
 
 /// Sample rate to probe at. The reference machine is configured for 3200 Hz and
 /// delivers about 3053 Hz; the probe uses the configured figure because it only
 /// needs to size the transform, not to be physically accurate.
-inline constexpr float PROBE_SAMPLE_RATE_HZ = 3200.0f;
+inline constexpr float kProbeSampleRateHz = 3200.0f;
 
 /// Bandwidth to probe at. Must match what the pluck path requests, or the probe
 /// measures a cheaper transform than the one that will run - roughly 700 Hz for
 /// a 150 mm span with four harmonics.
-inline constexpr float PROBE_BANDWIDTH_HZ = 700.0f;
+inline constexpr float kProbeBandwidthHz = 700.0f;
 
 /**
  * @brief Longest acceptable time for one windowed PSD, in milliseconds
@@ -28,7 +28,7 @@ inline constexpr float PROBE_BANDWIDTH_HZ = 700.0f;
  * ten updates a second, so 60 ms still leaves more than a third of the budget
  * for decoding and drawing.
  */
-inline constexpr double MAX_PSD_MS = 60.0;
+inline constexpr double kMaxPsdMs = 60.0;
 
 struct DspProbeResult {
     double psd_ms = 0.0; ///< measured milliseconds for one windowed PSD

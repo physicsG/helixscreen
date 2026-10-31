@@ -1,0 +1,79 @@
+name: Telemetry Printer Candidates
+
+# Weekly: pull recent telemetry, find hardware the printer database does not
+# recognize, and file (or update) one issue per cluster with a draft entry.
+
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print the issues instead of filing them'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  printer-candidates:
+    name: File printer-database candidate issues
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check for the telemetry key
+        id: key
+        env:
+          HELIX_TELEMETRY_ADMIN_KEY: ${{ secrets.HELIX_TELEMETRY_ADMIN_KEY }}
+        run: |
+          if [ -z "$HELIX_TELEMETRY_ADMIN_KEY" ]; then
+            echo "::notice::HELIX_TELEMETRY_ADMIN_KEY is not set; skipping."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.key.outputs.present == 'true'
+
+      - uses: actions/setup-python@v6
+        if: steps.key.outputs.present == 'true'
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.key.outputs.present == 'true'
+        run: pip install -r scripts/telemetry-requirements.txt
+
+      - name: Pull telemetry
+        if: steps.key.outputs.present == 'true'
+        env:
+          HELIX_TELEMETRY_ADMIN_KEY: ${{ secrets.HELIX_TELEMETRY_ADMIN_KEY }}
+        run: scripts/telemetry-pull.sh --since "$(date -u -d '28 days ago' +%F)"
+
+      - name: Analyze printers
+        if: steps.key.outputs.present == 'true'
+        run: scripts/telemetry-printer-profiles.py --json --candidates > analysis.json
+
+      - name: File issues
+        if: steps.key.outputs.present == 'true'
+        env:
+          LIVE_SCHEDULED: ${{ vars.TELEMETRY_PRINTER_ISSUES_LIVE }}
+          DISPATCH_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          dry=true
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            if [ "$LIVE_SCHEDULED" = "true" ]; then dry=false; else
+              echo "::notice::Scheduled run is dry. Set the repository variable TELEMETRY_PRINTER_ISSUES_LIVE to true to file issues."
+            fi
+          elif [ "$DISPATCH_DRY_RUN" = "false" ]; then
+            dry=false
+          fi
+          flags=""
+          if [ "$dry" = "true" ]; then flags="--dry-run"; fi
+          scripts/telemetry-printer-issues.py --analysis analysis.json \
+            --db assets/config/printer_database.json $flags

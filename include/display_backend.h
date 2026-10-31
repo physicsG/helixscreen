@@ -13,10 +13,13 @@
 
 #pragma once
 
+#include "board_identity.h"
 #include "data_root_resolver.h"
+#include "display_metrics.h"
 #include "text_io.h"
 #include "touch_calibration.h"
 
+#include <cstdlib>
 #include <lvgl.h>
 #include <memory>
 #include <optional>
@@ -32,6 +35,50 @@ enum class DisplayBackendType {
     DRM,   ///< Linux DRM/KMS - modern display API, better for Pi
     AUTO   ///< Auto-detect best available backend
 };
+
+namespace helix {
+
+/**
+ * @brief The display path HELIX_DISPLAY_BACKEND names
+ *
+ * `egl` is the DRM backend presenting through EGL/OpenGL ES rather than dumb
+ * buffers. `fb` is accepted for fbdev. An unset variable is None; anything
+ * else, the empty string included, is Unknown.
+ */
+enum class ForcedDisplayBackend { None, Drm, DrmEgl, Fbdev, Sdl, Unknown };
+
+inline ForcedDisplayBackend parse_forced_display_backend(const char* value) {
+    if (value == nullptr) {
+        return ForcedDisplayBackend::None;
+    }
+    const std::string_view v(value);
+    if (v == "drm") {
+        return ForcedDisplayBackend::Drm;
+    }
+    if (v == "egl") {
+        return ForcedDisplayBackend::DrmEgl;
+    }
+    if (v == "fbdev" || v == "fb") {
+        return ForcedDisplayBackend::Fbdev;
+    }
+    if (v == "sdl") {
+        return ForcedDisplayBackend::Sdl;
+    }
+    return ForcedDisplayBackend::Unknown;
+}
+
+/// Whether the app will own the panel through DRM (dumb buffers or EGL), given
+/// what HELIX_DISPLAY_BACKEND forces and whether DisplayBackendDRM is available.
+/// A forced drm or egl rung still falls back to fbdev in-process when DRM or its
+/// libraries are missing, and an unset or unknown value auto-detects DRM first.
+inline bool drm_will_own_panel(ForcedDisplayBackend forced, bool drm_available) {
+    if (forced == ForcedDisplayBackend::Fbdev || forced == ForcedDisplayBackend::Sdl) {
+        return false;
+    }
+    return drm_available;
+}
+
+} // namespace helix
 
 /**
  * @brief Result of display resolution auto-detection
@@ -239,26 +286,61 @@ inline int read_config_rotation(int default_value = 0) {
 
 namespace helix {
 
+/// HELIX_FORCE_ROTATION_PROBE: run the interactive probe even where the
+/// orientation is configured or known from the board.
+inline bool rotation_probe_forced() {
+    return std::getenv("HELIX_FORCE_ROTATION_PROBE") != nullptr;
+}
+
+/**
+ * @brief The board's panel mount as a first boot applies it, or -1
+ *
+ * Only where the kernel reports no panel_orientation and the probe is not
+ * forced, and only on the framebuffer geometry the mount was measured on.
+ *
+ * @param kernel_orientation The kernel's panel_orientation, -1 if absent
+ * @param native_w, native_h Framebuffer size before rotation
+ */
+inline int first_boot_board_mount(int kernel_orientation, int native_w, int native_h) {
+    if (rotation_probe_forced() || kernel_orientation >= 0) {
+        return -1;
+    }
+    return DisplayMetrics::board_mount_rotation(board::current(), native_w, native_h);
+}
+
 /**
  * @brief Rotation for the splash and the watchdog's crash dialog
  *
- * The CLI value, else the configured one, else the kernel's panel_orientation
- * (informational only: the kernel does not rotate the framebuffer itself).
+ * The CLI value, else the configured one (a saved 0 included, as the app honors
+ * it), else the orientation the app's first boot applies without asking: the
+ * kernel's panel_orientation (informational only: the kernel does not rotate the
+ * framebuffer itself), else the board's known mount (first_boot_board_mount).
+ *
+ * @param native_w, native_h Framebuffer size before rotation
  */
-inline int standalone_rotation(int cli_rotation) {
-    const int rotation = cli_rotation != 0 ? cli_rotation : read_config_rotation(0);
-    if (rotation != 0) {
-        return rotation;
+inline int standalone_rotation(int cli_rotation, int native_w, int native_h) {
+    if (cli_rotation != 0) {
+        return cli_rotation;
+    }
+    const int saved = read_config_rotation(-1);
+    if (saved >= 0) {
+        return saved;
     }
     const int kernel = detect_panel_orientation_from_cmdline();
-    return kernel > 0 ? kernel : 0;
+    if (kernel > 0) {
+        return kernel;
+    }
+    const int mount = first_boot_board_mount(kernel, native_w, native_h);
+    return mount > 0 ? mount : 0;
 }
 
 /**
  * @brief Rotation DisplayManager::init() applies at startup
  *
  * The requested rotation, else the kernel's panel_orientation when the
- * first-boot rotation probe owns this boot. It must be applied in init(),
+ * first-boot rotation probe owns this boot. The board's mount needs the
+ * framebuffer geometry, so DisplayManager::init() adds it after detecting the
+ * resolution (DisplayManager::Config::first_boot_probe). It must be applied in init(),
  * before the input devices exist: the backends gate the stored touch range and
  * calibration on the display's rotation from create_input_pointer()
  * (prestonbrown/helixscreen#1428).

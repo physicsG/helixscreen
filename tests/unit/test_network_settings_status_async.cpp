@@ -12,6 +12,8 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/network_settings_overlay_test_access.h"
 #include "../test_helpers/scoped_runtime_config.h"
+#include "../test_helpers/wifi_manager_test_access.h"
+#include "../ui_test_utils.h"
 #include "async_lifetime_guard.h"
 #include "http_executor.h"
 #include "runtime_config.h"
@@ -122,6 +124,10 @@ class OverlayStatusFixture : public LVGLUITestFixture {
         return modal;
     }
 
+    helix::WiFiManager& manager() {
+        return *manager_;
+    }
+
   private:
     std::shared_ptr<helix::WiFiManager> manager_;
     std::unique_ptr<NetworkSettingsOverlay> overlay_;
@@ -217,4 +223,28 @@ TEST_CASE_METHOD(OverlayStatusFixture, "network settings: a failed join reads th
 
     REQUIRE(wait_until([&]() { return shows_connection(); }));
     CHECK(no_read_on_this_thread());
+}
+
+TEST_CASE_METHOD(OverlayStatusFixture,
+                 "network settings: Forget behind a stalled lane says WiFi isn't responding",
+                 "[network_settings][wifi_status_async][wifi_control_lane]") {
+    // A CONNECTED event leaves the cache connected with no network name, and a
+    // stalled lane answers polls from that cache.
+    helix::WiFiManagerTestAccess::set_breaker_config(manager(), {50, 3, 400, 2000});
+    helix::WiFiManagerTestAccess::fire_connected(manager());
+    wifi->hold_next_status();
+    helix::AsyncLifetimeGuard parked;
+    manager().get_status_async(parked.token(), [](const WifiBackend::ConnectionStatus&) {});
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    auto toasts = std::make_shared<std::vector<std::string>>();
+    helix::ui::set_test_notification_event_hook(
+        [toasts](const helix::ui::NotificationEvent& e) { toasts->push_back(e.message); });
+    Access::forget_clicked(overlay());
+    const bool toasted = wait_until([&]() { return !toasts->empty(); }, 2000);
+    helix::ui::set_test_notification_event_hook(nullptr);
+
+    REQUIRE(toasted);
+    CHECK(toasts->front() == "WiFi isn't responding");
+    CHECK(Access::pending_forget_ssid(overlay()).empty());
 }

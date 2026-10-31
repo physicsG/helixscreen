@@ -21,11 +21,11 @@
 namespace helix {
 
 ImageFormat sniff_image_format(const uint8_t* data, size_t size) {
-    static const uint8_t PNG_SIG[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    static const uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
     if (!data) {
         return ImageFormat::Unknown;
     }
-    if (size >= sizeof(PNG_SIG) && std::memcmp(data, PNG_SIG, sizeof(PNG_SIG)) == 0) {
+    if (size >= sizeof(kPngSig) && std::memcmp(data, kPngSig, sizeof(kPngSig)) == 0) {
         return ImageFormat::Png;
     }
     if (size >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) {
@@ -39,7 +39,7 @@ ImageFormat sniff_image_format(const uint8_t* data, size_t size) {
 
 bool is_complete_image(const std::vector<uint8_t>& bytes) {
     static const uint8_t IEND[4] = {'I', 'E', 'N', 'D'};
-    static const uint8_t EOI[2] = {0xFF, 0xD9};
+    static const uint8_t kEoi[2] = {0xFF, 0xD9};
 
     const uint8_t* marker = nullptr;
     size_t marker_size = 0;
@@ -49,8 +49,8 @@ bool is_complete_image(const std::vector<uint8_t>& bytes) {
         marker_size = sizeof(IEND);
         break;
     case ImageFormat::Jpeg:
-        marker = EOI;
-        marker_size = sizeof(EOI);
+        marker = kEoi;
+        marker_size = sizeof(kEoi);
         break;
     default:
         return false;
@@ -78,7 +78,7 @@ std::vector<uint8_t> jpeg_to_png(const std::vector<uint8_t>& jpeg) {
     (void)jpeg;
     return {};
 #else
-    constexpr int kMaxSide = THUMBNAIL_MAX_SOURCE_DIMENSION;
+    constexpr int kMaxSide = kThumbnailMaxSourceDimension;
     const int len = static_cast<int>(jpeg.size());
     int w = 0, h = 0, channels = 0;
     if (!stbi_info_from_memory(jpeg.data(), len, &w, &h, &channels) || w <= 0 || h <= 0 ||
@@ -129,6 +129,8 @@ std::string thumbnail_cache_id(ThumbnailSource source, const std::string& id) {
         return "usb:" + id;
     case ThumbnailSource::Timelapse:
         return "tl_" + std::to_string(std::hash<std::string>{}(id));
+    case ThumbnailSource::ArchiveEntry:
+        return id + "_archive";
     }
     return id;
 }

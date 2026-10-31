@@ -48,14 +48,21 @@
     <!-- Titles render in capitals; "none" keeps the title's own case (a name
          whose case carries meaning, like "LEDs"). -->
     <prop name="title_transform" type="string" default="uppercase"/>
-    <!-- Optional trailing badge: a small image plus a short label, for a screen
+    <!-- Title font and line budget. The default is one heading-font line cut at the
+         slot edge; a screen whose titles run long (the shared numeric keypad) passes
+         a smaller font, long_mode "dots" and max_lines "2" so a long title wraps
+         inside the bar and dots only past its last line. -->
+    <prop name="title_font" type="string" default="#font_heading"/>
+    <prop name="title_long_mode" type="string" default="clip"/>
+    <prop name="title_max_lines" type="string" default="1"/>
+    <!-- Optional trailing badge: a small icon plus a short label, for a screen
          that needs to show WHICH record it is editing. Both parts are empty by
          default and the group stays hidden unless title_badge_subject resolves
          to 1, so a header that asks for nothing renders nothing. The label text
          is left to the owning screen — bind "header_title_badge_text" with
          lv_label_bind_text rather than adding a bind_text here, which would warn
          on every header that has no badge subject. -->
-    <prop name="title_badge_image" type="string" default=""/>
+    <prop name="title_badge_icon" type="string" default=""/>
     <prop name="title_badge_subject" type="string" default=""/>
     <!-- Back button callback - defaults to standard navigation go_back -->
     <prop name="back_button_callback" type="string" default="on_header_back_clicked"/>
@@ -100,10 +107,8 @@
     <prop name="action_button_2_icon" type="string" default=""/>
     <prop name="action_button_2_icon_size" type="string" default="sm"/>
     <prop name="action_button_2_bg_color" type="string" default="#secondary"/>
-    <prop name="action_button_2_radius" type="string" default="#border_radius"/>
-    <prop name="action_button_2_width" type="string" default="content"/>
-    <!-- Floor for the text-shaped slot; an icon-only consumer passes a smaller
-         value so the button reads as a circle. -->
+    <!-- Floor for the labelled slot; a consumer whose label may hide passes a
+         smaller one. -->
     <prop name="action_button_2_min_width" type="string" default="90"/>
     <prop name="action_button_2_callback" type="string" default=""/>
     <prop name="hide_action_button_2" type="string" default="true"/>
@@ -114,7 +119,18 @@
          constant here would fire once at bind and un-hide the slot for every
          consumer that never asked for the button. -->
     <prop name="action_button_2_hidden_cond" type="string" default=""/>
+    <!-- A condition under which the secondary button drops its label and keeps its icon. -->
+    <prop name="action_button_2_label_hidden_cond" type="string" default=""/>
     <prop name="action_button_2_disabled_subject" type="string" default=""/>
+    <!-- Icon-only action, left of the secondary button: a round button drawn
+         by styles.header_icon_button. A screen with a labelled second action
+         uses action_button_2; one with only a glyph uses this. -->
+    <prop name="action_icon" type="string" default=""/>
+    <prop name="action_icon_callback" type="string" default=""/>
+    <prop name="hide_action_icon" type="string" default="true"/>
+    <!-- Expression hiding it (e.g. "ui_breakpoint lt 2"); empty leaves the flag
+         alone, as action_button_2_hidden_cond does. -->
+    <prop name="action_icon_hidden_cond" type="string" default=""/>
   </api>
   <view extends="lv_obj"
         width="100%" height="#header_height" style_pad_left="0" style_pad_right="#space_lg" style_pad_top="0"
@@ -132,21 +148,21 @@
            stamps "0" over the title. Applying text/translation_tag afterwards puts the
            static title back, and the no-op subject never changes, so it never returns.
            A header that does supply a subject still retitles on every publish. -->
-      <!-- clip, not dots: dots with a content height wraps a title too long
-           for its slot onto a second line mid-word. clip measures the text
+      <!-- clip by default, not dots: dots with a content height wraps a title too
+           long for its slot onto a second line mid-word. clip measures the text
            unwrapped, so the title stays one line and is cut at the slot edge. -->
       <text_heading name="header_title"
-                    long_mode="clip" bind_text="$title_subject" text="$title" translation_tag="$title_tag"
-                    text_transform="$title_transform" flex_grow="1" style_text_align="left" clickable="false"
-                    event_bubble="true" scrollable="false"/>
-      <!-- Trailing badge (image + label), see the props above. Sits after the
+                    long_mode="$title_long_mode" max_lines="$title_max_lines" bind_text="$title_subject" text="$title"
+                    translation_tag="$title_tag" text_transform="$title_transform" style_text_font="$title_font"
+                    flex_grow="1" style_text_align="left" clickable="false" event_bubble="true" scrollable="false"/>
+      <!-- Trailing badge (icon + label), see the props above. Sits after the
            title so the two parts read together as one mark. -->
       <lv_obj name="header_title_badge"
               width="content" height="content" style_pad_all="0" flex_flow="row" style_flex_cross_place="center"
               style_pad_gap="#space_xs" hidden="true" clickable="false" event_bubble="true" scrollable="false">
         <bind_flag_if_eq subject="$title_badge_subject" flag="hidden" ref_value="0"/>
-        <lv_image src="$title_badge_image"
-                  style_image_recolor="#text_muted" style_image_recolor_opa="255" clickable="false" event_bubble="true"/>
+        <icon name="header_title_badge_icon"
+              src="$title_badge_icon" size="sm" variant="muted" clickable="false" event_bubble="true"/>
         <text_body name="header_title_badge_text" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
       </lv_obj>
     </lv_obj>
@@ -158,18 +174,28 @@
          own: injected content brings its left margin with it (see
          header_coords in motion_panel.xml), so an unfilled slot is zero
          width and a header that asks for nothing renders exactly as if the
-         slot did not exist. -->
+         slot did not exist. Both flex placements centre: cross_place centres
+         items within their track, track_place centres the track itself, so
+         a child shorter than the header sits on the title's centre line. -->
     <lv_obj name="header_content"
             width="content" height="100%" style_pad_all="0" style_pad_left="0" style_pad_right="0" style_bg_opa="0"
             style_border_width="0" scrollable="false" clickable="false" flex_flow="row" style_pad_gap="#space_sm"
-            style_flex_cross_place="center"/>
+            style_flex_cross_place="center" style_flex_track_place="center"/>
+    <!-- Icon-only action (left of the secondary button, hidden by default). -->
+    <ui_button name="action_icon_button"
+               width="#button_height_sm" height="#button_height_sm" style_max_height="#header_button_height"
+               hidden="$hide_action_icon" icon="$action_icon" icon_size="sm">
+      <style name="styles.header_icon_button"/>
+      <bind_flag_if cond="$action_icon_hidden_cond" flag="hidden"/>
+      <event_cb trigger="clicked" callback="$action_icon_callback"/>
+    </ui_button>
     <!-- Secondary action button (left of primary, hidden by default) -->
     <ui_button name="action_button_2"
-               width="$action_button_2_width" height="$action_button_height"
-               style_min_width="$action_button_2_min_width" style_max_height="#header_button_height"
-               style_radius="$action_button_2_radius" style_bg_color="$action_button_2_bg_color"
-               hidden="$hide_action_button_2" icon="$action_button_2_icon" icon_size="$action_button_2_icon_size"
-               text="$action_button_2_text" translation_tag="$action_button_2_text_tag">
+               width="content" height="$action_button_height" style_min_width="$action_button_2_min_width"
+               style_max_height="#header_button_height" style_radius="#border_radius"
+               style_bg_color="$action_button_2_bg_color" hidden="$hide_action_button_2" icon="$action_button_2_icon"
+               icon_size="$action_button_2_icon_size" text="$action_button_2_text"
+               translation_tag="$action_button_2_text_tag" label_hidden_cond="$action_button_2_label_hidden_cond">
       <bind_state_if_eq subject="$action_button_2_disabled_subject" state="disabled" ref_value="1"/>
       <!-- Both bindings drive the same hidden flag, so order settles only the
            value at bind time, where the subject form lands last. After that

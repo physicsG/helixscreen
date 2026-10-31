@@ -21,7 +21,7 @@ struct TimelapseCardDimensions {
 
 class TimelapseVideosOverlay : public OverlayBase {
   public:
-    explicit TimelapseVideosOverlay(IMoonrakerAPI* api);
+    explicit TimelapseVideosOverlay(helix::IMoonrakerAPI* api);
 
     lv_obj_t* create(lv_obj_t* parent) override;
     void register_callbacks() override;
@@ -37,7 +37,7 @@ class TimelapseVideosOverlay : public OverlayBase {
     void on_deactivating(DeactivateReason reason) override;
     void cleanup() override;
 
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -84,7 +84,7 @@ class TimelapseVideosOverlay : public OverlayBase {
 
     friend struct TimelapseVideosOverlayTestAccess;
 
-    IMoonrakerAPI* api_;
+    helix::IMoonrakerAPI* api_;
     std::vector<VideoEntry> videos_;
     bool can_play_ = false;
     std::string player_command_;
@@ -109,7 +109,7 @@ class TimelapseVideosOverlay : public OverlayBase {
 };
 
 TimelapseVideosOverlay& get_global_timelapse_videos();
-void init_global_timelapse_videos(IMoonrakerAPI* api);
+void init_global_timelapse_videos(helix::IMoonrakerAPI* api);
 void open_timelapse_videos();
 
 namespace helix::ui {

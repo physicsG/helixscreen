@@ -15,15 +15,15 @@ namespace helix::calibration {
 namespace {
 /// Floor of the measured 5-to-9x band, where a strike clearly occurred but
 /// pitch estimation is unreliable (64% right). Below this a batch is silently
-/// dropped; between this and MIN_RMS_RATIO it is reported as a rejected event
+/// dropped; between this and kMinRmsRatio it is reported as a rejected event
 /// so the UI can say "pluck harder" instead of staying silent.
 ///
-/// Written as a fraction of MIN_RMS_RATIO so the two move together, and the
+/// Written as a fraction of kMinRmsRatio so the two move together, and the
 /// fraction is the one that lands on the measured boundary: 9.0 * 5/9 = 5.0.
-/// It read MIN_RMS_RATIO / 3.0f (= 3.0) while the comment named the 5x
+/// It read kMinRmsRatio / 3.0f (= 3.0) while the comment named the 5x
 /// boundary, which surfaced strikes at 3-5x - where the evidence base says
 /// nothing was a pluck at all - to the user as "Too soft, pluck harder".
-constexpr float MIN_DETECTABLE_RATIO = PluckDetector::MIN_RMS_RATIO * 5.0f / 9.0f;
+constexpr float kMinDetectableRatio = PluckDetector::kMinRmsRatio * 5.0f / 9.0f;
 } // namespace
 
 BeltListenSession::BeltListenSession(float span_mm, float sample_rate_hz)
@@ -33,7 +33,7 @@ bool BeltListenSession::learn_noise_floor(const std::vector<AccelSample>& quiet)
     // The same buffer answers two questions: how loud is it in here, and what
     // is already ringing in here. The second is what a scalar floor cannot
     // say, and it is what tells a belt tone apart from a fan tone.
-    quiet_spectrum_ = quiet_spectrum_for_span(quiet, sample_rate_hz_, span_mm_, DEFAULT_HARMONICS);
+    quiet_spectrum_ = quiet_spectrum_for_span(quiet, sample_rate_hz_, span_mm_, kDefaultHarmonics);
     capture_.write_quiet(quiet, sample_rate_hz_);
     return detector_.learn_noise_floor(quiet);
 }
@@ -64,10 +64,10 @@ bool BeltListenSession::committed() const {
 
 std::optional<PluckEvent> BeltListenSession::push(const AccelBatch& batch) {
     window_.insert(window_.end(), batch.samples.begin(), batch.samples.end());
-    if (window_.size() > DETECTION_WINDOW_SAMPLES) {
+    if (window_.size() > kDetectionWindowSamples) {
         window_.erase(window_.begin(),
                       window_.begin() +
-                          static_cast<long>(window_.size() - DETECTION_WINDOW_SAMPLES));
+                          static_cast<long>(window_.size() - kDetectionWindowSamples));
     }
 
     if (cooldown_samples_ > 0) {
@@ -79,12 +79,12 @@ std::optional<PluckEvent> BeltListenSession::push(const AccelBatch& batch) {
         return std::nullopt;
     }
 
-    if (window_.size() < DETECTION_WINDOW_SAMPLES || noise_floor() <= 0.0f) {
+    if (window_.size() < kDetectionWindowSamples || noise_floor() <= 0.0f) {
         return std::nullopt;
     }
 
     const float ratio = detector_.rms_ratio(window_.data(), window_.size());
-    if (ratio < MIN_DETECTABLE_RATIO) {
+    if (ratio < kMinDetectableRatio) {
         return std::nullopt;
     }
 
@@ -101,7 +101,7 @@ std::optional<PluckEvent> BeltListenSession::push(const AccelBatch& batch) {
 
     // Past this point the window is resolved one way or the other, so the
     // cooldown runs regardless of the outcome.
-    cooldown_samples_ = static_cast<size_t>((PluckDetector::SKIP_MS + PluckDetector::ANALYZE_MS) /
+    cooldown_samples_ = static_cast<size_t>((PluckDetector::kSkipMs + PluckDetector::kAnalyzeMs) /
                                             1000.0f * sample_rate_hz_);
 
     // Diagnostic numbers for BeltCaptureWriter, computed once so every branch
@@ -120,7 +120,7 @@ std::optional<PluckEvent> BeltListenSession::push(const AccelBatch& batch) {
         // and an `onset_rise=0.00` row in the corpus reads as the strongest
         // possible evidence of a thump. This corpus is the instrument built to
         // break the thresholds' circularity, so a mis-labelled row in it
-        // re-tunes MIN_ONSET_RISE off bad data. belt_capture.h promises a field
+        // re-tunes kMinOnsetRise off bad data. belt_capture.h promises a field
         // left at nullopt was genuinely never evaluated.
         const float rise =
             PluckDetector::onset_rise(window_.data(), window_.size(), sample_rate_hz_);
@@ -186,7 +186,7 @@ std::optional<PluckEvent> BeltListenSession::push(const AccelBatch& batch) {
 
     std::vector<std::pair<float, float>> psd;
     const PitchEstimate est = estimate_pitch_for_span(ringdown.samples, sample_rate_hz_, span_mm_,
-                                                      DEFAULT_HARMONICS, &psd, &quiet_spectrum_);
+                                                      kDefaultHarmonics, &psd, &quiet_spectrum_);
     if (!est.valid) {
         return not_a_pluck(&ringdown.samples, std::nullopt, 0.0f);
     }
@@ -200,8 +200,8 @@ std::optional<PluckEvent> BeltListenSession::push(const AccelBatch& batch) {
         return not_a_pluck(&ringdown.samples, std::nullopt, est.frequency_hz);
     }
     const float concentration =
-        harmonic_concentration(psd, est.frequency_hz, DEFAULT_HARMONICS, band_lo, &quiet_spectrum_);
-    if (concentration < MIN_HARMONIC_CONCENTRATION) {
+        harmonic_concentration(psd, est.frequency_hz, kDefaultHarmonics, band_lo, &quiet_spectrum_);
+    if (concentration < kMinHarmonicConcentration) {
         spdlog::debug("[BeltListen] {:.1f}x window at {:.1f} Hz rejected: only {:.2f} of in-band "
                       "energy on its harmonics",
                       ratio, est.frequency_hz, concentration);

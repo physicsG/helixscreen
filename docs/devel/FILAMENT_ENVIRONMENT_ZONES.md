@@ -75,6 +75,8 @@ heater is shared or per-lane.
 | `tests/unit/test_ams_environment_zone_source.cpp` | The default walk and backend overrides - `[ams][zones][source]` |
 | `tests/unit/test_zone_presentation.cpp` | Verdicts, labels, presentation choice - `[ams][zones][presentation]` |
 | `tests/unit/test_ams_environment_overlay_zones.cpp` | Overlay behavior over a zone set - `[ams][zones][overlay]` |
+| `include/dryer_summary.h`, `src/ui/panel_widgets/dryer_model.{h,cpp}` | `summarize_dryers()`, `ChamberCycle`, the live `dryer_model` behind the Dryer home widget - [The dryer summary](#the-dryer-summary) |
+| `tests/unit/test_dryer_summary.cpp`, `tests/unit/test_dryer_model.cpp` | The aggregation and the model - `[dryer][summary]` |
 
 ---
 
@@ -354,6 +356,17 @@ with (`zones_`) and a selected index.
   screen.
 - Three `IndexedSubjectPool`s back the tab strip (`env_zone_tab_label/state/active`), reclaimed
   in `on_ui_destroyed()` rather than `on_deactivate()`.
+- On a dryer reporting `supports_gate_selection` the lane line gives way to a row of lane chips
+  (`env_dry_gate_label/selected`, one per heated gate on the shown zone's unit; each lane's
+  state is on the zone tabs and the slot badges) and, with `supports_rotation`, a Rotate chip. Every chip starts selected
+  on each showing and the last selected one cannot be cleared. While every chip is selected,
+  Start and Stop send no gates at all, so the dryer gets exactly the command it gets with no
+  selection; a subset goes out as `DryingRequest::gates` / `stop_drying_gates()`. On such a
+  dryer the button and countdown follow the unit's cycle, not the shown lane's, since the cycle
+  belongs to the unit. Each chip is `#touch_target_min` square; while they show, the comfort
+  list wraps 2x2 at every breakpoint, and at Micro the comfort strip hides (the humidity readout
+  stays). A Stop on a subset names what it stopped ("Stopped drying Gate 2, Gate 3",
+  `stopped_lanes_text()`). The slot drying badges are read-only state and show on every dryer.
 - The cross-unit affordance ("View all boxes") appears only when the printer reports more zones
   than this view is showing **and** no overview already sits beneath the overlay - reached from
   the list, Back is already the way there, so a second route would stack a duplicate.
@@ -367,6 +380,56 @@ into can go stale while the list sits paused underneath.
 Both overlays register their repeated component (`zone_tab`, `zone_row`) before their own XML is
 parsed, and both self-register their overlay XML so they are safe to open without first visiting
 a host panel.
+
+---
+
+## The dryer summary
+
+The Dryer home widget needs one answer to "what is drying filament right now" across three
+independent things that can: box dryers (the zones above), the chamber heater's drying cycle
+([CHAMBER_HEATER.md](CHAMBER_HEATER.md)) and drying on the heated bed ([BED_DRYING.md](BED_DRYING.md)).
+`summarize_dryers()` in `include/dryer_summary.h` is the only place they are folded together.
+It takes a `DryerSummaryInput` (the backend's zones, a `ChamberDryerReading`, a
+`BedDryerReading`) and returns a `DryerSummary`: a vector of `DryerSource` (boxes, then chamber,
+then bed), `drying_count`, `highest_rh_pct` and `available`. It is pure and LVGL-free, with its own
+tests (`tests/unit/test_dryer_summary.cpp`, `[dryer][summary]`).
+
+- **One source per dryer, not per zone.** A unit whose sensors are per lane yields one zone per
+  lane over one dryer, so zones with no `dryer.supported` are skipped for sources and boxes are
+  de-duplicated by heater name (or by unit index when there is none). `highest_rh_pct` is the
+  highest reading among zones with a dryer, every lane of a shared one included. A passive box's
+  humidity is left to the Humidity widget: shown on a tile whose only dryer is the chamber or
+  the bed, it reads as that dryer's humidity.
+- **A source that is not drying carries no cycle numbers.** Remaining time, progress and target
+  are filled only while `drying` is set; the current temperature and humidity are always filled.
+  Unknown numbers are -1.
+- **Progress is one function.** `progress_pct_from(remaining_min, duration_min)` is the percent
+  elapsed, -1 when either number is unknown. A box uses its zone's duration; the bed uses the
+  run record's (`bed_drying_progress_pct`, [BED_DRYING.md](BED_DRYING.md#subjects)).
+- **The chamber has no duration, so its progress is observed.** The appliance reports minutes
+  left and nothing else. `next_chamber_cycle()` tracks a `ChamberCycle`: a cycle is `counted`
+  only when this session saw it begin (a reading that was inactive, then active), and its total
+  is the longest remaining time seen since. A cycle already running when the first reading
+  arrives has no known total, so its `progress_pct` stays -1 and the widget draws no ring: a ring
+  at 0 for an unknown progress would read as a cycle that has not started. Before a real status
+  frame has reported (`chamber_dryer_reported`), the default "inactive" reading is not a
+  baseline and `next_chamber_cycle()` returns the previous state unchanged; the first real
+  frame is the baseline.
+- **`primary_source()` picks the source a single-number rung shows**: the drying one whose cycle
+  ends first, sources with no known time last.
+- **Taps resolve in the same header.** `tap_for_source()` maps a row to the environment overlay
+  (a box), the chamber modal or the bed modal; `tap_for_tile()` picks the box that is drying (or
+  the first box), then the chamber, then the bed. The widget never starts or stops a cycle.
+
+`helix::dryer_model` (`src/ui/panel_widgets/dryer_model.h`) is the live side. `init_subjects()`
+registers `home_dryer_available` (the widget's gate) and `home_dryer_version`, attaches observers to
+every source and refreshes; the dryer widget's subject hook calls it, so the gate exists before the
+panel widget manager resolves gates. Sources notify far more often than the summary changes, so an
+observer only requests a refresh, and a burst becomes one `refresh_now()` on the UpdateQueue; the
+chamber and bed temperatures request one only when the whole-degree value changes. The version
+subject bumps only when the new summary differs from the last. The bed controller is built after
+the widget subjects, so the next refresh that finds it attaches its observers.
+`publish_for_test()` pins a summary for a widget test until `release_for_test()`.
 
 ---
 
@@ -414,6 +477,25 @@ ceiling even though `env_temp_range` is published per zone.
 - Otherwise it adds `" GATES=g,g,g"` listing **every** gate on that unit, empty gates
   included. Per-gate occupancy filtering is a refinement we cannot verify: nobody here owns an
   EMU rig.
+
+**A chosen set of gates.** On a Happy Hare 4 unit whose `filament_heaters` give each gate its own
+heater, `get_dryer_info(unit)` reports `supports_gate_selection`, and `supports_rotation` as well
+when `printer.mmu.espooler` names an eSpooler on one of the unit's gates (`''` means none).
+`start_drying_request()` with `gates` then sends `GATES=` naming only those gates, one command per
+unit they fall in, gates on no unit dropped; `rotate` adds `ROTATE=1`, and a rotation with no
+selection names every gate on the unit, because Happy Hare refuses `ROTATE` without `GATES`.
+`stop_drying_gates(unit, gates)` sends `MMU_HEATER STOP=1 GATES=...`, which cancels just those
+gates and leaves the rest of the cycle running. A duration restart and a temperature-only
+update drive the gates still in the selection (`dry_gates_`): a partial stop removes its gates
+from it, because a later `MMU_HEATER TEMP= GATES=` is raw heater control in Happy Hare and would
+heat a stopped gate outside any cycle, and the selection is forgotten once a status frame shows
+none of its gates queued or active after one has shown them drying (complete or cancelled at
+the printer). Happy Hare refuses `DRY=1` while a unit is
+already drying, so one cycle per unit is all there is: the gates are chosen before Start, not
+added to a running cycle. A shared-enclosure unit, and every v3 install, reports neither flag
+and refuses a selection. Each slot also carries its gate's `drying_state` as
+`SlotInfo::drying_state` (short lists leave later gates Idle), which AmsState publishes as
+`ams_slot_<n>_drying` for the slot's drying badge.
 
 **The commands**, all in `src/printer/ams_backend_happy_hare.cpp`:
 

@@ -18,9 +18,10 @@ class UiClogBar;
 /**
  * @brief Read-only modal for one filament buffer: an upright slider with its
  *        last minute scrolling out to the right, the reading and target, the
- *        lean in words, and the backend's own rows (Happy Hare spool motor, gear
- *        sync, flow; AFC state and distance to fault). Closed by its X; nothing
- *        to confirm.
+ *        lean in words, and the rows the filament system adds of its own
+ *        (AmsTypeTraits::buffer_rows: spool motor, gear sync and flow for a
+ *        sync drive; buffer state and distance to fault for a unit buffer).
+ *        Closed by its X; nothing to confirm.
  *
  * Live while open: every row is re-read from the backend on each AmsState data
  * revision or backend-count change.
@@ -94,10 +95,10 @@ class BufferStatusModal : public Modal {
     static char gear_sync_buf_[32];
     static lv_subject_t flow_value_subject_;
     static char flow_buf_[32];
-    static lv_subject_t afc_state_subject_;
-    static char afc_state_buf_[128];
-    static lv_subject_t afc_distance_subject_;
-    static char afc_distance_buf_[128];
+    static lv_subject_t state_subject_;
+    static char state_buf_[128];
+    static lv_subject_t fault_distance_subject_;
+    static char fault_distance_buf_[128];
 
     int effective_unit_ = 0;
     ObserverGuard revision_observer_;

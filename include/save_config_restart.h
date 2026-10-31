@@ -23,11 +23,14 @@
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
+#include "helix_shared_callback.h"
 
 #include <functional>
 #include <string>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 namespace helix::ui {
 
@@ -141,8 +144,9 @@ class SaveConfigWatch {
     ///                            is known to have succeeded.
     /// @param on_failed           Called once, on the main thread, with a human
     ///                            message, when the save genuinely failed.
-    void begin(IMoonrakerAPI* api, const char* initiation_message, std::function<void()> on_saved,
-               std::function<void(const std::string&)> on_failed);
+    void begin(IMoonrakerAPI* api, const char* initiation_message,
+               helix::SharedCallback<void()> on_saved,
+               helix::SharedCallback<void(const std::string&)> on_failed);
 
     /// Same contract as begin(), callable from a background thread.
     ///
@@ -152,8 +156,8 @@ class SaveConfigWatch {
     /// thread. The hop is guarded by this watch's own lifetime, so a watch
     /// destroyed between the call and the hop simply never begins.
     void begin_from_background(IMoonrakerAPI* api, const char* initiation_message,
-                               std::function<void()> on_saved,
-                               std::function<void(const std::string&)> on_failed);
+                               helix::SharedCallback<void()> on_saved,
+                               helix::SharedCallback<void(const std::string&)> on_failed);
 
     /// Drop the klippy watch and forget any in-flight save. Safe to call twice.
     void end();
@@ -174,8 +178,8 @@ class SaveConfigWatch {
 
     SaveRestartLatch latch_;
     ObserverGuard klippy_observer_;
-    std::function<void()> on_saved_;
-    std::function<void(const std::string&)> on_failed_;
+    helix::SharedCallback<void()> on_saved_;
+    helix::SharedCallback<void(const std::string&)> on_failed_;
     bool in_flight_ = false;
 
     // The rpc callbacks land on the WebSocket thread. bg_cb() hops them to the

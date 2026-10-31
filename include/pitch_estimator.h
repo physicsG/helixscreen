@@ -31,22 +31,22 @@ namespace helix::calibration {
 /// assumes that printer's belt and tension. A bed-slinger or a different belt
 /// profile silently inherits it as if it were physics. A per-printer
 /// reference is phase-2 work.
-inline constexpr float REFERENCE_SPAN_MM = 150.0f;
-inline constexpr float REFERENCE_FREQUENCY_HZ = 110.0f;
+inline constexpr float kReferenceSpanMm = 150.0f;
+inline constexpr float kReferenceFrequencyHz = 110.0f;
 
 /// Search window as a fraction of the expected fundamental. Validated against
 /// every capture in tests/fixtures/belt_plucks/; widening the floor below
 /// ~0.65 reintroduces subharmonic lock on the weakest captures.
-inline constexpr float SEARCH_WINDOW_LO_FRACTION = 0.70f;
+inline constexpr float kSearchWindowLoFraction = 0.70f;
 /// Widening this ceiling costs false locks onto a strong 2nd harmonic that
 /// happens to land inside the window; 1.50 is the highest value that stayed
 /// clean across every capture in tests/fixtures/belt_plucks/.
-inline constexpr float SEARCH_WINDOW_HI_FRACTION = 1.50f;
+inline constexpr float kSearchWindowHiFraction = 1.50f;
 
 /// Default harmonic count for both estimate_pitch() and required_bandwidth_hz().
 /// Shared so the two defaults cannot drift apart - a caller relying on both
 /// defaults needs a bandwidth that actually covers the harmonics requested.
-inline constexpr int DEFAULT_HARMONICS = 4;
+inline constexpr int kDefaultHarmonics = 4;
 
 /// Power ratio, against the quiet window's own median bin, above which a
 /// frequency counts as already occupied before anyone plucked anything.
@@ -55,13 +55,13 @@ inline constexpr int DEFAULT_HARMONICS = 4;
 /// across the ~700 Hz analysed here (measured: 4.8x), so a lower threshold
 /// would flag ordinary noise as a steady tone. 12 sits clear of that with
 /// room to spare, and a real fan tone runs orders of magnitude above it.
-inline constexpr float BACKGROUND_PROMINENCE_TOLERANCE = 12.0f;
+inline constexpr float kBackgroundProminenceTolerance = 12.0f;
 
 /// Floor on the per-bin discount, so contamination saturates instead of
 /// running away.
 ///
 /// This is a guard, not a tuned figure. Against a realistic quiet window
-/// nothing reaches BACKGROUND_PROMINENCE_TOLERANCE in the first place, so the
+/// nothing reaches kBackgroundProminenceTolerance in the first place, so the
 /// floor never engages and every value from 1e-4 to 1e-1 behaves identically
 /// (measured: 60 of 60 swept window phases estimate the same fundamental at
 /// each). What it defends against is a degenerate quiet window - a sensor
@@ -70,18 +70,18 @@ inline constexpr float BACKGROUND_PROMINENCE_TOLERANCE = 12.0f;
 /// keeps the discount order-preserving instead of letting the shape of the
 /// quiet window reorder candidates. Past about 30 dB over the tolerance a
 /// frequency is simply occupied, and 40 dB versus 80 dB says nothing more.
-inline constexpr float MIN_BACKGROUND_WEIGHT = 0.001f;
+inline constexpr float kMinBackgroundWeight = 0.001f;
 
 /// How far off a nominal frequency a bin may sit and still be the same tone.
 /// The quiet window and the ring-down are different lengths, so their bins do
 /// not line up; 2% is wider than that mismatch and narrower than the gap
 /// between a belt fundamental and its neighbours.
-inline constexpr float BIN_MATCH_FRACTION = 0.02f;
+inline constexpr float kBinMatchFraction = 0.02f;
 
 /// Half-width, in bins, of the band credited to each harmonic by
 /// harmonic_concentration(). A real peak straddles two bins whenever it falls
 /// between bin centres, so a single bin undercounts genuine plucks.
-inline constexpr float HARMONIC_MATCH_BINS = 2.0f;
+inline constexpr float kHarmonicMatchBins = 2.0f;
 
 /// Fraction of in-band energy that must sit on a candidate's harmonic series
 /// for the event to have been a pluck at all. A thump, a door, or a stepper
@@ -114,12 +114,12 @@ inline constexpr float HARMONIC_MATCH_BINS = 2.0f;
 /// Pooled, that is roughly one crossing in 60 000 events - not the 1 in 10 000
 /// a single observation suggests. A crossing is a false accept, and what keeps
 /// it harmless is downstream: PluckAggregator reports the median of at least
-/// COMMIT_AFTER = 5 accepted plucks, and one stray value cannot move it (pinned
+/// kCommitAfter = 5 accepted plucks, and one stray value cannot move it (pinned
 /// by "median ignores a single outlier" in tests/unit/test_pluck_aggregator.cpp).
 /// The guarantee is specifically about the COMMITTED median: the panel displays
 /// the running median from the first accept, so a stray value arriving first is
 /// shown until genuine plucks outvote it.
-inline constexpr float MIN_HARMONIC_CONCENTRATION = 0.25f;
+inline constexpr float kMinHarmonicConcentration = 0.25f;
 
 /**
  * @brief The spectrum of a window captured while the machine was still
@@ -151,7 +151,7 @@ class QuietSpectrum {
     /// Multiplier in (0, 1] for energy seen at `freq_hz` during a pluck.
     ///
     /// 1.0 for any frequency that was quiet beforehand, falling towards
-    /// MIN_BACKGROUND_WEIGHT the further a frequency stood above the quiet
+    /// kMinBackgroundWeight the further a frequency stood above the quiet
     /// window's own noise. It is a
     /// graduated discount, never a veto: a belt tone that happens to land on
     /// top of a fan tone can still outscore the fan if its harmonic series is
@@ -178,7 +178,7 @@ class QuietSpectrum {
  * @return an invalid QuietSpectrum if the buffer, rate or span is degenerate
  */
 QuietSpectrum quiet_spectrum_for_span(const std::vector<AccelSample>& quiet, float sample_rate,
-                                      float span_mm, int n_harmonics = DEFAULT_HARMONICS);
+                                      float span_mm, int n_harmonics = kDefaultHarmonics);
 
 /**
  * @brief Fraction of in-band energy sitting on f0's harmonic series
@@ -234,7 +234,7 @@ bool search_window_for_span(float span_mm, float* lo_hz, float* hi_hz);
  * @param n_harmonics Harmonics estimate_pitch() will multiply
  * @return Hz of bandwidth to request from compute_psd(), with 5% margin
  */
-float required_bandwidth_hz(float search_hi_hz, int n_harmonics = DEFAULT_HARMONICS);
+float required_bandwidth_hz(float search_hi_hz, int n_harmonics = kDefaultHarmonics);
 
 /**
  * @brief Estimate the fundamental via harmonic product spectrum
@@ -249,7 +249,7 @@ float required_bandwidth_hz(float search_hi_hz, int n_harmonics = DEFAULT_HARMON
  * @return Estimate with valid=false if input is degenerate or nothing is in range
  */
 PitchEstimate estimate_pitch(const std::vector<std::pair<float, float>>& psd, float search_lo_hz,
-                             float search_hi_hz, int n_harmonics = DEFAULT_HARMONICS,
+                             float search_hi_hz, int n_harmonics = kDefaultHarmonics,
                              const QuietSpectrum* background = nullptr);
 
 /**
@@ -281,7 +281,7 @@ PitchEstimate estimate_pitch(const std::vector<std::pair<float, float>>& psd, fl
  *         or if the underlying estimate_pitch() call finds nothing
  */
 PitchEstimate estimate_pitch_for_span(const std::vector<AccelSample>& samples, float sample_rate,
-                                      float span_mm, int n_harmonics = DEFAULT_HARMONICS,
+                                      float span_mm, int n_harmonics = kDefaultHarmonics,
                                       std::vector<std::pair<float, float>>* out_psd = nullptr,
                                       const QuietSpectrum* background = nullptr);
 

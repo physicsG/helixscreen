@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- A filament slot picker row that names no slot (Auto, the extra answer,
+       Cancel): the same look as filament_slot_picker_row with only its text.
+       A tap reports $choice through filament_picker_row_cb. A row that can be
+       the current answer binds styles.picker_row_selected where it is used. -->
+  <api>
+    <prop name="choice" type="string" default=""/>
+    <prop name="text_subject" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_cross_place="center" style_pad_all="#space_md"
+        style_pad_gap="#space_md" style_radius="#space_sm" scrollable="false" clickable="true">
+    <style name="styles.picker_row_base"/>
+    <style name="styles.press_wash" selector="pressed"/>
+    <text_body name="slot_label"
+               flex_grow="1" bind_text="$text_subject" long_mode="dots" clickable="false" event_bubble="true"/>
+    <event_cb trigger="clicked" callback="filament_picker_row_cb" user_data="$choice"/>
+  </view>
+</component>

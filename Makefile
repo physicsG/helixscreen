@@ -514,7 +514,7 @@ endif
 # same controller. So the probe cannot be trusted to decide this — the platform
 # must, or the user naming the channel. M300 (the PRINTER's beeper, over gcode) is deliberately NOT gated and
 # keeps working everywhere. Neither MIPS board exposes a sysfs pwmchip (the
-# AD5X piezo goes through jz_pwm below, the K1 has no audio at all).
+# FlashForge MIPS boards' piezo goes through jz_pwm below, the K1 has no audio at all).
 #
 # Decided HERE, above APP_OBJS, and not down in the sound-flags section: APP_OBJS
 # is computed from APP_SRCS a few lines below, so a filter-out placed after it is
@@ -532,7 +532,7 @@ else
     APP_SRCS := $(filter-out $(SRC_DIR)/system/pwm_sound_backend.cpp,$(APP_SRCS))
 endif
 
-# AD5X piezo via the jz_pwm DMA engine, exec'd through fx-pwm - there is no
+# The FlashForge MIPS boards' piezo via the jz_pwm DMA engine, exec'd through fx-pwm - there is no
 # sysfs pwmchip on the X2600, so the sysfs PWM backend above cannot drive it.
 # Compiled into the unified MIPS build and probed at runtime (/dev/jz_pwm + the
 # fx-pwm binary): the K1 carries /dev/jz_pwm but no fx-pwm, so the probe fails
@@ -663,12 +663,19 @@ ifeq ($(ENABLE_SDL),yes)
         SDL2_LIBS := $(shell sdl2-config --libs)
         SDL2_LIB :=
     else
-        # No system SDL2 - build from submodule
+        # No system SDL2 - build from submodule. The build dir lives under
+        # BUILD_DIR: lib/sdl2 is one checkout shared by every worktree, and the
+        # desktop release and a native build configure SDL differently.
         SDL2_DIR := lib/sdl2
-        SDL2_BUILD_DIR := $(SDL2_DIR)/build
+        SDL2_BUILD_DIR := $(BUILD_DIR)/sdl2
         SDL2_LIB := $(SDL2_BUILD_DIR)/libSDL2.a
         SDL2_INC := -I$(SDL2_DIR)/include -I$(SDL2_BUILD_DIR)/include -I$(SDL2_BUILD_DIR)/include-config-release
         SDL2_LIBS := $(SDL2_LIB)
+        # A static libSDL2 leaves its own system dependencies to the final link;
+        # glibc before 2.34 keeps shm_open and clock_* in librt.
+        ifeq ($(UNAME_S),Linux)
+            SDL2_LIBS += -lrt
+        endif
     endif
 else
     # Embedded target - no SDL2
@@ -782,8 +789,10 @@ ifneq ($(UNAME_S),Darwin)
             SYSTEMD_CXXFLAGS := -DHELIX_HAS_SYSTEMD
             SYSTEMD_LIBS := -lsystemd
         endif
-    else
-        # Native Linux build: use pkg-config
+    else ifneq ($(PLATFORM_TARGET),x86-desktop)
+        # Native Linux build: use pkg-config. The released desktop build stays
+        # off libsystemd: it runs as a window, not a service, and a desktop
+        # distro without systemd would otherwise refuse to load the binary.
         SYSTEMD_PKG_CONFIG := $(shell pkg-config --exists libsystemd 2>/dev/null && echo "yes")
         ifeq ($(SYSTEMD_PKG_CONFIG),yes)
             SYSTEMD_CXXFLAGS := -DHELIX_HAS_SYSTEMD
@@ -946,8 +955,9 @@ else ifneq ($(CROSS_COMPILE)$(filter x86 x86-fbdev x86-both,$(PLATFORM_TARGET)),
     endif
     # Add target-specific linker flags (e.g., -lstdc++fs for GCC 8)
     LDFLAGS += $(TARGET_LDFLAGS)
-    # DRM backend requires libdrm for display; libinput for LVGL input drivers
-    ifeq ($(DISPLAY_BACKEND),drm)
+    # DRM backend requires libdrm for display; libinput for LVGL input drivers.
+    # A DLOPEN_GPU_LIBS build loads all of them at runtime instead (mk/implib.mk).
+    ifeq ($(DISPLAY_BACKEND)-$(DLOPEN_GPU_LIBS),drm-)
         LDFLAGS += -ldrm
         ifneq ($(SNAPMAKER_SKIP_LIBINPUT),yes)
             LDFLAGS += -linput
@@ -996,12 +1006,20 @@ else
     # Linux native build - Include libwpa_client.a for WiFi control
     NPROC := $(shell nproc 2>/dev/null || echo 4)
     # Note: -lstdc++fs needed for std::experimental::filesystem on GCC < 9
-    LDFLAGS := $(LDFLAGS_COMMON) $(WPA_CLIENT_LIB) $(SYSTEMD_LIBS) -lusb-1.0 -lssl -lcrypto -ldl -lstdc++fs
-    CXXFLAGS += -isystem /usr/include/libusb-1.0 -DHELIX_HAS_LIBUSB=1
-    # GPU-accelerated 3D G-code rendering via OpenGL ES 2.0 (SDL GL context on desktop)
-    ifeq ($(ENABLE_GLES_3D),yes)
-        LDFLAGS += -lGLESv2
+    ifeq ($(PLATFORM_TARGET),x86-desktop)
+        # Static OpenSSL, as for x86: Bullseye ships libssl.so.1.1, newer
+        # distros libssl.so.3.
+        LINUX_SSL_LIBS := -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic
+        # A release binary: extract symbols, then strip, like every cross target.
+        STRIP_CMD := strip
+        NM_CMD := nm
+    else
+        LINUX_SSL_LIBS := -lssl -lcrypto
     endif
+    LDFLAGS := $(LDFLAGS_COMMON) $(WPA_CLIENT_LIB) $(SYSTEMD_LIBS) -lusb-1.0 $(LINUX_SSL_LIBS) -ldl -lstdc++fs
+    CXXFLAGS += -isystem /usr/include/libusb-1.0 -DHELIX_HAS_LIBUSB=1
+    # The 3D G-code renderer gets GLES2 from the context SDL creates
+    # (gles2_loader.h), so no -lGLESv2: a desktop without it still starts.
     PLATFORM := Linux
     WPA_DEPS := $(WPA_CLIENT_LIB)
 endif
@@ -1143,9 +1161,10 @@ endif
 # Sound system — synth, sequencer, backends (PWM/M300/SDL/ALSA), themes
 # Tracker player — MOD/MED file playback with PCM samples (requires HELIX_HAS_SOUND)
 #
-# HELIX_HAS_SOUND:   Pi, x86, AD5M family, unified MIPS, native — any platform
-#                    with audio output
-# HELIX_HAS_TRACKER: Pi, x86, native, unified MIPS — platforms cleared for tracker playback
+# HELIX_HAS_SOUND:   Pi, x86, x86-desktop, AD5M family, unified MIPS, native —
+#                    any platform with audio output
+# HELIX_HAS_TRACKER: Pi, x86, x86-desktop, native, unified MIPS — platforms
+#                    cleared for tracker playback
 # ad5m/ad5m-br: tone-only. The PWM backend answers supports_render_source() false —
 #   the piezo demodulates a duty-modulated carrier as static — so tracker playback
 #   falls back to the set_voice note path on the sequencer thread: SCHED_OTHER, a
@@ -1170,33 +1189,21 @@ else ifneq (,$(filter ad5m ad5m-br mips k1 ad5x,$(PLATFORM_TARGET)))
         # (synth fallback) path — per-note buffers, no PCM render loop involved.
         TRACKER_CXXFLAGS := -DHELIX_HAS_TRACKER
     endif
-else ifeq ($(PLATFORM_TARGET),native)
+else ifneq (,$(filter native x86-desktop,$(PLATFORM_TARGET)))
     SOUND_CXXFLAGS := -DHELIX_HAS_SOUND
     TRACKER_CXXFLAGS := -DHELIX_HAS_TRACKER
 endif
 CXXFLAGS +=$(SOUND_CXXFLAGS) $(TRACKER_CXXFLAGS) $(PWM_SOUND_CXXFLAGS) $(PWM_AUTO_EXPORT_CXXFLAGS) $(JZ_PWM_CXXFLAGS)
 
-# Feature gates — default ON for all platforms.
-# Disabled per-platform in mk/cross.mk for memory-constrained targets.
-HELIX_HAS_LABEL_PRINTER ?= 1
-HELIX_HAS_CFS ?= 1
-HELIX_HAS_IFS ?= 1
-# Vendor filament systems that are physically tied to one printer family. A
-# device build for printer X cannot meet vendor Y's hardware, so Y is dead
-# weight there. Kept ON for the generic hosts (pi/x86/native), which drive an
-# arbitrary printer over the network. AFC and Happy Hare are deliberately NOT
-# gated: both are user-installable Klipper add-ons that can appear on any
-# printer, so no platform can rule them out.
-HELIX_HAS_ACE ?= 1
-HELIX_HAS_QIDI ?= 1
-HELIX_HAS_SNAPMAKER ?= 1
-# Compile-out gates for the 2D gcode renderer and the bed-mesh 3D renderer —
-# code AND their big runtime buffers (ESP32-class targets set these to 0).
-HELIX_HAS_GCODE_VIEWER ?= 1
-HELIX_HAS_BED_MESH_3D ?= 1
-# Compile-out gate for the plugin runtime — embedded targets that cannot
-# spare the interpreter's size set this to 0 (ESP32-class).
-HELIX_HAS_PLUGINS ?= 1
+# Feature gates. include/helix_features.h holds every gate's default; each one becomes a
+# make variable here so mk/cross.mk can turn it off for a platform and make logic (the
+# Lua objects below) can read it, and every gate is passed to the compiler explicitly.
+HELIX_FEATURE_DEFAULTS := $(shell sed -n 's/^\#define \(HELIX_HAS_[A-Z0-9_]*\) \([0-9]*\)$$/\1=\2/p' $(INC_DIR)/helix_features.h)
+ifeq ($(strip $(HELIX_FEATURE_DEFAULTS)),)
+$(error no feature gate defaults read from $(INC_DIR)/helix_features.h)
+endif
+HELIX_FEATURE_GATES := $(foreach d,$(HELIX_FEATURE_DEFAULTS),$(firstword $(subst =, ,$(d))))
+$(foreach d,$(HELIX_FEATURE_DEFAULTS),$(eval $(firstword $(subst =, ,$(d))) ?= $(lastword $(subst =, ,$(d)))))
 # Lua 5.4 for the plugin runtime. Compiled as C++ so a Lua error is an exception and a
 # binding's destructors run. The io, os, package and debug libraries stay out of the
 # binary, which keeps them out of every plugin's reach.
@@ -1208,34 +1215,12 @@ LUA_OBJS := $(patsubst $(LUA_DIR)/%.c,$(OBJ_DIR)/lua/%.o,$(LUA_SRCS))
 else
 LUA_OBJS :=
 endif
-# Compile-out gate for the timelapse VIEWING UI (video list/download/playback).
-# Capture-control (settings, render, save-frames) is plain JSON-RPC and is NOT
-# gated — printers keep capturing timelapses even where the screen can't view them.
-HELIX_HAS_TIMELAPSE_VIEWER ?= 1
-# Compile-out gate for the Belt Tension panel. It reads Klipper's /tmp results,
-# so it only works co-located with Klipper.
-HELIX_HAS_BELT_TUNER ?= 1
-# Compile-out gate for the font rungs above the authored tier ladder. Only the
-# high-DPI UI scale factor reaches them, so a platform with a fixed panel and no
-# scale factor above 1.0 neither packs nor links those faces.
-HELIX_HAS_HIDPI_FONTS ?= 1
 # Lowest raw backlight level the panel renders visibly, as a percent of the raw
 # range. Nonzero percent scales across [floor, max] so the dimmest slider level
 # is the darkest visible level instead of black. settings.json's
 # /display/backlight_floor_percent overrides it per panel.
 HELIX_BACKLIGHT_FLOOR_PERCENT ?= 0
-CXXFLAGS += -DHELIX_HAS_LABEL_PRINTER=$(HELIX_HAS_LABEL_PRINTER) \
-            -DHELIX_HAS_CFS=$(HELIX_HAS_CFS) \
-            -DHELIX_HAS_IFS=$(HELIX_HAS_IFS) \
-            -DHELIX_HAS_ACE=$(HELIX_HAS_ACE) \
-            -DHELIX_HAS_QIDI=$(HELIX_HAS_QIDI) \
-            -DHELIX_HAS_SNAPMAKER=$(HELIX_HAS_SNAPMAKER) \
-            -DHELIX_HAS_GCODE_VIEWER=$(HELIX_HAS_GCODE_VIEWER) \
-            -DHELIX_HAS_BED_MESH_3D=$(HELIX_HAS_BED_MESH_3D) \
-            -DHELIX_HAS_PLUGINS=$(HELIX_HAS_PLUGINS) \
-            -DHELIX_HAS_TIMELAPSE_VIEWER=$(HELIX_HAS_TIMELAPSE_VIEWER) \
-            -DHELIX_HAS_BELT_TUNER=$(HELIX_HAS_BELT_TUNER) \
-            -DHELIX_HAS_HIDPI_FONTS=$(HELIX_HAS_HIDPI_FONTS) \
+CXXFLAGS += $(foreach g,$(HELIX_FEATURE_GATES),-D$(g)=$($(g))) \
             -DHELIX_BACKLIGHT_FLOOR_PERCENT=$(HELIX_BACKLIGHT_FLOOR_PERCENT)
 
 # Parallel build control
@@ -1327,12 +1312,9 @@ dev:
 setup:
 	@git config core.hooksPath .githooks
 	@git config commit.template .githooks/commit-template
-	@git config merge.recall-stats.name "recall lesson-stats union merge"
-	@git config merge.recall-stats.driver "python3 scripts/recall_stats_merge.py %O %A %B"
 	@echo "✓ Git configured:"
 	@echo "  - Pre-commit hook enabled (.githooks/)"
 	@echo "  - Commit template enabled (.githooks/commit-template)"
-	@echo "  - Lesson-stats merge driver enabled (.claude-recall/*.json)"
 
 # Help target - shows common commands, references topic-specific help
 help:
@@ -1407,25 +1389,45 @@ screenshots: $(BIN)
 #   .debug  — DWARF debug info for addr2line (file:line, inlined frames)
 # =============================================================================
 OBJCOPY_CMD := $(CROSS_COMPILE)objcopy
+READELF_CMD := $(CROSS_COMPILE)readelf
+
+# Writes $(1).sym and $(1).debug from binary $(1) while it still has a symbol
+# table. Every build reaches this step, including one that relinked nothing, and
+# by then the binary is the stripped one from the last build: reading it again
+# would overwrite the maps with empty files. So a stripped binary keeps the maps
+# its link wrote, and a stripped binary with no map, or an empty map, fails the
+# build, since crash reports from it could not be symbolized.
+define extract-symbols
+	@if $(READELF_CMD) -S $(1) | grep -q '\.symtab'; then \
+		$(NM_CMD) -nC $(1) > $(1).sym && \
+		$(OBJCOPY_CMD) --only-keep-debug $(1) $(1).debug && \
+		echo "Symbol map: $(1).sym, debug info: $(1).debug"; \
+	elif [ -s $(1).sym ]; then \
+		echo "$(1) is already stripped; keeping the symbol map from its link"; \
+	else \
+		echo "$(RED)$(BOLD)ERROR: $(1) has no symbol table and no symbol map from its link$(RESET)"; \
+		exit 1; \
+	fi
+	@test -s $(1).sym || { echo "$(RED)$(BOLD)ERROR: $(1).sym is empty$(RESET)"; exit 1; }
+endef
 
 symbols: $(TARGET)
 ifeq ($(STRIP_BINARY),yes)
-	$(NM_CMD) -nC $(TARGET) > $(TARGET).sym
-	@echo "Symbol map: $(TARGET).sym"
-	$(OBJCOPY_CMD) --only-keep-debug $(TARGET) $(TARGET).debug
-	@echo "Debug info: $(TARGET).debug ($(shell du -h $(TARGET).debug 2>/dev/null | cut -f1 || echo '?'))"
+	$(call extract-symbols,$(TARGET))
 else
 	@echo "STRIP_BINARY not set — skipping symbol extraction"
 endif
 
+# SDL builds have no splash or watchdog: they exist to own a framebuffer.
+STRIP_AUX_BINS = $(if $(SPLASH_BUILD),$(SPLASH_BIN)) $(if $(WATCHDOG_BUILD),$(WATCHDOG_BIN))
+
 # strip must wait for the aux binaries it strips: under -j, splash/watchdog can
-# still be linking when strip runs. Depend on them (only when actually built).
-strip: symbols $(if $(filter yes,$(STRIP_BINARY)),$(SPLASH_BIN) $(WATCHDOG_BIN))
+# still be linking when strip runs. Those prerequisites are declared after
+# mk/splash.mk and mk/watchdog.mk define them; named here they expand empty.
+strip: symbols
 ifeq ($(STRIP_BINARY),yes)
-	$(STRIP_CMD) $(TARGET)
-	$(STRIP_CMD) $(SPLASH_BIN)
-	$(STRIP_CMD) $(WATCHDOG_BIN)
-	@echo "Stripped: $(TARGET) $(SPLASH_BIN) $(WATCHDOG_BIN)"
+	$(STRIP_CMD) $(TARGET) $(STRIP_AUX_BINS)
+	@echo "Stripped: $(TARGET) $(STRIP_AUX_BINS)"
 else
 	@echo "STRIP_BINARY not set — skipping strip"
 endif
@@ -1498,14 +1500,21 @@ include mk/tests.mk
 include mk/images.mk
 include mk/format.mk
 include mk/tools.mk
+include mk/implib.mk
 include mk/display-lib.mk
 include mk/bluetooth.mk
 include mk/splash.mk
 include mk/filaments.mk
 include mk/watchdog.mk
+ifeq ($(STRIP_BINARY),yes)
+strip: $(STRIP_AUX_BINS)
+endif
 ifdef PI_DUAL_LINK
 include mk/pi-dual-link.mk
 endif
+# The objects the EGL presentation path adds to the DRM link; empty where the
+# binary carries none.
+EGL_PATH_OBJS :=
 ifeq ($(ENABLE_EGL_RUNG),yes)
 include mk/egl-link.mk
 endif
@@ -1528,6 +1537,63 @@ print-cxxflags:
 # does not need a new target here. `make print-var-SUBMODULE_CXXFLAGS`.
 print-var-%:
 	@echo "$($*)"
+
+# The compile command for a source, as its object rule's .ccj records it:
+#   make print-compile-command F=src/print/foo.cpp [F="a.cpp b.cpp"]
+# One line per source, `<compiler> <flags> -c <source>`, printed through the
+# shell exactly as emit-compile-command (mk/rules.mk) captures it. A source no
+# rule compiles prints nothing and fails; add -k to get the others' lines anyway.
+# Nothing is built: the targets below have no prerequisites, though parsing this
+# Makefile writes the stamps every invocation writes ($(FLAGS_STAMP), the patch id
+# and ABI stamps).
+# scripts/compile_command.py reads it for a tree whose compile database is
+# missing or was recorded by another version.
+#
+# Each entry pairs a source pattern with the *_COMPILE function of the rule that
+# compiles it, ordered as make chooses between those rules (shortest stem first).
+PRINT_COMPILE_RULES := \
+	$(SRC_DIR)/bluetooth/%.cpp=BT_COMPILE \
+	$(SRC_DIR)/%.cpp=APP_CXX_COMPILE \
+	$(SRC_DIR)/%.mm=APP_CXX_COMPILE \
+	$(SRC_DIR)/%.c=APP_C_COMPILE \
+	$(addsuffix =TEST_COMPILE,$(patsubst $(OBJ_DIR)/tests/%.o,$(TEST_DIR)/%.cpp,$(UI_TEST_UTILS_OBJ) $(LVGL_TEST_FIXTURE_OBJ) $(HELIX_TEST_FIXTURE_OBJ) $(TEST_FIXTURES_OBJ) $(LVGL_UI_TEST_FIXTURE_OBJ))) \
+	$(TEST_UNIT_DIR)/application/%.cpp=TEST_APP_COMPILE \
+	$(TEST_UNIT_DIR)/%.cpp=TEST_COMPILE \
+	$(TEST_MOCK_DIR)/%.cpp=TEST_MOCK_COMPILE \
+	$(TEST_DIR)/test_main.cpp=TEST_MAIN_COMPILE \
+	$(TEST_DIR)/catch_amalgamated.cpp=CATCH2_COMPILE \
+	$(addsuffix =LVGL_GLES_COMPILE,$(LVGL_OPENGLES_CXX_SRCS)) \
+	$(LVGL_DIR)/demos/%.c=LVGL_DEMO_COMPILE \
+	$(LVGL_DIR)/%.c=LVGL_C_COMPILE \
+	$(LVGL_DIR)/%.cpp=LVGL_CXX_COMPILE \
+	$(HELIX_XML_DIR)/%.c=HELIX_XML_COMPILE \
+	$(if $(SPDLOG_DIR),$(SPDLOG_DIR)/src/%.cpp=SPDLOG_COMPILE) \
+	$(LV_MARKDOWN_DIR)/%.c=LV_MARKDOWN_COMPILE \
+	$(QUIRC_DIR)/%.c=QUIRC_COMPILE \
+	$(LUA_DIR)/%.c=LUA_COMPILE \
+	assets/fonts/%.c=FONT_COMPILE
+print_compile_rule = $(firstword $(foreach r,$(PRINT_COMPILE_RULES),$(if $(filter $(firstword $(subst =, ,$(r))),$(1)),$(lastword $(subst =, ,$(r))))))
+
+.PHONY: print-compile-command
+print-compile-command: $(addsuffix .pcc,$(addprefix print-compile-command/,$(F)))
+	@$(if $(strip $(F)),:,echo "usage: make print-compile-command F=<source>" >&2; exit 2)
+
+print-compile-command/%.pcc:
+	@$(if $(call print_compile_rule,$*),printf '%s\n' "$(call $(call print_compile_rule,$*)) -c $*",echo "print-compile-command: no rule compiles $*" >&2; exit 1)
+
+# A recipe runs with its own target's variables and those it inherits as a
+# prerequisite, and these print targets are neither the object nor a prerequisite
+# of the test binary, so the target-specific flags those carry are added here.
+$(foreach f,$(F),$(if $(filter $(LFS_OBJS),$(f:$(SRC_DIR)/%.cpp=$(OBJ_DIR)/%.o)),$(eval print-compile-command/$(f).pcc: override CXXFLAGS += $(LFS_CXXFLAGS))))
+$(foreach f,$(filter $(TEST_DIR)/%,$(F)),$(eval print-compile-command/$(f).pcc: override CXXFLAGS += $(TEST_BIN_CXXFLAGS)))
+
+# What an object rule needs in place before its compiler can read the source:
+# patched submodules, the third-party ABI stamp, the flags stamp, libhv's
+# generated headers (with the archive whose build installs them) and the
+# generated headers under $(BUILD_DIR)/generated. A syntax-only check of a tree
+# that was never built makes this and nothing else.
+.PHONY: compile-prereqs
+compile-prereqs: $(LIBHV_LIB) $(LIBHV_JSON_HEADER) $(PATCHES_STAMP) $(ABI_STAMP) $(FLAGS_STAMP) $(PATCH_MARKER_STAMP) $(CONTRIBUTORS_H) $(GIT_HASH_H)
 
 # =============================================================================
 # Install target — stages binary + assets under $(DESTDIR)/opt/helixscreen/

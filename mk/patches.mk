@@ -14,6 +14,8 @@ LVGL_PATCHED_FILES := \
 	src/drivers/display/fb/lv_linux_fbdev.h \
 	src/core/lv_refr.c \
 	src/core/lv_observer.c \
+	src/core/lv_observer.h \
+	src/widgets/span/lv_span.c \
 	src/widgets/slider/lv_slider.c \
 	src/widgets/image/lv_image.c \
 	src/stdlib/clib/lv_string_clib.c \
@@ -84,10 +86,16 @@ LVGL_PATCHED_FILES := \
 	src/indev/lv_indev.c \
 	src/indev/lv_indev_private.h \
 	src/indev/lv_indev_scroll.c \
+	src/misc/lv_timer.c \
+	src/misc/lv_check_arg.h \
+	src/misc/lv_helix_thread_check.h \
+	src/drivers/display/drm/lv_linux_drm_egl_upload.h \
 	lv_conf_template.h
-# NOTE: src/misc/lv_check_arg.h is deliberately absent — the backport patch
-# CREATES it, so it is untracked upstream and `git checkout` cannot restore it.
-# reset-patches removes it explicitly instead.
+# Every file a patch touches belongs in its submodule's list, the files a patch
+# creates included: reset_submodule_patches restores the tracked ones and deletes
+# the untracked ones, so a file left off survives a reset and the drift check
+# then refuses the tree. tests/shell/test_reset_patches.bats holds the lists to
+# the patches.
 
 # Files modified by libhv patches
 LIBHV_PATCHED_FILES := \
@@ -95,6 +103,7 @@ LIBHV_PATCHED_FILES := \
 	Makefile.in \
 	http/client/requests.h \
 	base/hsocket.c \
+	base/hsocket.h \
 	base/hplatform.h \
 	base/hlog.c \
 	base/dns_resolv.c \
@@ -104,7 +113,10 @@ LIBHV_PATCHED_FILES := \
 	evpp/TcpClient.h \
 	http/HttpMessage.h \
 	http/client/WebSocketClient.h \
-	http/client/WebSocketClient.cpp
+	http/client/WebSocketClient.cpp \
+	http/client/AsyncHttpClient.cpp \
+	http/client/HttpClient.h \
+	http/client/HttpClient.cpp
 
 # The patched sources themselves, for use as build prerequisites, so an applied
 # patch invalidates the objects built from it and not only the stamp.
@@ -136,13 +148,15 @@ LUA_PATCHED_FILES := \
 # a real change should cost a rebuild. cksum is POSIX, so this also works on
 # the BusyBox and Buildroot hosts.
 #
-# The list is spelled out rather than globbed. libhv's own build installs the
-# include/hv/ copies our -isystem path resolves to, so on a checkout that has
-# not been built they do not exist yet, and a glob would silently stop watching
-# the very headers the objects compile against.
+# Only the source headers are listed, never the include/hv/ copies our
+# -isystem path resolves to. libhv's build installs those copies from these
+# sources, and $(LIBHV_LIB) reruns that build whenever a patched source moves,
+# before any object that includes them compiles, so the sources already decide
+# their content. The copies exist only once libhv has been built: a hash that
+# read them would differ between a cold tree's first make and its second, and
+# through the -D below would recompile every object twice.
 ABI_HEADERS := \
 	$(addprefix $(LIBHV_DIR)/,$(filter %.h,$(LIBHV_PATCHED_FILES))) \
-	$(addprefix $(LIBHV_DIR)/include/hv/,$(notdir $(filter %.h,$(LIBHV_PATCHED_FILES)))) \
 	$(addprefix $(LVGL_DIR)/,$(filter %.h,$(LVGL_PATCHED_FILES))) \
 	$(addprefix $(LUA_DIR)/,$(filter %.h,$(LUA_PATCHED_FILES)))
 ABI_STAMP := $(BUILD_DIR)/.thirdparty-abi
@@ -408,11 +422,6 @@ endef
 reset-patches:
 	$(ECHO) "$(YELLOW)Resetting LVGL patches to upstream state...$(RESET)"
 	$(call reset_submodule_patches,$(LVGL_DIR),$(LVGL_PATCHED_FILES))
-	@# Not in LVGL_PATCHED_FILES: the backport patch creates it, so there is no
-	@# tracked version to compare against.
-	$(Q)rm -f $(LVGL_DIR)/src/misc/lv_check_arg.h
-	@# Same for the header the EGL partial upload patch creates.
-	$(Q)rm -f $(LVGL_DIR)/src/drivers/display/drm/lv_linux_drm_egl_upload.h
 	$(ECHO) "$(YELLOW)Resetting libhv patches to upstream state...$(RESET)"
 	$(call reset_submodule_patches,$(LIBHV_DIR),$(LIBHV_PATCHED_FILES))
 	$(ECHO) "$(YELLOW)Resetting Lua patches to upstream state...$(RESET)"
@@ -528,7 +537,7 @@ $(PATCHES_STAMP): $(PATCH_FILES) $(LVGL_HEAD) $(LIBHV_HEAD) $(LUA_HEAD) $(APPLIE
 	@# downgrades rather than fail the build.
 	$(Q)if [ "$(HELIX_PATCHES_FROM_CLEAN)" = "1" ]; then \
 		ok=1; \
-		for pair in "$(LVGL_DIR)|$(LVGL_PATCHED_FILES) src/misc/lv_check_arg.h" \
+		for pair in "$(LVGL_DIR)|$(LVGL_PATCHED_FILES)" \
 		            "$(LIBHV_DIR)|$(LIBHV_PATCHED_FILES)" \
 		            "$(LUA_DIR)|$(LUA_PATCHED_FILES)"; do \
 			dir=$${pair%%|*}; files=$${pair#*|}; \
@@ -592,6 +601,7 @@ $(PATCHES_STAMP): $(PATCH_FILES) $(LVGL_HEAD) $(LIBHV_HEAD) $(LUA_HEAD) $(APPLIE
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_async_del_crumb.patch "LVGL async-delete breadcrumb patch (#840/#906 sync+async diagnostic)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_translation_warn_once.patch "LVGL translation warn-once patch (missing-language warning once per language)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_translation_threadsafe.patch "LVGL translation lock patch (lv_tr safe from any thread)"
+	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_translation_tail_packs.patch "LVGL translation tail packs patch (plugin packs consulted after the app's)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_label_text_transform.patch "LVGL label text transform patch"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl-sw-draw-wait-for-finish.patch "LVGL SW draw wait_for_finish + NULL guard patch (#739)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl-image-cache-oversize-uncached.patch "LVGL oversize-image uncached-draw patch (image larger than the cache draws instead of vanishing)"
@@ -607,10 +617,12 @@ $(PATCHES_STAMP): $(PATCH_FILES) $(LVGL_HEAD) $(LIBHV_HEAD) $(LUA_HEAD) $(APPLIE
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_event_dispatch_cb_guard.patch "LVGL dispatch-cb bounds gate + widget identity (3XNZQB2R)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_obj_event_null_guards.patch "LVGL obj-event NULL guards (VHTR49QJ — recoverable bail + telemetry)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_style_null_guards.patch "LVGL style NULL guards patch (null style pointers in transitions/cache)"
+	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_subject_deinit_refuses_observers.patch "LVGL subject deinit refuses observers patch (#1279)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_obj_flag_screen_parent_null_guard.patch "LVGL obj flag screen-parent NULL guard (hide/unhide a screen)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_flex_hidden_grow_gap.patch "LVGL flex hidden+grow gap fix (upstream #9897 backport)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_check_arg_backport.patch "LVGL LV_CHECK_ARG backport patch (master macro for v9.5.0; drop at upgrade)"
 	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_fbdev_arg_guards.patch "LVGL fbdev arg-guard + log-order patch (uses backported LV_CHECK_ARG)"
+	$(Q)$(APPLY_PATCH) $(LVGL_DIR) $(PATCH_DIR)/lvgl_thread_check_hook.patch "LVGL thread-check hook patch (subject/timer/delete entry points, #1942)"
 	$(ECHO) "$(CYAN)Checking libhv patches...$(RESET)"
 	$(Q)$(APPLY_PATCH) $(LIBHV_DIR) $(PATCH_DIR)/libhv-openssl-static-link.patch "libhv OpenSSL/static build hook patch"
 	$(Q)$(APPLY_PATCH) $(LIBHV_DIR) $(PATCH_DIR)/libhv-streaming-upload.patch "libhv streaming upload patch"
@@ -633,8 +645,10 @@ $(PATCHES_STAMP): $(PATCH_FILES) $(LVGL_HEAD) $(LIBHV_HEAD) $(LUA_HEAD) $(APPLIE
 	$(Q)$(APPLY_PATCH) $(LIBHV_DIR) $(PATCH_DIR)/libhv-http-request-cancel-atomic.patch "libhv HttpRequest cancel atomic patch" "Without it CameraStream::stop() races the stream thread's ParseUrl() (nightly TSAN in HttpRequest::Cancel)."
 	$(Q)$(APPLY_PATCH) $(LIBHV_DIR) $(PATCH_DIR)/libhv-hloop-preallocate-ios.patch "libhv hloop ios preallocation patch" "Without it a client connecting right after its loop thread starts can lose its io to a concurrent first allocation and fault in iowatcher_add_event."
 	$(Q)$(APPLY_PATCH) $(LIBHV_DIR) $(PATCH_DIR)/libhv-websocket-open-install-once.patch "libhv WebSocketClient install-once patch" "Without it a reconnect from another thread overwrites onConnection while the loop thread is running it, and a redirect reassigns onMessage from inside onMessage."
+	$(Q)$(APPLY_PATCH) $(LIBHV_DIR) $(PATCH_DIR)/libhv-outbound-socket-hook.patch "libhv outbound socket hook patch" "Without it the Android app cannot route LAN printer sockets over a Wi-Fi that has no internet."
+	$(Q)$(APPLY_PATCH) $(LIBHV_DIR) $(PATCH_DIR)/libhv-http-request-hook.patch "libhv HTTP request hook patch" "Without it no HTTP request carries the Moonraker API key, so a printer with force_logins rejects every one."
 	$(Q)if [ -d "$(LIBHV_DIR)/include/hv" ]; then \
-		for h in evpp/TcpClient.h http/client/WebSocketClient.h cpputil/hthreadpool.h http/HttpMessage.h; do \
+		for h in evpp/TcpClient.h http/client/WebSocketClient.h cpputil/hthreadpool.h http/HttpMessage.h base/hsocket.h http/client/HttpClient.h; do \
 			base=$$(basename $$h); \
 			if ! diff -q "$(LIBHV_DIR)/$$h" "$(LIBHV_DIR)/include/hv/$$base" >/dev/null 2>&1; then \
 				echo "$(YELLOW)→ Syncing patched $$base to include/hv/$(RESET)"; \

@@ -25,7 +25,7 @@ template <bool Suppressible, typename M> constexpr auto field(M member) {
 /// hold this value because somebody told it? Those are cached declarations,
 /// and firmware restating one is not a new fact. The rest are readings in
 /// their own right and pass through untouched.
-constexpr auto FIELD_ROSTER = std::make_tuple(
+constexpr auto kFieldRoster = std::make_tuple(
     // Presence and docking are sensed. No backend writes either and no write
     // can echo them.
     field<false>(&Observation::present), field<false>(&Observation::tool_docked),
@@ -51,7 +51,7 @@ constexpr auto FIELD_ROSTER = std::make_tuple(
     // reads back the seeded number.
     field<false>(&Observation::remaining_weight_g), field<false>(&Observation::total_weight_g));
 
-static_assert(std::tuple_size_v<decltype(FIELD_ROSTER)> ==
+static_assert(std::tuple_size_v<decltype(kFieldRoster)> ==
                   std::tuple_size_v<decltype(std::declval<Observation&>().fields())>,
               "every Observation field needs a row above: a field with no row is one this guard "
               "lets through unexamined, so a backend that writes it back launders it into a "
@@ -63,7 +63,7 @@ template <typename Fn> void for_each_suppressible(Fn&& fn) {
         if constexpr (std::decay_t<decltype(row)>::suppressible)
             fn(row.member);
     };
-    std::apply([&visit](const auto&... rows) { (visit(rows), ...); }, FIELD_ROSTER);
+    std::apply([&visit](const auto&... rows) { (visit(rows), ...); }, kFieldRoster);
 }
 
 /// True when @p obs still declares a field this guard could withhold. A

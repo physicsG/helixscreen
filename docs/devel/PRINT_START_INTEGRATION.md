@@ -185,7 +185,7 @@ HelixScreen can analyze your `PRINT_START` macro to detect which operations can 
 
 On printers whose stock firmware has no toggleable `PRINT_START` parameters, HelixScreen drives the operation itself: the print details toggle dispatches a **pre-start gcode block** to the printer before the job starts, and only then calls `start_print`. The block runs under a 20-minute ceiling with a busy→idle wait, so long operations (a full bed mesh) survive.
 
-This is how the shipped "Auto Bed Mesh" toggle works on the Creality K2 Plus / K2 Pro and K1C. The gcode comes from the printer's entry in `assets/config/printer_database.json` (`pre_print_options` → `strategy: pre_start_gcode`):
+This is how the shipped "Auto Bed Mesh" toggle works on the Creality K2, K2 Plus, K2 Pro and K1C (not the `creality_k2_plus_k2improvements` entry, which declares no `bed_mesh` option). The gcode comes from the printer's entry in `assets/config/printer_database.json` (`pre_print_options` → `strategy: pre_start_gcode`):
 
 | Token | Substitutes |
 |-------|-------------|
@@ -195,6 +195,12 @@ This is how the shipped "Auto Bed Mesh" toggle works on the Creality K2 Plus / K
 | `{?ext}…{/?}` | Segment emitted only when the extruder temperature is known - for firmwares whose commands reject a literal `EXTRUDER_TEMP=0` (Creality K1's Python `get_float(minval=...)` raises). `BED_TEMP=0` needs no marker: the firmware accepts it, and an unheated bed is a real configuration |
 
 An option with `emit_when_disabled: false` has no "off" gcode at all: unchecking it sends nothing and the firmware's own default sequence runs.
+
+`emit_when_disabled: false` has a second meaning (`include/pre_print_option.h#emit_when_disabled`): the line *is* the step, so it is not sent when the started file calls the same command itself. For an enabled option whose id maps to a file-embeddable operation (`bed_mesh`, `qgl`, `z_tilt`, `nozzle_clean`), `collect_pre_start_gcode_lines()` drops the line when `file_runs_command()` finds the rendered line's command word, under that operation type, in the scan's `operation_commands` (`src/ui/ui_print_preparation_manager.cpp#file_runs_command`). `GCodeOpsDetector` records there the command word of every line that matches an operation pattern, while `operations` keeps only the first line of each type for the file-modification path. On a K2 only a direct `BED_MESH_CALIBRATE_START_PRINT` call counts, wherever it sits among the file's `BED_MESH` lines; `BED_MESH_PROFILE LOAD`, `BED_MESH_CLEAR` and `START_PRINT` mesh parameters do not, and the line is still sent. The scan is `GCodeOpsDetector` with its default `DetectionConfig` (first 500 lines or 50 KB, thumbnail comments counted, stopping at the first extruding move or layer marker), so a call past that window is not seen and the line is sent. A start with no scan for its file skips nothing.
+
+The pre-start block exists only on starts HelixScreen makes (`PrintPreparationManager::start_print`): the file view's Print, the queue's file-view start and the Job Queue widget's Start next. A job started by a slicer upload, another web UI or Moonraker's `automatic_transition` never gets it.
+
+**Which option states a queued start uses.** Options picked at queue time live in the Moonraker database, namespace `helix-screen`, one key per job at `queued_job_options.<job_id>` (`include/queued_job_options.h`). A job queued elsewhere (Mainsail, Fluidd, a slicer) has no entry, and `load_queued_job_options()` answers an empty map for it, as it does for a read error. The Job Queue widget's Start next (`QueuedJobStarter`, `src/ui/queued_job_start.cpp`) installs `saved_option_state()` as the start's option override; an id with no saved state returns -1 and falls through to `option_state_provider_` (only bound while the detail view has rendered rows), then the option's `default_enabled` (`PrintPreparationManager::get_option_state`). The file-view path (`PrintSelectPanel::start_queued_job`) seeds the detail view's rows from the saved entry; rows it does not name keep their `default_enabled`. Either way a K2 job queued from another client starts with `bed_mesh` on.
 
 **K1C specifics.** The K1 firmware's `START_PRINT` runs its full preparation chain whenever its `prepare` variable is 0 (homing, nozzle wipe, accurate Z homing, then `CX_PRINT_LEVELING_CALIBRATE`). That command is a 4-corner bed check - it re-meshes the whole bed only when ≥2 corners drift beyond tolerance, and the whole decision is internal: none of it reaches the gcode console. The shipped toggle front-runs exactly what Creality's own app sends - heat, home, nozzle wipe, accurate home, `BED_MESH_CALIBRATE`, then `PRINT_PREPARED` (which makes the file's `START_PRINT` skip its now-redundant chain) - so one preparation pass runs, at print temperature, with a guaranteed mesh.
 
@@ -242,6 +248,39 @@ What keeps it safe to install:
 | A wrappable step is not wrapped (the file or its include is missing, or the printer gained `[z_tilt]`) | The helper macros read as Outdated, and Update stages the file |
 | The user later removes `[bed_mesh]`, `[quad_gantry_level]` or `[z_tilt]` while its wrapper is loaded | Klipper refuses to start: `Existing command '...' not found in gcode_macro rename`. Only the restart HelixScreen itself requests is watched, so this one is not rolled back. Remove the `[include helix_skips.cfg]` line, or reinstall the helper macros after restarting |
 | A Klipper error after HelixScreen's restart has another cause (a CAN board that did not come up) | The rollback still removes the file, since it cannot tell the causes apart; Update stages it again once Klipper is healthy |
+
+### How a choice reaches the sliced file
+
+A toggle that turns off a step the sliced file runs itself, or a skip parameter added to
+the file's `PRINT_START` line, means printing a rewritten copy.
+`PrintPreparationManager::modify_and_print` builds the edits once from the file's own
+ops scan (`GCodeFileModifier::disable_operations`, `add_print_start_skip_params`): a
+comment-out for a detected command, a replace for a `PRINT_START` line or a macro
+parameter. Every edit carries the line the scan saw, and a file whose line differs is
+refused rather than rewritten, wherever the rewrite runs. Filament Mapping's tool remap
+([FILAMENT_MANAGEMENT.md](FILAMENT_MANAGEMENT.md)) takes the same route.
+
+Where the rewrite runs is one pure decision, `gcode::choose_edit_transport`
+(`include/gcode_edit_list.h`):
+
+| HelixPrint `server_edits` feature | Route |
+|---|---|
+| Ready (`plugin_feature("server_edits", 1)`), the list can travel, not a `.3mf` plate | `server.helix.print_edited`: the app sends the edit list (`gcode::to_server_edits`) and the plugin rewrites beside the original, then starts the copy as `print_modified` does. Nothing is downloaded or uploaded. The plugin refuses with 507 when the copy would leave less than 100 MB free (`helix_storage.py`), as `print_modified` does |
+| Anything else | `rewrite_and_print`: download, `GCodeFileModifier::apply_streaming` (or `GcodeToolRemapper::apply_to_file`) file to file, upload, then `print_modified` (or a plain start without the plugin). The upload waits for `storage::check_upload_space`: a copy that would leave less than 100 MB free on the gcodes volume is not uploaded and the start is abandoned with a toast |
+
+A list cannot travel when it holds text that is not UTF-8, both edits and a tool remap,
+or a range on an edit kind that has none; it then rewrites on the screen. A `.3mf` plate
+always does, since the plate has to be extracted first. The plugin refusing a stale line
+ends the start with an error, as the screen's own rewrite would.
+
+The two rewriters are one grammar in two languages. `tests/fixtures/gcode_edits/` holds
+input, edit list and expected bytes for each case; `tests/unit/test_gcode_edit_list.cpp`
+and `moonraker-plugin/tests/test_helix_edits.py` both apply every case, and a new edit
+kind or line rule lands in both with a fixture.
+
+The copy ends with a newline exactly when the original does. Klipper's `virtual_sdcard`
+never runs an unterminated final line, so a copy that dropped the newline would skip
+the file's last command.
 
 ### Parameter Semantics
 
@@ -352,7 +391,7 @@ If detection falls all the way through to a timeout:
 1. **Add HELIX_READY**: The most reliable option
 2. **Check if your slicer sets layer info**: Look for `SET_PRINT_STATS_INFO` in your G-code
 3. **Verify macro object subscriptions**: HelixScreen subscribes to `gcode_macro _HELIX_STATE`, `gcode_macro _START_PRINT`, and `gcode_macro START_PRINT`
-4. **ForgeX users**: Detection should be instant via the Forge-X profile (`// State:` signals) and `START_PRINT.preparation_done` macro variable
+4. **ForgeX users**: Detection should be instant via the Forge-X profile (the `operation_context` status object on 1.4.x, `// State:` lines on older versions), the `_START_PRINT.print_started` and `START_PRINT.preparation_done` macro variables
 
 ## Files
 

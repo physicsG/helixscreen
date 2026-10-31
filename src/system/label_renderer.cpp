@@ -24,7 +24,7 @@ namespace helix {
 // ---------------------------------------------------------------------------
 
 // clang-format off
-static const uint8_t FONT_5X7[95][7] = {
+static const uint8_t kFont5x7[95][7] = {
     // 32 ' '
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00},
     // 33 '!'
@@ -218,21 +218,21 @@ static const uint8_t FONT_5X7[95][7] = {
 };
 // clang-format on
 
-static constexpr int FONT_W = 5;
-static constexpr int FONT_H = 7;
-static constexpr int FONT_FIRST = 32;
-static constexpr int FONT_LAST = 126;
+static constexpr int kFontW = 5;
+static constexpr int kFontH = 7;
+static constexpr int kFontFirst = 32;
+static constexpr int kFontLast = 126;
 
 /// Draw a single character at (x, y) scaled by `scale`
 static void draw_char(LabelBitmap& bmp, char c, int x, int y, int scale) {
-    int idx = static_cast<int>(static_cast<unsigned char>(c)) - FONT_FIRST;
-    if (idx < 0 || idx > (FONT_LAST - FONT_FIRST))
+    int idx = static_cast<int>(static_cast<unsigned char>(c)) - kFontFirst;
+    if (idx < 0 || idx > (kFontLast - kFontFirst))
         idx = 0; // fallback to space
 
-    const uint8_t* glyph = FONT_5X7[idx];
-    for (int row = 0; row < FONT_H; row++) {
+    const uint8_t* glyph = kFont5x7[idx];
+    for (int row = 0; row < kFontH; row++) {
         uint8_t bits = glyph[row];
-        for (int col = 0; col < FONT_W; col++) {
+        for (int col = 0; col < kFontW; col++) {
             if (bits & (0x80 >> col)) {
                 // Draw a scale×scale block
                 for (int sy = 0; sy < scale; sy++)
@@ -246,7 +246,7 @@ static void draw_char(LabelBitmap& bmp, char c, int x, int y, int scale) {
 /// Draw a string at (x, y) with given scale (char pitch = 6*scale)
 static void draw_text(LabelBitmap& bmp, const std::string& text, int x, int y, int scale) {
     int cursor_x = x;
-    int char_pitch = (FONT_W + 1) * scale; // 1px gap between chars
+    int char_pitch = (kFontW + 1) * scale; // 1px gap between chars
     for (char c : text) {
         draw_char(bmp, c, cursor_x, y, scale);
         cursor_x += char_pitch;
@@ -255,7 +255,7 @@ static void draw_text(LabelBitmap& bmp, const std::string& text, int x, int y, i
 
 /// Truncate text to fit within max_width pixels at given scale
 static std::string truncate_to_fit(const std::string& text, int max_width, int scale) {
-    int char_pitch = (FONT_W + 1) * scale;
+    int char_pitch = (kFontW + 1) * scale;
     int max_chars = max_width / char_pitch;
     if (max_chars <= 0)
         return {};
@@ -270,7 +270,7 @@ static std::string truncate_to_fit(const std::string& text, int max_width, int s
 static int text_width(const std::string& text, int scale) {
     if (text.empty())
         return 0;
-    return static_cast<int>(text.length()) * (FONT_W + 1) * scale - scale;
+    return static_cast<int>(text.length()) * (kFontW + 1) * scale - scale;
 }
 
 /// Human-readable spool identifier. It is what a person reads off the label
@@ -289,14 +289,14 @@ static std::string spool_id_text(const SpoolInfo& spool) {
 // Spool-number size bounds for the MINIMAL layout, in font scale units.
 // The floor keeps the number legible; the cap stops a short number from
 // dwarfing the QR on a wide label.
-static constexpr int ID_MIN_SCALE = 3;
-static constexpr int ID_MAX_SCALE = 12;
+static constexpr int kIdMinScale = 3;
+static constexpr int kIdMaxScale = 12;
 
-/// Largest scale at which `text` fits inside a w x h box, capped at ID_MAX_SCALE
+/// Largest scale at which `text` fits inside a w x h box, capped at kIdMaxScale
 static int fit_scale(const std::string& text, int w, int h) {
-    int by_w = w / (static_cast<int>(text.length()) * (FONT_W + 1));
-    int by_h = h / FONT_H;
-    return std::min({by_w, by_h, ID_MAX_SCALE});
+    int by_w = w / (static_cast<int>(text.length()) * (kFontW + 1));
+    int by_h = h / kFontH;
+    return std::min({by_w, by_h, kIdMaxScale});
 }
 
 /// MINIMAL layout on a canvas_w x canvas_h canvas (canvas_h == 0: continuous,
@@ -319,13 +319,13 @@ static LabelBitmap render_minimal(const std::string& qr_data, const std::string&
 
     int scale_beside = fit_scale(id_text, inner_w - qr.width() - gap, qr.height());
     int scale_below = fit_scale(id_text, inner_w,
-                                canvas_h > 0 ? inner_h - qr.height() - gap : ID_MAX_SCALE * FONT_H);
-    bool beside = scale_beside >= ID_MIN_SCALE && scale_beside >= scale_below;
+                                canvas_h > 0 ? inner_h - qr.height() - gap : kIdMaxScale * kFontH);
+    bool beside = scale_beside >= kIdMinScale && scale_beside >= scale_below;
 
-    if (!beside && scale_below < ID_MIN_SCALE) {
+    if (!beside && scale_below < kIdMinScale) {
         // Die-cut label with no room for the number: give up QR pixels, not
         // the number. Continuous tape never lands here (its height is free).
-        int shrunk = inner_h - gap - FONT_H * ID_MIN_SCALE;
+        int shrunk = inner_h - gap - kFontH * kIdMinScale;
         auto smaller = generate_qr_bitmap(qr_data, std::max(shrunk, 1));
         if (!smaller.empty())
             qr = std::move(smaller);
@@ -335,7 +335,7 @@ static LabelBitmap render_minimal(const std::string& qr_data, const std::string&
 
     int scale = beside ? scale_beside : scale_below;
     int id_w = text_width(id_text, scale);
-    int id_h = FONT_H * scale;
+    int id_h = kFontH * scale;
 
     if (beside) {
         int height = canvas_h > 0 ? canvas_h : qr.height() + 2 * qr_margin;
@@ -446,7 +446,7 @@ LabelBitmap LabelRenderer::render(const SpoolInfo& spool, LabelPreset preset,
 
         // Font scale: 96px height gives room for scale 2 (14px line height)
         int scale = 2;
-        int line_h = FONT_H * scale + 2;
+        int line_h = kFontH * scale + 2;
         int text_x = has_id ? m + qr.width() + gap : m;
         int text_area_width = lw - text_x - m;
 
@@ -535,14 +535,14 @@ LabelBitmap LabelRenderer::render(const SpoolInfo& spool, LabelPreset preset,
     int scale_lg, scale_md, scale_sm;
     if (preset == LabelPreset::COMPACT) {
         // Compact: 3 lines. Scale to fill ~80% of height.
-        // 3 lines at (FONT_H * scale + 4) each → scale = (avail_h * 0.8 / 3 - 4) / FONT_H
-        int target_scale = (avail_h * 8 / 10 / 3 - 4) / FONT_H;
+        // 3 lines at (kFontH * scale + 4) each → scale = (avail_h * 0.8 / 3 - 4) / kFontH
+        int target_scale = (avail_h * 8 / 10 / 3 - 4) / kFontH;
         scale_lg = std::clamp(target_scale, 3, 8);
         scale_md = std::clamp(target_scale - 1, 2, 7);
         scale_sm = std::clamp(target_scale - 2, 2, 6);
     } else {
         // Standard: 3-6 lines. Scale to fill ~70% of height with 4 lines.
-        int target_scale = (avail_h * 7 / 10 / 4 - 4) / FONT_H;
+        int target_scale = (avail_h * 7 / 10 / 4 - 4) / kFontH;
         scale_lg = std::clamp(target_scale, 3, 7);
         scale_md = std::clamp(target_scale - 1, 2, 6);
         scale_sm = std::clamp(target_scale - 2, 2, 5);
@@ -551,16 +551,16 @@ LabelBitmap LabelRenderer::render(const SpoolInfo& spool, LabelPreset preset,
     // Floor of 8 chars: vendor/material strings ("PRUSAMENT", "POLYMAKER") are
     // typically 7-9 chars — anything less truncates them to garble on narrow
     // tape. Was 4, which left 29mm continuous showing only "PRUS".
-    int max_scale_by_width = text_area_width / ((FONT_W + 1) * 8); // fit ≥8 chars
+    int max_scale_by_width = text_area_width / ((kFontW + 1) * 8); // fit ≥8 chars
     if (max_scale_by_width < 2)
         max_scale_by_width = 2;
     scale_lg = std::min(scale_lg, max_scale_by_width);
     scale_md = std::min(scale_md, max_scale_by_width);
     scale_sm = std::min(scale_sm, max_scale_by_width);
 
-    int line_h_lg = FONT_H * scale_lg + 4;
-    int line_h_md = FONT_H * scale_md + 4;
-    int line_h_sm = FONT_H * scale_sm + 4;
+    int line_h_lg = kFontH * scale_lg + 4;
+    int line_h_md = kFontH * scale_md + 4;
+    int line_h_sm = kFontH * scale_sm + 4;
 
     // Calculate text block height. The spool number leads at the vendor
     // scale; untracked spools drop that line entirely so the remaining lines

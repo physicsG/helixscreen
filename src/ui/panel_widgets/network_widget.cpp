@@ -11,45 +11,30 @@
 #include "log_redact.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "panel_widget_registry.h"
-#include "static_subject_registry.h"
 #include "subject_debug_registry.h"
 #include "subject_managed_panel.h"
+#include "widget_subjects.h"
 #include "wifi_manager.h"
 
 #include <spdlog/spdlog.h>
 
 // Signal polling interval (5 seconds)
-static constexpr uint32_t SIGNAL_POLL_INTERVAL_MS = 5000;
+static constexpr uint32_t kSignalPollIntervalMs = 5000;
 
 // Subjects owned by NetworkWidget module — created before XML bindings resolve
 static lv_subject_t s_network_icon_state;
-static bool s_subjects_initialized = false;
-static SubjectManager s_subjects;
+static helix::WidgetSubjects s_subjects{"NetworkWidgetSubjects"};
 
 static void network_widget_init_subjects() {
-    if (s_subjects_initialized) {
-        return;
-    }
+    s_subjects.ensure_init([] {
+        // Integer subject: 0=disconnected, 1-4=wifi strength, 5=ethernet
+        lv_subject_init_int(&s_network_icon_state, 0);
+        s_subjects.publish("home_network_icon_state", &s_network_icon_state);
+        HELIX_SUBJECT_DEBUG_REGISTER(&s_network_icon_state, "home_network_icon_state",
+                                     LV_SUBJECT_TYPE_INT);
 
-    // Integer subject: 0=disconnected, 1-4=wifi strength, 5=ethernet
-    lv_subject_init_int(&s_network_icon_state, 0);
-    s_subjects.publish("home_network_icon_state", &s_network_icon_state);
-    SubjectDebugRegistry::instance().register_subject(
-        &s_network_icon_state, "home_network_icon_state", LV_SUBJECT_TYPE_INT, __FILE__, __LINE__);
-
-    s_subjects_initialized = true;
-
-    // Self-register cleanup with StaticSubjectRegistry (co-located with init)
-    // Subjects must be deinitialized AFTER panels remove their observers (Phase 2)
-    StaticSubjectRegistry::instance().register_deinit("NetworkWidgetSubjects", []() {
-        if (s_subjects_initialized && lv_is_initialized()) {
-            s_subjects.deinit_all();
-            s_subjects_initialized = false;
-            spdlog::trace("[NetworkWidget] Subjects deinitialized");
-        }
+        spdlog::debug("[NetworkWidget] Subjects initialized (icon_state + label)");
     });
-
-    spdlog::debug("[NetworkWidget] Subjects initialized (icon_state + label)");
 }
 
 namespace helix {
@@ -151,8 +136,8 @@ void NetworkWidget::ensure_signal_poll_timer() {
     if (!active_ || signal_poll_timer_ || current_network_ != NetworkType::Wifi) {
         return;
     }
-    signal_poll_timer_ = lv_timer_create(signal_poll_timer_cb, SIGNAL_POLL_INTERVAL_MS, this);
-    spdlog::debug("[NetworkWidget] Started signal polling timer ({}ms)", SIGNAL_POLL_INTERVAL_MS);
+    signal_poll_timer_ = lv_timer_create(signal_poll_timer_cb, kSignalPollIntervalMs, this);
+    spdlog::debug("[NetworkWidget] Started signal polling timer ({}ms)", kSignalPollIntervalMs);
 }
 
 void NetworkWidget::cancel_signal_poll_timer() {

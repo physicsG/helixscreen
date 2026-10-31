@@ -1,5 +1,5 @@
 {
-  "_attribution": "Factual filament data derived from OrcaSlicer (github.com/SoftFever/OrcaSlicer, tag v2.4.1, AGPL-3.0). No OrcaSlicer profile files are shipped.",
+  "_attribution": "Factual filament data derived from OrcaSlicer (github.com/SoftFever/OrcaSlicer, tag v2.4.1, filament ids from tag v2.5.0-beta, AGPL-3.0). No OrcaSlicer profile files are shipped.",
   "orca_library_types": [
     "ABS",
     "ABS-GF",
@@ -1770,7 +1770,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.04,
-      "orca_id": "AliZ003"
+      "orca_id": "OFd4zw5l"
     },
     {
       "id": "aliz-petg",
@@ -1783,7 +1783,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "AliZ001"
+      "orca_id": "OFocyw69"
     },
     {
       "id": "aliz-petg-cf",
@@ -1796,7 +1796,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.27,
-      "orca_id": "AZ01-1"
+      "orca_id": "OFJOFnOZ"
     },
     {
       "id": "aliz-petg-metal",
@@ -1809,7 +1809,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "AZ01-2"
+      "orca_id": "OFOABq7t"
     },
     {
       "id": "aliz-pla",
@@ -1822,7 +1822,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.27,
-      "orca_id": "AliZ002"
+      "orca_id": "OFyxayW4"
     },
     {
       "id": "bambu-lab-bambu-abs",
@@ -1835,7 +1835,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.04,
-      "orca_id": "OGFB00"
+      "orca_id": "OFhuaUQB"
     },
     {
       "id": "bambu-lab-bambu-abs-gf",
@@ -1848,7 +1848,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.08,
-      "orca_id": "OGFB50"
+      "orca_id": "OFknl9Iz"
     },
     {
       "id": "bambu-lab-bambu-asa",
@@ -1861,7 +1861,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.05,
-      "orca_id": "OGFB01"
+      "orca_id": "OFfBpSRI"
     },
     {
       "id": "bambu-lab-bambu-asa-aero",
@@ -1872,7 +1872,7 @@
       "bed": 100,
       "source": "orca",
       "density": 0.99,
-      "orca_id": "OGFB02"
+      "orca_id": "OFXzQ4yL"
     },
     {
       "id": "bambu-lab-bambu-asa-cf",
@@ -1883,7 +1883,7 @@
       "bed": 100,
       "source": "orca",
       "density": 1.02,
-      "orca_id": "OGFB51"
+      "orca_id": "OF0wBGNx"
     },
     {
       "id": "bambu-lab-bambu-pa-cf",
@@ -1896,7 +1896,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.09,
-      "orca_id": "OGFN03"
+      "orca_id": "OFFNYwWR"
     },
     {
       "id": "bambu-lab-bambu-pa6-cf",
@@ -1909,7 +1909,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.1,
-      "orca_id": "OGFN05"
+      "orca_id": "OFniMuTN"
     },
     {
       "id": "bambu-lab-bambu-pa6-gf",
@@ -1922,7 +1922,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.14,
-      "orca_id": "OGFN08"
+      "orca_id": "OFNk8bxk"
     },
     {
       "id": "bambu-lab-bambu-paht-cf",
@@ -1935,7 +1935,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.06,
-      "orca_id": "OGFN04"
+      "orca_id": "OF2VFe4J"
     },
     {
       "id": "bambu-lab-bambu-pc",
@@ -1948,7 +1948,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.04,
-      "orca_id": "OGFC00"
+      "orca_id": "OFKhMPeX"
     },
     {
       "id": "bambu-lab-bambu-pc-fr",
@@ -1961,7 +1961,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.19,
-      "orca_id": "OGFC01"
+      "orca_id": "OFg57Nmc"
     },
     {
       "id": "bambu-lab-bambu-pet-cf",
@@ -1974,7 +1974,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.29,
-      "orca_id": "OGFT01"
+      "orca_id": "OFHa48An"
     },
     {
       "id": "bambu-lab-bambu-petg-basic",
@@ -1987,7 +1987,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.25,
-      "orca_id": "OGFG00"
+      "orca_id": "OFFvzqcd"
     },
     {
       "id": "bambu-lab-bambu-petg-hf",
@@ -2000,7 +2000,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.28,
-      "orca_id": "OGFG02"
+      "orca_id": "OFovEIbw"
     },
     {
       "id": "bambu-lab-bambu-petg-translucent",
@@ -2013,7 +2013,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.25,
-      "orca_id": "OGFG01"
+      "orca_id": "OFwPrlCM"
     },
     {
       "id": "bambu-lab-bambu-petg-cf",
@@ -2024,7 +2024,7 @@
       "bed": 70,
       "source": "orca",
       "density": 1.25,
-      "orca_id": "OGFG50"
+      "orca_id": "OFTRZ8Y4"
     },
     {
       "id": "bambu-lab-bambu-pla-aero",
@@ -2037,7 +2037,7 @@
       "nozzle_min": 210,
       "nozzle_max": 260,
       "density": 1.21,
-      "orca_id": "OGFA11"
+      "orca_id": "OFBSW57R"
     },
     {
       "id": "bambu-lab-bambu-pla-basic",
@@ -2050,7 +2050,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.26,
-      "orca_id": "OGFA00"
+      "orca_id": "OFoiVqVM"
     },
     {
       "id": "bambu-lab-bambu-pla-dynamic",
@@ -2063,7 +2063,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.26,
-      "orca_id": "OGFA13"
+      "orca_id": "OFDGigEI"
     },
     {
       "id": "bambu-lab-bambu-pla-galaxy",
@@ -2076,7 +2076,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.19,
-      "orca_id": "OGFA15"
+      "orca_id": "OFQ3e56w"
     },
     {
       "id": "bambu-lab-bambu-pla-glow",
@@ -2089,7 +2089,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.26,
-      "orca_id": "OGFA12"
+      "orca_id": "OFEkPBwx"
     },
     {
       "id": "bambu-lab-bambu-pla-impact",
@@ -2102,7 +2102,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFA03"
+      "orca_id": "OFTGHyNC"
     },
     {
       "id": "bambu-lab-bambu-pla-marble",
@@ -2115,7 +2115,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.22,
-      "orca_id": "OGFA07"
+      "orca_id": "OF9OlTWH"
     },
     {
       "id": "bambu-lab-bambu-pla-matte",
@@ -2128,7 +2128,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.32,
-      "orca_id": "OGFA01"
+      "orca_id": "OFXIbw5D"
     },
     {
       "id": "bambu-lab-bambu-pla-metal",
@@ -2141,7 +2141,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OGFA02"
+      "orca_id": "OFrKLeE3"
     },
     {
       "id": "bambu-lab-bambu-pla-silk",
@@ -2154,7 +2154,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.32,
-      "orca_id": "OGFA05"
+      "orca_id": "OFEGNJD4"
     },
     {
       "id": "bambu-lab-bambu-pla-silk-plus",
@@ -2167,7 +2167,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.27,
-      "orca_id": "OGFA06"
+      "orca_id": "OFUanySo"
     },
     {
       "id": "bambu-lab-bambu-pla-sparkle",
@@ -2180,7 +2180,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.26,
-      "orca_id": "OGFA08"
+      "orca_id": "OFDxfPgH"
     },
     {
       "id": "bambu-lab-bambu-pla-tough",
@@ -2193,7 +2193,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.26,
-      "orca_id": "OGFA09"
+      "orca_id": "OFaQMgRH"
     },
     {
       "id": "bambu-lab-bambu-pla-wood",
@@ -2206,7 +2206,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.21,
-      "orca_id": "OGFA16"
+      "orca_id": "OFMjtqTC"
     },
     {
       "id": "bambu-lab-bambu-pla-cf",
@@ -2219,7 +2219,7 @@
       "nozzle_min": 210,
       "nozzle_max": 250,
       "density": 1.22,
-      "orca_id": "OGFA50"
+      "orca_id": "OFEswT5W"
     },
     {
       "id": "bambu-lab-bambu-ppa-cf",
@@ -2232,7 +2232,7 @@
       "nozzle_min": 280,
       "nozzle_max": 320,
       "density": 1.17,
-      "orca_id": "OGFN06"
+      "orca_id": "OF54B0S0"
     },
     {
       "id": "bambu-lab-bambu-pva",
@@ -2245,7 +2245,7 @@
       "nozzle_min": 210,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "OGFS04"
+      "orca_id": "OFzyIxba"
     },
     {
       "id": "bambu-lab-bambu-support-for-abs",
@@ -2256,7 +2256,7 @@
       "bed": 100,
       "source": "orca",
       "density": 1.04,
-      "orca_id": "OGFS06"
+      "orca_id": "OFf6mfQO"
     },
     {
       "id": "bambu-lab-bambu-support-for-pa-pet",
@@ -2269,7 +2269,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.22,
-      "orca_id": "OGFS03"
+      "orca_id": "OFMTK0UC"
     },
     {
       "id": "bambu-lab-bambu-support-for-pla",
@@ -2282,7 +2282,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.3,
-      "orca_id": "OGFS02"
+      "orca_id": "OFAnyRUI"
     },
     {
       "id": "bambu-lab-bambu-support-for-pla-petg",
@@ -2295,7 +2295,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.19,
-      "orca_id": "OGFS05"
+      "orca_id": "OFIfnzxC"
     },
     {
       "id": "bambu-lab-bambu-support-g",
@@ -2308,7 +2308,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.22,
-      "orca_id": "OGFS01"
+      "orca_id": "OFQHiNJs"
     },
     {
       "id": "bambu-lab-bambu-support-w",
@@ -2321,7 +2321,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.3,
-      "orca_id": "OGFS00"
+      "orca_id": "OFsHSVZc"
     },
     {
       "id": "bambu-lab-bambu-tpu-95a",
@@ -2334,7 +2334,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.22,
-      "orca_id": "OGFU01"
+      "orca_id": "OFVCkX5w"
     },
     {
       "id": "bambu-lab-bambu-tpu-95a-hf",
@@ -2347,7 +2347,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.22,
-      "orca_id": "OGFU00"
+      "orca_id": "OFvKUnLh"
     },
     {
       "id": "coex-3d-coex-abs",
@@ -2360,7 +2360,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.04,
-      "orca_id": "CXABSB01"
+      "orca_id": "OF99UMPq"
     },
     {
       "id": "coex-3d-coex-abs-prime",
@@ -2373,7 +2373,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.04,
-      "orca_id": "CXABPB09"
+      "orca_id": "OFuWCQXN"
     },
     {
       "id": "coex-3d-coex-asa-prime",
@@ -2386,7 +2386,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.07,
-      "orca_id": "CXASAB04"
+      "orca_id": "OFtpXCCv"
     },
     {
       "id": "coex-3d-coex-nylex-pa6-cf",
@@ -2399,7 +2399,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.24,
-      "orca_id": "CXPACB23"
+      "orca_id": "OF0NgY1y"
     },
     {
       "id": "coex-3d-coex-pctg-prime",
@@ -2412,7 +2412,7 @@
       "nozzle_min": 220,
       "nozzle_max": 275,
       "density": 1.27,
-      "orca_id": "CXPCTB15"
+      "orca_id": "OFwu7IAG"
     },
     {
       "id": "coex-3d-coex-petg",
@@ -2425,7 +2425,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "CXPETB13"
+      "orca_id": "OFvTVZc3"
     },
     {
       "id": "coex-3d-coex-pla",
@@ -2438,7 +2438,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "CXPLAB02"
+      "orca_id": "OFhlCNqq"
     },
     {
       "id": "coex-3d-coex-pla-prime",
@@ -2451,7 +2451,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "CXPLAB08"
+      "orca_id": "OFd2vX0G"
     },
     {
       "id": "coex-3d-coex-pla-plus-silk",
@@ -2464,7 +2464,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "CXPLSB03"
+      "orca_id": "OF0pzFLc"
     },
     {
       "id": "coex-3d-coex-tpe-30d",
@@ -2477,7 +2477,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.15,
-      "orca_id": "CX30DB20"
+      "orca_id": "OFVptRxp"
     },
     {
       "id": "coex-3d-coex-tpe-40d",
@@ -2490,7 +2490,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.18,
-      "orca_id": "CX40DB20"
+      "orca_id": "OFfnXFie"
     },
     {
       "id": "coex-3d-coex-tpe-60d",
@@ -2503,7 +2503,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.2,
-      "orca_id": "CX60DB19"
+      "orca_id": "OFfr4XNO"
     },
     {
       "id": "coex-3d-coex-tpu-60a",
@@ -2516,7 +2516,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.14,
-      "orca_id": "CX60AB17"
+      "orca_id": "OFE0NFRh"
     },
     {
       "id": "dremc-abs-gf",
@@ -2529,7 +2529,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.12,
-      "orca_id": "DREMC009"
+      "orca_id": "OFCidU7j"
     },
     {
       "id": "dremc-pa6-cf",
@@ -2542,7 +2542,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.25,
-      "orca_id": "DREMC006"
+      "orca_id": "OFsoykbm"
     },
     {
       "id": "dremc-ppa-cf",
@@ -2555,7 +2555,7 @@
       "nozzle_min": 280,
       "nozzle_max": 320,
       "density": 1.17,
-      "orca_id": "DREMC010"
+      "orca_id": "OFiWaoqD"
     },
     {
       "id": "elas-asa",
@@ -2568,7 +2568,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.04,
-      "orca_id": "OGFB01"
+      "orca_id": "OFCoRobU"
     },
     {
       "id": "elas-petg-basic",
@@ -2581,7 +2581,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.27,
-      "orca_id": "OGFG00"
+      "orca_id": "OFXTPuqV"
     },
     {
       "id": "elas-pla-basic",
@@ -2594,7 +2594,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFA00"
+      "orca_id": "OFMuXBmO"
     },
     {
       "id": "elas-pla-pro",
@@ -2607,7 +2607,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFA00"
+      "orca_id": "OFaYz8iE"
     },
     {
       "id": "elegoo-abs",
@@ -2620,7 +2620,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.1,
-      "orca_id": "OEABSB00"
+      "orca_id": "OFxOHhZw"
     },
     {
       "id": "elegoo-asa",
@@ -2633,7 +2633,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.1,
-      "orca_id": "OEASAB00"
+      "orca_id": "OFobDOW5"
     },
     {
       "id": "elegoo-asa-cf",
@@ -2646,7 +2646,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.1,
-      "orca_id": "OEASAB00"
+      "orca_id": "OFryjl35"
     },
     {
       "id": "elegoo-paht-cf",
@@ -2659,7 +2659,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.25,
-      "orca_id": "OEPAHTB0"
+      "orca_id": "OF20kXr5"
     },
     {
       "id": "elegoo-pc",
@@ -2672,7 +2672,7 @@
       "nozzle_min": 250,
       "nozzle_max": 270,
       "density": 1.25,
-      "orca_id": "OEPCB00"
+      "orca_id": "OFUyDDNv"
     },
     {
       "id": "elegoo-pc-fr",
@@ -2685,7 +2685,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.1,
-      "orca_id": "OEPCB00"
+      "orca_id": "OFlsTpJG"
     },
     {
       "id": "elegoo-pet-cf",
@@ -2698,7 +2698,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.25,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OFe98A1y"
     },
     {
       "id": "elegoo-petg",
@@ -2711,7 +2711,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.25,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OFLcd093"
     },
     {
       "id": "elegoo-petg-hf",
@@ -2724,7 +2724,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.26,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OFlP3KWq"
     },
     {
       "id": "elegoo-petg-pro",
@@ -2737,7 +2737,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.25,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OFOsHDnB"
     },
     {
       "id": "elegoo-petg-translucent",
@@ -2750,7 +2750,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.25,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OF6Ll8lK"
     },
     {
       "id": "elegoo-petg-cf",
@@ -2763,7 +2763,7 @@
       "nozzle_min": 240,
       "nozzle_max": 270,
       "density": 1.26,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OFuUuIhR"
     },
     {
       "id": "elegoo-petg-gf",
@@ -2776,7 +2776,7 @@
       "nozzle_min": 240,
       "nozzle_max": 270,
       "density": 1.26,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OFmveLWz"
     },
     {
       "id": "elegoo-pla",
@@ -2789,7 +2789,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFvgE0Zh"
     },
     {
       "id": "elegoo-pla-basic",
@@ -2802,7 +2802,7 @@
       "nozzle_min": 190,
       "nozzle_max": 230,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFm06H6V"
     },
     {
       "id": "elegoo-pla-galaxy",
@@ -2813,7 +2813,7 @@
       "bed": 60,
       "source": "orca",
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFU1zPxE"
     },
     {
       "id": "elegoo-pla-glow",
@@ -2826,7 +2826,7 @@
       "nozzle_min": 190,
       "nozzle_max": 230,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFjPXrXO"
     },
     {
       "id": "elegoo-pla-marble",
@@ -2837,7 +2837,7 @@
       "bed": 60,
       "source": "orca",
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFfuhviw"
     },
     {
       "id": "elegoo-pla-matte",
@@ -2850,7 +2850,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFsB2lxm"
     },
     {
       "id": "elegoo-pla-pro",
@@ -2863,7 +2863,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OF1hznGB"
     },
     {
       "id": "elegoo-pla-silk",
@@ -2876,7 +2876,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.32,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFXz7Mwx"
     },
     {
       "id": "elegoo-pla-sparkle",
@@ -2887,7 +2887,7 @@
       "bed": 60,
       "source": "orca",
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFhcYzR8"
     },
     {
       "id": "elegoo-pla-translucent2",
@@ -2900,7 +2900,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFn1QaY3"
     },
     {
       "id": "elegoo-pla-wood",
@@ -2913,7 +2913,7 @@
       "nozzle_min": 200,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFWYtgCa"
     },
     {
       "id": "elegoo-pla-plus",
@@ -2926,7 +2926,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFBUIlZ7"
     },
     {
       "id": "elegoo-pla-cf",
@@ -2939,7 +2939,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.21,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFln72PT"
     },
     {
       "id": "elegoo-rapid-petg",
@@ -2952,7 +2952,7 @@
       "nozzle_min": 230,
       "nozzle_max": 270,
       "density": 1.26,
-      "orca_id": "OEPETGB0"
+      "orca_id": "OFLXvuMr"
     },
     {
       "id": "elegoo-rapid-pla-plus",
@@ -2965,7 +2965,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OEPLAB00"
+      "orca_id": "OFkhhUS0"
     },
     {
       "id": "elegoo-rapid-tpu-95a",
@@ -2978,7 +2978,7 @@
       "nozzle_min": 200,
       "nozzle_max": 230,
       "density": 1.21,
-      "orca_id": "OETPUB00"
+      "orca_id": "OF30Ftju"
     },
     {
       "id": "elegoo-tpu-95a",
@@ -2991,7 +2991,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.21,
-      "orca_id": "OETPUB00"
+      "orca_id": "OFqHQNoZ"
     },
     {
       "id": "eolas-prints-abs",
@@ -3002,7 +3002,7 @@
       "bed": 100,
       "source": "orca",
       "density": 1.04,
-      "orca_id": "GFSEP017"
+      "orca_id": "OFXCBZTA"
     },
     {
       "id": "eolas-prints-asa",
@@ -3015,7 +3015,7 @@
       "nozzle_min": 245,
       "nozzle_max": 275,
       "density": 1.07,
-      "orca_id": "GFSEP018"
+      "orca_id": "OFlSNkhc"
     },
     {
       "id": "eolas-prints-petg",
@@ -3026,7 +3026,7 @@
       "bed": 80,
       "source": "orca",
       "density": 1.27,
-      "orca_id": "GFSEP010"
+      "orca_id": "OFhWhL1i"
     },
     {
       "id": "eolas-prints-petg-transition",
@@ -3037,7 +3037,7 @@
       "bed": 80,
       "source": "orca",
       "density": 1.27,
-      "orca_id": "GFSEP012"
+      "orca_id": "OFRiFnfQ"
     },
     {
       "id": "eolas-prints-petg-uv-resistant",
@@ -3050,7 +3050,7 @@
       "nozzle_min": 235,
       "nozzle_max": 265,
       "density": 1.27,
-      "orca_id": "GFSEP011"
+      "orca_id": "OFx8Lmsd"
     },
     {
       "id": "eolas-prints-pla-antibacterial",
@@ -3063,7 +3063,7 @@
       "nozzle_min": 195,
       "nozzle_max": 230,
       "density": 1.24,
-      "orca_id": "GFSEP008"
+      "orca_id": "OFkzr35f"
     },
     {
       "id": "eolas-prints-pla-high-speed",
@@ -3076,7 +3076,7 @@
       "nozzle_min": 210,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "GFSEP005"
+      "orca_id": "OFvzvwCu"
     },
     {
       "id": "eolas-prints-pla-ingeo-850",
@@ -3089,7 +3089,7 @@
       "nozzle_min": 190,
       "nozzle_max": 230,
       "density": 1.24,
-      "orca_id": "GFSEP006"
+      "orca_id": "OFH2nN08"
     },
     {
       "id": "eolas-prints-pla-ingeo-870",
@@ -3102,7 +3102,7 @@
       "nozzle_min": 200,
       "nozzle_max": 235,
       "density": 1.22,
-      "orca_id": "GFSEP007"
+      "orca_id": "OFPc4zVY"
     },
     {
       "id": "eolas-prints-pla-matte",
@@ -3115,7 +3115,7 @@
       "nozzle_min": 200,
       "nozzle_max": 230,
       "density": 1.24,
-      "orca_id": "GFSEP002"
+      "orca_id": "OFf5awy4"
     },
     {
       "id": "eolas-prints-pla-neon",
@@ -3128,7 +3128,7 @@
       "nozzle_min": 200,
       "nozzle_max": 230,
       "density": 1.24,
-      "orca_id": "GFSEP004"
+      "orca_id": "OFrFBEfd"
     },
     {
       "id": "eolas-prints-pla-premium",
@@ -3141,7 +3141,7 @@
       "nozzle_min": 190,
       "nozzle_max": 230,
       "density": 1.24,
-      "orca_id": "GFSEP001"
+      "orca_id": "OFtudokz"
     },
     {
       "id": "eolas-prints-pla-silk",
@@ -3154,7 +3154,7 @@
       "nozzle_min": 205,
       "nozzle_max": 235,
       "density": 1.24,
-      "orca_id": "GFSEP003"
+      "orca_id": "OFbP8zEO"
     },
     {
       "id": "eolas-prints-pla-transition",
@@ -3167,7 +3167,7 @@
       "nozzle_min": 200,
       "nozzle_max": 230,
       "density": 1.24,
-      "orca_id": "GFSEP009"
+      "orca_id": "OFHfzQXo"
     },
     {
       "id": "eolas-prints-tpu-d60-uv-resistant",
@@ -3180,7 +3180,7 @@
       "nozzle_min": 215,
       "nozzle_max": 245,
       "density": 1.16,
-      "orca_id": "GFSEP015"
+      "orca_id": "OFvVy7yo"
     },
     {
       "id": "eolas-prints-tpu-flex-93a",
@@ -3191,7 +3191,7 @@
       "bed": 35,
       "source": "orca",
       "density": 1.21,
-      "orca_id": "GFSEP013"
+      "orca_id": "OFhfd722"
     },
     {
       "id": "eolas-prints-tpu-flex-d53",
@@ -3204,7 +3204,7 @@
       "nozzle_min": 205,
       "nozzle_max": 235,
       "density": 1.17,
-      "orca_id": "GFSEP014"
+      "orca_id": "OFIegjmD"
     },
     {
       "id": "eolas-prints-tpu-transition",
@@ -3215,7 +3215,183 @@
       "bed": 35,
       "source": "orca",
       "density": 1.21,
-      "orca_id": "GFSEP016"
+      "orca_id": "OFTOPcx0"
+    },
+    {
+      "id": "eryone-abs",
+      "brand": "Eryone",
+      "name": "ABS",
+      "type": "ABS",
+      "nozzle": 255,
+      "bed": 100,
+      "source": "orca",
+      "nozzle_min": 240,
+      "nozzle_max": 290,
+      "density": 1.04,
+      "orca_id": "OFOzwywz"
+    },
+    {
+      "id": "eryone-abs-cf",
+      "brand": "Eryone",
+      "name": "ABS-CF",
+      "type": "ABS-CF",
+      "nozzle": 250,
+      "bed": 100,
+      "source": "orca",
+      "nozzle_min": 240,
+      "nozzle_max": 290,
+      "orca_id": "OFQ1zgm3"
+    },
+    {
+      "id": "eryone-asa",
+      "brand": "Eryone",
+      "name": "ASA",
+      "type": "ASA",
+      "nozzle": 265,
+      "bed": 110,
+      "source": "orca",
+      "nozzle_min": 240,
+      "nozzle_max": 290,
+      "orca_id": "OFVtIasg"
+    },
+    {
+      "id": "eryone-asa-cf",
+      "brand": "Eryone",
+      "name": "ASA-CF",
+      "type": "ASA-CF",
+      "nozzle": 260,
+      "bed": 110,
+      "source": "orca",
+      "nozzle_min": 240,
+      "nozzle_max": 290,
+      "orca_id": "OFwyt1xt"
+    },
+    {
+      "id": "eryone-pa",
+      "brand": "Eryone",
+      "name": "PA",
+      "type": "PA",
+      "nozzle": 265,
+      "bed": 115,
+      "source": "orca",
+      "nozzle_min": 240,
+      "nozzle_max": 280,
+      "orca_id": "OFS4jbj3"
+    },
+    {
+      "id": "eryone-pa-cf",
+      "brand": "Eryone",
+      "name": "PA-CF",
+      "type": "PA-CF",
+      "nozzle": 265,
+      "bed": 115,
+      "source": "orca",
+      "nozzle_min": 240,
+      "nozzle_max": 280,
+      "orca_id": "OFp9wdmf"
+    },
+    {
+      "id": "eryone-pa-gf",
+      "brand": "Eryone",
+      "name": "PA-GF",
+      "type": "PA-GF",
+      "nozzle": 270,
+      "bed": 110,
+      "source": "orca",
+      "nozzle_min": 240,
+      "nozzle_max": 280,
+      "orca_id": "OFkq7rPy"
+    },
+    {
+      "id": "eryone-petg",
+      "brand": "Eryone",
+      "name": "PETG",
+      "type": "PETG",
+      "nozzle": 245,
+      "bed": 75,
+      "source": "orca",
+      "nozzle_min": 225,
+      "nozzle_max": 270,
+      "orca_id": "OF8kJys9"
+    },
+    {
+      "id": "eryone-petg-cf",
+      "brand": "Eryone",
+      "name": "PETG-CF",
+      "type": "PETG-CF",
+      "nozzle": 245,
+      "bed": 80,
+      "source": "orca",
+      "nozzle_min": 225,
+      "nozzle_max": 270,
+      "orca_id": "OFNstOna"
+    },
+    {
+      "id": "eryone-pla",
+      "brand": "Eryone",
+      "name": "PLA",
+      "type": "PLA",
+      "nozzle": 220,
+      "bed": 60,
+      "source": "orca",
+      "nozzle_min": 180,
+      "nozzle_max": 260,
+      "density": 1.24,
+      "orca_id": "OFmKU2Ha"
+    },
+    {
+      "id": "eryone-pla-cf",
+      "brand": "Eryone",
+      "name": "PLA-CF",
+      "type": "PLA-CF",
+      "nozzle": 225,
+      "bed": 55,
+      "source": "orca",
+      "nozzle_min": 200,
+      "nozzle_max": 250,
+      "orca_id": "OFilAA3b"
+    },
+    {
+      "id": "eryone-pp",
+      "brand": "Eryone",
+      "name": "PP",
+      "type": "PP",
+      "nozzle": 230,
+      "bed": 100,
+      "source": "orca",
+      "nozzle_min": 225,
+      "nozzle_max": 270,
+      "orca_id": "OF5oNRED"
+    },
+    {
+      "id": "eryone-pp-cf",
+      "brand": "Eryone",
+      "name": "PP-CF",
+      "type": "PP-CF",
+      "nozzle": 240,
+      "bed": 100,
+      "source": "orca",
+      "orca_id": "OFbh7HcA"
+    },
+    {
+      "id": "eryone-silk-pla",
+      "brand": "Eryone",
+      "name": "Silk PLA",
+      "type": "Silk PLA",
+      "nozzle": 230,
+      "bed": 60,
+      "source": "orca",
+      "orca_id": "OF7nBAd3"
+    },
+    {
+      "id": "eryone-tpu",
+      "brand": "Eryone",
+      "name": "TPU",
+      "type": "TPU",
+      "nozzle": 230,
+      "bed": 50,
+      "source": "orca",
+      "orca_id": "OFhUjPA5"
     },
     {
       "id": "esun-epla-lw",
@@ -3228,7 +3404,7 @@
       "nozzle_min": 190,
       "nozzle_max": 270,
       "density": 1.2,
-      "orca_id": "ESN02"
+      "orca_id": "OFRzR5mi"
     },
     {
       "id": "esun-petg",
@@ -3241,7 +3417,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "ESN03",
+      "orca_id": "OF3kBrdA",
       "codes": {
         "cfs": "E2001"
       }
@@ -3257,7 +3433,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OGFL03",
+      "orca_id": "OFqINlYj",
       "codes": {
         "cfs": "E1001"
       }
@@ -3273,7 +3449,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL04"
+      "orca_id": "OFTcE0nA"
     },
     {
       "id": "esun-pla-marble",
@@ -3286,7 +3462,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.27,
-      "orca_id": "OGFL06"
+      "orca_id": "OF7H3VJM"
     },
     {
       "id": "esun-pla-matte",
@@ -3299,7 +3475,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.32,
-      "orca_id": "OGFL05",
+      "orca_id": "OFDETOM6",
       "codes": {
         "cfs": "E1003"
       }
@@ -3315,7 +3491,7 @@
       "nozzle_min": 245,
       "nozzle_max": 260,
       "density": 1.04,
-      "orca_id": "FDPLAST01"
+      "orca_id": "OFjorDcx"
     },
     {
       "id": "fdplast-hips",
@@ -3328,7 +3504,7 @@
       "nozzle_min": 250,
       "nozzle_max": 270,
       "density": 1.26,
-      "orca_id": "FDPLAST02"
+      "orca_id": "OFmJAd3A"
     },
     {
       "id": "fdplast-petg",
@@ -3341,7 +3517,7 @@
       "nozzle_min": 220,
       "nozzle_max": 240,
       "density": 1.27,
-      "orca_id": "FDPLAST03"
+      "orca_id": "OFfJSCzm"
     },
     {
       "id": "fdplast-pla",
@@ -3354,7 +3530,7 @@
       "nozzle_min": 190,
       "nozzle_max": 225,
       "density": 1.26,
-      "orca_id": "FDPLAST04"
+      "orca_id": "OFtr8eZw"
     },
     {
       "id": "fdplast-sbs",
@@ -3367,7 +3543,7 @@
       "nozzle_min": 225,
       "nozzle_max": 240,
       "density": 1.26,
-      "orca_id": "FDPLAST05"
+      "orca_id": "OFtRn8X8"
     },
     {
       "id": "fdplast-tpu",
@@ -3380,7 +3556,7 @@
       "nozzle_min": 175,
       "nozzle_max": 190,
       "density": 1.26,
-      "orca_id": "FDPLAST06"
+      "orca_id": "OFfmZrI3"
     },
     {
       "id": "filar-petg-amarillo-lima",
@@ -3393,7 +3569,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0047"
+      "orca_id": "OFt6e0US"
     },
     {
       "id": "filar-petg-amarillo-radiante",
@@ -3406,7 +3582,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0048"
+      "orca_id": "OF0Vtzaw"
     },
     {
       "id": "filar-petg-azul-boreal",
@@ -3419,7 +3595,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0049"
+      "orca_id": "OFNU9YIW"
     },
     {
       "id": "filar-petg-azul-francia",
@@ -3432,7 +3608,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0050"
+      "orca_id": "OF44VYzK"
     },
     {
       "id": "filar-petg-azul-imperial",
@@ -3445,7 +3621,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0051"
+      "orca_id": "OF2Z1nT5"
     },
     {
       "id": "filar-petg-blanco-antartida",
@@ -3458,7 +3634,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0052"
+      "orca_id": "OFsXQXbs"
     },
     {
       "id": "filar-petg-cian",
@@ -3471,7 +3647,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0053"
+      "orca_id": "OFnejEt4"
     },
     {
       "id": "filar-petg-coral",
@@ -3484,7 +3660,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0054"
+      "orca_id": "OFysxCep"
     },
     {
       "id": "filar-petg-cristal",
@@ -3497,7 +3673,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0055"
+      "orca_id": "OFJQDUk3"
     },
     {
       "id": "filar-petg-gris-ceniza",
@@ -3510,7 +3686,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0056"
+      "orca_id": "OFybzvQN"
     },
     {
       "id": "filar-petg-gris-plata",
@@ -3523,7 +3699,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0057"
+      "orca_id": "OFgpLTMR"
     },
     {
       "id": "filar-petg-magenta",
@@ -3536,7 +3712,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0058"
+      "orca_id": "OFurdQxc"
     },
     {
       "id": "filar-petg-negro-azabache",
@@ -3549,7 +3725,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0059"
+      "orca_id": "OFq8gfS4"
     },
     {
       "id": "filar-petg-rojo-carmesi",
@@ -3562,7 +3738,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "FILAR0060"
+      "orca_id": "OFPbyOSk"
     },
     {
       "id": "filar-pla-amarillo-lirio",
@@ -3575,7 +3751,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0022"
+      "orca_id": "OF8aFWfQ"
     },
     {
       "id": "filar-pla-azul-francia",
@@ -3588,7 +3764,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0026"
+      "orca_id": "OFnYVFk2"
     },
     {
       "id": "filar-pla-blanco-antartida",
@@ -3601,7 +3777,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0017"
+      "orca_id": "OFHAccHz"
     },
     {
       "id": "filar-pla-blanco-calido",
@@ -3614,7 +3790,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0018"
+      "orca_id": "OFKTSiYF"
     },
     {
       "id": "filar-pla-bronce",
@@ -3627,7 +3803,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0001"
+      "orca_id": "OFWTRJ1K"
     },
     {
       "id": "filar-pla-cafe-con-leche",
@@ -3640,7 +3816,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0006"
+      "orca_id": "OFWwF7K7"
     },
     {
       "id": "filar-pla-carpincho",
@@ -3653,7 +3829,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0009"
+      "orca_id": "OFKWWgyp"
     },
     {
       "id": "filar-pla-celeste-cielo",
@@ -3666,7 +3842,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0027"
+      "orca_id": "OFaDOaNt"
     },
     {
       "id": "filar-pla-cobre",
@@ -3679,7 +3855,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0003"
+      "orca_id": "OFNemJM6"
     },
     {
       "id": "filar-pla-dorado",
@@ -3692,7 +3868,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0029"
+      "orca_id": "OF5P4jgA"
     },
     {
       "id": "filar-pla-gris-ceniza",
@@ -3705,7 +3881,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0025"
+      "orca_id": "OFIamQnD"
     },
     {
       "id": "filar-pla-gris-pizarra",
@@ -3718,7 +3894,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0024"
+      "orca_id": "OFTlRzpe"
     },
     {
       "id": "filar-pla-gris-plata",
@@ -3731,7 +3907,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0002"
+      "orca_id": "OFKKajh6"
     },
     {
       "id": "filar-pla-manteca",
@@ -3744,7 +3920,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0007"
+      "orca_id": "OFexaZU2"
     },
     {
       "id": "filar-pla-marron-oxido",
@@ -3757,7 +3933,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0008"
+      "orca_id": "OFAt6ec0"
     },
     {
       "id": "filar-pla-naranja-tigre",
@@ -3770,7 +3946,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0020"
+      "orca_id": "OFKZ9skj"
     },
     {
       "id": "filar-pla-negro-azabache",
@@ -3783,7 +3959,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0019"
+      "orca_id": "OFgMWJ8T"
     },
     {
       "id": "filar-pla-oro",
@@ -3796,7 +3972,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0028"
+      "orca_id": "OF5nlfKY"
     },
     {
       "id": "filar-pla-piel",
@@ -3809,7 +3985,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0012"
+      "orca_id": "OFsDXRpS"
     },
     {
       "id": "filar-pla-rojo-de-carreras",
@@ -3822,7 +3998,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0021"
+      "orca_id": "OFaEesXQ"
     },
     {
       "id": "filar-pla-rosa-amaranto",
@@ -3835,7 +4011,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0010"
+      "orca_id": "OFPqX3x2"
     },
     {
       "id": "filar-pla-rosa-flamenco",
@@ -3848,7 +4024,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0011"
+      "orca_id": "OFZ4QbfK"
     },
     {
       "id": "filar-pla-tabaco",
@@ -3861,7 +4037,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0005"
+      "orca_id": "OFjT9PkZ"
     },
     {
       "id": "filar-pla-titanio",
@@ -3874,7 +4050,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0004"
+      "orca_id": "OFQWIKbV"
     },
     {
       "id": "filar-pla-verde-filar",
@@ -3887,7 +4063,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0013"
+      "orca_id": "OFvPPMxL"
     },
     {
       "id": "filar-pla-verde-manzana",
@@ -3900,7 +4076,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0014"
+      "orca_id": "OFdb8YNz"
     },
     {
       "id": "filar-pla-verde-oliva",
@@ -3913,7 +4089,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0016"
+      "orca_id": "OFkoLUtR"
     },
     {
       "id": "filar-pla-verde-pixel",
@@ -3926,7 +4102,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0015"
+      "orca_id": "OFkGvN4d"
     },
     {
       "id": "filar-pla-violeta-jacaranda",
@@ -3939,7 +4115,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.24,
-      "orca_id": "FILAR0023"
+      "orca_id": "OFP26zNb"
     },
     {
       "id": "filar-pla-mate-amarillo",
@@ -3952,7 +4128,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0030"
+      "orca_id": "OFj3bTjw"
     },
     {
       "id": "filar-pla-mate-azul",
@@ -3965,7 +4141,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0031"
+      "orca_id": "OF5vgi2G"
     },
     {
       "id": "filar-pla-mate-beige",
@@ -3978,7 +4154,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0032"
+      "orca_id": "OFGcLA5R"
     },
     {
       "id": "filar-pla-mate-blanco",
@@ -3991,7 +4167,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0033"
+      "orca_id": "OFtefokm"
     },
     {
       "id": "filar-pla-mate-bordo",
@@ -4004,7 +4180,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0034"
+      "orca_id": "OFiDpM1B"
     },
     {
       "id": "filar-pla-mate-celeste-cielo",
@@ -4017,7 +4193,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0035"
+      "orca_id": "OFqtx549"
     },
     {
       "id": "filar-pla-mate-chocolate",
@@ -4030,7 +4206,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0036"
+      "orca_id": "OFdzlrhi"
     },
     {
       "id": "filar-pla-mate-gris",
@@ -4043,7 +4219,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0037"
+      "orca_id": "OFGVwfK0"
     },
     {
       "id": "filar-pla-mate-marron",
@@ -4056,7 +4232,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0038"
+      "orca_id": "OF8jh0Lk"
     },
     {
       "id": "filar-pla-mate-naranja",
@@ -4069,7 +4245,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0039"
+      "orca_id": "OFmaeU4a"
     },
     {
       "id": "filar-pla-mate-negro",
@@ -4082,7 +4258,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0040"
+      "orca_id": "OFufTAK9"
     },
     {
       "id": "filar-pla-mate-piel",
@@ -4095,7 +4271,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0041"
+      "orca_id": "OFfZcoKr"
     },
     {
       "id": "filar-pla-mate-rojo",
@@ -4108,7 +4284,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0042"
+      "orca_id": "OFIBXa0k"
     },
     {
       "id": "filar-pla-mate-rosa",
@@ -4121,7 +4297,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0043"
+      "orca_id": "OFausr3F"
     },
     {
       "id": "filar-pla-mate-uva",
@@ -4134,7 +4310,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0044"
+      "orca_id": "OFEZ449N"
     },
     {
       "id": "filar-pla-mate-verde",
@@ -4147,7 +4323,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0045"
+      "orca_id": "OFCjG251"
     },
     {
       "id": "filar-pla-mate-violeta",
@@ -4160,7 +4336,7 @@
       "nozzle_min": 195,
       "nozzle_max": 210,
       "density": 1.24,
-      "orca_id": "FILAR0046"
+      "orca_id": "OF2EK9F1"
     },
     {
       "id": "fill3d-pa",
@@ -4173,7 +4349,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.04,
-      "orca_id": "FILL3D006"
+      "orca_id": "OFJNeELv"
     },
     {
       "id": "fill3d-petg",
@@ -4186,7 +4362,7 @@
       "nozzle_min": 230,
       "nozzle_max": 285,
       "density": 1.27,
-      "orca_id": "FILL3D003"
+      "orca_id": "OFQbjX3s"
     },
     {
       "id": "fill3d-petg-cf",
@@ -4199,7 +4375,7 @@
       "nozzle_min": 230,
       "nozzle_max": 265,
       "density": 1.3,
-      "orca_id": "FILL3D007"
+      "orca_id": "OFOiJfLM"
     },
     {
       "id": "fill3d-pla-basic",
@@ -4212,7 +4388,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "FILL3D002"
+      "orca_id": "OFDpW3J8"
     },
     {
       "id": "fill3d-pla-turbo",
@@ -4225,7 +4401,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.31,
-      "orca_id": "FILL3D001"
+      "orca_id": "OFoSknDB"
     },
     {
       "id": "fill3d-pp",
@@ -4238,7 +4414,7 @@
       "nozzle_min": 220,
       "nozzle_max": 300,
       "density": 0.93,
-      "orca_id": "FILL3D004"
+      "orca_id": "OFPWPlSC"
     },
     {
       "id": "fill3d-ppcf",
@@ -4251,7 +4427,7 @@
       "nozzle_min": 220,
       "nozzle_max": 300,
       "density": 0.97,
-      "orca_id": "FILL3D005"
+      "orca_id": "OFg8hMzT"
     },
     {
       "id": "fusrock-abs-gf",
@@ -4264,7 +4440,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.08,
-      "orca_id": "OGFR00"
+      "orca_id": "OFmn9NZL"
     },
     {
       "id": "generic-abs",
@@ -4277,7 +4453,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.04,
-      "orca_id": "OGFB99",
+      "orca_id": "OFY9muEs",
       "codes": {
         "cfs": "00004"
       }
@@ -4293,7 +4469,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.04,
-      "orca_id": "OGFB98",
+      "orca_id": "OFLPAxz3",
       "codes": {
         "cfs": "00007"
       }
@@ -4309,7 +4485,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.13,
-      "orca_id": "OGFS97",
+      "orca_id": "OFo2UF2C",
       "codes": {
         "cfs": "00010"
       }
@@ -4323,7 +4499,7 @@
       "bed": 55,
       "source": "orca",
       "density": 1.29,
-      "orca_id": "OGFLC99"
+      "orca_id": "OFjt9en1"
     },
     {
       "id": "generic-eva",
@@ -4333,7 +4509,7 @@
       "nozzle": 200,
       "bed": 60,
       "source": "orca",
-      "orca_id": "OGFR99"
+      "orca_id": "OFCD8qiU"
     },
     {
       "id": "generic-hips",
@@ -4346,7 +4522,7 @@
       "nozzle_min": 220,
       "nozzle_max": 270,
       "density": 1.06,
-      "orca_id": "OGFS98",
+      "orca_id": "OFsFon5l",
       "codes": {
         "cfs": "00012"
       }
@@ -4362,7 +4538,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.04,
-      "orca_id": "OGFN99",
+      "orca_id": "OFg8ndtj",
       "codes": {
         "cfs": "00008"
       }
@@ -4378,7 +4554,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.04,
-      "orca_id": "OGFN98",
+      "orca_id": "OFQLcbps",
       "codes": {
         "cfs": "00009"
       }
@@ -4394,7 +4570,7 @@
       "nozzle_min": 260,
       "nozzle_max": 290,
       "density": 1.04,
-      "orca_id": "OGFC99",
+      "orca_id": "OFLakOUI",
       "codes": {
         "cfs": "00021"
       }
@@ -4410,7 +4586,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "OGFG97",
+      "orca_id": "OFu1evlr",
       "codes": {
         "cfs": "00032"
       }
@@ -4426,7 +4602,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFP99"
+      "orca_id": "OFPklMI1"
     },
     {
       "id": "generic-pe-cf",
@@ -4439,7 +4615,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFP99"
+      "orca_id": "OFd0Fv0k"
     },
     {
       "id": "generic-petg",
@@ -4452,7 +4628,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "OGFG99",
+      "orca_id": "OFYPdQJh",
       "codes": {
         "cfs": "00003"
       }
@@ -4468,7 +4644,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "OGFG99"
+      "orca_id": "OF7lOgYF"
     },
     {
       "id": "generic-petg-cf",
@@ -4481,7 +4657,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "OGFG99",
+      "orca_id": "OFoYSJKi",
       "codes": {
         "cfs": "00014"
       }
@@ -4497,7 +4673,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFR98"
+      "orca_id": "OF74KeQR"
     },
     {
       "id": "generic-pla",
@@ -4510,7 +4686,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL99",
+      "orca_id": "OFDSrzZ8",
       "codes": {
         "cfs": "00001"
       }
@@ -4526,7 +4702,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL95"
+      "orca_id": "OFmpMwxS"
     },
     {
       "id": "generic-pla-matte",
@@ -4539,7 +4715,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL99"
+      "orca_id": "OFmY0l6t"
     },
     {
       "id": "generic-pla-silk",
@@ -4552,7 +4728,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL96",
+      "orca_id": "OFesA6rF",
       "codes": {
         "cfs": "00002"
       }
@@ -4568,7 +4744,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL98",
+      "orca_id": "OFWbdGsC",
       "codes": {
         "cfs": "00006"
       }
@@ -4582,7 +4758,7 @@
       "bed": 55,
       "source": "orca",
       "density": 0.93,
-      "orca_id": "OGFP97",
+      "orca_id": "OF1UNk9P",
       "codes": {
         "cfs": "00019"
       }
@@ -4598,7 +4774,7 @@
       "nozzle_min": 220,
       "nozzle_max": 250,
       "density": 1.01,
-      "orca_id": "OGFP97",
+      "orca_id": "OFXkm8q1",
       "codes": {
         "cfs": "00031"
       }
@@ -4614,7 +4790,7 @@
       "nozzle_min": 220,
       "nozzle_max": 250,
       "density": 1.05,
-      "orca_id": "OGFP97"
+      "orca_id": "OFsijjtH"
     },
     {
       "id": "generic-ppa-cf",
@@ -4627,7 +4803,7 @@
       "nozzle_min": 280,
       "nozzle_max": 320,
       "density": 1.17,
-      "orca_id": "OGFN97"
+      "orca_id": "OF8tPByX"
     },
     {
       "id": "generic-ppa-gf",
@@ -4640,7 +4816,7 @@
       "nozzle_min": 280,
       "nozzle_max": 320,
       "density": 1.17,
-      "orca_id": "OGFN96"
+      "orca_id": "OF8Tlg47"
     },
     {
       "id": "generic-pva",
@@ -4653,7 +4829,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFS99",
+      "orca_id": "OFDvXujf",
       "codes": {
         "cfs": "00011"
       }
@@ -4667,7 +4843,7 @@
       "bed": 70,
       "source": "orca",
       "density": 1.02,
-      "orca_id": "OFLSBS99"
+      "orca_id": "OFhQfUQY"
     },
     {
       "id": "generic-tpu",
@@ -4680,7 +4856,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.24,
-      "orca_id": "OGFU99",
+      "orca_id": "OFgbpcy9",
       "codes": {
         "cfs": "00005"
       }
@@ -4696,7 +4872,7 @@
       "nozzle_min": 220,
       "nozzle_max": 260,
       "density": 1.27,
-      "orca_id": "OGFGG300"
+      "orca_id": "OFhMO9Kh"
     },
     {
       "id": "nit-abs",
@@ -4709,7 +4885,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.04,
-      "orca_id": "NIT01"
+      "orca_id": "OFhWc5Bv"
     },
     {
       "id": "nit-petg",
@@ -4722,7 +4898,7 @@
       "nozzle_min": 230,
       "nozzle_max": 250,
       "density": 1.27,
-      "orca_id": "NIT03"
+      "orca_id": "OFJu1XwK"
     },
     {
       "id": "nit-pla",
@@ -4735,7 +4911,7 @@
       "nozzle_min": 200,
       "nozzle_max": 210,
       "density": 1.26,
-      "orca_id": "NIT02"
+      "orca_id": "OFwRJ4g0"
     },
     {
       "id": "numakers-pla-plus",
@@ -4748,7 +4924,7 @@
       "nozzle_min": 200,
       "nozzle_max": 255,
       "density": 1.24,
-      "orca_id": "OGFNMK00"
+      "orca_id": "OFqGRZyH"
     },
     {
       "id": "overture-abs-basic",
@@ -4761,7 +4937,7 @@
       "nozzle_min": 245,
       "nozzle_max": 265,
       "density": 1.15,
-      "orca_id": "OVTABS08"
+      "orca_id": "OFDvqJ6n"
     },
     {
       "id": "overture-air-pla",
@@ -4772,7 +4948,7 @@
       "bed": 55,
       "source": "orca",
       "density": 0.82,
-      "orca_id": "GFOT006"
+      "orca_id": "OFcfQk4h"
     },
     {
       "id": "overture-asa",
@@ -4783,7 +4959,7 @@
       "bed": 100,
       "source": "orca",
       "density": 1.14,
-      "orca_id": "GFOT009"
+      "orca_id": "OFM91vZs"
     },
     {
       "id": "overture-easy-pla",
@@ -4794,7 +4970,7 @@
       "bed": 55,
       "source": "orca",
       "density": 1.2,
-      "orca_id": "GFOT003"
+      "orca_id": "OF1Pke8t"
     },
     {
       "id": "overture-matte-pla",
@@ -4807,7 +4983,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.22,
-      "orca_id": "OGFL05"
+      "orca_id": "OFBw6eEG"
     },
     {
       "id": "overture-pla",
@@ -4820,7 +4996,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.2,
-      "orca_id": "OGFL04"
+      "orca_id": "OFc3xdm9"
     },
     {
       "id": "overture-pla-pro",
@@ -4831,7 +5007,7 @@
       "bed": 55,
       "source": "orca",
       "density": 1.27,
-      "orca_id": "GFOT001"
+      "orca_id": "OFxA1p01"
     },
     {
       "id": "overture-rock-pla",
@@ -4844,7 +5020,7 @@
       "nozzle_min": 190,
       "nozzle_max": 230,
       "density": 1.3,
-      "orca_id": "GFOT004"
+      "orca_id": "OFMZvH0z"
     },
     {
       "id": "overture-silk-pla",
@@ -4857,7 +5033,7 @@
       "nozzle_min": 200,
       "nozzle_max": 220,
       "density": 1.19,
-      "orca_id": "GFOT002"
+      "orca_id": "OFGkyftV"
     },
     {
       "id": "overture-super-pla-plus",
@@ -4870,7 +5046,7 @@
       "nozzle_min": 190,
       "nozzle_max": 230,
       "density": 1.21,
-      "orca_id": "GFOT005"
+      "orca_id": "OF2pj5l5"
     },
     {
       "id": "overture-tpu",
@@ -4883,7 +5059,7 @@
       "nozzle_min": 210,
       "nozzle_max": 230,
       "density": 1.18,
-      "orca_id": "GFOT008"
+      "orca_id": "OFcvKkrs"
     },
     {
       "id": "polymaker-fiberon-pa12-cf",
@@ -4896,7 +5072,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.06,
-      "orca_id": "OGFL52"
+      "orca_id": "OFX0ycRQ"
     },
     {
       "id": "polymaker-fiberon-pa6-cf",
@@ -4909,7 +5085,7 @@
       "nozzle_min": 280,
       "nozzle_max": 300,
       "density": 1.17,
-      "orca_id": "OGFL50"
+      "orca_id": "OFkOviHk"
     },
     {
       "id": "polymaker-fiberon-pa6-gf",
@@ -4922,7 +5098,7 @@
       "nozzle_min": 280,
       "nozzle_max": 300,
       "density": 1.2,
-      "orca_id": "OGFL51"
+      "orca_id": "OFwaYjL6"
     },
     {
       "id": "polymaker-fiberon-pa612-cf",
@@ -4935,7 +5111,7 @@
       "nozzle_min": 260,
       "nozzle_max": 300,
       "density": 1.06,
-      "orca_id": "OGFL53"
+      "orca_id": "OFS2tn6G"
     },
     {
       "id": "polymaker-fiberon-pet-cf",
@@ -4946,7 +5122,7 @@
       "bed": 70,
       "source": "orca",
       "density": 1.34,
-      "orca_id": "OGFL54"
+      "orca_id": "OFHWSM21"
     },
     {
       "id": "polymaker-fiberon-petg-esd",
@@ -4959,7 +5135,7 @@
       "nozzle_min": 250,
       "nozzle_max": 290,
       "density": 1.24,
-      "orca_id": "OGFL06"
+      "orca_id": "OFcytyoA"
     },
     {
       "id": "polymaker-fiberon-petg-rcf",
@@ -4970,7 +5146,7 @@
       "bed": 70,
       "source": "orca",
       "density": 1.3,
-      "orca_id": "OGFL55"
+      "orca_id": "OFk8t9mz"
     },
     {
       "id": "polymaker-ht-pla",
@@ -4983,7 +5159,7 @@
       "nozzle_min": 210,
       "nozzle_max": 230,
       "density": 1.28,
-      "orca_id": "OGFPM017"
+      "orca_id": "OFPoyiFs"
     },
     {
       "id": "polymaker-ht-pla-gf",
@@ -4996,7 +5172,7 @@
       "nozzle_min": 210,
       "nozzle_max": 230,
       "density": 1.34,
-      "orca_id": "OGFPM018"
+      "orca_id": "OFlwmqrC"
     },
     {
       "id": "polymaker-panchroma-cope",
@@ -5009,7 +5185,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.29,
-      "orca_id": "OGFPM016"
+      "orca_id": "OFqw2PQA"
     },
     {
       "id": "polymaker-panchroma-pla",
@@ -5022,7 +5198,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.32,
-      "orca_id": "OGFPM001"
+      "orca_id": "OFsRDvTM"
     },
     {
       "id": "polymaker-panchroma-pla-celestial",
@@ -5035,7 +5211,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM008"
+      "orca_id": "OFRiYgMK"
     },
     {
       "id": "polymaker-panchroma-pla-galaxy",
@@ -5048,7 +5224,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM007"
+      "orca_id": "OFFkCLBl"
     },
     {
       "id": "polymaker-panchroma-pla-glow",
@@ -5061,7 +5237,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM010"
+      "orca_id": "OF0gGRWk"
     },
     {
       "id": "polymaker-panchroma-pla-luminous",
@@ -5074,7 +5250,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM011"
+      "orca_id": "OF0kCNDK"
     },
     {
       "id": "polymaker-panchroma-pla-marble",
@@ -5087,7 +5263,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.31,
-      "orca_id": "OGFPM003"
+      "orca_id": "OFKiSMWR"
     },
     {
       "id": "polymaker-panchroma-pla-matte",
@@ -5100,7 +5276,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.31,
-      "orca_id": "OGFPM002"
+      "orca_id": "OFrOh600"
     },
     {
       "id": "polymaker-panchroma-pla-metallic",
@@ -5113,7 +5289,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM012"
+      "orca_id": "OFjb0wos"
     },
     {
       "id": "polymaker-panchroma-pla-neon",
@@ -5126,7 +5302,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM013"
+      "orca_id": "OFO1GEq6"
     },
     {
       "id": "polymaker-panchroma-pla-satin",
@@ -5139,7 +5315,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFPM005"
+      "orca_id": "OFPkCJKE"
     },
     {
       "id": "polymaker-panchroma-pla-silk",
@@ -5152,7 +5328,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.31,
-      "orca_id": "OGFPM004"
+      "orca_id": "OFS8lTQt"
     },
     {
       "id": "polymaker-panchroma-pla-starlight",
@@ -5165,7 +5341,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM009"
+      "orca_id": "OFC78WGQ"
     },
     {
       "id": "polymaker-panchroma-pla-temp-shift",
@@ -5178,7 +5354,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM015"
+      "orca_id": "OFhASRWj"
     },
     {
       "id": "polymaker-panchroma-pla-translucent",
@@ -5191,7 +5367,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM006"
+      "orca_id": "OFCIUsWh"
     },
     {
       "id": "polymaker-panchroma-pla-uv-shift",
@@ -5204,7 +5380,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.17,
-      "orca_id": "OGFPM014"
+      "orca_id": "OF1N1qMK"
     },
     {
       "id": "polymaker-polylite-abs",
@@ -5217,7 +5393,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.03,
-      "orca_id": "OGFB60"
+      "orca_id": "OFOvv91M"
     },
     {
       "id": "polymaker-polylite-asa",
@@ -5230,7 +5406,7 @@
       "nozzle_min": 240,
       "nozzle_max": 280,
       "density": 1.02,
-      "orca_id": "OGFB61"
+      "orca_id": "OFvrXuV7"
     },
     {
       "id": "polymaker-polylite-dual-pla",
@@ -5243,7 +5419,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL00"
+      "orca_id": "OFYGbPHX"
     },
     {
       "id": "polymaker-polylite-petg",
@@ -5256,7 +5432,7 @@
       "nozzle_min": 220,
       "nozzle_max": 270,
       "density": 1.27,
-      "orca_id": "OGFG60"
+      "orca_id": "OF0UJcb6"
     },
     {
       "id": "polymaker-polylite-pla",
@@ -5269,7 +5445,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.24,
-      "orca_id": "OGFL00"
+      "orca_id": "OF5CgdDq"
     },
     {
       "id": "polymaker-polylite-pla-pro",
@@ -5280,7 +5456,7 @@
       "bed": 55,
       "source": "orca",
       "density": 1.22,
-      "orca_id": "OGFPM019"
+      "orca_id": "OFF9OKoY"
     },
     {
       "id": "polymaker-polyterra-dual-pla",
@@ -5293,7 +5469,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.31,
-      "orca_id": "OGFL00-1"
+      "orca_id": "OFCccVrQ"
     },
     {
       "id": "polymaker-polyterra-pla",
@@ -5306,7 +5482,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.31,
-      "orca_id": "OGFL01"
+      "orca_id": "OFW29a9R"
     },
     {
       "id": "sunlu-petg",
@@ -5319,7 +5495,7 @@
       "nozzle_min": 230,
       "nozzle_max": 280,
       "density": 1.27,
-      "orca_id": "OGFSNL08"
+      "orca_id": "OF2GCW1l"
     },
     {
       "id": "sunlu-pla-marble",
@@ -5332,7 +5508,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OGFSNL06"
+      "orca_id": "OFxUwUeW"
     },
     {
       "id": "sunlu-pla-matte",
@@ -5345,7 +5521,7 @@
       "nozzle_min": 205,
       "nozzle_max": 245,
       "density": 1.3,
-      "orca_id": "OGFSNL02"
+      "orca_id": "OFpW4gdi"
     },
     {
       "id": "sunlu-pla-plus",
@@ -5358,7 +5534,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.23,
-      "orca_id": "OGFSNL03"
+      "orca_id": "OFMUWNkp"
     },
     {
       "id": "sunlu-pla-plus-2-0",
@@ -5371,7 +5547,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.21,
-      "orca_id": "OGFSNL04"
+      "orca_id": "OFHmPYRy"
     },
     {
       "id": "sunlu-silk-pla-plus",
@@ -5384,7 +5560,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.25,
-      "orca_id": "OGFSNL05"
+      "orca_id": "OFpPGSKG"
     },
     {
       "id": "sunlu-wood-pla",
@@ -5397,7 +5573,7 @@
       "nozzle_min": 190,
       "nozzle_max": 240,
       "density": 1.1,
-      "orca_id": "OGFSNL07"
+      "orca_id": "OFLJ8S6I"
     },
     {
       "id": "valment-pla",
@@ -5410,7 +5586,7 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.24,
-      "orca_id": "VLMNT01"
+      "orca_id": "OFDe8uyM"
     },
     {
       "id": "valment-pla-galaxy",
@@ -5423,7 +5599,7 @@
       "nozzle_min": 220,
       "nozzle_max": 250,
       "density": 1.24,
-      "orca_id": "VLMNT04"
+      "orca_id": "OFB5SmWk"
     },
     {
       "id": "valment-pla-silk",
@@ -5436,7 +5612,7 @@
       "nozzle_min": 220,
       "nozzle_max": 250,
       "density": 1.24,
-      "orca_id": "VLMNT02"
+      "orca_id": "OFpBlrvY"
     },
     {
       "id": "valment-pla-cf",
@@ -5449,7 +5625,31 @@
       "nozzle_min": 200,
       "nozzle_max": 250,
       "density": 1.24,
-      "orca_id": "VLMNT03"
+      "orca_id": "OFfq5YXA"
+    },
+    {
+      "id": "sunlu-abs",
+      "brand": "SUNLU",
+      "name": "ABS",
+      "type": "ABS",
+      "nozzle": 250,
+      "bed": 90,
+      "nozzle_min": 240,
+      "nozzle_max": 260,
+      "density": 1.04,
+      "source": "vendor-spec"
+    },
+    {
+      "id": "sunlu-asa",
+      "brand": "SUNLU",
+      "name": "ASA",
+      "type": "ASA",
+      "nozzle": 260,
+      "bed": 100,
+      "nozzle_min": 250,
+      "nozzle_max": 280,
+      "density": 1.07,
+      "source": "vendor-spec"
     }
   ]
 }

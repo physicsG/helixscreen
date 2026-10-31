@@ -121,6 +121,15 @@ slicer. Stock Klipper has no runtime command that refuses a Z move or homing:
 says so. An opt-in `[gcode_macro G28]` guard in `helix_macros.cfg` would cover homing
 only and collides with vendor `G28` wrappers; it is future work.
 
+## Subjects
+
+`bed_drying_state` (the `State` int), `bed_drying_text`, and, while a cycle is `Running`,
+`bed_drying_remaining_min` (minutes left, rounded up) and `bed_drying_progress_pct` (0..100).
+Outside a running cycle both of the last two read -1. The Dryer home widget draws its bed row
+from them (`src/ui/panel_widgets/dryer_model.cpp`). The percentage is `progress_pct_from()` over
+the run record's duration, the same function the box dryers use; how the three drying sources are
+folded into one summary is in [FILAMENT_ENVIRONMENT_ZONES.md](FILAMENT_ENVIRONMENT_ZONES.md#the-dryer-summary).
+
 ## Persistence and interruptions
 
 The run is a `RunRecord` under `bed_drying` in settings.json

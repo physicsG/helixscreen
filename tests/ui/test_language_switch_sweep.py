@@ -39,11 +39,13 @@ ALLOW = {"min", "mm", "PLA", "PETG", "ABS", "ASA", "TPU", "OK"}
 
 TEXT_TYPES = {"label", "dropdown"}
 
-# Widgets that show data: file, spool, material and macro names, paths, the
-# licenses text, LED names from the printer's config.
+# Widgets that show data: file, spool and AMS slot (spool) names, material and macro names, paths, the
+# licenses text, LED names from the printer's config, and the title, text and buttons a macro's
+# action prompt supplies.
 DATA_PATH = re.compile(
     r"licenses_text|row_install_root|loaded_material|macro_label|macro_desc|"
-    r"filename_label|spool_name|led_tab_\d+/0/tab_label")
+    r"filename_label|spool_name|ams_slot_view\[\d+\]/name_label|led_tab_\d+/0/tab_label|"
+    r"action_prompt_modal/.*(dialog_title|content_container|button_container|footer_container)")
 
 # Fan names generated from the mock printer's config object names.
 CONFIG_NAMES = {"Controller Fan", "Nevermore Fan"}
@@ -51,7 +53,7 @@ CONFIG_NAMES = {"Controller Fan", "Nevermore Fan"}
 
 def _ru_index() -> int:
     """Position of "ru" in SystemSettingsManager's language list."""
-    codes = re.search(r"LANGUAGE_CODES\[\] = \{([^}]*)\}", LANGUAGES.read_text()).group(1)
+    codes = re.search(r"kLanguageCodes\[\] = \{([^}]*)\}", LANGUAGES.read_text()).group(1)
     return re.findall(r'"(\w+)"', codes).index("ru")
 
 

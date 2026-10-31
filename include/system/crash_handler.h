@@ -7,7 +7,7 @@
  * @file crash_handler.h
  * @brief Async-signal-safe crash handler for telemetry
  *
- * Installs signal handlers for SIGSEGV, SIGABRT, SIGBUS, SIGFPE.
+ * Installs signal handlers for SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS.
  * On crash, writes a minimal crash file to disk using only
  * async-signal-safe functions (open, write, close, _exit).
  * NO heap allocation, NO mutex, NO spdlog in the signal handler.
@@ -38,14 +38,14 @@
 namespace crash_handler {
 
 /// Fixed width (bytes, incl. NUL) of one captured recent-error-log entry.
-inline constexpr unsigned int ERROR_LOG_ENTRY_LEN = 256;
+inline constexpr unsigned int kErrorLogEntryLen = 256;
 /// Number of recent ERROR-level log lines retained for crash diagnostics.
-inline constexpr unsigned int ERROR_LOG_RING_CAPACITY = 4;
+inline constexpr unsigned int kErrorLogRingCapacity = 4;
 
 /**
  * @brief Install crash signal handlers
  *
- * Registers handlers for SIGSEGV, SIGABRT, SIGBUS, SIGFPE via sigaction().
+ * Registers handlers for SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS via sigaction().
  * The path is copied into a static buffer so the signal handler can use it
  * without heap allocation.
  *
@@ -194,12 +194,12 @@ void register_previous_tag_ring(volatile const char* const* ring,
  * sets no `__abort_msg` and doesn't pass through the std::terminate handler —
  * e.g. a bare `abort()`/`raise(SIGABRT)` from a dependency (issue #987).
  *
- * `ring` is `capacity * ERROR_LOG_ENTRY_LEN` contiguous bytes; each entry is a
+ * `ring` is `capacity * kErrorLogEntryLen` contiguous bytes; each entry is a
  * NUL-terminated string. The producer fills slot `*next % capacity`, NUL-
  * terminates it, then advances `*next`. All storage must outlive any possible
  * crash (process-lifetime / static). Pass `nullptr` ring to disable.
  *
- * @param ring     Base of the entry buffer (capacity × ERROR_LOG_ENTRY_LEN bytes)
+ * @param ring     Base of the entry buffer (capacity × kErrorLogEntryLen bytes)
  * @param capacity Number of entry slots in the ring
  * @param next     Pointer to the monotonically-increasing write counter
  */

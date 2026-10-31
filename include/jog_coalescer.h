@@ -176,7 +176,7 @@ struct JogClampResult {
 inline JogClampResult clamp_jog_with_warn(double current, double uncommitted, double delta,
                                           double min, double max, bool already_warned) {
     const double allowed = clamp_jog_delta(current, uncommitted, delta, min, max);
-    const bool blocked = std::abs(allowed) <= AxisMove::EPSILON_MM;
+    const bool blocked = std::abs(allowed) <= AxisMove::kEpsilonMm;
     if (!blocked) {
         return {allowed, false, false};
     }

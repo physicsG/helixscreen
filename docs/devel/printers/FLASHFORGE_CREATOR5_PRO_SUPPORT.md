@@ -17,6 +17,10 @@ prestonbrown/helixscreen#1714), and Reforge (`Klipper4FlashForge/firmware`) ship
 over SSH with the NaN2008 toolchain; the kernel refuses legacy-NaN executables with
 ENOEXEC (see "NaN encoding").
 
+Stock firmware packages, what each release changed (2.0.0 in detail), and the stock UI's
+features against HelixScreen's are recorded in
+[`../printer-research/FLASHFORGE_CREATOR5_FIRMWARE.md`](../printer-research/FLASHFORGE_CREATOR5_FIRMWARE.md).
+
 **Status: the toolchanger is implemented and verified against the `creator5_zmod` mock**:
 the four heads are driven by the tool changer backend through Z-Mod's own objects, with
 mount/unmount and per-head colour and material (see "Z-Mod tool changer support" below).
@@ -34,7 +38,7 @@ wording, the bar stays silently suppressed until the parser learns it.
 |------|-------|
 | SoC | Ingenic X2000 (XBurst2, MIPS32r2, 2x 1.2 GHz) - same family as the Creality K1's X2000E |
 | FPU / ABI | Hard float, 64-bit FPU (`-mfp64`), **NaN2008** (`/lib/ld-linux-mipsn8.so.1`) |
-| RAM | 128-256 MB |
+| RAM | 512 MB (MemTotal ~473 MB, as reported by Creator 5 Pro installs in telemetry) |
 | Display | 800x480 panel; the framebuffer is exposed **portrait (480x800)**, so the preset sets `display.rotate = 90` (verified on the printer); fbdev `/dev/fb0`, no X11/Wayland/DRM |
 | Touch | evdev, `/dev/input/event2` (auto-detected; override with `HELIX_TOUCH_DEVICE`) |
 | Stock UI | `firmwareExe` - LVGL 8 on fbdev. **Also** hosts the port-8898 REST API, the MQTT cloud link, and the tool-pickup orchestration for UI-started prints |
@@ -122,7 +126,7 @@ HelixScreen data root". `HELIX_DATA_DIR` overrides the lookup.
 | Input | evdev (auto-detect; `HELIX_TOUCH_DEVICE=/dev/input/event2` to pin) |
 | SSL | Enabled (static OpenSSL in the toolchain image) |
 | Platform defines | `HELIX_PLATFORM_MIPS` only, no creator5 define |
-| Sound | Compiled in, same as K1/AD5X (`HELIX_HAS_SOUND` + tracker via the jz_pwm backend); whether this board has `/dev/jz_pwm` hardware is unverified |
+| Sound | Compiled in, same as K1/AD5X (`HELIX_HAS_SOUND` + tracker via the jz_pwm backend); whether this board has `/dev/jz_pwm` hardware is unverified (`ls /dev/jz_pwm` results go to [#1714](https://github.com/prestonbrown/helixscreen/issues/1714)) |
 | Output | `build/mips/bin/helix-screen`, `helix-splash`; CA bundle in `build/mips/certs/` |
 
 ## Printer detection and preset
@@ -197,17 +201,33 @@ query — is sent at connect and after `FIRMWARE_RESTART`, and its answer clears
 boot carriage reading on firmware older than the `zmod_color` export; the afclite shim's
 fault flag (`error_state` + `message`) surfaces as this backend's own fault dialog, while
 its activity word and lane map are logged for field visibility and acted on for nothing
-(vocabulary unverified — a debug bundle captured during a real load shows both); and
+(vocabulary unverified — a debug bundle captured during a real load shows both; post its
+share code on [#1714](https://github.com/prestonbrown/helixscreen/issues/1714)); and
 `zmod_color.slots[].hasFilament` stamps a docked head without filament as Empty.
 
-**The filament-feed macros are deliberately not wired.** `LOAD_FILAMENT`,
+**Load feeds through the afclite shim's `CHANGE_TOOL`.** `LOAD_FILAMENT`,
 `UNLOAD_FILAMENT`, `LOAD_MATERIAL`, `TOOL_UNLOAD` and `LANE_UNLOAD` all exist on this
-firmware and all move hardware (heat, feed, cut, wipe), but no capture shows their
-parameter shapes — which of `T=`, `SLOT=`, `LANE=` or bare-operates-on-active each takes —
-and a guessed parameter can drive the wrong head's feed motor. The afclite state logging
-above is the instrument that settles it: once a capture shows the words and the
-parameters, wiring them is a provider-row change. Until then the macros remain reachable
-through the Macros panel, which is where they are safe.
+firmware and all move hardware (heat, feed, cut, wipe), and none of them is called. A
+contributor's on-device test (prestonbrown/helixscreen#1779, Z-Mod 1.7.4) showed that
+`CHANGE_TOOL LANE=E<n>` is Z-Mod's own Load for head `n`: the afclite shim heats only the
+selected head and feeds it. With `zmod_afclite` present, the UI's Load for head `n` sends
+exactly that command and nothing else. `_T_IN_ZCOLOR` is not called directly: it is defined
+in the unpublished `zmod_color` plugin, the C5 configs call it with a 1-based `SLOT`
+(ghzserg/z_c5pro `translate/en/c5pro_display_off.cfg`, `_T_USE`), and the AD5X
+zmod_color.py plugin (its cmd_IN_ZCOLOR handler) reads `NAPR=0` as load, so a guessed `SLOT` or `NAPR` could
+feed the wrong head. The shim owns that mapping. Head `n` maps to the shim's lane `E<n>` by
+name only; no published field ties a lane to a head, and a lane the shim did not publish
+gets no command. Without the shim (Z-Mod older than 1.7.4) Load stays a tool mount.
+
+Load stays enabled while a head reads loaded, since the printer cannot tell an inserted
+strand from a fed one, and the UI does not preheat (the shim heats the head it feeds).
+Mounting a head is the toolhead tap, which sends `_T_IN T=<n>`.
+
+**There is no automatic unload on the Creator 5.** The user cuts the filament at the head
+and pulls it out by hand; the firmware's `TOOL_UNLOAD` says so only after heating. The
+Z-Mod row answers `AmsBackend::unload_is_manual()` true, so Unload is disabled with that
+reason, and any surface that still reaches it shows a notice and sends and heats nothing.
+The sidebar's **Park** remains a `_T_OUT` tool park.
 
 One upstream dependency: [ghzserg/z_c5pro#1](https://github.com/ghzserg/z_c5pro/pull/1)
 adds `slots`, `palette` and a live `active_tool_id` to `zmod_color.get_status()`. Without
@@ -217,6 +237,46 @@ filament.json on the printer. **zmod ≥ 1.7.4 ships the export** (field-confirm
 `5WSPTZBL`); older Z-Mod builds keep the degraded behaviour. Hardware verification of the
 step-bar markers on a live swap remains open (prestonbrown/helixscreen#1714).
 
+### Calibration and chamber air macros
+
+HelixScreen drives three more Z-Mod macro families from `c5pro_generic.cfg`. Each is a row in
+a capability provider table; the tool offset and stepper resonance rows detect the macro by
+capability rather than by naming the machine.
+
+| Macro | What it does on the printer | HelixScreen entry | Provider row |
+|-------|-----------------------------|-------------------|--------------|
+| `CALIBRATE_EXTRUDERS` | Opens an action:prompt ("Please remove the build plate first!"); OK runs `_T_CALIBRATE_EXTRUDERS`, measuring all four heads | Tool Offsets (Advanced row, Controls tile) sends it without opening the panel | the procedure table in `src/printer/tool_offset_calibration.cpp`; see [`FILAMENT_BACKEND_TOOLCHANGER.md`](../FILAMENT_BACKEND_TOOLCHANGER.md#which-procedure-the-entry-runs) |
+| `CALIBRATE_VFA T=<n>` | Mounts head n, zeroes the gcode offset, moves to X130 Y130, runs `STEPPER_RESONANCE_FACTORY_CALIBRATE`, parks the head, then `SAVE_CONFIG` | Advanced ▸ Vertical Artifact Compensation, with a tool picker | the procedure table in `src/printer/stepper_resonance_calibration.cpp` |
+| `AIR_CIRCULATION_INTERNAL` / `_EXTERNAL` / `_STOP` | Recirculate (heat 0.9, loop 0.3), exhaust (chamber 0.5, cool 0.7), all four chamber fans off | **Chamber air** row on the fan overlay | `kProviders` in `src/printer/chamber_air_modes.cpp`; see [`CHAMBER_HEATER.md`](../CHAMBER_HEATER.md#chamber-air-modes) |
+
+**Stepper resonance calibration** (`include/stepper_resonance_calibration.h`,
+`helix::stepper_resonance_cal`) does not depend on Z-Mod. `Procedure resolve(hw)` returns
+`{name, per_tool, needs_home, restarts_klipper, build}` from a table in
+`src/printer/stepper_resonance_calibration.cpp`, most specific row first:
+
+1. The firmware wrapper, detected by `has_macro("CALIBRATE_VFA")` alone (Z-Mod's): per
+   tool, `CALIBRATE_VFA T=<n>`, which ends in its own `SAVE_CONFIG`.
+2. The stock `stepper_resonance_tester` klippy extra, detected by its printer object:
+   whole machine, `STEPPER_RESONANCE_FACTORY_CALIBRATE` when the stock wrapper macro is
+   defined, otherwise `STEPPER_RESONANCE_SEARCH_CALIBRATE STEPPER=stepper_x` and
+   `STEPPER=stepper_y`, then `SAVE_CONFIG` (the stock macro's own `SAVE_CONFIG` is commented
+   out, so the result is lost on restart unless the caller saves it).
+
+Both rows need a homed toolhead. `calibrate_gcode(hw, tool)` builds the script (empty with
+no row, or for a negative tool on a per-tool row) and never includes the homing. The
+subject is `printer_has_stepper_resonance_cal`. The entry
+(`src/ui/ui_stepper_resonance_cal_modal.cpp`) offers a tool dropdown for a per-tool row on a
+printer with more than one tool, else a plain confirmation, and sends through
+`start_calibration_gcode()` (`src/printer/macro_executor.cpp#start_calibration_gcode`):
+refused while `machine_motion_blocked` is set, `ensure_homed_then()` when `needs_home`, then
+`execute_machine_gcode()`, which absorbs the rpc that `SAVE_CONFIG` drops as an expected
+restart. A third firmware is one row in that table. Tests: `[stepper_resonance_cal]` in
+`tests/unit/test_stepper_resonance_calibration.cpp`; mock: `HELIX_MOCK_STEPPER_RESONANCE`.
+
+Every row requires its macro to be defined, so a Creator 5 on an older Z-Mod without one
+shows no entry. The chamber air row also requires the Z-Mod changer row
+(`toolchanger_addon::zmod_c5_present(hw)`).
+
 ### The `creator5_zmod` mock persona
 
 `HELIX_MOCK_PRINTER=creator5_zmod ./build/bin/helix-screen --test` runs the real
@@ -225,8 +285,8 @@ step-bar markers on a live swap remains open (prestonbrown/helixscreen#1714).
 `extruder_grab1..4`, Z-Mod 1.7.4's afclite shim objects (`zmod_afclite`, `AFC`,
 `AFC_lane E0..E3`, `AFC_unit C5`) and the `fd_ex`/`fm_ex` sensor pairs, answers
 `_T_IN` / `_T_OUT` / `CHANGE_ZCOLOR` — narrating the swap markers the step bar parses —
-and implies `--real-ams` so the mock AMS gate does not stand a mock backend in front of
-it. The `creator5` persona models the Reforge side only. Details in
+answers the calibration and chamber air macros above, and implies `--real-ams` so the mock
+AMS gate does not stand a mock backend in front of it. The `creator5` persona models the Reforge side only. Details in
 [`MOCK_ENVIRONMENT_VARIABLES.md`](../MOCK_ENVIRONMENT_VARIABLES.md).
 
 ## On-device bring-up
@@ -273,11 +333,12 @@ Each item below says whether it is done or still open.
    chamber_*_fan`, `led chamber_led`. The chamber heater and the `chamber_*_fan`s are
    the Pro's hardware; the heater-free Creator 5 reports neither, and its preset drops
    both.
-7. **Memory** (open): 128-256 MB shared with Klipper, Moonraker, `firmwareExe`.
-   HelixScreen's ~15 MB footprint is fine, but check `free` with the stock stack
-   running.
-8. **Init** (open): no systemd; the stock stack is started from BusyBox init scripts. An
-   init.d script modeled on the AD5X/ZMOD `S80guppyscreen` pattern is the likely shape.
+7. **Memory** (done): 512 MB, shared with Klipper, Moonraker and `firmwareExe`.
+   Telemetry `host.ram_total_mb` reads 472-473 on every Creator 5 Pro install;
+   no heater-free Creator 5 has reported yet.
+8. **Init** (done on Z-Mod): no systemd; the stock stack is started from BusyBox init
+   scripts. Z-Mod ships its own `S80helixscreen` init script and starts HelixScreen in
+   place of the stock UI with `DISPLAY_OFF HELIX=1` (#1714).
 9. **Per-head runout** (hw-verify): the presets give `fd_ex0..3` the runout role and
    `"lane": N`, because the names encode no head. Z-Mod holds every `fd_ex`/`fm_ex` sensor
    disabled in standby and enables only the active head's pair while printing

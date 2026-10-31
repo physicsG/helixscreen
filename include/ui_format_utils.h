@@ -43,25 +43,21 @@ std::string format_filament_weight(float grams);
 std::string format_layer_count(uint32_t layer_count);
 
 /**
- * @brief Format live layer progress for the print-status displays
+ * @brief Format the commanded Z height that trails a layer count
  *
- * The single renderer behind every "Layer N / M" string. Omits the total when
- * it is unknown, marks counts that were guessed from the progress fraction with
- * a leading "~", and appends the commanded Z height when one is available.
- * Examples: "Layer 42 / 213", "Layer ~42 / 213 (24.0mm)", "Layer 7"
+ * Examples: "· 24.0mm", or "" when no Z height is available.
  *
- * @param current Current layer number
- * @param total Total layers, or 0/negative when unknown
- * @param accurate False when the layer was estimated from the progress fraction
  * @param z_centimm Commanded Z in centimillimeters, or 0/negative to omit
- * @return Formatted layer string
+ * @return The Z suffix, without a leading space
  */
-std::string format_layer_progress(int current, int total, bool accurate, int z_centimm);
+std::string format_layer_z(int z_centimm);
 
 /**
  * @brief Format layer progress for the metadata strip's icon cluster
  *
- * Same inputs and semantics as format_layer_progress(), without the prose:
+ * The single renderer behind every live "N / M" layer string. Omits the total
+ * when it is unknown, marks counts guessed from the progress fraction with a
+ * leading "~", and appends format_layer_z() when a Z height is available:
  * a layers icon carries the "Layer" word, so the string is bare counts and a
  * " · " separated Z height. Translation-neutral — the width of this string
  * does not change with the UI language.
@@ -129,6 +125,26 @@ std::string format_modified_date(time_t timestamp);
 std::string format_short_date(time_t timestamp);
 
 /**
+ * @brief The date half of format_modified_date(), without the time
+ *
+ * Examples: "Jan 15" (EN), "15. Jan." (DE), "1/15" (CJK)
+ *
+ * @param timestamp Unix timestamp (time_t)
+ * @return Formatted month and day
+ */
+std::string format_month_day(time_t timestamp);
+
+/**
+ * @brief The time half of format_modified_date(), in local time
+ *
+ * Examples: "2:30 PM" (12H) or "14:30" (24H)
+ *
+ * @param timestamp Unix timestamp (time_t)
+ * @return Formatted time string
+ */
+std::string format_time(time_t timestamp);
+
+/**
  * @brief Format time portion only (no date)
  *
  * Returns time in user's preferred format.
@@ -165,5 +181,17 @@ std::string format_time_with_seconds(const struct tm* tm_info);
  * @return Formatted relative time string
  */
 std::string format_relative_time(uint64_t elapsed_ms);
+
+/**
+ * @brief Format system uptime for the clock widget
+ *
+ * Translatable via lv_tr(). Under a day it reads as a duration
+ * (helix::format::duration), from a day on as days and hours.
+ * Examples: "Up: 42m", "Up: 3h 12m", "Up: 3d 14h", "Up: --"
+ *
+ * @param total_seconds Uptime in seconds; negative when it could not be read
+ * @return Formatted uptime string
+ */
+std::string format_uptime(int total_seconds);
 
 } // namespace helix::ui

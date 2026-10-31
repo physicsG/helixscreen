@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_breakpoint.h"
+
 #include <cstdint>
 
 /**
@@ -44,10 +46,10 @@ inline AmsSlotLayout calculate_ams_slot_layout(int32_t available_width, int slot
         return layout;
 
     if (slot_count > 4) {
-        constexpr float OVERLAP_RATIO = 0.5f;
+        constexpr float kOverlapRatio = 0.5f;
         layout.slot_width = static_cast<int32_t>(
-            available_width / (slot_count * (1.0f - OVERLAP_RATIO) + OVERLAP_RATIO));
-        layout.overlap = static_cast<int32_t>(layout.slot_width * OVERLAP_RATIO);
+            available_width / (slot_count * (1.0f - kOverlapRatio) + kOverlapRatio));
+        layout.overlap = static_cast<int32_t>(layout.slot_width * kOverlapRatio);
     } else {
         layout.slot_width = available_width / slot_count;
         layout.overlap = 0;
@@ -61,3 +63,72 @@ inline AmsSlotLayout calculate_ams_slot_layout(int32_t available_width, int slot
 
     return layout;
 }
+
+namespace helix::ui {
+
+/// The stagger row a slot's label stands in: @p rows rows, row 0 nearest the spools.
+struct AmsLabelRow {
+    int rows = 1;
+    int row = 0;
+};
+
+/**
+ * @brief Which row a slot's label stands in, so neighbouring labels never share one.
+ *
+ * Up to four slots all stand in one row. Below the medium breakpoint five or
+ * more alternate between two rows: odd lanes nearest the spools, even lanes
+ * above. From medium up seven or more take three rows and five or six two,
+ * running high, mid, low, mid, high.
+ */
+inline AmsLabelRow ams_stagger_row(int slot_index, int total_count, UiBreakpoint bp) {
+    AmsLabelRow r;
+    if (total_count < 5)
+        return r;
+    if (bp < UiBreakpoint::Medium) {
+        r.rows = 2;
+        r.row = slot_index % 2;
+        return r;
+    }
+    r.rows = total_count >= 7 ? 3 : 2;
+    const int period = (r.rows - 1) * 2;
+    const int pos = slot_index % period;
+    r.row = pos < r.rows ? r.rows - 1 - pos : pos - r.rows + 1;
+    return r;
+}
+
+/**
+ * @brief Height of one row of staggered slot labels, for a label font of @p line_height.
+ *
+ * From the medium breakpoint up a row is 1.5 lines. Below it a row is one line,
+ * and the height the label band gives up goes to the unit and the filament path.
+ */
+inline int32_t ams_stagger_row_height(int32_t line_height, UiBreakpoint bp) {
+    if (bp >= UiBreakpoint::Medium)
+        return line_height * 3 / 2;
+    return line_height;
+}
+
+/**
+ * @brief Widest a staggered label may be, or 0 for no limit.
+ *
+ * Below the medium breakpoint a label shares its row with the lanes two either
+ * side, so it keeps to two slot spacings less @p gap and ellipsizes past that.
+ */
+inline int32_t ams_stagger_label_width(int32_t slot_spacing, UiBreakpoint bp, int32_t gap) {
+    if (bp >= UiBreakpoint::Medium || slot_spacing <= 0)
+        return 0;
+    return 2 * slot_spacing - gap;
+}
+
+/**
+ * @brief Whether the operation sidebar lays its step progress out in a row.
+ *
+ * A portrait panel below the medium breakpoint gives the sidebar about 120 px
+ * under the diagram; a four-step vertical list (about 90 px) does not fit there
+ * under the strip and status, a row does. Everywhere else the vertical list fits.
+ */
+inline bool ams_stepper_horizontal(bool portrait, UiBreakpoint bp) {
+    return portrait && bp < UiBreakpoint::Medium;
+}
+
+} // namespace helix::ui

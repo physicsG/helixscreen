@@ -10,9 +10,9 @@
 
 #include "../catch_amalgamated.hpp"
 
-using helix::gcode::DEFAULT_GHOST_RENDER_MODE;
 using helix::gcode::GhostRenderMode;
+using helix::gcode::kDefaultGhostRenderMode;
 
 TEST_CASE("Ghost rendering defaults to Stipple", "[gcode][ghost][ghost_mode]") {
-    CHECK(DEFAULT_GHOST_RENDER_MODE == GhostRenderMode::Stipple);
+    CHECK(kDefaultGhostRenderMode == GhostRenderMode::Stipple);
 }

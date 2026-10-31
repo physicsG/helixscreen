@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
@@ -40,10 +41,10 @@ class PrinterState;
  *       []() { ... },
  *       [](const auto& err) { ... });
  */
-class MoonrakerJobAPI : public IJobAPI {
+class MoonrakerJobAPI : public helix::IJobAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using BoolCallback = std::function<void(bool)>;
     using ModifiedPrintCallback = std::function<void(const ModifiedPrintResult&)>;
 
@@ -53,15 +54,15 @@ class MoonrakerJobAPI : public IJobAPI {
     // answer while the print is already running. 10 min covers a cold heat-up; a
     // genuinely lost request still surfaces, just later.
     // (prestonbrown/helixscreen#1451)
-    static constexpr uint32_t PRINT_START_TIMEOUT_MS = 600000; // 10 min
+    static constexpr uint32_t kPrintStartTimeoutMs = 600000; // 10 min
 
     // The helix_print plugin answers print_modified only after awaiting that same
     // SDCARD_PRINT_FILE ack, and it gets there after copying metadata and creating
     // its symlink. Strictly more work for the same wait, so this endpoint can never
     // deserve the shorter ceiling of the two.
-    static constexpr uint32_t PRINT_MODIFIED_TIMEOUT_MS = PRINT_START_TIMEOUT_MS;
+    static constexpr uint32_t kPrintModifiedTimeoutMs = kPrintStartTimeoutMs;
 
-    static constexpr uint32_t CANCEL_TIMEOUT_MS = 300000; // 5 min — CANCEL_PRINT macros can be slow
+    static constexpr uint32_t kCancelTimeoutMs = 300000; // 5 min — CANCEL_PRINT macros can be slow
 
     /**
      * @brief Constructor
@@ -114,6 +115,23 @@ class MoonrakerJobAPI : public IJobAPI {
                               ModifiedPrintCallback on_success, ErrorCallback on_error) override;
 
     /**
+     * @brief Have the helix_print plugin apply @p edits to the original and start the result
+     *
+     * server.helix.print_edited: the plugin rewrites @p original_filename into
+     * @p temp_file_path beside it (gcode_edit_list.h has the edit grammar) and
+     * starts that copy as start_modified_print() would. Nothing is uploaded.
+     * Gate on the plugin's `server_edits` feature (gcode::choose_edit_transport).
+     *
+     * @p file_size (0 when unknown) sizes the wait (gcode::print_edited_timeout_ms):
+     * the plugin answers only once the print has started. What an error means for
+     * the start is gcode::classify_print_edited_failure's to say.
+     */
+    void start_edited_print(const std::string& original_filename, const std::string& temp_file_path,
+                            const json& edits, const std::vector<std::string>& modifications,
+                            uint64_t file_size, ModifiedPrintCallback on_success,
+                            ErrorCallback on_error) override;
+
+    /**
      * @brief Check if helix_print plugin is available
      *
      * Queries /server/helix/status to detect plugin availability.
@@ -122,7 +140,7 @@ class MoonrakerJobAPI : public IJobAPI {
      * @param on_result Callback with availability (true if plugin detected)
      * @param on_error Error callback (also means plugin not available)
      */
-    void check_helix_plugin(BoolCallback on_result, ErrorCallback on_error) override;
+    void check_helix_plugin(PluginInfoCallback on_result, ErrorCallback on_error) override;
 
     /**
      * @brief Pause the current print
@@ -150,6 +168,10 @@ class MoonrakerJobAPI : public IJobAPI {
 
   protected:
     /// True, with @p on_error called, while spools lie on the bed.
+    /// Announce a start of @p filename to the plugin's print_hooks, or take
+    /// back the announcement of one that failed.
+    void send_screen_start(const std::string& filename, bool withdraw);
+
     bool refused_by_spool_latch(const char* method, const ErrorCallback& on_error) const;
 
     helix::IMoonrakerClient& client_;

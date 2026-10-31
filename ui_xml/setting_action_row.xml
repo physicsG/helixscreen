@@ -17,6 +17,12 @@
          micro/tiny; set to 0 to force the description visible at all breakpoints
          (also suppresses the (?) info icon). -->
     <prop name="description_min_bp" type="int" default="2"/>
+    <!-- A short current value or status shown at the right, before the chevron. -->
+    <prop name="value" type="string" default=""/>
+    <prop name="value_tag" type="string" default=""/>
+    <!-- "false" for a row that opens nothing: no chevron. Pass clickable="false"
+         with it so the row takes no press either. -->
+    <prop name="chevron" type="string" default="true"/>
   </api>
   <styles>
     <style name="label_enabled" text_color="#text"/>
@@ -73,8 +79,13 @@
         <event_cb trigger="clicked" callback="on_setting_info_clicked"/>
       </lv_obj>
     </lv_obj>
-    <!-- Right side: Chevron icon -->
-    <icon src="chevron_right" size="sm" variant="secondary" clickable="false" event_bubble="true"/>
+    <!-- Right side: the value, then the chevron -->
+    <text_muted name="value"
+                text="$value" translation_tag="$value_tag" style_text_align="right" clickable="false"
+                event_bubble="true" hidden_if_empty="$value"/>
+    <icon name="chevron"
+          src="chevron_right" size="sm" variant="secondary" clickable="false" event_bubble="true"
+          hidden_if_prop_eq="$chevron|false"/>
     <!-- Declarative event callback -->
     <event_cb trigger="clicked" callback="$callback"/>
   </view>

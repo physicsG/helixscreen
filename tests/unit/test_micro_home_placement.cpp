@@ -20,17 +20,19 @@
  * oracle: every anchor the table seats must land at its authored cell and
  * span, unchanged.
  *
- * 320x240 is the honest edge: the micro table is authored against a 12x8
- * grid and this content box (270x232) is an 8x6, so five anchors are out of
- * bounds by design and go through auto-placement. The anchors that DO fit
- * must still land exactly; that is where a bad floor grows them.
+ * 320x240 is the honest edge: its content box (270x232) is an 8x6 grid with a
+ * 32px column track, below the micro tier's 34px nominal, and the table
+ * carries a micro@8x6 layout for it. Every anchor must still land exactly;
+ * that is where a bad floor grows them.
  */
 
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/panel_widget_size_harness.h"
+#include "../test_helpers/scoped_int_subject.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "ams_state.h"
 #include "grid_layout.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "panel_widget_manager.h"
@@ -86,12 +88,16 @@ class DefaultPlacementFixture : public LVGLUITestFixture {
         state().temperature_state().init_extruders({"extruder"});
         helix::ui::UpdateQueueTestAccess::drain(helix::ui::UpdateQueue::instance());
 
-        // The AMS/filament swap in build_default_grid() keys off this subject;
-        // pin it so the filament anchor exists regardless of what an earlier
-        // case in this binary left behind. Subjects are process-global.
-        if (lv_subject_t* ams = lv_xml_get_subject(nullptr, "ams_slot_count")) {
-            lv_subject_set_int(ams, 0);
+        // The default table's spool slot resolves off this subject; pin it to
+        // 0 so the slot does not take the AMS. Registered here when no earlier
+        // case has, because an absent gate subject reads as open. Subjects are
+        // process-global.
+        if (lv_xml_get_subject(nullptr, "ams_slot_count") == nullptr) {
+            helix::AmsState::instance().init_subjects(true);
         }
+        lv_subject_t* ams = lv_xml_get_subject(nullptr, "ams_slot_count");
+        REQUIRE(ams != nullptr);
+        lv_subject_set_int(ams, 0);
     }
 
     /// A grid container whose CONTENT box is exactly content_w x content_h:
@@ -159,33 +165,33 @@ const AuthoredAnchor kMicroAnchors[] = {
     {"bed_temperature",  8,  0,  2, 2},
     {"notifications",   10,  0,  2, 2},
     {"fan_stack",        6,  2,  2, 2},
-    {"led",              8,  2,  2, 2},
-    {"filament",        10,  2,  2, 2},
-    {"print_status",     0,  4, 12, 4},
+    {"filament",         8,  2,  2, 2},
+    {"led",             10,  2,  2, 2},
+    {"print_status",     0,  4,  8, 4},
+    {"temp_graph",       8,  4,  4, 4},
 };
 
-/// The medium table: 800x480 is the regression guard for the larger tiers,
-/// where the whole-cell floor does not apply and placement is already correct.
+/// The medium table's fixed anchors: 800x480 is the regression guard for the
+/// larger tiers, where the whole-cell floor does not apply and placement is
+/// already correct. Tracks (4,2) to (7,3) are the spool slot, whose occupants
+/// depend on the printer's capabilities, so the test checks them separately.
 const AuthoredAnchor kMediumAnchors[] = {
     {"printer_image",    0, 0, 4, 4},
     {"temperature",      4, 0, 2, 2},
     {"bed_temperature",  6, 0, 2, 2},
-    {"led",              8, 0, 2, 2},
+    {"fan_stack",        8, 0, 2, 2},
     {"notifications",   10, 0, 2, 2},
-    {"fan_stack",        4, 2, 2, 2},
-    {"filament",         6, 2, 2, 2},
+    {"temp_graph",       8, 2, 4, 6},
     {"print_status",     0, 4, 8, 4},
 };
 
-/// The micro anchors an 8x6 grid can seat. The other five (bed_temperature
-/// col 8, notifications col 10, led col 8, filament col 10, print_status
-/// colspan 12) are out of bounds at this width and go through auto-placement
-/// by design: build_default_grid() drops anchors the measured grid cannot
-/// hold rather than clamping them onto occupied tracks.
-const AuthoredAnchor kMicroCompanionAnchors[] = {
-    {"printer_image", 0, 0, 6, 4},
-    {"temperature",   6, 0, 2, 2},
-    {"fan_stack",     6, 2, 2, 2},
+/// The micro@8x6 table's fixed anchors. Tracks (4,0) to (5,1) are the readout
+/// slot, whose occupant depends on the printer's capabilities.
+const AuthoredAnchor kMicro8x6Anchors[] = {
+    {"temperature",     0, 0, 2, 2},
+    {"bed_temperature", 2, 0, 2, 2},
+    {"notifications",   6, 0, 2, 2},
+    {"print_status",    0, 2, 8, 4},
 };
 // clang-format on
 
@@ -199,7 +205,7 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "micro default layout lands exactly at
     lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
     REQUIRE(bp_subj != nullptr);
     REQUIRE(lv_subject_get_int(bp_subj) == static_cast<int>(UiBreakpoint::Micro));
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
     require_font_tokens_distinct();
 
     TestModeGuard test_mode_guard(get_runtime_config());
@@ -217,6 +223,15 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "micro default layout lands exactly at
     const CellMetrics tracks = grid_cell_metrics(430, 264, dims.cols, dims.rows, 2);
     REQUIRE(tracks.cell_h < 34.0f);
 
+    // The spool slot's occupants follow the capability subjects: no AMS
+    // (seed_topology()), a filament sensor and an LED.
+    helix::test::ScopedIntSubject dryer("home_dryer_available", 0);
+    helix::test::ScopedIntSubject chamber("printer_has_chamber", 0);
+    helix::test::ScopedIntSubject enclosed("printer_is_enclosed", 0);
+    helix::test::ScopedIntSubject led("led_controllable", 1);
+    helix::test::ScopedIntSubject fil("filament_sensor_count", 1);
+    helix::test::ScopedIntSubject spoolman("printer_has_spoolman", 0);
+
     populate_fresh_defaults("test_micro_home_480", container);
     lv_obj_update_layout(container);
     REQUIRE(grid_count_tracks(lv_obj_get_style_grid_column_dsc_array(container, LV_PART_MAIN)) ==
@@ -229,7 +244,7 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "micro default layout lands exactly at
     PanelWidgetManager::instance().clear_panel_config("test_micro_home_480");
 }
 
-TEST_CASE_METHOD(DefaultPlacementFixture, "micro anchors that fit land exactly at 320x240",
+TEST_CASE_METHOD(DefaultPlacementFixture, "micro default layout lands exactly at 320x240",
                  "[micro_home][panel_widget_manager]") {
     lv_display_t* disp = lv_display_get_default();
     REQUIRE(disp != nullptr);
@@ -239,7 +254,7 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "micro anchors that fit land exactly a
     lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
     REQUIRE(bp_subj != nullptr);
     REQUIRE(lv_subject_get_int(bp_subj) == static_cast<int>(UiBreakpoint::Micro));
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
     require_font_tokens_distinct();
 
     TestModeGuard test_mode_guard(get_runtime_config());
@@ -262,14 +277,15 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "micro anchors that fit land exactly a
     REQUIRE(grid_count_tracks(lv_obj_get_style_grid_column_dsc_array(container, LV_PART_MAIN)) ==
             8);
 
-    for (const auto& a : kMicroCompanionAnchors) {
+    for (const auto& a : kMicro8x6Anchors) {
         check_anchor(container, a);
     }
 
-    // The out-of-bounds anchors still render, auto-placed rather than lost.
-    for (const char* id : {"bed_temperature", "notifications", "led", "filament", "print_status"}) {
-        INFO("auto-placed widget '" << id << "' missing from the grid");
-        CHECK(lv_obj_find_by_name(container, id) != nullptr);
+    // The table switches these off on this grid rather than leaving them to
+    // auto-placement, which has no free track to give them.
+    for (const char* id : {"printer_image", "fan_stack"}) {
+        INFO("widget '" << id << "' placed on a full grid");
+        CHECK(lv_obj_find_by_name(container, id) == nullptr);
     }
 
     PanelWidgetManager::instance().clear_panel_config("test_micro_home_320");
@@ -285,7 +301,7 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "medium default layout is unchanged at
     lv_subject_t* bp_subj = theme_manager_get_breakpoint_subject();
     REQUIRE(bp_subj != nullptr);
     REQUIRE(lv_subject_get_int(bp_subj) == static_cast<int>(UiBreakpoint::Medium));
-    REQUIRE(theme_manager_get_spacing("space_xs") > 0);
+    REQUIRE(helix::GridLayout::gutter_px() > 0);
     require_font_tokens_distinct();
 
     TestModeGuard test_mode_guard(get_runtime_config());
@@ -298,6 +314,16 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "medium default layout is unchanged at
     REQUIRE(dims.cols == 12);
     REQUIRE(dims.rows == 8);
 
+    // The spool slot's occupants follow the capability subjects, so pin every
+    // one it consults: with ams_slot_count at 0 (seed_topology()) it takes its
+    // second alternative, filament in the cell beside the graph, then led.
+    helix::test::ScopedIntSubject dryer("home_dryer_available", 0);
+    helix::test::ScopedIntSubject chamber("printer_has_chamber", 0);
+    helix::test::ScopedIntSubject enclosed("printer_is_enclosed", 0);
+    helix::test::ScopedIntSubject led("led_controllable", 1);
+    helix::test::ScopedIntSubject fil("filament_sensor_count", 1);
+    helix::test::ScopedIntSubject spoolman("printer_has_spoolman", 0);
+
     populate_fresh_defaults("test_medium_home_800", container);
     lv_obj_update_layout(container);
     REQUIRE(grid_count_tracks(lv_obj_get_style_grid_column_dsc_array(container, LV_PART_MAIN)) ==
@@ -306,6 +332,10 @@ TEST_CASE_METHOD(DefaultPlacementFixture, "medium default layout is unchanged at
     for (const auto& a : kMediumAnchors) {
         check_anchor(container, a);
     }
+
+    CHECK(lv_obj_find_by_name(container, "ams") == nullptr);
+    check_anchor(container, {"filament", 6, 2, 2, 2});
+    check_anchor(container, {"led", 4, 2, 2, 2});
 
     PanelWidgetManager::instance().clear_panel_config("test_medium_home_800");
 }

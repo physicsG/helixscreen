@@ -537,6 +537,7 @@ ad5x_check_chroot_context() {
 #   4. Well-known users: biqu, pi, mks
 #   5. Fallback: root
 # Sets: KLIPPER_USER, KLIPPER_HOME
+# KLIPPER_HOMES_ROOT is the test seam for /home; nothing on a device ever sets it.
 detect_klipper_user() {
     # 1. systemd service owner (most reliable on Pi)
     if command -v systemctl >/dev/null 2>&1; then
@@ -563,15 +564,16 @@ detect_klipper_user() {
     fi
 
     # 3. printer_data directory scan
+    local homes_root="${KLIPPER_HOMES_ROOT:-/home}"
     local pd_dir
-    for pd_dir in /home/*/printer_data; do
+    for pd_dir in "$homes_root"/*/printer_data; do
         [ -d "$pd_dir" ] || continue
         local pd_user
-        pd_user=$(echo "$pd_dir" | sed 's|^/home/||;s|/printer_data$||')
+        pd_user=$(basename "$(dirname "$pd_dir")")
         if [ -n "$pd_user" ] && id "$pd_user" >/dev/null 2>&1; then
             KLIPPER_USER="$pd_user"
             KLIPPER_GROUP=$(_resolve_primary_group "$pd_user")
-            KLIPPER_HOME="/home/$pd_user"
+            KLIPPER_HOME="$homes_root/$pd_user"
             log_info "Klipper user (printer_data): $KLIPPER_USER (group: $KLIPPER_GROUP)"
             return 0
         fi
@@ -1023,6 +1025,7 @@ set_install_paths() {
     STATE_ROOT=""
     PREVIOUS_STATE_ROOT=""
     MIGRATE_FROM_DIR=""
+    INSTALL_LOG_DIR=""
 
     if [ "$platform" = "ad5m" ]; then
         # AD5M runs the helix-screen service as root on all three firmwares
@@ -1156,6 +1159,28 @@ set_install_paths() {
         # shellcheck disable=SC2034  # consumed by release.sh (stale cache reclaim)
         STALE_CACHE_DIRS="/usr/data/helixscreen/cache /usr/data/helixscreen-install /opt/.helixscreen-install"
         log_info "Platform: Creality K2 series"
+        log_info "Install directory: ${INSTALL_DIR}"
+    elif [ "$platform" = "x86-desktop" ]; then
+        # Per-user install beside the desktop: no service, no Klipper user, and
+        # nothing outside the user's home. The root comes from the XDG data
+        # dir, never from an existing kiosk install or INSTALL_DIR, so the
+        # detection below must not move it.
+        if ! INSTALL_DIR=$(desktop_install_root); then
+            log_error "Cannot place the desktop install: HOME or XDG_DATA_HOME is unset, or"
+            log_error "holds a space, quote or other character this install refuses."
+            exit 1
+        fi
+        if [ -n "${_USER_INSTALL_DIR:-}" ] && [ "$_USER_INSTALL_DIR" != "$INSTALL_DIR" ]; then
+            log_warn "Ignoring INSTALL_DIR=${_USER_INSTALL_DIR}: the desktop install lives at its own root"
+        fi
+        _install_dir_from_detection=1
+        INIT_SCRIPT_DEST=""
+        PREVIOUS_UI_SCRIPT=""
+        KLIPPER_USER=""
+        KLIPPER_GROUP=""
+        KLIPPER_HOME=""
+        # shellcheck disable=SC2034  # consumed by common.sh (install_log_dest)
+        INSTALL_LOG_DIR=$(desktop_state_dir) || INSTALL_LOG_DIR=""
         log_info "Install directory: ${INSTALL_DIR}"
     elif [ "$platform" = "cc1" ]; then
         # Elegoo Centauri Carbon running OpenCentauri COSMOS.
@@ -1375,7 +1400,7 @@ resolve_platform_hook_key() {
 # These are the files users may want to edit from Fluidd/Mainsail, and that
 # the app writes to at runtime. All other files in INSTALL_DIR/config/ are
 # static assets reinstalled on each update.
-HELIX_USER_CONFIG_FILES="settings.json helixscreen.env .disabled_services tool_spools.json crash_history.json user_filaments.json"
+HELIX_USER_CONFIG_FILES="settings.json helixscreen.env .disabled_services tool_spools.json crash_history.json user_filaments.json .webcams_backup.json .camera_migrated .klipper_includes .k2cam_webcam_disabled .seeded_settings .platform_hook .nginx_webcam_accesslog .nginx_remote_screen .remote_screen_route"
 
 # User-writable config DIRECTORIES that live in printer_data/config/helixscreen/.
 #
@@ -1546,6 +1571,7 @@ _safe_remove_migrated_config_dir() {
 #   ~/helixscreen/config/settings.json → above          (symlink)
 #
 # On upgrade from old layout, migrates files from install dir to printer_data.
+# Args: $1 = "quiet" to skip the success line (a repeat pass).
 # Reads: KLIPPER_HOME / KLIPPER_CONFIG_DIR (via klipper_config_dir), INSTALL_DIR
 setup_config_symlink() {
     # Only proceed if we have a Klipper config dir and an install directory
@@ -1727,7 +1753,7 @@ setup_config_symlink() {
         fi
     done
 
-    log_success "Config directory: $pd_helix"
+    [ "${1:-}" = "quiet" ] || log_success "Config directory: $pd_helix"
     # shellcheck disable=SC2034  # consumed by plan.sh (print_summary)
     HELIX_CONFIG_EDITABLE="$pd_helix"
     return 0

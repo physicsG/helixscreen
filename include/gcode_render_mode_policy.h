@@ -90,7 +90,7 @@ struct PreviewModeDecision {
 };
 
 /// Thumbnail Only, as stored in the display settings.
-constexpr int RENDER_MODE_THUMBNAIL_ONLY = 3;
+constexpr int kRenderModeThumbnailOnly = 3;
 
 /**
  * @brief Resolve a preview's render mode from the full ladder.
@@ -120,7 +120,7 @@ inline PreviewModeDecision decide_preview_mode(int cmdline_mode, bool env_mode_s
         return PreviewModeDecision{GcodeViewerRenderMode::Auto, PreviewModeSource::Environment,
                                    false};
     }
-    if (settings_mode == RENDER_MODE_THUMBNAIL_ONLY) {
+    if (settings_mode == kRenderModeThumbnailOnly) {
         return PreviewModeDecision{GcodeViewerRenderMode::Auto, PreviewModeSource::ThumbnailOnly,
                                    false};
     }

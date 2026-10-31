@@ -12,7 +12,7 @@
  *     lv_xml_get_subject: No subject was found with name "ams_env_ind_4_visible"
  *     lv_obj_xml_bind_flag_apply: Subject `ams_env_ind_4_visible` doesn't exist
  *
- * AmsState allocated per-unit subjects for MAX_UNITS = 4 units, while the
+ * AmsState allocated per-unit subjects for kMaxUnits = 4 units, while the
  * overview panel formatted ams_env_ind_<i>_* names for every unit the backend
  * reported. Unit 4's badge bound seven names nothing had registered and stayed
  * permanently dark and silent — no crash, because every getter bounds-checks.
@@ -39,11 +39,11 @@ using helix::AmsState;
 
 namespace {
 
-/// The seven environment-indicator subjects a unit card binds, in the order
+/// The eight environment-indicator subjects a unit card binds, in the order
 /// ams_unit_card.xml declares them.
-constexpr const char* kEnvIndSuffixes[] = {"temp_text",        "humidity_text", "humidity_status",
-                                           "humidity_visible", "visible",       "drying_active",
-                                           "drying_text"};
+constexpr const char* kEnvIndSuffixes[] = {"temp_text",       "humidity_text",    "humidity",
+                                           "humidity_status", "humidity_visible", "visible",
+                                           "drying_active",   "drying_text"};
 
 std::string env_ind_name(int unit, const char* suffix) {
     char buf[64];
@@ -79,7 +79,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Per-unit environment subjects exist for a fiv
     // whose badge went dark. Index 15 is the sixteenth, the widest rig the
     // overview supports; the path canvas and the badge subjects share one cap
     // or the path renders a unit the badge cannot.
-    static_assert(helix::ui::syspath::SystemPathData::MAX_UNITS == AmsState::MAX_UNITS);
+    static_assert(helix::ui::syspath::SystemPathData::kMaxUnits == AmsState::kMaxUnits);
     for (int unit : {0, 4, 7, 15}) {
         for (const char* suffix : kEnvIndSuffixes) {
             const std::string name = env_ind_name(unit, suffix);
@@ -123,7 +123,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Environment-subject lookups past the unit cap
     reinit_ams_subjects_for_xml();
 
     auto& ams = AmsState::instance();
-    for (int unit : {AmsState::MAX_UNITS, AmsState::MAX_UNITS + 1, -1}) {
+    for (int unit : {AmsState::kMaxUnits, AmsState::kMaxUnits + 1, -1}) {
         INFO("unit " << unit);
         CHECK(ams.get_env_ind_temp_text_subject(unit) == nullptr);
         CHECK(ams.get_env_ind_humidity_text_subject(unit) == nullptr);
@@ -137,10 +137,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "Environment-subject lookups past the unit cap
     }
 
     // The registration loop and the array bound must be the same number: an
-    // ams_env_ind_<MAX_UNITS>_* name resolving here would mean the loop ran past
+    // ams_env_ind_<kMaxUnits>_* name resolving here would mean the loop ran past
     // the arrays it indexes.
     for (const char* suffix : kEnvIndSuffixes) {
-        const std::string name = env_ind_name(AmsState::MAX_UNITS, suffix);
+        const std::string name = env_ind_name(AmsState::kMaxUnits, suffix);
         INFO("subject " << name);
         CHECK(lv_xml_get_subject(nullptr, name.c_str()) == nullptr);
     }
@@ -159,11 +159,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "Unit cards past the cap bind to the always-of
 
     // Whatever a backend reports, every name a card binds must resolve. This is
     // the assertion the bundle's warnings were the runtime symptom of.
-    for (int unit = 0; unit < AmsState::MAX_UNITS + 4; ++unit) {
+    for (int unit = 0; unit < AmsState::kMaxUnits + 4; ++unit) {
         const auto names = AmsState::env_indicator_subject_names(unit);
         for (const std::string& name :
-             {names.temp_text, names.humidity_text, names.humidity_status, names.humidity_visible,
-              names.visible, names.drying_active, names.drying_text}) {
+             {names.temp_text, names.humidity_text, names.humidity, names.humidity_status,
+              names.humidity_visible, names.visible, names.drying_active, names.drying_text}) {
             INFO("unit " << unit << " binds " << name);
             CHECK(lv_xml_get_subject(nullptr, name.c_str()) != nullptr);
         }
@@ -174,6 +174,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Unit cards past the cap bind to the always-of
     const auto in_range = AmsState::env_indicator_subject_names(4);
     CHECK(in_range.temp_text == "ams_env_ind_4_temp_text");
     CHECK(in_range.humidity_text == "ams_env_ind_4_humidity_text");
+    CHECK(in_range.humidity == "ams_env_ind_4_humidity");
     CHECK(in_range.humidity_status == "ams_env_ind_4_humidity_status");
     CHECK(in_range.humidity_visible == "ams_env_ind_4_humidity_visible");
     CHECK(in_range.visible == "ams_env_ind_4_visible");
@@ -183,14 +184,15 @@ TEST_CASE_METHOD(LVGLTestFixture, "Unit cards past the cap bind to the always-of
     // Past the cap there is no per-unit set, so the card falls back to the
     // placeholders rather than to unit 0's data (which would be a lie) or to an
     // unregistered name (which was the bug).
-    const std::string off_flag = AmsState::ENV_IND_OFF_FLAG_SUBJECT;
-    const std::string off_text = AmsState::ENV_IND_OFF_TEXT_SUBJECT;
-    for (int unit : {AmsState::MAX_UNITS, AmsState::MAX_UNITS + 3, -1}) {
+    const std::string off_flag = AmsState::kEnvIndOffFlagSubject;
+    const std::string off_text = AmsState::kEnvIndOffTextSubject;
+    for (int unit : {AmsState::kMaxUnits, AmsState::kMaxUnits + 3, -1}) {
         INFO("unit " << unit);
         const auto over = AmsState::env_indicator_subject_names(unit);
         CHECK(over.temp_text == off_text);
         CHECK(over.humidity_text == off_text);
         CHECK(over.drying_text == off_text);
+        CHECK(over.humidity == off_flag);
         CHECK(over.humidity_status == off_flag);
         CHECK(over.humidity_visible == off_flag);
         CHECK(over.visible == off_flag);
@@ -199,11 +201,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "Unit cards past the cap bind to the always-of
 
     // The placeholders only do their job if they read as "nothing to show":
     // ams_environment_indicator.xml hides its root on $visible == 0.
-    lv_subject_t* flag = lv_xml_get_subject(nullptr, AmsState::ENV_IND_OFF_FLAG_SUBJECT);
+    lv_subject_t* flag = lv_xml_get_subject(nullptr, AmsState::kEnvIndOffFlagSubject);
     REQUIRE(flag != nullptr);
     CHECK(lv_subject_get_int(flag) == 0);
 
-    lv_subject_t* text = lv_xml_get_subject(nullptr, AmsState::ENV_IND_OFF_TEXT_SUBJECT);
+    lv_subject_t* text = lv_xml_get_subject(nullptr, AmsState::kEnvIndOffTextSubject);
     REQUIRE(text != nullptr);
     const char* text_value = lv_subject_get_string(text);
     REQUIRE(text_value != nullptr);

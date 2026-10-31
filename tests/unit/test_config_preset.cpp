@@ -272,11 +272,12 @@ TEST_CASE_METHOD(PresetConfigFixture,
 
     printer_data()["wizard_completed"] = true;
 
-    json preset = {{"printer",
-                    {{"hardware",
-                      {{"expected",
-                        {"heater_bed", "extruder", "fan_generic chamber_fan", "led chamber_light",
-                         "controller_fan driver_fan", "AFC", "mmu", "toolchanger", "ace"}}}}}}};
+    json preset = {
+        {"printer",
+         {{"hardware",
+           {{"expected",
+             {"heater_bed", "extruder", "fan_generic chamber_fan", "led chamber_light",
+              "controller_fan driver_fan", "AFC", "mmu", "toolchanger", "ace", "indx", "cfs"}}}}}}};
     write_preset("expected_preset", preset);
 
     REQUIRE(config.apply_preset_file("expected_preset") == true);
@@ -290,6 +291,8 @@ TEST_CASE_METHOD(PresetConfigFixture,
         REQUIRE(name != "mmu");
         REQUIRE(name != "toolchanger");
         REQUIRE(name != "ace");
+        REQUIRE(name != "indx");
+        REQUIRE(name != "cfs");
     }
 
     TearDown();
@@ -675,7 +678,7 @@ TEST_CASE_METHOD(PresetConfigFixture, "Config::apply_preset_file integrates with
 /// TEST-NET-1 (RFC 5737). Guaranteed never assigned to a real interface, so
 /// is_moonraker_on_same_host()'s getifaddrs() scan can't accidentally match it
 /// on whatever machine CI runs on.
-static constexpr const char* REMOTE_TEST_HOST = "192.0.2.10";
+static constexpr const char* kRemoteTestHost = "192.0.2.10";
 
 TEST_CASE_METHOD(PresetConfigFixture,
                  "Config::apply_preset_file skips device display/input for a remote printer",
@@ -684,7 +687,7 @@ TEST_CASE_METHOD(PresetConfigFixture,
 
     // HelixScreen is running somewhere else and talking to this printer over the
     // network — e.g. a Pi with its own touchscreen that detected a Centauri Carbon.
-    printer_data()["moonraker_host"] = REMOTE_TEST_HOST;
+    printer_data()["moonraker_host"] = kRemoteTestHost;
 
     json preset = {
         {"printer", {{"heaters", {{"bed", "heater_bed"}}}}},
@@ -967,6 +970,21 @@ TEST_CASE_METHOD(PresetConfigFixture,
     // one, so there is nothing left to migrate.
     REQUIRE(config.apply_preset_file("k2") == false);
     REQUIRE(printer_data()["default_macros"]["cooldown"] == current_text);
+
+    TearDown();
+}
+
+// A preset's layout would be stored as raw track coordinates with no grid
+// named, which load() refuses to read; the home arrangement comes from the
+// default layout tables instead (prestonbrown/helixscreen#1216).
+TEST_CASE_METHOD(PresetConfigFixture, "snapmaker_u1 preset carries no home panel layout",
+                 "[config][preset][snapmaker_u1]") {
+    SetUp();
+
+    copy_shipped_preset("snapmaker_u1");
+    REQUIRE(config.apply_preset_file("snapmaker_u1") == true);
+
+    CHECK_FALSE(printer_data().contains("panel_widgets"));
 
     TearDown();
 }

@@ -16,6 +16,7 @@
 #include "ui_dialog.h"
 #include "ui_gcode_viewer.h"
 #include "ui_gradient_canvas.h"
+#include "ui_humidity_drop.h"
 #include "ui_icon.h"
 #include "ui_severity_card.h"
 #include "ui_switch.h"
@@ -130,6 +131,7 @@ void LVGLUITestFixture::register_widgets() {
     // Register C++ widgets in dependency order
     // These are needed before XML components that embed them
     helix::ui::icon::register_widget();
+    helix::ui::register_humidity_drop_widget();
     helix::ui::register_tile_rung_binding();
     ui_switch_register();
     ui_card_register();
@@ -137,7 +139,7 @@ void LVGLUITestFixture::register_widgets() {
     ui_severity_card_register();
     ui_dialog_register();
     ui_bed_mesh_register();
-    ui_gcode_viewer_register();
+    helix::ui::gcode_viewer_register();
     ui_gradient_canvas_register();
     // Grouped-list card used by every settings-style overlay
     setting_group_register();
@@ -208,6 +210,10 @@ void LVGLUITestFixture::register_xml_components() {
     // Use production registration function - registers ALL components
     // in correct dependency order
     helix::register_xml_components();
+    // A component registers its #tokens once. One an earlier case loaded on
+    // first use, under a plain LVGLTestFixture with no theme, kept empty styles;
+    // dropping the idle ones makes them register again against this theme.
+    helix::unregister_idle_xml_components();
 
     m_xml_registered = true;
     spdlog::debug("[LVGLUITestFixture] XML components registered");

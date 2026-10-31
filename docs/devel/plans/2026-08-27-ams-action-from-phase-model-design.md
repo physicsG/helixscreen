@@ -250,16 +250,6 @@ migration projects Purge steps to `PURGING` on that basis.
 
 Relevant if a report arrives about a step bar appearing during an AFC or Happy Hare purge.
 
-## Open item carried over: the MedusaHC fork mock is asserted, not observed
-
-`HELIX_MOCK_AMS=medusahc-fork` reproduces topi314's status schema, read from
-`scripts/medusahc.py` in that repo. The unit tests pin that shape, and the mock is
-self-consistent with our reading of it.
-
-**No frame from a real machine has ever gone through it.** A debug bundle from a machine
-running that fork is the cheap way to confirm the mock matches reality rather than matching
-our interpretation. Until then, treat fork behavior as unverified against hardware.
-
 ## Branch strategy
 
 Branch off `main`, not off `feature/medusahc-mock-and-steps`.

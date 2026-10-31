@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One sensor in a thermistor widget's picker: name, current reading, and
+     either a checkbox (multi-select) or a highlight on the chosen row
+     (single-select). Bound to the <prefix>_<index>_name, _temp, _hl and
+     _checked subjects the widget publishes for the picker; a tap goes to
+     thermistor_picker_row_cb with the row index. -->
+<!-- The rows set noto_sans_14 (the app default font) at every breakpoint, as the
+     imperative rows did; a heavier token wraps long sensor names. -->
+<component>
+  <api>
+    <prop name="prefix" type="string" default="thermistor_sel"/>
+    <prop name="index" type="string" default="0"/>
+    <!-- "false" shows the checkbox. -->
+    <prop name="checkbox_hidden" type="string" default="true"/>
+  </api>
+  <styles>
+    <style name="row_idle" bg_opa="0"/>
+    <style name="row_chosen" bg_opa="30"/>
+  </styles>
+  <view extends="lv_obj"
+        width="100%" height="content" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
+        style_flex_track_place="center" style_pad_all="#space_sm" style_pad_gap="#space_xs" scrollable="false"
+        clickable="true">
+    <style name="row_idle"/>
+    <bind_style_if_eq name="row_chosen" subject="${prefix}_${index}_hl" ref_value="1"/>
+    <lv_checkbox name="row_check" text="" style_pad_all="0" clickable="false" hidden="$checkbox_hidden">
+      <bind_state_if_eq subject="${prefix}_${index}_checked" state="checked" ref_value="1"/>
+    </lv_checkbox>
+    <text_body name="row_name"
+               bind_text="${prefix}_${index}_name" flex_grow="1" long_mode="dots" style_text_font="noto_sans_14"/>
+    <text_body name="row_temp" bind_text="${prefix}_${index}_temp" style_text_font="noto_sans_14" style_text_opa="180"/>
+    <event_cb trigger="clicked" callback="thermistor_picker_row_cb" user_data="$index"/>
+  </view>
+</component>

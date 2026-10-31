@@ -62,9 +62,10 @@ void MoonrakerAPI::set_temperature(const std::string& heater, double temperature
     // Route a chamber set through M141 S{temp} when the printer defines that macro.
     // The safety-limit validation above still bounds the target — M141 is just an
     // alternate transport for the same already-validated temperature.
+    const auto& macros = helix::MacroParamCache::instance();
     const bool use_m141 = helix::ui::temperature::chamber_uses_m141(
-        heater, state_.temperature_state().chamber_heater_name(),
-        helix::MacroParamCache::instance().has_macro("m141"));
+        heater, state_.temperature_state().chamber_heater_name(), macros.has_macro("m141"),
+        macros.macro_sets_target("m141", heater));
 
     char gcode_buf[128];
     const char* gcode = helix::ui::temperature::build_heater_gcode(
@@ -111,6 +112,12 @@ void MoonrakerAPI::set_fan_speed(const std::string& fan, double speed, SuccessCa
     }
 
     std::string gcode = helix::fan_gcode(fan, speed);
+    if (gcode.empty()) {
+        report_validation_error(
+            on_error, "set_fan_speed", "This fan is driven by the firmware",
+            fmt::format("Fan '{}' is firmware-driven and not commandable.", fan));
+        return;
+    }
     spdlog::debug("[MoonrakerAPI] set_fan_speed('{}', {:.0f}%) -> {}", fan, speed, gcode);
 
     execute_gcode(gcode, on_success, on_error);
@@ -330,12 +337,24 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
         // latch stays armed and a genuinely external op later in the same
         // episode can still announce itself.
         //
-        // The blocking-op predicates deliberately do not read app_macro_activity():
-        // narrowing them would let a late jog through during a filament op (#1108).
-        if (!silent && !state_.app_macro_activity().recently_active() &&
+        // The same goes for an episode the user's own commands began: light taps
+        // 0.2 s apart each read "Printing" for most of a second, which holds a
+        // settled busy episode up on an idle printer for as long as the burst
+        // lasts. Ownership is decided on the first ask, from the sends before
+        // this one, so it is asked before this send is stamped and on every
+        // pass, never behind a short-circuit.
+        //
+        // The blocking-op predicates deliberately read neither app_macro_activity()
+        // nor app_command_episode(): narrowing them would let a late jog through
+        // during a filament op or an external bed mesh (#1108).
+        const bool app_episode = state_.is_busy_episode_app_initiated();
+        if (!silent && !app_episode && !state_.app_macro_activity().recently_active() &&
             state_.calibration_state().claim_busy_queue_toast()) {
             NOTIFY_INFO("Printer is busy — your {} will run when it's ready.",
                         helix::discretionary_gcode_noun(gcode));
+        }
+        if (!silent) {
+            state_.app_command_episode().note_untracked_send();
         }
         json queued_params = {{"script", gcode}};
         // "Sending", not "queuing": the command goes to Klipper NOW and Klipper runs
@@ -391,6 +410,12 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
     if (stamp) {
         ps->app_macro_activity().note_sent();
     }
+    // A silent send is the app's own housekeeping (LedAutoState reacting to a
+    // printer state change), so it may follow an external op's start closely
+    // and must not claim that episode for the user.
+    if (!silent) {
+        ps->app_command_episode().note_untracked_send();
+    }
 
     // Guard: only wrap on_success in lambda if non-null, otherwise pass nullptr.
     // A lambda wrapping a null std::function would bypass send_jsonrpc's null check
@@ -405,7 +430,7 @@ void MoonrakerAPI::execute_gcode(const std::string& gcode, SuccessCallback on_su
     // failure, or connection loss — so one of the two wrappers runs. The
     // AppMacroActivity in-flight age ceiling covers the residual paths that
     // settle nothing at all (client destructor, cancel_request).
-    std::function<void(const json&)> success_wrapper;
+    helix::SharedCallback<void(const json&)> success_wrapper;
     if (on_success || stamp) {
         success_wrapper = [on_success, ps, stamp](json) {
             if (stamp) {
@@ -464,8 +489,8 @@ void MoonrakerAPI::exclude_object(const std::string& object_name, SuccessCallbac
     // the object. Pass silent=true so any late timeout does not emit a user-facing event;
     // truth comes from the `exclude_object.excluded_objects` status subscription. A 15-minute
     // ceiling still catches genuinely stuck requests without aborting legitimate pre-prints.
-    constexpr uint32_t EXCLUDE_OBJECT_TIMEOUT_MS = 15 * 60 * 1000;
-    execute_gcode(gcode, on_success, on_error, EXCLUDE_OBJECT_TIMEOUT_MS, /*silent=*/true);
+    constexpr uint32_t kExcludeObjectTimeoutMs = 15 * 60 * 1000;
+    execute_gcode(gcode, on_success, on_error, kExcludeObjectTimeoutMs, /*silent=*/true);
 }
 
 void MoonrakerAPI::emergency_stop(SuccessCallback on_success, ErrorCallback on_error) {

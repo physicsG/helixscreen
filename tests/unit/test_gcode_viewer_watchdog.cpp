@@ -28,8 +28,8 @@ using helix::test_access::gcode_viewer_watchdog_track;
 using helix::test_access::GcodeViewerWatchdogTrack;
 
 namespace {
-constexpr int NEVER_SAMPLED = -2; // sentinel for "no previous observation"
-constexpr int MAX_STALL_KICKS = 30;
+constexpr int kNeverSampled = -2; // sentinel for "no previous observation"
+constexpr int kMaxStallKicks = 30;
 bool g_load_done = false;
 } // namespace
 
@@ -37,11 +37,11 @@ TEST_CASE("watchdog: first sample never kicks or gives up", "[gcode_viewer][watc
     // prev_cached == -2 sentinel: we have nothing to compare against yet.
     WatchdogObservation obs{/*cached=*/-1,
                             /*target=*/855,
-                            /*prev_cached=*/NEVER_SAMPLED,
-                            /*prev_target=*/NEVER_SAMPLED,
+                            /*prev_cached=*/kNeverSampled,
+                            /*prev_target=*/kNeverSampled,
                             /*stall_streak=*/0,
                             /*visible=*/true};
-    auto d = watchdog_evaluate(obs, MAX_STALL_KICKS);
+    auto d = watchdog_evaluate(obs, kMaxStallKicks);
     CHECK_FALSE(d.kick);
     CHECK_FALSE(d.give_up);
     CHECK(d.stall_streak == 0);
@@ -52,7 +52,7 @@ TEST_CASE("watchdog: caught-up cache idles with zero streak", "[gcode_viewer][wa
     WatchdogObservation obs{
         /*cached=*/855,      /*target=*/855,      /*prev_cached=*/855,
         /*prev_target=*/855, /*stall_streak=*/12, /*visible=*/true};
-    auto d = watchdog_evaluate(obs, MAX_STALL_KICKS);
+    auto d = watchdog_evaluate(obs, kMaxStallKicks);
     CHECK_FALSE(d.kick);
     CHECK_FALSE(d.give_up);
     CHECK(d.stall_streak == 0);
@@ -62,7 +62,7 @@ TEST_CASE("watchdog: confirmed stall kicks and increments streak", "[gcode_viewe
     // Behind target AND same (cached,target) as last tick -> confirmed stall.
     WatchdogObservation obs{/*cached=*/-1,       /*target=*/855,     /*prev_cached=*/-1,
                             /*prev_target=*/855, /*stall_streak=*/0, /*visible=*/true};
-    auto d = watchdog_evaluate(obs, MAX_STALL_KICKS);
+    auto d = watchdog_evaluate(obs, kMaxStallKicks);
     CHECK(d.kick);
     CHECK_FALSE(d.give_up);
     CHECK(d.stall_streak == 1);
@@ -73,7 +73,7 @@ TEST_CASE("watchdog: progress since last tick resets the streak", "[gcode_viewer
     // large prior streak must reset and we must NOT give up.
     WatchdogObservation obs{/*cached=*/40,       /*target=*/855,      /*prev_cached=*/-1,
                             /*prev_target=*/855, /*stall_streak=*/29, /*visible=*/true};
-    auto d = watchdog_evaluate(obs, MAX_STALL_KICKS);
+    auto d = watchdog_evaluate(obs, kMaxStallKicks);
     CHECK_FALSE(d.kick);
     CHECK_FALSE(d.give_up);
     CHECK(d.stall_streak == 0);
@@ -87,26 +87,26 @@ TEST_CASE("watchdog: gives up after max consecutive stalls and stops kicking",
                             /*target=*/855,
                             /*prev_cached=*/-1,
                             /*prev_target=*/855,
-                            /*stall_streak=*/MAX_STALL_KICKS - 1,
+                            /*stall_streak=*/kMaxStallKicks - 1,
                             /*visible=*/true};
-    auto d = watchdog_evaluate(obs, MAX_STALL_KICKS);
+    auto d = watchdog_evaluate(obs, kMaxStallKicks);
     CHECK_FALSE(d.kick);
     CHECK(d.give_up);
-    CHECK(d.stall_streak == MAX_STALL_KICKS);
+    CHECK(d.stall_streak == kMaxStallKicks);
 }
 
 TEST_CASE("watchdog: a hidden viewer never kicks or gives up however long it stalls",
           "[gcode_viewer][watchdog]") {
     // A viewer under a hidden screen is not drawn, and its cache advances only
     // while drawing, so a stall there is expected rather than a render failure.
-    constexpr int HIDDEN_TICKS = MAX_STALL_KICKS + 10;
+    constexpr int kHiddenTicks = kMaxStallKicks + 10;
     int streak = 0;
-    for (int tick = 0; tick < HIDDEN_TICKS; ++tick) {
+    for (int tick = 0; tick < kHiddenTicks; ++tick) {
         CAPTURE(tick);
         WatchdogObservation obs{/*cached=*/-1,           /*target=*/855,
                                 /*prev_cached=*/-1,      /*prev_target=*/855,
                                 /*stall_streak=*/streak, /*visible=*/false};
-        const WatchdogDecision d = watchdog_evaluate(obs, MAX_STALL_KICKS);
+        const WatchdogDecision d = watchdog_evaluate(obs, kMaxStallKicks);
         REQUIRE_FALSE(d.kick);
         REQUIRE_FALSE(d.give_up);
         REQUIRE(d.stall_streak == 0);
@@ -121,20 +121,20 @@ TEST_CASE("watchdog: a viewer shown again counts its stall from zero", "[gcode_v
                                /*target=*/855,
                                /*prev_cached=*/-1,
                                /*prev_target=*/855,
-                               /*stall_streak=*/MAX_STALL_KICKS - 1,
+                               /*stall_streak=*/kMaxStallKicks - 1,
                                /*visible=*/false};
-    WatchdogDecision d = watchdog_evaluate(hidden, MAX_STALL_KICKS);
+    WatchdogDecision d = watchdog_evaluate(hidden, kMaxStallKicks);
     REQUIRE_FALSE(d.give_up);
     REQUIRE(d.stall_streak == 0);
 
     // Visible again and still stalled: a full run of kicks before it gives up.
     int streak = d.stall_streak;
-    for (int tick = 1; tick < MAX_STALL_KICKS; ++tick) {
+    for (int tick = 1; tick < kMaxStallKicks; ++tick) {
         CAPTURE(tick);
         WatchdogObservation obs{/*cached=*/-1,           /*target=*/855,
                                 /*prev_cached=*/-1,      /*prev_target=*/855,
                                 /*stall_streak=*/streak, /*visible=*/true};
-        d = watchdog_evaluate(obs, MAX_STALL_KICKS);
+        d = watchdog_evaluate(obs, kMaxStallKicks);
         REQUIRE(d.kick);
         REQUIRE_FALSE(d.give_up);
         REQUIRE(d.stall_streak == tick);
@@ -144,7 +144,7 @@ TEST_CASE("watchdog: a viewer shown again counts its stall from zero", "[gcode_v
     WatchdogObservation last{/*cached=*/-1,           /*target=*/855,
                              /*prev_cached=*/-1,      /*prev_target=*/855,
                              /*stall_streak=*/streak, /*visible=*/true};
-    d = watchdog_evaluate(last, MAX_STALL_KICKS);
+    d = watchdog_evaluate(last, kMaxStallKicks);
     CHECK_FALSE(d.kick);
     CHECK(d.give_up);
 }
@@ -165,26 +165,26 @@ TEST_CASE_METHOD(LVGLTestFixture, "watchdog: a new load starts from a fresh base
     }
     REQUIRE_FALSE(path.empty()); // run helix-tests from the repo root
 
-    lv_obj_t* viewer = ui_gcode_viewer_create(test_screen());
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(test_screen());
     REQUIRE(viewer != nullptr);
 
     g_load_done = false;
-    ui_gcode_viewer_set_load_callback(
+    helix::ui::gcode_viewer_set_load_callback(
         viewer, [](lv_obj_t*, void*, bool) { g_load_done = true; }, nullptr);
 
     // One tick short of giving up on the previous file's stall.
-    gcode_viewer_set_watchdog_track(viewer, {-1, 0, MAX_STALL_KICKS - 1});
+    gcode_viewer_set_watchdog_track(viewer, {-1, 0, kMaxStallKicks - 1});
 
-    ui_gcode_viewer_load_file(viewer, path.c_str());
+    helix::ui::gcode_viewer_load_file(viewer, path.c_str());
 
     const GcodeViewerWatchdogTrack track = gcode_viewer_watchdog_track(viewer);
-    CHECK(track.prev_cached == NEVER_SAMPLED);
-    CHECK(track.prev_target == NEVER_SAMPLED);
+    CHECK(track.prev_cached == kNeverSampled);
+    CHECK(track.prev_target == kNeverSampled);
     CHECK(track.stall_streak == 0);
 
     REQUIRE(wait_until([] { return g_load_done; }, 30000));
-    ui_gcode_viewer_set_load_callback(viewer, nullptr, nullptr);
-    ui_gcode_viewer_clear(viewer);
+    helix::ui::gcode_viewer_set_load_callback(viewer, nullptr, nullptr);
+    helix::ui::gcode_viewer_clear(viewer);
     lv_obj_delete(viewer);
     process_lvgl(50);
 }

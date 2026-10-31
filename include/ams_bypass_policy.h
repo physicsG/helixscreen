@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace helix {
 
@@ -17,10 +18,25 @@ struct BypassMacros {
     std::string off; ///< Releases it again
 };
 
+/// Which of a backend's @p conventional wrapper names this printer defines; a
+/// name is empty when discovery did not see it.
+[[nodiscard]] BypassMacros detect_bypass_macros(const PrinterDiscovery& hw,
+                                                const BypassMacros& conventional);
+
+/// Choices for a bypass macro picker: kAutoMacro followed by every macro whose
+/// name mentions BYPASS, sorted. Empty when the printer has none.
+[[nodiscard]] std::vector<std::string> bypass_macro_options(const PrinterDiscovery& hw);
+
+/// resolve_bypass_macros() over an already-detected pair, for a caller that
+/// keeps detection and re-resolves when the user picks another macro.
+[[nodiscard]] BypassMacros resolve_bypass_macros(const BypassMacros& detected,
+                                                 const std::string& on_choice,
+                                                 const std::string& off_choice);
+
 /// Resolve the bypass macros for this printer, from discovery and the user's
 /// stored overrides.
 ///
-/// Auto-detection looks for the conventional names; a machine exposing neither
+/// Auto-detection looks for the backend's @p conventional names; a machine exposing neither
 /// resolves to empty, so no bypass is offered rather than a control with
 /// nothing safe behind it. An explicit override is honoured verbatim even when
 /// discovery has not seen it - the owner may know something discovery does not,
@@ -30,13 +46,9 @@ struct BypassMacros {
 /// would skip the unload-first and refuse-during-print guards the wrapper
 /// macros exist to enforce.
 [[nodiscard]] BypassMacros resolve_bypass_macros(const PrinterDiscovery& hw,
+                                                 const BypassMacros& conventional,
                                                  const std::string& on_override,
                                                  const std::string& off_override);
-
-/// Gather resolve_bypass_macros()'s overrides from settings. Split from the
-/// rule above so the rule is testable without standing up SettingsManager,
-/// matching the bypass_available() / bypass_available_for() split.
-[[nodiscard]] BypassMacros resolve_bypass_macros_for(const PrinterDiscovery& hw);
 
 /**
  * @brief Whether the bypass controls should be available on this machine.

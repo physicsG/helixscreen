@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Klipper's display_status.message (M117 / SET_DISPLAY_TEXT), printing or not.
+     DisplayMessageWidget publishes whether two lines fit (the message wraps and ends
+     in an ellipsis) or one (it scrolls when too long, as on the print status card),
+     and whether the icon has room beside the text. -->
+<component>
+  <view extends="lv_obj"
+        width="100%" height="100%" style_pad_all="#space_sm" style_pad_gap="#space_sm" style_bg_opa="0%"
+        scrollable="false" flex_flow="row" style_flex_cross_place="center" style_flex_track_place="center">
+    <icon name="display_message_icon" src="message" size="sm" variant="muted" clickable="false">
+      <bind_flag_if_eq subject="display_message_widget_icon" flag="hidden" ref_value="0"/>
+    </icon>
+    <lv_obj name="display_message_text"
+            height="100%" flex_grow="1" style_pad_all="0" style_bg_opa="0%" style_border_width="0" scrollable="false"
+            clickable="false" flex_flow="column" style_flex_main_place="center">
+      <text_body name="display_message_line"
+                 width="100%" bind_text="display_message" long_mode="scroll_circular" hidden="true">
+        <bind_flag_if cond="display_message_visible eq 0 or display_message_widget_multiline ne 0" flag="hidden"/>
+      </text_body>
+      <!-- A declared max height is what keeps a dots label multi-line. -->
+      <text_body name="display_message_wrapped"
+                 width="100%" bind_text="display_message" long_mode="dots" style_max_height="100%" hidden="true">
+        <bind_flag_if cond="display_message_visible eq 0 or display_message_widget_multiline eq 0" flag="hidden"/>
+      </text_body>
+      <!-- The placeholder follows the same verdict as the message: one scrolling line,
+           or wrapped text. -->
+      <text_body name="display_message_empty_line"
+                 width="100%" text="No message" long_mode="scroll_circular" style_text_color="#text_muted" hidden="true">
+        <bind_flag_if cond="display_message_visible ne 0 or display_message_widget_multiline ne 0" flag="hidden"/>
+      </text_body>
+      <text_body name="display_message_empty"
+                 width="100%" text="No message" long_mode="dots" style_max_height="100%" style_text_color="#text_muted"
+                 hidden="true">
+        <bind_flag_if cond="display_message_visible ne 0 or display_message_widget_multiline eq 0" flag="hidden"/>
+      </text_body>
+    </lv_obj>
+  </view>
+</component>

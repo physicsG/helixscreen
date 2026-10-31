@@ -24,7 +24,8 @@ namespace helix::ui::icon {
  * property handling for easy theming:
  *
  * Properties:
- *   - src: Icon short name (e.g., "home", "wifi", "settings")
+ *   - src: Icon short name (e.g., "home", "wifi", "settings"), or an image icon
+ *          registered through ui_icon_image.h
  *   - size: Semantic size string - "xs", "sm", "md", "lg", "xl"
  *   - variant: Color variant - "text", "muted", "primary", "secondary",
  *              "tertiary", "disabled", "success", "warning", "danger",
@@ -84,6 +85,13 @@ void invalidate_font_cache();
  *                   Legacy "mat_*_img" names are also supported for transition.
  */
 void set_source(lv_obj_t* icon, const char* icon_name);
+
+/**
+ * The MDI font an icon of @p size_str draws in ("xs" .. "xl").
+ *
+ * For widgets that size themselves to sit where an icon of that size would.
+ */
+const lv_font_t* font_for_size(const char* size_str);
 
 /**
  * Change the icon size at runtime.

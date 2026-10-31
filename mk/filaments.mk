@@ -12,7 +12,7 @@ regen-filaments:
 	@cd "$(ORCA_TMP)" && git sparse-checkout set resources/profiles
 	@python3 scripts/import_orca_filaments.py \
 		--orca "$(ORCA_TMP)/resources/profiles" \
-		--cfs-seed scripts/fixtures/cfs_seed.json \
+		--seed scripts/fixtures/filament_seed.json \
 		--orca-tag $(ORCA_TAG) \
 		--out assets/filaments.json
 	@rm -rf "$(ORCA_TMP)"

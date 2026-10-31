@@ -32,7 +32,7 @@ StaticPanelRegistry::~StaticPanelRegistry() {
     // as destroyed so guards in panel destructors can check.
 }
 
-void StaticPanelRegistry::register_destroy(const char* name, std::function<void()> destroy_fn) {
+void StaticPanelRegistry::register_destroy(const char* name, helix::Callback<void()> destroy_fn) {
     destroyers_.push_back({name, std::move(destroy_fn)});
     spdlog::trace("[StaticPanelRegistry] Registered: {} (total: {})", name, destroyers_.size());
 }

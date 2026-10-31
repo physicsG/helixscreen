@@ -12,31 +12,34 @@ namespace helix {
 
 namespace {
 
-/// Panels that are permanently attached to a platform, so the platform key
-/// alone identifies them. Diagonals are measured, not taken from spec sheets —
-/// the fleet survey found reported physical sizes wrong or absent on 6 of 8
-/// devices, including a Raspberry Pi whose driver hands back the official 7"
-/// touchscreen's exact active area for a ~115mm panel.
+/// Panels that are permanently attached to a board, so the board alone identifies
+/// them. Diagonals are measured, not taken from spec sheets - the fleet survey
+/// found reported physical sizes wrong or absent on 6 of 8 devices, including a
+/// Raspberry Pi whose driver hands back the official 7" touchscreen's exact
+/// active area for a ~115mm panel.
 ///
-/// Deliberately absent: pi, pi32, x86, esp32. Those drive a user-chosen
-/// display, so a panel size here would be a guess imposed on every user of
-/// that build. Also absent: ad5x (no hardware to measure) and snapmaker-u1
-/// (its reported size is bogus and the true diagonal is not yet measured).
+/// Deliberately absent: Generic (Pi, x86 and ESP32 drive a user-chosen display, so
+/// a panel size here would be a guess imposed on every user of that build), the
+/// AD5X and Creator 5 line (no hardware to measure) and the Snapmaker U1 (its
+/// reported size is bogus and the true diagonal is not yet measured).
 struct PanelEntry {
-    const char* platform_key;
+    board::Board board;
     PanelSpec spec;
 };
 
 constexpr PanelEntry kKnownPanels[] = {
-    // FlashForge Adventurer 5M — 221.5 DPI. Reports 108x64mm (189 DPI), ~17% low.
-    {"ad5m", {800, 480, 107.0}},
-    // Elegoo Centauri Carbon — 131.0 DPI. simpledrm synthesizes 96 DPI here.
-    {"cc1", {480, 272, 107.0}},
-    // Creality K1/K1C — 218.2 DPI. Reports 0x0 over the ioctl, so this table is
-    // the only source it has. Panel is physically identical to the K2 Plus.
-    {"k1", {480, 800, 108.6}},
-    // Creality K2 Plus — 218.2 DPI. One of only two devices that measured honestly.
-    {"k2", {480, 800, 108.6}},
+    // FlashForge Adventurer 5M - 221.5 DPI. Reports 108x64mm (189 DPI), ~17% low.
+    {board::Board::Ad5m, {800, 480, 107.0}},
+    // Elegoo Centauri Carbon - 131.0 DPI. simpledrm synthesizes 96 DPI here.
+    {board::Board::Cc1, {480, 272, 107.0}},
+    // Creality K1/K1C/K1 Max - 218.2 DPI. Reports 0x0 over the ioctl, so this table
+    // is the only source it has. Panel is physically identical to the K2 Plus. All
+    // three mount it the same way and report no kernel panel_orientation. Every
+    // other mips box that resolves to K1 is told apart by its framebuffer geometry
+    // (board_mount_rotation). Geometry and mount must match platforms.json "k1".
+    {board::Board::K1, {480, 800, 108.6, 270}},
+    // Creality K2 Plus - 218.2 DPI. One of only two devices that measured honestly.
+    {board::Board::K2, {480, 800, 108.6}},
 };
 
 /// Sizes actually generated for each font family, ascending. Mirrors the
@@ -88,6 +91,18 @@ double DisplayMetrics::ui_scale_for_dpi(double dpi) {
     return std::min(scale, kMaxScale);
 }
 
+double DisplayMetrics::logical_dpi(double physical_dpi, int native_w, int native_h, int logical_w,
+                                   int logical_h) {
+    if (native_w <= 0 || native_h <= 0 || logical_w <= 0 || logical_h <= 0) {
+        return physical_dpi;
+    }
+    const double native_diag =
+        std::hypot(static_cast<double>(native_w), static_cast<double>(native_h));
+    const double logical_diag =
+        std::hypot(static_cast<double>(logical_w), static_cast<double>(logical_h));
+    return physical_dpi * logical_diag / native_diag;
+}
+
 bool DisplayMetrics::dpi_is_plausible(double dpi) {
     return std::isfinite(dpi) && dpi >= kMinPlausibleDpi && dpi <= kMaxPlausibleDpi;
 }
@@ -100,13 +115,21 @@ bool DisplayMetrics::dpi_is_trustworthy(double dpi) {
     return dpi_is_plausible(dpi) && !dpi_is_synthesized(dpi);
 }
 
-std::optional<PanelSpec> DisplayMetrics::known_panel(const std::string& platform_key) {
+std::optional<PanelSpec> DisplayMetrics::known_panel(board::Board board) {
     for (const auto& entry : kKnownPanels) {
-        if (platform_key == entry.platform_key) {
+        if (board == entry.board) {
             return entry.spec;
         }
     }
     return std::nullopt;
+}
+
+int DisplayMetrics::board_mount_rotation(board::Board board, int native_w, int native_h) {
+    const auto panel = known_panel(board);
+    if (!panel || panel->width_px != native_w || panel->height_px != native_h) {
+        return -1;
+    }
+    return panel->upright_rotation;
 }
 
 double DisplayMetrics::dpi_of(const PanelSpec& panel) {
@@ -120,7 +143,7 @@ double DisplayMetrics::dpi_of(const PanelSpec& panel) {
 
 ResolvedDpi DisplayMetrics::resolve_dpi(int user_override_dpi,
                                         std::optional<double> platform_measured,
-                                        const std::string& platform_key) {
+                                        board::Board board) {
     // An explicit override wins outright, but a nonsense value is ignored
     // rather than obeyed — it would otherwise be indistinguishable from a
     // deliberate choice and strand the user with an unusable UI.
@@ -137,11 +160,27 @@ ResolvedDpi DisplayMetrics::resolve_dpi(int user_override_dpi,
         return {*platform_measured, DpiSource::PlatformMeasured};
     }
 
-    if (const auto panel = known_panel(platform_key)) {
+    if (const auto panel = known_panel(board)) {
         return {dpi_of(*panel), DpiSource::KnownPanel};
     }
 
     return {kReferenceDpi, DpiSource::Fallback};
+}
+
+ScaleDecision DisplayMetrics::decide_scale(int user_override_dpi,
+                                           std::optional<double> platform_native_dpi, int native_w,
+                                           int native_h, int logical_w, int logical_h,
+                                           board::Board board, int scale_setting) {
+    std::optional<double> platform_dpi;
+    if (platform_native_dpi) {
+        platform_dpi = logical_dpi(*platform_native_dpi, native_w, native_h, logical_w, logical_h);
+    }
+    ScaleDecision d{};
+    d.resolved = resolve_dpi(user_override_dpi, platform_dpi, board);
+    d.auto_scale = ui_scale_for_dpi(d.resolved.dpi);
+    d.ui_scale = scale_for_setting(scale_setting, d.auto_scale);
+    d.lvgl_dpi = static_cast<int32_t>(std::lround(kReferenceDpi * d.ui_scale));
+    return d;
 }
 
 int32_t DisplayMetrics::scaled_px(int32_t authored_px, double scale) {

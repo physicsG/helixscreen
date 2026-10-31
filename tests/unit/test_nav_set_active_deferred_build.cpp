@@ -54,7 +54,7 @@ class DeferredBuildFixture : public LVGLUITestFixture {
 
         auto& nav = NavigationManager::instance();
         home_widget_ = lv_obj_create(test_screen());
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = home_widget_;
         nav.set_panels(panels);
         nav.register_panel_instance(PanelId::Home, &home_panel_);
@@ -77,7 +77,7 @@ class DeferredBuildFixture : public LVGLUITestFixture {
         nav.set_deferred_panel_builder({});
         nav.register_panel_instance(PanelId::PrintSelect, nullptr);
         nav.register_panel_instance(PanelId::Home, nullptr);
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         nav.set_panels(panels);
         drain();
         DisplaySettingsManager::instance().set_animations_enabled(animations_were_enabled_);

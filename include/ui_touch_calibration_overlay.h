@@ -202,7 +202,7 @@ class TouchCalibrationOverlay : public OverlayBase, public helix::ui::ITouchCali
     /**
      * @brief Handle one LV_EVENT_LONG_PRESSED_REPEAT tick of a press-and-hold
      *
-     * Aborts the session once HOLD_ABORT_REPEATS consecutive repeats have
+     * Aborts the session once kHoldAbortRepeats consecutive repeats have
      * arrived. Counting repeats rather than acting on the first one keeps a
      * deliberate hold distinct from the taps calibration is made of; the counter
      * resets on every fresh press and release.
@@ -343,15 +343,15 @@ class TouchCalibrationOverlay : public OverlayBase, public helix::ui::ITouchCali
     // === State Constants ===
     //
 
-    static constexpr int STATE_IDLE = 0;
-    static constexpr int STATE_POINT_1 = 1;
-    static constexpr int STATE_POINT_2 = 2;
-    static constexpr int STATE_POINT_3 = 3;
-    static constexpr int STATE_VERIFY = 4;
-    static constexpr int STATE_COMPLETE = 5;
+    static constexpr int kStateIdle = 0;
+    static constexpr int kStatePoint1 = 1;
+    static constexpr int kStatePoint2 = 2;
+    static constexpr int kStatePoint3 = 3;
+    static constexpr int kStateVerify = 4;
+    static constexpr int kStateComplete = 5;
 
-    static constexpr int CROSSHAIR_SIZE = 50;
-    static constexpr int CROSSHAIR_HALF_SIZE = CROSSHAIR_SIZE / 2;
+    static constexpr int kCrosshairSize = 50;
+    static constexpr int kCrosshairHalfSize = kCrosshairSize / 2;
 
     //
     // === Unattended-loop Guards ===
@@ -365,7 +365,7 @@ class TouchCalibrationOverlay : public OverlayBase, public helix::ui::ITouchCali
     /// Restarting capture after this many unattended VERIFY rounds is a loop, not
     /// a retry: a user who cannot reach Accept will never reach it on the next
     /// pass either. Abort instead so the screen is escapable.
-    static constexpr int MAX_UNATTENDED_VERIFY_ROUNDS = 2;
+    static constexpr int kMaxUnattendedVerifyRounds = 2;
 
     /// Consecutive LV_EVENT_LONG_PRESSED_REPEAT ticks seen on the current press.
     int hold_repeat_count_ = 0;
@@ -374,7 +374,7 @@ class TouchCalibrationOverlay : public OverlayBase, public helix::ui::ITouchCali
     /// long-press time (400ms by default) and LONG_PRESSED_REPEAT every 100ms
     /// after that, so this is roughly a 1.4s hold — far longer than the taps
     /// calibration collects, and short enough to find by leaning on the screen.
-    static constexpr int HOLD_ABORT_REPEATS = 10;
+    static constexpr int kHoldAbortRepeats = 10;
 
     friend class TouchCalibrationOverlayTestAccess;
 };

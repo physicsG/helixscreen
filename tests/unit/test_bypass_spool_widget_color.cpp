@@ -31,7 +31,7 @@ using helix::ui::BypassSpoolWidgets;
 namespace {
 
 /// The canvas's own pre-any-set_color() default (ui_spool_canvas.cpp).
-constexpr uint32_t CANVAS_DEFAULT = 0xE0E0E0;
+constexpr uint32_t kCanvasDefault = 0xE0E0E0;
 
 uint32_t canvas_rgb(const BypassSpoolWidgets& w) {
     lv_color_t c = ui_spool_canvas_get_color(w.spool_canvas);
@@ -49,7 +49,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "bypass swatch paints a black spool black",
 
     // Pre-condition: the canvas starts on its own light default, which is what
     // the user actually saw.
-    REQUIRE(canvas_rgb(w) == CANVAS_DEFAULT);
+    REQUIRE(canvas_rgb(w) == kCanvasDefault);
 
     bypass_spool_set_color(w, 0x000000);
 

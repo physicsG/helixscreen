@@ -1,11 +1,15 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_update_queue.h"
+
 #include "../helix_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/sensors_forget.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
 #include "moonraker_client.h"
+#include "pause_descriptor.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
 #include "settings_manager.h"
@@ -16,6 +20,8 @@
 
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
+
+using helix::test::SensorsForget;
 
 using namespace helix;
 using namespace helix::ui;
@@ -332,6 +338,62 @@ TEST_CASE("PrinterState: Update print state and filename", "[state][progress]") 
     REQUIRE(std::string(filename) == "benchy.gcode");
 }
 
+TEST_CASE("PrinterState: print_stats messages decode a firmware error envelope",
+          "[state][pause][firmware_error_envelope]") {
+    lv_init_safe();
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    json status = {
+        {"print_stats",
+         {{"state", "error"},
+          {"message",
+           R"({"coded": "0003-0522-0002-0008", "msg":"Lost communication with MCU 'e0'"})"},
+          {"exception",
+           {{"id", 522},
+            {"code", 8},
+            {"message", R"(Halted: {"code":"key9001","msg":"MCU shutdown"})"}}}}}};
+    state.update_from_status(status);
+
+    REQUIRE(std::string(lv_subject_get_string(state.print_state().get_print_message_subject())) ==
+            "Lost communication with MCU 'e0'");
+    REQUIRE(state.print_state().get_print_exception_message() == "Halted: MCU shutdown");
+
+    // Plain prose is untouched.
+    state.update_from_status(json{{"print_stats", {{"message", "Runout Detected"}}}});
+    REQUIRE(std::string(lv_subject_get_string(state.print_state().get_print_message_subject())) ==
+            "Runout Detected");
+}
+
+TEST_CASE("pause_descriptor::read: silence, an empty descriptor and a populated one",
+          "[state][pause]") {
+    using helix::pause_descriptor::read;
+    CHECK_FALSE(read(json{{"state", "paused"}}).has_value());
+    CHECK_FALSE(read(json{{"exception", nullptr}}).has_value());
+
+    auto cleared = read(json{{"exception", json::object()}});
+    REQUIRE(cleared.has_value());
+    CHECK(cleared->id == -1);
+    CHECK(cleared->code == -1);
+    CHECK(cleared->message.empty());
+    CHECK_FALSE(helix::pause_descriptor::frame_carries_cause(json{{"exception", json::object()}}));
+
+    const json populated = {
+        {"exception", {{"id", 532}, {"code", 1}, {"message", "detected dirty bed"}}}};
+    auto cause = read(populated);
+    REQUIRE(cause.has_value());
+    CHECK(cause->id == 532);
+    CHECK(cause->code == 1);
+    CHECK(cause->message == "detected dirty bed");
+    CHECK(helix::pause_descriptor::frame_carries_cause(populated));
+
+    auto partial = read(json{{"exception", {{"id", "x"}, {"message", 7}}}});
+    REQUIRE(partial.has_value());
+    CHECK(partial->id == -1);
+    CHECK(partial->message.empty());
+}
+
 TEST_CASE("PrinterState: parses print_stats.exception structured object",
           "[state][progress][pause]") {
     lv_init_safe();
@@ -399,6 +461,46 @@ TEST_CASE("PrinterState: parses print_stats.exception structured object",
         REQUIRE(state.print_state().get_print_exception_id() == 532);
         REQUIRE(state.print_state().get_print_exception_code() == 1);
         REQUIRE(state.print_state().get_print_exception_message() == "detected dirty bed");
+    }
+}
+
+TEST_CASE("PrinterState: a pause takes no exception latched earlier in the print",
+          "[state][progress][pause]") {
+    lv_init_safe();
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+    state.update_from_status(json{{"print_stats", {{"state", "printing"}}}});
+    const json dirty_bed = {{"id", 532}, {"code", 1}, {"message", "detected dirty bed"}};
+
+    SECTION("published while printing, then a later pause without one: a plain pause") {
+        state.update_from_status(json{{"print_stats", {{"exception", dirty_bed}}}});
+        state.update_from_status(json{{"print_stats", {{"print_duration", 12.0}}}});
+        state.update_from_status(json{{"print_stats", {{"print_duration", 13.0}}}});
+        state.update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+        CHECK(state.print_state().get_print_exception_id() == -1);
+        CHECK(state.print_state().get_print_exception_code() == -1);
+    }
+    SECTION("carried in the pause's own frame") {
+        state.update_from_status(
+            json{{"print_stats", {{"state", "paused"}, {"exception", dirty_bed}}}});
+        CHECK(state.print_state().get_print_exception_id() == 532);
+    }
+    SECTION("published in the frame just before the pause") {
+        state.update_from_status(json{{"print_stats", {{"exception", dirty_bed}}}});
+        state.update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+        CHECK(state.print_state().get_print_exception_id() == 532);
+    }
+    SECTION("arriving after the pause") {
+        state.update_from_status(json{{"print_stats", {{"state", "paused"}}}});
+        state.update_from_status(json{{"print_stats", {{"exception", dirty_bed}}}});
+        CHECK(state.print_state().get_print_exception_id() == 532);
+    }
+    SECTION("a resume clears it") {
+        state.update_from_status(
+            json{{"print_stats", {{"state", "paused"}, {"exception", dirty_bed}}}});
+        state.update_from_status(json{{"print_stats", {{"state", "printing"}}}});
+        CHECK(state.print_state().get_print_exception_id() == -1);
     }
 }
 
@@ -749,6 +851,195 @@ TEST_CASE("PrinterState: Connection state transitions", "[state][connection]") {
 }
 
 // ============================================================================
+// Derived connection state: nav_buttons_enabled, was_ever_connected
+// ============================================================================
+
+TEST_CASE("PrinterState: nav_buttons_enabled derivation",
+          "[characterization][network][nav_buttons]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    // Defaults: disconnected, "Disconnected", nav buttons off.
+    REQUIRE(std::string(lv_subject_get_string(
+                state.network_state().get_printer_connection_message_subject())) == "Disconnected");
+    REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+
+    SECTION("connected AND klippy ready -> nav_buttons_enabled = 1") {
+        // Set connected state
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTED), "Ready");
+        // Set klippy ready
+        state.set_klippy_state_sync(KlippyState::READY);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 1);
+    }
+
+    SECTION("disconnected AND klippy ready -> nav_buttons_enabled = 0") {
+        // Set disconnected state
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::DISCONNECTED), "Disconnected");
+        // Set klippy ready
+        state.set_klippy_state_sync(KlippyState::READY);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+    }
+
+    SECTION("connected AND klippy error -> nav_buttons_enabled = 0") {
+        // Set connected state
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTED), "Ready");
+        // Set klippy error
+        state.set_klippy_state_sync(KlippyState::ERROR);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+    }
+
+    SECTION("disconnected AND klippy error -> nav_buttons_enabled = 0") {
+        // Set disconnected state
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::DISCONNECTED), "Disconnected");
+        // Set klippy error
+        state.set_klippy_state_sync(KlippyState::ERROR);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+    }
+
+    SECTION("connecting state -> nav_buttons_enabled = 0") {
+        // Set connecting state (not fully connected)
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTING), "Connecting...");
+        state.set_klippy_state_sync(KlippyState::READY);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+    }
+
+    SECTION("reconnecting state -> nav_buttons_enabled = 0") {
+        // Set reconnecting state (not fully connected)
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::RECONNECTING), "Reconnecting...");
+        state.set_klippy_state_sync(KlippyState::READY);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+    }
+
+    SECTION("connected AND klippy startup -> nav_buttons_enabled = 0") {
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTED), "Ready");
+        state.set_klippy_state_sync(KlippyState::STARTUP);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+    }
+
+    SECTION("connected AND klippy shutdown -> nav_buttons_enabled = 0") {
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTED), "Ready");
+        state.set_klippy_state_sync(KlippyState::SHUTDOWN);
+
+        REQUIRE(lv_subject_get_int(state.network_state().get_nav_buttons_enabled_subject()) == 0);
+    }
+}
+
+TEST_CASE("PrinterState: observer fires when nav_buttons_enabled changes",
+          "[characterization][network][observer]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    auto observer_cb = [](lv_observer_t* observer, lv_subject_t* subject) {
+        int* count_ptr = static_cast<int*>(lv_observer_get_user_data(observer));
+        int* value_ptr = count_ptr + 1;
+
+        (*count_ptr)++;
+        *value_ptr = lv_subject_get_int(subject);
+    };
+
+    int user_data[2] = {0, -1};
+
+    lv_observer_t* observer = lv_subject_add_observer(
+        state.network_state().get_nav_buttons_enabled_subject(), observer_cb, user_data);
+
+    // Initial notification
+    REQUIRE(user_data[0] == 1);
+    REQUIRE(user_data[1] == 0); // Starts disabled
+
+    // Enable nav buttons by connecting with klippy ready
+    state.network_state().set_printer_connection_state_internal(
+        static_cast<int>(ConnectionState::CONNECTED), "Ready");
+    state.set_klippy_state_sync(KlippyState::READY);
+
+    REQUIRE(user_data[0] == 2);
+    REQUIRE(user_data[1] == 1);
+
+    // Disable by setting klippy to error
+    state.set_klippy_state_sync(KlippyState::ERROR);
+
+    REQUIRE(user_data[0] == 3);
+    REQUIRE(user_data[1] == 0);
+
+    lv_observer_remove(observer);
+}
+
+TEST_CASE("PrinterState: was_ever_connected flag behavior",
+          "[characterization][network][was_connected]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    // PrinterStateTestAccess::reset() clears the flag, so each SECTION starts false.
+    REQUIRE_FALSE(state.network_state().was_ever_connected());
+
+    SECTION("becomes true when connection state becomes CONNECTED") {
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTED), "Ready");
+
+        REQUIRE(state.network_state().was_ever_connected() == true);
+    }
+
+    SECTION("stays true even after disconnection") {
+        // First connect
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTED), "Ready");
+        REQUIRE(state.network_state().was_ever_connected() == true);
+
+        // Then disconnect
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::DISCONNECTED), "Disconnected");
+        REQUIRE(state.network_state().was_ever_connected() == true);
+    }
+
+    SECTION("stays true through reconnection cycle") {
+        // Connect
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTED), "Ready");
+        REQUIRE(state.network_state().was_ever_connected() == true);
+
+        // Reconnecting
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::RECONNECTING), "Reconnecting...");
+        REQUIRE(state.network_state().was_ever_connected() == true);
+
+        // Disconnect (failed)
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::FAILED), "Connection failed");
+        REQUIRE(state.network_state().was_ever_connected() == true);
+    }
+
+    SECTION("CONNECTING state alone does not set the flag") {
+        state.network_state().set_printer_connection_state_internal(
+            static_cast<int>(ConnectionState::CONNECTING), "Connecting...");
+
+        REQUIRE_FALSE(state.network_state().was_ever_connected());
+    }
+}
+
+// ============================================================================
 // Network Status Tests
 // ============================================================================
 
@@ -958,7 +1249,7 @@ TEST_CASE("PrintJobState: print_job_state_to_string converts to display strings"
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::PRINTING)) == "Printing");
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::PAUSED)) == "Paused");
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::COMPLETE)) == "Complete");
-    REQUIRE(std::string(print_job_state_to_string(PrintJobState::CANCELLED)) == "Cancelled");
+    REQUIRE(std::string(print_job_state_to_string(PrintJobState::CANCELLED)) == "Canceled");
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::ERROR)) == "Error");
 }
 
@@ -1337,6 +1628,33 @@ TEST_CASE("PrinterState: set_kinematics handles kinematics variations", "[state]
     }
 }
 
+TEST_CASE("PrinterState: set_kinematics gives deltas no individual XYZ homing",
+          "[state][kinematics]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    lv_subject_t* subject = state.capabilities_state().subject(Capability::HasIndividualXyzHoming);
+
+    for (const char* delta : {"delta", "rotary_delta"}) {
+        INFO(delta);
+        state.set_kinematics("cartesian");
+        REQUIRE(lv_subject_get_int(subject) == 1);
+        state.set_kinematics(delta);
+        CHECK(lv_subject_get_int(subject) == 0);
+    }
+
+    for (const char* other : {"cartesian", "corexy", "hybrid_corexy", "corexz"}) {
+        INFO(other);
+        state.set_kinematics("delta");
+        REQUIRE(lv_subject_get_int(subject) == 0);
+        state.set_kinematics(other);
+        CHECK(lv_subject_get_int(subject) == 1);
+    }
+}
+
 TEST_CASE("PrinterState: set_kinematics gates belt compare on true CoreXY", "[state][kinematics]") {
     lv_init_safe();
 
@@ -1367,6 +1685,58 @@ TEST_CASE("PrinterState: set_kinematics gates belt compare on true CoreXY", "[st
         REQUIRE(lv_subject_get_int(
                     state.capabilities_state().subject(Capability::SupportsBeltCompare)) == 1);
     }
+}
+
+namespace {
+std::string firmware_name_subject_text() {
+    lv_subject_t* s = lv_xml_get_subject(nullptr, "klipper_firmware_name");
+    REQUIRE(s != nullptr);
+    return lv_subject_get_string(s);
+}
+} // namespace
+
+TEST_CASE("PrinterState: firmware name reads Klipper before any discovery",
+          "[state][hardware][firmware]") {
+    lv_init_safe();
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(true);
+
+    REQUIRE(firmware_name_subject_text() == "Klipper");
+}
+
+TEST_CASE("PrinterState::set_hardware publishes the firmware name", "[state][hardware][firmware]") {
+    SensorsForget forget;
+    lv_init_safe();
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(true);
+
+    SECTION("Kalico") {
+        PrinterDiscovery hw;
+        hw.set_is_kalico(true);
+        state.set_hardware(std::move(hw));
+        REQUIRE(firmware_name_subject_text() == "Kalico");
+    }
+
+    SECTION("Klipper") {
+        PrinterDiscovery hw;
+        state.set_hardware(std::move(hw));
+        REQUIRE(firmware_name_subject_text() == "Klipper");
+    }
+}
+
+TEST_CASE("PrinterState: set_kinematics bumps the hardware generation",
+          "[state][kinematics][hardware]") {
+    lv_init_safe();
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    lv_subject_t* gen = state.capabilities_state().subject(Capability::HardwareGeneration);
+    const int before = lv_subject_get_int(gen);
+    state.set_kinematics("corexy");
+    REQUIRE(lv_subject_get_int(gen) != before);
 }
 
 TEST_CASE("PrinterState: Update kinematics from toolhead notification", "[state][kinematics][ui]") {
@@ -1573,6 +1943,7 @@ TEST_CASE("PrinterState::set_hardware propagates auto-detected chamber sensor na
 
 TEST_CASE("PrinterState::set_hardware gives the chamber to its heater",
           "[state][hardware][chamber]") {
+    SensorsForget forget;
     lv_init_safe();
     PrinterState& state = get_printer_state();
     PrinterStateTestAccess::reset(state);
@@ -1596,6 +1967,7 @@ TEST_CASE("PrinterState::set_hardware gives the chamber to its heater",
 
 TEST_CASE("PrinterState::set_hardware respects 'none' override for chamber",
           "[state][hardware][chamber]") {
+    SensorsForget forget;
     lv_init_safe();
     PrinterState& state = get_printer_state();
     PrinterStateTestAccess::reset(state);
@@ -1638,7 +2010,7 @@ struct ChamberAssignmentsRestore {
 
 /// The name a model preset seeds for its family's chamber heater before the
 /// wizard runs, and so before anything has checked the printer has one.
-constexpr const char* PRESET_CHAMBER_HEATER = "heater_generic chamber_heater";
+constexpr const char* kPresetChamberHeater = "heater_generic chamber_heater";
 
 PrinterDiscovery discovered_objects(std::initializer_list<const char*> objects) {
     PrinterDiscovery hw;
@@ -1673,14 +2045,6 @@ int has_chamber_heater(PrinterState& state) {
 int has_chamber_sensor(PrinterState& state) {
     return lv_subject_get_int(PrinterStateTestAccess::has_chamber_sensor_subject(state));
 }
-
-/// The temperature sensor manager is a singleton shared across test cases: any
-/// case that discovers sensors into it leaves it holding none for later cases.
-struct SensorsForget {
-    ~SensorsForget() {
-        helix::sensors::TemperatureSensorManager::instance().discover({});
-    }
-};
 
 /// A sensor's role, or nothing when the manager is not tracking that object.
 std::optional<helix::sensors::TemperatureSensorRole>
@@ -1748,7 +2112,7 @@ TEST_CASE(
     "PrinterState::set_hardware: a preset chamber heater the printer lacks yields discovery's",
     "[state][hardware][chamber]") {
     ChamberAssignmentsRestore restore;
-    PrinterState& state = state_before_discovery(PRESET_CHAMBER_HEATER);
+    PrinterState& state = state_before_discovery(kPresetChamberHeater);
 
     SECTION("a chamber-named temperature_fan drives the chamber") {
         state.set_hardware(
@@ -1775,13 +2139,14 @@ TEST_CASE(
 TEST_CASE("PrinterState::set_hardware: a named chamber heater the printer reports is its heater",
           "[state][hardware][chamber]") {
     ChamberAssignmentsRestore restore;
+    SensorsForget forget;
 
     SECTION("the preset's heater on a printer that has it") {
-        PrinterState& state = state_before_discovery(PRESET_CHAMBER_HEATER);
+        PrinterState& state = state_before_discovery(kPresetChamberHeater);
         state.set_hardware(discovered_objects(
-            {PRESET_CHAMBER_HEATER, "temperature_fan chamber_fan", "extruder", "heater_bed"}));
+            {kPresetChamberHeater, "temperature_fan chamber_fan", "extruder", "heater_bed"}));
 
-        CHECK(state.temperature_state().chamber_heater_name() == PRESET_CHAMBER_HEATER);
+        CHECK(state.temperature_state().chamber_heater_name() == kPresetChamberHeater);
         CHECK(has_chamber_heater(state) == 1);
     }
     SECTION("a heater no chamber keyword names") {
@@ -1798,7 +2163,8 @@ TEST_CASE("PrinterState::set_hardware: a named chamber heater the printer report
 TEST_CASE("PrinterState::set_hardware: an unreported chamber heater name falls back to discovery",
           "[state][hardware][chamber]") {
     ChamberAssignmentsRestore restore;
-    PrinterState& state = state_before_discovery(PRESET_CHAMBER_HEATER);
+    SensorsForget forget;
+    PrinterState& state = state_before_discovery(kPresetChamberHeater);
 
     state.set_hardware(discovered_objects({"heater_generic chamber", "extruder", "heater_bed"}));
 
@@ -1808,8 +2174,9 @@ TEST_CASE("PrinterState::set_hardware: an unreported chamber heater name falls b
 
 TEST_CASE("PrinterState: chamber heater presence follows each discovery, never the assignment",
           "[state][hardware][chamber]") {
+    SensorsForget forget;
     ChamberAssignmentsRestore restore;
-    PrinterState& state = state_before_discovery(PRESET_CHAMBER_HEATER);
+    PrinterState& state = state_before_discovery(kPresetChamberHeater);
     lv_subject_t* presence = state.capabilities_state().subject(Capability::HasChamberHeater);
 
     // Every value the capability takes from here on, including ones set and
@@ -1850,8 +2217,8 @@ TEST_CASE("PrinterState: chamber heater presence follows each discovery, never t
     CHECK(lv_subject_get_int(presence) == 1);
 
     // A later discovery that reports the heater makes it the chamber heater.
-    state.set_hardware(discovered_objects({PRESET_CHAMBER_HEATER, "extruder", "heater_bed"}));
-    CHECK(state.temperature_state().chamber_heater_name() == PRESET_CHAMBER_HEATER);
+    state.set_hardware(discovered_objects({kPresetChamberHeater, "extruder", "heater_bed"}));
+    CHECK(state.temperature_state().chamber_heater_name() == kPresetChamberHeater);
     CHECK(lv_subject_get_int(presence) == 1);
 
     // One that stops reporting it takes it away again.
@@ -1869,15 +2236,16 @@ namespace {
 
 /// A chamber sensor name an older model preset seeded, still saved on a printer
 /// whose configuration names its chamber sensor differently.
-constexpr const char* STALE_CHAMBER_SENSOR = "temperature_sensor box";
+constexpr const char* kStaleChamberSensor = "temperature_sensor box";
 
 } // namespace
 
 TEST_CASE("PrinterState::set_hardware: a chamber sensor the printer does not report yields "
           "discovery's",
           "[state][hardware][chamber]") {
+    SensorsForget forget;
     ChamberAssignmentsRestore restore;
-    PrinterState& state = state_before_discovery("auto", STALE_CHAMBER_SENSOR);
+    PrinterState& state = state_before_discovery("auto", kStaleChamberSensor);
 
     SECTION("the chamber reads the sensor the printer has") {
         state.set_hardware(centauri_carbon_objects());
@@ -1919,6 +2287,7 @@ TEST_CASE("PrinterState::set_hardware: a named chamber sensor counts from the di
           "reports it",
           "[state][hardware][chamber]") {
     ChamberAssignmentsRestore restore;
+    SensorsForget forget;
     PrinterState& state = state_before_discovery("auto", "temperature_sensor external_bme");
 
     // Discovery lands without the named sensor: discovery's pick stands.
@@ -1948,7 +2317,7 @@ TEST_CASE("PrinterState::set_hardware: a stale chamber sensor name leaves the re
 
     ChamberAssignmentsRestore restore;
     SensorsForget forget;
-    PrinterState& state = state_before_discovery("auto", STALE_CHAMBER_SENSOR);
+    PrinterState& state = state_before_discovery("auto", kStaleChamberSensor);
 
     auto& sensors = TemperatureSensorManager::instance();
     sensors.init_subjects();
@@ -1956,7 +2325,7 @@ TEST_CASE("PrinterState::set_hardware: a stale chamber sensor name leaves the re
     // Hardware discovery hands the manager the printer's sensors before discovery
     // completes and PrinterState resolves the chamber.
     PrinterDiscovery hw = centauri_carbon_objects();
-    sensors.discover(hw.sensors());
+    sensors.discover(hw);
     REQUIRE(role_of(sensors, "temperature_sensor chamber") == TemperatureSensorRole::CHAMBER);
 
     state.set_hardware(std::move(hw));
@@ -1983,7 +2352,7 @@ TEST_CASE("PrinterState::set_hardware: a stale chamber sensor override leaves th
     PrinterDiscovery hw =
         discovered_objects({"heater_generic chamber_heater", "temperature_fan chamber_exhaust_fans",
                             "temperature_sensor mcu_temp", "extruder", "heater_bed"});
-    sensors.discover(hw.sensors());
+    sensors.discover(hw);
     REQUIRE(role_of(sensors, "temperature_fan chamber_exhaust_fans") ==
             TemperatureSensorRole::CHAMBER);
 
@@ -2012,7 +2381,7 @@ TEST_CASE("PrinterState::set_hardware: auto leaves a chamber-named fan its own s
     PrinterDiscovery hw =
         discovered_objects({"heater_generic chamber_heater", "temperature_fan chamber_exhaust_fans",
                             "temperature_sensor mcu_temp", "extruder", "heater_bed"});
-    sensors.discover(hw.sensors());
+    sensors.discover(hw);
     REQUIRE(role_of(sensors, "temperature_fan chamber_exhaust_fans") ==
             TemperatureSensorRole::CHAMBER);
 
@@ -2040,7 +2409,7 @@ TEST_CASE("PrinterState::set_hardware: a chamber sensor override the printer rep
     PrinterDiscovery hw =
         discovered_objects({"temperature_fan chamber_exhaust_fans",
                             "temperature_sensor external_bme", "extruder", "heater_bed"});
-    sensors.discover(hw.sensors());
+    sensors.discover(hw);
     // Discovery classified the fan CHAMBER on its own; the reported override must
     // take the role from it.
     REQUIRE(role_of(sensors, "temperature_fan chamber_exhaust_fans") ==
@@ -2101,7 +2470,7 @@ TEST_CASE("parse_status_notification: reads eventtime and the replay marker",
 
     const nlohmann::json replay_frame = {{"method", "notify_status_update"},
                                          {"params", nlohmann::json::array({status})},
-                                         {CACHED_SNAPSHOT_MARKER, true}};
+                                         {kCachedSnapshotMarker, true}};
     auto replay = parse_status_notification(replay_frame);
     REQUIRE(replay);
     CHECK(replay->eventtime == 0.0);
@@ -2130,8 +2499,8 @@ TEST_CASE("make_status_notification round-trips through parse_status_notificatio
             CHECK(frame->from_cached_snapshot == cached);
             CHECK(frame->whole_objects == whole);
             // A marker is present only when set: live frames carry neither key.
-            CHECK(notification.contains(CACHED_SNAPSHOT_MARKER) == cached);
-            CHECK(notification.contains(WHOLE_OBJECTS_MARKER) == whole);
+            CHECK(notification.contains(kCachedSnapshotMarker) == cached);
+            CHECK(notification.contains(kWholeObjectsMarker) == whole);
         }
     }
 }
@@ -2167,4 +2536,46 @@ TEST_CASE("PrinterPrintState: update_from_status handles null print_stats fields
          }},
     };
     REQUIRE_NOTHROW(state.update_from_status(wrong_types));
+}
+
+TEST_CASE("PrinterState tracks pause_resume.is_paused", "[printer-state][pause]") {
+    lv_init_safe();
+
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    SECTION("defaults to false before any status update") {
+        REQUIRE_FALSE(state.is_paused());
+    }
+
+    SECTION("becomes true when Klipper reports is_paused:true") {
+        json status = {{"pause_resume", {{"is_paused", true}}}};
+        state.update_from_status(status);
+        REQUIRE(state.is_paused());
+    }
+
+    SECTION("becomes false when Klipper reports is_paused:false") {
+        // First set to true
+        json status_true = {{"pause_resume", {{"is_paused", true}}}};
+        state.update_from_status(status_true);
+        REQUIRE(state.is_paused());
+
+        // Then clear it
+        json status_false = {{"pause_resume", {{"is_paused", false}}}};
+        state.update_from_status(status_false);
+        REQUIRE_FALSE(state.is_paused());
+    }
+
+    SECTION("ignores pause_resume update with missing is_paused field") {
+        json status = {{"pause_resume", {{"other_field", 42}}}};
+        state.update_from_status(status);
+        REQUIRE_FALSE(state.is_paused()); // unchanged from default
+    }
+
+    SECTION("ignores pause_resume update with non-boolean is_paused") {
+        json status = {{"pause_resume", {{"is_paused", 1}}}};
+        state.update_from_status(status);
+        REQUIRE_FALSE(state.is_paused()); // unchanged: integer, not boolean
+    }
 }

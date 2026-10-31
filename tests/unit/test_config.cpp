@@ -970,7 +970,7 @@ TEST_CASE_METHOD(ConfigTestFixture, "Config: partial migration handles only exis
 // The replacements below read the values production actually produces, through
 // the two public paths that build them, and every read uses a fallback that
 // differs from the expected value (kAbsentSentinel) so an absent or wrong key
-// fails instead of echoing. House style: tests/unit/test_config_migration_v18.cpp:84.
+// fails instead of echoing. House style: tests/unit/test_config_migrations.cpp.
 // ----------------------------------------------------------------------------
 
 namespace {
@@ -1523,16 +1523,16 @@ struct BackupGuard {
 
     BackupGuard()
         : temp_dir(helix::test::unique_temp_dir("helix_nobackup")),
-          prev_state_dir(AppConstants::Update::detail::state_dir_ref()),
-          prev_fallback_dir(AppConstants::Update::detail::backup_fallback_dir_ref()),
+          prev_state_dir(app_constants::update::detail::state_dir_ref()),
+          prev_fallback_dir(app_constants::update::detail::backup_fallback_dir_ref()),
           had_home(std::getenv("HOME") != nullptr) {
         if (had_home)
             original_home = std::getenv("HOME");
         std::filesystem::create_directories(temp_dir);
         setenv("HOME", temp_dir.c_str(), 1);
-        AppConstants::Update::detail::backup_fallback_dir_ref() =
-            AppConstants::Update::sanitize_home(std::getenv("HOME")) + "/.helixscreen";
-        AppConstants::Update::detail::state_dir_ref() = temp_dir + "/var-lib";
+        app_constants::update::detail::backup_fallback_dir_ref() =
+            app_constants::update::sanitize_home(std::getenv("HOME")) + "/.helixscreen";
+        app_constants::update::detail::state_dir_ref() = temp_dir + "/var-lib";
     }
     ~BackupGuard() {
         if (had_home)
@@ -1542,8 +1542,8 @@ struct BackupGuard {
         // Restore the SAVED value, never a freshly-computed $HOME/.helixscreen:
         // the test sandbox points this at a temp dir, and recomputing it here
         // un-sandboxes every later test in the shard onto the real backup.
-        AppConstants::Update::detail::backup_fallback_dir_ref() = prev_fallback_dir;
-        AppConstants::Update::detail::state_dir_ref() = prev_state_dir;
+        app_constants::update::detail::backup_fallback_dir_ref() = prev_fallback_dir;
+        app_constants::update::detail::state_dir_ref() = prev_state_dir;
         std::error_code ec;
         std::filesystem::remove_all(temp_dir, ec);
     }
@@ -1571,7 +1571,7 @@ TEST_CASE_METHOD(
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(test_config.get_active_printer_id() == "default");
     REQUIRE(test_config.get<std::string>(test_config.df() + "moonraker_host") == "192.168.1.100");
     REQUIRE_FALSE(test_config.exists("/printers/ender3"));
@@ -1589,7 +1589,7 @@ TEST_CASE_METHOD(ConfigTestFixture, "Config: a config at the migration floor is 
     std::filesystem::create_directories(temp_dir);
     std::string temp_path = temp_dir + "/test_config.json";
 
-    json v9_config = {{"config_version", MIN_MIGRATABLE_CONFIG_VERSION},
+    json v9_config = {{"config_version", kMinMigratableConfigVersion},
                       {"active_printer_id", "ender3"},
                       {"printers", {{"ender3", {{"moonraker_host", "192.168.1.100"}}}}}};
     {
@@ -1601,7 +1601,7 @@ TEST_CASE_METHOD(ConfigTestFixture, "Config: a config at the migration floor is 
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(test_config.get_active_printer_id() == "ender3");
     REQUIRE(test_config.get<std::string>(test_config.df() + "moonraker_host") == "192.168.1.100");
 
@@ -1629,7 +1629,7 @@ TEST_CASE_METHOD(ConfigTestFixture,
     test_config.init(temp_path);
 
     // Fresh config should have current version (skips all migrations)
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     // Fresh config should NOT have sounds_enabled set (it's a user pref, not in base defaults)
     // But if accessed with default, should be false
@@ -1660,7 +1660,7 @@ TEST_CASE_METHOD(ConfigTestFixture,
     test_config.init(temp_path);
 
     // Should get version stamp without errors
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     // sounds_enabled should not have been created by migration
     REQUIRE(test_config.get<bool>("/sounds_enabled", false) == false);
 
@@ -1678,7 +1678,7 @@ TEST_CASE_METHOD(ConfigTestFixture, "Config: factory reset removes rolling backu
     BackupGuard guard;
 
     json old_config = {
-        {"config_version", CURRENT_CONFIG_VERSION},
+        {"config_version", kCurrentConfigVersion},
         {"wizard_completed", true},
         {"printers", {{"default", {{"moonraker_host", old_host}, {"moonraker_port", 7125}}}}}};
     {
@@ -1687,14 +1687,14 @@ TEST_CASE_METHOD(ConfigTestFixture, "Config: factory reset removes rolling backu
     }
 
     const std::vector<std::string> config_tiers = {
-        AppConstants::Update::config_backup_primary(),
-        AppConstants::Update::config_backup_fallback(),
-        AppConstants::Update::legacy_config_backup_primary(),
-        AppConstants::Update::legacy_config_backup_fallback(),
+        app_constants::update::config_backup_primary(),
+        app_constants::update::config_backup_fallback(),
+        app_constants::update::legacy_config_backup_primary(),
+        app_constants::update::legacy_config_backup_fallback(),
     };
     const std::vector<std::string> env_tiers = {
-        AppConstants::Update::env_backup_primary(),
-        AppConstants::Update::env_backup_fallback(),
+        app_constants::update::env_backup_primary(),
+        app_constants::update::env_backup_fallback(),
     };
 
     // Seed every tier the restore path reads, so the assertions below prove
@@ -1773,7 +1773,7 @@ TEST_CASE("Config: every shipped preset loads as a fresh install in the /printer
         test_config.init(temp_path);
         const json doc = test_config.get<json>("", json());
 
-        REQUIRE(doc.at("config_version") == CURRENT_CONFIG_VERSION);
+        REQUIRE(doc.at("config_version") == kCurrentConfigVersion);
         REQUIRE_FALSE(doc.contains("printer"));
 
         std::string slug = "default";
@@ -1872,7 +1872,7 @@ TEST_CASE("Config: version-0 migration restructures single printer to multi-prin
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     // /printer should be gone, /printers should exist
     REQUIRE_FALSE(test_config.get<json>("", json()).contains("printer"));
@@ -1987,7 +1987,7 @@ TEST_CASE("Config: version-0 migration moves printer_image to per-printer path",
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     // printer_image should be at per-printer path, not under /display
     REQUIRE(test_config.get<std::string>(test_config.df() + PRINTER_IMAGE) == "shipped:voron-v2");
@@ -2022,7 +2022,7 @@ TEST_CASE("Config: version-0 migration disables printer switcher for single-prin
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(test_config.get<bool>("/printers/show_printer_switcher") == false);
 
     std::filesystem::remove_all(temp_dir);
@@ -2049,7 +2049,7 @@ TEST_CASE("Config: version-0 migration skips when multiple printers configured",
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     // Migration should NOT have written the key for multi-printer configs
     REQUIRE_FALSE(test_config.exists("/printers/show_printer_switcher"));
 
@@ -2077,7 +2077,7 @@ TEST_CASE("Config: version-0 migration preserves explicit show_printer_switcher 
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     // Should NOT override the explicit true setting
     REQUIRE(test_config.get<bool>("/printers/show_printer_switcher") == true);
 
@@ -2111,7 +2111,7 @@ TEST_CASE("Config: v13→v14 imports legacy telemetry_config.json when settings 
     Config test_config;
     test_config.init(settings_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(test_config.exists("/telemetry_enabled"));
     REQUIRE(test_config.get<bool>("/telemetry_enabled") == true);
     // Legacy file must be removed so it can never re-poison a future startup.
@@ -2238,7 +2238,7 @@ TEST_CASE("Config: v22→v23 rewrites macro widget skip_param_prompt",
 
     REQUIRE(test_config.get<std::string>(base + "3/config/url") == "rtsp://x");
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     std::filesystem::remove_all(temp_dir);
 }
@@ -2253,7 +2253,7 @@ TEST_CASE("Config: v22→v23 leaves an already-migrated config alone",
     std::string settings_path = temp_dir + "/test_config.json";
 
     json v23_config = {
-        {"config_version", CURRENT_CONFIG_VERSION},
+        {"config_version", kCurrentConfigVersion},
         {"active_printer_id", "default"},
         {"printers",
          {{"default",
@@ -2276,7 +2276,7 @@ TEST_CASE("Config: v22→v23 leaves an already-migrated config alone",
 
     REQUIRE(test_config.get<bool>("/printers/default/panel_widgets/home/pages/0/widgets/0/config/"
                                   "require_confirmation") == false);
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     std::filesystem::remove_all(temp_dir);
 }
@@ -2297,7 +2297,7 @@ TEST_CASE("Config: v13→v14 is a no-op when no legacy file exists",
     Config test_config;
     test_config.init(settings_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE_FALSE(test_config.exists("/telemetry_enabled"));
 
     std::filesystem::remove_all(temp_dir);
@@ -2333,7 +2333,7 @@ TEST_CASE_METHOD(ConfigTestFixture,
 
     REQUIRE(test_config.get<int>("/display/hardware_blank") == 1);
     REQUIRE(test_config.get<bool>("/display/sleep_backlight_off") == true);
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     std::filesystem::remove_all(temp_dir);
 }
@@ -2659,9 +2659,9 @@ TEST_CASE_METHOD(ConfigTestFixture,
     REQUIRE(get_data()["removed_printers"].contains("voron"));
 
     json archived = get_data()["removed_printers"]["voron"];
-    REQUIRE(archived.contains(Config::ARCHIVED_AT_KEY));
-    REQUIRE(archived[Config::ARCHIVED_AT_KEY].is_number_integer());
-    archived.erase(Config::ARCHIVED_AT_KEY);
+    REQUIRE(archived.contains(Config::kArchivedAtKey));
+    REQUIRE(archived[Config::kArchivedAtKey].is_number_integer());
+    archived.erase(Config::kArchivedAtKey);
     REQUIRE(archived == voron);
 }
 
@@ -2895,7 +2895,7 @@ TEST_CASE_METHOD(ConfigTestFixture,
 TEST_CASE_METHOD(ConfigTestFixture,
                  "Config: archive_printer keeps only the most recently archived printers",
                  "[core][config][multi-printer][1210]") {
-    const size_t total = Config::MAX_ARCHIVED_PRINTERS + 3;
+    const size_t total = Config::kMaxArchivedPrinters + 3;
 
     json printers = {{"show_printer_switcher", false},
                      // Never archived — keeps remove_printer()'s last-printer
@@ -2917,21 +2917,21 @@ TEST_CASE_METHOD(ConfigTestFixture,
     }
 
     const json& archive = get_data()["removed_printers"];
-    REQUIRE(archive.size() == Config::MAX_ARCHIVED_PRINTERS);
+    REQUIRE(archive.size() == Config::kMaxArchivedPrinters);
 
     for (size_t i = 0; i < total; i++) {
         INFO("printer index " << i);
         // printer-0 was archived last, so the survivors are the LOW indices.
-        REQUIRE(archive.contains(ids[i]) == (i < Config::MAX_ARCHIVED_PRINTERS));
+        REQUIRE(archive.contains(ids[i]) == (i < Config::kMaxArchivedPrinters));
     }
 
     // Stamps are strictly ordered by archive order even though every archive
     // happened within the same wall-clock second.
     int64_t newer = 0;
-    for (size_t i = 0; i < Config::MAX_ARCHIVED_PRINTERS; i++) {
+    for (size_t i = 0; i < Config::kMaxArchivedPrinters; i++) {
         INFO("printer index " << i);
-        REQUIRE(archive.at(ids[i]).contains(Config::ARCHIVED_AT_KEY));
-        const int64_t stamp = archive.at(ids[i]).at(Config::ARCHIVED_AT_KEY).get<int64_t>();
+        REQUIRE(archive.at(ids[i]).contains(Config::kArchivedAtKey));
+        const int64_t stamp = archive.at(ids[i]).at(Config::kArchivedAtKey).get<int64_t>();
         if (i > 0) {
             REQUIRE(stamp < newer);
         }
@@ -2953,22 +2953,22 @@ TEST_CASE_METHOD(ConfigTestFixture,
     // is garbage. Neither may crash the prune, and both must sort as older than
     // anything stamped.
     json legacy = json::object();
-    for (size_t i = 0; i < Config::MAX_ARCHIVED_PRINTERS; i++) {
+    for (size_t i = 0; i < Config::kMaxArchivedPrinters; i++) {
         legacy["legacy-" + std::to_string(i)] = {{"moonraker_host", "172.16.0.1"}};
     }
-    legacy["legacy-2"][Config::ARCHIVED_AT_KEY] = "not-a-number";
-    legacy["legacy-3"][Config::ARCHIVED_AT_KEY] = nullptr;
+    legacy["legacy-2"][Config::kArchivedAtKey] = "not-a-number";
+    legacy["legacy-3"][Config::kArchivedAtKey] = nullptr;
     get_data()["removed_printers"] = legacy;
 
     config.archive_printer("voron");
 
     const json& archive = get_data()["removed_printers"];
-    REQUIRE(archive.size() == Config::MAX_ARCHIVED_PRINTERS);
+    REQUIRE(archive.size() == Config::kMaxArchivedPrinters);
     // The stamped newcomer survives; the unstamped entry whose key sorts first
     // is the one dropped.
     REQUIRE(archive.contains("voron"));
     REQUIRE_FALSE(archive.contains("legacy-0"));
-    for (size_t i = 1; i < Config::MAX_ARCHIVED_PRINTERS; i++) {
+    for (size_t i = 1; i < Config::kMaxArchivedPrinters; i++) {
         INFO("legacy index " << i);
         REQUIRE(archive.contains("legacy-" + std::to_string(i)));
     }
@@ -3170,15 +3170,15 @@ struct HomeGuard {
     std::string prev_fallback_dir;
     bool had_home;
     explicit HomeGuard(const std::string& new_home)
-        : prev_state_dir(AppConstants::Update::detail::state_dir_ref()),
-          prev_fallback_dir(AppConstants::Update::detail::backup_fallback_dir_ref()),
+        : prev_state_dir(app_constants::update::detail::state_dir_ref()),
+          prev_fallback_dir(app_constants::update::detail::backup_fallback_dir_ref()),
           had_home(std::getenv("HOME") != nullptr) {
         if (had_home)
             original = std::getenv("HOME");
         setenv("HOME", new_home.c_str(), 1);
-        AppConstants::Update::detail::backup_fallback_dir_ref() =
-            AppConstants::Update::sanitize_home(std::getenv("HOME")) + "/.helixscreen";
-        AppConstants::Update::detail::state_dir_ref() = new_home + "/var-lib";
+        app_constants::update::detail::backup_fallback_dir_ref() =
+            app_constants::update::sanitize_home(std::getenv("HOME")) + "/.helixscreen";
+        app_constants::update::detail::state_dir_ref() = new_home + "/var-lib";
     }
     ~HomeGuard() {
         if (had_home)
@@ -3186,8 +3186,8 @@ struct HomeGuard {
         else
             unsetenv("HOME");
         // Restore the SAVED value — see the note in ~BackupGuard().
-        AppConstants::Update::detail::backup_fallback_dir_ref() = prev_fallback_dir;
-        AppConstants::Update::detail::state_dir_ref() = prev_state_dir;
+        app_constants::update::detail::backup_fallback_dir_ref() = prev_fallback_dir;
+        app_constants::update::detail::state_dir_ref() = prev_state_dir;
     }
 };
 
@@ -3219,7 +3219,7 @@ TEST_CASE("Config::init() recovers from corrupt config by restoring backup",
     std::string backup_dir = temp_dir + "/.helixscreen";
     std::filesystem::create_directories(backup_dir);
     std::string backup_path = backup_dir + "/settings.json.backup";
-    json backup_data = {{"config_version", CURRENT_CONFIG_VERSION},
+    json backup_data = {{"config_version", kCurrentConfigVersion},
                         {"active_printer_id", "voron"},
                         {"brightness", 75},
                         {"printers", {{"voron", {{"moonraker_host", "10.0.0.5"}}}}}};
@@ -3317,7 +3317,7 @@ TEST_CASE("Config::init() restores the backup over a zero-byte settings file",
 
     HomeGuard home_guard(temp_dir);
     std::filesystem::create_directories(temp_dir + "/.helixscreen");
-    json backup_data = {{"config_version", CURRENT_CONFIG_VERSION},
+    json backup_data = {{"config_version", kCurrentConfigVersion},
                         {"active_printer_id", "voron"},
                         {"brightness", 61},
                         {"printers", {{"voron", {{"moonraker_host", "10.0.0.7"}}}}}};
@@ -3384,7 +3384,7 @@ struct TarballTestEnv {
     /// The installer's "this packaged config is here on purpose" marker,
     /// written beside settings.json.
     std::filesystem::path fresh_marker() const {
-        return dir / AppConstants::Update::FRESH_INSTALL_MARKER;
+        return dir / app_constants::update::kFreshInstallMarker;
     }
 
     void write_fresh_marker() {
@@ -3403,7 +3403,7 @@ TEST_CASE("Config::init() restores backup when tarball default replaces user con
                       {"display", {{"rotate", 0}}},
                       {"printer", {{"moonraker_host", "127.0.0.1"}}}});
 
-    env.write_backup({{"config_version", CURRENT_CONFIG_VERSION},
+    env.write_backup({{"config_version", kCurrentConfigVersion},
                       {"active_printer_id", "my-ad5x"},
                       {"wizard_completed", true},
                       {"brightness", 80},
@@ -3486,7 +3486,7 @@ TEST_CASE("Config::init() gives a versionless config with no printer the default
 
     auto on_disk = json::parse(std::ifstream(env.config_path));
     CHECK(on_disk.value("active_printer_id", "") == "default");
-    CHECK(on_disk.value("config_version", 0) == CURRENT_CONFIG_VERSION);
+    CHECK(on_disk.value("config_version", 0) == kCurrentConfigVersion);
 }
 
 // Moonraker's web updater can leave the installer's minimal file where the
@@ -3496,7 +3496,7 @@ TEST_CASE("Config::init() restores the backup over a printerless versionless con
           "[core][config][moonraker-update]") {
     TarballTestEnv env("seed_doc_backup_wins");
     env.write_config({{"update", {{"channel", 1}}}});
-    env.write_backup({{"config_version", CURRENT_CONFIG_VERSION},
+    env.write_backup({{"config_version", kCurrentConfigVersion},
                       {"active_printer_id", "my-pi"},
                       {"update", {{"channel", 0}}},
                       {"printers", {{"my-pi", {{"moonraker_host", "192.168.1.50"}}}}}});
@@ -3545,7 +3545,7 @@ TEST_CASE("Config::init() leaves a config with a printer off the fresh-install p
         CHECK_FALSE(test_config.exists("/log_path"));
     }
     SECTION("a versioned config with a printer") {
-        env.write_config({{"config_version", CURRENT_CONFIG_VERSION},
+        env.write_config({{"config_version", kCurrentConfigVersion},
                           {"active_printer_id", "voron"},
                           {"printers", {{"voron", {{"moonraker_host", "192.168.1.60"}}}}}});
         Config test_config;
@@ -3565,13 +3565,13 @@ TEST_CASE("Config::init() adds no default printer to a config from a newer build
     TarballTestEnv env("newer_build_printers");
     const json printers = {{"show_printer_switcher", true},
                            {"list", json::array({{{"id", "voron"}}})}};
-    env.write_config({{"config_version", CURRENT_CONFIG_VERSION + 1}, {"printers", printers}});
+    env.write_config({{"config_version", kCurrentConfigVersion + 1}, {"printers", printers}});
 
     Config test_config;
     test_config.init(env.config_path);
 
     auto on_disk = json::parse(std::ifstream(env.config_path));
-    CHECK(on_disk.value("config_version", 0) == CURRENT_CONFIG_VERSION + 1);
+    CHECK(on_disk.value("config_version", 0) == kCurrentConfigVersion + 1);
     CHECK(on_disk["printers"] == printers);
     CHECK_FALSE(on_disk.contains("active_printer_id"));
 }
@@ -3605,7 +3605,7 @@ TEST_CASE("Config::init() keeps a shipped preset when the installer marked a fre
 
     // A stale rolling backup left behind by an earlier install. Without the
     // marker this would replace the preset wholesale.
-    env.write_backup({{"config_version", CURRENT_CONFIG_VERSION},
+    env.write_backup({{"config_version", kCurrentConfigVersion},
                       {"active_printer_id", "other"},
                       {"wizard_completed", true},
                       {"brightness", 80},
@@ -3629,7 +3629,7 @@ TEST_CASE("Config::init() consumes the fresh-install marker", "[core][config][mo
                       {"wizard_completed", false},
                       {"display", {{"rotate", 270}}},
                       {"printer", {{"heaters", {{"bed", "heater_bed"}}}}}});
-    env.write_backup({{"config_version", CURRENT_CONFIG_VERSION},
+    env.write_backup({{"config_version", kCurrentConfigVersion},
                       {"active_printer_id", "other"},
                       {"brightness", 80},
                       {"printers", {{"other", {{"moonraker_host", "192.168.1.50"}}}}}});
@@ -3657,7 +3657,7 @@ TEST_CASE("Config::init() keeps a shipped preset when the marker cannot be delet
                       {"wizard_completed", false},
                       {"display", {{"rotate", 270}}},
                       {"printer", {{"heaters", {{"bed", "heater_bed"}}}}}});
-    env.write_backup({{"config_version", CURRENT_CONFIG_VERSION},
+    env.write_backup({{"config_version", kCurrentConfigVersion},
                       {"active_printer_id", "other"},
                       {"brightness", 80},
                       {"printers", {{"other", {{"moonraker_host", "192.168.1.50"}}}}}});
@@ -3704,7 +3704,7 @@ TEST_CASE("Config::init() discards a shipped preset with no fresh-install marker
                       {"display", {{"rotate", 270}, {"rotation_probed", true}}},
                       {"printer", {{"heaters", {{"bed", "heater_bed"}}}}}});
 
-    env.write_backup({{"config_version", CURRENT_CONFIG_VERSION},
+    env.write_backup({{"config_version", kCurrentConfigVersion},
                       {"active_printer_id", "my-k1"},
                       {"wizard_completed", true},
                       {"brightness", 80},
@@ -3768,7 +3768,7 @@ TEST_CASE("Config::init() keeps a below-floor backup restored over a tarball def
     Config test_config;
     test_config.init(env.config_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(test_config.get_active_printer_id() == "default");
     REQUIRE(read_json_file(env.config_path + ".pre-migration") == below_floor_backup());
     REQUIRE(read_json_file(env.backup_dir + "/settings.json.backup") == below_floor_backup());
@@ -3786,7 +3786,7 @@ TEST_CASE("Config::init() keeps a below-floor backup restored over a corrupt con
     Config test_config;
     test_config.init(env.config_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(test_config.get_active_printer_id() == "default");
     REQUIRE(read_json_file(env.config_path + ".pre-migration") == below_floor_backup());
     REQUIRE(read_json_file(env.backup_dir + "/settings.json.backup") == below_floor_backup());
@@ -3810,7 +3810,7 @@ TEST_CASE("Config::init() carries the Moonraker connection across the migration 
     Config test_config;
     test_config.init(env.config_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(test_config.get<std::string>(test_config.df() + "moonraker_host") == "192.168.1.77");
     REQUIRE(test_config.get<int>(test_config.df() + "moonraker_port") == 7126);
     REQUIRE(test_config.is_wizard_required());
@@ -3834,7 +3834,7 @@ TEST_CASE("Config::init() carries the update channel across the migration floor"
         Config test_config;
         test_config.init(env.config_path);
 
-        REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
         REQUIRE(test_config.get<int>("/update/channel", -1) == 1);
     }
     SECTION("no channel in the legacy backup leaves the default") {
@@ -3844,7 +3844,7 @@ TEST_CASE("Config::init() carries the update channel across the migration floor"
         Config test_config;
         test_config.init(env.config_path);
 
-        REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
         REQUIRE(test_config.get<std::string>(test_config.df() + "moonraker_host") ==
                 "192.168.1.77");
         REQUIRE_FALSE(test_config.exists("/update/channel"));
@@ -3884,7 +3884,7 @@ TEST_CASE("Config: v10→v11 migration moves heat rates and strips heating phase
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     // Heat rates should be at new location
     REQUIRE(test_config.get<double>("/thermal/rates/extruder/heat_rate") == Catch::Approx(1.25));
@@ -3980,7 +3980,7 @@ TEST_CASE("Config: v10→v11 migration handles missing calibration data graceful
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
     // No crash, no thermal section created
     REQUIRE_FALSE(test_config.exists("/thermal"));
 
@@ -4014,7 +4014,7 @@ TEST_CASE("Config: v11→v12 migration consolidates chamber keys for all printer
     Config test_config;
     test_config.init(temp_path);
 
-    REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
     // k1c: both keys moved to canonical paths
     REQUIRE(test_config.get<std::string>("/printers/k1c/temp_sensors/chamber") ==
@@ -4100,8 +4100,8 @@ TEST_CASE("Config: v15→v16 migration disables Flying Toasters on constrained t
         Config test_config;
         test_config.init(temp_path);
 
-        REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
-        REQUIRE(test_config.get<int>("/display/screensaver_type", 1) == 0);
+        REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
+        REQUIRE(test_config.get<std::string>("/display/screensaver_type", "") == "off");
         REQUIRE(test_config.get<bool>("/display/screensaver_migration_notice_pending", false) ==
                 true);
 
@@ -4126,8 +4126,8 @@ TEST_CASE("Config: v15→v16 migration disables Flying Toasters on constrained t
         Config test_config;
         test_config.init(temp_path);
 
-        REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
-        REQUIRE(test_config.get<int>("/display/screensaver_type", 1) == 0);
+        REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
+        REQUIRE(test_config.get<std::string>("/display/screensaver_type", "") == "off");
         REQUIRE(test_config.get<bool>("/display/screensaver_migration_notice_pending", false) ==
                 true);
 
@@ -4152,7 +4152,7 @@ TEST_CASE("Config: v15→v16 migration disables Flying Toasters on constrained t
         Config test_config;
         test_config.init(temp_path);
 
-        REQUIRE(test_config.get<int>("/display/screensaver_type", 0) == 1);
+        REQUIRE(test_config.get<std::string>("/display/screensaver_type", "") == "toasters");
         REQUIRE_FALSE(test_config.exists("/display/screensaver_migration_notice_pending"));
 
         std::filesystem::remove_all(temp_dir);
@@ -4176,7 +4176,7 @@ TEST_CASE("Config: v15→v16 migration disables Flying Toasters on constrained t
         Config test_config;
         test_config.init(temp_path);
 
-        REQUIRE(test_config.get<int>("/display/screensaver_type", 0) == 2);
+        REQUIRE(test_config.get<std::string>("/display/screensaver_type", "") == "starfield");
         REQUIRE_FALSE(test_config.exists("/display/screensaver_migration_notice_pending"));
 
         std::filesystem::remove_all(temp_dir);
@@ -4200,7 +4200,7 @@ TEST_CASE("Config: v15→v16 migration disables Flying Toasters on constrained t
         Config test_config;
         test_config.init(temp_path);
 
-        REQUIRE(test_config.get<int>("/display/screensaver_type", 0) == 3);
+        REQUIRE(test_config.get<std::string>("/display/screensaver_type", "") == "pipes");
         REQUIRE_FALSE(test_config.exists("/display/screensaver_migration_notice_pending"));
 
         std::filesystem::remove_all(temp_dir);
@@ -4224,7 +4224,7 @@ TEST_CASE("Config: v15→v16 migration disables Flying Toasters on constrained t
         Config test_config;
         test_config.init(temp_path);
 
-        REQUIRE(test_config.get<int>("/display/screensaver_type", 1) == 0);
+        REQUIRE(test_config.get<std::string>("/display/screensaver_type", "") == "off");
         REQUIRE_FALSE(test_config.exists("/display/screensaver_migration_notice_pending"));
 
         std::filesystem::remove_all(temp_dir);
@@ -4249,7 +4249,7 @@ TEST_CASE("Config: v15→v16 migration disables Flying Toasters on constrained t
         test_config.init(temp_path);
 
         // Migration gate (version < 16) must not fire for already-v16 config
-        REQUIRE(test_config.get<int>("/display/screensaver_type", 0) == 1);
+        REQUIRE(test_config.get<std::string>("/display/screensaver_type", "") == "toasters");
         REQUIRE_FALSE(test_config.exists("/display/screensaver_migration_notice_pending"));
 
         std::filesystem::remove_all(temp_dir);
@@ -4283,7 +4283,7 @@ TEST_CASE("Config: v16→v17 migration renames retired Voron printer_image IDs",
         Config test_config;
         test_config.init(temp_path);
 
-        REQUIRE(test_config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+        REQUIRE(test_config.get<int>("/config_version") == kCurrentConfigVersion);
 
         REQUIRE(test_config.get<std::string>("/printers/voron24/printer_image") ==
                 "shipped:voron-v2");
@@ -4358,16 +4358,16 @@ struct BackupSandbox {
 
     explicit BackupSandbox(const std::string& name)
         : dir(helix::test::unique_temp_dir("helix_test_" + name)),
-          prev_state_dir(AppConstants::Update::detail::state_dir_ref()),
-          prev_fallback_dir(AppConstants::Update::detail::backup_fallback_dir_ref()),
+          prev_state_dir(app_constants::update::detail::state_dir_ref()),
+          prev_fallback_dir(app_constants::update::detail::backup_fallback_dir_ref()),
           had_home(std::getenv("HOME") != nullptr) {
         if (had_home)
             original_home = std::getenv("HOME");
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
         setenv("HOME", dir.string().c_str(), 1);
-        AppConstants::Update::detail::state_dir_ref() = (dir / "var-lib").string();
-        AppConstants::Update::detail::backup_fallback_dir_ref() = (dir / ".helixscreen").string();
+        app_constants::update::detail::state_dir_ref() = (dir / "var-lib").string();
+        app_constants::update::detail::backup_fallback_dir_ref() = (dir / ".helixscreen").string();
     }
 
     ~BackupSandbox() {
@@ -4375,8 +4375,8 @@ struct BackupSandbox {
             setenv("HOME", original_home.c_str(), 1);
         else
             unsetenv("HOME");
-        AppConstants::Update::detail::state_dir_ref() = prev_state_dir;
-        AppConstants::Update::detail::backup_fallback_dir_ref() = prev_fallback_dir;
+        app_constants::update::detail::state_dir_ref() = prev_state_dir;
+        app_constants::update::detail::backup_fallback_dir_ref() = prev_fallback_dir;
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
     }
@@ -4387,24 +4387,24 @@ struct BackupSandbox {
 
     /// Write a backup at the primary (StateDirectory) tier.
     void write_primary_backup(const json& j) {
-        std::filesystem::create_directories(AppConstants::Update::state_dir());
-        std::ofstream o(AppConstants::Update::config_backup_primary());
+        std::filesystem::create_directories(app_constants::update::state_dir());
+        std::ofstream o(app_constants::update::config_backup_primary());
         o << j.dump(2);
     }
 
     bool primary_backup_exists() const {
-        return std::filesystem::exists(AppConstants::Update::config_backup_primary());
+        return std::filesystem::exists(app_constants::update::config_backup_primary());
     }
 
     json read_primary_backup() const {
-        return json::parse(std::fstream(AppConstants::Update::config_backup_primary()));
+        return json::parse(std::fstream(app_constants::update::config_backup_primary()));
     }
 };
 
 /// A recognizable "production" backup — marker values that must never leak into
 /// a test-mode config.
 json production_backup_json() {
-    return json{{"config_version", CURRENT_CONFIG_VERSION},
+    return json{{"config_version", kCurrentConfigVersion},
                 {"active_printer_id", "real-production-printer"},
                 {"brightness", 42},
                 {"wizard_completed", true},
@@ -4486,7 +4486,7 @@ TEST_CASE("Config::init() in test mode does not write a production rolling backu
     // A complete, wizard-completed config so init()'s rolling-backup write is reached.
     {
         std::ofstream o(env.config_path());
-        o << json{{"config_version", CURRENT_CONFIG_VERSION},
+        o << json{{"config_version", kCurrentConfigVersion},
                   {"active_printer_id", "test-printer"},
                   {"wizard_completed", true},
                   {"brightness", 7},
@@ -4502,7 +4502,7 @@ TEST_CASE("Config::init() in test mode does not write a production rolling backu
     test_config.save();
 
     REQUIRE_FALSE(env.primary_backup_exists());
-    REQUIRE_FALSE(std::filesystem::exists(AppConstants::Update::config_backup_fallback()));
+    REQUIRE_FALSE(std::filesystem::exists(app_constants::update::config_backup_fallback()));
 }
 
 TEST_CASE("Config::save() outside test mode still writes a rolling backup",
@@ -4512,7 +4512,7 @@ TEST_CASE("Config::save() outside test mode still writes a rolling backup",
 
     {
         std::ofstream o(env.config_path());
-        o << json{{"config_version", CURRENT_CONFIG_VERSION},
+        o << json{{"config_version", kCurrentConfigVersion},
                   {"active_printer_id", "test-printer"},
                   {"wizard_completed", true},
                   {"brightness", 7},
@@ -4548,7 +4548,7 @@ namespace {
 /// config_version == 0) cannot adopt the backup over it.
 json wizard_state_config_json(bool wizard_completed) {
     return json{
-        {"config_version", CURRENT_CONFIG_VERSION},
+        {"config_version", kCurrentConfigVersion},
         {"active_printer_id", "fresh"},
         {"wizard_completed", wizard_completed},
         {"brightness", 7},
@@ -4603,7 +4603,7 @@ TEST_CASE("Config::save() does not overwrite the rolling backup while the wizard
     REQUIRE(env.read_primary_backup().value("brightness", 0) == 42);
     REQUIRE(env.read_primary_backup().value("active_printer_id", "") == "real-production-printer");
     // ...and the setup-in-progress config must not have leaked into the fallback tier either.
-    REQUIRE_FALSE(std::filesystem::exists(AppConstants::Update::config_backup_fallback()));
+    REQUIRE_FALSE(std::filesystem::exists(app_constants::update::config_backup_fallback()));
 }
 
 TEST_CASE("Config::save() does refresh the rolling backup once the wizard is complete",
@@ -4722,7 +4722,7 @@ TEST_CASE("Config::init() persists migrations by atomic replace, not truncate-in
     // config_modified, which is what drives the persist-migrations branch.
     {
         std::ofstream o(cfg);
-        o << json{{"config_version", CURRENT_CONFIG_VERSION},
+        o << json{{"config_version", kCurrentConfigVersion},
                   {"active_printer_id", "voron"},
                   {"wizard_completed", true},
                   {"display_rotate", 90},
@@ -4753,7 +4753,7 @@ TEST_CASE("Config::init() persists migrations by atomic replace, not truncate-in
     REQUIRE_FALSE(on_disk.contains("display_rotate"));
     // Unrelated settings survived the rewrite — a partial write would lose these.
     REQUIRE(on_disk.value("brightness", 0) == 55);
-    REQUIRE(on_disk.value("config_version", 0) == CURRENT_CONFIG_VERSION);
+    REQUIRE(on_disk.value("config_version", 0) == kCurrentConfigVersion);
     REQUIRE(on_disk["printers"]["voron"].value("moonraker_host", "") == "192.168.1.10");
 
     // settings.json is a DIFFERENT file than the one we started with: rename()
@@ -4792,7 +4792,7 @@ TEST_CASE("Config::init() loads a read-only settings.json instead of condemning 
     // so the only thing under test is whether init() can READ an unwritable file.
     {
         std::ofstream o(cfg);
-        o << json{{"config_version", CURRENT_CONFIG_VERSION},
+        o << json{{"config_version", kCurrentConfigVersion},
                   {"active_printer_id", "voron"},
                   {"wizard_completed", true},
                   {"brightness", 55},

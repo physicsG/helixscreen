@@ -131,7 +131,7 @@ TEST_CASE_METHOD(AmsSlotSinkFixture, "AmsSlotSink: apply_delta decrements remain
 TEST_CASE_METHOD(AmsSlotSinkFixture, "consumption sinks meter at the printer's filament diameter",
                  "[consumption_sink][filament_diameter]") {
     helix::PrinterDiscovery hw;
-    hw.parse_filament_diameter(nlohmann::json{{"extruder", {{"filament_diameter", 2.85}}}});
+    hw.parse_extruder_dimensions(nlohmann::json{{"extruder", {{"filament_diameter", 2.85}}}});
     get_printer_state().set_hardware(hw);
 
     // 1000mm of 2.85mm PLA at 1.24 g/cm^3 is 6.379 cm^3, 7.91 g.
@@ -260,17 +260,69 @@ TEST_CASE_METHOD(LVGLTestFixture,
     ams.deinit_subjects();
     ams.init_subjects(false);
 
-    constexpr int SLOTS = 4;
-    auto m = std::make_unique<helix::AmsBackendMock>(SLOTS);
+    constexpr int kSlots = 4;
+    auto m = std::make_unique<helix::AmsBackendMock>(kSlots);
     int idx = ams.add_backend(std::move(m));
     REQUIRE(idx == 0);
 
-    // After add_backend, SLOTS sinks should have been registered.
-    REQUIRE(FilamentConsumptionTrackerTestAccess::sink_count() >= static_cast<std::size_t>(SLOTS));
+    // After add_backend, kSlots sinks should have been registered.
+    REQUIRE(FilamentConsumptionTrackerTestAccess::sink_count() >= static_cast<std::size_t>(kSlots));
 
     ams.clear_backends();
     // After clear_backends, slot sinks should be gone (but an external sink may
     // still be present if start() ran — we only check no leftover AMS sinks).
+    REQUIRE(FilamentConsumptionTrackerTestAccess::ams_sink_count() == 0);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "AmsState: slots a backend reports after add get sinks",
+                 "[consumption_sink][ams][tracker_registry]") {
+    auto& ams = helix::AmsState::instance();
+    ams.clear_backends();
+    ams.deinit_subjects();
+    ams.init_subjects(false);
+
+    auto m = std::make_unique<helix::AmsBackendMock>(4);
+    helix::AmsBackendMock* mock = m.get();
+    REQUIRE(ams.add_backend(std::move(m)) == 0);
+    REQUIRE(FilamentConsumptionTrackerTestAccess::ams_sink_count() == 4);
+
+    mock->set_multi_unit_mode(true);
+    const int grown = mock->get_system_info().total_slots;
+    REQUIRE(grown > 4);
+    ams.sync_backend(0);
+    CHECK(FilamentConsumptionTrackerTestAccess::ams_sink_count() ==
+          static_cast<std::size_t>(grown));
+
+    // A second sync with no new slots registers nothing more.
+    ams.sync_backend(0);
+    CHECK(FilamentConsumptionTrackerTestAccess::ams_sink_count() ==
+          static_cast<std::size_t>(grown));
+
+    ams.clear_backends();
+    REQUIRE(FilamentConsumptionTrackerTestAccess::ams_sink_count() == 0);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "AmsState: slots a second backend reports after add get sinks",
+                 "[consumption_sink][ams][tracker_registry]") {
+    auto& ams = helix::AmsState::instance();
+    ams.clear_backends();
+    ams.deinit_subjects();
+    ams.init_subjects(false);
+
+    REQUIRE(ams.add_backend(std::make_unique<helix::AmsBackendMock>(4)) == 0);
+    auto m = std::make_unique<helix::AmsBackendMock>(4);
+    helix::AmsBackendMock* second = m.get();
+    REQUIRE(ams.add_backend(std::move(m)) == 1);
+    REQUIRE(FilamentConsumptionTrackerTestAccess::ams_sink_count() == 8);
+
+    second->set_multi_unit_mode(true);
+    const int grown = second->get_system_info().total_slots;
+    REQUIRE(grown > 4);
+    ams.sync_backend(1);
+    CHECK(FilamentConsumptionTrackerTestAccess::ams_sink_count() ==
+          static_cast<std::size_t>(4 + grown));
+
+    ams.clear_backends();
     REQUIRE(FilamentConsumptionTrackerTestAccess::ams_sink_count() == 0);
 }
 

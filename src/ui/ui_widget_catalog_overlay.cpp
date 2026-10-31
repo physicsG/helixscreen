@@ -9,10 +9,12 @@
 #include "ui_row_text.h"
 #include "ui_selector_model.h"
 #include "ui_subject_registry.h"
+#include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "grid_layout.h"
+#include "home_layout_sync.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
@@ -66,6 +68,11 @@ struct DefRowIdentity {
 // Bumped by every show(): work queued by one opening must not land on a later
 // one, and a close-then-reopen can reuse the overlay's address.
 uint32_t g_catalog_generation = 0;
+
+// The catalog generation whose "Copy layout from printer" fetch is in flight, or 0.
+// A show() bumps the generation, so a fetch abandoned by a close never blocks the
+// next opening.
+uint32_t g_copy_fetch_generation = 0;
 
 struct CatalogState {
     lv_obj_t* overlay_root = nullptr;
@@ -230,6 +237,58 @@ void on_catalog_reset(lv_event_t* /*e*/) {
             close_catalog();
             PanelWidgetManager::instance().notify_config_changed("home");
         });
+}
+
+/// Replaces this screen's home layout with the one the printer's own screen
+/// published, after the user confirms. The replacement ignores edits: the
+/// user asked for the printer's layout by name.
+void apply_printer_layout(const home_layout::ParsedLayout& layout) {
+    auto& config = PanelWidgetManager::instance().get_widget_config("home");
+    const auto [cols, rows] = config.stamped_grid();
+    if (!config.import_layout(layout, cols, rows)) {
+        spdlog::warn("[WidgetCatalog] The printer's home layout did not import onto {}x{}", cols,
+                     rows);
+        ToastManager::instance().show(ToastSeverity::ERROR,
+                                      lv_tr("Could not copy the printer's layout"), 3000);
+        return;
+    }
+    spdlog::info("[WidgetCatalog] Copied the printer's home layout ({}x{} onto {}x{})", layout.cols,
+                 layout.rows, cols, rows);
+    close_catalog();
+    PanelWidgetManager::instance().notify_config_changed("home");
+}
+
+void on_catalog_copy_layout(lv_event_t* /*e*/) {
+    const uint32_t generation = g_catalog_generation;
+    if (!g_catalog_state.overlay_root || g_copy_fetch_generation == generation) {
+        return;
+    }
+    spdlog::info("[WidgetCatalog] Copy layout from printer requested");
+    g_copy_fetch_generation = generation;
+
+    HomeLayoutSync::instance().fetch_now([generation](
+                                             std::optional<home_layout::ParsedLayout> layout) {
+        if (g_copy_fetch_generation == generation) {
+            g_copy_fetch_generation = 0;
+        }
+        if (generation != g_catalog_generation || !g_catalog_state.overlay_root) {
+            return;
+        }
+        if (!layout) {
+            ToastManager::instance().show(
+                ToastSeverity::INFO, lv_tr("This printer's screen has not shared a layout"), 3000);
+            return;
+        }
+        ui::modal_confirm(
+            lv_tr("Copy Layout From Printer?"),
+            lv_tr("This replaces this screen's home layout for this printer with the one "
+                  "on the printer's own screen."),
+            ModalSeverity::Warning, lv_tr("Copy"), [generation, layout = std::move(*layout)] {
+                if (generation == g_catalog_generation && g_catalog_state.overlay_root) {
+                    apply_printer_layout(layout);
+                }
+            });
+    });
 }
 
 /// Renders a registry span for the size badge.
@@ -701,6 +760,7 @@ void WidgetCatalogOverlay::show(lv_obj_t* parent_screen, const PanelWidgetConfig
         return;
     }
     lv_xml_register_event_cb(nullptr, "on_catalog_reset", on_catalog_reset);
+    lv_xml_register_event_cb(nullptr, "on_catalog_copy_layout", on_catalog_copy_layout);
     lv_xml_register_event_cb(nullptr, "on_catalog_category_clicked", on_category_row_clicked);
     lv_xml_register_event_cb(nullptr, "on_catalog_unavailable_clicked", on_unavailable_row_clicked);
     lv_xml_register_event_cb(nullptr, "on_catalog_search_changed", on_search_changed);

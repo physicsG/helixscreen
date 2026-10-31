@@ -5,6 +5,7 @@
 
 #include "ui_modal.h"
 
+#include "helix_shared_callback.h"
 #include "static_subject_registry.h"
 
 #include <spdlog/spdlog.h>
@@ -40,7 +41,7 @@
  */
 class RunoutGuidanceModal : public Modal {
   public:
-    using Callback = std::function<void()>;
+    using Callback = helix::SharedCallback<void()>;
 
     RunoutGuidanceModal() {
         init_subjects();
@@ -213,6 +214,10 @@ class RunoutGuidanceModal : public Modal {
     /// @}
 
   protected:
+    // ESC closes without resuming or aborting: those take a button.
+    void on_escape() override {
+        hide(ModalCloseReason::EscKey);
+    }
     /**
      * @brief Called after modal is created and visible
      *

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "utils/network_validation.h"
 /**
  * @file cli_args.h
  * @brief Command-line argument parsing for HelixScreen
@@ -68,7 +69,7 @@ struct CliArgs {
     // Headless one-shot: detect printer via Moonraker REST and print JSON verdict, then exit.
     bool detect_printer = false;
     std::string detect_host = "127.0.0.1";
-    int detect_port = 7125;
+    int detect_port = helix::kDefaultMoonrakerPort;
 
     // Remote control server
     bool remote_control = false;                // --remote: enable remote control server

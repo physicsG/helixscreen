@@ -215,7 +215,22 @@ say ""
 if (( GIT_POINTER_OK )); then
     # --- what would be lost ---------------------------------------------------
 
-    DIRTY="$( { git -C "$WT_ABS" status --porcelain 2>/dev/null || true; } | wc -l | tr -d ' ')"
+    STATUS_PORCELAIN="$( { git -C "$WT_ABS" status --porcelain 2>/dev/null || true; } )"
+    DIRTY="$(printf '%s' "$STATUS_PORCELAIN" | grep -c . || true)"
+    # A tree whose files are gone but whose .git survives (an earlier teardown
+    # that stopped partway) reads as one big uncommitted deletion. With nothing
+    # modified or untracked, every tracked file gone, and every commit already
+    # in $INTO, nothing is lost by finishing the removal. A live tree with a few
+    # files deleted still has the rest of its files and is refused.
+    if [[ "$DIRTY" != "0" ]] && (( ! FORCE )) &&
+       ! printf '%s\n' "$STATUS_PORCELAIN" | grep -qv '^ D ' &&
+       [[ "$DIRTY" == "$(git -C "$WT_ABS" ls-files | wc -l | tr -d ' ')" ]] &&
+       [[ -n "$BRANCH" ]] &&
+       git -C "$MAIN_ABS" merge-base --is-ancestor "$BRANCH" "$INTO" 2>/dev/null; then
+        say "${YELLOW}! $DIRTY tracked file(s) are deleted and nothing else differs; '$BRANCH' is contained in $INTO.${RESET}"
+        say "  This is a half-removed tree from an earlier teardown; finishing the removal."
+        DIRTY=0
+    fi
     if [[ "$DIRTY" != "0" ]]; then
         if (( FORCE )); then
             say "${YELLOW}! $DIRTY uncommitted change(s) will be DISCARDED (--force).${RESET}"
@@ -229,20 +244,43 @@ if (( GIT_POINTER_OK )); then
 
     # The private submodules are the ones that can hold work nothing else has.
     # lvgl, libhv and lua are routinely dirty from patches/ and that is reproducible;
-    # helix-xml is our own repo and is edited directly, so unpushed commits there
-    # are real work that this script must not silently delete.
-    for sub in helix-xml libhv lua lvgl; do
-        [[ -d "$WT_ABS/lib/$sub/.git" || -f "$WT_ABS/lib/$sub/.git" ]] || continue
-        # No upstream configured is a git fatal, not an error here: a submodule with
-        # no remote tracking branch simply has nothing that could be unpushed.
-        unpushed="$( { git -C "$WT_ABS/lib/$sub" log --oneline '@{u}..' 2>/dev/null || true; } | wc -l | tr -d ' ')"
-        if [[ "$unpushed" != "0" ]]; then
-            say "${RED}Error: lib/$sub has $unpushed unpushed commit(s).${RESET}"
-            { git -C "$WT_ABS/lib/$sub" log --oneline '@{u}..' 2>/dev/null || true; } | head -5 | sed 's/^/    /'
-            say "Push them from ${CYAN}$WT_ABS/lib/$sub${RESET} first; this script will not discard them."
+    # helix-xml is our own repo and is edited directly, so commits there that no
+    # remote has are real work this script must not silently delete. Their git
+    # directories live under the worktree's admin dir, not in its checkout, so
+    # they are inspected whether or not lib/<sub> still exists on disk, and
+    # `git worktree prune` is what finally deletes them.
+    ADMIN_DIR="$(sed -n 's/^gitdir: //p' "$WT_ABS/.git" 2>/dev/null | head -1)"
+    if [[ -n "$ADMIN_DIR" && -d "$ADMIN_DIR/modules" ]]; then
+        OWNED_SUBMODULES=(helix-xml)
+        for owned in "${OWNED_SUBMODULES[@]}"; do
+            modgit="$ADMIN_DIR/modules/lib/$owned"
+            [[ -f "$modgit/HEAD" ]] || continue
+            # A module with no remote has nothing it could be behind.
+            [[ -n "$(git --git-dir="$modgit" for-each-ref --count=1 refs/remotes 2>/dev/null)" ]] || continue
+            # A private checkout's remote-tracking refs are as old as the
+            # worktree, so refresh them; a failed fetch leaves them as they are.
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 20 git --git-dir="$modgit" fetch -q 2>/dev/null || true
+            fi
+            # Work already pinned by $INTO's gitlink was pushed before that pin
+            # could land, whatever this checkout's tracking refs say.
+            not_pinned=()
+            pin="$(git -C "$MAIN_ABS" rev-parse -q --verify "$INTO:lib/$(basename "$modgit")" 2>/dev/null || true)"
+            if [[ -n "$pin" ]] && git --git-dir="$modgit" cat-file -e "$pin^{commit}" 2>/dev/null; then
+                not_pinned=("$pin")
+            fi
+            unpushed="$( { git --git-dir="$modgit" log --oneline HEAD --branches --not --remotes ${not_pinned[@]+"${not_pinned[@]}"} 2>/dev/null || true; } | wc -l | tr -d ' ')"
+            [[ "$unpushed" != "0" ]] || continue
+            if (( FORCE )); then
+                say "${YELLOW}! lib/$(basename "$modgit") has $unpushed commit(s) no remote has; they will be DISCARDED (--force).${RESET}"
+                continue
+            fi
+            say "${RED}Error: lib/$(basename "$modgit") has $unpushed commit(s) no remote has.${RESET}"
+            { git --git-dir="$modgit" log --oneline HEAD --branches --not --remotes ${not_pinned[@]+"${not_pinned[@]}"} 2>/dev/null || true; } | head -5 | sed 's/^/    /'
+            say "Push them from the worktree's lib/$(basename "$modgit") first (or pass ${CYAN}--force${RESET} to discard them); this script will not discard them silently."
             exit 1
-        fi
-    done
+        done
+    fi
 fi
 
 # --- branch containment -------------------------------------------------------
@@ -290,7 +328,19 @@ else
     # build output, say) stops this short, the worktree still has its own
     # .git and keeps identifying itself to git on a rerun, instead of a git
     # command scoped to it silently falling through to the main tree.
-    find "$WT_ABS" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} + 2>/dev/null || true
+    find "$WT_ABS" -mindepth 1 -maxdepth 1 -not -name '.git' -not -name '.cache' -exec rm -rf {} + 2>/dev/null || true
+    # .cache/ is the tree's own disposable tool state, and a running clangd keeps
+    # writing its index into it mid-removal. Remove it last and retry until it
+    # stays gone.
+    cache_rounds=0
+    for _ in $(seq 20); do
+        [[ -e "$WT_ABS/.cache" ]] || break
+        rm -rf "$WT_ABS/.cache" 2>/dev/null || true
+        cache_rounds=$((cache_rounds + 1))
+        sleep "${HELIX_TEARDOWN_CACHE_RETRY_SLEEP:-0.25}"
+        [[ -e "$WT_ABS/.cache" ]] || break
+    done
+    (( cache_rounds < 2 )) || say "  .cache/ was still being written; removed it on attempt $cache_rounds."
     LEFTOVER="$(find "$WT_ABS" -mindepth 1 -not -name '.git' 2>/dev/null || true)"
     if [[ -n "$LEFTOVER" ]]; then
         say ""

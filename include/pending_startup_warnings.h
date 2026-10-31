@@ -70,6 +70,7 @@ class PendingStartupWarnings {
 
     std::mutex mu_;
     std::vector<Entry> pending_;
+    bool overflow_warned_ = false; ///< A drop past the cap has been logged since it last had room
 };
 
 } // namespace helix

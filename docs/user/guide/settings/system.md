@@ -1,6 +1,6 @@
 # Settings: System
 
-**Settings > System** looks after HelixScreen itself: the screen lock, anonymous usage data, how much it logs, and restarting or resetting it. Network and printer connections are in [Connection](connection.md), and touch settings are in [Touch & Input](touch-input.md).
+**Settings > System** looks after HelixScreen itself: the screen lock, the printer's storage, anonymous usage data, how much it logs, and restarting or resetting it. Network and printer connections are in [Connection](connection.md), and touch settings are in [Touch & Input](touch-input.md).
 
 ![System settings, top of the page](../../../images/user/settings-system.png)
 
@@ -28,11 +28,41 @@ HelixScreen never saves your PIN itself, only a scrambled version of it that can
 
 ---
 
+## Storage
+
+Shows what fills your printer's storage, and lets you clear out what is safe to delete. Tap **Storage** to open it.
+
+The top of the page shows how much space is free, with a bar for how full the storage is. Below it, one line per kind of file, with how much space it takes:
+
+| Line | What it is | Clean up |
+|------|------------|----------|
+| **Print copies** | Changed copies of your files, made when a print starts with options that change the file | With the HelixPrint plugin. It keeps copies made in the last 10 minutes, the one printing now, and the one a power-loss resume would need |
+| **3MF conversions** | G-code unpacked from `.3mf` uploads, so they can print | No |
+| **File analysis** | Indexes that make print previews faster | With the HelixPrint plugin. Previews then read each file in full until it is analyzed again |
+| **Print photos** | Camera photos kept with your print history | With the HelixPrint plugin. The photos also leave the print history |
+| **Timelapse videos** | Finished timelapse videos | Yes. Only video and preview files older than 5 minutes |
+| **Old logs** | Older Klipper and Moonraker logs. The logs in use are kept | With the HelixPrint plugin. Only older log files, not other files in the logs folder |
+| **Thumbnails** | The preview pictures of your files | No |
+| **Your files** | Everything you uploaded | No, delete them from the file list |
+| **Power-loss recovery** | The saved print position and bed mesh for resuming after a power cut | No |
+
+**Clean up** appears on lines that can be cleaned and hold something. HelixScreen asks you to confirm, then deletes those files and says how much space it freed. If some files could not be deleted, it says so; if none could, it shows "Could not free space". Nothing you uploaded is ever deleted from here.
+
+**Automatic cleanup**: once a day, while nothing is printing, deletes print copies older than a week and old logs older than a month. Photos, timelapse videos and your files are never deleted automatically. **Off** until you turn it on.
+
+**With the [HelixPrint plugin](../helixprint-plugin.md)** the printer measures its own storage, so every line is shown, and Automatic cleanup is available. **Without it**, HelixScreen measures by listing the printer's folders, which takes longer on a printer with many files. 3MF conversions and Power-loss recovery are not shown then, conversions count under Your files, only Timelapse videos can be cleaned, and only when the timelapse folder is a folder of its own rather than your files or config folder (HelixScreen cannot tell on its own which print copy or index a power-loss resume still needs, and the printer does not let it delete logs). If the plugin is installed but refuses to clean up because a folder is set up unsafely, nothing can be cleaned from this page until that is fixed, and Automatic cleanup is not shown. Without the plugin, Automatic cleanup shows "Requires the HelixPrint plugin" with an **Install** button. This works the same whether HelixScreen runs on the printer's own screen or on a tablet or another computer.
+
+HelixScreen also checks for space before it uploads a file to the printer, a print copy or a file from a USB stick: if the upload would leave less than 100 MB free, it does not start and says so.
+
+---
+
 ## Performance
 
 > Only shown once HelixScreen has performance readings.
 
 The row shows how busy things are right now, for example *95% CPU · 13% MCU*. Tap it for live processor and memory use on the computer running HelixScreen, plus the load on each of your printer's controller boards. Check it when prints stutter or the screen feels slow, to see whether the host or a board is overloaded.
+
+The same readings can sit on the home screen as the [Host Health widget](../home-panel.md#host-health-widget), which opens this screen when tapped.
 
 ---
 
@@ -42,7 +72,7 @@ Sends anonymous usage data that helps improve HelixScreen. **Off** until you tur
 
 ### View Telemetry Data
 
-> Only shown while Share Usage Data is on.
+> Only shown while Share Usage Data is on. Not shown on the ESP32 firmware (the BigTreeTech K-Touch), which keeps no queue of data to show.
 
 Shows exactly what would be sent, before it's sent.
 

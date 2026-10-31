@@ -174,12 +174,12 @@ TEST_CASE("CoordMapper edge cases", "[exclude_map][coords]") {
 
     SECTION("overlapping minimum-size rects") {
         // Two tiny adjacent objects (1mm each) on a 235mm square bed.
-        // Both must be expanded to at least MIN_TOUCH_TARGET_PX.
+        // Both must be expanded to at least kMinTouchTargetPx.
         auto mapper = ExcludeObjectMapView::CoordMapper(235.0f, 235.0f, 400, 400);
         auto r1 = mapper.bbox_to_rect({100.0f, 100.0f}, {101.0f, 101.0f});
         auto r2 = mapper.bbox_to_rect({102.0f, 100.0f}, {103.0f, 101.0f});
-        REQUIRE(r1.w >= ExcludeObjectMapView::MIN_TOUCH_TARGET_PX);
-        REQUIRE(r2.w >= ExcludeObjectMapView::MIN_TOUCH_TARGET_PX);
+        REQUIRE(r1.w >= ExcludeObjectMapView::kMinTouchTargetPx);
+        REQUIRE(r2.w >= ExcludeObjectMapView::kMinTouchTargetPx);
     }
 }
 
@@ -232,7 +232,8 @@ TEST_CASE_METHOD(XMLTestFixture, "ExcludeObjectMapView create/destroy roundtrip 
     seed_objects(state().excluded_objects_state());
 
     auto view = std::make_unique<ExcludeObjectMapView>();
-    view->create(test_screen(), &state().excluded_objects_state(), 235.0f, 235.0f, {},
+    view->create(test_screen(), &state().excluded_objects_state(),
+                 helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
                  ExcludeTapMode::ExcludeOnly, nullptr);
     REQUIRE(view->is_active());
 
@@ -268,7 +269,8 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     {
         ExcludeObjectMapView view;
-        view.create(test_screen(), &state().excluded_objects_state(), 200.0f, 200.0f, {},
+        view.create(test_screen(), &state().excluded_objects_state(),
+                    helix::bed_dimensions_from_volume(0.0f, 200.0f, 0.0f, 200.0f), {},
                     ExcludeTapMode::ExcludeOnly, nullptr);
         REQUIRE(view.is_active());
         REQUIRE(lv_obj_get_child_count(test_screen()) > baseline_children);
@@ -298,6 +300,11 @@ class ExcludeObjectMapViewTestAccess {
     }
     /// Strongest outline alpha drawn within 2px of the bed point (x_mm, y_mm).
     static int outline_alpha_near(const ExcludeObjectMapView& view, float x_mm, float y_mm) {
+        return alpha_within(view, x_mm, y_mm, 2, nullptr);
+    }
+    /// Strongest alpha within @p radius px of the point; @p lit counts the pixels drawn.
+    static int alpha_within(const ExcludeObjectMapView& view, float x_mm, float y_mm, int radius,
+                            int* lit) {
         lv_obj_t* canvas = view.canvas_;
         if (!canvas || !view.mapper_) {
             return -1;
@@ -306,17 +313,33 @@ class ExcludeObjectMapViewTestAccess {
         const int32_t w = lv_obj_get_width(canvas);
         const int32_t h = lv_obj_get_height(canvas);
         int best = 0;
-        for (int32_t dy = -2; dy <= 2; ++dy) {
-            for (int32_t dx = -2; dx <= 2; ++dx) {
+        if (lit) {
+            *lit = 0;
+        }
+        for (int32_t dy = -radius; dy <= radius; ++dy) {
+            for (int32_t dx = -radius; dx <= radius; ++dx) {
                 const int32_t x = static_cast<int32_t>(px) + dx;
                 const int32_t y = static_cast<int32_t>(py) + dy;
                 if (x < 0 || y < 0 || x >= w || y >= h) {
                     continue;
                 }
-                best = std::max(best, static_cast<int>(lv_canvas_get_px(canvas, x, y).alpha));
+                const int alpha = lv_canvas_get_px(canvas, x, y).alpha;
+                best = std::max(best, alpha);
+                if (lit && alpha > 0) {
+                    ++*lit;
+                }
             }
         }
         return best;
+    }
+    static int canvas_width(const ExcludeObjectMapView& view) {
+        return view.canvas_ ? lv_obj_get_width(view.canvas_) : -1;
+    }
+    static const lv_draw_buf_t* canvas_buf(const ExcludeObjectMapView& view) {
+        return view.canvas_buf_;
+    }
+    static size_t rect_count(const ExcludeObjectMapView& view) {
+        return view.object_rects_.size();
     }
 };
 
@@ -331,8 +354,8 @@ TEST_CASE_METHOD(
 
     ExcludeObjectMapView view;
     view.create(
-        test_screen(), &st, 235.0f, 235.0f, [&](const std::string& name) { taps.push_back(name); },
-        ExcludeTapMode::Toggle, nullptr);
+        test_screen(), &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f),
+        [&](const std::string& name) { taps.push_back(name); }, ExcludeTapMode::Toggle, nullptr);
     process_lvgl(50);
     st.set_excluded_objects({"OBJ_1"});
     helix::ui::UpdateQueue::instance().drain();
@@ -356,7 +379,8 @@ TEST_CASE_METHOD(XMLTestFixture, "Map view in exclude-only mode drops an exclude
     seed_objects(st);
 
     ExcludeObjectMapView view;
-    view.create(test_screen(), &st, 235.0f, 235.0f, {}, ExcludeTapMode::ExcludeOnly, nullptr);
+    view.create(test_screen(), &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f),
+                {}, ExcludeTapMode::ExcludeOnly, nullptr);
     process_lvgl(50);
     st.set_excluded_objects({"OBJ_1"});
     helix::ui::UpdateQueue::instance().drain();
@@ -383,8 +407,12 @@ TEST_CASE_METHOD(XMLTestFixture, "Each open map view's close button closes only 
         ExcludeObjectMapView second;
         first.set_close_callback([&] { ++first_closed; });
         second.set_close_callback([&] { ++second_closed; });
-        first.create(test_screen(), &st, 235.0f, 235.0f, {}, ExcludeTapMode::ExcludeOnly, nullptr);
-        second.create(test_screen(), &st, 235.0f, 235.0f, {}, ExcludeTapMode::ExcludeOnly, nullptr);
+        first.create(test_screen(), &st,
+                     helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                     ExcludeTapMode::ExcludeOnly, nullptr);
+        second.create(test_screen(), &st,
+                      helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                      ExcludeTapMode::ExcludeOnly, nullptr);
         process_lvgl(20);
 
         lv_obj_send_event(lv_obj_find_by_name(first.root(), "close_btn"), LV_EVENT_CLICKED,
@@ -409,7 +437,8 @@ TEST_CASE_METHOD(XMLTestFixture, "A picked object's outline fades on the map lik
     seed_objects(st);
 
     ExcludeObjectMapView view;
-    view.create(test_screen(), &st, 235.0f, 235.0f, {}, ExcludeTapMode::Toggle, nullptr);
+    view.create(test_screen(), &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f),
+                {}, ExcludeTapMode::Toggle, nullptr);
     process_lvgl(50);
 
     // Midpoint of OBJ_1's bottom edge, (60,60)-(90,60).
@@ -466,7 +495,8 @@ TEST_CASE_METHOD(XMLTestFixture,
     parsed->layers.push_back(std::move(layer0));
 
     ExcludeObjectMapView view;
-    view.create(test_screen(), &st, 235.0f, 235.0f, {}, ExcludeTapMode::Toggle, parsed.get());
+    view.create(test_screen(), &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f),
+                {}, ExcludeTapMode::Toggle, parsed.get());
     process_lvgl(50);
     // Midpoint of the hull's bottom edge, (60,60)-(90,60).
     REQUIRE(ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f) > 0);
@@ -517,7 +547,8 @@ TEST_CASE_METHOD(XMLTestFixture, "Every object rect and its badge fit inside the
             lv_obj_set_size(card, shape.w, shape.h);
 
             ExcludeObjectMapView view;
-            view.create(card, &st, 235.0f, 235.0f, {}, ExcludeTapMode::Toggle, nullptr);
+            view.create(card, &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f),
+                        {}, ExcludeTapMode::Toggle, nullptr);
             REQUIRE(view.is_active());
             process_lvgl(30);
 
@@ -553,4 +584,192 @@ TEST_CASE_METHOD(XMLTestFixture, "Every object rect and its badge fit inside the
             lv_obj_delete(card);
         }
     }
+}
+
+// ============================================================================
+// Mini mode and resize
+// ============================================================================
+
+namespace {
+lv_obj_t* make_host(int w, int h) {
+    lv_obj_t* host = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(host, w, h);
+    lv_obj_set_style_pad_all(host, 0, 0);
+    lv_obj_set_flex_flow(host, LV_FLEX_FLOW_COLUMN);
+    return host;
+}
+} // namespace
+
+TEST_CASE_METHOD(XMLTestFixture, "Mini map takes a layout slot and offers nothing to tap",
+                 "[exclude_map][mini]") {
+    REQUIRE(register_component("components/exclude_object_map_mini"));
+    auto& st = state().excluded_objects_state();
+    seed_objects(st);
+    lv_obj_t* host = make_host(120, 100);
+
+    ExcludeObjectMapView view;
+    view.create(host, &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                ExcludeTapMode::ExcludeOnly, nullptr, helix::ui::ExcludeMapMode::Mini);
+    REQUIRE(view.is_active());
+    process_lvgl(30);
+
+    CHECK_FALSE(lv_obj_has_flag(view.root(), LV_OBJ_FLAG_IGNORE_LAYOUT));
+    CHECK(lv_obj_get_width(view.root()) == 120);
+    CHECK(lv_obj_get_height(view.root()) == 100);
+    CHECK(ExcludeObjectMapViewTestAccess::rect_count(view) == 0);
+    CHECK(lv_obj_find_by_name(view.root(), "close_btn") == nullptr);
+    CHECK(lv_obj_find_by_name(view.root(), "plate_dims_label") == nullptr);
+    CHECK(ExcludeObjectMapViewTestAccess::canvas_width(view) == 120);
+    // The outlines are there: the midpoint of OBJ_1's bottom edge, (60,60)-(90,60).
+    CHECK(ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f) > 0);
+
+    view.destroy();
+    process_lvgl(20);
+    lv_obj_delete(host);
+}
+
+TEST_CASE_METHOD(XMLTestFixture,
+                 "Mini map draws the current object brightest and hatches an excluded one",
+                 "[exclude_map][mini]") {
+    REQUIRE(register_component("components/exclude_object_map_mini"));
+    auto& st = state().excluded_objects_state();
+    seed_objects(st);
+    st.set_current_object("OBJ_1");
+    st.set_excluded_objects({"OBJ_2"});
+    lv_obj_t* host = make_host(160, 140);
+
+    ExcludeObjectMapView view;
+    view.create(host, &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                ExcludeTapMode::ExcludeOnly, nullptr, helix::ui::ExcludeMapMode::Mini);
+    process_lvgl(30);
+
+    // Bottom-edge midpoints: OBJ_0 (20,20)-(50,20), OBJ_1 (60,60)-(90,60).
+    const int idle = ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 35.0f, 20.0f);
+    const int current = ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f);
+    CHECK(idle > 0);
+    CHECK(current > idle);
+
+    // Centroids: an idle object's inside is empty, an excluded object's is crossed by hatching.
+    int idle_lit = 0;
+    int excluded_lit = 0;
+    ExcludeObjectMapViewTestAccess::alpha_within(view, 35.0f, 30.0f, 3, &idle_lit);
+    ExcludeObjectMapViewTestAccess::alpha_within(view, 115.0f, 110.0f, 3, &excluded_lit);
+    CHECK(idle_lit == 0);
+    CHECK(excluded_lit > 0);
+
+    view.destroy();
+    process_lvgl(20);
+    lv_obj_delete(host);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "Mini map follows an exclusion and a new current object",
+                 "[exclude_map][mini]") {
+    REQUIRE(register_component("components/exclude_object_map_mini"));
+    auto& st = state().excluded_objects_state();
+    seed_objects(st);
+    lv_obj_t* host = make_host(160, 140);
+
+    ExcludeObjectMapView view;
+    view.create(host, &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                ExcludeTapMode::ExcludeOnly, nullptr, helix::ui::ExcludeMapMode::Mini);
+    process_lvgl(30);
+
+    const int before = ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f);
+    st.set_current_object("OBJ_1");
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(20);
+    CHECK(ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f) > before);
+
+    int lit = 0;
+    ExcludeObjectMapViewTestAccess::alpha_within(view, 75.0f, 70.0f, 3, &lit);
+    CHECK(lit == 0);
+    st.set_excluded_objects({"OBJ_1"});
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(20);
+    ExcludeObjectMapViewTestAccess::alpha_within(view, 75.0f, 70.0f, 3, &lit);
+    CHECK(lit > 0);
+
+    view.destroy();
+    process_lvgl(20);
+    lv_obj_delete(host);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "Map view rebuilds its surface when its slot is resized",
+                 "[exclude_map][mini][resize]") {
+    REQUIRE(register_component("components/exclude_object_map_mini"));
+    auto& st = state().excluded_objects_state();
+    seed_objects(st);
+    lv_obj_t* host = make_host(120, 100);
+
+    ExcludeObjectMapView view;
+    view.create(host, &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                ExcludeTapMode::ExcludeOnly, nullptr, helix::ui::ExcludeMapMode::Mini);
+    process_lvgl(30);
+    REQUIRE(ExcludeObjectMapViewTestAccess::canvas_width(view) == 120);
+    const lv_draw_buf_t* first_buf = ExcludeObjectMapViewTestAccess::canvas_buf(view);
+    const int small = ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f);
+    REQUIRE(small > 0);
+
+    SECTION("a larger slot gets a larger canvas with the outlines redrawn") {
+        lv_obj_set_size(host, 240, 200);
+        view.resize();
+        CHECK(ExcludeObjectMapViewTestAccess::canvas_width(view) == 240);
+        CHECK(ExcludeObjectMapViewTestAccess::canvas_buf(view) != first_buf);
+        CHECK(ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f) > 0);
+    }
+
+    SECTION("an unchanged slot keeps its buffer") {
+        view.resize();
+        CHECK(ExcludeObjectMapViewTestAccess::canvas_buf(view) == first_buf);
+    }
+
+    view.destroy();
+    process_lvgl(20);
+    lv_obj_delete(host);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "Interactive map keeps its rects and close button after a resize",
+                 "[exclude_map][resize]") {
+    REQUIRE(register_component("components/exclude_object_map"));
+    auto& st = state().excluded_objects_state();
+    seed_objects(st);
+    lv_obj_t* card = lv_obj_create(test_screen());
+    lv_obj_set_size(card, 300, 240);
+
+    ExcludeObjectMapView view;
+    view.create(card, &st, helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                ExcludeTapMode::ExcludeOnly, nullptr);
+    process_lvgl(30);
+    REQUIRE(ExcludeObjectMapViewTestAccess::rect_count(view) == 3);
+
+    lv_obj_set_size(card, 400, 300);
+    view.resize();
+    CHECK(ExcludeObjectMapViewTestAccess::rect_count(view) == 3);
+    CHECK(lv_obj_find_by_name(view.root(), "close_btn") != nullptr);
+    CHECK(ExcludeObjectMapViewTestAccess::outline_alpha_near(view, 75.0f, 60.0f) > 0);
+
+    view.destroy();
+    process_lvgl(20);
+    lv_obj_delete(card);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "ExcludeObjectMapView destroy runs no queued callback",
+                 "[exclude_map][lifecycle][drain_reentrancy]") {
+    REQUIRE(register_component("components/exclude_object_map"));
+    seed_objects(state().excluded_objects_state());
+
+    auto view = std::make_unique<ExcludeObjectMapView>();
+    view->create(test_screen(), &state().excluded_objects_state(),
+                 helix::bed_dimensions_from_volume(0.0f, 235.0f, 0.0f, 235.0f), {},
+                 ExcludeTapMode::ExcludeOnly, nullptr);
+    process_lvgl(50);
+
+    bool ran = false;
+    helix::ui::UpdateQueue::instance().queue("test::drain_canary", [&ran]() { ran = true; });
+    view->destroy();
+    CHECK_FALSE(ran);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(ran);
+    view.reset();
+    process_lvgl(20);
 }

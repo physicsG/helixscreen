@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Auto Backup rules for Android 11 and lower (android:fullBackupContent). Keep the
+     include and exclude lines identical to data_extraction_rules.xml, which a unit
+     test checks. -->
+<full-backup-content>
+    <!-- The user's config layer and its rolling backups (android_storage_layout()).
+         Everything else under files/ is package content re-extracted from the APK,
+         or a cache. -->
+    <include domain="file" path="data/config/"/>
+    <include domain="file" path="state/"/>
+    <!-- Identity and state that belong to this device, not to the user -->
+    <exclude domain="file" path="data/config/telemetry_device.json"/>
+    <exclude domain="file" path="data/config/telemetry_queue.json"/>
+    <exclude domain="file" path="data/config/telemetry_snapshot.json"/>
+    <exclude domain="file" path="data/config/crash.txt"/>
+    <exclude domain="file" path="data/config/crash_1.txt"/>
+    <exclude domain="file" path="data/config/crash_2.txt"/>
+    <exclude domain="file" path="data/config/crash_3.txt"/>
+    <exclude domain="file" path="data/config/crash_history.json"/>
+    <exclude domain="file" path="data/config/.crash_restart_count"/>
+    <exclude domain="file" path="data/config/.helix-screen.lock"/>
+    <exclude domain="file" path="data/config/safe_mode.flag"/>
+    <exclude domain="file" path="data/config/gpu_3d_guard"/>
+    <exclude domain="file" path="data/config/gpu_blur_guard"/>
+    <exclude domain="file" path="data/config/filament_slot_overrides.json"/>
+    <exclude domain="file" path="data/config/update_success.json"/>
+    <!-- Config::init() renames an unparseable config aside under these names -->
+    <exclude domain="file" path="data/config/settings.json.corrupt"/>
+    <exclude domain="file" path="data/config/settings-test.json.corrupt"/>
+</full-backup-content>

@@ -8,7 +8,9 @@
 
 #include <string>
 
+namespace helix {
 struct JobQueueEntry;
+}
 class JobQueueModalTestAccess;
 
 namespace helix {

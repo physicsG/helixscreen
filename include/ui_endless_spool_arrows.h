@@ -13,13 +13,14 @@ extern "C" {
  * @file ui_endless_spool_arrows.h
  * @brief Canvas widget for visualizing endless spool backup relationships
  *
- * Draws routed arrow lines connecting slots that have backup relationships.
- * The arrows show chains at a glance (e.g., Slot 1 -> Slot 3 -> Slot 5).
- *
- * Visual design:
- *   - Routed lines: up from source slot, over horizontally, down to target slot
- *   - Arrowheads pointing down at target end
- *   - Multiple connections draw at different vertical heights to avoid overlap
+ * Draws the endless-spool relation above the slot row, one mark per group:
+ *   - Unordered group (any member substitutes for any other): a BRACKET, one
+ *     horizontal bar spanning the members with a tick down to each member,
+ *     ending in a dot. No arrowheads, because the group has no order.
+ *   - Ordered group (a directed hand-off, e.g. AFC's SET_RUNOUT): a routed
+ *     arrow per hand-off, up from the source, over, and down into the target.
+ *   - Overlapping marks stack at different heights; a bar is broken where
+ *     another mark's vertical passes through it, so membership stays readable.
  *   - Uses subtle color (#text_muted) to avoid overwhelming filament colors
  *
  * XML usage:
@@ -30,7 +31,7 @@ extern "C" {
  * @endcode
  *
  * XML attributes:
- *   - slot_count: Number of slots (1-16) - default 4
+ *   - slot_count: Number of slots (1 to helix::kAmsMaxSlots) - default 4
  *   - slot_width: Width of each slot cell in pixels - default 80
  */
 
@@ -53,7 +54,7 @@ lv_obj_t* ui_endless_spool_arrows_create(lv_obj_t* parent);
  * @brief Set the number of slots
  *
  * @param obj The endless_spool_arrows widget
- * @param count Number of slots (1-16)
+ * @param count Number of slots, clamped to 1..helix::kAmsMaxSlots
  */
 void ui_endless_spool_arrows_set_slot_count(lv_obj_t* obj, int count);
 
@@ -86,20 +87,6 @@ void ui_endless_spool_arrows_set_slot_overlap(lv_obj_t* obj, int32_t overlap);
 void ui_endless_spool_arrows_set_slot_offset(lv_obj_t* obj, int32_t offset);
 
 /**
- * @brief Set endless spool configuration
- *
- * Provides the backup slot mappings for visualization.
- * Each element in the array represents one slot's backup:
- *   - Index is the source slot
- *   - Value is the backup slot (-1 = no backup)
- *
- * @param obj The endless_spool_arrows widget
- * @param backup_slots Array of backup slot indices (one per slot)
- * @param count Number of elements in the array
- */
-void ui_endless_spool_arrows_set_config(lv_obj_t* obj, const int* backup_slots, int count);
-
-/**
  * @brief Clear all endless spool connections
  *
  * @param obj The endless_spool_arrows widget
@@ -115,4 +102,102 @@ void ui_endless_spool_arrows_refresh(lv_obj_t* obj);
 
 #ifdef __cplusplus
 }
+
+#include "ams_types.h"
+
+#include <vector>
+
+/**
+ * @brief Set the endless-spool relation to draw
+ *
+ * The widget decides bracket vs arrow from each group's `ordered` flag.
+ * Members at or beyond the slot count are not drawn.
+ *
+ * @param obj The endless_spool_arrows widget
+ * @param config The backend's group relation
+ */
+void ui_endless_spool_arrows_set_groups(lv_obj_t* obj,
+                                        const helix::printer::EndlessSpoolConfig& config);
+
+namespace helix::ui {
+
+/// What one endless-spool mark draws as.
+enum class EndlessSpoolMarkKind {
+    Bracket, ///< Unordered group: bar over the members, a tick + dot per member
+    Arrow,   ///< One ordered hand-off: routed line with an arrowhead at the target
+};
+
+/// Where a vertical meets the slot row: a slot, nudged sideways by whole lanes.
+struct EndlessSpoolColumn {
+    int slot = 0;
+    /// 0 = the slot's centre. An arrow's source sits one lane left of it and
+    /// its arrowhead one lane right, so a slot that is both the target of one
+    /// hop and the source of the next shows two separate lines. A second
+    /// arrowhead into the same slot lands one lane further right.
+    int lane = 0;
+    /// `lane` in pixels: lane times the lane width the limits allow.
+    int32_t offset_px = 0;
+
+    bool operator==(const EndlessSpoolColumn& o) const {
+        return slot == o.slot && lane == o.lane;
+    }
+    bool operator!=(const EndlessSpoolColumn& o) const {
+        return !(*this == o);
+    }
+};
+
+/// One mark above the slot row, in slot and lane units plus the pixel sizes
+/// that depend on them.
+struct EndlessSpoolMark {
+    EndlessSpoolMarkKind kind = EndlessSpoolMarkKind::Bracket;
+    /// Bracket: members, ascending. Arrow: {source, target}.
+    std::vector<int> slots;
+    /// One per entry of `slots`: where that vertical drops. Bracket ticks are
+    /// centred; arrow ends take their own lane.
+    std::vector<EndlessSpoolColumn> columns;
+    int min_slot = 0; ///< Leftmost slot the mark touches
+    int max_slot = 0; ///< Rightmost slot the mark touches
+    /// 0 = the bar furthest from the slots; each level steps toward them.
+    /// Never deeper than EndlessSpoolMarkLimits::max_height_level.
+    int height_level = 0;
+    /// Columns where another mark's vertical crosses this bar; the bar is broken there.
+    std::vector<EndlessSpoolColumn> bar_gaps;
+    /// Arrow: half-width of the arrowhead, small enough that arrowheads sharing
+    /// a slot never overlap. Bracket: 0.
+    int32_t head_px = 0;
+};
+
+/// What the canvas can hold. The defaults impose nothing: unlimited levels and
+/// lanes with no width.
+struct EndlessSpoolMarkLimits {
+    /// Deepest height level the canvas fits; deeper marks share that bar. -1 = no limit.
+    int max_height_level = -1;
+    /// Preferred lane width in pixels.
+    int32_t lane_px = 0;
+    /// Distance between neighbouring slot centres in pixels; 0 = do not narrow lanes.
+    /// Lanes narrow so the outermost one stays inside its slot's half of it.
+    int32_t slot_spacing_px = 0;
+};
+
+/**
+ * @brief Lay out the marks for an endless-spool relation
+ *
+ * Pure geometry, no LVGL: which marks exist, which column each vertical drops
+ * in, their height levels, and where each bar is broken. No two arrow ends
+ * share a column, and marks whose extents overlap (lanes included, so two hops
+ * meeting at a slot overlap) never share a height level unless the canvas
+ * limit forces them onto its last one. A mark sits below every mark that
+ * contains its extent. Members outside [0, slot_count) are dropped; a group
+ * left with fewer than two members draws nothing.
+ *
+ * @param config     The group relation
+ * @param slot_count Number of slots on the row
+ * @param limits     What the canvas can hold
+ * @return Marks, in no particular order
+ */
+[[nodiscard]] std::vector<EndlessSpoolMark>
+endless_spool_marks(const helix::printer::EndlessSpoolConfig& config, int slot_count,
+                    const EndlessSpoolMarkLimits& limits = {});
+
+} // namespace helix::ui
 #endif

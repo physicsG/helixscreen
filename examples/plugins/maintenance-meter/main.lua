@@ -6,7 +6,7 @@
 local METERS = {
     { key = "filter", name = "HEPA filter", short = "HEPA", setting = "filter_interval_h" },
     { key = "nozzle", name = "Nozzle", short = "Nozzle", setting = "nozzle_interval_h" },
-    { key = "rails", name = "linear rails", short = "Rails", setting = "rails_interval_h" },
+    { key = "rails", name = "Linear rails", short = "Rails", setting = "rails_interval_h" },
 }
 
 -- One accrual tick per minute of printing; the store write rides the
@@ -42,17 +42,26 @@ for _, m in ipairs(METERS) do
     m.notified = false
 end
 
+-- A stored hour count: a finite, non-negative number, else `default`. The
+-- store is user-editable, and a stray string or boolean must not reach
+-- the arithmetic and formatting below.
+local function stored_hours(v, default)
+    local n = tonumber(v)
+    if n and n >= 0 and n < 1e7 then return n end
+    return default
+end
+
 local function load_state()
     local saved = helix.storage.get("state")
     if type(saved) ~= "table" then return end
-    total_h = tonumber(saved.total_h) or 0.0
+    total_h = stored_hours(saved.total_h, 0.0)
     local stored = saved.meters
     if type(stored) ~= "table" then return end
     for _, m in ipairs(METERS) do
         local s = stored[m.key]
         if type(s) == "table" then
-            m.used = tonumber(s.used) or 0.0
-            m.reset_at = s.reset_at
+            m.used = stored_hours(s.used, 0.0)
+            m.reset_at = stored_hours(s.reset_at, nil)
             m.notified = s.notified == true
         end
     end
@@ -203,11 +212,12 @@ for i in ipairs(rings) do
     rings[i]:on_size(function() draw_ring(i) end)
 end
 
--- Accrual: the printer state arrives by watch, the clock by timer. Each
--- tick while printing adds one interval to every enabled meter and the
--- screen total; crossing the interval fires the due toast once, until a
--- reset clears the latch.
-local printing = false
+-- Accrual: the printer state arrives by watch (which reports changes only,
+-- so the current value seeds it), the clock by timer. Each tick while
+-- printing on a live connection adds one interval to every enabled meter and
+-- the screen total; crossing the interval fires the due toast once, until a
+-- reset or a larger interval re-arms it.
+local printing = helix.printer.get("print_state") == "printing"
 helix.printer.watch("print_state", function(v)
     printing = (v == "printing")
 end)
@@ -220,7 +230,8 @@ local function redraw_all()
 end
 
 local function tick()
-    if not printing then return end
+    -- print_state keeps its last value while the printer is unreachable.
+    if not (printing and helix.printer.get("connected")) then return end
     total_h = total_h + TICK_H
     helix.log.debug(string.format("accrual tick: total %.2fh", total_h))
     for _, m in ipairs(METERS) do
@@ -244,6 +255,11 @@ for i, m in ipairs(METERS) do
     helix.settings.on_change(m.setting, function(v)
         helix.log.debug("interval change: " .. m.key .. " -> " .. tostring(v))
         m.interval = v or 0
+        -- A raised interval puts the due point ahead of the hours again.
+        if m.used < m.interval and m.notified then
+            m.notified = false
+            save_state()
+        end
         redraw_all()
     end)
 end
@@ -251,7 +267,7 @@ end
 helix.widget("tile", {
     on_size = function(cols, rows, w, hgt)
         compact:set(w < 190 and 1 or 0)
-        if cols >= 2 and rows == 1 then
+        if cols >= 2 and rows < 2 then
             list_zone:set(1)
             bars_visible:set(0)
         elseif rows >= 2 then
@@ -292,5 +308,4 @@ helix.ui.on("reset", function(arg)
 end)
 
 load_state()
-save_state()
 redraw_all()

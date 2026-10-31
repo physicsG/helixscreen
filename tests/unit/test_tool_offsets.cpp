@@ -60,8 +60,8 @@ PrinterDiscovery macro_but_one_tool() {
     return hw;
 }
 
-/// A MedusaHC-style machine: klipper-toolchanger PLUS the TOOL_OFFSET macro.
-/// This is the real shape - MedusaHC ships [toolchanger] and [tool T0..T3].
+/// A MedusaHC-style machine running klipper-toolchanger beside its controller,
+/// with the unprefixed TOOL_OFFSET macro an older config spells.
 PrinterDiscovery tool_offset_macro_printer(int tool_count = 4) {
     json objects = toolchanger_objects(tool_count);
     objects.push_back("gcode_macro TOOL_OFFSET");
@@ -76,6 +76,20 @@ PrinterDiscovery tool_offset_macro_printer(int tool_count = 4) {
 PrinterDiscovery mixed_case_macro_printer(int tool_count = 4) {
     json objects = toolchanger_objects(tool_count);
     objects.push_back("gcode_macro Tool_Offset");
+    PrinterDiscovery hw;
+    hw.parse_objects(objects);
+    return hw;
+}
+
+/// A stock MedusaHC: the controller and its dock sensors, `_TOOL_OFFSET`, one
+/// extruder per hot end, and no klipper-toolchanger at all.
+PrinterDiscovery stock_medusahc_printer(bool with_plain_macro_too = false) {
+    json objects =
+        json::array({"gcode_move", "toolhead", "extruder", "extruder1", "extruder2", "extruder3",
+                     "pin_watch io", "medusahc", "save_variables", "gcode_macro _TOOL_OFFSET"});
+    if (with_plain_macro_too) {
+        objects.push_back("gcode_macro TOOL_OFFSET");
+    }
     PrinterDiscovery hw;
     hw.parse_objects(objects);
     return hw;
@@ -183,11 +197,10 @@ TEST_CASE("tool offsets: a delta frame does not fall through to the other store"
     CHECK(*to_::read_tool_offset_microns(medusa, macro_frame, Axis::Z, 1, "T1") == -200);
 }
 
-TEST_CASE("tool offsets: an axis the model does not keep reads nothing", "[tool_offsets]") {
-    // The Provider contract lets a caller loop kAllAxes blindly. On the Z-only
-    // macro model an X read must be "no news" even though klipper-toolchanger's
-    // tool object in the same frame carries an X value; set_tool_offset_gcode()
-    // and save_tool_offset_gcode() already answer nothing there.
+TEST_CASE("tool offsets: an axis the macro frame does not carry reads nothing", "[tool_offsets]") {
+    // An X read on the macro model must be "no news" when the macro said
+    // nothing about X, even though klipper-toolchanger's tool object in the
+    // same frame carries an X value.
     const to_::OffsetReader medusa = to_::resolve_reader(tool_offset_macro_printer());
     json frame = json{
         {"gcode_macro TOOL_OFFSET", json{{"t1_off_z", -0.20}}},
@@ -436,16 +449,14 @@ TEST_CASE("tool offsets: klipper-toolchanger keeps all three axes", "[tool_offse
     }
 }
 
-TEST_CASE("tool offsets: the TOOL_OFFSET macro keeps only Z", "[tool_offsets]") {
-    // Not a capability of the machine, a gap in ours: only the Z variable
-    // names have been checked against a MedusaHC. Claiming X/Y would guess a
-    // name and write a value nothing reads. Once the names are confirmed this
-    // test flips to expecting true - see supports_axis_tool_offset_macro().
+TEST_CASE("tool offsets: the TOOL_OFFSET macro keeps all three axes", "[tool_offsets]") {
+    // The controller applies t<n>_off_x/y/z together on every swap.
     PrinterDiscovery hw = tool_offset_macro_printer();
 
-    CHECK(to_::supports_axis(hw, Axis::Z));
-    CHECK_FALSE(to_::supports_axis(hw, Axis::X));
-    CHECK_FALSE(to_::supports_axis(hw, Axis::Y));
+    for (Axis axis : helix::kAllAxes) {
+        CAPTURE(helix::axis_letter(axis));
+        CHECK(to_::supports_axis(hw, axis));
+    }
 }
 
 TEST_CASE("tool offsets: a printer without the capability supports no axis", "[tool_offsets]") {
@@ -508,18 +519,86 @@ TEST_CASE("tool offsets: an axis missing from a delta frame is no news for that 
     CHECK_FALSE(to_::read_tool_offset_microns(reader, delta, Axis::Z, 0, "T0").has_value());
 }
 
-TEST_CASE("tool offsets: the TOOL_OFFSET macro emits nothing for X and Y", "[tool_offsets]") {
-    // Declining is the contract, exactly like a negative tool index: an empty
-    // string is "this printer needs no such call", and a caller that loops the
-    // axes sends nothing rather than a guessed variable name.
+TEST_CASE("tool offsets: the TOOL_OFFSET macro writes X and Y to their own variables",
+          "[tool_offsets]") {
+    // t<n>_off_<axis> at runtime, t<n>_gcode_<axis>_offset in save_variables:
+    // the names the controller restores at startup.
     PrinterDiscovery hw = tool_offset_macro_printer();
 
-    CHECK(to_::set_tool_offset_gcode(hw, Axis::X, 1, -50).empty());
-    CHECK(to_::set_tool_offset_gcode(hw, Axis::Y, 1, -50).empty());
-    CHECK(to_::save_tool_offset_gcode(hw, Axis::X, 1, -50).empty());
-    CHECK(to_::save_tool_offset_gcode(hw, Axis::Y, 1, -50).empty());
-    // Z is untouched by that refusal.
-    CHECK(to_::set_tool_offset_gcode(hw, Axis::Z, 1, -50).rfind("SET_GCODE_VARIABLE", 0) == 0);
+    CHECK(to_::set_tool_offset_gcode(hw, Axis::X, 1, -50) ==
+          "SET_GCODE_VARIABLE MACRO=TOOL_OFFSET VARIABLE=t1_off_x VALUE=-0.050");
+    CHECK(to_::set_tool_offset_gcode(hw, Axis::Y, 2, 125) ==
+          "SET_GCODE_VARIABLE MACRO=TOOL_OFFSET VARIABLE=t2_off_y VALUE=0.125");
+    CHECK(to_::save_tool_offset_gcode(hw, Axis::X, 1, -50) ==
+          "SAVE_VARIABLE VARIABLE=t1_gcode_x_offset VALUE=-0.050\n"
+          "SET_GCODE_VARIABLE MACRO=TOOL_OFFSET VARIABLE=t1_off_x VALUE=-0.050");
+    CHECK(to_::save_tool_offset_gcode(hw, Axis::Y, 3, 10) ==
+          "SAVE_VARIABLE VARIABLE=t3_gcode_y_offset VALUE=0.010\n"
+          "SET_GCODE_VARIABLE MACRO=TOOL_OFFSET VARIABLE=t3_off_y VALUE=0.010");
+}
+
+TEST_CASE("tool offsets: the TOOL_OFFSET macro reads X and Y off the tool index",
+          "[tool_offsets]") {
+    const to_::OffsetReader reader = to_::resolve_reader(tool_offset_macro_printer());
+    json status = json{{"gcode_macro TOOL_OFFSET",
+                        json{{"t1_off_x", 0.12}, {"t1_off_y", -0.045}, {"t1_off_z", 0.03}}}};
+
+    CHECK(to_::read_tool_offset_microns(reader, status, Axis::X, 1, "T1") == 120);
+    CHECK(to_::read_tool_offset_microns(reader, status, Axis::Y, 1, "T1") == -45);
+    CHECK(to_::read_tool_offset_microns(reader, status, Axis::Z, 1, "T1") == 30);
+}
+
+TEST_CASE("tool offsets: a stock MedusaHC uses the _TOOL_OFFSET macro",
+          "[tool_offsets][medusahc]") {
+    // No klipper-toolchanger: the tools are the extruder heaters, and the
+    // offset macro carries the `_` prefix the controller resolves first.
+    PrinterDiscovery hw = stock_medusahc_printer();
+
+    REQUIRE(to_::supports_per_tool_offsets(hw));
+    CHECK(to_::provider_name(hw) == "TOOL_OFFSET macro");
+    CHECK(vec_has(to_::required_status_objects(hw), "gcode_macro _TOOL_OFFSET"));
+    CHECK(to_::set_tool_offset_gcode(hw, Axis::Z, 1, -50) ==
+          "SET_GCODE_VARIABLE MACRO=_TOOL_OFFSET VARIABLE=t1_off_z VALUE=-0.050");
+
+    const to_::OffsetReader reader = to_::resolve_reader(hw);
+    CHECK(reader.store_object == "gcode_macro _TOOL_OFFSET");
+    json status = json{{"gcode_macro _TOOL_OFFSET", json{{"t2_off_y", 0.2}}}};
+    CHECK(to_::read_tool_offset_microns(reader, status, Axis::Y, 2, "T2") == 200);
+}
+
+TEST_CASE("tool offsets: _TOOL_OFFSET outranks a plain TOOL_OFFSET beside it",
+          "[tool_offsets][medusahc]") {
+    // The controller reads `_TOOL_OFFSET` whenever it exists; a leftover
+    // unprefixed macro is a store nothing prints with.
+    PrinterDiscovery hw = stock_medusahc_printer(/*with_plain_macro_too=*/true);
+
+    CHECK(vec_has(to_::required_status_objects(hw), "gcode_macro _TOOL_OFFSET"));
+    CHECK_FALSE(vec_has(to_::required_status_objects(hw), "gcode_macro TOOL_OFFSET"));
+    CHECK(to_::save_tool_offset_gcode(hw, Axis::X, 0, 5).find("MACRO=_TOOL_OFFSET ") !=
+          std::string::npos);
+}
+
+TEST_CASE("tool offsets: the mounted tool's write is applied with MHC_TOOL_OFFSET",
+          "[tool_offsets][medusahc]") {
+    // The controller applies a tool's offsets only on a swap; MOVE=0 shifts
+    // the coordinates without moving the head over the print.
+    PrinterDiscovery hw = stock_medusahc_printer();
+
+    CHECK(to_::activate_mounted_offset_gcode(hw, 2, 2) == "MHC_TOOL_OFFSET T=2 MOVE=0");
+    // Another tool's offset applied now would shift the head by the wrong
+    // correction.
+    CHECK(to_::activate_mounted_offset_gcode(hw, 1, 2).empty());
+    CHECK(to_::activate_mounted_offset_gcode(hw, 1, -1).empty());
+    CHECK(to_::activate_mounted_offset_gcode(hw, -1, -1).empty());
+}
+
+TEST_CASE("tool offsets: models that apply a write on the next move need no activation",
+          "[tool_offsets][medusahc]") {
+    // klipper-toolchanger's transform reads the parameter per move; a
+    // TOOL_OFFSET macro without the [medusahc] controller has no command.
+    CHECK(to_::activate_mounted_offset_gcode(toolchanger_printer(), 1, 1).empty());
+    CHECK(to_::activate_mounted_offset_gcode(tool_offset_macro_printer(), 1, 1).empty());
+    CHECK(to_::activate_mounted_offset_gcode(plain_printer(), 0, 0).empty());
 }
 
 TEST_CASE("tool offsets: a TOOL_OFFSET frame never answers X or Y from the tool object",
@@ -557,4 +636,73 @@ TEST_CASE("tool offsets: a malformed X field is not a reading", "[tool_offsets]"
     CHECK_FALSE(to_::read_tool_offset_microns(
                     reader, json{{"tool T0", json{{"gcode_x_offset", nullptr}}}}, Axis::X, 0, "T0")
                     .has_value());
+}
+
+// ============================================================================
+// Read-only models: offsets the printer measures and keeps itself
+// ============================================================================
+
+namespace {
+
+/// A stock INDX printer: the host module plus its macro contract.
+PrinterDiscovery indx_printer() {
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array({"indx", "save_variables", "extruder", "toolhead", "gcode_move",
+                                  "gcode_macro TOOL_POSITIONS", "gcode_macro _TOOLCHANGE_VARS",
+                                  "gcode_macro CHANGE_TOOL", "gcode_macro PARK_TOOL",
+                                  "gcode_macro T0", "gcode_macro T1", "gcode_macro T2"}));
+    return hw;
+}
+
+json indx_frame() {
+    return json{{"save_variables",
+                 {{"variables",
+                   {{"t1_offset_x", 0.12},
+                    {"t1_offset_y", -0.045},
+                    {"t1_offset_z", 0.03},
+                    {"global_z_offset", -0.05}}}}}};
+}
+
+} // namespace
+
+TEST_CASE("tool offsets: INDX offsets are read-only", "[tool_offsets]") {
+    auto hw = indx_printer();
+    CHECK(to_::reads_axis(hw, Axis::X));
+    CHECK(to_::reads_axis(hw, Axis::Y));
+    CHECK(to_::reads_axis(hw, Axis::Z));
+    CHECK_FALSE(to_::supports_axis(hw, Axis::Z));
+    CHECK_FALSE(to_::supports_axis(hw, Axis::X));
+    CHECK_FALSE(to_::supports_per_tool_offsets(hw));
+    CHECK(to_::set_tool_offset_gcode(hw, Axis::Z, 1, 50).empty());
+    CHECK(to_::save_tool_offset_gcode(hw, Axis::Z, 1, 50).empty());
+    CHECK(to_::required_status_objects(hw).empty());
+    CHECK_FALSE(to_::persist_requires_save_config(hw));
+
+    CHECK_FALSE(to_::reads_axis(plain_printer(), Axis::Z));
+    CHECK(to_::reads_axis(toolchanger_printer(), Axis::X));
+}
+
+TEST_CASE("tool offsets: INDX reads save_variables", "[tool_offsets]") {
+    auto reader = to_::resolve_reader(indx_printer());
+    const json frame = indx_frame();
+    CHECK(to_::read_tool_offset_microns(reader, frame, Axis::X, 1, "T1") == 120);
+    CHECK(to_::read_tool_offset_microns(reader, frame, Axis::Y, 1, "T1") == -45);
+    CHECK(to_::read_tool_offset_microns(reader, frame, Axis::Z, 1, "T1") == 30);
+    CHECK(to_::read_global_z_offset_microns(reader, frame) == -50);
+    CHECK_FALSE(to_::read_tool_offset_microns(reader, frame, Axis::Z, 2, "T2").has_value());
+
+    const json other = {{"extruder", {{"temperature", 200.0}}}};
+    CHECK_FALSE(to_::read_tool_offset_microns(reader, other, Axis::Z, 1, "T1").has_value());
+    CHECK_FALSE(to_::read_global_z_offset_microns(reader, other).has_value());
+
+    const json text = {
+        {"save_variables", {{"variables", {{"t1_offset_x", "0.1"}, {"global_z_offset", "0.1"}}}}}};
+    CHECK_FALSE(to_::read_tool_offset_microns(reader, text, Axis::X, 1, "T1").has_value());
+    CHECK_FALSE(to_::read_global_z_offset_microns(reader, text).has_value());
+}
+
+TEST_CASE("tool offsets: models without a global Z read none", "[tool_offsets]") {
+    auto reader = to_::resolve_reader(toolchanger_printer());
+    CHECK_FALSE(to_::read_global_z_offset_microns(reader, indx_frame()).has_value());
+    CHECK_FALSE(to_::read_global_z_offset_microns(to_::OffsetReader{}, indx_frame()).has_value());
 }

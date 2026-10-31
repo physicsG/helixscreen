@@ -113,8 +113,8 @@ VALIDATE_XML_OBJ := $(OBJ_DIR)/tools/validate_xml_constants.o
 # server, so those objects are live here.
 VALIDATE_XML_APP_OBJS := $(filter-out $(OBJ_DIR)/main.o $(OBJ_DIR)/remote/remote_client.o,$(APP_OBJS) $(APP_C_OBJS) $(OBJCPP_OBJS))
 
-# Full dependencies (app objects + LVGL + fonts + lv_markdown + quirc + lua + translations)
-# Note: lv_markdown, quirc, lua, and translations are needed because app objects may reference them
+# Full dependencies (app objects + LVGL + fonts + lv_markdown + quirc + lua)
+# Note: lv_markdown, quirc and lua are needed because app objects may reference them
 VALIDATE_XML_DEPS := \
 	$(VALIDATE_XML_APP_OBJS) \
 	$(LVGL_OBJS) \
@@ -124,8 +124,7 @@ VALIDATE_XML_DEPS := \
 	$(LV_MARKDOWN_OBJS) \
 	$(QUIRC_OBJS) \
 	$(LUA_OBJS) \
-	$(FONT_OBJS) \
-	$(TRANS_OBJS)
+	$(FONT_OBJS)
 
 # Linker flags (same as main app for full compatibility)
 VALIDATE_XML_LDFLAGS := $(LDFLAGS)
@@ -239,7 +238,15 @@ XML_LINTER_PY    := PYTHONPATH=$(XML_LINTER_DIR)/src python3 -m helix_xml_linter
 XML_LINTER_EXTRACT := PYTHONPATH=$(XML_LINTER_DIR)/src python3 $(XML_LINTER_DIR)/schema/extract_schema.py
 XML_LINTER_SCHEMA := $(XML_LINTER_DIR)/schema/schema.json
 
-.PHONY: lint-xml lint-xml-all regen-xml-schema
+.PHONY: lint-xml lint-xml-all regen-xml-schema check-xml-schema
+
+# The extractor's inputs, shared by regen-xml-schema and check-xml-schema so the
+# check regenerates exactly what a regen would write.
+XML_LINTER_EXTRACT_ARGS := lib/helix-xml/src/xml \
+		--cpp-src src/ui \
+		--cpp-const-dirs src \
+		--xml-roots ui_xml \
+		--theme-dirs assets/config/themes/defaults
 
 lint-xml:
 	$(ECHO) "$(BLUE)[LINT]$(RESET) helix-xml-linter (errors only) on ui_xml/"
@@ -251,14 +258,21 @@ lint-xml-all:
 
 regen-xml-schema:
 	$(ECHO) "$(BLUE)[GEN]$(RESET) regenerating $(XML_LINTER_SCHEMA)"
-	$(Q)$(XML_LINTER_EXTRACT) \
-		lib/helix-xml/src/xml \
-		--cpp-src src/ui \
-		--cpp-const-dirs src \
-		--xml-roots ui_xml \
-		--theme-dirs assets/config/themes/defaults \
-		-o $(XML_LINTER_SCHEMA)
+	$(Q)$(XML_LINTER_EXTRACT) $(XML_LINTER_EXTRACT_ARGS) -o $(XML_LINTER_SCHEMA)
 	$(ECHO) "$(GREEN)✓ schema regenerated — commit $(XML_LINTER_SCHEMA) if it changed$(RESET)"
+
+# Report-only: regenerate into a temp file and fail if the committed snapshot
+# differs. The pre-commit hook regenerates only on a failing lint, so a snapshot
+# can drift without any lint noticing; this is the check that does.
+check-xml-schema:
+	$(Q)tmp=$$(mktemp); \
+	$(XML_LINTER_EXTRACT) $(XML_LINTER_EXTRACT_ARGS) -o "$$tmp" >/dev/null || { rm -f "$$tmp"; exit 1; }; \
+	if cmp -s "$$tmp" $(XML_LINTER_SCHEMA); then \
+		rm -f "$$tmp"; echo "$(GREEN)✓ $(XML_LINTER_SCHEMA) is up to date$(RESET)"; \
+	else \
+		diff -u $(XML_LINTER_SCHEMA) "$$tmp" | head -n 40; rm -f "$$tmp"; \
+		echo "$(RED)✗ $(XML_LINTER_SCHEMA) is stale: run make regen-xml-schema and commit it$(RESET)"; exit 1; \
+	fi
 
 # ==============================================================================
 # Theme token table (Python)
@@ -272,12 +286,16 @@ regen-xml-schema:
 #   make regen-tokens        — regenerate src/generated/theme_token_table.cpp
 #                              from ui_xml/*.xml
 
-.PHONY: regen-tokens
+.PHONY: regen-tokens check-theme-tokens
 
 regen-tokens:
 	$(ECHO) "$(BLUE)[GEN]$(RESET) regenerating src/generated/theme_token_table.cpp"
 	$(Q)python3 scripts/gen_theme_tokens.py
 	$(ECHO) "$(GREEN)✓ token table regenerated — commit src/generated/theme_token_table.cpp if it changed$(RESET)"
+
+# Report-only: exit 1 when the committed table differs from a regeneration.
+check-theme-tokens:
+	$(Q)python3 scripts/gen_theme_tokens.py --check
 
 # ==============================================================================
 # Doc citations: named anchors, line numbers rendered on demand
@@ -292,7 +310,7 @@ regen-tokens:
 #
 # Targets:
 #   make docs-pinned       — render docs with real line numbers into build/
-#   make check-doc-anchors — advisory report; what pre-push runs
+#   make check-doc-anchors — advisory report, run by hand; no hook runs it
 
 .PHONY: docs-pinned check-doc-anchors
 

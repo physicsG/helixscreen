@@ -27,6 +27,7 @@
 #include "axis_move.h"
 #include "belt_tension_types.h"
 #include "calibration_types.h"
+#include "helix_shared_callback.h"
 #include "json_fwd.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
@@ -39,9 +40,16 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
+
+namespace helix::three_mf {
+struct Conversion;
+} // namespace helix::three_mf
+
+namespace helix {
 
 /**
  * @brief A single entry in the Moonraker job queue
@@ -68,8 +76,8 @@ struct JobQueueStatus {
  */
 class IMotionAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
 
     virtual ~IMotionAPI() = default;
 
@@ -106,8 +114,8 @@ class IMotionAPI {
  */
 class IJobAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using BoolCallback = std::function<void(bool)>;
     using ModifiedPrintCallback = std::function<void(const ModifiedPrintResult&)>;
 
@@ -121,7 +129,17 @@ class IJobAPI {
                                       const std::vector<std::string>& modifications,
                                       ModifiedPrintCallback on_success, ErrorCallback on_error) = 0;
 
-    virtual void check_helix_plugin(BoolCallback on_result, ErrorCallback on_error) = 0;
+    virtual void start_edited_print(const std::string& original_filename,
+                                    const std::string& temp_file_path, const json& edits,
+                                    const std::vector<std::string>& modifications,
+                                    uint64_t file_size, ModifiedPrintCallback on_success,
+                                    ErrorCallback on_error) = 0;
+
+    using PluginInfoCallback = std::function<void(const HelixPluginInfo&)>;
+
+    /// Whether the HelixPrint plugin is installed, and its link directory.
+    /// Never reports an error: an absent plugin answers available=false.
+    virtual void check_helix_plugin(PluginInfoCallback on_result, ErrorCallback on_error) = 0;
 
     virtual void pause_print(SuccessCallback on_success, ErrorCallback on_error) = 0;
 
@@ -137,8 +155,8 @@ class IJobAPI {
  */
 class IFilesAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using FileListCallback = std::function<void(const std::vector<FileInfo>&)>;
     using FileMetadataCallback = std::function<void(const FileMetadata&)>;
     using FileRootsCallback = std::function<void(const std::vector<FileRoot>&)>;
@@ -168,6 +186,14 @@ class IFilesAPI {
     virtual void metascan_file(const std::string& filename, FileMetadataCallback on_success,
                                ErrorCallback on_error, bool silent = true) = 0;
 
+    using ArchiveConversionsCallback =
+        std::function<void(const std::vector<three_mf::Conversion>&)>;
+
+    /// What the printer-side .3mf converter has made (server.helix.3mf_conversions).
+    /// A printer without one answers an error: 404 or method-not-found.
+    virtual void get_archive_conversions(ArchiveConversionsCallback on_success,
+                                         ErrorCallback on_error) = 0;
+
     virtual void delete_file(const std::string& filename, SuccessCallback on_success,
                              ErrorCallback on_error) = 0;
 
@@ -192,8 +218,8 @@ class IFilesAPI {
 class IQueueAPI {
   public:
     using StatusCallback = std::function<void(const JobQueueStatus&)>;
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
 
     virtual ~IQueueAPI() = default;
 
@@ -220,8 +246,8 @@ class IQueueAPI {
  */
 class IHistoryAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using HistoryListCallback =
         std::function<void(const std::vector<PrintHistoryJob>&, uint64_t total_count)>;
     using HistoryTotalsCallback = std::function<void(const PrintHistoryTotals&)>;
@@ -251,32 +277,32 @@ class IHistoryAPI {
 class IAdvancedAPI {
   public:
     // ========== Timeout constants for long-running G-code commands ==========
-    static constexpr uint32_t CALIBRATION_TIMEOUT_MS =
+    static constexpr uint32_t kCalibrationTimeoutMs =
         300000; // 5 min - BED_MESH_CALIBRATE, SCREWS_TILT_CALCULATE
     /// A printer-shipped calibration sequence does its own heating, homing and
     /// wipe inside the one script, so its clock starts at heat-begin rather than
-    /// at probe-begin. CALIBRATION_TIMEOUT_MS measures only the probing and
+    /// at probe-begin. kCalibrationTimeoutMs measures only the probing and
     /// times out mid-probe here — which flips the panel to ERROR and cools the
     /// machine while it is still measuring.
-    static constexpr uint32_t SELF_PREPARED_CALIBRATION_TIMEOUT_MS = 900000; // 15 min
-    static constexpr uint32_t LEVELING_TIMEOUT_MS = 600000; // 10 min - QGL, Z_TILT_ADJUST
-    static constexpr uint32_t SHAPER_TIMEOUT_MS =
+    static constexpr uint32_t kSelfPreparedCalibrationTimeoutMs = 900000; // 15 min
+    static constexpr uint32_t kLevelingTimeoutMs = 600000; // 10 min - QGL, Z_TILT_ADJUST
+    static constexpr uint32_t kShaperTimeoutMs =
         600000; // 10 min - SHAPER_CALIBRATE, MEASURE_AXES_NOISE. Analysis alone
                 // measured ~3m50s per axis on a Creality K1C host; the analysis
                 // phase shows a spinner + elapsed time, so the longer wait is
                 // not silent.
-    static constexpr uint32_t PID_TIMEOUT_MS =
+    static constexpr uint32_t kPidTimeoutMs =
         1200000; // 20 min - PID_CALIBRATE (slow-cooling beds, e.g. AD5M Pro, exceed 15 min)
-    static constexpr uint32_t MPC_TIMEOUT_MS = 1200000; // 20 min - MPC_CALIBRATE
-    static constexpr uint32_t PROBING_TIMEOUT_MS =
+    static constexpr uint32_t kMpcTimeoutMs = 1200000; // 20 min - MPC_CALIBRATE
+    static constexpr uint32_t kProbingTimeoutMs =
         180000; // 3 min - PROBE_CALIBRATE, Z_ENDSTOP_CALIBRATE
 
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using BedMeshProgressCallback = std::function<void(int current, int total)>;
     using NoiseCheckCallback = std::function<void(float noise_level)>;
     using InputShaperConfigCallback = std::function<void(const InputShaperConfig&)>;
-    using HeaterControlTypeCallback = std::function<void(const std::string& control_type)>;
+    using HeaterControlTypeCallback = helix::SharedCallback<void(const std::string& control_type)>;
     using PIDProgressCallback = std::function<void(int sample, float tolerance)>;
     using PIDCalibrateCallback = std::function<void(float kp, float ki, float kd)>;
 
@@ -301,10 +327,11 @@ class IAdvancedAPI {
         std::function<void(int phase, int total_phases, const std::string& description)>;
     /// (percent 0-100, current sweep frequency Hz). Fires off the LVGL thread.
     using BeltSweepProgressCallback = std::function<void(int percent, float freq_hz)>;
-    /// Fires off the LVGL thread with the parsed curve.
-    using BeltCurveCallback = std::function<void(const helix::calibration::BeltCurve& curve)>;
+    /// Fires off the LVGL thread with the parsed curves.
+    using BeltResponseCallback =
+        std::function<void(const helix::calibration::BeltResponse& response)>;
     /// Stops listening and suppresses every later callback. Idempotent.
-    using BeltRunCancel = std::function<void()>;
+    using BeltRunCancel = helix::SharedCallback<void()>;
     using BeltHardwareCallback =
         std::function<void(const helix::calibration::BeltTensionHardware&)>;
 
@@ -400,10 +427,9 @@ class IAdvancedAPI {
     /// layer stays firmware-agnostic: it sends, it watches, it reports.
     /// Returns a cancel handle that stops listening; no callback fires after
     /// it. The firmware still finishes the run it is in.
-    virtual std::function<void()> start_pa_calibrate(const helix::pacal::Procedure& proc,
-                                                     PACalibrateCallback on_complete,
-                                                     ErrorCallback on_error,
-                                                     PAProgressCallback on_progress = nullptr) = 0;
+    virtual helix::SharedCallback<void()>
+    start_pa_calibrate(const helix::pacal::Procedure& proc, PACalibrateCallback on_complete,
+                       ErrorCallback on_error, PAProgressCallback on_progress = nullptr) = 0;
 
     virtual void get_machine_limits(helix::MachineLimitsCallback on_success,
                                     ErrorCallback on_error) = 0;
@@ -425,13 +451,14 @@ class IAdvancedAPI {
     virtual void detect_belt_hardware(BeltHardwareCallback on_complete, ErrorCallback on_error) = 0;
 
     /// TEST_RESONANCES AXIS=<axis_param> OUTPUT=resonances NAME=<output_name> SWEEPING_PERIOD=0.
-    /// Completes on Klipper's "Resonances data written to" line; there is no
+    /// A window adds FREQ_START/FREQ_END (floored/ceiled to whole Hz) and scales
+    /// progress against it. Completes on Klipper's "Resonances data written to" line; there is no
     /// overall deadline (the caller owns stall detection and cancels).
-    [[nodiscard]] virtual BeltRunCancel test_belt_resonance(const std::string& axis_param,
-                                                            const std::string& output_name,
-                                                            BeltSweepProgressCallback on_progress,
-                                                            BeltCurveCallback on_complete,
-                                                            ErrorCallback on_error) = 0;
+    [[nodiscard]] virtual BeltRunCancel test_belt_resonance(
+        const std::string& axis_param, const std::string& output_name,
+        BeltSweepProgressCallback on_progress, BeltResponseCallback on_complete,
+        ErrorCallback on_error,
+        std::optional<helix::calibration::BeltSweepWindow> window = std::nullopt) = 0;
 };
 
 /**
@@ -441,8 +468,8 @@ class IAdvancedAPI {
  */
 class IRestAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using RestCallback = std::function<void(const RestResponse&)>;
 
     virtual ~IRestAPI() = default;
@@ -457,8 +484,6 @@ class IRestAPI {
     virtual void wled_set_strip(const std::string& strip, const std::string& action, int brightness,
                                 int preset, SuccessCallback on_success, ErrorCallback on_error) = 0;
 
-    virtual void wled_get_status(RestCallback on_success, ErrorCallback on_error) = 0;
-
     virtual void get_server_config(RestCallback on_success, ErrorCallback on_error) = 0;
 };
 
@@ -469,9 +494,9 @@ class IRestAPI {
  */
 class ITransfersAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
-    using StringCallback = std::function<void(const std::string&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
+    using StringCallback = helix::SharedCallback<void(const std::string&)>;
     using ProgressCallback = std::function<void(size_t current, size_t total)>;
     /// Set by the requester when it no longer wants the result: a request still
     /// queued is dropped unsent and reports an error instead.
@@ -501,10 +526,27 @@ class ITransfersAPI {
                                     size_t max_bytes, StringCallback on_success,
                                     ErrorCallback on_error) = 0;
 
+    /// Download @p len bytes of a file starting at @p offset (HTTP byte range):
+    /// how a ZIP entry is read out of an archive on the printer without
+    /// fetching the archive.
+    ///
+    /// Hands on exactly the bytes from @p offset, fewer when the file ends
+    /// first. A server that ignores Range and sends the whole file still
+    /// yields the right bytes: the leading @p offset are skipped and the
+    /// transfer stops once @p len have arrived.
+    virtual void download_file_range(const std::string& root, const std::string& path,
+                                     uint64_t offset, size_t len, StringCallback on_success,
+                                     ErrorCallback on_error, CancelFlag cancelled = nullptr) = 0;
+
     virtual void download_file_to_path(const std::string& root, const std::string& path,
                                        const std::string& dest_path, StringCallback on_success,
                                        ErrorCallback on_error,
                                        ProgressCallback on_progress = nullptr) = 0;
+
+    /// Whether download_file_range() can fetch bytes from inside a file.
+    virtual bool supports_range_reads() const {
+        return true;
+    }
 
     /// Whether download_file_to_path() can write a local copy. A transport with
     /// nowhere to keep one answers false, and callers skip the request.
@@ -525,9 +567,15 @@ class ITransfersAPI {
                              const std::string& content, SuccessCallback on_success,
                              ErrorCallback on_error) = 0;
 
+    /// Which HTTP lane an in-memory upload takes: Fast for a few KB (config,
+    /// macros), Bulk for anything up to megabytes, so it never queues
+    /// small REST work behind it.
+    enum class UploadLane { Fast, Bulk };
+
     virtual void upload_file_with_name(const std::string& root, const std::string& path,
                                        const std::string& filename, const std::string& content,
-                                       SuccessCallback on_success, ErrorCallback on_error) = 0;
+                                       SuccessCallback on_success, ErrorCallback on_error,
+                                       UploadLane lane = UploadLane::Fast) = 0;
 
     virtual void upload_file_from_path(const std::string& root, const std::string& dest_path,
                                        const std::string& local_path, SuccessCallback on_success,
@@ -542,8 +590,8 @@ class ITransfersAPI {
  */
 class ISpoolmanAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
 
     virtual ~ISpoolmanAPI() = default;
 
@@ -578,6 +626,14 @@ class ISpoolmanAPI {
     virtual void update_spoolman_filament_color(int filament_id, const std::string& color_hex,
                                                 SuccessCallback on_success,
                                                 ErrorCallback on_error) = 0;
+
+    /// Set a numeric extra field on a filament. Spoolman rejects an extra key
+    /// it has no field definition for, so the field is defined first (as a
+    /// float named @p display_name) when it does not exist yet.
+    virtual void set_spoolman_filament_extra_number(int filament_id, const std::string& key,
+                                                    const std::string& display_name, double value,
+                                                    SuccessCallback on_success,
+                                                    ErrorCallback on_error) = 0;
 
     virtual void get_spoolman_vendors(helix::VendorListCallback on_success,
                                       ErrorCallback on_error) = 0;
@@ -624,10 +680,11 @@ class ISpoolmanAPI {
  */
 class ITimelapseAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
     using TimelapseSettingsCallback = std::function<void(const TimelapseSettings&)>;
     using WebcamListCallback = std::function<void(const std::vector<WebcamInfo>&)>;
+    using WebcamCallback = std::function<void(const WebcamInfo&)>;
 
     virtual ~ITimelapseAPI() = default;
 
@@ -648,4 +705,18 @@ class ITimelapseAPI {
                                      ErrorCallback on_error) = 0;
 
     virtual void get_webcam_list(WebcamListCallback on_success, ErrorCallback on_error) = 0;
+
+    /// Add or update a webcam in Moonraker's registry: server.webcams.post_item. An item
+    /// carrying a `uid` updates that entry (404 when it is gone) and keeps its name unless
+    /// the item names one; otherwise the entry is matched by name. @p on_success gets the
+    /// entry as Moonraker stored it, uid included.
+    virtual void post_webcam(const nlohmann::json& item, WebcamCallback on_success,
+                             ErrorCallback on_error) = 0;
+
+    /// Remove @p cam from the registry: server.webcams.delete_item by its uid, or by its
+    /// name when it has none.
+    virtual void delete_webcam(const WebcamInfo& cam, SuccessCallback on_success,
+                               ErrorCallback on_error) = 0;
 };
+
+} // namespace helix

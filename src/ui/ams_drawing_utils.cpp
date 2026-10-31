@@ -5,6 +5,7 @@
 #include "ams_backend.h"
 #include "ams_state.h"
 #include "display_numbering.h"
+#include "sort_small.h"
 #include "theme_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -134,8 +135,8 @@ lv_obj_t* create_transparent_container(lv_obj_t* parent) {
 static void pulse_scale_anim_cb(void* var, int32_t value) {
     auto* obj = static_cast<lv_obj_t*>(var);
     lv_obj_set_style_transform_scale(obj, value, LV_PART_MAIN);
-    int32_t range = PULSE_SCALE_MAX - PULSE_SCALE_MIN;
-    int32_t progress = value - PULSE_SCALE_MIN;
+    int32_t range = kPulseScaleMax - kPulseScaleMin;
+    int32_t progress = value - kPulseScaleMin;
     int32_t shadow = progress * 8 / range;
     lv_obj_set_style_shadow_width(obj, shadow, LV_PART_MAIN);
     lv_opa_t shadow_opa = static_cast<lv_opa_t>(progress * 180 / range);
@@ -163,9 +164,9 @@ void start_pulse(lv_obj_t* dot, lv_color_t base_color) {
     lv_anim_t sa;
     lv_anim_init(&sa);
     lv_anim_set_var(&sa, dot);
-    lv_anim_set_values(&sa, PULSE_SCALE_MAX, PULSE_SCALE_MIN);
-    lv_anim_set_time(&sa, PULSE_DURATION_MS);
-    lv_anim_set_playback_time(&sa, PULSE_DURATION_MS);
+    lv_anim_set_values(&sa, kPulseScaleMax, kPulseScaleMin);
+    lv_anim_set_time(&sa, kPulseDurationMs);
+    lv_anim_set_playback_time(&sa, kPulseDurationMs);
     lv_anim_set_repeat_count(&sa, LV_ANIM_REPEAT_INFINITE);
     lv_anim_set_path_cb(&sa, lv_anim_path_ease_in_out);
     lv_anim_set_exec_cb(&sa, pulse_scale_anim_cb);
@@ -174,9 +175,9 @@ void start_pulse(lv_obj_t* dot, lv_color_t base_color) {
     lv_anim_t ca;
     lv_anim_init(&ca);
     lv_anim_set_var(&ca, dot);
-    lv_anim_set_values(&ca, PULSE_SAT_MAX, PULSE_SAT_MIN);
-    lv_anim_set_time(&ca, PULSE_DURATION_MS);
-    lv_anim_set_playback_time(&ca, PULSE_DURATION_MS);
+    lv_anim_set_values(&ca, kPulseSatMax, kPulseSatMin);
+    lv_anim_set_time(&ca, kPulseDurationMs);
+    lv_anim_set_playback_time(&ca, kPulseDurationMs);
     lv_anim_set_repeat_count(&ca, LV_ANIM_REPEAT_INFINITE);
     lv_anim_set_path_cb(&ca, lv_anim_path_ease_in_out);
     lv_anim_set_exec_cb(&ca, pulse_color_anim_cb);
@@ -191,12 +192,12 @@ void set_active_ring(lv_obj_t* target, bool active) {
         const lv_color_t primary = theme_manager_get_color("primary");
         lv_obj_set_style_border_color(target, primary, LV_PART_MAIN);
         lv_obj_set_style_border_opa(target, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(target, ACTIVE_RING_BORDER_WIDTH, LV_PART_MAIN);
+        lv_obj_set_style_border_width(target, kActiveRingBorderWidth, LV_PART_MAIN);
         // Outer glow using shadow
-        lv_obj_set_style_shadow_width(target, ACTIVE_RING_GLOW_WIDTH, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(target, kActiveRingGlowWidth, LV_PART_MAIN);
         lv_obj_set_style_shadow_color(target, primary, LV_PART_MAIN);
         lv_obj_set_style_shadow_opa(target, LV_OPA_50, LV_PART_MAIN);
-        lv_obj_set_style_shadow_spread(target, ACTIVE_RING_GLOW_SPREAD, LV_PART_MAIN);
+        lv_obj_set_style_shadow_spread(target, kActiveRingGlowSpread, LV_PART_MAIN);
     } else {
         lv_obj_set_style_border_opa(target, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_border_width(target, 0, LV_PART_MAIN);
@@ -262,12 +263,11 @@ SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_h
 
     // Column container (bar + status line)
     col.container = create_transparent_container(parent);
-    lv_obj_set_size(col.container, bar_width,
-                    bar_height + STATUS_LINE_HEIGHT_PX + STATUS_LINE_GAP_PX);
+    lv_obj_set_size(col.container, bar_width, bar_height + kStatusLineHeightPx + kStatusLineGapPx);
     lv_obj_set_flex_flow(col.container, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(col.container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(col.container, STATUS_LINE_GAP_PX, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(col.container, kStatusLineGapPx, LV_PART_MAIN);
 
     // Bar background (outline container)
     col.bar_bg = create_transparent_container(col.container);
@@ -281,7 +281,7 @@ SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_h
 
     // Status line below bar
     col.status_line = create_transparent_container(col.container);
-    lv_obj_set_size(col.status_line, bar_width, STATUS_LINE_HEIGHT_PX);
+    lv_obj_set_size(col.status_line, bar_width, kStatusLineHeightPx);
     lv_obj_set_style_radius(col.status_line, bar_radius / 2, LV_PART_MAIN);
 
     return col;
@@ -291,20 +291,12 @@ SlotColumn create_slot_column(lv_obj_t* parent, int32_t bar_width, int32_t bar_h
 // Logo Helpers
 // ============================================================================
 
-const char* unit_logo_path(const helix::AmsUnit& unit, const helix::AmsSystemInfo& info) {
-    const char* path = helix::AmsState::get_logo_path(unit.name);
-    if (!path || !path[0]) {
-        path = helix::AmsState::get_logo_path(info.type_name);
-    }
-    return path;
-}
-
 void apply_logo(lv_obj_t* image, const helix::AmsUnit& unit, const helix::AmsSystemInfo& info) {
     if (!image) {
         return;
     }
 
-    const char* path = unit_logo_path(unit, info);
+    const char* path = helix::AmsState::get_unit_logo(unit, info).path;
 
     if (path && path[0]) {
         lv_image_set_src(image, path);
@@ -348,16 +340,38 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
     // never recorded here stay unknown (empty) — see physical_to_extruder_name.
     std::map<int, std::string> physical_extruder_names;
 
+    // The reverse: extruder name -> the nozzle it already owns. Written as
+    // nozzles are placed, so a later unit naming the same extruder - including a
+    // unit whose topology differs from the one that placed it - shares that
+    // physical nozzle instead of adding another. One physical head fed through
+    // two paths is one nozzle on the canvas no matter which path draws it.
+    std::map<std::string, int> extruder_to_phys;
+
+    // The physical nozzles each unit feeds, in its own lane order - one entry
+    // per unit, parallel to result.units. Under the share rule a unit's
+    // nozzles are not necessarily contiguous from first_physical_tool, so the
+    // label loop reads these instead of assuming first + t.
+    std::vector<std::vector<int>> unit_nozzle_positions;
+
     // Record the extruder that owns a physical nozzle, ignoring empty names and
     // refusing to overwrite a differing earlier answer (shared HUB nozzles).
-    auto record_extruder = [&physical_extruder_names](int phys, const std::string& name) {
+    // A conflicting answer also drops the reverse entry: a nozzle two extruders
+    // claim is not identifiable, so nothing may share on it.
+    auto record_extruder = [&physical_extruder_names, &extruder_to_phys](int phys,
+                                                                         const std::string& name) {
         if (name.empty()) {
             return;
         }
         auto [it, inserted] = physical_extruder_names.emplace(phys, name);
-        if (!inserted && it->second != name) {
-            it->second.clear(); // conflicting claims -> unknown, never a guess
+        if (inserted) {
+            extruder_to_phys.emplace(name, phys);
+            return;
         }
+        if (it->second == name) {
+            return;
+        }
+        extruder_to_phys.erase(it->second);
+        it->second.clear(); // conflicting claims -> unknown, never a guess
     };
 
     for (int i = 0; i < static_cast<int>(info.units.size()); ++i) {
@@ -387,70 +401,15 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
         utl.min_virtual_tool = min_tool;
         utl.hub_tool_label = unit.hub_tool_label;
         utl.hub_id = unit.hub_id;
-
-        // Cross-unit head sharing. A unit whose lanes all feed heads that an
-        // EARLIER unit already owns is a *source* for those heads, not a new set
-        // of heads, so it reuses their physical nozzles instead of allocating
-        // its own: a multiACE unit's bays all map to the toolchanger head it is
-        // bound to, and allocating would draw one nozzle more than the machine
-        // has. (The HUB branch below shares by hub_tool_label; this is the same
-        // idea keyed on mapped_tool, which every unit populates.)
-        //
-        // Guarded so other multi-unit rigs keep their layout: every one of this
-        // unit's mapped tools must already be claimed (a unit that adds even
-        // one new head allocates normally), each by a unit of several heads
-        // (two hubs on one nozzle are the HUB branch's to group), the reused
-        // nozzles must form a contiguous ascending run (UnitToolLayout can only
-        // express first+count), and units with no mapped_tool at all fall
-        // through.
-        std::vector<int> shared_phys;
-        if (!unit.absent && min_tool >= 0) {
-            auto owned_by_heads_unit = [&result](int phys) {
-                return std::any_of(
-                    result.units.begin(), result.units.end(), [phys](const UnitToolLayout& prev) {
-                        return prev.tool_count > 1 && phys >= prev.first_physical_tool &&
-                               phys < prev.first_physical_tool + prev.tool_count;
-                    });
-            };
-            bool all_claimed = true;
-            for (const auto& slot : unit.slots) {
-                if (slot.mapped_tool < 0) {
-                    continue;
-                }
-                auto it = result.virtual_to_physical.find(slot.mapped_tool);
-                if (it == result.virtual_to_physical.end() || !owned_by_heads_unit(it->second)) {
-                    all_claimed = false;
-                    break;
-                }
-                shared_phys.push_back(it->second);
-            }
-            std::sort(shared_phys.begin(), shared_phys.end());
-            shared_phys.erase(std::unique(shared_phys.begin(), shared_phys.end()),
-                              shared_phys.end());
-            for (size_t k = 1; all_claimed && k < shared_phys.size(); ++k) {
-                if (shared_phys[k] != shared_phys[k - 1] + 1) {
-                    all_claimed = false;
-                }
-            }
-            if (!all_claimed) {
-                shared_phys.clear();
-            }
-        }
+        // One positions entry per unit, whatever branch places it (a unit
+        // matching no branch places none, but still takes a slot here).
+        unit_nozzle_positions.emplace_back();
 
         if (unit.absent) {
             // A box that is not on the bus feeds no nozzle, so the units around
             // it number their nozzles as if it were not there.
             utl.first_physical_tool = total_physical;
             utl.tool_count = 0;
-        } else if (!shared_phys.empty()) {
-            utl.first_physical_tool = shared_phys.front();
-            utl.tool_count = static_cast<int>(shared_phys.size());
-            for (const auto& slot : unit.slots) {
-                if (slot.mapped_tool < 0) {
-                    continue; // operator[] would insert a bogus -1 key
-                }
-                record_extruder(result.virtual_to_physical[slot.mapped_tool], slot.extruder_name);
-            }
         } else if (topo == helix::PathTopology::MIXED) {
             // MIXED: direct lanes each get their own nozzle position,
             // hub lanes share one nozzle position regardless of mapped_tool.
@@ -485,25 +444,57 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
             utl.tool_count = direct_count + (has_hub_group ? 1 : 0);
             utl.first_physical_tool = total_physical;
 
-            // Map direct lane tools to physical positions first (sorted)
-            std::sort(direct_tools.begin(), direct_tools.end());
-            int idx = 0;
-            for (const auto& [t, ext_name] : direct_tools) {
-                result.virtual_to_physical[t] = total_physical + idx;
-                physical_label_overrides[total_physical + idx] = t;
-                record_extruder(total_physical + idx, ext_name);
-                ++idx;
-            }
-            // Hub group gets last physical position
-            if (has_hub_group && hub_tool >= 0) {
-                result.virtual_to_physical[hub_tool] = total_physical + idx;
-                physical_label_overrides[total_physical + idx] = hub_tool;
-                for (const auto& ext_name : hub_extruders) {
-                    record_extruder(total_physical + idx, ext_name);
+            // Map direct lane tools to physical positions first (sorted). A
+            // direct lane naming an extruder a placed nozzle already belongs
+            // to shares it, exactly as a PARALLEL lane does; the rest take new
+            // positions. The hub group shares too when its lanes agree on one
+            // named extruder that is already placed.
+            helix::sort_small(direct_tools.begin(), direct_tools.end());
+            std::string hub_extruder;
+            for (const std::string& name : hub_extruders) {
+                if (name.empty())
+                    continue;
+                if (hub_extruder.empty()) {
+                    hub_extruder = name;
+                } else if (hub_extruder != name) {
+                    hub_extruder.clear(); // lanes disagree -> not one nozzle, do not guess
+                    break;
                 }
             }
+            int next_phys = total_physical;
+            int new_nozzles = 0;
+            auto claim = [&](const std::string& ext_name) {
+                if (!ext_name.empty()) {
+                    if (auto it = extruder_to_phys.find(ext_name); it != extruder_to_phys.end()) {
+                        return it->second;
+                    }
+                }
+                ++new_nozzles;
+                return next_phys++;
+            };
+            std::vector<int>& positions = unit_nozzle_positions.back();
+            positions.reserve(direct_tools.size() + 1);
+            for (const auto& [t, ext_name] : direct_tools) {
+                const int phys = claim(ext_name);
+                result.virtual_to_physical[t] = phys;
+                physical_label_overrides[phys] = t;
+                record_extruder(phys, ext_name);
+                positions.push_back(phys);
+            }
+            if (has_hub_group && hub_tool >= 0) {
+                const int phys = claim(hub_extruder);
+                result.virtual_to_physical[hub_tool] = phys;
+                physical_label_overrides[phys] = hub_tool;
+                for (const auto& ext_name : hub_extruders) {
+                    record_extruder(phys, ext_name);
+                }
+                positions.push_back(phys);
+            }
 
-            total_physical += utl.tool_count;
+            if (!positions.empty()) {
+                utl.first_physical_tool = *std::min_element(positions.begin(), positions.end());
+            }
+            total_physical += new_nozzles;
         } else if (topo != helix::PathTopology::PARALLEL) {
             // HUB/LINEAR: all lanes converge to a single physical nozzle.
             // Multiple HUB units feeding one extruder (e.g. a BoxTurtle and a
@@ -530,16 +521,23 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
             utl.extruder_identity = unit_extruder;
 
             int shared_phys = -1;
+            // Extruder NAME identity first: it reaches nozzles any topology
+            // placed, including a PARALLEL unit's per-lane nozzles. The scan
+            // below covers backends that publish a label or hub id but no
+            // per-lane extruder names.
+            if (!unit_extruder.empty()) {
+                if (auto it = extruder_to_phys.find(unit_extruder); it != extruder_to_phys.end()) {
+                    shared_phys = it->second;
+                }
+            }
             for (const auto& prev : result.units) {
-                if (prev.tool_count != 1) {
+                if (shared_phys >= 0 || prev.tool_count != 1) {
                     continue;
                 }
-                const bool same_extruder =
-                    !unit_extruder.empty() && prev.extruder_identity == unit_extruder;
                 const bool same_label =
                     unit.hub_tool_label >= 0 && prev.hub_tool_label == unit.hub_tool_label;
                 const bool same_hub = !unit.hub_id.empty() && prev.hub_id == unit.hub_id;
-                if (same_extruder || same_label || same_hub) {
+                if (same_label || same_hub) {
                     shared_phys = prev.first_physical_tool;
                     break;
                 }
@@ -548,6 +546,14 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
             if (shared_phys >= 0) {
                 // Reuse existing physical nozzle
                 utl.first_physical_tool = shared_phys;
+            } else if (min_tool < 0 && unit_extruder.empty() && unit.hub_tool_label < 0) {
+                // An unwired hub: no lane names a tool, an extruder or a label,
+                // so the unit converges on no head at all and feeds no nozzle.
+                // Its lanes end at the hub (PREP/NONE on the path).
+                utl.first_physical_tool = total_physical;
+                utl.tool_count = 0;
+                result.units.push_back(utl);
+                continue;
             } else {
                 utl.first_physical_tool = total_physical;
                 total_physical += 1;
@@ -579,6 +585,7 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
                 // lanes disagree, which would mean this is not really one nozzle.
                 record_extruder(phys, slot.extruder_name);
             }
+            unit_nozzle_positions.back().push_back(phys);
         } else if (min_tool >= 0) {
             // PARALLEL: each lane maps to its own physical nozzle.
             // Use distinct tool count (not max-min+1) to handle cross-unit remapping
@@ -609,28 +616,47 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
                 }
 
                 int lane_count = static_cast<int>(extruder_tools.size());
-                utl.first_physical_tool = physical_first;
-                utl.tool_count = lane_count;
-
-                // Assign each extruder group a physical position and record
-                // the correct label (min tool in group) for each physical slot
-                int idx = 0;
+                // A group naming an extruder a placed nozzle already belongs to
+                // shares that nozzle; the rest take new positions after it.
+                int next_phys = total_physical;
+                int new_nozzles = 0;
+                int first_phys = -1;
+                std::vector<int>& positions = unit_nozzle_positions.back();
+                positions.reserve(extruder_tools.size());
                 for (auto& [ext_name, tools] : extruder_tools) {
                     int min_in_group = *std::min_element(tools.begin(), tools.end());
-                    for (int t : tools) {
-                        result.virtual_to_physical[t] = physical_first + idx;
+                    int phys = -1;
+                    const bool named_extruder =
+                        !ext_name.empty() && ext_name.rfind("__tool_", 0) != 0;
+                    if (named_extruder) {
+                        if (auto it = extruder_to_phys.find(ext_name);
+                            it != extruder_to_phys.end()) {
+                            phys = it->second;
+                        }
                     }
-                    physical_label_overrides[physical_first + idx] = min_in_group;
+                    if (phys < 0) {
+                        phys = next_phys++;
+                        ++new_nozzles;
+                    }
+                    for (int t : tools) {
+                        result.virtual_to_physical[t] = phys;
+                    }
+                    physical_label_overrides[phys] = min_in_group;
                     // The group key IS the extruder identity for this nozzle. The
                     // synthetic "__tool_N" key used for nameless lanes is not an
                     // extruder name and is deliberately not recorded.
-                    if (ext_name.rfind("__tool_", 0) != 0) {
-                        record_extruder(physical_first + idx, ext_name);
+                    if (named_extruder) {
+                        record_extruder(phys, ext_name);
                     }
-                    ++idx;
+                    positions.push_back(phys);
+                    if (first_phys < 0 || phys < first_phys) {
+                        first_phys = phys;
+                    }
                 }
 
-                total_physical += lane_count;
+                utl.first_physical_tool = (first_phys >= 0) ? first_phys : physical_first;
+                utl.tool_count = lane_count;
+                total_physical += new_nozzles;
             } else {
                 // Original logic: group by unique mapped_tool
                 std::vector<int> mapped_tools;
@@ -646,9 +672,11 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
                 int lane_count = static_cast<int>(mapped_tools.size());
                 utl.first_physical_tool = physical_first;
                 utl.tool_count = lane_count;
-
+                std::vector<int>& positions = unit_nozzle_positions.back();
+                positions.resize(mapped_tools.size());
                 for (int j = 0; j < static_cast<int>(mapped_tools.size()); ++j) {
                     result.virtual_to_physical[mapped_tools[j]] = physical_first + j;
+                    positions[static_cast<size_t>(j)] = physical_first + j;
                 }
 
                 total_physical += lane_count;
@@ -657,6 +685,11 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
             // PARALLEL fallback: no mapped_tool data, use slot count
             utl.first_physical_tool = total_physical;
             utl.tool_count = static_cast<int>(unit.slots.size());
+            std::vector<int>& positions = unit_nozzle_positions.back();
+            positions.resize(static_cast<size_t>(utl.tool_count));
+            for (int t = 0; t < utl.tool_count; ++t) {
+                positions[static_cast<size_t>(t)] = total_physical + t;
+            }
             total_physical += utl.tool_count;
         }
 
@@ -665,56 +698,26 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
 
     result.total_physical_tools = total_physical;
 
-    // Which of its nozzles each unit actually FEEDS. Decided after every unit is
-    // placed, because a unit's slots resolve to physical nozzles through the
-    // finished virtual_to_physical map. One backend query per slot: a slot
-    // whose identity is owned by another unit (an ACE-fed U1 head) clears the
-    // bit for the nozzle it maps to. Without a backend nothing is owned
-    // elsewhere and every bit stays set.
-    for (size_t i = 0; i < result.units.size() && i < info.units.size(); ++i) {
-        auto& utl = result.units[i];
-        uint32_t mask = 0;
-        for (int t = 0; t < utl.tool_count && t < 32; ++t) {
-            mask |= (1u << t);
-        }
-        if (backend) {
-            const auto& unit = info.units[i];
-            for (size_t sl = 0; sl < unit.slots.size(); ++sl) {
-                const auto& slot = unit.slots[sl];
-                if (slot.mapped_tool < 0) {
-                    continue;
-                }
-                auto it = result.virtual_to_physical.find(slot.mapped_tool);
-                if (it == result.virtual_to_physical.end()) {
-                    continue;
-                }
-                const int t = it->second - utl.first_physical_tool;
-                if (t < 0 || t >= utl.tool_count || t >= 32) {
-                    continue;
-                }
-                if (backend->slot_identity_owner_unit(unit.first_slot_global_index +
-                                                      static_cast<int>(sl))) {
-                    mask &= ~(1u << t);
-                }
-            }
-        }
-        utl.feeds_mask = mask;
-    }
-
-    // Build physical→virtual label map
+    // Build physical→virtual label map. Positions come per unit (a unit's
+    // nozzles need not be contiguous under the share rule), so a shared unit
+    // never writes a label onto a nozzle between its own that belongs to
+    // another unit.
     result.physical_to_virtual_label.resize(total_physical, -1);
-    for (const auto& utl : result.units) {
+    for (size_t u = 0; u < result.units.size(); ++u) {
+        const auto& utl = result.units[u];
         // For each physical nozzle this unit owns, set the label.
         // HUB units with hub_tool_label: use that (derived from extruder name).
         // Otherwise: use min_virtual_tool (+ offset for PARALLEL).
-        for (int t = 0; t < utl.tool_count; ++t) {
-            int phys = utl.first_physical_tool + t;
-            if (phys < total_physical) {
+        const std::vector<int>& positions = unit_nozzle_positions[u];
+        for (size_t t = 0; t < positions.size(); ++t) {
+            int phys = positions[t];
+            if (phys >= 0 && phys < total_physical) {
                 if (utl.hub_tool_label >= 0 && utl.tool_count == 1) {
                     // HUB unit with explicit label from extruder name
                     result.physical_to_virtual_label[phys] = utl.hub_tool_label;
                 } else if (utl.min_virtual_tool >= 0) {
-                    result.physical_to_virtual_label[phys] = utl.min_virtual_tool + t;
+                    result.physical_to_virtual_label[phys] =
+                        utl.min_virtual_tool + static_cast<int>(t);
                 } else {
                     result.physical_to_virtual_label[phys] = phys;
                 }
@@ -738,8 +741,8 @@ SystemToolLayout compute_system_tool_layout(const helix::AmsSystemInfo& info,
     }
     result.display_order.resize(result.units.size());
     std::iota(result.display_order.begin(), result.display_order.end(), 0);
-    std::stable_sort(result.display_order.begin(), result.display_order.end(),
-                     [&order_key](int a, int b) { return order_key[a] < order_key[b]; });
+    helix::sort_small(result.display_order.begin(), result.display_order.end(),
+                      [&order_key](int a, int b) { return order_key[a] < order_key[b]; });
 
     // Physical→extruder-name map. Positions no branch could identify stay empty.
     result.physical_to_extruder_name.assign(total_physical, std::string());
@@ -768,15 +771,10 @@ ToolBadgeLabels compute_tool_badge_labels(const SystemToolLayout& layout,
     ToolBadgeLabels out;
 
     if (layout_has_extruder_identity(layout)) {
-        // 'T', not 'E': this labels a TOOLHEAD, which is what every other
-        // surface calls it, so it carries the tool's own 0-based number as
-        // tool_label() spells it. The extruder name is still what supplies the
-        // NUMBER: a virtual lane alias can disagree with the physical toolhead
-        // and an extruder name cannot (prestonbrown/helixscreen#1229).
-        out.prefix = 'T';
+        out.prefix = 'E';
         out.numbers.reserve(layout.physical_to_extruder_name.size());
         for (const auto& name : layout.physical_to_extruder_name) {
-            out.numbers.push_back(*helix::tool_number_for_extruder(name));
+            out.numbers.push_back(helix::ui::lane_number(*helix::tool_number_for_extruder(name)));
         }
         return out;
     }
@@ -858,6 +856,19 @@ void set_lane_badge_active(lv_obj_t* badge, bool active) {
 
 namespace helix::ui {
 
+bool unit_feeds_toolhead(const helix::AmsSystemInfo& info, const helix::AmsBackend* backend,
+                         int unit_index) {
+    if (unit_index < 0 || unit_index >= static_cast<int>(info.units.size())) {
+        return true;
+    }
+    if (info.units[static_cast<size_t>(unit_index)].absent) {
+        return false;
+    }
+    const auto layout = ams_draw::compute_system_tool_layout(info, backend);
+    return layout.total_physical_tools <= 1 ||
+           layout.units[static_cast<size_t>(unit_index)].tool_count > 0;
+}
+
 int overview_hub_group(const ams_draw::SystemToolLayout& layout, int unit) {
     if (unit < 0 || unit >= static_cast<int>(layout.units.size())) {
         return 0;
@@ -883,6 +894,24 @@ std::vector<int> hub_groups_of_tool(const ams_draw::SystemToolLayout& layout, in
         }
     }
     return groups;
+}
+
+std::string upstream_lane_caption(const helix::AmsSystemInfo& info,
+                                  const helix::AmsBackend& backend, int slot) {
+    const auto upstream = backend.upstream_slot(slot);
+    if (!upstream) {
+        return {};
+    }
+    for (size_t u = 0; u < info.units.size(); ++u) {
+        const helix::AmsUnit& unit = info.units[u];
+        if (*upstream >= unit.first_slot_global_index &&
+            *upstream < unit.first_slot_global_index + unit.slot_count) {
+            const int local = *upstream - unit.first_slot_global_index;
+            return unit_scoped_label(ams_draw::get_unit_display_name(unit, static_cast<int>(u)),
+                                     lane_number_text(local));
+        }
+    }
+    return {};
 }
 
 } // namespace helix::ui

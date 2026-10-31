@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_filename_utils.h"
+
 #include <string>
 
 namespace helix {
@@ -30,7 +32,7 @@ struct PrintJobRef {
 
     /// Full path used for metadata lookup.
     [[nodiscard]] std::string full_path() const {
-        return path.empty() ? filename : path + "/" + filename;
+        return gcode::join_gcode_path(path, filename);
     }
 };
 
@@ -44,8 +46,23 @@ struct PrintJobRef {
  * Cancelled  - the user abandoned the start.
  * TimedOut   - no confirmation arrived. Ungated: a commit-armed job can be
  *              raised on a printer that never reaches state=printing at all.
+ * EndedByPrinter - the printer took this job and ended it before reporting it
+ *              printing (a cancel queued behind its start sequence). Its own
+ *              terminal state reports the outcome, so this exit says nothing.
  */
-enum class PreparingExit { Confirmed, Superseded, Failed, Cancelled, TimedOut };
+enum class PreparingExit { Confirmed, Superseded, Failed, Cancelled, TimedOut, EndedByPrinter };
+
+/// How far the preparing job's start has got towards the printer. Int values
+/// are the wire format of the preparing_start subject.
+enum class PreparingStart : int {
+    None = 0,     ///< nothing sent, or the send was refused
+    InFlight = 1, ///< sent, not answered: the printer may or may not have it
+    Accepted = 2, ///< answered OK: the printer has received the start
+    /// The answer was lost: a timeout, or a dropped connection while a cancel
+    /// was requested. A timeout means Klipper is busy with the start, so a
+    /// cancel sent now queues behind it.
+    Unanswered = 3,
+};
 
 /// Human-readable name, for logs.
 const char* preparing_exit_name(PreparingExit reason);

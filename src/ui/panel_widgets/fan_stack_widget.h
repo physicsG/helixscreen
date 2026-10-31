@@ -94,6 +94,10 @@ class FanStackWidget : public PanelWidget {
     bool animations_enabled_ = false;
     bool rebuilding_carousel_ = false;
     uint32_t carousel_gen_ = 0;
+    /// The fans version the widget last bound to. The version observer's
+    /// first notification repeats the bind attach just ran, so it rebinds
+    /// only on a version it has not bound.
+    int bound_fans_version_ = -1;
 
     // Carousel mode: per-page tracking for arc + label + icon updates
     struct CarouselPage {

@@ -1,9 +1,14 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_update_queue.h"
+
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
 #include "moonraker_types.h"
 #include "operation_patterns.h"
 #include "print_start_analyzer.h"
+#include "printer_state.h"
 
 #include <algorithm> // for std::find
 #include <map>
@@ -20,7 +25,7 @@ using namespace helix;
 // ============================================================================
 
 // Basic Voron-style PRINT_START with bed mesh and QGL
-static const char* BASIC_PRINT_START = R"(
+static const char* kBasicPrintStart = R"(
 ; Basic PRINT_START with common operations
 G28                             ; Home all axes
 QUAD_GANTRY_LEVEL               ; Level the gantry
@@ -30,7 +35,7 @@ M109 S{params.EXTRUDER|default(210)|float}
 )";
 
 // Advanced PRINT_START with skip parameters already defined
-static const char* CONTROLLABLE_PRINT_START = R"(
+static const char* kControllablePrintStart = R"(
 {% set BED_TEMP = params.BED|default(60)|float %}
 {% set EXTRUDER_TEMP = params.EXTRUDER|default(210)|float %}
 {% set SKIP_BED_MESH = params.SKIP_BED_MESH|default(0)|int %}
@@ -51,7 +56,7 @@ M109 S{EXTRUDER_TEMP}
 )";
 
 // PRINT_START with only some operations controllable
-static const char* PARTIAL_CONTROLLABLE = R"(
+static const char* kPartialControllable = R"(
 {% set SKIP_MESH = params.SKIP_MESH|default(0)|int %}
 {% set BED = params.BED|default(60)|float %}
 
@@ -67,14 +72,14 @@ M109 S{params.EXTRUDER|default(210)|float}
 )";
 
 // Empty/minimal macro
-static const char* MINIMAL_PRINT_START = R"(
+static const char* kMinimalPrintStart = R"(
 G28
 M109 S{params.EXTRUDER}
 M190 S{params.BED}
 )";
 
 // Macro with alternative parameter patterns
-static const char* ALT_PATTERN_PRINT_START = R"(
+static const char* kAltPatternPrintStart = R"(
 {% set bed_temp = params.BED_TEMP|default(60)|float %}
 {% set nozzle_temp = params.NOZZLE_TEMP|default(210)|float %}
 {% set force_level = params.FORCE_LEVEL|default(0)|int %}
@@ -94,7 +99,7 @@ M190 S{bed_temp}
 // ============================================================================
 
 TEST_CASE("PrintStartAnalyzer: Basic operation detection", "[print_start][parsing]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", BASIC_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kBasicPrintStart);
 
     REQUIRE(result.found == true);
     REQUIRE(result.macro_name == "PRINT_START");
@@ -121,7 +126,7 @@ TEST_CASE("PrintStartAnalyzer: Basic operation detection", "[print_start][parsin
 }
 
 TEST_CASE("PrintStartAnalyzer: Controllable operation detection", "[print_start][parsing]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", CONTROLLABLE_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kControllablePrintStart);
 
     SECTION("Detects controllable operations") {
         REQUIRE(result.is_controllable == true);
@@ -181,7 +186,7 @@ G28
 }
 
 TEST_CASE("PrintStartAnalyzer: Partial controllability", "[print_start][parsing]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", PARTIAL_CONTROLLABLE);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kPartialControllable);
 
     SECTION("Detects mixed controllability") {
         REQUIRE(result.is_controllable == true);
@@ -204,7 +209,7 @@ TEST_CASE("PrintStartAnalyzer: Partial controllability", "[print_start][parsing]
 }
 
 TEST_CASE("PrintStartAnalyzer: Minimal macro", "[print_start][parsing]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", MINIMAL_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kMinimalPrintStart);
 
     SECTION("Detects only homing") {
         REQUIRE(result.total_ops_count == 1);
@@ -225,7 +230,7 @@ TEST_CASE("PrintStartAnalyzer: Minimal macro", "[print_start][parsing]") {
 }
 
 TEST_CASE("PrintStartAnalyzer: Alternative skip parameter patterns", "[print_start][parsing]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", ALT_PATTERN_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kAltPatternPrintStart);
 
     SECTION("Detects QGL with SKIP_GANTRY variant") {
         auto qgl = result.get_operation(PrintStartOpCategory::QGL);
@@ -275,7 +280,7 @@ TEST_CASE("PrintStartAnalyzer: category_to_string", "[print_start][helpers]") {
 
 TEST_CASE("PrintStartAnalyzer: summary generation", "[print_start][helpers]") {
     SECTION("Found macro summary") {
-        auto result = PrintStartAnalyzer::parse_macro("PRINT_START", CONTROLLABLE_PRINT_START);
+        auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kControllablePrintStart);
         auto summary = result.summary();
 
         REQUIRE(summary.find("PRINT_START") != std::string::npos);
@@ -409,7 +414,7 @@ TEST_CASE("PrintStart: get_all_skip_variations includes unified BED_LEVEL", "[pr
 // ============================================================================
 
 // Opt-in macro using PERFORM_* pattern (HelixScreen standard)
-static const char* PERFORM_PRINT_START = R"(
+static const char* kPerformPrintStart = R"(
 {% set bed_temp = params.BED_TEMP|default(60)|float %}
 {% set extruder_temp = params.EXTRUDER_TEMP|default(200)|float %}
 {% set perform_qgl = params.PERFORM_QGL|default(0)|int %}
@@ -430,7 +435,7 @@ M109 S{extruder_temp}
 )";
 
 // Opt-in macro using DO_* pattern (compatibility with existing helix_macros.cfg)
-static const char* DO_STYLE_PRINT_START = R"(
+static const char* kDoStylePrintStart = R"(
 {% set do_qgl = params.DO_QGL|default(0)|int %}
 {% set do_bed_mesh = params.DO_BED_MESH|default(0)|int %}
 {% set do_nozzle_clean = params.DO_NOZZLE_CLEAN|default(0)|int %}
@@ -451,7 +456,7 @@ G28
 )";
 
 // AD5M Klipper Mod style with FORCE_LEVELING (real-world compatibility)
-static const char* FORCE_LEVELING_PRINT_START = R"(
+static const char* kForceLevelingPrintStart = R"(
 {% set bed_temp = params.BED_TEMP|default(60)|float %}
 {% set extruder_temp = params.EXTRUDER_TEMP|default(200)|float %}
 {% set force_leveling = params.FORCE_LEVELING|default(false) %}
@@ -467,7 +472,7 @@ M109 S{extruder_temp}
 )";
 
 // Mixed macro with both SKIP_* (opt-out) and PERFORM_* (opt-in)
-static const char* MIXED_SEMANTIC_PRINT_START = R"(
+static const char* kMixedSemanticPrintStart = R"(
 {% set skip_qgl = params.SKIP_QGL|default(0)|int %}
 {% set perform_bed_mesh = params.PERFORM_BED_MESH|default(0)|int %}
 
@@ -483,7 +488,7 @@ G28
 )";
 
 // Uncontrollable macro - uses custom variable, not recognized pattern
-static const char* UNCONTROLLABLE_PRINT_START = R"(
+static const char* kUncontrollablePrintStart = R"(
 {% set bed_temp = params.BED_TEMP|default(60)|float %}
 
 G28
@@ -497,7 +502,7 @@ QUAD_GANTRY_LEVEL
 
 TEST_CASE("PrintStartAnalyzer: PERFORM_* opt-in pattern detection",
           "[print_start][perform][opt_in]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", PERFORM_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kPerformPrintStart);
 
     REQUIRE(result.found == true);
     REQUIRE(result.is_controllable == true);
@@ -525,7 +530,7 @@ TEST_CASE("PrintStartAnalyzer: PERFORM_* opt-in pattern detection",
 }
 
 TEST_CASE("PrintStartAnalyzer: DO_* opt-in pattern detection", "[print_start][perform][opt_in]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", DO_STYLE_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kDoStylePrintStart);
 
     REQUIRE(result.found == true);
     REQUIRE(result.is_controllable == true);
@@ -557,7 +562,7 @@ TEST_CASE("PrintStartAnalyzer: DO_* opt-in pattern detection", "[print_start][pe
 }
 
 TEST_CASE("PrintStartAnalyzer: FORCE_LEVELING compatibility", "[print_start][perform][opt_in]") {
-    auto result = PrintStartAnalyzer::parse_macro("START_PRINT", FORCE_LEVELING_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("START_PRINT", kForceLevelingPrintStart);
 
     REQUIRE(result.found == true);
 
@@ -572,7 +577,7 @@ TEST_CASE("PrintStartAnalyzer: FORCE_LEVELING compatibility", "[print_start][per
 
 TEST_CASE("PrintStartAnalyzer: Mixed semantic detection (SKIP_* and PERFORM_*)",
           "[print_start][perform][mixed]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", MIXED_SEMANTIC_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kMixedSemanticPrintStart);
 
     REQUIRE(result.found == true);
     REQUIRE(result.is_controllable == true);
@@ -597,7 +602,7 @@ TEST_CASE("PrintStartAnalyzer: Mixed semantic detection (SKIP_* and PERFORM_*)",
 
 TEST_CASE("PrintStartAnalyzer: Existing SKIP_* patterns retain OPT_OUT semantic",
           "[print_start][perform][backward_compat]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", CONTROLLABLE_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kControllablePrintStart);
 
     SECTION("SKIP_QGL has OPT_OUT semantic") {
         auto qgl = result.get_operation(PrintStartOpCategory::QGL);
@@ -613,7 +618,7 @@ TEST_CASE("PrintStartAnalyzer: Existing SKIP_* patterns retain OPT_OUT semantic"
 }
 
 TEST_CASE("PrintStartAnalyzer: Uncontrollable macro detection", "[print_start][perform][edge]") {
-    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", UNCONTROLLABLE_PRINT_START);
+    auto result = PrintStartAnalyzer::parse_macro("PRINT_START", kUncontrollablePrintStart);
 
     REQUIRE(result.found == true);
 
@@ -780,22 +785,22 @@ bool qgl_controllable(const helix::PrintStartAnalysis& result) {
     return qgl && qgl->has_skip_param;
 }
 
-const char* const UNCONTROLLED_START_PRINT_BODY = "[gcode_macro START_PRINT]\n"
-                                                  "gcode:\n"
-                                                  "  QUAD_GANTRY_LEVEL\n";
+const char* const kUncontrolledStartPrintBody = "[gcode_macro START_PRINT]\n"
+                                                "gcode:\n"
+                                                "  QUAD_GANTRY_LEVEL\n";
 
-const char* const WRAPPER_PRINT_START = "[gcode_macro PRINT_START]\n"
-                                        "gcode:\n"
-                                        "  START_PRINT {rawparams}\n";
+const char* const kWrapperPrintStart = "[gcode_macro PRINT_START]\n"
+                                       "gcode:\n"
+                                       "  START_PRINT {rawparams}\n";
 
-const char* const VORON_START_PRINT_BODY = "[gcode_macro START_PRINT]\n"
-                                           "gcode:\n"
-                                           "  {% set SKIP_QGL = params.SKIP_QGL|default(0)|int %}\n"
-                                           "  G28\n"
-                                           "  {% if SKIP_QGL == 0 %}\n"
-                                           "    QUAD_GANTRY_LEVEL\n"
-                                           "  {% endif %}\n"
-                                           "  BED_MESH_CALIBRATE\n";
+const char* const kVoronStartPrintBody = "[gcode_macro START_PRINT]\n"
+                                         "gcode:\n"
+                                         "  {% set SKIP_QGL = params.SKIP_QGL|default(0)|int %}\n"
+                                         "  G28\n"
+                                         "  {% if SKIP_QGL == 0 %}\n"
+                                         "    QUAD_GANTRY_LEVEL\n"
+                                         "  {% endif %}\n"
+                                         "  BED_MESH_CALIBRATE\n";
 
 } // namespace
 
@@ -803,7 +808,7 @@ TEST_CASE("PrintStartAnalyzer follows a wrapper into the macro it calls", "[prin
     auto result = analyze_single_file(std::string("[gcode_macro PRINT_START]\n"
                                                   "gcode:\n"
                                                   "  start_print {rawparams}\n\n") +
-                                      VORON_START_PRINT_BODY);
+                                      kVoronStartPrintBody);
 
     REQUIRE(result.found);
     REQUIRE(result.macro_name == "PRINT_START");
@@ -825,7 +830,7 @@ TEST_CASE("PrintStartAnalyzer keeps a nested skip param only when the call forwa
         auto result = analyze_single_file(std::string("[gcode_macro PRINT_START]\n"
                                                       "gcode:\n"
                                                       "  START_PRINT BED={params.BED}\n\n") +
-                                          VORON_START_PRINT_BODY);
+                                          kVoronStartPrintBody);
         const auto* qgl = result.get_operation(helix::PrintStartOpCategory::QGL);
         REQUIRE(qgl);
         REQUIRE_FALSE(qgl->has_skip_param);
@@ -836,7 +841,7 @@ TEST_CASE("PrintStartAnalyzer keeps a nested skip param only when the call forwa
             std::string("[gcode_macro PRINT_START]\n"
                         "gcode:\n"
                         "  START_PRINT SKIP_QGL={params.SKIP_QGL|default(0)}\n\n") +
-            VORON_START_PRINT_BODY);
+            kVoronStartPrintBody);
         const auto* qgl = result.get_operation(helix::PrintStartOpCategory::QGL);
         REQUIRE(qgl);
         REQUIRE(qgl->has_skip_param);
@@ -911,7 +916,7 @@ TEST_CASE("PrintStartAnalyzer does not follow an override of a detected operatio
 }
 
 TEST_CASE("PrintStartAnalyzer ignores a commented-out macro header", "[print_start][follow]") {
-    auto result = analyze_single_file(std::string(WRAPPER_PRINT_START) + VORON_START_PRINT_BODY +
+    auto result = analyze_single_file(std::string(kWrapperPrintStart) + kVoronStartPrintBody +
                                       "#[gcode_macro START_PRINT]\n"
                                       "#gcode:\n"
                                       "#  CLEAN_NOZZLE\n");
@@ -924,8 +929,8 @@ TEST_CASE("PrintStartAnalyzer ignores a commented-out macro header", "[print_sta
 TEST_CASE("PrintStartAnalyzer uses the last definition of a macro in Klipper's read order",
           "[print_start][follow]") {
     SECTION("within one file") {
-        auto result = analyze_single_file(std::string(WRAPPER_PRINT_START) +
-                                          VORON_START_PRINT_BODY + UNCONTROLLED_START_PRINT_BODY);
+        auto result = analyze_single_file(std::string(kWrapperPrintStart) + kVoronStartPrintBody +
+                                          kUncontrolledStartPrintBody);
         REQUIRE(result.has_operation(helix::PrintStartOpCategory::QGL));
         REQUIRE_FALSE(qgl_controllable(result));
         REQUIRE_FALSE(result.has_operation(helix::PrintStartOpCategory::HOMING));
@@ -933,34 +938,33 @@ TEST_CASE("PrintStartAnalyzer uses the last definition of a macro in Klipper's r
     SECTION("across files, in include order rather than name order") {
         auto result = analyze_files({{"printer.cfg", std::string("[include z_base.cfg]\n"
                                                                  "[include a_custom.cfg]\n") +
-                                                         WRAPPER_PRINT_START},
-                                     {"z_base.cfg", VORON_START_PRINT_BODY},
-                                     {"a_custom.cfg", UNCONTROLLED_START_PRINT_BODY}});
+                                                         kWrapperPrintStart},
+                                     {"z_base.cfg", kVoronStartPrintBody},
+                                     {"a_custom.cfg", kUncontrolledStartPrintBody}});
         REQUIRE(result.has_operation(helix::PrintStartOpCategory::QGL));
         REQUIRE_FALSE(qgl_controllable(result));
     }
     SECTION("an include after a section overrides it") {
         auto result =
-            analyze_files({{"printer.cfg", std::string(WRAPPER_PRINT_START) +
-                                               VORON_START_PRINT_BODY + "[include late.cfg]\n"},
-                           {"late.cfg", UNCONTROLLED_START_PRINT_BODY}});
+            analyze_files({{"printer.cfg", std::string(kWrapperPrintStart) + kVoronStartPrintBody +
+                                               "[include late.cfg]\n"},
+                           {"late.cfg", kUncontrolledStartPrintBody}});
         REQUIRE_FALSE(qgl_controllable(result));
     }
     SECTION("a section after an include overrides it") {
-        auto result =
-            analyze_files({{"printer.cfg", std::string("[include early.cfg]\n") +
-                                               WRAPPER_PRINT_START + VORON_START_PRINT_BODY},
-                           {"early.cfg", UNCONTROLLED_START_PRINT_BODY}});
+        auto result = analyze_files({{"printer.cfg", std::string("[include early.cfg]\n") +
+                                                         kWrapperPrintStart + kVoronStartPrintBody},
+                                     {"early.cfg", kUncontrolledStartPrintBody}});
         REQUIRE(qgl_controllable(result));
     }
     SECTION("a file included from two places is read at both") {
         auto result = analyze_files(
             {{"printer.cfg", std::string("[include a.cfg]\n"
                                          "[include b.cfg]\n") +
-                                 WRAPPER_PRINT_START},
+                                 kWrapperPrintStart},
              {"a.cfg", "[include common.cfg]\n"},
-             {"b.cfg", std::string(UNCONTROLLED_START_PRINT_BODY) + "[include common.cfg]\n"},
-             {"common.cfg", VORON_START_PRINT_BODY}});
+             {"b.cfg", std::string(kUncontrolledStartPrintBody) + "[include common.cfg]\n"},
+             {"common.cfg", kVoronStartPrintBody}});
         REQUIRE(qgl_controllable(result));
     }
     SECTION("the print start macro itself") {
@@ -982,7 +986,7 @@ TEST_CASE("PrintStartAnalyzer decides from the call line whether a skip param re
           "[print_start][follow]") {
     auto with_call = [](const std::string& call) {
         return analyze_single_file("[gcode_macro PRINT_START]\ngcode:\n  " + call + "\n" +
-                                   VORON_START_PRINT_BODY);
+                                   kVoronStartPrintBody);
     };
     SECTION("a guard testing for a param in params forwards nothing") {
         REQUIRE_FALSE(
@@ -1012,7 +1016,7 @@ TEST_CASE("PrintStartAnalyzer decides from the call line whether a skip param re
                                                       "[gcode_macro _STAGE]\n"
                                                       "gcode:\n"
                                                       "  START_PRINT {rawparams}\n") +
-                                          VORON_START_PRINT_BODY);
+                                          kVoronStartPrintBody);
         REQUIRE(result.macro_chain ==
                 std::vector<std::string>{"PRINT_START", "_STAGE", "START_PRINT"});
         REQUIRE_FALSE(qgl_controllable(result));
@@ -1029,7 +1033,7 @@ TEST_CASE("PrintStartAnalyzer decides from the call line whether a skip param re
 
 TEST_CASE("PrintStartAnalyzer follows at most MAX_FOLLOW_DEPTH calls deep",
           "[print_start][follow]") {
-    const int depth = helix::PrintStartAnalyzer::MAX_FOLLOW_DEPTH;
+    const int depth = helix::PrintStartAnalyzer::kMaxFollowDepth;
     std::string config = "[gcode_macro PRINT_START]\ngcode:\n  _L1\n";
     for (int i = 1; i <= depth + 1; ++i) {
         const std::string next = "_L" + std::to_string(i + 1);
@@ -1060,4 +1064,27 @@ TEST_CASE("PrintStartAnalyzer does not follow a numbered gcode override", "[prin
 
     REQUIRE(result.macro_chain == std::vector<std::string>{"PRINT_START"});
     REQUIRE_FALSE(result.has_operation(helix::PrintStartOpCategory::NOZZLE_CLEAN));
+}
+
+TEST_CASE("PrintStartAnalyzer::analyze stops at a printer teardown mid-walk",
+          "[print_start][include_walk_lifetime]") {
+    helix::PrinterState state;
+    MoonrakerClientMock client;
+    auto api = std::make_unique<MoonrakerAPIMock>(client, state);
+    api->set_config_files({{"printer.cfg", "[include macros.cfg]\n[printer]\n"},
+                           {"macros.cfg", "[gcode_macro PRINT_START]\ngcode:\n  G28\n"}});
+
+    PrintStartAnalyzer analyzer;
+    bool completed = false;
+    std::string error;
+    analyzer.analyze(
+        api.get(), [&](const helix::PrintStartAnalysis&) { completed = true; },
+        [&](const MoonrakerError& err) { error = err.message; });
+
+    helix::ui::UpdateQueue::instance().drain(); // printer.cfg arrives
+    api.reset();
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK_FALSE(completed);
+    CHECK(error.find("disconnected") != std::string::npos);
 }

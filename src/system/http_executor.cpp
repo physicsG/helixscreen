@@ -76,7 +76,7 @@ void HttpExecutor::stop(std::chrono::milliseconds join_timeout) {
     // Poll a per-worker done flag set at the end of the thread lambda — lets
     // us detach a worker that's stuck in a long HTTP call without blocking
     // the others.
-    constexpr auto POLL_INTERVAL = std::chrono::milliseconds(10);
+    constexpr auto kPollInterval = std::chrono::milliseconds(10);
     auto deadline = std::chrono::steady_clock::now() + join_timeout;
     for (auto& w : workers_) {
         while (!w->done.load()) {
@@ -87,7 +87,7 @@ void HttpExecutor::stop(std::chrono::milliseconds join_timeout) {
                 w->thread.detach();
                 break;
             }
-            std::this_thread::sleep_for(POLL_INTERVAL);
+            std::this_thread::sleep_for(kPollInterval);
         }
         if (w->thread.joinable()) {
             w->thread.join();

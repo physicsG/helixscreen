@@ -16,6 +16,9 @@
 #include "discovery_steps.h"
 #include "display_settings_manager.h"
 #include "filament_consumption_tracker.h"
+#if !defined(HELIX_PLATFORM_ESP32)
+#include "glass_painter.h"
+#endif
 #include "http_request_epoch.h"
 #include "lap_log.h"
 #include "led/led_controller.h"
@@ -217,6 +220,10 @@ lv_obj_t* create_app_layout(lv_obj_t* screen,
         return nullptr;
     }
     NavigationManager::instance().wire_events(navbar);
+#if !defined(HELIX_PLATFORM_ESP32)
+    // The navbar fills itself with card_bg locally rather than carrying the Card style.
+    ui::glass_mark(navbar, ui::GlassFamily::Surface);
+#endif
     NavigationManager::instance().set_printer_callbacks(std::move(on_switch_printer),
                                                         std::move(on_add_printer));
     return app_layout;

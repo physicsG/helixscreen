@@ -121,7 +121,7 @@ TEST_CASE_METHOD(MigrationV25Fixture, "v25 re-keys stored phase ordinals to phas
                         {"print_start_history", v11_history()},
                         {"printers", {{"voron", {{"moonraker_host", "192.168.1.112"}}}}}});
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
 
     const json phases = phases_of(0);
     INFO("phases after migration: " << phases.dump());
@@ -223,6 +223,6 @@ TEST_CASE_METHOD(MigrationV25Fixture, "v25 tolerates a history with no phases ob
                                         json{{"total", 60}, {"phases", {{"2", 30}}}}})}}},
              {"printers", {{"voron", {{"moonraker_host", "192.168.1.112"}}}}}});
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
     CHECK(phases_of(2).value("HOMING", -1) == 30);
 }

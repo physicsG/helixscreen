@@ -45,15 +45,15 @@ namespace {
 /// Layers in the synthetic file. Far short of the ~5000 the 133MB K2 file
 /// carries, but well past any plausible sampling budget, which is what makes
 /// the difference between "bounded" and "one per layer" unambiguous.
-constexpr int SYNTH_LAYERS = 2000;
+constexpr int kSynthLayers = 2000;
 
 /// Moves per layer — enough that a layer is a real parse rather than one line.
-constexpr int MOVES_PER_LAYER = 40;
+constexpr int kMovesPerLayer = 40;
 
 /// Canvas the ghost renders into. 320 rows is representative of the preview on
 /// a 480x800 panel, and is what sets the sampling budget.
-constexpr int CANVAS_W = 400;
-constexpr int CANVAS_H = 320;
+constexpr int kCanvasW = 400;
+constexpr int kCanvasH = 320;
 
 /// A G-code file with a known layer count, shaped like a sliced print: a Z
 /// move opening each layer, then extrusions that trace a square.
@@ -147,7 +147,7 @@ struct StreamingFixture {
     CountingDataSource* counter = nullptr;
     GCodeStreamingController controller;
 
-    StreamingFixture() : file(make_layered_gcode(SYNTH_LAYERS, MOVES_PER_LAYER)) {
+    StreamingFixture() : file(make_layered_gcode(kSynthLayers, kMovesPerLayer)) {
         auto source = std::make_unique<CountingDataSource>(file.path());
         counter = source.get();
         REQUIRE(controller.open_source(std::move(source)));
@@ -177,6 +177,70 @@ std::string make_tall_narrow_gcode(int layers) {
     return out.str();
 }
 
+/// Which ghost-buffer rows carry ink. In the FRONT view a layer's Z is its row,
+/// so a stride too coarse for the model shows as a gap between first and last.
+struct InkRows {
+    int first = -1;
+    int last = -1;
+    int inked = 0;
+    int largest_gap = 0;
+};
+
+InkRows scan_ghost_rows(GCodeLayerRenderer& renderer) {
+    const uint8_t* px = GCodeLayerRendererTestAccess::ghost_pixels(renderer);
+    REQUIRE(px != nullptr);
+    const int gw = GCodeLayerRendererTestAccess::ghost_width(renderer);
+    const int gh = GCodeLayerRendererTestAccess::ghost_height(renderer);
+    const size_t stride = GCodeLayerRendererTestAccess::ghost_stride(renderer);
+
+    auto row_has_ink = [&](int y) {
+        const uint8_t* row = px + static_cast<size_t>(y) * stride;
+        for (int x = 0; x < gw; ++x) {
+            if (row[x * 4 + 3] != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    InkRows r;
+    for (int y = 0; y < gh; ++y) {
+        if (row_has_ink(y)) {
+            if (r.first < 0) {
+                r.first = y;
+            }
+            r.last = y;
+            ++r.inked;
+        }
+    }
+    int run = 0;
+    for (int y = r.first; r.first >= 0 && y <= r.last; ++y) {
+        run = row_has_ink(y) ? 0 : run + 1;
+        r.largest_gap = std::max(r.largest_gap, run);
+    }
+    return r;
+}
+
+/// A wide, flat plate: a large footprint and little height, the multiboard
+/// shape whose big files the CC1 chokes on. Hundreds of layers, but the model's
+/// Z extent spans only a few dozen canvas rows.
+std::string make_flat_wide_gcode(int layers, double layer_height) {
+    std::ostringstream out;
+    out << "; synthetic flat-wide ghost fixture\nG28\nG90\nM82\n";
+    double e = 0.0;
+    for (int layer = 0; layer < layers; ++layer) {
+        out << "G1 Z" << (layer_height * (layer + 1)) << " F1200\n";
+        for (int move = 0; move < 16; ++move) {
+            const double x = 20.0 + (move % 4) * 60.0;
+            const double y = 20.0 + ((move / 4) % 4) * 60.0;
+            e += 0.05;
+            out << "G1 X" << x << " Y" << y << " E" << e << " F1800\n";
+        }
+    }
+    out << "; end\n";
+    return out.str();
+}
+
 } // namespace
 
 TEST_CASE("ghost pass over a streamed file does not read one layer per layer",
@@ -186,10 +250,10 @@ TEST_CASE("ghost pass over a streamed file does not read one layer per layer",
     const int layer_count = static_cast<int>(fx.controller.get_layer_count());
     // The fixture is only meaningful if the index found roughly the layers it
     // was built with, and enough of them to exceed any sampling budget.
-    REQUIRE(layer_count > ghost_sample_budget(CANVAS_H) * 2);
+    REQUIRE(layer_count > ghost_sample_budget(kCanvasH) * 2);
 
     GCodeLayerRenderer renderer;
-    renderer.set_canvas_size(CANVAS_W, CANVAS_H);
+    renderer.set_canvas_size(kCanvasW, kCanvasH);
     renderer.set_streaming_controller(&fx.controller);
 
     // Everything before this point — the index build in particular — is not what
@@ -203,9 +267,9 @@ TEST_CASE("ghost pass over a streamed file does not read one layer per layer",
     CHECK(GCodeLayerRendererTestAccess::ghost_completed(renderer));
 
     const size_t reads = fx.counter->reads();
-    const auto plan = plan_ghost_sampling(layer_count, /*streaming=*/true, CANVAS_H);
+    const auto plan = plan_ghost_sampling(layer_count, /*streaming=*/true, kCanvasH);
     INFO("layers=" << layer_count << " reads=" << reads << " planned=" << plan.count
-                   << " budget=" << ghost_sample_budget(CANVAS_H));
+                   << " budget=" << ghost_sample_budget(kCanvasH));
 
     // The regression: one seek-and-parse per layer of the file, plus the
     // neighbours each one warmed. Anything near the layer count is that bug.
@@ -222,10 +286,10 @@ TEST_CASE("ghost pass does not drive the prefetch worker across the file",
     StreamingFixture fx;
 
     const int layer_count = static_cast<int>(fx.controller.get_layer_count());
-    REQUIRE(layer_count > ghost_sample_budget(CANVAS_H) * 2);
+    REQUIRE(layer_count > ghost_sample_budget(kCanvasH) * 2);
 
     GCodeLayerRenderer renderer;
-    renderer.set_canvas_size(CANVAS_W, CANVAS_H);
+    renderer.set_canvas_size(kCanvasW, kCanvasH);
     renderer.set_streaming_controller(&fx.controller);
 
     fx.controller.wait_for_prefetch_idle();
@@ -239,7 +303,7 @@ TEST_CASE("ghost pass does not drive the prefetch worker across the file",
     fx.controller.wait_for_prefetch_idle();
 
     const size_t reads = fx.counter->reads();
-    const auto plan = plan_ghost_sampling(layer_count, /*streaming=*/true, CANVAS_H);
+    const auto plan = plan_ghost_sampling(layer_count, /*streaming=*/true, kCanvasH);
     INFO("layers=" << layer_count << " reads=" << reads << " planned=" << plan.count);
 
     // Each get_layer_segments() used to schedule a prefetch of radius 3 around
@@ -256,7 +320,7 @@ TEST_CASE("a streamed ghost still spans the whole model", "[gcode][ghost][stream
     // what counts as a layer.
     StreamingFixture fx;
     const int layer_count = static_cast<int>(fx.controller.get_layer_count());
-    const auto plan = plan_ghost_sampling(layer_count, /*streaming=*/true, CANVAS_H);
+    const auto plan = plan_ghost_sampling(layer_count, /*streaming=*/true, kCanvasH);
 
     const int last_visited = plan.step * (plan.count - 1);
     INFO("layers=" << layer_count << " step=" << plan.step << " last=" << last_visited);
@@ -282,41 +346,17 @@ TEST_CASE("a streamed ghost leaves no empty row inside the model",
     GCodeStreamingController controller;
     REQUIRE(controller.open_file(file.path()));
     REQUIRE(controller.is_open());
-    REQUIRE(controller.get_layer_count() > static_cast<size_t>(ghost_sample_budget(CANVAS_H)));
+    REQUIRE(controller.get_layer_count() > static_cast<size_t>(ghost_sample_budget(kCanvasH)));
 
     GCodeLayerRenderer renderer;
-    renderer.set_canvas_size(CANVAS_W, CANVAS_H);
+    renderer.set_canvas_size(kCanvasW, kCanvasH);
     renderer.set_streaming_controller(&controller);
 
     GCodeLayerRendererTestAccess::run_ghost_pass(renderer);
     REQUIRE(GCodeLayerRendererTestAccess::ghost_completed(renderer));
 
-    const uint8_t* px = GCodeLayerRendererTestAccess::ghost_pixels(renderer);
-    REQUIRE(px != nullptr);
-    const int gw = GCodeLayerRendererTestAccess::ghost_width(renderer);
-    const int gh = GCodeLayerRendererTestAccess::ghost_height(renderer);
-    const size_t stride = GCodeLayerRendererTestAccess::ghost_stride(renderer);
-
-    auto row_has_ink = [&](int y) {
-        const uint8_t* row = px + static_cast<size_t>(y) * stride;
-        for (int x = 0; x < gw; ++x) {
-            if (row[x * 4 + 3] != 0) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    int first = -1, last = -1, inked = 0;
-    for (int y = 0; y < gh; ++y) {
-        if (row_has_ink(y)) {
-            if (first < 0) {
-                first = y;
-            }
-            last = y;
-            ++inked;
-        }
-    }
+    const InkRows ink = scan_ghost_rows(renderer);
+    const int first = ink.first, last = ink.last, inked = ink.inked;
     REQUIRE(first >= 0);
     // The model must occupy enough of the canvas for a gap to be meaningful.
     // It does not fill it: auto-fit sizes against the bed, so even 200mm of Z
@@ -328,12 +368,72 @@ TEST_CASE("a streamed ghost leaves no empty row inside the model",
     // contiguous silhouette rather than a comb.
     REQUIRE(last - first > 50);
 
-    int largest_gap = 0, run = 0;
-    for (int y = first; y <= last; ++y) {
-        run = row_has_ink(y) ? 0 : run + 1;
-        largest_gap = std::max(largest_gap, run);
-    }
+    const int largest_gap = ink.largest_gap;
     INFO("layers=" << controller.get_layer_count() << " rows " << first << ".." << last
                    << " inked=" << inked << " largest_gap=" << largest_gap);
     CHECK(largest_gap == 0);
+}
+
+namespace {
+
+struct FlatPlateRun {
+    size_t reads = 0;
+    InkRows ink;
+};
+
+/// One ghost pass over a 400-layer, 20mm plate on a board that scanned its index
+/// at @p index_rate MB/cpu-s.
+FlatPlateRun run_flat_plate_ghost(double index_rate) {
+    const int layers = 400;
+    TempFile file(make_flat_wide_gcode(layers, 0.05));
+    auto source = std::make_unique<CountingDataSource>(file.path());
+    CountingDataSource* counter = source.get();
+    GCodeStreamingController controller;
+    REQUIRE(controller.open_source(std::move(source)));
+    REQUIRE(controller.get_layer_count() >= static_cast<size_t>(layers - 1));
+    controller.set_index_throughput_for_test(index_rate);
+
+    GCodeLayerRenderer renderer;
+    renderer.set_canvas_size(kCanvasW, kCanvasH);
+    renderer.set_streaming_controller(&controller);
+    controller.wait_for_prefetch_idle();
+    counter->reset();
+
+    GCodeLayerRendererTestAccess::run_ghost_pass(renderer);
+    REQUIRE(GCodeLayerRendererTestAccess::ghost_completed(renderer));
+    return {counter->reads(), scan_ghost_rows(renderer)};
+}
+
+} // namespace
+
+TEST_CASE("a streamed flat plate's ghost reads layers for the rows it spans, not the canvas",
+          "[gcode][ghost][streaming][cost]") {
+    // 400 layers of 0.05mm is a 20mm plate across ~180mm of bed: auto-fit makes
+    // it width-constrained, so its Z spans a small slice of the canvas, and the
+    // canvas rule alone would visit every one of its 400 layers.
+    REQUIRE(plan_ghost_sampling(400, /*streaming=*/true, kCanvasH).count == 400);
+
+    const FlatPlateRun fast = run_flat_plate_ghost(kWeakIndexRateMbPerCpuS * 10);
+    INFO("fast reads=" << fast.reads);
+    CHECK(fast.reads <= 400u / 3);
+    CHECK(fast.reads >= static_cast<size_t>(kGhostMinModelSamples));
+
+    // Fewer layers, and still no banding across the plate's front face.
+    REQUIRE(fast.ink.first >= 0);
+    INFO("rows " << fast.ink.first << ".." << fast.ink.last
+                 << " largest_gap=" << fast.ink.largest_gap);
+    CHECK(fast.ink.largest_gap == 0);
+}
+
+TEST_CASE("a CPU-poor board's ghost takes half the samples, still without banding",
+          "[gcode][ghost][streaming][cost]") {
+    const FlatPlateRun fast = run_flat_plate_ghost(kWeakIndexRateMbPerCpuS * 10);
+    const FlatPlateRun slow = run_flat_plate_ghost(kWeakIndexRateMbPerCpuS / 4);
+    INFO("fast reads=" << fast.reads << " slow reads=" << slow.reads);
+    CHECK(slow.reads < fast.reads);
+    CHECK(slow.reads * 3 <= fast.reads * 2);
+
+    REQUIRE(slow.ink.first >= 0);
+    INFO("slow largest_gap=" << slow.ink.largest_gap);
+    CHECK(slow.ink.largest_gap == 0);
 }

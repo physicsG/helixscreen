@@ -17,6 +17,8 @@
 #include <unistd.h>
 
 #ifdef HELIX_DISPLAY_DRM
+#include "gpu_libs.h"
+
 #include <fcntl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -51,7 +53,7 @@ int DisplayBackend::detect_panel_orientation() {
 #ifdef HELIX_DISPLAY_DRM
     // Method 2: Query DRM connector "panel orientation" property directly
     // More reliable but requires libdrm
-    {
+    if (helix::gpu_libs::available(helix::gpu_libs::Lib::Drm)) {
         const char* devices[] = {"/dev/dri/card0", "/dev/dri/card1", "/dev/dri/card2"};
         for (const char* dev : devices) {
             int fd = open(dev, O_RDONLY | O_CLOEXEC);
@@ -168,11 +170,16 @@ void diagnose_no_display_hardware() {
     bool have_connected_connector = false;
 #ifdef HELIX_DISPLAY_DRM
     const char* devices[] = {"/dev/dri/card0", "/dev/dri/card1", "/dev/dri/card2"};
+    const bool have_libdrm = helix::gpu_libs::available(helix::gpu_libs::Lib::Drm);
     for (const char* dev : devices) {
         int fd = open(dev, O_RDONLY | O_CLOEXEC);
         if (fd < 0)
             continue;
         have_dri = true;
+        if (!have_libdrm) {
+            close(fd);
+            continue;
+        }
         drmModeRes* resources = drmModeGetResources(fd);
         if (resources) {
             for (int i = 0; i < resources->count_connectors && !have_connected_connector; i++) {
@@ -212,45 +219,70 @@ void diagnose_no_display_hardware() {
 std::unique_ptr<DisplayBackend> DisplayBackend::create_auto() {
     // Check environment variable override first
     const char* backend_env = std::getenv("HELIX_DISPLAY_BACKEND");
-    if (backend_env != nullptr) {
+    const auto forced = helix::parse_forced_display_backend(backend_env);
+    if (forced != helix::ForcedDisplayBackend::None) {
         spdlog::info("[DisplayBackend] HELIX_DISPLAY_BACKEND={} - using forced backend",
                      backend_env);
-
-        if (strcmp(backend_env, "drm") == 0) {
-#ifdef HELIX_DISPLAY_DRM
-            auto backend = std::make_unique<DisplayBackendDRM>();
-            if (backend->is_available()) {
-                return backend;
-            }
-            spdlog::warn("[DisplayBackend] DRM backend forced but not available");
-#else
-            spdlog::warn("[DisplayBackend] DRM backend forced but not compiled in");
-#endif
-        } else if (strcmp(backend_env, "fbdev") == 0 || strcmp(backend_env, "fb") == 0) {
-#ifdef HELIX_DISPLAY_FBDEV
-            auto backend = std::make_unique<DisplayBackendFbdev>();
-            if (backend->is_available()) {
-                return backend;
-            }
-            spdlog::warn("[DisplayBackend] Framebuffer backend forced but not available");
-#else
-            spdlog::warn("[DisplayBackend] Framebuffer backend forced but not compiled in");
-#endif
-        } else if (strcmp(backend_env, "sdl") == 0) {
-#ifdef HELIX_DISPLAY_SDL
-            auto backend = std::make_unique<DisplayBackendSDL>();
-            if (backend->is_available()) {
-                return backend;
-            }
-            spdlog::warn("[DisplayBackend] SDL backend forced but not available");
-#else
-            spdlog::warn("[DisplayBackend] SDL backend forced but not compiled in");
-#endif
-        } else {
-            spdlog::warn("[DisplayBackend] Unknown HELIX_DISPLAY_BACKEND value: {}", backend_env);
-        }
-        // Fall through to auto-detection if forced backend unavailable
     }
+    switch (forced) {
+    case helix::ForcedDisplayBackend::None:
+        break;
+    case helix::ForcedDisplayBackend::Drm: {
+#ifdef HELIX_DISPLAY_DRM
+        auto backend = std::make_unique<DisplayBackendDRM>();
+        if (backend->is_available()) {
+            return backend;
+        }
+        spdlog::warn("[DisplayBackend] DRM backend forced but not available");
+#else
+        spdlog::warn("[DisplayBackend] DRM backend forced but not compiled in");
+#endif
+        break;
+    }
+    case helix::ForcedDisplayBackend::DrmEgl: {
+#ifdef HELIX_DISPLAY_DRM
+        if (helix::make_drm_egl_backend != nullptr) {
+            auto backend = helix::make_drm_egl_backend();
+            if (backend->is_available()) {
+                return backend;
+            }
+            spdlog::warn("[DisplayBackend] EGL presentation forced but DRM is not available");
+            break;
+        }
+#endif
+        spdlog::warn("[DisplayBackend] EGL presentation forced but not compiled in");
+        break;
+    }
+    case helix::ForcedDisplayBackend::Fbdev: {
+#ifdef HELIX_DISPLAY_FBDEV
+        auto backend = std::make_unique<DisplayBackendFbdev>();
+        if (backend->is_available()) {
+            return backend;
+        }
+        spdlog::warn("[DisplayBackend] Framebuffer backend forced but not available");
+#else
+        spdlog::warn("[DisplayBackend] Framebuffer backend forced but not compiled in");
+#endif
+        break;
+    }
+    case helix::ForcedDisplayBackend::Sdl: {
+#ifdef HELIX_DISPLAY_SDL
+        auto backend = std::make_unique<DisplayBackendSDL>();
+        if (backend->is_available()) {
+            return backend;
+        }
+        spdlog::warn("[DisplayBackend] SDL backend forced but not available");
+#else
+        spdlog::warn("[DisplayBackend] SDL backend forced but not compiled in");
+#endif
+        break;
+    }
+    case helix::ForcedDisplayBackend::Unknown:
+        spdlog::warn("[DisplayBackend] Unknown HELIX_DISPLAY_BACKEND value: {}",
+                     backend_env != nullptr ? backend_env : "");
+        break;
+    }
+    // A forced backend that is unavailable falls through to auto-detection.
 
     // Auto-detection: try backends in order of preference
 

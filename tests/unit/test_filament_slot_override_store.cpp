@@ -1231,6 +1231,27 @@ TEST_CASE("FilamentSlotOverrideStore load_blocking returns empty on timeout",
 // such entries, and must return a clean best-effort result.
 // ============================================================================
 
+TEST_CASE("only stores built to migrate read the legacy namespace", "[filament_slot_override]") {
+    MockPrinter mock_printer;
+    auto& api = mock_printer.api;
+    mock_printer.client.mock_db_set(
+        "helix-screen", "ace_slot_overrides",
+        json{{"0", json{{"brand", "Legacy"}, {"material", "PLA"}, {"color_rgb", 0xFF0000}}}});
+
+    SECTION("a store that does not migrate leaves the legacy blob alone") {
+        FilamentSlotOverrideStore store(&api, "ace");
+        CHECK(store.load_blocking().empty());
+        CHECK_FALSE(mock_printer.client.mock_db_get("helix-screen", "ace_slot_overrides").empty());
+    }
+
+    SECTION("a store built to migrate copies the legacy slots forward") {
+        FilamentSlotOverrideStore store(&api, "ace", helix::ams::LaneKeyStyle::Lane, "lane_data",
+                                        /*migrates_legacy_namespace=*/true);
+        auto overrides = store.load_blocking();
+        CHECK(overrides.count(0) == 1);
+    }
+}
+
 TEST_CASE("FilamentSlotOverrideStore load_blocking handles non-object namespace value",
           "[filament_slot_override]") {
     MockPrinter mock_printer;
@@ -1594,7 +1615,7 @@ TEST_CASE("Migration: ACE backend migrates legacy namespace to lane_data on firs
     };
     mock_printer.client.mock_db_set("helix-screen", "ace_slot_overrides", legacy);
 
-    FilamentSlotOverrideStore store(&api, "ace");
+    FilamentSlotOverrideStore store(&api, "ace", helix::ams::LaneKeyStyle::Lane, "lane_data", true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store, tmp.path);
 
     auto overrides = store.load_blocking();
@@ -1642,7 +1663,7 @@ TEST_CASE("Migration: CFS backend migrates its legacy namespace, not ACE's",
     mock_printer.client.mock_db_set("helix-screen", "ace_slot_overrides",
                                     json{{"0", {{"brand", "ACE-Brand"}}}});
 
-    FilamentSlotOverrideStore store(&api, "cfs");
+    FilamentSlotOverrideStore store(&api, "cfs", helix::ams::LaneKeyStyle::Lane, "lane_data", true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store, tmp.path);
 
     auto overrides = store.load_blocking();
@@ -1715,7 +1736,8 @@ TEST_CASE("Migration: idempotent (second startup after migration is no-op)",
     mock_printer.client.mock_db_set("helix-screen", "ace_slot_overrides",
                                     json{{"0", {{"brand", "Polymaker"}, {"material", "PLA"}}}});
 
-    FilamentSlotOverrideStore store1(&api, "ace");
+    FilamentSlotOverrideStore store1(&api, "ace", helix::ams::LaneKeyStyle::Lane, "lane_data",
+                                     true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store1, tmp.path);
     auto first = store1.load_blocking();
     REQUIRE(first.count(0) == 1);
@@ -1724,7 +1746,8 @@ TEST_CASE("Migration: idempotent (second startup after migration is no-op)",
     // Second startup — same printer, MR DB now has lane_data populated. The
     // legacy blob was already deleted by the first startup, so there is
     // literally nothing for a second migration attempt to latch onto.
-    FilamentSlotOverrideStore store2(&api, "ace");
+    FilamentSlotOverrideStore store2(&api, "ace", helix::ams::LaneKeyStyle::Lane, "lane_data",
+                                     true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store2, tmp.path);
     auto second = store2.load_blocking();
     REQUIRE(second.count(0) == 1);
@@ -1774,7 +1797,7 @@ TEST_CASE("Migration: non-object slot entries are skipped silently",
     };
     mock_printer.client.mock_db_set("helix-screen", "ace_slot_overrides", legacy);
 
-    FilamentSlotOverrideStore store(&api, "ace");
+    FilamentSlotOverrideStore store(&api, "ace", helix::ams::LaneKeyStyle::Lane, "lane_data", true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store, tmp.path);
     auto overrides = store.load_blocking();
     REQUIRE(overrides.count(1) == 1);
@@ -1795,7 +1818,7 @@ TEST_CASE("Migration: legacy with only malformed entries is still cleaned up",
     };
     mock_printer.client.mock_db_set("helix-screen", "ace_slot_overrides", legacy);
 
-    FilamentSlotOverrideStore store(&api, "ace");
+    FilamentSlotOverrideStore store(&api, "ace", helix::ams::LaneKeyStyle::Lane, "lane_data", true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store, tmp.path);
 
     auto overrides = store.load_blocking();
@@ -1824,7 +1847,7 @@ TEST_CASE("Migration: deletes legacy per-backend local JSON file after success",
     mock_printer.client.mock_db_set("helix-screen", "ace_slot_overrides",
                                     json{{"0", {{"brand", "Polymaker"}}}});
 
-    FilamentSlotOverrideStore store(&api, "ace");
+    FilamentSlotOverrideStore store(&api, "ace", helix::ams::LaneKeyStyle::Lane, "lane_data", true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store, tmp.path);
     auto overrides = store.load_blocking();
     REQUIRE(overrides.count(0) == 1);
@@ -2999,7 +3022,7 @@ TEST_CASE("Legacy migration on ace still writes lane keys",
     mock_printer.client.mock_db_set("helix-screen", "ace_slot_overrides",
                                     json{{"0", {{"brand", "Polymaker"}, {"material", "PLA"}}}});
 
-    FilamentSlotOverrideStore store(&api, "ace", LaneKeyStyle::Lane);
+    FilamentSlotOverrideStore store(&api, "ace", LaneKeyStyle::Lane, "lane_data", true);
     FilamentSlotOverrideStoreTestAccess::set_cache_directory(store, tmp.path);
     auto overrides = store.load_blocking();
 
@@ -3824,6 +3847,45 @@ TEST_CASE("a Spoolman filing keeps a declared colour on the stored record",
         overrides[0] = linked;
         REQUIRE(persist_override_external_identity(nullptr, overrides, 0, spoolman, "[test]"));
         CHECK_FALSE(persist_override_external_identity(nullptr, overrides, 0, spoolman, "[test]"));
+    }
+}
+
+TEST_CASE("lane_data carries the catalog product's OrcaSlicer filament_id as a string",
+          "[filament_slot_override][orca]") {
+    FilamentSlotOverride ovr;
+    ovr.brand = "Bambu Lab";
+    ovr.material = "ABS";
+
+    SECTION("a product with an Orca id writes it") {
+        ovr.catalog_id = "bambu-lab-bambu-abs";
+        json wire = helix::ams::to_lane_data_record(0, ovr);
+        REQUIRE(wire.contains("filament_id"));
+        CHECK(wire["filament_id"].is_string());
+        CHECK(wire["filament_id"] == "OFhuaUQB");
+
+        // Read back unchanged: the field is Orca's, not part of the override.
+        auto parsed = helix::ams::from_lane_data_record(wire);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->second.catalog_id == "bambu-lab-bambu-abs");
+        CHECK(parsed->second.spoolman_filament_id == 0);
+    }
+
+    SECTION("a product with no Orca id writes none") {
+        ovr.catalog_id = "creality-cr-abs";
+        CHECK_FALSE(helix::ams::to_lane_data_record(0, ovr).contains("filament_id"));
+    }
+
+    SECTION("an unknown catalog id writes none") {
+        ovr.catalog_id = "no-such-product";
+        CHECK_FALSE(helix::ams::to_lane_data_record(0, ovr).contains("filament_id"));
+    }
+
+    SECTION("no catalog id writes none, even with a Spoolman filament id") {
+        ovr.spoolman_id = 42;
+        ovr.spoolman_filament_id = 55;
+        json wire = helix::ams::to_lane_data_record(0, ovr);
+        CHECK_FALSE(wire.contains("filament_id"));
+        CHECK(wire["helix_spoolman_filament_id"] == 55);
     }
 }
 

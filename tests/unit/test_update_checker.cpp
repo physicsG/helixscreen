@@ -21,6 +21,7 @@
 
 #include "../helix_test_fixture.h"
 #include "../test_helpers/live_thread_count.h"
+#include "../test_helpers/scoped_board.h"
 #include "../test_helpers/scoped_env.h"
 #include "../test_helpers/scoped_runtime_config.h"
 #include "../test_helpers/scoped_update_urls.h"
@@ -29,6 +30,7 @@
 #include "app_constants.h"
 #include "config.h"
 #include "lvgl.h"
+#include "platform_info.h"
 #include "platform_table.h"
 #include "runtime_config.h"
 #include "version.h"
@@ -95,17 +97,17 @@ std::string platform_tarball(const std::string& version) {
 
 TEST_CASE("Self-restart sentinel creates a missing fallback dir", "[update_checker][sentinel]") {
     namespace fs = std::filesystem;
-    const std::string prev = AppConstants::Update::detail::backup_fallback_dir_ref();
+    const std::string prev = helix::app_constants::update::detail::backup_fallback_dir_ref();
     const fs::path root =
         fs::temp_directory_path() / ("helix-sentinel-" + std::to_string(getpid()));
     const fs::path dir = root / ".helixscreen";
     fs::remove_all(root);
-    AppConstants::Update::detail::backup_fallback_dir_ref() = dir.string();
+    helix::app_constants::update::detail::backup_fallback_dir_ref() = dir.string();
 
     CHECK(UpdateChecker::write_self_restart_sentinel());
     CHECK(fs::exists(dir / "self_restart_sentinel"));
 
-    AppConstants::Update::detail::backup_fallback_dir_ref() = prev;
+    helix::app_constants::update::detail::backup_fallback_dir_ref() = prev;
     fs::remove_all(root);
 }
 
@@ -256,6 +258,265 @@ TEST_CASE("GitHub release JSON parsing", "[update_checker][json]") {
 }
 
 // ============================================================================
+// Release Asset Keys (prestonbrown/helixscreen#1789)
+// ============================================================================
+
+TEST_CASE("release_asset_keys gives a Creator 5 no legacy asset",
+          "[update_checker][platform][1789]") {
+    using helix::board::Board;
+    using helix::platform::release_asset_keys;
+    using Keys = std::vector<std::string>;
+
+    CHECK(release_asset_keys("mips", Board::Creator5) == Keys{"mips"});
+    CHECK(release_asset_keys("mips", Board::Creator5Pro) == Keys{"mips"});
+    // The AD5X by machine id or by a layout naming no machine (Forge-X), and the K1.
+    CHECK(release_asset_keys("mips", Board::Ad5x) == Keys{"mips", "ad5x"});
+    CHECK(release_asset_keys("mips", Board::K1) == Keys{"mips", "k1"});
+    // A dedicated build of a board whose legacy asset is its own key is not listed twice.
+    CHECK(release_asset_keys("k1", Board::K1) == Keys{"k1"});
+    CHECK(release_asset_keys("pi", Board::Generic) == Keys{"pi"});
+}
+
+TEST_CASE("The Android app has no release asset and is never refused for lacking one",
+          "[update_checker][platform][android]") {
+    using helix::board::Board;
+    using helix::platform::release_asset_keys;
+
+    CHECK_FALSE(helix::platform::installs_from_release_asset("android"));
+    CHECK(helix::platform::installs_from_release_asset("pi"));
+    CHECK(release_asset_keys("android", Board::Generic).empty());
+    REQUIRE(helix::platform::find("android") != nullptr);
+    CHECK(helix::platform::display_name("android") == "Android");
+
+    // The stable manifest lists Linux zips only; an APK install reads its version.
+    const std::string manifest = R"({"version": "1.0.6", "tag": "v1.0.6", "assets": {
+        "pi": {"url": "https://r/pi.zip", "sha256": "pp"}}})";
+    UpdateChecker::ReleaseInfo info;
+    std::string error;
+    REQUIRE(helix::parse_release_manifest(manifest, info, error,
+                                          release_asset_keys("android", Board::Generic)));
+    CHECK(info.version == "1.0.6");
+    CHECK(info.download_url.empty());
+
+    const auto android_keys = release_asset_keys("android", Board::Generic);
+    CHECK(helix::release_has_build_for(info, android_keys));
+    CHECK(helix::decide_check_outcome("1.0.5", info, android_keys).status ==
+          UpdateChecker::Status::UpdateAvailable);
+    CHECK(helix::decide_check_outcome("1.0.6", info, android_keys).status ==
+          UpdateChecker::Status::UpToDate);
+    // A Linux build reading the same release without its asset is still refused.
+    CHECK_FALSE(helix::release_has_build_for(info, {"pi32"}));
+    CHECK(helix::decide_check_outcome("1.0.5", info, {"pi32"}).status ==
+          UpdateChecker::Status::Error);
+}
+
+TEST_CASE("A release with no asset for this board is refused, never given another board's build",
+          "[update_checker][platform][json]") {
+    using helix::FlashForgeMachine;
+    using helix::platform::release_asset_keys;
+    const auto c5_keys = release_asset_keys("mips", helix::board::Board::Creator5);
+
+    // v1.0.5 stable shape: per-board assets only, no "mips".
+    const std::string manifest = R"({"version": "1.0.5", "tag": "v1.0.5", "assets": {
+        "ad5x": {"url": "https://r/ad5x.tar.gz", "sha256": "aa"},
+        "k1":   {"url": "https://r/k1.tar.gz",   "sha256": "kk"}}})";
+    const std::string github = R"({"tag_name": "v1.0.5", "assets": [)" +
+                               asset_json("helixscreen-ad5x-v1.0.5.tar.gz") + "," +
+                               asset_json("helixscreen-k1-v1.0.5.tar.gz") + R"(]})";
+
+    UpdateChecker::ReleaseInfo from_manifest;
+    UpdateChecker::ReleaseInfo from_github;
+    std::string error;
+    REQUIRE(helix::parse_release_manifest(manifest, from_manifest, error, c5_keys));
+    REQUIRE(helix::parse_github_release(github, from_github, error, c5_keys));
+
+    SECTION("both parsers hand back the version with no download URL") {
+        CHECK(from_manifest.version == "1.0.5");
+        CHECK(from_manifest.download_url.empty());
+        CHECK(from_github.version == "1.0.5");
+        CHECK(from_github.download_url.empty());
+    }
+
+    SECTION("the refusal names the version and the board") {
+        const std::string msg = helix::no_build_message("1.0.5", "FlashForge Creator 5");
+        CHECK(msg == "v1.0.5 has no build for the FlashForge Creator 5, so it can't be installed "
+                     "here. Pick a channel with a newer release.");
+    }
+
+    SECTION("a check refuses a newer or older release with no asset, never a same one") {
+        auto newer = helix::decide_check_outcome("1.0.4", from_manifest);
+        CHECK(newer.status == UpdateChecker::Status::Error);
+        auto older = helix::decide_check_outcome("1.1.0", from_github);
+        CHECK(older.status == UpdateChecker::Status::Error);
+        CHECK_FALSE(older.is_downgrade);
+        CHECK(helix::decide_check_outcome("1.0.5", from_manifest).status ==
+              UpdateChecker::Status::UpToDate);
+
+        UpdateChecker::ReleaseInfo with_asset = from_manifest;
+        with_asset.download_url = "https://r/mips.zip";
+        auto up = helix::decide_check_outcome("1.0.4", with_asset);
+        CHECK(up.status == UpdateChecker::Status::UpdateAvailable);
+        CHECK_FALSE(up.is_downgrade);
+        auto down = helix::decide_check_outcome("1.1.0", with_asset);
+        CHECK(down.status == UpdateChecker::Status::UpdateAvailable);
+        CHECK(down.is_downgrade);
+        CHECK(helix::decide_check_outcome("1.0.5", with_asset).status ==
+              UpdateChecker::Status::UpToDate);
+    }
+
+    SECTION("a release that has an asset is not refused") {
+        UpdateChecker::ReleaseInfo ok;
+        ok.version = "1.1.0";
+        ok.download_url = "https://r/mips.zip";
+        CHECK(helix::release_has_build_for_this_board(ok));
+        CHECK_FALSE(helix::release_has_build_for_this_board(from_manifest));
+    }
+}
+
+TEST_CASE("a release with this board's legacy asset is offered normally",
+          "[update_checker][platform][json]") {
+    const auto keys = helix::platform::release_asset_keys("mips", helix::board::Board::K1);
+    const std::string github = R"({"tag_name": "v1.0.5", "assets": [)" +
+                               asset_json("helixscreen-ad5x-v1.0.5.tar.gz") + "," +
+                               asset_json("helixscreen-k1-v1.0.5.tar.gz") + R"(]})";
+    UpdateChecker::ReleaseInfo release;
+    std::string error;
+    REQUIRE(helix::parse_github_release(github, release, error, keys));
+
+    CHECK(release.download_url.find("helixscreen-k1-v1.0.5.tar.gz") != std::string::npos);
+    CHECK(helix::release_has_build_for_this_board(release));
+    CHECK(helix::decide_check_outcome("1.0.4", release).status ==
+          UpdateChecker::Status::UpdateAvailable);
+}
+
+TEST_CASE("a Creator 5 Pro is refused a release with no mips asset on the main thread",
+          "[update_checker][platform][json]") {
+    helix::test::ScopedBoard board(helix::board::Board::Creator5Pro);
+    auto& checker = UpdateChecker::instance();
+    checker.clear_cache();
+    checker.init();
+
+    // v1.0.5 stable shape: per-board assets only, no "mips".
+    const std::string github = R"({"tag_name": "v1.0.5", "assets": [)" +
+                               asset_json("helixscreen-ad5x-v1.0.5.tar.gz") + "," +
+                               asset_json("helixscreen-k1-v1.0.5.tar.gz") + R"(]})";
+    UpdateChecker::ReleaseInfo release;
+    std::string error;
+    REQUIRE(helix::parse_github_release(
+        github, release, error,
+        helix::platform::release_asset_keys("mips", helix::board::current())));
+    REQUIRE(release.download_url.empty());
+
+    // The worker's own mapping, not a hand-built report: a regression that drops the
+    // release from the Error would leave the row reading a bare diagnostic.
+    UpdateCheckerTestAccess::report_fetched_release(checker, release, "1.0.4");
+    helix::ui::UpdateQueue::instance().drain();
+
+    CHECK(lv_subject_get_int(checker.status_subject()) ==
+          static_cast<int>(UpdateChecker::Status::Error));
+    const std::string shown = lv_subject_get_string(checker.version_text_subject());
+    CHECK(shown.find("no build for the FlashForge Creator 5 Pro") != std::string::npos);
+    CHECK(shown.find("v1.0.5") != std::string::npos);
+
+    // An error with no release attached keeps its own text.
+    UpdateCheckerTestAccess::report_result(checker, UpdateChecker::Status::Error, std::nullopt,
+                                           "boom");
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(std::string(lv_subject_get_string(checker.version_text_subject())).find("boom") !=
+          std::string::npos);
+
+    checker.shutdown();
+}
+
+TEST_CASE("Release manifest takes the first asset key it lists", "[update_checker][json][1789]") {
+    UpdateChecker::ReleaseInfo release;
+    std::string error;
+
+    // The shape of a release cut before the unified MIPS build: per-board
+    // entries only, tar.gz with no zip.
+    const std::string board_only = R"({
+        "version": "1.0.4", "tag": "v1.0.4",
+        "assets": {
+            "ad5x": {"url": "https://r/ad5x.tar.gz", "sha256": "aa", "size": 1},
+            "k1":   {"url": "https://r/k1.tar.gz",   "sha256": "kk", "size": 2},
+            "pi":   {"url": "https://r/pi.tar.gz",   "sha256": "pp", "size": 3}
+        }
+    })";
+
+    SECTION("a MIPS build on a K1 falls back to the k1 entry") {
+        REQUIRE(helix::parse_release_manifest(board_only, release, error, {"mips", "k1"}));
+        CHECK(release.version == "1.0.4");
+        CHECK(release.download_url == "https://r/k1.tar.gz");
+        CHECK(release.sha256 == "kk");
+    }
+
+    SECTION("a MIPS build on an AD5X falls back to the ad5x entry") {
+        REQUIRE(helix::parse_release_manifest(board_only, release, error, {"mips", "ad5x"}));
+        CHECK(release.download_url == "https://r/ad5x.tar.gz");
+        CHECK(release.sha256 == "aa");
+    }
+
+    SECTION("the unified key wins when the manifest carries it beside the aliases") {
+        const std::string unified = R"({
+            "version": "1.1.0-beta.8",
+            "assets": {
+                "k1":   {"url": "https://r/k1.tar", "sha256": "kk"},
+                "mips": {"url": "https://r/mips.tar", "sha256": "mm",
+                         "zip_url": "https://r/mips.zip", "zip_sha256": "mz"}
+            }
+        })";
+        REQUIRE(helix::parse_release_manifest(unified, release, error, {"mips", "k1"}));
+        CHECK(release.download_url == "https://r/mips.zip");
+        CHECK(release.sha256 == "mz");
+    }
+
+    SECTION("no listed key leaves the download empty, as the GitHub parser does") {
+        REQUIRE(helix::parse_release_manifest(board_only, release, error, {"mips"}));
+        CHECK(release.version == "1.0.4");
+        CHECK(release.download_url.empty());
+    }
+
+    SECTION("a manifest without a version is refused") {
+        REQUIRE_FALSE(helix::parse_release_manifest(R"({"assets": {"k1": {"url": "u"}}})", release,
+                                                    error, {"k1"}));
+        CHECK(error.find("version") != std::string::npos);
+    }
+}
+
+TEST_CASE("GitHub release takes the first asset key it carries", "[update_checker][json][1789]") {
+    UpdateChecker::ReleaseInfo release;
+    std::string error;
+
+    const std::string board_only = R"({"tag_name": "v1.0.4", "assets": [)" +
+                                   asset_json("helixscreen-ad5x-v1.0.4.tar.gz") + "," +
+                                   asset_json("helixscreen-k1-v1.0.4.tar.gz") + R"(]})";
+
+    SECTION("a MIPS build on a K1 selects the k1 tarball") {
+        REQUIRE(helix::parse_github_release(board_only, release, error, {"mips", "k1"}));
+        CHECK(release.download_url == "https://x/helixscreen-k1-v1.0.4.tar.gz");
+    }
+
+    SECTION("a MIPS build on an AD5X selects the ad5x tarball") {
+        REQUIRE(helix::parse_github_release(board_only, release, error, {"mips", "ad5x"}));
+        CHECK(release.download_url == "https://x/helixscreen-ad5x-v1.0.4.tar.gz");
+    }
+
+    SECTION("the unified key's zip beats an alias tarball listed first") {
+        const std::string unified = R"({"tag_name": "v1.1.0", "assets": [)" +
+                                    asset_json("helixscreen-k1-v1.1.0.tar.gz") + "," +
+                                    asset_json("helixscreen-mips.zip") + R"(]})";
+        REQUIRE(helix::parse_github_release(unified, release, error, {"mips", "k1"}));
+        CHECK(release.download_url == "https://x/helixscreen-mips.zip");
+    }
+
+    SECTION("no matching key leaves the download empty") {
+        REQUIRE(helix::parse_github_release(board_only, release, error, {"mips"}));
+        CHECK(release.version == "1.0.4");
+        CHECK(release.download_url.empty());
+    }
+}
+
+// ============================================================================
 // Version Prefix Stripping
 // ============================================================================
 
@@ -328,6 +589,7 @@ TEST_CASE("Update checker error scenarios", "[update_checker][error]") {
 #include "ui_update_queue.h"
 
 #include "app_globals.h"
+#include "platform_info.h"
 #include "platform_table.h"
 #include "print_lifecycle_state.h"
 #include "printer_state.h"
@@ -457,9 +719,9 @@ TEST_CASE("UpdateChecker callback is optional", "[update_checker][callback][slow
         // connect lands in ~10ms; the budget only has to exceed the request's
         // own 30s timeout so a host that silently drops (rather than refuses)
         // port 1 still reaches Error instead of flaking here.
-        constexpr int POLL_ITERATIONS = 8000; // 8000 * 5ms = 40s
+        constexpr int kPollIterations = 8000; // 8000 * 5ms = 40s
         for (int i = 0;
-             i < POLL_ITERATIONS && checker.get_status() == UpdateChecker::Status::Checking; ++i) {
+             i < kPollIterations && checker.get_status() == UpdateChecker::Status::Checking; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         // Pin that the check really ran end-to-end rather than short-circuiting
@@ -854,12 +1116,96 @@ TEST_CASE("UpdateChecker install_failure_detail names the cause, not the step",
     }
 }
 
-TEST_CASE("UpdateChecker service_dest_probe_error mirrors the installer's write probe",
+TEST_CASE("UpdateChecker install_failure_telemetry_detail scrubs the cause line",
+          "[update_checker][install_failure_detail][1813]") {
+    using UC = UpdateChecker;
+    const std::vector<std::string> lines = {
+        "[3/6] Downloaded ... ok (40 MB)",
+        "      \033[0;31m[ERROR]\033[0m Cannot write /home/alice/printer_data/x on k1max at "
+        "192.168.1.50 via mirror.example.net",
+        "[4/6] Installed files ... FAILED",
+    };
+    const std::string out = UC::install_failure_telemetry_detail(lines, {"k1max"});
+    INFO(out);
+    CHECK(out == "[ERROR] Cannot write <path> on <id> at <ip> via <host>");
+
+    const std::vector<std::string> long_line = {"[ERROR] " + std::string(300, 'x')};
+    CHECK(UC::install_failure_telemetry_detail(long_line, {}).size() == 120);
+    CHECK(UC::install_failure_telemetry_detail({"all fine"}, {}).empty());
+}
+
+TEST_CASE("UpdateChecker telemetry_release_host keeps only release hosts",
+          "[update_checker][1813]") {
+    using UC = UpdateChecker;
+    CHECK(UC::telemetry_release_host("releases.helixscreen.org") == "releases.helixscreen.org");
+    CHECK(UC::telemetry_release_host("Release-Assets.GitHubUserContent.com") ==
+          "release-assets.githubusercontent.com");
+    CHECK(UC::telemetry_release_host("objects.githubusercontent.com") ==
+          "objects.githubusercontent.com");
+    CHECK(UC::telemetry_release_host("mainsail.local") == "other");
+    CHECK(UC::telemetry_release_host("192.168.1.50") == "other");
+    CHECK(UC::telemetry_release_host("evil.releases.helixscreen.org.example") == "other");
+    CHECK(UC::telemetry_release_host("").empty());
+}
+
+TEST_CASE("UpdateChecker probes the service destination only where an update writes it",
+          "[update_checker][1778]") {
+    using UC = UpdateChecker;
+    // A SysV root install refreshes its init script during the update, so a
+    // full or read-only /etc/init.d must stop it before the download.
+    CHECK(UC::update_writes_service_dest(true, false));
+    // Under systemd the app runs in its unit's ProtectSystem=strict sandbox,
+    // where /etc is read-only even for root, and a self-update writes no unit:
+    // the next start's root ExecStartPre refreshes it.
+    CHECK_FALSE(UC::update_writes_service_dest(true, true));
+    // A non-root app never installs directly.
+    CHECK_FALSE(UC::update_writes_service_dest(false, false));
+    CHECK_FALSE(UC::update_writes_service_dest(false, true));
+}
+
+TEST_CASE("UpdateChecker knows whether a service definition is already installed",
           "[update_checker][1778]") {
     using UC = UpdateChecker;
     namespace fs = std::filesystem;
     const fs::path base =
-        fs::temp_directory_path() / ("helix-probe-" + std::to_string(getpid()));
+        fs::temp_directory_path() / ("helix-svc-installed-" + std::to_string(getpid()));
+    fs::remove_all(base);
+    fs::create_directories(base);
+    auto touch = [&](const char* name) { std::ofstream(base / name) << "x"; };
+
+    // A self-update leaves an installed init script alone, so an unwritable
+    // init dir only blocks the update when there is no script to keep.
+    SECTION("an init script carrying the service name counts") {
+        touch("S50other");
+        touch("S99helixscreen");
+        CHECK(UC::service_definition_installed(base.string()));
+    }
+    SECTION("the K2 procd shim name counts") {
+        touch("helixscreen");
+        CHECK(UC::service_definition_installed(base.string()));
+    }
+    SECTION("other services alone do not") {
+        touch("S50other");
+        CHECK_FALSE(UC::service_definition_installed(base.string()));
+    }
+    SECTION("a leftover space probe is not a service definition") {
+        touch(".helixscreen-space-probe.1234");
+        CHECK_FALSE(UC::service_definition_installed(base.string()));
+    }
+    SECTION("a missing or empty dir has none") {
+        CHECK_FALSE(UC::service_definition_installed(base.string()));
+        CHECK_FALSE(UC::service_definition_installed((base / "absent").string()));
+        CHECK_FALSE(UC::service_definition_installed(""));
+    }
+
+    fs::remove_all(base);
+}
+
+TEST_CASE("UpdateChecker service_dest_probe_error mirrors the installer's write probe",
+          "[update_checker][1778]") {
+    using UC = UpdateChecker;
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / ("helix-probe-" + std::to_string(getpid()));
     fs::remove_all(base);
     fs::create_directories(base);
 
@@ -880,7 +1226,10 @@ TEST_CASE("UpdateChecker service_dest_probe_error mirrors the installer's write 
 
     SECTION("a path under a non-directory fails for any uid") {
         const fs::path blocker = base / "blocker";
-        { std::ofstream out(blocker); out << "x"; }
+        {
+            std::ofstream out(blocker);
+            out << "x";
+        }
         REQUIRE_FALSE(UC::service_dest_probe_error((blocker / "init.d").string()).empty());
     }
 
@@ -1061,9 +1410,7 @@ static void drive_lifecycle(PrinterState& ps, const char* wire_state, PrintStart
         .reset_print_start_state(); // force phase to IDLE so the next raise is a new print
     ps.update_from_status(json{{"print_stats", {{"state", wire_state}}}});
     ps.print_state().set_print_start_state(phase, "", 0);
-    for (int i = 0; i < 8; ++i) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 }
 
 namespace {
@@ -1078,9 +1425,7 @@ struct GlobalPrintStateFixture : public HelixTestFixture {
         auto& ps = get_printer_state();
         ps.print_state().reset_print_start_state();
         ps.update_from_status(nlohmann::json{{"print_stats", {{"state", "standby"}}}});
-        for (int i = 0; i < 8; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 };
 
@@ -1488,7 +1833,6 @@ TEST_CASE("do_install never runs the installer in test mode",
     // A child process makes the install: past the installer, do_install()
     // ends the process to restart it, which would take the assertions with it.
     const pid_t pid = fork();
-    REQUIRE(pid >= 0);
     if (pid == 0) {
         ScopedRuntimeConfig scoped_config;
         get_runtime_config()->test_mode = true;
@@ -1498,6 +1842,7 @@ TEST_CASE("do_install never runs the installer in test mode",
         UpdateCheckerTestAccess::do_install(checker, tarball);
         _exit(0);
     }
+    REQUIRE(pid > 0);
     int wstatus = 0;
     for (int i = 0; i < 3000 && waitpid(pid, &wstatus, WNOHANG) == 0; ++i)
         usleep(10 * 1000);
@@ -1679,8 +2024,9 @@ TEST_CASE("current_key returns a known platform", "[update_checker][platform]") 
     // here — AND a matching #elif in current_key — silently bricks
     // in-app updates for that platform (falls through to "pi", so the device
     // downloads the Pi tarball and ends up with missing shared libs).
-    std::vector<std::string> known_platforms = {"pi",   "pi32", "x86", "ad5m",  "k1",          "k2",
-                                                "ad5x", "mips", "cc1", "esp32", "snapmaker-u1"};
+    std::vector<std::string> known_platforms = {
+        "pi",   "pi32", "x86", "x86-desktop", "ad5m",         "k1",     "k2",
+        "ad5x", "mips", "cc1", "esp32",       "snapmaker-u1", "android"};
     bool found = false;
     for (const auto& p : known_platforms) {
         if (platform == p) {
@@ -1728,8 +2074,9 @@ TEST_CASE("display_name returns non-empty string for all known platforms",
           "[update_checker][platform]") {
     // Mirror the known_platforms list from "current_key returns a known platform".
     // Every key that helix::platform::current_key() can return MUST have a display name.
-    std::vector<std::string> known_platforms = {"pi",   "pi32", "x86", "ad5m",  "k1",          "k2",
-                                                "ad5x", "mips", "cc1", "esp32", "snapmaker-u1"};
+    std::vector<std::string> known_platforms = {
+        "pi",   "pi32", "x86", "x86-desktop", "ad5m",         "k1",     "k2",
+        "ad5x", "mips", "cc1", "esp32",       "snapmaker-u1", "android"};
 
     for (const auto& key : known_platforms) {
         INFO("platform key: " << key);
@@ -1744,8 +2091,8 @@ TEST_CASE("display_name returns non-empty string for all known platforms",
 TEST_CASE("platform table gives every Linux platform an ELF expectation",
           "[update_checker][platform]") {
     // esp32 ships a firmware image, not an ELF release zip.
-    for (const char* key :
-         {"pi", "pi32", "x86", "ad5m", "k1", "k2", "ad5x", "mips", "cc1", "snapmaker-u1"}) {
+    for (const char* key : {"pi", "pi32", "x86", "x86-desktop", "ad5m", "k1", "k2", "ad5x", "mips",
+                            "cc1", "snapmaker-u1"}) {
         INFO("platform key: " << key);
         const auto* p = helix::platform::find(key);
         REQUIRE(p != nullptr);
@@ -1757,7 +2104,7 @@ TEST_CASE("platform table marks which platforms name printer hardware",
           "[update_checker][platform]") {
     // Debug bundles compare this platform's display name against the user's
     // printer pick; generic hosts have no hardware name to compare.
-    for (const char* key : {"pi", "pi32", "x86", "esp32"}) {
+    for (const char* key : {"pi", "pi32", "x86", "x86-desktop", "esp32"}) {
         INFO("platform key: " << key);
         REQUIRE_FALSE(helix::platform::find(key)->has_printer_hardware);
     }
@@ -1812,6 +2159,7 @@ TEST_CASE("display_name returns correct strings for known platforms",
     REQUIRE(helix::platform::display_name("pi") == "Raspberry Pi");
     REQUIRE(helix::platform::display_name("pi32") == "Raspberry Pi (32-bit)");
     REQUIRE(helix::platform::display_name("x86") == "x86 Desktop");
+    REQUIRE(helix::platform::display_name("x86-desktop") == "x86 Linux Desktop (windowed)");
     REQUIRE(helix::platform::display_name("ad5m") == "FlashForge Adventurer 5M");
     REQUIRE(helix::platform::display_name("ad5x") == "FlashForge Adventurer 5X");
     REQUIRE(helix::platform::display_name("mips") == "MIPS (K1 series / AD5X)");
@@ -2810,11 +3158,22 @@ TEST_CASE_METHOD(HelixTestFixture,
 
 namespace {
 
-/// Counts config writes; the mock's injected config root records their content.
+/// Counts config reads and writes; the mock's injected config root records their content.
 class CountingTransfers : public MoonrakerFileTransferAPIMock {
   public:
     using MoonrakerFileTransferAPIMock::MoonrakerFileTransferAPIMock;
     int uploads = 0;
+    int downloads = 0;
+    /// Runs after each download has delivered its result.
+    helix::SharedCallback<void()> after_download;
+    void download_file(const std::string& root, const std::string& path, StringCallback on_success,
+                       ErrorCallback on_error) override {
+        ++downloads;
+        MoonrakerFileTransferAPIMock::download_file(root, path, std::move(on_success),
+                                                    std::move(on_error));
+        if (after_download)
+            after_download();
+    }
     void upload_file(const std::string& root, const std::string& path, const std::string& content,
                      SuccessCallback on_success, ErrorCallback on_error) override {
         ++uploads;
@@ -2850,19 +3209,38 @@ struct ChannelSyncFixture : public GlobalPrintStateFixture {
     helix::PrinterState state;
     ChannelSyncApi api{client, state};
 
+    bool checks_were_blocked = false;
+
     ChannelSyncFixture() {
         get_printer_state().init_subjects(false);
         api.set_http_base_url("http://127.0.0.1:7125");
         set_moonraker_api(&api);
+        auto& checker = UpdateChecker::instance();
+        checks_were_blocked = UpdateCheckerTestAccess::checks_blocked(checker);
+        UpdateCheckerTestAccess::set_checks_blocked(checker, true);
+        set_synced("");
     }
 
     std::string install_root = kInstallRoot;
     ~ChannelSyncFixture() override {
+        UpdateCheckerTestAccess::set_checks_blocked(UpdateChecker::instance(), checks_were_blocked);
         set_moonraker_api(nullptr);
     }
 
+    /// The channel the app and moonraker.conf last agreed on; empty is unknown.
+    static void set_synced(const char* channel) {
+        Config::get_instance()->set<std::string>("/update/moonraker_channel", channel);
+    }
+    static std::string synced() {
+        return Config::get_instance()->get<std::string>("/update/moonraker_channel", "");
+    }
+
     void seed(const std::string& conf) {
-        api.xfers_.set_config_files({{"moonraker.conf", conf}});
+        seed_files({{"moonraker.conf", conf}});
+    }
+    void seed_files(const std::map<std::string, std::string>& files) {
+        api.xfers_.set_config_files(files);
+        api.files_mock().set_config_files(files);
     }
     void set_app_channel(int channel, bool beta_features) {
         auto* config = Config::get_instance();
@@ -2878,8 +3256,7 @@ struct ChannelSyncFixture : public GlobalPrintStateFixture {
         return drain();
     }
     std::string drain() {
-        for (int i = 0; i < 8; ++i)
-            helix::ui::UpdateQueue::instance().drain();
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
         return api.xfers_.get_uploaded_config("moonraker.conf").value_or("");
     }
     static std::string conf(const char* channel, const char* path = kInstallRoot) {
@@ -2888,6 +3265,84 @@ struct ChannelSyncFixture : public GlobalPrintStateFixture {
 };
 
 } // namespace
+
+using Sync = UpdateChecker::MoonrakerChannelSync;
+
+TEST_CASE("Channel sync decides which side of a disagreement moved",
+          "[update_checker][moonraker_channel]") {
+    const auto decide = &UpdateChecker::decide_moonraker_channel_sync;
+
+    SECTION("a stanza without a channel gets the app's") {
+        CHECK(decide("beta", "", "") == Sync::Write);
+        CHECK(decide("beta", "", "stable") == Sync::Write);
+    }
+    SECTION("agreement is recorded, nothing written") {
+        CHECK(decide("beta", "beta", "") == Sync::RecordOnly);
+        CHECK(decide("stable", "stable", "beta") == Sync::RecordOnly);
+    }
+    SECTION("a stanza edited by hand is adopted") {
+        CHECK(decide("stable", "beta", "stable") == Sync::Adopt);
+        CHECK(decide("beta", "stable", "beta") == Sync::Adopt);
+    }
+    SECTION("a hand edit to an unknown channel is left alone") {
+        CHECK(decide("stable", "nightly", "stable") == Sync::Leave);
+    }
+    SECTION("an app change is written") {
+        CHECK(decide("beta", "stable", "stable") == Sync::Write);
+    }
+    SECTION("with no record, or both sides moved, the app wins") {
+        CHECK(decide("beta", "stable", "") == Sync::Write);
+        CHECK(decide("stable", "nightly", "") == Sync::Write);
+        CHECK(decide("stable", "beta", "dev") == Sync::Write);
+    }
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync adopts a channel edited into moonraker.conf",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("beta"));
+    set_app_channel(0, false); // Stable
+    set_synced("stable");
+
+    CHECK(sync() == conf("beta"));
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+    CHECK(UpdateChecker::instance().get_channel() == UpdateChecker::UpdateChannel::Beta);
+    CHECK(synced() == "beta");
+
+    // The next connect finds the two agreeing and writes nothing.
+    CHECK(sync() == conf("beta"));
+    CHECK(api.xfers_.uploads == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync leaves an unknown hand-edited channel alone",
+                 "[update_checker][moonraker_channel]") {
+    seed(conf("nightly"));
+    set_app_channel(0, false);
+    set_synced("stable");
+
+    CHECK(sync() == conf("nightly"));
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(UpdateChecker::instance().get_channel() == UpdateChecker::UpdateChannel::Stable);
+    CHECK(synced() == "stable");
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync records the channel it agrees on",
+                 "[update_checker][moonraker_channel]") {
+    SECTION("already matching") {
+        seed(conf("beta"));
+        set_app_channel(1, true);
+        CHECK(sync() == conf("beta"));
+        CHECK(api.xfers_.uploads == 0);
+    }
+    SECTION("after writing an app change") {
+        seed(conf("stable"));
+        set_app_channel(1, true);
+        set_synced("stable");
+        CHECK(sync() == conf("beta"));
+        CHECK(api.xfers_.uploads == 1);
+    }
+    CHECK(synced() == "beta");
+}
 
 TEST_CASE_METHOD(ChannelSyncFixture,
                  "Channel sync rewrites a drifted stanza and restarts Moonraker",
@@ -2931,6 +3386,32 @@ TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync never writes without a stanza
     set_app_channel(1, true);
 
     CHECK(sync() == bare);
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync rewrites a stanza moonraker.conf includes",
+                 "[update_checker][moonraker_channel][update_channel_sync]") {
+    const std::string root = "[server]\nhost: 0.0.0.0\n\n[include mainsail.conf]\n";
+    seed_files({{"moonraker.conf", root}, {"mainsail.conf", conf("stable")}});
+    set_app_channel(1, true);
+
+    CHECK(sync() == root);
+    CHECK(api.xfers_.get_uploaded_config("mainsail.conf") == conf("beta"));
+    CHECK(api.xfers_.uploads == 1);
+    CHECK(api.restarts == 1);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync leaves another install's included stanza alone",
+                 "[update_checker][moonraker_channel][update_channel_sync]") {
+    const std::string root = "[include conf.d/*.conf]\n";
+    seed_files(
+        {{"moonraker.conf", root}, {"conf.d/helix.conf", conf("stable", "/home/pi/helixscreen")}});
+    set_app_channel(1, true);
+
+    CHECK(sync() == root);
+    CHECK(api.xfers_.get_uploaded_config("conf.d/helix.conf") ==
+          conf("stable", "/home/pi/helixscreen"));
     CHECK(api.xfers_.uploads == 0);
     CHECK(api.restarts == 0);
 }
@@ -2986,10 +3467,39 @@ TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync abandons a printer it was det
     seed(conf("stable"));
     set_app_channel(1, true);
 
-    start_sync(); // the download answers inline; the upload waits on the queue
-    UpdateChecker::instance().detach(client);
+    // Detached after the read, while the write waits on the queue.
+    api.xfers_.after_download = [this] { UpdateChecker::instance().detach(client); };
 
-    CHECK(drain() == conf("stable"));
+    CHECK(sync() == conf("stable"));
+    CHECK(api.xfers_.downloads == 1);
+    CHECK(api.xfers_.uploads == 0);
+    CHECK(api.restarts == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync reads no include after a detach",
+                 "[update_checker][moonraker_channel][update_channel_sync]") {
+    const std::string root = "[include mainsail.conf]\n";
+    seed_files({{"moonraker.conf", root}, {"mainsail.conf", conf("stable")}});
+    set_app_channel(1, true);
+    // Detached between reading moonraker.conf and the file it includes.
+    api.xfers_.after_download = [this] { UpdateChecker::instance().detach(client); };
+
+    CHECK(sync() == root);
+    CHECK(api.xfers_.downloads == 1);
+    CHECK(api.xfers_.get_uploaded_config("mainsail.conf") == conf("stable"));
+    CHECK(api.xfers_.uploads == 0);
+}
+
+TEST_CASE_METHOD(ChannelSyncFixture, "Channel sync writes nothing when an include cannot be read",
+                 "[update_checker][moonraker_channel][update_channel_sync]") {
+    // moonraker.conf defines the stanza itself; the walk still refuses a config
+    // missing a file Moonraker reads, which might hold the stanza that wins.
+    const std::string root = conf("stable") + "\n[include mainsail.conf]\n";
+    api.files_mock().set_config_files({{"moonraker.conf", root}, {"mainsail.conf", ""}});
+    api.xfers_.set_config_files({{"moonraker.conf", root}});
+    set_app_channel(1, true);
+
+    CHECK(sync() == root);
     CHECK(api.xfers_.uploads == 0);
     CHECK(api.restarts == 0);
 }

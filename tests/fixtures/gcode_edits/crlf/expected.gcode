@@ -1,0 +1,4 @@
+G28
+; BED_MESH_CALIBRATE  ; [HelixScreen: Disabled Bed mesh]
+PRINT_START BED=60 SKIP_BED_MESH=1
+G1 X0

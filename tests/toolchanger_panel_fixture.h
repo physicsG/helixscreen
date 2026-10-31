@@ -94,12 +94,15 @@ template <typename Base> struct ToolchangerPanelFixture : Base {
     /// Pumps the mock's calibration timer (600 ms per tick), LVGL, and the
     /// UpdateQueue the run's bg_cb callbacks land on.
     bool pump_until(const std::function<bool()>& done, int max_ticks = 200) {
-        for (int i = 0; i < max_ticks && !done(); ++i) {
-            lv_tick_inc(100);
-            lv_timer_handler_safe();
-            helix::ui::UpdateQueue::instance().drain();
+        if (done() || max_ticks <= 0) {
+            return done();
         }
-        return done();
+        return UITest::advance_until(
+            [&done] {
+                helix::ui::UpdateQueue::instance().drain();
+                return done();
+            },
+            static_cast<uint32_t>(max_ticks) * 100, 100);
     }
 };
 

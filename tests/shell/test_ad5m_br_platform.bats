@@ -6,6 +6,10 @@
 
 load helpers
 
+setup() {
+    cd "$(scratch_tree)" || return 1
+}
+
 @test "ad5m-br: make accepts PLATFORM_TARGET=ad5m-br without unknown-target error" {
     run make -n PLATFORM_TARGET=ad5m-br CROSS_COMPILE= CC=gcc CXX=g++ cross-info
     [ "$status" -eq 0 ] || {

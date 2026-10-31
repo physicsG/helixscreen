@@ -14,17 +14,8 @@
  * `/printer/afc/status` HTTP endpoint, which we never call — and `save_vars()`,
  * which writes the vars file.
  *
- * So on real hardware `num_extruders_` stayed at its default 1 and `extruders_`
- * stayed empty, which made every toolchanger branch unreachable and
- * `AFC_SELECT_TOOL` was never dispatched on an actual AFC toolchanger.
- *
- * The dispatch branch no longer gates on `num_extruders_ > 1` — that counts
- * `[AFC_extruder]` sections, which an IDEX or standalone-toolhead machine also
- * has, and `AFC_SELECT_TOOL` exists only where an `[AFC_Toolchanger <name>]`
- * section does (AFC_Toolchanger.py:47-49, v1.2.0 only). `extruders_` discovery
- * from the flat array is still exactly as covered below; what changed is that
- * the frames which drive a DISPATCH now have to say whether a toolchanger is
- * present, because that is the real question.
+ * The extruder list therefore has to come from the flat top-level
+ * `AFC.extruders` array, which is what these tests feed.
  *
  * The existing multi-extruder tests all feed a `system` object, so they passed
  * while exercising a shape production never receives — the same failure mode as
@@ -42,6 +33,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <functional>
 #include <string>
 #include <vector>
@@ -108,20 +100,13 @@ TEST_CASE("AFC discovers toolchanger extruders from the status payload",
     }
 
     SECTION("two extruders are both discovered, with no AFC.system present") {
-        // This is the case that was broken: the firmware names both extruders in
-        // the flat array, but nothing derived num_extruders_ from it, so every
-        // toolchanger branch stayed unreachable.
-        //
-        // Discovering two extruders is NOT the same as being a toolchanger —
-        // see "AFC toolchanger detection" in test_ams_backend_afc.cpp. This
-        // section pins discovery only.
         AfcToolchangerStatusHelper afc;
         afc.feed_afc(status_payload({"extruder", "extruder1"}));
         CHECK(afc.extruder_count() == 2);
         CHECK(afc.extruder_infos() == std::vector<std::string>{"extruder", "extruder1"});
     }
 
-    SECTION("positional order is preserved — extruders_ is indexed as a tool number") {
+    SECTION("positional order is preserved — per-extruder actions address extruders_ by position") {
         AfcToolchangerStatusHelper afc;
         afc.feed_afc(status_payload({"extruder", "extruder1", "extruder2"}));
         REQUIRE(afc.extruder_count() == 3);
@@ -173,28 +158,8 @@ TEST_CASE("AFC.system still wins when present — it carries strictly more",
 // End-to-end: status payload in, toolchanger G-code out (#1200)
 // ============================================================================
 //
-// The discovery tests above stop at `num_extruders_`. Everything that CONSUMES
-// it is covered elsewhere by two shapes that a real printer never produces:
-//
-//  * `AmsBackendAfcTestHelper::setup_toolchanger(n)` in test_ams_backend_afc.cpp
-//    assigns `num_extruders_` and `extruders_` directly, skipping the parser
-//    entirely.
-//  * The `AFC.system` fixtures in test_ams_afc_multi_extruder.cpp feed the
-//    /printer/afc/status webhook shape, which the status subscription we
-//    actually subscribe to does not carry.
-//
-// Both were green for the entire time `AFC_SELECT_TOOL` was dead on hardware,
-// because neither one asks the question that matters: does the payload the
-// firmware really sends reach the dispatch? These do — the only input is a
-// status frame, with one deliberate exception noted below.
-//
-// That exception is the lane-fed toolchanger. A toolchanger whose heads are all
-// fed by real lanes publishes NO `Toolchanger` entry in `units` (AFC drops any
-// unit with no lanes, AFC.py v1.2.0:2554, and AFCExtruder.check_lanes() removes
-// the synthetic per-head lane once a real one exists, AFC_extruder.py:391-401),
-// so its status frame is byte-identical to an IDEX machine's. There is no
-// status-only answer; the `[AFC_Toolchanger …]` section in configfile.settings
-// is the only discriminator, and that case seeds it directly.
+// The only input is a status frame, so these prove the payload the firmware
+// really sends reaches the dispatch.
 
 namespace helix {
 
@@ -213,6 +178,11 @@ class AfcStatusDispatchHelper : public AmsBackendAfc {
     void feed_afc(const nlohmann::json& afc) {
         nlohmann::json params;
         params["AFC"] = afc;
+        feed(params);
+    }
+
+    /// Feed a whole status frame: the AFC object plus any per-lane objects.
+    void feed(const nlohmann::json& params) {
         nlohmann::json notification;
         notification["params"] = nlohmann::json::array({params, 0.0});
         handle_status_update(notification);
@@ -227,28 +197,17 @@ class AfcStatusDispatchHelper : public AmsBackendAfc {
     // (dispatch_operation -> ensure_homed_then -> execute_gcode(gcode, cb)).
     // Overriding only the 1-arg form captures nothing and the dispatch fails
     // with "MoonrakerAPI not available".
-    AmsError execute_gcode(const std::string& gcode, std::function<void()> on_complete) override {
+    AmsError execute_gcode(const std::string& gcode,
+                           helix::SharedCallback<void()> on_complete) override {
         captured.push_back(gcode);
         pending_macro_ack = std::move(on_complete);
         return AmsErrorHelper::success();
     }
 
-    std::function<void()> pending_macro_ack;
-
-    /// Stand in for an `[AFC_Toolchanger …]` section in configfile.settings.
-    /// client_ is null here, so query_afc_configfile_topology() never runs.
-    void seed_configfile_toolchanger(bool present) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        AfcTestAccess::configfile_has_toolchanger(*this) = present;
-    }
+    helix::SharedCallback<void()> pending_macro_ack;
 
     [[nodiscard]] bool sent(const std::string& gcode) const {
         return std::find(captured.begin(), captured.end(), gcode) != captured.end();
-    }
-
-    [[nodiscard]] bool sent_starting_with(const std::string& prefix) const {
-        return std::any_of(captured.begin(), captured.end(),
-                           [&](const std::string& g) { return g.rfind(prefix, 0) == 0; });
     }
 
     [[nodiscard]] bool has_action(const std::string& id) const {
@@ -282,6 +241,23 @@ nlohmann::json toolchanger_status() {
     return j;
 }
 
+/// The toolchanger frame with each lane's own object, as the subscription
+/// delivers it: AFC_stepper publishes the lane's T number (`map`) and the
+/// head it feeds (`extruder`). The T numbers are interleaved across the heads
+/// so a tool change has to read them rather than count extruders.
+nlohmann::json toolchanger_frame() {
+    nlohmann::json params;
+    params["AFC"] = toolchanger_status();
+    const std::vector<std::array<const char*, 3>> lanes{{"lane1", "T1", "extruder1"},
+                                                        {"lane2", "T0", "extruder"},
+                                                        {"lane3", "T2", "extruder"},
+                                                        {"lane4", "T3", "extruder1"}};
+    for (const auto& [lane, map, extruder] : lanes) {
+        params[std::string("AFC_stepper ") + lane] = {{"map", map}, {"extruder", extruder}};
+    }
+    return params;
+}
+
 /// A plain single-extruder BoxTurtle. One extruder, no toolchanger.
 nlohmann::json single_extruder_status() {
     nlohmann::json j = base_status({"extruder"});
@@ -290,8 +266,7 @@ nlohmann::json single_extruder_status() {
 }
 
 /// TWO extruders and NO toolchanger — IDEX, or two standalone toolheads driven
-/// by their own [AFC_extruder] sections. `AFC_SELECT_TOOL` does not exist on
-/// this machine; emitting it is the #1200 follow-up defect.
+/// by their own [AFC_extruder] sections.
 nlohmann::json multi_extruder_no_toolchanger_status() {
     nlohmann::json j = base_status({"extruder", "extruder1"});
     j["units"] = nlohmann::json::array({"Box_Turtle Turtle_1"});
@@ -300,98 +275,56 @@ nlohmann::json multi_extruder_no_toolchanger_status() {
 
 } // namespace
 
-TEST_CASE("AFC_SELECT_TOOL dispatches from the status payload alone (#1200)",
+TEST_CASE("AFC load and tool change name the lane or T number on every topology",
+          "[ams][afc][toolchanger][status][1200][1824][1850]") {
+    // AFC owns lane -> extruder and T -> lane, so a load names the lane on
+    // every topology. A tool change sends T{n} except on a toolchanger, where
+    // it only mounts the head that T number's lane feeds.
+    const std::vector<std::pair<const char*, nlohmann::json>> frames{
+        {"toolchanger", toolchanger_frame()},
+        {"single extruder", {{"AFC", single_extruder_status()}}},
+        {"multi-extruder, no toolchanger", {{"AFC", multi_extruder_no_toolchanger_status()}}}};
+
+    for (const auto& [label, frame] : frames) {
+        CAPTURE(label);
+
+        AfcStatusDispatchHelper load;
+        load.feed(frame);
+        REQUIRE(load.load_filament(1));
+        CHECK(load.captured == std::vector<std::string>{"CHANGE_TOOL LANE=lane2"});
+
+        AfcStatusDispatchHelper change;
+        change.feed(frame);
+        REQUIRE(change.change_tool(1));
+        if (std::string(label) == "toolchanger") {
+            CHECK(change.captured == std::vector<std::string>{"AFC_SELECT_TOOL TOOL=extruder1"});
+        } else {
+            CHECK(change.captured == std::vector<std::string>{"T1"});
+        }
+    }
+}
+
+TEST_CASE("AFC toolchanger refuses a tool change while lanes have named no head",
+          "[ams][afc][toolchanger][status][1850]") {
+    // Before the per-lane objects arrive, every lane's head is unknown. Picking
+    // one would be a guess, so nothing is sent.
+    AfcStatusDispatchHelper afc;
+    afc.feed_afc(toolchanger_status());
+    CHECK_FALSE(afc.change_tool(1));
+    CHECK(afc.captured.empty());
+}
+
+TEST_CASE("Per-extruder actions follow the frame's extruder order, not name order",
           "[ams][afc][toolchanger][status][1200]") {
-    SECTION("load_filament routes through the toolchanger on a toolchanger frame") {
-        AfcStatusDispatchHelper afc;
-        afc.feed_afc(toolchanger_status());
+    // The webhook parse sorts its map keys; the status parse must not, or the
+    // _T0 and _T1 actions silently swap heads.
+    AfcStatusDispatchHelper afc;
+    nlohmann::json frame = toolchanger_status();
+    frame["extruders"] = nlohmann::json::array({"extruder_b", "extruder_a"});
+    afc.feed_afc(frame);
 
-        REQUIRE(afc.load_filament(1));
-        CHECK(afc.sent("AFC_SELECT_TOOL TOOL=extruder1"));
-        CHECK_FALSE(afc.sent_starting_with("CHANGE_TOOL"));
-    }
-
-    SECTION("load_filament falls back to CHANGE_TOOL on a single-extruder frame") {
-        // Both halves of the branch: a one-extruder frame must NOT be mistaken
-        // for a toolchanger, or every BoxTurtle load turns into a tool select.
-        AfcStatusDispatchHelper afc;
-        afc.feed_afc(single_extruder_status());
-
-        REQUIRE(afc.load_filament(1));
-        CHECK(afc.sent("CHANGE_TOOL LANE=lane2"));
-        CHECK_FALSE(afc.sent_starting_with("AFC_SELECT_TOOL"));
-    }
-
-    SECTION("change_tool routes through the toolchanger on a toolchanger frame") {
-        AfcStatusDispatchHelper afc;
-        afc.feed_afc(toolchanger_status());
-
-        REQUIRE(afc.change_tool(1));
-        CHECK(afc.sent("AFC_SELECT_TOOL TOOL=extruder1"));
-        CHECK_FALSE(afc.sent("T1"));
-    }
-
-    SECTION("change_tool falls back to T{n} on a single-extruder frame") {
-        AfcStatusDispatchHelper afc;
-        afc.feed_afc(single_extruder_status());
-
-        REQUIRE(afc.change_tool(1));
-        CHECK(afc.sent("T1"));
-        CHECK_FALSE(afc.sent_starting_with("AFC_SELECT_TOOL"));
-    }
-
-    SECTION("a multi-extruder frame with NO toolchanger must not tool-select") {
-        // #1200 follow-up. `num_extruders_ > 1` was the old gate, so an IDEX or
-        // standalone-toolhead machine — two [AFC_extruder] sections, no
-        // [AFC_Toolchanger] — got `AFC_SELECT_TOOL TOOL=extruder1`. Klipper has
-        // no such command there, answered `// Unknown command:"AFC_SELECT_TOOL"`
-        // and the load SILENTLY never happened.
-        AfcStatusDispatchHelper afc;
-        afc.feed_afc(multi_extruder_no_toolchanger_status());
-
-        REQUIRE(afc.load_filament(1));
-        CHECK(afc.sent("CHANGE_TOOL LANE=lane2"));
-        CHECK_FALSE(afc.sent_starting_with("AFC_SELECT_TOOL"));
-    }
-
-    SECTION("a multi-extruder frame with NO toolchanger falls back to T{n} on change_tool") {
-        AfcStatusDispatchHelper afc;
-        afc.feed_afc(multi_extruder_no_toolchanger_status());
-
-        REQUIRE(afc.change_tool(1));
-        CHECK(afc.sent("T1"));
-        CHECK_FALSE(afc.sent_starting_with("AFC_SELECT_TOOL"));
-    }
-
-    SECTION("a lane-fed toolchanger publishes no Toolchanger unit — configfile carries it") {
-        // Every toolhead is fed by a real lane, so AFCExtruder.check_lanes()
-        // popped the synthetic per-toolhead lane off the Toolchanger unit
-        // (AFC_extruder.py:391-401) and AFC's `len(unit.lanes) > 0` filter
-        // (AFC.py v1.2.0:2554) dropped the unit from `units` altogether. The
-        // status frame is indistinguishable from the IDEX case above; only the
-        // [AFC_Toolchanger] section in configfile.settings tells them apart.
-        AfcStatusDispatchHelper afc;
-        afc.seed_configfile_toolchanger(true);
-        afc.feed_afc(multi_extruder_no_toolchanger_status());
-
-        REQUIRE(afc.load_filament(1));
-        CHECK(afc.sent("AFC_SELECT_TOOL TOOL=extruder1"));
-        CHECK_FALSE(afc.sent_starting_with("CHANGE_TOOL"));
-    }
-
-    SECTION("tool number indexes extruders_ positionally, not by name order") {
-        // AFC emits the array in tool order and extruders_ is indexed as a tool
-        // number, so T0 must be the FIRST name in the frame even when a later
-        // name sorts ahead of it. The webhook parse sorts its map keys; the
-        // status parse must not, or T0 and T1 silently swap.
-        AfcStatusDispatchHelper afc;
-        nlohmann::json frame = toolchanger_status();
-        frame["extruders"] = nlohmann::json::array({"extruder_b", "extruder_a"});
-        afc.feed_afc(frame);
-
-        REQUIRE(afc.change_tool(0));
-        CHECK(afc.sent("AFC_SELECT_TOOL TOOL=extruder_b"));
-    }
+    REQUIRE(afc.execute_device_action("led_extruder_T0"));
+    CHECK(afc.sent("AFC_SET_EXTRUDER_LED EXTRUDER=extruder_b TURN_ON=1"));
 }
 
 TEST_CASE("Per-extruder device actions materialise from the status payload alone (#1200)",

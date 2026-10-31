@@ -16,7 +16,7 @@
 #
 # Covers both halves of the mechanism:
 #   setup_config_symlink()      scripts/lib/installer/platform.sh   (installer)
-#   restore_config_symlinks()   config/refresh-service-units.sh     (post-update)
+#   restore_config_symlinks()   config/restore-user-config.sh        (post-update)
 
 WORKTREE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
@@ -455,19 +455,13 @@ extract_release_zip() {
 # restore_config_symlinks — the real function from refresh-service-units.sh
 # ===========================================================================
 
-# Load the real function bodies out of the shipped script. The script is not
-# sourceable as a whole (set -e, systemctl, a 90s settle loop), so pull out the
-# block between the config lists and the bare invocation at the bottom. Nothing
-# is retyped here: a change to the shipped logic is a change to what runs.
+# Load the real function bodies from the shipped restore script, defined
+# without running them. Nothing is retyped here: a change to the shipped logic
+# is a change to what runs.
 load_restore_functions() {
-    local extracted="$BATS_TEST_TMPDIR/restore_extract.sh"
-    awk '/^HELIX_USER_CONFIG_FILES=/{on=1} /^restore_config_symlinks$/{on=0} on' \
-        "$WORKTREE_ROOT/config/refresh-service-units.sh" > "$extracted"
-    # Sanity: the markers must still exist, or we would be testing an empty file.
-    grep -q 'restore_config_symlinks()' "$extracted"
-    grep -q 'HELIX_USER_CONFIG_DIRS=' "$extracted"
     # shellcheck disable=SC1090
-    . "$extracted"
+    HELIX_RESTORE_LIB_ONLY=1 . "$WORKTREE_ROOT/config/restore-user-config.sh"
+    grep -q 'restore_config_symlinks()' "$WORKTREE_ROOT/config/restore-user-config.sh"
 
     # Discovery scans absolute system paths; point it at the test tree instead.
     eval "discover_pd_helix() { printf '%s' '$1'; }"
@@ -640,7 +634,7 @@ load_restore_functions() {
 @test "installer and refresh script agree on the directory list" {
     local from_platform from_refresh
     from_platform=$(grep -m1 '^HELIX_USER_CONFIG_DIRS=' "$WORKTREE_ROOT/scripts/lib/installer/platform.sh")
-    from_refresh=$(grep -m1 '^HELIX_USER_CONFIG_DIRS=' "$WORKTREE_ROOT/config/refresh-service-units.sh")
+    from_refresh=$(grep -m1 '^HELIX_USER_CONFIG_DIRS=' "$WORKTREE_ROOT/config/restore-user-config.sh")
     [ -n "$from_platform" ]
     [ "$from_platform" = "$from_refresh" ]
 }
@@ -648,7 +642,7 @@ load_restore_functions() {
 @test "installer and refresh script agree on the file list" {
     local from_platform from_refresh
     from_platform=$(grep -m1 '^HELIX_USER_CONFIG_FILES=' "$WORKTREE_ROOT/scripts/lib/installer/platform.sh")
-    from_refresh=$(grep -m1 '^HELIX_USER_CONFIG_FILES=' "$WORKTREE_ROOT/config/refresh-service-units.sh")
+    from_refresh=$(grep -m1 '^HELIX_USER_CONFIG_FILES=' "$WORKTREE_ROOT/config/restore-user-config.sh")
     [ -n "$from_platform" ]
     [ "$from_platform" = "$from_refresh" ]
 }

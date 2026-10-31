@@ -1,0 +1,144 @@
+{
+  "ams": {
+    "total_slots": 0,
+    "type": "happy_hare",
+    "unit_count": 0
+  },
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "build_volume": {
+    "x_mm": 350,
+    "y_mm": 350,
+    "z_mm": 340
+  },
+  "capabilities": {
+    "has_accelerometer": false,
+    "has_chamber": true,
+    "has_exclude_object": true,
+    "has_firmware_retraction": true,
+    "has_klippain_shaketune": false,
+    "has_speaker": false,
+    "has_timelapse": false
+  },
+  "device_id": "<device_id>",
+  "display_backend": "DRM/KMS",
+  "event": "hardware_profile",
+  "extruders": {
+    "count": 1,
+    "has_chamber_heater": true,
+    "has_heater_bed": true
+  },
+  "fans": {
+    "controller_fan": 1,
+    "generic": 0,
+    "heater_fan": 1,
+    "names": [
+      "fan",
+      "heater_fan hotend_fan",
+      "controller_fan electronics"
+    ],
+    "part_cooling": 1,
+    "total": 3
+  },
+  "leds": {
+    "count": 1,
+    "has_led_effects": false,
+    "names": [
+      "neopixel status_led"
+    ]
+  },
+  "macros": {
+    "has_heat_soak": true,
+    "has_helix_macros": false,
+    "has_nozzle_clean": true,
+    "has_print_start": true,
+    "has_purge_line": true,
+    "led_macro_count": 0,
+    "names": [
+      "CLEAN_NOZZLE",
+      "HEAT_SOAK",
+      "PRINT_START",
+      "PURGE_LINE"
+    ],
+    "total_count": 4
+  },
+  "mcus": {
+    "chips": [
+      "stm32f446xx",
+      "stm32g0b1xx"
+    ],
+    "count": 2,
+    "primary": "stm32f446xx"
+  },
+  "moonraker_is_local": true,
+  "plugins": {
+    "helix_plugin_installed": false
+  },
+  "printer": {
+    "detected_model": "Voron 2.4",
+    "kinematics": "corexy"
+  },
+  "printer_objects": [
+    "configfile",
+    "mcu",
+    "mcu ebb36",
+    "toolhead",
+    "extruder",
+    "heater_bed",
+    "heater_generic chamber",
+    "fan",
+    "heater_fan hotend_fan",
+    "controller_fan electronics",
+    "stepper_x",
+    "stepper_y",
+    "tmc2209 stepper_x",
+    "probe",
+    "bed_mesh",
+    "quad_gantry_level",
+    "adxl345",
+    "neopixel status_led",
+    "filament_switch_sensor runout",
+    "temperature_sensor chamber",
+    "exclude_object",
+    "firmware_retraction",
+    "mmu",
+    "gcode_macro PRINT_START",
+    "gcode_macro CLEAN_NOZZLE",
+    "gcode_macro HEAT_SOAK",
+    "gcode_macro PURGE_LINE"
+  ],
+  "probe": {
+    "has_bed_mesh": true,
+    "has_probe": true,
+    "has_qgl": true,
+    "has_screws_tilt": false,
+    "has_z_tilt": false
+  },
+  "schema_version": 3,
+  "sensors": {
+    "accel": 0,
+    "filament": 0,
+    "filament_names": [
+      "filament_switch_sensor runout"
+    ],
+    "load_cell": 0,
+    "temperature_extra": 0,
+    "temperature_names": [
+      "temperature_sensor chamber"
+    ]
+  },
+  "steppers": {
+    "count": 2,
+    "names": [
+      "stepper_x",
+      "stepper_y"
+    ]
+  },
+  "timestamp": "<timestamp>",
+  "tools": {
+    "count": 0,
+    "is_multi_tool": false
+  }
+}

@@ -19,9 +19,8 @@
 
 namespace helix {
 class AmsBackend;
-} // namespace helix
-
 class IMoonrakerAPI;
+} // namespace helix
 
 /**
  * @brief Centralized Spoolman weight polling, circuit breaker, and identity cache
@@ -78,7 +77,7 @@ class SpoolmanManager {
     void init_subjects();
     void deinit_subjects();
 
-    void set_api(IMoonrakerAPI* api);
+    void set_api(helix::IMoonrakerAPI* api);
 
     void refresh_spoolman_weights();
 
@@ -87,7 +86,8 @@ class SpoolmanManager {
      *
      * A save the user just made is the one moment a lane's Spoolman record is
      * known stale, and the poll would leave it that way for up to its interval.
-     * This is one request per slot linked to @p spool_id, so it is not gated on
+     * This is one request per lane linked to @p spool_id, the external spool's
+     * bypass lane included, so it is not gated on
      * the poll timer, the debounce or the circuit breaker, and it does not
      * write the debounce clock: none of those pace a single deliberate read.
      *
@@ -124,6 +124,10 @@ class SpoolmanManager {
      * Called with mutex_ held, which is what makes api_ safe to read.
      */
     void fetch_linked_slot(int backend_index, int slot_index, int spoolman_id);
+
+    /// fetch_linked_slot() for the external spool: files the answer on the
+    /// bypass lane and the stored record. Called with mutex_ held.
+    void fetch_linked_external_spool(int ext_spoolman_id);
 
   public:
     // ========================================================================
@@ -222,7 +226,7 @@ class SpoolmanManager {
     static std::atomic<bool> s_shutdown_flag;
 
     mutable std::recursive_mutex mutex_;
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
     bool initialized_ = false;
 
     // Polling
@@ -230,10 +234,10 @@ class SpoolmanManager {
     int poll_refcount_ = 0;
 
     // Circuit breaker / debounce
-    static constexpr int CB_FAILURE_THRESHOLD = 3;
-    static constexpr uint32_t CB_BACKOFF_MS = 30000;
-    static constexpr uint32_t DEBOUNCE_MS = 5000;
-    static constexpr uint32_t POLL_INTERVAL_MS = 30000;
+    static constexpr int kCbFailureThreshold = 3;
+    static constexpr uint32_t kCbBackoffMs = 30000;
+    static constexpr uint32_t kDebounceMs = 5000;
+    static constexpr uint32_t kPollIntervalMs = 30000;
 
     uint32_t last_refresh_ms_ = 0;
     int consecutive_failures_ = 0;

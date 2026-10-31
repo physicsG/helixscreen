@@ -29,7 +29,7 @@
 namespace {
 
 // Every context menu component, including the five with no reachable mock state.
-constexpr const char* MENUS[] = {
+constexpr const char* kMenus[] = {
     "print_status_configure_picker",
     "print_status_nozzle_tool_picker",
     "thermistor_configure_picker",
@@ -42,6 +42,7 @@ constexpr const char* MENUS[] = {
     "printer_switch_menu",
     "ams_selector_menu",
     "spoolman_context_menu",
+    "belt_retest_menu",
     "ams_context_menu",
 };
 
@@ -49,7 +50,7 @@ constexpr const char* MENUS[] = {
 
 TEST_CASE_METHOD(XMLTestFixture, "context menus: every one resolves its card and close button",
                  "[xml][context-menu][sweep]") {
-    for (const char* menu : MENUS) {
+    for (const char* menu : kMenus) {
         INFO("component: " << menu);
         REQUIRE(register_component(menu));
 
@@ -84,7 +85,7 @@ TEST_CASE_METHOD(XMLTestFixture,
     // close control has to sit at the content-right for the header to read evenly.
     // ui_button carries 16px of internal padding, which is why the XML zeroes
     // pad_right; without that the glyph floats short of the edge.
-    for (const char* menu : MENUS) {
+    for (const char* menu : kMenus) {
         INFO("component: " << menu);
         REQUIRE(register_component(menu));
 

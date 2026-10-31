@@ -1,0 +1,14 @@
+{
+  "description": "Replace one line with two",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "OLD2",
+      "action": "replace",
+      "args": {
+        "gcode": "NEW_A\nNEW_B",
+        "comment": "Replaced"
+      }
+    }
+  ]
+}

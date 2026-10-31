@@ -205,6 +205,7 @@ setup_refresh_fixture() {
     # A stable install dir so the refresh's settle-wait returns immediately.
     mkdir -p "$INSTALL_DIR/bin"
     printf '#!/bin/sh\n' > "$INSTALL_DIR/bin/helix-screen"
+    chmod +x "$INSTALL_DIR/bin/helix-screen"
     printf '{}' > "$INSTALL_DIR/release_info.json"
     # The identity source the refresh reads before overwriting the service:
     # User= there is the Klipper user on these single-user installs.

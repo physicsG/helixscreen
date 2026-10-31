@@ -14,17 +14,20 @@
 #include "ams_state.h"
 
 #include "ui_color_picker.h"
+#include "ui_error_reporting.h"
 #include "ui_update_queue.h"
 
 #include "ams_backend_registry.h"
 #include "ams_bypass_policy.h"
 #include "ams_lane_state.h"
 #include "ams_runout_grace.h"
+#include "ams_standing_fault.h"
 #include "ams_state_internal.h"
 #include "ams_tool_topology.h"
 #include "app_globals.h"
 #include "data_root_resolver.h"
 #include "display_numbering.h"
+#include "filament_accounting_controller.h"
 #include "filament_database.h"
 #include "filament_display_name.h"
 #include "filament_sensor_manager.h"
@@ -33,11 +36,14 @@
 #include "i_moonraker_api.h"
 #include "lane_source_store.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "print_stop_reason.h"
 #include "printer_discovery.h"
+#include "printer_event_journal.h"
 #include "printer_state.h"
 #include "runtime_config.h"
 #include "settings_manager.h"
 #include "spoolman_manager.h"
+#include "spoolman_types.h"
 #include "text_io.h"
 #include "tool_state.h"
 #include "ui/ui_widget_helpers.h"
@@ -47,16 +53,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
 namespace helix {
 
-static_assert(RunoutGrace::MAX_SLOTS == AmsState::MAX_SLOTS, "one unload stamp per slot subject");
+static_assert(RunoutGrace::kMaxSlots == AmsState::kMaxSlots, "one unload stamp per slot subject");
 
 namespace ams_state_detail {
 
@@ -93,6 +99,7 @@ bool shutting_down() {
 } // namespace ams_state_detail
 
 using ams_state_detail::assert_main_thread;
+using ams_state_detail::set_int_if_changed;
 using ams_state_detail::slot_error_state;
 
 namespace {
@@ -103,21 +110,6 @@ struct AsyncSyncData {
     int slot_index; // Only used if full_sync == false
 };
 
-// Shortens a UTF-8 string to at most max_bytes bytes without splitting a
-// multi-byte codepoint. A raw firmware message (AFC's message.message) has no
-// length bound at all, so a composition can still overrun a subject buffer
-// sized for the longest known translated producer.
-std::string truncate_utf8(const std::string& s, size_t max_bytes) {
-    if (s.size() <= max_bytes) {
-        return s;
-    }
-    size_t end = max_bytes;
-    while (end > 0 && (static_cast<unsigned char>(s[end]) & 0xC0) == 0x80) {
-        --end;
-    }
-    return s.substr(0, end);
-}
-
 } // namespace
 
 AmsState& AmsState::instance() {
@@ -127,7 +119,7 @@ AmsState& AmsState::instance() {
     return instance;
 }
 
-const char* AmsState::get_logo_path(const std::string& type_name) {
+LogoArt AmsState::get_logo(const std::string& type_name) {
     // Normalize to lowercase for matching
     std::string lower_name = helix::text_io::to_lower(type_name);
 
@@ -149,51 +141,62 @@ const char* AmsState::get_logo_path(const std::string& type_name) {
     }
 
     // Map system names to logo paths
-    // Note: All logos are 64x64 white-on-transparent PNGs
-    static const std::unordered_map<std::string, std::string> logo_map = {
+    // Every logo is a 64x64 PNG. A mono mark is white on transparent and the UI tints it
+    // to the text color; a color mark is drawn as is.
+    struct Entry {
+        std::string path;
+        bool color;
+    };
+    static const std::unordered_map<std::string, Entry> logo_map = {
         // AFC (Armored Turtle) - has its own logo
-        {"afc", asset_component_uri("assets/images/ams/afc_64.png")},
-        {"box turtle", asset_component_uri("assets/images/ams/box_turtle_64.png")},
-        {"box_turtle", asset_component_uri("assets/images/ams/box_turtle_64.png")},
-        {"boxturtle", asset_component_uri("assets/images/ams/box_turtle_64.png")},
+        {"afc", {asset_component_uri("assets/images/ams/afc_64.png"), false}},
+        {"box turtle", {asset_component_uri("assets/images/ams/box_turtle_64.png"), false}},
+        {"box_turtle", {asset_component_uri("assets/images/ams/box_turtle_64.png"), false}},
+        {"boxturtle", {asset_component_uri("assets/images/ams/box_turtle_64.png"), false}},
 
         // Happy Hare - generic firmware, has its own logo
-        {"happy hare", asset_component_uri("assets/images/ams/happy_hare_64.png")},
-        {"happy_hare", asset_component_uri("assets/images/ams/happy_hare_64.png")},
-        {"happyhare", asset_component_uri("assets/images/ams/happy_hare_64.png")},
+        {"happy hare", {asset_component_uri("assets/images/ams/happy_hare_64.png"), false}},
+        {"happy_hare", {asset_component_uri("assets/images/ams/happy_hare_64.png"), false}},
+        {"happyhare", {asset_component_uri("assets/images/ams/happy_hare_64.png"), false}},
 
         // Specific hardware types (when detected or configured)
-        {"ercf", asset_component_uri("assets/images/ams/ercf_64.png")},
-        {"3ms", asset_component_uri("assets/images/ams/3ms_64.png")},
-        {"tradrack", asset_component_uri("assets/images/ams/tradrack_64.png")},
-        {"mmx", asset_component_uri("assets/images/ams/mmx_64.png")},
-        {"night owl", asset_component_uri("assets/images/ams/night_owl_64.png")},
-        {"night_owl", asset_component_uri("assets/images/ams/night_owl_64.png")},
-        {"nightowl", asset_component_uri("assets/images/ams/night_owl_64.png")},
-        {"quattro box", asset_component_uri("assets/images/ams/quattro_box_64.png")},
-        {"quattro_box", asset_component_uri("assets/images/ams/quattro_box_64.png")},
-        {"quattrobox", asset_component_uri("assets/images/ams/quattro_box_64.png")},
-        {"btt vivid", asset_component_uri("assets/images/ams/btt_vivid_64.png")},
-        {"btt_vivid", asset_component_uri("assets/images/ams/btt_vivid_64.png")},
-        {"bttvivid", asset_component_uri("assets/images/ams/btt_vivid_64.png")},
-        {"vivid", asset_component_uri("assets/images/ams/btt_vivid_64.png")},
-        {"kms", asset_component_uri("assets/images/ams/kms_64.png")},
+        {"ercf", {asset_component_uri("assets/images/ams/ercf_64.png"), false}},
+        {"3ms", {asset_component_uri("assets/images/ams/3ms_64.png"), false}},
+        {"tradrack", {asset_component_uri("assets/images/ams/tradrack_64.png"), false}},
+        {"mmx", {asset_component_uri("assets/images/ams/mmx_64.png"), false}},
+        {"night owl", {asset_component_uri("assets/images/ams/night_owl_64.png"), false}},
+        {"night_owl", {asset_component_uri("assets/images/ams/night_owl_64.png"), false}},
+        {"nightowl", {asset_component_uri("assets/images/ams/night_owl_64.png"), false}},
+        {"quattro box", {asset_component_uri("assets/images/ams/quattro_box_64.png"), false}},
+        {"quattro_box", {asset_component_uri("assets/images/ams/quattro_box_64.png"), false}},
+        {"quattrobox", {asset_component_uri("assets/images/ams/quattro_box_64.png"), false}},
+
+        // QIDI Box - has its own logo (prestonbrown/helixscreen#1514)
+        {"qidi box", {asset_component_uri("assets/images/ams/qidi_box_64.png"), false}},
+        {"qidi_box", {asset_component_uri("assets/images/ams/qidi_box_64.png"), false}},
+        {"qidibox", {asset_component_uri("assets/images/ams/qidi_box_64.png"), false}},
+        {"btt vivid", {asset_component_uri("assets/images/ams/btt_vivid_64.png"), false}},
+        {"btt_vivid", {asset_component_uri("assets/images/ams/btt_vivid_64.png"), false}},
+        {"bttvivid", {asset_component_uri("assets/images/ams/btt_vivid_64.png"), false}},
+        {"vivid", {asset_component_uri("assets/images/ams/btt_vivid_64.png"), false}},
+        {"kms", {asset_component_uri("assets/images/ams/kms_64.png"), false}},
+        // OpenAMS: a full-color mark, drawn untinted.
+        {"open ams", {asset_component_uri("assets/images/ams/openams_64.png"), true}},
+        {"open_ams", {asset_component_uri("assets/images/ams/openams_64.png"), true}},
+        {"openams", {asset_component_uri("assets/images/ams/openams_64.png"), true}},
 
         // AFC unit types with no artwork of their own (Claymore is new in AFC
         // v1.2.0; the rest predate it). They fall back to the AFC mark:
         // wrong-but-related beats a blank slot, and the alternative is
         // silently rendering nothing.
-        {"htlf", asset_component_uri("assets/images/ams/afc_64.png")},
-        {"open ams", asset_component_uri("assets/images/ams/afc_64.png")},
-        {"open_ams", asset_component_uri("assets/images/ams/afc_64.png")},
-        {"openams", asset_component_uri("assets/images/ams/afc_64.png")},
-        {"claymore", asset_component_uri("assets/images/ams/afc_64.png")},
-        {"emu", asset_component_uri("assets/images/ams/afc_64.png")},
+        {"htlf", {asset_component_uri("assets/images/ams/afc_64.png"), false}},
+        {"claymore", {asset_component_uri("assets/images/ams/afc_64.png"), false}},
+        {"emu", {asset_component_uri("assets/images/ams/afc_64.png"), false}},
     };
 
     auto it = logo_map.find(lower_name);
     if (it != logo_map.end()) {
-        return it->second.c_str();
+        return {it->second.path.c_str(), it->second.color};
     }
 
     // AFC names a unit by type AND instance — "Box_Turtle Turtle_1" — so the
@@ -205,10 +208,22 @@ const char* AmsState::get_logo_path(const std::string& type_name) {
     if (space_pos != std::string::npos && space_pos > 0) {
         it = logo_map.find(lower_name.substr(0, space_pos));
         if (it != logo_map.end()) {
-            return it->second.c_str();
+            return {it->second.path.c_str(), it->second.color};
         }
     }
-    return nullptr;
+    return {};
+}
+
+LogoArt AmsState::get_unit_logo(const AmsUnit& unit, const AmsSystemInfo& info) {
+    LogoArt art = get_logo(unit.name);
+    if (!art.path || !art.path[0]) {
+        art = get_logo(info.type_name);
+    }
+    return art;
+}
+
+const char* AmsState::get_logo_path(const std::string& type_name) {
+    return get_logo(type_name).path;
 }
 
 AmsState::AmsState() {
@@ -263,7 +278,7 @@ void AmsState::init_backends_from_hardware(const helix::PrinterDiscovery& hardwa
         spdlog::info("[AMS State] Creating backend for: {} ({})", system.name,
                      ams_type_to_string(system.type));
 
-        auto backend = AmsBackend::create(system.type, api, client);
+        auto backend = AmsBackend::create(system.type, api, client, &hardware);
         if (!backend) {
             spdlog::warn("[AMS State] Failed to create {} backend", system.name);
             continue;
@@ -315,6 +330,7 @@ int AmsState::add_backend(std::unique_ptr<AmsBackend> backend) {
         std::move(backend), [this](int i, const std::string& event, const std::string& data) {
             on_backend_event(i, event, data);
         });
+    invalidate_system_info();
 
     // Per-backend slot subjects for secondary backends
     if (index > 0) {
@@ -337,6 +353,15 @@ std::optional<AmsType> AmsState::primary_type() const {
     return registry_.primary_type();
 }
 
+double AmsState::printable_y_shrink_mm() const {
+    const AmsBackend* backend = get_backend();
+    return backend != nullptr ? backend->printable_y_shrink_mm() : 0.0;
+}
+
+std::optional<BackendTraits> AmsState::primary_traits() const {
+    return registry_.primary_traits();
+}
+
 int AmsState::backend_count() const {
     return registry_.count();
 }
@@ -345,10 +370,21 @@ bool AmsState::any_filament_batch_in_flight() const {
     return registry_.any_filament_batch_in_flight();
 }
 
+void AmsState::before_disconnect() {
+    assert_main_thread();
+    for (const auto& backend : registry_.backends()) {
+        if (backend) {
+            backend->before_disconnect();
+        }
+    }
+}
+
 void AmsState::clear_backends() {
     assert_main_thread();
 
     registry_.clear();
+    invalidate_system_info();
+    system_info_snapshots_.clear();
 
     // Registration stamps indices from 0 again, so the next set of backends
     // takes these blocks of lane ids. A declaration left behind would be
@@ -366,6 +402,8 @@ void AmsState::clear_backends() {
     // per-slot stamps index the departing backend's slots; kept, they would
     // suppress a real runout on the same index of the next backend.
     runout_grace_.reset();
+    // What each lane's tag last named belongs to the departing backend's lanes.
+    tag_link_tracker_.clear();
     // A hold describes an operation on the departing backend.
     optimistic_action_until_.reset();
     // Every trace describes the departing backend's buffers.
@@ -377,6 +415,7 @@ void AmsState::clear_backends() {
     // Drop AMS-derived tool topology so the UI doesn't show stale tool pills
     // between backend disappearance and the next reconnect's init_tools().
     helix::ToolState::instance().clear_ams_topology();
+    helix::ToolState::instance().clear_backend_active_tool();
 
     // Clean up secondary slot subjects
     for (auto& subs : secondary_slot_subjects_) {
@@ -393,24 +432,29 @@ void AmsState::reset_backend_subjects() {
     // printer's filament system on the next one.
     lv_subject_set_int(&backend_count_, 0);
     lv_subject_set_int(&active_backend_, 0);
+    fault_cause_.clear();
 
     // System, action and current-tool state: the sync path with an empty system.
     sync_system_subjects(AmsSystemInfo{});
+    sync_shared_heater(nullptr, AmsSystemInfo{});
     // The action edge above belongs to no operation on the next printer.
     runout_grace_.reset();
     lv_subject_copy_string(&ams_system_name_, "");
     system_logo_buf_[0] = '\0';
     lv_subject_set_pointer(&ams_system_logo_, nullptr);
+    lv_subject_set_int(&ams_system_has_logo_, 0);
+    lv_subject_set_int(&ams_system_logo_color_, 0);
     lv_subject_copy_string(&ams_action_detail_, "");
     last_operation_detail_.clear();
     lv_subject_set_int(&toolchange_step_, -1);
-    lv_subject_copy_string(&ams_current_tool_text_, "---");
 
     lv_subject_set_int(&filament_loaded_, 0);
     lv_subject_set_int(&filament_runout_, 0);
     lv_subject_set_int(&bypass_active_, 0);
     lv_subject_set_int(&supports_bypass_, 0);
+    lv_subject_set_int(&ams_feeder_open_, 0);
     lv_subject_set_int(&ams_slot_count_, 0);
+    lv_subject_set_int(&ams_has_device_ops_, 0);
     lv_subject_set_int(&active_tool_port_present_, 1);
 
     lv_subject_set_int(&toolchange_visible_, 0);
@@ -428,11 +472,12 @@ void AmsState::reset_backend_subjects() {
     units_drying_signature_.clear();
 
     // Per-unit environment and its indicator.
-    for (int i = 0; i < MAX_UNITS; ++i) {
+    for (int i = 0; i < kMaxUnits; ++i) {
         lv_subject_set_int(&unit_temp_[i], 0);
         lv_subject_set_int(&unit_humidity_[i], 0);
         lv_subject_set_int(&unit_absent_[i], 0);
         lv_subject_set_int(&unit_disconnected_[i], 0);
+        lv_subject_set_int(&unit_logo_color_[i], 0);
         lv_subject_copy_string(&env_ind_temp_text_[i], "");
         lv_subject_copy_string(&env_ind_humidity_text_[i], "");
         lv_subject_set_int(&env_ind_humidity_status_[i], 0);
@@ -464,6 +509,16 @@ bool AmsState::any_bypass_active() const {
     return false;
 }
 
+bool AmsState::any_operation_running_here() const {
+    assert_main_thread();
+    for (const auto& backend : registry_.backends()) {
+        if (backend && backend->running_step_operation().has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool AmsState::active_spool_describes_bypass() const {
     assert_main_thread();
     return get_backend() == nullptr || any_bypass_active();
@@ -486,8 +541,14 @@ void AmsState::set_active_backend(int index) {
 
 bool AmsState::is_available() const {
     assert_main_thread();
-    auto* primary = get_backend(0);
-    return primary && primary->get_type() != AmsType::NONE;
+    const auto primary = system_info(0);
+    return primary && primary->presents_filament_system();
+}
+
+bool AmsState::filament_hardware_absent() const {
+    assert_main_thread();
+    const auto primary = system_info(0);
+    return primary && primary->external_spool_only;
 }
 
 void AmsState::set_moonraker_api(IMoonrakerAPI* api) {
@@ -519,7 +580,9 @@ void AmsState::sync_backend(int backend_index) {
         return;
     }
 
-    AmsSystemInfo info = backend->get_system_info();
+    const auto snapshot = read_system_info(backend_index);
+    const AmsSystemInfo& info = *snapshot;
+    registry_.ensure_sinks(backend_index, info.total_slots);
     auto& subs = secondary_slot_subjects_[sec_idx];
 
     for (int i = 0; i < std::min(info.total_slots, subs.slot_count); ++i) {
@@ -570,118 +633,6 @@ void AmsState::update_slot_for_backend(int backend_index, int slot_index) {
     }
 }
 
-namespace {
-/// Does any slot mapped to @p tool actually hold filament?
-///
-/// Guards the tool<-slot spool attribution when several slots share one tool,
-/// which is what an MMU in head mode looks like: every bay maps to the head it
-/// is bound to. Without this the attribution is decided by loop order.
-/// Which slot is actually SEATED at @p tool, when the tool is fed through a
-/// viewing position rather than holding a spool itself.
-///
-/// An ACE-fed U1 head is such a position: in head mode every bay of the bound
-/// ACE maps to that one head, so presence cannot pick between them — several
-/// bays hold filament at once and only one is loaded. The backend does know,
-/// through slot_identity_owner_slot(), and that is the only thing that does.
-///
-/// Returns nullopt both when no slot on this tool views another's spool (every
-/// ordinary backend, always) and when one does but nothing is seated in it —
-/// the caller has to tell those apart, which is what tool_is_fed_by_view() is
-/// for.
-std::optional<int> seated_slot_for_tool(const AmsSystemInfo& info, const AmsBackend* backend,
-                                        int tool) {
-    if (!backend) {
-        return std::nullopt;
-    }
-    for (const auto& unit : info.units) {
-        for (const auto& s : unit.slots) {
-            if (s.mapped_tool != tool || s.global_index < 0) {
-                continue;
-            }
-            if (auto owner = backend->slot_identity_owner_slot(s.global_index)) {
-                return owner;
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-/// Whether @p tool is reached through a position that views another unit's
-/// spool, seated or not. Distinguishes "nothing is loaded at this head" from
-/// "this backend has no such concept".
-bool tool_is_fed_by_view(const AmsSystemInfo& info, const AmsBackend* backend, int tool) {
-    if (!backend) {
-        return false;
-    }
-    for (const auto& unit : info.units) {
-        for (const auto& s : unit.slots) {
-            if (s.mapped_tool == tool && s.global_index >= 0 &&
-                backend->slot_identity_owner_unit(s.global_index)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool tool_has_present_slot(const AmsSystemInfo& info, int tool) {
-    for (const auto& unit : info.units) {
-        for (const auto& s : unit.slots) {
-            if (s.mapped_tool == tool && s.is_present()) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-/// Everything the attribution rule needs to know about ONE tool, gathered in
-/// a single pass. The three questions each re-walk every slot of every unit
-/// (and the two owner queries take the backend mutex per slot), so the full
-/// sync asks them once per distinct tool rather than once per slot.
-struct ToolFeed {
-    bool fed_by_view = false;  ///< reached through a position viewing another unit's spool
-    std::optional<int> seated; ///< the one slot entitled to the tool, when fed by view
-    bool has_present = false;  ///< some slot mapped to it holds filament
-};
-
-ToolFeed tool_feed(const AmsSystemInfo& info, const AmsBackend* backend, int tool) {
-    ToolFeed f;
-    f.fed_by_view = tool_is_fed_by_view(info, backend, tool);
-    if (f.fed_by_view) {
-        f.seated = seated_slot_for_tool(info, backend, tool);
-    }
-    f.has_present = tool_has_present_slot(info, tool);
-    return f;
-}
-
-/// Whether global slot @p slot_index may attribute its spool to its mapped
-/// tool. THE rule, shared by the full sync and the per-slot update: the
-/// per-slot path had grown its own shorter copy ("same guard as the full sync
-/// above") that stopped at presence, so on an ACE-fed head an occupied but
-/// UNSEATED bay re-claimed the tool's spool the moment its Spoolman spool was
-/// edited -- overwriting the seated bay's attribution, which ToolState then
-/// persisted, and which the next full sync could not undo (the seated bay had
-/// no Spoolman link to reassert, and a U1 has no firmware persistence to clear
-/// against).
-///
-/// Where a tool is reached through a viewing position, the SEATED slot is the
-/// only one entitled to it -- nothing seated means nothing to attribute. A
-/// viewing position with no seated source describes another unit's spool and
-/// is never a spool position itself. Everywhere else, presence decides:
-/// several slots on one tool means only an occupied one can be what feeds it.
-bool slot_may_attribute_tool(const ToolFeed& feed, const AmsBackend* backend, int slot_index,
-                             const SlotInfo& slot) {
-    if (feed.fed_by_view) {
-        return feed.seated.has_value() && *feed.seated == slot_index;
-    }
-    if (backend->slot_identity_owner_unit(slot_index)) {
-        return false;
-    }
-    return slot.is_present() || !feed.has_present;
-}
-} // namespace
-
 void AmsState::sync_from_backend() {
     assert_main_thread();
 
@@ -690,13 +641,23 @@ void AmsState::sync_from_backend() {
         return;
     }
 
-    AmsSystemInfo info = backend->get_system_info();
+    const auto snapshot = read_system_info(0);
+    const AmsSystemInfo& info = *snapshot;
 
+    registry_.ensure_sinks(0, info.total_slots);
     sync_system_subjects(info);
-    sync_tool_topology(backend);
+    sync_tool_topology(backend, info);
+    sync_shared_heater(backend, info);
     sync_filament_runout(info);
     sync_bypass(backend, info);
-    lv_subject_set_int(&ams_slot_count_, info.total_slots);
+    sync_feeder(backend);
+    const bool presented = info.presents_filament_system();
+    lv_subject_set_int(&ams_slot_count_, presented ? info.total_slots : 0);
+    warn_if_slots_exceed_subjects(info.total_slots);
+    // The overlay's Quick Actions, status line and bypass rows (the force-bypass
+    // row covers firmware that reports none) apply to every backend that
+    // presents a system, so that is the whole condition.
+    lv_subject_set_int(&ams_has_device_ops_, presented ? 1 : 0);
 
     // Update tool change progress raw data (text formatting in UI layer)
     if (info.number_of_toolchanges > 0) {
@@ -720,10 +681,17 @@ void AmsState::sync_from_backend() {
 
     // Update per-slot subjects, only firing when values actually change
     bool any_slot_changed = false;
-    for (int i = 0; i < std::min(info.total_slots, MAX_SLOTS); ++i) {
+    for (int i = 0; i < std::min(info.total_slots, kMaxSlots); ++i) {
         const SlotInfo* slot = info.get_slot_global(i);
         if (slot && write_slot_subjects(*backend, i, *slot)) {
             any_slot_changed = true;
+        }
+    }
+    for (int i = 0; i < info.total_slots; ++i) {
+        // An absent box's bays are placeholders that read empty, which is not
+        // a removal: the spool in them never left.
+        if (const SlotInfo* slot = info.get_slot_global(i); slot && !info.slot_absent(i)) {
+            sync_tag_spool_link(*backend, i, *slot);
         }
     }
 
@@ -741,7 +709,7 @@ void AmsState::sync_from_backend() {
 
     if (any_slot_changed) {
         spdlog::trace("[AmsState] Slot data changed, bumping version");
-        bump_slots_version();
+        bump_slots_version_from_sync();
     }
 
     // Sync dryer state (for systems with integrated drying like ACE)
@@ -767,14 +735,18 @@ void AmsState::sync_from_backend() {
 }
 
 void AmsState::sync_system_subjects(const AmsSystemInfo& info) {
-    // Update system-level subjects
-    int new_type = static_cast<int>(info.type);
+    // A backend presenting no filament system publishes the type of none, so
+    // every surface keyed on the type reads the printer as single-spool. Its
+    // action and loaded state below still flow: the filament panel's Load and
+    // Unload run through it and follow their progress there.
+    const AmsType presented = info.presents_filament_system() ? info.type : AmsType::NONE;
+    int new_type = static_cast<int>(presented);
     lv_subject_set_int(&ams_type_, new_type);
     // Published from the predicate, not the enum value, so a new tool-changer
     // type is picked up by XML without touching a binding.
-    int new_tool_changer = is_tool_changer(info.type) ? 1 : 0;
+    int new_tool_changer = is_tool_changer(presented) ? 1 : 0;
     lv_subject_set_int(&ams_is_tool_changer_, new_tool_changer);
-    int new_filament_system = is_filament_system(info.type) ? 1 : 0;
+    int new_filament_system = is_filament_system(presented) ? 1 : 0;
     lv_subject_set_int(&ams_is_filament_system_, new_filament_system);
     int new_action = static_cast<int>(info.action);
     if (optimistic_action_until_) {
@@ -802,8 +774,7 @@ void AmsState::sync_system_subjects(const AmsSystemInfo& info) {
     if (lv_subject_get_int(&ams_action_) != new_action) {
         spdlog::debug("[AmsState] sync_from_backend: action changed to {} ({})", new_action,
                       ams_action_to_string(static_cast<AmsAction>(new_action)));
-        lv_subject_set_int(&ams_action_, new_action);
-        action_mirror_.store(static_cast<AmsAction>(new_action), std::memory_order_relaxed);
+        publish_action(static_cast<AmsAction>(new_action));
     }
     // Granular firmware sub-phase (Snapmaker U1: Home/Select/Heat/Move). Most
     // backends leave operation_phase at -1, so this is a no-op for them.
@@ -824,7 +795,9 @@ void AmsState::sync_system_subjects(const AmsSystemInfo& info) {
 
     // Set system name from backend type_name or fallback to type string
     std::string sys_name;
-    if (!info.type_name.empty()) {
+    if (presented == AmsType::NONE) {
+        // No system shown, so no name or logo for one.
+    } else if (!info.type_name.empty()) {
         sys_name = info.type_name;
     } else {
         sys_name = ams_type_to_string(info.type);
@@ -834,13 +807,15 @@ void AmsState::sync_system_subjects(const AmsSystemInfo& info) {
     }
 
     // Set system logo path for declarative image binding (pointer subject for bind_src)
-    const char* logo_path = get_logo_path(sys_name);
-    const char* new_logo = logo_path ? logo_path : "";
+    const LogoArt logo_art = get_logo(sys_name);
+    const char* new_logo = logo_art.path ? logo_art.path : "";
     if (strcmp(system_logo_buf_, new_logo) != 0) {
         strncpy(system_logo_buf_, new_logo, sizeof(system_logo_buf_) - 1);
         system_logo_buf_[sizeof(system_logo_buf_) - 1] = '\0';
         lv_subject_set_pointer(&ams_system_logo_, system_logo_buf_);
     }
+    set_int_if_changed(&ams_system_has_logo_, system_logo_buf_[0] ? 1 : 0);
+    set_int_if_changed(&ams_system_logo_color_, logo_art.color ? 1 : 0);
     if (lv_subject_get_int(&current_slot_) != info.current_slot) {
         spdlog::debug("[AmsState] current_slot changed: {} → {}",
                       lv_subject_get_int(&current_slot_), info.current_slot);
@@ -850,15 +825,55 @@ void AmsState::sync_system_subjects(const AmsSystemInfo& info) {
     lv_subject_set_int(&ams_current_tool_, info.current_tool);
 }
 
-void AmsState::sync_tool_topology(AmsBackend* backend) {
+std::string AmsState::nozzle_heat_blocked_reason() const {
+    assert_main_thread();
+    const AmsBackend* backend = get_backend(0);
+    return backend ? backend->nozzle_heat_blocked_reason() : std::string();
+}
+
+void AmsState::sync_shared_heater(AmsBackend* backend, const AmsSystemInfo& info) {
+    const bool blocked = backend && !backend->nozzle_heat_blocked_reason().empty();
+    if (lv_subject_get_int(&ams_nozzle_heat_blocked_) != (blocked ? 1 : 0)) {
+        lv_subject_set_int(&ams_nozzle_heat_blocked_, blocked ? 1 : 0);
+    }
+    const int can_cancel = backend && backend->can_cancel_operation() ? 1 : 0;
+    if (lv_subject_get_int(&ams_can_cancel_) != can_cancel) {
+        lv_subject_set_int(&ams_can_cancel_, can_cancel);
+    }
+    if (!backend || !backend->heads_share_heater()) {
+        shared_heater_tool_ = -2;
+        return;
+    }
+    // The swap preheat latch keeps the last material's temperature to purge it
+    // from the same melt zone. A different mounted nozzle is a different melt
+    // zone, so the previous tool's temperature has nothing left to purge.
+    if (shared_heater_tool_ != -2 && info.current_tool != shared_heater_tool_) {
+        get_printer_state().temperature_state().clear_load_latch();
+    }
+    shared_heater_tool_ = info.current_tool;
+}
+
+void AmsState::sync_tool_topology(AmsBackend* backend, const AmsSystemInfo& info) {
     // Push tool topology to ToolState when the active backend multiplexes tools.
     // Otherwise leave ToolState in its extruder-enumerated state.
-    if (auto topo = helix::build_ams_topology(backend, 0)) {
-        helix::ToolState::instance().set_ams_topology(*topo);
-    } else if (helix::ToolState::instance().ams_topology_active()) {
+    auto& tool_state = helix::ToolState::instance();
+    if (auto topo = helix::build_ams_topology(backend, 0, info)) {
+        tool_state.clear_backend_active_tool();
+        tool_state.set_ams_topology(*topo);
+        return;
+    }
+    if (tool_state.ams_topology_active()) {
         // Backend stopped multiplexing (e.g., AMS removed). Drop the override
         // so callers can rebuild tools_ from extruders.
-        helix::ToolState::instance().clear_ams_topology();
+        tool_state.clear_ams_topology();
+    }
+    // With no table the extruder enumeration stands, but a carriage that can
+    // be empty still needs the backend to say which head is mounted: the
+    // status frame names the last head used.
+    if (backend && backend->carriage_can_be_empty()) {
+        tool_state.set_backend_active_tool(backend->get_current_tool());
+    } else {
+        tool_state.clear_backend_active_tool();
     }
 }
 
@@ -931,6 +946,14 @@ void AmsState::sync_filament_runout(const AmsSystemInfo& info) {
     }
 }
 
+void AmsState::sync_feeder(AmsBackend* backend) {
+    const int open = backend->supports_feeder_control() && backend->feeder_open() ? 1 : 0;
+    if (lv_subject_get_int(&ams_feeder_open_) != open) {
+        spdlog::debug("[AmsState] feeder open -> {}", open);
+        lv_subject_set_int(&ams_feeder_open_, open);
+    }
+}
+
 void AmsState::sync_bypass(AmsBackend* backend, const AmsSystemInfo& info) {
     // The one bypass truth: the backend's own is_bypass_active(), the same
     // predicate BypassToggleController branches on when the user taps, so the
@@ -946,7 +969,7 @@ void AmsState::sync_bypass(AmsBackend* backend, const AmsSystemInfo& info) {
     // filament check keys on bypass (PreflightValidator) and slots_version is its
     // ONLY refresh trigger, so without this the cached result goes stale: engage
     // bypass while a file's detail view is already open and the false
-    // "%s has no filament loaded" block still fires on Print.
+    // empty-slot block still fires on Print.
     //
     // Still tracked off any_bypass_active() rather than the bypass_active_
     // subject above, but for a different reason now that both read
@@ -957,7 +980,7 @@ void AmsState::sync_bypass(AmsBackend* backend, const AmsSystemInfo& info) {
         last_bypass_active_ = bypass_now;
         spdlog::debug("[AmsState] Bypass -> {}, bumping slots_version for the pre-print check",
                       bypass_now);
-        bump_slots_version();
+        bump_slots_version_from_sync();
         // Notification only — the bypass⇄sensor policy (arm/restore runout
         // sensors at the firmware level) lives entirely in
         // FilamentSensorManager, the sensor abstraction layer.
@@ -977,7 +1000,11 @@ void AmsState::sync_bypass(AmsBackend* backend, const AmsSystemInfo& info) {
             }
         }
     }
-    int new_supports_bypass = helix::bypass_available_for(info.supports_bypass) ? 1 : 0;
+    // With no system presented the external spool is the only path, so there
+    // is no bypass to switch to, forced or not.
+    int new_supports_bypass =
+        info.presents_filament_system() && helix::bypass_available_for(info.supports_bypass) ? 1
+                                                                                             : 0;
     lv_subject_set_int(&supports_bypass_, new_supports_bypass);
 
     // Update external spool color from persistent settings
@@ -1017,39 +1044,9 @@ bool AmsState::sync_tool_spools(AmsBackend* backend, const AmsSystemInfo& info) 
     // tool_spools.json plus a Moonraker DB key, so the stale spool outlived
     // restarts. Observed on the .112 BoxTurtle: "Assigned spool 86 () to tool 0"
     // fired during an EJECT, and ToolState::clear_spool() had no callers at all.
-    // Per-tool answers, computed once each: the loop below is per SLOT, and
-    // several slots on one tool would otherwise re-walk the whole system (and
-    // re-take the backend mutex per slot) for the same tool.
-    std::map<int, ToolFeed> feeds;
-    auto feed_for = [&](int tool) -> const ToolFeed& {
-        auto it = feeds.find(tool);
-        if (it == feeds.end()) {
-            it = feeds.emplace(tool, tool_feed(info, backend, tool)).first;
-        }
-        return it->second;
-    };
-    for (int i = 0; i < std::min(info.total_slots, MAX_SLOTS); ++i) {
+    for (int i = 0; i < info.total_slots; ++i) {
         const SlotInfo* slot = info.get_slot_global(i);
         if (!slot || slot->mapped_tool < 0) {
-            continue;
-        }
-        // Several slots can map to ONE tool — an MMU in head mode binds all of
-        // its bays to a single head. assign_spool() is keyed by tool, so without
-        // this every one of those bays overwrites the same entry and the last
-        // slot the loop happens to reach wins. See slot_may_attribute_tool() for
-        // the rule; it is shared with update_slot() so the incremental path
-        // cannot answer differently. Backends with no viewing position never
-        // enter its first arm and keep the plain presence rule.
-        const ToolFeed& feed = feed_for(slot->mapped_tool);
-        if (feed.fed_by_view && !feed.seated) {
-            // Head empty. Clear once, from the viewing position itself, so the
-            // stale spool does not outlive the filament that left.
-            if (backend->slot_identity_owner_unit(i)) {
-                ToolState::instance().clear_spool(slot->mapped_tool);
-            }
-            continue;
-        }
-        if (!slot_may_attribute_tool(feed, backend, i, *slot)) {
             continue;
         }
         if (slot->spoolman_id > 0) {
@@ -1084,35 +1081,12 @@ bool AmsState::sync_tool_spools(AmsBackend* backend, const AmsSystemInfo& info) 
     // identity in our own override store rather than in firmware — CFS, AD5X
     // IFS — and resurrected spools the user had just cleared from a lane. See
     // the matching note on the clear branch above.
-    //
-    // ...and NOT when the firmware itself says what is in each slot. That is a
-    // separate question, and the U1 is a tool changer that answers it yes: it
-    // persists no Spoolman id yet publishes filament_type and filament_vendor
-    // per head. Pushing ToolState back over that renamed the filament under the
-    // printer — a head reporting PLA displayed PETG, resolved from a spool
-    // sitting in an ACE bay — and since ToolState persists to Moonraker's DB it
-    // came back on every restart.
-    if (backend->supports_per_tool_spool_assignment() &&
-        !backend->has_firmware_filament_identity()) {
+    if (backend->supports_per_tool_spool_assignment()) {
         auto& tool_state = ToolState::instance();
         const auto& tools = tool_state.tools();
-        for (int i = 0; i < std::min(info.total_slots, MAX_SLOTS); ++i) {
+        for (int i = 0; i < info.total_slots; ++i) {
             const SlotInfo* slot = info.get_slot_global(i);
-            // A slot the printer has positively said is EMPTY gets nothing back.
-            // The forward sync above already refuses to let an empty slot claim a
-            // tool's spool; without the same rule here the assignment simply came
-            // back the other way, and since ToolState persists to Moonraker's DB
-            // it survived restarts. On the U1 that showed as two SnapSwap heads
-            // displaying filament (with material and colour, resolved from the
-            // returned spoolman_id) while print_task_config.filament_exist read
-            // false for both.
-            //
-            // EMPTY specifically, NOT !is_present(): that also covers UNKNOWN,
-            // which is exactly the state a tool changer's slots start in — and
-            // for those backends ToolState IS the source of truth, so gating on
-            // "not present" would stop the assignment ever reaching them.
-            const bool known_empty = slot && slot->status == SlotStatus::EMPTY;
-            if (slot && slot->mapped_tool >= 0 && slot->spoolman_id == 0 && !known_empty) {
+            if (slot && slot->mapped_tool >= 0 && slot->spoolman_id == 0) {
                 int ti = slot->mapped_tool;
                 if (ti >= 0 && ti < static_cast<int>(tools.size()) && tools[ti].spoolman_id > 0) {
                     SlotInfo updated = *slot;
@@ -1162,21 +1136,19 @@ void AmsState::set_unit_page(int count, int current) {
     count = std::max(0, count);
     current = count > 0 ? std::clamp(current, 0, count - 1) : 0;
     // Only a change is published, so a refresh that finds the same page wakes nobody.
-    auto set_if_changed = [](lv_subject_t* subject, int value) {
-        if (lv_subject_get_int(subject) != value)
-            lv_subject_set_int(subject, value);
-    };
-    set_if_changed(&ams_page_count_, count);
-    set_if_changed(&ams_page_current_, current);
-    set_if_changed(&ams_page_has_prev_, current > 0 ? 1 : 0);
-    set_if_changed(&ams_page_has_next_, current + 1 < count ? 1 : 0);
+    set_int_if_changed(&ams_page_count_, count);
+    set_int_if_changed(&ams_page_current_, current);
+    set_int_if_changed(&ams_page_has_prev_, current > 0 ? 1 : 0);
+    set_int_if_changed(&ams_page_has_next_, current + 1 < count ? 1 : 0);
 }
 
-void AmsState::set_unit_page_header(const std::string& name, const char* logo_path) {
+void AmsState::set_unit_page_header(const std::string& name, const char* logo_path,
+                                    bool logo_is_color) {
     assert_main_thread("set_unit_page_header");
     if (name != lv_subject_get_string(&ams_page_unit_name_))
         lv_subject_copy_string(&ams_page_unit_name_, name.c_str());
     const char* logo = logo_path ? logo_path : "";
+    set_int_if_changed(&ams_page_unit_logo_color_, logo_is_color ? 1 : 0);
     if (strcmp(page_unit_logo_buf_, logo) != 0) {
         strncpy(page_unit_logo_buf_, logo, sizeof(page_unit_logo_buf_) - 1);
         page_unit_logo_buf_[sizeof(page_unit_logo_buf_) - 1] = '\0';
@@ -1223,8 +1195,9 @@ void AmsState::sync_unit_environment(AmsBackend* backend, const AmsSystemInfo& i
     // Update per-unit environment subjects (CFS temperature/humidity)
     for (const auto& unit : info.units) {
         int idx = unit.unit_index;
-        if (idx >= 0 && idx < MAX_UNITS) {
+        if (idx >= 0 && idx < kMaxUnits) {
             lv_subject_set_int(&unit_absent_[idx], unit.absent ? 1 : 0);
+            set_int_if_changed(&unit_logo_color_[idx], get_unit_logo(unit, info).color ? 1 : 0);
             lv_subject_set_int(&unit_disconnected_[idx], (!unit.absent && !unit.connected) ? 1 : 0);
             if (unit.environment.has_value()) {
                 int temp_tenths = static_cast<int>(unit.environment->temperature_c * 10.0f);
@@ -1239,11 +1212,12 @@ void AmsState::sync_unit_environment(AmsBackend* backend, const AmsSystemInfo& i
     }
 
     // Clear environment subjects for units beyond what backend reports
-    for (int i = static_cast<int>(info.units.size()); i < MAX_UNITS; ++i) {
+    for (int i = static_cast<int>(info.units.size()); i < kMaxUnits; ++i) {
         lv_subject_set_int(&unit_temp_[i], 0);
         lv_subject_set_int(&unit_humidity_[i], 0);
         lv_subject_set_int(&unit_absent_[i], 0);
         lv_subject_set_int(&unit_disconnected_[i], 0);
+        set_int_if_changed(&unit_logo_color_[i], 0);
     }
     publish_viewed_unit_disconnected(&info);
 
@@ -1267,12 +1241,12 @@ void AmsState::sync_unit_environment(AmsBackend* backend, const AmsSystemInfo& i
     for (size_t k = 0; k < info.units.size(); ++k) {
         indicators[k] = compute_unit_env_indicator(backend, info.units[k]);
         const int idx = info.units[k].unit_index;
-        if (idx >= 0 && idx < MAX_UNITS)
+        if (idx >= 0 && idx < kMaxUnits)
             publish_unit_env_indicator(idx, indicators[k]);
     }
 
     // Clear indicator for units beyond what backend reports
-    for (int i = static_cast<int>(info.units.size()); i < MAX_UNITS; ++i) {
+    for (int i = static_cast<int>(info.units.size()); i < kMaxUnits; ++i) {
         lv_subject_set_int(&env_ind_visible_[i], 0);
         lv_subject_set_int(&env_ind_humidity_visible_[i], 0);
         lv_subject_set_int(&env_ind_drying_active_[i], 0);
@@ -1285,7 +1259,7 @@ AmsState::UnitEnvIndicator AmsState::compute_unit_env_indicator(AmsBackend* back
                                                                 const AmsUnit& unit) {
     UnitEnvIndicator out;
     const bool has_env = unit.environment.has_value();
-    char buf[ENV_IND_TEXT_BUF_SIZE];
+    char buf[kEnvIndTextBufSize];
     if (has_env) {
         // Format temperature text (e.g., "24°C")
         snprintf(buf, sizeof(buf),
@@ -1296,6 +1270,9 @@ AmsState::UnitEnvIndicator AmsState::compute_unit_env_indicator(AmsBackend* back
         // Format humidity text (e.g., "46%")
         snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(unit.environment->humidity_pct));
         out.humidity_text = buf;
+        if (unit.environment->has_humidity)
+            out.humidity_x10 =
+                std::max(0, static_cast<int>(std::lround(unit.environment->humidity_pct * 10.0f)));
 
         // Humidity status color from the most restrictive loaded material:
         // 0=ok (green), 1=warn (yellow), 2=danger (red)
@@ -1336,7 +1313,7 @@ AmsState::UnitEnvIndicator AmsState::compute_unit_env_indicator(AmsBackend* back
         // Compact countdown for the small indicator
         const int hrs = dryer.remaining_min / 60;
         const int mins = dryer.remaining_min % 60;
-        char drying_buf[ENV_IND_DRYING_BUF_SIZE];
+        char drying_buf[kEnvIndDryingBufSize];
         if (hrs > 0)
             snprintf(drying_buf, sizeof(drying_buf), "%d:%02d", hrs, mins);
         else
@@ -1356,6 +1333,7 @@ void set_string_if_changed(lv_subject_t* subject, const std::string& value) {
 void AmsState::publish_unit_env_indicator(int idx, const UnitEnvIndicator& e) {
     set_string_if_changed(&env_ind_temp_text_[idx], e.temp_text);
     set_string_if_changed(&env_ind_humidity_text_[idx], e.humidity_text);
+    lv_subject_set_int(&env_ind_humidity_[idx], e.humidity_x10);
     lv_subject_set_int(&env_ind_humidity_status_[idx], e.humidity_status);
     lv_subject_set_int(&env_ind_humidity_visible_[idx], e.humidity_visible ? 1 : 0);
     lv_subject_set_int(&env_ind_visible_[idx], e.visible ? 1 : 0);
@@ -1364,13 +1342,27 @@ void AmsState::publish_unit_env_indicator(int idx, const UnitEnvIndicator& e) {
         set_string_if_changed(&env_ind_drying_text_[idx], e.drying_text);
 }
 
+void AmsState::warn_if_slots_exceed_subjects(int total_slots) {
+    if (total_slots <= kMaxSlots || total_slots == slot_overflow_warned_total_) {
+        return;
+    }
+    slot_overflow_warned_total_ = total_slots;
+    spdlog::warn("[AMS State] Backend reports {} slots but per-slot subjects cover {}; "
+                 "slots {}-{} show unbound",
+                 total_slots, kMaxSlots, kMaxSlots + 1, total_slots);
+}
+
 bool AmsState::clear_unused_slot_subjects(int total_slots) {
     // Clear remaining slot subjects, only firing when values actually change
     bool any_slot_changed = false;
-    for (int i = total_slots; i < MAX_SLOTS; ++i) {
-        int default_color = static_cast<int>(AMS_DEFAULT_SLOT_COLOR);
+    for (int i = total_slots; i < kMaxSlots; ++i) {
+        int default_color = static_cast<int>(kAmsDefaultSlotColor);
         if (lv_subject_get_int(&slot_colors_[i]) != default_color) {
             lv_subject_set_int(&slot_colors_[i], default_color);
+            any_slot_changed = true;
+        }
+        if (lv_subject_get_int(&slot_paints_[i]) != 0) {
+            lv_subject_set_int(&slot_paints_[i], 0);
             any_slot_changed = true;
         }
         int default_status = static_cast<int>(SlotStatus::UNKNOWN);
@@ -1396,9 +1388,17 @@ bool AmsState::clear_unused_slot_subjects(int total_slots) {
         if (strcmp(lv_subject_get_string(&slot_remaining_[i]), "") != 0) {
             lv_subject_copy_string(&slot_remaining_[i], "");
         }
+        const int idle = static_cast<int>(helix::printer::ZoneDryingState::Idle);
+        if (lv_subject_get_int(&slot_drying_[i]) != idle) {
+            lv_subject_set_int(&slot_drying_[i], idle);
+        }
         // Clear material for unused slots — bump so the label clears (#1065)
         if (strcmp(lv_subject_get_string(&slot_materials_[i]), "") != 0) {
             lv_subject_copy_string(&slot_materials_[i], "");
+            any_slot_changed = true;
+        }
+        if (strcmp(lv_subject_get_string(&slot_names_[i]), "") != 0) {
+            lv_subject_copy_string(&slot_names_[i], "");
             any_slot_changed = true;
         }
         // Reset per-slot LIVE state subjects for unused slots
@@ -1418,7 +1418,54 @@ bool AmsState::clear_unused_slot_subjects(int total_slots) {
     return any_slot_changed;
 }
 
+bool AmsState::write_slot_name(lv_subject_t* subject, size_t buf_size, const SlotInfo& slot) {
+    const auto identity = SpoolmanManager::find_identity(slot.spoolman_id);
+    const std::string name = helix::slot_card_name(slot, identity ? &*identity : nullptr);
+    // buf_size - 1 leaves room for the NUL; cutting here keeps a long name on a
+    // codepoint boundary instead of letting the copy split one.
+    const std::string bounded(helix::text_io::utf8_prefix(name, buf_size - 1));
+    if (strcmp(lv_subject_get_string(subject), bounded.c_str()) == 0) {
+        return false;
+    }
+    lv_subject_copy_string(subject, bounded.c_str());
+    return true;
+}
+
+void AmsState::refresh_slot_names() {
+    assert_main_thread();
+    bool changed = false;
+    if (auto* backend = get_backend(0)) {
+        const AmsSystemInfo info = backend->get_system_info();
+        for (int i = 0; i < std::min(info.total_slots, kMaxSlots); ++i) {
+            const SlotInfo* slot = info.get_slot_global(i);
+            if (slot && write_slot_name(&slot_names_[i], sizeof(slot_names_buf_[i]), *slot)) {
+                changed = true;
+            }
+        }
+    }
+    for (size_t sec = 0; sec < secondary_slot_subjects_.size(); ++sec) {
+        auto* backend = get_backend(static_cast<int>(sec) + 1);
+        if (!backend) {
+            continue;
+        }
+        auto& subs = secondary_slot_subjects_[sec];
+        const AmsSystemInfo info = backend->get_system_info();
+        for (int i = 0; i < std::min(info.total_slots, subs.slot_count); ++i) {
+            const SlotInfo* slot = info.get_slot_global(i);
+            if (slot && write_slot_name(&subs.names[i], kSlotNameBufSize, *slot)) {
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        spdlog::debug("[AmsState] Slot names re-derived from new Spoolman identity");
+    }
+}
+
 bool AmsState::write_slot_subjects(AmsBackend& backend, int slot_index, const SlotInfo& slot) {
+    if (slot_index < 0 || slot_index >= kMaxSlots) {
+        return false;
+    }
     bool changed = false;
 
     int new_color = static_cast<int>(slot.color_rgb);
@@ -1461,11 +1508,24 @@ bool AmsState::write_slot_subjects(AmsBackend& backend, int slot_index, const Sl
         changed = true;
     }
 
+    // Multi-colour list and finish: a swatch beside the colour repaints on it.
+    const int new_paint = slot.paint_key();
+    if (lv_subject_get_int(&slot_paints_[slot_index]) != new_paint) {
+        lv_subject_set_int(&slot_paints_[slot_index], new_paint);
+        changed = true;
+    }
+
     // Measured remaining length, "" when the backend publishes none. The slot
     // shows it under its material; weight has its own surfaces.
     std::string remaining = slot.remaining_length_display();
     if (strcmp(lv_subject_get_string(&slot_remaining_[slot_index]), remaining.c_str()) != 0) {
         lv_subject_copy_string(&slot_remaining_[slot_index], remaining.c_str());
+    }
+
+    // The lane's part in a drying cycle, for the drying badge on its slot.
+    const int new_drying = static_cast<int>(slot.drying_state);
+    if (lv_subject_get_int(&slot_drying_[slot_index]) != new_drying) {
+        lv_subject_set_int(&slot_drying_[slot_index], new_drying);
     }
 
     // Material type. The ams_slot widget binds this subject directly (its
@@ -1474,6 +1534,11 @@ bool AmsState::write_slot_subjects(AmsBackend& backend, int slot_index, const Sl
     // material delta still bumps the version (#1065).
     if (strcmp(lv_subject_get_string(&slot_materials_[slot_index]), slot.material.c_str()) != 0) {
         lv_subject_copy_string(&slot_materials_[slot_index], slot.material.c_str());
+        changed = true;
+    }
+    // The name the card shows above the material. A different spool of the
+    // same material changes only this.
+    if (write_slot_name(&slot_names_[slot_index], sizeof(slot_names_buf_[slot_index]), slot)) {
         changed = true;
     }
 
@@ -1503,10 +1568,12 @@ void AmsState::update_slot(int slot_index) {
     assert_main_thread();
 
     auto* backend = get_backend(0);
-    if (!backend || slot_index < 0 || slot_index >= MAX_SLOTS) {
+    if (!backend || slot_index < 0) {
         return;
     }
 
+    // A slot past kMaxSlots has no subjects of its own, but it can still be
+    // the loaded one and still map to a tool.
     SlotInfo slot = backend->get_slot_info(slot_index);
     if (slot.slot_index >= 0) {
         if (write_slot_subjects(*backend, slot_index, slot)) {
@@ -1519,21 +1586,17 @@ void AmsState::update_slot(int slot_index) {
             sync_current_loaded_from_backend();
         }
 
-        // Sync spool to ToolState if this slot maps to a tool, under the same
-        // rule as the full sync (slot_may_attribute_tool). Presence alone is
-        // not enough: an occupied but unseated bay behind a tool would claim
-        // that tool's spool the moment its Spoolman spool was edited.
+        // Sync spool to ToolState if this slot maps to a tool
         if (slot.mapped_tool >= 0 && slot.spoolman_id > 0) {
-            const AmsSystemInfo sys = backend->get_system_info();
-            const ToolFeed feed = tool_feed(sys, backend, slot.mapped_tool);
-            if (slot_may_attribute_tool(feed, backend, slot_index, slot)) {
-                ToolState::instance().assign_spool(slot.mapped_tool, slot.spoolman_id,
-                                                   slot.spool_name, slot.remaining_weight_g,
-                                                   slot.total_weight_g);
-                if (!backend->has_firmware_spool_persistence()) {
-                    ToolState::instance().save_spool_assignments_if_dirty(get_moonraker_api());
-                }
+            ToolState::instance().assign_spool(slot.mapped_tool, slot.spoolman_id, slot.spool_name,
+                                               slot.remaining_weight_g, slot.total_weight_g);
+            if (!backend->has_firmware_spool_persistence()) {
+                ToolState::instance().save_spool_assignments_if_dirty(get_moonraker_api());
             }
+        }
+
+        if (const auto info = read_system_info(0); info && !info->slot_absent(slot_index)) {
+            sync_tag_spool_link(*backend, slot_index, slot);
         }
 
         spdlog::trace("[AMS State] Updated slot {} - color=0x{:06X}, status={}", slot_index,
@@ -1545,6 +1608,10 @@ void AmsState::on_backend_event(int backend_index, const std::string& event,
                                 const std::string& data) {
     spdlog::trace("[AMS State] Received event '{}' data='{}' from backend {}", event, data,
                   backend_index);
+
+    // The backend's data has moved; readers between here and the queued sync
+    // read it again rather than serve the reading from before the event.
+    invalidate_system_info();
 
     auto queue_sync = [backend_index](bool full_sync, int slot_index, bool ends_operation = false) {
         helix::ui::queue_update(
@@ -1574,7 +1641,7 @@ void AmsState::on_backend_event(int backend_index, const std::string& event,
 
     if (event == AmsBackend::EVENT_STATE_CHANGED) {
         queue_sync(true, -1);
-    } else if (event == AmsBackend::EVENT_SLOT_CHANGED) {
+    } else if (event == AmsBackend::kEventSlotChanged) {
         // Parse slot index from data. Fall back to a full sync for ANY case
         // where we can't parse a specific slot — empty data OR non-numeric.
         // Dropping the event silently (the old behavior) left the UI stale
@@ -1589,39 +1656,65 @@ void AmsState::on_backend_event(int backend_index, const std::string& event,
                 queue_sync(true, -1);
             }
         }
-    } else if (event == AmsBackend::EVENT_LOAD_COMPLETE ||
-               event == AmsBackend::EVENT_UNLOAD_COMPLETE ||
-               event == AmsBackend::EVENT_TOOL_CHANGED) {
-        // These events indicate state change, sync everything
+    } else if (event == AmsBackend::kEventLoadComplete ||
+               event == AmsBackend::kEventUnloadComplete) {
+        // The operation is over, so an optimistic action held over the
+        // backend's silence ends with it; a busy action the backend still
+        // reports keeps the display until its own last frame.
+        queue_sync(true, -1, /*ends_operation=*/true);
+    } else if (event == AmsBackend::kEventToolChanged) {
         queue_sync(true, -1);
-    } else if (event == AmsBackend::EVENT_ERROR) {
+    } else if (event == AmsBackend::kEventError) {
         // Error occurred, sync to get error state. An error ends the operation,
         // so an optimistic action held over the backend's silence ends with it.
         queue_sync(true, -1, /*ends_operation=*/true);
         spdlog::warn("[AMS State] Backend error - {}", data);
-    } else if (event == AmsBackend::EVENT_ATTENTION_REQUIRED) {
+    } else if (event == AmsBackend::kEventAttentionRequired) {
         // User intervention needed
         queue_sync(true, -1);
         spdlog::warn("[AMS State] Attention required - {}", data);
+    } else if (event == AmsBackend::kEventEndlessSpoolRefused) {
+        // The switch flipped itself on the tap; the backend's state never moved,
+        // so an unchanged set would not notify. Re-announce it.
+        helix::ui::queue_update("AmsState::endless_spool_refused", []() {
+            if (ams_state_detail::shutting_down()) {
+                return;
+            }
+            lv_subject_notify(AmsState::instance().get_endless_spool_on_subject());
+        });
     }
 }
 
 void AmsState::sync_endless_spool_from_backend(AmsBackend* backend) {
+    using helix::printer::EndlessSpoolCapabilities;
+    using helix::printer::EndlessSpoolEnabled;
     using helix::printer::EndlessSpoolStatus;
     using helix::printer::EndlessSpoolStatusKind;
 
     // Capabilities take the backend's own mutex_, which is the lock order
     // sync_from_backend() already established with get_system_info().
-    EndlessSpoolStatus status;
-    if (backend != nullptr) {
-        status = helix::printer::endless_spool_status(backend->get_endless_spool_capabilities());
-    }
+    const EndlessSpoolCapabilities caps =
+        backend != nullptr ? backend->get_endless_spool_capabilities() : EndlessSpoolCapabilities{};
+    const EndlessSpoolStatus status =
+        backend != nullptr ? helix::printer::endless_spool_status(caps) : EndlessSpoolStatus{};
 
     const int kind = static_cast<int>(status.kind);
     if (lv_subject_get_int(&ams_endless_state_) != kind) {
         spdlog::debug("[AmsState] endless spool status -> kind={} text='{}'", kind, status.text);
         lv_subject_set_int(&ams_endless_state_, kind);
     }
+    const int switchable = caps.available() && caps.switchable ? 1 : 0;
+    const int on = (caps.enabled == EndlessSpoolEnabled::On ||
+                    caps.enabled == EndlessSpoolEnabled::OnWithoutBackup)
+                       ? 1
+                       : 0;
+    if (lv_subject_get_int(&ams_endless_spool_switchable_) != switchable) {
+        lv_subject_set_int(&ams_endless_spool_switchable_, switchable);
+    }
+    if (lv_subject_get_int(&ams_endless_spool_on_) != on) {
+        lv_subject_set_int(&ams_endless_spool_on_, on);
+    }
+
     // The kind can hold while the sentence changes (a CFS box that keeps
     // auto-refill on but gains a restriction reason), so the text is compared
     // independently rather than gated on the kind having moved.
@@ -1631,8 +1724,46 @@ void AmsState::sync_endless_spool_from_backend(AmsBackend* backend) {
 }
 
 void AmsState::bump_slots_version() {
+    invalidate_system_info();
+    bump_slots_version_from_sync();
+}
+
+void AmsState::bump_slots_version_from_sync() {
     int current = lv_subject_get_int(&slots_version_);
     lv_subject_set_int(&slots_version_, current + 1);
+}
+
+std::shared_ptr<const AmsSystemInfo> AmsState::read_system_info(int backend_index) const {
+    assert_main_thread();
+    auto* backend = get_backend(backend_index);
+    if (!backend) {
+        return nullptr;
+    }
+    // Taken before the read: an event raised while the backend is copied
+    // advances the generation, and the next system_info() reads again.
+    const uint64_t generation = system_info_generation_.load(std::memory_order_acquire);
+    auto info = std::make_shared<const AmsSystemInfo>(backend->get_system_info());
+    if (system_info_snapshots_.size() <= static_cast<size_t>(backend_index)) {
+        system_info_snapshots_.resize(static_cast<size_t>(backend_index) + 1);
+    }
+    system_info_snapshots_[static_cast<size_t>(backend_index)] = {info, generation};
+    return info;
+}
+
+std::shared_ptr<const AmsSystemInfo> AmsState::system_info(int backend_index) const {
+    assert_main_thread();
+    if (backend_index < 0) {
+        return nullptr;
+    }
+    const size_t i = static_cast<size_t>(backend_index);
+    if (i < system_info_snapshots_.size()) {
+        const auto& snapshot = system_info_snapshots_[i];
+        if (snapshot.info &&
+            snapshot.generation == system_info_generation_.load(std::memory_order_acquire)) {
+            return snapshot.info;
+        }
+    }
+    return read_system_info(backend_index);
 }
 
 void AmsState::set_detail_env_unit(int unit) {
@@ -1660,6 +1791,7 @@ void AmsState::mirror_detail_env_subjects(AmsBackend* backend, const AmsSystemIn
     }
     set_string_if_changed(&env_ind_detail_temp_text_, e.temp_text);
     set_string_if_changed(&env_ind_detail_humidity_text_, e.humidity_text);
+    lv_subject_set_int(&env_ind_detail_humidity_, e.humidity_x10);
     lv_subject_set_int(&env_ind_detail_humidity_status_, e.humidity_status);
     lv_subject_set_int(&env_ind_detail_humidity_visible_, e.humidity_visible ? 1 : 0);
     lv_subject_set_int(&env_ind_detail_visible_, e.visible ? 1 : 0);
@@ -1695,15 +1827,56 @@ void AmsState::set_action_detail(const std::string& detail) {
 }
 // clang-format on
 
+bool AmsState::update_fault_cause() {
+    const auto action = static_cast<AmsAction>(lv_subject_get_int(&ams_action_));
+    const AmsBackend* backend = get_backend();
+    const bool fault =
+        action == AmsAction::ERROR || (backend && backend->current_error().has_value());
+    if (!fault) {
+        const bool had = !fault_cause_.empty();
+        fault_cause_.clear();
+        return had;
+    }
+    auto& print = get_printer_state().print_state();
+    // RAW_PRINT_STATE_OK: the printer's own pause is what a filament fault
+    // stops the print with.
+    const bool paused = print.get_print_job_state() == PrintJobState::PAUSED;
+    // The newest cause wins: a second fault while the first stands names its
+    // own lane, and recovery acts on the lane the cause names.
+    std::string cause =
+        standing_fault_cause(paused, lv_subject_get_string(print.get_print_stop_reason_subject()),
+                             recent_gcode_error(print, wall_now_s()));
+    if (cause.empty() || cause == fault_cause_) {
+        return false;
+    }
+    fault_cause_ = std::move(cause);
+    return true;
+}
+
+void AmsState::refresh_fault_cause() {
+    assert_main_thread();
+    if (update_fault_cause()) {
+        recompute_action_detail();
+    }
+}
+
+std::optional<ErrorEvent> AmsState::standing_fault() const {
+    const AmsBackend* backend = get_backend();
+    return backend ? backend->current_error_with_cause(fault_cause_) : std::nullopt;
+}
+
 void AmsState::recompute_action_detail() {
+    update_fault_cause();
     auto action = static_cast<AmsAction>(lv_subject_get_int(&ams_action_));
 
     // Priority:
-    //   1. Backend / UI-supplied operation_detail (non-empty)
-    //   2. Action != IDLE → translated action string
-    //   3. PrintJobState::PRINTING → "Printing"
-    //   4. PrintJobState::PAUSED  → "Paused"
-    //   5. Otherwise              → "Idle"
+    //   1. Toolchange narration label
+    //   2. Action == ERROR with a fault_cause()
+    //   3. Backend / UI-supplied operation_detail (non-empty)
+    //   4. Action != IDLE → translated action string
+    //   5. PrintJobState::PRINTING → "Printing"
+    //   6. PrintJobState::PAUSED  → "Paused"
+    //   7. Otherwise              → "Idle"
     //
     // Translation note (L067): the literals "Idle"/"Printing"/"Paused" and
     // the AmsAction strings are user-visible — translate at this UI binding
@@ -1713,6 +1886,9 @@ void AmsState::recompute_action_detail() {
         // Live toolchange narration phase ("Brush nozzle") — finer-grained than
         // the AmsAction enum; wins until the operation ends (IDLE clears it).
         new_detail = last_narration_label_.c_str();
+    } else if (action == AmsAction::ERROR && !fault_cause_.empty()) {
+        // The backend's own text can belong to an earlier fault.
+        new_detail = fault_cause_.c_str();
     } else if (!last_operation_detail_.empty()) {
         // Backend strings are intentionally NOT lv_tr()'d — the backend may
         // emit dynamic content ("Waiting for slot 2", "Heating to 230°C") that
@@ -1743,7 +1919,8 @@ void AmsState::recompute_action_detail() {
     // sizeof(action_detail_buf_) - 1 leaves room for the NUL lv_subject_copy_string
     // writes; truncating here first (rather than letting it truncate) keeps the
     // cut on a codepoint boundary regardless of which producer overran it.
-    const std::string bounded_detail = truncate_utf8(new_detail, sizeof(action_detail_buf_) - 1);
+    const std::string bounded_detail(
+        helix::text_io::utf8_prefix(new_detail, sizeof(action_detail_buf_) - 1));
     if (strcmp(lv_subject_get_string(&ams_action_detail_), bounded_detail.c_str()) != 0) {
         lv_subject_copy_string(&ams_action_detail_, bounded_detail.c_str());
     }
@@ -1753,23 +1930,26 @@ void AmsState::set_action(AmsAction action) {
     assert_main_thread();
     int val = static_cast<int>(action);
     if (lv_subject_get_int(&ams_action_) != val) {
-        lv_subject_set_int(&ams_action_, val);
-        action_mirror_.store(action, std::memory_order_relaxed);
+        publish_action(action);
         spdlog::debug("[AMS State] Action set: {}", ams_action_to_string(action));
-        // Operation ended: clear the narration label + phase index BEFORE the
-        // recompute so the cleared state is reflected in the detail string. The
-        // next swap then restarts from a clean step bar. set_action writes
-        // subjects directly (main-thread contract), so write toolchange_step_
-        // directly too.
-        if (action == AmsAction::IDLE) {
-            last_narration_label_.clear();
-            narration_phase_high_water_ = -1;
-            lv_subject_set_int(&toolchange_step_, -1);
-        }
         // Action change must propagate to the displayed detail string (e.g.
         // LOADING → IDLE while still printing should flip "Loading" → "Printing").
         recompute_action_detail();
     }
+}
+
+void AmsState::publish_action(AmsAction action) {
+    // Operation ended: clear the narration label + phase index before the
+    // action observers run, so they and the next recompute see the cleared
+    // state, and the next operation starts from a clean step bar.
+    if (action == AmsAction::IDLE) {
+        last_narration_label_.clear();
+        narration_phase_id_.clear();
+        narration_phase_high_water_ = -1;
+        lv_subject_set_int(&toolchange_step_, -1);
+    }
+    lv_subject_set_int(&ams_action_, static_cast<int>(action));
+    action_mirror_.store(action, std::memory_order_relaxed);
 }
 
 void AmsState::hold_optimistic_action(std::chrono::milliseconds budget) {
@@ -1790,18 +1970,55 @@ bool AmsState::optimistic_action_held() const {
 void AmsState::set_active_step_operation(StepOperationType op) {
     assert_main_thread();
     const StepOperationType prev = active_step_operation_.exchange(op, std::memory_order_relaxed);
-    if (prev != op) {
-        // Each operation kind has its own phase template, so an index carried
-        // over from the previous one is not comparable with the new one's.
-        // (The sidebar re-derives the operation whenever it (re)builds the step
-        // bar, so this is also the mid-operation UNLOAD -> LOAD_SWAP upgrade.)
-        narration_phase_high_water_ = -1;
+    if (prev == op) {
+        return;
     }
+    // Each operation kind has its own phase template, so an index carried
+    // over from the previous one is not comparable with the new one's.
+    // (The sidebar re-derives the operation whenever it (re)builds the step
+    // bar, so this is also the mid-operation UNLOAD -> LOAD_SWAP upgrade, and
+    // the first build of a bar for an operation that narrated before it.)
+    narration_phase_high_water_ = -1;
+    if (lv_subject_get_int(&toolchange_step_) >= 0) {
+        lv_subject_set_int(&toolchange_step_, -1);
+    }
+    if (!narration_phase_id_.empty()) {
+        apply_narration_phase_id(std::string(narration_phase_id_));
+    }
+}
+
+void AmsState::apply_narration_phase_id(const std::string& id) {
+    assert_main_thread();
+    auto* backend = get_backend();
+    if (!backend) {
+        return;
+    }
+    const auto op = get_active_step_operation();
+    const auto tmpl = backend->toolchange_phase_template(op);
+    for (size_t k = 0; k < tmpl.size(); ++k) {
+        if (tmpl[k].id == id) {
+            spdlog::debug("[AMS State] Narration phase '{}' -> step {} ({})", id, k, tmpl[k].label);
+            if (publish_narration_phase(static_cast<int>(k), tmpl[k].label)) {
+                narration_phase_id_ = id;
+            }
+            return;
+        }
+    }
+    // No index in this template: hold the id for the operation the step bar
+    // settles on.
+    spdlog::debug("[AMS State] Narration phase '{}' is not in op {}'s template; held", id,
+                  static_cast<int>(op));
+    narration_phase_id_ = id;
 }
 
 void AmsState::set_narration_phase(int index, const std::string& label) {
     assert_main_thread();
+    if (publish_narration_phase(index, label)) {
+        narration_phase_id_.clear();
+    }
+}
 
+bool AmsState::publish_narration_phase(int index, const std::string& label) {
     // Firmware narration is not monotonic. AFC runs its wipe macro twice per
     // toolchange, once before and once after the kick (AFC.py
     // do_poop_kick_wipe(), v1.2.0:1390-1413; inline in TOOL_LOAD at
@@ -1809,13 +2026,14 @@ void AmsState::set_narration_phase(int index, const std::string& label) {
     // second one resolves to the same "brush" phase as the first, which sits
     // BEFORE "kick" in the template — publishing it verbatim rewinds the bar.
     //
-    // Latch the highest index instead. Reset points are the three places an
-    // index stops being comparable with its predecessor:
+    // Latch the highest index instead. Reset points are the places an index
+    // stops being comparable with its predecessor:
     //   - index < 0        explicit clear (operation over / test baseline)
     //   - index == 0       the template's first phase narrated again, i.e. the
     //                      operation restarted from the top (an AFC retry after
     //                      a resumed error re-runs TOOL_LOAD from the heat)
-    //   - set_action(IDLE) operation ended
+    //   - action -> IDLE   operation ended (publish_action, from either the UI
+    //                      or a backend sync)
     //   - set_active_step_operation() the template itself changed
     //
     // A retry that resumes PAST the first phase (nozzle already hot, so no heat
@@ -1830,7 +2048,7 @@ void AmsState::set_narration_phase(int index, const std::string& label) {
     } else if (index < narration_phase_high_water_) {
         spdlog::trace("[AMS State] Narration phase {} ('{}') ignored — already past step {}", index,
                       label, narration_phase_high_water_);
-        return;
+        return false;
     } else {
         narration_phase_high_water_ = index;
     }
@@ -1838,6 +2056,7 @@ void AmsState::set_narration_phase(int index, const std::string& label) {
     lv_subject_set_int(&toolchange_step_, index);
     last_narration_label_ = label;
     recompute_action_detail();
+    return true;
 }
 
 void AmsState::set_pending_target_slot(int slot) {
@@ -1901,7 +2120,19 @@ void AmsState::set_current_loaded_defaults(bool write_header) {
         lv_subject_copy_string(&current_weight_text_, "");
     }
     lv_subject_set_int(&current_has_weight_, 0);
-    lv_subject_set_int(&current_color_, 0x505050);
+    set_current_paint(0x505050);
+    lv_subject_set_int(&current_fill_pct_, 0);
+}
+
+void AmsState::set_current_paint(uint32_t rgb, const std::string& multi_color_hexes,
+                                 const std::string& finish_name) {
+    if (strcmp(lv_subject_get_string(&current_colors_), multi_color_hexes.c_str()) != 0) {
+        lv_subject_copy_string(&current_colors_, multi_color_hexes.c_str());
+    }
+    if (strcmp(lv_subject_get_string(&current_finish_), finish_name.c_str()) != 0) {
+        lv_subject_copy_string(&current_finish_, finish_name.c_str());
+    }
+    lv_subject_set_int(&current_color_, static_cast<int>(rgb));
 }
 
 void AmsState::sync_current_loaded_from_backend() {
@@ -1912,49 +2143,35 @@ void AmsState::sync_current_loaded_from_backend() {
         return;
     }
 
-    auto* backend = get_backend(0);
-    if (backend) {
-        sync_current_loaded_from_backend(backend->get_system_info());
+    if (const auto snapshot = read_system_info(0)) {
+        sync_current_loaded_from_backend(*snapshot);
     }
 }
 
-void AmsState::set_current_slot_header(AmsBackend& backend, int slot_index) {
-    AmsSystemInfo sys = backend.get_system_info();
-
+void AmsState::set_current_slot_header(AmsBackend& backend, const AmsSystemInfo& sys,
+                                       int slot_index) {
     char tmp[64];
     if (is_tool_changer(sys.type) && sys.units.empty()) {
         // Pure tool changer with no AMS units: show the physical toolhead position
-        snprintf(tmp, sizeof(tmp), lv_tr("Current: %s"),
+        snprintf(tmp, sizeof(tmp), "%s",
                  helix::ui::lane_label(helix::ui::active_tool_noun(), slot_index).c_str());
     } else {
         std::string unit_display;
-        // The spool's ORIGIN, not the position holding it: a slot fed from
-        // another unit shows that unit's spool, and the card this header
-        // captions is that spool's material and colour. nullopt for every
-        // position that describes itself.
-        const auto owner = backend.slot_identity_owner_unit(slot_index);
         for (const auto& unit : sys.units) {
-            const bool is_source =
-                owner ? unit.unit_index == *owner
-                      : (slot_index >= unit.first_slot_global_index &&
-                         slot_index < unit.first_slot_global_index + unit.slot_count);
-            if (is_source) {
+            if (slot_index >= unit.first_slot_global_index &&
+                slot_index < unit.first_slot_global_index + unit.slot_count) {
                 // Prefer display_name, fall back to name, replace _ with spaces
                 unit_display = !unit.display_name.empty() ? unit.display_name : unit.name;
                 std::replace(unit_display.begin(), unit_display.end(), '_', ' ');
                 break;
             }
         }
-        // The number the badges show: a fed slot and the slot feeding it share
-        // one spool number. `sys` is passed so the helper does not re-fetch it.
-        const int display_slot = backend.spool_display_number(slot_index, sys);
-        const std::string slot_label = helix::ui::lane_label(backend.lane_noun(), display_slot - 1);
+        const std::string slot_label = helix::ui::lane_label(backend.lane_noun(), slot_index);
         if (!unit_display.empty() && sys.units.size() > 1) {
             // Multi-unit: show unit name + slot label on one line
-            snprintf(tmp, sizeof(tmp), lv_tr("Current: %s · %s"), unit_display.c_str(),
-                     slot_label.c_str());
+            snprintf(tmp, sizeof(tmp), "%s · %s", unit_display.c_str(), slot_label.c_str());
         } else {
-            snprintf(tmp, sizeof(tmp), lv_tr("Current: %s"), slot_label.c_str());
+            snprintf(tmp, sizeof(tmp), "%s", slot_label.c_str());
         }
     }
     if (strcmp(lv_subject_get_string(&current_slot_text_), tmp) != 0) {
@@ -1973,8 +2190,11 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
     // Search ALL backends to find the one with filament loaded.
     // In multi-backend setups (e.g., AMS_1 + AMS_2), only one backend
     // will have filament actively loaded at a time.
-    // Use pre-fetched primary_info for backend 0 to avoid redundant get_system_info().
+    // primary_info stands for backend 0; the others are read through system_info(),
+    // and the *_hold pointers keep a secondary reading alive while *_info points at it.
     AmsBackend* loaded_backend = nullptr;
+    const AmsSystemInfo* loaded_info = &primary_info;
+    std::shared_ptr<const AmsSystemInfo> loaded_hold;
     int slot_index = -1;
     bool filament_loaded = false;
     // While a load/unload works a head, the header names THAT head. Only the
@@ -1982,6 +2202,8 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
     // the carriage, so they read the loaded lane below. The backend owns the
     // classification (operation_working_slot); this side only formats it.
     AmsBackend* working_backend = nullptr;
+    const AmsSystemInfo* working_info = nullptr;
+    std::shared_ptr<const AmsSystemInfo> working_hold;
     int working_slot = -1;
 
     const auto& backends = registry_.backends();
@@ -1989,12 +2211,17 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
         auto& b = backends[idx];
         if (!b)
             continue;
-        AmsSystemInfo secondary_info;
-        if (idx != 0)
-            secondary_info = b->get_system_info();
-        const AmsSystemInfo& info = (idx == 0) ? primary_info : secondary_info;
+        std::shared_ptr<const AmsSystemInfo> secondary;
+        if (idx != 0) {
+            secondary = system_info(static_cast<int>(idx));
+            if (!secondary)
+                continue;
+        }
+        const AmsSystemInfo& info = (idx == 0) ? primary_info : *secondary;
         if (!working_backend && info.operation_working_slot >= 0) {
             working_backend = b.get();
+            working_info = &info;
+            working_hold = secondary;
             working_slot = info.operation_working_slot;
         }
         if (loaded_backend) {
@@ -2002,6 +2229,8 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
         }
         if (info.filament_loaded) {
             loaded_backend = b.get();
+            loaded_info = &info;
+            loaded_hold = secondary;
             slot_index = info.current_slot;
             filament_loaded = true;
             continue;
@@ -2009,6 +2238,8 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
         // Also check bypass on each backend
         if (info.current_slot == -2 && b->is_bypass_active()) {
             loaded_backend = b.get();
+            loaded_info = &info;
+            loaded_hold = secondary;
             slot_index = -2;
         }
     }
@@ -2024,7 +2255,6 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
 
     if (!loaded_backend) {
         set_current_loaded_defaults();
-        lv_subject_set_int(&current_color_, 0x505050);
         return;
     }
 
@@ -2036,10 +2266,15 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
         slot_index != last_synced_loaded_slot_ || filament_loaded != last_synced_filament_loaded_;
     last_synced_loaded_slot_ = slot_index;
     last_synced_filament_loaded_ = filament_loaded;
+    // Each load re-asserts its spool: the server's active spool may have been
+    // cleared since this lane last loaded (a print's end, another client).
+    if (loaded_identity_changed) {
+        last_synced_spoolman_id_ = 0;
+    }
 
     // Check for bypass mode (slot_index == -2)
     if (slot_index == -2 && loaded_backend->is_bypass_active()) {
-        const char* bypass_text = lv_tr("Current: Bypass");
+        const char* bypass_text = lv_tr("Bypass");
         if (strcmp(lv_subject_get_string(&current_slot_text_), bypass_text) != 0) {
             lv_subject_copy_string(&current_slot_text_, bypass_text);
         }
@@ -2048,8 +2283,9 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
         auto ext_spool = get_external_spool_info();
         if (ext_spool.has_value()) {
             const auto& ext = ext_spool.value();
-            int ext_color = static_cast<int>(ext.color_rgb);
-            lv_subject_set_int(&current_color_, ext_color);
+            set_current_paint(ext.color_rgb, ext.multi_color_hexes,
+                              filament_finish_name(ext.finish()));
+            lv_subject_set_int(&current_fill_pct_, ext.display_fill_pct());
 
             // Build label from spool info — same resolver as the loaded-slot
             // card below. Precedence and brand/material dedup live in
@@ -2085,7 +2321,8 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
                 lv_subject_copy_string(&current_weight_text_, "");
             }
             lv_subject_set_int(&current_has_weight_, 0);
-            lv_subject_set_int(&current_color_, 0x888888);
+            set_current_paint(0x888888);
+            lv_subject_set_int(&current_fill_pct_, -1);
         }
     } else if (slot_index >= 0 && filament_loaded) {
         // Filament is loaded - show slot info from the backend that has it loaded
@@ -2095,22 +2332,22 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
         }
         SlotInfo slot_info = loaded_backend->get_slot_info(slot_index);
 
-        // Sync Spoolman active spool when slot with spoolman_id is loaded.
-        // Skip when the backend manages active spool itself (e.g., AFC calls
-        // spoolman_set_active_spool on tool load/unload natively).
-        if (api_ && slot_info.spoolman_id > 0 &&
-            slot_info.spoolman_id != last_synced_spoolman_id_ &&
-            !loaded_backend->manages_active_spool()) {
-            last_synced_spoolman_id_ = slot_info.spoolman_id;
-            spdlog::info("[AMS State] Setting active Spoolman spool to {} (slot {})",
-                         slot_info.spoolman_id, slot_index);
-            api_->spoolman().set_active_spool(
-                slot_info.spoolman_id, []() {}, [](const MoonrakerError&) {});
+        // Sync Spoolman active spool when slot with spoolman_id is loaded,
+        // unless something else switches it (the backend, as AFC does on tool
+        // load, the printer's firmware, or its T<n> macros). A linked spool
+        // means Spoolman is in use.
+        const int spool = spool_to_activate(loaded_backend, slot_index);
+        if (api_ && spool > 0 && spool != last_synced_spoolman_id_) {
+            last_synced_spoolman_id_ = spool;
+            spdlog::info("[AMS State] Setting active Spoolman spool to {} (slot {})", spool,
+                         slot_index);
+            api_->spoolman().set_active_spool(spool, []() {}, [](const MoonrakerError&) {});
         }
 
         // Set color
-        int slot_color = static_cast<int>(slot_info.color_rgb);
-        lv_subject_set_int(&current_color_, slot_color);
+        set_current_paint(slot_info.color_rgb, slot_info.multi_color_hexes,
+                          filament_finish_name(slot_info.finish()));
+        lv_subject_set_int(&current_fill_pct_, slot_info.display_fill_pct());
 
         // Build the material label. The slot's own name/brand/material win, the
         // cached Spoolman identity fills the gaps (it is the only source of a
@@ -2131,7 +2368,7 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
         // The header is written once per sync: an operation's working head
         // below takes it, so the carriage slot does not flash in first.
         if (!working_backend) {
-            set_current_slot_header(*loaded_backend, slot_index);
+            set_current_slot_header(*loaded_backend, *loaded_info, slot_index);
         }
 
         // Remaining weight (Spoolman or backend) and measured length, either or both
@@ -2153,7 +2390,7 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
     }
 
     if (working_backend) {
-        set_current_slot_header(*working_backend, working_slot);
+        set_current_slot_header(*working_backend, *working_info, working_slot);
     }
 
     spdlog::trace("[AMS State] Synced current loaded - slot={}, has_weight={}", slot_index,
@@ -2163,6 +2400,57 @@ void AmsState::sync_current_loaded_from_backend(const AmsSystemInfo& primary_inf
 // ============================================================================
 // Slot edit commit (single authority for spool assignment changes)
 // ============================================================================
+
+void AmsState::clear_active_spool_if(int spool_id) {
+    if (api_ == nullptr || spool_id <= 0) {
+        return;
+    }
+    api_->spoolman().get_spoolman_status(
+        [spool_id](bool /*connected*/, int active) {
+            if (active != spool_id) {
+                return;
+            }
+            helix::ui::queue_update("AmsState::clear_active_spool_if", [spool_id]() {
+                if (ams_state_detail::shutting_down()) {
+                    return;
+                }
+                IMoonrakerAPI* api = AmsState::instance().api_;
+                if (api == nullptr) {
+                    return;
+                }
+                api->spoolman().set_active_spool(
+                    0, []() {},
+                    [spool_id](const MoonrakerError& err) {
+                        spdlog::warn("[AmsState] Failed to clear active spool {}: {}", spool_id,
+                                     err.message);
+                    });
+            });
+        },
+        [](const MoonrakerError& err) {
+            spdlog::debug("[AmsState] Spoolman status unavailable: {}", err.message);
+        },
+        /*silent=*/true);
+}
+
+bool AmsState::external_spool_feeds() const {
+    const AmsBackend* primary = get_backend();
+    if (primary == nullptr) {
+        return true;
+    }
+    for (int i = 0; i < backend_count(); ++i) {
+        const AmsBackend* b = get_backend(i);
+        if (b == nullptr) {
+            continue;
+        }
+        if (b->is_bypass_active()) {
+            return true;
+        }
+        if (b->is_filament_loaded() && b->get_current_slot() >= 0) {
+            return false;
+        }
+    }
+    return true;
+}
 
 AmsError AmsState::commit_slot_edit(int slot_index, const SlotInfo& original,
                                     const SlotInfo& info) {
@@ -2175,20 +2463,19 @@ AmsError AmsState::commit_slot_edit(int slot_index, const SlotInfo& original,
 
     // S1 — server-side active spool (fire-and-forget, warn on failure). The
     // active spool is the one feeding the toolhead, so only an edit on the
-    // loaded lane sets or clears it.
+    // loaded lane sets or clears it. It sets one unless the printer takes the
+    // link itself (helix_sets_active_spool_on_edit). An unlink clears the
+    // spool it unlinked whoever switches spools, since no firmware drops a
+    // link Moonraker holds.
     if (api_ && backend->slot_is_actively_loaded(slot_index)) {
-        if (info.spoolman_id > 0) {
+        if (info.spoolman_id > 0 && helix_sets_active_spool_on_edit(backend)) {
             api_->spoolman().set_active_spool(
                 info.spoolman_id, []() {},
                 [](const MoonrakerError& err) {
                     spdlog::warn("[AmsState] Failed to set active spool: {}", err.message);
                 });
-        } else if (original.spoolman_id > 0) {
-            api_->spoolman().set_active_spool(
-                0, []() {},
-                [](const MoonrakerError& err) {
-                    spdlog::warn("[AmsState] Failed to clear active spool: {}", err.message);
-                });
+        } else if (info.spoolman_id == 0) {
+            clear_active_spool_if(original.spoolman_id);
         }
     }
 
@@ -2218,6 +2505,103 @@ AmsError AmsState::commit_slot_edit(int slot_index, const SlotInfo& original,
     // S4 + S7
     sync_from_backend();
     return err;
+}
+
+AmsState::SpoolLink AmsState::link_spool_to_slot(int slot_index, const SpoolInfo& spool) {
+    assert_main_thread();
+    SpoolLink link;
+    if (AmsBackend* backend = get_backend()) {
+        link.original = backend->get_slot_info(slot_index);
+    }
+    link.linked = link.original;
+    apply_spool_to_slot(link.linked, spool);
+    link.error = commit_slot_edit(slot_index, link.original, link.linked);
+    return link;
+}
+
+// ============================================================================
+// Tag-declared Spoolman links
+// ============================================================================
+
+void AmsState::sync_tag_spool_link(AmsBackend& backend, int slot_index, const SlotInfo& slot) {
+    // A lane whose occupancy is unknown says nothing about an insert.
+    const std::optional<bool> occupied = slot_status_reports_filament(slot.status);
+    if (!occupied) {
+        return;
+    }
+    const std::optional<helix::ams::TagReading> tag = backend.tag_reading(slot_index);
+    helix::ams::TagSpoolSighting sighting;
+    sighting.occupied = *occupied;
+    sighting.tag_spool_id = tag ? tag->spoolman_id : std::nullopt;
+    sighting.lane_spoolman_id = slot.spoolman_id;
+    const std::optional<int> want = tag_link_tracker_.observe(slot_index, sighting);
+    if (!want) {
+        return;
+    }
+    const int spool_id = *want;
+    if (!SettingsManager::instance().get_ams_tag_links_spoolman()) {
+        tag_link_tracker_.settle(slot_index, spool_id);
+        return;
+    }
+    // Offered again on a later frame, once Spoolman is reachable.
+    if (!api_ || !get_printer_state().is_spoolman_available()) {
+        return;
+    }
+    tag_link_tracker_.begin_lookup(slot_index, spool_id, slot.spoolman_id);
+    spdlog::info("[AMS State] Slot {} tag names Spoolman spool {}; looking it up", slot_index,
+                 spool_id);
+    auto tok = async_lifetime_.token();
+    api_->spoolman().get_spoolman_spool(
+        spool_id,
+        [tok, slot_index, spool_id](const std::optional<SpoolInfo>& spool) {
+            tok.defer("AmsState::tag_spool_link", [slot_index, spool_id, spool]() {
+                AmsState::instance().finish_tag_spool_link(slot_index, spool_id, spool);
+            });
+        },
+        [tok, slot_index, spool_id](const MoonrakerError& err) {
+            spdlog::warn("[AMS State] Slot {} tag names Spoolman spool {}, and the lookup "
+                         "failed: {}",
+                         slot_index, spool_id, err.message);
+            tok.defer("AmsState::tag_spool_link_failed", [slot_index, spool_id]() {
+                AmsState::instance().tag_link_tracker_.lookup_failed(slot_index, spool_id);
+            });
+        },
+        /*silent=*/true);
+}
+
+void AmsState::finish_tag_spool_link(int slot_index, int spool_id,
+                                     const std::optional<SpoolInfo>& spool) {
+    assert_main_thread();
+    // The tag changed or the lane emptied while the lookup ran.
+    if (!tag_link_tracker_.wants(slot_index, spool_id)) {
+        return;
+    }
+    const bool inserted = tag_link_tracker_.want_is_insert(slot_index);
+    tag_link_tracker_.settle(slot_index, spool_id);
+    AmsBackend* backend = get_backend();
+    if (!backend) {
+        return;
+    }
+    const std::string lane = helix::ui::lane_label(backend->lane_noun(), slot_index);
+    if (!spool) {
+        // A spool seated across a restart warned when it was put in.
+        if (!inserted) {
+            spdlog::info("[AMS State] Slot {} tag names Spoolman spool {}, which doesn't exist",
+                         slot_index, spool_id);
+            return;
+        }
+        NOTIFY_WARNING(lv_tr("{}: the tag names Spoolman spool #{}, which doesn't exist"), lane,
+                       spool_id);
+        return;
+    }
+    const SpoolLink link = link_spool_to_slot(slot_index, *spool);
+    if (!link.error.success() && !link.error.partially_applied) {
+        spdlog::warn("[AMS State] Slot {} could not be linked to Spoolman spool {} from its "
+                     "tag: {}",
+                     slot_index, spool_id, link.error.technical_msg);
+        return;
+    }
+    NOTIFY_INFO(lv_tr("{} linked to Spoolman spool #{} from its tag"), lane, spool_id);
 }
 
 } // namespace helix

@@ -4,6 +4,9 @@
 #include "ui_print_tune_overlay.h"
 
 #include "ui_callback_helpers.h"
+#if !defined(HELIX_PLATFORM_ESP32)
+#include "ui_overlay_pa_tuning.h"
+#endif
 #include "ui_z_offset_indicator.h"
 
 #include "display_numbering.h"
@@ -14,7 +17,6 @@
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "printer_state.h"
-#include "tool_offsets.h"
 #include "tool_state.h"
 #include "tune_controller.h"
 #include "ui/ui_widget_helpers.h"
@@ -41,6 +43,7 @@ PrintTuneOverlay::~PrintTuneOverlay() {
     max_velocity_observer_.reset();
     extruder_vel_observer_.reset();
     units_observer_.reset();
+    pa_observer_.reset();
 
     // Clean up subjects
     if (subjects_initialized_) {
@@ -89,6 +92,9 @@ void PrintTuneOverlay::init_subjects() {
     UI_MANAGED_SUBJECT_STRING(tune_actual_flow_subject_, tune_actual_flow_buf_, "",
                               "tune_actual_flow_display", subjects_);
 
+    UI_MANAGED_SUBJECT_STRING(tune_pa_subject_, tune_pa_buf_, "--", "tune_pa_display", subjects_);
+    UI_MANAGED_SUBJECT_INT(tune_pa_session_subject_, 0, "tune_pa_session_active", subjects_);
+
     // Z-offset direction button icons (kinematic-aware, like motion panel)
     UI_MANAGED_SUBJECT_STRING(z_closer_icon_subject_, z_closer_icon_buf_, "arrow_down",
                               "tune_z_closer_icon", subjects_);
@@ -125,6 +131,13 @@ void PrintTuneOverlay::register_callbacks() {
                  get_print_tune_overlay().handle_flow_adjust(*delta);
          }},
         {"on_tune_reset_clicked", [](lv_event_t*) { get_print_tune_overlay().handle_reset(); }},
+        {"on_tune_pa_adjust",
+         [](lv_event_t* e) {
+             if (auto steps = helix::ui::event_user_int(e))
+                 get_print_tune_overlay().handle_pa_adjust(*steps);
+         }},
+        {"on_tune_open_pa_tuner",
+         [](lv_event_t*) { get_print_tune_overlay().handle_open_pa_tuner(); }},
         {"on_tune_units_toggle",
          [](lv_event_t*) {
              auto& settings = helix::DisplaySettingsManager::instance();
@@ -157,6 +170,10 @@ void PrintTuneOverlay::register_callbacks() {
 void PrintTuneOverlay::on_activate() {
     OverlayBase::on_activate();
     sync_to_state();
+#if !defined(HELIX_PLATFORM_ESP32)
+    lv_subject_set_int(&tune_pa_session_subject_,
+                       helix::ui::get_global_pa_tuning_overlay().session_active() ? 1 : 0);
+#endif
     spdlog::debug("[PrintTuneOverlay] Activated - synced to state");
 }
 
@@ -185,6 +202,10 @@ void PrintTuneOverlay::setup_panel() {
         extruder_vel_observer_ = helix::ui::observe<int>(
             printer_state_->motion_state().get_live_extruder_velocity_subject(), this,
             [](PrintTuneOverlay* self, int /*value*/) { self->update_display(); },
+            printer_state_->get_subjects_lifetime());
+        pa_observer_ = helix::ui::observe<int>(
+            printer_state_->temperature_state().get_active_extruder_pressure_advance_subject(),
+            this, [](PrintTuneOverlay* self, int /*value*/) { self->update_pa_display(); },
             printer_state_->get_subjects_lifetime());
     }
     auto& display_settings = DisplaySettingsManager::instance();
@@ -244,6 +265,8 @@ void PrintTuneOverlay::sync_to_state() {
         ui_z_offset_indicator_set_value(indicator, z_offset_microns);
     }
 
+    update_pa_display();
+
     spdlog::debug("[PrintTuneOverlay] Synced to state: speed={}%, flow={}%", speed, flow);
 }
 
@@ -290,7 +313,7 @@ void PrintTuneOverlay::update_display() {
     int live_velocity = 0;
     int max_velocity = 0;
     int vel_centimm = 0;
-    float diameter_mm = filament::DEFAULT_DIAMETER_MM;
+    float diameter_mm = filament::kDefaultDiameterMm;
     if (printer_state_) {
         diameter_mm = printer_state_->get_discovery().filament_diameter_mm();
         live_velocity =
@@ -382,6 +405,49 @@ void PrintTuneOverlay::handle_flow_adjust(int delta) {
     helix::tune::set_flow_percent(api_, flow_percent_);
 }
 
+void PrintTuneOverlay::update_pa_display() {
+    if (!subjects_initialized_ || !printer_state_) {
+        return;
+    }
+    const int value = lv_subject_get_int(
+        printer_state_->temperature_state().get_active_extruder_pressure_advance_subject());
+    lv_strlcpy(tune_pa_buf_, helix::tune::pressure_advance_text(value).c_str(),
+               sizeof(tune_pa_buf_));
+    lv_subject_copy_string(&tune_pa_subject_, tune_pa_buf_);
+}
+
+void PrintTuneOverlay::handle_pa_adjust(int steps) {
+    if (!printer_state_) {
+        return;
+    }
+#if !defined(HELIX_PLATFORM_ESP32)
+    // During a tuning run the nudge is the tuner's: it stops the ramp, which
+    // would otherwise overwrite this value at the next band.
+    if (helix::ui::get_global_pa_tuning_overlay().nudge_by(steps * helix::tune::kPaTuneStep)) {
+        return;
+    }
+#endif
+    auto& temps = printer_state_->temperature_state();
+    const auto current = helix::tune::pressure_advance_from_subject(
+        lv_subject_get_int(temps.get_active_extruder_pressure_advance_subject()));
+    if (!current) {
+        return; // nothing reported yet: a nudge would be relative to a guess
+    }
+    // The readout follows the printer's report, not this request.
+    helix::tune::set_pressure_advance(api_, temps.active_extruder_name(),
+                                      *current + steps * helix::tune::kPaTuneStep);
+}
+
+void PrintTuneOverlay::handle_open_pa_tuner() {
+#if !defined(HELIX_PLATFORM_ESP32)
+    auto& tuner = helix::ui::get_global_pa_tuning_overlay();
+    if (tuner.session_active()) {
+        tuner.set_api(api_);
+        tuner.show(parent_screen_);
+    }
+#endif
+}
+
 void PrintTuneOverlay::handle_reset() {
     speed_percent_ = 100;
     flow_percent_ = 100;
@@ -401,7 +467,8 @@ void PrintTuneOverlay::handle_z_offset_changed(double delta) {
 
     if (lv_obj_t* indicator =
             helix::ui::find_required(overlay_root_, "z_offset_indicator", get_name())) {
-        ui_z_offset_indicator_set_value(indicator, static_cast<int>(current_z_offset_ * 1000.0));
+        ui_z_offset_indicator_set_value(indicator,
+                                        static_cast<int>(std::lround(current_z_offset_ * 1000.0)));
         ui_z_offset_indicator_flash_direction(indicator, r.applied_delta_mm > 0 ? 1 : -1);
     }
 }
@@ -502,38 +569,11 @@ void PrintTuneOverlay::handle_z_adjust(int direction) {
 }
 
 void PrintTuneOverlay::handle_tool_z_offset_changed(double delta) {
-    if (!api_ || !printer_state_) {
+    const int tool_index =
+        lv_subject_get_int(helix::ToolState::instance().get_active_tool_subject());
+    if (!helix::zoffset::adjust_tool_offset(api_, printer_state_, tool_index, delta)) {
         return;
     }
-    auto& ts = helix::ToolState::instance();
-    const int tool_index = lv_subject_get_int(ts.get_active_tool_subject());
-
-    // Adjust from the value we DISPLAYED, same rule the machine-wide path
-    // follows: the firmware takes an absolute offset, so a delta applied to
-    // anything else would land somewhere the user did not ask for. Without a
-    // reported value there is no base to adjust from, so refuse rather than
-    // assume zero and overwrite whatever the tool actually holds.
-    if (!ts.tool_offset_known(tool_index, helix::Axis::Z)) {
-        spdlog::warn("[PrintTuneOverlay] No reported offset for T{} — refusing to adjust",
-                     tool_index);
-        return;
-    }
-    const int base_microns =
-        static_cast<int>(std::lround(ts.tool_offset_mm(tool_index, helix::Axis::Z) * 1000.0));
-    const int new_microns = base_microns + static_cast<int>(std::lround(delta * 1000.0));
-
-    const std::string gcode = helix::tool_offsets::set_tool_offset_gcode(
-        printer_state_->get_discovery(), helix::Axis::Z, tool_index, new_microns);
-    if (gcode.empty()) {
-        return;
-    }
-    api_->execute_gcode(gcode, nullptr, nullptr);
-
-    // Through ToolState, not straight at the subject: tools_ is what
-    // dirty_tool_indices() and the save path read, so poking only the
-    // published subject left this adjustment invisible to Save until the
-    // firmware echoed back — and a save in that window discarded it silently.
-    ts.set_tool_offset_local(tool_index, helix::Axis::Z, new_microns);
     update_tool_z_displays();
 
     if (lv_obj_t* indicator =

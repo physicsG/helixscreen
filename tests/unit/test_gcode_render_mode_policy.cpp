@@ -19,8 +19,8 @@
 using helix::GcodeViewerRenderMode;
 using helix::gcode_viewer::decide_preview_mode;
 using helix::gcode_viewer::decide_render_mode;
+using helix::gcode_viewer::kRenderModeThumbnailOnly;
 using helix::gcode_viewer::PreviewModeSource;
-using helix::gcode_viewer::RENDER_MODE_THUMBNAIL_ONLY;
 using helix::gcode_viewer::RenderModeReason;
 
 TEST_CASE("Render mode: unset env auto-detects", "[gcode_viewer][render_mode]") {
@@ -112,7 +112,7 @@ TEST_CASE("decide_preview_mode - falls through to the saved setting", "[gcode][r
 TEST_CASE("decide_preview_mode - Thumbnail Only leaves the viewer alone", "[gcode][render_mode]") {
     // Setting 3 means the viewer is never shown; touching its mode would spin up
     // a renderer for nothing.
-    auto d = decide_preview_mode(-1, false, RENDER_MODE_THUMBNAIL_ONLY);
+    auto d = decide_preview_mode(-1, false, kRenderModeThumbnailOnly);
     REQUIRE(d.source == PreviewModeSource::ThumbnailOnly);
     REQUIRE_FALSE(d.apply);
 }
@@ -121,7 +121,7 @@ TEST_CASE("decide_preview_mode - Thumbnail Only still yields to the command line
           "[gcode][render_mode]") {
     // Non-vacuity guard: a ladder that checked thumbnail-only first would pass
     // the case above while breaking --render-2d on a thumbnail-only install.
-    auto d = decide_preview_mode(/*cmdline=*/2, false, RENDER_MODE_THUMBNAIL_ONLY);
+    auto d = decide_preview_mode(/*cmdline=*/2, false, kRenderModeThumbnailOnly);
     REQUIRE(d.source == PreviewModeSource::CommandLine);
     REQUIRE(d.apply);
 }
@@ -135,7 +135,7 @@ TEST_CASE("decide_preview_mode - Thumbnail Only still yields to the command line
 
 TEST_CASE("uses_viewer - Thumbnail Only is the only outcome that skips the viewer",
           "[gcode][render_mode]") {
-    CHECK_FALSE(decide_preview_mode(-1, false, RENDER_MODE_THUMBNAIL_ONLY).uses_viewer());
+    CHECK_FALSE(decide_preview_mode(-1, false, kRenderModeThumbnailOnly).uses_viewer());
 
     CHECK(decide_preview_mode(-1, false, /*settings=*/0).uses_viewer());
     CHECK(decide_preview_mode(-1, false, /*settings=*/1).uses_viewer());
@@ -146,8 +146,8 @@ TEST_CASE("uses_viewer - an explicit override outranks a saved Thumbnail Only",
           "[gcode][render_mode]") {
     // Same precedence the mode ladder applies: asking for a renderer on the
     // command line, or through HELIX_GCODE_MODE, asks for the viewer.
-    CHECK(decide_preview_mode(/*cmdline=*/2, false, RENDER_MODE_THUMBNAIL_ONLY).uses_viewer());
-    CHECK(decide_preview_mode(-1, /*env_set=*/true, RENDER_MODE_THUMBNAIL_ONLY).uses_viewer());
+    CHECK(decide_preview_mode(/*cmdline=*/2, false, kRenderModeThumbnailOnly).uses_viewer());
+    CHECK(decide_preview_mode(-1, /*env_set=*/true, kRenderModeThumbnailOnly).uses_viewer());
 }
 
 TEST_CASE("uses_viewer - is not a restatement of apply", "[gcode][render_mode]") {

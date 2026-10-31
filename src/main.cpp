@@ -14,6 +14,7 @@
 #include "app_globals.h"
 #include "application.h"
 #include "async_lifetime_guard.h"
+#include "bench_gcode_cmd.h"
 #include "data_root_resolver.h"
 #include "helix_version.h"
 #include "probe_egl_cmd.h"
@@ -138,6 +139,11 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--probe-egl") == 0) {
             return helix::probe::run_probe_egl();
         }
+    }
+
+    // A measurement tool, run beside a live instance: no config, logging or lock.
+    if (argc >= 2 && strcmp(argv[1], "bench-gcode") == 0) {
+        return helix::bench::run_bench_gcode(argc, argv);
     }
 
     // Before any subsystem that can touch SDL audio. With overwrite=0, this

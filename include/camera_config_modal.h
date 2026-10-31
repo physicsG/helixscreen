@@ -50,9 +50,9 @@ class CameraConfigModal : public Modal {
     }
 
     /// Cameras the source picker can offer; a printer with more lists the first 8.
-    static constexpr size_t MAX_SOURCES = 8;
+    static constexpr size_t kMaxSources = 8;
     /// Picker rows: Automatic is row 0, cameras follow.
-    static constexpr size_t MAX_ROWS = MAX_SOURCES + 1;
+    static constexpr size_t kMaxRows = kMaxSources + 1;
 
     // Static event callbacks — registered once in register_camera_widget()
     static void on_source_clicked(lv_event_t* e); // user_data: row index, 0 = Automatic
@@ -109,12 +109,12 @@ class CameraConfigModal : public Modal {
     lv_subject_t flip_h_active_{};
     lv_subject_t flip_v_active_{};
     lv_subject_t source_count_{}; // rows in the picker (Automatic + cameras); drives the <repeat>
-    std::array<lv_subject_t, MAX_ROWS> source_active_{}; // 1 on the selected row
-    std::array<lv_subject_t, MAX_ROWS> source_name_{};
-    std::array<lv_subject_t, MAX_ROWS> source_note_{};
-    static constexpr size_t SOURCE_TEXT_LEN = 64;
-    std::array<std::array<char, SOURCE_TEXT_LEN>, MAX_ROWS> source_name_buf_{};
-    std::array<std::array<char, SOURCE_TEXT_LEN>, MAX_ROWS> source_note_buf_{};
+    std::array<lv_subject_t, kMaxRows> source_active_{}; // 1 on the selected row
+    std::array<lv_subject_t, kMaxRows> source_name_{};
+    std::array<lv_subject_t, kMaxRows> source_note_{};
+    static constexpr size_t kSourceTextLen = 64;
+    std::array<std::array<char, kSourceTextLen>, kMaxRows> source_name_buf_{};
+    std::array<std::array<char, kSourceTextLen>, kMaxRows> source_note_buf_{};
 
     friend class CameraConfigModalTestAccess;
 };

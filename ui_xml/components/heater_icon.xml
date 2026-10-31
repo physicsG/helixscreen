@@ -13,6 +13,13 @@
          (see note below on why it stays empty rather than defaulting to
          "bed_icon_glyph"). -->
     <prop name="glyph_name" type="string" default=""/>
+    <!-- Reserve the width a nozzle_icon's tool digit takes, so this icon's
+         row lines up with a nozzle row beside it. Same subjects and font as
+         nozzle_icon's badge; empty by default, which installs no binding and
+         leaves the spacer hidden, so the icon renders bare. -->
+    <prop name="badge_space_subject" type="string" default=""/>
+    <prop name="badge_text_subject" type="string" default="tool_badge_text"/>
+    <prop name="badge_font" type="string" default="#font_body_bold"/>
   </api>
   <!--
     Heater Icon (heatbed / chamber)
@@ -30,12 +37,22 @@
 
     Colour is owned by HeatingIconAnimator once bound (4-state thermal tint); the
     variant here is only the pre-bind resting appearance.
+
+    The layout matches nozzle_icon's (row, bottom-aligned, #space_xxs gap), so
+    with badge_space_subject set the invisible spacer gives this icon exactly
+    the nozzle icon's width, digit for digit.
   -->
   <view name="heater_icon"
-        width="content" height="content" style_pad_all="0" scrollable="false" clickable="false" event_bubble="true">
+        width="content" height="content" flex_flow="row" style_flex_cross_place="end" style_pad_all="0"
+        style_pad_column="#space_xxs" scrollable="false" clickable="false" event_bubble="true">
     <icon name="$glyph_name" src="$src" size="$size" variant="secondary" clickable="false" event_bubble="true">
       <!-- The heating pulse animates this glyph, so it never takes the scaled path -->
       <bind_tile_rung ladder="icon" subject="$rung_subject" animated="true"/>
     </icon>
+    <text_tiny name="badge_space"
+               bind_text="$badge_text_subject" style_text_font="$badge_font" style_opa="0" hidden="true"
+               clickable="false" event_bubble="true">
+      <bind_flag_if_eq subject="$badge_space_subject" flag="hidden" ref_value="0"/>
+    </text_tiny>
   </view>
 </component>

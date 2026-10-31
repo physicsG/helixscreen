@@ -148,6 +148,7 @@ CONF
 }
 
 @test "moonraker remove_update_manager_section: works without sudo on user-writable conf" {
+    . "$WORKTREE_ROOT/scripts/lib/installer/helix_print_conf.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/moonraker.sh"
 
     local conf_dir="$BATS_TEST_TMPDIR/home/testuser/printer_data/config"

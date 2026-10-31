@@ -1,11 +1,14 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_next_tick.h"
 #include "ui_update_queue.h"
 
 #include "../../include/temp_graph_controller.h"
 #include "../../include/temp_graph_internal.h"
 #include "../../include/ui_temp_graph.h"
+#include "../lvgl_test_fixture.h"
+#include "../test_helpers/discovery_of_objects.h"
 #include "../test_helpers/temp_graph_controller_test_access.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
@@ -25,15 +28,9 @@ using namespace helix;
 // Test Fixture
 // ============================================================================
 
-class TempGraphControllerFixture {
+class TempGraphControllerFixture : public LVGLTestFixture {
   public:
     TempGraphControllerFixture() {
-        lv_init_safe();
-
-        lv_display_t* disp = lv_display_create(800, 480);
-        alignas(64) static lv_color_t buf1[800 * 10];
-        lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
-
         screen = lv_obj_create(NULL);
 
         // Initialize PrinterState subjects (needed by controller's setup_observers)
@@ -281,7 +278,8 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     auto& tsm = sensors::TemperatureSensorManager::instance();
     tsm.init_subjects();
     tsm.set_sync_mode(true);
-    tsm.discover({"heater_generic filament_dryer", "temperature_fan exhaust"});
+    tsm.discover(
+        helix::test::discovery_of({"heater_generic filament_dryer", "temperature_fan exhaust"}));
     tsm.update_from_status(
         {{"heater_generic filament_dryer", {{"temperature", 48.5}, {"target", 55.0}}},
          {"temperature_fan exhaust", {{"temperature", 31.0}, {"target", 40.0}}}});
@@ -546,6 +544,7 @@ TEST_CASE_METHOD(TempGraphControllerFixture,
     controller->detach();
     TempGraphController* raw = controller.release();
     REQUIRE(raw != nullptr);
+    helix::ui::run_next_tick([raw]() { delete raw; });
 
     // Drain the UpdateQueue — pending reconnect callback must no-op against
     // the detached controller (tearing_down_ flag + lifetime token).

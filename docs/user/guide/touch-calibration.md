@@ -270,7 +270,6 @@ For power users and developers. These override config file settings and are usef
 | `HELIX_TOUCH_SWAP_AXES` | Swap X and Y axes before calibration (axis swap is also auto-detected during calibration — use this only to force it) | `1` |
 | `HELIX_DISPLAY_ROTATION` | Display rotation (touch auto-adjusts) | `90`, `180`, `270` |
 | `HELIX_DEBUG_TOUCH` | Draw ripple at each touch point + calibration logging (alias: `HELIX_DEBUG_TOUCHES`) | `1` |
-| `HELIX_TOUCH_JITTER` | Touch jitter filter dead zone (pixels) | `5` |
 
 > **Note:** The MIN/MAX variables provide a simple linear calibration that bypasses the 3-point system. Most users should use the built-in calibration instead.
 >

@@ -14,7 +14,7 @@
  * cleanly: one of the two callbacks fires, and nothing escapes the callback
  * as an exception.
  *
- * hw.has_adxl reads helix::sensors::AccelSensorManager::has_sensors(). That
+ * hw.has_adxl reads helix::sensors::AccelSensorManager::sensor_count(). That
  * was reporting false on every printer until #1262 was fixed: the manager's
  * only populating call, discover_from_config(), had no production caller, so
  * `sensors_` never filled and a Voron with a real [adxl345] section detected
@@ -31,6 +31,7 @@
 #include "../../include/moonraker_advanced_api.h"
 #include "../../include/moonraker_api.h"
 #include "../../include/moonraker_client_mock.h"
+#include "../../include/printer_discovery.h"
 #include "../../include/printer_state.h"
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/mock_kinematics_env.h"
@@ -45,17 +46,17 @@ using namespace helix;
 
 namespace {
 
-// Seeds AccelSensorManager from a configfile.config payload, the same path
-// the real discovery sequence takes (moonraker_discovery_sequence.cpp).
+// Seeds AccelSensorManager from a configfile.config payload, the way discovery
+// does: the config keys are classified by PrinterDiscovery, then the manager
+// discovers from it.
 //
-// Draining on both sides is load-bearing, not decoration: discover_from_config()
-// sets LVGL subjects and so runs through ui_queue_update(), and a callback some
-// earlier test queued would otherwise repopulate the singleton on OUR drain,
-// after the seed. Same idiom as reset_accel_manager() in
-// test_accel_discovery_wiring.cpp.
+// Draining on both sides keeps a callback some earlier test queued from
+// repopulating the singleton on OUR drain, after the seed.
 void seed_accel_manager(const nlohmann::json& config) {
     helix::ui::UpdateQueue::instance().drain();
-    helix::sensors::AccelSensorManager::instance().discover_from_config(config);
+    helix::PrinterDiscovery hw;
+    hw.parse_config_keys(config);
+    helix::sensors::AccelSensorManager::instance().discover(hw);
     helix::ui::UpdateQueue::instance().drain();
 }
 

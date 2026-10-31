@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Why a device-action button above it is unavailable: "Label: reason".
+     AmsDeviceSectionDetailOverlay adds one under a button row per disabled
+     button that has a reason, the way setting rows show it as their description. -->
+<component>
+  <api>
+    <prop name="text" type="string" default=""/>
+  </api>
+  <view extends="lv_obj"
+        width="100%" height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+    <text_small name="note" width="100%" text="$text" long_mode="wrap"/>
+  </view>
+</component>

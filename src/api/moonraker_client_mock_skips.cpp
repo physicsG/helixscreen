@@ -18,7 +18,7 @@ namespace sw = helix::skip_wrappers;
 
 namespace {
 
-constexpr sw::Op ALL_OPS[] = {sw::Op::BedMesh, sw::Op::Qgl, sw::Op::ZTilt};
+constexpr sw::Op kAllOps[] = {sw::Op::BedMesh, sw::Op::Qgl, sw::Op::ZTilt};
 
 /// The leveling sections a printer with these objects has in its config.
 json leveling_sections(bool bed_mesh, bool qgl, bool z_tilt) {
@@ -70,7 +70,7 @@ json MoonrakerClientMock::skip_wrapper_status() const {
          sw::wrappable(leveling_sections(hw.has_bed_mesh(), hw.has_qgl(), hw.has_z_tilt()))) {
         flags[sw::flag_for(op)] = skip_flags_[static_cast<size_t>(op)].load();
     }
-    status[std::string("gcode_macro ") + sw::PREP_MACRO] = flags;
+    status[std::string("gcode_macro ") + sw::kPrepMacro] = flags;
     // A mock that has just leveled, so the QGL and Z-tilt toggles show at once.
     if (hw.has_qgl()) {
         status["quad_gantry_level"] = {{"applied", true}};
@@ -90,7 +90,7 @@ bool MoonrakerClientMock::consume_skip(sw::Op op) {
         return false;
     }
     dispatch_status_update(
-        {{std::string("gcode_macro ") + sw::PREP_MACRO, {{sw::flag_for(op), 1}}}});
+        {{std::string("gcode_macro ") + sw::kPrepMacro, {{sw::flag_for(op), 1}}}});
     return true;
 }
 
@@ -101,7 +101,7 @@ void MoonrakerClientMock::append_skip_wrapper_objects(json& objects) {
     auto has = [&objects](const std::string& name) {
         return std::find(objects.begin(), objects.end(), name) != objects.end();
     };
-    std::vector<std::string> names = {sw::PREP_MACRO};
+    std::vector<std::string> names = {sw::kPrepMacro};
     for (const auto& command : sw::wrapped_commands(sw::wrappable(
              leveling_sections(has("bed_mesh"), has("quad_gantry_level"), has("z_tilt"))))) {
         names.push_back(command);
@@ -118,7 +118,7 @@ void MoonrakerClientMock::append_skip_wrapper_objects(json& objects) {
 // one. A pre-start block carries several lines in one script, so each line is
 // read on its own. Never ends the script.
 MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_skip_wrappers(const std::string& g) {
-    if (!skip_wrappers_loaded() || g.find(sw::PREP_MACRO) == std::string::npos) {
+    if (!skip_wrappers_loaded() || g.find(sw::kPrepMacro) == std::string::npos) {
         return std::nullopt;
     }
     json flags = json::object();
@@ -126,15 +126,15 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_skip_wrappers(const 
     std::string raw;
     while (std::getline(lines, raw)) {
         const std::string line(text_io::trim(raw));
-        if (line == sw::PREP_MACRO) {
-            for (sw::Op op : ALL_OPS) {
+        if (line == sw::kPrepMacro) {
+            for (sw::Op op : kAllOps) {
                 skip_flags_[static_cast<size_t>(op)] = 1;
                 flags[sw::flag_for(op)] = 1;
             }
             continue;
         }
         if (line.rfind("SET_GCODE_VARIABLE", 0) != 0 ||
-            line.find(std::string("MACRO=") + sw::PREP_MACRO + " ") == std::string::npos) {
+            line.find(std::string("MACRO=") + sw::kPrepMacro + " ") == std::string::npos) {
             continue;
         }
         const size_t value_at = line.find("VALUE=");
@@ -142,7 +142,7 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_skip_wrappers(const 
             continue;
         }
         const int value = line.compare(value_at + 6, 1, "0") == 0 ? 0 : 1;
-        for (sw::Op op : ALL_OPS) {
+        for (sw::Op op : kAllOps) {
             if (line.find(std::string("VARIABLE=") + sw::flag_for(op) + " ") != std::string::npos) {
                 skip_flags_[static_cast<size_t>(op)] = value;
                 flags[sw::flag_for(op)] = value;
@@ -151,7 +151,7 @@ MoonrakerClientMock::GcodeResult MoonrakerClientMock::gcode_skip_wrappers(const 
     }
     if (!flags.empty()) {
         spdlog::debug("[MoonrakerClientMock] skip flags now {}", flags.dump());
-        dispatch_status_update({{std::string("gcode_macro ") + sw::PREP_MACRO, flags}});
+        dispatch_status_update({{std::string("gcode_macro ") + sw::kPrepMacro, flags}});
     }
     return std::nullopt;
 }

@@ -3,17 +3,23 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
+
 #include <functional>
 #include <string>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 namespace helix::ui {
 
 /// Run the active AMS backend's prepare_for_resume, then dispatch the
 /// Resume StandardMacro. On either error path (prep failure or macro send
 /// failure) emit a contextual `NOTIFY_ERROR` toast and invoke `on_failure`,
-/// which call sites typically use to clear optimistic-UI state.
+/// which call sites typically use to clear optimistic-UI state. A macro
+/// refusal the active backend's classifier explains gets no toast: the
+/// error router presents that explanation instead.
 ///
 /// All work is async; this returns immediately. `on_failure` and the
 /// internal toast emission fire on the **main thread** even when the
@@ -34,10 +40,10 @@ namespace helix::ui {
 ///                     and the async lambdas don't depend on the caller's
 ///                     storage outliving the dispatch.
 /// @param on_failure   Optional. Invoked on the main thread on either
-///                     error path AFTER the toast has been emitted.
+///                     error path AFTER the failure has been reported.
 ///                     Default: no-op.
 void dispatch_prepared_resume(IMoonrakerAPI* api, std::string log_prefix,
-                              std::function<void()> on_failure = {});
+                              helix::SharedCallback<void()> on_failure = {});
 
 /// Confirm, then cancel the running print through the configured Cancel
 /// StandardMacro.
@@ -76,7 +82,15 @@ void dispatch_prepared_resume(IMoonrakerAPI* api, std::string log_prefix,
 ///                     this callback's job rather than the button hook's. Guard
 ///                     it with a lifetime token like any retained callback.
 void dispatch_cancel_print(IMoonrakerAPI* api, std::string log_prefix,
-                           std::function<void()> on_confirmed = {});
+                           helix::SharedCallback<void()> on_confirmed = {});
+
+/// Start the paused print's file over: SDCARD_RESET_FILE + CANCEL_PRINT_BASE
+/// to drop the job the printer cannot resume, then start_print(@p filename).
+/// For a pause whose virtual_sdcard is gone, where RESUME silently does nothing.
+/// Failures toast and run @p on_failure (may be null) on the main thread.
+void restart_print_from_beginning(IMoonrakerAPI* api, const std::string& filename,
+                                  const std::string& log_prefix,
+                                  const helix::SharedCallback<void()>& on_failure);
 
 /// Show the "Print Was Terminated — Restart from the beginning?" modal.
 /// Exposed so post-resume backstops (e.g. AmsBackendSnapmaker) can surface it
@@ -90,6 +104,6 @@ void dispatch_cancel_print(IMoonrakerAPI* api, std::string log_prefix,
 /// @param on_failure      May be null.
 void show_restart_required_modal(IMoonrakerAPI* api, const std::string& filename,
                                  const std::string& authored_reason, std::string log_prefix,
-                                 std::function<void()> on_failure);
+                                 helix::SharedCallback<void()> on_failure);
 
 } // namespace helix::ui

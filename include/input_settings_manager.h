@@ -29,8 +29,11 @@ class InputSettingsManager {
   public:
     static InputSettingsManager& instance();
 
-    /// Default scroll momentum decay; see helix::input_defaults::SCROLL_THROW.
-    static constexpr int DEFAULT_SCROLL_THROW = helix::input_defaults::SCROLL_THROW;
+    /// The static PersistedSetting table this manager is built from.
+    static settings::TableView persisted_table();
+
+    /// Default scroll momentum decay; see helix::input_defaults::kScrollThrow.
+    static constexpr int kDefaultScrollThrow = helix::input_defaults::kScrollThrow;
 
     // Non-copyable
     InputSettingsManager(const InputSettingsManager&) = delete;
@@ -152,6 +155,11 @@ class InputSettingsManager {
     lv_subject_t* subject_keypad_layout() {
         return settings_.subject(Key::KeypadLayout);
     }
+
+    /// Give one pointer device the scroll throw, scroll limit and long-press time
+    /// the settings hold. A pointer created after the settings applied (the ctl
+    /// and screen-server pointer) calls this so its holds time like a finger's.
+    void apply_to_pointer(lv_indev_t* indev) const;
 
   private:
     InputSettingsManager();

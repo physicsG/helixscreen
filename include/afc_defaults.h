@@ -45,6 +45,14 @@ std::vector<DeviceSection> afc_default_sections();
 std::vector<DeviceAction> afc_default_actions();
 
 /**
+ * @brief Add the guided toolhead calibration button (AFC_TOOLHEAD_CALIBRATION)
+ *
+ * It leads the toolhead section, whose distances it calibrates. Only for an AFC
+ * that registers the command; older AFC answers it with "Unknown command".
+ */
+void afc_add_toolhead_calibration_action(std::vector<DeviceAction>& actions);
+
+/**
  * @brief Get the default AFC capability flags
  * @return AfcCapabilities with standard AFC values
  */

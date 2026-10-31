@@ -17,7 +17,7 @@
  *     the first tile row fully visible whenever the width/3 floor did not
  *     clamp the card.
  *
- * The option set is the real Snapmaker U1 database entry (four options, two
+ * The option set is the real Snapmaker U1 database entry (three options, two
  * tile rows), injected into the global PrinterState the view reads.
  */
 
@@ -37,6 +37,7 @@
 #include "theme_manager.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -58,6 +59,7 @@ void register_detail_noops() {
         {"on_print_select_detail_backdrop", detail_noop_cb},
         {"on_print_select_print_button", detail_noop_cb},
         {"on_print_select_delete_button", detail_noop_cb},
+        {"on_print_select_more_button", detail_noop_cb},
         {"on_print_detail_back_clicked", detail_noop_cb},
         {"on_toggle_sliced_colors", detail_noop_cb},
         {"on_print_select_detail_objects", detail_noop_cb},
@@ -162,7 +164,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     PrinterStateTestAccess::set_option_set(
         ps, PrinterDetector::get_pre_print_option_set("Snapmaker U1"));
     PrinterStateTestAccess::refresh_option_visibility(ps);
-    // Setup reached the branch: four options make has_any_preprint_options 1,
+    // Setup reached the branch: three options make has_any_preprint_options 1,
     // so the options card (and its tiles) exist to measure.
     REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "has_any_preprint_options")) == 1);
 
@@ -193,7 +195,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
         REQUIRE(container != nullptr);
         const uint32_t tile_count = lv_obj_get_child_count(container);
         INFO("tile_count " << tile_count);
-        REQUIRE(tile_count == 4);
+        REQUIRE(tile_count == 3);
 
         // Delete and Print are pinned outside the scroll area: fully on
         // screen at every canvas, whatever the options column holds.
@@ -232,17 +234,55 @@ TEST_CASE_METHOD(LVGLUITestFixture,
             }
         }
 
-        // Labels wrap inside their tile; the check tab never covers one.
+        // Labels wrap inside their pill, beside the icon slot, never under it.
         for (uint32_t i = 0; i < tile_count; ++i) {
             INFO("tile " << i);
             lv_obj_t* const tile = lv_obj_get_child(container, i);
             const Rect tile_r = coords_of(tile);
             lv_obj_t* const label = lv_obj_find_by_name(tile, "label");
-            lv_obj_t* const tab = lv_obj_find_by_name(tile, "check_tab");
+            lv_obj_t* const slot = lv_obj_find_by_name(tile, "icon_slot");
             REQUIRE(label != nullptr);
-            REQUIRE(tab != nullptr);
+            REQUIRE(slot != nullptr);
             CHECK(rect_contains(tile_r, coords_of(label)));
-            CHECK_FALSE(rect_intersects(coords_of(tab), coords_of(label)));
+            CHECK(rect_contains(tile_r, coords_of(slot)));
+            CHECK_FALSE(rect_intersects(coords_of(slot), coords_of(label)));
+        }
+
+        // Small portrait folds the filament chips onto the FILAMENTS header's
+        // line and shrinks the preview to fit the whole options column, down
+        // to its width/3 floor; everywhere else the chips sit on a row of
+        // their own under the header.
+        {
+            lv_subject_t* const bp = lv_xml_get_subject(nullptr, "ui_breakpoint");
+            lv_subject_t* const portrait_sub = lv_xml_get_subject(nullptr, "ui_is_portrait");
+            const bool small_portrait =
+                lv_subject_get_int(portrait_sub) == 1 && lv_subject_get_int(bp) < 2;
+            INFO("small_portrait " << small_portrait);
+            lv_obj_t* const header = lv_obj_find_by_name(root, "color_card_header");
+            lv_obj_t* const chips = lv_obj_find_by_name(root, "filament_mapping_rows");
+            lv_obj_t* const cue = lv_obj_find_by_name(root, "color_card_header_end");
+            REQUIRE(header != nullptr);
+            REQUIRE(chips != nullptr);
+            REQUIRE(cue != nullptr);
+            const Rect h = coords_of(header);
+            const Rect ch = coords_of(chips);
+            const Rect cu = coords_of(cue);
+            if (small_portrait) {
+                CHECK(ch.y1 < h.y2);
+                CHECK(ch.x1 >= h.x2);
+                CHECK(cu.x1 >= ch.x2);
+                lv_obj_t* const sc = lv_obj_find_by_name(root, "detail_options_scroll");
+                lv_obj_t* const preview = lv_obj_find_by_name(root, "detail_card");
+                REQUIRE(sc != nullptr);
+                REQUIRE(preview != nullptr);
+                const int floor_h = lv_obj_get_width(preview) / 3;
+                INFO("scroll_bottom " << lv_obj_get_scroll_bottom(sc) << " preview "
+                                      << lv_obj_get_height(preview) << " floor " << floor_h);
+                CHECK((lv_obj_get_scroll_bottom(sc) <= 0 || lv_obj_get_height(preview) <= floor_h));
+            } else {
+                CHECK(ch.y1 >= h.y2);
+                CHECK(cu.y1 < h.y2); // the cue stays on the header's line
+            }
         }
 
         // The cue reports the scroll area it belongs to, no more, no less.
@@ -313,4 +353,125 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     CHECK(r.y1 >= 0);
     CHECK(r.x2 < 800);
     CHECK(r.y2 < 480);
+}
+
+namespace {
+
+int count_named(lv_obj_t* obj, const char* name) {
+    int n = 0;
+    const char* own = lv_obj_get_name(obj);
+    if (own && std::string(own) == name)
+        ++n;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); ++i)
+        n += count_named(lv_obj_get_child(obj, static_cast<int32_t>(i)), name);
+    return n;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "print file detail placeholders and cards share their neighbours' boxes",
+                 "[print_select][detail][geometry][print_detail_geometry]") {
+    PrinterState& ps = get_printer_state();
+    PrinterStateTestAccess::set_option_set(
+        ps, PrinterDetector::get_pre_print_option_set("Snapmaker U1"));
+    PrinterStateTestAccess::refresh_option_visibility(ps);
+    REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "has_any_preprint_options")) == 1);
+
+    ScopedAmsBackend ams(4);
+    const std::vector<std::string> palette{"#FF0000", "#00FF00"};
+    const std::vector<std::string> materials{"PLA", "PETG"};
+
+    const Canvas canvases[] = {{800, 480}, {480, 272}, {480, 800}, {272, 480}};
+    for (const Canvas& c : canvases) {
+        INFO(c.w << "x" << c.h);
+        ScopedResolution res(lv_display_get_default(), c.w, c.h);
+        theme_manager_refresh_layout_constants(lv_display_get_default());
+
+        helix::ui::PrintSelectDetailView view;
+        lv_obj_t* const root =
+            build_and_show_detail(*this, view, ps, test_screen(), palette, materials);
+        CloseOnExit closer{view};
+
+        // One sliced-colors toggle, on the preview it recolours.
+        CHECK(count_named(root, "sliced_colors_toggle") == 1);
+        lv_obj_t* const toggle = lv_obj_find_by_name(root, "sliced_colors_toggle");
+        lv_obj_t* const preview = lv_obj_find_by_name(root, "detail_card");
+        REQUIRE(toggle != nullptr);
+        REQUIRE(preview != nullptr);
+        CHECK(rect_contains(coords_of(preview), coords_of(toggle)));
+
+        // The options card pads its content off its top and bottom edges as
+        // the filament card above it does.
+        lv_obj_t* const fil_card = lv_obj_find_by_name(root, "filament_mapping_card");
+        lv_obj_t* const opt_card = lv_obj_find_by_name(root, "options_card");
+        REQUIRE(fil_card != nullptr);
+        REQUIRE(opt_card != nullptr);
+        REQUIRE(lv_obj_get_style_pad_top(fil_card, LV_PART_MAIN) > 0);
+        CHECK(lv_obj_get_style_pad_top(opt_card, LV_PART_MAIN) ==
+              lv_obj_get_style_pad_top(fil_card, LV_PART_MAIN));
+        CHECK(lv_obj_get_style_pad_bottom(opt_card, LV_PART_MAIN) ==
+              lv_obj_get_style_pad_bottom(fil_card, LV_PART_MAIN));
+
+        // The chip skeleton holds the box the chips take once the tool set
+        // lands, so nothing moves when detail_mapping_ready flips.
+        lv_subject_t* const ready = lv_xml_get_subject(nullptr, "detail_mapping_ready");
+        REQUIRE(ready != nullptr);
+        lv_obj_t* const chips = lv_obj_find_by_name(root, "filament_mapping_rows");
+        lv_obj_t* const skeleton = lv_obj_find_by_name(root, "mapping_skeleton");
+        REQUIRE(chips != nullptr);
+        REQUIRE(skeleton != nullptr);
+        lv_subject_set_int(ready, 1);
+        lv_obj_update_layout(root);
+        REQUIRE_FALSE(lv_obj_has_flag(chips, LV_OBJ_FLAG_HIDDEN));
+        const Rect chips_r = coords_of(chips);
+        lv_subject_set_int(ready, 0);
+        lv_obj_update_layout(root);
+        REQUIRE_FALSE(lv_obj_has_flag(skeleton, LV_OBJ_FLAG_HIDDEN));
+        const Rect skel_r = coords_of(skeleton);
+        CHECK(skel_r.x1 == chips_r.x1);
+        CHECK(skel_r.y1 == chips_r.y1);
+        CHECK(skel_r.x2 == chips_r.x2);
+        CHECK(skel_r.y2 == chips_r.y2);
+        lv_subject_set_int(ready, 1);
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "small portrait shrinks the preview to show every option when the floor allows",
+                 "[print_select][detail][geometry][print_detail_geometry]") {
+    PrinterState& ps = get_printer_state();
+    PrinterStateTestAccess::set_option_set(
+        ps, PrinterDetector::get_pre_print_option_set("Snapmaker U1"));
+    PrinterStateTestAccess::refresh_option_visibility(ps);
+    REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "has_any_preprint_options")) == 1);
+
+    // No filament card: the options column is short enough to fit whole
+    // above the width/3 floor at a micro portrait canvas.
+    ScopedResolution res(lv_display_get_default(), 272, 480);
+    theme_manager_refresh_layout_constants(lv_display_get_default());
+    REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "ui_breakpoint")) < 2);
+    REQUIRE(lv_subject_get_int(lv_xml_get_subject(nullptr, "ui_is_portrait")) == 1);
+
+    helix::ui::PrintSelectDetailView view;
+    lv_obj_t* const root = build_and_show_detail(*this, view, ps, test_screen());
+    CloseOnExit closer{view};
+
+    lv_obj_t* const card = lv_obj_find_by_name(root, "detail_card");
+    lv_obj_t* const scroll = lv_obj_find_by_name(root, "detail_options_scroll");
+    REQUIRE(card != nullptr);
+    REQUIRE(scroll != nullptr);
+    const int width = lv_obj_get_width(card);
+    const int avail = lv_obj_get_height(card) + lv_obj_get_height(scroll);
+    const int content =
+        lv_obj_get_scroll_y(scroll) + lv_obj_get_height(scroll) + lv_obj_get_scroll_bottom(scroll);
+    INFO("card " << width << "x" << lv_obj_get_height(card) << " avail " << avail << " content "
+                 << content);
+    // The setup is the case in question: the column overflows under the 2:1
+    // preview, and fitting all of it keeps the preview above its floor.
+    REQUIRE(content > avail - width / 2);
+    REQUIRE(avail - content >= width / 3);
+
+    CHECK(lv_obj_get_scroll_bottom(scroll) <= 0);
+    CHECK(lv_obj_get_height(card) == avail - content);
 }

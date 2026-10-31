@@ -4,11 +4,15 @@
 
 #include "ui_error_reporting.h"
 
+#include "ams_backend.h"
 #include "filament_sensor_manager.h"
 #include "observer_factory.h"
 #include "static_subject_registry.h"
 
 #include <spdlog/spdlog.h>
+
+#include <optional>
+#include <string>
 
 namespace {
 
@@ -21,8 +25,8 @@ bool s_registered = false;
 
 /// Toolhead-detected subject values. -1 is "this printer has no such sensor",
 /// which is a third answer and not a synonym for 0.
-constexpr int TOOLHEAD_CLEAR = 0;
-constexpr int TOOLHEAD_DETECTED = 1;
+constexpr int kToolheadClear = 0;
+constexpr int kToolheadDetected = 1;
 
 void fire(const char* via) {
     // Disarm BEFORE notifying. NOTIFY_* is synchronous, and tearing the observer
@@ -53,16 +57,16 @@ void arm_manual_pull_prompt() {
     // (already clear, or no sensor at all) can produce no meaningful 1 -> 0 edge,
     // and observe<int> fires once on registration — hooking it up in those
     // states would toast immediately, before the retract has moved anything.
-    const bool watchable = toolhead && lv_subject_get_int(toolhead) == TOOLHEAD_DETECTED;
+    const bool watchable = toolhead && lv_subject_get_int(toolhead) == kToolheadDetected;
     if (watchable) {
         s_toolhead_observer = observe<int>(
             toolhead, &sensors,
             [](FilamentSensorManager*, int detected) {
-                if (detected == TOOLHEAD_CLEAR) {
+                if (detected == kToolheadClear) {
                     fire("toolhead sensor");
                 }
             },
-            sensors.get_subjects_lifetime());
+            sensors.subjects_lifetime());
     }
 
     if (!s_registered) {
@@ -83,6 +87,33 @@ void manual_pull_unload_finished() {
         return;
     }
     fire("unload complete");
+}
+
+bool notify_if_filament_op_unavailable(const AmsBackend* backend, int slot, bool load) {
+    if (!backend) {
+        return false;
+    }
+    std::optional<int> head = slot >= 0 ? backend->head_for_slot(slot) : std::nullopt;
+    if (slot < 0) {
+        head = backend->filament_head_count() == 1
+                   ? std::optional<int>(0)
+                   : backend->head_for_slot(backend->get_system_info().current_slot);
+    }
+    if (!head) {
+        return false;
+    }
+    const HeadFilamentOps ops = backend->head_filament_ops(*head);
+    if ((load ? ops.load : ops.unload) == FilamentOpSupport::Automatic) {
+        return false;
+    }
+    const std::string& reason = load ? ops.load_reason : ops.unload_reason;
+    spdlog::info("[ManualPull] {} on head {} is not automatic here — telling the user, sending "
+                 "nothing",
+                 load ? "Load" : "Unload", *head);
+    if (!reason.empty()) {
+        NOTIFY_INFO("{}", reason);
+    }
+    return true;
 }
 
 } // namespace helix::ui

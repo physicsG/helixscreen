@@ -1,0 +1,33 @@
+{
+  "door_check": false,
+  "sensors": [
+    {
+      "enabled": true,
+      "inverted": true,
+      "klipper_name": "gcode_button frontDoor",
+      "role": "door",
+      "type": "gcode_button"
+    },
+    {
+      "enabled": true,
+      "inverted": false,
+      "klipper_name": "gcode_button topDoor",
+      "role": "other",
+      "type": "gcode_button"
+    },
+    {
+      "enabled": true,
+      "inverted": false,
+      "klipper_name": "gcode_button extruder_pos1",
+      "role": "door",
+      "type": "gcode_button"
+    },
+    {
+      "enabled": true,
+      "inverted": false,
+      "klipper_name": "gcode_button extruder_grab1",
+      "role": "other",
+      "type": "gcode_button"
+    }
+  ]
+}

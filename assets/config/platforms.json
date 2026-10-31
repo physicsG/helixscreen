@@ -207,7 +207,11 @@
         "extra_splash_3d_classes": [
           "small"
         ],
-        "extra_splash_3d_reason": "Plain K1 and K1 Max are unmeasured. A 480x400 variant would select `small`; generating it alongside the derived class costs ~1.5MB and guarantees no K1 ships without a splash. Drop it once measured."
+        "extra_splash_3d_reason": "Plain K1 and K1 Max are unmeasured. A 480x400 variant would select `small`; generating it alongside the derived class costs ~1.5MB and guarantees no K1 ships without a splash. Drop it once measured.",
+        "extra_printer_image_sizes": [
+          150
+        ],
+        "extra_printer_image_sizes_reason": "Plain K1 and K1 Max are unmeasured. A 480-wide variant would select the 150px tier; keeping it costs ~2.6MB and guarantees no K1 shows the generic printer. Drop it once measured."
       }
     },
     "k1-dynamic": {
@@ -261,16 +265,40 @@
         "extra_splash_3d_classes": [
           "small"
         ],
-        "extra_splash_3d_reason": "Plain K1 and K1 Max are unmeasured. A 480x400 variant would select `small`; generating it alongside the derived class costs ~1.5MB and guarantees no K1 ships without a splash. Drop it once measured."
+        "extra_splash_3d_reason": "Plain K1 and K1 Max are unmeasured. A 480x400 variant would select `small`; generating it alongside the derived class costs ~1.5MB and guarantees no K1 ships without a splash. Drop it once measured.",
+        "extra_printer_image_sizes": [
+          150
+        ],
+        "extra_printer_image_sizes_reason": "Plain K1 and K1 Max are unmeasured. A 480-wide variant would select the 150px tier; keeping it costs ~2.6MB and guarantees no K1 shows the generic printer. Drop it once measured."
       }
     },
     "mips": {
       "display_name": "Unified MIPS (Creality K1 series + FlashForge AD5X)",
       "panel": {
         "variable": true,
+        "candidates": [
+          "k1",
+          "ad5x",
+          {
+            "board": "creator5-pro",
+            "width": 480,
+            "height": 800,
+            "rotate": 90,
+            "verified": true,
+            "source": "docs/devel/printers/FLASHFORGE_CREATOR5_PRO_SUPPORT.md: 480x800 portrait framebuffer, display.rotate = 90 verified on the printer"
+          },
+          {
+            "board": "creator5",
+            "width": 480,
+            "height": 800,
+            "rotate": 90,
+            "verified": false,
+            "source": "assets/config/presets/creator5.json rotates 90 like the Pro; the plain Creator 5 panel is unmeasured and assumed to be the Pro's"
+          }
+        ],
         "verified": true,
         "source": "Both boards measured 2026-09-11: K1C 480x800 rotate 270, AD5X 800x480 rotate 0 — 800x480 effective on each. Which one this binary lands on is a runtime fact (helix::ad5x_mod_layout_present), so the panel is unknown at package time.",
-        "notes": "Ships every size class: the k1 entry's small-class hedge (plain K1 / K1 Max unmeasured) is subsumed by keeping them all."
+        "notes": "Ships what its candidate boards need: the union of the K1, AD5X and Creator 5 / 5 Pro splash classes and printer tiers, hedges included. All are 800x480 effective, so no request exceeds the 300px tier and the source PNGs are dropped. The Creator 5 boards have no platform entry of their own, so their panels are inline."
       },
       "storage": {
         "root": "detected",
@@ -721,6 +749,54 @@
         "gen_images_target": "gen-images",
         "in_release_matrix": true,
         "detectable": true
+      }
+    },
+    "x86-desktop": {
+      "display_name": "x86-64 Linux desktop",
+      "panel": {
+        "variable": true,
+        "verified": false,
+        "source": "An SDL window on the user's desktop, sized by -s or the window manager; unknown until runtime."
+      },
+      "storage": {
+        "root": "${XDG_DATA_HOME:-$HOME/.local/share}/helixscreen",
+        "cache_dir": null,
+        "log_file": null,
+        "notes": "Per-user root from desktop_install_root (scripts/lib/installer/desktop.sh); never in HELIX_INSTALL_DIRS, so no uninstall sweep reaches a home directory. The installer's log goes to ${XDG_STATE_HOME:-$HOME/.local/state}/helixscreen."
+      },
+      "service": {
+        "init_system": "none",
+        "init_system_pinned": true,
+        "init_script": null,
+        "start_order": null,
+        "needs_procd_shim": false,
+        "previous_ui_script": "",
+        "notes": "No service: the user launches it from the app menu entry the installer writes (${XDG_DATA_HOME:-$HOME/.local/share}/applications/helixscreen.desktop). No autostart entry."
+      },
+      "klipper": {
+        "home": null,
+        "user": null,
+        "group": null,
+        "config_dir": null,
+        "notes": "Connects to a Moonraker on another machine, named in the first-run wizard or with --moonraker."
+      },
+      "moonraker": {
+        "update_manager": false
+      },
+      "sound": {
+        "has_sound": true,
+        "has_tracker": true,
+        "source": "Makefile sound section (SOUND_CXXFLAGS / TRACKER_CXXFLAGS by PLATFORM_TARGET)"
+      },
+      "package": {
+        "asset_name": "helixscreen-x86-desktop.zip",
+        "docker_target": "x86-desktop-docker",
+        "build_dir": "build/x86-desktop",
+        "splash_3d_target": "gen-splash-3d",
+        "gen_images_target": "gen-images",
+        "in_release_matrix": true,
+        "detectable": false,
+        "notes": "detect_platform answers x86; resolve_x86_flavour (scripts/lib/installer/desktop.sh) turns it into x86-desktop by flag, existing install, prompt or a desktop session found."
       }
     }
   }

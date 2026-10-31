@@ -14,9 +14,8 @@
 #include <string>
 #include <vector>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 struct PowerDeviceWidgetTestAccess; // test-only friend (tests/test_helpers/)
 
@@ -46,11 +45,15 @@ class PowerDeviceWidget : public TiledPanelWidget {
 
     void handle_clicked();
     static void power_device_clicked_cb(lv_event_t* e);
+    /// A tile_color_grid swatch in the open picker; applies live and leaves the card up.
+    static void color_swatch_cb(lv_event_t* e);
 
   private:
     std::string instance_id_;
     std::string device_name_;
     std::string icon_name_; // Custom icon, empty = "power_cycle" default
+    uint32_t color_ = 0;    // User colour (RGB), 0 = the state colours
+    int last_status_ = -1;  // Last status drawn, to repaint after a colour change
 
     lv_obj_t* widget_obj_ = nullptr;
     lv_obj_t* parent_screen_ = nullptr;
@@ -63,9 +66,10 @@ class PowerDeviceWidget : public TiledPanelWidget {
     ObserverGuard status_observer_;
     helix::AsyncLifetimeGuard lifetime_;
 
-    /// Device list, icon grid and energy-sensor chips, raised by a tap on an
-    /// unconfigured tile or the edit-mode gear. A device row or a sensor chip
-    /// applies and closes; an icon applies live and leaves the card up.
+    /// Device list, icon grid, colour swatches and energy-sensor chips, raised by
+    /// a tap on an unconfigured tile or the edit-mode gear. A device row or a
+    /// sensor chip applies and closes; an icon or a colour applies live and
+    /// leaves the card up.
     class DevicePicker : public helix::ui::ContextMenu {
         HELIX_CONTEXT_MENU_KIND(DevicePicker)
 
@@ -74,6 +78,10 @@ class PowerDeviceWidget : public TiledPanelWidget {
 
         /// Repaint the grid's selection ring after a live icon change.
         void refresh_icon_highlights();
+
+        PowerDeviceWidget& owner() {
+            return owner_;
+        }
 
       protected:
         const char* xml_component_name() const override {
@@ -138,9 +146,13 @@ class PowerDeviceWidget : public TiledPanelWidget {
 
     IMoonrakerAPI* get_api() const;
     void update_display(int status);
+    /// Badge, icon and state-line colours for @p status (0=off, 1=on,
+    /// 2=locked, -1=unconfigured), with the user colour when one is set.
+    void apply_state_colors(int status);
     void show_device_picker();
     void select_device(const std::string& name);
     void select_icon(const std::string& name);
+    void select_color(uint32_t rgb);
     void select_sensor(const std::string& sensor_id);
     void save_config();
     void setup_carousel();

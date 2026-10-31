@@ -41,21 +41,21 @@ class TouchCalibrationPanelTestAccess {
     }
 
     /// Drive the stall-timeout fallback directly (the LVGL timer would otherwise
-    /// fire this). Commits a pending press outstanding >= STALL_COMMIT_MS.
+    /// fire this). Commits a pending press outstanding >= kStallCommitMs.
     static void commit_pending_if_stale(TouchCalibrationPanel& p, uint32_t now) {
         p.commit_pending_if_stale(now);
     }
 
     static uint32_t refractory_ms() {
-        return TouchCalibrationPanel::REFRACTORY_MS;
+        return TouchCalibrationPanel::kRefractoryMs;
     }
 
     static uint32_t stall_commit_ms() {
-        return TouchCalibrationPanel::STALL_COMMIT_MS;
+        return TouchCalibrationPanel::kStallCommitMs;
     }
 
     static int samples_required() {
-        return TouchCalibrationPanel::SAMPLES_REQUIRED;
+        return TouchCalibrationPanel::kSamplesRequired;
     }
 
     /// Fire the VERIFY countdown-expiry callback directly. The production path

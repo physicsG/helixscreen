@@ -7,6 +7,7 @@
 // printer_has_chamber_heater_diagnostics / _filter_fan gates.
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/sensors_forget.h"
 #include "../ui_test_utils.h"
 #include "app_globals.h"
 #include "chamber_heater_assignment.h"
@@ -488,6 +489,7 @@ TEST_CASE("chamber required_status_objects lists only non-empty surfaces", "[cha
 // the capabilities. Pattern per test_printer_state.cpp set_hardware cases.
 TEST_CASE("set_hardware wires diagnostics only when the resolved heater is the discovery pick",
           "[chamber][subjects][state][hardware]") {
+    helix::test::SensorsForget forget;
     lv_init_safe();
     helix::PrinterState& state = get_printer_state();
     helix::PrinterStateTestAccess::reset(state);
@@ -570,6 +572,7 @@ TEST_CASE("set_hardware wires diagnostics only when the resolved heater is the d
 // rows that can only ever say "--".
 TEST_CASE("set_hardware wires the stock panda_breath surfaces and no others",
           "[chamber][subjects][state][hardware][1290]") {
+    helix::test::SensorsForget forget;
     lv_init_safe();
     helix::PrinterState& state = get_printer_state();
     helix::PrinterStateTestAccess::reset(state);
@@ -748,6 +751,7 @@ TEST_CASE("stock drying status drives the dryer subjects", "[chamber][subjects][
 // every other chamber surface: stock has one, DragonBreath does not.
 TEST_CASE("set_hardware raises the dryer capability for a backend with one",
           "[chamber][subjects][state][hardware][dryer][1299]") {
+    helix::test::SensorsForget forget;
     lv_init_safe();
     helix::PrinterState& state = get_printer_state();
     helix::PrinterStateTestAccess::reset(state);

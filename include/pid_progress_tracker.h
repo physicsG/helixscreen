@@ -68,26 +68,26 @@ class PidProgressTracker {
     /// Set historical estimates from previous calibrations
     void set_history(float heat_rate_s_per_deg, float oscillation_duration_s);
 
-    /// Handle Kalico sample progress callback
-    void on_kalico_sample(int sample, int estimated_total);
+    /// Handle a firmware sample-progress callback (sample N of an estimated total)
+    void on_sample_progress(int sample, int estimated_total);
 
     /// Last temperature reading
     float last_temp() const {
         return last_temp_;
     }
 
-    /// Current Kalico sample number
-    int kalico_sample() const {
-        return kalico_sample_;
+    /// Current sample number from the firmware progress callback
+    int sample_number() const {
+        return sample_number_;
     }
 
-    static constexpr int EXPECTED_CYCLES = 5;
+    static constexpr int kExpectedCycles = 5;
 
     // Smart defaults (used when no history exists)
-    static constexpr float DEFAULT_EXTRUDER_HEAT_RATE = 0.5f;     // s/°C
-    static constexpr float DEFAULT_BED_HEAT_RATE = 1.5f;          // s/°C
-    static constexpr float DEFAULT_EXTRUDER_OSCILLATION = 120.0f; // seconds
-    static constexpr float DEFAULT_BED_OSCILLATION = 360.0f;      // seconds
+    static constexpr float kDefaultExtruderHeatRate = 0.5f;      // s/°C
+    static constexpr float kDefaultBedHeatRate = 1.5f;           // s/°C
+    static constexpr float kDefaultExtruderOscillation = 120.0f; // seconds
+    static constexpr float kDefaultBedOscillation = 360.0f;      // seconds
 
   private:
     Phase phase_ = Phase::IDLE;
@@ -113,10 +113,10 @@ class PidProgressTracker {
     float hist_oscillation_duration_ = 0;
     bool has_history_ = false; // for oscillation history only
 
-    // Kalico sample tracking
-    bool has_kalico_ = false;
-    int kalico_sample_ = 0;
-    int kalico_total_ = 0;
+    // Firmware-reported sample progress
+    bool has_sample_progress_ = false;
+    int sample_number_ = 0;
+    int sample_total_ = 0;
 
     // Default estimates for the selected heater
     float default_heat_rate() const;

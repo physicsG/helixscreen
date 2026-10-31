@@ -43,17 +43,24 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/ams_state_test_access.h"
 #include "../test_helpers/buffer_infos.h"
+#include "../test_helpers/bypass_engaged_seed.h"
+#include "../test_helpers/job_queue_tile_seed.h"
 #include "../test_helpers/panel_widget_size_harness.h"
+#include "../test_helpers/print_history_seed.h"
+#include "../test_helpers/scoped_animations_enabled.h"
+#include "../test_helpers/scoped_widget_labels.h"
 #include "../test_helpers/tips_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
+#include "bed_mesh_state.h"
 #include "display_metrics.h"
 #include "grid_layout.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
 #include "printer_state.h"
 #include "runtime_config.h"
+#include "src/ui/panel_widgets/content_chrome.h"
 #include "src/ui/panel_widgets/print_status_widget.h"
 #include "theme_manager.h"
 #include "tool_state.h"
@@ -62,6 +69,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -120,15 +128,18 @@ const std::vector<Geometry> kShipping = {
     {"480x400",   480,  400,   414, 388,  4},
     {"800x480",   800,  480,   710, 466,  5},
     {"480x800",   480,  800,   466, 664,  5},
-    {"1024x600", 1024,  600,   904, 584,  6},
-    {"1280x720", 1280,  720,  1128, 700,  8},
+    {"1024x600", 1024,  600,   904, 584, 10},
+    {"1280x720", 1280,  720,  1128, 700, 10},
 
     // Phone-class panel — a 1080x2400 handset, the geometry the DPI work exists
     // for. Measured off a live instance the way the rest of the table was:
     // `-s 1080x2400 -vv`, reading the `[PanelWidgetManager] Grid layout:` and
     // `Track geometry:` lines. Adding it immediately surfaced two widgets that
     // had always clipped at this size and had simply never been measured.
-    {"1080x2400", 1080, 2400,  1056, 2236, 10},
+    {"1080x2400", 1080, 2400,  1056, 2236, 12},
+
+    // The xxlarge rung's landscape panel: a 1080p screen, measured the same way.
+    {"1920x1080", 1920, 1080,  1720, 1056, 12},
 };
 // clang-format on
 
@@ -193,9 +204,6 @@ const std::vector<KnownClip> kKnownClipping = {
     {"print_status",     "*"},
     {"printer_image",    "*"},
 
-    // Geometry-specific.
-    {"ams",              "272x480"},
-
     // The #icon_size cluster that used to live here - bed_temperature,
     // chamber_temperature, gcode_console, led, macros, motion, network at
     // 1024x600 and 1280x720, plus led_controls on every panel - is gone. It was
@@ -214,18 +222,6 @@ const std::vector<KnownClip> kKnownClipping = {
     {"nozzle_temps",     "272x480"},  {"nozzle_temps",     "480x400"},
     {"nozzle_temps",     "1024x600"},
 
-    // Measured against the LONGEST title in the database, which is what the
-    // sweep now pins — the two entries this used to hold were whatever the
-    // random rotation happened to draw. tip_container ends up taller than the
-    // tile on seven of the nine geometries, overflowing top and bottom
-    // equally (2px at 480x800, 34px at 1080x2400): the title wraps to more
-    // lines than the authored minimum height has room for. Only 480x320 and
-    // 800x480 hold it. The fix is a line clamp on the title label rather than
-    // a bigger minimum, which is why these are recorded rather than resized.
-    {"tips",             "272x480"},  {"tips",             "480x272"},
-    {"tips",             "480x400"},  {"tips",             "480x800"},
-    {"tips",             "1024x600"}, {"tips",             "1280x720"},
-    {"tips",             "1080x2400"},
 };
 // clang-format on
 
@@ -264,6 +260,11 @@ struct TestModeGuard {
 /// clear it or later files in the same binary inherit stale tools (same trap
 /// as NozzleTempsFixture in test_widget_size_nozzle_temps.cpp).
 struct ContentFitsFixture : public LVGLUITestFixture {
+    /// What the seeds that publish through the update queue call after each change.
+    void settle_updates() {
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+        process_lvgl(30);
+    }
     ~ContentFitsFixture() override {
         // Before ToolState, and before the base fixture's reset_all() gets to
         // it: PrintStatusWidget's formatter is a process-lifetime static whose
@@ -274,9 +275,11 @@ struct ContentFitsFixture : public LVGLUITestFixture {
         ToolState::instance().deinit_subjects();
         helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
         // The sweep drives the display through eight resolutions; put the token
-        // table back where the rest of the suite expects it.
+        // table back where the rest of the suite expects it, and drop the components
+        // registered at the last one so their next use takes the restored tokens.
         if (lv_display_t* d = lv_display_get_default()) {
             theme_manager_refresh_layout_constants(d);
+            helix::unregister_idle_xml_components();
         }
     }
 };
@@ -356,6 +359,51 @@ struct ClogReadingSeed {
     AmsBackendMock* backend_ = nullptr;
 };
 
+/// The widest content the job queue tile budgets for: four jobs, the first named by 90
+/// characters with no break to wrap at, in the state that shows the most text.
+struct QueueTileSeed : helix::JobQueueTileSeed {
+    using JobQueueTileSeed::JobQueueTileSeed;
+    static std::string long_name() {
+        return std::string(86, 'x') + ".gcode";
+    }
+    void waiting() {
+        set_print_active(false);
+        set_automatic(false);
+        deliver_named(4, long_name());
+    }
+    void auto_next() {
+        waiting();
+        set_automatic(true);
+    }
+    void printing() {
+        auto_next();
+        set_print_active(true);
+    }
+    void empty() {
+        set_print_active(false);
+        deliver(0);
+    }
+};
+
+/// The print stats tile at its widest numbers: a week of prints and lifetime totals at
+/// the largest values the tile budgets for.
+struct StatsTileSeed : helix::PrintHistorySeed {
+    StatsTileSeed(helix::PrinterState& state, helix::SharedCallback<void()> settle)
+        : PrintHistorySeed(state, std::move(settle)) {
+        PrintHistoryTotals totals;
+        totals.total_jobs = 88888;
+        totals.total_time = 8888 * 3600;
+        totals.total_filament_used = 12345678.0;
+        history_api->totals_api().totals = totals;
+        connect(state);
+        std::vector<PrintHistoryJob> week;
+        for (int day = 0; day < 7; ++day) {
+            week.push_back(job(day, 3600.0 * (day + 1)));
+        }
+        seed(std::move(week));
+    }
+};
+
 struct Rendered {
     bool built = false;
     OverflowReport report;
@@ -367,7 +415,7 @@ struct Rendered {
 /// grid @p m with the arithmetic PanelWidgetManager applies (truncation
 /// included), and measure what spills.
 Rendered render_at(lv_obj_t* screen, const PanelWidgetDef& def, const CellMetrics& m, int c, int r,
-                   const char* icon_name = nullptr) {
+                   const char* icon_name = nullptr, bool activate = false) {
     Rendered out;
     {
         RegistryWidgetHarness h(screen, def, &m);
@@ -377,6 +425,9 @@ Rendered render_at(lv_obj_t* screen, const PanelWidgetDef& def, const CellMetric
         out.built = true;
         h.resize(c, r, static_cast<int>(grid_track_extent(m.cell_w, m.gutter, c)),
                  static_cast<int>(grid_track_extent(m.cell_h, m.gutter, r)));
+        if (activate) {
+            h.activate();
+        }
         // Several widgets rebuild their content from an observer that fires
         // through UpdateQueue rather than inline (observe<int> queues its
         // handler), so measuring before the drain measures the pre-rebuild tree.
@@ -592,8 +643,17 @@ TEST_CASE_METHOD(ContentFitsFixture,
     REQUIRE(disp != nullptr);
 
     TestModeGuard test_mode_guard(get_runtime_config());
+    // A scroll_circular label held still by the Animations preference turns CLIP
+    // and draws a middle ellipsis at draw time (ui_text.cpp#middle_ellipsis_draw_cb),
+    // which the detector cannot see and would read as a silent cut. With the
+    // preference on, the label reports the long mode its XML declared.
+    helix::ui::ScopedAnimationsEnabled animations(true);
+    REQUIRE(animations.available());
 
     PanelWidgetManager::instance().init_widget_subjects();
+    // The bed mesh tile binds BedMeshState's subjects, which the app registers before any
+    // widget XML is parsed.
+    BedMeshState::instance().init_subjects();
     require_font_tokens_distinct();
     seed_printer_topology(state());
 
@@ -626,6 +686,9 @@ TEST_CASE_METHOD(ContentFitsFixture,
 
         const UiBreakpoint bp = breakpoint_for(std::min(g.panel_w, g.panel_h));
         const GridDimensions dims = GridLayout::get_dimensions(bp, g.content_w, g.content_h);
+        // The table's gutter is the one the home grid is built with here.
+        INFO("geometry " << g.name);
+        REQUIRE(GridLayout::gutter_px() == g.gutter);
         const CellMetrics m =
             grid_cell_metrics(g.content_w, g.content_h, dims.cols, dims.rows, g.gutter);
 
@@ -679,11 +742,23 @@ TEST_CASE_METHOD(ContentFitsFixture,
             std::optional<ClogReadingSeed> clog_seed;
             if (std::string_view(def.id) == "clog_detection")
                 clog_seed.emplace();
+            std::optional<test::BypassEngagedSeed> bypass_seed;
+            if (std::string_view(def.id) == "bypass")
+                bypass_seed.emplace();
+            std::optional<QueueTileSeed> queue_seed;
+            if (std::string_view(def.id) == "job_queue") {
+                queue_seed.emplace([this] { settle_updates(); });
+                queue_seed->waiting();
+            }
+            std::optional<StatsTileSeed> stats_seed;
+            if (std::string_view(def.id) == "print_stats")
+                stats_seed.emplace(state(), [this] { settle_updates(); });
             for (int pass = 0; pass < (clog_seed ? 2 : 1); ++pass) {
                 if (clog_seed) {
                     pass == 0 ? clog_seed->flowguard() : clog_seed->encoder();
                 }
-                const Rendered rendered = render_at(test_screen(), def, m, min_c, min_r);
+                const Rendered rendered =
+                    render_at(test_screen(), def, m, min_c, min_r, nullptr, stats_seed.has_value());
                 if (!rendered.built) {
                     spdlog::warn("[content_fits] {} @ {}: component would not build", def.id,
                                  g.name);
@@ -759,6 +834,107 @@ TEST_CASE_METHOD(ContentFitsFixture,
     CHECK(regressions.empty());
 }
 
+TEST_CASE_METHOD(ContentFitsFixture,
+                 "queue and stats tiles render every rung on every shipping geometry",
+                 "[content_fits][queue_stats]") {
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    TestModeGuard test_mode_guard(get_runtime_config());
+    PanelWidgetManager::instance().init_widget_subjects();
+    require_font_tokens_distinct();
+
+    QueueTileSeed queue([this] { settle_updates(); });
+    StatsTileSeed stats(state(), [this] { settle_updates(); });
+
+    struct Span {
+        int c;
+        int r;
+    };
+    // The four rungs of the medium tier's ladder, from the Strip to the Full tile.
+    const Span spans[] = {{2, 1}, {2, 2}, {4, 2}, {4, 4}};
+    struct QueueState {
+        const char* name;
+        void (QueueTileSeed::*apply)();
+    };
+    const QueueState queue_states[] = {{"WaitingForStart", &QueueTileSeed::waiting},
+                                       {"AutoNext", &QueueTileSeed::auto_next},
+                                       {"Printing", &QueueTileSeed::printing},
+                                       {"Empty", &QueueTileSeed::empty}};
+
+    const PanelWidgetDef* queue_def = find_widget_def("job_queue");
+    const PanelWidgetDef* stats_def = find_widget_def("print_stats");
+    REQUIRE(queue_def != nullptr);
+    REQUIRE(stats_def != nullptr);
+
+    std::vector<std::string> refused;
+    int rendered_count = 0;
+    auto check_clean = [](const Rendered& r) {
+        std::string detail;
+        for (const auto& f : r.report.findings) {
+            detail += std::string("[") + overflow_kind_name(f.kind) + "] " + f.path + ": " +
+                      f.detail + "\n";
+        }
+        INFO(detail);
+        CHECK(r.report.clean());
+    };
+
+    for (const auto& g : kShipping) {
+        ScopedResolution res(disp, g.panel_w, g.panel_h);
+        theme_manager_refresh_layout_constants(disp);
+        helix::unregister_idle_xml_components();
+        const UiBreakpoint bp = breakpoint_for(std::min(g.panel_w, g.panel_h));
+        const GridDimensions dims = GridLayout::get_dimensions(bp, g.content_w, g.content_h);
+        const CellMetrics m =
+            grid_cell_metrics(g.content_w, g.content_h, dims.cols, dims.rows, g.gutter);
+
+        for (const Span sp : spans) {
+            const std::string where =
+                std::string(g.name) + " @ " + std::to_string(sp.c) + "x" + std::to_string(sp.r);
+            for (const PanelWidgetDef* def : {queue_def, stats_def}) {
+                if (sp.c > dims.cols || sp.r > dims.rows) {
+                    refused.push_back(std::string(def->id) + " " + where + " (grid " +
+                                      std::to_string(dims.cols) + "x" + std::to_string(dims.rows) +
+                                      ")");
+                    continue;
+                }
+                auto probe = def->factory(def->id);
+                REQUIRE(probe != nullptr);
+                if (TileSizing* sizing = probe->tile_sizing()) {
+                    sizing->set_cell_metrics(m);
+                }
+                if (!probe->fits_at(
+                        static_cast<int>(grid_track_extent(m.cell_w, m.gutter, sp.c)),
+                        static_cast<int>(grid_track_extent(m.cell_h, m.gutter, sp.r)))) {
+                    refused.push_back(std::string(def->id) + " " + where + " (fits_at)");
+                    continue;
+                }
+                if (def == queue_def) {
+                    for (const QueueState& qs : queue_states) {
+                        (queue.*qs.apply)();
+                        INFO(def->id << " " << where << " " << qs.name);
+                        const Rendered r = render_at(test_screen(), *def, m, sp.c, sp.r);
+                        REQUIRE(r.built);
+                        ++rendered_count;
+                        check_clean(r);
+                    }
+                } else {
+                    INFO(def->id << " " << where << " Activity");
+                    const Rendered r = render_at(test_screen(), *def, m, sp.c, sp.r, nullptr, true);
+                    REQUIRE(r.built);
+                    ++rendered_count;
+                    check_clean(r);
+                }
+            }
+        }
+    }
+    for (const auto& x : refused) {
+        INFO("not rendered: " << x);
+    }
+    spdlog::info("[content_fits] queue/stats: {} renders, {} spans not offered", rendered_count,
+                 refused.size());
+    CHECK(rendered_count > 0);
+}
+
 TEST_CASE_METHOD(ContentFitsFixture, "every icon tile renders its content grown to two cells",
                  "[content_fits][growth]") {
     // The sweep above measures the smallest span; a tile that scales its glyph
@@ -794,6 +970,9 @@ TEST_CASE_METHOD(ContentFitsFixture, "every icon tile renders its content grown 
             }
             const int c = std::min({kTwoCells, def.effective_max_colspan(), dims.cols});
             const int r = std::min({kTwoCells, def.effective_max_rowspan(), dims.rows});
+            std::optional<test::BypassEngagedSeed> bypass_seed;
+            if (std::string_view(def.id) == "bypass")
+                bypass_seed.emplace();
             const Rendered rendered = render_at(test_screen(), def, m, c, r);
             REQUIRE(rendered.built);
             ++checked;
@@ -865,4 +1044,126 @@ TEST_CASE_METHOD(ContentFitsFixture,
             CHECK(two.icon_h > one.icon_h);
         }
     }
+}
+
+TEST_CASE_METHOD(ContentFitsFixture,
+                 "the tips tile refuses a width whose title column breaks inside a word",
+                 "[content_fits][tips]") {
+    // The title ends in an ellipsis rather than overflowing, which the sweep
+    // accepts as declared truncation, so the minimum span is what keeps a
+    // title readable. At 1920x1080 the authored minimum leaves the column a
+    // few characters wide.
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    TestModeGuard test_mode_guard(get_runtime_config());
+    PanelWidgetManager::instance().init_widget_subjects();
+
+    const auto g = std::find_if(kShipping.begin(), kShipping.end(), [](const Geometry& x) {
+        return std::string_view(x.name) == "1920x1080";
+    });
+    REQUIRE(g != kShipping.end());
+    ScopedResolution res(disp, g->panel_w, g->panel_h);
+    theme_manager_refresh_layout_constants(disp);
+    helix::unregister_idle_xml_components();
+    const UiBreakpoint bp = breakpoint_for(std::min(g->panel_w, g->panel_h));
+    const GridDimensions dims = GridLayout::get_dimensions(bp, g->content_w, g->content_h);
+    const CellMetrics m =
+        grid_cell_metrics(g->content_w, g->content_h, dims.cols, dims.rows, g->gutter);
+
+    const auto& defs = get_all_widget_defs();
+    const auto def = std::find_if(defs.begin(), defs.end(), [](const PanelWidgetDef& d) {
+        return std::string_view(d.id) == "tips";
+    });
+    REQUIRE(def != defs.end());
+    auto probe = def->factory(def->id);
+    REQUIRE(probe);
+
+    const int h_px =
+        static_cast<int>(grid_track_extent(m.cell_h, m.gutter, def->effective_min_rowspan()));
+    const auto w_px = [&](int span) {
+        return static_cast<int>(grid_track_extent(m.cell_w, m.gutter, span));
+    };
+    CHECK_FALSE(probe->fits_at(w_px(def->effective_min_colspan()), h_px));
+    CHECK(probe->fits_at(w_px(dims.cols), h_px));
+}
+
+TEST_CASE_METHOD(ContentFitsFixture,
+                 "a micro favorite macro takes half a cell's height and draws its row unclipped",
+                 "[content_fits][favorite_macro][1805]") {
+    lv_display_t* disp = lv_display_get_default();
+    REQUIRE(disp != nullptr);
+    TestModeGuard test_mode_guard(get_runtime_config());
+    PanelWidgetManager::instance().init_widget_subjects();
+    require_font_tokens_distinct();
+    test::ScopedWidgetLabelsShown labels;
+
+    const auto g = std::find_if(kShipping.begin(), kShipping.end(),
+                                [](const Geometry& x) { return std::string(x.name) == "480x272"; });
+    REQUIRE(g != kShipping.end());
+    ScopedResolution res(disp, g->panel_w, g->panel_h);
+    theme_manager_refresh_layout_constants(disp);
+    helix::unregister_idle_xml_components();
+    const UiBreakpoint bp = breakpoint_for(std::min(g->panel_w, g->panel_h));
+    REQUIRE(bp == UiBreakpoint::Micro);
+    const GridDimensions dims = GridLayout::get_dimensions(bp, g->content_w, g->content_h);
+    const CellMetrics m =
+        grid_cell_metrics(g->content_w, g->content_h, dims.cols, dims.rows, g->gutter);
+
+    const PanelWidgetDef* def = find_widget_def("favorite_macro");
+    REQUIRE(def != nullptr);
+    // One track tall, one to four tracks wide: the half-height spans the grid offers. A
+    // track is 31 or 32px tall depending on which row it lands on (the grid's float edge
+    // rounds per row), so both are checked.
+    struct Box {
+        int tracks;
+        int w;
+    };
+    int names_drawn = 0;
+    for (const Box box : {Box{2, 70}, Box{4, 142}, Box{3, 106}, Box{1, 34}}) {
+        for (const int h : {31, 32}) {
+            const int w = static_cast<int>(grid_track_extent(m.cell_w, m.gutter, box.tracks));
+            INFO("favorite_macro at " << w << "x" << h);
+            REQUIRE(w == box.w);
+            REQUIRE(std::abs(static_cast<int>(grid_track_extent(m.cell_h, m.gutter, 1)) - h) <= 1);
+
+            auto probe = def->factory(def->id);
+            REQUIRE(probe != nullptr);
+            REQUIRE(probe->tile_sizing() != nullptr);
+            probe->tile_sizing()->set_cell_metrics(m);
+            CHECK(probe->fits_at(w, h));
+
+            RegistryWidgetHarness harness(test_screen(), *def, &m);
+            REQUIRE(harness.created());
+            harness.resize(box.tracks, 1, w, h);
+            helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+            lv_obj_update_layout(harness.root());
+            require_no_overflow(harness.root(), exceptions(), "favorite_macro micro half height");
+
+            lv_obj_t* badge = harness.child("fav_macro_badge");
+            lv_obj_t* name = harness.child("fav_macro_name");
+            REQUIRE(badge != nullptr);
+            REQUIRE(name != nullptr);
+            CHECK_FALSE(lv_obj_has_flag(badge, LV_OBJ_FLAG_HIDDEN));
+            // Whether the name fits beside the disc depends on the tier's faces; wherever it
+            // is drawn it must be whole.
+            if (!lv_obj_has_flag(name, LV_OBJ_FLAG_HIDDEN)) {
+                ++names_drawn;
+                // Inside the tile's content box on every edge, and a whole line of its face
+                // tall: its dots ellipsize the width by design, never the height.
+                lv_area_t content;
+                lv_obj_get_content_coords(harness.root(), &content);
+                lv_area_t a;
+                lv_obj_get_coords(name, &a);
+                CHECK(a.x1 >= content.x1);
+                CHECK(a.x2 <= content.x2);
+                CHECK(a.y1 >= content.y1);
+                CHECK(a.y2 <= content.y2);
+                CHECK(lv_obj_get_height(name) >=
+                      line_px(lv_obj_get_style_text_font(name, LV_PART_MAIN)));
+            }
+        }
+    }
+    // The wider strips draw the name, so the bounds checks above ran.
+    CHECK(names_drawn > 0);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 }

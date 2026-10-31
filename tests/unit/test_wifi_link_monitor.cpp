@@ -12,7 +12,7 @@ using namespace helix;
 
 namespace {
 
-constexpr const char* PROC_SAMPLE =
+constexpr const char* kProcSample =
     "Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE\n"
     " face | tstat| link level noise |  nwid  crypt   frag  retry   misc | beacon | 22\n"
     " wlan0: 0000   58.  -52.  -256        0      0      0     17      3        4\n";
@@ -29,7 +29,7 @@ LinkSample sample(int64_t t, bool connected, int freq, std::optional<int> rssi) 
 } // namespace
 
 TEST_CASE("/proc/net/wireless parses quality, level and counters", "[wifi][link]") {
-    auto st = parse_proc_net_wireless(PROC_SAMPLE);
+    auto st = parse_proc_net_wireless(kProcSample);
     REQUIRE(st);
     CHECK(*st->link_quality == 58);
     CHECK(*st->rssi_dbm == -52);
@@ -79,9 +79,8 @@ TEST_CASE("link change classification", "[wifi][link]") {
 
 TEST_CASE("INFO rate limit", "[wifi][link]") {
     CHECK(link_info_allowed(LinkEvent::Disconnected, 100, std::nullopt));
-    CHECK_FALSE(
-        link_info_allowed(LinkEvent::Disconnected, 100 + LINK_INFO_MIN_INTERVAL_S - 1, 100));
-    CHECK(link_info_allowed(LinkEvent::Disconnected, 100 + LINK_INFO_MIN_INTERVAL_S, 100));
+    CHECK_FALSE(link_info_allowed(LinkEvent::Disconnected, 100 + kLinkInfoMinIntervalS - 1, 100));
+    CHECK(link_info_allowed(LinkEvent::Disconnected, 100 + kLinkInfoMinIntervalS, 100));
     // A restore is exempt so a logged drop always has its recovery.
     CHECK(link_info_allowed(LinkEvent::Reconnected, 101, 100));
 }
@@ -142,4 +141,32 @@ TEST_CASE("network section states when frequency is unavailable", "[wifi][link]"
     h.push(sample(1, true, 0, -50));
     CHECK(link_history_to_json(h, false)["frequency_available"] == false);
     CHECK(link_history_to_json(h, true)["frequency_available"] == true);
+}
+
+TEST_CASE("a status WiFi control could not read makes no link sample", "[wifi][link]") {
+    WifiBackend::ConnectionStatus st;
+    st.connected = true;
+    st.frequency_mhz = 2437;
+
+    const auto live = link_sample_from_status(st, 42, kProcSample, "wlan0");
+    REQUIRE(live.has_value());
+    CHECK(live->uptime_s == 42);
+    CHECK(live->connected);
+    CHECK(live->frequency_mhz == 2437);
+    CHECK(live->radio.rssi_dbm == -52);
+
+    // The cached answer of a wedged lane: recording it would log a stale link.
+    st.unresponsive = true;
+    CHECK_FALSE(link_sample_from_status(st, 43, kProcSample, "wlan0").has_value());
+}
+
+TEST_CASE("a disconnected status samples no radio row", "[wifi][link]") {
+    WifiBackend::ConnectionStatus st;
+    st.connected = false;
+    st.frequency_mhz = 2437;
+    const auto s = link_sample_from_status(st, 7, kProcSample, "wlan0");
+    REQUIRE(s.has_value());
+    CHECK_FALSE(s->connected);
+    CHECK(s->frequency_mhz == 0);
+    CHECK_FALSE(s->radio.rssi_dbm.has_value());
 }

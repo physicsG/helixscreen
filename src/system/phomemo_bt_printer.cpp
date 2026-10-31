@@ -81,7 +81,7 @@ void PhomemoBluetoothPrinter::print(const LabelBitmap& bitmap, const LabelSize& 
                     error = lv_tr("Failed to initialize Bluetooth context");
                     spdlog::error("Phomemo BT: {}", error);
                 } else {
-                    int handle = loader.connect_ble(ctx, mac.c_str(), PHOMEMO_WRITE_UUID);
+                    int handle = loader.connect_ble(ctx, mac.c_str(), kPhomemoWriteUuid);
                     if (handle < 0) {
                         const char* err =
                             loader.last_error ? loader.last_error(ctx) : "unknown error";

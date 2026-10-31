@@ -15,27 +15,27 @@ using helix::ScopedEnv;
 
 namespace {
 
-constexpr const char* REFR_PERIOD = "HELIX_REFR_PERIOD_MS";
-constexpr const char* REFR_SCOPE = "HELIX_REFR_PERIOD_SCOPE";
-constexpr const char* SAVER_PERIOD = "HELIX_SCREENSAVER_REFR_PERIOD_MS";
-constexpr const char* LOOP_FLOOR = "HELIX_LOOP_MIN_SLEEP_MS";
-constexpr const char* EGL_VSYNC = "HELIX_EGL_VSYNC";
-constexpr const char* EGL_PARTIAL = "HELIX_EGL_PARTIAL_UPLOAD";
-constexpr const char* EGL_XRGB = "HELIX_EGL_XRGB";
+constexpr const char* kRefrPeriod = "HELIX_REFR_PERIOD_MS";
+constexpr const char* kRefrScope = "HELIX_REFR_PERIOD_SCOPE";
+constexpr const char* kSaverPeriod = "HELIX_SCREENSAVER_REFR_PERIOD_MS";
+constexpr const char* kLoopFloor = "HELIX_LOOP_MIN_SLEEP_MS";
+constexpr const char* kEglVsync = "HELIX_EGL_VSYNC";
+constexpr const char* kEglPartial = "HELIX_EGL_PARTIAL_UPLOAD";
+constexpr const char* kEglXrgb = "HELIX_EGL_XRGB";
 
 /// Restores every refresh-timing variable when the test ends, and starts from none set.
 struct RefreshEnv {
-    ScopedEnv period{REFR_PERIOD};
-    ScopedEnv scope{REFR_SCOPE};
-    ScopedEnv saver{SAVER_PERIOD};
-    ScopedEnv floor{LOOP_FLOOR};
-    ScopedEnv vsync{EGL_VSYNC};
-    ScopedEnv partial{EGL_PARTIAL};
-    ScopedEnv xrgb{EGL_XRGB};
+    ScopedEnv period{kRefrPeriod};
+    ScopedEnv scope{kRefrScope};
+    ScopedEnv saver{kSaverPeriod};
+    ScopedEnv floor{kLoopFloor};
+    ScopedEnv vsync{kEglVsync};
+    ScopedEnv partial{kEglPartial};
+    ScopedEnv xrgb{kEglXrgb};
 
     RefreshEnv() {
-        for (const char* name : {REFR_PERIOD, REFR_SCOPE, SAVER_PERIOD, LOOP_FLOOR, EGL_VSYNC,
-                                 EGL_PARTIAL, EGL_XRGB}) {
+        for (const char* name : {kRefrPeriod, kRefrScope, kSaverPeriod, kLoopFloor, kEglVsync,
+                                 kEglPartial, kEglXrgb}) {
             unsetenv(name);
         }
     }
@@ -63,11 +63,11 @@ TEST_CASE("refresh timing defaults when nothing is set", "[application][display]
 
 TEST_CASE("refresh timing reads each variable", "[application][display][refresh_period]") {
     RefreshEnv env;
-    setenv(REFR_PERIOD, "16", 1);
-    setenv(REFR_SCOPE, "all", 1);
-    setenv(SAVER_PERIOD, "20", 1);
-    setenv(LOOP_FLOOR, "2", 1);
-    setenv(EGL_VSYNC, "1", 1);
+    setenv(kRefrPeriod, "16", 1);
+    setenv(kRefrScope, "all", 1);
+    setenv(kSaverPeriod, "20", 1);
+    setenv(kLoopFloor, "2", 1);
+    setenv(kEglVsync, "1", 1);
 
     const RefreshTiming t = helix::refresh_timing_from_env();
     CHECK(t.refr_period_ms == 16);
@@ -78,9 +78,9 @@ TEST_CASE("refresh timing reads each variable", "[application][display][refresh_
     CHECK(helix::egl_vsync_from_env());
 
     SECTION("a display scope, vsync 0 and screensaver period 0 read as off") {
-        setenv(REFR_SCOPE, "display", 1);
-        setenv(EGL_VSYNC, "0", 1);
-        setenv(SAVER_PERIOD, "0", 1);
+        setenv(kRefrScope, "display", 1);
+        setenv(kEglVsync, "0", 1);
+        setenv(kSaverPeriod, "0", 1);
         const RefreshTiming off = helix::refresh_timing_from_env();
         CHECK_FALSE(off.scope_all);
         CHECK_FALSE(helix::egl_vsync_from_env());
@@ -91,7 +91,7 @@ TEST_CASE("refresh timing reads each variable", "[application][display][refresh_
 TEST_CASE("refresh periods accept 8 to 100 ms and reject everything else",
           "[application][display][refresh_period]") {
     RefreshEnv env;
-    const char* name = GENERATE(REFR_PERIOD, SAVER_PERIOD);
+    const char* name = GENERATE(kRefrPeriod, kSaverPeriod);
     CAPTURE(name);
 
     for (const char* ok : {"8", "100"}) {
@@ -99,7 +99,7 @@ TEST_CASE("refresh periods accept 8 to 100 ms and reject everything else",
         setenv(name, ok, 1);
         const RefreshTiming t = helix::refresh_timing_from_env();
         const uint32_t got =
-            std::string(name) == REFR_PERIOD ? t.refr_period_ms : t.screensaver_refr_period_ms;
+            std::string(name) == kRefrPeriod ? t.refr_period_ms : t.screensaver_refr_period_ms;
         CHECK(got == std::strtoul(ok, nullptr, 10));
     }
 
@@ -108,7 +108,7 @@ TEST_CASE("refresh periods accept 8 to 100 ms and reject everything else",
         setenv(name, bad, 1);
         const RefreshTiming t = helix::refresh_timing_from_env();
         CHECK(t.refr_period_ms == 0);
-        CHECK(t.screensaver_refr_period_ms == RefreshTiming::DEFAULT_SCREENSAVER_REFR_PERIOD_MS);
+        CHECK(t.screensaver_refr_period_ms == RefreshTiming::kDefaultScreensaverRefrPeriodMs);
     }
 }
 
@@ -117,7 +117,7 @@ TEST_CASE("the main loop floor accepts 1 to 33 ms and rejects everything else",
     RefreshEnv env;
     for (const char* ok : {"1", "33"}) {
         CAPTURE(ok);
-        setenv(LOOP_FLOOR, ok, 1);
+        setenv(kLoopFloor, ok, 1);
         const RefreshTiming t = helix::refresh_timing_from_env();
         // A set floor applies everywhere, screensaver included.
         CHECK(t.loop_min_sleep_ms == std::strtoul(ok, nullptr, 10));
@@ -125,7 +125,7 @@ TEST_CASE("the main loop floor accepts 1 to 33 ms and rejects everything else",
     }
     for (const char* bad : {"", "0", "34", "-1", "5x", "fast"}) {
         CAPTURE(bad);
-        setenv(LOOP_FLOOR, bad, 1);
+        setenv(kLoopFloor, bad, 1);
         const RefreshTiming t = helix::refresh_timing_from_env();
         CHECK(t.loop_min_sleep_ms == 5);
         CHECK(t.screensaver_loop_min_sleep_ms == 1);
@@ -137,12 +137,12 @@ TEST_CASE("unknown scope and EGL switch values keep the defaults",
     RefreshEnv env;
     for (const char* bad : {"ALL", "everything", "", "1"}) {
         CAPTURE(bad);
-        setenv(REFR_SCOPE, bad, 1);
+        setenv(kRefrScope, bad, 1);
         CHECK_FALSE(helix::refresh_timing_from_env().scope_all);
     }
     for (const char* bad : {"yes", "true", "2", ""}) {
         CAPTURE(bad);
-        setenv(EGL_VSYNC, bad, 1);
+        setenv(kEglVsync, bad, 1);
         CHECK(helix::egl_vsync_from_env());
     }
 }
@@ -195,12 +195,12 @@ TEST_CASE("HELIX_EGL_VSYNC reaches the vsync setter unless it is 0",
 
     CHECK(helix::apply_egl_vsync_from_env(record));
     REQUIRE(calls.size() == 1);
-    setenv(EGL_VSYNC, "0", 1);
+    setenv(kEglVsync, "0", 1);
     CHECK_FALSE(helix::apply_egl_vsync_from_env(record));
     CHECK(calls.size() == 1);
-    setenv(EGL_VSYNC, "on", 1);
+    setenv(kEglVsync, "on", 1);
     CHECK(helix::apply_egl_vsync_from_env(record));
-    setenv(EGL_VSYNC, "1", 1);
+    setenv(kEglVsync, "1", 1);
     CHECK(helix::apply_egl_vsync_from_env(record));
     REQUIRE(calls.size() == 3);
     CHECK(calls == std::vector<bool>{true, true, true});
@@ -212,13 +212,13 @@ TEST_CASE("each EGL presentation switch is on unless its own variable is 0",
     CHECK(helix::egl_partial_upload_from_env());
     CHECK(helix::egl_xrgb_from_env());
 
-    setenv(EGL_PARTIAL, "0", 1);
+    setenv(kEglPartial, "0", 1);
     CHECK_FALSE(helix::egl_partial_upload_from_env());
     CHECK(helix::egl_xrgb_from_env());
     CHECK(helix::egl_vsync_from_env());
 
-    unsetenv(EGL_PARTIAL);
-    setenv(EGL_XRGB, "0", 1);
+    unsetenv(kEglPartial);
+    setenv(kEglXrgb, "0", 1);
     CHECK_FALSE(helix::egl_xrgb_from_env());
     CHECK(helix::egl_partial_upload_from_env());
     CHECK(helix::egl_vsync_from_env());
@@ -226,8 +226,8 @@ TEST_CASE("each EGL presentation switch is on unless its own variable is 0",
     // Only 0 turns a switch off: 1 and anything malformed keep it on.
     for (const char* on : {"1", "yes", "true", "on", "2", "", " 0", "0 "}) {
         CAPTURE(on);
-        setenv(EGL_PARTIAL, on, 1);
-        setenv(EGL_XRGB, on, 1);
+        setenv(kEglPartial, on, 1);
+        setenv(kEglXrgb, on, 1);
         CHECK(helix::egl_partial_upload_from_env());
         CHECK(helix::egl_xrgb_from_env());
     }
@@ -246,16 +246,16 @@ TEST_CASE("an EGL switch reaches the driver unless it is 0, and reports a refusa
         return false;
     };
 
-    CHECK(helix::apply_egl_switch_from_env(EGL_PARTIAL, accept) == helix::EglSwitch::On);
+    CHECK(helix::apply_egl_switch_from_env(kEglPartial, accept) == helix::EglSwitch::On);
     CHECK(calls == 1);
-    setenv(EGL_PARTIAL, "0", 1);
-    CHECK(helix::apply_egl_switch_from_env(EGL_PARTIAL, accept) == helix::EglSwitch::Off);
+    setenv(kEglPartial, "0", 1);
+    CHECK(helix::apply_egl_switch_from_env(kEglPartial, accept) == helix::EglSwitch::Off);
     CHECK(calls == 1);
-    setenv(EGL_PARTIAL, "on", 1);
-    CHECK(helix::apply_egl_switch_from_env(EGL_PARTIAL, accept) == helix::EglSwitch::On);
+    setenv(kEglPartial, "on", 1);
+    CHECK(helix::apply_egl_switch_from_env(kEglPartial, accept) == helix::EglSwitch::On);
     CHECK(calls == 2);
 
-    setenv(EGL_PARTIAL, "1", 1);
-    CHECK(helix::apply_egl_switch_from_env(EGL_PARTIAL, refuse) == helix::EglSwitch::Declined);
+    setenv(kEglPartial, "1", 1);
+    CHECK(helix::apply_egl_switch_from_env(kEglPartial, refuse) == helix::EglSwitch::Declined);
     CHECK(calls == 3);
 }

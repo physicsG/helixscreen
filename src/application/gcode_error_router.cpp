@@ -18,33 +18,29 @@
 #include "gcode_response_lines.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
+#include "klipper_error_table.h"
+#include "lvgl.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
 #include "print_control_buttons.h"
+#include "printer_event_journal.h"
 #include "printer_recovery_service.h"
 #include "printer_state.h"
 #include "recovery_modal_presenter.h"
 #include "rpc_error_correlation.h"
 
-#if HELIX_HAS_CFS
-#include "ams_backend_cfs.h"
-#endif
-
-#include "lvgl.h"
-
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <chrono>
 #include <vector>
 
 namespace helix {
 
 namespace {
 
-constexpr const char* NOTIFY_HANDLER_NAME = "gcode_error_notifier";
-constexpr const char* REPLAY_OBSERVER_NAME = "gcode_store_replay";
-constexpr const char* FAULT_NOTIFY_HANDLER_NAME = "fault_raise_notifier";
+constexpr const char* kNotifyHandlerName = "gcode_error_notifier";
+constexpr const char* kReplayObserverName = "gcode_store_replay";
+constexpr const char* kFaultNotifyHandlerName = "fault_raise_notifier";
 
 /// Moonraker notify frames carry their payload as the first element of a
 /// params array; a frame without a non-empty one has nothing to read.
@@ -58,17 +54,22 @@ const nlohmann::json* first_notify_param(const nlohmann::json& msg) {
 /// How long a coded raise displaces a pending prose copy of the same fault.
 /// The firmware pushes the pair within milliseconds, so this only has to
 /// outlive the 150ms hold of the prose presentation.
-constexpr double DISPLACED_PROSE_WINDOW_SECONDS = 2.0;
+constexpr double kDisplacedProseWindowSeconds = 2.0;
 
 /// The one recovery action that does NOT run through execute_gcode: key298's
 /// rpi-MCU-bridge bounce goes via PrinterRecoveryService and so carries an
-/// empty gcode. Matched on the tag error_classify.cpp:73 stamps, because an
-/// empty gcode alone is not a reliable signal — see present_recover_toast().
-constexpr const char* KEY298_RECOVER_TAG = "error_classify::key298_recover";
+/// empty gcode. Matched on the tag the error table stamps, because an empty
+/// gcode alone is not a reliable signal — see present_recover_toast().
+constexpr const char* kKey298RecoverTag = printer::kKlipperErrorRecoveryServiceTag;
+
+/// How long a claimed RPC report waits for the router's own explanation of
+/// the same refusal before the caller's report runs after all. Matches the
+/// RPC correlation window: both channels leave Klipper together.
+constexpr uint32_t kRpcReportClaimMs = 1500;
 
 /// How long a recover toast stays tappable. Longer than a plain toast: the
 /// user has to read the fault and decide, not just notice it.
-constexpr uint32_t RECOVER_TOAST_MS = 15000;
+constexpr uint32_t kRecoverToastMs = 15000;
 
 /// Owns one recover toast's action for as long as the toast can be tapped.
 /// See present_recover_toast() for why this is heap-allocated with a timer
@@ -90,16 +91,11 @@ struct RecoverToastCtx {
 /// Resume. 30s comfortably spans a reconnect blip but is far below the
 /// multi-minute gap a manual restart leaves. (Was 600s, which let the
 /// 287s error through.)
-constexpr double REPLAY_MAX_AGE_SECONDS = 30.0;
+constexpr double kReplayMaxAgeSeconds = 30.0;
 
 /// gcode_store fetch depth on reconnect. The K2's box driver is chatty
 /// (status polls every ~3s) so we need headroom to find a `!!` line.
-constexpr int REPLAY_FETCH_COUNT = 50;
-
-double now_unix_seconds() {
-    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
+constexpr int kReplayFetchCount = 50;
 
 } // namespace
 
@@ -112,9 +108,24 @@ struct GcodeErrorRouter::DeferredCtx {
     std::string short_form;
 };
 
+/// One claimed RPC report: the caller's report to run if the router's
+/// explanation of `message` has not surfaced when the timer fires.
+struct GcodeErrorRouter::ClaimCtx {
+    GcodeErrorRouter* owner;
+    std::string message;
+    std::function<void()> report;
+};
+
 GcodeErrorRouter::GcodeErrorRouter(IMoonrakerAPI* api, IMoonrakerClient* client,
                                    helix::ui::RecoveryModalPresenter& presenter)
     : api_(api), client_(client), presenter_(presenter) {
+    // Callers ask this on the main thread, where the router is built and
+    // destroyed, so `this` outlives every call.
+    rpc_error_correlation::set_broadcast_claimant(
+        this, [this](const std::string& message, std::function<void()>& report) {
+            return claim_rpc_report(message, report);
+        });
+
     if (!client_) {
         spdlog::warn("[GcodeErrorRouter] Null client -- handlers not registered");
         return;
@@ -129,7 +140,7 @@ GcodeErrorRouter::GcodeErrorRouter(IMoonrakerAPI* api, IMoonrakerClient* client,
     // the gen is re-checked, so a callback that fires after the dtor
     // invalidates `lifetime_` is silently dropped.
     client_->register_method_callback(
-        "notify_gcode_response", NOTIFY_HANDLER_NAME,
+        "notify_gcode_response", kNotifyHandlerName,
         lifetime_.bg_cb("GcodeErrorRouter::on_notify",
                         [this](const nlohmann::json& msg) { on_notify_gcode_response(msg); }));
 
@@ -137,7 +148,7 @@ GcodeErrorRouter::GcodeErrorRouter(IMoonrakerAPI* api, IMoonrakerClient* client,
     // bg_cb takes a 0-arg callback fine -- the lambda below doesn't need
     // arguments; the wrapper just defers and gen-checks.
     client_->add_connected_observer(
-        REPLAY_OBSERVER_NAME,
+        kReplayObserverName,
         lifetime_.bg_cb("GcodeErrorRouter::on_connected", [this]() { on_connected(); }));
 
     // Standing faults. notify_status_update delivers the status delta on the
@@ -167,7 +178,7 @@ GcodeErrorRouter::GcodeErrorRouter(IMoonrakerAPI* api, IMoonrakerClient* client,
     // construction) is not needed to spell them.
     for (const auto& method : faultcodes::notification_methods()) {
         client_->register_method_callback(
-            method, FAULT_NOTIFY_HANDLER_NAME,
+            method, kFaultNotifyHandlerName,
             lifetime_.bg_cb(
                 "GcodeErrorRouter::on_notify_fault",
                 [this, method](const nlohmann::json& msg) { on_notify_fault(method, msg); }));
@@ -175,6 +186,15 @@ GcodeErrorRouter::GcodeErrorRouter(IMoonrakerAPI* api, IMoonrakerClient* client,
 }
 
 GcodeErrorRouter::~GcodeErrorRouter() {
+    rpc_error_correlation::clear_broadcast_claimant(this);
+    // A claimed report still waiting belongs to a printer scope that is going
+    // away; it is dropped with the router.
+    for (lv_timer_t* timer : pending_claims_) {
+        delete static_cast<ClaimCtx*>(lv_timer_get_user_data(timer));
+        lv_timer_delete(timer);
+    }
+    pending_claims_.clear();
+
     // Held presentations carry a pointer back to this router; cancel every
     // still-pending one so a fire after teardown cannot reach freed members.
     for (lv_timer_t* timer : pending_deferred_) {
@@ -190,12 +210,12 @@ GcodeErrorRouter::~GcodeErrorRouter() {
     // all outstanding tokens, so any deferred body that lands on main after
     // the unregister is silently dropped.
     if (client_) {
-        client_->unregister_method_callback("notify_gcode_response", NOTIFY_HANDLER_NAME);
-        client_->remove_connected_observer(REPLAY_OBSERVER_NAME);
+        client_->unregister_method_callback("notify_gcode_response", kNotifyHandlerName);
+        client_->remove_connected_observer(kReplayObserverName);
         for (const auto& method : faultcodes::notification_methods()) {
-            client_->unregister_method_callback(method, FAULT_NOTIFY_HANDLER_NAME);
+            client_->unregister_method_callback(method, kFaultNotifyHandlerName);
         }
-        if (standing_notify_id_ != INVALID_SUBSCRIPTION_ID) {
+        if (standing_notify_id_ != kInvalidSubscriptionId) {
             client_->unsubscribe_notify_update(standing_notify_id_);
         }
     }
@@ -212,7 +232,7 @@ bool GcodeErrorRouter::should_surface_replay(double entry_time, double now) {
     const double age = now - entry_time;
     // Clock skew or an entry stamped in the (apparent) future reads as a
     // negative age; treat as fresh rather than silently suppressing.
-    if (age <= REPLAY_MAX_AGE_SECONDS)
+    if (age <= kReplayMaxAgeSeconds)
         return true;
 
     spdlog::debug("[GcodeError replay] Skipping stale `!!` (age {:.0f}s)", age);
@@ -226,9 +246,9 @@ std::string GcodeErrorRouter::truncate_for_toast(std::string text) {
     // UTF-8 byte truncation is not strictly correct (could land mid-codepoint),
     // but matches prior behavior. The right long-term fix is wrapping text in
     // ToastManager; at that point this goes away.
-    constexpr size_t MAX_LEN = 80;
-    if (text.size() > MAX_LEN) {
-        text = text.substr(0, MAX_LEN - 3) + "...";
+    constexpr size_t kMaxLen = 80;
+    if (text.size() > kMaxLen) {
+        text = text.substr(0, kMaxLen - 3) + "...";
     }
     return text;
 }
@@ -245,10 +265,67 @@ std::string GcodeErrorRouter::truncate_for_toast(std::string text) {
 // (the AMS backends, whose detail already IS the raw text). The match remains
 // exact-string on both arms — see include/rpc_error_correlation.h for why
 // substring matching is deliberately avoided.
-static bool already_reported_via_rpc(const std::string& raw_detail, const std::string& detail) {
-    if (!raw_detail.empty() && rpc_error_correlation::was_recently_handled(raw_detail))
+//
+// A command refusal is never "already reported": its caller hands its own
+// report to this router instead (report_unless_explained).
+static bool already_reported_via_rpc(const ErrorEvent& ev) {
+    if (ev.command_refusal)
+        return false;
+    if (!ev.raw_detail.empty() && rpc_error_correlation::was_recently_handled(ev.raw_detail))
         return true;
-    return rpc_error_correlation::was_recently_handled(detail);
+    return rpc_error_correlation::was_recently_handled(ev.detail);
+}
+
+ClassifyContext GcodeErrorRouter::current_classify_context() {
+    // Main thread only: these synchronous getters read printer state.
+    ClassifyContext ctx;
+    ctx.is_paused = get_printer_state().is_paused();
+    // RAW_PRINT_STATE_OK: classifiers offer resume/retry actions off this flag.
+    // A failure inside a host-side pre-start block is PrintPreparationManager's
+    // to report, and claiming a print is running would offer a Resume that has
+    // nothing to resume.
+    ctx.is_printing =
+        get_printer_state().print_state().get_print_job_state() == PrintJobState::PRINTING;
+    return ctx;
+}
+
+bool GcodeErrorRouter::explains_rpc_error(const std::string& message) const {
+    auto* backend = AmsState::instance().get_backend();
+    if (!backend)
+        return false;
+    // Klipper mirrors a gcode.script rejection onto the console as `!! <message>`;
+    // this is the line process_line will classify when that copy arrives.
+    const auto ev = backend->classify_error("!! " + message, current_classify_context());
+    return ev && ev->command_refusal && decide_presentation(*ev) != PresentAs::NONE;
+}
+
+bool GcodeErrorRouter::claim_rpc_report(const std::string& message, std::function<void()>& report) {
+    if (!explains_rpc_error(message))
+        return false;
+    // process_line records the refusal's raw wording when it presents it, and
+    // that wording is this RPC error's message.
+    auto* cctx = new ClaimCtx{this, message, std::move(report)};
+    auto* t = lv_timer_create(
+        [](lv_timer_t* timer) {
+            auto* c = static_cast<ClaimCtx*>(lv_timer_get_user_data(timer));
+            // c->owner is alive: the dtor cancels every pending claim.
+            GcodeErrorRouter* r = c->owner;
+            if (!fault_surface_correlation::was_recently_surfaced(c->message)) {
+                spdlog::warn("[GcodeError] Explanation never surfaced; caller reports: {}",
+                             c->message);
+                if (c->report)
+                    c->report();
+            }
+            r->pending_claims_.erase(
+                std::remove(r->pending_claims_.begin(), r->pending_claims_.end(), timer),
+                r->pending_claims_.end());
+            delete c;
+            lv_timer_delete(timer);
+        },
+        kRpcReportClaimMs, cctx);
+    lv_timer_set_repeat_count(t, 1);
+    pending_claims_.push_back(t);
+    return true;
 }
 
 PresentAs decide_presentation(const ErrorEvent& e) {
@@ -260,22 +337,12 @@ PresentAs decide_presentation(const ErrorEvent& e) {
     return PresentAs::NONE; // INFO not surfaced in L0
 }
 
-PromptData build_recovery_prompt(const ErrorEvent& e) {
-    PromptData p;
-    p.title = e.title.empty() ? std::string(lv_tr("Printer Error")) : e.title;
-    if (!e.detail.empty())
-        p.text_lines.push_back(e.detail);
-    for (const auto& a : e.recovery_actions) {
-        PromptButton b;
-        b.label = a.label;
-        b.gcode = a.gcode;
-        b.color = helix::ui::color_for_style(a.style);
-        p.buttons.push_back(std::move(b));
-    }
-    return p;
-}
-
 void GcodeErrorRouter::present_recovery_modal(const ErrorEvent& e) {
+    if (e.command_refusal) {
+        // It answers the command just sent: an identical refusal the user
+        // dismissed earlier must not hide this one.
+        presenter_.forget_handled_fault();
+    }
     presenter_.present(e);
 }
 
@@ -299,7 +366,7 @@ RecoverDispatch decide_recover_dispatch(const ErrorEvent& e) {
     // recover; PrinterRecoveryService bounces klipper_mcu via the platform
     // recovery script. Recognised by its log_tag rather than by its empty
     // gcode, because an empty gcode now legitimately means "dismiss".
-    if (action.log_tag == KEY298_RECOVER_TAG)
+    if (action.log_tag == kKey298RecoverTag)
         return RecoverDispatch::RECOVERY_SERVICE;
 
     // No gcode and no service behind it: nothing to run, so no button.
@@ -344,23 +411,23 @@ bool GcodeErrorRouter::present_recover_toast(const ErrorEvent& e) {
                     return;
                 spdlog::info("[GcodeError] User tapped Recover for key298");
                 PrinterRecoveryService recovery(a);
-                recovery.recover([]() { spdlog::info("[Recovery] Auto-recovery initiated"); },
-                                 [](const MoonrakerError& err) {
-                                     spdlog::error("[Recovery] Auto-recovery failed: {}",
-                                                   err.message);
-                                     // The callback can run on the WebSocket thread; lv_tr is
-                                     // main-thread only.
-                                     helix::ui::run_on_main("error_toast", [err]() {
-                                         ToastManager::instance().show(
-                                             ToastSeverity::ERROR,
-                                             fmt::format(fmt::runtime(lv_tr("Recovery failed: {}")),
-                                                         err.localized_message())
-                                                 .c_str(),
-                                             6000);
-                                     });
-                                 });
+                recovery.recover(
+                    [](RecoveryOutcome) { spdlog::info("[Recovery] Auto-recovery initiated"); },
+                    [](const MoonrakerError& err) {
+                        spdlog::error("[Recovery] Auto-recovery failed: {}", err.message);
+                        // The callback can run on the WebSocket thread; lv_tr is
+                        // main-thread only.
+                        helix::ui::run_on_main("error_toast", [err]() {
+                            ToastManager::instance().show(
+                                ToastSeverity::ERROR,
+                                fmt::format(fmt::runtime(lv_tr("Recovery failed: {}")),
+                                            err.localized_message())
+                                    .c_str(),
+                                6000);
+                        });
+                    });
             },
-            api, /*duration_ms=*/RECOVER_TOAST_MS);
+            api, /*duration_ms=*/kRecoverToastMs);
         return true;
     }
 
@@ -392,16 +459,16 @@ bool GcodeErrorRouter::present_recover_toast(const ErrorEvent& e) {
                             6000);
                     });
                 },
-                IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
+                IMoonrakerAPI::kAmsOperationTimeoutMs);
         },
-        ctx, /*duration_ms=*/RECOVER_TOAST_MS);
+        ctx, /*duration_ms=*/kRecoverToastMs);
 
     auto* reaper = lv_timer_create(
         [](lv_timer_t* t) {
             delete static_cast<RecoverToastCtx*>(lv_timer_get_user_data(t));
             lv_timer_delete(t);
         },
-        RECOVER_TOAST_MS + 5000, ctx);
+        kRecoverToastMs + 5000, ctx);
     lv_timer_set_repeat_count(reaper, 1);
     return true;
 }
@@ -420,7 +487,7 @@ void GcodeErrorRouter::present_deferred(const ErrorEvent& e, PresentAs how) {
             // c->owner is alive: the dtor cancels every pending timer before
             // the member state goes away.
             GcodeErrorRouter* r = c->owner;
-            if (already_reported_via_rpc(c->ev.raw_detail, c->ev.detail)) {
+            if (already_reported_via_rpc(c->ev)) {
                 spdlog::info("[GcodeError] Suppressing held `!!` presentation "
                              "(caller-handled RPC error arrived after): {}",
                              c->ev.detail);
@@ -467,20 +534,20 @@ void GcodeErrorRouter::show_deferred(const ErrorEvent& e, PresentAs how,
 }
 
 void GcodeErrorRouter::displace_prose_twin(const std::string& message) {
-    const double now = now_unix_seconds();
+    const double now = wall_now_s();
     displaced_prose_.erase(std::remove_if(displaced_prose_.begin(), displaced_prose_.end(),
                                           [now](const auto& entry) {
                                               return now - entry.first >
-                                                     DISPLACED_PROSE_WINDOW_SECONDS;
+                                                     kDisplacedProseWindowSeconds;
                                           }),
                            displaced_prose_.end());
     displaced_prose_.emplace_back(now, message);
 }
 
 bool GcodeErrorRouter::prose_twin_displaced(const std::string& raw) const {
-    const double now = now_unix_seconds();
+    const double now = wall_now_s();
     for (const auto& [raised_at, message] : displaced_prose_) {
-        if (now - raised_at <= DISPLACED_PROSE_WINDOW_SECONDS && message == raw) {
+        if (now - raised_at <= kDisplacedProseWindowSeconds && message == raw) {
             return true;
         }
     }
@@ -491,17 +558,9 @@ void GcodeErrorRouter::process_line(const std::string& line, bool firmware_repor
     if (line.empty())
         return;
 
-    // Build classify context from current printer state. process_line runs
-    // on the MAIN thread (the ctor's lifetime_.bg_cb wrapper defers the
-    // notify body to main), so these synchronous getters are safe.
-    ClassifyContext ctx;
-    ctx.is_paused = get_printer_state().is_paused();
-    // RAW_PRINT_STATE_OK: classifiers offer resume/retry actions off this flag.
-    // A failure inside a host-side pre-start block is PrintPreparationManager's
-    // to report, and claiming a print is running would offer a Resume that has
-    // nothing to resume.
-    ctx.is_printing =
-        get_printer_state().print_state().get_print_job_state() == PrintJobState::PRINTING;
+    // process_line runs on the MAIN thread (the ctor's lifetime_.bg_cb wrapper
+    // defers the notify body to main), so reading printer state is safe.
+    const ClassifyContext ctx = current_classify_context();
 
     // Ask the active AMS backend first (domain-aware), then any firmware that
     // reports faults as structured codes, else the generic classifier.
@@ -523,6 +582,17 @@ void GcodeErrorRouter::process_line(const std::string& line, bool firmware_repor
     }
     if (!ev)
         return;
+
+    // Every classifier's detail reaches the user, and a backend or an unknown
+    // fault code passes the firmware's text through verbatim, so an envelope in
+    // it is decoded once here. raw_detail keeps the firmware's wording for the
+    // cross-channel dedup.
+    if (std::string decoded = decode_firmware_error_text(ev->detail); decoded != ev->detail) {
+        if (ev->raw_detail.empty()) {
+            ev->raw_detail = ev->detail;
+        }
+        ev->detail = std::move(decoded);
+    }
 
     // A fault the firmware itself reported -- standing in its list, or pushed
     // as a raise -- is current by definition: the INFO suppression exists for
@@ -547,7 +617,7 @@ void GcodeErrorRouter::process_line(const std::string& line, bool firmware_repor
     // contextual toast. Skipping our generic surfacing avoids double-
     // notification for the same root cause. (The deferred-toast path
     // re-checks at fire time for late-arriving RPC responses.)
-    if (already_reported_via_rpc(ev->raw_detail, ev->detail)) {
+    if (already_reported_via_rpc(*ev)) {
         spdlog::info("[GcodeError] Suppressing duplicate (RPC-handled): {}", ev->detail);
         return;
     }
@@ -707,7 +777,7 @@ void GcodeErrorRouter::on_connected() {
     // otherwise re-enter `this` on freed memory. bg_cb defers to main with
     // a generation guard.
     client_->get_gcode_store(
-        REPLAY_FETCH_COUNT,
+        kReplayFetchCount,
         lifetime_.bg_cb(
             "GcodeErrorRouter::replay_response",
             [this](const std::vector<GcodeStoreEntry>& entries) {
@@ -719,7 +789,7 @@ void GcodeErrorRouter::on_connected() {
                     if (raw.size() < 3 || raw[0] != '!' || raw[1] != '!')
                         continue;
 
-                    const double now = now_unix_seconds();
+                    const double now = wall_now_s();
                     if (!should_surface_replay(it->time, now)) {
                         // should_surface_replay logs the stale skip at debug.
                         return;
@@ -749,9 +819,8 @@ void GcodeErrorRouter::on_connected() {
                     // reconnect. Modal dedup-by-title prevents the live
                     // notify_gcode_response (if Klippy re-emits) from
                     // duplicating.
-                    const char* title = (code.size() >= 4 && code.compare(0, 4, "key8") == 0)
-                                            ? lv_tr("Filament System Error")
-                                            : lv_tr("Printer Error");
+                    const char* table_title = printer::klipper_error_modal_title(code);
+                    const char* title = table_title ? table_title : lv_tr("Printer Error");
                     ui_notification_printer_fault(title, clean.c_str());
                     return;
                 }

@@ -20,7 +20,7 @@
 # scrolling list is a gate somebody switches off.
 
 GATE="scripts/check_panel_widget_scrollable.py"
-BASELINE=21
+BASELINE=5
 
 setup() {
     cd "$BATS_TEST_DIRNAME/../.." || return 1

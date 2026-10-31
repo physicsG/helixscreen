@@ -21,7 +21,7 @@ namespace helix {
 namespace {
 
 // The queue modal is opened from the completion dialog, the print-status
-// panel and the home widget — no one caller outlives the others — so it lives
+// panel and the home tile — no one caller outlives the others — so it lives
 // for the process and is reshown, exactly like the member instances
 // PrintStatusWidget and JobQueueWidget own. Never destructed: teardown runs
 // ModalStack::clear() to retire the dialog, and a destructor firing after
@@ -29,10 +29,6 @@ namespace {
 JobQueueModal& queue_modal() {
     static JobQueueModal* instance = new JobQueueModal();
     return *instance;
-}
-
-void open_job_queue_modal() {
-    queue_modal().show(lv_screen_active());
 }
 
 void on_completion_start_next_cb(lv_event_t*) {
@@ -45,6 +41,10 @@ void on_completion_start_next_cb(lv_event_t*) {
 }
 
 } // namespace
+
+void open_job_queue_modal() {
+    queue_modal().show(lv_screen_active());
+}
 
 UpNextTapAction decide_up_next_tap(bool can_start_new_print) {
     return can_start_new_print ? UpNextTapAction::StartNextJob : UpNextTapAction::OpenQueueModal;
@@ -59,11 +59,14 @@ void start_next_queued_job() {
         spdlog::debug("[JobQueueStart] Start next found no queued job");
         return;
     }
+    open_queued_job_in_file_view(jqs->get_jobs().front());
+}
+
+void open_queued_job_in_file_view(const JobQueueEntry& job) {
     // The same entry the queue modal's row tap uses: the busy guard, the
     // saved option states and the entry's removal on confirmed start all
     // live in the detail-view pipeline every manual Print tap already uses.
-    get_print_select_panel(get_printer_state(), get_moonraker_api())
-        ->start_queued_job(jqs->get_jobs().front());
+    get_print_select_panel(get_printer_state(), get_moonraker_api())->start_queued_job(job);
 }
 
 void handle_up_next_tap() {

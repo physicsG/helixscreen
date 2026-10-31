@@ -5,7 +5,7 @@
  * @file test_print_status_header_action_button.cpp
  * @brief The print-status header's action-button contract.
  *
- * The header carries exactly one configured action: the secondary button
+ * The header carries exactly one configured action: the icon-only action
  * (folder icon, on_print_status_files) that opens print select during an active
  * print, where starting a print stays blocked by print_select_can_print
  * (prestonbrown/helixscreen#1395). The primary action button stays unconfigured.
@@ -74,13 +74,13 @@ struct PrintStatusHeaderFixture : public LVGLUITestFixture {
         return header ? lv_obj_find_by_name(header, "action_button") : nullptr;
     }
 
-    /// The header's secondary action button (the Files entry).
-    lv_obj_t* action_button_2() const {
+    /// The header's icon-only action (the Files entry).
+    lv_obj_t* action_icon_button() const {
         if (!root_) {
             return nullptr;
         }
         lv_obj_t* header = lv_obj_find_by_name(root_, "overlay_header");
-        return header ? lv_obj_find_by_name(header, "action_button_2") : nullptr;
+        return header ? lv_obj_find_by_name(header, "action_icon_button") : nullptr;
     }
 
     void set_print_state(PrintJobState s) {
@@ -112,11 +112,11 @@ TEST_CASE_METHOD(PrintStatusHeaderFixture,
 
     lv_obj_t* action = action_button();
     REQUIRE(action != nullptr);
-    lv_obj_t* files = action_button_2();
+    lv_obj_t* files = action_icon_button();
     REQUIRE(files != nullptr);
 
     // Baseline: header_bar's hide_action_button default, untouched; the Files
-    // entry opts in via hide_action_button_2="false".
+    // entry opts in via hide_action_icon="false".
     REQUIRE(lv_obj_has_flag(action, LV_OBJ_FLAG_HIDDEN));
     CHECK_FALSE(lv_obj_has_flag(files, LV_OBJ_FLAG_HIDDEN));
 
@@ -146,7 +146,7 @@ TEST_CASE("print_status_panel.xml passes no action-button props to header_bar",
           "[print_status][header_bar][1204][1395]") {
     // Structural companion to the behavioural test above. The PRIMARY slot stays
     // unconfigured (header_bar defaults: hidden, empty text/icon, no callback) so
-    // the empty-pill regression cannot return; the SECONDARY slot is the Files
+    // the empty-pill regression cannot return; the icon-only action is the Files
     // entry and must name the folder icon and the navigation callback. Both
     // layout variants, since layout-class resolution picks one at runtime and the
     // unit test only exercises the base.
@@ -170,10 +170,10 @@ TEST_CASE("print_status_panel.xml passes no action-button props to header_bar",
         CHECK(tag.find("action_button_callback=") == std::string::npos);
         CHECK(tag.find("hide_action_button=") == std::string::npos);
 
-        // Secondary slot fully configured as the Files entry.
-        CHECK(tag.find("hide_action_button_2=\"false\"") != std::string::npos);
-        CHECK(tag.find("action_button_2_icon=\"folder\"") != std::string::npos);
-        CHECK(tag.find("action_button_2_callback=\"on_print_status_files\"") != std::string::npos);
+        // The icon-only action fully configured as the Files entry.
+        CHECK(tag.find("hide_action_icon=\"false\"") != std::string::npos);
+        CHECK(tag.find("action_icon=\"folder\"") != std::string::npos);
+        CHECK(tag.find("action_icon_callback=\"on_print_status_files\"") != std::string::npos);
     }
 }
 
@@ -182,7 +182,7 @@ TEST_CASE_METHOD(PrintStatusHeaderFixture,
                  "[print_status][header_bar][1395]") {
     REQUIRE(root_ != nullptr);
 
-    lv_obj_t* files = action_button_2();
+    lv_obj_t* files = action_icon_button();
     REQUIRE(files != nullptr);
 
     // Pin the callback wiring: the XML name resolves, and the handler queues

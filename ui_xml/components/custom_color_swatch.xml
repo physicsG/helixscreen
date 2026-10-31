@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The app's one custom-colour swatch: a color_swatch painting the hue wheel,
+     with a glyph on a screen-coloured centre. It is index -2, so a
+     selected_subject holding -2 (the colour is a custom one) rings it.
+
+     Props (all optional):
+       icon              the centre glyph: pencil where it opens a colour editor
+                         (the preset grids), plus where it adds a colour (LEDs)
+       selected_subject  int subject naming the ringed index
+       callback          click handler
+       size, hit, reach, ring
+                         as color_swatch; the defaults are the dense preset
+                         grids' tokens, which every host but the LED row uses -->
+<component>
+  <api>
+    <prop name="icon" type="string" default="pencil"/>
+    <prop name="selected_subject" type="string" default=""/>
+    <prop name="callback" type="string" default=""/>
+    <prop name="size" type="string" default="#swatch_grid_size"/>
+    <prop name="hit" type="string" default="#swatch_grid_gap_half"/>
+    <prop name="reach" type="string" default="#swatch_grid_ring_reach"/>
+    <prop name="ring" type="string" default="styles.grid_swatch_ring"/>
+  </api>
+  <view extends="color_swatch"
+        index="-2" fill="disc_rainbow" selected_subject="$selected_subject" callback="$callback" size="$size" hit="$hit"
+        reach="$reach" ring="$ring">
+    <lv_obj width="50%"
+            height="50%" align="center" style_radius="9999" style_bg_opa="255" style_bg_color="#screen_bg"
+            style_border_width="0" clickable="false" event_bubble="true" scrollable="false">
+      <icon src="$icon" size="xs" align="center" clickable="false" event_bubble="true"/>
+    </lv_obj>
+  </view>
+</component>

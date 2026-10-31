@@ -5,7 +5,10 @@
 #include "json_fwd.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
+#include <optional>
+#include <set>
 #include <vector>
 
 namespace helix {
@@ -47,7 +50,53 @@ struct PreprintEntry {
     int temp_bucket{
         0}; ///< Bed temp at start: 1 = cold (<40°C), 2 = warm (≥40°C); 0 = unknown/legacy
     PreprintWindow window{PreprintWindow::Unknown}; ///< Which window this entry measured
+    /// Phases this start was told to skip (option toggles turned off);
+    /// nullopt when nothing said, which reads as unknown, never as "none".
+    std::optional<std::set<int>> skipped_phases;
+    /// Nozzle+bed heating this start was priced for, in seconds; nullopt when
+    /// the start bypassed pricing (legacy entries, a start we did not arm).
+    std::optional<int> heating_seconds;
 };
+
+/**
+ * @brief Heating time the thermal model prices for one start
+ *
+ * The predictor never records heating; `ThermalRateManager` estimates it from
+ * the start temperatures and the targets.
+ */
+struct PreprintHeating {
+    float nozzle_seconds = 0.0f;
+    float bed_seconds = 0.0f;
+    /// False while the nozzle's target is unknown (a bed-first macro issues
+    /// its M109 late), so the estimate holds a placeholder for that climb.
+    bool nozzle_target_known = false;
+
+    /// Nozzle+bed seconds this start owes, or nullopt while its heating cannot
+    /// be priced: 0 means targets known and already reached.
+    [[nodiscard]] std::optional<float> priced_seconds() const {
+        if (!nozzle_target_known) {
+            return std::nullopt;
+        }
+        return nozzle_seconds + bed_seconds;
+    }
+};
+
+/**
+ * @brief One pre-print estimate: the phase shape and the absolute total
+ */
+struct PreprintEstimate {
+    std::map<int, float> durations; ///< phase_enum -> seconds, heating included
+    float total_seconds = 0.0f;
+};
+
+/**
+ * @brief What this start does about a phase the predictor may expect
+ *
+ * phase_enum -> true when the start runs the phase (added if the expected
+ * phases lack it), false when it skips it (removed if they have it). A phase
+ * left out keeps whatever the history or defaults say.
+ */
+using PreprintPhaseOverrides = std::map<int, bool>;
 
 /**
  * @brief Predicts pre-print duration from historical per-phase timing
@@ -73,6 +122,16 @@ class PreprintPredictor {
      */
     void load_entries(const std::vector<PreprintEntry>& entries,
                       StartCondition condition = StartCondition::COLD);
+
+    /// Bed temperature at or above which a start counts as warm
+    static constexpr float kWarmBedC = 40.0f;
+
+    /// The temp_bucket a start with the bed at @p bed_c belongs to: 2 (warm)
+    /// at or above kWarmBedC, else 1 (cold)
+    [[nodiscard]] static int temp_bucket_for(float bed_c);
+
+    /// The phases @p overrides skips, as a run's history entry records them
+    [[nodiscard]] static std::set<int> phases_skipped_by(const PreprintPhaseOverrides& overrides);
 
     /**
      * @brief Load entries with legacy temp_bucket filtering (backward compat)
@@ -120,10 +179,10 @@ class PreprintPredictor {
 
     /// Homing estimate floor. A macro that goes straight from G28 into its
     /// next narrated step records a homing phase of a few seconds or none.
-    static constexpr int MIN_HOMING_SECONDS = 20;
+    static constexpr int kMinHomingSeconds = 20;
 
     /**
-     * @brief Predicted homing seconds, never below MIN_HOMING_SECONDS
+     * @brief Predicted homing seconds, never below kMinHomingSeconds
      *
      * The one homing estimate the pre-print collector and the print details
      * estimate share.
@@ -142,6 +201,32 @@ class PreprintPredictor {
      * typical printer behavior.
      */
     static std::map<int, int> default_phase_durations();
+
+    /// Generic per-phase durations, used when the printer database has no
+    /// `print_start_default_phases` for the printer and for a phase a start
+    /// adds that the expected phases lack.
+    static std::map<int, int> generic_phase_durations();
+
+    /// Nozzle-heating placeholder while the nozzle target is unknown.
+    static constexpr float kUnknownNozzleHeatSeconds = 60.0f;
+
+    /**
+     * @brief The pre-print estimate the live countdown and the print details share
+     *
+     * Durations: the heating seconds, the predicted phases (history, else the
+     * defaults) with homing at predicted_homing_seconds(), then @p overrides
+     * applied. Total: with history, the recorded wall clock (which already
+     * holds heating and every phase the start ran, matched or not) less each
+     * skipped phase's share of it, plus the generic duration of a run phase
+     * every entry recorded as skipped; any other run phase adds nothing. An
+     * entry that recorded its priced heating replaces that wall clock with its
+     * constant remainder plus the heating priced for this start, and a history
+     * with none recorded is floored by this start's own heating. Without
+     * history, the sum of the durations, a run phase the defaults lack added
+     * at its generic duration.
+     */
+    [[nodiscard]] PreprintEstimate estimate(const PreprintHeating& heating,
+                                            const PreprintPhaseOverrides& overrides = {}) const;
 
     /**
      * @brief Load entries from Config's print_start_history
@@ -168,12 +253,12 @@ class PreprintPredictor {
      *
      * Every stored entry is kept except the oldest of the new entry's own
      * (temp bucket, window) population beyond MAX_ENTRIES, and the oldest
-     * overall beyond MAX_STORED_ENTRIES. Writes Config; does not save it.
+     * overall beyond kMaxStoredEntries. Writes Config; does not save it.
      */
     static void append_to_config(const PreprintEntry& entry);
 
     /// Cap on the whole stored history, across buckets and windows
-    static constexpr size_t MAX_STORED_ENTRIES = 15;
+    static constexpr size_t kMaxStoredEntries = 15;
 
     /**
      * @brief Load history from Config and return predicted total seconds
@@ -188,6 +273,14 @@ class PreprintPredictor {
   private:
     /// Exponential time-decay weights (oldest=low, newest=high), normalized to sum=1
     [[nodiscard]] std::vector<double> compute_weights() const;
+
+    /// Every entry records @p phase as skipped (false when any entry is silent)
+    [[nodiscard]] bool every_entry_skipped(int phase) const;
+
+    /// @p value per entry, averaged with compute_weights() over the entries it
+    /// returns a value for (nullopt skips one); nullopt when it skips them all
+    [[nodiscard]] std::optional<double> weighted_entry_mean(
+        const std::function<std::optional<double>(const PreprintEntry&)>& value) const;
 
     std::vector<PreprintEntry> entries_;
 };

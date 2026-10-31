@@ -15,12 +15,12 @@ namespace helix::label {
 // --- Paper dimensions ---
 
 // Letter: 215.9mm x 279.4mm (8.5" x 11")
-static constexpr float LETTER_WIDTH_MM = 215.9f;
-static constexpr float LETTER_HEIGHT_MM = 279.4f;
+static constexpr float kLetterWidthMm = 215.9f;
+static constexpr float kLetterHeightMm = 279.4f;
 
 // A4: 210mm x 297mm
-static constexpr float A4_WIDTH_MM = 210.0f;
-static constexpr float A4_HEIGHT_MM = 297.0f;
+static constexpr float kA4WidthMm = 210.0f;
+static constexpr float kA4HeightMm = 297.0f;
 
 /// Convert millimeters to pixels at a given DPI
 static int mm_to_px(float mm, int dpi) {
@@ -30,14 +30,14 @@ static int mm_to_px(float mm, int dpi) {
 PageDimensions get_page_dimensions(PaperSize paper, int dpi) {
     switch (paper) {
     case PaperSize::LETTER:
-        return {mm_to_px(LETTER_WIDTH_MM, dpi), mm_to_px(LETTER_HEIGHT_MM, dpi), LETTER_WIDTH_MM,
-                LETTER_HEIGHT_MM};
+        return {mm_to_px(kLetterWidthMm, dpi), mm_to_px(kLetterHeightMm, dpi), kLetterWidthMm,
+                kLetterHeightMm};
     case PaperSize::A4:
-        return {mm_to_px(A4_WIDTH_MM, dpi), mm_to_px(A4_HEIGHT_MM, dpi), A4_WIDTH_MM, A4_HEIGHT_MM};
+        return {mm_to_px(kA4WidthMm, dpi), mm_to_px(kA4HeightMm, dpi), kA4WidthMm, kA4HeightMm};
     }
     // Unreachable, but satisfy compiler
-    return {mm_to_px(LETTER_WIDTH_MM, dpi), mm_to_px(LETTER_HEIGHT_MM, dpi), LETTER_WIDTH_MM,
-            LETTER_HEIGHT_MM};
+    return {mm_to_px(kLetterWidthMm, dpi), mm_to_px(kLetterHeightMm, dpi), kLetterWidthMm,
+            kLetterHeightMm};
 }
 
 const char* get_pwg_media_keyword(PaperSize paper) {

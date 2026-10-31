@@ -4,11 +4,13 @@
 
 #include "screensaver_registry.h"
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
+#include "screensaver_clock_reading.h"
 #include "screensaver_cpu_clock.h"
 #include "screensaver_gate.h"
 #include "screensaver_overlay.h"
+#include "screensaver_usage.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -16,36 +18,11 @@
 #include <lvgl.h>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
 namespace helix::ui {
-
-/**
- * @brief Color format of the starfield canvas
- *
- * Opaque, so the full-screen canvas draws as a straight copy instead of an alpha blend.
- * Production 32 bpp displays run ARGB8888 and copy an XRGB8888 image byte for byte, so
- * every canvas pixel's X byte must be 0xFF or that pixel draws transparent ("The alpha
- * trap" in docs/devel/GPU_ACCELERATION.md). The starfield writes every pixel itself with
- * that byte set. A canvas drawn with lv_draw_* cannot rely on it: see PIPES_CANVAS_FORMAT.
- */
-
-/**
- * @brief Color format of the pipes canvas
- *
- * Pipes draws antialiased segments and joints with lv_draw_*. On aarch64, LVGL's NEON
- * blends into an XRGB8888 destination write 0 into each pixel's 4th byte, and an XRGB8888
- * canvas is copied byte for byte into the ARGB8888 display, so those pixels would draw
- * transparent. An ARGB8888 canvas keeps real alpha, and it is filled opaque before anything
- * is drawn on it, so it still covers every pixel under the transparent overlay.
- *
- * RGB565 has no 4th byte for a blend to zero, so a 16 bpp build takes the display's own
- * format and the trap above does not arise. This is why pipes does not use
- * SAVER_BUILD_CANVAS_FORMAT: at 32 bpp it needs ARGB8888 specifically, not XRGB8888.
- */
-inline constexpr lv_color_format_t PIPES_CANVAS_FORMAT =
-    LV_COLOR_DEPTH == 16 ? LV_COLOR_FORMAT_RGB565 : LV_COLOR_FORMAT_ARGB8888;
 
 /**
  * @brief Row pitch in bytes lv_canvas_set_buffer() uses for a w-wide canvas in format cf
@@ -63,6 +40,7 @@ inline uint32_t screensaver_canvas_stride_bytes(int32_t w, lv_color_format_t cf)
 }
 
 class SaverBase;
+class ClockInputSink;
 struct BoardFacts;
 
 } // namespace helix::ui
@@ -90,6 +68,11 @@ class Screensaver {
 
     /** @brief Return the type identifier for this screensaver */
     virtual ScreensaverType type() const = 0;
+
+    /** @brief Where a clock saver reads the time and the print; nullptr for one without a clock */
+    virtual helix::ui::ClockInputSink* clock_input_sink() {
+        return nullptr;
+    }
 };
 
 namespace helix::ui {
@@ -100,6 +83,8 @@ struct SaverHost {
     std::function<bool()> is_printing;
     /// Running display path for the board fingerprint: "sdl", "fbdev", "drm" or "egl".
     std::string display_backend;
+    /// The print's phase, time left and progress; unset reads as no print.
+    std::function<ClockPrint()> print_status;
 };
 
 } // namespace helix::ui
@@ -129,7 +114,7 @@ class ScreensaverManager {
     ScreensaverManager& operator=(const ScreensaverManager&) = delete;
 
     /// Samples closer together than this are skipped by on_idle_check_tick().
-    static constexpr uint64_t SAMPLE_INTERVAL_NS = 250000000ULL;
+    static constexpr uint64_t kSampleIntervalNs = 250000000ULL;
 
     /**
      * @brief Start the specified screensaver type
@@ -138,7 +123,8 @@ class ScreensaverManager {
      *
      * The saver starts at the level stored for it on this board and app version, or at level 0
      * (HELIX_SCREENSAVER_LEVEL forces a level and turns the gate off for the run). A saver
-     * stored as too heavy shows a static black screen instead.
+     * stored as too heavy gives way to runnable_type(type); with every saver too heavy, a
+     * static black screen shows instead.
      *
      * While a saver runs, the active screen is hidden beneath its overlay
      * (helix::ScreenHideHold), and it stays hidden across a switch between types.
@@ -147,8 +133,10 @@ class ScreensaverManager {
      * configured (helix::RefreshPeriodHold). The black screen does not take that hold.
      * A saver that fails to start leaves the manager inactive, and the screen and
      * refresh period as they were before any saver ran.
+     *
+     * A run counts in usage() unless `preview` says it is the settings Test button's.
      */
-    void start(ScreensaverType type);
+    void start(ScreensaverType type, bool preview = false);
 
     /**
      * @brief Registry savers this build can draw but has no instance for
@@ -160,11 +148,52 @@ class ScreensaverManager {
      */
     std::vector<const char*> savers_missing_for_build_depth() const;
 
-    /** @brief Stop whatever screensaver or black screen is active */
-    void stop();
+    /**
+     * @brief The saver start(configured) runs on this board and app version
+     *
+     * `configured`, or when it is too heavy here the fallback helix::ui::runnable_screensaver
+     * picks. The stored setting is left alone.
+     */
+    ScreensaverType runnable_type(ScreensaverType configured);
+
+    /**
+     * @brief Whether this board cannot run `type`
+     *
+     * True when its stored entry for this board and app version is marked too heavy, or the
+     * build has no instance of a registered saver. False for OFF, for a value the registry does
+     * not know, and for a saver HELIX_SCREENSAVER_LEVEL runs at a forced level with the gate off.
+     */
+    bool too_heavy_here(ScreensaverType type);
+
+    /// The settings dropdown's options on this board with `configured` stored
+    /// (helix::ui::screensaver_choices).
+    std::vector<ScreensaverType> choices(ScreensaverType configured);
+
+    /// What the settings dropdown lists and selects with `configured` stored.
+    struct SettingsDropdown {
+        std::vector<ScreensaverType> choices;
+        /// The saver that runs, which the dropdown selects.
+        ScreensaverType runs = ScreensaverType::OFF;
+        /// Only on a board where every saver is too heavy: `runs` is the stored saver, listed
+        /// so that choosing Off is a change.
+        bool runs_too_heavy = false;
+    };
+    static SettingsDropdown settings_dropdown(ScreensaverType configured);
+
+    /** @brief Stop whatever screensaver or black screen is active; `how` is what usage() records */
+    void stop(helix::SaverRunEnd how = helix::SaverRunEnd::OTHER);
+
+    /// Seconds shown, starts and run endings per saver for telemetry; previews are left out.
+    helix::SaverUsage& usage() {
+        return usage_;
+    }
 
     /** @brief True while a screensaver or its black screen is up */
     bool is_active() const;
+
+    /// The saver running now, the type its black screen stands in for, or OFF. Never RANDOM:
+    /// a Random run reports the saver it drew.
+    ScreensaverType running_type() const;
 
     /** @brief Read configured screensaver type from DisplaySettingsManager, clamped */
     static ScreensaverType configured_type();
@@ -178,7 +207,8 @@ class ScreensaverManager {
      * Call on the display manager's idle-check tick. While no saver runs, samples feed the idle
      * baseline. While one runs they close the gate's windows: over budget steps the saver down
      * one level and stores that level; over budget at the lowest level stores the board as too
-     * heavy and replaces the saver with a static black screen.
+     * heavy and replaces the saver with its fallback (runnable_type), or a static black screen
+     * when every saver is too heavy.
      */
     void on_idle_check_tick();
 
@@ -197,9 +227,22 @@ class ScreensaverManager {
     /** @brief Find screensaver instance by type, or nullptr */
     helix::ui::SaverBase* find(ScreensaverType type) const;
 
-    /// Level, too-heavy mark and gating a run of `saver` starts with. Records the board and
-    /// version.
+    /// Level, too-heavy mark and gating a run of `saver` starts with, for the identity
+    /// refresh_identity() last read.
     StartPlan plan_start(const helix::ui::SaverBase& saver, const helix::ui::ScreensaverInfo& info);
+
+    /// Reads the core count, app version and board fingerprint the level store is keyed by.
+    void refresh_identity();
+
+    /// too_heavy_here() against the identity refresh_identity() last read.
+    bool too_heavy_for_identity(ScreensaverType type) const;
+
+    /// runnable_type() against the identity refresh_identity() last read.
+    ScreensaverType runnable_type_for_identity(ScreensaverType configured) const;
+
+    /// Starts `type`, already resolved by runnable_type(), keeping the screen hold out. A saver
+    /// stored as too heavy shows the black screen.
+    void launch(ScreensaverType type);
 
     helix::ui::BoardFacts board_facts(const helix::PlatformCapabilities& caps) const;
 
@@ -207,10 +250,19 @@ class ScreensaverManager {
     void begin_gate(const StartPlan& plan);
 
     /// Stops the running saver or black screen without giving back the holds.
-    void end_current();
+    void end_current(helix::SaverRunEnd how);
+
+    /// Records in usage_ that a run of `name` started, unless this one is a preview.
+    void count_run_start(const char* name);
+
+    /// Records in usage_ that the counted run ended, at `level` (none for the black screen).
+    void count_run_end(helix::SaverRunEnd how, std::optional<size_t> level);
 
     /// Shows the static black overlay in place of `type`.
     void show_black_screen(ScreensaverType type);
+
+    /// Runs the black screen in place of `type`: no held refresh period, counted, screen held.
+    void run_black_screen(ScreensaverType type);
 
     /// Stores `level` and `too_heavy` for the running saver on this board and version.
     void record_level(size_t level, bool too_heavy);
@@ -227,11 +279,17 @@ class ScreensaverManager {
     /** @brief Give back the hold taken by hold_refresh_period(), if one is out */
     void release_refresh_period();
 
+    /// The local time, date and the host's print, for the clock savers.
+    helix::ui::ClockInput clock_input() const;
+
     std::vector<std::unique_ptr<helix::ui::SaverBase>> screensavers_;
     helix::ui::SaverBase* active_ = nullptr;
     const helix::ui::ScreensaverInfo* active_info_ = nullptr;
     helix::ui::SaverOverlay black_screen_;
     ScreensaverType black_screen_type_ = ScreensaverType::OFF;
+    /// Draws a Random run's saver; last_random_ is the one it drew before.
+    std::minstd_rand random_;
+    ScreensaverType last_random_ = ScreensaverType::OFF;
     bool holds_screen_ = false;
     bool holds_refresh_period_ = false;
 
@@ -239,15 +297,22 @@ class ScreensaverManager {
     helix::ui::CpuClockFn cpu_clock_;
     helix::ui::IdleBaseline baseline_;
     helix::ui::SaverGateSession session_;
+    helix::ui::SaverComfortStreak comfort_;
     bool gate_enabled_ = false;
     std::optional<double> budget_override_;
     int cores_ = 0;
     size_t gated_level_ = 0;
     size_t requested_level_ = 0;
+    /// The highest rung a raise may reach this run: a rung that stepped down stays closed.
+    size_t level_ceiling_ = 0;
     uint64_t last_sample_ns_ = 0;
     bool sampled_ = false;
     std::string version_;
     std::string board_;
+
+    helix::SaverUsage usage_;
+    /// False while the running saver is a preview, which usage_ leaves out.
+    bool counting_ = false;
 };
 
 #endif // HELIX_ENABLE_SCREENSAVER

@@ -47,8 +47,8 @@ template <typename T> class ScopedConfigValue {
 };
 
 // Config's own defaults, mirrored so the restore above is a true restore.
-constexpr int CHANNEL_DEFAULT = 0;
-constexpr bool BETA_DEFAULT = false;
+constexpr int kChannelDefault = 0;
+constexpr bool kBetaDefault = false;
 
 } // namespace
 
@@ -57,8 +57,8 @@ TEST_CASE_METHOD(HelixTestFixture, "Only the Dev update channel needs beta featu
     auto& checker = UpdateChecker::instance();
 
     SECTION("Dev channel with beta locked reports Stable") {
-        ScopedConfigValue<bool> beta("/beta_features", false, BETA_DEFAULT);
-        ScopedConfigValue<int> chan("/update/channel", 2, CHANNEL_DEFAULT);
+        ScopedConfigValue<bool> beta("/beta_features", false, kBetaDefault);
+        ScopedConfigValue<int> chan("/update/channel", 2, kChannelDefault);
 
         CHECK(checker.get_channel() == UpdateChecker::UpdateChannel::Stable);
         CHECK(std::string(UpdateChecker::channel_name(checker.get_channel())) == "stable");
@@ -68,8 +68,8 @@ TEST_CASE_METHOD(HelixTestFixture, "Only the Dev update channel needs beta featu
         // Falling back one step would move the install onto a channel it was
         // never opted into, and the dropdown that appears on a locked install
         // would then read Beta for a value the user set to Dev.
-        ScopedConfigValue<bool> beta("/beta_features", false, BETA_DEFAULT);
-        ScopedConfigValue<int> chan("/update/channel", 2, CHANNEL_DEFAULT);
+        ScopedConfigValue<bool> beta("/beta_features", false, kBetaDefault);
+        ScopedConfigValue<int> chan("/update/channel", 2, kChannelDefault);
 
         CHECK_FALSE(checker.get_channel() == UpdateChecker::UpdateChannel::Beta);
     }
@@ -77,16 +77,16 @@ TEST_CASE_METHOD(HelixTestFixture, "Only the Dev update channel needs beta featu
     SECTION("Beta channel is honoured with beta locked") {
         // Stable/Beta is the picker every install gets, so a stored Beta has to
         // reach the checker without the beta-features unlock.
-        ScopedConfigValue<bool> beta("/beta_features", false, BETA_DEFAULT);
-        ScopedConfigValue<int> chan("/update/channel", 1, CHANNEL_DEFAULT);
+        ScopedConfigValue<bool> beta("/beta_features", false, kBetaDefault);
+        ScopedConfigValue<int> chan("/update/channel", 1, kChannelDefault);
 
         CHECK(checker.get_channel() == UpdateChecker::UpdateChannel::Beta);
         CHECK(std::string(UpdateChecker::channel_name(checker.get_channel())) == "beta");
     }
 
     SECTION("Stable channel with beta locked is unaffected") {
-        ScopedConfigValue<bool> beta("/beta_features", false, BETA_DEFAULT);
-        ScopedConfigValue<int> chan("/update/channel", 0, CHANNEL_DEFAULT);
+        ScopedConfigValue<bool> beta("/beta_features", false, kBetaDefault);
+        ScopedConfigValue<int> chan("/update/channel", 0, kChannelDefault);
 
         CHECK(checker.get_channel() == UpdateChecker::UpdateChannel::Stable);
     }
@@ -94,31 +94,31 @@ TEST_CASE_METHOD(HelixTestFixture, "Only the Dev update channel needs beta featu
     SECTION("Unlocking beta again restores the channel the user picked") {
         // The whole point of clamping at read time: the stored pick survives a
         // lock/unlock round trip. A rewrite-on-lock fix would fail this.
-        ScopedConfigValue<int> chan("/update/channel", 2, CHANNEL_DEFAULT);
+        ScopedConfigValue<int> chan("/update/channel", 2, kChannelDefault);
 
         {
-            ScopedConfigValue<bool> locked("/beta_features", false, BETA_DEFAULT);
+            ScopedConfigValue<bool> locked("/beta_features", false, kBetaDefault);
             REQUIRE(checker.get_channel() == UpdateChecker::UpdateChannel::Stable);
             // Clamping must not touch the persisted value.
             CHECK(helix::Config::get_instance()->get<int>("/update/channel", 0) == 2);
         }
 
-        ScopedConfigValue<bool> unlocked("/beta_features", true, BETA_DEFAULT);
+        ScopedConfigValue<bool> unlocked("/beta_features", true, kBetaDefault);
         CHECK(checker.get_channel() == UpdateChecker::UpdateChannel::Dev);
         CHECK(std::string(UpdateChecker::channel_name(checker.get_channel())) == "dev");
     }
 
     SECTION("Beta unlocked passes the Beta channel through") {
-        ScopedConfigValue<bool> beta("/beta_features", true, BETA_DEFAULT);
-        ScopedConfigValue<int> chan("/update/channel", 1, CHANNEL_DEFAULT);
+        ScopedConfigValue<bool> beta("/beta_features", true, kBetaDefault);
+        ScopedConfigValue<int> chan("/update/channel", 1, kChannelDefault);
 
         CHECK(checker.get_channel() == UpdateChecker::UpdateChannel::Beta);
         CHECK(std::string(UpdateChecker::channel_name(checker.get_channel())) == "beta");
     }
 
     SECTION("Out-of-range channel still degrades to Stable with beta unlocked") {
-        ScopedConfigValue<bool> beta("/beta_features", true, BETA_DEFAULT);
-        ScopedConfigValue<int> chan("/update/channel", 99, CHANNEL_DEFAULT);
+        ScopedConfigValue<bool> beta("/beta_features", true, kBetaDefault);
+        ScopedConfigValue<int> chan("/update/channel", 99, kChannelDefault);
 
         CHECK(checker.get_channel() == UpdateChecker::UpdateChannel::Stable);
     }

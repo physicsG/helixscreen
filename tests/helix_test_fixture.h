@@ -12,7 +12,7 @@ namespace helix::test {
 ///
 /// Created by a static initializer before main() and torn down at exit. The
 /// same initializer points the rolling-backup tiers
-/// (AppConstants::Update::state_dir() / backup_fallback_dir()) into it, so a
+/// (app_constants::update::state_dir() / backup_fallback_dir()) into it, so a
 /// test binary structurally cannot write the developer's $HOME/.helixscreen/
 /// or /var/lib/helixscreen/ backups.
 ///

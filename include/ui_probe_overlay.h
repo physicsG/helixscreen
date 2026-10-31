@@ -16,7 +16,9 @@
 #include <memory>
 #include <string>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 /**
  * @file ui_probe_overlay.h
@@ -64,7 +66,7 @@ class ProbeOverlay : public OverlayBase {
     // === Public API ===
     //
 
-    void set_api(IMoonrakerAPI* api);
+    void set_api(helix::IMoonrakerAPI* api);
 
     //
     // === Event Handlers (public for XML event_cb callbacks) ===
@@ -212,7 +214,7 @@ class ProbeOverlay : public OverlayBase {
     // Widget/client references
     friend struct ProbeOverlayTestAccess;
 
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     // Type-specific panel container
     lv_obj_t* type_panel_container_ = nullptr;

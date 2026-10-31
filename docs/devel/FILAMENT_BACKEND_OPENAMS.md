@@ -125,7 +125,7 @@ unload. While `ready` is false, every action is refused.
   the first member with a spool ready. A group with no ready member is refused before
   anything is sent, rather than failing in `OAMSM_VALIDATE_LOAD`.
 - **Load and unload** stay pending until Moonraker completes the macro call. Completion
-  emits `EVENT_LOAD_COMPLETE` or `EVENT_UNLOAD_COMPLETE`; failure unwinds the pending
+  emits `kEventLoadComplete` or `kEventUnloadComplete`; failure unwinds the pending
   action and keeps the reason in `operation_detail` until the next action or
   `clear_fault()`. The macro's own error reaches the user through the G-code error
   stream, so the dispatch passes `caller_surfaces_errors=false` and only unwinds. Both

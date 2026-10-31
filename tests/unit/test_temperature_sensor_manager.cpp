@@ -15,7 +15,11 @@
  * - Sorted output by priority
  */
 
+#include "../lvgl_test_fixture.h"
+#include "../test_helpers/discovery_of_objects.h"
 #include "../test_helpers/log_capture.h"
+#include "../test_helpers/sensor_manager_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "device_display_name.h"
 #include "temperature_sensor_manager.h"
@@ -40,11 +44,17 @@ namespace helix::sensors {
 class TemperatureSensorManagerTestAccess {
   public:
     static void reset(TemperatureSensorManager& obj) {
-        std::lock_guard<std::recursive_mutex> lock(obj.mutex_);
-        obj.sensors_.clear();
-        obj.temp_subjects_.clear();
-        obj.sync_mode_ = true;
+        SensorManagerTestAccess::reconcile(obj, {});
+        obj.set_sync_mode(true);
         obj.deinit_subjects();
+    }
+
+    static size_t temp_subject_count(TemperatureSensorManager& obj) {
+        return obj.temp_subjects_.size();
+    }
+
+    static size_t target_subject_count(TemperatureSensorManager& obj) {
+        return obj.target_subjects_.size();
     }
 };
 } // namespace helix::sensors
@@ -53,25 +63,9 @@ class TemperatureSensorManagerTestAccess {
 // Test Fixture
 // ============================================================================
 
-class TemperatureSensorTestFixture {
+class TemperatureSensorTestFixture : public LVGLTestFixture {
   public:
     TemperatureSensorTestFixture() {
-        // Initialize LVGL (safe version avoids "already initialized" warnings)
-        lv_init_safe();
-
-        // Create a headless display for testing
-        if (!display_created_) {
-            display_ = lv_display_create(480, 320);
-            alignas(64) static lv_color_t buf[480 * 10];
-            lv_display_set_buffers(display_, buf, nullptr, sizeof(buf),
-                                   LV_DISPLAY_RENDER_MODE_PARTIAL);
-            lv_display_set_flush_cb(display_,
-                                    [](lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-                                        lv_display_flush_ready(disp);
-                                    });
-            display_created_ = true;
-        }
-
         // Reset state for test isolation first (clears subjects)
         TemperatureSensorManagerTestAccess::reset(mgr());
 
@@ -80,6 +74,8 @@ class TemperatureSensorTestFixture {
     }
 
     ~TemperatureSensorTestFixture() {
+        // Refreshes the test queued run while the subjects are alive.
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
         // Reset after each test
         TemperatureSensorManagerTestAccess::reset(mgr());
     }
@@ -94,7 +90,7 @@ class TemperatureSensorTestFixture {
         std::vector<std::string> sensors = {"temperature_sensor mcu_temp",
                                             "temperature_sensor raspberry_pi",
                                             "temperature_fan exhaust_fan"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
     }
 
     // Helper to simulate Moonraker status update for a temperature sensor
@@ -112,13 +108,9 @@ class TemperatureSensorTestFixture {
     }
 
   private:
-    static lv_display_t* display_;
-    static bool display_created_;
 };
 
 // Static members
-lv_display_t* TemperatureSensorTestFixture::display_ = nullptr;
-bool TemperatureSensorTestFixture::display_created_ = false;
 
 // ============================================================================
 // Type Helper Tests (temperature_sensor_types.h)
@@ -176,9 +168,9 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - disco
                  "[temperature][discovery]") {
     SECTION("Discovers temperature_sensor objects") {
         std::vector<std::string> sensors = {"temperature_sensor mcu_temp"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
-        REQUIRE(mgr().has_sensors());
+        REQUIRE(mgr().sensor_count() > 0);
         REQUIRE(mgr().sensor_count() == 1);
 
         auto configs = mgr().get_sensors();
@@ -191,7 +183,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - disco
 
     SECTION("Discovers temperature_fan objects") {
         std::vector<std::string> sensors = {"temperature_fan exhaust_fan"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         REQUIRE(mgr().sensor_count() == 1);
 
@@ -201,21 +193,10 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - disco
         REQUIRE(configs[0].type == TemperatureSensorType::TEMPERATURE_FAN);
     }
 
-    SECTION("Ignores extruder, heater_bed, and unrelated objects") {
-        std::vector<std::string> sensors = {
-            "temperature_sensor mcu_temp", "temperature_sensor extruder",
-            "temperature_sensor heater_bed", "filament_switch_sensor runout", "bme280 chamber"};
-        mgr().discover(sensors);
-
-        REQUIRE(mgr().sensor_count() == 1);
-        REQUIRE(mgr().get_sensors()[0].sensor_name == "mcu_temp");
-    }
-
-    SECTION("Ignores extruder1 (multi-extruder)") {
-        std::vector<std::string> sensors = {"temperature_sensor mcu_temp",
-                                            "temperature_sensor extruder1",
-                                            "temperature_sensor extruder2"};
-        mgr().discover(sensors);
+    SECTION("Excludes the real heaters by kind and ignores unrelated objects") {
+        mgr().discover(
+            helix::test::discovery_of({"temperature_sensor mcu_temp", "extruder", "extruder1",
+                                       "heater_bed", "filament_switch_sensor runout"}));
 
         REQUIRE(mgr().sensor_count() == 1);
         REQUIRE(mgr().get_sensors()[0].sensor_name == "mcu_temp");
@@ -227,22 +208,22 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - disco
 
         mgr().discover({});
         REQUIRE(mgr().sensor_count() == 0);
-        REQUIRE_FALSE(mgr().has_sensors());
+        REQUIRE(mgr().sensor_count() == 0);
     }
 
     SECTION("Re-discovery replaces sensor list") {
         std::vector<std::string> sensors1 = {"temperature_sensor mcu_temp"};
-        mgr().discover(sensors1);
+        mgr().discover(helix::test::discovery_of(sensors1));
         REQUIRE(mgr().get_sensors()[0].sensor_name == "mcu_temp");
 
         std::vector<std::string> sensors2 = {"temperature_sensor raspberry_pi"};
-        mgr().discover(sensors2);
+        mgr().discover(helix::test::discovery_of(sensors2));
         REQUIRE(mgr().sensor_count() == 1);
         REQUIRE(mgr().get_sensors()[0].sensor_name == "raspberry_pi");
     }
 
     SECTION("Sensor count subject is updated") {
-        lv_subject_t* count_subject = mgr().get_sensor_count_subject();
+        lv_subject_t* count_subject = mgr().count_subject();
         REQUIRE(lv_subject_get_int(count_subject) == 0);
 
         discover_test_sensors();
@@ -261,7 +242,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - auto-
                  "[temperature][roles]") {
     SECTION("chamber_temp gets CHAMBER role, priority 0") {
         std::vector<std::string> sensors = {"temperature_sensor chamber_temp"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].role == TemperatureSensorRole::CHAMBER);
@@ -270,7 +251,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - auto-
 
     SECTION("mcu_temp gets MCU role, priority 10") {
         std::vector<std::string> sensors = {"temperature_sensor mcu_temp"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].role == TemperatureSensorRole::MCU);
@@ -279,7 +260,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - auto-
 
     SECTION("raspberry_pi gets HOST role, priority 20") {
         std::vector<std::string> sensors = {"temperature_sensor raspberry_pi"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].role == TemperatureSensorRole::HOST);
@@ -288,7 +269,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - auto-
 
     SECTION("random_sensor gets AUXILIARY role, priority 100") {
         std::vector<std::string> sensors = {"temperature_sensor random_sensor"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].role == TemperatureSensorRole::AUXILIARY);
@@ -297,7 +278,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - auto-
 
     SECTION("host_temp gets HOST role") {
         std::vector<std::string> sensors = {"temperature_sensor host_temp"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].role == TemperatureSensorRole::HOST);
@@ -305,7 +286,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - auto-
 
     SECTION("Name containing raspberry gets HOST role") {
         std::vector<std::string> sensors = {"temperature_sensor my_raspberry_sensor"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].role == TemperatureSensorRole::HOST);
@@ -321,7 +302,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - displ
     SECTION("Uses get_display_name for readable names") {
         std::vector<std::string> sensors = {"temperature_sensor mcu_temp",
                                             "temperature_sensor chamber_temp"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto configs = mgr().get_sensors();
         // get_display_name with DeviceType::TEMP_SENSOR produces readable names
@@ -337,7 +318,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - displ
         // causing duplicate entries in the thermistor widget sensor picker.
         std::vector<std::string> sensors = {"temperature_sensor chamber",
                                             "temperature_sensor chamber_temp"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto sorted = mgr().get_sensors_sorted();
         REQUIRE(sorted.size() == 2);
@@ -403,77 +384,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - state
         json status = json::object();
         mgr().update_from_status(status);
 
-        REQUIRE(mgr().has_sensors());
-    }
-}
-
-// ============================================================================
-// Config Persistence Tests
-// ============================================================================
-
-TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - config persistence",
-                 "[temperature][config]") {
-    discover_test_sensors();
-
-    SECTION("save_config returns JSON with roles and enabled state") {
-        json config = mgr().save_config();
-
-        REQUIRE(config.is_object());
-        REQUIRE(config.contains("sensors"));
-        REQUIRE(config["sensors"].is_array());
-        REQUIRE(config["sensors"].size() == 3);
-
-        bool found_mcu = false;
-        for (const auto& sensor : config["sensors"]) {
-            if (sensor.value("klipper_name", "") == "temperature_sensor mcu_temp") {
-                REQUIRE(sensor.value("role", "") == "mcu");
-                REQUIRE(sensor.value("enabled", false) == true);
-                found_mcu = true;
-            }
-        }
-        REQUIRE(found_mcu);
-    }
-
-    SECTION("load_config restores roles") {
-        json config;
-        json sensors_array = json::array();
-
-        json sensor1;
-        sensor1["klipper_name"] = "temperature_sensor mcu_temp";
-        sensor1["role"] = "auxiliary";
-        sensor1["enabled"] = false;
-        sensors_array.push_back(sensor1);
-
-        config["sensors"] = sensors_array;
-
-        mgr().load_config(config);
-
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.sensor_name == "mcu_temp"; });
-        REQUIRE(it != configs.end());
-        REQUIRE(it->role == TemperatureSensorRole::AUXILIARY);
-        REQUIRE(it->enabled == false);
-    }
-
-    SECTION("load_config with unknown sensor is handled") {
-        json config;
-        json sensors_array = json::array();
-        json sensor1;
-        sensor1["klipper_name"] = "temperature_sensor unknown_sensor";
-        sensor1["role"] = "chamber";
-        sensors_array.push_back(sensor1);
-        config["sensors"] = sensors_array;
-
-        // Should not crash
-        mgr().load_config(config);
-
-        // Existing sensors should keep their auto-assigned roles
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.sensor_name == "mcu_temp"; });
-        REQUIRE(it != configs.end());
-        REQUIRE(it->role == TemperatureSensorRole::MCU);
+        REQUIRE(mgr().sensor_count() > 0);
     }
 }
 
@@ -487,7 +398,7 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture, "TemperatureSensorManager - sorte
         std::vector<std::string> sensors = {
             "temperature_sensor random_aux", "temperature_sensor mcu_temp",
             "temperature_sensor chamber_temp", "temperature_sensor raspberry_pi"};
-        mgr().discover(sensors);
+        mgr().discover(helix::test::discovery_of(sensors));
 
         auto sorted = mgr().get_sensors_sorted();
         REQUIRE(sorted.size() == 4);
@@ -546,7 +457,8 @@ TEST_CASE_METHOD(
     // A chamber-named object auto-takes the CHAMBER role. Overriding onto a
     // different, absent object is what reaches the unmatched branch: without an
     // incumbent CHAMBER sensor the call early-outs and logs nothing at all.
-    mgr().discover({"temperature_fan chamber_fan", "temperature_sensor mcu_temp"});
+    mgr().discover(
+        helix::test::discovery_of({"temperature_fan chamber_fan", "temperature_sensor mcu_temp"}));
     bool had_chamber = false;
     for (const auto& config : mgr().get_sensors()) {
         if (config.role == TemperatureSensorRole::CHAMBER) {
@@ -582,7 +494,8 @@ TEST_CASE_METHOD(
 TEST_CASE_METHOD(TemperatureSensorTestFixture,
                  "TemperatureSensorManager - heater_generic is a sensor with a target",
                  "[temperature][heater_generic]") {
-    mgr().discover({"heater_generic filament_dryer", "temperature_sensor mcu_temp"});
+    mgr().discover(helix::test::discovery_of(
+        {"heater_generic filament_dryer", "temperature_sensor mcu_temp"}));
 
     auto state_of = [&](const std::string& name) {
         for (const auto& c : mgr().get_sensors())
@@ -618,8 +531,9 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture,
                  "[temperature][heater_generic][chamber]") {
     // The heater has no "chamber" in its name, so only the override can tell
     // the manager it is the chamber's heater rather than an auxiliary one.
-    mgr().discover({"heater_generic enclosure_heat", "temperature_sensor chamber",
-                    "heater_generic filament_dryer"});
+    mgr().discover(
+        helix::test::discovery_of({"heater_generic enclosure_heat", "temperature_sensor chamber",
+                                   "heater_generic filament_dryer"}));
 
     mgr().apply_chamber_sensor_override("temperature_sensor chamber",
                                         "heater_generic enclosure_heat");
@@ -639,7 +553,8 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture,
                  "[temperature][heater_generic][chamber]") {
     // The saved sensor name is stale, so the incumbent roles stand; the
     // chamber heater must still leave the auxiliary list or it is graphed twice.
-    mgr().discover({"heater_generic enclosure_heat", "temperature_sensor mcu_temp"});
+    mgr().discover(helix::test::discovery_of(
+        {"heater_generic enclosure_heat", "temperature_sensor mcu_temp"}));
 
     mgr().apply_chamber_sensor_override("temperature_sensor gone", "heater_generic enclosure_heat");
 
@@ -658,8 +573,8 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture,
                  "[temperature][heater_generic]") {
     // Pickers and the settings list show display names only, so a chamber
     // heater and a chamber thermistor must not both read "Chamber ...".
-    mgr().discover(
-        {"heater_generic chamber", "temperature_sensor chamber", "heater_generic filament_dryer"});
+    mgr().discover(helix::test::discovery_of(
+        {"heater_generic chamber", "temperature_sensor chamber", "heater_generic filament_dryer"}));
 
     std::map<std::string, std::string> names;
     for (const auto& c : mgr().get_sensors())
@@ -668,4 +583,177 @@ TEST_CASE_METHOD(TemperatureSensorTestFixture,
     CHECK(names["heater_generic chamber"] == "Chamber Heater");
     CHECK(names["heater_generic filament_dryer"] == "Filament Dryer Heater");
     CHECK(names["heater_generic chamber"] != names["temperature_sensor chamber"]);
+}
+
+// ============================================================================
+// Discovery by kind
+// ============================================================================
+
+TEST_CASE_METHOD(
+    TemperatureSensorTestFixture,
+    "TemperatureSensorManager - heater_generic objects join the sensors, real heaters do not",
+    "[temperature][discovery]") {
+    mgr().discover(helix::test::discovery_of({"extruder", "heater_bed", "heater_generic chamber",
+                                              "heater_generic filament_dryer",
+                                              "temperature_sensor mcu_temp"}));
+
+    std::vector<std::string> names;
+    for (const auto& c : mgr().get_sensors())
+        names.push_back(c.klipper_name);
+    CHECK(names == std::vector<std::string>{"heater_generic chamber",
+                                            "heater_generic filament_dryer",
+                                            "temperature_sensor mcu_temp"});
+}
+
+TEST_CASE_METHOD(TemperatureSensorTestFixture,
+                 "TemperatureSensorManager - a sensor merely named like a heater is listed",
+                 "[temperature][discovery]") {
+    mgr().discover(helix::test::discovery_of({"extruder", "temperature_sensor extruder_board",
+                                              "temperature_sensor heater_bed_ambient"}));
+
+    REQUIRE(mgr().sensor_count() == 2);
+    CHECK(mgr().get_temp_subject("temperature_sensor extruder_board") != nullptr);
+    CHECK(mgr().get_temp_subject("extruder") == nullptr);
+}
+
+TEST_CASE_METHOD(TemperatureSensorTestFixture,
+                 "TemperatureSensorManager - humidity chips are temperature sensors",
+                 "[temperature][discovery][humidity]") {
+    mgr().discover(helix::test::discovery_of({"bme280 chamber", "aht20_f box"}));
+
+    REQUIRE(mgr().sensor_count() == 2);
+    auto sensors = mgr().get_sensors();
+    CHECK(sensors[0].role == TemperatureSensorRole::CHAMBER);
+    CHECK(sensors[1].role == TemperatureSensorRole::AUXILIARY);
+    CHECK(sensors[0].type == TemperatureSensorType::TEMPERATURE_SENSOR);
+}
+
+TEST_CASE_METHOD(TemperatureSensorTestFixture,
+                 "TemperatureSensorManager - a humidity chip's temperature names its chip",
+                 "[temperature][display][humidity]") {
+    auto name_of = [this](const std::string& klipper_name) {
+        for (const auto& s : mgr().get_sensors()) {
+            if (s.klipper_name == klipper_name) {
+                return s.display_name;
+            }
+        }
+        return std::string("<missing>");
+    };
+
+    SECTION("A thermistor keeps its plain name") {
+        mgr().discover(helix::test::discovery_of({"temperature_sensor chamber"}));
+        CHECK(name_of("temperature_sensor chamber") == "Chamber Temperature");
+    }
+
+    SECTION("A chip alone still names its chip") {
+        mgr().discover(helix::test::discovery_of({"aht20_f box"}));
+        CHECK(name_of("aht20_f box") == "Box Temperature (AHT20-F)");
+    }
+
+    SECTION("A thermistor and a chip of one name read differently") {
+        mgr().discover(helix::test::discovery_of({"temperature_sensor chamber", "bme280 chamber"}));
+        CHECK(name_of("temperature_sensor chamber") == "Chamber Temperature");
+        CHECK(name_of("bme280 chamber") == "Chamber Temperature (BME280)");
+    }
+
+    SECTION("The Settings row carries the same name") {
+        mgr().discover(helix::test::discovery_of({"bme280 chamber"}));
+        CHECK(mgr().row(0).name == "Chamber Temperature (BME280)");
+    }
+}
+
+TEST_CASE_METHOD(TemperatureSensorTestFixture,
+                 "TemperatureSensorManager - a bme280 status frame updates its temperature",
+                 "[temperature][state][humidity]") {
+    mgr().discover(helix::test::discovery_of({"bme280 chamber"}));
+
+    json status;
+    status["bme280 chamber"] = {{"temperature", 27.5}, {"humidity", 41.0}, {"pressure", 1002.0}};
+    mgr().update_from_status(status);
+
+    lv_subject_t* temp = mgr().get_temp_subject("bme280 chamber");
+    REQUIRE(temp != nullptr);
+    CHECK(lv_subject_get_int(temp) == 275);
+    auto state = mgr().get_sensor_state("bme280 chamber");
+    REQUIRE(state.has_value());
+    CHECK(state->temperature == Catch::Approx(27.5f));
+}
+
+TEST_CASE_METHOD(TemperatureSensorTestFixture,
+                 "TemperatureSensorManager - roles are by name, never offered, never exclusive",
+                 "[temperature][roles]") {
+    mgr().discover(helix::test::discovery_of({"tmc2240 stepper_x", "tmc5160 stepper_y",
+                                              "temperature_sensor chamber",
+                                              "temperature_sensor chamber_temp"}));
+
+    CHECK(mgr().offered_roles().empty());
+
+    std::map<std::string, TemperatureSensorConfig> by_name;
+    for (const auto& c : mgr().get_sensors())
+        by_name[c.klipper_name] = c;
+    CHECK(by_name["tmc2240 stepper_x"].role == TemperatureSensorRole::STEPPER_DRIVER);
+    CHECK(by_name["tmc2240 stepper_x"].priority == 30);
+    CHECK(by_name["tmc5160 stepper_y"].role == TemperatureSensorRole::STEPPER_DRIVER);
+    CHECK(by_name["temperature_sensor chamber"].role == TemperatureSensorRole::CHAMBER);
+    CHECK(by_name["temperature_sensor chamber_temp"].role == TemperatureSensorRole::CHAMBER);
+
+    // Setting CHAMBER on a third sensor does not take it from the others.
+    mgr().discover(helix::test::discovery_of({"temperature_sensor a", "temperature_sensor b"}));
+    mgr().set_role("temperature_sensor a", static_cast<uint8_t>(TemperatureSensorRole::CHAMBER));
+    mgr().set_role("temperature_sensor b", static_cast<uint8_t>(TemperatureSensorRole::CHAMBER));
+    for (const auto& c : mgr().get_sensors())
+        CHECK(c.role == TemperatureSensorRole::CHAMBER);
+}
+
+// ============================================================================
+// Per-sensor subject lifetime
+// ============================================================================
+
+TEST_CASE_METHOD(TemperatureSensorTestFixture,
+                 "TemperatureSensorManager - a vanished sensor's subjects are removed and expire",
+                 "[temperature][subjects][lifetime]") {
+    mgr().discover(
+        helix::test::discovery_of({"temperature_sensor keep", "temperature_sensor gone"}));
+
+    SubjectLifetime gone_lt;
+    SubjectLifetime keep_lt;
+    REQUIRE(mgr().get_temp_subject("temperature_sensor gone", gone_lt) != nullptr);
+    REQUIRE(mgr().get_temp_subject("temperature_sensor keep", keep_lt) != nullptr);
+    REQUIRE(gone_lt);
+    REQUIRE(*gone_lt);
+    CHECK(TemperatureSensorManagerTestAccess::temp_subject_count(mgr()) == 2);
+    CHECK(TemperatureSensorManagerTestAccess::target_subject_count(mgr()) == 2);
+
+    mgr().discover(helix::test::discovery_of({"temperature_sensor keep"}));
+
+    CHECK_FALSE(*gone_lt);
+    CHECK(*keep_lt);
+    CHECK(mgr().get_temp_subject("temperature_sensor gone") == nullptr);
+    SubjectLifetime unused;
+    CHECK(mgr().get_target_subject("temperature_sensor gone", unused) == nullptr);
+    CHECK(TemperatureSensorManagerTestAccess::temp_subject_count(mgr()) == 1);
+    CHECK(TemperatureSensorManagerTestAccess::target_subject_count(mgr()) == 1);
+}
+
+TEST_CASE_METHOD(TemperatureSensorTestFixture,
+                 "TemperatureSensorManager - deinit expires every sensor lifetime before freeing",
+                 "[temperature][subjects][lifetime]") {
+    mgr().discover(helix::test::discovery_of({"heater_generic dryer"}));
+
+    SubjectLifetime temp_lt;
+    SubjectLifetime target_lt;
+    REQUIRE(mgr().get_temp_subject("heater_generic dryer", temp_lt) != nullptr);
+    REQUIRE(mgr().get_target_subject("heater_generic dryer", target_lt) != nullptr);
+    REQUIRE(*temp_lt);
+    CHECK(target_lt == temp_lt);
+
+    mgr().deinit_subjects();
+
+    CHECK_FALSE(*temp_lt);
+    CHECK_FALSE(*target_lt);
+    CHECK(mgr().get_temp_subject("heater_generic dryer") == nullptr);
+
+    // Subjects come back on the next init for the sensors that remain.
+    mgr().init_subjects();
+    CHECK(mgr().get_temp_subject("heater_generic dryer") != nullptr);
 }

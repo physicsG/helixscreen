@@ -60,6 +60,11 @@ class TileSizing {
         /// The label is the only thing telling this tile from its siblings
         /// (which fan, which sensor), so the glyph shrinks before it goes.
         bool label_is_identity = false;
+        /// Font token of a line drawn under the label in a column and never in
+        /// a row, such as bypass's spool row; null for none. Only while it is
+        /// drawn: a tile that shows it on a state change sets it then and
+        /// calls remeasure().
+        const char* detail_font = nullptr;
     };
 
     explicit TileSizing(const std::string& instance_id);
@@ -104,6 +109,10 @@ class TileSizing {
 
     /// Measure at this pixel box and publish the verdict.
     void measure_and_publish(int width_px, int height_px);
+
+    /// Measure again at the last box, after something the verdict reads has
+    /// changed. Does nothing before the first measurement.
+    void remeasure();
 
     /// Whether the tile can draw here. Monotonic, as PanelWidget::fits_at
     /// requires, because decide_tile_layout is.

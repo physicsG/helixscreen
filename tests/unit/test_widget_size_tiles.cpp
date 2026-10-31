@@ -10,12 +10,15 @@
  * Run with: ./build/bin/helix-tests "[widget_size][tile]"
  */
 
+#include "ui_humidity_drop.h"
 #include "ui_tile_rung.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/bypass_engaged_seed.h"
 #include "../test_helpers/panel_widget_size_harness.h"
 #include "../test_helpers/scoped_breakpoint.h"
+#include "../test_helpers/scoped_widget_labels.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_component.h"
@@ -25,9 +28,12 @@
 #include "panel_widget_registry.h"
 #include "settings_manager.h"
 #include "src/ui/panel_widgets/led_widget.h"
+#include "src/ui/panel_widgets/tile_layout.h"
 #include "src/ui/panel_widgets/tile_sizing.h"
 #include "system_settings_manager.h"
 #include "theme_manager.h"
+
+#include <cstdlib>
 
 #include "../catch_amalgamated.hpp"
 
@@ -43,6 +49,29 @@ class PlainWidget : public helix::PanelWidget {
         return "plain";
     }
 };
+
+/// Every widget whose home tile is a centred icon sized by a TileSizing.
+const std::vector<std::string> kCentredIconTiles = {"shutdown",
+                                                    "lock",
+                                                    "firmware_restart",
+                                                    "led_controls",
+                                                    "macros",
+                                                    "motion",
+                                                    "gcode_console",
+                                                    "led",
+                                                    "network",
+                                                    "bypass",
+                                                    "notifications",
+                                                    "power_device",
+                                                    "favorite_macro",
+                                                    "humidity",
+                                                    "width_sensor",
+                                                    "fan",
+                                                    "thermistor",
+                                                    "filament",
+                                                    "temperature",
+                                                    "bed_temperature",
+                                                    "chamber_temperature"};
 
 } // namespace
 
@@ -78,7 +107,7 @@ namespace {
 /// A tile component whose icon face is bound to whichever per-instance subject
 /// it is handed. Two instances get different subject names, so a verdict
 /// published to one must not move the other.
-constexpr const char* TILE_FIXTURE_XML = R"(<component>
+constexpr const char* kTileFixtureXml = R"(<component>
   <api>
     <prop name="tile_icon_subject" type="string" default=""/>
   </api>
@@ -97,7 +126,7 @@ constexpr const char* TILE_FIXTURE_XML = R"(<component>
 lv_obj_t* create_tile(lv_obj_t* parent, const helix::TileSizing& sizing) {
     static bool registered = false;
     if (!registered) {
-        REQUIRE(lv_xml_register_component_from_data("tile_size_fixture", TILE_FIXTURE_XML) ==
+        REQUIRE(lv_xml_register_component_from_data("tile_size_fixture", kTileFixtureXml) ==
                 LV_RESULT_OK);
         registered = true;
     }
@@ -248,13 +277,50 @@ TEST_CASE("half a cell at the small tiers depends on whether the tile shows a re
         CHECK_FALSE(reading.fits(40, 76));
     }
 
-    SECTION("micro: every tile floors at a whole cell") {
+    SECTION("micro: a lone glyph takes half a cell, a reading floors at a whole one") {
         helix::test::ScopedBreakpoint bp(UiBreakpoint::Micro);
         const CellMetrics m{34.0f, 30.0f, 2, 12, 8};
         icon_only.set_cell_metrics(m);
-        CHECK_FALSE(icon_only.fits(34, 64));
-        CHECK(icon_only.fits(70, 64));
+        reading.set_cell_metrics(m);
+        CHECK(icon_only.fits(34, 30));
+        CHECK_FALSE(reading.fits(34, 64));
+        CHECK_FALSE(reading.fits(70, 30));
+        CHECK(reading.fits(70, 64));
     }
+}
+
+TEST_CASE("a glyph-only tile is not charged its stack's gap", "[widget_size][tile]") {
+    // Two tiles identical but for the gap between glyph and label. With the
+    // label off, the glyph is the only part drawn, so the gap must not shrink it.
+    LVGLUITestFixture fixture;
+    helix::test::ScopedBreakpoint bp(UiBreakpoint::Micro);
+    const CellMetrics m{34.0f, 30.0f, 2, 12, 8};
+
+    auto make_stack = [&](int row_gap) {
+        lv_obj_t* root = lv_obj_create(fixture.test_screen());
+        lv_obj_set_style_pad_all(root, 0, LV_PART_MAIN);
+        lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(root, row_gap, LV_PART_MAIN);
+        lv_obj_set_style_pad_column(root, row_gap, LV_PART_MAIN);
+        lv_obj_create(root);
+        lv_obj_t* label = lv_obj_create(root);
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+        return root;
+    };
+
+    helix::TileSizing tight("lock:tight");
+    helix::TileSizing loose("lock:loose");
+    tight.set_content({"", "", "", false});
+    loose.set_content({"", "", "", false});
+    tight.set_cell_metrics(m);
+    loose.set_cell_metrics(m);
+    tight.set_content_root(make_stack(1));
+    loose.set_content_root(make_stack(16));
+
+    tight.measure_and_publish(50, 50);
+    loose.measure_and_publish(50, 50);
+    REQUIRE(tight.icon_rung() > 0);
+    CHECK(loose.icon_rung() == tight.icon_rung());
 }
 
 TEST_CASE("every centred-icon tile resolves a different glyph at two sizes",
@@ -266,32 +332,10 @@ TEST_CASE("every centred-icon tile resolves a different glyph at two sizes",
     LVGLUITestFixture fixture;
     helix::init_widget_registrations();
 
-    const std::vector<std::string> kTiles = {"shutdown",
-                                             "lock",
-                                             "firmware_restart",
-                                             "led_controls",
-                                             "macros",
-                                             "motion",
-                                             "gcode_console",
-                                             "led",
-                                             "network",
-                                             "bypass",
-                                             "notifications",
-                                             "power_device",
-                                             "favorite_macro",
-                                             "humidity",
-                                             "width_sensor",
-                                             "fan",
-                                             "thermistor",
-                                             "filament",
-                                             "temperature",
-                                             "bed_temperature",
-                                             "chamber_temperature"};
-
     int scaled = 0;
     std::vector<std::string> unscaled;
 
-    for (const auto& id : kTiles) {
+    for (const auto& id : kCentredIconTiles) {
         const auto* def = find_widget_def(id);
         INFO("tile " << id);
         REQUIRE(def != nullptr);
@@ -321,7 +365,7 @@ TEST_CASE("every centred-icon tile resolves a different glyph at two sizes",
     }
     INFO("these tiles do not grow their glyph between 48px and 420px:" << joined);
     CHECK(unscaled.empty());
-    CHECK(scaled == static_cast<int>(kTiles.size()));
+    CHECK(scaled == static_cast<int>(kCentredIconTiles.size()));
 }
 
 namespace {
@@ -339,7 +383,9 @@ void collect_icon_fonts(lv_obj_t* root, std::vector<const lv_font_t*>& out) {
     for (uint32_t i = 0; i < n; ++i) {
         lv_obj_t* child = lv_obj_get_child(root, i);
         const lv_font_t* f = lv_obj_get_style_text_font(child, LV_PART_MAIN);
-        if (lv_obj_check_type(child, &lv_label_class) && helix::ui::is_icon_font(f)) {
+        const bool glyph =
+            lv_obj_check_type(child, &lv_label_class) || helix::ui::is_humidity_drop(child);
+        if (glyph && helix::ui::is_icon_font(f)) {
             out.push_back(f);
         }
         collect_icon_fonts(child, out);
@@ -357,30 +403,8 @@ TEST_CASE("every centred-icon tile RENDERS a different glyph at two sizes",
     LVGLUITestFixture fixture;
     helix::init_widget_registrations();
 
-    const std::vector<std::string> kTiles = {"shutdown",
-                                             "lock",
-                                             "firmware_restart",
-                                             "led_controls",
-                                             "macros",
-                                             "motion",
-                                             "gcode_console",
-                                             "led",
-                                             "network",
-                                             "bypass",
-                                             "notifications",
-                                             "power_device",
-                                             "favorite_macro",
-                                             "humidity",
-                                             "width_sensor",
-                                             "fan",
-                                             "thermistor",
-                                             "filament",
-                                             "temperature",
-                                             "bed_temperature",
-                                             "chamber_temperature"};
-
     std::vector<std::string> unscaled;
-    for (const auto& id : kTiles) {
+    for (const auto& id : kCentredIconTiles) {
         const auto* def = find_widget_def(id);
         INFO("tile " << id);
         REQUIRE(def != nullptr);
@@ -464,30 +488,8 @@ TEST_CASE("every tile exposes its live instance to edit mode", "[widget_size][ti
     LVGLUITestFixture fixture;
     helix::init_widget_registrations();
 
-    const std::vector<std::string> kTiles = {"shutdown",
-                                             "lock",
-                                             "firmware_restart",
-                                             "led_controls",
-                                             "macros",
-                                             "motion",
-                                             "gcode_console",
-                                             "led",
-                                             "network",
-                                             "bypass",
-                                             "notifications",
-                                             "power_device",
-                                             "favorite_macro",
-                                             "humidity",
-                                             "width_sensor",
-                                             "fan",
-                                             "thermistor",
-                                             "filament",
-                                             "temperature",
-                                             "bed_temperature",
-                                             "chamber_temperature"};
-
     std::vector<std::string> unreachable;
-    for (const auto& id : kTiles) {
+    for (const auto& id : kCentredIconTiles) {
         const auto* def = find_widget_def(id);
         INFO("tile " << id);
         REQUIRE(def != nullptr);
@@ -953,4 +955,274 @@ TEST_CASE("a tile forgets its content root when the root is deleted", "[widget_s
     lv_obj_delete(root);
     CHECK(sizing.content_root() == nullptr);
     sizing.measure_and_publish(120, 120); // walks nothing
+}
+
+namespace {
+
+/// Each of @p tiles, with the boxes it draws differently on a second decision.
+std::vector<std::string> unsettled_tiles(lv_obj_t* screen, const std::vector<std::string>& tiles,
+                                         const std::vector<std::pair<int, int>>& boxes) {
+    std::vector<std::string> unsettled;
+    for (const auto& id : tiles) {
+        const auto* def = find_widget_def(id);
+        INFO("tile " << id);
+        REQUIRE(def != nullptr);
+        RegistryWidgetHarness h(screen, *def);
+        REQUIRE(h.created());
+        std::string joined;
+        for (const auto& box : h.unsettled_boxes(boxes)) {
+            joined += " " + box;
+        }
+        if (!joined.empty()) {
+            unsettled.push_back(id + ":" + joined);
+        }
+    }
+    return unsettled;
+}
+
+} // namespace
+
+TEST_CASE("every centred-icon tile draws a box the same whatever it drew before",
+          "[widget_size][tile][1805]") {
+    LVGLUITestFixture fixture;
+    helix::init_widget_registrations();
+    helix::test::ScopedWidgetLabelsShown labels;
+
+    std::vector<std::pair<int, int>> boxes;
+    for (int w : {44, 114, 173}) {
+        const auto column = box_sweep(w, w, 20, 160);
+        boxes.insert(boxes.end(), column.begin(), column.end());
+    }
+    for (int h : {30, 60}) {
+        const auto row = box_sweep(20, 240, h, h);
+        boxes.insert(boxes.end(), row.begin(), row.end());
+    }
+
+    {
+        helix::test::BypassEngagedSeed engaged;
+        CHECK(unsettled_tiles(fixture.test_screen(), {"bypass"}, boxes) ==
+              std::vector<std::string>{});
+    }
+    CHECK(unsettled_tiles(fixture.test_screen(), kCentredIconTiles, boxes) ==
+          std::vector<std::string>{});
+}
+
+TEST_CASE("an engaged bypass tile's spool row fits the box it is given",
+          "[widget_size][tile][1805]") {
+    LVGLUITestFixture fixture;
+    helix::init_widget_registrations();
+    helix::test::BypassEngagedSeed engaged;
+    // The row is drawn only under a drawn caption.
+    helix::test::ScopedWidgetLabelsShown labels;
+
+    const auto* def = find_widget_def("bypass");
+    REQUIRE(def != nullptr);
+    RegistryWidgetHarness h(fixture.test_screen(), *def);
+    REQUIRE(h.created());
+    lv_obj_t* row = h.child("bypass_active_row");
+    REQUIRE(row != nullptr);
+
+    int row_drawn = 0;
+    for (int edge = 40; edge <= 240; edge += 2) {
+        h.resize(1, 1, edge, edge);
+        if (!lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN)) {
+            ++row_drawn;
+        }
+        require_no_overflow(h.root(), {}, "bypass at " + std::to_string(edge) + "px");
+    }
+    // The row is drawn somewhere in the sweep, so the fit check measured it.
+    CHECK(row_drawn > 0);
+}
+
+TEST_CASE("a bypass tile re-decides its box when bypass engages and disengages",
+          "[widget_size][tile][1805]") {
+    LVGLUITestFixture fixture;
+    helix::init_widget_registrations();
+    helix::test::BypassEngagedSeed seed;
+    helix::test::ScopedWidgetLabelsShown labels;
+    lv_subject_t* engaged = helix::AmsState::instance().get_bypass_active_subject();
+    lv_subject_set_int(engaged, 0);
+
+    const auto* def = find_widget_def("bypass");
+    REQUIRE(def != nullptr);
+    RegistryWidgetHarness h(fixture.test_screen(), *def);
+    REQUIRE(h.created());
+    lv_obj_t* row = h.child("bypass_active_row");
+    REQUIRE(row != nullptr);
+    auto verdict = [&] {
+        return "rung " +
+               std::to_string(lv_subject_get_int(lv_xml_get_subject(nullptr, "bypass_tile_icon"))) +
+               " label " +
+               std::to_string(
+                   lv_subject_get_int(lv_xml_get_subject(nullptr, "bypass_tile_label"))) +
+               " row " + (lv_obj_has_flag(row, LV_OBJ_FLAG_HIDDEN) ? "hidden" : "drawn");
+    };
+
+    int differing = 0;
+    for (int edge = 40; edge <= 240; edge += 2) {
+        INFO("bypass at " << edge << "px");
+        lv_subject_set_int(engaged, 0);
+        h.resize(1, 1, edge, edge);
+        const std::string off = verdict();
+
+        // Engaged with no resize: the tile decides as a fresh resize engaged would.
+        lv_subject_set_int(engaged, 1);
+        lv_obj_update_layout(h.root());
+        const std::string flipped_on = verdict();
+        h.resize(1, 1, edge, edge);
+        const std::string on = verdict();
+        CHECK(flipped_on == on);
+        if (on != off) {
+            ++differing;
+        }
+
+        // Disengaged again with no resize: back to the disengaged verdict.
+        lv_subject_set_int(engaged, 0);
+        lv_obj_update_layout(h.root());
+        CHECK(verdict() == off);
+    }
+    // Some box decides differently with the row than without it, so the flips are
+    // proved to re-decide rather than agreeing by coincidence.
+    CHECK(differing > 0);
+}
+
+// ============================================================================
+// The notifications tile's count badge follows the rung its bell glyph draws at
+// ============================================================================
+
+namespace {
+
+/// One notifications tile, built the way the manager builds it: a factory
+/// instance owns the TileSizing (so the per-instance subjects exist before the
+/// component is parsed) and the component is created with its attrs.
+struct NotificationsTile {
+    std::unique_ptr<helix::PanelWidget> widget;
+    lv_obj_t* root = nullptr;
+    lv_obj_t* bell = nullptr;
+    lv_obj_t* badge = nullptr;
+
+    explicit NotificationsTile(LVGLUITestFixture& fixture) {
+        const helix::PanelWidgetDef* def = helix::find_widget_def("notifications");
+        REQUIRE(def != nullptr);
+        REQUIRE(def->factory != nullptr);
+        widget = def->factory("notifications:0");
+        REQUIRE(widget != nullptr);
+
+        root = static_cast<lv_obj_t*>(lv_xml_create(
+            fixture.test_screen(), "panel_widget_notifications", widget->xml_attrs()));
+        REQUIRE(root != nullptr);
+        bell = lv_obj_find_by_name(root, "status_notification_icon");
+        badge = lv_obj_find_by_name(root, "notification_badge");
+        REQUIRE(bell != nullptr);
+        REQUIRE(badge != nullptr);
+    }
+
+    ~NotificationsTile() {
+        if (widget)
+            widget->detach();
+    }
+
+    /// Publish @p rung as TileSizing does: the requested rung, and the rung
+    /// the glyph draws at (@p drawn, or this build's own answer).
+    void set_rung(int rung, int drawn = -1) const {
+        lv_subject_set_int(lv_xml_get_subject(nullptr, "notifications:0_tile_icon"), rung);
+        lv_subject_set_int(lv_xml_get_subject(nullptr, "notifications:0_tile_drawn"),
+                           drawn >= 0 ? drawn : helix::ui::tile_drawn_rung(rung));
+        helix::ui::UpdateQueue::instance().drain();
+    }
+};
+
+} // namespace
+
+TEST_CASE("the notification badge follows the bell's rung", "[widget_size][tile]") {
+    LVGLUITestFixture fixture;
+    helix::init_widget_registrations();
+    NotificationsTile tile(fixture);
+
+    for (int rung = 0; rung < helix::kTileRungs; ++rung) {
+        INFO("rung " << rung);
+        tile.set_rung(rung);
+
+        const lv_font_t* bell_face = lv_obj_get_style_text_font(tile.bell, LV_PART_MAIN);
+        REQUIRE(bell_face != nullptr);
+
+        const int32_t badge_w = lv_obj_get_style_width(tile.badge, LV_PART_MAIN);
+
+        // The contract is the proportion, not the ladder value: 2/5 of the
+        // glyph the bell is actually drawing at this rung.
+        // The xxl glyph may draw a smaller face scaled up to its size.
+        const int bell_h = bell_face->line_height *
+                           lv_obj_get_style_transform_scale_x(tile.bell, LV_PART_MAIN) /
+                           LV_SCALE_NONE;
+        INFO("badge " << badge_w << " on bell line_height " << bell_h);
+        CHECK(std::abs(badge_w * 5 - bell_h * 2) <= 6);
+    }
+}
+
+TEST_CASE("the notification badge's label face fits the circle", "[widget_size][tile]") {
+    LVGLUITestFixture fixture;
+    helix::init_widget_registrations();
+    NotificationsTile tile(fixture);
+
+    const lv_obj_t* label = lv_obj_get_child(tile.badge, 0);
+    REQUIRE(label != nullptr);
+
+    const lv_font_t* font_xs = theme_manager_get_font("font_xs");
+    const lv_font_t* font_small = theme_manager_get_font("font_small");
+    REQUIRE(font_xs != nullptr);
+    REQUIRE(font_small != nullptr);
+    REQUIRE(font_xs != font_small);
+
+    // The cramped end: a badge too small for any face falls back to the
+    // smallest one rather than keeping a face that overflows.
+    tile.set_rung(0);
+    const int32_t dot = lv_obj_get_style_width(tile.badge, LV_PART_MAIN);
+    if (font_xs->line_height > dot) {
+        CHECK(lv_obj_get_style_text_font(label, LV_PART_MAIN) == font_xs);
+    }
+
+    // The roomy end: the face grows past font_xs and stays inside the circle.
+    tile.set_rung(4);
+    const int32_t big = lv_obj_get_style_width(tile.badge, LV_PART_MAIN);
+    const lv_font_t* face = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    REQUIRE(face != nullptr);
+    CHECK(face != font_xs);
+    CHECK(face->line_height <= big);
+}
+
+TEST_CASE("an xxl bell held to its xl face keeps the xl badge", "[widget_size][tile][xxl]") {
+    // xxl requested where the cap leaves the largest face at the xl size (the
+    // ESP32 image, or an animated glyph): the glyph draws at xl, so the badge
+    // must too, not at the xxl size the rung asked for.
+    LVGLUITestFixture fixture;
+    helix::init_widget_registrations();
+    NotificationsTile tile(fixture);
+
+    const int xxl = helix::kTileRungs - 1;
+    const int drawn = helix::ui::tile_drawn_rung(xxl, 64, 64);
+    REQUIRE(drawn == xxl - 1);
+    tile.set_rung(xxl, drawn);
+    CHECK(lv_obj_get_style_width(tile.badge, LV_PART_MAIN) ==
+          theme_manager_get_spacing("tile_badge_xl"));
+    CHECK(theme_manager_get_spacing("tile_badge_xl") !=
+          theme_manager_get_spacing("tile_badge_xxl"));
+}
+
+TEST_CASE("the notifications tile publishes the rung its bell draws at",
+          "[widget_size][tile][xxl]") {
+    LVGLUITestFixture fixture;
+    helix::init_widget_registrations();
+    NotificationsTile tile(fixture);
+    lv_subject_t* icon = lv_xml_get_subject(nullptr, "notifications:0_tile_icon");
+    lv_subject_t* drawn = lv_xml_get_subject(nullptr, "notifications:0_tile_drawn");
+    REQUIRE(icon != nullptr);
+    REQUIRE(drawn != nullptr);
+
+    for (int px : {60, 420, 900}) {
+        INFO("box " << px);
+        tile.widget->notify_size_changed(2, 2, px, px);
+        CHECK(lv_subject_get_int(drawn) == helix::ui::tile_drawn_rung(lv_subject_get_int(icon)));
+    }
+    // The biggest box asks for the top rung, which the default seed never holds.
+    CHECK(lv_subject_get_int(icon) != 2);
 }

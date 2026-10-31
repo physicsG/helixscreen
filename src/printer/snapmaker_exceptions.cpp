@@ -67,6 +67,10 @@ bool field_persistent(const nlohmann::json& entry, const char* key) {
 
 } // namespace
 
+std::string format_exception_code(const ExceptionCode& c) {
+    return fmt::format("{:04d}-{:04d}-{:04d}-{:04d}", c.level, c.id, c.index, c.code);
+}
+
 std::optional<ExceptionCode> decode_exception_code(const std::string& text) {
     // Scan for NNNN-NNNN-NNNN-NNNN. Requiring all four groups is what keeps the
     // three-part basic form from decoding as a shifted four-part one.
@@ -142,8 +146,7 @@ std::optional<ActiveException> read_exception_entry(const nlohmann::json& entry)
 }
 
 std::string coded_line(const ActiveException& fault) {
-    return fmt::format("!! {:04d}-{:04d}-{:04d}-{:04d} {}", fault.code.level, fault.code.id,
-                       fault.code.index, fault.code.code, fault.message);
+    return fmt::format("!! {} {}", snapmaker::format_exception_code(fault.code), fault.message);
 }
 
 std::vector<ActiveException> read_active_exceptions(const nlohmann::json& status) {

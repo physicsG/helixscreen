@@ -284,13 +284,13 @@ void PixelBuffer::fill_triangle_solid(int x1, int y1, int x2, int y2, int x3, in
 namespace {
 
 // Adaptive gradient rasterization: span widths and how many color segments each gets
-constexpr int GRADIENT_MIN_LINE_WIDTH = 3;
-constexpr int GRADIENT_THIN_LINE_THRESHOLD = 20;
-constexpr int GRADIENT_MEDIUM_LINE_THRESHOLD = 50;
-constexpr int GRADIENT_THIN_SEGMENT_COUNT = 2;
-constexpr int GRADIENT_MEDIUM_SEGMENT_COUNT = 3;
-constexpr int GRADIENT_WIDE_SEGMENT_COUNT = 4;
-constexpr double GRADIENT_SEGMENT_SAMPLE_POSITION = 0.5;
+constexpr int kGradientMinLineWidth = 3;
+constexpr int kGradientThinLineThreshold = 20;
+constexpr int kGradientMediumLineThreshold = 50;
+constexpr int kGradientThinSegmentCount = 2;
+constexpr int kGradientMediumSegmentCount = 3;
+constexpr int kGradientWideSegmentCount = 4;
+constexpr double kGradientSegmentSamplePosition = 0.5;
 
 struct ColorRGB {
     uint8_t r, g, b;
@@ -374,19 +374,19 @@ void PixelBuffer::fill_triangle_gradient(int x1, int y1, uint8_t r1, uint8_t g1,
             continue;
         }
 
-        if (line_width < GRADIENT_MIN_LINE_WIDTH) {
+        if (line_width < kGradientMinLineWidth) {
             // Thin line: use average color
             ColorRGB avg = lerp_color(c_left, c_right, 0.5);
             fill_hline(xl, line_width, y, avg.r, avg.g, avg.b, a);
         } else {
             // Adaptive segment count based on width
             int segment_count;
-            if (line_width < GRADIENT_THIN_LINE_THRESHOLD) {
-                segment_count = GRADIENT_THIN_SEGMENT_COUNT;
-            } else if (line_width < GRADIENT_MEDIUM_LINE_THRESHOLD) {
-                segment_count = GRADIENT_MEDIUM_SEGMENT_COUNT;
+            if (line_width < kGradientThinLineThreshold) {
+                segment_count = kGradientThinSegmentCount;
+            } else if (line_width < kGradientMediumLineThreshold) {
+                segment_count = kGradientMediumSegmentCount;
             } else {
-                segment_count = GRADIENT_WIDE_SEGMENT_COUNT;
+                segment_count = kGradientWideSegmentCount;
             }
 
             for (int si = 0; si < segment_count; si++) {
@@ -397,7 +397,7 @@ void PixelBuffer::fill_triangle_gradient(int x1, int y1, uint8_t r1, uint8_t g1,
                 }
 
                 // Sample color at segment center
-                double factor = (si + GRADIENT_SEGMENT_SAMPLE_POSITION) / segment_count;
+                double factor = (si + kGradientSegmentSamplePosition) / segment_count;
                 ColorRGB seg_color = lerp_color(c_left, c_right, factor);
                 fill_hline(seg_x_start, seg_x_end - seg_x_start + 1, y, seg_color.r, seg_color.g,
                            seg_color.b, a);

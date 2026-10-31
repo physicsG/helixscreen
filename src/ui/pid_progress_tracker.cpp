@@ -14,17 +14,17 @@ void PidProgressTracker::start(Heater heater, int target_temp, float current_tem
     start_tick_ = 0;
     last_tick_ = 0;
     thermal_model_.reset(current_temp);
-    thermal_model_.set_default_rate(heater == Heater::EXTRUDER ? DEFAULT_EXTRUDER_HEAT_RATE
-                                                               : DEFAULT_BED_HEAT_RATE);
+    thermal_model_.set_default_rate(heater == Heater::EXTRUDER ? kDefaultExtruderHeatRate
+                                                               : kDefaultBedHeatRate);
     was_above_target_ = false;
     oscillation_count_ = 0;
     first_oscillation_tick_ = 0;
     last_oscillation_tick_ = 0;
     measured_cycle_period_ = 0;
     has_measured_cycle_ = false;
-    has_kalico_ = false;
-    kalico_sample_ = 0;
-    kalico_total_ = 0;
+    has_sample_progress_ = false;
+    sample_number_ = 0;
+    sample_total_ = 0;
 }
 
 void PidProgressTracker::on_temperature(float temp, uint32_t tick_ms) {
@@ -75,7 +75,7 @@ void PidProgressTracker::mark_complete() {
 }
 
 float PidProgressTracker::heating_fraction() const {
-    float heat_est = (static_cast<float>(target_temp_) - start_temp_) * best_heat_rate();
+    float heat_est = thermal_model_.estimate_seconds(start_temp_, static_cast<float>(target_temp_));
     float osc_est = best_oscillation_duration();
     float total = heat_est + osc_est;
     if (total <= 0)
@@ -105,16 +105,16 @@ int PidProgressTracker::progress_percent() const {
     float osc_bar = (1.0f - heat_frac) * 95.0f;
     float base = heat_frac * 95.0f;
 
-    if (has_kalico_ && kalico_total_ > 0) {
+    if (has_sample_progress_ && sample_total_ > 0) {
         float sample_progress =
-            static_cast<float>(kalico_sample_) / static_cast<float>(kalico_total_);
+            static_cast<float>(sample_number_) / static_cast<float>(sample_total_);
         int pct = static_cast<int>(base + sample_progress * osc_bar);
         return std::min(pct, 95);
     }
 
     // Cycle-based progress
     float cycle_progress =
-        static_cast<float>(oscillation_count_) / static_cast<float>(EXPECTED_CYCLES);
+        static_cast<float>(oscillation_count_) / static_cast<float>(kExpectedCycles);
     cycle_progress = std::clamp(cycle_progress, 0.0f, 1.0f);
     int pct = static_cast<int>(base + cycle_progress * osc_bar);
     return std::min(pct, 95);
@@ -139,7 +139,7 @@ std::optional<int> PidProgressTracker::eta_seconds() const {
 
     // Oscillating
     if (has_measured_cycle_ && oscillation_count_ > 0) {
-        int remaining_cycles = EXPECTED_CYCLES - oscillation_count_;
+        int remaining_cycles = kExpectedCycles - oscillation_count_;
         if (remaining_cycles <= 0)
             return 0;
         // Subtract time elapsed within the current cycle for smooth countdown
@@ -178,18 +178,18 @@ void PidProgressTracker::set_history(float heat_rate_s_per_deg, float oscillatio
     }
 }
 
-void PidProgressTracker::on_kalico_sample(int sample, int estimated_total) {
-    has_kalico_ = true;
-    kalico_sample_ = sample;
-    kalico_total_ = estimated_total;
+void PidProgressTracker::on_sample_progress(int sample, int estimated_total) {
+    has_sample_progress_ = true;
+    sample_number_ = sample;
+    sample_total_ = estimated_total;
 }
 
 float PidProgressTracker::default_heat_rate() const {
-    return heater_ == Heater::EXTRUDER ? DEFAULT_EXTRUDER_HEAT_RATE : DEFAULT_BED_HEAT_RATE;
+    return heater_ == Heater::EXTRUDER ? kDefaultExtruderHeatRate : kDefaultBedHeatRate;
 }
 
 float PidProgressTracker::default_oscillation_duration() const {
-    return heater_ == Heater::EXTRUDER ? DEFAULT_EXTRUDER_OSCILLATION : DEFAULT_BED_OSCILLATION;
+    return heater_ == Heater::EXTRUDER ? kDefaultExtruderOscillation : kDefaultBedOscillation;
 }
 
 float PidProgressTracker::best_heat_rate() const {

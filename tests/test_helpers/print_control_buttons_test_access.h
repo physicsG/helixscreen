@@ -13,6 +13,8 @@ struct PrintControlButtonsTestAccess {
     static void reset() {
         auto& s = PrintControlButtons::instance();
         s.print_state_observer_.reset();
+        s.preparing_start_observer_.reset();
+        s.preparing_epoch_observer_.reset();
         if (s.pending_action_timeout_) {
             lv_timer_delete(s.pending_action_timeout_);
             s.pending_action_timeout_ = nullptr;
@@ -24,6 +26,32 @@ struct PrintControlButtonsTestAccess {
         // process (PrintStatusPanel::pending_action_observer_ above all).
         s.teardown_subjects();
         s.pending_action_ = PendingAction::None;
+    }
+
+    /// What the cancel modal's confirm button runs.
+    static void confirm_stop() {
+        PrintControlButtons::instance().confirm_stop();
+    }
+
+    static bool cancel_requested() {
+        return PrintControlButtons::instance().cancel_state_ !=
+               PrintControlButtons::CancelState::Idle;
+    }
+
+    static bool cancel_confirm_armed() {
+        return PrintControlButtons::instance().cancel_confirm_timer_ != nullptr;
+    }
+
+    /// Fire the confirm timer now instead of waiting kCancelConfirmMs.
+    static void fire_cancel_confirm() {
+        auto& s = PrintControlButtons::instance();
+        s.cancel_confirm_timer();
+        s.on_cancel_confirm_timeout();
+    }
+
+    /// The StaticSubjectRegistry teardown's own step.
+    static void teardown_subjects() {
+        PrintControlButtons::instance().teardown_subjects();
     }
 
     /// True if the singleton currently holds a live observer on the global

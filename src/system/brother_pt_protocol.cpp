@@ -11,7 +11,7 @@
 
 namespace helix::label {
 
-static constexpr std::array<BrotherPTTapeInfo, 6> TAPE_TABLE = {{
+static constexpr std::array<BrotherPTTapeInfo, 6> kTapeTable = {{
     {4, 24, 52},  // 3.5mm (status byte = 4)
     {6, 32, 48},  // 6mm
     {9, 50, 39},  // 9mm
@@ -21,7 +21,7 @@ static constexpr std::array<BrotherPTTapeInfo, 6> TAPE_TABLE = {{
 }};
 
 const BrotherPTTapeInfo* brother_pt_get_tape_info(int width_mm) {
-    for (const auto& t : TAPE_TABLE) {
+    for (const auto& t : kTapeTable) {
         if (t.width_mm == width_mm)
             return &t;
     }
@@ -131,7 +131,7 @@ std::vector<uint8_t> brother_pt_build_raster(const LabelBitmap& bitmap, int tape
     int bmp_h = bitmap.height();
 
     std::vector<uint8_t> cmd;
-    cmd.reserve(256 + static_cast<size_t>(bmp_h) * (3 + BROTHER_PT_RASTER_ROW_BYTES) + 1);
+    cmd.reserve(256 + static_cast<size_t>(bmp_h) * (3 + kBrotherPtRasterRowBytes) + 1);
 
     // 1. Invalidate — 100 bytes of 0x00
     cmd.insert(cmd.end(), 100, 0x00);
@@ -189,7 +189,7 @@ std::vector<uint8_t> brother_pt_build_raster(const LabelBitmap& bitmap, int tape
 
     // 9. Raster rows — pin-precise margin centering
     // Each bitmap row (70 pixels for 12mm) is centered in the 128-pin print head
-    std::vector<uint8_t> padded_row(BROTHER_PT_RASTER_ROW_BYTES, 0x00);
+    std::vector<uint8_t> padded_row(kBrotherPtRasterRowBytes, 0x00);
     int margin_pins = tape->left_margin_pins;
 
     for (int y = 0; y < bmp_h; y++) {
@@ -207,14 +207,14 @@ std::vector<uint8_t> brother_pt_build_raster(const LabelBitmap& bitmap, int tape
                 int dst_pin = margin_pins + dst_x;
                 int dst_byte = dst_pin / 8;
                 int dst_bit = 7 - (dst_pin % 8);
-                if (dst_byte < BROTHER_PT_RASTER_ROW_BYTES)
+                if (dst_byte < kBrotherPtRasterRowBytes)
                     padded_row[dst_byte] |= (1 << dst_bit);
             }
         }
 
         // Check if all zeros
         bool all_white = true;
-        for (int b = 0; b < BROTHER_PT_RASTER_ROW_BYTES; b++) {
+        for (int b = 0; b < kBrotherPtRasterRowBytes; b++) {
             if (padded_row[b] != 0x00) {
                 all_white = false;
                 break;
@@ -225,7 +225,7 @@ std::vector<uint8_t> brother_pt_build_raster(const LabelBitmap& bitmap, int tape
             cmd.push_back(0x5A);
         } else {
             auto compressed =
-                brother_pt_packbits_compress(padded_row.data(), BROTHER_PT_RASTER_ROW_BYTES);
+                brother_pt_packbits_compress(padded_row.data(), kBrotherPtRasterRowBytes);
             cmd.push_back(0x47);
             cmd.push_back(static_cast<uint8_t>(compressed.size() & 0xFF));
             cmd.push_back(static_cast<uint8_t>((compressed.size() >> 8) & 0xFF));

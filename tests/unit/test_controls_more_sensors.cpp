@@ -10,6 +10,7 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/discovery_of_objects.h"
 #include "printer_state.h"
 #include "temperature_sensor_manager.h"
 
@@ -103,8 +104,8 @@ TEST_CASE_METHOD(ControlsMoreSensorsFixture,
                  "Controls more-sensors row counts every enabled non-chamber sensor",
                  "[controls][temps][more-sensors]") {
     TemperatureSensorManager::instance().discover(
-        {"temperature_sensor mcu_temp", "temperature_sensor raspberry_pi",
-         "temperature_fan exhaust_fan", "temperature_sensor chamber"});
+        helix::test::discovery_of({"temperature_sensor mcu_temp", "temperature_sensor raspberry_pi",
+                                   "temperature_fan exhaust_fan", "temperature_sensor chamber"}));
     build_and_activate();
 
     REQUIRE(caption() == "3 more sensors");
@@ -112,7 +113,8 @@ TEST_CASE_METHOD(ControlsMoreSensorsFixture,
 
 TEST_CASE_METHOD(ControlsMoreSensorsFixture, "Controls more-sensors row is empty with no sensors",
                  "[controls][temps][more-sensors]") {
-    TemperatureSensorManager::instance().discover({"temperature_sensor chamber"});
+    TemperatureSensorManager::instance().discover(
+        helix::test::discovery_of({"temperature_sensor chamber"}));
     build_and_activate();
 
     CHECK(caption().empty());
@@ -120,14 +122,14 @@ TEST_CASE_METHOD(ControlsMoreSensorsFixture, "Controls more-sensors row is empty
 
 TEST_CASE_METHOD(ControlsMoreSensorsFixture, "Controls more-sensors row follows rediscovery",
                  "[controls][temps][more-sensors]") {
-    TemperatureSensorManager::instance().discover(
-        {"temperature_sensor mcu_temp", "temperature_sensor raspberry_pi"});
+    TemperatureSensorManager::instance().discover(helix::test::discovery_of(
+        {"temperature_sensor mcu_temp", "temperature_sensor raspberry_pi"}));
     build_and_activate();
     REQUIRE(caption() == "2 more sensors");
 
-    TemperatureSensorManager::instance().discover({"temperature_sensor mcu_temp",
-                                                   "temperature_sensor raspberry_pi",
-                                                   "temperature_fan exhaust_fan"});
+    TemperatureSensorManager::instance().discover(
+        helix::test::discovery_of({"temperature_sensor mcu_temp", "temperature_sensor raspberry_pi",
+                                   "temperature_fan exhaust_fan"}));
     settle();
     CHECK(caption() == "3 more sensors");
 
@@ -138,7 +140,8 @@ TEST_CASE_METHOD(ControlsMoreSensorsFixture, "Controls more-sensors row follows 
 
 TEST_CASE_METHOD(ControlsMoreSensorsFixture, "Controls more-sensors row is a tap target",
                  "[controls][temps][more-sensors]") {
-    TemperatureSensorManager::instance().discover({"temperature_sensor mcu_temp"});
+    TemperatureSensorManager::instance().discover(
+        helix::test::discovery_of({"temperature_sensor mcu_temp"}));
     build_and_activate();
 
     CHECK(lv_obj_has_flag(list(), LV_OBJ_FLAG_CLICKABLE));

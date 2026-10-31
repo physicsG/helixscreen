@@ -24,7 +24,9 @@
 
       <!-- Logo image - 64x64 icons, use min_width/min_height to prevent clipping -->
       <lv_image name="ams_logo"
-                width="64" height="64" style_min_width="64" style_min_height="64" inner_align="center" hidden="true"/>
+                width="64" height="64" style_min_width="64" style_min_height="64" inner_align="center" hidden="true">
+        <bind_style_if_eq name="styles.ams_logo_mono" subject="wizard_ams_logo_color" ref_value="0"/>
+      </lv_image>
 
       <!-- Spacer between logo and text -->
       <lv_obj width="1" height="#space_md"/>

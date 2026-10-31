@@ -56,6 +56,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "SafetySettingsManager default values after in
         REQUIRE(SafetySettingsManager::instance().get_allow_cold_extrude() == false);
     }
 
+    SECTION("tool_change_require_confirmation defaults to true") {
+        REQUIRE(SafetySettingsManager::instance().get_tool_change_require_confirmation() == true);
+    }
+
     SECTION("min_toast_severity defaults to 0 (All) - no change for existing users") {
         // #1213: the gate must not suppress anything out of the box. Defaults to
         // the "All" rung so existing toast behaviour is unchanged until the user

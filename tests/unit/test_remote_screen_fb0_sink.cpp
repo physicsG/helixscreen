@@ -44,14 +44,14 @@ using namespace helix;
 
 namespace {
 
-constexpr int FB_W = 480;
-constexpr int FB_H = 320;
+constexpr int kFbW = 480;
+constexpr int kFbH = 320;
 constexpr uint32_t FB_STRIDE = 1920;                              // 480 * 4, no row padding
-constexpr size_t FB_SIZE = static_cast<size_t>(FB_STRIDE) * FB_H; // 614400
+constexpr size_t kFbSize = static_cast<size_t>(FB_STRIDE) * kFbH; // 614400
 
 // 16bpp (RGB565) destination geometry — some U1 firmwares expose fb0 at 16bpp.
-constexpr uint32_t FB_STRIDE16 = FB_W * 2;                            // 960, no row padding
-constexpr size_t FB_SIZE16 = static_cast<size_t>(FB_STRIDE16) * FB_H; // 307200
+constexpr uint32_t kFbStride16 = kFbW * 2;                            // 960, no row padding
+constexpr size_t kFbSize16 = static_cast<size_t>(kFbStride16) * kFbH; // 307200
 
 std::vector<uint8_t> read_file(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
@@ -69,11 +69,11 @@ std::string make_temp_fb_sized(size_t bytes) {
 }
 
 std::string make_temp_fb() {
-    return make_temp_fb_sized(FB_SIZE);
+    return make_temp_fb_sized(kFbSize);
 }
 
 std::string make_temp_fb16() {
-    return make_temp_fb_sized(FB_SIZE16);
+    return make_temp_fb_sized(kFbSize16);
 }
 
 // A frame whose px_map is a FULL-buffer-origin source (stride spans the whole
@@ -87,15 +87,15 @@ RemoteScreenFrame make_frame(const uint8_t* px, int32_t x1, int32_t y1, int32_t 
     f.y1 = y1;
     f.x2 = x2;
     f.y2 = y2;
-    f.disp_w = FB_W;
-    f.disp_h = FB_H;
+    f.disp_w = kFbW;
+    f.disp_h = kFbH;
     f.color_format = 18;
     f.src_stride = src_stride;
     f.src_format = fmt;
     return f;
 }
 
-// Fill a BGRA rect [x1,x2]x[y1,y2] within a full-size (FB_W x FB_H) buffer.
+// Fill a BGRA rect [x1,x2]x[y1,y2] within a full-size (kFbW x kFbH) buffer.
 void fill_bgra_rect(std::vector<uint8_t>& buf, uint32_t stride, int x1, int y1, int x2, int y2,
                     uint8_t b, uint8_t g, uint8_t r, uint8_t a) {
     for (int y = y1; y <= y2; ++y) {
@@ -115,23 +115,23 @@ TEST_CASE("Fb0MailboxSink: full-frame magenta blit", "[remote_screen][fb0]") {
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
     REQUIRE(sink.wants_frames());
 
-    std::vector<uint8_t> src(FB_SIZE);
-    for (size_t i = 0; i < FB_SIZE; i += 4) {
+    std::vector<uint8_t> src(kFbSize);
+    for (size_t i = 0; i < kFbSize; i += 4) {
         src[i + 0] = 0xFF;
         src[i + 1] = 0x00;
         src[i + 2] = 0xFF;
         src[i + 3] = 0xFF; // magenta BGRA
     }
 
-    sink.on_frame(make_frame(src.data(), 0, 0, FB_W - 1, FB_H - 1, FB_STRIDE));
+    sink.on_frame(make_frame(src.data(), 0, 0, kFbW - 1, kFbH - 1, FB_STRIDE));
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
     const size_t center = static_cast<size_t>(160) * FB_STRIDE + static_cast<size_t>(240) * 4;
     REQUIRE(fb[center + 0] == 0xFF);
     REQUIRE(fb[center + 2] == 0xFF);
@@ -148,13 +148,13 @@ TEST_CASE("Fb0MailboxSink: partial rect copies ITS content, not top-left (ghost 
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // Full-buffer source: RED across the whole buffer (incl. top-left), GREEN
     // only in the dirty rect (100,50)..(131,81). px_map is buffer origin.
-    std::vector<uint8_t> src(FB_SIZE);
-    fill_bgra_rect(src, FB_STRIDE, 0, 0, FB_W - 1, FB_H - 1, 0x00, 0x00, 0xFF,
+    std::vector<uint8_t> src(kFbSize);
+    fill_bgra_rect(src, FB_STRIDE, 0, 0, kFbW - 1, kFbH - 1, 0x00, 0x00, 0xFF,
                    0xFF);                                                     // red everywhere
     fill_bgra_rect(src, FB_STRIDE, 100, 50, 131, 81, 0x00, 0xFF, 0x00, 0xFF); // green rect
 
@@ -163,7 +163,7 @@ TEST_CASE("Fb0MailboxSink: partial rect copies ITS content, not top-left (ghost 
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
 
     // fb0 at the rect must be GREEN (the rect's content) — NOT red (top-left).
     for (int r = 50; r <= 81; ++r) {
@@ -190,19 +190,19 @@ TEST_CASE("Fb0MailboxSink: dirty rect past the edge is clamped", "[remote_screen
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // Full buffer, distinct color in the in-bounds corner region.
-    std::vector<uint8_t> src(FB_SIZE);
-    fill_bgra_rect(src, FB_STRIDE, 460, 300, FB_W - 1, FB_H - 1, 0x11, 0x22, 0x33, 0x44);
+    std::vector<uint8_t> src(kFbSize);
+    fill_bgra_rect(src, FB_STRIDE, 460, 300, kFbW - 1, kFbH - 1, 0x11, 0x22, 0x33, 0x44);
 
     // Area (460,300)..(500,340) extends past the 480x320 fb — must clamp.
     sink.on_frame(make_frame(src.data(), 460, 300, 500, 340, FB_STRIDE));
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE); // no write past the mapping
+    REQUIRE(fb.size() == kFbSize); // no write past the mapping
 
     const size_t tl = static_cast<size_t>(300) * FB_STRIDE + static_cast<size_t>(460) * 4;
     REQUIRE(fb[tl + 0] == 0x11);
@@ -219,27 +219,27 @@ TEST_CASE("Fb0MailboxSink: RGB565 source is converted to BGRA at the right posit
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // Full-size RGB565 buffer (stride 480*2 = 960). Pure red (0xF800) only in the
     // rect (10,10)..(25,25); rest zero.
-    constexpr uint32_t RGB_STRIDE = FB_W * 2; // 960
-    std::vector<uint8_t> src(static_cast<size_t>(RGB_STRIDE) * FB_H, 0);
+    constexpr uint32_t kRgbStride = kFbW * 2; // 960
+    std::vector<uint8_t> src(static_cast<size_t>(kRgbStride) * kFbH, 0);
     for (int y = 10; y <= 25; ++y) {
         for (int x = 10; x <= 25; ++x) {
-            size_t o = static_cast<size_t>(y) * RGB_STRIDE + static_cast<size_t>(x) * 2;
+            size_t o = static_cast<size_t>(y) * kRgbStride + static_cast<size_t>(x) * 2;
             src[o + 0] = 0x00;
             src[o + 1] = 0xF8; // 0xF800 = pure red
         }
     }
 
     sink.on_frame(
-        make_frame(src.data(), 10, 10, 25, 25, RGB_STRIDE, RemoteScreenPixelFormat::RGB565));
+        make_frame(src.data(), 10, 10, 25, 25, kRgbStride, RemoteScreenPixelFormat::RGB565));
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
 
     // 0xF800 -> R8=0xFF, G=0, B=0. fb0 BGRA: [B=0, G=0, R=0xFF, A=0xFF] at (12,12).
     const size_t off = static_cast<size_t>(12) * FB_STRIDE + static_cast<size_t>(12) * 4;
@@ -256,18 +256,18 @@ TEST_CASE("Fb0MailboxSink: RGB565 source is converted to BGRA at the right posit
 TEST_CASE("Fb0MailboxSink: unknown source format is skipped", "[remote_screen][fb0]") {
     std::string path = make_temp_fb();
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
-    std::vector<uint8_t> src(FB_SIZE, 0xAB);
-    sink.on_frame(make_frame(src.data(), 0, 0, FB_W - 1, FB_H - 1, FB_STRIDE,
+    std::vector<uint8_t> src(kFbSize, 0xAB);
+    sink.on_frame(make_frame(src.data(), 0, 0, kFbW - 1, kFbH - 1, FB_STRIDE,
                              RemoteScreenPixelFormat::Unknown));
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
     REQUIRE(fb[0] == 0x00);
-    REQUIRE(fb[FB_SIZE / 2] == 0x00);
+    REQUIRE(fb[kFbSize / 2] == 0x00);
 
     ::unlink(path.c_str());
 }
@@ -276,36 +276,36 @@ TEST_CASE("Fb0MailboxSink: 16bpp dest, RGB565 source is copied verbatim", "[remo
     std::string path = make_temp_fb16();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE16, 16);
+    sink.configure_geometry(kFbW, kFbH, kFbStride16, 16);
     REQUIRE(sink.start());
     REQUIRE(sink.wants_frames());
 
     // Full-size RGB565 source (stride matches the 16bpp dest). Distinct value
     // 0x1234 in the rect (40,30)..(71,61); rest zero. RGB565 -> RGB565 is a
     // straight per-row memcpy, so fb0 must equal the source bytes verbatim.
-    std::vector<uint8_t> src(FB_SIZE16, 0);
+    std::vector<uint8_t> src(kFbSize16, 0);
     const uint16_t val = 0x1234;
     for (int y = 30; y <= 61; ++y) {
         for (int x = 40; x <= 71; ++x) {
-            size_t o = static_cast<size_t>(y) * FB_STRIDE16 + static_cast<size_t>(x) * 2;
+            size_t o = static_cast<size_t>(y) * kFbStride16 + static_cast<size_t>(x) * 2;
             src[o + 0] = static_cast<uint8_t>(val & 0xFF);
             src[o + 1] = static_cast<uint8_t>(val >> 8);
         }
     }
 
     sink.on_frame(
-        make_frame(src.data(), 40, 30, 71, 61, FB_STRIDE16, RemoteScreenPixelFormat::RGB565));
+        make_frame(src.data(), 40, 30, 71, 61, kFbStride16, RemoteScreenPixelFormat::RGB565));
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE16);
+    REQUIRE(fb.size() == kFbSize16);
 
     // fb0 at a pixel inside the rect equals the source bytes (little-endian 0x1234).
-    const size_t off = static_cast<size_t>(45) * FB_STRIDE16 + static_cast<size_t>(50) * 2;
+    const size_t off = static_cast<size_t>(45) * kFbStride16 + static_cast<size_t>(50) * 2;
     REQUIRE(fb[off + 0] == 0x34);
     REQUIRE(fb[off + 1] == 0x12);
     // Last column of the rect (71) copied too.
-    const size_t last = static_cast<size_t>(45) * FB_STRIDE16 + static_cast<size_t>(71) * 2;
+    const size_t last = static_cast<size_t>(45) * kFbStride16 + static_cast<size_t>(71) * 2;
     REQUIRE(fb[last + 0] == 0x34);
     REQUIRE(fb[last + 1] == 0x12);
     // Outside the flushed rect stays zero.
@@ -318,12 +318,12 @@ TEST_CASE("Fb0MailboxSink: 16bpp dest, BGRA source packs to RGB565", "[remote_sc
     std::string path = make_temp_fb16();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE16, 16);
+    sink.configure_geometry(kFbW, kFbH, kFbStride16, 16);
     REQUIRE(sink.start());
 
     // Full-size BGRA source (stride 1920). Four known colors in four adjacent
     // cells; each must pack to its canonical RGB565 value in the 16bpp dest.
-    std::vector<uint8_t> src(FB_SIZE, 0);
+    std::vector<uint8_t> src(kFbSize, 0);
     fill_bgra_rect(src, FB_STRIDE, 0, 0, 7, 7, 0x00, 0x00, 0xFF, 0xFF);   // red   -> 0xF800
     fill_bgra_rect(src, FB_STRIDE, 10, 0, 17, 7, 0x00, 0xFF, 0x00, 0xFF); // green -> 0x07E0
     fill_bgra_rect(src, FB_STRIDE, 20, 0, 27, 7, 0xFF, 0x00, 0x00, 0xFF); // blue  -> 0x001F
@@ -334,10 +334,10 @@ TEST_CASE("Fb0MailboxSink: 16bpp dest, BGRA source packs to RGB565", "[remote_sc
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE16);
+    REQUIRE(fb.size() == kFbSize16);
 
     auto px16 = [&](int x, int y) -> uint16_t {
-        size_t o = static_cast<size_t>(y) * FB_STRIDE16 + static_cast<size_t>(x) * 2;
+        size_t o = static_cast<size_t>(y) * kFbStride16 + static_cast<size_t>(x) * 2;
         return static_cast<uint16_t>(fb[o] | (fb[o + 1] << 8));
     };
 
@@ -346,7 +346,7 @@ TEST_CASE("Fb0MailboxSink: 16bpp dest, BGRA source packs to RGB565", "[remote_sc
     REQUIRE(px16(23, 3) == 0x001F); // blue
     REQUIRE(px16(33, 3) == 0xFFFF); // white
     // Little-endian byte order in the buffer: red low byte 0x00, high byte 0xF8.
-    const size_t red_off = static_cast<size_t>(3) * FB_STRIDE16 + static_cast<size_t>(3) * 2;
+    const size_t red_off = static_cast<size_t>(3) * kFbStride16 + static_cast<size_t>(3) * 2;
     REQUIRE(fb[red_off + 0] == 0x00);
     REQUIRE(fb[red_off + 1] == 0xF8);
 
@@ -354,10 +354,10 @@ TEST_CASE("Fb0MailboxSink: 16bpp dest, BGRA source packs to RGB565", "[remote_sc
 }
 
 TEST_CASE("Fb0MailboxSink: unsupported bpp leaves an inactive no-op sink", "[remote_screen][fb0]") {
-    std::string path = make_temp_fb_sized(static_cast<size_t>(FB_W) * FB_H * 3); // 24bpp-ish
+    std::string path = make_temp_fb_sized(static_cast<size_t>(kFbW) * kFbH * 3); // 24bpp-ish
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_W * 3, 24); // 24bpp is rejected
+    sink.configure_geometry(kFbW, kFbH, kFbW * 3, 24); // 24bpp is rejected
     REQUIRE_FALSE(sink.start());
     REQUIRE_FALSE(sink.wants_frames());
 
@@ -366,13 +366,13 @@ TEST_CASE("Fb0MailboxSink: unsupported bpp leaves an inactive no-op sink", "[rem
 
 TEST_CASE("Fb0MailboxSink: failed start leaves an inactive no-op sink", "[remote_screen][fb0]") {
     Fb0MailboxSink sink("/proc/nonexistent_helix_fb0");
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
 
     REQUIRE_FALSE(sink.start());
     REQUIRE_FALSE(sink.wants_frames());
 
-    std::vector<uint8_t> src(FB_SIZE, 0xFF);
-    sink.on_frame(make_frame(src.data(), 0, 0, FB_W - 1, FB_H - 1, FB_STRIDE));
+    std::vector<uint8_t> src(kFbSize, 0xFF);
+    sink.on_frame(make_frame(src.data(), 0, 0, kFbW - 1, kFbH - 1, FB_STRIDE));
 
     sink.stop();
     REQUIRE_FALSE(sink.wants_frames());
@@ -383,33 +383,33 @@ TEST_CASE("Fb0MailboxSink: frame past px_map_len is skipped even when the inferr
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // The renderer only produced a 100-row buffer (e.g. a fallback backend after
     // DRM init failed), but the frame still reports the full 320-row display. The
     // inferred bound (src_stride * disp_h = 614400) therefore does NOT catch the
     // over-read; only the declared px_map_len does.
-    constexpr int32_t REAL_ROWS = 100;
-    const size_t real_len = static_cast<size_t>(FB_STRIDE) * REAL_ROWS; // 192000
+    constexpr int32_t kRealRows = 100;
+    const size_t real_len = static_cast<size_t>(FB_STRIDE) * kRealRows; // 192000
 
     // Backing allocation is deliberately larger than the declared length so the
     // pre-fix behaviour reads valid-but-wrong memory instead of crashing the
     // test run. 0xAB marks anything that gets mirrored.
-    std::vector<uint8_t> src(FB_SIZE, 0xAB);
+    std::vector<uint8_t> src(kFbSize, 0xAB);
 
-    RemoteScreenFrame f = make_frame(src.data(), 0, 200, FB_W - 1, 219, FB_STRIDE);
+    RemoteScreenFrame f = make_frame(src.data(), 0, 200, kFbW - 1, 219, FB_STRIDE);
     f.px_map_len = real_len;
     // Sanity: this frame passes the stride*disp_h inference but not the real length.
-    const size_t last_src = static_cast<size_t>(219) * FB_STRIDE + static_cast<size_t>(FB_W) * 4;
-    REQUIRE(last_src < static_cast<size_t>(FB_STRIDE) * FB_H);
+    const size_t last_src = static_cast<size_t>(219) * FB_STRIDE + static_cast<size_t>(kFbW) * 4;
+    REQUIRE(last_src < static_cast<size_t>(FB_STRIDE) * kFbH);
     REQUIRE(last_src > real_len);
 
     sink.on_frame(f);
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
     // Nothing mirrored: the fb0 file is still all zeros.
     const size_t row200 = static_cast<size_t>(200) * FB_STRIDE;
     REQUIRE(fb[row200 + 0] == 0x00);
@@ -425,22 +425,22 @@ TEST_CASE("Fb0MailboxSink: frame inside px_map_len still mirrors", "[remote_scre
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // Same short 100-row buffer, but the dirty rect lives inside it — the guard
     // must not reject a frame the declared length covers.
-    constexpr int32_t REAL_ROWS = 100;
-    std::vector<uint8_t> src(FB_SIZE, 0);
-    fill_bgra_rect(src, FB_STRIDE, 0, 10, FB_W - 1, 41, 0x00, 0xFF, 0x00, 0xFF); // green
+    constexpr int32_t kRealRows = 100;
+    std::vector<uint8_t> src(kFbSize, 0);
+    fill_bgra_rect(src, FB_STRIDE, 0, 10, kFbW - 1, 41, 0x00, 0xFF, 0x00, 0xFF); // green
 
-    RemoteScreenFrame f = make_frame(src.data(), 0, 10, FB_W - 1, 41, FB_STRIDE);
-    f.px_map_len = static_cast<size_t>(FB_STRIDE) * REAL_ROWS;
+    RemoteScreenFrame f = make_frame(src.data(), 0, 10, kFbW - 1, 41, FB_STRIDE);
+    f.px_map_len = static_cast<size_t>(FB_STRIDE) * kRealRows;
     sink.on_frame(f);
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
     const size_t off = static_cast<size_t>(20) * FB_STRIDE + static_cast<size_t>(240) * 4;
     REQUIRE(fb[off + 0] == 0x00);
     REQUIRE(fb[off + 1] == 0xFF);
@@ -477,7 +477,7 @@ TEST_CASE("Fb0MailboxSink: PARTIAL source is read from the rect's own origin, no
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // Rect (100,10)-(131,41): 32x32, area stride 128. The real U1 allocation is
@@ -485,15 +485,15 @@ TEST_CASE("Fb0MailboxSink: PARTIAL source is read from the rect's own origin, no
     // so absolute indexing stays INSIDE px_map_len here and silently reads the
     // wrong row rather than tripping the bounds guard.
     constexpr int32_t X1 = 100, Y1 = 10, X2 = 131, Y2 = 41;
-    constexpr uint32_t A_STRIDE = 32 * 4;
-    constexpr size_t ALLOC = static_cast<size_t>(FB_W) * 4 * 60; // 115200
+    constexpr uint32_t kAStride = 32 * 4;
+    constexpr size_t ALLOC = static_cast<size_t>(kFbW) * 4 * 60; // 115200
 
     // Row r of the AREA is tagged G = r, so mirroring the wrong source row is
     // detectable per row rather than as a single wrong colour.
     std::vector<uint8_t> src(ALLOC, 0x00);
     for (int r = 0; r < 32; ++r) {
         for (int c = 0; c < 32; ++c) {
-            size_t o = static_cast<size_t>(r) * A_STRIDE + static_cast<size_t>(c) * 4;
+            size_t o = static_cast<size_t>(r) * kAStride + static_cast<size_t>(c) * 4;
             src[o + 0] = 0x00;                    // B
             src[o + 1] = static_cast<uint8_t>(r); // G <- row marker
             src[o + 2] = 0x00;                    // R
@@ -505,10 +505,10 @@ TEST_CASE("Fb0MailboxSink: PARTIAL source is read from the rect's own origin, no
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
 
     // fb0 row (Y1 + r) must carry area row r's marker. Under absolute indexing
-    // the source offset is Y1*A_STRIDE + X1*4 = 1680, i.e. area row 13 — in
+    // the source offset is Y1*kAStride + X1*4 = 1680, i.e. area row 13 — in
     // bounds, wrong pixels.
     for (int r = 0; r < 32; ++r) {
         const size_t off = static_cast<size_t>(Y1 + r) * FB_STRIDE + static_cast<size_t>(X1) * 4;
@@ -525,7 +525,7 @@ TEST_CASE("Fb0MailboxSink: PARTIAL rect below the buffer's line window still mir
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // A rect at y=200 with a 32-row area-origin buffer. Absolute indexing runs
@@ -533,8 +533,8 @@ TEST_CASE("Fb0MailboxSink: PARTIAL rect below the buffer's line window still mir
     // skips the mirror entirely — the silent half of the bug (oob_warned_ is
     // one-shot, so it is one warning and then permanent silence).
     constexpr int32_t X1 = 100, Y1 = 200, X2 = 131, Y2 = 231;
-    constexpr uint32_t A_STRIDE = 32 * 4;
-    constexpr size_t ALLOC = static_cast<size_t>(A_STRIDE) * 32; // 4096
+    constexpr uint32_t kAStride = 32 * 4;
+    constexpr size_t ALLOC = static_cast<size_t>(kAStride) * 32; // 4096
 
     std::vector<uint8_t> src(ALLOC);
     for (size_t i = 0; i < ALLOC; i += 4) {
@@ -548,7 +548,7 @@ TEST_CASE("Fb0MailboxSink: PARTIAL rect below the buffer's line window still mir
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
 
     for (int r = Y1; r <= Y2; ++r) {
         const size_t off = static_cast<size_t>(r) * FB_STRIDE + static_cast<size_t>(X1) * 4;
@@ -564,14 +564,14 @@ TEST_CASE("Fb0MailboxSink: rect starting before the source origin is skipped",
     std::string path = make_temp_fb();
 
     Fb0MailboxSink sink(path);
-    sink.configure_geometry(FB_W, FB_H, FB_STRIDE, 32);
+    sink.configure_geometry(kFbW, kFbH, FB_STRIDE, 32);
     REQUIRE(sink.start());
 
     // A malformed frame whose declared source origin sits to the right of / below
     // the rect it describes. Indexing relative to that origin would go negative,
     // so the blit must skip rather than read backwards out of the allocation.
-    constexpr uint32_t A_STRIDE = 32 * 4;
-    constexpr size_t ALLOC = static_cast<size_t>(A_STRIDE) * 32;
+    constexpr uint32_t kAStride = 32 * 4;
+    constexpr size_t ALLOC = static_cast<size_t>(kAStride) * 32;
     std::vector<uint8_t> src(ALLOC, 0xAB);
 
     RemoteScreenFrame f = make_partial_frame(src.data(), 100, 50, 131, 81, ALLOC);
@@ -581,7 +581,7 @@ TEST_CASE("Fb0MailboxSink: rect starting before the source origin is skipped",
     sink.stop();
 
     std::vector<uint8_t> fb = read_file(path);
-    REQUIRE(fb.size() == FB_SIZE);
+    REQUIRE(fb.size() == kFbSize);
     // Nothing mirrored: the marker byte never reaches fb0.
     for (int r = 50; r <= 81; ++r) {
         const size_t off = static_cast<size_t>(r) * FB_STRIDE + static_cast<size_t>(100) * 4;
@@ -622,7 +622,7 @@ std::vector<FlushRecord>& flush_log() {
 TEST_CASE_METHOD(LVGLTestFixture, "LVGL PARTIAL mode flushes from the dirty area's own origin",
                  "[remote_screen][fb0][lvgl]") {
     constexpr int32_t W = 480, H = 320;
-    constexpr int32_t BAND = 40; // draw buffer is BAND lines tall, not H
+    constexpr int32_t kBand = 40; // draw buffer is kBand lines tall, not H
 
     flush_log().clear();
 
@@ -633,8 +633,8 @@ TEST_CASE_METHOD(LVGLTestFixture, "LVGL PARTIAL mode flushes from the dirty area
     // attaches the new screen to whatever display is default at that moment.
     lv_display_set_default(disp);
     const lv_color_format_t cf = lv_display_get_color_format(disp);
-    static std::vector<uint8_t> buf(static_cast<size_t>(lv_draw_buf_width_to_stride(W, cf)) * BAND +
-                                    1024);
+    static std::vector<uint8_t> buf(
+        static_cast<size_t>(lv_draw_buf_width_to_stride(W, cf)) * kBand + 1024);
     lv_display_set_buffers(disp, buf.data(), nullptr, static_cast<uint32_t>(buf.size()),
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, [](lv_display_t* d, const lv_area_t* area, uint8_t* px_map) {
@@ -676,7 +676,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "LVGL PARTIAL mode flushes from the dirty area
         REQUIRE(r.hdr_h == r.y2 - r.y1 + 1);
         REQUIRE(r.hdr_stride == lv_draw_buf_width_to_stride(r.hdr_w, cf));
         // The band is narrower than the display, which is the whole point.
-        REQUIRE(r.hdr_h <= BAND);
+        REQUIRE(r.hdr_h <= kBand);
     }
 
     // (3) The consequence that matters for the blit: a pixel's ABSOLUTE offset

@@ -25,8 +25,8 @@ namespace helix::ui {
 // varies per file. lv_obj_add_event_cb and lv_label_set_text are used here
 // as allowed exceptions for dynamic content.
 namespace {
-constexpr int TOOL_LABEL_MIN_W = 32;
-constexpr lv_opa_t SWATCH_BORDER_OPA = 30;
+constexpr int kToolLabelMinW = 32;
+constexpr lv_opa_t kSwatchBorderOpa = 30;
 
 // Process-wide, not per-instance: the dialog tree is deleted after the owning
 // modal's teardown, so instance-owned subjects would die under bound labels.
@@ -128,23 +128,30 @@ void FilamentMappingModal::on_ok() {
     if (on_updated_cb_) {
         on_updated_cb_(mappings_);
     }
-    hide();
+    hide(ModalCloseReason::ButtonPress);
 }
 
 void FilamentMappingModal::on_cancel() {
+    revert();
+    hide(ModalCloseReason::ButtonPress);
+}
+
+void FilamentMappingModal::on_dismissed() {
+    revert();
+}
+
+void FilamentMappingModal::revert() {
     mappings_ = original_mappings_;
 
-    // The persisted preference is part of what Cancel undoes. Without this the
-    // toggle was a one-way door: flip it to see the other mode, press Cancel,
-    // and the printer kept the new preference for every future print — on every
-    // backend that can reach this picker. Written only when it actually changed
-    // so a plain Cancel does not churn the settings file.
+    // The persisted preference is part of what a cancel undoes: the toggle
+    // writes it straight through, so a flip made only to see the other mode
+    // would otherwise stick for every future print, on every backend that can
+    // reach this picker. Written only when it changed, so a plain Cancel does
+    // not churn the settings file.
     if (auto_color_map_ != original_auto_color_map_) {
         SettingsManager::instance().set_auto_color_map(original_auto_color_map_);
         auto_color_map_ = original_auto_color_map_;
     }
-
-    hide();
 }
 
 // ============================================================================
@@ -198,7 +205,7 @@ lv_obj_t* FilamentMappingModal::create_tool_row(int tool_index) {
 
     lv_color_t gcode_color = lv_color_hex(tool.color_rgb);
     if (auto* expected_swatch = helix::ui::find_required(row, "expected_swatch", get_name())) {
-        lv_obj_set_style_bg_color(expected_swatch, gcode_color, 0);
+        helix::ui::apply_swatch_color(expected_swatch, tool.color_rgb, "");
     }
 
     if (auto* tool_label = helix::ui::find_required(row, "tool_label", get_name())) {
@@ -226,10 +233,11 @@ lv_obj_t* FilamentMappingModal::create_tool_row(int tool_index) {
     if (auto* chosen_swatch = helix::ui::find_required(row, "chosen_swatch", get_name())) {
         if (mapped && !mapped->is_empty) {
             helix::ui::apply_swatch_color(chosen_swatch, mapped->color_rgb,
-                                          mapped->multi_color_hexes);
+                                          mapped->multi_color_hexes,
+                                          helix::ui::swatch_finish(mapped->finish));
             lv_obj_remove_flag(chosen_swatch, LV_OBJ_FLAG_HIDDEN);
         } else if (mapped && mapped->is_empty) {
-            lv_obj_set_style_bg_opa(chosen_swatch, LV_OPA_TRANSP, 0);
+            helix::ui::clear_swatch_color(chosen_swatch);
             lv_obj_set_style_border_width(chosen_swatch, 2, 0);
             lv_obj_set_style_border_color(chosen_swatch, theme_manager_get_color("warning"), 0);
             lv_obj_set_style_border_opa(chosen_swatch, LV_OPA_COVER, 0);
@@ -308,11 +316,8 @@ std::string FilamentMappingModal::get_slot_display_text(const helix::ToolMapping
     }
 
     // No AvailableSlot here to carry a noun, so the active printer answers for
-    // it, with the number the slot's badge shows. The label helpers spell the
-    // whole label, so there is no buffer here for a translated noun to overrun.
-    if (const helix::AmsBackend* backend = helix::AmsState::instance().get_backend()) {
-        return helix::ui::backend_lane_label(*backend, mapping.mapped_slot);
-    }
+    // it. lane_label() spells the whole label, so there is no buffer here for a
+    // translated noun to overrun.
     return helix::ui::lane_label(helix::ui::active_lane_noun(), mapping.mapped_slot);
 }
 
@@ -347,23 +352,9 @@ void FilamentMappingModal::on_slot_selected(int tool_index,
         return;
     }
 
-    auto& mapping = mappings_[static_cast<size_t>(tool_index)];
-    mapping.mapped_slot = selection.slot_index;
-    mapping.mapped_backend = selection.backend_index;
-    mapping.is_auto = selection.is_auto;
-
-    // A hand-picked lane is a new pairing, so the old warnings are stale. Clear
-    // them first: "auto", and a lane that is no longer present, both leave no
-    // pairing to classify at all.
-    mapping.set_mismatches({});
-    if (selection.is_auto) {
-        mapping.reason = helix::ToolMapping::MatchReason::AUTO;
-    } else {
-        const auto& tool = tool_info_[static_cast<size_t>(tool_index)];
-        if (const auto* slot = find_mapped_slot(mapping)) {
-            mapping.set_mismatches(helix::FilamentMapper::classify_mismatches(tool, *slot));
-        }
-    }
+    helix::FilamentMapper::pick_slot(
+        mappings_[static_cast<size_t>(tool_index)], tool_info_[static_cast<size_t>(tool_index)],
+        available_slots_, selection.slot_index, selection.backend_index, selection.is_auto);
 
     spdlog::info("[FilamentMappingModal] T{} mapped to: auto={}, slot={}, backend={}",
                  tool_info_[static_cast<size_t>(tool_index)].tool_index, selection.is_auto,

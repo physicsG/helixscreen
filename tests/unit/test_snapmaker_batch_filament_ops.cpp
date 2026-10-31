@@ -386,14 +386,14 @@ TEST_CASE_METHOD(BatchFixture, "Batch shape follows the discovery the backend wa
 TEST_CASE_METHOD(BatchFixture, "Batch filament ops are not_supported on a plain backend",
                  "[ams][batch]") {
     BatchlessBackend backend;
-    REQUIRE_FALSE(backend.supports_batch_filament_ops());
+    REQUIRE(backend.max_heads_per_filament_op() == 1);
     REQUIRE(backend.load_filament_batch({0}).result == AmsResult::NOT_SUPPORTED);
     REQUIRE(backend.unload_filament_batch({0}).result == AmsResult::NOT_SUPPORTED);
 }
 
 TEST_CASE_METHOD(BatchFixture, "Snapmaker advertises batch filament ops", "[ams][batch]") {
     auto backend = snapmaker();
-    REQUIRE(backend->supports_batch_filament_ops());
+    REQUIRE(backend->max_heads_per_filament_op() == 4);
 }
 
 TEST_CASE_METHOD(BatchFixture, "A batch is refused busy while another filament op holds the claim",
@@ -681,10 +681,9 @@ TEST_CASE_METHOD(BatchFixture,
         helix::AmsState::instance().sync_from_backend();
         lv_subject_t* header = lv_xml_get_subject(nullptr, "ams_current_slot_text");
         REQUIRE(header != nullptr);
-        // Head 3 is 0-based; lane labels are 1-based over the heads. The
-        // fixture resets the language, so the format renders as written.
+        // Head 3 is 0-based; lane labels are 1-based over the heads.
         CHECK(std::string(lv_subject_get_string(header)) ==
-              "Current: " + helix::ui::lane_label(backend().lane_noun(), 3));
+              helix::ui::lane_label(backend().lane_noun(), 3));
     }
 }
 
@@ -739,8 +738,7 @@ TEST_CASE_METHOD(BatchFixture, "An op's working head names the header, not the l
     set_channel(1, "unload_homing", "ok", /*detected=*/true, /*module=*/true, /*no_auto=*/false);
     ams.sync_from_backend();
 
-    const std::string working_header =
-        "Current: " + helix::ui::lane_label(backend().lane_noun(), 1);
+    const std::string working_header = helix::ui::lane_label(backend().lane_noun(), 1);
     CHECK(std::string(lv_subject_get_string(header)) == working_header);
     CHECK(lv_subject_get_int(color) == card_at_rest);
 
@@ -804,63 +802,88 @@ TEST_CASE_METHOD(BatchFixture, "A batch the firmware ends mid-head leaves no wor
     lv_subject_t* header = lv_xml_get_subject(nullptr, "ams_current_slot_text");
     REQUIRE(header != nullptr);
     CHECK(std::string(lv_subject_get_string(header)) ==
-          "Current: " + helix::ui::lane_label(backend().lane_noun(), 3));
+          helix::ui::lane_label(backend().lane_noun(), 3));
 }
 
 // ============================================================================
-// The picker modal: one direction per open, chosen by the sidebar button that
-// opened it
+// The head picker, opened by the sidebar's Load and Unload buttons
 // ============================================================================
 
-TEST_CASE_METHOD(BatchModalFixture,
-                 "The batch picker prefills and names the direction it opened in",
-                 "[snapmaker][batch][ams][multiselect]") {
-    // The rig state: heads 0 and 2 sit loaded at their toolheads, 1 and 3 are
-    // fed but not loaded. Each direction must tick its own complement.
-    REQUIRE(backend().start().success());
-    mock_client.clear_gcode_script_history();
-    set_channel(0, "load_finish", "ok", /*detected=*/true, /*module=*/true, /*no_auto=*/false);
-    set_channel(1, "preload_finish", "ok", true, true, false);
-    set_channel(2, "load_finish", "ok", true, true, false);
-    set_channel(3, "preload_finish", "ok", true, true, false);
+namespace {
+/// Builds the production sidebar inside a panel, the way ams_panel.xml does,
+/// so the static callbacks reach this instance.
+struct PickerSidebar {
+    PickerSidebar(lv_obj_t* screen, helix::PrinterState& state) {
+        helix::AmsState::instance().init_subjects(true);
+        helix::AmsState::instance().sync_from_backend();
+        helix::test::register_ams_sidebar_xml();
+        panel = lv_obj_create(screen);
+        const char* attrs[] = {"name", "ams_operation_sidebar", nullptr};
+        root = static_cast<lv_obj_t*>(lv_xml_create(panel, "ams_sidebar", attrs));
+        REQUIRE(root != nullptr);
+        sidebar = std::make_unique<helix::ui::AmsOperationSidebar>(state);
+        REQUIRE(sidebar->setup(panel));
+    }
+    ~PickerSidebar() {
+        sidebar.reset(); // cancel the stall watchdog before the tree goes
+        lv_obj_delete(panel);
+    }
+    lv_obj_t* button(const char* name) const {
+        lv_obj_t* btn = lv_obj_find_by_name(root, name);
+        REQUIRE(btn != nullptr);
+        return btn;
+    }
+    lv_obj_t* panel = nullptr;
+    lv_obj_t* root = nullptr;
+    std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar;
+};
 
-    SECTION("a Load open ticks the heads without filament at the toolhead") {
-        REQUIRE(helix::ui::BatchFilamentModal::show_owned(/*for_load=*/true));
+void tick_row(lv_obj_t* dialog, int head) {
+    lv_obj_t* row = lv_obj_find_by_name(dialog, ("item_" + std::to_string(head)).c_str());
+    REQUIRE(row != nullptr);
+    lv_obj_send_event(row, LV_EVENT_CLICKED, nullptr);
+}
+} // namespace
+
+TEST_CASE_METHOD(BatchModalFixture, "The head picker names the op it opened for",
+                 "[snapmaker][batch][ams][multiselect]") {
+    REQUIRE(backend().start().success());
+    for (int slot = 0; slot < 4; ++slot) {
+        set_channel(slot, "preload_finish", "ok", /*detected=*/true, /*module=*/true,
+                    /*no_auto=*/false);
+    }
+
+    SECTION("Load") {
+        REQUIRE(helix::ui::BatchFilamentModal::show_owned(helix::ui::HeadPickOp::Load, {}));
         lv_obj_t* dialog = picker_dialog();
         CHECK(std::string(lv_label_get_text(lv_obj_find_by_name(dialog, "batch_title"))) ==
-              lv_tr("Load filament"));
+              lv_tr("Load into which tool?"));
         CHECK(button_caption(dialog, "btn_primary") == lv_tr("Load"));
-        CHECK_FALSE(row_checked(dialog, "0"));
-        CHECK(row_checked(dialog, "1"));
-        CHECK_FALSE(row_checked(dialog, "2"));
-        CHECK(row_checked(dialog, "3"));
+        for (int head = 0; head < 4; ++head) {
+            REQUIRE(lv_obj_find_by_name(dialog, ("item_" + std::to_string(head)).c_str()));
+        }
         close_picker(dialog);
     }
-    SECTION("an Unload open ticks the heads with filament at the toolhead") {
-        REQUIRE(helix::ui::BatchFilamentModal::show_owned(/*for_load=*/false));
+    SECTION("Unload") {
+        REQUIRE(helix::ui::BatchFilamentModal::show_owned(helix::ui::HeadPickOp::Unload, {}));
         lv_obj_t* dialog = picker_dialog();
         CHECK(std::string(lv_label_get_text(lv_obj_find_by_name(dialog, "batch_title"))) ==
-              lv_tr("Unload filament"));
+              lv_tr("Unload which tool?"));
         CHECK(button_caption(dialog, "btn_primary") == lv_tr("Unload"));
-        CHECK(row_checked(dialog, "0"));
-        CHECK_FALSE(row_checked(dialog, "1"));
-        CHECK(row_checked(dialog, "2"));
-        CHECK_FALSE(row_checked(dialog, "3"));
         close_picker(dialog);
     }
 }
 
 TEST_CASE_METHOD(BatchModalFixture, "A Load open with every feeder empty ticks nothing",
                  "[snapmaker][batch][ams][multiselect]") {
-    // Feeding an empty lane is the no-op the firmware refuses, so the Load
-    // prefill must leave every row unticked when no lane carries filament.
+    // Feeding an empty lane is the no-op the firmware refuses, so the
+    // preselection must leave every row unticked when no lane carries filament.
     REQUIRE(backend().start().success());
-    mock_client.clear_gcode_script_history();
     for (int slot = 0; slot < 4; ++slot) {
         set_channel(slot, "idle", "ok", /*detected=*/false, /*module=*/true, /*no_auto=*/false);
     }
 
-    REQUIRE(helix::ui::BatchFilamentModal::show_owned(/*for_load=*/true));
+    REQUIRE(helix::ui::BatchFilamentModal::show_owned(helix::ui::HeadPickOp::Load, {}));
     lv_obj_t* dialog = picker_dialog();
     for (int slot = 0; slot < 4; ++slot) {
         CHECK_FALSE(row_checked(dialog, std::to_string(slot).c_str()));
@@ -876,19 +899,7 @@ TEST_CASE_METHOD(BatchModalFixture,
     // and the disabled binding catching up, so each entry re-checks. This test
     // drives the real sidebar XML because that wiring is the regression.
     REQUIRE(backend().start().success());
-    helix::AmsState::instance().init_subjects(true);
-    helix::AmsState::instance().sync_from_backend();
-
-    // Built the way ams_panel.xml builds it: a named create inside a panel,
-    // then setup(panel) plants the instance the static callbacks route to.
-    // Panels register ams_sidebar.xml lazily, so the test registers it too.
-    helix::test::register_ams_sidebar_xml();
-    lv_obj_t* panel = lv_obj_create(test_screen());
-    const char* attrs[] = {"name", "ams_operation_sidebar", nullptr};
-    lv_obj_t* sidebar_root = static_cast<lv_obj_t*>(lv_xml_create(panel, "ams_sidebar", attrs));
-    REQUIRE(sidebar_root != nullptr);
-    auto sidebar = std::make_unique<helix::ui::AmsOperationSidebar>(BatchMockHarness::state);
-    REQUIRE(sidebar->setup(panel));
+    PickerSidebar ui(test_screen(), BatchMockHarness::state);
     REQUIRE(Modal::get_top() == nullptr);
 
     // Busy with the gating subjects still settled idle: the tap arrives in
@@ -896,8 +907,6 @@ TEST_CASE_METHOD(BatchModalFixture,
     set_channel(0, "load_feeding", "ok", /*detected=*/true, /*module=*/true, /*no_auto=*/false);
     REQUIRE(backend().get_system_info().is_busy());
 
-    // Each verdict must stand alone: a refusal that opens the picker anyway
-    // would otherwise contaminate the next tap, so close the stray before it.
     auto tap_expects_no_picker = [this](lv_obj_t* btn) {
         lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
         lv_obj_t* top = Modal::get_top();
@@ -908,38 +917,33 @@ TEST_CASE_METHOD(BatchModalFixture,
         }
     };
 
-    // A batch backend's Unload is the picker button; the active-head one hides.
-    lv_obj_t* active_unload_btn = lv_obj_find_by_name(sidebar_root, "btn_unload");
-    REQUIRE(active_unload_btn != nullptr);
-    CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "ams_is_filament_system")) == 1);
-    CHECK(lv_obj_has_flag(active_unload_btn, LV_OBJ_FLAG_HIDDEN));
-
-    lv_obj_t* unload_btn = lv_obj_find_by_name(sidebar_root, "btn_batch_unload");
-    REQUIRE(unload_btn != nullptr);
-    CHECK_FALSE(lv_obj_has_flag(unload_btn, LV_OBJ_FLAG_HIDDEN));
-    tap_expects_no_picker(unload_btn);
-
-    lv_obj_t* load_btn = lv_obj_find_by_name(sidebar_root, "btn_batch_load");
-    REQUIRE(load_btn != nullptr);
-    tap_expects_no_picker(load_btn);
-
-    sidebar.reset(); // cancel the stall watchdog before the tree goes
-    lv_obj_delete(panel);
+    // Several heads: Unload is the picker button; the one-tap one hides.
+    CHECK(lv_obj_has_flag(ui.button("btn_unload"), LV_OBJ_FLAG_HIDDEN));
+    CHECK_FALSE(lv_obj_has_flag(ui.button("btn_batch_unload"), LV_OBJ_FLAG_HIDDEN));
+    tap_expects_no_picker(ui.button("btn_batch_unload"));
+    tap_expects_no_picker(ui.button("btn_load"));
 }
 
 TEST_CASE_METHOD(BatchModalFixture,
-                 "The picker's primary dispatches its direction; Cancel dispatches nothing",
-                 "[snapmaker][batch][ams]") {
+                 "The picker hands its heads to the sidebar, which batches several; Cancel sends "
+                 "nothing",
+                 "[snapmaker][batch][ams][sidebar]") {
     REQUIRE(backend().start().success());
     mock_client.clear_gcode_script_history();
 
-    SECTION("a Load open sends one LOAD script for the ticked heads") {
+    SECTION("a Load of four heads sends one LOAD script") {
         for (int slot = 0; slot < 4; ++slot) {
             set_channel(slot, "preload_finish", "ok", /*detected=*/true, /*module=*/true,
                         /*no_auto=*/false);
         }
-        REQUIRE(helix::ui::BatchFilamentModal::show_owned(/*for_load=*/true));
+        PickerSidebar ui(test_screen(), BatchMockHarness::state);
+        lv_obj_send_event(ui.button("btn_load"), LV_EVENT_CLICKED, nullptr);
         lv_obj_t* dialog = picker_dialog();
+        for (int head = 0; head < 4; ++head) {
+            if (!row_checked(dialog, std::to_string(head).c_str())) {
+                tick_row(dialog, head);
+            }
+        }
         click(dialog, "btn_primary");
         CHECK(mock_client.last_send_script() == "AUTO_FEEDING EXTRUDER=0 LOAD=1\n"
                                                 "AUTO_FEEDING EXTRUDER=1 LOAD=1\n"
@@ -947,21 +951,28 @@ TEST_CASE_METHOD(BatchModalFixture,
                                                 "AUTO_FEEDING EXTRUDER=3 LOAD=1");
         process_lvgl(200); // free the one-shot instance
     }
-    SECTION("an Unload open sends the UNLOAD verb") {
+    SECTION("an Unload of two heads sends the UNLOAD verb for those two") {
         for (int slot = 0; slot < 4; ++slot) {
             set_channel(slot, "load_finish", "ok", /*detected=*/true, /*module=*/true,
                         /*no_auto=*/false);
         }
-        REQUIRE(helix::ui::BatchFilamentModal::show_owned(/*for_load=*/false));
-        click(picker_dialog(), "btn_primary");
-        CHECK(mock_client.last_send_script() == "AUTO_FEEDING EXTRUDER=0 UNLOAD=1\n"
-                                                "AUTO_FEEDING EXTRUDER=1 UNLOAD=1\n"
-                                                "AUTO_FEEDING EXTRUDER=2 UNLOAD=1\n"
+        PickerSidebar ui(test_screen(), BatchMockHarness::state);
+        lv_obj_send_event(ui.button("btn_batch_unload"), LV_EVENT_CLICKED, nullptr);
+        lv_obj_t* dialog = picker_dialog();
+        for (int head = 0; head < 4; ++head) {
+            const bool want = head == 1 || head == 3;
+            if (row_checked(dialog, std::to_string(head).c_str()) != want) {
+                tick_row(dialog, head);
+            }
+        }
+        click(dialog, "btn_primary");
+        CHECK(mock_client.last_send_script() == "AUTO_FEEDING EXTRUDER=1 UNLOAD=1\n"
                                                 "AUTO_FEEDING EXTRUDER=3 UNLOAD=1");
         process_lvgl(200);
     }
     SECTION("Cancel closes without sending anything") {
-        REQUIRE(helix::ui::BatchFilamentModal::show_owned(/*for_load=*/true));
+        PickerSidebar ui(test_screen(), BatchMockHarness::state);
+        lv_obj_send_event(ui.button("btn_load"), LV_EVENT_CLICKED, nullptr);
         click(picker_dialog(), "btn_secondary");
         CHECK(sent_gcodes().empty());
         process_lvgl(200);

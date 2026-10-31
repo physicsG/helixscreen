@@ -20,6 +20,7 @@
 #include "ui_update_queue.h"
 
 #include "../helix_test_fixture.h"
+#include "../test_helpers/filament_sensor_manager_test_access.h"
 #include "../test_helpers/filament_slot_override_store_test_access.h"
 #include "ams_backend_ad5x_ifs.h"
 #include "ams_backend_afc.h"
@@ -54,11 +55,14 @@ namespace helix {
 class BypassArmingTestAccess {
   public:
     static void reset(FilamentSensorManager& mgr) {
-        std::lock_guard<std::recursive_mutex> lock(mgr.mutex_);
-        mgr.sensors_.clear();
+        mgr.set_sync_mode(true);
+        std::lock_guard<std::recursive_mutex> lock(mgr.mutex());
+        mgr.entries_locked().clear();
+        mgr.readings_.clear();
+        mgr.lanes_.clear();
+        mgr.known_.clear();
         mgr.bypass_armed_.clear();
         mgr.master_enabled_ = true;
-        mgr.sync_mode_ = true;
         mgr.initial_status_received_ = false;
         mgr.startup_time_ = std::chrono::steady_clock::now() - std::chrono::seconds(10);
     }
@@ -90,8 +94,9 @@ class BypassArmingFixture : public HelixTestFixture {
 
     /// Discover one switch sensor and give it a first status frame.
     void seed_toolhead_sensor(bool firmware_enabled) {
-        mgr.discover_sensors({"filament_switch_sensor filament_sensor"});
-        mgr.set_sensor_role("filament_switch_sensor filament_sensor", FilamentSensorRole::RUNOUT);
+        discover_filament_sensors(mgr, {"filament_switch_sensor filament_sensor"});
+        mgr.set_role("filament_switch_sensor filament_sensor",
+                     static_cast<uint8_t>(FilamentSensorRole::RUNOUT));
         mgr.update_from_status(
             json{{"filament_switch_sensor filament_sensor",
                   {{"filament_detected", true}, {"enabled", firmware_enabled}}}});
@@ -117,7 +122,7 @@ TEST_CASE("bypass arming: engages firmware-disabled runout sensor with bare name
     // SET_FILAMENT_SENSOR wants the bare name (post-section-prefix), which is
     // FilamentSensorConfig::sensor_name — the same form Creality's macros use.
     CHECK(sent[0] == "SET_FILAMENT_SENSOR SENSOR=filament_sensor ENABLE=1");
-    CHECK(fx.mgr.has_bypass_armed_sensors());
+    CHECK(FilamentSensorManagerTestAccess::has_bypass_armed_sensors(fx.mgr));
 }
 
 TEST_CASE("bypass arming: firmware-enabled sensor is left alone", "[ams][bypass-arming]") {
@@ -127,7 +132,7 @@ TEST_CASE("bypass arming: firmware-enabled sensor is left alone", "[ams][bypass-
     fx.mgr.on_bypass_active_changed(true);
     helix::ui::UpdateQueue::instance().drain();
     CHECK(fx.gcode_sent().empty());
-    CHECK_FALSE(fx.mgr.has_bypass_armed_sensors());
+    CHECK_FALSE(FilamentSensorManagerTestAccess::has_bypass_armed_sensors(fx.mgr));
 }
 
 TEST_CASE("bypass arming: master-disabled monitoring refuses to arm", "[ams][bypass-arming]") {
@@ -162,7 +167,7 @@ TEST_CASE("bypass arming: arm is idempotent, restore sends exactly one disable",
     auto sent = fx.gcode_sent();
     REQUIRE(sent.size() == 1);
     CHECK(sent[0] == "SET_FILAMENT_SENSOR SENSOR=filament_sensor ENABLE=0");
-    CHECK_FALSE(fx.mgr.has_bypass_armed_sensors());
+    CHECK_FALSE(FilamentSensorManagerTestAccess::has_bypass_armed_sensors(fx.mgr));
 
     // Disengage with nothing armed is silent.
     fx.client.clear_gcode_script_history();
@@ -248,7 +253,7 @@ class AfcBypassPublishTestAccess : public AmsBackendAfc {
             slot.global_index = i;
             slot.status = SlotStatus::AVAILABLE;
             slot.mapped_tool = i;
-            slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+            slot.color_rgb = kAmsDefaultSlotColor;
             unit.slots.push_back(slot);
         }
         system_info_.units.push_back(unit);

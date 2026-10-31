@@ -16,16 +16,44 @@ namespace helix {
  * @brief Z-offset calibration strategy — determines gcode commands for calibration and save
  *
  * Different printers need different approaches to calibrate and persist Z-offset.
- * FIRMWARE_MANAGED: firmware or macros auto-persist (FlashForge, Snapmaker U1, Artillery M1,
- * ForgeX-mod). PROBE_CALIBRATE: standard Klipper PROBE_CALIBRATE -> ACCEPT -> SAVE_CONFIG. ENDSTOP:
- * Z_ENDSTOP_CALIBRATE -> ACCEPT -> Z_OFFSET_APPLY_ENDSTOP -> SAVE_CONFIG.
+ * FIRMWARE_MANAGED: HelixScreen offers no Save step; calibration applies SET_GCODE_OFFSET and
+ * the firmware owns what happens next (FlashForge, ForgeX-mod and Artillery M1 persist it; the
+ * Snapmaker U1 does not, see ZOffsetTuneHint). PROBE_CALIBRATE: standard Klipper
+ * PROBE_CALIBRATE -> ACCEPT -> SAVE_CONFIG. ENDSTOP: Z_ENDSTOP_CALIBRATE -> ACCEPT ->
+ * Z_OFFSET_APPLY_ENDSTOP -> SAVE_CONFIG.
  */
 enum class ZOffsetCalibrationStrategy {
     PROBE_CALIBRATE,  ///< Standard Klipper: PROBE_CALIBRATE -> ACCEPT -> SAVE_CONFIG
-    FIRMWARE_MANAGED, ///< Firmware/macros auto-persist (FlashForge, Snapmaker U1, Artillery M1,
-                      ///< ForgeX-mod)
+    FIRMWARE_MANAGED, ///< No HelixScreen Save step: SET_GCODE_OFFSET, then the firmware's call
     ENDSTOP ///< Endstop: Z_ENDSTOP_CALIBRATE -> ACCEPT -> Z_OFFSET_APPLY_ENDSTOP -> SAVE_CONFIG
 };
+
+/**
+ * @brief What Print Tune can truthfully say about a z-offset adjustment
+ *
+ * Published as the `z_offset_tune_hint` subject; the values are the XML's ref_values.
+ */
+enum class ZOffsetTuneHint {
+    SAVE_ON_CONTROLS = 0,      ///< Temporary unless the user saves it (Save Z Offset)
+    AUTO_SAVED = 1,            ///< The firmware or an installed module persists it
+    TEMPORARY = 2,             ///< No save path: it lasts until the print ends
+    TEMPORARY_TOOL_CHANGE = 3, ///< As TEMPORARY, and a tool change re-applies the head's own
+                               ///< stored offset over it
+};
+
+/**
+ * @brief Pick the tune hint from what is known about persistence
+ *
+ * @param external_persistence an installed z-offset persistence provider is latched
+ * @param db_persists the printer database does not say the firmware drops the offset
+ *        (`z_offset_persists`, default true)
+ * @param tool_change_resets the printer database's `tool_change_resets_z_offset`
+ * @param save_enabled the user offers Z-offset saves on this printer
+ *        (helix::zoffset::save_enabled()); off turns a Save step into no save path
+ */
+ZOffsetTuneHint resolve_z_offset_tune_hint(ZOffsetCalibrationStrategy strategy,
+                                           bool external_persistence, bool db_persists,
+                                           bool tool_change_resets, bool save_enabled);
 
 /**
  * @brief The printer type and what it decides: the pre-print option set and the
@@ -74,7 +102,8 @@ class PrinterProfileState {
      * @brief Record whether an installed module persists the z-offset itself
      *
      * While set the strategy resolves to FIRMWARE_MANAGED whatever the type
-     * says (prestonbrown/helixscreen#1401). The caller re-resolves the type.
+     * says, and the tune hint to AUTO_SAVED (prestonbrown/helixscreen#1401).
+     * The caller re-resolves the type.
      * @return true when the flag changed
      */
     bool set_external_persistence(bool persisted);
@@ -112,6 +141,13 @@ class PrinterProfileState {
         return db_enclosed_;
     }
 
+    /// Whether this printer's Klipper skips dot-directories when it resolves a
+    /// print (the printer database's `klipper_hides_dot_dirs`): files the app
+    /// stages for printing must sit in a visible directory.
+    bool klipper_hides_dot_dirs() const {
+        return db_hides_dot_dirs_;
+    }
+
     /**
      * @brief String subject updated on every change to the resolved type
      *
@@ -122,9 +158,18 @@ class PrinterProfileState {
     lv_subject_t* get_printer_type_subject() {
         return &printer_type_subject_;
     }
-    /// 1 when Save Z Offset is needed, 0 when firmware or a module auto-saves.
+    /// 1 when HelixScreen offers Save Z Offset, 0 when the strategy has no Save step.
     lv_subject_t* get_z_offset_can_save_subject() {
         return &z_offset_can_save_;
+    }
+    /// Whether Z-offset saving is offered on this printer, as
+    /// helix::zoffset::save_enabled() decides it; feeds the tune hint.
+    /// Returns true when the published hint changed.
+    bool set_z_offset_save_enabled(bool enabled);
+
+    /// The ZOffsetTuneHint for the resolved type, as an int.
+    lv_subject_t* get_z_offset_tune_hint_subject() {
+        return &z_offset_tune_hint_;
     }
 
   private:
@@ -138,7 +183,12 @@ class PrinterProfileState {
     ZOffsetCalibrationStrategy z_offset_calibration_strategy_ =
         ZOffsetCalibrationStrategy::PROBE_CALIBRATE;
     bool external_persistence_ = false;
+    ZOffsetTuneHint z_offset_tune_hint_value_ = ZOffsetTuneHint::SAVE_ON_CONTROLS;
+    bool z_offset_save_enabled_ = true;
+    bool db_z_offset_persists_ = true;
+    bool db_tool_change_resets_z_offset_ = false;
     bool db_enclosed_ = false;
+    bool db_hides_dot_dirs_ = false;
     bool timelapse_default_enabled_ = false;
     /// What the firmware reports for each pre-print option it stores itself.
     /// Empty on printers whose firmware stores none.
@@ -147,6 +197,7 @@ class PrinterProfileState {
     lv_subject_t printer_type_subject_{};
     char printer_type_subject_buf_[128];
     lv_subject_t z_offset_can_save_{};
+    lv_subject_t z_offset_tune_hint_{};
 };
 
 } // namespace helix

@@ -65,8 +65,9 @@ void apply_resolution(const PrinterDiscovery& discovery, const std::string& sens
     // In COOLING mode the K2 M141 macro parks the setpoint on this fan's target.
     temps.set_chamber_cooling_fan_name(discovery.chamber_cooling_fan_name());
     // Cooling fan's configured resting/off target (from configfile.settings). M141
-    // S0 returns the fan here, so the chamber mode treats this value as Off rather
-    // than a deliberate "Maintaining" set.
+    // S0 returns the fan here, and a deliberate set equal to it is wire-identical,
+    // so the chamber mode labels that state Resting (auto) rather than a
+    // deliberate "Maintaining" set.
     temps.set_chamber_fan_resting(discovery.chamber_fan_resting_deci());
 
     // Chamber-heater diagnostics backend (issue #1290). The backend matched the
@@ -91,10 +92,11 @@ void apply_resolution(const PrinterDiscovery& discovery, const std::string& sens
     if (tc) {
         if (chamber_diagnostics_apply) {
             const auto* backend = backend_by_id(discovery.chamber_heater_backend_id());
-            tc->set_chamber_actions(backend ? std::string(backend->fault_reset_gcode())
-                                            : std::string(),
-                                    discovery.chamber_filter_fan_pin(),
-                                    backend ? backend->conservative_max_temp() : 0.0);
+            tc->set_chamber_actions(
+                backend ? std::string(backend->fault_reset_gcode()) : std::string(),
+                discovery.chamber_filter_fan_pin(),
+                backend ? backend->conservative_max_temp() : 0.0,
+                backend ? std::string(backend->set_target_method()) : std::string());
             tc->set_chamber_dryer(backend, discovery.has_heater_bed());
             // Read the ceiling now, after set_chamber_actions() stored the
             // backend's fallback, so a label built from it on first open is right.
@@ -117,6 +119,8 @@ void apply_resolution(const PrinterDiscovery& discovery, const std::string& sens
         chamber_diagnostics_apply ? backend_by_id(discovery.chamber_heater_backend_id()) : nullptr;
     caps.set_has_chamber_element_temp(chamber_backend && chamber_backend->reports_element_temp());
     caps.set_has_chamber_dryer(chamber_backend && chamber_backend->dryer_capabilities().supported);
+    caps.set_has_chamber_target_route(chamber_backend &&
+                                      !chamber_backend->set_target_method().empty());
 
     // Promote the resolved chamber sensor and heater to CHAMBER role in the
     // sensor manager. Required for vendors whose chamber object names don't

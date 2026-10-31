@@ -31,6 +31,42 @@ cpp	.disabled_services	written by the installer on the device, never exists in a
 gradle	.disabled_services	written by the installer on the device, never exists in a build tree
 strip	.disabled_services	written by the installer on the device, never exists in a build tree
 deploy	.disabled_services	written by the installer on the device, never exists in a build tree
+cpp	.webcams_backup.json	written by the installer on the device, never exists in a build tree
+gradle	.webcams_backup.json	written by the installer on the device, never exists in a build tree
+strip	.webcams_backup.json	written by the installer on the device, never exists in a build tree
+deploy	.webcams_backup.json	written by the installer on the device, never exists in a build tree
+cpp	.camera_migrated	written by the installer on the device, never exists in a build tree
+gradle	.camera_migrated	written by the installer on the device, never exists in a build tree
+strip	.camera_migrated	written by the installer on the device, never exists in a build tree
+deploy	.camera_migrated	written by the installer on the device, never exists in a build tree
+cpp	.klipper_includes	written by the installer on the device, never exists in a build tree
+gradle	.klipper_includes	written by the installer on the device, never exists in a build tree
+strip	.klipper_includes	written by the installer on the device, never exists in a build tree
+deploy	.klipper_includes	written by the installer on the device, never exists in a build tree
+cpp	.k2cam_webcam_disabled	written by the installer on the device, never exists in a build tree
+gradle	.k2cam_webcam_disabled	written by the installer on the device, never exists in a build tree
+strip	.k2cam_webcam_disabled	written by the installer on the device, never exists in a build tree
+deploy	.k2cam_webcam_disabled	written by the installer on the device, never exists in a build tree
+cpp	.seeded_settings	written by the installer on the device, never exists in a build tree
+gradle	.seeded_settings	written by the installer on the device, never exists in a build tree
+strip	.seeded_settings	written by the installer on the device, never exists in a build tree
+deploy	.seeded_settings	written by the installer on the device, never exists in a build tree
+cpp	.platform_hook	written by the installer on the device, never exists in a build tree
+gradle	.platform_hook	written by the installer on the device, never exists in a build tree
+strip	.platform_hook	written by the installer on the device, never exists in a build tree
+deploy	.platform_hook	written by the installer on the device, never exists in a build tree
+cpp	.nginx_webcam_accesslog	written by the installer on the device, never exists in a build tree
+gradle	.nginx_webcam_accesslog	written by the installer on the device, never exists in a build tree
+strip	.nginx_webcam_accesslog	written by the installer on the device, never exists in a build tree
+deploy	.nginx_webcam_accesslog	written by the installer on the device, never exists in a build tree
+cpp	.nginx_remote_screen	written by the installer on the device, never exists in a build tree
+gradle	.nginx_remote_screen	written by the installer on the device, never exists in a build tree
+strip	.nginx_remote_screen	written by the installer on the device, never exists in a build tree
+deploy	.nginx_remote_screen	written by the installer on the device, never exists in a build tree
+cpp	.remote_screen_route	written by the installer on the device, never exists in a build tree
+gradle	.remote_screen_route	written by the installer on the device, never exists in a build tree
+strip	.remote_screen_route	written by the installer on the device, never exists in a build tree
+deploy	.remote_screen_route	written by the installer on the device, never exists in a build tree
 TABLE
 )"
 

@@ -23,7 +23,14 @@
  */
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/trait_probe_backend.h"
+#include "ams_backend_ace.h"
+#include "ams_backend_ad5x_ifs.h"
+#include "ams_backend_afc.h"
+#include "ams_backend_cfs.h"
+#include "ams_backend_happy_hare.h"
 #include "ams_backend_mock.h"
+#include "ams_backend_qidi.h"
 #include "ams_state.h"
 #include "ams_types.h"
 #include "app_globals.h"
@@ -39,11 +46,37 @@ using namespace helix::printer;
 
 namespace {
 
+/// The traits of the real backend @p type names, for the types this file stands in for.
+BackendTraits real_traits_for(AmsType type) {
+    switch (type) {
+    case AmsType::HAPPY_HARE:
+        return AmsBackendHappyHare::kTraits;
+    case AmsType::AFC:
+        return AmsBackendAfc::kTraits;
+    case AmsType::AD5X_IFS:
+        return AmsBackendAd5xIfs::kTraits;
+    case AmsType::CFS:
+        return printer::AmsBackendCfs::kTraits;
+    case AmsType::ACE:
+        return AmsBackendAce::kTraits;
+    case AmsType::QIDI_BOX:
+        return AmsBackendQidi::kTraits;
+    default:
+        return {};
+    }
+}
+
 /// A mock backend whose reported AmsType, runout flag and bypass state are
-/// directly settable. Everything else is AmsBackendMock's normal behavior.
+/// directly settable, and whose traits are those of the real backend of that type.
+/// Everything else is AmsBackendMock's normal behavior.
 class RunoutProbeBackend : public AmsBackendMock {
   public:
-    explicit RunoutProbeBackend(AmsType type) : AmsBackendMock(4), type_(type) {}
+    explicit RunoutProbeBackend(AmsType type)
+        : AmsBackendMock(4), type_(type), traits_(real_traits_for(type)) {}
+
+    [[nodiscard]] BackendTraits traits() const override {
+        return traits_;
+    }
 
     AmsType get_type() const override {
         return type_;
@@ -77,6 +110,7 @@ class RunoutProbeBackend : public AmsBackendMock {
 
   private:
     AmsType type_;
+    BackendTraits traits_;
     bool runout_ = false;
     bool bypass_ = false;
 };
@@ -281,6 +315,18 @@ TEST_CASE_METHOD(LVGLTestFixture, "Generic runout modal defers only to backends 
             ams.sync_from_backend();
             CHECK(cfg->should_show_runout_modal());
         }
+    }
+
+    SECTION("ownership follows the backend's trait, not its type") {
+        BackendTraits owns;
+        owns.raises_runout_fault = true;
+        ams.set_backend(std::make_unique<helix::test::TraitProbeBackend>(owns));
+        ams.sync_from_backend();
+        CHECK_FALSE(cfg->should_show_runout_modal());
+
+        ams.set_backend(std::make_unique<helix::test::TraitProbeBackend>(BackendTraits{}));
+        ams.sync_from_backend();
+        CHECK(cfg->should_show_runout_modal());
     }
 
     SECTION("bypass active — the external spool's own sensor is what matters") {

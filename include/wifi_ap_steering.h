@@ -16,9 +16,9 @@ namespace helix {
  *
  * A Moonraker connection that drops after a long silence points at the path
  * through the current access point, not at Moonraker: the association stays up
- * while nothing gets through. After LINK_STALL_DROPS such drops on one access
+ * while nothing gets through. After kLinkStallDrops such drops on one access
  * point, the caller scans and pick_alternative() names the strongest other
- * access point for the SSID. The abandoned one is skipped for AVOID_MS only, so
+ * access point for the SSID. The abandoned one is skipped for kAvoidMs only, so
  * an access point that recovers is used again. With no alternative the station
  * stays where it is and keeps reconnecting.
  *
@@ -34,21 +34,21 @@ class WifiApSteering {
     };
 
     /// A drop counts against the access point when nothing arrived for this long before it.
-    static constexpr int64_t LINK_STALL_SILENCE_MS = 15'000;
+    static constexpr int64_t kLinkStallSilenceMs = 15'000;
     /// Stalled drops on one access point before leaving it.
-    static constexpr int LINK_STALL_DROPS = 3;
+    static constexpr int kLinkStallDrops = 3;
     /// The drops must fall within this window; an older first drop starts the count again.
-    static constexpr int64_t LINK_STALL_WINDOW_MS = 5 * 60'000;
+    static constexpr int64_t kLinkStallWindowMs = 5 * 60'000;
     /// How long an abandoned access point is skipped.
-    static constexpr int64_t AVOID_MS = 30 * 60'000;
+    static constexpr int64_t kAvoidMs = 30 * 60'000;
     /// An alternative weaker than this is not worth moving to.
-    static constexpr int MIN_RSSI = -85;
+    static constexpr int kMinRssi = -85;
     /// An alternative may be at most this much weaker than the current access
     /// point. Stalls on the printer's side count too, so this keeps a run of
     /// printer restarts from moving a strong link to a marginal one.
-    static constexpr int MAX_RSSI_LOSS_DB = 10;
+    static constexpr int kMaxRssiLossDb = 10;
     /// A steering scan that has not completed within this long is abandoned.
-    static constexpr int64_t SCAN_REQUEST_TTL_MS = 30'000;
+    static constexpr int64_t kScanRequestTtlMs = 30'000;
 
     void on_associated(const Bssid& bssid);
 
@@ -64,8 +64,8 @@ class WifiApSteering {
     bool take_scan_request(int64_t now_ms);
 
     /// Marks the current access point avoided and returns the strongest other
-    /// candidate that is not avoided, clears MIN_RSSI and is within
-    /// MAX_RSSI_LOSS_DB of the current access point when the scan saw it;
+    /// candidate that is not avoided, clears kMinRssi and is within
+    /// kMaxRssiLossDb of the current access point when the scan saw it;
     /// nullopt means stay.
     std::optional<Bssid> pick_alternative(const std::vector<Candidate>& seen, int64_t now_ms);
 

@@ -2,6 +2,8 @@
 
 #include "light_button_config.h"
 
+#include "ui_toast_manager.h"
+
 #include "config.h"
 #include "json_utils.h"
 #include "led/led_controller.h"
@@ -13,6 +15,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace helix {
@@ -25,7 +28,7 @@ bool is_light_button(const PanelWidgetEntry& e) {
 }
 
 std::string pending_value(const Config& cfg) {
-    const nlohmann::json* p = cfg.try_get_json(cfg.df() + led::LIGHT_BUTTON_PENDING_PATH);
+    const nlohmann::json* p = cfg.try_get_json(cfg.df() + led::kLightButtonPendingPath);
     return (p != nullptr && p->is_string()) ? p->get<std::string>() : std::string();
 }
 
@@ -68,7 +71,7 @@ bool adopt_pending_light_button(Config& cfg, PanelWidgetConfig& home) {
         c["led"] = value;
         home.set_widget_config(id, c);
     }
-    cfg.set(cfg.df() + led::LIGHT_BUTTON_PENDING_PATH, nlohmann::json());
+    cfg.set(cfg.df() + led::kLightButtonPendingPath, nlohmann::json());
     cfg.save();
     return !ids.empty();
 }
@@ -90,6 +93,27 @@ bool home_light_buttons_lit() {
         states.push_back(ctrl.device_state(id));
     }
     return light_icon_look(states).brightness > 0;
+}
+
+LightToggleResult toggle_lights(const std::vector<std::string>& ids, const char* caller) {
+    auto& ctrl = led::LedController::instance();
+    if (ctrl.light_command_in_flight()) {
+        spdlog::debug("[LightButtons] {}: ignoring toggle - LED command already in flight", caller);
+        ToastManager::instance().show(
+            ToastSeverity::INFO, lv_tr("Light will switch when the current operation finishes"));
+        return {LightToggle::Busy, false};
+    }
+    if (ids.empty()) {
+        spdlog::warn("[LightButtons] {}: light toggle with no light to switch", caller);
+        return {LightToggle::NoTarget, false};
+    }
+    const bool on = ctrl.toggle_power(ids);
+    spdlog::info("[LightButtons] {}: toggled {} device(s) {}", caller, ids.size(),
+                 on ? "ON" : "OFF");
+    const bool unconfirmed = std::all_of(ids.begin(), ids.end(), [&](const std::string& id) {
+        return ctrl.device_state(id).power == led::PowerState::Unknown;
+    });
+    return {on ? LightToggle::On : LightToggle::Off, unconfirmed};
 }
 
 void settle_light_buttons() {

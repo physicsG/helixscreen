@@ -17,6 +17,7 @@
 
 #include "../lvgl_test_fixture.h"
 #include "action_prompt_manager.h"
+#include "color_utils.h"
 
 #include <functional>
 #include <memory>
@@ -475,6 +476,91 @@ TEST_CASE("parse_button_spec: Hex color field (4th field)", "[action_prompt][but
         auto button = ActionPromptManager::parse_button_spec("_|GCODE|primary");
         REQUIRE(button.label == "_");
         REQUIRE(button.hex_color.empty());
+    }
+
+    SECTION("A 4th field that is not a color is ignored") {
+        auto button = ActionPromptManager::parse_button_spec("Label|GCODE|warning|zzzzzz");
+        REQUIRE(button.color == "warning");
+        REQUIRE(button.hex_color.empty());
+    }
+}
+
+// Fluidd, Mainsail, GuppyScreen and Z-Mod take a button color as hex in the
+// third field; the fourth field is the deprecated spelling of the same thing
+// (prestonbrown/helixscreen#1806).
+TEST_CASE("parse_button_spec: Hex color in the 3rd field",
+          "[action_prompt][button][hex_color][1806]") {
+    SECTION("Bare 6-digit hex is a fill color, not a style name") {
+        auto button =
+            ActionPromptManager::parse_button_spec("HEX Dark (White Text)|GCODE_CMD_2|ff5722");
+        REQUIRE(button.label == "HEX Dark (White Text)");
+        REQUIRE(button.gcode == "GCODE_CMD_2");
+        REQUIRE(button.hex_color == "ff5722");
+        REQUIRE(button.color.empty());
+    }
+
+    SECTION("Leading # is accepted") {
+        auto button = ActionPromptManager::parse_button_spec("Light|GCODE_CMD_3|#e0e0e0");
+        REQUIRE(button.hex_color == "#e0e0e0");
+        REQUIRE(button.color.empty());
+    }
+
+    SECTION("3-digit shorthand is accepted") {
+        auto button = ActionPromptManager::parse_button_spec("Red|GCODE|#f00");
+        REQUIRE(button.hex_color == "#f00");
+        REQUIRE(button.color.empty());
+    }
+
+    SECTION("Named styles stay styles") {
+        for (const char* style : {"primary", "secondary", "info", "warning", "error"}) {
+            auto button = ActionPromptManager::parse_button_spec(std::string("S|G|") + style);
+            INFO(style);
+            REQUIRE(button.color == style);
+            REQUIRE(button.hex_color.empty());
+        }
+    }
+
+    SECTION("Garbage stays an unknown style and carries no fill") {
+        auto button = ActionPromptManager::parse_button_spec("Bad|GCODE|zzzzzz");
+        REQUIRE(button.color == "zzzzzz");
+        REQUIRE(button.hex_color.empty());
+    }
+
+    SECTION("Z-Mod swatch tile drops its placeholder label") {
+        auto button = ActionPromptManager::parse_button_spec(
+            "_ |CHANGE_ZCOLOR SLOT=1 TYPE=PETG-CF HEX=21cc3d HIDE=0|21cc3d");
+        REQUIRE(button.label.empty());
+        REQUIRE(button.gcode == "CHANGE_ZCOLOR SLOT=1 TYPE=PETG-CF HEX=21cc3d HIDE=0");
+        REQUIRE(button.hex_color == "21cc3d");
+    }
+
+    SECTION("A legacy 4th-field hex wins over a 3rd-field hex") {
+        auto button = ActionPromptManager::parse_button_spec("L|G|ff0000|00ff00");
+        REQUIRE(button.hex_color == "00ff00");
+    }
+
+    SECTION("8-digit hex with alpha is a fill; the RGB is what renders") {
+        auto button = ActionPromptManager::parse_button_spec("A|G|#ff5722cc");
+        REQUIRE(button.hex_color == "#ff5722cc");
+        REQUIRE(button.color.empty());
+        REQUIRE(parse_hex_color(button.hex_color) == std::optional<uint32_t>(0xff5722));
+    }
+
+    SECTION("0x prefix is accepted") {
+        auto button = ActionPromptManager::parse_button_spec("A|G|0xff5722");
+        REQUIRE(button.color.empty());
+        REQUIRE(parse_hex_color(button.hex_color) == std::optional<uint32_t>(0xff5722));
+    }
+
+    SECTION("Whitespace around the hex field is tolerated") {
+        auto button = ActionPromptManager::parse_button_spec("A|G| ff5722 ");
+        REQUIRE(button.color.empty());
+        REQUIRE(parse_hex_color(button.hex_color) == std::optional<uint32_t>(0xff5722));
+    }
+
+    SECTION("A garbage 4th field leaves the 3rd-field hex in place") {
+        auto button = ActionPromptManager::parse_button_spec("L|G|ff0000|nope");
+        REQUIRE(button.hex_color == "ff0000");
     }
 }
 

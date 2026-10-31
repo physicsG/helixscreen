@@ -22,7 +22,7 @@ namespace helix {
 
 namespace {
 
-constexpr const char* NOTIFY_HANDLER_NAME = "gcode_narration_router";
+constexpr const char* kNotifyHandlerName = "gcode_narration_router";
 
 } // namespace
 
@@ -44,14 +44,14 @@ GcodeNarrationRouter::GcodeNarrationRouter(IMoonrakerAPI* api, IMoonrakerClient*
     // thread — the direct AmsState::set_narration_phase write is therefore
     // thread-safe with no second defer.
     client_->register_method_callback(
-        "notify_gcode_response", NOTIFY_HANDLER_NAME,
+        "notify_gcode_response", kNotifyHandlerName,
         lifetime_.bg_cb("GcodeNarrationRouter::on_notify",
                         [this](const nlohmann::json& msg) { on_notify_gcode_response(msg); }));
 }
 
 GcodeNarrationRouter::~GcodeNarrationRouter() {
     if (client_) {
-        client_->unregister_method_callback("notify_gcode_response", NOTIFY_HANDLER_NAME);
+        client_->unregister_method_callback("notify_gcode_response", kNotifyHandlerName);
     }
 }
 
@@ -113,17 +113,7 @@ void GcodeNarrationRouter::process_line(const std::string& line) {
         return;
     }
 
-    const auto op = AmsState::instance().get_active_step_operation();
-    const auto tmpl = backend->toolchange_phase_template(op);
-    for (size_t k = 0; k < tmpl.size(); ++k) {
-        if (tmpl[k].id == *id) {
-            spdlog::debug("[GcodeNarration] phase '{}' -> step {} ({})", *id, k, tmpl[k].label);
-            AmsState::instance().set_narration_phase(static_cast<int>(k), tmpl[k].label);
-            return;
-        }
-    }
-    // Matched a phase id the active operation's template doesn't contain — no
-    // index to advance to; leave the step subject untouched.
+    AmsState::instance().apply_narration_phase_id(*id);
 }
 
 void GcodeNarrationRouter::on_notify_gcode_response(const nlohmann::json& msg) {

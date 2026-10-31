@@ -8,7 +8,7 @@
 // snapshot carrying every signal the entry's own heuristics look for, and
 // nothing else - and PrinterDetector::detect() has to answer with that entry's
 // machine, leading every candidate picturing a different machine by
-// DETECT_MIN_MARGIN. An entry whose own best case ends in a tie is never
+// kDetectMinMargin. An entry whose own best case ends in a tie is never
 // auto-saved (the tie is resolved by heuristic count and database order, which
 // meets_autosave_threshold refuses to persist); one whose own best case is won
 // by another entry is worse, because that owner's printer is saved as the
@@ -19,6 +19,7 @@
 // that stops reproducing fails it too, so the list never outlives the defect.
 
 #include "printer_detector.h"
+#include "text_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -37,24 +38,14 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr const char* DB_PATH = "assets/config/printer_database.json";
+constexpr const char* kDbPath = "assets/config/printer_database.json";
 
 json load_database() {
-    INFO("reading " << DB_PATH << " (tests must run from the repo root)");
-    REQUIRE(fs::exists(DB_PATH));
-    std::ifstream in(DB_PATH);
+    INFO("reading " << kDbPath << " (tests must run from the repo root)");
+    REQUIRE(fs::exists(kDbPath));
+    std::ifstream in(kDbPath);
     REQUIRE(in.good());
     return json::parse(in);
-}
-
-std::string lowercase(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
-
-bool contains_ci(const std::string& haystack, const std::string& needle) {
-    return lowercase(haystack).find(lowercase(needle)) != std::string::npos;
 }
 
 /// The name a pattern describes: "^box$" is the object "box".
@@ -124,12 +115,13 @@ PrinterHardwareData fingerprint_of(const json& entry) {
                      });
     for (const auto& h : hostname_patterns) {
         const std::string pattern = h.value("pattern", "");
-        if (pattern.empty() || contains_ci(hw.hostname, pattern))
+        if (pattern.empty() || helix::text_io::contains_ignore_case(hw.hostname, pattern))
             continue;
         const std::string candidate = hw.hostname.empty() ? pattern : hw.hostname + "-" + pattern;
-        const bool excluded =
-            std::any_of(hostname_excludes.begin(), hostname_excludes.end(),
-                        [&](const std::string& ex) { return contains_ci(candidate, ex); });
+        const bool excluded = std::any_of(
+            hostname_excludes.begin(), hostname_excludes.end(), [&](const std::string& ex) {
+                return helix::text_io::contains_ignore_case(candidate, ex);
+            });
         if (!excluded)
             hw.hostname = candidate;
     }
@@ -156,9 +148,10 @@ PrinterHardwareData fingerprint_of(const json& entry) {
         } else if (type == "board_match") {
             hw.printer_objects.push_back("temperature_sensor " + pattern);
         } else if (type == "kinematics_match") {
-            const bool excluded =
-                std::any_of(kinematics_excludes.begin(), kinematics_excludes.end(),
-                            [&](const std::string& ex) { return contains_ci(pattern, ex); });
+            const bool excluded = std::any_of(
+                kinematics_excludes.begin(), kinematics_excludes.end(), [&](const std::string& ex) {
+                    return helix::text_io::contains_ignore_case(pattern, ex);
+                });
             if (hw.kinematics.empty() && !excluded)
                 hw.kinematics = pattern;
         } else if (type == "mcu_match") {

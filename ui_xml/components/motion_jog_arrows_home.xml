@@ -1,0 +1,114 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Arrows + Home layout: the arrows layout with a home key in the centre of
+       each cross (X and Y together in the XY cross, Z between its arrows),
+       Home All / X / Y and the leveling keys beside them in landscape or
+       under them in portrait, and the shared step selector at the bottom.
+       MotionPanel::fit_jog_layout() sizes cross_xy, cross_z, cross_home and
+       cross_steps from one near-square key size whenever this view resizes;
+       the keys fill those blocks, and the blocks sit centred in the view. -->
+  <view name="motion_jog_arrows_home"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="0" style_border_opa="0" style_bg_opa="0"
+        scrollable="false" flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center"
+        style_flex_track_place="center" style_pad_gap="#space_xs">
+    <event_cb trigger="size_changed" callback="on_motion_jog_layout_resized"/>
+    <lv_obj name="cross_body"
+            width="content" height="content" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+            style_pad_gap="#space_xs">
+      <bind_style_if_eq name="styles.jog_flow_row" subject="ui_is_portrait" ref_value="0"/>
+      <bind_style_if_eq name="styles.jog_flow_column" subject="ui_is_portrait" ref_value="1"/>
+      <lv_obj name="cross_pad"
+              width="content" height="content" style_pad_all="0" style_border_opa="0" style_bg_opa="0"
+              scrollable="false" flex_flow="row" style_pad_gap="#space_xs">
+        <lv_obj name="cross_xy"
+                width="content" height="content" style_pad_all="0" style_border_opa="0" style_bg_opa="0"
+                scrollable="false" flex_flow="row" style_pad_gap="#space_xs">
+          <lv_obj width="0"
+                  height="100%" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+                  flex_flow="column" style_pad_gap="#space_xs">
+            <lv_obj width="100%"
+                    height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+                    clickable="false"/>
+            <motion_jog_button name="cross_x_minus"
+                               width="100%" height="0" icon_size="jog_key" jog="x_minus_step" flex_grow="1"
+                               icon="arrow_left" variant="secondary"/>
+            <lv_obj width="100%"
+                    height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+                    clickable="false"/>
+          </lv_obj>
+          <lv_obj width="0"
+                  height="100%" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+                  flex_flow="column" style_pad_gap="#space_xs">
+            <motion_jog_button name="cross_y_plus"
+                               width="100%" height="0" icon_size="jog_key" jog="y_plus_step" flex_grow="1"
+                               icon="arrow_up" variant="secondary"/>
+            <motion_home_button name="cross_home_xy"
+                                width="100%" height="0" flex_grow="1" axis="XY"
+                                needs_home="motion_x_homed eq 0 or motion_y_homed eq 0"/>
+            <motion_jog_button name="cross_y_minus"
+                               width="100%" height="0" icon_size="jog_key" jog="y_minus_step" flex_grow="1"
+                               icon="arrow_down" variant="secondary"/>
+          </lv_obj>
+          <lv_obj width="0"
+                  height="100%" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+                  flex_flow="column" style_pad_gap="#space_xs">
+            <lv_obj width="100%"
+                    height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+                    clickable="false"/>
+            <motion_jog_button name="cross_x_plus"
+                               width="100%" height="0" icon_size="jog_key" jog="x_plus_step" flex_grow="1"
+                               icon="arrow_right" variant="secondary"/>
+            <lv_obj width="100%"
+                    height="0" flex_grow="1" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false"
+                    clickable="false"/>
+          </lv_obj>
+        </lv_obj>
+        <!-- Z cross: up, home Z, down. The arrows carry the kinematics-aware
+             icons and limit states of the pad layout's Z column. -->
+        <lv_obj name="cross_z"
+                width="content" height="content" style_pad_all="0" style_border_opa="0" style_bg_opa="0"
+                scrollable="false" flex_flow="column" style_pad_gap="#space_xs">
+          <motion_jog_button name="cross_z_up"
+                             width="100%" height="0" icon_size="jog_key" jog="z_up_step" flex_grow="1" icon="arrow_up"
+                             bind_icon="motion_z_up_icon" variant="secondary">
+            <bind_state_if_eq subject="motion_z_up_blocked" state="disabled" ref_value="1"/>
+          </motion_jog_button>
+          <motion_home_button name="cross_home_z"
+                              width="100%" height="0" flex_grow="1" axis="Z" needs_home="motion_z_homed eq 0"/>
+          <motion_jog_button name="cross_z_down"
+                             width="100%" height="0" icon_size="jog_key" jog="z_down_step" flex_grow="1"
+                             icon="arrow_down" bind_icon="motion_z_down_icon" variant="secondary">
+            <bind_state_if_eq subject="motion_z_down_blocked" state="disabled" ref_value="1"/>
+          </motion_jog_button>
+        </lv_obj>
+      </lv_obj>
+      <!-- Home All, Home X and Y, and leveling: a column beside the crosses in
+           landscape, a row under them in portrait. -->
+      <lv_obj name="cross_home"
+              width="content" height="content" style_pad_all="0" style_border_opa="0" style_bg_opa="0"
+              scrollable="false" style_pad_gap="#space_xs">
+        <bind_style_if_eq name="styles.jog_flow_column" subject="ui_is_portrait" ref_value="0"/>
+        <bind_style_if_eq name="styles.jog_flow_row" subject="ui_is_portrait" ref_value="1"/>
+        <motion_home_button name="cross_home_all"
+                            width="100%" height="100%" flex_grow="1" text="All" axis="all"
+                            needs_home="motion_x_homed eq 0 or motion_y_homed eq 0 or motion_z_homed eq 0"/>
+        <lv_obj width="100%"
+                height="100%" style_pad_all="0" style_border_opa="0" style_bg_opa="0" scrollable="false" flex_flow="row"
+                style_pad_gap="#space_xs">
+          <bind_style_if_eq name="styles.jog_grow_1" subject="ui_is_portrait" ref_value="0"/>
+          <bind_style_if_eq name="styles.jog_grow_2" subject="ui_is_portrait" ref_value="1"/>
+          <motion_home_button name="cross_home_x"
+                              width="0" height="100%" style_pad_hor="#space_xxs" flex_grow="1" text="X" axis="X"
+                              needs_home="motion_x_homed eq 0"/>
+          <motion_home_button name="cross_home_y"
+                              width="0" height="100%" style_pad_hor="#space_xxs" flex_grow="1" text="Y" axis="Y"
+                              needs_home="motion_y_homed eq 0"/>
+        </lv_obj>
+        <motion_leveling_row name="cross_leveling" width="100%" height="100%"/>
+      </lv_obj>
+    </lv_obj>
+    <motion_step_bar name="cross_steps"/>
+  </view>
+</component>

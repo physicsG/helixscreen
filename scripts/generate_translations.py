@@ -3,12 +3,11 @@
 """
 Translation generator script for HelixScreen.
 
-This script reads YAML translation files and generates:
-1. LVGL XML files for the declarative UI system
-2. lv_i18n C code for runtime translation lookups
+This script reads YAML translation files and generates the LVGL XML
+translation packs the app loads at runtime.
 
 Usage:
-    python generate_translations.py [--yaml-dir DIR] [--xml-dir DIR] [--c-dir DIR]
+    python generate_translations.py [--yaml-dir DIR] [--xml-dir DIR]
 """
 
 import argparse
@@ -53,6 +52,59 @@ def is_plural_entry(value: Any) -> bool:
         True if value is a dict (plural form), False otherwise
     """
     return isinstance(value, dict)
+
+
+# CLDR plural categories a YAML plural mapping may name.
+PLURAL_CATEGORIES = ("zero", "one", "two", "few", "many", "other")
+
+
+def plural_variant_tag(key: str, category: str) -> str:
+    """The runtime tag carrying ``key``'s form for ``category``.
+
+    The C++ twin is helix::ui::plural_variant_tag() (include/i18n_plural.h);
+    tests/unit/test_i18n_plural.cpp pins the same spelling.
+    """
+    return key if category == "other" else f"{key}_{category}"
+
+
+def expand_plural_entries(
+    locale: str, translations: dict[str, Any]
+) -> tuple[dict[str, str], list[str]]:
+    """Flatten one locale's plural mappings into plain runtime tags.
+
+    A plural entry is a mapping of CLDR categories to strings. Its ``other``
+    form becomes the plain tag, so every lookup that knows nothing of plurals
+    still finds a translation, and each remaining category becomes
+    ``<key>_<category>`` (see plural_variant_tag), which
+    helix::ui::tr_plural() looks up for a count in that category.
+
+    Returns:
+        (flat {tag: text} dict, list of error strings)
+    """
+    flat: dict[str, str] = {}
+    errors: list[str] = []
+    for key, value in translations.items():
+        if not is_plural_entry(value):
+            flat[key] = value
+            continue
+        unknown = sorted(set(value) - set(PLURAL_CATEGORIES))
+        if unknown:
+            errors.append(
+                f"{locale}: plural entry '{key}' has unknown categor"
+                f"{'y' if len(unknown) == 1 else 'ies'} {', '.join(unknown)}; "
+                f"use {', '.join(PLURAL_CATEGORIES)}"
+            )
+            continue
+        if not value.get("other"):
+            errors.append(
+                f"{locale}: plural entry '{key}' has no 'other' form, which every "
+                f"count without its own form falls back to"
+            )
+            continue
+        for category, text in value.items():
+            if text:
+                flat[plural_variant_tag(key, category)] = text
+    return flat, errors
 
 
 # =============================================================================
@@ -123,403 +175,6 @@ def generate_lvgl_xml(translations_dict: dict[str, dict[str, str]]) -> str:
     lines.append("</translations>")
 
     return "\n".join(lines) + "\n"
-
-
-# =============================================================================
-# lv_i18n C Code Generation
-# =============================================================================
-
-# Plural rules for different languages
-# Based on CLDR plural rules: https://unicode-org.github.io/cldr-staging/charts/latest/supplemental/language_plural_rules.html
-PLURAL_RULES = {
-    "en": """
-static uint8_t {locale}_plural_fn(int32_t num)
-{{
-    uint32_t n = op_n(num); UNUSED(n);
-    uint32_t i = op_i(n); UNUSED(i);
-    uint32_t v = op_v(n); UNUSED(v);
-
-    if ((i == 1 && v == 0)) return LV_I18N_PLURAL_TYPE_ONE;
-    return LV_I18N_PLURAL_TYPE_OTHER;
-}}
-""",
-    "de": """
-static uint8_t {locale}_plural_fn(int32_t num)
-{{
-    uint32_t n = op_n(num); UNUSED(n);
-    uint32_t i = op_i(n); UNUSED(i);
-    uint32_t v = op_v(n); UNUSED(v);
-
-    if ((i == 1 && v == 0)) return LV_I18N_PLURAL_TYPE_ONE;
-    return LV_I18N_PLURAL_TYPE_OTHER;
-}}
-""",
-    "es": """
-static uint8_t {locale}_plural_fn(int32_t num)
-{{
-    uint32_t n = op_n(num); UNUSED(n);
-    uint32_t i = op_i(n); UNUSED(i);
-    uint32_t v = op_v(n); UNUSED(v);
-
-    if ((i == 1 && v == 0)) return LV_I18N_PLURAL_TYPE_ONE;
-    return LV_I18N_PLURAL_TYPE_OTHER;
-}}
-""",
-    "fr": """
-static uint8_t {locale}_plural_fn(int32_t num)
-{{
-    uint32_t n = op_n(num); UNUSED(n);
-    uint32_t i = op_i(n); UNUSED(i);
-
-    if ((i == 0 || i == 1)) return LV_I18N_PLURAL_TYPE_ONE;
-    return LV_I18N_PLURAL_TYPE_OTHER;
-}}
-""",
-    "ru": """
-static uint8_t {locale}_plural_fn(int32_t num)
-{{
-    uint32_t n = op_n(num); UNUSED(n);
-    uint32_t v = op_v(n); UNUSED(v);
-    uint32_t i = op_i(n); UNUSED(i);
-    uint32_t i10 = i % 10;
-    uint32_t i100 = i % 100;
-    if ((v == 0 && i10 == 1 && i100 != 11)) return LV_I18N_PLURAL_TYPE_ONE;
-    if ((v == 0 && (2 <= i10 && i10 <= 4) && (!(12 <= i100 && i100 <= 14)))) return LV_I18N_PLURAL_TYPE_FEW;
-    if ((v == 0 && i10 == 0) || (v == 0 && (5 <= i10 && i10 <= 9)) || (v == 0 && (11 <= i100 && i100 <= 14))) return LV_I18N_PLURAL_TYPE_MANY;
-    return LV_I18N_PLURAL_TYPE_OTHER;
-}}
-""",
-}
-
-
-def escape_c_string(text: str) -> str:
-    """Escape special characters for C strings.
-
-    Handles both real control characters and literal escape sequences from YAML.
-    YAML single-quoted strings store \\n as two chars (backslash + n), which must
-    stay as \\n in C (the compiler interprets it as a real newline at runtime).
-    """
-    result = []
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if ch == "\n":
-            result.append("\\n")
-        elif ch == "\r":
-            result.append("\\r")
-        elif ch == "\t":
-            result.append("\\t")
-        elif ch == '"':
-            result.append('\\"')
-        elif ch == "\\" and i + 1 < len(text):
-            next_ch = text[i + 1]
-            if next_ch in ("n", "r", "t", "\\", '"'):
-                # Recognized C escape sequence — preserve as-is
-                result.append("\\")
-                result.append(next_ch)
-                i += 1
-            else:
-                result.append("\\\\")
-        elif ch == "\\":
-            result.append("\\\\")
-        else:
-            result.append(ch)
-        i += 1
-    return "".join(result)
-
-
-def get_plural_forms_for_locale(locale: str) -> list[str]:
-    """Get the plural forms used by a locale."""
-    # Most languages use one/other
-    # Russian uses one/few/many/other
-    if locale == "ru":
-        return ["one", "few", "many", "other"]
-    else:
-        return ["one", "other"]
-
-
-def generate_lv_i18n_c(
-    singulars: dict[str, dict[str, str]],
-    plurals: dict[str, dict[str, dict[str, str]]],
-) -> str:
-    """
-    Generate C code for lv_i18n library.
-
-    Args:
-        singulars: Dict of {locale: {key: value, ...}, ...} for singular translations
-        plurals: Dict of {locale: {key: {form: value, ...}, ...}, ...} for plural translations
-
-    Returns:
-        C source code string
-    """
-    lines = [
-        "// SPDX-License-Identifier: GPL-3.0-or-later",
-        "// Auto-generated by generate_translations.py - DO NOT EDIT",
-        "",
-        '#include "lv_i18n_translations.h"',
-        "#include <stddef.h>  // For NULL",
-        "#include <string.h>  // For strcmp",
-        "",
-        "////////////////////////////////////////////////////////////////////////////////",
-        "// Define plural operands",
-        "// http://unicode.org/reports/tr35/tr35-numbers.html#Operands",
-        "",
-        "#define UNUSED(x) (void)(x)",
-        "",
-        "static inline uint32_t op_n(int32_t val) { return (uint32_t)(val < 0 ? -val : val); }",
-        "static inline uint32_t op_i(uint32_t val) { return val; }",
-        "static inline uint32_t op_v(uint32_t val) { UNUSED(val); return 0; }",
-        "static inline uint32_t op_w(uint32_t val) { UNUSED(val); return 0; }",
-        "static inline uint32_t op_f(uint32_t val) { UNUSED(val); return 0; }",
-        "static inline uint32_t op_t(uint32_t val) { UNUSED(val); return 0; }",
-        "static inline uint32_t op_e(uint32_t val) { UNUSED(val); return 0; }",
-        "",
-    ]
-
-    # Collect all locales
-    all_locales = set(singulars.keys()) | set(plurals.keys())
-    sorted_locales = sorted(all_locales)
-
-    # Collect all singular keys (sorted)
-    all_singular_keys = set()
-    for locale_data in singulars.values():
-        all_singular_keys.update(locale_data.keys())
-    sorted_singular_keys = sorted(all_singular_keys)
-
-    # Collect all plural keys (sorted)
-    all_plural_keys = set()
-    for locale_data in plurals.values():
-        all_plural_keys.update(locale_data.keys())
-    sorted_plural_keys = sorted(all_plural_keys)
-
-    # Generate singulars arrays for each locale
-    for locale in sorted_locales:
-        locale_singulars = singulars.get(locale, {})
-        if locale_singulars or locale in singulars:
-            lines.append(f"static const char * {locale}_singulars[] = {{")
-            for i, key in enumerate(sorted_singular_keys):
-                value = locale_singulars.get(key)
-                if value is not None:
-                    lines.append(f'    "{escape_c_string(value)}", // {i}="{key}"')
-                else:
-                    lines.append(f'    NULL, // {i}="{key}"')
-            lines.append("};")
-            lines.append("")
-
-    # Generate plurals arrays for each locale and plural form
-    for locale in sorted_locales:
-        locale_plurals = plurals.get(locale, {})
-        if not locale_plurals:
-            continue
-
-        # Determine which plural forms this locale uses
-        forms_used = set()
-        for key_plurals in locale_plurals.values():
-            forms_used.update(key_plurals.keys())
-
-        for form in ["one", "two", "few", "many", "other"]:
-            if form not in forms_used:
-                continue
-
-            lines.append(f"static const char * {locale}_plurals_{form}[] = {{")
-            for i, key in enumerate(sorted_plural_keys):
-                key_plurals = locale_plurals.get(key, {})
-                value = key_plurals.get(form)
-                if value is not None:
-                    lines.append(f'    "{escape_c_string(value)}", // {i}="{key}"')
-                else:
-                    lines.append(f'    NULL, // {i}="{key}"')
-            lines.append("};")
-            lines.append("")
-
-    # Generate plural functions for each locale that has plurals
-    for locale in sorted_locales:
-        if locale not in plurals or not plurals[locale]:
-            continue
-
-        # Use the locale-specific plural rule or fall back to English
-        rule_template = PLURAL_RULES.get(locale, PLURAL_RULES["en"])
-        lines.append(rule_template.format(locale=locale))
-
-    # Generate language structs
-    for locale in sorted_locales:
-        locale_singulars = singulars.get(locale, {})
-        locale_plurals = plurals.get(locale, {})
-
-        lines.append(f"static const lv_i18n_lang_t {locale}_lang = {{")
-        lines.append(f'    .locale_name = "{locale}",')
-
-        if locale_singulars:
-            lines.append(f"    .singulars = {locale}_singulars,")
-
-        if locale_plurals:
-            forms_used = set()
-            for key_plurals in locale_plurals.values():
-                forms_used.update(key_plurals.keys())
-
-            for form in ["one", "two", "few", "many", "other"]:
-                if form in forms_used:
-                    plural_type = f"LV_I18N_PLURAL_TYPE_{form.upper()}"
-                    lines.append(f"    .plurals[{plural_type}] = {locale}_plurals_{form},")
-
-            lines.append(f"    .locale_plural_fn = {locale}_plural_fn")
-        lines.append("};")
-        lines.append("")
-
-    # Generate language pack
-    lines.append("const lv_i18n_language_pack_t lv_i18n_language_pack[] = {")
-    for locale in sorted_locales:
-        lines.append(f"    &{locale}_lang,")
-    lines.append("    NULL // End mark")
-    lines.append("};")
-    lines.append("")
-
-    # Generate singular and plural index arrays (for runtime lookup)
-    lines.append("#ifndef LV_I18N_OPTIMIZE")
-    lines.append("")
-
-    if sorted_singular_keys:
-        lines.append("static const char * singular_idx[] = {")
-        for key in sorted_singular_keys:
-            lines.append(f'    "{escape_c_string(key)}",')
-        lines.append("};")
-        lines.append("")
-
-    if sorted_plural_keys:
-        lines.append("static const char * plural_idx[] = {")
-        for key in sorted_plural_keys:
-            lines.append(f'    "{escape_c_string(key)}",')
-        lines.append("};")
-        lines.append("")
-
-    lines.append("#endif")
-    lines.append("")
-
-    # Add runtime functions
-    lines.extend([
-        "////////////////////////////////////////////////////////////////////////////////",
-        "// Runtime API",
-        "////////////////////////////////////////////////////////////////////////////////",
-        "",
-        "// Internal state",
-        "static const lv_i18n_language_pack_t * current_lang_pack = NULL;",
-        "static const lv_i18n_lang_t * current_lang = NULL;",
-        "",
-        "int lv_i18n_init(const lv_i18n_language_pack_t * langs)",
-        "{",
-        "    if (langs == NULL) return -1;",
-        "    if (langs[0] == NULL) return -1;",
-        "",
-        "    current_lang_pack = langs;",
-        "    current_lang = langs[0];  // Default to first language",
-        "    return 0;",
-        "}",
-        "",
-        "int lv_i18n_set_locale(const char * l_name)",
-        "{",
-        "    if (current_lang_pack == NULL) return -1;",
-        "    if (l_name == NULL) return -1;",
-        "",
-        "    for (int i = 0; current_lang_pack[i] != NULL; i++) {",
-        "        if (strcmp(current_lang_pack[i]->locale_name, l_name) == 0) {",
-        "            current_lang = current_lang_pack[i];",
-        "            return 0;",
-        "        }",
-        "    }",
-        "",
-        "    return -1;  // Locale not found",
-        "}",
-        "",
-        "const char * lv_i18n_get_current_locale(void)",
-        "{",
-        "    if (current_lang == NULL) return NULL;",
-        "    return current_lang->locale_name;",
-        "}",
-        "",
-    ])
-
-    return "\n".join(lines)
-
-
-def generate_lv_i18n_h(
-    singulars: dict[str, dict[str, str]],
-    plurals: dict[str, dict[str, dict[str, str]]],
-) -> str:
-    """
-    Generate header file for lv_i18n library.
-
-    Args:
-        singulars: Dict of {locale: {key: value, ...}, ...} for singular translations
-        plurals: Dict of {locale: {key: {form: value, ...}, ...}, ...} for plural translations
-
-    Returns:
-        C header code string
-    """
-    lines = [
-        "// SPDX-License-Identifier: GPL-3.0-or-later",
-        "// Auto-generated by generate_translations.py - DO NOT EDIT",
-        "",
-        "#ifndef LV_I18N_TRANSLATIONS_H",
-        "#define LV_I18N_TRANSLATIONS_H",
-        "",
-        "#ifdef __cplusplus",
-        'extern "C" {',
-        "#endif",
-        "",
-        "#include <stdint.h>",
-        "",
-        "////////////////////////////////////////////////////////////////////////////////",
-        "",
-        "typedef enum {",
-        "    LV_I18N_PLURAL_TYPE_ZERO,",
-        "    LV_I18N_PLURAL_TYPE_ONE,",
-        "    LV_I18N_PLURAL_TYPE_TWO,",
-        "    LV_I18N_PLURAL_TYPE_FEW,",
-        "    LV_I18N_PLURAL_TYPE_MANY,",
-        "    LV_I18N_PLURAL_TYPE_OTHER,",
-        "    _LV_I18N_PLURAL_TYPE_NUM,",
-        "} lv_i18n_plural_type_t;",
-        "",
-        "typedef struct {",
-        "    const char * locale_name;",
-        "    const char * * singulars;",
-        "    const char * * plurals[_LV_I18N_PLURAL_TYPE_NUM];",
-        "    uint8_t (*locale_plural_fn)(int32_t num);",
-        "} lv_i18n_lang_t;",
-        "",
-        "typedef const lv_i18n_lang_t * lv_i18n_language_pack_t;",
-        "",
-        "extern const lv_i18n_language_pack_t lv_i18n_language_pack[];",
-        "",
-        "/**",
-        " * Initialize the lv_i18n translation system with a language pack.",
-        " * @param langs Pointer to the array of languages (last element must be NULL)",
-        " * @return 0 on success, -1 on error",
-        " */",
-        "int lv_i18n_init(const lv_i18n_language_pack_t * langs);",
-        "",
-        "/**",
-        " * Change the current locale (language).",
-        " * @param l_name Name of the locale to use (e.g., \"en\", \"de\", \"fr\")",
-        " * @return 0 on success, -1 if locale not found",
-        " */",
-        "int lv_i18n_set_locale(const char * l_name);",
-        "",
-        "/**",
-        " * Get the name of the currently active locale.",
-        " * @return Locale name string, or NULL if not initialized",
-        " */",
-        "const char * lv_i18n_get_current_locale(void);",
-        "",
-        "#ifdef __cplusplus",
-        "} /* extern \"C\" */",
-        "#endif",
-        "",
-        "#endif /* LV_I18N_TRANSLATIONS_H */",
-        "",
-    ]
-
-    return "\n".join(lines)
 
 
 # =============================================================================
@@ -695,29 +350,6 @@ def write_per_locale_xml(
     return written
 
 
-def write_lv_i18n_files(
-    singulars: dict[str, dict[str, str]],
-    plurals: dict[str, dict[str, dict[str, str]]],
-    output_dir: Path,
-) -> None:
-    """
-    Write lv_i18n C source and header files.
-
-    Args:
-        singulars: Dict of {locale: {key: value, ...}, ...} for singular translations
-        plurals: Dict of {locale: {key: {form: value, ...}, ...}, ...} for plural translations
-        output_dir: Directory to write the files
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    c_content = generate_lv_i18n_c(singulars, plurals)
-    h_content = generate_lv_i18n_h(singulars, plurals)
-
-    (output_dir / "lv_i18n_translations.c").write_text(c_content, encoding="utf-8")
-    (output_dir / "lv_i18n_translations.h").write_text(h_content, encoding="utf-8")
-
-
 # =============================================================================
 # Full Pipeline
 # =============================================================================
@@ -735,10 +367,8 @@ class GenerateResult:
 def generate_all(
     yaml_dir: Path,
     xml_output_dir: Path,
-    c_output_dir: Path,
     base_locale: str = "en",
     languages: list[str] | None = None,
-    emit_lv_i18n: bool = False,
 ) -> GenerateResult:
     """
     Run the full translation generation pipeline.
@@ -746,16 +376,10 @@ def generate_all(
     Args:
         yaml_dir: Directory containing YAML translation files
         xml_output_dir: Directory to write XML output
-        c_output_dir: Directory to write C output (only used if emit_lv_i18n)
         base_locale: Base locale for comparison (default: "en")
         languages: Optional whitelist of locale codes. If None, all YAMLs are
                    included. Constrained-device builds pass a short list (e.g.
-                   ["en"]) to shrink the compiled translation table.
-        emit_lv_i18n: When True, also write the legacy lv_i18n C/H translation
-                   table. Default False — that table is NOT compiled or linked
-                   (runtime uses the XML packs via LVGL's lv_translation_* API),
-                   so emitting it only produces a large churn diff. Opt in only
-                   if the lv_i18n subsystem is ever re-enabled.
+                   ["en"]) to shrink the shipped translation packs.
 
     Returns:
         GenerateResult with success status and any warnings/errors
@@ -781,22 +405,20 @@ def generate_all(
                 f"Dropped locales (not in HELIX_LANG whitelist): {', '.join(dropped)}"
             )
 
-    # Separate singulars and plurals
-    singulars: dict[str, dict[str, str]] = {}
-    plurals: dict[str, dict[str, dict[str, str]]] = {}
+    runtime_tags: dict[str, dict[str, str]] = {}
 
     for locale, locale_translations in translations.items():
-        singulars[locale] = {}
-        plurals[locale] = {}
+        runtime_tags[locale], plural_errors = expand_plural_entries(
+            locale, locale_translations
+        )
+        result.errors.extend(plural_errors)
 
-        for key, value in locale_translations.items():
-            if is_plural_entry(value):
-                plurals[locale][key] = value
-            else:
-                singulars[locale][key] = value
+    if result.errors:
+        result.success = False
+        return result
 
     # Check for missing translations
-    missing = find_missing_translations(singulars, base_locale)
+    missing = find_missing_translations(translations, base_locale)
     if missing:
         for locale, keys in missing.items():
             for key in keys:
@@ -807,16 +429,11 @@ def generate_all(
     result.warnings.extend(issues)
 
     # Generate XML
-    write_xml_file(singulars, xml_output_dir / "translations.xml")
+    write_xml_file(runtime_tags, xml_output_dir / "translations.xml")
 
     # Also emit per-locale XMLs so the app can load only the current language
     # at runtime. See write_per_locale_xml() for the rationale.
-    write_per_locale_xml(singulars, xml_output_dir)
-
-    # Legacy lv_i18n C/H table: not compiled or linked (see emit_lv_i18n note).
-    # Skipped by default to avoid a large churn diff on every regeneration.
-    if emit_lv_i18n:
-        write_lv_i18n_files(singulars, plurals, c_output_dir)
+    write_per_locale_xml(runtime_tags, xml_output_dir)
 
     return result
 
@@ -844,20 +461,6 @@ def main():
         help="Output directory for XML files",
     )
     parser.add_argument(
-        "--c-dir",
-        type=Path,
-        default=Path("src/generated"),
-        help="Output directory for the legacy lv_i18n C files (only used with "
-             "--emit-lv-i18n)",
-    )
-    parser.add_argument(
-        "--emit-lv-i18n",
-        action="store_true",
-        help="Also emit the legacy lv_i18n C/H translation table. Off by "
-             "default — it is not compiled or linked (runtime uses the XML "
-             "packs), so emitting it just produces churn.",
-    )
-    parser.add_argument(
         "--base-locale",
         default="en",
         help="Base locale for translation comparison (default: en)",
@@ -880,10 +483,8 @@ def main():
     result = generate_all(
         yaml_dir=args.yaml_dir,
         xml_output_dir=args.xml_dir,
-        c_output_dir=args.c_dir,
         base_locale=args.base_locale,
         languages=lang_whitelist,
-        emit_lv_i18n=args.emit_lv_i18n,
     )
 
     for warning in result.warnings:

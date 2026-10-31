@@ -70,7 +70,7 @@ Rules that hold throughout:
 
 A hold on the home grid enters edit mode (`src/ui/ui_panel_home.cpp#on_home_grid_long_press`).
 The handler does nothing when `should_suppress_edit_mode()` refuses (the Touch & Input kill
-switch, the lock screen, a scroll in progress, an arc or slider under the finger), when the
+switch, the lock screen, a scroll in progress, a drag surface under the finger), when the
 carousel is not resting on the page the handlers act on (`carousel_on_scoped_page()`), or when
 the finger drifted from where it landed (`finger_drifted_since_press()`). Otherwise it:
 
@@ -80,6 +80,19 @@ the finger drifted from where it landed (`finger_drifted_since_press()`). Otherw
 4. states the swipe policy for a session with no gesture, the policy outside edit mode: the pages
    swipe by their count and the next-page slot stays out of reach;
 5. selects the widget under the finger with `handle_click()`.
+
+A drag surface is a control the user drags for a value or a position, so a hold on it is the
+start of a drag, not a request to edit. `helix::ui::is_drag_surface_hit()`
+(`src/ui/ui_drag_surface.cpp#is_drag_surface_hit`) walks from the press target up to the
+widget and answers true for an `lv_arc`, an `lv_slider`, or any object a widget marked with
+`helix::ui::mark_drag_surface()` (`include/ui_drag_surface.h`). Marking sets
+`kDragSurfaceFlag` (`LV_OBJ_FLAG_USER_1`) and the input flags a drag needs: clickable, not
+scrollable, no scroll chaining (so a horizontal drag never adopts the page carousel), press
+lock and no gesture bubbling. A widget opts in by marking the object from `attach()`; the
+toolhead plate is the worked example (`src/ui/panel_widgets/toolhead_widget.cpp#attach`). To
+make a surface inert, clear its `clickable` flag: the press then lands on the tile, and a hold
+there enters edit mode as anywhere else. The fan control overlay asks the same question
+(`src/ui/ui_fan_control_overlay.cpp#press_consumed_by_value_widget`).
 
 `enter()` sets `home_edit_mode` to 1, marks the entering hold inert (`gesture_inert_`, see below)
 when it runs inside a pointer read, and runs `attach_to_current_page()`: it disarms the
@@ -139,7 +152,7 @@ swipeable: a swipe that starts on a widget must still flip the page.
 - **Press-and-move grabs only a widget selected before the press.** The gesture's first PRESSING
   cycle, which LVGL dispatches in the same read as the PRESSED, decides the grab latch from the
   selection standing at the press. A press on the selected widget, or inside its edge grab band,
-  arms (`press_armed_`), and travel past `DRAG_THRESHOLD_PX` starts a drag, or a resize when the
+  arms (`press_armed_`), and travel past `kDragThresholdPx` starts a drag, or a resize when the
   press landed on a resizable widget's edge. Any other press selects the widget under the finger
   on that first cycle, and no later cycle of the gesture selects again: a finger moving on is a
   swipe, never a new selection.
@@ -407,8 +420,9 @@ has no press target to release (`indev_proc_release`: `lib/lvgl/src/indev/lv_ind
 the shield could commit on follows a reset.
 
 **So input is reset only when the press itself should end.** Navigation, a modal closing and the
-wake from display sleep interrupt a drag for real, and cancel it; nothing resets input as the
-display goes to sleep (`src/application/display_manager.cpp#disable_input_briefly`). The rule for new code that retires
+display waking from sleep, dim or a screensaver interrupt a drag for real, and cancel it (the
+wake through `src/application/display_manager.cpp#cancel_pointer_presses`); nothing resets input as the
+display goes to sleep. The rule for new code that retires
 objects while a press may be in flight on them: reset input through
 `helix::ui::reset_input_within(subtree)` (`src/ui/ui_utils.cpp#reset_input_within`), which resets
 only a pointer whose press or scroll target lies inside the subtree, and never call an unscoped
@@ -438,7 +452,7 @@ Every drag move (`src/ui/grid_edit_mode.cpp#handle_drag_move`) gathers one
 
     // Both flips wait on timers, since both are deadlines: the dwell runs out
     // while the pointer may rest, and a crossing flips only if the finger is
-    // still down when CROSS_PAGE_CROSSING_DELAY_MS runs out.
+    // still down when kCrossPageCrossingDelayMs runs out.
     if (step.flip_dir != 0) {
         start_crossing_flip(step.flip_dir);
     }
@@ -454,12 +468,12 @@ Every drag move (`src/ui/grid_edit_mode.cpp#handle_drag_move`) gathers one
   it stays under the finger while its page slides. The frame is the grid area, so in landscape
   the left edge zone sits beside the navigation bar, not at the screen edge.
 - **Edge push.** While the pointer stays in an edge zone, the widget slides past the pointer at a
-  speed proportional to the column track, capped `CROSS_PAGE_PUSH_CAP_SLOP_PX` past the majority
+  speed proportional to the column track, capped `kCrossPagePushCapSlopPx` past the majority
   line, so a pinned pointer always reaches a crossing.
 - **Majority crossing.** The widget's majority past a frame edge requests one flip, due
-  `CROSS_PAGE_CROSSING_DELAY_MS` later; the next crossing waits until the widget is majority
+  `kCrossPageCrossingDelayMs` later; the next crossing waits until the widget is majority
   inside again.
-- **Dwell.** The pointer held in an edge zone for `CROSS_PAGE_DWELL_MS` flips toward that edge.
+- **Dwell.** The pointer held in an edge zone for `kCrossPageDwellMs` flips toward that edge.
   The timer restarts only when the dwell's direction changes (`dwell_changed`), so the reads a
   resting finger produces every read period do not hold it off.
 - **One flip per zone stay.** A crossing stops the dwell, and a flip spends the zone for both
@@ -726,7 +740,7 @@ populated page (`ui_xml/home_panel.xml`):
   means the page holds a placed entry. The badge count and pruning share it.
 - `place_entry(id, page, col, row, colspan, rowspan)` leaves exactly one entry named `id` across all
   pages and carries its per-widget config along. Drag commit and catalog placement both use it.
-- `can_add_page()` is the page cap (`helix::MAX_PAGES`); `add_page()` returns -1 at the cap. Its
+- `can_add_page()` is the page cap (`helix::kMaxPages`); `add_page()` returns -1 at the cap. Its
   `position` parameter is the one creation seam: `-1` appends, `0` inserts before the first page
   (shifting the main page index with it), and any other position clamps into the page list. The
   slot's + and a right-border drop append; a left-border drop inserts at 0.
@@ -809,7 +823,7 @@ built around:
   for real only from `press()`, `move()`, `release()` or `hold()`. `lv_obj_send_event()` reaches
   it with no indev.
 - A read advances no time, and nothing reads on its own: `lv_timer_handler_safe()` fires one-shot
-  timers only, never the indev's periodic read timer. `hold(ms)` reads every `READ_PERIOD_MS` and
+  timers only, never the indev's periodic read timer. `hold(ms)` reads every `kReadPeriodMs` and
   advances the tick and the one-shot timers between reads, the device's cadence.
 - `grab(x, y)` is the two-step grab. `long_press_hold_ms()` ends a hold on the read that dispatches
   LONG_PRESSED.
@@ -819,7 +833,7 @@ The test binary links a stub `ToastManager`, so toast teardown is exercised thro
 a real toast.
 
 Thresholds, zones and times come from the code's constants (`drag_threshold_px()`,
-`edge_zone_px()`, `CROSS_PAGE_DWELL_MS`), never literals. Run each new case alone once, and
+`edge_zone_px()`, `kCrossPageDwellMs`), never literals. Run each new case alone once, and
 `make test-order-dependence`, which takes no file: it re-runs every test file alone against a
 full-suite report.
 

@@ -57,7 +57,7 @@ void Thing::go() {
         [](const MoonrakerError& err) {
             spdlog::error("[Thing] unload failed: {}", err.message);
         },
-        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS);
+        IMoonrakerAPI::kAmsOperationTimeoutMs);
 }'
     flagged
 }

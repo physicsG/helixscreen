@@ -32,6 +32,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/log_capture.h"
 #include "../test_helpers/navigation_manager_test_access.h"
+#include "../test_helpers/scoped_platform_tier.h"
 #include "../test_helpers/snapshot_backdrops_mode.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
@@ -42,8 +43,14 @@
 #include "panel_lifecycle.h"
 #include "platform_capabilities.h"
 #include "printer_state.h"
+#include "system/telemetry_manager.h"
 
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <string>
 
 #include "../catch_amalgamated.hpp"
 
@@ -87,23 +94,6 @@ class RecordingPanel : public PanelBase {
     int deactivates = 0;
     bool visible_on_last_activate = false;
     bool navigate_to_home_on_activate = false;
-};
-
-/// Sets the platform_tier subject for one scope.
-class ScopedTier {
-  public:
-    explicit ScopedTier(helix::PlatformTier tier)
-        : subject_(lv_xml_get_subject(nullptr, "platform_tier")),
-          saved_(lv_subject_get_int(subject_)) {
-        lv_subject_set_int(subject_, static_cast<int>(tier));
-    }
-    ~ScopedTier() {
-        lv_subject_set_int(subject_, saved_);
-    }
-
-  private:
-    lv_subject_t* subject_;
-    int saved_;
 };
 
 /// Unhidden children of the top layer, where the loading pill lives.
@@ -160,7 +150,7 @@ class OverlayActivationFixture : public LVGLUITestFixture {
         home_widget_ = lv_obj_create(test_screen());
         controls_widget_ = lv_obj_create(test_screen());
 
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = home_widget_;
         panels[static_cast<int>(PanelId::Controls)] = controls_widget_;
         nav.set_panels(panels); // active is Home by default → stack = [home_widget_]
@@ -868,4 +858,35 @@ TEST_CASE_METHOD(OverlayActivationFixture, "Overlay slides follow the tier's sty
         process_lvgl(500);
         CHECK(closes == 1);
     }
+}
+
+TEST_CASE_METHOD(OverlayActivationFixture,
+                 "push_overlay reports the root's object name to telemetry, not the display name",
+                 "[navigation][overlay][telemetry]") {
+    auto& tm = TelemetryManager::instance();
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("helix_nav_telemetry_" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir);
+    tm.shutdown();
+    tm.init(dir.string());
+    tm.set_enabled(true);
+    tm.clear_queue();
+
+    lv_obj_set_name(overlay_, "recording_overlay");
+    open_overlay();
+    tm.record_panel_usage();
+
+    auto queue = tm.get_queue_snapshot();
+    tm.set_enabled(false);
+    tm.shutdown();
+    std::filesystem::remove_all(dir);
+
+    auto it = std::find_if(queue.begin(), queue.end(), [](const nlohmann::json& e) {
+        return e.value("event", "") == "panel_usage";
+    });
+    REQUIRE(it != queue.end());
+    const auto& visits = (*it)["overlay_visits"];
+    CHECK(visits.value("recording_overlay", 0) == 1);
+    CHECK_FALSE(visits.contains("RecordingOverlay"));
 }

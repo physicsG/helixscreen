@@ -69,17 +69,24 @@ struct ChannelStateInfo {
 /// The firmware sets an op's terminal and its resting state (wait_insert,
 /// preload_finish) in one reactor tick, and a status frame carries only the
 /// last channel_state. channel_action_state keeps the op's own last step at
-/// rest, so it stands in when the channel rests and it moved to a *_finish or
-/// *_fail since the previous frame. An unchanged value is the previous op's
+/// rest, so it stands in once the channel rests. The two fields also move in
+/// either order across frames: an outcome that arrives while the channel still
+/// reports a step under way is held until the channel settles, and a new step
+/// in channel_action_state drops it. An unchanged value is the previous op's
 /// outcome and says nothing about the current one, and the first value a
 /// channel reports is an op that ended before anyone was watching.
-///
+struct OpOutcome {
+    std::optional<std::string> outcome; ///< drives the op lifecycle; nullopt = use channel_state
+    std::string held;                   ///< an outcome still waiting for the channel to settle
+};
+
 /// @param channel_state          The channel's current (held) channel_state.
 /// @param prev_action_state      channel_action_state before this frame.
 /// @param action_state           channel_action_state after this frame.
-/// @return The state to drive the op lifecycle with, or nullopt to use channel_state.
-[[nodiscard]] std::optional<std::string> settled_op_outcome(const std::string& channel_state,
-                                                            const std::string& prev_action_state,
-                                                            const std::string& action_state);
+/// @param held_outcome           The previous frame's OpOutcome::held for this channel.
+[[nodiscard]] OpOutcome resolve_op_outcome(const std::string& channel_state,
+                                           const std::string& prev_action_state,
+                                           const std::string& action_state,
+                                           const std::string& held_outcome);
 
 } // namespace helix::snapmaker

@@ -18,7 +18,7 @@ using namespace helix;
 
 namespace {
 
-constexpr const char* NESTED = R"xml(
+constexpr const char* kNested = R"xml(
 <component>
   <view name="nested_root" extends="lv_obj">
     <lv_obj name="units">
@@ -50,7 +50,7 @@ int count_by_name(lv_obj_t* root, const char* name) {
 
 TEST_CASE_METHOD(LVGLTestFixture, "nested repeat is skipped and the outer still expands",
                  "[xml][repeat]") {
-    REQUIRE(lv_xml_register_component_from_data("nested_repeat_guard", NESTED) == LV_RESULT_OK);
+    REQUIRE(lv_xml_register_component_from_data("nested_repeat_guard", kNested) == LV_RESULT_OK);
 
     lv_obj_t* root =
         static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "nested_repeat_guard", nullptr));

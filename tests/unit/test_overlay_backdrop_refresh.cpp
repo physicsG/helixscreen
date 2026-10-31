@@ -41,8 +41,8 @@ using namespace helix;
 
 namespace {
 
-constexpr lv_color_t BASE_COLOR = LV_COLOR_MAKE(0xFF, 0x00, 0x00);    // red
-constexpr lv_color_t OVERLAY_COLOR = LV_COLOR_MAKE(0x00, 0xFF, 0x00); // green
+constexpr lv_color_t kBaseColor = LV_COLOR_MAKE(0xFF, 0x00, 0x00);    // red
+constexpr lv_color_t kOverlayColor = LV_COLOR_MAKE(0x00, 0xFF, 0x00); // green
 
 /// Full-screen opaque child in a known flat color.
 lv_obj_t* make_flat_layer(lv_obj_t* parent, lv_color_t color) {
@@ -155,7 +155,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Backdrop refresh re-snapshots the live base c
     auto& nav = NavigationManager::instance();
     lv_obj_t* screen = test_screen();
 
-    lv_obj_t* base = make_flat_layer(screen, BASE_COLOR);
+    lv_obj_t* base = make_flat_layer(screen, kBaseColor);
     process_lvgl(20);
 
     // First overlay: snapshot the screen (all red), then hide the base and cover
@@ -165,7 +165,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Backdrop refresh re-snapshots the live base c
     REQUIRE(backdrop != nullptr);
 
     lv_obj_add_flag(base, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t* overlay = make_flat_layer(screen, OVERLAY_COLOR);
+    lv_obj_t* overlay = make_flat_layer(screen, kOverlayColor);
     lv_obj_move_foreground(overlay);
     NavigationManagerTestAccess::set_panel_stack(nav, {base, overlay});
     process_lvgl(20);
@@ -217,10 +217,10 @@ TEST_CASE_METHOD(LVGLTestFixture, "The backdrop snapshot excludes the arriving o
     auto& nav = NavigationManager::instance();
     lv_obj_t* screen = test_screen();
 
-    lv_obj_t* base = make_flat_layer(screen, BASE_COLOR);
+    lv_obj_t* base = make_flat_layer(screen, kBaseColor);
     // An overlay root left visible at push time, as a caller that skips the
     // create-hidden convention produces: the snapshot must not bake it in.
-    lv_obj_t* arriving = make_flat_layer(screen, OVERLAY_COLOR);
+    lv_obj_t* arriving = make_flat_layer(screen, kOverlayColor);
     process_lvgl(20);
 
     NavigationManagerTestAccess::adopt_overlay_backdrop(nav, screen, arriving);
@@ -304,7 +304,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a backdrop refresh never holds two full frame
     SnapshotBackdropsMode snapshots(true);
     auto& nav = NavigationManager::instance();
     lv_obj_t* screen = test_screen();
-    lv_obj_t* base = make_flat_layer(screen, BASE_COLOR);
+    lv_obj_t* base = make_flat_layer(screen, kBaseColor);
     process_lvgl(20);
 
     NavigationManagerTestAccess::adopt_overlay_backdrop(nav, screen);
@@ -375,7 +375,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "with snapshots off the backdrop is a dim laye
     SnapshotBackdropsMode snapshots(false);
     auto& nav = NavigationManager::instance();
     lv_obj_t* screen = test_screen();
-    lv_obj_t* base = make_flat_layer(screen, BASE_COLOR);
+    lv_obj_t* base = make_flat_layer(screen, kBaseColor);
     process_lvgl(20);
 
     FrameBufferCounter frames;

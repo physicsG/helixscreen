@@ -22,8 +22,8 @@
         style_border_width="0" scrollable="false" clickable="true" checked="$selected">
     <style name="selected" selector="checked"/>
     <style name="styles.press_wash" selector="pressed"/>
-    <lv_label name="option_label"
-              text="" flex_grow="1" long_mode="dots" style_text_font="noto_sans_14" style_text_color="#text"
-              clickable="false" event_bubble="true"/>
+    <text_body name="option_label"
+               text="" flex_grow="1" long_mode="dots" style_text_font="noto_sans_14" clickable="false"
+               event_bubble="true"/>
   </view>
 </component>

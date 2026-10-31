@@ -59,10 +59,10 @@ enum class NiimbotLabelType : uint8_t {
 };
 
 /// Niimbot BLE service UUID (Transparent UART / Microchip ISSC)
-inline constexpr const char* NIIMBOT_SERVICE_UUID = "e7810a71-73ae-499d-8c15-faa9aef0c3f2";
+inline constexpr const char* kNiimbotServiceUuid = "e7810a71-73ae-499d-8c15-faa9aef0c3f2";
 
 /// Niimbot BLE write characteristic UUID (within the transparent UART service)
-inline constexpr const char* NIIMBOT_WRITE_CHAR_UUID = "bef8d6c9-9c21-4c9e-b632-bd58c1009f9f";
+inline constexpr const char* kNiimbotWriteCharUuid = "bef8d6c9-9c21-4c9e-b632-bd58c1009f9f";
 
 /// Build a single Niimbot protocol packet: [0x55 0x55 CMD LEN DATA... CHECKSUM 0xAA 0xAA]
 std::vector<uint8_t> niimbot_build_packet(NiimbotCmd cmd, const uint8_t* data, size_t len);

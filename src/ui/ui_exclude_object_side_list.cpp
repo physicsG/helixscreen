@@ -22,7 +22,7 @@
 namespace helix::ui {
 
 namespace {
-constexpr uint32_t SLIDE_IN_DURATION_MS = 220;
+constexpr uint32_t kSlideInDurationMs = 220;
 
 // Print status keeps its overlay alive while the details view opens its own.
 OpenInstances<ExcludeObjectSideList>& open_lists() {
@@ -146,7 +146,7 @@ void ExcludeObjectSideList::create(lv_obj_t* parent, PrinterExcludedObjectsState
     lv_anim_init(&a);
     lv_anim_set_var(&a, root_);
     lv_anim_set_values(&a, slide_distance, 0);
-    lv_anim_set_duration(&a, SLIDE_IN_DURATION_MS);
+    lv_anim_set_duration(&a, kSlideInDurationMs);
     lv_anim_set_exec_cb(
         &a, geom.anchor_bottom
                 ? [](void* obj, int32_t v) { lv_obj_set_y(static_cast<lv_obj_t*>(obj), v); }
@@ -295,7 +295,11 @@ void ExcludeObjectSideList::create_row(lv_obj_t* parent, const ObjectBadge& badg
     if (!row) {
         return;
     }
-    helix::ui::set_row_label_text(row, "object_name", name.c_str());
+    if (lv_obj_t* label = lv_obj_find_by_name(row, "object_name")) {
+        const lv_font_t* font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+        helix::ui::set_row_label_text(row, "object_name",
+                                      object_display_name(name, badge.defined_index, font).c_str());
+    }
 
     // L069: the row is a plain lv_obj, so the user_data slot is ours. The
     // helper owns the copy and frees it on LV_EVENT_DELETE. An excluded row
@@ -322,7 +326,7 @@ void ExcludeObjectSideList::on_row_clicked(lv_event_t* e) {
     // has no modal to follow, so it leaves the viewer alone.
     if (self->gcode_viewer_ && self->tap_mode_ == ExcludeTapMode::ExcludeOnly) {
         std::unordered_set<std::string> highlight = {std::string(name)};
-        ui_gcode_viewer_set_highlighted_objects(self->gcode_viewer_, highlight);
+        helix::ui::gcode_viewer_set_highlighted_objects(self->gcode_viewer_, highlight);
     }
 
     self->on_object_tapped_(std::string(name));

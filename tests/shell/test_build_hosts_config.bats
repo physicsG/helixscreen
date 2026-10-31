@@ -12,7 +12,7 @@ LIB="$ROOT/scripts/lib/build_hosts.sh"
 
 setup() {
     load helpers
-    cd "$ROOT"
+    cd "$(scratch_tree)" || return 1
     mock_command_script ssh 'touch "$BATS_TEST_TMPDIR/ssh-called"; exit 255'
     # A makefile that prints what a recipe under mk/remote.mk sees.
     SHOW="$BATS_TEST_TMPDIR/show.mk"
@@ -118,9 +118,45 @@ via_shell() { run bash -c '. "$1"; echo "host=[${REMOTE_HOST:-}] dir=[${REMOTE_D
     [ "$status" -eq 0 ]
     for k in HELIX_TEST_HOST HELIX_TEST_CONTAINER HELIX_TEST_WORKDIR HELIX_TEST_TREES_HOST \
              HELIX_TEST_TREES HELIX_TEST_CCACHE HELIX_TEST_LOCK_DIR HELIX_TEST_HOST_AUTO \
-             REMOTE_HOST REMOTE_USER REMOTE_DIR REMOTE_BUILD_DIR; do
+             HELIX_TEST_MEMORY REMOTE_HOST REMOTE_USER REMOTE_DIR REMOTE_BUILD_DIR; do
         contains "$k" "$output"
     done
+}
+
+@test "the test container's memory limit is a key the file can set" {
+    hosts HELIX_TEST_MEMORY=96g
+    run bash -c '. "$1"; echo "mem=[${HELIX_TEST_MEMORY:-}]"' _ "$LIB"
+    [ "$status" -eq 0 ]
+    contains "mem=[96g]" "$output"
+    lacks "is not a build-hosts key" "$output"
+}
+
+# An ssh that saves what each call reads on stdin (the remote scripts
+# remote-build.sh sends) and succeeds without reaching anything.
+capture_ssh() {
+    mock_command_script ssh 'n=$(ls "$BATS_TEST_TMPDIR"/ssh-in-* 2>/dev/null | wc -l | tr -d " ")
+case " $* " in *" -O "*) exit 0 ;; esac
+cat > "$BATS_TEST_TMPDIR/ssh-in-$n"; exit 0'
+    mock_command_script scp 'exit 0'
+}
+
+@test "remote-build.sh passes no -j unless JOBS names one, so the remote make sizes its own" {
+    capture_ssh
+    hosts REMOTE_HOST=ok.invalid
+    # It reads only git (a diff, the untracked list) and writes a temp dir, so the
+    # real checkout is safe; the scratch tree has no .git for it to read.
+    cd "$ROOT"
+    run scripts/remote-build.sh test
+    [ "$status" -eq 0 ] || fail "remote-build failed: $output"
+    build=$(grep -l "JOBS_ARG=" "$BATS_TEST_TMPDIR"/ssh-in-*)
+    [ -n "$build" ] || fail "no build script captured: $(ls "$BATS_TEST_TMPDIR")"
+    grep -qx 'JOBS_ARG=""' "$build" || fail "$(grep JOBS_ARG= "$build")"
+
+    rm -f "$BATS_TEST_TMPDIR"/ssh-in-*
+    JOBS=-j7 run scripts/remote-build.sh test
+    [ "$status" -eq 0 ] || fail "remote-build failed: $output"
+    build=$(grep -l "JOBS_ARG=" "$BATS_TEST_TMPDIR"/ssh-in-*)
+    grep -qx 'JOBS_ARG="-j7"' "$build" || fail "$(grep JOBS_ARG= "$build")"
 }
 
 @test "a file that exists but cannot be read says so" {
@@ -153,4 +189,97 @@ via_shell() { run bash -c '. "$1"; echo "host=[${REMOTE_HOST:-}] dir=[${REMOTE_D
     contains "REMOTE_HOST is not set" "$output"
     contains "$HELIX_BUILD_HOSTS_FILE" "$output"
     [ ! -e "$BATS_TEST_TMPDIR/ssh-called" ]
+}
+
+# An ssh that logs each target it is asked for, then answers as the host's
+# name says: up.* answers, hang.* never returns, anything else is a name the
+# resolver cannot look up.
+mock_candidate_ssh() {
+    mock_command_script ssh 'for a; do [ "$a" = true ] && break; h=$a; done
+echo "$h" >> "$BATS_TEST_TMPDIR/ssh-log"
+case "$h" in
+    *up.*) exit 0 ;;
+    *hang.*) exec sleep 30 ;;
+    *) echo "ssh: Could not resolve hostname $h: nodename nor servname provided, or not known" >&2; exit 255 ;;
+esac'
+}
+resolve() { run bash -c '. "$1"; resolve_build_host "$2"; rc=$?; echo "value=[${!2}]"; exit $rc' _ "$LIB" "$@"; }
+
+@test "a single host is used as written and never probed" {
+    mock_candidate_ssh
+    REMOTE_HOST=dead.invalid resolve REMOTE_HOST
+    [ "$status" -eq 0 ]
+    contains "value=[dead.invalid]" "$output"
+    [ ! -e "$BATS_TEST_TMPDIR/ssh-log" ]
+}
+
+@test "a candidate list resolves to the first host that answers, and names the pick" {
+    mock_candidate_ssh
+    hosts HELIX_TEST_HOST=dead.invalid,up.invalid,up2.invalid
+    resolve HELIX_TEST_HOST
+    [ "$status" -eq 0 ]
+    contains "value=[up.invalid]" "$output"
+    contains "→ HELIX_TEST_HOST=up.invalid (not answering: dead.invalid: no such name)" "$output"
+    [ "$(cat "$BATS_TEST_TMPDIR/ssh-log")" = "$(printf 'dead.invalid\nup.invalid')" ]
+}
+
+@test "the remote user goes with every REMOTE_HOST candidate" {
+    mock_candidate_ssh
+    REMOTE_USER=pb REMOTE_HOST=dead.invalid,up.invalid resolve REMOTE_HOST
+    [ "$status" -eq 0 ]
+    contains "value=[up.invalid]" "$output"
+    [ "$(cat "$BATS_TEST_TMPDIR/ssh-log")" = "$(printf 'pb@dead.invalid\npb@up.invalid')" ]
+}
+
+@test "a candidate that hangs is killed at the limit and the next one is tried" {
+    mock_candidate_ssh
+    start=$(date +%s)
+    HELIX_HOST_PROBE_SECS=1 REMOTE_HOST=hang.invalid,up.invalid resolve REMOTE_HOST
+    [ "$status" -eq 0 ]
+    [ $(( $(date +%s) - start )) -le 4 ]
+    contains "value=[up.invalid]" "$output"
+    contains "hang.invalid: timeout after 1s" "$output"
+}
+
+@test "no candidate answering fails in one line naming every one tried" {
+    mock_candidate_ssh
+    HELIX_HOST_PROBE_SECS=1 HELIX_TEST_HOST=dead.invalid,hang.invalid resolve HELIX_TEST_HOST
+    [ "$status" -ne 0 ]
+    contains "✗ HELIX_TEST_HOST: no candidate answered ssh (tried dead.invalid: no such name; hang.invalid: timeout after 1s)" "$output"
+    # require_build_host refuses the same way scripts expect of a missing host.
+    HELIX_HOST_PROBE_SECS=1 HELIX_TEST_HOST=dead.invalid run bash -c '. "$1"; HELIX_TEST_HOST=dead.invalid,dead2.invalid; require_build_host HELIX_TEST_HOST' _ "$LIB"
+    [ "$status" -eq 2 ]
+    contains "no candidate answered" "$output"
+}
+
+@test "a resolved host is not probed again, in the same shell or a child" {
+    mock_candidate_ssh
+    run bash -c '. "$1"; REMOTE_HOST=dead.invalid,up.invalid
+        resolve_build_host REMOTE_HOST && require_build_host REMOTE_HOST &&
+        bash -c ". \"$1\"; resolve_build_host REMOTE_HOST; echo child=[\$REMOTE_HOST]"' _ "$LIB"
+    [ "$status" -eq 0 ]
+    contains "child=[up.invalid]" "$output"
+    [ "$(wc -l < "$BATS_TEST_TMPDIR/ssh-log")" -eq 2 ]
+}
+
+@test "--make resolves a host key, and leaves any other key's commas alone" {
+    mock_candidate_ssh
+    hosts REMOTE_HOST=dead.invalid,up.invalid REMOTE_DIR=/a,b
+    run "$LIB" --make REMOTE_HOST
+    [ "$status" -eq 0 ]
+    [ "${lines[${#lines[@]}-1]}" = up.invalid ]
+    run "$LIB" --make REMOTE_DIR
+    [ "$output" = "/a,b" ]
+    via_make show-remote
+    contains "host=[up.invalid] dir=[/a,b]" "$output"
+}
+
+@test "a candidate list with whitespace or quotes is refused like any value" {
+    mock_candidate_ssh
+    hosts 'REMOTE_HOST=up.invalid, dead.invalid' 'HELIX_TEST_HOST="up.invalid,dead.invalid"'
+    run bash -c '. "$1"; echo "host=[${REMOTE_HOST:-}] test=[${HELIX_TEST_HOST:-}]"' _ "$LIB"
+    contains "host=[] test=[]" "$output"
+    contains "REMOTE_HOST: whitespace in the value" "$output"
+    contains "HELIX_TEST_HOST: quotes in the value" "$output"
+    [ ! -e "$BATS_TEST_TMPDIR/ssh-log" ]
 }

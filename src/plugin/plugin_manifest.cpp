@@ -5,7 +5,12 @@
 
 #include "plugin_manifest.h"
 
+#include "ui_icon_codepoints.h"
+
+#include "lua_runtime.h"
+
 #include <algorithm>
+#include <iterator>
 #include <set>
 
 namespace helix::plugin {
@@ -201,6 +206,46 @@ void span_field(const json& w, const char* key, int& out, int lo, bool half,
     out = static_cast<int>(tracks);
 }
 
+void parse_icons(const json& obj, Manifest& m, std::vector<std::string>& errors) {
+    if (!obj.is_object()) {
+        errors.push_back("'icons' must be an object");
+        return;
+    }
+    if (obj.size() > kMaxIconsPerPlugin) {
+        errors.push_back("'icons' may list at most " + std::to_string(kMaxIconsPerPlugin));
+        return;
+    }
+    for (const auto& [name, v] : obj.items()) {
+        const std::string where = "icons." + name;
+        std::vector<std::string> local;
+        IconDecl d;
+        d.name = name;
+        d.fallback = kDefaultPluginIcon;
+        if (!is_owned_name(m.id, name) || !is_valid_local_name(local_part_of(name)))
+            local.push_back("the name must be " + m.id +
+                            "__<name>, the name 1 to 48 of [a-z0-9_-]");
+        if (!v.is_object()) {
+            local.push_back("must be an object");
+        } else {
+            require_string(v, "src", d.src, local);
+            if (!d.src.empty() && !is_plugin_relative_path(d.src, ".png"))
+                local.push_back("'src' must be a .png path inside the plugin folder");
+            optional_string(v, "fallback", d.fallback, local);
+            if (!helix::ui::icon::lookup_codepoint(d.fallback.c_str()))
+                local.push_back("'fallback' '" + d.fallback + "' is not an app icon name");
+        }
+        for (const auto& e : local)
+            errors.push_back(where + ": " + e);
+        if (local.empty())
+            m.icons.push_back(std::move(d));
+    }
+}
+
+bool declares_icon(const Manifest& m, const std::string& name) {
+    return std::any_of(m.icons.begin(), m.icons.end(),
+                       [&](const IconDecl& d) { return d.name == name; });
+}
+
 void parse_widgets(const json& arr, Manifest& m, std::vector<std::string>& errors) {
     if (!arr.is_array()) {
         errors.push_back("'widgets' must be an array");
@@ -229,6 +274,9 @@ void parse_widgets(const json& arr, Manifest& m, std::vector<std::string>& error
             local.push_back("'id' must be named " + m.id + "__<name>");
         if (!d.component.empty() && !is_owned_name(m.id, d.component))
             local.push_back("'component' must be named " + m.id + "__<name>");
+        // Only a plugin-owned name contains the separator; app icon names never do.
+        if (d.icon.find(kPluginNameSeparator) != std::string::npos && !declares_icon(m, d.icon))
+            local.push_back("'icon' '" + d.icon + "' is not declared in 'icons'");
         if (auto h = w.find("half_cells"); h != w.end()) {
             if (h->is_boolean())
                 d.half_cells = h->get<bool>();
@@ -252,7 +300,77 @@ void parse_widgets(const json& arr, Manifest& m, std::vector<std::string>& error
     }
 }
 
+void check_local_name(const char* key, const std::string& v, std::vector<std::string>& local) {
+    if (!v.empty() && !is_valid_local_name(v))
+        local.push_back(std::string("'") + key +
+                        "' must be a helix.ui.on name, 1 to 48 of [a-z0-9_-]");
+}
+
+void parse_menu_items(const json& arr, Manifest& m, std::vector<std::string>& errors) {
+    if (!arr.is_array()) {
+        errors.push_back("'menu_items' must be an array");
+        return;
+    }
+    if (arr.size() > static_cast<size_t>(kMaxMenuItems)) {
+        errors.push_back("'menu_items' may list at most " + std::to_string(kMaxMenuItems));
+        return;
+    }
+    std::set<std::string> seen;
+    int per_menu[std::size(kMenuKinds)] = {};
+    for (size_t i = 0; i < arr.size(); ++i) {
+        const std::string where = "menu_items[" + std::to_string(i) + "]";
+        const json& it = arr[i];
+        if (!it.is_object()) {
+            errors.push_back(where + " must be an object");
+            continue;
+        }
+        MenuItemDecl d;
+        std::vector<std::string> local;
+        require_string(it, "id", d.id, local);
+        require_string(it, "label", d.label, local);
+        if (!d.label.empty())
+            check_display_field("label", d.label, kMaxMenuLabelBytes, local);
+        optional_string(it, "icon", d.icon, local);
+        // The icon widget's own table: a name it cannot find draws the broken-image glyph.
+        if (!d.icon.empty() && !helix::ui::icon::lookup_codepoint(d.icon.c_str()))
+            local.push_back("'icon' '" + d.icon + "' is not an app icon name");
+        require_string(it, "handler", d.handler, local);
+        check_local_name("handler", d.handler, local);
+        optional_string(it, "check", d.check, local);
+        check_local_name("check", d.check, local);
+
+        auto menu_it = it.find("menu");
+        auto kind = menu_it != it.end() && menu_it->is_string()
+                        ? parse_menu_kind(menu_it->get_ref<const std::string&>())
+                        : std::nullopt;
+        if (!kind) {
+            local.push_back("'menu' must be one of print_file, filament_slot, spool, tile");
+        } else {
+            d.menu = *kind;
+            if (d.menu == MenuKind::Tile && m.widgets.empty())
+                local.push_back("'tile' items need a widget");
+            if (++per_menu[static_cast<size_t>(d.menu)] == kMaxMenuItemsPerMenu + 1)
+                local.push_back("at most " + std::to_string(kMaxMenuItemsPerMenu) + " items for " +
+                                menu_kind_name(d.menu));
+        }
+        if (!d.id.empty() && !seen.insert(d.id).second)
+            local.push_back("duplicate item id '" + d.id + "'");
+
+        for (const auto& e : local)
+            errors.push_back(where + ": " + e);
+        if (local.empty())
+            m.menu_items.push_back(std::move(d));
+    }
+}
+
 } // namespace
+
+bool is_valid_local_name(std::string_view n) {
+    if (n.empty() || n.size() > 48)
+        return false;
+    return std::all_of(n.begin(), n.end(),
+                       [](char c) { return is_lower_or_digit(c) || c == '_' || c == '-'; });
+}
 
 bool is_valid_plugin_id(std::string_view id) {
     if (id.size() < 2 || id.size() > 32 || !(id[0] >= 'a' && id[0] <= 'z'))
@@ -344,8 +462,16 @@ ManifestParse parse_manifest(const std::string& text) {
             m.settings_overlay = it->get<std::string>();
     }
 
+    // Before the widgets: a widget's icon may name one.
+    if (auto it = j.find("icons"); it != j.end())
+        parse_icons(*it, m, r.errors);
+
     if (auto it = j.find("widgets"); it != j.end())
         parse_widgets(*it, m, r.errors);
+
+    // After the widgets: a `tile` item needs one.
+    if (auto it = j.find("menu_items"); it != j.end())
+        parse_menu_items(*it, m, r.errors);
 
     if (r.errors.empty())
         r.manifest = std::move(m);

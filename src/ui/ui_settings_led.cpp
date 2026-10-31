@@ -27,6 +27,8 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstring>
+#include <optional>
 
 namespace helix::settings {
 
@@ -42,6 +44,7 @@ void LedSettingsOverlay::init_subjects() {
     UI_MANAGED_SUBJECT_INT(led_on_at_start_subject_, 0, "led_on_at_start_enabled", subjects_);
     UI_MANAGED_SUBJECT_INT(print_macros_drive_leds_subject_, 0, "led_print_macros_drive_leds",
                            subjects_);
+    UI_MANAGED_SUBJECT_INT(auto_preset_count_, 0, "led_auto_preset_count", subjects_);
 }
 
 namespace {
@@ -70,6 +73,11 @@ void LedSettingsOverlay::register_callbacks() {
          }},
         {"on_add_macro_device",
          [](lv_event_t*) { get_led_settings_overlay().handle_add_macro_device(); }},
+        {"led_auto_color_swatch_cb",
+         [](lv_event_t* e) {
+             get_led_settings_overlay().handle_color_swatch_clicked(
+                 lv_event_get_current_target_obj(e), helix::ui::event_user_int(e).value_or(-1));
+         }},
     });
 }
 
@@ -1044,7 +1052,7 @@ struct StateRowInfo {
     const char* icon;
 };
 
-static constexpr StateRowInfo STATE_ROWS[] = {
+static constexpr StateRowInfo kStateRows[] = {
     {"idle", "Idle", "sleep"},
     {"heating", "Heating", "fire"},
     {"printing", "Printing", "printer_3d"},
@@ -1052,6 +1060,50 @@ static constexpr StateRowInfo STATE_ROWS[] = {
     {"error", "Error", "alert_circle"},
     {"complete", "Complete", "check_circle"},
 };
+
+static constexpr size_t kStateRowCount = sizeof(kStateRows) / sizeof(kStateRows[0]);
+
+static std::optional<size_t> state_row_index(const std::string& key) {
+    for (size_t i = 0; i < kStateRowCount; ++i) {
+        if (key == kStateRows[i].key) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+/// The index of @p color among the LED colour presets, or -1.
+static int preset_index_of(uint32_t color) {
+    const auto& presets = helix::led::LedController::instance().color_presets();
+    const auto it = std::find(presets.begin(), presets.end(), color);
+    return it == presets.end() ? -1 : static_cast<int>(it - presets.begin());
+}
+
+void LedSettingsOverlay::publish_auto_color_presets() {
+    const auto& presets = helix::led::LedController::instance().color_presets();
+    auto_preset_color_pool_.ensure_size(presets.size());
+    for (size_t i = 0; i < presets.size(); ++i) {
+        auto_preset_color_pool_.set_color(i, presets[i]);
+    }
+    auto_color_selected_pool_.ensure_size(kStateRowCount);
+    lv_subject_set_int(&auto_preset_count_, static_cast<int>(presets.size()));
+}
+
+void LedSettingsOverlay::handle_color_swatch_clicked(lv_obj_t* swatch, int preset_index) {
+    const auto& presets = helix::led::LedController::instance().color_presets();
+    if (preset_index < 0 || preset_index >= static_cast<int>(presets.size())) {
+        return;
+    }
+    // The swatches sit inside their row's ctx_<state> container.
+    for (lv_obj_t* obj = swatch; obj != nullptr; obj = lv_obj_get_parent(obj)) {
+        const char* name = lv_obj_get_name(obj);
+        if (name != nullptr && std::strncmp(name, "ctx_", 4) == 0) {
+            handle_color_selected(name + 4, presets[static_cast<size_t>(preset_index)]);
+            return;
+        }
+    }
+    spdlog::warn("[{}] Color swatch {} is in no auto-state row", get_name(), preset_index);
+}
 
 void LedSettingsOverlay::populate_auto_state_rows() {
     if (!overlay_root_)
@@ -1065,6 +1117,7 @@ void LedSettingsOverlay::populate_auto_state_rows() {
     helix::ui::safe_clean_children(container);
 
     auto& auto_state = helix::led::LedAutoState::instance();
+    publish_auto_color_presets();
 
     // Build capability-filtered action type options (shared across all rows)
     action_type_options_.clear();
@@ -1113,7 +1166,7 @@ void LedSettingsOverlay::populate_auto_state_rows() {
             options_str += lv_tr("Macro");
     }
 
-    for (const auto& state : STATE_ROWS) {
+    for (const auto& state : kStateRows) {
         std::string key = state.key;
 
         // Get current action for this state
@@ -1188,8 +1241,7 @@ void LedSettingsOverlay::populate_auto_state_rows() {
         rebuild_contextual_controls(key, ctx_container);
     }
 
-    spdlog::debug("[{}] Auto-state rows populated ({} states)", get_name(),
-                  sizeof(STATE_ROWS) / sizeof(STATE_ROWS[0]));
+    spdlog::debug("[{}] Auto-state rows populated ({} states)", get_name(), kStateRowCount);
 }
 
 void LedSettingsOverlay::rebuild_contextual_controls(const std::string& state_key,
@@ -1244,64 +1296,12 @@ void LedSettingsOverlay::rebuild_contextual_controls(const std::string& state_ke
     }
 
     if (action.action_type == "color") {
-        // Color preset swatches row
-        lv_obj_t* swatch_row = lv_obj_create(container);
-        lv_obj_set_width(swatch_row, lv_pct(100));
-        lv_obj_set_height(swatch_row, LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(swatch_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(swatch_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_gap(swatch_row, theme_manager_get_spacing("space_sm"), 0);
-        lv_obj_set_style_pad_all(swatch_row, 0, 0);
-        lv_obj_set_style_bg_opa(swatch_row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(swatch_row, 0, 0);
-        lv_obj_remove_flag(swatch_row, LV_OBJ_FLAG_SCROLLABLE);
-
-        auto& ctrl = helix::led::LedController::instance();
-        const auto& presets = ctrl.color_presets();
-
-        for (uint32_t color : presets) {
-            lv_obj_t* swatch = lv_obj_create(swatch_row);
-            lv_obj_set_size(swatch, 32, 32);
-            lv_obj_set_style_radius(swatch, 4, 0);
-            lv_obj_set_style_bg_opa(swatch, LV_OPA_COVER, 0);
-            lv_obj_set_style_bg_color(
-                swatch, lv_color_make((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF), 0);
-            lv_obj_set_style_border_width(swatch, 1, 0);
-            lv_obj_set_style_border_color(swatch, theme_manager_get_color("border"), 0);
-            lv_obj_add_flag(swatch, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_remove_flag(swatch, LV_OBJ_FLAG_SCROLLABLE);
-
-            // Highlight the active color
-            if (color == action.color) {
-                lv_obj_set_style_border_width(swatch, 2, 0);
-                lv_obj_set_style_border_color(swatch, theme_manager_get_color("primary"), 0);
-            }
-
-            struct SwatchData {
-                std::string key;
-                uint32_t color;
-            };
-            auto* sdata = new SwatchData{state_key, color};
-            lv_obj_set_user_data(swatch, sdata);
-
-            lv_obj_add_event_cb(
-                swatch,
-                [](lv_event_t* e) {
-                    LVGL_SAFE_EVENT_CB_BEGIN("[LedSettingsOverlay] color_selected");
-                    auto* data = static_cast<SwatchData*>(lv_obj_get_user_data(
-                        static_cast<lv_obj_t*>(lv_event_get_current_target(e))));
-                    if (data) {
-                        get_led_settings_overlay().handle_color_selected(data->key, data->color);
-                    }
-                    LVGL_SAFE_EVENT_CB_END();
-                },
-                LV_EVENT_CLICKED, sdata);
-
-            lv_obj_add_event_cb(
-                swatch,
-                [](lv_event_t* e) { delete static_cast<SwatchData*>(lv_event_get_user_data(e)); },
-                LV_EVENT_DELETE, sdata);
+        const auto row = state_row_index(state_key);
+        if (row) {
+            auto_color_selected_pool_.set_int(*row, preset_index_of(action.color));
+            const std::string selected = fmt::format("led_auto_color_sel_{}", *row);
+            const char* attrs[] = {"selected_subject", selected.c_str(), nullptr};
+            lv_xml_create(container, "led_auto_color_swatches", attrs);
         }
 
         // Brightness slider below color swatches
@@ -1582,16 +1582,10 @@ void LedSettingsOverlay::handle_color_selected(const std::string& state_key, uin
     auto_state.set_mapping(state_key, action);
     save_and_evaluate(state_key);
 
-    // SAFETY: Defer rebuild — the clicked color swatch is a child of the container
-    // that rebuild_contextual_controls() will clean. Destroying it mid-callback
-    // causes use-after-free (see issue #80).
-    lifetime_.defer("LedSettingsOverlay::color_selected_rebuild", [this, state_key]() {
-        if (!overlay_root_)
-            return;
-        std::string ctx_name = fmt::format("ctx_{}", state_key);
-        lv_obj_t* ctx = lv_obj_find_by_name(overlay_root_, ctx_name.c_str());
-        rebuild_contextual_controls(state_key, ctx);
-    });
+    const auto row = state_row_index(state_key);
+    if (row && *row < auto_color_selected_pool_.size()) {
+        auto_color_selected_pool_.set_int(*row, preset_index_of(color));
+    }
 }
 
 void LedSettingsOverlay::handle_effect_selected(const std::string& state_key,

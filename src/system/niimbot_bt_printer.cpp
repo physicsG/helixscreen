@@ -84,7 +84,7 @@ static int ensure_connected(helix::bluetooth::BluetoothLoader& loader, const std
         return -1;
     }
 
-    s_handle = loader.connect_ble(s_ctx, mac.c_str(), NIIMBOT_WRITE_CHAR_UUID);
+    s_handle = loader.connect_ble(s_ctx, mac.c_str(), kNiimbotWriteCharUuid);
     if (s_handle < 0) {
         // Snapshot the real error before we tear down the context — the
         // caller needs it for the toast/log, and last_error(ctx) returns

@@ -22,6 +22,7 @@
 #include "../../include/ui_filename_utils.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/history_call_counting_api.h"
 #include "../test_helpers/print_history_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
@@ -38,31 +39,10 @@
 using namespace helix;
 using namespace helix::ui;
 // ============================================================================
-// Global LVGL Initialization
-// ============================================================================
-
-namespace {
-struct LVGLInitializerHistoryManager {
-    LVGLInitializerHistoryManager() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerHistoryManager lvgl_init;
-} // namespace
-
-// ============================================================================
 // Test Fixture
 // ============================================================================
 
-class HistoryManagerTestFixture {
+class HistoryManagerTestFixture : public LVGLTestFixture {
     static bool queue_initialized;
 
   public:
@@ -1601,4 +1581,56 @@ TEST_CASE_METHOD(HistoryManagerTestFixture,
     table.release(0); // the stale one, answered from before the invalidation
     pump();
     CHECK(manager_->get_jobs().front().exists);
+}
+
+TEST_CASE_METHOD(
+    HistoryManagerTestFixture,
+    "PrintHistoryManager: a plate staged from an archive records the archive and plate",
+    "[history_manager][reprint][three_mf]") {
+    // The printer keeps no metadata for the archive; its listing still has it.
+    FileInfo archive;
+    archive.filename = "Door.gcode.3mf";
+    archive.modified = 9.0;
+    api_->metadata_table().directories["parts"] = {archive};
+    const std::string staged = helix::gcode::make_extracted_plate_path("parts/Door.gcode.3mf", 9);
+
+    install_live_cache({history_job(staged, 300.0)});
+    pump();
+
+    const PrintHistoryJob& job = manager_->get_jobs().front();
+    CHECK(job.filename == "parts/Door.gcode.3mf");
+    CHECK(job.archive_plate == 9);
+    CHECK(job.from_rewrite);
+    CHECK(job.exists);
+
+    SECTION("gone from the listing too: missing") {
+        api_->metadata_table().directories["parts"] = {};
+        manager_->invalidate();
+        PrintHistoryManagerTestAccess::set_loaded_jobs(*manager_, {history_job(staged, 300.0)});
+        pump();
+        CHECK_FALSE(manager_->get_jobs().front().exists);
+    }
+}
+
+TEST_CASE_METHOD(HistoryManagerTestFixture,
+                 "PrintHistoryManager: archives in one directory share one listing",
+                 "[history_manager][reprint][three_mf]") {
+    FileInfo door;
+    door.filename = "Door.gcode.3mf";
+    door.modified = 9.0;
+    FileInfo hinge;
+    hinge.filename = "Hinge.gcode.3mf";
+    hinge.modified = 11.0;
+    api_->metadata_table().directories["parts"] = {door, hinge};
+
+    install_live_cache(
+        {history_job(helix::gcode::make_extracted_plate_path("parts/Door.gcode.3mf", 9), 300.0),
+         history_job(helix::gcode::make_extracted_plate_path("parts/Hinge.gcode.3mf", 2), 200.0)});
+    pump();
+
+    CHECK(api_->metadata_table().listings == 1);
+    for (const auto& job : manager_->get_jobs()) {
+        CAPTURE(job.filename);
+        CHECK(job.exists);
+    }
 }

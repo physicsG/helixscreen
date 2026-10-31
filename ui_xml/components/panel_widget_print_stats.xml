@@ -2,148 +2,97 @@
 <!-- Copyright (C) 2025-2026 356C LLC -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <component>
-  <view extends="lv_obj"
-        width="100%" height="100%" style_pad_all="4" style_pad_gap="2" style_bg_opa="0%" scrollable="false"
-        scrollbar_mode="off" flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center">
+  <!--
+    Print stats home tile. PrintStatsWidget publishes print_stats_rung (SizeRung),
+    print_stats_content (0 loading, 1 no history, 2 activity), print_stats_support
+    (0 none, 1 prints only, 2 full), the show/side-by-side flags, the hero and support
+    texts, and seven day bars with their weekday initials; everything below binds off
+    them. A tap opens the history dashboard.
+
+    Rungs: 1 strip (this week's hours and its label on one line, in the largest fonts
+    print_stats_strip_text says hold it whole), 3 cell (the hours over
+    "this week", and the lifetime print count where it fits), 4 wide (the hours beside the
+    seven bars, over the lifetime line), 5 full (the hours over the bars, a weekday initial
+    under each bar, then the lifetime line).
+  -->
+  <styles>
+    <style name="ps_main_column"
+           layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="start" flex_track_place="start"/>
+    <style name="ps_main_row"
+           layout="flex" flex_flow="row" flex_main_place="start" flex_cross_place="center" flex_track_place="center"/>
+    <style name="ps_hero_inline"
+           width="100%" layout="flex" flex_flow="row" flex_main_place="start" flex_cross_place="end"
+           flex_track_place="start"/>
+    <style name="ps_hero_stacked"
+           width="content" layout="flex" flex_flow="column" flex_main_place="start" flex_cross_place="start"
+           flex_track_place="start"/>
+    <!-- Fonts stay per component: a component registers again at a new breakpoint and
+         re-reads its font tokens, while ui_xml/styles.xml is read once. -->
+    <style name="ps_font_body" text_font="#font_body"/>
+    <style name="ps_font_small" text_font="#font_small"/>
+    <style name="ps_font_xs" text_font="#font_xs"/>
+  </styles>
+  <view name="panel_widget_print_stats"
+        extends="lv_obj" width="100%" height="100%" style_pad_hor="#space_sm" style_pad_ver="#space_xxs"
+        style_pad_row="#space_xxs" style_pad_column="0" scrollable="false" flex_flow="column"
+        style_flex_main_place="center" style_flex_cross_place="start" style_flex_track_place="center">
     <event_cb trigger="clicked" callback="print_stats_clicked_cb"/>
+    <style name="styles.press_wash" selector="pressed"/>
 
-    <!-- Title row (always visible) -->
-    <lv_obj name="print_stats_title_row"
-            width="100%" height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="0" flex_flow="row"
-            style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-      <text_small bind_text="print_stats_title" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-    </lv_obj>
+    <pass_through name="ps_main" width="100%" height="content" style_pad_row="#space_xxs" style_pad_column="#space_xs">
+      <bind_style_if_eq name="ps_main_row" subject="print_stats_side_by_side" ref_value="1"/>
+      <bind_style_if_eq name="ps_main_column" subject="print_stats_side_by_side" ref_value="0"/>
+      <!-- With the bars showing, the chart takes the height the lines leave. -->
+      <bind_style_if_eq name="styles.tile_fill" subject="print_stats_show_bars" ref_value="1"/>
 
-    <!-- Mode 0: narrow compact — time + success (2x1) -->
-    <lv_obj name="print_stats_compact"
-            width="100%" height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
-            style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-      <bind_flag_if_not_eq subject="print_stats_size_mode" flag="hidden" ref_value="0"/>
-      <text_body bind_text="print_stats_total_time_short" clickable="false" event_bubble="true"/>
-      <text_tiny text="·" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-      <text_body bind_text="print_stats_success_rate" clickable="false" event_bubble="true"/>
-    </lv_obj>
+      <pass_through name="ps_hero_block" height="content" style_pad_row="0" style_pad_column="#space_xs">
+        <bind_style_if_eq name="ps_hero_inline" subject="print_stats_rung" ref_value="1"/>
+        <bind_style_if_not_eq name="ps_hero_stacked" subject="print_stats_rung" ref_value="1"/>
+        <text_heading name="ps_hero" bind_text="print_stats_hero" clickable="false" event_bubble="true">
+          <bind_flag_if_eq subject="print_stats_content" flag="hidden" ref_value="1"/>
+          <bind_style_if name="ps_font_body"
+                         cond="print_stats_strip_text eq 1 or print_stats_strip_text eq 2 or print_stats_strip_text eq 5 or print_stats_strip_text eq 6"/>
+          <bind_style_if name="ps_font_small" cond="print_stats_strip_text eq 3 or print_stats_strip_text eq 7"/>
+        </text_heading>
+        <text_small name="ps_hero_label"
+                    bind_text="print_stats_hero_label" long_mode="dots" style_text_color="#text_muted" clickable="false"
+                    event_bubble="true">
+          <bind_style_if_eq name="styles.tile_fill" subject="print_stats_rung" ref_value="1"/>
+          <bind_style_if name="ps_font_xs"
+                         cond="print_stats_strip_text eq 2 or print_stats_strip_text eq 3 or print_stats_strip_text eq 6 or print_stats_strip_text eq 7"/>
+        </text_small>
+      </pass_through>
 
-    <!-- Mode 3: wide compact — all stats inline (3x1+) -->
-    <lv_obj name="print_stats_wide_compact"
-            width="100%" height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
-            style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-      <bind_flag_if_not_eq subject="print_stats_size_mode" flag="hidden" ref_value="3"/>
-      <text_body bind_text="print_stats_total_prints" clickable="false" event_bubble="true"/>
-      <text_tiny text="prints" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-      <text_tiny text="·" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-      <text_body bind_text="print_stats_total_time_short" clickable="false" event_bubble="true"/>
-      <text_tiny text="·" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-      <text_body bind_text="print_stats_success_rate" clickable="false" event_bubble="true"/>
-      <text_tiny text="·" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-      <text_body bind_text="print_stats_weekly" clickable="false" event_bubble="true"/>
-    </lv_obj>
+      <!-- Seven bars on a baseline, today on the right, initials under them at Full. -->
+      <pass_through name="ps_chart" width="100%" height="100%" flex_grow="1" flex_flow="column" style_pad_row="0">
+        <bind_flag_if_not_eq subject="print_stats_show_bars" flag="hidden" ref_value="1"/>
+        <pass_through name="ps_bars"
+                      width="100%" flex_grow="1" flex_flow="row" style_flex_main_place="start"
+                      style_flex_cross_place="end" style_pad_column="#space_xs">
+          <repeat count="7">
+            <lv_bar name="ps_bar_${i}"
+                    height="100%" flex_grow="1" style_min_width="#space_xs" orientation="vertical" min_value="0"
+                    max_value="100" bind_value="print_stats_day_${i}" style_bg_opa="0"
+                    style_bg_color-indicator="#primary" style_bg_opa-indicator="255" style_radius="0"
+                    style_radius-indicator="#border_radius" clickable="false" event_bubble="true"/>
+          </repeat>
+        </pass_through>
+        <divider_horizontal name="ps_baseline" color="#text_muted" opacity="102"/>
+        <pass_through name="ps_day_labels" width="100%" height="content" flex_flow="row" style_pad_column="#space_xs">
+          <bind_flag_if_not_eq subject="print_stats_show_day_labels" flag="hidden" ref_value="1"/>
+          <repeat count="7">
+            <text_tiny name="ps_day_label_${i}"
+                       flex_grow="1" style_min_width="#space_xs" bind_text="print_stats_day_label_${i}"
+                       style_text_align="center" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+          </repeat>
+        </pass_through>
+      </pass_through>
+    </pass_through>
 
-    <!-- Mode 1: time+success top, details bottom (2x2) -->
-    <lv_obj name="print_stats_grid"
-            width="100%" height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="2" flex_flow="column"
-            style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true"
-            scrollbar_mode="off">
-      <bind_flag_if_not_eq subject="print_stats_size_mode" flag="hidden" ref_value="1"/>
-
-      <!-- Top row: Time + Success -->
-      <lv_obj width="100%"
-              height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="0" flex_flow="row"
-              style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-        <!-- Time -->
-        <lv_obj width="50%"
-                height="content" style_bg_opa="0%" style_pad_all="1" flex_flow="column" style_flex_main_place="center"
-                style_flex_cross_place="center" clickable="false" event_bubble="true">
-          <text_body width="100%"
-                     bind_text="print_stats_total_time_short" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-          <text_tiny width="100%"
-                     text="Time" style_text_color="#text_muted" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-        </lv_obj>
-        <!-- Success -->
-        <lv_obj width="50%"
-                height="content" style_bg_opa="0%" style_pad_all="1" flex_flow="column" style_flex_main_place="center"
-                style_flex_cross_place="center" clickable="false" event_bubble="true">
-          <text_body width="100%"
-                     bind_text="print_stats_success_rate" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-          <text_tiny width="100%"
-                     text="Success" style_text_color="#text_muted" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-        </lv_obj>
-      </lv_obj>
-
-      <!-- Bottom row: prints · hours · weekly -->
-      <lv_obj width="100%"
-              height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
-              style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-        <text_body bind_text="print_stats_total_prints" clickable="false" event_bubble="true"/>
-        <text_tiny text="prints" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-        <text_tiny text="·" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-        <text_body bind_text="print_stats_total_time_short" clickable="false" event_bubble="true"/>
-        <text_tiny text="·" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-        <text_body bind_text="print_stats_weekly" clickable="false" event_bubble="true"/>
-      </lv_obj>
-    </lv_obj>
-
-    <!-- Mode 2: 3-col stats + activity line (3x2) -->
-    <lv_obj name="print_stats_full"
-            width="100%" height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="#space_xs"
-            flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center" clickable="false"
-            event_bubble="true">
-      <bind_flag_if_not_eq subject="print_stats_size_mode" flag="hidden" ref_value="2"/>
-
-      <!-- Top row: 3-col stats -->
-      <lv_obj width="100%"
-              height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
-              style_flex_main_place="space_evenly" style_flex_cross_place="center" clickable="false" event_bubble="true">
-
-        <!-- Total prints -->
-        <lv_obj width="30%"
-                height="content" style_bg_opa="0%" style_pad_all="#space_xs" flex_flow="column"
-                style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-          <text_body width="100%"
-                     bind_text="print_stats_total_prints" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-          <text_tiny width="100%"
-                     text="Prints" style_text_color="#text_muted" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-        </lv_obj>
-
-        <!-- Total time -->
-        <lv_obj width="30%"
-                height="content" style_bg_opa="0%" style_pad_all="#space_xs" flex_flow="column"
-                style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-          <text_body width="100%"
-                     bind_text="print_stats_total_time" style_text_align="center" clickable="false" event_bubble="true"/>
-          <text_tiny width="100%"
-                     text="Time" style_text_color="#text_muted" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-        </lv_obj>
-
-        <!-- Success rate -->
-        <lv_obj width="30%"
-                height="content" style_bg_opa="0%" style_pad_all="#space_xs" flex_flow="column"
-                style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-          <text_body width="100%"
-                     bind_text="print_stats_success_rate" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-          <text_tiny width="100%"
-                     text="Success" style_text_color="#text_muted" style_text_align="center" clickable="false"
-                     event_bubble="true"/>
-        </lv_obj>
-      </lv_obj>
-
-      <!-- Bottom: activity line -->
-      <lv_obj width="100%"
-              height="content" style_bg_opa="0%" style_pad_all="0" style_pad_gap="#space_xs" flex_flow="row"
-              style_flex_main_place="center" style_flex_cross_place="center" clickable="false" event_bubble="true">
-        <text_body bind_text="print_stats_weekly" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-        <text_tiny text="·" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-        <text_body bind_text="print_stats_last_print"
-                   style_text_color="#text_muted" clickable="false" event_bubble="true"/>
-      </lv_obj>
-    </lv_obj>
+    <text_small name="ps_support"
+                width="100%" bind_text="print_stats_support_text" long_mode="dots" style_text_color="#text_muted"
+                clickable="false" event_bubble="true">
+      <bind_flag_if_eq subject="print_stats_support" flag="hidden" ref_value="0"/>
+    </text_small>
   </view>
 </component>

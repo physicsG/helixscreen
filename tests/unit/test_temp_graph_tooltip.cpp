@@ -5,6 +5,7 @@
 #include "../../include/temp_graph_tooltip.h"
 #include "../../include/theme_manager.h"
 #include "../../include/ui_temp_graph.h"
+#include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
 #include "lvgl/lvgl.h"
 
@@ -13,22 +14,18 @@
 #include "../catch_amalgamated.hpp"
 
 using helix::temp_graph_internal::find_meta_by_id;
+using helix::temp_graph_internal::kTempGraphTooltipHitRadiusPx;
 using helix::temp_graph_internal::temp_graph_compute_geometry;
 using helix::temp_graph_internal::temp_graph_geometry_t;
 using helix::temp_graph_internal::temp_graph_tooltip_box_area;
-using helix::temp_graph_internal::TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX;
 using helix::temp_graph_internal::tooltip_hit_test;
 
 // Mirrors TempGraphTestFixture in test_temp_graph.cpp (headless display + a
 // parent screen). Kept local rather than shared because that fixture is defined
 // inline in its own TU.
-class TooltipTestFixture {
+class TooltipTestFixture : public LVGLTestFixture {
   public:
     TooltipTestFixture() {
-        lv_init_safe();
-        lv_display_t* disp = lv_display_create(800, 480);
-        alignas(64) static lv_color_t buf1[800 * 10];
-        lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
         screen = lv_obj_create(NULL);
     }
     lv_obj_t* screen;
@@ -99,8 +96,8 @@ TEST_CASE_METHOD(TooltipTestFixture, "hit test misses beyond the radius", "[ui][
     lv_point_t p = point_pos(g, id, g->point_count - 1);
 
     // Just inside, then clearly outside, straight down from the point.
-    REQUIRE(tooltip_hit_test(g, p.x, p.y + TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX - 2).has_value());
-    REQUIRE_FALSE(tooltip_hit_test(g, p.x, p.y + TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX + 5).has_value());
+    REQUIRE(tooltip_hit_test(g, p.x, p.y + kTempGraphTooltipHitRadiusPx - 2).has_value());
+    REQUIRE_FALSE(tooltip_hit_test(g, p.x, p.y + kTempGraphTooltipHitRadiusPx + 5).has_value());
 
     ui_temp_graph_destroy(g);
 }
@@ -130,7 +127,7 @@ TEST_CASE_METHOD(TooltipTestFixture, "tap on a steep segment between samples sti
     const int32_t my = (a.y + b.y) / 2;
 
     constexpr int64_t r2 =
-        static_cast<int64_t>(TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX) * TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX;
+        static_cast<int64_t>(kTempGraphTooltipHitRadiusPx) * kTempGraphTooltipHitRadiusPx;
     auto far_from = [&](lv_point_t p) {
         const int64_t dx = p.x - mx;
         const int64_t dy = p.y - my;
@@ -166,7 +163,7 @@ TEST_CASE_METHOD(TooltipTestFixture, "no segment spans a POINT_NONE gap", "[ui][
     // Halfway between the oldest real sample and the plot's left edge at the
     // same height: over the gap, well away from any drawn line.
     const int32_t mx = (geo.cx1 + first.x) / 2;
-    REQUIRE(first.x - mx > TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX);
+    REQUIRE(first.x - mx > kTempGraphTooltipHitRadiusPx);
     REQUIRE_FALSE(tooltip_hit_test(g, mx, first.y).has_value());
 
     ui_temp_graph_destroy(g);

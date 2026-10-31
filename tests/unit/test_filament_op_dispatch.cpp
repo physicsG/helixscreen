@@ -40,12 +40,12 @@ using helix::AmsSystemInfo;
 using helix::AmsUnit;
 using helix::SlotInfo;
 
-using helix::ui::ACTIVE_HEAD_SLOT;
 using helix::ui::AmsCall;
 using helix::ui::BackendCaps;
-using helix::ui::EXTERNAL_SPOOL_SLOT;
 using helix::ui::FilamentRefusal;
 using helix::ui::FilamentTier;
+using helix::ui::kActiveHeadSlot;
+using helix::ui::kExternalSpoolSlot;
 using helix::ui::plan_load;
 using helix::ui::plan_unload;
 using helix::ui::unload_needs_manual_pull;
@@ -229,7 +229,7 @@ TEST_CASE("plan_load: a named lane under bypass reaches the backend, not the ext
 
 TEST_CASE("plan_load: a named lane under bypass refuses while the bypass spool is still threaded",
           "[filament][dispatch][tier][bypass][refusal]") {
-    AmsSystemInfo sys = make_sys(4, EXTERNAL_SPOOL_SLOT);
+    AmsSystemInfo sys = make_sys(4, kExternalSpoolSlot);
     sys.filament_loaded = true; // bypass spool still crossing the toolhead
 
     BackendCaps bypassed = fresh_ams();
@@ -305,6 +305,23 @@ TEST_CASE("plan_load: a seated machine swaps via change_tool on the MAPPED tool"
     CHECK(plan.ams_arg == 3); // slot 1's mapped_tool, NOT slot 1
 }
 
+TEST_CASE("plan_load: a backend whose load swaps lanes itself gets Load, not change_tool",
+          "[filament][dispatch][swap][1824]") {
+    // AFC's load_filament() is `CHANGE_TOOL LANE={n}`: it unloads the seated
+    // lane and swaps heads itself. Its change_tool() on a toolchanger only
+    // mounts a head, so routing the swap there would move no filament.
+    AmsSystemInfo sys = make_sys(4, /*current_slot=*/0, /*mapped_tools=*/{0, 3, 2, 1});
+    BackendCaps seated = fresh_ams();
+    seated.needs_unload_before_load = true;
+    seated.load_swaps_seated_lane = true;
+
+    auto plan = plan_load(sys, seated, /*target_slot=*/1, /*macro_available=*/true,
+                          /*macro_user_configured=*/false);
+    CHECK(plan.tier == FilamentTier::AmsBackend);
+    CHECK(plan.ams_call == AmsCall::Load);
+    CHECK(plan.ams_arg == 1); // the SLOT, not slot 1's mapped tool
+}
+
 TEST_CASE("plan_load: a seated machine with no tool mapping loads the slot anyway",
           "[filament][dispatch][swap]") {
     // There is no tool number to change to, so the swap arm cannot fire. This
@@ -358,39 +375,6 @@ TEST_CASE("plan_load: reloading the seated slot itself is a plain load, not a sw
 // =============================================================================
 // Refusals
 // =============================================================================
-
-TEST_CASE("plan_load: toolchanger refuses a load on the tool already mounted",
-          "[filament][dispatch][refusal][1183]") {
-    // Bundle 9KRXZ62P. SELECT_TOOL on the carriage tool is a firmware no-op;
-    // dispatching it left the Load button spinning for 120 s and locked out
-    // every later operation via is_busy(). The sidebar has always refused here.
-    AmsSystemInfo sys = make_sys(5, /*current_slot=*/4);
-    BackendCaps tc = fresh_ams();
-    tc.is_tool_changer = true;
-    tc.needs_unload_before_load = true;
-
-    auto plan = plan_load(sys, tc, /*target_slot=*/4, /*macro_available=*/true,
-                          /*macro_user_configured=*/false);
-    CHECK(plan.tier == FilamentTier::Refused);
-    CHECK(plan.refusal == FilamentRefusal::AlreadyMounted);
-    CHECK(plan.ams_call == AmsCall::None);
-}
-
-TEST_CASE("plan_load: toolchanger still swaps to a DIFFERENT tool",
-          "[filament][dispatch][refusal][1183]") {
-    // Guard rail on the refusal above: it must key on the mounted tool, not on
-    // being a toolchanger.
-    AmsSystemInfo sys = make_sys(5, /*current_slot=*/4);
-    BackendCaps tc = fresh_ams();
-    tc.is_tool_changer = true;
-    tc.needs_unload_before_load = true;
-
-    auto plan = plan_load(sys, tc, /*target_slot=*/1, /*macro_available=*/true,
-                          /*macro_user_configured=*/false);
-    CHECK(plan.tier == FilamentTier::AmsBackend);
-    CHECK(plan.ams_call == AmsCall::ChangeTool);
-    CHECK(plan.ams_arg == 1);
-}
 
 TEST_CASE("plan_load: unresolved slot refuses with SelectSlot", "[filament][dispatch][refusal]") {
     AmsSystemInfo sys = make_sys(4, -1);
@@ -452,13 +436,13 @@ TEST_CASE("unload_target_is_loaded: bypass reads the aggregate, not per-slot sen
     // answers false while filament is demonstrably at the nozzle. CFS and Happy
     // Hare accidentally answer true via `slot == current_slot && loaded`, which
     // is exactly the kind of per-backend divergence this header exists to end.
-    CHECK(unload_target_is_loaded(EXTERNAL_SPOOL_SLOT, /*slot_actively_loaded=*/false,
+    CHECK(unload_target_is_loaded(kExternalSpoolSlot, /*slot_actively_loaded=*/false,
                                   /*slot_filament_at_toolhead=*/false, /*is_current_slot=*/true,
                                   /*any_filament_loaded=*/true));
 
     // Bypass engaged with nothing fed yet — AFC's bypass_state is independent of
     // filament presence, so "bypass is on" must not be read as "something to pull".
-    CHECK_FALSE(unload_target_is_loaded(EXTERNAL_SPOOL_SLOT, false, false, /*is_current_slot=*/true,
+    CHECK_FALSE(unload_target_is_loaded(kExternalSpoolSlot, false, false, /*is_current_slot=*/true,
                                         /*any_filament_loaded=*/false));
 }
 
@@ -487,16 +471,16 @@ TEST_CASE("plan_unload: the bypass spool dispatches to the backend",
     // Every backend already handles -2 correctly: CFS ignores the slot and sends
     // its unload script, AFC resolves the lane name to "" and sends a bare
     // TOOL_UNLOAD, Happy Hare sends MMU_UNLOAD. Only this decision layer refused.
-    auto plan = plan_unload(fresh_ams(), EXTERNAL_SPOOL_SLOT, /*target_is_loaded=*/true,
+    auto plan = plan_unload(fresh_ams(), kExternalSpoolSlot, /*target_is_loaded=*/true,
                             /*macro_available=*/true, /*macro_user_configured=*/false);
     CHECK(plan.tier == FilamentTier::AmsBackend);
     CHECK(plan.ams_call == AmsCall::Unload);
-    CHECK(plan.ams_arg == EXTERNAL_SPOOL_SLOT);
+    CHECK(plan.ams_arg == kExternalSpoolSlot);
 }
 
 TEST_CASE("plan_unload: bypass with an empty toolhead still refuses",
           "[filament][dispatch][bypass][refusal]") {
-    auto plan = plan_unload(fresh_ams(), EXTERNAL_SPOOL_SLOT, /*target_is_loaded=*/false,
+    auto plan = plan_unload(fresh_ams(), kExternalSpoolSlot, /*target_is_loaded=*/false,
                             /*macro_available=*/true, /*macro_user_configured=*/false);
     CHECK(plan.tier == FilamentTier::Refused);
     CHECK(plan.refusal == FilamentRefusal::NothingLoaded);
@@ -518,17 +502,21 @@ TEST_CASE("unload_target_is_loaded: the active head counts when the toolhead is 
     // IFS_STATUS reports Chan=0). The per-slot sensors answer for lanes and
     // there is no lane to ask about, so the backend's unaccounted answer is the
     // only evidence anything is pullable.
-    CHECK(unload_target_is_loaded(ACTIVE_HEAD_SLOT, /*slot_actively_loaded=*/false,
+    CHECK(unload_target_is_loaded(kActiveHeadSlot, /*slot_actively_loaded=*/false,
                                   /*slot_filament_at_toolhead=*/false, /*is_current_slot=*/true,
                                   /*any_filament_loaded=*/false, /*toolhead_unaccounted=*/true));
 
     // A backend that cannot tell (nullopt, flattened to false) keeps the
     // refusal: "no slot resolved" must not dispatch on a guess.
-    CHECK_FALSE(unload_target_is_loaded(ACTIVE_HEAD_SLOT, false, false, true, true, false));
+    CHECK_FALSE(unload_target_is_loaded(kActiveHeadSlot, false, false, true, true, false));
 
-    // The unaccounted answer speaks for the active head only; any other
-    // negative slot is still "nothing resolved".
-    CHECK_FALSE(unload_target_is_loaded(-3, true, true, true, true, true));
+    // The "Not sure" clear names the same filament and rides the same answer.
+    CHECK(unload_target_is_loaded(helix::kClearToolheadSlot, false, false, false, false, true));
+    CHECK_FALSE(unload_target_is_loaded(helix::kClearToolheadSlot, true, true, true, true, false));
+
+    // The unaccounted answer speaks for the toolhead only; any other negative
+    // slot is still "nothing resolved".
+    CHECK_FALSE(unload_target_is_loaded(-4, true, true, true, true, true));
 }
 
 TEST_CASE("plan_unload: an unaccounted toolhead unloads from the active head, and only from there",
@@ -536,23 +524,32 @@ TEST_CASE("plan_unload: an unaccounted toolhead unloads from the active head, an
     BackendCaps ams = fresh_ams();
     ams.toolhead_unaccounted = true;
 
-    auto plan = plan_unload(ams, ACTIVE_HEAD_SLOT, /*target_is_loaded=*/true,
+    auto plan = plan_unload(ams, kActiveHeadSlot, /*target_is_loaded=*/true,
                             /*macro_available=*/true, /*macro_user_configured=*/false);
     CHECK(plan.tier == FilamentTier::AmsBackend);
     CHECK(plan.ams_call == AmsCall::Unload);
     // -1 reaches unload_filament(), which every backend resolves to the real
     // channel from firmware.
-    CHECK(plan.ams_arg == ACTIVE_HEAD_SLOT);
+    CHECK(plan.ams_arg == kActiveHeadSlot);
 
     // nullopt and false flatten to the same input: still NothingLoaded.
     BackendCaps silent = fresh_ams();
-    auto refused = plan_unload(silent, ACTIVE_HEAD_SLOT, /*target_is_loaded=*/false,
+    auto refused = plan_unload(silent, kActiveHeadSlot, /*target_is_loaded=*/false,
                                /*macro_available=*/true, /*macro_user_configured=*/false);
     CHECK(refused.tier == FilamentTier::Refused);
     CHECK(refused.refusal == FilamentRefusal::NothingLoaded);
 
+    // "Not sure" reaches the backend unchanged, under the same condition.
+    auto clear = plan_unload(ams, helix::kClearToolheadSlot, /*target_is_loaded=*/true,
+                             /*macro_available=*/true, /*macro_user_configured=*/false);
+    CHECK(clear.tier == FilamentTier::AmsBackend);
+    CHECK(clear.ams_arg == helix::kClearToolheadSlot);
+    auto clear_silent = plan_unload(silent, helix::kClearToolheadSlot, /*target_is_loaded=*/true,
+                                    /*macro_available=*/true, /*macro_user_configured=*/false);
+    CHECK(clear_silent.tier == FilamentTier::Refused);
+
     // Any other negative slot never dispatches, unaccounted or not.
-    auto other = plan_unload(ams, /*target_slot=*/-3, /*target_is_loaded=*/true,
+    auto other = plan_unload(ams, /*target_slot=*/-4, /*target_is_loaded=*/true,
                              /*macro_available=*/true, /*macro_user_configured=*/false);
     CHECK(other.tier == FilamentTier::Refused);
 }
@@ -566,9 +563,9 @@ TEST_CASE("unload_needs_manual_pull: only unloads with no lane to retract into",
     // An AMS lane unload reels the filament back into its own lane; prompting
     // the user to pull it would be noise. The bypass spool and a backend-less
     // printer both leave it dangling out of the toolhead.
-    CHECK(unload_needs_manual_pull(/*backend_present=*/true, EXTERNAL_SPOOL_SLOT));
+    CHECK(unload_needs_manual_pull(/*backend_present=*/true, kExternalSpoolSlot));
     CHECK(unload_needs_manual_pull(/*backend_present=*/false, /*target_slot=*/0));
-    CHECK(unload_needs_manual_pull(/*backend_present=*/false, EXTERNAL_SPOOL_SLOT));
+    CHECK(unload_needs_manual_pull(/*backend_present=*/false, kExternalSpoolSlot));
     CHECK_FALSE(unload_needs_manual_pull(/*backend_present=*/true, /*target_slot=*/0));
     CHECK_FALSE(unload_needs_manual_pull(/*backend_present=*/true, /*target_slot=*/3));
 }

@@ -52,7 +52,7 @@ BaseGeometry compute_base_geometry(lv_obj_t* obj, const FilamentPathData* data) 
     g.height = lv_area_get_height(&obj_coords);
     g.slot_count = data->slot_count;
 
-    int count = LV_MIN(g.slot_count, FilamentPathData::MAX_SLOTS);
+    int count = LV_MIN(g.slot_count, FilamentPathData::kMaxSlots);
     for (int i = 0; i < count; i++) {
         g.slot_x[i] = g.x_off + get_slot_x(data, i, g.x_off);
     }
@@ -80,7 +80,7 @@ BaseGeometry compute_base_geometry(lv_obj_t* obj, const FilamentPathData* data) 
 
 SlotRenderStates compute_slot_render_states(const FilamentPathData* data) {
     SlotRenderStates states{};
-    int count = LV_MIN(data->slot_count, FilamentPathData::MAX_SLOTS);
+    int count = LV_MIN(data->slot_count, FilamentPathData::kMaxSlots);
     for (int i = 0; i < count; i++) {
         SlotRenderState& s = states[i];
 
@@ -92,16 +92,12 @@ SlotRenderStates compute_slot_render_states(const FilamentPathData* data) {
         }
 
         // Active slot overrides with current load/unload state when present.
+        // SPOOL reports no strand in the path, so it cannot show filament the
+        // slot's own report says is not there: an empty active lane stays empty.
         s.is_mounted = (i == data->active_slot);
-
-        // The aggregate (filament_segment / filament_color) describes one shared
-        // route to one nozzle. On PARALLEL each tool owns its own path and the
-        // backend answers per slot, so the aggregate may refine a slot that has
-        // filament (it carries the live segment mid-load) but never create one:
-        // a backend whose aggregate never reports NONE would otherwise draw a
-        // full lane on an empty mounted tool.
-        const bool parallel = data->topology == static_cast<int>(PathTopology::PARALLEL);
-        if (s.is_mounted && data->filament_segment > 0 && (!parallel || s.has_filament)) {
+        const auto active_seg = static_cast<PathSegment>(data->filament_segment);
+        const bool strand_in_path = active_seg > PathSegment::SPOOL;
+        if (s.is_mounted && active_seg != PathSegment::NONE && (strand_in_path || s.has_filament)) {
             s.has_filament = true;
             s.color = lv_color_hex(data->filament_color);
             s.segment = static_cast<PathSegment>(data->filament_segment);
@@ -206,6 +202,33 @@ void draw_parallel_tool(const RenderCtx& ctx, const SlotRenderStates& states, in
     draw_toolhead(ctx.layer, slot_x, toolhead_y, noz_color, tool_scale, toolhead_opa);
 }
 
+// A fed lane's upstream caption, on the row its prep sensor band would take:
+// a lane with an upstream has no prep sensor of its own, so the row is free.
+void draw_upstream_captions(const RenderCtx& ctx, const ParallelRows& rows) {
+    const FilamentPathData* data = ctx.data;
+    const lv_font_t* font = data->theme.label_font;
+    if (!font)
+        return;
+    const int32_t font_h = lv_font_get_line_height(font);
+    for (int i = 0; i < LV_MIN(data->slot_count, FilamentPathData::kMaxSlots); i++) {
+        const char* caption = data->slot_upstream_caption[i];
+        if (!caption[0])
+            continue;
+        lv_draw_label_dsc_t dsc;
+        lv_draw_label_dsc_init(&dsc);
+        dsc.color = data->theme.color_muted;
+        dsc.font = font;
+        dsc.align = LV_TEXT_ALIGN_CENTER;
+        dsc.text = caption;
+        const int32_t half_col = (ctx.geo.slot_count > 1)
+                                     ? (ctx.geo.slot_x[1] - ctx.geo.slot_x[0]) / 2
+                                     : ctx.geo.width / 2;
+        const lv_area_t area = {ctx.geo.slot_x[i] - half_col, rows.prep_y - font_h,
+                                ctx.geo.slot_x[i] + half_col, rows.prep_y};
+        lv_draw_label(ctx.layer, &dsc, &area);
+    }
+}
+
 void render_parallel(lv_obj_t* obj, lv_layer_t* layer, FilamentPathData* data) {
     RenderCtx ctx{layer, data, compute_base_geometry(obj, data)};
     PathPlan& plan = plan_scratch();
@@ -216,9 +239,10 @@ void render_parallel(lv_obj_t* obj, lv_layer_t* layer, FilamentPathData* data) {
     const ParallelRows rows = parallel_rows(*data, ctx.geo);
     const SlotRenderStates states = compute_slot_render_states(data);
     for (ToolPass pass : {ToolPass::Glyph, ToolPass::Badge}) {
-        for (int i = 0; i < LV_MIN(data->slot_count, FilamentPathData::MAX_SLOTS); i++)
+        for (int i = 0; i < LV_MIN(data->slot_count, FilamentPathData::kMaxSlots); i++)
             draw_parallel_tool(ctx, states, i, rows, pass);
     }
+    draw_upstream_captions(ctx, rows);
 }
 
 // ============================================================================
@@ -316,7 +340,7 @@ void render_mixed(lv_obj_t* obj, lv_layer_t* layer, FilamentPathData* data) {
     for (ToolPass pass : {ToolPass::Glyph, ToolPass::Badge}) {
         if (f.hub_count > 0)
             draw_mixed_shared_toolhead(ctx, f, pass);
-        for (int i = 0; i < LV_MIN(data->slot_count, FilamentPathData::MAX_SLOTS); i++) {
+        for (int i = 0; i < LV_MIN(data->slot_count, FilamentPathData::kMaxSlots); i++) {
             if (!data->slot_is_hub_routed[i])
                 draw_mixed_direct_toolhead(ctx, f, i, pass);
         }
@@ -458,7 +482,7 @@ void draw_buffer_section(const RenderCtx& ctx, const LinearHubFrame& f, const Pa
 // margin 0 via hub_box_hit.
 void record_bypass_hit(const RenderCtx& ctx, const LinearHubFrame& f) {
     const BaseGeometry& g = ctx.geo;
-    int32_t bypass_x = g.x_off + (int32_t)(g.width * BYPASS_X_RATIO);
+    int32_t bypass_x = g.x_off + (int32_t)(g.width * kBypassXRatio);
     ctx.data->hits.bypass = {bypass_x - f.sensor_r * 3, f.bypass_merge_y - f.sensor_r * 4,
                              bypass_x + f.sensor_r * 3, f.bypass_merge_y + f.sensor_r * 4};
     ctx.data->hits.bypass_valid = true;
@@ -474,31 +498,7 @@ void draw_nozzle_glyph(const RenderCtx& ctx, const LinearHubFrame& f) {
         noz_color =
             (f.has_error && f.error_seg == PathSegment::NOZZLE) ? f.error_color : f.active_color;
     }
-
-    // On a toolchanger this single nozzle IS a specific head, so say which one
-    // and whether it is the one on the carriage: badged, and dimmed when it is
-    // docked, matching what the PARALLEL renderer does per column.
-    // mounted_tool < 0 with no mapped tool means "not a toolchanger": drawn
-    // solid and unlabelled.
-    int unit_tool = -1;
-    for (int i = 0; i < data->slot_count; ++i) {
-        if (data->mapped_tool[i] >= 0) {
-            unit_tool = data->mapped_tool[i];
-            break;
-        }
-    }
-    const bool toolchanger_view = (data->mounted_tool >= 0 || unit_tool >= 0);
-    const bool is_mounted = (unit_tool >= 0 && unit_tool == data->mounted_tool);
-    const lv_opa_t noz_opa = (!toolchanger_view || is_mounted) ? LV_OPA_COVER : LV_OPA_40;
-
-    draw_toolhead(ctx.layer, f.center_x, f.nozzle_y, noz_color, data->theme.extruder_scale,
-                  noz_opa);
-
-    if (toolchanger_view && unit_tool >= 0) {
-        char tool_label[16];
-        format_tool_badge_label(data, 0, unit_tool, tool_label, sizeof(tool_label));
-        draw_tool_badge(ctx, f.center_x, f.nozzle_y, data->theme.extruder_scale, tool_label);
-    }
+    draw_toolhead(ctx.layer, f.center_x, f.nozzle_y, noz_color, data->theme.extruder_scale);
 }
 
 // LINEAR/HUB renderer: frame → plan → tubes → boxes and glyphs. Hit-rect
@@ -522,7 +522,7 @@ void render_linear_hub(lv_obj_t* obj, lv_layer_t* layer, FilamentPathData* data)
 
     const LinearHubFrame f = compute_linear_hub_frame(
         *data, ctx.geo,
-        toolhead_top_y(ctx.geo.y_off + (int32_t)(ctx.geo.height * NOZZLE_Y_RATIO),
+        toolhead_top_y(ctx.geo.y_off + (int32_t)(ctx.geo.height * kNozzleYRatio),
                        data->theme.extruder_scale));
     PathPlan& plan = plan_scratch();
     plan_linear_hub(f, *data, ctx.geo, plan);
@@ -533,13 +533,16 @@ void render_linear_hub(lv_obj_t* obj, lv_layer_t* layer, FilamentPathData* data)
     draw_offpage_stubs(ctx, f);
 
     draw_hub_section(ctx, f);
-    if (f.has_buffer)
+    // A hub that feeds no toolhead ends at the hub: nothing below it is drawn.
+    const bool feeds = data->feeds_toolhead;
+    if (feeds && f.has_buffer)
         draw_buffer_section(ctx, f, plan);
     // Bands on the hub/selector edges clamp the tube where it enters the box.
     paint_box_bands(layer, plan, pal);
-    if (data->show_bypass)
+    if (feeds && data->show_bypass)
         record_bypass_hit(ctx, f);
-    draw_nozzle_glyph(ctx, f);
+    if (feeds)
+        draw_nozzle_glyph(ctx, f);
 
     data->path_cache.path = (plan.active_route >= 0) ? filled_prefix(plan.routes[plan.active_route])
                                                      : pg::FilamentPath{};
@@ -573,7 +576,7 @@ void draw_animation_linear_hub(lv_layer_t* layer, FilamentPathData* data) {
     }
 
     // Heat glow halo around the nozzle tip.
-    if (data->anim.heat_active) {
+    if (data->anim.heat_active && data->feeds_toolhead) {
         int32_t tip_y = toolhead_tip_y(nozzle_y, data->theme.extruder_scale);
         draw_heat_glow(layer, center_x, tip_y, sensor_r, data->anim.heat_pulse_opa);
     }
@@ -583,12 +586,12 @@ void draw_animation_linear_hub(lv_layer_t* layer, FilamentPathData* data) {
         PathSegment prev_seg = static_cast<PathSegment>(data->anim.prev_segment);
         PathSegment fil_seg = static_cast<PathSegment>(data->filament_segment);
         float progress_factor = data->anim.progress / 100.0f;
-        const float NUM_INTERVALS = static_cast<float>(static_cast<int>(PathSegment::NOZZLE) -
+        const float kNumIntervals = static_cast<float>(static_cast<int>(PathSegment::NOZZLE) -
                                                        static_cast<int>(PathSegment::SPOOL));
         float base = static_cast<float>(static_cast<int>(prev_seg) - 1);
         float target = static_cast<float>(static_cast<int>(fil_seg) - 1);
-        float tip_fraction = (base + (target - base) * progress_factor) / NUM_INTERVALS;
-        tip_fraction = LV_CLAMP(tip_fraction, 0.0f, 1.0f);
+        float tip_fraction = (base + (target - base) * progress_factor) / kNumIntervals;
+        tip_fraction = LV_CLAMP(0.0f, tip_fraction, 1.0f);
         float tip_distance = tip_fraction * pg::path_length(path);
         pg::PathPoint tip = pg::path_point_at(path, tip_distance);
         int32_t tip_x = (int32_t)lroundf(tip.x);
@@ -613,7 +616,7 @@ void draw_animation_parallel(lv_layer_t* layer, const BaseGeometry& g,
     int32_t sensor_y = rows.sensor_y;
     int32_t sensor_r = data->theme.sensor_radius;
     bool reverse = (data->anim.direction == AnimDirection::UNLOADING);
-    int count = LV_MIN(data->slot_count, FilamentPathData::MAX_SLOTS);
+    int count = LV_MIN(data->slot_count, FilamentPathData::kMaxSlots);
     for (int i = 0; i < count; i++) {
         const SlotRenderState& s = states[i];
         if (!s.is_mounted || !s.has_filament)

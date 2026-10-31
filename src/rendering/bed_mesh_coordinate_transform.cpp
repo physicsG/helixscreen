@@ -71,17 +71,17 @@ double compute_bed_scale_factor(double bed_size_mm, double target_world_size) {
 
 WallBounds compute_wall_bounds(double z_min_world, double z_max_world, double bed_half_width,
                                double bed_half_height) {
-    constexpr double WALL_HEIGHT_TO_BED_RATIO = 1.25;
-    constexpr double MESH_Z_TO_WALL_RATIO = 1.5;
-    constexpr double FLOOR_BELOW_MESH_RATIO = 0.25;
-    constexpr double CEILING_ABOVE_MESH_RATIO = 1.0;
+    constexpr double kWallHeightToBedRatio = 1.25;
+    constexpr double kMeshZToWallRatio = 1.5;
+    constexpr double kFloorBelowMeshRatio = 0.25;
+    constexpr double kCeilingAboveMeshRatio = 1.0;
 
     double mesh_z_range = z_max_world - z_min_world;
-    double min_wall_height = std::max(bed_half_width, bed_half_height) * WALL_HEIGHT_TO_BED_RATIO;
-    double wall_height = std::max(mesh_z_range * MESH_Z_TO_WALL_RATIO, min_wall_height);
+    double min_wall_height = std::max(bed_half_width, bed_half_height) * kWallHeightToBedRatio;
+    double wall_height = std::max(mesh_z_range * kMeshZToWallRatio, min_wall_height);
 
-    return WallBounds{z_min_world - wall_height * FLOOR_BELOW_MESH_RATIO,
-                      z_max_world + wall_height * CEILING_ABOVE_MESH_RATIO, wall_height};
+    return WallBounds{z_min_world - wall_height * kFloorBelowMeshRatio,
+                      z_max_world + wall_height * kCeilingAboveMeshRatio, wall_height};
 }
 
 } // namespace mesh

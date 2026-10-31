@@ -7,7 +7,7 @@
 // later task can attach branded filament info to each of the 4 quick-material
 // preset slots.
 //
-// Migration tests mirror tests/unit/test_config_migration_v18.cpp exactly:
+// Migration tests mirror tests/unit/test_config_migrations.cpp exactly:
 // the migration function is a static function in config.cpp's anonymous
 // namespace, so it's exercised through the public Config::init() path, which
 // runs run_versioned_migrations() on an existing on-disk config. A sandboxed
@@ -95,7 +95,7 @@ TEST_CASE_METHOD(MigrationV19Fixture,
                 {"preset_materials", json::array({"PLA", "PETG", "ABS", "TPU"})}};
     write_and_init(v18);
 
-    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version") == kCurrentConfigVersion);
     auto& arr = config.get_json("/preset_materials");
     REQUIRE(arr.is_array());
     REQUIRE(arr.size() == 4);
@@ -111,7 +111,7 @@ TEST_CASE_METHOD(MigrationV19Fixture,
 TEST_CASE_METHOD(MigrationV19Fixture,
                  "Config migration v19: idempotent on already-object preset_materials",
                  "[config][migration]") {
-    // Seed at v18 (NOT CURRENT_CONFIG_VERSION) so run_versioned_migrations' `version < 19`
+    // Seed at v18 (NOT kCurrentConfigVersion) so run_versioned_migrations' `version < 19`
     // gate actually fires and migrate_v18_to_v19 runs against already-object data. This is
     // the only way to exercise its is_string() skip-guard for real: seeding at v19 would
     // never call the migration at all, making the test a no-op that proves nothing.
@@ -128,7 +128,7 @@ TEST_CASE_METHOD(MigrationV19Fixture,
                                                   {{"type", "TPU"}}})}};
     write_and_init(v18);
 
-    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version") == kCurrentConfigVersion);
     auto& arr = config.get_json("/preset_materials");
     REQUIRE(arr.is_array());
     REQUIRE(arr.size() == 4);

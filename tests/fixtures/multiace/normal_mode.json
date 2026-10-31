@@ -1,0 +1,45 @@
+{
+  "api_version": 1,
+  "status": "ready",
+  "temp": 25,
+  "dryer_status": {},
+  "gate_status": [
+    1,
+    1,
+    1,
+    1
+  ],
+  "active_device": 0,
+  "device_count": 0,
+  "ace_heads": [],
+  "mode": "normal",
+  "quad_replenish": false,
+  "quad_first": false,
+  "spools": {},
+  "spool_binding": {},
+  "swap_phase": "idle",
+  "last_swap_result": null,
+  "event_seq": 0,
+  "head_source": {},
+  "head_manual": {
+    "0": false,
+    "1": false,
+    "2": false,
+    "3": false
+  },
+  "head_feeder": {
+    "0": false,
+    "1": false,
+    "2": false,
+    "3": false
+  },
+  "head_ace": {
+    "0": 0,
+    "1": 1,
+    "2": 2,
+    "3": 3
+  },
+  "swap_in_progress": false,
+  "unload_all_active": false,
+  "aces": []
+}

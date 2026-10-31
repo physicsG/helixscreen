@@ -9,9 +9,9 @@
 // dismiss. These pin both the firing and the silence: a READY with nothing
 // expected, like the first one at app start, must stay quiet.
 //
-// ToastManager is stubbed in the test binary (tests/ui_test_utils.cpp), so the
-// toast is captured through the stub's test hook - the same mechanism the
-// runout toast-suppression tests use at the ui_notification_* layer.
+// The toast is captured through the toast hook (tests/ui_test_utils.h) - the
+// same mechanism the runout toast-suppression tests use at the
+// ui_notification_* layer.
 
 #include "ui_emergency_stop.h"
 #include "ui_toast_manager.h"
@@ -19,6 +19,7 @@
 
 #include "../test_fixtures.h"
 #include "../test_helpers/emergency_stop_test_access.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 #include "moonraker_api.h"
 #include "printer_state.h"
@@ -48,7 +49,7 @@ class ReadyToastFixture : public XMLTestFixture {
         // Burning with an unsuppressed ERROR/SHUTDOWN instead would build a
         // recovery dialog, and every READY below would take the dialog
         // branch rather than the path under test.
-        estop.suppress_recovery_dialog(RecoverySuppression::LONG);
+        estop.suppress_recovery_dialog(recovery_suppression::LONG);
         state().set_klippy_state_sync(KlippyState::SHUTDOWN);
         settle();
         settle();
@@ -68,10 +69,7 @@ class ReadyToastFixture : public XMLTestFixture {
     // hops through async_call before it touches any toast, so a single drain
     // leaves the toast in flight.
     void settle() {
-        for (int i = 0; i < 16 && UpdateQueue::instance().pending_count() > 0; i++) {
-            UpdateQueue::instance().drain();
-        }
-        UpdateQueue::instance().drain();
+        helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance(), 16);
     }
 
     struct Shown {
@@ -98,7 +96,7 @@ TEST_CASE_METHOD(ReadyToastFixture,
                  "[recovery][readytoast]") {
     // A SAVE_CONFIG-style flow: dialog suppressed for the restart, klippy
     // bounces and comes back with no dialog ever shown.
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::LONG);
     go_ready();
 
     REQUIRE(shown.size() == 1);

@@ -10,6 +10,7 @@
 
 #include "ui_color_picker.h"
 
+#include "helix/xml/indexed_subject_pool.h"
 #include "overlay_base.h"
 #include "static_panel_registry.h"
 #include "theme_loader.h"
@@ -151,7 +152,10 @@ class ThemeEditorOverlay : public OverlayBase {
     int editing_color_index_ = -1;
 
     lv_obj_t* panel_ = nullptr;
-    std::array<lv_obj_t*, 16> swatch_objects_{};
+    /// One colour per palette slot; theme_editor_overlay.xml's swatches bind
+    /// "theme_editor_role_color_<i>".
+    helix::xml::IndexedSubjectPool swatch_color_pool_{"theme_editor_role_color",
+                                                      helix::xml::IndexedSubjectPool::Type::Color};
 
     // Color picker for swatch editing
     std::unique_ptr<helix::ui::ColorPicker> color_picker_;

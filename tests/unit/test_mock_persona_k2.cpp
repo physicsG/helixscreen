@@ -143,13 +143,18 @@ TEST_CASE("The k2 persona's motor_control and fan_feedback frames parse",
 
 TEST_CASE("The k2 persona reports the declared 350 bed through discovery", "[mock][persona][k2]") {
     helix::test::PersonaEnv env("k2");
-    MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::CREALITY_K2_PLUS);
-    mock.connect("ws://mock/websocket", [] {}, [] {});
-    bool done = false;
-    mock.discover_printer([&done] { done = true; });
-    REQUIRE(done);
+    BuildVolume volume;
+    {
+        MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::CREALITY_K2_PLUS);
+        mock.connect("ws://mock/websocket", [] {}, [] {});
+        bool done = false;
+        mock.discover_printer([&done] { done = true; });
+        REQUIRE(done);
+        volume = mock.hardware().build_volume();
+    }
+    // Discovery queues UI-thread callbacks; run them before the test ends.
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
-    const auto volume = mock.hardware().build_volume();
     CHECK(volume.declared_bed_x == Catch::Approx(350.0f));
     CHECK(volume.declared_bed_y == Catch::Approx(350.0f));
 }
@@ -273,4 +278,32 @@ TEST_CASE("CFS action completion runs from the UpdateQueue, not the answering th
     K2Cfs::drain();
     REQUIRE(ran);
     CHECK(ran_from != nullptr);
+}
+
+TEST_CASE("The k2 persona with HELIX_MOCK_CFS_BOXES=none publishes an empty bus",
+          "[mock][persona][k2][cfs][1904]") {
+    helix::test::PersonaEnv env("k2");
+    auto frame_for = [](const char* boxes) {
+        helix::ScopedEnv cfs_boxes("HELIX_MOCK_CFS_BOXES", boxes);
+        MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::CREALITY_K2_PLUS);
+        return helix::MoonrakerClientMockTestAccess::cfs_box_status(mock);
+    };
+    // What the backend makes of the frame: the real parse, not the JSON shape.
+    auto external_spool_only = [](const json& box) {
+        helix::printer::AmsBackendCfs cfs(nullptr, nullptr);
+        helix::CfsTestAccess::handle_status(cfs,
+                                            json{{"params", json::array({{{"box", box}}, 0})}});
+        return cfs.get_system_info().external_spool_only;
+    };
+
+    const json empty_bus = frame_for("none");
+    CHECK(empty_bus.value("state", "") == "disconnect");
+    for (const char* unit : {"T1", "T2", "T3", "T4"}) {
+        CAPTURE(unit);
+        CHECK(empty_bus[unit].value("state", "") == "None");
+    }
+    CHECK(external_spool_only(empty_bus));
+
+    // The default bus has box 1 on it.
+    CHECK_FALSE(external_spool_only(frame_for(nullptr)));
 }

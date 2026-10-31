@@ -15,6 +15,7 @@
 #include "advanced_panel_types.h"
 #include "belt_tension_types.h"
 #include "calibration_types.h"
+#include "helix_shared_callback.h"
 #include "i_moonraker_sub_apis.h"
 #include "moonraker_error.h"
 #include "moonraker_types.h"
@@ -73,10 +74,10 @@ OperationTimeoutGuard* armed_idle_grace();
  *   MoonrakerAdvancedAPI advanced(client, api);
  *   advanced.start_bed_mesh_calibrate(command, on_progress, on_complete, on_error);
  */
-class MoonrakerAdvancedAPI : public IAdvancedAPI {
+class MoonrakerAdvancedAPI : public helix::IAdvancedAPI {
   public:
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const MoonrakerError&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const MoonrakerError&)>;
 
     /// Progress callback for bed mesh calibration: (current_probe, total_probes)
     using BedMeshProgressCallback = std::function<void(int current, int total)>;
@@ -88,7 +89,7 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
     using InputShaperConfigCallback = std::function<void(const InputShaperConfig&)>;
 
     /// Callback for heater control type query (returns "pid", "mpc", etc.)
-    using HeaterControlTypeCallback = std::function<void(const std::string& control_type)>;
+    using HeaterControlTypeCallback = helix::SharedCallback<void(const std::string& control_type)>;
 
     /// Callback for PID calibration progress (sample number, tolerance value; -1.0 = n/a)
     using PIDProgressCallback = std::function<void(int sample, float tolerance)>;
@@ -414,10 +415,9 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
      * @param on_error Called on refusal or failure
      * @param on_progress Best-effort per-attempt progress; may never fire
      */
-    std::function<void()> start_pa_calibrate(const helix::pacal::Procedure& proc,
-                                             PACalibrateCallback on_complete,
-                                             ErrorCallback on_error,
-                                             PAProgressCallback on_progress = nullptr) override;
+    helix::SharedCallback<void()>
+    start_pa_calibrate(const helix::pacal::Procedure& proc, PACalibrateCallback on_complete,
+                       ErrorCallback on_error, PAProgressCallback on_progress = nullptr) override;
 
     // ========================================================================
     // Machine Limits Operations
@@ -491,7 +491,7 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
 
     /// Mirrors IAdvancedAPI (contracts live there).
     using BeltSweepProgressCallback = IAdvancedAPI::BeltSweepProgressCallback;
-    using BeltCurveCallback = IAdvancedAPI::BeltCurveCallback;
+    using BeltResponseCallback = IAdvancedAPI::BeltResponseCallback;
     using BeltRunCancel = IAdvancedAPI::BeltRunCancel;
 
     /// Callback for belt hardware detection
@@ -516,20 +516,21 @@ class MoonrakerAdvancedAPI : public IAdvancedAPI {
      * Executes TEST_RESONANCES with OUTPUT=resonances and SWEEPING_PERIOD=0
      * (pulse-only excitation) and collects the console sweep, then reads the
      * CSV Klipper names in its "Resonances data written to" line and hands
-     * back the parsed curve.
+     * back the parsed curves.
      *
      * @param axis_param Axis parameter: "1,-1" for CoreXY Path A, "1,1" for Path B
      * @param output_name Name for the CSV output file
      * @param on_progress Called with progress percentage (0-100) and current frequency
-     * @param on_complete Called with the parsed curve on success
+     * @param on_complete Called with the parsed curves (psd_xyz and psd_x + psd_y) on success
      * @param on_error Called on failure
+     * @param window Optional frequency range to limit the sweep to
      * @return Cancel handle; stops listening and suppresses every later callback
      */
-    [[nodiscard]] BeltRunCancel test_belt_resonance(const std::string& axis_param,
-                                                    const std::string& output_name,
-                                                    BeltSweepProgressCallback on_progress,
-                                                    BeltCurveCallback on_complete,
-                                                    ErrorCallback on_error) override;
+    [[nodiscard]] BeltRunCancel test_belt_resonance(
+        const std::string& axis_param, const std::string& output_name,
+        BeltSweepProgressCallback on_progress, BeltResponseCallback on_complete,
+        ErrorCallback on_error,
+        std::optional<helix::calibration::BeltSweepWindow> window = std::nullopt) override;
 
   protected:
     helix::IMoonrakerClient& client_;

@@ -6,20 +6,42 @@
 #include "ui_update_queue.h"
 
 #include "ams_state.h"
+#include "app_globals.h"
 #include "i_moonraker_client.h"
 #include "i_moonraker_sub_apis.h"
+#include "pa_tuning.h"
+#include "printer_state.h"
 #include "replace_method_callback.h"
 #include "spoolman_manager.h"
 #include "spoolman_types.h"
 #include "tool_state.h"
+#include "tune_controller.h"
 
 #include <spdlog/spdlog.h>
 
 namespace helix::spoolman_sync {
 
 namespace {
-constexpr const char* ACTIVE_SPOOL_METHOD = "notify_active_spool_set";
-constexpr const char* ACTIVE_SPOOL_HANDLER = "external_spool_sync";
+constexpr const char* kActiveSpoolMethod = "notify_active_spool_set";
+constexpr const char* kActiveSpoolHandler = "external_spool_sync";
+constexpr const char* kStatusMethod = "notify_spoolman_status_changed";
+constexpr const char* kStatusHandler = "spoolman_status_sync";
+
+/// The startup status query and its sync, also rerun when Spoolman reconnects.
+void request_status_sync(ISpoolmanAPI& spoolman) {
+    // The reply arrives on the WebSocket thread and sync_from_status() reads AmsState.
+    spoolman.get_spoolman_status(
+        [&spoolman](bool connected, int active_spool_id) {
+            helix::ui::queue_update("spoolman_active_spool_sync::sync_from_status",
+                                    [&spoolman, connected, active_spool_id]() {
+                                        sync_from_status(spoolman, connected, active_spool_id);
+                                    });
+        },
+        [](const MoonrakerError& err) {
+            spdlog::debug("[Application] Spoolman status unavailable: {}", err.message);
+        },
+        true); // silent: Spoolman not configured is normal
+}
 } // namespace
 
 void try_assign_active_spool_to_tool(const SpoolInfo& spool) {
@@ -104,6 +126,30 @@ void sync_external_spool(const SpoolInfo& spool, std::string log_context) {
                             });
 }
 
+void apply_saved_pressure_advance(const SpoolInfo& spool) {
+    auto& state = get_printer_state();
+    const bool printing = job_holds_machine(state.print_state().get_print_lifecycle());
+    if (!helix::pa::should_auto_apply_on_activation(printing, spool.pressure_advance)) {
+        if (spool.pressure_advance) {
+            spdlog::info("[Application] Spool {} has K={:.4f} saved; not applied during a print",
+                         spool.id, *spool.pressure_advance);
+        }
+        return;
+    }
+    std::vector<helix::pa::SpoolOnExtruder> mounted;
+    auto& tools = ToolState::instance();
+    for (const auto& tool : tools.tools()) {
+        if (tool.spoolman_id > 0) {
+            mounted.push_back({tool.spoolman_id, tool.effective_heater()});
+        }
+    }
+    const std::string extruder = helix::pa::extruder_for_spool(
+        spool.id, mounted, state.temperature_state().active_extruder_name());
+    spdlog::info("[Application] Applying spool {}'s saved pressure advance {:.4f} to {}", spool.id,
+                 *spool.pressure_advance, extruder);
+    helix::tune::set_pressure_advance(get_moonraker_api(), extruder, *spool.pressure_advance);
+}
+
 void sync_from_status(ISpoolmanAPI& spoolman, bool connected, int active_spool_id) {
     if (!connected || active_spool_id <= 0) {
         spdlog::debug("[Application] No active Spoolman spool to sync "
@@ -168,6 +214,15 @@ void on_active_spool_set(ISpoolmanAPI& spoolman, const nlohmann::json& data) {
                               "not the bypass — keeping external spool");
                 return;
             }
+            // A manual entry never set the server's active spool, so a clear
+            // says nothing about it. Unlinking the bypass spool commits one and
+            // then clears the server, whose echo lands here.
+            const auto existing = ams.get_external_spool_info();
+            if (existing && existing->spoolman_id <= 0) {
+                spdlog::debug("[Application] Active spool cleared, bypass holds an "
+                              "unlinked entry, keeping it");
+                return;
+            }
             spdlog::info("[Application] Active spool cleared via notification");
             ams.clear_external_spool_info();
         });
@@ -181,6 +236,11 @@ void on_active_spool_set(ISpoolmanAPI& spoolman, const nlohmann::json& data) {
             if (!spool_opt)
                 return;
             sync_external_spool(*spool_opt, "updated via notification");
+            // Only on an activation, never on the startup sync: a reconnect
+            // must not overwrite a K the user set by hand since.
+            helix::ui::queue_update(
+                "spoolman_active_spool_sync::apply_saved_pressure_advance",
+                [spool = *spool_opt]() { apply_saved_pressure_advance(spool); });
         },
         [spool_id](const MoonrakerError& err) {
             spdlog::warn("[Application] Failed to fetch notified spool {}: {}", spool_id,
@@ -188,28 +248,47 @@ void on_active_spool_set(ISpoolmanAPI& spoolman, const nlohmann::json& data) {
         });
 }
 
+void on_spoolman_status_changed(ISpoolmanAPI& spoolman, const nlohmann::json& msg) {
+    const auto& params = msg.contains("params") ? msg["params"] : msg;
+    if (!params.is_array() || params.empty() || !params[0].is_object()) {
+        return;
+    }
+    const auto& status = params[0];
+    const auto it = status.find("spoolman_connected");
+    if (it == status.end() || !it->is_boolean()) {
+        return;
+    }
+    const bool connected = it->get<bool>();
+    spdlog::info("[Application] Spoolman {} (status notification)",
+                 connected ? "connected" : "disconnected");
+    get_printer_state().capabilities_state().set_spoolman_available(connected);
+    if (connected) {
+        request_status_sync(spoolman);
+    }
+}
+
 void attach(IMoonrakerClient& client, ISpoolmanAPI& spoolman) {
     // Sync external spool from Moonraker's active Spoolman spool. This ensures the
     // filament panel shows the correct spool on startup, even if the active spool was
     // changed via Spoolman's web UI or another client.
-    spoolman.get_spoolman_status(
-        [&spoolman](bool connected, int active_spool_id) {
-            sync_from_status(spoolman, connected, active_spool_id);
-        },
-        [](const MoonrakerError& err) {
-            spdlog::debug("[Application] Spoolman status unavailable: {}", err.message);
-        },
-        true); // silent: Spoolman not configured is normal
+    request_status_sync(spoolman);
 
     // Listen for Moonraker active spool changes (user changes spool in Spoolman web
     // UI or another client while HelixScreen is running).
     replace_method_callback(
-        client, ACTIVE_SPOOL_METHOD, ACTIVE_SPOOL_HANDLER,
+        client, kActiveSpoolMethod, kActiveSpoolHandler,
         [&spoolman](const nlohmann::json& data) { on_active_spool_set(spoolman, data); });
+
+    // Moonraker's link to Spoolman comes and goes on its own (Spoolman starts after
+    // Moonraker, the network drops), and discovery asks only once.
+    replace_method_callback(
+        client, kStatusMethod, kStatusHandler,
+        [&spoolman](const nlohmann::json& data) { on_spoolman_status_changed(spoolman, data); });
 }
 
 void detach(IMoonrakerClient& client) {
-    client.unregister_method_callback(ACTIVE_SPOOL_METHOD, ACTIVE_SPOOL_HANDLER);
+    client.unregister_method_callback(kActiveSpoolMethod, kActiveSpoolHandler);
+    client.unregister_method_callback(kStatusMethod, kStatusHandler);
 }
 
 } // namespace helix::spoolman_sync

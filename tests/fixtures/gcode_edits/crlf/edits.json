@@ -1,0 +1,21 @@
+{
+  "description": "CRLF: expect_raw_line matches with or without the CR; a commented line keeps its CR ahead of the annotation, a replacement carries none",
+  "edits": [
+    {
+      "line_number": 2,
+      "expect_raw_line": "BED_MESH_CALIBRATE",
+      "action": "comment_out",
+      "args": {
+        "comment": "Disabled Bed mesh"
+      }
+    },
+    {
+      "line_number": 3,
+      "expect_raw_line": "PRINT_START BED=60\r",
+      "action": "replace",
+      "args": {
+        "gcode": "PRINT_START BED=60 SKIP_BED_MESH=1"
+      }
+    }
+  ]
+}

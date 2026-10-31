@@ -13,9 +13,9 @@ namespace helix::settings {
  * @class HardwareSettingsOverlay
  * @brief Overlay for hardware and device settings
  *
- * Provides action rows for managing printers, AMS, fans, sensors,
- * LEDs, power devices, spoolman, and macro buttons. Each row opens
- * an existing overlay for the respective feature.
+ * Provides action rows for hardware health, camera, fans, sensors,
+ * LEDs, power devices and spoolman. Each row opens an existing overlay
+ * for the respective feature.
  *
  * @pattern Overlay (lazy init)
  * @threading Main thread only

@@ -30,6 +30,7 @@
 #include "../../include/ui_print_exclude_object_manager.h"
 #include "../../include/ui_update_queue.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
 
 #include "../catch_amalgamated.hpp"
@@ -60,25 +61,11 @@ class PrintExcludeObjectManagerTestAccess {
 
 namespace {
 
-struct LVGLInitializerExcludeMgr {
-    LVGLInitializerExcludeMgr() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-static LVGLInitializerExcludeMgr lvgl_init_mgr;
-
 /// Fixture: manager wired to mock client and PrinterState, no gcode_viewer widget.
 /// The manager's viewer-touching branches are all guarded by `if (gcode_viewer_)`,
 /// so passing nullptr keeps us out of the LVGL widget graph while still exercising
 /// the observer, awaiting-confirmation, and excluded_objects_ bookkeeping.
-class ExcludeManagerFixture {
+class ExcludeManagerFixture : public LVGLTestFixture {
   public:
     ExcludeManagerFixture() : mock_client(MoonrakerClientMock::PrinterType::VORON_24) {
         state.init_subjects(false);

@@ -18,10 +18,10 @@
 namespace helix::ui {
 
 /// Minimum spin duration at 100% fan speed (ms per full rotation)
-inline constexpr uint32_t FAN_SPIN_MIN_DURATION_MS = 600;
+inline constexpr uint32_t kFanSpinMinDurationMs = 600;
 
 /// Maximum spin duration at ~1% fan speed (slow crawl)
-inline constexpr uint32_t FAN_SPIN_MAX_DURATION_MS = 6000;
+inline constexpr uint32_t kFanSpinMaxDurationMs = 6000;
 
 /**
  * @brief LVGL animation exec callback for rotation transform

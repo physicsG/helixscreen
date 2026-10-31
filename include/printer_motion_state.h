@@ -29,14 +29,14 @@ struct AxisBounds {
 /// G-code range per axis is [min - origin, max - origin]. Has-bits are untouched.
 /// Resolution of the stored gcode_position subjects: centimillimetres,
 /// truncated, so a reading sits up to this far below the real position.
-inline constexpr double POSITION_RESOLUTION_MM = 0.01;
+inline constexpr double kPositionResolutionMm = 0.01;
 
 /// Clamps stop this far inside the G-code envelope. Klipper adds the offset to
 /// a target in doubles and range-checks the sum, so a target exactly at a
 /// shifted edge can land a hair past the machine limit and be refused (Z
 /// 274.94 + 0.06 on a Snapmaker U1); and a relative jog computed from a
-/// truncated reading can overshoot by up to POSITION_RESOLUTION_MM.
-inline constexpr double GCODE_EDGE_MARGIN_MM = 2 * POSITION_RESOLUTION_MM;
+/// truncated reading can overshoot by up to kPositionResolutionMm.
+inline constexpr double kGcodeEdgeMarginMm = 2 * kPositionResolutionMm;
 
 /// Shrink each axis's range by `margin` from both ends. Has-bits are untouched.
 inline AxisBounds inset_bounds(const AxisBounds& b, double margin) {

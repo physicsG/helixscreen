@@ -35,7 +35,7 @@ TEST_CASE("send with invalid UTF-8 params does not throw or leak a pending reque
     RequestId id = 0;
     REQUIRE_NOTHROW(id = tracker.send(ws, "printer.gcode.script", invalid_utf8_params(), nullptr,
                                       [&](const MoonrakerError&) { error_cb_fired = true; }));
-    REQUIRE(id == INVALID_REQUEST_ID);
+    REQUIRE(id == kInvalidRequestId);
     REQUIRE(error_cb_fired);
     REQUIRE(MoonrakerRequestTrackerTestAccess::pending_count(tracker) == 0);
 }

@@ -9,7 +9,7 @@
 namespace helix::label {
 
 /// Raster row width for Brother QL-800/810W/820NWB: 90 bytes = 720 pixels
-static constexpr int BROTHER_QL_RASTER_ROW_BYTES = 90;
+static constexpr int kBrotherQlRasterRowBytes = 90;
 
 /// Build Brother QL raster protocol bytes from a bitmap.
 /// Pure function — no I/O. Output can be sent over TCP, RFCOMM, or any transport.

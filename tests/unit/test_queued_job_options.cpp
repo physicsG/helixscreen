@@ -127,7 +127,7 @@ TEST_CASE("stale_queued_job_option_ids names stored ids absent from the queue",
 
 namespace {
 
-JobQueueEntry entry(const char* job_id, const char* filename) {
+helix::JobQueueEntry entry(const char* job_id, const char* filename) {
     return {job_id, filename, 0.0, 0.0};
 }
 
@@ -138,8 +138,8 @@ TEST_CASE("find_new_job_id recovers the id added between two queue snapshots",
     using helix::queue::find_new_job_id;
 
     const std::vector<std::string> before = {"0001", "0002"};
-    const std::vector<JobQueueEntry> after = {entry("0001", "a.gcode"), entry("0002", "b.gcode"),
-                                              entry("0003", "benchy.gcode")};
+    const std::vector<helix::JobQueueEntry> after = {
+        entry("0001", "a.gcode"), entry("0002", "b.gcode"), entry("0003", "benchy.gcode")};
 
     SECTION("one new id") {
         const auto found = find_new_job_id(before, after);

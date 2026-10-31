@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ui_history_list_view.h"
+#include "ui_history_photos.h"
 #include "ui_observer_guard.h"
 #include "ui_search_debounce.h"
 
@@ -247,7 +248,7 @@ class HistoryListPanel : public OverlayBase {
     helix::HistoryChangedCallback history_observer_;
 
     // Pagination state for infinite scroll
-    static constexpr int JOBS_PER_PAGE = 50; ///< Jobs per API request
+    static constexpr int kJobsPerPage = 50; ///< Jobs per API request
     /// Single-flight guard for the "load next page" fetch, with a 30s self-heal
     /// so a silently-lost response can't permanently block infinite scroll.
     helix::InFlightGuard load_more_guard_{std::chrono::milliseconds(30000)};
@@ -301,7 +302,9 @@ class HistoryListPanel : public OverlayBase {
     lv_subject_t detail_status_{};
     lv_subject_t detail_status_icon_{};
     lv_subject_t detail_status_variant_{};
+    lv_subject_t detail_start_date_{};
     lv_subject_t detail_start_time_{};
+    lv_subject_t detail_end_date_{};
     lv_subject_t detail_end_time_{};
     lv_subject_t detail_duration_{};
     lv_subject_t detail_layers_{};
@@ -313,23 +316,33 @@ class HistoryListPanel : public OverlayBase {
     lv_subject_t detail_can_reprint_{};   ///< 1 if file exists, 0 otherwise
     lv_subject_t detail_status_code_{};   ///< 0=completed, 1=cancelled, 2=error, 3=in_progress
     lv_subject_t detail_has_timelapse_{}; ///< 1 if timelapse available, 0 otherwise
+    lv_subject_t detail_spools_{};        ///< The job's per-spool lines, newline-joined
+    lv_subject_t detail_has_spools_{};    ///< 1 once the plugin reported the job's spools
+    /// Bumped per detail open, so a spool record still in flight for an
+    /// earlier job is dropped.
+    uint32_t detail_spools_request_ = 0;
+    /// The job's camera photos on the detail overlay's preview card
+    helix::ui::HistoryPhotoViewer photo_viewer_;
 
     // Buffers for string subjects (LVGL 9.4 requires pre-allocated buffers)
-    static constexpr size_t DETAIL_BUF_SIZE = 128;
-    static constexpr size_t SMALL_BUF_SIZE = 32;
+    static constexpr size_t kDetailBufSize = 128;
+    static constexpr size_t kSmallBufSize = 32;
     char detail_filename_buf_[256] = {};
-    char detail_status_buf_[SMALL_BUF_SIZE] = {};
-    char detail_status_icon_buf_[SMALL_BUF_SIZE] = {};
-    char detail_status_variant_buf_[SMALL_BUF_SIZE] = {};
-    char detail_start_time_buf_[SMALL_BUF_SIZE] = {};
-    char detail_end_time_buf_[SMALL_BUF_SIZE] = {};
-    char detail_duration_buf_[SMALL_BUF_SIZE] = {};
-    char detail_layers_buf_[SMALL_BUF_SIZE] = {};
-    char detail_layer_height_buf_[SMALL_BUF_SIZE] = {};
-    char detail_nozzle_temp_buf_[SMALL_BUF_SIZE] = {};
-    char detail_bed_temp_buf_[SMALL_BUF_SIZE] = {};
-    char detail_filament_buf_[SMALL_BUF_SIZE] = {};
-    char detail_filament_type_buf_[SMALL_BUF_SIZE] = {};
+    char detail_status_buf_[kSmallBufSize] = {};
+    char detail_status_icon_buf_[kSmallBufSize] = {};
+    char detail_status_variant_buf_[kSmallBufSize] = {};
+    char detail_start_date_buf_[kSmallBufSize] = {};
+    char detail_start_time_buf_[kSmallBufSize] = {};
+    char detail_end_date_buf_[kSmallBufSize] = {};
+    char detail_end_time_buf_[kSmallBufSize] = {};
+    char detail_duration_buf_[kSmallBufSize] = {};
+    char detail_layers_buf_[kSmallBufSize] = {};
+    char detail_layer_height_buf_[kSmallBufSize] = {};
+    char detail_nozzle_temp_buf_[kSmallBufSize] = {};
+    char detail_bed_temp_buf_[kSmallBufSize] = {};
+    char detail_filament_buf_[kSmallBufSize] = {};
+    char detail_filament_type_buf_[kSmallBufSize] = {};
+    char detail_spools_buf_[512] = {};
 
     //
     // === Internal Methods ===
@@ -446,6 +459,9 @@ class HistoryListPanel : public OverlayBase {
      * @param job The job to display
      */
     void update_detail_subjects(const PrintHistoryJob& job);
+
+    /// Ask the HelixPrint plugin which spools @p job used, for the detail view.
+    void fetch_spool_usage(const PrintHistoryJob& job);
 
     /**
      * @brief Handle reprint button click

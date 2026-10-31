@@ -6,6 +6,8 @@
 #include "../test_fixtures.h"
 #include "../test_helpers/config_test_access.h"
 #include "../test_helpers/process_async_timers.h"
+#include "../test_helpers/typed_mock_backend.h"
+#include "ams_state.h"
 #include "app_globals.h"
 #include "config.h"
 #include "misc/lv_timer_private.h"
@@ -203,8 +205,8 @@ TEST_CASE_METHOD(XMLTestFixture, "PrinterImageWidget generates its image cache o
 
 // A widget's image can still be LV_SIZE_CONTENT when the cache check fires.
 // The raw special coordinate is large and positive, so it must read as "no size
-// yet": a cache job sized off it can never complete, leaves cache_job_inflight_
-// set, and blocks the generation for the real size that follows.
+// yet": a cache job sized off it can never complete, so it stays in flight
+// and blocks the generation for the real size that follows.
 TEST_CASE_METHOD(XMLTestFixture,
                  "PrinterImageWidget skips the cache while its image is content-sized",
                  "[panel_widget][printer_image][cache]") {
@@ -390,4 +392,141 @@ TEST_CASE_METHOD(XMLTestFixture,
     process_async_timers();
     helix::ConfigTestAccess::data(*cfg) = saved;
     helix::ConfigTestAccess::active_printer_id(*cfg) = saved_active;
+}
+
+// A filament system registers after connect, after the home panel is built. A
+// database entry's image_variants can pick another image for it, so the widget
+// re-resolves when the detected filament systems change, and back when they go.
+TEST_CASE_METHOD(XMLTestFixture,
+                 "PrinterImageWidget switches to an image variant when a filament system registers",
+                 "[panel_widget][printer_image][printer_image_variants]") {
+    helix::init_widget_registrations();
+    helix::PanelWidgetManager::instance().init_widget_subjects();
+    get_printer_state().init_subjects(false);
+    AmsState& ams = AmsState::instance();
+    ams.clear_backends();
+    ams.init_subjects(false);
+
+    Config* cfg = Config::get_instance();
+    cfg->set<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "Creality K2");
+
+    lv_obj_t* widget_obj = lv_obj_create(test_screen());
+    lv_obj_set_size(widget_obj, 200, 200);
+    lv_obj_t* img = lv_image_create(widget_obj);
+    lv_obj_set_name(img, "printer_image");
+    process_lvgl(2);
+
+    helix::PrinterImageWidget w;
+    w.attach(widget_obj, test_screen());
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    auto source = [&]() { return std::string(static_cast<const char*>(lv_image_get_src(img))); };
+    const std::string plain = source();
+    REQUIRE(plain.find("creality-k2") != std::string::npos);
+    REQUIRE(plain.find("creality-k2-cfs") == std::string::npos);
+
+    ams.add_backend(std::make_unique<helix::test::TypedMockBackend>(AmsType::CFS));
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    CHECK(source().find("creality-k2-cfs") != std::string::npos);
+
+    ams.clear_backends();
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    CHECK(source() == plain);
+
+    w.detach();
+    process_async_timers();
+    cfg->set<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "");
+}
+
+// The top can be fitted or lifted off while connected, so the widget follows the
+// enclosure-top subject as well.
+TEST_CASE_METHOD(XMLTestFixture,
+                 "PrinterImageWidget switches to the with-top image when the top is fitted",
+                 "[panel_widget][printer_image][printer_image_variants][enclosure_top]") {
+    helix::init_widget_registrations();
+    helix::PanelWidgetManager::instance().init_widget_subjects();
+    get_printer_state().init_subjects(false);
+    AmsState& ams = AmsState::instance();
+    ams.clear_backends();
+    ams.init_subjects(false);
+    auto& caps = get_printer_state().capabilities_state();
+    caps.set_enclosure_top_fitted(false);
+    caps.set_has_chamber_heater(false);
+
+    Config* cfg = Config::get_instance();
+    cfg->set<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "Snapmaker U1");
+
+    lv_obj_t* widget_obj = lv_obj_create(test_screen());
+    lv_obj_set_size(widget_obj, 200, 200);
+    lv_obj_t* img = lv_image_create(widget_obj);
+    lv_obj_set_name(img, "printer_image");
+    process_lvgl(2);
+
+    helix::PrinterImageWidget w;
+    w.attach(widget_obj, test_screen());
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    auto source = [&]() { return std::string(static_cast<const char*>(lv_image_get_src(img))); };
+    const std::string plain = source();
+    REQUIRE(plain.find("snapmaker-u1") != std::string::npos);
+    REQUIRE(plain.find("snapmaker-u1-tophat") == std::string::npos);
+
+    caps.set_enclosure_top_fitted(true);
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    CHECK(source().find("snapmaker-u1-tophat") != std::string::npos);
+
+    caps.set_enclosure_top_fitted(false);
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    CHECK(source() == plain);
+
+    caps.set_has_chamber_heater(true);
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    CHECK(source().find("snapmaker-u1-tophat") != std::string::npos);
+
+    caps.set_has_chamber_heater(false);
+    helix::ui::UpdateQueue::instance().drain();
+    process_async_timers();
+    CHECK(source() == plain);
+
+    w.detach();
+    process_async_timers();
+    cfg->set<std::string>(cfg->df() + helix::wizard::PRINTER_TYPE, "");
+}
+
+// A chamber with only a sensor still has a reading worth showing, so the home
+// callout follows HasChamber (sensor or heater), as the print status tile does.
+TEST_CASE_METHOD(XMLTestFixture, "PrinterImageWidget shows a sensor-only chamber's callout",
+                 "[panel_widget][printer_image]") {
+    helix::init_widget_registrations();
+    helix::PanelWidgetManager::instance().init_widget_subjects();
+    get_printer_state().init_subjects(false);
+    auto& caps = get_printer_state().capabilities_state();
+    caps.set_has_chamber_heater(false);
+    caps.set_has_chamber_sensor(true);
+    // Hot enough to show with no target.
+    lv_subject_set_int(get_printer_state().temperature_state().get_chamber_temp_subject(), 600);
+
+    lv_obj_t* widget_obj = lv_obj_create(test_screen());
+    lv_obj_t* img = lv_image_create(widget_obj);
+    lv_obj_set_name(img, "printer_image");
+    helix::PrinterImageWidget w;
+    w.attach(widget_obj, test_screen());
+    helix::ui::UpdateQueue::instance().drain();
+
+    lv_subject_t* shown = lv_xml_get_subject(nullptr, "callout_chamber_shown");
+    REQUIRE(shown != nullptr);
+    CHECK(lv_subject_get_int(shown) != 0);
+
+    caps.set_has_chamber_sensor(false);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(lv_subject_get_int(shown) == 0);
+
+    w.detach();
+    process_async_timers();
+    lv_subject_set_int(get_printer_state().temperature_state().get_chamber_temp_subject(), 0);
 }

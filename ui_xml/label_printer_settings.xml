@@ -6,6 +6,12 @@
   <subjects>
     <!-- DO NOT declare printer_type_subject here — it's managed by C++ (LabelPrinterSettingsManager) -->
   </subjects>
+  <styles>
+    <style name="size_preset_side_by_side" layout="flex" flex_flow="row"/>
+    <style name="size_preset_stacked" layout="flex" flex_flow="column"/>
+    <!-- min_width wins over the rows' 50% width, which a bound style could not replace -->
+    <style name="fill_row" min_width="100%"/>
+  </styles>
   <view name="label_printer_settings" extends="overlay_panel" title="Label Printer" bg_color="#screen_bg">
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_top="0" style_pad_left="0" style_pad_right="0"
@@ -37,9 +43,10 @@
                   style_pad_top="#space_sm" style_pad_bottom="#space_sm" style_pad_gap="#space_md" style_bg_opa="0"
                   style_border_width="0" scrollable="false">
             <text_muted name="label_address" width="content" text="Address"/>
-            <text_input name="input_address" width="160" placeholder_text="192.168.1.50" one_line="true"/>
+            <text_input name="input_address"
+                        width="40%" placeholder_text="192.168.1.50" one_line="true" scrollbar_mode="off"/>
             <text_muted name="label_port" width="content" text="Port"/>
-            <text_input name="input_port" width="70" placeholder_text="9100" one_line="true"/>
+            <text_input name="input_port" width="15%" placeholder_text="9100" one_line="true" scrollbar_mode="off"/>
           </lv_obj>
         </setting_group>
       </lv_obj>
@@ -99,22 +106,30 @@
           <bind_flag_if_eq subject="ipp_selected" flag="hidden" ref_value="0"/>
         </setting_dropdown_row>
 
-        <!-- Label Size + Preset (shared, combined row) -->
-        <lv_obj width="100%"
-                height="content" flex_flow="row" style_flex_cross_place="center" style_bg_opa="0" style_border_width="0"
+        <!-- Label Size + Preset (shared): side by side, stacked where half a row cannot fit a label -->
+        <lv_obj name="row_size_preset"
+                width="100%" height="content" style_flex_cross_place="center" style_bg_opa="0" style_border_width="0"
                 style_pad_all="0" style_pad_gap="0" scrollable="false">
+          <bind_style_if name="size_preset_side_by_side" cond="ui_breakpoint ge 2 and ui_is_portrait eq 0"/>
+          <bind_style_if name="size_preset_stacked" cond="ui_breakpoint lt 2 or ui_is_portrait eq 1"/>
           <setting_dropdown_row name="row_label_size"
                                 width="50%" label="Label Size" icon="ruler" hide_description="true" dropdown_width="55%"
-                                callback="on_lp_label_size_changed"/>
+                                callback="on_lp_label_size_changed">
+            <bind_style_if name="fill_row" cond="ui_breakpoint lt 2 or ui_is_portrait eq 1"/>
+          </setting_dropdown_row>
           <setting_dropdown_row name="row_preset"
                                 width="50%" label="Preset" icon="tune" hide_description="true" dropdown_width="55%"
-                                callback="on_lp_preset_changed"/>
+                                callback="on_lp_preset_changed">
+            <bind_style_if name="fill_row" cond="ui_breakpoint lt 2 or ui_is_portrait eq 1"/>
+          </setting_dropdown_row>
         </lv_obj>
         <!-- Test Print (shared) -->
         <lv_obj name="row_test_print"
                 width="100%" height="content" flex_flow="row" style_flex_main_place="center" style_pad_all="#space_md"
                 style_bg_opa="0" style_border_width="0" scrollable="false">
-          <ui_button name="btn_test_print" width="200" text="Test Print" icon="print">
+          <ui_button name="btn_test_print"
+                     width="content" style_min_width="#button_width_action" style_pad_hor="#space_sm" text="Test Print"
+                     icon="print">
             <bind_state_if_eq subject="test_printing" state="disabled" ref_value="1"/>
             <event_cb trigger="clicked" callback="on_lp_test_print"/>
           </ui_button>

@@ -6,7 +6,6 @@
 #include "afc_defaults.h"
 #include "helix_thread.h"
 #if HELIX_HAS_SNAPMAKER
-#include "ams_backend_multiace.h"
 #include "ams_backend_snapmaker.h"
 #endif
 #if HELIX_HAS_IFS
@@ -16,7 +15,6 @@
 #include "ams_backend_happy_hare.h"
 #include "ams_backend_toolchanger.h"
 #include "ams_bypass_policy.h"
-#include "ams_state.h"
 #include "display_numbering.h"
 #include "filament_database.h"
 #include "hh_defaults.h"
@@ -48,7 +46,7 @@ struct MockFilament {
 // Predefined sample filaments matching Spoolman mock spools 1-8 (moonraker_api_mock.cpp)
 // IMPORTANT: Keep in sync with MockSpoolmanServer::init_mock_spools()
 // (guarded by tests/unit/test_mock_spool_consistency.cpp)
-constexpr MockFilament SAMPLE_FILAMENTS[] = {
+constexpr MockFilament kSampleFilaments[] = {
     {0x1A1A2E, "Jet Black", "PLA", "Polymaker", 850.0f, 1000.0f},        // Spool #1
     {0x26DCD9, "Silk Blue", "Silk PLA", "eSUN", 750.0f, 1000.0f},        // Spool #2
     {0x00AEFF, "Pop Blue", "ASA", "Elegoo", 500.0f, 1000.0f},            // Spool #3
@@ -58,29 +56,29 @@ constexpr MockFilament SAMPLE_FILAMENTS[] = {
     {0x8A949E, "Gray ASA", "ASA", "Bambu Lab", 1000.0f, 1000.0f},        // Spool #7
     {0xA2AAAD, "PolyMax PC Grey", "PC", "Polymaker", 500.0f, 750.0f},    // Spool #8
 };
-constexpr int NUM_SAMPLE_FILAMENTS = sizeof(SAMPLE_FILAMENTS) / sizeof(SAMPLE_FILAMENTS[0]);
+constexpr int kNumSampleFilaments = sizeof(kSampleFilaments) / sizeof(kSampleFilaments[0]);
 
 // Timing constants for realistic mode (milliseconds at 1x speed)
 // These values simulate real AMS/MMU timing behavior
-constexpr int HEATING_BASE_MS = 3000;            // 3 seconds to heat nozzle
-constexpr int CUTTING_BASE_MS = 2000;            // 2 seconds for filament cut
-constexpr int PURGING_BASE_MS = 3000;            // 3 seconds for purge after load
-constexpr int CHECKING_BASE_MS = 1500;           // 1.5 seconds for recovery check
-constexpr int SELECTING_BASE_MS = 1000;          // 1 second for slot/tool selection
-constexpr int SEGMENT_ANIMATION_BASE_MS = 15000; // 15 seconds for full segment animation
+constexpr int kHeatingBaseMs = 3000;           // 3 seconds to heat nozzle
+constexpr int kCuttingBaseMs = 2000;           // 2 seconds for filament cut
+constexpr int kPurgingBaseMs = 3000;           // 3 seconds for purge after load
+constexpr int kCheckingBaseMs = 1500;          // 1.5 seconds for recovery check
+constexpr int kSelectingBaseMs = 1000;         // 1 second for slot/tool selection
+constexpr int kSegmentAnimationBaseMs = 15000; // 15 seconds for full segment animation
 
 // Variance factors (±percentage) for natural timing variation
-constexpr float HEATING_VARIANCE = 0.3f;    // ±30%
-constexpr float TIP_VARIANCE = 0.2f;        // ±20%
-constexpr float LOADING_VARIANCE = 0.2f;    // ±20%
-constexpr float PURGING_VARIANCE = 0.2f;    // ±20%
-constexpr float CHECKING_VARIANCE = 0.2f;   // ±20% (for recovery)
-constexpr float SELECTING_VARIANCE = 0.15f; // ±15%
+constexpr float kHeatingVariance = 0.3f;    // ±30%
+constexpr float kTipVariance = 0.2f;        // ±20%
+constexpr float kLoadingVariance = 0.2f;    // ±20%
+constexpr float kPurgingVariance = 0.2f;    // ±20%
+constexpr float kCheckingVariance = 0.2f;   // ±20% (for recovery)
+constexpr float kSelectingVariance = 0.15f; // ±15%
 } // namespace
 
 AmsBackendMock::AmsBackendMock(int slot_count) {
-    // Clamp slot count to reasonable range
-    slot_count = std::clamp(slot_count, 1, 16);
+    // Up to one backend's block of lane ids, so a mock can exceed kAmsMaxSlots.
+    slot_count = std::clamp(slot_count, 1, helix::ams::kLanesPerBackend);
 
     // Initialize system info (non-slot metadata)
     system_info_.type = AmsType::HAPPY_HARE; // Mock as Happy Hare
@@ -119,7 +117,7 @@ AmsBackendMock::AmsBackendMock(int slot_count) {
         entry->info.mapped_tool = i; // Direct 1:1 mapping
 
         // Assign sample filament data (cycle through samples)
-        const auto& sample = SAMPLE_FILAMENTS[i % NUM_SAMPLE_FILAMENTS];
+        const auto& sample = kSampleFilaments[i % kNumSampleFilaments];
         entry->info.color_rgb = sample.color;
         entry->info.color_name = sample.color_name;
         entry->info.material = sample.material;
@@ -127,7 +125,7 @@ AmsBackendMock::AmsBackendMock(int slot_count) {
         // gate map "has no concept of brand / spool_name / total weight / colour
         // name" (ams_backend_happy_hare.cpp), so a real lane's brand comes only
         // from the user's override store or the Spoolman identity cache -- never
-        // from firmware. The vendor in SAMPLE_FILAMENTS is what Spoolman
+        // from firmware. The vendor in kSampleFilaments is what Spoolman
         // supplies for these lanes, which is why the ids below line up with
         // init_mock_spools().
 
@@ -184,10 +182,12 @@ AmsBackendMock::AmsBackendMock(int slot_count) {
 
     // Mock sync feedback (proportional sensor, slight compression)
     system_info_.sync_feedback_state = "compressed";
+    system_info_.system_buffer_motion = BufferMotion::Advancing;
     system_info_.sync_feedback_bias = 0.15f;
     system_info_.sync_feedback_bias_raw = 0.18f;
     system_info_.sync_feedback_flow_rate = 98.5f;
     system_info_.espooler_state = "assist";
+    system_info_.spool_motor = SpoolMotorAction::Assisting;
     system_info_.sync_drive = true;
 
     // Mock encoder clog detection (auto mode, 85% flow, realistic headroom values)
@@ -377,12 +377,57 @@ AmsError AmsBackendMock::start() {
                     }
                 }
             }
-            emit_event(EVENT_SLOT_CHANGED);
+            emit_event(kEventSlotChanged);
             spdlog::info("[AMS Mock] Applied initial state scenario: grade (all lanes -> PLA-CF)");
+        } else if (scenario == "finishes") {
+            // One lane per swatch finish, and two multi-colour lanes, so every
+            // surface that paints a spool shows each one. The finish comes from
+            // the material or product name, the colour name is only a colour,
+            // and the lanes are unlinked so no Spoolman record renames them.
+            struct FinishLane {
+                const char* material;
+                const char* product;
+                const char* color_name;
+                uint32_t rgb;
+                const char* multi;
+            };
+            static constexpr FinishLane kLanes[] = {
+                {"Silk PLA", "Silk PLA", "Gold", 0xD4AF37, ""},
+                {"Silk PLA", "Silk Tri-Colour", "Gold Silver Copper", 0xD4AF37,
+                 "#D4AF37,#C0C0C0,#B87333"},
+                {"PLA", "PLA Marble", "White", 0xE8E4DC, ""},
+                {"PETG", "Galaxy PETG", "Black", 0x1C1C2A, ""},
+                {"PLA Matte", "PLA Matte", "Charcoal", 0x3A3A3A, ""},
+                {"PLA", "PLA Dual-Colour", "Red Blue", 0xE53935, "#E53935,#1E88E5"},
+            };
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (int i = 0; i < slots_.slot_count(); ++i) {
+                    auto* entry = slots_.get_mut(i);
+                    if (!entry) {
+                        continue;
+                    }
+                    const FinishLane& lane = kLanes[static_cast<size_t>(i) % std::size(kLanes)];
+                    entry->info.material = lane.material;
+                    entry->info.product_name = lane.product;
+                    entry->info.color_name = lane.color_name;
+                    entry->info.color_rgb = lane.rgb;
+                    entry->info.multi_color_hexes = lane.multi;
+                    entry->info.spoolman_id = 0;
+                    entry->info.spool_name.clear();
+                }
+            }
+            emit_event(kEventSlotChanged);
+            spdlog::info("[AMS Mock] Applied initial state scenario: finishes");
+        } else if (scenario == "feeder") {
+            // Lane 3's filament waits at its feeder, short of its toolhead.
+            set_slot_at_feeder(2);
+            emit_event(kEventSlotChanged);
+            spdlog::info("[AMS Mock] Applied initial state scenario: feeder (slot 2)");
         } else if (scenario == "blocked") {
             // A jammed lane with no error object, as the QIDI Box reports one.
             force_slot_status(1, SlotStatus::BLOCKED);
-            emit_event(EVENT_SLOT_CHANGED);
+            emit_event(kEventSlotChanged);
             spdlog::info("[AMS Mock] Applied initial state scenario: blocked (slot 1)");
         } else if (scenario == "disconnected") {
             // The last unit is on the bus map but reports itself offline.
@@ -503,6 +548,7 @@ AmsSystemInfo AmsBackendMock::get_system_info() const {
     // simulated type publishes its units' pressure sensors, as AFC and OpenAMS do.
     if (info.type != AmsType::HAPPY_HARE) {
         info.sync_feedback_bias = info.pressure_sensor_bias();
+        info.system_buffer_motion.reset();
     }
 
     // Populate environment sensor data based on configured mode
@@ -612,23 +658,14 @@ bool AmsBackendMock::is_filament_loaded() const {
 
 bool AmsBackendMock::can_unload_from_toolhead(int slot_index) const {
     bool tool_changer = false;
-    bool head_indexed = false;
     int carriage = -1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         tool_changer = tool_changer_mode_;
-        head_indexed = snapmaker_mode_ || multiace_mode_;
         carriage = system_info_.current_slot;
         if (tool_changer && (slot_index < 0 || slot_index >= system_info_.total_slots)) {
             return false;
         }
-    }
-
-    // Snapmaker/multiACE: only the four heads exist at a toolhead. An ACE bay
-    // stages filament for a head; it is never AT one. Neither mode sets
-    // tool_changer_mode_, so this arm is reached on its own. See the header.
-    if (head_indexed && slot_index >= 4) {
-        return false;
     }
 
     // Lane-based modes keep the inherited status rule; only a changer narrows to
@@ -672,6 +709,9 @@ PathSegment AmsBackendMock::get_slot_filament_segment(int slot_index) const {
     if (!entry) {
         return PathSegment::NONE;
     }
+    if (slot_index == slot_at_feeder_) {
+        return PathSegment::PREP;
+    }
 
     if (entry->info.status != SlotStatus::AVAILABLE &&
         entry->info.status != SlotStatus::FROM_BUFFER) {
@@ -698,6 +738,12 @@ PathSegment AmsBackendMock::infer_error_segment() const {
 }
 
 AmsError AmsBackendMock::load_filament(int slot_index) {
+    if (const HeadFilamentOps ops = head_filament_ops(std::max(slot_index, 0));
+        ops.load != FilamentOpSupport::Automatic) {
+        // The backend this persona stands in for refuses the same way.
+        return AmsError(AmsResult::NOT_SUPPORTED, "No filament feed for this tool", ops.load_reason,
+                        "");
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -739,12 +785,17 @@ AmsError AmsBackendMock::load_filament(int slot_index) {
     }
 
     emit_event(EVENT_STATE_CHANGED);
-    schedule_completion(AmsAction::LOADING, EVENT_LOAD_COMPLETE, slot_index);
+    schedule_completion(AmsAction::LOADING, kEventLoadComplete, slot_index);
 
     return AmsErrorHelper::success();
 }
 
 AmsError AmsBackendMock::unload_filament(int slot_index) {
+    if (const HeadFilamentOps ops = head_filament_ops(std::max(slot_index, 0));
+        ops.unload != FilamentOpSupport::Automatic) {
+        return AmsError(AmsResult::NOT_SUPPORTED, "No filament unload on this tool changer",
+                        ops.unload_reason, "");
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -762,6 +813,7 @@ AmsError AmsBackendMock::unload_filament(int slot_index) {
 
         // Start unloading
         last_unload_slot_ = slot_index;
+        park_pending_ = false;
         system_info_.action = AmsAction::UNLOADING;
         system_info_.operation_detail = lv_tr("Unloading filament");
         filament_segment_ = PathSegment::NOZZLE; // Start at nozzle (working backwards)
@@ -769,8 +821,42 @@ AmsError AmsBackendMock::unload_filament(int slot_index) {
     }
 
     emit_event(EVENT_STATE_CHANGED);
-    schedule_completion(AmsAction::UNLOADING, EVENT_UNLOAD_COMPLETE);
+    schedule_completion(AmsAction::UNLOADING, kEventUnloadComplete);
 
+    return AmsErrorHelper::success();
+}
+
+bool AmsBackendMock::supports_tool_park() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return system_info_.type == AmsType::TOOL_CHANGER || system_info_.type == AmsType::SNAPMAKER;
+}
+
+AmsError AmsBackendMock::park_active_tool() {
+    if (!supports_tool_park()) {
+        return AmsBackend::park_active_tool();
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!running_) {
+            return AmsErrorHelper::not_connected("Mock backend not started");
+        }
+        if (system_info_.action != AmsAction::IDLE) {
+            return AmsErrorHelper::busy(ams_action_to_string(system_info_.action));
+        }
+        if (system_info_.current_tool < 0) {
+            return AmsErrorHelper::not_loaded();
+        }
+
+        park_pending_ = true;
+        system_info_.action = AmsAction::UNLOADING;
+        system_info_.operation_detail = lv_tr("Parking toolhead");
+        filament_segment_ = PathSegment::NOZZLE;
+        spdlog::info("[AmsBackendMock] Parking T{}", system_info_.current_tool);
+    }
+
+    emit_event(EVENT_STATE_CHANGED);
+    schedule_completion(AmsAction::UNLOADING, kEventUnloadComplete);
     return AmsErrorHelper::success();
 }
 
@@ -796,9 +882,6 @@ BackendTraits AmsBackendMock::traits() const {
     case AmsType::SNAPMAKER:
         t = AmsBackendSnapmaker::kTraits;
         break;
-    case AmsType::MULTIACE:
-        t = AmsBackendMultiAce::kTraits;
-        break;
 #endif
     default:
         break;
@@ -813,8 +896,8 @@ BackendTraits AmsBackendMock::traits() const {
     // environment UI is drivable in --test whatever the emulated firmware has.
     // An empty mode resolves to "dryer" or "passive", both of which have sensors.
     const std::string& mode = environment_mode_;
-    t.has_environment_sensors =
-        mode.empty() || mode == "passive" || mode == "dryer" || mode == "slot";
+    t.has_environment_sensors = mode.empty() || mode == "passive" || mode == "dryer" ||
+                                mode == "slot" || mode == "emu_dryer";
     return t;
 }
 
@@ -871,9 +954,9 @@ AmsError AmsBackendMock::run_filament_batch(const std::vector<int>& slots, bool 
 
     emit_event(EVENT_STATE_CHANGED);
     if (load) {
-        schedule_completion(AmsAction::LOADING, EVENT_LOAD_COMPLETE, slots.front());
+        schedule_completion(AmsAction::LOADING, kEventLoadComplete, slots.front());
     } else {
-        schedule_completion(AmsAction::UNLOADING, EVENT_UNLOAD_COMPLETE);
+        schedule_completion(AmsAction::UNLOADING, kEventUnloadComplete);
     }
 
     return AmsErrorHelper::success();
@@ -928,11 +1011,12 @@ AmsError AmsBackendMock::change_tool(int tool_number) {
         system_info_.operation_detail = fmt::format(lv_tr("Tool change to T{}"), tool_number);
         target_slot = mapped_slot; // Capture while locked
         system_info_.pending_target_slot = target_slot;
+        park_pending_ = false;
         spdlog::info("[AmsBackendMock] Tool change to T{}", tool_number);
     }
 
     emit_event(EVENT_STATE_CHANGED);
-    schedule_completion(AmsAction::LOADING, EVENT_TOOL_CHANGED, target_slot);
+    schedule_completion(AmsAction::LOADING, kEventToolChanged, target_slot);
 
     return AmsErrorHelper::success();
 }
@@ -1202,7 +1286,7 @@ void AmsBackendMock::clear_slot_override(int slot_index) {
     // still outlive it is the lane's user rung, so the clear resets the lane
     // to machine readings and lets the resync announce the slot.
     helix::ams::reset_lane_to_machine_readings(lane_id(slot_index));
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 }
 
 AmsError AmsBackendMock::sync_external_identity(int slot_index, const SlotInfo& info) {
@@ -1258,7 +1342,7 @@ AmsError AmsBackendMock::write_slot(int slot_index, const SlotInfo& info) {
     }
 
     // Emit event OUTSIDE the lock to avoid deadlock
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
     return AmsErrorHelper::success();
 }
 
@@ -1272,8 +1356,8 @@ AmsError AmsBackendMock::can_set_tool_mapping_locked(int tool_number, int slot_i
     // slicer files often reference T0..T7 even when only 4 lanes exist. The
     // sentinel for "too large" is arbitrary; 64 is generous and matches the
     // production slot_registry behavior of growing on demand.
-    constexpr int MAX_TOOL_INDEX = 64;
-    if (tool_number < 0 || tool_number >= MAX_TOOL_INDEX) {
+    constexpr int kMaxToolIndex = 64;
+    if (tool_number < 0 || tool_number >= kMaxToolIndex) {
         return AmsErrorHelper::tool_out_of_range(tool_number);
     }
     if (!slots_.is_valid_index(slot_index)) {
@@ -1404,7 +1488,7 @@ void AmsBackendMock::simulate_error(AmsResult error) {
         }
     }
 
-    emit_event(EVENT_ERROR, ams_result_to_string(error));
+    emit_event(kEventError, ams_result_to_string(error));
     emit_event(EVENT_STATE_CHANGED);
 }
 
@@ -1556,6 +1640,7 @@ void AmsBackendMock::inject_mock_errors() {
             health.fault_detection_enabled = true;
             health.error_sensitivity = 7.0f;
             health.state = "Trailing";
+            health.motion = BufferMotion::Trailing;
             health.distance_to_fault = 12.5f;
             system_info_.units[u].buffer_health = health;
         }
@@ -1605,6 +1690,27 @@ void AmsBackendMock::set_environment_mode(const std::string& mode) {
 
     if (mode == "emu") {
         unit_dryers_.assign(unit_count, DryerInfo{}); // nothing to drive, only to watch
+    } else if (mode == "emu_dryer") {
+        // A heater per lane, an eSpooler per spool, and a cycle part-way through on the
+        // first unit: lane 1 heating, lane 2 waiting its turn, lane 3 finished.
+        DryerInfo d = heated();
+        d.supports_gate_selection = true;
+        d.supports_rotation = true;
+        unit_dryers_.assign(unit_count, d);
+        int gate_count = 0;
+        for (const auto& u : system_info_.units) {
+            gate_count += u.slot_count;
+        }
+        gate_drying_.assign(static_cast<size_t>(std::max(gate_count, 0)),
+                            helix::printer::ZoneDryingState::Idle);
+        begin_gate_cycle_locked({0, 1, 2});
+        if (gate_drying_.size() > 2) {
+            gate_drying_[2] = helix::printer::ZoneDryingState::Complete;
+        }
+        pending_drying_unit_ = 0;
+        pending_drying_temp_c_ = 55.0f;
+        pending_drying_duration_min_ = 240;
+        pending_drying_elapsed_min_ = 40;
     } else if (mode == "mixed") {
         unit_dryers_.assign(unit_count, DryerInfo{});
         unit_dryers_[0] = heated();
@@ -1654,12 +1760,33 @@ void AmsBackendMock::populate_environment_data(AmsSystemInfo& info) const {
     const bool no_humidity = std::getenv("HELIX_MOCK_NO_HUMIDITY") != nullptr;
     auto mode = resolve_environment_mode();
     if (mode != "passive" && mode != "dryer" && mode != "slot" && mode != "emu" &&
-        mode != "mixed" && mode != "capped") {
+        mode != "emu_dryer" && mode != "mixed" && mode != "capped") {
         return;
     }
 
+    // A cycle that has ended leaves its waiting and heating gates finished.
+    if (mode == "emu_dryer") {
+        for (auto& unit : info.units) {
+            const bool running = static_cast<size_t>(unit.unit_index) < unit_dryers_.size() &&
+                                 unit_dryers_[static_cast<size_t>(unit.unit_index)].active;
+            for (auto& slot : unit.slots) {
+                const auto gate =
+                    static_cast<size_t>(unit.first_slot_global_index + slot.slot_index);
+                if (gate >= gate_drying_.size()) {
+                    continue;
+                }
+                auto state = gate_drying_[gate];
+                if (!running && (state == helix::printer::ZoneDryingState::Active ||
+                                 state == helix::printer::ZoneDryingState::Queued)) {
+                    state = helix::printer::ZoneDryingState::Complete;
+                }
+                slot.drying_state = state;
+            }
+        }
+    }
+
     // EMU: a sealed box per lane, so every slot carries its own reading.
-    if (mode == "emu") {
+    if (mode == "emu" || mode == "emu_dryer") {
         constexpr float lane_humidity[] = {31.0f, 38.0f, 45.0f, 52.0f, 58.0f, 63.0f};
         int lane = 0;
         for (auto& unit : info.units) {
@@ -1787,12 +1914,37 @@ void AmsBackendMock::set_dryer_speed(int speed_x) {
     spdlog::info("[AmsBackendMock] Dryer speed set to {}x", dryer_speed_x_);
 }
 
+void AmsBackendMock::set_dryer_humidity_target(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    dryer_humidity_target_ = enabled;
+    spdlog::info("[AmsBackendMock] Dryer humidity target {}", enabled ? "enabled" : "disabled");
+}
+
+void AmsBackendMock::set_dryer_default_humidity(std::optional<float> pct) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    dryer_default_humidity_ = pct;
+    spdlog::info("[AmsBackendMock] Dryer default humidity target {}",
+                 pct ? fmt::format("{:.0f}%", *pct) : std::string("unset"));
+}
+
 DryerInfo AmsBackendMock::get_dryer_info(int unit) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (unit >= 0 && static_cast<size_t>(unit) < unit_dryers_.size()) {
-        return unit_dryers_[static_cast<size_t>(unit)];
+    DryerInfo out = (unit >= 0 && static_cast<size_t>(unit) < unit_dryers_.size())
+                        ? unit_dryers_[static_cast<size_t>(unit)]
+                        : dryer_state_;
+    out.supports_humidity_target = out.supported && dryer_humidity_target_;
+    out.default_humidity_target =
+        out.supports_humidity_target ? dryer_default_humidity_ : std::nullopt;
+    return out;
+}
+
+AmsError AmsBackendMock::start_drying_to_humidity(float temp_c, int duration_min,
+                                                  float humidity_pct, int fan_pct, int unit) {
+    if (!get_dryer_info(unit).humidity_target(humidity_pct)) {
+        return AmsError{AmsResult::NOT_SUPPORTED, "Dryer humidity target not available"};
     }
-    return dryer_state_;
+    spdlog::info("[AmsBackendMock] start_drying_to_humidity: target {}%", humidity_pct);
+    return start_drying(temp_c, duration_min, fan_pct, unit);
 }
 
 std::vector<helix::printer::EnvironmentZone> AmsBackendMock::get_environment_zones(int unit) const {
@@ -1955,6 +2107,86 @@ AmsError AmsBackendMock::start_drying(float temp_c, int duration_min, int fan_pc
     return AmsError{AmsResult::SUCCESS};
 }
 
+void AmsBackendMock::begin_gate_cycle_locked(const std::vector<int>& gates) {
+    std::fill(gate_drying_.begin(), gate_drying_.end(), helix::printer::ZoneDryingState::Idle);
+    bool first = true;
+    for (int gate : gates) {
+        if (gate < 0 || static_cast<size_t>(gate) >= gate_drying_.size()) {
+            continue;
+        }
+        gate_drying_[static_cast<size_t>(gate)] = first ? helix::printer::ZoneDryingState::Active
+                                                        : helix::printer::ZoneDryingState::Queued;
+        first = false;
+    }
+}
+
+AmsError AmsBackendMock::start_drying_request(const DryingRequest& request) {
+    bool per_gate = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        per_gate = resolve_environment_mode() == "emu_dryer";
+        if (per_gate) {
+            std::vector<int> gates = request.gates;
+            if (gates.empty()) {
+                for (const auto& u : system_info_.units) {
+                    if (u.unit_index == request.unit) {
+                        for (int i = 0; i < u.slot_count; ++i) {
+                            gates.push_back(u.first_slot_global_index + i);
+                        }
+                    }
+                }
+            }
+            spdlog::info("[AmsBackendMock] Drying {} gate(s) on unit {}{}", gates.size(),
+                         request.unit, request.rotate ? ", rotating spools" : "");
+            begin_gate_cycle_locked(gates);
+        }
+    }
+    if (!per_gate) {
+        return AmsBackend::start_drying_request(request);
+    }
+    return start_drying(request.temp_c, request.duration_min, request.fan_pct, request.unit);
+}
+
+AmsError AmsBackendMock::stop_drying_gates(int unit, const std::vector<int>& gates) {
+    using helix::printer::ZoneDryingState;
+    auto live = [](ZoneDryingState st) {
+        return st == ZoneDryingState::Active || st == ZoneDryingState::Queued;
+    };
+    bool per_gate = false;
+    bool any_left = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        per_gate = resolve_environment_mode() == "emu_dryer";
+        if (per_gate) {
+            for (size_t g = 0; g < gate_drying_.size(); ++g) {
+                const bool named = gates.empty() || std::find(gates.begin(), gates.end(),
+                                                              static_cast<int>(g)) != gates.end();
+                if (named && live(gate_drying_[g])) {
+                    gate_drying_[g] = ZoneDryingState::Cancelled;
+                }
+            }
+            any_left = std::any_of(gate_drying_.begin(), gate_drying_.end(), live);
+            // The next waiting gate takes the heater.
+            if (std::none_of(gate_drying_.begin(), gate_drying_.end(),
+                             [](ZoneDryingState st) { return st == ZoneDryingState::Active; })) {
+                const auto next =
+                    std::find(gate_drying_.begin(), gate_drying_.end(), ZoneDryingState::Queued);
+                if (next != gate_drying_.end()) {
+                    *next = ZoneDryingState::Active;
+                }
+            }
+        }
+    }
+    if (!per_gate) {
+        return AmsBackend::stop_drying_gates(unit, gates);
+    }
+    if (any_left) {
+        emit_event(EVENT_STATE_CHANGED);
+        return AmsError{AmsResult::SUCCESS};
+    }
+    return stop_drying(unit);
+}
+
 AmsError AmsBackendMock::stop_drying(int unit) {
     spdlog::info("[AmsBackendMock] stop_drying: unit {}", unit);
 
@@ -2017,6 +2249,8 @@ void AmsBackendMock::set_tool_changer_mode(bool enabled) {
 
         // Rename unit to reflect tool changer nature
         if (!system_info_.units.empty()) {
+            // klipper-toolchanger publishes no per-tool filament sensor.
+            system_info_.units[0].has_toolhead_sensor = false;
             system_info_.units[0].name = "Mock Tool Changer";
         }
 
@@ -2201,12 +2435,15 @@ void AmsBackendMock::set_afc_mode(bool enabled) {
         }
         if (buf_env == "advancing") {
             buf_health.state = "Advancing";
+            buf_health.motion = BufferMotion::Advancing;
             buf_health.distance_to_fault = -100.0f; // fault timer stopped, stale — safe
         } else if (buf_env == "trailing") {
             buf_health.state = "Trailing";
+            buf_health.motion = BufferMotion::Trailing;
             buf_health.distance_to_fault = 25.0f; // within 40mm threshold — 37.5% danger
         } else if (buf_env == "fault") {
             buf_health.state = "Trailing";
+            buf_health.motion = BufferMotion::Trailing;
             buf_health.distance_to_fault = 5.0f; // within 40mm threshold — 87.5% danger
         } else {
             buf_health.state = "Neutral";
@@ -2229,6 +2466,7 @@ void AmsBackendMock::set_afc_mode(bool enabled) {
         // AFC device sections and actions — use all defaults
         mock_device_sections_ = helix::printer::afc_default_sections();
         mock_device_actions_ = helix::printer::afc_default_actions();
+        helix::printer::afc_add_toolhead_calibration_action(mock_device_actions_);
 
         // Disable save_restart in mock mode (no real Klipper to restart)
         for (auto& action : mock_device_actions_) {
@@ -2291,8 +2529,8 @@ void AmsBackendMock::set_multi_unit_mode(bool enabled) {
         // Reinitialize registry with 2 units
         slots_.clear();
         slots_.initialize_units({
-            {"Box Turtle 1", {"0", "1", "2", "3"}},
-            {"Night Owl", {"0", "1"}},
+            {"Box_Turtle Turtle_1", {"0", "1", "2", "3"}},
+            {"Night_Owl Night_Owl_1", {"0", "1"}},
         });
 
         // Unit 0 is a heated enclosure, unit 1 a passive box: the shape that puts
@@ -2381,7 +2619,8 @@ void AmsBackendMock::set_multi_unit_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 0;
-            u.name = "Box Turtle 1";
+            u.name = "Box_Turtle Turtle_1";
+            u.display_name = "Turtle_1";
             u.slot_count = 4;
             u.first_slot_global_index = 0;
             u.connected = true;
@@ -2397,7 +2636,8 @@ void AmsBackendMock::set_multi_unit_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 1;
-            u.name = "Night Owl";
+            u.name = "Night_Owl Night_Owl_1";
+            u.display_name = "Night_Owl_1";
             u.slot_count = 2;
             u.first_slot_global_index = 4;
             u.connected = true;
@@ -2478,9 +2718,9 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
         // Reinitialize registry with 3 units (4+4+4=12 slots)
         slots_.clear();
         slots_.initialize_units({
-            {"Turtle_1", {"0", "1", "2", "3"}},
-            {"AMS_1", {"0", "1", "2", "3"}},
-            {"AMS_2", {"0", "1", "2", "3"}},
+            {"Box_Turtle Turtle_1", {"0", "1", "2", "3"}},
+            {"OpenAMS AMS_1", {"0", "1", "2", "3"}},
+            {"OpenAMS AMS_2", {"0", "1", "2", "3"}},
         });
 
         // Helper to populate a slot
@@ -2533,7 +2773,8 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 0;
-            u.name = "Turtle_1";
+            u.name = "Box_Turtle Turtle_1";
+            u.display_name = "Turtle_1";
             u.slot_count = 4;
             u.first_slot_global_index = 0;
             u.connected = true;
@@ -2547,6 +2788,7 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
             health.fault_detection_enabled = true;
             health.error_sensitivity = 7.0f;
             health.state = "Trailing";
+            health.motion = BufferMotion::Trailing;
             health.distance_to_fault = 25.0f;
             u.buffer_health = health;
             system_info_.units.push_back(u);
@@ -2554,7 +2796,8 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 1;
-            u.name = "AMS_1";
+            u.name = "OpenAMS AMS_1";
+            u.display_name = "AMS_1";
             u.slot_count = 4;
             u.first_slot_global_index = 4;
             u.connected = true;
@@ -2571,7 +2814,8 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 2;
-            u.name = "AMS_2";
+            u.name = "OpenAMS AMS_2";
+            u.display_name = "AMS_2";
             u.slot_count = 4;
             u.first_slot_global_index = 8;
             u.connected = true;
@@ -2595,6 +2839,7 @@ void AmsBackendMock::set_mixed_topology_mode(bool enabled) {
         // AFC device sections and actions
         mock_device_sections_ = helix::printer::afc_default_sections();
         mock_device_actions_ = helix::printer::afc_default_actions();
+        helix::printer::afc_add_toolhead_calibration_action(mock_device_actions_);
         for (auto& action : mock_device_actions_) {
             if (action.id == "save_restart") {
                 action.enabled = false;
@@ -2668,12 +2913,12 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         unit_topologies_.push_back(PathTopology::HUB);
 
         // Reinitialize registry with 3 units (4+4+4=12 slots)
-        // Turtle_1 lanes 1-4, Turtle_2 lanes 5-8, vivid_1 lanes 13-16
+        // Turtle_1 lanes 1-4, Turtle_2 lanes 5-8, Vivid_1 lanes 13-16
         slots_.clear();
         slots_.initialize_units({
-            {"Turtle_1", {"lane1", "lane2", "lane3", "lane4"}},
-            {"Turtle_2", {"lane5", "lane6", "lane7", "lane8"}},
-            {"vivid_1", {"lane13", "lane14", "lane15", "lane16"}},
+            {"Box_Turtle Turtle_1", {"lane1", "lane2", "lane3", "lane4"}},
+            {"Box_Turtle Turtle_2", {"lane5", "lane6", "lane7", "lane8"}},
+            {"ViViD Vivid_1", {"lane13", "lane14", "lane15", "lane16"}},
         });
 
         // Helper to populate a slot
@@ -2713,7 +2958,7 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         populate_slot(6, 2, "PETG", 0x8E24AA, "Purple", SlotStatus::AVAILABLE, 412, 500.0f);
         populate_slot(7, 3, "ASA", 0xFF6F00, "Orange", SlotStatus::AVAILABLE, 413, 650.0f);
 
-        // Unit 2: vivid_1 (ViViD) — lanes 13-16, HUB (own hub)
+        // Unit 2: Vivid_1 (ViViD) — lanes 13-16, HUB (own hub)
         populate_slot(8, 0, "PLA", 0xE53935, "Red", SlotStatus::AVAILABLE, 420, 1000.0f);
         populate_slot(9, 1, "PLA-CF", 0x424242, "Carbon", SlotStatus::AVAILABLE, 421, 900.0f);
         populate_slot(10, 2, "PETG", 0x90CAF9, "Sky Blue", SlotStatus::AVAILABLE, 422, 800.0f);
@@ -2727,7 +2972,8 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 0;
-            u.name = "Turtle_1";
+            u.name = "Box_Turtle Turtle_1";
+            u.display_name = "Turtle_1";
             u.slot_count = 4;
             u.first_slot_global_index = 0;
             u.connected = true;
@@ -2744,7 +2990,8 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 1;
-            u.name = "Turtle_2";
+            u.name = "Box_Turtle Turtle_2";
+            u.display_name = "Turtle_2";
             u.slot_count = 4;
             u.first_slot_global_index = 4;
             u.connected = true;
@@ -2761,7 +3008,8 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         {
             AmsUnit u;
             u.unit_index = 2;
-            u.name = "vivid_1";
+            u.name = "ViViD Vivid_1";
+            u.display_name = "Vivid_1";
             u.slot_count = 4;
             u.first_slot_global_index = 8;
             u.connected = true;
@@ -2785,6 +3033,7 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
         // AFC device sections and actions
         mock_device_sections_ = helix::printer::afc_default_sections();
         mock_device_actions_ = helix::printer::afc_default_actions();
+        helix::printer::afc_add_toolhead_calibration_action(mock_device_actions_);
         for (auto& action : mock_device_actions_) {
             if (action.id == "save_restart") {
                 action.enabled = false;
@@ -2792,7 +3041,7 @@ void AmsBackendMock::set_vivid_mixed_mode(bool enabled) {
             }
         }
 
-        spdlog::info("[AmsBackendMock] ViViD mixed mode: Turtle_1 (4) + Turtle_2 (4) + vivid_1 "
+        spdlog::info("[AmsBackendMock] ViViD mixed mode: Turtle_1 (4) + Turtle_2 (4) + Vivid_1 "
                      "(4) = 12 slots");
     } else {
         vivid_mixed_mode_ = false;
@@ -2985,247 +3234,6 @@ void AmsBackendMock::set_snapmaker_mode(bool enabled) {
     system_info_.filament_loaded = true;
 }
 
-void AmsBackendMock::set_multiace_mode(bool enabled) {
-    std::lock_guard<std::mutex> lock(mutex_);
-#if !HELIX_HAS_SNAPMAKER
-    // Backend compiled out: the persona takes its traits and its swap step
-    // model from the real backend, so it cannot run here.
-    if (enabled) {
-        spdlog::warn(
-            "[AMS Mock] multiACE mode refused: backend not compiled in (HELIX_HAS_SNAPMAKER=0)");
-    }
-    multiace_mode_ = false;
-    return;
-#endif
-    multiace_mode_ = enabled;
-    if (!enabled) {
-        return;
-    }
-
-    snapmaker_mode_ = false;
-    tool_changer_mode_ = false;
-    afc_mode_ = false;
-    multi_unit_mode_ = false;
-    mixed_topology_mode_ = false;
-    vivid_mixed_mode_ = false;
-    ifs_mode_ = false;
-    htlf_toolchanger_mode_ = false;
-    torture_mode_ = false;
-
-    system_info_.type = AmsType::MULTIACE;
-    system_info_.type_name = "Snapmaker U1 + multiACE (Mock)";
-    system_info_.total_slots = 12;
-    system_info_.endless_spool_enabled = false;
-    system_info_.supports_bypass = false;
-    system_info_.has_hardware_bypass_sensor = false;
-    system_info_.tip_method = TipMethod::NONE;
-
-    // Unit 0 is the U1's four heads; units 1 and 2 are the ACEs, bound to head
-    // 0 and head 1 respectively. Heads 2 and 3 stay on their stock feeders, so
-    // one screen shows both kinds of position side by side.
-    slots_.clear();
-    slots_.initialize_units({
-        {"SnapSwap", {"1", "2", "3", "4"}},
-        {"ACE 1", {"1", "2", "3", "4"}},
-        {"ACE 2", {"1", "2", "3", "4"}},
-    });
-
-    struct Bay {
-        const char* material;
-        const char* brand;
-        uint32_t color;
-        const char* color_name;
-        SlotStatus status;
-        int spoolman_id;
-        float remaining;
-    };
-    // Heads: 0 and 1 hold what their ACE has seated, 2 and 3 their own spools.
-    const Bay heads[4] = {
-        {"PETG", "Kingroon", 0x83AFFF, "Silver", SlotStatus::LOADED, 15, 502.0f},
-        {"PLA", "Jayo", 0xE72F1D, "Red", SlotStatus::AVAILABLE, 23, 250.0f},
-        {"PLA", "Forshape", 0xF4C032, "Yellow", SlotStatus::AVAILABLE, 31, 800.0f},
-        {"ABS", "Snapmaker", 0x080A0D, "Black", SlotStatus::EMPTY, -1, 0.0f},
-    };
-    // ACE 1 (feeds head 0) — bay 0 is the seated one, matching heads[0].
-    const Bay ace1[4] = {
-        {"PETG", "Kingroon", 0x83AFFF, "Silver", SlotStatus::LOADED, 15, 502.0f},
-        {"PETG", "Kingroon", 0x8FA7C8, "Gray", SlotStatus::AVAILABLE, 10, 1000.0f},
-        {"PETG", "Generic", 0x632C2C, "Brick", SlotStatus::AVAILABLE, 41, 640.0f},
-        {"PETG", "Kingroon", 0xC47053, "Orange", SlotStatus::AVAILABLE, 17, 845.0f},
-    };
-    // ACE 2 (feeds head 1) — bay 2 is the seated one, matching heads[1]. A
-    // different bay on purpose: the seat must not be assumed to be bay 0.
-    const Bay ace2[4] = {
-        {"PLA", "Polymaker", 0x1E9E4A, "Green", SlotStatus::AVAILABLE, 51, 900.0f},
-        {"PLA", "eSUN", 0x19C3D6, "Cyan", SlotStatus::EMPTY, -1, 0.0f},
-        {"PLA", "Jayo", 0xE72F1D, "Red", SlotStatus::LOADED, 23, 250.0f},
-        {"TPU", "Overture", 0xFFFFFF, "White", SlotStatus::AVAILABLE, 62, 480.0f},
-    };
-
-    auto fill = [this](int gi, const Bay& b, int mapped_tool) {
-        auto* entry = slots_.get_mut(gi);
-        if (!entry) {
-            return;
-        }
-        entry->info.slot_index = gi;
-        entry->info.global_index = gi;
-        entry->info.material = b.material;
-        entry->info.brand = b.brand;
-        entry->info.color_rgb = b.color;
-        entry->info.color_name = b.color_name;
-        entry->info.status = b.status;
-        entry->info.spoolman_id = b.spoolman_id;
-        entry->info.remaining_weight_g = b.remaining;
-        entry->info.total_weight_g = b.remaining > 0.0f ? 1000.0f : -1.0f;
-        entry->info.mapped_tool = mapped_tool;
-        if (auto mat = filament::find_material(b.material)) {
-            entry->info.nozzle_temp_min = mat->nozzle_min;
-            entry->info.nozzle_temp_max = mat->nozzle_max;
-            entry->info.bed_temp = mat->bed_temp;
-        }
-    };
-
-    for (int i = 0; i < 4; ++i) {
-        fill(i, heads[i], i);
-        // Every bay of an ACE feeds the single head it is bound to — head mode.
-        fill(4 + i, ace1[i], 0);
-        fill(8 + i, ace2[i], 1);
-    }
-
-    multiace_seated_ = {{4, 10, -1, -1}}; // ACE 1 bay 0, ACE 2 bay 2
-
-    if (system_info_.units.size() >= 3) {
-        system_info_.units[0].topology = PathTopology::PARALLEL;
-        system_info_.units[0].name = "SnapSwap";
-        system_info_.units[0].display_name = "SnapSwap";
-        // A bound ACE is a combiner, not a fan: all four bays reach one head.
-        system_info_.units[1].topology = PathTopology::HUB;
-        system_info_.units[1].display_name = "ACE 2 Pro";
-        system_info_.units[2].topology = PathTopology::HUB;
-        system_info_.units[2].display_name = "ACE 2 Pro";
-    }
-    topology_ = PathTopology::PARALLEL;
-    // Populating AmsUnit::topology is NOT enough: compute_system_tool_layout()
-    // asks the BACKEND, and unit_topologies_ is what answers. Without it each
-    // ACE draws four separate nozzles all labelled with the same tool instead
-    // of the combiner it is.
-    unit_topologies_ = {PathTopology::PARALLEL, PathTopology::HUB, PathTopology::HUB};
-
-    system_info_.current_tool = 0;
-    system_info_.current_slot = 0;
-    system_info_.filament_loaded = true;
-}
-
-bool AmsBackendMock::change_tool_completes_load(int slot_index) const {
-    if (multiace_mode_) {
-        return slot_index < 4; // the U1's own heads; an ACE bay must be named
-    }
-    return AmsBackend::change_tool_completes_load(slot_index);
-}
-
-namespace {
-// Positions in the U1's step models, the indices its channel_state classifier
-// publishes as operation_phase (snapmaker_channel_state.h).
-//   LOAD:   Home, Select, Feed filament, Heat nozzle, Extrude, Purge
-//   UNLOAD: Home, Select, Heat nozzle, Retract
-constexpr int kU1LoadFeed = 2;
-constexpr int kU1LoadHeat = 3;
-constexpr int kU1LoadExtrude = 4;
-constexpr int kU1LoadPurge = 5;
-constexpr int kU1UnloadHome = 0;
-constexpr int kU1UnloadSelect = 1;
-constexpr int kU1UnloadHeat = 2;
-constexpr int kU1UnloadRetract = 3;
-
-/// The U1's per-direction step model, as AmsBackendSnapmaker answers it. Each
-/// step's coarse action is the one the mock assigns while that step is current.
-AmsBackend::OperationStepModel u1_step_model(bool unload) {
-    using Step = AmsBackend::OperationStep;
-    AmsBackend::OperationStepModel model;
-    if (unload) {
-        model.steps = {
-            Step{lv_tr("Home"), kU1UnloadHome, false, false, AmsAction::UNLOADING},
-            Step{lv_tr("Select"), kU1UnloadSelect, false, false, AmsAction::UNLOADING},
-            Step{lv_tr("Heat nozzle"), kU1UnloadHeat, false, /*live_temp=*/true,
-                 AmsAction::HEATING},
-            Step{lv_tr("Retract"), kU1UnloadRetract, false, false, AmsAction::UNLOADING},
-        };
-    } else {
-        model.steps = {
-            Step{lv_tr("Home"), 0, false, false, AmsAction::LOADING},
-            Step{lv_tr("Select"), 1, false, false, AmsAction::LOADING},
-            Step{lv_tr("Feed filament"), kU1LoadFeed, false, false, AmsAction::LOADING},
-            Step{lv_tr("Heat nozzle"), kU1LoadHeat, false, /*live_temp=*/true, AmsAction::HEATING},
-            Step{lv_tr("Extrude"), kU1LoadExtrude, false, false, AmsAction::LOADING},
-            Step{lv_tr("Purge"), kU1LoadPurge, false, false, AmsAction::PURGING},
-        };
-    }
-    return model;
-}
-} // namespace
-
-AmsBackend::OperationStepModel
-AmsBackendMock::get_operation_step_model(StepOperationType op) const {
-    bool u1_persona = false;
-    bool swap_bar = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        u1_persona = snapmaker_mode_ || multiace_mode_;
-        // A swap on an ACE-fed head is one operation with two halves and gets
-        // the swap bar. Heads 0 and 1 are the ACE-fed ones (set_multiace_mode()).
-        swap_bar = multiace_mode_ && op == StepOperationType::LOAD_SWAP && multiace_op_head_ >= 0 &&
-                   multiace_op_head_ < 2;
-    }
-    // Outside the lock: the base consults virtuals that take it.
-    if (!u1_persona) {
-        return AmsBackend::get_operation_step_model(op);
-    }
-#if HELIX_HAS_SNAPMAKER
-    if (swap_bar) {
-        // The real model, not a copy of it, so the simulated swap publishes
-        // indices into the bar that ships.
-        return AmsBackendMultiAce::swap_step_model();
-    }
-#else
-    (void)swap_bar; // Unreachable: set_multiace_mode() refuses the mode when gated out.
-#endif
-    return u1_step_model(op == StepOperationType::UNLOAD);
-}
-
-lv_subject_t* AmsBackendMock::get_operation_step_index_subject(StepOperationType op) {
-    if (!snapmaker_mode_ && !multiace_mode_) {
-        return AmsBackend::get_operation_step_index_subject(op);
-    }
-    // Same subject the real U1 drives — the mock's simulated operation writes
-    // step indices into AmsSystemInfo::operation_phase, which AmsState mirrors here.
-    return AmsState::instance().get_ams_operation_phase_subject();
-}
-
-std::optional<int> AmsBackendMock::slot_identity_owner_unit(int slot_index) const {
-    if (!multiace_mode_ || slot_index < 0 || slot_index >= 4) {
-        return std::nullopt;
-    }
-    // Heads 0 and 1 are ACE-fed; the ACE describes their spool. Wiring, not
-    // contents — it holds whether or not a bay is currently seated, which is
-    // what keeps the head from flipping back to a SnapSwap spool on unload.
-    if (slot_index == 0) {
-        return 1;
-    }
-    if (slot_index == 1) {
-        return 2;
-    }
-    return std::nullopt;
-}
-
-std::optional<int> AmsBackendMock::slot_identity_owner_slot(int slot_index) const {
-    if (!multiace_mode_ || slot_index < 0 ||
-        slot_index >= static_cast<int>(multiace_seated_.size())) {
-        return std::nullopt;
-    }
-    const int seated = multiace_seated_[static_cast<size_t>(slot_index)];
-    return seated >= 0 ? std::optional<int>(seated) : std::nullopt;
-}
-
 void AmsBackendMock::apply_remap_overrides(const std::string& csv) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!slots_.is_initialized()) {
@@ -3401,6 +3409,7 @@ void AmsBackendMock::set_htlf_toolchanger_mode(bool enabled) {
             u.lane_is_hub_routed = {false, false, true, true};
             BufferHealth health;
             health.state = "Advancing";
+            health.motion = BufferMotion::Advancing;
             health.fault_detection_enabled = false;
             u.buffer_health = health;
             system_info_.units.push_back(u);
@@ -3429,6 +3438,7 @@ void AmsBackendMock::set_htlf_toolchanger_mode(bool enabled) {
         // AFC device sections and actions
         mock_device_sections_ = helix::printer::afc_default_sections();
         mock_device_actions_ = helix::printer::afc_default_actions();
+        helix::printer::afc_add_toolhead_calibration_action(mock_device_actions_);
 
         spdlog::info("[AmsBackendMock] HTLF+Toolchanger mode: HTLF_1 (4, MIXED) + Tools (3, "
                      "PARALLEL) = 7 slots");
@@ -3534,8 +3544,8 @@ constexpr AfcMockLane kStealthLanes[] = {
 
 constexpr AfcMockUnit kStealthUnits[] = {
     {"Ace Ace2_1", "Ace2 1", PathTopology::PARALLEL, false, false, 0, 4},
-    {"AMS AMS_1", "AMS 1", PathTopology::HUB, true, false, 4, 4},
-    {"Turtle Turtle_1", "Turtle 1", PathTopology::HUB, true, true, 8, 4},
+    {"OpenAMS AMS_1", "AMS 1", PathTopology::HUB, true, false, 4, 4},
+    {"Box_Turtle Turtle_1", "Turtle 1", PathTopology::HUB, true, true, 8, 4},
     {"Bambu Bambu_1", "Bambu 1", PathTopology::HUB, true, false, 12, 4},
     {"Bambu Bambu_2", "Bambu 2", PathTopology::HUB, true, false, 16, 2},
 };
@@ -3691,6 +3701,7 @@ void AmsBackendMock::apply_afc_profile_locked(const AfcMockLane* lanes, int lane
 
     mock_device_sections_ = helix::printer::afc_default_sections();
     mock_device_actions_ = helix::printer::afc_default_actions();
+    helix::printer::afc_add_toolhead_calibration_action(mock_device_actions_);
 
     spdlog::info("[AmsBackendMock] AFC profile '{}': {} units / {} lanes", type_name, unit_count,
                  lane_count);
@@ -3706,8 +3717,13 @@ PathTopology AmsBackendMock::get_unit_topology(int unit_index) const {
 
 bool AmsBackendMock::slot_has_prep_sensor(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    // Mock always has prep sensors on all valid slots (matches AFC behavior)
-    return slots_.is_valid_index(slot_index);
+    // Every persona's lanes carry an entry sensor except a tool changer's.
+    return system_info_.type != AmsType::TOOL_CHANGER && slots_.is_valid_index(slot_index);
+}
+
+void AmsBackendMock::set_slot_at_feeder(int slot_index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    slot_at_feeder_ = slot_index;
 }
 
 bool AmsBackendMock::slot_has_load_sensor(int slot_index) const {
@@ -3755,120 +3771,12 @@ void AmsBackendMock::set_action(AmsAction action, const std::string& detail) {
     system_info_.operation_detail = detail;
 }
 
-void AmsBackendMock::set_operation_phase(int phase) {
-    if (!snapmaker_mode_ && !multiace_mode_) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    system_info_.operation_phase = phase;
-}
-
-void AmsBackendMock::publish_u1_step(const OperationStepModel& model, int step, AmsAction fallback,
-                                     const std::string& detail) {
-    set_action(model.action_at(step).value_or(fallback), detail);
-    set_operation_phase(step);
-    emit_event(EVENT_STATE_CHANGED);
-}
-
-bool AmsBackendMock::run_multiace_swap_prologue(InterruptibleSleep interruptible_sleep) {
-#if HELIX_HAS_SNAPMAKER
-    // The half a bay swap runs before the load: retract the seated bay back into
-    // its ACE. The swap bar opens with the unload half, so its first three
-    // positions are the U1 UNLOAD model's own.
-    const OperationStepModel model = AmsBackendMultiAce::swap_step_model();
-    const int step_ms = get_effective_delay_ms(HEATING_BASE_MS / 2, HEATING_VARIANCE);
-    struct Step {
-        int index;
-        AmsAction fallback;
-        const char* detail;
-    };
-    const Step prologue[] = {
-        {kU1UnloadHome, AmsAction::UNLOADING, "Homing"},
-        {kU1UnloadSelect, AmsAction::UNLOADING, "Selecting toolhead"},
-        {kU1UnloadHeat, AmsAction::HEATING, "Heating nozzle"},
-        {AmsBackendMultiAce::SWAP_STEP_RETRACT, AmsAction::UNLOADING, "Retracting filament"},
-    };
-    for (const auto& p : prologue) {
-        if (shutdown_requested_ || cancel_requested_) {
-            return false;
-        }
-        publish_u1_step(model, p.index, p.fallback, p.detail);
-        if (!interruptible_sleep(step_ms)) {
-            return false;
-        }
-    }
-    return true;
-#else
-    (void)interruptible_sleep;
-    return true; // Unreachable: set_multiace_mode() refuses the mode when gated out.
-#endif
-}
-
-void AmsBackendMock::execute_u1_load_operation(int slot_index, bool on_swap_bar,
-                                               InterruptibleSleep interruptible_sleep) {
-    OperationStepModel model = u1_step_model(/*unload=*/false);
-    int feed = kU1LoadFeed;
-    int extrude = kU1LoadExtrude;
-    int purge = kU1LoadPurge;
-#if HELIX_HAS_SNAPMAKER
-    if (on_swap_bar) {
-        model = AmsBackendMultiAce::swap_step_model();
-        feed = AmsBackendMultiAce::SWAP_STEP_FEED;
-        extrude = AmsBackendMultiAce::SWAP_STEP_EXTRUDE;
-        purge = AmsBackendMultiAce::SWAP_STEP_PURGE;
-    }
-#endif
-
-    // Feed: the module pushes filament to the toolhead before the nozzle heats.
-    if (realistic_mode_) {
-        spdlog::debug("[AmsBackendMock] Load step: Feed filament (segment animation)");
-        publish_u1_step(model, feed, AmsAction::LOADING,
-                        "Loading from slot " + std::to_string(helix::ui::lane_number(slot_index)));
-    } else {
-        // Simple mode keeps the action and detail the caller assigned.
-        set_operation_phase(feed);
-    }
-    run_load_segment_animation(slot_index, interruptible_sleep);
-    if (shutdown_requested_ || cancel_requested_)
-        return;
-
-    if (realistic_mode_) {
-        if (!on_swap_bar) {
-            spdlog::debug("[AmsBackendMock] Load step: Heat nozzle");
-            publish_u1_step(model, kU1LoadHeat, AmsAction::HEATING, "Heating nozzle for load");
-            if (!interruptible_sleep(get_effective_delay_ms(HEATING_BASE_MS, HEATING_VARIANCE)))
-                return;
-            if (shutdown_requested_ || cancel_requested_)
-                return;
-        }
-
-        spdlog::debug("[AmsBackendMock] Load step: Extrude");
-        publish_u1_step(model, extrude, AmsAction::LOADING, "Extruding filament");
-        if (!interruptible_sleep(get_effective_delay_ms(SELECTING_BASE_MS, SELECTING_VARIANCE)))
-            return;
-        if (shutdown_requested_ || cancel_requested_)
-            return;
-
-        if (system_info_.supports_purge) {
-            spdlog::debug("[AmsBackendMock] Load step: Purge");
-            publish_u1_step(model, purge, AmsAction::PURGING, "Purging filament");
-            if (!interruptible_sleep(get_effective_delay_ms(PURGING_BASE_MS, PURGING_VARIANCE)))
-                return;
-            if (shutdown_requested_ || cancel_requested_)
-                return;
-        }
-    }
-
-    set_operation_phase(-1);
-    finalize_load_state(slot_index);
-}
-
 void AmsBackendMock::run_load_segment_animation(int slot_index,
                                                 InterruptibleSleep interruptible_sleep) {
     // Calculate per-segment delay
-    int total_animation_ms =
-        realistic_mode_ ? get_effective_delay_ms(SEGMENT_ANIMATION_BASE_MS, LOADING_VARIANCE)
-                        : get_effective_delay_ms(operation_delay_ms_);
+    int total_animation_ms = realistic_mode_
+                                 ? get_effective_delay_ms(kSegmentAnimationBaseMs, kLoadingVariance)
+                                 : get_effective_delay_ms(operation_delay_ms_);
     int segment_delay = total_animation_ms / 6;
 
     const PathSegment load_sequence[] = {
@@ -3891,9 +3799,9 @@ void AmsBackendMock::run_load_segment_animation(int slot_index,
 }
 
 void AmsBackendMock::run_unload_segment_animation(InterruptibleSleep interruptible_sleep) {
-    int total_animation_ms =
-        realistic_mode_ ? get_effective_delay_ms(SEGMENT_ANIMATION_BASE_MS, LOADING_VARIANCE)
-                        : get_effective_delay_ms(operation_delay_ms_);
+    int total_animation_ms = realistic_mode_
+                                 ? get_effective_delay_ms(kSegmentAnimationBaseMs, kLoadingVariance)
+                                 : get_effective_delay_ms(operation_delay_ms_);
     int segment_delay = total_animation_ms / 6;
 
     const PathSegment unload_sequence[] = {
@@ -3943,6 +3851,10 @@ void AmsBackendMock::finalize_unload_state(AmsAction then, const std::string& th
     }
     system_info_.filament_loaded = false;
     system_info_.current_slot = -1;
+    if (park_pending_) {
+        system_info_.current_tool = -1;
+        park_pending_ = false;
+    }
     filament_segment_ = PathSegment::NONE;
     // A cancel that landed mid-unload has already set IDLE; handing over to the
     // next phase would bring the operation back to life.
@@ -3955,39 +3867,12 @@ void AmsBackendMock::finalize_unload_state(AmsAction then, const std::string& th
 
 void AmsBackendMock::execute_load_operation(int slot_index,
                                             InterruptibleSleep interruptible_sleep) {
-    // A multiACE bay load onto a head that already holds a different bay is a
-    // SWAP: the backend emits ACE_UNLOAD_HEAD before ACE_LOAD_HEAD, so the
-    // simulation has to run both halves or the swap step bar has nothing to
-    // drive it and the mock cannot show the case it exists for.
-    bool on_swap_bar = false;
-    if (multiace_mode_ && slot_index >= 4) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            const int head = slot_index < 8 ? 0 : 1; // ACE 1 feeds head 0, ACE 2 head 1
-            multiace_op_head_ = head;
-            // slots_, NOT system_info_.units: the registry is where slot state
-            // lives on this backend (get_system_info() rebuilds the units from
-            // it), so the struct's copy of the head never reads as occupied.
-            const auto* entry = slots_.get(head);
-            on_swap_bar = entry != nullptr && entry->info.status == SlotStatus::LOADED;
-        }
-        if (on_swap_bar && !run_multiace_swap_prologue(interruptible_sleep)) {
-            return;
-        }
-    }
-
-    // The U1 feeds before it heats, so its personas walk their own step order.
-    if (snapmaker_mode_ || multiace_mode_) {
-        execute_u1_load_operation(slot_index, on_swap_bar, interruptible_sleep);
-        return;
-    }
-
     if (realistic_mode_) {
         // Phase 1: HEATING
         spdlog::debug("[AmsBackendMock] Load phase: HEATING");
         set_action(AmsAction::HEATING, "Heating nozzle for load");
         emit_event(EVENT_STATE_CHANGED);
-        if (!interruptible_sleep(get_effective_delay_ms(HEATING_BASE_MS, HEATING_VARIANCE)))
+        if (!interruptible_sleep(get_effective_delay_ms(kHeatingBaseMs, kHeatingVariance)))
             return;
         if (shutdown_requested_ || cancel_requested_)
             return;
@@ -4009,7 +3894,7 @@ void AmsBackendMock::execute_load_operation(int slot_index,
         spdlog::debug("[AmsBackendMock] Load phase: PURGING");
         set_action(AmsAction::PURGING, "Purging filament");
         emit_event(EVENT_STATE_CHANGED);
-        if (!interruptible_sleep(get_effective_delay_ms(PURGING_BASE_MS, PURGING_VARIANCE)))
+        if (!interruptible_sleep(get_effective_delay_ms(kPurgingBaseMs, kPurgingVariance)))
             return;
         if (shutdown_requested_ || cancel_requested_)
             return;
@@ -4025,9 +3910,8 @@ void AmsBackendMock::execute_unload_operation(InterruptibleSleep interruptible_s
         // Phase 1: HEATING (shorter - just for clean cut)
         spdlog::debug("[AmsBackendMock] Unload phase: HEATING");
         set_action(AmsAction::HEATING, "Heating for cut");
-        set_operation_phase(kU1UnloadHeat);
         emit_event(EVENT_STATE_CHANGED);
-        if (!interruptible_sleep(get_effective_delay_ms(HEATING_BASE_MS / 2, HEATING_VARIANCE)))
+        if (!interruptible_sleep(get_effective_delay_ms(kHeatingBaseMs / 2, kHeatingVariance)))
             return;
         if (shutdown_requested_ || cancel_requested_)
             return;
@@ -4036,7 +3920,7 @@ void AmsBackendMock::execute_unload_operation(InterruptibleSleep interruptible_s
         spdlog::debug("[AmsBackendMock] Unload phase: CUTTING");
         set_action(AmsAction::CUTTING, "Cutting filament");
         emit_event(EVENT_STATE_CHANGED);
-        if (!interruptible_sleep(get_effective_delay_ms(CUTTING_BASE_MS, TIP_VARIANCE)))
+        if (!interruptible_sleep(get_effective_delay_ms(kCuttingBaseMs, kTipVariance)))
             return;
         if (shutdown_requested_ || cancel_requested_)
             return;
@@ -4048,13 +3932,11 @@ void AmsBackendMock::execute_unload_operation(InterruptibleSleep interruptible_s
     }
 
     // Reverse segment animation
-    set_operation_phase(kU1UnloadRetract);
     run_unload_segment_animation(interruptible_sleep);
     if (shutdown_requested_ || cancel_requested_)
         return;
 
     // Finalize
-    set_operation_phase(-1);
     finalize_unload_state(then, then_detail);
 }
 
@@ -4077,7 +3959,7 @@ void AmsBackendMock::execute_tool_change_operation(int target_slot,
     // Phase 2: SELECTING (only in realistic mode)
     if (realistic_mode_) {
         spdlog::debug("[AmsBackendMock] Tool change phase: SELECTING slot {}", target_slot);
-        if (!interruptible_sleep(get_effective_delay_ms(SELECTING_BASE_MS, SELECTING_VARIANCE)))
+        if (!interruptible_sleep(get_effective_delay_ms(kSelectingBaseMs, kSelectingVariance)))
             return;
         if (shutdown_requested_ || cancel_requested_)
             return;
@@ -4112,7 +3994,7 @@ void AmsBackendMock::schedule_recovery_sequence() {
         spdlog::debug("[AmsBackendMock] Recovery phase: CHECKING");
         set_action(AmsAction::CHECKING, "Checking system state");
         emit_event(EVENT_STATE_CHANGED);
-        if (!interruptible_sleep(get_effective_delay_ms(CHECKING_BASE_MS, CHECKING_VARIANCE)))
+        if (!interruptible_sleep(get_effective_delay_ms(kCheckingBaseMs, kCheckingVariance)))
             return;
         if (shutdown_requested_ || cancel_requested_)
             return;
@@ -4154,7 +4036,7 @@ void AmsBackendMock::schedule_completion(AmsAction action, const std::string& co
     operation_thread_running_ = true;
 
     // Check if this is a tool change (complete_event signals intent)
-    bool is_tool_change = (complete_event == EVENT_TOOL_CHANGED);
+    bool is_tool_change = (complete_event == kEventToolChanged);
 
     // Simulate operation delay in background thread with path segment progression
     operation_thread_ =
@@ -4252,7 +4134,7 @@ AmsError AmsBackendMock::apply_endless_spool_backup(int slot_index, int backup_s
 
 AmsBackendMock::RemapStrategy AmsBackendMock::get_remap_strategy() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (snapmaker_mode_ || multiace_mode_) {
+    if (snapmaker_mode_) {
         return RemapStrategy::PrePrintSend;
     }
     return remap_strategy_;
@@ -4268,12 +4150,89 @@ bool AmsBackendMock::owns_tool_mapping_table() const {
     // The U1 owns none — its extruders are independent. Every other mode stands
     // in for a backend that does, including the tool changer, whose table is
     // identity but real and rewritten by ASSIGN_TOOL.
-    return !snapmaker_mode_ && !multiace_mode_;
+    return !snapmaker_mode_;
+}
+
+bool AmsBackendMock::carriage_can_be_empty() const {
+    // AmsBackendSnapmaker and AmsBackendToolChanger dock their heads; every
+    // other mode answers what the backend it stands in for answers.
+    std::lock_guard<std::mutex> lock(mutex_);
+    return snapmaker_mode_ || system_info_.type == AmsType::TOOL_CHANGER;
+}
+
+HeadFilamentOps AmsBackendMock::head_filament_ops(int head) const {
+    bool changer = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        changer = system_info_.type == AmsType::TOOL_CHANGER;
+    }
+    // The mock tool changer has no firmware feed, so it answers as
+    // AmsBackendToolChanger does without one.
+    if (changer) {
+        return AmsBackendToolChanger::head_ops_for(/*feeds_head=*/false, /*cut_to_unload=*/false);
+    }
+    return AmsBackend::head_filament_ops(head);
+}
+
+int AmsBackendMock::filament_head_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return is_tool_changer(system_info_.type) ? system_info_.total_slots : 1;
+}
+
+std::optional<int> AmsBackendMock::head_for_slot(int slot) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (slot < 0 || slot >= system_info_.total_slots) {
+        return std::nullopt;
+    }
+    return is_tool_changer(system_info_.type) ? slot : 0;
+}
+
+std::optional<int> AmsBackendMock::head_source_slot(int head, const AmsSystemInfo& info) const {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (is_tool_changer(system_info_.type)) {
+            if (head < 0 || head >= system_info_.total_slots) {
+                return std::nullopt;
+            }
+            return head;
+        }
+    }
+    return AmsBackend::head_source_slot(head, info);
+}
+
+std::optional<bool> AmsBackendMock::head_has_filament(int head) const {
+    bool per_tool = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        per_tool = is_tool_changer(system_info_.type);
+        if (per_tool && (head < 0 || head >= system_info_.total_slots)) {
+            return std::nullopt;
+        }
+    }
+    if (per_tool) {
+        return can_unload_from_toolhead(head);
+    }
+    return AmsBackend::head_has_filament(head);
+}
+
+int AmsBackendMock::max_heads_per_filament_op() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return snapmaker_mode_ ? system_info_.total_slots : 1;
 }
 
 void AmsBackendMock::set_remap_strategy(RemapStrategy strategy) {
     std::lock_guard<std::mutex> lock(mutex_);
     remap_strategy_ = strategy;
+}
+
+void AmsBackendMock::set_firmware_picks_lanes_at_print(bool picks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    firmware_picks_lanes_at_print_ = picks;
+}
+
+bool AmsBackendMock::firmware_picks_lanes_at_print() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return firmware_picks_lanes_at_print_;
 }
 
 void AmsBackendMock::set_remap_ready(bool ready) {
@@ -4326,15 +4285,17 @@ std::vector<int> AmsBackendMock::get_tool_mapping() const {
 }
 
 helix::FirmwareRouting AmsBackendMock::firmware_default_routing() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (snapmaker_mode_) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (snapmaker_mode_) {
 #if HELIX_HAS_SNAPMAKER
-        return AmsBackendSnapmaker::default_routing();
+            return AmsBackendSnapmaker::default_routing();
 #endif
-        // Unreachable: set_snapmaker_mode() refuses the mode when the backend
-        // is compiled out, so fall through to the lane-per-tool answer.
+            // Unreachable: set_snapmaker_mode() refuses the mode when the backend
+            // is compiled out, so fall through to the base answer.
+        }
     }
-    // Every other mode this mock emulates is lane-per-tool.
+    // The base reads get_tool_mapping(), which takes mutex_ itself.
     return AmsBackend::firmware_default_routing();
 }
 

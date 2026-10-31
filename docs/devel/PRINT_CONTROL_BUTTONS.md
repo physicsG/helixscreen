@@ -80,11 +80,11 @@ function with **no LVGL dependency** — which makes it trivially unit-testable
 enum class PendingAction : int { None = 0, Pausing = 1, Resuming = 2 };
 
 struct ControlButtonView {
-    const char* primary_icon  = CONTROL_ICON_PAUSE;  // MDI glyph pointer
+    const char* primary_icon  = kControlIconPause;  // MDI glyph pointer
     const char* primary_label = "Pause";            // English; caller runs lv_tr()
     bool        primary_enabled = false;
     bool        stop_enabled    = false;
-    bool        stop_retires_preparing = false;      // Stop cancels the start, not the print
+    StopRoute   stop_route      = StopRoute::Abort; // which mechanism Stop uses
 };
 
 struct ControlButtonInputs {
@@ -95,6 +95,8 @@ struct ControlButtonInputs {
     bool pause_available = false;
     bool resume_available = false;
     bool cancel_available = false;
+    bool start_sent = false;        // the preparing job's start went to the printer
+    bool cancel_requested = false;  // a cancel is in flight, unanswered
 };
 
 ControlButtonView compute_control_button_view(const ControlButtonInputs& in);
@@ -112,8 +114,11 @@ const bool printer_has_the_job = (in.job_state == PrintJobState::PRINTING ||
                                   in.job_state == PrintJobState::PAUSED);
 const bool preparing = (in.lifecycle == PrintState::Preparing);
 
-v.stop_retires_preparing = in.has_preparing_job && !printer_has_the_job;
-v.stop_enabled = v.stop_retires_preparing || (printer_has_the_job && in.cancel_available);
+const bool unclaimed = in.has_preparing_job && !printer_has_the_job;
+if (unclaimed)
+    v.stop_route = in.start_sent ? StopRoute::CancelSentStart : StopRoute::RetirePreparing;
+v.stop_enabled = !in.cancel_requested &&
+                 (unclaimed || (printer_has_the_job && in.cancel_available));
 
 const bool slot_ok = (in.job_state == PrintJobState::PAUSED) ? in.resume_available
                                                              : in.pause_available;
@@ -121,11 +126,11 @@ v.primary_enabled = printer_has_the_job && !preparing &&
                     in.pending == PendingAction::None && slot_ok;
 
 switch (in.pending) {
-case PendingAction::Pausing:  v.primary_icon = CONTROL_ICON_HOURGLASS; v.primary_label = "Pausing...";  break;
-case PendingAction::Resuming: v.primary_icon = CONTROL_ICON_HOURGLASS; v.primary_label = "Resuming..."; break;
+case PendingAction::Pausing:  v.primary_icon = kControlIconHourglass; v.primary_label = "Pausing...";  break;
+case PendingAction::Resuming: v.primary_icon = kControlIconHourglass; v.primary_label = "Resuming..."; break;
 case PendingAction::None:
-    if (in.job_state == PrintJobState::PAUSED) { v.primary_icon = CONTROL_ICON_PLAY;  v.primary_label = "Resume"; }
-    else                                       { v.primary_icon = CONTROL_ICON_PAUSE; v.primary_label = "Pause";  }
+    if (in.job_state == PrintJobState::PAUSED) { v.primary_icon = kControlIconPlay;  v.primary_label = "Resume"; }
+    else                                       { v.primary_icon = kControlIconPause; v.primary_label = "Pause";  }
     break;
 }
 ```
@@ -147,13 +152,82 @@ diverged in opposite directions:
 | **Pause, before** | disabled (incidentally) | **enabled - sent PAUSE mid-macro** |
 | **Cancel, before** | **disabled - the retire path was unreachable** | enabled |
 | Pause, now | disabled | disabled |
-| Cancel, now | enabled, retires the preparing job | enabled, routes to `AbortManager` |
+| Cancel, now | enabled, retires the preparing job (or cancels a sent start, below) | enabled, routes to `AbortManager` |
 
-`stop_retires_preparing` is computed here rather than at the call site so the
-button's enablement and the handler's routing cannot disagree about which
-mechanism applies. `CANCEL_PRINT` sent to an idle printer is worse than useless:
-`AbortManager` reads the terminal state as proof the cancel succeeded while the
-queued `start_print` still fires.
+`stop_route` is computed here rather than at the call site so the button's
+enablement and the handler's routing cannot disagree about which mechanism
+applies:
+
+| Route | When | What Stop does |
+|---|---|---|
+| `RetirePreparing` | preparing, no start in flight or accepted | `retire_preparing(Cancelled)`; every start send first checks its preparing epoch, so nothing reaches the printer |
+| `CancelSentStart` | preparing, a start in flight or accepted, printer not reporting the job | Requests a cancel and disables Stop; the state table below decides when `printer.print.cancel` goes out and what settles it |
+| `Abort` | the printer reports the job | `AbortManager` |
+
+`CANCEL_PRINT` sent to an idle printer is worse than useless: it is answered at
+once, and the start that follows prints. But once a start has been sent,
+retiring locally stops nothing either. Some firmwares run the whole print-start
+sequence inside `SDCARD_PRINT_FILE`, so `print_stats` stays idle while the
+printer homes, heats and probes (prestonbrown/helixscreen#1890), and the start
+RPC answers only once that sequence ends. Klipper cannot interrupt a running
+macro, so the start sequence finishes either way.
+
+**The ordering rule: `CANCEL_PRINT` goes out only after the start RPC has
+answered OK.** Then the cancel always queues behind a start the printer has
+actually received, whichever path sent it (plain `printer.print.start`, a staged
+copy, the plugin's `print_edited` or `print_modified`, the on-screen rewrite
+fallback). The cost: on a firmware whose start answers only after its sequence,
+the cancel lands a round trip after the file starts rather than before its
+first line, so the first commands of the file can run. A macro is one line to
+`virtual_sdcard`, so if the file's first line calls the slicer's own start macro
+(`START_PRINT ...`), that whole macro runs before the cancel lands: homing,
+heating, possibly a bed mesh, and a purge line on the bed.
+
+`PrinterPrintState` tracks the preparing job's start hand-over
+(`PreparingStart`: `None` -> `InFlight` on send -> `Accepted` on an OK answer,
+or back to `None` on a refusal, or `Unanswered` when the answer is lost). A
+start whose RPC times out is held, not retired as failed
+(`hold_unanswered_start()`, every start path's one rule): a start sequence
+longer than the RPC ceiling is still running, and only the printer's own report
+settles the job: `Confirmed` once it reports the job, or the preparing watchdog
+(prestonbrown/helixscreen#1898). A dropped connection is held only while a
+cancel is requested, since a start refused for a link that is down never
+reached Moonraker; without one the start fails. A cancel sent while a start is
+held queues behind it. `PrintControlButtons` tracks the cancel
+(`CancelState`: `Idle`, `Requested`, `Sent`, `Answered`). Stop is disabled in
+every state but `Idle`.
+
+| Cancel state | Event | Next | Action |
+|---|---|---|---|
+| `Idle` | Stop confirmed, start `Accepted` or `Unanswered` | `Sent` | send `printer.print.cancel`; notify "Cancel sent" |
+| `Idle` | Stop confirmed, start `InFlight` | `Requested` | notify "Cancel sent"; nothing goes to the printer yet |
+| `Requested` | start answers OK (`Accepted`) | `Sent` | send `printer.print.cancel` |
+| `Requested` | start loses its answer (`Unanswered`; job held) | `Sent` | send `printer.print.cancel`: it queues behind the start |
+| `Requested` | the printer reports our job (retired `Confirmed`) | `Sent` | send `printer.print.cancel`: the printer has the start |
+| `Requested` | start refused (`None`), job still preparing | `Idle` | `retire_preparing(Cancelled)`, no cancel sent |
+| `Requested` | job retired any other way (start failed) | `Idle` | nothing: the job is gone and nothing reached the printer |
+| `Sent` / `Answered` | job state `cancelled` / `complete` / `error` | `Idle` | retire as `EndedByPrinter` if still ours; the completion observer reports once |
+| `Sent` | cancel answers OK | `Answered` | if the job state already reads terminal, settle now (no transition will come) |
+| `Sent` | cancel answers with a real error | `Idle` | notify "Failed to cancel: ..."; Stop comes back |
+| `Sent` | the client refuses the cancel before sending it (not connected) | `Idle` | notify "Failed to cancel: Not connected to printer"; Stop comes back |
+| `Sent` | cancel times out or the connection drops | `Sent` (lost) | nothing: the cancel may still be queued, so only the job state settles it |
+| `Sent` (lost) / `Answered` | printer holds the job (`printing` / `paused`) | same | arm the `kCancelConfirmMs` timer |
+| `Sent` (lost) / `Answered` | confirm timer fires, printer still holds the job | `Idle` | warn that the printer kept printing; Stop routes to `Abort` |
+| any but `Idle` | a different job starts preparing (new epoch) | `Idle` | drop the request |
+| any | `set_api()` with a different API, or teardown | `Idle` | drop the request |
+
+`standby` is never an answer: `SDCARD_PRINT_FILE` passes through it while
+loading the file. `printing` while the cancel is out and unanswered is expected:
+it waits behind whatever line the file is running. A `printing` report right
+after the cancel's OK is not proof the cancel failed either: status notifications and RPC answers reach the main
+thread through different queues, so a frame from before the cancel can land
+after its answer. That is why `Answered` waits `kCancelConfirmMs` before it
+judges a printer still holding the job.
+
+`EndedByPrinter` leaves the heaters to the printer's own cancel gcode, the same
+as `Abort`. A printer whose `CANCEL_PRINT` is `[pause_resume]`'s built-in, with
+no `TURN_OFF_HEATERS`, keeps the start sequence's targets until Klipper's
+`idle_timeout`.
 
 Inputs → outputs at a glance:
 
@@ -164,7 +238,7 @@ Inputs → outputs at a glance:
   available — this prevents re-triggering while an RPC is in flight, and shows
   the hourglass + transitional label.
 
-Icon constants: `CONTROL_ICON_PAUSE`, `CONTROL_ICON_PLAY`, `CONTROL_ICON_HOURGLASS`
+Icon constants: `kControlIconPause`, `kControlIconPlay`, `kControlIconHourglass`
 (MDI glyphs, defined in `print_control_view.h`).
 
 ---

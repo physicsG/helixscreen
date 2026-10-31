@@ -257,7 +257,7 @@ TEST_CASE("every platform resolves its printer image from what it ships",
             // get_prerendered_path() is what the printer database walks to turn
             // "<name>.png" into a shipped tier.
             const std::string path =
-                PrinterImages::get_prerendered_path(std::string(kStem) + ".png", width);
+                helix::printer_images::get_prerendered_path(std::string(kStem) + ".png", width);
             INFO("resolved to '" << path << "'");
             REQUIRE_FALSE(path.empty());
         }

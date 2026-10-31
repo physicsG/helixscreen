@@ -19,7 +19,7 @@ namespace helix::test {
 /// Owns a backend through AmsState so that registration stamps its backend
 /// index, then hands it back for driving.
 ///
-/// Registration is not scenery. AmsBackend::lane_id() answers INVALID_LANE_ID
+/// Registration is not scenery. AmsBackend::lane_id() answers kInvalidLaneId
 /// until AmsState::add_backend() stamps an index, and the lane funnels drop
 /// what that id names, so an unregistered backend files nothing and every
 /// assertion against the store reads empty. set_backend() clears first, and

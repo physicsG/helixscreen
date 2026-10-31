@@ -106,7 +106,7 @@ void reconcile_on_connect(IMoonrakerClient& client, const nlohmann::json& status
         return;
     }
     spdlog::info("[BatchFeed] Clearing a stranded AUTO_FEEDING_BATCH interlock");
-    client.gcode_script(END_GCODE);
+    client.gcode_script(kEndGcode);
 }
 
 } // namespace helix::batch_feeding

@@ -83,36 +83,36 @@ TEST_CASE("wifi_parse_freq_list_has_5ghz: all frequencies below 5000 returns fal
 // wifi_parse_iw_phy_has_5ghz Tests
 // =============================================================================
 
-static const char* IW_OUTPUT_DUAL_BAND = "Band 1:\n"
-                                         "    Frequencies:\n"
-                                         "        * 2412 MHz [1] (20.0 dBm)\n"
-                                         "        * 2437 MHz [6] (20.0 dBm)\n"
-                                         "        * 2462 MHz [11] (20.0 dBm)\n"
-                                         "Band 2:\n"
-                                         "    Frequencies:\n"
-                                         "        * 5180 MHz [36] (20.0 dBm)\n"
-                                         "        * 5240 MHz [48] (20.0 dBm)\n";
-
-static const char* IW_OUTPUT_24_ONLY = "Band 1:\n"
+static const char* kIwOutputDualBand = "Band 1:\n"
                                        "    Frequencies:\n"
                                        "        * 2412 MHz [1] (20.0 dBm)\n"
-                                       "        * 2417 MHz [2] (20.0 dBm)\n"
-                                       "        * 2422 MHz [3] (20.0 dBm)\n"
-                                       "        * 2427 MHz [4] (20.0 dBm)\n"
-                                       "        * 2432 MHz [5] (20.0 dBm)\n"
                                        "        * 2437 MHz [6] (20.0 dBm)\n"
-                                       "        * 2442 MHz [7] (20.0 dBm)\n"
-                                       "        * 2447 MHz [8] (20.0 dBm)\n"
-                                       "        * 2452 MHz [9] (20.0 dBm)\n"
-                                       "        * 2457 MHz [10] (20.0 dBm)\n"
-                                       "        * 2462 MHz [11] (20.0 dBm)\n";
+                                       "        * 2462 MHz [11] (20.0 dBm)\n"
+                                       "Band 2:\n"
+                                       "    Frequencies:\n"
+                                       "        * 5180 MHz [36] (20.0 dBm)\n"
+                                       "        * 5240 MHz [48] (20.0 dBm)\n";
+
+static const char* kIwOutput24Only = "Band 1:\n"
+                                     "    Frequencies:\n"
+                                     "        * 2412 MHz [1] (20.0 dBm)\n"
+                                     "        * 2417 MHz [2] (20.0 dBm)\n"
+                                     "        * 2422 MHz [3] (20.0 dBm)\n"
+                                     "        * 2427 MHz [4] (20.0 dBm)\n"
+                                     "        * 2432 MHz [5] (20.0 dBm)\n"
+                                     "        * 2437 MHz [6] (20.0 dBm)\n"
+                                     "        * 2442 MHz [7] (20.0 dBm)\n"
+                                     "        * 2447 MHz [8] (20.0 dBm)\n"
+                                     "        * 2452 MHz [9] (20.0 dBm)\n"
+                                     "        * 2457 MHz [10] (20.0 dBm)\n"
+                                     "        * 2462 MHz [11] (20.0 dBm)\n";
 
 TEST_CASE("wifi_parse_iw_phy_has_5ghz: dual-band iw output returns true", "[wifi][5ghz]") {
-    REQUIRE(wifi_parse_iw_phy_has_5ghz(IW_OUTPUT_DUAL_BAND) == true);
+    REQUIRE(wifi_parse_iw_phy_has_5ghz(kIwOutputDualBand) == true);
 }
 
 TEST_CASE("wifi_parse_iw_phy_has_5ghz: 2.4GHz-only iw output returns false", "[wifi][5ghz]") {
-    REQUIRE(wifi_parse_iw_phy_has_5ghz(IW_OUTPUT_24_ONLY) == false);
+    REQUIRE(wifi_parse_iw_phy_has_5ghz(kIwOutput24Only) == false);
 }
 
 TEST_CASE("wifi_parse_iw_phy_has_5ghz: empty string returns false", "[wifi][5ghz]") {

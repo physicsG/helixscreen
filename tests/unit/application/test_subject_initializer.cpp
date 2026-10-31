@@ -16,6 +16,9 @@
 #include "ui_observer_guard.h"
 
 #include "../../lvgl_test_fixture.h"
+#include "../../test_helpers/ams_state_test_access.h"
+#include "ams_state.h"
+#include "filament_sensor_manager.h"
 #include "observer_factory.h"
 #include "runtime_config.h"
 #include "settings_manager.h"
@@ -253,4 +256,22 @@ TEST_CASE_METHOD(LVGLTestFixture, "Settings subjects are live once core and stat
     subjects.init_core_and_state();
 
     CHECK(settings.are_subjects_initialized());
+}
+
+// The clog meter's motion-sensor fallback re-syncs on FilamentSensorManager's
+// motion signature, whose subject only exists once the sensor managers have
+// initialised, so the wiring belongs to the initializer (#1823).
+TEST_CASE_METHOD(LVGLTestFixture, "Core and state init wires the clog meter to the motion sensors",
+                 "[application][subjects][motion][1823]") {
+    auto& ams = helix::AmsState::instance();
+    auto& sensors = helix::FilamentSensorManager::instance();
+    sensors.init_subjects();
+    lv_subject_t* signature = sensors.get_motion_signature_subject();
+    helix::AmsStateTestAccess::remove_motion_sensor_observer(ams);
+    const uint32_t before = lv_ll_get_len(&signature->subs_ll);
+
+    SubjectInitializer subjects;
+    subjects.init_core_and_state();
+
+    CHECK(lv_ll_get_len(&signature->subs_ll) == before + 1);
 }

@@ -58,6 +58,11 @@
                  focusable="false" style_flex_main_place="start" style_text_color="#danger">
         <event_cb trigger="clicked" callback="spoolman_context_delete_cb"/>
       </ui_button>
+      <!-- Plugin items for this spool (a divider, then each plugin's group), filled
+           by C++; empty when no enabled plugin declares a spool item. -->
+      <lv_obj name="plugin_rows"
+              width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="0" style_bg_opa="0"
+              style_border_width="0" scrollable="false"/>
     </context_menu_card>
   </view>
 </component>

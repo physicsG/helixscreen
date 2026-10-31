@@ -277,6 +277,166 @@ TEST_CASE_METHOD(XMLTestFixture, "two readings commit a sparkline onto the canva
     tile.reset();
 }
 
+TEST_CASE_METHOD(XMLTestFixture, "a missing reading shows dashes, not the previous value",
+                 "[plugin][example]") {
+    HostRig rig(ambient_block(generic_settings()));
+    rig.host->load_from("examples/plugins");
+    size_t next = 0;
+    answer_http(rig, next, 200, R"({"current":{"t":21.4,"rh":38}})");
+    process_lvgl(10500);
+    answer_http(rig, next, 200, R"({"current":{"t":22.0}})");
+    CHECK(watcher_str("ambient-tile__temp_text") == "22.0\u00B0");
+    CHECK(watcher_str("ambient-tile__rh_text") == "--");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "repeated failed polls blank the values", "[plugin][example]") {
+    HostRig rig(ambient_block(generic_settings()));
+    rig.host->load_from("examples/plugins");
+    size_t next = 0;
+    answer_http(rig, next, 200, R"({"current":{"t":21.4,"rh":38}})");
+    for (int i = 0; i < 2; ++i) {
+        process_lvgl(10500);
+        answer_http(rig, next, 500, "");
+    }
+    CHECK(watcher_str("ambient-tile__temp_text") == "21.4\u00B0"); // two misses: still shown
+    process_lvgl(10500);
+    answer_http(rig, next, 500, "");
+    CHECK(watcher_str("ambient-tile__temp_text") == "--");
+    CHECK(watcher_str("ambient-tile__rh_text") == "--");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "a slow poll is never overlapped by the next tick",
+                 "[plugin][example]") {
+    HostRig rig(ambient_block(generic_settings()));
+    rig.host->load_from("examples/plugins");
+    REQUIRE(http_count(rig) == 1);
+    process_lvgl(35000); // three ticks while the first request is unanswered
+    CHECK(http_count(rig) == 1);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "an old source cannot overwrite a newer one",
+                 "[plugin][example]") {
+    HostRig rig(ambient_block(generic_settings()));
+    rig.host->load_from("examples/plugins");
+    REQUIRE(http_count(rig) == 1);
+    REQUIRE(rig.host->set_setting("ambient-tile", "url", "https://other.example.com/room"));
+    // The reply of the first (old url) request lands after the change.
+    const_cast<FakeBackend::Request*>(http_at(rig, 0))
+        ->reply(RpcResult{
+            true, json{{"status", 200}, {"body", R"({"current":{"t":99,"rh":99}})"}}, {}});
+    drain();
+    CHECK(watcher_str("ambient-tile__temp_text") == "--");
+    REQUIRE(http_count(rig) == 2); // re-polled against the new url
+    CHECK(http_at(rig, 1)->b == "https://other.example.com/room");
+    http_at(rig, 1);
+    const_cast<FakeBackend::Request*>(http_at(rig, 1))
+        ->reply(RpcResult{
+            true, json{{"status", 200}, {"body", R"({"current":{"t":18,"rh":50}})"}}, {}});
+    drain();
+    CHECK(watcher_str("ambient-tile__temp_text") == "18.0\u00B0");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "pointer segments fall back to object keys", "[plugin][example]") {
+    json settings = generic_settings();
+    settings["temp_pointer"] = "sensors.1.t";
+    settings["humidity_pointer"] = "sensors.0";
+    HostRig rig(ambient_block(settings));
+    rig.host->load_from("examples/plugins");
+    size_t next = 0;
+    answer_http(rig, next, 200, R"({"sensors":{"1":{"t":20.5},"0":44}})");
+    CHECK(watcher_str("ambient-tile__temp_text") == "20.5\u00B0");
+    CHECK(watcher_str("ambient-tile__rh_text") == "44%");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "credentials never reach the screen", "[plugin][example]") {
+    json settings = generic_settings();
+    settings["url"] = "https://user:hunter2@api.example.com/room?key=abc123";
+    HostRig rig(ambient_block(settings));
+    rig.host->load_from("examples/plugins");
+    CHECK(watcher_str("ambient-tile__source_line") == "JSON endpoint \u00B7 api.example.com");
+    REQUIRE(http_count(rig) == 1);
+    http_at(rig, 0);
+    const_cast<FakeBackend::Request*>(http_at(rig, 0))
+        ->reply(RpcResult{false, json(),
+                          "connect failed: https://user:hunter2@api.example.com/room?key=abc123"});
+    drain();
+    const std::string status = watcher_str("ambient-tile__status_line");
+    CHECK_FALSE(status.empty());
+    CHECK(status.find("hunter2") == std::string::npos);
+    CHECK(status.find("abc123") == std::string::npos);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "one unavailable home assistant entity leaves the other",
+                 "[plugin][example]") {
+    HostRig rig(ambient_block(ha_settings()));
+    rig.host->load_from("examples/plugins");
+    http_at(rig, 0);
+    const_cast<FakeBackend::Request*>(http_at(rig, 0))
+        ->reply(RpcResult{true, json{{"status", 200}, {"body", R"({"state":"unavailable"})"}}, {}});
+    drain();
+    REQUIRE(http_count(rig) == 2);
+    const_cast<FakeBackend::Request*>(http_at(rig, 1))
+        ->reply(RpcResult{true, json{{"status", 200}, {"body", R"({"state":"41"})"}}, {}});
+    drain();
+    CHECK(watcher_str("ambient-tile__temp_text") == "--");
+    CHECK(watcher_str("ambient-tile__rh_text") == "41%");
+    CHECK(watcher_str("ambient-tile__status_line") == "");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "a failing home assistant entity is reported beside the good one",
+                 "[plugin][example]") {
+    HostRig rig(ambient_block(ha_settings()));
+    rig.host->load_from("examples/plugins");
+    const_cast<FakeBackend::Request*>(http_at(rig, 0))
+        ->reply(RpcResult{true, json{{"status", 404}, {"body", ""}}, {}});
+    drain();
+    REQUIRE(http_count(rig) == 2);
+    const_cast<FakeBackend::Request*>(http_at(rig, 1))
+        ->reply(RpcResult{true, json{{"status", 200}, {"body", R"({"state":"41"})"}}, {}});
+    drain();
+    CHECK(watcher_str("ambient-tile__rh_text") == "41%");
+    CHECK(watcher_str("ambient-tile__status_line") == "HTTP 404");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "non-finite and huge numbers are refused", "[plugin][example]") {
+    json settings = generic_settings();
+    settings["temp_pointer"] = "t";
+    settings["humidity_pointer"] = "rh";
+    HostRig rig(ambient_block(settings));
+    rig.host->load_from("examples/plugins");
+    size_t next = 0;
+    answer_http(rig, next, 200, R"({"t":"1e999","rh":1e300})");
+    CHECK(watcher_str("ambient-tile__temp_text") == "--");
+    CHECK(watcher_str("ambient-tile__rh_text") == "--");
+    CHECK(watcher_str("ambient-tile__status_line") == "bad data");
+}
+
+TEST_CASE_METHOD(XMLTestFixture,
+                 "a transport failure in the load-time poll cannot fault the plugin",
+                 "[plugin][example]") {
+    HostRig rig(ambient_block(generic_settings()));
+    rig.host->load_from("examples/plugins");
+    const_cast<FakeBackend::Request*>(http_at(rig, 0))->reply(RpcResult{false, json(), "boom"});
+    drain();
+    CHECK(rig.info("ambient-tile")->status == PluginStatus::Loaded);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "a language change re-renders without polling",
+                 "[plugin][example]") {
+    HostRig rig(ambient_block(generic_settings()));
+    rig.host->load_from("examples/plugins");
+    size_t next = 0;
+    answer_http(rig, next, 200, R"({"current":{"t":21.4,"rh":38}})");
+    const size_t before = http_count(rig);
+    helix::ui::ensure_translation_loaded("de");
+    lv_translation_set_language("de");
+    helix::ui::locale_set_language("de");
+    CHECK(http_count(rig) == before);
+    CHECK(watcher_str("ambient-tile__age_text") == "Soeben aktualisiert");
+    lv_translation_set_language("en");
+    helix::ui::locale_set_language("en");
+}
+
 TEST_CASE_METHOD(XMLTestFixture, "payloads and status follow the screen language",
                  "[plugin][example]") {
     HostRig rig(ambient_block(json{{"source", "JSON endpoint"}}));

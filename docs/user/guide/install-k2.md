@@ -2,6 +2,8 @@
 
 End-to-end guide for the Creality K2, K2 Plus, and K2 Pro: install, update, and uninstall. HelixScreen runs on the stock firmware, in place of the stock screen UI.
 
+> **Easy installer:** the [HelixScreen easy installer](https://helixscreen.org/installer/) can update HelixScreen on a K2 from a desktop app. A first install is still done by hand with this guide.
+
 > **Tested state:** works with stock firmware and stock Moonraker (no custom firmware required). Root access is enabled from the printer's own settings menu.
 
 ## Prerequisites

@@ -33,7 +33,7 @@ namespace filament {
 /**
  * @brief Reduce a decorated material name to its base polymer.
  *
- * Strips known variant affixes (see VARIANT_AFFIXES in the .cpp) from either
+ * Strips known variant affixes (see kVariantAffixes in the .cpp) from either
  * end at '-', '_' or ' ' boundaries, applies the explicit family override table
  * for polymer grades that string-stripping cannot reach ("PA6" -> "PA"), then
  * falls back to a shortest-known-prefix walk for unrecognised compound names
@@ -105,8 +105,41 @@ bool is_filled_grade(std::string_view name);
  * Thin wrapper over extract_base_material() that guarantees a non-empty result:
  * a type we cannot reduce becomes its own family (a heading with one entry),
  * which keeps unknown//user-overlay types visible instead of silently dropped.
+ * A recycled grade files under its polymer ("rPLA" is PLA, variant Recycled),
+ * although extract_base_material() keeps it a material of its own.
  */
 std::string display_family(std::string_view type);
+
+/**
+ * @brief The variant a @p type adds over its @p family, as a chip label.
+ *
+ * The inverse half of display_family(): the remainder the reducer strips,
+ * spelled as one short label. "PLA" in family PLA is "Basic"; "PLA-CF" is
+ * "CF"; "Silk PLA" is "Silk"; "PLA+" is "+"; the r-prefix recycled spellings
+ * ("rPLA") read as "Recycled". A @p type that is not @p family decorated at
+ * all (an alias like "SILK", an override grade like "PA6") labels as its own
+ * remainder, and a @p type equal to its family (or empty) is "Basic".
+ *
+ * @param type Catalog or firmware type string, possibly decorated.
+ * @param family The family display_family() reduces @p type to. Empty means
+ *               derive it here.
+ * @return One variant label, never empty.
+ */
+// NAMESPACE_OK: module convention - extract_base_material lives in namespace filament
+std::string variant_label(std::string_view type, std::string_view family = {});
+
+/**
+ * @brief The type string a family and a variant label compose to.
+ *
+ * The spelling follows the catalog's own conventions: a bare family for
+ * "Basic", the r-prefix for "Recycled", a leading word for the wordy finishes
+ * ("Silk", "Matte", "Wood", "Marble", "Metal", "Glow"), and a hyphenated
+ * suffix for everything else ("CF", "GF", "HS", "+"). Callers that hold a
+ * catalog prefer the catalog's own sample type for the same label — this is
+ * the synthesized fallback for a pair the catalog does not carry.
+ */
+// NAMESPACE_OK: module convention - extract_base_material lives in namespace filament
+std::string compose_family_type(const std::string& family, const std::string& variant);
 
 /**
  * @brief Reduce a display type to a string OrcaSlicer can actually match.
@@ -198,3 +231,26 @@ void warm_orca_tables();
 void merge_user_orca_overrides(const std::map<std::string, std::string>& overrides);
 
 } // namespace filament
+
+namespace helix {
+
+/// A filament's surface finish: how its colour should be painted.
+enum class FilamentFinish : unsigned char { None, Silk, Matte, Marble, Sparkle };
+
+/**
+ * @brief The cosmetic finish a filament name announces, if any.
+ *
+ * Reads whole words of @p name ("PLA Silk", "Silk-PLA", "Galaxy Black",
+ * "PLA Matte"), case-insensitively, at the same '-', '_' and ' ' boundaries as
+ * the variant affixes, plus '+', '/', '(' and ')'. Silk also answers to Satin
+ * and Silky; Matte to Matt; Marble to Granite and Stone; Sparkle to Glitter,
+ * Galaxy, Shimmer and Starlight. The first finish word wins. A name that only
+ * contains a finish as a substring ("Silkworm") has none.
+ */
+FilamentFinish filament_finish_of(std::string_view name);
+
+/// The word for @p finish ("Silk", "Matte", "Marble", "Sparkle"; "" for none):
+/// what a finish subject carries, read back by filament_finish_of().
+const char* filament_finish_name(FilamentFinish finish);
+
+} // namespace helix

@@ -22,8 +22,8 @@ namespace helix::ui {
  *
  * Owns the per-option `lv_subject_t` state (one int subject per option in the
  * active printer's `PrePrintOptionSet`). Builds a 2-column grid of checkable
- * `option_tile` cells: one tile per option, icon + 2-line label in an
- * outline that turns `#primary` when checked. Categories are used
+ * `option_tile` pills: one per option, icon + 2-line label, filled with the
+ * primary tint and showing a check in place of the icon when checked. Categories are used
  * as a sort key only; no sub-headers are emitted (the surrounding "PRINT
  * OPTIONS" card header in `print_file_detail.xml` provides the section title).
  *

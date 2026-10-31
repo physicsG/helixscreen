@@ -15,8 +15,8 @@ namespace helix {
 /// start_stream()/stop_stream() sit behind their own guards (active_,
 /// fullscreen_overlay_) strictly narrower than the on_size_changed()
 /// edge-trigger conditions that invoke them, and with no camera configured
-/// stream_ always ends up null again after either call returns — so
-/// "stream_ non-null" cannot tell a test whether the call happened and
+/// the view never holds a stream after either call returns — so
+/// "has a stream" cannot tell a test whether the call happened and
 /// no-op'd versus never happened at all. These counters can, without
 /// needing a real camera or opening a connection.
 ///
@@ -59,7 +59,7 @@ class CameraWidgetTestAccess {
     /// its frame callback. Lets a test assert the raw-delete hook does NOT
     /// expire it - the camera's deliberate divergence from the other three.
     static helix::LifetimeToken stream_token(const CameraWidget& w) {
-        return w.lifetime_.token();
+        return w.view_.stream_token();
     }
 
     /// The `source` (webcam name) the widget's config asks for; "" = auto.
@@ -68,16 +68,24 @@ class CameraWidgetTestAccess {
     }
     /// The feed the running stream shows (name is "" for the auto-pick).
     static const WebcamInfo& current_feed(const CameraWidget& w) {
-        return w.current_feed_;
+        return w.view_.feed();
     }
     static bool has_stream(const CameraWidget& w) {
-        return w.stream_ != nullptr;
+        return w.view_.has_stream();
     }
 
     /// Open the fullscreen overlay without the stream open_fullscreen()
     /// requires, so a test can reach the overlay's lifetime with no camera.
     static void show_fullscreen_overlay(CameraWidget& w) {
         w.show_fullscreen_overlay();
+    }
+
+    /// The status setters a decoded frame and the stream status callbacks call.
+    static void set_status_text(CameraWidget& w, const char* text) {
+        w.set_status_text(text);
+    }
+    static void set_status_key(CameraWidget& w, const char* key) {
+        w.set_status_key(key);
     }
     static lv_obj_t* fullscreen_overlay(const CameraWidget& w) {
         return w.fullscreen_overlay_;
@@ -87,6 +95,16 @@ class CameraWidgetTestAccess {
     }
     static lv_obj_t* fullscreen_spinner(const CameraWidget& w) {
         return w.fullscreen_spinner_;
+    }
+
+    /// The open standalone viewer's CameraView, or nullptr when none is open.
+    static CameraView* standalone_view() {
+        auto* viewer = StandaloneCameraViewer::s_open_;
+        return viewer ? &viewer->view_ : nullptr;
+    }
+    static lv_obj_t* standalone_overlay() {
+        auto* viewer = StandaloneCameraViewer::s_open_;
+        return viewer ? viewer->overlay_ : nullptr;
     }
 };
 

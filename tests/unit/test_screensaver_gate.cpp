@@ -1,7 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "../test_helpers/scoped_env.h"
 #include "config.h"
@@ -38,22 +38,25 @@ CpuSample at(double wall_s, double cpu_s) {
 // Budget and decision
 // ============================================================================
 
-TEST_CASE("the saver budget follows the core count and halves while printing",
+TEST_CASE("the saver budget follows the core count and drops while printing",
           "[screensaver][screensaver_gate]") {
     using helix::ui::saver_budget_share;
-    CHECK(saver_budget_share(8, false) == Catch::Approx(0.50));
-    CHECK(saver_budget_share(4, false) == Catch::Approx(0.50));
-    CHECK(saver_budget_share(3, false) == Catch::Approx(0.37));
-    CHECK(saver_budget_share(2, false) == Catch::Approx(0.25));
+    CHECK(saver_budget_share(8, false) == Catch::Approx(1.00));
+    CHECK(saver_budget_share(4, false) == Catch::Approx(1.00));
+    CHECK(saver_budget_share(3, false) == Catch::Approx(0.75));
+    CHECK(saver_budget_share(2, false) == Catch::Approx(0.50));
     CHECK(saver_budget_share(1, false) == Catch::Approx(0.10));
     CHECK(saver_budget_share(0, false) == Catch::Approx(0.10));
+    // klippy shares the SoC while printing: these stay where they are on purpose.
+    CHECK(saver_budget_share(8, true) == Catch::Approx(0.25));
     CHECK(saver_budget_share(4, true) == Catch::Approx(0.25));
     CHECK(saver_budget_share(3, true) == Catch::Approx(0.185));
     CHECK(saver_budget_share(2, true) == Catch::Approx(0.125));
     CHECK(saver_budget_share(1, true) == Catch::Approx(0.05));
+    CHECK(saver_budget_share(0, true) == Catch::Approx(0.05));
 }
 
-TEST_CASE("over budget steps down one level, at the bottom it is too heavy, and it never steps up",
+TEST_CASE("over budget steps down one level, at the bottom it is too heavy",
           "[screensaver][screensaver_gate]") {
     using helix::ui::decide_saver_level;
     CHECK(decide_saver_level(0.51, 0.50, 0, 2) == GateDecision::STEP_DOWN);
@@ -61,9 +64,41 @@ TEST_CASE("over budget steps down one level, at the bottom it is too heavy, and 
     CHECK(decide_saver_level(0.90, 0.50, 2, 4) == GateDecision::STEP_DOWN);
     CHECK(decide_saver_level(0.90, 0.50, 3, 4) == GateDecision::TOO_HEAVY);
     CHECK(decide_saver_level(0.50, 0.50, 0, 2) == GateDecision::KEEP);
-    // Far under budget at a lower level keeps the level: there is no step up.
+    // Far under budget keeps the level: a raise is decided by the comfort streak.
     CHECK(decide_saver_level(0.01, 0.50, 1, 2) == GateDecision::KEEP);
     CHECK(decide_saver_level(0.51, 0.50, 0, 1) == GateDecision::TOO_HEAVY);
+}
+
+TEST_CASE("a comfort streak rises only on windows comfortably under budget",
+          "[screensaver][screensaver_gate]") {
+    using helix::ui::SaverComfortStreak;
+    SaverComfortStreak streak;
+    CHECK(streak.streak() == 0);
+    streak.add(0.59, 1.0);
+    CHECK(streak.streak() == 1);
+    streak.add(0.6, 1.0);
+    CHECK(streak.streak() == 2);
+    streak.add(0.61, 1.0);
+    CHECK(streak.streak() == 0);
+    streak.add(0.1, 1.0);
+    streak.reset();
+    CHECK(streak.streak() == 0);
+}
+
+TEST_CASE("three comfortable windows step the level back up, never past the top",
+          "[screensaver][screensaver_gate]") {
+    using helix::ui::decide_saver_level_up;
+    CHECK(decide_saver_level_up(3, 3, 0) == GateDecision::STEP_UP);
+    CHECK(decide_saver_level_up(1, 3, 0) == GateDecision::STEP_UP);
+    CHECK(decide_saver_level_up(0, 10, 0) == GateDecision::KEEP);
+    CHECK(decide_saver_level_up(3, 2, 0) == GateDecision::KEEP);
+}
+
+TEST_CASE("a raise never reaches a rung above the ceiling", "[screensaver][screensaver_gate]") {
+    using helix::ui::decide_saver_level_up;
+    CHECK(decide_saver_level_up(2, 10, 2) == GateDecision::KEEP);
+    CHECK(decide_saver_level_up(2, 10, 1) == GateDecision::STEP_UP);
+    CHECK(decide_saver_level_up(3, 10, 2) == GateDecision::STEP_UP);
 }
 
 // ============================================================================

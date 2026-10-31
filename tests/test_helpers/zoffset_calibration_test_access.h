@@ -41,6 +41,12 @@ class ZOffsetCalibrationTestAccess {
         panel.send_accept();
     }
 
+    /// Sends the strategy's start sequence (approach move plus calibrate
+    /// command), skipping the warm-bed wait.
+    static void begin_probe_sequence(ZOffsetCalibrationPanel& panel) {
+        panel.begin_probe_sequence();
+    }
+
     /// Drops the panel straight into a phase. Assigns the member rather than
     /// calling set_state(), which also pushes subjects and touches widgets a
     /// bare panel does not have.

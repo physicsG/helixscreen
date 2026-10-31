@@ -12,11 +12,8 @@
  * controller treats it as authoritative (`_current_tool()` returns
  * `pin_watch.current_tool`, and `sensor_error` is `current_tool == -2`).
  *
- * Two [medusahc] schemas exist and object presence cannot separate them, so the
- * reader discriminates on field names and reads the Irbis3D ones first:
- *
- *   Irbis3D MedusaHC-Python-Controller   operation / last_error / sensor_error / sensors
- *   third-party fork                     state     / error      / toolN_docked
+ * The controller's [medusahc] status carries operation / last_error /
+ * sensor_error / sensors.
  */
 
 #include "printer_discovery.h"
@@ -114,26 +111,6 @@ TEST_CASE("An explicit sensor_error flag is honoured", "[toolchanger][toolsource
 }
 
 // ============================================================================
-// The fork schema is a fallback, never a default
-// ============================================================================
-
-TEST_CASE("The fork's 'state' field is read when 'operation' is absent",
-          "[toolchanger][toolsource]") {
-    auto r = read_tool(json{{"medusahc", {{"state", "changing"}, {"current_tool", 1}}}});
-    REQUIRE(r.has_value());
-    CHECK(r->operation == "changing");
-    CHECK(r->current_tool == 1);
-}
-
-TEST_CASE("'operation' wins when a frame somehow carries both", "[toolchanger][toolsource]") {
-    // Irbis3D's name is the default; the fork's is only a fallback.
-    auto r = read_tool(
-        json{{"medusahc", {{"operation", "idle"}, {"state", "changing"}, {"current_tool", 0}}}});
-    REQUIRE(r.has_value());
-    CHECK(r->operation == "idle");
-}
-
-// ============================================================================
 // pin_watch alone (Irbis3D stock, no [medusahc] object at all)
 // ============================================================================
 
@@ -172,20 +149,17 @@ TEST_CASE("A frame with none of our fields reads as no news", "[toolchanger][too
 // Feeder macro selection
 // ============================================================================
 
-TEST_CASE("The feeder prefers the controller's native command",
+TEST_CASE("The feeder uses the plain OPEN/CLOSE names on every MedusaHC build",
           "[toolchanger][toolsource][feeder]") {
-    // The official build registers MHC_OPEN/MHC_CLOSE and ships legacy OPEN/CLOSE
-    // aliases forwarding to them, so both work there. Prefer the native one.
-    auto official = toolchanger_addon::resolve_feeder(medusahc_hw(/*official_macros=*/true));
-    REQUIRE(official.present);
-    CHECK(official.open_gcode == "MHC_OPEN");
-    CHECK(official.close_gcode == "MHC_CLOSE");
-
-    // Stock config has only the plain macros.
-    auto stock = toolchanger_addon::resolve_feeder(medusahc_hw(/*official_macros=*/false));
-    REQUIRE(stock.present);
-    CHECK(stock.open_gcode == "OPEN");
-    CHECK(stock.close_gcode == "CLOSE");
+    // The controller's OPEN/CLOSE forward to its MHC_* commands and work on a
+    // parked tool, and the stock config has only the plain names.
+    for (const bool official : {true, false}) {
+        CAPTURE(official);
+        auto feeder = toolchanger_addon::resolve_feeder(medusahc_hw(official));
+        REQUIRE(feeder.present);
+        CHECK(feeder.open_gcode == "OPEN");
+        CHECK(feeder.close_gcode == "CLOSE");
+    }
 }
 
 // ============================================================================
@@ -223,22 +197,22 @@ TEST_CASE("An override replaces the detected macro", "[toolchanger][feeder][macr
     CHECK(f.close_gcode == "CUSTOM_GRIP");
     CHECK(f.open_choice == "CUSTOM_RELEASE");
     // The detected default is kept so picking "auto" again restores it.
-    CHECK(f.detected_open == "MHC_OPEN");
-    CHECK(f.detected_close == "MHC_CLOSE");
+    CHECK(f.detected_open == "OPEN");
+    CHECK(f.detected_close == "CLOSE");
 }
 
 TEST_CASE("'auto' and empty both mean the detected default", "[toolchanger][feeder][macro]") {
     auto hw = medusahc_hw(/*official_macros=*/true);
 
     auto explicit_auto = toolchanger_addon::resolve_feeder(hw, "auto", "auto");
-    CHECK(explicit_auto.open_gcode == "MHC_OPEN");
+    CHECK(explicit_auto.open_gcode == "OPEN");
     CHECK(explicit_auto.open_choice == "auto");
 
     // A never-set setting reads back empty on some config paths; it must not
     // blank the gcode and silently break the button.
     auto empty = toolchanger_addon::resolve_feeder(hw, "", "");
-    CHECK(empty.open_gcode == "MHC_OPEN");
-    CHECK(empty.close_gcode == "MHC_CLOSE");
+    CHECK(empty.open_gcode == "OPEN");
+    CHECK(empty.close_gcode == "CLOSE");
     CHECK(empty.open_choice == "auto");
 }
 
@@ -299,26 +273,6 @@ TEST_CASE("A dock nobody reported stays unknown, not empty", "[toolchanger][tool
     CHECK(r->docks[2] == false);
 }
 
-TEST_CASE("The fork's flat dock keys are read the same way", "[toolchanger][toolsource][docks]") {
-    // topi314/MedusaHC emits tool<N>_docked booleans and head_loaded instead of
-    // a sensors dict. Same physical answer, different spelling.
-    auto r = read_tool(json{{"medusahc",
-                             {{"state", "ready"},
-                              {"current_tool", 1},
-                              {"tool_count", 3},
-                              {"head_loaded", true},
-                              {"tool0_docked", true},
-                              {"tool1_docked", false},
-                              {"tool2_docked", true}}}});
-    REQUIRE(r.has_value());
-    REQUIRE(r->docks.size() == 3);
-    CHECK(r->docks[0] == true);
-    CHECK(r->docks[1] == false);
-    CHECK(r->docks[2] == true);
-    REQUIRE(r->head_loaded.has_value());
-    CHECK(*r->head_loaded);
-}
-
 TEST_CASE("A frame with no dock fields reports no docks at all",
           "[toolchanger][toolsource][docks]") {
     // Empty, not "all empty" — the caller must be able to tell a frame that said
@@ -329,15 +283,41 @@ TEST_CASE("A frame with no dock fields reports no docks at all",
     CHECK_FALSE(r->head_loaded.has_value());
 }
 
+TEST_CASE("The controller's target tool is read, and absent means no news",
+          "[toolchanger][toolsource][last_error]") {
+    auto r = read_tool(json{{"medusahc", {{"target_tool", 2}}}});
+    REQUIRE(r.has_value());
+    REQUIRE(r->target_tool.has_value());
+    CHECK(*r->target_tool == 2);
+
+    auto silent = read_tool(json{{"medusahc", {{"current_tool", 1}}}});
+    REQUIRE(silent.has_value());
+    CHECK_FALSE(silent->target_tool.has_value());
+}
+
 // ============================================================================
 // Who owns the swap
 // ============================================================================
 
-TEST_CASE("klipper-toolchanger keeps its own select commands",
+TEST_CASE("A MedusaHC beside klipper-toolchanger still swaps with its own commands",
           "[toolchanger][toolsource][commands]") {
-    // Stock MedusaHC has [toolchanger], which owns SELECT_TOOL/UNSELECT_TOOL.
-    // An absent capability is the backend's signal to keep using them.
+    // klipper-toolchanger only mirrors the detected tool there: it keeps the
+    // machine's own T<n> macros and its UNSELECT_TOOL runs an empty
+    // dropoff_gcode. Its INITIALIZE_TOOLCHANGER does exist.
     auto cmds = toolchanger_addon::resolve_tool_commands(medusahc_hw());
+    REQUIRE(cmds.present);
+    CHECK(cmds.select_prefix == "T");
+    CHECK(cmds.unselect == "DROP_TOOL");
+    CHECK(cmds.initialize_available);
+}
+
+TEST_CASE("A plain klipper-toolchanger keeps its own select commands",
+          "[toolchanger][toolsource][commands]") {
+    // An absent capability is the backend's signal to keep using
+    // SELECT_TOOL/UNSELECT_TOOL.
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array({"toolchanger", "tool T0", "tool T1", "extruder"}));
+    auto cmds = toolchanger_addon::resolve_tool_commands(hw);
     CHECK_FALSE(cmds.present);
     CHECK(cmds.select_prefix.empty());
     CHECK(cmds.unselect.empty());
@@ -346,8 +326,8 @@ TEST_CASE("klipper-toolchanger keeps its own select commands",
 TEST_CASE("A changer without klipper-toolchanger names its own commands",
           "[toolchanger][toolsource][commands]") {
     PrinterDiscovery hw;
-    hw.parse_objects(json::array(
-        {"medusahc", "gcode_macro T0", "gcode_macro T1", "extruder", "extruder1", "toolhead"}));
+    hw.parse_objects(json::array({"pin_watch io", "medusahc", "gcode_macro T0", "gcode_macro T1",
+                                  "gcode_macro DROP_TOOL", "extruder", "extruder1", "toolhead"}));
 
     auto cmds = toolchanger_addon::resolve_tool_commands(hw);
     REQUIRE(cmds.present);
@@ -355,6 +335,18 @@ TEST_CASE("A changer without klipper-toolchanger names its own commands",
     // registers are the swap.
     CHECK(cmds.select_prefix == "T");
     CHECK(cmds.unselect == "DROP_TOOL");
+    CHECK_FALSE(cmds.initialize_available);
+}
+
+TEST_CASE("A MedusaHC without a DROP_TOOL macro parks with the controller's own commands",
+          "[toolchanger][toolsource][commands]") {
+    PrinterDiscovery hw;
+    hw.parse_objects(json::array({"pin_watch io", "medusahc", "gcode_macro T0", "gcode_macro T1",
+                                  "extruder", "extruder1", "toolhead"}));
+
+    auto cmds = toolchanger_addon::resolve_tool_commands(hw);
+    REQUIRE(cmds.present);
+    CHECK(cmds.unselect == "MHC_DROP\nMHC_CLOSE");
 }
 
 TEST_CASE("A printer with no changer module at all swaps with plain T<n>",
@@ -383,7 +375,7 @@ TEST_CASE("A swap in flight makes a derived -2 transitional, not a fault",
     using helix::toolchanger_addon::sensor_error_is_fault;
 
     // Derived from -2: the controller published no flag of its own.
-    auto derived = read_tool(json{{"medusahc", {{"state", "changing"}, {"current_tool", -2}}}});
+    auto derived = read_tool(json{{"medusahc", {{"operation", "changing"}, {"current_tool", -2}}}});
     REQUIRE(derived.has_value());
     REQUIRE(derived->sensor_error);
     REQUIRE_FALSE(derived->sensor_error_reported);
@@ -398,15 +390,34 @@ TEST_CASE("A published sensor_error is a fault even mid-swap", "[toolchanger][to
     auto flagged = read_tool(json{{"medusahc", {{"sensor_error", true}, {"current_tool", 1}}}});
     REQUIRE(flagged.has_value());
     REQUIRE(flagged->sensor_error_reported);
-
     CHECK(sensor_error_is_fault(*flagged, /*swap_in_flight=*/true));
-    CHECK(sensor_error_is_fault(*flagged, /*swap_in_flight=*/false));
+
+    // At rest without a carriage reading, nothing contradicts the flag.
+    auto bare = read_tool(json{{"medusahc", {{"sensor_error", true}}}});
+    REQUIRE(bare.has_value());
+    CHECK(sensor_error_is_fault(*bare, /*swap_in_flight=*/false));
+}
+
+TEST_CASE("A published sensor_error at rest beside a definite carriage is a past failure",
+          "[toolchanger][toolsource]") {
+    using helix::toolchanger_addon::sensor_error_is_fault;
+
+    for (int tool : {-1, 0, 2}) {
+        CAPTURE(tool);
+        auto r = read_tool(json{{"medusahc", {{"sensor_error", true}, {"current_tool", tool}}}});
+        REQUIRE(r.has_value());
+        REQUIRE(r->sensor_error_reported);
+        CHECK_FALSE(sensor_error_is_fault(*r, /*swap_in_flight=*/false));
+    }
+    auto unknown = read_tool(json{{"medusahc", {{"sensor_error", true}, {"current_tool", -2}}}});
+    REQUIRE(unknown.has_value());
+    CHECK(sensor_error_is_fault(*unknown, /*swap_in_flight=*/false));
 }
 
 TEST_CASE("A clean reading is never a fault", "[toolchanger][toolsource]") {
     using helix::toolchanger_addon::sensor_error_is_fault;
 
-    auto clean = read_tool(json{{"medusahc", {{"state", "ready"}, {"current_tool", 1}}}});
+    auto clean = read_tool(json{{"medusahc", {{"operation", "idle"}, {"current_tool", 1}}}});
     REQUIRE(clean.has_value());
     REQUIRE_FALSE(clean->sensor_error);
 

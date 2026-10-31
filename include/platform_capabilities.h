@@ -103,19 +103,19 @@ struct PlatformCapabilities {
     // ========================================================================
 
     /// RAM below this threshold = EMBEDDED tier
-    static constexpr size_t EMBEDDED_RAM_THRESHOLD_MB = 512;
+    static constexpr size_t kEmbeddedRamThresholdMb = 512;
 
     /// RAM at or above this threshold (with enough cores) = STANDARD tier
-    static constexpr size_t STANDARD_RAM_THRESHOLD_MB = 768;
+    static constexpr size_t kStandardRamThresholdMb = 768;
 
     /// Minimum cores for STANDARD tier (with enough RAM)
-    static constexpr int STANDARD_CPU_CORES_MIN = 4;
+    static constexpr int kStandardCpuCoresMin = 4;
 
     /// Max chart points for STANDARD tier
-    static constexpr size_t STANDARD_CHART_POINTS = 200;
+    static constexpr size_t kStandardChartPoints = 200;
 
     /// Max chart points for BASIC tier
-    static constexpr size_t BASIC_CHART_POINTS = 50;
+    static constexpr size_t kBasicChartPoints = 50;
 
     // ========================================================================
     // Factory methods

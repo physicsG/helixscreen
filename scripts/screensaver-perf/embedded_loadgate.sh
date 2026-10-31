@@ -1,24 +1,19 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Runs ON a BusyBox board (CC1, AD5M) through embedded_gate.sh with PROBE=<probe path>
-# HIST=<histogram path> DUR=<seconds> as its first lines.
+# Runs ON a BusyBox board (CC1, AD5M) through embedded_gate.sh, after device_lib.sh, with
+# PROBE=<probe path> HIST=<histogram path> DUR=<seconds>.
 # Loads half the cores with busy loops, runs the wake-up probe for DUR seconds and prints one
-# GATE_RAW line in the fields ctparse.py reads. USER_HZ is 100 on these kernels, and BusyBox
-# has no getconf.
+# GATE_RAW line. The boards keep no journal, so the saver start and stop counts read -1.
 PROBE=${PROBE:?}
 HIST=${HIST:?}
 DUR=${DUR:-60}
-HZ=100
+HZ=$(clk_tck)
 
-PID=$(pidof helix-screen | awk '{print $1}')
+PID=$(helix_pid)
 if [ -z "$PID" ]; then
-    echo "GATE_RAW hist=$HIST ct_exit=3 ct_err=no_helix_screen helix_cpu=-1 saver_started=-1 saver_stopped_midrun=-1"
+    gate_raw "$HIST" 3 no_helix_screen -1 -1 -1
     exit 0
 fi
-
-cpu_ticks() {
-    awk '{ sub(/^.*\) /, ""); print $12 + $13 }' "/proc/$PID/stat"
-}
 
 CORES=$(grep -c '^processor' /proc/cpuinfo)
 LOADERS=$(((CORES + 1) / 2))
@@ -31,15 +26,14 @@ while [ "$i" -lt "$LOADERS" ]; do
 done
 sleep 5
 
-T0=$(cpu_ticks)
+T0=$(cpu_ticks "$PID")
 "$PROBE" "$DUR" > "$HIST" 2> "$HIST.err"
 CT_EXIT=$?
-T1=$(cpu_ticks)
+T1=$(cpu_ticks "$PID")
 
 for p in $BUSY; do
     kill "$p" 2>/dev/null
 done
 CT_ERR=$(head -n 1 "$HIST.err" | tr ' ' '_')
 rm -f "$HIST.err"
-CPU=$(awk -v d=$((T1 - T0)) -v hz="$HZ" -v w="$DUR" 'BEGIN { printf "%.1f", (d / hz) / w * 100 }')
-echo "GATE_RAW hist=$HIST ct_exit=$CT_EXIT ct_err=${CT_ERR:-none} helix_cpu=$CPU saver_started=-1 saver_stopped_midrun=-1"
+gate_raw "$HIST" "$CT_EXIT" "$CT_ERR" "$(cpu_pct $((T1 - T0)) "$HZ" "$DUR")" -1 -1

@@ -38,9 +38,18 @@ helix::PrinterDiscovery make_discovery(AmsType type) {
         objects = {"mmu", "mmu_encoder mmu_encoder", "extruder", "heater_bed", "gcode_move"};
         break;
     case AmsType::AFC:
-        // lane1/lane2 + a buffer named "TN" so <lane>_* and <buffer>_* resolve.
-        objects = {"AFC",      "AFC_stepper lane1", "AFC_stepper lane2", "AFC_buffer TN",
-                   "extruder", "heater_bed",        "gcode_move"};
+        // lane1/lane2, a buffer named "TN" and two AFC extruders so <lane>_*,
+        // <buffer>_* and <extruder>_tool_* resolve.
+        objects = {"AFC",
+                   "AFC_stepper lane1",
+                   "AFC_stepper lane2",
+                   "AFC_buffer TN",
+                   "AFC_extruder extruder",
+                   "AFC_extruder extruder1",
+                   "extruder",
+                   "extruder1",
+                   "heater_bed",
+                   "gcode_move"};
         break;
     case AmsType::CFS:
         objects = {"box", "extruder", "heater_bed", "gcode_move"};
@@ -82,7 +91,8 @@ bool is_ams(const std::string& bare, const helix::PrinterDiscovery& d) {
     // Sensors are usually fully prefixed in the wild; the switch strips the
     // "filament_switch_sensor " / "filament_motion_sensor " prefix. Feed the
     // switch-sensor prefix so the strip path is exercised, matching production.
-    return PrinterHardware::is_ams_sensor("filament_switch_sensor " + bare, d);
+    return PrinterHardware::is_ams_sensor("filament_switch_sensor " + bare, d,
+                                          /*filament_hardware_absent=*/false);
 }
 
 } // namespace
@@ -152,6 +162,31 @@ TEST_CASE("backend-managed sensor: AFC named + per-lane + per-buffer sensors",
     CHECK_FALSE(is_ams("filament_tension", afc));
 }
 
+// AFC registers each [AFC_extruder <name>]'s toolhead sensors as
+// <name>_tool_start / <name>_tool_end. With `pin_tool_start: virtual` the
+// tool_start entry is a software switch whose ENABLE means "filament is loaded",
+// so a generic sensor toggle would rewrite AFC's toolhead load state.
+TEST_CASE("backend-managed sensor: AFC per-extruder toolhead sensors", "[ams][sensor-ownership]") {
+    auto afc = make_discovery(AmsType::AFC);
+    REQUIRE(afc.mmu_type() == AmsType::AFC);
+    REQUIRE(afc.afc_extruder_names() == std::vector<std::string>{"extruder", "extruder1"});
+
+    for (const auto& ext : afc.afc_extruder_names()) {
+        CHECK(is_ams(ext + "_tool_start", afc));
+        CHECK(is_ams(ext + "_tool_end", afc));
+    }
+
+    // An extruder AFC does not manage keeps its sensors visible.
+    CHECK_FALSE(is_ams("extruder2_tool_start", afc));
+    CHECK_FALSE(is_ams("extruder2_tool_end", afc));
+    // Other suffixes on a managed extruder are not AFC's.
+    CHECK_FALSE(is_ams("extruder_runout", afc));
+
+    // Without an MMU nothing is suppressed, whatever the name.
+    auto plain = make_no_mmu_discovery();
+    CHECK_FALSE(is_ams("extruder_tool_start", plain));
+}
+
 // ---------------------------------------------------------------------------
 // AD5X IFS: ifs_motion_sensor, head_switch_sensor,
 //           _ifs_port_sensor_N, _ifs_motion_sensor_N
@@ -186,6 +221,18 @@ TEST_CASE("backend-managed sensor: CFS toolhead sensor", "[ams][sensor-ownership
     CHECK_FALSE(is_ams("tool_start", cfs));
 }
 
+TEST_CASE("backend-managed sensor: a named claim lapses once the backend reports no hardware",
+          "[ams][sensor-ownership][1904]") {
+    auto cfs = make_discovery(AmsType::CFS);
+    REQUIRE(cfs.mmu_type() == AmsType::CFS);
+    REQUIRE(PrinterHardware::is_ams_sensor("filament_switch_sensor filament_sensor", cfs, false));
+
+    CHECK_FALSE(PrinterHardware::is_ams_sensor("filament_switch_sensor filament_sensor", cfs,
+                                               /*filament_hardware_absent=*/true));
+    // A name that says filament system is one whatever the backend reports.
+    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor lane1", cfs, true));
+}
+
 // ---------------------------------------------------------------------------
 // Backends with NO named-sensor case in the switch (default → substring only).
 // "filament_sensor" must NOT be suppressed for these; "extruder" must NOT be.
@@ -212,15 +259,33 @@ TEST_CASE("backend-managed sensor: keyword substring path is type-independent",
     REQUIRE_FALSE(none.has_mmu());
 
     // Keyword-bearing names are AMS sensors regardless of detected backend.
-    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor lane1", none));
-    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor mmu_gate", none));
-    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor afc_whatever", none));
-    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor gate_2", none));
-    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor hub_sensor", none));
+    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor lane1", none, false));
+    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor mmu_gate", none, false));
+    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor afc_whatever", none, false));
+    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor gate_2", none, false));
+    CHECK(PrinterHardware::is_ams_sensor("filament_switch_sensor hub_sensor", none, false));
 
     // Backend-named sensors WITHOUT a keyword stay visible when no MMU detected
     // (a plain printer's "extruder" runout switch must not be hidden).
-    CHECK_FALSE(PrinterHardware::is_ams_sensor("filament_switch_sensor extruder", none));
-    CHECK_FALSE(PrinterHardware::is_ams_sensor("filament_switch_sensor toolhead", none));
-    CHECK_FALSE(PrinterHardware::is_ams_sensor("filament_switch_sensor filament_sensor", none));
+    CHECK_FALSE(PrinterHardware::is_ams_sensor("filament_switch_sensor extruder", none, false));
+    CHECK_FALSE(PrinterHardware::is_ams_sensor("filament_switch_sensor toolhead", none, false));
+    CHECK_FALSE(
+        PrinterHardware::is_ams_sensor("filament_switch_sensor filament_sensor", none, false));
+}
+
+TEST_CASE("backend-managed sensor: each system's own keywords, with nothing detected",
+          "[ams][sensor-ownership]") {
+    auto none = make_no_mmu_discovery();
+    REQUIRE_FALSE(none.has_mmu());
+
+    for (const char* bare : {"ercf_gear", "tradrack_sel", "boxturtle_1", "happy_sensor",
+                             "hare_sensor", "quiet_switch", "AFC_prep"}) {
+        CAPTURE(bare);
+        CHECK(PrinterHardware::is_ams_sensor(std::string("filament_switch_sensor ") + bare, none,
+                                             false));
+    }
+    // The question itself is the backends' and type-independent.
+    CHECK(helix::AmsBackend::sensor_name_names_filament_system("ercf_gear"));
+    CHECK(helix::AmsBackend::sensor_name_names_filament_system("my_afc_hub"));
+    CHECK_FALSE(helix::AmsBackend::sensor_name_names_filament_system("runout"));
 }

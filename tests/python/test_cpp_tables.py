@@ -169,6 +169,15 @@ def test_device_action_factory_calls_yield_label_and_description():
     assert not {"a_btn", "setup", "off", "mm", "ruler"} & found
 
 
+def test_info_factory_yields_label_and_description():
+    found = extract_table_strings(dedent("""\
+        actions.push_back(DA::info("an_info", "Info Label", "tool_offsets", value, "axis_arrow",
+                                   "Info hint"));
+    """))
+    assert {"Info Label", "Info hint"} <= found
+    assert not {"an_info", "tool_offsets", "axis_arrow"} & found
+
+
 def test_builder_lambda_calls_yield_the_label_argument():
     """hh_defaults.cpp builds its rows through local lambdas, not initializers."""
     found = extract_table_strings(dedent("""\

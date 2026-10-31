@@ -8,13 +8,14 @@
  * execute_gcode blocks until the macro finishes. A long pre-start macro
  * (Creality's BED_MESH_CALIBRATE_START_PRINT chain: home, wipe, soak, mesh —
  * ~10-19 min measured on a K2 Plus) can outlive the RPC ceiling even at
- * PRE_START_MACRO_TIMEOUT_MS. When that happens and Klipper still reports
+ * kPreStartMacroTimeoutMs. When that happens and Klipper still reports
  * idle_timeout "Printing", the app must wait for the busy->idle edge and start
  * the print then, not abort with "Pre-print command failed" while the printer
  * is mid-mesh.
  */
 
 #include "ui_print_preparation_manager.h"
+#include "ui_test_utils.h"
 #include "ui_update_queue.h"
 
 #include "../test_helpers/print_preparation_manager_test_access.h"
@@ -30,7 +31,12 @@
 #include "printer_state.h"
 #include "test_helpers/printer_state_test_access.h"
 
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "../catch_amalgamated.hpp"
+#include "hv/json.hpp"
 
 namespace {
 
@@ -41,11 +47,18 @@ struct RecordingJobAPI : public MoonrakerJobAPI {
 
     int start_print_calls = 0;
     std::string last_filename;
+    /// Answer start_print with this instead of success.
+    std::optional<MoonrakerError> fail_with;
 
     void start_print(const std::string& filename, IMoonrakerAPI::SuccessCallback on_success,
-                     IMoonrakerAPI::ErrorCallback /*on_error*/) override {
+                     IMoonrakerAPI::ErrorCallback on_error) override {
         ++start_print_calls;
         last_filename = filename;
+        if (fail_with) {
+            if (on_error)
+                on_error(*fail_with);
+            return;
+        }
         if (on_success)
             on_success();
     }
@@ -141,11 +154,11 @@ TEST_CASE_METHOD(PreStartGateFixture,
     // The pre-start block went through execute_gcode with the long ceiling.
     REQUIRE(api->captured_error);
     REQUIRE(api->captured_gcode.find("BED_MESH_CALIBRATE_START_PRINT") != std::string::npos);
-    CHECK(api->captured_timeout == IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS);
+    CHECK(api->captured_timeout == IMoonrakerAPI::kPreStartMacroTimeoutMs);
 
     // RPC ceiling hit — but Klipper is still executing the macro.
     api->captured_error(
-        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS));
+        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::kPreStartMacroTimeoutMs));
     drain();
 
     CHECK_FALSE(completed);
@@ -171,7 +184,7 @@ TEST_CASE_METHOD(PreStartGateFixture,
     REQUIRE(api->captured_error);
 
     api->captured_error(
-        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS));
+        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::kPreStartMacroTimeoutMs));
     drain();
 
     CHECK(completed);
@@ -208,7 +221,7 @@ TEST_CASE_METHOD(PreStartGateFixture,
     REQUIRE(api->captured_error);
 
     api->captured_error(
-        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS));
+        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::kPreStartMacroTimeoutMs));
     drain();
     REQUIRE_FALSE(completed);
 
@@ -244,7 +257,7 @@ TEST_CASE_METHOD(PreStartGateFixture,
 
     // Macro finishes and the printer goes idle.
     api->captured_error(
-        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::PRE_START_MACRO_TIMEOUT_MS));
+        MoonrakerError::timeout("printer.gcode.script", IMoonrakerAPI::kPreStartMacroTimeoutMs));
     drain();
     set_busy(false);
     drain();
@@ -268,6 +281,118 @@ TEST_CASE_METHOD(PreStartGateFixture, "A start with no preparing job still runs"
     CHECK(jobs.start_print_calls == 1);
 }
 
+TEST_CASE_METHOD(PreStartGateFixture, "A start sent to the printer marks the preparing job",
+                 "[print_preparation][preparing_cancel]") {
+    // From the send on, withdrawing the job locally stops nothing, so Stop
+    // must know to cancel on the printer instead (#1890).
+    state.print_state().begin_preparing(helix::PrintJobRef{"part.gcode", "", ""});
+    set_busy(false);
+
+    manager.start_print("part.gcode", "", []() {}, completion());
+    REQUIRE(api->captured_success);
+    // The pre-start block is still running.
+    CHECK(state.print_state().preparing_start() == helix::PreparingStart::None);
+    api->captured_success();
+    drain();
+
+    REQUIRE(jobs.start_print_calls == 1);
+    CHECK(state.print_state().has_preparing_job());
+    CHECK(state.print_state().preparing_start() == helix::PreparingStart::Accepted);
+}
+
+TEST_CASE_METHOD(PreStartGateFixture, "A refused start fails; a lost one stays preparing",
+                 "[print_preparation][preparing_cancel][1898]") {
+    // A refusal never reached the printer, so the start fails and Stop must
+    // not cancel there. A timeout says nothing about whether it did: a start
+    // sequence run inside SDCARD_PRINT_FILE can outlast the RPC ceiling.
+    const bool refused = GENERATE(true, false);
+    CAPTURE(refused);
+    jobs.fail_with = refused ? MoonrakerError::validation_error("printer.print.start", "Spools")
+                             : MoonrakerError::timeout("printer.print.start", 600000);
+    state.print_state().begin_preparing(helix::PrintJobRef{"part.gcode", "", ""});
+    set_busy(false);
+
+    manager.start_print("part.gcode", "", []() {}, completion());
+    REQUIRE(api->captured_success);
+    api->captured_success();
+    drain();
+
+    REQUIRE(jobs.start_print_calls == 1);
+    CHECK(state.print_state().preparing_start() ==
+          (refused ? helix::PreparingStart::None : helix::PreparingStart::Unanswered));
+    CHECK(completed == refused);
+    if (refused) {
+        CHECK_FALSE(completion_success);
+        CHECK_FALSE(completion_error.empty()); // what the controller retires on
+    }
+}
+
+TEST_CASE_METHOD(PreStartGateFixture,
+                 "A start that times out stays preparing until the printer reports it",
+                 "[print_preparation][preparing_cancel][1898]") {
+    const bool stop_waiting = GENERATE(true, false);
+    CAPTURE(stop_waiting);
+    jobs.fail_with = MoonrakerError::timeout("printer.print.start", 600000);
+    state.print_state().begin_preparing(helix::PrintJobRef{"part.gcode", "", ""});
+    set_busy(false);
+
+    manager.start_print("part.gcode", "", []() {}, completion());
+    REQUIRE(api->captured_success);
+    if (stop_waiting) {
+        state.print_state().note_preparing_cancel_requested(); // Stop while it runs
+    }
+    api->captured_success();
+    drain();
+
+    REQUIRE(jobs.start_print_calls == 1);
+    CHECK(state.print_state().has_preparing_job());
+    CHECK(state.print_state().preparing_start() == helix::PreparingStart::Unanswered);
+    CHECK_FALSE(completed); // no failure reported for a start the printer may be running
+
+    // The printer finishes its start sequence and reports the job.
+    state.update_from_status(
+        nlohmann::json{{"print_stats", {{"state", "printing"}, {"filename", "part.gcode"}}}});
+    drain();
+    CHECK_FALSE(state.print_state().has_preparing_job());
+    CHECK(state.print_state().last_preparing_exit() == helix::PreparingExit::Confirmed);
+}
+
+TEST_CASE_METHOD(PreStartGateFixture,
+                 "A start sent with the connection down fails unless Stop waits on it",
+                 "[print_preparation][preparing_cancel][1898]") {
+    // CONNECTION_LOST is also what a start refused for a link that is down
+    // gets: nothing reached Moonraker, so the start fails and says so.
+    const bool stop_waiting = GENERATE(true, false);
+    CAPTURE(stop_waiting);
+    jobs.fail_with = MoonrakerError::connection_lost("printer.print.start");
+    std::vector<std::string> errors;
+    helix::ui::set_test_notification_error_hook(
+        [&errors](const std::string& msg) { errors.push_back(msg); });
+    state.print_state().begin_preparing(helix::PrintJobRef{"part.gcode", "", ""});
+    set_busy(false);
+
+    manager.start_print("part.gcode", "", []() {}, completion());
+    REQUIRE(api->captured_success);
+    if (stop_waiting) {
+        state.print_state().note_preparing_cancel_requested();
+    }
+    api->captured_success();
+    drain();
+    helix::ui::set_test_notification_error_hook(nullptr);
+
+    REQUIRE(jobs.start_print_calls == 1);
+    CHECK(completed == !stop_waiting);
+    if (stop_waiting) {
+        CHECK(state.print_state().preparing_start() == helix::PreparingStart::Unanswered);
+        CHECK(errors.empty());
+        return;
+    }
+    CHECK_FALSE(completion_success);
+    CHECK_FALSE(completion_error.empty()); // what the controller retires Failed on
+    REQUIRE(errors.size() == 1);
+    CHECK(errors[0].rfind("Failed to start print: ", 0) == 0);
+}
+
 // ============================================================================
 // printer.print.start's own RPC ceiling
 // ============================================================================
@@ -289,11 +414,11 @@ TEST_CASE("start_print outlives a print-start macro that heats synchronously",
 
     REQUIRE(started);
     REQUIRE(client.last_send_method() == "printer.print.start");
-    CHECK(client.last_send_timeout_ms() == MoonrakerJobAPI::PRINT_START_TIMEOUT_MS);
-    CHECK(MoonrakerJobAPI::PRINT_START_TIMEOUT_MS == 600000u);
+    CHECK(client.last_send_timeout_ms() == MoonrakerJobAPI::kPrintStartTimeoutMs);
+    CHECK(MoonrakerJobAPI::kPrintStartTimeoutMs == 600000u);
     // The ceiling only helps while it clears the default — pin the relation too.
-    CHECK(MoonrakerJobAPI::PRINT_START_TIMEOUT_MS >
-          helix::MoonrakerRequestTracker::DEFAULT_REQUEST_TIMEOUT_MS);
+    CHECK(MoonrakerJobAPI::kPrintStartTimeoutMs >
+          helix::MoonrakerRequestTracker::kDefaultRequestTimeoutMs);
 }
 
 TEST_CASE_METHOD(PreStartGateFixture,

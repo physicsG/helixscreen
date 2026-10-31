@@ -271,6 +271,9 @@ class WifiBackend {
         std::string mac_address; ///< Device WiFi adapter MAC address
         int signal_strength{0};  ///< Signal strength (0-100%)
         int frequency_mhz{0};    ///< Connected frequency in MHz (0 = unknown)
+        /// Set by WiFiManager, never by a backend: the control interface has
+        /// stopped answering, and the fields above are the last answer it gave.
+        bool unresponsive{false};
     };
 
     // ========================================================================
@@ -384,6 +387,8 @@ class WifiBackend {
      * - "CONNECTED" - Successfully connected to network
      * - "DISCONNECTED" - Disconnected from network
      * - "AUTH_FAILED" - Authentication failed (wrong password, etc.)
+     * - "REGDOM_CHANGE" - The kernel changed regulatory domain (data: the raw
+     *   event line, which may carry alpha2=XX)
      *
      * One handler per event name: a second registration for a name is ignored.
      *
@@ -625,6 +630,47 @@ class WifiBackend {
     /// A backend that cannot says so, so a missing band is not read as "no band change".
     virtual bool reports_frequency() const {
         return false;
+    }
+
+    // ========================================================================
+    // Regulatory Country
+    // ========================================================================
+
+    /// Whether get_country()/set_country() can read and set the radio's
+    /// regulatory country. False where something else owns the radio (the
+    /// printer's network daemon) or the platform has no such control; the UI
+    /// hides its country control then.
+    virtual bool supports_country() const {
+        return false;
+    }
+
+    /**
+     * @brief Read the radio's regulatory country
+     *
+     * BLOCKING (a control-socket round trip or a subprocess): call it from
+     * WiFiManager's control lane, never the LVGL thread.
+     *
+     * @param[out] code ISO 3166-1 alpha-2 in upper case, or "" for none
+     *                  (the world regulatory domain)
+     * @return SUCCESS with @p code filled; NOT_SUPPORTED where
+     *         supports_country() is false; an error when the read failed
+     */
+    virtual WiFiError get_country(std::string& code) {
+        code.clear();
+        return WiFiError(WiFiResult::NOT_SUPPORTED, "get_country not supported by this backend");
+    }
+
+    /**
+     * @brief Set the radio's regulatory country
+     *
+     * BLOCKING, like get_country(). The kernel may answer with a regulatory
+     * domain change; backends that see it dispatch "REGDOM_CHANGE".
+     *
+     * @param code ISO 3166-1 alpha-2, already validated by the caller
+     */
+    virtual WiFiError set_country(const std::string& code) {
+        (void)code;
+        return WiFiError(WiFiResult::NOT_SUPPORTED, "set_country not supported by this backend");
     }
 
     // ========================================================================

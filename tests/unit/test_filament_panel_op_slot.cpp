@@ -25,18 +25,23 @@
  * for 3, not 0). If it still passes, the test does not reach the callsite.
  */
 
+#include "ui_modal.h"
 #include "ui_panel_filament.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/filament_panel_test_access.h"
 #include "../test_helpers/log_capture.h"
+#include "../test_helpers/modal_answer.h"
+#include "../test_helpers/scoped_shared_resource.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "ams_backend_mock.h"
 #include "ams_state.h"
 #include "ams_types.h"
 #include "config.h"
 #include "post_op_cooldown_manager.h"
 #include "printer_state.h"
+#include "safety_settings_manager.h"
 #include "tool_state.h"
 
 #include <lvgl.h>
@@ -129,6 +134,12 @@ class RecordingBackend : public helix::AmsBackendMock {
         }
         return info;
     }
+    /// AmsBackend::toolhead_filament_unaccounted(): filament at the nozzle that
+    /// no lane claims. nullopt = no observation, the base contract's default.
+    std::optional<bool> unaccounted_;
+    [[nodiscard]] std::optional<bool> toolhead_filament_unaccounted() const override {
+        return unaccounted_;
+    }
     [[nodiscard]] helix::BackendTraits traits() const override {
         helix::BackendTraits t = helix::AmsBackendMock::traits();
         t.filament_ops_self_home = self_homes_;
@@ -160,6 +171,9 @@ struct OpSlotHarness {
     RecordingBackend* mock = nullptr;
     std::unique_ptr<FilamentPanel> panel;
     lv_obj_t* root = nullptr;
+    /// Tests that change "Confirm tool changes" leave it as they found it.
+    bool saved_confirm =
+        helix::SafetySettingsManager::instance().get_tool_change_require_confirmation();
 
     OpSlotHarness(LVGLUITestFixture& f, const AmsSystemInfo& sys, int loaded_slot,
                   const ToolTopology& topo)
@@ -201,6 +215,9 @@ struct OpSlotHarness {
     }
 
     ~OpSlotHarness() {
+        helix::SafetySettingsManager::instance().set_tool_change_require_confirmation(
+            saved_confirm);
+        ModalStack::instance().clear();
         if (root) {
             lv_obj_delete(root); // delete UI subtree while panel subjects live
         }
@@ -371,43 +388,136 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "[filament][op_slot][panel]") {
     OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
     h.mock->topology_ = PathTopology::PARALLEL;
+    helix::SafetySettingsManager::instance().set_tool_change_require_confirmation(false);
     h.select_tool(1); // != active T0
 
-    // RecordingBackend::change_tool() succeeds synchronously, so on_success()
-    // (the "Switched to {}" toast) runs inside this call, on this thread.
+    // RecordingBackend::change_tool() accepts synchronously, so on_success()
+    // (the "Switching to {}" toast) runs inside this call, on this thread. An
+    // accepted change has not happened yet: the toast must not claim it has.
     helix::LogCapture log(64);
     TA::handle_extruder_changed(*h.panel);
 
     REQUIRE(h.mock->change_tool_calls == 1);
     CHECK(h.mock->last_change_tool == 1);
-    // NOTIFY_SUCCESS logs once itself and the test stub's ui_notification_success
-    // echoes it a second time, so at least one line is the assertion, not exactly one.
+    // NOTIFY_SUCCESS logs the text of the toast it raises.
     // The toast names the tool the user tapped, never the 0-based G-code form.
-    CHECK(log.count_containing("Switched to Tool 2") >= 1);
-    CHECK(log.count_containing("Switched to T1") == 0);
+    CHECK(log.count_containing("Switching to Tool 2") >= 1);
+    CHECK(log.count_containing("Switching to T1") == 0);
+    CHECK(log.count_containing("Switched to") == 0);
 }
+
+// With "Confirm tool changes" on, the dropdown's selection waits on the dialog,
+// and a change that does not happen leaves the dropdown on the mounted tool.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "Toolchanger (PARALLEL): dropdown selection asks first and reverts on cancel",
+                 "[filament][op_slot][panel][confirm]") {
+    OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
+    h.mock->topology_ = PathTopology::PARALLEL;
+    helix::SafetySettingsManager::instance().set_tool_change_require_confirmation(true);
+    lv_obj_t* dd = TA::extruder_dropdown(*h.panel);
+    h.select_tool(2); // != active T0
+
+    TA::handle_extruder_changed(*h.panel);
+    CHECK(h.mock->change_tool_calls == 0);
+    REQUIRE(ModalStack::instance().top_dialog() != nullptr);
+    CHECK(lv_dropdown_get_selected(dd) == 2);
+
+    SECTION("confirming changes tool") {
+        helix::test::answer_top_modal("btn_primary");
+        CHECK(h.mock->change_tool_calls == 1);
+        CHECK(h.mock->last_change_tool == 2);
+    }
+    SECTION("cancelling puts the dropdown back on the mounted tool") {
+        helix::test::answer_top_modal("btn_secondary");
+        CHECK(h.mock->change_tool_calls == 0);
+        CHECK(lv_dropdown_get_selected(dd) == 0);
+    }
+    SECTION("a backdrop dismissal puts it back too") {
+        helix::test::dismiss_top_modal();
+        CHECK(h.mock->change_tool_calls == 0);
+        CHECK(lv_dropdown_get_selected(dd) == 0);
+    }
+    SECTION("a programmatic close puts it back too") {
+        Modal::hide(ModalStack::instance().top_dialog());
+        process_lvgl(500);
+        helix::ui::UpdateQueue::instance().drain();
+        REQUIRE(ModalStack::instance().stack_empty());
+        CHECK(h.mock->change_tool_calls == 0);
+        CHECK(lv_dropdown_get_selected(dd) == 0);
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "Toolchanger (PARALLEL): a refused dropdown selection reverts without a dialog",
+                 "[filament][op_slot][panel][confirm]") {
+    OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
+    h.mock->topology_ = PathTopology::PARALLEL;
+    helix::SafetySettingsManager::instance().set_tool_change_require_confirmation(true);
+    lv_obj_t* dd = TA::extruder_dropdown(*h.panel);
+
+    SECTION("while printing") {
+        set_wire_state(state(), "printing");
+    }
+    SECTION("while the filament system is busy") {
+        h.mock->sys_.action = AmsAction::LOADING;
+    }
+    h.select_tool(1);
+    TA::handle_extruder_changed(*h.panel);
+
+    CHECK(h.mock->change_tool_calls == 0);
+    CHECK(ModalStack::instance().stack_empty());
+    CHECK(lv_dropdown_get_selected(dd) == 0);
+}
+
+namespace {
+
+/// Sets the active extruder's reading and target, in degrees.
+void set_nozzle(helix::PrinterState& st, int temp_c, int target_c) {
+    lv_subject_set_int(st.temperature_state().get_active_extruder_target_subject(), target_c * 10);
+    lv_subject_set_int(st.temperature_state().get_active_extruder_temp_subject(), temp_c * 10);
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+}
+
+/// A ticket @p heater heated for: an op requested on a cold nozzle, run once hot.
+helix::ui::FilamentOpTicket heated_ticket(helix::ui::FilamentOpHeater& heater,
+                                          helix::PrinterState& st) {
+    set_nozzle(st, 25, 0);
+    helix::ui::FilamentOpTicket ticket = 0;
+    helix::ui::PreheatRequest req;
+    req.op = helix::ui::FilamentHeatOp::Extrude;
+    req.run = [&ticket](helix::ui::FilamentOpTicket t) { ticket = t; };
+    REQUIRE(heater.run_after_preheat(std::move(req)) ==
+            helix::ui::FilamentOpHeater::Outcome::Heating);
+    set_nozzle(st, 220, 220);
+    REQUIRE(ticket != 0);
+    return ticket;
+}
+
+} // namespace
 
 // ============================================================================
 // Bug C guard: after a filament op, the extruder must cool back down. Two halves:
 //
-//   1. restore_heater_after_preheat() schedules the post-op cooldown whenever the
-//      printer is IDLE, and skips it while printing/paused (a real print manages
-//      its own heat — cooling under it would fight the job).
-//   2. Fire-and-forget AMS backend ops (AFC/BoxTurtle) complete via
-//      ams_action_observer_ returning to IDLE — NOT the gcode/macro success
-//      callback that used to be the only caller of restore_heater_after_preheat().
-//      That completion block must reach restore, or the nozzle holds the material
-//      temp indefinitely after a swap (the reported bug).
+//   1. FilamentOpHeater::op_succeeded() schedules the post-op cooldown for an op
+//      it heated for whenever the printer is IDLE, and skips it while a job holds
+//      the machine (a real print manages its own heat — cooling under it would
+//      fight the job).
+//   2. Fire-and-forget AMS backend ops (AFC/BoxTurtle) complete on the AMS
+//      action feed returning to IDLE, not on a gcode/macro reply. The heater
+//      watches that feed after the panel's dispatch, or the nozzle holds the
+//      material temp indefinitely after a swap.
 //
-// The 120s timer -> M104 S0 machinery itself lives in PostOpCooldownManager and is
-// shared/pre-existing; these tests pin only the panel's NEW scheduling behavior,
-// observed via PostOpCooldownManager::has_pending_timer().
+// The 120s timer -> M104 S0 machinery itself lives in PostOpCooldownManager;
+// these tests pin the scheduling, observed via
+// PostOpCooldownManager::has_pending_timer().
 // ============================================================================
 
-TEST_CASE_METHOD(LVGLUITestFixture,
-                 "Bug C: restore_heater_after_preheat schedules a cooldown when idle",
+TEST_CASE_METHOD(LVGLUITestFixture, "Bug C: a finished filament op schedules a cooldown when idle",
                  "[filament][op_slot][panel]") {
     OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(state()));
+    const auto ticket = heated_ticket(heater.get(), state());
 
     auto& cd = PostOpCooldownManager::instance();
     cd.init();
@@ -417,7 +527,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     set_wire_state(state(), "standby");
 
-    TA::restore_heater_after_preheat(*h.panel);
+    heater.get().op_succeeded(ticket);
     process_lvgl(30); // observer/schedule hops -> queued timer creation
 
     CHECK(cd.has_pending_timer());
@@ -427,9 +537,12 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
-                 "Bug C: restore_heater_after_preheat does NOT schedule while printing",
+                 "Bug C: a finished filament op does NOT schedule while printing",
                  "[filament][op_slot][panel]") {
     OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(state()));
+    const auto ticket = heated_ticket(heater.get(), state());
 
     auto& cd = PostOpCooldownManager::instance();
     cd.init();
@@ -439,7 +552,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     set_wire_state(state(), "printing");
 
-    TA::restore_heater_after_preheat(*h.panel);
+    heater.get().op_succeeded(ticket);
     process_lvgl(30);
 
     CHECK_FALSE(cd.has_pending_timer()); // a print manages its own heat
@@ -449,12 +562,15 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture,
-                 "Bug C: restore_heater_after_preheat does NOT schedule while PREPARING",
+                 "Bug C: a finished filament op does NOT schedule while PREPARING",
                  "[filament][op_slot][panel][print_guard]") {
     // print_stats reads standby for the whole of a host-side pre-start block, so
     // the old PRINTING||PAUSED test scheduled a cooldown that the block's own
     // heating would immediately undo - and then fight.
     OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(state()));
+    const auto ticket = heated_ticket(heater.get(), state());
 
     auto& cd = PostOpCooldownManager::instance();
     cd.init();
@@ -466,14 +582,17 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     state().print_state().set_print_start_state(helix::PrintStartPhase::BED_MESH, "", 0);
     process_lvgl(10);
 
-    TA::restore_heater_after_preheat(*h.panel);
+    heater.get().op_succeeded(ticket);
     process_lvgl(30);
     CHECK_FALSE(cd.has_pending_timer());
 
     // The block ending hands the behaviour back, so the guard cannot latch.
     state().print_state().set_print_start_state(helix::PrintStartPhase::IDLE, "", 0);
     process_lvgl(10);
-    TA::restore_heater_after_preheat(*h.panel);
+    const auto later_ticket = heated_ticket(heater.get(), state());
+    cd.cancel();
+    process_lvgl(10);
+    heater.get().op_succeeded(later_ticket);
     process_lvgl(30);
     CHECK(cd.has_pending_timer());
 
@@ -484,13 +603,15 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 TEST_CASE_METHOD(LVGLUITestFixture,
                  "Bug C: AFC backend load completion schedules the post-op cooldown",
                  "[filament][op_slot][panel]") {
-    // End-to-end: an AFC load is dispatched fire-and-forget, then the AMS action
-    // returns to IDLE (backend finished). The ams_action_observer_ completion
-    // block must run restore_heater_after_preheat() and leave a cooldown pending.
-    // Mutation target: delete the restore_heater_after_preheat() call in that block
-    // (ui_panel_filament.cpp) and this fails — no timer pending after completion.
+    // End-to-end: the panel heats a cold nozzle, an AFC load is dispatched
+    // fire-and-forget, then the AMS action returns to IDLE (backend finished).
+    // The heater's completion watch, armed by the dispatch, must leave a
+    // cooldown pending for the heat it sent.
     OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
     h.select_tool(0); // slot 0 is NOT loaded (only slot 3 is) -> load proceeds
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(state()));
+    set_nozzle(state(), 25, 0);
 
     set_wire_state(state(), "standby");
 
@@ -503,6 +624,9 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // Fire-and-forget backend op; op guard now active. Lane 3 is seated, so the
     // dispatch is the swap arm — the completion path is the same either way.
     TA::execute_load(*h.panel);
+    REQUIRE(heater.get().pending());
+    REQUIRE(h.mock->change_tool_calls == 0);
+    set_nozzle(state(), 250, 250);
     REQUIRE(h.mock->change_tool_calls == 1);
 
     // Backend signals progress, then completion, via the shared AMS action subject.
@@ -554,6 +678,9 @@ template <typename T> class ScopedConfigValue {
 TEST_CASE_METHOD(LVGLUITestFixture, "Post-op cooldown: disabled in settings schedules nothing",
                  "[filament][op_slot][panel]") {
     OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(state()));
+    const auto ticket = heated_ticket(heater.get(), state());
 
     auto* cfg = helix::Config::get_instance();
     ScopedConfigValue<bool> off(cfg->df() + "filament/auto_cooldown", false, true);
@@ -566,7 +693,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Post-op cooldown: disabled in settings sche
 
     set_wire_state(state(), "standby");
 
-    TA::restore_heater_after_preheat(*h.panel);
+    heater.get().op_succeeded(ticket);
     process_lvgl(30);
 
     CHECK_FALSE(cd.has_pending_timer()); // the filament system owns the cooldown
@@ -581,6 +708,9 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // CONFIGURATION.md documents cooldown_delay_seconds=0 as "disable auto-cooldown".
     // A 0ms lv_timer would instead fire on the next tick and cut the heater at once.
     OpSlotHarness h(*this, boxturtle_sys(), /*loaded_slot=*/3, identity_topo());
+    helix_test::ScopedSharedResource<helix::ui::FilamentOpHeater> heater(
+        std::make_shared<helix::ui::FilamentOpHeater>(state()));
+    const auto ticket = heated_ticket(heater.get(), state());
 
     auto* cfg = helix::Config::get_instance();
     ScopedConfigValue<bool> on(cfg->df() + "filament/auto_cooldown", true, true);
@@ -594,16 +724,14 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
     set_wire_state(state(), "standby");
 
-    TA::restore_heater_after_preheat(*h.panel);
+    heater.get().op_succeeded(ticket);
 
     // Drain the update queue WITHOUT lv_timer_handler. schedule() creates the timer
     // from a queued lambda, but a 0ms timer would then fire and null itself inside
     // the same process_lvgl() sweep — making "fired instantly" (the bug) read
     // identical to "never scheduled" (the fix). Draining alone lets the timer be
     // created but never run, so its mere existence is the failure signal.
-    for (int i = 0; i < 5; ++i) {
-        helix::ui::UpdateQueue::instance().drain();
-    }
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     CHECK_FALSE(cd.has_pending_timer());
 
@@ -629,6 +757,61 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 // Mutation check: drop `print_blocks_op` from the compute_op_button_gating()
 // call in update_filament_op_buttons(), OR delete the print-state observer
 // registration, and this test fails at the post-start assertions.
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "AD5X: an unaccounted toolhead enables Unload and unloads the active head",
+                 "[filament][op_slot][panel][1324]") {
+    // The live AD5X IFS module shape: four virtual tools with an identity map,
+    // filament at the toolhead, no lane claiming it. Whatever tool the dropdown
+    // names, the button must act on the active head, not that tool's lane.
+    AmsSystemInfo sys = boxturtle_sys();
+    sys.type = AmsType::AD5X_IFS;
+    sys.current_slot = -1;
+    ToolTopology topo = identity_topo();
+    topo.active_tool = -1;
+
+    OpSlotHarness h(*this, sys, /*loaded_slot=*/-1, topo);
+    h.mock->unaccounted_ = true;
+    h.select_tool(1);
+    TA::handle_extruder_changed(*h.panel);
+    process_lvgl(10);
+
+    CHECK(TA::selected_op_slot(*h.panel) == helix::ui::kActiveHeadSlot);
+    lv_subject_t* unload_disabled = lv_xml_get_subject(nullptr, "filament_unload_disabled");
+    REQUIRE(unload_disabled != nullptr);
+    CHECK(lv_subject_get_int(unload_disabled) == 0);
+
+    TA::execute_unload(*h.panel);
+    REQUIRE(h.mock->unload_calls == 1);
+    CHECK(h.mock->last_unload_slot == helix::ui::kActiveHeadSlot);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "AD5X: the extruder-only clear answer reaches the backend from the Filament panel",
+                 "[filament][op_slot][panel][1324]") {
+    AmsSystemInfo sys = boxturtle_sys();
+    sys.type = AmsType::AD5X_IFS;
+    sys.current_slot = -1;
+    ToolTopology topo = identity_topo();
+    topo.active_tool = -1;
+
+    OpSlotHarness h(*this, sys, /*loaded_slot=*/-1, topo);
+    h.select_tool(1);
+    TA::handle_extruder_changed(*h.panel);
+    process_lvgl(10);
+
+    SECTION("dispatched unchanged while the toolhead is unaccounted") {
+        h.mock->unaccounted_ = true;
+        TA::handle_unload_button(*h.panel, helix::kClearToolheadSlot);
+        REQUIRE(h.mock->unload_calls == 1);
+        CHECK(h.mock->last_unload_slot == helix::kClearToolheadSlot);
+    }
+    SECTION("refused, sending nothing, when the backend accounts for the toolhead") {
+        h.mock->unaccounted_ = false;
+        TA::handle_unload_button(*h.panel, helix::kClearToolheadSlot);
+        CHECK(h.mock->unload_calls == 0);
+    }
+}
+
 TEST_CASE_METHOD(LVGLUITestFixture,
                  "Filament panel greys Load/Unload when a print owns the toolhead",
                  "[filament][op_slot][panel][print_guard]") {

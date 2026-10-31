@@ -26,14 +26,18 @@
 #include "config.h"
 #include "env_knobs.h"
 #include "filament_sensor_manager.h"
+#include "home_layout_sync.h"
 #include "host_identity.h"
 #include "i_moonraker_client.h"
 #include "json_utils.h"
+#include "lan_sweep.h"
 #include "mock_persona.h"
 #include "moonraker_api.h"
 #include "moonraker_client.h"
 #include "moonraker_event_routing.h"
 #include "power_device_state.h"
+#include "printer_discovery_list.h"
+#include "printer_retarget.h"
 #include "sensor_state.h"
 #include "unit_conversions.h"
 #ifdef HELIX_ENABLE_MOCKS
@@ -45,6 +49,7 @@
 #include "print_completion.h"
 #include "print_start_collector.h"
 #include "print_start_profile.h"
+#include "print_stop_reason.h"
 #include "printer_detector.h"
 #include "printer_state.h"
 #include "runtime_config.h"
@@ -104,10 +109,13 @@ bool MoonrakerManager::init(const RuntimeConfig& runtime_config, Config* config)
 
     // HELIX_MOCK_PRINTER is authoritative over any persisted printer type:
     // PrinterDetector::auto_detect_and_save() short-circuits when a type is
-    // already saved, so settle it here, before detection runs.
+    // already saved, so settle it here, before detection runs. The firmware
+    // never sets the variable, and leaving the call out drops the persona table.
+#if !defined(ESP_PLATFORM)
     if (config && helix::apply_mock_printer_identity(*config, std::getenv("HELIX_MOCK_PRINTER"))) {
         config->save();
     }
+#endif
 
     // Configure timeouts from config file
     if (config) {
@@ -122,6 +130,11 @@ bool MoonrakerManager::init(const RuntimeConfig& runtime_config, Config* config)
             [] { return std::make_unique<helix::MdnsDiscovery>(); });
     }
 #endif
+    // The setup wizard and the host modal list printers from mDNS and the LAN sweep. A
+    // mock printer has nothing on the network to find.
+    if (!runtime_config.should_mock_mdns()) {
+        helix::set_printer_discovery_source(helix::make_moonraker_discovery);
+    }
 
     // Register callbacks for notifications and state changes
     register_callbacks();
@@ -152,6 +165,7 @@ void MoonrakerManager::shutdown() {
 
     // Stop print start collector first (before client is destroyed)
     release_print_start_collector();
+    m_print_stop_reason.reset();
 
     // Release observer guards without calling lv_observer_remove().
     // During shutdown, subjects may already be deinitialized (which frees observers).
@@ -181,9 +195,16 @@ void MoonrakerManager::shutdown() {
     }
     m_client.reset();
 
+    // Before the API it calls goes away; replies still queued are discarded.
+    helix::HomeLayoutSync::instance().shutdown();
+
     // Safe now — no callbacks can fire after client destruction.
     // Note: m_api holds a MoonrakerClient& that is now dangling, but
     // ~MoonrakerAPI() only joins HTTP threads and deinits subjects.
+    // As with the client, the global stops naming the API this manager installed.
+    if (get_moonraker_api() == m_api.get()) {
+        set_moonraker_api(nullptr);
+    }
     m_api.reset();
 
     // Clear notification queue
@@ -308,6 +329,11 @@ void MoonrakerManager::process_notifications() {
                     moonraker_remote = true;
                 }
                 get_printer_state().set_moonraker_is_remote(moonraker_remote);
+                helix::HomeLayoutSync::instance().on_connected();
+            } else if (new_state != static_cast<int>(ConnectionState::CONNECTED)) {
+                // The verdict belonged to the connection that just ended.
+                get_printer_state().clear_moonraker_locality();
+                helix::HomeLayoutSync::instance().on_disconnected();
             }
 
             // Auto-close Connection Failed modal when connection is restored
@@ -376,6 +402,8 @@ void MoonrakerManager::create_client(const RuntimeConfig& runtime_config) {
         spdlog::info("[MoonrakerManager] Creating MOCK client ({}, {}x speed)",
                      persona.display_name, speedup);
         auto mock = std::make_unique<MoonrakerClientMock>(persona.type, speedup);
+        // Whole-Hz shaper sweep lines, so the live sweep preview has a sweep to follow.
+        mock->set_shaper_sweep_realtime(true);
 
         // HELIX_MOCK_AUTO_PRINT=1 — boot straight into an active mock print so
         // print-gated features (e.g. adaptive bed mesh) are exercisable under
@@ -483,9 +511,9 @@ void MoonrakerManager::configure_timeouts(Config* config) {
 
     uint32_t connection_timeout = static_cast<uint32_t>(
         config->get<int>(config->df() + "moonraker_connection_timeout_ms", 10000));
-    uint32_t request_timeout = static_cast<uint32_t>(
-        config->get<int>(config->df() + "moonraker_request_timeout_ms",
-                         MoonrakerRequestTracker::DEFAULT_REQUEST_TIMEOUT_MS));
+    uint32_t request_timeout =
+        static_cast<uint32_t>(config->get<int>(config->df() + "moonraker_request_timeout_ms",
+                                               MoonrakerRequestTracker::kDefaultRequestTimeoutMs));
     uint32_t keepalive_interval = static_cast<uint32_t>(
         config->get<int>(config->df() + "moonraker_keepalive_interval_ms", 10000));
     uint32_t reconnect_min_delay = static_cast<uint32_t>(
@@ -554,6 +582,21 @@ void MoonrakerManager::present_event(const MoonrakerEvent& evt) {
     case helix::MoonrakerEventRoute::WarningToast:
         NOTIFY_WARNING("{}", text);
         return;
+
+    case helix::MoonrakerEventRoute::LoginRefusedPrompt:
+    case helix::MoonrakerEventRoute::LoginRefusedToast: {
+        const char* title = lv_tr(decision.title_tag);
+        const char* message = lv_tr(
+            helix::login_refused_message(!helix::active_printer_credential().api_key.empty()));
+        spdlog::error("[MoonrakerManager] {}: {}", title, message);
+        if (decision.route == helix::MoonrakerEventRoute::LoginRefusedToast) {
+            NOTIFY_ERROR_T(title, "{}", message);
+            return;
+        }
+        helix::ui::modal_confirm(title, message, ModalSeverity::Warning, lv_tr("Enter API Key"),
+                                 [] { helix::ui::show_change_host_modal(); });
+        return;
+    }
 
     case helix::MoonrakerEventRoute::SuccessToast:
         // Not ui_notification_*: every severity there writes a history row,
@@ -651,6 +694,9 @@ void MoonrakerManager::create_api(const RuntimeConfig& runtime_config) {
     // Set API for SpoolmanManager weight polling
     SpoolmanManager::instance().set_api(m_api.get());
 
+    // Publish / fetch the home layout through Moonraker's database
+    helix::HomeLayoutSync::instance().init(*m_api);
+
     // Note: EmergencyStopOverlay::init() and create() are called from Application
     // after both MoonrakerManager and SubjectInitializer are ready
 }
@@ -659,6 +705,14 @@ void MoonrakerManager::release_print_start_collector() {
     if (m_print_start_collector) {
         m_print_start_collector->detach();
         m_print_start_collector.reset();
+    }
+}
+
+void MoonrakerManager::init_print_stop_reason() {
+    m_print_stop_reason.reset();
+    if (m_client) {
+        m_print_stop_reason =
+            std::make_unique<helix::PrintStopReasonTracker>(*m_client, get_printer_state());
     }
 }
 
@@ -671,7 +725,7 @@ void MoonrakerManager::init_print_start_collector() {
     // A retarget keeps the client: the previous printer's collector must not stay hooked
     // to it.
     release_print_start_collector();
-    m_print_start_collector = std::make_shared<PrintStartCollector>(*m_client, get_printer_state());
+    m_print_start_collector = PrintStartCollector::create(*m_client, get_printer_state());
 
     // Load print start profile based on detected printer type
     std::string printer_type = get_printer_state().profile_state().printer_type();
@@ -967,7 +1021,8 @@ void MoonrakerManager::init_print_start_collector() {
             collector->note_current_layer(current_layer);
             if (should_complete_preprint(printer_reports_layers, current_layer, print_duration,
                                          collector->has_seen_layer_zero(),
-                                         collector->has_seen_layer_advance())) {
+                                         collector->has_seen_layer_advance(),
+                                         collector->in_live_preprint_step())) {
                 spdlog::info("[MoonrakerManager] Authoritative: pre-print complete via "
                              "print_duration fallback (print_duration={}s, "
                              "printer_reports_layers={}), completing pre-print phase",

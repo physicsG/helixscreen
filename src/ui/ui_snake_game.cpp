@@ -43,28 +43,28 @@ namespace helix {
 // CONSTANTS
 // ============================================================================
 
-static constexpr int32_t CELL_SIZE = 20;
-static constexpr uint32_t INITIAL_TICK_MS = 150;
-static constexpr uint32_t MIN_TICK_MS = 70;
-static constexpr int SPEED_UP_INTERVAL = 5;
-static constexpr uint32_t RENDER_TICK_MS = 16; // ~60fps render timer
-static constexpr uint32_t DT_CLAMP_MS = 200;   // Spiral-of-death clamp
+static constexpr int32_t kCellSize = 20;
+static constexpr uint32_t kInitialTickMs = 150;
+static constexpr uint32_t kMinTickMs = 70;
+static constexpr int kSpeedUpInterval = 5;
+static constexpr uint32_t kRenderTickMs = 16; // ~60fps render timer
+static constexpr uint32_t kDtClampMs = 200;   // Spiral-of-death clamp
 
 // Config key for persisted high score (non-obvious name)
-static constexpr const char* HIGH_SCORE_KEY = "/display/frame_counter";
+static constexpr const char* kHighScoreKey = "/display/frame_counter";
 
 // Death animation timing (ms)
-static constexpr uint32_t DEATH_FLASH_DURATION = 50;
-static constexpr uint32_t DEATH_SHRINK_DURATION = 200;
-static constexpr uint32_t DEATH_CARD_TIME = 300;
-static constexpr uint32_t DEATH_INPUT_READY_TIME = 600;
-static constexpr uint32_t TRACKER_FADE_MS = 500;
+static constexpr uint32_t kDeathFlashDuration = 50;
+static constexpr uint32_t kDeathShrinkDuration = 200;
+static constexpr uint32_t kDeathCardTime = 300;
+static constexpr uint32_t kDeathInputReadyTime = 600;
+static constexpr uint32_t kTrackerFadeMs = 500;
 
 // Tracker music asset
-static constexpr const char* SNAKE_MUSIC_PATH = "assets/sounds/elysium.mod";
+static constexpr const char* kSnakeMusicPath = "assets/sounds/elysium.mod";
 
 // Filament colors for snake body (random at game start)
-static constexpr uint32_t FILAMENT_COLORS[] = {
+static constexpr uint32_t kFilamentColors[] = {
     0xED1C24, // Red
     0x00A651, // Green
     0x2E3192, // Blue
@@ -76,11 +76,11 @@ static constexpr uint32_t FILAMENT_COLORS[] = {
     0x8DC63F, // Lime
     0xF15A24, // Vermillion
 };
-static constexpr int NUM_FILAMENT_COLORS =
-    static_cast<int>(sizeof(FILAMENT_COLORS) / sizeof(FILAMENT_COLORS[0]));
+static constexpr int kNumFilamentColors =
+    static_cast<int>(sizeof(kFilamentColors) / sizeof(kFilamentColors[0]));
 
 // Food spool colors (random per food item)
-static constexpr uint32_t FOOD_COLORS[] = {
+static constexpr uint32_t kFoodColors[] = {
     0xFF6B35, // Tangerine
     0x00D2FF, // Sky blue
     0xFFD700, // Gold
@@ -88,19 +88,19 @@ static constexpr uint32_t FOOD_COLORS[] = {
     0x7FFF00, // Chartreuse
     0xDA70D6, // Orchid
 };
-static constexpr int NUM_FOOD_COLORS =
-    static_cast<int>(sizeof(FOOD_COLORS) / sizeof(FOOD_COLORS[0]));
+static constexpr int kNumFoodColors =
+    static_cast<int>(sizeof(kFoodColors) / sizeof(kFoodColors[0]));
 
 // Speed tier border colors
-static constexpr uint32_t TIER_COLORS[] = {
+static constexpr uint32_t kTierColors[] = {
     0x666666, // Neutral gray (tier 0)
     0x00A651, // Green (tier 1)
     0xFFF200, // Yellow (tier 2)
     0xF7941D, // Orange (tier 3)
     0xED1C24, // Red (tier 4+)
 };
-static constexpr int NUM_TIER_COLORS =
-    static_cast<int>(sizeof(TIER_COLORS) / sizeof(TIER_COLORS[0]));
+static constexpr int kNumTierColors =
+    static_cast<int>(sizeof(kTierColors) / sizeof(kTierColors[0]));
 
 // ============================================================================
 // TYPES
@@ -181,7 +181,7 @@ struct GameState {
     GridPos food = {0, 0};
     lv_color_t food_color = {};
     lv_color_t snake_color = {};
-    uint32_t tick_ms = INITIAL_TICK_MS;
+    uint32_t tick_ms = kInitialTickMs;
     int speed_tier = 0;
     bool game_over = false;
     bool game_started = false;
@@ -347,26 +347,26 @@ void draw_tube_segment(lv_layer_t* layer, int32_t x1, int32_t y1, int32_t x2, in
 
 /// Convert grid position to pixel center coordinates
 void grid_to_pixel(const GridPos& pos, int32_t& px, int32_t& py) {
-    px = g_grid.offset_x + pos.x * CELL_SIZE + CELL_SIZE / 2;
-    py = g_grid.offset_y + pos.y * CELL_SIZE + CELL_SIZE / 2;
+    px = g_grid.offset_x + pos.x * kCellSize + kCellSize / 2;
+    py = g_grid.offset_y + pos.y * kCellSize + kCellSize / 2;
 }
 
 /// Interpolate between two grid positions and return pixel coords
 void lerp_grid_to_pixel(const GridPos& from, const GridPos& to, float t, int32_t& px, int32_t& py) {
     float fx = static_cast<float>(from.x) + (static_cast<float>(to.x - from.x)) * t;
     float fy = static_cast<float>(from.y) + (static_cast<float>(to.y - from.y)) * t;
-    px = g_grid.offset_x + static_cast<int32_t>(fx * CELL_SIZE + CELL_SIZE / 2);
-    py = g_grid.offset_y + static_cast<int32_t>(fy * CELL_SIZE + CELL_SIZE / 2);
+    px = g_grid.offset_x + static_cast<int32_t>(fx * kCellSize + kCellSize / 2);
+    py = g_grid.offset_y + static_cast<int32_t>(fy * kCellSize + kCellSize / 2);
 }
 
 /// Pick a random filament color
 lv_color_t random_filament_color() {
-    return lv_color_hex(FILAMENT_COLORS[rand() % NUM_FILAMENT_COLORS]);
+    return lv_color_hex(kFilamentColors[rand() % kNumFilamentColors]);
 }
 
 /// Pick a random food color
 lv_color_t random_food_color() {
-    return lv_color_hex(FOOD_COLORS[rand() % NUM_FOOD_COLORS]);
+    return lv_color_hex(kFoodColors[rand() % kNumFoodColors]);
 }
 
 // ============================================================================
@@ -505,7 +505,7 @@ void start_music() {
 #ifdef HELIX_HAS_TRACKER
     auto& sm = SoundManager::instance();
     if (sm.has_backend()) {
-        sm.play_file(SNAKE_MUSIC_PATH, SoundPriority::UI);
+        sm.play_file(kSnakeMusicPath, SoundPriority::UI);
     }
 #endif
 }
@@ -523,7 +523,7 @@ void fade_music() {
 #ifdef HELIX_HAS_TRACKER
     auto& sm = SoundManager::instance();
     if (sm.is_tracker_playing()) {
-        sm.fade_out_tracker(TRACKER_FADE_MS);
+        sm.fade_out_tracker(kTrackerFadeMs);
     }
 #endif
 }
@@ -534,14 +534,14 @@ void fade_music() {
 
 void load_high_score() {
     auto* cfg = Config::get_instance();
-    g_game.high_score = cfg->get<int>(HIGH_SCORE_KEY, 0);
+    g_game.high_score = cfg->get<int>(kHighScoreKey, 0);
 
     spdlog::debug("[SnakeGame] Loaded high score: {}", g_game.high_score);
 }
 
 void save_high_score() {
     auto* cfg = Config::get_instance();
-    cfg->set(HIGH_SCORE_KEY, g_game.high_score);
+    cfg->set(kHighScoreKey, g_game.high_score);
     cfg->save();
 
     spdlog::info("[SnakeGame] Saved new high score: {}", g_game.high_score);
@@ -555,7 +555,7 @@ void init_game() {
     g_game.game_over = false;
     g_game.game_started = true;
     g_game.score = 0;
-    g_game.tick_ms = INITIAL_TICK_MS;
+    g_game.tick_ms = kInitialTickMs;
     g_game.speed_tier = 0;
 
     // Random snake color
@@ -700,9 +700,9 @@ void game_logic_tick() {
         place_food();
 
         // Speed up periodically
-        if (g_game.score % SPEED_UP_INTERVAL == 0 && g_game.tick_ms > MIN_TICK_MS) {
+        if (g_game.score % kSpeedUpInterval == 0 && g_game.tick_ms > kMinTickMs) {
             g_game.tick_ms -= 10;
-            g_game.speed_tier = g_game.score / SPEED_UP_INTERVAL;
+            g_game.speed_tier = g_game.score / kSpeedUpInterval;
             play_sfx_speedup();
         }
     } else {
@@ -719,7 +719,7 @@ void render_tick(lv_timer_t* /*timer*/) {
     g_render.last_render_ms = now;
 
     // Clamp dt to avoid spiral of death after pause/debug
-    float dt = static_cast<float>(LV_MIN(raw_dt, DT_CLAMP_MS)) / 1000.0f;
+    float dt = static_cast<float>(LV_MIN(raw_dt, kDtClampMs)) / 1000.0f;
 
     // Update food pulse animation
     g_render.food_pulse_phase += dt * 2.0f * 3.14159265f * 2.0f; // 2Hz
@@ -733,14 +733,14 @@ void render_tick(lv_timer_t* /*timer*/) {
     // Update death animation state
     if (g_game.game_over && g_render.death_start_ms > 0) {
         uint32_t death_elapsed = now - g_render.death_start_ms;
-        if (death_elapsed >= DEATH_INPUT_READY_TIME && !g_render.death_input_ready) {
+        if (death_elapsed >= kDeathInputReadyTime && !g_render.death_input_ready) {
             g_render.death_input_ready = true;
         }
     }
 
     // Accumulate time and run game logic ticks
     if (!g_game.game_over && g_game.game_started) {
-        g_render.tick_accumulator += static_cast<float>(LV_MIN(raw_dt, DT_CLAMP_MS));
+        g_render.tick_accumulator += static_cast<float>(LV_MIN(raw_dt, kDtClampMs));
 
         while (g_render.tick_accumulator >= static_cast<float>(g_game.tick_ms)) {
             g_render.tick_accumulator -= static_cast<float>(g_game.tick_ms);
@@ -819,8 +819,8 @@ void draw_cb(lv_event_t* e) {
         lv_area_t bg_area = {
             obj_area.x1 + g_grid.offset_x - 2,
             obj_area.y1 + g_grid.offset_y - 2,
-            obj_area.x1 + g_grid.offset_x + g_grid.cols * CELL_SIZE + 1,
-            obj_area.y1 + g_grid.offset_y + g_grid.rows * CELL_SIZE + 1,
+            obj_area.x1 + g_grid.offset_x + g_grid.cols * kCellSize + 1,
+            obj_area.y1 + g_grid.offset_y + g_grid.rows * kCellSize + 1,
         };
         lv_draw_rect(layer, &bg_dsc, &bg_area);
     }
@@ -830,9 +830,9 @@ void draw_cb(lv_event_t* e) {
         lv_color_t grid_color = lv_color_hex(0x1a1a1a);
         // Vertical lines
         for (int x = 0; x <= g_grid.cols; x++) {
-            int32_t px = obj_area.x1 + g_grid.offset_x + x * CELL_SIZE;
+            int32_t px = obj_area.x1 + g_grid.offset_x + x * kCellSize;
             int32_t y1 = obj_area.y1 + g_grid.offset_y;
-            int32_t y2 = y1 + g_grid.rows * CELL_SIZE;
+            int32_t y2 = y1 + g_grid.rows * kCellSize;
             lv_draw_line_dsc_t line_dsc;
             lv_draw_line_dsc_init(&line_dsc);
             line_dsc.color = grid_color;
@@ -845,9 +845,9 @@ void draw_cb(lv_event_t* e) {
         }
         // Horizontal lines
         for (int y = 0; y <= g_grid.rows; y++) {
-            int32_t py = obj_area.y1 + g_grid.offset_y + y * CELL_SIZE;
+            int32_t py = obj_area.y1 + g_grid.offset_y + y * kCellSize;
             int32_t x1 = obj_area.x1 + g_grid.offset_x;
-            int32_t x2 = x1 + g_grid.cols * CELL_SIZE;
+            int32_t x2 = x1 + g_grid.cols * kCellSize;
             lv_draw_line_dsc_t line_dsc;
             lv_draw_line_dsc_init(&line_dsc);
             line_dsc.color = grid_color;
@@ -862,11 +862,11 @@ void draw_cb(lv_event_t* e) {
 
     // Speed tier border
     {
-        int tier_idx = LV_MIN(g_game.speed_tier, NUM_TIER_COLORS - 1);
+        int tier_idx = LV_MIN(g_game.speed_tier, kNumTierColors - 1);
         lv_draw_rect_dsc_t border_dsc;
         lv_draw_rect_dsc_init(&border_dsc);
         border_dsc.bg_opa = LV_OPA_TRANSP;
-        border_dsc.border_color = lv_color_hex(TIER_COLORS[tier_idx]);
+        border_dsc.border_color = lv_color_hex(kTierColors[tier_idx]);
         border_dsc.border_opa = LV_OPA_COVER;
         border_dsc.border_width = 2;
         border_dsc.radius = 4;
@@ -874,8 +874,8 @@ void draw_cb(lv_event_t* e) {
         lv_area_t border_area = {
             obj_area.x1 + g_grid.offset_x - 2,
             obj_area.y1 + g_grid.offset_y - 2,
-            obj_area.x1 + g_grid.offset_x + g_grid.cols * CELL_SIZE + 1,
-            obj_area.y1 + g_grid.offset_y + g_grid.rows * CELL_SIZE + 1,
+            obj_area.x1 + g_grid.offset_x + g_grid.cols * kCellSize + 1,
+            obj_area.y1 + g_grid.offset_y + g_grid.rows * kCellSize + 1,
         };
         lv_draw_rect(layer, &border_dsc, &border_area);
     }
@@ -896,7 +896,7 @@ void draw_cb(lv_event_t* e) {
         fy += obj_area.y1;
 
         float pulse = sinf(g_render.food_pulse_phase) * 2.0f;
-        int32_t food_r = CELL_SIZE / 4 + static_cast<int32_t>(pulse);
+        int32_t food_r = kCellSize / 4 + static_cast<int32_t>(pulse);
         if (food_r < 2)
             food_r = 2;
 
@@ -909,17 +909,17 @@ void draw_cb(lv_event_t* e) {
     float death_shrink_progress = 0.0f;
     if (g_game.game_over && g_render.death_start_ms > 0) {
         death_elapsed = lv_tick_get() - g_render.death_start_ms;
-        if (death_elapsed > DEATH_FLASH_DURATION &&
-            death_elapsed <= DEATH_FLASH_DURATION + DEATH_SHRINK_DURATION) {
+        if (death_elapsed > kDeathFlashDuration &&
+            death_elapsed <= kDeathFlashDuration + kDeathShrinkDuration) {
             death_shrinking = true;
-            death_shrink_progress = static_cast<float>(death_elapsed - DEATH_FLASH_DURATION) /
-                                    static_cast<float>(DEATH_SHRINK_DURATION);
+            death_shrink_progress = static_cast<float>(death_elapsed - kDeathFlashDuration) /
+                                    static_cast<float>(kDeathShrinkDuration);
         }
     }
 
     // Draw snake body as tube segments
     lv_color_t body_color = g_game.game_over ? lv_color_hex(0xCC2222) : g_game.snake_color;
-    int32_t tube_width = CELL_SIZE * 2 / 3;
+    int32_t tube_width = kCellSize * 2 / 3;
     int snake_len = static_cast<int>(g_game.snake.size());
 
     for (int i = 1; i < snake_len; i++) {
@@ -994,7 +994,7 @@ void draw_cb(lv_event_t* e) {
         hx += obj_area.x1;
         hy += obj_area.y1;
 
-        int32_t eye_offset = CELL_SIZE / 4;
+        int32_t eye_offset = kCellSize / 4;
         int32_t ex1 = hx, ey1 = hy, ex2 = hx, ey2 = hy;
 
         switch (g_game.direction) {
@@ -1063,7 +1063,7 @@ void draw_cb(lv_event_t* e) {
     }
 
     // Death white flash overlay
-    if (g_game.game_over && g_render.death_start_ms > 0 && death_elapsed < DEATH_FLASH_DURATION) {
+    if (g_game.game_over && g_render.death_start_ms > 0 && death_elapsed < kDeathFlashDuration) {
         lv_draw_rect_dsc_t flash_dsc;
         lv_draw_rect_dsc_init(&flash_dsc);
         flash_dsc.bg_color = lv_color_white();
@@ -1073,14 +1073,14 @@ void draw_cb(lv_event_t* e) {
         lv_area_t flash_area = {
             obj_area.x1 + g_grid.offset_x - 2,
             obj_area.y1 + g_grid.offset_y - 2,
-            obj_area.x1 + g_grid.offset_x + g_grid.cols * CELL_SIZE + 1,
-            obj_area.y1 + g_grid.offset_y + g_grid.rows * CELL_SIZE + 1,
+            obj_area.x1 + g_grid.offset_x + g_grid.cols * kCellSize + 1,
+            obj_area.y1 + g_grid.offset_y + g_grid.rows * kCellSize + 1,
         };
         lv_draw_rect(layer, &flash_dsc, &flash_area);
     }
 
-    // Show game over label after DEATH_CARD_TIME (fade in over ~200ms)
-    if (g_game.game_over && g_render.death_start_ms > 0 && death_elapsed >= DEATH_CARD_TIME) {
+    // Show game over label after kDeathCardTime (fade in over ~200ms)
+    if (g_game.game_over && g_render.death_start_ms > 0 && death_elapsed >= kDeathCardTime) {
         if (g_gameover_label && lv_obj_has_flag(g_gameover_label, LV_OBJ_FLAG_HIDDEN)) {
             bool new_high = g_game.score > 0 &&
                             g_game.score >= g_game.high_score; // already saved in show_game_over
@@ -1093,8 +1093,8 @@ void draw_cb(lv_event_t* e) {
             lv_obj_remove_flag(g_gameover_label, LV_OBJ_FLAG_HIDDEN);
         }
         if (g_gameover_label) {
-            uint32_t fade_elapsed = death_elapsed - DEATH_CARD_TIME;
-            uint32_t fade_duration = DEATH_INPUT_READY_TIME - DEATH_CARD_TIME; // ~300ms
+            uint32_t fade_elapsed = death_elapsed - kDeathCardTime;
+            uint32_t fade_duration = kDeathInputReadyTime - kDeathCardTime; // ~300ms
             float fade =
                 LV_MIN(1.0f, static_cast<float>(fade_elapsed) / static_cast<float>(fade_duration));
             lv_obj_set_style_opa(g_gameover_label, static_cast<lv_opa_t>(LV_OPA_COVER * fade),
@@ -1148,8 +1148,8 @@ void touch_cb(lv_event_t* e) {
         int32_t abs_dx = LV_ABS(dx);
         int32_t abs_dy = LV_ABS(dy);
 
-        constexpr int32_t SWIPE_THRESHOLD = 12;
-        if (abs_dx < SWIPE_THRESHOLD && abs_dy < SWIPE_THRESHOLD) {
+        constexpr int32_t kSwipeThreshold = 12;
+        if (abs_dx < kSwipeThreshold && abs_dy < kSwipeThreshold) {
             return;
         }
 
@@ -1171,8 +1171,8 @@ void touch_cb(lv_event_t* e) {
             int32_t abs_dx = LV_ABS(dx);
             int32_t abs_dy = LV_ABS(dy);
 
-            constexpr int32_t SWIPE_THRESHOLD = 12;
-            if (abs_dx >= SWIPE_THRESHOLD || abs_dy >= SWIPE_THRESHOLD) {
+            constexpr int32_t kSwipeThreshold = 12;
+            if (abs_dx >= kSwipeThreshold || abs_dy >= kSwipeThreshold) {
                 if (!g_game.game_over) {
                     if (abs_dx > abs_dy) {
                         g_input.push_direction(dx > 0 ? Direction::RIGHT : Direction::LEFT,
@@ -1246,10 +1246,10 @@ void close_cb(lv_event_t* /*e*/) {
 
 // MDI chevron codepoints for D-pad arrows (use DPAD_ prefix to avoid
 // collision with ICON_CHEVRON_* macros from ui_fonts.h)
-static constexpr const char* DPAD_CHEVRON_UP = "\xF3\xB0\x85\x83";    // F0143
-static constexpr const char* DPAD_CHEVRON_DOWN = "\xF3\xB0\x85\x80";  // F0140
-static constexpr const char* DPAD_CHEVRON_LEFT = "\xF3\xB0\x85\x81";  // F0141
-static constexpr const char* DPAD_CHEVRON_RIGHT = "\xF3\xB0\x85\x82"; // F0142
+static constexpr const char* kDpadChevronUp = "\xF3\xB0\x85\x83";    // F0143
+static constexpr const char* kDpadChevronDown = "\xF3\xB0\x85\x80";  // F0140
+static constexpr const char* kDpadChevronLeft = "\xF3\xB0\x85\x81";  // F0141
+static constexpr const char* kDpadChevronRight = "\xF3\xB0\x85\x82"; // F0142
 
 lv_obj_t* create_dpad_button(lv_obj_t* parent, const char* icon_utf8, lv_align_t align,
                              int32_t x_ofs, int32_t y_ofs) {
@@ -1279,12 +1279,12 @@ void create_dpad(lv_obj_t* parent) {
     int32_t cx = 0;
     int32_t base_y = -20;
 
-    g_dpad_up = create_dpad_button(parent, DPAD_CHEVRON_UP, LV_ALIGN_BOTTOM_MID, cx, base_y - 100);
-    g_dpad_down = create_dpad_button(parent, DPAD_CHEVRON_DOWN, LV_ALIGN_BOTTOM_MID, cx, base_y);
+    g_dpad_up = create_dpad_button(parent, kDpadChevronUp, LV_ALIGN_BOTTOM_MID, cx, base_y - 100);
+    g_dpad_down = create_dpad_button(parent, kDpadChevronDown, LV_ALIGN_BOTTOM_MID, cx, base_y);
     g_dpad_left =
-        create_dpad_button(parent, DPAD_CHEVRON_LEFT, LV_ALIGN_BOTTOM_MID, cx - 52, base_y - 50);
+        create_dpad_button(parent, kDpadChevronLeft, LV_ALIGN_BOTTOM_MID, cx - 52, base_y - 50);
     g_dpad_right =
-        create_dpad_button(parent, DPAD_CHEVRON_RIGHT, LV_ALIGN_BOTTOM_MID, cx + 52, base_y - 50);
+        create_dpad_button(parent, kDpadChevronRight, LV_ALIGN_BOTTOM_MID, cx + 52, base_y - 50);
 }
 
 // ============================================================================
@@ -1368,10 +1368,10 @@ void create_overlay() {
     lv_coord_t avail_w = screen_w - 24;
     lv_coord_t avail_h = screen_h - 64;
 
-    g_grid.cols = avail_w / CELL_SIZE;
-    g_grid.rows = avail_h / CELL_SIZE;
-    g_grid.offset_x = (avail_w - g_grid.cols * CELL_SIZE) / 2;
-    g_grid.offset_y = (avail_h - g_grid.rows * CELL_SIZE) / 2;
+    g_grid.cols = avail_w / kCellSize;
+    g_grid.rows = avail_h / kCellSize;
+    g_grid.offset_x = (avail_w - g_grid.cols * kCellSize) / 2;
+    g_grid.offset_y = (avail_h - g_grid.rows * kCellSize) / 2;
 
     spdlog::debug("[SnakeGame] Grid: {}x{} cells, offset: ({}, {})", g_grid.cols, g_grid.rows,
                   g_grid.offset_x, g_grid.offset_y);
@@ -1418,7 +1418,7 @@ void create_overlay() {
 
     // Start render timer
     g_render.last_render_ms = lv_tick_get();
-    g_render_timer = lv_timer_create(render_tick, RENDER_TICK_MS, nullptr);
+    g_render_timer = lv_timer_create(render_tick, kRenderTickMs, nullptr);
 
     spdlog::info("[SnakeGame] Game started! Grid: {}x{}, input: {}", g_grid.cols, g_grid.rows,
                  g_input.mode == InputMode::DPAD ? "DPAD" : "SWIPE");

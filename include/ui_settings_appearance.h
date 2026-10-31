@@ -73,6 +73,8 @@ class AppearanceSettingsOverlay : public OverlayBase {
     int original_theme_index_{-1};
     /// Snapshot of active theme when explorer opens (for revert on close)
     helix::ThemeData original_theme_;
+    /// Dark mode when the explorer opened; previews flip the live flag.
+    bool original_is_dark_{true};
     /// Current preview dark mode state
     bool preview_is_dark_{true};
     /// Cached theme list (populated when explorer opens, avoids re-parsing on every toggle)

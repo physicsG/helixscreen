@@ -4,15 +4,19 @@
 <!-- Modal for Klipper action:prompt dialogs -->
 <!-- Buttons are created dynamically in C++ based on PromptData -->
 <!-- NOTE: Backdrop created programmatically by Modal system -->
-<!-- MODAL_CHROME_OK: beyond any single content ladder — an AFC diagram pinned
-     below the scroll area PLUS wrapping prompt rows PLUS a footer row. Measured
-     at five breakpoints with the full worst case on screen (AFC diagram, three
-     wrapping buttons and the footer, via `ctl demo action-prompt-worst`), footer
-     flush with the card bottom: 480x272 card 226/cap 231, 480x320 247/272,
-     640x400 298/340, 800x480 397/408, 1024x600 483/510. Headroom is thinnest at
-     480x272 (5px) and 800x480 (11px) — any growth in the button rows needs
-     re-measuring, not arithmetic. `ctl demo action-prompt-many` is the many-wrap
-     shape (seven presets over three rows, card 193 at 480x272). -->
+<!-- MODAL_CHROME_OK: no token ladder can budget this card. Text, the AFC diagram and the
+     button rows share one scroll area, prompt_scroll, which ActionPromptModal::fit_rows()
+     caps at the 85% card cap less the measured header and footer, so the footer stays
+     on the card however many buttons a macro sends. Measured card/cap with the footer
+     flush at the card bottom (`ctl geom`), per demo:
+       action-prompt-afc-cal (six units, two-button footer): 480x272 203/231 (3-column
+         grid, no scroll), 480x320 224/272, 640x400 302/340, 800x480 408/408 (2-column
+         grid, scrolls 3px), 1024x600 510/510 (scrolls 41px)
+       action-prompt-worst (AFC diagram, three text lines, three buttons, footer):
+         480x272 227/231, 480x320 248/272, 640x400 297/340, 800x480 396/408,
+         1024x600 483/510
+       action-prompt-many 193/231 at 480x272; action-prompt-hex scrolls 18px at 640x400;
+       action-prompt-zmod fills the 480x272 card to 229 of 231 with a widened card. -->
 <component>
   <!-- Dialog card (backdrop created programmatically) -->
   <view name="action_prompt_modal"
@@ -30,30 +34,34 @@
     </lv_obj>
     <!-- Horizontal divider below title -->
     <divider_horizontal/>
-    <!-- Scrollable text content area -->
-    <lv_obj name="content_container"
-            width="100%" height="content" style_min_height="40" style_max_height="#dialog_content_pinned_max"
-            style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="#space_md"
-            style_pad_bottom="#space_md" flex_flow="column" style_pad_gap="#space_xs" scrollable="true"
-            scroll_snap_y="none">
-      <!-- Text lines will be added dynamically -->
-    </lv_obj>
-    <!-- AFC filament position diagram — self-hides unless RecoveryModalPresenter
-         recognised the fault message (prestonbrown/helixscreen#1184). Outside the
-         scrollable text area so the graphic never scrolls out of view. -->
-    <lv_obj width="100%"
-            height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
-            style_pad_bottom="#space_md" style_bg_opa="0" style_border_width="0" scrollable="false">
-      <afc_fault_path name="fault_path"/>
-      <bind_flag_if_eq subject="afc_fault_segment" flag="hidden" ref_value="0"/>
-    </lv_obj>
-    <!-- Regular buttons: one action_prompt_button_row per button group or run
-         of ungrouped buttons, stacked -->
-    <lv_obj name="button_container"
-            width="100%" height="content" style_pad_left="#space_md" style_pad_right="#space_md"
-            style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="column" style_pad_gap="#space_sm"
-            scrollable="false">
-      <!-- Rows are added dynamically based on PromptData.buttons -->
+    <!-- Text, the AFC diagram and the button rows scroll together; the footer
+         below stays on the card. ActionPromptModal caps this area's height at
+         what the card has left once a prompt is built. -->
+    <lv_obj name="prompt_scroll"
+            width="100%" height="content" style_pad_all="0" style_pad_gap="0" style_bg_opa="0" style_border_width="0"
+            flex_flow="column" scrollable="true" scroll_dir="ver" scroll_snap_y="none">
+      <lv_obj name="content_container"
+              width="100%" height="content" style_min_height="40" style_pad_left="#space_lg" style_pad_right="#space_lg"
+              style_pad_top="#space_md" style_pad_bottom="#space_md" flex_flow="column" style_pad_gap="#space_xs"
+              scrollable="false">
+        <!-- Text lines will be added dynamically -->
+      </lv_obj>
+      <!-- AFC filament position diagram: self-hides unless the prompt's text
+           names an AFC lane fault (prestonbrown/helixscreen#1184). -->
+      <lv_obj width="100%"
+              height="content" style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_top="0"
+              style_pad_bottom="#space_md" style_bg_opa="0" style_border_width="0" scrollable="false">
+        <fault_path name="fault_path"/>
+        <bind_flag_if_eq subject="fault_path_segment" flag="hidden" ref_value="0"/>
+      </lv_obj>
+      <!-- Regular buttons: one action_prompt_button_row per button group or run
+           of ungrouped buttons, stacked -->
+      <lv_obj name="button_container"
+              width="100%" height="content" style_pad_left="#space_md" style_pad_right="#space_md"
+              style_pad_top="#space_sm" style_pad_bottom="#space_sm" flex_flow="column" style_pad_gap="#space_sm"
+              scrollable="false">
+        <!-- Rows are added dynamically based on PromptData.buttons -->
+      </lv_obj>
     </lv_obj>
     <!-- Horizontal divider above footer -->
     <divider_horizontal name="footer_divider" hidden="true"/>

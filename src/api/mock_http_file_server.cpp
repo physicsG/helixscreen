@@ -4,6 +4,7 @@
 #include "mock_http_file_server.h"
 
 #include "env_knobs.h"
+#include "http_listen_socket.h"
 
 #ifdef HELIX_ENABLE_MOCKS
 
@@ -13,14 +14,11 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <arpa/inet.h>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <netinet/in.h>
 #include <optional>
 #include <string>
-#include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
 
@@ -31,7 +29,7 @@ namespace {
 /// Real PNG bytes rather than a synthesised image: the decoder under test is
 /// stb_image, and the thing worth exercising is production-shaped input
 /// (interlacing, palette, alpha), not the smallest buffer that parses.
-const char* THUMBNAIL_ASSET = "assets/images/benchy_thumbnail_white.png";
+const char* kThumbnailAsset = "assets/images/benchy_thumbnail_white.png";
 
 std::vector<uint8_t> read_asset(const std::string& relative) {
     // CWD-relative, the same convention the rest of the tree uses for assets
@@ -56,9 +54,9 @@ std::string make_gcode_header(const std::vector<uint8_t>& png) {
     out += "; thumbnail begin 300x300 " + std::to_string(png.size()) + "\n";
     // Slicers hard-wrap the base64 payload; match that so the extractor's
     // line-oriented accumulation is exercised rather than bypassed.
-    constexpr size_t WRAP = 78;
-    for (size_t i = 0; i < b64.size(); i += WRAP) {
-        out += "; " + b64.substr(i, WRAP) + "\n";
+    constexpr size_t kWrap = 78;
+    for (size_t i = 0; i < b64.size(); i += kWrap) {
+        out += "; " + b64.substr(i, kWrap) + "\n";
     }
     out += "; thumbnail end\n";
     out += ";FLAVOR:Marlin\n;Generated with MockHttpFileServer\nG28\n";
@@ -162,41 +160,6 @@ bool ends_with(const std::string& s, const std::string& suffix) {
            s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-/// Bind a loopback listener on an ephemeral port and report which one.
-///
-/// libhv's http_server_run() skips binding entirely when `port == 0` (it guards
-/// on `port > 0`), so asking it for an ephemeral port yields a server that
-/// never listens. It does honour a pre-bound descriptor via setListenFD(), and
-/// handing it one is also race-free — picking a port, closing, and re-binding
-/// would leave a window for another process to take it.
-int bind_loopback_ephemeral(int* out_port) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return -1;
-    }
-    int reuse = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
-        ::listen(fd, 16) != 0) {
-        ::close(fd);
-        return -1;
-    }
-
-    sockaddr_in bound{};
-    socklen_t len = sizeof(bound);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &len) != 0) {
-        ::close(fd);
-        return -1;
-    }
-    *out_port = ntohs(bound.sin_port);
-    return fd;
-}
-
 } // namespace
 
 struct MockHttpFileServer::Impl {
@@ -217,10 +180,10 @@ bool MockHttpFileServer::start() {
         return true;
     }
 
-    impl_->png = read_asset(THUMBNAIL_ASSET);
+    impl_->png = read_asset(kThumbnailAsset);
     if (impl_->png.empty()) {
         spdlog::warn("[MockHttpFileServer] Could not read {} — thumbnail mocking disabled",
-                     THUMBNAIL_ASSET);
+                     kThumbnailAsset);
         return false;
     }
     impl_->gcode_header = make_gcode_header(impl_->png);
@@ -283,7 +246,7 @@ bool MockHttpFileServer::start() {
         });
 
     int port = 0;
-    int fd = bind_loopback_ephemeral(&port);
+    int fd = bind_tcp_listener("127.0.0.1", 0, &port);
     if (fd < 0) {
         spdlog::warn("[MockHttpFileServer] Could not bind a loopback port — "
                      "thumbnail mocking disabled");

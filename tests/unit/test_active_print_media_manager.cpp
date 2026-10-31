@@ -13,9 +13,12 @@
  * - Uses generation counter for stale callback detection
  */
 
+#include "ui_filename_utils.h"
+
 #include "../test_helpers/active_print_media_manager_test_access.h"
 #include "../test_helpers/moonraker_client_test_access.h"
 #include "../test_helpers/printer_state_test_access.h"
+#include "../test_helpers/thumbnail_test_png.h"
 #include "../ui_test_utils.h"
 #include "active_print_media_manager.h"
 #include "async_lifetime_guard.h"
@@ -24,14 +27,20 @@
 #include "moonraker_file_api.h"
 #include "moonraker_file_transfer_api.h"
 #include "printer_state.h"
+#include "three_mf_reader.h"
 #include "thumbnail_cache.h"
 #include "thumbnail_processor.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <fstream>
 #include <functional>
+#include <iterator>
+#include <map>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -50,7 +59,7 @@ using namespace helix::ui;
 // on first call, and this runs before any test body — so tests that temporarily
 // set_asset_root() (test_asset_root.cpp) can never be the first caller and pin
 // a non-default root into the cache. Do not inline it into the fixture.
-static const std::string NO_THUMB = helix::ActivePrintMediaManager::no_thumbnail_placeholder();
+static const std::string kNoThumb = helix::ActivePrintMediaManager::no_thumbnail_placeholder();
 
 // ============================================================================
 // Test Fixture for ActivePrintMediaManager tests
@@ -415,7 +424,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     REQUIRE(get_display_filename() == "model");
 
     // No API to load from, so the file has no thumbnail of its own.
-    REQUIRE(get_thumbnail_path() == NO_THUMB);
+    REQUIRE(get_thumbnail_path() == kNoThumb);
 }
 
 TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
@@ -539,7 +548,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         // never "".
         manager().set_thumbnail_path("cleared.gcode", "");
 
-        REQUIRE(get_thumbnail_path() == NO_THUMB);
+        REQUIRE(get_thumbnail_path() == kNoThumb);
     }
 }
 #endif
@@ -576,7 +585,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
 
     // Observer fires on registration with the initial (placeholder) value
     REQUIRE(observer_fire_count == 1);
-    REQUIRE(last_observed_path == NO_THUMB);
+    REQUIRE(last_observed_path == kNoThumb);
 
     // Setting a thumbnail path should fire the observer
     state().print_state().set_print_thumbnail("model.gcode", "A:/cache/thumb.bin");
@@ -613,7 +622,7 @@ TEST_CASE_METHOD(
 
     // Initial fire
     REQUIRE(observed_values.size() == 1);
-    REQUIRE(observed_values[0] == NO_THUMB);
+    REQUIRE(observed_values[0] == kNoThumb);
 
     // Rapid updates - observer should see each distinct value
     state().print_state().set_print_thumbnail("first.gcode", "A:/cache/first.bin");
@@ -646,7 +655,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         set_print_filename("print_b.gcode");
         REQUIRE(get_display_filename() == "print_b");
         // The old thumbnail path should be cleared so the new one can be fetched
-        REQUIRE(get_thumbnail_path() == NO_THUMB);
+        REQUIRE(get_thumbnail_path() == kNoThumb);
     }
 
     SECTION("direct switch between prints clears old thumbnail") {
@@ -658,7 +667,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
         // Print B starts immediately (no empty filename in between)
         set_print_filename("second.gcode");
         REQUIRE(get_display_filename() == "second");
-        REQUIRE(get_thumbnail_path() == NO_THUMB);
+        REQUIRE(get_thumbnail_path() == kNoThumb);
     }
 
     SECTION("same filename reprint preserves thumbnail") {
@@ -690,7 +699,7 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     REQUIRE(get_display_filename() == "brand_new");
     // The leftover must be dropped, and the identity must describe the file we
     // are now loading for — not the finished print.
-    CHECK(get_thumbnail_path() == NO_THUMB);
+    CHECK(get_thumbnail_path() == kNoThumb);
     CHECK(state().print_state().get_print_thumbnail_file() != "previous.gcode");
 }
 
@@ -824,6 +833,39 @@ class StubTransferAPI : public MoonrakerFileTransferAPI {
     [[nodiscard]] size_t partial_count() const {
         return partial_errors_.size();
     }
+
+    /// Serve @p bytes as the file @p path to the ranged and tail reads a .3mf
+    /// archive is read with, synchronously; offsets read are recorded.
+    void serve_archive(const std::string& path, std::string bytes) {
+        archives_[path] = std::move(bytes);
+    }
+    void download_file_tail(const std::string& root, const std::string& path, size_t max_bytes,
+                            StringCallback on_success, ErrorCallback on_error) override {
+        (void)root;
+        auto it = archives_.find(path);
+        if (it == archives_.end()) {
+            on_error(MoonrakerError::file_not_found("download_file_tail", path));
+            return;
+        }
+        const std::string& f = it->second;
+        on_success(f.substr(f.size() - std::min(max_bytes, f.size())));
+    }
+    void download_file_range(const std::string& root, const std::string& path, uint64_t offset,
+                             size_t len, StringCallback on_success, ErrorCallback on_error,
+                             CancelFlag = nullptr) override {
+        (void)root;
+        auto it = archives_.find(path);
+        if (it == archives_.end()) {
+            on_error(MoonrakerError::file_not_found("download_file_range", path));
+            return;
+        }
+        range_offsets_.push_back(offset);
+        const std::string& f = it->second;
+        on_success(offset < f.size() ? f.substr(static_cast<size_t>(offset), len) : "");
+    }
+    [[nodiscard]] const std::vector<uint64_t>& range_offsets() const {
+        return range_offsets_;
+    }
     void fire_partial_error_last(const MoonrakerError& err) {
         REQUIRE(!partial_errors_.empty());
         auto cb = partial_errors_.back();
@@ -876,6 +918,8 @@ class StubTransferAPI : public MoonrakerFileTransferAPI {
     std::string last_thumbnail_path_;
     std::vector<Captured> captured_;
     std::vector<ErrorCallback> partial_errors_;
+    std::map<std::string, std::string> archives_;
+    std::vector<uint64_t> range_offsets_;
 };
 
 /// MoonrakerAPI that installs the CapturingFileAPI in place of the real file API
@@ -1175,7 +1219,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(10, unique_thumb_path("superseded_publish")));
     drain();
     REQUIRE(transfers_stub().captured_downloads() == 1);
-    REQUIRE(get_thumbnail_path() == NO_THUMB);
+    REQUIRE(get_thumbnail_path() == kNoThumb);
 
     // Print B starts. process_filename() runs synchronously off the filename
     // subject write, so the load generation is bumped here — before A's
@@ -1184,14 +1228,14 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     set_print_filename_no_drain("print_b.gcode");
     drain();
     REQUIRE(files().pending_count() == 2);
-    REQUIRE(get_thumbnail_path() == NO_THUMB);
+    REQUIRE(get_thumbnail_path() == kNoThumb);
 
     // A's download finally lands and its PNG is pre-scaled. The result belongs
     // to a superseded load: publishing it would put print A's image on print B.
     transfers_stub().fire_captured_download(0);
     drain();
 
-    CHECK(get_thumbnail_path() == NO_THUMB);
+    CHECK(get_thumbnail_path() == kNoThumb);
     // Publishing also disarms recovery, so a leaked publish would additionally
     // stop B's own thumbnail from ever being retried.
     CHECK_FALSE(helix::ActivePrintMediaManagerTestAccess::thumbnail_loaded(manager()));
@@ -1210,19 +1254,6 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
 // print-select cards feed their own requests.
 
 namespace {
-
-/// Smallest PNG both the cache and the processor accept: a 10x10 solid square.
-/// Same bytes as tests/unit/test_thumbnail_cache_request.cpp.
-// clang-format off
-const std::vector<uint8_t> FRESHNESS_PNG = {
-    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
-    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x0A,
-    0x08, 0x02, 0x00, 0x00, 0x00, 0x02, 0x50, 0x58, 0xEA, 0x00, 0x00, 0x00,
-    0x12, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x68, 0x70, 0x50, 0xC0,
-    0x83, 0x18, 0x46, 0xA5, 0xB1, 0x21, 0x00, 0x24, 0x51, 0x57, 0x81, 0xF7,
-    0xEC, 0xA3, 0x23, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
-    0x42, 0x60, 0x82};
-// clang-format on
 
 /// The target ActivePrintMediaManager builds its request from. Planting under
 /// any other target would produce a .bin the manager never looks for, and the
@@ -1252,8 +1283,8 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
                  "ActivePrintMediaManager: a cached thumbnail older than the source is served",
                  "[ActivePrintMediaManager][async][thumbnail]") {
     const std::string key = unique_thumb_path("freshness_control");
-    const auto planted = helix::ThumbnailProcessor::instance().process_sync(FRESHNESS_PNG, key,
-                                                                            active_print_target());
+    const auto planted =
+        helix::ThumbnailProcessor::instance().process_sync(kTinyPng, key, active_print_target());
     REQUIRE(planted.success);
     REQUIRE(ThumbnailCache::is_lvgl_path(planted.output_path));
 
@@ -1277,8 +1308,8 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
                  "from cache",
                  "[ActivePrintMediaManager][async][thumbnail]") {
     const std::string key = unique_thumb_path("freshness_stale");
-    const auto planted = helix::ThumbnailProcessor::instance().process_sync(FRESHNESS_PNG, key,
-                                                                            active_print_target());
+    const auto planted =
+        helix::ThumbnailProcessor::instance().process_sync(kTinyPng, key, active_print_target());
     REQUIRE(planted.success);
     REQUIRE(ThumbnailCache::is_lvgl_path(planted.output_path));
 
@@ -1364,7 +1395,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(42, unique_thumb_path("retry_success")));
     drain();
 
-    REQUIRE(get_thumbnail_path() != NO_THUMB);
+    REQUIRE(get_thumbnail_path() != kNoThumb);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
     REQUIRE(TestAccess::retry_count(manager()) == 0);
     REQUIRE_FALSE(TestAccess::has_pending_retry(manager()));
@@ -1400,7 +1431,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(3, unique_thumb_path("dl_fail")));
     drain();
 
-    REQUIRE(get_thumbnail_path() == NO_THUMB);
+    REQUIRE(get_thumbnail_path() == kNoThumb);
     REQUIRE(TestAccess::has_pending_retry(manager()));
     REQUIRE(TestAccess::retry_count(manager()) == 1);
 
@@ -1411,7 +1442,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(3, unique_thumb_path("dl_recover")));
     drain();
 
-    REQUIRE(get_thumbnail_path() != NO_THUMB);
+    REQUIRE(get_thumbnail_path() != kNoThumb);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
 }
 
@@ -1464,7 +1495,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
 
     files().fire_last(make_metadata_with_thumb(11, unique_thumb_path("filelist_reload")));
     drain();
-    REQUIRE(get_thumbnail_path() != NO_THUMB);
+    REQUIRE(get_thumbnail_path() != kNoThumb);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
 }
 
@@ -1664,7 +1695,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     files().fire_last(make_metadata_with_thumb(21, unique_thumb_path("first_try")));
     drain();
 
-    REQUIRE(get_thumbnail_path() != NO_THUMB);
+    REQUIRE(get_thumbnail_path() != kNoThumb);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
     REQUIRE_FALSE(TestAccess::has_pending_retry(manager()));
     REQUIRE(TestAccess::retry_count(manager()) == 0);
@@ -1763,7 +1794,7 @@ TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
     // Destination metadata resolves -> thumbnail loads.
     files().fire_last(make_metadata_with_thumb(8, unique_thumb_path("moved_dest")));
     drain();
-    REQUIRE(get_thumbnail_path() != NO_THUMB);
+    REQUIRE(get_thumbnail_path() != kNoThumb);
     REQUIRE(TestAccess::thumbnail_loaded(manager()));
 }
 
@@ -2052,4 +2083,84 @@ TEST_CASE_METHOD(ActivePrintMediaManagerTestFixture,
     set_print_filename("previous.gcode");
 
     REQUIRE(get_display_filename() == "committed");
+}
+
+namespace {
+
+std::string three_mf_fixture(const char* name) {
+    std::string dir = __FILE__;
+    const auto pos = dir.rfind("/tests/unit/");
+    dir = pos != std::string::npos ? dir.substr(0, pos) + "/tests/fixtures/three_mf/"
+                                   : "tests/fixtures/three_mf/";
+    std::ifstream in(dir + name, std::ios::binary);
+    std::string bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    REQUIRE(!bytes.empty());
+    return bytes;
+}
+
+/// Where @p entry_name's local header sits in @p archive.
+uint64_t entry_offset(const std::string& archive, const std::string& entry_name) {
+    std::vector<helix::zip::ZipEntry> entries;
+    helix::zip::ZipError err = helix::zip::ZipError::None;
+    REQUIRE(helix::zip::parse_central_directory(reinterpret_cast<const uint8_t*>(archive.data()),
+                                                archive.size(), archive.size(), entries, err));
+    const auto* e = helix::three_mf::find_archive_entry(entries, entry_name);
+    REQUIRE(e != nullptr);
+    return e->lh_offset;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(ActivePrintMediaAsyncFixture,
+                 "ActivePrintMediaManager: a .3mf print's thumbnail comes out of its archive",
+                 "[ActivePrintMediaManager][async][three_mf]") {
+    const std::string bytes = three_mf_fixture("multi_plate.gcode.3mf");
+    const std::string archive = "Set_" + std::to_string(::getpid()) + ".gcode.3mf";
+    transfers_stub().serve_archive(archive, bytes);
+
+    std::string expect_entry;
+    SECTION("the plate a staged extract names") {
+        set_print_filename_no_drain(helix::gcode::make_extracted_plate_path(archive, 5));
+        expect_entry = "Metadata/plate_5.png";
+    }
+    SECTION("a .3mf the printer runs itself: its first plate") {
+        set_print_filename_no_drain(archive);
+        expect_entry = "Metadata/plate_2.png";
+    }
+    drain();
+    REQUIRE(files().has_pending());
+    MoonrakerError metadata_err;
+    metadata_err.message = "Metadata not available";
+    files().fire_error_last(metadata_err);
+    drain();
+
+    // No G-code header read: the render is an entry of the archive.
+    CHECK(transfers_stub().partial_count() == 0);
+    const auto& offsets = transfers_stub().range_offsets();
+    CHECK(std::find(offsets.begin(), offsets.end(), entry_offset(bytes, expect_entry)) !=
+          offsets.end());
+    const std::string thumb = get_thumbnail_path();
+    INFO(thumb);
+    CHECK(thumb.find(".bin") != std::string::npos);
+}
+
+TEST_CASE_METHOD(
+    ActivePrintMediaAsyncFixture,
+    "ActivePrintMediaManager: the job's materials come from its metadata and reset per file",
+    "[ActivePrintMediaManager][active_print_media][door]") {
+    set_print_filename_no_drain("abs_part.gcode");
+    drain();
+    REQUIRE(files().has_pending());
+
+    FileMetadata abs = make_metadata(/*layer_count=*/10);
+    abs.filament_type = "ABS";
+    files().fire_last(abs);
+    drain();
+    CHECK(state().print_state().print_materials() == std::vector<std::string>{"ABS"});
+
+    // A different file: its materials are unknown until its own metadata says.
+    set_print_filename_no_drain("next_job.gcode");
+    drain();
+    REQUIRE(files().has_pending());
+    CHECK(state().print_state().print_materials().empty());
 }

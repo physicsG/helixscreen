@@ -102,7 +102,7 @@ TEST_CASE_METHOD(MoonrakerTestFixture, "rebuild_active_views swaps active panel 
 
     // 4. Register widget array with NavigationManager. Only Home is populated —
     //    other slots are nullptr, which is fine for this test.
-    lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+    lv_obj_t* panels[kUiPanelCount] = {nullptr};
     panels[static_cast<int>(helix::PanelId::Home)] = initial_widget;
     nav.set_panels(panels);
 
@@ -148,7 +148,7 @@ TEST_CASE_METHOD(MoonrakerTestFixture, "rebuild_active_views swaps active panel 
 
     // Clear panel_widgets_ entry too — nav holds a dangling pointer after our
     // local `fake_panel` is destroyed and LVGL tears down.
-    lv_obj_t* null_panels[UI_PANEL_COUNT] = {nullptr};
+    lv_obj_t* null_panels[kUiPanelCount] = {nullptr};
     nav.set_panels(null_panels);
 
     // Drain any deferred deletions queued by the rebuild teardown.

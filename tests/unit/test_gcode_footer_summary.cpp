@@ -6,16 +6,16 @@
 #include "../catch_amalgamated.hpp"
 
 using helix::gcode::gcode_tail_window_bytes;
-using helix::gcode::GCODE_TAIL_WINDOW_DEFAULT;
-using helix::gcode::GCODE_TAIL_WINDOW_MAX;
-using helix::gcode::GCODE_TAIL_WINDOW_MIN;
+using helix::gcode::kGcodeTailWindowDefault;
+using helix::gcode::kGcodeTailWindowMax;
+using helix::gcode::kGcodeTailWindowMin;
 using helix::gcode::parse_gcode_footer_summary;
 
 namespace {
 
 // The shape a real Orca-family footer has, condensed: the two lines that
 // matter sit ~5 KB apart in the file with config noise in between.
-constexpr const char* REAL_FOOTER = R"(; EXECUTABLE_BLOCK_END
+constexpr const char* kRealFooter = R"(; EXECUTABLE_BLOCK_END
 
 ; filament used [mm] = 0.00, 0.00, 0.00, 0.00, 11534.28
 ; filament used [cm3] = 0.00, 0.00, 0.00, 0.00, 27.71
@@ -29,7 +29,7 @@ constexpr const char* REAL_FOOTER = R"(; EXECUTABLE_BLOCK_END
 } // namespace
 
 TEST_CASE("parse_gcode_footer_summary - real Orca footer", "[gcode][footer_summary]") {
-    const auto s = parse_gcode_footer_summary(REAL_FOOTER);
+    const auto s = parse_gcode_footer_summary(kRealFooter);
 
     REQUIRE(s.has_usage_line);
     REQUIRE(s.usable());
@@ -237,25 +237,25 @@ TEST_CASE("gcode_tail_window_bytes - sizing", "[gcode][footer_summary]") {
     }
 
     SECTION("tiny footer is floored, never a pointless micro-request") {
-        REQUIRE(gcode_tail_window_bytes(5'000'000, 4'999'000) == GCODE_TAIL_WINDOW_MIN);
+        REQUIRE(gcode_tail_window_bytes(5'000'000, 4'999'000) == kGcodeTailWindowMin);
     }
 
     SECTION("absurd footer is capped") {
-        REQUIRE(gcode_tail_window_bytes(50'000'000, 1'000) == GCODE_TAIL_WINDOW_MAX);
+        REQUIRE(gcode_tail_window_bytes(50'000'000, 1'000) == kGcodeTailWindowMax);
     }
 
     SECTION("unknown gcode_end_byte falls back to the fixed window") {
-        REQUIRE(gcode_tail_window_bytes(10'000'000, 0) == GCODE_TAIL_WINDOW_DEFAULT);
+        REQUIRE(gcode_tail_window_bytes(10'000'000, 0) == kGcodeTailWindowDefault);
     }
 
     SECTION("20KB would have missed the sample's usage line") {
         // Regression guard on the default: the measured footer is larger.
-        REQUIRE(GCODE_TAIL_WINDOW_DEFAULT > 24565);
+        REQUIRE(kGcodeTailWindowDefault > 24565);
     }
 
     SECTION("gcode_end_byte at or past EOF is nonsense - use the default") {
-        REQUIRE(gcode_tail_window_bytes(1'000'000, 1'000'000) == GCODE_TAIL_WINDOW_DEFAULT);
-        REQUIRE(gcode_tail_window_bytes(1'000'000, 2'000'000) == GCODE_TAIL_WINDOW_DEFAULT);
+        REQUIRE(gcode_tail_window_bytes(1'000'000, 1'000'000) == kGcodeTailWindowDefault);
+        REQUIRE(gcode_tail_window_bytes(1'000'000, 2'000'000) == kGcodeTailWindowDefault);
     }
 
     SECTION("never larger than the file") {
@@ -264,7 +264,7 @@ TEST_CASE("gcode_tail_window_bytes - sizing", "[gcode][footer_summary]") {
     }
 
     SECTION("unknown size still yields a requestable window") {
-        REQUIRE(gcode_tail_window_bytes(0, 0) == GCODE_TAIL_WINDOW_DEFAULT);
+        REQUIRE(gcode_tail_window_bytes(0, 0) == kGcodeTailWindowDefault);
     }
 
     SECTION("never zero - download_file_tail rejects a zero-length range") {

@@ -23,62 +23,62 @@ inline bool is_tty() {
 
 // Colors
 constexpr const char* RESET = "\033[0m";
-constexpr const char* BOLD = "\033[1m";
-constexpr const char* DIM = "\033[2m";
-constexpr const char* ITALIC = "\033[3m";
-constexpr const char* UNDERLINE = "\033[4m";
+constexpr const char* kBold = "\033[1m";
+constexpr const char* kDim = "\033[2m";
+constexpr const char* kItalic = "\033[3m";
+constexpr const char* kUnderline = "\033[4m";
 
 // Foreground colors
-constexpr const char* BLACK = "\033[30m";
+constexpr const char* kBlack = "\033[30m";
 constexpr const char* RED = "\033[31m";
 constexpr const char* GREEN = "\033[32m";
-constexpr const char* YELLOW = "\033[33m";
+constexpr const char* kYellow = "\033[33m";
 constexpr const char* BLUE = "\033[34m";
-constexpr const char* MAGENTA = "\033[35m";
-constexpr const char* CYAN = "\033[36m";
+constexpr const char* kMagenta = "\033[35m";
+constexpr const char* kCyan = "\033[36m";
 constexpr const char* WHITE = "\033[37m";
 
 // Bright foreground colors
-constexpr const char* BRIGHT_BLACK = "\033[90m";
-constexpr const char* BRIGHT_RED = "\033[91m";
-constexpr const char* BRIGHT_GREEN = "\033[92m";
-constexpr const char* BRIGHT_YELLOW = "\033[93m";
-constexpr const char* BRIGHT_BLUE = "\033[94m";
-constexpr const char* BRIGHT_MAGENTA = "\033[95m";
-constexpr const char* BRIGHT_CYAN = "\033[96m";
-constexpr const char* BRIGHT_WHITE = "\033[97m";
+constexpr const char* kBrightBlack = "\033[90m";
+constexpr const char* kBrightRed = "\033[91m";
+constexpr const char* kBrightGreen = "\033[92m";
+constexpr const char* kBrightYellow = "\033[93m";
+constexpr const char* kBrightBlue = "\033[94m";
+constexpr const char* kBrightMagenta = "\033[95m";
+constexpr const char* kBrightCyan = "\033[96m";
+constexpr const char* kBrightWhite = "\033[97m";
 
 // Semantic colors (btop-style)
 inline std::string success(const std::string& text) {
-    return std::string(BRIGHT_GREEN) + text + RESET;
+    return std::string(kBrightGreen) + text + RESET;
 }
 
 inline std::string error(const std::string& text) {
-    return std::string(BRIGHT_RED) + text + RESET;
+    return std::string(kBrightRed) + text + RESET;
 }
 
 inline std::string warning(const std::string& text) {
-    return std::string(BRIGHT_YELLOW) + text + RESET;
+    return std::string(kBrightYellow) + text + RESET;
 }
 
 inline std::string info(const std::string& text) {
-    return std::string(BRIGHT_CYAN) + text + RESET;
+    return std::string(kBrightCyan) + text + RESET;
 }
 
 inline std::string dim(const std::string& text) {
-    return std::string(DIM) + text + RESET;
+    return std::string(kDim) + text + RESET;
 }
 
 inline std::string header(const std::string& text) {
-    return std::string(BOLD) + std::string(BRIGHT_CYAN) + text + RESET;
+    return std::string(kBold) + std::string(kBrightCyan) + text + RESET;
 }
 
 inline std::string section(const std::string& text) {
-    return std::string(BOLD) + std::string(CYAN) + text + RESET;
+    return std::string(kBold) + std::string(kCyan) + text + RESET;
 }
 
 inline std::string key(const std::string& text) {
-    return std::string(BRIGHT_BLUE) + text + RESET;
+    return std::string(kBrightBlue) + text + RESET;
 }
 
 inline std::string value(const std::string& text) {

@@ -56,12 +56,12 @@ namespace {
 
 /// The reporter's configuration (bundle 6QWNVZY5): every extruder carries
 /// min_temp: -100 so Klipper tolerates the open thermistor on an empty dock.
-constexpr double REPORTED_MIN_TEMP = -100.0;
+constexpr double kReportedMinTemp = -100.0;
 
 /// Raised above the 400.0 SafetyLimits default so the parse produces an
 /// observable change on the ceiling too - the signal that the temperature loop
 /// ran at all, rather than the floors reading 0 because nothing was parsed.
-constexpr double PROBE_EXTRUDER_MAX_TEMP = 500.0;
+constexpr double kProbeExtruderMaxTemp = 500.0;
 
 /// Drives the real update_safety_limits_from_printer() against a mock whose
 /// configfile.settings can carry a negative floor.
@@ -70,7 +70,7 @@ class NegativeMinTempFixture : public LVGLTestFixture {
     NegativeMinTempFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
         state_.init_subjects(false);
         api_ = std::make_unique<MoonrakerAPI>(mock_client_, state_);
-        mock_client_.set_extruder_max_temp(PROBE_EXTRUDER_MAX_TEMP);
+        mock_client_.set_extruder_max_temp(kProbeExtruderMaxTemp);
     }
 
     ~NegativeMinTempFixture() override {
@@ -139,8 +139,8 @@ struct SafetyTextHarness {
 
 TEST_CASE("SafetyLimits: negative temperature floors clamp to zero", "[1353][safety_limits]") {
     SafetyLimits limits;
-    limits.min_temperature_celsius = REPORTED_MIN_TEMP;
-    limits.min_extrude_temp_celsius = REPORTED_MIN_TEMP;
+    limits.min_temperature_celsius = kReportedMinTemp;
+    limits.min_extrude_temp_celsius = kReportedMinTemp;
 
     limits.clamp_temperature_floors();
 
@@ -151,7 +151,7 @@ TEST_CASE("SafetyLimits: negative temperature floors clamp to zero", "[1353][saf
 TEST_CASE("SafetyLimits: a negative per-extruder extrusion floor clamps to zero",
           "[1353][safety_limits]") {
     SafetyLimits limits;
-    limits.set_min_extrude_temp_for("extruder1", REPORTED_MIN_TEMP);
+    limits.set_min_extrude_temp_for("extruder1", kReportedMinTemp);
     limits.set_min_extrude_temp_for("extruder2", 190.0);
 
     limits.clamp_temperature_floors();
@@ -166,22 +166,22 @@ TEST_CASE("SafetyLimits: a configured positive floor survives the clamp", "[1353
     SafetyLimits limits;
     limits.min_temperature_celsius = 5.0;
     limits.min_extrude_temp_celsius = 190.0;
-    limits.max_temperature_celsius = PROBE_EXTRUDER_MAX_TEMP;
+    limits.max_temperature_celsius = kProbeExtruderMaxTemp;
 
     limits.clamp_temperature_floors();
 
     CHECK(limits.min_temperature_celsius == Catch::Approx(5.0));
     CHECK(limits.min_extrude_temp_celsius == Catch::Approx(190.0));
     // The ceiling is a permissive sanity net and is deliberately untouched.
-    CHECK(limits.max_temperature_celsius == Catch::Approx(PROBE_EXTRUDER_MAX_TEMP));
+    CHECK(limits.max_temperature_celsius == Catch::Approx(kProbeExtruderMaxTemp));
 }
 
 TEST_CASE("SafetyLimits: clamping is idempotent", "[1353][safety_limits]") {
     // update_safety_limits_from_printer() re-runs on every discovery completion,
     // including reconnects, so the clamp is applied to already-clamped values.
     SafetyLimits limits;
-    limits.min_temperature_celsius = REPORTED_MIN_TEMP;
-    limits.min_extrude_temp_celsius = REPORTED_MIN_TEMP;
+    limits.min_temperature_celsius = kReportedMinTemp;
+    limits.min_extrude_temp_celsius = kReportedMinTemp;
 
     limits.clamp_temperature_floors();
     const SafetyLimits once = limits;
@@ -198,8 +198,8 @@ TEST_CASE("SafetyLimits: clamping is idempotent", "[1353][safety_limits]") {
 TEST_CASE_METHOD(NegativeMinTempFixture,
                  "Klipper's negative min_temp is not adopted into SafetyLimits",
                  "[1353][safety_limits]") {
-    mock_client_.set_extruder_min_temp(REPORTED_MIN_TEMP);
-    mock_client_.set_extruder_min_extrude_temp(REPORTED_MIN_TEMP);
+    mock_client_.set_extruder_min_temp(kReportedMinTemp);
+    mock_client_.set_extruder_min_extrude_temp(kReportedMinTemp);
 
     REQUIRE(run_update());
 
@@ -207,7 +207,7 @@ TEST_CASE_METHOD(NegativeMinTempFixture,
 
     // Proves the temperature loop ran at all - without this the floors could
     // read 0 simply because nothing was parsed.
-    REQUIRE(limits.max_temperature_celsius == Catch::Approx(PROBE_EXTRUDER_MAX_TEMP));
+    REQUIRE(limits.max_temperature_celsius == Catch::Approx(kProbeExtruderMaxTemp));
 
     // The regression. Before the fix these were -100.
     CHECK(limits.min_temperature_celsius == Catch::Approx(0.0));
@@ -217,8 +217,8 @@ TEST_CASE_METHOD(NegativeMinTempFixture,
 TEST_CASE_METHOD(NegativeMinTempFixture,
                  "A negative configured min_temp leaves negative targets unsendable",
                  "[1353][safety_limits]") {
-    mock_client_.set_extruder_min_temp(REPORTED_MIN_TEMP);
-    mock_client_.set_extruder_min_extrude_temp(REPORTED_MIN_TEMP);
+    mock_client_.set_extruder_min_temp(kReportedMinTemp);
+    mock_client_.set_extruder_min_extrude_temp(kReportedMinTemp);
     REQUIRE(run_update());
 
     const SafetyLimits& limits = api_->get_safety_limits();
@@ -234,8 +234,8 @@ TEST_CASE_METHOD(NegativeMinTempFixture,
 
 TEST_CASE_METHOD(NegativeMinTempFixture, "set_temperature rejects a negative target",
                  "[1353][safety_limits]") {
-    mock_client_.set_extruder_min_temp(REPORTED_MIN_TEMP);
-    mock_client_.set_extruder_min_extrude_temp(REPORTED_MIN_TEMP);
+    mock_client_.set_extruder_min_temp(kReportedMinTemp);
+    mock_client_.set_extruder_min_extrude_temp(kReportedMinTemp);
     REQUIRE(run_update());
 
     // The wiring, not just the predicate: validation is synchronous and runs
@@ -295,8 +295,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // Push the reporter's numbers through the API the way discovery does, then
     // hand the panel the adopted limits, as application.cpp does.
     SafetyLimits limits;
-    limits.min_temperature_celsius = REPORTED_MIN_TEMP;
-    limits.min_extrude_temp_celsius = REPORTED_MIN_TEMP;
+    limits.min_temperature_celsius = kReportedMinTemp;
+    limits.min_extrude_temp_celsius = kReportedMinTemp;
     api()->set_safety_limits(limits);
 
     h.panel->set_limits(api()->get_safety_limits());

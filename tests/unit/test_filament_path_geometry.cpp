@@ -104,10 +104,10 @@ TEST_CASE("add_line skips zero-length, add ops respect MAX_SEGS", "[filament-pat
     REQUIRE(p.count == 0);
 
     p.clear();
-    for (int i = 0; i < FilamentPath::MAX_SEGS + 5; ++i) {
+    for (int i = 0; i < FilamentPath::kMaxSegs + 5; ++i) {
         p.add_line(0.0f, static_cast<float>(i), 0.0f, static_cast<float>(i + 1));
     }
-    REQUIRE(p.count == FilamentPath::MAX_SEGS);
+    REQUIRE(p.count == FilamentPath::kMaxSegs);
 }
 
 // ============================================================================
@@ -576,9 +576,9 @@ TEST_CASE("route_polyline_filleted duplicate waypoint preserves the corner",
     // distance to the corner.
     float total = path_length(p);
     float min_to_corner = 1e9f;
-    const int SAMPLES = 200;
-    for (int i = 0; i <= SAMPLES; ++i) {
-        PathPoint at = path_point_at(p, total * (float)i / (float)SAMPLES);
+    const int kSamples = 200;
+    for (int i = 0; i <= kSamples; ++i) {
+        PathPoint at = path_point_at(p, total * (float)i / (float)kSamples);
         float dx = at.x - 100.0f;
         float dy = at.y - 0.0f;
         float d = std::sqrt(dx * dx + dy * dy);
@@ -686,7 +686,7 @@ float leg_len(const MergeLaneOut& o, int i) {
 // starved arc or a sharp mitered notch. The two corners that previously starved
 // were the FIRST (just below the sensor) and LAST (just above the hub) verticals.
 TEST_CASE("build_merge_fan reserves fillet room at every corner", "[filament-path][geometry]") {
-    const float FILLET_R = 8.0f;
+    const float kFilletR = 8.0f;
 
     auto check_lane_legs = [&](const MergeLaneOut& o, const char* label) {
         INFO(label);
@@ -700,13 +700,13 @@ TEST_CASE("build_merge_fan reserves fillet room at every corner", "[filament-pat
         float l0 = leg_len(o, 0);
         float l1 = leg_len(o, 1);
         float l2 = leg_len(o, 2);
-        REQUIRE(l0 >= FILLET_R);
-        REQUIRE(l2 >= FILLET_R);
+        REQUIRE(l0 >= kFilletR);
+        REQUIRE(l2 >= kFilletR);
         // Middle diagonal: either degenerate (collinear collapse) or long enough
         // to seat both corner fillets.
         bool degenerate = std::fabs(o.pts[1].x - o.pts[2].x) < 1e-2f;
         if (!degenerate)
-            REQUIRE(l1 >= FILLET_R);
+            REQUIRE(l1 >= kFilletR);
     };
 
     // AFC-like fan: 4 lanes, sensors across the top, hub well below. The steepest
@@ -715,7 +715,7 @@ TEST_CASE("build_merge_fan reserves fillet room at every corner", "[filament-pat
         MergeLaneIn in[4] = {{20.0f, 0.0f}, {60.0f, 0.0f}, {140.0f, 0.0f}, {180.0f, 0.0f}};
         MergeLaneOut out[4];
         build_merge_fan(in, 4, /*hub_cx=*/100.0f, /*hub_top=*/120.0f, /*hub_w=*/90.0f,
-                        /*entry_margin=*/8.0f, FILLET_R, /*max_slope=*/1.2f, out);
+                        /*entry_margin=*/8.0f, kFilletR, /*max_slope=*/1.2f, out);
         for (int i = 0; i < 4; ++i)
             check_lane_legs(out[i], "afc-4 lane");
     }
@@ -726,7 +726,7 @@ TEST_CASE("build_merge_fan reserves fillet room at every corner", "[filament-pat
         MergeLaneIn in[3] = {{30.0f, 10.0f}, {100.0f, 10.0f}, {170.0f, 10.0f}};
         MergeLaneOut out[3];
         build_merge_fan(in, 3, /*hub_cx=*/100.0f, /*hub_top=*/70.0f, /*hub_w=*/120.0f,
-                        /*entry_margin=*/8.0f, FILLET_R, /*max_slope=*/1.2f, out);
+                        /*entry_margin=*/8.0f, kFilletR, /*max_slope=*/1.2f, out);
         for (int i = 0; i < 3; ++i)
             check_lane_legs(out[i], "shallow-hub lane");
     }
@@ -737,11 +737,11 @@ TEST_CASE("build_merge_fan reserves fillet room at every corner", "[filament-pat
         MergeLaneIn in[3] = {{30.0f, 0.0f}, {100.0f, 25.0f}, {170.0f, 50.0f}};
         MergeLaneOut out[3];
         build_merge_fan(in, 3, /*hub_cx=*/100.0f, /*hub_top=*/130.0f, /*hub_w=*/110.0f,
-                        /*entry_margin=*/8.0f, FILLET_R, /*max_slope=*/1.2f, out);
+                        /*entry_margin=*/8.0f, kFilletR, /*max_slope=*/1.2f, out);
         for (int i = 0; i < 3; ++i) {
             check_lane_legs(out[i], "staggered lane");
             // First leg must clear THIS lane's own sensor by >= fillet_r.
-            REQUIRE(out[i].pts[1].y - out[i].pts[0].y >= FILLET_R);
+            REQUIRE(out[i].pts[1].y - out[i].pts[0].y >= kFilletR);
         }
     }
 }
@@ -834,21 +834,21 @@ TEST_CASE("merge fans on the measured detail canvases clear tube, halo and bands
     const int count = GENERATE(8, 4, 2);
     CAPTURE(canvas.name, count);
 
-    constexpr float SENSOR_R = 4, SEPARATION = 13, MARGIN = 8, BAND_STEP = 17;
+    constexpr float kSensorR = 4, SEPARATION = 13, kMargin = 8, BAND_STEP = 17;
     MergeLaneIn in[8];
     for (int i = 0; i < count; ++i)
-        in[i] = {canvas.w * (i + 0.5f) / count, 0.10f * canvas.h + SENSOR_R};
+        in[i] = {canvas.w * (i + 0.5f) / count, 0.10f * canvas.h + kSensorR};
     const float slot_span = in[count - 1].slot_x - in[0].slot_x;
-    const float tube_end = 0.25f * canvas.h - SENSOR_R;
-    const float min_width = (count - 1) * 22.0f + 2 * MARGIN;
-    const float max_width = slot_span + 2 * MARGIN;
+    const float tube_end = 0.25f * canvas.h - kSensorR;
+    const float min_width = (count - 1) * 22.0f + 2 * kMargin;
+    const float max_width = slot_span + 2 * kMargin;
 
     const float width = merge_fan_width(in, count, canvas.w / 2, tube_end, min_width, max_width,
-                                        MARGIN, 8, 1.2f, SEPARATION);
+                                        kMargin, 8, 1.2f, SEPARATION);
     MergeLaneOut fan[8];
-    build_merge_fan(in, count, canvas.w / 2, tube_end, width, MARGIN, 8, 1.2f, fan);
+    build_merge_fan(in, count, canvas.w / 2, tube_end, width, kMargin, 8, 1.2f, fan);
     const float clearance = neighbour_clearance(fan, count);
-    const float entry_step = (width - 2 * MARGIN) / (count - 1);
+    const float entry_step = (width - 2 * kMargin) / (count - 1);
     CAPTURE(width, max_width, clearance, entry_step);
 
     // The micro fan zone is shorter than the two fillet legs, so only vertical

@@ -18,7 +18,7 @@ namespace {
 /// Anything at or below 0 is Klipper's "no data" / disconnect / inactive-tool
 /// placeholder. Shared by the live recorder and the store seed so a sample can
 /// never enter the history through one door that the other would have rejected.
-constexpr int MAX_VALID_TEMP_DECI = 4000;
+constexpr int kMaxValidTempDeci = 4000;
 } // namespace
 
 // ============================================================================
@@ -69,19 +69,19 @@ TemperatureHistoryManager::get_samples(const std::string& heater_name) const {
     int oldest_index;
     int num_samples;
 
-    if (history.count < HISTORY_SIZE) {
+    if (history.count < kHistorySize) {
         // Buffer not full yet - samples start at 0
         oldest_index = 0;
         num_samples = history.count;
     } else {
         // Buffer full - oldest is at current write position
         oldest_index = history.write_index;
-        num_samples = HISTORY_SIZE;
+        num_samples = kHistorySize;
     }
 
     // Copy samples in chronological order (oldest first)
     for (int i = 0; i < num_samples; ++i) {
-        int idx = (oldest_index + i) % HISTORY_SIZE;
+        int idx = (oldest_index + i) % kHistorySize;
         result.push_back(history.samples[static_cast<size_t>(idx)]);
     }
 
@@ -106,12 +106,12 @@ std::vector<TempSample> TemperatureHistoryManager::get_samples_since(const std::
     int oldest_index;
     int num_samples;
 
-    if (history.count < HISTORY_SIZE) {
+    if (history.count < kHistorySize) {
         oldest_index = 0;
         num_samples = history.count;
     } else {
         oldest_index = history.write_index;
-        num_samples = HISTORY_SIZE;
+        num_samples = kHistorySize;
     }
 
     // Filter samples in chronological order, collecting only those after since_ms
@@ -119,7 +119,7 @@ std::vector<TempSample> TemperatureHistoryManager::get_samples_since(const std::
     result.reserve(static_cast<size_t>(num_samples));
 
     for (int i = 0; i < num_samples; ++i) {
-        int idx = (oldest_index + i) % HISTORY_SIZE;
+        int idx = (oldest_index + i) % kHistorySize;
         const TempSample& sample = history.samples[static_cast<size_t>(idx)];
         if (sample.timestamp_ms > since_ms) {
             result.push_back(sample);
@@ -150,7 +150,7 @@ int TemperatureHistoryManager::get_sample_count(const std::string& heater_name) 
         return 0;
     }
 
-    return std::min(it->second.count, HISTORY_SIZE);
+    return std::min(it->second.count, kHistorySize);
 }
 
 // ============================================================================
@@ -212,7 +212,7 @@ void TemperatureHistoryManager::log_sample_verdict(const std::string& heater_nam
     case helix::InvalidSampleLog::Entered:
         spdlog::debug("[TempHistory] '{}' reading out of range ({} deci-°C) - dropping samples; "
                       "further reports back off to one per {} min",
-                      heater_name, temp_deci, helix::InvalidSampleTracker::MAX_REPEAT_MS / 60000);
+                      heater_name, temp_deci, helix::InvalidSampleTracker::kMaxRepeatMs / 60000);
         break;
     case helix::InvalidSampleLog::StillInvalid:
         spdlog::debug("[TempHistory] '{}' still out of range ({} deci-°C): {} samples dropped "
@@ -248,7 +248,7 @@ bool TemperatureHistoryManager::add_sample_internal(const std::string& heater_na
     // single message, which evicted the whole crash ring. InvalidSampleTracker
     // collapses a run into: one line when it opens, a heartbeat on a doubling
     // interval while it lasts, one line when it closes.
-    const bool valid = (temp_deci > 0 && temp_deci <= MAX_VALID_TEMP_DECI);
+    const bool valid = (temp_deci > 0 && temp_deci <= kMaxValidTempDeci);
     log_sample_verdict(heater_name, valid, temp_deci, timestamp_ms);
     if (!valid) {
         return false;
@@ -257,9 +257,8 @@ bool TemperatureHistoryManager::add_sample_internal(const std::string& heater_na
     // Get or create heater history
     HeaterHistory& history = heaters_[heater_name];
 
-    // Throttle: reject if within SAMPLE_INTERVAL_MS of last sample
-    if (history.last_sample_ms > 0 &&
-        (timestamp_ms - history.last_sample_ms) < SAMPLE_INTERVAL_MS) {
+    // Throttle: reject if within kSampleIntervalMs of last sample
+    if (history.last_sample_ms > 0 && (timestamp_ms - history.last_sample_ms) < kSampleIntervalMs) {
         return false;
     }
 
@@ -272,10 +271,10 @@ bool TemperatureHistoryManager::add_sample_internal(const std::string& heater_na
     history.samples[static_cast<size_t>(history.write_index)] = sample;
 
     // Advance write index (circular)
-    history.write_index = (history.write_index + 1) % HISTORY_SIZE;
+    history.write_index = (history.write_index + 1) % kHistorySize;
 
-    // Update count (capped at HISTORY_SIZE)
-    if (history.count < HISTORY_SIZE) {
+    // Update count (capped at kHistorySize)
+    if (history.count < kHistorySize) {
         history.count++;
     }
 
@@ -302,7 +301,7 @@ void TemperatureHistoryManager::seed_from_store(const TemperatureStore& store, i
 
         // Moonraker's store is a bare array with no timestamps, so it is
         // reconstructed as an even 1 Hz run ending at now_ms.
-        const int64_t store_oldest_ms = now_ms - static_cast<int64_t>(n - 1) * SAMPLE_INTERVAL_MS;
+        const int64_t store_oldest_ms = now_ms - static_cast<int64_t>(n - 1) * kSampleIntervalMs;
 
         HeaterHistory& hh = heaters_[key];
 
@@ -325,11 +324,11 @@ void TemperatureHistoryManager::seed_from_store(const TemperatureStore& store, i
         std::vector<TempSample> merged;
         merged.reserve(static_cast<size_t>(hh.count) + n);
 
-        const int existing = std::min(hh.count, HISTORY_SIZE);
-        const int oldest_index = (hh.count < HISTORY_SIZE) ? 0 : hh.write_index;
+        const int existing = std::min(hh.count, kHistorySize);
+        const int oldest_index = (hh.count < kHistorySize) ? 0 : hh.write_index;
         for (int i = 0; i < existing; ++i) {
             const TempSample& s =
-                hh.samples[static_cast<size_t>((oldest_index + i) % HISTORY_SIZE)];
+                hh.samples[static_cast<size_t>((oldest_index + i) % kHistorySize)];
             if (s.timestamp_ms < store_oldest_ms) {
                 merged.push_back(s);
             }
@@ -342,7 +341,7 @@ void TemperatureHistoryManager::seed_from_store(const TemperatureStore& store, i
             // reporting, and a seeded 0 draws a solid vertical drop to the
             // chart's 0°C floor exactly like a live one would.
             const int temp_deci = static_cast<int>(std::lround(series.temperatures[i] * 10.0f));
-            if (temp_deci <= 0 || temp_deci > MAX_VALID_TEMP_DECI) {
+            if (temp_deci <= 0 || temp_deci > kMaxValidTempDeci) {
                 continue;
             }
             TempSample s;
@@ -350,7 +349,7 @@ void TemperatureHistoryManager::seed_from_store(const TemperatureStore& store, i
             s.target_deci = (i < series.targets.size())
                                 ? static_cast<int>(std::lround(series.targets[i] * 10.0f))
                                 : 0;
-            s.timestamp_ms = now_ms - static_cast<int64_t>(n - 1 - i) * SAMPLE_INTERVAL_MS;
+            s.timestamp_ms = now_ms - static_cast<int64_t>(n - 1 - i) * kSampleIntervalMs;
             merged.push_back(s);
         }
         const size_t store_added = merged.size() - local_kept;
@@ -364,14 +363,14 @@ void TemperatureHistoryManager::seed_from_store(const TemperatureStore& store, i
             continue;
         }
 
-        // Keep the newest HISTORY_SIZE.
-        const size_t keep = std::min(merged.size(), static_cast<size_t>(HISTORY_SIZE));
+        // Keep the newest kHistorySize.
+        const size_t keep = std::min(merged.size(), static_cast<size_t>(kHistorySize));
         const size_t start = merged.size() - keep;
         for (size_t i = 0; i < keep; ++i) {
             hh.samples[i] = merged[start + i];
         }
         hh.count = static_cast<int>(keep);
-        hh.write_index = static_cast<int>(keep) % HISTORY_SIZE;
+        hh.write_index = static_cast<int>(keep) % kHistorySize;
         hh.last_sample_ms = hh.samples[keep - 1].timestamp_ms;
 
         spdlog::debug("[TempHistory] seeded '{}': {} samples ({} local kept + {} from store, "
@@ -468,7 +467,7 @@ void TemperatureHistoryManager::subscribe_to_subjects() {
     }
 
     auto& sensor_mgr = helix::sensors::TemperatureSensorManager::instance();
-    if (lv_subject_t* sensor_count = sensor_mgr.get_sensor_count_subject()) {
+    if (lv_subject_t* sensor_count = sensor_mgr.count_subject()) {
         sensor_count_observer_ = ObserverGuard(
             sensor_count,
             [](lv_observer_t* observer, lv_subject_t*) {
@@ -479,7 +478,7 @@ void TemperatureHistoryManager::subscribe_to_subjects() {
                 }
             },
             this);
-        sensor_count_observer_.set_alive_token(sensor_mgr.get_subjects_lifetime());
+        sensor_count_observer_.set_alive_token(sensor_mgr.subjects_lifetime());
     }
 
     resubscribe();
@@ -640,10 +639,10 @@ void TemperatureHistoryManager::update_recent_sample_target(const std::string& h
     HeaterHistory& history = it->second;
 
     // Find the most recent sample
-    int recent_idx = (history.write_index - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+    int recent_idx = (history.write_index - 1 + kHistorySize) % kHistorySize;
     TempSample& recent = history.samples[static_cast<size_t>(recent_idx)];
 
-    // Check if it was stored recently (within RECENT_SAMPLE_WINDOW_MS)
+    // Check if it was stored recently (within kRecentSampleWindowMs)
     using namespace std::chrono;
     int64_t current_ms =
         duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
@@ -651,7 +650,7 @@ void TemperatureHistoryManager::update_recent_sample_target(const std::string& h
 
     // Always update if sample was stored very recently
     // Use a generous window since temp and target are typically set together
-    if (age_ms <= RECENT_SAMPLE_WINDOW_MS) {
+    if (age_ms <= kRecentSampleWindowMs) {
         recent.target_deci = target_deci;
     }
 }

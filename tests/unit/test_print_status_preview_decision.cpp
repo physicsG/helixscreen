@@ -219,10 +219,10 @@ TEST_CASE("Preview decision: both gates must open to fetch", "[print_status][pre
 TEST_CASE("Preview decision: a command-line render mode outranks Thumbnail Only",
           "[print_status][preview][render_mode]") {
     using helix::gcode_viewer::decide_preview_mode;
-    using helix::gcode_viewer::RENDER_MODE_THUMBNAIL_ONLY;
+    using helix::gcode_viewer::kRenderModeThumbnailOnly;
 
     const bool enabled =
-        decide_preview_mode(/*cmdline=*/2, /*env_set=*/false, RENDER_MODE_THUMBNAIL_ONLY)
+        decide_preview_mode(/*cmdline=*/2, /*env_set=*/false, kRenderModeThumbnailOnly)
             .uses_viewer();
     REQUIRE(enabled);
 
@@ -234,10 +234,10 @@ TEST_CASE("Preview decision: a command-line render mode outranks Thumbnail Only"
 TEST_CASE("Preview decision: the persisted Thumbnail Only setting closes the gate",
           "[print_status][preview][render_mode]") {
     using helix::gcode_viewer::decide_preview_mode;
-    using helix::gcode_viewer::RENDER_MODE_THUMBNAIL_ONLY;
+    using helix::gcode_viewer::kRenderModeThumbnailOnly;
 
     const bool enabled =
-        decide_preview_mode(/*cmdline=*/-1, /*env_set=*/false, RENDER_MODE_THUMBNAIL_ONLY)
+        decide_preview_mode(/*cmdline=*/-1, /*env_set=*/false, kRenderModeThumbnailOnly)
             .uses_viewer();
     REQUIRE_FALSE(enabled);
 
@@ -302,22 +302,22 @@ TEST_CASE("Preview decision: the finished-print freeze is preserved", "[print_st
 // ============================================================================
 
 TEST_CASE("preview_viewer_hidden - thumbnail mode hides the viewer", "[print_status][preview]") {
-    CHECK(helix::ui::preview_viewer_hidden(helix::ui::PREVIEW_MODE_THUMBNAIL, false));
-    CHECK(helix::ui::preview_viewer_hidden(helix::ui::PREVIEW_MODE_THUMBNAIL, true));
+    CHECK(helix::ui::preview_viewer_hidden(helix::ui::kPreviewModeThumbnail, false));
+    CHECK(helix::ui::preview_viewer_hidden(helix::ui::kPreviewModeThumbnail, true));
 }
 
 TEST_CASE("preview_viewer_hidden - 2D stays hidden until it has content",
           "[print_status][preview]") {
-    CHECK(helix::ui::preview_viewer_hidden(helix::ui::PREVIEW_MODE_2D, false));
-    CHECK_FALSE(helix::ui::preview_viewer_hidden(helix::ui::PREVIEW_MODE_2D, true));
+    CHECK(helix::ui::preview_viewer_hidden(helix::ui::kPreviewMode2d, false));
+    CHECK_FALSE(helix::ui::preview_viewer_hidden(helix::ui::kPreviewMode2d, true));
 }
 
 TEST_CASE("preview_viewer_hidden - 3D is never hidden while it works", "[print_status][preview]") {
     // A hidden 3D viewer would never upload its VBOs (that happens in the draw
     // pass), so it would never reach the first frame that reveals it. It stays
     // visible under the thumbnail instead.
-    CHECK_FALSE(helix::ui::preview_viewer_hidden(helix::ui::PREVIEW_MODE_3D, false));
-    CHECK_FALSE(helix::ui::preview_viewer_hidden(helix::ui::PREVIEW_MODE_3D, true));
+    CHECK_FALSE(helix::ui::preview_viewer_hidden(helix::ui::kPreviewMode3d, false));
+    CHECK_FALSE(helix::ui::preview_viewer_hidden(helix::ui::kPreviewMode3d, true));
 }
 
 TEST_CASE("preview_build_size - a hidden viewer builds at its parent's size",

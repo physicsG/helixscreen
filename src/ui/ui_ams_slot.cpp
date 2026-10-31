@@ -3,12 +3,13 @@
 
 #include "ui_ams_slot.h"
 
-#include "ui_ams_lane_bar.h"
 #include "ui_ams_lane_spool.h"
+#include "ui_ams_slot_layout.h"
 #include "ui_fonts.h"
+#include "ui_humidity_drop.h"
 #include "ui_observer_guard.h"
+#include "ui_text.h"
 #include "ui_toolhead_badge.h"
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "ams_lane_state.h"
@@ -17,16 +18,19 @@
 #include "data_root_resolver.h"
 #include "display_numbering.h"
 #include "display_settings_manager.h"
+#include "filament_display_name.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_parser.h"
 #include "helix-xml/src/xml/lv_xml_widget.h"
 #include "helix-xml/src/xml/parsers/lv_xml_obj_parser.h"
 #include "lvgl/lvgl.h"
 #include "observer_factory.h"
+#include "panel_widget_size.h"
 #include "static_subject_registry.h"
 #include "theme_manager.h"
 #include "ui/ams_drawing_utils.h"
 #include "ui/ui_widget_helpers.h"
+#include "widget_data_registry.h"
 
 #include <spdlog/spdlog.h>
 
@@ -34,9 +38,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
-#include <optional>
-#include <unordered_map>
 
 using namespace helix;
 
@@ -56,7 +59,7 @@ struct AmsSlotData {
 
     /// Backend whose subjects the observers below are bound to (captured at
     /// setup_slot_observers time from the active backend). Kept so later
-    /// re-reads (refresh_slot_material_label) hit the same backend the
+    /// re-reads (apply_slot_label) hit the same backend the
     /// observers are bound to, even if the active backend moved on.
     int backend_index = 0;
 
@@ -72,15 +75,17 @@ struct AmsSlotData {
     ObserverGuard status_observer;     ///< Per-slot status -> badge color
     ObserverGuard lane_state_observer; ///< Per-slot lane_state -> label text + ghost
     ObserverGuard material_observer;   ///< Per-slot material type label (static subject)
+    ObserverGuard name_observer;       ///< Per-slot spool name line
     ObserverGuard remaining_observer;  ///< Per-slot remaining length (primary backend)
     ObserverGuard current_slot_observer;
     ObserverGuard filament_loaded_observer;
     ObserverGuard active_loaded_observer; ///< Per-slot active-loaded (single highlight source)
     ObserverGuard action_observer;
     ObserverGuard target_slot_observer;
+    ObserverGuard slots_version_observer; ///< Spool table renumber -> badge number
 
     // Lifetime tokens paired with the observers that bind per-backend subjects
-    // (status, lane_state, material). Secondary-backend (index > 0) subjects
+    // (status, lane_state, material, name). Secondary-backend (index > 0) subjects
     // are DYNAMIC - recreated on backend rediscovery - so those observers need
     // tokens that expire when AmsState tears the subject down (L084). For
     // backend 0 the accessors return AmsState's subjects lifetime. Each MUST be
@@ -88,6 +93,7 @@ struct AmsSlotData {
     SubjectLifetime status_lifetime;
     SubjectLifetime lane_state_lifetime;
     SubjectLifetime material_lifetime;
+    SubjectLifetime name_lifetime;
 
     lv_obj_t* spool_container = nullptr; // Container for the lane spool + badges
 
@@ -95,20 +101,8 @@ struct AmsSlotData {
     // from the per-slot subjects; ams_slot only points it at a slot index.
     lv_obj_t* lane_spool = nullptr;
 
-    /// Bar row shown INSTEAD of the spool for a position fed from another unit.
-    /// An ACE-fed U1 head does not hold one spool — in head mode every bay of
-    /// its ACE feeds it — so a single spool graphic names whichever bay happens
-    /// to be seated and hides the other three. The bars are the same ones the
-    /// multi-filament overview draws on a unit card: one ams_lane_bar per bay.
-    lv_obj_t* source_bars = nullptr;
-    /// What source_bars was last built for: the feeding unit's first slot, its
-    /// bay count and the measured bar width. Each bar binds a global slot index
-    /// and repaints itself, so only a change here needs new bars.
-    int source_bars_first_slot = -1;
-    int source_bars_count = 0;
-    int32_t source_bars_width = 0;
-
     // Other UI elements
+    lv_obj_t* name_label = nullptr; // Spool name, above the material
     lv_obj_t* material_label = nullptr;
     lv_obj_t* leader_line = nullptr;     // Dotted line connecting label to spool (when staggered)
     lv_point_precise_t leader_points[2]; // Points for leader line (per-slot storage)
@@ -119,10 +113,14 @@ struct AmsSlotData {
     lv_obj_t* container = nullptr;       // The ams_slot widget itself
     lv_obj_t* lane_humidity = nullptr;   // Droplet + value row, under a per-lane lid
     lv_obj_t* lane_humidity_text = nullptr; // The row's value
+    lv_obj_t* lane_humidity_drop = nullptr; // The row's drop, filled to the value
     lv_obj_t* lane_temp_row = nullptr;      // Thermometer + value, above the humidity
     lv_obj_t* lane_temp_text = nullptr;
     lv_obj_t* lane_remaining = nullptr; // Measured remaining length, under the material
     bool show_lane_humidity = false;
+    lv_obj_t* drying_badge = nullptr;       // Top-right drying-state badge
+    lv_obj_t* drying_icons[4] = {};         // Queued, active, complete, cancelled
+    lv_subject_t* drying_subject = nullptr; // Subject the badge is bound to
 
     // Pulsing state - when true, highlight updates are skipped to preserve animation
     bool is_pulsing = false;
@@ -130,32 +128,28 @@ struct AmsSlotData {
 
 // Static registry mapping lv_obj_t* -> AmsSlotData*
 // Used for safe cleanup during lv_deinit() when user_data may be unreliable
-static std::unordered_map<lv_obj_t*, AmsSlotData*> s_slot_registry;
+static helix::WidgetDataRegistry<AmsSlotData> s_slot_registry;
 
 /**
  * @brief Get AmsSlotData for an object from the registry
  */
 static AmsSlotData* get_slot_data(lv_obj_t* obj) {
-    auto it = s_slot_registry.find(obj);
-    return (it != s_slot_registry.end()) ? it->second : nullptr;
+    return s_slot_registry.get(obj);
 }
 
 /**
  * @brief Register slot data in the registry
  */
 static void register_slot_data(lv_obj_t* obj, AmsSlotData* data) {
-    s_slot_registry[obj] = data;
+    s_slot_registry.set(obj, data);
 }
 
 /**
  * @brief Unregister and cleanup slot data
  */
 static void unregister_slot_data(lv_obj_t* obj) {
-    auto it = s_slot_registry.find(obj);
-    if (it != s_slot_registry.end()) {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-        std::unique_ptr<AmsSlotData> data(it->second);
+    if (AmsSlotData* registered = s_slot_registry.get(obj)) {
+        std::unique_ptr<AmsSlotData> data(registered);
         if (data) {
             // Use reset() to properly unsubscribe from subjects (which are alive
             // during normal widget deletion). This frees the LambdaObserverContext,
@@ -163,8 +157,6 @@ static void unregister_slot_data(lv_obj_t* obj) {
             // are safely skipped. Using release() here caused use-after-free:
             // zombie observers would fire on subject changes, queue callbacks with
             // stale widget pointers, and crash in apply_status_badge (#579).
-            // Note: cleanup_all_slot_data() uses release() for pre-deinit when
-            // subjects may already be destroyed — that path is correct.
             //
             // Reset the dynamic-subject lifetime BEFORE its observer so the
             // observer's weak_ptr is already expired (secondary-backend subjects
@@ -172,9 +164,11 @@ static void unregister_slot_data(lv_obj_t* obj) {
             data->status_lifetime.reset();
             data->lane_state_lifetime.reset();
             data->material_lifetime.reset();
+            data->name_lifetime.reset();
             data->status_observer.reset();
             data->lane_state_observer.reset();
             data->material_observer.reset();
+            data->name_observer.reset();
             data->remaining_observer.reset();
             data->current_slot_observer.reset();
             data->filament_loaded_observer.reset();
@@ -182,77 +176,116 @@ static void unregister_slot_data(lv_obj_t* obj) {
             data->action_observer.reset();
             data->target_slot_observer.reset();
         }
-        s_slot_registry.erase(it);
+        s_slot_registry.take(obj);
     }
 }
 
 /**
- * @brief Pre-deinit cleanup: release all slot data while widgets are still alive.
+ * @brief Teardown cleanup: drop all slot data while widgets are still alive.
  *
- * Called via StaticSubjectRegistry BEFORE lv_deinit(). Releases ObserverGuards
- * while global subjects are still valid. After this, the DELETE events fired
- * during lv_deinit() find nothing in the registry and are no-ops.
+ * Runs from StaticSubjectRegistry at every printer switch and before lv_deinit().
+ * reset(), not release(): every guard carries its subject owner's lifetime token,
+ * so it removes its observer from a live subject and skips one AmsState has
+ * already freed, and either way frees the observer's context. After this, the
+ * DELETE events fired later find nothing in the registry and are no-ops.
  */
 static void cleanup_all_slot_data() {
-    for (auto& [obj, data] : s_slot_registry) {
+    s_slot_registry.for_each([](lv_obj_t* /*obj*/, AmsSlotData* data) {
         if (!data)
-            continue;
+            return;
 
-        // Release ObserverGuards while global subjects are still alive. Reset the
-        // dynamic-subject lifetime first (same #705 ordering as above).
+        // Reset the dynamic-subject lifetime first (same #705 ordering as above).
         data->status_lifetime.reset();
         data->lane_state_lifetime.reset();
         data->material_lifetime.reset();
-        data->status_observer.release();
-        data->lane_state_observer.release();
-        data->material_observer.release();
-        data->remaining_observer.release();
-        data->current_slot_observer.release();
-        data->filament_loaded_observer.release();
-        data->active_loaded_observer.release();
-        data->action_observer.release();
-        data->target_slot_observer.release();
+        data->name_lifetime.reset();
+        data->status_observer.reset();
+        data->lane_state_observer.reset();
+        data->material_observer.reset();
+        data->name_observer.reset();
+        data->remaining_observer.reset();
+        data->current_slot_observer.reset();
+        data->filament_loaded_observer.reset();
+        data->active_loaded_observer.reset();
+        data->action_observer.reset();
+        data->target_slot_observer.reset();
 
         delete data;
-    }
+    });
     s_slot_registry.clear();
     spdlog::debug("[AmsSlot] Pre-deinit cleanup: all slot data released");
 }
 
 // ============================================================================
-// Material Label
+// Name and Material Labels
 // ============================================================================
 
 /**
- * @brief Apply the material-type label from the per-slot material subject.
+ * @brief Paint the name and material lines from the per-slot subjects.
  *
- * The widget owns its own material rendering so every ams_slot consumer -
- * AmsPanel, AmsOverviewPanel, AmsDetail - repaints on a material-only change
- * without any container re-reading it imperatively (#1065). The text itself
- * comes from the spool family's shared rule, helix::ui::lane_material_text(),
- * keyed on the same lane_state subject that drives the embedded spool widget
- * so the label and the graphic cannot reach opposite conclusions about one
- * lane. What is ams_slot's own: long names truncate to 4 chars when 5+ slots
- * share a row (overlap guard; the mini strip ellipsizes instead).
+ * The widget owns its own label rendering so every ams_slot consumer -
+ * AmsPanel, AmsOverviewPanel, AmsDetail - repaints on a name-only or
+ * material-only change without any container re-reading it imperatively
+ * (#1065). The material text comes from the spool family's shared rule,
+ * helix::ui::lane_material_text(), keyed on the same lane_state subject that
+ * drives the embedded spool widget so the label and the graphic cannot reach
+ * opposite conclusions about one lane. helix::slot_card_lines() decides what
+ * the two lines read; this only puts that on screen.
+ *
+ * Reads both subjects rather than taking an observer's value, because either
+ * one changing changes what both lines read.
  */
-static void apply_material_label(AmsSlotData* data, const char* material) {
-    if (!data || !data->material_label)
+static helix::SlotCardLines slot_lines(const AmsSlotData* data) {
+    AmsState& state = AmsState::instance();
+    lv_subject_t* material_subject =
+        state.get_slot_material_subject(data->backend_index, data->slot_index);
+    lv_subject_t* name_subject = state.get_slot_name_subject(data->backend_index, data->slot_index);
+    const char* material = material_subject ? lv_subject_get_string(material_subject) : "";
+    const char* name = name_subject ? lv_subject_get_string(name_subject) : "";
+
+    return helix::slot_card_lines(
+        name, material, helix::ui::lane_material_text(data->last_lane_state, material),
+        data->total_count, data->last_lane_state == helix::ui::LaneState::Empty);
+}
+
+/**
+ * The name line takes its row's space in every slot of the row or in none. The
+ * spools stand below the label lines, so one slot laid out with the line and
+ * its neighbours without it puts that slot's spool a line lower than theirs.
+ */
+static void apply_row_name_lines(lv_obj_t* row) {
+    if (!row)
         return;
-    // A position drawn as its feeder's bays holds no single filament to name:
-    // the label would state whichever bay happened to be seated. Decided here,
-    // in the rule that owns this label, because it re-runs.
-    if (data->source_bars) {
-        lv_obj_add_flag(data->material_label, LV_OBJ_FLAG_HIDDEN);
-        return;
+    bool any_name = false;
+    const uint32_t count = lv_obj_get_child_count(row);
+    for (uint32_t i = 0; i < count && !any_name; ++i) {
+        const AmsSlotData* d = get_slot_data(lv_obj_get_child(row, (int32_t)i));
+        any_name = d && d->slot_index >= 0 && d->name_label && !slot_lines(d).name.empty();
     }
-    const char* text = helix::ui::lane_material_text(data->last_lane_state, material);
-    if (data->last_lane_state != helix::ui::LaneState::Empty && data->total_count > 4 &&
-        std::strlen(text) > 4) {
-        std::string truncated(text, 4);
-        lv_label_set_text(data->material_label, truncated.c_str());
-        return;
+    for (uint32_t i = 0; i < count; ++i) {
+        const AmsSlotData* d = get_slot_data(lv_obj_get_child(row, (int32_t)i));
+        if (!d || !d->name_label)
+            continue;
+        // DECLARATIVE_OK: a row-wide decision over per-slot subjects
+        if (any_name)
+            lv_obj_remove_flag(d->name_label, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(d->name_label, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_label_set_text(data->material_label, text);
+}
+
+static void apply_slot_label(AmsSlotData* data) {
+    if (!data || data->slot_index < 0)
+        return;
+    const helix::SlotCardLines lines = slot_lines(data);
+
+    if (data->material_label)
+        lv_label_set_text(data->material_label, lines.lower.c_str());
+    if (data->name_label) {
+        // DECLARATIVE_OK: per-slot subjects whose index arrives after view creation
+        lv_label_set_text(data->name_label, lines.name.c_str());
+        apply_row_name_lines(data->container ? lv_obj_get_parent(data->container) : nullptr);
+    }
 }
 
 /// The measured remaining length ("212m"), hidden while the lane has none.
@@ -275,13 +308,16 @@ static void apply_lane_humidity(AmsSlotData* data, AmsBackend* backend) {
     if (!data->show_lane_humidity || !data->lane_humidity_text || !backend)
         return;
     char text[16] = "--";
-    const AmsSystemInfo info = backend->get_system_info();
-    const SlotInfo* slot = info.get_slot_global(data->slot_index);
+    const auto info = AmsState::instance().system_info(data->backend_index);
+    const SlotInfo* slot = info ? info->get_slot_global(data->slot_index) : nullptr;
     const EnvironmentData* env = (slot && slot->environment) ? &*slot->environment : nullptr;
     if (env && env->has_humidity)
         snprintf(text, sizeof(text), "%d%%", (int)std::lround(env->humidity_pct));
     // DECLARATIVE_OK: per-slot reading with no per-slot humidity subject
     lv_label_set_text(data->lane_humidity_text, text);
+    helix::ui::humidity_drop_set_value(
+        data->lane_humidity_drop,
+        (env && env->has_humidity) ? static_cast<int>(std::lround(env->humidity_pct * 10.0f)) : -1);
 
     if (!data->lane_temp_row || !data->lane_temp_text)
         return;
@@ -300,18 +336,35 @@ static void apply_lane_humidity(AmsSlotData* data, AmsBackend* backend) {
         lv_obj_add_flag(data->lane_temp_row, LV_OBJ_FLAG_HIDDEN);
 }
 
-/// Re-apply the material label from the live per-slot material subject.
-///
-/// Used by apply_lane_state(), whose outcome changes what the label should
-/// read. Goes through apply_material_label() rather than writing text itself,
-/// so the rule above has exactly one implementation.
-static void refresh_slot_material_label(AmsSlotData* data) {
-    if (!data || !data->material_label)
+/// Bind the drying badge to @p subject (nullptr unbinds it and leaves it hidden). The
+/// slot index, and so the subject, arrives after the view is built, so the binding is
+/// made here rather than in XML.
+static void bind_drying_badge(AmsSlotData* data, lv_subject_t* subject) {
+    if (!data || !data->drying_badge || data->drying_subject == subject)
         return;
-    lv_subject_t* material_subject =
-        AmsState::instance().get_slot_material_subject(data->backend_index, data->slot_index);
-    apply_material_label(data,
-                         material_subject ? lv_subject_get_string(material_subject) : nullptr);
+    if (data->drying_subject) {
+        lv_obj_remove_from_subject(data->drying_badge, data->drying_subject);
+        for (lv_obj_t* icon : data->drying_icons) {
+            if (icon)
+                lv_obj_remove_from_subject(icon, data->drying_subject);
+        }
+    }
+    data->drying_subject = subject;
+    if (!subject) {
+        lv_obj_add_flag(data->drying_badge, LV_OBJ_FLAG_HIDDEN); // DECLARATIVE_OK: unbound
+        return;
+    }
+    using helix::printer::ZoneDryingState;
+    lv_obj_bind_flag_if_eq(data->drying_badge, subject, LV_OBJ_FLAG_HIDDEN,
+                           static_cast<int>(ZoneDryingState::Idle));
+    constexpr ZoneDryingState kIconState[4] = {ZoneDryingState::Queued, ZoneDryingState::Active,
+                                               ZoneDryingState::Complete,
+                                               ZoneDryingState::Cancelled};
+    for (int i = 0; i < 4; ++i) {
+        if (data->drying_icons[i])
+            lv_obj_bind_flag_if_not_eq(data->drying_icons[i], subject, LV_OBJ_FLAG_HIDDEN,
+                                       static_cast<int>(kIconState[i]));
+    }
 }
 
 // ============================================================================
@@ -319,6 +372,25 @@ static void refresh_slot_material_label(AmsSlotData* data) {
 // ============================================================================
 
 // Helper functions for observer logic (called by lambdas and initial triggers)
+
+/**
+ * @brief Set the badge's number text: the lane's spool number, not its index.
+ *
+ * A lane sharing another lane's spool (a fed toolhead lane) wears the storage
+ * lane's number, so the two count one spool. Lanes that hold their own spool
+ * keep the 1-based global order. Re-read on status changes: routing changes
+ * arrive with them and the alias follows the routing.
+ */
+static void apply_badge_number(AmsSlotData* data) {
+    if (!data || !data->slot_badge)
+        return;
+    AmsBackend* backend = AmsState::instance().get_backend(data->backend_index);
+    const int number = backend ? backend->spool_display_number(data->slot_index)
+                               : helix::ui::lane_number(data->slot_index);
+    char badge_text[16];
+    snprintf(badge_text, sizeof(badge_text), "%d", number);
+    lv_label_set_text(data->slot_badge, badge_text);
+}
 
 /**
  * @brief Color the status badge from the per-slot status subject.
@@ -355,6 +427,7 @@ static void apply_status_badge(AmsSlotData* data, int status_int) {
     }
     lv_obj_remove_flag(data->status_badge_bg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_bg_color(data->status_badge_bg, badge_bg, LV_PART_MAIN);
+    apply_badge_number(data);
 
     // Status fills are accents, so the label starts from the palette text colour and
     // shifts toward its pole as 4:1 needs
@@ -380,16 +453,15 @@ static void apply_lane_state(AmsSlotData* data, int state_int) {
     if (!data)
         return;
     data->last_lane_state = static_cast<helix::ui::LaneState>(state_int);
-    if (data->material_label) {
-        lv_obj_set_style_text_opa(data->material_label,
-                                  data->last_lane_state == helix::ui::LaneState::Ghosted
-                                      ? ams_draw::GHOST_OPA
-                                      : LV_OPA_COVER,
-                                  LV_PART_MAIN);
+    const lv_opa_t text_opa =
+        data->last_lane_state == helix::ui::LaneState::Ghosted ? ams_draw::kGhostOpa : LV_OPA_COVER;
+    for (lv_obj_t* label : {data->name_label, data->material_label}) {
+        if (label)
+            lv_obj_set_style_text_opa(label, text_opa, LV_PART_MAIN);
     }
-    // The label's TEXT depends on the classification just recorded, so
+    // The labels' TEXT depends on the classification just recorded, so
     // re-derive it from the one rule now that last_lane_state is current.
-    refresh_slot_material_label(data);
+    apply_slot_label(data);
 }
 
 // The current lane is marked by the spool's own glow, never a box on the slot.
@@ -428,31 +500,6 @@ static void apply_current_slot_highlight(AmsSlotData* data, int current_slot) {
 
     set_spool_glow(data,
                    is_active ? helix::ui::SpoolHighlight::Steady : helix::ui::SpoolHighlight::None);
-
-    // A slot fed from another unit is showing that unit's spool, not one of its
-    // own — on multiACE the U1's ACE-fed head. Mark it so the borrowed spool is
-    // legible as borrowed, which is also why its edit actions are missing from
-    // the slot menu.
-    //
-    // On `container`, the slot widget itself, so it frames the whole position
-    // rather than the spool area. Muted and thin so it reads as an annotation
-    // rather than competing with the active mark.
-    if (data->container) {
-        bool external = false;
-        if (auto* backend = AmsState::instance().get_backend(data->backend_index)) {
-            external = backend->slot_identity_owner_unit(data->slot_index).has_value();
-        }
-        if (external) {
-            lv_obj_set_style_border_color(data->container, theme_manager_get_color("text_muted"),
-                                          LV_PART_MAIN);
-            lv_obj_set_style_border_opa(data->container, LV_OPA_60, LV_PART_MAIN);
-            lv_obj_set_style_border_width(data->container, 1, LV_PART_MAIN);
-            lv_obj_set_style_radius(data->container, 4, LV_PART_MAIN);
-        } else {
-            lv_obj_set_style_border_opa(data->container, LV_OPA_TRANSP, LV_PART_MAIN);
-            lv_obj_set_style_border_width(data->container, 0, LV_PART_MAIN);
-        }
-    }
 
     spdlog::debug("[AmsSlot] Slot {} highlight active={} (from slot_active_loaded subject)",
                   data->slot_index, is_active);
@@ -510,7 +557,8 @@ static void evaluate_pulse_state(AmsSlotData* data) {
  * @brief Update tool badge based on slot's mapped_tool value
  *
  * Shows "T0", "T1", etc. when a tool is mapped to this slot.
- * Hidden when mapped_tool == -1 (no tool assigned). The hide policy is the
+ * Hidden when mapped_tool == -1 (no tool assigned), and when every tool feeds
+ * the lane of its own number (tool_badges_add_information()). The hide policy is the
  * slot's own backend's: a mixed rig can pair a tool changer with a lane-based
  * system, and only the changer's slots get the redundant badge.
  */
@@ -519,20 +567,19 @@ static void apply_tool_badge(AmsSlotData* data, int mapped_tool, bool is_overrid
         return;
     }
 
-    // A position drawn as its feeder's bays is not one tool's spool — it is the
-    // set the tool can draw from — so the tool letter belongs to the toolhead
-    // row below, not on top of the bars. Decided here, with the rest of this
-    // badge's visibility, because this rule re-runs on every refresh.
-    if (data->source_bars) {
-        lv_obj_add_flag(data->tool_badge_bg, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
     // Tool changers: badge is redundant with toolhead label below
     auto* backend = AmsState::instance().get_backend(data->backend_index);
     if (backend && backend->should_hide_slot_tool_badge()) {
         lv_obj_add_flag(data->tool_badge_bg, LV_OBJ_FLAG_HIDDEN);
         return;
+    }
+
+    // A tool feeding the lane of its own number only repeats the lane badge.
+    if (const auto info = AmsState::instance().system_info(data->backend_index)) {
+        if (!helix::ui::tool_badges_add_information(info->tool_to_slot_map, info->total_slots)) {
+            lv_obj_add_flag(data->tool_badge_bg, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
     }
 
     if (mapped_tool >= 0) {
@@ -562,8 +609,6 @@ static void apply_tool_badge(AmsSlotData* data, int mapped_tool, bool is_overrid
 /**
  * @brief Event handler for widget lifecycle (DELETE event for cleanup)
  */
-static void apply_source_bars(AmsSlotData* data);
-
 static void ams_slot_event_cb(lv_event_t* e) {
     lv_event_code_t code = lv_event_get_code(e);
 
@@ -578,21 +623,6 @@ static void ams_slot_event_cb(lv_event_t* e) {
     }
 }
 
-/// SIZE_CHANGED on the spool container (user_data = the slot widget). The
-/// source bars are sized off the container's computed width, which is 0 when
-/// the widget is first built (mid-XML-inflation) and only real once the
-/// container itself has been laid out -- so the hook sits on the container,
-/// whose coords are final when its own event fires, not on the slot widget,
-/// whose event runs before its children are re-laid-out. Only a position fed
-/// from another unit has bars to size; apply_source_bars() returns at once for
-/// every other slot.
-static void ams_slot_container_size_cb(lv_event_t* e) {
-    auto* obj = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
-    if (auto* d = get_slot_data(obj)) {
-        apply_source_bars(d);
-    }
-}
-
 // ============================================================================
 // Widget Creation (Internal)
 // ============================================================================
@@ -600,125 +630,15 @@ static void ams_slot_container_size_cb(lv_event_t* e) {
  * @brief Setup observers for a given slot index
  * Uses observer factory pattern for type-safe lambda observers
  */
-/**
- * @brief Draw the feeding unit's bays as bars, instead of one spool.
- *
- * A position fed from another unit is not a spool position — it is a view of
- * several. On a U1 in head mode all four bays of the bound ACE feed the one
- * ACE-fed head, so a single spool graphic would show whichever bay happened to
- * be seated and hide the other three; the badge already reads as the range.
- *
- * The bars are ams_lane_bar widgets, the ones the multi-filament overview's
- * unit cards use: each binds one bay's per-slot subjects and repaints itself,
- * so a bay's colour, fill, active mark and error reach this position without a
- * rebuild. Only geometry rebuilds them: the feeding unit, its bay count, or the
- * measured bar width.
- *
- * Safe to call repeatedly, and called from three places: setup_slot_observers()
- * once the slot index is known, ui_ams_slot_refresh() because which unit feeds
- * a position can change, and the spool container's SIZE_CHANGED because the
- * first call lands mid-XML-inflation, when the container has no width yet. A
- * rebuild goes through safe_clean_children(): the refresh arrives inside a
- * queued batch, where a synchronous lv_obj_clean() corrupts LVGL's event list
- * (#776).
- *
- * A slot that holds its own spool keeps it; one that stopped being fed from
- * elsewhere gets its spool, label and badge back.
- */
-static void apply_source_bars(AmsSlotData* data) {
-    if (!data || !data->spool_container) {
-        return;
-    }
-    auto* backend = AmsState::instance().get_backend(data->backend_index);
-    const auto owner = backend ? backend->slot_identity_owner_unit(data->slot_index) : std::nullopt;
-    const AmsSystemInfo info = owner ? backend->get_system_info() : AmsSystemInfo{};
-    const bool fed_elsewhere = owner && *owner >= 0 &&
-                               *owner < static_cast<int>(info.units.size()) &&
-                               !info.units[static_cast<size_t>(*owner)].slots.empty();
-
-    if (!fed_elsewhere) {
-        if (data->source_bars) {
-            // Deferred for the same reason the rebuild below is.
-            lv_obj_delete_async(data->source_bars);
-            data->source_bars = nullptr;
-            data->source_bars_first_slot = -1;
-            data->source_bars_count = 0;
-            data->source_bars_width = 0;
-            if (data->lane_spool) {
-                lv_obj_remove_flag(data->lane_spool, LV_OBJ_FLAG_HIDDEN);
-            }
-            if (data->material_label) {
-                lv_obj_remove_flag(data->material_label, LV_OBJ_FLAG_HIDDEN);
-            }
-            refresh_slot_material_label(data);
-            const SlotInfo slot = backend ? backend->get_slot_info(data->slot_index) : SlotInfo{};
-            apply_tool_badge(data, slot.mapped_tool, slot.tool_mapping_override);
-        }
-        return;
-    }
-
-    const auto& unit = info.units[static_cast<size_t>(*owner)];
-    const int bays = static_cast<int>(unit.slots.size());
-
-    // The computed width, not the styled one, and only once there IS one.
-    // Before the first layout pass this reads 0, and calc_bar_width() would
-    // clamp every bar to MINI_BAR_MIN_WIDTH_PX. SIZE_CHANGED brings this back
-    // once the container has been laid out.
-    lv_obj_update_layout(data->spool_container);
-    const int32_t box = lv_obj_get_width(data->spool_container);
-    if (box <= 0) {
-        return;
-    }
-    const int32_t gap = theme_manager_get_spacing("space_xxs");
-    const int32_t bar_w = ams_draw::calc_bar_width(box, bays, gap, ams_draw::MINI_BAR_MIN_WIDTH_PX,
-                                                   ams_draw::MINI_BAR_MAX_WIDTH_PX);
-
-    const bool created = data->source_bars == nullptr;
-    if (created) {
-        data->source_bars = lv_obj_create(data->spool_container);
-        lv_obj_remove_style_all(data->source_bars);
-        lv_obj_set_size(data->source_bars, LV_PCT(100), LV_PCT(100));
-        lv_obj_set_flex_flow(data->source_bars, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(data->source_bars, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_column(data->source_bars, gap, LV_PART_MAIN);
-        lv_obj_remove_flag(data->source_bars, LV_OBJ_FLAG_SCROLLABLE);
-        // Taps belong to the head's menu, so the bars must not swallow them.
-        lv_obj_remove_flag(data->source_bars, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(data->source_bars, LV_OBJ_FLAG_EVENT_BUBBLE);
-    }
-
-    if (created || data->source_bars_first_slot != unit.first_slot_global_index ||
-        data->source_bars_count != bays || data->source_bars_width != bar_w) {
-        if (!created) {
-            helix::ui::safe_clean_children(data->source_bars);
-        }
-        helix::ui::ams_lane_bar_create_range(data->source_bars, unit.first_slot_global_index, bays,
-                                             bar_w, (box * 3) / 4);
-        data->source_bars_first_slot = unit.first_slot_global_index;
-        data->source_bars_count = bays;
-        data->source_bars_width = bar_w;
-    }
-
-    if (created) {
-        // The spool and the bars are alternatives, never both. The lane spool
-        // manages its own children from the lane_state subject and never its
-        // root's visibility, so hiding the root holds.
-        if (data->lane_spool) {
-            lv_obj_add_flag(data->lane_spool, LV_OBJ_FLAG_HIDDEN);
-        }
-        // The label and tool-badge rules read source_bars and may have run
-        // for this slot before the bars existed.
-        refresh_slot_material_label(data);
-        if (data->tool_badge_bg) {
-            lv_obj_add_flag(data->tool_badge_bg, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-}
-
 static void setup_slot_observers(AmsSlotData* data) {
-    if (data->slot_index < 0 || data->slot_index >= AmsState::MAX_SLOTS) {
+    if (data->slot_index < 0) {
         spdlog::warn("[AmsSlot] Invalid slot index {}, skipping observers", data->slot_index);
+        return;
+    }
+    if (data->slot_index >= AmsState::kMaxSlots) {
+        // AmsState warns once for the whole overflow; this slot stays unbound.
+        spdlog::debug("[AmsSlot] Slot {} is past the subject ceiling, left unbound",
+                      data->slot_index);
         return;
     }
 
@@ -774,17 +694,27 @@ static void setup_slot_observers(AmsSlotData* data) {
     if (material_subject) {
         data->material_observer = helix::ui::observe<const char*>(
             material_subject, obj,
-            [](lv_obj_t* o, const char* mat) {
+            [](lv_obj_t* o, const char* /*mat*/) {
                 auto* d = get_slot_data(o);
                 if (!d)
                     return;
-                apply_material_label(d, mat);
+                apply_slot_label(d);
                 // No spool re-derive on an identity-only change: AmsState
                 // recomputes the lane classification on the same update, so the
                 // lane_state subject fires and the embedded ams_lane_spool
                 // ghosts (or un-ghosts) itself.
             },
             data->material_lifetime);
+    }
+    // Per-slot spool name: a different spool of the same material, or a
+    // Spoolman identity arriving after first paint, changes only this.
+    lv_subject_t* name_subject =
+        state.get_slot_name_subject(backend_idx, data->slot_index, data->name_lifetime);
+    if (name_subject) {
+        data->name_observer = helix::ui::observe<const char*>(
+            name_subject, obj,
+            [](lv_obj_t* o, const char* /*name*/) { apply_slot_label(get_slot_data(o)); },
+            data->name_lifetime);
     }
 
     // Only the primary backend publishes the per-slot remaining subject.
@@ -798,6 +728,10 @@ static void setup_slot_observers(AmsSlotData* data) {
     } else {
         data->remaining_observer.reset();
     }
+
+    // Only the primary backend publishes the per-slot drying subject.
+    bind_drying_badge(data,
+                      backend_idx == 0 ? state.get_slot_drying_subject(data->slot_index) : nullptr);
 
     if (current_slot_subject) {
         data->current_slot_observer = observe<int>(
@@ -870,27 +804,24 @@ static void setup_slot_observers(AmsSlotData* data) {
             state.get_subjects_lifetime());
     }
 
-    // Update slot badge with its 1-based SPOOL number, which is not the global
-    // index: the index is dense over every addressable slot, the label counts
-    // spools. They diverge when one slot only views another's spool — a U1 head
-    // fed from an ACE bay — and numbering by index there labelled seven spools
-    // 1-8. Identical to slot_index + 1 on every backend where each slot owns
-    // what it holds.
-    if (data->slot_badge) {
-        auto* badge_backend = AmsState::instance().get_backend(data->backend_index);
-        // A range ("4-7") when the position is fed by several of another unit's
-        // bays; the badge is width="content" over a min-width, so it widens into
-        // a pill on its own.
-        const std::string label = badge_backend
-                                      ? badge_backend->spool_display_label(data->slot_index)
-                                      : helix::ui::lane_number_text(data->slot_index);
-        lv_label_set_text(data->slot_badge, label.c_str());
+    // Slots version observer: the badge number follows the whole spool table,
+    // not only this lane's own status. A routing change re-numbers lanes that
+    // had no status change of their own (a lane stops or starts sharing a
+    // spool, and every lane after it shifts), and every such sync bumps this
+    // subject.
+    if (lv_subject_t* version_subject = state.get_slots_version_subject()) {
+        data->slots_version_observer = observe<int>(
+            version_subject, obj,
+            [](lv_obj_t* o, int /*version*/) {
+                auto* d = get_slot_data(o);
+                if (d)
+                    apply_badge_number(d);
+            },
+            state.get_subjects_lifetime());
     }
 
-    // A position fed from another unit shows that unit's bays instead of one
-    // spool. Here rather than at create time: slot_index is only set after the
-    // widget is built, so the backend cannot be asked about it any earlier.
-    apply_source_bars(data);
+    // Update slot badge with its spool's display number
+    apply_badge_number(data);
 
     // Trigger initial updates from current subject values. lane_state applies
     // BEFORE material so the label rule reads a current classification on the
@@ -905,7 +836,7 @@ static void setup_slot_observers(AmsSlotData* data) {
         apply_current_slot_highlight(data, lv_subject_get_int(current_slot_subject));
     }
     if (material_subject && data->material_observer) {
-        apply_material_label(data, lv_subject_get_string(material_subject));
+        apply_slot_label(data);
     }
     apply_lane_remaining(data, remaining_subject && data->remaining_observer
                                    ? lv_subject_get_string(remaining_subject)
@@ -955,6 +886,7 @@ static void* ams_slot_xml_create(lv_xml_parser_state_t* state, const char** attr
     data->container = obj;
 
     // Find XML-created children by name
+    data->name_label = helix::ui::find_required(obj, "name_label", "AmsSlot");
     data->material_label = helix::ui::find_required(obj, "material_label", "AmsSlot");
     data->spool_container = helix::ui::find_required(obj, "spool_container", "AmsSlot");
     data->lane_spool = helix::ui::find_required(obj, "lane_spool", "AmsSlot");
@@ -964,9 +896,15 @@ static void* ams_slot_xml_create(lv_xml_parser_state_t* state, const char** attr
     data->tool_badge = helix::ui::find_required(obj, "tool_badge_label", "AmsSlot");
     data->lane_humidity = lv_obj_find_by_name(obj, "lane_humidity");
     data->lane_humidity_text = lv_obj_find_by_name(obj, "lane_humidity_text");
+    data->lane_humidity_drop = lv_obj_find_by_name(obj, "lane_humidity_icon");
     data->lane_temp_row = lv_obj_find_by_name(obj, "lane_temp_row");
     data->lane_temp_text = lv_obj_find_by_name(obj, "lane_temp_text");
     data->lane_remaining = lv_obj_find_by_name(obj, "lane_remaining");
+    data->drying_badge = lv_obj_find_by_name(obj, "drying_badge");
+    data->drying_icons[0] = lv_obj_find_by_name(obj, "drying_badge_queued");
+    data->drying_icons[1] = lv_obj_find_by_name(obj, "drying_badge_active");
+    data->drying_icons[2] = lv_obj_find_by_name(obj, "drying_badge_complete");
+    data->drying_icons[3] = lv_obj_find_by_name(obj, "drying_badge_cancelled");
 
     // Validate required children were found
     if (!data->spool_container || !data->lane_spool) {
@@ -981,6 +919,11 @@ static void* ams_slot_xml_create(lv_xml_parser_state_t* state, const char** attr
     if (data->material_label) {
         lv_label_set_text(data->material_label, "--");
     }
+    // At content height a dotted label wraps into the spool instead of
+    // ellipsizing, and the stagger rows below are laid out one line apart.
+    for (lv_obj_t* label : {data->name_label, data->material_label}) {
+        helix::ui::label_hold_one_line(label);
+    }
     if (data->slot_badge) {
         lv_label_set_text(data->slot_badge, "?");
     }
@@ -988,10 +931,6 @@ static void* ams_slot_xml_create(lv_xml_parser_state_t* state, const char** attr
     // Register for cleanup
     register_slot_data(obj, data_ptr.release());
     lv_obj_add_event_cb(obj, ams_slot_event_cb, LV_EVENT_DELETE, nullptr);
-    // The registry, not the raw pointer, resolves obj on the way back in (see
-    // ams_slot_container_size_cb), so a deleted slot answers nullptr.
-    lv_obj_add_event_cb(data->spool_container, ams_slot_container_size_cb, LV_EVENT_SIZE_CHANGED,
-                        obj);
 
     // Apply responsive slot width
     int32_t space_lg = theme_manager_get_spacing("space_lg");
@@ -1037,9 +976,11 @@ static void ams_slot_xml_apply(lv_xml_parser_state_t* state, const char** attrs)
                 data->status_lifetime.reset();
                 data->lane_state_lifetime.reset();
                 data->material_lifetime.reset();
+                data->name_lifetime.reset();
                 data->status_observer.reset();
                 data->lane_state_observer.reset();
                 data->material_observer.reset();
+                data->name_observer.reset();
                 data->current_slot_observer.reset();
                 data->filament_loaded_observer.reset();
 
@@ -1074,8 +1015,6 @@ void ui_ams_slot_register(void) {
     // The view embeds <ams_lane_spool>; it must be registered before the view
     // is instantiated.
     ui_ams_lane_spool_register();
-    // A position fed from another unit draws that unit's bays as <ams_lane_bar>s.
-    ui_ams_lane_bar_register();
 
     // Register the XML component first (defines the structural template)
     lv_xml_register_component_from_file(
@@ -1086,7 +1025,11 @@ void ui_ams_slot_register(void) {
 
     // Self-register cleanup — ensures slot data is released before lv_deinit()
     // so that lv_subject_deinit() can safely remove observers from live widgets
-    StaticSubjectRegistry::instance().register_deinit("AmsSlotWidgets", cleanup_all_slot_data);
+    // Registration is process-once; the slots observe printer subjects, so the cleanup
+    // runs at every printer switch and stays registered for the next one.
+    StaticSubjectRegistry::instance().register_deinit(
+        "AmsSlotWidgets", cleanup_all_slot_data,
+        StaticSubjectRegistry::Lifetime::ProcessRunOnSwitch);
 
     spdlog::info("[AmsSlot] Registered ams_slot widget with XML system");
 }
@@ -1122,9 +1065,11 @@ void ui_ams_slot_set_index(lv_obj_t* obj, int slot_index) {
     data->status_lifetime.reset();
     data->lane_state_lifetime.reset();
     data->material_lifetime.reset();
+    data->name_lifetime.reset();
     data->status_observer.reset();
     data->lane_state_observer.reset();
     data->material_observer.reset();
+    data->name_observer.reset();
     data->current_slot_observer.reset();
     data->filament_loaded_observer.reset();
 
@@ -1158,9 +1103,6 @@ void ui_ams_slot_refresh(lv_obj_t* obj) {
         apply_tool_badge(data, slot.mapped_tool, slot.tool_mapping_override);
         apply_lane_humidity(data, backend);
     }
-    // Which unit feeds a position, and how many bays it has, can change under
-    // it; this is the per-slot hook the panel runs on every slots_version bump.
-    apply_source_bars(data);
 
     spdlog::trace("[AmsSlot] Refreshed slot {}", data->slot_index);
 }
@@ -1185,6 +1127,12 @@ void ui_ams_slot_set_lane_humidity_visible(lv_obj_t* obj, bool visible) {
 lv_obj_t* ui_ams_slot_get_lane_humidity(lv_obj_t* obj) {
     auto* data = get_slot_data(obj);
     return data ? data->lane_humidity : nullptr;
+}
+
+// NAMESPACE_OK: the widget's C API, beside its siblings
+lv_obj_t* ui_ams_slot_get_status_badge(lv_obj_t* obj) {
+    auto* data = get_slot_data(obj);
+    return data ? data->status_badge_bg : nullptr;
 }
 
 float ui_ams_slot_get_fill_level(lv_obj_t* obj) {
@@ -1213,39 +1161,24 @@ void ui_ams_slot_set_layout_info(lv_obj_t* obj, int slot_index, int total_count)
 
     data->total_count = total_count;
 
-    // Calculate stagger parameters based on total gate count
-    // Pattern: Low → Medium → High → Low... (cycling)
-    int stagger_rows = 1;
-    if (total_count >= 7) {
-        stagger_rows = 3; // Low, Medium, High
-    } else if (total_count >= 5) {
-        stagger_rows = 2; // Low, Medium
+    const UiBreakpoint bp = helix::widget_size::current_breakpoint();
+    const helix::ui::AmsLabelRow placement =
+        helix::ui::ams_stagger_row(slot_index, total_count, bp);
+    const int stagger_rows = placement.rows;
+    const int row = placement.row;
+
+    // Staggered labels below the medium breakpoint take the extra-small font, so
+    // their rows stay one short line apart.
+    const char* font_name = lv_xml_get_const(
+        NULL, stagger_rows > 1 && bp < UiBreakpoint::Medium ? "font_xs" : "font_small");
+    const lv_font_t* label_font = font_name ? lv_xml_get_font(NULL, font_name) : &noto_sans_16;
+    int32_t line_height = lv_font_get_line_height(label_font);
+    const int32_t row_height = helix::ui::ams_stagger_row_height(line_height, bp);
+    if (data->material_label && stagger_rows > 1) {
+        // DECLARATIVE_OK: computed font; the stagger rows are sized from it. The
+        // label is held to one line, so its height follows the font.
+        lv_obj_set_style_text_font(data->material_label, label_font, LV_PART_MAIN);
     }
-
-    // Calculate which row this slot belongs to using triangle wave pattern
-    // Pattern: High → Mid → Low → Mid → High → Mid → Low...
-    // This creates a more balanced visual distribution of labels
-    int row = 0;
-    if (stagger_rows > 1) {
-        int period = (stagger_rows - 1) * 2; // 4 for 3 rows, 2 for 2 rows
-        int pos = slot_index % period;
-        if (pos < stagger_rows) {
-            // Descending: High(2) → Mid(1) → Low(0)
-            row = stagger_rows - 1 - pos;
-        } else {
-            // Ascending: Mid(1) back up
-            row = pos - stagger_rows + 1;
-        }
-    }
-
-    // Get font for dynamic row height calculation
-    const char* font_small_name = lv_xml_get_const(NULL, "font_small");
-    const lv_font_t* font_small =
-        font_small_name ? lv_xml_get_font(NULL, font_small_name) : &noto_sans_16;
-    int32_t line_height = lv_font_get_line_height(font_small);
-
-    // Row height with comfortable spacing (1.5x line height)
-    int32_t row_height = (line_height * 3) / 2;
 
     // For staggered labels, we use absolute positioning
     // Remove label from flex flow and position it at the correct stagger row
@@ -1298,7 +1231,8 @@ void ui_ams_slot_set_layout_info(lv_obj_t* obj, int slot_index, int total_count)
         int32_t label_gap = 3; // Small gap between label and line
         int32_t line_start_y = label_y + line_height + label_gap; // Negative (in content coords)
         int32_t line_end_y = 0;                                   // Spool top
-        int32_t leader_length = line_end_y - line_start_y;        // Positive length
+        // A row-0 label sits right on its spool when rows are tight: no leader.
+        int32_t leader_length = std::max<int32_t>(0, line_end_y - line_start_y);
 
         // Set line points (relative to line object position)
         data->leader_points[0].x = 0;
@@ -1326,9 +1260,13 @@ void ui_ams_slot_set_layout_info(lv_obj_t* obj, int slot_index, int total_count)
 
         spdlog::debug("[AmsSlot] Slot {} layout: no stagger (count={})", slot_index, total_count);
     }
+
+    // The slot count decides whether the card has room for a name line.
+    apply_slot_label(data);
 }
 
-void ui_ams_slot_move_label_to_layer(lv_obj_t* obj, lv_obj_t* labels_layer, int32_t slot_center_x) {
+void ui_ams_slot_move_label_to_layer(lv_obj_t* obj, lv_obj_t* labels_layer, int32_t slot_center_x,
+                                     int32_t max_width) {
     auto* data = get_slot_data(obj);
     if (!data || !labels_layer) {
         return;
@@ -1357,6 +1295,10 @@ void ui_ams_slot_move_label_to_layer(lv_obj_t* obj, lv_obj_t* labels_layer, int3
     // Reparent label to labels_layer
     lv_obj_set_parent(data->material_label, labels_layer);
 
+    // A label sharing its row with near neighbours keeps to its span and ellipsizes.
+    if (max_width > 0)
+        lv_obj_set_width(data->material_label, max_width);
+
     // Get label width for centering
     lv_obj_update_layout(data->material_label);
     int32_t label_width = lv_obj_get_width(data->material_label);
@@ -1382,7 +1324,7 @@ void ui_ams_slot_move_label_to_layer(lv_obj_t* obj, lv_obj_t* labels_layer, int3
         int32_t line_end_y = slot_pad_top; // Spool top in labels_layer coords
 
         // Update line points for new length
-        int32_t leader_length = line_end_y - line_start_y;
+        int32_t leader_length = std::max<int32_t>(0, line_end_y - line_start_y);
         data->leader_points[0].x = 0;
         data->leader_points[0].y = 0;
         data->leader_points[1].x = 0;
@@ -1447,10 +1389,18 @@ void ui_ams_slot_move_badge_to_layer(lv_obj_t* obj, lv_obj_t* badge_layer, int32
     int32_t label_h = data->material_label ? lv_obj_get_height(data->material_label) : 0;
     int32_t pad_row = lv_obj_get_style_pad_row(obj, LV_PART_MAIN);
 
-    // Spool container top Y = slot padding + label height + row gap
+    // Spool container top Y = slot padding + label lines + row gaps
     int32_t container_top_y = slot_pad_top + label_h + pad_row;
+    if (data->name_label && !lv_obj_has_flag(data->name_label, LV_OBJ_FLAG_HIDDEN))
+        container_top_y += lv_obj_get_height(data->name_label) + pad_row;
     int32_t badge_x = slot_center_x + container_w / 2 - badge_w - 2; // -2 from translate_x
     int32_t badge_y = container_top_y + container_h - badge_h - 2;   // -2 from translate_y
+    // The spool container is wider than a narrow slot, so an end lane's corner
+    // can stand past the row; the layer clips there, so the badge stays inside.
+    // A layer not laid out yet has no width to hold it in.
+    const int32_t layer_w = lv_obj_get_content_width(badge_layer);
+    if (layer_w > badge_w)
+        badge_x = LV_CLAMP(0, badge_x, layer_w - badge_w);
 
     // Reparent to badge_layer
     lv_obj_set_parent(data->status_badge_bg, badge_layer);

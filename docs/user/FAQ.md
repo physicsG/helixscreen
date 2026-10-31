@@ -13,8 +13,8 @@ HelixScreen is a touchscreen interface for Klipper 3D printers. It connects to y
 **Key features:**
 - 30+ panels, 20+ overlays, and a customizable multi-page widget dashboard
 - 3D G-code preview, bed mesh visualization, frequency response charts
-- 7 multi-material backends (AFC, Happy Hare, ACE, AD5X IFS, CFS, Snapmaker U1, tool changers) with Spoolman integration
-- First-run wizard with auto-detection of 90+ printer models
+- 10 filament systems (AFC, Happy Hare, ACE, AD5X IFS, CFS, Snapmaker U1, QIDI Box, OpenAMS, Bondtech INDX in early support, and tool changers) with Spoolman integration
+- First-run wizard with auto-detection of over 100 printer models
 - Theme editor with 18 presets (dark and light), 9 languages
 - Sound system, timelapse integration, label printing, exclude objects
 - Auto-detecting layout system for displays from 480x320 to 1024x600, including ultrawide and portrait
@@ -36,7 +36,7 @@ HelixScreen works with any Klipper-based printer running Moonraker. Tested and s
 | Creality Hi | **Preliminary** | Auto-detected; Cartesian bedslinger with optional CFS. Untested on our hardware. |
 | Anycubic Kobra 2 Pro / Kobra 3 / 3 V2 / 3 Max / S1 / S1 Max | **Community** | Auto-detected on [Rinkhals](https://github.com/jbatonnet/Rinkhals) firmware; native ACE (`filament_hub`) supported. Untested on our hardware. |
 | FlashForge AD5X | **Tested** | IFS filament system integrated |
-| FlashForge Creator 5 / Creator 5 Pro | **Preliminary** | Four-head tool changer, auto-detected on either replacement firmware: [Z-Mod](https://wiki.zmod.link/C5PRO/) or [Reforge](https://github.com/Klipper4FlashForge/firmware). Mounting and parking a head is driven from the screen. On Z-Mod, each head's material and colour are read from the printer itself once Z-Mod ships its pending status update; until then, edits stay on the screen. Untested on our hardware. |
+| FlashForge Creator 5 / Creator 5 Pro | **Preliminary** | Four-head tool changer, auto-detected on either replacement firmware: [Z-Mod](https://wiki.zmod.link/C5PRO/) or [Reforge](https://github.com/Klipper4FlashForge/firmware). Mounting and parking a head is driven from the screen. On Z-Mod, each head's material and color are read from the printer itself once Z-Mod ships its pending status update; until then, edits stay on the screen. Untested on our hardware. |
 | SOVOL SV06 / SV08 | **Tested** | Community reports welcome |
 | Elegoo Centauri Carbon 1 | **Tested** | Requires [OpenCentauri COSMOS](https://docs.opencentauri.cc/klipper-conversion/cosmos/cosmos/) firmware 26.07.0 or newer; ships with factory white-balance calibration |
 | Snapmaker U1 (SnapSwap toolchanger) | **Tested** | Native four-head support with RFID spool recognition. Needs SSH — stock firmware (1.2+) via its **Root access** option, or PAXX Extended Firmware (SSH on by default). Tested on PAXX 1.2.x–1.4.x; the stock-firmware path is unverified on a real stock device. Reinstall after a firmware update. On PAXX firmware you can also view/control the screen remotely in Mainsail/Fluidd (the "gui" webcam) via the firmware's `web remote_screen` toggle; physical cameras work normally. |
@@ -48,7 +48,7 @@ HelixScreen works with any Klipper-based printer running Moonraker. Tested and s
 
 ### Can I run HelixScreen on a separate device instead of on my printer?
 
-Yes. HelixScreen is a Moonraker client — it only needs network access to your printer's Moonraker instance, so it doesn't have to run on the printer itself. Install it on any supported Linux device (a spare Raspberry Pi with a touchscreen, a mini PC with an HDMI touchscreen, even your desktop) and enter your **printer's IP address** in the wizard's Moonraker step instead of `localhost`. This is ideal when the printer is on the floor and you want the screen at your desk.
+Yes. HelixScreen is a Moonraker client — it only needs network access to your printer's Moonraker instance, so it doesn't have to run on the printer itself. Install it on any supported Linux device (a spare Raspberry Pi with a touchscreen, a mini PC with an HDMI touchscreen, even [a window on your Linux desktop](guide/install-linux-desktop.md)) and enter your **printer's IP address** in the wizard's Moonraker step instead of `localhost`. This is ideal when the printer is on the floor and you want the screen at your desk.
 
 Point it at Moonraker (port `7125`), not the Mainsail/Fluidd web interface — you don't need Mainsail or Fluidd on the screen device at all. See [Remote Screen Setup](INSTALL.md#remote-screen-setup-run-on-a-separate-device) for step-by-step instructions.
 
@@ -88,7 +88,7 @@ HelixScreen reads standard G-code, so most slicers work. But support is tiered:
 
 | Slicer | Status | Notes |
 |--------|--------|-------|
-| **OrcaSlicer 2.3.2+** | **Primary** | The slicer we develop and test against. Best experience — including one-way (HelixScreen → OrcaSlicer) filament preset sync with HelixScreen's filament slots. Recommended for everyone. |
+| **OrcaSlicer 2.3.2+** | **Primary** | The slicer we develop and test against. Best experience — including one-way (HelixScreen → OrcaSlicer) filament preset sync with HelixScreen's filament slots. Recommended for everyone. G-code from the 2.5 alpha has been checked and needs nothing new from HelixScreen. |
 | Manufacturer slicers (Creality Print, FlashForge Orca, Bambu Studio, etc.) | **Supported** | Most are OrcaSlicer/PrusaSlicer forks and work well. We aim to support them. This is about G-code and profiles, not the vendor's own network path: on the Creality K1 series the stock backend keeps running beside HelixScreen, so Creality Print can still reach the printer. If it cannot, see [Troubleshooting](TROUBLESHOOTING.md#creality-print-can-no-longer-find-or-connect-to-the-printer). |
 | PrusaSlicer / SuperSlicer | **Supported** | Fully usable, including exclude-objects and pre-print options. |
 | Cura | **Not targeted** | We don't test against Cura and don't build features for it, but we don't go out of our way to break it. Output generally works; some features (exclude objects, filament sync) need extra setup or aren't available. |
@@ -115,9 +115,9 @@ For an exact layer count and a reliable time-remaining estimate, HelixScreen nee
 **HelixScreen advantages:**
 - Low memory footprint (~15MB on embedded targets vs ~50MB for KlipperScreen on the same hardware)
 - Declarative XML layouts (change UI without recompiling)
-- Modern reactive architecture with 7 multi-material backends
+- Modern reactive architecture with 10 filament systems
 - 3D visualizations (G-code preview, bed mesh)
-- 90+ printer auto-detection database
+- Auto-detection database of over 100 printers
 - 9 languages (English, German, Spanish, French, Italian, Japanese, Portuguese, Russian, Chinese)
 
 ---
@@ -190,6 +190,8 @@ If you have two displays, you could theoretically run both (advanced configurati
 
 This is why it uses less memory than alternatives.
 
+The one exception is by choice: if you *want* HelixScreen in a window on a Linux desktop PC, there is a separate desktop package that runs under X11 or Wayland. See [Run HelixScreen in a Window on a Linux Desktop](guide/install-linux-desktop.md).
+
 ### Does this work with MainsailOS, FluiddPi, or other Klipper distros?
 
 Yes! HelixScreen works with any Klipper distribution that includes Moonraker:
@@ -246,12 +248,28 @@ sudo apt install libturbojpeg0
 
 This enables SIMD-accelerated (hardware-optimized) JPEG decoding, which is 3-5x faster than the built-in software decoder. HelixScreen automatically uses it if available — no configuration needed. Without it, everything still works, just with slightly higher CPU usage during camera streaming.
 
+### Can I see or use the printer's screen from my browser?
+
+**Yes.** Turn on **Settings > Connection > Screen Sharing > Share Screen** and the screen shows up live in your browser, and as a **HelixScreen Screen** webcam in Mainsail and Fluidd. Turn on **Allow Remote Control** as well to tap and drag on it from the browser. Both are off until you turn them on at the printer. Some printers ask for a pairing code before a browser can take control; on a Raspberry Pi running MainsailOS or KIAUH, Moonraker's trusted clients decide instead. See [Screen Sharing and Remote Control](guide/screen-sharing.md).
+
 ### Does it work with Spoolman?
 
 **Yes.** Spoolman integration is supported:
 - **Advanced panel** → **Spoolman** to browse your spool inventory
 - **Settings** → **Devices** → **Spoolman** for weight sync settings
 - Assign spools to AMS slots and track filament usage
+
+### Why didn't Spoolman deduct my print from the spool?
+
+Spoolman only records usage against its **active spool**. On a multi-filament system (CFS, AFC, Happy Hare and others), HelixScreen makes a slot's linked spool active when that slot loads, so the slot has to be linked to the spool *before* the print starts. Matching is by the linked spool only, never by material name. See [Which spool Spoolman charges](guide/filament-tracking.md#which-spool-spoolman-charges-on-a-multi-filament-system).
+
+### Why is a spool grayed out when I pick one?
+
+It is already linked to another slot or tool. On the External Spool editor, every spool linked to a slot is grayed out: to link a spool to a CFS or AMS slot, edit that slot instead. See [Editing Filament Properties](guide/filament.md#editing-filament-properties).
+
+### Does my K2 run its bed mesh twice?
+
+Not normally. With **Auto Bed Mesh** on, HelixScreen sends the K2's `BED_MESH_CALIBRATE_START_PRINT` before the print, unless the file's start G-code already calls that same command. Other bed mesh commands in the file don't count. Details and limits: [Pre-Print Options](guide/printing.md#pre-print-options).
 
 ### Can I print spool labels?
 
@@ -272,7 +290,7 @@ Labels include spool name, material, color swatch, temperatures, and a QR code. 
 - **ACE** (Anycubic ACE Pro) — supported on native Anycubic firmware (the `filament_hub` Klipper object, e.g. Kobra on Rinkhals) and on the community ValgACE/BunnyACE/DuckACE Klipper drivers
 - **Tool changers** — supported
 
-Features include visual slot configuration with tool badges, endless spool arrows, tap-to-edit popup, Spoolman integration, and material compatibility validation.
+Features include visual slot configuration with tool badges, Endless Spool arrows, Filament Mapping, tap-to-edit popup, Spoolman integration, and material compatibility validation.
 
 ### Can I customize the home screen widgets?
 
@@ -311,7 +329,7 @@ For layout customization, use Edit Mode on the Home panel — long-press the das
 
 ### Does it support multiple printers?
 
-**Yes!** You can configure multiple Klipper printers and switch between them from the navigation bar or Settings. You view one printer at a time, but switching is instant. Enable beta features first (**Settings** → **Help & About** → **About**, then tap the version button 7 times), then add printers via **Settings** → **Connection** → **Printers**.
+**Yes!** You can configure multiple Klipper printers and switch between them from the navigation bar or Settings. You view one printer at a time, but switching is instant. Add printers via **Settings** → **Connection** → **Printers**.
 
 ### Can I view print history?
 

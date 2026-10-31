@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // miniz's tinfl (MZ_VERSION 10.1.0), the streaming inflater the ESP32-S3 ROM
-// ships, copied for host tests of code that drives it. Test-only: nothing in
-// the app links it. Licence:
+// ships, copied so every other build runs the same inflater: the app reaches it
+// through include/tinfl_inflate.h, which picks the ROM's copy on the firmware.
+// Licence:
 /**************************************************************************
  *
  * Copyright 2013-2014 RAD Game Tools and Valve Software

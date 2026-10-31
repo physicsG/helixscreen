@@ -20,6 +20,8 @@ Which releases you get:
 
 Changing the channel checks the new channel straight away.
 
+The channel also stays in step with the `channel:` line of HelixScreen's `[update_manager helixscreen]` section in `moonraker.conf`, which Mainsail and Fluidd use for their own update button. Changing the channel here rewrites that line. If you edit the line yourself to `stable` or `beta` (by hand, or in Mainsail or Fluidd's config editor), HelixScreen switches its own channel to match the next time it connects to the printer, instead of writing its old channel back.
+
 > **Note:** Choosing **Dev** without a `dev_url` in `update_urls.json` shows "Dev channel requires dev_url in update_urls.json" and doesn't check. Dev builds are meant for people working on HelixScreen. Most people should stay on **Stable** or **Beta**.
 
 ---

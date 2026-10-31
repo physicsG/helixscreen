@@ -6,6 +6,34 @@
 #include <cstdio>
 #include <cstdlib>
 
+namespace helix {
+namespace probe {
+
+ProbeGate probe_gate(bool carries_rungs, bool egl_presentation, gpu_libs::LoadCheck loads) {
+    using gpu_libs::Lib;
+    if (!carries_rungs) {
+        return {false, kProbeNoRungs, "built without display rungs"};
+    }
+    if (!loads(Lib::Drm)) {
+        return {false, kProbeNoDrm, std::string(gpu_libs::soname(Lib::Drm)) + " is not installed"};
+    }
+    // GLES for the 3D viewer alone compiles the probe in, but only a binary
+    // linked with the EGL presentation path can act on a yes.
+    if (!egl_presentation) {
+        return {false, kProbeDeclined, "built without EGL presentation"};
+    }
+    for (Lib lib : {Lib::Gbm, Lib::Egl, Lib::Gles2}) {
+        if (!loads(lib)) {
+            return {false, kProbeDeclined,
+                    std::string(gpu_libs::soname(lib)) + " is not installed"};
+        }
+    }
+    return {true, kProbeEgl, ""};
+}
+
+} // namespace probe
+} // namespace helix
+
 // EGL and GBM are linked only into the DRM builds that carry a GPU path. The
 // file itself always compiles: a launcher asking a binary that cannot answer
 // must get a refusal, not the "ignoring unknown argument" warning and a booted
@@ -17,11 +45,13 @@
 
 #ifdef HELIX_PROBE_EGL_AVAILABLE
 
+#include "display_backend.h"
 #include "gcode_gl_fallback.h"
+#include "gles2_loader.h"
+#include "gpu_libs.h"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES2/gl2.h>
 #include <algorithm>
 #include <cstring>
 #include <dirent.h>
@@ -158,7 +188,10 @@ NodeVerdict probe_node(int fd) {
     }
 
     if (verdict.failure.empty()) {
-        const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+        const char* renderer =
+            helix::gles2::load(helix::gpu_libs::gles2_proc)
+                ? reinterpret_cast<const char*>(helix::gles2::glGetString(GL_RENDERER))
+                : nullptr;
         if (renderer == nullptr || renderer[0] == '\0') {
             verdict.failure = "context came up but GL_RENDERER is empty";
         } else {
@@ -213,10 +246,22 @@ std::vector<std::string> candidate_nodes() {
 } // namespace
 
 int run_probe_egl() {
+#ifdef HELIX_DLOPEN_GPU_LIBS
+    constexpr bool kCarriesRungs = true;
+#else
+    constexpr bool kCarriesRungs = false;
+#endif
+    const ProbeGate gate = probe_gate(kCarriesRungs, helix::make_drm_egl_backend != nullptr,
+                                      helix::gpu_libs::available);
+    if (!gate.probe) {
+        printf("%s\n", gate.reason.c_str());
+        return gate.status;
+    }
+
     const std::vector<std::string> nodes = candidate_nodes();
     if (nodes.empty()) {
         printf("no DRM card nodes to probe\n");
-        return 1;
+        return kProbeDeclined;
     }
 
     std::string last_reason;
@@ -253,7 +298,7 @@ int run_probe_egl() {
     }
 
     printf("no GPU presentation available - %s\n", last_reason.c_str());
-    return 1;
+    return kProbeDeclined;
 }
 
 } // namespace probe
@@ -265,8 +310,9 @@ namespace helix {
 namespace probe {
 
 int run_probe_egl() {
-    printf("built without EGL support\n");
-    return 1;
+    const ProbeGate gate = probe_gate(false, false, nullptr);
+    printf("%s\n", gate.reason.c_str());
+    return gate.status;
 }
 
 } // namespace probe

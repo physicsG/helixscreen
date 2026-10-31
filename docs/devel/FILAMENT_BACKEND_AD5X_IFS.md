@@ -39,15 +39,21 @@ moment a status frame carries either object (`ifs_module_live_`):
 `loaded_channels` and `active_channel` are folded into the same
 `ZColorSilentResult` the zmod objects and macro responses use, so every seated-
 channel guard, presence corroboration, and external-edit baseline applies
-unchanged. `ifs_loaded` overwrites `seated_chan_` directly.
+unchanged. `ifs_loaded` overwrites `seated_chan_` directly, and once the module has
+published it, it stays the seated lane on every module frame (`active_channel` included),
+unless a lessWaste/bambufy plugin runs beside the module: its swaps need not run
+`IFS_LOAD`, so that rig keeps following `active_channel`.
+The remembered seated lane (the `lane_data` DB `seated` key) mirrors it instead of
+feeding the cold-boot floor: on the module, `active_channel=0` with a loaded head is the
+normal idle state, not a firmware that forgot its lane (#1897).
 
 **Ops and writes route to the module's macros** once live:
 
 | Action | Command |
 |--------|---------|
 | Load | `IFS_LOAD SLOT={n}` (resolves its own heat from the slot's material; self-unloads the outgoing lane) |
-| Toolhead unload | `IFS_UNLOAD SLOT={n}` (bare for "whatever is active" — it defaults from `ifs_loaded`) |
-| Lane eject | `IFS_EJECT SLOT={n}` (replaces the zmod `IFS_F24`/`F11`/`F39` sequence) |
+| Toolhead unload | `IFS_UNLOAD SLOT={n}`, or bare when a live active slot exists (the macro defaults `SLOT=` from `ifs_loaded`). With no active slot the backend names the lane itself or asks the user; see "Unload with no lane named" below |
+| Lane eject | `IFS_EJECT SLOT={n}` (replaces the zmod `IFS_F24`/`F11`/`F39` sequence). Ejecting the lane `ifs_loaded` names also clears the extruder, which needs a temperature: an unlabelled lane gets `TEMP=` (the nozzle target from 150C, else 220C), a labelled one leaves it to the module's material |
 | Tool change | `T{n}` — the module maps T0..T3 to slots 1..4 itself, so the identity tool map is firmware truth |
 | Material/colour edit | `IFS_SET_MATERIAL SLOT={n} TYPE=… COLOR=7EC8E3` (bare hex — klipper's parser eats `#`; the module re-prefixes) |
 | Fault recovery / abort | `IFS_RESET_DRIVER` / `IFS_STOP` |
@@ -75,7 +81,7 @@ Stock zMod owns two Klipper objects — `zmod_ifs` and `zmod_color` — that hol
 |--------|------|-------|
 | `filament_switch_sensor head_switch_sensor` | Toolhead filament presence | Authoritative NOZZLE/TOOLHEAD indicator |
 | `filament_motion_sensor ifs_motion_sensor` | Filament moving **post-hub**, inside the IFS | Single boolean on stock zMod. Maps to `OUTPUT` segment — **not** the toolhead. Replaced by per-port sensors when plugins are installed. |
-| `Adventurer5M.json` (Moonraker file API) | Per-channel color + material type | Polled + re-read on sensor edges / gcode responses. No push notifications. Poll cadence 5 s idle / 30 s while printing — see "Polling caution" below. |
+| `Adventurer5M.json` (Moonraker file API) | Per-channel color + material type | Polled + re-read on sensor edges / gcode responses. Moonraker sends no push for it; the HelixPrint Moonraker plugin can (below). Poll cadence 5 s idle / 30 s while printing — see "Polling caution" below. |
 
 **Plugin-only (lessWaste / bambufy) — the Moonraker-visible export of `zmod_ifs` / `zmod_color`:**
 
@@ -108,12 +114,12 @@ On native ZMOD (no lessWaste / bambufy plugin) the backend reconciles **two** in
 
 | Source | Transport | Question it answers | Code |
 |--------|-----------|---------------------|------|
-| `Adventurer5M.json` `FFMInfo` | Moonraker `download_file("config", "Adventurer5M.json")`, 5s content-compare poll | What **color / material** is *assigned* to each channel (persisted metadata) | `parse_adventurer_json()`, `poll_adventurer_json()`, `note_json_content()` |
-| `GET_ZCOLOR SILENT=1` (and, future, `IFS_STATUS`) | gcode console, on-demand | Which lanes **physically have filament** (RS-485 silk sensor) + the active lane | `query_zcolor_silent()`, `parse_zcolor_silent()`, `apply_zcolor_result()` |
+| `Adventurer5M.json` `FFMInfo` | Moonraker `download_file("config", "Adventurer5M.json")`, 5s content-compare poll, or the HelixPrint plugin's push | What **color / material** is *assigned* to each channel (persisted metadata) | `parse_adventurer_json()`, `poll_adventurer_json()`, `apply_json_content()`, `note_json_content()` |
+| `GET_ZCOLOR SILENT=1` (and, future, `IFS_STATUS`) | gcode console, on-demand | Which lanes **physically have filament** (RS-485 silk sensor) + the active lane | `query_zcolor_silent()`, `src/printer/ad5x_status_parse.cpp#parse_zcolor_silent`, `apply_zcolor_result()` |
 
 **`Adventurer5M.json` `FFMInfo` has NO per-channel presence field.** It carries `ffmColor{1-4}` / `ffmType{1-4}` plus an active `channel`, and those colors **persist across unload/eject** — zmod never blanks `ffmColorN` when a lane is emptied. So a non-empty `ffmColorN` means "this channel was *assigned* this color", **not** "filament is loaded here". (Field-proven on raza616's hardware: he ejected *and* unloaded channel 1, yet `ffmColor1` stayed populated; a live `IFS_STATUS` reported `Ports:[F,T,T,T]` while the JSON still had `ffmColor1` set — the JSON simply does not track presence.)
 
-**`GET_ZCOLOR SILENT=1`** is the silk-sensor truth. Text format (every line `// `-prefixed), parsed by `parse_zcolor_silent()`:
+**`GET_ZCOLOR SILENT=1`** is the silk-sensor truth. Text format (every line `// `-prefixed), parsed by `src/printer/ad5x_status_parse.cpp#parse_zcolor_silent`:
 
 ```
 // Extruder: 3: PLA/2750E0 | IFS: True   <- summary: active lane, its mat/hex, IFS-mode flag
@@ -180,11 +186,37 @@ IFS ([upstream-doc]; full write-up incl. attribution in
   the AD5X MCU on Klipper 12.
 
 That is the external rationale for the print-time poll backoff: the
-`Adventurer5M.json` freshness poll runs at `JSON_POLL_IDLE` = 5 s but slows to
-`JSON_POLL_PRINTING` = 30 s while PRINTING (`include/ams_backend_ad5x_ifs.h`; each
+`Adventurer5M.json` freshness poll runs at `kJsonPollIdle` = 5 s but slows to
+`kJsonPollPrinting` = 30 s while PRINTING (`include/ams_backend_ad5x_ifs.h`; each
 poll is a loopback HTTP GET on a 2-core board that is simultaneously feeding the MCU
 step queue). PAUSED deliberately keeps the 5 s cadence — a pause is when a user
 actually swaps a spool and relabels it.
+
+#### Pushed by the HelixPrint plugin
+
+Where the HelixPrint Moonraker plugin's `vendor_ad5x` feature is ready
+(`moonraker-plugin/helix_vendor_ad5x.py`), the plugin stats the file once a second on the
+printer and broadcasts its text as `notify_helix_vendor_state` (vendor `ad5x`, payload
+`{"file", "content"}`) only when it changed and parses as JSON; the feature is ready only
+once a read has parsed. The periodic poll then drops to a 30 s backstop
+(`kVendorPushBackstop`, `should_poll_json(..., pushing)`), which removes most of the
+loopback GETs the caution above is about while bounding how long a silent push can leave
+the colours stale.
+
+- One function applies a body either way: `apply_json_content(content, reason)` runs
+  `note_json_content()`, then `parse_adventurer_json()` and `schedule_zcolor_query()` on a
+  change. The poll calls it with `"json_poll"`, a push (`#on_vendor_state`) with
+  `"json_push"`, so a push gets the same GET_ZCOLOR / IFS_STATUS follow-up.
+- The poll's stand-downs hold for a push too: nothing is applied while the standalone module
+  is live, or while the backend polls.
+- `handle_status` re-reads the plugin's state each frame (`#refresh_vendor_push`). A plugin
+  probe on the current connection that finds the feature ready owes one read of the file (a
+  reconnect can have missed a change); anything else, no probe yet since a reconnect, a
+  plugin uninstalled or too old for the contract, puts the poll back on its cadence at once.
+  `on_started` / `on_stopping` reset the tracker. The rule is `vendor_state_source()`
+  (`include/vendor_state_push.h`), shared with the ACE backend.
+- The event-driven re-reads (`schedule_json_reread()` on sensor edges and klippy ready)
+  are unchanged: they are rare, and they answer "did that edit land" sooner than any push.
 
 #### Unattended runout detection (#1250, reported as #1247)
 
@@ -209,7 +241,7 @@ On a raise: `runout_active_ = true`, `system_info_.filament_runout = true`, and 
 
 > **There is deliberately NO "Load slot N" recovery button**, even though a runout is exactly when the user wants one. Every AD5X load path runs `INSERT_PRUTOK_IFS`, whose macro homes itself and then moves the toolhead on its own authority (`_GOTO_TRASH`, `_SBROS_TRASH`, `_CLEAR_REZINA` nozzle wipe) — this is what `filament_ops_self_home()` is about. On the loadcell-Z AD5X that motion reaches **down into the part**; with a job owning the toolhead it trips ZMOD's `ZCONTROL_AUTO` and shuts Klipper down, recoverable only by a firmware restart (bundle `XWPBR2DX`, commit `329e731e9`). A runout state is PAUSED by construction, so the button would fire straight into that. Note the leading `_G28` is *conditional* on `homed_axes` (see `FLASHFORGE_AD5X_IFS_ANALYSIS.md` §12) and usually no-ops mid-print — that is not a reason to relax this: `homed_axes` is cleared by a Klipper error, an `M84`, or a cold resume, and the trash/wipe moves happen either way. `refuse_if_printing()` protects `load_filament()`; it does **not** protect a recovery button, which hands its gcode directly to `MoonrakerAPI::execute_gcode`, and the `_G28` is buried inside the macro where `reject_homing_during_active_print()` never sees it. The purge is a bare extruder move for the same reason — no homing, so it cannot reach the `_G28`. If a verified non-homing load-to-toolhead command ever turns up, that is the time to add the button.
 
-> **Unverified, flagged rather than assumed:** whether a firmware tool change can make the job read PAUSED with the head still empty. The reasoning above (Klipper queues `PAUSE` behind the running macro) is first-principles, not a device observation, and the fleet's AD5X rig (commissioned 2026-08-23) has not yet been exercised for this case, nor is there an `ad5x` mock profile. If a false runout ever shows up mid-swap, the fix is to lengthen `RUNOUT_CONFIRM_DELAY` past a full swap (~2 min measured in bundle `NJB2U558`), not to loosen the PAUSED gate.
+> **Unverified, flagged rather than assumed:** whether a firmware tool change can make the job read PAUSED with the head still empty. The reasoning above (Klipper queues `PAUSE` behind the running macro) is first-principles, not a device observation, and the fleet's AD5X rig (commissioned 2026-08-23) has not yet been exercised for this case, nor is there an `ad5x` mock profile. If a false runout ever shows up mid-swap, the fix is to lengthen `kRunoutConfirmDelay` past a full swap (~2 min measured in bundle `NJB2U558`), not to loosen the PAUSED gate.
 
 #### Auto-switchover plugin visibility
 
@@ -239,7 +271,7 @@ exists), not a code restriction.
 |--------|--------|
 | `AmsBackendAd5xIfs::get_plugin()` | `IfsPlugin::None` / `LessWaste` / `Bambufy`. `None` whenever `has_ifs_vars_` is false, so stale `less_waste_*` rows left behind by an uninstalled plugin never read as installed |
 | `AmsBackendAd5xIfs::plugin_backup_enabled()` | `std::optional<bool>` — `nullopt` means the macro dict never carried the key (or no plugin is installed), which is **not** the same as off |
-| `AmsBackendAd5xIfs::backup_state_locked()` | The live switchover state as a tri-state, `BACKUP_UNKNOWN` (-1) / `BACKUP_OFF` (0) / `BACKUP_ON` (1). Stock zMod reports `BACKUP_ON` (ANALOG_PRUTOK is always-on); the plugin path mirrors `variable_backup` with `BACKUP_UNKNOWN` when the key was never read. Feeds both the runout warning log and `get_endless_spool_capabilities()`' `enabled` axis, so the number in the log and the sentence on screen cannot disagree |
+| `AmsBackendAd5xIfs::backup_state_locked()` | The live switchover state as a tri-state, `kBackupUnknown` (-1) / `kBackupOff` (0) / `kBackupOn` (1). Stock zMod reports `kBackupOn` (ANALOG_PRUTOK is always-on); the plugin path mirrors `variable_backup` with `kBackupUnknown` when the key was never read. Feeds both the runout warning log and `get_endless_spool_capabilities()`' `enabled` axis, so the number in the log and the sentence on screen cannot disagree |
 
 **There are no AD5X-specific XML subjects.** `ams_ifs_plugin` and `ams_ifs_backup_enabled`
 existed for one release as this backend's own publication path and are gone: they never
@@ -333,6 +365,110 @@ entirely: the lane a menu names may not be the seated one, and a cold eject of t
 grinds un-cut filament. The AMS sidebar's panel-level Unload and the Filament panel's Unload stay
 live instead, dispatching `unload_filament(-1)`; `do_unload_filament()` takes the row-4 heated
 cut, so the firmware resolves the real channel, not the screen.
+
+Native ZMOD's `_IFS_REMOVE_CURRENT_PRUTOK` finds the channel itself only when
+`FFMInfo.channel` names one: with it 0, `IFS_REMOVE_PRUTOK PRUTOK=0` returns at once, so the
+printer homes and moves nothing. The standalone module's `IFS_UNLOAD` needs a lane too. The
+next section covers how both find it.
+
+#### Unload with no lane named (#1324)
+
+When the head holds filament and `current_slot` is -1, a slotless unload has to find its
+lane before it dispatches. `src/printer/ams_backend_ad5x_ifs.cpp#decide_unload_lane` is the
+pure rule, over the firmware kind, the records, the per-lane presence bits and the head
+sensor; `unload_lane_decision_locked()` feeds it the live state. Top-down:
+
+| # | State | Verdict | What happens |
+|---|---|---|---|
+| 1 | A record names the lane: the active slot, the seated channel (`ifs_loaded` on the module, Chan/`FFMInfo.channel` on ZMOD), ZMOD's `FFMInfo.channel` alone, or the remembered lane (`remembered_unload_lane_locked()`, the `lane_data` DB `seated` key, only while that port reads present; on native ZMOD only once Adventurer5M.json has been read) | `UnloadLane` | Unload it, no question |
+| 2 | Module only: `ifs_at_hub = n` and port n reads present | `UnloadLane` | `IFS_UNLOAD SLOT=n`, no question. Only one lane fits in the shared path, and `IFS_LOAD` claims it before the feed, so a load that failed after the feed leaves exactly this record |
+| 3 | Exactly one lane reads present | `ConfirmLane` | The lane picker with that one lane. Never dispatched on the inference alone: a runout tail or filament fed from outside the IFS breaks it |
+| 4 | Several lanes read present | `PickLane` | The lane picker |
+| 5 | No lane reads present (a runout tail) | `ConfirmClear` | A dialog asks to confirm the extruder-only clear |
+
+Only row 2 skips a question it could not otherwise answer. Rows 3-5 hold on both firmwares.
+`module_at_hub_` is read from every `save_variables` frame, because that frame can arrive
+before the one that latches the module, and is consulted only while the module is live.
+
+`do_unload_filament()` acts on the verdict. Anything only the user can answer (rows 3-5) returns
+`WRONG_STATE` before setting `HEATING`, so nothing warms up for an unload that cannot run.
+On the module a lane always goes out as `IFS_UNLOAD SLOT={n}`, including the active slot: a
+bare `IFS_UNLOAD` falls back on the module's own records, which can disagree with the screen.
+
+On native ZMOD with no active slot, `_IFS_REMOVE_CURRENT_PRUTOK` unloads the lane in
+`FFMInfo.channel` and does nothing when that is 0. `ffm_file_read_` says the file has been read and
+`ffm_file_channel_` holds the channel exactly as it said it (nullopt before the first read or
+with no integer channel), apart from `ffm_channel_`,
+Helix's working copy, which `clear_seated_if_ejected_locked()` zeroes on an eject while the file
+keeps the ejected lane. `native_lane_dispatch()` decides:
+
+| File says | Dispatch |
+|---|---|
+| not read yet | refused ("Still reading the printer's lane record"), and a re-read is requested |
+| read, but no integer `FFMInfo.channel` (or no `FFMInfo`) | no lane can be named to the firmware: refused with "The printer reports no lane record, so only clearing the extruder can unload it.", and `unload_lane_question()` offers only the clear, with that sentence as the confirmation's text (`UnloadLaneQuestion::reason`) |
+| 0 | `SET_EXTRUDER_SLOT SLOT={n}` then `_IFS_REMOVE_CURRENT_PRUTOK`, one script. `SET_EXTRUDER_SLOT` is ZMOD's `ad5x.cfg` wrapper over `cmd_SET_EXTRUDER_SLOT` in ZMOD's zmod_color.py, which writes `FFMInfo.channel` and moves nothing |
+| lane n | `_IFS_REMOVE_CURRENT_PRUTOK` |
+| another lane | refused ("The printer records lane {} in the toolhead, not this one"): declaring would overwrite the firmware's record, and the plain macro would unload the other lane |
+
+The extruder-only clear (`kClearToolheadSlot`) is `clear_toolhead_gcode()`. No lane names a
+material, so its temperature `t` is the nozzle target when that is at least 150C, else 220C.
+
+- **module:** `_IFS_SENSOR_RESUME` then `_IFS_CLEAR_EXTRUDER TEMP={t}` with no `SLOT=`: cut,
+  wipe and the extruder withdraw, clamping and retracting no lane. The private macro does not
+  restore a toolhead sensor an earlier failed op left muted; every public entry point does that
+  first, so Helix does too.
+- **native ZMOD:** `_REMOVE_PRUTOK_IFS PRUTOK=0 TEMP={t}`, the `prutok == 0` branch of ZMOD's
+  `_REMOVE_PRUTOK_IFS` in `ad5x_display_off.cfg`: home, heat, cut, drop the stub in the trash,
+  withdraw 60 mm, touching no lane. The public `REMOVE_PRUTOK_IFS` cannot be told a temperature
+  (it fills TEMP from the lane's config, and lane 0 has none), and preheating first does not
+  help: the macro sets its own TEMP and waits within -2/+4 of it.
+
+Both refuse a clear while the head reads empty, by the same switch-pair predicate as the eject
+routing, so a unit whose toolhead switch has published is gated by it. A unit whose switch reads
+present with an empty head (row 7 of the research table) cannot be told apart; the clear still
+waits for the user's confirmation there. A clear retracts no lane, so the strand that came from
+one stays at the hub with no record naming it, and a load of a different lane can feed into
+it. That is the price of not guessing: retracting the wrong lane leaves the same strand behind
+and also writes records saying the path is clear.
+
+The module's own `IFS_UNLOAD` falls back the same way (ad5m-forgex `macros/ifs.cfg`):
+`SLOT=`, then `ifs_loaded`, then `ifs_at_hub` while the toolhead sensor reads filament and that
+lane reads present (clearing both records on success), then the extruder-only clear with a
+`!!` warning. A bare `IFS_UNLOAD` from Fluidd takes rows 2 and 5 itself. HelixScreen never sends
+it bare, so it works on a module without that fallback too.
+
+The UI asks before any of this. `AmsBackend::unload_lane_question()` asks nothing by default;
+on this backend it returns the lanes to offer (rows 3-4) or `confirm_clear_toolhead` (row 5).
+The AMS sidebar's Unload (`src/ui/ui_ams_sidebar.cpp#"void AmsOperationSidebar::handle_unload()"`)
+and the Filament panel's Unload (`src/ui/ui_panel_filament.cpp#handle_unload_button`) both call
+`src/ui/ui_unload_lane_choice.cpp#choose_unload_lane` first. Every other slotless unload asks
+through `src/ui/ui_unload_lane_choice.cpp#ask_lane_then_unload`, which sends the answer straight
+to `execute_filament_unload()`: the runout dialog's Unload
+(`src/ui/ui_filament_runout_handler.cpp#dispatch_unload`) and the filament sensor tile's
+(`src/ui/panel_widgets/filament_sensor_widget.cpp#dispatch_unload`) when the runout names no
+lane, and bed drying's unload-first (`src/ui/ui_bed_drying_modal.cpp#unload_before_drying`),
+where a Cancel leaves the drying unstarted. The lane context menus name their lane and withdraw
+Unload in this state; the bypass toggle and the external spool unload only with a lane active
+or for the bypass spool, neither of which reaches the question. Lanes open the slot picker titled
+"Which lane is in the toolhead?" anchored to the Unload button: one row per lane, a "Clear
+extruder only" row (`FilamentSlotPicker::Options::extra_choice`, answers `kClearToolheadSlot`)
+and a "Cancel" row (`Options::cancel_choice`), even for a single lane, so the harmless way out
+is always an explicit row. Row 5 opens a `modal_confirm` "Clear the extruder?" with Clear and
+Cancel. Cancel, a backdrop tap and ESC send nothing. The answer re-enters the same handler as an
+explicit slot: the sidebar passes `lane_in_toolhead`, so the stepper treats that lane as the
+loaded one, and the Filament panel holds it in `chosen_unload_lane_` through its preheat.
+`plan_unload()` dispatches `kClearToolheadSlot` under the same unaccounted-toolhead condition
+as `kActiveHeadSlot`. With no question, the handler goes on to `unload_filament(-1)`, which
+handles rows 1 and 2 itself.
+
+The `ifs-module` mock can stage every row: `HELIX_MOCK_IFS_UNACCOUNTED`, `HELIX_MOCK_IFS_LANES`
+and `HELIX_MOCK_IFS_AT_HUB` (`docs/devel/MOCK_ENVIRONMENT_VARIABLES.md`). Unit coverage: the
+decision table, the module cases and the no-bare-`IFS_UNLOAD` sweep in
+`tests/unit/test_ams_ad5x_ifs_module.cpp`, the native ZMOD cases (file read, eject) in
+`tests/unit/test_ams_backend_ad5x_ifs.cpp`, the picker, dialog and sidebar dispatch in
+`tests/unit/test_unload_lane_choice.cpp`, the Filament panel route in
+`tests/unit/test_filament_panel_op_slot.cpp`, and the mock knobs in
+`tests/unit/test_mock_ifs_module_env.cpp`.
 
 **"Empty" for row 3 is the switch pair, not `head_filament_`** (`head_empty_for_unload_routing_locked()`):
 

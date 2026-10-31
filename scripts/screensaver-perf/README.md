@@ -19,13 +19,21 @@ Every script sources `perf_env.sh`. Nothing about a device is written in the rep
 | `HELIX_PERF_BUILD_TREE` | Tree `arm_measure.sh` builds with `make pi-docker` |
 | `HELIX_PERF_PROBE` | Wake-up probe binary for `embedded_gate.sh` |
 
+The `pi3b_service.sh`, `pi3b_measure.sh`, `pi3b_loadgate.sh` and `embedded_loadgate.sh` steps
+run on the device. `perf_remote_script` sends each one as a single stream on ssh's stdin: its
+settings as `KEY=VALUE` lines, then `device_lib.sh`, then the step. `device_lib.sh` holds what
+every step shares (sudo, `ctl`, the app's PID, CPU ticks and percentages, the `GATE_RAW` line)
+and is POSIX sh, so it also runs under BusyBox ash.
+
 ## The load gate
 
 A run passes when the latency probe records **no wake-up of 20 ms or more and a p99 under
 5 ms**, under a CPU load that stands in for klippy and moonraker. An arm passes only when
 every run passes. On the Pi the probe is `cyclictest --laptop --policy=other -i 1000` beside
 `stress-ng --cpu 2`; on BusyBox boards it is `wakeup_probe` beside busy loops on half the cores.
-`summarize.py` prints the verdict.
+`summarize.py` prints the verdict. `perfstats.py` holds what the parsers share: the 20 ms
+histogram limit and one percentile rule, the smallest value at which the running count reaches
+the fraction, for latency histograms and frame gaps alike.
 
 ## Raspberry Pi 3B
 
@@ -42,8 +50,12 @@ finishes. An arm has two halves and they take DIFFERENT variables: `WORKLOADS` s
 measurement passes (default `idle toasters starfield pipes`) and `SAVERS` selects the load gates
 (default `off toasters starfield pipes`). Setting only one leaves the other at its default, so
 `SAVERS="off fireworks"` gates fireworks while still measuring the default four. Workload names
-come from `perf_saver_type` in `perf_env.sh`: `idle`, `off` and `ui` run no saver, and `toasters`,
-`starfield`, `pipes`, `bounce` and `fireworks` each run that saver.
+come from `perf_saver_name` in `perf_env.sh`: `idle`, `off` and `ui` run no saver, and every
+stable saver name in the `kScreensavers` table of `include/screensaver_registry.h` (`toasters`,
+`pipes`, `flipclock` and the rest, read from that file) runs that saver through
+`helix-screen ctl screensaver <name>`, the Test Screensaver path, which needs no settings change and so leaves the configured saver alone. A
+saver the board has marked too heavy runs its fallback there, so check the `STARTED` line's
+type before reading a number as that saver's.
 
 Before touching the Pi the arm asks the Moonraker in the app's settings for the print state and
 stops unless the printer is idle (`PRINT_STATE` in the log). Every arm runs with

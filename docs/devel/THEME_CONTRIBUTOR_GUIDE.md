@@ -251,7 +251,7 @@ Themes get bounced when they:
 
 ## Contributing your theme
 
-1. **Put the final JSON in `assets/config/themes/defaults/`** in the repo.
+1. **Put the final JSON in `assets/config/themes/defaults/`** in the repo, never in `config/themes/`. That one is the user themes directory on an install, and a file shipped there would hide the default and overwrite users' edits on every update.
 2. **Filename is the theme's kebab-cased name** — my-cool-theme.json, not MyCoolTheme.json.
 3. **Take screenshots** of your theme on at least three panels — home, settings, print status. These go in the PR description.
 4. **Open a PR** on `prestonbrown/helixscreen` with `feat(theme): add <theme name>` as the commit subject.

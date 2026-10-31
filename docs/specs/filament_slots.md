@@ -1,6 +1,6 @@
 # Filament Slot Metadata — `lane_data` Convention
 
-**Status**: Informational, v1.15 (2026-09). See [Changelog](#changelog).
+**Status**: Informational, v1.17 (2026-10). See [Changelog](#changelog).
 
 This document describes HelixScreen's use of the `lane_data` Moonraker database
 namespace to share per-slot filament metadata with OrcaSlicer and other tools.
@@ -53,7 +53,11 @@ shape. OrcaSlicer 2.3.2+ reads it back on the next print and pre-selects the
 correct filament preset — with no HelixScreen-specific integration on the
 slicer side. Verified unchanged through OrcaSlicer 2.4.0-beta: the namespace
 and the consumed fields (`lane`, `color`, `material`, `bed_temp`,
-`nozzle_temp`) are identical to 2.3.2.
+`nozzle_temp`) are identical to 2.3.2. OrcaSlicer builds carrying
+[PR #14423](https://github.com/OrcaSlicer/OrcaSlicer/pull/14423) also read a
+string `filament_id` and select the exact filament preset carrying that id
+(OrcaSlicer's docs/HLSD/filament_id.md); HelixScreen writes it for a slot whose
+catalog product has a known OrcaSlicer id (§3).
 
 The convention is intentionally permissive:
 
@@ -112,7 +116,8 @@ DELETE /server/database/item      # body: { namespace, key }
 ### Top-level shape
 
 One JSON object keyed by a per-slot identifier. Two key styles are in use
-(§4): `laneN` (1-based, filament systems) and `T<n>` (0-based, tool changers).
+(§4): `laneN` and `T<n>`. `T<n>` is 0-based; `laneN` is 1-based from
+HelixScreen and AFC and 0-based from Happy Hare.
 Each value is an object conforming to the record shape in Section 3.
 
 **The outer key is opaque; the inner `lane` field is authoritative.** Readers
@@ -140,6 +145,7 @@ A full HelixScreen-emitted record looks like this:
   "color": "#1A1A1A",
   "material": "ASA",
   "helix_material": "ASA-GF",
+  "filament_id": "OGFB61",
   "vendor": "Polymaker",
   "vendor_name": "Polymaker",
   "spool_id": 42,
@@ -175,6 +181,7 @@ reference below.
 | `lane` | string | yes | stringified integer, 0-based | Tool / slot index as interpreted by the slicer. Matches OrcaSlicer's tool-index convention. See §4 for the intentional off-by-one versus the outer DB key. | HelixScreen writes slot index as string. |
 | `color` | string | optional | `#RRGGBB` hex | Slot color. Leading `#` is conventional; HelixScreen's parser also accepts `0x`-prefixed forms on read. Emitted whenever the record carries a colour at all, pure black `#000000` included: black is a real filament colour, not an unset one. | User-edited, or firmware-reported on backends where the user has no override. |
 | `material` | string | optional | short code (`PLA`, `PETG`, `ABS`, `TPU`, …) | The **slicer-matchable** material string. OrcaSlicer matches a lane to a preset by this value alone, so a writer should emit a string the slicer's library actually carries. HelixScreen derives it from the user's precise type (see `helix_material`): explicit override → exact library type → base polymer, and **omits the field entirely** when nothing safely matches, rather than emit a string the slicer would resolve to a wrong (Generic PLA) preset. Readers should still treat unknown values as opaque strings — do NOT silently map them. | Derived by HelixScreen (`orca_match_type()`), or user-edited on writers without a match table. |
+| `filament_id` | string | optional | OrcaSlicer preset `filament_id` | The OrcaSlicer filament preset id of the catalog product the user picked for this slot. OrcaSlicer (since PR #14423) matches it against its installed presets' `filament_id` and selects that exact preset; an id no installed preset carries falls back to the generic preset for `material`, with a notice. OrcaSlicer ignores a numeric value, which is what Happy Hare's records carry under this key (Spoolman's filament id). HelixScreen emits it only when the record's `helix_catalog_id` names a catalog product with a recorded Orca id (`orca_id` in assets/filaments.json or the user overlay) that no other product in the catalog carries. An ambiguous id, one several products share, is never written, since it would select another product's preset, possibly of another material. A user-overlay entry for a built-in product uses its own `orca_id` and carries none when it has none. HelixScreen never derives an id from brand or name. HelixScreen does not read it back. | HelixScreen's filament catalog (`to_lane_data_record()`). |
 | `vendor` | string | optional | free-form | Brand / manufacturer. Readers match case-insensitively when pairing with their own filament databases. | User-edited. |
 | `vendor_name` | string | optional | free-form | Alias of `vendor`, mirroring Happy Hare's key convention (`push_lane_data` in components/mmu_server.py). Emitted with the same value as `vendor` for forward-compat: as OrcaSlicer moves toward vendor-aware preset matching, `vendor_name` is the key it is most likely to consume. Zero-cost today — Orca ignores unknown keys. HelixScreen's reader accepts either key. | Same as `vendor`. |
 | `spool_id` | integer | optional | positive integer | Spoolman spool ID for the physical spool currently loaded. Omitted when zero. | User-selected from Spoolman, if configured. |
@@ -183,8 +190,9 @@ reference below.
 | `nozzle_temp` | integer | optional | Celsius | Recommended nozzle temperature. When derived from a Spoolman spool's min/max range, the midpoint is emitted. | Same priority order as `bed_temp`. |
 
 OrcaSlicer (2.3.2 through 2.4.0-beta, verified) only consumes `lane`, `color`,
-`material`, `bed_temp`, and `nozzle_temp`. All other fields are additive and
-must be silently ignored by compliant readers.
+`material`, `bed_temp`, and `nozzle_temp`; builds carrying PR #14423 also
+consume a string `filament_id`. All other fields are additive and must be
+silently ignored by compliant readers.
 
 #### HelixScreen extension fields
 
@@ -199,7 +207,7 @@ throw on unknown keys).
 | `spool_name` | string | optional | free-form | Human-readable name for the spool (e.g. `"PolyLite ASA-GF Black"`). Distinct from `vendor` + `material` because users often want a friendlier label. | User-edited, or auto-filled from Spoolman. |
 | `name` | string | optional | free-form | Alias of `spool_name`, mirroring Happy Hare's key convention (`push_lane_data` in components/mmu_server.py). Emitted with the same value as `spool_name` for forward-compat. HelixScreen's reader accepts either key. | Same as `spool_name`. |
 | `spoolman_vendor_id` | integer | optional | positive integer | Spoolman vendor ID, paired with `spool_id` for full Spoolman round-tripping. Omitted when zero. | From Spoolman when a spool is selected. |
-| `helix_spoolman_filament_id` | integer | optional | positive integer | The Spoolman filament definition ID behind the `spool_id`: the specific filament record whose vendor, material and colour the spool instantiates. Filed with the spool id and dropped with it, since a definition id whose spool is unlinked names nothing. `helix_`-prefixed because Happy Hare's `push_lane_data` writes its own unprefixed `filament_id` inner field, a different value with the same name. Omitted when zero. | From Spoolman when a spool is selected. |
+| `helix_spoolman_filament_id` | integer | optional | positive integer | The Spoolman filament definition ID behind the `spool_id`: the specific filament record whose vendor, material and colour the spool instantiates. Filed with the spool id and dropped with it, since a definition id whose spool is unlinked names nothing. `helix_`-prefixed because the unprefixed `filament_id` is OrcaSlicer's preset id in HelixScreen's records and Spoolman's numeric filament id in Happy Hare's. Omitted when zero. | From Spoolman when a spool is selected. |
 | `remaining_weight_g` | float | optional | grams | Remaining filament weight. Negative = unset / unknown. | Spoolman, or user-entered. |
 | `total_weight_g` | float | optional | grams | Full-spool nominal weight. Negative = unset / unknown. | Spoolman, or user-entered. |
 | `color_name` | string | optional | free-form | Human-readable color label (e.g. `"Orange"`), distinct from the `color` hex value. Some user workflows care about the marketing name as well as the RGB. | User-edited, or auto-filled from Spoolman. |
@@ -231,7 +239,8 @@ key's base depends on the writer's key style.
 
 | Key style | Outer DB key | Outer base | Inner `lane` field | Example for slot 0 | Written by |
 |-----------|--------------|------------|--------------------|--------------------|------------|
-| `laneN` | `"lane" + (i+1)` | 1-based | `std::to_string(i)` (0-based string) | key `"lane1"`, field `"0"` | HelixScreen (filament systems), Happy Hare, AFC before its virtual-tools firmware |
+| `laneN` | `"lane" + (i+1)` | 1-based | `std::to_string(i)` (0-based string) | key `"lane1"`, field `"0"` | HelixScreen (filament systems), AFC before its virtual-tools firmware |
+| `laneN` (0-based) | `"lane" + i` | 0-based | `str(gate)` (0-based string) | key `"lane0"`, field `"0"` | Happy Hare (components/mmu_server.py `push_lane_data`) |
 | `T<n>` | `"T" + i` | 0-based | `std::to_string(i)` (0-based string) | key `"T0"`, field `"0"` | HelixScreen (tool changers), Mainsail #2510, AFC since its virtual-tools firmware |
 
 The `laneN` style matches AFC's on-disk layout (AFC labels its lanes `lane1`,
@@ -239,7 +248,9 @@ The `laneN` style matches AFC's on-disk layout (AFC labels its lanes `lane1`,
 to `T<n>` *keys*, which is a `lane_data` change only). The `T<n>` style matches the tool-index naming
 Mainsail and OrcaSlicer use (`T0`, `T1`, …). **Both styles carry the identical
 0-based stringified inner `lane` field** — the only difference is the outer key
-and its base, which readers treat as opaque.
+and its base, which readers treat as opaque. Happy Hare's `lane1` is gate 1,
+HelixScreen's `lane1` is slot 0; the two never share a printer's namespace,
+because HelixScreen writes no records for a Happy Hare backend (§1).
 
 Why a tool changer uses `T<n>`: Mainsail's Spoolman + toolchanger integration
 (PR #2510) writes its records keyed `T<n>`. A HelixScreen tool changer that
@@ -481,7 +492,7 @@ Write AFC-shaped records using `POST /server/database/item`:
     "color": "#1A1A1A",
     "material": "ASA",
     "helix_material": "ASA-GF",
-    "vendor": "Polymaker",
+    "vendor_name": "Polymaker",
     "spool_id": 42,
     "scan_time": "2026-04-18T12:34:56Z",
     "bed_temp": 90,
@@ -502,6 +513,10 @@ Guidelines:
   `material`.
 - **Stamp** `scan_time` on every write. Use ISO-8601 UTC with second
   precision; other readers will rely on it.
+- **Write `vendor_name` and `name`, never `vendor` or `spool_name`.** Those two
+  are HelixScreen's legacy spellings, so a record carrying either reads as
+  HelixScreen's own write (§5) and is not taken as your edit: the screen keeps
+  showing the old spool.
 - **Pick one key style and stay consistent within a slot.** Use `laneN`
   (1-based outer key) for filament systems or `T<n>` (0-based outer key) for
   tool changers; either way the inner `lane` field is 0-based (§4). The outer
@@ -556,7 +571,7 @@ re-verify against the cited source lines rather than this table.
 |--------|-----------|-------|
 | **HelixScreen** | `T<n>` on tool changers, `laneN` otherwise | `format_lane_key(i, style)` in `filament_slot_override_store.cpp`. Style is derived from the AMS type (`lane_key_style_for`), not hardcoded per backend. |
 | **AFC** (AFCProject) | `T<n>` since the virtual-tools firmware (DEV 2026-08, Klipper-Add-On #832); `laneN` before | AFC_lane.py `send_lane_data` writes one record **per T(n) mapping**, so a multi-mapped lane appears once per tool. Inner `lane` field is the tool number string. See below. |
-| **Happy Hare** | `laneN` | components/mmu_server.py `push_lane_data`; also emits `vendor_name` / `name` / `filament_id` inner fields. |
+| **Happy Hare** | `laneN`, 0-based (`lane0` for gate 0) | components/mmu_server.py `push_lane_data`; also emits `vendor_name` / `name` / `filament_id` inner fields, `filament_id` being Spoolman's numeric filament id. |
 | **Mainsail #2510** | `T<n>` | Writes `lane_data` records for plain Spoolman + tool changer setups, keyed by tool (`T0`, `T1`, …). This is why HelixScreen tool changers converge on `T<n>`. |
 
 #### Shipped: AFC moved from `laneN` to `T<n>` (virtual-tools firmware)
@@ -642,6 +657,15 @@ reader can resolve.
 
 ## Changelog
 
+- **v1.17 (2026-10-27)**: §3: new optional field `filament_id`, OrcaSlicer's
+  preset id for the slot's catalog product, which OrcaSlicer builds carrying
+  PR #14423 use to select the exact preset. An id more than one catalog product
+  carries is never written. §2/§4/§8: Happy Hare's `laneN` keys
+  are 0-based (`lane0` is gate 0), not 1-based.
+- **v1.16 (2026-10-22)**: §7: an outside writer writes `vendor_name` and
+  `name`, never the legacy `vendor` / `spool_name` that mark a record as
+  HelixScreen's own (§5); the write example now uses `vendor_name`. The wire
+  format is unchanged.
 - **v1.15 (2026-09-27)**: §5: a record AFC's plugin wrote (`td`, no
   `vendor_name`) is a firmware reading and never promotes, whether or not the
   plugin build writes `extruder_index`. §6: stock CFS judges a finished read

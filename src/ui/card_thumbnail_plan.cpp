@@ -3,6 +3,8 @@
 
 #include "card_thumbnail_plan.h"
 
+#include "sort_small.h"
+
 #include <algorithm>
 
 namespace helix {
@@ -45,9 +47,8 @@ CardThumbnailPlan plan_card_thumbnails(const std::vector<CardThumbnailState>& fi
 
     // Cards on screen and fetches come first; the most recently shown cards
     // off screen keep what is left, so scrolling back redraws without a decode.
-    std::stable_sort(kept.begin(), kept.end(), [&files](size_t a, size_t b) {
-        return files[a].last_shown > files[b].last_shown;
-    });
+    sort_small(kept.begin(), kept.end(),
+               [&files](size_t a, size_t b) { return files[a].last_shown > files[b].last_shown; });
     for (size_t i : kept) {
         if (keep_off_screen && committed <= budget && budget - committed >= slot(files[i])) {
             committed += slot(files[i]);
@@ -55,7 +56,7 @@ CardThumbnailPlan plan_card_thumbnails(const std::vector<CardThumbnailState>& fi
             plan.drop.push_back(i);
         }
     }
-    std::sort(plan.drop.begin(), plan.drop.end());
+    sort_small(plan.drop.begin(), plan.drop.end());
     return plan;
 }
 

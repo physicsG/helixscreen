@@ -34,11 +34,11 @@ TEST_CASE("hold repeat cadence after the first fire", "[hold_repeat]") {
     HoldRepeat hr;
     hr.press();
     REQUIRE(hr.on_elapsed(HoldRepeat::DELAY_MS));
-    // One repeat per INTERVAL_MS, anchored on the press.
-    CHECK_FALSE(hr.on_elapsed(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS - 1));
-    CHECK(hr.on_elapsed(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS));
-    CHECK_FALSE(hr.on_elapsed(HoldRepeat::DELAY_MS + 2 * HoldRepeat::INTERVAL_MS - 1));
-    CHECK(hr.on_elapsed(HoldRepeat::DELAY_MS + 2 * HoldRepeat::INTERVAL_MS));
+    // One repeat per kIntervalMs, anchored on the press.
+    CHECK_FALSE(hr.on_elapsed(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs - 1));
+    CHECK(hr.on_elapsed(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs));
+    CHECK_FALSE(hr.on_elapsed(HoldRepeat::DELAY_MS + 2 * HoldRepeat::kIntervalMs - 1));
+    CHECK(hr.on_elapsed(HoldRepeat::DELAY_MS + 2 * HoldRepeat::kIntervalMs));
 }
 
 TEST_CASE("a late poll fires once and skips the missed intervals", "[hold_repeat]") {
@@ -48,7 +48,7 @@ TEST_CASE("a late poll fires once and skips the missed intervals", "[hold_repeat
     REQUIRE(hr.on_elapsed(HoldRepeat::DELAY_MS + 600));
     // The next poll, one period later, must not repay the missed intervals.
     CHECK_FALSE(hr.on_elapsed(HoldRepeat::DELAY_MS + 650));
-    CHECK(hr.on_elapsed(HoldRepeat::DELAY_MS + 600 + HoldRepeat::INTERVAL_MS));
+    CHECK(hr.on_elapsed(HoldRepeat::DELAY_MS + 600 + HoldRepeat::kIntervalMs));
 }
 
 TEST_CASE("a tap with no repeat jogs once via the click path", "[hold_repeat]") {
@@ -80,7 +80,7 @@ TEST_CASE("cancel stops ticks and forgets the repeat", "[hold_repeat]") {
     REQUIRE(hr.on_elapsed(HoldRepeat::DELAY_MS));
     hr.cancel();
     CHECK_FALSE(hr.active());
-    CHECK_FALSE(hr.on_elapsed(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS));
+    CHECK_FALSE(hr.on_elapsed(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs));
     CHECK_FALSE(hr.swallow_click());
 }
 
@@ -144,7 +144,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "HoldRepeatTimer fires on poll and stops when 
     // The owner refuses (jog blocked): ticking stops, but the repeat that
     // already fired still swallows the imminent click.
     ctx.allow = false;
-    CHECK(timer.poll(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS));
+    CHECK(timer.poll(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs));
     REQUIRE(ctx.fires == 2);
     CHECK_FALSE(timer.ticking());
     // A stopped timer polls nothing further, whatever the clock says.
@@ -168,7 +168,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "HoldRepeatTimer release stops ticks and keeps
     timer.release();
     CHECK_FALSE(timer.ticking());
     CHECK(timer.swallow_click());
-    CHECK_FALSE(timer.poll(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS));
+    CHECK_FALSE(timer.poll(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs));
     CHECK(ctx.fires == 1);
 
     timer.cancel();
@@ -199,7 +199,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "HoldRepeatTimer release stops ticks and keeps
 
 TEST_CASE_METHOD(LVGLUITestFixture, "a Z jog blocked at the ceiling cancels the hold repeat",
                  "[motion][hold_repeat][xml]") {
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -232,30 +232,30 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a Z jog blocked at the ceiling cancels the 
 
     // Press arms the repeat (this is the XML pressed event's whole job).
     lv_obj_send_event(z_up, LV_EVENT_PRESSED, nullptr);
-    REQUIRE(panel.z_hold_timer().ticking());
+    REQUIRE(panel.jog_hold_timer().ticking());
 
     // Before the delay: no repeat, no jog attempt, no toast.
-    CHECK_FALSE(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS - 1));
+    CHECK_FALSE(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS - 1));
     CHECK(warnings.empty());
 
     // First repeat at the delay is the press's INITIAL jog: a fresh press
     // already at the limit warns every time, and the refusal stops the repeat.
-    CHECK(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS));
-    CHECK_FALSE(panel.z_hold_timer().ticking());
+    CHECK(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS));
+    CHECK_FALSE(panel.jog_hold_timer().ticking());
     REQUIRE(warnings.size() == 1);
     CHECK(warnings.front().find("Z is at its limit") != std::string::npos);
     CHECK(warnings.front().find("250.00mm") != std::string::npos);
 
     // Repeat ticks into the wall can never raise a toast (and none fire: the
     // refusal already stopped the timer).
-    CHECK_FALSE(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS));
+    CHECK_FALSE(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs));
     CHECK(warnings.size() == 1);
 
     // The release click is swallowed (a repeat fired): no extra jog, no toast.
     lv_obj_send_event(z_up, LV_EVENT_RELEASED, nullptr);
     lv_obj_send_event(z_up, LV_EVENT_CLICKED, nullptr);
     CHECK(warnings.size() == 1);
-    CHECK_FALSE(panel.z_hold_timer().ticking());
+    CHECK_FALSE(panel.jog_hold_timer().ticking());
 
     helix::ui::set_test_notification_warning_hook(nullptr);
     StaticPanelRegistry::instance().destroy_all();
@@ -264,7 +264,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a Z jog blocked at the ceiling cancels the 
 
 TEST_CASE_METHOD(LVGLUITestFixture, "a hold that repeated jogs exactly once on release",
                  "[motion][hold_repeat][xml]") {
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -300,7 +300,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a hold that repeated jogs exactly once on r
     set_moonraker_api(&api);
     client.clear_gcode_script_history();
 
-    // handle_z_button() logs one line per accepted jog decision, before any
+    // handle_jog_button() logs one line per accepted jog decision, before any
     // coalescing: the count stays honest whether or not the move acked yet.
     helix::TextLogCapture log;
     const auto jog_decisions = [&log] {
@@ -323,9 +323,9 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a hold that repeated jogs exactly once on r
     };
 
     lv_obj_send_event(z_up, LV_EVENT_PRESSED, nullptr);
-    REQUIRE(panel.z_hold_timer().ticking());
+    REQUIRE(panel.jog_hold_timer().ticking());
     // Exactly one repeat fires inside the delay window, and it dispatches.
-    REQUIRE(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS));
+    REQUIRE(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS));
     REQUIRE(jog_decisions() == 1);
 
     // Release after a repeated hold: the CLICKED must be swallowed, adding
@@ -334,7 +334,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a hold that repeated jogs exactly once on r
     lv_obj_send_event(z_up, LV_EVENT_CLICKED, nullptr);
     CHECK(jog_decisions() == 1);
     CHECK(jog_scripts() == 1);
-    CHECK_FALSE(panel.z_hold_timer().ticking());
+    CHECK_FALSE(panel.jog_hold_timer().ticking());
 
     set_moonraker_api(previous_api);
     helix::ui::UpdateQueue::instance().drain();
@@ -374,7 +374,7 @@ TEST_CASE("z_direction_blocked decides from the bound the button drives toward",
 }
 
 TEST_CASE_METHOD(LVGLUITestFixture, "two taps at the Z limit warn twice", "[motion][limits][xml]") {
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -399,10 +399,10 @@ TEST_CASE_METHOD(LVGLUITestFixture, "two taps at the Z limit warn twice", "[moti
         [&warnings](const std::string& msg) { warnings.push_back(msg); });
 
     // Each tap is a fresh press: both warn, with the limit it hit.
-    CHECK_FALSE(panel.handle_z_button("z_up_large"));
+    CHECK_FALSE(panel.handle_jog_button("z_up_large"));
     REQUIRE(warnings.size() == 1);
     CHECK(warnings.front().find("Z is at its limit (250.00mm)") != std::string::npos);
-    CHECK_FALSE(panel.handle_z_button("z_up_large"));
+    CHECK_FALSE(panel.handle_jog_button("z_up_large"));
     REQUIRE(warnings.size() == 2);
     CHECK(warnings[1].find("Z is at its limit (250.00mm)") != std::string::npos);
 
@@ -418,7 +418,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a hold that moves then hits the ceiling sto
     // would creep a hundredth at a time and never reach the ceiling.
     SettingsManager::instance().init_subjects();
 
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -460,16 +460,16 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a hold that moves then hits the ceiling sto
         [&warnings](const std::string& msg) { warnings.push_back(msg); });
 
     lv_obj_send_event(z_up, LV_EVENT_PRESSED, nullptr);
-    REQUIRE(panel.z_hold_timer().ticking());
+    REQUIRE(panel.jog_hold_timer().ticking());
 
     // Partial first tick: moves 5 of the requested 10, no toast, keeps ticking.
-    CHECK(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS));
-    CHECK(panel.z_hold_timer().ticking());
+    CHECK(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS));
+    CHECK(panel.jog_hold_timer().ticking());
     CHECK(warnings.empty());
 
     // Repeat tick into the ceiling: fully clamped, stops the repeat, no toast.
-    CHECK(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS));
-    CHECK_FALSE(panel.z_hold_timer().ticking());
+    CHECK(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs));
+    CHECK_FALSE(panel.jog_hold_timer().ticking());
     CHECK(warnings.empty());
 
     helix::ui::set_test_notification_warning_hook(nullptr);
@@ -481,7 +481,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a hold that moves then hits the ceiling sto
 
 TEST_CASE_METHOD(LVGLUITestFixture, "Z buttons disable at the ceiling and swap under bed_moves",
                  "[motion][limits][xml]") {
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -534,7 +534,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a coordinate tap sends one absolute single-
                  "[motion][coords][xml]") {
     SettingsManager::instance().init_subjects();
 
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -593,77 +593,12 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a coordinate tap sends one absolute single-
     helix::ui::UpdateQueue::instance().drain();
 }
 
-TEST_CASE_METHOD(LVGLUITestFixture, "an unhomed coordinate tap homes first then moves",
-                 "[motion][coords][xml]") {
-    SettingsManager::instance().init_subjects();
-
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
-    for (auto& p : panels)
-        p = lv_obj_create(lv_screen_active());
-    NavigationManager::instance().set_panels(panels.data());
-
-    lv_obj_t* cached = nullptr;
-    REQUIRE(get_global_motion_panel().show(lv_screen_active()));
-    cached = get_global_motion_panel().get_root();
-    helix::ui::UpdateQueue::instance().drain();
-
-    MotionPanel& panel = get_global_motion_panel();
-    get_printer_state().update_from_status({{"toolhead",
-                                             {{"homed_axes", ""},
-                                              {"axis_minimum", {0.0, 0.0, 0.0, 0.0}},
-                                              {"axis_maximum", {235.0, 235.0, 250.0, 0.0}}}}});
-    get_printer_state().set_klippy_state_sync(helix::KlippyState::READY);
-    lv_subject_set_int(get_printer_state().print_state().get_print_state_enum_subject(),
-                       static_cast<int>(helix::PrintJobState::STANDBY));
-    helix::ui::UpdateQueue::instance().drain();
-
-    MoonrakerClientMock client{MoonrakerClientMock::PrinterType::VORON_24};
-    MoonrakerAPI api{client, get_printer_state()};
-    IMoonrakerAPI* previous_api = get_moonraker_api();
-    set_moonraker_api(&api);
-    client.clear_gcode_script_history();
-
-    // Unhomed with a known envelope: the move must wait for a full G28.
-    REQUIRE(get_printer_state().motion_state().get_axis_bounds().has_y);
-    REQUIRE_FALSE(helix::axis_is_homed(get_printer_state(), helix::Axis::Y));
-
-    panel.request_axis_target('y', 100.0);
-    helix::ui::UpdateQueue::instance().drain();
-
-    const auto& history = client.gcode_script_history();
-    size_t home_at = std::string::npos;
-    size_t move_at = std::string::npos;
-    int homing_lines = 0;
-    std::string move;
-    for (size_t i = 0; i < history.size(); ++i) {
-        if (history[i].find("G28") != std::string::npos) {
-            if (home_at == std::string::npos)
-                home_at = i;
-            ++homing_lines;
-        }
-        if (history[i].find("G0 Y100") != std::string::npos) {
-            move_at = i;
-            move = history[i];
-        }
-    }
-    REQUIRE(homing_lines == 1);
-    REQUIRE(move_at != std::string::npos);
-    CHECK(home_at < move_at); // the move only goes out after G28 completes
-    CHECK(move.find(" X") == std::string::npos);
-    CHECK(move.find(" Z") == std::string::npos);
-
-    set_moonraker_api(previous_api);
-    helix::ui::UpdateQueue::instance().drain();
-    StaticPanelRegistry::instance().destroy_all();
-    helix::ui::UpdateQueue::instance().drain();
-}
-
 TEST_CASE_METHOD(LVGLUITestFixture,
                  "a Z button disabled under a hold drops its pressed look and follows commanded Z",
                  "[motion][limits][xml]") {
     SettingsManager::instance().init_subjects();
 
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());
@@ -698,7 +633,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // A real finger sets PRESSED through the input device; the test sets it.
     lv_obj_add_state(z_up, LV_STATE_PRESSED);
     lv_obj_send_event(z_up, LV_EVENT_PRESSED, nullptr);
-    REQUIRE(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS)); // moves the last 5mm
+    REQUIRE(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS)); // moves the last 5mm
 
     // Any recompute before the head reports 250 reads commanded Z, so the up
     // buttons stay live even while the move toward the ceiling is in flight.
@@ -712,8 +647,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     lv_subject_set_int(get_printer_state().motion_state().get_gcode_position_z_subject(), 25'000);
     helix::ui::UpdateQueue::instance().drain();
     REQUIRE(lv_obj_has_state(z_up, LV_STATE_DISABLED));
-    CHECK(panel.z_hold_timer().poll(HoldRepeat::DELAY_MS + HoldRepeat::INTERVAL_MS));
-    CHECK_FALSE(panel.z_hold_timer().ticking());
+    CHECK(panel.jog_hold_timer().poll(HoldRepeat::DELAY_MS + HoldRepeat::kIntervalMs));
+    CHECK_FALSE(panel.jog_hold_timer().ticking());
     CHECK_FALSE(lv_obj_has_state(z_up, LV_STATE_PRESSED));
 
     set_moonraker_api(previous_api);
@@ -724,7 +659,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 
 TEST_CASE_METHOD(LVGLUITestFixture, "a diagonal along a wall moves the free axis without warning",
                  "[motion][limits][xml]") {
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());

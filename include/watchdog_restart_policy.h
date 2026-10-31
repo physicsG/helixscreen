@@ -53,15 +53,15 @@ enum class ExecFailureClass {
 // The values must not collide with:
 //   - 0                : clean exit
 //   - 1                : helix-screen's own argument/startup failure exit
-//   - 42               : RESTART_LOOP_EXIT_CODE, the watchdog's own surrender code
+//   - 42               : kRestartLoopExitCode, the watchdog's own surrender code
 //   - 128..159         : the crash handler's exit(128 + signum) encoding
 //
 // 125/126/127 sit just below the signal-encoding range and follow the POSIX
 // shell convention for exec problems (126 "found but not executable",
 // 127 "not found"), so they read correctly in a shell-oriented log too.
-inline constexpr int EXEC_FAILED_TRANSIENT_EXIT = 125;
-inline constexpr int EXEC_FAILED_PERMANENT_EXIT = 126;
-inline constexpr int EXEC_FAILED_UNCLASSIFIED_EXIT = 127;
+inline constexpr int kExecFailedTransientExit = 125;
+inline constexpr int kExecFailedPermanentExit = 126;
+inline constexpr int kExecFailedUnclassifiedExit = 127;
 
 /// Classify an errno set by a failed execv() or fork().
 inline ExecFailureClass classify_exec_errno(int err) {
@@ -95,12 +95,12 @@ inline ExecFailureClass classify_exec_errno(int err) {
 inline int exec_failure_exit_code(int err) {
     switch (classify_exec_errno(err)) {
     case ExecFailureClass::TRANSIENT:
-        return EXEC_FAILED_TRANSIENT_EXIT;
+        return kExecFailedTransientExit;
     case ExecFailureClass::PERMANENT:
-        return EXEC_FAILED_PERMANENT_EXIT;
+        return kExecFailedPermanentExit;
     case ExecFailureClass::NONE:
     default:
-        return EXEC_FAILED_UNCLASSIFIED_EXIT;
+        return kExecFailedUnclassifiedExit;
     }
 }
 
@@ -109,9 +109,9 @@ inline int exec_failure_exit_code(int err) {
 /// failure at all.
 inline ExecFailureClass classify_child_exit_code(int exit_code) {
     switch (exit_code) {
-    case EXEC_FAILED_TRANSIENT_EXIT:
+    case kExecFailedTransientExit:
         return ExecFailureClass::TRANSIENT;
-    case EXEC_FAILED_PERMANENT_EXIT:
+    case kExecFailedPermanentExit:
         return ExecFailureClass::PERMANENT;
     default:
         return ExecFailureClass::NONE;
@@ -136,18 +136,18 @@ inline const char* exec_failure_class_name(ExecFailureClass cls) {
 // =============================================================================
 
 /// First retry delay. Doubles on each consecutive failure.
-inline constexpr int RESTART_BACKOFF_BASE_SEC = 3;
+inline constexpr int kRestartBackoffBaseSec = 3;
 /// Ceiling for the doubling sequence: 3, 6, 12, 24, 48, 60, 60, …
-inline constexpr int RESTART_BACKOFF_MAX_SEC = 60;
+inline constexpr int kRestartBackoffMaxSec = 60;
 
 /// Consecutive TRANSIENT exec/fork failures tolerated at the backoff cadence
 /// before dropping to the slow cooldown cadence. With the backoff above this
 /// spans roughly 16 minutes, which comfortably outlasts an input-shaper FFT on
 /// a low-RAM board (the pressure window that produces ENOEXEC in the first
 /// place).
-inline constexpr int TRANSIENT_MAX_FAILURES = 20;
+inline constexpr int kTransientMaxFailures = 20;
 /// Delay between cooldown rounds once the backoff budget is spent.
-inline constexpr int TRANSIENT_COOLDOWN_SEC = 60;
+inline constexpr int kTransientCooldownSec = 60;
 /// Cooldown rounds before the supervisor finally surrenders. Each round starts
 /// the backoff budget over, so a round is one cooldown plus a fresh ~16-minute
 /// backoff sweep and ten of them span roughly three hours. Deliberately
@@ -155,21 +155,21 @@ inline constexpr int TRANSIENT_COOLDOWN_SEC = 60;
 /// which is strictly worse than a supervisor that keeps quietly trying — but
 /// still bounded, so a genuinely dead install eventually reaches the service
 /// manager instead of retrying forever.
-inline constexpr int TRANSIENT_MAX_COOLDOWN_ROUNDS = 10;
+inline constexpr int kTransientMaxCooldownRounds = 10;
 
 /// Delay before the Nth consecutive retry (N counted from 1).
 inline int restart_backoff_seconds(int consecutive_failures) {
     if (consecutive_failures < 1) {
         consecutive_failures = 1;
     }
-    long delay = RESTART_BACKOFF_BASE_SEC;
+    long delay = kRestartBackoffBaseSec;
     for (int i = 1; i < consecutive_failures; ++i) {
-        if (delay >= RESTART_BACKOFF_MAX_SEC) {
+        if (delay >= kRestartBackoffMaxSec) {
             break;
         }
         delay *= 2;
     }
-    return delay > RESTART_BACKOFF_MAX_SEC ? RESTART_BACKOFF_MAX_SEC : static_cast<int>(delay);
+    return delay > kRestartBackoffMaxSec ? kRestartBackoffMaxSec : static_cast<int>(delay);
 }
 
 /// What the supervisor should do after a failed child launch.
@@ -179,21 +179,21 @@ enum class RestartAction {
     /// Backoff budget spent: sleep a long fixed cooldown, reset the failure
     /// counter, and relaunch. Consumes one cooldown round.
     COOLDOWN_RETRY,
-    /// Out of options — exit with RESTART_LOOP_EXIT_CODE so the service
+    /// Out of options — exit with kRestartLoopExitCode so the service
     /// manager (or a human) sees the failure.
     GIVE_UP,
 };
 
 struct RestartDecision {
     RestartAction action = RestartAction::RETRY_BACKOFF;
-    int delay_seconds = RESTART_BACKOFF_BASE_SEC;
+    int delay_seconds = kRestartBackoffBaseSec;
 };
 
 /// Failure budget for non-transient failures: deliberate non-zero exits
 /// ("another instance is already running", config validation, missing shared
 /// library) and PERMANENT exec failures. These do not resolve by retrying, so
 /// the budget stays small and the supervisor gives up quickly.
-inline constexpr int RESTART_LOOP_MAX_FAILURES = 5;
+inline constexpr int kRestartLoopMaxFailures = 5;
 
 /**
  * @brief Consecutive launch-failure counters feeding decide_restart_action().
@@ -247,14 +247,14 @@ inline RestartDecision decide_restart_action(ExecFailureClass cls, int consecuti
     RestartDecision decision;
 
     if (cls == ExecFailureClass::TRANSIENT) {
-        if (consecutive_failures <= TRANSIENT_MAX_FAILURES) {
+        if (consecutive_failures <= kTransientMaxFailures) {
             decision.action = RestartAction::RETRY_BACKOFF;
             decision.delay_seconds = restart_backoff_seconds(consecutive_failures);
             return decision;
         }
-        if (cooldown_rounds_used < TRANSIENT_MAX_COOLDOWN_ROUNDS) {
+        if (cooldown_rounds_used < kTransientMaxCooldownRounds) {
             decision.action = RestartAction::COOLDOWN_RETRY;
-            decision.delay_seconds = TRANSIENT_COOLDOWN_SEC;
+            decision.delay_seconds = kTransientCooldownSec;
             return decision;
         }
         decision.action = RestartAction::GIVE_UP;
@@ -262,7 +262,7 @@ inline RestartDecision decide_restart_action(ExecFailureClass cls, int consecuti
         return decision;
     }
 
-    if (consecutive_failures > RESTART_LOOP_MAX_FAILURES) {
+    if (consecutive_failures > kRestartLoopMaxFailures) {
         decision.action = RestartAction::GIVE_UP;
         decision.delay_seconds = 0;
         return decision;

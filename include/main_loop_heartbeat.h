@@ -59,9 +59,9 @@ class MainLoopHeartbeat {
  */
 class MainLoopHangDetector {
   public:
-    static constexpr uint32_t DEFAULT_THRESHOLD_MS = 60000;
+    static constexpr uint32_t kDefaultThresholdMs = 60000;
 
-    explicit MainLoopHangDetector(uint32_t threshold_ms = DEFAULT_THRESHOLD_MS) noexcept
+    explicit MainLoopHangDetector(uint32_t threshold_ms = kDefaultThresholdMs) noexcept
         : threshold_ms_(threshold_ms) {}
 
     void set_threshold_ms(uint32_t ms) noexcept {
@@ -118,7 +118,7 @@ class MainLoopHangDetector {
   private:
     uint64_t last_count_ = 0;
     uint64_t last_change_ms_ = 0;
-    uint32_t threshold_ms_ = DEFAULT_THRESHOLD_MS;
+    uint32_t threshold_ms_ = kDefaultThresholdMs;
     bool seeded_ = false;
     bool reported_ = false;
 };

@@ -148,7 +148,7 @@ class ConfigPollutionFixture : public HelixTestFixture {
 
 /// A clean, already-current config with no legacy garbage in it.
 json clean_config() {
-    return json{{"config_version", CURRENT_CONFIG_VERSION},
+    return json{{"config_version", kCurrentConfigVersion},
                 {"active_printer_id", "voronv2"},
                 {"printers",
                  {{"voronv2",
@@ -314,7 +314,7 @@ TEST_CASE_METHOD(ConfigPollutionFixture,
                  "[config][migration][pollution]") {
     write_and_init(polluted_v19_config());
 
-    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE_FALSE(config.exists("/led"));
     REQUIRE_FALSE(config.exists("/printer"));
 
@@ -543,7 +543,7 @@ TEST_CASE_METHOD(ConfigPollutionFixture,
                  "[config][migration][pollution]") {
     write_and_init(clean_config());
 
-    REQUIRE(config.get<int>("/config_version") == CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version") == kCurrentConfigVersion);
     REQUIRE(config.get_string_array("/printers/voronv2/leds/selected_strips") ==
             std::vector<std::string>{"neopixel case_lights"});
     REQUIRE(null_leaves(ConfigTestAccess::data(config)).empty());

@@ -534,8 +534,8 @@ TEST_CASE("GCodeFileModifier - Streaming replace on the last line",
           "[gcode][modifier][streaming]") {
     // Streaming emits the separating newline BEFORE each line rather than after
     // it, so the final line is the one place that bookkeeping can drop a
-    // separator or emit a spare one. The output is never newline-terminated,
-    // whether or not the source was.
+    // separator or emit a spare one. The output ends with a newline exactly
+    // when the source does: Klipper never runs an unterminated final line.
     auto run = [](const std::string& source, const std::string& replacement) {
         GCodeFileModifier modifier;
         std::string test_path =
@@ -563,7 +563,7 @@ TEST_CASE("GCodeFileModifier - Streaming replace on the last line",
         auto [ok, modified, content] = run("L1\nL2\nOLD_LAST\n", "NEW_LAST");
         REQUIRE(ok);
         REQUIRE(modified == 1);
-        REQUIRE(content == "L1\nL2\nNEW_LAST");
+        REQUIRE(content == "L1\nL2\nNEW_LAST\n");
     }
 
     SECTION("source has no trailing newline") {
@@ -577,7 +577,7 @@ TEST_CASE("GCodeFileModifier - Streaming replace on the last line",
         auto [ok, modified, content] = run("L1\nL2\nOLD_LAST\n", "NEW_A\nNEW_B");
         REQUIRE(ok);
         REQUIRE(modified == 1);
-        REQUIRE(content == "L1\nL2\nNEW_A\nNEW_B");
+        REQUIRE(content == "L1\nL2\nNEW_A\nNEW_B\n");
     }
 }
 
@@ -604,10 +604,47 @@ TEST_CASE("GCodeFileModifier - Streaming with no modifications", "[gcode][modifi
 
     std::ifstream in(result.modified_path);
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    REQUIRE(content == "G28\nG1 X0 Y0\nM104 S200");
+    REQUIRE(content == "G28\nG1 X0 Y0\nM104 S200\n");
 
     std::filesystem::remove(test_path);
     std::filesystem::remove(result.modified_path);
+}
+
+TEST_CASE("GCodeFileModifier - Buffered copy with no modifications keeps the final newline",
+          "[gcode][modifier]") {
+    // A small file takes the buffered path, whose empty-set branch copies the
+    // source line by line. The copy ends with a newline exactly when the source
+    // does: Klipper never runs an unterminated final line.
+    auto copy_of = [](const std::string& source) {
+        GCodeFileModifier modifier;
+        std::string test_path =
+            "/tmp/helix_buffered_test_empty_" + std::to_string(getpid()) + ".gcode";
+        {
+            std::ofstream out(test_path);
+            out << source;
+        }
+
+        auto result = modifier.apply(test_path);
+        REQUIRE(result.success);
+        REQUIRE(result.modified_path != test_path);
+
+        std::string content;
+        {
+            std::ifstream in(result.modified_path);
+            content.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        }
+        std::filesystem::remove(test_path);
+        std::filesystem::remove(result.modified_path);
+        return content;
+    };
+
+    SECTION("source ends with a newline") {
+        REQUIRE(copy_of("G28\nG1 X0 Y0\nM104 S200\n") == "G28\nG1 X0 Y0\nM104 S200\n");
+    }
+
+    SECTION("source has no trailing newline") {
+        REQUIRE(copy_of("G28\nG1 X0 Y0\nM104 S200") == "G28\nG1 X0 Y0\nM104 S200");
+    }
 }
 
 TEST_CASE("GCodeFileModifier - Auto-select streaming for large files",
@@ -905,4 +942,88 @@ G1 X10 Y10 F3000
         // Original structure preserved
         REQUIRE(result.find("G1 X10 Y10 F3000") != std::string::npos);
     }
+}
+
+// ============================================================================
+// A scan of other G-code
+// ============================================================================
+
+TEST_CASE("GCodeFileModifier - a line that is not the scanned one is refused",
+          "[gcode][modifier][stale_scan]") {
+    const std::string path = "/tmp/helix_stale_scan_" + std::to_string(getpid()) + ".gcode";
+    {
+        std::ofstream out(path);
+        out << "G28\nPRINT_START BED=60\nBED_MESH_CALIBRATE\nG1 X0 Y0\n";
+    }
+
+    auto rewrite = [&](bool streaming, Modification mod) {
+        GCodeFileModifier modifier;
+        modifier.add_modification(std::move(mod));
+        return streaming ? modifier.apply_streaming(path) : modifier.apply(path);
+    };
+
+    for (const bool streaming : {false, true}) {
+        CAPTURE(streaming);
+
+        SECTION(std::string("comment out, ") + (streaming ? "streaming" : "buffered")) {
+            const auto stale =
+                rewrite(streaming, Modification::comment_out(3).expecting("CLEAN_NOZZLE"));
+            REQUIRE_FALSE(stale.success);
+            REQUIRE(stale.error_message.find("line 3") != std::string::npos);
+            REQUIRE((stale.modified_path.empty() || !std::filesystem::exists(stale.modified_path)));
+
+            const auto fresh =
+                rewrite(streaming, Modification::comment_out(3).expecting("BED_MESH_CALIBRATE\r"));
+            REQUIRE(fresh.success);
+            std::ifstream in(fresh.modified_path);
+            const std::string content((std::istreambuf_iterator<char>(in)),
+                                      std::istreambuf_iterator<char>());
+            REQUIRE(content.find("; BED_MESH_CALIBRATE") != std::string::npos);
+            std::filesystem::remove(fresh.modified_path);
+        }
+
+        SECTION(std::string("replace, ") + (streaming ? "streaming" : "buffered")) {
+            const auto stale =
+                rewrite(streaming, Modification::replace(2, "PRINT_START BED=60 SKIP_MESH=1")
+                                       .expecting("PRINT_START BED=110"));
+            REQUIRE_FALSE(stale.success);
+            REQUIRE((stale.modified_path.empty() || !std::filesystem::exists(stale.modified_path)));
+        }
+    }
+
+    SECTION("disable_operation checks the operation's own line") {
+        DetectedOperation op;
+        op.type = OperationType::BED_MESH;
+        op.embedding = OperationEmbedding::DIRECT_COMMAND;
+        op.line_number = 3;
+        op.raw_line = "BED_MESH_CALIBRATE ADAPTIVE=1";
+        GCodeFileModifier modifier;
+        REQUIRE(modifier.disable_operation(op));
+        REQUIRE_FALSE(modifier.apply(path).success);
+    }
+
+    SECTION("a macro parameter is switched off only on the scanned call") {
+        // A scan of other G-code whose START_PRINT, on this file's line 2,
+        // asks for leveling.
+        const auto scan = GCodeOpsDetector{}.scan_content(
+            "G28\nSTART_PRINT BED=110 FORCE_LEVELING=true\nG1 X0 Y0\n");
+        const auto op = scan.get_operation(OperationType::BED_MESH);
+        REQUIRE(op.has_value());
+        REQUIRE(op->embedding == OperationEmbedding::MACRO_PARAMETER);
+        REQUIRE(op->line_number == 2);
+        GCodeFileModifier modifier;
+        REQUIRE(modifier.disable_operation(*op));
+        REQUIRE_FALSE(modifier.apply(path).success);
+    }
+
+    SECTION("the START_PRINT rewrite checks the scanned call") {
+        // A scan of other G-code whose START_PRINT sits on this file's line 2.
+        const auto scan = GCodeOpsDetector{}.scan_content("G28\nPRINT_START BED=110\nG1 X0 Y0\n");
+        REQUIRE(scan.print_start.line_number == 2);
+        GCodeFileModifier modifier;
+        REQUIRE(modifier.add_print_start_skip_params(scan, {{"SKIP_BED_MESH", "1"}}));
+        REQUIRE_FALSE(modifier.apply(path).success);
+    }
+
+    std::filesystem::remove(path);
 }

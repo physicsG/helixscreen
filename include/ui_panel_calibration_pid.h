@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "ui_head_picker.h"
 #include "ui_observer_guard.h"
 #include "ui_temp_graph.h"
 
@@ -18,7 +19,9 @@
 #include <string>
 #include <vector>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 class MoonrakerAdvancedAPI;
 class TemperatureService;
 
@@ -79,7 +82,7 @@ class PIDCalibrationPanel : public OverlayBase {
      *        the user has selected
      *
      * UNKNOWN until the firmware answers a control-type query. Firmware without
-     * MPC support never answers, so UNKNOWN also means "not Kalico".
+     * MPC support never answers, so UNKNOWN also means "no MPC".
      */
     enum class ControlType { UNKNOWN, PID, MPC };
 
@@ -180,7 +183,7 @@ class PIDCalibrationPanel : public OverlayBase {
      *
      * @param api IMoonrakerAPI for PID calibrate and save_config
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -240,7 +243,7 @@ class PIDCalibrationPanel : public OverlayBase {
   private:
     // Client/API references
     // Note: overlay_root_ inherited from OverlayBase
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     /// Owns the SAVE_CONFIG contract: absorbs the rpc the restart drops
     /// and reports success only once Klipper is back.
@@ -249,29 +252,39 @@ class PIDCalibrationPanel : public OverlayBase {
     // State
     State state_ = State::IDLE;
     Heater selected_heater_ = Heater::EXTRUDER;
+    /// Which extruder an EXTRUDER calibration heats, on a printer with several
+    helix::ui::HeadPicker heads_;
+    ObserverGuard active_tool_observer_;
+    /// The heater and extruder a run calibrates, fixed when it begins: the tool
+    /// list can rebuild mid-run, and its results must land under the heater
+    /// that was heated.
+    std::string run_heater_;
+    std::string run_extruder_;
+    /// M106 went out for this run, so it is owed an M107.
+    bool fan_sent_ = false;
     int target_temp_ = 200;         // Default for extruder
     int fan_speed_ = 0;             // Part cooling fan speed for extruder PID
     std::string selected_material_; // Active material preset name
 
     // Temperature limits
-    static constexpr int EXTRUDER_MIN_TEMP = 150;
-    static constexpr int EXTRUDER_MAX_TEMP = 280;
-    static constexpr int EXTRUDER_DEFAULT_TEMP = 200;
-    static constexpr int BED_MIN_TEMP = 40;
-    static constexpr int BED_MAX_TEMP = 110;
-    static constexpr int BED_DEFAULT_TEMP = 60;
+    static constexpr int kExtruderMinTemp = 150;
+    static constexpr int kExtruderMaxTemp = 280;
+    static constexpr int kExtruderDefaultTemp = 200;
+    static constexpr int kBedMinTemp = 40;
+    static constexpr int kBedMaxTemp = 110;
+    static constexpr int kBedDefaultTemp = 60;
 
     // Wattage limits
-    static constexpr int WATTAGE_MIN = 20;
-    static constexpr int WATTAGE_MAX = 1000;
-    static constexpr int WATTAGE_STEP = 5;
-    static constexpr int WATTAGE_DEFAULT_EXTRUDER = 50;
-    static constexpr int WATTAGE_DEFAULT_BED = 400;
+    static constexpr int kWattageMin = 20;
+    static constexpr int kWattageMax = 1000;
+    static constexpr int kWattageStep = 5;
+    static constexpr int kWattageDefaultExtruder = 50;
+    static constexpr int kWattageDefaultBed = 400;
 
     // Fan breakpoint presets
-    static constexpr int FAN_BP_QUICK = 3;
-    static constexpr int FAN_BP_DETAILED = 5;
-    static constexpr int FAN_BP_THOROUGH = 7;
+    static constexpr int kFanBpQuick = 3;
+    static constexpr int kFanBpDetailed = 5;
+    static constexpr int kFanBpThorough = 7;
 
     // Demo mode: inject results after on_activate() resets state
     bool demo_inject_pending_ = false;
@@ -287,12 +300,12 @@ class PIDCalibrationPanel : public OverlayBase {
     float old_kd_ = 0;
     bool has_old_values_ = false;
 
-    // MPC/Kalico state
+    // MPC state
     CalibMethod selected_method_ = CalibMethod::PID;
-    int heater_wattage_ = WATTAGE_DEFAULT_EXTRUDER;
-    int fan_breakpoints_ = FAN_BP_QUICK;
+    int heater_wattage_ = kWattageDefaultExtruder;
+    int fan_breakpoints_ = kFanBpQuick;
     bool needs_migration_ = false;
-    bool is_kalico_ = false;
+    bool supports_mpc_ = false;
     ControlType current_control_ = ControlType::UNKNOWN;
 
     // MPC results
@@ -354,7 +367,7 @@ class PIDCalibrationPanel : public OverlayBase {
     char buf_wattage_display_[16];
 
     // MPC-related int subjects
-    lv_subject_t subj_is_kalico_{};       // int 0/1
+    lv_subject_t subj_supports_mpc_{};    // int 0/1
     lv_subject_t subj_method_is_mpc_{};   // int 0/1
     lv_subject_t subj_show_wattage_{};    // int 0/1
     lv_subject_t subj_needs_migration_{}; // int 0/1
@@ -374,7 +387,7 @@ class PIDCalibrationPanel : public OverlayBase {
     lv_subject_t subj_pid_eta_{};
     char buf_pid_eta_[32];
     int pid_estimated_total_ = 3;      // Dynamic estimate, starts at 3
-    bool has_kalico_progress_ = false; // True once first sample callback arrives
+    bool has_sample_progress_ = false; // True once first sample callback arrives
 
     // Tick (lv_tick_get) when the current CALIBRATING run began; 0 when not calibrating.
     // Drives the "taking longer than expected" backstop (#988): once a run exceeds a
@@ -468,9 +481,20 @@ class PIDCalibrationPanel : public OverlayBase {
     // Fan section visibility — single source of truth for both subjects
     void update_fan_section_visibility();
 
+    /// The Klipper heater the selected heater calibrates: the picked head's
+    /// heater, or "heater_bed".
+    std::string heater_name() const;
+    /// The extruder object of the picked head, which keys its temperature.
+    std::string extruder_name() const;
+    /// Part-fan gcode (M106/M107) drives the active tool's fan, so it only
+    /// cools the heater being tuned when that heater is the active tool's.
+    bool part_fan_reaches_heater() const;
+
     // Event handlers
     void handle_heater_extruder_clicked();
     void handle_heater_bed_clicked();
+    void handle_head_clicked(int head);
+    void on_active_tool_changed();
     void handle_temp_up();
     void handle_temp_down();
     void handle_start_clicked();

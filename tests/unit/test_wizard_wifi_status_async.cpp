@@ -6,6 +6,7 @@
 // control-socket round trip that can wait 10s, so no path may make one on the
 // UI thread.
 
+#include "ui_update_queue.h"
 #include "ui_wizard_wifi.h"
 
 #include "../lvgl_ui_test_fixture.h"
@@ -184,4 +185,16 @@ TEST_CASE_METHOD(WizardWifiStatusFixture,
     wifi->release_held_status();
     await_earlier_answers();
     CHECK(Access::status(step()) == connecting);
+}
+
+TEST_CASE_METHOD(WizardWifiStatusFixture,
+                 "wizard wifi: clearing the network list runs no queued callback",
+                 "[wizard_wifi][drain_reentrancy]") {
+    REQUIRE(Access::network_list(step()) != nullptr);
+    bool ran = false;
+    helix::ui::UpdateQueue::instance().queue("test::drain_canary", [&ran]() { ran = true; });
+    Access::clear_list(step());
+    CHECK_FALSE(ran);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(ran);
 }

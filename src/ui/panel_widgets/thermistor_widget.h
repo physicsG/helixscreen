@@ -7,6 +7,7 @@
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
+#include "helix/xml/indexed_subject_pool.h"
 #include "src/ui/panel_widgets/tiled_panel_widget.h"
 #include "subject_managed_panel.h"
 
@@ -54,6 +55,10 @@ class ThermistorWidget : public TiledPanelWidget {
 
     // Static event callbacks (XML-registered)
     static void thermistor_clicked_cb(lv_event_t* e);
+    /// A tap on a picker row; the row index is the event's user_data.
+    static void picker_row_cb(lv_event_t* e);
+    /// A tap on a carousel page.
+    static void carousel_page_cb(lv_event_t* e);
 
   private:
     /// Keypad confirm: sends the value to the heater the keypad was opened for.
@@ -82,14 +87,15 @@ class ThermistorWidget : public TiledPanelWidget {
         }
         void on_created(lv_obj_t* backdrop) override;
 
+      public:
+        /// Publish the rows' subjects. Runs before the card is built, so the XML
+        /// <repeat> expands with its rows in place.
+        void fill_rows();
+        /// Choose row @p row: close the card and bind the widget to its sensor.
+        void row_tapped(size_t row);
+
       private:
-        /// What a row needs to act on a tap: which sensor it names, and the picker
-        /// that owns it. Heap-allocated per row, hung off the row's user_data and
-        /// freed by that row's own LV_EVENT_DELETE handler.
-        struct RowPayload {
-            SensorPicker* picker;
-            std::string klipper_name;
-        };
+        std::vector<std::string> row_sensors_; ///< klipper_name per row
 
         ThermistorWidget& owner_;
     };
@@ -122,15 +128,17 @@ class ThermistorWidget : public TiledPanelWidget {
         /// path.
         void on_backdrop_clicked() override;
 
-      private:
-        /// Which sensor a row names, so the commit sweep can read it back off the
-        /// row. Heap-allocated per row and freed by that row's LV_EVENT_DELETE.
-        struct RowPayload {
-            ConfigurePicker* picker;
-            std::string klipper_name;
-        };
+      public:
+        /// Publish the rows' subjects. Runs before the card is built, so the XML
+        /// <repeat> expands with its rows in place.
+        void fill_rows();
+        /// Flip row @p row's checkbox.
+        void row_tapped(size_t row);
 
-        /// Read the checkbox states back into the widget's sensor list, then close.
+      private:
+        std::vector<std::string> row_sensors_; ///< klipper_name per row
+
+        /// Read the checked rows into the widget's sensor list, then close.
         void commit();
 
         ThermistorWidget& owner_;
@@ -170,13 +178,14 @@ class ThermistorWidget : public TiledPanelWidget {
     std::vector<std::string> attr_storage_;
     std::vector<const char*> attrs_;
 
-    // Carousel mode
-    struct CarouselPage {
-        lv_obj_t* temp_label = nullptr;
-        lv_obj_t* name_label = nullptr;
-        char temp_buffer[16] = {};
-    };
-    std::vector<CarouselPage> carousel_pages_;
+    // Carousel mode: each page binds the reading and name subjects of its slot
+    // in these pools (thermistor_carousel_page). Declared before the observers
+    // that write them, so those are torn down first.
+    /// Outlives page_temp_ and page_name_, which keep a pointer to it as their name prefix.
+    std::string page_prefix_;
+    std::unique_ptr<helix::xml::IndexedSubjectPool> page_temp_;
+    std::unique_ptr<helix::xml::IndexedSubjectPool> page_name_;
+    size_t carousel_page_count_ = 0;
     std::vector<ObserverGuard> carousel_observers_;
     std::vector<SubjectLifetime> carousel_lifetimes_;
     ObserverGuard version_observer_;
@@ -191,6 +200,10 @@ class ThermistorWidget : public TiledPanelWidget {
     helix::AsyncLifetimeGuard lifetime_;
 
     bool binding_in_progress_ = false; // reentrancy guard for bind_carousel_sensors
+    /// The count observer's first notification repeats the bind attach just
+    /// ran; every later one is a change in the sensor set and rebinds, even at
+    /// an unchanged count.
+    bool sensor_count_seen_ = false;
 
     // The two context menus this widget raises
     SensorPicker sensor_picker_{*this};
@@ -200,6 +213,8 @@ class ThermistorWidget : public TiledPanelWidget {
     void attach_single();
     void attach_carousel();
     void bind_carousel_sensors();
+    /// Show @p decidegrees on carousel page @p page.
+    void show_page_temp(size_t page, int decidegrees);
 
     /// Null every cached widget pointer (single-mode labels, carousel page
     /// labels, tile root) without touching observers or the widget tree.

@@ -10,20 +10,22 @@
  * callers can arrive before, during and after a transfer.
  */
 
+#include "ui_filename_utils.h"
 #include "ui_update_queue.h"
 
 #include "../helix_test_fixture.h"
+#include "../test_helpers/planted_gcode.h"
 #include "../test_helpers/print_status_preview_fixture.h"
 #include "../test_helpers/update_queue_test_access.h"
+#include "config.h"
 #include "gcode_preview_fetcher.h"
+#include "gcode_preview_gate.h"
 
 #include <fstream>
 #include <string>
 #include <vector>
 
 using helix::ui::GcodePreviewFetcher;
-using print_status_preview_test::HeldFileTransfers;
-using print_status_preview_test::HeldTransfersAPIMock;
 
 namespace {
 
@@ -63,11 +65,11 @@ class HeldFileListing : public MoonrakerFileAPIMock {
     ErrorCallback pending_error_;
 };
 
-class HeldListingAPIMock : public HeldTransfersAPIMock {
+class HeldListingAPIMock : public DelayedMoonrakerAPIMock {
   public:
     HeldListingAPIMock(helix::MoonrakerClient& client, helix::PrinterState& state,
-                       HeldFileTransfers& transfers, HeldFileListing& listing)
-        : HeldTransfersAPIMock(client, state, transfers), listing_(listing) {}
+                       DelayedFileTransfers& transfers, HeldFileListing& listing)
+        : DelayedMoonrakerAPIMock(client, state, transfers), listing_(listing) {}
 
     MoonrakerFileAPI& files() override {
         return listing_;
@@ -81,7 +83,8 @@ class FetcherFixture : public HelixTestFixture {
   public:
     FetcherFixture() : client_(MoonrakerClientMock::PrinterType::VORON_24) {
         state_.init_subjects(false);
-        api_ = std::make_unique<HeldTransfersAPIMock>(client_, state_, transfers_);
+        transfers_.hold_transfers = true;
+        api_ = std::make_unique<DelayedMoonrakerAPIMock>(client_, state_, transfers_);
         fetcher_.set_api(api_.get());
         local_ = (cache_.dir / "copy.gcode").string();
     }
@@ -106,10 +109,10 @@ class FetcherFixture : public HelixTestFixture {
             [&](GcodePreviewFetcher::Unavailable) { ++failed; });
     }
 
-    print_status_preview_test::FreshCacheDir cache_;
+    helix::test::ScopedCacheDir cache_;
     MoonrakerClientMock client_;
     helix::PrinterState state_;
-    HeldFileTransfers transfers_{client_, ""};
+    DelayedFileTransfers transfers_{client_, ""};
     std::unique_ptr<MoonrakerAPIMock> api_;
     GcodePreviewFetcher fetcher_{"FetcherTest"};
     std::string local_;
@@ -251,6 +254,37 @@ TEST_CASE_METHOD(FetcherFixture,
     CHECK(second_ready.size() == 1);
 }
 
+TEST_CASE_METHOD(FetcherFixture,
+                 "Fetcher: a cached copy too costly to preview now is kept, not handed over",
+                 "[gcode_preview_fetcher][preview_gate]") {
+    const auto cached =
+        cache_.dir / "gcode_temp" / GcodePreviewFetcher::cache_file_name("print_view_", REMOTE);
+    std::filesystem::create_directories(cached.parent_path());
+    {
+        std::ofstream copy(cached, std::ios::binary);
+        copy << "G1 X10 Y10 E1\n";
+    }
+    // A rate this low projects any file far over budget on this board.
+    helix::Config* config = helix::Config::get_instance();
+    helix::ui::save_preview_rate(
+        *config, {1e-6, helix::ui::preview_rate_board(), helix::ui::preview_rate_version()});
+
+    std::vector<std::string> ready;
+    std::vector<GcodePreviewFetcher::Unavailable> why;
+    helix::ScopedEnv metadata_fails("HELIX_MOCK_METADATA_404", "1");
+    fetcher_.fetch(
+        REMOTE, [&](const std::string& path) { ready.push_back(path); },
+        [&](GcodePreviewFetcher::Unavailable reason) { why.push_back(reason); });
+    drain();
+    config->get_json("/display").erase("gcode_preview_rate");
+
+    CHECK(ready.empty());
+    CHECK(why == std::vector<GcodePreviewFetcher::Unavailable>{
+                     GcodePreviewFetcher::Unavailable::TooExpensive});
+    // Affordable again once the print ends, so the copy stays on disk.
+    CHECK(std::filesystem::exists(cached));
+}
+
 TEST_CASE_METHOD(FetcherFixture, "Fetcher: a .temp listing landing after cancel starts nothing",
                  "[gcode_preview_fetcher]") {
     HeldFileListing listing{client_};
@@ -390,4 +424,41 @@ TEST_CASE_METHOD(FetcherFixture,
     CHECK_FALSE(fetcher_.is_downloading(local_));
     CHECK(reasons == std::vector<GcodePreviewFetcher::Unavailable>(
                          2, GcodePreviewFetcher::Unavailable::NoLocalCopies));
+}
+
+TEST_CASE_METHOD(FetcherFixture, "Fetcher: a staged .3mf plate is sized by its own metadata",
+                 "[gcode_preview_fetcher][three_mf]") {
+    // The archive it maps back to has no G-code metadata on a printer that
+    // cannot read it; the staged plate does.
+    const std::string staged = helix::gcode::make_extracted_plate_path("Door.gcode.3mf", 9);
+    const std::string dir = helix::gcode_dir_of(staged);
+    helix::PlantedGcode plate(helix::gcode::get_filename_basename(staged), dir,
+                              "; plate 9\nG28\nG1 X10\n");
+    // The mock's transfers find a file by its basename at the root.
+    helix::PlantedGcode plate_for_download(helix::gcode::get_filename_basename(staged), "",
+                                           "; plate 9\nG28\nG1 X10\n");
+    std::vector<std::string> ready;
+    int failed = 0;
+    fetcher_.fetch(
+        staged, [&ready](const std::string& path) { ready.push_back(path); },
+        [&failed](GcodePreviewFetcher::Unavailable) { ++failed; });
+    drain();
+    REQUIRE(transfers_.held_count() == 1);
+    REQUIRE(transfers_.release(staged));
+    drain();
+    CHECK(failed == 0);
+    CHECK(ready.size() == 1);
+}
+
+TEST_CASE("preview_gcode_for shows the G-code a .3mf print runs as", "[filename_utils][three_mf]") {
+    using helix::gcode::preview_gcode_for;
+    const std::string staged = helix::gcode::make_extracted_plate_path("Door.gcode.3mf", 9);
+    CHECK(preview_gcode_for("Door.gcode.3mf", staged) == staged);
+    CHECK(preview_gcode_for("Door.gcode.3mf", "Door_plate9.gcode") == "Door_plate9.gcode");
+    // A .3mf the printer runs itself, and every ordinary print, keep their name.
+    CHECK(preview_gcode_for("Door.gcode.3mf", "Door.gcode.3mf") == "Door.gcode.3mf");
+    CHECK(preview_gcode_for("Door.gcode.3mf", "usb/Door.gcode.3mf") == "Door.gcode.3mf");
+    CHECK(preview_gcode_for("Door.gcode.3mf", "Door.txt") == "Door.gcode.3mf");
+    CHECK(preview_gcode_for("Door.gcode.3mf", "") == "Door.gcode.3mf");
+    CHECK(preview_gcode_for("benchy.gcode", "other.gcode") == "benchy.gcode");
 }

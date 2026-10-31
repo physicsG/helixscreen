@@ -1,0 +1,337 @@
+{
+  "buckets": {
+    "fans": [
+      "fan",
+      "heater_fan chamber_fan",
+      "temperature_fan chamber_fan",
+      "output_pin fan0",
+      "output_pin fan1",
+      "output_pin fan2",
+      "temperature_fan chamber_fan",
+      "output_pin extruder_fan",
+      "heater_fan chamber_heater_fan"
+    ],
+    "filament_sensor_names": [
+      "filament_switch_sensor filament_sensor"
+    ],
+    "has_accelerometer": true,
+    "has_fan_feedback": true,
+    "has_filament_sensors": true,
+    "has_led": true,
+    "has_led_effects": false,
+    "has_probe": false,
+    "has_speaker": true,
+    "has_width_sensors": false,
+    "heaters": [
+      "heater_bed",
+      "extruder",
+      "heater_generic chamber_heater"
+    ],
+    "leds": [
+      "output_pin LED"
+    ],
+    "load_cells": [],
+    "printer_objects": [
+      "heater_bed",
+      "extruder",
+      "bed_mesh",
+      "output_pin beeper",
+      "firmware_retraction",
+      "heater_generic chamber_heater",
+      "fan",
+      "heater_fan chamber_fan",
+      "temperature_fan chamber_fan",
+      "output_pin fan0",
+      "output_pin fan1",
+      "output_pin fan2",
+      "temperature_sensor chamber_temp",
+      "output_pin LED",
+      "motor_control",
+      "fan_feedback",
+      "load_ai",
+      "filament_rack",
+      "output_pin extruder_fan",
+      "output_pin power",
+      "output_pin ptc_power",
+      "temperature_sensor mcu_temp",
+      "heater_fan chamber_heater_fan",
+      "exclude_object",
+      "gcode_macro START_PRINT",
+      "gcode_macro END_PRINT",
+      "gcode_macro PAUSE",
+      "gcode_macro RESUME",
+      "gcode_macro CANCEL_PRINT",
+      "gcode_macro LOAD_FILAMENT",
+      "gcode_macro UNLOAD_FILAMENT",
+      "gcode_macro BED_MESH_CALIBRATE",
+      "gcode_macro G28",
+      "gcode_macro M600",
+      "gcode_macro _SYSTEM_MACRO",
+      "gcode_macro SET_PAUSE_NEXT_LAYER",
+      "gcode_macro SET_PAUSE_AT_LAYER",
+      "gcode_macro SET_PRINT_STATS_INFO",
+      "mcu",
+      "timelapse",
+      "filament_switch_sensor filament_sensor",
+      "box"
+    ],
+    "sensors": [
+      "temperature_fan chamber_fan",
+      "temperature_sensor chamber_temp",
+      "temperature_fan chamber_fan",
+      "temperature_sensor mcu_temp"
+    ],
+    "width_sensor_objects": []
+  },
+  "managers": {
+    "accel": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "adxl345",
+          "role": "none",
+          "sensor_name": "adxl345",
+          "type": "adxl345"
+        }
+      ]
+    },
+    "filament": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "filament_switch_sensor filament_sensor",
+          "role": "none",
+          "sensor_name": "filament_sensor",
+          "type": "switch"
+        }
+      ]
+    },
+    "humidity": {
+      "count": 0,
+      "entries": []
+    },
+    "input": {
+      "count": 0,
+      "entries": []
+    },
+    "load_cell": {
+      "count": 0,
+      "entries": []
+    },
+    "probe": {
+      "count": 0,
+      "entries": []
+    },
+    "temperature": {
+      "count": 4,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "heater_generic chamber_heater",
+          "role": "chamber",
+          "sensor_name": "chamber_heater",
+          "type": "heater_generic"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "temperature_fan chamber_fan",
+          "role": "chamber",
+          "sensor_name": "chamber_fan",
+          "type": "temperature_fan"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "temperature_sensor chamber_temp",
+          "role": "chamber",
+          "sensor_name": "chamber_temp",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "temperature_sensor mcu_temp",
+          "role": "mcu",
+          "sensor_name": "mcu_temp",
+          "type": "temperature_sensor"
+        }
+      ]
+    },
+    "width": {
+      "count": 0,
+      "entries": []
+    }
+  },
+  "subscriptions": {
+    "bed_mesh": [
+      "profile_name",
+      "probed_matrix",
+      "mesh_min",
+      "mesh_max",
+      "mesh_params",
+      "profiles"
+    ],
+    "box": null,
+    "display_status": [
+      "message",
+      "progress"
+    ],
+    "exclude_object": [
+      "objects",
+      "excluded_objects",
+      "current_object"
+    ],
+    "extruder": [
+      "temperature",
+      "target",
+      "power",
+      "pressure_advance",
+      "nozzle_diameter",
+      "nozzle_volume_type"
+    ],
+    "fan": [
+      "speed"
+    ],
+    "fan_feedback": [
+      "fan0_speed",
+      "fan1_speed",
+      "fan2_speed",
+      "fan3_speed",
+      "fan4_speed",
+      "fan5_speed",
+      "fan6_speed",
+      "fan7_speed",
+      "fan8_speed",
+      "fan9_speed"
+    ],
+    "filament_switch_sensor filament_sensor": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "firmware_retraction": [
+      "retract_length",
+      "retract_speed",
+      "unretract_extra_length",
+      "unretract_speed"
+    ],
+    "gcode_macro SET_PRINT_STATS_INFO": [
+      "pause_next_layer",
+      "pause_at_layer"
+    ],
+    "gcode_macro START_PRINT": [
+      "preparation_done"
+    ],
+    "gcode_macro _HELIX_STATE": [
+      "print_started"
+    ],
+    "gcode_macro _START_PRINT": [
+      "print_started"
+    ],
+    "gcode_move": [
+      "gcode_position",
+      "speed",
+      "speed_factor",
+      "extrude_factor",
+      "homing_origin"
+    ],
+    "heater_bed": [
+      "temperature",
+      "target",
+      "power"
+    ],
+    "heater_fan chamber_fan": [
+      "speed"
+    ],
+    "heater_fan chamber_heater_fan": [
+      "speed"
+    ],
+    "heater_generic chamber_heater": [
+      "temperature",
+      "target",
+      "power"
+    ],
+    "idle_timeout": [
+      "state"
+    ],
+    "manual_probe": [
+      "is_active",
+      "z_position"
+    ],
+    "mcu": [
+      "last_stats"
+    ],
+    "motion_report": [
+      "live_position",
+      "live_velocity",
+      "live_extruder_velocity"
+    ],
+    "motor_control": null,
+    "output_pin LED": [
+      "value"
+    ],
+    "output_pin extruder_fan": [
+      "value"
+    ],
+    "output_pin fan0": [
+      "value"
+    ],
+    "output_pin fan1": [
+      "value"
+    ],
+    "output_pin fan2": [
+      "value"
+    ],
+    "pause_resume": [
+      "is_paused"
+    ],
+    "print_stats": [
+      "state",
+      "filename",
+      "filament_used",
+      "print_duration",
+      "total_duration",
+      "estimated_time",
+      "info",
+      "message",
+      "power_loss"
+    ],
+    "stepper_enable": [
+      "steppers"
+    ],
+    "temperature_fan chamber_fan": [
+      "temperature",
+      "target",
+      "speed"
+    ],
+    "temperature_sensor chamber_temp": [
+      "temperature",
+      "humidity"
+    ],
+    "temperature_sensor mcu_temp": [
+      "temperature",
+      "humidity"
+    ],
+    "toolhead": [
+      "position",
+      "homed_axes",
+      "kinematics",
+      "extruder",
+      "max_velocity",
+      "axis_minimum",
+      "axis_maximum"
+    ],
+    "virtual_sdcard": [
+      "progress",
+      "layer",
+      "layer_count",
+      "is_active",
+      "file_position",
+      "file_path"
+    ],
+    "webhooks": [
+      "state",
+      "state_message"
+    ]
+  }
+}

@@ -12,36 +12,36 @@ namespace {
 /// Evidence older than this stops counting. Long enough to span a K1-class
 /// corner validation (4 corners at ~7.5 s apart, measured on hardware);
 /// short enough that one activity's evidence retires once the chain moves on.
-constexpr uint64_t EVIDENCE_WINDOW_MS = 45'000;
+constexpr uint64_t kEvidenceWindowMs = 45'000;
 
 /// A wipe verdict requires every sample this recent to sit in the wipe zone.
-constexpr uint64_t WIPE_RECENCY_MS = 8'000;
+constexpr uint64_t kWipeRecencyMs = 8'000;
 
 /// Zone sizes as fractions of the mesh extent.
-constexpr float CENTER_ZONE_FRACTION = 0.12f;
-constexpr float CORNER_ZONE_FRACTION = 0.10f;
+constexpr float kCenterZoneFraction = 0.12f;
+constexpr float kCornerZoneFraction = 0.10f;
 
 /// Minimum X spacing between consecutive raster-march samples (mm). Mesh
 /// rows step tens of mm; corner-to-corner jumps break the row tolerance and
 /// wipe oscillation reverses direction long before a run of three forms.
-constexpr float RASTER_MIN_STEP_MM = 8.0f;
+constexpr float kRasterMinStepMm = 8.0f;
 
 /// Y tolerance for "same row" while marching (mm).
-constexpr float RASTER_ROW_TOLERANCE_MM = 5.0f;
+constexpr float kRasterRowToleranceMm = 5.0f;
 
 /// How far past mesh_max the toolhead must sit before it reads as the wipe
 /// strip (mm) — skips travel noise right at the mesh edge.
-constexpr float WIPE_MARGIN_MM = 2.0f;
+constexpr float kWipeMarginMm = 2.0f;
 
 /// Distinct-corner count that says "validation tour", not "sweep row ends"
 /// (a sweep row brushes at most two corners).
-constexpr int CORNER_DISTINCT_MIN = 3;
+constexpr int kCornerDistinctMin = 3;
 
 /// Minimum centre-zone samples before CENTER_PROBE is declared, and the Z
 /// descent (mm) those samples must show somewhere — a parked toolhead at the
 /// centre is not probing.
-constexpr int CENTER_SAMPLE_MIN = 3;
-constexpr float CENTER_DESCENT_Z_MM = 4.0f;
+constexpr int kCenterSampleMin = 3;
+constexpr float kCenterDescentZMm = 4.0f;
 
 int corner_index(float x, float y, float x_min, float x_max, float y_min, float y_max) {
     const float w_x = x_max - x_min;
@@ -49,10 +49,10 @@ int corner_index(float x, float y, float x_min, float x_max, float y_min, float 
     if (w_x <= 0.0f || w_y <= 0.0f) {
         return -1;
     }
-    const bool near_x_min = (x - x_min) <= w_x * CORNER_ZONE_FRACTION;
-    const bool near_x_max = (x_max - x) <= w_x * CORNER_ZONE_FRACTION;
-    const bool near_y_min = (y - y_min) <= w_y * CORNER_ZONE_FRACTION;
-    const bool near_y_max = (y_max - y) <= w_y * CORNER_ZONE_FRACTION;
+    const bool near_x_min = (x - x_min) <= w_x * kCornerZoneFraction;
+    const bool near_x_max = (x_max - x) <= w_x * kCornerZoneFraction;
+    const bool near_y_min = (y - y_min) <= w_y * kCornerZoneFraction;
+    const bool near_y_max = (y_max - y) <= w_y * kCornerZoneFraction;
     if (near_x_min && near_y_min)
         return 0;
     if (near_x_min && near_y_max)
@@ -94,7 +94,7 @@ void PrintStartPositionClassifier::note_position(float x_mm, float y_mm, float z
         }
     }
     samples_.push_back({x_mm, y_mm, z_mm, now_ms});
-    while (!samples_.empty() && now_ms - samples_.front().t > EVIDENCE_WINDOW_MS) {
+    while (!samples_.empty() && now_ms - samples_.front().t > kEvidenceWindowMs) {
         samples_.pop_front();
     }
     reclassify();
@@ -114,19 +114,19 @@ void PrintStartPositionClassifier::reclassify() {
         const Sample& a = samples_[i];
         const Sample& b = samples_[i + 1];
         const Sample& c = samples_[i + 2];
-        if (now - a.t > EVIDENCE_WINDOW_MS) {
+        if (now - a.t > kEvidenceWindowMs) {
             continue;
         }
         if (a.y < y_min_ || a.y > y_max_) {
             continue;
         }
-        if (std::fabs(a.y - b.y) > RASTER_ROW_TOLERANCE_MM ||
-            std::fabs(b.y - c.y) > RASTER_ROW_TOLERANCE_MM) {
+        if (std::fabs(a.y - b.y) > kRasterRowToleranceMm ||
+            std::fabs(b.y - c.y) > kRasterRowToleranceMm) {
             continue;
         }
         const float dx1 = b.x - a.x;
         const float dx2 = c.x - b.x;
-        if (std::fabs(dx1) < RASTER_MIN_STEP_MM || std::fabs(dx2) < RASTER_MIN_STEP_MM) {
+        if (std::fabs(dx1) < kRasterMinStepMm || std::fabs(dx2) < kRasterMinStepMm) {
             continue;
         }
         if ((dx1 > 0.0f) != (dx2 > 0.0f)) {
@@ -141,10 +141,10 @@ void PrintStartPositionClassifier::reclassify() {
     // evidence from earlier activities, so this is checked before corner and
     // centre.
     {
-        const float wipe_y = y_max_ + WIPE_MARGIN_MM;
+        const float wipe_y = y_max_ + kWipeMarginMm;
         size_t recent = 0;
         bool all_wipe = true;
-        for (auto it = samples_.rbegin(); it != samples_.rend() && now - it->t <= WIPE_RECENCY_MS;
+        for (auto it = samples_.rbegin(); it != samples_.rend() && now - it->t <= kWipeRecencyMs;
              ++it) {
             ++recent;
             if (it->y <= wipe_y) {
@@ -170,7 +170,7 @@ void PrintStartPositionClassifier::reclassify() {
                 ++distinct;
             }
         }
-        if (distinct >= CORNER_DISTINCT_MIN) {
+        if (distinct >= kCornerDistinctMin) {
             activity_ = PositionActivity::CORNER_PROBE;
             return;
         }
@@ -181,8 +181,8 @@ void PrintStartPositionClassifier::reclassify() {
     {
         const float cx = (x_min_ + x_max_) / 2.0f;
         const float cy = (y_min_ + y_max_) / 2.0f;
-        const float tol_x = (x_max_ - x_min_) * CENTER_ZONE_FRACTION;
-        const float tol_y = (y_max_ - y_min_) * CENTER_ZONE_FRACTION;
+        const float tol_x = (x_max_ - x_min_) * kCenterZoneFraction;
+        const float tol_y = (y_max_ - y_min_) * kCenterZoneFraction;
         int count = 0;
         float min_z = 1e9f;
         for (const auto& s : samples_) {
@@ -191,7 +191,7 @@ void PrintStartPositionClassifier::reclassify() {
                 min_z = std::fmin(min_z, s.z);
             }
         }
-        if (count >= CENTER_SAMPLE_MIN && min_z <= CENTER_DESCENT_Z_MM) {
+        if (count >= kCenterSampleMin && min_z <= kCenterDescentZMm) {
             activity_ = PositionActivity::CENTER_PROBE;
             return;
         }

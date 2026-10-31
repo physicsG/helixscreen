@@ -120,8 +120,9 @@ class AddQueueFixture : private helix::PrintSelectGlobalStateReset,
     void refuse_post_job() {
         helix::MoonrakerClientMockTestAccess::set_method_handler(
             mock_client_, "server.job_queue.post_job",
-            [](MoonrakerClientMock*, const json&, std::function<void(const json&)> /*success_cb*/,
-               std::function<void(const MoonrakerError&)> error_cb) -> bool {
+            [](MoonrakerClientMock*, const json&,
+               helix::SharedCallback<void(const json&)> /*success_cb*/,
+               helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
                 if (error_cb) {
                     error_cb(MoonrakerError::unknown("refused", "server.job_queue.post_job"));
                 }
@@ -132,13 +133,14 @@ class AddQueueFixture : private helix::PrintSelectGlobalStateReset,
     /// Makes the mock hold every add_job answer until the test releases it,
     /// keeping the flight open across drains the way a real wire does.
     struct HeldPostJob {
-        std::function<void(const json&)> success_cb;
+        helix::SharedCallback<void(const json&)> success_cb;
     };
     void hold_post_job(HeldPostJob& held) {
         helix::MoonrakerClientMockTestAccess::set_method_handler(
             mock_client_, "server.job_queue.post_job",
-            [&held](MoonrakerClientMock*, const json&, std::function<void(const json&)> success_cb,
-                    std::function<void(const MoonrakerError&)>) -> bool {
+            [&held](MoonrakerClientMock*, const json&,
+                    helix::SharedCallback<void(const json&)> success_cb,
+                    helix::SharedCallback<void(const MoonrakerError&)>) -> bool {
                 held.success_cb = std::move(success_cb);
                 return true;
             });

@@ -149,8 +149,8 @@ TEST_CASE("output_rgb: W adds to every channel, scaled to full", "[led][page]") 
 }
 
 namespace {
-const std::vector<uint32_t> PRESETS(std::begin(helix::led::DEFAULT_COLOR_PRESETS),
-                                    std::end(helix::led::DEFAULT_COLOR_PRESETS));
+const std::vector<uint32_t> PRESETS(std::begin(helix::led::kDefaultColorPresets),
+                                    std::end(helix::led::kDefaultColorPresets));
 }
 
 TEST_CASE("ring_for_look: every preset rings itself, whatever its brightest channel",

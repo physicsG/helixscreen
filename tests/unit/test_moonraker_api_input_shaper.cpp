@@ -18,17 +18,17 @@
 #include "../../include/moonraker_api.h"
 #include "../../include/moonraker_client_mock.h"
 #include "../../include/printer_state.h"
+#include "../../include/resonance_console.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/log_capture.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <memory>
 #include <regex>
-#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -36,27 +36,6 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-// ============================================================================
-// Global LVGL Initialization (called once)
-// ============================================================================
-
-namespace {
-struct LVGLInitializerInputShaper {
-    LVGLInitializerInputShaper() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerInputShaper lvgl_init;
-
-} // namespace
 
 // ============================================================================
 // Test Fixture
@@ -65,7 +44,7 @@ static LVGLInitializerInputShaper lvgl_init;
 /**
  * @brief Test fixture for input shaper API testing with mock client
  */
-class InputShaperTestFixture {
+class InputShaperTestFixture : public LVGLTestFixture {
   public:
     InputShaperTestFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
         state_.init_subjects(false); // Don't register XML bindings in tests
@@ -129,18 +108,17 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test accepts X axis",
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {}, // progress callback
+        'X', [](int, ShaperCalibrationPhase, float) {}, // progress callback
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
         },
         [&](const MoonrakerError&) { FAIL("Error callback should not be called"); });
 
-    // Wait for async callback (mock dispatches synchronously)
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -156,18 +134,17 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test accepts Y axis",
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'Y', [](int, ShaperCalibrationPhase) {}, // progress callback
+        'Y', [](int, ShaperCalibrationPhase, float) {}, // progress callback
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
         },
         [&](const MoonrakerError&) { FAIL("Error callback should not be called"); });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -180,7 +157,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test sends correct G-c
     std::atomic<bool> complete_called{false};
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {},
+        'X', [](int, ShaperCalibrationPhase, float) {},
         [&](const InputShaperResult& result) {
             complete_called = true;
             // Verify parsed values from mock response
@@ -189,11 +166,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test sends correct G-c
         },
         [&](const MoonrakerError&) { FAIL("Error callback should not be called"); });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -233,7 +209,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {},
+        'X', [](int, ShaperCalibrationPhase, float) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -243,7 +219,6 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -264,7 +239,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {},
+        'X', [](int, ShaperCalibrationPhase, float) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -274,7 +249,6 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -294,7 +268,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
 
     SECTION("without the marker line the flag stays clear") {
         api_->advanced().start_resonance_test(
-            'Y', [](int, ShaperCalibrationPhase) {},
+            'Y', [](int, ShaperCalibrationPhase, float) {},
             [&](const InputShaperResult& result) { captured_result = result; },
             [&](const MoonrakerError&) { FAIL("Error callback should not be called"); });
 
@@ -302,7 +276,6 @@ TEST_CASE_METHOD(InputShaperTestFixture,
              i < 200 && !(captured_result.is_valid() && !captured_result.csv_path.empty()); ++i) {
             lv_tick_inc(100);
             lv_timer_handler_safe();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
         REQUIRE(captured_result.is_valid());
@@ -311,7 +284,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
 
     SECTION("the marker line flags the result and spares the Y recommendation") {
         api_->advanced().start_resonance_test(
-            'Y', [](int, ShaperCalibrationPhase) {},
+            'Y', [](int, ShaperCalibrationPhase, float) {},
             [&](const InputShaperResult& result) { captured_result = result; },
             [&](const MoonrakerError&) { FAIL("Error callback should not be called"); });
 
@@ -324,7 +297,6 @@ TEST_CASE_METHOD(InputShaperTestFixture,
              i < 200 && !(captured_result.is_valid() && !captured_result.csv_path.empty()); ++i) {
             lv_tick_inc(100);
             lv_timer_handler_safe();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
         REQUIRE(captured_result.is_valid());
@@ -348,11 +320,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "set_input_shaper sends command for X a
         'X', "mzv", 36.7, [&]() { success_called = true; },
         [&](const MoonrakerError&) { FAIL("Error callback should not be called"); });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !success_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(success_called);
@@ -366,11 +337,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "set_input_shaper sends command for Y a
         'Y', "ei", 47.6, [&]() { success_called = true; },
         [&](const MoonrakerError&) { FAIL("Error callback should not be called"); });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !success_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(success_called);
@@ -391,11 +361,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "set_input_shaper accepts all valid sha
                                                                       << err.message);
             });
 
-        // Wait for async callback
+        // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
         for (int i = 0; i < 200 && !success_called; ++i) {
             lv_tick_inc(100);
             lv_timer_handler_safe();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
         REQUIRE(success_called);
@@ -509,7 +478,6 @@ TEST_CASE_METHOD(InputShaperTestFixture, "API handles null callbacks gracefully"
     for (int i = 0; i < 50; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     // set_input_shaper requires valid callbacks (by design), so we test with valid ones
@@ -517,11 +485,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "API handles null callbacks gracefully"
     REQUIRE_NOTHROW(api_->advanced().set_input_shaper(
         'X', "mzv", 36.7, [&]() { success_called = true; }, nullptr));
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !success_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     REQUIRE(success_called);
 }
@@ -642,7 +609,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test returns all shape
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {}, // progress callback
+        'X', [](int, ShaperCalibrationPhase, float) {}, // progress callback
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -651,11 +618,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "start_resonance_test returns all shape
             FAIL("Error callback should not be called: " << err.message);
         });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -729,11 +695,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "measure_axes_noise returns noise level
             FAIL("Error callback should not be called: " << err.message);
         });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -761,11 +726,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "measure_axes_noise handles no accelero
             captured_error = err.message;
         });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !error_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(error_called);
@@ -796,11 +760,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "get_input_shaper_config returns curren
             FAIL("Error callback should not be called: " << err.message);
         });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -834,11 +797,10 @@ TEST_CASE_METHOD(InputShaperTestFixture, "get_input_shaper_config handles unconf
             FAIL("Error callback should not be called: " << err.message);
         });
 
-    // Wait for async callback
+    // Mock replies may play on lv_timers: advance the virtual clock until the callback runs
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -855,7 +817,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector parses new Klipper recommend
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {},
+        'X', [](int, ShaperCalibrationPhase, float) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -867,7 +829,6 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector parses new Klipper recommend
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -882,7 +843,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector parses max_accel per shaper"
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {},
+        'X', [](int, ShaperCalibrationPhase, float) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -892,7 +853,6 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector parses max_accel per shaper"
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -929,7 +889,7 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector captures CSV path",
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'X', [](int, ShaperCalibrationPhase) {},
+        'X', [](int, ShaperCalibrationPhase, float) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -939,7 +899,6 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector captures CSV path",
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -953,14 +912,15 @@ TEST_CASE_METHOD(InputShaperTestFixture, "collector emits progress callbacks dur
 
     api_->advanced().start_resonance_test(
         'X',
-        [&](int percent, ShaperCalibrationPhase phase) { reports.emplace_back(percent, phase); },
+        [&](int percent, ShaperCalibrationPhase phase, float) {
+            reports.emplace_back(percent, phase);
+        },
         [&](const InputShaperResult&) { complete_called = true; },
         [&](const MoonrakerError& err) { FAIL("Error: " << err.message); });
 
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -994,7 +954,7 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     InputShaperResult captured_result;
 
     api_->advanced().start_resonance_test(
-        'Y', [](int, ShaperCalibrationPhase) {},
+        'Y', [](int, ShaperCalibrationPhase, float) {},
         [&](const InputShaperResult& result) {
             captured_result = result;
             complete_called = true;
@@ -1004,7 +964,6 @@ TEST_CASE_METHOD(InputShaperTestFixture,
     for (int i = 0; i < 200 && !complete_called; ++i) {
         lv_tick_inc(100);
         lv_timer_handler_safe();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     REQUIRE(complete_called);
@@ -1171,7 +1130,7 @@ struct ProgressRecorder {
     std::vector<std::pair<int, ShaperCalibrationPhase>> samples;
 
     [[nodiscard]] helix::ShaperProgressCallback callback() {
-        return [this](int percent, ShaperCalibrationPhase phase) {
+        return [this](int percent, ShaperCalibrationPhase phase, float) {
             samples.emplace_back(percent, phase);
         };
     }
@@ -1511,4 +1470,49 @@ TEST_CASE_METHOD(InputShaperTestFixture, "set_machine_limits writes each limit w
     CHECK(last_script_containing(mock_client_, "SET_VELOCITY_LIMIT") ==
           "SET_VELOCITY_LIMIT VELOCITY=300.0 ACCEL=3000.0 ACCEL_TO_DECEL=1501.0 "
           "SQUARE_CORNER_VELOCITY=5.2");
+}
+
+TEST_CASE_METHOD(InputShaperTestFixture, "sweep progress carries each console frequency",
+                 "[calibration][input_shaper][sweep_preview]") {
+    std::atomic<bool> complete_called{false};
+    std::vector<std::pair<ShaperCalibrationPhase, float>> reports;
+    std::vector<float> console_hz;
+    mock_client_.register_method_callback(
+        "notify_gcode_response", "freq_progress_test", [&console_hz](const nlohmann::json& msg) {
+            const auto line = msg["params"][0].get<std::string>();
+            if (const auto hz = helix::calibration::parse_testing_frequency(line)) {
+                console_hz.push_back(*hz);
+            }
+        });
+
+    api_->advanced().start_resonance_test(
+        'X',
+        [&](int, ShaperCalibrationPhase phase, float freq_hz) {
+            reports.emplace_back(phase, freq_hz);
+        },
+        [&](const InputShaperResult&) { complete_called = true; },
+        [&](const MoonrakerError& err) { FAIL("Error: " << err.message); });
+
+    for (int i = 0; i < 200 && !complete_called; ++i) {
+        lv_tick_inc(100);
+        lv_timer_handler_safe();
+    }
+    mock_client_.unregister_method_callback("notify_gcode_response", "freq_progress_test");
+    REQUIRE(complete_called);
+
+    std::vector<float> sweep_hz;
+    bool saw_analyzing = false;
+    for (const auto& [phase, hz] : reports) {
+        if (phase == ShaperCalibrationPhase::Sweeping) {
+            sweep_hz.push_back(hz);
+        } else {
+            saw_analyzing = saw_analyzing || phase == ShaperCalibrationPhase::Analyzing;
+            CHECK(hz == 0.0f);
+        }
+    }
+    CHECK(saw_analyzing);
+    REQUIRE(console_hz.size() == 20);
+    CHECK(console_hz.front() == 5.0f);
+    CHECK(console_hz.back() == 135.0f);
+    CHECK(sweep_hz == console_hz);
 }

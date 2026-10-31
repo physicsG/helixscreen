@@ -1,0 +1,297 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    Toolhead position and homing home widget. ToolheadWidget publishes toolhead_rung
+    (SizeRung), the toolhead_z_only / toolhead_show_rows / toolhead_show_letters /
+    toolhead_show_plate / toolhead_show_home / toolhead_show_status flags, the per-axis
+    toolhead_homed_x/y/z, and the value, tool and speed texts; everything below binds off
+    them. A tap anywhere that is not a button or an interactive plate opens the Motion panel.
+
+    Rungs: 0 glance and 1 strip (homed letters, or the Z height while printing), 2 column
+    (one row per axis), 3 cell (the same with a homed dot), 4 wide (plate, crosshair and Z
+    bar beside the values), 5 full (the same stacked, with Home All while unhomed or the
+    active tool and speed while printing, and with room to spare the preset slots and the
+    lift line). The plate, its grid, the print's outlines and a
+    tapped target are drawn by the widget on toolhead_plate.
+  -->
+  <styles>
+    <style name="th_ok" text_color="#success"/>
+    <style name="th_bad" text_color="#danger"/>
+    <style name="th_dot_ok" bg_color="#success"/>
+    <style name="th_dot_off" bg_color="#text_muted"/>
+    <style name="th_font_xs" text_font="#font_xs"/>
+    <style name="th_font_small" text_font="#font_small"/>
+    <style name="th_stacked" layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center"/>
+    <style name="th_inline" layout="flex" flex_flow="row" flex_main_place="center" flex_cross_place="center"/>
+    <style name="th_map_wide" layout="flex" flex_flow="row" flex_main_place="center" flex_cross_place="center"/>
+    <style name="th_map_full" layout="flex" flex_flow="column" flex_main_place="start" flex_cross_place="center"/>
+    <style name="th_plate_wide" width="0" height="100%"/>
+    <style name="th_plate_full" width="100%" height="0"/>
+    <style name="th_values_wide"
+           width="0" flex_grow="1" layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center"/>
+    <style name="th_values_full"
+           width="100%" flex_grow="0" layout="flex" flex_flow="row" flex_main_place="space_evenly"
+           flex_cross_place="center"/>
+  </styles>
+  <view name="panel_widget_toolhead"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_xxs" scrollable="false">
+    <event_cb trigger="clicked" callback="toolhead_clicked_cb"/>
+    <pass_through name="toolhead_body"
+                  width="100%" height="100%" flex_flow="column" style_flex_main_place="center"
+                  style_flex_cross_place="center" style_pad_row="0" style_pad_column="0">
+      <!-- Glance and strip while idle: X, Y and Z, green when the axis is homed. -->
+      <pass_through name="toolhead_letters"
+                    width="100%" height="content" flex_flow="row" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_pad_column="#space_xs">
+        <bind_flag_if_eq subject="toolhead_show_letters" flag="hidden" ref_value="0"/>
+        <text_body name="toolhead_letter_x" text="X" clickable="false" event_bubble="true">
+          <bind_style_if_eq name="th_ok" subject="toolhead_homed_x" ref_value="1"/>
+          <bind_style_if_eq name="th_bad" subject="toolhead_homed_x" ref_value="0"/>
+        </text_body>
+        <text_body name="toolhead_letter_y" text="Y" clickable="false" event_bubble="true">
+          <bind_style_if_eq name="th_ok" subject="toolhead_homed_y" ref_value="1"/>
+          <bind_style_if_eq name="th_bad" subject="toolhead_homed_y" ref_value="0"/>
+        </text_body>
+        <text_body name="toolhead_letter_z" text="Z" clickable="false" event_bubble="true">
+          <bind_style_if_eq name="th_ok" subject="toolhead_homed_z" ref_value="1"/>
+          <bind_style_if_eq name="th_bad" subject="toolhead_homed_z" ref_value="0"/>
+        </text_body>
+      </pass_through>
+      <!-- Glance and strip while printing: the Z height. -->
+      <pass_through name="toolhead_zonly" width="100%" height="content" style_pad_row="0" style_pad_column="#space_xs">
+        <bind_flag_if_eq subject="toolhead_z_only" flag="hidden" ref_value="0"/>
+        <bind_style_if name="th_stacked" cond="toolhead_rung eq 0"/>
+        <bind_style_if name="th_inline" cond="toolhead_rung ne 0"/>
+        <icon name="toolhead_zonly_icon"
+              src="axis_z_arrow" size="xs" variant="muted" clickable="false" event_bubble="true"/>
+        <text_body name="toolhead_zonly_value" bind_text="toolhead_z_text" clickable="false" event_bubble="true">
+          <style name="th_font_xs"/>
+        </text_body>
+      </pass_through>
+      <!-- Column and cell: one row per axis, with the Controls card's homed dot at cell. -->
+      <pass_through name="toolhead_rows"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if_eq subject="toolhead_show_rows" flag="hidden" ref_value="0"/>
+        <pass_through name="toolhead_row_x"
+                      width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
+                      style_pad_column="#space_xxs">
+          <text_muted name="toolhead_row_x_letter" text="X" clickable="false" event_bubble="true">
+            <bind_style_if_eq name="th_font_xs" subject="toolhead_rung" ref_value="2"/>
+          </text_muted>
+          <text_body name="toolhead_row_x_value"
+                     bind_text="toolhead_x_text" flex_grow="1" style_text_align="right" clickable="false"
+                     event_bubble="true">
+            <bind_style_if_eq name="th_font_xs" subject="toolhead_rung" ref_value="2"/>
+          </text_body>
+          <!-- SWATCH_OK: a homing-state dot, not a colour swatch -->
+          <lv_obj name="toolhead_row_x_dot"
+                  width="#space_sm" height="#space_sm" style_radius="9999" style_bg_opa="255" style_border_width="0"
+                  scrollable="false" clickable="false" event_bubble="true">
+            <bind_style_if_eq name="th_dot_ok" subject="toolhead_homed_x" ref_value="1"/>
+            <bind_style_if_eq name="th_dot_off" subject="toolhead_homed_x" ref_value="0"/>
+            <bind_flag_if_eq subject="toolhead_rung" flag="hidden" ref_value="2"/>
+          </lv_obj>
+        </pass_through>
+        <pass_through name="toolhead_row_y"
+                      width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
+                      style_pad_column="#space_xxs">
+          <text_muted name="toolhead_row_y_letter" text="Y" clickable="false" event_bubble="true">
+            <bind_style_if_eq name="th_font_xs" subject="toolhead_rung" ref_value="2"/>
+          </text_muted>
+          <text_body name="toolhead_row_y_value"
+                     bind_text="toolhead_y_text" flex_grow="1" style_text_align="right" clickable="false"
+                     event_bubble="true">
+            <bind_style_if_eq name="th_font_xs" subject="toolhead_rung" ref_value="2"/>
+          </text_body>
+          <!-- SWATCH_OK: a homing-state dot, not a colour swatch -->
+          <lv_obj name="toolhead_row_y_dot"
+                  width="#space_sm" height="#space_sm" style_radius="9999" style_bg_opa="255" style_border_width="0"
+                  scrollable="false" clickable="false" event_bubble="true">
+            <bind_style_if_eq name="th_dot_ok" subject="toolhead_homed_y" ref_value="1"/>
+            <bind_style_if_eq name="th_dot_off" subject="toolhead_homed_y" ref_value="0"/>
+            <bind_flag_if_eq subject="toolhead_rung" flag="hidden" ref_value="2"/>
+          </lv_obj>
+        </pass_through>
+        <pass_through name="toolhead_row_z"
+                      width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
+                      style_pad_column="#space_xxs">
+          <text_muted name="toolhead_row_z_letter" text="Z" clickable="false" event_bubble="true">
+            <bind_style_if_eq name="th_font_xs" subject="toolhead_rung" ref_value="2"/>
+          </text_muted>
+          <text_body name="toolhead_row_z_value"
+                     bind_text="toolhead_z_text" flex_grow="1" style_text_align="right" clickable="false"
+                     event_bubble="true">
+            <bind_style_if_eq name="th_font_xs" subject="toolhead_rung" ref_value="2"/>
+          </text_body>
+          <!-- SWATCH_OK: a homing-state dot, not a colour swatch -->
+          <lv_obj name="toolhead_row_z_dot"
+                  width="#space_sm" height="#space_sm" style_radius="9999" style_bg_opa="255" style_border_width="0"
+                  scrollable="false" clickable="false" event_bubble="true">
+            <bind_style_if_eq name="th_dot_ok" subject="toolhead_homed_z" ref_value="1"/>
+            <bind_style_if_eq name="th_dot_off" subject="toolhead_homed_z" ref_value="0"/>
+            <bind_flag_if_eq subject="toolhead_rung" flag="hidden" ref_value="2"/>
+          </lv_obj>
+        </pass_through>
+      </pass_through>
+      <!-- Wide and full: the plate canvas, the axis values, and the footer. -->
+      <pass_through name="toolhead_map"
+                    width="100%" height="100%" style_pad_row="#space_xxs" style_pad_column="#space_xs">
+        <bind_flag_if_eq subject="toolhead_show_plate" flag="hidden" ref_value="0"/>
+        <bind_style_if name="th_map_wide" cond="toolhead_rung eq 4"/>
+        <bind_style_if name="th_map_full" cond="toolhead_rung gt 4"/>
+        <!-- The plate: a drag surface while toolhead_plate_interactive (homed, idle, the
+             motion gate open). Then a tap drops a target to confirm with Move here and a
+             drag moves the head live. Otherwise it takes no press, so a tap opens Motion. -->
+        <lv_obj name="toolhead_plate"
+                flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0" style_radius="0"
+                scrollable="false" clickable="false" event_bubble="true" moves_machine="true">
+          <bind_style_if name="th_plate_wide" cond="toolhead_rung eq 4"/>
+          <bind_style_if name="th_plate_full" cond="toolhead_rung gt 4"/>
+          <bind_flag_if_eq subject="toolhead_plate_interactive" flag="clickable" ref_value="1"/>
+          <event_cb trigger="pressed" callback="toolhead_plate_pressed_cb"/>
+          <event_cb trigger="pressing" callback="toolhead_plate_pressing_cb"/>
+          <event_cb trigger="released" callback="toolhead_plate_released_cb"/>
+          <event_cb trigger="press_lost" callback="toolhead_plate_press_lost_cb"/>
+          <event_cb trigger="clicked" callback="toolhead_plate_clicked_cb"/>
+          <!-- A tapped target: nothing moves until Move here. -->
+          <pass_through name="toolhead_ghost_chip"
+                        width="content" height="content" align="top_mid" flex_flow="row" style_flex_cross_place="center"
+                        style_pad_column="#space_xxs">
+            <bind_flag_if_eq subject="toolhead_ghost_active" flag="hidden" ref_value="0"/>
+            <!-- The label goes on a plate narrower than the labelled chip. -->
+            <ui_button name="toolhead_move_here"
+                       width="content" height="#button_height_sm" variant="primary" icon="cursor_move" text="Move here"
+                       label_hidden_subject="toolhead_chip_icon_only" label_hidden_if_eq="1" moves_machine="true">
+              <event_cb trigger="clicked" callback="toolhead_move_here_cb"/>
+            </ui_button>
+            <ui_button name="toolhead_ghost_dismiss"
+                       width="#button_height_sm" height="#button_height_sm" variant="outline" icon="close">
+              <event_cb trigger="clicked" callback="toolhead_ghost_dismiss_cb"/>
+            </ui_button>
+          </pass_through>
+          <!-- While the last print may still be on the bed, moves lift above it; the user
+               taps this once the part is removed. -->
+          <ui_button name="toolhead_bed_cleared"
+                     width="content" height="#button_height_sm" text="Cleared" icon="check" variant="outline"
+                     align="top_right" label_hidden_subject="toolhead_chip_icon_only" label_hidden_if_eq="1">
+            <bind_flag_if cond="bed_occupied eq 0 or toolhead_ghost_active eq 1" flag="hidden"/>
+            <event_cb trigger="clicked" callback="toolhead_bed_cleared_cb"/>
+          </ui_button>
+        </lv_obj>
+        <!-- Full with room to spare: three preset slots the edit-mode gear configures, and
+             the lift the next move takes. -->
+        <pass_through name="toolhead_presets"
+                      width="100%" height="content" flex_flow="row" style_flex_cross_place="center"
+                      style_pad_column="#space_xs">
+          <bind_flag_if_eq subject="toolhead_show_presets" flag="hidden" ref_value="0"/>
+          <ui_button name="toolhead_preset_0"
+                     width="0" height="content" flex_grow="1" variant="outline" icon="target" icon_position="top"
+                     bind_icon="toolhead_preset_0_icon" bind_text="toolhead_preset_0_label" style_pad_top="#space_xxs"
+                     style_pad_bottom="#space_xxs" moves_machine="true">
+            <bind_flag_if_eq subject="toolhead_preset_0_state" flag="hidden" ref_value="0"/>
+            <bind_state_if_eq subject="toolhead_preset_0_state" state="disabled" ref_value="1"/>
+            <event_cb trigger="clicked" callback="toolhead_preset_0_cb"/>
+          </ui_button>
+          <ui_button name="toolhead_preset_1"
+                     width="0" height="content" flex_grow="1" variant="outline" icon="target" icon_position="top"
+                     bind_icon="toolhead_preset_1_icon" bind_text="toolhead_preset_1_label" style_pad_top="#space_xxs"
+                     style_pad_bottom="#space_xxs" moves_machine="true">
+            <bind_flag_if_eq subject="toolhead_preset_1_state" flag="hidden" ref_value="0"/>
+            <bind_state_if_eq subject="toolhead_preset_1_state" state="disabled" ref_value="1"/>
+            <event_cb trigger="clicked" callback="toolhead_preset_1_cb"/>
+          </ui_button>
+          <ui_button name="toolhead_preset_2"
+                     width="0" height="content" flex_grow="1" variant="outline" icon="target" icon_position="top"
+                     bind_icon="toolhead_preset_2_icon" bind_text="toolhead_preset_2_label" style_pad_top="#space_xxs"
+                     style_pad_bottom="#space_xxs" moves_machine="true">
+            <bind_flag_if_eq subject="toolhead_preset_2_state" flag="hidden" ref_value="0"/>
+            <bind_state_if_eq subject="toolhead_preset_2_state" state="disabled" ref_value="1"/>
+            <event_cb trigger="clicked" callback="toolhead_preset_2_cb"/>
+          </ui_button>
+        </pass_through>
+        <text_small name="toolhead_lift_line"
+                    width="100%" bind_text="toolhead_lift_text" style_text_align="center" style_text_color="#text_muted"
+                    long_mode="dots" clickable="false" event_bubble="true">
+          <bind_flag_if_eq subject="toolhead_show_presets" flag="hidden" ref_value="0"/>
+        </text_small>
+        <pass_through name="toolhead_values"
+                      width="content" height="content" style_pad_row="#space_xxs" style_pad_column="#space_sm">
+          <bind_style_if name="th_values_wide" cond="toolhead_rung eq 4"/>
+          <bind_style_if name="th_values_full" cond="toolhead_rung gt 4"/>
+          <pass_through name="toolhead_value_x"
+                        width="content" height="content" flex_flow="row" style_flex_cross_place="center"
+                        style_pad_column="#space_xxs">
+            <text_body text="X" clickable="false" event_bubble="true">
+              <bind_style_if_eq name="th_font_small" subject="toolhead_rung" ref_value="5"/>
+              <bind_style_if_eq name="th_ok" subject="toolhead_homed_x" ref_value="1"/>
+              <bind_style_if_eq name="th_bad" subject="toolhead_homed_x" ref_value="0"/>
+            </text_body>
+            <text_body name="toolhead_value_x_text" bind_text="toolhead_x_text" clickable="false" event_bubble="true">
+              <bind_style_if_eq name="th_font_small" subject="toolhead_rung" ref_value="5"/>
+            </text_body>
+          </pass_through>
+          <pass_through name="toolhead_value_y"
+                        width="content" height="content" flex_flow="row" style_flex_cross_place="center"
+                        style_pad_column="#space_xxs">
+            <text_body text="Y" clickable="false" event_bubble="true">
+              <bind_style_if_eq name="th_font_small" subject="toolhead_rung" ref_value="5"/>
+              <bind_style_if_eq name="th_ok" subject="toolhead_homed_y" ref_value="1"/>
+              <bind_style_if_eq name="th_bad" subject="toolhead_homed_y" ref_value="0"/>
+            </text_body>
+            <text_body name="toolhead_value_y_text" bind_text="toolhead_y_text" clickable="false" event_bubble="true">
+              <bind_style_if_eq name="th_font_small" subject="toolhead_rung" ref_value="5"/>
+            </text_body>
+          </pass_through>
+          <pass_through name="toolhead_value_z"
+                        width="content" height="content" flex_flow="row" style_flex_cross_place="center"
+                        style_pad_column="#space_xxs">
+            <text_body text="Z" clickable="false" event_bubble="true">
+              <bind_style_if_eq name="th_font_small" subject="toolhead_rung" ref_value="5"/>
+              <bind_style_if_eq name="th_ok" subject="toolhead_homed_z" ref_value="1"/>
+              <bind_style_if_eq name="th_bad" subject="toolhead_homed_z" ref_value="0"/>
+            </text_body>
+            <text_body name="toolhead_value_z_text" bind_text="toolhead_z_text" clickable="false" event_bubble="true">
+              <bind_style_if_eq name="th_font_small" subject="toolhead_rung" ref_value="5"/>
+            </text_body>
+          </pass_through>
+        </pass_through>
+        <!-- The target under the finger or the tapped one, and the lift it takes. Floats
+             over the values so the plate keeps its size while it shows. -->
+        <text_small name="toolhead_target_readout"
+                    width="100%" bind_text="toolhead_ghost_text" floating="true" align="bottom_mid"
+                    style_text_align="center" style_bg_color="#card_bg" style_bg_opa="255" clickable="false"
+                    event_bubble="true">
+          <bind_flag_if_eq subject="toolhead_target_shown" flag="hidden" ref_value="0"/>
+        </text_small>
+        <!-- Full, idle, an axis not homed: the position is unknown and Home All sends G28. -->
+        <pass_through name="toolhead_footer_home"
+                      width="100%" height="content" flex_flow="column" style_flex_cross_place="center"
+                      style_pad_row="#space_xxs">
+          <bind_flag_if_eq subject="toolhead_show_home" flag="hidden" ref_value="0"/>
+          <text_small name="toolhead_unknown"
+                      text="Position unknown" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+          <ui_button name="toolhead_home_all"
+                     width="100%" height="#button_height_sm" variant="primary" icon="home" text="Home All"
+                     moves_machine="true">
+            <event_cb trigger="clicked" callback="toolhead_home_all_cb"/>
+          </ui_button>
+        </pass_through>
+        <!-- Full, printing: the active tool and the measured speed. -->
+        <pass_through name="toolhead_footer_status"
+                      width="100%" height="content" flex_flow="row" style_flex_main_place="space_between"
+                      style_flex_cross_place="center" style_pad_column="#space_xs">
+          <bind_flag_if_eq subject="toolhead_show_status" flag="hidden" ref_value="0"/>
+          <text_small name="toolhead_tool"
+                      bind_text="toolhead_tool_text" style_text_color="#text_muted" clickable="false"
+                      event_bubble="true"/>
+          <text_small name="toolhead_speed"
+                      bind_text="toolhead_speed_text" style_text_color="#text_muted" clickable="false"
+                      event_bubble="true"/>
+        </pass_through>
+      </pass_through>
+    </pass_through>
+  </view>
+</component>

@@ -1,42 +1,107 @@
 <?xml version="1.0"?>
 <component name="panel_widget_tool_switcher">
-  <api>
-    <!-- Per-instance subject names, supplied by the widget at creation. They
-         must exist before this component is parsed: a binding whose subject is
-         missing at parse time is dropped permanently and silently. -->
-    <prop name="tile_icon_subject" type="string" default=""/>
-    <prop name="tile_label_subject" type="string" default=""/>
-    <prop name="tile_dir_subject" type="string" default=""/>
-    <prop name="tile_target_subject" type="string" default=""/>
-  </api>
+  <styles>
+    <!-- A Pair stacked along a tall tile. layout="flex" is load-bearing: a
+         style carrying flex_flow alone activates no layout. -->
+    <style name="tool_switcher_stacked" layout="flex" flex_flow="column"/>
+    <style name="tool_switcher_side_by_side" layout="flex" flex_flow="row"/>
+    <style name="tool_switcher_detail_other" text_color="#text_muted"/>
+    <style name="tool_switcher_detail_main" text_font="#font_body" text_color="#text"/>
+    <style name="tool_switcher_detail_hot" text_color="#danger"/>
+  </styles>
+  <!-- The widget decides a mode from this content box (the tile less
+       #space_md each side) and publishes it with every cell's size; the
+       branches below draw it. Cells sit kRailGap (2 px) apart, the gap the
+       widget measures them with, and each branch clips its outer corners so
+       the cells read as one control. -->
   <view name="tool_switcher_root"
-        extends="lv_obj" width="100%" height="100%" flex_flow="column" style_flex_main_place="center"
-        style_flex_cross_place="center" style_pad_all="0" scrollable="false" style_bg_opa="0" style_border_width="0">
-    <!-- One pill per tool, built by the widget, while there is room for them -->
-    <lv_obj name="tool_switcher_container"
-            width="100%" height="100%" flex_flow="row" style_flex_main_place="start" style_flex_cross_place="center"
-            style_pad_all="#space_md" style_pad_column="#space_xs" scrollable="true" scroll_dir="hor"
-            scrollbar_mode="off" style_bg_opa="0" style_border_width="0">
-      <bind_flag_if_eq subject="tool_switcher_compact" flag="hidden" ref_value="1"/>
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_md" scrollable="false" style_bg_opa="0"
+        style_border_width="0">
+    <!-- Rail and RailWithActions: a segment per head, then the detail block
+         when the tile is tall enough for one. -->
+    <!-- SIZE_OK: the 2 px gap is kRailGap, which the widget measures cells with -->
+    <lv_obj name="tool_switcher_rail_view"
+            width="100%" height="100%" flex_flow="column" style_flex_cross_place="center"
+            style_flex_track_place="center" style_pad_all="0" style_pad_gap="2" style_bg_opa="0" style_border_width="0"
+            scrollable="false">
+      <bind_flag_if_gt subject="tool_switcher_mode" flag="hidden" ref_value="1"/>
+      <!-- The repeat is the rail's only child: a rebuilt expansion is appended
+           to the end of its parent. So the action cells (Park, then the feeder)
+           ride in every iteration and show only after the last head, each on a
+           backend that offers it. -->
+      <!-- SIZE_OK: kRailGap -->
+      <lv_obj name="tool_switcher_rail"
+              height="content" flex_flow="row_wrap" style_pad_all="0" style_pad_gap="2" style_radius="#border_radius"
+              style_clip_corner="true" style_bg_opa="0" style_border_width="0" scrollable="false">
+        <!-- Exactly the columns' span, centred by the rail view, so the
+             clipped corners fall on the outer cells. -->
+        <bind_style_prop prop="width" subject="tool_switcher_rail_w"/>
+        <repeat count="tool_switcher_rail_heads">
+          <tool_switcher_segment name="tool_switcher_seg_${i}" index="${i}"/>
+          <lv_obj name="tool_switcher_rail_park_${i}"
+                  style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+            <bind_flag_if cond="tool_switcher_mode ne 0 or tool_switcher_rail_heads ne ${i + 1} or tool_switcher_park_supported eq 0"
+                          flag="hidden"/>
+            <bind_style_prop prop="width" subject="tool_switcher_cell_w"/>
+            <bind_style_prop prop="height" subject="tool_switcher_cell_h"/>
+            <tool_switcher_park_segment name="tool_switcher_rail_park_btn_${i}" width="100%" height="100%"/>
+          </lv_obj>
+          <lv_obj name="tool_switcher_rail_feeder_${i}"
+                  style_pad_all="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+            <bind_flag_if cond="tool_switcher_mode ne 0 or tool_switcher_rail_heads ne ${i + 1} or tool_switcher_feeder_supported eq 0"
+                          flag="hidden"/>
+            <bind_style_prop prop="width" subject="tool_switcher_cell_w"/>
+            <bind_style_prop prop="height" subject="tool_switcher_cell_h"/>
+            <tool_switcher_feeder_segment name="tool_switcher_rail_feeder_btn_${i}" width="100%" height="100%"/>
+          </lv_obj>
+        </repeat>
+      </lv_obj>
+      <!-- Every head on its own line, centred: the mounted head first in the
+           body font, the others small and muted. The widget publishes only as
+           many rows as fit. -->
+      <lv_obj name="tool_switcher_detail"
+              width="100%" flex_grow="1" flex_flow="column" style_flex_cross_place="center" style_pad_all="0"
+              style_pad_gap="0" style_bg_opa="0" style_border_width="0" scrollable="false">
+        <bind_flag_if_eq subject="tool_switcher_detail" flag="hidden" ref_value="0"/>
+        <repeat count="tool_switcher_detail_rows">
+          <lv_obj name="tool_switcher_detail_row_${i}"
+                  width="100%" height="content" flex_flow="row" style_flex_main_place="center"
+                  style_flex_cross_place="center" style_pad_all="0" style_pad_gap="#space_xs" style_bg_opa="0"
+                  style_border_width="0" scrollable="false">
+            <color_dot name="tool_switcher_detail_dot_${i}"
+                       color_subject="tool_switcher_detail_${i}_color" colors_subject="tool_switcher_detail_${i}_colors"
+                       size="#space_sm">
+              <bind_flag_if_eq subject="tool_switcher_detail_${i}_has_color" flag="hidden" ref_value="0"/>
+            </color_dot>
+            <text_small name="tool_switcher_detail_text_${i}"
+                        width="content" style_max_width="100%" long_mode="dots"
+                        bind_text="tool_switcher_detail_${i}_text">
+              <bind_style_if_eq name="tool_switcher_detail_other" subject="tool_switcher_detail_${i}_main" ref_value="0"/>
+              <bind_style_if_eq name="tool_switcher_detail_main" subject="tool_switcher_detail_${i}_main" ref_value="1"/>
+              <bind_style_if_eq name="tool_switcher_detail_hot" subject="tool_switcher_detail_${i}_hot" ref_value="1"/>
+            </text_small>
+          </lv_obj>
+        </repeat>
+      </lv_obj>
     </lv_obj>
-    <!-- Compact: the swap glyph over the active tool, sized like any other
-         tile; a tap raises the tool picker. -->
-    <lv_obj name="tool_switcher_compact"
-            width="100%" height="100%" style_pad_ver="0" style_pad_gap="#space_xxs" style_bg_opa="0"
-            style_border_width="0" scrollable="false" hidden="true" style_radius="#border_radius">
-      <style name="styles.press_wash" selector="pressed"/>
-      <bind_flag_if_eq subject="tool_switcher_compact" flag="hidden" ref_value="0"/>
-      <style name="styles.tile_column"/>
-      <bind_style_if_eq name="styles.tile_row" subject="$tile_dir_subject" ref_value="1"/>
-      <event_cb trigger="clicked" callback="tool_compact_cb"/>
-      <icon name="tool_switcher_compact_icon"
-            src="arrow_left_right" size="sm" variant="secondary" clickable="false" event_bubble="true">
-        <bind_tile_rung ladder="icon" subject="$tile_icon_subject"/>
-      </icon>
-      <text_body name="tool_switcher_compact_label"
-                 bind_text="tool_switcher_active_label" style_text_align="center" clickable="false" event_bubble="true">
-        <bind_tile_rung ladder="value" subject="$tile_icon_subject"/>
-      </text_body>
+    <!-- Pair and Single: the mounted head as one target, and in Pair the Park
+         cell beside it along the tile's long axis. -->
+    <!-- SIZE_OK: kRailGap -->
+    <lv_obj name="tool_switcher_face_view"
+            width="100%" height="100%" style_pad_all="0" style_pad_gap="2" style_radius="#border_radius"
+            style_clip_corner="true" style_bg_opa="0" style_border_width="0" scrollable="false">
+      <bind_flag_if_lt subject="tool_switcher_mode" flag="hidden" ref_value="2"/>
+      <!-- Two bound flows, no inline one: an inline flex_flow would outrank
+           the stacked style. -->
+      <bind_style_if_eq name="tool_switcher_stacked" subject="tool_switcher_rows" ref_value="2"/>
+      <bind_style_if name="tool_switcher_side_by_side" cond="tool_switcher_rows ne 2"/>
+      <tool_switcher_face name="tool_switcher_face"/>
+      <lv_obj name="tool_switcher_face_park"
+              width="100%" height="100%" flex_grow="1" style_pad_all="0" style_bg_opa="0" style_border_width="0"
+              scrollable="false">
+        <bind_flag_if cond="tool_switcher_mode ne 2" flag="hidden"/>
+        <tool_switcher_park_segment name="tool_switcher_face_park_btn" width="100%" height="100%"/>
+      </lv_obj>
     </lv_obj>
   </view>
 </component>

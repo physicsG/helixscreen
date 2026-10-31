@@ -4,6 +4,7 @@
 #include "fault_modal_registry.h"
 
 #include "ui_modal.h"
+#include "ui_utils.h"
 
 #include <spdlog/spdlog.h>
 
@@ -34,12 +35,6 @@ void forget_fault_modal(lv_event_t* e) {
 
 // The dialog currently restating the printer fault, or nullptr.
 lv_obj_t* s_fault_carrier = nullptr;
-
-void forget_fault_carrier(lv_event_t* e) {
-    if (lv_event_get_target(e) == s_fault_carrier) {
-        s_fault_carrier = nullptr;
-    }
-}
 
 // True when `dialog` is on the stack and not already animating out.
 bool modal_live(lv_obj_t* dialog) {
@@ -104,13 +99,10 @@ void set_fault_carrier(lv_obj_t* dialog) {
     if (dialog == s_fault_carrier) {
         return;
     }
-    s_fault_carrier = dialog;
+    helix::ui::store_until_deleted(&s_fault_carrier, dialog);
     if (!dialog) {
         return;
     }
-    // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
-    lv_obj_remove_event_cb(dialog, forget_fault_carrier);
-    lv_obj_add_event_cb(dialog, forget_fault_carrier, LV_EVENT_DELETE, nullptr);
     const int dismissed = hide_fault_modals();
     if (dismissed > 0) {
         spdlog::info("[FaultModal] Fault now shown by another dialog - dismissed {} modal(s)",

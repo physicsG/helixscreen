@@ -185,6 +185,22 @@ crash dialog or blank screen. Fix #2 (`crash_handler::uninstall()` moved
 from first → last in `shutdown()`) is the load-bearing fix for AD5X
 stability — without it, the ZMOD respawn loop is unsurvivable.
 
+**The restart overlaps the old launcher.** `killall` never signals
+`helix-launcher.sh`, whose PID is the one in `/var/run/helixscreen.pid`, and
+the launcher outlives helix-screen while its exit trap runs. Z-Mod's
+`S80helixscreen` reads any live PID there as "already running", so three rules
+keep the new instance up:
+
+- the launcher's exit trap stops only processes carrying its own
+  `HELIX_LAUNCHER_PID` (`scripts/helix-launcher.sh#helix_stop_own_children`),
+  never by name, so it cannot kill its successor;
+- a starting launcher waits up to 10s for an older one to exit
+  (`helix_wait_for_predecessor`);
+- `platform_pre_start` in `hooks-ad5x.sh` and `hooks-ad5m-zmod.sh` runs
+  `helix-launcher.sh --wait-for-predecessor`, which Z-Mod's fork calls before
+  its pidfile check: it returns at once while a watchdog or helix-screen is
+  alive, and otherwise waits out the exiting launcher.
+
 `display_off_timeout` is in **seconds**, default 20, minimum-clamped to 5
 in the macro. There is no helix-side configuration that prevents this kill.
 
@@ -520,14 +536,14 @@ There is no setting to point the handoff path at a different profile name;
 hardcodes `auto`. Creating the profile is the only user-side fix, which is why
 this is worth an upstream report rather than a local workaround.
 
-**UNVERIFIED, and it decides how much this matters.** The macro runs
+**Hypothesis, tested in the next section.** The macro runs
 `BED_MESH_CLEAR` *before* `BED_MESH_PROFILE LOAD=auto`. If the clear succeeds and
 the load fails, the printer may be left with no active mesh after every screen
 handover — which happens on every boot in alt-screen mode. Mitigating: `_START_PRINT`
 issues its own `BED_MESH_PROFILE LOAD={mesh}` from a configured variable, so the
 print path probably reloads something, and `PRINT_LEVELING` defaults to 0 (no
-re-mesh per print) meaning it leans on that saved profile. Nobody has checked
-`printer.bed_mesh.profile_name` after a handoff. Two red lines in the error UI and
+re-mesh per print) meaning it leans on that saved profile. Reading
+`printer.bed_mesh.profile_name` after a handoff settles it. Two red lines in the error UI and
 a silently unmeshed bed are very different bugs; this one query separates them.
 
 **VERIFIED 2026-08-24 (rig, read-only + one handover): the handover itself is
@@ -593,9 +609,11 @@ surfacing a raw gcode error. It is currently vendor-free (no zmod/forge/creality
 mentions anywhere in `ui_panel_bed_mesh.cpp` or `ui_bed_mesh.cpp`) and this would
 keep it that way.
 
-Not built, for three reasons: the consequence above is unverified and only one
-version of it justifies the machinery; an upstream fix would make it dead code
-encoding a convention that no longer exists; and it is one printer's observation.
+Not built, for three reasons: the verified consequence is narrow (only a fresh
+install with no persisted `auto` profile is affected, see RESOLVED below), which
+does not justify the machinery; upstream ZMOD 1.7.3 and later end
+`AUTO_FULL_BED_LEVEL` in `_SAVE_CONFIG` (#1345), so the bootstrap closes on its own
+and the table would encode a dead convention; and it is one printer's observation.
 Trigger for revisiting: upstream declines, or a second reporter hits it.
 
 ### RESOLVED (2026-08-24): the missing step is `SAVE_CONFIG`, and `LOAD=auto` is not a bug

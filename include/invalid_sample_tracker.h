@@ -66,7 +66,7 @@ struct InvalidSampleReport {
  * still O(uptime): six heaters over 7.7 hours is ~2,800 lines, ~14% of the ring.
  *
  * So: log both transitions, and between them emit a heartbeat on a doubling
- * interval capped at MAX_REPEAT_MS. That is O(log uptime) — ~20 lines per key
+ * interval capped at kMaxRepeatMs. That is O(log uptime) — ~20 lines per key
  * for a 7.7 hour run instead of ~3,200 — while guaranteeing the ring always
  * holds a recent line naming the key, the value, the dropped count, and the
  * elapsed time. Bad state is never silent, and never expensive.
@@ -87,9 +87,9 @@ struct InvalidSampleReport {
 class InvalidSampleTracker {
   public:
     /// First heartbeat comes one minute into a run.
-    static constexpr int64_t FIRST_REPEAT_MS = 60'000;
+    static constexpr int64_t kFirstRepeatMs = 60'000;
     /// Heartbeat interval doubles per emission, but never past half an hour.
-    static constexpr int64_t MAX_REPEAT_MS = 1'800'000;
+    static constexpr int64_t kMaxRepeatMs = 1'800'000;
 
     /**
      * @brief Feed one sample's verdict and learn whether to log.
@@ -129,8 +129,8 @@ class InvalidSampleTracker {
             run.start_ms = now_ms;
             run.dropped = 1;
             run.first_temp_deci = temp_deci;
-            run.interval_ms = FIRST_REPEAT_MS;
-            run.next_log_ms = now_ms + FIRST_REPEAT_MS;
+            run.interval_ms = kFirstRepeatMs;
+            run.next_log_ms = now_ms + kFirstRepeatMs;
 
             report.what = InvalidSampleLog::Entered;
             report.dropped = 1;
@@ -147,7 +147,7 @@ class InvalidSampleTracker {
         }
 
         // Heartbeat due. Widen the window first so the next one is further out.
-        run.interval_ms = std::min(run.interval_ms * 2, MAX_REPEAT_MS);
+        run.interval_ms = std::min(run.interval_ms * 2, kMaxRepeatMs);
         run.next_log_ms = now_ms + run.interval_ms;
 
         report.what = InvalidSampleLog::StillInvalid;

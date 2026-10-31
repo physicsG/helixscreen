@@ -1,7 +1,7 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "screensaver_bounce.h"
 
@@ -9,18 +9,16 @@
 
 #include "lv_draw_buf_guard.h"
 #include "platform_capabilities.h"
-#include "printer_image_manager.h"
-#include "printer_images.h"
-#include "wizard_config_paths.h"
+#include "screensaver_fast_math.h"
+#include "screensaver_image.h"
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <draw/lv_image_decoder_private.h>
 #include <string>
 
 using helix::screensaver_bounce::fit_sprite;
-using helix::screensaver_bounce::MIN_RANGE_PX;
+using helix::screensaver_bounce::kMinRangePx;
 using helix::screensaver_bounce::sprite_size_for;
 using helix::ui::screensaver::fold;
 using helix::ui::screensaver::fold_index;
@@ -32,35 +30,35 @@ namespace {
 
 // Travel per second as a fraction of the screen's narrow axis, so a 480x272
 // panel and a 1024x600 one read at the same pace.
-constexpr float SPEED_FRACTION = 0.16f;
+constexpr float kSpeedFraction = 0.16f;
 
 // Angles this far off both axes keep the path from degenerating into a line.
-constexpr float ANGLE_MIN_DEG = 18.0f;
-constexpr float ANGLE_SPAN_DEG = 54.0f;
+constexpr float kAngleMinDeg = 18.0f;
+constexpr float kAngleSpanDeg = 54.0f;
 
 // Rejection bound for short repeating paths, and how close counts as repeating.
-constexpr int MAX_DENOMINATOR = 6;
-constexpr float RATIONAL_EPS = 0.02f;
-constexpr int SEED_ATTEMPTS = 16;
+constexpr int kMaxDenominator = 6;
+constexpr float kRationalEps = 0.02f;
+constexpr int kSeedAttempts = 16;
 
 // Tint strength. At LV_OPA_COVER the recolor replaces every channel and the
-// printer collapses to a flat silhouette; this leaves the render readable.
+// sprite collapses to a flat silhouette; this leaves the render readable.
 constexpr lv_opa_t RECOLOR_OPA = 110;
 
-constexpr int CORNER_FLASH_TICKS = 3;
+constexpr int kCornerFlashTicks = 3;
 // How far the backdrop travels from black toward the tint. The overlay stays
 // fully opaque throughout — fading it would show the UI it is covering.
-constexpr lv_opa_t CORNER_FLASH_MIX = 56;
+constexpr lv_opa_t kCornerFlashMix = 56;
 // Every particle costs a position, a size and a style write each frame, so one is
 // roughly 2.5x a flying-toaster sprite. The tightest board that runs animations
 // sustains 49 toaster sprites; this keeps the celebration inside that same band
 // instead of spiking to twice it.
-constexpr int CORNER_CONFETTI_PARTICLES = 24;
+constexpr int kCornerConfettiParticles = 24;
 
 // Procedural palette for the sprite tint and the corner flash. These are
 // animation content rather than UI chrome, so they are not theme tokens —
-// the same footing as STAR_TINTS and CONFETTI_COLORS.
-const lv_color_t BOUNCE_TINTS[] = {
+// the same footing as kStarTints and kConfettiColors.
+const lv_color_t kBounceTints[] = {
     LV_COLOR_MAKE(0xFF, 0x6B, 0x6B), // red
     LV_COLOR_MAKE(0xFF, 0xE6, 0x6D), // yellow
     LV_COLOR_MAKE(0x4E, 0xCD, 0xC4), // teal
@@ -69,25 +67,26 @@ const lv_color_t BOUNCE_TINTS[] = {
     LV_COLOR_MAKE(0xDD, 0xA0, 0xDD), // plum
     LV_COLOR_MAKE(0xFF, 0xA6, 0x5C), // orange
 };
-constexpr int NUM_TINTS = sizeof(BOUNCE_TINTS) / sizeof(BOUNCE_TINTS[0]);
+constexpr int kNumTints = sizeof(kBounceTints) / sizeof(kBounceTints[0]);
 
-/// LVGL path of the image this printer should be represented by.
-std::string resolve_sprite_path(int screen_w) {
-    // An image the user picked by hand outranks whatever auto-detection settled
-    // on, the same precedence the home screen widget applies.
-    std::string path = helix::PrinterImageManager::instance().get_active_image_path(screen_w);
-    if (!path.empty()) {
-        return path;
-    }
-    return PrinterImages::get_best_printer_image(helix::get_saved_printer_type());
-}
+/// Logo art cropped to its opaque bounds, so the walls meet the artwork itself, and
+/// sized to the largest box sprite_size_for() hands out.
+constexpr const char* kLogoSpritePath = "A:assets/images/helixscreen-logo-bounce.png";
 
 } // namespace
 
 namespace helix {
 
+std::string BouncingPrinterScreensaver::sprite_path(int screen_w) const {
+    return helix::ui::saver_printer_image_path(screen_w);
+}
+
+std::string BouncingLogoScreensaver::sprite_path(int /*screen_w*/) const {
+    return kLogoSpritePath;
+}
+
 bool BouncingPrinterScreensaver::on_start() {
-    spdlog::info("[Screensaver] Starting bouncing printer");
+    spdlog::info("[Screensaver] Starting bouncing {}", subject_name());
 
     screen_w_ = screen_w();
     screen_h_ = screen_h();
@@ -95,7 +94,7 @@ bool BouncingPrinterScreensaver::on_start() {
     const int box = sprite_size_for(screen_w_, screen_h_);
     if (box <= 0) {
         spdlog::warn("[Screensaver] {}x{} leaves under {}px of travel, declining to bounce",
-                     screen_w_, screen_h_, MIN_RANGE_PX);
+                     screen_w_, screen_h_, kMinRangePx);
         return false;
     }
 
@@ -104,8 +103,8 @@ bool BouncingPrinterScreensaver::on_start() {
     }
     apply_geometry(box);
 
-    spdlog::debug("[Screensaver] Bouncing printer sprite ready ({}x{}, {}x{} sprite)", screen_w_,
-                  screen_h_, sprite_w_, sprite_h_);
+    spdlog::debug("[Screensaver] Bouncing {} sprite ready ({}x{}, {}x{} sprite)", subject_name(),
+                  screen_w_, screen_h_, sprite_w_, sprite_h_);
 
     elapsed_ms_ = 0;
 
@@ -134,35 +133,18 @@ void BouncingPrinterScreensaver::on_stop() {
 }
 
 bool BouncingPrinterScreensaver::decode_sprite() {
-    const std::string path = resolve_sprite_path(screen_w_);
+    const std::string path = sprite_path(screen_w_);
 
-    // LV_CACHE_DEF_SIZE is 0, so an image handed to LVGL as a path is decoded
-    // again on every redraw. Decoding once into a draw buffer makes each frame a
-    // scaled blit over the sprite's own footprint and nothing more.
-    lv_image_decoder_dsc_t dsc;
-    lv_result_t res = lv_image_decoder_open(&dsc, path.c_str(), nullptr);
-    if (res != LV_RESULT_OK || !dsc.decoded) {
-        spdlog::warn("[Screensaver] Failed to decode printer image '{}'", path);
-        if (res == LV_RESULT_OK) {
-            lv_image_decoder_close(&dsc);
-        }
-        return false;
-    }
-
-    decoded_ = lv_draw_buf_dup(dsc.decoded);
-    src_w_ = static_cast<int32_t>(dsc.decoded->header.w);
-    src_h_ = static_cast<int32_t>(dsc.decoded->header.h);
-    lv_image_decoder_close(&dsc);
-
-    if (!decoded_) {
-        spdlog::warn("[Screensaver] Failed to copy decoded printer image '{}'", path);
-        return false;
-    }
-
-    // A device reads the pre-rendered variant here; a source tree without
+    // Decoded once, each frame is a scaled blit over the sprite's own footprint and nothing
+    // more. A device reads the pre-rendered variant here; a source tree without
     // `make gen-images` behind it holds the full-size art instead.
-    spdlog::debug("[Screensaver] Bouncing printer sprite '{}' decoded at {}x{}", path, src_w_,
-                  src_h_);
+    const std::string what = std::string(subject_name()) + " image";
+    decoded_ = helix::ui::saver_decode_image(path.c_str(), what.c_str());
+    if (!decoded_) {
+        return false;
+    }
+    src_w_ = static_cast<int32_t>(decoded_->header.w);
+    src_h_ = static_cast<int32_t>(decoded_->header.h);
     return true;
 }
 
@@ -177,9 +159,9 @@ void BouncingPrinterScreensaver::seed_motion() {
     const float start_x = unit_random(rng()) * range_x_;
     const float start_y = unit_random(rng()) * range_y_;
 
-    for (int attempt = 0; attempt < SEED_ATTEMPTS; ++attempt) {
-        const float deg = ANGLE_MIN_DEG + unit_random(rng()) * ANGLE_SPAN_DEG;
-        const float theta = deg * (static_cast<float>(M_PI) / 180.0f);
+    for (int attempt = 0; attempt < kSeedAttempts; ++attempt) {
+        const float deg = kAngleMinDeg + unit_random(rng()) * kAngleSpanDeg;
+        const float theta = deg * (helix::ui::kSaverPi / 180.0f);
         const float sx = (unit_random(rng()) < 0.5f) ? -1.0f : 1.0f;
         const float sy = (unit_random(rng()) < 0.5f) ? -1.0f : 1.0f;
 
@@ -190,7 +172,7 @@ void BouncingPrinterScreensaver::seed_motion() {
             break;
         }
         const float ratio = std::fabs((vx_ / range_x_) / (vy_ / range_y_));
-        if (!near_rational(ratio, MAX_DENOMINATOR, RATIONAL_EPS)) {
+        if (!near_rational(ratio, kMaxDenominator, kRationalEps)) {
             break;
         }
     }
@@ -205,7 +187,7 @@ void BouncingPrinterScreensaver::apply_geometry(int box) {
     fit_sprite(box, src_w_, src_h_, sprite_w_, sprite_h_);
     range_x_ = static_cast<float>(screen_w_ - sprite_w_);
     range_y_ = static_cast<float>(screen_h_ - sprite_h_);
-    speed_ = SPEED_FRACTION * static_cast<float>(std::min(screen_w_, screen_h_));
+    speed_ = kSpeedFraction * static_cast<float>(std::min(screen_w_, screen_h_));
 }
 
 void BouncingPrinterScreensaver::rebase(int screen_w, int screen_h) {
@@ -238,20 +220,20 @@ void BouncingPrinterScreensaver::rebase(int screen_w, int screen_h) {
     prev_x_ = INT32_MIN;
     prev_y_ = INT32_MIN;
 
-    spdlog::debug("[Screensaver] Bouncing printer rebased to {}x{} ({}x{} sprite)", screen_w_,
-                  screen_h_, sprite_w_, sprite_h_);
+    spdlog::debug("[Screensaver] Bouncing {} rebased to {}x{} ({}x{} sprite)", subject_name(),
+                  screen_w_, screen_h_, sprite_w_, sprite_h_);
 }
 
 void BouncingPrinterScreensaver::apply_tint() {
-    if (!img_) {
+    if (!img_ || !decorated()) {
         return;
     }
-    lv_obj_set_style_image_recolor(img_, BOUNCE_TINTS[color_index_], 0);
+    lv_obj_set_style_image_recolor(img_, kBounceTints[color_index_], 0);
     lv_obj_set_style_image_recolor_opa(img_, RECOLOR_OPA, 0);
 }
 
 int BouncingPrinterScreensaver::confetti_count(size_t level) const {
-    return level < FLASH_ONLY_LEVEL ? CORNER_CONFETTI_PARTICLES : 0;
+    return kLevels[std::min(level, std::size(kLevels) - 1)].confetti ? kCornerConfettiParticles : 0;
 }
 
 // The sprite is an LVGL image, which invalidates its own old and new areas when
@@ -284,7 +266,7 @@ void BouncingPrinterScreensaver::on_frame(uint32_t dt_ms,
     prev_fold_y_ = fy;
 
     if (bounced_x || bounced_y) {
-        color_index_ = (color_index_ + 1) % NUM_TINTS;
+        color_index_ = (color_index_ + 1) % kNumTints;
         apply_tint();
     }
 
@@ -292,13 +274,14 @@ void BouncingPrinterScreensaver::on_frame(uint32_t dt_ms,
     // frames at whatever period the running level allows, tight enough that a
     // plain wall hit is not mistaken for one.
     const float tol = std::max(4.0f, speed_ * static_cast<float>(dt_ms) / 2000.0f);
-    const bool corner = is_corner_hit(bounced_x, bounced_y, x, y, range_x_, range_y_, tol);
+    const bool corner =
+        decorated() && is_corner_hit(bounced_x, bounced_y, x, y, range_x_, range_y_, tol);
     if (corner) {
-        spdlog::info("[Screensaver] Bouncing printer hit the corner");
-        corner_flash_ticks_ = CORNER_FLASH_TICKS;
+        spdlog::info("[Screensaver] Bouncing {} hit the corner", subject_name());
+        corner_flash_ticks_ = kCornerFlashTicks;
         lv_obj_set_style_bg_color(
             overlay().obj(),
-            lv_color_mix(BOUNCE_TINTS[color_index_], lv_color_black(), CORNER_FLASH_MIX), 0);
+            lv_color_mix(kBounceTints[color_index_], lv_color_black(), kCornerFlashMix), 0);
 
         // The particle system is dozens of objects repositioned and resized
         // every frame. That is the cost profile BASIC and EMBEDDED tiers had the

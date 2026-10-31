@@ -12,6 +12,7 @@
 
 #include "app_globals.h"
 #include "demo_overlays.h"
+#include "display_manager.h"
 #include "display_settings_manager.h"
 #include "grid_edit_drop.h"
 #include "http_executor.h"
@@ -22,6 +23,8 @@
 #ifdef HELIX_ENABLE_MOCKS
 #include "moonraker_client_mock.h"
 #endif
+#include "ui_utils.h"
+
 #include "panel_factory.h"
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
@@ -31,6 +34,8 @@
 #include "remote_client.h"
 #include "remote_pointer.h"
 #include "runtime_config.h"
+#include "screensaver.h"
+#include "screensaver_registry.h"
 #include "screenshot.h"
 #include "subject_debug_registry.h"
 #include "system/diag_upload_gate.h"
@@ -61,15 +66,15 @@
 namespace helix {
 
 // Panel name ↔ ID mappings, derived dynamically from the panel registry
-// (PanelFactory::PANEL_NAMES) so new panels are picked up with no edits here.
+// (PanelFactory::kPanelNames) so new panels are picked up with no edits here.
 // The registry stores widget names ("home_panel"); the CLI protocol uses short
 // names ("home", "print-select") — strip a trailing "_panel" and map '_' -> '-'.
 static std::string panel_short_name(int idx) {
-    std::string n = PanelFactory::PANEL_NAMES[idx];
-    static const std::string SUFFIX = "_panel";
-    if (n.size() > SUFFIX.size() &&
-        n.compare(n.size() - SUFFIX.size(), SUFFIX.size(), SUFFIX) == 0) {
-        n.erase(n.size() - SUFFIX.size());
+    std::string n = PanelFactory::kPanelNames[idx];
+    static const std::string kSuffix = "_panel";
+    if (n.size() > kSuffix.size() &&
+        n.compare(n.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
+        n.erase(n.size() - kSuffix.size());
     }
     std::replace(n.begin(), n.end(), '_', '-');
     return n;
@@ -77,7 +82,7 @@ static std::string panel_short_name(int idx) {
 
 static std::string panel_id_to_name(helix::PanelId id) {
     int idx = static_cast<int>(id);
-    if (idx < 0 || idx >= UI_PANEL_COUNT) {
+    if (idx < 0 || idx >= kUiPanelCount) {
         return "unknown";
     }
     return panel_short_name(idx);
@@ -86,8 +91,8 @@ static std::string panel_id_to_name(helix::PanelId id) {
 static std::optional<helix::PanelId> name_to_panel_id(const std::string& name) {
     std::string norm = name;
     std::replace(norm.begin(), norm.end(), '_', '-');
-    for (int i = 0; i < UI_PANEL_COUNT; ++i) {
-        if (name == PanelFactory::PANEL_NAMES[i] || norm == panel_short_name(i)) {
+    for (int i = 0; i < kUiPanelCount; ++i) {
+        if (name == PanelFactory::kPanelNames[i] || norm == panel_short_name(i)) {
             return static_cast<helix::PanelId>(i);
         }
     }
@@ -354,6 +359,9 @@ void RemoteControlServer::register_builtin_handlers() {
     handlers_["set_text"] = [this](const nlohmann::json& p) { return handle_set_text(p); };
     handlers_["get_const"] = [this](const nlohmann::json& p) { return handle_get_const(p); };
     handlers_["wake"] = [this](const nlohmann::json& p) { return handle_wake(p); };
+    handlers_["preview_screensaver"] = [this](const nlohmann::json& p) {
+        return handle_preview_screensaver(p);
+    };
 
     // Lifecycle + diagnostics
     handlers_["shutdown"] = [this](const nlohmann::json& p) { return handle_shutdown(p); };
@@ -435,7 +443,7 @@ nlohmann::json RemoteControlServer::handle_navigate(const nlohmann::json& params
         if (!lv_obj_has_flag(widget, LV_OBJ_FLAG_CLICKABLE)) {
             throw std::invalid_argument("Widget '" + target + "' is not clickable");
         }
-        lv_obj_send_event(widget, LV_EVENT_CLICKED, nullptr);
+        helix::ui::send_tap(widget);
         return {{"navigated_to", target}, {"kind", "widget"}};
     });
 }
@@ -465,8 +473,8 @@ nlohmann::json RemoteControlServer::handle_reset(const nlohmann::json& /*params*
         // non-exiting entries, so it flips to true as soon as every modal has
         // been marked -- no need to wait out the exit animation here.
         int modals_cleared = 0;
-        constexpr int MAX_MODAL_DEPTH = 16; // matching MAX_DEPTH's reasoning below
-        while (!ModalStack::instance().empty() && modals_cleared < MAX_MODAL_DEPTH) {
+        constexpr int kMaxModalDepth = 16; // matching MAX_DEPTH's reasoning below
+        while (!ModalStack::instance().empty() && modals_cleared < kMaxModalDepth) {
             lv_obj_t* top = Modal::get_top();
             if (!top) {
                 break;
@@ -477,10 +485,10 @@ nlohmann::json RemoteControlServer::handle_reset(const nlohmann::json& /*params*
             Modal::hide(top, ModalCloseReason::External);
             modals_cleared++;
         }
-        if (modals_cleared == MAX_MODAL_DEPTH && !ModalStack::instance().empty()) {
+        if (modals_cleared == kMaxModalDepth && !ModalStack::instance().empty()) {
             spdlog::warn("[RemoteControlServer] reset: modal stack still non-empty after "
                          "{} dismissals -- hit the safety cap, something isn't draining",
-                         MAX_MODAL_DEPTH);
+                         kMaxModalDepth);
         }
 
         // Toasts: ToastManager::hide() dismisses every visible toast (also via
@@ -576,7 +584,7 @@ nlohmann::json RemoteControlServer::handle_go_back(const nlohmann::json& /*param
 
 nlohmann::json RemoteControlServer::handle_list_panels(const nlohmann::json& /*params*/) {
     nlohmann::json panels = nlohmann::json::array();
-    for (int i = 0; i < UI_PANEL_COUNT; ++i) {
+    for (int i = 0; i < kUiPanelCount; ++i) {
         panels.push_back(panel_short_name(i));
     }
     return {{"panels", panels}};
@@ -701,10 +709,10 @@ nlohmann::json RemoteControlServer::handle_screenshot(const nlohmann::json& para
     int stable_frames = 0;
     if (stable) {
         constexpr int REQUIRED = 3;
-        constexpr int MAX_SAMPLES = 180; // 16 ms sleep plus up to 33 ms drain wait each: ~3-9 s
+        constexpr int kMaxSamples = 180; // 16 ms sleep plus up to 33 ms drain wait each: ~3-9 s
         uint64_t last = 0;
         int run = 0;
-        for (int i = 0; i < MAX_SAMPLES; i++) {
+        for (int i = 0; i < kMaxSamples; i++) {
             uint64_t h = execute_on_ui_thread([resolve_crop]() -> nlohmann::json {
                              lv_obj_t* crop = resolve_crop();
                              helix::CapturedFrame f;
@@ -758,8 +766,9 @@ nlohmann::json RemoteControlServer::handle_demo(const nlohmann::json& params) {
 
     return execute_on_ui_thread([name]() -> nlohmann::json {
         wake_display();
-        if (!helix::show_demo_overlay(name)) {
-            throw std::invalid_argument("Unknown demo overlay: " + name);
+        std::string error;
+        if (!helix::show_demo_overlay(name, &error)) {
+            throw std::invalid_argument(error.empty() ? "Unknown demo overlay: " + name : error);
         }
         return {{"shown", true}, {"name", name}};
     });
@@ -1511,6 +1520,8 @@ nlohmann::json RemoteControlServer::handle_click(const nlohmann::json& params) {
         // without this the response is indistinguishable from a real one.
         result["path"] = path_of(widget);
         result["handlers"] = lv_obj_get_event_count(widget);
+        const bool tap_handled = helix::tap_reaches_handler(widget);
+        result["tap_handled"] = tap_handled;
         result["active_screen"] = active_screen_label();
         if (descended) {
             result["descended_to"] = path_of(descended);
@@ -1523,13 +1534,13 @@ nlohmann::json RemoteControlServer::handle_click(const nlohmann::json& params) {
             result["candidates"] = cands; // clicked the container; @path one of these
         }
 
-        // A synthetic CLICKED does not flip a switch/checkbox/checkable object
+        // A synthetic tap does not flip a switch/checkbox/checkable object
         // (LVGL toggles those on the indev press/release). Toggle the state
         // explicitly and notify, so `click <switch>` and
         // `click <option_tile_*>` behave like a real tap. An object that is
-        // only CHECKABLE (a tile, a checkable button) still gets CLICKED after
+        // only CHECKABLE (a tile, a checkable button) still gets the tap after
         // the toggle: a real tap delivers both, and checkable buttons act on
-        // CLICKED (extruder selector, gcode test Travels).
+        // it (extruder selector, gcode test Travels).
         bool toggle_class = lv_obj_check_type(widget, &lv_switch_class) ||
                             lv_obj_check_type(widget, &lv_checkbox_class);
         if (toggle_class || lv_obj_has_flag(widget, LV_OBJ_FLAG_CHECKABLE)) {
@@ -1539,14 +1550,23 @@ nlohmann::json RemoteControlServer::handle_click(const nlohmann::json& params) {
             } else {
                 lv_obj_remove_state(widget, LV_STATE_CHECKED);
             }
-            lv_obj_send_event(widget, LV_EVENT_VALUE_CHANGED, nullptr);
-            if (!toggle_class) {
-                lv_obj_send_event(widget, LV_EVENT_CLICKED, nullptr);
-            }
             result["toggled_to"] = now ? 1 : 0;
+            // A handler may close the screen it sits on; stop once the widget is gone.
+            if (lv_obj_send_event(widget, LV_EVENT_VALUE_CHANGED, nullptr) == LV_RESULT_INVALID) {
+                return result;
+            }
+            if (!toggle_class) {
+                helix::ui::send_tap(widget);
+            }
             return result;
         }
-        lv_obj_send_event(widget, LV_EVENT_CLICKED, nullptr);
+        if (!tap_handled && !helix::is_value_control(widget)) {
+            // Without this a click on a hold-only widget reads like success.
+            result["warning"] = "no clicked or short_clicked handler on this widget or the "
+                                "ancestors its events bubble to, so a tap does nothing here. "
+                                "A hold action takes `ctl long_press <x> <y>`.";
+        }
+        helix::ui::send_tap(widget);
         return result;
     });
 }
@@ -2212,28 +2232,23 @@ nlohmann::json RemoteControlServer::apply_pointer_state(int32_t x, int32_t y, bo
         if (!pointer.ensure_created()) {
             throw std::runtime_error("No display available for the synthetic pointer");
         }
-        pointer.set_state(x, y, pressed);
         baseline = pointer.read_count();
+        pointer.set_logical_state(x, y, pressed);
         return {{"x", x}, {"y", y}, {"pressed", pressed}};
     });
 
     // Indevs are sampled on a timer, so the state above is not visible to LVGL yet.
-    // Wait for two reads: the first delivers the new state, the second lets LVGL's
-    // press/release state machine act on it before the next command lands. Without
-    // this, a fast press-then-release sequence can be coalesced into a single sample
-    // and the press is never seen at all.
     auto& pointer = helix::remote::RemotePointer::instance();
-    const uint64_t target = baseline + 2;
-    for (int i = 0; i < 400; ++i) { // 400 * 5ms = 2s
-        if (pointer.read_count() >= target) {
-            result["what"] = what;
-            result["reads"] = pointer.read_count();
-            return result;
-        }
-        if (!running_.load()) {
-            throw std::runtime_error("remote server shutting down");
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    switch (pointer.wait_for_samples(baseline, std::chrono::seconds(2),
+                                     [this] { return running_.load(); })) {
+    case helix::remote::RemotePointer::WaitResult::Sampled:
+        result["what"] = what;
+        result["reads"] = pointer.read_count();
+        return result;
+    case helix::remote::RemotePointer::WaitResult::Stopped:
+        throw std::runtime_error("remote server shutting down");
+    case helix::remote::RemotePointer::WaitResult::TimedOut:
+        break;
     }
     throw std::runtime_error("Timed out waiting for the synthetic pointer to be sampled");
 }
@@ -2333,8 +2348,16 @@ nlohmann::json RemoteControlServer::handle_scroll(const nlohmann::json& params) 
             lv_obj_scroll_by(obj, dx, dy, LV_ANIM_OFF);
             return {{"scrolled", target_label(params)}, {"dx", dx}, {"dy", dy}};
         }
-        // Bring the target into its scroll parent's viewport (walks ancestors).
-        lv_obj_scroll_to_view(obj, LV_ANIM_OFF);
+        if (lv_obj_t* clipper = helix::scroll_into_view(obj)) {
+            const bool inactive_screen = lv_obj_get_parent(clipper) == nullptr &&
+                                         clipper != lv_screen_active() &&
+                                         clipper != lv_layer_top() && clipper != lv_layer_sys();
+            const char* why = helix::hidden_ancestor(obj) == clipper ? "hidden by "
+                              : inactive_screen                      ? "on inactive screen "
+                                                                     : "clipped by ";
+            throw std::runtime_error("Widget '" + target_label(params) +
+                                     "' is still out of view: " + why + helix::path_of(clipper));
+        }
         return {{"scrolled_into_view", target_label(params)}};
     });
 }
@@ -2458,6 +2481,40 @@ nlohmann::json RemoteControlServer::handle_wake(const nlohmann::json& /*params*/
         wake_display();
         return {{"awake", true}};
     });
+}
+
+// Starts a saver by its stable name the way the settings Test Screensaver button does, so a
+// saver too heavy for the board runs its fallback, named in "runs". No wake: a wake dismisses
+// the saver. A saver already up is left running and reported, as the button would leave it.
+nlohmann::json RemoteControlServer::handle_preview_screensaver(const nlohmann::json& params) {
+    if (!params.contains("name") || !params["name"].is_string()) {
+        throw std::invalid_argument("Missing required parameter: name");
+    }
+    const std::string name = params["name"];
+    const std::optional<ScreensaverType> type = helix::ui::screensaver_from_name(name);
+    if (!type || *type == ScreensaverType::OFF) {
+        throw std::invalid_argument("Unknown screensaver: " + name);
+    }
+#if HELIX_ENABLE_SCREENSAVER
+    return execute_on_ui_thread([type, name]() -> nlohmann::json {
+        DisplayManager* dm = DisplayManager::instance();
+        if (!dm) {
+            throw std::runtime_error("DisplayManager not available");
+        }
+        ScreensaverManager& savers = ScreensaverManager::instance();
+        if (savers.is_active()) {
+            return {{"requested", name},
+                    {"started", false},
+                    {"reason", "a screensaver is already running"}};
+        }
+        dm->preview_screensaver(static_cast<int>(*type));
+        return {{"requested", name},
+                {"runs", helix::ui::screensaver_name(savers.running_type())},
+                {"started", savers.is_active()}};
+    });
+#else
+    throw std::runtime_error("This build has no screensavers");
+#endif
 }
 
 nlohmann::json RemoteControlServer::handle_scenario(const nlohmann::json& params) {

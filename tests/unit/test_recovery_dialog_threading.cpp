@@ -68,7 +68,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "show_recovery_for still suppresses on the c
     // remain free — and must not queue anything.
     auto& estop = EmergencyStopOverlay::instance();
     Access::reset_recovery_reason(estop);
-    estop.suppress_recovery_dialog(RecoverySuppression::SHORT);
+    estop.suppress_recovery_dialog(recovery_suppression::SHORT);
 
     std::thread bg([&estop]() { estop.show_recovery_for(RecoveryReason::SHUTDOWN); });
     bg.join();

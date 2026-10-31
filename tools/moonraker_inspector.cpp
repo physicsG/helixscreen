@@ -22,13 +22,13 @@
 #include <hv/WebSocketClient.h>
 #include <spdlog/spdlog.h>
 
-#include "hv/json.hpp"
-
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <thread>
+
+#include "hv/json.hpp"
 
 using json = nlohmann::json;
 using helix::MoonrakerRequestTracker;
@@ -55,7 +55,7 @@ static InspectorState state;
 
 void print_header(const std::string& title) {
     if (use_colors) {
-        std::cout << "\n" << ansi::BOLD << ansi::BRIGHT_CYAN;
+        std::cout << "\n" << ansi::kBold << ansi::kBrightCyan;
         std::cout << "╔════════════════════════════════════════════════════════════════╗\n";
         std::cout << "║ " << std::left << std::setw(62) << title << " ║\n";
         std::cout << "╚════════════════════════════════════════════════════════════════╝";
@@ -70,7 +70,7 @@ void print_header(const std::string& title) {
 
 void print_section(const std::string& title) {
     if (use_colors) {
-        std::cout << "\n" << ansi::BOLD << ansi::CYAN << "┌─ " << title << ansi::RESET << "\n";
+        std::cout << "\n" << ansi::kBold << ansi::kCyan << "┌─ " << title << ansi::RESET << "\n";
     } else {
         std::cout << "\n┌─ " << title << "\n";
     }
@@ -79,11 +79,11 @@ void print_section(const std::string& title) {
 void print_kv(const std::string& key, const std::string& value, int indent = 0) {
     std::string prefix(indent * 2, ' ');
     if (use_colors) {
-        std::cout << prefix << "  " << ansi::BRIGHT_BLUE << std::left << std::setw(30 - indent * 2) << key
-                  << ansi::RESET << ": " << ansi::WHITE << value << ansi::RESET << "\n";
+        std::cout << prefix << "  " << ansi::kBrightBlue << std::left << std::setw(30 - indent * 2)
+                  << key << ansi::RESET << ": " << ansi::WHITE << value << ansi::RESET << "\n";
     } else {
-        std::cout << prefix << "  " << std::left << std::setw(30 - indent * 2) << key
-                  << ": " << value << "\n";
+        std::cout << prefix << "  " << std::left << std::setw(30 - indent * 2) << key << ": "
+                  << value << "\n";
     }
 }
 
@@ -117,8 +117,8 @@ void print_server_info(const json& info) {
     if (info.contains("api_version")) {
         auto api = info["api_version"];
         std::string api_str = "[" + std::to_string(api[0].get<int>()) + "." +
-                             std::to_string(api[1].get<int>()) + "." +
-                             std::to_string(api[2].get<int>()) + "]";
+                              std::to_string(api[1].get<int>()) + "." +
+                              std::to_string(api[2].get<int>()) + "]";
         print_kv("API Version", api_str);
     }
 
@@ -144,9 +144,8 @@ void print_printer_info(const json& info) {
         std::string state_str = info["state"].get<std::string>();
         std::string display;
         if (use_colors) {
-            display = (state_str == "ready") ?
-                      ansi::success(state_str + " ✓") :
-                      ansi::warning(state_str + " ⚠");
+            display = (state_str == "ready") ? ansi::success(state_str + " ✓")
+                                             : ansi::warning(state_str + " ⚠");
         } else {
             display = state_str + ((state_str == "ready") ? " ✓" : " ⚠");
         }
@@ -194,11 +193,10 @@ void print_hardware_objects(const json& objects) {
         std::string name = obj.get<std::string>();
 
         // Filter out core Klipper objects that aren't useful to expand
-        if (name == "gcode" || name == "webhooks" || name == "configfile" ||
-            name == "mcu" || name.find("mcu ") == 0 || name == "heaters" ||
-            name == "gcode_move" || name == "print_stats" || name == "virtual_sdcard" ||
-            name == "display_status" || name == "exclude_object" ||
-            name == "idle_timeout" || name == "pause_resume" ||
+        if (name == "gcode" || name == "webhooks" || name == "configfile" || name == "mcu" ||
+            name.find("mcu ") == 0 || name == "heaters" || name == "gcode_move" ||
+            name == "print_stats" || name == "virtual_sdcard" || name == "display_status" ||
+            name == "exclude_object" || name == "idle_timeout" || name == "pause_resume" ||
             name == "motion_report" || name == "query_endstops" || name == "system_stats" ||
             name == "manual_probe" || name == "toolhead") {
             // Core Klipper objects - skip
@@ -299,8 +297,8 @@ void print_hardware_objects(const json& objects) {
     }
 
     // Count total (excluding filtered core objects)
-    int total = heaters.size() + sensors.size() + fans.size() + leds.size() +
-                steppers.size() + probes.size() + macros.size() + accessories.size();
+    int total = heaters.size() + sensors.size() + fans.size() + leds.size() + steppers.size() +
+                probes.size() + macros.size() + accessories.size();
     std::cout << "\n  Total Hardware Objects: " << total << "\n";
 }
 
@@ -362,7 +360,7 @@ int main(int argc, char** argv) {
 
     // Configure WebSocket
     ws_client.setConnectTimeout(5000);
-    ws_client.setPingInterval(10);  // keepalive (seconds)
+    ws_client.setPingInterval(10); // keepalive (seconds)
 
     // Set up connection callbacks
     std::cout << "\nConnecting";
@@ -373,7 +371,8 @@ int main(int argc, char** argv) {
         std::cout << " ✓\n";
 
         // Query 1: Server info
-        tracker.send(ws_client, "server.info", json::object(),
+        tracker.send(
+            ws_client, "server.info", json::object(),
             [&](const json& response) {
                 if (response.contains("result")) {
                     state.server_info = response["result"];
@@ -385,7 +384,8 @@ int main(int argc, char** argv) {
             });
 
         // Query 2: Printer info
-        tracker.send(ws_client, "printer.info", json::object(),
+        tracker.send(
+            ws_client, "printer.info", json::object(),
             [&](const json& response) {
                 if (response.contains("result")) {
                     state.printer_info = response["result"];
@@ -397,7 +397,8 @@ int main(int argc, char** argv) {
             });
 
         // Query 3: Objects list
-        tracker.send(ws_client, "printer.objects.list", json::object(),
+        tracker.send(
+            ws_client, "printer.objects.list", json::object(),
             [&](const json& response) {
                 if (response.contains("result")) {
                     state.objects_list = response["result"];
@@ -426,8 +427,8 @@ int main(int argc, char** argv) {
     ws_client.onmessage = [&](const std::string& msg) {
         try {
             auto response = json::parse(msg);
-            tracker.route_response(response,
-                [](MoonrakerEventType, const std::string&, bool, const std::string&) {
+            tracker.route_response(
+                response, [](MoonrakerEventType, const std::string&, bool, const std::string&) {
                     // CLI tool -- no event system needed
                 });
         } catch (const json::parse_error& e) {
@@ -450,7 +451,8 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
+                           std::chrono::steady_clock::now() - start)
+                           .count();
 
         if (elapsed > 10) {
             std::cerr << "\nTimeout: No response from Moonraker after 10 seconds\n";

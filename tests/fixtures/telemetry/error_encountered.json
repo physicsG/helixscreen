@@ -1,0 +1,14 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "category": "moonraker_api",
+  "code": "timeout",
+  "context": "get_printer_objects",
+  "device_id": "<device_id>",
+  "event": "error_encountered",
+  "schema_version": 3,
+  "timestamp": "<timestamp>",
+  "uptime_sec": 0
+}

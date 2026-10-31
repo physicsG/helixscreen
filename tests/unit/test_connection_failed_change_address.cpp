@@ -56,7 +56,8 @@ class ReconnectCountingClient : public helix::IMoonrakerClient {
         ++force_reconnect_calls;
     }
 
-    int connect(const char*, std::function<void()>, std::function<void()>) override {
+    int connect(const char*, helix::SharedCallback<void()>,
+                helix::SharedCallback<void()>) override {
         return 0;
     }
     void disconnect() override {}
@@ -71,11 +72,13 @@ class ReconnectCountingClient : public helix::IMoonrakerClient {
         return 0;
     }
     helix::RequestId send_jsonrpc(const std::string&, const json&,
-                                  std::function<void(const json&)>) override {
+                                  helix::SharedCallback<void(const json&)>) override {
         return 0;
     }
-    helix::RequestId send_jsonrpc(const std::string&, const json&, std::function<void(const json&)>,
-                                  std::function<void(const MoonrakerError&)>, uint32_t, bool,
+    helix::RequestId send_jsonrpc(const std::string&, const json&,
+                                  helix::SharedCallback<void(const json&)>,
+                                  helix::SharedCallback<void(const MoonrakerError&)>, uint32_t,
+                                  bool,
                                   std::optional<helix::rpc_error_policy::CallerIntent>) override {
         return 0;
     }
@@ -83,11 +86,11 @@ class ReconnectCountingClient : public helix::IMoonrakerClient {
         return 0;
     }
     void get_gcode_store(int, std::function<void(const std::vector<GcodeStoreEntry>&)>,
-                         std::function<void(const MoonrakerError&)>) override {}
+                         helix::SharedCallback<void(const MoonrakerError&)>) override {}
     void get_temperature_store(std::function<void(const TemperatureStore&)>,
-                               std::function<void(const MoonrakerError&)>) override {}
-    void discover_printer(std::function<void()>, std::function<void(const std::string&)>) override {
-    }
+                               helix::SharedCallback<void(const MoonrakerError&)>) override {}
+    void discover_printer(helix::SharedCallback<void()>,
+                          helix::SharedCallback<void(const std::string&)>) override {}
     helix::PrinterDiscovery hardware() const override {
         return {};
     }
@@ -96,15 +99,16 @@ class ReconnectCountingClient : public helix::IMoonrakerClient {
     void set_on_hardware_discovered(std::function<void(const helix::PrinterDiscovery&)>) override {}
     void set_on_discovery_complete(
         std::function<void(const helix::PrinterDiscovery&, const json&)>) override {}
-    void set_bed_mesh_callback(std::function<void(const json&)>) override {}
-    helix::SubscriptionId register_notify_update(std::function<void(const json&)>) override {
-        return helix::INVALID_SUBSCRIPTION_ID;
+    void set_bed_mesh_callback(helix::SharedCallback<void(const json&)>) override {}
+    helix::SubscriptionId
+    register_notify_update(helix::SharedCallback<void(const json&)>) override {
+        return helix::kInvalidSubscriptionId;
     }
     bool unsubscribe_notify_update(helix::SubscriptionId) override {
         return false;
     }
     void register_method_callback(const std::string&, const std::string&,
-                                  std::function<void(const json&)>) override {}
+                                  helix::SharedCallback<void(const json&)>) override {}
     bool unregister_method_callback(const std::string&, const std::string&) override {
         return false;
     }
@@ -114,7 +118,7 @@ class ReconnectCountingClient : public helix::IMoonrakerClient {
     helix::ConnectionState get_connection_state() const override {
         return state;
     }
-    void add_connected_observer(const std::string&, std::function<void()>) override {}
+    void add_connected_observer(const std::string&, helix::SharedCallback<void()>) override {}
     bool remove_connected_observer(const std::string&) override {
         return false;
     }
@@ -510,7 +514,7 @@ struct SavedPrinter {
     Config* cfg = Config::get_instance();
     std::string host_key = cfg->df() + "moonraker_host";
     std::string port_key = cfg->df() + "moonraker_port";
-    std::string hostname_key = cfg->df() + helix::wizard::HOSTNAME;
+    std::string hostname_key = cfg->df() + helix::wizard::kHostname;
     std::string prev_host = cfg->get<std::string>(host_key, "");
     int prev_port = cfg->get<int>(port_key, 7125);
     std::string prev_hostname = cfg->get<std::string>(hostname_key, "");
@@ -543,7 +547,7 @@ TEST_CASE_METHOD(ConnFailedFixture, "Connection-failed prompt offers the printer
     UpdateQueue::instance().drain();
     // The prompt waits for the browse, so it can carry what it found.
     CHECK(Modal::get_top() == nullptr);
-    process_lvgl(helix::ui::REDISCOVERY_WINDOW_MS + 100);
+    process_lvgl(helix::ui::kRediscoveryWindowMs + 100);
     UpdateQueue::instance().drain();
 
     lv_obj_t* dialog = Modal::get_top();
@@ -580,7 +584,7 @@ TEST_CASE_METHOD(ConnFailedFixture,
     helix::ui::show_connection_failed_modal("Connection Failed",
                                             "Unable to reach printer at 192.0.2.1:7125.");
     UpdateQueue::instance().drain();
-    process_lvgl(helix::ui::REDISCOVERY_WINDOW_MS + 100);
+    process_lvgl(helix::ui::kRediscoveryWindowMs + 100);
     UpdateQueue::instance().drain();
 
     lv_obj_t* dialog = Modal::get_top();
@@ -599,10 +603,10 @@ TEST_CASE_METHOD(ConnFailedFixture, "A failure escalation browses once",
     helix::ui::show_connection_failed_modal("Connection Failed", "Unable to reach printer.");
     helix::ui::show_connection_failed_modal("Connection Failed", "Unable to reach printer.");
     UpdateQueue::instance().drain();
-    process_lvgl(helix::ui::REDISCOVERY_WINDOW_MS + 100);
+    process_lvgl(helix::ui::kRediscoveryWindowMs + 100);
     UpdateQueue::instance().drain();
     CHECK(mdns.browses == 1);
-    process_lvgl(3 * helix::ui::REDISCOVERY_WINDOW_MS);
+    process_lvgl(3 * helix::ui::kRediscoveryWindowMs);
     CHECK(mdns.browses == 1);
 
     // One prompt: dismissing it leaves nothing behind.
@@ -631,7 +635,7 @@ TEST_CASE_METHOD(ConnFailedFixture, "A browse outlived by the failure shows no p
     SECTION("the user switched printers meanwhile") {
         helix::ConfigTestAccess::active_printer_id(*cfg) = saved_active + "-other";
     }
-    process_lvgl(helix::ui::REDISCOVERY_WINDOW_MS + 100);
+    process_lvgl(helix::ui::kRediscoveryWindowMs + 100);
     UpdateQueue::instance().drain();
     helix::ConfigTestAccess::active_printer_id(*cfg) = saved_active;
 
@@ -650,7 +654,7 @@ TEST_CASE_METHOD(ConnFailedFixture, "Use New Address writes nothing after a prin
 
     helix::ui::show_connection_failed_modal("Connection Failed", "Unable to reach printer.");
     UpdateQueue::instance().drain();
-    process_lvgl(helix::ui::REDISCOVERY_WINDOW_MS + 100);
+    process_lvgl(helix::ui::kRediscoveryWindowMs + 100);
     UpdateQueue::instance().drain();
     lv_obj_t* dialog = Modal::get_top();
     REQUIRE(dialog != nullptr);

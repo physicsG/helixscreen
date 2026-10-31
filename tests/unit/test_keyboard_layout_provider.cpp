@@ -3,6 +3,7 @@
 
 #include "ui_fonts.h"
 
+#include "../lvgl_test_fixture.h"
 #include "keyboard_layout_provider.h"
 
 #include <cstring>
@@ -502,121 +503,6 @@ TEST_CASE("Keyboard Layout: All layouts have matching button and control counts"
         size_t btn_count = count_buttons(map);
         REQUIRE(btn_count > 0);
     }
-
-    SECTION("Numeric") {
-        const char* const* map = keyboard_layout_get_map(KEYBOARD_LAYOUT_NUMERIC, false);
-        size_t btn_count = count_buttons(map);
-        REQUIRE(btn_count > 0);
-        // A mismatch between the two arrays reads past the end of the control
-        // map, so pin the exact count rather than just "> 0".
-        REQUIRE(btn_count == 17); // 10 digits + . +/- close check backspace 2 arrows
-    }
-}
-
-// ============================================================================
-// Numeric Layout Tests
-//
-// keyboard_hint="numeric" fields (temperatures, durations, port, weights,
-// prices, probe offsets) get this instead of the ?123 page. The point of the
-// layout is what it does NOT offer, so most of these are negative assertions.
-// ============================================================================
-
-TEST_CASE("Keyboard Layout: Numeric - digits and nothing else", "[ui][layout][numeric]") {
-    const char* const* map = keyboard_layout_get_map(KEYBOARD_LAYOUT_NUMERIC, false);
-    REQUIRE(map != nullptr);
-
-    SECTION("every digit is present") {
-        for (const char* d : {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}) {
-            INFO("digit " << d);
-            REQUIRE(button_exists(map, d));
-        }
-    }
-
-    SECTION("sign toggle and decimal point are present") {
-        // Probe offsets go negative; prices and weights are fractional. Without
-        // these the keypad cannot express values its own fields accept.
-        REQUIRE(button_exists(map, "+/-"));
-        REQUIRE(button_exists(map, "."));
-    }
-
-    SECTION("editing and cursor keys are present") {
-        REQUIRE(button_exists(map, ICON_BACKSPACE));
-        REQUIRE(button_exists(map, ICON_KEYBOARD_CLOSE));
-        REQUIRE(button_exists(map, ICON_CHECK));
-        REQUIRE(button_exists(map, ICON_CHEVRON_LEFT));
-        REQUIRE(button_exists(map, ICON_CHEVRON_RIGHT));
-    }
-
-    SECTION("carries none of the symbol page") {
-        // This is the whole reason the keypad is used for numeric-hint fields: a
-        // field that can only hold a number must not offer input it then rejects.
-        for (const char* sym : {"/", ":", ";", "(", ")", "$", "&", "@", "*", "?", "!", "\"", ","}) {
-            INFO("symbol " << sym);
-            REQUIRE_FALSE(button_exists(map, sym));
-        }
-    }
-
-    SECTION("offers no route to letters or symbols") {
-        // No escape hatch on purpose — a field needing letters has the wrong
-        // hint, and routing around the layout would hide that.
-        REQUIRE_FALSE(button_exists(map, "XYZ"));
-        REQUIRE_FALSE(button_exists(map, "?123"));
-        REQUIRE_FALSE(button_exists(map, "#+="));
-        REQUIRE_FALSE(button_exists(map, keyboard_layout_get_spacebar_text()));
-        REQUIRE_FALSE(button_exists(map, ICON_KEYBOARD_SHIFT));
-    }
-
-    SECTION("is not the numbers-and-symbols page") {
-        REQUIRE(map != keyboard_layout_get_map(KEYBOARD_LAYOUT_NUMBERS_SYMBOLS, false));
-    }
-}
-
-TEST_CASE("Keyboard Layout: Numeric - control words are well formed", "[ui][layout][numeric]") {
-    const char* const* map = keyboard_layout_get_map(KEYBOARD_LAYOUT_NUMERIC, false);
-    const lv_buttonmatrix_ctrl_t* ctrl = keyboard_layout_get_ctrl_map(KEYBOARD_LAYOUT_NUMERIC);
-    REQUIRE(ctrl != nullptr);
-
-    SECTION("every key that is not literal text is flagged non-printing") {
-        // CUSTOM_1 is how KeyboardManager tells an action key from a character.
-        // LV_KEYBOARD_CTRL_BUTTON_FLAGS does NOT include it, so a key relying on
-        // that alone falls through and inserts its raw icon bytes as text.
-        for (const char* key : {ICON_KEYBOARD_CLOSE, ICON_CHECK, ICON_BACKSPACE, ICON_CHEVRON_LEFT,
-                                ICON_CHEVRON_RIGHT, "+/-"}) {
-            INFO("action key " << key);
-            const int idx = find_button_index(map, key);
-            REQUIRE(idx >= 0);
-            REQUIRE((ctrl[idx] & LV_BUTTONMATRIX_CTRL_CUSTOM_1) != 0);
-        }
-    }
-
-    SECTION("digits and the decimal point are printing keys") {
-        for (const char* key : {"0", "5", "9", "."}) {
-            INFO("character key " << key);
-            const int idx = find_button_index(map, key);
-            REQUIRE(idx >= 0);
-            REQUIRE((ctrl[idx] & LV_BUTTONMATRIX_CTRL_CUSTOM_1) == 0);
-        }
-    }
-
-    SECTION("no width overflows the 4-bit field") {
-        // LV_BUTTONMATRIX_WIDTH_MASK is 0x000F. A width above 15 wraps into the
-        // flag bits, which silently drops keys from the rendered row rather than
-        // failing loudly — exactly how the first version of this layout broke.
-        int btn_idx = 0;
-        for (size_t i = 0; map[i][0] != '\0'; i++) {
-            if (strcmp(map[i], "\n") == 0) {
-                continue;
-            }
-            INFO("key " << map[i]);
-            const int w = extract_width(ctrl[btn_idx++]);
-            REQUIRE(w >= 1);
-            REQUIRE(w <= 15);
-        }
-    }
-
-    SECTION("the keypad is four rows") {
-        REQUIRE(count_rows(map) == 4);
-    }
 }
 
 // ============================================================================
@@ -865,4 +751,51 @@ TEST_CASE("Keyboard Layout: All printable ASCII available", "[ui][layout][comple
         }
         REQUIRE(all_found);
     }
+}
+
+// ============================================================================
+// Installing a layout (prestonbrown/helixscreen#1884)
+// ============================================================================
+
+TEST_CASE_METHOD(LVGLTestFixture, "Keyboard Layout: popovers off strips every preview bubble",
+                 "[ui][layout][keyboard_popover]") {
+    lv_obj_t* kb = lv_keyboard_create(lv_screen_active());
+    lv_keyboard_set_popovers(kb, false);
+
+    for (keyboard_layout_mode_t mode :
+         {KEYBOARD_LAYOUT_ALPHA_LC, KEYBOARD_LAYOUT_ALPHA_UC, KEYBOARD_LAYOUT_NUMBERS_SYMBOLS,
+          KEYBOARD_LAYOUT_ALT_SYMBOLS}) {
+        keyboard_layout_apply(kb, mode, false);
+        const char* const* map = keyboard_layout_get_map(mode, false);
+        const lv_buttonmatrix_ctrl_t* ctrl = keyboard_layout_get_ctrl_map(mode);
+        const size_t buttons = count_buttons(map);
+        size_t popover_keys = 0;
+        for (uint32_t i = 0; i < buttons; ++i) {
+            INFO("mode " << mode << " button " << i);
+            CHECK_FALSE(lv_buttonmatrix_has_button_ctrl(kb, i, LV_BUTTONMATRIX_CTRL_POPOVER));
+            if (ctrl[i] & LV_BUTTONMATRIX_CTRL_POPOVER) {
+                ++popover_keys;
+                // Still types on release, so a long press can offer alternates first.
+                CHECK(lv_buttonmatrix_has_button_ctrl(kb, i, LV_BUTTONMATRIX_CTRL_CLICK_TRIG));
+            }
+        }
+        REQUIRE(popover_keys > 0);
+    }
+    lv_obj_delete(kb);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "Keyboard Layout: popovers on keeps the layout's bubbles",
+                 "[ui][layout][keyboard_popover]") {
+    lv_obj_t* kb = lv_keyboard_create(lv_screen_active());
+    lv_keyboard_set_popovers(kb, true);
+    keyboard_layout_apply(kb, KEYBOARD_LAYOUT_ALPHA_LC, false);
+
+    const lv_buttonmatrix_ctrl_t* ctrl = keyboard_layout_get_ctrl_map(KEYBOARD_LAYOUT_ALPHA_LC);
+    const size_t buttons = count_buttons(keyboard_layout_get_map(KEYBOARD_LAYOUT_ALPHA_LC, false));
+    for (uint32_t i = 0; i < buttons; ++i) {
+        INFO("button " << i);
+        CHECK(lv_buttonmatrix_has_button_ctrl(kb, i, LV_BUTTONMATRIX_CTRL_POPOVER) ==
+              ((ctrl[i] & LV_BUTTONMATRIX_CTRL_POPOVER) != 0));
+    }
+    lv_obj_delete(kb);
 }

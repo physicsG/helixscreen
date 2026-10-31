@@ -637,6 +637,6 @@ TEST_CASE("AmsBackendMock: the dryer's own multiplier composes over the flag",
         AmsBackendMockTimingTestAccess::set_dryer_speed_x(backend, 1000);
         get_runtime_config()->sim_speedup = helix::sim::MAX_SPEED;
         REQUIRE(AmsBackendMockTimingTestAccess::dryer_speed_x(backend) ==
-                static_cast<int>(helix::sim::MAX_COMPOSED_SPEED));
+                static_cast<int>(helix::sim::kMaxComposedSpeed));
     }
 }

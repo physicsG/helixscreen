@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "moonraker_config_manager.h"
 
+#include "klipper_config_includes.h"
 #include "text_io.h"
 
 #include <algorithm>
@@ -653,6 +654,24 @@ std::string MoonrakerConfigManager::set_existing_value(const std::string& conten
     std::string out = content;
     out.replace(value_begin, value_end - value_begin, value);
     return out;
+}
+
+std::string
+MoonrakerConfigManager::find_section_file(const std::map<std::string, std::string>& files,
+                                          const std::string& root_file,
+                                          const std::string& section_name) {
+    // Moonraker reads an included file where its [include] line stands, so a
+    // file's sections either side of that line are read before and after it.
+    std::vector<helix::system::ConfigSegment> order;
+    (void)helix::system::resolve_active_files(files, root_file, 5, &order);
+    std::string last;
+    for (const auto& seg : order) {
+        const auto it = files.find(seg.file);
+        if (it != files.end() &&
+            has_section(it->second.substr(seg.begin, seg.end - seg.begin), section_name))
+            last = seg.file;
+    }
+    return last;
 }
 
 } // namespace helix

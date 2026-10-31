@@ -73,14 +73,15 @@ struct SpoolIdentity {
  * `+ - _ #` count as word characters — those are the characters real material
  * names glue on ("PLA+", "PA6-CF").
  *
- * @param brand    Vendor/brand, may be empty
- * @param name     Filament or spool name, may be empty
- * @param material Material type, may be empty
+ * @param brand     Vendor/brand, may be empty
+ * @param name      Filament or spool name, may be empty
+ * @param material  Material type, may be empty
+ * @param separator What goes between the parts that remain
  * @return Joined label; **empty** when all three inputs are blank. The
  *         never-empty guarantee belongs to resolve_filament_label().
  */
 std::string compose_filament_label(std::string_view brand, std::string_view name,
-                                   std::string_view material);
+                                   std::string_view material, std::string_view separator = " ");
 
 /**
  * @brief The three naming fields, resolved but not yet joined
@@ -150,5 +151,68 @@ FilamentLabelParts resolve_filament_label_parts(const SlotInfo& slot, const Spoo
 std::string resolve_filament_label(const SlotInfo& slot, const SpoolIdentity* identity,
                                    std::string_view color_fallback,
                                    std::string_view last_resort = "Filament");
+
+/**
+ * @brief Does @p name already say what @p material says?
+ *
+ * The material half of compose_filament_label()'s deduplication, for callers
+ * that place the name and the material on separate lines and must decide
+ * whether the material line repeats the name. Case-insensitive; "PLA+ Bone
+ * White" states "PLA+", "Silk Blue ePLA" states "Silk PLA", "Bone White" states
+ * nothing. A blank material is never stated.
+ */
+bool name_states_material(std::string_view name, std::string_view material);
+
+/**
+ * @brief The spool name an AMS slot card shows above its material
+ *
+ * `slot.spool_name` -> `identity->filament_name` -> `slot.product_name`: what
+ * the spool IS ("PLA+ 2.0", "Silk PLA+"). Never a colour name: the spool graphic
+ * under it already shows the colour.
+ *
+ * @param slot     Slot to name
+ * @param identity Cached Spoolman identity, or nullptr on a miss
+ * @return Whitespace-normalized name; empty when nothing names the spool
+ */
+std::string slot_card_name(const SlotInfo& slot, const SpoolIdentity* identity);
+
+/// Slot counts above this share the row too tightly for a name line; the card
+/// keeps its single, truncated material line.
+inline constexpr int kSlotCardMaxTwoLineCount = 4;
+
+/// Bytes a material keeps when more than kSlotCardMaxTwoLineCount slots
+/// share the row.
+inline constexpr size_t kSlotCardCrowdedMaterialBytes = 4;
+
+/**
+ * @brief The two lines of an AMS slot card's filament label
+ *
+ * `lower` is the line that is always there; `name` sits above it and is blank
+ * when the card shows one line.
+ */
+struct SlotCardLines {
+    std::string name;  ///< Upper line; empty = no upper line
+    std::string lower; ///< The material, or the name when the lane has no material
+};
+
+/**
+ * @brief Decide what an AMS slot card's filament label reads
+ *
+ * - Empty lane, more than kSlotCardMaxTwoLineCount slots, or no name: one
+ *   line, @p material_text. A crowded row cuts a non-Empty material to
+ *   kSlotCardCrowdedMaterialBytes bytes.
+ * - A lane with no material: one line, the name.
+ * - Otherwise the name over @p material_text, even when the name states the
+ *   material: the card is a spool wide, so the name alone ellipsizes past it.
+ *
+ * @param name          Resolved name (slot_card_name()), may be empty
+ * @param material      Raw material type, may be empty
+ * @param material_text What a material-only label reads for this lane
+ *                      ("Empty", "--" or the material)
+ * @param total_count   Slots shown side by side
+ * @param lane_empty    The lane is classified Empty
+ */
+SlotCardLines slot_card_lines(std::string_view name, std::string_view material,
+                              std::string_view material_text, int total_count, bool lane_empty);
 
 } // namespace helix

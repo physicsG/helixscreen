@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 #include "hv/json.hpp"
 
@@ -30,5 +32,9 @@ FavoriteMacroConfig favorite_macro_config_from_json(const nlohmann::json& j);
 
 /// Serialize config, omitting default-valued fields to keep JSON minimal.
 nlohmann::json favorite_macro_config_to_json(const FavoriteMacroConfig& c);
+
+/// The macros a home-widget picker offers: sorted, without the `_` helpers Klipper
+/// macros hide from users.
+std::vector<std::string> pickable_macro_names(const std::unordered_set<std::string>& macros);
 
 } // namespace helix

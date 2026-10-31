@@ -88,7 +88,7 @@ class ExternalSpoolSink : public IConsumptionSink {
     float snapshot_mm_ = 0.0f;
     float snapshot_weight_g_ = 0.0f;
     float density_g_cm3_ = 0.0f;
-    float diameter_mm_ = filament::DEFAULT_DIAMETER_MM;
+    float diameter_mm_ = filament::kDefaultDiameterMm;
     float last_written_weight_g_ = 0.0f;
     uint32_t last_persist_tick_ms_ = 0;
     uint32_t persist_interval_override_ms_ = 0;
@@ -144,7 +144,7 @@ class AmsSlotSink : public IConsumptionSink {
     float snapshot_mm_ = 0.0f;
     float snapshot_weight_g_ = 0.0f;
     float density_g_cm3_ = 0.0f;
-    float diameter_mm_ = filament::DEFAULT_DIAMETER_MM;
+    float diameter_mm_ = filament::kDefaultDiameterMm;
     float last_written_weight_g_ = 0.0f;
     uint32_t last_persist_tick_ms_ = 0;
     uint32_t persist_interval_override_ms_ = 0;

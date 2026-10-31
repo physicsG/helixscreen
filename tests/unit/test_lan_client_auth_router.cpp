@@ -37,6 +37,7 @@
 
 #include "../fake_moonraker_client.h"
 #include "../test_fixtures.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "lan_client_auth_router.h"
 #include "lan_client_authorization.h"
 
@@ -53,16 +54,16 @@ using nlohmann::json;
 
 namespace {
 
-constexpr const char* SNAPMAKER_NOTIFY = "notify_client_access";
-constexpr const char* APPROVE_METHOD = "server.client_manager.approve";
+constexpr const char* kSnapmakerNotify = "notify_client_access";
+constexpr const char* kApproveMethod = "server.client_manager.approve";
 /// The handler name the router registers under, from its own .cpp.
-constexpr const char* HANDLER_NAME = "lan_client_auth";
+constexpr const char* kHandlerName = "lan_client_auth";
 
 /// A notification frame as Moonraker puts it on the wire: the component's
 /// event payload wrapped in the params array.
 json access_frame(const json& payload) {
     return json{
-        {"jsonrpc", "2.0"}, {"method", SNAPMAKER_NOTIFY}, {"params", json::array({payload})}};
+        {"jsonrpc", "2.0"}, {"method", kSnapmakerNotify}, {"params", json::array({payload})}};
 }
 
 json request_frame(const std::string& client_id, const std::string& app_id) {
@@ -88,17 +89,14 @@ class LanAuthRouterFixture : public XMLTestFixture {
     /// Drain until the queue stops producing work. A drained callback can
     /// enqueue more, so a single drain leaves work in flight.
     void settle() {
-        for (int i = 0; i < 16 && UpdateQueue::instance().pending_count() > 0; i++) {
-            UpdateQueue::instance().drain();
-        }
-        UpdateQueue::instance().drain();
+        helix::ui::UpdateQueueTestAccess::drain_all(UpdateQueue::instance(), 16);
     }
 
     /// Deliver a notification the way the WebSocket thread would, then let the
     /// router's deferred handler actually run.
     /// @return whether anything was subscribed to receive it.
     bool deliver(FakeMoonrakerClient& client, const json& msg) {
-        const bool fired = client.fire_notification(SNAPMAKER_NOTIFY, msg);
+        const bool fired = client.fire_notification(kSnapmakerNotify, msg);
         settle();
         return fired;
     }
@@ -177,7 +175,7 @@ TEST_CASE_METHOD(LanAuthRouterFixture,
     CHECK(ModalStack::instance().top_dialog() == nullptr);
     // And the answer carries the NEWEST attempt id, which is the one still
     // listening for it.
-    REQUIRE(client.rpc_count(APPROVE_METHOD) == 1);
+    REQUIRE(client.rpc_count(kApproveMethod) == 1);
     const auto* rpc = client.last_rpc();
     REQUIRE(rpc != nullptr);
     CHECK(rpc->params["app_id"] == "orca-second");
@@ -203,7 +201,7 @@ TEST_CASE_METHOD(LanAuthRouterFixture,
     CHECK(ModalStack::instance().top_dialog() == nullptr);
     // The one answer belongs to the client that was actually being asked
     // about — approving the wrong one would admit a device nobody looked at.
-    REQUIRE(client.rpc_count(APPROVE_METHOD) == 1);
+    REQUIRE(client.rpc_count(kApproveMethod) == 1);
     const auto* rpc = client.last_rpc();
     REQUIRE(rpc != nullptr);
     CHECK(rpc->params["clientid"] == "orca-abc");
@@ -224,10 +222,10 @@ TEST_CASE_METHOD(LanAuthRouterFixture, "lan auth router: Allow approves the aski
 
     press_button(prompt, "btn_primary");
 
-    REQUIRE(client.rpc_count(APPROVE_METHOD) == 1);
+    REQUIRE(client.rpc_count(kApproveMethod) == 1);
     const auto* rpc = client.last_rpc();
     REQUIRE(rpc != nullptr);
-    CHECK(rpc->method == APPROVE_METHOD);
+    CHECK(rpc->method == kApproveMethod);
     CHECK(rpc->params["approve"] == 1);
     CHECK(rpc->params["clientid"] == "orca-abc");
     CHECK(rpc->params["app_id"] == "orca-1787643423061664");
@@ -248,10 +246,10 @@ TEST_CASE_METHOD(LanAuthRouterFixture, "lan auth router: Deny puts the refusal o
 
     // Silence is not a denial: saying nothing leaves the client sitting on
     // "requesting connection" until it times out. The refusal has to be sent.
-    REQUIRE(client.rpc_count(APPROVE_METHOD) == 1);
+    REQUIRE(client.rpc_count(kApproveMethod) == 1);
     const auto* rpc = client.last_rpc();
     REQUIRE(rpc != nullptr);
-    CHECK(rpc->method == APPROVE_METHOD);
+    CHECK(rpc->method == kApproveMethod);
     CHECK(rpc->params["approve"] == 0);
     CHECK(rpc->params["clientid"] == "orca-abc");
     CHECK(ModalStack::instance().top_dialog() == nullptr);
@@ -287,7 +285,7 @@ TEST_CASE_METHOD(LanAuthRouterFixture,
     settle();
 
     // Nothing was answered; the client is still waiting and will re-file.
-    CHECK(client.rpc_count(APPROVE_METHOD) == 0);
+    CHECK(client.rpc_count(kApproveMethod) == 0);
 
     // The regression this guards: with the pending request left set behind the
     // dismissed dialog, every later request is refused as "one is already
@@ -297,7 +295,7 @@ TEST_CASE_METHOD(LanAuthRouterFixture,
     REQUIRE(second != nullptr);
 
     press_button(second, "btn_primary");
-    REQUIRE(client.rpc_count(APPROVE_METHOD) == 1);
+    REQUIRE(client.rpc_count(kApproveMethod) == 1);
     const auto* rpc = client.last_rpc();
     REQUIRE(rpc != nullptr);
     CHECK(rpc->params["clientid"] == "app-phone");
@@ -319,17 +317,17 @@ TEST_CASE_METHOD(LanAuthRouterFixture, "lan auth router: the destructor stops li
             REQUIRE(client.method_callbacks.count(method) == 1);
             const auto& handlers = client.method_callbacks.at(method);
             REQUIRE(handlers.size() == 1);
-            CHECK(handlers[0].handler_name == HANDLER_NAME);
+            CHECK(handlers[0].handler_name == kHandlerName);
         }
     }
     settle();
 
     for (const std::string& method : helix::lan_auth::notification_methods()) {
-        CHECK(client.was_unregistered(method, HANDLER_NAME));
+        CHECK(client.was_unregistered(method, kHandlerName));
     }
     // The record is only half of it — the subscription itself has to be gone,
     // so a notification arriving afterwards reaches nothing.
-    CHECK_FALSE(client.fire_notification(SNAPMAKER_NOTIFY, request_frame("orca-abc", "orca-1")));
+    CHECK_FALSE(client.fire_notification(kSnapmakerNotify, request_frame("orca-abc", "orca-1")));
     settle();
     CHECK(ModalStack::instance().top_dialog() == nullptr);
 }

@@ -47,21 +47,6 @@ Create a JSON file in this directory (e.g., `my-printer.json`):
 | `enabled` | `false` to hide a bundled printer from detection/selection |
 | `console_filters` | List of named filter-set names whose patterns suppress firmware noise in the G-code console. See **Console Filter Sets** below. |
 | `console_filter_patterns` | Inline suppression patterns for noise specific to this one model, when a shared set would be overkill. Same pattern syntax as a set. |
-| `screws_tilt_direction` | `"cw"` or `"ccw"` — override for bed-screw tightening direction. Set to `"ccw"` when the printer's Klipper `screw_thread` config disagrees with its physical screw geometry, causing `SCREWS_TILT_CALCULATE` to report inverted directions. HelixScreen flips CW↔CCW at display so following the UI actually levels the bed. Omit (or use `"cw"`) when Klipper's output matches reality. |
-
-Example with a screws-tilt override:
-
-```json
-{
-  "printers": [
-    {
-      "id": "my_custom_printer",
-      "name": "My Custom Printer",
-      "screws_tilt_direction": "ccw"
-    }
-  ]
-}
-```
 
 ## Console Filter Sets
 

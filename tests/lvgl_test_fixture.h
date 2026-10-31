@@ -14,15 +14,15 @@
 /**
  * @brief Test display dimensions (standard 800x480 touchscreen)
  */
-constexpr int TEST_DISPLAY_WIDTH = 800;
-constexpr int TEST_DISPLAY_HEIGHT = 480;
+constexpr int kTestDisplayWidth = 800;
+constexpr int kTestDisplayHeight = 480;
 
 /**
  * @brief Drive a display to a size for the duration of a scope, then put it back
  *
  * A resize is the only production path that reaches
  * theme_manager_refresh_layout_constants(), and the rest of the suite assumes
- * the fixture's TEST_DISPLAY_WIDTH x TEST_DISPLAY_HEIGHT.
+ * the fixture's kTestDisplayWidth x kTestDisplayHeight.
  *
  * The destructor restores the pixels only. The derived state those pixels
  * feed - XML px constants, the ui_breakpoint / ui_breakpoint_v /
@@ -129,12 +129,11 @@ class LVGLTestFixture : public HelixTestFixture {
      * — the test binary has no tick source of its own (see below), so this is
      * the only thing that makes LVGL's clock move.
      *
-     * NOT a wall-clock wait, and NOT a way to wait on another thread. Real time
-     * elapsed is roughly `ms / 5` (one 1ms sleep per 5ms step) and exactly zero
-     * for `ms <= 50`, which skips the sleep entirely. A loop that accumulates
-     * the nominal `ms` toward a timeout therefore burns its whole budget in a
-     * fraction of the time and may never yield to the thread it is waiting on;
-     * the test then fails past the end of the fixture's lifetime, so teardown
+     * NOT a wall-clock wait, and NOT a way to wait on another thread: it
+     * never sleeps, so no real time passes beyond the CPU the timers take. A
+     * loop that accumulates the nominal `ms` toward a timeout burns its whole
+     * budget at once and may never yield to the thread it is waiting on; the
+     * test then fails past the end of the fixture's lifetime, so teardown
      * effects look like they happened mid-test. Use wait_until() for that, or
      * better, join the worker (e.g. ThumbnailProcessor::wait_for_completion())
      * and then drain.
@@ -156,6 +155,21 @@ class LVGLTestFixture : public HelixTestFixture {
      */
     bool wait_until(const std::function<bool()>& condition, uint32_t timeout_ms = 5000,
                     uint32_t poll_ms = 5);
+
+    /**
+     * @brief Advance VIRTUAL time until @p condition holds, never sleeping
+     * @param condition Predicate, re-evaluated after every pump
+     * @param budget_ms Virtual budget: how far LVGL's clock may move
+     * @param step_ms Virtual tick step per iteration
+     * @return true if the condition held within the budget
+     *
+     * For waits that only LVGL timers and the UpdateQueue can end. Nothing
+     * sleeps, so a 2s virtual timer costs microseconds, and no other thread
+     * gets a time slice from it: when a real thread has to publish the result,
+     * use wait_until(). The condition is evaluated at least once.
+     */
+    bool advance_until(const std::function<bool()>& condition, uint32_t budget_ms,
+                       uint32_t step_ms = 5);
 
     /**
      * @brief Get the test screen for this fixture
@@ -185,7 +199,6 @@ class LVGLTestFixture : public HelixTestFixture {
      */
     static void ensure_lvgl_initialized();
 
-  protected:
     lv_obj_t* m_test_screen; ///< Test screen for this fixture instance
 
     // Static initialization state

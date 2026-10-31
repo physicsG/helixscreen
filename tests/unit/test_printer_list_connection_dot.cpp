@@ -19,6 +19,7 @@
 #include "printer_state.h"
 
 #include <lvgl.h>
+#include <memory>
 
 #include "../catch_amalgamated.hpp"
 #include "hv/json.hpp"
@@ -108,4 +109,28 @@ TEST_CASE_METHOD(ConnectionDotFixture,
     lv_obj_t* name = lv_obj_find_by_name(row, "printer_name");
     REQUIRE(name != nullptr);
     CHECK(std::string(lv_label_get_text(name)) == "10.0.0.9");
+}
+
+// A repopulation clears and rebuilds the rows inside the overlay's own call; queued
+// work, such as the go_back a row click schedules, waits for the next tick instead of
+// running under it, where it could free the overlay mid-populate.
+TEST_CASE_METHOD(ConnectionDotFixture, "Printers list: repopulating runs no queued callback",
+                 "[multi-printer][printer_list][drain_reentrancy]") {
+    auto overlay = std::make_unique<helix::ui::PrinterListOverlay>();
+    lv_obj_t* root = overlay->create(test_screen());
+    REQUIRE(root != nullptr);
+
+    bool ran = false;
+    helix::ui::UpdateQueue::instance().queue("test::free_printer_list", [&ran, &overlay]() {
+        ran = true;
+        overlay.reset();
+    });
+    overlay->on_activate();
+    REQUIRE_FALSE(ran);
+    CHECK(lv_obj_find_by_name(root, "alpha") != nullptr);
+    CHECK(lv_obj_find_by_name(root, "beta") != nullptr);
+
+    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    CHECK(ran);
+    CHECK(overlay == nullptr);
 }

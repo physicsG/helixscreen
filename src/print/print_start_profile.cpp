@@ -187,8 +187,33 @@ bool PrintStartProfile::try_match_signal(const std::string& line, MatchResult& r
     return false;
 }
 
+bool PrintStartProfile::start_block_step_owns(const std::string& command,
+                                              const std::string& console_line) const {
+    const auto it = start_block_owned_lines_.find(command);
+    if (it == start_block_owned_lines_.end()) {
+        return false;
+    }
+    return std::any_of(it->second.begin(), it->second.end(), [&](const std::string& text) {
+        return console_line.find(text) != std::string::npos;
+    });
+}
+
 bool PrintStartProfile::try_match_pattern(const std::string& line, MatchResult& result) const {
     return match_pattern_list(response_patterns_, line, result);
+}
+
+bool PrintStartProfile::try_match_tag(const std::string& line, MatchResult& result) const {
+    return match_pattern_list(tag_patterns_, line, result);
+}
+
+int PrintStartProfile::percent_from_report(double value) {
+    if (!std::isfinite(value) || value < 0.0) {
+        return -1;
+    }
+    const float v = static_cast<float>(value);
+    // Bounded before the cast; the result clamps to 100 anyway.
+    const float scaled = (v <= 1.5f) ? v * 100.0f : std::min(v, 1000.0f);
+    return std::clamp(static_cast<int>(scaled + 0.5f), 0, 100);
 }
 
 bool PrintStartProfile::try_match_state(const std::string& state, MatchResult& result) const {
@@ -216,15 +241,23 @@ bool PrintStartProfile::match_pattern_list(const std::vector<ResponsePattern>& p
             result.progress = rp.weight; // Caller interprets based on progress_mode
             result.hold_seconds = 0;
             result.narrates = rp.narrates;
+            result.counts_probes = rp.counts_probes;
+            result.reported_percent = -1;
+            result.owns = rp.owns;
+            if (rp.progress_group > 0 && static_cast<size_t>(rp.progress_group) < match.size()) {
+                if (auto value = helix::text_io::parse_double(match[rp.progress_group].view)) {
+                    result.reported_percent = percent_from_report(*value);
+                }
+            }
             if (rp.hold_minutes_group > 0 &&
                 static_cast<size_t>(rp.hold_minutes_group) < match.size()) {
                 // Firmware prints the number with a '.' whatever the UI locale.
                 // A day bounds the seconds well inside an int.
-                constexpr double MAX_HOLD_MINUTES = 24.0 * 60.0;
+                constexpr double kMaxHoldMinutes = 24.0 * 60.0;
                 auto minutes = helix::text_io::parse_double(match[rp.hold_minutes_group].view);
                 if (minutes && std::isfinite(*minutes) && *minutes > 0.0) {
                     result.hold_seconds =
-                        static_cast<int>(std::lround(std::min(*minutes, MAX_HOLD_MINUTES) * 60.0));
+                        static_cast<int>(std::lround(std::min(*minutes, kMaxHoldMinutes) * 60.0));
                 }
             }
             spdlog::trace("[PrintStartProfile] Pattern match: '{}' -> phase={}, msg='{}'", text,
@@ -233,6 +266,20 @@ bool PrintStartProfile::match_pattern_list(const std::vector<ResponsePattern>& p
         }
     }
     return false;
+}
+
+std::string PrintStartProfile::innermost_context(const nlohmann::json& value) {
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    if (value.is_array() && !value.empty() && value.back().is_string()) {
+        return value.back().get<std::string>();
+    }
+    return {};
+}
+
+std::string PrintStartProfile::qualify_state(const std::string& context, const std::string& state) {
+    return context + "/" + state;
 }
 
 std::vector<std::string> PrintStartProfile::required_status_objects() const {
@@ -299,9 +346,24 @@ bool PrintStartProfile::parse_json(const json& j, const std::string& source_path
         adaptive_meshing_ = j["adaptive_meshing"].get<bool>();
     }
 
-    // Creality tag stream in gcode_response (optional, defaults to false)
-    if (j.contains("cfs_signals") && j["cfs_signals"].is_boolean()) {
-        cfs_signals_ = j["cfs_signals"].get<bool>();
+    // Start sequence inlined in the print file (optional, defaults to false)
+    if (j.contains("scripted_start") && j["scripted_start"].is_boolean()) {
+        scripted_start_ = j["scripted_start"].get<bool>();
+    }
+
+    // Console lines a start-block command prints while it runs (optional)
+    if (j.contains("start_block_owned_lines") && j["start_block_owned_lines"].is_object()) {
+        for (const auto& [command, lines] : j["start_block_owned_lines"].items()) {
+            if (!lines.is_array()) {
+                continue;
+            }
+            auto& owned = start_block_owned_lines_[helix::text_io::to_upper(command)];
+            for (const auto& text : lines) {
+                if (text.is_string() && !text.get_ref<const std::string&>().empty()) {
+                    owned.push_back(text.get<std::string>());
+                }
+            }
+        }
     }
 
     // Silent-window position inference (optional, defaults to false)
@@ -388,6 +450,12 @@ bool PrintStartProfile::parse_json(const json& j, const std::string& source_path
                             source_path);
     }
 
+    // Tag patterns (optional) — lines that announce a step outright, matched
+    // ahead of the response patterns. Same entry shape.
+    if (j.contains("tag_patterns") && j["tag_patterns"].is_array()) {
+        parse_pattern_array(j["tag_patterns"], tag_patterns_, "tag_pattern", source_path);
+    }
+
     // Phase object (optional) — a status object whose field carries structured
     // phase state. Its state strings map to phases through state_patterns and
     // feed the same matching pipeline console lines take. Malformed entries
@@ -405,6 +473,24 @@ bool PrintStartProfile::parse_json(const json& j, const std::string& source_path
                              source_path);
                 phase_object_name_.clear();
                 phase_object_field_.clear();
+            }
+            // A bad context qualifier drops the whole phase object: its
+            // state_patterns are written against "<context>/<state>" keys, so
+            // matching bare states against them would only ever miss.
+            if (po.contains("context_field")) {
+                const auto& cf = po["context_field"];
+                if (cf.is_string() && !cf.get_ref<const std::string&>().empty()) {
+                    phase_object_context_field_ = cf.get<std::string>();
+                } else {
+                    spdlog::warn("[PrintStartProfile] phase_object context_field must be a "
+                                 "non-empty string in {} - phase_object ignored",
+                                 source_path);
+                    phase_object_name_.clear();
+                    phase_object_field_.clear();
+                }
+            }
+            if (phase_object_name_.empty()) {
+                phase_object_context_field_.clear();
             }
         } else {
             spdlog::warn(
@@ -483,9 +569,20 @@ void PrintStartProfile::parse_pattern_array(const nlohmann::json& array,
 
         ResponsePattern rp;
 
-        // Compile regex with case-insensitive flag
+        // Case-insensitive unless the entry asks otherwise
         std::string pattern_str = rp_json["pattern"].get<std::string>();
-        rp.pattern = helix::Regex(pattern_str, helix::Regex::ICase);
+        bool case_sensitive = false;
+        if (rp_json.contains("case_sensitive")) {
+            if (rp_json["case_sensitive"].is_boolean()) {
+                case_sensitive = rp_json["case_sensitive"].get<bool>();
+            } else {
+                spdlog::warn(
+                    "[PrintStartProfile] Ignoring non-boolean case_sensitive for {} '{}' in {}",
+                    kind, pattern_str, source_path);
+            }
+        }
+        rp.pattern =
+            helix::Regex(pattern_str, case_sensitive ? helix::Regex::None : helix::Regex::ICase);
         if (!rp.pattern.ok()) {
             spdlog::warn("[PrintStartProfile] Invalid regex '{}' in {}: {}", pattern_str,
                          source_path, rp.pattern.error());
@@ -521,6 +618,16 @@ void PrintStartProfile::parse_pattern_array(const nlohmann::json& array,
             }
         }
 
+        if (rp_json.contains("counts_probes")) {
+            if (rp_json["counts_probes"].is_boolean()) {
+                rp.counts_probes = rp_json["counts_probes"].get<bool>();
+            } else {
+                spdlog::warn(
+                    "[PrintStartProfile] Ignoring non-boolean counts_probes for {} '{}' in {}",
+                    kind, pattern_str, source_path);
+            }
+        }
+
         // Silent minutes the text announces, from a capture group (optional)
         if (rp_json.contains("hold_minutes_group")) {
             const auto& group = rp_json["hold_minutes_group"];
@@ -531,6 +638,46 @@ void PrintStartProfile::parse_pattern_array(const nlohmann::json& array,
                 spdlog::warn("[PrintStartProfile] Ignoring hold_minutes_group for {} '{}' in {}: "
                              "not a capture group of the pattern",
                              kind, pattern_str, source_path);
+            }
+        }
+
+        // Progress the text reports, from a capture group (optional)
+        if (rp_json.contains("progress_group")) {
+            const auto& group = rp_json["progress_group"];
+            if (group.is_number_integer() && group.get<int>() >= 1 &&
+                static_cast<unsigned>(group.get<int>()) <= rp.pattern.mark_count()) {
+                rp.progress_group = group.get<int>();
+            } else {
+                spdlog::warn("[PrintStartProfile] Ignoring progress_group for {} '{}' in {}: "
+                             "not a capture group of the pattern",
+                             kind, pattern_str, source_path);
+            }
+        }
+
+        // Phases the step this text begins emits signals for (optional)
+        if (rp_json.contains("owns")) {
+            const auto& owns = rp_json["owns"];
+            if (!owns.is_array()) {
+                spdlog::warn("[PrintStartProfile] Ignoring non-array owns for {} '{}' in {}", kind,
+                             pattern_str, source_path);
+            } else {
+                for (const auto& name : owns) {
+                    std::optional<PrintStartPhase> phase;
+                    if (name.is_string()) {
+                        phase = helix::print_start_phase_from_name(
+                            helix::text_io::to_upper(name.get<std::string>()));
+                    }
+                    // A step cannot own itself, nothing, or the print starting.
+                    if (!phase || *phase == rp.phase || *phase == PrintStartPhase::IDLE ||
+                        *phase == PrintStartPhase::COMPLETE) {
+                        spdlog::warn("[PrintStartProfile] Ignoring owns entry {} for {} '{}' in {}",
+                                     name.dump(), kind, pattern_str, source_path);
+                        continue;
+                    }
+                    if (std::find(rp.owns.begin(), rp.owns.end(), *phase) == rp.owns.end()) {
+                        rp.owns.push_back(*phase);
+                    }
+                }
             }
         }
 

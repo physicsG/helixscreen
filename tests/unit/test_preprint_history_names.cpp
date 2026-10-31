@@ -43,7 +43,7 @@ class HistoryConfigFixture {
     std::string temp_dir;
 
     void seed_entries(const json& entries) {
-        ConfigTestAccess::data(config) = json{{"config_version", helix::CURRENT_CONFIG_VERSION},
+        ConfigTestAccess::data(config) = json{{"config_version", helix::kCurrentConfigVersion},
                                               {"active_printer_id", "voron"},
                                               {"print_start_history", {{"entries", entries}}}};
     }

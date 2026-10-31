@@ -15,6 +15,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
+#include "glass_painter.h"
 #include "printer_state.h"
 #include "session_wiring.h"
 
@@ -86,4 +87,12 @@ TEST_CASE_METHOD(SessionShellFixture, "the printer icon follows the connection",
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     CHECK(icon_state() == static_cast<int>(PrinterIconState::READY));
+}
+
+TEST_CASE_METHOD(SessionShellFixture, "the navbar takes glass as a surface",
+                 "[session_wiring][glass]") {
+    lv_obj_t* navbar = lv_obj_find_by_name(shell, "navbar");
+    REQUIRE(navbar != nullptr);
+    // It fills itself with card_bg locally instead of carrying the Card style.
+    CHECK(helix::ui::glass_family_of(navbar, LV_PART_MAIN) == helix::ui::GlassFamily::Surface);
 }

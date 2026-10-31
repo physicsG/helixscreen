@@ -1,0 +1,16 @@
+{
+    "type": "filament",
+    "name": "Eryone ASA",
+    "inherits": "Eryone Standard PLA",
+    "instantiation": "true",
+    "filament_id": "EFL92",
+    "filament_type": [
+        "ASA"
+    ],
+    "nozzle_temperature": [
+        "265"
+    ],
+    "hot_plate_temp": [
+        "110"
+    ]
+}

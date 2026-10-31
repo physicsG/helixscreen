@@ -73,16 +73,11 @@
                this row ends up with (e.g. portrait_cards_row splitting the
                row with current_mesh_card, or a genuinely long saved profile
                name) truncates on one line with an ellipsis instead of
-               wrapping — flex_grow="1" makes this the field that absorbs
-               the squeeze, so it is the one that should truncate; the fixed-
-               width range value next to it should not. width="1" alongside
-               flex_grow="1" is required for dots to actually engage: LVGL's
-               theme default width is "content" (size-to-fit), and dot
-               truncation needs a definite width to truncate against — a
-               content-sized label just grows/wraps instead, even when flex
-               allocates it real pixels (verified: without width="1" this
-               wrapped a long name across 5 lines rather than truncating).
-               Same idiom as the flex column in ams_loaded_card.xml. -->
+               wrapping. flex_grow="1" makes this the field that absorbs the
+               squeeze, so it is the one that truncates; the fixed-width range
+               value next to it does not. text_small holds a dotted
+               content-height label to one line, which is what makes the dots
+               engage. -->
           <!-- height="content", not 100%: a full-height label box renders its
                glyphs at the top, leaving the name higher than the range and icons. -->
           <text_small name="profile_${i}_name"

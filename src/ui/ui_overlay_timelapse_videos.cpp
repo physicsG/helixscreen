@@ -13,15 +13,16 @@
 #include "ui_gradient_canvas.h"
 #include "ui_modal.h"
 #include "ui_notification.h"
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "app_globals.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "helix-xml/src/xml/parsers/lv_xml_responsive_grid_parser.h"
 #include "lv_draw_buf_guard.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
+#include "system/run_capture.h"
 #include "theme_manager.h"
 #include "thumbnail_cache.h"
 #include "thumbnail_processor.h"
@@ -45,11 +46,11 @@
 
 // Where a same-host Moonraker keeps its videos when server.files.roots has not
 // answered yet (or names no timelapse root): the stock data_path layout.
-static constexpr const char* TIMELAPSE_DATA_SUBPATH = "printer_data/timelapse/";
+static constexpr const char* kTimelapseDataSubpath = "printer_data/timelapse/";
 
 static std::string default_timelapse_dir() {
     const char* home = getenv("HOME");
-    return std::string(home ? home : "/root") + "/" + TIMELAPSE_DATA_SUBPATH;
+    return std::string(home ? home : "/root") + "/" + kTimelapseDataSubpath;
 }
 
 // ============================================================================
@@ -66,7 +67,7 @@ TimelapseVideosOverlay& get_global_timelapse_videos() {
     return *instance;
 }
 
-void init_global_timelapse_videos(IMoonrakerAPI* api) {
+void init_global_timelapse_videos(helix::IMoonrakerAPI* api) {
     helix::lazy_global<TimelapseVideosOverlay>("TimelapseVideosOverlay", api);
     spdlog::trace("[Timelapse Videos] TimelapseVideosOverlay initialized");
 }
@@ -103,7 +104,7 @@ bool helix::ui::timelapse_viewer_available() {
 // CONSTRUCTOR
 // ============================================================================
 
-TimelapseVideosOverlay::TimelapseVideosOverlay(IMoonrakerAPI* api) : api_(api) {}
+TimelapseVideosOverlay::TimelapseVideosOverlay(helix::IMoonrakerAPI* api) : api_(api) {}
 
 // ============================================================================
 // LIFECYCLE
@@ -236,13 +237,10 @@ void TimelapseVideosOverlay::fetch_video_list() {
 // VIDEO GRID MANAGEMENT
 // ============================================================================
 
-// Card sizing constants (same as print select)
-static constexpr int CARD_MIN_WIDTH = 140;
-static constexpr int CARD_MAX_WIDTH = 230;
-static constexpr int CARD_DEFAULT_HEIGHT = 220;
+static constexpr int kCardDefaultHeight = 220;
 
 TimelapseCardDimensions TimelapseVideosOverlay::calculate_card_dimensions() {
-    TimelapseCardDimensions dims{CARD_MIN_WIDTH, CARD_DEFAULT_HEIGHT};
+    TimelapseCardDimensions dims{0, kCardDefaultHeight};
 
     if (!video_grid_container_ || !overlay_root_) {
         spdlog::debug("[{}] Cannot calculate dimensions: container or root is null", get_name());
@@ -300,26 +298,9 @@ TimelapseCardDimensions TimelapseVideosOverlay::calculate_card_dimensions() {
                   get_name(), overlay_height, header_height, content_pad_top, content_pad_bottom,
                   render_height, grid_pad_top, content_gap, available_height, dims.card_height);
 
-    // Calculate card width: try column counts from 10 down to 1
-    lv_coord_t container_width = lv_obj_get_content_width(video_grid_container_);
-    int col_gap = lv_obj_get_style_pad_column(video_grid_container_, LV_PART_MAIN);
-
-    for (int cols = 10; cols >= 1; cols--) {
-        int total_gaps = (cols - 1) * col_gap;
-        int card_width = (container_width - total_gaps) / cols;
-
-        if (card_width >= CARD_MIN_WIDTH && card_width <= CARD_MAX_WIDTH) {
-            dims.card_width = card_width;
-            spdlog::debug("[{}] Card layout: {} columns, card={}x{}", get_name(), cols,
-                          dims.card_width, dims.card_height);
-            return dims;
-        }
-    }
-
-    // Fallback
-    dims.card_width = CARD_MIN_WIDTH;
-    spdlog::debug("[{}] Card layout fallback: card={}x{}", get_name(), dims.card_width,
-                  dims.card_height);
+    // The grid's columns decide the width; the gradient buffer is sized per cell.
+    dims.card_width = lv_xml_responsive_grid_get_fit(video_grid_container_).col_w;
+    spdlog::debug("[{}] Card layout: card={}x{}", get_name(), dims.card_width, dims.card_height);
     return dims;
 }
 
@@ -395,10 +376,7 @@ void TimelapseVideosOverlay::populate_video_grid(const std::vector<FileInfo>& fi
             continue;
         }
 
-        // Apply responsive card dimensions
-        lv_obj_set_width(card, dims.card_width);
         lv_obj_set_height(card, dims.card_height);
-        lv_obj_set_style_flex_grow(card, 0, LV_PART_MAIN);
 
         // Apply shared gradient buffer to card
         ensure_gradient_cache(dims.card_width, dims.card_height);
@@ -598,9 +576,9 @@ void TimelapseVideosOverlay::load_thumbnail_for_card(lv_obj_t* card, const std::
 }
 
 void TimelapseVideosOverlay::clear_video_grid() {
+    // Queued thumbnails find their card by filename among the live children,
+    // so none reaches a card cleared here.
     if (video_grid_container_) {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
         helix::ui::safe_clean_children(video_grid_container_);
     }
     videos_.clear();
@@ -620,25 +598,13 @@ void TimelapseVideosOverlay::detect_playback_capability() {
         detected = true;
 
         // Check for available players (only once per process)
-        FILE* pipe = popen("which mpv 2>/dev/null", "r");
-        if (pipe) {
-            char buf[256];
-            if (fgets(buf, sizeof(buf), pipe) != nullptr) {
-                cached_player = "mpv";
+        for (const char* player : {"mpv", "ffplay"}) {
+            int exit_code = -1;
+            if (!helix::run_capture(std::string("which ") + player + " 2>/dev/null", exit_code)
+                     .empty()) {
+                cached_player = player;
                 cached_can_play = true;
-            }
-            pclose(pipe);
-        }
-
-        if (!cached_can_play) {
-            pipe = popen("which ffplay 2>/dev/null", "r");
-            if (pipe) {
-                char buf[256];
-                if (fgets(buf, sizeof(buf), pipe) != nullptr) {
-                    cached_player = "ffplay";
-                    cached_can_play = true;
-                }
-                pclose(pipe);
+                break;
             }
         }
     }
@@ -856,6 +822,8 @@ void TimelapseVideosOverlay::on_card_long_pressed(lv_event_t* e) {
         return;
 
     spdlog::debug("[Timelapse Videos] Card long-pressed: {}", filename);
+    // The hold acts, so its release is not also a tap that plays the video.
+    helix::ui::end_press(e);
     self->confirm_delete(filename);
 }
 

@@ -4,7 +4,8 @@
 <!-- Non-interactive section label; used as the first child of a <setting_group> card. -->
 <!-- Usage: <setting_group_header title="DISPLAY" title_tag="DISPLAY" icon="light" hide_icon="false"/> -->
 <!-- Optional count badge (right-justified): badge_name="fan_count" badge_text="0" hide_badge="false"; -->
-<!-- C++ finds the pill by badge_name and updates it via ui_status_pill_set_text(). -->
+<!-- C++ finds the pill by badge_name and updates it via ui_status_pill_set_text(), or -->
+<!-- badge_subject binds the badge's text to a subject (an int count shows as a number). -->
 <component>
   <api>
     <prop name="title" type="string" default="Section"/>
@@ -15,6 +16,7 @@
     <prop name="badge_name" type="string" default=""/>
     <prop name="badge_text" type="string" default=""/>
     <prop name="hide_badge" type="string" default="true"/>
+    <prop name="badge_subject" type="string" default=""/>
   </api>
   <styles>
     <style name="pad_standard"
@@ -35,6 +37,6 @@
       <text_muted text="$title" translation_tag="$title_tag" style_text_letter_space="1"/>
     </lv_obj>
     <!-- Optional count badge, right-justified (hidden by default; excluded from flex when hidden). -->
-    <status_pill name="$badge_name" text="$badge_text" variant="muted" hidden="$hide_badge"/>
+    <status_pill name="$badge_name" text="$badge_text" bind_text="$badge_subject" variant="muted" hidden="$hide_badge"/>
   </view>
 </component>

@@ -25,20 +25,20 @@
 namespace {
 
 // Mirrors the shipped orca_library_types for deterministic tests.
-const std::set<std::string> LIB = {
+const std::set<std::string> kLib = {
     "ABS",    "ABS-GF", "ASA",     "ASA-AERO", "ASA-CF", "BVOH",     "CoPE",   "EVA",
     "HIPS",   "PA",     "PA-CF",   "PA-GF",    "PA6-CF", "PC",       "PCTG",   "PE",
     "PET-CF", "PETG",   "PETG-CF", "PHA",      "PLA",    "PLA-AERO", "PLA-CF", "PP",
     "PP-CF",  "PP-GF",  "PPA-CF",  "PPA-GF",   "PVA",    "SBS",      "TPU"};
 
-const std::map<std::string, std::string> OVERRIDES = {
+const std::map<std::string, std::string> kOverrides = {
     {"rPLA", "PLA"},    {"rPETG", "PETG"}, {"TPE", "TPU"},          {"TPU-95A", "TPU"},
     {"TPU-85A", "TPU"}, {"SILK", "PLA"},   {"Color-Change", "PLA"}, {"PLA+", "PLA"},
     {"ASA+", "ASA"},    {"ABS+", "ABS"}};
 
 struct TableFixture {
     TableFixture() {
-        filament::FilamentVariantsTestAccess::set_orca_tables(LIB, OVERRIDES);
+        filament::FilamentVariantsTestAccess::set_orca_tables(kLib, kOverrides);
     }
     ~TableFixture() {
         filament::FilamentVariantsTestAccess::set_orca_tables({}, {});
@@ -105,7 +105,7 @@ TEST_CASE_METHOD(TableFixture, "orca_match_type handles non-catalog input", "[or
 TEST_CASE("every catalog type resolves or is deliberately blank", "[orca_match][catalog]") {
     // Deliberately unmatchable — see the spec's safety rationale. PET is not
     // PETG; PPS/PPA have no library equivalent and a wrong guess is unsafe.
-    const std::set<std::string> MUST_NOT_GUESS = {"PET", "PET-GF", "PPS", "PPS-CF", "PPA"};
+    const std::set<std::string> kMustNotGuess = {"PET", "PET-GF", "PPS", "PPS-CF", "PPA"};
 
     auto catalog = helix::printer::FilamentCatalog::load_full();
     auto products = catalog.all_products();
@@ -115,7 +115,7 @@ TEST_CASE("every catalog type resolves or is deliberately blank", "[orca_match][
     for (const auto* p : products) {
         if (p->type.empty())
             continue;
-        if (filament::orca_match_type(p->type).empty() && !MUST_NOT_GUESS.count(p->type))
+        if (filament::orca_match_type(p->type).empty() && !kMustNotGuess.count(p->type))
             unresolved.insert(p->type);
     }
 
@@ -243,7 +243,7 @@ TEST_CASE_METHOD(TableFixture, "merge_user_orca_overrides is idempotent",
 
 TEST_CASE_METHOD(TableFixture, "merge_user_orca_overrides supersedes a case-variant shipped key",
                  "[orca_match][user_override]") {
-    // Shipped overrides are mixed-case (OVERRIDES carries "SILK" -> "PLA"). A
+    // Shipped overrides are mixed-case (kOverrides carries "SILK" -> "PLA"). A
     // user hand-editing orca_type_map may not match that exact case. The merge
     // must still let the user win: without case-insensitive replacement, "SILK"
     // and "Silk" coexist and std::map's sorted iteration (upper before lower)

@@ -25,7 +25,7 @@ namespace helix::diag {
 namespace {
 
 // TCP_LISTEN in the kernel's st column.
-constexpr const char* STATE_LISTEN = "0A";
+constexpr const char* kStateListen = "0A";
 
 bool parse_hex(const std::string& s, uint32_t& out) {
     if (s.empty() || s.size() > 8)
@@ -116,7 +116,7 @@ std::vector<std::string> parse_listeners_for_port(const std::string& proc_net_tc
         std::string sl, local, remote, state;
         if (!(ls >> sl >> local >> remote >> state))
             continue;
-        if (state != STATE_LISTEN)
+        if (state != kStateListen)
             continue;
 
         const size_t colon = local.rfind(':');
@@ -314,20 +314,22 @@ std::vector<std::string> listeners_on_port(uint16_t port) {
 std::vector<ProcMatch> select_moonraker_processes(const std::vector<ProcMatch>& candidates) {
     // "klippy" rather than "klipper": the process is klippy.py, and matching
     // "klipper" alone would also hit every path containing the klipper dir.
-    static const std::vector<std::string> DAEMON_NEEDLES = {"moonraker", "klippy"};
+    // moonruster and rusticc are RustiCC's Moonraker and Klipper on the CC1.
+    static const std::vector<std::string> kDaemonNeedles = {"moonraker", "klippy", "moonruster",
+                                                            "rusticc"};
 
     // Anything naming our own binary is us, however many daemon needles it also
     // carries — helix-screen's argv can name a moonraker URL. Checked after the
     // daemon needles and never instead of them: counting ourselves would turn
     // "Moonraker is not running" into "one moonraker process found", the exact
     // opposite of the finding the bundle is being read for.
-    static const std::vector<std::string> SELF_NEEDLES = {"helix-screen"};
+    static const std::vector<std::string> kSelfNeedles = {"helix-screen"};
 
     std::vector<ProcMatch> out;
     for (const auto& proc : candidates) {
-        if (!cmdline_matches_any(proc.cmdline, DAEMON_NEEDLES))
+        if (!cmdline_matches_any(proc.cmdline, kDaemonNeedles))
             continue;
-        if (cmdline_matches_any(proc.cmdline, SELF_NEEDLES))
+        if (cmdline_matches_any(proc.cmdline, kSelfNeedles))
             continue;
         out.push_back(proc);
     }

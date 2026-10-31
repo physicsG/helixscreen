@@ -54,9 +54,7 @@
           <lv_obj width="content"
                   height="content" flex_flow="row" style_pad_all="0" style_pad_gap="#space_xs"
                   style_flex_cross_place="center" scrollable="false">
-            <lv_obj name="filament_color_swatch"
-                    width="28" height="28" style_radius="14" style_bg_color="#card_bg" style_bg_opa="255"
-                    style_border_width="1" style_border_color="#border"/>
+            <color_dot name="filament_color_swatch" color="#card_bg" size="#swatch_grid_size"/>
             <ui_button name="pick_color_btn" variant="ghost" text="Pick" icon="palette">
               <event_cb trigger="clicked" callback="on_wizard_pick_filament_color"/>
             </ui_button>

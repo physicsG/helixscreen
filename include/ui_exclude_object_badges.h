@@ -68,6 +68,35 @@ struct ObjectBadge {
 std::vector<ObjectBadge> compute_object_badges(const PrinterExcludedObjectsState& state,
                                                const gcode::ParsedGCodeFile* parsed);
 
+/**
+ * @brief The name an object is shown under: its own when @p font draws it.
+ *
+ * A name with any character @p font cannot draw (a Chinese model name on an
+ * English UI, whose fonts carry no CJK) is shown as "Object <n>" instead, n
+ * being the badge number for @p defined_index, so the label still matches the
+ * object's disc. An empty name gets the same label. Display only: commands
+ * sent to the printer always carry the real name.
+ *
+ * @param defined_index Position in the defined list; negative when unknown, which labels "Object"
+ */
+std::string object_display_name(const std::string& name, int defined_index, const lv_font_t* font);
+
+/**
+ * @brief Position of @p name in @p defined, or -1 when no defined object matches.
+ *
+ * Compared ASCII upper-case: Klipper stores object names upper-cased, while the
+ * viewer and the file keep the slicer's casing.
+ */
+int defined_object_index(const std::vector<std::string>& defined, const std::string& name);
+
+/// object_display_name() with the index from defined_object_index().
+std::string object_display_name(const std::vector<std::string>& defined, const std::string& name,
+                                const lv_font_t* font);
+
+/// object_display_name() for a name formatted into a toast or dialog message,
+/// both of which draw in the body font.
+std::string object_message_name(const std::vector<std::string>& defined, const std::string& name);
+
 // Badge styling, shared by the map view's widgets and the viewer's draw pass.
 
 /// Fill colour for the object at @p defined_index (same as its side-list chip).

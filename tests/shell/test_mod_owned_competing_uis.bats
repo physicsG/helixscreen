@@ -40,6 +40,7 @@ setup() {
         "$WORKTREE_ROOT/scripts/lib/installer/competing_uis.sh" > "$patched"
     unset _HELIX_COMPETING_UIS_SOURCED
     # shellcheck disable=SC1090
+    . "$WORKTREE_ROOT/scripts/lib/installer/common.sh"
     . "$patched"
 
     # Fresh install in every case here, and nothing to kill in the sandbox.

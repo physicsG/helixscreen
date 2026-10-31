@@ -63,10 +63,10 @@ bool wizard_apply_hardware_snapshot_decision(Config* config, bool discovery_succ
     if (!config) {
         return false;
     }
-    // df() — per-printer, alongside `preset` and WIZARD_PRESET_PROVISIONAL. A
+    // df() — per-printer, alongside `preset` and kWizardPresetProvisional. A
     // root-level flag would let a second printer inherit or clear the first
     // one's debt, which is exactly what #1162 fixed for the preset marker.
-    const std::string key = config->df() + WIZARD_HARDWARE_SETUP_DEFERRED;
+    const std::string key = config->df() + kWizardHardwareSetupDeferred;
 
     if (wizard_hardware_snapshot_is_deferred(discovery_succeeded, snapshot_has_entries)) {
         config->set<bool>(key, true);
@@ -86,14 +86,14 @@ bool wizard_hardware_setup_deferred(Config* config) {
     if (!config) {
         return false;
     }
-    return config->get<bool>(config->df() + WIZARD_HARDWARE_SETUP_DEFERRED, false);
+    return config->get<bool>(config->df() + kWizardHardwareSetupDeferred, false);
 }
 
 bool wizard_clear_hardware_setup_deferred(Config* config) {
     if (!wizard_hardware_setup_deferred(config)) {
         return false;
     }
-    config->set<bool>(config->df() + WIZARD_HARDWARE_SETUP_DEFERRED, false);
+    config->set<bool>(config->df() + kWizardHardwareSetupDeferred, false);
     return true;
 }
 
@@ -202,7 +202,7 @@ std::vector<wizard::StepId> wizard_deferred_hardware_steps(const std::vector<Ste
     // Wizard order. PrinterIdentify leads: the model pick drives the preset that
     // the pickers behind it are collapsed by, so re-running the hardware steps
     // without it would ask about hardware while leaving the printer unidentified.
-    static constexpr wizard::StepId CANDIDATES[] = {
+    static constexpr wizard::StepId kCandidates[] = {
         wizard::StepId::PrinterIdentify, wizard::StepId::HeaterSelect,
         wizard::StepId::FanSelect,       wizard::StepId::AmsIdentify,
         wizard::StepId::LedSelect,       wizard::StepId::FilamentSensor,
@@ -210,7 +210,7 @@ std::vector<wizard::StepId> wizard_deferred_hardware_steps(const std::vector<Ste
     };
 
     std::vector<wizard::StepId> out;
-    for (wizard::StepId id : CANDIDATES) {
+    for (wizard::StepId id : kCandidates) {
         for (const auto& s : steps) {
             if (s.id == id) {
                 if (!s.skipped) {

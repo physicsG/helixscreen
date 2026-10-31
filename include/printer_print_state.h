@@ -5,6 +5,8 @@
 
 #include "async_lifetime_guard.h"
 #include "gcode_pause_scan.h"
+#include "height_layer_dwell.h"
+#include "layer_pause.h"
 #include "print_eta_estimator.h"
 #include "print_job_ref.h"
 #include "print_lifecycle_state.h"
@@ -18,11 +20,14 @@
 #include <lvgl.h>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "hv/json.hpp"
+
+struct MoonrakerError; // NAMESPACE_OK: MoonrakerError itself is global (moonraker_error.h)
 
 // Forward declaration - enums are defined in printer_state.h
 namespace helix {
@@ -130,36 +135,105 @@ class PrinterPrintState {
     // wrong one.
     // ========================================================================
 
-    /// Publish a scan result. The list stays hidden unless the print's
-    /// identity (get_effective_print_filename()) still equals @p
-    /// source_filename, so a scan that finishes after a print switch can
-    /// never paint the new print with the old file's pauses.
-    void set_scheduled_pauses(std::vector<helix::gcode::ScheduledPause> pauses,
-                              helix::gcode::ProgressAxis axis, const std::string& source_filename);
+    /// Publish a scan result. It stays hidden unless the print's identity
+    /// (get_effective_print_filename()) still equals @p source_filename, so a
+    /// scan that finishes after a print switch can never paint the new print
+    /// with the old file's pauses.
+    void set_pause_scan(helix::gcode::PauseScanPtr scan, const std::string& source_filename);
 
     /// The collected pauses of the scanned file; empty when none were found.
     const std::vector<helix::gcode::ScheduledPause>& get_scheduled_pauses() const {
-        return scheduled_pauses_;
+        static const std::vector<helix::gcode::ScheduledPause> kNone;
+        return pause_scan_ ? pause_scan_->pauses : kNone;
     }
 
     /// Which axis the progress bar fills on for the scanned file; marker
     /// placement must use helix::gcode::display_fraction() with this axis.
     helix::gcode::ProgressAxis get_pause_marker_axis() const {
-        return pause_marker_axis_;
+        return pause_scan_ ? pause_scan_->axis : helix::gcode::ProgressAxis::BytePosition;
     }
 
-    /// True when the collected list belongs to the print now identified by
-    /// get_effective_print_filename(). This is the draw-side gate: markers
-    /// render only while it holds.
+    /// True when the published scan belongs to the print now identified by
+    /// get_effective_print_filename(). Every marker is gated on it.
+    bool pause_scan_matches_current_file() const {
+        return pause_scan_ && pause_source_filename_ == effective_print_filename_;
+    }
+
+    /// True when the scan carries pauses for the current print: the gate for
+    /// the scanned-pause ticks.
     bool pause_markers_match_current_file() const {
-        return !scheduled_pauses_.empty() && pause_source_filename_ == effective_print_filename_;
+        return pause_scan_ && !pause_scan_->pauses.empty() && pause_scan_matches_current_file();
     }
 
-    /// Bumped whenever the pause list is published or cleared so marker
-    /// renderers can invalidate. The list itself is read via
-    /// get_scheduled_pauses(); the subject only signals change.
+    /// Where the pause scheduled at runtime (see "Layer pause" below) sits on
+    /// the progress bar: the fraction of the file's report of that layer, on
+    /// get_pause_marker_axis(). nullopt when nothing is pending, the scan does
+    /// not belong to this print, or the file never reports that layer: no
+    /// tick, never a guessed one.
+    std::optional<float> layer_pause_marker_fraction() const;
+
+    /// Bumped whenever the pause list is published or cleared, or the runtime
+    /// pause moves, so marker renderers can invalidate. The data itself is read
+    /// via the accessors above; the subject only signals change.
     lv_subject_t* get_pause_markers_version_subject() {
         return &pause_markers_version_;
+    }
+
+    // ========================================================================
+    // Layer pause (prestonbrown/helixscreen#1703)
+    //
+    // A pause the user schedules into the running print through the printer's
+    // own macros. helix::layer_pause owns the macros, their state and the
+    // rules; this holds the per-print state and publishes it to the UI.
+    // ========================================================================
+
+    /// The status object the schedule reads back from (layer_pause::
+    /// state_object()); empty when the printer publishes none. Called on every
+    /// discovery, so it also forgets the schedule: after a printer switch or a
+    /// reconnect nothing known still applies, and the subscription's first
+    /// frame reads the macro state back again.
+    void set_layer_pause_state_object(std::string object);
+
+    /// False when the current print's scanned file never reports @p layer, so
+    /// a pause armed for it could not fire this print (the macros fire on an
+    /// exact CURRENT_LAYER match) and would linger into the next. True when no
+    /// scan belongs to this print: nothing to judge by.
+    bool file_may_report_layer(int layer) const;
+
+    /// Record a command this screen sent, so the schedule shows at once and
+    /// stands in for read-back on printers that publish none.
+    void note_layer_pause_next_layer(bool enable);
+    void note_layer_pause_at_layer(int layer); ///< 0 = cancel
+
+    /// The effective schedule, from read-back or from what was sent.
+    helix::layer_pause::Schedule get_layer_pause_schedule() const {
+        return layer_pause_.effective();
+    }
+
+    /// True once this print's slicer has reported a layer through
+    /// print_stats.info: the only reports the macros fire on.
+    bool slicer_reports_layers() const {
+        return slicer_layers_reported_;
+    }
+
+    /// The last print_stats.info current/total layer, the numbers the macros
+    /// compare against. Unlike print_layer_current, never a virtual_sdcard,
+    /// gcode-echo or estimated value, whose numbering can differ.
+    int slicer_current_layer() const {
+        return slicer_current_layer_;
+    }
+    int slicer_total_layers() const {
+        return slicer_total_layers_;
+    }
+
+    /// Integer helix::layer_pause::Availability for the scheduling UI.
+    lv_subject_t* get_layer_pause_availability_subject() {
+        return &layer_pause_availability_;
+    }
+
+    /// Integer: the layer the next scheduled pause lands on, 0 = none.
+    lv_subject_t* get_layer_pause_layer_subject() {
+        return &layer_pause_layer_;
     }
 
     /// Raw filename from Moonraker
@@ -183,7 +257,7 @@ class PrinterPrintState {
         return &print_state_enum_;
     }
 
-    /// print_stats.exception code as a subject (-1 when none is latched), so a
+    /// The latched pause cause's code as a subject (-1 when none is latched), so a
     /// consumer sees a code that arrives in a later frame than the pause.
     lv_subject_t* get_print_exception_subject() {
         return &print_exception_;
@@ -317,7 +391,7 @@ class PrinterPrintState {
      * `print_stats.filament_used` stream.
      *
      * Map entries are **pre-populated** in `init_subjects()` for all indices
-     * `0 .. MAX_EXTRUDER_SCAN-1`, so the map structure is frozen after init.
+     * `0 .. kMaxExtruderScan-1`, so the map structure is frozen after init.
      * This eliminates the WebSocket-BG-thread vs UI-thread rehash race that
      * lazy emplace would expose (only subject values change during status
      * updates, and `lv_subject_set_int` is atomic for the int value).
@@ -329,14 +403,14 @@ class PrinterPrintState {
      *
      * @param extruder_idx 0-based extruder index (0 = "extruder", 1 = "extruder1", ...)
      * @param[out] lifetime Token whose expiration signals subject death
-     * @return Non-null subject pointer for `0 <= idx < MAX_EXTRUDER_SCAN` once
+     * @return Non-null subject pointer for `0 <= idx < kMaxExtruderScan` once
      *         `init_subjects()` has run; `nullptr` otherwise (lifetime untouched).
      */
     lv_subject_t* get_extruder_filament_used_subject(int extruder_idx, SubjectLifetime& lifetime);
 
     /// Maximum number of per-extruder filament subjects pre-populated at init.
     /// Klipper toolchanger setups max out well below this.
-    static constexpr int MAX_EXTRUDER_SCAN = 16;
+    static constexpr int kMaxExtruderScan = 16;
 
     /// Current PrintStartPhase enum value
     /**
@@ -361,6 +435,66 @@ class PrinterPrintState {
     }
     [[nodiscard]] const PrintJobRef& preparing_job() const {
         return preparing_job_;
+    }
+
+    /**
+     * @brief The preparing job's start command is being sent to the printer
+     *
+     * From here retiring the job locally no longer stops it: only the printer
+     * can. A firmware that runs its print-start sequence inside
+     * SDCARD_PRINT_FILE keeps print_stats idle for the whole sequence, so the
+     * printer can be working on the job long before it reports it
+     * (prestonbrown/helixscreen#1890). No-op without a preparing job.
+     */
+    void note_preparing_start_sent();
+
+    /// The start sent for the job armed at @p epoch answered: OK when
+    /// @p accepted, else refused, which leaves the printer nothing to cancel.
+    /// No-op once a different job is preparing.
+    void note_preparing_start_answered(int epoch, bool accepted);
+
+    /**
+     * @brief Stop asked the printer to cancel this job's start
+     *
+     * Set by PrintControlButtons, which sends the cancel once the start has
+     * answered or lost its answer: see hold_unanswered_start().
+     */
+    void note_preparing_cancel_requested() {
+        preparing_cancel_requested_ = !preparing_job_.empty();
+    }
+    [[nodiscard]] bool preparing_cancel_requested() const {
+        return preparing_cancel_requested_;
+    }
+
+    /**
+     * @brief The start sent for the job armed at @p epoch failed with @p error
+     *
+     * The one rule every start site applies to a start error. A refusal
+     * carries the printer's own answer: nothing is running, so the caller
+     * fails the job. An RPC timeout says Klipper is still busy with the start:
+     * a firmware that runs its print-start sequence inside SDCARD_PRINT_FILE
+     * answers only once that sequence ends, which can outlast the RPC ceiling.
+     * Such a start keeps its job, marked Unanswered so a Stop queues its cancel
+     * behind it, until the printer reports the job (reconcile_preparing) or the
+     * preparing watchdog retires it (prestonbrown/helixscreen#1898).
+     *
+     * A dropped connection is also what a start that never reached Moonraker
+     * gets, so it holds the job only while a cancel is requested; otherwise
+     * the start fails and says so.
+     *
+     * Returns true when it held the job; the caller then skips its failure
+     * handling. False for a refusal, a dropped connection with no cancel
+     * waiting, or once a different job is preparing.
+     */
+    bool hold_unanswered_start(int epoch, const MoonrakerError& error);
+
+    [[nodiscard]] PreparingStart preparing_start() const {
+        return static_cast<PreparingStart>(
+            lv_subject_get_int(const_cast<lv_subject_t*>(&preparing_start_)));
+    }
+    /// Integer PreparingStart; see note_preparing_start_sent().
+    lv_subject_t* get_preparing_start_subject() {
+        return &preparing_start_;
     }
 
     /**
@@ -509,6 +643,14 @@ class PrinterPrintState {
         return &print_start_phase_;
     }
 
+    /// 1 while the job is held by a heater wait on the chamber: the nozzle
+    /// and bed are at target and the wait goes on. Main thread only; any
+    /// phase change other than to SOAKING clears it.
+    lv_subject_t* get_print_start_chamber_wait_subject() {
+        return &print_start_chamber_wait_;
+    }
+    void set_print_start_chamber_wait(bool waiting);
+
     /// Human-readable phase message
     lv_subject_t* get_print_start_message_subject() {
         return &print_start_message_;
@@ -556,54 +698,87 @@ class PrinterPrintState {
         return &print_message_;
     }
 
-    /// print_stats.exception (Snapmaker U1 structured pause descriptor) id, or
-    /// -1 when no exception is latched. Hardware-verified ids: 523 = recoverable
-    /// runout, 532 = terminal dirty-bed (#991). Main-thread only.
+    /// Why the print is paused, or why the last one was canceled or failed,
+    /// when anything says; empty otherwise, and cleared on resume and when a
+    /// new print starts. PrintStopReasonTracker decides it (print_stop_reason.h).
+    lv_subject_t* get_print_stop_reason_subject() {
+        return &print_stop_reason_;
+    }
+
+    /// 1 when print_stop_reason is non-empty (for XML visibility binding)
+    lv_subject_t* get_print_stop_reason_visible_subject() {
+        return &print_stop_reason_visible_;
+    }
+
+    /// Main thread only.
+    void set_print_stop_reason(const std::string& reason);
+
+    /// The newest `!!` line PrintStopReasonTracker saw, as
+    /// gcode_error_reason_text(), and when (unix seconds). A print need not be
+    /// stopped. Main thread only.
+    void set_last_gcode_error(std::string text, double time) {
+        last_gcode_error_ = std::move(text);
+        last_gcode_error_time_ = time;
+    }
+    [[nodiscard]] const std::string& last_gcode_error() const {
+        return last_gcode_error_;
+    }
+    [[nodiscard]] double last_gcode_error_time() const {
+        return last_gcode_error_time_;
+    }
+
+    /// The latched structured pause cause's id (pause_cause::read), or -1 when
+    /// none is latched. Main-thread only.
     [[nodiscard]] int get_print_exception_id() const {
         return print_exception_id_;
     }
 
-    /// print_stats.exception code, or -1 when absent. (Runout = 0, dirty-bed = 1.)
+    /// The latched pause cause's code, or -1 when absent.
     [[nodiscard]] int get_print_exception_code() const {
         return print_exception_code_;
     }
 
-    /// print_stats.exception message — the human-readable pause reason. On these
-    /// firmware pauses print_stats.message is EMPTY and the text lives here.
+    /// Drop the latched pause cause (id, code, message, subject).
+    /// Main-thread only.
+    void clear_print_exception();
+
+    /// The latched pause cause's message — the human-readable pause reason. On
+    /// the firmware that publishes one, print_stats.message is EMPTY on these
+    /// pauses and the text lives here.
     [[nodiscard]] const std::string& get_print_exception_message() const {
         return print_exception_message_;
     }
 
-    /// virtual_sdcard.pl_env_valid — Snapmaker-fork Power-Loss-Recovery flag.
-    /// True only after the firmware validates a coherent power-loss snapshot
-    /// against MCU flash on boot; default 0, and stays 0 on mainline Klipper
-    /// (field absent). Main-thread only (updated by update_from_status).
-    lv_subject_t* get_pl_env_valid_subject() {
-        return &pl_env_valid_;
+    /// Power-loss recovery: the firmware reports a snapshot it validated itself
+    /// (plr_backend owns which firmware and which key). Default 0, and stays 0
+    /// on firmware without one. Main-thread only (updated by update_from_status).
+    lv_subject_t* get_plr_snapshot_valid_subject() {
+        return &plr_snapshot_valid_;
     }
 
-    /// True when virtual_sdcard.pl_env_valid is set. See get_pl_env_valid_subject().
-    [[nodiscard]] bool is_pl_env_valid() const {
-        return lv_subject_get_int(const_cast<lv_subject_t*>(&pl_env_valid_)) != 0;
+    /// True when the validated-snapshot flag is set. See
+    /// get_plr_snapshot_valid_subject().
+    [[nodiscard]] bool is_plr_snapshot_valid() const {
+        return lv_subject_get_int(const_cast<lv_subject_t*>(&plr_snapshot_valid_)) != 0;
     }
 
-    /// virtual_sdcard.file_path — the file a Power-Loss-Recovery restore would
-    /// resume. Only meaningful when is_pl_env_valid() is true. Main-thread only.
+    /// The file a Power-Loss-Recovery restore would resume, as the status
+    /// payload names it (plr_parse_recovery_file). Main-thread only.
     [[nodiscard]] const std::string& pl_recovery_file() const {
         return pl_recovery_file_;
     }
 
     /// Clear the cached Power-Loss-Recovery file path. Used on the disconnect
-    /// edge alongside forcing pl_env_valid back to 0, so a reconnect starts from
+    /// edge alongside forcing plr_snapshot_valid back to 0, so a reconnect starts from
     /// a clean slate and re-derives both from the fresh status. Main-thread only.
     void clear_pl_recovery_file() {
         pl_recovery_file_.clear();
     }
 
-    /// print_stats.power_loss PRESENCE — the Creality-Klipper-fork capability
-    /// marker for Power-Loss-Recovery. 1 once a status payload has carried the
-    /// key as a JSON number; mainline Klipper never emits it, and Moonraker's
-    /// explicit null for a subscribed-but-unpopulated field does not count.
+    /// The active recovery probe's capability marker (plr_parse_power_loss_signal
+    /// owns the key and the presence rule). 1 once a status payload has carried
+    /// it; Moonraker's explicit null for a subscribed-but-unpopulated field does
+    /// not count.
     /// Latches UP only (status arrives as deltas) and is reset by the offer
     /// controller on the disconnect edge. See docs/devel/POWER_LOSS_RECOVERY.md.
     lv_subject_t* get_plr_power_loss_signal_subject() {
@@ -713,6 +888,19 @@ class PrinterPrintState {
      * @param first_layer_height Slice first-layer height in mm (may differ)
      */
     void set_print_layer_heights(double layer_height, double first_layer_height);
+
+    /**
+     * @brief Set the materials the active print extrudes, from its file metadata
+     *
+     * Thread-safe like set_print_layer_heights(). Empty means not known. Like the
+     * layer heights they belong to the file, so a same-file reprint keeps them.
+     */
+    void set_print_materials(std::vector<std::string> materials);
+
+    /// The materials the active print extrudes; empty when not known. Main thread.
+    [[nodiscard]] const std::vector<std::string>& print_materials() const {
+        return print_materials_;
+    }
 
     /**
      * @brief Set current layer number (gcode response fallback)
@@ -995,14 +1183,25 @@ class PrinterPrintState {
     lv_subject_t print_progress_display_{}; // Integer 0-100, frozen after completion
     lv_subject_t print_progress_text_{};    // String: print_progress_display_ as "N%"
 
-    // Scheduled-pause markers: pauses collected from the active print's gcode
-    // by whichever path parsed the file. All writes happen on the main thread
-    // (publish from the viewer load callback, clear from
-    // reset_for_new_print()), so the vector needs no lock.
-    std::vector<helix::gcode::ScheduledPause> scheduled_pauses_;
+    // Scheduled-pause markers: pauses and layer marks collected from the
+    // active print's gcode by whichever path parsed the file. All writes happen
+    // on the main thread (publish from the viewer load callback, clear from
+    // reset_for_new_print()), so the vectors need no lock.
+    helix::gcode::PauseScanPtr pause_scan_; // shared with the viewer; null = no scan
     std::string pause_source_filename_;
-    helix::gcode::ProgressAxis pause_marker_axis_{helix::gcode::ProgressAxis::BytePosition};
-    lv_subject_t pause_markers_version_{};  // Integer: bumped on publish/clear
+    lv_subject_t pause_markers_version_{}; // Integer: bumped on publish/clear/move
+
+    // Layer pause: main thread only, like the status frames that feed it.
+    helix::layer_pause::Tracker layer_pause_;
+    std::string layer_pause_state_object_;
+    bool slicer_layers_reported_{false};      // per-print
+    int slicer_current_layer_{0};             // per-print, print_stats.info only
+    int slicer_total_layers_{0};              // per-print, print_stats.info only
+    bool layer_pause_seen_paused_{false};     // edge detector for Tracker::on_paused
+    lv_subject_t layer_pause_availability_{}; // Integer: layer_pause::Availability
+    lv_subject_t layer_pause_layer_{};        // Integer: pending layer, 0 = none
+    void refresh_layer_pause();
+    void bump_pause_markers_version();
     lv_subject_t print_filename_{};         // String buffer
     lv_subject_t print_state_{};            // String buffer (for UI display)
     lv_subject_t print_state_enum_{};       // Integer: PrintJobState enum
@@ -1030,13 +1229,21 @@ class PrinterPrintState {
     // no virtual_sdcard.layer). These belong to the FILE, not the session: like
     // print_layer_total_ they survive reset_for_new_print() so same-file reprints
     // (whose metadata callback won't re-fire) keep working.
-    double layer_height_ = 0.0;       // slice layer height (mm)
-    double first_layer_height_ = 0.0; // slice first-layer height (mm)
+    double layer_height_ = 0.0;                // slice layer height (mm)
+    double first_layer_height_ = 0.0;          // slice first-layer height (mm)
+    std::vector<std::string> print_materials_; // active file's extruded materials
     // Last commanded Z (mm) from gcode_move.gcode_position, cached each status
     // update so the Z-derivation can run on any update (even one that only
     // carries virtual_sdcard). Reset per-print (motion belongs to the print).
     double last_gcode_z_mm_ = 0.0;
     bool have_gcode_z_ = false;
+    // print_stats.print_duration unrounded: the clock the Z-derived layer's
+    // dwell runs on. It is the printer's own print time, so it stands still
+    // while paused (a pause park never becomes a layer) and follows the mock's
+    // --sim-speed. Reset per-print.
+    double print_clock_s_ = 0.0;
+    // A Z-derived layer waiting out kHeightLayerDwellSeconds. Reset per-print.
+    HeightLayerPending height_layer_pending_;
 
     // Print time tracking subjects (in seconds)
     lv_subject_t print_duration_{};      // Extrusion-only elapsed time (Moonraker print_duration)
@@ -1045,7 +1252,7 @@ class PrinterPrintState {
     lv_subject_t print_filament_used_{}; // Filament used in mm (from Moonraker print_stats)
 
     // Per-extruder filament_used (mm) — heap-allocated for stable pointers.
-    // Map entries are pre-populated by init_subjects() for indices 0..MAX_EXTRUDER_SCAN-1,
+    // Map entries are pre-populated by init_subjects() for indices 0..kMaxExtruderScan-1,
     // freezing the map structure so the WebSocket background thread cannot trigger
     // a rehash while a UI-thread caller is reading. Only the int value inside
     // each subject is mutated during status updates (atomic via lv_subject_set_int).
@@ -1077,11 +1284,15 @@ class PrinterPrintState {
 
     /// The job we are preparing; empty when none. See begin_preparing().
     PrintJobRef preparing_job_{};
+    lv_subject_t preparing_start_{};          // Integer PreparingStart
+    bool preparing_cancel_requested_ = false; // See note_preparing_cancel_requested()
+    void set_preparing_start(PreparingStart start);
     lv_subject_t preparing_epoch_{}; // Integer: bumped per preparing job, 0 when none
     int preparing_epoch_counter_ = 0;
     PreparingExit last_preparing_exit_ = PreparingExit::Confirmed;
-    lv_subject_t print_start_message_{};  // String: phase message
-    lv_subject_t print_start_progress_{}; // Integer: 0-100%
+    lv_subject_t print_start_chamber_wait_{}; // Integer 0/1: a heater wait on the chamber
+    lv_subject_t print_start_message_{};      // String: phase message
+    lv_subject_t print_start_progress_{};     // Integer: 0-100%
 
     // Print workflow in-progress subject
     lv_subject_t print_in_progress_{};
@@ -1097,7 +1308,7 @@ class PrinterPrintState {
     /// Half an hour. Must sit above the slowest legitimate pre-print: the K2
     /// Plus runs ~1140s with a forced mesh, and PrintStartCollector uses the
     /// same 1800s as its own "definitely stuck" ceiling.
-    static constexpr uint32_t PREPARING_WATCHDOG_MS = 1800U * 1000U;
+    static constexpr uint32_t kPreparingWatchdogMs = 1800U * 1000U;
 
     void arm_preparing_watchdog();
     void cancel_preparing_watchdog();
@@ -1166,14 +1377,14 @@ class PrinterPrintState {
     /// while print_progress_display_ holds its final value.
     bool progress_frozen_ = false;
 
-    // virtual_sdcard.pl_env_valid — Snapmaker-fork Power-Loss-Recovery flag.
-    lv_subject_t pl_env_valid_{}; // Integer: 1 when a validated PLR snapshot exists
-    // virtual_sdcard.file_path — companion to pl_env_valid_. Not a subject:
+    // Power-loss recovery validated-snapshot flag (plr_parse_snapshot_valid).
+    lv_subject_t plr_snapshot_valid_{}; // Integer: 1 when a validated PLR snapshot exists
+    // Recovery file (plr_parse_recovery_file). Not a subject:
     // no XML binding needed, read on the main thread by the resume dispatcher.
     std::string pl_recovery_file_;
 
-    // print_stats.power_loss — Creality-fork PLR capability marker. Integer:
-    // 1 once the key has been seen as a JSON number (presence, not value).
+    // Active recovery probe capability marker (plr_parse_power_loss_signal).
+    // Integer: 1 once the key has been seen (presence, not value).
     lv_subject_t plr_power_loss_signal_{};
 
     // PLR passive backend. plr_resume_macro_: 1 once discovery found the
@@ -1196,14 +1407,24 @@ class PrinterPrintState {
     lv_subject_t print_message_{};  // String: e.g. "Filament Sensor: Runout Detected"
     char print_message_buf_[256]{}; // Buffer for print_stats.message storage
 
-    // print_stats.exception — structured pause descriptor {id,index,code,message,
-    // level} sent by Snapmaker U1 firmware. On these pauses print_stats.message
-    // is empty and the reason text lives in exception.message. Plain members
-    // (not subjects): no XML binding, read on the main thread by the resume
-    // classifier. Default -1/"" means "no exception latched". (#991)
+    lv_subject_t print_stop_reason_{};
+    char print_stop_reason_buf_[256]{};
+    lv_subject_t print_stop_reason_visible_{};
+    std::string last_gcode_error_;
+    double last_gcode_error_time_ = 0.0;
+
+    // Latched structured pause cause (pause_cause::read). Plain members (not
+    // subjects): no XML binding, read on the main thread by the resume
+    // classifier. Default -1/"" means "no cause latched". (#991)
     int print_exception_id_ = -1;
     int print_exception_code_ = -1;
     std::string print_exception_message_;
+    /// print_stats frames parsed, and the one the latched exception arrived
+    /// in: a pause takes an exception from its own frame, a later one, or the
+    /// frame just before it (the firmware can publish the two across a status
+    /// interval), never one latched further back in the print.
+    uint64_t print_stats_frames_ = 0;
+    uint64_t print_exception_frame_ = 0;
 
     // String buffers for subject storage
     char print_filename_buf_[256]{};

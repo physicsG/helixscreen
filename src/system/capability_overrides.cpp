@@ -73,6 +73,10 @@ bool CapabilityOverrides::is_available(const std::string& name) const {
     }
 }
 
+bool CapabilityOverrides::is_forced_on(const std::string& name) const {
+    return get_override(name) == OverrideState::ENABLE && !get_auto_value(name);
+}
+
 bool CapabilityOverrides::get_auto_value(const std::string& name) const {
     if (!hardware_set_) {
         // No hardware set, default to false for safety

@@ -45,7 +45,7 @@ RegionsTable& user() {
     return t;
 }
 
-constexpr const char* USER_REGIONS_FILE = "printer_image_regions.json";
+constexpr const char* kUserRegionsFile = "printer_image_regions.json";
 
 /// `set_aside_bad`: a file that reads but does not parse is renamed to
 /// `<path>.bad` and the table starts empty, so the next save writes a fresh
@@ -120,7 +120,7 @@ bool write_user_table(const std::unordered_map<std::string, ImageRegions>& entri
         sep = ",\n";
     }
     text += "\n}\n";
-    const std::string path = writable_path(USER_REGIONS_FILE);
+    const std::string path = writable_path(kUserRegionsFile);
     if (!text_io::write_file_atomic(path, text, text_io::Durability::Fsync)) {
         spdlog::error("[PrinterImageRegions] cannot write {}: {}", path, std::strerror(errno));
         return false;
@@ -167,7 +167,7 @@ std::unordered_map<std::string, ImageRegions> parse_image_regions(const std::str
 }
 
 const ImageRegions* lookup_user_image_regions(std::string_view key, int natural_w, int natural_h) {
-    load(user(), writable_path(USER_REGIONS_FILE), "user", /*set_aside_bad=*/true);
+    load(user(), writable_path(kUserRegionsFile), "user", /*set_aside_bad=*/true);
     const ImageRegions* r = entry_for(user(), key);
     return r && r->src_w == natural_w && r->src_h == natural_h ? r : nullptr;
 }
@@ -189,10 +189,10 @@ namespace {
 /// only once it is on disk. Refuses to replace a file it could not read, which
 /// would drop every tag in it.
 template <typename Change> bool commit_user_change(Change change) {
-    load(user(), writable_path(USER_REGIONS_FILE), "user", /*set_aside_bad=*/true);
+    load(user(), writable_path(kUserRegionsFile), "user", /*set_aside_bad=*/true);
     if (user().unreadable) {
         spdlog::error("[PrinterImageRegions] not saving over unreadable {}",
-                      writable_path(USER_REGIONS_FILE));
+                      writable_path(kUserRegionsFile));
         return false;
     }
     auto next = user().entries;
@@ -210,7 +210,7 @@ bool save_user_image_regions(const std::string& key, const ImageRegions& regions
 }
 
 bool reset_user_image_regions(const std::string& key) {
-    load(user(), writable_path(USER_REGIONS_FILE), "user", /*set_aside_bad=*/true);
+    load(user(), writable_path(kUserRegionsFile), "user", /*set_aside_bad=*/true);
     if (user().entries.count(key) == 0)
         return true;
     return commit_user_change([&](auto& entries) { entries.erase(key); });

@@ -8,16 +8,19 @@
 
 #include "../lvgl_test_fixture.h"
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_fixtures.h"
 #include "../test_helpers/log_capture.h"
 #include "../test_helpers/plugin_host_test_support.h"
 #include "../test_helpers/plugin_test_support.h"
-#include "../test_helpers/scope_exit.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_component.h"
 #include "layout_manager.h"
 #include "lua_bindings.h"
+#include "lvgl/src/misc/lv_text_private.h"
 #include "lvgl_log_handler.h"
+#include "plugin_canvas.h"
 #include "plugin_overlay_host.h"
+#include "scope_exit.h"
 #include "xml_registration.h"
 
 #include "../catch_amalgamated.hpp"
@@ -108,7 +111,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "creating a plugin subject logs no missing-sub
 
     lv_subject_t app_subject;
     lv_subject_init_int(&app_subject, 5);
-    helix::test::ScopeExit cleanup([&app_subject] {
+    helix::ScopeExit cleanup([&app_subject] {
         lv_xml_unregister_subject(nullptr, "test-plugin__taken");
         lv_subject_deinit(&app_subject);
     });
@@ -192,7 +195,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "runtime close leaves an app subject that took
                  "[plugin][bindings][ui]") {
     lv_subject_t app_subject;
     lv_subject_init_int(&app_subject, 5);
-    helix::test::ScopeExit cleanup([&app_subject] {
+    helix::ScopeExit cleanup([&app_subject] {
         if (lv_xml_get_subject(nullptr, "test-plugin__x") == &app_subject)
             lv_xml_unregister_subject(nullptr, "test-plugin__x");
         lv_subject_deinit(&app_subject);
@@ -298,7 +301,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a bound object outlives its plugin's runtime 
     sweep_retired_subjects();
     size_t before = retired_subject_count();
     lv_obj_t* root = bind_label_to_doomed_subject();
-    helix::test::ScopeExit cleanup([&root] {
+    helix::ScopeExit cleanup([&root] {
         if (root && lv_obj_is_valid(root))
             lv_obj_delete(root);
         lv_xml_component_unregister("test-plugin__bindrow");
@@ -320,7 +323,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a plugin load sweeps retired subjects",
     sweep_retired_subjects();
     size_t before = retired_subject_count();
     lv_obj_t* root = bind_label_to_doomed_subject();
-    helix::test::ScopeExit cleanup([&root] {
+    helix::ScopeExit cleanup([&root] {
         if (root && lv_obj_is_valid(root))
             lv_obj_delete(root);
         lv_xml_component_unregister("test-plugin__bindrow");
@@ -359,6 +362,57 @@ TEST_CASE_METHOD(LVGLTestFixture, "toast and confirm validate their arguments",
 }
 
 namespace {
+/// Width lv_draw_label gives @p text in the canvas font @p name, for comparison.
+int32_t drawn_width(const char* text, const char* name) {
+    const lv_font_t* font = canvas_resolve_font(name);
+    REQUIRE(font);
+    lv_text_attributes_t attributes = {};
+    attributes.max_width = LV_COORD_MAX;
+    return lv_text_get_width(text, static_cast<uint32_t>(strlen(text)), font, &attributes);
+}
+} // namespace
+
+TEST_CASE_METHOD(XMLTestFixture, "helix.ui.text_width measures in the live theme font",
+                 "[plugin][bindings][ui][text_width]") {
+    BoundRuntime b({&install_ui_bindings});
+    REQUIRE(b.t.run(R"(
+        small = helix.ui.text_width("Benchy_0.2mm_PLA.gcode", "small")
+        heading = helix.ui.text_width("Benchy_0.2mm_PLA.gcode", "heading")
+        default = helix.ui.text_width("Benchy_0.2mm_PLA.gcode")
+        body = helix.ui.text_width("Benchy_0.2mm_PLA.gcode", "body")
+        empty = helix.ui.text_width("", "body")
+        is_int = math.type(small)
+    )"));
+    CHECK(b.t.global("small") == std::to_string(drawn_width("Benchy_0.2mm_PLA.gcode", "small")));
+    CHECK(b.t.global("heading") ==
+          std::to_string(drawn_width("Benchy_0.2mm_PLA.gcode", "heading")));
+    CHECK(std::stoi(b.t.global("heading")) > std::stoi(b.t.global("small")));
+    CHECK(b.t.global("default") == b.t.global("body"));
+    CHECK(b.t.global("empty") == "0");
+    CHECK(b.t.global("is_int") == "integer");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "helix.ui.text_width refuses fonts canvas text refuses",
+                 "[plugin][bindings][ui][text_width]") {
+    // Each refusal gets a fresh runtime: the 3rd error within 60 s faults one.
+    {
+        BoundRuntime b({&install_ui_bindings});
+        CHECK_FALSE(b.t.run(R"(helix.ui.text_width("x", "heading_large"))"));
+        CHECK_FALSE(b.t.run(R"(helix.ui.text_width("x", "nope"))"));
+    }
+    {
+        BoundRuntime b({&install_ui_bindings});
+        CHECK_FALSE(b.t.run(R"(helix.ui.text_width(nil, "body"))"));
+        CHECK_FALSE(b.t.run(R"(helix.ui.text_width(string.rep("w", 1025), "body"))"));
+    }
+    {
+        BoundRuntime b({&install_ui_bindings});
+        REQUIRE(b.t.run(R"(w = helix.ui.text_width(string.rep("w", 1024), "body"))"));
+        CHECK(std::stoi(b.t.global("w")) > 0);
+    }
+}
+
+namespace {
 /// A PluginUi double recording opens and closes without touching navigation.
 struct FakeUi {
     int opened = 0;
@@ -368,7 +422,7 @@ struct FakeUi {
     PluginUi::Attrs last_attrs;
 
     PluginUi ui{
-        [this](const std::string& component, std::function<void()>, const PluginUi::Attrs& attrs) {
+        [this](const std::string& component, PluginUi::Callbacks, const PluginUi::Attrs& attrs) {
             if (reject)
                 return 0;
             ++opened;
@@ -445,6 +499,216 @@ TEST_CASE_METHOD(LVGLUITestFixture, "a confirm the user closed is not hidden aga
     process_lvgl(50);
     helix::ui::UpdateQueue::instance().drain();
     CHECK_FALSE(log.contains("Dialog not found in stack"));
+}
+
+namespace {
+std::vector<Installer> check_installers() {
+    return {&install_ui_bindings, &install_io_bindings, &install_moonraker_bindings,
+            &install_printer_bindings, &install_sound_bindings};
+}
+
+SettingDecl check_step_decl() {
+    SettingDecl d;
+    d.key = "step";
+    d.label = "Step";
+    d.type = SettingType::Int;
+    d.min = 1;
+    d.max = 20;
+    d.default_value = 5;
+    return d;
+}
+
+/// Runs handler `name` as a menu check; `visible` is the boolean it returned.
+bool run_check(BoundRuntime& b, const std::string& name, bool* visible = nullptr) {
+    return call_ui_handler_sync(*b.t.rt, name, {}, [visible](lua_State* co, int nres) {
+        if (visible && nres >= 1)
+            *visible = lua_type(co, -nres) == LUA_TBOOLEAN && lua_toboolean(co, -nres);
+    });
+}
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture, "side effects refused in check",
+                 "[plugin][bindings][ui][check]") {
+    struct Case {
+        const char* call;
+        const char* lua;
+    };
+    const Case cases[] = {
+        {"helix.ui.toast", R"(helix.ui.toast("hi"))"},
+        {"helix.ui.dialog", R"(helix.ui.dialog("test-plugin__d"))"},
+        {"helix.ui.overlay", R"(helix.ui.overlay("test-plugin__o"))"},
+        {"helix.ui.confirm", R"(helix.ui.confirm("t", "m"))"},
+        {"helix.ui.on", R"(helix.ui.on("late", function() end))"},
+        {"helix.sound.play", R"(helix.sound.play("button_tap"))"},
+        {"helix.storage.set", R"(helix.storage.set("k", 1))"},
+        {"helix.settings.set", R"(helix.settings.set("step", 7))"},
+        {"helix.settings.on_change", R"(helix.settings.on_change("step", function() end))"},
+        {"subject:set", R"(counter:set(9))"},
+        {"subject:observe", R"(counter:observe(function() end))"},
+        {"helix.subject", R"(helix.subject.int("fresh", 1))"},
+        {"helix.timer", R"(helix.timer.after(10, function() fired = true end))"},
+        {"helix.timer", R"(helix.timer.every(10, function() fired = true end))"},
+        {"timer:cancel", R"(armed:cancel())"},
+        {"helix.i18n.on_change", R"(helix.i18n.on_change(function() end))"},
+        {"helix.printer.watch", R"(helix.printer.watch("bed_temp", function() end))"},
+        {"helix.moonraker.subscribe", R"(helix.moonraker.subscribe({}, function() end))"},
+        {"helix.moonraker.on_agent_event",
+         R"(helix.moonraker.on_agent_event("e", function() end))"},
+        {"not allowed in a menu check", R"(helix.gcode("G28"))"},
+        {"not allowed in a menu check", R"(helix.moonraker.call("server.info"))"},
+        {"not allowed in a menu check", R"(helix.http.get("https://example.com"))"},
+        {"not allowed in a menu check", R"(helix.sleep(1))"},
+    };
+    TempDir dir;
+    for (const auto& c : cases) {
+        INFO(c.lua);
+        BoundRuntime b(check_installers(),
+                       {Permission::Gcode, Permission::Http, Permission::Storage},
+                       {check_step_decl()}, dir.file("s.json"));
+        REQUIRE(b.t.run(std::string(R"(
+            counter = helix.subject.int("counter", 3)
+            armed = helix.timer.after(100000, function() end)
+            helix.ui.on("check", function() )") +
+                        c.lua + R"( return true end)
+        )"));
+        helix::LogCapture logs;
+        bool visible = false;
+        CHECK_FALSE(run_check(b, "check", &visible));
+        CHECK_FALSE(visible);
+        CHECK(logs.has_line_with({c.call, "not allowed in a menu check"}));
+        CHECK_FALSE(b.t.rt->faulted());
+
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(b.fake.requests.empty());
+        CHECK(b.saves == 0);
+        CHECK(b.settings.empty());
+        CHECK_FALSE(std::filesystem::exists(dir.file("s.json")));
+        CHECK(lv_subject_get_int(lv_xml_get_subject(nullptr, "test-plugin__counter")) == 3);
+        CHECK(lv_xml_find_subject(nullptr, "test-plugin__fresh") == nullptr);
+        CHECK(b.t.global("fired") == "nil");
+        // The plugin is untouched: an ordinary entry still runs.
+        CHECK(b.t.run("ok = true"));
+    }
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "reads allowed in check", "[plugin][bindings][ui][check]") {
+    BoundRuntime b(check_installers(), {}, {check_step_decl()});
+    lv_subject_set_int(lv_xml_get_subject(nullptr, "bed_temp"), 605);
+    REQUIRE(b.t.run(R"(
+        counter = helix.subject.int("counter", 3)
+        local calls = 0
+        helix.ui.on("check", function(ctx)
+            calls = calls + 1
+            return helix.settings.get("step") == 5 and counter:get() == 3
+                and helix.printer.get("bed_temp") == 60.5 and calls == 1
+                and helix.json.decode("[1]")[1] == 1 and type(helix.i18n.t("x")) == "string"
+        end)
+    )"));
+    bool visible = false;
+    CHECK(run_check(b, "check", &visible));
+    CHECK(visible);
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a check that is not registered reports",
+                 "[plugin][bindings][ui][check]") {
+    BoundRuntime b({&install_ui_bindings});
+    helix::LogCapture logs;
+    CHECK_FALSE(run_check(b, "nowhere"));
+    CHECK(logs.count_containing("menu check 'nowhere' is not registered") == 1);
+    CHECK_FALSE(b.t.rt->faulted());
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "dispatch_ui_handler with a table",
+                 "[plugin][bindings][ui][check]") {
+    BoundRuntime b({&install_ui_bindings});
+    REQUIRE(b.t.run(R"(
+        helix.ui.on("open", function(ctx)
+            got_path = ctx.path
+            got_missing = ctx.missing
+            got_tools = #ctx.tools_used
+        end)
+    )"));
+    json ctx = {{"path", "a/b.gcode"}, {"tools_used", json::array({0, 1})}};
+    CHECK(dispatch_ui_handler(*b.t.rt, "open", LuaRuntime::PushFn([&ctx](lua_State* co) {
+        push_json(co, ctx);
+        return 1;
+    })));
+    CHECK(b.t.global("got_path") == "a/b.gcode");
+    CHECK(b.t.global("got_missing") == "nil");
+    CHECK(b.t.global("got_tools") == "2");
+    CHECK_FALSE(dispatch_ui_handler(*b.t.rt, "missing", LuaRuntime::PushFn{}));
+}
+
+TEST_CASE_METHOD(LVGLTestFixture, "a check's <close> handlers run inside check mode",
+                 "[plugin][bindings][ui][check]") {
+    struct Case {
+        const char* name;
+        const char* close_body;
+        const char* log;
+    };
+    // Each check fails after arming a to-be-closed variable; its __close runs as the
+    // check's thread is closed.
+    const Case cases[] = {
+        {"stores", R"(helix.storage.set("x", 1))",
+         "helix.storage.set is not allowed in a menu check"},
+        {"raises", R"(error("from __close"))", "from __close"},
+        {"loops", "while true do end", "menu check exceeded its time budget"},
+    };
+    TempDir dir;
+    for (const auto& c : cases) {
+        INFO(c.name);
+        BoundRuntime b(check_installers(), {Permission::Storage}, {}, dir.file("s.json"));
+        REQUIRE(b.t.run(std::string(R"(
+            helix.ui.on("check", function()
+                local guard <close> = setmetatable({}, {__close = function() )") +
+                        c.close_body + R"( end})
+                local _ = nil + 1
+            end)
+        )"));
+        helix::LogCapture logs;
+        CHECK_FALSE(run_check(b, "check"));
+        CHECK(logs.count_containing(c.log) >= 1);
+        CHECK_FALSE(b.t.rt->faulted());
+        helix::ui::UpdateQueue::instance().drain();
+        REQUIRE(b.t.run(R"(stored = helix.storage.get("x"))"));
+        CHECK(b.t.global("stored") == "nil");
+        CHECK(b.t.run("ok = true"));
+    }
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "binding metatables are locked against plugins",
+                 "[plugin][bindings][ui]") {
+    BoundRuntime b({&install_ui_bindings, &install_moonraker_bindings, &install_canvas_bindings},
+                   {Permission::MoonrakerWrite});
+    REQUIRE(b.t.run(R"(
+        local kinds = {
+            timer = helix.timer.after(100000, function() end),
+            subject = helix.subject.int("locked_n", 0),
+            canvas = helix.canvas("locked_c"),
+            subscription = helix.moonraker.subscribe({print_stats = {"state"}}, function() end),
+        }
+        seen = {}
+        for name, ud in pairs(kinds) do
+            seen[#seen + 1] = name .. "=" .. tostring(getmetatable(ud))
+        end
+        table.sort(seen)
+        seen = table.concat(seen, ",")
+        -- The arming attempt: with the metatable hidden there is no table to give a __gc.
+        armed = pcall(function()
+            getmetatable(helix.timer.after(100000, function() end)).__gc = function()
+                while true do end
+            end
+        end)
+        swap = pcall(setmetatable, kinds.timer, {})
+        strmeta = tostring(getmetatable(""))
+    )"));
+    CHECK(b.t.global("strmeta") == "locked");
+    CHECK(b.t.global("seen") == "canvas=locked,subject=locked,subscription=locked,timer=locked");
+    CHECK(b.t.global("armed") == "false");
+    CHECK(b.t.global("swap") == "false");
+    // A new userdata still works and GC finds nothing to finalize.
+    REQUIRE(
+        b.t.run("helix.timer.after(100000, function() end); collectgarbage(); collectgarbage()"));
 }
 
 #endif // HELIX_HAS_PLUGINS

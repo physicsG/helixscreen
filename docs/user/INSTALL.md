@@ -9,6 +9,8 @@ This guide walks you through installing HelixScreen on your 3D printer's touchsc
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+  - [Easy installer (desktop app)](#easy-installer-desktop-app)
+  - [From the command line](#from-the-command-line)
 - [Which printer are you installing on?](#which-printer-are-you-installing-on)
 - [Remote Screen Setup (Run on a Separate Device)](#remote-screen-setup-run-on-a-separate-device)
 - [Android App (Experimental)](#android-app-experimental)
@@ -22,6 +24,26 @@ This guide walks you through installing HelixScreen on your 3D printer's touchsc
 ---
 
 ## Quick Start
+
+### Easy installer (desktop app)
+
+If you would rather not use a terminal, the HelixScreen easy installer works from a Windows, macOS or Linux computer. [Download it](https://helixscreen.org/installer/), switch your printer on, and open the app. It looks for printers on your network, shows the ones it knows how to handle, and walks you through the rest. It identifies the printer from what it reports about itself and refuses anything it isn't sure about instead of guessing; nothing is changed on a printer it stops on. It signs in over SSH (with a password or your SSH key), and it never installs an older version over a newer one.
+
+**Covered today:** updating HelixScreen on printers that already run Klipper or a firmware mod.
+
+| Printer | Guide |
+|---------|-------|
+| Raspberry Pi, BTT CB1/CB2 and other Klipper hosts | [Klipper host](guide/install-generic.md) |
+| Creality K1 / K1C / K1 Max already on Simple AF or rooted | [K1 series](guide/install-k1.md) |
+| Creality K2 / K2 Plus / K2 Pro | [K2 series](guide/install-k2.md) |
+| QIDI Q2 / Max 4 / Plus 5 | [QIDI](guide/install-qidi.md) |
+| Flashforge Adventurer 5M / 5M Pro on Forge-X | [Adventurer 5M](guide/install-ad5m.md) |
+
+**Coming:** first installs on printers that need a firmware mod first. The Creality K1 on stock firmware gets Simple AF from the installer. The Adventurer 5M and 5X get Forge-X or ZMOD written to a USB stick, which works only on certain stock firmware versions: Forge-X on 2.6.5 to 5.1.x (the official 3.1.5 image lacks the printer config files only on a printer that was wiped before getting it; a printer already printing on 3.1.5 is fine, otherwise flash a `-Factory` image first, see [Forge-X: flashing factory firmware](https://github.com/DrA1ex/ff5m/blob/main/docs/UNINSTALL.md#flashing-factory-firmware)), ZMOD on 1.1.7 to 1.2.3 except 1.1.8, 3.0.3, 3.0.9 and 3.1.0, after a factory reset, and it takes up to 40 minutes. The Adventurer 5X (ZMOD) and the BigTreeTech [K-Touch](https://helixscreen.org/1.1/guide/install-esp32/#with-the-easy-installer) are also on the way. Until then, use the guides in [the table below](#which-printer-are-you-installing-on).
+
+A printer the app recognizes but can't handle sends you to [Printers the easy installer doesn't handle](guide/easy-installer-unsupported.md). Builds without a code-signing certificate make macOS and Windows warn the first time you open the app; the [download page](https://helixscreen.org/installer/) shows how to get past that.
+
+### From the command line
 
 > **⚠️ Run these commands on your printer's host, not your local computer.**
 >
@@ -49,14 +71,15 @@ The one-liner above works on every supported platform, but each printer family h
 
 | Printer | Install guide |
 |---------|---------------|
-| Generic Linux - Raspberry Pi, BTT CB1/CB2/Manta, x86 | This page - see [Generic Linux Install](#generic-linux-install-raspberry-pi-btt-x86) below |
-| Creality K1 / K1C / K1 Max | [Creality K1C Setup Guide](guide/creality-k1c-setup.md) - root access plus Simple AF or Guilouz firmware |
+| Generic Linux - Raspberry Pi, BTT CB1/CB2/Manta, x86 | This page - see [Generic Linux Install](#generic-linux-install-raspberry-pi-btt-x86) below, or the [easy installer on a Klipper host](guide/install-generic.md) |
+| Creality K1 / K1C / K1 Max | [K1 Series Install](guide/install-k1.md) - the easy installer path; [Creality K1C Setup Guide](guide/creality-k1c-setup.md) - the same by hand, root access plus Simple AF or Guilouz firmware |
 | Creality K2 / K2 Plus / K2 Pro | [K2 Series Install](guide/install-k2.md) - works on stock firmware, no custom firmware needed |
-| Flashforge Adventurer 5M / 5M Pro | [Adventurer 5M Install](guide/install-ad5m.md) - Forge-X or Klipper Mod, plus a ready-made firmware image |
+| Flashforge Adventurer 5M / 5M Pro | [Adventurer 5M Install](guide/install-ad5m.md) - Forge-X (recommended) or ZMOD firmware mod first |
 | FlashForge Adventurer 5X | [Adventurer 5X Install (ZMOD)](guide/install-ad5x.md) - the ZMOD firmware mod manages install and updates |
 | FlashForge Creator 5 / Creator 5 Pro | [Z-Mod wiki](https://wiki.zmod.link/C5PRO/) - Z-Mod installs and updates HelixScreen itself; on [Reforge](https://github.com/Klipper4FlashForge/firmware), HelixScreen ships with the firmware |
 | Elegoo Centauri Carbon | [Centauri Carbon Install](guide/install-cc1.md) - requires the OpenCentauri COSMOS firmware, 26.07.0 or newer |
 | Creality Sonic Pad | [Sonic Pad Install](guide/install-sonicpad.md) - requires the SonicPad-Debian firmware |
+| QIDI Q2 / Max 4 / Plus 5 | [QIDI Install](guide/install-qidi.md) - replaces QIDI's screen program; read the QIDI Studio and cloud notice first |
 | Snapmaker U1 | [Snapmaker U1 Install](guide/install-u1.md) - stock firmware 1.2+ with Root access, or PAXX Extended Firmware |
 | BigTreeTech K-Touch (standalone ESP32 screen) | [K-Touch Install](guide/install-esp32.md) - alpha firmware, flashed from your browser or over USB; 1.1 betas and newer |
 
@@ -70,7 +93,7 @@ This is the setup to choose when:
 
 - Your printer has no built-in screen, like a Voron, RatRig, or any Klipper printer whose host has no panel of its own
 - The printer lives somewhere you don't: another room, a garage, a workshop
-- You run more than one printer and want a single screen for all of them: with [multi-printer support](guide/beta-features.md) (beta) enabled, the printer manager switches between every printer you've added
+- You run more than one printer and want a single screen for all of them: the printer manager switches between every printer you've added
 - Your printer's stock panel can't be replaced (some QIDI models)
 
 Common screen devices:
@@ -78,7 +101,7 @@ Common screen devices:
 - A spare Raspberry Pi (3/4/5, Zero 2 W, CM4) with a touchscreen
 - A repurposed Klipper pad or a small self-built touchscreen PC
 - A mini PC or x86 box with an HDMI touchscreen
-- Your desktop, running the app in a window (macOS or Linux) for monitoring
+- Your Linux desktop or laptop, running the app in a window: see [Run HelixScreen in a Window on a Linux Desktop](guide/install-linux-desktop.md)
 - A BigTreeTech K-Touch, with the [ESP32 firmware](guide/install-esp32.md) (alpha)
 
 **How it works:** HelixScreen is a Moonraker client. It only needs network access to your printer's Moonraker instance (port `7125` by default); it does **not** need to run on the same machine as Klipper.
@@ -134,6 +157,7 @@ Ignore the `.aab` file on the release page. That one is only for publishing to G
 - **It runs in landscape.** Turn the device sideways, or let auto-rotate handle it.
 - **It asks for very little.** Network access, and permission to keep the screen awake so a print you are watching does not black out. No location, storage, contacts, or camera.
 - **Updating means downloading the new APK** and installing over the old one. There is no in-app updater on Android yet, and the app will not update itself.
+- **Your settings survive updates.** Installing a new APK over the old one keeps your settings, and never overwrites a theme you made or edited. The app also keeps its own backup copies of your settings, and when Android's backup is turned on it saves your HelixScreen settings with the rest of your phone's backup, so they come back on a new device restored from it.
 - **Foldables and unusual screen shapes** can show layout quirks when the device folds or resizes. Reports with a screenshot are welcome.
 - **It cannot do the printer-side things.** Anything that requires running *on the printer*, like taking over the printer's own panel or configuring the printer's WiFi during the wizard, does not apply here. Printing, monitoring, and control all work normally.
 - **Power controls are hidden.** An Android app can't power off or reboot the device it runs on, so the shutdown widget never appears on the Home panel (it shows as "Not available on Android" in the widget catalog) and the **POWER** section of the Advanced panel is hidden too. Moonraker power *devices* (smart plugs and the like) are unaffected.
@@ -143,6 +167,8 @@ Ignore the `.aab` file on the release page. That one is only for publishing to G
 ---
 
 ## Generic Linux Install (Raspberry Pi, BTT, x86)
+
+> **Want HelixScreen in a window on your desktop PC instead?** That is a separate package that leaves your desktop alone; see [Run HelixScreen in a Window on a Linux Desktop](guide/install-linux-desktop.md).
 
 This covers any Klipper printer with a Raspberry Pi running MainsailOS (or similar), including SOVOL SV06, SOVOL SV08, Voron, RatRig, and other printers where Klipper runs on a separate Pi. Also works on x86 Linux PCs (e.g., mini ITX) running Debian/Ubuntu with Klipper and a touchscreen, and on BTT CB1/CB2/Manta host boards.
 
@@ -225,6 +251,25 @@ curl -sSL https://releases.helixscreen.org/install.sh | sh -s -- --verbose
 The full log is saved either way, to `~/printer_data/logs/helixscreen-install.log` (it shows up in Mainsail and Fluidd's log list). The previous run's log is kept as `helixscreen-install.log.1`. On printers without a `printer_data` folder, the log is in a `logs` folder next to the HelixScreen install.
 
 > **Where does it install?** The installer puts HelixScreen in your home directory when it runs as a normal user (with or without a Klipper ecosystem alongside), and in `/opt` when it runs as root. Override with `INSTALL_DIR=/custom/path/helixscreen` (the directory name must contain `helixscreen`).
+
+#### Installing from a downloaded package
+
+If you already downloaded a release from the [releases page](https://github.com/prestonbrown/helixscreen/releases), the installer installs exactly that release and does not download anything. Either name the archive:
+
+```bash
+sh install.sh helixscreen-pi-v1.1.0.tar.gz
+```
+
+(`--local helixscreen-pi-v1.1.0.tar.gz` does the same), or extract it and run the installer that comes inside it:
+
+```bash
+tar -xzf helixscreen-pi-v1.1.0.tar.gz
+./helixscreen/install.sh
+```
+
+The installer says `Installing the package next to this installer` and shows the package's version in its plan. If the package was built for a different kind of printer or computer, it stops and changes nothing. Adding `--version` or `--update` makes it download from the internet instead.
+
+A beta package (a version like `v1.1.0-beta.9`) puts a new install on the Beta update channel, so later updates stay on betas. If HelixScreen is already installed, the update channel you picked in the app is kept. Change it any time under **Settings > Updates > Update Channel**.
 
 ### Step 3: Complete the Setup Wizard
 
@@ -334,7 +379,7 @@ The wizard will test the connection before proceeding.
 ### Step 5: Printer Identification
 HelixScreen will try to identify your printer from its configuration. You can:
 - Confirm the detected printer type
-- Select from a database of 90+ printers
+- Select from a database of over 100 printers
 - Enter custom settings
 
 ### Step 6: Heater Selection
@@ -571,9 +616,11 @@ path: ~/helixscreen
 ```
 
 > **Important:** Do not add `install_script`, `managed_services`, or `persistent_files`
-> to this section; these options are not supported with `type: web` and Moonraker will
-> log warnings about unparsed config options. Service restart after updates is handled
-> automatically by a systemd path unit installed during setup.
+> to this section. The first two are ignored by `type: web` and Moonraker logs warnings
+> about them; `persistent_files` cannot keep your settings because the update replaces
+> the whole install folder. Your settings are kept in `printer_data/config/helixscreen/`
+> instead, and service restart after updates is handled automatically by a systemd path
+> unit installed during setup.
 
 Then restart Moonraker:
 ```bash

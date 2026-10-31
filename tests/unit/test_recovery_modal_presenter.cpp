@@ -2,16 +2,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/modal_answer.h"
 #include "../test_helpers/recovery_modal_presenter_test_access.h"
 #include "../ui_test_utils.h"
+#include "action_prompt_manager.h"
 #include "ams_state.h"
 #include "app_constants.h"
 #include "app_globals.h"
+#include "gcode_response_routing.h"
 #include "moonraker_api.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
 #include "recovery_modal_presenter.h"
 #include "safety_settings_manager.h"
+#include "theme_manager.h"
 
 #include <memory>
 #include <string>
@@ -75,7 +79,7 @@ class RecoveryPreheatFixture : public LVGLUITestFixture {
         api_.set_safety_limits(limits);
 
         // No AMS backend and no external spool: the preheat target resolves to
-        // DEFAULT_LOAD_PREHEAT_TEMP, so the tests know what they are waiting for.
+        // kDefaultLoadPreheatTemp, so the tests know what they are waiting for.
         helix::AmsState::instance().set_backend(nullptr);
         prev_cold_extrude_ = helix::SafetySettingsManager::instance().get_allow_cold_extrude();
         helix::SafetySettingsManager::instance().set_allow_cold_extrude(false);
@@ -278,7 +282,7 @@ TEST_CASE_METHOD(RecoveryPreheatFixture, "Reaching target dispatches the deferre
     REQUIRE(TA::preheating(presenter()));
 
     // Comfortably past any target the resolver can pick (latch, material temp,
-    // or DEFAULT_LOAD_PREHEAT_TEMP).
+    // or kDefaultLoadPreheatTemp).
     set_nozzle_c(300);
     process_lvgl(600); // > one poll period
 
@@ -335,4 +339,308 @@ TEST_CASE_METHOD(RecoveryPreheatFixture, "A second tap replaces the pending reco
 
     CHECK(gcode_count(mock_client_, "RESUME") == 1);
     CHECK(gcode_count(mock_client_, "TOOL_UNLOAD") == 0);
+}
+
+// ============================================================================
+// Recovery actions that ask before sending
+// ============================================================================
+
+namespace {
+
+helix::ErrorEvent make_seat_fault() {
+    helix::ErrorEvent e;
+    e.source = helix::ErrorSource::GENERIC;
+    e.severity = helix::ErrorSeverity::CRITICAL;
+    e.title = "Tool half seated";
+    e.detail = "A tool may be half seated";
+    helix::RecoveryAction remove{"Remove tool", "MANUAL_TOOL_REMOVE", "t::remove", "danger"};
+    remove.confirm_message = "Hold it";
+    helix::RecoveryAction seat{"Tool is seated", "MANUAL_TOOL_SEAT TOOL=2", "t::seat", "primary"};
+    e.recovery_actions = {seat, remove};
+    return e;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(RecoveryPreheatFixture,
+                 "A recovery with confirm_message sends only after the confirm",
+                 "[error-center][recovery-presenter]") {
+    presenter().present(make_seat_fault());
+    process_lvgl(20);
+
+    TA::tap(presenter(), "MANUAL_TOOL_REMOVE");
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "MANUAL_TOOL_REMOVE") == 0);
+    REQUIRE(ModalStack::instance().top_dialog() != nullptr);
+    CHECK_THAT(helix::test::top_modal_text(), Catch::Matchers::ContainsSubstring("Hold it"));
+
+    helix::test::answer_top_modal("btn_primary");
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "MANUAL_TOOL_REMOVE") == 1);
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture,
+                 "Cancelling a recovery confirm sends nothing and does not re-present",
+                 "[error-center][recovery-presenter]") {
+    const auto fault = make_seat_fault();
+    presenter().present(fault);
+    process_lvgl(20);
+
+    TA::tap(presenter(), "MANUAL_TOOL_REMOVE");
+    process_lvgl(20);
+    helix::test::answer_top_modal("btn_secondary");
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "MANUAL_TOOL_REMOVE") == 0);
+
+    TA::tap(presenter(), "MANUAL_TOOL_REMOVE");
+    process_lvgl(20);
+    helix::test::dismiss_top_modal();
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "MANUAL_TOOL_REMOVE") == 0);
+
+    CHECK(TA::handled_detail(presenter()) == fault.detail);
+    TA::user_dismiss(presenter());
+    process_lvgl(20);
+    presenter().present(fault);
+    process_lvgl(20);
+    CHECK_FALSE(presenter().is_visible());
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture,
+                 "A recovery without confirm_message still sends on the tap",
+                 "[error-center][recovery-presenter]") {
+    presenter().present(make_seat_fault());
+    process_lvgl(20);
+    const auto* before = ModalStack::instance().top_dialog();
+
+    TA::tap(presenter(), "MANUAL_TOOL_SEAT TOOL=2");
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "MANUAL_TOOL_SEAT TOOL=2") == 1);
+    const auto* after = ModalStack::instance().top_dialog();
+    CHECK((after == nullptr || after == before));
+}
+
+namespace {
+
+/// The background colour @p role paints, for telling which variant a button took.
+lv_color_t style_bg(StyleRole role) {
+    lv_style_value_t v{};
+    REQUIRE(lv_style_get_prop(ThemeManager::instance().get_style(role), LV_STYLE_BG_COLOR, &v) ==
+            LV_STYLE_RES_FOUND);
+    return v.color;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(RecoveryPreheatFixture,
+                 "A danger recovery's confirm keeps the danger style on its button",
+                 "[error-center][recovery-presenter]") {
+    auto fault = make_seat_fault();
+    fault.recovery_actions[0].confirm_message = "Hold it on";
+    presenter().present(fault);
+    process_lvgl(20);
+
+    TA::tap(presenter(), "MANUAL_TOOL_REMOVE");
+    process_lvgl(20);
+    lv_obj_t* dialog = ModalStack::instance().top_dialog();
+    REQUIRE(dialog != nullptr);
+    lv_obj_t* btn = lv_obj_find_by_name(dialog, "btn_primary");
+    REQUIRE(btn != nullptr);
+    CHECK(lv_color_eq(lv_obj_get_style_bg_color(btn, LV_PART_MAIN),
+                      style_bg(StyleRole::ButtonDanger)));
+    helix::test::answer_top_modal("btn_secondary");
+    process_lvgl(20);
+
+    TA::tap(presenter(), "MANUAL_TOOL_SEAT TOOL=2");
+    process_lvgl(20);
+    dialog = ModalStack::instance().top_dialog();
+    REQUIRE(dialog != nullptr);
+    btn = lv_obj_find_by_name(dialog, "btn_primary");
+    REQUIRE(btn != nullptr);
+    CHECK(lv_color_eq(lv_obj_get_style_bg_color(btn, LV_PART_MAIN),
+                      style_bg(StyleRole::ButtonPrimary)));
+    helix::test::answer_top_modal("btn_secondary");
+    process_lvgl(20);
+}
+
+// ============================================================================
+// The fault renders as the standard dialog with a modal_button_row
+// ============================================================================
+
+namespace {
+
+lv_obj_t* fault_dialog() {
+    return ModalStack::instance().dialog_for_component("recovery_fault_modal");
+}
+
+/// The button named @p name on the fault dialog, which must exist.
+lv_obj_t* fault_button(const char* name) {
+    lv_obj_t* dialog = fault_dialog();
+    REQUIRE(dialog != nullptr);
+    lv_obj_t* btn = lv_obj_find_by_name(dialog, name);
+    REQUIRE(btn != nullptr);
+    return btn;
+}
+
+bool shown(lv_obj_t* obj) {
+    return !lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool painted(lv_obj_t* btn, StyleRole role) {
+    return lv_color_eq(lv_obj_get_style_bg_color(btn, LV_PART_MAIN), style_bg(role));
+}
+
+/// Tap @p name on the fault dialog the way a finger does.
+void press(const char* name) {
+    lv_obj_send_event(fault_button(name), LV_EVENT_CLICKED, nullptr);
+    helix::ui::UpdateQueue::instance().drain();
+}
+
+} // namespace
+
+TEST_CASE_METHOD(RecoveryPreheatFixture,
+                 "A filament fault shows the standard dialog, one styled button per action",
+                 "[error-center][recovery-presenter][1838]") {
+    presenter().present(make_afc_jam());
+    process_lvgl(20);
+
+    REQUIRE(fault_dialog() != nullptr);
+    CHECK(ModalStack::instance().dialog_for_component("action_prompt_modal") == nullptr);
+
+    lv_obj_t* title = lv_obj_find_by_name(fault_dialog(), helix::ui::kModalTitleWidgetName);
+    REQUIRE(title != nullptr);
+    CHECK(std::string(lv_label_get_text(title)) == "Toolhead jam");
+    CHECK_THAT(helix::test::top_modal_text(),
+               Catch::Matchers::ContainsSubstring("tool_end jam detected"));
+
+    // First action at the right in the primary slot, the rest leftward.
+    lv_obj_t* resume = fault_button("btn_primary");
+    lv_obj_t* unload = fault_button("btn_secondary");
+    lv_obj_t* recover = fault_button("btn_tertiary");
+    CHECK(helix::test::subtree_text(resume).find("Resume") != std::string::npos);
+    CHECK(helix::test::subtree_text(unload).find("Unload") != std::string::npos);
+    CHECK(helix::test::subtree_text(recover).find("Recover") != std::string::npos);
+    CHECK(shown(resume));
+    CHECK(shown(unload));
+    CHECK(shown(recover));
+    CHECK_FALSE(shown(fault_button("btn_quaternary")));
+
+    CHECK(painted(resume, StyleRole::ButtonPrimary));
+    CHECK(painted(unload, StyleRole::ButtonSecondary));
+    CHECK(painted(recover, StyleRole::ButtonDanger));
+
+    presenter().dismiss();
+    process_lvgl(20);
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture, "A fault button sends its own gcode and closes",
+                 "[error-center][recovery-presenter][1838]") {
+    auto fault = make_afc_jam();
+    presenter().present(fault);
+    process_lvgl(20);
+
+    press("btn_tertiary");
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "AFC_RESET") == 1);
+    CHECK(gcode_count(mock_client_, "RESUME") == 0);
+    CHECK_FALSE(presenter().is_visible());
+    // Answered: the same fault re-notified stays down.
+    presenter().present(fault);
+    process_lvgl(20);
+    CHECK_FALSE(presenter().is_visible());
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture, "A dismiss-only fault button closes and sends nothing",
+                 "[error-center][recovery-presenter][1838]") {
+    helix::ErrorEvent fault = make_afc_jam();
+    fault.recovery_actions = {{"OK", "", "t::dismiss", ""}};
+    presenter().present(fault);
+    process_lvgl(20);
+    CHECK_FALSE(shown(fault_button("btn_secondary")));
+
+    press("btn_primary");
+    process_lvgl(20);
+    CHECK(mock_client_.gcode_script_history().empty());
+    CHECK_FALSE(presenter().is_visible());
+    CHECK(TA::handled_detail(presenter()) == fault.detail);
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture, "ESC closes the fault without running an action",
+                 "[error-center][recovery-presenter][1838]") {
+    // The secondary slot holds an action that would send at once if ESC ran it.
+    auto fault = make_afc_jam();
+    fault.recovery_actions = {fault.recovery_actions[0], fault.recovery_actions[2]};
+    presenter().present(fault);
+    process_lvgl(20);
+
+    lv_obj_t* backdrop = ModalStack::instance().backdrop_for(fault_dialog());
+    REQUIRE(backdrop != nullptr);
+    uint32_t key = LV_KEY_ESC;
+    lv_obj_send_event(backdrop, LV_EVENT_KEY, &key);
+    process_lvgl(20);
+
+    CHECK(mock_client_.gcode_script_history().empty());
+    CHECK_FALSE(TA::preheating(presenter()));
+    CHECK_FALSE(presenter().is_visible());
+    CHECK(TA::handled_detail(presenter()) == fault.detail);
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture, "A fault button with confirm_message asks before it sends",
+                 "[error-center][recovery-presenter][1838]") {
+    presenter().present(make_seat_fault());
+    process_lvgl(20);
+
+    // make_seat_fault(): Tool is seated (primary), Remove tool (danger, confirms).
+    CHECK(painted(fault_button("btn_secondary"), StyleRole::ButtonDanger));
+    press("btn_secondary");
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "MANUAL_TOOL_REMOVE") == 0);
+    CHECK_THAT(helix::test::top_modal_text(), Catch::Matchers::ContainsSubstring("Hold it"));
+
+    helix::test::answer_top_modal("btn_primary");
+    process_lvgl(20);
+    CHECK(gcode_count(mock_client_, "MANUAL_TOOL_REMOVE") == 1);
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture, "A Klipper action:prompt macro keeps the prompt renderer",
+                 "[error-center][recovery-presenter][1838]") {
+    helix::GcodeResponseRouting routing;
+    routing.attach(&mock_client_, &api_);
+    helix::ActionPromptManager* prompts = routing.action_prompt_manager();
+    REQUIRE(prompts != nullptr);
+
+    prompts->process_line("// action:prompt_begin Load filament");
+    prompts->process_line("// action:prompt_text Pick a lane");
+    prompts->process_line("// action:prompt_button Lane 1|LOAD LANE=1|primary");
+    prompts->process_line("// action:prompt_show");
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(20);
+
+    CHECK(ModalStack::instance().dialog_for_component("action_prompt_modal") != nullptr);
+    CHECK(fault_dialog() == nullptr);
+
+    routing.detach_handlers(&mock_client_);
+    routing.release_routers();
+    helix::ActionPromptManager::set_instance(nullptr);
+    process_lvgl(20);
+}
+
+TEST_CASE_METHOD(RecoveryPreheatFixture, "A fault with no actions offers OK to close it",
+                 "[error-center][recovery-presenter][1838]") {
+    helix::ErrorEvent fault = make_afc_jam();
+    fault.recovery_actions.clear();
+    presenter().present(fault);
+    process_lvgl(20);
+    REQUIRE(presenter().is_visible());
+
+    lv_obj_t* ok = fault_button("btn_primary");
+    CHECK(helix::test::subtree_text(ok).find(lv_tr("OK")) != std::string::npos);
+    CHECK(shown(ok));
+    CHECK_FALSE(shown(fault_button("btn_secondary")));
+
+    press("btn_primary");
+    process_lvgl(20);
+    CHECK(mock_client_.gcode_script_history().empty());
+    CHECK_FALSE(presenter().is_visible());
+    CHECK(TA::handled_detail(presenter()) == fault.detail);
 }

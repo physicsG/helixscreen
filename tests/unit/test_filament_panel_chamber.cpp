@@ -200,7 +200,7 @@ struct K2PresetCooldownHarness {
 
 /// The first preset slot whose material asks for a heated chamber.
 int first_slot_with_chamber_temp() {
-    for (int slot = 0; slot < helix::presets::PRESET_COUNT; ++slot) {
+    for (int slot = 0; slot < helix::presets::kPresetCount; ++slot) {
         auto material = filament::find_material(helix::presets::name(slot));
         if (material && material->chamber_temp_c > 0) {
             return slot;

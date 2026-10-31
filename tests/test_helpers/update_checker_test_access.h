@@ -52,6 +52,16 @@ class UpdateCheckerTestAccess {
         c.sync_moonraker_channel_for(install_root);
     }
 
+    /// Whether check_for_updates() refuses to start, as it does during shutdown. A
+    /// channel sync that adopts a channel starts a re-check, which would otherwise
+    /// reach the network.
+    static bool checks_blocked(const UpdateChecker& c) {
+        return c.shutting_down_.load();
+    }
+    static void set_checks_blocked(UpdateChecker& c, bool blocked) {
+        c.shutting_down_ = blocked;
+    }
+
     // ------------------------------------------------------------------
     // Post-install restart sequence
     //
@@ -102,5 +112,11 @@ class UpdateCheckerTestAccess {
                               std::optional<UpdateChecker::ReleaseInfo> info,
                               const std::string& error = "") {
         c.report_result(status, std::move(info), error);
+    }
+
+    /// The worker's mapping from a fetched release to the reported result.
+    static void report_fetched_release(UpdateChecker& c, UpdateChecker::ReleaseInfo info,
+                                       const std::string& current_version) {
+        c.report_fetched_release(std::move(info), current_version);
     }
 };

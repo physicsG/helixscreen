@@ -37,6 +37,16 @@ qc_make() {
   fi
 }
 
+# One src/ or tests/ source that includes HEADER (path as staged), or nothing.
+# A header breaks the units that include it, and one of them compiling is the
+# commit-time question; pre-push's clang gate checks the rest.
+qc_one_includer() {
+  local base
+  base=$(basename "$1")
+  grep -rlE --include='*.cpp' --include='*.cc' --include='*.mm' \
+    "#include[[:space:]]+[\"<]([^\">]*/)?${base//./\\.}[\">]" src tests 2>/dev/null | head -1
+}
+
 # A verdict that carries a count is recorded in $QC_COUNTS as well as printed,
 # so a cached pass can replay what the full run examined.
 qc_note() { printf '%s\n' "$1" >> "$QC_COUNTS" 2>/dev/null || true; }
@@ -46,3 +56,23 @@ qc_count() { echo "$1"; qc_note "$1"; }
 QC_TRIGGER_XML='\.xml$|^src/ui/|^tools/xml-linter/'
 QC_TRIGGER_NATIVE_SRC='\.(cpp|c|h|mm)$'
 QC_TRIGGER_ICONS='\.xml$|icon|font'
+
+# What a commit compiles from its staged paths (one per line): each staged source,
+# and one source including each staged header. Sets CHECK_UNITS (sorted, one per
+# line) and UNREACHED_HDR (the staged headers no source includes directly, which
+# pre-push's clang gate still reaches through their dependents).
+qc_staged_compile_units() {
+  local staged="$1" hdr unit
+  CHECK_UNITS=$(printf '%s\n' "$staged" | grep -E '\.(cpp|cc|cxx|mm)$' || true)
+  UNREACHED_HDR=""
+  for hdr in $(printf '%s\n' "$staged" | grep -E '\.(h|hh|hpp|hxx|inc)$' || true); do
+    unit=$(qc_one_includer "$hdr")
+    if [ -n "$unit" ]; then
+      CHECK_UNITS="$CHECK_UNITS
+$unit"
+    else
+      UNREACHED_HDR="$UNREACHED_HDR $hdr"
+    fi
+  done
+  CHECK_UNITS=$(printf '%s\n' "$CHECK_UNITS" | sed '/^$/d' | sort -u)
+}

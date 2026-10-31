@@ -9,6 +9,7 @@
 
 #include <lvgl.h>
 #include <memory>
+#include <optional>
 
 namespace helix {
 class PrinterExcludedObjectsState;
@@ -21,12 +22,14 @@ struct ExcludeModeTargets {
     lv_obj_t* card = nullptr;            ///< Preview card: the map covers it in thumbnail mode; the
                                          ///< portrait list stops below it
     lv_obj_t* columns = nullptr;         ///< Row the object list floats over
-    const char* controls_name = nullptr; ///< Child of columns the list covers in portrait
-    lv_obj_t* gcode_viewer = nullptr;    ///< May be null
-    lv_subject_t* map_active = nullptr;  ///< 1 while the map covers the card; may be null
-    bool thumbnail_mode = true;          ///< Map + list; otherwise render badges + list
-    float bed_w_mm = 0.0f;
-    float bed_h_mm = 0.0f;
+    const char* controls_name = nullptr; ///< Child of columns the list covers when stacked
+    /// Whether columns stacks the card above the controls; unset follows the
+    /// layout's orientation.
+    std::optional<bool> stacked;
+    lv_obj_t* gcode_viewer = nullptr;   ///< May be null
+    lv_subject_t* map_active = nullptr; ///< 1 while the map covers the card; may be null
+    bool thumbnail_mode = true;         ///< Map + list; otherwise render badges + list
+    helix::BedDimensions bed{0.0f, 0.0f, 0.0f, 0.0f}; ///< helix::bed_dimensions()
 };
 
 /// Exclude mode over a preview: the object list, plus the top-down map in

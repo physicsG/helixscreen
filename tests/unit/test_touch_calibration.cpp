@@ -2,6 +2,7 @@
 // Copyright (C) 2025-2026 356C LLC
 
 #include "lvgl_test_fixture.h"
+#include "test_helpers/scoped_board.h"
 #include "touch_calibration.h"
 #include "touch_calibration_panel.h"
 #include "touch_calibration_wrapper.h"
@@ -1715,29 +1716,51 @@ TEST_CASE("shipped AD5X and AD5M fits describe the same panel", "[touch][calibra
     CHECK(std::fabs(y_span_a - y_span_b) / y_span_b < 0.05f);
 }
 
-// On a build that HAS a measured default, the shipped function must return one of
-// the fits above rather than something invalid. The unified MIPS build picks the
-// AD5X fit at runtime (mod-layout probe), so it cannot be asserted at compile
-// time; the fits themselves are checked as data above.
-TEST_CASE("platform_default_calibration agrees with the shipped table", "[touch][calibration]") {
-    helix::TouchCalibration cal = helix::platform_default_calibration();
-#if defined(HELIX_PLATFORM_AD5M)
-    REQUIRE(cal.valid);
-    CHECK(helix::is_calibration_valid(cal));
+namespace {
 
-    // Close the loop between the table above and the shipped function, so the two
-    // cannot drift apart on the platforms that actually carry a default.
-    const helix::TouchCalibration& expected = kShippedFits[1].cal;
+void check_fit_equals(const helix::TouchCalibration& cal, const helix::TouchCalibration& expected) {
+    CHECK(cal.valid);
     CHECK(cal.a == Catch::Approx(expected.a));
     CHECK(cal.b == Catch::Approx(expected.b));
     CHECK(cal.c == Catch::Approx(expected.c));
     CHECK(cal.d == Catch::Approx(expected.d).margin(1e-6));
     CHECK(cal.e == Catch::Approx(expected.e));
     CHECK(cal.f == Catch::Approx(expected.f));
-#else
-    // Desktop and uncharacterised printers must decline to guess.
-    CHECK_FALSE(cal.valid);
-#endif
+}
+
+} // namespace
+
+// Only the AD5X and AD5M have a measured panel. The Creator 5's digitizer already spans
+// its panel, so the AD5X fit would throw its taps off-screen; every other board runs the
+// calibration wizard on first use.
+TEST_CASE("factory_touch_fit ships fits for the AD5X and AD5M only", "[touch][calibration]") {
+    using helix::board::Board;
+    const auto ad5x = helix::factory_touch_fit(Board::Ad5x);
+    const auto ad5m = helix::factory_touch_fit(Board::Ad5m);
+    REQUIRE(ad5x.has_value());
+    REQUIRE(ad5m.has_value());
+    check_fit_equals(*ad5x, kShippedFits[0].cal);
+    check_fit_equals(*ad5m, kShippedFits[1].cal);
+
+    for (Board b : {Board::Creator5, Board::Creator5Pro, Board::K1, Board::K2, Board::Cc1,
+                    Board::SnapmakerU1, Board::Generic}) {
+        INFO("board: " << helix::board::info(b).key);
+        CHECK_FALSE(helix::factory_touch_fit(b).has_value());
+    }
+}
+
+TEST_CASE("platform_default_calibration follows the board", "[touch][calibration]") {
+    {
+        helix::test::ScopedBoard board(helix::board::Board::Ad5x);
+        const helix::TouchCalibration cal = helix::platform_default_calibration();
+        REQUIRE(cal.valid);
+        CHECK(helix::is_calibration_valid(cal));
+        check_fit_equals(cal, kShippedFits[0].cal);
+    }
+    {
+        helix::test::ScopedBoard board(helix::board::Board::Creator5);
+        CHECK_FALSE(helix::platform_default_calibration().valid);
+    }
 }
 
 // ============================================================================

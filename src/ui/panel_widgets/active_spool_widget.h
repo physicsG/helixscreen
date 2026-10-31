@@ -12,9 +12,8 @@
 
 #include <memory>
 
-class IMoonrakerAPI;
-
 namespace helix {
+class IMoonrakerAPI;
 
 class ActiveSpoolWidget : public TiledPanelWidget {
   public:

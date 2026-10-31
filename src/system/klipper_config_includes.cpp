@@ -3,6 +3,9 @@
 
 #include "klipper_config_includes.h"
 
+#include "ui_update_queue.h"
+
+#include "async_lifetime_guard.h"
 #include "i_moonraker_api.h"
 #include "text_io.h"
 
@@ -250,7 +253,7 @@ void download_include_graph(std::vector<std::string> listing, const std::string&
 
     // Report once every outstanding download has returned. Called with the lock
     // held; the returned closure runs after it is released.
-    auto take_report = [](Walk& w) -> std::function<void()> {
+    auto take_report = [](Walk& w) -> helix::Callback<void()> {
         if (w.reported || w.in_flight > 0 || (w.error.empty() && !w.queue.empty()))
             return {};
         w.reported = true;
@@ -266,8 +269,9 @@ void download_include_graph(std::vector<std::string> listing, const std::string&
         };
     };
 
-    std::shared_ptr<std::function<void()>> pump = std::make_shared<std::function<void()>>();
-    std::weak_ptr<std::function<void()>> weak_pump = pump;
+    std::shared_ptr<helix::SharedCallback<void()>> pump =
+        std::make_shared<helix::SharedCallback<void()>>();
+    std::weak_ptr<helix::SharedCallback<void()>> weak_pump = pump;
     *pump = [walk, take_report, weak_pump]() {
         for (;;) {
             std::pair<std::string, int> next;
@@ -283,14 +287,11 @@ void download_include_graph(std::vector<std::string> listing, const std::string&
             auto self = weak_pump.lock();
             const std::string path = next.first;
             const int depth = next.second;
-            // A failure reported before download() returns is the transport
-            // refusing to queue the request, not a failed transfer.
-            auto submitting = std::make_shared<std::atomic<bool>>(true);
             auto deferred = std::make_shared<std::atomic<bool>>(false);
             walk->download(
                 path,
                 [walk, take_report, self, path, depth](std::string content) {
-                    std::function<void()> report;
+                    helix::Callback<void()> report;
                     {
                         std::lock_guard<std::mutex> lock(walk->mutex);
                         --walk->in_flight;
@@ -310,16 +311,16 @@ void download_include_graph(std::vector<std::string> listing, const std::string&
                     else if (self)
                         (*self)();
                 },
-                [walk, take_report, path, depth, submitting, deferred](std::string message,
-                                                                       bool queue_full) {
-                    std::function<void()> report;
+                [walk, take_report, path, depth, deferred](std::string message, bool queue_full) {
+                    helix::Callback<void()> report;
                     {
                         std::lock_guard<std::mutex> lock(walk->mutex);
                         --walk->in_flight;
                         // Backpressure: retry when an in-flight download completes.
                         // With nothing in flight there is no completion to wait for.
-                        if (queue_full && submitting->load() && walk->in_flight > 0 &&
-                            walk->error.empty()) {
+                        // A refusal can arrive after download() returns, when the
+                        // request was handed to another thread first.
+                        if (queue_full && walk->in_flight > 0 && walk->error.empty()) {
                             walk->queue.insert(walk->queue.begin(), {path, depth});
                             deferred->store(true);
                             spdlog::debug("[ConfigIncludes] {} not queued ({}), retrying later",
@@ -334,7 +335,7 @@ void download_include_graph(std::vector<std::string> listing, const std::string&
                     if (report)
                         report();
                 });
-            submitting->store(false);
+            // Refused before download() returned: wait for a completion.
             if (deferred->load())
                 return;
         }
@@ -342,39 +343,65 @@ void download_include_graph(std::vector<std::string> listing, const std::string&
     (*pump)();
 }
 
-void resolve_active_config_files_with_content(IMoonrakerAPI& api,
-                                              ActiveFilesWithContentCallback on_complete,
-                                              ErrorCallback on_error) {
-    // api must outlive all async callbacks (guaranteed: IMoonrakerAPI is owned by PrinterState
-    // singleton)
+ConfigDownloadFn api_config_download(IMoonrakerAPI& api,
+                                     helix::SharedCallback<bool()> still_wanted) {
+    return [&api, tok = api.lifetime_token(), still_wanted = std::move(still_wanted)](
+               const std::string& path, helix::SharedCallback<void(std::string)> ok,
+               helix::SharedCallback<void(std::string, bool)> fail) {
+        // Queued directly rather than through tok.defer(), which would drop the
+        // request silently once the API is gone and leave the walk waiting forever.
+        helix::ui::queue_update(
+            "ConfigIncludes::download", [&api, tok, still_wanted, path, ok, fail]() {
+                if (tok.expired()) {
+                    fail("the printer disconnected", false);
+                    return;
+                }
+                if (still_wanted && !still_wanted()) {
+                    fail(kConfigDownloadNotWanted, false);
+                    return;
+                }
+                api.transfers().download_file(
+                    "config", path, [ok](const std::string& content) { ok(content); },
+                    [fail](const MoonrakerError& err) {
+                        fail(err.message, err.type == MoonrakerErrorType::QUEUE_FULL);
+                    });
+            });
+    };
+}
+
+void download_config_include_graph(IMoonrakerAPI& api, const std::string& root_file,
+                                   const std::string& suffix,
+                                   ActiveFilesWithContentCallback on_complete,
+                                   ErrorCallback on_error, ConfigDownloadFn download) {
+    if (!download)
+        download = api_config_download(api);
     api.files().list_files(
         "config", "", true,
-        [&api, on_complete, on_error](const std::vector<FileInfo>& file_list) {
-            std::vector<std::string> cfg_paths;
+        [root_file, suffix, download, on_complete,
+         on_error](const std::vector<FileInfo>& file_list) {
+            std::vector<std::string> paths;
             for (const auto& f : file_list) {
                 if (!f.is_dir) {
                     std::string path = f.path.empty() ? f.filename : f.path;
-                    if (path.size() > 4 && path.substr(path.size() - 4) == ".cfg") {
-                        cfg_paths.push_back(path);
+                    if (path.size() > suffix.size() &&
+                        path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                        paths.push_back(path);
                     }
                 }
             }
-            download_include_graph(
-                std::move(cfg_paths), "printer.cfg",
-                [&api](const std::string& path, std::function<void(std::string)> ok,
-                       std::function<void(std::string, bool)> fail) {
-                    api.transfers().download_file(
-                        "config", path, [ok](const std::string& content) { ok(content); },
-                        [fail](const MoonrakerError& err) {
-                            fail(err.message, err.type == MoonrakerErrorType::QUEUE_FULL);
-                        });
-                },
-                on_complete, on_error);
+            download_include_graph(std::move(paths), root_file, download, on_complete, on_error);
         },
         [on_error](const MoonrakerError& err) {
             if (on_error)
                 on_error("Failed to list config files: " + err.message);
         });
+}
+
+void resolve_active_config_files_with_content(IMoonrakerAPI& api,
+                                              ActiveFilesWithContentCallback on_complete,
+                                              ErrorCallback on_error) {
+    download_config_include_graph(api, "printer.cfg", ".cfg", std::move(on_complete),
+                                  std::move(on_error));
 }
 
 void resolve_active_config_files(IMoonrakerAPI& api, ActiveFilesCallback on_complete,

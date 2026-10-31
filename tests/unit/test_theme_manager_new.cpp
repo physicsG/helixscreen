@@ -518,9 +518,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "responsive_dimension picks the smaller screen
 
     SECTION("null display falls back to the default display") {
         // lv_display_get_default() returns the first display created — here the
-        // fixture's TEST_DISPLAY_WIDTH x TEST_DISPLAY_HEIGHT screen — so the
+        // fixture's kTestDisplayWidth x kTestDisplayHeight screen — so the
         // fallback resolves to its smaller axis, not any later-created display.
-        REQUIRE(responsive_dimension(nullptr) == std::min(TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT));
+        REQUIRE(responsive_dimension(nullptr) == std::min(kTestDisplayWidth, kTestDisplayHeight));
     }
 }
 

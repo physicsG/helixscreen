@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- One row of AMS device-action buttons, sharing the width equally.
+     AmsDeviceSectionDetailOverlay creates one per pair of BUTTON actions. -->
+<component>
+  <view extends="lv_obj"
+        width="100%" height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0" flex_flow="row"
+        style_pad_column="#space_sm" scrollable="false"/>
+</component>

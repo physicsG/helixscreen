@@ -66,6 +66,18 @@ TEST_CASE("extract_friendly_message parses Klipper error strings", "[moonraker][
         REQUIRE(result == "Heater extruder not heating at expected rate");
     }
 
+    SECTION("decodes a coded envelope and keeps the text around it") {
+        auto result = MoonrakerError::extract_friendly_message(
+            R"(Error executing script X: {"coded": "0001-0531-0000-0005", "msg":"Printer is not idle", "action":"none"} (line 4))");
+        REQUIRE(result == "Error executing script X: Printer is not idle (line 4)");
+    }
+
+    SECTION("an escaped quote in msg does not truncate it") {
+        auto result = MoonrakerError::extract_friendly_message(
+            R"({"code":"key12","msg":"Heater \"extruder\" not heating"})");
+        REQUIRE(result == R"(Heater "extruder" not heating)");
+    }
+
     SECTION("prefers message over msg when both present") {
         auto result = MoonrakerError::extract_friendly_message(
             R"({"msg":"raw detail","message":"friendly summary"})");
@@ -95,6 +107,63 @@ TEST_CASE("from_json_rpc extracts friendly message from Klipper errors", "[moonr
         auto err = MoonrakerError::from_json_rpc(error_obj, "some.method");
         REQUIRE(err.message == "Method not found");
     }
+
+    SECTION("a coded firmware envelope becomes its msg") {
+        json error_obj = {
+            {"code", 400},
+            {"message",
+             R"({"coded":"0001-0531-0000-0005","msg":"Printer is not idle, cannot restore power loss print","action":"none"})"}};
+
+        auto err = MoonrakerError::from_json_rpc(error_obj, "printer.gcode.script");
+        REQUIRE(err.message == "Printer is not idle, cannot restore power loss print");
+    }
+}
+
+TEST_CASE("json_rpc_error decodes a firmware envelope in a raw error line",
+          "[moonraker][error][firmware_error_envelope]") {
+    auto err = MoonrakerError::json_rpc_error(
+        "PID_CALIBRATE", R"({"code":"key9001","msg":"Heater extruder not heating"})");
+    REQUIRE(err.message == "Heater extruder not heating");
+}
+
+TEST_CASE("json_rpc_error extracts a wrapped envelope before decoding it",
+          "[moonraker][error][firmware_error_envelope]") {
+    auto err = MoonrakerError::json_rpc_error(
+        "BED_MESH_CALIBRATE",
+        R"({'error': 'WebRequestError', 'message': '{"coded": "0003-0522-0002-0008", "msg":"Lost communication with MCU e0"}'})");
+    REQUIRE(err.message == "Lost communication with MCU e0");
+}
+
+TEST_CASE("friendly_error_line strips the error prefix and decodes",
+          "[moonraker][error][firmware_error_envelope]") {
+    REQUIRE(
+        MoonrakerError::friendly_error_line(
+            R"(!! {"coded": "0003-0522-0002-0008", "msg":"Lost communication with MCU 'e0'"})") ==
+        "Lost communication with MCU 'e0'");
+    REQUIRE(MoonrakerError::friendly_error_line("Error:  Must home axis first") ==
+            "Must home axis first");
+    REQUIRE(
+        MoonrakerError::friendly_error_line(
+            R"(!! {"error": "WebRequestError", "message": "Probe triggered prior to movement"})") ==
+        "Probe triggered prior to movement");
+    REQUIRE(MoonrakerError::friendly_error_line("plain text") == "plain text");
+    REQUIRE(MoonrakerError::friendly_error_line("!! Error: foo") == "foo");
+}
+
+TEST_CASE("extract_friendly_message skips escaped quotes in the message value",
+          "[moonraker][error][firmware_error_envelope]") {
+    // Python repr: a value holding both quote kinds escapes the single quotes.
+    REQUIRE(
+        MoonrakerError::extract_friendly_message(
+            R"({'error': 'x', 'message': '{"coded": "1", "msg":"Lost communication with MCU \'e0\'"}'})") ==
+        "Lost communication with MCU 'e0'");
+    // JSON: the inner envelope's quotes are escaped.
+    REQUIRE(
+        MoonrakerError::extract_friendly_message(
+            R"({"error": "x", "message": "{\"coded\": \"1\", \"msg\":\"Lost communication\"}"})") ==
+        "Lost communication");
+    REQUIRE(MoonrakerError::extract_friendly_message(
+                R"({"error":"x","message":"say \"hi\" twice"})") == R"(say "hi" twice)");
 }
 
 // ============================================================================

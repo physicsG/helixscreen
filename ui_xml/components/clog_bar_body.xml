@@ -31,7 +31,7 @@
 
       <!-- What is measuring on the left, how worried it is on the right. The
            severity is a glyph rather than a word: it is the one slot whose
-           meaning is the same in all three modes, it is already carried by the
+           meaning is the same in every mode, it is already carried by the
            fill colour, and a picture costs a third of the width of "Warning".
            One label per ClogMeterStatus, only the matching one visible. -->
       <lv_obj width="100%"
@@ -43,6 +43,12 @@
         <lv_obj name="clog_bar_status"
                 width="content" height="content" style_pad_all="0" scrollable="false" clickable="false"
                 event_bubble="true">
+          <!-- A detector that is present but disarmed: it would not catch a jam. -->
+          <lv_label name="clog_bar_status_off"
+                    align="center" text="#icon_eye_off" style_text_font="mdi_icons_16" style_text_color="#text_muted"
+                    clickable="false" event_bubble="true">
+            <bind_flag_if_not_eq subject="clog_meter_status" flag="hidden" ref_value="-1"/>
+          </lv_label>
           <lv_label name="clog_bar_status_ok"
                     align="center" text="#icon_check_circle" style_text_font="mdi_icons_16" style_text_color="#primary"
                     clickable="false" event_bubble="true">
@@ -54,8 +60,8 @@
             <bind_flag_if_not_eq subject="clog_meter_status" flag="hidden" ref_value="1"/>
           </lv_label>
           <lv_label name="clog_bar_status_fault"
-                    align="center" text="#icon_filament_alert" style_text_font="mdi_icons_16" style_text_color="#danger"
-                    clickable="false" event_bubble="true">
+                    align="center" text="#icon_filament_sensor_alert" style_text_font="mdi_icons_16"
+                    style_text_color="#danger" clickable="false" event_bubble="true">
             <bind_flag_if_not_eq subject="clog_meter_status" flag="hidden" ref_value="2"/>
           </lv_label>
         </lv_obj>
@@ -133,7 +139,7 @@
            phrases chosen by clog_meter_note_kind so they follow the language. -->
       <text_tiny name="clog_bar_note"
                  width="100%" bind_text="clog_meter_note_text" style_text_color="#text_muted" style_text_align="center"
-                 long_mode="dots" clickable="false" event_bubble="true">
+                 clickable="false" event_bubble="true">
         <bind_flag_if_not_eq subject="clog_meter_note_kind" flag="hidden" ref_value="1"/>
       </text_tiny>
       <text_tiny name="clog_bar_note_boosted"

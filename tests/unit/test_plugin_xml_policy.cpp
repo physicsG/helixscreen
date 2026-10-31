@@ -245,4 +245,119 @@ TEST_CASE("plugin object names are plugin-owned", "[plugin][xml_policy]") {
     CHECK_FALSE(check_plugin_attr("ab", "name", "ab__root").has_value());
 }
 
+namespace {
+const char* kButtonRowNames =
+    R"( primary_name="ab__ok" secondary_name="ab__no" tertiary_name="ab__t"
+        quaternary_name="ab__q" tertiary_divider_name="ab__dt" quaternary_divider_name="ab__dq")";
+const char* kHeaderNames = R"( icon_name="ab__hi" title_name="ab__ht" close_name="ab__hc")";
+} // namespace
+
+TEST_CASE("modal_button_row with owned names and plugin_event passes", "[plugin][xml_policy]") {
+    CHECK(check_plugin_xml("ab", {},
+                           view_with(std::string(R"(<ui_dialog><modal_header title="Pick")") +
+                                     kHeaderNames +
+                                     R"(/><modal_button_row primary_callback="plugin_event"
+                    primary_user_data="ab__accept:1")" +
+                                     kButtonRowNames + "/></ui_dialog>"))
+              .empty());
+}
+
+TEST_CASE("a missing or unowned *_name on dialog chrome is rejected", "[plugin][xml_policy]") {
+    // Missing: the component's default btn_primary would land on screen.
+    CHECK(check_plugin_xml("ab", {},
+                           view_with(R"(<modal_button_row primary_callback="plugin_event"/>)"))
+              .find("primary_name") != std::string::npos);
+    CHECK(check_plugin_xml("ab", {}, view_with(R"(<modal_header title="x"/>)")).find("icon_name") !=
+          std::string::npos);
+    // Unowned.
+    std::string unowned = kButtonRowNames;
+    unowned.replace(unowned.find("ab__ok"), 6, "btn_ok");
+    CHECK(check_plugin_xml("ab", {}, view_with("<modal_button_row" + unowned + "/>"))
+              .find("primary_name=\"btn_ok\"") != std::string::npos);
+}
+
+TEST_CASE("a plugin's own component props ending in _name or _user_data are plain props",
+          "[plugin][xml_policy]") {
+    // Only the app's dialog chrome names objects through *_name props.
+    CHECK(check_plugin_xml("ab", {"ab__row"},
+                           view_with(R"(<ab__row file_name="Benchy" job_user_data="x"/>)"))
+              .empty());
+    CHECK_FALSE(check_plugin_attr("ab", "file_name", "Benchy").has_value());
+}
+
+TEST_CASE("dialog chrome callbacks must be plugin_event", "[plugin][xml_policy]") {
+    CHECK_FALSE(
+        check_plugin_xml("ab", {},
+                         view_with(std::string(R"(<modal_button_row primary_callback="on_save")") +
+                                   kButtonRowNames + "/>"))
+            .empty());
+}
+
+TEST_CASE("dialog chrome *_user_data must name an owned handler", "[plugin][xml_policy]") {
+    CHECK_FALSE(
+        check_plugin_xml(
+            "ab", {},
+            view_with(
+                std::string(
+                    R"(<modal_button_row primary_callback="plugin_event" primary_user_data="other__go")") +
+                kButtonRowNames + "/>"))
+            .empty());
+    CHECK(
+        check_plugin_xml(
+            "ab", {},
+            view_with(
+                std::string(
+                    R"(<modal_button_row primary_callback="plugin_event" primary_user_data="ab__go:2")") +
+                kButtonRowNames + "/>"))
+            .empty());
+}
+
+TEST_CASE("plugin consts with owned names pass; unowned and stray values are rejected",
+          "[plugin][xml_policy]") {
+    CHECK(check_plugin_xml("ab", {}, R"(<component><consts><px name="ab__w_small" value="4"/>
+        <color name="ab__tint" value="0xff0000"/></consts><view extends="lv_obj"/></component>)")
+              .empty());
+    CHECK(check_plugin_xml("ab", {}, R"(<component><consts><px name="space_md" value="4"/>
+        </consts><view extends="lv_obj"/></component>)")
+              .find("space_md") != std::string::npos);
+    CHECK_FALSE(check_plugin_xml("ab", {}, view_with(R"(<px name="ab__w" value="4"/>)")).empty());
+}
+
+TEST_CASE("breakpoint subjects are readable in conditional binds only", "[plugin][xml_policy]") {
+    for (const char* subject : {"ui_breakpoint", "ui_breakpoint_v", "ui_is_portrait"}) {
+        CHECK(check_plugin_xml("ab", {},
+                               view_with(std::string(R"(<lv_obj><bind_flag_if_eq subject=")") +
+                                         subject + R"(" flag="hidden" ref_value="0"/></lv_obj>)"))
+                  .empty());
+        CHECK(check_plugin_xml(
+                  "ab", {},
+                  view_with(std::string(R"(<lv_obj><bind_style_if_ge name="s" subject=")") +
+                            subject + R"(" ref_value="2"/></lv_obj>)"))
+                  .empty());
+    }
+    CHECK_FALSE(check_plugin_xml("ab", {}, view_with(R"(<lv_slider bind_value="ui_breakpoint"/>)"))
+                    .empty());
+    CHECK_FALSE(
+        check_plugin_xml("ab", {}, view_with(R"(<lv_label bind_text="ui_breakpoint"/>)")).empty());
+    CHECK(
+        check_plugin_xml(
+            "ab", {},
+            view_with(
+                R"(<lv_obj><bind_flag_if subject="ab__x" cond="ui_breakpoint lt 2" flag="hidden"/></lv_obj>)"))
+            .empty());
+}
+
+TEST_CASE("plugin XML may use plugin_table under an owned name", "[plugin][xml_policy]") {
+    CHECK(check_plugin_xml("ab", {}, view_with(R"(<plugin_table name="ab__tasks" flex_grow="1"/>)"))
+              .empty());
+    CHECK_FALSE(check_plugin_xml("ab", {}, view_with(R"(<plugin_table name="tasks"/>)")).empty());
+}
+
+TEST_CASE("plugin XML draws only its own image icons", "[plugin][xml_policy][icons]") {
+    CHECK(check_plugin_xml("ab", {}, view_with(R"(<icon src="ab__oil" size="lg"/>)")).empty());
+    CHECK(check_plugin_xml("ab", {}, view_with(R"(<icon src="water"/>)")).empty());
+    const std::string why = check_plugin_xml("ab", {}, view_with(R"(<icon src="cd__oil"/>)"));
+    CHECK(why.find("an image icon must be named ab__<name>") != std::string::npos);
+}
+
 #endif // HELIX_HAS_PLUGINS

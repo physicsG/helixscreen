@@ -78,3 +78,79 @@ TEST_CASE("a widget that accepts everything never grows", "[span_fit][1559]") {
         CHECK(r == span);
     }
 }
+
+// ---------------------------------------------------------------------------
+// seat_grown_span: where a grown widget may sit without taking a neighbour's
+// tracks. Run with: ./build/bin/helix-tests "[seat_grown]"
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool overlaps(const TrackRect& a, const TrackRect& b) {
+    return a.col < b.col + b.colspan && b.col < a.col + a.colspan && a.row < b.row + b.rowspan &&
+           b.row < a.row + a.rowspan;
+}
+
+/// Accepts a candidate that stays clear of every rectangle in @p taken.
+auto clear_of(std::vector<TrackRect> taken) {
+    return [taken](const TrackRect& c) {
+        for (const auto& t : taken) {
+            if (overlaps(c, t)) {
+                return false;
+            }
+        }
+        return true;
+    };
+}
+
+} // namespace
+
+TEST_CASE("seat_grown_span: growth into free space extends right", "[span_fit][seat_grown]") {
+    const TrackRect saved{4, 0, 4, 4};
+    const auto r = seat_grown_span(saved, 5, 4, 12, 8, 1, 1, clear_of({}));
+    CHECK(r.col == 4);
+    CHECK(r.row == 0);
+    CHECK(r.colspan == 5);
+    CHECK(r.rowspan == 4);
+}
+
+TEST_CASE("seat_grown_span: a neighbour on the right moves the growth left",
+          "[span_fit][seat_grown]") {
+    // Tracks 0..3 free, a neighbour flush against the right edge at 8.
+    const TrackRect saved{4, 0, 4, 4};
+    const TrackRect neighbour{8, 0, 4, 2};
+    const auto r = seat_grown_span(saved, 5, 4, 12, 8, 1, 1, clear_of({neighbour}));
+    CHECK(r.col == 3);
+    CHECK(r.colspan == 5);
+    CHECK_FALSE(overlaps(r, neighbour));
+}
+
+TEST_CASE("seat_grown_span: boxed in on both sides keeps the saved span",
+          "[span_fit][seat_grown]") {
+    // The 1.0 home layout at 800x480: tips between printer_image and active_spool.
+    const TrackRect saved{4, 0, 4, 4};
+    const TrackRect left{0, 0, 4, 4};
+    const TrackRect right{8, 0, 4, 2};
+    const auto r = seat_grown_span(saved, 5, 4, 12, 8, 1, 1, clear_of({left, right}));
+    CHECK(r.col == saved.col);
+    CHECK(r.row == saved.row);
+    CHECK(r.colspan == saved.colspan);
+    CHECK(r.rowspan == saved.rowspan);
+}
+
+TEST_CASE("seat_grown_span: the shifted origin lands on the snap step", "[span_fit][seat_grown]") {
+    // A whole-cell widget grown 2 -> 4 against the right edge shifts by 2, never 1.
+    const TrackRect saved{2, 0, 2, 2};
+    const auto r = seat_grown_span(saved, 4, 2, 4, 4, 2, 2, clear_of({}));
+    CHECK(r.col == 0);
+    CHECK(r.colspan == 4);
+}
+
+TEST_CASE("seat_grown_span: growth never leaves the grid", "[span_fit][seat_grown]") {
+    // Grown taller than the rows below allow: the origin moves up instead.
+    const TrackRect saved{0, 6, 2, 2};
+    const auto r = seat_grown_span(saved, 2, 4, 12, 8, 1, 1, clear_of({}));
+    CHECK(r.row == 4);
+    CHECK(r.rowspan == 4);
+    CHECK(r.row + r.rowspan <= 8);
+}

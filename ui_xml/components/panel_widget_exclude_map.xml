@@ -1,0 +1,117 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    Exclude Objects home widget. ExcludeMapWidget publishes exclude_map_rung (SizeRung),
+    exclude_map_placeholder, exclude_map_show_map, exclude_map_show_skip,
+    exclude_map_show_name and the texts; everything below binds off them. The tile never
+    excludes anything: a tap anywhere, or the Full rung's button, opens the full map in
+    print status, where the confirmation and the undo window guard the exclusion.
+
+    Rungs with objects: 0 glance (icon over remaining/total), 1 strip (objects and
+    skipped counts on two lines), 2 column (a tiny map over remaining/total), 3 cell (the
+    map over "N of M printing"), 4 wide (the map beside the object printing now and the
+    counts), 5 full (the map over the name, the counts and the Skip objects button).
+    exclude_map_placeholder is 1 when the tile is not printing or the print has fewer
+    than two objects: an icon, with its caption from the strip rung up.
+
+    The map view (the mini mode of ExcludeObjectMapView) is created by C++ inside
+    exclude_map_host.
+  -->
+  <styles>
+    <style name="em_stacked"
+           layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center" flex_track_place="center"/>
+    <style name="em_inline"
+           layout="flex" flex_flow="row" flex_main_place="start" flex_cross_place="center" flex_track_place="center"/>
+    <style name="em_text_under" width="100%"/>
+    <style name="em_text_beside" width="50%"/>
+  </styles>
+  <view name="panel_widget_exclude_map"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_xxs" scrollable="false">
+    <event_cb trigger="clicked" callback="exclude_map_clicked_cb"/>
+    <pass_through name="exclude_map_body"
+                  width="100%" height="100%" flex_flow="column" style_flex_main_place="center"
+                  style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="0" style_pad_column="0">
+
+      <!-- Placeholder: an icon, and from the strip rung up its caption. -->
+      <pass_through name="exclude_map_placeholder"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if_eq subject="exclude_map_placeholder" flag="hidden" ref_value="0"/>
+        <icon name="exclude_map_placeholder_icon"
+              src="debug_step_over" size="xs" variant="muted" clickable="false" event_bubble="true"/>
+        <text_tiny name="exclude_map_placeholder_caption"
+                   bind_text="exclude_map_placeholder_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true">
+          <bind_flag_if_eq subject="exclude_map_rung" flag="hidden" ref_value="0"/>
+        </text_tiny>
+      </pass_through>
+
+      <!-- 0 glance: the icon over remaining/total. -->
+      <pass_through name="exclude_map_glance"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if cond="exclude_map_placeholder eq 1 or exclude_map_rung ne 0" flag="hidden"/>
+        <icon name="exclude_map_glance_icon"
+              src="debug_step_over" size="xs" variant="muted" clickable="false" event_bubble="true"/>
+        <text_tiny name="exclude_map_glance_count"
+                   bind_text="exclude_map_count_text" clickable="false" event_bubble="true"/>
+      </pass_through>
+
+      <!-- 1 strip: object and skipped counts on two lines. -->
+      <pass_through name="exclude_map_strip"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_row="#space_xxs">
+        <bind_flag_if cond="exclude_map_placeholder eq 1 or exclude_map_rung ne 1" flag="hidden"/>
+        <text_tiny name="exclude_map_strip_objects"
+                   bind_text="exclude_map_objects_text" clickable="false" event_bubble="true"/>
+        <text_tiny name="exclude_map_strip_skipped"
+                   bind_text="exclude_map_skipped_text" style_text_color="#text_muted" clickable="false"
+                   event_bubble="true"/>
+      </pass_through>
+
+      <!-- 2..5: the map and the text under it (column, cell, full) or beside it (wide). -->
+      <pass_through name="exclude_map_content"
+                    width="100%" height="100%" style_pad_row="#space_xxs" style_pad_column="#space_xs">
+        <bind_flag_if_eq subject="exclude_map_show_map" flag="hidden" ref_value="0"/>
+        <bind_style_if_not_eq name="em_stacked" subject="exclude_map_rung" ref_value="4"/>
+        <bind_style_if_eq name="em_inline" subject="exclude_map_rung" ref_value="4"/>
+        <pass_through name="exclude_map_host" width="100%" height="100%" flex_grow="1"/>
+        <pass_through name="exclude_map_text"
+                      height="content" flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center"
+                      style_flex_track_place="center" style_pad_row="#space_xxs">
+          <bind_style_if_eq name="em_text_beside" subject="exclude_map_rung" ref_value="4"/>
+          <bind_style_if_not_eq name="em_text_under" subject="exclude_map_rung" ref_value="4"/>
+          <text_tiny name="exclude_map_now_caption"
+                     text="Now printing" style_text_color="#text_muted" clickable="false" event_bubble="true">
+            <bind_flag_if cond="exclude_map_show_name eq 0 or exclude_map_has_current eq 0" flag="hidden"/>
+          </text_tiny>
+          <text_small name="exclude_map_now_name"
+                      bind_text="exclude_map_current_name" long_mode="dots" style_max_width="100%" clickable="false"
+                      event_bubble="true">
+            <bind_flag_if cond="exclude_map_show_name eq 0 or exclude_map_has_current eq 0" flag="hidden"/>
+          </text_small>
+          <text_tiny name="exclude_map_short_count"
+                     bind_text="exclude_map_count_text" clickable="false" event_bubble="true">
+            <bind_flag_if_not_eq subject="exclude_map_rung" flag="hidden" ref_value="2"/>
+          </text_tiny>
+          <text_tiny name="exclude_map_printing"
+                     bind_text="exclude_map_printing_text" clickable="false" event_bubble="true">
+            <bind_flag_if_lt subject="exclude_map_rung" flag="hidden" ref_value="3"/>
+          </text_tiny>
+          <text_tiny name="exclude_map_skipped"
+                     bind_text="exclude_map_skipped_text" style_text_color="#text_muted" clickable="false"
+                     event_bubble="true">
+            <bind_flag_if_eq subject="exclude_map_show_name" flag="hidden" ref_value="0"/>
+          </text_tiny>
+          <ui_button name="exclude_map_skip_button"
+                     width="100%" height="#button_height_sm" icon="debug_step_over" text="Skip Objects...">
+            <bind_flag_if_eq subject="exclude_map_show_skip" flag="hidden" ref_value="0"/>
+            <event_cb trigger="clicked" callback="exclude_map_skip_cb"/>
+          </ui_button>
+        </pass_through>
+      </pass_through>
+    </pass_through>
+  </view>
+</component>

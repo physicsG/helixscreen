@@ -180,8 +180,8 @@ bool has_include(const std::string& content, const std::string& filename) {
 /// one winning, so every user macro must load after ours.
 std::string with_includes(const std::string& content, bool with_skips) {
     std::string out = content;
-    if (!has_include(out, HELIX_MACROS_FILENAME)) {
-        out = with_include_after_last(out, HELIX_MACROS_FILENAME);
+    if (!has_include(out, kHelixMacrosFilename)) {
+        out = with_include_after_last(out, kHelixMacrosFilename);
     }
     if (with_skips && !has_include(out, skip_wrappers::FILENAME)) {
         out = include_line(skip_wrappers::FILENAME) + "\n" + out;
@@ -316,7 +316,7 @@ void MacroManager::install_files(SuccessCallback on_success, ErrorCallback on_er
     // callbacks to main too (see the queue pin test), because the caller's
     // continuation touches LVGL-adjacent state.
     upload_macro_file(
-        HELIX_MACROS_FILENAME, get_macro_content(),
+        kHelixMacrosFilename, get_macro_content(),
         [this, on_success, on_error]() {
             upload_skips_file(
                 [this, on_success, on_error]() {
@@ -332,7 +332,7 @@ void MacroManager::update_files(SuccessCallback on_success, ErrorCallback on_err
     spdlog::info("[HelixMacroManager] Staging macro update...");
 
     upload_macro_file(
-        HELIX_MACROS_FILENAME, get_macro_content(),
+        kHelixMacrosFilename, get_macro_content(),
         [this, on_success, on_error]() {
             if (!stages_skips()) {
                 if (on_success) {
@@ -381,13 +381,13 @@ void MacroManager::uninstall(SuccessCallback on_success, ErrorCallback on_error)
     auto token = lifetime_.token();
 
     remove_include_from_config(
-        {HELIX_MACROS_FILENAME, skip_wrappers::FILENAME},
+        {kHelixMacrosFilename, skip_wrappers::FILENAME},
         [this, token, on_success, on_error]() {
             // L081 Mechanism C: defer chained this-> work to main thread
             // (remove_include cb fires on HTTP bg thread).
             token.defer("MacroManager::uninstall_delete", [this, on_success, on_error]() {
                 delete_macro_file(
-                    HELIX_MACROS_FILENAME,
+                    kHelixMacrosFilename,
                     [this, on_success, on_error]() {
                         delete_macro_file(
                             skip_wrappers::FILENAME,

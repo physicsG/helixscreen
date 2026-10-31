@@ -16,7 +16,7 @@ namespace helix {
  *
  * Two windows share one duration. The post-unload grace is a one-shot armed
  * when an operation that passed through UNLOADING returns to IDLE; the per-slot
- * stamps record a lane's unload_finish. Either way, past WINDOW an empty sensor
+ * stamps record a lane's unload_finish. Either way, past kWindow an empty sensor
  * is a real runout again.
  *
  * Read from the WebSocket thread (FilamentSensorManager) and written from both
@@ -28,9 +28,9 @@ class RunoutGrace {
     using Clock = std::chrono::steady_clock;
 
     /// Same 30s as the AD5X IFS runout suppression.
-    static constexpr std::chrono::seconds WINDOW{30};
+    static constexpr std::chrono::seconds kWindow{30};
     /// One stamp per AmsState slot subject.
-    static constexpr int MAX_SLOTS = 16;
+    static constexpr int kMaxSlots = kAmsMaxSlots;
 
     /// Feed one action sample. Arms the one-shot when an operation that passed
     /// through UNLOADING ends; tracked across the whole operation because a
@@ -41,10 +41,10 @@ class RunoutGrace {
     /// has happened or been superseded.
     void on_filament_loaded();
 
-    /// Take the one-shot. True at most once per unload, and only inside WINDOW.
+    /// Take the one-shot. True at most once per unload, and only inside kWindow.
     [[nodiscard]] bool consume();
 
-    /// Is the one-shot armed and inside WINDOW, without spending it.
+    /// Is the one-shot armed and inside kWindow, without spending it.
     [[nodiscard]] bool armed() const;
 
     void mark_slot_unloaded(int slot_index);
@@ -63,8 +63,8 @@ class RunoutGrace {
     /// runout, days later, would be swallowed.
     Clock::time_point armed_at_{};
     bool saw_unload_in_op_{false};
-    /// time_point{} means never unloaded and is always outside WINDOW.
-    std::array<Clock::time_point, MAX_SLOTS> last_unload_{};
+    /// time_point{} means never unloaded and is always outside kWindow.
+    std::array<Clock::time_point, kMaxSlots> last_unload_{};
 };
 
 } // namespace helix

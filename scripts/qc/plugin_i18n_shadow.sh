@@ -18,10 +18,10 @@ qc_plugin_i18n_shadow() {
 SECTION_START=$(date +%s)
 echo -n "🌐 Checking plugin packs for system-string shadows..."
 
-if python3 scripts/check_plugin_i18n_shadow.py >/tmp/plugin_i18n_shadow.out 2>&1; then
+if "$TRANS_FMT_PY" scripts/check_plugin_i18n_shadow.py >/tmp/plugin_i18n_shadow.out 2>&1; then
   section_time $SECTION_START
   echo ""
-  echo "✅ No plugin translation shadows a system string"
+  qc_count "✅ No plugin translation shadows a system string ($(tail -1 /tmp/plugin_i18n_shadow.out))"
 else
   section_time $SECTION_START
   echo ""
@@ -36,4 +36,4 @@ echo ""
   return $EXIT_CODE
 }
 
-QC_TRIGGER_qc_plugin_i18n_shadow='^examples/plugins/.*/i18n/|^tests/fixtures/plugins/.*/i18n/|^translations/'
+QC_TRIGGER_qc_plugin_i18n_shadow='^examples/plugins/.*/i18n/|^tests/fixtures/plugins/.*/i18n/|^translations/|^scripts/check_plugin_i18n_shadow\.py$|^scripts/qc/plugin_i18n_shadow\.sh$|^tests/shell/test_plugin_i18n_shadow_gate\.bats$'

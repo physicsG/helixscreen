@@ -5,6 +5,7 @@
 
 #include "ui_callback_helpers.h"
 #include "ui_carousel.h"
+#include "ui_drag_surface.h"
 #include "ui_event_safety.h"
 #include "ui_fonts.h"
 #include "ui_icon_codepoints.h"
@@ -45,17 +46,6 @@
 
 using namespace helix;
 
-/// Recursively set EVENT_BUBBLE on all descendants so touch events
-/// (long_press, click, etc.) propagate up to the container.
-static void set_event_bubble_recursive(lv_obj_t* obj) {
-    uint32_t count = lv_obj_get_child_count(obj);
-    for (uint32_t i = 0; i < count; ++i) {
-        lv_obj_t* child = lv_obj_get_child(obj, static_cast<int32_t>(i));
-        lv_obj_add_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
-        set_event_bubble_recursive(child);
-    }
-}
-
 /// A home carousel page container (ui_xml/components/home_page_container.xml) in @p parent.
 static lv_obj_t* create_page_container(lv_obj_t* parent) {
     return static_cast<lv_obj_t*>(lv_xml_create(parent, "home_page_container", nullptr));
@@ -64,6 +54,7 @@ static lv_obj_t* create_page_container(lv_obj_t* parent) {
 // disable_widget_clicks_recursive() and clear_pressed_state_recursive() are in ui_utils.h
 using helix::ui::clear_pressed_state_recursive;
 using helix::ui::disable_widget_clicks_recursive;
+using helix::ui::set_event_bubble_recursive;
 
 HomePanel::HomePanel(PrinterState& printer_state, IMoonrakerAPI* api)
     : PanelBase(printer_state, api) {
@@ -147,9 +138,14 @@ void HomePanel::init_subjects() {
 
     subjects_initialized_ = true;
 
-    // Self-register cleanup — ensures deinit runs before lv_deinit()
-    StaticPanelRegistry::instance().register_destroy(
-        "HomePanelSubjects", []() { get_global_home_panel().deinit_subjects(); });
+    // Self-register cleanup — ensures deinit runs before lv_deinit(). The hook
+    // peeks: an absent panel has no subjects to deinit, and building one here
+    // would construct a panel against a PrinterState and LVGL mid-teardown.
+    StaticPanelRegistry::instance().register_destroy("HomePanelSubjects", []() {
+        if (auto* panel = helix::lazy_global_if_exists<HomePanel>()) {
+            panel->deinit_subjects();
+        }
+    });
 
     spdlog::debug("[{}] Registered subjects and event callbacks", get_name());
 }
@@ -296,6 +292,8 @@ void HomePanel::build_carousel(int initial_page) {
         return;
     }
 
+    carousel_lifetime_.invalidate();
+
     auto& config = helix::PanelWidgetManager::instance().get_widget_config("home");
     int num_pages = static_cast<int>(config.page_count());
     const int shown = std::clamp(initial_page, 0, std::max(num_pages - 1, 0));
@@ -434,9 +432,13 @@ void HomePanel::build_carousel(int initial_page) {
     }
     active_page_index_ = shown;
 
-    // Populate all pages, activate only the shown page's widgets
+    // Populate all pages, activate only the shown page's widgets. A population
+    // whose drain rebuilt the carousel leaves this build stale: the rebuild
+    // owns the pages and the page observer now.
     for (int i = 0; i < num_pages; ++i) {
-        populate_page(i, true);
+        if (!populate_page(i, true)) {
+            return;
+        }
     }
 
     update_arrow_visibility(active_page_index_);
@@ -467,7 +469,7 @@ void HomePanel::rebuild_carousel(int shown) {
     build_carousel(shown);
 }
 
-void HomePanel::teardown_carousel() {
+void HomePanel::release_pages() {
     // Deactivate current page widgets
     if (active_page_index_ >= 0 && active_page_index_ < static_cast<int>(pages_.size())) {
         for (auto& w : pages_[static_cast<size_t>(active_page_index_)].widgets) {
@@ -487,6 +489,15 @@ void HomePanel::teardown_carousel() {
 
     // Disconnect page observer before deiniting subject
     page_observer_.reset();
+}
+
+bool HomePanel::drain_keeps_carousel() {
+    return helix::drain_updates_survived(carousel_lifetime_.token());
+}
+
+void HomePanel::teardown_carousel() {
+    carousel_lifetime_.invalidate();
+    release_pages();
 
     // Freeze queue, drain deferred callbacks, then async-clean the carousel.
     // safe_clean_children schedules child deletion via lv_obj_delete_async
@@ -495,7 +506,15 @@ void HomePanel::teardown_carousel() {
     // when populate_page runs via the gate observer path (#776 / #834).
     {
         auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
+        const auto panel_alive = lifetime_.token();
+        if (!drain_keeps_carousel()) {
+            if (panel_alive.expired()) {
+                return;
+            }
+            // The drained work built a carousel of its own, under the host
+            // cleaned below: its pages go with it.
+            release_pages();
+        }
         if (carousel_host_) {
             helix::ui::safe_clean_children(carousel_host_);
         }
@@ -512,25 +531,37 @@ void HomePanel::teardown_carousel() {
     subjects_.deinit_all();
 }
 
-void HomePanel::populate_page(int page_index, bool force) {
+bool HomePanel::populate_page(int page_index, bool force) {
     if (populating_widgets_) {
         spdlog::debug("[{}] populate_page: already in progress, skipping", get_name());
-        return;
+        return true;
     }
 
     if (page_index < 0 || page_index >= static_cast<int>(pages_.size())) {
         spdlog::error("[{}] populate_page: page_index {} out of range", get_name(), page_index);
-        return;
+        return true;
     }
 
     populating_widgets_ = true;
     auto idx = static_cast<size_t>(page_index);
+    // A drain below can run queued work that rebuilds the carousel, which
+    // replaces this page and skips its own population while this one holds
+    // populating_widgets_: every page is filled again on the next tick.
+    const auto panel_alive = lifetime_.token();
+    auto abandon_populate = [this, panel_alive]() {
+        if (panel_alive.expired()) {
+            return;
+        }
+        spdlog::debug("[{}] populate_page: carousel rebuilt mid-population, refilling", get_name());
+        populating_widgets_ = false;
+        helix::ui::run_next_tick(lifetime_.token(), [this]() { populate_widgets(true); });
+    };
 
     lv_obj_t* container = pages_[idx].container;
     if (!container) {
         spdlog::error("[{}] populate_page: null container for page {}", get_name(), page_index);
         populating_widgets_ = false;
-        return;
+        return true;
     }
 
     // Compute the widget ID list once per populate_page call; the cache below
@@ -549,7 +580,7 @@ void HomePanel::populate_page(int page_index, bool force) {
             spdlog::debug("[{}] Page {} widget list unchanged, skipping rebuild", get_name(),
                           page_index);
             populating_widgets_ = false;
-            return;
+            return true;
         }
 
         // A change that only flips hardware gates re-creates just those tiles,
@@ -562,7 +593,10 @@ void HomePanel::populate_page(int page_index, bool force) {
                                                                         snapshot_ids)) {
                 {
                     auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-                    helix::ui::UpdateQueue::instance().drain();
+                    if (!drain_keeps_carousel()) {
+                        abandon_populate();
+                        return false;
+                    }
                 }
                 auto fresh = helix::PanelWidgetManager::instance().swap_gated_tiles(
                     "home", container, page_index, snapshot_ids, *flips, pages_[idx].widgets);
@@ -582,7 +616,7 @@ void HomePanel::populate_page(int page_index, bool force) {
                     pages_[idx].visible_ids = std::move(snapshot_ids);
                     pages_[idx].widget_gen = gen;
                     populating_widgets_ = false;
-                    return;
+                    return true;
                 }
             }
         }
@@ -613,7 +647,10 @@ void HomePanel::populate_page(int page_index, bool force) {
     // lv_obj_delete_async, escaping the UpdateQueue batch.
     {
         auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
+        if (!drain_keeps_carousel()) {
+            abandon_populate();
+            return false;
+        }
         lv_obj_update_layout(container);
         helix::ui::safe_clean_children(container);
     }
@@ -650,6 +687,7 @@ void HomePanel::populate_page(int page_index, bool force) {
     pages_[idx].widget_gen = helix::runtime_widget_generation();
 
     populating_widgets_ = false;
+    return true;
 }
 
 std::map<std::string, nlohmann::json>
@@ -693,7 +731,9 @@ bool HomePanel::reseat_widgets() {
         if (mgr.reseat_tiles("home", pages_[i].container, static_cast<int>(i), pages_[i].widgets)) {
             ++reseated;
         } else {
-            populate_page(static_cast<int>(i), /*force=*/true);
+            if (!populate_page(static_cast<int>(i), /*force=*/true)) {
+                return true;
+            }
         }
     }
     spdlog::info(
@@ -838,7 +878,9 @@ void HomePanel::populate_widgets(bool force) {
     auto& config = helix::PanelWidgetManager::instance().get_widget_config("home");
     int num_pages = static_cast<int>(config.page_count());
     for (int i = 0; i < num_pages && i < static_cast<int>(pages_.size()); ++i) {
-        populate_page(i, force);
+        if (!populate_page(i, force)) {
+            return;
+        }
     }
     update_populated_pages_subject();
 }
@@ -866,7 +908,10 @@ void HomePanel::setup_widget_gate_observers() {
                 }
             }
         }
-        populate_widgets(/*force=*/false);
+        // A live default rearranged by this change can keep the same widget
+        // list, which the unforced path would read as nothing to do.
+        const bool relaid = helix::PanelWidgetManager::instance().refresh_live_default("home");
+        populate_widgets(/*force=*/relaid);
     });
 }
 
@@ -1007,7 +1052,7 @@ void HomePanel::refresh_printer_image() {
     // dynamic_cast this replaces, and works under -fno-rtti (firmware).
     for (auto& page : pages_) {
         for (auto& w : page.widgets) {
-            if (w && std::strcmp(w->id(), helix::PrinterImageWidget::WIDGET_ID) == 0) {
+            if (w && std::strcmp(w->id(), helix::PrinterImageWidget::kWidgetId) == 0) {
                 static_cast<helix::PrinterImageWidget*>(w.get())->refresh_printer_image();
                 return;
             }
@@ -1020,7 +1065,7 @@ void HomePanel::trigger_idle_runout_check() {
     // for why the id() match stands in for a dynamic_cast).
     for (auto& page : pages_) {
         for (auto& w : page.widgets) {
-            if (w && std::strcmp(w->id(), helix::PrintStatusWidget::WIDGET_ID) == 0) {
+            if (w && std::strcmp(w->id(), helix::PrintStatusWidget::kWidgetId) == 0) {
                 static_cast<helix::PrintStatusWidget*>(w.get())->trigger_idle_runout_check();
                 return;
             }
@@ -1057,23 +1102,14 @@ static bool should_suppress_edit_mode(lv_event_t* e) {
     if (indev && lv_indev_get_scroll_obj(indev))
         return true;
 
-    // Check if the original press target (before event bubbling) is an arc or
-    // slider — these widgets consume drag gestures for value adjustment, so a
-    // long hold on them should never trigger edit mode.
+    // The original press target (before event bubbling) on a drag surface: an
+    // arc, a slider, or a widget's mark_drag_surface() object consumes the drag,
+    // so a long hold on it never enters edit mode. The walk stops at the
+    // container that owns the event handler.
     lv_obj_t* target = lv_event_get_target_obj(e);
     if (!target)
         return false;
-    lv_obj_t* current = lv_event_get_current_target_obj(e);
-    while (target) {
-        if (lv_obj_has_class(target, &lv_arc_class) || lv_obj_has_class(target, &lv_slider_class))
-            return true;
-        // Stop at the container that owns the event handler
-        if (target == current)
-            break;
-        target = lv_obj_get_parent(target);
-    }
-
-    return false;
+    return helix::ui::is_drag_surface_hit(target, lv_event_get_current_target_obj(e));
 }
 
 bool HomePanel::finger_drifted_since_press() const {
@@ -1086,7 +1122,7 @@ bool HomePanel::finger_drifted_since_press() const {
     lv_indev_get_point(indev, &now);
     const int dx = now.x - press_start_point_.x;
     const int dy = now.y - press_start_point_.y;
-    const int limit = lv_dpx(AppConstants::Input::EDIT_MODE_MOVE_CANCEL_DPX);
+    const int limit = lv_dpx(app_constants::input::kEditModeMoveCancelDpx);
     return (dx * dx + dy * dy) > (limit * limit);
 }
 
@@ -1134,11 +1170,10 @@ void HomePanel::on_home_grid_long_press(lv_event_t* e) {
             if (panel.finger_drifted_since_press()) {
                 return; // inside the SAFE_EVENT_CB try block; END closes it below
             }
-            // Cancel the in-progress press to prevent the widget's click
-            // action from firing on release.
-            lv_indev_t* indev = lv_indev_active();
-            if (indev)
-                lv_indev_reset(indev, nullptr);
+            // The hold enters edit mode, so it ends the press: its release
+            // must not also fire the widget's tap. A hold this handler declines
+            // (kill switch, lock, drift, another page) keeps its tap.
+            helix::ui::end_press(e);
 
             // Clear PRESSED state from active page container
             lv_obj_t* container = nullptr;

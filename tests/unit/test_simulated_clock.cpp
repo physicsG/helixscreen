@@ -42,13 +42,13 @@ class GlobalSpeedScope {
 // ============================================================================
 
 TEST_CASE("SimSpeed: every factor lands in the one shared range", "[sim][simclock][clamp]") {
-    REQUIRE(SimSpeed::of(1.0).factor() == Catch::Approx(helix::sim::MIN_SPEED));
+    REQUIRE(SimSpeed::of(1.0).factor() == Catch::Approx(helix::sim::kMinSpeed));
     REQUIRE(SimSpeed::of(250.0).factor() == Catch::Approx(250.0));
 
     SECTION("sub-1x is not expressible — --sim-speed forbids it") {
-        REQUIRE(SimSpeed::of(0.5).factor() == Catch::Approx(helix::sim::MIN_SPEED));
-        REQUIRE(SimSpeed::of(0.0).factor() == Catch::Approx(helix::sim::MIN_SPEED));
-        REQUIRE(SimSpeed::of(-5.0).factor() == Catch::Approx(helix::sim::MIN_SPEED));
+        REQUIRE(SimSpeed::of(0.5).factor() == Catch::Approx(helix::sim::kMinSpeed));
+        REQUIRE(SimSpeed::of(0.0).factor() == Catch::Approx(helix::sim::kMinSpeed));
+        REQUIRE(SimSpeed::of(-5.0).factor() == Catch::Approx(helix::sim::kMinSpeed));
     }
 
     SECTION("above the ceiling saturates") {
@@ -67,7 +67,7 @@ TEST_CASE("SimSpeed: global() reads the --sim-speed flag", "[sim][simclock][clam
 
     SECTION("an out-of-range flag value is brought into range, not honoured") {
         get_runtime_config()->sim_speedup = 0.25;
-        REQUIRE(SimSpeed::global().factor() == Catch::Approx(helix::sim::MIN_SPEED));
+        REQUIRE(SimSpeed::global().factor() == Catch::Approx(helix::sim::kMinSpeed));
     }
 }
 
@@ -169,7 +169,7 @@ TEST_CASE("SimSpeed: a subsystem multiplier composes over the global flag",
     SECTION("only the overflow guard bounds an absurd product") {
         // Two in-range factors at their maximum would make 1e6.
         REQUIRE(SimSpeed::of(helix::sim::MAX_SPEED).composed_with(helix::sim::MAX_SPEED).factor() ==
-                Catch::Approx(helix::sim::MAX_COMPOSED_SPEED));
+                Catch::Approx(helix::sim::kMaxComposedSpeed));
     }
 
     SECTION("composition scales both operations, in their own directions") {

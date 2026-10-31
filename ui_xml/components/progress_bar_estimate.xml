@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- A progress_bar whose value is an estimate that can sit still through a long
+     phase (pre-print). A highlight sweeps the unfilled part left to right, pass
+     after pass, so the bar itself shows the work is alive whether or not the
+     estimate moves. The sweep stops while the bar is hidden or full. -->
+<component>
+  <api>
+    <prop name="bind_value" type="string" default=""/>
+    <prop name="min_value" type="string" default="0"/>
+    <prop name="max_value" type="string" default="100"/>
+    <prop name="value" type="string" default="0"/>
+  </api>
+  <view extends="progress_bar" bind_value="$bind_value" min_value="$min_value" max_value="$max_value" value="$value">
+    <event_cb trigger="draw_main_end" callback="on_progress_bar_draw_sweep"/>
+  </view>
+</component>

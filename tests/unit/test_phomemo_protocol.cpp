@@ -19,7 +19,7 @@ TEST_CASE("Phomemo protocol - speed command", "[label][phomemo]") {
     REQUIRE(data[0] == 0x1B);
     REQUIRE(data[1] == 0x4E);
     REQUIRE(data[2] == 0x0D);
-    REQUIRE(data[3] == PHOMEMO_DEFAULT_SPEED);
+    REQUIRE(data[3] == kPhomemoDefaultSpeed);
 }
 
 TEST_CASE("Phomemo protocol - density command", "[label][phomemo]") {
@@ -33,7 +33,7 @@ TEST_CASE("Phomemo protocol - density command", "[label][phomemo]") {
     REQUIRE(data[4] == 0x1B);
     REQUIRE(data[5] == 0x4E);
     REQUIRE(data[6] == 0x04);
-    REQUIRE(data[7] == PHOMEMO_DEFAULT_DENSITY);
+    REQUIRE(data[7] == kPhomemoDefaultDensity);
 }
 
 TEST_CASE("Phomemo protocol - GS v 0 raster command", "[label][phomemo]") {

@@ -13,7 +13,6 @@
 #include "ui_icon_codepoints.h"
 #include "ui_icon_picker.h"
 #include "ui_row_text.h"
-#include "ui_update_queue.h"
 #include "ui_utils.h"
 
 #include "app_globals.h"
@@ -53,24 +52,24 @@ void register_fan_stack_widget() {
 namespace {
 
 // Fan-related icons available in the font
-static const char* const FAN_ICONS[] = {
+static const char* const kFanIcons[] = {
     // clang-format off
     "fan",       "fan_off",    "cooldown",   "heat_wave",
     // clang-format on
 };
-static constexpr size_t FAN_ICON_COUNT = std::size(FAN_ICONS);
-static constexpr const char* DEFAULT_FAN_ICON = "fan";
+static constexpr size_t kFanIconCount = std::size(kFanIcons);
+static constexpr const char* kDefaultFanIcon = "fan";
 
 } // namespace
 
 namespace {
 // Text font token for the stacked icon-above layout, and the token the fit is
 // measured at. One name so the measurement and the applied font cannot drift.
-constexpr const char* FONT_STACKED = "font_body";
+constexpr const char* kFontStacked = "font_body";
 
 // Widest speed the label ever shows. Measured instead of the live value so the
 // name beside it does not reflow when a fan spins up from 0% to 100%.
-constexpr const char* WIDEST_SPEED_TEXT = "100%";
+constexpr const char* kWidestSpeedText = "100%";
 
 // How much of a fan's name a row has room for, longest first. Letter is the
 // floor: it is used when nothing longer fits.
@@ -192,13 +191,9 @@ void FanStackWidget::detach() {
     lifetime_.invalidate();
     picker_.hide();
 
-    // Freeze queue, drain pending deferred callbacks, THEN tear down observers
-    // and animations. Without the freeze, the WebSocket thread can enqueue new
-    // callbacks between drain() and pointer cleanup → use-after-free.
+    // Resetting each observer drops its queued callbacks, so none of them runs
+    // against the pointers cleared below.
     {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-
         part_observer_.reset();
         hotend_observer_.reset();
         aux_observer_.reset();
@@ -236,14 +231,14 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
     if (!widget_obj_ || is_carousel_mode())
         return;
 
-    static_assert(ICON_ABOVE_MIN_ROWSPAN == GridLayout::TRACKS_PER_CELL + 1,
+    static_assert(kIconAboveMinRowspan == GridLayout::TRACKS_PER_CELL + 1,
                   "The stacked layout starts one track above a whole authored cell");
 
     const char* row_names[] = {"fan_stack_part_row", "fan_stack_hotend_row", "fan_stack_aux_row"};
 
     // Width tiers, decided from physical pixels rather than grid span so the
     // same authored layout reads correctly on every panel:
-    //   compact: xs fonts, single-letter labels (P, H, C)
+    //   compact: xs fonts, single-letter labels (P, H, A)
     //   bigger:  sm fonts, resolved display names from PrinterFanState
     //
     // The name is a width question and only a width question: it shares a line
@@ -271,7 +266,7 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
 
     // Measure the layout being considered, not the one on screen: stacking
     // buys its vertical room back as type, so ask whether the LARGER text fits.
-    const lv_font_t* stacked_font = theme_manager_get_font(FONT_STACKED);
+    const lv_font_t* stacked_font = theme_manager_get_font(kFontStacked);
     const StackedRowMetrics stacked_row{
         static_cast<int>(mdi_icons_24.line_height),
         stacked_font ? static_cast<int>(stacked_font->line_height) : 0, icon_gap_px};
@@ -279,7 +274,7 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
     const bool icon_above =
         wants_icon_above(rowspan, height_px, visible_rows, stacked_row, row_gap_px);
 
-    const char* font_token = icon_above ? FONT_STACKED : (bigger ? "font_small" : "font_xs");
+    const char* font_token = icon_above ? kFontStacked : (bigger ? "font_small" : "font_xs");
     const lv_font_t* text_font = theme_manager_get_font(font_token);
     if (!text_font)
         return;
@@ -313,9 +308,12 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
         const char* short_word;     // one word; also the fallback when unresolved
     };
     const NameMapping name_map[] = {
-        {"fan_stack_part_row", "fan_stack_part_name", "P", &part_display_name_, "Part"},
-        {"fan_stack_hotend_row", "fan_stack_hotend_name", "H", &hotend_display_name_, "Hotend"},
-        {"fan_stack_aux_row", "fan_stack_aux_name", "C", &aux_display_name_, "Chamber"},
+        {"fan_stack_part_row", "fan_stack_part_name", "P", &part_display_name_,
+         fan_role_label(FanRole::Part, FanLabelLength::Word)},
+        {"fan_stack_hotend_row", "fan_stack_hotend_name", "H", &hotend_display_name_,
+         fan_role_label(FanRole::Hotend, FanLabelLength::Word)},
+        {"fan_stack_aux_row", "fan_stack_aux_name", "A", &aux_display_name_,
+         fan_role_label(FanRole::Aux, FanLabelLength::Word)},
     };
 
     auto name_text = [&](const NameMapping& m, NameForm f) -> const char* {
@@ -346,7 +344,7 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
         int content_w = lv_obj_get_content_width(widget_obj_);
         if (content_w <= 0)
             content_w = width_px;
-        const int avail_px = content_w - measure_text_px(WIDEST_SPEED_TEXT, text_font) - row_gap_px;
+        const int avail_px = content_w - measure_text_px(kWidestSpeedText, text_font) - row_gap_px;
 
         auto fits_every_row = [&](NameForm f) {
             for (const auto& m : name_map) {
@@ -420,7 +418,7 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
             if (!label)
                 continue;
             lv_point_t worst = {0, 0};
-            lv_text_get_size(&worst, WIDEST_SPEED_TEXT, text_font,
+            lv_text_get_size(&worst, kWidestSpeedText, text_font,
                              lv_obj_get_style_text_letter_space(label, LV_PART_MAIN), 0,
                              LV_COORD_MAX, LV_TEXT_FLAG_NONE);
             lv_obj_set_style_min_width(label, worst.x, 0);
@@ -428,7 +426,7 @@ void FanStackWidget::on_size_changed(int colspan, int rowspan, int width_px, int
         }
 
         // Level the name column the same way: per-row names differ in
-        // advance width ("P" vs "H" vs "C", "Hotend" vs "Part Cooling Fan"),
+        // advance width ("P" vs "H" vs "A", "Hotend" vs "Part Cooling Fan"),
         // which would leave the speed column's right edge ragged by a pixel
         // or two even with the boxes reserved above. A shared name-box width
         // pins both column edges for every row.
@@ -562,10 +560,8 @@ void FanStackWidget::bind_carousel_fans() {
     if (!widget_obj_)
         return;
 
-    // Guard against re-entrancy: drain() below can process a pending
-    // version_observer_ callback which calls bind_carousel_fans() again.
-    // The inner call would create widgets that the outer call then destroys
-    // via lv_obj_clean(), leaving stale pointers in carousel_pages_.
+    // A nested bind would create widgets that the outer call then cleans,
+    // leaving stale pointers in carousel_pages_.
     if (rebuilding_carousel_)
         return;
     rebuilding_carousel_ = true;
@@ -577,19 +573,13 @@ void FanStackWidget::bind_carousel_fans() {
         return;
     }
 
-    // Freeze the update queue while tearing down observers and widgets to
-    // prevent the WebSocket thread from enqueuing callbacks for destroyed objects.
+    // Resetting the observers drops their queued callbacks, so none reaches the
+    // pages cleared below.
     {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
         part_observer_.reset();
         hotend_observer_.reset();
         aux_observer_.reset();
         carousel_observers_.clear();
-
-        // Drain pending callbacks BEFORE clearing pages/widgets — pending
-        // callbacks may reference carousel_pages_ entries or their LVGL objects.
-        // The freeze prevents new callbacks from being enqueued during cleanup.
-        helix::ui::UpdateQueue::instance().drain();
 
         for (auto& page : carousel_pages_) {
             if (page.fan_icon)
@@ -598,9 +588,6 @@ void FanStackWidget::bind_carousel_fans() {
         carousel_pages_.clear();
 
         // Clear existing carousel pages (the carousel may have pages from a previous bind).
-        // Drain BEFORE clean to process any pending callbacks that reference these widgets.
-        // The freeze prevents new callbacks from being enqueued during the clean.
-        helix::ui::UpdateQueue::instance().drain();
         auto* state_ptr = ui_carousel_get_state(carousel);
         if (state_ptr && state_ptr->scroll_container) {
             helix::ui::safe_clean_children(state_ptr->scroll_container);
@@ -621,8 +608,10 @@ void FanStackWidget::bind_carousel_fans() {
     };
     std::vector<FanEntry> entries;
     if (fans.empty()) {
-        entries.push_back({lv_tr("Part"), "", 0, false});
-        entries.push_back({lv_tr("Hotend"), "", 0, false});
+        entries.push_back(
+            {lv_tr(fan_role_label(FanRole::Part, FanLabelLength::Word)), "", 0, false});
+        entries.push_back(
+            {lv_tr(fan_role_label(FanRole::Hotend, FanLabelLength::Word)), "", 0, false});
         spdlog::debug("[FanStackWidget] Carousel: no fans discovered, using placeholders");
     } else {
         for (const auto& fan : fans) {
@@ -747,9 +736,9 @@ void FanStackWidget::bind_carousel_fans() {
 
             // Don't let stale telemetry overwrite the user's optimistic value
             // during the Moonraker round-trip (mirrors FanDial).
-            constexpr uint32_t POST_INPUT_SUPPRESSION_MS = 400;
+            constexpr uint32_t kPostInputSuppressionMs = 400;
             if (cp.last_user_input_ms != 0 &&
-                (lv_tick_get() - cp.last_user_input_ms) < POST_INPUT_SUPPRESSION_MS)
+                (lv_tick_get() - cp.last_user_input_ms) < kPostInputSuppressionMs)
                 return;
 
             if (cp.arc) {
@@ -771,7 +760,7 @@ void FanStackWidget::bind_carousel_fans() {
     // Attach auto-resize AFTER all pages are reparented into the carousel.
     // Doing it inside the loop above would trigger an initial resize before the
     // carousel layout is finalized, resulting in 0x0 container dimensions and
-    // the arc collapsing to MIN_ARC_SIZE.
+    // the arc collapsing to kMinArcSize.
     lv_obj_update_layout(carousel);
     auto* state = ui_carousel_get_state(carousel);
     if (state && state->scroll_container) {
@@ -838,11 +827,15 @@ void FanStackWidget::setup_common_observers(std::function<void()> on_anim_change
         },
         DisplaySettingsManager::instance().get_subjects_lifetime());
 
+    // Both attach paths bind right after this, against the current version.
+    lv_subject_t* version_subject = printer_state_.fan_state().get_fans_version_subject();
+    bound_fans_version_ = lv_subject_get_int(version_subject);
     version_observer_ = helix::ui::observe<int>(
-        printer_state_.fan_state().get_fans_version_subject(), this,
-        [token, on_fans_version](FanStackWidget* /*self*/, int /*version*/) {
-            if (token.expired())
+        version_subject, this,
+        [token, on_fans_version](FanStackWidget* self, int version) {
+            if (token.expired() || version == self->bound_fans_version_)
                 return;
+            self->bound_fans_version_ = version;
             on_fans_version();
         },
         printer_state_.get_subjects_lifetime());
@@ -1029,12 +1022,12 @@ void FanStackWidget::ConfigurePicker::on_created(lv_obj_t* backdrop) {
         return;
     }
 
-    std::string effective_icon = owner_.icon_name_.empty() ? DEFAULT_FAN_ICON : owner_.icon_name_;
+    std::string effective_icon = owner_.icon_name_.empty() ? kDefaultFanIcon : owner_.icon_name_;
 
-    helix::ui::populate_icon_grid(icon_grid, FAN_ICONS, FAN_ICON_COUNT, effective_icon,
+    helix::ui::populate_icon_grid(icon_grid, kFanIcons, kFanIconCount, effective_icon,
                                   [this](const char* name) { owner_.select_icon(name); });
 
-    spdlog::debug("[FanStackWidget] Picker built with {} icons", FAN_ICON_COUNT);
+    spdlog::debug("[FanStackWidget] Picker built with {} icons", kFanIconCount);
 }
 
 // DECLARATIVE_OK: the grid cells are created in C++, so their selection border has
@@ -1049,7 +1042,7 @@ void FanStackWidget::ConfigurePicker::refresh_icon_highlights() {
         return;
     }
 
-    std::string effective = owner_.icon_name_.empty() ? DEFAULT_FAN_ICON : owner_.icon_name_;
+    std::string effective = owner_.icon_name_.empty() ? kDefaultFanIcon : owner_.icon_name_;
     helix::ui::refresh_icon_grid(icon_grid, effective);
 }
 
@@ -1061,7 +1054,7 @@ void FanStackWidget::select_fan(const std::string& object_name) {
 }
 
 void FanStackWidget::select_icon(const std::string& name) {
-    icon_name_ = (name == DEFAULT_FAN_ICON) ? "" : name;
+    icon_name_ = (name == kDefaultFanIcon) ? "" : name;
     save_fan_config();
     picker_.refresh_icon_highlights();
 
@@ -1078,5 +1071,5 @@ void FanStackWidget::save_fan_config() {
     save_widget_config(config);
     spdlog::debug("[FanStackWidget] Saved config: {} fan={} icon={}", instance_id_,
                   selected_fan_.empty() ? "(auto)" : selected_fan_,
-                  icon_name_.empty() ? DEFAULT_FAN_ICON : icon_name_);
+                  icon_name_.empty() ? kDefaultFanIcon : icon_name_);
 }

@@ -19,21 +19,70 @@ static uint32_t read_be32(const uint8_t* p) {
 // PackBits encoding
 // ---------------------------------------------------------------------------
 
+// Decodes one PWG Raster scanline (PWG 5102.4 / CUPS raster compression, 1-byte pixels):
+// 0..127 repeats the next pixel count+1 times, 129..255 copies 257-count literal pixels.
+// 128 is not a valid PWG code; it fails the decode.
+static bool pwg_decode_line(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+    size_t i = 0;
+    while (i < in.size()) {
+        uint8_t code = in[i++];
+        if (code == 128)
+            return false;
+        if (code < 128) {
+            if (i >= in.size())
+                return false;
+            out.insert(out.end(), static_cast<size_t>(code) + 1, in[i++]);
+        } else {
+            size_t n = 257 - static_cast<size_t>(code);
+            if (i + n > in.size())
+                return false;
+            out.insert(out.end(), in.begin() + i, in.begin() + i + n);
+            i += n;
+        }
+    }
+    return true;
+}
+
 TEST_CASE("PackBits encoding - literal bytes", "[label][pwg]") {
     // Distinct bytes: should encode as literals
     std::vector<uint8_t> input = {0x01, 0x02, 0x03, 0x04};
     std::vector<uint8_t> out;
     packbits_encode(input.data(), input.size(), out);
 
-    // Literal encoding: (256 - count) followed by the bytes
-    // count=4 -> 256-4=252
-    REQUIRE(!out.empty());
-    REQUIRE(out[0] == 252); // 256 - 4
+    // Literal encoding: (257 - count) followed by the bytes
+    REQUIRE(out.size() == 5);
+    REQUIRE(out[0] == 253); // 257 - 4
     REQUIRE(out[1] == 0x01);
     REQUIRE(out[2] == 0x02);
     REQUIRE(out[3] == 0x03);
     REQUIRE(out[4] == 0x04);
-    REQUIRE(out.size() == 5);
+}
+
+TEST_CASE("PackBits encoding - single literal is a run of one", "[label][pwg]") {
+    // 257 - 1 does not fit a byte; one pixel is a run of length 1
+    std::vector<uint8_t> input = {0x42};
+    std::vector<uint8_t> out;
+    packbits_encode(input.data(), input.size(), out);
+
+    REQUIRE(out.size() == 2);
+    REQUIRE(out[0] == 0);
+    REQUIRE(out[1] == 0x42);
+}
+
+TEST_CASE("PackBits encoding - round-trips through a PWG decoder", "[label][pwg]") {
+    std::vector<uint8_t> input;
+    for (int i = 0; i < 300; i++)
+        input.push_back(static_cast<uint8_t>(i * 7)); // 300 distinct-neighbor bytes
+    input.insert(input.end(), 200, 0xFF);             // a run longer than 128
+    input.push_back(0x00);                            // one trailing literal
+    input.insert(input.end(), {0x10, 0x20, 0x20, 0x30});
+
+    std::vector<uint8_t> encoded;
+    packbits_encode(input.data(), input.size(), encoded);
+
+    std::vector<uint8_t> decoded;
+    REQUIRE(pwg_decode_line(encoded, decoded));
+    REQUIRE(decoded == input);
 }
 
 TEST_CASE("PackBits encoding - run of identical bytes", "[label][pwg]") {
@@ -58,8 +107,8 @@ TEST_CASE("PackBits encoding - mixed content", "[label][pwg]") {
     // Should produce: literal(3 bytes) + run(5 of 0xFF)
     REQUIRE(out.size() >= 2); // At minimum some output
 
-    // First chunk: 3 literals -> (256-3=253), 0x01, 0x02, 0x03
-    REQUIRE(out[0] == 253);
+    // First chunk: 3 literals -> (257-3=254), 0x01, 0x02, 0x03
+    REQUIRE(out[0] == 254);
     REQUIRE(out[1] == 0x01);
     REQUIRE(out[2] == 0x02);
     REQUIRE(out[3] == 0x03);
@@ -114,28 +163,73 @@ TEST_CASE("Page header - resolution", "[label][pwg]") {
     REQUIRE(read_be32(hdr.data() + 280) == 600);
 }
 
-TEST_CASE("Page header - dimensions", "[label][pwg]") {
+// Offsets are PWG 5102.4 section 4.3 (the CUPS cups_page_header2_t layout).
+TEST_CASE("Page header - every field at its PWG 5102.4 offset", "[label][pwg]") {
     PageParams params;
+    params.hw_resolution_x = 300;
+    params.hw_resolution_y = 300;
+    params.width_px = 2480; // A4 at 300 dpi
+    params.height_px = 3508;
+    params.color_space = ColorSpace::SGRAY;
+    params.bits_per_color = 8;
+    params.bits_per_pixel = 8;
+    params.num_colors = 1;
+    params.page_size_name = "iso_a4_210x297mm";
+
+    auto hdr = build_page_header(params);
+    const uint8_t* h = hdr.data();
+
+    REQUIRE(std::string(reinterpret_cast<const char*>(h + 0)) == "PwgRaster");    // MediaClass
+    REQUIRE(std::string(reinterpret_cast<const char*>(h + 128)) == "stationery"); // MediaType
+    REQUIRE(read_be32(h + 276) == 300);                                           // HWResolution
+    REQUIRE(read_be32(h + 280) == 300);
+    REQUIRE(read_be32(h + 340) == 1);    // NumCopies
+    REQUIRE(read_be32(h + 352) == 595);  // PageSize[0], points
+    REQUIRE(read_be32(h + 356) == 842);  // PageSize[1], points
+    REQUIRE(read_be32(h + 368) == 0);    // Tumble
+    REQUIRE(read_be32(h + 372) == 2480); // Width
+    REQUIRE(read_be32(h + 376) == 3508); // Height
+    REQUIRE(read_be32(h + 380) == 0);    // cupsMediaType
+    REQUIRE(read_be32(h + 384) == 8);    // BitsPerColor
+    REQUIRE(read_be32(h + 388) == 8);    // BitsPerPixel
+    REQUIRE(read_be32(h + 392) == 2480); // BytesPerLine
+    REQUIRE(read_be32(h + 396) == 0);    // ColorOrder: chunky
+    REQUIRE(read_be32(h + 400) == static_cast<uint32_t>(ColorSpace::SGRAY));
+    REQUIRE(read_be32(h + 404) == 0); // cupsCompression
+    REQUIRE(read_be32(h + 420) == 1); // NumColors
+    REQUIRE(read_be32(h + 452) == 1); // TotalPageCount
+    REQUIRE(read_be32(h + 456) == 1); // CrossFeedTransform
+    REQUIRE(read_be32(h + 460) == 1); // FeedTransform
+    REQUIRE(std::string(reinterpret_cast<const char*>(h + 1732)) == "iso_a4_210x297mm");
+}
+
+TEST_CASE("Page header - Letter page size in points", "[label][pwg]") {
+    PageParams params;
+    params.hw_resolution_x = 300;
+    params.hw_resolution_y = 600;
     params.width_px = 2550;
-    params.height_px = 3300;
+    params.height_px = 6600;
 
     auto hdr = build_page_header(params);
 
-    // Width at offset 368, Height at offset 372
-    REQUIRE(read_be32(hdr.data() + 368) == 2550);
-    REQUIRE(read_be32(hdr.data() + 372) == 3300);
+    REQUIRE(read_be32(hdr.data() + 352) == 612);
+    REQUIRE(read_be32(hdr.data() + 356) == 792);
 }
 
-TEST_CASE("Page header - color space", "[label][pwg]") {
+TEST_CASE("Page header - sRGB fields", "[label][pwg]") {
     PageParams params;
     params.width_px = 100;
     params.height_px = 100;
-    params.color_space = ColorSpace::SGRAY;
+    params.color_space = ColorSpace::SRGB;
+    params.bits_per_pixel = 24;
+    params.num_colors = 3;
 
     auto hdr = build_page_header(params);
 
-    // ColorSpace at offset 396
-    REQUIRE(read_be32(hdr.data() + 396) == static_cast<uint32_t>(ColorSpace::SGRAY));
+    REQUIRE(read_be32(hdr.data() + 388) == 24);
+    REQUIRE(read_be32(hdr.data() + 392) == 300);
+    REQUIRE(read_be32(hdr.data() + 400) == static_cast<uint32_t>(ColorSpace::SRGB));
+    REQUIRE(read_be32(hdr.data() + 420) == 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,8 +317,8 @@ TEST_CASE("Generate - small bitmap", "[label][pwg]") {
     REQUIRE(out.size() > 4 + 1796);
 
     // Dimensions in header
-    REQUIRE(read_be32(out.data() + 4 + 368) == 8);
-    REQUIRE(read_be32(out.data() + 4 + 372) == 2);
+    REQUIRE(read_be32(out.data() + 4 + 372) == 8);
+    REQUIRE(read_be32(out.data() + 4 + 376) == 2);
 }
 
 TEST_CASE("Generate - 1bpp to 8bpp conversion", "[label][pwg]") {
@@ -250,12 +344,9 @@ TEST_CASE("Generate - 1bpp to 8bpp conversion", "[label][pwg]") {
     size_t data_start = 4 + 1796;
     REQUIRE(out[data_start] == 0); // no repeats (only 1 line)
 
-    // The 8-byte scanline is: 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF
-    // PackBits: all distinct -> literals: (256-8=248), then 8 bytes
-    // But PackBits groups runs of 2+, so pairs of (0x00,0xFF) are literals
-    // Actually: 0x00 is alone (next byte 0xFF differs), but then 0xFF is alone...
-    // All 8 bytes are distinct from their neighbors -> one literal chunk
-    REQUIRE(out[data_start + 1] == 248); // 256 - 8
+    // The 8-byte scanline 0x00, 0xFF, 0x00, 0xFF, ... has no neighbor runs,
+    // so it is one literal chunk: (257-8=249), then 8 bytes
+    REQUIRE(out[data_start + 1] == 249); // 257 - 8
     REQUIRE(out[data_start + 2] == 0x00);
     REQUIRE(out[data_start + 3] == 0xFF);
     REQUIRE(out[data_start + 4] == 0x00);
@@ -289,4 +380,20 @@ TEST_CASE("Generate multi - single page", "[label][pwg]") {
     // Single-page multi should produce identical output to generate()
     REQUIRE(multi_out.size() == single_out.size());
     REQUIRE(multi_out == single_out);
+}
+
+TEST_CASE("Generate multi - TotalPageCount counts the pages", "[label][pwg]") {
+    LabelBitmap a(8, 2);
+    LabelBitmap b(8, 2);
+    a.fill(false);
+    b.fill(false);
+
+    PageParams params;
+    params.width_px = 8;
+    params.height_px = 2;
+
+    std::vector<const LabelBitmap*> pages = {&a, nullptr, &b};
+    auto out = generate_multi(pages, params);
+
+    REQUIRE(read_be32(out.data() + 4 + 452) == 2);
 }

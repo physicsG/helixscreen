@@ -300,12 +300,8 @@ TEST_CASE("checking is gated more weakly than installing", "[update][external]")
 }
 
 TEST_CASE("root_escalation_available is cached and true under root", "[update][external]") {
-    // The value depends on the host's sudoers, so the only universally true
-    // assertions are stability and the euid-0 shortcut. (The test build stubs the
-    // sudo probe out — see the mirror in tests/ui_test_utils.cpp — so this checks
-    // the contract, not the probe.)
+    // tests/ui_test_utils.cpp swaps the sudo probe for one that answers no, so the
+    // answer is the euid check alone: true under root, false otherwise.
     CHECK(root_escalation_available() == root_escalation_available());
-    if (::geteuid() == 0) {
-        CHECK(root_escalation_available());
-    }
+    CHECK(root_escalation_available() == (::geteuid() == 0));
 }

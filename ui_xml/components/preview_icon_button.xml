@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  A translucent round icon button over a preview: the corner controls of the
+  print status card and the skip-objects button share this one shell, so their
+  size, translucency, radius and press feedback cannot drift apart.
+
+  The host names the click callback and the condition that hides it, and gives
+  the glyph either as fixed text (icon, e.g. "#icon_webcam") or as a string
+  subject (icon_subject). icon_name names the glyph label for a host that looks
+  it up. The host places it (align / translate, or a parent's flex row).
+-->
+<component>
+  <api>
+    <prop name="callback" type="string"/>
+    <prop name="hidden_when" type="string"/>
+    <prop name="icon" type="string" default=""/>
+    <!-- Optional, deliberately without a default: an unset prop drops the
+         attribute instead of binding or naming with an empty string. -->
+    <prop name="icon_subject" type="string"/>
+    <prop name="icon_name" type="string"/>
+  </api>
+  <view extends="lv_obj"
+        width="#icon_button_size_lg" height="#icon_button_size_lg" style_bg_color="#card_bg" style_bg_opa="180"
+        style_radius="#icon_button_radius_lg" clickable="true" style_pad_all="0" scrollable="false">
+    <style name="styles.press_wash" selector="pressed"/>
+    <bind_flag_if cond="$hidden_when" flag="hidden"/>
+    <lv_label name="$icon_name"
+              text="$icon" bind_text="$icon_subject" style_text_font="mdi_icons_24" style_text_color="#text_muted"
+              align="center"/>
+    <event_cb trigger="clicked" callback="$callback"/>
+  </view>
+</component>

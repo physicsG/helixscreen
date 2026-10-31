@@ -18,12 +18,9 @@ REMOTE_PROBE=/tmp/wakeup_probe
 REMOTE_HIST=/tmp/hm_probe_${ARM}_${LABEL}.txt
 
 perf_ssh "cat > $REMOTE_PROBE && chmod +x $REMOTE_PROBE" < "$HELIX_PERF_PROBE"
-raw=$({
-    printf 'PROBE=%s\nHIST=%s\nDUR=%s\n' "$REMOTE_PROBE" "$REMOTE_HIST" "$DUR"
-    cat "$PERF_HERE/embedded_loadgate.sh"
-} | perf_ssh "sh -s" | grep '^GATE_RAW' | tail -n 1)
+raw=$(perf_remote_script "$PERF_HERE/embedded_loadgate.sh" "PROBE=$REMOTE_PROBE" "HIST=$REMOTE_HIST" \
+    "DUR=$DUR" | perf_ssh "sh -s" | grep '^GATE_RAW' | tail -n 1)
 local_hist=$HELIX_PERF_SCRATCH/cyclic/$ARM-r$RUN-$LABEL.txt
 perf_ssh "cat $REMOTE_HIST; rm -f $REMOTE_HIST" > "$local_hist"
-python3 "$PERF_HERE/ctparse.py" "$local_hist" "$ARM" "$LABEL" "${raw:-GATE_RAW missing}" |
-    sed "s/^/$ARM run=$RUN gate /" >> "$OUT"
+perf_record_gate "$ARM" "$RUN" "$LABEL" "$local_hist" "$raw"
 tail -n 1 "$OUT"

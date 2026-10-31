@@ -21,15 +21,15 @@ namespace helix::ui {
  * Follows the same spacer-based virtualization pattern as SpoolmanListView.
  *
  * ## Key Features:
- * - Fixed widget pool (POOL_SIZE rows created once)
+ * - Fixed widget pool (kPoolSize rows created once)
  * - Leading/trailing spacers for smooth scroll virtualization
  * - Imperative row updates (no per-row subjects)
  * - Click callback with data index for detail overlay navigation
  */
 class HistoryListView : public ContainerDeleteNet {
   public:
-    static constexpr int POOL_SIZE = 30;  ///< Fixed pool of history row widgets
-    static constexpr int BUFFER_ROWS = 2; ///< Extra rows above/below viewport
+    static constexpr int kPoolSize = 30;  ///< Fixed pool of history row widgets
+    static constexpr int kBufferRows = 2; ///< Extra rows above/below viewport
 
     using RowClickCallback = std::function<void(size_t index)>;
 

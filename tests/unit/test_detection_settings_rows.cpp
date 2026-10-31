@@ -181,3 +181,60 @@ TEST_CASE_METHOD(DetectionRowsFixture, "Detection settings rows follow detection
         CHECK_FALSE(lv_obj_has_state(pause_toggle(), LV_STATE_DISABLED));
     }
 }
+
+// The bed-check row stands apart from the spaghetti rows: it is gated on a
+// printer that can switch its own bed check, not on detection at large.
+TEST_CASE_METHOD(DetectionRowsFixture, "Bed check row follows detection_bed_check_available",
+                 "[detection][settings][safety][binding][bed_check]") {
+    auto& m = helix::detection::DetectionManager::instance();
+    lv_subject_t* bed_available = m.subject_bed_check_available();
+    lv_subject_t* bed_enabled = m.subject_bed_check_enabled();
+    auto bed_container = [this] {
+        lv_obj_t* c = lv_obj_find_by_name(root_, "container_bed_check");
+        REQUIRE(c != nullptr);
+        return c;
+    };
+    auto bed_toggle = [this] {
+        lv_obj_t* row = lv_obj_find_by_name(root_, "row_bed_check");
+        REQUIRE(row != nullptr);
+        lv_obj_t* toggle = lv_obj_find_by_name(row, "toggle");
+        REQUIRE(toggle != nullptr);
+        return toggle;
+    };
+
+    SECTION("detection without a bed check: spaghetti rows show, the bed row hides") {
+        lv_subject_set_int(avail_, 1);
+        lv_subject_set_int(bed_available, 0);
+        build();
+        CHECK_FALSE(lv_obj_has_flag(container(), LV_OBJ_FLAG_HIDDEN));
+        CHECK(lv_obj_has_flag(bed_container(), LV_OBJ_FLAG_HIDDEN));
+    }
+
+    SECTION("a printer with a bed check shows the row, toggled to its state") {
+        lv_subject_set_int(avail_, 1);
+        lv_subject_set_int(bed_available, 1);
+        lv_subject_set_int(bed_enabled, 0);
+        build();
+        CHECK_FALSE(lv_obj_has_flag(bed_container(), LV_OBJ_FLAG_HIDDEN));
+        CHECK_FALSE(lv_obj_has_state(bed_toggle(), LV_STATE_CHECKED));
+
+        lv_subject_set_int(bed_enabled, 1);
+        process_lvgl(10);
+        CHECK(lv_obj_has_state(bed_toggle(), LV_STATE_CHECKED));
+        CHECK_FALSE(lv_obj_has_state(bed_toggle(), LV_STATE_DISABLED));
+    }
+
+    SECTION("a detection module switched off as a whole greys the row") {
+        lv_subject_set_int(avail_, 1);
+        lv_subject_set_int(bed_available, 1);
+        lv_subject_set_int(bed_enabled, 0);
+        lv_subject_set_int(m.subject_bed_check_switchable(), 0);
+        build();
+        CHECK_FALSE(lv_obj_has_flag(bed_container(), LV_OBJ_FLAG_HIDDEN));
+        CHECK(lv_obj_has_state(bed_toggle(), LV_STATE_DISABLED));
+    }
+
+    lv_subject_set_int(bed_available, 0);
+    lv_subject_set_int(bed_enabled, 1);
+    lv_subject_set_int(m.subject_bed_check_switchable(), 1);
+}

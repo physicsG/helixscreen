@@ -22,24 +22,24 @@
 namespace helix::bluetooth {
 
 /// HID UUID prefix (Classic Bluetooth HID Profile)
-inline constexpr const char* HID_UUID_PREFIX = "00001124";
+inline constexpr const char* kHidUuidPrefix = "00001124";
 /// HID-over-GATT UUID prefix (BLE HID)
-inline constexpr const char* HOGP_UUID_PREFIX = "00001812";
+inline constexpr const char* kHogpUuidPrefix = "00001812";
 
 /// Check if a UUID matches a HID scanner service UUID.
 /// Matches classic HID (0x1124) and HID-over-GATT (0x1812).
 inline bool is_hid_scanner_uuid(const char* uuid) {
     if (!uuid || !uuid[0])
         return false;
-    if (strncasecmp(uuid, HID_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kHidUuidPrefix, 8) == 0)
         return true;
-    if (strncasecmp(uuid, HOGP_UUID_PREFIX, 8) == 0)
+    if (strncasecmp(uuid, kHogpUuidPrefix, 8) == 0)
         return true;
     return false;
 }
 
 /// Known scanner brand prefixes for name-based fallback detection.
-inline constexpr const char* KNOWN_SCANNER_BRANDS[] = {
+inline constexpr const char* kKnownScannerBrands[] = {
     "Tera", "Netum", "Symcode", "Inateck", "Eyoyo",
 };
 
@@ -61,7 +61,7 @@ inline bool is_likely_bt_scanner(const char* name) {
         return true;
 
     // Known brand match
-    for (const auto* brand : KNOWN_SCANNER_BRANDS) {
+    for (const auto* brand : kKnownScannerBrands) {
         if (strncasecmp(name, brand, strlen(brand)) == 0)
             return true;
     }

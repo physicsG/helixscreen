@@ -5,6 +5,7 @@
 
 #include "ui_exclude_object_badges.h"
 
+#include "fit_check.h"
 #include "gcode_pause_scan.h"
 
 #include <lvgl/lvgl.h>
@@ -53,9 +54,9 @@ enum class GcodeViewerPresetView {
 };
 
 } // namespace helix
-
-extern "C" {
 #endif
+
+namespace helix::ui {
 
 /**
  * @file ui_gcode_viewer.h
@@ -74,8 +75,8 @@ extern "C" {
  *
  * Usage:
  * @code
- *   lv_obj_t* viewer = ui_gcode_viewer_create(parent);
- *   ui_gcode_viewer_load_file(viewer, "/path/to/file.gcode");
+ *   lv_obj_t* viewer = gcode_viewer_create(parent);
+ *   gcode_viewer_load_file(viewer, "/path/to/file.gcode");
  * @endcode
  */
 
@@ -95,7 +96,7 @@ typedef void (*gcode_viewer_load_callback_t)(lv_obj_t* viewer, void* user_data, 
  * Creates a custom widget with transparent background and custom drawing.
  * Widget handles its own rendering via draw event callbacks.
  */
-lv_obj_t* ui_gcode_viewer_create(lv_obj_t* parent);
+lv_obj_t* gcode_viewer_create(lv_obj_t* parent);
 
 /**
  * @brief Load G-code file from path
@@ -107,7 +108,7 @@ lv_obj_t* ui_gcode_viewer_create(lv_obj_t* parent);
  *
  * Note: Async parsing not implemented in Phase 1 - parses synchronously.
  */
-void ui_gcode_viewer_load_file(lv_obj_t* obj, const char* file_path);
+void gcode_viewer_load_file(lv_obj_t* obj, const char* file_path);
 
 /**
  * @brief Set callback to be invoked when async file loading completes
@@ -119,11 +120,11 @@ void ui_gcode_viewer_load_file(lv_obj_t* obj, const char* file_path);
  * geometry building completes. Use this to update UI elements that
  * depend on the loaded file data.
  *
- * Only the newest ui_gcode_viewer_load_file() reports: a load superseded by a
+ * Only the newest gcode_viewer_load_file() reports: a load superseded by a
  * later one never invokes the callback, on success or on failure.
  */
-void ui_gcode_viewer_set_load_callback(lv_obj_t* obj, gcode_viewer_load_callback_t callback,
-                                       void* user_data);
+void gcode_viewer_set_load_callback(lv_obj_t* obj, gcode_viewer_load_callback_t callback,
+                                    void* user_data);
 
 /**
  * @brief Register a one-shot callback that fires when the viewer first has
@@ -148,8 +149,8 @@ void ui_gcode_viewer_set_load_callback(lv_obj_t* obj, gcode_viewer_load_callback
  *                  renders, or nullptr to unregister
  * @param user_data Passed through to the callback
  */
-void ui_gcode_viewer_set_first_frame_callback(lv_obj_t* obj, gcode_viewer_load_callback_t callback,
-                                              void* user_data);
+void gcode_viewer_set_first_frame_callback(lv_obj_t* obj, gcode_viewer_load_callback_t callback,
+                                           void* user_data);
 
 /**
  * @brief Frame this viewer's render the way the slicer thumbnail beside it is
@@ -165,7 +166,7 @@ void ui_gcode_viewer_set_first_frame_callback(lv_obj_t* obj, gcode_viewer_load_c
  * @param obj     Viewer widget
  * @param enabled true for THUMBNAIL_PARITY framing, false for STANDARD
  */
-void ui_gcode_viewer_set_thumbnail_parity(lv_obj_t* obj, bool enabled);
+void gcode_viewer_set_thumbnail_parity(lv_obj_t* obj, bool enabled);
 
 /**
  * @brief Clear loaded G-code
@@ -173,46 +174,45 @@ void ui_gcode_viewer_set_thumbnail_parity(lv_obj_t* obj, bool enabled);
  *
  * Frees internal G-code data and resets to empty state.
  */
-void ui_gcode_viewer_clear(lv_obj_t* obj);
+void gcode_viewer_clear(lv_obj_t* obj);
 
 /**
  * @brief Clear every live G-code viewer widget process-wide
  *
  * Iterates the internal registry of created viewers and calls
- * ui_gcode_viewer_clear() on each. Used by the memory pressure responder
+ * gcode_viewer_clear() on each. Used by the memory pressure responder
  * to release ParsedGCodeFile + renderer geometry on every active viewer
  * (print_status + print_select_detail) when the system goes low on memory.
  *
  * Safe to call from the main thread only.
  */
-void ui_gcode_viewer_clear_all_active();
+void gcode_viewer_clear_all_active();
 
 /**
  * @brief Install a callback invoked when this viewer is cleared
  *
- * Fires from inside ui_gcode_viewer_clear() (and therefore also from
- * ui_gcode_viewer_clear_all_active()). The owning panel uses this to flip
+ * Fires from inside gcode_viewer_clear() (and therefore also from
+ * gcode_viewer_clear_all_active()). The owning panel uses this to flip
  * its mode subject back to thumbnail so the user doesn't see a transparent
  * rectangle where the rendered model used to be.
  *
  * Set during panel widget setup; auto-fired on every clear thereafter.
  */
-typedef void (*ui_gcode_viewer_clear_cb_t)(lv_obj_t* viewer, void* user_data);
-void ui_gcode_viewer_set_clear_callback(lv_obj_t* obj, ui_gcode_viewer_clear_cb_t cb,
-                                        void* user_data);
+typedef void (*gcode_viewer_clear_cb_t)(lv_obj_t* viewer, void* user_data);
+void gcode_viewer_set_clear_callback(lv_obj_t* obj, gcode_viewer_clear_cb_t cb, void* user_data);
 
 /**
  * @brief Query whether the viewer currently holds renderable geometry
  *
  * Returns true after a successful load_file, false after
- * ui_gcode_viewer_clear() or before any load (and false if @p obj is null).
+ * gcode_viewer_clear() or before any load (and false if @p obj is null).
  * Used by the print status panel to reconcile the preview against the real
  * widget state on re-entry instead of trusting intent bools.
  *
  * @param obj Viewer widget (may be null)
  * @return true if geometry is loaded and renderable
  */
-bool ui_gcode_viewer_has_content(lv_obj_t* obj);
+bool gcode_viewer_has_content(lv_obj_t* obj);
 
 // ==============================================
 // Rendering Pause Control
@@ -229,14 +229,14 @@ bool ui_gcode_viewer_has_content(lv_obj_t* obj);
  *
  * Resuming triggers an immediate invalidate to refresh the view.
  */
-void ui_gcode_viewer_set_paused(lv_obj_t* obj, bool paused);
+void gcode_viewer_set_paused(lv_obj_t* obj, bool paused);
 
 /**
  * @brief Check if rendering is paused
  * @param obj Viewer widget
  * @return true if rendering is currently paused
  */
-bool ui_gcode_viewer_is_paused(lv_obj_t* obj);
+bool gcode_viewer_is_paused(lv_obj_t* obj);
 
 /**
  * @brief Force a full redraw of the viewer
@@ -246,7 +246,7 @@ bool ui_gcode_viewer_is_paused(lv_obj_t* obj);
  * scratch. Use on display wake — the cached-blit fast path can leave a blank
  * widget when LVGL's image cache is invalidated by the framebuffer unblank.
  */
-void ui_gcode_viewer_force_redraw(lv_obj_t* obj);
+void gcode_viewer_force_redraw(lv_obj_t* obj);
 
 // ==============================================
 // Render Mode Control
@@ -263,14 +263,23 @@ void ui_gcode_viewer_force_redraw(lv_obj_t* obj);
  *
  * Default is AUTO. Settings are persisted in SettingsManager.
  */
-void ui_gcode_viewer_set_render_mode(lv_obj_t* obj, helix::GcodeViewerRenderMode mode);
+void gcode_viewer_set_render_mode(lv_obj_t* obj, helix::GcodeViewerRenderMode mode);
 
 /**
  * @brief Check if currently using 2D layer renderer
  * @param obj Viewer widget
  * @return true if 2D layer renderer is active (either forced or via AUTO fallback)
  */
-bool ui_gcode_viewer_is_using_2d_mode(lv_obj_t* obj);
+bool gcode_viewer_is_using_2d_mode(lv_obj_t* obj);
+
+/**
+ * @brief Did the viewer's last load stop because the preview would cost too much CPU?
+ *
+ * Such a load reports failure to the load callback like any other, but it is the
+ * preview gate working, not an error: the caller shows its thumbnail and logs at
+ * info level.
+ */
+bool gcode_viewer_load_skipped_for_cost(lv_obj_t* obj);
 
 /**
  * @brief Disable streaming mode for this viewer instance.
@@ -279,7 +288,7 @@ bool ui_gcode_viewer_is_using_2d_mode(lv_obj_t* obj);
  * streaming 2D layer renderer. Use for detail panel previews where 3D is
  * preferred and 2D streaming is not useful.
  */
-void ui_gcode_viewer_disable_streaming(lv_obj_t* obj);
+void gcode_viewer_disable_streaming(lv_obj_t* obj);
 
 // ==============================================
 // Camera Controls
@@ -289,7 +298,7 @@ void ui_gcode_viewer_disable_streaming(lv_obj_t* obj);
  * @brief Reset camera to default view
  * @param obj Viewer widget
  */
-void ui_gcode_viewer_reset_camera(lv_obj_t* obj);
+void gcode_viewer_reset_camera(lv_obj_t* obj);
 
 // ==============================================
 // Print Progress / Ghost Layer Visualization
@@ -309,7 +318,7 @@ void ui_gcode_viewer_reset_camera(lv_obj_t* obj);
  *
  * Performance: Layer changes are instant (<1ms) - no geometry rebuild needed.
  */
-void ui_gcode_viewer_set_print_progress(lv_obj_t* obj, int current_layer);
+void gcode_viewer_set_print_progress(lv_obj_t* obj, int current_layer);
 
 /**
  * @brief Name the widget that covers the bottom of this viewer.
@@ -328,14 +337,14 @@ void ui_gcode_viewer_set_print_progress(lv_obj_t* obj, int current_layer);
  *
  * @see helix::gcode::compute_content_offset_y() for the rule being applied.
  */
-void ui_gcode_viewer_set_bottom_occluder(lv_obj_t* obj, lv_obj_t* occluder);
+void gcode_viewer_set_bottom_occluder(lv_obj_t* obj, lv_obj_t* occluder);
 
 /**
  * @brief Get maximum layer index in current geometry
  * @param obj Viewer widget
  * @return Max layer index (0-based), or -1 if no geometry loaded
  */
-int ui_gcode_viewer_get_max_layer(lv_obj_t* obj);
+int gcode_viewer_get_max_layer(lv_obj_t* obj);
 
 // ==============================================
 // Statistics
@@ -349,14 +358,14 @@ int ui_gcode_viewer_get_max_layer(lv_obj_t* obj);
  * Returns the filename from the loaded G-code file. String is valid
  * until next file load.
  */
-const char* ui_gcode_viewer_get_filename(lv_obj_t* obj);
+const char* gcode_viewer_get_filename(lv_obj_t* obj);
 
 /**
  * @brief Get number of layers in loaded file
  * @param obj Viewer widget
  * @return Layer count or 0 if no file loaded
  */
-int ui_gcode_viewer_get_layer_count(lv_obj_t* obj);
+int gcode_viewer_get_layer_count(lv_obj_t* obj);
 
 // ==============================================
 // LVGL XML Component Registration
@@ -373,10 +382,11 @@ int ui_gcode_viewer_get_layer_count(lv_obj_t* obj);
  *   <gcode_viewer name="my_viewer" width="100%" height="100%"/>
  * @endcode
  */
-void ui_gcode_viewer_register(void);
+void gcode_viewer_register(void);
+
+} // namespace helix::ui
 
 #ifdef __cplusplus
-}
 
 // ==============================================
 // C++ API Extensions
@@ -388,6 +398,21 @@ void ui_gcode_viewer_register(void);
 #include <unordered_set>
 #include <vector>
 
+namespace helix::ui {
+
+/**
+ * @brief Hand the next load the HelixPrint plugin's layer index sidecar for its file
+ *
+ * A streaming load builds its layer index from it instead of reading the
+ * whole file first (GCodeStreamingController::set_layer_index_sidecar); a
+ * full load ignores it. The next gcode_viewer_load_file() consumes it.
+ */
+void gcode_viewer_set_layer_index_sidecar(lv_obj_t* obj, std::string sidecar);
+
+/// Whether loading @p file_path into this viewer would stream, the only load
+/// that uses a layer index sidecar. False for an object that is not a viewer.
+bool gcode_viewer_would_stream(lv_obj_t* obj, const std::string& file_path);
+
 /**
  * @brief Set per-tool AMS color overrides for multi-color prints
  * @param obj Viewer widget
@@ -397,7 +422,7 @@ void ui_gcode_viewer_register(void);
  * For 3D: updates geometry palette and triggers VBO re-upload.
  * For 2D: replaces tool_palette_ entries; resolves at render time.
  */
-void ui_gcode_viewer_set_tool_colors(lv_obj_t* obj, const std::vector<uint32_t>& colors);
+void gcode_viewer_set_tool_colors(lv_obj_t* obj, const std::vector<uint32_t>& colors);
 
 /**
  * @brief Apply AMS filament colors to the viewer from AmsState
@@ -407,7 +432,7 @@ void ui_gcode_viewer_set_tool_colors(lv_obj_t* obj, const std::vector<uint32_t>&
  * Reads the current AMS tool-to-slot mapping and applies slot colors.
  * Shared by print status panel and print file detail view.
  */
-bool ui_gcode_viewer_apply_ams_tool_colors(lv_obj_t* obj);
+bool gcode_viewer_apply_ams_tool_colors(lv_obj_t* obj);
 
 /**
  * @brief Set highlighted objects (multi-select support)
@@ -417,8 +442,8 @@ bool ui_gcode_viewer_apply_ams_tool_colors(lv_obj_t* obj);
  * Allows multiple objects to be highlighted simultaneously. Objects in the set
  * will be rendered with brightened colors and bounding box wireframes.
  */
-void ui_gcode_viewer_set_highlighted_objects(lv_obj_t* obj,
-                                             const std::unordered_set<std::string>& object_names);
+void gcode_viewer_set_highlighted_objects(lv_obj_t* obj,
+                                          const std::unordered_set<std::string>& object_names);
 
 /**
  * @brief Set excluded objects
@@ -429,8 +454,8 @@ void ui_gcode_viewer_set_highlighted_objects(lv_obj_t* obj,
  * reduced opacity to indicate they won't be printed. Use this to sync the
  * visual state with Klipper's exclude_object feature.
  */
-void ui_gcode_viewer_set_excluded_objects(lv_obj_t* obj,
-                                          const std::unordered_set<std::string>& object_names);
+void gcode_viewer_set_excluded_objects(lv_obj_t* obj,
+                                       const std::unordered_set<std::string>& object_names);
 
 /**
  * @brief Numbered badges drawn over each object while exclude mode is open
@@ -440,8 +465,7 @@ void ui_gcode_viewer_set_excluded_objects(lv_obj_t* obj,
  * Drawn after the 2D/3D render at each anchor's projected point, so they follow
  * pan, zoom and rotation. A tap on a badge picks the object it labels.
  */
-// NAMESPACE_OK: joins this file's global ui_gcode_viewer_* API
-void ui_gcode_viewer_set_object_badges(lv_obj_t* obj, std::vector<helix::ui::ObjectBadge> badges);
+void gcode_viewer_set_object_badges(lv_obj_t* obj, std::vector<helix::ui::ObjectBadge> badges);
 
 /**
  * @brief Whether a tap on an excluded badge picks its object
@@ -449,8 +473,7 @@ void ui_gcode_viewer_set_object_badges(lv_obj_t* obj, std::vector<helix::ui::Obj
  * Print details sets this while exclude mode is open, so a pick can be undone
  * from the render. Off by default.
  */
-// NAMESPACE_OK: joins this file's global ui_gcode_viewer_* API
-void ui_gcode_viewer_set_excluded_badges_pickable(lv_obj_t* obj, bool pickable);
+void gcode_viewer_set_excluded_badges_pickable(lv_obj_t* obj, bool pickable);
 
 /**
  * @brief Callback type for object tap events
@@ -470,9 +493,9 @@ typedef void (*gcode_viewer_object_tap_callback_t)(lv_obj_t* viewer, const char*
  * The callback is invoked when user taps on an object in the 3D view.
  * Use this to implement exclude object confirmation UI.
  */
-void ui_gcode_viewer_set_object_tap_callback(lv_obj_t* obj,
-                                             gcode_viewer_object_tap_callback_t callback,
-                                             void* user_data);
+void gcode_viewer_set_object_tap_callback(lv_obj_t* obj,
+                                          gcode_viewer_object_tap_callback_t callback,
+                                          void* user_data);
 
 /**
  * @brief Callback type for object long-press events
@@ -495,16 +518,21 @@ typedef void (*gcode_viewer_object_long_press_callback_t)(lv_obj_t* viewer, cons
  * Use this to implement the exclude object confirmation flow - long-press to exclude
  * is more intentional than tap, preventing accidental exclusions.
  */
-void ui_gcode_viewer_set_object_long_press_callback(
-    lv_obj_t* obj, gcode_viewer_object_long_press_callback_t callback, void* user_data);
+void gcode_viewer_set_object_long_press_callback(lv_obj_t* obj,
+                                                 gcode_viewer_object_long_press_callback_t callback,
+                                                 void* user_data);
 
 // ==============================================
 // Parsed Data Access
 // ==============================================
 
+} // namespace helix::ui
+
 namespace helix::gcode {
 struct ParsedGCodeFile;
 } // namespace helix::gcode
+
+namespace helix::ui {
 
 /**
  * @brief Get the parsed G-code file data from the viewer
@@ -514,7 +542,7 @@ struct ParsedGCodeFile;
  * The returned pointer is valid as long as the viewer widget exists and has data loaded.
  * In streaming mode, this returns nullptr (streaming mode doesn't hold the full file).
  */
-const helix::gcode::ParsedGCodeFile* ui_gcode_viewer_get_parsed_file(lv_obj_t* obj);
+const helix::gcode::ParsedGCodeFile* gcode_viewer_get_parsed_file(lv_obj_t* obj);
 
 /**
  * @brief The set of tools the loaded file actually prints with.
@@ -533,28 +561,35 @@ const helix::gcode::ParsedGCodeFile* ui_gcode_viewer_get_parsed_file(lv_obj_t* o
  * @return Logical tool indices, or empty when nothing is loaded / the file
  *         names no tools and carries no palette.
  */
-std::set<int> ui_gcode_viewer_get_tools_used(lv_obj_t* obj);
+std::set<int> gcode_viewer_get_tools_used(lv_obj_t* obj);
 
 /**
- * @brief The scheduled pauses of the loaded file, with its progress axis.
+ * @brief The loaded file's model box, for the file-fits-printer check.
+ *
+ * Mode-independent like the tool queries: the full parse's global bounding
+ * box, or the extents the streaming layer index accumulates. Both cover the
+ * extruding moves outside purge and wipe-tower geometry, in G-code coordinates.
+ *
+ * @param obj Viewer widget
+ * @return nullopt when nothing is loaded or nothing extruded.
+ */
+std::optional<helix::FitBox> gcode_viewer_get_model_bounds(lv_obj_t* obj);
+
+/**
+ * @brief The scheduled pauses and layer marks of the loaded file, with its
+ *        progress axis.
  *
  * Mode-independent like the tool queries: the streaming layer-index scan and
- * the full-load parse loop both collect the pauses on the pass they already
- * make over the file (see gcode_pause_scan.h). @p out_axis reports which
- * function of the file its progress bar fills on, so the caller can place each
- * pause on the axis the bar actually uses.
+ * the full-load parse loop both collect them on the pass they already make
+ * over the file (see gcode_pause_scan.h). The axis says which function of the
+ * file its progress bar fills on, so the caller can place each marker on the
+ * axis the bar actually uses.
  *
- * @param obj        Viewer widget
- * @param out_pauses Receives the pauses (cleared when none/not loaded)
- * @param out_axis   Receives the file's progress axis
- * @return true when a scan result exists (empty pauses = pause-free file);
- *         false when nothing is loaded, so callers degrade to no markers.
+ * @param obj Viewer widget
+ * @return The shared scan (empty lists = pause-free file), or null when
+ *         nothing is loaded, so callers degrade to no markers.
  */
-namespace helix {
-bool ui_gcode_viewer_get_scheduled_pauses(lv_obj_t* obj,
-                                          std::vector<helix::gcode::ScheduledPause>& out_pauses,
-                                          helix::gcode::ProgressAxis& out_axis);
-} // namespace helix
+helix::gcode::PauseScanPtr gcode_viewer_get_pause_scan(lv_obj_t* obj);
 
 /**
  * @brief Adopt the viewer's recovered palette into @p colors when @p colors is
@@ -574,7 +609,7 @@ bool ui_gcode_viewer_get_scheduled_pauses(lv_obj_t* obj,
  * @return true if @p colors was empty and has now been filled — the caller's cue
  *         to redo whatever it derived from an empty palette.
  */
-bool ui_gcode_viewer_adopt_palette_if_empty(lv_obj_t* obj, std::vector<std::string>& colors);
+bool gcode_viewer_adopt_palette_if_empty(lv_obj_t* obj, std::vector<std::string>& colors);
 
 /**
  * @brief How far along the viewer's current load is, 0.0 to 1.0.
@@ -587,7 +622,7 @@ bool ui_gcode_viewer_adopt_palette_if_empty(lv_obj_t* obj, std::vector<std::stri
  * @param obj Viewer widget
  * @return Progress fraction; 1.0 when idle or complete, 0.0 when unknown.
  */
-float ui_gcode_viewer_get_load_progress(lv_obj_t* obj);
+float gcode_viewer_get_load_progress(lv_obj_t* obj);
 
 /**
  * @brief Advance a hidden 2D preview's build; true once it can be revealed.
@@ -604,11 +639,13 @@ float ui_gcode_viewer_get_load_progress(lv_obj_t* obj);
  * @param obj Viewer widget
  * @return true when there is content worth swapping in.
  */
-bool ui_gcode_viewer_pump_offscreen_2d(lv_obj_t* obj);
+bool gcode_viewer_pump_offscreen_2d(lv_obj_t* obj);
 
 // ==============================================
 // Test Seam
 // ==============================================
+
+} // namespace helix::ui
 
 #include <memory>
 

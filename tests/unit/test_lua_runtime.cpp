@@ -538,4 +538,263 @@ TEST_CASE("run_file refuses a path outside the plugin", "[plugin][lua_runtime]")
     CHECK_FALSE(t.rt->run_file("../require-test/util.lua"));
 }
 
+namespace {
+/// Registry ref of the global function `name`.
+int global_ref(TestRuntime& t, const char* name) {
+    lua_State* L = t.rt->state();
+    lua_getglobal(L, name);
+    int ref = t.rt->ref_value(L, -1);
+    lua_pop(L, 1);
+    return ref;
+}
+
+/// What a check returned: its type and, for a table, the three documented fields.
+struct CheckResult {
+    int type = LUA_TNONE;
+    bool boolean = false;
+    bool visible = false;
+    bool enabled = false;
+    std::string reason;
+};
+
+LuaRuntime::ReadFn read_check(CheckResult& out) {
+    return [&out](lua_State* co, int nres) {
+        if (nres < 1)
+            return;
+        out.type = lua_type(co, -nres);
+        if (out.type == LUA_TBOOLEAN) {
+            out.boolean = lua_toboolean(co, -nres);
+        } else if (out.type == LUA_TTABLE) {
+            lua_getfield(co, -nres, "visible");
+            out.visible = lua_toboolean(co, -1);
+            lua_getfield(co, -nres - 1, "enabled");
+            out.enabled = lua_toboolean(co, -1);
+            lua_getfield(co, -nres - 2, "reason");
+            if (const char* r = lua_tostring(co, -1))
+                out.reason = r;
+            lua_pop(co, 3);
+        }
+    };
+}
+} // namespace
+
+TEST_CASE("call_sync returns a boolean", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    REQUIRE(t.run("function f(x) return x == 7 end"));
+    CheckResult r;
+    CHECK(t.rt->call_sync(
+        global_ref(t, "f"),
+        [](lua_State* co) {
+            lua_pushinteger(co, 7);
+            return 1;
+        },
+        read_check(r)));
+    CHECK(r.type == LUA_TBOOLEAN);
+    CHECK(r.boolean);
+    CHECK_FALSE(t.rt->in_check());
+}
+
+TEST_CASE("call_sync returns a table", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    REQUIRE(t.run(R"(function f() return {visible = true, enabled = false, reason = "no"} end)"));
+    CheckResult r;
+    CHECK(t.rt->call_sync(global_ref(t, "f"), {}, read_check(r)));
+    CHECK(r.type == LUA_TTABLE);
+    CHECK(r.visible);
+    CHECK_FALSE(r.enabled);
+    CHECK(r.reason == "no");
+}
+
+TEST_CASE("check mode is on only while the check runs", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    lua_State* L = t.rt->state();
+    lua_pushcfunction(L, [](lua_State* co) -> int {
+        lua_pushboolean(co, LuaRuntime::from(co).in_check());
+        return 1;
+    });
+    lua_setglobal(L, "in_check");
+    REQUIRE(t.run("function f() return in_check() end; outside = in_check()"));
+    CHECK(t.global("outside") == "false");
+    CheckResult r;
+    CHECK(t.rt->call_sync(global_ref(t, "f"), {}, read_check(r)));
+    CHECK(r.boolean);
+}
+
+TEST_CASE("check overrun reports, does not fault", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    helix::LogCapture logs;
+    REQUIRE(t.run("function f() while true do end end"));
+    bool read = false;
+    auto start = std::chrono::steady_clock::now();
+    CHECK_FALSE(t.rt->call_sync(global_ref(t, "f"), {}, [&read](lua_State*, int) { read = true; }));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500));
+    CHECK_FALSE(read);
+    CHECK_FALSE(t.rt->faulted());
+    CHECK(logs.count_containing("menu check exceeded its time budget") == 1);
+    // The kill does not leak into the next entry.
+    CHECK(t.run("after = true"));
+    CHECK(t.global("after") == "true");
+}
+
+TEST_CASE("check overrun swallowed by pcall still fails", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    REQUIRE(t.run("function f() pcall(function() while true do end end); return true end"));
+    CHECK_FALSE(t.rt->call_sync(global_ref(t, "f"), {}, {}));
+    CHECK_FALSE(t.rt->faulted());
+}
+
+TEST_CASE("check raising reports", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    helix::LogCapture logs;
+    REQUIRE(t.run(R"(function f() error("broken check") end)"));
+    CHECK_FALSE(t.rt->call_sync(global_ref(t, "f"), {}, {}));
+    CHECK_FALSE(t.rt->faulted());
+    CHECK(logs.count_containing("broken check") == 1);
+}
+
+TEST_CASE("check yield fails", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    std::vector<LuaRuntime::Pending> pending;
+    install_test_wait(*t.rt, &pending);
+    REQUIRE(t.run("function waits() helix.test_wait(); return true end\n"
+                  "function yields() coroutine.yield(); return true end"));
+    helix::LogCapture logs;
+    CHECK_FALSE(t.rt->call_sync(global_ref(t, "waits"), {}, {}));
+    CHECK(pending.empty());
+    CHECK(logs.count_containing("not allowed in a menu check") == 1);
+    CHECK_FALSE(t.rt->call_sync(global_ref(t, "yields"), {}, {}));
+    CHECK(logs.count_containing("menu check yielded") == 1);
+    CHECK_FALSE(t.rt->faulted());
+}
+
+TEST_CASE("three failing checks fault through report_error", "[plugin][lua_runtime][check]") {
+    // Checks share the plugin's error quota.
+    TestRuntime t;
+    REQUIRE(t.run(R"(function f() error("x") end)"));
+    int ref = global_ref(t, "f");
+    CHECK_FALSE(t.rt->call_sync(ref, {}, {}));
+    CHECK_FALSE(t.rt->call_sync(ref, {}, {}));
+    CHECK_FALSE(t.rt->faulted());
+    CHECK_FALSE(t.rt->call_sync(ref, {}, {}));
+    CHECK(t.rt->faulted());
+    CHECK(t.fault.find("errors") != std::string::npos);
+}
+
+TEST_CASE("call_sync refuses a faulted runtime and a nested call", "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    lua_State* L = t.rt->state();
+    REQUIRE(t.run("function f() return true end"));
+    int ref = global_ref(t, "f");
+    // A binding that runs a check from inside an entry.
+    lua_pushinteger(L, ref);
+    lua_pushcclosure(
+        L,
+        [](lua_State* co) -> int {
+            auto& rt = LuaRuntime::from(co);
+            lua_pushboolean(
+                co, rt.call_sync(static_cast<int>(lua_tointeger(co, lua_upvalueindex(1))), {}, {}));
+            return 1;
+        },
+        1);
+    lua_setglobal(L, "nested");
+    helix::LogCapture logs;
+    REQUIRE(t.run("nested_ok = nested()"));
+    CHECK(t.global("nested_ok") == "false");
+    CHECK(logs.count_containing("cannot run inside another plugin entry") == 1);
+
+    t.run("while true do end");
+    REQUIRE(t.rt->faulted());
+    bool read = false;
+    CHECK_FALSE(t.rt->call_sync(ref, {}, [&read](lua_State*, int) { read = true; }));
+    CHECK_FALSE(read);
+}
+
+TEST_CASE("require is refused in a check, and loads later as usual",
+          "[plugin][lua_runtime][check]") {
+    TestRuntime t;
+    REQUIRE(t.run(R"(function f() local d = require("deep"); return true end)"));
+    helix::LogCapture logs;
+    CHECK_FALSE(t.rt->call_sync(global_ref(t, "f"), {}, {}));
+    CHECK(logs.count_containing("require is not allowed in a menu check") == 1);
+    CHECK(t.global("loads") == "nil"); // the module's top level never ran
+    CHECK_FALSE(t.rt->faulted());
+    REQUIRE(t.run(R"(d = require("deep"))"));
+    CHECK(t.global("loads") == "1");
+}
+
+TEST_CASE("an entry's <close> handler that raises or loops is contained",
+          "[plugin][lua_runtime][lua_budget]") {
+    {
+        TestRuntime t;
+        CHECK_FALSE(t.run(R"(
+            local g <close> = setmetatable({}, {__close = function() error("from close") end})
+            local _ = nil + 1
+        )"));
+        CHECK_FALSE(t.rt->faulted());
+        CHECK(t.run("after = true"));
+    }
+    {
+        TestRuntime t;
+        auto start = std::chrono::steady_clock::now();
+        CHECK_FALSE(t.run(R"(
+            local g <close> = setmetatable({}, {__close = function() while true do end end})
+            local _ = nil + 1
+        )"));
+        CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+        CHECK(t.rt->faulted()); // an entry's overrun faults, as any entry's does
+    }
+}
+
+TEST_CASE("sandbox refuses __gc finalizers", "[plugin][lua_runtime]") {
+    TestRuntime t;
+    REQUIRE(t.run(R"(
+        ok, err = pcall(setmetatable, {}, {__gc = function() while true do end end})
+        plain = getmetatable(setmetatable({}, {__index = {a = 1}})) ~= nil
+    )"));
+    CHECK(t.global("ok") == "false");
+    CHECK(t.global("err").find("__gc is not available to plugins") != std::string::npos);
+    CHECK(t.global("plain") == "true");
+}
+
+TEST_CASE("a __gc added after setmetatable never runs", "[plugin][lua_runtime]") {
+    // Lua 5.4 marks an object for finalization only when setmetatable sees __gc.
+    TestRuntime t;
+    REQUIRE(t.run(R"(
+        local mt = {}
+        local obj = setmetatable({}, mt)
+        mt.__gc = function() ran = true end
+        obj = nil
+        collectgarbage()
+        collectgarbage()
+    )"));
+    CHECK(t.global("ran") == "nil");
+}
+
+TEST_CASE("a dropped entry's <close> handlers run inside the entry",
+          "[plugin][lua_runtime][lua_budget]") {
+    SECTION("a loop in one, on the stray-yield path, faults") {
+        TestRuntime t;
+        auto start = std::chrono::steady_clock::now();
+        CHECK_FALSE(t.run(R"(
+            local g <close> = setmetatable({}, {__close = function() while true do end end})
+            coroutine.yield()
+        )"));
+        CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+        CHECK(t.rt->faulted());
+        CHECK(t.fault.find("time budget") != std::string::npos);
+    }
+    SECTION("the memory cap applies to one") {
+        TestRuntime t;
+        helix::LogCapture logs;
+        CHECK_FALSE(t.run(R"(
+            local g <close> = setmetatable({}, {__close = function()
+                big = string.rep("x", 8 * 1024 * 1024)
+            end})
+            coroutine.yield()
+        )"));
+        CHECK(t.global("big") == "nil");
+        CHECK(t.rt->memory_used() <= t.rt->memory_cap());
+    }
+}
+
 #endif // HELIX_HAS_PLUGINS

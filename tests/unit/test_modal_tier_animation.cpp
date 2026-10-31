@@ -18,7 +18,7 @@
 using helix::PlatformTier;
 
 namespace {
-constexpr const char* TEST_COMPONENT = "print_cancel_confirm_modal";
+constexpr const char* kTestComponent = "print_cancel_confirm_modal";
 
 /// An owned modal records whether its widget tree was already deleted when its
 /// destructor ran; a destructor that touches its widgets needs them alive.
@@ -36,7 +36,7 @@ class TreeOrderModal : public Modal {
         return "TreeOrderModal";
     }
     const char* component_name() const override {
-        return TEST_COMPONENT;
+        return kTestComponent;
     }
     void on_show() override {
         lv_obj_add_event_cb(
@@ -85,7 +85,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "modal: limited tiers show and hide without 
                  "[modal][modal_tier][platform_tier]") {
     for (PlatformTier t : {PlatformTier::BASIC, PlatformTier::EMBEDDED}) {
         TierScope scope(t);
-        lv_obj_t* dialog = Modal::show(TEST_COMPONENT);
+        lv_obj_t* dialog = Modal::show(kTestComponent);
         REQUIRE(dialog != nullptr);
         lv_obj_t* backdrop = ModalStack::instance().backdrop_for(dialog);
         REQUIRE(backdrop != nullptr);
@@ -109,7 +109,7 @@ TEST_CASE_METHOD(LVGLUITestFixture, "modal: limited tiers show and hide without 
 TEST_CASE_METHOD(LVGLUITestFixture, "modal: the capable tier still animates entrance and exit",
                  "[modal][modal_tier][platform_tier]") {
     TierScope scope(PlatformTier::STANDARD);
-    lv_obj_t* dialog = Modal::show(TEST_COMPONENT);
+    lv_obj_t* dialog = Modal::show(kTestComponent);
     REQUIRE(dialog != nullptr);
     lv_obj_t* backdrop = ModalStack::instance().backdrop_for(dialog);
     REQUIRE(backdrop != nullptr);

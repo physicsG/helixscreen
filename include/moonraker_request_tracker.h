@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "helix_shared_callback.h"
 #include "json_fwd.h"
 #include "moonraker_error.h"
 #include "moonraker_events.h"
@@ -32,7 +33,7 @@ using ::json;
 using RequestId = uint64_t;
 
 /// @brief Invalid request ID constant
-constexpr RequestId INVALID_REQUEST_ID = 0;
+constexpr RequestId kInvalidRequestId = 0;
 
 /**
  * @brief Owns pending JSON-RPC request lifecycle
@@ -43,7 +44,7 @@ constexpr RequestId INVALID_REQUEST_ID = 0;
  */
 class MoonrakerRequestTracker {
   public:
-    static constexpr size_t MAX_PENDING_REQUESTS = 500;
+    static constexpr size_t kMaxPendingRequests = 500;
 
     MoonrakerRequestTracker() = default;
 
@@ -68,12 +69,12 @@ class MoonrakerRequestTracker {
      *        of @p error_cb, which is what the ~130 direct callers below the gcode
      *        APIs rely on: they carry no `!!` channel, so "supplied an error_cb"
      *        is still a fair proxy for "will report this itself".
-     * @return Request ID, or INVALID_REQUEST_ID on error
+     * @return Request ID, or kInvalidRequestId on error
      */
     RequestId send(hv::WebSocketClient& ws, const std::string& method, const json& params,
-                   std::function<void(const json&)> success_cb,
-                   std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
-                   bool silent = false,
+                   helix::SharedCallback<void(const json&)> success_cb,
+                   helix::SharedCallback<void(const MoonrakerError&)> error_cb,
+                   uint32_t timeout_ms = 0, bool silent = false,
                    std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt);
 
     /**
@@ -137,29 +138,29 @@ class MoonrakerRequestTracker {
     }
 
     /// Default timeout for Moonraker requests (tool changes, moves, etc.)
-    static constexpr uint32_t DEFAULT_REQUEST_TIMEOUT_MS = 60000; // 60s
+    static constexpr uint32_t kDefaultRequestTimeoutMs = 60000; // 60s
 
     /// Floor on the oldest pending request's age before check_timeouts() logs the
     /// periodic pending-count line at debug. A request that has been in flight for
     /// tens of milliseconds is simply working; only a queue that is failing to
     /// drain is worth a line. See the throttle note in check_timeouts().
-    static constexpr uint32_t PENDING_LOG_MIN_AGE_MS = 1000; // 1s
+    static constexpr uint32_t kPendingLogMinAgeMs = 1000; // 1s
 
     /// Age at which the periodic pending-count line escalates from debug to warn.
-    static constexpr uint32_t PENDING_WARN_AGE_MS = 30000; // 30s
+    static constexpr uint32_t kPendingWarnAgeMs = 30000; // 30s
 
     /// Same, for a long-running G-code script. `printer.gcode.script` does not
     /// return until Klipper finishes the macro, and an AFC toolchange over a 2 m
     /// bowden is legitimately a minute or more, so the 30 s threshold flagged
     /// healthy work: 77 warnings in one AFC bundle, all of them normal lane
     /// loads. Past five minutes a script really has stopped.
-    static constexpr uint32_t PENDING_WARN_AGE_GCODE_MS = 300000; // 5min
+    static constexpr uint32_t kPendingWarnAgeGcodeMs = 300000; // 5min
 
   private:
     std::map<uint64_t, PendingRequest> pending_requests_;
     std::mutex requests_mutex_;
     std::atomic_uint64_t request_id_{0};
-    uint32_t default_request_timeout_ms_{DEFAULT_REQUEST_TIMEOUT_MS};
+    uint32_t default_request_timeout_ms_{kDefaultRequestTimeoutMs};
 
     // Log-throttle state for the periodic pending-count line in check_timeouts()
     // (timer thread only). Without it a single stuck request logs ~4x/sec for

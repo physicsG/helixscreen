@@ -115,8 +115,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     lv_display_t* const d = lv_display_get_default();
     CHECK(d == LVGLTestFixture::s_display);
     CHECK(lv_display_get_rotation(d) == LV_DISPLAY_ROTATION_0);
-    CHECK(lv_display_get_horizontal_resolution(d) == TEST_DISPLAY_WIDTH);
-    CHECK(lv_display_get_vertical_resolution(d) == TEST_DISPLAY_HEIGHT);
+    CHECK(lv_display_get_horizontal_resolution(d) == kTestDisplayWidth);
+    CHECK(lv_display_get_vertical_resolution(d) == kTestDisplayHeight);
     CHECK(lv_subject_get_int(breakpoint) == to_int(UiBreakpoint::Medium));
     CHECK(lv_subject_get_int(breakpoint_v) == to_int(UiBreakpoint::Medium));
     // Consumer level: current_breakpoint() reads the subject rather than the
@@ -140,8 +140,8 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     lv_display_t* const disp = lv_display_get_default();
     REQUIRE(disp == LVGLTestFixture::s_display);
     REQUIRE(lv_display_get_rotation(disp) == LV_DISPLAY_ROTATION_0);
-    REQUIRE(lv_display_get_horizontal_resolution(disp) == TEST_DISPLAY_WIDTH);
-    REQUIRE(lv_display_get_vertical_resolution(disp) == TEST_DISPLAY_HEIGHT);
+    REQUIRE(lv_display_get_horizontal_resolution(disp) == kTestDisplayWidth);
+    REQUIRE(lv_display_get_vertical_resolution(disp) == kTestDisplayHeight);
 
     lv_subject_t* const breakpoint = theme_manager_get_breakpoint_subject();
     REQUIRE(breakpoint != nullptr);
@@ -211,7 +211,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // lv_image_decoder_get_info() and silently leaves src null, see
     // lv_image.c:180-201) so clearing it on this transition is a real
     // assertion, not a check against an already-null default.
-    lv_image_set_src(camera_image, "A:assets/images/ams/spoolman_64.png");
+    lv_image_set_src(camera_image, "A:assets/images/helix-icon-64.png");
     REQUIRE(lv_image_get_src(camera_image) != nullptr);
 
     h.resize(4, 4, w_normal() - 1, h_tall() - 1);
@@ -230,7 +230,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
     // true). Re-seed the sentinel source; a correct edge-triggered
     // implementation must NOT re-enter the "compact && !was_compact" branch,
     // so the sentinel must survive AND stop_stream_calls must not advance.
-    lv_image_set_src(camera_image, "A:assets/images/ams/spoolman_24.png");
+    lv_image_set_src(camera_image, "A:assets/images/ams/afc_64.png");
     h.resize(3, 3, w_normal() - 1, h_tall() - 1); // spans vary, width identical
     process_lvgl(30);
 

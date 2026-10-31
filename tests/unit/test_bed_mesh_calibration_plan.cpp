@@ -224,8 +224,8 @@ TEST_CASE("stored meshes are read from the bed_mesh status object",
 
 namespace {
 
-const nlohmann::json OLD_POINTS = nlohmann::json::parse("[[0.1, 0.2]]");
-const nlohmann::json NEW_POINTS = nlohmann::json::parse("[[0.15, 0.25]]");
+const nlohmann::json kOldPoints = nlohmann::json::parse("[[0.1, 0.2]]");
+const nlohmann::json kNewPoints = nlohmann::json::parse("[[0.15, 0.25]]");
 
 helix::bed_mesh::CalibrationPlan plan_for(const char* detected, const char* configured,
                                           const char* name) {
@@ -243,19 +243,19 @@ TEST_CASE("calibration check: a mesh is trusted only where a profile changed",
         const auto plan = plan_for("BED_MESH_CALIBRATE", "", "cold");
         REQUIRE(plan.writes_profile == "cold");
 
-        auto r = check_calibration(plan, {}, {{"cold", NEW_POINTS}});
+        auto r = check_calibration(plan, {}, {{"cold", kNewPoints}});
         CHECK(r.outcome == CalibrationOutcome::Stored);
         CHECK(r.to == "cold");
 
-        r = check_calibration(plan, {{"cold", OLD_POINTS}}, {{"cold", NEW_POINTS}});
+        r = check_calibration(plan, {{"cold", kOldPoints}}, {{"cold", kNewPoints}});
         CHECK(r.outcome == CalibrationOutcome::Stored);
         CHECK(r.to == "cold");
     }
 
     SECTION("a command that dropped its PROFILE stored in default, which is copied") {
         const auto plan = plan_for("BED_MESH_CALIBRATE", "", "cold");
-        const StoredMeshes before{{"default", OLD_POINTS}, {"cold", OLD_POINTS}};
-        const StoredMeshes after{{"default", NEW_POINTS}, {"cold", OLD_POINTS}};
+        const StoredMeshes before{{"default", kOldPoints}, {"cold", kOldPoints}};
+        const StoredMeshes after{{"default", kNewPoints}, {"cold", kOldPoints}};
         const auto r = check_calibration(plan, before, after);
         CHECK(r.outcome == CalibrationOutcome::Copy);
         CHECK(r.from == "default");
@@ -266,33 +266,33 @@ TEST_CASE("calibration check: a mesh is trusted only where a profile changed",
         const auto plan = plan_for("G29", "", "cold");
         REQUIRE(plan.copy_to == "cold");
 
-        auto r = check_calibration(plan, {{"default", OLD_POINTS}}, {{"default", NEW_POINTS}});
+        auto r = check_calibration(plan, {{"default", kOldPoints}}, {{"default", kNewPoints}});
         CHECK(r.outcome == CalibrationOutcome::Copy);
         CHECK(r.from == "default");
         CHECK(r.to == "cold");
 
-        r = check_calibration(plan, {{"default", OLD_POINTS}}, {{"default", OLD_POINTS}});
+        r = check_calibration(plan, {{"default", kOldPoints}}, {{"default", kOldPoints}});
         CHECK(r.outcome == CalibrationOutcome::NotStored);
     }
 
     SECTION("nothing changed anywhere: not stored, whatever the profiles hold") {
         const auto plan = plan_for("BED_MESH_CALIBRATE", "", "cold");
-        const StoredMeshes same{{"default", OLD_POINTS}, {"cold", OLD_POINTS}};
+        const StoredMeshes same{{"default", kOldPoints}, {"cold", kOldPoints}};
         CHECK(check_calibration(plan, same, same).outcome == CalibrationOutcome::NotStored);
         CHECK(check_calibration(plan, {}, {}).outcome == CalibrationOutcome::NotStored);
     }
 
     SECTION("a profile that vanished is not a stored mesh") {
         const auto plan = plan_for("BED_MESH_CALIBRATE", "", "cold");
-        CHECK(check_calibration(plan, {{"cold", OLD_POINTS}}, {}).outcome ==
+        CHECK(check_calibration(plan, {{"cold", kOldPoints}}, {}).outcome ==
               CalibrationOutcome::NotStored);
     }
 
     SECTION("chosen default, command stores elsewhere but dropped that: it is in default") {
         const auto plan = plan_for("", "BED_MESH_CALIBRATE PROFILE=pei", "default");
         REQUIRE(plan.writes_profile == "pei");
-        const auto r = check_calibration(plan, {{"pei", OLD_POINTS}, {"default", OLD_POINTS}},
-                                         {{"pei", OLD_POINTS}, {"default", NEW_POINTS}});
+        const auto r = check_calibration(plan, {{"pei", kOldPoints}, {"default", kOldPoints}},
+                                         {{"pei", kOldPoints}, {"default", kNewPoints}});
         CHECK(r.outcome == CalibrationOutcome::Stored);
         CHECK(r.to == "default");
     }

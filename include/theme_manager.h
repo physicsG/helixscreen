@@ -98,6 +98,11 @@ struct ThemePalette {
     int shadow_width = 0;
     int shadow_opa = 0;
     int shadow_offset_y = 2;
+    /// Glass appearance: the shared styles carry glass shadows and rims. Set by ThemeManager
+    /// from set_glass(), never by a theme file.
+    bool glass = false;
+    /// Whether this palette is applied in dark mode. Set by ThemeManager; only glass reads it.
+    bool dark = true;
 };
 
 namespace helix {
@@ -201,6 +206,7 @@ struct StyleEntry {
 };
 
 #include <array>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -237,6 +243,14 @@ class ThemeManager {
     /// Toggle between dark and light mode
     void toggle_dark_mode() {
         set_dark_mode(!dark_mode_);
+    }
+
+    /// Turn the glass appearance's style half on or off and re-apply the current palette.
+    /// Survives set_dark_mode(), set_palettes() and previews.
+    void set_glass(bool on);
+
+    bool is_glass() const {
+        return glass_;
     }
 
     /// Set both light and dark palettes (for theme loading)
@@ -281,6 +295,7 @@ class ThemeManager {
     bool initialized_ = false;
     bool dark_mode_ = true;
     bool previewing_ = false;
+    bool glass_ = false;
 
     void register_style_configs();
     void apply_palette(const ThemePalette& palette);
@@ -458,6 +473,42 @@ bool theme_manager_token_uses_vertical_axis(const char* base_name);
  */
 std::unordered_map<std::string, std::string> theme_manager_resolve_px_tokens(lv_display_t* display);
 
+namespace helix {
+
+/// The seven per-tier tables of one set of px constants, keyed by base name
+/// (`space_md` for `space_md_small`).
+struct PxTierTables {
+    std::unordered_map<std::string, std::string> micro, tiny, small, medium, large, xlarge, xxlarge;
+};
+
+/**
+ * @brief One constant's value for one tier suffix, with the ladder's fallbacks
+ *
+ * The optional tiers fall back inwards to the required triplet: _micro to _tiny
+ * then _small, _tiny to _small, _xlarge to _large, _xxlarge to _xlarge then
+ * _large. The caller guarantees @p base has the _small/_medium/_large triplet.
+ */
+const std::string& theme_manager_pick_px_tier(const PxTierTables& tables, const std::string& base,
+                                              const char* suffix);
+
+/**
+ * @brief Resolve every complete triplet in @p tables for @p display, DPI-scaled
+ *
+ * @p app_tokens selects the app's per-token axis policy (nav_width's own ladder,
+ * the vertical-axis tokens); without it every constant follows the cramped
+ * axis, which is what plugin constants use. Constants missing the triplet are
+ * left out.
+ */
+std::unordered_map<std::string, std::string>
+theme_manager_resolve_px_tables(const PxTierTables& tables, lv_display_t* display, bool app_tokens);
+
+/// Runs @p hook with the display at the end of every
+/// theme_manager_refresh_layout_constants(). Returns an id for removal.
+int theme_manager_add_layout_refresh_hook(std::function<void(lv_display_t*)> hook);
+void theme_manager_remove_layout_refresh_hook(int id);
+
+} // namespace helix
+
 /**
  * @brief Register responsive spacing tokens (space_* system)
  *
@@ -483,10 +534,10 @@ void theme_manager_register_responsive_spacing(lv_display_t* display);
 void theme_manager_refresh_layout_constants(lv_display_t* display);
 
 /**
- * @brief Republish the ui_is_portrait subject from the override-aware source.
+ * @brief Republish ui_is_portrait and ui_is_ultrawide from the override-aware source.
  *
- * ui_is_portrait must follow LayoutManager::type() so a --layout override and
- * the XML that branches on it agree. LayoutManager isn't constructed until
+ * Both must follow LayoutManager::type() so a --layout override and the XML
+ * that branches on them agree. LayoutManager isn't constructed until
  * Phase 8b, so the startup seed (theme_manager_init) still uses
  * detect_layout_type(); once LayoutManager is up, call this to publish the
  * override-aware value. theme_manager_refresh_layout_constants() also calls it
@@ -753,6 +804,10 @@ double contrast_ratio(lv_color_t a, lv_color_t b);
 /// Contrast a field outline must reach on every surface a field can sit on:
 /// WCAG 1.4.11 non-text contrast for a component boundary.
 inline constexpr double kFieldOutlineContrastThreshold = 3.0;
+
+/// Contrast a chart's data curve must reach on its plot: WCAG 1.4.11 non-text
+/// contrast for a graphical object.
+inline constexpr double kChartCurveContrastThreshold = 3.0;
 
 /// Outline colour for unfilled input fields. Starts from the palette's
 /// text_subtle and shifts it the least amount needed to clear 3:1 against the
@@ -1060,6 +1115,15 @@ void theme_manager_parse_xml_file_for_suffix(
  */
 std::vector<std::string> theme_manager_find_xml_files(const char* directory,
                                                       bool recursive = false);
+
+/**
+ * @brief How many times token discovery has parsed an XML file's contents
+ *
+ * Discovery reuses a file's parse while its stat is unchanged, so a pass over
+ * an unchanged directory adds nothing. Exists so tests can pin that reuse
+ * without timing anything.
+ */
+int theme_manager_token_file_parse_count();
 
 /**
  * @brief Parse all XML files in a directory for constants with a specific suffix

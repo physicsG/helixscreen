@@ -25,7 +25,7 @@ using helix::ui::validate_product_form;
 
 namespace {
 constexpr const char* FIX = "tests/fixtures/filaments_test.json";
-constexpr const char* USER_FIX = "tests/fixtures/user_filaments_test.json";
+constexpr const char* kUserFix = "tests/fixtures/user_filaments_test.json";
 } // namespace
 
 TEST_CASE_METHOD(HelixTestFixture, "resolve_code cfs hit and miss", "[filament_catalog]") {
@@ -62,6 +62,55 @@ TEST_CASE_METHOD(HelixTestFixture, "load_codes materializes only coded slice",
     auto cat = FilamentCatalog::load_from_file(FIX, true, "cfs");
     CHECK(cat.all_products().size() == 1); // only the cfs-coded entry
     CHECK(cat.resolve_id("polymaker-abs-pro") == nullptr);
+}
+
+TEST_CASE_METHOD(HelixTestFixture, "orca ids: only an id exactly one product carries",
+                 "[filament_catalog][orca]") {
+    constexpr const char* kBuiltin = "tests/fixtures/orca_ids_builtin.json";
+    constexpr const char* kOverlay = "tests/fixtures/orca_ids_overlay.json";
+
+    SECTION("built-ins alone") {
+        const auto ids = FilamentCatalog::orca_id_map_from(kBuiltin, "");
+        REQUIRE(ids.count("acme-pla") == 1);
+        CHECK(ids.at("acme-pla") == "UNIQUE01");
+        CHECK(ids.count("acme-pp") == 0); // SHARED01 names two products
+        CHECK(ids.count("acme-petg-cf") == 0);
+        CHECK(ids.count("acme-pc") == 0); // no orca_id
+        REQUIRE(ids.count("acme-tpu") == 1);
+        CHECK(ids.at("acme-tpu") == "OVERLAY_TAKEN");
+    }
+
+    SECTION("with the user overlay") {
+        const auto ids = FilamentCatalog::orca_id_map_from(kBuiltin, kOverlay);
+        CHECK(ids.at("acme-pla") == "UNIQUE01");
+        // An override with no orca_id of its own carries none.
+        CHECK(ids.count("acme-abs") == 0);
+        // An override with its own orca_id carries that one.
+        REQUIRE(ids.count("acme-asa") == 1);
+        CHECK(ids.at("acme-asa") == "OVERLAY_ASA");
+        // A user product sharing a built-in's id makes it ambiguous for both.
+        CHECK(ids.count("acme-tpu") == 0);
+        CHECK(ids.count("user-tpu") == 0);
+    }
+}
+
+// OrcaSlicer 2.5 matches a lane's filament_id only against its OF* product
+// hashes; any other id falls back to type matching with a notice. Earlier Orca
+// versions never read the field.
+TEST_CASE_METHOD(HelixTestFixture, "orca ids: the shipped catalog carries Orca 2.5 product ids",
+                 "[filament_catalog][orca]") {
+    const auto ids = FilamentCatalog::orca_id_map_from("assets/filaments.json", "");
+    REQUIRE(ids.size() > 200);
+
+    // The example Orca's docs/HLSD/filament_id.md derives by hand.
+    REQUIRE(ids.count("polymaker-polylite-pla") == 1);
+    CHECK(ids.at("polymaker-polylite-pla") == "OF5CgdDq");
+
+    for (const auto& [product, orca_id] : ids) {
+        INFO(product << " -> " << orca_id);
+        CHECK(orca_id.size() == 8);
+        CHECK(orca_id.rfind("OF", 0) == 0);
+    }
 }
 
 TEST_CASE_METHOD(HelixTestFixture, "queries by brand and type", "[filament_catalog]") {
@@ -105,7 +154,7 @@ TEST_CASE_METHOD(HelixTestFixture, "user overlay accepts legacy bare-array produ
 
 TEST_CASE_METHOD(HelixTestFixture, "load_user_orca_type_map_from reads object form",
                  "[filament_catalog]") {
-    auto m = FilamentCatalog::load_user_orca_type_map_from(USER_FIX);
+    auto m = FilamentCatalog::load_user_orca_type_map_from(kUserFix);
     REQUIRE(m.size() == 3);
     CHECK(m.at("PLA-BioTough") == "PLA");
     CHECK(m.at("CustomASA") == "ASA");
@@ -168,10 +217,10 @@ std::string read_small_file(const std::string& path) {
     return ss.str();
 }
 
-constexpr const char* SAVE_TMP = "/tmp/helix_user_save_test.json";
+constexpr const char* kSaveTmp = "/tmp/helix_user_save_test.json";
 
 void remove_save_tmp() {
-    std::remove(SAVE_TMP);
+    std::remove(kSaveTmp);
 }
 } // namespace
 
@@ -194,10 +243,10 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to round-trips through lo
          {"source", "user"}},
     };
 
-    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(products, kSaveTmp));
 
     // File exists, is parseable, carries the filaments section.
-    const std::string raw = read_small_file(SAVE_TMP);
+    const std::string raw = read_small_file(kSaveTmp);
     INFO("overlay content: " << raw);
     auto doc = nlohmann::json::parse(raw);
     REQUIRE(doc.is_object());
@@ -209,7 +258,7 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to round-trips through lo
 
     // Functional round-trip: load_with_overlay against the built-in fixture
     // merges the new entries over the existing ones.
-    auto cat = FilamentCatalog::load_with_overlay(FIX, SAVE_TMP);
+    auto cat = FilamentCatalog::load_with_overlay(FIX, kSaveTmp);
     const auto* added = cat.resolve_id("acme-test-pla");
     REQUIRE(added != nullptr);
     CHECK(added->brand == "Acme");
@@ -223,7 +272,7 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to preserves existing orc
     remove_save_tmp();
     // Seed the file with both sections.
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"({"filaments":[{"id":"old-entry","type":"PLA"}],)"
             << R"("orca_type_map":{"MyResin":"PLA","WeirdResin":""}})";
     }
@@ -231,15 +280,15 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to preserves existing orc
     std::vector<nlohmann::json> fresh_products = {
         {{"id", "new-entry"}, {"type", "PETG"}, {"source", "user"}},
     };
-    REQUIRE(FilamentCatalog::save_user_products_to(fresh_products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(fresh_products, kSaveTmp));
 
     // Products were replaced (old-entry is gone, new-entry is present).
-    auto doc = nlohmann::json::parse(read_small_file(SAVE_TMP));
+    auto doc = nlohmann::json::parse(read_small_file(kSaveTmp));
     REQUIRE(doc["filaments"].size() == 1);
     CHECK(doc["filaments"][0]["id"] == "new-entry");
 
     // orca_type_map is preserved verbatim, including the "" suppress entry.
-    auto m = FilamentCatalog::load_user_orca_type_map_from(SAVE_TMP);
+    auto m = FilamentCatalog::load_user_orca_type_map_from(kSaveTmp);
     REQUIRE(m.size() == 2);
     CHECK(m.at("MyResin") == "PLA");
     CHECK(m.at("WeirdResin") == "");
@@ -255,21 +304,21 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to migrates legacy bare-a
     // bare-array shape, write proper object form. The legacy form never
     // carried orca_type_map, so nothing is lost.
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"([{"id":"legacy-entry","type":"PLA"}])";
     }
 
     std::vector<nlohmann::json> products = {
         {{"id", "post-migration"}, {"type", "PETG"}, {"source", "user"}},
     };
-    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(products, kSaveTmp));
 
-    auto doc = nlohmann::json::parse(read_small_file(SAVE_TMP));
+    auto doc = nlohmann::json::parse(read_small_file(kSaveTmp));
     REQUIRE(doc.is_object()); // migrated to object form
     REQUIRE(doc["filaments"].size() == 1);
     CHECK(doc["filaments"][0]["id"] == "post-migration");
     // Reader accepts the new shape.
-    auto cat = FilamentCatalog::load_with_overlay(FIX, SAVE_TMP);
+    auto cat = FilamentCatalog::load_with_overlay(FIX, kSaveTmp);
     CHECK(cat.resolve_id("post-migration") != nullptr);
 
     remove_save_tmp();
@@ -294,7 +343,7 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to handles corrupt existi
                  "[filament_catalog][user_save]") {
     remove_save_tmp();
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"(this is not json)";
     }
 
@@ -302,9 +351,9 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to handles corrupt existi
         {{"id", "post-corrupt"}, {"type", "PLA"}, {"source", "user"}},
     };
     // Corrupt existing file must not block the save — start fresh, log a warn.
-    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(products, kSaveTmp));
 
-    auto doc = nlohmann::json::parse(read_small_file(SAVE_TMP));
+    auto doc = nlohmann::json::parse(read_small_file(kSaveTmp));
     REQUIRE(doc["filaments"].size() == 1);
     CHECK(doc["filaments"][0]["id"] == "post-corrupt");
 
@@ -314,19 +363,19 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to handles corrupt existi
 TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to backs up a corrupt existing file",
                  "[filament_catalog][user_save]") {
     remove_save_tmp();
-    const std::string bak = std::string(SAVE_TMP) + ".bak";
+    const std::string bak = std::string(kSaveTmp) + ".bak";
     std::remove(bak.c_str());
     // A hand-authored file that's been truncated mid-edit: the orca_type_map is
     // real data the user would want back, but the file no longer parses.
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"({"orca_type_map":{"PreciousHint":"PLA"}, "filaments":[)"; // truncated
     }
 
     std::vector<nlohmann::json> products = {
         {{"id", "post-corrupt"}, {"type", "PLA"}, {"source", "user"}},
     };
-    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(products, kSaveTmp));
 
     // The unparseable original is preserved to <path>.bak for hand-recovery,
     // with its content intact.
@@ -371,13 +420,13 @@ TEST_CASE_METHOD(HelixTestFixture, "save_user_products_to empty product list wri
     remove_save_tmp();
     // Seed with orca_type_map so we can verify it survives an empty-products save.
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"({"filaments":[{"id":"will-be-replaced"}],"orca_type_map":{"X":"PLA"}})";
     }
 
-    REQUIRE(FilamentCatalog::save_user_products_to({}, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to({}, kSaveTmp));
 
-    auto doc = nlohmann::json::parse(read_small_file(SAVE_TMP));
+    auto doc = nlohmann::json::parse(read_small_file(kSaveTmp));
     REQUIRE(doc["filaments"].is_array());
     CHECK(doc["filaments"].empty());
     // orca_type_map preserved.
@@ -393,21 +442,21 @@ TEST_CASE_METHOD(HelixTestFixture, "load_user_products_from reads authored produ
     remove_save_tmp();
     // Object form: return the sparse authored entries verbatim, no inheritance.
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"({"filaments":[{"id":"a","type":"PLA"},{"id":"b","nozzle":250}],)"
             << R"("orca_type_map":{"X":"PLA"}})";
     }
-    auto products = FilamentCatalog::load_user_products_from(SAVE_TMP);
+    auto products = FilamentCatalog::load_user_products_from(kSaveTmp);
     REQUIRE(products.size() == 2);
     CHECK(products[0]["id"] == "a");
     CHECK(products[1]["nozzle"] == 250); // authored value, not resolved/inherited
 
     // Legacy bare-array form is accepted too.
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"([{"id":"legacy","type":"ABS"}])";
     }
-    auto legacy = FilamentCatalog::load_user_products_from(SAVE_TMP);
+    auto legacy = FilamentCatalog::load_user_products_from(kSaveTmp);
     REQUIRE(legacy.size() == 1);
     CHECK(legacy[0]["id"] == "legacy");
 
@@ -461,41 +510,41 @@ TEST_CASE_METHOD(HelixTestFixture, "product edit round-trip preserves orca_type_
     remove_save_tmp();
     // Seed as the modal will find it: existing user products + an orca_type_map.
     {
-        std::ofstream out(SAVE_TMP);
+        std::ofstream out(kSaveTmp);
         out << R"({"filaments":[{"id":"user-pla","type":"PLA","nozzle":215}],)"
             << R"("orca_type_map":{"CustomPLA":"PLA"}})";
     }
 
     // --- Add a new product (the modal's "+ Add custom filament" flow) ---
-    auto products = FilamentCatalog::load_user_products_from(SAVE_TMP);
+    auto products = FilamentCatalog::load_user_products_from(kSaveTmp);
     CHECK_FALSE(FilamentCatalog::upsert_product(
         products, {{"id", "user-petg"}, {"type", "PETG"}, {"nozzle", 240}, {"source", "user"}}));
-    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(products, kSaveTmp));
 
     // Both products present; orca_type_map survived the products-only write.
-    auto after_add = FilamentCatalog::load_user_products_from(SAVE_TMP);
+    auto after_add = FilamentCatalog::load_user_products_from(kSaveTmp);
     REQUIRE(after_add.size() == 2);
-    auto map1 = FilamentCatalog::load_user_orca_type_map_from(SAVE_TMP);
+    auto map1 = FilamentCatalog::load_user_orca_type_map_from(kSaveTmp);
     CHECK(map1.at("CustomPLA") == "PLA");
 
     // --- Edit an existing product (override-by-id) ---
     FilamentCatalog::upsert_product(
         after_add, {{"id", "user-pla"}, {"type", "PLA"}, {"nozzle", 225}, {"source", "user"}});
-    REQUIRE(FilamentCatalog::save_user_products_to(after_add, SAVE_TMP));
-    auto cat = FilamentCatalog::load_with_overlay(FIX, SAVE_TMP);
+    REQUIRE(FilamentCatalog::save_user_products_to(after_add, kSaveTmp));
+    auto cat = FilamentCatalog::load_with_overlay(FIX, kSaveTmp);
     const auto* edited = cat.resolve_id("user-pla");
     REQUIRE(edited != nullptr);
     CHECK(edited->nozzle_recommended == 225); // edit applied
 
     // --- Delete / Restore-Defaults (remove the overlay entry) ---
-    auto after_edit = FilamentCatalog::load_user_products_from(SAVE_TMP);
+    auto after_edit = FilamentCatalog::load_user_products_from(kSaveTmp);
     CHECK(FilamentCatalog::remove_product(after_edit, "user-petg"));
-    REQUIRE(FilamentCatalog::save_user_products_to(after_edit, SAVE_TMP));
-    auto final_products = FilamentCatalog::load_user_products_from(SAVE_TMP);
+    REQUIRE(FilamentCatalog::save_user_products_to(after_edit, kSaveTmp));
+    auto final_products = FilamentCatalog::load_user_products_from(kSaveTmp);
     REQUIRE(final_products.size() == 1);
     CHECK(final_products[0]["id"] == "user-pla");
     // orca_type_map still intact after the whole add/edit/delete cycle.
-    auto map2 = FilamentCatalog::load_user_orca_type_map_from(SAVE_TMP);
+    auto map2 = FilamentCatalog::load_user_orca_type_map_from(kSaveTmp);
     CHECK(map2.at("CustomPLA") == "PLA");
 
     remove_save_tmp();
@@ -685,7 +734,7 @@ TEST_CASE_METHOD(HelixTestFixture, "a user-overlay save retires the snapshot",
 
     std::vector<nlohmann::json> products = {
         {{"id", "acme-cache-pla"}, {"brand", "Acme"}, {"name", "Cache PLA"}, {"type", "PLA"}}};
-    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(products, kSaveTmp));
 
     CHECK(FilamentCatalog::user_overlay_generation() > gen_before);
     auto after = FilamentCatalog::load_codes_cached("cfs");
@@ -710,7 +759,7 @@ TEST_CASE_METHOD(HelixTestFixture, "a held snapshot outlives its retirement",
 
     std::vector<nlohmann::json> products = {
         {{"id", "acme-cache-pla2"}, {"brand", "Acme"}, {"name", "Cache PLA 2"}, {"type", "PLA"}}};
-    REQUIRE(FilamentCatalog::save_user_products_to(products, SAVE_TMP));
+    REQUIRE(FilamentCatalog::save_user_products_to(products, kSaveTmp));
     auto replacement = FilamentCatalog::load_codes_cached("cfs");
     REQUIRE(replacement.get() != held.get());
 

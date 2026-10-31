@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "android_asset_extractor.h"
 
+#include "app_constants.h"
+
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
@@ -135,6 +137,42 @@ bool is_non_shippable_config_file(const std::string& filename) {
            filename.rfind("helixconfig", 0) == 0 || filename == ".helix-screen.lock";
 }
 
+/// Whether an APK asset directory extracts into the user's config layer.
+///
+/// data/config/ is the writable layer find_readable() consults before the shipped
+/// seeds under assets/config/, so a file there is the user's: a theme saved from
+/// the editor, a printer_database.d override. The package may create one that is
+/// missing, but rewriting an existing one on every update would discard the edit.
+///
+/// So a file shipped under config/ is only ever seeded and never updated: an install
+/// keeps the first copy it received. Package content that must follow releases
+/// belongs under assets/config/.
+bool asset_dir_is_user_layer(const std::string& asset_path) {
+    return asset_path == "config" || asset_path.rfind("config/", 0) == 0;
+}
+
+int remove_compiled_font_sources(const std::string& fonts_dir) {
+    int removed = 0;
+    std::error_code ec;
+    for (fs::directory_iterator it(fonts_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().extension() == ".c" && it->is_regular_file(ec)) {
+            std::error_code rm_ec;
+            if (fs::remove(it->path(), rm_ec)) {
+                removed++;
+            }
+        }
+    }
+    return removed;
+}
+
+AndroidStorageLayout android_storage_layout(const std::string& internal_storage) {
+    std::string root = internal_storage;
+    while (root.size() > 1 && root.back() == '/') {
+        root.pop_back();
+    }
+    return {root + "/data", root + "/state", root + "/.helixscreen"};
+}
+
 #ifdef __ANDROID__
 
 #include "helix_version.h"
@@ -219,6 +257,10 @@ static DirExtractResult extract_asset_dir(AAssetManager* mgr, const std::string&
         // the extraction's success.
         if (asset_path == "config" && is_non_shippable_config_file(filename)) {
             spdlog::debug("[AndroidAssets] Skipping non-shippable config file {}", filename);
+            continue;
+        }
+        if (asset_dir_is_user_layer(asset_path) && fs::exists(target_file, ec)) {
+            spdlog::debug("[AndroidAssets] Keeping existing user-layer file {}", target_file);
             continue;
         }
 
@@ -330,7 +372,7 @@ void android_extract_assets_if_needed() {
         return;
     }
 
-    std::string target_dir = std::string(internal_path) + "/data";
+    std::string target_dir = android_storage_layout(internal_path).data_dir;
     spdlog::info("[AndroidAssets] Target directory: {}", target_dir);
 
     AAssetManager* mgr = get_asset_manager();
@@ -389,6 +431,15 @@ void android_extract_assets_if_needed() {
              {"presets", "print_start_profiles", "platform", "sounds", "themes/defaults"}) {
             fs::remove_all(cfg + "/" + stale_dir, ec);
         }
+        // Mock-printer fixtures the APK does not ship (mockOnlyAssets in
+        // android/app/build.gradle). Nothing else removes an extracted tree, so
+        // an install that once received them would keep ~180 MB forever.
+        for (const char* mock_dir : {"test_gcodes", "test_timelapse"}) {
+            fs::remove_all(target_dir + "/assets/" + mock_dir, ec);
+        }
+        // Font C sources, compiled into the library and left out of the APK
+        // (compiledFontSources in build.gradle).
+        remove_compiled_font_sources(target_dir + "/assets/fonts");
     }
 
     // Walk MANIFEST.txt — every directory in the APK, one per line, in a stable
@@ -451,6 +502,19 @@ void android_extract_assets_if_needed() {
     // Set HELIX_DATA_DIR so ensure_project_root_cwd() chdir's here
     setenv("HELIX_DATA_DIR", target_dir.c_str(), 1);
     spdlog::info("[AndroidAssets] Set HELIX_DATA_DIR={}", target_dir);
+}
+
+void android_configure_backup_dirs() {
+    const char* internal_path = SDL_AndroidGetInternalStoragePath();
+    if (!internal_path) {
+        spdlog::error("[AndroidAssets] No internal storage path; settings backups stay disabled");
+        return;
+    }
+    const AndroidStorageLayout layout = android_storage_layout(internal_path);
+    app_constants::update::detail::state_dir_ref() = layout.backup_dir;
+    app_constants::update::detail::backup_fallback_dir_ref() = layout.backup_fallback_dir;
+    spdlog::info("[AndroidAssets] Settings backups: {} (fallback {})", layout.backup_dir,
+                 layout.backup_fallback_dir);
 }
 
 #endif // __ANDROID__

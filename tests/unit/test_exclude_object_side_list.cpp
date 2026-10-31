@@ -334,6 +334,24 @@ TEST_CASE_METHOD(SideListFixture, "A row tap hands the object's name to the tap 
     CHECK(taps[0] == "obj_4");
 }
 
+TEST_CASE_METHOD(SideListFixture,
+                 "A row whose name the font cannot draw reads Object <n> and taps the real name",
+                 "[exclude_side_list][object_display_name]") {
+    const std::string cjk = "\xE7\xAB\x8B\xE6\x96\xB9\xE4\xBD\x93"; // 立方体
+    objects().set_defined_objects({"Cube_id_0", cjk});
+    settle();
+    const auto rows = rows_of(container);
+    REQUIRE(rows.size() == 2);
+
+    CHECK(shows_text(rows[0], "Cube_id_0"));
+    CHECK(shows_text(rows[1], "Object 2"));
+    CHECK_FALSE(shows_text(rows[1], cjk.c_str()));
+
+    lv_obj_send_event(rows[1], LV_EVENT_CLICKED, nullptr);
+    REQUIRE(taps.size() == 1);
+    CHECK(taps[0] == cjk);
+}
+
 TEST_CASE_METHOD(SideListFixture, "In toggle mode a picked row reads Excluded and stays tappable",
                  "[exclude_side_list][pre_start_exclude]") {
     objects().set_current_object("");
@@ -413,10 +431,10 @@ lv_obj_t* make_viewer_with_obj_4(helix::gcode::GCodeLayerRenderer*& renderer) {
     file->layers.push_back(std::move(layer));
     file->total_segments = 1;
 
-    lv_obj_t* viewer = ui_gcode_viewer_create(lv_screen_active());
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(lv_screen_active());
     lv_obj_set_size(viewer, 200, 200);
     lv_obj_update_layout(viewer);
-    ui_gcode_viewer_set_render_mode(viewer, helix::GcodeViewerRenderMode::Layer2D);
+    helix::ui::gcode_viewer_set_render_mode(viewer, helix::GcodeViewerRenderMode::Layer2D);
     renderer = helix::test_access::gcode_viewer_show_2d(viewer, std::move(file));
     return viewer;
 }

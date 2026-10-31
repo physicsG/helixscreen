@@ -98,6 +98,7 @@ UNICODE_RANGES+=",0x2022"        # Bullet
 UNICODE_RANGES+=",0x2026"        # Ellipsis
 UNICODE_RANGES+=",0x20AC"        # Euro sign
 UNICODE_RANGES+=",0x2122"        # Trademark
+UNICODE_RANGES+=",0x215B-0x215E" # Eighth fractions (belt tuning turns)
 
 # Extract ALL CJK characters from translations, C++ sources, XML layouts and
 # the printer database.

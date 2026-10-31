@@ -44,7 +44,7 @@ struct TempCsvFile {
 };
 
 /// Realistic CSV content matching Klipper's calibrate_shaper.py output (real format, no marker)
-const char* REALISTIC_CSV =
+const char* kRealisticCsv =
     "freq, psd_x, psd_y, psd_z, psd_xyz, zv(59.0), mzv(53.8), ei(56.2), 2hump_ei(71.8), "
     "3hump_ei(89.6)\n"
     "5.0, 1.234e-03, 2.345e-03, 1.123e-03, 4.702e-03, 0.001, 0.001, 0.001, 0.000, 0.000\n"
@@ -61,10 +61,10 @@ const char* REALISTIC_CSV =
     "60.0, 1.500e-01, 2.000e-01, 9.500e-02, 4.450e-01, 0.163, 0.122, 0.140, 0.081, 0.054\n";
 
 /// CSV without shaper columns (raw PSD only)
-const char* RAW_PSD_ONLY_CSV = "freq, psd_x, psd_y, psd_z, psd_xyz\n"
-                               "5.0, 1.234e-03, 2.345e-03, 1.123e-03, 4.702e-03\n"
-                               "10.0, 2.500e-03, 3.100e-03, 1.800e-03, 7.400e-03\n"
-                               "15.0, 4.100e-03, 5.200e-03, 2.900e-03, 1.220e-02\n";
+const char* kRawPsdOnlyCsv = "freq, psd_x, psd_y, psd_z, psd_xyz\n"
+                             "5.0, 1.234e-03, 2.345e-03, 1.123e-03, 4.702e-03\n"
+                             "10.0, 2.500e-03, 3.100e-03, 1.800e-03, 7.400e-03\n"
+                             "15.0, 4.100e-03, 5.200e-03, 2.900e-03, 1.220e-02\n";
 
 } // anonymous namespace
 
@@ -73,7 +73,7 @@ const char* RAW_PSD_ONLY_CSV = "freq, psd_x, psd_y, psd_z, psd_xyz\n"
 // ============================================================================
 
 TEST_CASE("Valid CSV parse with all columns", "[shaper_csv]") {
-    TempCsvFile csv(REALISTIC_CSV);
+    TempCsvFile csv(kRealisticCsv);
     auto data = parse_shaper_csv(csv.path, 'X');
 
     SECTION("frequency bins parsed correctly") {
@@ -122,7 +122,7 @@ TEST_CASE("Valid CSV parse with all columns", "[shaper_csv]") {
 }
 
 TEST_CASE("X vs Y axis selection", "[shaper_csv]") {
-    TempCsvFile csv(REALISTIC_CSV);
+    TempCsvFile csv(kRealisticCsv);
 
     auto data_x = parse_shaper_csv(csv.path, 'X');
     auto data_y = parse_shaper_csv(csv.path, 'Y');
@@ -179,7 +179,7 @@ TEST_CASE("Header only with no data rows", "[shaper_csv]") {
 }
 
 TEST_CASE("CSV without shaper columns parses raw PSD only", "[shaper_csv]") {
-    TempCsvFile csv(RAW_PSD_ONLY_CSV);
+    TempCsvFile csv(kRawPsdOnlyCsv);
     auto data = parse_shaper_csv(csv.path, 'X');
 
     CHECK(data.frequencies.size() == 3);
@@ -236,20 +236,20 @@ TEST_CASE("Parser detects shaper columns without marker", "[shaper_csv]") {
 // Resonance CSV (TEST_RESONANCES OUTPUT=resonances)
 // ============================================================================
 
-static const char* MAINLINE_RESONANCES_CSV = "freq,psd_x,psd_y,psd_z,psd_xyz\n"
-                                             "5.0,1.0e+01,2.0e+01,3.0e+00,3.3e+01\n"
-                                             "5.8,1.1e+01,2.1e+01,3.0e+00,3.5e+01\n"
-                                             "6.6,1.2e+01,2.2e+01,3.0e+00,3.7e+01\n";
+static const char* kMainlineResonancesCsv = "freq,psd_x,psd_y,psd_z,psd_xyz\n"
+                                            "5.0,1.0e+01,2.0e+01,3.0e+00,3.3e+01\n"
+                                            "5.8,1.1e+01,2.1e+01,3.0e+00,3.5e+01\n"
+                                            "6.6,1.2e+01,2.2e+01,3.0e+00,3.7e+01\n";
 
-static const char* KALICO_RESONANCES_CSV = "freq,psd_x,psd_y,psd_z,psd_xyz,accel_per_hz\n"
-                                           "5.0,1.0e+01,2.0e+01,3.0e+00,3.3e+01,60.0\n"
-                                           "5.8,1.1e+01,2.1e+01,3.0e+00,3.5e+01,60.0\n";
+static const char* kKalicoResonancesCsv = "freq,psd_x,psd_y,psd_z,psd_xyz,accel_per_hz\n"
+                                          "5.0,1.0e+01,2.0e+01,3.0e+00,3.3e+01,60.0\n"
+                                          "5.8,1.1e+01,2.1e+01,3.0e+00,3.5e+01,60.0\n";
 
-static const char* MULTI_CHIP_CSV = "freq,adxl345,adxl345_hotend\n"
-                                    "5.0,1.0e+01,2.0e+01\n";
+static const char* kMultiChipCsv = "freq,adxl345,adxl345_hotend\n"
+                                   "5.0,1.0e+01,2.0e+01\n";
 
 TEST_CASE("resonance CSV: mainline columns", "[shaper_csv][belt]") {
-    TempCsvFile csv(MAINLINE_RESONANCES_CSV);
+    TempCsvFile csv(kMainlineResonancesCsv);
     auto d = parse_resonance_csv(csv.path);
     REQUIRE(d.error == ResonanceCsvError::NONE);
     REQUIRE(d.curve.size() == 3);
@@ -259,7 +259,7 @@ TEST_CASE("resonance CSV: mainline columns", "[shaper_csv][belt]") {
 }
 
 TEST_CASE("resonance CSV: Kalico's extra column is ignored", "[shaper_csv][belt]") {
-    TempCsvFile csv(KALICO_RESONANCES_CSV);
+    TempCsvFile csv(kKalicoResonancesCsv);
     auto d = parse_resonance_csv(csv.path);
     REQUIRE(d.error == ResonanceCsvError::NONE);
     REQUIRE(d.curve.size() == 2);
@@ -267,7 +267,7 @@ TEST_CASE("resonance CSV: Kalico's extra column is ignored", "[shaper_csv][belt]
 }
 
 TEST_CASE("resonance CSV: per-chip columns are reported, not guessed", "[shaper_csv][belt]") {
-    TempCsvFile csv(MULTI_CHIP_CSV);
+    TempCsvFile csv(kMultiChipCsv);
     auto d = parse_resonance_csv(csv.path);
     CHECK(d.error == ResonanceCsvError::MULTI_CHIP);
     CHECK(d.curve.empty());
@@ -290,6 +290,31 @@ TEST_CASE("resonance CSV: a truncated last row is dropped, the rest kept", "[sha
     auto d = parse_resonance_csv(csv.path);
     REQUIRE(d.error == ResonanceCsvError::NONE);
     CHECK(d.curve.size() == 1);
+    REQUIRE(d.in_plane.size() == d.curve.size());
+    CHECK(d.in_plane[0].first == d.curve[0].first);
+}
+
+TEST_CASE("resonance CSV: the in-plane curve is psd_x + psd_y on the same bins",
+          "[shaper_csv][belt]") {
+    TempCsvFile csv("freq,psd_x,psd_y,psd_z,psd_xyz\n"
+                    "10,1,2,3,6\n"
+                    "11,4,5,1,10\n"
+                    "12,0.5,0.5,9,10\n");
+    auto d = parse_resonance_csv(csv.path);
+    REQUIRE(d.error == ResonanceCsvError::NONE);
+    const BeltCurve want_in_plane = {{10.0f, 3.0f}, {11.0f, 9.0f}, {12.0f, 1.0f}};
+    const BeltCurve want_xyz = {{10.0f, 6.0f}, {11.0f, 10.0f}, {12.0f, 10.0f}};
+    CHECK(d.in_plane == want_in_plane);
+    CHECK(d.curve == want_xyz);
+}
+
+TEST_CASE("resonance CSV: a CSV with psd_xyz but no psd_x or psd_y has an empty in-plane curve",
+          "[shaper_csv][belt]") {
+    TempCsvFile csv("freq,psd_xyz\n5.0,6\n5.8,7\n");
+    auto d = parse_resonance_csv(csv.path);
+    REQUIRE(d.error == ResonanceCsvError::NONE);
+    CHECK(d.curve.size() == 2);
+    CHECK(d.in_plane.empty());
 }
 
 TEST_CASE("resonance CSV: no freq or psd_xyz column", "[shaper_csv][belt]") {

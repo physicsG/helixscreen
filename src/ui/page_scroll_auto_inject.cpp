@@ -53,6 +53,13 @@ bool PageScrollAutoInject::qualifies(lv_obj_t* obj) {
     if ((lv_obj_get_scroll_dir(obj) & LV_DIR_VER) == 0) {
         return false; // horizontal-only (e.g. carousel)
     }
+    // An image is scrollable by default and measures its source pixels as content,
+    // so a picture larger than its box overflows on paper. It draws scaled to the
+    // box and ignores the scroll offset: paging it moves nothing and the gutter
+    // would sit on the picture.
+    if (lv_obj_check_type(obj, &lv_image_class)) {
+        return false;
+    }
     return lv_obj_get_scroll_bottom(obj) > 0 || lv_obj_get_scroll_y(obj) > 0;
 }
 
@@ -106,7 +113,7 @@ void PageScrollAutoInject::walk_and_attach(lv_obj_t* obj, bool ancestor_managed)
     // taller, so a gutter inside one sits on the widget's own content instead of
     // beside it. Cut the whole subtree: most tile roots are non-scrollable and
     // the walk would otherwise sail through them into a widget's inner list.
-    if (lv_obj_has_flag(obj, helix::PANEL_WIDGET_TILE_FLAG)) {
+    if (lv_obj_has_flag(obj, helix::kPanelWidgetTileFlag)) {
         return;
     }
     // A container already managed from an earlier on_root_shown() pass must

@@ -20,6 +20,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "app_globals.h"
+#include "delayed_file_transfers.h"
 #include "display_settings_manager.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "moonraker_api.h"
@@ -70,8 +71,9 @@ enum class PrintSelectFilelistHandler { Unregistered, Registered };
 enum class PrintSelectVisit { Immediate, Deferred };
 
 /// Which API the panel talks to. Mock is MoonrakerAPIMock, whose transfers
-/// record uploads instead of needing an HTTP server.
-enum class PrintSelectApi { Real, Mock };
+/// record uploads instead of needing an HTTP server. Delayed is the same mock
+/// with transfers a test can hold and release (transfers()).
+enum class PrintSelectApi { Real, Mock, Delayed };
 
 /// What the connection-state subject says when setup() registers the panel's
 /// observer. Connected is a first visit on a platform that builds the panel on
@@ -98,7 +100,11 @@ class PrintSelectPanelFixture : public LVGLUITestFixture {
         // initial-state dispatch then has no subscribers to storm, while
         // get_connection_state() still reports CONNECTED for is_ready() checks.
         mock_client_.connect("ws://mock/websocket", []() {}, []() {});
-        if (api == PrintSelectApi::Mock) {
+        if (api == PrintSelectApi::Delayed) {
+            transfers_ = std::make_unique<DelayedFileTransfers>(mock_client_, "");
+            api_ = std::make_unique<DelayedMoonrakerAPIMock>(mock_client_, get_printer_state(),
+                                                             *transfers_);
+        } else if (api == PrintSelectApi::Mock) {
             api_ = std::make_unique<MoonrakerAPIMock>(mock_client_, get_printer_state());
         } else {
             api_ = std::make_unique<MoonrakerAPI>(mock_client_, get_printer_state());
@@ -122,7 +128,7 @@ class PrintSelectPanelFixture : public LVGLUITestFixture {
         }
 
         home_widget_ = lv_obj_create(test_screen());
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = home_widget_;
         panels[static_cast<int>(PanelId::PrintSelect)] = panel_obj_;
         auto& nav = NavigationManager::instance();
@@ -142,6 +148,7 @@ class PrintSelectPanelFixture : public LVGLUITestFixture {
         drain();
         panel_.reset();
         api_.reset();
+        transfers_.reset();
         mock_client_.stop_temperature_simulation();
         mock_client_.disconnect();
         DisplaySettingsManager::instance().set_animations_enabled(animations_were_enabled_);
@@ -168,7 +175,14 @@ class PrintSelectPanelFixture : public LVGLUITestFixture {
         }
     }
 
+    /// The holdable transfers of a PrintSelectApi::Delayed fixture; null otherwise.
+    DelayedFileTransfers& transfers() {
+        REQUIRE(transfers_ != nullptr);
+        return *transfers_;
+    }
+
     MoonrakerClientMock mock_client_;
+    std::unique_ptr<DelayedFileTransfers> transfers_;
     std::unique_ptr<MoonrakerAPI> api_;
     std::unique_ptr<PrintSelectPanel> panel_;
     lv_obj_t* panel_obj_ = nullptr;

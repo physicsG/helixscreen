@@ -14,7 +14,7 @@ load helpers
 
 setup_file() {
     export GATE_DB="$BATS_FILE_TMPDIR/gate_db.txt"
-    make -n -p 2>/dev/null > "$GATE_DB" || true
+    make_db > "$GATE_DB" || true
 }
 
 recipe_of() {
@@ -58,7 +58,7 @@ recipe_of() {
 }
 
 @test "test-run refuses, exits non-zero, and names both gates" {
-    run make test-run
+    run scratch_make test-run
     [ "$status" -eq 2 ]
     contains "unit-sweep" "$output"
     contains "full-test-run" "$output"

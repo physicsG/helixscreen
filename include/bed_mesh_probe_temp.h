@@ -7,7 +7,7 @@ namespace helix {
 namespace bed_mesh {
 
 /// Bed temperature a mesh is probed at when nothing else chooses one.
-inline constexpr int DEFAULT_PROBE_BED_TEMP_C = 60;
+inline constexpr int kDefaultProbeBedTempC = 60;
 
 /**
  * @brief The bed temperature, in whole degrees C, to probe a mesh at.
@@ -23,8 +23,8 @@ inline constexpr int DEFAULT_PROBE_BED_TEMP_C = 60;
  */
 [[nodiscard]] inline constexpr int probe_bed_temp_c(int target_deci, int current_deci) {
     const int target_c = target_deci / 10;
-    const int wanted_c = target_c > 0 ? target_c : DEFAULT_PROBE_BED_TEMP_C;
-    if (current_deci <= DEFAULT_PROBE_BED_TEMP_C * 10) {
+    const int wanted_c = target_c > 0 ? target_c : kDefaultProbeBedTempC;
+    if (current_deci <= kDefaultProbeBedTempC * 10) {
         return wanted_c;
     }
     const int current_c = current_deci / 10;

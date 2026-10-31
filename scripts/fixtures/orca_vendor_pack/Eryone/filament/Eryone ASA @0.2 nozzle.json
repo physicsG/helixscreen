@@ -1,0 +1,9 @@
+{
+    "type": "filament",
+    "name": "Eryone ASA @0.2 nozzle",
+    "inherits": "Eryone ASA",
+    "instantiation": "true",
+    "nozzle_temperature": [
+        "250"
+    ]
+}

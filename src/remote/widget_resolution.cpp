@@ -4,6 +4,7 @@
 #include "widget_resolution.h"
 
 #include "lvgl.h"
+#include "lvgl/src/misc/lv_area_private.h" // lv_area_intersect
 
 // lv_event_dsc_t's filter is not exposed by the public API, and
 // has_own_click_handler() needs it to tell a click target from scaffolding.
@@ -20,7 +21,7 @@ bool is_value_control(lv_obj_t* o) {
            lv_obj_check_type(o, &lv_dropdown_class) || lv_obj_check_type(o, &lv_textarea_class);
 }
 
-bool has_own_click_handler(lv_obj_t* o) {
+bool has_own_click_handler(lv_obj_t* o, lv_event_cb_t cb) {
     if (!o) {
         return false;
     }
@@ -34,8 +35,24 @@ bool has_own_click_handler(lv_obj_t* o) {
             continue;
         }
         uint32_t filter = dsc->filter & ~(LV_EVENT_PREPROCESS | LV_EVENT_MARKED_DELETING);
-        if (filter == LV_EVENT_ALL || filter == LV_EVENT_CLICKED) {
+        if ((filter == LV_EVENT_ALL || filter == LV_EVENT_CLICKED ||
+             filter == LV_EVENT_SHORT_CLICKED) &&
+            (cb == nullptr || lv_event_dsc_get_cb(dsc) == cb)) {
             return true;
+        }
+    }
+    return false;
+}
+
+bool tap_reaches_handler(lv_obj_t* o) {
+    // A tap's events bubble from the pressed object up through every ancestor
+    // it reaches by EVENT_BUBBLE, so a handler anywhere on that chain answers it.
+    for (lv_obj_t* cur = o; cur; cur = lv_obj_get_parent(cur)) {
+        if (has_own_click_handler(cur)) {
+            return true;
+        }
+        if (!lv_obj_has_flag(cur, LV_OBJ_FLAG_EVENT_BUBBLE)) {
+            break;
         }
     }
     return false;
@@ -400,16 +417,23 @@ lv_obj_t* topmost_visible(const std::vector<lv_obj_t*>& matches) {
     return best;
 }
 
-const char* click_blocker(lv_obj_t* obj) {
-    if (obj == nullptr) {
-        return "not found";
-    }
+lv_obj_t* hidden_ancestor(lv_obj_t* obj) {
     // Hidden is inherited: an object inside a hidden parent is not drawn and
     // never hit-tested, however unhidden it is itself.
     for (lv_obj_t* o = obj; o != nullptr; o = lv_obj_get_parent(o)) {
         if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) {
-            return "hidden";
+            return o;
         }
+    }
+    return nullptr;
+}
+
+const char* click_blocker(lv_obj_t* obj) {
+    if (obj == nullptr) {
+        return "not found";
+    }
+    if (hidden_ancestor(obj) != nullptr) {
+        return "hidden";
     }
     if (!lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICKABLE)) {
         return "not clickable";
@@ -420,6 +444,66 @@ const char* click_blocker(lv_obj_t* obj) {
         return "disabled";
     }
     return nullptr;
+}
+
+namespace {
+
+bool axis_shows(int32_t lo, int32_t hi, int32_t view_lo, int32_t view_hi) {
+    if (hi - lo <= view_hi - view_lo) {
+        return lo >= view_lo && hi <= view_hi;
+    }
+    return lo <= view_hi && hi >= view_lo;
+}
+
+} // namespace
+
+lv_obj_t* view_clipper(lv_obj_t* obj) {
+    if (obj == nullptr) {
+        return nullptr;
+    }
+    if (lv_obj_t* hidden = hidden_ancestor(obj)) {
+        return hidden;
+    }
+    // Only the loaded screen and the layers drawn over it are on the display.
+    lv_obj_t* screen = lv_obj_get_screen(obj);
+    if (screen != lv_screen_active() && screen != lv_layer_top() && screen != lv_layer_sys()) {
+        return screen;
+    }
+    lv_obj_update_layout(obj);
+    lv_area_t box;
+    lv_obj_get_coords(obj, &box);
+    lv_area_t view{};
+    bool clipped = false;
+    for (lv_obj_t* a = lv_obj_get_parent(obj); a != nullptr; a = lv_obj_get_parent(a)) {
+        if (lv_obj_has_flag(a, LV_OBJ_FLAG_OVERFLOW_VISIBLE)) {
+            continue;
+        }
+        // What shows is the intersection of every clipping box on the way up.
+        lv_area_t own;
+        lv_obj_get_coords(a, &own);
+        if (!clipped) {
+            view = own;
+            clipped = true;
+        } else if (!lv_area_intersect(&view, &view, &own)) {
+            return a;
+        }
+        if (lv_area_get_width(&view) <= 0 || lv_area_get_height(&view) <= 0) {
+            return a;
+        }
+        if (!axis_shows(box.x1, box.x2, view.x1, view.x2) ||
+            !axis_shows(box.y1, box.y2, view.y1, view.y2)) {
+            return a;
+        }
+    }
+    return nullptr;
+}
+
+lv_obj_t* scroll_into_view(lv_obj_t* obj) {
+    if (obj == nullptr) {
+        return nullptr;
+    }
+    lv_obj_scroll_to_view_recursive(obj, LV_ANIM_OFF);
+    return view_clipper(obj);
 }
 
 } // namespace helix

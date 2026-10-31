@@ -344,7 +344,7 @@ TEST_CASE_METHOD(PerfOverlayFixture, "PerformanceOverlay registers with the nav 
 
     // panel_stack_[0] must hold a root panel — overlay code reads panel_stack_.back()
     // to find what sits beneath it.
-    std::array<lv_obj_t*, static_cast<size_t>(UI_PANEL_COUNT)> panels{};
+    std::array<lv_obj_t*, static_cast<size_t>(kUiPanelCount)> panels{};
     for (auto& p : panels) {
         p = lv_obj_create(lv_screen_active());
     }

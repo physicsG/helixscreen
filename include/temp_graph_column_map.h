@@ -29,7 +29,7 @@ namespace helix::temp_graph {
 /// A column the renderer does not fill (no data, or the curve at/below the
 /// floor). Distinct from any real row so a signature can hash it as its own
 /// value - a column appearing or disappearing must change the hash.
-inline constexpr int32_t COLUMN_NOT_DRAWN = INT32_MIN;
+inline constexpr int32_t kColumnNotDrawn = INT32_MIN;
 
 /// Fractional point index for pixel column @p x, in 8.8 fixed point.
 /// Mirrors the renderer: columns (not segments) are walked so each pixel column
@@ -46,7 +46,7 @@ inline void column_to_point(int32_t x, int32_t cw, int32_t pc, int32_t& idx, int
 }
 
 /**
- * @brief Top row of the fill for one column, or COLUMN_NOT_DRAWN.
+ * @brief Top row of the fill for one column, or kColumnNotDrawn.
  *
  * @param v0,v1   Chart values bracketing the column (raw, may be
  *                LV_CHART_POINT_NONE)
@@ -59,7 +59,7 @@ inline int32_t column_series_y(int32_t v0, int32_t v1, int32_t frac, int32_t y_m
     const int32_t floor_y = ch;
 
     if (v0 == LV_CHART_POINT_NONE && v1 == LV_CHART_POINT_NONE) {
-        return COLUMN_NOT_DRAWN;
+        return kColumnNotDrawn;
     }
     if (v0 == LV_CHART_POINT_NONE) {
         v0 = v1;
@@ -77,7 +77,7 @@ inline int32_t column_series_y(int32_t v0, int32_t v1, int32_t frac, int32_t y_m
     }
     // At or below the floor there is no column left to fill.
     if (series_y >= floor_y) {
-        return COLUMN_NOT_DRAWN;
+        return kColumnNotDrawn;
     }
     return series_y;
 }

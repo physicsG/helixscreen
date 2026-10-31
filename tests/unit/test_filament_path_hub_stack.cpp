@@ -25,8 +25,8 @@ using namespace helix::ui::fpath;
 
 namespace {
 
-constexpr int32_t CANVAS_W = 420;
-constexpr int32_t CANVAS_H = 420;
+constexpr int32_t kCanvasW = 420;
+constexpr int32_t kCanvasH = 420;
 
 struct HubCanvas {
     lv_obj_t* obj = nullptr;
@@ -39,7 +39,7 @@ class HubStackFixture : public LVGLTestFixture {
         HubCanvas c;
         c.obj = ui_filament_path_canvas_create(test_screen());
         REQUIRE(c.obj != nullptr);
-        lv_obj_set_size(c.obj, CANVAS_W, CANVAS_H);
+        lv_obj_set_size(c.obj, kCanvasW, kCanvasH);
         ui_filament_path_canvas_set_topology(c.obj, 1);
         ui_filament_path_canvas_set_slot_count(c.obj, slots);
         ui_filament_path_canvas_set_slot_width(c.obj, 80);
@@ -106,7 +106,7 @@ float inlet_y(const HubCanvas& c) {
 const PathPlan& plan_of(const HubCanvas& c, LinearHubFrame* frame_out) {
     static PathPlan plan;
     const BaseGeometry g = compute_base_geometry(c.obj, c.data);
-    const int32_t nozzle_y = g.y_off + (int32_t)(g.height * NOZZLE_Y_RATIO);
+    const int32_t nozzle_y = g.y_off + (int32_t)(g.height * kNozzleYRatio);
     *frame_out = compute_linear_hub_frame(*c.data, g,
                                           toolhead_top_y(nozzle_y, c.data->theme.extruder_scale));
     plan_linear_hub(*frame_out, *c.data, g, plan);
@@ -205,7 +205,7 @@ TEST_CASE_METHOD(HubStackFixture,
         render(c);
         REQUIRE(c.data->hits.hub_valid);
         REQUIRE(c.data->hits.buffer_valid);
-        CHECK(center_y(c.data->hits.hub) > ratio_y(c, HUB_Y_RATIO));
+        CHECK(center_y(c.data->hits.hub) > ratio_y(c, kHubYRatio));
         CHECK(c.data->hits.hub.y2 < c.data->hits.buffer.y1);
         const int32_t gap = (c.data->hits.hub.y2 - c.data->hits.hub.y1) / 2;
         const int32_t glyph_top =
@@ -222,7 +222,7 @@ TEST_CASE_METHOD(HubStackFixture,
         load(c, static_cast<int>(helix::PathSegment::NOZZLE));
         render(c);
         REQUIRE(c.data->hits.hub_valid);
-        CHECK(center_y(c.data->hits.hub) > ratio_y(c, HUB_Y_RATIO));
+        CHECK(center_y(c.data->hits.hub) > ratio_y(c, kHubYRatio));
         const int32_t glyph_top =
             toolhead_top_y(c.data->path_cache.nozzle_y, c.data->theme.extruder_scale);
         CHECK(c.data->hits.hub.y2 < glyph_top);
@@ -239,8 +239,8 @@ TEST_CASE_METHOD(HubStackFixture,
     const auto& route = c.data->path_cache.path;
     // The on-toolhead hub's bottom edge (its output Y) sits one stub above the
     // toolhead sensor row.
-    const int32_t stub = std::max<int32_t>(10, static_cast<int32_t>(CANVAS_H * 0.03f));
-    const int32_t output_y = ratio_y(c, TOOLHEAD_Y_RATIO) - stub;
+    const int32_t stub = std::max<int32_t>(10, static_cast<int32_t>(kCanvasH * 0.03f));
+    const int32_t output_y = ratio_y(c, kToolheadYRatio) - stub;
     const int run = segment_starting_at(route, (float)output_y);
     // No output sensor dot sits under an on-toolhead hub: the tube leaves the
     // hub's bottom edge and runs into the glyph's inlet.
@@ -257,8 +257,8 @@ TEST_CASE_METHOD(HubStackFixture, "HUB with the bypass shown keeps the ratio lay
     render(c);
     REQUIRE(c.data->hits.hub_valid);
     REQUIRE(c.data->hits.buffer_valid);
-    CHECK(center_y(c.data->hits.hub) == Catch::Approx(ratio_y(c, HUB_Y_RATIO)).margin(1));
-    CHECK(center_y(c.data->hits.buffer) == Catch::Approx(ratio_y(c, BUFFER_Y_RATIO)).margin(1));
+    CHECK(center_y(c.data->hits.hub) == Catch::Approx(ratio_y(c, kHubYRatio)).margin(1));
+    CHECK(center_y(c.data->hits.buffer) == Catch::Approx(ratio_y(c, kBufferYRatio)).margin(1));
 }
 
 TEST_CASE_METHOD(HubStackFixture, "LINEAR never stacks its selector or buffer",
@@ -271,27 +271,27 @@ TEST_CASE_METHOD(HubStackFixture, "LINEAR never stacks its selector or buffer",
     REQUIRE(c.data->hits.buffer_valid);
     // The selector butts against the prep sensors; the buffer keeps its ratio.
     const int32_t hub_h = c.data->hits.hub.y2 - c.data->hits.hub.y1;
-    CHECK(center_y(c.data->hits.hub) ==
-          Catch::Approx(ratio_y(c, PREP_Y_RATIO) + c.data->theme.sensor_radius + hub_h / 2)
-              .margin(1));
-    CHECK(center_y(c.data->hits.buffer) == Catch::Approx(ratio_y(c, BUFFER_Y_RATIO)).margin(1));
+    CHECK(
+        center_y(c.data->hits.hub) ==
+        Catch::Approx(ratio_y(c, kPrepYRatio) + c.data->theme.sensor_radius + hub_h / 2).margin(1));
+    CHECK(center_y(c.data->hits.buffer) == Catch::Approx(ratio_y(c, kBufferYRatio)).margin(1));
 }
 
 TEST_CASE_METHOD(HubStackFixture, "HUB on a canvas too short to stack keeps the ratio layout",
                  "[filament-path][hub-stack]") {
     auto c = make(false, false);
-    lv_obj_set_size(c.obj, CANVAS_W, 100);
+    lv_obj_set_size(c.obj, kCanvasW, 100);
     load(c, static_cast<int>(helix::PathSegment::NOZZLE));
     render(c);
     REQUIRE(c.data->hits.hub_valid);
 
     // Stacked, the hub would sit above its ratio position: the stack only moves it down.
-    const int32_t hub_h = (int32_t)(100 * HUB_HEIGHT_RATIO);
+    const int32_t hub_h = (int32_t)(100 * kHubHeightRatio);
     const int32_t gap = hub_h / 2 + 2 * c.data->theme.sensor_radius;
     const int32_t glyph_top =
-        toolhead_top_y(ratio_y(c, NOZZLE_Y_RATIO), c.data->theme.extruder_scale);
-    REQUIRE(glyph_top - 2 * gap - hub_h / 2 <= ratio_y(c, HUB_Y_RATIO));
-    CHECK(center_y(c.data->hits.hub) == Catch::Approx(ratio_y(c, HUB_Y_RATIO)).margin(1));
+        toolhead_top_y(ratio_y(c, kNozzleYRatio), c.data->theme.extruder_scale);
+    REQUIRE(glyph_top - 2 * gap - hub_h / 2 <= ratio_y(c, kHubYRatio));
+    CHECK(center_y(c.data->hits.hub) == Catch::Approx(ratio_y(c, kHubYRatio)).margin(1));
 }
 
 // Each expected top restates its renderer's top edge in src/rendering/nozzle_renderer_*.cpp

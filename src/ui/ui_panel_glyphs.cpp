@@ -28,7 +28,7 @@ extern lv_font_t mdi_icons_48;
  * @brief Create a single icon display item
  *
  * @param parent Parent container for the item
- * @param icon Icon mapping from helix::ui::icon::ICON_MAP
+ * @param icon Icon mapping from helix::ui::icon::kIconMap
  * @return lv_obj_t* The created item container
  */
 static lv_obj_t* create_icon_item(lv_obj_t* parent, const helix::ui::icon::IconMapping& icon) {
@@ -113,7 +113,7 @@ void GlyphsPanel::populate_glyphs() {
     lv_obj_t* count_label = helix::ui::find_required(panel_, "glyph_count_label", get_name());
     if (count_label) {
         char count_text[32];
-        snprintf(count_text, sizeof(count_text), "%zu icons", helix::ui::icon::ICON_MAP_SIZE);
+        snprintf(count_text, sizeof(count_text), "%zu icons", helix::ui::icon::kIconMapSize);
         lv_label_set_text(count_label, count_text);
     }
 
@@ -133,16 +133,16 @@ void GlyphsPanel::populate_glyphs() {
 
     // Add all MDI icon items to the content area
     spdlog::debug("[{}] Adding {} MDI icon items to content area", get_name(),
-                  helix::ui::icon::ICON_MAP_SIZE);
-    for (size_t i = 0; i < helix::ui::icon::ICON_MAP_SIZE; i++) {
-        create_icon_item(content_area, helix::ui::icon::ICON_MAP[i]);
+                  helix::ui::icon::kIconMapSize);
+    for (size_t i = 0; i < helix::ui::icon::kIconMapSize; i++) {
+        create_icon_item(content_area, helix::ui::icon::kIconMap[i]);
     }
 
     // Force layout update to ensure scrolling works correctly
     lv_obj_update_layout(panel_);
 
     spdlog::info("[{}] Setup complete with {} MDI icons", get_name(),
-                 helix::ui::icon::ICON_MAP_SIZE);
+                 helix::ui::icon::kIconMapSize);
 }
 
 // ============================================================================

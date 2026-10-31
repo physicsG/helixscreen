@@ -33,6 +33,9 @@ struct PrintSelectButtonInputs {
     bool print_start_committed = false;
     /// True while macro analysis of the shown file is still running.
     bool macro_analysis_running = false;
+    /// True while the shown file's operations scan is still reading and an
+    /// option as set needs it (a step turned off, a START_PRINT rewrite).
+    bool file_check_pending = false;
     /// True when Moonraker's server.info lists the job_queue component.
     bool job_queue_available = false;
     /// True while an add_job request is on the wire: the button disables for
@@ -49,7 +52,8 @@ struct PrintSelectButtonInputs {
 /// Print, because the option rows that get saved are not settled yet. An
 /// in-flight add outranks all of it: the button reads as a disabled Queue
 /// for the flight, whatever the machine is doing, because the pending
-/// operation is a queue add.
+/// operation is a queue add. A pending file check holds a direct Print only:
+/// a queue add starts nothing.
 PrintSelectButtonView compute_print_select_button_view(const PrintSelectButtonInputs& in);
 
 } // namespace helix::ui

@@ -21,7 +21,7 @@
 #include "active_material_provider.h"
 #include "ams_types.h"
 #include "filament_database.h"
-#include "filament_op_dispatch.h" // EXTERNAL_SPOOL_SLOT — the bypass sentinel both headers key on
+#include "filament_op_dispatch.h" // kExternalSpoolSlot / kActiveHeadSlot, the sentinels both headers key on
 #include "print_lifecycle_state.h"
 
 #include <algorithm>
@@ -44,22 +44,33 @@ namespace helix::ui {
  *        index. Using the tool index there collapses to slot 0 and wrongly greys
  *        Unload while another lane is loaded (prestonbrown/helixscreen#1065).
  *
- * @param sys           Backend system info (tool_to_slot_map, current_slot).
- * @param selected_tool Dropdown/active tool index (>= 0).
- * @param tool_count    Number of tools the printer exposes (>1 == toolchanger).
+ * An unaccounted toolhead (filament at the nozzle that no lane claims) resolves
+ * to kActiveHeadSlot before the map is consulted: the selected tool's lane is
+ * not what is in the nozzle, and the AD5X IFS module publishes four virtual
+ * tools with an identity map, so a dropdown that always names a tool would
+ * otherwise never reach the active head (prestonbrown/helixscreen#1324).
+ *
+ * @param sys                  Backend system info (tool_to_slot_map, current_slot).
+ * @param selected_tool        Dropdown/active tool index (>= 0).
+ * @param tool_count           Number of tools the printer exposes (>1 == toolchanger).
+ * @param toolhead_unaccounted The backend's confident toolhead_filament_unaccounted().
  * @return Global slot index whose load-state gates the buttons,
- *         EXTERNAL_SPOOL_SLOT when bypass is engaged, or -1 if none.
+ *         kExternalSpoolSlot when bypass is engaged, kActiveHeadSlot for an
+ *         unaccounted toolhead, or -1 if none.
  */
 [[nodiscard]] inline int resolve_op_button_slot(const AmsSystemInfo& sys, int selected_tool,
-                                                int tool_count) {
+                                                int tool_count, bool toolhead_unaccounted = false) {
     // Bypass is not a lane, so no tool->slot map entry can describe it. While
     // the external spool feeds the toolhead it IS what these buttons act on:
     // CFS publishes a tool->slot map from the box's own `map` (identity fallback
     // on the flat dialect), so resolving through it here handed back lane 0 and
     // gated Unload on an empty bay with filament plainly in the nozzle. AFC and
     // Happy Hare land on the same sentinel from bypass_state / the selector.
-    if (sys.current_slot == EXTERNAL_SPOOL_SLOT) {
-        return EXTERNAL_SPOOL_SLOT;
+    if (sys.current_slot == kExternalSpoolSlot) {
+        return kExternalSpoolSlot;
+    }
+    if (toolhead_unaccounted) {
+        return kActiveHeadSlot;
     }
 
     int slot = -1;
@@ -123,6 +134,10 @@ struct OpButtonState {
     /// affordance and AmsSubscriptionBackend::refuse_if_printing() cannot drift.
     bool print_blocks_op = false;
 
+    /// Load feeds filament into a head the machine already shows as loaded
+    /// (AmsBackend::load_feeds_filament()), so "loaded" does not refuse it.
+    bool load_feeds_filament = false;
+
     /// This surface's Unload button runs a COLD lane op (Eject / Recover) rather
     /// than a heated toolhead unload. Deliberate asymmetry, not an oversight:
     /// #995 / #1199 keep the cold lane ops reachable mid-print because they move
@@ -171,8 +186,8 @@ using helix::print_blocks_filament_op;
  */
 [[nodiscard]] inline OpButtonGating compute_op_button_gating(const OpButtonState& s) {
     const bool nothing_to_feed = s.slot_has_filament.has_value() && !*s.slot_has_filament;
-    return {/*load_disabled=*/s.system_busy || s.print_blocks_op || s.slot_is_loaded ||
-                nothing_to_feed,
+    return {/*load_disabled=*/s.system_busy || s.print_blocks_op ||
+                (s.slot_is_loaded && !s.load_feeds_filament) || nothing_to_feed,
             /*unload_disabled=*/s.system_busy || !s.unload_available ||
                 (s.print_blocks_op && !s.unload_is_cold_lane_op),
             /*purge_disabled=*/s.system_busy || s.print_blocks_op};
@@ -308,7 +323,7 @@ struct MachineOpGating {
  *    through a heated toolhead; it is not one of the cold lane ops (#995/#1199)
  *    that stay reachable mid-print.
  *
- * @param bypass_loaded      read_unload_target_loaded() for EXTERNAL_SPOOL_SLOT.
+ * @param bypass_loaded      read_unload_target_loaded() for kExternalSpoolSlot.
  * @param system_busy        AmsSystemInfo::is_busy(); false with no backend.
  * @param lifecycle          The derived PrintState.
  * @param backend_self_homes AmsBackend::filament_ops_self_home(); false with none.
@@ -384,7 +399,7 @@ struct PreheatTarget {
  *   1. The slot the load actually targets. An AMS lane the user picked is the
  *      filament about to pass through the melt zone; nothing outranks it.
  *   2. The external / bypass spool, but ONLY when the load has no AMS lane of
- *      its own (@p target_slot == EXTERNAL_SPOOL_SLOT, or nothing resolved, or
+ *      its own (@p target_slot == kExternalSpoolSlot, or nothing resolved, or
  *      the lane names no material). On an external-spool-only printer this is
  *      the one filament there is.
  *
@@ -401,7 +416,7 @@ struct PreheatTarget {
  * now" and is correct for its callers. This answers "what is about to go in",
  * where the target slot — not the active one — is the authority.
  *
- * @param target_slot       Slot the load targets; EXTERNAL_SPOOL_SLOT for bypass,
+ * @param target_slot       Slot the load targets; kExternalSpoolSlot for bypass,
  *                          < 0 for "none resolved".
  * @param target_slot_info  SlotInfo for @p target_slot, or nullptr when there is
  *                          no backend / no such slot.
@@ -437,7 +452,7 @@ resolve_load_preheat_material(int target_slot, const SlotInfo* target_slot_info,
     };
 
     // The bypass row IS the external spool — never look at an AMS lane for it.
-    if (target_slot == EXTERNAL_SPOOL_SLOT) {
+    if (target_slot == kExternalSpoolSlot) {
         return external_spool ? from(*external_spool) : std::nullopt;
     }
 

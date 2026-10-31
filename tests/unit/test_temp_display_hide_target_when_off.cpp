@@ -32,8 +32,8 @@ namespace {
 // ui_temp_display_create_cb() creates its labels in a fixed order:
 // current (0), separator (1), target (2), unit (3). Indices 1 and 2 exist only
 // when show_target is enabled at all.
-constexpr int SEPARATOR_CHILD = 1;
-constexpr int TARGET_CHILD = 2;
+constexpr int kSeparatorChild = 1;
+constexpr int kTargetChild = 2;
 
 lv_obj_t* create_display(lv_obj_t* parent, const char* show_target, const char* hide_when_off) {
     const char* attrs[] = {"bind_current",         "extruder_temp", "bind_target",
@@ -43,8 +43,8 @@ lv_obj_t* create_display(lv_obj_t* parent, const char* show_target, const char* 
 }
 
 bool target_portion_hidden(lv_obj_t* display) {
-    lv_obj_t* separator = lv_obj_get_child(display, SEPARATOR_CHILD);
-    lv_obj_t* target = lv_obj_get_child(display, TARGET_CHILD);
+    lv_obj_t* separator = lv_obj_get_child(display, kSeparatorChild);
+    lv_obj_t* target = lv_obj_get_child(display, kTargetChild);
     REQUIRE(separator != nullptr);
     REQUIRE(target != nullptr);
     bool sep_hidden = lv_obj_has_flag(separator, LV_OBJ_FLAG_HIDDEN);

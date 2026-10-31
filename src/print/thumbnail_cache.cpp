@@ -13,6 +13,7 @@
 #include "system/crash_handler.h"
 #include "system/helix_paths.h"
 #include "text_io.h"
+#include "three_mf_reader.h"
 #include "thumbnail_rules.h"
 
 #include <spdlog/spdlog.h>
@@ -40,15 +41,15 @@ static size_t calculate_dynamic_max_size(const std::string& cache_dir, size_t co
     if (!space) {
         spdlog::warn("[ThumbnailCache] Failed to query disk space: {}, using minimum",
                      std::strerror(errno));
-        return ThumbnailCache::MIN_CACHE_SIZE;
+        return ThumbnailCache::kMinCacheSize;
     }
     size_t available = static_cast<size_t>(*space);
 
     // Use 5% of available space
-    size_t dynamic_size = static_cast<size_t>(available * ThumbnailCache::DEFAULT_DISK_PERCENT);
+    size_t dynamic_size = static_cast<size_t>(available * ThumbnailCache::kDefaultDiskPercent);
 
     // Clamp to min/configured_max bounds
-    size_t clamped = std::clamp(dynamic_size, ThumbnailCache::MIN_CACHE_SIZE, configured_max);
+    size_t clamped = std::clamp(dynamic_size, ThumbnailCache::kMinCacheSize, configured_max);
 
     spdlog::debug("[ThumbnailCache] Available disk: {} MB, cache limit: {} MB (max: {} MB)",
                   available / (1024 * 1024), clamped / (1024 * 1024),
@@ -71,7 +72,7 @@ std::string ThumbnailCache::determine_cache_dir() {
     Config* config = Config::get_instance();
     std::string config_dir = config->get<std::string>("/cache/directory", "");
     if (!config_dir.empty()) {
-        std::string full_path = config_dir + "/" + CACHE_SUBDIR;
+        std::string full_path = config_dir + "/" + kCacheSubdir;
         if (try_create_cache_dir(full_path)) {
             spdlog::info("[ThumbnailCache] Using configured cache directory: {}", full_path);
             return full_path;
@@ -80,13 +81,13 @@ std::string ThumbnailCache::determine_cache_dir() {
     }
 
     // 2. Fall through to centralized cache resolution chain
-    return get_helix_cache_dir(CACHE_SUBDIR);
+    return get_helix_cache_dir(kCacheSubdir);
 }
 
 ThumbnailCache::ThumbnailCache()
-    : cache_dir_(determine_cache_dir()), max_size_(MIN_CACHE_SIZE),
-      disk_critical_(DEFAULT_DISK_CRITICAL), disk_low_(DEFAULT_DISK_LOW),
-      configured_max_(DEFAULT_MAX_CACHE_SIZE) {
+    : cache_dir_(determine_cache_dir()), max_size_(kMinCacheSize),
+      disk_critical_(kDefaultDiskCritical), disk_low_(kDefaultDiskLow),
+      configured_max_(kDefaultMaxCacheSize) {
     ensure_cache_dir();
     load_config();
     // Now that directory exists and config is loaded, calculate dynamic size
@@ -95,7 +96,7 @@ ThumbnailCache::ThumbnailCache()
     // HELIX_THUMB_CACHE_MAX_MB — force a hard cache ceiling for testing.
     //
     // Applied AFTER the dynamic sizing and deliberately not through it:
-    // calculate_dynamic_max_size() clamps its result up to MIN_CACHE_SIZE
+    // calculate_dynamic_max_size() clamps its result up to kMinCacheSize
     // (5 MB), so feeding a small value in through configured_max_ gets raised
     // straight back and eviction still never fires. Making eviction reachable
     // is the entire point here — without it the decode-vs-evict interaction
@@ -112,7 +113,7 @@ ThumbnailCache::ThumbnailCache()
             max_size_ = configured_max_;
             spdlog::info("[ThumbnailCache] HELIX_THUMB_CACHE_MAX_MB={} — cache ceiling forced "
                          "to {} MB (dynamic sizing and the {} MB floor bypassed)",
-                         mb, mb, MIN_CACHE_SIZE / (1024 * 1024));
+                         mb, mb, kMinCacheSize / (1024 * 1024));
         } else {
             spdlog::warn("[ThumbnailCache] HELIX_THUMB_CACHE_MAX_MB='{}' is not a positive "
                          "integer — ignoring",
@@ -129,8 +130,8 @@ ThumbnailCache::ThumbnailCache()
 }
 
 ThumbnailCache::ThumbnailCache(size_t max_size)
-    : cache_dir_(determine_cache_dir()), max_size_(max_size), disk_critical_(DEFAULT_DISK_CRITICAL),
-      disk_low_(DEFAULT_DISK_LOW), configured_max_(max_size) {
+    : cache_dir_(determine_cache_dir()), max_size_(max_size), disk_critical_(kDefaultDiskCritical),
+      disk_low_(kDefaultDiskLow), configured_max_(max_size) {
     ensure_cache_dir();
     spdlog::debug("[ThumbnailCache] Using explicit max size: {} MB", max_size_ / (1024 * 1024));
 
@@ -152,11 +153,11 @@ void ThumbnailCache::load_config() {
 
     // Read cache settings from config (values are in MB, convert to bytes)
     int max_mb = config->get<int>("/cache/thumbnail_max_mb",
-                                  static_cast<int>(DEFAULT_MAX_CACHE_SIZE / (1024 * 1024)));
+                                  static_cast<int>(kDefaultMaxCacheSize / (1024 * 1024)));
     int critical_mb = config->get<int>("/cache/disk_critical_mb",
-                                       static_cast<int>(DEFAULT_DISK_CRITICAL / (1024 * 1024)));
+                                       static_cast<int>(kDefaultDiskCritical / (1024 * 1024)));
     int low_mb =
-        config->get<int>("/cache/disk_low_mb", static_cast<int>(DEFAULT_DISK_LOW / (1024 * 1024)));
+        config->get<int>("/cache/disk_low_mb", static_cast<int>(kDefaultDiskLow / (1024 * 1024)));
 
     // Convert to bytes and store
     configured_max_ = static_cast<size_t>(max_mb) * 1024 * 1024;
@@ -177,6 +178,16 @@ void ThumbnailCache::load_config() {
 
 std::string ThumbnailCache::get_cache_path(const std::string& cache_id) const {
     return cache_dir_ + "/" + thumbnail_file_name(thumbnail_hash(cache_id), nullptr);
+}
+
+std::string ThumbnailCache::peek(const std::string& cache_id,
+                                 const helix::ThumbnailTarget& target) const {
+    std::string bin = helix::ThumbnailProcessor::instance().get_if_processed(cache_id, target);
+    if (!bin.empty()) {
+        return bin;
+    }
+    const std::string png = get_cache_path(cache_id);
+    return helix::fs::exists(png) ? to_lvgl_path(png) : std::string();
 }
 
 bool ThumbnailCache::is_lvgl_path(const std::string& path) {
@@ -249,7 +260,7 @@ std::optional<size_t> ThumbnailCache::probe_disk_space() const {
     // reached twice per fetch_optimized() — once via is_caching_allowed() and
     // once inside evict_locked() — on the main thread while a file listing
     // populates. Free space does not move fast enough to justify probing it per
-    // thumbnail; DISK_PROBE_INTERVAL_MS bounds how stale the answer can be.
+    // thumbnail; kDiskProbeIntervalMs bounds how stale the answer can be.
     const auto now = std::chrono::steady_clock::now();
 
     {
@@ -257,7 +268,7 @@ std::optional<size_t> ThumbnailCache::probe_disk_space() const {
         if (disk_probe_valid_) {
             const auto age =
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - last_disk_probe_);
-            if (age.count() < DISK_PROBE_INTERVAL_MS) {
+            if (age.count() < kDiskProbeIntervalMs) {
                 return cached_available_bytes_;
             }
         }
@@ -324,7 +335,7 @@ std::vector<ThumbnailCache::CacheEntry> ThumbnailCache::scan_locked(size_t* tota
         return entries;
     }
 
-    constexpr std::int64_t STALE_STAGING_NS = 10LL * 60 * 1000 * 1000 * 1000;
+    constexpr std::int64_t kStaleStagingNs = 10LL * 60 * 1000 * 1000 * 1000;
     const std::int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count();
@@ -350,9 +361,9 @@ std::vector<ThumbnailCache::CacheEntry> ThumbnailCache::scan_locked(size_t* tota
 
         // Staging files (text_io::write_file_atomic, write_lvgl_bin) are writes
         // in flight or debris from a crash mid-write: never cached content.
-        // Debris past STALE_STAGING_NS no writer can still own.
+        // Debris past kStaleStagingNs no writer can still own.
         if (path.size() > 4 && path.compare(path.size() - 4, 4, ".tmp") == 0) {
-            if (now_ns - *mtime > STALE_STAGING_NS && helix::fs::remove(path)) {
+            if (now_ns - *mtime > kStaleStagingNs && helix::fs::remove(path)) {
                 spdlog::debug("[ThumbnailCache] Removed stale staging file {}", path);
             }
             continue;
@@ -475,7 +486,7 @@ void ThumbnailCache::refresh_index_locked() const {
         return;
     }
 
-    if (++checks_since_scan_ >= INDEX_RECONCILE_INTERVAL) {
+    if (++checks_since_scan_ >= kIndexReconcileInterval) {
         rescan_locked();
         return;
     }
@@ -513,7 +524,7 @@ void ThumbnailCache::evict_locked() {
     // save_raw_png(), whether or not anything was evicted
     // (prestonbrown/helixscreen#1207). It is now arithmetic over an index kept
     // current by the write sites, plus a reconcile every
-    // INDEX_RECONCILE_INTERVAL checks.
+    // kIndexReconcileInterval checks.
     refresh_index_locked();
     size_t current_size = index_total_;
 
@@ -1256,6 +1267,44 @@ std::string ThumbnailCache::get_if_cached(const ThumbnailRequest& req) const {
     return get_if_optimized(cache_id, req.target, req.source_modified);
 }
 
+namespace {
+
+/// @p on_error, run on the main thread whichever thread reports.
+helix::SharedCallback<void(const std::string&)>
+main_thread_error(const char* tag, ThumbnailCache::ErrorCallback on_error) {
+    return [tag, on_error](const std::string& message) {
+        helix::ui::queue_update(tag, [on_error, message]() { // QUEUE_TAG_OK: callers pass literals
+            if (on_error) {
+                on_error(message);
+            }
+        });
+    };
+}
+
+/// Caches @p png extracted from a file as (@p source, @p id) and feeds it
+/// through the prescale pipeline. HttpExecutor worker; fetch marshals the
+/// callbacks to the main thread and drops a superseded load via @p ctx.
+void cache_extracted_png(ThumbnailSource source, const std::string& id,
+                         const std::vector<uint8_t>& png, time_t source_modified,
+                         IMoonrakerAPI* api, const helix::ThumbnailTarget& target,
+                         ThumbnailLoadContext ctx, ThumbnailCache::SuccessCallback on_success,
+                         const helix::SharedCallback<void(const std::string&)>& report_error) {
+    if (get_thumbnail_cache().save_raw_png(source, id, png).empty()) {
+        spdlog::warn("[ThumbnailCache] Failed to cache extracted thumbnail for {}", id);
+        report_error("failed to cache extracted thumbnail for " + id);
+        return;
+    }
+    ThumbnailRequest req;
+    req.key = id;
+    req.source = source;
+    req.target = target;
+    req.source_modified = source_modified;
+    req.api = api;
+    get_thumbnail_cache().fetch(req, ctx, std::move(on_success), report_error);
+}
+
+} // namespace
+
 void helix::fetch_thumbnail_from_gcode(const std::string& gcode_path, size_t max_header_bytes,
                                        IMoonrakerAPI* api, const helix::ThumbnailTarget& target,
                                        ThumbnailLoadContext ctx,
@@ -1265,14 +1314,8 @@ void helix::fetch_thumbnail_from_gcode(const std::string& gcode_path, size_t max
     // the fetch below are marshalled by the cache. Route everything through
     // the queue so @p on_error always runs on the main thread (the same
     // reason ThumbnailCache wraps its own callbacks — #960, #1202).
-    auto report_error = [on_error](const std::string& message) {
-        helix::ui::queue_update("thumbnail_cache::fetch_thumbnail_from_gcode",
-                                [on_error, message]() {
-                                    if (on_error) {
-                                        on_error(message);
-                                    }
-                                });
-    };
+    auto report_error =
+        main_thread_error("thumbnail_cache::fetch_thumbnail_from_gcode", std::move(on_error));
 
     if (!api) {
         report_error("no API available for gcode thumbnail extraction");
@@ -1293,36 +1336,67 @@ void helix::fetch_thumbnail_from_gcode(const std::string& gcode_path, size_t max
             const auto best = helix::gcode::get_best_thumbnail_from_content(content);
             if (best.png_data.empty()) {
                 spdlog::debug("[ThumbnailCache] No embedded thumbnails in {}", gcode_path);
-                report_error(std::string(GCODE_THUMBNAIL_NONE_EMBEDDED) + gcode_path);
+                report_error(std::string(kGcodeThumbnailNoneEmbedded) + gcode_path);
                 return;
             }
 
             spdlog::debug("[ThumbnailCache] Extracted {}x{} thumbnail ({} bytes) from {}",
                           best.width, best.height, best.png_data.size(), gcode_path);
-
-            std::string lvgl_path = get_thumbnail_cache().save_raw_png(
-                ThumbnailSource::GcodeExtract, gcode_path, best.png_data);
-            if (lvgl_path.empty()) {
-                spdlog::warn("[ThumbnailCache] Failed to cache extracted thumbnail for {}",
-                             gcode_path);
-                report_error("failed to cache extracted thumbnail for " + gcode_path);
-                return;
-            }
-
-            // Feed through the prescale pipeline for .bin generation (avoids
-            // runtime scaling on every frame). fetch marshals the callbacks
-            // to the main thread and drops a superseded load via ctx.
-            ThumbnailRequest req;
-            req.key = gcode_path;
-            req.source = ThumbnailSource::GcodeExtract;
-            req.target = target;
-            req.api = api;
-
-            get_thumbnail_cache().fetch(req, ctx, std::move(on_success), report_error);
+            cache_extracted_png(ThumbnailSource::GcodeExtract, gcode_path, best.png_data, 0, api,
+                                target, ctx, on_success, report_error);
         },
         [gcode_path, report_error](const MoonrakerError& error) {
             spdlog::debug("[ThumbnailCache] Failed to download gcode header for {}: {}", gcode_path,
                           error.message);
             report_error(error.message);
+        });
+}
+
+void helix::fetch_thumbnail_from_archive(const std::string& archive_path,
+                                         const zip::ZipEntry& entry, time_t source_modified,
+                                         IMoonrakerAPI* api, const helix::ThumbnailTarget& target,
+                                         ThumbnailLoadContext ctx,
+                                         ThumbnailCache::SuccessCallback on_success,
+                                         ThumbnailCache::ErrorCallback on_error) {
+    auto report_error =
+        main_thread_error("thumbnail_cache::fetch_thumbnail_from_archive", std::move(on_error));
+    if (!api) {
+        report_error("no API available for archive thumbnail extraction");
+        return;
+    }
+    if constexpr (!gcode_thumbnail_extraction_available()) {
+        report_error("archive thumbnail extraction is not available on this platform");
+        return;
+    }
+
+    const std::string id = archive_path + "#" + entry.name;
+    ThumbnailRequest req;
+    req.key = id;
+    req.source = ThumbnailSource::ArchiveEntry;
+    req.target = target;
+    req.source_modified = source_modified;
+    req.api = api;
+    // Another size of the same render prescales from the PNG already cached.
+    // Writing the PNG again would retire every prescaled size of it, among
+    // them the one a card on screen is drawing.
+    ThumbnailRequest png_req = req;
+    png_req.format = ThumbnailRequest::ThumbnailFormat::FullPng;
+    if (!get_thumbnail_cache().get_if_cached(req).empty() ||
+        !get_thumbnail_cache().get_if_cached(png_req).empty()) {
+        get_thumbnail_cache().fetch(req, ctx, std::move(on_success), report_error);
+        return;
+    }
+
+    three_mf::ThreeMfReader::read_entry(
+        api->transfers(), archive_path, entry,
+        [id, source_modified, api, target, ctx, on_success,
+         report_error](const std::string& bytes) {
+            const std::vector<uint8_t> png(bytes.begin(), bytes.end());
+            cache_extracted_png(ThumbnailSource::ArchiveEntry, id, png, source_modified, api,
+                                target, ctx, on_success, report_error);
+        },
+        [report_error](const std::string& error) {
+            spdlog::debug("[ThumbnailCache] Archive thumbnail read failed: {}", error);
+            report_error(error);
         });
 }

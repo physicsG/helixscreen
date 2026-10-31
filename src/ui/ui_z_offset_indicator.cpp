@@ -49,7 +49,7 @@ struct ScaleRange {
     int decimal_places; // For label formatting
 };
 
-static constexpr ScaleRange SCALE_RANGES[] = {
+static constexpr ScaleRange kScaleRanges[] = {
     {100, 50, 2},     // ±0.10mm, ticks every 0.05mm
     {250, 100, 1},    // ±0.25mm, ticks every 0.1mm
     {500, 250, 2},    // ±0.50mm, ticks every 0.25mm
@@ -58,18 +58,18 @@ static constexpr ScaleRange SCALE_RANGES[] = {
     {5000, 2000, 0},  // ±5.0mm, ticks every 2mm
     {10000, 5000, 0}, // ±10mm, ticks every 5mm
 };
-static constexpr int NUM_SCALE_RANGES = sizeof(SCALE_RANGES) / sizeof(SCALE_RANGES[0]);
+static constexpr int kNumScaleRanges = sizeof(kScaleRanges) / sizeof(kScaleRanges[0]);
 
 /// Pick the best scale range for a given value in microns.
 static const ScaleRange& pick_scale_range(int microns) {
     int abs_val = std::abs(microns);
-    for (int i = 0; i < NUM_SCALE_RANGES; i++) {
+    for (int i = 0; i < kNumScaleRanges; i++) {
         // 80% of range as headroom threshold
-        if (abs_val <= SCALE_RANGES[i].range_microns * 80 / 100) {
-            return SCALE_RANGES[i];
+        if (abs_val <= kScaleRanges[i].range_microns * 80 / 100) {
+            return kScaleRanges[i];
         }
     }
-    return SCALE_RANGES[NUM_SCALE_RANGES - 1]; // Largest range as fallback
+    return kScaleRanges[kNumScaleRanges - 1]; // Largest range as fallback
 }
 
 /// Convert microns to Y pixel position on the vertical scale.

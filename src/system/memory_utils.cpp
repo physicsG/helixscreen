@@ -209,24 +209,24 @@ bool is_gcode_3d_render_safe(size_t file_size_bytes) {
 
     // If we can't read memory info, be conservative - allow only small files
     if (mem.available_kb == 0) {
-        return file_size_bytes < GCodeMemoryLimits::MAX_FILE_SIZE_CONSTRAINED;
+        return file_size_bytes < GCodeMemoryLimits::kMaxFileSizeConstrained;
     }
 
     // Check minimum available RAM
-    if (mem.available_kb < GCodeMemoryLimits::MIN_AVAILABLE_KB) {
+    if (mem.available_kb < GCodeMemoryLimits::kMinAvailableKb) {
         return false;
     }
 
     // Determine max file size based on whether available memory is low
-    size_t max_file_size = mem.is_low_memory() ? GCodeMemoryLimits::MAX_FILE_SIZE_CONSTRAINED
-                                               : GCodeMemoryLimits::MAX_FILE_SIZE_NORMAL;
+    size_t max_file_size = mem.is_low_memory() ? GCodeMemoryLimits::kMaxFileSizeConstrained
+                                               : GCodeMemoryLimits::kMaxFileSizeNormal;
 
     if (file_size_bytes > max_file_size) {
         return false;
     }
 
     // Estimate memory needed: file size * expansion factor
-    size_t estimated_memory_kb = (file_size_bytes * GCodeMemoryLimits::EXPANSION_FACTOR) / 1024;
+    size_t estimated_memory_kb = (file_size_bytes * GCodeMemoryLimits::kExpansionFactor) / 1024;
 
     // Check if we have enough headroom (need at least 2x the estimated memory as buffer)
     return mem.available_kb > (estimated_memory_kb * 2);

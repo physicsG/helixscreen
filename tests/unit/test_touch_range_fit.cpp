@@ -134,10 +134,10 @@ TEST_CASE("compute_range_fit: T1 Pro transposed panel with an inverted axis",
     constexpr int W = 480;
     constexpr int H = 272;
     // Ground truth: what the digitizer really emits at each display edge.
-    constexpr int TRUE_MIN_X = 13;  // raw Y at screen x = 0
-    constexpr int TRUE_MAX_X = 470; // raw Y at screen x = W-1
-    constexpr int TRUE_MIN_Y = 243; // raw X at screen y = 0
-    constexpr int TRUE_MAX_Y = 16;  // raw X at screen y = H-1  (inverted)
+    constexpr int kTrueMinX = 13;  // raw Y at screen x = 0
+    constexpr int kTrueMaxX = 470; // raw Y at screen x = W-1
+    constexpr int kTrueMinY = 243; // raw X at screen y = 0
+    constexpr int kTrueMaxY = 16;  // raw X at screen y = H-1  (inverted)
 
     Point screen[3];
     targets(W, H, screen);
@@ -145,8 +145,8 @@ TEST_CASE("compute_range_fit: T1 Pro transposed panel with an inverted axis",
     Point raw[3];
     for (int i = 0; i < 3; i++) {
         // Screen X is fed by raw Y, screen Y by raw X.
-        raw[i].y = raw_for_pixel(screen[i].x, W - 1, TRUE_MIN_X, TRUE_MAX_X);
-        raw[i].x = raw_for_pixel(screen[i].y, H - 1, TRUE_MIN_Y, TRUE_MAX_Y);
+        raw[i].y = raw_for_pixel(screen[i].x, W - 1, kTrueMinX, kTrueMaxX);
+        raw[i].x = raw_for_pixel(screen[i].y, H - 1, kTrueMinY, kTrueMaxY);
     }
 
     TouchRangeFit fit = compute_range_fit(screen, raw, W, H);
@@ -158,10 +158,10 @@ TEST_CASE("compute_range_fit: T1 Pro transposed panel with an inverted axis",
 
     // Rounding the three raw captures to integers perturbs the fit by a raw unit
     // or two; the range must land on the hardware, not on the exact constants.
-    CHECK(std::abs(fit.min_x - TRUE_MIN_X) <= 3);
-    CHECK(std::abs(fit.max_x - TRUE_MAX_X) <= 3);
-    CHECK(std::abs(fit.min_y - TRUE_MIN_Y) <= 3);
-    CHECK(std::abs(fit.max_y - TRUE_MAX_Y) <= 3);
+    CHECK(std::abs(fit.min_x - kTrueMinX) <= 3);
+    CHECK(std::abs(fit.max_x - kTrueMaxX) <= 3);
+    CHECK(std::abs(fit.min_y - kTrueMinY) <= 3);
+    CHECK(std::abs(fit.max_y - kTrueMaxY) <= 3);
 
     // The inverted axis MUST come back as max < min. That is not a bug to correct:
     // lv_evdev's negative denominator is exactly how an axis gets inverted, and
@@ -192,21 +192,21 @@ TEST_CASE("compute_range_fit: T1 Pro range reaches both display edges",
     // the display.
     constexpr int W = 480;
     constexpr int H = 272;
-    constexpr int TRUE_MIN_X = 13, TRUE_MAX_X = 470, TRUE_MIN_Y = 243, TRUE_MAX_Y = 16;
+    constexpr int kTrueMinX = 13, kTrueMaxX = 470, kTrueMinY = 243, kTrueMaxY = 16;
 
     Point screen[3];
     targets(W, H, screen);
     Point raw[3];
     for (int i = 0; i < 3; i++) {
-        raw[i].y = raw_for_pixel(screen[i].x, W - 1, TRUE_MIN_X, TRUE_MAX_X);
-        raw[i].x = raw_for_pixel(screen[i].y, H - 1, TRUE_MIN_Y, TRUE_MAX_Y);
+        raw[i].y = raw_for_pixel(screen[i].x, W - 1, kTrueMinX, kTrueMaxX);
+        raw[i].x = raw_for_pixel(screen[i].y, H - 1, kTrueMinY, kTrueMaxY);
     }
 
     TouchRangeFit fit = compute_range_fit(screen, raw, W, H);
     REQUIRE(fit.valid);
 
-    Point top_left = full_pipeline(fit, Point{TRUE_MIN_Y, TRUE_MIN_X}, W, H);
-    Point bottom_right = full_pipeline(fit, Point{TRUE_MAX_Y, TRUE_MAX_X}, W, H);
+    Point top_left = full_pipeline(fit, Point{kTrueMinY, kTrueMinX}, W, H);
+    Point bottom_right = full_pipeline(fit, Point{kTrueMaxY, kTrueMaxX}, W, H);
 
     // Within a few pixels of each corner. The three captures are integers, so the
     // recovered endpoints carry a raw unit or two of rounding; what matters is
@@ -229,15 +229,15 @@ TEST_CASE("compute_range_fit: compressed emitted range (SV06 Ace class)",
     constexpr int W = 800;
     constexpr int H = 480;
     // The driver declares 0..4095 on both axes; the panel only ever emits these.
-    constexpr int TRUE_MIN_X = 900, TRUE_MAX_X = 3200;
-    constexpr int TRUE_MIN_Y = 700, TRUE_MAX_Y = 3800;
+    constexpr int kTrueMinX = 900, kTrueMaxX = 3200;
+    constexpr int kTrueMinY = 700, kTrueMaxY = 3800;
 
     Point screen[3];
     targets(W, H, screen);
     Point raw[3];
     for (int i = 0; i < 3; i++) {
-        raw[i].x = raw_for_pixel(screen[i].x, W - 1, TRUE_MIN_X, TRUE_MAX_X);
-        raw[i].y = raw_for_pixel(screen[i].y, H - 1, TRUE_MIN_Y, TRUE_MAX_Y);
+        raw[i].x = raw_for_pixel(screen[i].x, W - 1, kTrueMinX, kTrueMaxX);
+        raw[i].y = raw_for_pixel(screen[i].y, H - 1, kTrueMinY, kTrueMaxY);
     }
 
     TouchRangeFit fit = compute_range_fit(screen, raw, W, H);
@@ -246,10 +246,10 @@ TEST_CASE("compute_range_fit: compressed emitted range (SV06 Ace class)",
     CHECK_FALSE(fit.swap_axes);
     INFO("recovered X(" << fit.min_x << ".." << fit.max_x << ") Y(" << fit.min_y << ".."
                         << fit.max_y << ")");
-    CHECK(std::abs(fit.min_x - TRUE_MIN_X) <= 4);
-    CHECK(std::abs(fit.max_x - TRUE_MAX_X) <= 4);
-    CHECK(std::abs(fit.min_y - TRUE_MIN_Y) <= 4);
-    CHECK(std::abs(fit.max_y - TRUE_MAX_Y) <= 4);
+    CHECK(std::abs(fit.min_x - kTrueMinX) <= 4);
+    CHECK(std::abs(fit.max_x - kTrueMaxX) <= 4);
+    CHECK(std::abs(fit.min_y - kTrueMinY) <= 4);
+    CHECK(std::abs(fit.max_y - kTrueMaxY) <= 4);
     CHECK_FALSE(fit.residual.valid);
 
     // Under the DECLARED 0..4095 range the same taps compress toward the top-left
@@ -261,12 +261,12 @@ TEST_CASE("compute_range_fit: compressed emitted range (SV06 Ace class)",
     declared.max_x = 4095;
     declared.min_y = 0;
     declared.max_y = 4095;
-    Point declared_far = evdev_stage(declared, Point{TRUE_MAX_X, TRUE_MAX_Y}, W, H);
+    Point declared_far = evdev_stage(declared, Point{kTrueMaxX, kTrueMaxY}, W, H);
     INFO("far corner under the declared range -> (" << declared_far.x << "," << declared_far.y
                                                     << ")");
     CHECK(declared_far.x < W - 100);
 
-    Point solved_far = full_pipeline(fit, Point{TRUE_MAX_X, TRUE_MAX_Y}, W, H);
+    Point solved_far = full_pipeline(fit, Point{kTrueMaxX, kTrueMaxY}, W, H);
     CHECK(solved_far.x >= W - 3);
     CHECK(solved_far.y >= H - 3);
 }
@@ -462,18 +462,18 @@ TEST_CASE("compute_range_fit: a valid fit never returns min == max on an axis",
 
 namespace {
 
-constexpr int PANEL_W = 800;
-constexpr int PANEL_H = 480;
-constexpr int EMIT_MIN_X = 900, EMIT_MAX_X = 3200;
-constexpr int EMIT_MIN_Y = 700, EMIT_MAX_Y = 3800;
-constexpr int DECLARED_MAX = 4095;
+constexpr int kPanelW = 800;
+constexpr int kPanelH = 480;
+constexpr int kEmitMinX = 900, EMIT_MAX_X = 3200;
+constexpr int kEmitMinY = 700, EMIT_MAX_Y = 3800;
+constexpr int kDeclaredMax = 4095;
 
 void compressed_capture(Point screen, Point& out_touch, Point& out_raw) {
-    out_raw.x = raw_for_pixel(screen.x, PANEL_W - 1, EMIT_MIN_X, EMIT_MAX_X);
-    out_raw.y = raw_for_pixel(screen.y, PANEL_H - 1, EMIT_MIN_Y, EMIT_MAX_Y);
+    out_raw.x = raw_for_pixel(screen.x, kPanelW - 1, kEmitMinX, EMIT_MAX_X);
+    out_raw.y = raw_for_pixel(screen.y, kPanelH - 1, kEmitMinY, EMIT_MAX_Y);
     // What lv_evdev hands us under the wrong declared range.
-    out_touch.x = evdev_calibrate(out_raw.x, 0, DECLARED_MAX, 0, PANEL_W - 1);
-    out_touch.y = evdev_calibrate(out_raw.y, 0, DECLARED_MAX, 0, PANEL_H - 1);
+    out_touch.x = evdev_calibrate(out_raw.x, 0, kDeclaredMax, 0, kPanelW - 1);
+    out_touch.y = evdev_calibrate(out_raw.y, 0, kDeclaredMax, 0, kPanelH - 1);
 }
 
 } // namespace
@@ -481,7 +481,7 @@ void compressed_capture(Point screen, Point& out_touch, Point& out_raw) {
 TEST_CASE_METHOD(LVGLTestFixture, "TouchCalibrationPanel: raw readings reach the range solver",
                  "[touch][touch-calibration][range-fit][1276]") {
     TouchCalibrationPanel panel;
-    panel.set_screen_size(PANEL_W, PANEL_H);
+    panel.set_screen_size(kPanelW, kPanelH);
     panel.start();
 
     for (int step = 0; step < 3; step++) {
@@ -503,9 +503,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "TouchCalibrationPanel: raw readings reach the
     INFO("recovered X(" << fit.min_x << ".." << fit.max_x << ") Y(" << fit.min_y << ".."
                         << fit.max_y << ")");
     CHECK_FALSE(fit.swap_axes);
-    CHECK(std::abs(fit.min_x - EMIT_MIN_X) <= 10);
+    CHECK(std::abs(fit.min_x - kEmitMinX) <= 10);
     CHECK(std::abs(fit.max_x - EMIT_MAX_X) <= 10);
-    CHECK(std::abs(fit.min_y - EMIT_MIN_Y) <= 10);
+    CHECK(std::abs(fit.min_y - kEmitMinY) <= 10);
     CHECK(std::abs(fit.max_y - EMIT_MAX_Y) <= 10);
 }
 
@@ -521,7 +521,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     {
         TouchCalibrationPanel panel;
-        panel.set_screen_size(PANEL_W, PANEL_H);
+        panel.set_screen_size(kPanelW, kPanelH);
         panel.start();
         for (int step = 0; step < 3; step++) {
             Point touch, raw;
@@ -537,7 +537,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
 
     {
         TouchCalibrationPanel panel;
-        panel.set_screen_size(PANEL_W, PANEL_H);
+        panel.set_screen_size(kPanelW, kPanelH);
         panel.start();
         for (int step = 0; step < 3; step++) {
             Point touch, raw;
@@ -566,7 +566,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     // would produce a plausible-looking range that maps the panel wrongly, which
     // is worse than not solving at all.
     TouchCalibrationPanel panel;
-    panel.set_screen_size(PANEL_W, PANEL_H);
+    panel.set_screen_size(kPanelW, kPanelH);
     panel.start();
 
     for (int step = 0; step < 3; step++) {
@@ -1117,29 +1117,29 @@ TEST_CASE("A transposed declared ABS range is scaled by the display size instead
           "[touch][touch-calibration][range-fit][abs-transposed]") {
     constexpr int W = 480;
     constexpr int H = 800;
-    constexpr int DECLARED_MAX_X = 800;
-    constexpr int DECLARED_MAX_Y = 480;
+    constexpr int kDeclaredMaxX = 800;
+    constexpr int kDeclaredMaxY = 480;
     // What the digitizer actually emits.
-    constexpr int RAW_MAX_X = 480;
-    constexpr int RAW_MAX_Y = 800;
+    constexpr int kRawMaxX = 480;
+    constexpr int kRawMaxY = 800;
 
-    REQUIRE(has_transposed_abs_range(DECLARED_MAX_X, DECLARED_MAX_Y, W, H));
+    REQUIRE(has_transposed_abs_range(kDeclaredMaxX, kDeclaredMaxY, W, H));
 
     SECTION("scaling by the advertised range loses reach on X and flattens Y") {
         auto declared = [](int rx, int ry) {
-            return Point{evdev_calibrate(rx, 0, DECLARED_MAX_X, 0, W - 1),
-                         evdev_calibrate(ry, 0, DECLARED_MAX_Y, 0, H - 1)};
+            return Point{evdev_calibrate(rx, 0, kDeclaredMaxX, 0, W - 1),
+                         evdev_calibrate(ry, 0, kDeclaredMaxY, 0, H - 1)};
         };
 
         // The far corner lands 40% short across X.
-        CHECK(declared(RAW_MAX_X, RAW_MAX_Y).x == 287);
+        CHECK(declared(kRawMaxX, kRawMaxY).x == 287);
         // Every raw Y at or past the advertised maximum clamps onto the bottom edge,
         // so the lower 40% of the panel collapses to one row.
-        CHECK(declared(RAW_MAX_X, DECLARED_MAX_Y).y == H - 1);
-        CHECK(declared(RAW_MAX_X, RAW_MAX_Y).y == H - 1);
+        CHECK(declared(kRawMaxX, kDeclaredMaxY).y == H - 1);
+        CHECK(declared(kRawMaxX, kRawMaxY).y == H - 1);
         // A touch at the centre of the panel reports up and to the left of it.
-        CHECK(declared(RAW_MAX_X / 2, RAW_MAX_Y / 2).x == 143);
-        CHECK(declared(RAW_MAX_X / 2, RAW_MAX_Y / 2).y == 665);
+        CHECK(declared(kRawMaxX / 2, kRawMaxY / 2).x == 143);
+        CHECK(declared(kRawMaxX / 2, kRawMaxY / 2).y == 665);
     }
 
     SECTION("scaling by the display size maps the panel corner to corner") {
@@ -1151,9 +1151,9 @@ TEST_CASE("A transposed declared ABS range is scaled by the display size instead
 
         CHECK(by_display(0, 0).x == 0);
         CHECK(by_display(0, 0).y == 0);
-        CHECK(by_display(RAW_MAX_X, RAW_MAX_Y).x == W - 1);
-        CHECK(by_display(RAW_MAX_X, RAW_MAX_Y).y == H - 1);
-        CHECK(by_display(RAW_MAX_X / 2, RAW_MAX_Y / 2).x == 239);
-        CHECK(by_display(RAW_MAX_X / 2, RAW_MAX_Y / 2).y == 399);
+        CHECK(by_display(kRawMaxX, kRawMaxY).x == W - 1);
+        CHECK(by_display(kRawMaxX, kRawMaxY).y == H - 1);
+        CHECK(by_display(kRawMaxX / 2, kRawMaxY / 2).x == 239);
+        CHECK(by_display(kRawMaxX / 2, kRawMaxY / 2).y == 399);
     }
 }

@@ -66,6 +66,7 @@ reasonable, and the reason adversarial reading matters.
 | **Claim not verified against current code** | A root cause inherited from an issue report, a commit message, or a stale comment. Grep the current tree and `git log -S` before accepting a mechanism — confident, well-argued reporter archaeology has pointed at the wrong cause more than once. | L095 |
 | **Log-only `on_error` claiming the error report** | An `execute_gcode` / `set_temperature` / `set_led` caller whose `on_error` only `spdlog`s or resets state, without `caller_surfaces_errors=false`. It records the rejection for dedup and silences `GcodeErrorRouter`'s `!!` copy — the only surface that would have told the user. Deriving intent *after* an internal callback wrapper has the same effect. | `RPC_ERROR_OWNERSHIP.md` |
 | **Print-state enum mismatch** | `static_cast<PrintState>(lv_subject_get_int(...))` compiles against whichever subject the author named — and `PrintJobState` and `PrintState` share no numbering past index 0, so a COMPLETE job reads back Paused and a PRINTING one Preparing. Binding the wrong subject to a typed observer fails the same way. Compiles, runs, answers a different question; shipped twice in one refactor. Use `get_print_lifecycle()` / `get_print_job_state()` and the typed factories (see `architecture/05-printer-state.md` § "Reading print state: typed accessors, not hand-cast ints"). | `check_print_state_cast.py` (partial) |
+| **Duplicated functionality** | Every function, helper, constant, formatter, XML fragment, fixture and test helper the change ADDS gets a search of the whole repo for code that already does the same thing. Grep the behaviour (the computation, the string shape, the subject plumbing, the JSON parse, the defer/timer pattern), not the name: a near-twin usually has a different noun on it. Code moved out of one place must be gone from it, with every caller switched, not copied. Two hand-kept copies agree by convention until they silently don't, and each reads as correct on its own. Severity is **Major**; name the existing code to call or extend, and the fix: call it, extend it, or extract one shared function. Pre-existing duplicates the change sits beside go in a separate list. | CLAUDE.md § DRY |
 | **Absence reported as a result** | A routine that could not do its work returns what a routine that did it and found nothing returns: a failed search returning an empty list, a tool that skips files outside its scope and reports clean, a scorer that reports high confidence on a tie it cannot break. The caller cannot tell "I looked and found nothing" from "I could not look". Ask what the failure path returns, and whether the call site can distinguish inability from success. | #1436, #1437 |
 
 ---
@@ -77,8 +78,9 @@ reasonable, and the reason adversarial reading matters.
 | **Declarative UI** | New UI that mutates an XML widget from C++ instead of binding a subject. The gate ratchets the count, but it can only see the specific `find_by_name` + setter shape — read for the intent. Structural exceptions are listed in CLAUDE.md; existing imperative code is **not** precedent. |
 | **Centralized sends** | Temperature targets go through `TemperatureController::set_target()`, never `MoonrakerAPI::set_temperature()` directly. |
 | **Design tokens** | `theme_manager_get_color("token")` and `#space_md`, not raw hex or pixel counts. |
-| **Pattern reuse** | Does an existing helper already do this? Check the exemplars in CLAUDE.md § Patterns before accepting a hand-rolled version. |
+| **Pattern reuse** | Does an existing pattern already shape this? Check the exemplars in CLAUDE.md § Patterns before accepting a hand-rolled version. Duplicated *logic* is the Tier 2 check above. |
 | **Tests that would fail if the feature were removed** | Not `REQUIRE(true)`, not happy-path only. Edge cases and error conditions. |
+| **Comments that earn their place** | New `@brief`/`@param` ceremony, a comment restating the signature, `// ====` banners, commented-out code, or history in a comment. Keep the why, the thread/lifetime/units contract, and the quirk workaround. Rule: DEVELOPMENT.md § Code Standards, "Comments". |
 | **Docs updated with behaviour** | If the change alters behaviour or architecture, the relevant `docs/devel/` doc moves with it. |
 
 ---
@@ -105,7 +107,7 @@ Noise makes a review ignorable, and these all look like problems but aren't:
 ```bash
 ./scripts/quality-checks.sh              # everything the gates check
 make -j                                  # it has to build
-make test-run                            # parallel; excludes [slow] and hidden
+make unit-sweep                          # parallel; excludes [slow] and hidden
 ./build/bin/helix-tests "[tag]" "~[.]"   # one area
 make test-asan                           # suspected UAF or leak
 make test-tsan                           # suspected race

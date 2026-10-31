@@ -60,9 +60,6 @@ class Ad5xIfsTestAccess {
     static bool module_live(const AmsBackendAd5xIfs& b) {
         return b.ifs_module_live_.load();
     }
-    static std::string normalize_module_color(const std::string& value) {
-        return AmsBackendAd5xIfs::normalize_module_color_hex(value);
-    }
     // Deliver a printer.ifs status frame carrying the identity tool_map — the
     // fixture every "wire contract detected" test starts from. Shape as the
     // module serialises it: string tool keys, 1-based lanes.
@@ -276,10 +273,6 @@ class Ad5xIfsTestAccess {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.system_info_.current_slot;
     }
-    static AmsBackendAd5xIfs::ZColorSilentResult
-    parse_zcolor_silent(const std::vector<std::string>& lines) {
-        return AmsBackendAd5xIfs::parse_zcolor_silent(lines, "test");
-    }
     static bool zcolor_silent_supported(const AmsBackendAd5xIfs& b) {
         return b.zcolor_silent_supported_.load();
     }
@@ -304,6 +297,12 @@ class Ad5xIfsTestAccess {
     static void set_ffm_channel(AmsBackendAd5xIfs& b, int chan) {
         std::lock_guard<std::mutex> lock(b.mutex_);
         b.ffm_channel_ = chan;
+    }
+    // FFMInfo.channel as the file last said it (nullopt = never read).
+    static void set_ffm_file_channel(AmsBackendAd5xIfs& b, std::optional<int> chan) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        b.ffm_file_read_ = chan.has_value();
+        b.ffm_file_channel_ = chan;
     }
     static int ffm_channel(const AmsBackendAd5xIfs& b) {
         std::lock_guard<std::mutex> lock(b.mutex_);
@@ -345,6 +344,24 @@ class Ad5xIfsTestAccess {
         // The backend's own init files both stores together; a fixture that
         // wrote only this map would leave the lane reading empty.
         helix::test::file_override_as_lane_records(b, slot_index, ovr);
+    }
+    // on_started()'s install of the store it loaded, for a fixture that
+    // loaded one against a mock namespace.
+    static void adopt_loaded_override_store(AmsBackendAd5xIfs& b,
+                                            helix::ams::LoadedOverrideStore loaded) {
+        b.adopt_loaded_override_store(std::move(loaded));
+    }
+    // The lane_data re-read the debounce fires, run now, as the debounce
+    // runs it: its gate open again first.
+    static void fire_lane_record_reread(AmsBackendAd5xIfs& b) {
+        b.lane_reread_pending_.store(false);
+        b.reread_lane_records();
+    }
+    static bool lane_reread_pending(const AmsBackendAd5xIfs& b) {
+        return b.lane_reread_pending_.load();
+    }
+    static bool lane_reread_owed(const AmsBackendAd5xIfs& b) {
+        return b.lane_reread_owed_.load();
     }
     // Read the override currently staged for a slot (empty optional if none).
     // Lets tests assert what set_slot_info(persist=true) wrote into the
@@ -426,6 +443,18 @@ class Ad5xIfsTestAccess {
     static bool on_gcode_response_line(AmsBackendAd5xIfs& b, const std::string& line) {
         return b.on_gcode_response_line(line);
     }
+    static void schedule_json_reread(AmsBackendAd5xIfs& b) {
+        b.schedule_json_reread();
+    }
+    static void schedule_lane_record_reread(AmsBackendAd5xIfs& b) {
+        b.schedule_lane_record_reread();
+    }
+    static void schedule_zcolor_query(AmsBackendAd5xIfs& b) {
+        b.schedule_zcolor_query("test");
+    }
+    static void query_zcolor_silent(AmsBackendAd5xIfs& b) {
+        b.query_zcolor_silent();
+    }
     static void set_zcolor_query_active(AmsBackendAd5xIfs& b, bool active) {
         b.zcolor_query_active_.store(active);
     }
@@ -444,6 +473,26 @@ class Ad5xIfsTestAccess {
     }
     static bool note_json_content(AmsBackendAd5xIfs& b, const std::string& content) {
         return b.note_json_content(content);
+    }
+    // --- HelixPrint plugin vendor push ---
+    static void on_vendor_state(AmsBackendAd5xIfs& b, const json& payload) {
+        b.on_vendor_state(payload);
+    }
+    static bool vendor_pushing(const AmsBackendAd5xIfs& b) {
+        return b.vendor_push_.pushing();
+    }
+    static void on_stopping(AmsBackendAd5xIfs& b) {
+        b.on_stopping();
+    }
+    static void on_started(AmsBackendAd5xIfs& b) {
+        b.on_started();
+    }
+    static std::chrono::steady_clock::time_point last_json_poll_kick(const AmsBackendAd5xIfs& b) {
+        return b.last_json_poll_kick_;
+    }
+    static void set_last_json_poll_kick(AmsBackendAd5xIfs& b,
+                                        std::chrono::steady_clock::time_point at) {
+        b.last_json_poll_kick_ = at;
     }
     // Override the resolved on-disk Adventurer5M.json path so tests can drive
     // the direct-write path against a tmp file instead of the real
@@ -464,7 +513,7 @@ class Ad5xIfsTestAccess {
         return b.write_adventurer_json_local(slot_index, hex, material);
     }
     // tool_map snapshot: copy out for comparison without holding mutex_.
-    static std::array<int, AmsBackendAd5xIfs::TOOL_MAP_SIZE> tool_map(const AmsBackendAd5xIfs& b) {
+    static std::array<int, AmsBackendAd5xIfs::kToolMapSize> tool_map(const AmsBackendAd5xIfs& b) {
         std::lock_guard<std::mutex> lock(b.mutex_);
         return b.tool_map_;
     }
@@ -477,32 +526,9 @@ class Ad5xIfsTestAccess {
 
     // --- filament.json eject-parameter cache (LEN/SPEED per material) ---
 
-    // Drive the pure parse helper directly (no IO).
+    // Parse a filament.json body and apply it to the eject-parameter cache.
     static void parse_filament_json(AmsBackendAd5xIfs& b, const std::string& content) {
         b.parse_filament_json(content);
-    }
-    // Seed the per-material eject-parameter cache directly (mirrors what
-    // fetch_filament_json applies on the main thread). Material key, tube
-    // length (LEN), ifs speed (SPEED).
-    static void seed_filament_eject_params(AmsBackendAd5xIfs& b, const std::string& material,
-                                           int tube_length, int ifs_speed) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        b.filament_eject_params_[material] = {tube_length, ifs_speed};
-    }
-    // Read a cached pair back (returns nullopt when the material isn't cached).
-    static std::optional<std::pair<int, int>> filament_eject_params(const AmsBackendAd5xIfs& b,
-                                                                    const std::string& material) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        auto it = b.filament_eject_params_.find(material);
-        if (it == b.filament_eject_params_.end()) {
-            return std::nullopt;
-        }
-        return it->second;
-    }
-    // Read the parsed "default" pair (tube length, ifs speed).
-    static std::pair<int, int> filament_eject_default(const AmsBackendAd5xIfs& b) {
-        std::lock_guard<std::mutex> lock(b.mutex_);
-        return b.filament_eject_default_;
     }
 
     // --- Phase tracker hooks (live load/unload progress feedback) ---
@@ -553,6 +579,10 @@ class Ad5xIfsTestAccess {
 
     static void finalize_op_after_macro(AmsBackendAd5xIfs& b, bool is_unload) {
         b.finalize_op_after_macro(is_unload);
+    }
+    static void fail_op_after_macro(AmsBackendAd5xIfs& b, bool is_unload,
+                                    const MoonrakerError& err) {
+        b.fail_op_after_macro(is_unload, err);
     }
 
     // --- Unattended runout detection (#1250 / #1247) ---

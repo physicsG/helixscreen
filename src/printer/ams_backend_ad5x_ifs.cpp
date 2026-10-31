@@ -12,6 +12,7 @@
 #include "ams_state.h"
 #include "app_globals.h"
 #include "config.h"
+#include "hardware_object_table.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix_fs.h"
 #include "helix_regex.h"
@@ -31,7 +32,6 @@
 #include "settings_manager.h"
 #include "static_subject_registry.h"
 #include "text_io.h"
-#include "zmod_color_status.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -87,8 +87,8 @@ namespace {
 /// plain extruder move rather than zmod's `PURGE_FILAMENT` macro, because a bare
 /// `G1 E` needs no homing and cannot reach the loadcell `_G28` that shuts the
 /// AD5X down mid-job (see build_recovery_actions()).
-constexpr int RUNOUT_PURGE_MM = 50;
-constexpr int RUNOUT_PURGE_FEEDRATE_MM_MIN = 10 * 60;
+constexpr int kRunoutPurgeMm = 50;
+constexpr int kRunoutPurgeFeedrateMmMin = 10 * 60;
 
 /// The ffmColor / ffmType pair to persist into Adventurer5M.json for one slot.
 struct FfmSlotFields {
@@ -98,7 +98,7 @@ struct FfmSlotFields {
 
 /// zmod's own fallback colour, from `gcmd.get('HEX', '161616')` in
 /// zmod_color.py's cmd_RUN_ZCOLOR.
-constexpr const char* ZMOD_DEFAULT_HEX = "161616";
+constexpr const char* kZmodDefaultHex = "161616";
 
 /// Map an in-memory slot (hex colour, material) onto the ffmColor/ffmType pair
 /// stock ZMOD expects in Adventurer5M.json.
@@ -124,7 +124,7 @@ constexpr const char* ZMOD_DEFAULT_HEX = "161616";
     if (!no_color) {
         color = "#" + hex;
     } else if (!no_material) {
-        color = std::string{"#"} + ZMOD_DEFAULT_HEX;
+        color = std::string{"#"} + kZmodDefaultHex;
     }
     return {std::move(color), no_material ? std::string{"?"} : material};
 }
@@ -133,13 +133,13 @@ constexpr const char* ZMOD_DEFAULT_HEX = "161616";
 
 AmsBackendAd5xIfs::AmsBackendAd5xIfs(IMoonrakerAPI* api, helix::IMoonrakerClient* client)
     : AmsSubscriptionBackend(api, client) {
-    // Fill tool map with UNMAPPED_PORT
-    tool_map_.fill(UNMAPPED_PORT);
+    // Fill tool map with kUnmappedPort
+    tool_map_.fill(kUnmappedPort);
     port_presence_.fill(false);
 
     // Initialize SlotRegistry with 4 ports in a single unit
     std::vector<std::string> slot_names;
-    for (int i = 1; i <= NUM_PORTS; ++i) {
+    for (int i = 1; i <= kNumPorts; ++i) {
         slot_names.push_back(std::to_string(i));
     }
     slots_.initialize("IFS", slot_names);
@@ -147,7 +147,7 @@ AmsBackendAd5xIfs::AmsBackendAd5xIfs(IMoonrakerAPI* api, helix::IMoonrakerClient
     // Set system info capabilities
     system_info_.type = AmsType::AD5X_IFS;
     system_info_.type_name = "AD5X IFS";
-    system_info_.total_slots = NUM_PORTS;
+    system_info_.total_slots = kNumPorts;
     // No bypass on this machine: every path into the hub runs through a lane
     // of the IFS, and there is no external direct-feed spool entry.
     system_info_.supports_bypass = false;
@@ -173,10 +173,10 @@ bool AmsBackendAd5xIfs::owns_filament_sensor(const std::string& bare_name,
     // (zmod_ifs_switch_sensor / zmod_ifs_motion_sensor) instead of the stock
     // filament_switch_sensor / filament_motion_sensor sections. The hardware-side
     // strip only removes the stock prefixes, so the bare_name still carries the
-    // zmod namespace — claim it by prefix so the head/motion sensors aren't
-    // surfaced as generic runout sensors.
-    if (bare_name.rfind("zmod_ifs_switch_sensor ", 0) == 0 ||
-        bare_name.rfind("zmod_ifs_motion_sensor ", 0) == 0) {
+    // zmod namespace; the object table knows those names, so the head/motion
+    // sensors aren't surfaced as generic runout sensors.
+    if (helix::hw::classify_object(bare_name).kind ==
+        helix::hw::ObjectKind::BackendFilamentSensor) {
         return true;
     }
     // lessWaste per-port HUB sensors (_ifs_port_sensor_{1..4}) and older ZMOD
@@ -203,9 +203,9 @@ bool AmsBackendAd5xIfs::owns_filament_sensor(const std::string& bare_name,
 
 namespace {
 /// Z-Mod's change macro; its last_data.channel is the change in flight.
-constexpr const char* ZMOD_CHANGE_MACRO = "gcode_macro END_CHANGE_FILAMENT";
+constexpr const char* kZmodChangeMacro = "gcode_macro END_CHANGE_FILAMENT";
 /// last_data.channel when no change is running.
-constexpr int ZMOD_CHANGE_IDLE_CHANNEL = 99;
+constexpr int kZmodChangeIdleChannel = 99;
 
 /// What each synthesized phase projects to, by the phase index the tracker
 /// publishes. The step model and the tracker's action both read these, so the
@@ -227,7 +227,7 @@ AmsBackendAd5xIfs::required_status_objects(const helix::PrinterDiscovery& hw) {
     // Klipper's objects/list only carries objects that implement get_status(),
     // so listing them IS the capability check.
     const auto& available = hw.printer_objects();
-    for (const char* name : {"ifs", "ifs_materials", "zmod_ifs", "zmod_color", ZMOD_CHANGE_MACRO}) {
+    for (const char* name : {"ifs", "ifs_materials", "zmod_ifs", "zmod_color", kZmodChangeMacro}) {
         if (std::find(available.begin(), available.end(), name) != available.end()) {
             objects.emplace_back(name);
         }
@@ -238,6 +238,7 @@ AmsBackendAd5xIfs::required_status_objects(const helix::PrinterDiscovery& hw) {
 // --- Lifecycle ---
 
 void AmsBackendAd5xIfs::on_started() {
+    vendor_push_.reset();
     // Load persisted per-slot overrides (brand, spool name, spoolman IDs, etc.)
     // BEFORE issuing the initial status query — otherwise the first
     // handle_status() callback may fire (on the websocket thread) and
@@ -246,25 +247,16 @@ void AmsBackendAd5xIfs::on_started() {
     // on this (main) thread; the Moonraker DB callback fires on the libhv
     // event loop, so the two threads don't interfere.
     if (api_) {
-        auto loaded =
-            helix::ams::make_loaded_override_store(api_, "ifs", get_type(), backend_log_tag());
-        if (loaded.store) {
-            helix::ams::ingest_legacy_records(*loaded.store, helix::ams::LegacyLockKeys::LaneData,
-                                              backend_index());
-        }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            override_store_ = std::move(loaded.store);
-            overrides_ = std::move(loaded.overrides);
-        }
+        adopt_loaded_override_store(
+            helix::ams::make_loaded_override_store(api_, "ifs", get_type(), backend_log_tag()));
 
         // Restore the last-known seated lane (#1065 power-cycle floor). The
         // firmware forgets the seated channel across a reboot, so this is the only
         // way to relabel Unload/Eject correctly when IFS_STATUS returns Chan=0 with
-        // a lane still physically at the head. Range-check against NUM_PORTS — a
+        // a lane still physically at the head. Range-check against kNumPorts — a
         // stale/corrupt value is discarded rather than trusted.
         std::optional<int> seated = override_store_->load_seated_slot_blocking();
-        if (seated.has_value() && (*seated < 0 || *seated >= NUM_PORTS)) {
+        if (seated.has_value() && (*seated < 0 || *seated >= kNumPorts)) {
             seated.reset();
         }
         {
@@ -324,7 +316,7 @@ void AmsBackendAd5xIfs::on_started() {
                    // gate closed, same as a printer without the module.
                    {"ifs", nullptr},
                    {"ifs_materials", nullptr},
-                   {ZMOD_CHANGE_MACRO, nullptr},
+                   {kZmodChangeMacro, nullptr},
                    // The module's toolhead sensor registers under this stock
                    // name ([ifs_toolhead_sensor toolhead]); its frames are the
                    // head-presence authority on that firmware.
@@ -447,6 +439,9 @@ void AmsBackendAd5xIfs::on_started() {
                             // printers is silent and falls back to 1000/1200.
                             fetch_filament_json();
                             register_zcolor_listener();
+                            helix::subscribe_vendor_state(
+                                *client_, "ifs_vendor_state", kVendorPushVendor, lifetime_.token(),
+                                [this](const json& payload) { on_vendor_state(payload); });
                             // notify_klippy_ready catches startup and
                             // FIRMWARE_RESTART; it's the point at which zmod
                             // is initialised and GET_ZCOLOR returns populated
@@ -462,8 +457,56 @@ void AmsBackendAd5xIfs::on_started() {
         });
 }
 
+void AmsBackendAd5xIfs::adopt_loaded_override_store(helix::ams::LoadedOverrideStore loaded) {
+    if (loaded.store) {
+        helix::ams::ingest_legacy_records(*loaded.store, helix::ams::LegacyLockKeys::LaneData,
+                                          backend_index());
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    override_store_ = std::move(loaded.store);
+    overrides_ = std::move(loaded.overrides);
+    seed_lane_records_seen_locked();
+}
+
+void AmsBackendAd5xIfs::publish_override_locked(int slot_index, const char* reason) {
+    if (lane_reread_owed_.load()) {
+        lane_saves_held_[slot_index] = reason;
+        return;
+    }
+    auto it = overrides_.find(slot_index);
+    if (it != overrides_.end() && override_store_) {
+        helix::ams::save_override_async(override_store_.get(), slot_index, it->second,
+                                        backend_log_tag(), reason);
+    }
+}
+
+void AmsBackendAd5xIfs::on_lane_reread_scheduled() {
+    lane_reread_owed_.store(true);
+}
+
+void AmsBackendAd5xIfs::on_lane_reread_finished(const std::unordered_set<int>& taken) {
+    release_held_lane_saves(taken);
+}
+
+void AmsBackendAd5xIfs::release_held_lane_saves(const std::unordered_set<int>& taken) {
+    // What a firmware change held back publishes now, unless the tool's record
+    // took the slot: that record is already what lane_data says.
+    if (lane_reread_pending())
+        return; // a newer read is coming, and it publishes
+    std::lock_guard<std::mutex> lock(mutex_);
+    lane_reread_owed_.store(false);
+    std::unordered_map<int, std::string> held;
+    held.swap(lane_saves_held_);
+    for (const auto& [slot, reason] : held) {
+        if (taken.count(slot) == 0) {
+            publish_override_locked(slot, reason.c_str());
+        }
+    }
+}
+
 void AmsBackendAd5xIfs::on_stopping() {
     unregister_moonraker_listeners();
+    vendor_push_.reset();
 }
 
 void AmsBackendAd5xIfs::request_resync() {
@@ -522,17 +565,13 @@ void AmsBackendAd5xIfs::handle_status(const json& status_obj) {
         }
     }
 
-    // Parse per-port filament sensors
-    // Leading space in sensor name is intentional — Klipper object naming convention
-    for (int port = 1; port <= NUM_PORTS; ++port) {
-        std::string key = "filament_switch_sensor _ifs_port_sensor_" + std::to_string(port);
-        if (status->contains(key)) {
-            const auto& sensor = (*status)[key];
-            if (sensor.contains("filament_detected") && sensor["filament_detected"].is_boolean()) {
-                parse_port_sensor(port, sensor["filament_detected"].get<bool>());
-                state_changed = true;
-                sensor_changed = true;
-            }
+    const ad5x::SensorFrame sensors = ad5x::parse_sensor_frame(*status);
+
+    for (int port = 1; port <= kNumPorts; ++port) {
+        if (const auto detected = sensors.port_detected[static_cast<size_t>(port - 1)]) {
+            parse_port_sensor(port, *detected);
+            state_changed = true;
+            sensor_changed = true;
         }
     }
 
@@ -544,105 +583,72 @@ void AmsBackendAd5xIfs::handle_status(const json& status_obj) {
         lock.lock();
     }
 
-    // A sensor object only counts as a real reading when it actually carries a
-    // boolean filament_detected. On a fresh boot Moonraker can return the stock
-    // filament_*_sensor object as a present-but-empty {} compat view while the
-    // live zmod_ifs_* sensor carries the real field; choosing a key purely by
-    // presence would let the empty stock object win and the real zmod reading be
-    // ignored (#1065 boot scenario). Prefer whichever namespace carries the
-    // field, stock first when both do (the historical order).
-    const auto has_reading = [&](const char* key) {
-        return status->contains(key) && (*status)[key].is_object() &&
-               (*status)[key].contains("filament_detected") &&
-               (*status)[key]["filament_detected"].is_boolean();
-    };
-
     // Native ZMOD IFS: single motion sensor replaces per-port presence sensors.
     // Maps to head_filament_ since it detects filament at the toolhead. The live
     // AD5X publishes this under the zmod_ifs_motion_sensor namespace rather than
-    // the stock filament_motion_sensor section, so accept either key.
-    const char* motion_key = has_reading("filament_motion_sensor ifs_motion_sensor")
-                                 ? "filament_motion_sensor ifs_motion_sensor"
-                                 : (has_reading("zmod_ifs_motion_sensor ifs_motion_sensor")
-                                        ? "zmod_ifs_motion_sensor ifs_motion_sensor"
-                                        : nullptr);
-    if (motion_key) {
-        const auto& motion = (*status)[motion_key];
-        if (motion.contains("filament_detected") && motion["filament_detected"].is_boolean()) {
-            bool detected = motion["filament_detected"].get<bool>();
-            bool was = head_filament_;
-            parse_head_sensor(detected);
-            // During a purge, ifs_motion_sensor activity means filament is still
-            // moving — the purge is progressing, not stalled. Reset the timeout
-            // clock so a long-but-healthy purge isn't falsely failed; the PURGING
-            // budget then measures time since the last motion (#1065 Bug 2).
-            if (system_info_.action == AmsAction::PURGING && detected) {
-                action_start_time_ = std::chrono::steady_clock::now();
-            }
-            // Motion-sensor activity means filament is still moving — a genuine
-            // progress signal for the indeterminate detector, for any phase of a
-            // tracked op (#1065 row 14), so a busy-but-moving op never reads as a
-            // frozen "Working…".
-            if (phase_tracker_.active && detected) {
-                note_phase_progress_locked();
-            }
-            // Phase tracker (active op WE started) advances the phase on a head
-            // transition. detect_load_unload_completion preserves legacy
-            // snap-to-IDLE when the tracker is inactive.
-            if (phase_tracker_.active && was != detected) {
-                on_head_transition_locked(detected);
-            }
-            detect_load_unload_completion(detected);
-            state_changed = true;
+    // the stock filament_motion_sensor section; parse_sensor_frame accepts either.
+    if (sensors.motion_detected) {
+        bool detected = *sensors.motion_detected;
+        bool was = head_filament_;
+        parse_head_sensor(detected);
+        // During a purge, ifs_motion_sensor activity means filament is still
+        // moving — the purge is progressing, not stalled. Reset the timeout
+        // clock so a long-but-healthy purge isn't falsely failed; the PURGING
+        // budget then measures time since the last motion (#1065 Bug 2).
+        if (system_info_.action == AmsAction::PURGING && detected) {
+            action_start_time_ = std::chrono::steady_clock::now();
         }
+        // Motion-sensor activity means filament is still moving — a genuine
+        // progress signal for the indeterminate detector, for any phase of a
+        // tracked op (#1065 row 14), so a busy-but-moving op never reads as a
+        // frozen "Working…".
+        if (phase_tracker_.active && detected) {
+            note_phase_progress_locked();
+        }
+        // Phase tracker (active op WE started) advances the phase on a head
+        // transition. detect_load_unload_completion preserves legacy
+        // snap-to-IDLE when the tracker is inactive.
+        if (phase_tracker_.active && was != detected) {
+            on_head_transition_locked(detected);
+        }
+        detect_load_unload_completion(detected);
+        state_changed = true;
     }
 
     // Parse head sensor. The live AD5X publishes this under the
     // zmod_ifs_switch_sensor namespace rather than the stock
     // filament_switch_sensor section, so accept either key (switch semantics).
     // The standalone module registers its toolhead sensor under the stock
-    // section with its own name ("toolhead"), so accept that too.
-    const char* head_key = has_reading("filament_switch_sensor head_switch_sensor")
-                               ? "filament_switch_sensor head_switch_sensor"
-                               : (has_reading("zmod_ifs_switch_sensor head_switch_sensor")
-                                      ? "zmod_ifs_switch_sensor head_switch_sensor"
-                                      : (has_reading("filament_switch_sensor toolhead")
-                                             ? "filament_switch_sensor toolhead"
-                                             : nullptr));
-    if (head_key) {
-        const auto& head = (*status)[head_key];
-        if (head.contains("filament_detected") && head["filament_detected"].is_boolean()) {
-            bool detected = head["filament_detected"].get<bool>();
-            bool was = head_filament_;
-            parse_head_sensor(detected);
-            // Latch the SWITCH sensor's own authority, separate from the conflated
-            // head_filament_ (which the motion sensor also writes, false-negating
-            // while loaded-idle). Only the switch's reading can authoritatively say
-            // the head is empty for the #1065 row 28 head-gate and for the runout
-            // detector (#1250). Maintain the runout edge state BEFORE overwriting
-            // the latch - note_head_switch_reading_locked needs the previous value.
-            note_head_switch_reading_locked(detected);
-            head_switch_seen_ = true;
-            head_switch_present_ = detected;
-            if (phase_tracker_.active && was != detected) {
-                on_head_transition_locked(detected);
-            }
-            detect_load_unload_completion(detected);
-            state_changed = true;
+    // section with its own name ("toolhead"); parse_sensor_frame accepts all three.
+    if (sensors.head_detected) {
+        bool detected = *sensors.head_detected;
+        bool was = head_filament_;
+        parse_head_sensor(detected);
+        // Latch the SWITCH sensor's own authority, separate from the conflated
+        // head_filament_ (which the motion sensor also writes, false-negating
+        // while loaded-idle). Only the switch's reading can authoritatively say
+        // the head is empty for the #1065 row 28 head-gate and for the runout
+        // detector (#1250). Maintain the runout edge state BEFORE overwriting
+        // the latch - note_head_switch_reading_locked needs the previous value.
+        note_head_switch_reading_locked(detected);
+        head_switch_seen_ = true;
+        head_switch_present_ = detected;
+        if (phase_tracker_.active && was != detected) {
+            on_head_transition_locked(detected);
         }
+        detect_load_unload_completion(detected);
+        state_changed = true;
     }
 
     // Parse extruder temp/target — primary HEATING-completion signal for the
     // load/unload phase tracker. High-frequency, so only mark state_changed
     // when the synthesized action actually moves (mirrors CFS).
-    if (status->contains("extruder")) {
-        const auto& extr = (*status)["extruder"];
-        if (extr.contains("target") && extr["target"].is_number()) {
-            last_extruder_target_deci_ = helix::units::to_decidegrees(extr["target"].get<double>());
+    if (sensors.has_extruder) {
+        if (sensors.extruder_target) {
+            last_extruder_target_deci_ = helix::units::to_decidegrees(*sensors.extruder_target);
         }
-        if (extr.contains("temperature") && extr["temperature"].is_number()) {
-            last_extruder_temp_deci_ =
-                helix::units::to_decidegrees(extr["temperature"].get<double>());
+        if (sensors.extruder_temperature) {
+            last_extruder_temp_deci_ = helix::units::to_decidegrees(*sensors.extruder_temperature);
         }
         if (phase_tracker_.active) {
             AmsAction before = system_info_.action;
@@ -663,7 +669,7 @@ void AmsBackendAd5xIfs::handle_status(const json& status_obj) {
         recompute_current_slot_locked();
 
         // Update all slot states
-        for (int i = 0; i < NUM_PORTS; ++i) {
+        for (int i = 0; i < kNumPorts; ++i) {
             update_slot_from_state(i);
         }
     }
@@ -754,41 +760,68 @@ void AmsBackendAd5xIfs::handle_status(const json& status_obj) {
                        helix::PrintJobState::PRINTING;
     }
 
+    // While the HelixPrint plugin pushes the file, the poll drops to a slow
+    // backstop.
+    refresh_vendor_push();
     auto now = std::chrono::steady_clock::now();
-    if (should_poll_json(printing_now, json_poll_was_printing_, now - last_json_poll_kick_)) {
+    if (should_poll_json(printing_now, json_poll_was_printing_, now - last_json_poll_kick_,
+                         vendor_push_.pushing())) {
         last_json_poll_kick_ = now;
         poll_adventurer_json();
     }
     json_poll_was_printing_ = printing_now;
 }
 
+void AmsBackendAd5xIfs::refresh_vendor_push() {
+    const helix::PluginFeatureProbe probe =
+        helix::current_plugin_feature(kVendorPushFeature, kVendorPushMinVersion);
+    const uint64_t connection = client_ ? client_->connection_generation() : 0;
+    if (vendor_push_.update(probe.state, probe.seq, connection)) {
+        last_json_poll_kick_ = std::chrono::steady_clock::now();
+        spdlog::debug("{} Adventurer5M.json pushed by the HelixPrint plugin; reading it once",
+                      backend_log_tag());
+        poll_adventurer_json();
+    }
+}
+
+void AmsBackendAd5xIfs::on_vendor_state(const json& payload) {
+    // The poll's own stand-down holds for a push too.
+    if (!vendor_push_.pushing() || ifs_module_live_.load()) {
+        return;
+    }
+    auto content = payload.find("content");
+    if (content == payload.end() || !content->is_string()) {
+        return;
+    }
+    apply_json_content(content->get_ref<const std::string&>(), "json_push");
+}
+
 bool AmsBackendAd5xIfs::should_poll_json(bool printing_now, bool was_printing,
-                                         std::chrono::steady_clock::duration since_last) {
+                                         std::chrono::steady_clock::duration since_last,
+                                         bool pushing) {
+    if (pushing) {
+        return since_last >= helix::kVendorPushBackstop;
+    }
     // printing->anything else: poll immediately rather than waiting out the slow
     // interval, so the firmware's post-print FFMInfo revert is seen as promptly
     // as it was before the backoff existed.
     if (was_printing && !printing_now) {
         return true;
     }
-    return since_last >= (printing_now ? JSON_POLL_PRINTING : JSON_POLL_IDLE);
+    return since_last >= (printing_now ? kJsonPollPrinting : kJsonPollIdle);
 }
 
 void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
+    const ad5x::SaveVariables parsed = ad5x::parse_save_variables(vars, var_prefix_);
+
     // Auto-detect variable prefix: lessWaste/zmod uses "less_waste_*", bambufy uses "bambufy_*".
     // Check once per status update — the prefix can't change at runtime, but we may not
     // see both sets of variables in the initial query.
-    if (vars.contains("bambufy_colors") || vars.contains("bambufy_tools")) {
-        if (var_prefix_ != "bambufy") {
-            var_prefix_ = "bambufy";
-            spdlog::debug("{} Detected bambufy variable prefix", backend_log_tag());
-        }
-        if (!ifs_macro_confirmed_missing_) {
-            has_ifs_vars_ = true;
-        }
-    } else if (vars.contains("less_waste_colors") || vars.contains("less_waste_tools")) {
-        if (var_prefix_ != "less_waste") {
-            var_prefix_ = "less_waste";
-            spdlog::debug("{} Detected lessWaste variable prefix", backend_log_tag());
+    if (parsed.prefix) {
+        if (var_prefix_ != *parsed.prefix) {
+            var_prefix_ = *parsed.prefix;
+            spdlog::debug("{} Detected {} variable prefix", backend_log_tag(),
+                          var_prefix_ == "bambufy" ? "bambufy" : "lessWaste");
         }
         if (!ifs_macro_confirmed_missing_) {
             has_ifs_vars_ = true;
@@ -802,27 +835,23 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
     // and don't get silently normalized to PLA on save (#904 root cause #2).
     // Always read regardless of has_ifs_vars_: user-defined types are
     // orthogonal to plugin activation.
-    if (vars.contains("bambufy_custom_types") && vars["bambufy_custom_types"].is_array()) {
-        std::vector<std::string> staged;
-        for (const auto& t : vars["bambufy_custom_types"]) {
-            if (t.is_string()) {
-                std::string name = t.get<std::string>();
-                if (!name.empty()) {
-                    staged.push_back(std::move(name));
-                }
-            }
-        }
-        size_t count = staged.size();
+    if (parsed.custom_types) {
+        size_t count = parsed.custom_types->size();
         {
             std::lock_guard<std::mutex> lock(custom_types_mutex_);
-            custom_material_types_ = std::move(staged);
+            custom_material_types_ = *parsed.custom_types;
         }
         if (count > 0) {
             spdlog::debug("{} Loaded {} bambufy_custom_types entries", backend_log_tag(), count);
         }
     }
 
-    const std::string p = var_prefix_;
+    // The standalone module's lane records. Stored whatever the module latch
+    // says, because this frame can arrive before the one that latches it, and
+    // ahead of the plugin branch's early return; unload_lane_decision_locked()
+    // and apply_zcolor_result() read them only while the module is live.
+    module_at_hub_ = parsed.module_at_hub;
+    module_loaded_ = parsed.module_loaded;
 
     // NOTE on colors/types: <prefix>_colors and <prefix>_types live in the
     // lessWaste/bambufy plugin's PRIVATE save_variables namespace. zmod does
@@ -866,15 +895,7 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
         // existence check catches it: has_ifs_vars_ stays false and we never
         // reach this branch. The guard below only matters for the
         // both-installed-then-deactivated scenario.
-        const std::string other_p = (p == "bambufy") ? "less_waste" : "bambufy";
-        const bool have_self_tools = vars.contains(p + "_tools") && vars[p + "_tools"].is_array();
-        const bool have_other_tools =
-            vars.contains(other_p + "_tools") && vars[other_p + "_tools"].is_array();
-        bool conflict = false;
-        if (have_self_tools && have_other_tools) {
-            conflict = vars[p + "_tools"] != vars[other_p + "_tools"];
-        }
-        if (conflict) {
+        if (parsed.tools_conflict) {
             spdlog::warn("{} Both bambufy_tools and less_waste_tools present and disagree "
                          "— stale data from a deactivated plugin; falling back to default "
                          "1:1 tool mapping",
@@ -883,49 +904,35 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
             return;
         }
 
-        if (have_self_tools) {
-            const auto& tools = vars[p + "_tools"];
-            for (size_t i = 0; i < std::min(tools.size(), static_cast<size_t>(TOOL_MAP_SIZE));
-                 ++i) {
-                if (tools[i].is_number_integer()) {
-                    tool_map_[i] = tools[i].get<int>();
-                }
+        for (size_t i = 0; i < parsed.tools.size(); ++i) {
+            if (parsed.tools[i]) {
+                tool_map_[i] = *parsed.tools[i];
             }
         }
 
         // #1247 shape guard: lessWaste's `_colors`/`_types` arrays are
-        // TOOL_MAP_SIZE-entry tool-indexed state, but our mirror bug pushed
+        // kToolMapSize-entry tool-indexed state, but our mirror bug pushed
         // 4-entry port-indexed lists — and `_IFS_VARS` replaces the arrays
         // wholesale, so every push truncated them (after which `_RUNOUT_HEAD`'s
         // scan of tools 4..15 could never find a backup lane). SAVE_VARIABLE
         // persists the damage across reboots, and lessWaste's own start dialog
         // only re-heals it until our next push. Detect the truncated shape and
         // stage a repair; handle_status() dispatches it with mutex_
-        // released. bambufy arrays legitimately hold 4 entries, so the check is
-        // lessWaste-only. Not an array (string/absent) means the plugin never
-        // wrote the row or uses another form — leave it alone.
-        if (p == "less_waste" && !ifs_vars_repair_staged_) {
-            for (const std::string key : {p + "_colors", p + "_types"}) {
-                const auto it = vars.find(key);
-                if (it != vars.end() && it->is_array() &&
-                    it->size() < static_cast<size_t>(TOOL_MAP_SIZE)) {
-                    spdlog::warn("{} {} carries {} entries; lessWaste expects {} "
-                                 "tool-indexed — staging _IFS_VARS repair (#1247)",
-                                 backend_log_tag(), key, it->size(), TOOL_MAP_SIZE);
-                    ifs_vars_repair_staged_ = true;
-                    break;
-                }
-            }
+        // released. bambufy arrays legitimately hold 4 entries, so the parse
+        // reports a short list for lessWaste only.
+        if (parsed.short_tool_list && !ifs_vars_repair_staged_) {
+            spdlog::warn("{} {} carries {} entries; lessWaste expects {} "
+                         "tool-indexed — staging _IFS_VARS repair (#1247)",
+                         backend_log_tag(), parsed.short_tool_list->first,
+                         parsed.short_tool_list->second, kToolMapSize);
+            ifs_vars_repair_staged_ = true;
         }
 
-        // Current tool (-1 = none, 0-15 = tool number)
-        if (vars.contains(p + "_current_tool") && vars[p + "_current_tool"].is_number_integer()) {
-            active_tool_ = vars[p + "_current_tool"].get<int>();
+        if (parsed.current_tool) {
+            active_tool_ = *parsed.current_tool;
         }
-
-        // External/bypass mode (0 or 1)
-        if (vars.contains(p + "_external") && vars[p + "_external"].is_number_integer()) {
-            external_mode_ = (vars[p + "_external"].get<int>() != 0);
+        if (parsed.external) {
+            external_mode_ = *parsed.external;
         }
 
         // Rebuild SlotRegistry tool mapping from IFS tool_map_. Only meaningful
@@ -934,8 +941,7 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
         // running this loop would lock those defaults in over real data that
         // might arrive later via apply_zcolor_result's extruder_slot path.
         rebuild_slot_tool_mapping_locked();
-    } else if (ifs_module_live_.load() && vars.contains("ifs_loaded") &&
-               vars["ifs_loaded"].is_number_integer()) {
+    } else if (ifs_module_live_.load() && parsed.module_loaded) {
         // Standalone IFS module: `ifs_loaded` is the module's own
         // success-confirmed record of the lane in the nozzle (SAVE_VARIABLE at
         // the end of IFS_LOAD / IFS_UNLOAD, cleared on eject), and it survives
@@ -947,7 +953,7 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
         // the module is live. Gated on the latch because save_variables rows
         // persist after a firmware change, same lesson as the plugin rows
         // above.
-        const int loaded = vars["ifs_loaded"].get<int>(); // 1-based; 0 = none
+        const int loaded = *module_loaded_;
         if (loaded != seated_chan_) {
             spdlog::debug("{} module ifs_loaded={} (was Chan {}) — adopting as seated channel",
                           backend_log_tag(), loaded, seated_chan_);
@@ -956,12 +962,13 @@ void AmsBackendAd5xIfs::parse_save_variables(const json& vars) {
         // Keep current_tool in step too — handle_status snapshots
         // active_tool_ into system_info_ on this same frame, and the identity
         // tool map the latch installed makes tool == channel - 1.
-        active_tool_ = (loaded >= 1 && loaded <= NUM_PORTS) ? loaded - 1 : -1;
+        active_tool_ = (loaded >= 1 && loaded <= kNumPorts) ? loaded - 1 : -1;
         module_last_chan_ = loaded;
+        sync_remembered_lane_to_module_locked();
     }
 
     // Sync all slots from cached state
-    for (int i = 0; i < NUM_PORTS; ++i) {
+    for (int i = 0; i < kNumPorts; ++i) {
         update_slot_from_state(i);
     }
 }
@@ -972,7 +979,7 @@ void AmsBackendAd5xIfs::rebuild_slot_tool_mapping_locked() {
     // from save_variables, the Forge-X module from printer.ifs frames); this
     // is the one place the reverse direction is projected onto the slot model
     // the UI reads. Caller holds mutex_.
-    for (int i = 0; i < NUM_PORTS; ++i) {
+    for (int i = 0; i < kNumPorts; ++i) {
         slots_.set_tool_mapping(i, find_first_tool_for_port(i + 1)); // port is 1-based
     }
 }
@@ -981,12 +988,12 @@ void AmsBackendAd5xIfs::install_identity_tool_map_locked() {
     // Clear first: `_tools` is a 16-entry tool-indexed array, and a tool left
     // aimed at a lane past T3 still shows up in get_system_info()'s attachment
     // map, which carries no contract gate.
-    tool_map_.fill(UNMAPPED_PORT);
-    for (int t = 0; t < NUM_PORTS; ++t) {
+    tool_map_.fill(kUnmappedPort);
+    for (int t = 0; t < kNumPorts; ++t) {
         tool_map_[static_cast<size_t>(t)] = t + 1;
     }
     rebuild_slot_tool_mapping_locked();
-    for (int i = 0; i < NUM_PORTS; ++i) {
+    for (int i = 0; i < kNumPorts; ++i) {
         update_slot_from_state(i);
     }
 }
@@ -1052,28 +1059,28 @@ bool AmsBackendAd5xIfs::parse_ifs_tool_map_locked(const nlohmann::json& ifs_obje
         }
     }
 
-    std::array<int, TOOL_MAP_SIZE> parsed{};
-    parsed.fill(UNMAPPED_PORT);
+    std::array<int, kToolMapSize> parsed{};
+    parsed.fill(kUnmappedPort);
     for (auto entry = it->begin(); entry != it->end(); ++entry) {
         const auto tool_number = helix::text_io::parse_leading<int>(entry.key());
         if (!tool_number) {
             continue; // not a tool number
         }
         const int tool = *tool_number;
-        if (tool < 0 || tool >= TOOL_MAP_SIZE) {
+        if (tool < 0 || tool >= kToolMapSize) {
             continue;
         }
         const json& lane = entry.value();
         if (lane.is_number_integer()) {
             const int port = lane.get<int>();
-            if (port >= 1 && port <= NUM_PORTS) {
+            if (port >= 1 && port <= kNumPorts) {
                 parsed[static_cast<size_t>(tool)] = port;
             }
         }
     }
 
     bool changed = false;
-    for (size_t t = 0; t < TOOL_MAP_SIZE; ++t) {
+    for (size_t t = 0; t < kToolMapSize; ++t) {
         if (tool_map_[t] != parsed[t]) {
             tool_map_[t] = parsed[t];
             changed = true;
@@ -1086,7 +1093,7 @@ bool AmsBackendAd5xIfs::parse_ifs_tool_map_locked(const nlohmann::json& ifs_obje
     // Rebuild the per-lane reverse mapping so SlotInfo::mapped_tool badges
     // follow the wire table (mirrors the parse_save_variables tail).
     rebuild_slot_tool_mapping_locked();
-    for (int i = 0; i < NUM_PORTS; ++i) {
+    for (int i = 0; i < kNumPorts; ++i) {
         update_slot_from_state(i);
     }
     return true;
@@ -1094,7 +1101,7 @@ bool AmsBackendAd5xIfs::parse_ifs_tool_map_locked(const nlohmann::json& ifs_obje
 
 void AmsBackendAd5xIfs::parse_port_sensor(int port_1based, bool detected) {
     int slot = port_1based - 1;
-    if (slot >= 0 && slot < NUM_PORTS) {
+    if (slot >= 0 && slot < kNumPorts) {
         bool was_first = !has_per_port_sensors_;
         const bool was_present = port_presence_[static_cast<size_t>(slot)];
         bool changed = was_present != detected;
@@ -1155,7 +1162,7 @@ bool AmsBackendAd5xIfs::head_empty_for_unload_routing_locked() const {
 }
 
 void AmsBackendAd5xIfs::update_slot_from_state(int slot_index) {
-    if (slot_index < 0 || slot_index >= NUM_PORTS)
+    if (slot_index < 0 || slot_index >= kNumPorts)
         return;
 
     auto* entry = slots_.get_mut(slot_index);
@@ -1513,11 +1520,39 @@ bool AmsBackendAd5xIfs::sync_override_to_firmware_locked(int slot_index, uint32_
     // lane source holds is guarded the same way, which is how a linked spool's
     // material survives a type the printer's own menu sets. To re-enable
     // auto-track on a previously-edited slot the user calls clear_slot_override.
-    const helix::ams::DeclaredOnLane declared = helix::ams::declared_on_lane(lane_id(slot_index));
+    //
+    // The tool that restated the firmware may have rewritten the lane's record
+    // beside it, so what the mirror changes is published only once lane_data
+    // has been read again (publish_override_locked()).
+    schedule_lane_record_reread();
+
+    // A value the lane's user record holds that the override does not declare
+    // is another tool's statement, and this restatement is the change it
+    // yields to (prestonbrown/helixscreen#1632): it guards nothing, and on an
+    // unlinked lane the spool name that described it goes with it, along with
+    // a colour name nobody declared. A linked lane's name is its spool's.
+    auto it = overrides_.find(slot_index);
+    helix::ams::FilamentSlotOverride* record = it == overrides_.end() ? nullptr : &it->second;
+    const auto lane = lane_id(slot_index);
+    const helix::ams::DeclaredOnLane held = helix::ams::declared_on_lane(lane);
+    const helix::ams::DeclaredOnLane declared = helix::ams::declared_on_lane(lane, record);
+    const bool outside_statement =
+        (held.color && !declared.color) || (held.material && !declared.material);
+    const bool name_released = outside_statement && record && record->spoolman_id == 0 &&
+                               !helix::ams::declares_spool_name(*record);
+    if (name_released) {
+        record->spool_name.clear();
+        if (!helix::ams::declares_color(*record)) {
+            record->color_name.clear();
+        }
+    }
     bool changed = helix::ams::mirror_firmware_to_lane_data(
-        override_store_.get(), overrides_, slot_index, firmware_color, firmware_material,
+        /*store=*/nullptr, overrides_, slot_index, firmware_color, firmware_material,
         /*slot_has_filament=*/true, helix::ams::MirrorPolicy::OverwriteAlways, backend_log_tag(),
         declared);
+    if (changed || name_released) {
+        publish_override_locked(slot_index, "auto-mirror");
+    }
 
     // The lane's stored declaration of what the mirror just rewrote goes with
     // it, or the two stores disagree and the stronger record paints a value the
@@ -1528,13 +1563,14 @@ bool AmsBackendAd5xIfs::sync_override_to_firmware_locked(int slot_index, uint32_
     // Not gated on `changed`, which says the override needed moving. The lane
     // is a separate store and can be stale on its own, and this path runs only
     // where firmware has deliberately restated the field.
-    auto it = overrides_.find(slot_index);
+    it = overrides_.find(slot_index);
     RetractedFields restated;
     restated.color = it == overrides_.end() || !helix::ams::declares_color(it->second);
     // A linked spool's material never reaches firmware, so a type firmware
     // states does not retract what the server states.
     restated.material = it == overrides_.end() ||
                         (!helix::ams::declares_material(it->second) && !declared.material);
+    restated.spool_name = name_released;
     retract_lane_declaration_locked(slot_index, restated);
 
     if (!changed)
@@ -1551,7 +1587,7 @@ bool AmsBackendAd5xIfs::sync_override_to_firmware_locked(int slot_index, uint32_
 void AmsBackendAd5xIfs::retract_lane_declaration_locked(int slot_index, RetractedFields fields) {
     // Caller holds mutex_. See the header for why both stores have to move
     // together.
-    if (!fields.color && !fields.material && !fields.catalog) {
+    if (!fields.color && !fields.material && !fields.catalog && !fields.spool_name) {
         return;
     }
     helix::ams::retract_lane_declarations(lane_id(slot_index),
@@ -1569,6 +1605,9 @@ void AmsBackendAd5xIfs::retract_lane_declaration_locked(int slot_index, Retracte
                                               if (fields.catalog) {
                                                   kept.catalog_id.reset();
                                                   kept.product_name.reset();
+                                              }
+                                              if (fields.spool_name) {
+                                                  kept.spool_name.reset();
                                               }
                                           });
 }
@@ -1621,11 +1660,8 @@ void AmsBackendAd5xIfs::release_color_material_locks_locked(int slot_index,
     retract_lane_declaration_locked(slot_index, released);
 
     // Persist so a restart reloads the released record rather than the locked
-    // one. Capture by value: the callback can fire long after this returns.
-    if (override_store_) {
-        helix::ams::save_override_async(override_store_.get(), slot_index, ovr, backend_log_tag(),
-                                        "lock release");
-    }
+    // one.
+    publish_override_locked(slot_index, "lock release");
 }
 
 void AmsBackendAd5xIfs::release_locked_override_keep_identity_locked(int slot_index,
@@ -1703,7 +1739,7 @@ void AmsBackendAd5xIfs::unlock_auto_tracked_override_on_insert_locked(int slot_i
 }
 
 void AmsBackendAd5xIfs::clear_slot_override(int slot_index) {
-    if (slot_index < 0 || slot_index >= NUM_PORTS) {
+    if (slot_index < 0 || slot_index >= kNumPorts) {
         spdlog::warn("{} clear_slot_override: invalid slot {}", backend_log_tag(), slot_index);
         return;
     }
@@ -1720,7 +1756,7 @@ void AmsBackendAd5xIfs::clear_slot_override(int slot_index) {
         clear_override_locked(slot_index, &entry->info);
     }
 
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 }
 
 // --- State queries ---
@@ -1728,11 +1764,11 @@ void AmsBackendAd5xIfs::clear_slot_override(int slot_index) {
 void AmsBackendAd5xIfs::publish_external_spool_lane(const SlotInfo* spool) {
     // ZMOD never writes lane_data — our mirror store owns it — so no separate
     // publish store is needed (unlike AFC/HH, whose plugins own the namespace).
-    // IFS is fixed at NUM_PORTS bays; the extern lane rides one past.
+    // IFS is fixed at kNumPorts bays; the extern lane rides one past.
     if (!override_store_ || !system_info_.supports_bypass) {
         return;
     }
-    helix::ams::publish_external_lane(override_store_.get(), NUM_PORTS, spool, backend_log_tag());
+    helix::ams::publish_external_lane(override_store_.get(), kNumPorts, spool, backend_log_tag());
 }
 
 helix::FirmwareRouting AmsBackendAd5xIfs::firmware_default_routing() const {
@@ -1749,10 +1785,10 @@ helix::FirmwareRouting AmsBackendAd5xIfs::firmware_default_routing() const {
     }
 
     helix::FirmwareRouting routing;
-    routing.head_for_tool.reserve(static_cast<size_t>(TOOL_MAP_SIZE));
-    for (int t = 0; t < TOOL_MAP_SIZE; ++t) {
+    routing.head_for_tool.reserve(static_cast<size_t>(kToolMapSize));
+    for (int t = 0; t < kToolMapSize; ++t) {
         const int port = tool_map_[static_cast<size_t>(t)]; // 1-based; 5 = unmapped
-        routing.head_for_tool.push_back(port >= 1 && port <= NUM_PORTS ? port - 1 : -1);
+        routing.head_for_tool.push_back(port >= 1 && port <= kNumPorts ? port - 1 : -1);
     }
     routing.fallback_head = -1; // tools past the table have no port
     return routing;
@@ -1772,9 +1808,9 @@ AmsSystemInfo AmsBackendAd5xIfs::get_system_info() const {
 
     // Replace registry's tool map with IFS-specific 16-entry mapping
     info.tool_to_slot_map.clear();
-    for (int t = 0; t < TOOL_MAP_SIZE; ++t) {
+    for (int t = 0; t < kToolMapSize; ++t) {
         int port = tool_map_[static_cast<size_t>(t)];
-        if (port >= 1 && port <= NUM_PORTS) {
+        if (port >= 1 && port <= kNumPorts) {
             info.tool_to_slot_map.push_back(port - 1);
         } else {
             info.tool_to_slot_map.push_back(-1);
@@ -1845,9 +1881,9 @@ PathSegment AmsBackendAd5xIfs::get_filament_segment() const {
         return PathSegment::NOZZLE;
     }
     // Check if active tool's port has filament
-    if (active_tool_ >= 0 && active_tool_ < TOOL_MAP_SIZE) {
+    if (active_tool_ >= 0 && active_tool_ < kToolMapSize) {
         int port = tool_map_[static_cast<size_t>(active_tool_)];
-        if (port >= 1 && port <= NUM_PORTS && port_presence_[static_cast<size_t>(port - 1)]) {
+        if (port >= 1 && port <= kNumPorts && port_presence_[static_cast<size_t>(port - 1)]) {
             return PathSegment::LANE;
         }
     }
@@ -1856,7 +1892,7 @@ PathSegment AmsBackendAd5xIfs::get_filament_segment() const {
 
 PathSegment AmsBackendAd5xIfs::get_slot_filament_segment(int slot_index) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (slot_index < 0 || slot_index >= NUM_PORTS) {
+    if (slot_index < 0 || slot_index >= kNumPorts) {
         return PathSegment::NONE;
     }
 
@@ -1901,7 +1937,7 @@ AmsError AmsBackendAd5xIfs::do_load_filament(int slot_index) {
         // currently seated, INSERT_PRUTOK_IFS will run an implicit UNLOAD of
         // it before loading the new lane. The default 90s LOADING budget
         // would fire mid-swap; flip swap_expected so check_action_timeout
-        // applies SWAP_LOADING_TIMEOUT_SECONDS, and on_head_transition_locked
+        // applies kSwapLoadingTimeoutSeconds, and on_head_transition_locked
         // resets the LOADING clock when the implicit-unload head drop fires.
         // seated_chan_ is the live seated-port authority (1-based; 0 = none).
         if (seated_chan_ > 0 && seated_chan_ != port) {
@@ -1922,34 +1958,44 @@ AmsError AmsBackendAd5xIfs::do_load_filament(int slot_index) {
     // it acks only after the purge fully runs. Like the unload, the synthesized
     // Purge phase has no sensor event and the confirming query can silently fail
     // on native ZMOD — without this the load sticks at Purge until the 90s
-    // timeout flips to ERROR (raza616 stuck-on-Purging). on_complete fires on a
-    // bg thread, so hop to the main thread before touching state.
+    // timeout flips to ERROR (raza616 stuck-on-Purging).
     //
     // ensure_homed_then() WITHOUT skip_homing does not double-home (#1248): the
     // macro's leading _G28 is conditional on homed_axes, so once our G28 has
     // run it falls through - one home either way.
-    auto token = lifetime_.token();
     if (ifs_module_live_.load()) {
         // Standalone module: IFS_LOAD SLOT=n is the whole choreography - heat
         // to the slot material's own handling temperature (no TEMP= needed),
         // unload whichever lane is seated, feed to the toolhead sensor, then
         // the colour-distance-scaled purge. Same ack-finalize contract as the
         // zmod macro below: the ack fires only after the purge fully ran.
-        return ensure_homed_then("IFS_LOAD SLOT=" + std::to_string(port), [this, token]() {
-            token.defer("Ad5xIfsBackend::load_macro_complete",
-                        [this]() { finalize_op_after_macro(/*is_unload=*/false); });
-        });
+        return dispatch_load_macro("IFS_LOAD SLOT=" + std::to_string(port));
     }
-    return ensure_homed_then("INSERT_PRUTOK_IFS PRUTOK=" + std::to_string(port), [this, token]() {
-        token.defer("Ad5xIfsBackend::load_macro_complete",
-                    [this]() { finalize_op_after_macro(/*is_unload=*/false); });
-    });
+    return dispatch_load_macro("INSERT_PRUTOK_IFS PRUTOK=" + std::to_string(port));
+}
+
+AmsError AmsBackendAd5xIfs::dispatch_load_macro(std::string gcode) {
+    auto token = lifetime_.token();
+    return ensure_homed_then(
+        std::move(gcode), [this]() { finalize_op_after_macro(/*is_unload=*/false); },
+        [this, token](const MoonrakerError& err) {
+            token.defer("Ad5xIfsBackend::load_macro_failed",
+                        [this, err]() { fail_op_after_macro(/*is_unload=*/false, err); });
+        },
+        IMoonrakerAPI::kAmsOperationTimeoutMs, /*skip_homing=*/false, /*silent=*/true,
+        // The firmware's own `!!` error is the user-facing report; this
+        // callback only moves the op to ERROR.
+        /*caller_surfaces_errors=*/false);
 }
 
 AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
     bool head_empty;
     int current_slot;
     int seated_slot; // 0-based slot of the IFS_STATUS-seated port (-1 = none)
+    UnloadLaneDecision decision;
+    bool ffm_file_read;
+    std::optional<int> ffm_file_channel;
+    int nozzle_target_deci;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         // Stamp here, at the top, and not in the heated-unload branch below:
@@ -1966,7 +2012,13 @@ AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
         head_empty = head_empty_for_unload_routing_locked();
         current_slot = system_info_.current_slot;
         seated_slot = seated_chan_ > 0 ? seated_chan_ - 1 : -1;
+        decision = unload_lane_decision_locked();
+        ffm_file_read = ffm_file_read_;
+        ffm_file_channel = ffm_file_channel_;
+        nozzle_target_deci = last_extruder_target_deci_;
     }
+    const bool module_live = ifs_module_live_.load();
+    bool clear_toolhead = slot_index == kClearToolheadSlot;
 
     // A specific slot that is NOT the firmware's active slot is never seated at
     // the toolhead — its filament sits in the lane, not the nozzle. Route it to a
@@ -2018,6 +2070,12 @@ AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
     // toolhead, so route to the cold per-lane retract instead of a guaranteed
     // no-op (7AC4SDEX: head_switch_sensor empty, ifs_motion_sensor present — the
     // switch pair still calls that empty, so 7AC4SDEX keeps this branch).
+    if (head_empty && clear_toolhead) {
+        spdlog::info("{} Toolhead clear with empty toolhead sensor -> nothing to unload",
+                     backend_log_tag());
+        return AmsError(AmsResult::WRONG_STATE, "unload_filament: head sensor empty",
+                        lv_tr("Nothing to unload: no filament at the nozzle"));
+    }
     if (head_empty) {
         // "Unload whatever is active" (slot_index < 0) needs a concrete lane for
         // the cold eject — resolve through the seated channel, then the active
@@ -2038,6 +2096,79 @@ AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
         spdlog::info("{} Unload with empty toolhead sensor -> cold lane eject (slot {})",
                      backend_log_tag(), eject_slot);
         return eject_lane(eject_slot);
+    }
+
+    // With no live active slot, decide_unload_lane() names the lane from the
+    // records (#1324). Anything only the user can answer - which lane, or
+    // whether to clear the extruder alone - is refused here, before anything
+    // heats, and the caller asks (unload_lane_question()).
+    int lane = slot_index;
+    if (!clear_toolhead && slot_index < 0 && current_slot < 0) {
+        switch (decision.verdict) {
+        case UnloadLaneVerdict::UnloadLane:
+            lane = decision.lane;
+            break;
+        case UnloadLaneVerdict::ConfirmClear:
+            spdlog::info("{} Toolhead unload with no lane holding filament -> refused, the "
+                         "extruder clear must be confirmed",
+                         backend_log_tag());
+            return AmsError(AmsResult::WRONG_STATE,
+                            "unload_filament: only an extruder clear is possible, unconfirmed",
+                            lv_tr("Confirm clearing the extruder to unload it"));
+        case UnloadLaneVerdict::ConfirmLane:
+        case UnloadLaneVerdict::PickLane:
+            spdlog::info("{} Toolhead unload with no active, seated or remembered lane -> "
+                         "refused, the lane must be chosen",
+                         backend_log_tag());
+            return AmsError(AmsResult::WRONG_STATE,
+                            "unload_filament: no lane names the filament in the toolhead",
+                            lv_tr("Choose which lane is in the toolhead to unload it"));
+        case UnloadLaneVerdict::NotToolhead:
+            break;
+        }
+    }
+    // The module's IFS_UNLOAD is always told the lane: bare, it falls back on
+    // its own records, which can disagree with the active slot shown here.
+    if (module_live && !clear_toolhead && lane < 0 && current_slot >= 0) {
+        lane = current_slot;
+    }
+
+    // Native ZMOD unloads the lane in FFMInfo.channel. With no active slot
+    // that record has to be the lane being unloaded, and only the file says
+    // what it holds: Helix's own copy is zeroed on an eject while the file
+    // keeps the ejected lane.
+    bool declare_lane = false;
+    if (!module_live && !clear_toolhead && lane >= 0 && current_slot < 0) {
+        switch (native_lane_dispatch(lane, ffm_file_read, ffm_file_channel)) {
+        case NativeLaneDispatch::AsRecorded:
+            break;
+        case NativeLaneDispatch::Declare:
+            declare_lane = true;
+            break;
+        case NativeLaneDispatch::RecordUnread:
+            spdlog::info("{} Toolhead unload of slot {} before FFMInfo was read -> refused, "
+                         "re-reading",
+                         backend_log_tag(), lane);
+            read_adventurer_json();
+            return AmsError(AmsResult::WRONG_STATE, "unload_filament: FFMInfo.channel not read yet",
+                            lv_tr("Still reading the printer's lane record. Try again in a "
+                                  "moment."));
+        case NativeLaneDispatch::NoRecord:
+            spdlog::info("{} Toolhead unload of slot {} with no FFMInfo.channel in the file -> "
+                         "refused, only the extruder clear can run",
+                         backend_log_tag(), lane);
+            return AmsError(AmsResult::WRONG_STATE,
+                            "unload_filament: Adventurer5M.json has no FFMInfo.channel",
+                            no_lane_record_message());
+        case NativeLaneDispatch::RecordNamesOther:
+            spdlog::info("{} Toolhead unload of slot {} while FFMInfo.channel={} -> refused",
+                         backend_log_tag(), lane, ffm_file_channel.value_or(0));
+            return AmsError(
+                AmsResult::WRONG_STATE, "unload_filament: FFMInfo.channel names another lane",
+                fmt::format(fmt::runtime(lv_tr("The printer records lane {} in the toolhead, "
+                                               "not this one")),
+                            ffm_file_channel.value_or(0)));
+        }
     }
 
     {
@@ -2075,30 +2206,44 @@ AmsError AmsBackendAd5xIfs::do_unload_filament(int slot_index) {
     // Retract phase has no sensor event, and the IFS_STATUS Chan==0 / GET_ZCOLOR
     // confirm can silently fail on native ZMOD — leaving the op stuck at Retract
     // until the 90s timeout flips it to ERROR (raza616 stuck-on-Retract). The
-    // macro ack is the reliable "unload fully ran" signal. on_complete fires on a
-    // bg thread, so hop to the main thread before touching state.
+    // macro ack is the reliable "unload fully ran" signal.
+    auto on_complete = [this]() { finalize_op_after_macro(/*is_unload=*/true); };
+    // A refusal for want of an IMoonrakerAPI runs on_error on this stack, so
+    // the failure still hops to main itself.
     auto token = lifetime_.token();
+    auto on_error = [this, token](const MoonrakerError& err) {
+        token.defer("Ad5xIfsBackend::unload_macro_failed",
+                    [this, err]() { fail_op_after_macro(/*is_unload=*/true, err); });
+    };
     AmsError result;
-    if (ifs_module_live_.load()) {
+    if (clear_toolhead) {
+        spdlog::info("{} No lane can be named for the toolhead filament -> clearing the "
+                     "extruder only",
+                     backend_log_tag());
+        result = execute_gcode(clear_toolhead_gcode(module_live, nozzle_target_deci), on_complete,
+                               on_error);
+    } else if (module_live) {
         // Standalone module: IFS_UNLOAD takes the nozzle contents back into the
         // lane and leaves it threaded (70 mm), resolving the heat from the
-        // slot's material. slot_index < 0 ("unload whatever is active") sends
-        // it bare - the macro defaults SLOT= from its own ifs_loaded record,
-        // exactly the "current channel" the zmod macro resolves internally.
+        // slot's material.
         std::string cmd = "IFS_UNLOAD";
-        if (slot_index >= 0) {
+        if (lane >= 0) {
             cmd += " SLOT=";
-            cmd += std::to_string(slot_index + 1); // DISPLAY_NUMBERING_OK: gcode wire, not a label
+            cmd += std::to_string(lane + 1); // DISPLAY_NUMBERING_OK: gcode wire, not a label
         }
-        result = execute_gcode(std::move(cmd), [this, token]() {
-            token.defer("Ad5xIfsBackend::unload_macro_complete",
-                        [this]() { finalize_op_after_macro(/*is_unload=*/true); });
-        });
+        result = execute_gcode(std::move(cmd), on_complete, on_error);
     } else {
-        result = execute_gcode("_IFS_REMOVE_CURRENT_PRUTOK", [this, token]() {
-            token.defer("Ad5xIfsBackend::unload_macro_complete",
-                        [this]() { finalize_op_after_macro(/*is_unload=*/true); });
-        });
+        // _IFS_REMOVE_CURRENT_PRUTOK unloads the lane in FFMInfo.channel and
+        // does nothing at all when that is 0, so a 0 gets the lane declared
+        // first: SET_EXTRUDER_SLOT only writes FFMInfo.channel and moves nothing.
+        std::string cmd;
+        if (declare_lane) {
+            cmd = "SET_EXTRUDER_SLOT SLOT=" +
+                  std::to_string(lane + 1) + // DISPLAY_NUMBERING_OK: gcode wire, not a label
+                  "\n";
+        }
+        cmd += "_IFS_REMOVE_CURRENT_PRUTOK";
+        result = execute_gcode(std::move(cmd), on_complete, on_error);
     }
     // Backup re-query: for inactive-slot unloads on native ZMOD the head
     // sensor never changes, so detect_load_unload_completion() won't fire.
@@ -2150,7 +2295,7 @@ void AmsBackendAd5xIfs::finalize_op_after_macro(bool is_unload) {
                 // Unlike the Chan/GET_ZCOLOR finalize paths (which refresh slots
                 // in their own loops), this gcode-ack path otherwise wouldn't —
                 // so the just-cleared head wouldn't reach the cached slot status.
-                for (int i = 0; i < NUM_PORTS; ++i) {
+                for (int i = 0; i < kNumPorts; ++i) {
                     update_slot_from_state(i);
                 }
             }
@@ -2164,6 +2309,31 @@ void AmsBackendAd5xIfs::finalize_op_after_macro(bool is_unload) {
         // Reconcile presence/colours now that the lane state changed (drives the
         // present<->absent override-clear via GET_ZCOLOR / IFS_STATUS Ports).
         schedule_zcolor_query(is_unload ? "unload_macro_complete" : "load_macro_complete");
+        emit_event(EVENT_STATE_CHANGED);
+    }
+}
+
+void AmsBackendAd5xIfs::fail_op_after_macro(bool is_unload, const MoonrakerError& err) {
+    if (err.type == MoonrakerErrorType::TIMEOUT) {
+        return;
+    }
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (phase_tracker_.active && phase_tracker_.is_unload == is_unload) {
+            spdlog::warn("{} {} macro failed -> ERROR: {}", backend_log_tag(),
+                         is_unload ? "Unload" : "Load", err.message);
+            system_info_.action = AmsAction::ERROR;
+            system_info_.operation_indeterminate = false;
+            end_phase_tracking_locked();
+            if (!err.message.empty()) {
+                set_operation_detail_locked(err.message);
+            }
+            changed = true;
+        }
+    }
+    if (changed) {
+        schedule_zcolor_query(is_unload ? "unload_macro_failed" : "load_macro_failed");
         emit_event(EVENT_STATE_CHANGED);
     }
 }
@@ -2190,7 +2360,7 @@ AmsError AmsBackendAd5xIfs::do_select_slot(int slot_index) {
 }
 
 AmsError AmsBackendAd5xIfs::do_change_tool(int tool_number) {
-    if (tool_number < 0 || tool_number >= TOOL_MAP_SIZE) {
+    if (tool_number < 0 || tool_number >= kToolMapSize) {
         return AmsErrorHelper::tool_out_of_range(tool_number);
     }
 
@@ -2200,7 +2370,7 @@ AmsError AmsBackendAd5xIfs::do_change_tool(int tool_number) {
         port = tool_map_[static_cast<size_t>(tool_number)];
     }
 
-    if (port < 1 || port > NUM_PORTS) {
+    if (port < 1 || port > kNumPorts) {
         return AmsErrorHelper::invalid_parameter("Tool " + helix::ui::tool_label(tool_number) +
                                                  " is not mapped to any port");
     }
@@ -2251,6 +2421,11 @@ AmsError AmsBackendAd5xIfs::eject_lane(int slot_index) {
     int len = filament_eject_default_.first;
     int speed = filament_eject_default_.second;
     std::string material;
+    // The module's IFS_EJECT of its own loaded lane also clears the extruder,
+    // heated to TEMP=, else the slot material's temperature, else the nozzle
+    // target, and raises an error with none of them. An unlabelled lane has no
+    // material temperature, so name one.
+    std::optional<int> eject_temp_c;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -2298,6 +2473,9 @@ AmsError AmsBackendAd5xIfs::eject_lane(int slot_index) {
                 speed = it->second.second;
             }
         }
+        if (module_loaded_ == std::optional<int>(slot_index + 1) && material.empty()) {
+            eject_temp_c = clear_toolhead_temp_c(last_extruder_target_deci_);
+        }
     }
 
     int port = slot_index + 1; // DISPLAY_NUMBERING_OK: 1-based SLOT= gcode parameter (IFS_EJECT)
@@ -2310,7 +2488,8 @@ AmsError AmsBackendAd5xIfs::eject_lane(int slot_index) {
         // is the loaded one. One command, one ack.
         spdlog::info("{} Eject lane {} (port {}) -> IFS_EJECT", backend_log_tag(), slot_index,
                      port);
-        err39 = execute_gcode("IFS_EJECT SLOT=" + port_str);
+        err39 = execute_gcode("IFS_EJECT SLOT=" + port_str +
+                              (eject_temp_c ? " TEMP=" + std::to_string(*eject_temp_c) : ""));
     } else {
         spdlog::info("{} Cold eject lane {} (port {}, material '{}') -> IFS_F24 / IFS_F11 LEN={} "
                      "SPEED={} / IFS_F39",
@@ -2441,7 +2620,7 @@ bool AmsBackendAd5xIfs::can_cancel_operation() const {
 }
 
 void AmsBackendAd5xIfs::apply_zmod_change_macro(const json& status) {
-    auto it = status.find(ZMOD_CHANGE_MACRO);
+    auto it = status.find(kZmodChangeMacro);
     if (it == status.end() || !it->is_object()) {
         return;
     }
@@ -2454,7 +2633,7 @@ void AmsBackendAd5xIfs::apply_zmod_change_macro(const json& status) {
     if (channel == data->end() || !channel->is_number_integer()) {
         return;
     }
-    const bool changing = channel->get<int>() != ZMOD_CHANGE_IDLE_CHANNEL;
+    const bool changing = channel->get<int>() != kZmodChangeIdleChannel;
     const bool in_job = job_holds_machine_now();
 
     bool action_changed = false;
@@ -2544,8 +2723,8 @@ std::vector<helix::RecoveryAction> AmsBackendAd5xIfs::build_recovery_actions() c
     // extruder move, so it needs no homing (see the no-Load note below) and it
     // works on stock zMod as well as on either plugin. Obviously hot-only.
     actions.push_back({lv_tr("Purge"),
-                       "M83\nG1 E" + std::to_string(RUNOUT_PURGE_MM) + " F" +
-                           std::to_string(RUNOUT_PURGE_FEEDRATE_MM_MIN),
+                       "M83\nG1 E" + std::to_string(kRunoutPurgeMm) + " F" +
+                           std::to_string(kRunoutPurgeFeedrateMmMin),
                        "ifs::purge", "",
                        /*needs_hot_nozzle=*/true});
 
@@ -2605,6 +2784,144 @@ std::optional<bool> AmsBackendAd5xIfs::toolhead_filament_unaccounted() const {
     return head_switch_present_ && system_info_.current_slot < 0;
 }
 
+std::optional<int> AmsBackendAd5xIfs::remembered_unload_lane_locked() const {
+    if (!persisted_seated_slot_.has_value()) {
+        return std::nullopt;
+    }
+    const int slot = *persisted_seated_slot_;
+    if (slot < 0 || slot >= kNumPorts || !port_presence_[static_cast<size_t>(slot)]) {
+        return std::nullopt;
+    }
+    return slot;
+}
+
+AmsBackendAd5xIfs::UnloadLaneDecision
+AmsBackendAd5xIfs::decide_unload_lane(const UnloadLaneInputs& in) {
+    if (!in.head_loaded) {
+        return {UnloadLaneVerdict::NotToolhead, -1};
+    }
+    if (in.recorded_lane >= 0) {
+        return {UnloadLaneVerdict::UnloadLane, in.recorded_lane};
+    }
+    // Only one lane fits in the shared path, so filament at the head with lane
+    // n holding the hub is lane n's - while lane n still holds filament.
+    if (in.module && in.at_hub_lane >= 0 && in.at_hub_lane < kNumPorts &&
+        in.present[static_cast<size_t>(in.at_hub_lane)]) {
+        return {UnloadLaneVerdict::UnloadLane, in.at_hub_lane};
+    }
+    // Presence alone is only a guess: a runout tail or filament fed into the
+    // toolhead from outside the IFS breaks it, so the user confirms even a
+    // single candidate.
+    int lone = -1;
+    int count = 0;
+    for (int i = 0; i < kNumPorts; ++i) {
+        if (in.present[static_cast<size_t>(i)]) {
+            lone = i;
+            ++count;
+        }
+    }
+    if (count == 0) {
+        return {UnloadLaneVerdict::ConfirmClear, -1};
+    }
+    if (count == 1) {
+        return {UnloadLaneVerdict::ConfirmLane, lone};
+    }
+    return {UnloadLaneVerdict::PickLane, -1};
+}
+
+AmsBackendAd5xIfs::UnloadLaneDecision AmsBackendAd5xIfs::unload_lane_decision_locked() const {
+    UnloadLaneInputs in;
+    in.module = ifs_module_live_.load();
+    in.head_loaded = !head_empty_for_unload_routing_locked();
+    if (system_info_.current_slot >= 0) {
+        in.recorded_lane = system_info_.current_slot;
+    } else if (seated_chan_ > 0) {
+        in.recorded_lane = seated_chan_ - 1;
+    } else if (!in.module && ffm_channel_ > 0 && ffm_channel_ <= kNumPorts) {
+        // _IFS_REMOVE_CURRENT_PRUTOK resolves this lane itself.
+        in.recorded_lane = ffm_channel_ - 1;
+    } else if (in.module || ffm_file_channel_.has_value()) {
+        // On native ZMOD the remembered lane stands in only once the file has
+        // been read: before that the firmware may record another lane, and
+        // declaring this one would overwrite it.
+        in.recorded_lane = remembered_unload_lane_locked().value_or(-1);
+    }
+    in.at_hub_lane = (module_at_hub_ >= 1 && module_at_hub_ <= kNumPorts) ? module_at_hub_ - 1 : -1;
+    in.present = port_presence_;
+    return decide_unload_lane(in);
+}
+
+UnloadLaneQuestion AmsBackendAd5xIfs::unload_lane_question() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const UnloadLaneDecision decision = unload_lane_decision_locked();
+    UnloadLaneQuestion question;
+    if (decision.verdict == UnloadLaneVerdict::ConfirmLane) {
+        question.lanes.push_back(decision.lane);
+    } else if (decision.verdict == UnloadLaneVerdict::PickLane) {
+        for (int i = 0; i < kNumPorts; ++i) {
+            if (port_presence_[static_cast<size_t>(i)]) {
+                question.lanes.push_back(i);
+            }
+        }
+    } else if (decision.verdict == UnloadLaneVerdict::ConfirmClear) {
+        question.confirm_clear_toolhead = true;
+    }
+    // Native ZMOD names its lane only through FFMInfo.channel. A file read
+    // with no such record leaves no lane the firmware can be told to unload,
+    // so the extruder clear is the one answer that can run.
+    if (question.asks() && !ifs_module_live_.load() && ffm_file_read_ &&
+        !ffm_file_channel_.has_value()) {
+        question.lanes.clear();
+        question.confirm_clear_toolhead = true;
+        question.reason = no_lane_record_message();
+    }
+    return question;
+}
+
+std::string AmsBackendAd5xIfs::no_lane_record_message() {
+    return lv_tr("The printer reports no lane record, so only clearing the extruder can unload "
+                 "it.");
+}
+
+AmsBackendAd5xIfs::NativeLaneDispatch
+AmsBackendAd5xIfs::native_lane_dispatch(int lane, bool file_read, std::optional<int> file_channel) {
+    if (!file_read) {
+        return NativeLaneDispatch::RecordUnread;
+    }
+    if (!file_channel.has_value()) {
+        return NativeLaneDispatch::NoRecord;
+    }
+    if (*file_channel == 0) {
+        return NativeLaneDispatch::Declare;
+    }
+    return *file_channel == lane + 1 ? NativeLaneDispatch::AsRecorded
+                                     : NativeLaneDispatch::RecordNamesOther;
+}
+
+int AmsBackendAd5xIfs::clear_toolhead_temp_c(int nozzle_target_deci) {
+    // No lane names a material to take a temperature from, so a nozzle the
+    // user already heated keeps its target. The module's clear refuses below
+    // 150C.
+    const int target_c = ui::temperature::deci_to_degrees(nozzle_target_deci);
+    return target_c >= kClearToolheadMinTempC ? target_c : kClearToolheadFallbackTempC;
+}
+
+std::string AmsBackendAd5xIfs::clear_toolhead_gcode(bool module_live, int nozzle_target_deci) {
+    const int temp_c = clear_toolhead_temp_c(nozzle_target_deci);
+    if (module_live) {
+        // The module's extruder clear (cut, wipe, withdraw) with no SLOT=: it
+        // clamps and retracts no lane.
+        // The private macro does not restore a toolhead sensor an earlier
+        // failed op left muted; every public module entry point does that first.
+        return "_IFS_SENSOR_RESUME\n_IFS_CLEAR_EXTRUDER TEMP=" + std::to_string(temp_c);
+    }
+    // ZMOD's own no-IFS unload, the PRUTOK=0 branch of _REMOVE_PRUTOK_IFS:
+    // home, heat, cut, drop the stub in the trash and withdraw the extruder,
+    // touching no lane. Called directly because its public wrapper fills TEMP
+    // from a lane's config, and lane 0 has none.
+    return "_REMOVE_PRUTOK_IFS PRUTOK=0 TEMP=" + std::to_string(temp_c);
+}
+
 // --- Plugin visibility (lessWaste / bambufy auto switchover) ---
 
 AmsBackendAd5xIfs::IfsPlugin AmsBackendAd5xIfs::get_plugin() const {
@@ -2630,50 +2947,37 @@ int AmsBackendAd5xIfs::backup_state_locked() const {
     // a definite ON, not Unknown. The runout log already includes `plugin=none`
     // for context, so `backup=1` on that line reads correctly.
     if (!has_ifs_vars_) {
-        return BACKUP_ON;
+        return kBackupOn;
     }
     if (!ifs_backup_variable_.has_value()) {
-        return BACKUP_UNKNOWN;
+        return kBackupUnknown;
     }
-    return *ifs_backup_variable_ ? BACKUP_ON : BACKUP_OFF;
+    return *ifs_backup_variable_ ? kBackupOn : kBackupOff;
 }
 
 bool AmsBackendAd5xIfs::parse_ifs_vars_macro_locked(const json& macro_status) {
     // Klipper returns `{}` for an object that does not exist, so an empty dict is
     // the "no macro" answer and carries nothing to read.
-    if (!macro_status.is_object() || macro_status.empty()) {
+    const auto macro = ad5x::parse_ifs_vars_macro(macro_status);
+    if (!macro) {
         return false;
     }
-
-    const auto parse_boolish = [](const json& v) -> std::optional<bool> {
-        if (v.is_boolean()) {
-            return v.get<bool>();
-        }
-        if (v.is_number_integer()) {
-            return v.get<int>() != 0;
-        }
-        return std::nullopt;
-    };
 
     bool changed = false;
 
     // lessWaste's runout backup toggle. Accepts the jinja int form the variable
     // dump shows (`variable_backup: 0`) and a bool, since neither plugin's schema
     // is pinned by anything we control.
-    const auto backup_it = macro_status.find("variable_backup");
-    if (backup_it != macro_status.end()) {
-        std::optional<bool> parsed = parse_boolish(*backup_it);
-        if (parsed.has_value() && parsed != ifs_backup_variable_) {
-            ifs_backup_variable_ = parsed;
-            // Mirror into the snapshot so get_system_info() agrees with the capabilities.
-            // ifs_backup_variable_ stays the source of truth - it can be nullopt, which
-            // the bool cannot express and which caps.enabled reports as Unknown.
-            system_info_.endless_spool_enabled = *parsed;
-            spdlog::info(
-                "{} _IFS_VARS variable_backup = {} (automatic backup-spool switching on runout)",
-                backend_log_tag(), *parsed ? "on" : "off");
-            changed = true;
-        }
+    if (const auto parsed = macro->backup; parsed && parsed != ifs_backup_variable_) {
+        ifs_backup_variable_ = parsed;
+        // Mirror into the snapshot so get_system_info() agrees with the capabilities.
+        // ifs_backup_variable_ stays the source of truth - it can be nullopt, which
+        // the bool cannot express and which caps.enabled reports as Unknown.
+        system_info_.endless_spool_enabled = *parsed;
+        spdlog::info(
+            "{} _IFS_VARS variable_backup = {} (automatic backup-spool switching on runout)",
+            backend_log_tag(), *parsed ? "on" : "off");
+        changed = true;
     }
 
     // lessWaste's own post-boot IFS-unlock workaround (`_UNLOCK_IFS` ->
@@ -2683,15 +2987,11 @@ bool AmsBackendAd5xIfs::parse_ifs_vars_macro_locked(const json& macro_status) {
     // change IFS behavior (clamped lanes) and confound a screen A/B (#1247).
     // The plugin owns the unlock; HelixScreen does not send hardware motion
     // unprompted.
-    const auto unlock_it = macro_status.find("variable_ifs_unlock_after_boot");
-    if (unlock_it != macro_status.end()) {
-        std::optional<bool> parsed = parse_boolish(*unlock_it);
-        if (parsed.has_value() && parsed != ifs_unlock_after_boot_) {
-            ifs_unlock_after_boot_ = parsed;
-            spdlog::info("{} _IFS_VARS ifs_unlock_after_boot = {} (plugin's own post-boot "
-                         "IFS-unlock workaround)",
-                         backend_log_tag(), *parsed ? "on" : "off");
-        }
+    if (const auto parsed = macro->unlock_after_boot; parsed && parsed != ifs_unlock_after_boot_) {
+        ifs_unlock_after_boot_ = parsed;
+        spdlog::info("{} _IFS_VARS ifs_unlock_after_boot = {} (plugin's own post-boot "
+                     "IFS-unlock workaround)",
+                     backend_log_tag(), *parsed ? "on" : "off");
     }
 
     return changed;
@@ -2731,8 +3031,8 @@ lv_subject_t* AmsBackendAd5xIfs::get_operation_step_index_subject(StepOperationT
 // --- Configuration ---
 
 std::optional<std::vector<std::string>> AmsBackendAd5xIfs::get_supported_materials() const {
-    // Stock AD5X firmware whitelist — see STOCK_WHITELIST in the header.
-    std::vector<std::string> result(STOCK_WHITELIST.begin(), STOCK_WHITELIST.end());
+    // Stock AD5X firmware whitelist — see kStockWhitelist in the header.
+    std::vector<std::string> result(kStockWhitelist.begin(), kStockWhitelist.end());
 
     // Append user-defined types from bambufy_custom_types (save_variables) and
     // [zmod_ifs] filament_<NAME> (mod_data/user.cfg). zmod's COLOR macro
@@ -2882,7 +3182,7 @@ AmsError AmsBackendAd5xIfs::apply_user_edit(int slot_index, const SlotInfo& info
 
         auto* entry = slots_.get_mut(slot_index);
         if (!entry) {
-            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, NUM_PORTS - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, kNumPorts - 1);
         }
         normalized_material = write_port_locked(slot_index, entry->info, info);
 
@@ -3042,7 +3342,7 @@ AmsError AmsBackendAd5xIfs::apply_user_edit(int slot_index, const SlotInfo& info
         }
     } // zmod/plugin write path (module path dispatched above)
 
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
     return AmsErrorHelper::success();
 }
 
@@ -3064,7 +3364,7 @@ AmsError AmsBackendAd5xIfs::sync_external_identity(int slot_index, const SlotInf
 
         auto* entry = slots_.get_mut(slot_index);
         if (!entry) {
-            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, NUM_PORTS - 1);
+            return AmsErrorHelper::invalid_slot(lane_noun(), slot_index, kNumPorts - 1);
         }
         // Nothing reaches Adventurer5M.json, _IFS_VARS or the override store: a
         // synced value lives in memory only.
@@ -3072,7 +3372,7 @@ AmsError AmsBackendAd5xIfs::sync_external_identity(int slot_index, const SlotInf
         settle_port_locked(slot_index);
     }
 
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
     return AmsErrorHelper::success();
 }
 
@@ -3099,7 +3399,7 @@ void AmsBackendAd5xIfs::prepare_lane_repaint_locked(int slot_index, SlotInfo& sl
 
 void AmsBackendAd5xIfs::update_slot_weight_impl(int slot_index, float remaining_weight_g,
                                                 float total_weight_g, bool persist) {
-    if (slot_index < 0 || slot_index >= NUM_PORTS) {
+    if (slot_index < 0 || slot_index >= kNumPorts) {
         spdlog::warn("{} update_slot_weight: invalid slot {}", backend_log_tag(), slot_index);
         return;
     }
@@ -3132,7 +3432,7 @@ void AmsBackendAd5xIfs::update_slot_weight_impl(int slot_index, float remaining_
                                         backend_log_tag(), "weight");
     }
 
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 }
 
 bool AmsBackendAd5xIfs::remap_ready() const {
@@ -3157,11 +3457,11 @@ std::vector<int> AmsBackendAd5xIfs::get_tool_mapping() const {
     if (!ifs_tool_map_live_ && !has_ifs_vars_) {
         return {};
     }
-    std::vector<int> result(TOOL_MAP_SIZE, -1);
+    std::vector<int> result(kToolMapSize, -1);
     int highest_mapped = -1;
-    for (size_t t = 0; t < TOOL_MAP_SIZE; ++t) {
+    for (size_t t = 0; t < kToolMapSize; ++t) {
         int port = tool_map_[t];
-        if (port >= 1 && port <= NUM_PORTS) {
+        if (port >= 1 && port <= kNumPorts) {
             result[t] = port - 1;
             highest_mapped = static_cast<int>(t);
         }
@@ -3181,7 +3481,7 @@ std::vector<int> AmsBackendAd5xIfs::get_tool_mapping() const {
 }
 
 AmsError AmsBackendAd5xIfs::can_set_tool_mapping(int tool_number, int slot_index) const {
-    if (tool_number < 0 || tool_number >= TOOL_MAP_SIZE) {
+    if (tool_number < 0 || tool_number >= kToolMapSize) {
         return AmsErrorHelper::invalid_parameter("Invalid tool number");
     }
     bool wire_backed = false;
@@ -3226,7 +3526,7 @@ AmsError AmsBackendAd5xIfs::set_tool_mapping_impl(int tool_number, int slot_inde
     // ZMOD + lessWaste/bambufy: the plugin's save_variables table. Applied
     // locally (the read-back is polled, not pushed) and persisted through the
     // _IFS_VARS macro the plugin replays at print start.
-    int port = (slot_index >= 0 && slot_index < NUM_PORTS) ? (slot_index + 1) : UNMAPPED_PORT;
+    int port = (slot_index >= 0 && slot_index < kNumPorts) ? (slot_index + 1) : kUnmappedPort;
     std::string tools_val;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -3334,7 +3634,7 @@ std::string AmsBackendAd5xIfs::build_ifs_list_value(bool colors, int override_sl
     };
     std::string ss = "\"[";
     if (var_prefix_ != "less_waste") {
-        for (int i = 0; i < NUM_PORTS; ++i) {
+        for (int i = 0; i < kNumPorts; ++i) {
             if (i > 0)
                 ss += ", ";
             ss += "'" + port_entry(i + 1) + "'";
@@ -3349,19 +3649,19 @@ std::string AmsBackendAd5xIfs::build_ifs_list_value(bool colors, int override_sl
     // than overwrite a fresh plugin's defaults with 16 empty entries.
     bool any_mapped = false;
     for (int port : tool_map_) {
-        if (port >= 1 && port <= NUM_PORTS) {
+        if (port >= 1 && port <= kNumPorts) {
             any_mapped = true;
             break;
         }
     }
-    for (int t = 0; t < TOOL_MAP_SIZE; ++t) {
+    for (int t = 0; t < kToolMapSize; ++t) {
         if (t > 0)
             ss += ", ";
         int port = tool_map_[static_cast<size_t>(t)];
         if (!any_mapped) {
-            port = (t < NUM_PORTS) ? t + 1 : UNMAPPED_PORT;
+            port = (t < kNumPorts) ? t + 1 : kUnmappedPort;
         }
-        if (port >= 1 && port <= NUM_PORTS) {
+        if (port >= 1 && port <= kNumPorts) {
             ss += "'" + port_entry(port) + "'";
         } else {
             // Unmapped tool: no lane, no colour. A candidate on an unmapped
@@ -3378,7 +3678,7 @@ std::string AmsBackendAd5xIfs::build_tool_map_value() const {
     // Integer list — no quotes around elements.
     // Example: "[1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]"
     std::string ss = "\"[";
-    for (int i = 0; i < TOOL_MAP_SIZE; ++i) {
+    for (int i = 0; i < kToolMapSize; ++i) {
         if (i > 0)
             ss += ", ";
         ss += std::to_string(tool_map_[static_cast<size_t>(i)]);
@@ -3631,8 +3931,8 @@ void AmsBackendAd5xIfs::fetch_user_cfg_materials() {
     api_->transfers().download_file(
         "config", "mod_data/user.cfg",
         [this, token](const std::string& content) {
-            // BG THREAD: parse_user_cfg_filament_types is static, no this access.
-            auto names = parse_user_cfg_filament_types(content);
+            // BG THREAD: the parse is pure, no this access.
+            auto names = ad5x::parse_user_cfg_filament_types(content);
             if (names.empty()) {
                 spdlog::debug("[AMS AD5X-IFS] user.cfg parsed: no [zmod_ifs] filament_* "
                               "entries");
@@ -3685,51 +3985,6 @@ void AmsBackendAd5xIfs::fetch_user_cfg_materials() {
                 spdlog::debug("[AMS AD5X-IFS] user.cfg fetch failed: {}", err.message);
             }
         });
-}
-
-std::vector<std::string> AmsBackendAd5xIfs::parse_user_cfg_filament_types(const std::string& body) {
-    // zmod docs: https://wiki.zmod.link/AD5X/#7-add-custom-filament-types
-    //
-    //   [zmod_ifs]
-    //   filament_NEWTYPE: 300
-    //
-    // Section is Klipper-style INI. Comments start with '#' or ';'. Values
-    // are decimal temperatures we don't currently use — we only collect the
-    // NAME tokens (uppercased convention, but preserve user case as written).
-    // Any whitespace before the section header or key is tolerated; we don't
-    // try to fully reimplement Klipper's INI parser, just match the lines we
-    // care about within the [zmod_ifs] section.
-    std::vector<std::string> out;
-    bool in_section = false;
-    static const helix::Regex section_re(R"(^\s*\[\s*([^\]\s]+)\s*\]\s*$)");
-    static const helix::Regex filament_re(R"(^\s*filament_([A-Za-z0-9_+\-]+)\s*[:=].*$)");
-    for (std::string_view line_view : helix::text_io::lines(body)) {
-        std::string line(line_view);
-        // Strip trailing CR for files saved with CRLF.
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        // Strip inline comments — Klipper accepts both '#' and ';'.
-        for (char ch : {'#', ';'}) {
-            auto pos = line.find(ch);
-            if (pos != std::string::npos) {
-                line.erase(pos);
-                break;
-            }
-        }
-        if (line.find_first_not_of(" \t") == std::string::npos) {
-            continue;
-        }
-        helix::RegexMatch m;
-        if (helix::regex_match(line, m, section_re)) {
-            in_section = (m[1].str() == "zmod_ifs");
-            continue;
-        }
-        if (in_section && helix::regex_match(line, m, filament_re)) {
-            out.push_back(m[1].str());
-        }
-    }
-    return out;
 }
 
 void AmsBackendAd5xIfs::read_adventurer_json() {
@@ -3800,61 +4055,18 @@ void AmsBackendAd5xIfs::fetch_filament_json() {
 }
 
 void AmsBackendAd5xIfs::parse_filament_json(const std::string& content) {
-    // filament.json is a JSON object keyed by filament TYPE name plus a
-    // "default" entry. Each value carries filament_tube_length (the unload
-    // retract distance, our IFS_F11 LEN) and filament_ifs_speed (IFS_F11
-    // SPEED), among many fields we don't use. Build a {tube_length, ifs_speed}
-    // pair per material; resolve missing fields against the "default" entry,
-    // and missing "default" against the literal 1000/1200.
-    json root = json::parse(content, nullptr, false);
-    if (root.is_discarded()) {
-        spdlog::warn("[AMS AD5X-IFS] filament.json parse failed");
-        return;
-    }
-    if (!root.is_object()) {
+    auto table = ad5x::parse_filament_json(content);
+    if (!table) {
         spdlog::warn("[AMS AD5X-IFS] filament.json is not a JSON object — ignoring");
         return;
     }
-
-    // int field reader with a fallback, tolerant of numeric-as-string values.
-    auto read_int = [](const json& obj, const char* key, int fallback) -> int {
-        auto it = obj.find(key);
-        if (it == obj.end())
-            return fallback;
-        if (it->is_number_integer() || it->is_number_unsigned())
-            return it->get<int>();
-        if (it->is_number_float())
-            return static_cast<int>(it->get<double>());
-        if (it->is_string()) {
-            return helix::text_io::parse_leading<int>(it->get_ref<const std::string&>())
-                .value_or(fallback);
-        }
-        return fallback;
-    };
-
-    // Resolve the "default" pair first so per-material fallbacks key off it.
-    int default_len = 1000;
-    int default_speed = 1200;
-    auto def_it = root.find("default");
-    if (def_it != root.end() && def_it->is_object()) {
-        default_len = read_int(*def_it, "filament_tube_length", 1000);
-        default_speed = read_int(*def_it, "filament_ifs_speed", 1200);
-    }
-
-    std::map<std::string, std::pair<int, int>> parsed;
-    for (auto it = root.begin(); it != root.end(); ++it) {
-        if (it.key() == "default" || !it.value().is_object())
-            continue;
-        int len = read_int(it.value(), "filament_tube_length", default_len);
-        int speed = read_int(it.value(), "filament_ifs_speed", default_speed);
-        parsed[it.key()] = {len, speed};
-    }
+    const auto [default_len, default_speed] = table->default_params;
 
     size_t cached_count;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        filament_eject_default_ = {default_len, default_speed};
-        filament_eject_params_ = std::move(parsed);
+        filament_eject_default_ = table->default_params;
+        filament_eject_params_ = std::move(table->materials);
         cached_count = filament_eject_params_.size();
     }
     spdlog::info("{} filament.json: cached eject LEN/SPEED for {} material(s); default {}/{}",
@@ -3867,6 +4079,19 @@ bool AmsBackendAd5xIfs::note_json_content(const std::string& content) {
         return false;
     }
     last_json_content_ = content;
+    return true;
+}
+
+bool AmsBackendAd5xIfs::apply_json_content(const std::string& content, const char* reason) {
+    if (!note_json_content(content)) {
+        spdlog::trace("{} Adventurer5M.json unchanged ({} bytes, {}), skipping GET_ZCOLOR",
+                      backend_log_tag(), content.size(), reason);
+        return false;
+    }
+    spdlog::debug("{} Adventurer5M.json changed ({} bytes, {}), parsing + scheduling GET_ZCOLOR",
+                  backend_log_tag(), content.size(), reason);
+    parse_adventurer_json(content);
+    schedule_zcolor_query(reason);
     return true;
 }
 
@@ -3892,19 +4117,7 @@ void AmsBackendAd5xIfs::poll_adventurer_json() {
         // stay "true" for one extra UpdateQueue tick — harmless coalescing.
         token.defer("Ad5xIfsBackend::poll_json_apply", [this, content]() mutable {
             json_poll_in_flight_.store(false);
-
-            if (!note_json_content(content)) {
-                spdlog::trace("{} Adventurer5M.json unchanged ({} bytes), "
-                              "skipping GET_ZCOLOR",
-                              backend_log_tag(), content.size());
-                return;
-            }
-
-            spdlog::debug("{} Adventurer5M.json changed ({} bytes), parsing + "
-                          "scheduling GET_ZCOLOR",
-                          backend_log_tag(), content.size());
-            parse_adventurer_json(content);
-            schedule_zcolor_query("json_poll");
+            apply_json_content(content, "json_poll");
         });
     };
     auto on_error = [this, token](const MoonrakerError& err) {
@@ -3930,14 +4143,14 @@ void AmsBackendAd5xIfs::poll_adventurer_json() {
     // Task 15 R2 evaluation arm (CONFIG_HELIX_AMS_HTTP_POLL_BACKENDS):
     // download_file() is a hard stub on ESP32 (Task 10's HTTP lane only
     // supports bounded fetches — see esp_rest_api.cpp). Adventurer5M.json is
-    // a small generated config; ADVENTURER_JSON_POLL_CAP_BYTES is generous
+    // a small generated config; kAdventurerJsonPollCapBytes is generous
     // enough a real file rarely hits it, and download_file_partial fails
     // loud on an over-cap response rather than silently truncating (see
     // esp_http_lane.cpp) — same graceful degrade as any other poll failure
     // handled by on_error above.
-    static constexpr size_t ADVENTURER_JSON_POLL_CAP_BYTES = 32 * 1024;
+    static constexpr size_t kAdventurerJsonPollCapBytes = 32 * 1024;
     api_->transfers().download_file_partial("config", "Adventurer5M.json",
-                                            ADVENTURER_JSON_POLL_CAP_BYTES, on_content, on_error);
+                                            kAdventurerJsonPollCapBytes, on_content, on_error);
 #else
     api_->transfers().download_file("config", "Adventurer5M.json", on_content, on_error);
 #endif
@@ -4049,7 +4262,8 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
         line.find("CHANGE_ZCOLOR") != std::string::npos) {
         // Menu-definition echo vs. executed command (#1065, bundle 482NB943).
         // zmod renders every COLOR dialog by echoing its buttons down the
-        // console as `// action:prompt_button <label>|<gcode>|<style>[|<hex>]`.
+        // console as `// action:prompt_button <label>|<gcode>|<hex>`, or in the
+        // older form `<label>|<gcode>|<style>|<hex>`.
         // Those payloads are the menu's OFFER LIST, not a record of anything
         // the firmware did — the "Select color" grid alone carries 24 distinct
         // CHANGE_ZCOLOR candidates. Running them through the extractor below
@@ -4157,13 +4371,20 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                     }
                 }
 
-                const bool slot_valid = (slot0 >= 0 && slot0 < NUM_PORTS);
+                const bool slot_valid = (slot0 >= 0 && slot0 < kNumPorts);
                 const bool has_params = parsed_type.has_value() || parsed_hex.has_value();
 
                 // Decide under the lock whether there's real work: clearing a
                 // stale locked override (existing #981 path) and/or applying
                 // freshly-parsed TYPE=/HEX= parameters to colors_/materials_.
                 bool mutated = false;
+                if (slot_valid && has_params) {
+                    // Before the release below publishes anything: the edit's
+                    // author may have rewritten the lane's record beside it. A
+                    // slot with no override reaches no sync, and the baselines
+                    // advanced below keep the next parse from firing one.
+                    schedule_lane_record_reread();
+                }
                 if (slot_valid) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     auto it = overrides_.find(slot0);
@@ -4277,7 +4498,7 @@ bool AmsBackendAd5xIfs::on_gcode_response_line(const std::string& line) {
                     }
                 }
                 if (mutated) {
-                    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot0));
+                    emit_event(kEventSlotChanged, std::to_string(slot0));
                 }
             }
         }
@@ -4342,7 +4563,7 @@ bool AmsBackendAd5xIfs::apply_color_menu_slot_row(const std::string& line) {
         return false;
 
     const int slot0 = std::atoi(sm[1].str().c_str()) - 1; // zmod SLOT is 1-based
-    if (slot0 < 0 || slot0 >= NUM_PORTS)
+    if (slot0 < 0 || slot0 >= kNumPorts)
         return false;
 
     helix::RegexMatch tm;
@@ -4385,7 +4606,7 @@ bool AmsBackendAd5xIfs::apply_color_menu_slot_row(const std::string& line) {
         // debounced query returns, only ~500ms sooner.
         update_slot_from_state(slot0);
     }
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot0));
+    emit_event(kEventSlotChanged, std::to_string(slot0));
     return true;
 }
 
@@ -4552,6 +4773,7 @@ void AmsBackendAd5xIfs::unregister_moonraker_listeners() {
         return;
     client_->unregister_method_callback("notify_gcode_response", "ifs_zcolor_watcher");
     client_->unregister_method_callback("notify_klippy_ready", "ifs_klippy_ready_watcher");
+    helix::unsubscribe_vendor_state(*client_, "ifs_vendor_state");
 }
 
 void AmsBackendAd5xIfs::schedule_json_reread() {
@@ -4562,9 +4784,10 @@ void AmsBackendAd5xIfs::schedule_json_reread() {
 
     // Bounded worker pool — bare std::thread on AD5M can hit EAGAIN under
     // thread exhaustion (feedback_no_bare_threads_arm.md).
-    helix::http::HttpExecutor::fast().submit([this, token]() {
+    helix::http::HttpExecutor::fast().submit([this, token, cancel = debounce_cancel_]() {
         // BG THREAD: only the debounce sleep — no member touch.
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        if (!debounce_wait(cancel, std::chrono::seconds(2)))
+            return;
 
         // MAIN THREAD: clear the gate atomic and chain into read_adventurer_json,
         // which itself touches api_ and member state.
@@ -4624,11 +4847,12 @@ void AmsBackendAd5xIfs::schedule_zcolor_query(const char* reason) {
     zcolor_worker_submit_count_.fetch_add(1, std::memory_order_relaxed);
 
     auto token = lifetime_.token();
-    helix::http::HttpExecutor::fast().submit([this, token]() {
+    helix::http::HttpExecutor::fast().submit([this, token, cancel = debounce_cancel_]() {
         // BG THREAD: just the debounce sleep — no member touch.
         // Short debounce — coalesce bursts from port-sensor changes, the
         // gcode stream, and unload-complete triggers.
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (!debounce_wait(cancel, std::chrono::milliseconds(500)))
+            return;
 
         // MAIN THREAD: disarm so a trigger arriving after this point arms a fresh
         // worker, then claim the pending flag and run the query. Both touch
@@ -4692,8 +4916,9 @@ void AmsBackendAd5xIfs::query_zcolor_silent() {
         // window the GET_ZCOLOR callback uses, so the IFS_STATUS response in the
         // buffer gets parsed + applied (Ports presence stays live, #981).
         spdlog::debug("{} Querying IFS_STATUS only (SILENT demoted)", backend_log_tag());
-        helix::http::HttpExecutor::fast().submit([this, token]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        helix::http::HttpExecutor::fast().submit([this, token, cancel = debounce_cancel_]() {
+            if (!debounce_wait(cancel, std::chrono::milliseconds(500)))
+                return;
             token.defer("Ad5xIfsBackend::ifs_status_finalize_apply",
                         [this]() { finalize_zcolor_response(); });
         });
@@ -4711,14 +4936,16 @@ void AmsBackendAd5xIfs::query_zcolor_silent() {
     // so the next trigger re-arms the poll. Mirrors get_sensors() / EXCLUDE_OBJECT.
     api_->execute_gcode(
         "GET_ZCOLOR SILENT=1",
-        [this, token]() {
-            // BG THREAD: HttpExecutor::fast() is a static accessor — no `this`
-            // touch — so we can submit the debounce worker without a guard.
+        [this, token, cancel = debounce_cancel_]() {
+            // BG THREAD: HttpExecutor::fast() is a static accessor and the
+            // cancel handle was captured on the main thread — no `this` touch
+            // — so we can submit the debounce worker without a guard.
             // Response lines arrive via notify_gcode_response listener;
             // schedule finalization after a short collection window.
-            helix::http::HttpExecutor::fast().submit([this, token]() {
+            helix::http::HttpExecutor::fast().submit([this, token, cancel]() {
                 // BG THREAD: just the debounce sleep.
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                if (!debounce_wait(cancel, std::chrono::milliseconds(500)))
+                    return;
                 // MAIN THREAD: finalize touches mutex_, atomics, and chains
                 // into apply_zcolor_result + possibly query_zcolor_silent.
                 token.defer("Ad5xIfsBackend::zcolor_finalize_apply",
@@ -4749,7 +4976,22 @@ void AmsBackendAd5xIfs::finalize_zcolor_response() {
     zcolor_query_active_.store(false);
 
     if (!lines.empty()) {
-        auto result = parse_zcolor_silent(lines, zcolor_query_reason_active_);
+        auto result = ad5x::parse_zcolor_silent(lines);
+        if (result.ifs_chan.has_value()) {
+            // Diagnostic: the seated channel + presence view, so a field
+            // bundle shows Chan's loaded-idle behaviour.
+            std::string ports_str;
+            if (result.ifs_ports) {
+                for (bool p : *result.ifs_ports) {
+                    ports_str += ports_str.empty() ? "[" : ", ";
+                    ports_str += p ? "true" : "false";
+                }
+                ports_str += "]";
+            }
+            spdlog::info("{} IFS_STATUS trigger={} Chan={} State={} Ports={}", backend_log_tag(),
+                         zcolor_query_reason_active_, *result.ifs_chan,
+                         result.ifs_state.value_or(-1), ports_str);
+        }
         apply_zcolor_result(result);
     } else {
         spdlog::debug("{} GET_ZCOLOR SILENT=1 returned no lines", backend_log_tag());
@@ -4767,84 +5009,13 @@ void AmsBackendAd5xIfs::finalize_zcolor_response() {
     }
 }
 
-void AmsBackendAd5xIfs::read_ifs_status_object(const json& obj, ZColorSilentResult& result) {
-    // Chan and Ports are read independently. The gcode path only ever calls
-    // this on a line that already contains "Chan", but a subscription delivers
-    // Moonraker's diff: a frame where only the silk sensors moved carries Ports
-    // and no Chan, and requiring Chan would drop the presence update on the
-    // floor.
-    if (auto chan_it = obj.find("Chan"); chan_it != obj.end() && chan_it->is_number_integer()) {
-        result.ifs_chan = chan_it->get<int>();
-        result.saw_valid_response = true;
-    }
-
-    // Per-port presence: the RS-485 silk switch for port i+1, and the presence
-    // authority in apply_zcolor_result — which is what makes empty-channel
-    // resurrection from a stale ffmColor impossible (#981). All or nothing: one
-    // non-boolean entry discards the array rather than inventing a value for
-    // that port.
-    auto ports_it = obj.find("Ports");
-    if (ports_it == obj.end() || !ports_it->is_array() || ports_it->size() != NUM_PORTS) {
-        return;
-    }
-    std::array<bool, NUM_PORTS> ports{};
-    for (int p = 0; p < NUM_PORTS; ++p) {
-        const auto& v = (*ports_it)[static_cast<size_t>(p)];
-        if (!v.is_boolean()) {
-            return;
-        }
-        ports[static_cast<size_t>(p)] = v.get<bool>();
-    }
-    result.ifs_ports = ports;
-    result.saw_valid_response = true;
-}
-
-bool AmsBackendAd5xIfs::read_zmod_color_object(const json& obj, ZColorSilentResult& result,
-                                               std::optional<int>& channel) {
-    // The bool behind the "IFS: True" field of the GET_ZCOLOR summary line.
-    if (auto ifs_it = obj.find("ifs"); ifs_it != obj.end() && ifs_it->is_boolean()) {
-        result.ifs_active = ifs_it->get<bool>();
-        result.saw_valid_response = true;
-    }
-    // FFMInfo.channel, the same value parse_adventurer_json() reads. Handed
-    // back rather than applied: adopting it as the seated lane is head-gated
-    // (#1065 Bug 3) and that gate lives in the file path for now.
-    if (auto chan_it = obj.find("channel"); chan_it != obj.end() && chan_it->is_number_integer()) {
-        channel = chan_it->get<int>();
-    }
-
-    auto slots = helix::zmod_color::parse_slots(obj, NUM_PORTS);
-    if (!slots) {
-        return false;
-    }
-    bool saw_slot = false;
-    for (size_t i = 0; i < slots->size(); ++i) {
-        if (!(*slots)[i]) {
-            continue;
-        }
-        ZColorSlot slot;
-        slot.material = (*slots)[i]->material;
-        slot.hex = (*slots)[i]->hex;
-        result.slots[i] = std::move(slot);
-        saw_slot = true;
-    }
-    if (saw_slot) {
-        result.saw_valid_response = true;
-        // Counts as silent content: a firmware that publishes these objects at
-        // all is far past the prompt-only zmod the demotion in #981 exists for,
-        // so a status frame must not leave GET_ZCOLOR marked unsupported.
-        result.saw_silent_content = true;
-    }
-    return saw_slot;
-}
-
 bool AmsBackendAd5xIfs::apply_zmod_status_objects(const json& status) {
     ZColorSilentResult result;
     std::optional<int> ffm_channel;
     bool saw_object = false;
 
     if (auto it = status.find("zmod_ifs"); it != status.end() && it->is_object()) {
-        read_ifs_status_object(*it, result);
+        ad5x::read_ifs_status_object(*it, result);
         saw_object = true;
 
         // Re-supply an omitted Chan from the last frame that carried one: a
@@ -4858,7 +5029,7 @@ bool AmsBackendAd5xIfs::apply_zmod_status_objects(const json& status) {
         }
     }
     if (auto it = status.find("zmod_color"); it != status.end() && it->is_object()) {
-        read_zmod_color_object(*it, result, ffm_channel);
+        ad5x::read_zmod_color_object(*it, result, ffm_channel);
         saw_object = true;
     }
     if (!saw_object) {
@@ -4879,79 +5050,6 @@ bool AmsBackendAd5xIfs::apply_zmod_status_objects(const json& status) {
     return true;
 }
 
-std::string AmsBackendAd5xIfs::normalize_module_color_hex(const std::string& value) {
-    // The module stores and reports colours '#'-prefixed ("#A03CF7", or the
-    // "#RGB" short form the stock UI writes); colors_[] holds bare upper-case
-    // 6-digit hex. Empty return = "not a colour" (null / empty / malformed),
-    // which the apply path treats as no reading rather than as black.
-    std::string digits = value;
-    if (!digits.empty() && digits.front() == '#') {
-        digits.erase(0, 1);
-    }
-    if (digits.size() == 3) {
-        std::string expanded;
-        expanded.reserve(6);
-        for (char c : digits) {
-            expanded.push_back(c);
-            expanded.push_back(c);
-        }
-        digits = std::move(expanded);
-    }
-    if (digits.size() != 6) {
-        return {};
-    }
-    for (char c : digits) {
-        if (!std::isxdigit(static_cast<unsigned char>(c))) {
-            return {};
-        }
-    }
-    digits = helix::text_io::to_upper(digits);
-    return digits;
-}
-
-bool AmsBackendAd5xIfs::read_ifs_materials_object(const json& obj, ZColorSilentResult& result) {
-    auto slots_it = obj.find("slots");
-    if (slots_it == obj.end() || !slots_it->is_object()) {
-        return false;
-    }
-    bool saw_slot = false;
-    for (auto slot_it = slots_it->begin(); slot_it != slots_it->end(); ++slot_it) {
-        // Moonraker serialises dict keys as strings, so "1".."4" - but accept
-        // an integer key too, same tolerance helix::zmod_color::parse_slots
-        // gives the ID field (it is somebody else's serializer either way).
-        const auto id_number = helix::text_io::parse_leading<int>(slot_it.key());
-        if (!id_number) {
-            continue;
-        }
-        const int id = *id_number;
-        if (id < 1 || id > NUM_PORTS || !slot_it.value().is_object()) {
-            continue;
-        }
-        const auto& entry = slot_it.value();
-        ZColorSlot slot;
-        if (auto type = entry.find("type"); type != entry.end() && type->is_string()) {
-            slot.material = type->get<std::string>();
-            // The stock-UI unset sentinel, same one the zmod_color reader and
-            // parse_adventurer_json normalise - a live "?" must never render.
-            if (slot.material == "?") {
-                slot.material.clear();
-            }
-        }
-        if (auto color = entry.find("color"); color != entry.end() && color->is_string()) {
-            slot.hex = normalize_module_color_hex(color->get<std::string>());
-        }
-        result.slots[static_cast<size_t>(id - 1)] = std::move(slot);
-        saw_slot = true;
-    }
-    if (saw_slot) {
-        result.saw_valid_response = true;
-        // Same reasoning as the zmod_color reader: a firmware publishing these
-        // objects has no prompt-only degradation path to protect against.
-        result.saw_silent_content = true;
-    }
-    return saw_slot;
-}
-
 bool AmsBackendAd5xIfs::apply_ifs_module_objects(const json& status) {
     ZColorSilentResult result;
     // "Carried the object" is not enough to count as evidence the module is
@@ -4966,51 +5064,31 @@ bool AmsBackendAd5xIfs::apply_ifs_module_objects(const json& status) {
     std::string error_text;
 
     if (auto it = status.find("ifs"); it != status.end() && it->is_object()) {
-        const auto& obj = *it;
-
-        // loaded_channels: 1-based channel ints decoded from the same RS-485
-        // silk bitmask the per-lane sensors and zmod's Ports array carry. All
-        // or nothing across the array - one non-integer entry discards the
-        // presence view rather than inventing values. Out-of-range channel
-        // numbers are ignored (this printer has four lanes).
-        if (auto lc = obj.find("loaded_channels"); lc != obj.end() && lc->is_array()) {
-            std::array<bool, NUM_PORTS> ports{};
-            bool usable = true;
-            for (const auto& ch : *lc) {
-                if (!ch.is_number_integer()) {
-                    usable = false;
-                    break;
-                }
-                const int c = ch.get<int>();
-                if (c >= 1 && c <= NUM_PORTS) {
-                    ports[static_cast<size_t>(c - 1)] = true;
-                }
-            }
-            if (usable) {
-                result.ifs_ports = ports;
-                result.saw_valid_response = true;
-                saw_module_content = true;
-            }
+        auto obj = ad5x::parse_ifs_module_object(*it);
+        if (obj.loaded_ports) {
+            result.ifs_ports = *obj.loaded_ports;
+            result.saw_valid_response = true;
+            saw_module_content = true;
         }
         // active_channel is the F13 `chan` - the same field zmod's Chan is,
         // with the same "last channel the mechanism engaged" stickiness, so it
         // rides the same guarded seated-adoption path in apply_zcolor_result.
-        if (auto ac = obj.find("active_channel"); ac != obj.end() && ac->is_number_integer()) {
-            result.ifs_chan = ac->get<int>();
+        if (obj.active_channel) {
+            result.ifs_chan = *obj.active_channel;
             result.saw_valid_response = true;
             saw_module_content = true;
         }
-        if (auto a = obj.find("activity"); a != obj.end() && a->is_string()) {
-            activity = a->get<std::string>();
+        if (obj.activity) {
+            activity = std::move(*obj.activity);
             saw_module_content = true;
         }
-        if (auto e = obj.find("error"); e != obj.end() && e->is_string()) {
-            error_text = e->get<std::string>();
+        if (obj.error) {
+            error_text = std::move(*obj.error);
             saw_module_content = true;
         }
     }
     if (auto it = status.find("ifs_materials"); it != status.end() && it->is_object()) {
-        if (read_ifs_materials_object(*it, result)) {
+        if (ad5x::read_ifs_materials_object(*it, result)) {
             saw_module_content = true;
         }
     }
@@ -5043,7 +5121,7 @@ bool AmsBackendAd5xIfs::apply_ifs_module_objects(const json& status) {
         std::lock_guard<std::mutex> lock(mutex_);
         const bool plugin_owns_table =
             std::any_of(tool_map_.begin(), tool_map_.end(),
-                        [](int port) { return port >= 1 && port <= NUM_PORTS; });
+                        [](int port) { return port >= 1 && port <= kNumPorts; });
         if (!plugin_owns_table) {
             install_identity_tool_map_locked();
         }
@@ -5149,7 +5227,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             // presence. Used to corroborate both the eject-stale-Chan rejection and
             // the cold-boot restore below.
             const auto lane_present = [&](int slot0) -> bool {
-                if (slot0 < 0 || slot0 >= NUM_PORTS)
+                if (slot0 < 0 || slot0 >= kNumPorts)
                     return false;
                 if (result.ifs_ports.has_value())
                     return (*result.ifs_ports)[static_cast<size_t>(slot0)];
@@ -5161,7 +5239,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             // wrongly reject a freshly-seated Chan on a frame that carried no Ports
             // reading (the plugin path applies Chan without Ports).
             const bool chan_lane_empty =
-                (chan > 0 && chan <= NUM_PORTS && result.ifs_ports.has_value() &&
+                (chan > 0 && chan <= kNumPorts && result.ifs_ports.has_value() &&
                  !(*result.ifs_ports)[static_cast<size_t>(chan - 1)]);
 
             // Same corroboration for FFMInfo.channel. It is sticky (only the ~5s
@@ -5174,7 +5252,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             // port_presence_), mirroring chan_lane_empty; on a Ports-less frame
             // the pointer is adopted as before.
             const bool ffm_lane_empty =
-                (ffm_channel_ > 0 && ffm_channel_ <= NUM_PORTS && result.ifs_ports.has_value() &&
+                (ffm_channel_ > 0 && ffm_channel_ <= kNumPorts && result.ifs_ports.has_value() &&
                  !(*result.ifs_ports)[static_cast<size_t>(ffm_channel_ - 1)]);
 
             // Adventurer5M.json's FFMInfo.channel is the firmware's own persistent
@@ -5200,7 +5278,20 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             // published) head_switch_seen_ stays false and we fall back to
             // adopting FFMInfo.channel as before.
             const bool head_empty_authoritative = head_switch_seen_ && !head_switch_present_;
-            if (ffm_channel_ > 0 && head_empty_authoritative) {
+            // The standalone module's `ifs_loaded` is its own success-confirmed,
+            // restart-surviving record of the lane in the nozzle. It outranks
+            // active_channel (which also tracks cold ejects) and makes the
+            // remembered-lane floor below unnecessary: on the module, Chan=0 with
+            // a loaded head is the normal idle state, not post-reboot amnesia
+            // (prestonbrown/helixscreen#1897).
+            const bool module_record = module_owns_seated_lane_locked();
+            if (module_record) {
+                if (seated_chan_ != *module_loaded_) {
+                    spdlog::debug("{} Seated lane from module ifs_loaded={} (active_channel={})",
+                                  backend_log_tag(), *module_loaded_, chan);
+                }
+                seated_chan_ = *module_loaded_;
+            } else if (ffm_channel_ > 0 && head_empty_authoritative) {
                 if (seated_chan_ != 0) {
                     spdlog::debug("{} FFMInfo.channel={} rejected as seated: toolhead switch "
                                   "reads empty (sticky/stale channel, #1065 row 28); clearing "
@@ -5259,8 +5350,11 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             // cold-boot-restored). On a confirmed unload (Chan=0 with the head
             // empty) drop the memory so a later boot doesn't resurrect a lane that
             // is no longer loaded. Writes are deduped so idle status frames don't
-            // re-post the DB key every ~1.4 s.
-            if (seated_chan_ > 0) {
+            // re-post the DB key every ~1.4 s. On the module the remembered lane
+            // mirrors ifs_loaded instead.
+            if (module_record) {
+                sync_remembered_lane_to_module_locked();
+            } else if (seated_chan_ > 0) {
                 const int seated_slot0 = seated_chan_ - 1;
                 if (persisted_seated_slot_ != std::optional<int>(seated_slot0)) {
                     persisted_seated_slot_ = seated_slot0;
@@ -5290,13 +5384,13 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             if (result.ifs_ports.has_value() && !has_per_port_sensors_) {
                 ifs_status_ports_seen_.store(true);
                 const auto& ports = *result.ifs_ports;
-                for (int i = 0; i < NUM_PORTS; ++i) {
+                for (int i = 0; i < kNumPorts; ++i) {
                     const auto idx = static_cast<size_t>(i);
                     if (port_presence_[idx] == ports[idx]) {
                         continue;
                     }
                     // Eject-settling suppression (#1065): a false->true transition
-                    // within EJECT_PRESENCE_SUPPRESSION of this lane's eject is the
+                    // within kEjectPresenceSuppression of this lane's eject is the
                     // silk sensor still settling clear of the just-retracted lane,
                     // not a re-insert. Ignore it so the optimistic clear survives —
                     // the last-ejected lane otherwise stayed "present" (offering
@@ -5304,7 +5398,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
                     // any transition after the window still apply.
                     if (!port_presence_[idx] && ports[idx] &&
                         (std::chrono::steady_clock::now() - last_eject_time_[idx]) <
-                            EJECT_PRESENCE_SUPPRESSION) {
+                            kEjectPresenceSuppression) {
                         spdlog::debug("{} Slot {} IFS_STATUS Ports reads present within eject "
                                       "settling window — ignoring as sensor lag (#1065)",
                                       backend_log_tag(), i);
@@ -5394,7 +5488,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
             }
 
             if (chan_changed) {
-                for (int i = 0; i < NUM_PORTS; ++i) {
+                for (int i = 0; i < kNumPorts; ++i) {
                     update_slot_from_state(i);
                 }
             }
@@ -5448,7 +5542,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
     bool changed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (int i = 0; i < NUM_PORTS; ++i) {
+        for (int i = 0; i < kNumPorts; ++i) {
             const auto idx = static_cast<size_t>(i);
             const auto& parsed = result.slots[idx];
             const bool loaded = parsed.has_value();
@@ -5568,7 +5662,7 @@ void AmsBackendAd5xIfs::apply_zcolor_result(const ZColorSilentResult& result) {
         }
 
         if (changed) {
-            for (int i = 0; i < NUM_PORTS; ++i) {
+            for (int i = 0; i < kNumPorts; ++i) {
                 update_slot_from_state(i);
             }
         }
@@ -5627,7 +5721,7 @@ bool AmsBackendAd5xIfs::derive_head_loaded_from_summary_locked(const ZColorSilen
     if (!head_filament_) {
         return false;
     }
-    const bool seated_port_present = seated_chan_ > 0 && seated_chan_ <= NUM_PORTS &&
+    const bool seated_port_present = seated_chan_ > 0 && seated_chan_ <= kNumPorts &&
                                      port_presence_[static_cast<size_t>(seated_chan_ - 1)];
     if (seated_port_present) {
         spdlog::debug("{} Extruder:None with seated lane {} still present — keeping "
@@ -5640,154 +5734,19 @@ bool AmsBackendAd5xIfs::derive_head_loaded_from_summary_locked(const ZColorSilen
     return true;
 }
 
-AmsBackendAd5xIfs::ZColorSilentResult
-AmsBackendAd5xIfs::parse_zcolor_silent(const std::vector<std::string>& lines, const char* reason) {
-    ZColorSilentResult result;
-
-    // Regexes compiled once per call; parsing is off the hot path.
-    // Summary: "// Extruder: None (N) | IFS: True"
-    //   or:    "// Extruder: N: MATERIAL/HEX | IFS: True"
-    static const helix::Regex summary_re(
-        R"(^//\s*Extruder:\s*(.+?)\s*\|\s*IFS:\s*(True|False)\s*$)");
-    // Slot: "// N: MATERIAL/HEX" or "// N: MATERIAL/NAME/HEX" or old "// N: MATERIAL"
-    static const helix::Regex slot_re(R"(^//\s*([1-9])\s*:\s*(.+?)\s*$)");
-    // Extruder detail inside summary text: "N: MATERIAL/..."
-    static const helix::Regex extruder_slot_re(R"(^([1-9])\s*:)");
-    // current channel: "None (N)" or bare "N" form — look for "(N)" paren form
-    static const helix::Regex channel_paren_re(R"(\((\d+)\))");
-
-    // First pass: classify the response and pull the IFS_STATUS JSON line.
-    //
-    // IFS_STATUS (zmod cmd_IFS_STATUS -> respond_info(json.dumps(get_values())))
-    // arrives as one `// `-prefixed clean-JSON object containing "Chan" (1-based
-    // seated port, 0 = none). It shares the response buffer with GET_ZCOLOR but
-    // is emitted via respond_info, NOT a prompt dialog — so on old zmod where
-    // GET_ZCOLOR degrades to an action:prompt_ dialog, the IFS_STATUS data is
-    // still present and must NOT be discarded by the prompt early-out. We scan
-    // every line here (no early return) and let apply_zcolor_result honor
-    // ifs_chan even when is_prompt_fallback is set.
-    for (const auto& raw : lines) {
-        if (raw.find("action:prompt_") != std::string::npos) {
-            result.is_prompt_fallback = true;
-            continue;
-        }
-        if (result.ifs_chan.has_value() || raw.find("\"Chan\"") == std::string::npos) {
-            continue;
-        }
-        // Strip the gcode-console "// " prefix before JSON parsing.
-        std::string body = raw;
-        const size_t slashes = body.find("//");
-        if (slashes != std::string::npos) {
-            body = body.substr(slashes + 2);
-        }
-        json obj = json::parse(body, nullptr, false);
-        // Not valid JSON (malformed line, partial buffer) — ignore. Never
-        // throw on a bad gcode-response line.
-        if (!obj.is_discarded() && obj.is_object()) {
-            const bool had_chan = result.ifs_chan.has_value();
-            read_ifs_status_object(obj, result);
-            if (!had_chan && result.ifs_chan.has_value()) {
-                // Diagnostic: log the seated channel + presence view so the
-                // next field bundle proves Chan's loaded-idle behavior.
-                // safe_int, not .value(): a line like {"Chan":1,"State":null}
-                // would make .value() throw type_error.302 — nothing here
-                // catches a type error on a gcode-response line.
-                std::string ports_str;
-                if (auto ports_it = obj.find("Ports");
-                    ports_it != obj.end() && ports_it->is_array()) {
-                    ports_str = helix::json_util::safe_dump(*ports_it);
-                }
-                spdlog::info("[AMS AD5X-IFS] IFS_STATUS trigger={} Chan={} State={} Ports={}",
-                             reason, *result.ifs_chan, helix::json_util::safe_int(obj, "State", -1),
-                             ports_str);
-            }
-        }
-    }
-
-    int slot_lines_seen = 0;
-    int slot_lines_with_hex = 0;
-    helix::RegexMatch m;
-
-    for (const auto& line : lines) {
-        if (helix::regex_match(line, m, summary_re)) {
-            result.saw_valid_response = true;
-            result.saw_silent_content = true;   // genuine GET_ZCOLOR summary line
-            result.saw_extruder_summary = true; // carries the "Extruder:" head field
-            result.ifs_active = (m[2].str() == "True");
-            const std::string extruder_part = m[1].str();
-
-            helix::RegexMatch em;
-            if (helix::regex_search(extruder_part, em, extruder_slot_re)) {
-                const auto n = helix::text_io::parse_leading<int>(em[1].str());
-                if (n && *n >= 1 && *n <= NUM_PORTS) {
-                    result.extruder_slot = *n - 1; // 0-based
-                }
-            }
-            helix::RegexMatch cm;
-            if (helix::regex_search(extruder_part, cm, channel_paren_re)) {
-                const auto chan = helix::text_io::parse_leading<int>(cm[1].str());
-                if (chan) {
-                    result.current_channel = *chan;
-                }
-            }
-            continue;
-        }
-
-        if (helix::regex_match(line, m, slot_re)) {
-            const auto parsed_n = helix::text_io::parse_leading<int>(m[1].str());
-            if (!parsed_n) {
-                continue;
-            }
-            const int n = *parsed_n;
-            if (n < 1 || n > NUM_PORTS) {
-                continue; // slot number out of range — skip (e.g. "// 99: nonsense")
-            }
-
-            result.saw_valid_response = true;
-            result.saw_silent_content = true; // genuine GET_ZCOLOR slot line
-            slot_lines_seen++;
-
-            // Slot line body is "MATERIAL" or "MATERIAL/HEX" or "MATERIAL/NAME/HEX".
-            // Rule: material is everything before the first '/', hex is everything
-            // after the LAST '/'. Anything between is a COLOR_MAPPING alias we ignore.
-            const std::string rest = m[2].str();
-            const size_t first_slash = rest.find('/');
-            const size_t last_slash = rest.rfind('/');
-
-            ZColorSlot slot;
-            if (first_slash == std::string::npos) {
-                // Old format: just material, no /HEX.
-                slot.material = rest;
-            } else {
-                slot.material = rest.substr(0, first_slash);
-                slot.hex = rest.substr(last_slash + 1);
-                slot_lines_with_hex++;
-            }
-            result.slots[static_cast<size_t>(n - 1)] = std::move(slot);
-        }
-    }
-
-    // Old format detection: we saw slot lines but none had a /HEX segment.
-    if (slot_lines_seen > 0 && slot_lines_with_hex == 0) {
-        result.is_old_format = true;
-    }
-
-    return result;
-}
-
 void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
-    json doc = json::parse(content, nullptr, false);
-    if (doc.is_discarded()) {
+    const auto file = ad5x::parse_adventurer_json(content);
+    if (!file) {
         spdlog::warn("{} Failed to parse Adventurer5M.json", backend_log_tag());
         return;
     }
-
-    auto ffm_it = doc.find("FFMInfo");
-    if (ffm_it == doc.end() || !ffm_it->is_object()) {
+    if (!file->has_ffm) {
         spdlog::debug("{} No FFMInfo section in Adventurer5M.json", backend_log_tag());
+        std::lock_guard<std::mutex> lock(mutex_);
+        ffm_file_read_ = true;
+        ffm_file_channel_.reset();
         return;
     }
-    const auto& ffm = *ffm_it;
 
     int parsed_count = 0;
     bool needs_ifs_vars_push = false;
@@ -5802,43 +5761,15 @@ void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
         const size_t pre_sync_count = external_sync_count_;
 
         // Ports 1-4 in JSON map to slots 0-3
-        for (int port = 1; port <= NUM_PORTS; ++port) {
-            std::string color_key = "ffmColor" + std::to_string(port);
-            std::string type_key = "ffmType" + std::to_string(port);
-
-            auto color_it = ffm.find(color_key);
-            auto type_it = ffm.find(type_key);
-            if (color_it == ffm.end() && type_it == ffm.end())
+        for (int port = 1; port <= kNumPorts; ++port) {
+            const auto& entry = file->ports[static_cast<size_t>(port - 1)];
+            if (!entry)
                 continue;
-
-            // Extract color — strip '#' prefix, default to gray if empty
-            std::string hex;
-            if (color_it != ffm.end() && color_it->is_string()) {
-                hex = color_it->get<std::string>();
-            }
-            if (!hex.empty() && hex[0] == '#') {
-                hex = hex.substr(1);
-            }
+            const std::string& hex = entry->hex;
+            const std::string& type = entry->type;
             // Non-empty color means filament was loaded into this port (only used
             // as a presence signal on pre-SILENT zmod — see the gated block below).
-            bool has_filament_data = !hex.empty();
-            if (hex.empty()) {
-                hex = "808080";
-            }
-            // Uppercase
-            for (auto& c : hex)
-                c = static_cast<char>(toupper(c));
-
-            // Extract material type
-            std::string type;
-            if (type_it != ffm.end() && type_it->is_string()) {
-                type = type_it->get<std::string>();
-            }
-            // Firmware-native unset sentinel: live stock ZMOD writes ffmType='?'
-            // for an entry with no assigned material. Map it to empty so the UI
-            // renders '--' rather than a literal '?'.
-            if (type == "?")
-                type.clear();
+            const bool has_filament_data = entry->has_color;
 
             int idx = port - 1;
             if (dirty_[static_cast<size_t>(idx)])
@@ -5941,11 +5872,15 @@ void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
         // IFS_STATUS Chan. Read it here so a file poll updates the seated lane
         // promptly (and remembers it for the post-reboot floor) without waiting for
         // the next IFS_STATUS frame.
-        auto chan_it = ffm.find("channel");
-        if (chan_it != ffm.end() && chan_it->is_number_integer()) {
+        ffm_file_read_ = true;
+        if (!file->channel) {
+            ffm_file_channel_.reset();
+        }
+        if (file->channel) {
             const int prev_current_slot = system_info_.current_slot;
-            const int fw_chan = chan_it->get<int>();
-            ffm_channel_ = (fw_chan >= 1 && fw_chan <= NUM_PORTS) ? fw_chan : 0;
+            const int fw_chan = *file->channel;
+            ffm_channel_ = (fw_chan >= 1 && fw_chan <= kNumPorts) ? fw_chan : 0;
+            ffm_file_channel_ = ffm_channel_;
             // Head-gate (#1065 row 28): the file's FFMInfo.channel is sticky and
             // survives an eject, so a plain poll re-reads a stale channel. Adopt it
             // as seated ONLY when the toolhead SWITCH sensor corroborates filament
@@ -5988,7 +5923,7 @@ void AmsBackendAd5xIfs::parse_adventurer_json(const std::string& content) {
             // status frame: the stamp is what slot_is_actively_loaded() reads,
             // and a stale one paints the highlight on the lane we just left.
             if (system_info_.current_slot != prev_current_slot) {
-                for (int i = 0; i < NUM_PORTS; ++i) {
+                for (int i = 0; i < kNumPorts; ++i) {
                     update_slot_from_state(i);
                 }
             }
@@ -6070,6 +6005,17 @@ void AmsBackendAd5xIfs::begin_phase_tracking_locked(bool is_unload) {
     if (last_extruder_target_deci_ > 0) {
         phase_tracker_.target_deci = last_extruder_target_deci_;
     }
+}
+
+void AmsBackendAd5xIfs::on_klipper_restarted() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (phase_tracker_.active) {
+            end_phase_tracking_locked();
+        }
+        system_info_.operation_indeterminate = false;
+    }
+    AmsSubscriptionBackend::on_klipper_restarted();
 }
 
 void AmsBackendAd5xIfs::end_phase_tracking_locked() {
@@ -6329,9 +6275,9 @@ std::chrono::seconds AmsBackendAd5xIfs::runout_confirm_delay_locked() const {
     // is always-on (no toggle), so the !has_ifs_vars_ path always qualifies;
     // plugins qualify only when variable_backup reads true.
     if (!has_ifs_vars_ || ifs_backup_variable_.value_or(false)) {
-        return RUNOUT_CONFIRM_DELAY_WITH_BACKUP;
+        return kRunoutConfirmDelayWithBackup;
     }
-    return RUNOUT_CONFIRM_DELAY;
+    return kRunoutConfirmDelay;
 }
 
 bool AmsBackendAd5xIfs::evaluate_runout_locked() {
@@ -6376,7 +6322,7 @@ bool AmsBackendAd5xIfs::evaluate_runout_locked() {
     // eject_lane() and do_unload_filament()'s three early returns leave the
     // backend IDLE and armless, so neither test above sees them. The dispatch
     // stamp does.
-    if (now - last_filament_op_dispatch_ < RUNOUT_OP_SUPPRESSION) {
+    if (now - last_filament_op_dispatch_ < kRunoutOpSuppression) {
         return false;
     }
     if (now - *head_empty_since_ < runout_confirm_delay_locked()) {
@@ -6437,7 +6383,7 @@ void AmsBackendAd5xIfs::clear_runout_locked(const char* why) {
 }
 
 bool AmsBackendAd5xIfs::backup_eligible_locked(int slot, int candidate) const {
-    if (slot < 0 || slot >= NUM_PORTS || candidate < 0 || candidate >= NUM_PORTS ||
+    if (slot < 0 || slot >= kNumPorts || candidate < 0 || candidate >= kNumPorts ||
         slot == candidate) {
         return false;
     }
@@ -6458,7 +6404,7 @@ bool AmsBackendAd5xIfs::backup_eligible_locked(int slot, int candidate) const {
 }
 
 int AmsBackendAd5xIfs::find_backup_slot_locked(int runout_slot) const {
-    for (int i = 0; i < NUM_PORTS; ++i) {
+    for (int i = 0; i < kNumPorts; ++i) {
         if (backup_eligible_locked(runout_slot, i)) {
             return i;
         }
@@ -6505,10 +6451,10 @@ helix::printer::EndlessSpoolCapabilities AmsBackendAd5xIfs::get_endless_spool_ca
     // nullopt stays Unknown: flattening it to Off would tell the user no swap
     // will happen when we simply never read the setting.
     switch (backup_state_locked()) {
-    case BACKUP_ON:
+    case kBackupOn:
         caps.enabled = EndlessSpoolEnabled::On;
         break;
-    case BACKUP_OFF:
+    case kBackupOff:
         caps.enabled = EndlessSpoolEnabled::Off;
         break;
     default:
@@ -6537,7 +6483,7 @@ std::string AmsBackendAd5xIfs::build_runout_detail_locked() const {
     // that -- German sends it to the end of the clause and Japanese reorders the
     // whole thing -- so the fragments sat untranslated in all eight locales.
     const auto append_switchover_rule = [&](const std::string& who) {
-        detail += fmt::format(lv_tr("{} will switch to a slot whose filament type AND colour "
+        detail += fmt::format(lv_tr("{} will switch to a slot whose filament type AND color "
                                     "both match the active spool and whose own port sensor "
                                     "reads filament present."),
                               who);
@@ -6559,14 +6505,14 @@ std::string AmsBackendAd5xIfs::build_runout_detail_locked() const {
     // i18n: do not translate — plugin names as their authors spell them.
     const std::string plugin_name = (var_prefix_ == "bambufy") ? "bambufy" : "lessWaste";
     if (!ifs_backup_variable_.has_value()) {
-        detail += fmt::format(lv_tr("{} is installed, but its backup-spool setting could not be "
-                                    "read - do not count on an automatic swap."),
+        detail += fmt::format(lv_tr("{} is installed, but its Endless Spool setting could not be "
+                                    "read - do not count on Endless Spool."),
                               plugin_name);
         return detail;
     }
     if (!*ifs_backup_variable_) {
-        detail += fmt::format(lv_tr("{} is installed but its backup-spool switching is turned "
-                                    "off, so no automatic swap will happen."),
+        detail += fmt::format(lv_tr("{} is installed but its Endless Spool setting is turned off, "
+                                    "so nothing will switch on runout."),
                               plugin_name);
         return detail;
     }
@@ -6576,7 +6522,7 @@ std::string AmsBackendAd5xIfs::build_runout_detail_locked() const {
 }
 
 int AmsBackendAd5xIfs::find_first_tool_for_port(int port_1based) const {
-    for (int t = 0; t < TOOL_MAP_SIZE; ++t) {
+    for (int t = 0; t < kToolMapSize; ++t) {
         if (tool_map_[static_cast<size_t>(t)] == port_1based) {
             return t;
         }
@@ -6597,9 +6543,9 @@ void AmsBackendAd5xIfs::recompute_current_slot_locked() {
         system_info_.current_slot = seated_chan_ > 0 ? seated_chan_ - 1 : -1;
         return;
     }
-    if (active_tool_ >= 0 && active_tool_ < TOOL_MAP_SIZE) {
+    if (active_tool_ >= 0 && active_tool_ < kToolMapSize) {
         int port = tool_map_[static_cast<size_t>(active_tool_)];
-        if (port >= 1 && port <= NUM_PORTS) {
+        if (port >= 1 && port <= kNumPorts) {
             system_info_.current_slot = port - 1;
             return;
         }
@@ -6624,7 +6570,7 @@ bool AmsBackendAd5xIfs::clear_seated_if_ejected_locked(int slot_index) {
 
 void AmsBackendAd5xIfs::log_seated_state_locked(const char* where) const {
     std::string ports;
-    for (int i = 0; i < NUM_PORTS; ++i) {
+    for (int i = 0; i < kNumPorts; ++i) {
         ports += (i ? "," : "");
         ports += port_presence_[static_cast<size_t>(i)] ? "1" : "0";
     }
@@ -6658,6 +6604,26 @@ void AmsBackendAd5xIfs::persist_seated_slot_locked(int slot0) {
     }
 }
 
+bool AmsBackendAd5xIfs::module_owns_seated_lane_locked() const {
+    // A lessWaste/bambufy plugin running beside the module owns the tool map
+    // and its own swap path, which need not run IFS_LOAD, so ifs_loaded can lag
+    // there; the plugin rig keeps following active_channel.
+    return ifs_module_live_.load() && !has_ifs_vars_ && module_loaded_.has_value();
+}
+
+void AmsBackendAd5xIfs::sync_remembered_lane_to_module_locked() {
+    if (!module_owns_seated_lane_locked()) {
+        return;
+    }
+    const int loaded = *module_loaded_;
+    const std::optional<int> slot0 = loaded > 0 ? std::optional<int>(loaded - 1) : std::nullopt;
+    if (persisted_seated_slot_ == slot0) {
+        return;
+    }
+    persisted_seated_slot_ = slot0;
+    persist_seated_slot_locked(slot0.value_or(-1));
+}
+
 // ensure_homed_then() provided by AmsSubscriptionBackend
 
 void AmsBackendAd5xIfs::check_action_timeout() {
@@ -6674,14 +6640,14 @@ void AmsBackendAd5xIfs::check_action_timeout() {
     if (phase_tracker_.active) {
         const auto since_progress = std::chrono::steady_clock::now() - last_phase_progress_time_;
         system_info_.operation_indeterminate =
-            since_progress > std::chrono::seconds(INDETERMINATE_THRESHOLD_SECONDS);
+            since_progress > std::chrono::seconds(kIndeterminateThresholdSeconds);
     } else {
         system_info_.operation_indeterminate = false;
     }
 
     if (zmod_change_owns_action_) {
         const auto held = std::chrono::steady_clock::now() - action_start_time_;
-        if (held >= std::chrono::seconds(SWAP_LOADING_TIMEOUT_SECONDS)) {
+        if (held >= std::chrono::seconds(kSwapLoadingTimeoutSeconds)) {
             release_zmod_change_locked("END_CHANGE_FILAMENT never ran");
         } else if (zmod_change_in_job_ && !job_holds_machine_now()) {
             release_zmod_change_locked("the job ended mid-change");
@@ -6706,18 +6672,18 @@ void AmsBackendAd5xIfs::check_action_timeout() {
     // implicit unload before the load doesn't blow the 90s default. Every
     // other phase has its clock reset on transition (see
     // apply_phase_action_locked) and keeps the short 90s window.
-    int limit = ACTION_TIMEOUT_SECONDS;
+    int limit = kActionTimeoutSeconds;
     if (a == AmsAction::HEATING) {
-        limit = HEATING_TIMEOUT_SECONDS;
+        limit = kHeatingTimeoutSeconds;
     } else if (a == AmsAction::PURGING) {
-        limit = PURGING_TIMEOUT_SECONDS;
+        limit = kPurgingTimeoutSeconds;
     } else if (a == AmsAction::LOADING && phase_tracker_.swap_expected) {
         // Belt-and-suspenders for the implicit-unload-before-load case. The
         // primary defence is the head-drop reset in on_head_transition_locked;
         // this covers firmware variants where the head sensor doesn't
         // transition reliably during a swap (bundle NJB2U558 ch4→ch2 swap
         // surfaced the false timeout at 90s).
-        limit = SWAP_LOADING_TIMEOUT_SECONDS;
+        limit = kSwapLoadingTimeoutSeconds;
     }
     auto elapsed = std::chrono::steady_clock::now() - action_start_time_;
     if (elapsed >= std::chrono::seconds(limit)) {

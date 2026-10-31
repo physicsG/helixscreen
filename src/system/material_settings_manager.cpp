@@ -26,14 +26,14 @@ using helix::printer::FilamentCatalog;
 
 // The keys MaterialSettingsManager owns inside one overlay `types` entry.
 // Any other key there (density, dry_temp, ...) is hand-authored and preserved.
-constexpr const char* KEY_NOZZLE_MIN = "nozzle_min";
-constexpr const char* KEY_NOZZLE_MAX = "nozzle_max";
-constexpr const char* KEY_BED = "bed";
-constexpr const char* KEY_CHAMBER = "chamber";
-constexpr const char* KEY_MACRO = "preheat_macro";
-constexpr const char* KEY_MACRO_HEATS = "macro_handles_heating";
-constexpr const char* MANAGED_KEYS[] = {KEY_NOZZLE_MIN, KEY_NOZZLE_MAX, KEY_BED,
-                                        KEY_CHAMBER,    KEY_MACRO,      KEY_MACRO_HEATS};
+constexpr const char* kKeyNozzleMin = "nozzle_min";
+constexpr const char* kKeyNozzleMax = "nozzle_max";
+constexpr const char* kKeyBed = "bed";
+constexpr const char* kKeyChamber = "chamber";
+constexpr const char* kKeyMacro = "preheat_macro";
+constexpr const char* kKeyMacroHeats = "macro_handles_heating";
+constexpr const char* kManagedKeys[] = {kKeyNozzleMin, kKeyNozzleMax, kKeyBed,
+                                        kKeyChamber,   kKeyMacro,     kKeyMacroHeats};
 
 /// The entry naming @p name (any case, aliases resolved), or end().
 std::vector<nlohmann::json>::iterator find_entry(std::vector<nlohmann::json>& entries,
@@ -52,13 +52,13 @@ std::optional<filament::MaterialOverride> parse_override(const nlohmann::json& e
         if (it != e.end() && it->is_number())
             out = static_cast<int>(it->get<double>());
     };
-    read_int(KEY_NOZZLE_MIN, ovr.nozzle_min);
-    read_int(KEY_NOZZLE_MAX, ovr.nozzle_max);
-    read_int(KEY_BED, ovr.bed_temp);
-    read_int(KEY_CHAMBER, ovr.chamber_temp);
-    if (auto it = e.find(KEY_MACRO); it != e.end() && it->is_string())
+    read_int(kKeyNozzleMin, ovr.nozzle_min);
+    read_int(kKeyNozzleMax, ovr.nozzle_max);
+    read_int(kKeyBed, ovr.bed_temp);
+    read_int(kKeyChamber, ovr.chamber_temp);
+    if (auto it = e.find(kKeyMacro); it != e.end() && it->is_string())
         ovr.preheat_macro = it->get<std::string>();
-    if (auto it = e.find(KEY_MACRO_HEATS); it != e.end() && it->is_boolean())
+    if (auto it = e.find(kKeyMacroHeats); it != e.end() && it->is_boolean())
         ovr.macro_handles_heating = it->get<bool>();
     if (!ovr.nozzle_min && !ovr.nozzle_max && !ovr.bed_temp && !ovr.chamber_temp &&
         !ovr.preheat_macro && !ovr.macro_handles_heating)
@@ -68,17 +68,17 @@ std::optional<filament::MaterialOverride> parse_override(const nlohmann::json& e
 
 void write_override(nlohmann::json& e, const filament::MaterialOverride& ovr) {
     if (ovr.nozzle_min)
-        e[KEY_NOZZLE_MIN] = *ovr.nozzle_min;
+        e[kKeyNozzleMin] = *ovr.nozzle_min;
     if (ovr.nozzle_max)
-        e[KEY_NOZZLE_MAX] = *ovr.nozzle_max;
+        e[kKeyNozzleMax] = *ovr.nozzle_max;
     if (ovr.bed_temp)
-        e[KEY_BED] = *ovr.bed_temp;
+        e[kKeyBed] = *ovr.bed_temp;
     if (ovr.chamber_temp)
-        e[KEY_CHAMBER] = *ovr.chamber_temp;
+        e[kKeyChamber] = *ovr.chamber_temp;
     if (ovr.preheat_macro)
-        e[KEY_MACRO] = *ovr.preheat_macro;
+        e[kKeyMacro] = *ovr.preheat_macro;
     if (ovr.macro_handles_heating)
-        e[KEY_MACRO_HEATS] = *ovr.macro_handles_heating;
+        e[kKeyMacroHeats] = *ovr.macro_handles_heating;
 }
 
 } // namespace
@@ -161,7 +161,7 @@ bool MaterialSettingsManager::write_to_overlay(
         entries.push_back({{"name", name}});
         it = std::prev(entries.end());
     }
-    for (const char* key : MANAGED_KEYS)
+    for (const char* key : kManagedKeys)
         it->erase(key);
     if (ovr)
         write_override(*it, *ovr);
@@ -198,10 +198,10 @@ bool MaterialSettingsManager::migrate_settings_overrides() {
 
     if (legacy.is_object() && !legacy.empty()) {
         // settings.json spelled two of the keys differently from the overlay.
-        static constexpr std::pair<const char*, const char*> RENAMES[] = {
-            {"nozzle_min", KEY_NOZZLE_MIN}, {"nozzle_max", KEY_NOZZLE_MAX},
-            {"bed_temp", KEY_BED},          {"chamber_temp", KEY_CHAMBER},
-            {"preheat_macro", KEY_MACRO},   {"macro_handles_heating", KEY_MACRO_HEATS}};
+        static constexpr std::pair<const char*, const char*> kRenames[] = {
+            {"nozzle_min", kKeyNozzleMin}, {"nozzle_max", kKeyNozzleMax},
+            {"bed_temp", kKeyBed},         {"chamber_temp", kKeyChamber},
+            {"preheat_macro", kKeyMacro},  {"macro_handles_heating", kKeyMacroHeats}};
 
         auto entries = FilamentCatalog::load_user_types();
         for (const auto& [name, values] : legacy.items()) {
@@ -213,7 +213,7 @@ bool MaterialSettingsManager::migrate_settings_overrides() {
                 it = std::prev(entries.end());
             }
             // A field already in the overlay wins: it is the newer copy.
-            for (const auto& [from, to] : RENAMES) {
+            for (const auto& [from, to] : kRenames) {
                 if (values.contains(from) && !it->contains(to))
                     (*it)[to] = values[from];
             }

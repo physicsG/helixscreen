@@ -1,6 +1,8 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include "ui_update_queue.h"
+
 #include "../helix_test_fixture.h"
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/mock_bypass.h"
@@ -45,9 +47,9 @@ struct TempConfigFixture : public HelixTestFixture {
         // Remove backup files to prevent cross-test contamination.
         // Config::init() restores from backups when the config file is missing,
         // so stale backup data from a previous test run can leak into this test.
-        std::filesystem::remove(AppConstants::Update::config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::legacy_config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::env_backup_fallback());
+        std::filesystem::remove(app_constants::update::config_backup_fallback());
+        std::filesystem::remove(app_constants::update::legacy_config_backup_fallback());
+        std::filesystem::remove(app_constants::update::env_backup_fallback());
 
         // Initialize Config singleton with temp path
         Config::get_instance()->init(config_path);
@@ -86,9 +88,9 @@ struct ExternalSpoolCommitFixture : LVGLTestFixture {
         config_path = temp_dir + "/settings.json";
 
         // Same cross-test contamination guard as TempConfigFixture.
-        std::filesystem::remove(AppConstants::Update::config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::legacy_config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::env_backup_fallback());
+        std::filesystem::remove(app_constants::update::config_backup_fallback());
+        std::filesystem::remove(app_constants::update::legacy_config_backup_fallback());
+        std::filesystem::remove(app_constants::update::env_backup_fallback());
 
         Config::get_instance()->init(config_path);
         // AmsState's clear resets the in-memory override too, not just the
@@ -361,6 +363,7 @@ TEST_CASE("commit_external_spool_edit empty arm erases settings record",
     REQUIRE(fixture.client.spoolman_mock().get_mock_active_spool_id() == 169);
 
     AmsState::instance().commit_external_spool_edit(SlotInfo{});
+    helix::ui::UpdateQueue::instance().drain();
 
     // S5 — the settings subtree is ABSENT, not an empty assigned=true record
     REQUIRE_FALSE(SettingsManager::instance().get_external_spool_info().has_value());
@@ -394,7 +397,7 @@ TEST_CASE("commit_external_spool_edit keeps manual entry without spoolman id",
 
 // ============================================================================
 // The bypass lane (#1632): the external spool's Spoolman record and meter file
-// onto BYPASS_LANE_ID, and get_external_spool_info() reads through resolve().
+// onto kBypassLaneId, and get_external_spool_info() reads through resolve().
 // ============================================================================
 
 namespace {
@@ -425,7 +428,7 @@ TEST_CASE("the bypass lane's Spoolman record owns the external spool's shown wei
     AmsState::instance().set_external_spool_info(raw);
 
     // The server's answer, filed the way the poll files it.
-    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::BYPASS_LANE_ID, server_spool_1()));
+    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::kBypassLaneId, server_spool_1()));
 
     auto shown = AmsState::instance().get_external_spool_info();
     REQUIRE(shown.has_value());
@@ -452,11 +455,46 @@ TEST_CASE("the external spool's meter outranks a stale local weight on the bypas
     helix::ams::Observation metered(helix::ams::ObservationSource::Metered);
     metered.remaining_weight_g = 490.0f;
     metered.total_weight_g = 1000.0f;
-    helix::ams::ingest(helix::ams::BYPASS_LANE_ID, metered);
+    helix::ams::ingest(helix::ams::kBypassLaneId, metered);
 
     auto shown = AmsState::instance().get_external_spool_info();
     REQUIRE(shown.has_value());
     CHECK(shown->remaining_weight_g == 490.0f);
+}
+
+TEST_CASE("a weight edit on the external spool reaches observers as the edited weight",
+          "[external_spool][1632]") {
+    ExternalSpoolCommitFixture fixture;
+    AmsState::instance().init_subjects(true);
+
+    // A manual entry the user already declared a weight for.
+    SlotInfo manual;
+    manual.material = "PLA";
+    manual.remaining_weight_g = 0.0f;
+    manual.total_weight_g = 1000.0f;
+    AmsState::instance().commit_external_spool_edit(manual);
+    REQUIRE(helix::ams::lane_sources(helix::ams::kBypassLaneId).local_user.has_value());
+
+    // Displays re-read the resolved record when the colour subject fires, and
+    // never again until it fires next, so what they read then is what stays on screen.
+    static float seen_weight = -1.0f;
+    seen_weight = -1.0f;
+    lv_observer_t* observer = lv_subject_add_observer(
+        AmsState::instance().get_external_spool_color_subject(),
+        [](lv_observer_t*, lv_subject_t*) {
+            if (auto ext = AmsState::instance().get_external_spool_info()) {
+                seen_weight = ext->remaining_weight_g;
+            }
+        },
+        nullptr);
+
+    SlotInfo edited = manual;
+    edited.remaining_weight_g = 100.0f;
+    AmsState::instance().commit_external_spool_edit(edited);
+    lv_observer_remove(observer);
+
+    REQUIRE(AmsState::instance().get_external_spool_info()->remaining_weight_g == 100.0f);
+    CHECK(seen_weight == 100.0f);
 }
 
 TEST_CASE("re-linking the external spool drops the previous spool's lane record",
@@ -467,7 +505,7 @@ TEST_CASE("re-linking the external spool drops the previous spool's lane record"
     first.spoolman_id = 1;
     first.material = "PLA";
     AmsState::instance().commit_external_spool_edit(first);
-    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::BYPASS_LANE_ID, server_spool_1()));
+    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::kBypassLaneId, server_spool_1()));
     REQUIRE(AmsState::instance().get_external_spool_info()->remaining_weight_g == 850.0f);
 
     SlotInfo second;
@@ -479,7 +517,7 @@ TEST_CASE("re-linking the external spool drops the previous spool's lane record"
 
     // Spool 1's record describes a spool that is no longer bound; it must not
     // paint spool 2's display.
-    CHECK_FALSE(helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID).spoolman.has_value());
+    CHECK_FALSE(helix::ams::lane_sources(helix::ams::kBypassLaneId).spoolman.has_value());
     auto shown = AmsState::instance().get_external_spool_info();
     REQUIRE(shown.has_value());
     CHECK(shown->spoolman_id == 2);
@@ -498,20 +536,20 @@ TEST_CASE("re-binding through the sync funnel drops the previous spool's pick an
     first.remaining_weight_g = 400.0f;
     first.total_weight_g = 1000.0f;
     AmsState::instance().set_external_spool_info(first);
-    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::BYPASS_LANE_ID, server_spool_1()));
+    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::kBypassLaneId, server_spool_1()));
 
     helix::ams::Observation pick(helix::ams::ObservationSource::LocalUser);
     pick.color_rgb = 0x00FF00;
     pick.color_name = "Picked for spool 1";
-    helix::ams::commit_slot_edit(helix::ams::BYPASS_LANE_ID, pick);
+    helix::ams::commit_slot_edit(helix::ams::kBypassLaneId, pick);
 
     helix::ams::Observation metered(helix::ams::ObservationSource::Metered);
     metered.remaining_weight_g = 490.0f;
-    helix::ams::ingest(helix::ams::BYPASS_LANE_ID, metered);
+    helix::ams::ingest(helix::ams::kBypassLaneId, metered);
 
     // The setup reached the branch: the pick outranks the spool's colour, and
     // the meter's count is on the lane.
-    const auto before = helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID);
+    const auto before = helix::ams::lane_sources(helix::ams::kBypassLaneId);
     REQUIRE(before.local_user.has_value());
     REQUIRE(before.metered.has_value());
     REQUIRE(AmsState::instance().get_external_spool_info()->color_rgb == 0x00FF00);
@@ -527,7 +565,7 @@ TEST_CASE("re-binding through the sync funnel drops the previous spool's pick an
     AmsState::instance().set_external_spool_info(second);
 
     // All three of spool 1's records are gone, so nothing of it paints spool 2.
-    const auto sources = helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID);
+    const auto sources = helix::ams::lane_sources(helix::ams::kBypassLaneId);
     CHECK_FALSE(sources.spoolman.has_value());
     CHECK_FALSE(sources.local_user.has_value());
     CHECK_FALSE(sources.metered.has_value());
@@ -550,7 +588,7 @@ TEST_CASE("a Spoolman record naming a different spool than the binding is not re
     rebound.remaining_weight_g = 600.0f;
     rebound.total_weight_g = 750.0f;
     AmsState::instance().set_external_spool_info(rebound);
-    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::BYPASS_LANE_ID, server_spool_1()));
+    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::kBypassLaneId, server_spool_1()));
 
     // Spool 1's weight and brand must not paint spool 2's record.
     auto shown = AmsState::instance().get_external_spool_info();
@@ -567,11 +605,11 @@ TEST_CASE("clearing the external spool resets the bypass lane", "[external_spool
     linked.spoolman_id = 1;
     linked.material = "PLA";
     AmsState::instance().commit_external_spool_edit(linked);
-    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::BYPASS_LANE_ID, server_spool_1()));
+    REQUIRE(SpoolmanManager::file_spool_on_lane(helix::ams::kBypassLaneId, server_spool_1()));
 
     AmsState::instance().commit_external_spool_edit(SlotInfo{});
 
-    const auto sources = helix::ams::lane_sources(helix::ams::BYPASS_LANE_ID);
+    const auto sources = helix::ams::lane_sources(helix::ams::kBypassLaneId);
     CHECK_FALSE(sources.spoolman.has_value());
     CHECK_FALSE(sources.local_user.has_value());
     CHECK_FALSE(AmsState::instance().get_external_spool_info().has_value());

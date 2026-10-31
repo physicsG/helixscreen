@@ -32,8 +32,8 @@ SaveConfigWatch::~SaveConfigWatch() {
 }
 
 void SaveConfigWatch::begin(IMoonrakerAPI* api, const char* initiation_message,
-                            std::function<void()> on_saved,
-                            std::function<void(const std::string&)> on_failed) {
+                            helix::SharedCallback<void()> on_saved,
+                            helix::SharedCallback<void(const std::string&)> on_failed) {
     if (in_flight_) {
         spdlog::warn("[SaveConfigWatch] begin() while a save is already in flight - ignoring");
         return;
@@ -111,9 +111,9 @@ void SaveConfigWatch::begin(IMoonrakerAPI* api, const char* initiation_message,
         }));
 }
 
-void SaveConfigWatch::begin_from_background(IMoonrakerAPI* api, const char* initiation_message,
-                                            std::function<void()> on_saved,
-                                            std::function<void(const std::string&)> on_failed) {
+void SaveConfigWatch::begin_from_background(
+    IMoonrakerAPI* api, const char* initiation_message, helix::SharedCallback<void()> on_saved,
+    helix::SharedCallback<void(const std::string&)> on_failed) {
     lifetime_.bg_cb("SaveConfigWatch::begin_from_background",
                     [this, api, initiation_message, on_saved = std::move(on_saved),
                      on_failed = std::move(on_failed)]() mutable {

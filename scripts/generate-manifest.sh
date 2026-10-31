@@ -174,8 +174,8 @@ done
 for f in "$DIR"/helixscreen-*.zip; do
     [[ -f "$f" ]] || continue
     base=$(basename "$f")
-    # ESP32 firmware zips sit in the same release directory but are flashed
-    # over USB; no updater can install one, so none may appear as a platform.
+    # ESP32 firmware zips are flashed over USB, not installed by an updater, so
+    # they are not platforms; they are listed separately below.
     [[ "$base" == helixscreen-esp32-* ]] && continue
     if [[ "$base" =~ ^helixscreen-(.+)\.zip$ ]]; then
         add_platform "${BASH_REMATCH[1]}"
@@ -261,6 +261,28 @@ for plat in ${PLATFORMS[@]+"${PLATFORMS[@]}"}; do
         echo "Error: $plat ships only a zip and --no-include-zip suppressed it — nothing to serve" >&2
         exit 1
     fi
+done
+
+# ESP32 firmware zips (`helixscreen-esp32-<board>-v<version>.zip`) are listed
+# under an `esp32-<board>` key with only url/sha256/size, after every platform
+# so existing keys keep their order. They carry no zip_* fields: nothing
+# self-installs them. An absent zip (a release line with the ESP32 build off)
+# leaves the key out entirely.
+for f in "$DIR"/helixscreen-esp32-*-v*.zip; do
+    [[ -f "$f" ]] || continue
+    base=$(basename "$f")
+    [[ "$base" =~ ^helixscreen-(esp32-.+)-v([0-9][0-9A-Za-z.+-]*)\.zip$ ]] || continue
+    # A zip left over from another release must not be listed under this one.
+    if [[ "${BASH_REMATCH[2]}" != "${VERSION#v}" ]]; then
+        echo "Skipping $base: not version $VERSION" >&2
+        continue
+    fi
+    ASSETS_JSON=$(echo "$ASSETS_JSON" | jq \
+        --arg key "${BASH_REMATCH[1]}" \
+        --arg url "${BASE_URL}/${base}" \
+        --arg sha256 "$($SHA256_CMD "$f" | awk '{print $1}')" \
+        --argjson size "$(wc -c < "$f" | tr -d ' ')" \
+        '.[$key] = {url: $url, sha256: $sha256, size: $size}')
 done
 
 if [[ "$FOUND_ANY" == "false" ]]; then

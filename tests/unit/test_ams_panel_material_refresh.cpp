@@ -59,6 +59,7 @@ void register_ams_widgets_and_xml_once() {
     lv_xml_register_component_from_file("A:ui_xml/components/ams_unit_detail.xml");
     lv_xml_register_component_from_file("A:ui_xml/components/ams_loaded_card.xml");
     lv_xml_register_component_from_file("A:ui_xml/components/ams_environment_indicator.xml");
+    lv_xml_register_component_from_file("A:ui_xml/components/ams_env_pill.xml");
     lv_xml_register_component_from_file("A:ui_xml/components/ams_sidebar.xml");
     lv_xml_register_component_from_file("A:ui_xml/ams_panel.xml");
     done = true;

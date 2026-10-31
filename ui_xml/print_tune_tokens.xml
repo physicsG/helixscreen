@@ -53,5 +53,13 @@
     <px name="z_tune_dir_col_w_medium" value="90"/>
     <px name="z_tune_dir_col_w_large" value="96"/>
     <px name="z_tune_dir_col_w_xlarge" value="104"/>
+
+    <!-- Pressure advance step buttons: four in a row beside the readout. -->
+    <px name="tune_pa_btn_w_micro" value="42"/>
+    <px name="tune_pa_btn_w_tiny" value="46"/>
+    <px name="tune_pa_btn_w_small" value="52"/>
+    <px name="tune_pa_btn_w_medium" value="60"/>
+    <px name="tune_pa_btn_w_large" value="68"/>
+    <px name="tune_pa_btn_w_xlarge" value="76"/>
   </consts>
 </component>

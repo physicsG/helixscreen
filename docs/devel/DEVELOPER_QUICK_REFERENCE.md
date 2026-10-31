@@ -128,6 +128,10 @@ void MySingleton::deinit_subjects() {
 // Self-registration (last line of init_subjects()) — never from SubjectInitializer
 StaticSubjectRegistry::instance().register_deinit(
     "MySingleton", []() { MySingleton::instance().deinit_subjects(); });
+
+// Subjects created once at boot, whose init a printer switch does not re-run:
+StaticSubjectRegistry::instance().register_deinit(
+    "MyComponent", deinit_my_component_subjects, StaticSubjectRegistry::Lifetime::Process);
 ```
 
 **See [chapter 11 — Startup & shutdown](architecture/11-startup-shutdown.md) for full pattern.**
@@ -320,11 +324,19 @@ lv_obj_t* progress = ui_step_progress_create(parent, steps, 3, false);  // false
 ui_step_progress_set_current(progress, 2);  // Advance to step 3
 ```
 
+A horizontal row centres each step's dot in its share of the width, so the dots and their
+connectors stand centred in the row for any step count, and puts a label under every step. Where the row is too narrow for that,
+`ui_step_progress_set_current_label_only(progress, true)` hides the per-step labels and
+shows one caption centred under the row, naming the step `ui_step_progress_caption_step()`
+picks: the active one, else the last completed, else the first. The caption follows
+`set_current()`, `set_completed()` and `set_label()`. The AMS operation sidebar turns it on
+for its horizontal stepper (a narrow portrait screen).
+
 ---
 
 ## Sensor Framework
 
-One singleton manager per sensor category, called directly (`Manager::instance()`). Headers live flat in `include/` (`*_sensor_manager.h`).
+One singleton manager per sensor category, each deriving `SensorManager` (`include/sensor_manager.h`) and called directly (`Manager::instance()`). Headers live flat in `include/` (`*_sensor_manager.h`).
 
 **Available managers:**
 - `AccelSensorManager` - ADXL345, LIS2DW, LIS3DH, MPU9250, ICM20948
@@ -332,9 +344,10 @@ One singleton manager per sensor category, called directly (`Manager::instance()
 - `ProbeSensorManager` - Z-probe tracking
 - `WidthSensorManager` - Filament diameter
 - `HumiditySensorManager` - Chamber humidity
+- `InputSensorManager` - `gcode_button` on/off inputs (doors, buttons) with Door/Other roles
 - `TemperatureSensorManager` - `temperature_sensor` / `temperature_fan` objects
 
-**Wiring:** discovery calls each manager's `discover()` / `discover_from_config()` from `src/printer/printer_discovery.cpp#init_subsystems_from_hardware` and the configfile discovery step; status frames reach every manager from `dispatch_status_frame()` (`src/application/moonraker_manager.cpp`).
+**Wiring:** discovery calls each manager's `discover()` then `load_settings()` from `src/printer/printer_discovery.cpp#init_subsystems_from_hardware`, and `rediscover_from_config()` runs `discover()` again on the managers that read config sections once `configfile.config` arrives; status frames reach every manager from `dispatch_status_frame()` (`src/printer/status_dispatch.cpp#dispatch_status_frame`). Every walk goes through `sensor_managers()`, so a new manager is one registry line. A new Klipper object of an existing kind is one row in `src/printer/hardware_object_table.cpp`. Full guide: `SENSOR_MANAGEMENT.md`.
 
 **Accessing state:** Sensors expose LVGL subjects for reactive binding.
 
@@ -552,7 +565,7 @@ CLI: `--layout ultrawide` | Config: `display.layout` in settings.json
 Versioned migration system for upgrading existing user configs on update.
 
 **Adding a migration:**
-1. Bump `CURRENT_CONFIG_VERSION` in `include/config.h`
+1. Bump `kCurrentConfigVersion` in `include/config.h`
 2. Write `migrate_vN_to_vM(json& config, const std::string& config_path)` in `src/system/config_migrations.cpp` (anonymous namespace)
 3. Add `{M, migrate_vN_to_vM},` to the end of `kMigrations`
 4. Update `get_default_config()` if the new key needs a default for fresh installs

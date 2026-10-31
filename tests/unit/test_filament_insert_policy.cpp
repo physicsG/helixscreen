@@ -72,3 +72,28 @@ TEST_CASE("insert policy: manual load presence combines the entry and toolhead r
     REQUIRE(manual_load_presence(0, 0) == false);
     REQUIRE_FALSE(manual_load_presence(-1, -1).has_value());
 }
+
+TEST_CASE("insert policy: a lane's tag reader settles who identifies the spool",
+          "[filament][insert_policy][entry_sensor]") {
+    using helix::InsertEditorAction;
+    using helix::InsertIdentity;
+    using helix::lane_insert_action;
+    SECTION("at the insert edge") {
+        // No reader on the lane: the edge alone decides.
+        CHECK(lane_insert_action(InsertIdentity::NotRead, false) == InsertEditorAction::Open);
+        // The reader has not answered yet: hold the edge for its verdict.
+        CHECK(lane_insert_action(InsertIdentity::Pending, false) == InsertEditorAction::Wait);
+        // Answered in the same frame.
+        CHECK(lane_insert_action(InsertIdentity::FromTag, false) == InsertEditorAction::Ignore);
+        CHECK(lane_insert_action(InsertIdentity::NoTag, false) == InsertEditorAction::Open);
+    }
+    SECTION("while an edge waits on the reader") {
+        CHECK(lane_insert_action(InsertIdentity::Pending, true) == InsertEditorAction::Wait);
+        // The tag named the spool: nothing to ask.
+        CHECK(lane_insert_action(InsertIdentity::FromTag, true) == InsertEditorAction::Ignore);
+        // The reader found no tag: the person identifies it.
+        CHECK(lane_insert_action(InsertIdentity::NoTag, true) == InsertEditorAction::Open);
+        // The backend dropped the insert (a firmware feed, the spool left).
+        CHECK(lane_insert_action(InsertIdentity::NotRead, true) == InsertEditorAction::Ignore);
+    }
+}

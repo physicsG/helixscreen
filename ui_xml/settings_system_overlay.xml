@@ -28,6 +28,12 @@
                               callback="on_system_performance_clicked"/>
         </lv_obj>
         <!-- ================================================================== -->
+        <!-- STORAGE -->
+        <!-- ================================================================== -->
+        <setting_action_row name="row_storage"
+                            label="Storage" icon="sd" description="What fills the printer's disk, and cleanup"
+                            callback="on_storage_clicked"/>
+        <!-- ================================================================== -->
         <!-- TELEMETRY -->
         <!-- ================================================================== -->
         <setting_toggle_row name="row_telemetry"
@@ -37,7 +43,7 @@
         <setting_action_row name="row_telemetry_view_data"
                             label="View Telemetry Data" icon="list" description="See exactly what data will be sent"
                             callback="on_telemetry_view_data">
-          <bind_flag_if_eq subject="settings_telemetry_enabled" flag="hidden" ref_value="0"/>
+          <bind_flag_if cond="settings_telemetry_enabled eq 0 or platform_extras_available eq 0" flag="hidden"/>
         </setting_action_row>
         <!-- ================================================================== -->
         <!-- LOG LEVEL -->

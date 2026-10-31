@@ -237,7 +237,7 @@ def test_long_message_scrolls_instead_of_growing_the_card(shutdown_app):
 
 _AMS_ACTION_ERROR = 9  # AmsAction::ERROR, ams_types.h
 
-# A recognised AFC fault publishes its stop point here and the <afc_fault_path>
+# A recognised AFC fault publishes its stop point here and the <fault_path>
 # graphic binds `hidden` to it, so setting it directly is enough to show the
 # diagram without needing a backend that produces the matching fault text.
 _AFC_SEGMENT_VISIBLE = 2
@@ -264,6 +264,7 @@ def ams_error_app(request, tmp_path):
         app = HelixApp(binary=_BINARY, socket_path=tmp_path / "control.sock",
                        log_path=tmp_path / "app.log")
         with app:
+            app.wait_for("nav_buttons_enabled", 1, timeout=30)
             app.navigate("filament")
             app.wait_idle()
             app.click("ams_mini_status")
@@ -320,7 +321,7 @@ def test_ams_error_modal_fits_with_the_fault_diagram(ams_error_app):
     app, size = ams_error_app
     screen_h = int(size.split("x")[1])
 
-    app.set("afc_fault_segment", _AFC_SEGMENT_VISIBLE)
+    app.set("fault_path_segment", _AFC_SEGMENT_VISIBLE)
     app.wait_idle()
 
     diagram = _geom(app, "fault_path")

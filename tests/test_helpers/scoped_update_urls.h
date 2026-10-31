@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// Points the trusted update-URL lookup (AppConstants::Update::state_dir(), the
+// Points the trusted update-URL lookup (app_constants::update::state_dir(), the
 // root-owned update_urls.json) at a scratch directory, optionally seeding the
 // file, and restores the previous directory even when a REQUIRE throws: a
 // leaked redirect would point every later test's URL lookup at this scratch
@@ -22,7 +22,7 @@ class ScopedUpdateUrls {
   public:
     /// @param body  JSON for update_urls.json; empty leaves the file absent.
     explicit ScopedUpdateUrls(const std::string& prefix, const std::string& body = "")
-        : prev_(AppConstants::Update::detail::state_dir_ref()), dir_(unique_temp_dir(prefix)) {
+        : prev_(app_constants::update::detail::state_dir_ref()), dir_(unique_temp_dir(prefix)) {
         std::filesystem::create_directories(dir_);
         // The trust gate refuses update_urls.json in a group/world-writable
         // directory, so pin the mode rather than trusting the umask.
@@ -34,11 +34,11 @@ class ScopedUpdateUrls {
             f.close();
             ::chmod(file.c_str(), 0644);
         }
-        AppConstants::Update::detail::state_dir_ref() = dir_;
+        app_constants::update::detail::state_dir_ref() = dir_;
     }
 
     ~ScopedUpdateUrls() {
-        AppConstants::Update::detail::state_dir_ref() = prev_;
+        app_constants::update::detail::state_dir_ref() = prev_;
         std::error_code ec;
         std::filesystem::remove_all(dir_, ec);
     }

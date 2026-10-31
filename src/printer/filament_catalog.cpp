@@ -3,6 +3,7 @@
 
 #include "data_root_resolver.h"
 #include "filament_database.h"
+#include "filament_variants.h"
 #include "helix_fs.h"
 #include "json_utils.h"
 #include "system/helix_paths.h"
@@ -276,6 +277,65 @@ std::vector<std::string> FilamentCatalog::builtin_candidate_paths() {
 FilamentCatalog FilamentCatalog::load_full() {
     return load_with_overlay(first_existing(builtin_candidate_paths()),
                              first_existing(user_paths()));
+}
+
+std::unordered_map<std::string, std::string>
+FilamentCatalog::orca_id_map_from(const std::string& builtin_path,
+                                  const std::string& overlay_path) {
+    // catalog id -> the Orca id that product carries, built-ins first, then the
+    // overlay. An overlay entry speaks for the whole product: it may have
+    // changed what the product is, so one with no orca_id of its own carries
+    // none, rather than inheriting the built-in's.
+    std::unordered_map<std::string, std::string> by_product;
+    for (const auto& jp : read_products({builtin_path}))
+        by_product[helix::json_util::safe_string(jp, "id")] =
+            helix::json_util::safe_string(jp, "orca_id");
+    for (const auto& jp : read_products({overlay_path}))
+        by_product[helix::json_util::safe_string(jp, "id")] =
+            helix::json_util::safe_string(jp, "orca_id");
+
+    // An Orca id carried by more than one product names none of them exactly:
+    // child Orca profiles inherit their parent's id, so a shared id can belong
+    // to another product or another material altogether.
+    std::unordered_map<std::string, int> carriers;
+    for (const auto& [id, orca] : by_product)
+        if (!orca.empty())
+            ++carriers[orca];
+
+    std::unordered_map<std::string, std::string> out;
+    for (auto& [id, orca] : by_product)
+        if (!id.empty() && !orca.empty() && carriers[orca] == 1)
+            out.emplace(id, std::move(orca));
+    return out;
+}
+
+namespace {
+std::mutex g_orca_ids_mutex;
+uint64_t g_orca_ids_generation = 0;
+std::shared_ptr<const std::unordered_map<std::string, std::string>> g_orca_ids;
+} // namespace
+
+std::string FilamentCatalog::orca_id_for(const std::string& catalog_id) {
+    if (catalog_id.empty())
+        return {};
+    const uint64_t gen = g_user_overlay_generation.load(std::memory_order_acquire);
+    std::shared_ptr<const std::unordered_map<std::string, std::string>> ids;
+    {
+        std::lock_guard<std::mutex> lock(g_orca_ids_mutex);
+        if (g_orca_ids && g_orca_ids_generation == gen)
+            ids = g_orca_ids;
+    }
+    if (!ids) {
+        // Built outside the lock, as in load_codes_cached(): the parse is the
+        // whole bundled catalog, and a racing build is wasted once, never wrong.
+        ids = std::make_shared<const std::unordered_map<std::string, std::string>>(orca_id_map_from(
+            first_existing(builtin_candidate_paths()), first_existing(user_paths())));
+        std::lock_guard<std::mutex> lock(g_orca_ids_mutex);
+        g_orca_ids = ids;
+        g_orca_ids_generation = gen;
+    }
+    auto it = ids->find(catalog_id);
+    return it == ids->end() ? std::string{} : it->second;
 }
 
 std::map<std::string, std::string> FilamentCatalog::load_user_orca_type_map() {
@@ -552,6 +612,143 @@ std::vector<const EffectiveFilament*> FilamentCatalog::products_for(const std::s
         }
     }
     return out;
+}
+
+namespace {
+
+/// insert-if-absent over a case-insensitive key, preserving the first spelling.
+template <typename T>
+bool insert_ci(std::set<std::string>& keys, std::vector<T>& out, const std::string& key, T value) {
+    const std::string lower = tio::to_lower(key);
+    if (!keys.insert(lower).second) {
+        return false;
+    }
+    out.push_back(std::move(value));
+    return true;
+}
+
+} // namespace
+
+std::vector<std::string> FilamentCatalog::all_families() const {
+    std::set<std::string> keys;
+    std::vector<std::string> out;
+    for (const auto& p : products_) {
+        insert_ci(keys, out, filament::display_family(p.type), filament::display_family(p.type));
+    }
+    std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+        return tio::to_lower(a) < tio::to_lower(b);
+    });
+    return out;
+}
+
+std::vector<FilamentCatalog::FamilyVariant>
+FilamentCatalog::variants_in_family(const std::string& family) const {
+    std::set<std::string> keys;
+    std::vector<FamilyVariant> out;
+    for (const auto& p : products_) {
+        const std::string fam = filament::display_family(p.type);
+        if (!tio::equals_ignore_case(fam, family)) {
+            continue;
+        }
+        FamilyVariant fv{filament::variant_label(p.type, fam), p.type};
+        // Copy the key BEFORE the move: argument evaluation order is
+        // unspecified, and a key bound to fv.label after std::move(fv) emptied
+        // it reads back empty, collapsing every variant onto one entry.
+        const std::string key = fv.label;
+        insert_ci(keys, out, key, std::move(fv));
+    }
+    std::sort(out.begin(), out.end(), [](const FamilyVariant& a, const FamilyVariant& b) {
+        if (a.label == "Basic" || b.label == "Basic") {
+            return a.label == "Basic" && b.label != "Basic";
+        }
+        return tio::to_lower(a.label) < tio::to_lower(b.label);
+    });
+    if (out.empty()) {
+        // A family the catalog does not know still gets one chip: the family
+        // itself, unvarianted, so an unknown material round-trips.
+        out.push_back({"Basic", family});
+    }
+    return out;
+}
+
+std::vector<std::string> FilamentCatalog::brands_in_family(const std::string& family) const {
+    std::set<std::string> keys;
+    std::vector<std::string> out;
+    for (const auto& p : products_) {
+        if (tio::equals_ignore_case(filament::display_family(p.type), family)) {
+            insert_ci(keys, out, p.brand, p.brand);
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+        return tio::to_lower(a) < tio::to_lower(b);
+    });
+    return out;
+}
+
+std::vector<const EffectiveFilament*>
+FilamentCatalog::products_in_family(const std::string& brand, const std::string& family) const {
+    std::vector<const EffectiveFilament*> out;
+    for (const auto& p : products_) {
+        if (tio::equals_ignore_case(p.brand, brand) &&
+            tio::equals_ignore_case(filament::display_family(p.type), family)) {
+            out.push_back(&p);
+        }
+    }
+    sort_for_display(out, family);
+    return out;
+}
+
+void sort_for_display(std::vector<const EffectiveFilament*>& products, const std::string& family) {
+    const std::string family_lc = tio::to_lower(family);
+    // 0 = named exactly the family, 1 = the family's name extended with no space
+    // (a grade like "+" or a fill like "-CF"), 2 = everything else.
+    auto tier_of = [&](const EffectiveFilament* p) {
+        const std::string name_lc = tio::to_lower(p->name);
+        if (name_lc == family_lc)
+            return 0;
+        if (name_lc.size() > family_lc.size() &&
+            name_lc.compare(0, family_lc.size(), family_lc) == 0 &&
+            name_lc[family_lc.size()] != ' ')
+            return 1;
+        return 2;
+    };
+    // Tier 2 groups base-type products ahead of each variant type's own run.
+    auto variant_key = [&](const EffectiveFilament* p) -> std::string {
+        std::string type_lc = tio::to_lower(p->type);
+        return type_lc == family_lc ? std::string{} : type_lc;
+    };
+    // Within a run: the product named its own type, then the rest, then
+    // "Support...".
+    auto rank_of = [](const EffectiveFilament* p) {
+        const std::string name_lc = tio::to_lower(p->name);
+        if (name_lc == tio::to_lower(p->type))
+            return 0;
+        if (name_lc.rfind("support", 0) == 0)
+            return 2;
+        return 1;
+    };
+    std::stable_sort(products.begin(), products.end(),
+                     [&](const EffectiveFilament* a, const EffectiveFilament* b) {
+                         const int ta = tier_of(a);
+                         const int tb = tier_of(b);
+                         if (ta != tb)
+                             return ta < tb;
+                         if (ta == 0)
+                             return false;
+                         if (ta == 2) {
+                             const std::string ka = variant_key(a);
+                             const std::string kb = variant_key(b);
+                             if (ka != kb)
+                                 return ka < kb;
+                             const int ra = rank_of(a);
+                             const int rb = rank_of(b);
+                             if (ra != rb)
+                                 return ra < rb;
+                             if (ra != 1)
+                                 return false;
+                         }
+                         return tio::to_lower(a->name) < tio::to_lower(b->name);
+                     });
 }
 
 } // namespace helix::printer

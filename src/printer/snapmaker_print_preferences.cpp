@@ -23,6 +23,21 @@ std::optional<bool> read_flag(const nlohmann::json& obj, const char* key) {
     return std::nullopt;
 }
 
+/// A per-toolhead list of flags, in either spelling; empty when absent.
+std::vector<bool> read_flag_list(const nlohmann::json& ptc, const char* key) {
+    std::vector<bool> out;
+    if (auto it = ptc.find(key); it != ptc.end() && it->is_array()) {
+        for (const auto& v : *it) {
+            if (v.is_boolean()) {
+                out.push_back(v.get<bool>());
+            } else if (v.is_number_integer()) {
+                out.push_back(v.get<int>() != 0);
+            }
+        }
+    }
+    return out;
+}
+
 void append(std::string& out, const char* name, const std::string& value) {
     out += (out.empty() ? "SET_PRINT_PREFERENCES " : " ");
     out += name;
@@ -56,6 +71,9 @@ void PrintPreferences::merge(const PrintPreferences& incoming) {
     if (!incoming.end_unload_filament.empty()) {
         end_unload_filament = incoming.end_unload_filament;
     }
+    if (!incoming.filament_soft.empty()) {
+        filament_soft = incoming.filament_soft;
+    }
 }
 
 PrintPreferences read_print_preferences(const nlohmann::json& status) {
@@ -75,15 +93,8 @@ PrintPreferences read_print_preferences(const nlohmann::json& status) {
     if (auto it = ptc->find("filament_entangle_sen"); it != ptc->end() && it->is_string()) {
         p.filament_entangle_sen = it->get<std::string>();
     }
-    if (auto it = ptc->find("end_unload_filament"); it != ptc->end() && it->is_array()) {
-        for (const auto& v : *it) {
-            if (v.is_boolean()) {
-                p.end_unload_filament.push_back(v.get<bool>());
-            } else if (v.is_number_integer()) {
-                p.end_unload_filament.push_back(v.get<int>() != 0);
-            }
-        }
-    }
+    p.end_unload_filament = read_flag_list(*ptc, "end_unload_filament");
+    p.filament_soft = read_flag_list(*ptc, "filament_soft");
     return p;
 }
 
@@ -116,6 +127,9 @@ std::string write_print_preferences_gcode(const PrintPreferences& changes) {
         }
         list_literal += "]";
         append(out, "END_UNLOAD_FILAMENT", list_literal);
+    }
+    if (changes.force && !out.empty()) {
+        append(out, "FORCE", "1");
     }
     return out;
 }

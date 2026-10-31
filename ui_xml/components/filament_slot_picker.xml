@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- The filament slot picker (helix::ui::FilamentSlotPicker): a dimmed
+       backdrop that dismisses on a tap, holding a card the picker anchors under
+       (or over) the control that opened it. The card lists an optional heading,
+       an Auto row, one row per slot (filament_picker_row_count, up to
+       FilamentSlotPicker::kMaxPickerRows) and the optional extra and Cancel
+       rows. The card scrolls only where it is taller than the screen. -->
+  <view extends="lv_obj"
+        width="100%" height="100%" style_bg_opa="128" style_bg_color="0x000000" style_border_width="0" style_pad_all="0"
+        style_radius="0" scrollable="false" clickable="true">
+    <event_cb trigger="clicked" callback="filament_picker_backdrop_cb"/>
+    <lv_obj name="filament_picker_card"
+            width="content" height="content" style_max_height="100%" style_bg_color="#elevated_bg" style_bg_opa="255"
+            style_radius="#border_radius" style_border_width="0" style_pad_all="#space_md" style_pad_gap="#space_xs"
+            flex_flow="column" scrollbar_mode="active" clickable="true">
+      <text_body name="filament_picker_title" bind_text="filament_picker_title">
+        <bind_flag_if_eq subject="filament_picker_has_title" flag="hidden" ref_value="0"/>
+      </text_body>
+      <filament_slot_picker_choice name="auto_choice" choice="auto" text_subject="filament_picker_auto_text">
+        <bind_style_if_eq name="styles.picker_row_selected" subject="filament_picker_auto_selected" ref_value="1"/>
+        <bind_flag_if_eq subject="filament_picker_offer_auto" flag="hidden" ref_value="0"/>
+      </filament_slot_picker_choice>
+      <lv_obj name="filament_picker_rows"
+              width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs"
+              style_bg_opa="0" style_border_width="0" scrollable="false" clickable="false">
+        <repeat count="filament_picker_row_count">
+          <filament_slot_picker_row name="filament_picker_row_${i}" index="${i}"/>
+        </repeat>
+      </lv_obj>
+      <filament_slot_picker_choice name="extra_choice" choice="extra" text_subject="filament_picker_extra_text">
+        <bind_flag_if_eq subject="filament_picker_has_extra" flag="hidden" ref_value="0"/>
+      </filament_slot_picker_choice>
+      <filament_slot_picker_choice name="cancel_choice" choice="cancel" text_subject="filament_picker_cancel_text">
+        <bind_flag_if_eq subject="filament_picker_has_cancel" flag="hidden" ref_value="0"/>
+      </filament_slot_picker_choice>
+    </lv_obj>
+  </view>
+</component>

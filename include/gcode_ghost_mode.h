@@ -30,7 +30,7 @@ enum class GhostRenderMode : uint8_t {
 };
 
 /// Mode used when nothing has set one explicitly.
-inline constexpr GhostRenderMode DEFAULT_GHOST_RENDER_MODE = GhostRenderMode::Stipple;
+inline constexpr GhostRenderMode kDefaultGhostRenderMode = GhostRenderMode::Stipple;
 
 } // namespace gcode
 } // namespace helix

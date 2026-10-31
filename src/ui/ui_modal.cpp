@@ -34,7 +34,7 @@ using namespace helix;
 // MODAL STYLE CONSTANTS
 // ============================================================================
 // Default backdrop opacity if globals.xml constant not found
-static constexpr uint8_t DEFAULT_MODAL_BACKDROP_OPACITY = 100;
+static constexpr uint8_t kDefaultModalBackdropOpacity = 100;
 
 // Helper to get backdrop opacity from globals.xml
 static uint8_t get_modal_backdrop_opacity() {
@@ -45,20 +45,20 @@ static uint8_t get_modal_backdrop_opacity() {
             return static_cast<uint8_t>(val);
         }
     }
-    return DEFAULT_MODAL_BACKDROP_OPACITY;
+    return kDefaultModalBackdropOpacity;
 }
 
 // ============================================================================
 // ANIMATION CONSTANTS
 // ============================================================================
 // Duration values match globals.xml tokens for consistency
-static constexpr int32_t MODAL_ENTRANCE_DURATION_MS = 250; // anim_normal
-static constexpr int32_t MODAL_EXIT_DURATION_MS = 150;     // anim_fast
+static constexpr int32_t kModalEntranceDurationMs = 250; // anim_normal
+static constexpr int32_t kModalExitDurationMs = 150;     // anim_fast
 
 // Scale animation uses percentage values (0-256 in LVGL)
 // We animate from 85% (218) to 100% (256), with slight overshoot for bounce
-static constexpr int32_t MODAL_SCALE_START = 218; // ~85% scale
-static constexpr int32_t MODAL_SCALE_END = 256;   // 100% scale
+static constexpr int32_t kModalScaleStart = 218; // ~85% scale
+static constexpr int32_t kModalScaleEnd = 256;   // 100% scale
 
 namespace {
 bool g_callbacks_registered = false;
@@ -123,9 +123,19 @@ ModalStack& ModalStack::instance() {
     return instance;
 }
 
+// A visible modal blocks the navbar: its backdrop covers the always-on-top
+// chrome (E-stop included) until the last visible modal starts to close.
+static void sync_chrome_cover(const ModalStack& stack) {
+    helix::ui::set_chrome_covered(stack.covers_chrome());
+}
+
 void ModalStack::push(lv_obj_t* backdrop, lv_obj_t* dialog, const std::string& component_name,
                       Modal* owner) {
-    stack_.push_back({backdrop, dialog, component_name, false /* exiting */, owner});
+    stack_.push_back({backdrop, dialog, component_name, false /* exiting */, owner, true, {}});
+    sync_chrome_cover(*this);
+    if (backdrop && lv_obj_is_valid(backdrop)) {
+        lv_obj_move_foreground(backdrop);
+    }
     spdlog::debug("[ModalStack] Pushed modal '{}' (stack depth: {})", component_name,
                   stack_.size());
     crash_handler::breadcrumb::note("modal+", component_name.c_str(),
@@ -157,6 +167,7 @@ void ModalStack::remove(lv_obj_t* backdrop, bool free_owned_now) {
                                         static_cast<long>(stack_.size() - 1));
         std::unique_ptr<Modal> owned = std::move(it->owned_instance);
         stack_.erase(it);
+        sync_chrome_cover(*this);
         if (owned) {
             // An owned instance must die BEFORE its widget tree: subclass
             // destructors may touch widgets they created in on_show()
@@ -224,6 +235,7 @@ void ModalStack::clear() {
         }
         lv_obj_delete(entry.backdrop);
     }
+    sync_chrome_cover(*this);
 }
 
 lv_obj_t* ModalStack::top_dialog() const {
@@ -243,6 +255,14 @@ std::string ModalStack::top_component_name() const {
             return it->component_name;
     }
     return "";
+}
+
+lv_obj_t* ModalStack::dialog_for_component(const std::string& component_name) const {
+    for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) {
+        if (!it->exiting && it->component_name == component_name)
+            return it->dialog;
+    }
+    return nullptr;
 }
 
 lv_obj_t* ModalStack::backdrop_for(lv_obj_t* dialog) const {
@@ -300,6 +320,49 @@ bool ModalStack::empty() const {
     return true;
 }
 
+void ModalStack::add_external_cover() {
+    ++external_covers_;
+    sync_chrome_cover(*this);
+}
+
+void ModalStack::remove_external_cover() {
+    if (external_covers_ > 0) {
+        --external_covers_;
+    }
+    sync_chrome_cover(*this);
+}
+
+bool ModalStack::covers_chrome() const {
+    if (external_covers_ > 0) {
+        return true;
+    }
+    for (const auto& entry : stack_) {
+        if (!entry.exiting && entry.covers_chrome) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ModalStack::set_covers_chrome(lv_obj_t* backdrop, bool covers) {
+    for (auto& entry : stack_) {
+        if (entry.backdrop == backdrop) {
+            entry.covers_chrome = covers;
+            sync_chrome_cover(*this);
+            return;
+        }
+    }
+}
+
+lv_obj_t* ModalStack::lowest_covering_backdrop() const {
+    for (const auto& entry : stack_) {
+        if (!entry.exiting && entry.covers_chrome) {
+            return entry.backdrop;
+        }
+    }
+    return nullptr;
+}
+
 bool ModalStack::mark_exiting(lv_obj_t* backdrop) {
     for (auto& entry : stack_) {
         if (entry.backdrop == backdrop) {
@@ -310,6 +373,7 @@ bool ModalStack::mark_exiting(lv_obj_t* backdrop) {
             }
             entry.exiting = true;
             spdlog::debug("[ModalStack] Marked modal '{}' as exiting", entry.component_name);
+            sync_chrome_cover(*this);
             return true;
         }
     }
@@ -358,7 +422,7 @@ void ModalStack::animate_entrance(lv_obj_t* dialog) {
     if (!DisplaySettingsManager::instance().get_animations_enabled() ||
         !helix::ui::full_style_effects_active()) {
         lv_obj_set_style_opa(backdrop, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_transform_scale(dialog, MODAL_SCALE_END, LV_PART_MAIN);
+        lv_obj_set_style_transform_scale(dialog, kModalScaleEnd, LV_PART_MAIN);
         lv_obj_set_style_opa(dialog, LV_OPA_COVER, LV_PART_MAIN);
         spdlog::debug("[ModalStack] Animations disabled - showing modal instantly");
         return;
@@ -368,7 +432,7 @@ void ModalStack::animate_entrance(lv_obj_t* dialog) {
     lv_obj_set_style_opa(backdrop, LV_OPA_TRANSP, LV_PART_MAIN);
 
     // Start dialog scaled down and transparent
-    lv_obj_set_style_transform_scale(dialog, MODAL_SCALE_START, LV_PART_MAIN);
+    lv_obj_set_style_transform_scale(dialog, kModalScaleStart, LV_PART_MAIN);
     lv_obj_set_style_opa(dialog, LV_OPA_TRANSP, LV_PART_MAIN);
 
     // Fade in backdrop
@@ -376,7 +440,7 @@ void ModalStack::animate_entrance(lv_obj_t* dialog) {
     lv_anim_init(&backdrop_anim);
     lv_anim_set_var(&backdrop_anim, backdrop);
     lv_anim_set_values(&backdrop_anim, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&backdrop_anim, MODAL_ENTRANCE_DURATION_MS);
+    lv_anim_set_duration(&backdrop_anim, kModalEntranceDurationMs);
     lv_anim_set_path_cb(&backdrop_anim, lv_anim_path_ease_out);
     lv_anim_set_exec_cb(&backdrop_anim, [](void* obj, int32_t value) {
         // No lv_obj_is_valid() guard: LVGL's lv_obj_destructor cancels an object's
@@ -392,8 +456,8 @@ void ModalStack::animate_entrance(lv_obj_t* dialog) {
     lv_anim_t scale_anim;
     lv_anim_init(&scale_anim);
     lv_anim_set_var(&scale_anim, dialog);
-    lv_anim_set_values(&scale_anim, MODAL_SCALE_START, MODAL_SCALE_END);
-    lv_anim_set_duration(&scale_anim, MODAL_ENTRANCE_DURATION_MS);
+    lv_anim_set_values(&scale_anim, kModalScaleStart, kModalScaleEnd);
+    lv_anim_set_duration(&scale_anim, kModalEntranceDurationMs);
     lv_anim_set_path_cb(&scale_anim, lv_anim_path_overshoot);
     lv_anim_set_exec_cb(&scale_anim, [](void* obj, int32_t value) {
         // No lv_obj_is_valid() guard — see the opacity cbs above ([L076]).
@@ -407,7 +471,7 @@ void ModalStack::animate_entrance(lv_obj_t* dialog) {
     lv_anim_init(&fade_anim);
     lv_anim_set_var(&fade_anim, dialog);
     lv_anim_set_values(&fade_anim, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&fade_anim, MODAL_ENTRANCE_DURATION_MS);
+    lv_anim_set_duration(&fade_anim, kModalEntranceDurationMs);
     lv_anim_set_path_cb(&fade_anim, lv_anim_path_ease_out);
     lv_anim_set_exec_cb(&fade_anim, [](void* obj, int32_t value) {
         // No lv_obj_is_valid() guard: LVGL's lv_obj_destructor cancels an object's
@@ -496,7 +560,7 @@ void ModalStack::animate_exit(lv_obj_t* backdrop, lv_obj_t* dialog) {
     // Same rule as animate_entrance: no animation, or too costly on this tier
     if (!DisplaySettingsManager::instance().get_animations_enabled() ||
         !helix::ui::full_style_effects_active()) {
-        lv_obj_set_style_transform_scale(dialog, MODAL_SCALE_END, LV_PART_MAIN);
+        lv_obj_set_style_transform_scale(dialog, kModalScaleEnd, LV_PART_MAIN);
         lv_obj_set_style_opa(dialog, LV_OPA_COVER, LV_PART_MAIN);
         spdlog::debug("[ModalStack] Exit without animation - hiding, finishing next tick");
         // finish_exit frees an owned instance before it queues the tree's delete;
@@ -512,7 +576,7 @@ void ModalStack::animate_exit(lv_obj_t* backdrop, lv_obj_t* dialog) {
     lv_anim_init(&backdrop_anim);
     lv_anim_set_var(&backdrop_anim, backdrop);
     lv_anim_set_values(&backdrop_anim, LV_OPA_COVER, LV_OPA_TRANSP);
-    lv_anim_set_duration(&backdrop_anim, MODAL_EXIT_DURATION_MS);
+    lv_anim_set_duration(&backdrop_anim, kModalExitDurationMs);
     lv_anim_set_path_cb(&backdrop_anim, lv_anim_path_ease_in);
     lv_anim_set_exec_cb(&backdrop_anim, [](void* obj, int32_t value) {
         // No lv_obj_is_valid() guard: LVGL's lv_obj_destructor cancels an object's
@@ -529,8 +593,8 @@ void ModalStack::animate_exit(lv_obj_t* backdrop, lv_obj_t* dialog) {
     lv_anim_t scale_anim;
     lv_anim_init(&scale_anim);
     lv_anim_set_var(&scale_anim, dialog);
-    lv_anim_set_values(&scale_anim, MODAL_SCALE_END, MODAL_SCALE_START);
-    lv_anim_set_duration(&scale_anim, MODAL_EXIT_DURATION_MS);
+    lv_anim_set_values(&scale_anim, kModalScaleEnd, kModalScaleStart);
+    lv_anim_set_duration(&scale_anim, kModalExitDurationMs);
     lv_anim_set_path_cb(&scale_anim, lv_anim_path_ease_in);
     lv_anim_set_exec_cb(&scale_anim, [](void* obj, int32_t value) {
         // No lv_obj_is_valid() guard — see the opacity cbs above ([L076]).
@@ -544,7 +608,7 @@ void ModalStack::animate_exit(lv_obj_t* backdrop, lv_obj_t* dialog) {
     lv_anim_init(&fade_anim);
     lv_anim_set_var(&fade_anim, dialog);
     lv_anim_set_values(&fade_anim, LV_OPA_COVER, LV_OPA_TRANSP);
-    lv_anim_set_duration(&fade_anim, MODAL_EXIT_DURATION_MS);
+    lv_anim_set_duration(&fade_anim, kModalExitDurationMs);
     lv_anim_set_path_cb(&fade_anim, lv_anim_path_ease_in);
     lv_anim_set_exec_cb(&fade_anim, [](void* obj, int32_t value) {
         // No lv_obj_is_valid() guard: LVGL's lv_obj_destructor cancels an object's
@@ -624,7 +688,7 @@ Modal::~Modal() {
 void Modal::disarm_tree(lv_obj_t* backdrop, lv_obj_t* dialog, Modal* owner) {
     if (dialog) {
         // Order matters only in that all three must happen before the widgets
-        // start animating out; the dialog stays alive for MODAL_EXIT_DURATION_MS
+        // start animating out; the dialog stays alive for kModalExitDurationMs
         // after a hide, and every callback on it is still wired.
         clear_user_data_in_tree(dialog);
         disable_clicks_in_tree(dialog);
@@ -653,7 +717,7 @@ void Modal::disarm_tree(lv_obj_t* backdrop, lv_obj_t* dialog, Modal* owner) {
     }
 
     // A stack-owned instance is freed when its entry goes, while these widgets
-    // live out MODAL_EXIT_DURATION_MS first. Any callback still carrying it -
+    // live out kModalExitDurationMs first. Any callback still carrying it -
     // wire_button()'s hooks, or one a subclass added - would then dispatch on
     // freed memory. disable_clicks_in_tree() stops a finger from reaching
     // them, but not lv_obj_send_event (which `ctl click` and tests use, and
@@ -739,17 +803,40 @@ bool Modal::show_owned(std::unique_ptr<Modal> modal, lv_obj_t* parent, const cha
     return true;
 }
 
-// If any visible (non-exiting) modal remains, bring the new topmost one to the
-// foreground so it isn't left buried behind a backdrop that is on its way out.
+void ModalStack::raise_visible_to_foreground() {
+    for (const auto& entry : stack_) {
+        if (!entry.exiting && entry.backdrop) {
+            helix::ui::bring_to_front(entry.backdrop);
+        }
+    }
+}
+
+void ModalStack::set_tag(lv_obj_t* backdrop, std::string tag) {
+    for (auto& entry : stack_) {
+        if (entry.backdrop == backdrop) {
+            entry.tag = std::move(tag);
+            return;
+        }
+    }
+}
+
+bool ModalStack::has_visible_untagged() const {
+    return std::any_of(stack_.begin(), stack_.end(),
+                       [](const ModalEntry& e) { return !e.exiting && e.tag.empty(); });
+}
+
+std::string ModalStack::top_visible_tag() const {
+    for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) {
+        if (!it->exiting && !it->tag.empty()) {
+            return it->tag;
+        }
+    }
+    return {};
+}
+
+// Visible modals come back in front of a backdrop that is on its way out.
 static void raise_top_modal_to_foreground(ModalStack& stack) {
-    lv_obj_t* top = stack.top_dialog();
-    if (!top) {
-        return;
-    }
-    lv_obj_t* top_backdrop = stack.backdrop_for(top);
-    if (top_backdrop && !stack.is_exiting(top_backdrop)) {
-        helix::ui::bring_to_front(top_backdrop);
-    }
+    stack.raise_visible_to_foreground();
 }
 
 static const char* close_reason_name(ModalCloseReason reason) {
@@ -830,6 +917,13 @@ void Modal::hide(lv_obj_t* dialog, ModalCloseReason reason) {
     stack.animate_exit(backdrop, dialog);
 
     raise_top_modal_to_foreground(stack);
+}
+
+void Modal::set_covers_chrome(lv_obj_t* dialog, bool covers) {
+    auto& stack = ModalStack::instance();
+    if (lv_obj_t* backdrop = stack.backdrop_for(dialog)) {
+        stack.set_covers_chrome(backdrop, covers);
+    }
 }
 
 lv_obj_t* Modal::get_top() {
@@ -961,6 +1055,9 @@ void Modal::hide(ModalCloseReason reason) {
 
     // Call hook before destruction
     on_hide();
+    if (reason != ModalCloseReason::ButtonPress) {
+        on_dismissed();
+    }
 
     // Save pointers before clearing (needed for animation)
     lv_obj_t* backdrop = backdrop_;
@@ -1160,9 +1257,8 @@ void Modal::esc_key_cb(lv_event_t* e) {
 
     auto* self = static_cast<Modal*>(lv_event_get_user_data(e));
     if (self) {
-        // Instance modal - call on_cancel to allow override
         spdlog::debug("[{}] ESC key pressed - closing", self->get_name());
-        self->on_cancel();
+        self->on_escape();
     } else {
         // Static modal - hide topmost
         lv_obj_t* top = ModalStack::instance().top_dialog();
@@ -1229,11 +1325,11 @@ helix::ui::ModalDialogAttrs::ModalDialogAttrs(std::string title, std::string mes
 }
 
 const char** helix::ui::ModalDialogAttrs::get() {
-    attrs_ = {"title",        title_.c_str(),   "message",        message_.c_str(),
-              "primary_text", primary_.c_str(), "secondary_text", secondary_.c_str(),
-              "hide_info",    hide_info_,       "hide_warning",   hide_warning_,
-              "hide_error",   hide_error_,      "hide_secondary", hide_secondary_,
-              nullptr};
+    attrs_ = {"title",           title_.c_str(),   "message",        message_.c_str(),
+              "primary_text",    primary_.c_str(), "secondary_text", secondary_.c_str(),
+              "hide_info",       hide_info_,       "hide_warning",   hide_warning_,
+              "hide_error",      hide_error_,      "hide_secondary", hide_secondary_,
+              "primary_variant", primary_variant_, nullptr};
     return attrs_.data();
 }
 
@@ -1280,7 +1376,7 @@ class ConfirmationModal : public Modal {
   public:
     ConfirmationModal(std::string title, std::string message, ModalSeverity severity,
                       std::string primary, std::string secondary, bool show_cancel,
-                      std::function<void()> on_dismiss,
+                      helix::SharedCallback<void()> on_dismiss,
                       std::optional<helix::LifetimeToken> owner_token)
         : attrs_(std::move(title), std::move(message), severity, std::move(primary),
                  std::move(secondary), show_cancel),
@@ -1289,11 +1385,15 @@ class ConfirmationModal : public Modal {
     /// The callbacks never touch a widget, so nothing of the caller's is
     /// attached to one and there is no user_data to outlive anything
     /// (prestonbrown/helixscreen#1383).
-    void set_callbacks(std::function<void()> on_confirm, std::function<void()> on_cancel,
-                       bool has_cancel) {
+    void set_callbacks(helix::SharedCallback<void()> on_confirm,
+                       helix::SharedCallback<void()> on_cancel, bool has_cancel) {
         fn_confirm_ = std::move(on_confirm);
         fn_cancel_ = std::move(on_cancel);
         has_cancel_ = has_cancel;
+    }
+
+    void set_destructive(bool destructive) {
+        attrs_.set_primary_variant(destructive ? "danger" : "primary");
     }
 
     /// Owns its attr strings so they outlive XML creation by construction
@@ -1328,7 +1428,7 @@ class ConfirmationModal : public Modal {
     }
 
     void on_cancel() override {
-        // esc_key_cb() is the ONLY caller - the cancel button goes to
+        // on_escape()'s default is the ONLY caller - the cancel button goes to
         // secondary_clicked() instead. So this is unambiguously "closed with no
         // button pressed": hide and let on_hide() report the dismissal. That is
         // what makes the documented on_dismiss contract true for ESC as well as
@@ -1422,10 +1522,10 @@ class ConfirmationModal : public Modal {
     }
 
     helix::ui::ModalDialogAttrs attrs_;
-    std::function<void()> on_dismiss_;
+    helix::SharedCallback<void()> on_dismiss_;
     std::optional<helix::LifetimeToken> owner_token_;
-    std::function<void()> fn_confirm_;
-    std::function<void()> fn_cancel_;
+    helix::SharedCallback<void()> fn_confirm_;
+    helix::SharedCallback<void()> fn_cancel_;
     bool has_cancel_ = false;
     bool answered_ = false;
 };
@@ -1433,7 +1533,7 @@ class ConfirmationModal : public Modal {
 /// The one build sequence behind both forms.
 lv_obj_t* build_confirmation(const char* title, const char* message, ModalSeverity severity,
                              const char* primary_text, const char* cancel_text, bool has_cancel,
-                             std::function<void()> on_dismiss,
+                             helix::SharedCallback<void()> on_dismiss,
                              std::optional<helix::LifetimeToken> owner_token,
                              const std::function<void(ConfirmationModal&)>& setup) {
     if (!title || !message) {
@@ -1464,13 +1564,15 @@ lv_obj_t* build_confirmation(const char* title, const char* message, ModalSeveri
 } // namespace
 
 lv_obj_t* helix::ui::modal_confirm(const char* title, const char* message, ModalSeverity severity,
-                                   const char* confirm_text, std::function<void()> on_confirm,
+                                   const char* confirm_text,
+                                   helix::SharedCallback<void()> on_confirm,
                                    const ConfirmOptions& options) {
     return build_confirmation(title, message, severity, confirm_text, options.cancel_text,
                               /*has_cancel=*/true, options.on_dismiss, options.owner_token,
                               [&](ConfirmationModal& m) {
                                   m.set_callbacks(std::move(on_confirm), options.on_cancel,
                                                   /*has_cancel=*/true);
+                                  m.set_destructive(options.destructive);
                               });
 }
 
@@ -1490,7 +1592,7 @@ std::string helix::ui::config_rewrite_message(std::string_view what) {
 
 lv_obj_t* helix::ui::confirm_config_rewrite(const char* title, std::string_view what,
                                             const char* confirm_text,
-                                            std::function<void()> on_confirm,
+                                            helix::SharedCallback<void()> on_confirm,
                                             const ConfirmOptions& options) {
     const std::string message = config_rewrite_message(what);
     return modal_confirm(title, message.c_str(), ModalSeverity::Warning, confirm_text,
@@ -1498,7 +1600,7 @@ lv_obj_t* helix::ui::confirm_config_rewrite(const char* title, std::string_view 
 }
 
 lv_obj_t* helix::ui::modal_alert(const char* title, const char* message, ModalSeverity severity,
-                                 const char* ok_text, std::function<void()> on_ok,
+                                 const char* ok_text, helix::SharedCallback<void()> on_ok,
                                  const AlertOptions& options) {
     return build_confirmation(title, message, severity, ok_text, nullptr, /*has_cancel=*/false,
                               options.on_dismiss, options.owner_token, [&](ConfirmationModal& m) {
@@ -1508,7 +1610,7 @@ lv_obj_t* helix::ui::modal_alert(const char* title, const char* message, ModalSe
 }
 
 lv_obj_t* helix::ui::show_resonance_memory_refusal(size_t headroom_mb,
-                                                   std::function<void()> on_close,
+                                                   helix::SharedCallback<void()> on_close,
                                                    const AlertOptions& options) {
     std::string msg = lv_tr("There is not enough free memory to run this test. Klipper's "
                             "analysis would run out of memory and leave the printer stuck "
@@ -1517,7 +1619,7 @@ lv_obj_t* helix::ui::show_resonance_memory_refusal(size_t headroom_mb,
         msg = fmt::format(lv_tr("Only {} MB of memory is free, and Klipper's analysis needs "
                                 "about {} MB. Running the test would leave the printer stuck "
                                 "until it is power-cycled."),
-                          headroom_mb, helix::RESONANCE_MIN_HEADROOM_MB);
+                          headroom_mb, helix::kResonanceMinHeadroomMb);
     });
     AlertOptions all = options;
     if (on_close && !all.on_dismiss) {
@@ -1528,7 +1630,7 @@ lv_obj_t* helix::ui::show_resonance_memory_refusal(size_t headroom_mb,
 }
 
 lv_obj_t* helix::ui::show_low_ram_resonance_warning(size_t total_mb, lv_obj_t** dialog_handle,
-                                                    std::function<void()> on_confirm,
+                                                    helix::SharedCallback<void()> on_confirm,
                                                     const ConfirmOptions& options) {
     // A mistranslated {} must never abort through the LVGL C dispatch frame:
     // the unformatted wording stands in if formatting fails.
@@ -1556,7 +1658,8 @@ lv_obj_t* helix::ui::show_low_ram_resonance_warning(size_t total_mb, lv_obj_t** 
             *dialog_handle = nullptr;
         }
     };
-    auto lead_with_drop = [drop](std::function<void()> rest) -> std::function<void()> {
+    auto lead_with_drop =
+        [drop](helix::SharedCallback<void()> rest) -> helix::SharedCallback<void()> {
         if (!rest) {
             return drop;
         }
@@ -1567,7 +1670,7 @@ lv_obj_t* helix::ui::show_low_ram_resonance_warning(size_t total_mb, lv_obj_t** 
     };
     all.on_cancel = lead_with_drop(std::move(all.on_cancel));
     all.on_dismiss = lead_with_drop(std::move(all.on_dismiss));
-    std::function<void()> confirm = lead_with_drop(std::move(on_confirm));
+    helix::SharedCallback<void()> confirm = lead_with_drop(std::move(on_confirm));
     lv_obj_t* dialog = modal_confirm(lv_tr("Low Memory"), msg.c_str(), ModalSeverity::Warning,
                                      lv_tr("Continue"), std::move(confirm), all);
     if (dialog_handle) {

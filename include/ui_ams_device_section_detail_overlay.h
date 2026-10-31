@@ -16,12 +16,16 @@
 
 #pragma once
 
+#include "ui_observer_guard.h"
+
+#include "ams_error.h"
 #include "ams_types.h"
 #include "overlay_base.h"
 #include "static_panel_registry.h"
 
 #include <lvgl/lvgl.h>
 
+#include <any>
 #include <string>
 #include <vector>
 
@@ -59,12 +63,11 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
     //
 
     /**
-     * @brief Initialize subjects for reactive binding
-     *
-     * Registers subjects for:
-     * - ams_section_detail_title: Title text for the overlay header
+     * @brief Register the constant subject a disabled action's row binds to
      */
     void init_subjects() override;
+
+    void register_callbacks() override;
 
     /**
      * @brief Get human-readable overlay name
@@ -104,66 +107,70 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
      */
     void refresh();
 
+    /**
+     * @brief Follow the backend while open: rebuild when this section's actions
+     *        change value or availability
+     */
+    void on_activate() override;
+
   protected:
     void before_show() override;
+    void on_deactivating(DeactivateReason reason) override;
 
   private:
+    friend class AmsDeviceSectionDetailOverlayTestAccess;
+
+    /// The always-1 subject a disabled action's row names as its `disabled` subject.
+    static constexpr const char* kActionDisabledSubject = "ams_device_action_disabled";
+    /// What a dropdown shows when the backend reports no value it lists.
+    static constexpr const char* kUnknownDropdownText = "-";
+
     //
     // === Internal Methods ===
     //
 
     /**
-     * @brief Create control for a single device action (non-BUTTON types)
+     * @brief Create the setting_*_row for a TOGGLE, SLIDER, DROPDOWN or INFO action
      *
-     * Creates the appropriate control based on action type (TOGGLE,
-     * INFO, SLIDER, DROPDOWN). BUTTON actions are handled by
-     * create_button_in_row() instead.
-     *
-     * @param parent Container to add control to
-     * @param action Action metadata
+     * The row is named after the action id. A disabled action shows its
+     * disable_reason where the description goes.
      */
-    void create_action_control(lv_obj_t* parent, const helix::printer::DeviceAction& action);
+    void create_setting_row(lv_obj_t* parent, const helix::printer::DeviceAction& action);
 
-    /**
-     * @brief Create a button inside a 2-column row container
-     *
-     * @param row The flex row container (2 buttons per row)
-     * @param action Action metadata for the button
-     */
-    void create_button_in_row(lv_obj_t* row, const helix::printer::DeviceAction& action);
+    /// Create a BUTTON action's device_action_button inside a two-button row.
+    void create_button(lv_obj_t* row, const helix::printer::DeviceAction& action);
+
+    /// The action whose row (or button) the event's target sits in, or nullptr.
+    [[nodiscard]] const helix::printer::DeviceAction* action_for_event(lv_event_t* e) const;
+
+    /// The row or button built for @p action_id, or nullptr.
+    [[nodiscard]] lv_obj_t* row_for(const std::string& action_id) const;
+
+    /// Run @p action through the backend, reporting a failure, and on success record
+    /// @p value as the one its row shows. Returns the result.
+    AmsError execute(const helix::printer::DeviceAction& action, std::any value);
+
+    /// Show slider @p position as @p action's value in its row's value display.
+    void show_slider_value(lv_obj_t* row, const helix::printer::DeviceAction& action,
+                           int32_t position) const;
+
+    /// Set @p action's slider to @p value (clamped to its range and step) and send it.
+    /// A refused value puts the slider back on the action's current value.
+    void apply_slider_value(const helix::printer::DeviceAction& action, double value);
 
     //
     // === Static Callbacks ===
     //
 
-    /**
-     * @brief Callback for dynamic action button click
-     */
     static void on_action_clicked(lv_event_t* e);
-
-    /**
-     * @brief Callback for dynamic toggle value change
-     */
     static void on_toggle_changed(lv_event_t* e);
-
-    /**
-     * @brief Callback for slider value change — updates label only (no backend call)
-     */
+    /// The value display follows the drag; nothing is sent.
     static void on_slider_changed(lv_event_t* e);
-
-    /**
-     * @brief Callback for slider release — executes backend action once
-     */
+    /// Sends the slider's value, once, on release.
     static void on_slider_released(lv_event_t* e);
-
-    /**
-     * @brief Callback for text input submit — validates and applies numeric value
-     */
-    static void on_value_input_ready(lv_event_t* e);
-
-    /**
-     * @brief Callback for dynamic dropdown value change
-     */
+    /// Opens the numeric keypad for an exact value.
+    static void on_value_clicked(lv_event_t* e);
+    static void on_keypad_value(float value, void* user_data);
     static void on_dropdown_changed(lv_event_t* e);
 
     //
@@ -185,9 +192,41 @@ class AmsDeviceSectionDetailOverlay : public OverlayBase {
     /// Cached actions from backend
     std::vector<helix::printer::DeviceAction> cached_actions_;
 
-    /// Action IDs for callback lookup (index stored in user_data)
-    std::vector<std::string> action_ids_;
+    /// Re-reads the backend on every AMS data tick while the overlay is open.
+    ObserverGuard data_observer_;
+
+    /// refresh(), only when the backend's actions for this section differ from the shown ones.
+    void refresh_if_changed();
+
+    /// The slider action the open keypad edits, and the keypad's title
+    std::string keypad_action_id_;
+    std::string keypad_title_;
+
+    lv_subject_t action_disabled_subject_{};
+    /// Declared after the subject it deinits, so it is destroyed first.
+    SubjectManager subjects_;
 };
+
+/**
+ * @brief What a DeviceAction's control is labeled: its translated label, then the
+ *        tool it applies to in the app's one tool-label form ("Tool 1 (T0)").
+ */
+[[nodiscard]] std::string device_action_label(const helix::printer::DeviceAction& action);
+
+/**
+ * @brief Whether @p section's actions in @p fresh differ from those in @p shown in
+ *        anything a row displays: which actions, their value, or their availability.
+ */
+[[nodiscard]] bool device_section_changed(const std::vector<helix::printer::DeviceAction>& shown,
+                                          const std::vector<helix::printer::DeviceAction>& fresh,
+                                          const std::string& section);
+
+/**
+ * @brief The bind_state_if expression device_action_button greys a button with,
+ *        beyond moves_machine: for a motion action still allowed on a paused
+ *        print, "motion blocked and not paused"; otherwise one that is never true.
+ */
+[[nodiscard]] std::string device_action_disabled_cond(const helix::printer::DeviceAction& action);
 
 inline AmsDeviceSectionDetailOverlay& get_ams_device_section_detail_overlay() {
     return lazy_global<AmsDeviceSectionDetailOverlay>("AmsDeviceSectionDetailOverlay");

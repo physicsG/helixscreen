@@ -35,7 +35,7 @@ class PluckAggregator {
     /// failure mode this feature keeps hitting is correlated - a fan running,
     /// a stale span, a resonance in the room - and it biases every pluck in a
     /// session the same way. That is also why more plucks stop helping.
-    static constexpr size_t COMMIT_AFTER = 5;
+    static constexpr size_t kCommitAfter = 5;
 
     /// Record an estimate. Non-positive values are ignored.
     void add(float frequency_hz);
@@ -46,7 +46,7 @@ class PluckAggregator {
         return samples_.size();
     }
     [[nodiscard]] bool committed() const {
-        return samples_.size() >= COMMIT_AFTER;
+        return samples_.size() >= kCommitAfter;
     }
 
     /// Median of everything recorded, or 0 if nothing has been.

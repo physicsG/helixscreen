@@ -7,17 +7,19 @@
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
+#include "helix_callback.h"
 #include "print_history_data.h"
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-class IMoonrakerAPI;
 namespace helix {
+class IMoonrakerAPI;
 class IMoonrakerClient;
 class PrintHistoryManagerTestAccess;
 } // namespace helix
@@ -41,7 +43,7 @@ struct PrintHistoryStats {
 
 namespace helix {
 /// Observer callback when history data changes
-using HistoryChangedCallback = std::function<void()>;
+using HistoryChangedCallback = helix::Callback<void()>;
 } // namespace helix
 
 namespace helix {
@@ -124,7 +126,7 @@ class PrintHistoryManager {
      * @param api IMoonrakerAPI for fetching history
      * @param client helix::IMoonrakerClient for notification subscription
      */
-    PrintHistoryManager(IMoonrakerAPI* api, helix::IMoonrakerClient* client);
+    PrintHistoryManager(helix::IMoonrakerAPI* api, helix::IMoonrakerClient* client);
 
     ~PrintHistoryManager();
 
@@ -243,7 +245,7 @@ class PrintHistoryManager {
 
     /// Jobs a COMPLETE load asks for. A job with metadata runs ~1.6 KB on the
     /// wire, so the ESP32 asks for fewer: its WebSocket client drops any message
-    /// over 256 KB (MAX_MESSAGE_BYTES in esp_moonraker_client.h), and a dropped
+    /// over 256 KB (kMaxMessageBytes in esp_moonraker_client.h), and a dropped
     /// response is never answered. A load that comes back full holds the newest
     /// jobs only (see covers_since()).
 #if defined(HELIX_PLATFORM_ESP32)
@@ -389,7 +391,7 @@ class PrintHistoryManager {
      * @brief Remove observer callback by pointer
      *
      * Removes the callback registered with add_observer(). Uses pointer
-     * comparison, so this actually works (unlike std::function comparison).
+     * comparison, since the callbacks themselves cannot be compared.
      *
      * @param cb Pointer to callback to remove
      */
@@ -475,6 +477,13 @@ class PrintHistoryManager {
     /// the original (gcode::trusted_original_path()), present the job as the
     /// original's print: its name, and its existence, mtime and thumbnails from
     /// one metadata request per original. Otherwise it reads as missing.
+    /// Whether the archive @p filename is still listed, for a printer that
+    /// keeps no metadata for archives; answers through on_original_answered().
+    void look_for_archive(const std::string& filename, uint64_t generation);
+    /// Answers every archive waiting on @p dir's listing from @p listed (name
+    /// to modified time), or as missing when the listing failed (null).
+    void answer_archive_listing(const std::string& dir, uint64_t generation,
+                                const std::unordered_map<std::string, double>* listed);
     void adopt_original(PrintHistoryJob& job);
 
     /// What the original's metadata answered. It reads as missing while the
@@ -535,7 +544,7 @@ class PrintHistoryManager {
     void watch_connection_state();
 
     // Dependencies
-    IMoonrakerAPI* api_;
+    helix::IMoonrakerAPI* api_;
     helix::IMoonrakerClient* client_;
 
     // Cached data
@@ -544,6 +553,9 @@ class PrintHistoryManager {
     std::unordered_map<std::string, OriginalFile> originals_;
     /// Bumped by invalidate(), so an answer asked for before it is dropped.
     uint64_t originals_generation_ = 0;
+    /// Archives waiting on a directory listing under way, by generation and
+    /// directory: one listing answers every archive in it.
+    std::map<std::pair<uint64_t, std::string>, std::vector<std::string>> archive_listings_;
 
     // Observers (stored as pointers for reliable removal)
     std::vector<helix::HistoryChangedCallback*> observers_;

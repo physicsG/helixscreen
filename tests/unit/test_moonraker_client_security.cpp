@@ -278,12 +278,14 @@ TEST_CASE_METHOD(MoonrakerClientSecurityFixture,
                  "MoonrakerClient state change callback is exception safe",
                  "[connection][security][exception][issue9][eventloop][slow]") {
     SECTION("State change callback that throws doesn't crash") {
-        std::atomic<bool> callback_invoked{false};
+        // The refused connect's onclose changes state on the loop thread, possibly after
+        // the body returns, while the fixture's client still holds this callback.
+        auto callback_invoked = std::make_shared<std::atomic<bool>>(false);
 
         // Register callback that throws
         client->set_state_change_callback(
-            [&callback_invoked](ConnectionState old_state, ConnectionState new_state) {
-                callback_invoked = true;
+            [callback_invoked](ConnectionState old_state, ConnectionState new_state) {
+                *callback_invoked = true;
                 throw std::runtime_error("Test exception in state callback");
             });
 
@@ -292,7 +294,7 @@ TEST_CASE_METHOD(MoonrakerClientSecurityFixture,
         REQUIRE_NOTHROW(client->connect("ws://127.0.0.1:19999/websocket", []() {}, []() {}));
 
         // Verify callback was invoked (and threw)
-        REQUIRE(callback_invoked.load());
+        REQUIRE(callback_invoked->load());
     }
 }
 

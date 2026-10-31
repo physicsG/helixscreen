@@ -21,7 +21,7 @@ using namespace helix::plugin::test;
 
 namespace {
 
-constexpr const char* PLUGINS_DIR = "tests/fixtures/plugins";
+constexpr const char* kPluginsDir = "tests/fixtures/plugins";
 
 /// The permissions string form of every permission, so an enabled entry always
 /// covers the manifest and cannot land in NeedsApproval by accident.
@@ -33,7 +33,7 @@ std::vector<std::string> all_perms() {
 /// close paths run inline) and the Plugins overlay opened against a HostRig.
 class ListFx : public LVGLUITestFixture {
   public:
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     std::unique_ptr<HostRig> rig;
     lv_obj_t* root = nullptr;
     int consent_calls = 0;
@@ -62,7 +62,7 @@ class ListFx : public LVGLUITestFixture {
     /// overlay: the same order the Settings row produces (host exists first).
     void open(json initial = json::object()) {
         rig = std::make_unique<HostRig>(std::move(initial));
-        rig->host->load_from(PLUGINS_DIR);
+        rig->host->load_from(kPluginsDir);
         get_plugins_overlay().register_callbacks(); // show() does this before every create
         root = get_plugins_overlay().create(lv_screen_active());
         REQUIRE(root != nullptr);
@@ -72,7 +72,7 @@ class ListFx : public LVGLUITestFixture {
     void auto_yes_consent() {
         get_plugins_overlay().set_consent_shower([this](const Manifest&,
                                                         const std::vector<Permission>& grown,
-                                                        std::function<void()> on_yes) {
+                                                        helix::SharedCallback<void()> on_yes) {
             ++consent_calls;
             consent_grown = grown;
             on_yes();
@@ -124,6 +124,14 @@ TEST_CASE("one row per discovered plugin, status and reason in the description",
     // directory name and the reason names the mismatch.
     CHECK(fx.label_text(fx.row("bad-name")) == "bad-name");
     CHECK(fx.desc_text(fx.row("bad-name")).find("must match") != std::string::npos);
+}
+
+TEST_CASE("a plugin row lists the menus it adds to", "[plugin][plugins_overlay]") {
+    ListFx fx;
+    fx.open();
+    CHECK(fx.desc_text(fx.row("widget-demo")).find("\nAdds to: Print details") !=
+          std::string::npos);
+    CHECK(fx.desc_text(fx.row("hello")).find("Adds to") == std::string::npos);
 }
 
 TEST_CASE("tapping a disabled plugin consents, then enables with its permissions recorded",

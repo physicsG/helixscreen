@@ -30,7 +30,8 @@ setup() {
     export -f _has_no_new_privs
 
     # Reset source guard so we can re-source per test
-    unset _HELIX_REQUIREMENTS_SOURCED
+    unset _HELIX_REQUIREMENTS_SOURCED _HELIX_RELEASE_SOURCED _REAL_CURL
+    . "$WORKTREE_ROOT/scripts/lib/installer/release.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/requirements.sh"
 
     export INSTALL_DIR="$BATS_TEST_TMPDIR/opt/helixscreen"
@@ -65,13 +66,25 @@ run_check_requirements_with_path() {
         log_success() { echo \"OK: \$*\"; }
         export -f log_error log_info log_success
         export PATH='$restricted_path'
-        unset _HELIX_COMMON_SOURCED _HELIX_REQUIREMENTS_SOURCED _PY_BIN _PY_PROBED
+        unset _HELIX_COMMON_SOURCED _HELIX_REQUIREMENTS_SOURCED _HELIX_RELEASE_SOURCED _PY_BIN _PY_PROBED _REAL_CURL
         . '$WORKTREE_ROOT/scripts/lib/installer/common.sh'
         . '$WORKTREE_ROOT/scripts/lib/installer/host_profile.sh'
         _has_no_new_privs() { return 1; }
+        . '$WORKTREE_ROOT/scripts/lib/installer/release.sh'
         . '$WORKTREE_ROOT/scripts/lib/installer/requirements.sh'
         check_requirements
     "
+}
+
+@test "check_requirements: a libhv-style curl does not count as a downloader" {
+    local rbin
+    rbin=$(make_restricted_path tar gunzip unzip)
+    # Creality K1 firmware ships libhv's example client as /usr/bin/curl.
+    printf '#!/bin/sh\necho "curl version 1.0.0"\nexit 0\n' > "$rbin/curl"
+    chmod +x "$rbin/curl"
+    run_check_requirements_with_path "$rbin"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"curl, wget, or python3"* ]]
 }
 
 # ===========================================================================

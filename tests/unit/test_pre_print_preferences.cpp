@@ -74,13 +74,15 @@ TEST_CASE("pre-print preferences: stored settings map onto option ids", "[prepri
     PrinterDiscovery u1 = hardware_with_objects({"print_task_config"});
     auto got = helix::preprint_prefs::read_persisted_defaults(u1, prefs_frame({
                                                                       {"auto_bed_leveling", true},
-                                                                      {"shaper_calibrate", false},
+                                                                      {"shaper_calibrate", true},
                                                                       {"flow_calibrate", true},
                                                                       {"time_lapse_camera", false},
                                                                   }));
-    REQUIRE(got.size() == 4);
+    // The stored shaper setting has no option to seed: input shaping is not a
+    // pre-print step.
+    REQUIRE(got.size() == 3);
+    REQUIRE(got.count("shaper_calibrate") == 0);
     REQUIRE(got.at("bed_mesh") == true);
-    REQUIRE(got.at("shaper_calibrate") == false);
     REQUIRE(got.at("flow_calibrate") == true);
     REQUIRE(got.at("u1_timelapse") == false);
 }
@@ -103,9 +105,9 @@ TEST_CASE("pre-print preferences: integer and boolean spellings both read",
           "[preprint][preferences]") {
     PrinterDiscovery u1 = hardware_with_objects({"print_task_config"});
     auto got = helix::preprint_prefs::read_persisted_defaults(
-        u1, prefs_frame({{"auto_bed_leveling", 1}, {"shaper_calibrate", 0}}));
+        u1, prefs_frame({{"auto_bed_leveling", 1}, {"flow_calibrate", 0}}));
     REQUIRE(got.at("bed_mesh") == true);
-    REQUIRE(got.at("shaper_calibrate") == false);
+    REQUIRE(got.at("flow_calibrate") == false);
 }
 
 TEST_CASE("pre-print preferences: a frame without the store yields nothing",

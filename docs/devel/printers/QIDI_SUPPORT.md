@@ -10,13 +10,13 @@ HelixScreen supports the entire QIDI 3-series and 4-series in two distinct modes
 
 If your QIDI is running Klipper + Moonraker -- whether that's stock firmware, [FreeDi](https://github.com/Phil1988/FreeDi), [FreeQIDI](https://github.com/Phil1988/FreeQIDI), or another community stack -- HelixScreen can control it remotely from a separate touchscreen device. The printer's local display (TJC HMI or otherwise) is irrelevant in this mode; HelixScreen talks to Moonraker over WebSocket on port 7125 the same way Mainsail or Fluidd does.
 
-All seven QIDI models in the printer database (X-Smart 3, X-Plus 3, X-Max 3, Q1 Pro, Plus 4, Q2, Max 4) are auto-detected as remote targets. Just point HelixScreen at the printer's hostname or IP and the correct profile loads automatically.
+All eight QIDI models in the printer database (X-Smart 3, X-Plus 3, X-Max 3, Q1 Pro, Plus 4, Q2, Max 4, Plus 5) are auto-detected as remote targets. Just point HelixScreen at the printer's hostname or IP and the correct profile loads automatically.
 
 **On-device install (replace the built-in UI)**
 
 This mode requires a Linux framebuffer display. Most older QIDI models use TJC HMI displays (the Chinese Nextion OEM) connected over serial UART -- standalone MCU-driven screens that HelixScreen cannot drive without a physical screen swap. FreeDi targets that serial display from the mainboard side with its own firmware; HelixScreen can't.
 
-Of the newer models, **Q2** and **Max 4** ship with Linux framebuffer displays and can run HelixScreen directly on the printer.
+Of the newer models, **Q2**, **Max 4** and **Plus 5** ship with Linux framebuffer displays and can run HelixScreen directly on the printer.
 
 ## Display Compatibility
 
@@ -40,14 +40,15 @@ The only way to run HelixScreen on-device on a Plus 4 or 3-series printer is to 
 QIDI uses two generations of mainboard:
 
 - **Older models (X-Smart 3, X-Plus 3, X-Max 3, Q1 Pro, Plus 4):** MKSPI boards with Rockchip RK3328, ARM Cortex-A53 (aarch64), 1 GB RAM. These all use TJC HMI serial displays.
-- **Newer models (Q2, Max 4):** New-generation boards with quad-core ARM Cortex-A35 (aarch64), ~498 MB RAM. Both drive Linux framebuffer displays from the SoC.
+- **Newer models (Q2, Max 4, Plus 5):** New-generation boards with a quad-core ARM Cortex-A35 (aarch64, Rockchip RK3308 on the Plus 5), ~498 MB RAM. All drive Linux framebuffer displays from the SoC.
 
-"On-device" below means whether HelixScreen can replace the printer's built-in display. **All seven models work as remote targets regardless of this column.**
+"On-device" below means whether HelixScreen can replace the printer's built-in display. **All eight models work as remote targets regardless of this column.**
 
 | Model | Display Type | Resolution | On-Device Install? | Notes |
 |-------|-------------|------------|--------------------|-------|
-| Max 4 | Linux framebuffer (5" capacitive) | 800x480 | **Likely yes** (untested) | Same new-gen mainboard as Q2, with a larger framebuffer display. |
+| Max 4 | Linux framebuffer (5" capacitive) | 800x480 | **Yes** (community-tested) | Same new-gen mainboard as Q2, with a larger framebuffer display. QIDI Box eject is unverified on hardware ([#1067](https://github.com/prestonbrown/helixscreen/issues/1067)). |
 | Q2 | Linux framebuffer (4.3" IPS capacitive) | 480x272 | **Yes** (confirmed) | Goodix touch controller. User-confirmed working install. WiFi requires wpa_supplicant backend (see below). |
+| Plus 5 | Linux framebuffer (sideways 480x800 portrait panel) | 480x800 | **Yes** (community-tested) | Same new-gen board as the Q2/Max 4 (STM32F407 main MCU). The panel is a portrait 480x800 mounted sideways; HelixScreen rotates it to landscape (set by the preset). RK3308 host with no virtual terminals, so the stock QIDI LVGL app (`qidi-client`) is the on-device UI replaced here. Compatible with the QIDI Box. |
 | Plus 4 | TJC HMI (serial) | 800x480 | **No** | Panel identified: `TJC8048X250_011C_I_Z03`, firmware V1.65, CST3240 touch, driven by `xindi` daemon over `/dev/ttyS1 @ 115200`. Requires screen replacement. Auto-detected as remote target. |
 | Q1 Pro | TJC HMI (serial) | 480x272 | **No** | Requires screen replacement. TJC model TJC4827X243_011. Auto-detected as remote target. |
 | X-Max 3 | TJC HMI (serial) | 800x480 | **No** | Requires screen replacement (HDMI/DSI touchscreen). Auto-detected as remote target. |
@@ -91,8 +92,21 @@ This section is for replacing the printer's built-in display with HelixScreen ru
 ### Prerequisites
 
 - A QIDI printer with a Linux framebuffer display (Q2, Max 4 — **not** Plus 4, see Display Compatibility above)
-- SSH access to the printer
+- SSH access to the printer (logins below)
 - Stock firmware works directly. Community firmware like [53Aries/Q2-Firmware](https://github.com/53Aries/Q2-Firmware) or [FreeQIDI](https://github.com/Phil1988/FreeQIDI) may also be used.
+
+### SSH Logins
+
+Stock firmware has SSH open, but the default login differs by model. The default user is not root and `sudo` asks for the same password; it is never passwordless.
+
+| Model | User / password | Source |
+|-------|-----------------|--------|
+| Q2 | `mks` / `makerbase` | community-documented ([Camden-Winder/Qidi-Q2-superuser](https://github.com/Camden-Winder/Qidi-Q2-superuser)) and our Q2 testers |
+| Max 4 | `qidi` / `qiditech` | community-documented ([QidiMax4CommunityWiki](https://github.com/thelegendtubaguy/QidiMax4CommunityWiki/blob/main/docs/ssh_os.md)) |
+| Plus 5 | unconfirmed; SSH is open. Same Debian 11 board generation as the Max 4, so try `qidi` / `qiditech` first, then `mks` / `makerbase` | one owner's notes ([randomm/qidi-plus5-orca-lan](https://github.com/randomm/qidi-plus5-orca-lan/blob/main/NOTES.md)) |
+| Plus 4, 3-series, Q1 Pro (MKSPI) | `mks` / `makerbase`; `root` also uses `makerbase` | [qidi-community/Plus4-Wiki](https://github.com/qidi-community/Plus4-Wiki/blob/main/content/ssh-access/README.md) |
+
+On Q2 firmware 01.01.02 and newer the Klipper files move from `/home/mks` to `/home/qidi` and `printer.cfg` is owned by `qidi`. The `mks` login still works, but editing config needs `sudo`. None of these logins has been checked on a Max 4 or Plus 5 we own; corrections go in a [new issue](https://github.com/prestonbrown/helixscreen/issues/new).
 
 ### One-Line Installer (Recommended)
 
@@ -102,7 +116,7 @@ The standard HelixScreen installer works on QIDI hardware out of the box. SSH in
 curl -sSL https://releases.helixscreen.org/install.sh | sh
 ```
 
-The installer auto-detects QIDI-class SBCs (hostname `linaro-alip` + `/home/mks` on stock Q2; the same Pi/aarch64 binary covers Max 4) and sets up the systemd service, launcher, and config under the correct user.
+The installer auto-detects QIDI-class SBCs (hostname `linaro-alip` plus `/home/mks` or `/home/qidi`; the same Pi/aarch64 binary covers Max 4) and sets up the systemd service, launcher, and config under the correct user.
 
 ### Manual Deployment (Alternative)
 
@@ -219,12 +233,11 @@ HelixScreen has a **read-only state mirror** and a **gated write-path** for the 
 - **Temperature profiles** — fetches `/server/files/config/officiall_filas_list.cfg` via Moonraker's file API at `on_started()`. Parses the ConfigParser INI sections (`[fila<N>]` with `min_temp` / `max_temp` / `box_min_temp` / `box_max_temp`), caches them, and applies the nozzle min/max to `SlotInfo` whenever a `filament_slot<N>` index arrives. HTTP failure is non-fatal.
 - **Bootstrap** — `on_started()` issues a `printer.objects.query` for `save_variables` + `box_extras` so the initial snapshot lands; subsequent `notify_status_update` frames carry deltas only.
 - **Heater drying state** — `heater_generic heater_box<N>` (temperature/target) and `aht20_f heater_box<N>` (temperature/humidity) notifications flow into each box's own `AmsUnit::environment` entry, so the UI can show drying-active state regardless of which physical box is active.
-- **Write-path** — always enabled: `load_filament` (`T<tool>`), `unload_filament` (`UNLOAD_T<tool>`, supports `-1` for active slot), `change_tool` (`T<tool>`), and `set_tool_mapping` (`SAVE_VARIABLE VARIABLE=value_t<t> VALUE="slot<s>"`). Commands verified against QIDI's open-source firmware (box_stepper.py/box_extras.py, #1030). Each op logs at `info` (entry log + raw G-code) for field visibility.
+- **Write-path** — always enabled: `load_filament` (`EXTRUDER_LOAD SLOT=slot<N>` inside the backend's own heat, load, wipe, cool envelope), `unload_filament` (`M603`, with an `EXTRUDER_UNLOAD` fallback for firmware without it), `change_tool` (resolves the `value_t<n>` mapping and drives the same load), and `set_tool_mapping` (`SAVE_VARIABLE VARIABLE=value_t<t> VALUE="slot<s>"`). The bare `T<n>`/`UNLOAD_T<n>` macros are inert on Q2 firmware (#1041). Full command table in [`FILAMENT_BACKEND_QIDI_BOX.md`](../FILAMENT_BACKEND_QIDI_BOX.md). Each op logs at `info` (entry log + raw G-code) for field visibility.
 
 **Known gaps:**
 
-- No `qidi_box_64.png` logo asset yet — `AmsState::get_system_logo_path()` returns nullptr for `"qidi box"`, UI falls back to a generic AMS chip.
-- Write-path needs field validation against real hardware. Tracking via issue #954.
+- Load, unload and eject are measured on a real Q2 (#1041). The Max 4's `MULTI_COLOR_BOX_UNLOAD` eject is not yet confirmed on hardware ([#1067](https://github.com/prestonbrown/helixscreen/issues/1067)).
 
 Full context and references to the `qidi-community/Plus4-Wiki` open-source reimplementation live in [`FILAMENT_BACKEND_QIDI_BOX.md` → QIDI Box](../FILAMENT_BACKEND_QIDI_BOX.md#qidi-box-qidi-plus4--q2--max4).
 
@@ -239,7 +252,7 @@ HelixScreen ships a **Q2 Happy Hare preset** (`presets/qidi_q2.json`) for exactl
 - **Q2 resolution is very small** -- The Q2's 480x272 display uses the MICRO layout. Some UI elements may be cramped but the layout is functional.
 - **Q2 digitizer over-reports its touch range** -- Advertises 800x480, emits ~460x237, so pre-calibration touches land in the top-left ~55%x49% of the screen (see Hardware Details below). First-run calibration fixes it permanently; `HELIX_TOUCH_MIN/MAX_X/Y` with the *emitted* range is the env-level alternative ([#943](https://github.com/prestonbrown/helixscreen/issues/943)).
 - **Q2 has limited RAM** -- ~498 MB total. HelixScreen must be memory-conscious on this device.
-- **Max 4 QIDI Box control diverges from the Q2** -- Detection + preset are in and a community tester confirmed the on-device build runs, but the Max 4's QIDI Box does **not** share the Q2's control surface. The shared QIDI backend ejects/unloads via a `box_stepper` `FORCE_MOVE` primitive (measured on a real Q2, prestonbrown/helixscreen#1041); on the Max 4 that is rejected with `Invalid pin value` — the Max 4 uses the `multi_color_controller` dialect (`MULTI_COLOR_BOX_UNLOAD SLOT=slotN`) instead. Per-model box dispatch is tracked in prestonbrown/helixscreen#1083 (#1070 is separate — multi-box scaling). Klipper/Moonraker version reporting is also currently blank on QIDI new-gen firmware (Q2 + Max 4).
+- **Max 4 QIDI Box control diverges from the Q2** -- Detection + preset are in and a community tester confirmed the on-device build runs, but the Max 4's QIDI Box does **not** share the Q2's control surface. The shared QIDI backend ejects/unloads via a `box_stepper` `FORCE_MOVE` primitive (measured on a real Q2, prestonbrown/helixscreen#1041); on the Max 4 that is rejected with `Invalid pin value` — the Max 4 uses the `multi_color_controller` dialect (`MULTI_COLOR_BOX_UNLOAD SLOT=slotN`) instead. HelixScreen dispatches box control per model (#1083): a `[multi_color_controller]` config section selects the Max 4 dialect. That command form is not yet confirmed on Max 4 hardware ([#1067](https://github.com/prestonbrown/helixscreen/issues/1067)). QIDI new-gen Moonraker reports Klipper/Moonraker versions as `?`, which HelixScreen shows as "Unknown" (#1068).
 - **No standalone box-heater panel** -- The QIDI Box's PTC dryer heater (`heater_generic heater_box<N>`) *is* controllable today through the shared AMS drying screen (Start/Stop drying, target temp/duration), which drives the native `heater_box<N>` for the stock QIDI backend and `MMU_HEATER` for a Happy-Hare-flashed box (Bunny Box). What's missing is a *dedicated* box-heater temperature panel like the chamber temperature panel — the heater is reachable only via the drying flow, not as a standalone control.
 
 ## Q2 Hardware Details
@@ -253,7 +266,7 @@ Gathered from firmware analysis and user reports:
 - **Display:** 4.3" 480x272 IPS capacitive (Goodix touch)
 - **Touch digitizer (measured, #943):** `Goodix Capacitive TouchScreen` on `/dev/input/event0` (phys `input/ts`), reporting both legacy ABS_X/Y and MT position axes. It **over-reports its ABS range**: EVIOCGABS advertises 0..799 x 0..479 (an 800x480 panel) but the glass only emits ~460x237, so evdev's linear scale delivers touches compressed to ~0.57x/0.49y of the screen — until first calibration only the top-left ~55%x49% of the UI is reachable. The affine calibration absorbs the compression fully (a≈1.74, e≈1.93); calibration working "correctly" can look broken mid-capture because raw capture space is that compressed space. Evidence: debug bundle N4ZN3YY2 (v0.99.114); the calibration span-check logs the captured/target ratio on every run. A controller that reports honestly needs no affine — don't copy this fix class elsewhere without the span-check evidence.
 - **WiFi:** USB dongle, Realtek RTL8188GU (Tenda), 2.4 GHz only
-- **SSH:** user `mks`, password `makerbase`
+- **SSH:** user `mks`, password `makerbase`; `sudo` asks for the same password (see [SSH Logins](#ssh-logins) for other models)
 - **Klipper stack:** Standard Klipper + Moonraker (port 7125) + Fluidd, managed via systemd. The Moonraker is a QIDI-customized fork: `/server/files/metadata` 404s for every file (a whitelist drops `thumbnails`, and a firmware-only mmu_server.py component calls `metadata.main(config)` across a signature mismatch), so HelixScreen extracts print thumbnails from the gcode header client-side instead of trusting metadata.
 - **.3mf plate thumbnails:** the stock screen client is what materialised the plate images QIDI's Moonraker hardcodes metadata at (`gcodes/.thumbs/<subdir>/<stem>/plate_N.png`), so stopping it leaves every uploaded `.3mf` thumbnail 404ing for Fluidd and HelixScreen alike (prestonbrown/helixscreen#1713). HelixScreen's installer installs a replacement helper: `config/qidi_3mf_thumbs.py` (stdlib Python, extracts `Metadata/plate_N.png` from each `.3mf`) driven by the `helixscreen-3mf-thumbs.path`/`.service` units, running as the Klipper user on gcodes changes and once at boot. Only installed where Moonraker's file_manager metadata.py contains the `generate_thumb_path` function; older QIDI firmware extracts thumbnails itself. The gate and unit install live in `config/qidi-3mf-thumbs-units.sh`, called both by the installer and by the post-Moonraker-update refresh (an in-app update runs under NoNewPrivileges and cannot write /etc itself), so an updating machine gains the units without a reinstall.
 - **Stock UI:** Closed-source binary at `/home/mks/QD_Q2/bin/client`, pinned to CPU core 0 via `taskset`
@@ -264,12 +277,7 @@ Firmware source reference: [53Aries/Q2-Firmware](https://github.com/53Aries/Q2-F
 
 We have a confirmed install report on the Q2 (2026-04). The one-line installer works, display and touch render correctly, and WiFi connects without manual configuration via the wpa_supplicant backend.
 
-We still need testers for the **Max 4** (on-device install). If you can help:
-
-1. Build or download the aarch64 binary
-2. Deploy it to your QIDI printer
-3. Report back: Does it start? Does the display render? Does touch work? Is your printer detected correctly? Does WiFi work?
-4. File issues at the HelixScreen GitHub repository
+A community tester confirmed the on-device build runs on a **Max 4**. What is still unverified there is QIDI Box control: Max 4 owners, please report whether eject/unload (`MULTI_COLOR_BOX_UNLOAD`) works from HelixScreen in [#1067](https://github.com/prestonbrown/helixscreen/issues/1067). Problems on any other QIDI go in a [new issue](https://github.com/prestonbrown/helixscreen/issues/new).
 
 ## Related Projects
 

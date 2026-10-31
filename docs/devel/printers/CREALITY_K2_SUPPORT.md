@@ -6,18 +6,28 @@ HelixScreen has a cross-compilation target for the Creality K2 series of enclose
 
 ## Supported Models
 
-All K2 models use Allwinner ARM Cortex-A7 dual-core processors running Tina Linux (OpenWrt-based).
+The K2, K2 Pro and K2 Plus use Allwinner ARM Cortex-A7 dual-core processors running Tina Linux (OpenWrt-based). The K2 SE is not one of them: see the note below the table.
 
 | Model | Build Volume | Display | Chamber Heater | CFS | Status |
 |-------|-------------|---------|----------------|-----|--------|
-| K2 | 260 mm cubed | 4.3" 480x800 | No | Optional | Untested |
+| K2 | 260 mm cubed | 4.3" 480x800 | No | Optional | Untested: run the [Section 13 probe](../printer-research/CREALITY_K2_PLUS_RESEARCH.md#13-hardware-profile-answered-and-bring-up-probe-for-other-k2-variants) and post it in a [new issue](https://github.com/prestonbrown/helixscreen/issues/new) |
 | K2 Pro | 300 mm cubed | 4.3" 480x800 | Yes (60C) | Optional | **Community-confirmed running** (2026-09) |
 | K2 Plus | 350 mm cubed | 4.3" 480x800 | Yes (60C) | Yes (CFS) | **Hardware confirmed** |
-| K2 SE | 220x215x245 mm | Unknown | No | Unknown | User-confirmed install (wget) |
 
-Detection has an entry for the K2, K2 Pro and K2 Plus (plus the K2 Plus k2-improvements variant),
-all sharing the `k2` preset. They are told apart by the model hostname or by the bed size the
-firmware declares in `gcode_macro product_param` (250-270, 290-310 and 340-360 mm). The base K2
+**K2 SE is a K1-family board despite the name.** It runs Creality's K1 MIPS firmware image
+(Ingenic, Buildroot), so it installs the mips package and its CFS speaks the K1 dialect. It is
+covered by [K1 Series Support](CREALITY_K1_SUPPORT.md), where its user-confirmed install is
+recorded. The routing trap is described in `src/printer/ams_backend_cfs.cpp#"AmsBackendCfs::AmsBackendCfs("`.
+
+Detection has an entry for the K2, K2 Pro and K2 Plus, plus k2-improvements variants of the K2 Pro
+and K2 Plus, all sharing the `k2` preset. They are told apart by the model hostname or by the bed
+size the firmware declares in `gcode_macro product_param` (250-270, 290-310 and 340-360 mm); the
+mod's `_START_PRINT_VARS` macro picks the variant pair, and the bed picks the model within it. The
+mod documents only the K2 Plus, and a K2 Pro has been reported running it; with no report from a
+base K2 there is no base K2 variant, so a modded base K2 misses both mod windows and ties them,
+which detection offers as a choice and never saves. The mod
+entries keep `probe_type: prtouch_v3`: Cartographer is optional on the mod, and a real one types
+itself from its own `cartographer` object. The base K2
 entry is the preset's `preset_default`, so a K2 preset install that identifies no K2 machine
 persists "Creality K2". Its image is a copy of the K2 Plus photo until one of the base model exists.
 
@@ -253,8 +263,8 @@ Note that `chamber_temp` is **not** universal on K2 hardware either: the Kalico 
 - **480x800 portrait panel (double-buffered framebuffer → 480x1600 virtual)** — presented landscape by a 270° software rotation; same as all other K2 models.
 
 ### CFS
-- **Closed-source protocol** — CFS communication relies on `box_wrapper.cpython-39.so` binary blob. Protocol has been reverse-engineered from strings but full reimplementation is not yet available.
-- **Material database is cloud-fetched** — The material database at /mnt/UDISK/creality/userdata/box/material_database.json is downloaded from Creality's cloud. HelixScreen should include a fallback mapping for common material type codes.
+- **Closed-source protocol on stock firmware**: stock CFS communication relies on the `box_wrapper.cpython-39.so` binary blob, whose protocol is reverse-engineered from strings. A community Kalico port replaces it with a clean-room box.py, and HelixScreen drives that port through its own dialect (`CfsMacroVariant::Fork`). See [Community Kalico port](../printer-research/CREALITY_CFS_K2_INTERNALS.md#community-kalico-port).
+- **Material database is cloud-fetched** — The material database at /mnt/UDISK/creality/userdata/box/material_database.json is downloaded from Creality's cloud. HelixScreen does not depend on it: `assets/filaments.json` carries `cfs` codes for common materials, and the backend resolves a slot's material code through them (`FilamentCatalog::load_codes_cached("cfs")`).
 - **Community Kalico ports require Box API v1 for control** — the flat status layout still parses without it, but load/unload/tool-change stay gated until `api_version == 1` identifies the supported command dialect. See [Community Kalico port](../printer-research/CREALITY_CFS_K2_INTERNALS.md#community-kalico-port).
 
 ### Platform

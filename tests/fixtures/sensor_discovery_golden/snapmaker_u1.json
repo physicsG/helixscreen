@@ -1,0 +1,426 @@
+{
+  "buckets": {
+    "fans": [
+      "fan",
+      "heater_fan power_fan",
+      "fan_generic cavity_fan",
+      "heater_fan e0_nozzle_fan",
+      "fan_generic e1_fan",
+      "heater_fan e1_nozzle_fan",
+      "fan_generic e2_fan",
+      "heater_fan e2_nozzle_fan",
+      "fan_generic e3_fan",
+      "heater_fan e3_nozzle_fan"
+    ],
+    "filament_sensor_names": [
+      "filament_motion_sensor e0_filament",
+      "filament_motion_sensor e1_filament",
+      "filament_motion_sensor e2_filament",
+      "filament_motion_sensor e3_filament"
+    ],
+    "has_accelerometer": true,
+    "has_fan_feedback": false,
+    "has_filament_sensors": true,
+    "has_led": true,
+    "has_led_effects": true,
+    "has_probe": false,
+    "has_speaker": true,
+    "has_width_sensors": false,
+    "heaters": [
+      "heater_bed",
+      "extruder",
+      "extruder1",
+      "extruder2",
+      "extruder3"
+    ],
+    "leds": [
+      "led cavity_led"
+    ],
+    "load_cells": [],
+    "printer_objects": [
+      "heater_bed",
+      "extruder",
+      "bed_mesh",
+      "output_pin beeper",
+      "firmware_retraction",
+      "extruder1",
+      "extruder2",
+      "extruder3",
+      "fan",
+      "heater_fan power_fan",
+      "fan_generic cavity_fan",
+      "heater_fan e0_nozzle_fan",
+      "fan_generic e1_fan",
+      "heater_fan e1_nozzle_fan",
+      "fan_generic e2_fan",
+      "heater_fan e2_nozzle_fan",
+      "fan_generic e3_fan",
+      "heater_fan e3_nozzle_fan",
+      "temperature_sensor cavity",
+      "led cavity_led",
+      "tool",
+      "fm175xx_reader",
+      "tmc2240 stepper_x",
+      "purifier",
+      "camera",
+      "defect_detection",
+      "gcode_macro FILAMENT_DT_UPDATE",
+      "gcode_macro FILAMENT_DT_QUERY",
+      "gcode_macro EXTRUDER_OFFSET_ACTION_PROBE_CALIBRATE_ALL",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_PRESTART",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_EXIT",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_HEAT_T0",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_AUTO_CLEAN_T0",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_MANUAL_CLEAN_T0",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_WAIT_COOL_T0",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_PROBE_CALIBRATE_T0",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_HEAT_T1",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_AUTO_CLEAN_T1",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_MANUAL_CLEAN_T1",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_WAIT_COOL_T1",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_PROBE_CALIBRATE_T1",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_HEAT_T2",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_AUTO_CLEAN_T2",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_MANUAL_CLEAN_T2",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_WAIT_COOL_T2",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_PROBE_CALIBRATE_T2",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_HEAT_T3",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_AUTO_CLEAN_T3",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_MANUAL_CLEAN_T3",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_WAIT_COOL_T3",
+      "gcode_macro _EXTRUDER_OFFSET_ACTION_PROBE_CALIBRATE_T3",
+      "filament_motion_sensor e0_filament",
+      "filament_motion_sensor e1_filament",
+      "filament_motion_sensor e2_filament",
+      "filament_motion_sensor e3_filament",
+      "led_effect breathing",
+      "led_effect fire_comet",
+      "led_effect rainbow",
+      "led_effect static_white",
+      "exclude_object",
+      "gcode_macro START_PRINT",
+      "gcode_macro END_PRINT",
+      "gcode_macro PAUSE",
+      "gcode_macro RESUME",
+      "gcode_macro CANCEL_PRINT",
+      "gcode_macro LOAD_FILAMENT",
+      "gcode_macro UNLOAD_FILAMENT",
+      "gcode_macro BED_MESH_CALIBRATE",
+      "gcode_macro G28",
+      "gcode_macro M600",
+      "gcode_macro _SYSTEM_MACRO",
+      "gcode_macro SET_PAUSE_NEXT_LAYER",
+      "gcode_macro SET_PAUSE_AT_LAYER",
+      "gcode_macro SET_PRINT_STATS_INFO",
+      "gcode_macro LIGHTS_ON",
+      "gcode_macro LIGHTS_OFF",
+      "gcode_macro LIGHTS_TOGGLE",
+      "gcode_macro LED_PARTY",
+      "gcode_macro LED_NIGHTLIGHT",
+      "mcu",
+      "timelapse"
+    ],
+    "sensors": [
+      "temperature_sensor cavity",
+      "tmc2240 stepper_x"
+    ],
+    "width_sensor_objects": []
+  },
+  "managers": {
+    "accel": {
+      "count": 1,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "adxl345",
+          "role": "none",
+          "sensor_name": "adxl345",
+          "type": "adxl345"
+        }
+      ]
+    },
+    "filament": {
+      "count": 4,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "filament_motion_sensor e0_filament",
+          "role": "none",
+          "sensor_name": "e0_filament",
+          "type": "motion"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "filament_motion_sensor e1_filament",
+          "role": "none",
+          "sensor_name": "e1_filament",
+          "type": "motion"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "filament_motion_sensor e2_filament",
+          "role": "none",
+          "sensor_name": "e2_filament",
+          "type": "motion"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "filament_motion_sensor e3_filament",
+          "role": "none",
+          "sensor_name": "e3_filament",
+          "type": "motion"
+        }
+      ]
+    },
+    "humidity": {
+      "count": 0,
+      "entries": []
+    },
+    "input": {
+      "count": 0,
+      "entries": []
+    },
+    "load_cell": {
+      "count": 0,
+      "entries": []
+    },
+    "probe": {
+      "count": 0,
+      "entries": []
+    },
+    "temperature": {
+      "count": 2,
+      "entries": [
+        {
+          "enabled": true,
+          "klipper_name": "temperature_sensor cavity",
+          "role": "auxiliary",
+          "sensor_name": "cavity",
+          "type": "temperature_sensor"
+        },
+        {
+          "enabled": true,
+          "klipper_name": "tmc2240 stepper_x",
+          "role": "stepper_driver",
+          "sensor_name": "stepper_x",
+          "type": "temperature_sensor"
+        }
+      ]
+    },
+    "width": {
+      "count": 0,
+      "entries": []
+    }
+  },
+  "subscriptions": {
+    "bed_mesh": [
+      "profile_name",
+      "probed_matrix",
+      "mesh_min",
+      "mesh_max",
+      "mesh_params",
+      "profiles"
+    ],
+    "display_status": [
+      "message",
+      "progress"
+    ],
+    "exclude_object": [
+      "objects",
+      "excluded_objects",
+      "current_object"
+    ],
+    "extruder": [
+      "temperature",
+      "target",
+      "power",
+      "pressure_advance",
+      "nozzle_diameter",
+      "nozzle_volume_type"
+    ],
+    "extruder1": [
+      "temperature",
+      "target",
+      "power",
+      "pressure_advance",
+      "nozzle_diameter",
+      "nozzle_volume_type"
+    ],
+    "extruder2": [
+      "temperature",
+      "target",
+      "power",
+      "pressure_advance",
+      "nozzle_diameter",
+      "nozzle_volume_type"
+    ],
+    "extruder3": [
+      "temperature",
+      "target",
+      "power",
+      "pressure_advance",
+      "nozzle_diameter",
+      "nozzle_volume_type"
+    ],
+    "fan": [
+      "speed"
+    ],
+    "fan_generic cavity_fan": [
+      "speed"
+    ],
+    "fan_generic e1_fan": [
+      "speed"
+    ],
+    "fan_generic e2_fan": [
+      "speed"
+    ],
+    "fan_generic e3_fan": [
+      "speed"
+    ],
+    "filament_motion_sensor e0_filament": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "filament_motion_sensor e1_filament": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "filament_motion_sensor e2_filament": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "filament_motion_sensor e3_filament": [
+      "filament_detected",
+      "enabled",
+      "detection_count"
+    ],
+    "firmware_retraction": [
+      "retract_length",
+      "retract_speed",
+      "unretract_extra_length",
+      "unretract_speed"
+    ],
+    "gcode_macro SET_PRINT_STATS_INFO": [
+      "pause_next_layer",
+      "pause_at_layer"
+    ],
+    "gcode_macro START_PRINT": [
+      "preparation_done"
+    ],
+    "gcode_macro _HELIX_STATE": [
+      "print_started"
+    ],
+    "gcode_macro _START_PRINT": [
+      "print_started"
+    ],
+    "gcode_move": [
+      "gcode_position",
+      "speed",
+      "speed_factor",
+      "extrude_factor",
+      "homing_origin"
+    ],
+    "heater_bed": [
+      "temperature",
+      "target",
+      "power"
+    ],
+    "heater_fan e0_nozzle_fan": [
+      "speed"
+    ],
+    "heater_fan e1_nozzle_fan": [
+      "speed"
+    ],
+    "heater_fan e2_nozzle_fan": [
+      "speed"
+    ],
+    "heater_fan e3_nozzle_fan": [
+      "speed"
+    ],
+    "heater_fan power_fan": [
+      "speed"
+    ],
+    "idle_timeout": [
+      "state"
+    ],
+    "led cavity_led": [
+      "color_data"
+    ],
+    "led_effect breathing": [
+      "enabled"
+    ],
+    "led_effect fire_comet": [
+      "enabled"
+    ],
+    "led_effect rainbow": [
+      "enabled"
+    ],
+    "led_effect static_white": [
+      "enabled"
+    ],
+    "manual_probe": [
+      "is_active",
+      "z_position"
+    ],
+    "mcu": [
+      "last_stats"
+    ],
+    "motion_report": [
+      "live_position",
+      "live_velocity",
+      "live_extruder_velocity"
+    ],
+    "pause_resume": [
+      "is_paused"
+    ],
+    "print_stats": [
+      "state",
+      "filename",
+      "filament_used",
+      "print_duration",
+      "total_duration",
+      "estimated_time",
+      "info",
+      "message",
+      "power_loss"
+    ],
+    "purifier": [
+      "power_detected"
+    ],
+    "stepper_enable": [
+      "steppers"
+    ],
+    "temperature_sensor cavity": [
+      "temperature",
+      "humidity"
+    ],
+    "tmc2240 stepper_x": [
+      "temperature",
+      "humidity"
+    ],
+    "toolhead": [
+      "position",
+      "homed_axes",
+      "kinematics",
+      "extruder",
+      "max_velocity",
+      "axis_minimum",
+      "axis_maximum"
+    ],
+    "virtual_sdcard": [
+      "progress",
+      "layer",
+      "layer_count",
+      "is_active",
+      "file_position",
+      "file_path"
+    ],
+    "webhooks": [
+      "state",
+      "state_message"
+    ]
+  }
+}

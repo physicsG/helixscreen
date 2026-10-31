@@ -20,6 +20,7 @@
 #include "app_globals.h"
 #include "moonraker_client_mock.h"
 #include "printer_state.h"
+#include "webcam_selection.h"
 
 #include <functional>
 #include <optional>
@@ -40,7 +41,7 @@ class WebcamListClient : public MoonrakerClientMock {
     }
 
     helix::RequestId send_jsonrpc(const std::string& method, const json& params,
-                                  std::function<void(const json&)> cb) override {
+                                  helix::SharedCallback<void(const json&)> cb) override {
         if (auto scripted = scripted_reply(method)) {
             if (cb) {
                 cb(*scripted);
@@ -51,8 +52,9 @@ class WebcamListClient : public MoonrakerClientMock {
     }
 
     helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
+        const std::string& method, const json& params,
+        helix::SharedCallback<void(const json&)> success_cb,
+        helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms = 0,
         bool silent = false,
         std::optional<helix::rpc_error_policy::CallerIntent> intent = std::nullopt) override {
         if (auto scripted = scripted_reply(method)) {
@@ -125,6 +127,31 @@ TEST_CASE("Discovery keeps every enabled webcam and derives the auto-pick from t
     // PrinterState's subjects are not initialized under this fixture.)
     CHECK(ps.capabilities_state().get_webcam_stream_url() == "/webcam/?action=stream");
     CHECK(ps.capabilities_state().get_webcam_snapshot_url() == "/webcam/?action=snapshot");
+}
+
+TEST_CASE("webcam discovery skips HelixScreen's own screen entry",
+          "[discovery][webcam][remote_screen]") {
+    LVGLTestFixture fixture;
+    SECTION("with a real camera beside it, the real camera is picked") {
+        DiscoveryRun run(json::array({
+            cam(helix::kRemoteScreenWebcamName, "mjpegstreamer-adaptive",
+                "/helixscreen/screen/snapshot.jpg", "/helixscreen/screen/snapshot.jpg"),
+            cam("Nozzle", "mjpegstreamer", "/webcam/?action=stream", "/webcam/?action=snapshot"),
+        }));
+        auto& caps = get_printer_state().capabilities_state();
+        REQUIRE(caps.get_webcams().size() == 1);
+        CHECK(caps.get_webcams()[0].name == "Nozzle");
+        CHECK(caps.get_webcam_snapshot_url() == "/webcam/?action=snapshot");
+    }
+    SECTION("alone, no camera is offered") {
+        DiscoveryRun run(json::array({
+            cam(helix::kRemoteScreenWebcamName, "mjpegstreamer-adaptive",
+                "/helixscreen/screen/snapshot.jpg", "/helixscreen/screen/snapshot.jpg"),
+        }));
+        auto& caps = get_printer_state().capabilities_state();
+        CHECK(caps.get_webcams().empty());
+        CHECK(caps.get_webcam_snapshot_url() != "/helixscreen/screen/snapshot.jpg");
+    }
 }
 
 TEST_CASE("Mock webcam spec parses into a Moonraker-shaped list", "[mock][webcam][camera]") {

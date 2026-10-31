@@ -96,11 +96,11 @@ def test_stable_times_out_with_an_actionable_message_on_a_genuinely_moving_scree
     # from config/settings-test.json, whose `animations_enabled: false` is
     # what needs overriding here — see the seeding comment in helix/app.py
     # for why that seeding step exists at all).
-    # PrintStatusPanel restarts a ~300ms ease-out progress-bar animation on
-    # every mock physics tick (~250ms, independent of --sim-speed), so
-    # pixels never hold still for 3 consecutive samples, each a 16 ms sleep
-    # plus up to a 33 ms wait for a queue drain. That reliably drives the
-    # timeout branch rather than merely asserting it exists.
+    # While a print is preparing, the print status strip's estimate bar sweeps
+    # a highlight across its unfilled part on every frame, so pixels never
+    # hold still for 3 consecutive samples, each a 16 ms sleep plus up to a
+    # 33 ms wait for a queue drain. That reliably drives the timeout branch
+    # rather than merely asserting it exists.
     #
     # Boots its own instance (HELIX_MOCK_AUTO_PRINT env + --sim-speed) since
     # this needs boot-time flags the shared `helix_app`/`fresh_helix_app`
@@ -114,10 +114,10 @@ def test_stable_times_out_with_an_actionable_message_on_a_genuinely_moving_scree
     try:
         app = HelixApp(binary=_BINARY, socket_path=tmp_path / "control.sock",
                        log_path=tmp_path / "app.log",
-                       extra_args=["--sim-speed", "8"])
+                       extra_args=["--sim-speed", "2"])
         with app:
             app.set("settings_animations_enabled", 1)
-            app.wait_for("print_progress", 1, timeout=15)
+            app.wait_for("preparing_visible", 1, timeout=15)
             with pytest.raises(HelixCtlError) as exc:
                 app.screenshot(str(tmp_path / "moving.png"), stable=True)
             message = exc.value.message

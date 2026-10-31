@@ -50,6 +50,9 @@ This project includes third-party components with their own licenses:
 - cpp-terminal (lib/cpp-terminal) - MIT License
 - mdns (lib/mdns) - Public Domain
 - stb libraries (lib/stb) - MIT License / Public Domain
+- freeglut teapot data (src/ui/screensaver_pipes_teapot.cpp) - MIT License
+- Spoolman logo (assets/fonts/custom_icons/spoolman.svg, compiled into the
+  icon fonts) - MIT License (see below)
 
 Bundled inside the libraries above, and linked into the binary:
 
@@ -85,3 +88,34 @@ headers record whether each file is unmodified LVGL code, LVGL code modified by
 
 See lib/helix-xml/LICENSE, lib/helix-xml/README.md, and
 docs/devel/LVGL_XML_SITUATION.md.
+
+================================================================================
+
+SPOOLMAN LOGO
+
+The Spoolman icon (assets/fonts/custom_icons/spoolman.svg, and the glyph built
+from it into assets/fonts/helix-custom-icons.ttf and the mdi_icons_* fonts) is
+derived from client/icons/spoolman_monochrome.svg in
+https://github.com/Donkie/Spoolman, used under the MIT License:
+
+MIT License
+
+Copyright (c) 2023 Daniel Hultgren
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

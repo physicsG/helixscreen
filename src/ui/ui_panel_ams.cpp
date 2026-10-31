@@ -3,7 +3,6 @@
 
 #include "ui_panel_ams.h"
 
-#include "ui_afc_fault_path.h"
 #include "ui_ams_detail.h"
 #include "ui_ams_device_operations_overlay.h"
 #include "ui_ams_environment_overlay.h"
@@ -14,6 +13,7 @@
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
 #include "ui_external_spool_menu.h"
+#include "ui_fault_path.h"
 #include "ui_filament_path_canvas.h"
 #include "ui_fonts.h"
 #include "ui_icon.h"
@@ -23,33 +23,31 @@
 #include "ui_panel_ams_overview.h"
 #include "ui_panel_common.h"
 #include "ui_spool_canvas.h"
-#include "ui_swatch.h"
 #include "ui_utils.h"
 
 #include "ams_backend.h"
-#include "data_root_resolver.h"
-#include "overlay_base.h"
-#include "ui/ui_widget_helpers.h"
-#if HELIX_HAS_CFS
-#include "ams_backend_cfs.h"
-#endif
 #include "ams_state.h"
 #include "ams_types.h"
 #include "app_globals.h"
 #include "buffer_status_modal.h"
 #include "color_utils.h"
 #include "config.h"
+#include "data_root_resolver.h"
 #include "display_numbering.h"
+#include "filament_accounting_controller.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
+#include "overlay_base.h"
 #include "printer_detector.h"
 #include "printer_state.h"
 #include "spoolman_manager.h"
 #include "static_panel_registry.h"
 #include "system/crash_handler.h"
 #include "theme_manager.h"
+#include "tool_change_request.h"
 #include "ui/ams_drawing_utils.h"
+#include "ui/ui_widget_helpers.h"
 #include "wizard_config_paths.h"
 
 #include <spdlog/spdlog.h>
@@ -63,13 +61,13 @@
 using namespace helix;
 
 // Default slot width for endless arrows canvas (when layout not yet computed)
-static constexpr int32_t DEFAULT_SLOT_WIDTH = 80;
+static constexpr int32_t kDefaultSlotWidth = 80;
 
 // Unit index handed to the shared ams_detail_* helpers, which take a unit to
 // scope to or -1 for "every unit". This panel is always the whole-system view:
 // the AMS Overview panel owns the per-unit presentation, via its own inline
 // detail view rather than through here.
-static constexpr int ALL_UNITS = -1;
+static constexpr int kAllUnits = -1;
 
 // Logo path mapping moved to AmsState::get_logo_path()
 
@@ -138,8 +136,6 @@ void ensure_ams_widgets_registered() {
         helix::asset_component_uri("ui_xml/ams_context_menu.xml").c_str());
     lv_xml_register_component_from_file(
         helix::asset_component_uri("ui_xml/ams_selector_menu.xml").c_str());
-    // ams_toolhead_menu.xml is registered by AmsToolheadMenu itself — the
-    // overview opens it too and is reachable without this panel ever loading.
     // NOTE: spoolman_spool_item.xml and ams_edit_overlay.xml are registered
     // globally in xml_registration.cpp (needed by FilamentPanel without AMS lazy init)
     lv_xml_register_component_from_file(
@@ -266,25 +262,18 @@ void AmsPanel::init_subjects() {
             self->update_current_slot_highlight(slot);
             self->update_path_canvas_from_backend();
 
-            // Auto-set active Spoolman spool when slot becomes active.
-            // Skip when the backend manages active spool itself (e.g., AFC).
-            if (slot >= 0 && self->api_) {
-                auto* backend = AmsState::instance().get_backend();
-                if (backend && !backend->manages_active_spool()) {
-                    SlotInfo slot_info = backend->get_slot_info(slot);
-                    if (slot_info.spoolman_id > 0) {
-                        spdlog::info(
-                            "[AmsPanel] Slot {} has Spoolman ID {}, setting as active spool", slot,
-                            slot_info.spoolman_id);
-                        self->api_->spoolman().set_active_spool(
-                            slot_info.spoolman_id,
-                            []() { spdlog::debug("[AmsPanel] Active spool set successfully"); },
-                            [](const MoonrakerError& err) {
-                                spdlog::warn("[AmsPanel] Failed to set active spool: {}",
-                                             err.message);
-                            });
-                    }
-                }
+            // Auto-set active Spoolman spool when slot becomes active, unless
+            // something else switches it (spool_to_activate()).
+            const int spool =
+                self->api_ ? spool_to_activate(AmsState::instance().get_backend(), slot) : 0;
+            if (spool > 0) {
+                spdlog::info("[AmsPanel] Slot {} has Spoolman ID {}, setting as active spool", slot,
+                             spool);
+                self->api_->spoolman().set_active_spool(
+                    spool, []() { spdlog::debug("[AmsPanel] Active spool set successfully"); },
+                    [](const MoonrakerError& err) {
+                        spdlog::warn("[AmsPanel] Failed to set active spool: {}", err.message);
+                    });
             }
         },
         AmsState::instance().get_subjects_lifetime());
@@ -557,17 +546,12 @@ void AmsPanel::sync_spoolman_active_spool() {
         return; // No active slot
     }
 
-    auto* backend = AmsState::instance().get_backend();
-    if (!backend || backend->manages_active_spool()) {
-        return;
-    }
-
-    SlotInfo slot_info = backend->get_slot_info(current_slot);
-    if (slot_info.spoolman_id > 0) {
+    const int spool = spool_to_activate(AmsState::instance().get_backend(), current_slot);
+    if (spool > 0) {
         spdlog::debug("[{}] Syncing Spoolman: slot {} → spool ID {}", get_name(), current_slot,
-                      slot_info.spoolman_id);
+                      spool);
         api_->spoolman().set_active_spool(
-            slot_info.spoolman_id, []() {},
+            spool, []() {},
             [](const MoonrakerError& err) {
                 spdlog::warn("[AmsPanel] Failed to sync active spool: {}", err.message);
             });
@@ -658,7 +642,7 @@ void AmsPanel::clear_panel_reference() {
     endless_arrows_ = nullptr;
     current_slot_count_ = 0;
 
-    for (int i = 0; i < MAX_VISIBLE_SLOTS; ++i) {
+    for (int i = 0; i < kMaxVisibleSlots; ++i) {
         slot_widgets_[i] = nullptr;
         label_widgets_[i] = nullptr;
     }
@@ -810,13 +794,12 @@ void AmsPanel::create_slots(int count) {
     // Destroy existing
     ams_detail_destroy_slots(detail_widgets_, slot_widgets_, current_slot_count_);
 
-    // Pre-show environment indicator so flex layout accounts for its width
-    // when calculating slot sizes. Must happen BEFORE slot creation.
-    ams_detail_pre_show_env_indicator(detail_widgets_, ALL_UNITS);
+    // Show the environment chip for this unit; update_tray places it on the lid.
+    ams_detail_pre_show_env_indicator(detail_widgets_, kAllUnits);
 
     // Create new slots
-    auto result = ams_detail_create_slots(detail_widgets_, slot_widgets_, MAX_VISIBLE_SLOTS,
-                                          ALL_UNITS, on_slot_clicked, this);
+    auto result = ams_detail_create_slots(detail_widgets_, slot_widgets_, kMaxVisibleSlots,
+                                          kAllUnits, on_slot_clicked, this);
 
     current_slot_count_ = result.slot_count;
 
@@ -839,7 +822,7 @@ void AmsPanel::create_slots(int count) {
     setup_slot_path_observers(result.slot_count);
 
     // Update tray
-    ams_detail_update_tray(detail_widgets_, slot_widgets_, result.slot_count, ALL_UNITS);
+    ams_detail_update_tray(detail_widgets_, slot_widgets_, result.slot_count, kAllUnits);
     helix::ui::ams_detail_sync_lane_entry(path_canvas_, slot_grid_);
 }
 
@@ -896,28 +879,25 @@ void AmsPanel::setup_path_canvas() {
 
     // Set slot click callback (panel-specific)
     ui_filament_path_canvas_set_slot_callback(path_canvas_, on_path_slot_clicked, this);
+    helix::ui::filament_path_canvas_set_toolhead_callback(path_canvas_, on_path_toolhead_clicked,
+                                                          this);
 
     // Set selector/hub click callback (opens Happy Hare selector context menu)
     ui_filament_path_canvas_set_hub_callback(path_canvas_, &AmsPanel::on_path_hub_clicked_thunk,
                                              this);
-
-    // Nozzle taps get their own menu (Select / Park / Load / Unload). Registered
-    // unconditionally: the canvas only routes here on PARALLEL topology, and the
-    // menu itself declines to show when the head has no action to offer.
-    ui_filament_path_canvas_set_toolhead_callback(path_canvas_, on_path_toolhead_clicked, this);
 
     // Set bypass spool click callback (opens edit modal for external spool)
     ui_filament_path_canvas_set_bypass_callback(path_canvas_, on_bypass_spool_clicked, this);
     ui_filament_path_canvas_set_buffer_callback(path_canvas_, on_buffer_clicked, this);
 
     // Configure from backend using shared helper
-    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS);
+    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, kAllUnits);
 
     spdlog::debug("[{}] Path canvas setup complete", get_name());
 }
 
 void AmsPanel::update_path_canvas_from_backend() {
-    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS);
+    ams_detail_setup_path_canvas(path_canvas_, slot_grid_, kAllUnits);
 }
 
 void AmsPanel::setup_bypass_spool() {
@@ -1031,36 +1011,22 @@ void AmsPanel::update_endless_arrows_from_backend() {
         return;
     }
 
-    // Get the endless spool relation and flatten it to one arrow per slot. The
-    // group-to-edge projection lives in helix::printer, shared with the context
-    // menu's dropdown, so a Happy Hare group and an AFC chain cannot disagree
-    // about which arrow to draw.
-    static constexpr int MAX_ARROW_SLOTS = 16;
+    // The widget receives the whole group relation and decides per group
+    // whether it is a bracket (unordered) or arrows (ordered).
     const auto config = backend->get_endless_spool_config();
-    int slot_count = std::min(backend->get_system_info().total_slots, MAX_ARROW_SLOTS);
-    if (config.empty() || slot_count <= 0) {
-        ui_endless_spool_arrows_clear(endless_arrows_);
-        lv_obj_add_flag(endless_arrows_, LV_OBJ_FLAG_HIDDEN);
-        return;
-    }
-
-    const std::vector<int> edges = helix::printer::endless_spool_backup_edges(config, slot_count);
-    if (std::none_of(edges.begin(), edges.end(), [](int backup) { return backup >= 0; })) {
+    int slot_count = std::min(backend->get_system_info().total_slots, helix::kAmsMaxSlots);
+    if (config.empty() || slot_count <= 0 ||
+        helix::ui::endless_spool_marks(config, slot_count).empty()) {
         spdlog::trace("[{}] No endless spool backups configured - hiding arrows", get_name());
         ui_endless_spool_arrows_clear(endless_arrows_);
         lv_obj_add_flag(endless_arrows_, LV_OBJ_FLAG_HIDDEN);
         return;
     }
-
-    int backup_slots[MAX_ARROW_SLOTS];
-    for (int i = 0; i < slot_count; ++i) {
-        backup_slots[i] = edges[static_cast<size_t>(i)];
-    }
     spdlog::trace("[{}] Endless spool relation has {} group(s) over {} slots", get_name(),
                   config.groups.size(), slot_count);
 
     // Get slot width and overlap from current layout
-    int32_t slot_width = DEFAULT_SLOT_WIDTH;
+    int32_t slot_width = kDefaultSlotWidth;
     int32_t overlap = 0;
     int32_t offset = 0;
     if (slot_grid_) {
@@ -1069,7 +1035,7 @@ void AmsPanel::update_endless_arrows_from_backend() {
             lv_obj_update_layout(slot_area);
             int32_t available_width = lv_obj_get_content_width(slot_area);
             auto layout = helix::ui::ams_detail_slot_layout(available_width, slot_count);
-            slot_width = layout.slot_width > 0 ? layout.slot_width : DEFAULT_SLOT_WIDTH;
+            slot_width = layout.slot_width > 0 ? layout.slot_width : kDefaultSlotWidth;
             overlap = layout.overlap;
             offset = layout.centering_offset;
         }
@@ -1080,7 +1046,7 @@ void AmsPanel::update_endless_arrows_from_backend() {
     ui_endless_spool_arrows_set_slot_width(endless_arrows_, slot_width);
     ui_endless_spool_arrows_set_slot_overlap(endless_arrows_, overlap);
     ui_endless_spool_arrows_set_slot_offset(endless_arrows_, offset);
-    ui_endless_spool_arrows_set_config(endless_arrows_, backup_slots, slot_count);
+    ui_endless_spool_arrows_set_groups(endless_arrows_, config);
 
     // Show the canvas
     lv_obj_remove_flag(endless_arrows_, LV_OBJ_FLAG_HIDDEN);
@@ -1100,11 +1066,11 @@ void AmsPanel::refresh_slots() {
     }
 
     update_slot_colors();
-    // One read of the system info serves both the bay states and the path canvas.
+    // One reading of the system info serves both the bay states and the path canvas.
     const AmsBackend* backend = AmsState::instance().get_backend();
-    const AmsSystemInfo info = backend ? backend->get_system_info() : AmsSystemInfo{};
-    if (backend)
-        helix::ui::ams_detail_sync_slot_states(slot_widgets_, current_slot_count_, info);
+    const auto info = AmsState::instance().system_info();
+    if (backend && info)
+        helix::ui::ams_detail_sync_slot_states(slot_widgets_, current_slot_count_, *info);
 
     int current_slot = lv_subject_get_int(AmsState::instance().get_current_slot_subject());
     update_current_slot_highlight(current_slot);
@@ -1116,8 +1082,8 @@ void AmsPanel::refresh_slots() {
     // guards against a missing canvas (ams_detail_setup_path_canvas() returns
     // early when canvas/backend is null) and never writes slot subjects, so it
     // can't recurse back into a slots_version bump.
-    if (backend)
-        ams_detail_setup_path_canvas(path_canvas_, slot_grid_, ALL_UNITS, backend, info);
+    if (backend && info)
+        ams_detail_setup_path_canvas(path_canvas_, slot_grid_, kAllUnits, backend, *info);
 }
 
 // ============================================================================
@@ -1126,10 +1092,8 @@ void AmsPanel::refresh_slots() {
 
 void AmsPanel::update_slot_colors() {
     int slot_count = lv_subject_get_int(AmsState::instance().get_slot_count_subject());
-    int backend_idx = AmsState::instance().active_backend_index();
-    AmsBackend* backend = AmsState::instance().get_backend(backend_idx);
 
-    for (int i = 0; i < MAX_VISIBLE_SLOTS; ++i) {
+    for (int i = 0; i < kMaxVisibleSlots; ++i) {
         if (!slot_widgets_[i]) {
             continue;
         }
@@ -1141,21 +1105,6 @@ void AmsPanel::update_slot_colors() {
         }
 
         lv_obj_remove_flag(slot_widgets_[i], LV_OBJ_FLAG_HIDDEN);
-
-        // Get slot color from AmsState subject (using active backend)
-        lv_subject_t* color_subject = AmsState::instance().get_slot_color_subject(backend_idx, i);
-        if (color_subject) {
-            uint32_t rgb = static_cast<uint32_t>(lv_subject_get_int(color_subject));
-
-            // Find color swatch within slot. Multi-color spools render as
-            // diagonal chunks; single-color falls back to a solid fill.
-            lv_obj_t* swatch = lv_obj_find_by_name(slot_widgets_[i], "color_swatch");
-            if (swatch) {
-                std::string multi =
-                    backend ? backend->get_slot_info(i).multi_color_hexes : std::string();
-                helix::ui::apply_swatch_color(swatch, rgb, multi);
-            }
-        }
 
         // Material and fill are no longer pushed here: the ams_slot widget
         // observes its own per-slot subjects (AmsState::get_slot_material_subject
@@ -1173,7 +1122,7 @@ void AmsPanel::update_slot_colors() {
 }
 
 void AmsPanel::update_slot_status(int slot_index) {
-    if (slot_index < 0 || slot_index >= MAX_VISIBLE_SLOTS || !slot_widgets_[slot_index]) {
+    if (slot_index < 0 || slot_index >= kMaxVisibleSlots || !slot_widgets_[slot_index]) {
         return;
     }
 
@@ -1305,15 +1254,32 @@ void AmsPanel::on_path_slot_clicked(int slot_index, void* user_data) {
     self->show_context_menu(slot_index, self->path_canvas_, click_pt);
 }
 
-void AmsPanel::on_path_toolhead_clicked(int tool_index, void* user_data) {
+void AmsPanel::on_path_toolhead_clicked(int slot_index, void* user_data) {
     auto* self = static_cast<AmsPanel*>(user_data);
     if (!self) {
         return;
     }
-    // Range check, touch point, lazy menu and shared dispatch all live in the
-    // helper, which the overview calls too.
-    helix::ui::show_toolhead_menu_at_touch(self->toolhead_menu_, self->parent_screen_,
-                                           self->path_canvas_, tool_index);
+
+    // A head tap mounts that head's tool. Its own tube and spool open the slot
+    // menu instead (on_path_slot_clicked), so a tap meant for the filament
+    // never moves the carriage.
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return;
+    }
+    const AmsSystemInfo info = backend->get_system_info();
+    const SlotInfo* slot = info.get_slot_global(slot_index);
+    if (!slot || slot->mapped_tool < 0) {
+        on_path_slot_clicked(slot_index, user_data);
+        return;
+    }
+
+    spdlog::info("[AmsPanel] Toolhead {} (T{}) clicked", slot_index, slot->mapped_tool);
+    const auto verdict = helix::ui::offer_tool_change(self->printer_state_, slot->mapped_tool);
+    // The mounted head's tap is the slot menu's, the same as its tube's.
+    if (verdict == helix::ui::ToolChangeVerdict::AlreadyActive) {
+        on_path_slot_clicked(slot_index, user_data);
+    }
 }
 
 void AmsPanel::on_path_hub_clicked_thunk(lv_point_t click_pt, void* user_data) {
@@ -1379,7 +1345,7 @@ void AmsPanel::handle_slot_tap(int slot_index, lv_point_t click_pt) {
     }
 
     // Show context menu near the tapped slot
-    if (slot_index >= 0 && slot_index < MAX_VISIBLE_SLOTS && slot_widgets_[slot_index]) {
+    if (slot_index >= 0 && slot_index < kMaxVisibleSlots && slot_widgets_[slot_index]) {
         show_context_menu(slot_index, slot_widgets_[slot_index], click_pt);
     }
 }
@@ -1403,10 +1369,6 @@ void AmsPanel::show_context_menu(int slot_index, lv_obj_t* near_widget, lv_point
     host.log_tag = "[AmsPanel]";
     host.path_canvas = [this] { return path_canvas_; };
     host.sidebar = [this] { return sidebar_.get(); };
-    // This panel is one unit's view and cannot show another unit's.
-    // navigate_to_ams_panel() routes to the multi-unit overview whenever there
-    // is more than one unit, which is the only case that produces the action.
-    host.open_source_unit = [](int /*owner_unit*/) { navigate_to_ams_panel(); };
     helix::ui::open_slot_context_menu(*context_menu_, host, slot_index, near_widget, click_pt);
 }
 
@@ -1441,23 +1403,41 @@ void AmsPanel::show_loading_error_modal() {
         error_message = lv_tr("An error occurred during filament loading.");
     }
 
-    // AFC welds a monospace position diagram onto its lane faults, which our
-    // proportional font renders as noise (#1184). Publish the stop point to the
-    // modal's <afc_fault_path> graphic and drop the art rows from the text. An
-    // unrecognised message sets the subject to 0 (graphic hidden) and comes back
-    // unchanged — including the non-AFC backends, which must clear a previous
-    // AFC fault's marker rather than inherit it.
-    error_message = helix::ui::afc_fault_path_apply(error_message);
-
     // Store slot for retry
     int retry_slot = info.current_slot;
 
+    helix::ui::show_ams_error_dialog(
+        *error_modal_, parent_screen_, error_message, retry_slot,
+        [this]() { error_modal_dismiss_time_ = std::chrono::steady_clock::now(); },
+        [this, retry_slot]() {
+            // Retry load operation for the same slot
+            if (retry_slot >= 0) {
+                AmsBackend* backend = AmsState::instance().get_backend();
+                if (backend) {
+                    spdlog::info("[AmsPanel] Retrying load for slot {}", retry_slot);
+                    // Reset the AMS first, then load
+                    backend->reset();
+                    if (this->sidebar_) {
+                        this->sidebar_->handle_load_with_preheat(retry_slot);
+                    }
+                }
+            }
+        });
+}
+
+namespace helix::ui {
+
+void show_ams_error_dialog(AmsLoadingErrorModal& modal, lv_obj_t* parent,
+                           const std::string& message, int slot, std::function<void()> on_dismissed,
+                           AmsLoadingErrorModal::RetryCallback retry) {
     // Clear backend error state when user dismisses (Close/X/Cancel/backdrop).
     // AFC maintains a persistent message_queue and error_state that won't clear
     // until RESET_FAILURE + AFC_CLEAR_MESSAGE are sent. Without this, the error
     // dialog reappears immediately because AFC keeps reporting ERROR. (#497)
-    error_modal_->set_dismiss_callback([this, retry_slot]() {
-        error_modal_dismiss_time_ = std::chrono::steady_clock::now();
+    modal.set_dismiss_callback([slot, on_dismissed = std::move(on_dismissed)]() {
+        if (on_dismissed) {
+            on_dismissed();
+        }
         AmsBackend* backend = AmsState::instance().get_backend();
         if (!backend) {
             return;
@@ -1468,25 +1448,74 @@ void AmsPanel::show_loading_error_modal() {
         // owns that sequence for every backend.
         spdlog::info("[AmsPanel] Clearing error state on dismiss (type={})",
                      ams_type_to_string(backend->get_type()));
-        backend->clear_fault(retry_slot);
+        backend->clear_fault(slot);
     });
 
-    // Show the error modal with retry callback
-    error_modal_->show(parent_screen_, error_message, [this, retry_slot]() {
-        // Retry load operation for the same slot
-        if (retry_slot >= 0) {
-            AmsBackend* backend = AmsState::instance().get_backend();
-            if (backend) {
-                spdlog::info("[AmsPanel] Retrying load for slot {}", retry_slot);
-                // Reset the AMS first, then load
-                backend->reset();
-                if (this->sidebar_) {
-                    this->sidebar_->handle_load_with_preheat(retry_slot);
-                }
-            }
-        }
-    });
+    // Some firmware welds a monospace position diagram onto its lane faults,
+    // which our proportional font renders as noise (#1184). Publish the stop
+    // point to the modal's <fault_path> graphic and drop the art rows from the
+    // text. An unrecognised message sets the subject to 0 (graphic hidden) and
+    // comes back unchanged, so a backend whose faults carry no position clears
+    // a previous fault's marker rather than inheriting it.
+    modal.show(parent, fault_path_apply(message), std::move(retry));
 }
+
+AmsStandingFaultDialog::AmsStandingFaultDialog(PrinterState& printer) : printer_(printer) {
+    auto& ams = AmsState::instance();
+    action_observer_ = observe<int>(
+        ams.get_ams_action_subject(), this,
+        [](AmsStandingFaultDialog* self, int) { self->evaluate(); }, ams.get_subjects_lifetime());
+    // RAW_PRINT_STATE_OK: the printer's own pause is what a filament fault
+    // stops the print with.
+    print_state_observer_ = observe<int>(
+        printer_.print_state().get_print_state_enum_subject(), this,
+        [](AmsStandingFaultDialog* self, int) { self->evaluate(); },
+        printer_.get_subjects_lifetime());
+    // The stop reason can land after the pause, read from gcode_store.
+    stop_reason_observer_ = observe<const char*>(
+        printer_.print_state().get_print_stop_reason_subject(), this,
+        [](AmsStandingFaultDialog* self, const char*) { self->evaluate(); },
+        printer_.get_subjects_lifetime());
+}
+
+void AmsStandingFaultDialog::evaluate() {
+    auto& print = printer_.print_state();
+    // RAW_PRINT_STATE_OK: see the print-state observer in the constructor.
+    const PrintJobState job = print.get_print_job_state();
+    const bool paused = job == PrintJobState::PAUSED;
+    const bool printing = job == PrintJobState::PRINTING;
+    auto& ams = AmsState::instance();
+    ams.refresh_fault_cause();
+    const auto ev = ams.standing_fault();
+    const StandingFaultStep step =
+        trigger_.update(ev.has_value(), paused, printing, !ams.fault_cause().empty());
+    if (!trigger_.raised()) {
+        if (modal_) {
+            modal_->dismiss_silently();
+        }
+        return;
+    }
+    // A fault the user closed stays closed when its cause arrives.
+    if (step == StandingFaultStep::None || (step == StandingFaultStep::Explain && !is_visible())) {
+        return;
+    }
+    spdlog::info("[AmsStandingFaultDialog] filament fault: {}", ev->detail);
+    ensure_ams_widgets_registered();
+    if (!modal_) {
+        modal_ = std::make_unique<AmsLoadingErrorModal>();
+    }
+    // The cause that now explains the fault replaces the backend's own text.
+    modal_->dismiss_silently();
+    show_ams_error_dialog(*modal_, lv_screen_active(), ev->detail,
+                          ams.get_backend()->get_system_info().current_slot, nullptr,
+                          []() { navigate_to_ams_panel(); });
+}
+
+void init_ams_standing_fault_dialog() {
+    helix::lazy_global<AmsStandingFaultDialog>("AmsStandingFaultDialog", get_printer_state());
+}
+
+} // namespace helix::ui
 
 void AmsPanel::dismiss_error_modal_silently(const char* reason) {
     if (!error_modal_ || !error_modal_->is_visible()) {

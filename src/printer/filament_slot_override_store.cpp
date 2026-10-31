@@ -4,6 +4,7 @@
 #include "ams_types.h"
 #include "data_root_resolver.h"
 #include "exception_policy.h"
+#include "filament_catalog.h"
 #include "filament_database.h"
 #include "filament_slot_override.h"
 #include "filament_variants.h"
@@ -342,8 +343,9 @@ std::optional<int> implied_slot_from_key(const std::string& key) {
 } // namespace
 
 // Convert FilamentSlotOverride + slot_index to the AFC-shaped JSON Orca expects,
-// plus our extension fields (prefixed comment fields are HelixScreen-only, silently
-// ignored by Orca 2.3.2 which only reads the top 5 required fields).
+// plus our extension fields. Orca reads lane, color, material, nozzle_temp,
+// bed_temp and a string filament_id; the helix_-prefixed fields are
+// HelixScreen-only and Orca ignores them.
 //
 // NOTE on indexing: the outer Moonraker DB key style varies (laneN 1-based for
 // filament systems, T<n> 0-based for tool changers) but the "lane" field inside
@@ -388,8 +390,18 @@ nlohmann::json to_lane_data_record(int slot_index, const FilamentSlotOverride& o
     // namespace. Emitted independently: a pick whose id later stops resolving
     // still has a name worth keeping, and a name with no id is a legitimate
     // half-record rather than a reason to drop both.
-    if (!o.catalog_id.empty())
+    if (!o.catalog_id.empty()) {
         j["helix_catalog_id"] = o.catalog_id;
+        // OrcaSlicer matches a string `filament_id` against its presets' own
+        // filament_id and picks that exact preset over the generic one for the
+        // material. Only an id the catalog records for this one product goes
+        // here, never a guess and never one several products share. Orca
+        // ignores a numeric `filament_id` (Happy Hare's Spoolman id, in its own
+        // records).
+        if (std::string orca = helix::printer::FilamentCatalog::orca_id_for(o.catalog_id);
+            !orca.empty())
+            j["filament_id"] = std::move(orca);
+    }
     if (!o.product_name.empty())
         j["helix_product_name"] = o.product_name;
     // Authorship for the identity fields, colour and material included.
@@ -433,8 +445,9 @@ nlohmann::json to_lane_data_record(int slot_index, const FilamentSlotOverride& o
     }
     if (o.spoolman_vendor_id > 0)
         j["spoolman_vendor_id"] = o.spoolman_vendor_id;
-    // helix_-prefixed: Happy Hare writes its own unprefixed "filament_id" inner
-    // field into these shared records, so that name is not ours to take.
+    // helix_-prefixed: the unprefixed "filament_id" in our records is
+    // OrcaSlicer's preset id (above), and Happy Hare's records use it for a
+    // numeric Spoolman id, so the Spoolman definition id needs its own name.
     if (o.spoolman_filament_id > 0)
         j["helix_spoolman_filament_id"] = o.spoolman_filament_id;
     if (o.remaining_weight_g >= 0)
@@ -795,9 +808,10 @@ stage_weight_override(std::unordered_map<int, FilamentSlotOverride>& overrides, 
 // ============================================================================
 
 FilamentSlotOverrideStore::FilamentSlotOverrideStore(IMoonrakerAPI* api, std::string backend_id,
-                                                     LaneKeyStyle key_style, std::string ns)
+                                                     LaneKeyStyle key_style, std::string ns,
+                                                     bool migrates_legacy_namespace)
     : api_(api), backend_id_(std::move(backend_id)), key_style_(key_style),
-      namespace_(std::move(ns)) {}
+      namespace_(std::move(ns)), migrates_legacy_namespace_(migrates_legacy_namespace) {}
 
 std::string FilamentSlotOverrideStore::cache_dir_effective() const {
     if (!cache_dir_.empty()) {
@@ -859,8 +873,6 @@ std::unordered_map<int, FilamentSlotOverride> try_migrate_legacy(IMoonrakerAPI* 
                                                                  LaneKeyStyle key_style) {
     std::unordered_map<int, FilamentSlotOverride> empty_result;
     if (!api)
-        return empty_result;
-    if (backend_id != "ace" && backend_id != "cfs")
         return empty_result;
 
     const std::string legacy_ns = "helix-screen";
@@ -1277,8 +1289,15 @@ bool is_absent_namespace(const MoonrakerError& err) {
 
 } // namespace
 
-void FilamentSlotOverrideStore::reload_async(ReloadCallback cb) {
-    if (!api_ || !cb) {
+void FilamentSlotOverrideStore::reload_async(ReloadCallback cb,
+                                             helix::SharedCallback<void()> on_failure) {
+    if (!cb) {
+        return;
+    }
+    if (!api_) {
+        if (on_failure) {
+            on_failure();
+        }
         return;
     }
     // Carry everything the callbacks read by value. The store can be destroyed
@@ -1289,19 +1308,25 @@ void FilamentSlotOverrideStore::reload_async(ReloadCallback cb) {
     const std::string ns = namespace_;
     api_->database_get_namespace(
         namespace_,
-        [style, id, cb](const nlohmann::json& value) {
+        [style, id, cb, on_failure](const nlohmann::json& value) {
             if (!value.is_object()) {
+                if (on_failure) {
+                    on_failure();
+                }
                 return;
             }
             cb(parse_namespace_document(value, style, id));
         },
-        [style, id, ns, cb](const MoonrakerError& err) {
+        [style, id, ns, cb, on_failure](const MoonrakerError& err) {
             if (is_absent_namespace(err)) {
                 cb(parse_namespace_document(nlohmann::json::object(), style, id));
                 return;
             }
             spdlog::debug("[FilamentSlotOverrideStore:{}] reload of {} failed: {}", id, ns,
                           err.message);
+            if (on_failure) {
+                on_failure();
+            }
         });
 }
 
@@ -1544,7 +1569,7 @@ std::unordered_map<int, FilamentSlotOverride> FilamentSlotOverrideStore::load_bl
     // round-trip succeeded, so this is the right moment. In the offline
     // fallback branch above we explicitly do NOT migrate — a transient
     // network blip should not attempt destructive namespace moves.
-    if (result.empty() && (backend_id_ == "ace" || backend_id_ == "cfs")) {
+    if (result.empty() && migrates_legacy_namespace_) {
         auto migrated =
             try_migrate_legacy(api_, backend_id_, load_timeout_, cache_dir_effective(), key_style_);
         if (!migrated.empty())
@@ -1774,7 +1799,7 @@ std::optional<int> FilamentSlotOverrideStore::load_seated_slot_blocking() {
 
     if (!got_copy)
         return std::nullopt;
-    // Must be a plain non-negative integer. The store doesn't know NUM_PORTS,
+    // Must be a plain non-negative integer. The store doesn't know kNumPorts,
     // so the caller is responsible for the upper-bound range check.
     if (!received_copy.is_number_integer())
         return std::nullopt;
@@ -1788,15 +1813,16 @@ std::optional<int> FilamentSlotOverrideStore::load_seated_slot_blocking() {
 // Shared firmware -> lane_data mirror helper
 // =============================================================================
 
-DeclaredOnLane declared_on_lane(LaneId lane) {
+DeclaredOnLane declared_on_lane(LaneId lane, const FilamentSlotOverride* record) {
     const LaneSources sources = lane_sources(lane);
-    const auto held = [&sources](auto field) {
+    const auto held = [&sources](auto field, bool user_declares) {
         return (sources.spoolman.has_value() && ((*sources.spoolman).*field).has_value()) ||
-               (sources.local_user.has_value() && ((*sources.local_user).*field).has_value());
+               (user_declares && sources.local_user.has_value() &&
+                ((*sources.local_user).*field).has_value());
     };
     DeclaredOnLane declared;
-    declared.color = held(&Observation::color_rgb);
-    declared.material = held(&Observation::material);
+    declared.color = held(&Observation::color_rgb, !record || declares_color(*record));
+    declared.material = held(&Observation::material, !record || declares_material(*record));
     return declared;
 }
 
@@ -2031,13 +2057,14 @@ void SlotFingerprintTracker::clear() {
 
 LoadedOverrideStore make_loaded_override_store(IMoonrakerAPI* api, std::string backend_id,
                                                AmsType type, const std::string& log_tag,
-                                               std::string ns) {
+                                               std::string ns, bool migrates_legacy_namespace) {
     if (!api) {
         return {};
     }
     LoadedOverrideStore result;
     result.store = std::make_unique<FilamentSlotOverrideStore>(
-        api, std::move(backend_id), lane_key_style_for(type), std::move(ns));
+        api, std::move(backend_id), lane_key_style_for(type), std::move(ns),
+        migrates_legacy_namespace);
     result.overrides = result.store->load_blocking();
     spdlog::info("{} Loaded {} slot overrides from filament_slot store", log_tag,
                  result.overrides.size());

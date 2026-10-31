@@ -1540,7 +1540,7 @@ TEST_CASE("Print characterization: print_job_state_to_string function",
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::PRINTING)) == "Printing");
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::PAUSED)) == "Paused");
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::COMPLETE)) == "Complete");
-    REQUIRE(std::string(print_job_state_to_string(PrintJobState::CANCELLED)) == "Cancelled");
+    REQUIRE(std::string(print_job_state_to_string(PrintJobState::CANCELLED)) == "Canceled");
     REQUIRE(std::string(print_job_state_to_string(PrintJobState::ERROR)) == "Error");
 }
 
@@ -2039,6 +2039,50 @@ TEST_CASE("A preparing job reconciles against what the printer eventually report
         REQUIRE(state.print_state().has_preparing_job());
         REQUIRE(lv_subject_get_int(state.print_state().get_print_lifecycle_subject()) ==
                 static_cast<int>(PrintState::Preparing));
+    }
+}
+
+TEST_CASE("A paused print settles a preparing job the printer has taken",
+          "[print][preparing][1365]") {
+    // Klipper reaches `paused` only from a job it has accepted: a PRINT_START that
+    // issues M25 and finishes from [delayed_gcode] reads `paused` for the whole
+    // soak. Settling the claim there keeps the 30 minute watchdog, which cools
+    // both heaters, from firing on a print that is running.
+    lv_init_safe();
+    PrinterState& state = get_printer_state();
+    PrinterStateTestAccess::reset(state);
+    state.init_subjects(false);
+
+    auto report = [&state](const char* job_state, const char* filename) {
+        state.update_from_status(
+            json{{"print_stats", {{"state", job_state}, {"filename", filename}}}});
+        helix::ui::UpdateQueue::instance().drain();
+    };
+
+    SECTION("a paused print carrying our filename confirms the claim") {
+        state.print_state().begin_preparing(helix::PrintJobRef{"soak.gcode", "", ""});
+        report("paused", "soak.gcode");
+
+        REQUIRE_FALSE(state.print_state().has_preparing_job());
+        REQUIRE(state.print_state().last_preparing_exit() == helix::PreparingExit::Confirmed);
+    }
+
+    SECTION("a paused print naming a different job supersedes ours") {
+        state.print_state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
+        report("paused", "theirs.gcode");
+
+        REQUIRE_FALSE(state.print_state().has_preparing_job());
+        REQUIRE(state.print_state().last_preparing_exit() == helix::PreparingExit::Superseded);
+    }
+
+    SECTION("only PRINTING and PAUSED settle it: idle and terminal states keep the claim") {
+        for (const char* job_state : {"standby", "complete", "cancelled", "error"}) {
+            INFO(job_state);
+            state.print_state().retire_preparing(helix::PreparingExit::Cancelled);
+            state.print_state().begin_preparing(helix::PrintJobRef{"mine.gcode", "", ""});
+            report(job_state, "mine.gcode");
+            CHECK(state.print_state().has_preparing_job());
+        }
     }
 }
 

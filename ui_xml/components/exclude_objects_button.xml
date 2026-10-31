@@ -3,7 +3,8 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!--
   The skip-objects button over a G-code preview, shared by print status and
-  print details so both show the same button in the same corner. The host
+  print details so both show the same button in the same corner. It is a
+  preview_icon_button, the shell the print status corner toggles share. The host
   places it (align / translate at the instance site), names the click callback
   and the condition that hides it. A host that holds pending picks also binds
   the count badge; without count_hidden_when it stays hidden.
@@ -17,17 +18,11 @@
     <prop name="count_text_subject" type="string"/>
     <prop name="count_hidden_when" type="string" default=""/>
   </api>
-  <view extends="lv_obj"
-        width="#icon_button_size_lg" height="#icon_button_size_lg" style_bg_color="#card_bg" style_bg_opa="180"
-        style_radius="#icon_button_radius_lg" clickable="true" style_pad_all="0" scrollable="false">
-    <style name="styles.press_wash" selector="pressed"/>
-    <bind_flag_if cond="$hidden_when" flag="hidden"/>
-    <lv_label text="#icon_debug_step_over" style_text_font="mdi_icons_24" style_text_color="#text_muted" align="center"/>
+  <view extends="preview_icon_button" icon="#icon_debug_step_over" callback="$callback" hidden_when="$hidden_when">
     <notification_badge name="objects_pick_count"
                         align="top_right" hidden="true" clickable="false" event_bubble="true" style_bg_color="#primary"
                         bind_text="$count_text_subject">
       <bind_flag_if cond="$count_hidden_when" flag="hidden"/>
     </notification_badge>
-    <event_cb trigger="clicked" callback="$callback"/>
   </view>
 </component>

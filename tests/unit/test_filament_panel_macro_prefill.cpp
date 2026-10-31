@@ -64,20 +64,20 @@ using PrefillPanelHarness = helix::test::FilamentPanelMacroHarness;
 namespace {
 
 /// A macro that takes a nozzle temperature and one parameter the panel cannot know.
-constexpr const char* LOAD_WITH_LENGTH = "{% set t = params.EXTRUDER_TEMP|default(220)|int %}\n"
-                                         "{% set l = params.LENGTH|default(100)|float %}\n"
-                                         "M109 S{t}\nG1 E{l} F300";
+constexpr const char* kLoadWithLength = "{% set t = params.EXTRUDER_TEMP|default(220)|int %}\n"
+                                        "{% set l = params.LENGTH|default(100)|float %}\n"
+                                        "M109 S{t}\nG1 E{l} F300";
 
 /// A load macro that also reads the temperature it purges at.
-constexpr const char* LOAD_WITH_PURGE_TEMP = "{% set t = params.EXTRUDER_TEMP|default(220)|int %}\n"
-                                             "{% set p = params.PURGE_TEMP|default(250)|int %}\n"
-                                             "M109 S{t}\nG1 E50 F300\nM109 S{p}\nG1 E30 F300";
+constexpr const char* kLoadWithPurgeTemp = "{% set t = params.EXTRUDER_TEMP|default(220)|int %}\n"
+                                           "{% set p = params.PURGE_TEMP|default(250)|int %}\n"
+                                           "M109 S{t}\nG1 E50 F300\nM109 S{p}\nG1 E30 F300";
 
 /// Three parameters, the nozzle temperature in the middle.
-constexpr const char* TEMP_BETWEEN_TWO = "{% set l = params.LENGTH|default(100)|float %}\n"
-                                         "{% set t = params.EXTRUDER_TEMP|default(220)|int %}\n"
-                                         "{% set s = params.SPEED|default(5)|float %}\n"
-                                         "M109 S{t}\nG1 E{l} F{s * 60}";
+constexpr const char* kTempBetweenTwo = "{% set l = params.LENGTH|default(100)|float %}\n"
+                                        "{% set t = params.EXTRUDER_TEMP|default(220)|int %}\n"
+                                        "{% set s = params.SPEED|default(5)|float %}\n"
+                                        "M109 S{t}\nG1 E{l} F{s * 60}";
 
 } // namespace
 
@@ -89,7 +89,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load runs a temperature-only macro with the live extruder target, no dialog",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_extruder_target(260.0);
 
     TA::execute_load(*h.panel);
@@ -103,7 +103,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load with the heater off sends the selected preset's temperature",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_extruder_target(0.0);
     TA::set_selected_material(*h.panel, 0);
 
@@ -123,7 +123,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load with no temperature known opens the dialog with nothing filled in",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_extruder_target(0.0);
     TA::set_selected_material(*h.panel, -1);
 
@@ -139,7 +139,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load of a macro with a parameter nothing fills opens the dialog, temperature in",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", LOAD_WITH_LENGTH}});
+    h.cache_macros({{"LOAD_FILAMENT", kLoadWithLength}});
     h.set_extruder_target(260.0);
 
     TA::execute_load(*h.panel);
@@ -204,7 +204,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 TEST_CASE_METHOD(LVGLUITestFixture, "Load never sends a live target below the extrusion minimum",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_safety_limits(180.0);
     // A paused printer holds its nozzle at a standby temperature below the minimum.
     h.set_extruder_target(140.0);
@@ -221,7 +221,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load below the extrusion minimum sends the external spool's temperature instead",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_safety_limits(180.0);
     h.set_extruder_target(140.0);
     TA::set_selected_material(*h.panel, -1);
@@ -237,7 +237,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load of a material hotter than the hotend allows opens the dialog",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_safety_limits(180.0, 280.0);
     h.set_extruder_target(0.0);
     TA::set_selected_material(*h.panel, -1);
@@ -254,7 +254,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load holds a fractional extrusion minimum to the next whole degree",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     // Klipper refuses 180 against a 180.5 minimum, so the whole-degree minimum is
     // 181, and a target at the minimum is not offered.
     h.set_safety_limits(180.5);
@@ -272,7 +272,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load sends the live target when it is hotter than the material",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_extruder_target(260.0);
     TA::set_selected_material(*h.panel, -1);
     h.set_external_spool(240);
@@ -287,7 +287,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load sends the material temperature when it is hotter than the live target",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_extruder_target(200.0);
     TA::set_selected_material(*h.panel, -1);
     h.set_external_spool(240);
@@ -302,7 +302,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load acting on an AMS lane sends that lane's material temperature",
                  "[filament][prefill]") {
     PrefillPanelHarness h(std::make_unique<helix::test::LaneMaterialBackend>(/*lane=*/2, 235));
-    h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+    h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
     h.set_extruder_target(0.0);
     TA::set_selected_material(*h.panel, -1);
 
@@ -316,7 +316,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
                  "Load of a macro that also reads PURGE_TEMP leaves that one to the dialog",
                  "[filament][prefill]") {
     PrefillPanelHarness h;
-    h.cache_macros({{"LOAD_FILAMENT", LOAD_WITH_PURGE_TEMP}});
+    h.cache_macros({{"LOAD_FILAMENT", kLoadWithPurgeTemp}});
     h.set_extruder_target(260.0);
 
     TA::execute_load(*h.panel);
@@ -365,7 +365,7 @@ TEST_CASE_METHOD(LVGLUITestFixture,
 // =============================================================================
 
 namespace {
-constexpr const char* PURGE_TEMP_ONLY =
+constexpr const char* kPurgeTempOnly =
     "{% set t = params.PURGE_TEMP|default(240)|int %}\nM109 S{t}\nG1 E30 F300";
 } // namespace
 
@@ -377,7 +377,7 @@ struct TwoExtruderPurge {
         : h(std::make_unique<helix::test::LaneMaterialBackend>(/*lane=*/1, nozzle_c,
                                                                /*selected_slot=*/-1, lane_tool)) {
         h.use_two_extruders();
-        h.cache_macros({{"PURGE", PURGE_TEMP_ONLY}});
+        h.cache_macros({{"PURGE", kPurgeTempOnly}});
         h.panel->set_limits(PrefillPanelHarness::two_extruder_limits());
         TA::set_selected_material(*h.panel, -1);
     }
@@ -441,7 +441,7 @@ struct TwoExtruderSidebarLoad {
                                                                /*selected_slot=*/-1,
                                                                /*lane_tool=*/1)) {
         h.use_two_extruders();
-        h.cache_macros({{"LOAD_FILAMENT", helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT}});
+        h.cache_macros({{"LOAD_FILAMENT", helix::test::kLoadFilamentExpressionDefault}});
         h.api.set_safety_limits(PrefillPanelHarness::two_extruder_limits());
     }
     /// The sidebar runs its macro through its lifetime token, so it outlives the drain.
@@ -524,7 +524,7 @@ class ParamModalFixture : public LVGLUITestFixture {
 
     /// Show the modal for the expression-default LOAD_FILAMENT and return its one field.
     lv_obj_t* show_load_filament(const ParamValues& prefill) {
-        auto params = helix::parse_macro_params(helix::test::LOAD_FILAMENT_EXPRESSION_DEFAULT);
+        auto params = helix::parse_macro_params(helix::test::kLoadFilamentExpressionDefault);
         REQUIRE(params.size() == 1);
         show(params, prefill);
         lv_obj_t* field = lv_obj_find_by_name(modal.dialog(), "field_input");
@@ -556,18 +556,24 @@ class ParamModalFixture : public LVGLUITestFixture {
 };
 
 /// Removes the form_field component for its lifetime, so no parameter field can be
-/// built, and registers it again from its file on the way out.
+/// built, and registers it again from its file on the way out. A process that has not
+/// registered it yet (this case running first in its shard) already has no such field,
+/// and is left that way.
 struct FormFieldUnregistered {
-    FormFieldUnregistered() {
-        REQUIRE(lv_xml_component_unregister("form_field") == LV_RESULT_OK);
-    }
+    FormFieldUnregistered()
+        : was_registered_(lv_xml_component_unregister("form_field") == LV_RESULT_OK) {}
     ~FormFieldUnregistered() {
+        if (!was_registered_)
+            return;
         const std::string path =
             "A:" + helix::LayoutManager::instance().resolve_xml_path("form_field.xml");
         lv_xml_register_component_from_file(path.c_str());
     }
     FormFieldUnregistered(const FormFieldUnregistered&) = delete;
     FormFieldUnregistered& operator=(const FormFieldUnregistered&) = delete;
+
+  private:
+    bool was_registered_;
 };
 
 } // namespace
@@ -602,7 +608,7 @@ TEST_CASE_METHOD(ParamModalFixture, "A cleared prefill leaves the parameter to t
 TEST_CASE_METHOD(ParamModalFixture,
                  "A prefill lands in its own parameter's field and leaves the others empty",
                  "[filament][prefill][macro_params]") {
-    const auto params = helix::parse_macro_params(TEMP_BETWEEN_TWO);
+    const auto params = helix::parse_macro_params(kTempBetweenTwo);
     REQUIRE(params.size() == 3);
     REQUIRE(params[1].name == "EXTRUDER_TEMP");
 
@@ -620,7 +626,7 @@ TEST_CASE_METHOD(ParamModalFixture,
 TEST_CASE_METHOD(ParamModalFixture,
                  "A field that cannot be built still holds its parameter's place",
                  "[filament][prefill][macro_params]") {
-    const auto params = helix::parse_macro_params(TEMP_BETWEEN_TWO);
+    const auto params = helix::parse_macro_params(kTempBetweenTwo);
     REQUIRE(params.size() == 3);
 
     {

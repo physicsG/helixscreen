@@ -5,11 +5,14 @@
  * @file helix_cache_dir_internal.h
  * @brief Internals of the cache cascade, exposed so the sweep is testable.
  *
- * Which rungs exist is a compile-time question (HELIX_PLATFORM_*), so a host
- * build can only ever exercise the desktop case through the public entry point.
- * Exposing the decision as a pure function over a candidate list lets a test
- * build the embedded shapes directly instead of mirroring the logic.
+ * Which board rung exists is a question of the board this process is on, so a
+ * host build can only ever exercise the desktop case through the public entry
+ * point. Exposing the decision as pure functions over a candidate list lets a
+ * test build the embedded shapes directly instead of mirroring the logic.
  */
+
+#include "board_identity.h"
+#include "platform_info.h"
 
 #include <functional>
 #include <string>
@@ -23,15 +26,25 @@ struct CacheCandidate {
     /// Labels the rung in the log; nullptr means resolve quietly. Non-null also
     /// marks the rung deliberate - chosen on purpose, never reclaimed.
     const char* tier = nullptr;
-    /// True for the compile-time platform rung. Its presence marks an embedded
-    /// build; it need not win, since every device hook exports HELIX_CACHE_DIR.
+    /// True for the board's own rung. Its presence marks an embedded board; it
+    /// need not win, since every device hook exports HELIX_CACHE_DIR.
     bool platform = false;
 };
 
-/// Env override, config setting, or platform path. Never reclaimed.
+/// Env override, config setting, or board path. Never reclaimed.
 inline bool is_deliberate(const CacheCandidate& c) {
     return c.tier != nullptr;
 }
+
+/**
+ * @brief The board's own cache rungs for one subdir, in priority order.
+ *
+ * Empty for Board::Generic. Each rung is labelled with the board key and marked as
+ * the platform rung. @p tree matters only to the FlashForge MIPS boards, whose mod
+ * (Z-Mod or Forge-X) decides which durable directory holds state.
+ */
+std::vector<CacheCandidate> board_cache_candidates(board::Board board, FlashForgeModTree tree,
+                                                   const std::string& subdir);
 
 /**
  * @brief Paths safe to reclaim, given one subdir's candidate list.

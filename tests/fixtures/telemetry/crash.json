@@ -1,0 +1,28 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "backtrace": [
+    "0x401000",
+    "0x401200"
+  ],
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "event": "crash",
+  "fault_addr": "0x0",
+  "fault_code": 1,
+  "fault_code_name": "SEGV_MAPERR",
+  "load_base": "0x400000",
+  "memory_map": [
+    "00400000-00500000 r-xp 00000000 00:00 0 /opt/helixscreen/bin/helix-screen"
+  ],
+  "reg_bp": "0x7ffc0040",
+  "reg_lr": "0x401200",
+  "reg_pc": "0x401000",
+  "reg_sp": "0x7ffc0000",
+  "schema_version": 3,
+  "signal": 11,
+  "signal_name": "SIGSEGV",
+  "timestamp": "<timestamp>",
+  "uptime_sec": 0
+}

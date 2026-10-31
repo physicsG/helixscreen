@@ -30,7 +30,7 @@ namespace {
 /// with an allocator that counts and can be told to fail.
 struct TestInflate {
     using Decompressor = tinfl_copy::tinfl_decompressor;
-    static constexpr size_t WINDOW = TINFL_LZ_DICT_SIZE;
+    static constexpr size_t kWindow = TINFL_LZ_DICT_SIZE;
     static inline int live = 0;
     static inline int fail_after = -1; ///< allocations left before one fails; -1 never
 
@@ -116,7 +116,7 @@ void fix_crc(std::vector<uint8_t>& png, size_t chunk_at) {
     }
 }
 
-constexpr size_t IHDR_AT = 8;
+constexpr size_t kIhdrAt = 8;
 
 } // namespace
 
@@ -196,8 +196,8 @@ TEST_CASE("interlaced, 16-bit and oversized thumbnails keep the placeholder",
     auto png = fixture("thumb_filters_rgba.png");
     auto with = [&](size_t field, uint8_t value) {
         auto edited = png;
-        edited[IHDR_AT + 8 + field] = value;
-        fix_crc(edited, IHDR_AT);
+        edited[kIhdrAt + 8 + field] = value;
+        fix_crc(edited, kIhdrAt);
         return decode(edited, 37, 37);
     };
     CHECK(with(12, 1).failure == ThumbnailDecodeFailure::Unsupported); // interlace method
@@ -304,13 +304,13 @@ TEST_CASE("a decode that would cut into the PSRAM floor is not started",
     const size_t need =
         helix::rgb565a8_size(dims) + helix::thumbnail_decode_working_bytes(300, dims);
 
-    TestInflate::free_left = helix::THUMBNAIL_PSRAM_FLOOR + need - 1;
+    TestInflate::free_left = helix::kThumbnailPsramFloor + need - 1;
     const DecodedThumbnail refused = decode(png, 166, 166);
     CHECK(refused.pixels == nullptr);
     CHECK(refused.failure == ThumbnailDecodeFailure::OutOfMemory);
     CHECK(TestInflate::live == 0); // nothing was even allocated
 
-    TestInflate::free_left = helix::THUMBNAIL_PSRAM_FLOOR + need;
+    TestInflate::free_left = helix::kThumbnailPsramFloor + need;
     const DecodedThumbnail ok = decode(png, 166, 166);
     CHECK(ok.failure == ThumbnailDecodeFailure::None);
     TestInflate::free(ok.pixels);
@@ -347,7 +347,7 @@ TEST_CASE("decoding into a caller's buffer allocates only the working memory",
 
     // The floor counts only the working memory when the image has a home.
     TestInflate::free_left =
-        helix::THUMBNAIL_PSRAM_FLOOR + helix::thumbnail_decode_working_bytes(300, dims);
+        helix::kThumbnailPsramFloor + helix::thumbnail_decode_working_bytes(300, dims);
     CHECK(helix::decode_png_thumbnail<TestInflate>(png.data(), png.size(), 166, 166, slot.data(),
                                                    slot.size())
               .failure == ThumbnailDecodeFailure::None);

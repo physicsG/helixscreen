@@ -14,6 +14,7 @@
 #include "helix-xml/src/xml/lv_xml.h"
 #include "printer_discovery.h"
 #include "printer_state.h"
+#include "settings_manager.h"
 #include "tool_state.h"
 #include "z_offset_utils.h"
 
@@ -43,12 +44,16 @@ class SaveAvailableFixture : public LVGLTestFixture {
         hw.parse_objects(objects);
         ToolState::instance().init_tools(hw);
 
+        helix::SettingsManager::instance().init_subjects();
+        helix::SettingsManager::instance().set_z_offset_save_mode(0);
+
         helix::zoffset::deinit_save_available_subject();
         helix::zoffset::init_save_available_subject(true);
     }
 
     ~SaveAvailableFixture() override {
         helix::zoffset::deinit_save_available_subject();
+        helix::SettingsManager::instance().set_z_offset_save_mode(0);
         ToolState::instance().deinit_subjects();
         get_printer_state().deinit_subjects();
     }
@@ -80,6 +85,20 @@ class SaveAvailableFixture : public LVGLTestFixture {
         } else {
             ToolState::instance().mark_tool_offsets_saved(0);
         }
+    }
+
+    /// Whether each tool keeps its own Z offset, as init_tools() publishes it
+    /// for a toolchanger.
+    void set_per_tool_z(bool per_tool) {
+        lv_subject_set_int(
+            ToolState::instance().get_per_tool_axis_supported_subject(helix::Axis::Z),
+            per_tool ? 1 : 0);
+    }
+
+    int enabled_via_xml_name() {
+        lv_subject_t* subj = lv_xml_get_subject(nullptr, "z_offset_save_enabled");
+        REQUIRE(subj != nullptr);
+        return lv_subject_get_int(subj);
     }
 
     void set_firmware_auto_saves(bool auto_saves) {
@@ -173,4 +192,97 @@ TEST_CASE_METHOD(SaveAvailableFixture, "save_available(): the click handler and 
     set_firmware_auto_saves(true);
     CHECK_FALSE(helix::zoffset::save_available());
     CHECK(published() == 0);
+}
+
+// ============================================================================
+// The per-printer "offer Z-offset saves" setting (#1766)
+// ============================================================================
+
+TEST_CASE_METHOD(SaveAvailableFixture,
+                 "z_offset_save_enabled: a toolchanger hides every save by default",
+                 "[zoffset][save-rule][subject][save-toggle]") {
+    set_global_offset_mm(-0.15);
+    set_tool_dirty(true);
+    REQUIRE(published() == 1);
+    REQUIRE(enabled_via_xml_name() == 1);
+
+    set_per_tool_z(true);
+    CHECK(enabled_via_xml_name() == 0);
+    CHECK(published() == 0);
+    CHECK_FALSE(helix::zoffset::save_available());
+    CHECK_FALSE(helix::zoffset::save_enabled());
+}
+
+TEST_CASE_METHOD(SaveAvailableFixture,
+                 "z_offset_tune_hint: Print Tune calls the offset temporary while saving is off",
+                 "[zoffset][save-rule][subject][save-toggle]") {
+    lv_subject_t* hint = get_printer_state().profile_state().get_z_offset_tune_hint_subject();
+    REQUIRE(lv_subject_get_int(hint) == static_cast<int>(helix::ZOffsetTuneHint::SAVE_ON_CONTROLS));
+
+    set_per_tool_z(true); // the toolchanger default turns saving off
+    CHECK(lv_subject_get_int(hint) == static_cast<int>(helix::ZOffsetTuneHint::TEMPORARY));
+
+    helix::zoffset::set_save_enabled(true);
+    CHECK(lv_subject_get_int(hint) == static_cast<int>(helix::ZOffsetTuneHint::SAVE_ON_CONTROLS));
+}
+
+TEST_CASE_METHOD(SaveAvailableFixture,
+                 "z_offset_save_enabled: turning it on overrides the toolchanger default",
+                 "[zoffset][save-rule][subject][save-toggle]") {
+    set_per_tool_z(true);
+    set_global_offset_mm(-0.15);
+    REQUIRE(published() == 0);
+
+    helix::zoffset::set_save_enabled(true);
+    CHECK(helix::SettingsManager::instance().get_z_offset_save_mode() ==
+          static_cast<int>(helix::zoffset::SaveMode::Show));
+    CHECK(enabled_via_xml_name() == 1);
+    CHECK(published() == 1);
+    CHECK(helix::zoffset::save_available());
+}
+
+TEST_CASE_METHOD(SaveAvailableFixture,
+                 "z_offset_save_enabled: turning it off hides saves on a one-offset printer",
+                 "[zoffset][save-rule][subject][save-toggle]") {
+    set_global_offset_mm(-0.15);
+    REQUIRE(published() == 1);
+
+    helix::zoffset::set_save_enabled(false);
+    CHECK(helix::SettingsManager::instance().get_z_offset_save_mode() ==
+          static_cast<int>(helix::zoffset::SaveMode::Hide));
+    CHECK(enabled_via_xml_name() == 0);
+    CHECK(published() == 0);
+
+    // Baby-stepping still moves the live offset; only the save is withheld.
+    set_global_offset_mm(-0.20);
+    CHECK(published() == 0);
+
+    helix::zoffset::set_save_enabled(true);
+    CHECK(published() == 1);
+}
+
+TEST_CASE_METHOD(SaveAvailableFixture,
+                 "z_offset_save_enabled: the explicit choice survives a later detection",
+                 "[zoffset][save-rule][subject][save-toggle]") {
+    helix::zoffset::set_save_enabled(true);
+    set_per_tool_z(true); // discovery lands after the user chose
+    CHECK(enabled_via_xml_name() == 1);
+
+    helix::zoffset::set_save_enabled(false);
+    set_per_tool_z(false);
+    CHECK(enabled_via_xml_name() == 0);
+}
+
+TEST_CASE_METHOD(SaveAvailableFixture,
+                 "z_offset_save_enabled: follows a mode change made through SettingsManager",
+                 "[zoffset][save-rule][subject][save-toggle]") {
+    // A printer switch reloads the per-printer row behind the subject; the
+    // published answer must follow it without the setter being called.
+    set_global_offset_mm(-0.15);
+    helix::SettingsManager::instance().set_z_offset_save_mode(
+        static_cast<int>(helix::zoffset::SaveMode::Hide));
+    CHECK(published() == 0);
+    helix::SettingsManager::instance().set_z_offset_save_mode(
+        static_cast<int>(helix::zoffset::SaveMode::Auto));
+    CHECK(published() == 1);
 }

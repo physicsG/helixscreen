@@ -27,7 +27,7 @@ namespace helix::ui {
 class ScrewsTiltShareModal : public Modal {
   public:
     /// Rows the XML component can render; results beyond this are QR-only.
-    static constexpr size_t MAX_ROWS = 8;
+    static constexpr size_t kMaxRows = 8;
 
     explicit ScrewsTiltShareModal(std::vector<ScrewTiltResult> results);
 

@@ -8,6 +8,7 @@
 
 #include "app_globals.h"
 #include "display/lv_display_private.h" // flush_cb access
+#include "display_awake_hold.h"
 #include "display_manager.h"
 #include "display_settings_manager.h"
 #include "lock_manager.h"
@@ -15,7 +16,7 @@
 #include "printer_state.h"
 #include "screen_hide_hold.h"
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 #include "screensaver.h"
 #endif
 
@@ -99,6 +100,14 @@ namespace helix {
 
 DisplaySleepController::DisplaySleepController(DisplaySleepHost host) : m_host(std::move(host)) {}
 
+// A controller that slept without LVGL teardown abandoning its state still owns a
+// full-screen black overlay on the top layer and a hold that hides the active screen.
+DisplaySleepController::~DisplaySleepController() {
+    if (lv_is_initialized()) {
+        destroy_sleep_overlay();
+    }
+}
+
 void DisplaySleepController::configure(const DisplaySleepConfig& config) {
     m_use_hardware_blank = config.use_hardware_blank;
     m_use_power_off = config.use_power_off;
@@ -114,7 +123,7 @@ void DisplaySleepController::configure(const DisplaySleepConfig& config) {
 void DisplaySleepController::enter_sleep(int timeout_sec) {
     DisplayBackend* backend = m_host.backend.get();
     BacklightBackend* backlight = m_host.backlight.get();
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     // Stop screensaver before entering full sleep
     if (m_screensaver_active) {
         ScreensaverManager::instance().stop();
@@ -273,8 +282,13 @@ void DisplaySleepController::suppress_flush_for_sleep() {
     spdlog::debug("[DisplaySleep] Flush suppressed while panel powered off");
 }
 
+void DisplaySleepController::hold_flush_for_power_off() {
+    suppress_flush_for_sleep();
+    m_flush_held_for_power_off = true;
+}
+
 void DisplaySleepController::restore_flush_after_sleep() {
-    if (!m_flush_suppressed_for_sleep) {
+    if (!m_flush_suppressed_for_sleep || m_flush_held_for_power_off) {
         return;
     }
     m_flush_suppressed_for_sleep = false;
@@ -293,7 +307,7 @@ void DisplaySleepController::restore_flush_after_sleep() {
 
 void DisplaySleepController::tick() {
     BacklightBackend* backlight = m_host.backlight.get();
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     ScreensaverManager::instance().on_idle_check_tick();
     // HELIX_SCREENSAVER_NOW: start a screensaver on the first tick. A registered saver name
     // picks that saver; any other value the configured one, or flying toasters.
@@ -330,6 +344,11 @@ void DisplaySleepController::tick() {
             lv_display_trigger_activity(nullptr);
             inhibit_sleep_entry = true;
         }
+    }
+    // A view waiting on the user mid-operation holds the screen up regardless.
+    if (helix::display_awake_hold().is_held()) {
+        lv_display_trigger_activity(nullptr);
+        inhibit_sleep_entry = true;
     }
 
     // Get configured sleep timeout from settings (0 = disabled)
@@ -384,7 +403,10 @@ void DisplaySleepController::tick() {
     in.can_dim = backlight && backlight->supports_dimming();
     in.wake_requested = m_wake_requested;
     in.host_resumed = resumed_from_host_sleep;
-#ifdef HELIX_ENABLE_SCREENSAVER
+    in.remote_viewer = m_host.remote_viewer_active && m_host.remote_viewer_active();
+    in.remote_viewer_arrived = in.remote_viewer && !m_remote_viewer_seen;
+    m_remote_viewer_seen = in.remote_viewer;
+#if HELIX_ENABLE_SCREENSAVER
     in.has_screensaver = ScreensaverManager::configured_type() != ScreensaverType::OFF;
     in.saver_running = m_screensaver_active;
     in.is_preview = m_screensaver_is_preview;
@@ -395,18 +417,39 @@ void DisplaySleepController::tick() {
     // the wrapper is not installed because it breaks mouse device identification).
     // Two-stage idle (#1049): Dim lowers the backlight and/or starts the screensaver,
     // Sleep blanks or powers off. Both timeouts run from the same idle clock.
-    switch (helix::decide_idle(in).action) {
+    const helix::IdleDecision decision = helix::decide_idle(in);
+    if (decision.sleep_held != m_remote_sleep_held) {
+        m_remote_sleep_held = decision.sleep_held;
+        if (decision.sleep_held) {
+            // Holding at dim needs something to dim with, or a display already dimmed.
+            const bool can_hold_dim =
+                in.state == helix::IdleState::Dimmed || in.can_dim || in.has_screensaver;
+            spdlog::info("[DisplaySleep] Remote screen viewer present: holding {} instead of "
+                         "sleeping after {}s",
+                         can_hold_dim ? "at dim" : "awake", inactive_ms / 1000);
+        } else {
+            spdlog::info("[DisplaySleep] Remote screen sleep hold released ({})",
+                         in.remote_viewer ? "display active again" : "viewer gone");
+        }
+    }
+
+    switch (decision.action) {
     case helix::IdleAction::None:
         break;
     case helix::IdleAction::Wake:
+        if (in.remote_viewer_arrived && in.state == helix::IdleState::Sleeping) {
+            spdlog::info("[DisplaySleep] Remote screen viewer opened the screen; waking display");
+        }
         m_wake_requested = false;
+        m_wake_from_input = true;
         wake();
+        m_wake_from_input = false;
         break;
     case helix::IdleAction::Sleep:
         enter_sleep(sleep_timeout_sec);
         break;
     case helix::IdleAction::StartSaver:
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
         m_display_dimmed = true;
         // Suspend the active panel lifecycle so widget timers (clock, etc.) do not
         // invalidate the UI underneath the screensaver.
@@ -419,7 +462,12 @@ void DisplaySleepController::tick() {
             // setting wins.
             backlight->set_brightness(std::max(m_dim_brightness_percent, 50));
         }
-        spdlog::info("[DisplaySleep] Screensaver started after {}s inactivity", m_dim_timeout_sec);
+        if (decision.sleep_held) {
+            spdlog::info("[DisplaySleep] Screensaver started in place of sleep (remote viewer)");
+        } else {
+            spdlog::info("[DisplaySleep] Screensaver started after {}s inactivity",
+                         m_dim_timeout_sec);
+        }
 #endif
         break;
     case helix::IdleAction::Dim:
@@ -427,8 +475,13 @@ void DisplaySleepController::tick() {
         if (backlight) {
             backlight->set_brightness(m_dim_brightness_percent);
         }
-        spdlog::info("[DisplaySleep] Display dimmed to {}% after {}s inactivity",
-                     m_dim_brightness_percent, m_dim_timeout_sec);
+        if (decision.sleep_held) {
+            spdlog::info("[DisplaySleep] Display dimmed to {}% in place of sleep (remote viewer)",
+                         m_dim_brightness_percent);
+        } else {
+            spdlog::info("[DisplaySleep] Display dimmed to {}% after {}s inactivity",
+                         m_dim_brightness_percent, m_dim_timeout_sec);
+        }
         break;
     }
 }
@@ -491,13 +544,14 @@ void DisplaySleepController::wake() {
     m_display_sleeping = false;
     m_display_dimmed = false;
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     bool was_preview = m_screensaver_is_preview;
     m_screensaver_is_preview = false;
     m_preview_start_tick_ms = 0;
     // Stop screensaver on wake
     if (m_screensaver_active) {
-        ScreensaverManager::instance().stop();
+        ScreensaverManager::instance().stop(m_wake_from_input ? helix::SaverRunEnd::TOUCH
+                                                              : helix::SaverRunEnd::OTHER);
         m_screensaver_active = false;
     }
     // Resume only a suspend this manager requested. enter_sleep() stops the
@@ -513,11 +567,15 @@ void DisplaySleepController::wake() {
     constexpr bool was_preview = false;
 #endif
 
-    // Gate input if waking from full sleep (not dim)
-    // This prevents the wake touch from triggering UI actions
-    if (was_sleeping) {
-        m_host.gate_input();
+    // Ends any press LVGL has already started on every pointer, so the wake touch cannot
+    // click, long-press or scroll whatever it landed on.
+    m_host.cancel_pointer_presses();
 
+    // A swallowed wake touch never reaches LVGL's activity clock, so without this the
+    // display would wake and dim or sleep again on the next tick.
+    lv_display_trigger_activity(nullptr);
+
+    if (was_sleeping) {
         // Restore the panel output (unblank / power-on / remove overlay) BEFORE
         // the synchronous render below so the framebuffer is ready when LVGL
         // paints — honoring the #303 black-screen-on-wake race.
@@ -529,11 +587,6 @@ void DisplaySleepController::wake() {
         // on some hardware (#303). lv_refr_now() renders synchronously.
         lv_obj_invalidate(lv_screen_active());
         lv_refr_now(nullptr);
-
-        // Reset LVGL's inactivity timer so we don't immediately go back to sleep.
-        // When touch is absorbed by sleep_aware_read_cb, LVGL doesn't register activity,
-        // so without this the display would wake and immediately sleep again.
-        lv_display_trigger_activity(nullptr);
     }
 
     // Restore configured brightness from settings
@@ -563,26 +616,18 @@ void DisplaySleepController::wake() {
 }
 
 bool DisplaySleepController::note_press(int x, int y) {
-    // If sleeping or dimmed and touch detected, request wake.
-    // During sleep: absorb the touch so it doesn't trigger UI actions.
-    // During dim: let the touch pass through but still flag for wake.
-    // This is necessary because LVGL only updates last_activity_time on PRESSED,
-    // but evdev drains all buffered events in one read — if press+release both
-    // arrive in one poll (quick tap or slow main loop), the final state is
-    // RELEASED and LVGL never registers activity.
-    if (m_display_sleeping) {
-        m_wake_requested = true;
-        spdlog::info("[DisplaySleep] Wake touch absorbed at ({},{}) while sleeping", x, y);
-        return true;
+    // The caller hides this press from LVGL, so it never reaches LVGL's activity clock;
+    // m_wake_requested is how the next idle tick learns of it.
+    if (!m_display_sleeping && !m_display_dimmed) {
+        return false;
     }
-    if (m_display_dimmed) {
-        m_wake_requested = true;
-        spdlog::info("[DisplaySleep] Wake touch at ({},{}) while dim — passing through", x, y);
-    }
-    return false;
+    m_wake_requested = true;
+    spdlog::info("[DisplaySleep] Wake touch at ({},{}) while {}: swallowed until release", x, y,
+                 m_display_sleeping ? "sleeping" : "dimmed");
+    return true;
 }
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 void DisplaySleepController::preview_screensaver(int type) {
     if (m_host.shutting_down || m_screensaver_active) {
         return;
@@ -596,7 +641,7 @@ void DisplaySleepController::preview_screensaver(int type) {
     // Suspend active panel so widget timers stop updating the background
     NavigationManager::instance().suspend_active();
     m_lifecycle_suspended = true;
-    ScreensaverManager::instance().start(ss_type);
+    ScreensaverManager::instance().start(ss_type, /*preview=*/true);
     // Mark display as dimmed so wake() runs on touch; is_preview
     // flag suppresses auto-lock on dismiss.
     m_display_dimmed = true;
@@ -645,8 +690,10 @@ void DisplaySleepController::restore_on_shutdown() {
     }
 
     // Clear framebuffer to black so the last rendered frame doesn't persist
-    // after the process exits (SIGTERM/SIGINT graceful shutdown)
-    if (backend) {
+    // after the process exits (SIGTERM/SIGINT graceful shutdown). A power-off
+    // hold has already painted opaque black, which this transparent clear
+    // would undo on panels that read the X byte as alpha.
+    if (backend && !m_flush_held_for_power_off) {
         backend->clear_framebuffer(0x00000000);
     }
 

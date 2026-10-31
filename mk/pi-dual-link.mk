@@ -230,18 +230,16 @@ FBDEV_LDFLAGS := $(filter-out -ldrm -linput -lEGL -lGLESv2 -lgbm,$(LDFLAGS))
 # Order-only (after the `|`) rather than a normal prerequisite on purpose — the
 # fbdev binary must not be considered out of date merely because the DRM binary
 # is newer, which would relink it on every incremental build.
-# $(REMOTE_LINENOISE_OBJ) is empty unless ENABLE_REMOTE_CONTROL=yes, which is
-# the default for any build that does not pass HELIX_PACKAGING=1. It has to be
-# listed here as well as on $(TARGET) (mk/rules.mk) because this recipe links
-# $(filter-out %.a,$^) -- what is not a prerequisite is not linked. Omitting it
-# cost three green-looking platforms: the release cross-builds pass
-# HELIX_PACKAGING=1, which filters src/remote/*.cpp out of APP_SRCS entirely, so
-# only .github/workflows/ccache-warm.yml built the configuration that references
-# linenoise, and all three of its jobs died here on 11 undefined references.
+# Every object the DRM link ($(TARGET), mk/rules.mk) depends on must appear here
+# too, because this recipe links $(filter-out %.a,$^): what is not a
+# prerequisite is not linked. Several of them are empty in some configurations
+# ($(REMOTE_LINENOISE_OBJ) under HELIX_PACKAGING=1, $(APP_DNS_RESOLV_OBJ) on a
+# native build), so a missing one fails only in the build that compiles it in.
+# scripts/check_link_parity.py compares the two lists and fails on a gap.
 $(FBDEV_TARGET): $(APP_C_OBJS) $(FBDEV_APP_OBJS) $(FBDEV_GLES_VARIANT_OBJS) $(FBDEV_CRASH_OBJ) \
                  $(FBDEV_LVGL_OBJS) $(HELIX_XML_OBJS) $(THORVG_OBJS) $(SPDLOG_OBJS) $(LV_MARKDOWN_OBJS) \
-                 $(QUIRC_OBJS) $(LUA_OBJS) $(FONT_OBJS) $(TRANS_OBJS) $(REMOTE_LINENOISE_OBJ) \
-                 $(DISPLAY_LIB_FBDEV) $(WPA_DEPS) \
+                 $(QUIRC_OBJS) $(LUA_OBJS) $(FONT_OBJS) $(REMOTE_LINENOISE_OBJ) \
+                 $(APP_DNS_RESOLV_OBJ) $(DISPLAY_LIB_FBDEV) $(WPA_DEPS) \
                  | $(TARGET)
 	$(Q)mkdir -p $(dir $@)
 	$(ECHO) "$(MAGENTA)$(BOLD)[LD/fbdev]$(RESET) $@"
@@ -267,17 +265,8 @@ $(FBDEV_TARGET): $(APP_C_OBJS) $(FBDEV_APP_OBJS) $(FBDEV_GLES_VARIANT_OBJS) $(FB
 
 symbols-both: $(TARGET) $(FBDEV_TARGET)
 ifeq ($(STRIP_BINARY),yes)
-	@echo "Extracting symbols for DRM binary..."
-	$(NM_CMD) -nC $(TARGET) > $(TARGET).sym
-	@echo "Symbol map: $(TARGET).sym"
-	$(OBJCOPY_CMD) --only-keep-debug $(TARGET) $(TARGET).debug
-	@echo "Debug info: $(TARGET).debug"
-	@echo "Extracting symbols for fbdev binary..."
-	@mkdir -p $(FBDEV_BUILD_DIR)/bin
-	$(NM_CMD) -nC $(FBDEV_TARGET) > $(FBDEV_TARGET).sym
-	@echo "Symbol map: $(FBDEV_TARGET).sym"
-	$(OBJCOPY_CMD) --only-keep-debug $(FBDEV_TARGET) $(FBDEV_TARGET).debug
-	@echo "Debug info: $(FBDEV_TARGET).debug"
+	$(call extract-symbols,$(TARGET))
+	$(call extract-symbols,$(FBDEV_TARGET))
 else
 	@echo "STRIP_BINARY not set — skipping symbol extraction"
 endif

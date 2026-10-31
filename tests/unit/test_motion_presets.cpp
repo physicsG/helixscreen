@@ -46,7 +46,7 @@ void check_grid(const PresetPoint* points, size_t count, const AxisBounds& bound
     }
 }
 
-constexpr double CORNER_REACH_100 = 63.63961030678928; // 90 * sqrt(0.5) on r=100
+constexpr double kCornerReach100 = 63.63961030678928; // 90 * sqrt(0.5) on r=100
 
 } // namespace
 
@@ -81,15 +81,15 @@ TEST_CASE("motion presets on a circular bed sit on the inscribed circle", "[moti
     // Rim presets at 90% of the 100 mm radius; diagonals at 45 degrees, not
     // on the bounding square's corners where the round bed has ended.
     const PresetPoint grid[] = {
-        {MotionPreset::RearLeft, -CORNER_REACH_100, CORNER_REACH_100},
+        {MotionPreset::RearLeft, -kCornerReach100, kCornerReach100},
         {MotionPreset::Rear, 0, 90},
-        {MotionPreset::RearRight, CORNER_REACH_100, CORNER_REACH_100},
+        {MotionPreset::RearRight, kCornerReach100, kCornerReach100},
         {MotionPreset::Left, -90, 0},
         {MotionPreset::Center, 0, 0},
         {MotionPreset::Right, 90, 0},
-        {MotionPreset::FrontLeft, -CORNER_REACH_100, -CORNER_REACH_100},
+        {MotionPreset::FrontLeft, -kCornerReach100, -kCornerReach100},
         {MotionPreset::Front, 0, -90},
-        {MotionPreset::FrontRight, CORNER_REACH_100, -CORNER_REACH_100},
+        {MotionPreset::FrontRight, kCornerReach100, -kCornerReach100},
     };
     check_grid(grid, std::size(grid), bounds, true);
 
@@ -271,19 +271,45 @@ TEST_CASE("bed map refuses unknown plate bounds", "[motion][bed_map]") {
     CHECK_FALSE(helix::bed_map_target(100, 100, mapper, area, false).has_value());
 }
 
-TEST_CASE("bed map lift rises to clearance only from below it", "[motion][bed_map]") {
-    const auto lift = helix::bed_map_lift_z(0.2, 5.0, 250.0);
-    REQUIRE(lift.has_value());
-    CHECK(*lift == Catch::Approx(5.0));
+TEST_CASE("plate_lift decides the lift floor", "[motion][presets][lift]") {
+    using Kind = helix::PlateLift::Kind;
+    const auto expect_lift = [](const helix::PlateLift& lift, double z) {
+        CHECK(lift.kind == Kind::Lift);
+        CHECK(lift.z == Catch::Approx(z));
+    };
 
-    CHECK_FALSE(helix::bed_map_lift_z(5.0, 5.0, 250.0).has_value());
-    CHECK_FALSE(helix::bed_map_lift_z(12.0, 5.0, 250.0).has_value());
+    expect_lift(helix::plate_lift(0.2, 5.0, 300.0, std::nullopt), 5.0);
+    CHECK(helix::plate_lift(6.0, 5.0, 300.0, std::nullopt).kind == Kind::None);
+    CHECK(helix::plate_lift(5.0 - 1e-7, 5.0, 300.0, std::nullopt).kind == Kind::None);
+    CHECK(helix::plate_lift(5.0, 5.0, 250.0, std::nullopt).kind == Kind::None);
+    CHECK(helix::plate_lift(12.0, 5.0, 250.0, std::nullopt).kind == Kind::None);
 
-    // A clearance above travel is capped there.
-    const auto capped = helix::bed_map_lift_z(1.0, 5.0, 3.0);
-    REQUIRE(capped.has_value());
-    CHECK(*capped == Catch::Approx(3.0));
-    CHECK_FALSE(helix::bed_map_lift_z(3.0, 5.0, 3.0).has_value());
+    // A part on the bed raises the floor by its height.
+    expect_lift(helix::plate_lift(0.2, 5.0, 300.0, 38.0), 43.0);
+    CHECK(helix::plate_lift(45.0, 5.0, 300.0, 38.0).kind == Kind::None);
+
+    // The floor is capped at z_max while z_max still clears the part by the minimum.
+    expect_lift(helix::plate_lift(0.2, 5.0, 40.0, 38.0), 40.0);
+    CHECK(helix::plate_lift(0.2, 5.0, 38.5, 38.0).kind == Kind::Refuse);
+
+    // With nothing on the bed a short travel caps the clearance and never refuses.
+    expect_lift(helix::plate_lift(0.2, 5.0, 3.0, std::nullopt), 3.0);
+    expect_lift(helix::plate_lift(1.0, 5.0, 3.0, std::nullopt), 3.0);
+    CHECK(helix::plate_lift(3.0, 5.0, 3.0, std::nullopt).kind == Kind::None);
+}
+
+TEST_CASE("clamp_z_down_to_floor keeps a lowered nozzle above a part", "[motion][presets][lift]") {
+    CHECK(helix::clamp_z_down_to_floor(20.0, 5.0, true, 38.0) == Catch::Approx(43.0));
+    CHECK(helix::clamp_z_down_to_floor(50.0, 5.0, true, 38.0) == Catch::Approx(50.0));
+    CHECK(helix::clamp_z_down_to_floor(0.0, 5.0, false, std::nullopt) == Catch::Approx(0.0));
+}
+
+TEST_CASE("clamp_z_down_to_floor floors an occupied bed of unknown height at the clearance",
+          "[motion][presets][lift]") {
+    CHECK(helix::clamp_z_down_to_floor(0.0, 5.0, true, std::nullopt) == Catch::Approx(5.0));
+    CHECK(helix::clamp_z_down_to_floor(12.0, 5.0, true, std::nullopt) == Catch::Approx(12.0));
+    CHECK(helix::plate_z_floor(5.0, std::nullopt) == Catch::Approx(5.0));
+    CHECK(helix::plate_z_floor(5.0, 38.0) == Catch::Approx(43.0));
 }
 
 TEST_CASE("bed map lift completes before XY travel, even behind an in-flight move",
@@ -302,7 +328,9 @@ TEST_CASE("bed map lift completes before XY travel, even behind an in-flight mov
     helix::AxisTarget second;
     second.x = 150.0;
     second.y = 80.0;
-    second.z = *helix::bed_map_lift_z(0.2, 5.0, 250.0);
+    const auto lift = helix::plate_lift(0.2, 5.0, 250.0, std::nullopt);
+    REQUIRE(lift.kind == helix::PlateLift::Kind::Lift);
+    second.z = lift.z;
     CHECK_FALSE(coalescer.on_target(second).has_value());
     const auto flushed = coalescer.on_ack();
     REQUIRE(flushed.has_value());

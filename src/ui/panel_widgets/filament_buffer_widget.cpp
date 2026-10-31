@@ -10,32 +10,26 @@
 #include "grid_layout.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "panel_widget_registry.h"
-#include "static_subject_registry.h"
 #include "subject_managed_panel.h"
+#include "text_measure.h"
+#include "theme_manager.h"
+#include "widget_subjects.h"
 
 #include <spdlog/spdlog.h>
+
+#include <algorithm>
 
 namespace {
 
 // 1 when the tile is two cells wide, which is what draws the trace and the
 // lean in words. Registered before the XML that binds it is parsed.
 lv_subject_t s_wide_subject{};
-bool s_subjects_initialized = false;
-SubjectManager s_subjects;
+helix::WidgetSubjects s_subjects{"FilamentBufferWidgetSubjects"};
 
 void filament_buffer_widget_init_subjects() {
-    if (s_subjects_initialized)
-        return;
-
-    lv_subject_init_int(&s_wide_subject, 0);
-    s_subjects.publish("filament_buffer_wide", &s_wide_subject);
-    s_subjects_initialized = true;
-
-    StaticSubjectRegistry::instance().register_deinit("FilamentBufferWidgetSubjects", []() {
-        if (s_subjects_initialized && lv_is_initialized()) {
-            s_subjects.deinit_all();
-            s_subjects_initialized = false;
-        }
+    s_subjects.ensure_init([] {
+        lv_subject_init_int(&s_wide_subject, 0);
+        s_subjects.publish("filament_buffer_wide", &s_wide_subject);
     });
 }
 
@@ -78,6 +72,18 @@ void FilamentBufferWidget::detach() {
 void FilamentBufferWidget::on_size_changed(int colspan, int /*rowspan*/, int /*width_px*/,
                                            int /*height_px*/) {
     lv_subject_set_int(&s_wide_subject, colspan >= 2 * GridLayout::TRACKS_PER_CELL ? 1 : 0);
+}
+
+bool FilamentBufferWidget::fits_at(int width_px, int /*height_px*/) const {
+    // One row of padding, slider, gap and reading, and the reading never wraps.
+    // A synced buffer's bias reads up to "+100%" (buffer_short_text).
+    const lv_font_t* value_font = theme_manager_get_font("font_body_bold");
+    const int reading_px = std::max(ui::measure_text_px("+100%", value_font),
+                                    ui::measure_text_px("-100%", value_font));
+    const int need = 2 * theme_manager_get_spacing("buffer_tile_pad") +
+                     theme_manager_get_spacing("buffer_slider_w") +
+                     theme_manager_get_spacing("space_sm") + reading_px;
+    return width_px >= need;
 }
 
 } // namespace helix

@@ -37,7 +37,7 @@ struct ExternalSpoolMenuHooks {
 
     /// This surface's bypass controller. Drives the Enable/Disable Bypass entry
     /// AND the engage that must precede a load — with bypass disengaged,
-    /// plan_load() refuses EXTERNAL_SPOOL_SLOT outright
+    /// plan_load() refuses kExternalSpoolSlot outright
     /// (requires_slot_selection_for_load() is !is_bypass_active()), so a Load
     /// offered without it is a dead end.
     ///

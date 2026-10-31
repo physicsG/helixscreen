@@ -461,3 +461,34 @@ TEST_CASE_METHOD(XMLTestFixture, "the palette walker still themes a neutral butt
     theme_apply_current_palette_to_tree(root);
     CHECK(bg_rgb(btn) == elevated);
 }
+
+TEST_CASE_METHOD(XMLTestFixture, "chart_measured is each theme's primary, readable on the plot",
+                 "[theme][chart_measured]") {
+    RestoreTheme restore;
+    const std::string dir = helix::get_default_themes_directory();
+    const auto themes = helix::discover_themes(dir);
+    REQUIRE(themes.size() > 1);
+    for (const auto& info : themes) {
+        const helix::ThemeData theme =
+            helix::load_theme_from_file(dir + "/" + info.filename + ".json");
+        REQUIRE(theme.is_valid());
+        for (const bool dark : {true, false}) {
+            if (dark ? !theme.supports_dark() : !theme.supports_light()) {
+                continue;
+            }
+            theme_manager_apply_theme(theme, dark);
+            const helix::ModePalette& palette = dark ? theme.dark : theme.light;
+            const uint32_t measured = const_rgb("chart_measured");
+            const uint32_t plot = hex(palette.screen_bg);
+            const uint32_t primary = hex(palette.primary);
+            INFO(info.filename << (dark ? " dark" : " light") << ": chart_measured=" << std::hex
+                               << measured << " primary=" << primary << " plot=" << plot);
+            // The curve sits on the chart's screen_bg plot.
+            CHECK(contrast(measured, plot) >= helix::kChartCurveContrastThreshold);
+            if (contrast(primary, plot) >= helix::kChartCurveContrastThreshold) {
+                CHECK(measured == primary);
+            }
+            CHECK(rgb(theme_manager_get_color("chart_measured")) == measured);
+        }
+    }
+}

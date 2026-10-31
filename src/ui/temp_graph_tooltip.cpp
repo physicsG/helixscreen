@@ -176,7 +176,7 @@ std::optional<TempGraphHit> tooltip_hit_test(ui_temp_graph_t* graph, int32_t x, 
         }
     }
 
-    constexpr int64_t r = TEMP_GRAPH_TOOLTIP_HIT_RADIUS_PX;
+    constexpr int64_t r = kTempGraphTooltipHitRadiusPx;
     if (!found || best_d2 > r * r) {
         return std::nullopt;
     }
@@ -185,7 +185,7 @@ std::optional<TempGraphHit> tooltip_hit_test(ui_temp_graph_t* graph, int32_t x, 
 
 lv_area_t temp_graph_tooltip_box_area(const temp_graph_geometry_t& geo, int32_t px, int32_t py,
                                       int32_t box_w, int32_t box_h) {
-    constexpr int32_t GAP = 8;
+    constexpr int32_t kGap = 8;
     const int32_t plot_x2 = geo.cx1 + geo.cw;
     const int32_t plot_y2 = geo.cy1 + geo.ch;
 
@@ -209,7 +209,7 @@ lv_area_t temp_graph_tooltip_box_area(const temp_graph_geometry_t& geo, int32_t 
 
     // Flip below when the point sits in the top third of the plot.
     const bool below = py < geo.cy1 + geo.ch / 3;
-    a.y1 = below ? (py + GAP) : (py - GAP - h);
+    a.y1 = below ? (py + kGap) : (py - kGap - h);
     if (a.y1 + h > plot_y2) {
         a.y1 = plot_y2 - h;
     }
@@ -300,24 +300,24 @@ void temp_graph_tooltip_draw_cb(lv_event_t* e) {
     dot.border_color = graph->cached_graph_bg;
     dot.border_width = 1;
     dot.border_opa = LV_OPA_COVER;
-    constexpr int32_t DOT_R = 4;
-    lv_area_t dot_area = {px - DOT_R, py - DOT_R, px + DOT_R, py + DOT_R};
+    constexpr int32_t kDotR = 4;
+    lv_area_t dot_area = {px - kDotR, py - kDotR, px + kDotR, py + kDotR};
     lv_draw_rect(layer, &dot, &dot_area);
 
     // ---- tail, only when the clamped box still spans the point ----
     const lv_color_t box_bg = theme_manager_get_color("card_bg");
-    constexpr int32_t TAIL_W = 6;
+    constexpr int32_t kTailW = 6;
     const bool box_above = box.y2 <= py;
-    if (px - TAIL_W >= box.x1 && px + TAIL_W <= box.x2) {
+    if (px - kTailW >= box.x1 && px + kTailW <= box.x2) {
         lv_draw_triangle_dsc_t tail;
         lv_draw_triangle_dsc_init(&tail);
         tail.color = box_bg;
         tail.opa = LV_OPA_COVER;
         const int32_t base_y = box_above ? box.y2 : box.y1;
-        const int32_t tip_y = box_above ? (py - DOT_R) : (py + DOT_R);
-        tail.p[0].x = px - TAIL_W;
+        const int32_t tip_y = box_above ? (py - kDotR) : (py + kDotR);
+        tail.p[0].x = px - kTailW;
         tail.p[0].y = base_y;
-        tail.p[1].x = px + TAIL_W;
+        tail.p[1].x = px + kTailW;
         tail.p[1].y = base_y;
         tail.p[2].x = px;
         tail.p[2].y = tip_y;

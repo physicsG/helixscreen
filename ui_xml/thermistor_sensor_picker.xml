@@ -6,11 +6,15 @@
   <view name="context_backdrop" extends="context_menu_backdrop">
     <!-- Context menu card - positioned by C++ -->
     <context_menu_card title="Select Sensor">
-      <!-- Sensor rows populated dynamically by C++ -->
+      <!-- One row per sensor, bound to the thermistor_sel_<i>_* subjects -->
       <!-- max_height set dynamically by C++ to ~2/3 screen height -->
       <lv_obj name="sensor_list"
               width="100%" height="content" flex_flow="column" style_pad_all="#space_xs" style_pad_gap="0"
-              scrollable="true"/>
+              scrollable="true">
+        <repeat count="thermistor_sel_rows">
+          <thermistor_picker_row prefix="thermistor_sel" index="${i}" checkbox_hidden="true"/>
+        </repeat>
+      </lv_obj>
     </context_menu_card>
   </view>
 </component>

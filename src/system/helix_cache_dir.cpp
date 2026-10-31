@@ -4,23 +4,9 @@
  * @file helix_cache_dir.cpp
  * @brief Cache-directory resolution cascade.
  *
- * Lifted out of app_globals.cpp so the TEST BINARY can link the real thing.
- * app_globals.o is excluded from the test link (mk/tests.mk) because it carries
- * the global subjects and app state, and tests/ui_test_utils.cpp used to supply
- * a hand-written get_helix_cache_dir() in its place — a two-rung fake that
- * honoured HELIX_CACHE_DIR and otherwise returned "/tmp/helix_test_<subdir>",
- * a shape this cascade never produces. Every assertion in
- * tests/unit/test_cache_dir.cpp landed on that fake, so rungs 2-7 (config,
- * platform, XDG, HOME, /var/tmp, /tmp) were never under test at all. Same drift
- * mk/tests.mk documents for ui_text_input.o and ui_emergency_stop.o.
- *
- * This translation unit has no global subjects and no app state — only Config,
- * helix::paths and spdlog — so it links into the test binary cleanly and the
- * stub is gone. Test isolation now comes from HELIX_CACHE_DIR, which is rung 1
- * of the real cascade, rather than from a second implementation of it.
- *
- * Declarations stay in app_globals.h: the split is about what links, not about
- * churning 28 call sites.
+ * This translation unit has no global subjects and no app state - only Config,
+ * helix::paths and spdlog. Tests isolate themselves through HELIX_CACHE_DIR,
+ * rung 1 of the cascade. Declarations live in app_globals.h.
  */
 
 #include "app_globals.h"
@@ -64,6 +50,58 @@ static bool cache_candidate_viable(const std::string& path) {
 using helix::cache_internal::CacheCandidate;
 using helix::cache_internal::is_deliberate;
 
+namespace helix::cache_internal {
+
+std::vector<CacheCandidate> board_cache_candidates(board::Board board, FlashForgeModTree tree,
+                                                   const std::string& subdir) {
+    const char* tier = board::info(board).key;
+    auto rung = [&](const std::string& root) {
+        return CacheCandidate{root + "/cache/" + subdir, tier, true};
+    };
+
+    switch (board) {
+    case board::Board::Ad5m:
+        // Dot-prefixed on purpose: /data is the only large writable partition on
+        // this board and the vendor symlinks it whole into Moonraker's gcodes
+        // root, so a plain-named directory shows up in the print-file picker.
+        // Moonraker's listings hide dot-entries (the vendor's own .mod and .thumbs
+        // rely on exactly that), no moonraker.conf edit needed.
+        return {rung("/data/.helixscreen")};
+    case board::Board::Cc1:
+        // /user-resource is the 6.3GB ext4 partition. / is a read-only squashfs with
+        // no /opt, so anything rooted there falls through to RAM-backed /tmp. The
+        // -state sibling keeps the cache off the payload, which every update deletes.
+        return {rung("/user-resource/helixscreen-state")};
+    case board::Board::K2:
+        // /mnt/UDISK is the 27.5GB user partition and carries both the payload and
+        // its state; the cache sits in the -state sibling because the payload is
+        // what an update replaces. /usr/data is on the root overlay, only ~240MB
+        // and shared with the firmware, so it is the fallback for a unit without
+        // the mount. Same two roots plr_backend.cpp probes for Creality data.
+        return {rung("/mnt/UDISK/helixscreen-state"), rung("/usr/data/helixscreen-state")};
+    case board::Board::K1:
+        // /usr/data IS the large user partition here, unlike on the K2. The cache
+        // sits in a sibling of the payload rather than inside it, because the
+        // payload is what an update replaces.
+        return {rung("/usr/data/helixscreen-state")};
+    case board::Board::Ad5x:
+    case board::Board::Creator5:
+    case board::Board::Creator5Pro:
+        // Z-Mod keeps state under /srv; the Forge-X chroot has neither /srv nor
+        // /usr/data and keeps it in the mod's durable config directory.
+        if (tree == FlashForgeModTree::ForgeX)
+            return {rung("/opt/config/mod_data/helixscreen-state")};
+        return {rung("/srv/helixscreen-state")};
+    case board::Board::SnapmakerU1:
+        return {rung("/userdata/helixscreen-state")};
+    case board::Board::Generic:
+        break;
+    }
+    return {};
+}
+
+} // namespace helix::cache_internal
+
 /// The cache cascade for `subdir`, in priority order. Pure: enumerating the
 /// candidates touches nothing on disk.
 static std::vector<CacheCandidate> cache_path_candidates(const std::string& subdir) {
@@ -80,36 +118,17 @@ static std::vector<CacheCandidate> cache_path_candidates(const std::string& subd
     if (!base.empty())
         out.push_back({base + "/" + subdir, "config", false});
 
-        // 3. Platform-specific compile-time paths
-#if defined(HELIX_PLATFORM_AD5M)
-    // Dot-prefixed on purpose: /data is the only large writable partition on
-    // this board and the vendor symlinks it whole into Moonraker's gcodes
-    // root, so a plain-named directory shows up in the print-file picker.
-    // Moonraker's listings hide dot-entries (the vendor's own .mod and .thumbs
-    // rely on exactly that), no moonraker.conf edit needed.
-    out.push_back({"/data/.helixscreen/cache/" + subdir, "AD5M", true});
-#elif defined(HELIX_PLATFORM_CC1)
-    // /user-resource is the 6.3GB ext4 partition. / is a read-only squashfs with
-    // no /opt, so anything rooted there falls through to RAM-backed /tmp. The
-    // -state sibling keeps the cache off the payload, which every update deletes.
-    out.push_back({"/user-resource/helixscreen-state/cache/" + subdir, "CC1", true});
-#elif defined(HELIX_PLATFORM_K2)
-    // /mnt/UDISK is the 27.5GB user partition and carries both the payload and
-    // its state; the cache sits in the -state sibling because the payload is
-    // what an update replaces. /usr/data is on the root overlay, only ~240MB
-    // and shared with the firmware, so it is the fallback for a unit without
-    // the mount. Same two roots plr_backend.cpp probes for Creality data.
-    out.push_back({"/mnt/UDISK/helixscreen-state/cache/" + subdir, "K2", true});
-    out.push_back({"/usr/data/helixscreen-state/cache/" + subdir, "K2", true});
-#elif defined(HELIX_PLATFORM_MIPS)
-    // K1 series: /usr/data IS the large user partition here, unlike on the K2.
-    // The cache sits in a sibling of the payload rather than inside it, because
-    // the payload is what an update replaces. This binary also serves the AD5X,
-    // where /usr/data exists only in the ZMOD chroot (persistent — cache lands
-    // here) and never in the Forge-X chroot (can_create_dir fails and the
-    // cascade falls through to XDG, same as the dedicated AD5X build did).
-    out.push_back({"/usr/data/helixscreen-state/cache/" + subdir, "MIPS", true});
-#elif defined(HELIX_PLATFORM_ANDROID) || defined(__ANDROID__)
+    // 3. The board's own rung
+    const helix::board::Board board = helix::board::current();
+    // The mod tree only decides the FlashForge MIPS boards' rung, so no other board stats for it.
+    const bool flashforge_mips = board == helix::board::Board::Ad5x ||
+                                 board == helix::board::Board::Creator5 ||
+                                 board == helix::board::Board::Creator5Pro;
+    const helix::FlashForgeModTree tree =
+        flashforge_mips ? helix::flashforge_mod_tree() : helix::FlashForgeModTree::None;
+    for (CacheCandidate& c : helix::cache_internal::board_cache_candidates(board, tree, subdir))
+        out.push_back(std::move(c));
+#if defined(HELIX_PLATFORM_ANDROID) || defined(__ANDROID__)
     // Use SDL's Android internal storage path (app-private, no permissions needed)
     if (const char* android_path = SDL_AndroidGetInternalStoragePath())
         out.push_back({std::string(android_path) + "/cache/" + subdir, "Android", true});
@@ -179,12 +198,12 @@ std::string get_helix_cache_dir(const std::string& subdir) {
 // ============================================================================
 
 /// Cache subdirectories this build creates. Mirrors the get_helix_cache_dir()
-/// call sites: ThumbnailCache::CACHE_SUBDIR, ThumbnailProcessor, the gcode temp
+/// call sites: ThumbnailCache::kCacheSubdir, ThumbnailProcessor, the gcode temp
 /// and modified-file caches, ToolsUsedCache, and prerendered printer images. A
 /// name missing here means a stale directory survives, which is harmless; a
 /// name that is wrong would target something we do not own, which is not, so
 /// this list is explicit rather than a glob.
-static const char* const HELIX_CACHE_SUBDIRS[] = {
+static const char* const kHelixCacheSubdirs[] = {
     "helix_thumbs", "gcode_temp", "gcode_mod", "tools_used", "printer_images",
 };
 
@@ -325,7 +344,7 @@ int migrate_state_root(const std::string& legacy_root, const std::string& curren
 
 int sweep_stale_helix_cache_dirs() {
     int removed = 0;
-    for (const char* subdir : HELIX_CACHE_SUBDIRS) {
+    for (const char* subdir : kHelixCacheSubdirs) {
         const std::vector<std::string> stale = helix::cache_internal::select_stale_paths(
             cache_path_candidates(subdir), cache_candidate_viable);
         removed += reclaim_cache_paths(stale, subdir);
@@ -336,7 +355,8 @@ int sweep_stale_helix_cache_dirs() {
 namespace helix {
 
 void migrate_legacy_state_roots() {
-#if defined(HELIX_PLATFORM_AD5M)
+    if (board::current() != board::Board::Ad5m)
+        return;
     // /data is this board's only large writable partition and the vendor
     // symlinks it whole into Moonraker's gcodes root, so the state root has to
     // stay dot-prefixed to stay out of the print-file picker. A binary update
@@ -359,7 +379,6 @@ void migrate_legacy_state_roots() {
         setenv(var, repaired.c_str(), 1);
         spdlog::info("[CacheDir] Repointed {} to the renamed state root: {}", var, repaired);
     }
-#endif
 }
 
 } // namespace helix

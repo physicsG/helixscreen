@@ -54,7 +54,7 @@ class OwnershipMoreFixture : public LVGLTestFixture {
     }
 };
 
-constexpr const char* REJECTION = "Printer is not ready";
+constexpr const char* kRejection = "Printer is not ready";
 
 /// ZOffsetCalibrationPanel::adjust_z() branches on the PROCESS-WIDE
 /// PrinterState's strategy, not on a local one. Reset pins it to
@@ -84,7 +84,7 @@ TEST_CASE_METHOD(OwnershipMoreFixture, "Z-offset TESTZ nudge leaves the `!!` rou
     ZOffsetCalibrationPanel panel;
     panel.set_api(&api);
 
-    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, REJECTION, "TESTZ");
+    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kRejection, "TESTZ");
     ZOffsetCalibrationTestAccess::adjust_z(panel, -0.025f);
 
     // The nudge really went out and really was rejected.
@@ -92,7 +92,7 @@ TEST_CASE_METHOD(OwnershipMoreFixture, "Z-offset TESTZ nudge leaves the `!!` rou
     REQUIRE(client.last_send_script() == "TESTZ Z=-0.025");
     CHECK_FALSE(client.current_send_intent().surfaces_errors);
 
-    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(REJECTION));
+    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(kRejection));
 }
 
 TEST_CASE_METHOD(OwnershipMoreFixture, "Z-offset bed-off send leaves the `!!` router free",
@@ -105,13 +105,13 @@ TEST_CASE_METHOD(OwnershipMoreFixture, "Z-offset bed-off send leaves the `!!` ro
     panel.set_api(&api);
     ZOffsetCalibrationTestAccess::mark_bed_warmed(panel);
 
-    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, REJECTION, "M140");
+    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kRejection, "M140");
     ZOffsetCalibrationTestAccess::turn_off_bed(panel);
 
     REQUIRE(client.last_send_script() == "M140 S0");
     CHECK_FALSE(client.current_send_intent().surfaces_errors);
 
-    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(REJECTION));
+    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(kRejection));
 }
 
 // ============================================================================
@@ -131,24 +131,24 @@ TEST_CASE_METHOD(OwnershipMoreFixture, "LED strip writes claim ownership only fo
     backend.set_api(&api);
 
     SECTION("no caller handler — the adapter lambda must not claim it") {
-        client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, REJECTION, "SET_LED");
+        client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kRejection, "SET_LED");
         backend.set_color("neopixel bar", 1.0, 0.0, 0.0, 0.0);
 
         REQUIRE(client.last_send_script().find("SET_LED LED=\"bar\"") == 0);
         CHECK_FALSE(client.current_send_intent().surfaces_errors);
-        CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(REJECTION));
+        CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(kRejection));
     }
 
     SECTION("caller handler present — the `!!` copy dedups against it") {
-        client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, REJECTION, "SET_LED");
+        client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kRejection, "SET_LED");
         std::string seen;
         backend.set_color("neopixel bar", 1.0, 0.0, 0.0, 0.0, nullptr,
                           [&seen](const std::string& msg) { seen = msg; });
 
         REQUIRE(client.last_send_script().find("SET_LED LED=\"bar\"") == 0);
         CHECK(client.current_send_intent().surfaces_errors);
-        CHECK(helix::rpc_error_correlation::was_recently_handled(REJECTION));
-        CHECK(seen == REJECTION);
+        CHECK(helix::rpc_error_correlation::was_recently_handled(kRejection));
+        CHECK(seen == kRejection);
     }
 }
 
@@ -165,14 +165,14 @@ TEST_CASE_METHOD(OwnershipMoreFixture, "LED effect activation can opt out for a 
     // LedControlOverlay's shape: a non-null handler that only writes a log line,
     // so it explicitly declines ownership rather than inheriting the
     // "non-null means the user was told" presumption.
-    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, REJECTION, "SET_LED_EFFECT");
+    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kRejection, "SET_LED_EFFECT");
     std::string seen;
     backend.activate_effect(
         "led_effect rainbow", nullptr, [&seen](const std::string& msg) { seen = msg; },
         /*on_queued=*/nullptr, /*caller_surfaces_errors=*/false);
 
     REQUIRE(client.last_send_script() == "SET_LED_EFFECT EFFECT=rainbow");
-    CHECK(seen == REJECTION); // the handler still ran; it just does not report
+    CHECK(seen == kRejection); // the handler still ran; it just does not report
     CHECK_FALSE(client.current_send_intent().surfaces_errors);
-    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(REJECTION));
+    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(kRejection));
 }

@@ -48,12 +48,12 @@ using Catch::Approx;
 namespace {
 
 // Micro-tier geometry that reproduces the Q2 panel.
-constexpr int32_t MICRO_W = 480;
-constexpr int32_t MICRO_H = 272;
+constexpr int32_t kMicroW = 480;
+constexpr int32_t kMicroH = 272;
 
 // The reported/physical ratio the reporter's panel exhibits. Any s < 1 anchored
 // at the origin reproduces the trap; 0.6 is the suspected value.
-constexpr double COMPRESSION = 0.6;
+constexpr double kCompression = 0.6;
 
 /// Records what the session installs on the live input device, modelling the
 /// backend: disable_affine() leaves the stored matrix intact, enable_affine()
@@ -123,8 +123,8 @@ helix::TouchCalibration identity_cal() {
 /// anchored compression by `s`, a finger anywhere on the panel reports somewhere
 /// in [0, s*(W-1)] x [0, s*(H-1)] and nowhere else.
 bool reportable(const helix::Point& raw, double s) {
-    return raw.x >= 0 && raw.y >= 0 && raw.x <= static_cast<int>((MICRO_W - 1) * s) &&
-           raw.y <= static_cast<int>((MICRO_H - 1) * s);
+    return raw.x >= 0 && raw.y >= 0 && raw.x <= static_cast<int>((kMicroW - 1) * s) &&
+           raw.y <= static_cast<int>((kMicroH - 1) * s);
 }
 
 /// Is the widget rect centred at (x,y) addressable through `cal`? Invert the
@@ -193,7 +193,7 @@ class Q2CompressionFixture : public XMLTestFixture {
         wired.register_callbacks();
 
         prev_display_ = lv_display_get_default();
-        disp_ = lv_display_create(MICRO_W, MICRO_H);
+        disp_ = lv_display_create(kMicroW, kMicroH);
         REQUIRE(disp_ != nullptr);
         lv_display_set_default(disp_);
         screen_ = lv_obj_create(nullptr);
@@ -212,7 +212,7 @@ class Q2CompressionFixture : public XMLTestFixture {
         // unit-test XML scope; pin full-screen geometry deterministically.
         lv_obj_set_align(root_, LV_ALIGN_TOP_LEFT);
         lv_obj_set_pos(root_, 0, 0);
-        lv_obj_set_size(root_, MICRO_W, MICRO_H);
+        lv_obj_set_size(root_, kMicroW, kMicroH);
 
         lv_obj_t* header = lv_obj_find_by_name(root_, "overlay_header");
         REQUIRE(header != nullptr);
@@ -223,7 +223,7 @@ class Q2CompressionFixture : public XMLTestFixture {
 
         panel_ = overlay_->get_panel();
         REQUIRE(panel_ != nullptr);
-        panel_->set_screen_size(MICRO_W, MICRO_H);
+        panel_->set_screen_size(kMicroW, kMicroH);
         // Legacy sample-on-press: three on_press() calls per point commit that
         // point without a clock or release edge to model.
         helix::TouchCalibrationPanelTestAccess::set_debounce_enabled(*panel_, false);
@@ -309,7 +309,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     sink_.affine_enabled = true;
 
     activate_at_idle();
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
 
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::VERIFY);
     const helix::TouchCalibration* fresh = panel_->get_calibration();
@@ -317,8 +317,8 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     REQUIRE(fresh->valid);
 
     // The solve must undo the compression: ~1/s on both diagonal terms.
-    CHECK(fresh->a == Approx(1.0 / COMPRESSION).epsilon(0.05));
-    CHECK(fresh->e == Approx(1.0 / COMPRESSION).epsilon(0.05));
+    CHECK(fresh->a == Approx(1.0 / kCompression).epsilon(0.05));
+    CHECK(fresh->e == Approx(1.0 / kCompression).epsilon(0.05));
 
     // Entering VERIFY installs the JUST-COMPUTED matrix, not the pre-session one.
     // Restoring the old matrix here is what made the whole screen unwinnable:
@@ -332,7 +332,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     // (commit() happens only on Accept.)
 
     // --- Reachability of the bottom-anchored Accept button --------------------
-    lv_subject_set_int(state_, 4); // STATE_VERIFY
+    lv_subject_set_int(state_, 4); // kStateVerify
     lv_obj_update_layout(screen_);
     const lv_area_t accept = coords_of("btn_accept");
     const int32_t ax = (accept.x1 + accept.x2) / 2;
@@ -341,17 +341,17 @@ TEST_CASE_METHOD(Q2CompressionFixture,
 
     // Accept sits below the compressed reachable region, so under the OLD matrix
     // no physical finger can address it — the user can never commit.
-    CHECK_FALSE(screen_point_addressable(identity_cal(), ax, ay, COMPRESSION));
+    CHECK_FALSE(screen_point_addressable(identity_cal(), ax, ay, kCompression));
 
     // Under the matrix VERIFY now installs, it is addressable.
-    CHECK(screen_point_addressable(sink_.stored, ax, ay, COMPRESSION));
+    CHECK(screen_point_addressable(sink_.stored, ax, ay, kCompression));
 
     // Same for Retry, the other way out of VERIFY.
     const lv_area_t retry = coords_of("btn_retry");
     const int32_t rx = (retry.x1 + retry.x2) / 2;
     const int32_t ry = (retry.y1 + retry.y2) / 2;
-    CHECK_FALSE(screen_point_addressable(identity_cal(), rx, ry, COMPRESSION));
-    CHECK(screen_point_addressable(sink_.stored, rx, ry, COMPRESSION));
+    CHECK_FALSE(screen_point_addressable(identity_cal(), rx, ry, kCompression));
+    CHECK(screen_point_addressable(sink_.stored, rx, ry, kCompression));
 }
 
 TEST_CASE_METHOD(Q2CompressionFixture,
@@ -367,7 +367,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     panel_->start();
     for (int step = 0; step < 3; ++step) {
         const helix::Point t = panel_->get_target_position(step);
-        const helix::Point raw{t.x, (MICRO_H - 1) - t.y}; // Y inverted at capture
+        const helix::Point raw{t.x, (kMicroH - 1) - t.y}; // Y inverted at capture
         for (int i = 0; i < helix::TouchCalibrationPanelTestAccess::samples_required(); ++i) {
             panel_->on_press(raw);
         }
@@ -391,9 +391,9 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     REQUIRE(helix::invert_transform_point(sink_.stored, {ax, ay}, raw));
     INFO("Accept centre (" << ax << "," << ay << ") <- raw (" << raw.x << "," << raw.y << ")");
     CHECK(raw.x >= 0);
-    CHECK(raw.x < MICRO_W);
+    CHECK(raw.x < kMicroW);
     CHECK(raw.y >= 0);
-    CHECK(raw.y < MICRO_H);
+    CHECK(raw.y < kMicroH);
 }
 
 // ============================================================================
@@ -406,8 +406,8 @@ TEST_CASE_METHOD(Q2CompressionFixture,
                  "[touch][calibration][943]") {
     activate_at_idle();
 
-    const int32_t max_x = static_cast<int32_t>((MICRO_W - 1) * COMPRESSION);
-    const int32_t max_y = static_cast<int32_t>((MICRO_H - 1) * COMPRESSION);
+    const int32_t max_x = static_cast<int32_t>((kMicroW - 1) * kCompression);
+    const int32_t max_y = static_cast<int32_t>((kMicroH - 1) * kCompression);
 
     lv_obj_t* capture = lv_obj_find_by_name(screen_, "touch_capture_overlay");
     REQUIRE(capture != nullptr);
@@ -460,7 +460,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
                  "surface is hidden",
                  "[touch][calibration][943]") {
     activate_at_idle();
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::VERIFY);
 
     lv_obj_t* capture = lv_obj_find_by_name(screen_, "touch_capture_overlay");
@@ -492,7 +492,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     // degenerate rect that makes the chip unclickable once it un-hides.
     activate_at_idle();
 
-    lv_subject_set_int(state_, 1); // STATE_POINT_1 — chip un-hides here
+    lv_subject_set_int(state_, 1); // kStatePoint1 — chip un-hides here
     lv_obj_update_layout(screen_);
 
     lv_obj_t* chip = lv_obj_find_by_name(screen_, "cancel_chip");
@@ -594,8 +594,8 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     CHECK(lv_area_get_width(&h) > 0);
     CHECK(lv_area_get_height(&h) > 0);
     // On screen, not clipped off the bottom/right edge.
-    CHECK(h.x2 < MICRO_W);
-    CHECK(h.y2 < MICRO_H);
+    CHECK(h.x2 < kMicroW);
+    CHECK(h.y2 < kMicroH);
 
     // Clear of every crosshair — P1 is bottom-CENTER, which is why the hint sits
     // bottom-right rather than bottom-center.
@@ -642,7 +642,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     sink_.stored = identity_cal();
     activate_at_idle();
 
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::VERIFY);
 
     // Round 1: the user could not press Accept, so the countdown expired. One
@@ -650,7 +650,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     helix::TouchCalibrationPanelTestAccess::fire_verify_timeout(*panel_);
     CHECK(panel_->get_state() == helix::TouchCalibrationPanel::State::POINT_1);
 
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::VERIFY);
 
     // Round 2: the same thing happened again. Restarting a third time is the
@@ -679,19 +679,19 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     sink_.stored = identity_cal();
     activate_at_idle();
 
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
     helix::TouchCalibrationPanelTestAccess::fire_verify_timeout(*panel_);
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::POINT_1);
 
     // Someone who is actually driving the screen presses Retry; that is evidence
     // they can reach the buttons, so the budget resets rather than counting down
     // toward an abort they did not ask for.
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::VERIFY);
     overlay_->handle_retry_clicked();
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::POINT_1);
 
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::VERIFY);
     helix::TouchCalibrationPanelTestAccess::fire_verify_timeout(*panel_);
     CHECK(panel_->get_state() == helix::TouchCalibrationPanel::State::POINT_1);
@@ -706,10 +706,10 @@ TEST_CASE_METHOD(Q2CompressionFixture,
                  "reads",
                  "[touch][calibration][943]") {
     activate_at_idle();
-    capture_three_points(COMPRESSION);
+    capture_three_points(kCompression);
     REQUIRE(panel_->get_state() == helix::TouchCalibrationPanel::State::VERIFY);
 
-    lv_subject_set_int(state_, 4); // STATE_VERIFY
+    lv_subject_set_int(state_, 4); // kStateVerify
     lv_obj_update_layout(screen_);
 
     lv_obj_t* capture = lv_obj_find_by_name(screen_, "touch_capture_overlay");
@@ -847,7 +847,7 @@ namespace {
 
 // The kernel declares Y as 0..230 on a 272-row panel: lv_evdev scales Y up and
 // clamps the bottom rows, where Accept/Retry sit.
-constexpr int DECLARED_MAX_Y = 230;
+constexpr int kDeclaredMaxY = 230;
 
 int evdev_scale(int v, int in_max, int out_max) {
     return std::max(0, std::min(v * out_max / in_max, out_max));
@@ -861,8 +861,8 @@ void capture_with_raw(helix::TouchCalibrationPanel& panel, double shear) {
     for (int step = 0; step < 3; ++step) {
         const helix::Point target = panel.get_target_position(step);
         const helix::Point raw{target.x + static_cast<int>(target.y * shear), target.y};
-        const helix::Point touch{evdev_scale(raw.x, MICRO_W - 1, MICRO_W - 1),
-                                 evdev_scale(raw.y, DECLARED_MAX_Y, MICRO_H - 1)};
+        const helix::Point touch{evdev_scale(raw.x, kMicroW - 1, kMicroW - 1),
+                                 evdev_scale(raw.y, kDeclaredMaxY, kMicroH - 1)};
         for (int i = 0; i < helix::TouchCalibrationPanelTestAccess::samples_required(); ++i) {
             panel.add_sample(touch, &raw);
         }
@@ -873,7 +873,7 @@ void capture_with_raw(helix::TouchCalibrationPanel& panel, double shear) {
 
 TEST_CASE_METHOD(Q2CompressionFixture, "Overlay VERIFY installs the solved evdev range",
                  "[touch][calibration][range-fit][1714]") {
-    sink_.live = helix::LiveTouchRange{{true, false, 0, MICRO_W - 1, 0, DECLARED_MAX_Y},
+    sink_.live = helix::LiveTouchRange{{true, false, 0, kMicroW - 1, 0, kDeclaredMaxY},
                                        helix::TouchRangeSource::Declared};
     helix::ui::TouchCalibrationOverlayTestAccess::begin_session(*overlay_);
 
@@ -882,14 +882,14 @@ TEST_CASE_METHOD(Q2CompressionFixture, "Overlay VERIFY installs the solved evdev
     REQUIRE(panel_->get_range_fit().valid);
 
     INFO("range Y(" << sink_.live.range.min_y << ".." << sink_.live.range.max_y << ")");
-    CHECK(std::abs(sink_.live.range.max_y - (MICRO_H - 1)) <= 3);
+    CHECK(std::abs(sink_.live.range.max_y - (kMicroH - 1)) <= 3);
     CHECK(sink_.live.source == helix::TouchRangeSource::Stored);
 }
 
 TEST_CASE_METHOD(Q2CompressionFixture,
                  "Overlay VERIFY that cannot install its affine reverts the range too",
                  "[touch][calibration][range-fit][1714]") {
-    sink_.live = helix::LiveTouchRange{{true, false, 0, MICRO_W - 1, 0, DECLARED_MAX_Y},
+    sink_.live = helix::LiveTouchRange{{true, false, 0, kMicroW - 1, 0, kDeclaredMaxY},
                                        helix::TouchRangeSource::Declared};
     helix::ui::TouchCalibrationOverlayTestAccess::begin_session(*overlay_);
     sink_.reject_apply = true;
@@ -900,7 +900,7 @@ TEST_CASE_METHOD(Q2CompressionFixture,
     REQUIRE(panel_->get_range_fit().valid);
     REQUIRE(panel_->get_range_fit().residual.valid);
 
-    CHECK(sink_.live.range.max_y == DECLARED_MAX_Y);
+    CHECK(sink_.live.range.max_y == kDeclaredMaxY);
     CHECK(sink_.live.source == helix::TouchRangeSource::Declared);
     CHECK(sink_.affine_enabled);
 }

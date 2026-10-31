@@ -48,13 +48,13 @@ PlatformTier classify_tier(size_t ram_mb, int cores) {
     // EMBEDDED: RAM < 512MB OR single core
     // Note: cores <= 1 includes cores=0 (parse failure) and cores=1 (single core)
     // Both cases should be treated as EMBEDDED for safety
-    if (ram_mb < PlatformCapabilities::EMBEDDED_RAM_THRESHOLD_MB || cores <= 1) {
+    if (ram_mb < PlatformCapabilities::kEmbeddedRamThresholdMb || cores <= 1) {
         return PlatformTier::EMBEDDED;
     }
 
     // STANDARD: RAM >= 768MB AND 4+ cores
-    if (ram_mb >= PlatformCapabilities::STANDARD_RAM_THRESHOLD_MB &&
-        cores >= PlatformCapabilities::STANDARD_CPU_CORES_MIN) {
+    if (ram_mb >= PlatformCapabilities::kStandardRamThresholdMb &&
+        cores >= PlatformCapabilities::kStandardCpuCoresMin) {
         return PlatformTier::STANDARD;
     }
 
@@ -78,13 +78,13 @@ void set_derived_capabilities(PlatformCapabilities& caps) {
     case PlatformTier::BASIC:
         caps.supports_charts = true;
         caps.supports_animations = false;
-        caps.max_chart_points = PlatformCapabilities::BASIC_CHART_POINTS;
+        caps.max_chart_points = PlatformCapabilities::kBasicChartPoints;
         break;
 
     case PlatformTier::STANDARD:
         caps.supports_charts = true;
         caps.supports_animations = true;
-        caps.max_chart_points = PlatformCapabilities::STANDARD_CHART_POINTS;
+        caps.max_chart_points = PlatformCapabilities::kStandardChartPoints;
         break;
     }
 }

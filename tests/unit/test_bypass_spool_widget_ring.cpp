@@ -32,11 +32,11 @@ TEST_CASE_METHOD(LVGLTestFixture, "bypass node draws the active ring when engage
 
     bypass_spool_set_active(w, true);
 
-    CHECK(lv_obj_get_style_border_width(w.box, LV_PART_MAIN) == ams_draw::ACTIVE_RING_BORDER_WIDTH);
+    CHECK(lv_obj_get_style_border_width(w.box, LV_PART_MAIN) == ams_draw::kActiveRingBorderWidth);
     CHECK(lv_obj_get_style_border_opa(w.box, LV_PART_MAIN) == LV_OPA_COVER);
     // The glow is what makes it read as "active" rather than merely outlined.
-    CHECK(lv_obj_get_style_shadow_width(w.box, LV_PART_MAIN) == ams_draw::ACTIVE_RING_GLOW_WIDTH);
-    CHECK(lv_obj_get_style_shadow_spread(w.box, LV_PART_MAIN) == ams_draw::ACTIVE_RING_GLOW_SPREAD);
+    CHECK(lv_obj_get_style_shadow_width(w.box, LV_PART_MAIN) == ams_draw::kActiveRingGlowWidth);
+    CHECK(lv_obj_get_style_shadow_spread(w.box, LV_PART_MAIN) == ams_draw::kActiveRingGlowSpread);
 
     helix::ui::bypass_spool_destroy(w);
 }
@@ -49,8 +49,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "bypass node clears the ring when disengaged",
     REQUIRE(w.valid());
 
     bypass_spool_set_active(w, true);
-    REQUIRE(lv_obj_get_style_border_width(w.box, LV_PART_MAIN) ==
-            ams_draw::ACTIVE_RING_BORDER_WIDTH);
+    REQUIRE(lv_obj_get_style_border_width(w.box, LV_PART_MAIN) == ams_draw::kActiveRingBorderWidth);
 
     bypass_spool_set_active(w, false);
 
@@ -76,7 +75,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "bypass ring applies on the first call even wh
     // And the guard still dedups once applied.
     bypass_spool_set_active(w, true);
     CHECK(w.cached_active);
-    CHECK(lv_obj_get_style_border_width(w.box, LV_PART_MAIN) == ams_draw::ACTIVE_RING_BORDER_WIDTH);
+    CHECK(lv_obj_get_style_border_width(w.box, LV_PART_MAIN) == ams_draw::kActiveRingBorderWidth);
 
     helix::ui::bypass_spool_destroy(w);
 }

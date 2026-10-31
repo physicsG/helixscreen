@@ -12,7 +12,7 @@
 namespace helix::ui {
 
 /// 4x4 ordered-dither thresholds, 0 to 15, indexed [y & 3][x & 3].
-inline constexpr uint8_t BAYER_4X4[4][4] = {
+inline constexpr uint8_t kBayer4x4[4][4] = {
     {0, 8, 2, 10},
     {12, 4, 14, 6},
     {3, 11, 1, 9},
@@ -29,6 +29,107 @@ constexpr uint8_t dither_channel(uint8_t c, uint8_t max_level, uint8_t threshold
     const uint32_t scaled =
         static_cast<uint32_t>(c) * max_level * 32u + (2u * threshold + 1u) * 255u;
     return static_cast<uint8_t>(std::min<uint32_t>(max_level, scaled / (255u * 32u)));
+}
+
+/// Bytes one pixel takes in `format`.
+constexpr uint32_t pixel_bytes(PixelFormat format) {
+    return format == PixelFormat::RGB565 ? 2 : 4;
+}
+
+/// `a` moved `t` (0 to 1) of the way to `b`, rounded and clamped per channel.
+constexpr Rgb mix_rgb(Rgb a, Rgb b, float t) {
+    const auto ch = [t](uint8_t x, uint8_t y) {
+        const float v = static_cast<float>(x) + (static_cast<float>(y) - static_cast<float>(x)) * t;
+        return static_cast<uint8_t>(v <= 0.0f ? 0.0f : (v >= 255.0f ? 255.0f : v + 0.5f));
+    };
+    return {ch(a.r, b.r), ch(a.g, b.g), ch(a.b, b.b)};
+}
+
+/// `v` (0 to 255) rounded to a byte; out-of-range values clamp.
+constexpr uint8_t to_u8(float v) {
+    return static_cast<uint8_t>(std::clamp(v, 0.0f, 255.0f) + 0.5f);
+}
+
+/// `v` (0 to 1) as a byte, 0 to 255, rounded; out-of-range values clamp. Also the index of a
+/// 256-entry table.
+constexpr uint8_t unit_to_u8(float v) {
+    return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+/// `from` blended toward `to` by integer coverage `cov` (0 to 255), rounded per channel.
+constexpr Rgb blend_cov(Rgb from, Rgb to, uint32_t cov) {
+    const auto ch = [cov](uint8_t f, uint8_t t) {
+        return static_cast<uint8_t>((f * (255u - cov) + t * cov + 127u) / 255u);
+    };
+    return {ch(from.r, to.r), ch(from.g, to.g), ch(from.b, to.b)};
+}
+
+/// `c` at `amount` (0 to 255) of its brightness, truncated per channel.
+constexpr Rgb scale_rgb(Rgb c, uint32_t amount) {
+    return {static_cast<uint8_t>(c.r * amount / 255), static_cast<uint8_t>(c.g * amount / 255),
+            static_cast<uint8_t>(c.b * amount / 255)};
+}
+
+/// `c` times `k` (>= 0), rounded and clamped per channel. A separate name from scale_rgb(),
+/// so an integer argument cannot pick the float form.
+constexpr Rgb scale_rgb_by(Rgb c, float k) {
+    return {to_u8(c.r * k), to_u8(c.g * k), to_u8(c.b * k)};
+}
+
+/**
+ * @brief Coverage (0 to 1) of a pixel whose centre lies `inside_px` px inside an edge
+ *
+ * Negative outside. A pixel centred on the edge is half covered, so the edge is antialiased
+ * over one pixel. The caller measures the distance its own way.
+ */
+constexpr float edge_coverage(float inside_px) {
+    return std::clamp(inside_px + 0.5f, 0.0f, 1.0f);
+}
+
+/// Fully saturated colour `h` of 256 round the wheel.
+constexpr Rgb hue_color(uint32_t h) {
+    h &= 255;
+    const uint32_t sector = h * 6 / 256;
+    const auto ramp = static_cast<uint8_t>(h * 6 - sector * 256);
+    const auto fall = static_cast<uint8_t>(255 - ramp);
+    switch (sector) {
+    case 0:
+        return {255, ramp, 0};
+    case 1:
+        return {fall, 255, 0};
+    case 2:
+        return {0, 255, ramp};
+    case 3:
+        return {0, fall, 255};
+    case 4:
+        return {ramp, 0, 255};
+    default:
+        return {255, 0, fall};
+    }
+}
+
+/// Adds light (r, g, b) to the XRGB8888 pixel at `p`, each channel saturating at 255.
+inline void add_light(uint32_t* p, uint32_t r, uint32_t g, uint32_t b) {
+    const uint32_t v = *p;
+    const uint32_t nr = std::min<uint32_t>(255, (v >> 16 & 0xFF) + r);
+    const uint32_t ng = std::min<uint32_t>(255, (v >> 8 & 0xFF) + g);
+    const uint32_t nb = std::min<uint32_t>(255, (v & 0xFF) + b);
+    *p = 0xFF000000u | nr << 16 | ng << 8 | nb;
+}
+
+/**
+ * @brief Adds light (r, g, b), 8 bits a channel, to the RGB565 pixel at `p`
+ *
+ * Each channel saturates at its top level. `threshold` (0-15, kBayer4x4 at the pixel) rounds
+ * the 8-bit amount to the channel's levels, so light fainter than one RGB565 level still shows
+ * as a sparse pattern; 0 truncates.
+ */
+inline void add_light(uint16_t* p, uint32_t r, uint32_t g, uint32_t b, uint8_t threshold = 0) {
+    const uint32_t v = *p;
+    const uint32_t nr = std::min<uint32_t>(31, (v >> 11) + ((r + (threshold >> 1)) >> 3));
+    const uint32_t ng = std::min<uint32_t>(63, (v >> 5 & 0x3F) + ((g + (threshold >> 2)) >> 2));
+    const uint32_t nb = std::min<uint32_t>(31, (v & 0x1F) + ((b + (threshold >> 1)) >> 3));
+    *p = static_cast<uint16_t>(nr << 11 | ng << 5 | nb);
 }
 
 /**
@@ -51,7 +152,7 @@ class PixelWriter {
     /// channel's top bits.
     void put(int32_t x, int32_t y, Rgb c) {
         if (frame_.format == PixelFormat::RGB565) {
-            write_565(x, y, static_cast<uint16_t>((c.r >> 3) << 11 | (c.g >> 2) << 5 | (c.b >> 3)));
+            write_565(x, y, static_cast<uint16_t>(pack(c, PixelFormat::RGB565)));
             return;
         }
         uint8_t* p = pixel(x, y, 4);
@@ -61,34 +162,75 @@ class PixelWriter {
         p[3] = 0xFF;
     }
 
-    /// Like put(), but RGB565 dithers each channel with BAYER_4X4 at (x, y), so a smooth fade
-    /// shows as a fine pattern instead of bands. XRGB8888 is written exactly.
-    void put_dithered(int32_t x, int32_t y, Rgb c) {
-        if (frame_.format != PixelFormat::RGB565) {
-            put(x, y, c);
-            return;
+    /// `c` as put() stores it in `format`, read as one little-endian value: the RGB565 word,
+    /// or the XRGB8888 word with its X byte 0xFF.
+    static constexpr uint32_t pack(Rgb c, PixelFormat format) {
+        if (format == PixelFormat::RGB565) {
+            return static_cast<uint32_t>((c.r >> 3) << 11 | (c.g >> 2) << 5 | (c.b >> 3));
         }
-        const uint8_t t = BAYER_4X4[y & 3][x & 3];
-        write_565(x, y,
-                  static_cast<uint16_t>(dither_channel(c.r, 31, t) << 11 |
-                                        dither_channel(c.g, 63, t) << 5 |
-                                        dither_channel(c.b, 31, t)));
+        return 0xFF000000u | static_cast<uint32_t>(c.r) << 16 | static_cast<uint32_t>(c.g) << 8 |
+               c.b;
     }
 
-    /// The colour at (x, y). RGB565 levels expand to 8 bits by repeating their top bits.
+    /// Like put(), but RGB565 dithers each channel with kBayer4x4 at (x, y), so a smooth fade
+    /// shows as a fine pattern instead of bands. XRGB8888 is written exactly.
+    void put_dithered(int32_t x, int32_t y, Rgb c) {
+        if (frame_.format == PixelFormat::RGB565) {
+            put_dithered_in_row<PixelFormat::RGB565>(row(y), x, y, c);
+        } else {
+            put_dithered_in_row<PixelFormat::XRGB8888>(row(y), x, y, c);
+        }
+    }
+
+    /// put_dithered() at column `x` of row `y`, whose first byte is `row`, in format `F`: for
+    /// loops over a run of pixels, which decide the format once instead of at every pixel.
+    template <PixelFormat F>
+    static void put_dithered_in_row(uint8_t* row, int32_t x, int32_t y, Rgb c) {
+        if constexpr (F == PixelFormat::RGB565) {
+            const uint8_t t = kBayer4x4[y & 3][x & 3];
+            const auto v =
+                static_cast<uint16_t>(dither_channel(c.r, 31, t) << 11 |
+                                      dither_channel(c.g, 63, t) << 5 | dither_channel(c.b, 31, t));
+            uint8_t* p = row + static_cast<size_t>(x) * 2;
+            p[0] = static_cast<uint8_t>(v & 0xFF);
+            p[1] = static_cast<uint8_t>(v >> 8);
+        } else {
+            uint8_t* p = row + static_cast<size_t>(x) * 4;
+            p[0] = c.b;
+            p[1] = c.g;
+            p[2] = c.r;
+            p[3] = 0xFF;
+        }
+    }
+
+    /// First byte of row `y`.
+    uint8_t* row(int32_t y) const {
+        return frame_.data + static_cast<size_t>(y) * frame_.stride;
+    }
+
+    /// An RGB565 word as 8-bit channels, each level expanded by repeating its top bits, so
+    /// the top level reads 255.
+    static constexpr Rgb unpack565(uint16_t v) {
+        const auto r5 = static_cast<uint8_t>(v >> 11 & 0x1F);
+        const auto g6 = static_cast<uint8_t>(v >> 5 & 0x3F);
+        const auto b5 = static_cast<uint8_t>(v & 0x1F);
+        return {static_cast<uint8_t>(r5 << 3 | r5 >> 2), static_cast<uint8_t>(g6 << 2 | g6 >> 4),
+                static_cast<uint8_t>(b5 << 3 | b5 >> 2)};
+    }
+
+    /// The colour at (x, y). RGB565 reads through unpack565().
     Rgb get(int32_t x, int32_t y) const {
         if (frame_.format == PixelFormat::RGB565) {
             const uint8_t* p = pixel(x, y, 2);
-            const auto v = static_cast<uint16_t>(p[0] | p[1] << 8);
-            const auto r5 = static_cast<uint8_t>(v >> 11 & 0x1F);
-            const auto g6 = static_cast<uint8_t>(v >> 5 & 0x3F);
-            const auto b5 = static_cast<uint8_t>(v & 0x1F);
-            return {static_cast<uint8_t>(r5 << 3 | r5 >> 2),
-                    static_cast<uint8_t>(g6 << 2 | g6 >> 4),
-                    static_cast<uint8_t>(b5 << 3 | b5 >> 2)};
+            return unpack565(static_cast<uint16_t>(p[0] | p[1] << 8));
         }
         const uint8_t* p = pixel(x, y, 4);
         return {p[2], p[1], p[0]};
+    }
+
+    /// Blends `c` over the pixel at (x, y) by `alpha` (0 to 1) and writes it dithered.
+    void blend_over(int32_t x, int32_t y, Rgb c, float alpha) {
+        put_dithered(x, y, mix_rgb(get(x, y), c, alpha));
     }
 
     /// Raises each channel at (x, y) to at least `c`'s, so overlapping light shows its brightest
@@ -100,6 +242,28 @@ class PixelWriter {
         }
         put_dithered(
             x, y, {std::max(c.r, current.r), std::max(c.g, current.g), std::max(c.b, current.b)});
+    }
+
+    /// Writes `c` over the part of `r` inside the frame.
+    void fill_rect(const DirtyRect& r, Rgb c) {
+        const DirtyRect in =
+            r.clipped(static_cast<int32_t>(frame_.w), static_cast<int32_t>(frame_.h));
+        for (int32_t y = in.y1; y <= in.y2; y++) {
+            for (int32_t x = in.x1; x <= in.x2; x++) {
+                put(x, y, c);
+            }
+        }
+    }
+
+    /// fill_rect() through put_dithered().
+    void fill_rect_dithered(const DirtyRect& r, Rgb c) {
+        const DirtyRect in =
+            r.clipped(static_cast<int32_t>(frame_.w), static_cast<int32_t>(frame_.h));
+        for (int32_t y = in.y1; y <= in.y2; y++) {
+            for (int32_t x = in.x1; x <= in.x2; x++) {
+                put_dithered(x, y, c);
+            }
+        }
     }
 
     /// Writes `c` over every pixel, leaving row padding alone.

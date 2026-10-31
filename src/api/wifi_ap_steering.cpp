@@ -17,14 +17,14 @@ void WifiApSteering::on_associated(const Bssid& bssid) {
 }
 
 bool WifiApSteering::on_link_drop(int64_t now_ms, int64_t silence_ms) {
-    if (!associated_ || silence_ms < LINK_STALL_SILENCE_MS) {
+    if (!associated_ || silence_ms < kLinkStallSilenceMs) {
         return false;
     }
-    if (stalled_drops_ == 0 || now_ms - first_drop_ms_ > LINK_STALL_WINDOW_MS) {
+    if (stalled_drops_ == 0 || now_ms - first_drop_ms_ > kLinkStallWindowMs) {
         stalled_drops_ = 0;
         first_drop_ms_ = now_ms;
     }
-    return ++stalled_drops_ >= LINK_STALL_DROPS;
+    return ++stalled_drops_ >= kLinkStallDrops;
 }
 
 void WifiApSteering::scan_started(int64_t now_ms) {
@@ -32,7 +32,7 @@ void WifiApSteering::scan_started(int64_t now_ms) {
 }
 
 bool WifiApSteering::take_scan_request(int64_t now_ms) {
-    const bool answered = scan_requested_ms_ && now_ms - *scan_requested_ms_ <= SCAN_REQUEST_TTL_MS;
+    const bool answered = scan_requested_ms_ && now_ms - *scan_requested_ms_ <= kScanRequestTtlMs;
     scan_requested_ms_.reset();
     return answered;
 }
@@ -43,12 +43,12 @@ WifiApSteering::pick_alternative(const std::vector<Candidate>& seen, int64_t now
     avoided_.erase(std::remove_if(avoided_.begin(), avoided_.end(),
                                   [&](const Avoided& a) { return a.until_ms <= now_ms; }),
                    avoided_.end());
-    avoided_.push_back({current_, now_ms + AVOID_MS});
+    avoided_.push_back({current_, now_ms + kAvoidMs});
 
-    int floor = MIN_RSSI;
+    int floor = kMinRssi;
     for (const Candidate& c : seen) {
         if (c.bssid == current_) {
-            floor = std::max(floor, c.rssi - MAX_RSSI_LOSS_DB);
+            floor = std::max(floor, c.rssi - kMaxRssiLossDb);
         }
     }
 

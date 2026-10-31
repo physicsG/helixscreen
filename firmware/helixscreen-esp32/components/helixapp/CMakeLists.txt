@@ -26,8 +26,8 @@ cmake_path(NORMAL_PATH REPO_ROOT)
 set(HELIXNET_SHIM ${CMAKE_CURRENT_LIST_DIR}/../helixnet/shim)
 set(HELIXAPP_SHIM ${CMAKE_CURRENT_LIST_DIR}/shim)
 
-file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/app_srcs.txt APP_SRCS_REL
-     REGEX "^[^#].*\\.(cpp|c)$")
+include(${CMAKE_CURRENT_LIST_DIR}/app_srcs.cmake)
+helix_read_app_srcs(${CMAKE_CURRENT_LIST_DIR}/app_srcs.txt APP_SRCS_REL)
 set(APP_SRCS "")
 foreach(rel ${APP_SRCS_REL})
     list(APPEND APP_SRCS ${REPO_ROOT}/${rel})
@@ -81,11 +81,13 @@ set(LOCAL_SRCS
     link_probe.cpp
     wifi_backend_esp.cpp
     wall_clock_esp.cpp
+    lan_sweep_esp.cpp
     provisioning_esp.cpp)
 
 idf_component_register(
     SRCS ${APP_SRCS} ${MOCK_SRCS} ${LOCAL_SRCS}
     INCLUDE_DIRS "."
+    LDFRAGMENTS linker.lf
     REQUIRES helixcore helixnet
     # esp_wifi/esp_netif/esp_event/nvs_flash: the non-mock connect path
     # (app_boot.cpp, Task 8) brings up the WiFi station before connecting.
@@ -95,6 +97,12 @@ idf_component_register(
 # The PCH -include is C++-only: font/image .c sources compile as plain C.
 target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>
+    # GCC clones inline functions per translation unit ($isra, $constprop, $part)
+    # as local symbols the linker cannot merge, so every TU carries its own copy of
+    # the same std::string, json and ObserverGuard helpers.
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-ipa-sra>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-ipa-cp-clone>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-partial-inlining>
     -w
     $<$<COMPILE_LANGUAGE:CXX>:-include>
     $<$<COMPILE_LANGUAGE:CXX>:${REPO_ROOT}/include/lvgl_pch.h>)
@@ -102,35 +110,35 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 # Real v1 Core+AMS gate set (the plan's compile definitions). Excluded
 # subsystems compile out via these; kept files that touch them see the #else
 # no-op branch. HELIX_ENABLE_MOCKS is never defined here (see the NOTE below).
+idf_build_get_property(helix_version HELIX_VERSION)
+idf_build_get_property(helix_version_major HELIX_VERSION_MAJOR)
+idf_build_get_property(helix_version_minor HELIX_VERSION_MINOR)
+idf_build_get_property(helix_version_patch HELIX_VERSION_PATCH)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
-    HELIX_VERSION="0.0.0-esp32"
-    HELIX_VERSION_MAJOR=0 HELIX_VERSION_MINOR=0 HELIX_VERSION_PATCH=0
+    HELIX_VERSION="${helix_version}"
+    HELIX_VERSION_MAJOR=${helix_version_major}
+    HELIX_VERSION_MINOR=${helix_version_minor}
+    HELIX_VERSION_PATCH=${helix_version_patch}
     HELIX_GIT_HASH="esp32"
     INSTALLER_FILENAME="install.sh"
     HELIX_MAX_FONT_TIER=6
-    # Belt tuning needs klippy's UDS accel stream, which a firmware panel
-    # cannot reach; the hi-dpi rungs need a scale factor this fixed panel
-    # never has. Both are set explicitly - an undefined HELIX_HAS_X is 0 and
-    # would vanish silently rather than being a decision.
+    # Feature gates this firmware turns off; every other gate keeps its default
+    # from include/helix_features.h. Belt tuning needs klippy's UDS accel stream,
+    # which a firmware panel cannot reach; the hi-dpi rungs need a scale factor
+    # this fixed panel never has.
     HELIX_HAS_BELT_TUNER=0
+    HELIX_HAS_IMAGE_TAGGER=0
     HELIX_HAS_HIDPI_FONTS=0
     HELIX_PLATFORM_ESP32=1
     HELIX_HAS_PLUGINS=0
     HELIX_HAS_TIMELAPSE_VIEWER=0
     HELIX_HAS_CAMERA=0
+    # The Motion panel covers what the Toolhead widget offers; leaving the
+    # widget out saves its flash.
+    HELIX_HAS_TOOLHEAD_WIDGET=0
     HELIX_HAS_GCODE_VIEWER=0
     HELIX_HAS_BED_MESH_3D=0
     HELIX_HAS_LABEL_PRINTER=0
-    HELIX_HAS_CFS=1
-    HELIX_HAS_IFS=1
-    # Set explicitly, not left undefined: an undefined macro makes
-    # `#if HELIX_HAS_ACE` evaluate to 0, which would silently drop these
-    # backends from ESP32 as a side effect of adding the gates. 1 preserves
-    # existing ESP32 behaviour; flipping any to 0 is a separate size call.
-    HELIX_HAS_ACE=1
-    HELIX_HAS_QIDI=1
-    HELIX_HAS_SNAPMAKER=1
-    HELIX_HAS_SOUND=0
     # No CJK font fits the storage partition (~900KB for the faces the panel
     # uses), so zh/ja are left out of the language list and the asset image.
     HELIX_HAS_CJK=0

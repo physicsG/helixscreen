@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "ui_plugin_items_menu.h"
+
 #include "lua_bindings.h"
 #include "panel_widget.h"
 
@@ -36,6 +38,11 @@ class LuaPanelWidget : public helix::PanelWidget {
     bool supports_reuse() const override {
         return false;
     }
+    /// The gear appears when the plugin declares a tile menu item; no check runs to
+    /// decide it.
+    bool has_edit_configure() const override;
+    /// Opens the plugin's tile items below the tile. Returns false: nothing to rebuild.
+    bool on_edit_configure() override;
 
   private:
     void run(WidgetHook hook, const LuaRuntime::PushFn& args = {});
@@ -43,6 +50,7 @@ class LuaPanelWidget : public helix::PanelWidget {
     std::string widget_id_;
     std::string component_;
     LifetimeToken runtime_;
+    helix::ui::PluginItemsMenu tile_menu_;
 };
 
 } // namespace helix::plugin

@@ -23,9 +23,12 @@ namespace {
 
 constexpr const char* TOKEN = "9f2c41ab7e0d6835c1a4be97f30d5e62";
 
-/// Parallel shards run concurrently, so each process needs its own port.
+/// Parallel shards run concurrently, so each process needs its own port. The
+/// band sits below the kernel's ephemeral range (32768+), where any outgoing
+/// connection on the host can already hold a port, and apart from
+/// test_remote_transport_teardown.cpp's band.
 int test_port() {
-    return 20000 + static_cast<int>(getpid() % 10000);
+    return 20000 + static_cast<int>(getpid() % 5000);
 }
 
 std::string pong_handler(const std::string&) {

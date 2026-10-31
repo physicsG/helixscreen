@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Runs tests/test_launcher_select.sh, which exercises select_binary() in
-# scripts/helix-launcher.sh — the three-rung choice between helix-screen-egl,
-# helix-screen and helix-screen-fbdev.
+# Runs tests/test_launcher_select.sh, which exercises app_display_backend() in
+# scripts/helix-launcher.sh — the choice between helix-screen's EGL, DRM and
+# fbdev rungs.
 #
 # The harness there extracts the real functions out of the launcher with sed
 # and drives them against mock binaries, so it needs a shell rather than bats
@@ -24,5 +24,5 @@
     # pass. Pin the count so a vanished test is a red, not a quieter green.
     run bash tests/test_launcher_select.sh
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Total tests: 14"* ]]
+    [[ "$output" == *"Total tests: 8"* ]]
 }

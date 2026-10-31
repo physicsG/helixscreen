@@ -29,7 +29,17 @@ firmware. Before you commit:
   which the firmware toolchain does not have.
 - **Statics:** a large static in a firmware-compiled file is `HELIX_PSRAM_BSS`, `const`, or heap.
   `check_esp32_size.py` fails CI when `.dram0.bss` crosses its ceiling, and on the device the symptom is
-  `wifi:malloc buffer fail` at boot and no WiFi.
+  `wifi:malloc buffer fail` at boot and no WiFi. Small ones add up: every `lv_subject_t` and
+  text buffer a home widget keeps at namespace scope counts, and the widgets that ship them
+  (`src/ui/panel_widgets/toolhead_widget.cpp`, `host_health_widget.cpp`, `bed_mesh_tile_widget.cpp`,
+  `dryer_widget.cpp`, `dryer_model.cpp`, `tool_switcher_widget.cpp`) declare them all `HELIX_PSRAM_BSS`, as
+  do the state singletons they read (`src/printer/bed_mesh_state.cpp`, `src/system/performance_state.cpp`).
+  The same goes beyond the home screen: the AMS sidebar's and context menu's subjects and hint buffers
+  (`src/ui/ui_ams_sidebar.cpp`, `src/ui/ui_ams_context_menu.cpp`), the theme's XML subjects
+  (`src/ui/theme_manager.cpp#subjects`) and `SettingsManager`
+  (`src/system/settings_manager.cpp#"static HELIX_PSRAM_BSS SettingsManager instance"`). Do the same for a new widget's, overlay's
+  or model's subjects, buffers and singleton. Subjects registered at app runtime are first touched after PSRAM
+  is up, which is what makes the attribute legal.
 - **Push:** `.githooks/pre-push` runs `scripts/esp32_syntax_check.py`, which compiles the touched firmware units
   `-fsyntax-only` in the `espressif/idf` image and catches the host-green, Xtensa-red class (`int32_t` is `long`).
   It skips with a note when docker or the image is missing; `HELIX_ESP32_SYNTAX=0` skips it.
@@ -71,6 +81,7 @@ bench-only values there, never in a committed file:
 | `CONFIG_HELIX_HIL_MOONRAKER_URL` | First-boot Moonraker host (`ws://host:7125/websocket`); never overrides a host saved in Settings |
 | `CONFIG_HELIX_MOCK_PRINTER=y` | Synthetic printer, no network (chapter 17, Mock mode) |
 | `CONFIG_HELIX_LOG_STRIP_DEBUG=n` | Keep `spdlog::debug`/`trace`; stripped by default, so a debug line you add does not print |
+| `CONFIG_HELIX_SUBJECT_DEBUG_STRIP=n` | Keep the subject macros' `SubjectDebugRegistry` records, so an LVGL subject warning names the subject |
 | `CONFIG_HELIX_AMS_HTTP_POLL_BACKENDS=y` | Let the ACE and AD5X IFS backends run |
 | `CONFIG_HELIX_FAULT_CRASH_HOST` | Abort when connected to a matching host, to exercise the boot crash guard (#1750) |
 | `CONFIG_HELIX_NET_HIL` / `CONFIG_HELIX_HTTP_HIL` | Test-only transport and HTTP-lane probes |
@@ -127,7 +138,8 @@ diagnostics); the boot heap gates print as `heap before pthread` and `internal h
 | WiFi never associates, `wifi:malloc buffer fail` | Same: internal DRAM at boot |
 | Greyed navbar, `transport could not start` or `transport start refused` | The WebSocket task found no 8KB internal block; check what allocated internal RAM since boot |
 | A one-frame glitch on some action | `[scanout] underruns` and `[present] late blit` in the same 10s window; a PSRAM heap walk or a flash write in that path |
-| Taps ignored during load | `slow ui cycle` / `slow refresh cycle`: the UI thread was busy and the polled touch read was skipped |
+| Taps land late during load | `slow ui cycle` / `slow refresh cycle`: the UI thread was busy and the taps waited in the touch queue |
+| Taps lost | `stack` on the console prints `TOUCH: dropped_taps=N`: whole taps dropped because LVGL fell a full touch queue behind |
 | Panic | Symbolize with `xtensa-esp32s3-elf-addr2line -pfiaC -e <elf>` against the exact ELF flashed; the crash log's `ELF file SHA256` names it |
 | Heap corruption | `scripts/esp32_build_debug_heap.sh` builds with heap poisoning in its own directory and archives the matching ELF |
 | Reconnect behaviour | `scripts/esp32_ws_chaos_proxy.py` sits between the panel and Moonraker and drops the connection on demand |
@@ -139,7 +151,7 @@ diagnostics); the boot heap gates print as `heap before pthread` and `internal h
 | `scripts/check_esp32_app_srcs.py` | commit (`scripts/qc/esp32_app_srcs.sh`) | Manifest coverage, stale lines, locale-pulling includes, exception sites. `--link` (advisory) reads native objects for a kept file calling a symbol only an excluded file defines |
 | `scripts/check_esp32_xml_bindings.py` | commit (`scripts/qc/esp32_xml_bindings.sh`) | XML bindings the firmware does not register; baseline `scripts/esp32_xml_binding_baseline.txt` |
 | `scripts/esp32_syntax_check.py` | pre-push | Xtensa `-fsyntax-only` on touched firmware units |
-| `scripts/check_esp32_size.py` | `esp32-build.yml` | App image vs `app_max_bytes`, `.dram0.bss`/`.data` vs their ceilings, exception support or `std::locale` linked |
+| `scripts/check_esp32_size.py` | `esp32-build.yml` | App image vs `app_max_bytes`, `.dram0.bss`/`.data` vs their ceilings, exception support or `std::locale` linked. A breach prints the eight largest inputs of the section (size, input section, object file) so the offending static is named; read that list before raising a ceiling |
 | `tests/python/test_esp32_pack_assets.py` | `esp32-build.yml` | The frogfs packer round trip |
 | `tests/shell/test_code_lint.bats` | bats suite | A PSRAM heap walk on a per-event path (thumbnail, print select, print status) |
 | `tests/unit/test_esp32_*.cpp` | unit sweep | Reconnect backoff, link liveness, transport ordering, the HTTP lane queue, tested on the host |

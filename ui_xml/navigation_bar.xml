@@ -26,15 +26,23 @@
     <string name="icon_size_nav_inactive_xxlarge" value="md"/>
 
     <!-- Navbar E-stop diameter: the larger of #button_height and 44px, so the
-         target never shrinks below the circles it stands in for. micro is
-         capped at the 42px navbar width. -->
-    <px name="nav_estop_size_micro" value="42"/>
+         target never shrinks below the circles it stands in for. micro's 42px
+         navbar cannot fit that with a margin, so its disc is 34px and
+         nav_estop_reach extends the tap target back to the full 42px. -->
+    <px name="nav_estop_size_micro" value="34"/>
     <px name="nav_estop_size_tiny" value="44"/>
     <px name="nav_estop_size_small" value="48"/>
     <px name="nav_estop_size_medium" value="52"/>
     <px name="nav_estop_size_large" value="72"/>
     <px name="nav_estop_size_xlarge" value="80"/>
     <px name="nav_estop_size_xxlarge" value="96"/>
+    <px name="nav_estop_reach_micro" value="4"/>
+    <px name="nav_estop_reach_tiny" value="0"/>
+    <px name="nav_estop_reach_small" value="0"/>
+    <px name="nav_estop_reach_medium" value="0"/>
+    <px name="nav_estop_reach_large" value="0"/>
+    <px name="nav_estop_reach_xlarge" value="0"/>
+    <px name="nav_estop_reach_xxlarge" value="0"/>
   </consts>
   <styles>
     <!-- One bar, two axes. Each pair is bound complementarily on ui_is_portrait
@@ -86,7 +94,7 @@
     <!-- Add Widget (+) button -->
     <ui_button name="nav_btn_edit_add"
                height="100%" variant="ghost" flex_flow="column" style_flex_main_place="center"
-               style_flex_cross_place="center" style_flex_track_place="center" style_border_width="0" hidden="true">
+               style_flex_cross_place="center" style_border_width="0" hidden="true">
       <bind_style_if_eq name="nav_btn_edit_add_portrait" subject="ui_is_portrait" ref_value="1"/>
       <bind_style_if_not_eq name="nav_btn_edit_add_landscape" subject="ui_is_portrait" ref_value="1"/>
       <bind_flag_if_eq subject="home_edit_mode" flag="hidden" ref_value="0"/>
@@ -110,8 +118,7 @@
     <!-- Home Button (Panel 0) -->
     <ui_button name="nav_btn_home"
                width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
-               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
-               style_border_width="0">
+               style_flex_main_place="center" style_flex_cross_place="center" style_border_width="0">
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
       <!-- Active icon (accent color) - full opacity/scale when active_panel == 0 -->
@@ -132,8 +139,7 @@
     <!-- Uses combined nav_buttons_enabled subject (1=enabled when connected AND klippy ready) -->
     <ui_button name="nav_btn_controls"
                width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
-               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
-               style_border_width="0">
+               style_flex_main_place="center" style_flex_cross_place="center" style_border_width="0" style_pad_all="0">
       <!-- Disabled clickability when not enabled (disconnected OR klippy not ready) -->
       <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
       <!-- Disabled during grid edit mode -->
@@ -165,8 +171,7 @@
     <!-- Uses combined nav_buttons_enabled subject (1=enabled when connected AND klippy ready) -->
     <ui_button name="nav_btn_filament"
                width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
-               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
-               style_border_width="0">
+               style_flex_main_place="center" style_flex_cross_place="center" style_border_width="0" style_pad_all="0">
       <!-- Disabled clickability when not enabled (disconnected OR klippy not ready) -->
       <bind_state_if_not_eq subject="nav_buttons_enabled" state="disabled" ref_value="1"/>
       <!-- Disabled during grid edit mode -->
@@ -197,8 +202,7 @@
     <!-- Settings Button (Panel 4) -->
     <ui_button name="nav_btn_settings"
                width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
-               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
-               style_border_width="0">
+               style_flex_main_place="center" style_flex_cross_place="center" style_border_width="0">
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
       <icon name="nav_icon_settings_active"
@@ -217,8 +221,7 @@
     <!-- Advanced Button (Panel 5) -->
     <ui_button name="nav_btn_advanced"
                width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
-               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
-               style_border_width="0">
+               style_flex_main_place="center" style_flex_cross_place="center" style_border_width="0">
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>
       <icon name="nav_icon_advanced_active"
@@ -237,8 +240,7 @@
     <!-- Printer switcher button — visible only when setting enabled -->
     <ui_button name="nav_printer_badge"
                width="100%" height="100%" flex_grow="1" variant="ghost" flex_flow="column"
-               style_flex_main_place="center" style_flex_cross_place="center" style_flex_track_place="center"
-               style_border_width="0" hidden="true">
+               style_flex_main_place="center" style_flex_cross_place="center" style_border_width="0" hidden="true">
       <bind_flag_if_eq subject="show_printer_switcher" flag="hidden" ref_value="0"/>
       <!-- Disabled during grid edit mode -->
       <bind_state_if_eq subject="home_edit_mode" state="disabled" ref_value="1"/>

@@ -5,6 +5,7 @@
 #include "ams_types.h"
 #include "color_utils.h"
 #include "json_utils.h"
+#include "text_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -22,7 +23,7 @@ namespace {
 /// The tolerance the spool editor itself uses to decide a weight was edited
 /// (AmsEditOverlay::is_dirty). Anything finer is a consumption tick or float
 /// noise, not a number a person typed into a gram field.
-constexpr float WEIGHT_EPSILON_G = 0.1f;
+constexpr float kWeightEpsilonG = 0.1f;
 
 /// True when a weight the editor committed is a number a person could have
 /// entered. Negative is SlotInfo's "unknown" sentinel, and the editor refuses
@@ -32,7 +33,7 @@ bool is_declarable_weight(float grams) {
 }
 
 bool weight_changed(float original, float edited) {
-    return std::fabs(edited - original) > WEIGHT_EPSILON_G;
+    return std::fabs(edited - original) > kWeightEpsilonG;
 }
 
 /// What kind of value a field holds, which is what decides whether a given
@@ -42,7 +43,7 @@ bool weight_changed(float original, float edited) {
 /// translation supplies its own rule for that shape.
 enum class FieldKind {
     Untranslated, ///< Neither translation carries it.
-    Color,        ///< Carries the AMS_DEFAULT_SLOT_COLOR "no reading" sentinel.
+    Color,        ///< Carries the kAmsDefaultSlotColor "no reading" sentinel.
     Text,
     PositiveId, ///< Zero is "unset", so a stored zero declares nothing.
     Weight,     ///< Negative is the "unknown" sentinel.
@@ -91,7 +92,7 @@ constexpr auto field(std::string_view name, S slot, R record, O obs) {
 /// Every Observation field, once. This is the field list both translations
 /// walk, so a field reaches or is refused by each of them here rather than in
 /// two places that agree only by convention.
-constexpr auto FIELD_ROSTER = std::make_tuple(
+constexpr auto kFieldRoster = std::make_tuple(
     // Presence is sensed, never declared, so neither translation carries it.
     field<FieldKind::Untranslated>("present", nullptr, nullptr, &Observation::present),
     // Neither is docking: no editor or stored record can state where a
@@ -148,16 +149,16 @@ constexpr auto FIELD_ROSTER = std::make_tuple(
     field<FieldKind::Weight>("total_weight_g", &SlotInfo::total_weight_g,
                              &FilamentSlotOverride::total_weight_g, &Observation::total_weight_g));
 
-static_assert(std::tuple_size_v<decltype(FIELD_ROSTER)> ==
+static_assert(std::tuple_size_v<decltype(kFieldRoster)> ==
                   std::tuple_size_v<decltype(std::declval<Observation&>().fields())>,
               "every Observation field needs a row above: a field with no row is dropped by "
               "both translations while the store amends it, with nothing red");
 
-static_assert(std::tuple_size_v<decltype(FIELD_ROSTER)> <= DeclaredFields::CAPACITY,
+static_assert(std::tuple_size_v<decltype(kFieldRoster)> <= DeclaredFields::kCapacity,
               "DeclaredFields addresses a roster row per bit, so the roster may not outgrow it");
 
 template <typename Fn> void for_each_field(Fn&& fn) {
-    std::apply([&fn](const auto&... rows) { (fn(rows), ...); }, FIELD_ROSTER);
+    std::apply([&fn](const auto&... rows) { (fn(rows), ...); }, kFieldRoster);
 }
 
 /// As above, also handing each row its own position, which is the bit
@@ -169,34 +170,37 @@ template <typename Fn> void for_each_field_indexed(Fn&& fn) {
             size_t index = 0;
             ((fn(rows, index), ++index), ...);
         },
-        FIELD_ROSTER);
+        kFieldRoster);
 }
 
 /// The roster position of the row named @p name, for the two fields whose
 /// authorship the record path has to reach by name rather than by walking.
 template <size_t I = 0> constexpr size_t index_of(std::string_view name) {
-    if constexpr (I < std::tuple_size_v<decltype(FIELD_ROSTER)>) {
-        return std::get<I>(FIELD_ROSTER).name == name ? I : index_of<I + 1>(name);
+    if constexpr (I < std::tuple_size_v<decltype(kFieldRoster)>) {
+        return std::get<I>(kFieldRoster).name == name ? I : index_of<I + 1>(name);
     } else {
-        return std::tuple_size_v<decltype(FIELD_ROSTER)>;
+        return std::tuple_size_v<decltype(kFieldRoster)>;
     }
 }
 
-constexpr size_t COLOR_INDEX = index_of("color_rgb");
-constexpr size_t MATERIAL_INDEX = index_of("material");
-static_assert(COLOR_INDEX < std::tuple_size_v<decltype(FIELD_ROSTER)>, "colour row went missing");
-static_assert(MATERIAL_INDEX < std::tuple_size_v<decltype(FIELD_ROSTER)>,
+constexpr size_t kColorIndex = index_of("color_rgb");
+constexpr size_t kMaterialIndex = index_of("material");
+static_assert(kColorIndex < std::tuple_size_v<decltype(kFieldRoster)>, "colour row went missing");
+static_assert(kMaterialIndex < std::tuple_size_v<decltype(kFieldRoster)>,
               "material row went missing");
 // The one cleared text field whose statement must stand rather than withdraw;
 // withdraw_cleared_fields() reaches it by position for the same reason the
 // record path reaches colour and material by name.
-constexpr size_t COLOR_NAME_INDEX = index_of("color_name");
-static_assert(COLOR_NAME_INDEX < std::tuple_size_v<decltype(FIELD_ROSTER)>,
+constexpr size_t kColorNameIndex = index_of("color_name");
+constexpr size_t kSpoolNameIndex = index_of("spool_name");
+static_assert(kSpoolNameIndex < std::tuple_size_v<decltype(kFieldRoster)>,
+              "spool name row went missing");
+static_assert(kColorNameIndex < std::tuple_size_v<decltype(kFieldRoster)>,
               "colour name row went missing");
 // The binding's own row: withdraw_cleared_fields() spares it, for the reason
 // named at the use.
-constexpr size_t SPOOLMAN_ID_INDEX = index_of("spoolman_id");
-static_assert(SPOOLMAN_ID_INDEX < std::tuple_size_v<decltype(FIELD_ROSTER)>,
+constexpr size_t kSpoolmanIdIndex = index_of("spoolman_id");
+static_assert(kSpoolmanIdIndex < std::tuple_size_v<decltype(kFieldRoster)>,
               "binding row went missing");
 
 /// The roster positions whose row satisfies @p pred, one bit per row.
@@ -209,7 +213,7 @@ template <typename Pred> constexpr uint16_t rows_mask(Pred pred) {
               ++index),
              ...);
         },
-        FIELD_ROSTER);
+        kFieldRoster);
     return mask;
 }
 
@@ -233,10 +237,10 @@ constexpr uint16_t spool_owned_mask() {
 // other identity field. declares_color, declares_material and the lock keys
 // both emitters write all read these two bits, so a row that left the set
 // would leave every one of them answering from a bit nothing sets.
-static_assert((declared_set_mask() & (uint16_t{1} << COLOR_INDEX)) != 0,
+static_assert((declared_set_mask() & (uint16_t{1} << kColorIndex)) != 0,
               "colour's authorship lives in the declared set: its roster row must be "
               "Authorship::DeclaredSet");
-static_assert((declared_set_mask() & (uint16_t{1} << MATERIAL_INDEX)) != 0,
+static_assert((declared_set_mask() & (uint16_t{1} << kMaterialIndex)) != 0,
               "material's authorship lives in the declared set: its roster row must be "
               "Authorship::DeclaredSet");
 
@@ -244,7 +248,7 @@ static_assert((declared_set_mask() & (uint16_t{1} << MATERIAL_INDEX)) != 0,
 // over the spool's, and a spool that owned the colour would outrank the
 // colour a user picks.
 static_assert(spool_owned_mask() ==
-                  static_cast<uint16_t>((uint16_t{1} << MATERIAL_INDEX) |
+                  static_cast<uint16_t>((uint16_t{1} << kMaterialIndex) |
                                         (uint16_t{1} << index_of("brand")) |
                                         (uint16_t{1} << index_of("spool_name")) |
                                         (uint16_t{1} << index_of("spoolman_vendor_id"))),
@@ -383,14 +387,14 @@ void withdraw_cleared_fields(Observation& standing, const Observation& edit) {
             // lane_resolver.cpp). Clear Spool drops the record whole through
             // AmsBackend::clear_slot_override() instead, so it needs no
             // exception here.
-            if (index == COLOR_NAME_INDEX) {
+            if (index == kColorNameIndex) {
                 return;
             }
             // The binding is a statement about the lane's spool, not a field
             // another field's clear reaches: spoolman_id engages only as that
             // whole statement (user_edit_observation), so its zero is the
             // user's unlink and must stand.
-            if (index == SPOOLMAN_ID_INDEX) {
+            if (index == kSpoolmanIdIndex) {
                 return;
             }
             // Fields the edit path refuses (nullptr slot member) can never
@@ -432,6 +436,26 @@ SlotInfo keep_spool_owned_identity(const SlotInfo& original, const SlotInfo& edi
         }
     });
     return applied;
+}
+
+bool drop_stale_spool_name(const SlotInfo& original, SlotInfo& edited) {
+    if (edited.spool_name.empty() || edited.spool_name != original.spool_name) {
+        return false;
+    }
+    if (original.spoolman_id > 0 || edited.spoolman_id > 0) {
+        return false;
+    }
+    const auto moved = [](const std::string& before, const std::string& after) {
+        return text_io::to_lower(before) != text_io::to_lower(after);
+    };
+    const bool product_moved =
+        !original.catalog_id.empty() && original.catalog_id != edited.catalog_id;
+    if (!moved(original.brand, edited.brand) && !moved(original.material, edited.material) &&
+        !product_moved) {
+        return false;
+    }
+    edited.spool_name.clear();
+    return true;
 }
 
 std::vector<std::string_view> spool_owned_fields_dropped(const SlotInfo& original,
@@ -494,6 +518,21 @@ Observation declared_from_record(const FilamentSlotOverride& record) {
         }
     });
     return obs;
+}
+
+void amend_record(FilamentSlotOverride& record, const Observation& obs) {
+    for_each_field([&](const auto& f) {
+        using Row = std::decay_t<decltype(f)>;
+        if constexpr (!skipped<decltype(f.record)>) {
+            const auto& value = obs.*(f.obs);
+            if (!value.has_value())
+                return;
+            record.*(f.record) = *value;
+            if constexpr (Row::kind == FieldKind::Color) {
+                record.color_set = true;
+            }
+        }
+    });
 }
 
 bool wire_authored_by_firmware(const nlohmann::json& wire) {
@@ -636,7 +675,7 @@ LaneSources sources_from_record(const FilamentSlotOverride& record, const nlohma
     // the parser already read an older record's lock keys into them; the rest
     // fall back to the legacy rule on a record with no set.
     const auto declared_field = [&](size_t index) {
-        if (has_declared || index == COLOR_INDEX || index == MATERIAL_INDEX) {
+        if (has_declared || index == kColorIndex || index == kMaterialIndex) {
             return record.declared.test(index);
         }
         return legacy_declared;
@@ -823,10 +862,10 @@ DeclaredFields declared_fields_on_load(const nlohmann::json& wire, LegacyLockKey
     if (parsed.spoolman_id <= 0) {
         const LockKeyNames lock = lock_key_names(keys);
         if (locked(wire, lock.color)) {
-            declared.set(COLOR_INDEX);
+            declared.set(kColorIndex);
         }
         if (locked(wire, lock.material)) {
-            declared.set(MATERIAL_INDEX);
+            declared.set(kMaterialIndex);
         }
     }
 
@@ -844,11 +883,15 @@ DeclaredFields declared_fields_on_load(const nlohmann::json& wire, LegacyLockKey
 }
 
 bool declares_color(const FilamentSlotOverride& record) {
-    return record.declared.test(COLOR_INDEX);
+    return record.declared.test(kColorIndex);
 }
 
 bool declares_material(const FilamentSlotOverride& record) {
-    return record.declared.test(MATERIAL_INDEX);
+    return record.declared.test(kMaterialIndex);
+}
+
+bool declares_spool_name(const FilamentSlotOverride& record) {
+    return record.declared.test(kSpoolNameIndex);
 }
 
 void withdraw_spool_owned_declarations(FilamentSlotOverride& record) {
@@ -862,12 +905,12 @@ void withdraw_spool_owned_declarations(FilamentSlotOverride& record) {
 }
 
 void withdraw_color_and_material(FilamentSlotOverride& record) {
-    record.declared.reset(COLOR_INDEX);
-    record.declared.reset(MATERIAL_INDEX);
+    record.declared.reset(kColorIndex);
+    record.declared.reset(kMaterialIndex);
 }
 
 bool is_declarable_color(uint32_t rgb) {
-    return rgb != AMS_DEFAULT_SLOT_COLOR;
+    return rgb != kAmsDefaultSlotColor;
 }
 
 uint32_t picked_color(uint32_t rgb) {

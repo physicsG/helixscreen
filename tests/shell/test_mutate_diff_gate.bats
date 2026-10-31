@@ -1014,7 +1014,8 @@ reset_to() {
     git -C "$WORK" add include/feature.h
     git -C "$WORK" commit -qm "add header"
     BASE=$(git -C "$WORK" rev-parse HEAD)
-    printf 'int g(int n);\nint h(int n);\n' > "$WORK/include/feature.h"
+    # An inline body, so the header hunk is behaviour and not declaration-only.
+    printf 'int g(int n);\ninline int h(int n) { return n; }\n' > "$WORK/include/feature.h"
     printf 'int f(int n) {\n    return n + 3;\n}\n' > "$WORK/src/feature.cpp"
 
     run mutate --list-only
@@ -1026,10 +1027,9 @@ reset_to() {
     [ "$cpp_at" -lt "$hdr_at" ]
 }
 
-@test "an include-only hunk is skipped, not reported as a survivor" {
-    # An include has no behaviour to detect, and reverting one usually still
-    # compiles because the symbol arrives transitively - the one hunk shape
-    # guaranteed to cost a full build and come back SURVIVED.
+@test "an include-only hunk is mutated, not skipped" {
+    # A dropped include can flip an #if, change which overload a call picks
+    # (<cmath> abs) or lose a specialisation, and still compile.
     stub_tests_that_ignore
     reset_to 'int f(int n) {
     return n + 1;
@@ -1040,9 +1040,8 @@ int f(int n) {
 }
 '
     run mutate
-    [ "$status" -eq 0 ]
-    contains "include only" "$output"
-    [[ "$output" != *"SURVIVED"* ]]
+    [[ "$output" != *"declaration-only"* ]] || false
+    contains "SURVIVED" "$output"
 }
 
 @test "an include riding along with a code change is still mutated" {
@@ -1058,7 +1057,7 @@ int f(int n) {
 }
 '
     run mutate
-    [[ "$output" != *"include only"* ]]
+    [[ "$output" != *"declaration-only"* ]]
 }
 
 @test "a whitespace-only hunk is skipped" {

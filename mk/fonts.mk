@@ -91,7 +91,7 @@ FONTS_XXLARGE := assets/fonts/noto_sans_32.c assets/fonts/noto_sans_40.c \
 #   - asset_manager.cpp register_fonts(): noto_sans_{10,11,12,14,16,18,20,24},
 #     noto_sans_light_{10,11,12}, noto_sans_bold_{14,16,18,20,24,28},
 #     source_code_pro_{10,12,14,16}, mdi_icons_{14,16,24,32,48,64}
-#   - cjk_font_manager.cpp REGULAR/BOLD/LIGHT_FONTS tables: adds noto_sans_{26,28},
+#   - cjk_font_manager.cpp REGULAR/BOLD/kLightFonts tables: adds noto_sans_{26,28},
 #     noto_sans_light_{14,16,18} (xlarge/xxlarge entries are #if-guarded)
 #   - helix_watchdog.cpp: noto_sans_14, noto_sans_bold_{16,24}, mdi_icons_64
 #   - theme_fonts.cpp helix::ui::is_icon_font(): mdi_icons_{14,16,24,32,48,64}

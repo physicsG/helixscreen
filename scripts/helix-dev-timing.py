@@ -20,8 +20,8 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-OUT_JSONL = REPO / ".claude-recall" / "timing.jsonl"
-OUT_MD = REPO / ".claude-recall" / "TIMING.md"
+OUT_JSONL = REPO / "build" / "dev-timing" / "timing.jsonl"
+OUT_MD = REPO / "build" / "dev-timing" / "TIMING.md"
 
 # The harness kills a foreground Bash call at 600s. Those deltas are the cap, not
 # a cost, and averaging them in would invent a ceiling that does not exist.

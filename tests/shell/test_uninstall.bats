@@ -311,6 +311,23 @@ CONF
     grep -q '\[server\]' "$conf"
 }
 
+@test "remove_update_manager_section cleans a stanza moonraker.conf includes" {
+    local conf="$BATS_TEST_TMPDIR/moonraker.conf"
+    local included="$BATS_TEST_TMPDIR/mainsail.conf"
+    printf '[server]\nhost: 0.0.0.0\n\n[include mainsail.conf]\n' > "$conf"
+    printf '[update_manager mainsail]\ntype: web\n\n[update_manager helixscreen]\ntype: web\npath: /opt/helixscreen\n' \
+        > "$included"
+
+    KLIPPER_HOME=""
+    MOONRAKER_CONF_PATHS="$conf"
+
+    remove_update_manager_section
+
+    refute grep -q 'update_manager helixscreen' "$included"
+    grep -q 'update_manager mainsail' "$included"
+    grep -q '^\[include mainsail.conf\]' "$conf"
+}
+
 @test "remove_update_manager_section handles no moonraker.conf" {
     KLIPPER_HOME=""
     MOONRAKER_CONF_PATHS="/nonexistent/moonraker.conf"
@@ -497,6 +514,120 @@ CONF
 
     refute test -L "$root/moonraker/moonraker/components/helix_print.py"
     refute_grep '^\[helix_print\]' "$HELIX_PRINT_CONF"
+}
+
+@test "remove_moonraker_plugin removes a [helix_print] that moonraker.conf includes" {
+    # Only the inline pass runs here (no install tree), so this is the main
+    # installer's own detection: it must follow [include] the way the plugin's
+    # install.sh does.
+    local symlink conf inc
+    setup_helix_print_symlink
+    symlink="$HELIX_PRINT_SYMLINK"
+    conf="$BATS_TEST_TMPDIR/cfg/moonraker.conf"
+    inc="$BATS_TEST_TMPDIR/cfg/conf.d/helix.conf"
+    mkdir -p "$(dirname "$inc")"
+    printf '[server]\nhost: 0.0.0.0\n\n[include conf.d/*.conf]\n' > "$conf"
+    printf '[helix_print]\nenabled: True\n\n[octoprint_compat]\n' > "$inc"
+    cp "$conf" "$BATS_TEST_TMPDIR/conf.before"
+    KLIPPER_HOME=""
+    KLIPPER_CONFIG_DIR=""
+    MOONRAKER_CONF_PATHS="$conf"
+
+    remove_moonraker_plugin 2>/dev/null
+
+    refute test -L "$symlink"
+    refute_grep '^\[helix_print\]' "$inc"
+    grep -q '^\[octoprint_compat\]' "$inc" || fail "the include's other sections were lost"
+    cmp -s "$BATS_TEST_TMPDIR/conf.before" "$conf" || fail "moonraker.conf itself was edited"
+}
+
+@test "remove_moonraker_plugin edits an included conf through its symlink, keeping link and mode" {
+    local symlink conf inc real
+    setup_helix_print_symlink
+    conf="$BATS_TEST_TMPDIR/cfg/moonraker.conf"
+    inc="$BATS_TEST_TMPDIR/cfg/helix.conf"
+    real="$BATS_TEST_TMPDIR/config-repo/helix.conf"
+    mkdir -p "$(dirname "$conf")" "$(dirname "$real")"
+    printf '[server]\nhost: 0.0.0.0\n\n[include helix.conf]\n' > "$conf"
+    printf '[helix_print]\nenabled: True\n\n[octoprint_compat]\n' > "$real"
+    chmod 0640 "$real"
+    ln -s "$real" "$inc"
+    KLIPPER_HOME=""
+    KLIPPER_CONFIG_DIR=""
+    MOONRAKER_CONF_PATHS="$conf"
+
+    remove_moonraker_plugin 2>/dev/null
+
+    [ -L "$inc" ] || fail "the include's symlink was replaced by a regular file"
+    refute_grep '^\[helix_print\]' "$real"
+    grep -q '^\[octoprint_compat\]' "$real" || fail "the include's other sections were lost"
+    [ "$(stat -c %a "$real")" = 640 ] || fail "mode $(stat -c %a "$real")"
+}
+
+@test "remove_moonraker_plugin follows an absolute include as a chrooted Moonraker reads it" {
+    local chroot="$BATS_TEST_TMPDIR/data/.mod/.forge-x"
+    local proc="$BATS_TEST_TMPDIR/proc"
+    local conf="$chroot/root/printer_data/config/moonraker.conf"
+    local inc="$chroot/root/printer_data/config/helix.conf"
+    mkdir -p "$(dirname "$conf")" "$proc/1925"
+    printf '%s\0' /root/moonraker-env/bin/python3 /root/moonraker/moonraker/moonraker.py \
+        > "$proc/1925/cmdline"
+    ln -s "$chroot" "$proc/1925/root"
+    printf '[server]\nhost: 0.0.0.0\n\n[include /root/printer_data/config/helix.conf]\n' > "$conf"
+    printf '[helix_print]\nenabled: True\n\n[octoprint_compat]\n' > "$inc"
+    KLIPPER_HOME=""
+    KLIPPER_CONFIG_DIR=""
+    MOONRAKER_CONF_PATHS="$conf"
+
+    HELIX_PROC_ROOT="$proc" remove_moonraker_plugin 2>/dev/null
+
+    refute_grep '^\[helix_print\]' "$inc"
+    grep -q '^\[octoprint_compat\]' "$inc" || fail "the include's other sections were lost"
+}
+
+@test "remove_moonraker_plugin removes the updater entry a git-clone plugin install wrote" {
+    local symlink conf
+    setup_helix_print_symlink
+    symlink="$HELIX_PRINT_SYMLINK"
+    conf="$BATS_TEST_TMPDIR/cfg/moonraker.conf"
+    mkdir -p "$(dirname "$conf")"
+    printf '[server]\nhost: 0.0.0.0\n' > "$conf"
+    cp "$conf" "$BATS_TEST_TMPDIR/conf.before"
+    printf '\n#~# --- HelixPrint Plugin ---\n[helix_print]\n# enabled: True\n\n[update_manager helix_print]\ntype: git_repo\npath: ~/helix_print\nmanaged_services: moonraker\n' >> "$conf"
+    KLIPPER_HOME=""
+    KLIPPER_CONFIG_DIR=""
+    MOONRAKER_CONF_PATHS="$conf"
+
+    remove_moonraker_plugin 2>/dev/null
+
+    refute test -L "$symlink"
+    cmp -s "$BATS_TEST_TMPDIR/conf.before" "$conf" ||
+        fail "moonraker.conf differs: $(diff "$BATS_TEST_TMPDIR/conf.before" "$conf")"
+}
+
+@test "remove_moonraker_plugin cleans an updater entry left with no [helix_print] beside it" {
+    local conf
+    conf="$BATS_TEST_TMPDIR/cfg/moonraker.conf"
+    mkdir -p "$(dirname "$conf")"
+    printf '[server]\nhost: 0.0.0.0\n\n[update_manager helix_print]\ntype: git_repo\npath: ~/helix_print\n' > "$conf"
+    KLIPPER_HOME=""
+    KLIPPER_CONFIG_DIR=""
+    MOONRAKER_CONF_PATHS="$conf"
+
+    remove_moonraker_plugin 2>/dev/null
+
+    refute_grep '^\[update_manager helix_print\]' "$conf"
+    grep -qx 'host: 0.0.0.0' "$conf" || fail "the rest of the file was lost: $(cat "$conf")"
+}
+
+@test "the main installer and the plugin installer share one [helix_print] detection" {
+    local shared="$WORKTREE_ROOT/scripts/lib/installer/helix_print_conf.sh"
+    [ "$(readlink -f "$shared")" = "$(readlink -f "$WORKTREE_ROOT/moonraker-plugin/helix_print_conf.sh")" ] \
+        || fail "scripts/lib/installer/helix_print_conf.sh is not the plugin's own file"
+    grep -q '^helix_print_section_files()' "$UNINSTALL_BUNDLE" \
+        || fail "the uninstaller bundle carries no helix_print_section_files"
+    grep -q '/helix_print_conf.sh"' "$WORKTREE_ROOT/moonraker-plugin/install.sh" \
+        || fail "the plugin's install.sh does not load helix_print_conf.sh"
 }
 
 @test "uninstall removes the plugin before the install tree goes away" {

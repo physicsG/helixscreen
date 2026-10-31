@@ -14,6 +14,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstring>
 
 using namespace helix;
@@ -126,6 +127,17 @@ static void apply_size_preset(lv_obj_t* obj, const SwitchSizePreset& preset) {
     // NOTE: LV_OBJ_FLAG_OVERFLOW_VISIBLE when SET means "clip overflow"
     //       We need to CLEAR this flag to allow overflow
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+
+    // The track alone is too short a target for a fingertip (32px at 800x480), and
+    // the knob paints past it. A flex or grid parent keeps siblings out of the
+    // margins set above, so touch can extend into them without stealing a
+    // neighbour's taps; under any other layout the margins reserve nothing.
+    if (lv_obj_t* parent = lv_obj_get_parent(obj)) {
+        const auto layout = lv_obj_get_style_layout(parent, LV_PART_MAIN);
+        if (layout == LV_LAYOUT_FLEX || layout == LV_LAYOUT_GRID) {
+            lv_obj_set_ext_click_area(obj, std::max(preset.vert_margin, preset.horiz_margin));
+        }
+    }
 
     spdlog::trace("[Switch] Applied size preset: {}x{}, knob_pad={}, margins=v{}/h{}", preset.width,
                   preset.height, preset.knob_pad, preset.vert_margin, preset.horiz_margin);

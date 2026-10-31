@@ -25,11 +25,28 @@ fed from a plugin-side window.
   status line, never a fault.
 - The age line without a wall clock: the sandbox has none, so a one-second
   `helix.timer.every` tick counts from the last good reading and re-renders
-  only when the wording changes ("Updated just now" ... "Updated 3m ago").
-- The failure policy: values from the last good reading stay on the tile,
-  the status line carries the error ("HTTP 500", "bad data",
-  "not configured"), and the age line keeps growing - the stale reading is
-  always visibly stale.
+  only when the wording changes ("Updated just now" ... "Updated 3m ago",
+  then "Updated 2h ago" past an hour).
+- The failure policy: values from the last good reading stay on the tile
+  through the first two failed polls; the status line carries the error
+  ("HTTP 500", "bad data", "unreachable", "not configured") and the age line
+  keeps growing. From the third consecutive failure the values read `--`, so
+  a small tile with no age line never shows an old number as current. A
+  reading missing from a successful poll is `--` too, never the previous
+  value under "Updated just now".
+- Polls that cannot pile up or cross: a busy flag skips a tick while a poll
+  is in flight, and a settings generation counter makes a poll that started
+  under an older source discard its result and run again against the new
+  settings. One poll reads the settings once.
+- One Home Assistant entity failing (or reporting `unavailable`) does not
+  take the other down; a failing request is reported on the status line
+  beside the reading that did arrive.
+- Credentials stay off the screen and out of the logs: the source line names
+  only the host (userinfo, path and query are stripped), and a transport
+  error shows a fixed "unreachable", since the backend's error text carries
+  the full URL.
+- A language switch re-renders the age, source and status lines from their
+  English keys; it does not poll the network.
 - A canvas sparkline from a plugin-side window: samples accumulate in memory
   (capped), the tile draws them at two-row tiers, the overlay at a larger
   size, and `canvas:on_size` hands the drawing its size - the callback's

@@ -8,6 +8,8 @@
   <api>
     <prop name="text" type="string" default=""/>
     <prop name="variant" type="string" default="muted"/>
+    <!-- Subject whose value (string, or int as a number) is the pill's text -->
+    <prop name="bind_text" type="string" default=""/>
   </api>
   <view extends="lv_obj"/>
 </component>

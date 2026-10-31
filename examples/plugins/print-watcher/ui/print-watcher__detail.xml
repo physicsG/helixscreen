@@ -33,7 +33,7 @@
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
                 style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
-          <text_small text="Started"/>
+          <text_small text="Started" translation_tag="Started"/>
           <lv_switch>
             <bind_state_if_eq subject="print-watcher__ev_started" state="checked" ref_value="1"/>
             <event_cb trigger="value_changed" callback="plugin_event" user_data="print-watcher__flip:ev_started"/>
@@ -42,7 +42,7 @@
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
                 style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
-          <text_small text="Resumed"/>
+          <text_small text="Resumed" translation_tag="Resumed"/>
           <lv_switch>
             <bind_state_if_eq subject="print-watcher__ev_resumed" state="checked" ref_value="1"/>
             <event_cb trigger="value_changed" callback="plugin_event" user_data="print-watcher__flip:ev_resumed"/>
@@ -51,7 +51,7 @@
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
                 style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
-          <text_small text="Paused"/>
+          <text_small text="Paused" translation_tag="Paused"/>
           <lv_switch>
             <bind_state_if_eq subject="print-watcher__ev_paused" state="checked" ref_value="1"/>
             <event_cb trigger="value_changed" callback="plugin_event" user_data="print-watcher__flip:ev_paused"/>
@@ -60,7 +60,7 @@
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
                 style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
-          <text_small text="Completed"/>
+          <text_small text="Completed" translation_tag="Completed"/>
           <lv_switch>
             <bind_state_if_eq subject="print-watcher__ev_completed" state="checked" ref_value="1"/>
             <event_cb trigger="value_changed" callback="plugin_event" user_data="print-watcher__flip:ev_completed"/>
@@ -69,7 +69,7 @@
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
                 style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
-          <text_small text="Cancelled"/>
+          <text_small text="Canceled" translation_tag="Canceled"/>
           <lv_switch>
             <bind_state_if_eq subject="print-watcher__ev_cancelled" state="checked" ref_value="1"/>
             <event_cb trigger="value_changed" callback="plugin_event" user_data="print-watcher__flip:ev_cancelled"/>
@@ -78,7 +78,7 @@
         <lv_obj width="100%"
                 height="content" flex_flow="row" style_pad_all="0" style_flex_main_place="space_between"
                 style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0">
-          <text_small text="Failed"/>
+          <text_small text="Failed" translation_tag="Failed"/>
           <lv_switch>
             <bind_state_if_eq subject="print-watcher__ev_failed" state="checked" ref_value="1"/>
             <event_cb trigger="value_changed" callback="plugin_event" user_data="print-watcher__flip:ev_failed"/>

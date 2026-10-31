@@ -36,6 +36,7 @@
 # fixture (the bats gates do) must copy this module beside it.
 
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -106,8 +107,8 @@ def base_candidates(root):
     return [c for c in dict.fromkeys(cands) if c != here]   # first spelling of a ref wins
 
 
-def auto_base(root):
-    """(base, why): the nearest fork point among the candidate upstreams.
+def auto_base(root, head='HEAD'):
+    """(base, why): the nearest fork point of HEAD among the candidate upstreams.
 
     Nearest, rather than main first, because a branch cut from a long-lived
     maintenance branch shares with main only where those two diverged, and
@@ -117,7 +118,7 @@ def auto_base(root):
     candidates = base_candidates(root)
     best_ref = best = None
     for ref in candidates:
-        mb = _out(['merge-base', 'HEAD', ref], root)
+        mb = _out(['merge-base', head, ref], root)
         if not mb:
             continue                      # ref does not exist here, or no common history
         if best is None:
@@ -152,3 +153,26 @@ def base_line(root, base, why):
     differently and a reader moving between them reads the same line.
     """
     return f'base {short_sha(root, base)}  <- {why}'
+
+
+def main(argv=None):
+    """Print the base for --head (default HEAD); exit 1 when none resolves.
+
+    .githooks/pre-push asks this for a branch the remote does not have yet,
+    with --head naming the commit being pushed.
+    """
+    import argparse
+    ap = argparse.ArgumentParser(description='nearest fork point among the candidate upstreams')
+    ap.add_argument('--root', default='.')
+    ap.add_argument('--head', default='HEAD')
+    args = ap.parse_args(argv)
+    base, why = auto_base(Path(args.root), args.head)
+    if base == 'HEAD':
+        print(why, file=sys.stderr)
+        return 1
+    print(base)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

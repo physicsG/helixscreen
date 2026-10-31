@@ -29,9 +29,9 @@ lv_coord_t ui_get_header_content_padding() {
     int32_t spacing = theme_manager_get_spacing("space_lg");
 
     // Fallback if theme not initialized (e.g., in unit tests)
-    constexpr int32_t DEFAULT_SPACE_LG = 16; // Medium breakpoint value
+    constexpr int32_t kDefaultSpaceLg = 16; // Medium breakpoint value
     if (spacing == 0) {
-        spacing = DEFAULT_SPACE_LG;
+        spacing = kDefaultSpaceLg;
     }
 
     return spacing;
@@ -278,6 +278,22 @@ void refresh_overhang_chain(lv_obj_t* child) {
     for (lv_obj_t* p = lv_obj_get_parent(child);
          p && lv_obj_has_flag(p, LV_OBJ_FLAG_OVERFLOW_VISIBLE); p = lv_obj_get_parent(p))
         lv_obj_refresh_ext_draw_size(p);
+}
+
+static void clear_slot_cb(lv_event_t* e) {
+    auto* slot = static_cast<lv_obj_t**>(lv_event_get_user_data(e));
+    if (slot && *slot == lv_event_get_target_obj(e)) {
+        *slot = nullptr;
+    }
+}
+
+void store_until_deleted(lv_obj_t** slot, lv_obj_t* obj) {
+    *slot = obj;
+    if (obj) {
+        lv_obj_remove_event_cb_with_user_data(obj, clear_slot_cb, slot);
+        // DECLARATIVE_OK: LV_EVENT_DELETE cleanup has no declarative equivalent.
+        lv_obj_add_event_cb(obj, clear_slot_cb, LV_EVENT_DELETE, slot);
+    }
 }
 
 } // namespace helix::ui

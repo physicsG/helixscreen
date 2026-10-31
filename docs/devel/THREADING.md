@@ -131,7 +131,7 @@ library, assume you are on a background thread.
 ### Threading model
 
 ```
-MAIN THREAD              LIBHV THREAD           UTILITY THREADS
+MAIN THREAD              LIBHV THREAD           UTILITY kThreads
 ─────────────            ─────────────          ───────────────
 main_loop()              libhv Event Loop       UpdateChecker
   ├ process_notifs()       ├ WebSocket conn     TelemetryManager
@@ -154,7 +154,7 @@ main_loop()              libhv Event Loop       UpdateChecker
 
 ```cpp
 void WiFiManager::handle_scan_complete(const std::string& data) {
-    auto networks = parse_networks(data);   // BG thread — no LVGL calls
+    auto networks = parse_networks(data);   // kBg thread — no LVGL calls
     helix::ui::queue_update([networks = std::move(networks), cb = scan_callback_]() {
         cb(networks);                        // Main thread — widgets now safe
     });
@@ -219,7 +219,7 @@ defer only the mutation:
 auto tok = lifetime_.token();
 api_->rest().get_strips(
     [this, tok](const Resp& r) {
-        // BG: parse, validate, build LOCAL objects — no `this` access
+        // kBg: parse, validate, build LOCAL objects — no `this` access
         Local out = parse(r);
         // MAIN: only the mutation
         tok.defer("LedController::on_strips_apply",
@@ -495,6 +495,37 @@ client_->register_notify_update(
 `[UpdateQueue] DROPPED (shutdown): <tag>` line in a device log means a background thread is
 enqueueing after `update_queue_shutdown()` ran — that is a real bug, not noise.
 
+### Drain only when queued work can still reach what you delete
+
+`drain()` runs every pending callback synchronously under your stack frame, whoever queued
+it. One of them can free or rebuild the object that called the drain (a page rebuild, a
+widget recycle, a panel rebuilt by hot reload), and the caller then carries on through
+freed or replaced state. Before draining, ask what the drain protects:
+
+| What is being deleted | Drain? |
+|-----------------------|--------|
+| Objects only you own, deleted through `safe_delete_deferred()` / `lv_obj_delete_async()` | No, but only when no raw-pointer `queue_update` lambda captured them: then nothing queued can reach them, and the deletion already runs outside the batch |
+| Widget data behind `observe<>` callbacks reset in the same teardown | No: the reset expires the callback's `weak_alive` token, so the queued callback no-ops |
+| Objects that raw-pointer callbacks queued earlier may still touch | Yes, and check liveness after it (below) |
+
+A caller that keeps using its own state after a drain takes a token from a guard that expires
+with that state, and stops when `helix::drain_updates_survived(tok)` answers false:
+
+```cpp
+// HomePanel: carousel_lifetime_ is invalidated by every carousel build and teardown.
+auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
+if (!helix::drain_updates_survived(carousel_lifetime_.token())) {
+    return;   // queued work replaced the pages this call was filling
+}
+helix::ui::safe_clean_children(container);
+```
+
+Nested drains compose: a drain inside a callback (`UpdateQueue::is_draining()` true) runs
+only work queued since the outer batch began, and the token check means the same thing at
+any depth. Do not build anything that destroys whole panels or sessions to run inside a
+drain: `PrinterSwitchFlow` defers to the next tick when `is_draining()` for exactly that
+reason.
+
 ---
 
 ## 5. Subject lifecycle
@@ -511,6 +542,13 @@ enqueueing after `update_queue_shutdown()` ran — that is a real bug, not noise
 **Static subjects** exist for the whole app run and need no lifetime token — e.g. the
 primary-fan `get_fan_speed_subject()` (the genuinely no-argument overload). Teardown across a
 soft restart is covered by `ObserverGuard`'s invalidation epoch instead (§6).
+
+A subject between `lv_subject_deinit()` and its next `lv_subject_init_*()` refuses new
+observers (`patches/lvgl_subject_deinit_refuses_observers.patch`): the attach returns NULL,
+the `observe<V>()` factory returns an empty guard, and LVGL logs `Subject is deinitialized;
+observer refused`. The refusal stops the next init from orphaning the observer, but the
+observer is still missing: that warning in a log means something attached before the subject's
+owner re-initialized it, and the attach belongs after that init.
 
 **Dynamic subjects** are destroyed and recreated when hardware is rediscovered after a
 disconnect. Observing one without a `SubjectLifetime` is a use-after-free:
@@ -837,7 +875,8 @@ LVGL C event-dispatch frame or a `noexcept` boundary — aborts the process with
 | HTTP: bundles / gcode / large transfers | `helix::http::HttpExecutor::slow().submit(fn)` (1 worker) |
 | sd-bus / BlueZ DBus call | `helix::bluetooth::BusThread::run_sync(fn)` |
 | BT-over-RFCOMM / USB print / QR decode / device discovery | `try { std::thread([...]{}).detach(); } catch (const std::system_error& e) { /* toast + error callback */ }` |
-| Long-lived worker (member variable, joined in dtor) | plain `std::thread` is fine |
+| Long-lived worker (member variable, joined in dtor) | `helix::make_thread` (lint-gated: it installs the thread's signal stack, so an overflow still writes a crash file) |
+| Long-lived worker nobody is waiting on (G-code index scan, ghost pass, prefetch) | `helix::make_background_thread`: `make_thread` plus nice 19 on that thread only. Nice, not `SCHED_IDLE`: the UI thread joins these on cancel, and a `SCHED_IDLE` thread can starve indefinitely while Klipper keeps the CPU busy |
 
 The problem is one-shot **detached** spawns, not threads as such. Lambdas submitted to an
 executor still run on a worker thread, so their callbacks still need `queue_update()` or
@@ -977,6 +1016,17 @@ A `LifetimeToken`-guarded timer callback is the other valid answer — annotate 
 queued callbacks can't leak between tests. It also opts into
 `HELIX_STRICT_BG_THREAD_CHECK`, so any new L081 instance aborts the suite.
 
+### Off-thread LVGL calls are reported
+
+`helix-tests` and `--test` run with the LVGL thread check in report mode
+(`src/system/lvgl_thread_check.cpp`, `patches/lvgl_thread_check_hook.patch`): a subject
+write or notify, `lv_timer_create`/`lv_timer_delete`, or `lv_obj_delete`/`lv_obj_clean`
+reached from a thread other than UpdateQueue's main thread prints an `[LvglThreadCheck]`
+block with a backtrace to stderr, once per call site. `HELIX_LVGL_THREAD_CHECK=abort`
+makes the first one fatal (`docs/devel/ENVIRONMENT_VARIABLES.md`). Release builds compile
+the check out. A sensor manager in `set_sync_mode(true)` refreshes its subjects inline on
+whatever thread published, so a test that publishes from a worker reports here.
+
 XML subjects register into LVGL's global scope — per-test scopes are blocked by LVGL
 internals. Each test's `init_subjects(true)` overwrites prior entries with fresh pointers, and
 `XMLTestFixture`'s destructor tears the screen down *before* deinitializing subjects to avoid
@@ -1012,7 +1062,7 @@ REQUIRE(count == 2);          // fired again on change
 ### Commands
 
 ```bash
-make test-run      # parallel, excludes [slow] and hidden
+make unit-sweep    # parallel, excludes [slow] and hidden
 make test-serial   # sequential, for debugging
 make test-asan     # AddressSanitizer — UAF, leaks, overflows
 make test-tsan     # ThreadSanitizer — data races, deadlocks
@@ -1026,7 +1076,7 @@ Always append `"~[.]"` when running by tag, to exclude hidden tests that may han
 
 Relevant tags: `[state]` (subjects/observers), `[connection]` (WebSocket lifecycle),
 `[application]` (lifecycle/shutdown), `[core]` (must-pass), `[slow]` (>500ms, excluded from
-`test-run`).
+`unit-sweep`).
 
 ---
 

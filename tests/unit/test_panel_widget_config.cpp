@@ -7,11 +7,15 @@
 #include "../test_helpers/scoped_runtime_config.h"
 #include "config.h"
 #include "data_root_resolver.h"
+#include "home_layout_share.h"
+#include "layout_port.h"
 #include "panel_widget_config.h"
 #include "panel_widget_registry.h"
 #include "theme_manager.h"
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
@@ -404,7 +408,7 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
 
     while (wc.add_page() >= 0) {
     }
-    REQUIRE(wc.page_count() == MAX_PAGES);
+    REQUIRE(wc.page_count() == kMaxPages);
     // At the cap nothing is added, wherever it would land.
     REQUIRE(wc.add_page() == -1);
     REQUIRE(wc.add_page("", 0) == -1);
@@ -1151,11 +1155,13 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     wc.load();
 
     // Migration moves data to /printers/default/panel_widgets/home and removes old key.
-    // Legacy configs without grid coords are detected as pre-grid and reset to defaults.
-    // After migration, data is saved in the new pages format.
+    // Legacy configs without grid coords are detected as pre-grid and reset to defaults,
+    // which stay pending until READY: the pages format reaches disk on the next save.
     auto& printer_data = get_data()["printers"]["default"];
     REQUIRE(printer_data.contains("panel_widgets"));
     REQUIRE(printer_data["panel_widgets"].contains("home"));
+    CHECK_FALSE(printer_data["panel_widgets"]["home"].is_object());
+    wc.save();
     auto root = printer_data["panel_widgets"]["home"];
     REQUIRE(root.is_object());
     REQUIRE(root.contains("pages"));
@@ -1163,6 +1169,46 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
 
     // After pre-grid reset, entries match default grid (all registry widgets present)
     REQUIRE(wc.entries().size() == default_grid_widget_count());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a flat array replaced by the defaults is a live default",
+                 "[panel_widget][widget_config][migration][panel_widget_config]") {
+    // Whatever the old array held is gone, so the arrangement is the builder's
+    // own and waits for a measured grid like any fresh default.
+    SECTION("pre-grid entries") {
+        setup_with_widgets(json::array({
+            {{"id", "temperature"}, {"enabled", true}},
+            {{"id", "network"}, {"enabled", true}},
+        }));
+    }
+    SECTION("an empty array") {
+        setup_with_widgets(json::array());
+    }
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    CHECK(wc.is_unedited_default());
+    CHECK(wc.has_pending_anchors());
+    // Nothing is written before READY: the old array is still what is on disk.
+    CHECK_FALSE(get_printer_data()["panel_widgets"]["home"].is_object());
+    wc.save();
+    const json saved = get_printer_data()["panel_widgets"]["home"];
+    REQUIRE(saved.is_object());
+    CHECK(saved.contains("default"));
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a flat array with grid positions is the user's",
+                 "[panel_widget][widget_config][migration][panel_widget_config]") {
+    setup_with_widgets(json::array({
+        {{"id", "temperature"}, {"enabled", true}, {"col", 0}, {"row", 0}},
+    }));
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    CHECK_FALSE(wc.is_unedited_default());
+    CHECK_FALSE(wc.has_pending_anchors());
 }
 
 TEST_CASE_METHOD(PanelWidgetConfigFixture,
@@ -1456,8 +1502,9 @@ TEST_CASE("PanelWidgetConfig: build_default_grid produces correct layout",
     };
 
     // The micro landscape table: printer image 3x2 cells top-left, six 1x1
-    // readouts filling the rest of the top two rows, print_status full width
-    // below. Tracks are half-cells, so a cell span of 3x2 reads as 6x4.
+    // readouts filling the rest of the top two rows, print_status (4x2 cells)
+    // beside the temperature graph (2x2) below. Tracks are half-cells, so a
+    // cell span of 3x2 reads as 6x4.
     auto* pi = find_entry("printer_image");
     REQUIRE(pi);
     REQUIRE(pi->enabled);
@@ -1466,25 +1513,26 @@ TEST_CASE("PanelWidgetConfig: build_default_grid produces correct layout",
     REQUIRE(pi->colspan == 6);
     REQUIRE(pi->rowspan == 4);
 
-    // Print status spans the full 12-track width of the micro grid.
     auto* ps = find_entry("print_status");
     REQUIRE(ps);
     REQUIRE(ps->enabled);
     REQUIRE(ps->col == 0);
     REQUIRE(ps->row == 4);
-    REQUIRE(ps->colspan == 12);
+    REQUIRE(ps->colspan == 8);
     REQUIRE(ps->rowspan == 4);
+    auto* graph = find_entry("temp_graph");
+    REQUIRE(graph);
+    REQUIRE(graph->enabled);
+    REQUIRE(graph->col == 8);
+    REQUIRE(graph->row == 4);
+    REQUIRE(graph->colspan == 4);
+    REQUIRE(graph->rowspan == 4);
 
-    // tips and temp_graph are switched off on the 480-class tiers: four cell
-    // rows only pay for the image block plus a two-cell print_status, and the
-    // graph's axis labels collide at a 68px cell.
-    for (const char* id : {"tips", "temp_graph"}) {
-        auto* off = find_entry(id);
-        REQUIRE(off);
-        INFO("widget " << id);
-        REQUIRE_FALSE(off->enabled);
-        REQUIRE_FALSE(off->has_grid_position());
-    }
+    // Four cell rows only pay for the image block and the bottom band.
+    auto* tips = find_entry("tips");
+    REQUIRE(tips);
+    REQUIRE_FALSE(tips->enabled);
+    REQUIRE_FALSE(tips->has_grid_position());
 
     // Positions are all-or-nothing. Which ids the shipped table anchors is the
     // table's business and differs per tier; a half-placed entry is a bug.
@@ -1674,16 +1722,16 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture, "PanelWidgetConfig: add_page refuses 
     wc.load();
 
     // Add pages up to the cap
-    for (size_t i = 1; i < MAX_PAGES; ++i) {
+    for (size_t i = 1; i < kMaxPages; ++i) {
         int idx = wc.add_page();
         REQUIRE(idx >= 0);
     }
-    REQUIRE(wc.page_count() == MAX_PAGES);
+    REQUIRE(wc.page_count() == kMaxPages);
 
     // Adding one more should fail
     int idx = wc.add_page();
     REQUIRE(idx == -1);
-    REQUIRE(wc.page_count() == MAX_PAGES);
+    REQUIRE(wc.page_count() == kMaxPages);
 }
 
 TEST_CASE_METHOD(PanelWidgetConfigFixture,
@@ -1695,13 +1743,13 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     REQUIRE(wc.page_count() == 1);
     CHECK(wc.can_add_page());
 
-    while (wc.page_count() < MAX_PAGES) {
+    while (wc.page_count() < kMaxPages) {
         REQUIRE(wc.add_page() >= 0);
     }
     CHECK_FALSE(wc.can_add_page());
 
     REQUIRE(wc.remove_page(wc.page_count() - 1));
-    REQUIRE(wc.page_count() == MAX_PAGES - 1);
+    REQUIRE(wc.page_count() == kMaxPages - 1);
     CHECK(wc.can_add_page());
 }
 
@@ -2506,71 +2554,290 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     REQUIRE(fil->col == 3);
 }
 
-// =============================================================================
-// Preset seed layouts: every placed widget fits the grid and none overlap.
-// Presets ship on 800x480 = medium = 12x8 tracks.
-// =============================================================================
+// ============================================================================
+// Preset seeds are default-layout overlays
+// ============================================================================
 
-TEST_CASE("preset seeds: placed widgets fit the medium grid", "[panel_widget_config][preset]") {
-    // Medium 800x480 = 12 cols x 8 rows (measured, see test_grid_square_cells.cpp)
-    const int cols = 12, rows = 8;
-    for (const char* preset : {"ad5x", "ad5x_zmod", "cc1"}) {
-        std::string rel = std::string("panel_widgets/") + preset + "/home.json";
-        std::ifstream in(find_readable(rel));
-        INFO("preset " << preset);
-        REQUIRE(in.is_open());
-        nlohmann::json seed = nlohmann::json::parse(in);
-        REQUIRE(seed.contains("pages"));
-        for (const auto& page : seed["pages"]) {
-            REQUIRE(page.contains("widgets"));
-            for (const auto& w : page["widgets"]) {
-                int col = w.value("col", -1);
-                int row = w.value("row", -1);
-                if (col < 0 || row < 0)
-                    continue;
-                INFO("preset " << preset << " widget " << w.value("id", std::string{}));
-                CHECK(col + w.value("colspan", 1) <= cols);
-                CHECK(row + w.value("rowspan", 1) <= rows);
+namespace {
+
+/// Writes panel_widgets/<preset>/home.json under the guard's config dir.
+void write_seed(const ConfigDirGuard& guard, const std::string& preset, const json& seed) {
+    std::filesystem::create_directories(guard.dir / "panel_widgets" / preset);
+    std::ofstream out(guard.dir / "panel_widgets" / preset / "home.json");
+    out << seed.dump();
+}
+
+const json* find_placed_widget(const json& widgets, const std::string& id) {
+    for (const auto& w : widgets) {
+        if (w.value("id", std::string{}) == id && w.value("enabled", false) &&
+            w.value("col", -1) >= 0) {
+            return &w;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "a preset seed overlay removes an anchor and replaces a slot",
+                 "[panel_widget_config][preset]") {
+    ConfigDirGuard guard("preset-overlay");
+    helix::test::ScopedBreakpoint bp(UiBreakpoint::Large);
+
+    // Without a seed the large table places tips and no clock.
+    setup_empty_config();
+    PanelWidgetConfig plain("home", config);
+    plain.load();
+    plain.save();
+    const json base = get_saved_page0_widgets();
+    REQUIRE(find_placed_widget(base, "tips") != nullptr);
+    REQUIRE(find_placed_widget(base, "clock") == nullptr);
+
+    const json seed = {
+        {"anchors",
+         {{{"id", "tips"}, {"remove", true}},
+          {{"slot", "spool_env"},
+           {"placements", {{"large", {{"col", 8}, {"row", 0}, {"colspan", 4}, {"rowspan", 2}}}}},
+           {"alternatives", {{{"cells", {{{"candidates", {"clock"}}, {"at", {0, 0, 4, 2}}}}}}}}}}},
+        {"disabled", {{"large", {"tips"}}}}};
+    write_seed(guard, "testp", seed);
+    setup_empty_config();
+    ConfigTestAccess::data(config)["printers"]["default"]["preset"] = "testp";
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.save();
+
+    const json widgets = get_saved_page0_widgets();
+    CHECK(find_placed_widget(widgets, "tips") == nullptr);
+    const json* clock = find_placed_widget(widgets, "clock");
+    REQUIRE(clock != nullptr);
+    CHECK((*clock)["col"] == 8);
+    CHECK((*clock)["row"] == 0);
+    CHECK((*clock)["colspan"] == 4);
+    CHECK((*clock)["rowspan"] == 2);
+    // The rest of the base table still stands.
+    CHECK(find_placed_widget(widgets, "printer_image") != nullptr);
+    CHECK(find_placed_widget(widgets, "print_status") != nullptr);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "a preset seed overlay yields a live stamped default",
+                 "[panel_widget_config][preset]") {
+    ConfigDirGuard guard("preset-overlay-stamp");
+    helix::test::ScopedBreakpoint bp(UiBreakpoint::Large);
+    write_seed(guard, "testp", json{{"anchors", {{{"id", "tips"}, {"remove", true}}}}});
+    setup_empty_config();
+    ConfigTestAccess::data(config)["printers"]["default"]["preset"] = "testp";
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+
+    // The block is what lets the layout re-resolve when a capability changes
+    // and what a Reset re-arms; an unstamped seed would read as a user edit.
+    CHECK(wc.is_unedited_default());
+    wc.save();
+    const json saved = get_printer_data()["panel_widgets"]["home"];
+    REQUIRE(saved.contains("default"));
+    CHECK(saved["default"].contains("hash"));
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "a preset seed is parsed once per file stamp",
+                 "[panel_widget_config][preset]") {
+    ConfigDirGuard guard("preset-overlay-cache");
+    write_seed(guard, "testp", json{{"anchors", {{{"id", "tips"}, {"remove", true}}}}});
+    const auto path = guard.dir / "panel_widgets" / "testp" / "home.json";
+
+    const auto first = PanelWidgetConfig::load_preset_overlay("testp");
+    REQUIRE(first->is_object());
+    const int reads = PanelWidgetConfig::preset_overlay_reads();
+    const auto again = PanelWidgetConfig::load_preset_overlay("testp");
+    CHECK(PanelWidgetConfig::preset_overlay_reads() == reads);
+    CHECK(again.get() == first.get());
+
+    const json changed{{"anchors", {{{"id", "clock"}, {"remove", true}}}}};
+    write_seed(guard, "testp", changed);
+    std::filesystem::last_write_time(path, std::filesystem::last_write_time(path) +
+                                               std::chrono::seconds(7));
+    const auto reloaded = PanelWidgetConfig::load_preset_overlay("testp");
+    CHECK(PanelWidgetConfig::preset_overlay_reads() == reads + 1);
+    CHECK(*reloaded == changed);
+    // A tree a caller still holds survives the reload.
+    CHECK((*first)["anchors"][0]["id"] == "tips");
+    PanelWidgetConfig::load_preset_overlay("testp");
+    CHECK(PanelWidgetConfig::preset_overlay_reads() == reads + 1);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "a preset without a seed file falls back to the base",
+                 "[panel_widget_config][preset]") {
+    ConfigDirGuard guard("preset-no-seed");
+    helix::test::ScopedBreakpoint bp(UiBreakpoint::Large);
+
+    setup_empty_config();
+    PanelWidgetConfig plain("home", config);
+    plain.load();
+    const json base = get_saved_page0_widgets();
+
+    setup_empty_config();
+    ConfigTestAccess::data(config)["printers"]["default"]["preset"] = "no_such_seed";
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+
+    CHECK(get_saved_page0_widgets() == base);
+}
+
+namespace {
+
+/// Seed files directly under @p root/<preset>/home.json that were examined, and
+/// the problems found: a seed that is not an object, one carrying a page list,
+/// or one naming a widget no default may place.
+struct SeedAudit {
+    int examined = 0;
+    std::vector<std::string> problems;
+};
+
+SeedAudit audit_seed_dir(const std::filesystem::path& root) {
+    SeedAudit audit;
+    std::error_code ec;
+    for (const auto& dir : std::filesystem::directory_iterator(root, ec)) {
+        std::ifstream in(dir.path() / "home.json");
+        if (!in.is_open()) {
+            continue;
+        }
+        ++audit.examined;
+        const std::string name = dir.path().filename().string();
+        const json seed = json::parse(in, nullptr, false);
+        if (!seed.is_object()) {
+            audit.problems.push_back(name + ": not a JSON object");
+            continue;
+        }
+        if (seed.contains("pages")) {
+            audit.problems.push_back(name + ": carries a page list");
+        }
+        const std::string text = seed.dump();
+        for (const char* id : {"toolhead", "host_health", "exclude_map"}) {
+            if (text.find(std::string("\"") + id + "\"") != std::string::npos) {
+                audit.problems.push_back(name + ": names " + id);
             }
         }
     }
+    return audit;
 }
 
-TEST_CASE("preset seeds: placed widgets do not overlap", "[panel_widget_config][preset]") {
-    for (const char* preset : {"ad5x", "ad5x_zmod", "cc1"}) {
-        std::ifstream in(find_readable(std::string("panel_widgets/") + preset + "/home.json"));
-        REQUIRE(in.is_open());
-        nlohmann::json seed = nlohmann::json::parse(in);
-        INFO("preset " << preset);
-        // Guarded rather than seed["pages"][0]["widgets"]: const operator[] on a
-        // missing key is only JSON_ASSERT-guarded, so under NDEBUG a renamed or
-        // truncated preset dereferences end() instead of failing the test.
-        REQUIRE(seed.contains("pages"));
-        REQUIRE(seed["pages"].is_array());
-        REQUIRE_FALSE(seed["pages"].empty());
-        REQUIRE(seed["pages"][0].contains("widgets"));
-        struct Rect {
-            int col, row, colspan, rowspan;
-        };
-        std::vector<Rect> placed;
-        for (const auto& w : seed["pages"][0]["widgets"]) {
-            int col = w.value("col", -1);
-            int row = w.value("row", -1);
-            if (col < 0 || row < 0 || !w.value("enabled", false))
-                continue;
-            placed.push_back({col, row, w.value("colspan", 1), w.value("rowspan", 1)});
-        }
-        for (size_t i = 0; i < placed.size(); i++) {
-            for (size_t j = i + 1; j < placed.size(); j++) {
-                const auto& a = placed[i];
-                const auto& b = placed[j];
-                bool overlap = !(a.col + a.colspan <= b.col || b.col + b.colspan <= a.col ||
-                                 a.row + a.rowspan <= b.row || b.row + b.rowspan <= a.row);
-                INFO("preset " << preset << " widgets at (" << a.col << "," << a.row << ") and ("
-                               << b.col << "," << b.row << ")");
-                CHECK_FALSE(overlap);
+} // namespace
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "preset seeds: the seed audit examines and can fail",
+                 "[panel_widget_config][preset]") {
+    ConfigDirGuard guard("preset-audit");
+    write_seed(guard, "good", json{{"anchors", {{{"id", "tips"}, {"remove", true}}}}});
+    write_seed(guard, "paged", json{{"pages", json::array()}});
+    write_seed(guard, "banned", json{{"anchors", {{{"id", "toolhead"}}}}});
+
+    const SeedAudit audit = audit_seed_dir(guard.dir / "panel_widgets");
+    CHECK(audit.examined == 3);
+    CHECK(audit.problems.size() == 2);
+    CHECK(std::count_if(audit.problems.begin(), audit.problems.end(),
+                        [](const std::string& p) { return p.rfind("good", 0) == 0; }) == 0);
+}
+
+TEST_CASE("preset seeds: shipped seeds are overlays that place no excluded widget",
+          "[panel_widget_config][preset]") {
+    const std::filesystem::path root =
+        std::filesystem::path(find_readable("default_layout.json")).parent_path() / "panel_widgets";
+    // No seed ships today, so there may be nothing to examine; each one that
+    // does ship is held to the same audit as the fixtures above.
+    const SeedAudit audit = audit_seed_dir(root);
+    for (const auto& problem : audit.problems) {
+        FAIL_CHECK(problem);
+    }
+}
+
+namespace {
+
+/// A seed that removes tips and replaces the spool slot's large placement.
+const json kOverlaySeed = {
+    {"anchors",
+     {{{"id", "tips"}, {"remove", true}},
+      {{"slot", "spool_env"},
+       {"placements", {{"large", {{"col", 8}, {"row", 0}, {"colspan", 4}, {"rowspan", 2}}}}},
+       {"alternatives", {{{"cells", {{{"candidates", {"clock"}}, {"at", {0, 0, 4, 2}}}}}}}}}}},
+    {"disabled", {{"large", {"tips"}}}}};
+
+} // namespace
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "a seeded unedited default keeps its overlay through every rebuild path",
+                 "[panel_widget_config][preset]") {
+    ConfigDirGuard guard("preset-overlay-paths");
+    helix::test::ScopedBreakpoint bp(UiBreakpoint::Large);
+
+    auto page_entries = [](const PanelWidgetConfig& wc) {
+        std::vector<PanelWidgetEntry> placed;
+        for (const auto& e : wc.page_entries(0)) {
+            if (e.enabled && e.has_grid_position()) {
+                placed.push_back(e);
             }
         }
+        return placed;
+    };
+    auto has = [](const std::vector<PanelWidgetEntry>& v, const char* id) {
+        return std::any_of(v.begin(), v.end(),
+                           [&](const PanelWidgetEntry& e) { return e.id == id; });
+    };
+    auto expect_overlay = [&](const PanelWidgetConfig& wc) {
+        const auto placed = page_entries(wc);
+        CHECK_FALSE(has(placed, "tips"));
+        REQUIRE(has(placed, "clock"));
+        const auto it = std::find_if(placed.begin(), placed.end(),
+                                     [](const PanelWidgetEntry& e) { return e.id == "clock"; });
+        CHECK(it->col == 8);
+        CHECK(it->colspan == 4);
+    };
+
+    // The same steps without a seed: tips is placed and the clock is not, so
+    // the overlay assertions below cannot pass on an empty layout.
+    {
+        setup_empty_config();
+        PanelWidgetConfig plain("home", config);
+        plain.load();
+        plain.apply_pending_anchors(24, 12);
+        const auto placed = page_entries(plain);
+        REQUIRE(has(placed, "tips"));
+        REQUIRE_FALSE(has(placed, "clock"));
+    }
+
+    write_seed(guard, "testp", kOverlaySeed);
+    setup_empty_config();
+    ConfigTestAccess::data(config)["printers"]["default"]["preset"] = "testp";
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.is_unedited_default());
+    expect_overlay(wc);
+
+    SECTION("apply_pending_anchors") {
+        REQUIRE(wc.has_pending_anchors());
+        wc.apply_pending_anchors(24, 12);
+        CHECK_FALSE(wc.has_pending_anchors());
+        CHECK(wc.is_unedited_default());
+        expect_overlay(wc);
+    }
+
+    SECTION("reresolve_default_if_changed on a grid change") {
+        wc.apply_pending_anchors(24, 12);
+        REQUIRE(wc.reresolve_default_if_changed(20, 12));
+        CHECK(wc.is_unedited_default());
+        CHECK_FALSE(has(page_entries(wc), "tips"));
+    }
+
+    SECTION("reset_to_defaults") {
+        wc.apply_pending_anchors(24, 12);
+        wc.add_page();
+        REQUIRE_FALSE(wc.is_unedited_default());
+        wc.reset_to_defaults();
+        CHECK(wc.is_unedited_default());
+        expect_overlay(wc);
+        wc.apply_pending_anchors(24, 12);
+        expect_overlay(wc);
     }
 }
 
@@ -2678,9 +2945,12 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     CHECK(wc.grid_signature().empty());
 
     // ...and the rebuild is what a later load reads, not a one-run repair.
+    wc.save();
     auto root = get_saved_root();
     REQUIRE(root.is_object());
-    CHECK(root.value("anchors", "") == "pending");
+    REQUIRE(root.contains("default"));
+    CHECK(root["default"].value("signature", "x").empty());
+    CHECK_FALSE(root.contains("anchors"));
     bool found = false;
     for (const auto& w : get_saved_page0_widgets()) {
         if (w.value("id", "") == id) {
@@ -2901,50 +3171,25 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture, "restoring a parked layout keeps its 
     CHECK(kept);
 }
 
-TEST_CASE_METHOD(PanelWidgetConfigFixture, "a preset seed keeps unknown ids",
-                 "[panel_widget][widget_config]") {
-    ConfigDirGuard guard("preset-retain");
-    json unknown = {{"id", "gone-plug__tile"},
-                    {"enabled", true},
-                    {"col", 2},
-                    {"row", 0},
-                    {"colspan", 2},
-                    {"rowspan", 2}};
-    json seed;
-    seed["pages"] = json::array(
-        {json{{"id", "main"},
-              {"widgets", json::array({{{"id", "print_status"}, {"enabled", true}}, unknown})}}});
-    seed["main_page_index"] = 0;
-    seed["next_page_id"] = 1;
-    std::filesystem::create_directories(guard.dir / "panel_widgets" / "testp");
-    {
-        std::ofstream out(guard.dir / "panel_widgets" / "testp" / "home.json");
-        out << seed.dump();
-    }
-    setup_empty_config();
-    ConfigTestAccess::data(config)["printers"]["default"]["preset"] = "testp";
-
-    PanelWidgetConfig wc("home", config);
-    wc.load(); // no saved layout: seeds from panel_widgets/testp/home.json and saves
-
-    bool kept = false;
-    for (const auto& item : get_saved_page0_widgets())
-        kept = kept || item == unknown;
-    CHECK(kept);
-}
-
 TEST_CASE_METHOD(PanelWidgetConfigFixture,
-                 "PanelWidgetConfig: a new printer's saved defaults read back without a rebuild",
+                 "PanelWidgetConfig: a new printer's default is written at READY, not at load",
                  "[panel_widget_config][unnamed_units][multi-printer]") {
-    // A printer added at run time gets the defaults saved on its first load, before any
-    // grid has been measured; the next load (a live switch reloads Home) must read them.
+    // A default built at load can hold the previous printer's capability values after a
+    // live switch, so nothing is saved until the READY resolve; the next load must then
+    // read what that wrote.
     setup_empty_config();
     get_data()["config_version"] = 30;
     PanelWidgetConfig first("home", config);
     first.load();
+    CHECK(first.has_pending_anchors());
+    CHECK_FALSE(get_printer_data().contains("panel_widgets"));
+
+    REQUIRE(first.reresolve_default_if_changed(12, 8, /*persist=*/true));
+    first.flush_pending_save();
     const json saved = get_printer_data()["panel_widgets"]["home"];
-    REQUIRE(saved.value("anchors", "") == "pending");
-    REQUIRE_FALSE(saved.contains("grid"));
+    REQUIRE(saved.contains("default"));
+    REQUIRE_FALSE(saved["default"].value("signature", "").empty());
+    REQUIRE(saved.contains("grid"));
 
     CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(saved, 30));
 }
@@ -3056,4 +3301,453 @@ TEST_CASE_METHOD(PanelWidgetConfigFixture,
     const auto saved = get_saved_page0_widgets();
     CHECK(std::none_of(saved.begin(), saved.end(),
                        [&](const json& item) { return item["id"] == off_def->id; }));
+}
+
+// ============================================================================
+// The default block: which arrangement the defaults builder produced
+// ============================================================================
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: reset stamps a default block whose hash matches",
+                 "[panel_widget_config][default_block]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.add_page();
+    REQUIRE(wc.place_entry("clock", 1, 0, 0, 2, 2) >= 0);
+    REQUIRE_FALSE(wc.is_unedited_default());
+
+    wc.reset_to_defaults();
+    CHECK(wc.is_unedited_default());
+    CHECK(wc.has_pending_anchors());
+    CHECK(wc.default_signature().empty());
+
+    wc.save();
+    const json saved = get_saved_root();
+    REQUIRE(saved.contains("default"));
+    REQUIRE(saved["default"].is_object());
+    CHECK(saved["default"].value("hash", "") == helix::layout::arrangement_hash(saved));
+    CHECK_FALSE(saved.contains("anchors"));
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: applying the anchors stamps the signature and hash",
+                 "[panel_widget_config][default_block]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.has_pending_anchors());
+
+    wc.apply_pending_anchors(12, 8);
+    CHECK_FALSE(wc.has_pending_anchors());
+    CHECK_FALSE(wc.default_signature().empty());
+    CHECK(wc.default_signature().find("|12|8|") != std::string::npos);
+    CHECK(wc.is_unedited_default());
+
+    // A reload reads the block back unchanged.
+    PanelWidgetConfig again("home", config);
+    again.load();
+    CHECK(again.default_signature() == wc.default_signature());
+    CHECK(again.is_unedited_default());
+
+    // Moving a placed widget makes the layout the user's.
+    const auto& page = again.page_entries(0);
+    auto placed = std::find_if(page.begin(), page.end(),
+                               [](const PanelWidgetEntry& e) { return e.is_placed(); });
+    REQUIRE(placed != page.end());
+    const std::string id = placed->id;
+    again.place_entry(id, 0, placed->col, placed->row + 1, placed->colspan, placed->rowspan);
+    CHECK_FALSE(again.is_unedited_default());
+    // ...while per-widget config is outside the hash.
+    PanelWidgetConfig third("home", config);
+    third.load();
+    third.set_widget_config(id, json{{"style", "x"}});
+    CHECK(third.is_unedited_default());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: the older pending tag reads as a pending default block",
+                 "[panel_widget_config][default_block]") {
+    json node = placed_home_node("printer_image");
+    node["anchors"] = "pending";
+    setup_with_widgets(node);
+    get_data()["config_version"] = 30;
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    CHECK(wc.has_pending_anchors());
+    CHECK(wc.default_signature().empty());
+
+    wc.save();
+    const json saved = get_saved_root();
+    CHECK_FALSE(saved.contains("anchors"));
+    REQUIRE(saved.contains("default"));
+    CHECK(saved["default"].value("signature", "x").empty());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a default block saved before any grid is read as written",
+                 "[panel_widget_config][default_block][unnamed_units]") {
+    const std::string id = an_enabled_default_widget();
+    REQUIRE_FALSE(id.empty());
+
+    // The shape a pending default saves: placed widgets, a default block, no
+    // grid. The block names the coordinates, so the layout loads as written.
+    json node = placed_home_node(id);
+    node["default"] = json{{"signature", ""}, {"hash", ""}};
+    REQUIRE_FALSE(node.contains("grid"));
+    setup_with_widgets(node);
+    get_data()["config_version"] = 30;
+
+    CHECK_FALSE(PanelWidgetConfig::has_uninterpretable_coordinates(node, 30));
+
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    CHECK(wc.has_pending_anchors());
+    CHECK_FALSE(wc.is_enabled(id));
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a parked grid carries its own default block",
+                 "[panel_widget_config][default_block]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.apply_pending_anchors(12, 8);
+    const std::string sig = wc.default_signature();
+    REQUIRE_FALSE(sig.empty());
+
+    wc.switch_to_grid(10, 8);
+    const json parked = get_saved_root()["parked_grids"]["12x8"];
+    REQUIRE(parked.contains("default"));
+    CHECK(parked["default"].value("signature", "") == sig);
+
+    wc.switch_to_grid(12, 8);
+    CHECK(wc.default_signature() == sig);
+    CHECK(wc.is_unedited_default());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: a layout without a default block is not an unedited default",
+                 "[panel_widget_config][default_block]") {
+    json node = placed_home_node("printer_image");
+    node["grid"] = "12x8";
+    setup_with_widgets(node);
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    CHECK_FALSE(wc.is_unedited_default());
+    CHECK(wc.default_signature().empty());
+    CHECK_FALSE(wc.has_pending_anchors());
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "PanelWidgetConfig: seeding a new grid drops the old grid's default block",
+                 "[panel_widget_config][default_block]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    wc.apply_pending_anchors(12, 8);
+    REQUIRE_FALSE(wc.default_signature().empty());
+
+    wc.switch_to_grid(10, 8);
+    CHECK(wc.default_signature().empty());
+    CHECK_FALSE(wc.has_pending_anchors());
+    CHECK_FALSE(wc.is_unedited_default());
+    CHECK_FALSE(get_saved_root().contains("default"));
+}
+
+TEST_CASE("PanelWidgetRegistry: screen-scoped widgets are exactly the six",
+          "[panel_widget][widget_scope]") {
+    std::set<std::string> screen;
+    for (const auto& def : get_all_widget_defs()) {
+        if (def.scope == WidgetScope::Screen) {
+            screen.insert(def.id);
+        }
+    }
+    const std::set<std::string> expected = {"network", "clock",         "lock",
+                                            "tips",    "notifications", "shutdown"};
+    REQUIRE(screen == expected);
+    REQUIRE(is_screen_scoped("clock"));
+    REQUIRE_FALSE(is_screen_scoped("host_health"));
+    REQUIRE_FALSE(is_screen_scoped("no_such_widget"));
+}
+
+// ============================================================================
+// import_layout: a layout authored for another grid
+// ============================================================================
+
+namespace {
+
+json import_widget(const char* id, int col, int row, int colspan, int rowspan,
+                   const json& config = json::object()) {
+    json w{{"id", id},   {"enabled", true},    {"col", col},
+           {"row", row}, {"colspan", colspan}, {"rowspan", rowspan}};
+    if (!config.empty()) {
+        w["config"] = config;
+    }
+    return w;
+}
+
+helix::home_layout::ParsedLayout make_import(int cols, int rows, const json& widgets,
+                                             int main_page_index = 0) {
+    json payload{{"pages", json::array({json{{"id", "main"}, {"widgets", widgets}}})},
+                 {"main_page_index", main_page_index}};
+    return {cols, rows, payload};
+}
+
+/// A 12x8 arrangement holding a widget with per-widget config.
+json source_widgets_12x8() {
+    return json::array({import_widget("printer_image", 0, 0, 4, 4),
+                        import_widget("print_status", 4, 0, 6, 4, json{{"style", "compact"}}),
+                        import_widget("temperature", 0, 4, 2, 2),
+                        import_widget("fan", 2, 4, 2, 2)});
+}
+
+std::vector<LegacyPlacement> placements_of(const json& widgets) {
+    std::vector<LegacyPlacement> out;
+    for (const auto& w : widgets) {
+        out.push_back({w["id"].get<std::string>(), w["col"].get<int>(), w["row"].get<int>(),
+                       w["colspan"].get<int>(), w["rowspan"].get<int>()});
+    }
+    return out;
+}
+
+const PanelWidgetEntry* find_entry(const PanelWidgetConfig& wc, const std::string& id) {
+    for (const auto& page : wc.pages()) {
+        for (const auto& e : page.widgets) {
+            if (e.id == id) {
+                return &e;
+            }
+        }
+    }
+    return nullptr;
+}
+
+/// Everything the pages hold, for an exact before/after comparison.
+json pages_json(const PanelWidgetConfig& wc) {
+    json out = json::array();
+    for (const auto& page : wc.pages()) {
+        json widgets = json::array();
+        for (const auto& e : page.widgets) {
+            widgets.push_back({e.id, e.enabled, e.config, e.col, e.row, e.colspan, e.rowspan});
+        }
+        out.push_back({page.id, widgets, page.retained});
+    }
+    return json{{"pages", out}, {"main", wc.main_page_index()}};
+}
+
+/// A client holding its own default on 16x10, now showing 12x8: one parked grid.
+void prepare_client_with_parked_grid(PanelWidgetConfig& wc) {
+    wc.load();
+    wc.apply_pending_anchors(16, 10);
+    wc.switch_to_grid(12, 8);
+}
+
+} // namespace
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "import_layout: same grid copies placements one-to-one",
+                 "[widget_config][import_layout]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    prepare_client_with_parked_grid(wc);
+
+    const json src = source_widgets_12x8();
+    REQUIRE(wc.import_layout(make_import(12, 8, src), 12, 8));
+    CHECK(wc.grid_signature() == "12x8");
+    for (const auto& w : src) {
+        const std::string id = w["id"].get<std::string>();
+        INFO("widget " << id);
+        const auto* e = find_entry(wc, id);
+        REQUIRE(e != nullptr);
+        CHECK(e->enabled);
+        CHECK(e->col == w["col"].get<int>());
+        CHECK(e->row == w["row"].get<int>());
+        CHECK(e->colspan == w["colspan"].get<int>());
+        CHECK(e->rowspan == w["rowspan"].get<int>());
+        CHECK(e->config == w.value("config", json::object()));
+    }
+    CHECK(get_saved_root().value("grid", "") == "12x8");
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "import_layout: 12x8 to 10x8 and to 16x10 port through layout_port",
+                 "[widget_config][import_layout]") {
+    const auto [cols, rows] = GENERATE(std::pair<int, int>{10, 8}, std::pair<int, int>{16, 10});
+    INFO("target " << cols << "x" << rows);
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    prepare_client_with_parked_grid(wc);
+
+    const json src = source_widgets_12x8();
+    REQUIRE(wc.import_layout(make_import(12, 8, src), cols, rows));
+    CHECK(wc.grid_signature() == std::to_string(cols) + "x" + std::to_string(rows));
+
+    const auto expected = port_legacy_layout(placements_of(src), 12, 8, cols, rows);
+    for (const auto& p : expected) {
+        INFO("widget " << p.id);
+        const auto* e = find_entry(wc, p.id);
+        REQUIRE(e != nullptr);
+        CHECK(e->col == (p.seated ? p.col : -1));
+        CHECK(e->row == (p.seated ? p.row : -1));
+        if (p.seated) {
+            CHECK(e->colspan == p.colspan);
+            CHECK(e->rowspan == p.rowspan);
+        }
+    }
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "import_layout: the import is the user's layout",
+                 "[widget_config][import_layout]") {
+    const auto [cols, rows] = GENERATE(std::pair<int, int>{12, 8}, std::pair<int, int>{10, 8});
+    INFO("target " << cols << "x" << rows);
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    wc.load();
+    REQUIRE(wc.has_pending_anchors());
+
+    REQUIRE(wc.import_layout(make_import(12, 8, source_widgets_12x8()), cols, rows));
+    CHECK_FALSE(wc.is_unedited_default());
+    CHECK_FALSE(wc.has_pending_anchors());
+    CHECK(wc.default_signature().empty());
+    CHECK_FALSE(wc.reresolve_default_if_changed(cols, rows));
+    CHECK_FALSE(get_saved_root().contains("default"));
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture, "import_layout: parked grids are cleared",
+                 "[widget_config][import_layout]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    prepare_client_with_parked_grid(wc);
+    REQUIRE(get_saved_root().contains("parked_grids"));
+
+    const json src = source_widgets_12x8();
+    REQUIRE(wc.import_layout(make_import(12, 8, src), 12, 8));
+    CHECK_FALSE(get_saved_root().contains("parked_grids"));
+
+    wc.switch_to_grid(16, 10);
+    const auto expected = port_legacy_layout(placements_of(src), 12, 8, 16, 10);
+    for (const auto& p : expected) {
+        INFO("widget " << p.id);
+        const auto* e = find_entry(wc, p.id);
+        REQUIRE(e != nullptr);
+        CHECK(e->enabled);
+        CHECK(e->col == (p.seated ? p.col : -1));
+        CHECK(e->row == (p.seated ? p.row : -1));
+    }
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "import_layout: client screen-scoped defaults are appended unplaced",
+                 "[widget_config][import_layout]") {
+    std::set<std::string> screen_defaults;
+    for (const auto& e : PanelWidgetConfig::build_default_grid()) {
+        if (e.enabled && is_screen_scoped(e.id)) {
+            screen_defaults.insert(e.id);
+        }
+    }
+    REQUIRE_FALSE(screen_defaults.empty());
+
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    prepare_client_with_parked_grid(wc);
+    REQUIRE(wc.import_layout(make_import(12, 8, source_widgets_12x8()), 10, 8));
+
+    const auto& main = wc.pages()[wc.main_page_index()].widgets;
+    for (const auto& id : screen_defaults) {
+        INFO("widget " << id);
+        const auto n = std::count_if(main.begin(), main.end(),
+                                     [&](const PanelWidgetEntry& e) { return e.id == id; });
+        CHECK(n == 1);
+        CHECK(wc.is_enabled(id));
+        CHECK_FALSE(wc.is_placed(id));
+    }
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "import_layout: an unusable import is rejected and changes nothing",
+                 "[widget_config][import_layout]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    prepare_client_with_parked_grid(wc);
+
+    const auto pages_before = pages_json(wc);
+    const std::string grid_before = wc.grid_signature();
+    const std::string signature_before = wc.default_signature();
+    const bool unedited_before = wc.is_unedited_default();
+    const json saved_before = get_saved_root();
+    REQUIRE(saved_before.contains("parked_grids"));
+
+    SECTION("import of only screen-scoped widgets is rejected") {
+        CHECK_FALSE(wc.import_layout(
+            make_import(12, 8, json::array({import_widget("clock", 0, 0, 4, 2)})), 12, 8));
+    }
+    SECTION("import whose pages are all empty is rejected") {
+        json payload{{"pages", json::array({json{{"id", "main"}, {"widgets", json::array()}},
+                                            json{{"id", "p2"}, {"widgets", json::array()}}})},
+                     {"main_page_index", 0}};
+        CHECK_FALSE(wc.import_layout({12, 8, payload}, 12, 8));
+    }
+    SECTION("import holding only unknown widgets is rejected") {
+        CHECK_FALSE(wc.import_layout(
+            make_import(12, 8, json::array({import_widget("no_such_widget", 0, 0, 2, 2)})), 12, 8));
+    }
+    SECTION("a non-positive grid is rejected") {
+        CHECK_FALSE(wc.import_layout(make_import(12, 8, source_widgets_12x8()), 0, 8));
+        CHECK_FALSE(wc.import_layout(make_import(12, 8, source_widgets_12x8()), 12, -1));
+        CHECK_FALSE(wc.import_layout(make_import(0, 8, source_widgets_12x8()), 12, 8));
+    }
+
+    CHECK(pages_json(wc) == pages_before);
+    CHECK(wc.grid_signature() == grid_before);
+    CHECK(wc.default_signature() == signature_before);
+    CHECK(wc.is_unedited_default() == unedited_before);
+    CHECK(get_saved_root() == saved_before);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "import_layout: spans larger than the grid and negative origins are clamped, "
+                 "never off-grid",
+                 "[widget_config][import_layout]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    prepare_client_with_parked_grid(wc);
+
+    const json src =
+        json::array({import_widget("print_status", 0, 0, 999, 4),
+                     import_widget("temperature", -5, 4, 2, 2), import_widget("fan", 4, 4, 2, 2)});
+    REQUIRE(wc.import_layout(make_import(12, 8, src), 12, 8));
+    int placed = 0;
+    for (const auto& page : wc.pages()) {
+        for (const auto& e : page.widgets) {
+            if (!e.has_grid_position()) {
+                continue;
+            }
+            INFO("widget " << e.id << " at " << e.col << "," << e.row << " span " << e.colspan
+                           << "x" << e.rowspan);
+            CHECK(e.col >= 0);
+            CHECK(e.row >= 0);
+            CHECK(e.col + e.colspan <= 12);
+            CHECK(e.row + e.rowspan <= 8);
+            ++placed;
+        }
+    }
+    CHECK(placed > 0);
+}
+
+TEST_CASE_METHOD(PanelWidgetConfigFixture,
+                 "import_layout: unknown widget id lands in retained, not in widgets",
+                 "[widget_config][import_layout]") {
+    setup_empty_config();
+    PanelWidgetConfig wc("home", config);
+    prepare_client_with_parked_grid(wc);
+
+    json src = source_widgets_12x8();
+    src.push_back(import_widget("no_such_widget", 10, 0, 2, 2));
+    REQUIRE(wc.import_layout(make_import(12, 8, src), 12, 8));
+
+    CHECK(find_entry(wc, "no_such_widget") == nullptr);
+    const json& retained = wc.pages()[0].retained;
+    REQUIRE(retained.is_array());
+    REQUIRE(retained.size() == 1);
+    CHECK(retained[0]["id"] == "no_such_widget");
 }

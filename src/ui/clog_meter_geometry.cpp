@@ -61,6 +61,9 @@ ClogNote clog_meter_note(bool tripped, bool has_reason, bool tangle_active, bool
 }
 
 ClogMeterStatus clog_meter_status(int mode, int value, int warning, int danger_pct) {
+    if (static_cast<ClogMeterMode>(mode) == ClogMeterMode::Motion && value < 0) {
+        return ClogMeterStatus::Off;
+    }
     if (warning != 0) {
         return ClogMeterStatus::Fault;
     }
@@ -86,6 +89,17 @@ ClogMeterStatus buffer_fault_status(const BufferHealth& health) {
 ClogMeterStatus pressure_status_of_bias(float bias) {
     const float clamped = std::isnan(bias) ? 0.0f : std::clamp(bias, -1.0f, 1.0f);
     return pressure_status(static_cast<int>(std::lround(clamped * 100.0f)));
+}
+
+int motion_sensor_value(bool armed, bool filament_moving, bool print_running) {
+    if (!armed) {
+        return kMotionDisarmedValue;
+    }
+    return !filament_moving && print_running ? kMotionJammedValue : kMotionMovingValue;
+}
+
+bool clog_meter_is_state(int mode) {
+    return static_cast<ClogMeterMode>(mode) == ClogMeterMode::Motion;
 }
 
 bool clog_meter_is_symmetrical(int mode) {
@@ -126,6 +140,7 @@ const char* buffer_status_token(ClogMeterStatus s) {
         return "warning";
     case ClogMeterStatus::Fault:
         return "danger";
+    case ClogMeterStatus::Off:
     case ClogMeterStatus::Ok:
         break;
     }
@@ -140,7 +155,8 @@ BufferLean buffer_lean(float bias) {
 }
 
 bool clog_meter_is_safe(int mode, int value) {
-    return static_cast<ClogMeterMode>(mode) == ClogMeterMode::Buffer && value == 0;
+    const auto m = static_cast<ClogMeterMode>(mode);
+    return value == 0 && (m == ClogMeterMode::Buffer || m == ClogMeterMode::Motion);
 }
 
 ClogBarGeometry clog_bar_geometry(int mode, int value, int danger_pct, int peak_pct, int track_w) {
@@ -181,8 +197,14 @@ ClogBarGeometry clog_bar_geometry(int mode, int value, int danger_pct, int peak_
         g.marker_x = g.fill_w;
 
         g.danger_lo_w = 0;
-        g.danger_hi_x = scale(danger_pct, track_w, 100);
-        g.danger_hi_w = std::max(0, track_w - g.danger_hi_x);
+        if (clog_meter_is_state(mode)) {
+            // A state has no threshold to approach: the fill alone says it.
+            g.danger_hi_x = track_w;
+            g.danger_hi_w = 0;
+        } else {
+            g.danger_hi_x = scale(danger_pct, track_w, 100);
+            g.danger_hi_w = std::max(0, track_w - g.danger_hi_x);
+        }
 
         g.peak_x = scale(peak_pct, track_w, 100);
     }

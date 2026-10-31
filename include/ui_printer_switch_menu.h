@@ -7,6 +7,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace helix::ui {
 
@@ -46,13 +48,28 @@ class PrinterSwitchMenu : public ContextMenu {
     void on_created(lv_obj_t* menu) override;
     void on_backdrop_clicked() override;
 
+    /// As wide as the longest printer name, up to half a landscape screen or the whole
+    /// width of a portrait one less its margins; past that, names ellipsize.
+    CardWidth card_width() const override {
+        return {50, 160, 0, true, 100};
+    }
+    int32_t content_width() const override {
+        return widest_row_;
+    }
+
   private:
     void populate_printer_list();
+    /// Sets widest_row_ from the printer rows, the header and the Add button, laid out once
+    void measure_rows(lv_obj_t* printer_list,
+                      const std::vector<std::pair<lv_obj_t*, std::string>>& rows);
     void handle_printer_selected(const std::string& printer_id);
     void handle_add_printer();
     void dispatch_switch_action(MenuAction action, const std::string& printer_id = "");
 
     SwitchCallback switch_callback_;
+
+    /// Widest printer row populate_printer_list() built, inside the card's padding
+    int32_t widest_row_ = 0;
 
     static bool s_callbacks_registered_;
 

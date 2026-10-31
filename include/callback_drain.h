@@ -31,7 +31,7 @@ namespace helix {
  *         than treating it as success.
  */
 inline bool drain_shared_holders(std::shared_mutex& m, std::chrono::milliseconds timeout) {
-    constexpr auto POLL_INTERVAL = std::chrono::milliseconds(5);
+    constexpr auto kPollInterval = std::chrono::milliseconds(5);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
     do {
@@ -41,7 +41,7 @@ inline bool drain_shared_holders(std::shared_mutex& m, std::chrono::milliseconds
             m.unlock();
             return true;
         }
-        std::this_thread::sleep_for(POLL_INTERVAL);
+        std::this_thread::sleep_for(kPollInterval);
     } while (std::chrono::steady_clock::now() < deadline);
 
     return false;

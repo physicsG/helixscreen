@@ -9,22 +9,31 @@
        branch ships it unconditionally and only the faulted one shows it.
 
        All gates are bind-based: the banner row hides unless the heater is
-       faulted, inhibited or offline; offline swaps the reason text for
-       "Heater offline" and hides Reset (nothing to reset into a dead
-       appliance). Fires the TemperatureService XML callback that delegates
-       to the globally registered TemperatureController. -->
+       faulted, inhibited, offline or refused our last target; offline swaps
+       the reason text for "Heater offline" and hides Reset (nothing to reset
+       into a dead appliance). A refused target with no fault behind it shows
+       the heater's reason, with Retry when the backend has a route around
+       the gcode queue, which a wait on the chamber may be holding. Fires the TemperatureService XML
+       callbacks that delegate to the globally registered TemperatureController.
+       Also on the print-status panel, where a refused target matters most. -->
   <view name="chamber_fault_banner"
         width="100%" height="content" flex_flow="row" style_pad_all="#space_xs" style_pad_gap="#space_xs"
         style_flex_cross_place="center" scrollable="false" style_bg_color="#danger" style_bg_opa="25"
         style_radius="#border_radius_sm" style_border_width="#border_width" style_border_color="#danger">
-    <bind_flag_if cond="chamber_heater_fault or chamber_heater_inhibited or chamber_heater_offline"
+    <bind_flag_if cond="chamber_heater_fault or chamber_heater_inhibited or chamber_heater_offline or chamber_heater_command_rejected"
                   flag="hidden" invert="true"/>
     <text_small name="offline_label" text="Heater offline" style_text_color="#danger" flex_grow="1" long_mode="dots">
       <bind_flag_if cond="chamber_heater_offline" flag="hidden" invert="true"/>
     </text_small>
     <text_small name="fault_reason_label"
                 bind_text="chamber_heater_fault_reason_text" style_text_color="#danger" flex_grow="1" long_mode="dots">
-      <bind_flag_if cond="chamber_heater_offline" flag="hidden"/>
+      <bind_flag_if cond="chamber_heater_offline or (chamber_heater_fault eq 0 and chamber_heater_inhibited eq 0)"
+                    flag="hidden"/>
+    </text_small>
+    <text_small name="rejection_reason_label"
+                bind_text="chamber_heater_rejection_text" style_text_color="#danger" flex_grow="1" long_mode="dots">
+      <bind_flag_if cond="chamber_heater_command_rejected and chamber_heater_offline eq 0 and chamber_heater_fault eq 0 and chamber_heater_inhibited eq 0"
+                    flag="hidden" invert="true"/>
     </text_small>
     <!-- Pin the text to the font_small token, like the filament preset
          buttons: the button's width sets how much of the row the reason
@@ -33,8 +42,17 @@
                height="#button_height_sm_tiny" text="Reset" variant="ghost" style_text_font="#font_small"
                style_pad_left="#space_xs" style_pad_right="#space_xs" style_border_width="#border_width"
                style_border_color="#border" style_border_opa="255">
-      <bind_flag_if cond="chamber_heater_offline" flag="hidden"/>
+      <bind_flag_if cond="chamber_heater_offline or (chamber_heater_fault eq 0 and chamber_heater_inhibited eq 0)"
+                    flag="hidden"/>
       <event_cb trigger="clicked" callback="on_chamber_fault_reset_clicked"/>
+    </ui_button>
+    <ui_button name="retry_target_button"
+               height="#button_height_sm_tiny" text="Retry" variant="ghost" style_text_font="#font_small"
+               style_pad_left="#space_xs" style_pad_right="#space_xs" style_border_width="#border_width"
+               style_border_color="#border" style_border_opa="255">
+      <bind_flag_if cond="chamber_heater_command_rejected and chamber_heater_offline eq 0 and chamber_heater_fault eq 0 and chamber_heater_inhibited eq 0 and printer_has_chamber_target_route"
+                    flag="hidden" invert="true"/>
+      <event_cb trigger="clicked" callback="on_chamber_retry_target_clicked"/>
     </ui_button>
   </view>
 </component>

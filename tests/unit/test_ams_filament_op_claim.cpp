@@ -260,7 +260,7 @@ TEST_CASE_METHOD(ClaimFixture, "AMS filament op: the loser is refused, never blo
 
 TEST_CASE_METHOD(ClaimFixture, "AMS filament op: exactly one of many concurrent ops wins",
                  "[ams][threading][claim]") {
-    constexpr int THREADS = 8;
+    constexpr int kThreads = 8;
 
     // Model the real shape of the window on AFC / ACE / CFS / AD5X: the op wins
     // the gate, does work, and only THEN publishes the busy action. Without the
@@ -270,10 +270,10 @@ TEST_CASE_METHOD(ClaimFixture, "AMS filament op: exactly one of many concurrent 
     backend->publish_busy_action = true;
 
     std::atomic<bool> go{false};
-    std::vector<AmsError> results(THREADS, AmsErrorHelper::busy("not yet run"));
+    std::vector<AmsError> results(kThreads, AmsErrorHelper::busy("not yet run"));
     std::vector<std::thread> threads;
-    threads.reserve(THREADS);
-    for (int i = 0; i < THREADS; ++i) {
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
         threads.emplace_back([&, i] {
             while (!go.load(std::memory_order_acquire)) {
                 std::this_thread::yield();

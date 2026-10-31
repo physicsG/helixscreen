@@ -245,23 +245,23 @@ TEST_CASE("min note floor defaults to 20 ms and HELIX_PWM_MIN_NOTE_MS clamps to 
 TEST_CASE("PCM sample rate is 8 kHz", "[sound][pwm]") {
     // Piezo roll-off is ~3-4 kHz; rendering faster buys no audible content
     // while halving the time each duty-cycle write gets.
-    REQUIRE(PWMSoundBackend::PCM_SAMPLE_RATE == 8000);
+    REQUIRE(PWMSoundBackend::kPcmSampleRate == 8000);
 }
 
 TEST_CASE("PCM carrier frequency stays at 62.5 kHz", "[sound][pwm]") {
-    REQUIRE(PWMSoundBackend::PCM_CARRIER_HZ == 62500);
+    REQUIRE(PWMSoundBackend::kPcmCarrierHz == 62500);
 }
 
 TEST_CASE("PCM pacing constants are pinned", "[sound][pwm]") {
-    REQUIRE(PWMSoundBackend::PCM_RENDER_BUFFER_FRAMES == 512);
-    REQUIRE(PWMSoundBackend::PCM_PARK_SILENT_BUFFERS == 8);
-    REQUIRE(PWMSoundBackend::PCM_PARK_POLL_NS == 10000000LL);
-    REQUIRE(PWMSoundBackend::PCM_CATCHUP_MAX_SAMPLES == 2);
-    REQUIRE(PWMSoundBackend::PCM_SPIN_BUDGET_NS == 20000LL);
+    REQUIRE(PWMSoundBackend::kPcmRenderBufferFrames == 512);
+    REQUIRE(PWMSoundBackend::kPcmParkSilentBuffers == 8);
+    REQUIRE(PWMSoundBackend::kPcmParkPollNs == 10000000LL);
+    REQUIRE(PWMSoundBackend::kPcmCatchupMaxSamples == 2);
+    REQUIRE(PWMSoundBackend::kPcmSpinBudgetNs == 20000LL);
 }
 
 TEST_CASE("park_probe_frames derives frames from poll interval and rate", "[sound][pwm]") {
-    // PCM_PARK_POLL_NS * PCM_SAMPLE_RATE / 1e9 = 10000000 * 8000 / 1e9 = 80
+    // kPcmParkPollNs * kPcmSampleRate / 1e9 = 10000000 * 8000 / 1e9 = 80
     REQUIRE(PWMSoundBackend::park_probe_frames() == 80);
 }
 
@@ -871,7 +871,7 @@ class VirtualClock {
     /// Virtual time starts here — far from machine-uptime-scale CLOCK_MONOTONIC
     /// values, so a schedule base wrongly derived from the real clock is
     /// trivially distinguishable.
-    static constexpr int64_t START_NS = 1000000000LL;
+    static constexpr int64_t kStartNs = 1000000000LL;
 
     int64_t read() {
         if (jump_armed_.exchange(false)) {
@@ -906,7 +906,7 @@ class VirtualClock {
   private:
     // now_/deadlines_ are only touched from the render thread (both seams run
     // there); the test thread only arms the jump and reads the counters.
-    int64_t now_ = START_NS;
+    int64_t now_ = kStartNs;
     int64_t jump_ns_ = 0;
     std::atomic<bool> jump_armed_{false};
     std::vector<int64_t> deadlines_;
@@ -1016,7 +1016,7 @@ TEST_CASE("non-zero buffer resets the silence run", "[sound][pwm]") {
     std::atomic<bool> gate_open{false};
     PwmVirtualRun run(3);
     run.backend->set_render_source([&](float* buf, size_t frames, int) {
-        if (frames != static_cast<size_t>(PWMSoundBackend::PCM_RENDER_BUFFER_FRAMES)) {
+        if (frames != static_cast<size_t>(PWMSoundBackend::kPcmRenderBufferFrames)) {
             std::memset(buf, 0, frames * sizeof(float)); // probes stay silent
             return;
         }
@@ -1061,7 +1061,7 @@ TEST_CASE("catch-up drops samples instead of bursting", "[sound][pwm]") {
     PwmVirtualRun run(8); // non-zero content never parks
     PWMSoundBackend* backend = run.backend.get();
     run.backend->set_render_source([&](float* buf, size_t frames, int) {
-        if (frames != static_cast<size_t>(PWMSoundBackend::PCM_RENDER_BUFFER_FRAMES)) {
+        if (frames != static_cast<size_t>(PWMSoundBackend::kPcmRenderBufferFrames)) {
             return;
         }
         int n = full_buffers.fetch_add(1);
@@ -1076,7 +1076,7 @@ TEST_CASE("catch-up drops samples instead of bursting", "[sound][pwm]") {
         if (n == 2) {
             // Arm a +10-sample-interval jump: it fires on the render thread's
             // next now_fn() call, mid-buffer — a scheduling stall.
-            run.clock.arm_jump(10 * (1000000000LL / PWMSoundBackend::PCM_SAMPLE_RATE));
+            run.clock.arm_jump(10 * (1000000000LL / PWMSoundBackend::kPcmSampleRate));
         }
     });
 
@@ -1104,7 +1104,7 @@ TEST_CASE("steady playback paces from the virtual clock's base", "[sound][pwm]")
         }
     });
 
-    const int64_t interval = 1000000000LL / PWMSoundBackend::PCM_SAMPLE_RATE;
+    const int64_t interval = 1000000000LL / PWMSoundBackend::kPcmSampleRate;
     REQUIRE(wait_for([&] { return run.clock.deadline_count() >= 24; }));
     run.backend->clear_render_source();
 
@@ -1113,7 +1113,7 @@ TEST_CASE("steady playback paces from the virtual clock's base", "[sound][pwm]")
     // The schedule base must come from the injected clock (virtual start +
     // one sample interval for the first deadline). A CLOCK_MONOTONIC base
     // sits at machine-uptime scale — far outside this window.
-    REQUIRE(deadlines[0] - VirtualClock::START_NS <= 2 * interval);
+    REQUIRE(deadlines[0] - VirtualClock::kStartNs <= 2 * interval);
     // Steady pacing: every consecutive deadline is exactly one sample
     // interval after the previous one.
     for (size_t i = 1; i < deadlines.size(); i++) {
@@ -1126,7 +1126,7 @@ TEST_CASE("a render source that fills nothing parks - stale buffer content is no
     std::atomic<int> full_buffers{0};
     PwmVirtualRun run(2);
     run.backend->set_render_source([&full_buffers](float* buf, size_t frames, int) {
-        if (frames != static_cast<size_t>(PWMSoundBackend::PCM_RENDER_BUFFER_FRAMES)) {
+        if (frames != static_cast<size_t>(PWMSoundBackend::kPcmRenderBufferFrames)) {
             return; // probe calls: write nothing
         }
         // First buffer: real audio. Every later buffer: return without
@@ -1156,7 +1156,7 @@ TEST_CASE("clear_render_source joins the render thread even while parked", "[sou
     std::atomic<int> full_buffers{0};
     PwmVirtualRun run(2);
     run.backend->set_render_source([&full_buffers](float* buf, size_t frames, int) {
-        if (frames != static_cast<size_t>(PWMSoundBackend::PCM_RENDER_BUFFER_FRAMES)) {
+        if (frames != static_cast<size_t>(PWMSoundBackend::kPcmRenderBufferFrames)) {
             return;
         }
         if (full_buffers.fetch_add(1) == 0) {
@@ -1213,7 +1213,7 @@ TEST_CASE("render loop paces near 8 kHz with real clock", "[sound][pwm][slow]") 
     // it, and load can only make these writes slower. A loop that stops
     // pacing bursts them in a few ms; an over-sleep of orders of magnitude
     // (a unit error in the deadline) misses wait_for's timeout.
-    constexpr uint64_t WRITES = 800; // 100 ms of audio at 8 kHz
+    constexpr uint64_t kWrites = 800; // 100 ms of audio at 8 kHz
     const auto start = std::chrono::steady_clock::now();
     backend.set_render_source([](float* buf, size_t frames, int sr) {
         for (size_t i = 0; i < frames; i++) {
@@ -1222,7 +1222,7 @@ TEST_CASE("render loop paces near 8 kHz with real clock", "[sound][pwm][slow]") 
         }
     });
 
-    REQUIRE(wait_for([&] { return PWMSoundBackendTestAccess::duty_writes(backend) >= WRITES; }));
+    REQUIRE(wait_for([&] { return PWMSoundBackendTestAccess::duty_writes(backend) >= kWrites; }));
     const auto elapsed = std::chrono::steady_clock::now() - start;
     backend.clear_render_source();
 

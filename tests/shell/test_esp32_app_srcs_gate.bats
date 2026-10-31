@@ -82,39 +82,48 @@ decide_all() {
     [[ "$output" == *"src/printer/secretly_new.cpp"* ]]
 }
 
-# --------------------------------------------- CMake-consumability (the E1 class)
+# --------------------------------------------- CMake-consumability
 #
-# CMakeLists.txt reads the manifest with REGEX "^[^#].*\.(cpp|c)$". A line that
-# does not END at the suffix never reaches the build, and the gate must not
-# bless a line CMake will throw away — otherwise the gate goes green and the
-# firmware link fails 25 minutes later.
+# components/helixapp/app_srcs.cmake reads the manifest: a line holding one
+# .cpp/.c path, with optional surrounding whitespace and an optional trailing
+# '# comment', is compiled; '#' lines are comments. The gate parses the same
+# way, so it never blesses a line CMake drops and never rejects one CMake keeps.
 
-@test "rejects a manifest path with a trailing '# reason' comment (CMake drops it)" {
-    printf 'src/printer/compiled.cpp\nsrc/printer/secretly_new.cpp  # keep, AMS needs it\n' \
+READER="firmware/helixscreen-esp32/components/helixapp/app_srcs.cmake"
+
+# The paths CMake's own reader takes from a manifest, one per line.
+cmake_reads() {
+    command -v cmake >/dev/null || skip "cmake is not installed"
+    cat > "$BATS_TEST_TMPDIR/read.cmake" <<CMAKE
+include("$PWD/$READER")
+helix_read_app_srcs("$1" out)
+foreach(p IN LISTS out)
+    message("\${p}")
+endforeach()
+CMAKE
+    cmake -P "$BATS_TEST_TMPDIR/read.cmake" 2>&1
+}
+
+@test "a trailing '# reason', trailing or leading whitespace still compiles the path" {
+    printf 'src/printer/compiled.cpp  # keep, AMS needs it\n  src/printer/secretly_new.cpp   \n' \
         > "$ROOT/manifest.txt"
     run_gate
+    [ "$status" -eq 0 ] || fail "$output"
+}
+
+@test "CMake's reader takes the same paths the gate does" {
+    printf '# heading; with [ an unbalanced bracket\nsrc/a.cpp  # reason\n  src/b.c\t\n# MOCK: src/mock.cpp\nsrc/c.cpp\n' \
+        > "$BATS_TEST_TMPDIR/m.txt"
+    run cmake_reads "$BATS_TEST_TMPDIR/m.txt"
+    [ "$status" -eq 0 ] || fail "$output"
+    [ "$output" = "$(printf 'src/a.cpp\nsrc/b.c\nsrc/c.cpp')" ] || fail "$output"
+}
+
+@test "a path line carrying ; or [ is refused, since CMake would split or merge it" {
+    printf 'src/printer/compiled.cpp\nsrc/printer/secretly_new.cpp  # needs a; b\n' > "$ROOT/manifest.txt"
+    run_gate
     [ "$status" -eq 1 ]
-    contains "CMake will NOT compile" "$output"
     contains "line 2" "$output"
-    contains "secretly_new.cpp" "$output"
-    # and it must NOT be counted as compiled: the file is not silently "decided"
-    [[ "$output" == *"DROPPED"* ]]
-}
-
-@test "rejects a manifest path with trailing whitespace (CMake drops it)" {
-    printf 'src/printer/compiled.cpp\nsrc/printer/secretly_new.cpp   \n' > "$ROOT/manifest.txt"
-    run_gate
-    [ "$status" -eq 1 ]
-    contains "CMake will NOT compile" "$output"
-    [[ "$output" == *"trailing whitespace"* ]]
-}
-
-@test "rejects a manifest path with leading whitespace (CMake builds a bogus path)" {
-    printf 'src/printer/compiled.cpp\n  src/printer/secretly_new.cpp\n' > "$ROOT/manifest.txt"
-    run_gate
-    [ "$status" -eq 1 ]
-    contains "CMake will NOT compile" "$output"
-    [[ "$output" == *"leading whitespace"* ]]
 }
 
 @test "rejects a manifest line whose suffix is not .cpp/.c" {
@@ -123,7 +132,7 @@ decide_all() {
     run_gate
     [ "$status" -eq 1 ]
     contains "oops.h" "$output"
-    [[ "$output" == *"does not end in .cpp/.c"* ]]
+    [[ "$output" == *"does not name one .cpp/.c path"* ]]
 }
 
 @test "a manifest comment line is still a comment, not a malformed path" {
@@ -301,6 +310,30 @@ CMAKE
 CPP
     run_gate
     [ "$status" -eq 0 ]
+}
+
+@test "a gate the firmware leaves at its include/helix_features.h default is decided by that default" {
+    decide_all
+    mkdir -p "$ROOT/include"
+    printf '#ifndef HELIX_HAS_ACE\n#define HELIX_HAS_ACE 1\n#endif\n#ifndef HELIX_HAS_VIEWER\n#define HELIX_HAS_VIEWER 1\n#endif\n' \
+        > "$ROOT/include/helix_features.h"
+    printf 'target_compile_definitions(${COMPONENT_LIB} PRIVATE\n    HELIX_HAS_VIEWER=0)\n' > "$ROOT/CMakeLists.txt"
+    cat > "$ROOT/src/printer/compiled.cpp" <<'CPP'
+#if !HELIX_HAS_ACE
+    throw 1;
+#endif
+#if HELIX_HAS_VIEWER
+    try { build(); } catch (...) {}
+#endif
+#if HELIX_HAS_ACE
+    try { load(); } catch (...) {}
+#endif
+CPP
+    run_gate
+    [ "$status" -eq 1 ]
+    contains "src/printer/compiled.cpp:8: try" "$output"
+    lacks "compiled.cpp:2:" "$output"
+    lacks "compiled.cpp:5:" "$output"
 }
 
 @test "a branch under a macro the gate cannot evaluate is checked" {

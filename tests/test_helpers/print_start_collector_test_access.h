@@ -6,6 +6,30 @@
 
 class PrintStartCollectorTestAccess {
   public:
+    /// Answer the current wait's read of the command at the print position.
+    static void answer_wait_line(PrintStartCollector& c, const helix::WaitLine& line) {
+        uint64_t gen;
+        {
+            std::lock_guard<std::mutex> lock(c.state_mutex_);
+            gen = c.wait_line_gen_;
+        }
+        c.apply_wait_line(gen, line);
+    }
+    /// The kind of the command read for the current wait; nullopt until a
+    /// read for the current position answers.
+    static std::optional<helix::WaitKind> wait_line_kind(PrintStartCollector& c) {
+        std::lock_guard<std::mutex> lock(c.state_mutex_);
+        if (!c.wait_line_read_) {
+            return std::nullopt;
+        }
+        return c.wait_line_.kind;
+    }
+
+    static bool start_macro_seen_zero(PrintStartCollector& c) {
+        std::lock_guard<std::mutex> lock(c.state_mutex_);
+        return c.start_macro_seen_zero_;
+    }
+
     static bool is_heater_wait_report(const std::string& line) {
         return PrintStartCollector::is_heater_wait_report(line);
     }
@@ -94,6 +118,15 @@ class PrintStartCollectorTestAccess {
         c.update_eta_display();
     }
 
+    /// Fire the collector's periodic ETA timer once, as LVGL would.
+    static void fire_eta_timer(PrintStartCollector& c) {
+        if (!c.eta_timer_) {
+            return;
+        }
+        lv_timer_ready(c.eta_timer_);
+        lv_timer_handler();
+    }
+
     /// Drop all predictor history so compute_predicted_weights() takes the
     /// theoretical-durations path (matches a first print / empty bucket).
     /// start() reloads history from Config, so call this AFTER start().
@@ -128,10 +161,54 @@ class PrintStartCollectorTestAccess {
         return c.mesh_extrapolation_armed_;
     }
 
+    /// Hand the collector a phase-object status as the answer to its
+    /// start-up query, whenever that answer arrives.
+    static void feed_phase_object_seed(PrintStartCollector& c, const nlohmann::json& status) {
+        c.handle_phase_object_status(status, c.run_generation_.load());
+    }
+
+    /// The run a start-up query sent now would belong to.
+    static uint64_t run_generation(PrintStartCollector& c) {
+        return c.run_generation_.load();
+    }
+
+    /// Install the steps the follower reads from the print file's start block.
+    static void set_start_block_steps(PrintStartCollector& c,
+                                      std::vector<helix::StartBlockStep> steps) {
+        std::lock_guard<std::mutex> lock(c.state_mutex_);
+        c.start_block_.set_steps(std::move(steps));
+    }
+
+    /// Show a start-block step as run `run` reached it.
+    static void apply_start_block_step(PrintStartCollector& c, const helix::StartBlockStep& step,
+                                       uint64_t run) {
+        c.apply_start_block_step(step, run);
+    }
+
+    /// Deliver a start-up query answer tagged with run `run`.
+    static void answer_phase_object_query(PrintStartCollector& c, const nlohmann::json& response,
+                                          uint64_t run) {
+        c.apply_phase_object_query(response, run);
+    }
+
     /// Inject predictor history (deterministic per-phase durations) instead of
     /// relying on the theoretical-duration path.
     static void load_prediction_entries(PrintStartCollector& c,
                                         std::vector<helix::PreprintEntry> entries) {
         c.predictor_.load_entries(entries, helix::StartCondition::COLD);
+    }
+
+    /// The phases this run's start said it runs and skips; nullopt until told.
+    static std::optional<helix::PreprintPhaseOverrides> phase_overrides(PrintStartCollector& c) {
+        std::lock_guard<std::mutex> lock(c.state_mutex_);
+        return c.phase_overrides_;
+    }
+
+    /// Drop the client's references to a running collector and leave its ETA
+    /// timer armed, so whoever holds the collector holds the last reference.
+    static void drop_client_references(PrintStartCollector& c) {
+        c.client_.unregister_method_callback("notify_gcode_response", c.handler_name_);
+        c.handler_name_.clear();
+        c.client_.unsubscribe_notify_update(c.macro_subscription_id_.exchange(0));
     }
 };

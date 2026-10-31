@@ -1,0 +1,145 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    Filament dryer home widget. DryerWidget publishes home_dryer_rung (SizeRung), the show
+    flags and the texts below from decide_dryer_layout(); everything this file shows,
+    hides or sizes binds off them. A tap opens the environment overlay (or the chamber or
+    bed modal when no box has a dryer); at Full a tap on a row opens that row's source.
+    Nothing here starts or stops a cycle.
+
+    Rungs: 0 glance (drop over RH, or a ring), 1 strip (one row: drop and RH, or time and
+    temperature), 2 column (a stack of the same), 3 cell (stack with a ring), 4 wide (ring beside its details, or drop beside
+    the humidity), 5 full (one row per source).
+  -->
+  <styles>
+    <style name="df_xs" text_font="#font_xs"/>
+    <style name="df_small" text_font="#font_small"/>
+    <style name="df_body" text_font="#font_body"/>
+    <style name="df_heading" text_font="#font_heading"/>
+    <style name="df_stack"
+           layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center" flex_track_place="center"/>
+    <style name="df_beside"
+           layout="flex" flex_flow="row" flex_main_place="center" flex_cross_place="center" flex_track_place="center"/>
+    <style name="df_ring_sm" width="#button_height_sm" height="#button_height_sm"/>
+    <style name="df_ring_md" width="#button_height" height="#button_height"/>
+  </styles>
+  <view name="panel_widget_dryer"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_xxs" scrollable="false">
+    <event_cb trigger="clicked" callback="dryer_clicked_cb"/>
+    <pass_through name="dryer_body"
+                  width="100%" height="100%" style_pad_row="0" style_pad_column="0" flex_flow="column"
+                  style_flex_main_place="center" style_flex_cross_place="center">
+      <!-- Glance to Wide -->
+      <pass_through name="dryer_single"
+                    width="100%" height="content" style_pad_row="#space_xxs" style_pad_column="#space_xs">
+        <bind_flag_if_eq subject="home_dryer_rung" flag="hidden" ref_value="5"/>
+        <bind_style_if name="df_stack" cond="home_dryer_rung eq 0 or home_dryer_rung eq 2 or home_dryer_rung eq 3"/>
+        <bind_style_if name="df_beside" cond="home_dryer_rung eq 1 or home_dryer_rung eq 4"/>
+        <!-- Idle: a drop filled to the highest box humidity, an empty outline with no reading,
+             as large as the room the text leaves (DryerVerdict::drop_rung). -->
+        <humidity_drop name="dryer_drop" bind_value="home_dryer_rh_x10" size="xs" clickable="false" event_bubble="true">
+          <bind_flag_if_eq subject="home_dryer_show_drop" flag="hidden" ref_value="0"/>
+          <bind_tile_rung ladder="icon" subject="home_dryer_drop_rung"/>
+        </humidity_drop>
+        <!-- Drying, in a Column: the heater over the time and temperature. -->
+        <icon name="dryer_icon" src="heat_wave" size="xs" variant="muted" clickable="false" event_bubble="true">
+          <bind_flag_if_eq subject="home_dryer_show_icon" flag="hidden" ref_value="0"/>
+        </icon>
+        <!-- The time left inside a ring of the cycle's progress. -->
+        <pass_through name="dryer_ring_box">
+          <bind_flag_if_eq subject="home_dryer_show_ring" flag="hidden" ref_value="0"/>
+          <bind_style_if_eq name="df_ring_sm" subject="home_dryer_rung" ref_value="0"/>
+          <bind_style_if_not_eq name="df_ring_md" subject="home_dryer_rung" ref_value="0"/>
+          <helix_progress_arc name="dryer_ring"
+                              width="100%" height="100%" bind_value="home_dryer_ring_pct" bg_start_angle="270"
+                              bg_end_angle="269" start_angle="270" end_angle="270" style_arc_width="#space_xs"
+                              style_arc_width-indicator="#space_xs"/>
+          <text_tiny name="dryer_ring_time"
+                     align="center" bind_text="home_dryer_time_text" clickable="false" event_bubble="true">
+            <bind_style_if_ge name="df_small" subject="home_dryer_rung" ref_value="3"/>
+          </text_tiny>
+        </pass_through>
+        <pass_through name="dryer_info"
+                      width="content" height="content" style_pad_row="#space_xxs" style_pad_column="#space_xs">
+          <bind_flag_if_eq subject="home_dryer_show_info" flag="hidden" ref_value="0"/>
+          <bind_style_if_not_eq name="df_stack" subject="home_dryer_rung" ref_value="1"/>
+          <bind_style_if_eq name="df_beside" subject="home_dryer_rung" ref_value="1"/>
+          <text_tiny name="dryer_time" bind_text="home_dryer_time_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_time" flag="hidden" ref_value="0"/>
+            <bind_style_if_eq name="df_small" subject="home_dryer_rung" ref_value="3"/>
+          </text_tiny>
+          <text_body name="dryer_name" bind_text="home_dryer_name_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_name" flag="hidden" ref_value="0"/>
+          </text_body>
+          <text_tiny name="dryer_temp" bind_text="home_dryer_temp_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_temp" flag="hidden" ref_value="0"/>
+            <bind_style_if_ge name="df_small" subject="home_dryer_rung" ref_value="3"/>
+          </text_tiny>
+          <text_small name="dryer_rh_detail"
+                      bind_text="home_dryer_rh_detail_text" style_text_color="#text_muted" clickable="false"
+                      event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_rh_detail" flag="hidden" ref_value="0"/>
+          </text_small>
+          <!-- Highest box humidity while nothing is drying. -->
+          <text_tiny name="dryer_rh" bind_text="home_dryer_rh_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_rh" flag="hidden" ref_value="0"/>
+            <bind_style_if_eq name="df_body" subject="home_dryer_rung" ref_value="3"/>
+            <bind_style_if_eq name="df_heading" subject="home_dryer_rung" ref_value="4"/>
+          </text_tiny>
+          <text_small name="dryer_status"
+                      bind_text="home_dryer_status_text" style_text_color="#text_muted" clickable="false"
+                      event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_status" flag="hidden" ref_value="0"/>
+            <bind_style_if_eq name="df_xs" subject="home_dryer_rung" ref_value="2"/>
+            <bind_style_if_eq name="df_body" subject="home_dryer_rung" ref_value="4"/>
+          </text_small>
+          <text_small name="dryer_end"
+                      bind_text="home_dryer_end_text" style_text_color="#text_muted" clickable="false"
+                      event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_end" flag="hidden" ref_value="0"/>
+          </text_small>
+          <text_heading name="dryer_count" bind_text="home_dryer_count_text" clickable="false" event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_count" flag="hidden" ref_value="0"/>
+          </text_heading>
+          <text_small name="dryer_times"
+                      bind_text="home_dryer_times_text" style_text_color="#text_muted" clickable="false"
+                      event_bubble="true">
+            <bind_flag_if_eq subject="home_dryer_show_times" flag="hidden" ref_value="0"/>
+          </text_small>
+        </pass_through>
+      </pass_through>
+      <!-- Full: one row per source -->
+      <pass_through name="dryer_list"
+                    width="100%" height="content" flex_flow="column" style_flex_main_place="center"
+                    style_flex_cross_place="start" style_pad_row="#space_xs">
+        <bind_flag_if_not_eq subject="home_dryer_rung" flag="hidden" ref_value="5"/>
+        <repeat count="8">
+          <lv_obj name="dryer_row_${i}"
+                  width="100%" height="content" flex_flow="column" style_pad_all="0" style_pad_row="#space_xxs"
+                  style_bg_opa="0" style_border_width="0" scrollable="false" clickable="true">
+            <bind_flag_if_lt subject="home_dryer_row_count" flag="hidden" ref_value="${i + 1}"/>
+            <event_cb trigger="clicked" callback="dryer_row_clicked_cb" user_data="$i"/>
+            <pass_through width="100%"
+                          height="content" flex_flow="row" style_flex_main_place="space_between"
+                          style_flex_cross_place="center" style_pad_column="#space_xs">
+              <text_small name="dryer_row_name_${i}"
+                          bind_text="home_dryer_row_${i}_name" flex_grow="1" long_mode="dots" clickable="false"
+                          event_bubble="true"/>
+              <text_small name="dryer_row_time_${i}"
+                          bind_text="home_dryer_row_${i}_time" clickable="false" event_bubble="true"/>
+            </pass_through>
+            <progress_bar name="dryer_row_bar_${i}"
+                          height="#space_xs" bind_value="home_dryer_row_${i}_pct" clickable="false" event_bubble="true">
+              <bind_flag_if_lt subject="home_dryer_row_${i}_pct" flag="hidden" ref_value="0"/>
+            </progress_bar>
+            <text_tiny name="dryer_row_detail_${i}"
+                       bind_text="home_dryer_row_${i}_detail" style_text_color="#text_muted" clickable="false"
+                       event_bubble="true"/>
+          </lv_obj>
+        </repeat>
+      </pass_through>
+    </pass_through>
+  </view>
+</component>

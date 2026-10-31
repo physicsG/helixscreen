@@ -46,6 +46,18 @@ _G.collectgarbage = function(opt, ...)
     end
     return collect(opt, ...)
 end
+-- Finalizers run with hooks off, so a __gc that loops would hang the UI thread past any
+-- budget, and one armed in a menu check would act later, outside check mode. Lua marks
+-- an object for finalization only here, so refusing __gc at setmetatable is enough.
+local set_mt, raw_get = setmetatable, rawget
+_G.setmetatable = function(t, mt)
+    if type(mt) == "table" and raw_get(mt, "__gc") ~= nil then
+        error("__gc is not available to plugins", 2)
+    end
+    return set_mt(t, mt)
+end
+-- The shared string metatable is the app's, like the bindings' userdata ones.
+getmetatable("").__metatable = "locked"
 -- An empty result returns at once: stock rep loops n times building nothing, with no
 -- allocation for the memory cap to refuse and no instruction for the time budget to see.
 -- Any non-empty result is sized up front, so the memory cap bounds it.
@@ -130,10 +142,9 @@ std::vector<std::string> require_candidates(const std::string& plugin_dir,
     return {plugin_dir + "/" + rel + ".lua", plugin_dir + "/lib/" + rel + ".lua"};
 }
 
-bool is_plugin_relative_path(std::string_view path) {
-    constexpr std::string_view kExt = ".lua";
-    if (path.empty() || path.size() > 128 || path.front() == '/' || path.size() <= kExt.size() ||
-        path.substr(path.size() - kExt.size()) != kExt)
+bool is_plugin_relative_path(std::string_view path, std::string_view ext) {
+    if (path.empty() || path.size() > 128 || path.front() == '/' || path.size() <= ext.size() ||
+        path.substr(path.size() - ext.size()) != ext)
         return false;
     size_t start = 0;
     while (start <= path.size()) {
@@ -263,6 +274,11 @@ int LuaRuntime::lua_print(lua_State* L) {
 
 int LuaRuntime::lua_require(lua_State* L) {
     auto& rt = from(L);
+    // A module's top level is an ordinary entry's work; run from a check, a refused
+    // call inside it would leave a half-loaded module cached.
+    if (rt.in_check_)
+        return luaL_error(L, "require is not allowed in %s %s", rt.check_article(),
+                          rt.check_label_);
     std::string name = luaL_checkstring(L, 1);
     lua_rawgetp(L, LUA_REGISTRYINDEX, &kLoadedKey);
     lua_getfield(L, -1, name.c_str());
@@ -357,6 +373,90 @@ void LuaRuntime::invoke(int fn_ref, const PushFn& push_args) {
     spawn(push_args);
 }
 
+const char* LuaRuntime::check_article() const {
+    const char c = check_label_[0];
+    return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' ? "an" : "a";
+}
+
+bool LuaRuntime::call_sync(int fn_ref, const PushFn& args, const ReadFn& read, CheckLimits limits) {
+    if (faulted_)
+        return false;
+    if (depth_ > 0) {
+        report_error(std::string(limits.label) + " cannot run inside another plugin entry");
+        return false;
+    }
+    lua_State* co = nullptr;
+    int nargs = 0;
+    {
+        HostWorkGuard host_work(host_work_);
+        lua_rawgeti(L_, LUA_REGISTRYINDEX, fn_ref);
+        co = lua_newthread(L_);
+        threads_[co] = luaL_ref(L_, LUA_REGISTRYINDEX);
+        lua_xmove(L_, co, 1);
+        nargs = args ? args(co) : 0;
+    }
+    if (used_ > limits_.memory_bytes) {
+        lua_settop(co, 0);
+        drop(co);
+        report_error(std::string(limits.label) + " arguments exceed the plugin memory cap");
+        return false;
+    }
+
+    // The overrun of a check is reported, not faulted, so it never takes the enter()
+    // path; the kill flag is cleared here before any later entry can see it.
+    deadline_ = thread_cpu_time() + limits.time_budget;
+    wall_deadline_ = Clock::now() + limits.wall_ceiling;
+    killed_ = false;
+    yielded_for_async_ = false;
+    in_check_ = true;
+    check_label_ = limits.label;
+    ++depth_;
+    int nres = 0;
+    int status = lua_resume(co, L_, nargs, &nres);
+
+    // Everything that can run plugin code stays inside check mode and the check's
+    // budget: reading the results, and closing the thread, which runs any pending
+    // <close> handlers (protected, so one that raises is only a failure).
+    std::string failure;
+    if (killed_) {
+        failure = std::string(limits.label) + " exceeded its time budget";
+    } else if (status == LUA_YIELD) {
+        failure = std::string(limits.label) + " yielded; a check must return without waiting";
+    } else if (status != LUA_OK) {
+        HostWorkGuard host_work(host_work_);
+        const char* msg = lua_tostring(co, -1);
+        luaL_traceback(L_, co, msg ? msg : "(error object is not a string)", 0);
+        if (const char* text = lua_tostring(L_, -1))
+            failure = text;
+        lua_pop(L_, 1);
+    } else if (read) {
+        HostWorkGuard host_work(host_work_);
+        read(co, nres);
+    }
+    const bool killed_before_close = killed_;
+    if (lua_closethread(co, L_) != LUA_OK) {
+        std::string why;
+        if (killed_ && !killed_before_close) {
+            why = std::string(limits.label) + " exceeded its time budget in a <close> handler";
+        } else {
+            const char* msg = lua_tostring(co, -1);
+            why = std::string(limits.label) +
+                  " <close> handler failed: " + (msg ? msg : "(error object is not a string)");
+        }
+        failure = failure.empty() ? why : failure + "; " + why;
+    }
+    --depth_;
+    in_check_ = false;
+    killed_ = false;
+    yielded_for_async_ = false;
+
+    drop(co);
+    if (failure.empty())
+        return true;
+    report_error(failure);
+    return false;
+}
+
 void LuaRuntime::on_close(std::function<void()> fn) {
     closers_.push_back(std::move(fn));
 }
@@ -401,48 +501,61 @@ bool LuaRuntime::enter(lua_State* co, int nargs) {
     ++depth_;
     int nres = 0;
     int status = lua_resume(co, L_, nargs, &nres);
-    --depth_;
     bool yielded_for_async = yielded_for_async_;
     yielded_for_async_ = outer_yielded;
+
+    // A coroutine kept for its async reply stays as it is. Any other is closed here,
+    // still inside the entry: its pending <close> handlers run with the memory cap and
+    // the time budget applying, and a kill inside one faults below like any other.
+    const bool keep = status == LUA_YIELD && yielded_for_async && !(depth_ == 1 && killed_);
+    std::string text;
+    std::string close_error;
+    if (!keep) {
+        if (status != LUA_OK && status != LUA_YIELD) {
+            HostWorkGuard host_work(host_work_);
+            const char* msg = lua_tostring(co, -1);
+            luaL_traceback(L_, co, msg ? msg : "(error object is not a string)", 0);
+            if (const char* t = lua_tostring(L_, -1))
+                text = t;
+            lua_pop(L_, 1);
+        }
+        if (lua_closethread(co, L_) != LUA_OK) {
+            const char* msg = lua_tostring(co, -1);
+            close_error = std::string("<close> handler failed: ") +
+                          (msg ? msg : "(error object is not a string)");
+        }
+    }
+    --depth_;
 
     // The count hook's error can come back as a plain value from coroutine.resume or end
     // as a bare yield, so the overrun is checked on every exit of the outermost entry.
     // A killed plugin must never be resumed later, so a suspended coroutine is dropped too.
     if (depth_ == 0 && killed_) {
-        lua_pop(co, nres);
         drop(co);
         fault(budget_reason(limits_));
         return false;
     }
-    if (status == LUA_OK) {
+    if (keep) {
         lua_pop(co, nres);
-        drop(co);
-        return true;
-    }
-    if (status == LUA_YIELD) {
-        lua_pop(co, nres);
-        if (yielded_for_async)
-            return true; // stays in threads_ until its Pending resolves
-        report_error("coroutine.yield() outside an async call");
-        drop(co);
-        return false;
-    }
-    std::string text;
-    {
-        HostWorkGuard host_work(host_work_);
-        const char* msg = lua_tostring(co, -1);
-        luaL_traceback(L_, co, msg ? msg : "(error object is not a string)", 0);
-        if (const char* s = lua_tostring(L_, -1))
-            text = s;
-        lua_pop(L_, 1);
+        return true; // stays in threads_ until its Pending resolves
     }
     drop(co);
+    if (status == LUA_OK) {
+        if (close_error.empty())
+            return true;
+        report_error(close_error);
+        return false;
+    }
+    if (status == LUA_YIELD) {
+        report_error("coroutine.yield() outside an async call");
+        return false;
+    }
     if (killed_)
         fault(budget_reason(limits_));
     else if (status == LUA_ERRMEM)
         fault(memory_cap_reason(limits_.memory_bytes));
     else
-        report_error(text);
+        report_error(close_error.empty() ? text : text + "; " + close_error);
     return false;
 }
 
@@ -486,6 +599,13 @@ void LuaRuntime::budget_hook(lua_State* L, lua_Debug*) {
 
 int LuaRuntime::await_async(lua_State* co, const std::function<void(Pending)>& start) {
     // Only entry coroutines are in threads_, which rejects plugin-made coroutines.
+    if (in_check_) {
+        lua_Debug ar{};
+        const char* name = lua_getstack(co, 0, &ar) && lua_getinfo(co, "n", &ar) && ar.name
+                               ? ar.name
+                               : "an async call";
+        return luaL_error(co, "%s is not allowed in %s %s", name, check_article(), check_label_);
+    }
     if (!threads_.count(co) || !lua_isyieldable(co))
         return luaL_error(co, "async call not allowed here: call it from a handler or the top "
                               "level of main.lua, not a metamethod, iterator, sort comparator, "

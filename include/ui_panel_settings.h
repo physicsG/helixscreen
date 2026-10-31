@@ -45,7 +45,7 @@ class SettingsPanel : public PanelBase {
      * @param printer_state Reference to PrinterState
      * @param api Pointer to IMoonrakerAPI
      */
-    SettingsPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api);
+    SettingsPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api);
 
     ~SettingsPanel() override;
 

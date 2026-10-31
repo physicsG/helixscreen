@@ -7,15 +7,19 @@
 #include "ui_widget_ref.h"
 
 #include "axis.h"
+#include "bed_plate_gesture.h"
 #include "hold_repeat_timer.h"
-#include "jog_coalescer.h"
 #include "motion_presets.h"
 #include "overlay_base.h"
+#include "settings_manager.h"
 #include "static_panel_registry.h"
 #include "subject_managed_panel.h"
+#include "toolhead_move_sender.h"
 #include "ui/ui_modal_guard.h"
 
 #include <optional>
+#include <string>
+#include <vector>
 
 /**
  * @file ui_panel_motion.h
@@ -46,16 +50,46 @@ std::optional<AxisKeypadParams> keypad_params_for_axis(const AxisBounds& bounds,
 /// Whether a Z button driving G-code direction `direction_mm` (after the
 /// bed_moves inversion) can still move: true only when Z is homed with known
 /// bounds and the commanded `z` already
-/// sits at the bound that direction drives toward, within AxisMove::EPSILON_MM.
+/// sits at the bound that direction drives toward, within AxisMove::kEpsilonMm.
 /// A partial move is possible anywhere else, so the button stays enabled.
 bool z_direction_blocked(bool z_homed, bool bounds_known, double z, double z_min, double z_max,
                          double direction_mm);
 
-/// One pointer event on the Bed tab's touch surface.
-enum class BedTouch { Pressed, Pressing, Released, Lost };
+/// A block's size in px.
+struct BlockSize {
+    int w = 0;
+    int h = 0;
+};
+
+/// Sizes for one of the alternative Jog-tab layouts: the key size and the
+/// blocks MotionPanel::fit_jog_layout() sets. Arrows layouts fill `xy`, `z`,
+/// `home` and `steps_w`; Axis Rows fills `row` (each of its four rows).
+struct JogLayoutFit {
+    int key_w = 0;
+    int key_h = 0;
+    BlockSize xy;
+    BlockSize z;
+    BlockSize home;
+    BlockSize row;
+    int steps_w = 0;
+};
+
+/**
+ * @brief Block sizes for a Jog-tab layout in a `box_w` x `box_h` view
+ *
+ * Keys come out near square (fit_key_grid()); every block is a whole number of
+ * keys plus the `gap` between them, so the keys inside fill it. Arrows and
+ * Arrows + Home put the home block beside the keys in landscape and under
+ * them in portrait, and leave `step_h` plus a gap under everything for the
+ * step selector, whose `step_count` keys stay at most 1.4 times as wide as tall.
+ * Axis Rows stacks four rows of two minus keys, the axis key and two plus
+ * keys. Empty for MotionLayout::Pad, which sizes its own pad.
+ */
+JogLayoutFit jog_layout_fit(MotionLayout layout, bool portrait, int box_w, int box_h, int gap,
+                            int step_h, int step_count, int min_key);
 
 enum class JogMode { Fine = 0, Coarse = 1, Turbo = 2 };
-constexpr int JOG_MODE_COUNT = 3;
+constexpr int kJogModeCount = 3;
 
 // Inner/outer distance pair for each mode. Labels are owned buffers so the
 // struct can travel by value out of the settings lookup.
@@ -70,10 +104,43 @@ struct JogModeDistances {
 /// Values come from settings; the labels are formatted for display.
 JogModeDistances get_jog_mode_distances(JogMode mode);
 
+/// Most steps an arrow layout's selector offers: each mode's two rings.
+constexpr int kJogStepMax = 2 * kJogModeCount;
+
+/// The step list the arrow layouts offer: @p distances ascending, with a value
+/// within 0.001mm of a smaller one merged into it.
+std::vector<float> unique_sorted_steps(std::vector<float> distances);
+
+/// Every configured jog distance (each mode's inner and outer ring) as a step
+/// list, so the one set of distances in settings drives every layout.
+std::vector<float> jog_step_list();
+
+/// Index of the step closest to @p mm; 0 for an empty list.
+size_t nearest_step_index(const std::vector<float>& steps, float mm);
+
+/// Which distance a jog button moves.
+enum class JogButtonStep {
+    Inner,    ///< the jog mode's inner ring
+    Outer,    ///< the jog mode's outer ring
+    Selected, ///< the arrow layouts' selected step
+};
+
+/// A jog button, decoded from its XML user_data.
+struct JogButton {
+    Axis axis;
+    int sign; ///< +1 or -1; for Z a SCREEN direction, before the bed_moves inversion
+    JogButtonStep step;
+};
+
+/// Decode "<axis>_<direction>_<size>": axis x, y or z; direction plus/minus
+/// for X and Y, up/down for Z; size small (inner ring), large (outer ring) or
+/// step (the selected step). Empty for anything else.
+std::optional<JogButton> parse_jog_button(const char* name);
+
 inline const char* jog_mode_name(JogMode mode) {
     static const char* names[] = {"Fine", "Coarse", "Turbo"};
     int idx = static_cast<int>(mode);
-    if (idx < 0 || idx >= JOG_MODE_COUNT)
+    if (idx < 0 || idx >= kJogModeCount)
         return "Unknown";
     return names[idx];
 }
@@ -133,21 +200,35 @@ class MotionPanel : public OverlayBase {
     bool jog(helix::JogDirection direction, float distance_mm, bool is_repeat = false);
     void home(char axis);
 
-    /// Jog one Z button. Same false-means-refused contract as jog(), and the
-    /// same is_repeat meaning (false = the initial jog of this press).
-    bool handle_z_button(const char* name, bool is_repeat = false);
+    /// Home the named axes ("X", "XY", ...; empty homes all).
+    void home_axes(const std::string& axes);
+
+    /// Jog one button named in parse_jog_button() form. Same
+    /// false-means-refused contract as jog(), and the same is_repeat meaning
+    /// (false = the initial jog of this press).
+    bool handle_jog_button(const char* name, bool is_repeat = false);
     void set_jog_mode(helix::JogMode mode); // Switch between Fine/Coarse/Turbo jog mode
 
-    /// The Z hold timer, for the XML pressed/released/press_lost callbacks.
-    /// Also the test seam: poll() drives the repeat without a periodic timer,
-    /// which the unit-test harness never runs.
-    helix::HoldRepeatTimer& z_hold_timer() {
-        return z_hold_timer_;
+    /// Arrow layouts: select the step at @p index in the step list (persisted).
+    void select_jog_step(int index);
+
+    /// The arrow layouts' selected step, in mm.
+    float selected_jog_step() const;
+
+    /// Rebuild the step selector from the configured distances, keeping the
+    /// selection on the step nearest the one in use.
+    void refresh_step_list();
+
+    /// The jog-button hold timer, for the XML pressed/released/press_lost
+    /// callbacks. Also the test seam: poll() drives the repeat without a
+    /// periodic timer, which the unit-test harness never runs.
+    helix::HoldRepeatTimer& jog_hold_timer() {
+        return jog_hold_timer_;
     }
 
-    /// Arm the Z hold repeat for a named button press (the XML pressed event).
-    /// `button` is the pressed widget, when known.
-    void begin_z_hold(const char* button_name, lv_obj_t* button = nullptr);
+    /// Arm the hold repeat for a named jog button press (the XML pressed
+    /// event). `button` is the pressed widget, when known.
+    void begin_jog_hold(const char* button_name, lv_obj_t* button = nullptr);
 
     /// Flip the persisted commanded/actual coordinate preference. The panel's
     /// observer on the settings subject re-renders the readouts.
@@ -155,11 +236,12 @@ class MotionPanel : public OverlayBase {
 
     /// Open the coordinate keypad for one axis ('x'/'y'/'z'), seeded with the
     /// COMMANDED position and bounded by the axis envelope. Refuses (no-op)
-    /// while jogging is gated off (not connected or klippy not ready).
+    /// while jogging is gated off (not connected or klippy not ready) or the
+    /// axis is unhomed.
     void open_axis_keypad(char axis);
 
-    /// Keypad confirm: home the axis if needed, then dispatch the absolute
-    /// target for that one axis.
+    /// Keypad confirm: dispatch the absolute target for that one axis. An
+    /// unhomed axis sends nothing; nothing in the panel homes except Home.
     void request_axis_target(char axis, double mm);
 
     /// Select the content tab: 0=Jog, 1=Move, 2=Bed. Jog is re-selected every
@@ -168,20 +250,27 @@ class MotionPanel : public OverlayBase {
 
     /// Move tab: send the toolhead to one of the nine bed grid positions. The
     /// target is computed at tap time; unknown axis bounds warn instead of
-    /// moving, and an unhomed machine homes first.
+    /// moving. It goes out through the plate gesture's send_once(), so it lifts
+    /// to the plate floor, refuses a part too tall to clear, and sends nothing
+    /// unless every axis is homed.
     void handle_preset(helix::MotionPreset preset);
 
     /// Move tab: run the ParkToolhead macro when the slot resolves to one,
     /// else lift Z and park over the rear of the plate (plate_rear_park()).
+    /// Either way every axis must be homed, or nothing is sent.
     void handle_park();
 
-    /// Park with no macro: over the rear of the plate, after lifting Z by
-    /// PARK_Z_LIFT_MM (capped at travel) when @p lift_z. Every axis must
-    /// already be homed.
-    void park_over_plate(bool lift_z);
+    /// Park with no macro: over the rear of the plate at park_plate_lift()'s
+    /// height. A part too tall to clear refuses with a notice; unhomed sends
+    /// nothing.
+    void park_over_plate();
 
     /// Move tab: raise the shared Disable Motors confirmation.
     void handle_motors_off();
+
+    /// The Refuse notice: a part on the bed is too tall to clear. The home Toolhead
+    /// widget's plate raises it too.
+    static void notify_part_too_tall();
 
     /// Bed tab: one pointer event at @p screen_point on the touch surface
     /// @p area. A tap moves on release to the press point; travel past a few
@@ -189,23 +278,24 @@ class MotionPanel : public OverlayBase {
     /// wins), with the release point sent only if it differs from the last.
     void handle_bed_touch(helix::BedTouch phase, lv_obj_t* area, lv_point_t screen_point);
 
-    /// Bed tab: send the toolhead to @p target (XY), raising Z to @p lift_z
-    /// first when set. Unhomed XY homes first, and then never lifts.
-    void commit_bed_target(helix::AxisTarget target, std::optional<double> lift_z);
-
     /// Bed tab: size the plate to the bed's aspect inside the touch surface
     /// and place the marker. No-op while another tab is showing.
     void layout_bed_map();
+
+    /// Size an alternative Jog-tab layout's blocks for its current size
+    /// (jog_layout_fit()). `root` is the layout component's view; its
+    /// SIZE_CHANGED event calls this, and so does a change in the step count.
+    void fit_jog_layout(lv_obj_t* root);
+
+    /// Bed tab: draw the reference grid and the print's outlines on the plate
+    /// (its DRAW_MAIN hook).
+    void draw_bed_plate(lv_event_t* e) const;
 
     /// Clamp one axis against its bounds. Partial travel is silent; a fully
     /// clamped FRESH press (anything but a hold repeat tick) warns every time
     /// with the limit it hit. Returns the permitted delta, 0.0 when blocked.
     double clamp_axis_delta(helix::Axis axis, double current, double uncommitted, double delta,
                             float min, float max, bool fresh_press);
-    /// The G-code envelope the clamps and the Z-button state use: the nominal
-    /// one inset by GCODE_EDGE_MARGIN_MM. The keypad offers the nominal limits.
-    helix::AxisBounds clamp_bounds();
-
     /// Raise the "at its limit" warning for an axis refused at the clamp bound
     /// on its max (`at_max`) or min side.
     void warn_axis_limit(helix::Axis axis, float clamp_bound, bool at_max);
@@ -216,15 +306,15 @@ class MotionPanel : public OverlayBase {
 
     lv_subject_t pos_x_subject_{};
     lv_subject_t pos_y_subject_{};
-    lv_subject_t pos_z_subject_{};          // Commanded Z position
-    lv_subject_t z_axis_label_subject_{};   // "Bed" or "Print Head"
-    lv_subject_t z_up_icon_subject_{};      // "arrow_expand_up" or "arrow_up"
-    lv_subject_t z_down_icon_subject_{};    // "arrow_expand_down" or "arrow_down"
-    lv_subject_t z_large_label_subject_{};  // "10mm" or "1mm" (large Z button label)
-    lv_subject_t z_small_label_subject_{};  // "1mm" or "0.1mm" (small Z button label)
-    lv_subject_t jog_mode_fine_active_{};   // 1 when Fine mode active
-    lv_subject_t jog_mode_coarse_active_{}; // 1 when Coarse mode active
-    lv_subject_t jog_mode_turbo_active_{};  // 1 when Turbo mode active
+    lv_subject_t pos_z_subject_{};           // Commanded Z position
+    lv_subject_t z_axis_label_subject_{};    // "Bed" or "Print Head"
+    lv_subject_t z_up_icon_subject_{};       // "arrow_expand_up" or "arrow_up"
+    lv_subject_t z_down_icon_subject_{};     // "arrow_expand_down" or "arrow_down"
+    lv_subject_t jog_outer_label_subject_{}; // jog mode's outer distance, "10mm"
+    lv_subject_t jog_inner_label_subject_{}; // jog mode's inner distance, "1mm"
+    lv_subject_t jog_mode_fine_active_{};    // 1 when Fine mode active
+    lv_subject_t jog_mode_coarse_active_{};  // 1 when Coarse mode active
+    lv_subject_t jog_mode_turbo_active_{};   // 1 when Turbo mode active
     // Per-axis homing state (0=unhomed, 1=homed) for declarative bind_style:
     // the coordinate readouts mute an axis whose position is not trustworthy.
     lv_subject_t motion_x_homed_{};
@@ -256,8 +346,19 @@ class MotionPanel : public OverlayBase {
     char z_axis_label_buf_[64];
     char z_up_icon_buf_[24];
     char z_down_icon_buf_[24];
-    char z_large_label_buf_[8];
-    char z_small_label_buf_[8];
+    char jog_outer_label_buf_[16];
+    char jog_inner_label_buf_[16];
+    // Arrow layouts' step selector: how many steps show, each one's label and
+    // whether it is the selected one.
+    lv_subject_t step_count_subject_{};
+    lv_subject_t step_label_subject_[helix::kJogStepMax]{};
+    lv_subject_t step_active_subject_[helix::kJogStepMax]{};
+    char step_label_buf_[helix::kJogStepMax][16];
+    std::vector<float> steps_;
+    size_t step_index_ = 0;
+    /// The selected step as persisted; survives a distance edit that drops it
+    /// from the list, so the nearest remaining step is chosen.
+    float step_mm_ = 1.0f;
     bool bed_moves_ = false; // If true, invert Z direction (arrows match bed movement)
 
     helix::JogMode current_mode_ = helix::JogMode::Coarse;
@@ -269,47 +370,37 @@ class MotionPanel : public OverlayBase {
 
     lv_obj_t* jog_pad_ = nullptr;
 
-    helix::JogCoalescer jog_coalescer_;
+    /// One move in flight, the newest coalesced behind it, for jogs and targets alike.
+    helix::ToolheadMoveSender move_sender_;
 
     /// The Move tab's Disable Motors confirmation. The guard hides the dialog
     /// if the panel is destroyed while it is open.
     helix::ui::ModalGuard motors_off_dialog_;
-    /// Z the toolhead will sit at when the latest target's script starts,
-    /// captured at enqueue time. Feeds move_to's travel-before-descend
-    /// ordering; delta moves ignore it.
-    double target_start_z_ = 0.0;
 
-    /// Whether a repeat tick has fired for the current Z-button hold: the
+    /// Whether a repeat tick has fired for the current jog-button hold: the
     /// first tick is that press's initial jog, later ones are repeats.
-    bool z_hold_repeated_ = false;
+    bool jog_hold_repeated_ = false;
 
-    /// Hold-to-repeat for the four Z buttons. The pad owns its own repeat
-    /// (it is the only one that can see the press point move between zones);
-    /// both use helix::HoldRepeatTimer so the timing logic is shared.
-    helix::HoldRepeatTimer z_hold_timer_;
-    char z_hold_button_[16] = {};
-    /// The held Z button. A button disabled under the finger never receives
+    /// Hold-to-repeat for the jog buttons (Z column, arrows, axis rows). The
+    /// pad owns its own repeat (it is the only one that can see the press
+    /// point move between zones); both use helix::HoldRepeatTimer so the
+    /// timing logic is shared.
+    helix::HoldRepeatTimer jog_hold_timer_;
+    char jog_hold_button_[16] = {};
+    /// The held button. A button disabled under the finger never receives
     /// RELEASED, so LVGL would leave it drawn pressed.
-    helix::ui::WidgetRef z_hold_obj_;
+    helix::ui::WidgetRef jog_hold_obj_;
+    /// A widget was recorded for this hold. Deleting it (a layout swap, a
+    /// reload) sends no RELEASED, so a recorded widget gone null ends the hold.
+    bool jog_hold_has_obj_ = false;
 
     /// stop_hold_repeat() sweeps both this timer and the pad's on every
     /// teardown path.
     void stop_hold_repeat();
-    static bool z_hold_fire(void* user_data);
-
-    /// The Bed tab's plate (preset_area()) and shape, or nullopt while the
-    /// bounds are unknown or degenerate.
-    struct BedPlate {
-        helix::AxisBounds area;
-        bool circular;
-    };
-    std::optional<BedPlate> bed_plate() const;
+    static bool jog_hold_fire(void* user_data);
 
     /// Target under @p screen_point on the touch surface @p area.
     std::optional<helix::AxisTarget> bed_target_at(lv_obj_t* area, lv_point_t screen_point) const;
-
-    /// Z a Bed-tab move would lift to now, or nullopt for none (or Z unhomed).
-    std::optional<double> bed_lift_z();
 
     /// Move the toolhead marker to the commanded XY.
     void update_bed_marker();
@@ -318,23 +409,18 @@ class MotionPanel : public OverlayBase {
     /// the clearance lift a commit would make.
     void refresh_bed_readout();
 
-    // Bed tab press tracking: where the press landed, and whether it has
-    // travelled far enough to be a drag. The drag target feeds the readout.
-    bool bed_pressing_ = false;
-    bool bed_dragging_ = false;
-    lv_point_t bed_press_point_{};
-    std::optional<helix::AxisTarget> bed_drag_target_;
-    /// The last target this gesture sent; empty until its first move.
-    std::optional<helix::AxisTarget> bed_sent_target_;
-    /// The Z every move of this gesture lifts to, decided at its first move.
-    std::optional<double> bed_gesture_lift_z_;
-    /// A move of this gesture was refused; it sends nothing more.
-    bool bed_gesture_failed_ = false;
+    /// The Bed tab's press / drag / release decisions, shared with the home
+    /// Toolhead widget.
+    helix::BedPlateGesture bed_gesture_;
+    /// The touch surface handle_bed_touch() is handling, for the gesture's
+    /// target_at hook; null outside that call.
+    lv_obj_t* bed_touch_area_ = nullptr;
     /// Stop tracking the finger: no press, no drag target, readout at rest.
     void end_bed_gesture();
 
-    /// Send one of the current gesture's targets, lifting only on the first.
-    void send_bed_gesture_target(const helix::AxisTarget& target);
+    /// The gesture's send hook: one plate target (Bed tab or preset), lift
+    /// already applied.
+    void send_bed_target(const helix::AxisTarget& target);
 
     /// Gating backstop behind the Move tab's XML disabled bindings: commands
     /// are allowed only while nav buttons are enabled (connected + klippy
@@ -345,14 +431,11 @@ class MotionPanel : public OverlayBase {
     /// subjects.
     void sync_motion_tab_subjects();
 
-    // Route a tap/flush through the coalescer and send if idle. Returns
-    // whether the move was dispatched or accepted as pending.
+    // Route a jog delta through move_sender_. Returns whether the move was
+    // dispatched or accepted as pending.
     bool dispatch_jog(const helix::AxisMove& delta);
-    // Route an absolute target through the coalescer and send if idle.
+    // Route an absolute target through move_sender_, clamped to clamp_bounds().
     bool dispatch_target(const helix::AxisTarget& target);
-    // Send one coalesced move (delta or target); ack/error callbacks re-enter
-    // the coalescer. Returns false when there is no API to send through.
-    bool send_jog_move(const helix::JogCoalescer::CoalescedMove& move);
 
     ObserverGuard position_x_observer_;
     ObserverGuard position_y_observer_;
@@ -366,6 +449,11 @@ class MotionPanel : public OverlayBase {
     ObserverGuard bed_moves_observer_;
     ObserverGuard homed_axes_observer_;
     ObserverGuard jog_ready_observer_;
+    ObserverGuard layout_observer_;
+    /// Redraws the plate when the bed-occupancy verdict or outlines change.
+    ObserverGuard bed_occupancy_observer_;
+    /// (Re)take bed_occupancy_observer_ on the current session's state.
+    void observe_bed_occupancy();
 
     // Actual (live) positions in mm; the readouts show these when the
     // coordinate preference is "actual", the commanded current_x_/y_/z_
@@ -407,7 +495,7 @@ class MotionPanel : public OverlayBase {
     // Position observers use lambda-based observer factory (no static callbacks needed)
 
     void update_z_axis_label(bool bed_moves);
-    void update_z_button_labels(); // Update Z button text for current mode
+    void update_jog_distance_labels(); // Inner/outer labels for the current mode
 
     /// Which source the readouts render: 1 = actual (live) position,
     /// 0 = commanded. Mirrors the persisted preference subject.

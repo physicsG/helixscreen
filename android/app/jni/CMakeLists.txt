@@ -4,6 +4,22 @@ project(HelixScreen)
 # Project root is three levels up from android/app/jni/
 get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 
+# Every config but Debug is a release build, as every cross target in mk/cross.mk
+# is: XML hot reload defaults off, the theme token table is on, and LVGL's style
+# asserts are off. AGP builds its release buildType as RelWithDebInfo, so this
+# names the one config it excludes rather than the ones it includes. lv_conf.h
+# derives LV_USE_ASSERT_STYLE from it and lv_style_t has a sentinel member only
+# under that assert, so the define is set here at directory scope, ahead of
+# every target: two targets that disagree about it disagree about the layout of
+# every style they share, and nothing at link time notices.
+add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:HELIX_RELEASE_BUILD>)
+
+# CI's debug APK is a compile check that nobody attaches a debugger to, and its
+# DWARF is most of what that job's ccache has to store.
+if(HELIX_NO_DEBUG_INFO)
+    add_compile_options(-g0)
+endif()
+
 # ============================================================================
 # SDL2
 # ============================================================================
@@ -189,7 +205,9 @@ target_compile_definitions(lv_markdown PUBLIC LV_CONF_INCLUDE_SIMPLE)
 # ============================================================================
 # HelixScreen main library
 # ============================================================================
-file(GLOB_RECURSE HELIX_SOURCES "${PROJECT_ROOT}/src/*.cpp")
+# CONFIGURE_DEPENDS re-globs on every build, so an incremental build picks up a
+# new source file instead of linking without it.
+file(GLOB_RECURSE HELIX_SOURCES CONFIGURE_DEPENDS "${PROJECT_ROOT}/src/*.cpp")
 
 # Exclude files not needed on Android
 list(FILTER HELIX_SOURCES EXCLUDE REGEX ".*/test_.*\\.cpp$")
@@ -214,6 +232,20 @@ file(GLOB TRANS_SOURCES "${PROJECT_ROOT}/src/generated/*.c")
 
 # Quirc QR decoder library (vendored)
 file(GLOB QUIRC_SOURCES "${PROJECT_ROOT}/lib/quirc/lib/*.c")
+
+# Lua 5.4 for the plugin runtime, built as the Makefile's LUA_SRCS: compiled as
+# C++ so a Lua error unwinds as an exception and a binding's destructors run, and
+# without the io, os, package and debug libraries, which keeps them out of every
+# plugin's reach. A library of its own because main's precompiled header would
+# otherwise be forced into these sources.
+set(LUA_DIR "${PROJECT_ROOT}/lib/lua")
+file(GLOB LUA_SOURCES "${LUA_DIR}/*.c")
+foreach(_excluded lua.c onelua.c ltests.c linit.c liolib.c loslib.c loadlib.c ldblib.c)
+    list(REMOVE_ITEM LUA_SOURCES "${LUA_DIR}/${_excluded}")
+endforeach()
+set_source_files_properties(${LUA_SOURCES} PROPERTIES LANGUAGE CXX)
+add_library(lua STATIC ${LUA_SOURCES})
+target_compile_options(lua PRIVATE -std=c++17 -w)
 
 add_library(main SHARED ${HELIX_SOURCES} ${FONT_SOURCES} ${TRANS_SOURCES} ${QUIRC_SOURCES})
 
@@ -290,26 +322,20 @@ target_compile_definitions(main PRIVATE
     HELIX_PLATFORM_ANDROID
     HELIX_HAS_SOUND
     HELIX_HAS_TRACKER
-    # This build bypasses the Makefile, so its `?= 1` feature defaults do not
-    # apply here — an undefined macro in `#if` is 0 and silently selects the
-    # stub implementation.
-    HELIX_HAS_GCODE_VIEWER=1
-    HELIX_HAS_BED_MESH_3D=1
-    # The Lua plugin runtime is not built for Android.
-    HELIX_HAS_PLUGINS=0
-    HELIX_HAS_TIMELAPSE_VIEWER=1
+    # Feature gates keep their defaults from include/helix_features.h, which
+    # lvgl_pch.h brings into every source; only the ones this app changes are
+    # listed. The Belt Tension panel reads Klipper's /tmp results, so it needs
+    # the screen co-located with Klipper.
+    HELIX_HAS_BELT_TUNER=0
     # FONT_SOURCES above globs every face under assets/fonts/*.c with no tier
-    # filtering, so the 48/64pt and 32/40pt hi-DPI CJK rungs are linked into
-    # libmain.so same as every other tier. Left undefined, HELIX_HAS_HIDPI_FONTS
-    # falls back to a conservative 0 (src/system/cjk_font_manager.cpp and
-    # src/application/asset_manager.cpp both assume "not linked" when unset),
-    # which drops those faces' mappings and asset registrations at compile time
-    # even though the symbols are there. HELIX_MAX_FONT_TIER already falls back
-    # to 6 by the same convention, matching this glob; declared here too so
-    # both macros are explicit rather than one being coincidentally right.
+    # filtering, so every tier is linked.
     HELIX_MAX_FONT_TIER=6
-    HELIX_HAS_HIDPI_FONTS=1
     ENABLE_GLES_3D
+    # The Makefile's ENABLE_SCREENSAVER default; idle handling already
+    # covers Android's own panel sleep.
+    HELIX_ENABLE_SCREENSAVER
+    # Crash reports name the build they came from, as each cross target does.
+    HELIX_BINARY_VARIANT="android"
     $<$<CONFIG:Debug>:HELIX_ENABLE_MOCKS>
     $<$<BOOL:${HELIX_DIAGNOSTIC_UPLOADS}>:HELIX_ENABLE_DIAGNOSTIC_UPLOADS>
     LV_CONF_INCLUDE_SIMPLE
@@ -329,6 +355,11 @@ target_compile_options(main PRIVATE
 # lvgl.h, helix_xml.h, spdlog, and common STL headers into every TU.
 target_precompile_headers(main PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:${PROJECT_ROOT}/include/lvgl_pch.h>"
+)
+# A PCH that records its inputs' mtimes differs on every checkout, so ccache
+# could never reuse an object compiled against it.
+target_compile_options(main PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-Xclang -fno-pch-timestamp>"
 )
 
 # Large-file support on 32-bit ABIs (armeabi-v7a), mirroring the per-object
@@ -358,6 +389,7 @@ target_link_libraries(main
     lvgl
     helix_xml
     lv_markdown
+    lua
     hv_static
     GLESv2
     ${log-lib}

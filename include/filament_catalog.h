@@ -68,6 +68,21 @@ class FilamentCatalog {
      */
     static std::shared_ptr<const FilamentCatalog> load_codes_cached(const std::string& scheme);
 
+    /**
+     * @brief OrcaSlicer's preset `filament_id` for catalog product @p catalog_id
+     *
+     * "" when the product carries no `orca_id`, or carries one that another
+     * product in the effective catalog (built-ins plus user overlay) also
+     * carries: a shared id does not name this product exactly. Keeps only a
+     * flat catalog id -> Orca id map resident, rebuilt after a user-overlay
+     * write. Thread-safe.
+     */
+    static std::string orca_id_for(const std::string& catalog_id);
+    /// The map orca_id_for() serves, from explicit paths (tests). An overlay
+    /// entry for a built-in id replaces its Orca id, with none when it carries none.
+    static std::unordered_map<std::string, std::string>
+    orca_id_map_from(const std::string& builtin_path, const std::string& overlay_path);
+
     /// Bumped by every successful user-overlay write; the cache keys off it.
     /// Exposed so tests can assert invalidation rather than infer it.
     static uint64_t user_overlay_generation();
@@ -158,6 +173,34 @@ class FilamentCatalog {
     const EffectiveFilament* resolve_code(const std::string& scheme, const std::string& code) const;
     const EffectiveFilament* resolve_id(const std::string& id) const;
     std::vector<const EffectiveFilament*> products_for_type(const std::string& type) const;
+
+    /// One chip of the spool editor's variant row: the label shown and a real
+    /// catalog type that carries it (the exact spelling an identity emits when
+    /// this variant is chosen — never re-composed by hand).
+    struct FamilyVariant {
+        std::string label;       ///< "Basic", "CF", "Silk", "Recycled", ...
+        std::string sample_type; ///< "PLA", "PLA-CF", "Silk PLA", "rPLA", ...
+    };
+
+    /// Every material family in the catalog (the distinct display_family()
+    /// headings), case-insensitively deduped, alphabetical.
+    std::vector<std::string> all_families() const;
+
+    /// The variant labels the catalog carries for @p family, deduped
+    /// case-insensitively. "Basic" first when the family has a bare type, then
+    /// alphabetical. A family the catalog does not know answers one entry:
+    /// the family itself as "Basic".
+    std::vector<FamilyVariant> variants_in_family(const std::string& family) const;
+
+    /// Every brand with at least one product in @p family (case-insensitive
+    /// family match on display_family()), deduped case-insensitively and
+    /// alphabetical. "Generic" appears only when a Generic product exists.
+    std::vector<std::string> brands_in_family(const std::string& family) const;
+
+    /// The products @p brand sells in @p family — that brand's lines for that
+    /// material, in sort_for_display() order. Case-insensitive on both arguments.
+    std::vector<const EffectiveFilament*> products_in_family(const std::string& brand,
+                                                             const std::string& family) const;
     std::vector<const EffectiveFilament*> products_for_brand(const std::string& brand) const;
     std::vector<std::string> all_brands() const;
     std::vector<const EffectiveFilament*> all_products() const;
@@ -180,5 +223,12 @@ class FilamentCatalog {
     std::unordered_map<std::string, std::unordered_map<std::string, size_t>> by_code_;
     void index();
 };
+
+/// Order @p products for display under the @p family heading (case-insensitive):
+/// the product named exactly the family ("PLA"), then names that extend it with
+/// no space ("PLA+", "PLA+ 2.0", "PLA-CF"), alphabetical; then everything else,
+/// base-type products ahead of each variant type's own run, alphabetical within
+/// a run with "Support..." last. Stable, so equal rows keep catalog order.
+void sort_for_display(std::vector<const EffectiveFilament*>& products, const std::string& family);
 
 } // namespace helix::printer

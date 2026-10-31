@@ -870,6 +870,45 @@ TEST_CASE("find_hid_keyboard_devices honors the device blacklist", "[input]") {
     }
 }
 
+TEST_CASE("find_configured_hid_device reports only the configured device", "[input]") {
+    using helix::input::find_configured_hid_device;
+    const std::map<std::string, std::string> kbd_caps{
+        {"key", "40000000"}, {"abs", "0"}, {"rel", "0"}};
+
+    SECTION("configured device present is returned") {
+        MockInputTree tree("cfg_hid_present");
+        tree.add_device_with_ids(1, "Tera Barcode Scanner", kbd_caps, "0003", "aaaa", "bbbb");
+        tree.add_device_with_ids(2, "TMS HIDKeyBoard", kbd_caps, "0003", "1a2c", "4c5e");
+
+        auto result = find_configured_hid_device(tree.dev_dir, tree.sysfs_dir, "1a2c:4c5e");
+        REQUIRE(result.has_value());
+        REQUIRE(result->name == "TMS HIDKeyBoard");
+    }
+
+    SECTION("configured device absent does not fall back to another keyboard") {
+        MockInputTree tree("cfg_hid_absent");
+        tree.add_device_with_ids(1, "Tera Barcode Scanner", kbd_caps, "0003", "aaaa", "bbbb");
+
+        REQUIRE_FALSE(find_configured_hid_device(tree.dev_dir, tree.sysfs_dir, "1a2c:4c5e"));
+    }
+
+    SECTION("empty or malformed configured id finds nothing") {
+        MockInputTree tree("cfg_hid_empty");
+        tree.add_device_with_ids(1, "Tera Barcode Scanner", kbd_caps, "0003", "aaaa", "bbbb");
+
+        REQUIRE_FALSE(find_configured_hid_device(tree.dev_dir, tree.sysfs_dir, ""));
+        REQUIRE_FALSE(find_configured_hid_device(tree.dev_dir, tree.sysfs_dir, "aaaabbbb"));
+    }
+
+    SECTION("blacklisted configured device is not present") {
+        MockInputTree tree("cfg_hid_blacklisted");
+        tree.add_device_with_ids(1, "TMS HIDKeyBoard", kbd_caps, "0003", "1a2c", "4c5e");
+
+        REQUIRE_FALSE(find_configured_hid_device(tree.dev_dir, tree.sysfs_dir, "1a2c:4c5e",
+                                                 std::vector<std::string>{"1a2c:4c5e"}));
+    }
+}
+
 TEST_CASE("enumerate_usb_hid_devices returns devices with vendor/product IDs", "[input]") {
     using helix::input::enumerate_usb_hid_devices;
 

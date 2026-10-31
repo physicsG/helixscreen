@@ -28,12 +28,12 @@ namespace helix {
  * Main thread only, fed from a pointer's read callback.
  */
 struct ScrollClickGuard {
-    static constexpr uint32_t DEFAULT_COOLDOWN_MS = 80;
-    static constexpr int MIN_COOLDOWN_MS = 20;
-    static constexpr int MAX_COOLDOWN_MS = 500;
+    static constexpr uint32_t kDefaultCooldownMs = 80;
+    static constexpr int kMinCooldownMs = 20;
+    static constexpr int kMaxCooldownMs = 500;
 
     bool enabled = false;
-    uint32_t cooldown_ms = DEFAULT_COOLDOWN_MS;
+    uint32_t cooldown_ms = kDefaultCooldownMs;
     int32_t scroll_limit_px = 10;
 
     /**
@@ -41,7 +41,7 @@ struct ScrollClickGuard {
      *
      * HELIX_SCROLL_GUARD (env_truthy() enables, any other value disables) and
      * HELIX_SCROLL_GUARD_COOLDOWN_MS win over the saved values when set. The
-     * cooldown is clamped to MIN_COOLDOWN_MS..MAX_COOLDOWN_MS.
+     * cooldown is clamped to kMinCooldownMs..kMaxCooldownMs.
      *
      * @param env_enabled  value of HELIX_SCROLL_GUARD, nullptr when unset
      * @param env_cooldown value of HELIX_SCROLL_GUARD_COOLDOWN_MS, nullptr when unset
@@ -56,7 +56,7 @@ struct ScrollClickGuard {
         }
         const int cooldown = env_cooldown ? std::atoi(env_cooldown) : saved_cooldown_ms;
         guard.cooldown_ms =
-            static_cast<uint32_t>(std::clamp(cooldown, MIN_COOLDOWN_MS, MAX_COOLDOWN_MS));
+            static_cast<uint32_t>(std::clamp(cooldown, kMinCooldownMs, kMaxCooldownMs));
         guard.scroll_limit_px = scroll_limit_px;
         return guard;
     }

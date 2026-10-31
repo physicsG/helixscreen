@@ -5,7 +5,9 @@
 
 #include "ui_effects.h"
 #include "ui_modal.h"
+#include "ui_next_tick.h"
 #include "ui_toast_manager.h"
+#include "ui_update_queue.h"
 #include "ui_utils.h"
 #include "ui_wizard.h"
 
@@ -13,6 +15,7 @@
 #include "boot_crash_guard.h"
 #include "config.h"
 #include "connection_state.h"
+#include "home_layout_sync.h"
 #include "observer_factory.h"
 #include "print_lifecycle_state.h"
 #include "printer_cache_registry.h"
@@ -21,6 +24,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cassert>
 #include <string>
 #include <utility>
 
@@ -60,6 +64,14 @@ namespace {
 /// A job the user would be walking away from: preparing, printing or paused.
 bool active_printer_is_printing() {
     return PrintLifecycleState::is_active(get_printer_state().print_state().get_print_lifecycle());
+}
+
+/// The active printer moved: drop the connection's locality verdict and anything
+/// fetched under it, which describe the printer left behind until the new one's
+/// CONNECTED edge.
+void forget_previous_connection() {
+    get_printer_state().clear_moonraker_locality();
+    HomeLayoutSync::instance().on_disconnected();
 }
 
 } // namespace
@@ -135,10 +147,10 @@ void PrinterSwitchFlow::await_connection(const std::string& title, bool connecti
             // One-shot: LVGL deletes the timer after this run.
             self->m_connect_timeout.release();
             spdlog::warn("[PrinterSwitchFlow] No connection after {} ms; dropping the switch card",
-                         CONNECT_WAIT_MS);
+                         kConnectWaitMs);
             self->dismiss_interstitial();
         },
-        CONNECT_WAIT_MS, this);
+        kConnectWaitMs, this);
     lv_timer_set_repeat_count(timeout, 1);
     m_connect_timeout.reset(timeout);
 }
@@ -171,7 +183,72 @@ bool PrinterSwitchFlow::confirm_pending() {
     return false;
 }
 
+void PrinterSwitchFlow::arm_restart_tick() {
+    if (m_restart_tick_armed) {
+        return;
+    }
+    m_restart_tick_armed = true;
+    // LVGL runs timers created in one pass newest-first, so one runner reading fixed slots
+    // is what gives the waiting work a defined order.
+    ui::run_next_tick(m_async.token(), [this] {
+        m_restart_tick_armed = false;
+        run_waiting_restarts();
+    });
+}
+
+void PrinterSwitchFlow::run_waiting_restarts() {
+    if (std::exchange(m_cancel_restart_pending, false)) {
+        restart_onto_restored_printer();
+    }
+    if (auto request = std::exchange(m_pending_request, nullptr)) {
+        request();
+    }
+}
+
+void PrinterSwitchFlow::post_request(helix::SharedCallback<void()> request) {
+    if (m_pending_request) {
+        spdlog::info("[PrinterSwitchFlow] A newer request replaces the one waiting for the tick");
+    }
+    m_pending_request = std::move(request);
+    arm_restart_tick();
+}
+
+bool PrinterSwitchFlow::deferred_out_of_drain(const char* entry,
+                                              helix::SharedCallback<void()> work) {
+    if (!ui::UpdateQueue::instance().is_draining()) {
+        // Made in place, this call is newer than anything waiting: a cancel's restart runs
+        // first, as it would have on the tick, and a waiting request is dropped.
+        if (m_pending_request) {
+            spdlog::info("[PrinterSwitchFlow] {} replaces the request waiting for the tick", entry);
+            m_pending_request = nullptr;
+        }
+        if (std::exchange(m_cancel_restart_pending, false)) {
+            restart_onto_restored_printer();
+        }
+        return false;
+    }
+    spdlog::debug("[PrinterSwitchFlow] {} called inside an UpdateQueue drain; running it next tick",
+                  entry);
+    post_request(std::move(work));
+    return true;
+}
+
+void PrinterSwitchFlow::tear_down() {
+    if (ui::UpdateQueue::instance().is_draining()) {
+        spdlog::error("[PrinterSwitchFlow] Teardown inside an UpdateQueue drain: the panel that "
+                      "drained can be freed under its own frame");
+#ifndef HELIX_RELEASE_BUILD
+        assert(false && "PrinterSwitchFlow teardown inside an UpdateQueue drain");
+#endif
+    }
+    m_restart.teardown();
+}
+
 bool PrinterSwitchFlow::request_switch(const std::string& printer_id) {
+    if (deferred_out_of_drain("request_switch",
+                              [this, printer_id] { request_switch(printer_id); })) {
+        return false;
+    }
     if (m_soft_restart_in_progress || confirm_pending()) {
         spdlog::warn("[PrinterSwitchFlow] Ignoring switch to '{}': a switch is already running",
                      printer_id);
@@ -202,14 +279,17 @@ bool PrinterSwitchFlow::request_switch(const std::string& printer_id) {
             m_confirm_dialog = nullptr;
             // Out of the dialog's click handler: the restart tears down the
             // screen the dialog sits on.
-            m_async.defer("PrinterSwitchFlow::confirmed_switch",
-                          [this, printer_id] { switch_printer(printer_id); });
+            post_request([this, printer_id] { switch_printer(printer_id); });
         },
         options);
     return false;
 }
 
 bool PrinterSwitchFlow::switch_printer(const std::string& printer_id) {
+    if (deferred_out_of_drain("switch_printer",
+                              [this, printer_id] { switch_printer(printer_id); })) {
+        return false;
+    }
     if (confirm_pending()) {
         spdlog::warn(
             "[PrinterSwitchFlow] Ignoring switch_printer while a switch is being confirmed");
@@ -244,11 +324,12 @@ bool PrinterSwitchFlow::switch_printer(const std::string& printer_id) {
     // registered per-printer cache invalidator BEFORE teardown, while df() is already
     // correct, so nothing keeps serving the previous printer's values (#804).
     PrinterCacheRegistry::instance().invalidate_all();
+    forget_previous_connection();
 
     const std::string title =
         fmt::format(fmt::runtime(lv_tr("Switching to {}")), m_config->get_active_printer_name());
     paint_loading_card(title);
-    m_restart.teardown();
+    tear_down();
     const bool connecting = m_restart.rebuild();
 
     m_restart.land_home();
@@ -260,6 +341,9 @@ bool PrinterSwitchFlow::switch_printer(const std::string& printer_id) {
 }
 
 void PrinterSwitchFlow::add_printer_via_wizard() {
+    if (deferred_out_of_drain("add_printer_via_wizard", [this] { add_printer_via_wizard(); })) {
+        return;
+    }
     if (m_soft_restart_in_progress) {
         spdlog::warn(
             "[PrinterSwitchFlow] Ignoring add_printer_via_wizard during active soft restart");
@@ -293,12 +377,13 @@ void PrinterSwitchFlow::add_printer_via_wizard() {
     // Same active-printer change as switch_printer(): Config::df() has moved to the new
     // entry, so every per-printer cache must be dropped before teardown.
     PrinterCacheRegistry::instance().invalidate_all();
+    forget_previous_connection();
 
     // The rebuild runs the wizard itself when is_wizard_required() returns true (it does for
     // the new empty entry), so the wizard must not be launched again here.
     const std::string title = lv_tr("Adding printer");
     paint_loading_card(title);
-    m_restart.teardown();
+    tear_down();
 
     // Registered after the teardown (which clears it) and before the rebuild (which runs the
     // wizard).
@@ -339,30 +424,42 @@ void PrinterSwitchFlow::cancel_add_printer_wizard() {
     save_or_report();
     clear_wizard_previous_printer_id();
 
-    // Defer wizard teardown + soft restart — we're called from a wizard button click handler,
-    // so the wizard_container must survive until the event callback returns.
-    m_async.defer("PrinterSwitchFlow::cancel_add_printer_wizard", [this]() {
-        SoftRestartLatch soft_restart(m_soft_restart_in_progress);
+    // Called from a wizard button click handler: the wizard_container must survive until the
+    // event callback returns. The cancel is newer than any request still waiting.
+    if (m_pending_request) {
+        spdlog::info("[PrinterSwitchFlow] The wizard cancel replaces the request waiting for "
+                     "the tick");
+        m_pending_request = nullptr;
+    }
+    m_cancel_restart_pending = true;
+    arm_restart_tick();
+}
 
-        set_wizard_active(false);
-        ui_wizard_deinit_subjects();
+void PrinterSwitchFlow::restart_onto_restored_printer() {
+    SoftRestartLatch soft_restart(m_soft_restart_in_progress);
 
-        // set_active_printer() above restored the previous printer, so Config::df() moved
-        // again — drop every per-printer cache before teardown.
-        PrinterCacheRegistry::instance().invalidate_all();
+    set_wizard_active(false);
+    ui_wizard_deinit_subjects();
 
-        const std::string title = fmt::format(fmt::runtime(lv_tr("Switching to {}")),
-                                              m_config->get_active_printer_name());
-        paint_loading_card(title);
-        m_restart.teardown();
-        const bool connecting = m_restart.rebuild();
-        m_restart.land_home();
-        m_connected_printer_id = m_config->get_active_printer_id();
-        await_connection(title, connecting);
-    });
+    // set_active_printer() above restored the previous printer, so Config::df() moved
+    // again — drop every per-printer cache before teardown.
+    PrinterCacheRegistry::instance().invalidate_all();
+    forget_previous_connection();
+
+    const std::string title =
+        fmt::format(fmt::runtime(lv_tr("Switching to {}")), m_config->get_active_printer_name());
+    paint_loading_card(title);
+    tear_down();
+    const bool connecting = m_restart.rebuild();
+    m_restart.land_home();
+    m_connected_printer_id = m_config->get_active_printer_id();
+    await_connection(title, connecting);
 }
 
 bool PrinterSwitchFlow::add_printer(const std::string& host, int port) {
+    if (deferred_out_of_drain("add_printer", [this, host, port] { add_printer(host, port); })) {
+        return false;
+    }
     const std::string existing = m_config->find_printer_by_host(host, port);
     if (!existing.empty()) {
         spdlog::info("[PrinterSwitchFlow] {}:{} is already printer '{}'", host, port, existing);
@@ -381,21 +478,21 @@ bool PrinterSwitchFlow::add_printer(const std::string& host, int port) {
 
 PrinterSwitchFlow::BootCrashRecord PrinterSwitchFlow::record_switch_away(const std::string& from_id,
                                                                          const std::string& to_id) {
-    BootCrashRecord was{m_config->get<bool>(BOOT_CONNECT_HOLD_KEY, false),
-                        m_config->get<std::string>(SWITCH_PREVIOUS_PRINTER_KEY, ""),
-                        m_config->get<int>(BOOT_CRASH_STREAK_KEY, 0)};
-    m_config->set<bool>(BOOT_CONNECT_HOLD_KEY, false);
+    BootCrashRecord was{m_config->get<bool>(kBootConnectHoldKey, false),
+                        m_config->get<std::string>(kSwitchPreviousPrinterKey, ""),
+                        m_config->get<int>(kBootCrashStreakKey, 0)};
+    m_config->set<bool>(kBootConnectHoldKey, false);
     if (from_id != to_id) {
-        m_config->set<std::string>(SWITCH_PREVIOUS_PRINTER_KEY, from_id);
-        m_config->set<int>(BOOT_CRASH_STREAK_KEY, 0);
+        m_config->set<std::string>(kSwitchPreviousPrinterKey, from_id);
+        m_config->set<int>(kBootCrashStreakKey, 0);
     }
     return was;
 }
 
 void PrinterSwitchFlow::restore_boot_crash_record(const BootCrashRecord& record) {
-    m_config->set<bool>(BOOT_CONNECT_HOLD_KEY, record.connect_held);
-    m_config->set<std::string>(SWITCH_PREVIOUS_PRINTER_KEY, record.previous_printer_id);
-    m_config->set<int>(BOOT_CRASH_STREAK_KEY, record.crash_streak);
+    m_config->set<bool>(kBootConnectHoldKey, record.connect_held);
+    m_config->set<std::string>(kSwitchPreviousPrinterKey, record.previous_printer_id);
+    m_config->set<int>(kBootCrashStreakKey, record.crash_streak);
 }
 
 bool PrinterSwitchFlow::save_or_report() {

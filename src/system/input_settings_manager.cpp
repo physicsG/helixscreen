@@ -9,23 +9,27 @@
 #include "spdlog/spdlog.h"
 #include "static_subject_registry.h"
 
+#include <iterator>
+
 using namespace helix;
 
 using settings::Scope;
 // Row order is InputSettingsManager::Key.
-static constexpr settings::PersistedSetting INPUT_SETTINGS[] = {
+static constexpr settings::PersistedSetting kInputSettings[] = {
     {"settings_scroll_throw", "/input/scroll_throw", Scope::Global, false,
-     InputSettingsManager::DEFAULT_SCROLL_THROW, 5, 50, nullptr},
-    {"settings_scroll_limit", "/input/scroll_limit", Scope::Global, false, 10, 1, 20, nullptr},
+     InputSettingsManager::kDefaultScrollThrow, 5, 50, "scroll_throw"},
+    {"settings_scroll_limit", "/input/scroll_limit", Scope::Global, false, 10, 1, 20,
+     "scroll_limit"},
     {"settings_long_press_time", "/input/long_press_time", Scope::Global, false,
-     static_cast<int>(AppConstants::Input::LONG_PRESS_MS), 300, 1500, nullptr},
+     static_cast<int>(app_constants::input::kLongPressMs), 300, 1500, "long_press_time"},
     // AD5M/AD5X presets enable the scroll guard via the hardware preset.
-    {"settings_scroll_guard", "/input/scroll_guard", Scope::Global, true, 0, 0, 1, nullptr},
-    {"settings_debug_touches", "/input/debug_touches", Scope::Global, true, 0, 0, 1, nullptr},
+    {"settings_scroll_guard", "/input/scroll_guard", Scope::Global, true, 0, 0, 1, "scroll_guard"},
+    {"settings_debug_touches", "/input/debug_touches", Scope::Global, true, 0, 0, 1,
+     "debug_touches"},
     {"settings_home_edit_mode_enabled", "/input/home_edit_mode_enabled", Scope::Global, true, 1, 0,
-     1, nullptr},
+     1, "home_edit_mode_enabled"},
     {"settings_keypad_layout", "/input/keypad_layout", Scope::Global, false,
-     static_cast<int>(KeypadLayout::PHONE), 0, 1, nullptr},
+     static_cast<int>(KeypadLayout::PHONE), 0, 1, "keypad_layout"},
 };
 
 InputSettingsManager& InputSettingsManager::instance() {
@@ -33,7 +37,11 @@ InputSettingsManager& InputSettingsManager::instance() {
     return instance;
 }
 
-InputSettingsManager::InputSettingsManager() : settings_(INPUT_SETTINGS) {
+settings::TableView InputSettingsManager::persisted_table() {
+    return {kInputSettings, std::size(kInputSettings)};
+}
+
+InputSettingsManager::InputSettingsManager() : settings_(kInputSettings) {
     spdlog::trace("[InputSettingsManager] Constructor");
 }
 
@@ -77,14 +85,18 @@ void InputSettingsManager::deinit_subjects() {
 // Scroll throw, scroll limit and long-press time are live indev properties:
 // the next gesture uses the new values. Every pointer indev gets them, so this
 // works the same whichever platform layer created the indev.
+void InputSettingsManager::apply_to_pointer(lv_indev_t* indev) const {
+    if (!indev || lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) {
+        return;
+    }
+    lv_indev_set_scroll_throw(indev, static_cast<uint8_t>(get_scroll_throw()));
+    lv_indev_set_scroll_limit(indev, static_cast<uint8_t>(get_scroll_limit()));
+    lv_indev_set_long_press_time(indev, static_cast<uint16_t>(get_long_press_time()));
+}
+
 void InputSettingsManager::apply_to_pointers() const {
     for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev; indev = lv_indev_get_next(indev)) {
-        if (lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) {
-            continue;
-        }
-        lv_indev_set_scroll_throw(indev, static_cast<uint8_t>(get_scroll_throw()));
-        lv_indev_set_scroll_limit(indev, static_cast<uint8_t>(get_scroll_limit()));
-        lv_indev_set_long_press_time(indev, static_cast<uint16_t>(get_long_press_time()));
+        apply_to_pointer(indev);
     }
     // The post-scroll click guard decides "was this a scroll" by the same limit.
     if (auto* dm = DisplayManager::instance()) {

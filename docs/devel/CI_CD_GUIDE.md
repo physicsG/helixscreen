@@ -72,10 +72,15 @@ jobs:
     runs-on: ubuntu-22.04
     # ... bats steps ...
 
+  test-plugin-py38:
+    name: Moonraker Plugin Tests (Python 3.8)
+    runs-on: ubuntu-22.04
+    # ... pytest moonraker-plugin/tests/ on the plugin's Python floor ...
+
   build-status:
     name: Build Status
     runs-on: ubuntu-latest
-    needs: [compile-ubuntu, test-ubuntu, build-macos, build-android, test-shell]
+    needs: [compile-ubuntu, test-ubuntu, build-macos, build-android, test-shell, test-plugin-py38]
     # ... aggregates results ...
 ```
 

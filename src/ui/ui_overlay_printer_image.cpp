@@ -16,19 +16,20 @@
 #include "ui_callback_helpers.h"
 #include "ui_error_reporting.h"
 #include "ui_modal.h"
+#if HELIX_HAS_IMAGE_TAGGER
 #include "ui_overlay_printer_image_tagger.h"
+#endif
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
-#include "config.h"
 #include "helix_fs.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "prerendered_images.h"
 #include "printer_image_manager.h"
 #include "printer_images.h"
+#include "sort_small.h"
 #include "ui/ui_widget_helpers.h"
 #include "usb_manager.h"
-#include "wizard_config_paths.h"
 
 #include <spdlog/spdlog.h>
 
@@ -132,13 +133,9 @@ void PrinterImageOverlay::on_activate() {
         update_preview(active_id, display_name, preview_path);
     } else {
         // Show the auto-detected image as preview
-        std::string auto_path;
-        Config* config = Config::get_instance();
-        std::string printer_type =
-            config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
-        auto_path = PrinterImages::get_best_printer_image(printer_type);
-
-        update_preview("", lv_tr("Auto-Detect"), auto_path);
+        update_preview("", lv_tr("Auto-Detect"),
+                       helix::PrinterImageManager::instance().get_detected_image_path(
+                           printer_images::current_screen_width()));
     }
 }
 
@@ -190,17 +187,21 @@ void PrinterImageOverlay::update_preview(const std::string& /*image_id*/,
 }
 
 void PrinterImageOverlay::update_tag_state() {
+    int state = 0;
+#if HELIX_HAS_IMAGE_TAGGER
     // Selecting an image makes it the displayed one, so the tag buttons act on
     // what the home widget shows.
     const auto target = displayed_image_tag_target();
-    int state = 0;
     if (target) {
         state =
             lookup_user_image_regions(target->key, target->natural_w, target->natural_h) ? 2 : 1;
     }
+#endif
+    // State 0 hides both tag buttons, which is all a build without the tagger shows.
     lv_subject_set_int(&tag_state_subject_, state);
 }
 
+#if HELIX_HAS_IMAGE_TAGGER
 void PrinterImageOverlay::handle_tag_parts() {
     const auto target = displayed_image_tag_target();
     if (!target) {
@@ -234,13 +235,18 @@ void PrinterImageOverlay::reset_tags(const std::string& key) {
     helix::PrinterImageManager::instance().notify_image_changed();
     update_tag_state();
 }
+#else
+void PrinterImageOverlay::handle_tag_parts() {}
+void PrinterImageOverlay::handle_reset_tags() {}
+void PrinterImageOverlay::reset_tags(const std::string&) {}
+#endif // HELIX_HAS_IMAGE_TAGGER
 
 std::string PrinterImageOverlay::get_preview_path_for_id(const std::string& image_id) {
     if (image_id.rfind("shipped:", 0) == 0) {
         std::string name = image_id.substr(8);
         // Sized off the real display: only the tier this width selects is
         // shipped, so a fixed size names a file the device does not have.
-        return get_prerendered_printer_path(name, PrinterImages::current_screen_width());
+        return get_prerendered_printer_path(name, printer_images::current_screen_width());
     }
     if (image_id.rfind("custom:", 0) == 0) {
         auto custom_images = helix::PrinterImageManager::instance().get_custom_images();
@@ -269,7 +275,7 @@ void PrinterImageOverlay::populate_shipped_images() {
     lv_obj_clean(list);
 
     auto images = helix::PrinterImageManager::instance().get_shipped_images(
-        PrinterImages::current_screen_width());
+        printer_images::current_screen_width());
     spdlog::debug("[{}] Populating {} shipped images", get_name(), images.size());
 
     for (const auto& img : images) {
@@ -308,7 +314,7 @@ void PrinterImageOverlay::populate_custom_images() {
         merged.push_back({&img, true});
     for (const auto& img : invalid_images)
         merged.push_back({&img, false});
-    std::sort(merged.begin(), merged.end(), [](const CustomEntry& a, const CustomEntry& b) {
+    helix::sort_small(merged.begin(), merged.end(), [](const CustomEntry& a, const CustomEntry& b) {
         return a.info->display_name < b.info->display_name;
     });
 
@@ -442,13 +448,9 @@ void PrinterImageOverlay::handle_auto_detect() {
     update_selection_indicator("");
 
     // Show the auto-detected image as preview
-    std::string auto_path;
-    Config* config = Config::get_instance();
-    std::string printer_type =
-        config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
-    auto_path = PrinterImages::get_best_printer_image(printer_type);
-
-    update_preview("", "Auto-Detect", auto_path);
+    update_preview("", "Auto-Detect",
+                   helix::PrinterImageManager::instance().get_detected_image_path(
+                       printer_images::current_screen_width()));
     NOTIFY_INFO(lv_tr("Printer image set to auto-detect"));
 }
 

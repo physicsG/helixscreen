@@ -4,6 +4,8 @@
 #pragma once
 #if HELIX_HAS_ACE
 
+#include "ace_slot_parse.h"
+#include "ace_status_parse.h"
 #include "ams_bypass_policy.h"
 #include "ams_subscription_backend.h"
 #include "async_lifetime_guard.h"
@@ -11,15 +13,21 @@
 #include "filament_slot_override_store.h"
 #include "lane_binding.h"
 #include "moonraker_types.h"
+#include "vendor_state_push.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace helix {
 
@@ -56,18 +64,18 @@ class AmsBackendAce : public AmsSubscriptionBackend {
 
     ~AmsBackendAce() override;
 
+    /// The status objects ACE pushes, as a `printer.objects.subscribe` objects map:
+    /// every detected ACE object name (the community drivers, native GoKlipper
+    /// `filament_hub`, or the ACEPRO driver's `ace_instance_N`), falling back to `ace`.
+    /// Empty unless @p hw detected ACE.
+    [[nodiscard]] static nlohmann::json required_status_objects(const helix::PrinterDiscovery& hw);
+
     // ========================================================================
     // Type
     // ========================================================================
 
     [[nodiscard]] AmsType get_type() const override {
         return AmsType::ACE;
-    }
-
-    // ACE marker for expected-hardware recording during wizard setup. ACE is
-    // REST-based, not a real Klipper object, but the validator keys on this name.
-    [[nodiscard]] const char* get_klipper_object_name() const override {
-        return "ace";
     }
 
     // ACE uses ACE_CHANGE_TOOL TOOL=n, not the U1 Tn/SM_PRINT_* families
@@ -132,6 +140,9 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     AmsError recover() override;
     AmsError reset() override;
     AmsError cancel() override;
+    /// Also forgets the toolchange target the driver last stated, so the next
+    /// frame cannot re-raise the toolchange the restart already ended.
+    void on_klipper_restarted() override;
 
     // ========================================================================
     // Configuration
@@ -140,6 +151,11 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     AmsError apply_user_edit(int slot_index, const SlotInfo& info,
                              const helix::ams::Observation& declared) override;
     AmsError sync_external_identity(int slot_index, const SlotInfo& info) override;
+
+    /// A bay's last identified tag read (rfid true, or 2): material, colour and
+    /// the temperatures the frame carried. Dropped when the bay empties or a
+    /// finished read finds no tag.
+    [[nodiscard]] std::optional<helix::ams::TagReading> tag_reading(int slot_index) const override;
     void persist_slot_weight(int slot_index, float remaining_weight_g,
                              float total_weight_g) override;
     void persist_external_identity_impl(int slot_index,
@@ -157,9 +173,13 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     [[nodiscard]] AmsError can_set_tool_mapping(int tool_number, int slot_index) const override;
     AmsError set_tool_mapping_impl(int tool_number, int slot_index) override;
 
-    // ACE has fixed 1:1 mapping (tools ARE slots), not configurable — it
-    // declares RemapStrategy::None and owns no tool->slot table.
+    // Nothing here can re-aim a tool: the backend declares RemapStrategy::None
+    // and owns no editable tool->slot table.
     [[nodiscard]] std::vector<int> get_tool_mapping() const override;
+
+    /// T<n> loads slot_for_tool_locked(n): the slot whose ACEPRO tool number is
+    /// n, or slot n on a driver that publishes no tool numbers.
+    [[nodiscard]] helix::FirmwareRouting firmware_default_routing() const override;
 
     // ========================================================================
     // Bypass Mode
@@ -186,7 +206,7 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     /// with a user override. Empty names mean this rig cannot bypass.
     void set_bypass_macros(helix::BypassMacros macros);
 
-    /// The bypass macros resolved from discovery.
+    /// The bypass macros and the ACEPRO driver's `ace_instance_N` objects, from discovery.
     void set_discovery(const helix::PrinterDiscovery& discovery) override;
 
     // ========================================================================
@@ -206,8 +226,7 @@ class AmsBackendAce : public AmsSubscriptionBackend {
 
     [[nodiscard]] std::vector<helix::printer::DeviceSection> get_device_sections() const override;
     [[nodiscard]] std::vector<helix::printer::DeviceAction> get_device_actions() const override;
-    AmsError execute_device_action(const std::string& action_id,
-                                   const std::any& value = {}) override;
+    AmsError do_execute_device_action(const std::string& action_id, const std::any& value) override;
 
     // ========================================================================
     // Endless Spool
@@ -223,6 +242,9 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     [[nodiscard]] helix::printer::EndlessSpoolConfig get_endless_spool_config() const override;
 
   protected:
+    /// ACE_ENABLE_ENDLESS_SPOOL / ACE_DISABLE_ENDLESS_SPOOL.
+    AmsError apply_endless_spool_enabled(bool enabled) override;
+
     // ========================================================================
     // AmsSubscriptionBackend hooks
     // ========================================================================
@@ -235,7 +257,8 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     void on_stopping() override;
 
     // ========================================================================
-    // Response Parsing (protected for unit testing)
+    // Response handling (protected for unit testing): each reads its payload
+    // through helix::ace (ace_status_parse.h) and applies it under mutex_.
     // ========================================================================
 
     /**
@@ -265,11 +288,42 @@ class AmsBackendAce : public AmsSubscriptionBackend {
      * status, slots, dryer, etc. This handles that combined format.
      *
      * @param data JSON data from the ace Klipper object
+     * @param unit The unit the object describes: N for the ACEPRO driver's
+     *        `ace_instance_N`; kNotAnInstance (unit 0) for the ACEPRO
+     *        manager and every single-object driver
      */
-    void parse_ace_object(const nlohmann::json& data);
+    void parse_ace_object(const nlohmann::json& data, int unit = kNotAnInstance);
+
+    /// parse_ace_object's unit for an object that is no `ace_instance_N`.
+    static constexpr int kNotAnInstance = -1;
 
   private:
     friend class AceTestAccess;
+
+    /// Apply one object's parsed delta to unit @p unit (see parse_ace_object).
+    /// Caller holds mutex_.
+    void apply_ace_object_locked(const helix::ace::ObjectDelta& d, int unit);
+
+    /// Keep or drop bay @p slot_index's tag reading from one frame's slot
+    /// @p entry (its tag read, material, colour and temperatures) and
+    /// @p present. Caller holds mutex_.
+    void note_tag_frame_locked(int slot_index, const helix::ace::SlotDelta& entry,
+                               std::optional<bool> present);
+
+    /// Lay the REST bridge's temp_min / temp_max onto @p slot, unless a user
+    /// edit moved the slot's temperatures this session. Caller holds mutex_.
+    void apply_hub_temps_locked(int slot_index, SlotInfo& slot,
+                                const helix::ace::SlotDelta& entry) const;
+
+    /// Clear user_temps_ for @p slot_index. Caller holds mutex_.
+    void forget_user_temps_locked(int slot_index);
+
+    /// Per bay, whether a user edit this session set the temperatures; cleared
+    /// with the override and at on_started(). Under mutex_.
+    std::vector<bool> user_temps_;
+
+    /// Per bay, the last identified tag read. Under mutex_.
+    std::vector<std::optional<helix::ams::TagReading>> tag_readings_;
 
     // ========================================================================
     // REST Fallback (for BunnyACE/DuckACE without get_status())
@@ -283,30 +337,28 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     void poll_status();
     void poll_slots();
 
-    /**
-     * @brief Parse slot color from either RGB array [r,g,b] or hex string "#RRGGBB"
-     *
-     * Empty when the value carries no colour: a short or non-numeric array, a
-     * string the shared lane colour grammar refuses, any other JSON type. That
-     * is a different answer from pure black, which ACE reports for an empty bay
-     * and which is a real reading, so the two must not share a return value.
-     *
-     * @param color_val JSON value (array or string)
-     * @return Parsed RGB color value, or nullopt when the value states none
-     */
-    static std::optional<uint32_t> parse_slot_color(const nlohmann::json& color_val);
+    /// What a poll does with an answered /status or /slots result, and what
+    /// the plugin's pushed result gets: parse it and announce a change.
+    /// Main thread.
+    void apply_rest_status(const nlohmann::json& result);
+    void apply_rest_slots(const nlohmann::json& result);
 
-    /**
-     * @brief Read one slot's material, for both slot-bearing producers (the
-     *        WebSocket object path and the REST /slots poll read the same hub).
-     *
-     * `material` is the Kobra S1 fork/native live spelling, `type` the
-     * ValgACE spelling; material wins when both are stated. An empty or
-     * absent value states no reading.
-     *
-     * @return The material, or nullopt when the slot states none
-     */
-    static std::optional<std::string> read_slot_material(const nlohmann::json& slot_json);
+    /// What a poll does with a /status read that returned no data, and what
+    /// a pushed error answer gets: count it, and surface a bridge that never
+    /// answered. Main thread.
+    void note_rest_status_failure(const std::string& error);
+
+    /// Whether the REST thread polls /status and /slots on this pass: every
+    /// pass while polling, every kVendorPushBackstop while the plugin pushes.
+    static bool rest_data_poll_due(bool pushing, std::chrono::steady_clock::duration since_last);
+
+    /// The bridge's /status and /slots answers pushed by the HelixPrint
+    /// plugin. Main thread.
+    void on_vendor_state(const nlohmann::json& payload);
+
+    /// Fold the plugin's current answer into vendor_push_, polling the bridge
+    /// once when that owes a read. Main thread.
+    void refresh_vendor_push();
 
     /**
      * @brief Pick the ace/filament_hub/ace_instance_N object to parse from a
@@ -316,7 +368,7 @@ class AmsBackendAce : public AmsSubscriptionBackend {
      * them. The predicate varies by caller: with @p require_slots the object
      * must carry a non-empty "slots" array — the on_started() query commits to
      * the WebSocket subscription path only on real slot data, so a manager-only
-     * object (the Kobra S1 fork's `ace` exposes `ace_instances`/`current_index`
+     * object (the ACEPRO driver's `ace` exposes `ace_instances`/`current_index`
      * but NO `slots`; the per-unit data lives in `ace_instance_N`) falls
      * through to the REST bridge at /server/ace/ instead of parsing zero slots
      * off the manager (#1069). Without it, any non-empty object qualifies —
@@ -342,43 +394,26 @@ class AmsBackendAce : public AmsSubscriptionBackend {
                                                    const nlohmann::json* skip = nullptr);
 
     /**
-     * @brief The lowest-numbered `ace_instance_N` key whose value satisfies
-     *        @p predicate, so every walk over the fork's per-unit objects
-     *        picks the same one.
-     *
-     * The display is anchored to the lowest instance — on_started's
-     * slot-bearing pick populates it — so notify deltas must resolve to it
-     * too, not to whichever instance happened to carry the slots array whole
-     * in a given frame (#1107).
+     * @brief The lowest-numbered `ace_instance_N` object whose value satisfies
+     *        @p predicate: the bootstrap's pick when it decides whether the
+     *        ACEPRO driver's objects carry slot data (#1107). Walks
+     *        ace_instance_objects, so the same instances in the same order.
      *
      * @param status A query result.status object or one notify frame's status
-     * @param predicate Object filter; defaults to "non-empty object", the
-     *        notify-delta shape. Borrowed by select_ace_object with its own
-     *        mode-specific filter.
-     * @return Pointer to the key (borrowed from @p status), or null
+     * @param predicate Object filter; defaults to any instance object.
+     *        Borrowed by select_ace_object with its own mode-specific filter.
+     * @return The instance number and its object (borrowed from @p status),
+     *         or nullopt
      */
-    static const std::string* lowest_ace_instance_key(
-        const nlohmann::json& status,
-        const std::function<bool(const nlohmann::json&)>& predicate = [](const nlohmann::json& o) {
-            return o.is_object() && !o.empty();
-        });
-
-    /**
-     * @brief Map an ACE slot status string to a SlotStatus.
-     *
-     * Single source of truth shared by the WebSocket object path
-     * (parse_ace_object) and the REST fallback path (parse_slots_response) so
-     * the two vocabularies can't drift. empty/runout -> EMPTY;
-     * available/loaded/ready/preload/running -> AVAILABLE; anything else
-     * (including "unknown") -> UNKNOWN.
-     */
-    static SlotStatus slot_status_from_string(const std::string& status_str);
+    static std::optional<std::pair<int, const nlohmann::json*>> lowest_ace_instance(
+        const nlohmann::json& status, const std::function<bool(const nlohmann::json&)>& predicate =
+                                          [](const nlohmann::json&) { return true; });
 
     /**
      * @brief The manager-shaped `ace` object in a status frame, when one is
      *        present.
      *
-     * The Kobra S1 fork splits its surface: each unit's slots live on
+     * The ACEPRO driver splits its surface: each unit's slots live on
      * `ace_instance_N`, while the top-level `ace` is a manager whose only
      * seat signal is `current_index` (#1069). A slot-bearing `ace` (ValgACE)
      * is NOT a manager — returning null for it keeps the caller from parsing
@@ -392,36 +427,96 @@ class AmsBackendAce : public AmsSubscriptionBackend {
      */
     static const nlohmann::json* manager_ace_object(const nlohmann::json& status);
 
-    /// Fold one status-shaped object's dryer state into dryer_info_ under
-    /// either spelling: `dryer` (ValgACE/native) or `dryer_status` (Kobra S1
-    /// fork), each with either nested key set ({status, target_temp,
-    /// duration, remain_time} or {active, current_temp, remaining_minutes,
-    /// duration_minutes}). Also reads the top-level ambient `temp`, which a
-    /// stated dryer current temp overrides. Caller holds mutex_.
-    void apply_dryer_state_locked(const nlohmann::json& data);
+    /// `<verb>` addressed at global @p slot in the form the driver parses. The
+    /// ACEPRO driver resolves a unit from INSTANCE= (the unit index, which is
+    /// its instance number) and reads INDEX= as that unit's local slot,
+    /// rejecting INDEX= alone; GoKlipper and ValgACE drive a single hub by
+    /// INDEX= only.
+    std::string slot_command(const std::string& verb, int slot) const;
+
+    /// Every non-empty `ace_instance_N` object in a status frame with its
+    /// instance number N below kMaxUnits, in ascending numeric N.
+    static std::vector<std::pair<int, const nlohmann::json*>>
+    ace_instance_objects(const nlohmann::json& status);
+
+    /// The `ace_instance_N` key for instance @p n.
+    static std::string ace_instance_key(int n);
 
     /// Fold the manager's path sensors (`rdm_sensor` at the hub,
-    /// `toolhead_sensor` at the extruder) into the cached readings and onto the
-    /// unit. A frame stating neither leaves the last reading standing: notify
-    /// frames carry only changed fields, so silence is not a cleared sensor.
-    /// Caller holds mutex_.
-    void apply_path_sensors_locked(const nlohmann::json& data);
+    /// `toolhead_sensor` at the extruder) into the cached readings and onto
+    /// every unit, which all feed that one hub. A frame stating neither leaves
+    /// the last reading standing: notify frames carry only changed fields, so
+    /// silence is not a cleared sensor. Caller holds mutex_.
+    void apply_path_sensors_locked(const helix::ace::PathSensors& sensors);
 
-    /// Seat the loaded tool from the fork manager's `current_index` — the
-    /// global tool index across every unit, -1 = nothing loaded. This backend
-    /// displays one unit: below that unit's slot count the global index IS
-    /// the local slot (delegates to seat_from_local_index_locked); at or
-    /// beyond it the seat lives in a unit that is not displayed, so the tool
-    /// is stated and no slot is marked (the stamp helper guards
+    /// Seat the loaded tool from the ACEPRO manager's `current_index` — the
+    /// driver's tool number, -1 = nothing loaded. A tool no known slot carries
+    /// is stated with no slot marked (the stamp helper guards
     /// current_slot < 0). Caller holds mutex_.
     /// @return true when current_slot/current_tool/filament_loaded changed
-    bool seat_from_global_index_locked(int current_index);
+    bool seat_from_tool_locked(int tool);
 
-    /// The displayed slot for a global tool index, or -1 when that tool lives
-    /// in a unit this backend does not display. Caller holds mutex_.
-    int displayed_slot_for_global_index_locked(int global_index) const;
+    /// The global slot that feeds driver tool @p tool, or -1 when no slot
+    /// does. Read from each slot's mapped_tool, the tool number each ACEPRO
+    /// slot publishes; a driver that publishes none numbers its tools by slot.
+    /// Caller holds mutex_.
+    int slot_for_tool_locked(int tool) const;
 
-    /// Track the fork manager's `target_index` (the global tool a toolchange
+    /// The driver tool global slot @p slot_index feeds, the inverse of
+    /// slot_for_tool_locked; -1 for an ACEPRO slot the driver has named no tool
+    /// for. Caller holds mutex_.
+    int tool_for_slot_locked(int slot_index) const;
+
+    /// Unit @p unit, created when the frame names it first; units below it that
+    /// have not reported yet hold kSlotsPerUnit slots, disconnected. Caller
+    /// holds mutex_.
+    AmsUnit& unit_locked(int unit);
+
+    /// Publish every slot's mapped_tool as the tool map, in both directions;
+    /// with no slot naming a tool the map is empty. Caller holds mutex_.
+    void publish_tool_map_locked();
+
+    /// Drop every unit at or past @p count, with its dryer, status word and
+    /// link: the bootstrap answer names every unit there is, so one it does
+    /// not name is gone (a restart onto fewer units, or onto another driver).
+    /// Locks mutex_.
+    void keep_units(size_t count);
+
+    /// Number every unit's slots globally, unit after unit, and publish the
+    /// total. Returns true when a unit that had slots moved. Caller holds mutex_.
+    [[nodiscard]] bool index_units_locked();
+
+    /// The ` INSTANCE=N` argument (with its leading space) dryer commands
+    /// address unit @p unit by: empty on drivers with one unit, nullopt for a
+    /// unit the ACEPRO driver does not have. Locks mutex_.
+    [[nodiscard]] std::optional<std::string> dryer_instance_argument(int unit) const;
+
+    /// The ACEPRO instance number unit @p unit is: the unit index itself when
+    /// each `ace_instance_N` is its own unit, and on the REST bridge (which
+    /// serves one unit) the instance its /status reported serving. Caller
+    /// holds mutex_.
+    [[nodiscard]] int ace_instance_for_unit_locked(int unit) const;
+
+    /// Unit @p unit's dryer, created with the ACE Pro's defaults when the
+    /// frame names it first. Caller holds mutex_.
+    DryerInfo& dryer_locked(int unit);
+
+    /// Apply what each unit says about itself (unit_identities_) to the
+    /// units: its model as the unit's name, its firmware, and on the ACEPRO
+    /// driver a display name, the short product name for its protocol,
+    /// numbering the second and later unit of one name. Caller holds mutex_.
+    void apply_unit_identities_locked();
+
+    /// End a load or unload this backend sent, at its ack or error: a
+    /// LOADING or UNLOADING reads IDLE, anything else (an ERROR a unit
+    /// reported while it ran) is left standing. Caller holds mutex_.
+    void end_own_op_locked();
+
+    /// Record unit @p unit's own status word and publish the action of the
+    /// first unit that is doing something, or IDLE. Caller holds mutex_.
+    void set_unit_action_locked(int unit, AmsAction action);
+
+    /// Track the ACEPRO manager's `target_index` (the global tool a toolchange
     /// is heading for, -1 when none is under way). While it names a tool
     /// that is not seated, the target is the pending slot and an idle hub
     /// reads as LOADING, so a toolchange the printer started itself (PRINT_START,
@@ -430,12 +525,11 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     /// clears, so the path stays on the outgoing lane while it retracts.
     /// Caller holds mutex_; parse the path sensors first.
     /// @return true when pending_target_slot or action changed
-    bool apply_target_index_locked(const nlohmann::json& data);
+    bool apply_target_index_locked(std::optional<int> target_index);
 
-    /// Seat the loaded tool from a LOCAL slot index (loaded_slot, the
-    /// ValgACE "loaded" scan, current_filament's parsed local index): -1
-    /// clears, otherwise the index is the slot and the tool. Caller holds
-    /// mutex_.
+    /// Seat the loaded tool from a slot index (loaded_slot, the ValgACE
+    /// "loaded" scan, current_filament's parsed local index): -1 clears,
+    /// otherwise the index is the slot and the tool. Caller holds mutex_.
     /// @return true when current_slot/current_tool/filament_loaded changed
     bool seat_from_local_index_locked(int slot_index);
 
@@ -443,8 +537,46 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     // Members
     // ========================================================================
 
-    // Dryer state (ACE-specific, not in base class)
-    DryerInfo dryer_info_;
+    // Each unit's dryer, by unit index (ACE-specific, not in base class).
+    // Guarded by mutex_.
+    std::vector<DryerInfo> dryers_;
+
+    // Each unit's own status word as an action, by unit index. Guarded by
+    // mutex_.
+    std::vector<AmsAction> unit_actions_;
+
+    // Each ACEPRO unit's link from its `connection_state`, by unit: true when
+    // connected. A unit with no entry has not stated one. Guarded by mutex_.
+    std::map<int, bool> unit_links_;
+
+    // The unit-local slot each unit's driver is feed-assisting
+    // (`feed_assist_slot`), -1 for none, by unit. A unit with no entry has not
+    // stated one. Guarded by mutex_.
+    std::map<int, int> feed_assist_slots_;
+
+    /// The Feed Assist toggle for the loaded slot: on when its unit assists that
+    /// slot, without a value until the unit has said, and disabled with nothing
+    /// loaded.
+    [[nodiscard]] helix::printer::DeviceAction feed_assist_action_locked() const;
+
+    // What each unit states about itself, by unit index. Kept apart from the
+    // units: a notify frame can name a unit before its slots arrive, and a
+    // later frame restates only the fields that changed. Guarded by mutex_.
+    struct UnitIdentity {
+        std::string model;     // `model`, e.g. "Anycubic Color Engine Pro"
+        std::string protocol;  // `protocol`: "ace1_json" (ACE Pro) or "ace2_proto" (ACE 2)
+        std::string firmware;  // `firmware`
+        bool reported = false; // the driver has published this instance
+    };
+    std::vector<UnitIdentity> unit_identities_;
+
+    // The ACEPRO driver's `ace_instance_N` objects discovery found, which the bootstrap
+    // queries. Guarded by mutex_.
+    std::vector<std::string> discovered_instances_;
+
+    // Set once the driver publishes per-unit `ace_instance_N` objects (the
+    // ACEPRO driver), whose commands name a unit or a tool. Guarded by mutex_.
+    bool instance_objects_ = false;
 
     // Info tracking
     std::atomic<bool> info_fetched_{false};
@@ -460,6 +592,16 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     std::atomic<bool> rest_data_ok_{false};
     std::atomic<int> data_fetch_failures_{0};
 
+    // Set once the ACEPRO driver's surface is seen (`ace_instance_N` objects,
+    // or the REST bridge's `ace_manager`): its slot commands take INSTANCE= +
+    // INDEX=. Reset on every start. Guarded by mutex_.
+    bool instance_commands_ = false;
+
+    // The ACEPRO instance the REST bridge's /status serves (`instance_index`):
+    // without ?instance= the bridge picks it from current_index, so it is read
+    // back rather than assumed. Guarded by mutex_.
+    int rest_instance_ = 0;
+
     /// Guards ACE's own RPC and REST callbacks. Separate from the base
     /// lifetime_ because cancel() and on_stopping() expire these without
     /// expiring the status subscription.
@@ -467,16 +609,26 @@ class AmsBackendAce : public AmsSubscriptionBackend {
 
     // REST fallback state
     bool use_rest_fallback_{false};
+    // The HelixPrint plugin pushes the bridge's answers while its feature is
+    // ready; the REST loop skips its data polls for as long as it does.
+    helix::VendorStateTracker vendor_push_;
+    static constexpr const char* kVendorPushFeature = "vendor_ace";
+    static constexpr const char* kVendorPushVendor = "ace";
+    static constexpr int kVendorPushMinVersion = 1;
+    /// Passes on which the REST thread polled /status and /slots.
+    std::atomic<int> rest_data_polls_{0};
     std::thread rest_polling_thread_;
     std::atomic<bool> rest_stop_requested_{false};
     std::condition_variable rest_stop_cv_;
     std::mutex rest_stop_mutex_;
 
     // Configuration
-    static constexpr int POLL_INTERVAL_MS = 500;
+    static constexpr int kPollIntervalMs = 500;
     /// Consecutive data-endpoint (/status) failures before surfacing the
     /// "Moonraker bridge not found" error (genuinely-missing-bridge case).
-    static constexpr int MAX_DATA_FETCH_FAILURES = 3;
+    static constexpr int kMaxDataFetchFailures = 3;
+    static constexpr int kSlotsPerUnit = helix::ace::kSlotsPerUnit;
+    static constexpr int kMaxUnits = helix::ace::kMaxUnits;
 
     // Layer any configured FilamentSlotOverride for `slot_index` over `slot`,
     // mutating `slot` in place. Override wins for every non-default field;
@@ -518,14 +670,15 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     void judge_insert_locked(SlotInfo& slot, int slot_index,
                              const helix::ams::SpoolEvidence& inserted);
 
-    /// Mutable slot lookup. ACE is always single-unit, and the two REST
-    /// parsers size units[0].slots independently, so index directly rather
-    /// than through AmsSystemInfo::get_slot_global() — that walks
-    /// first_slot_global_index/slot_count, which parse_slots_response only
-    /// refreshes when the slot count actually changes. Caller holds mutex_.
+    /// Mutable slot lookup by global index. Walks each unit's
+    /// first_slot_global_index and its slots vector rather than
+    /// AmsSystemInfo::get_slot_global(), which reads slot_count: the two REST
+    /// parsers size units[0].slots independently, and parse_slots_response
+    /// only refreshes slot_count when the slot count actually changes.
+    /// Caller holds mutex_.
     SlotInfo* mutable_slot_locked(int slot_index);
-    /// Reads index units[0].slots the same way, so a read sees what a write
-    /// through mutable_slot_locked() left.
+    /// Reads the slots the same way, so a read sees what a write through
+    /// mutable_slot_locked() left.
     [[nodiscard]] const SlotInfo* slot_info_locked(int slot_index) const override {
         return const_cast<AmsBackendAce*>(this)->mutable_slot_locked(slot_index);
     }
@@ -589,6 +742,9 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     /// the two phases apart.
     int target_index_ = -1;
     bool driver_action_ = false;
+    // A load this backend sent is in flight: its LOADING ends with the
+    // command's ack, not when the driver's target clears. Guarded by mutex_.
+    bool own_load_ = false;
     bool swap_hub_cleared_ = false;
 
     /// Whether the driver has published `ace_pro_enabled`, and its last value.
@@ -614,6 +770,22 @@ class AmsBackendAce : public AmsSubscriptionBackend {
     /// Macros that turn the ACE path off (engaging bypass) and back on.
     std::string bypass_on_macro_;
     std::string bypass_off_macro_;
+
+    /// What discovery found for the pair, and the macros the user may pick
+    /// instead (kAutoMacro first). Re-resolved when a pick changes.
+    helix::BypassMacros bypass_detected_;
+    std::vector<std::string> bypass_macro_options_;
+
+    using ParkState = helix::ace::ParkState;
+
+    /// Records slot `index`'s park_state. Returns whether it changed.
+    bool note_park_state_locked(int index, ParkState state);
+
+    /// An idle slot the driver parked draws staged at the hub: not the seated
+    /// slot, no toolchange or load under way, filament present.
+    [[nodiscard]] bool slot_parked_at_hub_locked(int slot_index) const;
+
+    std::map<int, ParkState> park_states_;
 
     /// The two path sensors, when the driver publishes them. An unloaded strand
     /// parks just short of the hub rather than back at the spool, so these are

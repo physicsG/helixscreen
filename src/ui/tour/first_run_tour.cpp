@@ -3,6 +3,7 @@
 
 #include "first_run_tour.h"
 
+#include "ui_modal.h"
 #include "ui_nav_manager.h"
 #include "ui_next_tick.h"
 
@@ -50,6 +51,14 @@ bool FirstRunTour::should_auto_start() {
         return false;
     }
 
+    // The tour's card would sit over a modal or an overlay covering Home (a
+    // power-loss resume offer, its wizard), which outranks it. The gate stays
+    // open, so the tour is offered again at the next home activation.
+    if (!ModalStack::instance().empty() || NavigationManager::instance().has_open_overlays()) {
+        spdlog::debug("[FirstRunTour] gate: home_covered");
+        return false;
+    }
+
     const bool completed = cfg->get<bool>("/tour/completed", false);
     const int last_seen = cfg->get<int>("/tour/last_seen_version", 0);
 
@@ -57,10 +66,10 @@ bool FirstRunTour::should_auto_start() {
         spdlog::debug("[FirstRunTour] gate: fresh_auto_start");
         return true;
     }
-    if (last_seen < TOUR_VERSION) {
+    if (last_seen < kTourVersion) {
         spdlog::debug("[FirstRunTour] gate: version_bumped_since_last_seen "
                       "(last_seen={}, current={})",
-                      last_seen, TOUR_VERSION);
+                      last_seen, kTourVersion);
         return true;
     }
     spdlog::debug("[FirstRunTour] gate: already_completed_current_version");
@@ -70,9 +79,9 @@ bool FirstRunTour::should_auto_start() {
 void FirstRunTour::mark_completed() {
     auto* cfg = ::helix::Config::get_instance();
     cfg->set<bool>("/tour/completed", true);
-    cfg->set<int>("/tour/last_seen_version", TOUR_VERSION);
+    cfg->set<int>("/tour/last_seen_version", kTourVersion);
     cfg->save();
-    spdlog::debug("[FirstRunTour] Marked completed (version={})", TOUR_VERSION);
+    spdlog::debug("[FirstRunTour] Marked completed (version={})", kTourVersion);
 }
 
 void FirstRunTour::maybe_start() {
@@ -86,8 +95,9 @@ void FirstRunTour::maybe_start() {
     // static (immortal lifetime) — see instance().
     helix::ui::run_next_tick([this]() {
         start_queued_ = false;
-        // start() may have run the tour synchronously while this was queued.
-        if (running_)
+        // start() may have run the tour synchronously while this was queued,
+        // and a modal or overlay may have come up over Home since the check.
+        if (running_ || !should_auto_start())
             return;
         start_impl();
     });

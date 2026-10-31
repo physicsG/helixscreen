@@ -11,8 +11,8 @@
 namespace helix::ui {
 
 namespace {
-constexpr int DEFAULT_SCREEN_W = 800;
-constexpr int DEFAULT_SCREEN_H = 480;
+constexpr int kDefaultScreenW = 800;
+constexpr int kDefaultScreenH = 480;
 } // namespace
 
 TouchCalibrationController::TouchCalibrationController()
@@ -31,9 +31,9 @@ void TouchCalibrationController::begin() {
         panel_->set_screen_size(dm->width(), dm->height());
         spdlog::debug("[TouchCalController] Screen size set to {}x{}", dm->width(), dm->height());
     } else {
-        panel_->set_screen_size(DEFAULT_SCREEN_W, DEFAULT_SCREEN_H);
+        panel_->set_screen_size(kDefaultScreenW, kDefaultScreenH);
         spdlog::warn("[TouchCalController] DisplayManager not available, using default {}x{}",
-                     DEFAULT_SCREEN_W, DEFAULT_SCREEN_H);
+                     kDefaultScreenW, kDefaultScreenH);
     }
 
     panel_->reset();

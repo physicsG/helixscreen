@@ -6,9 +6,9 @@
 
 #include <spdlog/spdlog.h>
 
-AfcConfigManager::AfcConfigManager(IMoonrakerAPI* api) : api_(api) {}
+AfcConfigManager::AfcConfigManager(helix::IMoonrakerAPI* api) : api_(api) {}
 
-AfcConfigManager::AfcConfigManager(IMoonrakerAPI* api, helix::LifetimeToken token)
+AfcConfigManager::AfcConfigManager(helix::IMoonrakerAPI* api, helix::LifetimeToken token)
     : api_(api), token_(std::move(token)) {}
 
 void AfcConfigManager::load(const std::string& filename, Callback on_done) {

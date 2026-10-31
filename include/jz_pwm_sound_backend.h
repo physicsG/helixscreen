@@ -103,7 +103,11 @@ void jz_pwm_set_voice_knobs(const JzPwmVoiceKnobs& knobs);
  */
 class JzPwmSoundBackend : public SoundBackend {
   public:
-    /// /dev/jz_pwm exists and fx-pwm is executable (chroot or host path).
+    /// The board carries a piezo behind jz_pwm. The device node exists on every Ingenic
+    /// board, K1 series included, where its channels drive other hardware.
+    static bool board_admits_piezo();
+
+    /// board_admits_piezo(), /dev/jz_pwm exists and fx-pwm is executable (chroot or host path).
     static bool available();
 
     JzPwmSoundBackend();

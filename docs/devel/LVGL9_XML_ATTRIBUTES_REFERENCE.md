@@ -222,7 +222,7 @@ Define in `<styles>`, apply with child `<style>`. Drop `style_` prefix.
 | Attr | Notes |
 |------|-------|
 | `text` | Content |
-| `long_mode` | `wrap`, `scroll`, `dots`, `clip`. ⚠️ Inert without an explicit `width` — a content-width label is always one line. See `LVGL9_XML_GUIDE.md`, "Text never wraps inside a `flex_grow` column". |
+| `long_mode` | `wrap`, `scroll`, `dots`, `clip`. ⚠️ Inert without an explicit `width` — a content-width label is always one line. See `LVGL9_XML_GUIDE.md`, "Text never wraps inside a `flex_grow` column". `dots` on a `text_*` or `ui_button` at content height holds the label to one line; an explicit px/% `height` or `style_max_height` opts out and allows multi-line dots. Text meant to wrap must not use `dots`. See "One-line labels: `long_mode="dots"`". |
 | `bind_text` | `"subject 'format'"` |
 
 ### lv_image

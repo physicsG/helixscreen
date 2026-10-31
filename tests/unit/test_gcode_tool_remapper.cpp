@@ -261,6 +261,17 @@ TEST_CASE("a tool change the preview counts is a tool change the remapper rewrit
     CHECK(stream_remap("\tT1;next\r\n", remap) == "\tT2;next\r\n");
 }
 
+TEST_CASE("a tool change's macro parameters survive the rewrite byte for byte",
+          "[remap][gcode][stream][1848]") {
+    std::map<int, int> remap = {{0, 2}};
+    CHECK(stream_remap("T0 PURGE_LENGTH=121.399 NEW_EXTRUDER_TEMP=222\n", remap) ==
+          "T2 PURGE_LENGTH=121.399 NEW_EXTRUDER_TEMP=222\n");
+    CHECK(stream_remap("  T0\tPURGE_LENGTH=0 ; change\r\n", remap) ==
+          "  T2\tPURGE_LENGTH=0 ; change\r\n");
+    // A G-code word among the parameters keeps the line out of the rewrite.
+    CHECK(stream_remap("T0 PURGE_LENGTH=1 X1\n", remap) == "T0 PURGE_LENGTH=1 X1\n");
+}
+
 TEST_CASE("near-miss tokens are left alone", "[remap][gcode][stream]") {
     std::map<int, int> remap = {{1, 2}};
     // Each of these is a corrupted print if the match is ever loosened: a

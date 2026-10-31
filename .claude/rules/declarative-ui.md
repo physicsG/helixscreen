@@ -26,6 +26,7 @@ The gate ratchets: the count may fall, never rise.
 | 6 | **bind_style priority** | `style_bg_color` + `bind_style` | Inline attrs override - use TWO bind_styles |
 | 7 | **NO C++ derived subject for compound conditions** | Hand-written observer that combines 2+ subjects (`a \|\| b > c`) | XML `<subject_expr name="x" expr="a or b gt c"/>` or inline `cond="a or b gt c"` on `bind_flag_if`/`bind_state_if`/`bind_style_if` (word forms; `&&`/`<` need XML escaping) |
 | 8 | **NO C++ create-and-wire loop for repeated fragments** | `for(int i=0;i<n;i++) { lv_obj_create(...); ... }` in C++ | XML `<repeat count="4">…$i…</repeat>` (fixed) or `<repeat count="a_subject">…${i}…</repeat>` (reactive rebuild). See `docs/devel/LVGL9_XML_GUIDE.md` § "Repeating fragments with `<repeat>`". Measured layout, computed callbacks and data population still belong in C++; `<repeat>` only replaces the widget-creation loop |
+| 9 | **A hold that acts ends its press** | A tap on `short_clicked` (a slow tap then does nothing), a flag the hold handler sets to swallow the tap, or a hold handler that acts and leaves the press running (its release also fires `clicked`) | The tap binds `clicked`; the `long_pressed` handler calls `helix::ui::end_press(e)` when it acts and leaves the press alone when it declines. Gated by `scripts/check_hold_ends_press.py`. See `docs/devel/LVGL9_XML_GUIDE.md` § "Tap and hold" |
 
 **Structural exceptions - C++ is correct here, permanently:**
 

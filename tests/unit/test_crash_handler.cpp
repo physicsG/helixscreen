@@ -17,6 +17,7 @@
 #include "helix_thread.h"
 #include "system/crash_error_log_sink.h"
 #include "system/crash_handler.h"
+#include "system/crash_record.h"
 #include "system/telemetry_manager.h"
 
 #include <spdlog/spdlog.h>
@@ -241,6 +242,111 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: parse handles all signal types", "[te
     }
 }
 
+TEST_CASE_METHOD(CrashTestFixture,
+                 "Crash: illegal instruction and trap and bad syscall leave a crash file",
+                 "[telemetry][crash][subprocess]") {
+    const int sig = GENERATE(SIGILL, SIGTRAP, SIGSYS);
+    const char* const expected = sig == SIGILL ? "SIGILL" : sig == SIGTRAP ? "SIGTRAP" : "SIGSYS";
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        crash_handler::install(crash_path());
+        raise(sig);
+        _exit(99);
+    }
+    REQUIRE(pid > 0);
+
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 128 + sig);
+
+    auto result = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(result.is_null());
+    CHECK(result["signal"] == sig);
+    CHECK(result["signal_name"] == expected);
+}
+
+TEST_CASE_METHOD(CrashTestFixture, "Crash: a trap instruction records its fault code by name",
+                 "[telemetry][crash][subprocess]") {
+    // __builtin_trap is `brk` on aarch64 and `ud2` (or `udf`) elsewhere.
+#if defined(__aarch64__)
+    const int expected_sig = SIGTRAP;
+    const char* const expected_code = "TRAP_BRKPT";
+#else
+    const int expected_sig = SIGILL;
+    const char* const expected_code = "ILL_ILLOPN";
+#endif
+    pid_t pid = fork();
+    if (pid == 0) {
+        crash_handler::install(crash_path());
+        __builtin_trap();
+    }
+    REQUIRE(pid > 0);
+
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 128 + expected_sig);
+
+    auto result = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(result.is_null());
+    CHECK(result["signal"] == expected_sig);
+    CHECK(result.value("fault_code_name", "") == expected_code);
+}
+
+TEST_CASE_METHOD(CrashTestFixture, "Crash: an external record reads back as a crash",
+                 "[telemetry][crash]") {
+    REQUIRE(helix::crash_record::write_external(crash_path(), SIGILL, "1.2.3", 1707350400,
+                                                "watchdog", 0));
+
+    auto result = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(result.is_null());
+    CHECK(result["signal"] == SIGILL);
+    CHECK(result["signal_name"] == "SIGILL");
+    CHECK(result["app_version"] == "1.2.3");
+    CHECK(result["recorded_by"] == "watchdog");
+}
+
+TEST_CASE_METHOD(CrashTestFixture, "Crash: an external record never replaces the app's own",
+                 "[telemetry][crash]") {
+    write_realistic_crash_file();
+    const auto before = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(before.is_null());
+
+    // Written after the process started: the app's own record.
+    const long started = static_cast<long>(time(nullptr)) - 60;
+    CHECK_FALSE(helix::crash_record::write_external(crash_path(), SIGILL, "1.2.3", 1707350400,
+                                                    "watchdog", started));
+    CHECK(crash_handler::read_crash_file(crash_path()) == before);
+}
+
+TEST_CASE_METHOD(CrashTestFixture, "Crash: an external record replaces a previous run's leftover",
+                 "[telemetry][crash]") {
+    write_realistic_crash_file();
+    REQUIRE(crash_handler::read_crash_file(crash_path())["signal_name"] == "SIGSEGV");
+
+    // The process started after the file was last written.
+    const long started = static_cast<long>(time(nullptr)) + 60;
+    REQUIRE(helix::crash_record::write_external(crash_path(), SIGILL, "1.2.3", 1707350400,
+                                                "watchdog", started));
+    auto result = crash_handler::read_crash_file(crash_path());
+    CHECK(result["signal_name"] == "SIGILL");
+    CHECK(result["recorded_by"] == "watchdog");
+}
+
+TEST_CASE("Crash: stop requests are not crash signals", "[telemetry][crash]") {
+    for (const int sig : helix::crash_record::kCrashSignals) {
+        CAPTURE(sig);
+        CHECK(helix::crash_record::is_crash_signal(sig));
+        CHECK(std::string(helix::crash_record::signal_name(sig)) != "UNKNOWN");
+    }
+    for (const int sig : {SIGTERM, SIGKILL, SIGINT, SIGHUP}) {
+        CAPTURE(sig);
+        CHECK_FALSE(helix::crash_record::is_crash_signal(sig));
+    }
+}
+
 // ============================================================================
 // Crash File Cleanup [telemetry][crash]
 // ============================================================================
@@ -405,7 +511,6 @@ TEST_CASE_METHOD(CrashTestFixture,
     }
 
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         // Child. Pre-populate __abort_msg in glibc's real struct layout, the
@@ -424,6 +529,7 @@ TEST_CASE_METHOD(CrashTestFixture,
         raise(SIGABRT);
         _exit(99); // unreachable
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -456,7 +562,6 @@ TEST_CASE_METHOD(CrashTestFixture,
     }
 
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         // Embedded \n and \r must flatten to spaces — the crash file format
@@ -470,6 +575,7 @@ TEST_CASE_METHOD(CrashTestFixture,
         raise(SIGABRT);
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -490,7 +596,6 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: SIGABRT handler truncates oversized _
     }
 
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         // 500 'a's followed by a tail marker the bounded copy MUST NOT
@@ -511,6 +616,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: SIGABRT handler truncates oversized _
         raise(SIGABRT);
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -537,7 +643,6 @@ TEST_CASE_METHOD(CrashTestFixture,
     }
 
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         void** abort_msg_slot = static_cast<void**>(dlsym(RTLD_DEFAULT, "__abort_msg"));
@@ -552,6 +657,7 @@ TEST_CASE_METHOD(CrashTestFixture,
         raise(SIGABRT);
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -578,7 +684,6 @@ TEST_CASE_METHOD(CrashTestFixture,
     }
 
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         if (!publish_abort_msg("")) {
@@ -588,6 +693,7 @@ TEST_CASE_METHOD(CrashTestFixture,
         raise(SIGABRT);
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -629,7 +735,6 @@ TEST_CASE_METHOD(CrashTestFixture,
     }
 
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         crash_handler::install(crash_path());
@@ -665,6 +770,7 @@ TEST_CASE_METHOD(CrashTestFixture,
         free(const_cast<void*>(p)); // NOLINT — deliberate corruption, this is the test
         _exit(99);                  // glibc failed to detect it — parent's exit-code check fails
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -722,7 +828,6 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: heap_snapshot_age_ms is an age, not a
     }
 
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         crash_handler::install(crash_path());
@@ -730,6 +835,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: heap_snapshot_age_ms is an age, not a
         raise(SIGABRT);
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -754,7 +860,6 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: heap_snapshot_age_ms is an age, not a
 TEST_CASE_METHOD(CrashTestFixture, "Crash: heap snapshot emits self-consistent raw clock stamps",
                  "[telemetry][crash][subprocess]") {
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         crash_handler::install(crash_path());
@@ -762,6 +867,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: heap snapshot emits self-consistent r
         raise(SIGABRT);
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -802,7 +908,6 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: heap snapshot emits self-consistent r
 TEST_CASE_METHOD(CrashTestFixture, "Crash: recent ERROR log lines captured into crash file",
                  "[telemetry][crash][subprocess]") {
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         crash_handler::install(crash_path());
@@ -820,6 +925,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: recent ERROR log lines captured into 
         raise(SIGABRT);
         _exit(99); // unreachable
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -947,6 +1053,24 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: write_exception_record handles null w
     REQUIRE_FALSE(parsed.contains("exception"));
 }
 
+TEST_CASE_METHOD(CrashTestFixture, "Crash: an empty exception message reads back as present",
+                 "[telemetry][crash]") {
+    // An exception whose what() is "" still says the crash came from an
+    // exception, so the key must survive with an empty value.
+    write_crash_file("signal:0\n"
+                     "name:EXCEPTION\n"
+                     "version:0.13.3\n"
+                     "timestamp:1707350400\n"
+                     "uptime:0\n"
+                     "exception:\n");
+
+    json parsed = crash_handler::read_crash_file(crash_path());
+    REQUIRE_FALSE(parsed.is_null());
+    REQUIRE(parsed["signal_name"] == "EXCEPTION");
+    REQUIRE(parsed.contains("exception"));
+    CHECK(parsed["exception"] == "");
+}
+
 TEST_CASE_METHOD(CrashTestFixture, "Crash: write_exception_record is no-op without install",
                  "[telemetry][crash]") {
     // Ensure we start in uninstalled state — prior tests may have left state;
@@ -967,7 +1091,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: TelemetryManager enqueues crash event
     {
         std::ofstream ofs(tm_crash_path);
         ofs << "signal:11\nname:SIGSEGV\nversion:0.9.6\ntimestamp:1707350400\nuptime:3600\n"
-            << "bt:0x0040abcd\nbt:0x0040ef01\n";
+            << "recorded_by:watchdog\nbt:0x0040abcd\nbt:0x0040ef01\n";
     }
 
     // Enable telemetry via Config singleton (single source of truth since
@@ -994,7 +1118,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: TelemetryManager enqueues crash event
 
             // Verify crash event schema
             REQUIRE(event.contains("schema_version"));
-            REQUIRE(event["schema_version"] == TelemetryManager::SCHEMA_VERSION);
+            REQUIRE(event["schema_version"] == TelemetryManager::kSchemaVersion);
             REQUIRE(event.contains("device_id"));
             REQUIRE(event["device_id"].is_string());
             REQUIRE(event.contains("timestamp"));
@@ -1008,6 +1132,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: TelemetryManager enqueues crash event
             REQUIRE(event["uptime_sec"] == 3600);
             REQUIRE(event.contains("backtrace"));
             REQUIRE(event["backtrace"].size() == 2);
+            CHECK(event.value("recorded_by", "") == "watchdog");
             break;
         }
     }
@@ -1293,7 +1418,7 @@ TEST_CASE("Crash: breadcrumb ring keeps the newest 256 entries on wraparound",
           "[telemetry][crash]") {
     // Drain the ring first — static state leaks across test cases. Writing
     // ring-size drain entries pushes any residual application breadcrumbs out.
-    // Ring size: src/system/crash_handler.cpp BREADCRUMB_RING_SIZE = 256.
+    // Ring size: src/system/crash_handler.cpp kBreadcrumbRingSize = 256.
     for (int i = 0; i < 256; ++i) {
         crash_handler::breadcrumb::note("drain", "drain");
     }
@@ -1327,7 +1452,7 @@ TEST_CASE("Crash: breadcrumb ring keeps the newest 256 entries on wraparound",
 
 TEST_CASE("Crash: breadcrumb category/subject are truncated with null terminator",
           "[telemetry][crash]") {
-    // Ring size: src/system/crash_handler.cpp BREADCRUMB_RING_SIZE = 256.
+    // Ring size: src/system/crash_handler.cpp kBreadcrumbRingSize = 256.
     for (int i = 0; i < 256; ++i) {
         crash_handler::breadcrumb::note("drain", "drain");
     }
@@ -1445,7 +1570,6 @@ void give_forked_child_signal_stack() {
 TEST_CASE_METHOD(CrashTestFixture, "Crash: a stack overflow still writes the crash file",
                  "[telemetry][crash][subprocess]") {
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         // A small stack makes the overflow quick and deterministic.
@@ -1459,6 +1583,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: a stack overflow still writes the cra
         crash_handler::install(crash_path());
         _exit(overflow_stack(0) == 0 ? 97 : 99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -1489,7 +1614,6 @@ TEST_CASE_METHOD(CrashTestFixture,
                  "Crash: a stack overflow on a make_thread worker still writes the crash file",
                  "[telemetry][crash][subprocess]") {
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         crash_handler::install(crash_path());
@@ -1497,6 +1621,7 @@ TEST_CASE_METHOD(CrashTestFixture,
         worker.join();
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -1562,7 +1687,6 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: the stack dump holds the real stack w
     const bool deny = GENERATE(false, true);
     CAPTURE(deny);
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         if (deny && !deny_process_vm_readv()) {
@@ -1572,6 +1696,7 @@ TEST_CASE_METHOD(CrashTestFixture, "Crash: the stack dump holds the real stack w
         raise(SIGABRT);
         _exit(99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);
@@ -1588,7 +1713,6 @@ TEST_CASE_METHOD(CrashTestFixture,
                  "Crash: a stack overflow completes the record when process_vm_readv is refused",
                  "[telemetry][crash][subprocess]") {
     pid_t pid = fork();
-    REQUIRE(pid >= 0);
 
     if (pid == 0) {
         if (!deny_process_vm_readv()) {
@@ -1601,6 +1725,7 @@ TEST_CASE_METHOD(CrashTestFixture,
         crash_handler::install(crash_path());
         _exit(overflow_stack(0) == 0 ? 97 : 99);
     }
+    REQUIRE(pid > 0);
 
     int status = 0;
     REQUIRE(waitpid(pid, &status, 0) == pid);

@@ -4,7 +4,7 @@
        entities, pointers and poll interval are text and enum rows, so they
        live in the generated settings screen where input can round-trip. The
        access token is never shown here. -->
-  <view extends="overlay_panel" title="Room" bg_color="#card_bg">
+  <view extends="overlay_panel" title="Room" title_tag="Room" bg_color="#card_bg">
     <lv_obj name="ambient-tile__detail_content"
             width="100%" flex_grow="1" style_pad_all="#space_md" style_pad_gap="#space_sm" flex_flow="column"
             scrollable="true">

@@ -136,8 +136,8 @@ struct QuantizationParams {
  */
 /// Fallback toolpath color (teal) used when a vertex's color_index has no
 /// entry in the palette. Not to be confused with GCodeGLESRenderer's
-/// DEFAULT_FILAMENT_COLOR, which is the same shade as a normalized glm::vec4.
-constexpr uint32_t DEFAULT_TOOLPATH_COLOR = 0x26A69A;
+/// kDefaultFilamentColor, which is the same shade as a normalized glm::vec4.
+constexpr uint32_t kDefaultToolpathColor = 0x26A69A;
 
 struct PackedVertex {
     /// Quantized position, uploaded as GL_SHORT *unnormalized* and turned back
@@ -269,11 +269,11 @@ struct ObjectRunSpan {
 /// relative to the geometry it indexes, so run collection is abandoned entirely
 /// and the renderer falls back to what it did before runs existed (brackets
 /// only, no shell). 65536 runs is 512KB.
-inline constexpr size_t MAX_OBJECT_RUNS = 65536;
+inline constexpr size_t kMaxObjectRuns = 65536;
 
 /// Largest vertex_count that fits uint16 while staying strip-aligned
 /// (6 vertices per strip). A longer stretch is split across several runs.
-inline constexpr uint32_t MAX_RUN_VERTICES = 65532;
+inline constexpr uint32_t kMaxRunVertices = 65532;
 
 /**
  * @brief Complete ribbon geometry for rendering
@@ -306,7 +306,7 @@ struct RibbonGeometry {
     std::vector<AABB> layer_bboxes; ///< AABB per layer for frustum culling
 
     /// Per-object vertex runs, flat and grouped by layer. Empty when the file has
-    /// no exclude-object metadata, or when the MAX_OBJECT_RUNS guard tripped.
+    /// no exclude-object metadata, or when the kMaxObjectRuns guard tripped.
     std::vector<ObjectRun> object_runs;
 
     /// [layer_idx] -> (first index into object_runs, run count). Empty whenever
@@ -349,16 +349,16 @@ struct RibbonGeometry {
     /**
      * @brief Resolve a strip's RGB color through strip_color_index + color_palette.
      *
-     * Falls back to DEFAULT_TOOLPATH_COLOR when the strip has no recorded index or
+     * Falls back to kDefaultToolpathColor when the strip has no recorded index or
      * the index is stale relative to the palette.
      */
     uint32_t strip_color(size_t strip_idx) const {
         if (strip_idx >= strip_color_index.size()) {
-            return DEFAULT_TOOLPATH_COLOR;
+            return kDefaultToolpathColor;
         }
         uint8_t ci = strip_color_index[strip_idx];
         if (ci >= color_palette.size()) {
-            return DEFAULT_TOOLPATH_COLOR;
+            return kDefaultToolpathColor;
         }
         return color_palette[ci];
     }
@@ -514,7 +514,7 @@ size_t first_print_layer(const ParsedGCodeFile& gcode);
 class GeometryBuilder {
   public:
     // Default filament color (OrcaSlicer teal) - used when G-code doesn't specify color
-    static constexpr const char* DEFAULT_FILAMENT_COLOR = "#26A69A";
+    static constexpr const char* kDefaultFilamentColor = "#26A69A";
 
     GeometryBuilder();
 

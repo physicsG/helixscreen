@@ -5,65 +5,116 @@
 <!-- Launched from home screen by tapping the printer image -->
 <component>
   <consts>
-    <!-- Printer image size: responsive to screen height breakpoints -->
+    <!-- Printer image and identity column: responsive to screen height breakpoints -->
+    <!-- MICRO (<=272: 480x272), TINY (273-390: 480x320) -->
     <!-- SMALL (391-460: 480x400, 1920x440), MEDIUM (461-550: 800x480), LARGE (551-700: 1024x600), XLARGE (>700: 1280x720+) -->
-    <!-- _tiny falls back to _small, _xlarge falls back to _large -->
+    <!-- _micro falls back to _tiny, _tiny to _small, _xlarge to _large -->
     <px name="pm_image_size_small" value="120"/>
     <px name="pm_image_size_medium" value="160"/>
     <px name="pm_image_size_large" value="200"/>
+    <!-- 480x320 and 480x272 leave the right column too narrow for a setting row at 216 -->
+    <px name="pm_identity_width_tiny" value="180"/>
+    <px name="pm_identity_width_small" value="216"/>
+    <px name="pm_identity_width_medium" value="264"/>
+    <px name="pm_identity_width_large" value="304"/>
+    <!-- Portrait puts the image beside the name, so it stays small at every tier -->
+    <px name="pm_image_size_portrait" value="120"/>
   </consts>
-  <view name="printer_manager_overlay" extends="overlay_panel" title="Printer Manager" bg_color="#screen_bg">
-    <!-- Scrollable content area -->
+  <styles>
+    <!-- Landscape: the identity column on the left, Software and Capabilities
+         scrolling on the right. Portrait: an identity header card (image beside
+         name and model) over the two groups, the whole body scrolling. Paired on
+         ui_is_portrait so each orientation is always covered; an inline attribute
+         for any property below would beat the bound style and freeze one
+         orientation. layout="flex" installs the flex layout a style alone does
+         not. -->
+    <style name="body_row" layout="flex" flex_flow="row"/>
+    <style name="body_column" layout="flex" flex_flow="column"/>
+    <style name="identity_landscape"
+           width="#pm_identity_width" layout="flex" flex_flow="column" margin_bottom="0" flex_main_place="start"
+           flex_cross_place="center"/>
+    <style name="identity_portrait"
+           width="100%" layout="flex" flex_flow="row" margin_bottom="#space_md" flex_main_place="start"
+           flex_cross_place="center"/>
+    <style name="image_landscape" width="#pm_image_size" height="#pm_image_size"/>
+    <style name="image_portrait" width="#pm_image_size_portrait" height="#pm_image_size_portrait"/>
+    <style name="text_column_landscape" width="100%" flex_grow="0"/>
+    <style name="text_column_portrait" width="0" flex_grow="1"/>
+    <style name="text_center" text_align="center"/>
+    <style name="text_left" text_align="left"/>
+    <style name="details_landscape" width="0" height="100%" flex_grow="1"/>
+    <style name="details_portrait" width="100%" height="content" flex_grow="0"/>
+  </styles>
+  <view name="printer_manager_overlay"
+        extends="overlay_panel" title="Printer Manager" bg_color="#screen_bg" hide_action_button="false"
+        action_button_text="Manage Printers" action_button_callback="pm_manage_printers_clicked"
+        action_button_hidden_subject="ui_is_portrait" hide_action_icon="false" action_icon="printer_3d"
+        action_icon_hidden_cond="ui_is_portrait eq 0" action_icon_callback="pm_manage_printers_clicked">
+    <!-- Manage Printers: the labelled button in landscape; portrait is too narrow
+         for it beside the title, so the round icon button takes its place. -->
+    <!-- Body. Tapping it while the name is being edited saves the edit (C++). -->
     <lv_obj name="overlay_content"
-            width="100%" flex_grow="1" style_pad_all="0" style_pad_gap="0" flex_flow="column" scrollable="true">
+            width="100%" flex_grow="1" style_pad_all="0" style_pad_top="#space_sm" style_pad_gap="0" scrollable="true">
+      <bind_style_if_eq name="body_row" subject="ui_is_portrait" ref_value="0"/>
+      <bind_style_if_eq name="body_column" subject="ui_is_portrait" ref_value="1"/>
 
       <!-- ================================================================== -->
       <!-- SECTION 1: PRINTER IDENTITY -->
       <!-- ================================================================== -->
-      <lv_obj width="100%"
-              height="content" flex_flow="row" style_flex_main_place="center" style_flex_cross_place="center"
-              style_flex_track_place="center" scrollable="false" style_bg_opa="0" style_border_width="0"
-              style_pad_all="0">
-        <lv_obj width="content"
-                height="content" flex_flow="column" style_flex_cross_place="center" style_pad_top="#space_sm"
-                style_pad_bottom="#space_sm" style_pad_left="#space_lg" style_pad_right="#space_lg"
-                style_pad_gap="#space_xs" scrollable="false" style_bg_color="#elevated_bg" style_bg_opa="255"
-                style_border_width="0" style_radius="#border_radius">
-          <!-- Printer image (clickable to change) + pencil edit badge -->
-          <lv_obj name="pm_image_container"
-                  width="#pm_image_size" height="#pm_image_size" scrollable="false" clickable="true" style_bg_opa="0"
-                  style_border_width="0" style_pad_all="0" style_radius="#border_radius">
-            <style name="styles.press_wash" selector="pressed"/>
-            <event_cb trigger="clicked" callback="on_change_printer_image_clicked"/>
-            <lv_image name="pm_printer_image"
-                      width="100%" height="100%" inner_align="contain" style_radius="#border_radius" clickable="false"
-                      event_bubble="true"/>
-            <!-- Pencil badge overlaid in lower-right corner of image -->
-            <lv_obj width="#icon_button_size"
-                    height="#icon_button_size" style_bg_color="#card_bg" style_bg_opa="#modal_backdrop_opacity"
-                    style_radius="#border_radius" style_border_width="0" scrollable="false" align="bottom_right"
-                    style_pad_all="0" style_translate_x="-8" style_translate_y="-8" clickable="false"
-                    event_bubble="true">
-              <icon src="pencil" size="xs" variant="tertiary" align="center" clickable="false" event_bubble="true"/>
-            </lv_obj>
+      <lv_obj name="pm_identity_card"
+              height="content" event_bubble="true" style_pad_all="#space_md" style_pad_gap="#space_sm"
+              style_margin_left="#space_sm" style_margin_right="#space_sm" scrollable="false"
+              style_bg_color="#elevated_bg" style_bg_opa="255" style_border_width="0" style_radius="#border_radius">
+        <bind_style_if_eq name="identity_landscape" subject="ui_is_portrait" ref_value="0"/>
+        <bind_style_if_eq name="identity_portrait" subject="ui_is_portrait" ref_value="1"/>
+        <!-- Printer image (clickable to change) + pencil edit badge -->
+        <lv_obj name="pm_image_container"
+                scrollable="false" clickable="true" style_bg_opa="0" style_border_width="0" style_pad_all="0"
+                style_radius="#border_radius">
+          <bind_style_if_eq name="image_landscape" subject="ui_is_portrait" ref_value="0"/>
+          <bind_style_if_eq name="image_portrait" subject="ui_is_portrait" ref_value="1"/>
+          <style name="styles.press_wash" selector="pressed"/>
+          <event_cb trigger="clicked" callback="on_change_printer_image_clicked"/>
+          <lv_image name="pm_printer_image"
+                    width="100%" height="100%" inner_align="contain" style_radius="#border_radius" clickable="false"
+                    event_bubble="true"/>
+          <!-- Pencil badge overlaid in lower-right corner of image -->
+          <lv_obj width="#icon_button_size"
+                  height="#icon_button_size" style_bg_color="#card_bg" style_bg_opa="#modal_backdrop_opacity"
+                  style_radius="#border_radius" style_border_width="0" scrollable="false" align="bottom_right"
+                  style_pad_all="0" style_translate_x="-8" style_translate_y="-8" clickable="false" event_bubble="true">
+            <icon src="pencil" size="xs" variant="tertiary" align="center" clickable="false" event_bubble="true"/>
           </lv_obj>
-          <!-- Printer name (click to edit) — hidden when pm_name_editing == 1 -->
+        </lv_obj>
+        <!-- Name and model: under the image in landscape, beside it in portrait -->
+        <lv_obj name="pm_identity_text"
+                height="content" event_bubble="true" flex_flow="column" style_pad_all="0" style_pad_gap="#space_xs"
+                scrollable="false" style_bg_opa="0" style_border_width="0">
+          <bind_style_if_eq name="text_column_landscape" subject="ui_is_portrait" ref_value="0"/>
+          <bind_style_if_eq name="text_column_portrait" subject="ui_is_portrait" ref_value="1"/>
+          <!-- Printer name (click to edit) — hidden when pm_name_editing == 1.
+               Two lines, then dots: a long name keeps the pencil beside it. -->
           <lv_obj name="pm_printer_name_row"
                   width="100%" height="content" flex_flow="row" style_pad_gap="#space_xs"
-                  style_flex_cross_place="center" style_flex_main_place="center" scrollable="false" style_bg_opa="0"
-                  style_border_width="0" style_pad_all="0" clickable="true" style_radius="#border_radius">
+                  style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0"
+                  style_pad_all="0" clickable="true" style_radius="#border_radius">
             <style name="styles.press_wash" selector="pressed"/>
             <bind_flag_if_eq subject="pm_name_editing" flag="hidden" ref_value="1"/>
             <event_cb trigger="clicked" callback="pm_printer_name_clicked"/>
             <text_heading name="pm_printer_name"
-                          flex_grow="1" long_mode="dots" bind_text="printer_manager_name" style_text_align="center"
-                          clickable="false" event_bubble="true"/>
+                          width="0" flex_grow="1" long_mode="dots" max_lines="2" bind_text="printer_manager_name"
+                          clickable="false" event_bubble="true">
+              <bind_style_if_eq name="text_center" subject="ui_is_portrait" ref_value="0"/>
+              <bind_style_if_eq name="text_left" subject="ui_is_portrait" ref_value="1"/>
+            </text_heading>
             <icon src="pencil" size="xs" variant="tertiary" clickable="false" event_bubble="true"/>
           </lv_obj>
           <!-- Text input for name editing — shown when pm_name_editing == 1 -->
           <text_input name="pm_printer_name_input"
                       width="100%" height="#input_height" placeholder_text="Printer name" placeholder_tag="Printer name"
-                      style_text_align="center" hidden="true" one_line="true" scrollbar_mode="off">
+                      hidden="true" one_line="true" scrollbar_mode="off">
+            <bind_style_if_eq name="text_center" subject="ui_is_portrait" ref_value="0"/>
+            <bind_style_if_eq name="text_left" subject="ui_is_portrait" ref_value="1"/>
             <bind_flag_if_eq subject="pm_name_editing" flag="hidden" ref_value="0"/>
           </text_input>
           <!-- Printer model (click to correct) - detection declines to guess when
@@ -71,280 +122,227 @@
                confident, so this must always be reachable. -->
           <lv_obj name="pm_printer_model_row"
                   width="100%" height="content" flex_flow="row" style_pad_gap="#space_xs"
-                  style_flex_cross_place="center" style_flex_main_place="center" scrollable="false" style_bg_opa="0"
-                  style_border_width="0" style_pad_all="0" clickable="true" style_radius="#border_radius">
+                  style_flex_cross_place="center" scrollable="false" style_bg_opa="0" style_border_width="0"
+                  style_pad_all="0" clickable="true" style_radius="#border_radius">
             <style name="styles.press_wash" selector="pressed"/>
             <event_cb trigger="clicked" callback="on_change_printer_model_clicked"/>
             <text_muted name="pm_printer_model"
-                        width="content" bind_text="printer_manager_model" style_text_align="center" clickable="false"
-                        event_bubble="true"/>
+                        width="0" flex_grow="1" long_mode="dots" bind_text="printer_manager_model" clickable="false"
+                        event_bubble="true">
+              <bind_style_if_eq name="text_center" subject="ui_is_portrait" ref_value="0"/>
+              <bind_style_if_eq name="text_left" subject="ui_is_portrait" ref_value="1"/>
+            </text_muted>
             <icon src="pencil" size="xs" variant="tertiary" clickable="false" event_bubble="true"/>
           </lv_obj>
         </lv_obj>
       </lv_obj>
 
-      <!-- ================================================================== -->
-      <!-- SECTION 2: SOFTWARE VERSIONS -->
-      <!-- ================================================================== -->
-      <setting_group name="group_software">
-        <setting_group_header title="SOFTWARE"/>
-        <setting_info_row name="pm_row_klipper" label="Klipper" icon="toy_brick_outline">
-          <text_muted name="value" bind_text="klipper_version"/>
-        </setting_info_row>
-        <setting_info_row name="pm_row_moonraker" label="Moonraker" icon="toy_brick_outline">
-          <text_muted name="value" bind_text="moonraker_version"/>
-        </setting_info_row>
-        <setting_info_row name="pm_row_helix" label="HelixScreen" icon="info">
-          <text_muted name="value" bind_text="helix_version"/>
-        </setting_info_row>
-      </setting_group>
+      <!-- Software and Capabilities: their own scrolling column in landscape -->
+      <lv_obj name="pm_details"
+              flex_flow="column" event_bubble="true" style_pad_all="0" style_pad_gap="0" scrollable="true"
+              style_bg_opa="0" style_border_width="0">
+        <bind_style_if_eq name="details_landscape" subject="ui_is_portrait" ref_value="0"/>
+        <bind_style_if_eq name="details_portrait" subject="ui_is_portrait" ref_value="1"/>
+        <!-- ================================================================== -->
+        <!-- SECTION 2: SOFTWARE VERSIONS -->
+        <!-- ================================================================== -->
+        <setting_group name="group_software" event_bubble="true">
+          <setting_group_header title="SOFTWARE" event_bubble="true"/>
+          <!-- The firmware row names the Klipper fork the printer runs. -->
+          <setting_info_row name="pm_row_klipper"
+                            label="Klipper" icon="toy_brick_outline" bind_label="klipper_firmware_name"
+                            event_bubble="true" bind_value="klipper_version"/>
+          <setting_info_row name="pm_row_moonraker"
+                            label="Moonraker" icon="toy_brick_outline" event_bubble="true"
+                            bind_value="moonraker_version"/>
+          <setting_info_row name="pm_row_helix"
+                            label="HelixScreen" icon="info" event_bubble="true" bind_value="helix_version"/>
+        </setting_group>
 
-      <!-- ================================================================== -->
-      <!-- SECTION 3: HARDWARE CAPABILITIES -->
-      <!-- ================================================================== -->
-      <setting_group name="group_capabilities">
-        <setting_group_header title="CAPABILITIES"/>
-        <lv_obj width="100%"
-                height="content" flex_flow="row_wrap" style_pad_left="#space_lg" style_pad_right="#space_lg"
-                style_pad_gap="#space_sm" style_pad_top="#space_sm" style_pad_bottom="#space_lg" scrollable="false"
-                style_bg_opa="0" style_border_width="0">
-
-          <!-- Probe -->
-          <lv_obj width="content"
-                  height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0">
-            <bind_flag_if_eq subject="printer_has_probe" flag="hidden" ref_value="0"/>
-            <icon src="target" size="xs" variant="success"/>
-            <text_small text="Probe"/>
+        <!-- ================================================================== -->
+        <!-- SECTION 3: CAPABILITIES. Only what was detected shows; each group's
+             chip row has no padding, so a group with every chip hidden collapses,
+             header included. Chip text and taps come from C++ (printer_manager_chips). -->
+        <!-- ================================================================== -->
+        <setting_group name="group_caps_motion" event_bubble="true">
+          <setting_group_header title="MOTION &amp; LEVELING" event_bubble="true"/>
+          <lv_obj name="pm_chips_motion"
+                  width="100%" height="content" event_bubble="true" flex_flow="row_wrap" style_pad_all="0"
+                  style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_row="0" style_pad_column="#space_sm"
+                  scrollable="false" style_bg_opa="0" style_border_width="0">
+            <capability_chip name="pm_chip_kinematics" icon="axis_arrow" text="pm_chip_text_kinematics">
+              <bind_flag_if_eq subject="pm_has_kinematics" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_build_volume" icon="cube_outline" text="pm_chip_text_build_volume">
+              <bind_flag_if_eq subject="pm_has_build_volume" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_probe" icon="target" text="pm_chip_text_probe">
+              <bind_flag_if_eq subject="printer_has_probe" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_bed_mesh" icon="grid_large" text="pm_chip_text_bed_mesh">
+              <bind_flag_if_eq subject="printer_has_bed_mesh" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_qgl" icon="tune_vertical_variant" text="pm_chip_text_qgl">
+              <bind_flag_if_eq subject="printer_has_qgl" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_z_tilt" icon="swap_vertical" text="pm_chip_text_z_tilt">
+              <bind_flag_if_eq subject="printer_has_z_tilt" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_screws_tilt" icon="rotate_left" text="pm_chip_text_screws_tilt">
+              <bind_flag_if_eq subject="printer_has_screws_tilt" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_accelerometer" icon="vibrate" text="pm_chip_text_accelerometer">
+              <bind_flag_if_eq subject="printer_has_accelerometer" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_belt_tension" icon="waveform" text="pm_chip_text_belt_tension">
+              <bind_flag_if cond="printer_supports_belt_compare eq 0 or printer_has_accelerometer eq 0" flag="hidden"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_shake_tune" icon="sine_wave" text="pm_chip_text_shake_tune">
+              <bind_flag_if_eq subject="printer_has_shaketune" flag="hidden" ref_value="0"/>
+            </capability_chip>
           </lv_obj>
+        </setting_group>
 
-          <!-- Bed Mesh -->
-          <lv_obj name="pm_chip_bed_mesh"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_bed_mesh" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_bed_mesh_clicked"/>
-            <icon src="grid_large" size="xs" variant="success"/>
-            <text_small text="Bed Mesh"/>
+        <setting_group name="group_caps_thermal" event_bubble="true">
+          <setting_group_header title="THERMAL &amp; AIR" event_bubble="true"/>
+          <lv_obj name="pm_chips_thermal"
+                  width="100%" height="content" event_bubble="true" flex_flow="row_wrap" style_pad_all="0"
+                  style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_row="0" style_pad_column="#space_sm"
+                  scrollable="false" style_bg_opa="0" style_border_width="0">
+            <capability_chip name="pm_chip_heated_bed" icon="radiator" text="pm_chip_text_heated_bed">
+              <bind_flag_if_eq subject="printer_has_heater_bed" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_chamber_sensor" icon="thermometer" text="pm_chip_text_chamber_sensor">
+              <bind_flag_if_eq subject="printer_has_chamber_sensor" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_chamber_heater" icon="heat_wave" text="pm_chip_text_chamber_heater">
+              <bind_flag_if_eq subject="printer_has_chamber_heater" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_chamber_dryer" icon="water" text="pm_chip_text_chamber_dryer">
+              <bind_flag_if_eq subject="printer_has_chamber_dryer" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_filter_fan" icon="filter" text="pm_chip_text_filter_fan">
+              <bind_flag_if_eq subject="printer_has_chamber_filter_fan" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_bed_drying" icon="bed" text="pm_chip_text_bed_drying">
+              <bind_flag_if_eq subject="printer_can_bed_dry" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_fans" icon="fan" text="pm_chip_text_fans">
+              <bind_flag_if_eq subject="printer_has_extra_fans" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_fan_tach" icon="gauge" text="pm_chip_text_fan_tach">
+              <bind_flag_if_eq subject="printer_has_fan_feedback" flag="hidden" ref_value="0"/>
+            </capability_chip>
           </lv_obj>
+        </setting_group>
 
-          <!-- Heated Bed -->
-          <lv_obj width="content"
-                  height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0">
-            <bind_flag_if_eq subject="printer_has_heater_bed" flag="hidden" ref_value="0"/>
-            <icon src="radiator" size="xs" variant="success"/>
-            <text_small text="Heated Bed"/>
+        <setting_group name="group_caps_filament" event_bubble="true">
+          <setting_group_header title="FILAMENT &amp; TOOLHEAD" event_bubble="true"/>
+          <lv_obj name="pm_chips_filament"
+                  width="100%" height="content" event_bubble="true" flex_flow="row_wrap" style_pad_all="0"
+                  style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_row="0" style_pad_column="#space_sm"
+                  scrollable="false" style_bg_opa="0" style_border_width="0">
+            <capability_chip name="pm_chip_filament_system" icon="source_branch" text="pm_chip_text_filament_system">
+              <bind_flag_if_eq subject="pm_has_filament_system" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_tool_changer" icon="toolbox_outline" text="pm_chip_text_tool_changer">
+              <bind_flag_if_eq subject="pm_has_tool_changer" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_filament_sensors"
+                             icon="filament_sensor_alert" text="pm_chip_text_filament_sensors">
+              <bind_flag_if_eq subject="filament_sensor_count" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_width_sensors" icon="ruler" text="pm_chip_text_width_sensors">
+              <bind_flag_if_eq subject="width_sensor_count" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_retraction" icon="arrow_up_right" text="pm_chip_text_retraction">
+              <bind_flag_if_eq subject="printer_has_firmware_retraction" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_pa_cal" icon="chart_line" text="pm_chip_text_pa_cal">
+              <bind_flag_if_eq subject="printer_has_pa_cal" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_tool_offsets" icon="crosshairs_gps" text="pm_chip_text_tool_offsets">
+              <bind_flag_if_eq subject="printer_has_tool_offset_cal" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_nozzle_clean" icon="nozzle" text="pm_chip_text_nozzle_clean">
+              <bind_flag_if_eq subject="printer_has_nozzle_clean" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_purge_line" icon="nozzle_outline" text="pm_chip_text_purge_line">
+              <bind_flag_if_eq subject="printer_has_purge_line" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_heat_soak" icon="hourglass" text="pm_chip_text_heat_soak">
+              <bind_flag_if_eq subject="printer_has_heat_soak" flag="hidden" ref_value="0"/>
+            </capability_chip>
           </lv_obj>
+        </setting_group>
 
-          <!-- LEDs -->
-          <lv_obj name="pm_chip_leds"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_led" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_leds_clicked"/>
-            <icon src="lightbulb_on" size="xs" variant="success"/>
-            <text_small text="LEDs"/>
+        <setting_group name="group_caps_printing" event_bubble="true">
+          <setting_group_header title="PRINTING" event_bubble="true"/>
+          <lv_obj name="pm_chips_printing"
+                  width="100%" height="content" event_bubble="true" flex_flow="row_wrap" style_pad_all="0"
+                  style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_row="0" style_pad_column="#space_sm"
+                  scrollable="false" style_bg_opa="0" style_border_width="0">
+            <capability_chip name="pm_chip_exclude_object" icon="prohibited" text="pm_chip_text_exclude_object">
+              <bind_flag_if_eq subject="printer_has_exclude_object" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_layer_pause" icon="layers" text="pm_chip_text_layer_pause">
+              <bind_flag_if_eq subject="printer_has_layer_pause" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_job_queue" icon="list" text="pm_chip_text_job_queue">
+              <bind_flag_if_eq subject="printer_has_job_queue" flag="hidden" ref_value="0"/>
+            </capability_chip>
           </lv_obj>
+        </setting_group>
 
-          <!-- ADXL -->
-          <lv_obj name="pm_chip_adxl"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_accelerometer" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_adxl_clicked"/>
-            <icon src="vibrate" size="xs" variant="success"/>
-            <text_small text="ADXL"/>
+        <setting_group name="group_caps_electronics" event_bubble="true">
+          <setting_group_header title="ELECTRONICS &amp; ACCESSORIES" event_bubble="true"/>
+          <lv_obj name="pm_chips_electronics"
+                  width="100%" height="content" event_bubble="true" flex_flow="row_wrap" style_pad_all="0"
+                  style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_row="0" style_pad_column="#space_sm"
+                  scrollable="false" style_bg_opa="0" style_border_width="0">
+            <capability_chip name="pm_chip_mcus" icon="sysinfo" text="pm_chip_text_mcus">
+              <bind_flag_if_eq subject="pm_has_mcus" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_power" icon="power_plug" text="pm_chip_text_power">
+              <bind_flag_if_eq subject="power_device_count" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_leds" icon="lightbulb_on" text="pm_chip_text_leds">
+              <bind_flag_if_eq subject="printer_has_led" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_led_effects" icon="led_strip" text="pm_chip_text_led_effects">
+              <bind_flag_if_eq subject="printer_has_led_effects" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_speaker" icon="volume_high" text="pm_chip_text_speaker">
+              <bind_flag_if_eq subject="printer_has_speaker" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_webcam" icon="video" text="pm_chip_text_webcam">
+              <bind_flag_if_eq subject="printer_has_webcam" flag="hidden" ref_value="0"/>
+            </capability_chip>
           </lv_obj>
+        </setting_group>
 
-          <!-- QGL -->
-          <lv_obj width="content"
-                  height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0">
-            <bind_flag_if_eq subject="printer_has_qgl" flag="hidden" ref_value="0"/>
-            <icon src="tune_vertical_variant" size="xs" variant="success"/>
-            <text_small text="QGL"/>
+        <setting_group name="group_caps_addons" event_bubble="true">
+          <setting_group_header title="ADD-ONS" event_bubble="true"/>
+          <lv_obj name="pm_chips_addons"
+                  width="100%" height="content" event_bubble="true" flex_flow="row_wrap" style_pad_all="0"
+                  style_pad_left="#space_lg" style_pad_right="#space_lg" style_pad_row="0" style_pad_column="#space_sm"
+                  scrollable="false" style_bg_opa="0" style_border_width="0">
+            <capability_chip name="pm_chip_spoolman" icon="spoolman" text="pm_chip_text_spoolman">
+              <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_timelapse" icon="camera_timer" text="pm_chip_text_timelapse">
+              <bind_flag_if_eq subject="printer_has_timelapse" flag="hidden" ref_value="0"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_helix_macros" icon="code_braces" text="pm_chip_text_helix_macros">
+              <bind_flag_if cond="helix_macros_status lt 1" flag="hidden"/>
+            </capability_chip>
+            <capability_chip name="pm_chip_helix_plugin" icon="puzzle_outline" text="pm_chip_text_helix_plugin">
+              <bind_flag_if_not_eq subject="helix_plugin_installed" flag="hidden" ref_value="1"/>
+            </capability_chip>
           </lv_obj>
+        </setting_group>
 
-          <!-- Z-Tilt -->
-          <lv_obj width="content"
-                  height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0">
-            <bind_flag_if_eq subject="printer_has_z_tilt" flag="hidden" ref_value="0"/>
-            <icon src="swap_vertical" size="xs" variant="success"/>
-            <text_small text="Z-Tilt"/>
-          </lv_obj>
-
-          <!-- Firmware Retraction -->
-          <lv_obj name="pm_chip_retraction"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_firmware_retraction" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_retraction_clicked"/>
-            <icon src="arrow_up_right" size="xs" variant="success"/>
-            <text_small text="Retraction"/>
-          </lv_obj>
-
-          <!-- Spoolman -->
-          <lv_obj name="pm_chip_spoolman"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_spoolman" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_spoolman_clicked"/>
-            <icon src="database" size="xs" variant="success"/>
-            <text_small text="Spoolman"/>
-          </lv_obj>
-
-          <!-- Timelapse -->
-          <lv_obj name="pm_chip_timelapse"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_timelapse" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_timelapse_clicked"/>
-            <icon src="camera_timer" size="xs" variant="success"/>
-            <text_small text="Timelapse"/>
-          </lv_obj>
-
-          <!-- Screws Tilt -->
-          <lv_obj name="pm_chip_screws_tilt"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_screws_tilt" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_screws_tilt_clicked"/>
-            <icon src="rotate_left" size="xs" variant="success"/>
-            <text_small text="Screws Tilt"/>
-          </lv_obj>
-
-          <!-- Webcam -->
-          <lv_obj width="content"
-                  height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0">
-            <bind_flag_if_eq subject="printer_has_webcam" flag="hidden" ref_value="0"/>
-            <icon src="video" size="xs" variant="success"/>
-            <text_small text="Webcam"/>
-          </lv_obj>
-
-          <!-- AMS / Multi-Material -->
-          <lv_obj name="pm_chip_ams"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="ams_type" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_ams_clicked"/>
-            <icon src="source_branch" size="xs" variant="success"/>
-            <text_small text="Multi-Filament"/>
-          </lv_obj>
-
-          <!-- Extra Fans -->
-          <lv_obj name="pm_chip_fans"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_extra_fans" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_fans_clicked"/>
-            <icon src="fan" size="xs" variant="success"/>
-            <text_small text="Fans"/>
-          </lv_obj>
-
-          <!-- Power Devices -->
-          <lv_obj name="pm_chip_power"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="power_device_count" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_power_clicked"/>
-            <icon src="power_plug" size="xs" variant="success"/>
-            <text_small text="Power"/>
-          </lv_obj>
-
-          <!-- Chamber Sensor -->
-          <lv_obj width="content"
-                  height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0">
-            <bind_flag_if_eq subject="printer_has_chamber" flag="hidden" ref_value="0"/>
-            <icon src="thermometer" size="xs" variant="success"/>
-            <text_small text="Chamber"/>
-          </lv_obj>
-
-          <!-- Speaker -->
-          <lv_obj name="pm_chip_speaker"
-                  width="content" height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0" clickable="true">
-            <style name="styles.press_wash" selector="pressed"/>
-            <bind_flag_if_eq subject="printer_has_speaker" flag="hidden" ref_value="0"/>
-            <event_cb trigger="clicked" callback="pm_chip_speaker_clicked"/>
-            <icon src="volume_high" size="xs" variant="success"/>
-            <text_small text="Speaker"/>
-          </lv_obj>
-
-          <!-- Nozzle Clean -->
-          <lv_obj width="content"
-                  height="content" style_bg_color="#card_bg" style_bg_opa="255" style_radius="16"
-                  style_pad_top="#space_xs" style_pad_bottom="#space_xs" style_pad_left="#space_sm"
-                  style_pad_right="#space_sm" flex_flow="row" style_pad_gap="#space_xs" style_flex_cross_place="center"
-                  scrollable="false" style_border_width="0">
-            <bind_flag_if_eq subject="printer_has_nozzle_clean" flag="hidden" ref_value="0"/>
-            <icon src="filament" size="xs" variant="success"/>
-            <text_small text="Nozzle Clean"/>
-          </lv_obj>
-
-        </lv_obj>
-      </setting_group>
-
-      <!-- ================================================================== -->
-      <!-- SECTION 4: MANAGE PRINTERS (beta feature) -->
-      <!-- ================================================================== -->
-      <lv_obj width="100%"
-              height="content" style_pad_left="#space_sm" style_pad_right="#space_sm" style_pad_top="0"
-              style_pad_bottom="0" scrollable="false" style_bg_opa="0" style_border_width="0">
-        <ui_button name="pm_manage_printers_btn" width="100%" text="Manage Printers" icon="printer_3d">
-          <event_cb trigger="clicked" callback="pm_manage_printers_clicked"/>
-        </ui_button>
       </lv_obj>
-
-      <!-- Bottom padding for scroll -->
-      <lv_obj width="100%" height="#space_lg" scrollable="false"/>
     </lv_obj>
   </view>
 </component>

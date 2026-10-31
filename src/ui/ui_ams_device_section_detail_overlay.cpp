@@ -8,34 +8,33 @@
 
 #include "ui_ams_device_section_detail_overlay.h"
 
+#include "ui_button.h"
+#include "ui_callback_helpers.h"
+#include "ui_component_keypad.h"
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
-#include "ui_keyboard_manager.h"
-#include "ui_text_input.h"
+#include "ui_guided_device_flow.h"
+#include "ui_slider_scale.h"
+#include "ui_text.h"
 #include "ui_utils.h"
 
-#include "ui/ui_widget_helpers.h"
-
-#if HELIX_HAS_CFS
-#include "ui_cfs_chute_calibration_overlay.h"
-#include "ui_modal.h"
-#include "ui_subject_registry.h"
-
-#include "ams_backend_cfs.h"
-#endif
-
 #include "ams_backend.h"
+#include "ams_device_action_value.h"
 #include "ams_state.h"
 #include "ams_types.h"
+#include "display_numbering.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "observer_factory.h"
+#include "print_lifecycle_state.h"
 #include "static_panel_registry.h"
-#include "text_io.h"
-#include "theme_manager.h"
+#include "ui/ui_widget_helpers.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <memory>
 
 namespace helix::ui {
@@ -44,27 +43,11 @@ namespace helix::ui {
 // SINGLETON ACCESSOR
 // ============================================================================
 
-#if HELIX_HAS_CFS
-// The cutter sweep runs ~60s with no other visible progress, so a bound
-// status line under the calibration buttons carries the flow's state: running,
-// then the found position or the failure. A toast result would expire, and one
-// queued behind a "started" toast stays hidden for its whole lifetime. The
-// buttons' labels never change; ui_xml/components/cfs_cutter_status.xml
-// renders these subjects (phase: 0 nothing to report, 1 running, 2 result).
-static lv_subject_t s_cfs_cutter_phase;
-static lv_subject_t s_cfs_cutter_status;
-static char s_cfs_cutter_status_buf[128];
-static bool s_cfs_cutter_subjects_ready = false;
-#endif
-
 // ============================================================================
 // DESTRUCTOR
 // ============================================================================
 
-AmsDeviceSectionDetailOverlay::~AmsDeviceSectionDetailOverlay() {
-    // The CFS status line's subjects are file-static (see set_cutter_row_state),
-    // so they outlive every overlay instance and need no deinit here.
-}
+AmsDeviceSectionDetailOverlay::~AmsDeviceSectionDetailOverlay() = default;
 
 // ============================================================================
 // INITIALIZATION
@@ -72,17 +55,20 @@ AmsDeviceSectionDetailOverlay::~AmsDeviceSectionDetailOverlay() {
 
 void AmsDeviceSectionDetailOverlay::init_subjects() {
     init_subjects_guarded([this]() {
-#if HELIX_HAS_CFS
-        // Calibration status line subjects, consumed by
-        // ui_xml/components/cfs_cutter_status.xml. Init once per process: a second
-        // overlay instance must not memzero a subject whose observers are live.
-        if (!s_cfs_cutter_subjects_ready) {
-            s_cfs_cutter_subjects_ready = true;
-            UI_SUBJECT_INIT_AND_REGISTER_INT(s_cfs_cutter_phase, 0, "cfs_cutter_phase");
-            UI_SUBJECT_INIT_AND_REGISTER_STRING(s_cfs_cutter_status, s_cfs_cutter_status_buf, "",
-                                                "cfs_cutter_status");
-        }
-#endif
+        // Constant 1: a disabled action's row names it as its `disabled` subject, so the
+        // row component greys its label and control the way every settings row does.
+        UI_MANAGED_SUBJECT_INT(action_disabled_subject_, 1, kActionDisabledSubject, subjects_);
+    });
+}
+
+void AmsDeviceSectionDetailOverlay::register_callbacks() {
+    register_xml_callbacks({
+        {"on_device_action_clicked", on_action_clicked},
+        {"on_device_action_toggled", on_toggle_changed},
+        {"on_device_action_slider_moved", on_slider_changed},
+        {"on_device_action_slider_released", on_slider_released},
+        {"on_device_action_value_clicked", on_value_clicked},
+        {"on_device_action_dropdown_changed", on_dropdown_changed},
     });
 }
 
@@ -110,14 +96,70 @@ void AmsDeviceSectionDetailOverlay::show(lv_obj_t* parent_screen, const std::str
 
 void AmsDeviceSectionDetailOverlay::before_show() {
     // The overlay_panel title is static at XML creation, so it is set here. The name
-    // comes from the extended overlay_panel, not this component's own XML.
+    // comes from the extended overlay_panel, not this component's own XML. The section
+    // name stands alone: the back button already leads to the system it belongs to, and
+    // a 480px header has room for little more than the name.
     if (lv_obj_t* header_title =
             helix::ui::find_required(overlay_root_, "header_title", get_name())) {
-        std::string title = std::string(lv_tr("Multi-Filament System Management")) + ": " +
-                            lv_tr(section_label_.c_str());
-        lv_label_set_text(header_title, title.c_str());
+        lv_label_set_text(header_title, lv_tr(section_label_.c_str()));
     }
     refresh();
+}
+
+void AmsDeviceSectionDetailOverlay::on_activate() {
+    OverlayBase::on_activate();
+    // A backend's action values can change without the user touching them (a
+    // driver switching a mode itself), so the section follows every AMS data
+    // tick. observe<int> defers the handler, so the rebuild never runs inside
+    // the subject's notify.
+    auto& ams = AmsState::instance();
+    data_observer_ = observe<int>(
+        ams.get_ams_data_revision_subject(), this,
+        [](AmsDeviceSectionDetailOverlay* self, int) { self->refresh_if_changed(); },
+        ams.get_subjects_lifetime());
+}
+
+void AmsDeviceSectionDetailOverlay::on_deactivating(DeactivateReason) {
+    data_observer_.reset();
+}
+
+void AmsDeviceSectionDetailOverlay::refresh_if_changed() {
+    if (!is_visible()) {
+        return;
+    }
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        return;
+    }
+    // A rebuild under the user's finger would drop a drag or an open dropdown,
+    // so only a change a row shows rebuilds the section.
+    if (device_section_changed(cached_actions_, backend->get_device_actions(), section_id_)) {
+        refresh();
+    }
+}
+
+bool device_section_changed(const std::vector<helix::printer::DeviceAction>& shown,
+                            const std::vector<helix::printer::DeviceAction>& fresh,
+                            const std::string& section) {
+    auto next_in_section = [&section](const auto& actions, size_t i) {
+        while (i < actions.size() && actions[i].section != section) {
+            ++i;
+        }
+        return i;
+    };
+    size_t i = next_in_section(shown, 0);
+    size_t j = next_in_section(fresh, 0);
+    for (; i < shown.size() && j < fresh.size();
+         i = next_in_section(shown, i + 1), j = next_in_section(fresh, j + 1)) {
+        const auto& a = shown[i];
+        const auto& b = fresh[j];
+        if (a.id != b.id || a.enabled != b.enabled || a.disable_reason != b.disable_reason ||
+            a.options != b.options ||
+            !helix::printer::device_action_values_equal(a.current_value, b.current_value)) {
+            return true;
+        }
+    }
+    return i < shown.size() || j < fresh.size();
 }
 
 void AmsDeviceSectionDetailOverlay::refresh() {
@@ -127,17 +169,15 @@ void AmsDeviceSectionDetailOverlay::refresh() {
 
     spdlog::debug("[{}] Refreshing section '{}' from backend", get_name(), section_id_);
 
-    // Clear existing controls
     helix::ui::safe_clean_children(actions_container_);
-    action_ids_.clear();
 
     AmsBackend* backend = AmsState::instance().get_backend();
     if (!backend) {
         spdlog::warn("[{}] No backend available", get_name());
+        cached_actions_.clear();
         return;
     }
 
-    // Get all device actions and filter by section
     cached_actions_ = backend->get_device_actions();
 
     int count = 0;
@@ -150,17 +190,14 @@ void AmsDeviceSectionDetailOverlay::refresh() {
         }
 
         if (action.type == helix::printer::ActionType::BUTTON) {
-            // Start a new row if needed (no current row or current row is full)
+            // Two buttons to a row, sharing its width.
             if (!button_row || button_count_in_row >= 2) {
-                button_row = lv_obj_create(actions_container_);
-                lv_obj_set_width(button_row, LV_PCT(100));
-                lv_obj_set_height(button_row, LV_SIZE_CONTENT);
-                lv_obj_set_style_pad_all(button_row, 0, 0);
-                lv_obj_set_style_pad_column(button_row, theme_manager_get_spacing("space_sm"), 0);
-                lv_obj_set_style_bg_opa(button_row, LV_OPA_TRANSP, 0);
-                lv_obj_set_style_border_width(button_row, 0, 0);
-                lv_obj_set_flex_flow(button_row, LV_FLEX_FLOW_ROW);
-                lv_obj_remove_flag(button_row, LV_OBJ_FLAG_SCROLLABLE);
+                button_row = static_cast<lv_obj_t*>(
+                    lv_xml_create(actions_container_, "device_action_button_row", nullptr));
+                if (!button_row) {
+                    spdlog::warn("[{}] device_action_button_row is not registered", get_name());
+                    continue;
+                }
                 // Named so `helix-screen ctl ls` can address these rows. Every
                 // control below is named from its DeviceAction id, which is
                 // already the stable identifier the backend dispatches on.
@@ -169,25 +206,31 @@ void AmsDeviceSectionDetailOverlay::refresh() {
                 button_count_in_row = 0;
             }
 
-            create_button_in_row(button_row, action);
+            create_button(button_row, action);
             button_count_in_row++;
         } else {
-            // Non-button action closes any open button row
             button_row = nullptr;
             button_count_in_row = 0;
-            create_action_control(actions_container_, action);
+            create_setting_row(actions_container_, action);
         }
         count++;
     }
 
-#if HELIX_HAS_CFS
-    // The calibration section's status line sits below the button rows. The
-    // buttons are backend-driven so they are built above; this line is pure
-    // bound appearance and comes from XML, driven by the file-static subjects.
-    if (section_id_ == "calibration" && backend->get_type() == AmsType::CFS) {
-        lv_xml_create(actions_container_, "cfs_cutter_status", nullptr);
+    // Status widgets of the guided flows this section's actions name, once per flow, below
+    // the button rows.
+    std::vector<std::string> attached_flows;
+    for (const auto& action : cached_actions_) {
+        if (action.section != section_id_ || action.guided_flow.empty() ||
+            std::find(attached_flows.begin(), attached_flows.end(), action.guided_flow) !=
+                attached_flows.end()) {
+            continue;
+        }
+        attached_flows.push_back(action.guided_flow);
+        const GuidedDeviceFlow* flow = find_guided_device_flow(action.guided_flow);
+        if (flow && flow->attach_status) {
+            flow->attach_status(actions_container_);
+        }
     }
-#endif
 
     spdlog::debug("[{}] Created {} controls for section '{}'", get_name(), count, section_id_);
 }
@@ -196,258 +239,322 @@ void AmsDeviceSectionDetailOverlay::refresh() {
 // DYNAMIC CONTROL CREATION
 // ============================================================================
 
-void AmsDeviceSectionDetailOverlay::create_action_control(
-    lv_obj_t* parent, const helix::printer::DeviceAction& action) {
-    // NOTE: These controls are created dynamically from backend data, not from XML.
-    // Imperative lv_obj_add_event_cb() and lv_obj_set_style_*() are necessary here
-    // because the controls don't exist in XML templates. This falls under the same
-    // exception as widget pool recycling and chart data in the declarative UI rules.
-    spdlog::debug("[{}] Creating action control: {} (type={})", get_name(), action.label,
+std::string device_action_label(const helix::printer::DeviceAction& action) {
+    std::string label = lv_tr(action.label.c_str());
+    if (action.tool_index >= 0) {
+        // Punctuation only, so the format stays untranslated: a translated format whose
+        // placeholders differ would throw, and the firmware builds without exceptions.
+        label = fmt::format("{} - {}", label,
+                            active_tool_label(tool_label(action.tool_index), action.tool_index,
+                                              ToolLabelForm::Full));
+    }
+    return label;
+}
+
+std::string device_action_disabled_cond(const helix::printer::DeviceAction& action) {
+    if (action.moves_machine && action.allowed_while_paused) {
+        return fmt::format("machine_motion_blocked eq 1 and print_lifecycle ne {}",
+                           static_cast<int>(PrintState::Paused));
+    }
+    return "0 eq 1";
+}
+
+namespace {
+
+/// The slider positions one unit of @p action's value spans.
+SliderScale slider_scale(const helix::printer::DeviceAction& action) {
+    if (action.step <= 0.0f || action.step >= 1.0f) {
+        return SliderScale{1};
+    }
+    return SliderScale{static_cast<int>(std::lround(1.0f / action.step))};
+}
+
+/// A slider value as the row shows it: as many decimals as its step has, then the unit.
+std::string slider_value_text(double value, const SliderScale& scale, const std::string& unit) {
+    // Enough decimals to tell one step from the next: a 0.05 step needs two.
+    const int decimals =
+        static_cast<int>(std::ceil(std::log10(static_cast<double>(scale.effective_divisor()))));
+    std::string text = fmt::format("{:.{}f}", value, decimals);
+    if (!unit.empty()) {
+        text += " " + unit;
+    }
+    return text;
+}
+
+/// The value an INFO action shows.
+std::string info_value_text(const helix::printer::DeviceAction& action) {
+    const auto* text = std::any_cast<std::string>(&action.current_value);
+    if (!text) {
+        return "-";
+    }
+    return action.unit.empty() ? *text : *text + " " + action.unit;
+}
+
+} // namespace
+
+void AmsDeviceSectionDetailOverlay::create_setting_row(lv_obj_t* parent,
+                                                       const helix::printer::DeviceAction& action) {
+    // NOTE: The rows come from the setting_*_row components; only what varies per
+    // DeviceAction (its current value) is applied here, since a backend's action list is
+    // data the XML cannot enumerate.
+    spdlog::debug("[{}] Creating action row: {} (type={})", get_name(), action.label,
                   helix::printer::action_type_to_string(action.type));
 
-    // Create row container for action
-    lv_obj_t* row = lv_obj_create(parent);
-    lv_obj_set_width(row, LV_PCT(100));
-    lv_obj_set_height(row, LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_all(row, theme_manager_get_spacing("space_xs"), 0);
-    lv_obj_set_style_pad_column(row, theme_manager_get_spacing("space_sm"), 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_name(row, fmt::format("{}_row", action.id).c_str());
+    // A disabled action explains itself where its description would be.
+    const std::string& description = (!action.enabled && !action.disable_reason.empty())
+                                         ? action.disable_reason
+                                         : action.description;
+    const std::string label = device_action_label(action);
+    const std::string description_text = description.empty() ? "" : lv_tr(description.c_str());
 
+    std::vector<std::pair<std::string, std::string>> attrs = {
+        {"label", label},
+        // A tool-suffixed label is composed here; a tag would re-translate it to the bare label.
+        {"label_tag", action.tool_index >= 0 ? std::string() : action.label},
+        {"icon", action.icon},
+    };
+    const char* component = nullptr;
     switch (action.type) {
     case helix::printer::ActionType::BUTTON:
-        // Buttons are handled by create_button_in_row() via refresh() loop
-        spdlog::warn("[{}] BUTTON action '{}' passed to create_action_control(); use "
-                     "create_button_in_row() instead",
-                     get_name(), action.id);
+        return;
+    case helix::printer::ActionType::TOGGLE:
+        component = "setting_toggle_row";
+        attrs.insert(attrs.end(), {{"description", description_text},
+                                   {"description_tag", description},
+                                   {"callback", "on_device_action_toggled"},
+                                   {"moves_machine", action.moves_machine ? "true" : "false"}});
         break;
-
-    case helix::printer::ActionType::TOGGLE: {
-        // Label on left
-        lv_obj_t* label = lv_label_create(row);
-        lv_label_set_text(label, lv_tr(action.label.c_str()));
-        lv_obj_set_style_text_color(label, theme_manager_get_color("text"), 0);
-        lv_obj_set_name(label, fmt::format("{}_label", action.id).c_str());
-
-        // Switch on right
-        lv_obj_t* sw = lv_switch_create(row);
-        lv_obj_set_name(sw, action.id.c_str());
-
-        // Try to get current value
-        if (action.current_value.has_value()) {
-            const bool* val = std::any_cast<bool>(&action.current_value);
-            if (!val) {
-                spdlog::warn("[{}] Failed to cast toggle value for {}", get_name(), action.id);
-            } else if (*val) {
-                lv_obj_add_state(sw, LV_STATE_CHECKED);
-            }
-        }
-
-        // Store action ID in vector, pass index as user_data
-        action_ids_.push_back(action.id);
-        lv_obj_set_user_data(sw, reinterpret_cast<void*>(action_ids_.size() - 1));
-
-        // Register value changed callback
-        lv_obj_add_event_cb(sw, on_toggle_changed, LV_EVENT_VALUE_CHANGED, nullptr);
-        break;
-    }
-
-    case helix::printer::ActionType::INFO: {
-        // Label on left
-        lv_obj_t* label = lv_label_create(row);
-        lv_label_set_text(label, lv_tr(action.label.c_str()));
-        lv_obj_set_style_text_color(label, theme_manager_get_color("text"), 0);
-
-        lv_obj_set_name(label, fmt::format("{}_label", action.id).c_str());
-
-        // Value on right
-        lv_obj_t* value_label = lv_label_create(row);
-        lv_obj_set_style_text_color(value_label, theme_manager_get_color("text_muted"), 0);
-        lv_obj_set_name(value_label, action.id.c_str());
-        const std::string* current_str = std::any_cast<std::string>(&action.current_value);
-        if (current_str) {
-            std::string val = *current_str;
-            if (!action.unit.empty()) {
-                val += " " + action.unit;
-            }
-            lv_label_set_text(value_label, val.c_str());
-        } else {
-            lv_label_set_text(value_label, "-");
-        }
-        break;
-    }
-
     case helix::printer::ActionType::SLIDER: {
-        // Label on left — fixed width so sliders align across rows
-        lv_obj_t* label = lv_label_create(row);
-        lv_label_set_text(label, lv_tr(action.label.c_str()));
-        lv_obj_set_style_text_color(label, theme_manager_get_color("text"), 0);
-        lv_obj_set_width(label, LV_PCT(30));
-        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-        lv_obj_set_name(label, fmt::format("{}_label", action.id).c_str());
-
-        // Slider in the middle with flex-grow
-        lv_obj_t* slider = lv_slider_create(row);
-        lv_obj_set_name(slider, action.id.c_str());
-        lv_obj_set_flex_grow(slider, 1);
-        lv_obj_set_height(slider, theme_manager_get_spacing("space_md"));
-
-        // Set range from action min/max (LVGL slider uses int32_t)
-        lv_slider_set_range(slider, static_cast<int32_t>(action.min_value),
-                            static_cast<int32_t>(action.max_value));
-
-        // Set current value from action.current_value
-        int32_t slider_val = static_cast<int32_t>(action.min_value);
-        if (action.current_value.has_value()) {
-            if (const float* fv = std::any_cast<float>(&action.current_value)) {
-                slider_val = static_cast<int32_t>(*fv);
-            } else if (const int* iv = std::any_cast<int>(&action.current_value)) {
-                slider_val = *iv;
-            } else {
-                spdlog::warn("[{}] Failed to cast slider value for {}", get_name(), action.id);
-            }
+        component = "setting_slider_row";
+        const SliderScale scale = slider_scale(action);
+        const double value =
+            helix::printer::device_action_number(action.current_value).value_or(action.min_value);
+        if (!action.current_value.has_value() ||
+            !helix::printer::device_action_number(action.current_value)) {
+            spdlog::warn("[{}] Slider value for {} is not a number", get_name(), action.id);
         }
-        lv_slider_set_value(slider, slider_val, LV_ANIM_OFF);
-
-        // Editable numeric text input on right (replaces read-only value_label)
-        lv_obj_t* ta = lv_textarea_create(row);
-        lv_obj_set_name(ta, fmt::format("{}_value", action.id).c_str());
-        lv_textarea_set_one_line(ta, true);
-        lv_obj_set_width(ta, 80);
-        lv_obj_set_height(ta, LV_SIZE_CONTENT);
-        lv_textarea_set_accepted_chars(ta, "0123456789.-");
-        std::string val_text = std::to_string(slider_val);
-        lv_textarea_set_text(ta, val_text.c_str());
-
-        // Store unit as part of placeholder for reference
-        if (!action.unit.empty()) {
-            lv_textarea_set_placeholder_text(ta, action.unit.c_str());
-        }
-
-        // Store action ID in vector, pass index as user_data on slider only.
-        // Textarea user_data is reserved for TEXT_INPUT_MAGIC + KeyboardHint;
-        // on_value_input_ready finds the index via the sibling slider.
-        action_ids_.push_back(action.id);
-        size_t action_index = action_ids_.size() - 1;
-        lv_obj_set_user_data(slider, reinterpret_cast<void*>(action_index));
-
-        // Set numeric keyboard hint and register with KeyboardManager
-        static constexpr uintptr_t TEXT_INPUT_MAGIC = 0xBADC0DE0;
-        lv_obj_set_user_data(ta,
-                             reinterpret_cast<void*>(
-                                 TEXT_INPUT_MAGIC | static_cast<uintptr_t>(KeyboardHint::NUMERIC)));
-        KeyboardManager::instance().register_textarea(ta);
-
-        // Slider callbacks: update text input live during drag, execute on release
-        lv_obj_add_event_cb(slider, on_slider_changed, LV_EVENT_VALUE_CHANGED, nullptr);
-        lv_obj_add_event_cb(slider, on_slider_released, LV_EVENT_RELEASED, nullptr);
-
-        // Text input callback: validate and apply on Enter
-        lv_obj_add_event_cb(ta, on_value_input_ready, LV_EVENT_READY, nullptr);
-
-        // Handle disabled state
-        if (!action.enabled) {
-            lv_obj_add_state(slider, LV_STATE_DISABLED);
-            lv_obj_add_state(ta, LV_STATE_DISABLED);
-            if (!action.disable_reason.empty()) {
-                spdlog::debug("[{}] Slider '{}' disabled: {}", get_name(), action.id,
-                              action.disable_reason);
-            }
-        }
+        attrs.insert(attrs.end(), {{"description", description_text},
+                                   {"description_tag", description},
+                                   {"min", std::to_string(scale.to_slider(action.min_value))},
+                                   {"max", std::to_string(scale.to_slider(action.max_value))},
+                                   {"value", std::to_string(scale.to_slider_clamped(
+                                                 value, scale.to_slider(action.min_value),
+                                                 scale.to_slider(action.max_value)))},
+                                   {"value_text", slider_value_text(value, scale, action.unit)},
+                                   {"callback", "on_device_action_slider_moved"},
+                                   {"commit_callback", "on_device_action_slider_released"},
+                                   {"value_callback", "on_device_action_value_clicked"}});
         break;
     }
-
     case helix::printer::ActionType::DROPDOWN: {
-        // Label on left
-        lv_obj_t* label = lv_label_create(row);
-        lv_label_set_text(label, lv_tr(action.label.c_str()));
-        lv_obj_set_style_text_color(label, theme_manager_get_color("text"), 0);
-
-        lv_obj_set_name(label, fmt::format("{}_label", action.id).c_str());
-
-        // Dropdown on right
-        lv_obj_t* dropdown = lv_dropdown_create(row);
-        lv_obj_set_name(dropdown, action.id.c_str());
-
-        // Populate options (LVGL expects newline-separated string)
-        std::string options_str;
-        for (size_t i = 0; i < action.options.size(); i++) {
-            if (i > 0) {
-                options_str += "\n";
+        component = "setting_dropdown_row";
+        std::string options;
+        for (const auto& option : action.options) {
+            if (!options.empty()) {
+                options += "\n";
             }
-            options_str += action.options[i];
+            options += option;
         }
-        lv_dropdown_set_options(dropdown, options_str.c_str());
-
-        // Set selected index from current_value (string matching against options)
-        if (const std::string* current = std::any_cast<std::string>(&action.current_value)) {
-            for (size_t i = 0; i < action.options.size(); i++) {
-                if (action.options[i] == *current) {
-                    lv_dropdown_set_selected(dropdown, static_cast<uint32_t>(i));
-                    break;
-                }
-            }
-        } else if (action.current_value.has_value()) {
-            spdlog::warn("[{}] Failed to cast dropdown value for {}", get_name(), action.id);
-        }
-
-        // Store action ID in vector, pass index as user_data
-        action_ids_.push_back(action.id);
-        lv_obj_set_user_data(dropdown, reinterpret_cast<void*>(action_ids_.size() - 1));
-
-        // Register value changed callback
-        lv_obj_add_event_cb(dropdown, on_dropdown_changed, LV_EVENT_VALUE_CHANGED, nullptr);
-
-        // Handle disabled state
-        if (!action.enabled) {
-            lv_obj_add_state(dropdown, LV_STATE_DISABLED);
-            if (!action.disable_reason.empty()) {
-                spdlog::debug("[{}] Dropdown '{}' disabled: {}", get_name(), action.id,
-                              action.disable_reason);
-            }
-        }
+        attrs.insert(attrs.end(), {{"description", description_text},
+                                   {"description_tag", description},
+                                   {"options", options},
+                                   {"callback", "on_device_action_dropdown_changed"}});
         break;
     }
+    case helix::printer::ActionType::INFO:
+        component = "setting_info_row";
+        attrs.push_back({"value", info_value_text(action)});
+        break;
+    }
+
+    // lv_xml_create applies every attribute to the row's root lv_obj too, where
+    // `disabled` is the state flag and any value but "false" sets it, so an
+    // enabled action must not name the attribute at all.
+    if (!action.enabled && action.type != helix::printer::ActionType::INFO) {
+        attrs.push_back({"disabled", kActionDisabledSubject});
+    }
+
+    std::vector<const char*> pairs;
+    pairs.reserve(attrs.size() * 2 + 1);
+    for (const auto& [name, value] : attrs) {
+        pairs.push_back(name.c_str());
+        pairs.push_back(value.c_str());
+    }
+    pairs.push_back(nullptr);
+    lv_obj_t* row = static_cast<lv_obj_t*>(lv_xml_create(parent, component, pairs.data()));
+    if (!row) {
+        spdlog::warn("[{}] Failed to create {} for '{}'", get_name(), component, action.id);
+        return;
+    }
+    // The row carries the action id: the callbacks walk up to it to know which action
+    // fired, and `helix-screen ctl` addresses the control by it.
+    lv_obj_set_name(row, action.id.c_str());
+
+    if (action.type == helix::printer::ActionType::TOGGLE) {
+        // required-names: setting_toggle_row
+        if (lv_obj_t* toggle = helix::ui::find_required(row, "toggle", get_name())) {
+            if (const bool* on = std::any_cast<bool>(&action.current_value); on && *on) {
+                lv_obj_add_state(toggle, LV_STATE_CHECKED);
+            } else if (!on && action.current_value.has_value()) {
+                spdlog::warn("[{}] Toggle value for {} is not a bool", get_name(), action.id);
+            }
+        }
+    } else if (action.type == helix::printer::ActionType::DROPDOWN) {
+        // required-names: setting_dropdown_row
+        lv_obj_t* dropdown = helix::ui::find_required(row, "dropdown", get_name());
+        const auto* current = std::any_cast<std::string>(&action.current_value);
+        if (current == nullptr && action.current_value.has_value()) {
+            spdlog::warn("[{}] Dropdown value for {} is not a string", get_name(), action.id);
+        }
+        const auto it = current ? std::find(action.options.begin(), action.options.end(), *current)
+                                : action.options.end();
+        if (dropdown && it != action.options.end()) {
+            lv_dropdown_set_selected(dropdown, static_cast<uint32_t>(it - action.options.begin()));
+        } else if (dropdown) {
+            // A value the backend cannot prove shows as unknown, not as the first
+            // option it would otherwise read as.
+            lv_dropdown_set_text(dropdown, kUnknownDropdownText);
+        }
     }
 }
 
-void AmsDeviceSectionDetailOverlay::create_button_in_row(
-    lv_obj_t* row, const helix::printer::DeviceAction& action) {
-    // NOTE: Imperative lv_obj_add_event_cb() is necessary here — dynamic controls
-    // from backend data (documented exception for declarative UI rules).
+void AmsDeviceSectionDetailOverlay::create_button(lv_obj_t* row,
+                                                  const helix::printer::DeviceAction& action) {
     spdlog::debug("[{}] Creating button in row: {}", get_name(), action.label);
 
-    lv_obj_t* btn = lv_button_create(row);
+    const std::string label = device_action_label(action);
+    // A motion action a paused print may still run greys only while the printer
+    // is held some other way: printing, preparing, or spools on the bed.
+    const bool paused_ok = action.moves_machine && action.allowed_while_paused;
+    const std::string disabled_cond = device_action_disabled_cond(action);
+    const char* attrs[] = {"text",
+                           label.c_str(),
+                           "icon",
+                           action.icon.c_str(),
+                           "disabled_subject",
+                           action.enabled ? "" : kActionDisabledSubject,
+                           "moves_machine",
+                           action.moves_machine && !paused_ok ? "true" : "false",
+                           "disabled_cond",
+                           disabled_cond.c_str(),
+                           nullptr};
+    lv_obj_t* btn = static_cast<lv_obj_t*>(lv_xml_create(row, "device_action_button", attrs));
+    if (!btn) {
+        spdlog::warn("[{}] Failed to create button for '{}'", get_name(), action.id);
+        return;
+    }
     lv_obj_set_name(btn, action.id.c_str());
-    lv_obj_set_flex_grow(btn, 1);
-    lv_obj_set_height(btn, theme_manager_get_spacing("button_height_sm"));
-    lv_obj_set_style_radius(btn, theme_manager_get_spacing("border_radius"), 0);
-
-    // Button label
-    lv_obj_t* btn_label = lv_label_create(btn);
-    lv_label_set_text(btn_label, lv_tr(action.label.c_str()));
-    lv_obj_center(btn_label);
-    lv_obj_set_name(btn_label, fmt::format("{}_label", action.id).c_str());
-
-    // Store action ID in vector, pass index as user_data
-    action_ids_.push_back(action.id);
-    lv_obj_set_user_data(btn, reinterpret_cast<void*>(action_ids_.size() - 1));
-
-    // Register click callback
-    lv_obj_add_event_cb(btn, on_action_clicked, LV_EVENT_CLICKED, nullptr);
-
-    // Handle disabled state
-    if (!action.enabled) {
-        lv_obj_add_state(btn, LV_STATE_DISABLED);
-        if (!action.disable_reason.empty()) {
-            spdlog::debug("[{}] Action '{}' disabled: {}", get_name(), action.id,
-                          action.disable_reason);
+    if (lv_obj_t* btn_label = ui_button_get_label(btn)) {
+        lv_obj_set_name(btn_label, fmt::format("{}_label", action.id).c_str());
+    }
+    if (!action.enabled && !action.disable_reason.empty()) {
+        // Said under the row, as a setting row says it in its description.
+        const std::string note = fmt::format("{}: {}", label, lv_tr(action.disable_reason.c_str()));
+        const char* note_attrs[] = {"text", note.c_str(), nullptr};
+        if (lv_obj_t* note_obj = static_cast<lv_obj_t*>(
+                lv_xml_create(lv_obj_get_parent(row), "device_action_note", note_attrs))) {
+            lv_obj_set_name(note_obj, fmt::format("{}_reason", action.id).c_str());
         }
+    }
+}
+
+// ============================================================================
+// EVENT DISPATCH
+// ============================================================================
+
+const helix::printer::DeviceAction*
+AmsDeviceSectionDetailOverlay::action_for_event(lv_event_t* e) const {
+    for (auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e)); obj;
+         obj = lv_obj_get_parent(obj)) {
+        if (obj == actions_container_) {
+            break;
+        }
+        const char* name = lv_obj_get_name(obj);
+        if (!name) {
+            continue;
+        }
+        for (const auto& action : cached_actions_) {
+            if (action.section == section_id_ && action.id == name) {
+                return &action;
+            }
+        }
+    }
+    spdlog::warn("[{}] Event from a widget no action owns", get_name());
+    return nullptr;
+}
+
+lv_obj_t* AmsDeviceSectionDetailOverlay::row_for(const std::string& action_id) const {
+    return actions_container_ ? lv_obj_find_by_name(actions_container_, action_id.c_str())
+                              : nullptr;
+}
+
+AmsError AmsDeviceSectionDetailOverlay::execute(const helix::printer::DeviceAction& action,
+                                                std::any value) {
+    AmsBackend* backend = AmsState::instance().get_backend();
+    if (!backend) {
+        spdlog::warn("[{}] No backend available for '{}'", get_name(), action.id);
+        return AmsErrorHelper::not_connected("No backend");
+    }
+    const std::string id = action.id;
+    AmsError result = backend->execute_device_action(id, value);
+    if (!result.success()) {
+        helix::ui::notify_ams_error(result);
+    } else if (value.has_value()) {
+        // The row now shows the sent value. Recording it as shown means a backend
+        // that never takes it up differs from the row on the next data tick, and
+        // the row goes back to what the backend reports.
+        for (auto& cached : cached_actions_) {
+            if (cached.id == id) {
+                cached.current_value = std::move(value);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+void AmsDeviceSectionDetailOverlay::show_slider_value(lv_obj_t* row,
+                                                      const helix::printer::DeviceAction& action,
+                                                      int32_t position) const {
+    const SliderScale scale = slider_scale(action);
+    const std::string text = slider_value_text(scale.to_value(position), scale, action.unit);
+    // required-names: setting_slider_row
+    if (lv_obj_t* field = helix::ui::find_required(row, "value_field", get_name())) {
+        // required-names: setting_value_field
+        if (lv_obj_t* value = helix::ui::find_required(field, "value", get_name())) {
+            lv_label_set_text(value, text.c_str());
+        }
+    }
+}
+
+void AmsDeviceSectionDetailOverlay::apply_slider_value(const helix::printer::DeviceAction& action,
+                                                       double value) {
+    const SliderScale scale = slider_scale(action);
+    const int32_t min_pos = scale.to_slider(action.min_value);
+    const int32_t max_pos = scale.to_slider(action.max_value);
+    const int32_t position = scale.to_slider_clamped(value, min_pos, max_pos);
+    const double sent = scale.to_value(position);
+
+    lv_obj_t* row = row_for(action.id);
+    // required-names: setting_slider_row
+    lv_obj_t* slider = row ? helix::ui::find_required(row, "slider", get_name()) : nullptr;
+    if (slider) {
+        lv_slider_set_value(slider, position, LV_ANIM_OFF);
+        show_slider_value(row, action, position);
+    }
+
+    // The value travels as float, the type the section's sliders have always sent.
+    AmsError result = execute(action, std::any(static_cast<float>(sent)));
+    if (result.success()) {
+        NOTIFY_INFO(lv_tr("{} set to {}"), device_action_label(action),
+                    slider_value_text(sent, scale, action.unit));
+    } else if (slider) {
+        // The backend kept its old value; so does the row.
+        const double kept =
+            helix::printer::device_action_number(action.current_value).value_or(action.min_value);
+        const int32_t kept_pos = scale.to_slider_clamped(kept, min_pos, max_pos);
+        lv_slider_set_value(slider, kept_pos, LV_ANIM_OFF);
+        show_slider_value(row, action, kept_pos);
     }
 }
 
@@ -455,127 +562,34 @@ void AmsDeviceSectionDetailOverlay::create_button_in_row(
 // STATIC CALLBACKS
 // ============================================================================
 
-#if HELIX_HAS_CFS
-/// Cutter calibration confirm: BOX_FIND_CUT_POS homes X/Y and takes about a
-/// minute, so the click asks before moving the printer.
-namespace {
-
-void set_cutter_row_state(const char* status_text, bool busy) {
-    lv_subject_copy_string(&s_cfs_cutter_status, status_text);
-    // 0 = nothing to report (line hidden), 1 = sweep running, 2 = result.
-    lv_subject_set_int(&s_cfs_cutter_phase, busy ? 1 : (status_text[0] != '\0' ? 2 : 0));
-    // Both calibration actions home the machine; neither may start while a
-    // sweep owns it. The buttons are built dynamically from backend data
-    // (this file's documented exception), so their state is set here.
-    lv_obj_t* screen = lv_screen_active();
-    for (const char* name : {"calibrate_cutter", "calibrate_purge_chute"}) {
-        if (lv_obj_t* btn = lv_obj_find_by_name(screen, name)) {
-            if (busy) {
-                lv_obj_add_state(btn, LV_STATE_DISABLED);
-            } else {
-                lv_obj_remove_state(btn, LV_STATE_DISABLED);
-            }
-        }
-    }
-}
-} // namespace
-
-static void confirm_cutter_calibration(const std::string& label) {
-    helix::ui::ConfirmOptions opts;
-    helix::ui::modal_confirm(
-        lv_tr("Calibrate Cutter"),
-        lv_tr("The printer homes and sweeps the cutter (about 1 minute). Keep the filament "
-              "path clear."),
-        ModalSeverity::Warning, lv_tr("Start"),
-        [label]() {
-            AmsBackend* backend = AmsState::instance().get_backend();
-            if (!backend) {
-                return;
-            }
-            set_cutter_row_state(lv_tr("Calibrating... (about 1 minute)"), true);
-            AmsError result = backend->calibrate_cutter([](bool ok, const std::string& line) {
-                char axis = '\0';
-                double value_mm = 0.0;
-                std::string text;
-                if (ok &&
-                    helix::printer::AmsBackendCfs::parse_cut_found_line(line, axis, value_mm)) {
-                    text = fmt::format(
-                        lv_tr("Cut position saved: {}"),
-                        fmt::format("{} {:.1f}", static_cast<char>(std::toupper(axis)), value_mm));
-                } else if (ok) {
-                    text = lv_tr("Cutter calibration completed");
-                } else {
-                    text = fmt::format(lv_tr("Cutter calibration failed: {}"), line);
-                }
-                set_cutter_row_state(text.c_str(), false);
-            });
-            if (!result.success()) {
-                set_cutter_row_state("", false);
-                helix::ui::notify_ams_error(result);
-            }
-        },
-        opts);
-}
-#endif
-
 void AmsDeviceSectionDetailOverlay::on_action_clicked(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceSectionDetailOverlay] on_action_clicked");
 
-    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!btn || !lv_obj_is_valid(btn)) {
-        spdlog::warn("[AmsDeviceSectionDetailOverlay] on_action_clicked: invalid target");
-    } else {
-        // Get action ID from vector using index stored in user_data
-        auto& overlay = get_ams_device_section_detail_overlay();
-        auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(btn));
-        if (index >= overlay.action_ids_.size()) {
-            spdlog::warn("[AmsDeviceSectionDetailOverlay] Invalid action index: {}", index);
-        } else {
-            const std::string& action_id = overlay.action_ids_[index];
-            spdlog::debug("[AmsDeviceSectionDetailOverlay] Action clicked: {}", action_id);
-
-            // Execute via backend
-            AmsBackend* backend = AmsState::instance().get_backend();
-            if (!backend) {
-                spdlog::warn("[AmsDeviceSectionDetailOverlay] No backend available for action");
-            } else {
-                // Find label for the toast
-                std::string label = action_id;
-                for (const auto& act : overlay.cached_actions_) {
-                    if (act.id == action_id) {
-                        label = act.label;
-                        break;
-                    }
-                }
-
-#if HELIX_HAS_CFS
-                // K1 CFS calibration actions route away from the plain
-                // execute-and-toast shape: the chute flow is a guided overlay,
-                // and the cutter sweep homes the printer, which deserves a
-                // confirmation before it moves anything.
-                const bool calibrate_purge_chute =
-                    backend->get_type() == AmsType::CFS && action_id == "calibrate_purge_chute";
-                const bool calibrate_cutter =
-                    backend->get_type() == AmsType::CFS && action_id == "calibrate_cutter";
-                if (calibrate_purge_chute) {
-                    get_cfs_chute_calibration_overlay().show(lv_screen_active());
-                } else if (calibrate_cutter) {
-                    confirm_cutter_calibration(label);
-                } else
-#endif
-                {
-                    AmsError result = backend->execute_device_action(action_id);
-                    if (result.success()) {
-                        // Whole sentence, not "{} {}" over two separately translated
-                        // words: German sends the participle to the end of the
-                        // clause and Japanese renders this as 〜を開始しました, and
-                        // neither can be reached by concatenating "label" + "started".
-                        NOTIFY_INFO(lv_tr("{} started"), lv_tr(label.c_str()));
-                    } else {
-                        helix::ui::notify_ams_error(result);
-                    }
-                }
+    auto& overlay = get_ams_device_section_detail_overlay();
+    if (const auto* action = overlay.action_for_event(e); action && !action->enabled) {
+        spdlog::warn("[AmsDeviceSectionDetailOverlay] Ignoring unavailable action '{}'",
+                     action->id);
+    } else if (action) {
+        spdlog::debug("[AmsDeviceSectionDetailOverlay] Action clicked: {}", action->id);
+        // An action that names a guided flow starts it. The flow owns whatever
+        // confirmation the action needs, so a flow that is not registered must
+        // never fall through to a direct execute.
+        const GuidedDeviceFlow* flow =
+            action->guided_flow.empty() ? nullptr : find_guided_device_flow(action->guided_flow);
+        if (!action->guided_flow.empty() && !flow) {
+            spdlog::warn("[AmsDeviceSectionDetailOverlay] Action '{}' names unregistered "
+                         "guided flow '{}'; not executing",
+                         action->id, action->guided_flow);
+        } else if (flow) {
+            if (flow->start) {
+                flow->start(action->label);
             }
+        } else if (overlay.execute(*action, {}).success()) {
+            // Whole sentence, not "{} {}" over two separately translated
+            // words: German sends the participle to the end of the
+            // clause and Japanese renders this as 〜を開始しました, and
+            // neither can be reached by concatenating "label" + "started".
+            NOTIFY_INFO(lv_tr("{} started"), device_action_label(*action));
         }
     }
 
@@ -586,49 +600,25 @@ void AmsDeviceSectionDetailOverlay::on_toggle_changed(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceSectionDetailOverlay] on_toggle_changed");
 
     auto* sw = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!sw || !lv_obj_is_valid(sw)) {
-        spdlog::warn("[AmsDeviceSectionDetailOverlay] on_toggle_changed: invalid target");
-    } else {
-        // Get action ID from vector using index stored in user_data
-        auto& overlay = get_ams_device_section_detail_overlay();
-        auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(sw));
-        if (index >= overlay.action_ids_.size()) {
-            spdlog::warn("[AmsDeviceSectionDetailOverlay] Invalid toggle action index: {}", index);
+    auto& overlay = get_ams_device_section_detail_overlay();
+    if (const auto* action = overlay.action_for_event(e); action && !action->enabled) {
+        // An unavailable toggle never reaches the backend; put the switch back.
+        if (lv_obj_has_state(sw, LV_STATE_CHECKED)) {
+            lv_obj_remove_state(sw, LV_STATE_CHECKED);
         } else {
-            const std::string& action_id = overlay.action_ids_[index];
-            bool new_value = lv_obj_has_state(sw, LV_STATE_CHECKED);
-            spdlog::debug("[AmsDeviceSectionDetailOverlay] Toggle changed: {} = {}", action_id,
-                          new_value);
-
-            // Execute via backend with the new value
-            AmsBackend* backend = AmsState::instance().get_backend();
-            if (!backend) {
-                spdlog::warn("[AmsDeviceSectionDetailOverlay] No backend available for toggle");
-            } else {
-                // Find label for notification
-                std::string label = action_id;
-                for (const auto& act : overlay.cached_actions_) {
-                    if (act.id == action_id) {
-                        label = act.label;
-                        break;
-                    }
-                }
-
-                // For toggles, pass the new value as a parameter
-                AmsError result = backend->execute_device_action(action_id, std::any(new_value));
-                if (result.success()) {
-                    NOTIFY_INFO(new_value ? lv_tr("{} enabled") : lv_tr("{} disabled"),
-                                lv_tr(label.c_str()));
-                } else {
-                    helix::ui::notify_ams_error(result);
-                    // Revert the toggle state on failure
-                    if (new_value) {
-                        lv_obj_remove_state(sw, LV_STATE_CHECKED);
-                    } else {
-                        lv_obj_add_state(sw, LV_STATE_CHECKED);
-                    }
-                }
-            }
+            lv_obj_add_state(sw, LV_STATE_CHECKED);
+        }
+    } else if (action) {
+        const bool new_value = lv_obj_has_state(sw, LV_STATE_CHECKED);
+        spdlog::debug("[AmsDeviceSectionDetailOverlay] Toggle changed: {} = {}", action->id,
+                      new_value);
+        if (overlay.execute(*action, std::any(new_value)).success()) {
+            NOTIFY_INFO(new_value ? lv_tr("{} enabled") : lv_tr("{} disabled"),
+                        device_action_label(*action));
+        } else if (new_value) {
+            lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_add_state(sw, LV_STATE_CHECKED);
         }
     }
 
@@ -638,32 +628,12 @@ void AmsDeviceSectionDetailOverlay::on_toggle_changed(lv_event_t* e) {
 void AmsDeviceSectionDetailOverlay::on_slider_changed(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceSectionDetailOverlay] on_slider_changed");
 
-    // Update the value label live during drag — no backend execution here
+    // The value display follows the drag; the backend hears only the release.
     auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!slider || !lv_obj_is_valid(slider)) {
-        spdlog::warn("[AmsDeviceSectionDetailOverlay] on_slider_changed: invalid target");
-    } else {
-        auto& overlay = get_ams_device_section_detail_overlay();
-        auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(slider));
-        if (index < overlay.action_ids_.size()) {
-            int32_t int_val = lv_slider_get_value(slider);
-
-            // Update the text input (last child of the row: label, slider, textarea)
-            // Guard: only update if value actually changed to prevent feedback loops
-            lv_obj_t* row = lv_obj_get_parent(slider);
-            if (row) {
-                uint32_t child_count = lv_obj_get_child_count(row);
-                if (child_count >= 3) {
-                    lv_obj_t* ta = lv_obj_get_child(row, child_count - 1);
-                    if (ta) {
-                        std::string val_text = std::to_string(int_val);
-                        const char* current = lv_textarea_get_text(ta);
-                        if (!current || val_text != current) {
-                            lv_textarea_set_text(ta, val_text.c_str());
-                        }
-                    }
-                }
-            }
+    auto& overlay = get_ams_device_section_detail_overlay();
+    if (const auto* action = overlay.action_for_event(e)) {
+        if (lv_obj_t* row = overlay.row_for(action->id)) {
+            overlay.show_slider_value(row, *action, lv_slider_get_value(slider));
         }
     }
 
@@ -673,188 +643,82 @@ void AmsDeviceSectionDetailOverlay::on_slider_changed(lv_event_t* e) {
 void AmsDeviceSectionDetailOverlay::on_slider_released(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceSectionDetailOverlay] on_slider_released");
 
-    // Execute the action on release only — avoids spamming G-codes during drag
     auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!slider || !lv_obj_is_valid(slider)) {
-        spdlog::warn("[AmsDeviceSectionDetailOverlay] on_slider_released: invalid target");
-    } else {
-        auto& overlay = get_ams_device_section_detail_overlay();
-        auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(slider));
-        if (index >= overlay.action_ids_.size()) {
-            spdlog::warn("[AmsDeviceSectionDetailOverlay] Invalid slider action index: {}", index);
-        } else {
-            const std::string& action_id = overlay.action_ids_[index];
-            int32_t int_val = lv_slider_get_value(slider);
-            float float_val = static_cast<float>(int_val);
-
-            spdlog::debug("[AmsDeviceSectionDetailOverlay] Slider released: {} = {}", action_id,
-                          float_val);
-
-            AmsBackend* backend = AmsState::instance().get_backend();
-            if (!backend) {
-                spdlog::warn("[AmsDeviceSectionDetailOverlay] No backend available for slider");
-            } else {
-                // Find label and unit for notification
-                std::string label = action_id;
-                std::string unit;
-                for (const auto& act : overlay.cached_actions_) {
-                    if (act.id == action_id) {
-                        label = act.label;
-                        unit = act.unit;
-                        break;
-                    }
-                }
-
-                AmsError result = backend->execute_device_action(action_id, std::any(float_val));
-                if (result.success()) {
-                    if (!unit.empty()) {
-                        NOTIFY_INFO(lv_tr("{} set to {} {}"), lv_tr(label.c_str()), int_val, unit);
-                    } else {
-                        NOTIFY_INFO(lv_tr("{} set to {}"), lv_tr(label.c_str()), int_val);
-                    }
-                } else {
-                    helix::ui::notify_ams_error(result);
-                }
-            }
-        }
+    auto& overlay = get_ams_device_section_detail_overlay();
+    if (const auto* action = overlay.action_for_event(e)) {
+        const helix::printer::DeviceAction released = *action;
+        overlay.apply_slider_value(released,
+                                   slider_scale(released).to_value(lv_slider_get_value(slider)));
     }
 
     LVGL_SAFE_EVENT_CB_END();
 }
 
-void AmsDeviceSectionDetailOverlay::on_value_input_ready(lv_event_t* e) {
-    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceSectionDetailOverlay] on_value_input_ready");
+void AmsDeviceSectionDetailOverlay::on_value_clicked(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceSectionDetailOverlay] on_value_clicked");
 
-    auto* ta = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!ta || !lv_obj_is_valid(ta)) {
-        spdlog::warn("[AmsDeviceSectionDetailOverlay] on_value_input_ready: invalid target");
-    } else {
-        auto& overlay = get_ams_device_section_detail_overlay();
-        // Get action index from sibling slider (child index 1 of row).
-        // Textarea user_data is reserved for TEXT_INPUT_MAGIC + KeyboardHint.
-        lv_obj_t* row = lv_obj_get_parent(ta);
-        lv_obj_t* slider = row ? lv_obj_get_child(row, 1) : nullptr;
-        auto index = slider ? reinterpret_cast<size_t>(lv_obj_get_user_data(slider)) : SIZE_MAX;
-        if (index >= overlay.action_ids_.size()) {
-            spdlog::warn("[AmsDeviceSectionDetailOverlay] Invalid text input action index: {}",
-                         index);
-        } else {
-            const std::string& action_id = overlay.action_ids_[index];
-            const char* text = lv_textarea_get_text(ta);
-            bool valid_input = (text && text[0] != '\0');
-
-            float val = 0.0f;
-            if (valid_input) {
-                const auto parsed = helix::text_io::parse_leading<float>(text);
-                if (parsed) {
-                    val = *parsed;
-                } else {
-                    spdlog::warn("[AmsDeviceSectionDetailOverlay] Invalid numeric input: {}", text);
-                    valid_input = false;
-                }
-            }
-
-            if (valid_input) {
-                // Find action to validate range
-                float min_val = 0.0f, max_val = 0.0f;
-                std::string label, unit;
-                for (const auto& act : overlay.cached_actions_) {
-                    if (act.id == action_id) {
-                        min_val = act.min_value;
-                        max_val = act.max_value;
-                        label = act.label;
-                        unit = act.unit;
-                        break;
-                    }
-                }
-
-                // Clamp to valid range
-                if (val < min_val)
-                    val = min_val;
-                if (val > max_val)
-                    val = max_val;
-
-                // Update the textarea with clamped value
-                std::string clamped_text = std::to_string(static_cast<int32_t>(val));
-                lv_textarea_set_text(ta, clamped_text.c_str());
-
-                // Update the sibling slider (second child of row: label, slider, textarea)
-                lv_obj_t* row = lv_obj_get_parent(ta);
-                if (row) {
-                    lv_obj_t* slider = lv_obj_get_child(row, 1);
-                    if (slider) {
-                        lv_slider_set_value(slider, static_cast<int32_t>(val), LV_ANIM_ON);
-                    }
-                }
-
-                // Execute backend action
-                AmsBackend* backend = AmsState::instance().get_backend();
-                if (backend) {
-                    AmsError result = backend->execute_device_action(action_id, std::any(val));
-                    if (result.success()) {
-                        if (!unit.empty()) {
-                            NOTIFY_INFO(lv_tr("{} set to {} {}"), lv_tr(label.c_str()),
-                                        static_cast<int32_t>(val), unit);
-                        } else {
-                            NOTIFY_INFO(lv_tr("{} set to {}"), lv_tr(label.c_str()),
-                                        static_cast<int32_t>(val));
-                        }
-                    } else {
-                        helix::ui::notify_ams_error(result);
-                    }
-                }
-            }
+    auto& overlay = get_ams_device_section_detail_overlay();
+    if (const auto* action = overlay.action_for_event(e); action && action->enabled) {
+        const SliderScale scale = slider_scale(*action);
+        lv_obj_t* row = overlay.row_for(action->id);
+        lv_obj_t* slider = nullptr;
+        if (row) {
+            // required-names: setting_slider_row
+            slider = helix::ui::find_required(row, "slider", overlay.get_name());
         }
+        overlay.keypad_action_id_ = action->id;
+        overlay.keypad_title_ = device_action_label(*action);
+        ui_keypad_config_t config = {
+            .initial_value = static_cast<float>(slider ? scale.to_value(lv_slider_get_value(slider))
+                                                       : action->min_value),
+            .min_value = action->min_value,
+            .max_value = action->max_value,
+            .title_label = overlay.keypad_title_.c_str(),
+            .unit_label = action->unit.c_str(),
+            .allow_decimal = scale.effective_divisor() > 1,
+            .allow_negative = action->min_value < 0.0f,
+            .callback = on_keypad_value,
+            .user_data = nullptr};
+        ui_keypad_show(&config);
     }
 
     LVGL_SAFE_EVENT_CB_END();
+}
+
+void AmsDeviceSectionDetailOverlay::on_keypad_value(float value, void* /*user_data*/) {
+    auto& overlay = get_ams_device_section_detail_overlay();
+    for (const auto& action : overlay.cached_actions_) {
+        if (action.id == overlay.keypad_action_id_) {
+            // A refresh while the keypad was open can have made it unavailable.
+            if (!action.enabled) {
+                spdlog::info("[AmsDeviceSectionDetailOverlay] Keypad value for '{}' dropped: {}",
+                             action.id, action.disable_reason);
+                return;
+            }
+            const helix::printer::DeviceAction typed = action;
+            overlay.apply_slider_value(typed, value);
+            return;
+        }
+    }
+    spdlog::warn("[AmsDeviceSectionDetailOverlay] Keypad value for vanished action '{}'",
+                 overlay.keypad_action_id_);
 }
 
 void AmsDeviceSectionDetailOverlay::on_dropdown_changed(lv_event_t* e) {
     LVGL_SAFE_EVENT_CB_BEGIN("[AmsDeviceSectionDetailOverlay] on_dropdown_changed");
 
     auto* dropdown = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    if (!dropdown || !lv_obj_is_valid(dropdown)) {
-        spdlog::warn("[AmsDeviceSectionDetailOverlay] on_dropdown_changed: invalid target");
-    } else {
-        // Get action ID from vector using index stored in user_data
-        auto& overlay = get_ams_device_section_detail_overlay();
-        auto index = reinterpret_cast<size_t>(lv_obj_get_user_data(dropdown));
-        if (index >= overlay.action_ids_.size()) {
-            spdlog::warn("[AmsDeviceSectionDetailOverlay] Invalid dropdown action index: {}",
-                         index);
-        } else {
-            const std::string& action_id = overlay.action_ids_[index];
-            uint32_t selected = lv_dropdown_get_selected(dropdown);
-
-            // Get the selected option string
-            char buf[128] = {};
-            lv_dropdown_get_selected_str(dropdown, buf, sizeof(buf));
-            std::string selected_str(buf);
-
-            spdlog::debug("[AmsDeviceSectionDetailOverlay] Dropdown changed: {} = '{}' (index {})",
-                          action_id, selected_str, selected);
-
-            // Find label for notification
-            std::string label = action_id;
-            for (const auto& act : overlay.cached_actions_) {
-                if (act.id == action_id) {
-                    label = act.label;
-                    break;
-                }
-            }
-
-            // Execute via backend with the selected option string
-            AmsBackend* backend = AmsState::instance().get_backend();
-            if (!backend) {
-                spdlog::warn("[AmsDeviceSectionDetailOverlay] No backend available for dropdown");
-            } else {
-                AmsError result = backend->execute_device_action(action_id, std::any(selected_str));
-                if (result.success()) {
-                    NOTIFY_INFO(lv_tr("{} set to {}"), lv_tr(label.c_str()), selected_str);
-                } else {
-                    helix::ui::notify_ams_error(result);
-                }
+    auto& overlay = get_ams_device_section_detail_overlay();
+    if (const auto* action = overlay.action_for_event(e)) {
+        // A pick replaces the unknown placeholder with the option itself.
+        lv_dropdown_set_text(dropdown, nullptr);
+        const uint32_t selected = lv_dropdown_get_selected(dropdown);
+        if (selected < action->options.size()) {
+            const std::string& choice = action->options[selected];
+            spdlog::debug("[AmsDeviceSectionDetailOverlay] Dropdown changed: {} = '{}'", action->id,
+                          choice);
+            if (overlay.execute(*action, std::any(choice)).success()) {
+                NOTIFY_INFO(lv_tr("{} set to {}"), device_action_label(*action), choice);
             }
         }
     }

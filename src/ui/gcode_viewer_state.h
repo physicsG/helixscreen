@@ -80,12 +80,12 @@ class GCodeViewerState {
         // HELIX_GCODE_MODE handling lives in decide_render_mode() (pure, unit
         // tested); this only applies the result and logs why.
 #ifdef ENABLE_3D_RENDERER
-        constexpr bool HAVE_3D_RENDERER = true;
+        constexpr bool kHave3dRenderer = true;
 #else
-        constexpr bool HAVE_3D_RENDERER = false;
+        constexpr bool kHave3dRenderer = false;
 #endif
         const char* mode_env = std::getenv("HELIX_GCODE_MODE");
-        const auto rm = helix::gcode_viewer::decide_render_mode(mode_env, HAVE_3D_RENDERER);
+        const auto rm = helix::gcode_viewer::decide_render_mode(mode_env, kHave3dRenderer);
         render_mode_ = rm.mode;
         switch (rm.reason) {
         case helix::gcode_viewer::RenderModeReason::EnvForced3D:
@@ -200,7 +200,7 @@ class GCodeViewerState {
         // frame and abort via std::terminate ([L083]). This is the exact
         // hot path for L081-family crashes (RPHAV9T7).
         try {
-            build_thread_ = helix::make_thread([this, func = std::move(build_func)]() {
+            build_thread_ = helix::make_background_thread([this, func = std::move(build_func)]() {
                 func();
                 building_.store(false);
             });
@@ -240,6 +240,9 @@ class GCodeViewerState {
     // G-code data
     std::unique_ptr<helix::gcode::ParsedGCodeFile> gcode_file;
     GcodeViewerState viewer_state{GcodeViewerState::Empty};
+    /// The last load stopped because the preview would cost too much CPU; set
+    /// with viewer_state Error, cleared when the next load starts.
+    bool load_skipped_for_cost{false};
 
     // Rendering components (exposed for callbacks)
     std::unique_ptr<helix::gcode::GCodeCamera> camera_;
@@ -268,7 +271,7 @@ class GCodeViewerState {
     ViewOptions applied_2d;
 
     // Callbacks
-    gcode_viewer_object_tap_callback_t object_tap_callback{nullptr};
+    helix::ui::gcode_viewer_object_tap_callback_t object_tap_callback{nullptr};
     void* object_tap_user_data{nullptr};
 
     /// Exclude-mode badges drawn over the render; empty when exclude mode is off.
@@ -282,16 +285,16 @@ class GCodeViewerState {
     /// and widget-local centre. A tap on one picks its object.
     std::vector<int> drawn_badge_index;
     std::vector<glm::vec2> drawn_badge_centers;
-    gcode_viewer_object_long_press_callback_t object_long_press_callback{nullptr};
+    helix::ui::gcode_viewer_object_long_press_callback_t object_long_press_callback{nullptr};
     void* object_long_press_user_data{nullptr};
-    gcode_viewer_load_callback_t load_callback{nullptr};
+    helix::ui::gcode_viewer_load_callback_t load_callback{nullptr};
     void* load_callback_user_data{nullptr};
-    gcode_viewer_load_callback_t first_frame_callback{nullptr};
+    helix::ui::gcode_viewer_load_callback_t first_frame_callback{nullptr};
     void* first_frame_callback_user_data{nullptr};
     bool first_frame_fired_{false};
     helix::gcode::FitFraming framing_{
         helix::gcode::FitFraming::STANDARD}; ///< Fit shape every renderer of this viewer uses
-    ui_gcode_viewer_clear_cb_t clear_callback{nullptr};
+    helix::ui::gcode_viewer_clear_cb_t clear_callback{nullptr};
     void* clear_callback_user_data{nullptr};
 
     // Long-press state
@@ -325,15 +328,14 @@ class GCodeViewerState {
     /// Mutually exclusive with gcode_file - exactly one should hold data.
     std::unique_ptr<helix::gcode::GCodeStreamingController> streaming_controller_;
 
-    /// Scheduled pauses of the loaded file + the axis its progress bar fills
-    /// on, collected by whichever path read it (streaming layer-index scan or
-    /// full-load parse loop). The panel's load callback publishes them into
-    /// PrinterPrintState, which knows which print the file belongs to.
-    std::vector<helix::gcode::ScheduledPause> scheduled_pauses;
-    helix::gcode::ProgressAxis scheduled_pauses_axis{helix::gcode::ProgressAxis::BytePosition};
-    bool has_pause_scan{false};
+    /// Scheduled pauses and layer marks of the loaded file + the axis its
+    /// progress bar fills on, collected by whichever path read it (streaming
+    /// layer-index scan or full-load parse loop). The panel's load callback
+    /// publishes them into PrinterPrintState, which knows which print the file
+    /// belongs to.
+    helix::gcode::PauseScanPtr pause_scan; ///< null until a scan ran
 
-    /// Print progress layer (set via ui_gcode_viewer_set_print_progress)
+    /// Print progress layer (set via helix::ui::gcode_viewer_set_print_progress)
     /// -1 means "show all layers" (preview mode), >= 0 means "show up to this layer"
     int print_progress_layer_{-1};
 
@@ -354,19 +356,19 @@ class GCodeViewerState {
     // event, and the user sees a visually-frozen 2D render despite numeric
     // progress text updating correctly.
     //
-    // Tick: WATCHDOG_INTERVAL_MS (default 2s). On each tick, if the 2D
+    // Tick: kWatchdogIntervalMs (default 2s). On each tick, if the 2D
     // renderer reports needs_more_frames() AND its cached_up_to_layer_ has
     // not advanced since the previous tick, force one lv_obj_invalidate(obj).
     // The kick is idempotent: when the renderer is healthy each tick simply
     // observes a moving cached_up_to_layer_ and does nothing.
     // ========================================================================
-    static constexpr uint32_t WATCHDOG_INTERVAL_MS = 2000;
+    static constexpr uint32_t kWatchdogIntervalMs = 2000;
     // Consecutive confirmed-stall ticks tolerated before the watchdog gives up
-    // and surfaces an error. At WATCHDOG_INTERVAL_MS this is ~60s — generous vs.
+    // and surfaces an error. At kWatchdogIntervalMs this is ~60s — generous vs.
     // the 1-2 ticks a real dropped-invalidate needs to recover, but it stops the
     // multi-hour thrash seen when an EXTERNAL failure (disk full) wedges the
     // render permanently (bundle YZQ47HQ6: 4000+ kicks over ~2h).
-    static constexpr int WATCHDOG_MAX_STALL_KICKS = 30;
+    static constexpr int kWatchdogMaxStallKicks = 30;
     lv_timer_t* watchdog_timer_{nullptr};
     int watchdog_last_cached_layer_{-2}; ///< -2 sentinel = never sampled
     int watchdog_last_target_layer_{-2}; ///< -2 sentinel = never sampled
@@ -408,6 +410,10 @@ class GCodeViewerState {
     /// Disable streaming mode (detail panel uses full-load + budget instead)
     bool streaming_disabled_{false};
 
+    /// The plugin's layer index sidecar for the next load's file, or empty
+    /// (helix::ui::gcode_viewer_set_layer_index_sidecar).
+    std::string layer_index_sidecar_;
+
     /// Helper to check if currently using 2D layer renderer
     bool is_using_2d_mode() const {
 #ifdef ENABLE_3D_RENDERER
@@ -423,7 +429,7 @@ class GCodeViewerState {
 #else
         // Without a 3D renderer there is no 3D mode, full stop. A stored
         // display/gcode_render_mode of 3D (copied from a GLES device, or
-        // hand-edited) must still land here: ui_gcode_viewer_set_render_mode()
+        // hand-edited) must still land here: helix::ui::gcode_viewer_set_render_mode()
         // has no availability guard.
         return true;
 #endif

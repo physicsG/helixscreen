@@ -28,8 +28,8 @@ using helix::ui::create_ripple;
 // ============================================================================
 
 // Crosshair widget size in pixels (defined in XML as 50x50)
-constexpr int CROSSHAIR_SIZE = 50;
-constexpr int CROSSHAIR_HALF_SIZE = CROSSHAIR_SIZE / 2;
+constexpr int kCrosshairSize = 50;
+constexpr int kCrosshairHalfSize = kCrosshairSize / 2;
 
 // External wizard subjects (defined in ui_wizard.cpp)
 extern lv_subject_t connection_test_passed;
@@ -637,7 +637,7 @@ void WizardTouchCalibrationStep::update_crosshair_position() {
 
     // Crosshair is a direct child of the screen, so we can use screen-absolute coordinates
     if (crosshair_) {
-        lv_obj_set_pos(crosshair_, target.x - CROSSHAIR_HALF_SIZE, target.y - CROSSHAIR_HALF_SIZE);
+        lv_obj_set_pos(crosshair_, target.x - kCrosshairHalfSize, target.y - kCrosshairHalfSize);
     }
     lv_subject_set_int(&current_step_, step);
 

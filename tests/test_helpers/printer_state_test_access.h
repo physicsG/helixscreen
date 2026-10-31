@@ -26,6 +26,8 @@ class PrinterPrintStateTestAccess {
         pps.first_layer_height_ = 0.0;
         pps.last_gcode_z_mm_ = 0.0;
         pps.have_gcode_z_ = false;
+        pps.print_clock_s_ = 0.0;
+        pps.height_layer_pending_ = {};
         pps.layer_z_derived_ = false;
         pps.has_real_layer_data_ = false;
         // Sticky printer capability — session-scoped in production (survives
@@ -99,13 +101,11 @@ class PrinterPrintStateTestAccess {
 // touch, and that therefore live for the whole process on the shared
 // get_printer_state() singleton.
 //
-// Deliberately absent: PrinterFanStateTestAccess and
-// PrinterTemperatureStateTestAccess. Both names are already taken by local
-// definitions in tests/unit/test_print_status_fan_section.cpp and
-// tests/unit/test_printer_temperature_{state,char}.cpp, two of which already
-// include this header — defining them here is an immediate ambiguity. Those two
-// domains are cleared through their public init_fans({}) / init_extruders({})
-// instead, which is also the only correct way to expire their per-item subjects.
+// Deliberately absent: PrinterFanStateTestAccess, a name already taken by a
+// local definition in tests/unit/test_print_status_fan_section.cpp, and a
+// temperature accessor. The fan and temperature domains are cleared through
+// their public init_fans({}) / init_extruders({}) instead, which is also the
+// only correct way to expire their per-item subjects.
 // ---------------------------------------------------------------------------
 
 class PrinterExcludedObjectsStateTestAccess {
@@ -143,7 +143,7 @@ class PrinterCalibrationStateTestAccess {
         // Debounced view of idle_timeout.printing; not a subject, so
         // deinit_subjects() leaves it latched. A test that drove a blocking op
         // otherwise makes every later test's is_blocking_operation_active()
-        // read true once its SETTLE window has passed.
+        // read true once its kSettle window has passed.
         s.idle_timeout_busy_.set_printing(false);
     }
 };
@@ -269,6 +269,7 @@ class PrinterStateTestAccess {
         PrinterNetworkStateTestAccess::clear_data(ps.network_state_);
         PrinterPrintStateTestAccess::reset_extra(ps.print_domain_);
         ps.versions_state_.clear_data();
+        ps.plugin_status_state_.clear_data();
 
         // --- PrinterState's own members ---------------------------------------
         PrinterProfileStateTestAccess::clear_data(ps.profile_state_);
@@ -356,7 +357,7 @@ class PrinterStateTestAccess {
      * @brief Make the blocking-op guard see a SUSTAINED idle_timeout "Printing"
      *
      * Setting the subject alone no longer reaches is_blocking_operation_active():
-     * it reads IdleTimeoutBusy, which requires the flag to hold for SETTLE before
+     * it reads IdleTimeoutBusy, which requires the flag to hold for kSettle before
      * it counts (see include/idle_timeout_busy.h). A test that means "an external
      * blocking op is under way" means one that has already outlasted that window,
      * so back-date the transition rather than sleeping. Use this instead of
@@ -366,7 +367,7 @@ class PrinterStateTestAccess {
     static void set_sustained_idle_timeout_printing(PrinterState& ps, bool on) {
         lv_subject_set_int(ps.calibration_state().get_idle_timeout_printing_subject(), on ? 1 : 0);
         ps.calibration_state().idle_timeout_busy().set_printing(on, IdleTimeoutBusy::clock::now() -
-                                                                        IdleTimeoutBusy::SETTLE);
+                                                                        IdleTimeoutBusy::kSettle);
     }
 };
 

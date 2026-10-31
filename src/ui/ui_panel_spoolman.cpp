@@ -21,6 +21,7 @@
 #include "label_printer_utils.h"
 #endif
 #include "format_utils.h"
+#include "i18n_plural.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "printer_state.h"
@@ -257,7 +258,7 @@ void SpoolmanPanel::refresh_spools() {
         return;
     }
 
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] No API available, cannot refresh", get_name());
         show_empty_state();
@@ -287,7 +288,7 @@ void SpoolmanPanel::refresh_spools() {
             spdlog::info("[{}] Received {} spools from Spoolman", name, spools.size());
 
             // Also get active spool ID before updating UI
-            IMoonrakerAPI* api_inner = get_moonraker_api();
+            helix::IMoonrakerAPI* api_inner = get_moonraker_api();
             if (!api_inner) {
                 spdlog::warn("[{}] API unavailable for status check", name);
                 apply_spools(spools, -1);
@@ -339,13 +340,17 @@ void SpoolmanPanel::update_spool_count() {
     } else if (filtered_spools_.size() != cached_spools_.size()) {
         // Show filtered count: "Spoolman: 5/19 Spools"
         char buf[64];
-        snprintf(buf, sizeof(buf), lv_tr("Spoolman: %zu/%zu Spool%s"), filtered_spools_.size(),
-                 cached_spools_.size(), cached_spools_.size() == 1 ? "" : "s");
+        snprintf(buf, sizeof(buf),
+                 helix::ui::tr_plural("Spoolman: %zu/%zu Spool", "Spoolman: %zu/%zu Spools",
+                                      cached_spools_.size()),
+                 filtered_spools_.size(), cached_spools_.size());
         lv_subject_copy_string(&header_title_subject_, buf);
     } else {
         char buf[64];
-        snprintf(buf, sizeof(buf), lv_tr("Spoolman: %zu Spool%s"), cached_spools_.size(),
-                 cached_spools_.size() == 1 ? "" : "s");
+        snprintf(buf, sizeof(buf),
+                 helix::ui::tr_plural("Spoolman: %zu Spool", "Spoolman: %zu Spools",
+                                      cached_spools_.size()),
+                 cached_spools_.size());
         lv_subject_copy_string(&header_title_subject_, buf);
     }
 }
@@ -615,7 +620,7 @@ void SpoolmanPanel::show_edit_modal(int spool_id) {
         return;
     }
 
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
 
     edit_modal_.set_completion_callback([this](bool saved) {
         if (saved) {
@@ -632,7 +637,7 @@ void SpoolmanPanel::show_edit_modal(int spool_id) {
 // ============================================================================
 
 void SpoolmanPanel::duplicate_spool(int spool_id) {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] No API, cannot duplicate spool", get_name());
         return;
@@ -700,7 +705,7 @@ void SpoolmanPanel::archive_spool(int spool_id) {
         [spool_id] {
             spdlog::info("[Spoolman] Confirmed archive of spool {}", spool_id);
 
-            IMoonrakerAPI* api = get_moonraker_api();
+            helix::IMoonrakerAPI* api = get_moonraker_api();
             if (!api) {
                 ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("API not available"),
                                               3000);
@@ -741,7 +746,7 @@ void SpoolmanPanel::delete_spool(int spool_id) {
         [spool_id] {
             spdlog::info("[Spoolman] Confirmed delete of spool {}", spool_id);
 
-            IMoonrakerAPI* api = get_moonraker_api();
+            helix::IMoonrakerAPI* api = get_moonraker_api();
             if (!api) {
                 ToastManager::instance().show(ToastSeverity::ERROR, lv_tr("API not available"),
                                               3000);

@@ -8,7 +8,9 @@
 #include "static_panel_registry.h"
 #include "subject_managed_panel.h"
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 /**
  * @file ui_overlay_retraction_settings.h
@@ -34,7 +36,7 @@ class RetractionSettingsOverlay : public OverlayBase {
     /**
      * @param api IMoonrakerAPI for sending G-code (may be nullptr until set_api())
      */
-    explicit RetractionSettingsOverlay(IMoonrakerAPI* api = nullptr);
+    explicit RetractionSettingsOverlay(helix::IMoonrakerAPI* api = nullptr);
     ~RetractionSettingsOverlay() override;
 
     void init_subjects() override;
@@ -56,7 +58,7 @@ class RetractionSettingsOverlay : public OverlayBase {
      * @brief Update IMoonrakerAPI pointer
      * @param api New API pointer (may be nullptr)
      */
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -136,7 +138,7 @@ class RetractionSettingsOverlay : public OverlayBase {
     // === Injected Dependencies ===
     //
 
-    IMoonrakerAPI* api_ = nullptr;
+    helix::IMoonrakerAPI* api_ = nullptr;
 
     // Debounce - don't send G-code while syncing from printer state
     bool syncing_from_state_ = false;
@@ -147,6 +149,6 @@ inline RetractionSettingsOverlay& get_global_retraction_settings() {
 }
 
 /// Points the overlay at the API it sends G-code through.
-inline void init_global_retraction_settings(IMoonrakerAPI* api) {
+inline void init_global_retraction_settings(helix::IMoonrakerAPI* api) {
     get_global_retraction_settings().set_api(api);
 }

@@ -1,0 +1,196 @@
+{
+  "AFC": [
+    "connected",
+    "bypass_state",
+    "quiet_mode",
+    "current_load",
+    "current_lane",
+    "current_state",
+    "current_tool",
+    "current_toolchange",
+    "error_state",
+    "filament_loaded",
+    "lane_loaded",
+    "led_state",
+    "message",
+    "name",
+    "number_of_toolchanges",
+    "num_extruders",
+    "status",
+    "system",
+    "tool_sensor_after_extruder",
+    "tool_stn",
+    "tool_stn_unload",
+    "type",
+    "units",
+    "lanes",
+    "hubs",
+    "extruders",
+    "buffers"
+  ],
+  "AFC_BoxTurtle Turtle_1": [
+    "lanes",
+    "extruders",
+    "hubs",
+    "buffers"
+  ],
+  "AFC_buffer Turtle_1": [
+    "state",
+    "distance_to_fault",
+    "error_sensitivity",
+    "fault_detection_enabled",
+    "lanes"
+  ],
+  "AFC_extruder extruder": [
+    "lane_loaded",
+    "tool_end_status",
+    "tool_start_status"
+  ],
+  "AFC_hub Turtle_1": [
+    "state",
+    "afc_bowden_length"
+  ],
+  "AFC_stepper lane1": [
+    "buffer_status",
+    "color",
+    "current_map",
+    "dist_hub",
+    "extruder",
+    "filament_status",
+    "hub",
+    "load",
+    "loaded_to_hub",
+    "map",
+    "material",
+    "prep",
+    "runout_lane",
+    "spool_id",
+    "status",
+    "td1_color",
+    "td1_scan_time",
+    "td1_td",
+    "tool_loaded",
+    "weight"
+  ],
+  "AFC_stepper lane2": [
+    "buffer_status",
+    "color",
+    "current_map",
+    "dist_hub",
+    "extruder",
+    "filament_status",
+    "hub",
+    "load",
+    "loaded_to_hub",
+    "map",
+    "material",
+    "prep",
+    "runout_lane",
+    "spool_id",
+    "status",
+    "td1_color",
+    "td1_scan_time",
+    "td1_td",
+    "tool_loaded",
+    "weight"
+  ],
+  "bed_mesh": [
+    "profile_name",
+    "probed_matrix",
+    "mesh_min",
+    "mesh_max",
+    "mesh_params",
+    "profiles"
+  ],
+  "display_status": [
+    "message",
+    "progress"
+  ],
+  "exclude_object": [
+    "objects",
+    "excluded_objects",
+    "current_object"
+  ],
+  "extruder": [
+    "temperature",
+    "target",
+    "power",
+    "pressure_advance",
+    "nozzle_diameter",
+    "nozzle_volume_type"
+  ],
+  "fan": [
+    "speed"
+  ],
+  "gcode_macro START_PRINT": [
+    "preparation_done"
+  ],
+  "gcode_macro _HELIX_STATE": [
+    "print_started"
+  ],
+  "gcode_macro _START_PRINT": [
+    "print_started"
+  ],
+  "gcode_move": [
+    "gcode_position",
+    "speed",
+    "speed_factor",
+    "extrude_factor",
+    "homing_origin"
+  ],
+  "heater_bed": [
+    "temperature",
+    "target",
+    "power"
+  ],
+  "idle_timeout": [
+    "state"
+  ],
+  "manual_probe": [
+    "is_active",
+    "z_position"
+  ],
+  "motion_report": [
+    "live_position",
+    "live_velocity",
+    "live_extruder_velocity"
+  ],
+  "pause_resume": [
+    "is_paused"
+  ],
+  "print_stats": [
+    "state",
+    "filename",
+    "filament_used",
+    "print_duration",
+    "total_duration",
+    "estimated_time",
+    "info",
+    "message",
+    "power_loss"
+  ],
+  "stepper_enable": [
+    "steppers"
+  ],
+  "toolhead": [
+    "position",
+    "homed_axes",
+    "kinematics",
+    "extruder",
+    "max_velocity",
+    "axis_minimum",
+    "axis_maximum"
+  ],
+  "virtual_sdcard": [
+    "progress",
+    "layer",
+    "layer_count",
+    "is_active",
+    "file_position",
+    "file_path"
+  ],
+  "webhooks": [
+    "state",
+    "state_message"
+  ]
+}

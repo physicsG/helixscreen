@@ -17,6 +17,7 @@
 #include "ams_environment_zone.h"
 #include "ams_error.h"
 #include "ams_step_operation.h"
+#include "ams_tag_reading.h"
 #include "ams_types.h"
 #include "display_numbering.h"
 #include "error_event.h"
@@ -26,8 +27,8 @@
 #include "tool_mapping_origin.h"
 #include "toolchanger_addon.h"
 
-class IMoonrakerAPI;
 namespace helix {
+class IMoonrakerAPI;
 #ifdef HELIX_ENABLE_MOCKS
 class AmsBackendMock;
 #endif
@@ -72,12 +73,13 @@ namespace helix {
  * so the mock cannot drift from the hardware it emulates.
  */
 struct BackendTraits {
-    bool load_mounts_tool = false;
+    bool load_feeds_filament = false;
+    bool load_swaps_seated_lane = false;
     bool tracks_consumption_natively = false;
     bool hub_on_toolhead = false;
     bool has_per_slot_loaded_authority = false;
     bool filament_ops_self_home = false;
-    bool supports_batch_filament_ops = false;
+    bool supports_reset = true;
     bool reset_moves_filament = false;
     bool supports_recover_with_state = false;
     bool supports_lane_preload = false;
@@ -88,21 +90,22 @@ struct BackendTraits {
     bool supports_gate_check = false;
     bool should_suppress_idle_runout_modal = false;
     bool bypass_is_virtual = false;
-    bool supports_configurable_unload_after_print = false;
-    bool supports_configurable_eject_params = false;
     bool allows_implicit_chaining = true;
     bool has_physical_tray = true;
     bool slot_status_tracks_filament = true;
     bool should_hide_slot_tool_badge = false;
     bool requires_preprint_send = false;
     bool supports_auto_heat_on_load = false;
+    bool supports_auto_heat_on_unload = false;
     bool has_firmware_spool_persistence = false;
     bool printer_reports_spool_ids = false;
     bool recovers_filament_on_resume = false;
     bool has_environment_sensors = false;
     bool holds_optimistic_action = false;
-    bool supports_toolhead_park = false;
-    bool has_firmware_filament_identity = false;
+    bool unloads_stand_alone = false;
+    bool raises_runout_fault = false;
+    bool raises_runout_fault_during_job = false;
+    bool unloads_to_hub_between_prints = false;
 
     // All-bool with no padding, so the bytes are the value.
     bool operator==(const BackendTraits& o) const {
@@ -113,6 +116,38 @@ struct BackendTraits {
         return !(*this == o);
     }
 };
+
+/// How a head's filament op is done on this machine.
+enum class FilamentOpSupport : uint8_t {
+    Automatic,   ///< The backend runs it
+    Manual,      ///< The user does it by hand; the reason says how
+    Unavailable, ///< It cannot be done here; the reason says why
+};
+
+/**
+ * @brief What one head can do with filament, and why not.
+ *
+ * Answers filament questions only. Whether the head is mounted is never an
+ * input: a backend that needs the tool on the carriage to feed it mounts the
+ * tool inside the op.
+ */
+struct HeadFilamentOps {
+    FilamentOpSupport load = FilamentOpSupport::Automatic;
+    FilamentOpSupport unload = FilamentOpSupport::Automatic;
+    std::string load_reason;   ///< Translated; empty when load is Automatic
+    std::string unload_reason; ///< Translated; empty when unload is Automatic
+};
+
+/**
+ * @brief The entry of @p list that @p material names, or nullopt
+ *
+ * Case-insensitive exact match, then @p aliases, then the filament database's
+ * compat_group (e.g. "Wood PLA" -> "PLA"). No fallback: an unmatched material
+ * stays unmatched. AmsBackend::normalize_material() adds its own.
+ */
+[[nodiscard]] std::optional<std::string>
+match_material(const std::string& material, const std::vector<std::string>& list,
+               const std::vector<std::pair<std::string, std::string>>& aliases = {});
 
 /**
  * @brief Abstract interface for AMS/MMU backend implementations
@@ -133,6 +168,16 @@ class AmsBackend {
   public:
     virtual ~AmsBackend() = default;
 
+    /**
+     * @brief Bed Y this system's mounted hardware makes unprintable, in mm
+     *
+     * A rear-mounted cassette can sit over the far edge of the bed; the
+     * print-start fit check subtracts this from the machine's Y limit.
+     */
+    [[nodiscard]] virtual double printable_y_shrink_mm() const {
+        return 0.0;
+    }
+
     // ========================================================================
     // Event Types
     // ========================================================================
@@ -144,13 +189,16 @@ class AmsBackend {
      * Event names are strings to allow backend-specific extensions.
      */
     static constexpr const char* EVENT_STATE_CHANGED = "STATE_CHANGED"; ///< System state updated
-    static constexpr const char* EVENT_SLOT_CHANGED = "SLOT_CHANGED";   ///< Slot info updated
-    static constexpr const char* EVENT_LOAD_COMPLETE = "LOAD_COMPLETE"; ///< Load operation finished
-    static constexpr const char* EVENT_UNLOAD_COMPLETE =
-        "UNLOAD_COMPLETE";                                            ///< Unload operation finished
-    static constexpr const char* EVENT_TOOL_CHANGED = "TOOL_CHANGED"; ///< Tool change completed
-    static constexpr const char* EVENT_ERROR = "ERROR";               ///< Error occurred
-    static constexpr const char* EVENT_ATTENTION_REQUIRED =
+    static constexpr const char* kEventSlotChanged = "SLOT_CHANGED";    ///< Slot info updated
+    static constexpr const char* kEventLoadComplete = "LOAD_COMPLETE";  ///< Load operation finished
+    static constexpr const char* kEventUnloadComplete =
+        "UNLOAD_COMPLETE";                                           ///< Unload operation finished
+    static constexpr const char* kEventToolChanged = "TOOL_CHANGED"; ///< Tool change completed
+    static constexpr const char* kEventError = "ERROR";              ///< Error occurred
+    /// Klipper rejected an Endless Spool switch after it was sent: the switch the
+    /// user flipped goes back to what the backend still reports.
+    static constexpr const char* kEventEndlessSpoolRefused = "ENDLESS_SPOOL_REFUSED";
+    static constexpr const char* kEventAttentionRequired =
         "ATTENTION"; ///< User intervention needed
 
     // ========================================================================
@@ -184,6 +232,18 @@ class AmsBackend {
      * Backends that hold SubscriptionGuards should call release() on them.
      */
     virtual void release_subscriptions() {}
+
+    /**
+     * @brief Last word to the printer before the client disconnects
+     *
+     * Teardown (a printer switch or app exit) calls it on the main thread
+     * while the client is still connected, so a backend can end an operation
+     * that would otherwise leave the printer holding heaters or a machine
+     * state. May block briefly for a reply. Panels and subjects are still
+     * alive, so work it triggers may update subjects (an overlay refreshing
+     * its state); it must not open or close UI: no modals, no navigation.
+     */
+    virtual void before_disconnect() {}
 
     /**
      * @brief Re-fetch authoritative slot/state from the printer.
@@ -220,7 +280,7 @@ class AmsBackend {
      * Several backends coexist, so a slot index alone names a position on
      * every one of them at once. A backend that registration has not stamped,
      * and a slot index outside this backend's block, both yield
-     * helix::ams::INVALID_LANE_ID, which the lane funnels drop.
+     * helix::ams::kInvalidLaneId, which the lane funnels drop.
      *
      * Public because a caller holding a backend pointer needs the same
      * answer the backend gives itself: deriving the id from anything but the
@@ -313,6 +373,61 @@ class AmsBackend {
     }
 
     /**
+     * @brief Whether linking a spool to the loaded lane makes the firmware set
+     * Moonraker's active spool itself
+     *
+     * Asked only where manages_active_spool() is true: a backend that switches
+     * the spool on a lane LOAD may never see a link edit as one, and then the
+     * app sets it for the user's explicit link of the loaded lane.
+     */
+    [[nodiscard]] virtual bool sets_active_spool_on_link() const {
+        return false;
+    }
+
+    /// A Klipper status field that says which slot is feeding now: the
+    /// object, the path inside it, and each value (spelled as
+    /// helix::feed_signal_key() spells it) with the slot it names.
+    struct FeedSlotSignal {
+        std::string object;
+        std::vector<std::string> path;
+        std::vector<std::pair<std::string, int>> value_slots;
+    };
+
+    /**
+     * @brief The status fields that say which slot feeds the toolhead now
+     *
+     * Read by whatever switches the Spoolman active spool at a lane or tool
+     * change where this backend does not (manages_active_spool() false): the
+     * HelixPrint plugin follows them with no knowledge of the backend. Empty
+     * when the backend has no such field, or when the extruder that is
+     * printing already says it (each tool its own extruder).
+     */
+    [[nodiscard]] virtual std::vector<FeedSlotSignal> feed_slot_signals() const {
+        return {};
+    }
+
+    /**
+     * @brief Whether every tool prints through one shared extruder and heater
+     *
+     * The tools are separate nozzles (separate heads to the UI), but the one
+     * heater only ever heats the mounted nozzle, so heater surfaces show one
+     * temperature that follows the mounted tool.
+     */
+    [[nodiscard]] virtual bool heads_share_heater() const {
+        return false;
+    }
+
+    /**
+     * @brief Why the nozzle heater must not be given a target now
+     *
+     * Non-empty refuses any nozzle target above 0 (e.g. no tool mounted on a
+     * shared-heater changer). Empty when heating is allowed.
+     */
+    [[nodiscard]] virtual std::string nozzle_heat_blocked_reason() const {
+        return {};
+    }
+
+    /**
      * @brief Toolhead style this backend implies when the printer database has none
      *
      * Same vocabulary as the database's toolhead_style field (e.g. "creality_k2");
@@ -328,6 +443,43 @@ class AmsBackend {
      * @return SlotInfo struct (copy, safe for caller to hold)
      */
     [[nodiscard]] virtual SlotInfo get_slot_info(int slot_index) const = 0;
+
+    /**
+     * @brief What the slot's tag reader reported for the spool now in it
+     *
+     * The tag's own values, kept while a user edit overrides them, so the
+     * editor can mark the fields that came from the tag and restore them
+     * (helix::ams::reset_to_tag). A backend with no tag reader, a slot with no
+     * reading, and an out-of-range slot all answer nullopt. Thread-safe.
+     */
+    [[nodiscard]] virtual std::optional<helix::ams::TagReading> tag_reading(int slot_index) const {
+        (void)slot_index;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Whether this backend's tag readings can name a Spoolman spool
+     *
+     * True when tag_reading() fills TagReading::spoolman_id for tags that
+     * carry one. Gates the setting that links a lane to the spool its tag
+     * names; the linking itself reads only tag_reading().
+     */
+    [[nodiscard]] virtual bool tags_name_spoolman_spools() const {
+        return false;
+    }
+
+    /**
+     * @brief Per field, whether get_slot_info(slot_index) shows its tag's value
+     *
+     * Empty whenever tag_reading() is nullopt. Thread-safe.
+     */
+    [[nodiscard]] helix::ams::TagProvenance tag_provenance(int slot_index) const {
+        const std::optional<helix::ams::TagReading> tag = tag_reading(slot_index);
+        if (!tag) {
+            return {};
+        }
+        return helix::ams::tag_provenance(*tag, get_slot_info(slot_index));
+    }
 
     /**
      * @brief Get current action/operation status
@@ -362,21 +514,39 @@ class AmsBackend {
     /**
      * @brief The firmware's DEFAULT tool -> physical head map.
      *
-     * What the printer would do with a file if nobody remapped anything. NOT the
-     * live map (AmsSystemInfo::tool_to_slot_map carries that, and it is not even
-     * uniformly available - an AFC tracks it, a U1 freezes it at 1:1 while its
-     * real map lives in print_task_config.extruder_map_table).
+     * What the printer would do with a file if nobody remapped anything at print
+     * time. A firmware that routes by a standing table the user edits on the
+     * printer (an AFC lane map, a Happy Hare TTG map, a CFS tool table) routes an
+     * unremapped print by that table, so the default answers it: a backend with
+     * a Native remap route whose printer has stated its table
+     * (firmware_reported_tool_mapping()) reports get_tool_mapping(). Every other
+     * backend is lane-per-tool: tool N owns lane N, with no upper bound, unless
+     * it overrides this with a standing table it dispatches tools by (OpenAMS
+     * groups, ACEPRO slot tool numbers).
      *
-     * The default is lane-per-tool, which is every backend except two: tool N
-     * owns lane N, with no upper bound. Override only when the hardware genuinely
-     * disagrees - a bounded-head machine (Snapmaker U1) or one that publishes an
-     * arbitrary table (FlashForge AD5X IFS).
+     * Not every live map is a default: a U1 freezes get_tool_mapping() at 1:1
+     * while its real map lives in print_task_config.extruder_map_table, and a
+     * per-print map sent before the job is gone once it ends. Override when the
+     * hardware disagrees - a bounded-head machine (Snapmaker U1) or one that
+     * publishes a table through another surface (FlashForge AD5X IFS).
      *
      * Adding a third shape must touch only the new backend. A constant in shared
      * code instead of this question is what sent every AFC tool above 3 to lane 0.
+     *
+     * @note Calls get_tool_mapping(), which takes the backend's mutex_ on most
+     *       backends: never call this with mutex_ held.
      */
-    [[nodiscard]] virtual helix::FirmwareRouting firmware_default_routing() const {
-        return helix::FirmwareRouting::identity();
+    [[nodiscard]] virtual helix::FirmwareRouting firmware_default_routing() const;
+
+    /**
+     * @brief Does the firmware pick each tool's lane itself when the print starts?
+     *
+     * Then nothing before the print knows which lane a tool prints from, so
+     * firmware_default_routing() names none (FirmwareRouting::picked_at_print())
+     * and no surface claims one. Default false.
+     */
+    [[nodiscard]] virtual bool firmware_picks_lanes_at_print() const {
+        return false;
     }
 
     /**
@@ -416,9 +586,9 @@ class AmsBackend {
     }
 
     /// Channel B: the current actionable fault, derived from backend STATUS
-    /// rather than from a console line. Consulted only by AmsErrorBridge, and
-    /// only on the rising edge into AmsAction::ERROR — a backend that never
-    /// assigns that action can override this and still never be asked.
+    /// rather than from a console line. Read through AmsState::standing_fault()
+    /// by the surfaces that raise a standing fault, and by AmsState to know
+    /// how long the fault's cause holds.
     ///
     /// Returns nullopt when there is no actionable error, or when a bespoke
     /// dialog owns the fault.
@@ -429,6 +599,20 @@ class AmsBackend {
     /// only; AD5X IFS and QIDI are channel B only.
     [[nodiscard]] virtual std::optional<helix::ErrorEvent> current_error() const {
         return std::nullopt;
+    }
+
+    /// current_error() told by @p cause: why the print paused
+    /// (print_stop_reason), or the newest recent `!!` line, empty when nothing
+    /// said. A non-empty cause is the detail, since a backend's own status text
+    /// can belong to an earlier fault. Overridden by a backend that reads more
+    /// from the cause, such as which lane faulted.
+    [[nodiscard]] virtual std::optional<helix::ErrorEvent>
+    current_error_with_cause(const std::string& cause) const {
+        auto e = current_error();
+        if (e && !cause.empty()) {
+            e->detail = cause;
+        }
+        return e;
     }
 
   protected:
@@ -602,6 +786,31 @@ class AmsBackend {
     [[nodiscard]] virtual lv_subject_t* get_operation_step_index_subject(StepOperationType op);
 
     /**
+     * @brief The operation the backend is running, when it knows which.
+     *
+     * A sidebar that did not start the operation (the AMS panel opened mid-run)
+     * otherwise guesses it from the action frames, and a load that is still
+     * heating reads the same as a swap. nullopt (default) => not known; the
+     * sidebar guesses. Main thread.
+     */
+    [[nodiscard]] virtual std::optional<StepOperationType> running_step_operation() const {
+        return std::nullopt;
+    }
+
+    /**
+     * @brief The heater a live-temp step of the current step model heats.
+     *
+     * A machine with a heater per tool heats a different one at each tool's
+     * step, and Klipper's active extruder need not be it. Empty (default) =>
+     * the active extruder. Main thread.
+     *
+     * @param step_index  Index into the model get_operation_step_model() built
+     */
+    [[nodiscard]] virtual std::string step_heater(int /*step_index*/) const {
+        return {};
+    }
+
+    /**
      * @brief Does `action` mean an operation the STEP BAR should be following?
      *
      * Drives both halves of the step bar from one definition: whether the bar is
@@ -623,20 +832,40 @@ class AmsBackend {
     }
 
     /**
-     * @brief True when load/unload MOUNT and UNMOUNT a tool instead of moving filament.
+     * @brief True when the carriage can hold no tool at all, so a current tool
+     *        of -1 means "nothing mounted" rather than "nothing loaded".
      *
-     * A hotend or toolhead changer's "load" is `SELECT_TOOL`: no filament is fed,
-     * nothing is heated by us, nothing purges. Surfaces are expected to say so -
-     * calling that button "Load" invites the reasonable reading that the tool
-     * gets picked up, heated and then actually loaded with filament, which is
-     * not what happens.
-     *
-     * NOT the same question as `is_tool_changer()`. The Snapmaker U1 is a tool
-     * changer whose load really does feed filament through the selected
-     * toolhead, so it stays false here and keeps the filament wording.
+     * A machine whose heads dock (a tool changer, the Snapmaker U1) answers
+     * true: its heads are mounted and parked, which is never a filament op.
      */
-    [[nodiscard]] bool load_mounts_tool() const {
-        return traits().load_mounts_tool;
+    [[nodiscard]] virtual bool carriage_can_be_empty() const {
+        return false;
+    }
+
+    /**
+     * @brief True when Load is a firmware feed that cannot tell an inserted strand
+     *        from a fed one.
+     *
+     * A changer whose firmware offers a feed command (see
+     * toolchanger_addon::ToolFeed) answers Load with that feed. A head that
+     * reads loaded still accepts Load there, and the firmware heats the right
+     * head itself.
+     */
+    [[nodiscard]] bool load_feeds_filament() const {
+        return traits().load_feeds_filament;
+    }
+
+    /**
+     * @brief True when load_filament() itself clears whatever lane is seated in
+     *        the target's path before feeding the target.
+     *
+     * The planner then sends Load even when needs_unload_before_load() answers
+     * true, instead of routing the swap through change_tool(). A tool change on
+     * a machine whose heads dock only mounts a head, so it cannot stand in for a
+     * lane swap there.
+     */
+    [[nodiscard]] bool load_swaps_seated_lane() const {
+        return traits().load_swaps_seated_lane;
     }
 
     /**
@@ -648,6 +877,17 @@ class AmsBackend {
      * unload. Empty means "no explanation worth showing"; surfaces omit the hint.
      */
     [[nodiscard]] virtual std::string unload_blocked_reason(int /*slot_index*/) const {
+        return {};
+    }
+
+    /**
+     * @brief Why Eject is unavailable for this lane, in one line, or empty.
+     *
+     * Same contract as unload_blocked_reason(): the refusal is a configuration the
+     * user can fix, so the lane menu states it instead of silently omitting the
+     * action. Empty means eject is available or there is nothing to say.
+     */
+    [[nodiscard]] virtual std::string eject_unavailable_reason(int /*slot_index*/) const {
         return {};
     }
 
@@ -680,6 +920,19 @@ class AmsBackend {
      */
     [[nodiscard]] virtual std::optional<bool> toolhead_filament_unaccounted() const {
         return std::nullopt;
+    }
+
+    /**
+     * @brief The question to ask before a slotless toolhead unload.
+     *
+     * Has lanes only when filament sits in the toolhead, the backend cannot name
+     * the lane it came from, and its unload command needs one. The caller asks
+     * which lane is in the head and passes it to unload_filament(), or passes
+     * kClearToolheadSlot for "Not sure" when the question offers it. No lanes
+     * means unload_filament(-1) resolves the lane itself.
+     */
+    [[nodiscard]] virtual UnloadLaneQuestion unload_lane_question() const {
+        return {};
     }
 
     // ========================================================================
@@ -840,7 +1093,8 @@ class AmsBackend {
      * onto its own loaded answer; no Load gate reads it.
      *
      * Default false: only a backend with a per-toolhead presence switch that
-     * reads independently of the load state can answer it.
+     * reads independently of the load state can answer it, or one whose unload
+     * reaches a head that is not seated (a tool changer that mounts to feed).
      */
     [[nodiscard]] virtual bool slot_filament_parked_in_toolhead(int slot_index) const {
         (void)slot_index;
@@ -899,6 +1153,56 @@ class AmsBackend {
     [[nodiscard]] virtual bool slot_has_load_sensor(int slot_index) const {
         (void)slot_index;
         return false;
+    }
+
+    /**
+     * @brief How the spool last inserted in this lane was identified
+     *
+     * A backend whose tag reader answers after the lane's presence rises
+     * reports Pending until it does, so an insert is not taken as unnamed
+     * before the reader has spoken. Default: NotRead (no reader).
+     */
+    [[nodiscard]] virtual InsertIdentity slot_insert_identity(int slot_index) const {
+        (void)slot_index;
+        return InsertIdentity::NotRead;
+    }
+
+    /**
+     * @brief The presence reading the insert watcher judges on this lane
+     *
+     * An insert is this reading's empty to present edge. nullopt means the lane
+     * cannot tell an insert. Default: the slot status, on lanes with a prep
+     * sensor. A backend whose status also moves for reasons other than a spool
+     * going in (a tool parking, firmware metadata) answers from the sensor itself.
+     */
+    [[nodiscard]] virtual std::optional<bool> slot_insert_presence(int slot_index) const {
+        if (!slot_has_prep_sensor(slot_index))
+            return std::nullopt;
+        return slot_status_reports_filament(get_slot_info(slot_index).status);
+    }
+
+    /**
+     * @brief The lane whose spool is this lane's, when the two lanes share one
+     *
+     * A lane fed from storage upstream (a bay routed to a toolhead lane) shows
+     * another lane's spool: the spool's home is the bay, and the fed lane is
+     * the same filament's path onward. nullopt when the lane's spool is its
+     * own, which is every lane on a backend that does not answer this.
+     */
+    [[nodiscard]] virtual std::optional<int> upstream_slot(int slot_index) const {
+        (void)slot_index;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief The number a spool badge shows for this lane
+     *
+     * The base numbers lanes 1-based in global order. A backend whose lanes
+     * share spools resolves through upstream_slot(), so a fed lane and the
+     * storage lane feeding it wear one number and each spool counts once.
+     */
+    [[nodiscard]] virtual int spool_display_number(int slot_index) const {
+        return slot_index + 1;
     }
 
     // ========================================================================
@@ -971,31 +1275,6 @@ class AmsBackend {
     }
 
     /**
-     * @brief Does changing to slot @p slot_index's mapped tool COMPLETE its load?
-     *
-     * plan_load()'s swap arm turns "load slot N" into `change_tool(N's mapped
-     * tool)` and stops there, on the strength of that being the whole operation:
-     * ACE's change_tool() is literally `return load_filament(...)`, AFC's is
-     * `CHANGE_TOOL LANE={n}`, QIDI's load prepends its own unload. Nothing
-     * chains a second command, so a backend where the tool change is only HALF
-     * the job silently performs half.
-     *
-     * multiACE is that backend. Its ACE bays report mapped_tool = the head they
-     * feed, so tapping Load on a bay planned `T3` -- which mounts head 3, moves
-     * the carriage, and feeds nothing. The bay still has to be named:
-     * `ACE_LOAD_HEAD HEAD=h ACE=a SLOT=s`.
-     *
-     * Per-slot rather than per-backend because one backend can be both: on
-     * multiACE the U1's own heads keep their filament at the head, so a tool
-     * change really is the whole load there, while a bay four slots later is
-     * not. Default true -- the behaviour every backend had before this existed.
-     */
-    [[nodiscard]] virtual bool change_tool_completes_load(int slot_index) const {
-        (void)slot_index;
-        return true;
-    }
-
-    /**
      * @brief Whether the UI should redirect to the AMS panel for slot selection
      *        before loading filament.
      *
@@ -1036,9 +1315,9 @@ class AmsBackend {
      *     carriage and feeds nothing. load_filament() names that as its first
      *     wrong answer; AUTO_FEEDING already targets any extruder directly.
      *   - Toolchanger: the swap arm dispatches change_tool(mapped_tool), but
-     *     change_tool() validates its argument as a SLOT and emits
-     *     `SELECT_TOOL T={n}` precisely to bypass ASSIGN_TOOL remapping — so a
-     *     remapped tool would mount the wrong physical toolhead.
+     *     change_tool() validates its argument as a SLOT and names that slot's
+     *     physical tool, bypassing ASSIGN_TOOL remapping — so a remapped tool
+     *     number would mount the wrong physical toolhead.
      * This is the PARALLEL-appropriate rule deferred in #1199.
      *
      * @param info        Backend system info snapshot.
@@ -1119,7 +1398,7 @@ class AmsBackend {
      * @brief Load filament from specified slot (async)
      *
      * Initiates filament load from the specified slot to the extruder.
-     * Results delivered via EVENT_LOAD_COMPLETE or EVENT_ERROR.
+     * Results delivered via kEventLoadComplete or kEventError.
      *
      * Requires:
      * - System not busy with another operation
@@ -1135,7 +1414,7 @@ class AmsBackend {
      * @brief Unload filament from a specific slot (async)
      *
      * Initiates filament unload from extruder back to its slot.
-     * Results delivered via EVENT_UNLOAD_COMPLETE or EVENT_ERROR.
+     * Results delivered via kEventUnloadComplete or kEventError.
      *
      * @param slot_index Slot to unload. MUST be explicit — there is no default.
      *        Callers that mean "whatever is active" should call
@@ -1157,15 +1436,55 @@ class AmsBackend {
     // Batch Filament Operations (parallel-toolhead printers)
     // ========================================================================
 
-    /**
-     * @brief Whether this backend can load/unload several slots as one operation
-     *
-     * Gates the UI affordance only. A backend that answers true must implement
-     * load_filament_batch() / unload_filament_batch().
-     */
-    [[nodiscard]] bool supports_batch_filament_ops() const {
-        return traits().supports_batch_filament_ops;
+    // ========================================================================
+    // Heads (backend-neutral filament questions)
+    //
+    // A head is a nozzle filament is fed into. None of these read the current
+    // tool or slot: which head is mounted or active is never an input to a
+    // filament op.
+    // ========================================================================
+
+    /// How many heads filament can be fed into. One on a shared toolhead.
+    [[nodiscard]] virtual int filament_head_count() const {
+        return 1;
     }
+
+    /// The head @p slot feeds, or nullopt when it feeds none (a negative slot,
+    /// or a source not routed to any head). @p slot is one the caller read
+    /// from this backend; the one-head default does not re-read the slot count.
+    [[nodiscard]] virtual std::optional<int> head_for_slot(int slot) const {
+        if (slot < 0) {
+            return std::nullopt;
+        }
+        return 0;
+    }
+
+    /// Whether @p head's load and unload are automatic, manual or unavailable,
+    /// with the reason for anything but automatic.
+    [[nodiscard]] virtual HeadFilamentOps head_filament_ops(int head) const;
+
+    /// Whether @p head holds filament that an unload would act on. nullopt when
+    /// nothing on this machine can tell. Never "is the head mounted".
+    [[nodiscard]] virtual std::optional<bool> head_has_filament(int head) const {
+        if (head != 0) {
+            return std::nullopt;
+        }
+        return is_filament_loaded();
+    }
+
+    /// How many heads one load or unload may name. A backend that answers more
+    /// than one implements load_filament_batch() / unload_filament_batch(),
+    /// which run them together.
+    [[nodiscard]] virtual int max_heads_per_filament_op() const {
+        return 1;
+    }
+
+    /// The slot @p head is fed from: its Assigned Tool slot, the lane whose
+    /// mapped tool is @p head and which feeds that head. nullopt when no slot
+    /// is assigned to it. @p info is the caller's get_system_info() reading, so
+    /// a caller that already holds one costs the backend no second read.
+    [[nodiscard]] virtual std::optional<int> head_source_slot(int head,
+                                                              const AmsSystemInfo& info) const;
 
     /**
      * @brief Whether a batch this process dispatched is still unverified
@@ -1222,6 +1541,7 @@ class AmsBackend {
         SensorDisabled,    ///< load needs the head's motion sensor enabled
         Busy,              ///< transient or unrecognised channel state
         Error,             ///< the feeder reports a fault
+        NotSupported,      ///< the backend refuses this operation on this lane
     };
 
     /**
@@ -1280,12 +1600,55 @@ class AmsBackend {
      *
      * Complete tool change sequence: unload current, load new.
      * Equivalent to sending T{tool_number} command.
-     * Results delivered via EVENT_TOOL_CHANGED or EVENT_ERROR.
+     * Results delivered via kEventToolChanged or kEventError.
      *
      * @param tool_number Tool to change to (0-based)
      * @return AmsError indicating if operation was started successfully
      */
     virtual AmsError change_tool(int tool_number) = 0;
+
+    /**
+     * @brief Put the tool on the carriage back in its dock (async)
+     *
+     * Leaves the carriage empty. Only a machine with docked toolheads can do
+     * this: a Snapmaker U1 sends PARK_EXTRUDER, klipper-toolchanger
+     * UNSELECT_TOOL. Results arrive as a state change, like unload_filament().
+     *
+     * @return not_loaded() when nothing is mounted; not_supported() by default
+     */
+    virtual AmsError park_active_tool() {
+        return AmsErrorHelper::not_supported("Tool park");
+    }
+
+    /// Whether park_active_tool() can act on this printer.
+    [[nodiscard]] virtual bool supports_tool_park() const {
+        return false;
+    }
+
+    /**
+     * @brief Open or close the frame-side filament feeder (async)
+     *
+     * Only a machine whose filament is held by a gripper on the frame, not by
+     * the travelling head, has one. Opening releases the filament so it can be
+     * pulled by hand; closing grips it again. The reported state follows in a
+     * later status frame, through feeder_open().
+     *
+     * @return not_supported() by default
+     */
+    virtual AmsError set_feeder_open(bool open) {
+        (void)open;
+        return AmsErrorHelper::not_supported("Feeder");
+    }
+
+    /// Whether set_feeder_open() can act on this printer.
+    [[nodiscard]] virtual bool supports_feeder_control() const {
+        return false;
+    }
+
+    /// Whether the feeder last reported itself open (filament released).
+    [[nodiscard]] virtual bool feeder_open() const {
+        return false;
+    }
 
     // ========================================================================
     // Recovery Operations
@@ -1331,6 +1694,34 @@ class AmsBackend {
      */
     [[nodiscard]] bool reset_moves_filament() const {
         return traits().reset_moves_filament;
+    }
+
+    /**
+     * @brief Whether the sidebar's Reset button means anything here.
+     *
+     * False where the backend has no state for a reset to clear that its own
+     * recovery does not already cover: a tool changer, whose reset re-runs its
+     * initialisation, and the Snapmaker U1, whose reset is a no-op.
+     */
+    [[nodiscard]] bool supports_reset() const {
+        return traits().supports_reset;
+    }
+
+    /**
+     * @brief Whether reset() has a command to send on this machine.
+     *
+     * A runtime answer, unlike supports_reset(): one backend can drive machines
+     * where the command exists and machines where it does not. The device
+     * operations overlay's Home button follows it.
+     */
+    [[nodiscard]] virtual bool reset_available() const {
+        return true;
+    }
+
+    /// Whether recover() has a command to send on this machine. The device
+    /// operations overlay's Recover button follows it.
+    [[nodiscard]] virtual bool recover_available() const {
+        return true;
     }
 
     /**
@@ -1607,235 +1998,6 @@ class AmsBackend {
     }
 
     /**
-     * @brief Which unit owns this slot's filament IDENTITY, when not this one.
-     *
-     * On multiACE a U1 head is fed from an ACE bay, so the head's material,
-     * colour and Spoolman link are the ACE's to state. Editing them on the head
-     * would write `print_task_config` and be overwritten the moment the ACE
-     * reports its inventory again — two sources of truth for one spool. The
-     * slot menu uses this to drop its edit actions and offer a route to the
-     * owning unit instead.
-     *
-     * Identity only. Loading and unloading still act on the head and stay
-     * available; this says who describes the filament, not who moves it.
-     *
-     * @param slot_index Global slot index.
-     * @return Owning unit index, or nullopt when the slot describes itself
-     *         (every backend except multiACE, always).
-     */
-    [[nodiscard]] virtual std::optional<int> slot_identity_owner_unit(int slot_index) const {
-        (void)slot_index;
-        return std::nullopt;
-    }
-
-    /**
-     * @brief Global indices of the slots that hold a spool of their OWN, in order.
-     *
-     * A slot fed from another unit is not a spool position — it is a view of one.
-     * On multiACE, the U1's ACE-fed head and the ACE bay behind it are a single
-     * physical spool, so counting both double-counts it: a 4-head U1 with one
-     * 4-bay ACE has 7 spool positions, not 8.
-     *
-     * This is what user-facing COUNTS and per-spool rows should iterate.
-     * `total_slots` remains the indexing bound and is unchanged — every slot
-     * here is still addressable, still loadable, still unloadable.
-     *
-     * Derived from slot_identity_owner_unit(), so a backend that answers that
-     * question needs nothing further.
-     */
-    [[nodiscard]] std::vector<int> owned_spool_slots() const {
-        return owned_spool_slots(get_system_info());
-    }
-
-    /// Overload for callers that already hold the system info.
-    ///
-    /// get_system_info() returns BY VALUE under the backend mutex — every unit,
-    /// every SlotInfo, every std::string in them. These helpers are called per
-    /// slot and per frame, so re-fetching it inside each one was the dominant
-    /// cost of drawing a badge. Callers with `info` in hand should pass it.
-    [[nodiscard]] std::vector<int> owned_spool_slots(const AmsSystemInfo& info) const {
-        std::vector<int> out;
-        out.reserve(static_cast<size_t>(info.total_slots));
-        for (int i = 0; i < info.total_slots; ++i) {
-            if (!slot_identity_owner_unit(i).has_value()) {
-                out.push_back(i);
-            }
-        }
-        return out;
-    }
-
-    /**
-     * @brief Which slot holds the spool that @p slot_index is showing.
-     *
-     * The companion to slot_identity_owner_unit(): that says WHICH UNIT
-     * describes the filament, this says which slot of it. An ACE-fed head and
-     * the ACE bay behind it are one spool, so the head resolves to the bay.
-     *
-     * @param slot_index Global slot index.
-     * @return Global index of the owning slot, or nullopt when the slot holds
-     *         its own spool (every backend except multiACE, always).
-     */
-    [[nodiscard]] virtual std::optional<int> slot_identity_owner_slot(int slot_index) const {
-        (void)slot_index;
-        return std::nullopt;
-    }
-
-    /**
-     * @brief The 1-based number a slot should be LABELLED with.
-     *
-     * Not the same as the global index, and deliberately so. Global indices are
-     * the addressing key and must stay dense over every addressable slot; the
-     * label counts SPOOLS. On a U1 with one ACE those disagree: the U1's four
-     * heads take global 0-3, so the ACE's bays start at global 4 and used to be
-     * labelled 5-8 — eight numbers for seven spools, because the ACE-fed head
-     * and the bay feeding it are the same spool counted twice.
-     *
-     * A slot that only views another slot's spool resolves to it, so the head
-     * and its bay share one number instead of consuming two.
-     *
-     * Backends whose slots all own their spools are unaffected: owned_spool_slots()
-     * is then every slot in order, and this returns slot_index + 1 exactly.
-     */
-    [[nodiscard]] int spool_display_number(int slot_index) const {
-        return spool_number_in(owned_spool_slots(), slot_index);
-    }
-
-    /// Overload for callers that already hold the system info — see
-    /// owned_spool_slots(const AmsSystemInfo&).
-    [[nodiscard]] int spool_display_number(int slot_index, const AmsSystemInfo& info) const {
-        return spool_number_in(owned_spool_slots(info), slot_index);
-    }
-
-    /// The badge number for @p slot_index given a PRE-BUILT owned-slot list.
-    ///
-    /// Split out so spool_display_label() can build that list once instead of
-    /// once per candidate slot — it used to call spool_display_number() inside
-    /// its loop, and each call deep-copied the whole AmsSystemInfo and took the
-    /// backend mutex once per slot.
-    [[nodiscard]] int spool_number_in(const std::vector<int>& owned, int slot_index) const {
-        const int target = slot_identity_owner_slot(slot_index).value_or(slot_index);
-        for (size_t i = 0; i < owned.size(); ++i) {
-            if (owned[i] == target) {
-                return static_cast<int>(i) + 1;
-            }
-        }
-        // Not a spool position and nothing owns it — fall back to the raw index
-        // rather than showing nothing.
-        return slot_index + 1;
-    }
-
-    /**
-     * @brief What a slot's badge should READ — a number, or a range.
-     *
-     * A slot holding its own spool is simply its number ("3").
-     *
-     * A slot that only views another unit's spools is not one spool but a
-     * position any of them can reach, so it reads as the range ("4-7"). On a U1
-     * in head mode all four ACE bays feed the one ACE-fed head; naming only the
-     * seated bay would be a number that changes under the user every time the
-     * ACE swaps, and would hide the other three entirely. In multi mode exactly
-     * one bay feeds each head, so the range collapses back to a single number
-     * with no special-casing.
-     *
-     * Unchanged for backends whose slots all own their spools.
-     */
-    [[nodiscard]] std::string spool_display_label(int slot_index) const {
-        // ONE system fetch and ONE owned-slot build for the whole function. This
-        // used to fetch per call and again per loop iteration — roughly five deep
-        // copies of AmsSystemInfo and fifty mutex acquisitions to render one badge.
-        const AmsSystemInfo info = get_system_info();
-        const std::vector<int> owned = owned_spool_slots(info);
-
-        const auto owner_unit = slot_identity_owner_unit(slot_index);
-        if (!owner_unit.has_value()) {
-            return std::to_string(spool_number_in(owned, slot_index));
-        }
-        if (*owner_unit < 0 || *owner_unit >= static_cast<int>(info.units.size())) {
-            return std::to_string(spool_number_in(owned, slot_index));
-        }
-        // Which of the owner's slots can feed this position: the ones mapped to
-        // the same tool.
-        const int tool = get_slot_info(slot_index).mapped_tool;
-        const auto& unit = info.units[static_cast<size_t>(*owner_unit)];
-        int lo = -1;
-        int hi = -1;
-        for (int s = 0; s < static_cast<int>(unit.slots.size()); ++s) {
-            if (unit.slots[static_cast<size_t>(s)].mapped_tool != tool) {
-                continue;
-            }
-            const int n = spool_number_in(owned, unit.first_slot_global_index + s);
-            if (lo < 0 || n < lo) {
-                lo = n;
-            }
-            if (hi < 0 || n > hi) {
-                hi = n;
-            }
-        }
-        if (lo < 0) {
-            // Owned by a unit that maps none of its slots here — say what we can.
-            return std::to_string(spool_number_in(owned, slot_index));
-        }
-        if (lo == hi) {
-            return std::to_string(lo);
-        }
-        return std::to_string(lo) + "-" + std::to_string(hi);
-    }
-
-    /**
-     * @brief How many slots on @p unit_index hold a spool of their own.
-     * @see owned_spool_slots()
-     */
-    [[nodiscard]] int unit_spool_slot_count(int unit_index) const {
-        return unit_spool_slot_count(unit_index, get_system_info());
-    }
-
-    /// Overload for callers that already hold the system info — the overview
-    /// builds one card per unit and had been re-fetching for each.
-    [[nodiscard]] int unit_spool_slot_count(int unit_index, const AmsSystemInfo& info) const {
-        if (unit_index < 0 || unit_index >= static_cast<int>(info.units.size())) {
-            return 0;
-        }
-        const auto& unit = info.units[unit_index];
-        int n = 0;
-        for (int s = 0; s < unit.slot_count; ++s) {
-            if (!slot_identity_owner_unit(unit.first_slot_global_index + s).has_value()) {
-                ++n;
-            }
-        }
-        return n;
-    }
-
-    /**
-     * @brief Whether the backend can dock the mounted toolhead without unloading.
-     * @return true if park_toolhead() is implemented (toolchangers only).
-     */
-    [[nodiscard]] bool supports_toolhead_park() const {
-        return traits().supports_toolhead_park;
-    }
-
-    /**
-     * @brief Return the mounted toolhead to its dock, leaving filament alone.
-     *
-     * Parking is a carriage operation, not a filament one: on a toolchanger a
-     * head is routinely docked with filament still threaded to its nozzle, and
-     * the next pick-up finds it exactly as it was. So this must NOT unload —
-     * the two are separate actions with separate menu entries.
-     *
-     * Only meaningful while a head is actually mounted; with an empty carriage
-     * there is nothing to dock. Callers gate on MountState/mounted_tool.
-     *
-     * Gated like every other toolhead-motion op: AmsSubscriptionBackend makes
-     * this `final` and routes it through run_filament_op(), so an implementer
-     * writes only the protected do_park_toolhead() hook and cannot forget the
-     * print refusal or the single-op-in-flight claim.
-     *
-     * @return AmsError indicating success or failure.
-     */
-    virtual AmsError park_toolhead() {
-        return AmsErrorHelper::not_supported("Toolhead park");
-    }
-
-    /**
      * @brief Whether the backend can position the selector at a gate without loading.
      * @return true if select_gate() is implemented (selector-based systems only).
      */
@@ -1935,6 +2097,29 @@ class AmsBackend {
      * @return AmsError indicating if cancellation was accepted
      */
     virtual AmsError cancel() = 0;
+
+    /**
+     * @brief Klipper came back ready after a restart, which ended every
+     *        firmware-side filament operation
+     *
+     * Drops a busy action (ams_action_is_busy()) back to IDLE locally, along
+     * with any per-operation tracking the backend keeps, so tool changes and
+     * filament ops are accepted again. Sends no G-code and reports no load or
+     * unload outcome; ERROR and PAUSED stay, since those wait on the user.
+     * Main thread, from AmsState's klippy_state observer. Default: nothing to end.
+     */
+    virtual void on_klipper_restarted() {}
+
+    /**
+     * @brief The Moonraker connection dropped
+     *
+     * Nothing sent before the drop will be answered, and gcode cannot reach
+     * the printer until the reconnect. A backend that sequences an operation
+     * itself ends it here rather than waiting on acks. Main thread, from
+     * AmsState's connection observer, on the edge out of CONNECTED. Default:
+     * nothing to end.
+     */
+    virtual void on_connection_lost() {}
 
     /**
      * @brief Whether cancel() can reach what is running now
@@ -2485,6 +2670,26 @@ class AmsBackend {
     }
 
     /**
+     * @brief Start drying that also ends once the box reaches a humidity target
+     *
+     * The cycle runs at most @p duration_min and ends sooner once the box's relative
+     * humidity reads at or below @p humidity_pct. Only a backend whose
+     * get_dryer_info(unit).supports_humidity_target is true implements this; callers
+     * with no target use start_drying(), which leaves any target to the dryer's own default.
+     *
+     * @param humidity_pct Target relative humidity, % (positive)
+     */
+    virtual AmsError start_drying_to_humidity(float temp_c, int duration_min, float humidity_pct,
+                                              int fan_pct = -1, int unit = 0) {
+        (void)temp_c;
+        (void)duration_min;
+        (void)humidity_pct;
+        (void)fan_pct;
+        (void)unit;
+        return AmsErrorHelper::not_supported("Dryer humidity target");
+    }
+
+    /**
      * @brief Stop drying operation
      *
      * Stops any active drying and turns off heater/fan.
@@ -2495,6 +2700,24 @@ class AmsBackend {
         (void)unit;
         return AmsErrorHelper::not_supported("Dryer");
     }
+
+    /**
+     * @brief Start drying as @p request describes
+     *
+     * The one entry point a surface needs whatever the dryer can do. With no gates and
+     * no rotation it is exactly start_drying(), or start_drying_to_humidity() when a
+     * target is set, so a backend overrides it only to take a gate selection
+     * (DryerInfo::supports_gate_selection) or spool rotation (supports_rotation).
+     */
+    virtual AmsError start_drying_request(const DryingRequest& request);
+
+    /**
+     * @brief Stop drying on @p gates only, or everything on @p unit when empty
+     *
+     * Empty @p gates is exactly stop_drying(). Gates need
+     * DryerInfo::supports_gate_selection; the rest of the cycle keeps running.
+     */
+    virtual AmsError stop_drying_gates(int unit, const std::vector<int>& gates);
 
     /**
      * @brief Update drying parameters while running
@@ -2529,41 +2752,6 @@ class AmsBackend {
         return get_default_drying_presets();
     }
 
-    /**
-     * @brief Get humidity-controlled ("auto") drying state for a unit
-     *
-     * A dryer is not necessarily an auto-dryer: this is a separate capability
-     * from get_dryer_info() and a backend may support one without the other.
-     * Check AutoDryInfo::supported before showing any auto-dry UI.
-     *
-     * @param unit AMS unit index (0-based)
-     * @return AutoDryInfo struct (supported=false if the unit has no auto-dry)
-     */
-    [[nodiscard]] virtual AutoDryInfo get_auto_dry_info(int unit = 0) const {
-        (void)unit;
-        return AutoDryInfo{};
-    }
-
-    /**
-     * @brief Arm or disarm humidity-controlled drying
-     *
-     * Arming does not start a cycle — it hands the dryer to the humidity rule,
-     * which starts one when the reading crosses AutoDryInfo::rh_start_pct.
-     * Backends are expected to persist the setting across reboots.
-     *
-     * Refuse rather than send when AutoDryInfo::can_enable() is false; a
-     * follower with no master is a state the firmware rejects anyway.
-     *
-     * @param enabled true to arm the rule, false to disarm it
-     * @param unit AMS unit index (0-based)
-     * @return AmsError with SUCCESS result on success, or error with reason
-     */
-    virtual AmsError set_auto_dry_enabled(bool enabled, int unit = 0) {
-        (void)enabled;
-        (void)unit;
-        return AmsErrorHelper::not_supported("Auto-dry");
-    }
-
     // ========================================================================
     // Endless Spool Control
     // ========================================================================
@@ -2588,7 +2776,7 @@ class AmsBackend {
      *
      * Groups, not per-slot successors - see helix::printer::EndlessSpoolConfig.
      * Project with helix::printer::endless_spool_backup_edges() /
-     * endless_spool_backup_for() when a renderer needs single arrows.
+     * endless_spool_backup_for() when a consumer needs one backup per slot.
      *
      * Backends whose mapping lives in a SlotRegistry build this in one line:
      * lock `mutex_`, then
@@ -2623,6 +2811,18 @@ class AmsBackend {
      * @param backup_slot Backup slot, or -1 to clear.
      */
     AmsError set_endless_spool_backup(int slot_index, int backup_slot);
+
+    /**
+     * @brief Switch Endless Spool on or off.
+     *
+     * **Deliberately NOT virtual**, like set_endless_spool_backup(): the
+     * refusals live here, and backends supply the command through
+     * apply_endless_spool_enabled(). Rejects when the feature is unavailable or
+     * not EndlessSpoolCapabilities::switchable.
+     *
+     * @note Holds no lock.
+     */
+    AmsError set_endless_spool_enabled(bool enabled);
 
     /**
      * @brief May @p backup_slot stand in for @p slot_index?
@@ -2686,6 +2886,19 @@ class AmsBackend {
     }
 
     /**
+     * @brief Command-only hook behind set_endless_spool_enabled().
+     *
+     * Reached only after the base accepted the request, for a backend that
+     * reports EndlessSpoolCapabilities::switchable.
+     *
+     * @note Called with NO backend lock held.
+     */
+    virtual AmsError apply_endless_spool_enabled(bool enabled) {
+        (void)enabled;
+        return AmsErrorHelper::not_supported("Endless Spool");
+    }
+
+    /**
      * @brief How many slots the endless-spool relation spans.
      *
      * Drives the base's range validation and reset loop. Default is
@@ -2740,6 +2953,54 @@ class AmsBackend {
     }
 
     /**
+     * @brief Does the firmware route each file tool to its own slot by default?
+     *
+     * When last_print_tool_mapping() is not known, a reprint has no routing to
+     * replay. A backend answering true runs every tool the pre-print send leaves
+     * out at the slot of the same number, so the identity map for the file's
+     * tools states that default rather than guessing one; a reprint sends it to
+     * overwrite any map the printer still holds for its next print. A backend
+     * whose jobs carry their own crossover (Snapmaker U1) answers false: there
+     * an identity map written for a reprint is a confident wrong answer, so an
+     * unknown routing writes no map. What such a reprint may still send is
+     * print_routing_resets_to_identity()'s question.
+     *
+     * Default false.
+     */
+    [[nodiscard]] virtual bool default_print_routing_is_identity() const {
+        return false;
+    }
+
+    /**
+     * @brief Does the firmware return its routing to identity when each print ends?
+     *
+     * Then a print whose start writes no map runs file tool n at slot n, so a
+     * reprint with an unknown routing can still tell the firmware which slots
+     * the file uses (build_unrouted_preprint_gcode()) without writing a map.
+     * Without it, that reprint sends only the routing-free part of the
+     * pre-print step.
+     *
+     * Default false.
+     */
+    [[nodiscard]] virtual bool print_routing_resets_to_identity() const {
+        return false;
+    }
+
+    /**
+     * @brief The pre-print step for a reprint whose routing is unknown.
+     *
+     * Asked only of a backend answering print_routing_resets_to_identity(): the
+     * slots @p tools_used run at under the firmware's default routing, and no
+     * map. A backend that cannot vouch for that default right now answers the
+     * routing-free part instead. Default: the routing-free part.
+     */
+    [[nodiscard]] virtual std::string
+    build_unrouted_preprint_gcode(const std::set<int>& tools_used) const {
+        (void)tools_used;
+        return build_preprint_gcode({}, {});
+    }
+
+    /**
      * @brief Does this backend echo its tool mapping back from the printer?
      *
      * get_tool_mapping() is written from two directions — a backend updates it
@@ -2769,6 +3030,15 @@ class AmsBackend {
     [[nodiscard]] virtual uint64_t firmware_tool_mapping_generation() const {
         return 0;
     }
+
+    /**
+     * @brief Has the printer itself stated this backend's tool table?
+     *
+     * True once an echoing backend has parsed at least one firmware-sourced
+     * table. Before that, get_tool_mapping() holds only defaults and our own
+     * optimistic writes, which say nothing about what the printer routes by.
+     */
+    [[nodiscard]] bool firmware_reported_tool_mapping() const;
 
     // ========================================================================
     // Device-Specific Actions
@@ -2834,6 +3104,78 @@ class AmsBackend {
         (void)action_id;
         (void)value;
         return AmsErrorHelper::not_supported("Device actions");
+    }
+
+    /// Called once with the outcome of a tracked device action, on the main thread.
+    using DeviceActionDone = std::function<void(const AmsError& result)>;
+
+    /**
+     * @brief Execute a device action and report when it ends
+     *
+     * For an action that runs long on the printer (a calibration, a tool cycle):
+     * the returned AmsError says whether it was sent, @p on_done how it ended.
+     * @p on_done is not called when the send itself is refused.
+     *
+     * @param action_id The action ID from get_device_actions()
+     * @param value Optional value for toggles/sliders/dropdowns
+     * @param on_done Called once with the result, on the main thread
+     * @return AmsError indicating whether the action was sent
+     */
+    virtual AmsError run_device_action(const std::string& action_id, const std::any& value,
+                                       DeviceActionDone on_done) {
+        (void)action_id;
+        (void)value;
+        (void)on_done;
+        return AmsErrorHelper::not_supported("Device actions");
+    }
+
+    /// A run_device_action() has been sent and has not reported its end. While
+    /// it holds, filament ops and other machine-moving actions are refused.
+    [[nodiscard]] virtual bool device_action_running() const {
+        return false;
+    }
+
+    /// A question the UI asks after a slot edit commits, for printer state the
+    /// edit implies but did not write. Strings are translated.
+    struct EditFollowUp {
+        std::string title;
+        std::string message;
+        std::string confirm_label;
+    };
+
+    /**
+     * @brief What to offer after a slot edit, if anything
+     *
+     * @param slot_index The edited slot
+     * @param before The slot as it was before the edit
+     * @param after The slot as committed
+     * @return The question to ask, or nullopt for none
+     */
+    [[nodiscard]] virtual std::optional<EditFollowUp>
+    edit_follow_up(int slot_index, const SlotInfo& before, const SlotInfo& after) const {
+        (void)slot_index;
+        (void)before;
+        (void)after;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Apply the follow-up edit_follow_up() offered, once the user agrees
+     *
+     * Re-asks the offer's question first: the printer may have moved on while
+     * the dialog was up.
+     *
+     * @param slot_index The edited slot
+     * @param before The slot as it was before the edit
+     * @param after The slot as committed
+     * @return AmsError indicating success/failure
+     */
+    virtual AmsError run_edit_follow_up(int slot_index, const SlotInfo& before,
+                                        const SlotInfo& after) {
+        (void)slot_index;
+        (void)before;
+        (void)after;
+        return AmsErrorHelper::not_supported("Edit follow-up");
     }
 
     // ========================================================================
@@ -2947,6 +3289,48 @@ class AmsBackend {
     }
 
     /**
+     * @brief Whether this backend surfaces its own runout fault, and so owns the
+     *        runout surface for the printer it is on.
+     *
+     * One rule for both channels of the error architecture
+     * (docs/devel/FILAMENT_MANAGEMENT.md, "Two error channels"): exactly one
+     * surface per printer. A backend that raises its own runout event through
+     * classify_error() or current_error() already tells the user what happened,
+     * with recovery buttons derived from live hardware state, so the generic
+     * sensor-driven runout modal stands down for it. A backend that raises no
+     * runout fault owns nothing: suppressing the generic modal for it would leave
+     * the user with no runout notification at all, so it stays false.
+     *
+     * @return true if the generic runout modal must stand down for this backend
+     */
+    [[nodiscard]] bool raises_runout_fault() const {
+        return traits().raises_runout_fault;
+    }
+
+    /**
+     * @brief Whether the backend's runout fault is already on screen WHILE A JOB
+     *        HOLDS THE MACHINE.
+     *
+     * The phase-aware sibling of raises_runout_fault(): when true, the sensor-edge
+     * runout toast only restates the backend's own prompt and stands down. A backend
+     * whose fault arrives later than the sensor edge (AD5X IFS) leaves this false,
+     * because quieting the toast there would open a silent window.
+     */
+    [[nodiscard]] bool raises_runout_fault_during_job() const {
+        return traits().raises_runout_fault_during_job;
+    }
+
+    /**
+     * @brief Whether the firmware unloads filament back to the hub between prints.
+     *
+     * The toolhead sensor going empty while the printer is idle is then firmware
+     * behaviour rather than a user-facing event, and its removal toast is not shown.
+     */
+    [[nodiscard]] bool unloads_to_hub_between_prints() const {
+        return traits().unloads_to_hub_between_prints;
+    }
+
+    /**
      * @brief Whether the reported bypass position is virtual rather than physical.
      *
      * True on a backend whose firmware publishes a bypass sensor whether or not
@@ -2960,35 +3344,6 @@ class AmsBackend {
      */
     [[nodiscard]] bool bypass_is_virtual() const {
         return traits().bypass_is_virtual;
-    }
-
-    /**
-     * @brief Whether the user decides, from this screen, whether the toolhead
-     *        unloads after a print.
-     *
-     * Drives the unload-after-print toggle row in the device-operations
-     * overlay. Backends whose firmware fixes the behavior one way (always
-     * unloads, or never does) have nothing for the toggle to decide, so the
-     * row stays hidden there; the setting the toggle writes is what the
-     * backend's end-of-print macros consult.
-     *
-     * @return true if the post-print toolhead unload is a user setting here
-     */
-    [[nodiscard]] bool supports_configurable_unload_after_print() const {
-        return traits().supports_configurable_unload_after_print;
-    }
-
-    /**
-     * @brief Whether the backend exposes user-configurable eject parameters
-     *        (distance + velocity) that the UI should surface as sliders.
-     *
-     * QIDI Box lets the user tune the per-lane eject distance and velocity; the
-     * device-operations overlay renders the slider rows only for such backends.
-     *
-     * @return true if eject distance/velocity are configurable for this backend
-     */
-    [[nodiscard]] bool supports_configurable_eject_params() const {
-        return traits().supports_configurable_eject_params;
     }
 
     /**
@@ -3088,6 +3443,21 @@ class AmsBackend {
     }
 
     /**
+     * @brief Whether the machine has no automatic filament unload.
+     *
+     * True when removing filament is the user's job: they cut it at the head and
+     * pull it out by hand, and nothing the backend can send changes that. A UI
+     * surface whose intent is "take the filament out" asks this first and, when
+     * true, tells the user instead of heating or dispatching. That is distinct
+     * from unload_filament(), which may still mean something else on the same
+     * backend (a tool changer's unload is an unmount, and stays available as one).
+     * A discovery-dependent answer, so a virtual rather than a BackendTraits field.
+     */
+    [[nodiscard]] virtual bool unload_is_manual() const {
+        return false;
+    }
+
+    /**
      * @brief Whether the backend assigns one spool per tool (tool-changer model).
      *
      * Drives the auto-assign-active-spool-to-tool path and the runout-guidance
@@ -3100,20 +3470,6 @@ class AmsBackend {
      */
     [[nodiscard]] virtual bool supports_per_tool_spool_assignment() const {
         return is_tool_changer(get_type());
-    }
-
-    /**
-     * @brief Klipper object / expected-hardware name for this backend.
-     *
-     * Used when recording expected hardware during wizard setup so the hardware
-     * validator can warn if the AMS disappears. Matches the firmware object name
-     * (e.g. "AFC", "mmu", "toolchanger"). Empty string => not a tracked Klipper
-     * object (e.g. REST-based systems). Default empty; backends override.
-     *
-     * @return Klipper object name, or "" if none
-     */
-    [[nodiscard]] virtual const char* get_klipper_object_name() const {
-        return "";
     }
 
 #ifdef HELIX_ENABLE_MOCKS
@@ -3173,6 +3529,52 @@ class AmsBackend {
     }
 
     /**
+     * @brief The user's standing per-print choices, for a print already running.
+     *
+     * A print some other client started (Mainsail, a slicer, Moonraker's job
+     * queue) skips this screen's pre-print step. This is the part of that step
+     * that still applies once the print is running, rendered by the same
+     * functions build_preprint_gcode() uses: no routing (it is refused or too
+     * late mid-print), only choices that act later in the print. It is sent
+     * right after such a start, by the HelixPrint plugin or by this screen.
+     * Default "" (nothing to send).
+     *
+     * @return Newline-joined gcode (no trailing newline), or "" when none
+     */
+    [[nodiscard]] virtual std::string standing_print_gcode() const {
+        return "";
+    }
+
+    /**
+     * @brief This screen is about to start a print on a pre-print-send backend.
+     *
+     * Called by every start that runs the pre-print step, as the start is
+     * dispatched, so a backend holding per-print state can begin it for the
+     * print that follows. Main thread. Default: no-op.
+     */
+    virtual void note_print_start_from_here() {}
+
+    /**
+     * @brief Whether the pre-print send can honor this remap right now.
+     *
+     * The pre-print counterpart to can_set_tool_mapping(): a remap naming a
+     * slot that cannot feed is refused here, and PrintStartController stops
+     * the print with the error's user_msg instead of sending a map the
+     * firmware would act on with a slot it cannot reach. A backend that
+     * refuses here also returns "" from build_preprint_gcode() for the same
+     * arguments. Default success.
+     *
+     * @param tools_used Logical tools the gcode body uses
+     * @param remap      Logical tool -> physical slot, only for changed tools
+     */
+    [[nodiscard]] virtual AmsError check_preprint_remap(const std::set<int>& tools_used,
+                                                        const std::map<int, int>& remap) const {
+        (void)tools_used;
+        (void)remap;
+        return AmsErrorHelper::success();
+    }
+
+    /**
      * @brief Check if backend automatically heats extruder before loading
      *
      * Some backends (like AFC) use material-specific temperatures from their
@@ -3187,6 +3589,34 @@ class AmsBackend {
     }
 
     /**
+     * @brief Whether this backend's unload_filament() needs no preheat from the UI
+     *
+     * The unload counterpart of supports_auto_heat_on_load(): the command the
+     * backend sends heats the hotend itself, or moves no filament through it.
+     * Each backend sets it from what its own unload command does. Ask
+     * unload_heats_hotend() for a particular unload.
+     */
+    [[nodiscard]] bool supports_auto_heat_on_unload() const {
+        return traits().supports_auto_heat_on_unload;
+    }
+
+    /**
+     * @brief Whether unload_filament(@p slot_index) brings the hotend up itself
+     *
+     * Per call, because one backend can send a self-heating command for one
+     * unload and a bare retract for another. True only where the heat is shown:
+     * in the gcode we send for that unload (QIDI's M109), or in the documented
+     * behaviour of the firmware command we send on that path (AFC TOOL_UNLOAD,
+     * the IFS toolhead unload, the U1's AUTO_FEEDING unload), cited where the
+     * backend sets it. A wrong true runs a cold extrude; a wrong false costs a
+     * second wait. Defaults to the trait.
+     */
+    [[nodiscard]] virtual bool unload_heats_hotend(int slot_index) const {
+        (void)slot_index;
+        return supports_auto_heat_on_unload();
+    }
+
+    /**
      * @brief Whether the UI's optimistic action must outlive this backend's IDLE
      *
      * True for a backend that publishes nothing between the user starting a
@@ -3198,6 +3628,21 @@ class AmsBackend {
      */
     [[nodiscard]] bool holds_optimistic_action() const {
         return traits().holds_optimistic_action;
+    }
+
+    /**
+     * @brief Whether an unload here is always a whole operation, never the
+     *        first half of a swap
+     *
+     * A swap pulls one lane out of a shared toolhead and pushes another in, so
+     * an UNLOADING seen from IDLE with filament loaded usually starts one. On a
+     * machine where every lane has its own toolhead and the firmware runs load
+     * and unload as separate commands, nothing follows an unload, and the step
+     * bar must show the unload's own steps. A tool changer's dock is UNLOADING
+     * too, but its pick follows as one swap, so it leaves this false.
+     */
+    [[nodiscard]] bool unloads_stand_alone() const {
+        return traits().unloads_stand_alone;
     }
 
     /**
@@ -3242,6 +3687,17 @@ class AmsBackend {
     }
 
   protected:
+    /**
+     * @brief Whether filament reaches @p head only through the mounted tool.
+     *
+     * A backend answering true mounts the tool inside its own load and unload
+     * and puts the carriage back afterwards. Never a question the UI asks: to
+     * every surface the op is simply a Load or an Unload.
+     */
+    [[nodiscard]] virtual bool needs_mount_to_feed(int /*head*/) const {
+        return false;
+    }
+
     /**
      * @brief Send this backend's tool-mapping verb.
      *
@@ -3349,25 +3805,6 @@ class AmsBackend {
     ///@}
 
   public:
-    /**
-     * @brief Whether firmware states what filament is in each slot
-     *
-     * A DIFFERENT question from has_firmware_spool_persistence(): the Snapmaker
-     * U1 publishes filament_type and filament_vendor per head in
-     * `print_task_config` while keeping no Spoolman id at all, so it answers
-     * false there and true here.
-     *
-     * When true, ToolState's persisted assignments must not be pushed back onto
-     * slots — the firmware already knows, and a cached assignment that disagrees
-     * is stale by definition: a head the printer reports as PLA would display
-     * the material of whatever spool the cache last named.
-     *
-     * @return true if slot material/vendor come from firmware
-     */
-    [[nodiscard]] bool has_firmware_filament_identity() const {
-        return traits().has_firmware_filament_identity;
-    }
-
     /**
      * @brief Whether this backend unloads the toolhead automatically after a print
      *
@@ -3519,8 +3956,8 @@ class AmsBackend {
      * pattern matching with no per-instance state, so it needs no backend object.
      *
      * Keyword-bearing sensor names (mmu_*, afc_*, lane*, gate*, ...) are handled
-     * by the type-independent substring path in PrinterHardware and are NOT this
-     * method's concern.
+     * by the type-independent keyword paths (sensor_name_names_filament_system()
+     * and PrinterHardware's generic keywords) and are NOT this method's concern.
      *
      * @param type      Detected AMS/MMU backend type
      * @param bare_name Sensor name with the Klipper object-type prefix stripped
@@ -3529,6 +3966,29 @@ class AmsBackend {
      */
     static bool sensor_belongs_to_backend(AmsType type, const std::string& bare_name,
                                           const helix::PrinterDiscovery& discovery);
+
+    /**
+     * @brief Whether @p lower_name carries a filament system's own keyword.
+     *
+     * Type-independent: a sensor named for a system's hardware ("ercf_gate",
+     * "afc_hub") is that system's even when the system itself was not
+     * detected. Each backend lists its keywords (kSensorNameKeywords) in its
+     * own header; this asks every one of them.
+     *
+     * @param lower_name Sensor name, lowercased
+     */
+    static bool sensor_name_names_filament_system(std::string_view lower_name);
+
+    /**
+     * @brief Every Klipper status object the filament systems in @p hw need pushed.
+     *
+     * Merges each backend's own `required_status_objects`; each decides whether it
+     * applies to @p hw, so the subscription builder never names a vendor. Values are
+     * the field allowlist for the object, or null for the whole object. Like
+     * sensor_belongs_to_backend() it is static: discovery runs before any backend
+     * instance exists.
+     */
+    [[nodiscard]] static nlohmann::json required_status_objects(const helix::PrinterDiscovery& hw);
 
     // ========================================================================
     // Factory Method
@@ -3547,10 +4007,14 @@ class AmsBackend {
      * @param detected_type The detected AMS type from printer discovery
      * @param api Pointer to IMoonrakerAPI for sending commands
      * @param client Pointer to helix::IMoonrakerClient for subscriptions
+     * @param hw The discovered hardware, for a type whose backend has variants
+     *        told apart by what else the printer carries. Null builds the
+     *        type's base backend.
      * @return Unique pointer to backend instance, or nullptr if type is NONE
      */
     static std::unique_ptr<AmsBackend> create(AmsType detected_type, IMoonrakerAPI* api,
-                                              helix::IMoonrakerClient* client);
+                                              helix::IMoonrakerClient* client,
+                                              const helix::PrinterDiscovery* hw = nullptr);
 
     /**
      * @brief Create mock backend for testing
@@ -3562,6 +4026,21 @@ class AmsBackend {
      * @return Unique pointer to mock backend instance
      */
     static std::unique_ptr<AmsBackend> create_mock(int slot_count = 4);
+
+    /**
+     * @brief Load the state filament backends keep across sessions
+     *
+     * Process-scoped and independent of which backend this printer runs: a
+     * backend reads it when it is constructed, and a printer switch keeps it.
+     * Call once at startup, before any backend is created; a backend built
+     * before this treats every remembered fact as unknown.
+     *
+     * @param config_dir Writable directory the state is persisted under
+     */
+    static void init_persistent_state(const std::string& config_dir);
+
+    /// Release what init_persistent_state() loaded, at process exit.
+    static void shutdown_persistent_state();
 
   private:
     /// Tool -> slot aimed from our UI, for as long as this backend lives.

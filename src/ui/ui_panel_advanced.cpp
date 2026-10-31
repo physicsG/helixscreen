@@ -5,12 +5,16 @@
 
 #include "ui_callback_helpers.h"
 #include "ui_modal.h"
+#if !defined(HELIX_PLATFORM_ESP32)
+#include "ui_overlay_pa_tuning.h"
+#endif
 #include "ui_overlay_timelapse_install.h"
 #include "ui_overlay_timelapse_videos.h"
 #include "ui_panel_calibration_pid.h"
 #include "ui_panel_console.h"
 #include "ui_panel_macros.h"
 #include "ui_panel_spoolman.h"
+#include "ui_plugin_overview_overlay.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 
@@ -21,9 +25,12 @@
 #include "i_moonraker_client.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
+#include "panel_widget_config.h"
+#include "panel_widget_manager.h"
 #include "panel_widgets/shutdown_widget.h"
 #include "printer_state.h"
 #include "static_panel_registry.h"
+#include "static_subject_registry.h"
 #include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
@@ -58,6 +65,10 @@ AdvancedPanel::AdvancedPanel(PrinterState& printer_state, IMoonrakerAPI* api)
     spdlog::trace("[{}] Constructor", get_name());
 }
 
+AdvancedPanel::~AdvancedPanel() {
+    deinit_subjects();
+}
+
 // ============================================================================
 // PANELBASE IMPLEMENTATION
 // ============================================================================
@@ -71,9 +82,16 @@ void AdvancedPanel::init_subjects() {
         {"on_history_row_clicked", on_history_clicked},
         {"on_helix_plugin_install_clicked", on_helix_plugin_install_clicked},
         {"on_helix_plugin_uninstall_clicked", on_helix_plugin_uninstall_clicked},
+        {"on_helix_plugin_overview_clicked",
+         [](lv_event_t*) {
+             helix::ui::get_plugin_overview_overlay().show(
+                 get_global_advanced_panel().parent_screen_);
+         }},
         {"on_helix_macros_install_clicked", on_helix_macros_install_clicked},
         {"on_helix_macros_update_clicked", on_helix_macros_update_clicked},
         {"on_pid_tuning_clicked", on_pid_tuning_clicked},
+        {"on_pa_tuning_clicked",
+         [](lv_event_t*) { get_global_advanced_panel().handle_pa_tuning_clicked(); }},
         {"on_timelapse_videos_clicked", on_timelapse_videos_clicked},
         {"on_timelapse_setup_clicked", on_timelapse_setup_clicked},
         {"on_advanced_power_clicked", on_advanced_power_clicked},
@@ -82,6 +100,16 @@ void AdvancedPanel::init_subjects() {
     // Note: Input shaping uses on_input_shaper_row_clicked registered by InputShaperPanel
     // Note: Restart row doesn't exist - restart buttons have their own callbacks in
     // ui_emergency_stop.cpp
+
+    UI_MANAGED_SUBJECT_INT(show_notification_history_subject_, 0,
+                           "advanced_show_notification_history", subjects_);
+    // Runs from StaticSubjectRegistry::deinit_all(), after StaticPanelRegistry
+    // may already have destroyed the panel.
+    StaticSubjectRegistry::instance().register_deinit("AdvancedPanel", []() {
+        if (g_advanced_panel) {
+            g_advanced_panel->deinit_subjects();
+        }
+    });
 
     subjects_initialized_ = true;
     spdlog::trace("[{}] Event callbacks registered", get_name());
@@ -121,9 +149,22 @@ void AdvancedPanel::setup(lv_obj_t* panel, lv_obj_t* parent_screen) {
     spdlog::debug("[{}] Setup complete", get_name());
 }
 
+void AdvancedPanel::deinit_subjects() {
+    deinit_subjects_base(subjects_);
+}
+
 void AdvancedPanel::on_activate() {
     spdlog::debug("[{}] Activated", get_name());
     // Note: Plugin detection now happens automatically in discovery flow (application.cpp)
+    refresh_notification_history_row();
+}
+
+void AdvancedPanel::refresh_notification_history_row() {
+    // The home layout is only edited on the home screen, so reading it on
+    // activation is always current while this panel is up.
+    const bool bell_on_home =
+        PanelWidgetManager::instance().get_widget_config("home").is_placed("notifications");
+    lv_subject_set_int(&show_notification_history_subject_, bell_on_home ? 0 : 1);
 }
 
 // ============================================================================
@@ -159,6 +200,17 @@ void AdvancedPanel::handle_pid_tuning_clicked() {
     auto& overlay = get_global_pid_cal_panel();
     overlay.set_api(get_moonraker_api());
     overlay.show(parent_screen_);
+}
+
+void AdvancedPanel::handle_pa_tuning_clicked() {
+#if defined(HELIX_PLATFORM_ESP32)
+    // The tuner is not in the v1 Core+AMS cut, and a reference here would link it.
+    helix::ui::show_feature_unavailable_toast();
+#else
+    auto& overlay = helix::ui::get_global_pa_tuning_overlay();
+    overlay.set_api(get_moonraker_api());
+    overlay.show(parent_screen_);
+#endif
 }
 
 // ============================================================================
@@ -236,7 +288,7 @@ void AdvancedPanel::handle_timelapse_setup_clicked() {
 // HELIX HELPER MACRO HANDLERS (helix_macros.cfg)
 // ============================================================================
 
-bool AdvancedPanel::macro_job_holds_machine() const {
+bool AdvancedPanel::job_holds_machine_now() const {
     // job_holds_machine, not print_active: a host-side Preparing job has
     // print_active == 0 while the toolhead moves, and restarting Klipper
     // through it kills a job the app has already committed to.
@@ -280,7 +332,7 @@ void AdvancedPanel::handle_helix_macros_install_clicked() {
     opts.owner_token = object_lifetime_.token();
     helix::ui::modal_confirm(
         lv_tr("Install Helper Macros?"),
-        macro_job_holds_machine()
+        job_holds_machine_now()
             ? lv_tr("This installs the HelixScreen helper macros on the printer and adds them "
                     "to printer.cfg. A print is running, so Klipper restarts after it finishes.")
             : lv_tr("This installs the HelixScreen helper macros on the printer, adds them to "
@@ -317,7 +369,7 @@ void AdvancedPanel::handle_helix_macros_update_clicked() {
     opts.owner_token = object_lifetime_.token();
     helix::ui::modal_confirm(
         lv_tr("Update Helper Macros?"),
-        macro_job_holds_machine()
+        job_holds_machine_now()
             ? lv_tr("This replaces the printer's helper macros with the current version. A print "
                     "is running, so Klipper restarts after it finishes.")
             : lv_tr("This replaces the printer's helper macros with the current version and "
@@ -366,7 +418,7 @@ void AdvancedPanel::run_helix_macros_stage(bool update) {
 
 bool AdvancedPanel::restart_helix_macros_when_idle() {
     // Never restart during an active print; hard-refuse, the caller queues.
-    if (macro_job_holds_machine() || !macro_manager_) {
+    if (job_holds_machine_now() || !macro_manager_) {
         return false;
     }
 
@@ -496,6 +548,10 @@ void AdvancedPanel::on_klippy_state_for_skips(int state) {
 void AdvancedPanel::handle_helix_plugin_install_clicked() {
     spdlog::debug("[{}] HelixPrint Plugin Install clicked", get_name());
 
+    if (helix::ui::refuse_plugin_change_during_job(printer_state_)) {
+        return;
+    }
+
     // Double-check plugin isn't already installed (defensive)
     if (printer_state_.plugin_status_state().service_has_helix_plugin()) {
         spdlog::info("[{}] Plugin already installed", get_name());
@@ -510,46 +566,27 @@ void AdvancedPanel::handle_helix_plugin_install_clicked() {
 
     // Show the install modal
     plugin_install_modal_.set_installer(&plugin_installer_);
-    plugin_install_modal_.set_on_install_complete(
-        [this](bool success) { on_helix_plugin_install_finished(success); });
+    plugin_install_modal_.set_moonraker_restarter(
+        [this]() { return restart_moonraker_for_plugin(); });
+    plugin_install_modal_.set_job_gate(
+        [this]() { return helix::ui::refuse_plugin_change_during_job(printer_state_); });
     plugin_install_modal_.show(lv_screen_active());
 }
 
-void AdvancedPanel::on_helix_plugin_install_finished(bool success) {
-    if (!success) {
-        return;
-    }
-    // Files on disk are not a loaded plugin: installed stays as discovery
-    // last saw it until Moonraker comes back and the plugin check answers.
-    restart_moonraker_for_plugin();
-    ToastManager::instance().show(ToastSeverity::SUCCESS, lv_tr("Plugin installed successfully"),
-                                  2000);
-}
-
-void AdvancedPanel::restart_moonraker_for_plugin() {
+bool AdvancedPanel::restart_moonraker_for_plugin() {
     if (moonraker_restarter_) {
         moonraker_restarter_();
-        return;
+        return true;
     }
-    if (!api_) {
-        spdlog::warn("[{}] No Moonraker API - cannot restart Moonraker for the plugin", get_name());
-        return;
-    }
-    api_->restart_moonraker(
-        []() { spdlog::info("[AdvancedPanel] Moonraker restart requested for the plugin"); },
-        [](const MoonrakerError& error) {
-            spdlog::warn("[AdvancedPanel] Moonraker restart for the plugin failed: {}",
-                         error.message);
-            helix::ui::queue_update("AdvancedPanel::plugin_restart_failed", []() {
-                ToastManager::instance().show(
-                    ToastSeverity::WARNING, lv_tr("Restart Moonraker to finish the plugin change"),
-                    5000);
-            });
-        });
+    return helix::ui::request_moonraker_restart_for_plugin(api_);
 }
 
 void AdvancedPanel::handle_helix_plugin_uninstall_clicked() {
     spdlog::debug("[{}] HelixPrint Plugin Uninstall clicked", get_name());
+
+    if (helix::ui::refuse_plugin_change_during_job(printer_state_)) {
+        return;
+    }
 
     helix::ui::ConfirmOptions opts;
     opts.owner_token = object_lifetime_.token();
@@ -563,6 +600,11 @@ void AdvancedPanel::handle_helix_plugin_uninstall_clicked() {
 
 void AdvancedPanel::run_helix_plugin_uninstall() {
     using UninstallOutcome = helix::UninstallOutcome;
+
+    // A job can start while the confirmation is open.
+    if (helix::ui::refuse_plugin_change_during_job(printer_state_)) {
+        return;
+    }
 
     // Update installer's websocket URL for local/remote detection
     if (api_) {
@@ -579,6 +621,7 @@ void AdvancedPanel::run_helix_plugin_uninstall() {
         // The plugin itself is gone in both SUCCESS and NEEDS_ATTENTION - only
         // a FAILED uninstall leaves it installed.
         if (outcome != UninstallOutcome::FAILED) {
+            helix::HelixPluginInstaller::settle_prompt_for_session();
             printer_state_.set_helix_plugin_installed(false);
             restart_moonraker_for_plugin();
         }

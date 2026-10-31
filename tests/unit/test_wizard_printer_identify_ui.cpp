@@ -11,6 +11,7 @@
 #include "ui_wizard_printer_identify.h"
 
 #include "../lvgl_ui_test_fixture.h"
+#include "../test_helpers/one_line_label.h"
 #include "../test_helpers/wizard_printer_identify_test_access.h"
 #include "app_globals.h"
 #include "config.h"
@@ -265,6 +266,20 @@ TEST_CASE_METHOD(WizardPrinterIdentifyUIFixture,
 // Vendor drill-in
 // ============================================================================
 
+TEST_CASE_METHOD(WizardPrinterIdentifyUIFixture,
+                 "Wizard vendor tiles hold the vendor name to one line",
+                 "[wizard][selector][one_line]") {
+    require_ready();
+    lv_textarea_set_text(search_input(), "");
+    REQUIRE(view() == kViewTiles);
+
+    lv_obj_t* tile = tile_for("Anycubic");
+    REQUIRE(tile != nullptr);
+    lv_obj_t* name = helix::test::find_dotted_label(tile);
+    REQUIRE(name != nullptr);
+    CHECK(helix::test::held_to_one_line(name));
+}
+
 TEST_CASE_METHOD(WizardPrinterIdentifyUIFixture, "Wizard vendor tile drills into its models",
                  "[wizard][selector]") {
     require_ready();
@@ -342,7 +357,10 @@ TEST_CASE_METHOD(WizardPrinterIdentifyUIFixture,
     // restore them AND land inside the machine's vendor bucket.
     auto* step = get_wizard_printer_identify_step();
     step->cleanup();
+    // Screen-sized, as the wizard content area is: the vendor title holds one
+    // dotted line and would ellipsize in a default-sized box.
     lv_obj_t* parent = lv_obj_create(test_screen());
+    lv_obj_set_size(parent, lv_pct(100), lv_pct(100));
     REQUIRE(step->create(parent) != nullptr);
     step_root = parent;
 

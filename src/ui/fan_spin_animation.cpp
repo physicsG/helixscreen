@@ -27,9 +27,8 @@ void fan_spin_start(lv_obj_t* icon, int speed_pct) {
 
     // Scale duration inversely with speed: 100% → MIN, 1% → MAX
     uint32_t duration =
-        FAN_SPIN_MAX_DURATION_MS -
-        static_cast<uint32_t>((FAN_SPIN_MAX_DURATION_MS - FAN_SPIN_MIN_DURATION_MS) * speed_pct /
-                              100);
+        kFanSpinMaxDurationMs -
+        static_cast<uint32_t>((kFanSpinMaxDurationMs - kFanSpinMinDurationMs) * speed_pct / 100);
 
     // Delete existing animation and restart with new duration
     lv_anim_delete(icon, fan_spin_anim_cb);

@@ -25,7 +25,7 @@ struct Pattern {
 // Every pattern literal the tree hands std::regex, with its icase flag.
 const std::vector<Pattern> kSourcePatterns = {
     {R"re(Prob(?:ing (?:mesh )?point|e point) (\d+)[/\s]+(?:of\s+)?(\d+))re", false},
-    {R"re(Adapted probe count:\s*(\d+)\s*,\s*(\d+))re", false},
+    {R"re(Adapted probe count:\s*\(?\s*(\d+)\s*,\s*(\d+))re", false},
     {R"re(probe at (?:x:\s*)?(-?\d+(?:\.\d+)?)[,\s]+(?:y:\s*)?(-?\d+(?:\.\d+)?)\s+is z=)re", false},
     {R"re("rotate"\s*:\s*(\d+))re", false},
     {R"re(sample:(\d+)\s+pwm:[\d.]+\s+asymmetry:[\d.]+\s+tolerance:(\S+))re", false},
@@ -111,6 +111,7 @@ const std::vector<std::string> kCorpus = {
     "Probe point 12 of 49",
     "Probing mesh point 7 / 16",
     "Adapted probe count: 5, 5",
+    "// Adapted probe count: (7,7)",
     "probe at 120.000,130.500 is z=0.012500",
     "probe at x: -5.5, y: 10 is z=1.2",
     R"({"rotate": 180, "brightness": 55, "dark_mode": true, "auto_restart_sec": 30})",

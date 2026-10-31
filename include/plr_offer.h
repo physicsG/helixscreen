@@ -29,6 +29,8 @@ struct PlrOfferSignals {
     bool printer_idle;       ///< no active or paused print right now
     bool already_prompted;   ///< one-shot latch: already offered this connection
     bool wizard_active;      ///< setup wizard is running (app_globals::is_wizard_active())
+    /// The power-loss resume wizard is open: the user is already resuming.
+    bool resume_in_progress = false;
 };
 
 /// Should HelixScreen offer to resume an interrupted print? Pure: no LVGL,

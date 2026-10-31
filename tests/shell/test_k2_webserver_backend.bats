@@ -733,6 +733,54 @@ write_shim_source() {
     grep -q "Manual fix:.*init\.d/helixscreen enable" "$BATS_TEST_TMPDIR/log"
 }
 
+# The shim lives on the root overlay, which can be full during a self-update.
+# A copy that dies mid-write must never leave the boot entry truncated.
+@test "k2 shim install: an identical installed shim is not copied again" {
+    write_shim_source
+    cp "$INSTALL_DIR/config/helixscreen-k2-procd-shim.sh" "$MOCK_ROOT/etc/init.d/helixscreen"
+    chmod +x "$MOCK_ROOT/etc/init.d/helixscreen"
+    cp() { echo "cp $*" >> "$BATS_TEST_TMPDIR/cp-calls"; command cp "$@"; }
+
+    run install_procd_shim_k2
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/cp-calls" ]
+    [ "$(readlink "$MOCK_ROOT/etc/rc.d/S99helixscreen")" = "../init.d/helixscreen" ]
+}
+
+@test "k2 shim install: a failed copy keeps the existing shim byte-identical" {
+    write_shim_source
+    printf '#!/bin/sh %s\nSTART=99\nSTOP=01\n# older shim\n' "$MOCK_ROOT/etc/rc.common" \
+        > "$MOCK_ROOT/etc/init.d/helixscreen"
+    chmod +x "$MOCK_ROOT/etc/init.d/helixscreen"
+    command cp "$MOCK_ROOT/etc/init.d/helixscreen" "$BATS_TEST_TMPDIR/before"
+    # ENOSPC: the destination is opened (truncated) and the write fails.
+    cp() { : > "$2"; return 1; }
+
+    run install_procd_shim_k2
+    cmp -s "$BATS_TEST_TMPDIR/before" "$MOCK_ROOT/etc/init.d/helixscreen"
+    grep -q "WARN.*kept" "$BATS_TEST_TMPDIR/log"
+    [ -z "$(ls "$MOCK_ROOT/etc/init.d" | grep '\.new\.')" ]
+}
+
+@test "k2 shim install: a failed copy with no shim installed fails" {
+    write_shim_source
+    cp() { : > "$2"; return 1; }
+
+    run install_procd_shim_k2
+    [ "$status" -ne 0 ]
+    [ ! -e "$MOCK_ROOT/etc/init.d/helixscreen" ]
+    [ -z "$(ls "$MOCK_ROOT/etc/init.d" | grep '\.new\.')" ]
+}
+
+@test "k2 shim install: a fresh install copies the shim" {
+    write_shim_source
+
+    run install_procd_shim_k2
+    [ "$status" -eq 0 ]
+    cmp -s "$INSTALL_DIR/config/helixscreen-k2-procd-shim.sh" "$MOCK_ROOT/etc/init.d/helixscreen"
+    [ -x "$MOCK_ROOT/etc/init.d/helixscreen" ]
+}
+
 @test "k2 shim install: a verification failure warns instead of aborting the install" {
     # install_service calls the shim installer after the stock UI is
     # stopped and before anything of ours starts, so an unguarded failure
@@ -742,6 +790,65 @@ write_shim_source() {
 }
 
 # --- the shared rc.d helpers ---
+
+# The shim installed with its boot links already made, the fake rc.common's
+# enable recording each call, and the links' mtimes pinned so a remove and
+# recreate shows up.
+shim_with_current_links() {
+    write_shim_source
+    cp "$INSTALL_DIR/config/helixscreen-k2-procd-shim.sh" "$MOCK_ROOT/etc/init.d/helixscreen"
+    chmod +x "$MOCK_ROOT/etc/init.d/helixscreen"
+    ln -s ../init.d/helixscreen "$MOCK_ROOT/etc/rc.d/S99helixscreen"
+    ln -s ../init.d/helixscreen "$MOCK_ROOT/etc/rc.d/K01helixscreen"
+    touch -h -d 2001-01-01 "$MOCK_ROOT/etc/rc.d/S99helixscreen" "$MOCK_ROOT/etc/rc.d/K01helixscreen"
+    sed -i "/^    enable)/a\\        echo enable >> \"$BATS_TEST_TMPDIR/enable-calls\"" "$MOCK_ROOT/etc/rc.common"
+}
+
+link_mtime() { stat -c %Y "$MOCK_ROOT/etc/rc.d/$1"; }
+
+# On a full or read-only overlay the unlink can succeed while enable cannot
+# recreate the links, so links that already verify are left untouched.
+@test "k2 rc.d helper: links that already verify are neither removed nor re-enabled" {
+    shim_with_current_links
+
+    run enable_and_verify_rcd "$MOCK_ROOT/etc/init.d/helixscreen"
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/enable-calls" ]
+    [ "$(link_mtime S99helixscreen)" = "$(date -d 2001-01-01 +%s)" ]
+    [ "$(link_mtime K01helixscreen)" = "$(date -d 2001-01-01 +%s)" ]
+    grep -q "INFO.*already current" "$BATS_TEST_TMPDIR/log"
+}
+
+@test "k2 rc.d helper: a stale duplicate link still goes through remove and enable" {
+    shim_with_current_links
+    ln -s ../init.d/helixscreen "$MOCK_ROOT/etc/rc.d/S80helixscreen"
+
+    run enable_and_verify_rcd "$MOCK_ROOT/etc/init.d/helixscreen"
+    [ "$status" -eq 0 ]
+    [ -s "$BATS_TEST_TMPDIR/enable-calls" ]
+    [ ! -e "$MOCK_ROOT/etc/rc.d/S80helixscreen" ]
+    [ "$(readlink "$MOCK_ROOT/etc/rc.d/S99helixscreen")" = "../init.d/helixscreen" ]
+}
+
+@test "k2 rc.d helper: a missing link still runs enable" {
+    shim_with_current_links
+    rm "$MOCK_ROOT/etc/rc.d/K01helixscreen"
+
+    run enable_and_verify_rcd "$MOCK_ROOT/etc/init.d/helixscreen"
+    [ "$status" -eq 0 ]
+    [ -s "$BATS_TEST_TMPDIR/enable-calls" ]
+    [ "$(readlink "$MOCK_ROOT/etc/rc.d/K01helixscreen")" = "../init.d/helixscreen" ]
+}
+
+@test "k2 rc.d helper: a link pointing elsewhere still runs enable" {
+    shim_with_current_links
+    ln -sfn ../init.d/other "$MOCK_ROOT/etc/rc.d/S99helixscreen"
+
+    run enable_and_verify_rcd "$MOCK_ROOT/etc/init.d/helixscreen"
+    [ "$status" -eq 0 ]
+    [ -s "$BATS_TEST_TMPDIR/enable-calls" ]
+    [ "$(readlink "$MOCK_ROOT/etc/rc.d/S99helixscreen")" = "../init.d/helixscreen" ]
+}
 
 @test "k2 rc.d helper: is_rc_common_script accepts an rc.common shebang" {
     # The setup patches the module's /etc/rc.common references onto the

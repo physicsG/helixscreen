@@ -211,6 +211,11 @@
         <lv_label text="#icon_check_circle" style_text_font="mdi_icons_48" style_text_color="#success"/>
         <text_heading text="Calibration Complete!" style_text_align="center"/>
         <text_body name="final_offset_label" text="Accepted Z Position: 0.000"/>
+        <text_small name="not_saved_note"
+                    width="80%" style_text_align="center" long_mode="wrap"
+                    text="Z-offset saving is off, so HelixScreen did not save this. Klipper holds it until the next config save.">
+          <bind_flag_if cond="z_offset_save_enabled eq 1 or z_offset_can_save eq 0" flag="hidden"/>
+        </text_small>
         <ui_button name="btn_done" width="40%" text="Done">
           <event_cb trigger="clicked" callback="on_zoffset_done_clicked"/>
         </ui_button>

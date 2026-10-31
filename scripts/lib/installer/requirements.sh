@@ -33,7 +33,7 @@ check_requirements() {
     local missing=""
 
     # Need curl, wget, or python3 (urllib) to download the release.
-    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ! _has_python; then
+    if ! _has_real_curl && ! command -v wget >/dev/null 2>&1 && ! _has_python; then
         _helix_add_missing "curl, wget, or python3"
     fi
     command -v tar >/dev/null 2>&1 || _helix_add_missing "tar"
@@ -68,6 +68,8 @@ check_requirements() {
 detect_missing_unzip() {
     MISSING_UNZIP_PKG=""
     command -v unzip >/dev/null 2>&1 && return 0
+    # A desktop install runs without root, so apt is not an option there.
+    [ "${platform:-}" = "x86-desktop" ] && return 0
     if command -v apt-get >/dev/null 2>&1 && ! _has_no_new_privs; then
         MISSING_UNZIP_PKG=unzip
     fi
@@ -321,6 +323,14 @@ _overlay_upperdir() {
 # Runs at pre-flight -- before any UI is stopped and before the ~58MB download
 # -- so a refusal here leaves the printer exactly as it was found.
 check_service_dest_space() {
+    # A desktop install writes no service definition.
+    [ "${platform:-}" = "x86-desktop" ] && return 0
+    # Nor does a self-update under systemd: it runs inside the unit's
+    # ProtectSystem=strict sandbox, where /etc is read-only even for root, and
+    # the unit's root ExecStartPre refreshes the service files on restart.
+    if _is_self_update && _systemd_is_init; then
+        return 0
+    fi
     # set_install_paths() has already run, so INIT_SCRIPT_DEST is known. It is
     # empty on systemd platforms, where install_service_systemd writes the unit
     # to /etc/systemd/system instead.
@@ -350,6 +360,14 @@ check_service_dest_space() {
         2) return 0 ;;
     esac
 
+    # The K2's procd shim and its rc.d links also live here. A self-update
+    # leaves each untouched when already current, and a failed write keeps
+    # the installed copy, so neither makes the write required.
+    if ! _self_update_needs_service_write; then
+        log_warn "Cannot write to ${dest_dir} (full or read-only); continuing, the self-update leaves the installed service definition as it is."
+        return 0
+    fi
+
     local upper
     upper=$(_overlay_upperdir)
 
@@ -373,9 +391,14 @@ check_service_dest_space() {
 
 # Detect init system (systemd vs SysV)
 # Sets: INIT_SYSTEM to "systemd" or "sysv"
+# True when systemd is this host's running init.
+_systemd_is_init() {
+    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
 detect_init_system() {
     # Check for systemd
-    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    if _systemd_is_init; then
         INIT_SYSTEM="systemd"
         log_info "Init system: systemd"
         return
@@ -394,6 +417,66 @@ detect_init_system() {
     exit 1
 }
 
+# Print every process's command line, one per line, through the widest form
+# the host's ps takes. Bare `ps` lists every process only on BusyBox: procps-ng
+# ps lists the caller's session alone, which under `curl | sh` holds neither
+# Klipper nor Moonraker. Some BusyBox builds reject -e/-o, and their plain ps
+# cuts each line at the terminal width unless given w.
+_ps_all_args() {
+    ps -e -o args 2>/dev/null || ps w 2>/dev/null || ps 2>/dev/null
+}
+
+# True when systemd has service $1 active: $1.service or a numbered instance
+# ($1-1.service, ...). Only digits may follow the dash, because klipper-mcu and
+# moonraker-obico are other programs. Never true off systemd (INIT_SYSTEM).
+_systemd_service_active() {
+    [ "$INIT_SYSTEM" = systemd ] || return 1
+    systemctl is-active --quiet "$1.service" 2>/dev/null && return 0
+    systemctl list-units --type=service --state=active --no-legend --plain "$1-*.service" 2>/dev/null |
+        awk -v svc="$1" '$1 ~ ("^" svc "-[0-9]+\\.service$") { found = 1 } END { exit !found }'
+}
+
+# True when HELIX_PROC_ROOT (else /proc) shows any process's argv. When it
+# does, /proc holds every process whichever ps the host ships, and ps has
+# nothing to add.
+_proc_lists_processes() {
+    local f
+    for f in "${HELIX_PROC_ROOT:-/proc}"/[0-9]*/cmdline; do
+        [ -r "$f" ] && return 0
+    done
+    return 1
+}
+
+# True when a ps line (_ps_all_args) runs the python program $1 the way
+# running_python_module recognizes it: $1.py, or the module $1 or $1.$1.
+# A ps line's columns differ between builds, so argv[0] is not checked here.
+_ps_runs_python() {
+    _ps_all_args | grep -v grep |
+        grep -Eq "(^|[ /])$1\.py( |\$)|-m ?$1(\.$1)?( |\$)"
+}
+
+# True when the python program $1 runs here: in /proc when it lists any
+# process, else in the ps listing, or on systemd as an active $1 unit. A log
+# viewer, an editor, KlipperScreen or moonraker-obico only names the program.
+_python_service_running() {
+    if _proc_lists_processes; then
+        [ -n "$(running_python_module "$1")" ] && return 0
+    else
+        _ps_runs_python "$1" && return 0
+    fi
+    _systemd_service_active "$2"
+}
+
+# True when Klipper (klippy.py, service klipper) runs here.
+installer_klipper_running() {
+    _python_service_running klippy klipper
+}
+
+# True when Moonraker runs here.
+installer_moonraker_running() {
+    _python_service_running moonraker moonraker
+}
+
 # Check that Klipper and Moonraker are running (AD5M + K1 only)
 # These platforms require local Klipper/Moonraker; without them HelixScreen
 # has nothing to connect to. Warns and prompts for confirmation.
@@ -406,16 +489,14 @@ check_klipper_ecosystem() {
         *) return 0 ;;
     esac
 
-    local warnings=""
+    local warnings="" moonraker_up=false
 
-    # Check Klipper process
-    # Klipper runs as "klippy" (python module) or "klipper" (service name)
-    if ! ps | grep -v grep | grep -q -e '[Kk]lipper' -e '[Kk]lippy'; then
+    if ! installer_klipper_running; then
         warnings="Klipper does not appear to be running."
     fi
 
-    # Check Moonraker process
-    if ! ps | grep -v grep | grep -q '[Mm]oonraker'; then
+    installer_moonraker_running && moonraker_up=true
+    if [ "$moonraker_up" = false ]; then
         if [ -n "$warnings" ]; then
             warnings="$warnings
 Moonraker does not appear to be running."
@@ -424,25 +505,17 @@ Moonraker does not appear to be running."
         fi
     fi
 
-    # If Moonraker process is up, verify it responds on the expected port
-    if ps | grep -v grep | grep -q '[Mm]oonraker'; then
-        if command -v wget >/dev/null 2>&1; then
-            if ! wget -q -O /dev/null --timeout=5 "http://127.0.0.1:7125/server/info" 2>/dev/null; then
-                if [ -n "$warnings" ]; then
-                    warnings="$warnings
-Moonraker is running but not responding on http://127.0.0.1:7125."
-                else
-                    warnings="Moonraker is running but not responding on http://127.0.0.1:7125."
-                fi
-            fi
-        elif command -v curl >/dev/null 2>&1; then
-            if ! curl -sf --connect-timeout 5 "http://127.0.0.1:7125/server/info" >/dev/null 2>&1; then
-                if [ -n "$warnings" ]; then
-                    warnings="$warnings
-Moonraker is running but not responding on http://127.0.0.1:7125."
-                else
-                    warnings="Moonraker is running but not responding on http://127.0.0.1:7125."
-                fi
+    # If Moonraker process is up, verify it responds where it serves
+    if [ "$moonraker_up" = true ]; then
+        local mr_url
+        mr_url=$(installer_moonraker_url)
+        # 5s: a loaded K1 or AD5M can take that long to answer.
+        if ! moonraker_answers "${mr_url}/server/info" 5; then
+            if [ -n "$warnings" ]; then
+                warnings="$warnings
+Moonraker is running but not responding on ${mr_url}."
+            else
+                warnings="Moonraker is running but not responding on ${mr_url}."
             fi
         fi
     fi
@@ -602,17 +675,6 @@ verify_binary_deps() {
             # Re-check after attempted fixes
             missing_libs=$(ldd "$binary" 2>/dev/null | grep "not found" || true)
             if [ -n "$missing_libs" ]; then
-                # Check if fbdev fallback binary exists and is loadable
-                local fallback="${INSTALL_DIR}/bin/helix-screen-fbdev"
-                if [ -x "$fallback" ]; then
-                    local fb_missing
-                    fb_missing=$(ldd "$fallback" 2>/dev/null | grep "not found" || true)
-                    if [ -z "$fb_missing" ]; then
-                        log_warn "DRM binary has missing GL libraries -- fbdev fallback will be used"
-                        log_warn "Install GPU libraries for hardware acceleration: sudo apt install libgbm1 libegl1 libgles2"
-                        return 0
-                    fi
-                fi
                 # Under NoNewPrivileges (self-update), we can't install libs.
                 # Warn but don't block — the binary may still start with reduced
                 # functionality (e.g. no SIMD camera decode).

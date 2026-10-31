@@ -12,6 +12,7 @@
  *   - Wrong CWD:    Binary launched from / but data root exists at exe parent
  */
 
+#include "../../test_helpers/scoped_env.h"
 #include "data_root_resolver.h"
 
 #include <cstdlib>
@@ -22,32 +23,6 @@
 #include "../../catch_amalgamated.hpp"
 
 namespace fs = std::filesystem;
-
-/// RAII guard that restores an env var to its original state on destruction.
-/// Same pattern as tests/unit/test_cache_dir.cpp.
-namespace {
-struct EnvGuard {
-    std::string name;
-    std::string original;
-    bool was_set;
-
-    explicit EnvGuard(const char* env_name) : name(env_name) {
-        const char* val = std::getenv(env_name);
-        was_set = (val != nullptr);
-        if (was_set)
-            original = val;
-        unsetenv(env_name);
-    }
-
-    ~EnvGuard() {
-        if (was_set) {
-            setenv(name.c_str(), original.c_str(), 1);
-        } else {
-            unsetenv(name.c_str());
-        }
-    }
-};
-} // namespace
 
 /**
  * @brief Test fixture that creates temporary directory trees
@@ -238,21 +213,21 @@ TEST_CASE_METHOD(DataRootFixture, "resolve: deep nested deploy path works",
 // ============================================================================
 
 TEST_CASE("get_user_config_dir: returns HELIX_CONFIG_DIR when set", "[data_root][config_dir]") {
-    EnvGuard g("HELIX_CONFIG_DIR");
+    helix::ScopedEnv g("HELIX_CONFIG_DIR", nullptr);
     setenv("HELIX_CONFIG_DIR", "/etc/klipper/config/helixscreen", 1);
 
     REQUIRE(helix::get_user_config_dir() == "/etc/klipper/config/helixscreen");
 }
 
 TEST_CASE("get_user_config_dir: returns 'config' when env not set", "[data_root][config_dir]") {
-    EnvGuard g("HELIX_CONFIG_DIR");
+    helix::ScopedEnv g("HELIX_CONFIG_DIR", nullptr);
     // Guard already unset it.
 
     REQUIRE(helix::get_user_config_dir() == "config");
 }
 
 TEST_CASE("get_user_config_dir: returns 'config' when env is empty", "[data_root][config_dir]") {
-    EnvGuard g("HELIX_CONFIG_DIR");
+    helix::ScopedEnv g("HELIX_CONFIG_DIR", nullptr);
     setenv("HELIX_CONFIG_DIR", "", 1);
 
     REQUIRE(helix::get_user_config_dir() == "config");
@@ -263,20 +238,20 @@ TEST_CASE("get_user_config_dir: returns 'config' when env is empty", "[data_root
 // ============================================================================
 
 TEST_CASE("get_data_dir: returns HELIX_DATA_DIR when set", "[data_root][data_dir]") {
-    EnvGuard g("HELIX_DATA_DIR");
+    helix::ScopedEnv g("HELIX_DATA_DIR", nullptr);
     setenv("HELIX_DATA_DIR", "/usr/share/helixscreen", 1);
 
     REQUIRE(helix::get_data_dir() == "/usr/share/helixscreen");
 }
 
 TEST_CASE("get_data_dir: returns '.' when env not set", "[data_root][data_dir]") {
-    EnvGuard g("HELIX_DATA_DIR");
+    helix::ScopedEnv g("HELIX_DATA_DIR", nullptr);
 
     REQUIRE(helix::get_data_dir() == ".");
 }
 
 TEST_CASE("get_data_dir: returns '.' when env is empty", "[data_root][data_dir]") {
-    EnvGuard g("HELIX_DATA_DIR");
+    helix::ScopedEnv g("HELIX_DATA_DIR", nullptr);
     setenv("HELIX_DATA_DIR", "", 1);
 
     REQUIRE(helix::get_data_dir() == ".");
@@ -287,7 +262,7 @@ TEST_CASE("get_data_dir: returns '.' when env is empty", "[data_root][data_dir]"
 // ============================================================================
 
 TEST_CASE("writable_path: joins HELIX_CONFIG_DIR with relpath", "[data_root][writable_path]") {
-    EnvGuard g("HELIX_CONFIG_DIR");
+    helix::ScopedEnv g("HELIX_CONFIG_DIR", nullptr);
     setenv("HELIX_CONFIG_DIR", "/etc/klipper/config/helixscreen", 1);
 
     REQUIRE(helix::writable_path("settings.json") ==
@@ -296,13 +271,13 @@ TEST_CASE("writable_path: joins HELIX_CONFIG_DIR with relpath", "[data_root][wri
 
 TEST_CASE("writable_path: defaults to 'config/relpath' when env not set",
           "[data_root][writable_path]") {
-    EnvGuard g("HELIX_CONFIG_DIR");
+    helix::ScopedEnv g("HELIX_CONFIG_DIR", nullptr);
 
     REQUIRE(helix::writable_path("settings.json") == "config/settings.json");
 }
 
 TEST_CASE("writable_path: handles nested relpaths", "[data_root][writable_path]") {
-    EnvGuard g("HELIX_CONFIG_DIR");
+    helix::ScopedEnv g("HELIX_CONFIG_DIR", nullptr);
     setenv("HELIX_CONFIG_DIR", "/var/lib/helixscreen", 1);
 
     REQUIRE(helix::writable_path("custom_images/foo.png") ==
@@ -310,7 +285,7 @@ TEST_CASE("writable_path: handles nested relpaths", "[data_root][writable_path]"
 }
 
 TEST_CASE("writable_path: strips trailing slash from env", "[data_root][writable_path]") {
-    EnvGuard g("HELIX_CONFIG_DIR");
+    helix::ScopedEnv g("HELIX_CONFIG_DIR", nullptr);
     setenv("HELIX_CONFIG_DIR", "/etc/klipper/config/helixscreen/", 1);
 
     REQUIRE(helix::writable_path("settings.json") ==
@@ -324,8 +299,8 @@ TEST_CASE("writable_path: strips trailing slash from env", "[data_root][writable
 
 TEST_CASE_METHOD(DataRootFixture, "find_readable: returns config_dir path when file exists there",
                  "[data_root][find_readable]") {
-    EnvGuard cg("HELIX_CONFIG_DIR");
-    EnvGuard dg("HELIX_DATA_DIR");
+    helix::ScopedEnv cg("HELIX_CONFIG_DIR", nullptr);
+    helix::ScopedEnv dg("HELIX_DATA_DIR", nullptr);
 
     auto config_dir = temp_root / "user_config";
     auto data_dir = temp_root / "ship_data";
@@ -344,8 +319,8 @@ TEST_CASE_METHOD(DataRootFixture, "find_readable: returns config_dir path when f
 TEST_CASE_METHOD(DataRootFixture,
                  "find_readable: falls back to data_dir/assets/config when missing in config_dir",
                  "[data_root][find_readable]") {
-    EnvGuard cg("HELIX_CONFIG_DIR");
-    EnvGuard dg("HELIX_DATA_DIR");
+    helix::ScopedEnv cg("HELIX_CONFIG_DIR", nullptr);
+    helix::ScopedEnv dg("HELIX_DATA_DIR", nullptr);
 
     auto config_dir = temp_root / "user_config";
     auto data_dir = temp_root / "ship_data";
@@ -363,8 +338,8 @@ TEST_CASE_METHOD(DataRootFixture,
 TEST_CASE_METHOD(DataRootFixture,
                  "find_readable: returns config_dir path when neither location has the file",
                  "[data_root][find_readable]") {
-    EnvGuard cg("HELIX_CONFIG_DIR");
-    EnvGuard dg("HELIX_DATA_DIR");
+    helix::ScopedEnv cg("HELIX_CONFIG_DIR", nullptr);
+    helix::ScopedEnv dg("HELIX_DATA_DIR", nullptr);
 
     auto config_dir = temp_root / "user_config";
     auto data_dir = temp_root / "ship_data";
@@ -383,8 +358,8 @@ TEST_CASE_METHOD(DataRootFixture,
 
 TEST_CASE_METHOD(DataRootFixture, "find_readable: works with nested relpaths",
                  "[data_root][find_readable]") {
-    EnvGuard cg("HELIX_CONFIG_DIR");
-    EnvGuard dg("HELIX_DATA_DIR");
+    helix::ScopedEnv cg("HELIX_CONFIG_DIR", nullptr);
+    helix::ScopedEnv dg("HELIX_DATA_DIR", nullptr);
 
     auto config_dir = temp_root / "user_config";
     auto data_dir = temp_root / "ship_data";
@@ -402,8 +377,8 @@ TEST_CASE_METHOD(DataRootFixture, "find_readable: works with nested relpaths",
 TEST_CASE_METHOD(DataRootFixture,
                  "find_readable: with no env vars, uses 'config/' and './assets/config/'",
                  "[data_root][find_readable]") {
-    EnvGuard cg("HELIX_CONFIG_DIR");
-    EnvGuard dg("HELIX_DATA_DIR");
+    helix::ScopedEnv cg("HELIX_CONFIG_DIR", nullptr);
+    helix::ScopedEnv dg("HELIX_DATA_DIR", nullptr);
     // Neither env set — get_user_config_dir() returns "config",
     // get_data_dir() returns ".". Tarball-install case: cwd is data root.
 

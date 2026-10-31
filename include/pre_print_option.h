@@ -89,6 +89,10 @@ struct PrePrintStrategyPreStartGcode {
     /// expressed by sending nothing: Creality's BED_MESH_CALIBRATE_START_PRINT
     /// meshes unconditionally when called, so emitting it with a 0 would still
     /// mesh.
+    ///
+    /// False also marks the line as the step itself: when the started file
+    /// calls the same command (bed_mesh, qgl, z_tilt or nozzle_clean), the
+    /// line is not sent, so the printer does not run the step twice.
     bool emit_when_disabled = true;
 };
 
@@ -153,6 +157,11 @@ struct PrePrintOption {
     /// others (e.g. K2 Plus AI detect — "LOAD_AI_RUN" exists on Creality OS
     /// variants but not on the user's K2). Empty = no gate (always shown).
     std::string requires_macro;
+
+    /// Enabling this option makes the printer refuse a slot whose material is
+    /// not set (SlotInfo::material_required), so the pre-flight blocks such a
+    /// slot only while it is on. JSON: "needs_material".
+    bool needs_material = false;
 
     PrePrintStrategyKind strategy_kind = PrePrintStrategyKind::MacroParam;
     PrePrintStrategyPayload strategy{PrePrintStrategyMacroParam{}};

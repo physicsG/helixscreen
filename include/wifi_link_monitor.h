@@ -18,6 +18,7 @@
 #include "ui_timer_guard.h"
 
 #include "async_lifetime_guard.h"
+#include "wifi_backend.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -52,13 +53,22 @@ enum class LinkEvent { None, Disconnected, Reconnected, FrequencyChanged, RssiDr
 std::optional<WirelessProcStats> parse_proc_net_wireless(std::string_view text,
                                                          std::string_view iface = {});
 
+/// The sample one status read makes. @p proc_net_wireless is the table's text,
+/// read only while connected. nullopt when WiFi control did not answer: the
+/// status then holds the last answer it gave, and recording it would log a
+/// stale link as current.
+std::optional<LinkSample> link_sample_from_status(const WifiBackend::ConnectionStatus& status,
+                                                  int64_t uptime_s,
+                                                  std::string_view proc_net_wireless,
+                                                  std::string_view netdev);
+
 /// 802.11 channel number for a center frequency, 0 when not a WiFi channel.
 int wifi_channel_from_frequency(int frequency_mhz);
 
 /// An RSSI fall of at least this many dB between two samples is worth a line.
-inline constexpr int RSSI_DROP_DB = 15;
+inline constexpr int kRssiDropDb = 15;
 /// Real events log at INFO at most this often; the rest drop to DEBUG.
-inline constexpr int64_t LINK_INFO_MIN_INTERVAL_S = 60;
+inline constexpr int64_t kLinkInfoMinIntervalS = 60;
 
 /// What changed from @p prev to @p cur (None for the first sample).
 LinkEvent classify_link_change(const LinkSample* prev, const LinkSample& cur);
@@ -109,12 +119,12 @@ class WifiLinkMonitor {
     void record(const LinkSample& sample);
 
   private:
-    WifiLinkMonitor() : history_(HISTORY_CAPACITY) {}
+    WifiLinkMonitor() : history_(kHistoryCapacity) {}
     static void timer_cb(lv_timer_t* timer);
     void poll();
 
-    static constexpr uint32_t POLL_INTERVAL_MS = 30000;
-    static constexpr size_t HISTORY_CAPACITY = 40; ///< 20 minutes at the poll interval
+    static constexpr uint32_t kPollIntervalMs = 30000;
+    static constexpr size_t kHistoryCapacity = 40; ///< 20 minutes at the poll interval
 
     AsyncLifetimeGuard lifetime_;
     ui::LvglTimerGuard timer_;

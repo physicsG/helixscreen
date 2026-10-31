@@ -29,7 +29,7 @@ class CloseTimingFixture : public LVGLUITestFixture {
   public:
     CloseTimingFixture() {
         home_ = lv_obj_create(test_screen());
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = home_;
         panels[static_cast<int>(PanelId::Controls)] = lv_obj_create(test_screen());
         NavigationManager::instance().set_panels(panels);

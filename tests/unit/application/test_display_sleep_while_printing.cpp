@@ -22,7 +22,9 @@
 
 #include "ui_update_queue.h"
 
+#include "../../test_helpers/update_queue_test_access.h"
 #include "app_globals.h"
+#include "display_awake_hold.h"
 #include "display_manager.h"
 #include "display_settings_manager.h"
 #include "lvgl_test_fixture.h"
@@ -82,9 +84,7 @@ class SleepWhilePrintingFixture : public LVGLTestFixture {
         printer_state.print_state().set_print_start_state(phase, "", 0);
         // set_print_start_state defers; its callback is what publishes.
         process_lvgl(10);
-        for (int i = 0; i < 8; ++i) {
-            helix::ui::UpdateQueue::instance().drain();
-        }
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
     PrintState lifecycle() const {
@@ -177,4 +177,55 @@ TEST_CASE_METHOD(SleepWhilePrintingFixture,
     CHECK(mgr.is_display_sleeping());
 
     DisplayManagerTestAccess::restore_display_output(mgr);
+}
+
+TEST_CASE_METHOD(SleepWhilePrintingFixture, "a display awake hold keeps an idle printer awake",
+                 "[application][display][sleep][display-awake-hold]") {
+    // Sleep-while-printing allows sleep and nothing is printing, so the hold
+    // is the only thing that can keep the screen up.
+    DisplaySettingsManager::instance().set_sleep_while_printing(true);
+    drive_lifecycle("standby");
+    REQUIRE(lifecycle() == PrintState::Idle);
+
+    DisplayManager mgr;
+    {
+        helix::DisplayAwakeToken token;
+        token.acquire();
+        idle_past_sleep_timeout(mgr);
+        mgr.check_display_sleep();
+        CHECK_FALSE(mgr.is_display_sleeping());
+        CHECK(lv_display_get_inactive_time(nullptr) < 500);
+    }
+    REQUIRE_FALSE(helix::display_awake_hold().is_held());
+
+    idle_past_sleep_timeout(mgr);
+    mgr.check_display_sleep();
+    CHECK(mgr.is_display_sleeping());
+    DisplayManagerTestAccess::restore_display_output(mgr);
+}
+
+TEST_CASE("DisplayAwakeToken holds at most once and releases what it took",
+          "[application][display][display-awake-hold]") {
+    REQUIRE_FALSE(helix::display_awake_hold().is_held());
+    helix::DisplayAwakeToken a;
+    helix::DisplayAwakeToken b;
+    a.acquire();
+    a.acquire();
+    b.acquire();
+    a.reset();
+    // b's acquire still stands after a's double acquire is undone once.
+    CHECK(helix::display_awake_hold().is_held());
+    b.reset();
+    CHECK_FALSE(helix::display_awake_hold().is_held());
+    // A reset with nothing held must not release someone else's hold.
+    b.acquire();
+    a.reset();
+    CHECK(helix::display_awake_hold().is_held());
+    b.reset();
+    // The raw hold ignores a release with nothing acquired.
+    helix::display_awake_hold().release();
+    a.acquire();
+    CHECK(helix::display_awake_hold().is_held());
+    a.reset();
+    CHECK_FALSE(helix::display_awake_hold().is_held());
 }

@@ -62,22 +62,6 @@ TEST_CASE("format_offset: negative microns", "[zoffset][format]") {
 }
 
 // ============================================================================
-// is_auto_saved tests
-// ============================================================================
-
-TEST_CASE("is_auto_saved: FIRMWARE_MANAGED returns true", "[zoffset][strategy]") {
-    REQUIRE(is_auto_saved(ZOffsetCalibrationStrategy::FIRMWARE_MANAGED) == true);
-}
-
-TEST_CASE("is_auto_saved: PROBE_CALIBRATE returns false", "[zoffset][strategy]") {
-    REQUIRE(is_auto_saved(ZOffsetCalibrationStrategy::PROBE_CALIBRATE) == false);
-}
-
-TEST_CASE("is_auto_saved: ENDSTOP returns false", "[zoffset][strategy]") {
-    REQUIRE(is_auto_saved(ZOffsetCalibrationStrategy::ENDSTOP) == false);
-}
-
-// ============================================================================
 // displayed_z_offset_microns
 //
 // Firmware that persists the z-offset itself (ZMOD) zeroes Klipper's live
@@ -186,4 +170,54 @@ TEST_CASE("save_available: firmware that persists on its own offers no save",
     CHECK_FALSE(save_available(facts(false, true, false)));
     CHECK_FALSE(save_available(facts(false, false, true)));
     CHECK_FALSE(save_available(facts(false, true, true)));
+}
+
+TEST_CASE("save_available: saving turned off for this printer offers no save",
+          "[zoffset][save-rule][save-toggle]") {
+    SaveAvailability off = facts(true, true, true);
+    off.save_enabled = false;
+    CHECK_FALSE(save_available(off));
+    off.global_dirty = false;
+    CHECK_FALSE(save_available(off)); // a dirty tool alone does not bring it back
+}
+
+// ============================================================================
+// save_enabled: the per-printer "offer Z-offset saves" decision (#1766)
+// ============================================================================
+
+TEST_CASE("save_enabled: Auto offers saves on a printer with one offset",
+          "[zoffset][save-toggle]") {
+    CHECK(save_enabled(SaveMode::Auto, /*per_tool_z_offsets=*/false));
+}
+
+TEST_CASE("save_enabled: Auto withholds saves when each tool keeps its own Z offset",
+          "[zoffset][save-toggle]") {
+    // A machine-wide save folds the live offset into the probe or endstop,
+    // under every tool's own offset at once.
+    CHECK_FALSE(save_enabled(SaveMode::Auto, /*per_tool_z_offsets=*/true));
+}
+
+TEST_CASE("save_enabled: an explicit choice beats the toolchanger default",
+          "[zoffset][save-toggle]") {
+    CHECK(save_enabled(SaveMode::Show, true));
+    CHECK(save_enabled(SaveMode::Show, false));
+    CHECK_FALSE(save_enabled(SaveMode::Hide, true));
+    CHECK_FALSE(save_enabled(SaveMode::Hide, false));
+}
+
+TEST_CASE("save_enabled: an out-of-range stored mode falls back to Auto",
+          "[zoffset][save-toggle]") {
+    CHECK(save_enabled(static_cast<SaveMode>(7), false));
+    CHECK_FALSE(save_enabled(static_cast<SaveMode>(7), true));
+}
+
+TEST_CASE("saves_global: the machine-wide offset is written only while saving is on",
+          "[zoffset][save-toggle]") {
+    SaveAvailability f = facts(true, true, true);
+    CHECK(saves_global(f));
+    f.save_enabled = false;
+    CHECK_FALSE(saves_global(f));
+    f.save_enabled = true;
+    f.global_dirty = false;
+    CHECK_FALSE(saves_global(f));
 }

@@ -54,7 +54,7 @@ TEST_CASE("bluetooth_enabled - a --test run loads only with HELIX_BLUETOOTH=1", 
 namespace {
 
 int g_fake_ctx_storage = 0;
-helix_bt_context* const FAKE_CTX = reinterpret_cast<helix_bt_context*>(&g_fake_ctx_storage);
+helix_bt_context* const kFakeCtx = reinterpret_cast<helix_bt_context*>(&g_fake_ctx_storage);
 std::atomic<int> g_inits{0};
 
 // Slow on purpose: a real init() makes D-Bus round trips, and the window it holds
@@ -62,7 +62,7 @@ std::atomic<int> g_inits{0};
 extern "C" helix_bt_context* slow_counting_init() {
     g_inits.fetch_add(1);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    return FAKE_CTX;
+    return kFakeCtx;
 }
 
 } // namespace
@@ -90,5 +90,5 @@ TEST_CASE("BluetoothLoader creates one shared context when first called from man
 
     CHECK(g_inits.load() == 1);
     for (auto* ctx : got)
-        CHECK(ctx == FAKE_CTX);
+        CHECK(ctx == kFakeCtx);
 }

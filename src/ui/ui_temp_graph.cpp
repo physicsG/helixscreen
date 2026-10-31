@@ -4,7 +4,9 @@
 #include "ui_temp_graph.h"
 
 #include "ui_format_utils.h"
+#include "ui_swatch.h"
 
+#include "flat_map.h"
 #include "lv_draw_buf_guard.h"
 #include "system/crash_handler.h"
 #include "temp_graph_column_map.h"
@@ -17,7 +19,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
-#include <map>
 #include <memory>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,7 @@ using helix::ui::format_time;
 // Internal scale factor: store deci-degrees (×10) in the LVGL chart for 0.1°C precision.
 // Without this, float→int32_t truncation creates visible staircases in the line chart.
 // All public API values remain in degrees; scaling is applied at the LVGL boundary.
-static constexpr int32_t TEMP_SCALE = 10;
+static constexpr int32_t kTempScale = 10;
 
 // Mark the gradient cache for recompute on the next draw. Called from every path
 // that changes what the gradient should look like (data push, range change,
@@ -286,7 +287,7 @@ static void update_max_visible_temp(ui_temp_graph_t* graph) {
             if (y_points[j] == LV_CHART_POINT_NONE)
                 continue;
 
-            float temp = static_cast<float>(y_points[j]) / TEMP_SCALE;
+            float temp = static_cast<float>(y_points[j]) / kTempScale;
             if (temp > graph->min_temp && temp > max_temp) {
                 max_temp = temp;
             }
@@ -314,7 +315,7 @@ struct overrange_save_t {
 // pointers before chart A's DRAW_MAIN_END could restore them, leaving chart A's
 // over-range points stuck at LV_CHART_POINT_NONE (line gaps / frozen segments)
 // until the next data write.
-static std::map<ui_temp_graph_t*, std::vector<overrange_save_t>> s_overrange_saved;
+static helix::FlatMap<ui_temp_graph_t*, std::vector<overrange_save_t>> s_overrange_saved;
 
 // DRAW_MAIN_BEGIN: mask over-range points before LVGL draws chart lines
 static void mask_overrange_begin_cb(lv_event_t* e) {
@@ -325,7 +326,7 @@ static void mask_overrange_begin_cb(lv_event_t* e) {
     std::vector<overrange_save_t>& saved = s_overrange_saved[graph];
     saved.clear();
 
-    int32_t y_max = static_cast<int32_t>(graph->max_temp * TEMP_SCALE);
+    int32_t y_max = static_cast<int32_t>(graph->max_temp * kTempScale);
     uint32_t pc = lv_chart_get_point_count(graph->chart);
 
     for (int i = 0; i < UI_TEMP_GRAPH_MAX_SERIES; i++) {
@@ -391,8 +392,8 @@ bool temp_graph_compute_geometry(ui_temp_graph_t* graph, temp_graph_geometry_t* 
     if (point_count < 2)
         return false;
 
-    int32_t y_min = static_cast<int32_t>(graph->min_temp * TEMP_SCALE);
-    int32_t y_max = static_cast<int32_t>(graph->max_temp * TEMP_SCALE);
+    int32_t y_min = static_cast<int32_t>(graph->min_temp * kTempScale);
+    int32_t y_max = static_cast<int32_t>(graph->max_temp * kTempScale);
     if (y_max - y_min <= 0)
         return false;
 
@@ -490,7 +491,7 @@ static void gradient_render_columns(ui_temp_graph_t* graph, const temp_graph_geo
             helix::temp_graph::column_to_point(x, cw, pc, idx, t);
             const int32_t mapped = helix::temp_graph::column_series_y(
                 y_data[(sp + idx) % pc], y_data[(sp + idx + 1) % pc], t, y_min, y_max, ch);
-            if (mapped == helix::temp_graph::COLUMN_NOT_DRAWN) {
+            if (mapped == helix::temp_graph::kColumnNotDrawn) {
                 flush_run();
                 continue;
             }
@@ -956,19 +957,15 @@ static void draw_legend_cb(lv_event_t* e) {
         chip_area.y2 = y + chip_h;
         lv_draw_rect(layer, &rect_dsc, &chip_area);
 
-        // Draw color swatch (small filled circle)
-        lv_draw_rect_dsc_t swatch_dsc;
-        lv_draw_rect_dsc_init(&swatch_dsc);
-        swatch_dsc.bg_color = meta->color;
-        swatch_dsc.bg_opa = LV_OPA_COVER;
-        swatch_dsc.radius = LV_RADIUS_CIRCLE;
-
+        // The series colour as a swatch circle
         lv_area_t swatch_area;
         swatch_area.x1 = x + chip_pad_h;
         swatch_area.y1 = y + (chip_h - swatch_size) / 2;
         swatch_area.x2 = swatch_area.x1 + swatch_size;
         swatch_area.y2 = swatch_area.y1 + swatch_size;
-        lv_draw_rect(layer, &swatch_dsc, &swatch_area);
+        helix::ui::SwatchPaint swatch_paint;
+        swatch_paint.colors = {meta->color};
+        helix::ui::draw_swatch(layer, swatch_area, swatch_paint);
 
         // Draw series name label
         lv_draw_label_dsc_t label_dsc;
@@ -1103,9 +1100,9 @@ static void draw_target_lines_cb(lv_event_t* e) {
         // -----------------------------------------------------------------
         if (!history_mode) {
             int32_t content_y =
-                chart_height - lv_map(static_cast<int32_t>(meta->target_temp * TEMP_SCALE),
-                                      static_cast<int32_t>(graph->min_temp * TEMP_SCALE),
-                                      static_cast<int32_t>(graph->max_temp * TEMP_SCALE), 0,
+                chart_height - lv_map(static_cast<int32_t>(meta->target_temp * kTempScale),
+                                      static_cast<int32_t>(graph->min_temp * kTempScale),
+                                      static_cast<int32_t>(graph->max_temp * kTempScale), 0,
                                       chart_height);
             int32_t abs_y = cy1 + content_y;
             if (abs_y < cy1 || abs_y > cy2)
@@ -1150,8 +1147,8 @@ static void draw_target_lines_cb(lv_event_t* e) {
         auto y_for_deci = [&](int16_t deci) -> int32_t {
             int32_t content_y =
                 chart_height - lv_map(static_cast<int32_t>(deci),
-                                      static_cast<int32_t>(graph->min_temp * TEMP_SCALE),
-                                      static_cast<int32_t>(graph->max_temp * TEMP_SCALE), 0,
+                                      static_cast<int32_t>(graph->min_temp * kTempScale),
+                                      static_cast<int32_t>(graph->max_temp * kTempScale), 0,
                                       chart_height);
             return cy1 + content_y;
         };
@@ -1453,9 +1450,9 @@ static void draw_grid_lines_cb(lv_event_t* e) {
     line_dsc.opa = LV_OPA_30;
 
     // Draw horizontal grid lines (5 lines = 4 divisions)
-    constexpr int H_DIVISIONS = 5;
-    for (int i = 0; i <= H_DIVISIONS; i++) {
-        int32_t y = content_y1 + (content_height * i) / H_DIVISIONS;
+    constexpr int kHDivisions = 5;
+    for (int i = 0; i <= kHDivisions; i++) {
+        int32_t y = content_y1 + (content_height * i) / kHDivisions;
         line_dsc.p1.x = content_x1;
         line_dsc.p1.y = y;
         line_dsc.p2.x = content_x2;
@@ -1663,8 +1660,8 @@ ui_temp_graph_t* ui_temp_graph_create(lv_obj_t* parent) {
 
     // Set Y-axis range (in deci-degrees for 0.1°C precision)
     lv_chart_set_axis_range(graph->chart, LV_CHART_AXIS_PRIMARY_Y,
-                            static_cast<int32_t>(graph->min_temp * TEMP_SCALE),
-                            static_cast<int32_t>(graph->max_temp * TEMP_SCALE));
+                            static_cast<int32_t>(graph->min_temp * kTempScale),
+                            static_cast<int32_t>(graph->max_temp * kTempScale));
 
     // Cache theme colors for draw callbacks (avoid per-frame theme lookups)
     graph->cached_grid_color = theme_manager_get_color("elevated_bg");
@@ -2029,7 +2026,7 @@ void ui_temp_graph_show_series(ui_temp_graph_t* graph, SeriesId series_id, bool 
 static void push_target_sample(ui_temp_series_meta_t* meta) {
     if (!meta->target_deci_buf || meta->target_cap <= 0)
         return;
-    int16_t v = static_cast<int16_t>(meta->target_temp * TEMP_SCALE);
+    int16_t v = static_cast<int16_t>(meta->target_temp * kTempScale);
     if (meta->target_head < meta->target_cap) {
         meta->target_deci_buf[meta->target_head++] = v;
     } else {
@@ -2049,7 +2046,7 @@ void ui_temp_graph_update_series(ui_temp_graph_t* graph, SeriesId series_id, flo
 
     // Add point to series (shifts old data left, stored as deci-degrees)
     lv_chart_set_next_value(graph->chart, meta->chart_series,
-                            static_cast<int32_t>(temp * TEMP_SCALE));
+                            static_cast<int32_t>(temp * kTempScale));
 
     helix::temp_graph_internal::temp_graph_tooltip_on_sample_pushed(graph, series_id);
 
@@ -2085,7 +2082,7 @@ void ui_temp_graph_update_series_with_time(ui_temp_graph_t* graph, SeriesId seri
     if (!meta->first_value_received) {
         meta->first_value_received = true;
         lv_chart_set_all_values(graph->chart, meta->chart_series,
-                                static_cast<int32_t>(temp * TEMP_SCALE));
+                                static_cast<int32_t>(temp * kTempScale));
         spdlog::trace("[TempGraph] Series {} '{}' backfilled with initial temp {:.1f}°C", series_id,
                       meta->name, temp);
     }
@@ -2108,7 +2105,7 @@ void ui_temp_graph_update_series_with_time(ui_temp_graph_t* graph, SeriesId seri
 
     // Add point to series (shifts old data left, stored as deci-degrees)
     lv_chart_set_next_value(graph->chart, meta->chart_series,
-                            static_cast<int32_t>(temp * TEMP_SCALE));
+                            static_cast<int32_t>(temp * kTempScale));
 
     helix::temp_graph_internal::temp_graph_tooltip_on_sample_pushed(graph, series_id);
 
@@ -2148,7 +2145,7 @@ void ui_temp_graph_set_series_data(ui_temp_graph_t* graph, SeriesId series_id, c
     }
 
     for (size_t i = 0; i < static_cast<size_t>(points_to_copy); i++) {
-        values[i] = static_cast<int32_t>(temps[i] * TEMP_SCALE);
+        values[i] = static_cast<int32_t>(temps[i] * kTempScale);
     }
 
     // Set data using public API
@@ -2196,7 +2193,7 @@ void ui_temp_graph_set_series_data_with_targets(ui_temp_graph_t* graph, SeriesId
     if (meta->target_deci_buf) {
         int target_points = points_to_copy > meta->target_cap ? meta->target_cap : points_to_copy;
         for (int i = 0; i < target_points; i++) {
-            meta->target_deci_buf[i] = static_cast<int16_t>(targets[i] * TEMP_SCALE);
+            meta->target_deci_buf[i] = static_cast<int16_t>(targets[i] * kTempScale);
         }
         if (target_points < meta->target_cap) {
             memset(meta->target_deci_buf + target_points, 0,
@@ -2350,8 +2347,8 @@ void ui_temp_graph_set_temp_range(ui_temp_graph_t* graph, float min, float max) 
     graph->max_temp = max;
 
     lv_chart_set_axis_range(graph->chart, LV_CHART_AXIS_PRIMARY_Y,
-                            static_cast<int32_t>(min * TEMP_SCALE),
-                            static_cast<int32_t>(max * TEMP_SCALE));
+                            static_cast<int32_t>(min * kTempScale),
+                            static_cast<int32_t>(max * kTempScale));
 
     if (range_changed) {
         mark_gradient_cache_dirty(graph);

@@ -44,21 +44,29 @@ bool platform_defaults_to_external_updates();
 /// Moonraker address is a real question or a wasted step.
 bool is_printer_embedded();
 
-/// True when the environment carries an AD5X mod tree: ZMOD (the /ZMOD marker
-/// file or FlashForge's /usr/prog dir) or Forge-X — whose chroot has neither,
-/// but whose mod git tree stays reachable (/opt/config/mod in-chroot,
-/// /usr/data/config/mod host-side, proven by .shell/platform.sh). Same rule as
-/// the launcher's heap-diag gate (scripts/helix-launcher.sh); the two test
-/// suites pin both to one truth table. All probes resolve under `probe_root`
-/// (default "/") so tests can feed a fake layout without touching the real
-/// root filesystem. stat-only; never opens anything.
-///
-/// `flavor_out`, when non-null, receives a static "ZMOD" or "Forge-X" naming
-/// which arm matched, and is left untouched on a false return. One platform key
-/// can serve a K1 and both AD5X firmware populations, so the arm is what tells
-/// three different filesystem layouts apart in a diagnostic.
-bool ad5x_mod_layout_present(const std::string& probe_root = "/",
-                             const char** flavor_out = nullptr);
+/// Which FlashForge mod's filesystem tree the environment carries. A tree
+/// fact, not a board fact: an AD5X and a Creator 5 both carry FlashForge's
+/// /usr/prog.
+enum class FlashForgeModTree {
+    None,   ///< no FlashForge mod tree (Pi, dev box, K1)
+    Zmod,   ///< the /ZMOD marker file or FlashForge's /usr/prog dir
+    ForgeX, ///< a Forge-X chroot, which has neither but keeps its mod git tree reachable
+};
+
+/// Probes the mod tree: ZMOD (the /ZMOD marker file or FlashForge's /usr/prog dir) or
+/// Forge-X, whose chroot has neither but whose mod git tree stays reachable
+/// (/opt/config/mod in-chroot, /usr/data/config/mod host-side, proven by
+/// .shell/platform.sh). Same rule as the launcher's heap-diag gate
+/// (scripts/helix-launcher.sh); the two test suites pin both to one truth
+/// table. All probes resolve under `probe_root` (default "/") so tests can feed
+/// a fake layout without touching the real root filesystem. stat-only; never
+/// opens anything. One platform key can serve a K1 and both FlashForge firmware
+/// populations, so the tree is what tells three filesystem layouts apart in a
+/// diagnostic.
+FlashForgeModTree flashforge_mod_tree(const std::string& probe_root = "/");
+
+/// "none", "ZMOD" or "Forge-X".
+const char* flashforge_mod_tree_name(FlashForgeModTree tree);
 
 /// The three FlashForge boards the unified MIPS payload ships on. Answered by
 /// flashforge_machine_id() below.

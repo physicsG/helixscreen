@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Fail when a plugin translation pack shadows a system string.
 
-Packs are consulted BEFORE the app catalog, so a pack entry whose tag matches
-a catalog key does not "also translate" that string - it overrides the
-system's translation for the whole UI while the plugin is loaded (a plugin
-pack's "Start" relabels every Start button). The rule: a pack may only carry
-strings the app does not already say. Checked against translations/<lang>.yml
-(the source of truth, per qc_base_locale), not the generated XML.
+Packs are consulted AFTER the app catalog, so a pack entry whose tag matches
+a catalog key is never used: the app's own translation wins. The entry is dead
+weight and usually a sign the author expected to relabel the string. The rule:
+a pack may only carry strings the app does not already say. Checked against
+translations/<lang>.yml (the source of truth, per qc_base_locale), not the
+generated XML.
 
-Usage: check_plugin_i18n_shadow.py [--root DIR] [--staged-only]
+Usage: check_plugin_i18n_shadow.py [--root DIR]
 With --root, scan plugin packs under DIR/i18n instead of the repository's
 examples and fixtures (used by the meta-test).
 """
@@ -16,10 +16,11 @@ examples and fixtures (used by the meta-test).
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -27,18 +28,14 @@ REPO = Path(__file__).resolve().parent.parent
 def catalog_tags(lang: str) -> set[str] | None:
     """English-source keys for one language, from translations/<lang>.yml.
 
-    The YAML is flat "English text: translation" lines; keys are the tags.
+    Parsed with a real YAML loader: keys may use '' escapes, double-quoted
+    escapes, or fold across lines, none of which a per-line match sees.
     """
     yml = REPO / "translations" / f"{lang}.yml"
     if not yml.exists():
         return None
-    tags: set[str] = set()
-    for line in yml.read_text(encoding="utf-8").splitlines():
-        # Single-line keys under `translations:`: quoted or bare, indented.
-        m = re.match(r"^\s+(?:'([^']*)'|\"([^\"]*)\"|([^:#']+))\s*:", line)
-        if m:
-            tags.add(next(g for g in m.groups() if g is not None))
-    return tags
+    doc = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+    return {str(k) for k in (doc.get("translations") or {})}
 
 
 def pack_tags(pack: Path) -> list[tuple[str, str]]:
@@ -72,6 +69,11 @@ def main() -> int:
         except ValueError:
             return str(p)
 
+    if not packs:
+        print("No plugin translation packs found; the gate would pass "
+              "vacuously. Check the pack directories it scans.", file=sys.stderr)
+        return 1
+
     catalogs: dict[str, set[str] | None] = {}
     shadows: list[str] = []
     for pack in packs:
@@ -90,10 +92,11 @@ def main() -> int:
         print("Plugin packs must not shadow system strings:", file=sys.stderr)
         for s in shadows:
             print(f"  {s}", file=sys.stderr)
-        print("Packs are looked up before the catalog, so a duplicate tag overrides "
-              "the app's translation app-wide while the plugin is loaded. Remove the "
-              "entry; the catalog already translates it.", file=sys.stderr)
+        print("Packs are looked up after the catalog, so a duplicate tag is never "
+              "used. Remove the entry; the catalog already translates it.",
+              file=sys.stderr)
         return 1
+    print(f"Checked {len(packs)} plugin translation pack(s); no shadows")
     return 0
 
 

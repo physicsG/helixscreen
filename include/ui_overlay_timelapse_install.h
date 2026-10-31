@@ -12,7 +12,9 @@
 struct WebcamInfo;
 struct TimelapseSettings;
 struct MoonrakerError;
+namespace helix {
 class IMoonrakerAPI;
+}
 
 /**
  * @file ui_overlay_timelapse_install.h
@@ -28,7 +30,7 @@ class IMoonrakerAPI;
  */
 class TimelapseInstallOverlay : public OverlayBase {
   public:
-    explicit TimelapseInstallOverlay(IMoonrakerAPI* api);
+    explicit TimelapseInstallOverlay(helix::IMoonrakerAPI* api);
 
     const char* get_name() const override {
         return "Timelapse Install";
@@ -47,7 +49,7 @@ class TimelapseInstallOverlay : public OverlayBase {
     lv_obj_t* get_panel() const {
         return overlay_root_;
     }
-    void set_api(IMoonrakerAPI* api) {
+    void set_api(helix::IMoonrakerAPI* api) {
         api_ = api;
     }
 
@@ -97,7 +99,7 @@ class TimelapseInstallOverlay : public OverlayBase {
     void write_timelapse_config(const std::string& helix_content,
                                 const std::string& moonraker_content);
 
-    IMoonrakerAPI* api_;
+    helix::IMoonrakerAPI* api_;
     lv_obj_t* step_progress_ = nullptr;
     lv_obj_t* status_label_ = nullptr;
     lv_obj_t* action_btn_ = nullptr;
@@ -109,7 +111,7 @@ class TimelapseInstallOverlay : public OverlayBase {
 };
 
 TimelapseInstallOverlay& get_global_timelapse_install();
-void init_global_timelapse_install(IMoonrakerAPI* api);
+void init_global_timelapse_install(helix::IMoonrakerAPI* api);
 
 /// Open the timelapse install wizard overlay (lazy-creates panel on first call)
 void open_timelapse_install();

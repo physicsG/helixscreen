@@ -97,10 +97,10 @@ int keyword_confidence(const std::string& object_name) {
     if (upper != keyword) {
         score -= 1;
     }
-    static const char* const AIR_QUALITY_TOKENS[] = {"TVOC",     "VOC",         "CO2",     "GAS",
-                                                     "HUMIDITY", "IAQ",         "AQI",     "PM25",
-                                                     "PM10",     "PARTICULATE", "PRESSURE"};
-    for (const char* tok : AIR_QUALITY_TOKENS) {
+    static const char* const kAirQualityTokens[] = {"TVOC",     "VOC",         "CO2",     "GAS",
+                                                    "HUMIDITY", "IAQ",         "AQI",     "PM25",
+                                                    "PM10",     "PARTICULATE", "PRESSURE"};
+    for (const char* tok : kAirQualityTokens) {
         if (has_standalone_token(upper, tok)) {
             score -= 40;
             break;
@@ -115,12 +115,12 @@ const ChamberHeaterBackend* dragonbreath_backend_instance();
 const ChamberHeaterBackend* panda_breath_backend_instance();
 
 const std::vector<const ChamberHeaterBackend*>& registry() {
-    static const std::vector<const ChamberHeaterBackend*> REG = {
+    static const std::vector<const ChamberHeaterBackend*> kReg = {
         &kGeneric,
         dragonbreath_backend_instance(),
         panda_breath_backend_instance(),
     };
-    return REG;
+    return kReg;
 }
 
 MatchResult match(const std::string& object_name) {

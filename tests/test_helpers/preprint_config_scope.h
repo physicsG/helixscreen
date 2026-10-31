@@ -25,18 +25,18 @@ class PreprintConfigScope {
         : cfg_(helix::Config::get_instance()),
           type_path_(cfg_->df() + helix::wizard::PRINTER_TYPE) {
         saved_type_ = cfg_->get<std::string>(type_path_, "");
-        saved_history_ = cfg_->get<nlohmann::json>(HISTORY_PATH, nlohmann::json::array());
-        for (const char* heater : ThermalRateManager::PERSISTED_HEATERS) {
+        saved_history_ = cfg_->get<nlohmann::json>(kHistoryPath, nlohmann::json::array());
+        for (const char* heater : ThermalRateManager::kPersistedHeaters) {
             saved_rates_[heater] = cfg_->get<float>(rate_path(heater), 0.0f);
             cfg_->set<float>(rate_path(heater), 0.0f);
         }
         cfg_->set<std::string>(type_path_, printer_type);
-        cfg_->set<nlohmann::json>(HISTORY_PATH, nlohmann::json::array());
+        cfg_->set<nlohmann::json>(kHistoryPath, nlohmann::json::array());
     }
 
     ~PreprintConfigScope() {
         cfg_->set<std::string>(type_path_, saved_type_);
-        cfg_->set<nlohmann::json>(HISTORY_PATH, saved_history_);
+        cfg_->set<nlohmann::json>(kHistoryPath, saved_history_);
         for (const auto& [heater, rate] : saved_rates_) {
             cfg_->set<float>(rate_path(heater), rate);
         }
@@ -46,7 +46,7 @@ class PreprintConfigScope {
     PreprintConfigScope& operator=(const PreprintConfigScope&) = delete;
 
   private:
-    static constexpr const char* HISTORY_PATH = "/print_start_history/entries";
+    static constexpr const char* kHistoryPath = "/print_start_history/entries";
 
     static std::string rate_path(const std::string& heater) {
         return "/thermal/rates/" + heater + "/heat_rate";

@@ -202,6 +202,11 @@ class TipsManager {
     size_t get_total_tips();
 
     /**
+     * @brief Get every tip's title, in database order
+     */
+    std::vector<std::string> get_all_titles();
+
+    /**
      * @brief Get database version
      *
      * @return Version string from JSON

@@ -84,13 +84,13 @@ bool is_quoted_string(std::string_view text) {
 
 MacroDefaultKind classify_default(std::string_view text) {
     static const helix::Regex number_re(R"(^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$)");
-    static constexpr std::string_view KEYWORDS[] = {"true",  "True", "false",
-                                                    "False", "none", "None"};
+    static constexpr std::string_view kKeywords[] = {"true",  "True", "false",
+                                                     "False", "none", "None"};
 
     if (text.empty() || is_quoted_string(text) || helix::regex_match(text, number_re)) {
         return MacroDefaultKind::Literal;
     }
-    for (std::string_view keyword : KEYWORDS) {
+    for (std::string_view keyword : kKeywords) {
         if (text == keyword) {
             return MacroDefaultKind::Literal;
         }
@@ -181,7 +181,8 @@ std::vector<MacroParam> helix::parse_macro_params(const std::string& gcode_templ
     return result;
 }
 
-std::map<std::string, std::string> helix::parse_raw_macro_params(const std::string& raw_text) {
+std::map<std::string, std::string>
+helix::parse_raw_macro_params(const std::string& raw_text, std::vector<std::string>* rejected) {
     std::map<std::string, std::string> result;
     size_t pos = 0;
     while (pos < raw_text.size()) {
@@ -195,11 +196,26 @@ std::map<std::string, std::string> helix::parse_raw_macro_params(const std::stri
         std::string token = raw_text.substr(pos, end - pos);
         pos = end;
         auto eq = token.find('=');
-        if (eq == std::string::npos || eq == 0)
+        if (eq == std::string::npos || eq == 0) {
+            if (rejected)
+                rejected->push_back(token);
             continue;
+        }
         std::string key = token.substr(0, eq);
         key = helix::text_io::to_upper(key);
         result[key] = token.substr(eq + 1);
     }
     return result;
+}
+
+std::string helix::format_raw_macro_params(const std::map<std::string, std::string>& values) {
+    std::string text;
+    for (const auto& [key, value] : values) {
+        if (!text.empty())
+            text += ' ';
+        text += key;
+        text += '=';
+        text += value;
+    }
+    return text;
 }

@@ -3,6 +3,8 @@
 
 #include "ui_fan_control_overlay.h"
 
+#include "ui_callback_helpers.h"
+#include "ui_drag_surface.h"
 #include "ui_error_reporting.h"
 #include "ui_fan_arc_resize.h"
 #include "ui_modal.h"
@@ -12,12 +14,14 @@
 
 #include "app_constants.h"
 #include "app_globals.h"
+#include "chamber_air_modes.h"
 #include "config.h"
 #include "display_settings_manager.h"
 #include "format_utils.h"
 #include "helix-xml/src/xml/lv_xml.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "macro_executor.h"
 #include "observer_factory.h"
 #include "ui/fan_spin_animation.h"
 #include "ui/ui_widget_helpers.h"
@@ -41,25 +45,17 @@ struct FanRenameData {
     bool press_point_valid = false;
 };
 
-/// True when the active press landed on (or bubbled up from) an arc or slider —
-/// the fan speed dial. Its events bubble to the card root where the rename
-/// handler lives, so a hold spent dragging the dial must never read as a rename.
-/// Mirrors HomePanel::should_suppress_edit_mode.
+/// True when the active press landed on (or bubbled up from) a drag surface
+/// (is_drag_surface_hit()): the fan speed dial. Its events bubble to the card
+/// root where the rename handler lives, so a hold spent dragging the dial must
+/// never read as a rename. Same test as HomePanel::should_suppress_edit_mode.
 bool press_consumed_by_value_widget(lv_event_t* e) {
     lv_indev_t* indev = lv_indev_active();
     if (indev && lv_indev_get_scroll_obj(indev))
         return true;
 
-    lv_obj_t* target = lv_event_get_target_obj(e);
-    lv_obj_t* current = lv_event_get_current_target_obj(e);
-    while (target) {
-        if (lv_obj_has_class(target, &lv_arc_class) || lv_obj_has_class(target, &lv_slider_class))
-            return true;
-        if (target == current)
-            break;
-        target = lv_obj_get_parent(target);
-    }
-    return false;
+    return helix::ui::is_drag_surface_hit(lv_event_get_target_obj(e),
+                                          lv_event_get_current_target_obj(e));
 }
 
 /// True when the finger drifted past the deliberate-hold threshold since the
@@ -76,7 +72,7 @@ bool finger_drifted_since_press(const FanRenameData* data) {
     lv_indev_get_point(indev, &now);
     const int dx = now.x - data->press_start_point.x;
     const int dy = now.y - data->press_start_point.y;
-    const int limit = lv_dpx(AppConstants::Input::EDIT_MODE_MOVE_CANCEL_DPX);
+    const int limit = lv_dpx(app_constants::input::kEditModeMoveCancelDpx);
     return (dx * dx + dy * dy) > (limit * limit);
 }
 
@@ -107,6 +103,7 @@ void on_fan_long_pressed(lv_event_t* e) {
         return;
     }
     spdlog::debug("[FanControlOverlay] Long press on '{}'", data->object_name);
+    helix::ui::end_press(e);
     helix::settings::get_fan_settings_overlay().handle_fan_rename(data->object_name,
                                                                   data->display_name);
 }
@@ -122,6 +119,27 @@ void attach_long_press_rename(lv_obj_t* widget, const std::string& object_name,
     lv_obj_add_event_cb(widget, on_fan_pressed, LV_EVENT_PRESSED, data);
     lv_obj_add_event_cb(widget, on_fan_long_pressed, LV_EVENT_LONG_PRESSED, data);
     lv_obj_add_event_cb(widget, on_fan_rename_data_delete, LV_EVENT_DELETE, data);
+}
+
+/// A chamber air mode button: user_data names the mode (chamber_air::mode_id).
+void on_chamber_air_mode_clicked(lv_event_t* e) {
+    const char* id = static_cast<const char*>(lv_event_get_user_data(e));
+    const auto mode = helix::chamber_air::parse_mode_id(id ? id : "");
+    if (!mode) {
+        spdlog::warn("[FanControlOverlay] Unknown chamber air mode '{}'", id ? id : "");
+        return;
+    }
+    const std::string gcode =
+        helix::chamber_air::mode_gcode(get_printer_state().get_discovery(), *mode);
+    if (gcode.empty()) {
+        spdlog::warn("[FanControlOverlay] This printer does not offer chamber air mode '{}'", id);
+        return;
+    }
+    helix::MachineGcode cmd;
+    cmd.gcode = gcode;
+    cmd.log_name = gcode;
+    cmd.display_name = lv_tr("Chamber air");
+    helix::execute_machine_gcode(get_moonraker_api(), cmd, "[FanControlOverlay]");
 }
 
 } // namespace
@@ -159,6 +177,7 @@ FanControlOverlay::~FanControlOverlay() {
 // ============================================================================
 
 lv_obj_t* FanControlOverlay::create(lv_obj_t* parent) {
+    register_xml_callbacks({{"on_chamber_air_mode_clicked", on_chamber_air_mode_clicked}});
     if (!OverlayBase::create(parent)) {
         return nullptr;
     }
@@ -242,14 +261,10 @@ void FanControlOverlay::on_deactivating(DeactivateReason) {
 void FanControlOverlay::cleanup() {
     spdlog::debug("[{}] Cleanup", get_name());
 
-    // Freeze queue, drain pending deferred callbacks, THEN tear down observers
-    // and animations to prevent use-after-free from stale queued callbacks.
-    {
-        auto freeze = helix::ui::UpdateQueue::instance().scoped_freeze();
-        helix::ui::UpdateQueue::instance().drain();
-
-        release_fan_widgets();
-    }
+    // Resetting the observers drops their queued callbacks, and the queued fan
+    // rebuild checks the overlay is visible, so nothing queued reaches the
+    // dials released here.
+    release_fan_widgets();
     OverlayBase::cleanup();
 }
 

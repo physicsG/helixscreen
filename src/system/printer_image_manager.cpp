@@ -3,13 +3,18 @@
 
 #include "printer_image_manager.h"
 
+#include "ams_backend.h"
+#include "ams_state.h"
+#include "app_globals.h"
 #include "config.h"
 #include "data_root_resolver.h"
 #include "helix_fs.h"
 #include "lvgl_image_writer.h"
 #include "prerendered_images.h"
 #include "printer_image_regions.h"
+#include "printer_image_variants.h"
 #include "printer_images.h"
+#include "printer_state.h"
 #include "settings_manager.h"
 #include "static_subject_registry.h"
 #include "text_io.h"
@@ -35,10 +40,10 @@ namespace hfs = helix::fs;
 namespace helix {
 
 // Maximum file size for import (5 MB)
-static constexpr size_t MAX_FILE_SIZE = 5 * 1024 * 1024;
+static constexpr size_t kMaxFileSize = 5 * 1024 * 1024;
 
 // Maximum image dimensions for import
-static constexpr int MAX_IMAGE_DIMENSION = 2048;
+static constexpr int kMaxImageDimension = 2048;
 
 PrinterImageManager& PrinterImageManager::instance() {
     static PrinterImageManager inst;
@@ -47,15 +52,7 @@ PrinterImageManager& PrinterImageManager::instance() {
 
 void PrinterImageManager::init(const std::string& config_dir) {
     custom_dir_ = config_dir + "/custom_images/";
-
-    // Initialize image-changed subject (version counter for observers)
-    if (!subjects_initialized_) {
-        lv_subject_init_int(&image_changed_subject_, 0);
-        subjects_.register_subject(&image_changed_subject_);
-        subjects_initialized_ = true;
-        StaticSubjectRegistry::instance().register_deinit(
-            "PrinterImageManager", []() { PrinterImageManager::instance().deinit_subjects(); });
-    }
+    init_subjects();
 
     if (!hfs::create_directories(custom_dir_)) {
         spdlog::error("[PrinterImageManager] Failed to create custom_images dir: {}",
@@ -63,6 +60,17 @@ void PrinterImageManager::init(const std::string& config_dir) {
         return;
     }
     spdlog::info("[PrinterImageManager] Initialized, custom_dir: {}", custom_dir_);
+}
+
+void PrinterImageManager::init_subjects() {
+    if (subjects_initialized_)
+        return;
+    // Version counter for observers
+    lv_subject_init_int(&image_changed_subject_, 0);
+    subjects_.register_subject(&image_changed_subject_);
+    subjects_initialized_ = true;
+    StaticSubjectRegistry::instance().register_deinit(
+        "PrinterImageManager", []() { PrinterImageManager::instance().deinit_subjects(); });
 }
 
 void PrinterImageManager::deinit_subjects() {
@@ -151,6 +159,20 @@ std::string PrinterImageManager::get_active_image_path(int screen_width) {
     return "";
 }
 
+std::vector<PrinterImageManager::DetectionInput> PrinterImageManager::detection_inputs() {
+    std::vector<DetectionInput> inputs;
+    AmsState& ams = AmsState::instance();
+    for (lv_subject_t* s : {ams.get_backend_count_subject(), ams.get_ams_type_subject(),
+                            ams.get_ams_data_revision_subject()}) {
+        inputs.push_back({s, ams.get_subjects_lifetime()});
+    }
+    auto& caps = get_printer_state().capabilities_state();
+    for (Capability cap : {Capability::EnclosureTopFitted, Capability::HasChamberHeater}) {
+        inputs.push_back({caps.subject(cap), caps.get_subjects_lifetime()});
+    }
+    return inputs;
+}
+
 void PrinterImageManager::notify_image_changed() {
     if (subjects_initialized_) {
         int ver = lv_subject_get_int(&image_changed_subject_);
@@ -158,14 +180,47 @@ void PrinterImageManager::notify_image_changed() {
     }
 }
 
+namespace {
+
+/// The hardware AmsState and PrinterState have detected, as the facts image
+/// variants are chosen by.
+printer_images::HardwareFacts detected_hardware_facts() {
+    printer_images::HardwareFacts facts;
+    AmsState& ams = AmsState::instance();
+    for (int i = 0; i < ams.backend_count(); ++i) {
+        const AmsBackend* backend = ams.get_backend(i);
+        if (!backend) {
+            continue;
+        }
+        if (backend->get_system_info().presents_filament_system()) {
+            facts.filament_systems.push_back(backend->get_type());
+        }
+    }
+    const auto& caps = get_printer_state().capabilities_state();
+    facts.enclosure_top = caps.enclosure_top_fitted();
+    facts.has_chamber_heater = caps.has_chamber_heater();
+    return facts;
+}
+
+} // namespace
+
+std::string PrinterImageManager::get_detected_image_path(int screen_width) {
+    Config* config = Config::get_instance();
+    const std::string printer_type =
+        config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
+    if (printer_type.empty()) {
+        return printer_images::default_printer_image_path();
+    }
+    return printer_images::get_best_image_for_file(
+        PrinterDetector::get_image_for_printer(printer_type, detected_hardware_facts()),
+        screen_width);
+}
+
 std::string PrinterImageManager::get_displayed_image_path(int screen_width) {
     std::string path = get_active_image_path(screen_width);
     if (!path.empty())
         return path;
-    Config* config = Config::get_instance();
-    const std::string printer_type =
-        config->get<std::string>(config->df() + helix::wizard::PRINTER_TYPE, "");
-    return PrinterImages::get_best_printer_image(printer_type);
+    return get_detected_image_path(screen_width);
 }
 
 // =============================================================================
@@ -409,7 +464,7 @@ PrinterImageManager::validate_image(const std::string& path) const {
         result.error = "File not found: " + path;
         return result;
     }
-    if (*file_size > MAX_FILE_SIZE) {
+    if (*file_size > kMaxFileSize) {
         result.error =
             "File too large (" + std::to_string(*file_size / 1024 / 1024) + "MB, max 5MB)";
         return result;
@@ -422,10 +477,10 @@ PrinterImageManager::validate_image(const std::string& path) const {
         return result;
     }
 
-    if (w > MAX_IMAGE_DIMENSION || h > MAX_IMAGE_DIMENSION) {
+    if (w > kMaxImageDimension || h > kMaxImageDimension) {
         result.error = "Image too large (" + std::to_string(w) + "x" + std::to_string(h) +
-                       ", max " + std::to_string(MAX_IMAGE_DIMENSION) + "x" +
-                       std::to_string(MAX_IMAGE_DIMENSION) + ")";
+                       ", max " + std::to_string(kMaxImageDimension) + "x" +
+                       std::to_string(kMaxImageDimension) + ")";
         return result;
     }
 

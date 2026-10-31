@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!-- Live pressure advance for the active extruder, sharing a row with the
+       speed and flow reset in both orientations of the print tune panel (it
+       wraps under it where the row is too narrow). The value is the printer's
+       own report, so a step that Klipper refused never shows as applied. The
+       Tuner button appears only while a pressure-advance test print runs, as
+       the way back to the full-screen tuner. -->
+  <view name="tune_pa_row"
+        width="content" height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_xxs"
+        style_flex_cross_place="center" scrollable="false">
+    <text_small text="PA" style_text_color="#text_muted"/>
+    <text_heading name="pa_display" bind_text="tune_pa_display" style_pad_right="#space_xs"/>
+    <ui_button name="btn_pa_tuner" height="#button_height_sm" text="Tuner" icon="gauge" hidden="true">
+      <bind_flag_if_eq subject="tune_pa_session_active" flag="hidden" ref_value="0"/>
+      <event_cb trigger="clicked" callback="on_tune_open_pa_tuner"/>
+    </ui_button>
+    <!-- Coarse steps give way in portrait and on the smallest panels, where the
+         row shares its width with the reset button. -->
+    <ui_button name="btn_pa_minus_5" width="#tune_pa_btn_w" height="#button_height_sm" text="-.005">
+      <bind_flag_if cond="ui_is_portrait eq 1 or ui_breakpoint le 1" flag="hidden"/>
+      <event_cb trigger="clicked" callback="on_tune_pa_adjust" user_data="-5"/>
+    </ui_button>
+    <ui_button name="btn_pa_minus_1" width="#tune_pa_btn_w" height="#button_height_sm" text="-.001">
+      <event_cb trigger="clicked" callback="on_tune_pa_adjust" user_data="-1"/>
+    </ui_button>
+    <ui_button name="btn_pa_plus_1" width="#tune_pa_btn_w" height="#button_height_sm" text="+.001">
+      <event_cb trigger="clicked" callback="on_tune_pa_adjust" user_data="1"/>
+    </ui_button>
+    <ui_button name="btn_pa_plus_5" width="#tune_pa_btn_w" height="#button_height_sm" text="+.005">
+      <bind_flag_if cond="ui_is_portrait eq 1 or ui_breakpoint le 1" flag="hidden"/>
+      <event_cb trigger="clicked" callback="on_tune_pa_adjust" user_data="5"/>
+    </ui_button>
+  </view>
+</component>

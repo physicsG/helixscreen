@@ -13,6 +13,7 @@
 
 #include "../lvgl_ui_test_fixture.h"
 #include "display_settings_manager.h"
+#include "keyboard_layout_provider.h"
 #include "lvgl/lvgl.h"
 
 #include <string>
@@ -197,4 +198,37 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Hiding a suppressed keyboard leaves the scr
     lv_group_focus_obj(nullptr);
     lv_obj_delete(ta);
     lv_obj_delete(placed);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture,
+                 "The keyboard manager applies the no-bubble map when popovers are off",
+                 "[keyboard][keyboard_popover]") {
+    ScopedKeyboardPolicy policy(test_screen());
+    lv_obj_t* kb = KeyboardManager::instance().get_instance();
+    REQUIRE(kb != nullptr);
+    lv_keyboard_set_popovers(kb, false);
+
+    lv_obj_t* ta = focus_new_textarea(test_screen(), policy.group);
+    KeyboardManager::instance().show(ta);
+
+    const char* const* map = keyboard_layout_get_map(KEYBOARD_LAYOUT_ALPHA_LC, false);
+    const lv_buttonmatrix_ctrl_t* ctrl = keyboard_layout_get_ctrl_map(KEYBOARD_LAYOUT_ALPHA_LC);
+    uint32_t buttons = 0;
+    for (size_t i = 0; map[i][0] != '\0'; ++i) {
+        if (std::string(map[i]) != "\n") {
+            ++buttons;
+        }
+    }
+    size_t popover_keys = 0;
+    for (uint32_t i = 0; i < buttons; ++i) {
+        INFO("button " << i);
+        CHECK_FALSE(lv_buttonmatrix_has_button_ctrl(kb, i, LV_BUTTONMATRIX_CTRL_POPOVER));
+        if (ctrl[i] & LV_BUTTONMATRIX_CTRL_POPOVER) {
+            ++popover_keys;
+        }
+    }
+    REQUIRE(popover_keys > 0);
+
+    lv_group_focus_obj(nullptr);
+    lv_obj_delete(ta);
 }

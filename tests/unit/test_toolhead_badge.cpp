@@ -27,7 +27,7 @@ struct StyleCase {
     DrawFn draw;
 };
 
-const StyleCase STYLES[] = {
+const StyleCase kStyles[] = {
     {ToolheadStyle::DEFAULT, "default", draw_nozzle_bambu},
     {ToolheadStyle::A4T, "a4t", draw_nozzle_a4t},
     {ToolheadStyle::ANTHEAD, "anthead", draw_nozzle_anthead},
@@ -39,33 +39,33 @@ const StyleCase STYLES[] = {
 
 // Glyph scales the canvases draw at, micro through 800x480: the detail tool
 // scale (2/3 of space_md), the overview row (3/4) and the single nozzle.
-constexpr int32_t SCALES[] = {6, 7, 8, 10, 12};
+constexpr int32_t kScales[] = {6, 7, 8, 10, 12};
 
 // The spool badge at micro and at 800x480 (height, minimum width), inset 2.
 struct BadgeSize {
     int32_t h, w;
 };
-constexpr BadgeSize SIZES[] = {{14, 18}, {16, 22}};
-constexpr int32_t INSET = 2;
+constexpr BadgeSize kSizes[] = {{14, 18}, {16, 22}};
+constexpr int32_t kInset = 2;
 
 // Tube gauge 5 plus its halo, either side of the column center.
-constexpr int32_t TUBE_HALF = (5 + HALO_WIDTH_EXTRA + 1) / 2;
+constexpr int32_t kTubeHalf = (5 + kHaloWidthExtra + 1) / 2;
 
 } // namespace
 
 TEST_CASE("Toolhead badge: the lower-right corner clears the tube on every style",
           "[toolhead_badge]") {
     bool upper_left_overlaps = false;
-    for (const StyleCase& sc : STYLES) {
-        for (int32_t s : SCALES) {
-            for (const BadgeSize& b : SIZES) {
+    for (const StyleCase& sc : kStyles) {
+        for (int32_t s : kScales) {
+            for (const BadgeSize& b : kSizes) {
                 CAPTURE(sc.name, s, b.h, b.w);
                 const GlyphBounds g = toolhead_bounds(sc.style, 200, 200, s);
                 // The tube runs down to the nozzle inlet, 2 scale units above center.
                 const int32_t tube_end = 200 - 2 * s;
                 const lv_area_t lr =
-                    toolhead_badge_rect(g, b.w, b.h, INSET, BadgeCorner::LowerRight);
-                CHECK(badge_clears_tube(lr, 200, tube_end, TUBE_HALF));
+                    toolhead_badge_rect(g, b.w, b.h, kInset, BadgeCorner::LowerRight);
+                CHECK(badge_clears_tube(lr, 200, tube_end, kTubeHalf));
                 // Overhanging the corner, like the spool badge on its spool,
                 // and clear of the nozzle's center column.
                 CHECK(lr.x2 > g.right);
@@ -75,14 +75,14 @@ TEST_CASE("Toolhead badge: the lower-right corner clears the tube on every style
                 CHECK(lr.x1 > (g.left + g.right) / 2);
 
                 const lv_area_t ul =
-                    toolhead_badge_rect(g, b.w, b.h, INSET, BadgeCorner::UpperLeft);
-                upper_left_overlaps |= !badge_clears_tube(ul, 200, tube_end, TUBE_HALF);
+                    toolhead_badge_rect(g, b.w, b.h, kInset, BadgeCorner::UpperLeft);
+                upper_left_overlaps |= !badge_clears_tube(ul, 200, tube_end, kTubeHalf);
             }
         }
     }
     // Why the corner is lower right: upper left reaches across the tube somewhere.
     CHECK(upper_left_overlaps);
-    CHECK(TOOLHEAD_BADGE_CORNER == BadgeCorner::LowerRight);
+    CHECK(kToolheadBadgeCorner == BadgeCorner::LowerRight);
 }
 
 TEST_CASE("Toolhead badge: the clearance test sees a badge across the tube", "[toolhead_badge]") {
@@ -99,7 +99,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "Toolhead bounds hold every style's drawn pixe
     lv_obj_t* canvas = lv_canvas_create(test_screen());
     lv_canvas_set_draw_buf(canvas, buf);
 
-    for (const StyleCase& sc : STYLES) {
+    for (const StyleCase& sc : kStyles) {
         for (int32_t s : {6, 10, 16}) {
             CAPTURE(sc.name, s);
             lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_TRANSP);

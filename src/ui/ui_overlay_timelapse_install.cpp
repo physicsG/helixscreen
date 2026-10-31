@@ -580,7 +580,7 @@ void TimelapseInstallOverlay::step_restart_moonraker() {
     auto tok = lifetime_.token();
 
     // Suppress recovery modal during intentional restart
-    EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::LONG);
+    EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::LONG);
 
     api_->restart_moonraker(
         [this, tok]() {

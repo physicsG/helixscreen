@@ -64,14 +64,14 @@ TEST_CASE("a text face is not an icon font", "[icon][font][theme]") {
 
 namespace {
 
-constexpr const char* ICON_MODE_SUBJECT = "icon_font_test_mode";
+constexpr const char* kIconModeSubject = "icon_font_test_mode";
 
 /// The four ways an <icon>'s face can be decided: a size attribute, a bound
 /// style, the create-path default when no size is given, and an inline
 /// attribute. The default_icon case matters because ui_icon_xml_create applies
 /// a face unconditionally, so a fix that only covers the attribute path leaves
 /// that one writing locally.
-constexpr const char* ICON_FIXTURE_XML = R"(<component>
+constexpr const char* kIconFixtureXml = R"(<component>
   <styles>
     <style name="big_icon" text_font="#icon_font_xl"/>
     <style name="tiny_icon" text_font="#icon_font_xs"/>
@@ -93,7 +93,7 @@ lv_subject_t& icon_mode_subject() {
     static bool registered = false;
     if (!registered) {
         lv_subject_init_int(&subject, 0);
-        lv_xml_register_subject(nullptr, ICON_MODE_SUBJECT, &subject);
+        lv_xml_register_subject(nullptr, kIconModeSubject, &subject);
         registered = true;
     }
     return subject;
@@ -102,7 +102,7 @@ lv_subject_t& icon_mode_subject() {
 lv_obj_t* create_icon_fixture(lv_obj_t* parent) {
     static bool registered = false;
     if (!registered) {
-        REQUIRE(lv_xml_register_component_from_data("icon_font_fixture", ICON_FIXTURE_XML) ==
+        REQUIRE(lv_xml_register_component_from_data("icon_font_fixture", kIconFixtureXml) ==
                 LV_RESULT_OK);
         registered = true;
     }
@@ -202,7 +202,7 @@ namespace {
 /// subject to "". The app registers an int-0 subject under that empty name
 /// (src/xml_registration.cpp), so without an engine-side skip the eq-0 rung
 /// style installs and pins the glyph to the xs face at every breakpoint.
-constexpr const char* EMPTY_RUNG_FIXTURE_XML = R"(<component>
+constexpr const char* kEmptyRungFixtureXml = R"(<component>
   <api>
     <prop name="rung_subject" type="string" default=""/>
   </api>
@@ -239,8 +239,8 @@ TEST_CASE("a rung bind left at its empty default installs no style", "[xml][icon
     const lv_font_t* xs = icon_rung("icon_font_xs");
     REQUIRE(sm != xs);
 
-    REQUIRE(lv_xml_register_component_from_data("icon_empty_rung_fixture",
-                                                EMPTY_RUNG_FIXTURE_XML) == LV_RESULT_OK);
+    REQUIRE(lv_xml_register_component_from_data("icon_empty_rung_fixture", kEmptyRungFixtureXml) ==
+            LV_RESULT_OK);
     lv_obj_t* root = static_cast<lv_obj_t*>(
         lv_xml_create(fixture.test_screen(), "icon_empty_rung_fixture", nullptr));
     REQUIRE(root != nullptr);

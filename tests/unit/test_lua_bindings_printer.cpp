@@ -7,6 +7,7 @@
 #include "../test_helpers/plugin_test_support.h"
 #include "connection_state.h"
 #include "lua_bindings.h"
+#include "printer_state.h"
 
 #include "../catch_amalgamated.hpp"
 
@@ -75,9 +76,57 @@ TEST_CASE_METHOD(XMLTestFixture, "printer watchers detach when the runtime close
     SUCCEED(); // ASAN is what proves the closed runtime was not called
 }
 
+TEST_CASE_METHOD(XMLTestFixture, "klippy_state reports Klipper's own state names",
+                 "[plugin][bindings][printer]") {
+    BoundRuntime b({&install_printer_bindings});
+    lv_subject_t* klippy = lv_xml_get_subject(nullptr, "klippy_state");
+    REQUIRE(klippy);
+    lv_subject_set_int(lv_xml_get_subject(nullptr, "printer_connection_state"),
+                       static_cast<int>(helix::ConnectionState::CONNECTED));
+    lv_subject_set_int(klippy, static_cast<int>(helix::KlippyState::READY));
+    REQUIRE(b.t.run(R"(
+        first = helix.printer.get("klippy_state")
+        seen = {}
+        helix.printer.watch("klippy_state", function(v) seen[#seen + 1] = v end)
+    )"));
+    for (auto st : {helix::KlippyState::SHUTDOWN, helix::KlippyState::STARTUP,
+                    helix::KlippyState::ERROR, helix::KlippyState::READY})
+        lv_subject_set_int(klippy, static_cast<int>(st));
+    REQUIRE(b.t.run("r = table.concat(seen, ',')"));
+    CHECK(b.t.global("first") == "ready");
+    CHECK(b.t.global("r") == "shutdown,startup,error,ready");
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "klippy_state reads nil while Moonraker is disconnected",
+                 "[plugin][bindings][printer]") {
+    BoundRuntime b({&install_printer_bindings});
+    lv_subject_t* conn = lv_xml_get_subject(nullptr, "printer_connection_state");
+    lv_subject_t* klippy = lv_xml_get_subject(nullptr, "klippy_state");
+    REQUIRE(conn);
+    REQUIRE(klippy);
+    lv_subject_set_int(conn, static_cast<int>(helix::ConnectionState::DISCONNECTED));
+    lv_subject_set_int(klippy, static_cast<int>(helix::KlippyState::SHUTDOWN));
+    REQUIRE(b.t.run(R"(
+        before = helix.printer.get("klippy_state")
+        seen = {}
+        helix.printer.watch("klippy_state", function(v) seen[#seen + 1] = tostring(v) end)
+    )"));
+    lv_subject_set_int(klippy, static_cast<int>(helix::KlippyState::STARTUP));
+    lv_subject_set_int(conn, static_cast<int>(helix::ConnectionState::CONNECTED));
+    lv_subject_set_int(klippy, static_cast<int>(helix::KlippyState::READY));
+    REQUIRE(b.t.run(R"(
+        after = helix.printer.get("klippy_state")
+        r = table.concat(seen, ',')
+    )"));
+    CHECK(b.t.global("before") == "nil");
+    CHECK(b.t.global("r") == "nil,ready");
+    CHECK(b.t.global("after") == "ready");
+}
+
 TEST_CASE("the stable printer table", "[plugin][bindings][printer]") {
-    REQUIRE(printer_fields().size() == 10);
+    REQUIRE(printer_fields().size() == 11);
     CHECK(std::string(printer_fields()[0].lua_name) == "connected");
+    CHECK(std::string(printer_fields()[1].lua_name) == "klippy_state");
 }
 
 #endif // HELIX_HAS_PLUGINS

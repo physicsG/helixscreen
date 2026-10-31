@@ -41,8 +41,8 @@
 namespace {
 
 /// Maximum input lengths for sanity checking
-constexpr size_t MAX_VENDOR_NAME_LEN = 256;
-constexpr size_t MAX_VENDOR_URL_LEN = 2048;
+constexpr size_t kMaxVendorNameLen = 256;
+constexpr size_t kMaxVendorUrlLen = 2048;
 
 /// Spoolman stores one integer temperature per filament. A catalog range
 /// becomes its midpoint; a range with one end set becomes that end.
@@ -100,7 +100,10 @@ void SpoolWizardOverlay::init_subjects() {
                                   "wizard_summary_filament", subjects_);
         UI_MANAGED_SUBJECT_COLOR(summary_color_subject_, lv_color_hex(0x808080),
                                  "wizard_summary_color", subjects_);
-        UI_MANAGED_SUBJECT_INT(summary_edge_subject_, 0, "wizard_summary_edge", subjects_);
+        UI_MANAGED_SUBJECT_STRING(summary_colors_subject_, summary_colors_buf_, "",
+                                  "wizard_summary_colors", subjects_);
+        UI_MANAGED_SUBJECT_STRING(summary_finish_subject_, summary_finish_buf_, "",
+                                  "wizard_summary_finish", subjects_);
 
         // Create vendor/filament form visibility toggles
         UI_MANAGED_SUBJECT_INT(show_create_vendor_subject_, 0, "spool_wizard_show_create_vendor",
@@ -130,7 +133,8 @@ void SpoolWizardOverlay::init_subjects() {
         catalog_titles_.ensure_size(rows);
         catalog_details_.ensure_size(rows);
         catalog_colors_.ensure_size(rows);
-        catalog_edges_.ensure_size(rows);
+        catalog_multi_.ensure_size(rows);
+        catalog_finish_.ensure_size(rows);
     });
 }
 
@@ -139,7 +143,8 @@ void SpoolWizardOverlay::deinit_subjects() {
     catalog_titles_.reclaim();
     catalog_details_.reclaim();
     catalog_colors_.reclaim();
-    catalog_edges_.reclaim();
+    catalog_multi_.reclaim();
+    catalog_finish_.reclaim();
 }
 
 // ============================================================================
@@ -479,13 +484,15 @@ void SpoolWizardOverlay::enter_spool_details() {
         }
     }
 
-    // The summary swatch, edged where its colour would vanish into the card
+    // The summary swatch: the filament's colour or colours, and its finish
     uint32_t color_val = 0x808080;
     helix::parse_hex_color(selected_filament_.color_hex.c_str(), color_val);
     if (subjects_initialized_) {
         lv_subject_set_color(&summary_color_subject_, lv_color_hex(color_val));
-        lv_subject_set_int(&summary_edge_subject_,
-                           helix::ui::swatch_needs_edge_here(color_val) ? 1 : 0);
+        lv_subject_copy_string(&summary_colors_subject_,
+                               selected_filament_.multi_color_hexes.c_str());
+        const std::string finish = selected_filament_.material + " " + selected_filament_.name;
+        lv_subject_copy_string(&summary_finish_subject_, finish.c_str());
     }
 
     // Enable proceed if weight is pre-filled
@@ -602,7 +609,7 @@ nlohmann::json SpoolWizardOverlay::vendor_create_payload(const std::string& name
 }
 
 void SpoolWizardOverlay::create_vendor_then_filament_then_spool() {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         on_creation_error(lv_tr("No API connection"));
         return;
@@ -663,7 +670,7 @@ nlohmann::json SpoolWizardOverlay::filament_create_payload(const FilamentEntry& 
 }
 
 void SpoolWizardOverlay::create_filament_then_spool(int vendor_id) {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         on_creation_error(lv_tr("No API connection"), created_vendor_id_);
         return;
@@ -694,7 +701,7 @@ void SpoolWizardOverlay::create_filament_then_spool(int vendor_id) {
 }
 
 void SpoolWizardOverlay::create_spool(int filament_id) {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         on_creation_error(lv_tr("No API connection"), created_vendor_id_, created_filament_id_);
         return;
@@ -756,7 +763,7 @@ void SpoolWizardOverlay::on_creation_error(const std::string& message, int rollb
     ToastManager::instance().show(ToastSeverity::ERROR, message.c_str());
 
     // Best-effort rollback — delete filament first (references vendor), then vendor
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (api) {
         auto delete_vendor = [api, rollback_vendor_id]() {
             if (rollback_vendor_id >= 0) {
@@ -852,7 +859,7 @@ void SpoolWizardOverlay::load_vendors() {
         lv_subject_set_int(&show_create_vendor_subject_, 0);
     }
 
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] No API available, showing empty vendors", get_name());
         if (subjects_initialized_) {
@@ -960,8 +967,8 @@ void SpoolWizardOverlay::publish_vendor_selection() {
 }
 
 void SpoolWizardOverlay::set_new_vendor(const std::string& name, const std::string& url) {
-    new_vendor_name_ = name.substr(0, MAX_VENDOR_NAME_LEN);
-    new_vendor_url_ = url.substr(0, MAX_VENDOR_URL_LEN);
+    new_vendor_name_ = name.substr(0, kMaxVendorNameLen);
+    new_vendor_url_ = url.substr(0, kMaxVendorUrlLen);
 
     bool valid = !helix::text_io::trim(new_vendor_name_).empty();
 
@@ -1159,7 +1166,7 @@ void SpoolWizardOverlay::load_filaments() {
         lv_subject_set_int(&filaments_loading_subject_, 1);
     }
 
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         spdlog::warn("[{}] No API available, showing empty filaments", get_name());
         if (subjects_initialized_) {
@@ -1348,9 +1355,9 @@ void SpoolWizardOverlay::set_new_filament_color(const std::string& hex, const st
     lv_obj_t* search_root = create_filament_dialog_ ? create_filament_dialog_ : overlay_root_;
     if (search_root && !hex.empty()) {
         lv_obj_t* swatch = lv_obj_find_by_name(search_root, "filament_color_swatch");
-        if (swatch) {
-            uint32_t color_val = std::strtoul(hex.c_str(), nullptr, 16);
-            lv_obj_set_style_bg_color(swatch, lv_color_hex(color_val), 0);
+        auto rgb = helix::parse_hex_color(hex);
+        if (swatch && rgb) {
+            helix::ui::apply_swatch_color(swatch, *rgb, "");
         }
     }
 
@@ -1387,9 +1394,11 @@ void SpoolWizardOverlay::populate_filament_list() {
 
         // Set color swatch
         lv_obj_t* swatch = helix::ui::find_required(row, "color_swatch", get_name());
-        if (swatch && !fil.color_hex.empty()) {
-            uint32_t color_val = std::strtoul(fil.color_hex.c_str(), nullptr, 16);
-            helix::ui::apply_swatch_color(swatch, color_val, "");
+        auto rgb = helix::parse_hex_color(fil.color_hex);
+        if (swatch && rgb) {
+            helix::ui::apply_swatch_color(
+                swatch, *rgb, fil.multi_color_hexes,
+                helix::ui::swatch_finish_from_variant(fil.material + " " + fil.name));
         }
 
         // Set combined material - name label
@@ -1525,10 +1534,7 @@ void SpoolWizardOverlay::pick_filament_color() {
     });
 
     // Parse current color for initial value
-    uint32_t initial_color = 0x808080;
-    if (!new_filament_color_hex_.empty()) {
-        initial_color = std::strtoul(new_filament_color_hex_.c_str(), nullptr, 16);
-    }
+    uint32_t initial_color = helix::parse_hex_color(new_filament_color_hex_).value_or(0x808080);
 
     // Show color picker on the screen (it creates its own modal)
     lv_obj_t* parent = create_filament_dialog_
@@ -1726,7 +1732,7 @@ void SpoolWizardOverlay::set_catalog_state(CatalogState state) {
 }
 
 void SpoolWizardOverlay::sync_catalog_available() {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     const bool available = api && helix::SpoolmanCatalogSearch::availability(
                                       api->get_client().connection_generation()) ==
                                       helix::SpoolmanCatalogSearch::Availability::Available;
@@ -1737,7 +1743,7 @@ void SpoolWizardOverlay::sync_catalog_available() {
 
 void SpoolWizardOverlay::probe_catalog_search() {
     sync_catalog_available();
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         return;
     }
@@ -1801,7 +1807,7 @@ void SpoolWizardOverlay::apply_search_text() {
 }
 
 void SpoolWizardOverlay::run_catalog_search(const std::string& query) {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     const uint64_t conn = api ? api->get_client().connection_generation() : 0;
     if (!api ||
         helix::SpoolmanCatalogSearch::availability(conn) ==
@@ -1826,7 +1832,7 @@ void SpoolWizardOverlay::run_catalog_search(const std::string& query) {
 }
 
 void SpoolWizardOverlay::send_catalog_search(std::string query) {
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (!api) {
         return;
     }
@@ -1899,7 +1905,12 @@ void SpoolWizardOverlay::apply_catalog_results(std::vector<helix::ExternalFilame
             uint32_t rgb = 0x808080;
             helix::parse_hex_color(hex.c_str(), rgb);
             catalog_colors_.set_color(i, rgb);
-            catalog_edges_.set_int(i, helix::ui::swatch_needs_edge_here(rgb) ? 1 : 0);
+            std::string multi;
+            for (const auto& h : f.color_hexes) {
+                multi += (multi.empty() ? "" : ",") + h;
+            }
+            catalog_multi_.set_string(i, multi);
+            catalog_finish_.set_string(i, f.material + " " + f.name);
         }
         lv_subject_set_int(&catalog_count_subject_, static_cast<int32_t>(catalog_results_.size()));
     }
@@ -1945,7 +1956,7 @@ void SpoolWizardOverlay::select_catalog_result(int index) {
         navigate_to_step(Step::SPOOL_DETAILS);
         enter_spool_details();
     };
-    IMoonrakerAPI* api = get_moonraker_api();
+    helix::IMoonrakerAPI* api = get_moonraker_api();
     if (selected_vendor_.server_id < 0 || !api) {
         show_details();
         return;

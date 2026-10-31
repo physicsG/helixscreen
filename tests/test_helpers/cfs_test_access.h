@@ -8,6 +8,7 @@
 #include "ams_types.h"
 #include "filament_slot_override.h"
 #include "filament_slot_override_store.h"
+#include "helix_shared_callback.h"
 #include "test_helpers/seeded_override.h"
 
 #include <functional>
@@ -34,6 +35,11 @@ class CfsTestAccess {
     // the operation that chose the script.
     static AmsError dispatch_action_script(helix::printer::AmsBackendCfs& b, std::string gcode) {
         return b.dispatch_action_script(std::move(gcode));
+    }
+
+    /// Runs only the startup store load: a null client skips the initial query.
+    static void start_load(helix::printer::AmsBackendCfs& b) {
+        b.on_started();
     }
 
     /// Takes a notify frame, the shape the subscription delivers.
@@ -138,6 +144,9 @@ class CfsTestAccess {
     // Fork dialect, and the external spool entry's slots[] index (-1 = no
     // external entry in the payload). Lets enable_bypass's Fork branch be
     // exercised without a live box frame.
+    static helix::printer::CfsSchema schema(const helix::printer::AmsBackendCfs& b) {
+        return b.schema_;
+    }
     static void set_flat_fork(helix::printer::AmsBackendCfs& b, int external_index) {
         std::lock_guard<std::mutex> lock(b.mutex_);
         b.schema_ = helix::printer::CfsSchema::Flat;
@@ -173,10 +182,10 @@ class CfsTestAccess {
     /// one CFS takes: an on_error, silent=false) with a caller-chosen
     /// on_complete, so a test can watch where and when completion runs.
     static AmsError dispatch_with_completion(helix::printer::AmsBackendCfs& b, std::string gcode,
-                                             std::function<void()> on_complete) {
+                                             helix::SharedCallback<void()> on_complete) {
         return b.ensure_homed_then(
             std::move(gcode), std::move(on_complete), [](const MoonrakerError&) {},
-            IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS,
+            IMoonrakerAPI::kAmsOperationTimeoutMs,
             /*skip_homing=*/true, /*silent=*/false);
     }
 
@@ -187,6 +196,11 @@ class CfsTestAccess {
         std::lock_guard<std::mutex> lock(b.mutex_);
         b.system_info_.action = op;
         b.begin_phase_tracking();
+    }
+
+    static bool phase_active(const helix::printer::AmsBackendCfs& b) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        return b.phase_tracker_.active;
     }
 
     /// Read back the bypass flag do_unload_filament latched on the phase
@@ -217,6 +231,22 @@ class CfsTestAccess {
     /// Moonraker query itself is null-guarded in test constructions).
     static void call_on_started(helix::printer::AmsBackendCfs& b) {
         b.on_started();
+    }
+
+    /// The configfile query's answer, as configfile.settings.
+    static void answer_unit_registration(helix::printer::AmsBackendCfs& b,
+                                         const nlohmann::json& settings) {
+        b.apply_unit_registration(helix::cfs::has_registered_unit(settings)
+                                      ? helix::printer::AmsBackendCfs::UnitRegistration::Registered
+                                      : helix::printer::AmsBackendCfs::UnitRegistration::None);
+    }
+    /// The configfile query sent and not yet answered.
+    static void await_unit_registration(helix::printer::AmsBackendCfs& b) {
+        std::lock_guard<std::mutex> lock(b.mutex_);
+        b.unit_registration_ = helix::printer::AmsBackendCfs::UnitRegistration::Unknown;
+    }
+    static void expire_unit_settle(helix::printer::AmsBackendCfs& b) {
+        b.finish_unit_settle();
     }
 };
 } // namespace helix

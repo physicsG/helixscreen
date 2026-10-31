@@ -30,7 +30,7 @@ namespace {
 /// NavigationManager, so one fixture covers the subject cases and the overlay case.
 class TempSparkFx : public XMLTestFixture {
   public:
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     lv_obj_t* tile = nullptr;
 
     TempSparkFx() {

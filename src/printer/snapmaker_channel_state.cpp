@@ -132,21 +132,30 @@ bool channel_state_in_progress(const std::string& state) {
     return action == AmsAction::LOADING || action == AmsAction::UNLOADING;
 }
 
-std::optional<std::string> settled_op_outcome(const std::string& channel_state,
-                                              const std::string& prev_action_state,
-                                              const std::string& action_state) {
-    if (channel_state.empty() || !observed_change(prev_action_state, action_state)) {
-        return std::nullopt;
+OpOutcome resolve_op_outcome(const std::string& channel_state, const std::string& prev_action_state,
+                             const std::string& action_state, const std::string& held_outcome) {
+    std::string held = held_outcome;
+    if (observed_change(prev_action_state, action_state)) {
+        const ChannelStateInfo step = classify_channel_state(action_state);
+        if (step.is_terminal || step.is_fail) {
+            held = action_state;
+        } else if (channel_state_in_progress(action_state)) {
+            held.clear();
+        }
     }
-    const ChannelStateInfo resting = classify_channel_state(channel_state);
-    if (resting.action != AmsAction::IDLE || resting.is_terminal || resting.ignore) {
-        return std::nullopt;
+    if (held.empty() || channel_state.empty()) {
+        return {std::nullopt, held};
     }
-    const ChannelStateInfo outcome = classify_channel_state(action_state);
-    if (!outcome.is_terminal && !outcome.is_fail) {
-        return std::nullopt;
+    const ChannelStateInfo channel = classify_channel_state(channel_state);
+    if (channel.action == AmsAction::LOADING || channel.action == AmsAction::UNLOADING ||
+        channel.ignore) {
+        return {std::nullopt, held};
     }
-    return action_state;
+    if (channel.is_terminal || channel.is_fail) {
+        // The channel reports the op's end itself.
+        return {std::nullopt, {}};
+    }
+    return {held, {}};
 }
 
 } // namespace helix::snapmaker

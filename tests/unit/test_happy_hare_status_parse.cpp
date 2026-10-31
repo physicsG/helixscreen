@@ -275,6 +275,7 @@ TEST_CASE("Happy Hare layout: each tunable is read from its v4 section",
     CHECK(number("gear_unload_speed") == 120.0f);
     CHECK(number("sync_to_extruder") == 1.0f);
     CHECK(number("heater_max_temp") == 65.0f);
+    CHECK(number("heater_default_dry_humidity") == 25.0f);
     CHECK(number("toolhead_extruder_to_nozzle") == 87.0f);
     CHECK(number("toolhead_sensor_to_nozzle") == 1.0f);
     CHECK(number("toolhead_entry_to_extruder") == 6.0f);
@@ -290,7 +291,8 @@ TEST_CASE("Happy Hare layout: v3 reads every tunable from [mmu]",
                             {{"form_tip_macro", "_MMU_FORM_TIP"},
                              {"gear_from_spool_speed", "60"},
                              {"toolhead_ooze_reduction", 2.5},
-                             {"enable_clog_detection", 2}}},
+                             {"enable_clog_detection", 2},
+                             {"heater_default_dry_humidity", 30}}},
                            {"mmu_parameters", {{"gear_from_spool_speed", 99}}}};
     const auto layout = happy_hare::read_machine_layout(settings, json::object());
     REQUIRE_FALSE(layout.v4);
@@ -301,6 +303,8 @@ TEST_CASE("Happy Hare layout: v3 reads every tunable from [mmu]",
               happy_hare::find_config_param(settings, layout, "toolhead_ooze_reduction")) == 2.5f);
     CHECK(happy_hare::read_config_number(
               happy_hare::find_config_param(settings, layout, "clog_detection")) == 2.0f);
+    // v3 takes no HUMIDITY=, so a stray key of that name is not read.
+    CHECK_FALSE(happy_hare::find_config_param(settings, layout, "heater_default_dry_humidity"));
 }
 
 TEST_CASE("Happy Hare layout: each version's parameter names",

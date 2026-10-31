@@ -6,6 +6,7 @@
 #include "ui_notification_history.h"
 #include "ui_panel_common.h"
 #include "ui_panel_notification_history.h"
+#include "ui_printer_events_overlay.h"
 #include "ui_toast_manager.h"
 #include "ui_update_queue.h"
 #include "ui_utils.h"
@@ -15,6 +16,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cstdlib>
 #include <cstring>
 
 using namespace helix;
@@ -100,6 +102,20 @@ void NotificationManager::register_callbacks() {
     // Register notification history callback (must be called BEFORE app_layout XML is created)
     lv_xml_register_event_cb(nullptr, "status_notification_history_clicked",
                              notification_history_clicked);
+    // The notification history's link to the printer event journal: alerts and
+    // printer events live in one place.
+    lv_xml_register_event_cb(nullptr, "on_open_printer_events", [](lv_event_t*) {
+        helix::ui::get_printer_events_overlay().show(lv_screen_active());
+    });
+    // A tap on a history row. An XML event_cb's user_data is the row_index
+    // attribute as a heap string.
+    lv_xml_register_event_cb(nullptr, "on_notification_item_clicked", [](lv_event_t* e) {
+        const char* index = static_cast<const char*>(lv_event_get_user_data(e));
+        if (index != nullptr) {
+            get_global_notification_history_panel().handle_item_clicked(
+                static_cast<size_t>(std::atoi(index)));
+        }
+    });
     callbacks_registered_ = true;
     spdlog::debug("[NotificationManager] Event callbacks registered");
 }
@@ -219,18 +235,18 @@ void NotificationManager::animate_notification_badge() {
     // Animation constants for attention pulse
     // Stage 1: Scale up to 130% (300ms with overshoot)
     // Stage 2: Scale back to 100% (implicit - overshoot settles naturally)
-    constexpr int32_t PULSE_DURATION_MS = 300;
-    constexpr int32_t SCALE_NORMAL = 256; // 100%
-    constexpr int32_t SCALE_PULSE = 333;  // ~130%
+    constexpr int32_t kPulseDurationMs = 300;
+    constexpr int32_t kScaleNormal = 256; // 100%
+    constexpr int32_t kScalePulse = 333;  // ~130%
 
     // Scale up animation with overshoot easing (automatically bounces back)
     lv_anim_t scale_anim;
     lv_anim_init(&scale_anim);
     lv_anim_set_var(&scale_anim, badge);
-    lv_anim_set_values(&scale_anim, SCALE_NORMAL, SCALE_PULSE);
-    lv_anim_set_duration(&scale_anim, PULSE_DURATION_MS);
+    lv_anim_set_values(&scale_anim, kScaleNormal, kScalePulse);
+    lv_anim_set_duration(&scale_anim, kPulseDurationMs);
     lv_anim_set_path_cb(&scale_anim, lv_anim_path_overshoot);
-    lv_anim_set_playback_duration(&scale_anim, PULSE_DURATION_MS / 2);
+    lv_anim_set_playback_duration(&scale_anim, kPulseDurationMs / 2);
     lv_anim_set_exec_cb(&scale_anim, [](void* obj, int32_t value) {
         lv_obj_set_style_transform_scale(static_cast<lv_obj_t*>(obj), value, LV_PART_MAIN);
     });

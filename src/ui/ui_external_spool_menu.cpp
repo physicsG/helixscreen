@@ -44,11 +44,11 @@ void open_external_spool_editor(lv_obj_t* parent_screen, bool open_on_picker) {
 
     auto ext = helix::AmsState::instance().get_external_spool_info();
     SlotInfo initial = ext.value_or(SlotInfo{});
-    initial.slot_index = EXTERNAL_SPOOL_SLOT;
-    initial.global_index = EXTERNAL_SPOOL_SLOT;
+    initial.slot_index = kExternalSpoolSlot;
+    initial.global_index = kExternalSpoolSlot;
 
     get_ams_edit_overlay().show_for_slot(
-        parent_screen, EXTERNAL_SPOOL_SLOT, initial, get_moonraker_api(),
+        parent_screen, kExternalSpoolSlot, initial, get_moonraker_api(),
         [](const AmsEditOverlay::EditResult& result) {
             if (result.saved) {
                 helix::AmsState::instance().commit_external_spool_edit(result.slot_info);
@@ -64,8 +64,8 @@ ExternalSpoolMenuHooks sidebar_external_spool_hooks(AmsOperationSidebar* sidebar
     }
     ExternalSpoolMenuHooks hooks;
     // Dispatch only — the menu engages bypass before calling these.
-    hooks.on_load = [sidebar]() { sidebar->handle_load_with_preheat(EXTERNAL_SPOOL_SLOT); };
-    hooks.on_unload = [sidebar]() { sidebar->handle_unload(EXTERNAL_SPOOL_SLOT); };
+    hooks.on_load = [sidebar]() { sidebar->handle_load_with_preheat(kExternalSpoolSlot); };
+    hooks.on_unload = [sidebar]() { sidebar->handle_unload(kExternalSpoolSlot); };
     hooks.toggle = sidebar->bypass_controller();
     return hooks;
 }
@@ -94,13 +94,13 @@ void show_external_spool_menu(lv_obj_t* parent_screen, lv_obj_t* anchor_widget,
         switch (action) {
         case AmsContextMenu::MenuAction::LOAD: {
             // Engage first, always. With bypass disengaged plan_load()
-            // refuses EXTERNAL_SPOOL_SLOT outright, so dispatching straight
+            // refuses kExternalSpoolSlot outright, so dispatching straight
             // into the executor answers a tap on the bypass spool with
             // "Select a filament slot" — the dead end this menu exists to
             // remove. Owned here so no surface can omit it.
             std::function<void()> dispatch = h.on_load ? h.on_load : [] {
-                execute_filament_load(helix::AmsState::instance().get_backend(),
-                                      EXTERNAL_SPOOL_SLOT, "[ExternalSpoolMenu]");
+                execute_filament_load(helix::AmsState::instance().get_backend(), kExternalSpoolSlot,
+                                      "[ExternalSpoolMenu]");
             };
             if (h.toggle) {
                 h.toggle->ensure_engaged_then(std::move(dispatch));
@@ -111,7 +111,7 @@ void show_external_spool_menu(lv_obj_t* parent_screen, lv_obj_t* anchor_widget,
         }
 
         case AmsContextMenu::MenuAction::UNLOAD:
-            // No engage: plan_unload() resolves EXTERNAL_SPOOL_SLOT whatever
+            // No engage: plan_unload() resolves kExternalSpoolSlot whatever
             // the bypass state, and engaging in order to unload something
             // that is not there would move the path for nothing.
             if (h.on_unload) {
@@ -125,8 +125,8 @@ void show_external_spool_menu(lv_obj_t* parent_screen, lv_obj_t* anchor_widget,
                 // Never answered inline — the divergence
                 // read_unload_target_loaded() exists to prevent.
                 execute_filament_unload(
-                    backend, EXTERNAL_SPOOL_SLOT,
-                    read_unload_target_loaded(backend, info, EXTERNAL_SPOOL_SLOT),
+                    backend, kExternalSpoolSlot,
+                    read_unload_target_loaded(backend, info, kExternalSpoolSlot),
                     "[ExternalSpoolMenu]");
             }
             break;
@@ -141,7 +141,7 @@ void show_external_spool_menu(lv_obj_t* parent_screen, lv_obj_t* anchor_widget,
                 info = backend->get_system_info();
             }
             const OpButtonState state = build_external_spool_gating_state(
-                read_unload_target_loaded(backend, info, EXTERNAL_SPOOL_SLOT),
+                read_unload_target_loaded(backend, info, kExternalSpoolSlot),
                 backend && info.is_busy(), get_printer_state().print_state().get_print_lifecycle(),
                 backend && backend->filament_ops_self_home());
             if (compute_op_button_gating(state).purge_disabled) {

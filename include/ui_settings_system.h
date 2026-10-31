@@ -7,6 +7,7 @@
  *
  * This overlay provides access to system administration settings:
  * - Security (PIN lock)
+ * - Storage
  * - Performance
  * - Telemetry
  * - Log level

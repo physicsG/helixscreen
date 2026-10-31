@@ -5,18 +5,18 @@
 
 #include "ams_backend_afc.h"
 #include "ams_backend_happy_hare.h"
+#include "ams_backend_indx.h"
 #include "ams_backend_openams.h"
 #include "ams_state.h"
 #include "settings_manager.h"
+#include "system/afc_message_dedup.h"
 #ifdef HELIX_ENABLE_MOCKS
 #include "ams_backend_mock.h"
 #include "app_globals.h"
 #include "mock_persona.h"
 #include "moonraker_client_mock.h"
 #endif
-#if HELIX_HAS_IFS
 #include "ams_backend_ad5x_ifs.h"
-#endif
 #if HELIX_HAS_CFS
 #include "ams_backend_cfs.h"
 #endif
@@ -104,7 +104,7 @@ AmsError endless_spool_read_only_error(helix::printer::EndlessSpoolRestriction r
     return AmsError(AmsResult::NOT_SUPPORTED,
                     "Endless spool is read-only on this backend" +
                         (reason.empty() ? std::string() : " (" + reason + ")"),
-                    reason.empty() ? std::string("Endless spool cannot be changed here") : reason,
+                    reason.empty() ? std::string("Endless Spool cannot be changed here") : reason,
                     "");
 }
 
@@ -142,6 +142,18 @@ AmsError AmsBackend::set_endless_spool_backup(int slot_index, int backup_slot) {
     }
 
     return apply_endless_spool_backup(slot_index, backup_slot);
+}
+
+AmsError AmsBackend::set_endless_spool_enabled(bool enabled) {
+    const auto caps = get_endless_spool_capabilities();
+    if (!caps.available()) {
+        return AmsErrorHelper::not_supported("Endless spool");
+    }
+    if (!caps.switchable) {
+        return endless_spool_read_only_error(caps.restriction);
+    }
+    spdlog::info("[AMS Backend] Switching Endless Spool {}", enabled ? "on" : "off");
+    return apply_endless_spool_enabled(enabled);
 }
 
 AmsError AmsBackend::reset_endless_spool() {
@@ -247,7 +259,12 @@ std::vector<helix::printer::EnvironmentZone> AmsBackend::get_environment_zones(i
                 z.unit_index = unit_idx;
                 z.env = *s.environment;
                 z.dryer = dryer;
-                z.state = state;
+                // A dryer that heats gates one by one reports each lane's own part in
+                // the cycle; one running gate does not make the whole unit Active.
+                z.state = dryer.supports_gate_selection ? s.drying_state : state;
+                if (dryer.supports_gate_selection) {
+                    z.dryer.active = z.state == ZoneDryingState::Active;
+                }
                 zones.push_back(std::move(z));
             }
         } else if (au.environment.has_value() || dryer.supported) {
@@ -272,6 +289,44 @@ std::vector<helix::printer::EnvironmentZone> AmsBackend::get_environment_zones(i
         }
     }
     return zones;
+}
+
+AmsError AmsBackend::start_drying_request(const DryingRequest& request) {
+    if (!request.gates.empty() || request.rotate) {
+        return AmsErrorHelper::not_supported("Drying selected gates");
+    }
+    if (request.humidity_pct) {
+        return start_drying_to_humidity(request.temp_c, request.duration_min, *request.humidity_pct,
+                                        request.fan_pct, request.unit);
+    }
+    return start_drying(request.temp_c, request.duration_min, request.fan_pct, request.unit);
+}
+
+AmsError AmsBackend::stop_drying_gates(int unit, const std::vector<int>& gates) {
+    if (!gates.empty()) {
+        return AmsErrorHelper::not_supported("Drying selected gates");
+    }
+    return stop_drying(unit);
+}
+
+HeadFilamentOps AmsBackend::head_filament_ops(int /*head*/) const {
+    HeadFilamentOps ops;
+    if (unload_is_manual()) {
+        ops.unload = FilamentOpSupport::Manual;
+        ops.unload_reason = lv_tr("This printer has no automatic unload. Cut the filament at the "
+                                  "head and pull it out by hand.");
+    }
+    return ops;
+}
+
+std::optional<int> AmsBackend::head_source_slot(int head, const AmsSystemInfo& info) const {
+    for (int slot = 0; slot < info.total_slots; ++slot) {
+        const SlotInfo* lane = info.get_slot_global(slot);
+        if (lane && lane->mapped_tool == head && head_for_slot(slot) == head) {
+            return slot;
+        }
+    }
+    return std::nullopt;
 }
 
 AmsError AmsBackend::unload_active_filament() {
@@ -505,37 +560,27 @@ AmsError AmsBackend::commit_user_edit(int slot_index, const SlotInfo& original,
     return kept_by_spool;
 }
 
-std::string AmsBackend::normalize_material(const std::string& material) const {
-    auto supported = get_supported_materials();
-    if (!supported || supported->empty()) {
-        return material;
-    }
-    const auto& list = *supported;
+std::optional<std::string>
+match_material(const std::string& material, const std::vector<std::string>& list,
+               const std::vector<std::pair<std::string, std::string>>& aliases) {
+    const std::string input_lc = helix::text_io::to_lower(material);
 
-    // Case-insensitive lowercase helper.
-    auto lower = [](std::string s) {
-        s = helix::text_io::to_lower(s);
-        return s;
-    };
-
-    // (2) Case-insensitive exact match against the whitelist.
-    const std::string input_lc = lower(material);
+    // Case-insensitive exact match against the whitelist.
     for (const auto& s : list) {
-        if (lower(s) == input_lc) {
+        if (helix::text_io::to_lower(s) == input_lc) {
             return s;
         }
     }
 
-    // (3) Firmware-specific aliases (backends override get_material_aliases()
-    //     to handle names the shared filament DB groups differently than
-    //     firmware does — e.g., "Silk PLA" -> "SILK" on AD5X).
-    for (const auto& [alias, target] : get_material_aliases()) {
-        if (lower(alias) == input_lc) {
+    // Firmware-specific aliases (e.g. "Silk PLA" -> "SILK" on AD5X, which the
+    // shared filament DB groups differently).
+    for (const auto& [alias, target] : aliases) {
+        if (helix::text_io::to_lower(alias) == input_lc) {
             return target;
         }
     }
 
-    // (4) compat_group match via the filament database.
+    // compat_group match via the filament database.
     auto info = filament::find_material(material);
     if (info.has_value() && info->compat_group != nullptr) {
         std::string_view group(info->compat_group);
@@ -547,9 +592,17 @@ std::string AmsBackend::normalize_material(const std::string& material) const {
             }
         }
     }
+    return std::nullopt;
+}
 
-    // (5) Fallback: first whitelist entry (typically the safest / most common).
-    return list.front();
+std::string AmsBackend::normalize_material(const std::string& material) const {
+    auto supported = get_supported_materials();
+    if (!supported || supported->empty()) {
+        return material;
+    }
+    // Fallback: first whitelist entry (typically the safest / most common).
+    return match_material(material, *supported, get_material_aliases())
+        .value_or(supported->front());
 }
 
 #ifdef HELIX_ENABLE_MOCKS
@@ -625,9 +678,6 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
         } else if (ams_type == "snapmaker" || ams_type == "snapswap" || ams_type == "u1") {
             mock->set_snapmaker_mode(true);
             spdlog::info("[AMS Backend] Mock Snapmaker U1 mode enabled");
-        } else if (ams_type == "multiace" || ams_type == "u1_ace" || ams_type == "ace2") {
-            mock->set_multiace_mode(true);
-            spdlog::info("[AMS Backend] Mock U1 + 2x ACE mode enabled");
         }
     }
 
@@ -690,6 +740,18 @@ create_mock_with_features(int gate_count, IMoonrakerClient* mock_client = nullpt
         mock->set_dryer_enabled(true);
         spdlog::info("[AMS Backend] Mock dryer enabled");
 
+        // HELIX_MOCK_DRYER_HUMIDITY_TARGET=1: the dryer also takes a humidity target.
+        if (const char* hum = std::getenv("HELIX_MOCK_DRYER_HUMIDITY_TARGET");
+            hum && std::string(hum) != "0" && std::string(hum) != "false") {
+            mock->set_dryer_humidity_target(true);
+        }
+        // HELIX_MOCK_DRYER_DEFAULT_HUMIDITY=<pct>: the target a start with none applies.
+        if (const char* def = std::getenv("HELIX_MOCK_DRYER_DEFAULT_HUMIDITY")) {
+            if (const auto pct = helix::text_io::parse_leading<float>(def); pct && *pct > 0.0f) {
+                mock->set_dryer_default_humidity(*pct);
+            }
+        }
+
         // Optionally run an active drying session so the countdown ticks live
         // (HELIX_MOCK_DRYING). Uses the real countdown thread, so it respects
         // HELIX_MOCK_DRYER_SPEED. A 6h / 55 C session already ~1/3 through (4:00
@@ -734,8 +796,17 @@ static std::unique_ptr<AmsBackend> try_create_mock(IMoonrakerClient* mock_client
     // the point is to exercise the production AmsBackendToolChanger +
     // toolchanger_addon path against them. Declining here is what lets real
     // discovery run, the same escape hatch HELIX_MOCK_AMS=none uses.
-    if (mode == "medusahc" || mode == "medusa" || mode == "mhc" || mode == "medusahc-fork" ||
-        mode == "medusa-fork") {
+    if (helix::mock::medusa_variant(mode) != helix::mock::MedusaVariant::NONE) {
+        spdlog::info("[AMS Backend] HELIX_MOCK_AMS={} selects mock hardware, not a mock "
+                     "backend - deferring to real discovery",
+                     mode);
+        return nullptr;
+    }
+    // multiACE on a U1 and INDX: mock hardware the same way. MoonrakerClientMock
+    // seeds their objects and frames, and the production AmsBackendMultiAce /
+    // AmsBackendIndx run against them (multiACE pairs with
+    // HELIX_MOCK_PRINTER=snapmaker_u1).
+    if (mode == "multiace" || mode == "indx") {
         spdlog::info("[AMS Backend] HELIX_MOCK_AMS={} selects mock hardware, not a mock "
                      "backend - deferring to real discovery",
                      mode);
@@ -785,8 +856,8 @@ bool AmsBackend::sensor_belongs_to_backend(AmsType type, const std::string& bare
 #endif
     case AmsType::ACE:
     case AmsType::TOOL_CHANGER:
+    case AmsType::INDX:
     case AmsType::SNAPMAKER:
-    case AmsType::MULTIACE:
     case AmsType::QIDI_BOX:
     case AmsType::OPENAMS:
     case AmsType::NONE:
@@ -795,8 +866,65 @@ bool AmsBackend::sensor_belongs_to_backend(AmsType type, const std::string& bare
     }
 }
 
+bool AmsBackend::sensor_name_names_filament_system(std::string_view lower_name) {
+    const auto has_any = [lower_name](const auto& keywords) {
+        for (const char* keyword : keywords) {
+            if (lower_name.find(keyword) != std::string_view::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return has_any(AmsBackendAfc::kSensorNameKeywords) ||
+           has_any(AmsBackendHappyHare::kSensorNameKeywords);
+}
+
+nlohmann::json AmsBackend::required_status_objects(const helix::PrinterDiscovery& hw) {
+    nlohmann::json objects = nlohmann::json::object();
+    const auto merge = [&objects](const nlohmann::json& from) {
+        for (auto it = from.begin(); it != from.end(); ++it) {
+            objects[it.key()] = it.value();
+        }
+    };
+
+    merge(AmsBackendAfc::required_status_objects(hw));
+    merge(AmsBackendHappyHare::required_status_objects(hw));
+    merge(AmsBackendOpenAms::required_status_objects(hw));
+    merge(AmsBackendIndx::required_status_objects(hw));
+#if HELIX_HAS_IFS
+    if (hw.mmu_type() == AmsType::AD5X_IFS) {
+        for (const auto& name : AmsBackendAd5xIfs::required_status_objects(hw)) {
+            objects[name] = nullptr;
+        }
+    }
+#endif
+#if HELIX_HAS_CFS
+    merge(printer::AmsBackendCfs::required_status_objects(hw));
+#endif
+#if HELIX_HAS_ACE
+    merge(AmsBackendAce::required_status_objects(hw));
+#endif
+#if HELIX_HAS_QIDI
+    merge(AmsBackendQidi::required_status_objects(hw));
+#endif
+#if HELIX_HAS_SNAPMAKER
+    merge(AmsBackendSnapmaker::required_status_objects(hw));
+#endif
+    return objects;
+}
+
+void AmsBackend::init_persistent_state(const std::string& config_dir) {
+    AfcMessageDedup::instance().init(config_dir);
+}
+
+void AmsBackend::shutdown_persistent_state() {
+    AfcMessageDedup::instance().shutdown();
+}
+
 std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, IMoonrakerAPI* api,
-                                               IMoonrakerClient* client) {
+                                               IMoonrakerClient* client,
+                                               const helix::PrinterDiscovery* hw) {
+    (void)hw; // only variant-bearing types read it, and those can be compiled out
 #ifdef HELIX_ENABLE_MOCKS
     if (auto mock = try_create_mock(client)) {
         return mock;
@@ -846,6 +974,15 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, IMoonraker
         // Note: Caller must use set_discovered_tools() after creation to set tool names
         return std::make_unique<AmsBackendToolChanger>(api, client);
 
+    case AmsType::INDX:
+        if (!api || !client) {
+            spdlog::error("[AMS Backend] INDX requires IMoonrakerAPI and MoonrakerClient");
+            return nullptr;
+        }
+        spdlog::debug("[AMS Backend] Creating INDX backend");
+        // Sized and wired by set_discovery() before start()
+        return std::make_unique<AmsBackendIndx>(api, client);
+
     case AmsType::AD5X_IFS:
 #if HELIX_HAS_IFS
         if (!api || !client) {
@@ -882,23 +1019,14 @@ std::unique_ptr<AmsBackend> AmsBackend::create(AmsType detected_type, IMoonraker
             spdlog::error("[AMS Backend] Snapmaker requires IMoonrakerAPI and MoonrakerClient");
             return nullptr;
         }
+        if (hw && multiace::present(*hw)) {
+            spdlog::debug("[AMS Backend] Creating Snapmaker SnapSwap backend with multiACE");
+            return std::make_unique<AmsBackendMultiAce>(api, client);
+        }
         spdlog::debug("[AMS Backend] Creating Snapmaker SnapSwap backend");
         return std::make_unique<AmsBackendSnapmaker>(api, client);
 #else
         spdlog::info("[AMS Backend] Snapmaker support not compiled in");
-        return nullptr;
-#endif
-
-    case AmsType::MULTIACE:
-#if HELIX_HAS_SNAPMAKER
-        if (!api || !client) {
-            spdlog::error("[AMS Backend] multiACE requires IMoonrakerAPI and MoonrakerClient");
-            return nullptr;
-        }
-        spdlog::debug("[AMS Backend] Creating multiACE backend (U1 SnapSwap + ACE units)");
-        return std::make_unique<AmsBackendMultiAce>(api, client);
-#else
-        spdlog::info("[AMS Backend] multiACE support not compiled in");
         return nullptr;
 #endif
 
@@ -944,11 +1072,29 @@ AmsError AmsBackend::set_tool_mapping(int tool_number, int slot_index) {
     return result;
 }
 
+bool AmsBackend::firmware_reported_tool_mapping() const {
+    return reports_firmware_tool_mapping() && firmware_tool_mapping_generation() > 0;
+}
+
+helix::FirmwareRouting AmsBackend::firmware_default_routing() const {
+    if (firmware_picks_lanes_at_print()) {
+        return helix::FirmwareRouting::picked_at_print();
+    }
+    // Only a table the firmware keeps, and has reported at least once, is what
+    // it routes by. A table no frame has stated yet holds nothing but our own
+    // optimistic writes, and a per-print map is not a standing table at all.
+    if (!firmware_reported_tool_mapping() || get_remap_strategy() != RemapStrategy::Native) {
+        return helix::FirmwareRouting::identity();
+    }
+    // A tool no lane is mapped to has nowhere to run.
+    return helix::FirmwareRouting::from_table(get_tool_mapping());
+}
+
 helix::printer::ToolMappingOrigin AmsBackend::tool_mapping_origin() const {
     // A printer that publishes its own live table has already said what will
     // print. Nothing about the shape of that answer makes it less true, so it
     // needs no second opinion from us.
-    if (reports_firmware_tool_mapping() && firmware_tool_mapping_generation() > 0) {
+    if (firmware_reported_tool_mapping()) {
         return helix::printer::ToolMappingOrigin::Deliberate;
     }
 
@@ -984,6 +1130,8 @@ const char* filament_op_eligibility_reason(AmsBackend::FilamentOpEligibility e) 
         return "busy";
     case AmsBackend::FilamentOpEligibility::Error:
         return "feeder error";
+    case AmsBackend::FilamentOpEligibility::NotSupported:
+        return "not supported";
     }
     return "";
 }

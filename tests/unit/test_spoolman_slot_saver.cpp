@@ -274,7 +274,7 @@ TEST_CASE("a picked grey is a colour the save accepts, never the no-colour marke
     }
 
     SlotInfo slot = make_test_slot();
-    slot.color_rgb = helix::ams::picked_color(AMS_DEFAULT_SLOT_COLOR); // custom 0x808080 pick
+    slot.color_rgb = helix::ams::picked_color(kAmsDefaultSlotColor); // custom 0x808080 pick
     CHECK(helix::ams::is_declarable_color(slot.color_rgb));
     CHECK_FALSE(SpoolmanSlotSaver::missing_filament_fields(slot).color);
     CHECK(helix::ams::picked_color(0x123456) == 0x123456);
@@ -760,7 +760,7 @@ TEST_CASE("SpoolmanSlotSaver is_filament_complete: default gray color returns fa
     SlotInfo slot;
     slot.brand = "Polymaker";
     slot.material = "PLA";
-    slot.color_rgb = AMS_DEFAULT_SLOT_COLOR; // 0x808080
+    slot.color_rgb = kAmsDefaultSlotColor; // 0x808080
     REQUIRE_FALSE(SpoolmanSlotSaver::is_filament_complete(slot));
 }
 
@@ -1414,7 +1414,7 @@ TEST_CASE("SpoolmanSlotSaver reports a new spool missing its color as incomplete
     SlotInfo edited = original;
     edited.brand = "Creality";
     edited.material = "PLA";
-    edited.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+    edited.color_rgb = kAmsDefaultSlotColor;
 
     SpoolmanSlotSaver saver(&api);
     SaveResult got{};

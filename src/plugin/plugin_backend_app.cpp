@@ -5,20 +5,23 @@
 
 #include "ui_update_queue.h"
 
+#include "../api/moonraker_gcode_guards.h"
 #include "app_globals.h"
 #include "config.h"
 #include "helix_version.h"
+#include "host_identity.h"
 #include "http_executor.h"
 #include "hv/requests.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
+#include "json_utils.h"
 #include "moonraker_error.h"
 #include "moonraker_subscription_merge.h"
 #include "plugin_backend.h"
+#include "sound_manager.h"
 
 #include <algorithm>
 #include <atomic>
-#include <ifaddrs.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -46,16 +49,6 @@ bool is_transfer_root(const std::string& root) {
 constexpr const char* kNotConnected = "Moonraker is not connected";
 constexpr const char* kPrinterHostRefused = "requests to the printer host are not allowed";
 
-/// `ip` in the form addresses are compared in: an IPv4-mapped IPv6 address as plain IPv4,
-/// with no IPv6 zone suffix.
-std::string canonical_ip(std::string ip) {
-    if (auto pct = ip.find('%'); pct != std::string::npos)
-        ip.resize(pct);
-    if (ip.rfind("::ffff:", 0) == 0 && ip.find('.') != std::string::npos)
-        ip.erase(0, 7);
-    return ip;
-}
-
 /// Loopback, or an unspecified address, which Linux connects to the local host.
 bool is_this_host_ip(const std::string& ip) {
     return ip.rfind("127.", 0) == 0 || ip.rfind("0.", 0) == 0 || ip == "::1" || ip == "::";
@@ -79,28 +72,6 @@ std::vector<std::string> resolve_host_ips(const std::string& host) {
             ips.push_back(canonical_ip(buf));
     }
     freeaddrinfo(result);
-    return ips;
-}
-
-/// Every address assigned to one of this machine's interfaces. Moonraker listens on all
-/// of them, so the printer's LAN address reaches it as surely as loopback does.
-std::vector<std::string> local_interface_ips() {
-    std::vector<std::string> ips;
-    ifaddrs* list = nullptr;
-    if (getifaddrs(&list) != 0)
-        return ips;
-    char buf[NI_MAXHOST];
-    for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr)
-            continue;
-        int family = ifa->ifa_addr->sa_family;
-        if (family != AF_INET && family != AF_INET6)
-            continue;
-        socklen_t len = family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
-        if (getnameinfo(ifa->ifa_addr, len, buf, sizeof(buf), nullptr, 0, NI_NUMERICHOST) == 0)
-            ips.push_back(canonical_ip(buf));
-    }
-    freeifaddrs(list);
     return ips;
 }
 
@@ -227,6 +198,11 @@ PluginBackend make_app_backend() {
         auto* client = get_moonraker_client();
         if (!client)
             return cb(failure(kNotConnected));
+        // The same refusals the app's own print, restart and G-code paths apply.
+        if (helix::api::reject_plugin_rpc(
+                get_printer_state(), method, params,
+                [cb](const MoonrakerError& e) { cb(failure(e.message)); }))
+            return;
         client->send_jsonrpc(
             method, params, [cb](const json& result) { cb(success(result)); },
             [cb](const MoonrakerError& e) { cb(failure(e.message)); });
@@ -326,8 +302,28 @@ PluginBackend make_app_backend() {
         };
     };
 
+    b.on_status = [](std::function<void(const json&)> handler) -> std::function<void()> {
+        auto* api = get_moonraker_api();
+        if (!api)
+            return [] {};
+        // The client's status subscribers also see notify_filelist_changed.
+        helix::SubscriptionId id =
+            api->subscribe_notifications([handler = std::move(handler)](const json& msg) {
+                if (helix::json_util::safe_string(msg, "method", "") == "notify_status_update")
+                    handler(msg);
+            });
+        return [id]() {
+            if (auto* a = get_moonraker_api())
+                a->unsubscribe_notifications(id);
+        };
+    };
+
     b.set_plugin_objects = [](const std::string& plugin_id, const json& objects) {
         publish_plugin_objects(plugin_id, objects);
+    };
+
+    b.play_sound = [](const std::string& name, SoundPriority priority) {
+        SoundManager::instance().play(name, priority);
     };
 
     return b;

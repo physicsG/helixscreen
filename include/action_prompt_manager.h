@@ -71,7 +71,8 @@ struct PromptButton {
     std::string label;      ///< Display text for the button
     std::string gcode;      ///< G-code to execute when clicked (empty = use label)
     std::string color;      ///< Color hint: primary/secondary/info/warning/error (empty = default)
-    std::string hex_color;  ///< Raw hex color override (e.g., "7c4b00"), takes priority over color
+    std::string hex_color;  ///< Fill color as sent ("7c4b00", "#e0e0e0"); always valid for
+                            ///< helix::parse_hex_color, empty = none. Takes priority over color
     bool is_footer = false; ///< True if this is a footer button
     int group_id = -1;      ///< Group ID for button grouping (-1 = not grouped)
 };
@@ -134,8 +135,7 @@ class ActionPromptManager {
 
     /// Echoed back by Klipper as `// action:prompt_end`, which closes the prompt
     /// on every connected client. Sent when the user closes it here.
-    static constexpr const char* PROMPT_END_GCODE =
-        "RESPOND TYPE=command MSG=\"action:prompt_end\"";
+    static constexpr const char* kPromptEndGcode = "RESPOND TYPE=command MSG=\"action:prompt_end\"";
 
     // ========================================================================
     // Static Instance Access
@@ -190,6 +190,15 @@ class ActionPromptManager {
         }
     }
 
+    /**
+     * @brief The manager registered with set_instance(), or nullptr
+     *
+     * Main thread only: process_line() and the rest of the instance API are.
+     */
+    [[nodiscard]] static ActionPromptManager* instance() {
+        return s_instance.load(std::memory_order_acquire);
+    }
+
     // Non-copyable, non-movable: make_line_sink() hands out callables bound to `this`
     ActionPromptManager(const ActionPromptManager&) = delete;
     ActionPromptManager& operator=(const ActionPromptManager&) = delete;
@@ -219,6 +228,8 @@ class ActionPromptManager {
      * - "label|gcode" -> separate label and gcode
      * - "label|gcode|color" -> all three fields
      * - "label||color" -> label=gcode, with color
+     * - "label|gcode|ff5722" -> a hex third field is a fill color (hex_color)
+     * - "label|gcode|style|ff5722" -> legacy fourth-field fill color, wins over field 3
      *
      * @param spec The button specification string
      * @return PromptButton with parsed fields
@@ -284,7 +295,7 @@ class ActionPromptManager {
      * unless a prompt is SHOWING. Telling the firmware is the caller's job.
      * Main thread only.
      *
-     * @return true when the caller should send PROMPT_END_GCODE to Klipper
+     * @return true when the caller should send kPromptEndGcode to Klipper
      */
     bool closed_on_screen(PromptCloseKind kind);
 

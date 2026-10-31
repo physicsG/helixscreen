@@ -102,7 +102,7 @@ class TouchCalibrationPanel {
         State state;
         int point_num;      ///< 1-3 for POINT states, 0 otherwise
         int current_sample; ///< Samples collected for current point (0 to total_samples)
-        int total_samples;  ///< Samples required per point (SAMPLES_REQUIRED)
+        int total_samples;  ///< Samples required per point (kSamplesRequired)
     };
 
     TouchCalibrationPanel();
@@ -190,7 +190,7 @@ class TouchCalibrationPanel {
     /**
      * @brief Add a raw touch sample to the current capture buffer
      *
-     * Collects multiple samples per calibration point. When SAMPLES_REQUIRED
+     * Collects multiple samples per calibration point. When kSamplesRequired
      * samples have been collected, filters out ADC-saturated values, computes
      * the median, and advances the state machine via capture_point().
      *
@@ -211,7 +211,7 @@ class TouchCalibrationPanel {
      * sampling on every press inflated one tap into several samples and cascaded
      * the state machine. Instead of sampling here, we capture the press point and
      * defer committing it to on_release() (or the stall timer). A release-IMMUNE
-     * time refractory (REFRACTORY_MS since the last committed sample) drops bounce.
+     * time refractory (kRefractoryMs since the last committed sample) drops bounce.
      *
      * When debounce is disabled (HELIX_TOUCH_CAL_DEBOUNCE=0) this samples
      * immediately, preserving the exact legacy sample-on-press behavior for A/B
@@ -346,9 +346,9 @@ class TouchCalibrationPanel {
     TouchRangeFit range_fit_;
 
     // Multi-sample filtering
-    static constexpr int SAMPLES_REQUIRED = 3;
-    static constexpr int MIN_VALID_SAMPLES = 2;
-    static constexpr int MAX_SAMPLE_SPREAD = 60; ///< Max allowed range in either axis (pixels)
+    static constexpr int kSamplesRequired = 3;
+    static constexpr int kMinValidSamples = 2;
+    static constexpr int kMaxSampleSpread = 60; ///< Max allowed range in either axis (pixels)
 
     struct RawSample {
         int x = 0;
@@ -357,7 +357,7 @@ class TouchCalibrationPanel {
         int device_y = 0;
         bool has_device = false;
     };
-    RawSample sample_buffer_[SAMPLES_REQUIRED]{};
+    RawSample sample_buffer_[kSamplesRequired]{};
     int sample_count_ = 0;
 
     // Press-debounce (issue #943): capture-on-press, commit-on-release model with
@@ -381,12 +381,12 @@ class TouchCalibrationPanel {
     /// Release-immune refractory: a commit within this many ms of the previous
     /// committed sample is treated as bounce and dropped. Capacitive bounce
     /// resolves in <50ms; deliberate taps are >200ms apart.
-    static constexpr uint32_t REFRACTORY_MS = 150;
+    static constexpr uint32_t kRefractoryMs = 150;
 
     /// Commit the pending press if no release has arrived within this many ms.
     /// Panels that never deliver a clean release would otherwise be
     /// uncalibratable; the stall timer fires this fallback.
-    static constexpr uint32_t STALL_COMMIT_MS = 600;
+    static constexpr uint32_t kStallCommitMs = 600;
 
     /// Monotonic-ms clock used for the refractory + stall logic. Defaults to
     /// lv_tick_get(); tests inject a deterministic source via the test-access class.
@@ -400,7 +400,7 @@ class TouchCalibrationPanel {
     /// refractory window has not elapsed since the last committed sample.
     void commit_pending(uint32_t now);
 
-    /// Commit the pending press only if it has been outstanding >= STALL_COMMIT_MS
+    /// Commit the pending press only if it has been outstanding >= kStallCommitMs
     /// (the stall-timer fallback, also driven directly by tests).
     void commit_pending_if_stale(uint32_t now);
 
@@ -418,7 +418,7 @@ class TouchCalibrationPanel {
     /// `out_raw` receives the median of the digitizer readings belonging to the
     /// SAME samples that passed the screen-space filter, and `out_has_raw` says
     /// whether every one of them carried a reading. The raw values deliberately
-    /// get no spread or saturation gate of their own: MAX_SAMPLE_SPREAD is a pixel
+    /// get no spread or saturation gate of their own: kMaxSampleSpread is a pixel
     /// budget, and on a 4096-unit digitizer feeding an 800px panel the equivalent
     /// raw spread is five times larger, so reusing the constant would reject good
     /// taps. The screen-space gate already vetted the tap; this only needs the
@@ -444,7 +444,7 @@ class TouchCalibrationPanel {
     int verify_raw_touch_count_ = 0;
     int verify_onscreen_touch_count_ = 0;
     lv_timer_t* fast_revert_timer_ = nullptr;
-    static constexpr int FAST_REVERT_CHECK_MS = 3000;
+    static constexpr int kFastRevertCheckMs = 3000;
 
     void start_fast_revert_timer();
     void stop_fast_revert_timer();
@@ -453,12 +453,12 @@ class TouchCalibrationPanel {
     // Calibration target positions as screen ratios
     // These form a well-distributed triangle for accurate affine transform
     // Y ratios at 20%-78% to keep crosshairs clear of header/footer chrome
-    static constexpr float TARGET_0_X_RATIO = 0.15f; ///< 15% from left edge
-    static constexpr float TARGET_0_Y_RATIO = 0.20f; ///< 20% from top
-    static constexpr float TARGET_1_X_RATIO = 0.50f; ///< Center X
-    static constexpr float TARGET_1_Y_RATIO = 0.78f; ///< 78% from top (clear of buttons)
-    static constexpr float TARGET_2_X_RATIO = 0.85f; ///< 85% from left
-    static constexpr float TARGET_2_Y_RATIO = 0.20f; ///< 20% from top
+    static constexpr float kTarget0XRatio = 0.15f; ///< 15% from left edge
+    static constexpr float kTarget0YRatio = 0.20f; ///< 20% from top
+    static constexpr float kTarget1XRatio = 0.50f; ///< Center X
+    static constexpr float kTarget1YRatio = 0.78f; ///< 78% from top (clear of buttons)
+    static constexpr float kTarget2XRatio = 0.85f; ///< 85% from left
+    static constexpr float kTarget2YRatio = 0.20f; ///< 20% from top
 };
 
 } // namespace helix

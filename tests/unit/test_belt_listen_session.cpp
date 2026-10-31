@@ -30,7 +30,7 @@ using namespace helix::calibration;
 
 namespace {
 
-constexpr float SPAN_MM = 151.0f; ///< the span the fixtures were captured at
+constexpr float kSpanMm = 151.0f; ///< the span the fixtures were captured at
 
 /// A fixture plus the two numbers its header records. Both vary per file, so
 /// reading them beats hardcoding: rates run 3090.5-3091.5 Hz, and the recorded
@@ -199,7 +199,7 @@ std::vector<AccelSample> pluck_stream(float f0, float amp) {
 }
 
 /// A live-stream-shaped buffer with `n` copies of the same real ring-down in
-/// it, each separated by enough quiet for the cooldown (SKIP_MS + ANALYZE_MS,
+/// it, each separated by enough quiet for the cooldown (kSkipMs + kAnalyzeMs,
 /// about 1700 samples here) to expire before the next strike arrives. Noise
 /// amplitude is derived the same way splice_live_window() derives it, so every
 /// copy arrives at the strength the capture actually recorded.
@@ -208,7 +208,7 @@ std::vector<AccelSample> splice_n_plucks(const Fixture& f, size_t n) {
     const float noise_amp = sig / f.recorded_ratio;
 
     auto out =
-        make_noise(noise_amp, BeltListenSession::DETECTION_WINDOW_SAMPLES + 1024, 0.0f, f.rate_hz);
+        make_noise(noise_amp, BeltListenSession::kDetectionWindowSamples + 1024, 0.0f, f.rate_hz);
     for (size_t k = 0; k < n; ++k) {
         const float t_join = out.back().time;
         for (size_t i = 0; i < f.samples.size(); ++i) {
@@ -235,7 +235,7 @@ float peak_window_ratio(const BeltListenSession& s, const std::vector<AccelSampl
     PluckDetector det;
     det.set_noise_floor(s.noise_floor());
     float best = 0.0f;
-    const size_t w = BeltListenSession::DETECTION_WINDOW_SAMPLES;
+    const size_t w = BeltListenSession::kDetectionWindowSamples;
     for (size_t end = w; end <= buf.size(); end += 128) {
         best = std::max(best, det.rms_ratio(buf.data() + (end - w), w));
     }
@@ -251,7 +251,7 @@ TEST_CASE("session recovers the A belt fundamental from a real capture", "[belt]
     const auto fx = load_fixture("a_belt_86hz_3.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
 
     auto events = stream_through(s, live);
@@ -269,7 +269,7 @@ TEST_CASE("session recovers the B belt fundamental from a real capture", "[belt]
     const auto fx = load_fixture("b_belt_82hz_1.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
     stream_through(s, live);
 
@@ -284,7 +284,7 @@ TEST_CASE("session does not read the A belt an octave sharp", "[belt][listen]") 
     const auto fx = load_fixture("a_belt_86hz_2.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
     stream_through(s, live);
 
@@ -304,7 +304,7 @@ TEST_CASE("one physical pluck is counted once", "[belt][listen]") {
     const auto fx = load_fixture("a_belt_86hz_3.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
     stream_through(s, live);
 
@@ -315,7 +315,7 @@ TEST_CASE("a weak strike is rejected, not measured", "[belt][listen]") {
     const auto fx = load_fixture("weak_pluck_reject.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
     stream_through(s, live);
 
@@ -380,19 +380,19 @@ TEST_CASE("HELIX_BELT_CAPTURE_DIR wires capture into a live session end to end",
 
     {
         const auto fx = load_fixture("a_belt_86hz_3.csv");
-        BeltListenSession accepted_session(SPAN_MM, fx.rate_hz);
+        BeltListenSession accepted_session(kSpanMm, fx.rate_hz);
         listen(accepted_session, splice_live_window(fx));
         REQUIRE(accepted_session.accepted_count() >= 1);
     }
     {
-        // weak_pluck_reject.csv never clears MIN_DETECTABLE_RATIO once
+        // weak_pluck_reject.csv never clears kMinDetectableRatio once
         // spliced (it was captured at 1.4x the floor), so push() returns
         // nullopt before ever reaching a capture point - nothing to write
         // and nothing wrong with that. A steady tone clears the energy gate
         // and gets resolved as NOT_A_PLUCK, which is the rejection shape
         // this test needs to see written.
         auto buf = steady_tone_stream(115.0f, 400.0f);
-        BeltListenSession rejected_session(SPAN_MM, kRate);
+        BeltListenSession rejected_session(kSpanMm, kRate);
         auto events = listen(rejected_session, buf);
         REQUIRE_FALSE(events.empty());
         REQUIRE(rejected_session.accepted_count() == 0);
@@ -445,7 +445,7 @@ TEST_CASE("HELIX_BELT_CAPTURE_DIR wires capture into a live session end to end",
 TEST_CASE("quiet stream produces nothing", "[belt][listen]") {
     constexpr float kRate = 3091.0f; // no fixture involved; any plausible rate
     auto quiet = make_noise(5.0f, 8192, 0.0f, kRate);
-    BeltListenSession s(SPAN_MM, kRate);
+    BeltListenSession s(kSpanMm, kRate);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(quiet.begin(), quiet.begin() + 1000)));
     stream_through(s, quiet);
     CHECK(s.accepted_count() == 0);
@@ -454,7 +454,7 @@ TEST_CASE("quiet stream produces nothing", "[belt][listen]") {
 
 TEST_CASE("the session commits only after five accepted plucks", "[belt][listen]") {
     const auto fx = load_fixture("a_belt_86hz_3.csv");
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     for (int i = 0; i < 5; ++i) {
         auto live = splice_live_window(fx);
         if (i == 0) {
@@ -472,7 +472,7 @@ TEST_CASE("the session commits only after five accepted plucks", "[belt][listen]
 TEST_CASE("the session keeps accepting past the commit threshold", "[belt][listen]") {
     // The user is meant to be able to keep plucking and watch the number hold.
     const auto fx = load_fixture("a_belt_86hz_3.csv");
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     for (int i = 0; i < 8; ++i) {
         auto live = splice_live_window(fx);
         if (i == 0) {
@@ -490,7 +490,7 @@ TEST_CASE("a discontiguous batch is not analysed", "[belt][listen]") {
     const auto fx = load_fixture("a_belt_86hz_3.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
 
     constexpr size_t kBatch = 340;
@@ -509,7 +509,7 @@ TEST_CASE("reset clears everything", "[belt][listen]") {
     const auto fx = load_fixture("a_belt_86hz_3.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
     stream_through(s, live);
     REQUIRE(s.accepted_count() >= 1);
@@ -531,7 +531,7 @@ TEST_CASE("last_spectrum holds the accepted pluck's PSD", "[belt][listen]") {
     const auto fx = load_fixture("a_belt_86hz_3.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     CHECK(s.last_spectrum().empty()); // nothing accepted yet
 
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
@@ -560,11 +560,11 @@ TEST_CASE("a loud steady tone is never counted as a pluck", "[belt][listen]") {
     // plucked nothing. This is that event: far past the 9x gate, and not a
     // strike.
     auto buf = steady_tone_stream(115.0f, 400.0f);
-    BeltListenSession s(SPAN_MM, kRate);
+    BeltListenSession s(kSpanMm, kRate);
     auto events = listen(s, buf);
 
     INFO("peak window ratio " << peak_window_ratio(s, buf));
-    CHECK(peak_window_ratio(s, buf) > PluckDetector::MIN_RMS_RATIO); // energy accepts it
+    CHECK(peak_window_ratio(s, buf) > PluckDetector::kMinRmsRatio); // energy accepts it
     CHECK(s.accepted_count() == 0);
     CHECK(s.median_hz() == 0.0f);
     CHECK_FALSE(s.committed());
@@ -578,10 +578,10 @@ TEST_CASE("a loud steady tone is never counted as a pluck", "[belt][listen]") {
 
 TEST_CASE("energy that swells instead of ringing down is not a pluck", "[belt][listen]") {
     auto buf = swelling_stream(115.0f, 400.0f);
-    BeltListenSession s(SPAN_MM, kRate);
+    BeltListenSession s(kSpanMm, kRate);
     auto events = listen(s, buf);
 
-    CHECK(peak_window_ratio(s, buf) > PluckDetector::MIN_RMS_RATIO);
+    CHECK(peak_window_ratio(s, buf) > PluckDetector::kMinRmsRatio);
     CHECK(s.accepted_count() == 0);
     CHECK_FALSE(s.committed());
     // The swell is resolved and rejected on its shape. Its dying tail also
@@ -599,10 +599,10 @@ TEST_CASE("a broadband thump is not a pluck", "[belt][listen]") {
     // decay, no harmonic series. Only the spectrum can tell it apart, which is
     // why the concentration check exists.
     auto buf = thump_stream(400.0f);
-    BeltListenSession s(SPAN_MM, kRate);
+    BeltListenSession s(kSpanMm, kRate);
     auto events = listen(s, buf);
 
-    CHECK(peak_window_ratio(s, buf) > PluckDetector::MIN_RMS_RATIO);
+    CHECK(peak_window_ratio(s, buf) > PluckDetector::kMinRmsRatio);
     CHECK(s.accepted_count() == 0);
     CHECK_FALSE(s.committed());
     // The reason matters most here: a thump is firm, so "pluck harder" would
@@ -615,10 +615,10 @@ TEST_CASE("a broadband thump is not a pluck", "[belt][listen]") {
 
 TEST_CASE("a genuine decaying harmonic series is still accepted", "[belt][listen]") {
     // The guard on everything above: the new checks must not be satisfiable by
-    // raising MIN_RMS_RATIO, so a real strike barely over the existing gate has
+    // raising kMinRmsRatio, so a real strike barely over the existing gate has
     // to come through.
     auto buf = pluck_stream(99.0f, 172.0f);
-    BeltListenSession s(SPAN_MM, kRate);
+    BeltListenSession s(kSpanMm, kRate);
     auto events = listen(s, buf);
 
     const float ratio = peak_window_ratio(s, buf);
@@ -640,7 +640,7 @@ TEST_CASE("every accept-case capture is measured at every window alignment",
     //     of at the strike made the same capture read a rise of 1.16 at one
     //     alignment and 36.4 at the next, against a threshold of 3. A
     //     single-lead-in guard could not see it.
-    //   - MIN_HARMONIC_CONCENTRATION at 0.30 rejected b_belt_82hz_3, the
+    //   - kMinHarmonicConcentration at 0.30 rejected b_belt_82hz_3, the
     //     strongest capture in the set, at leads 2304-2312 and nowhere else. A
     //     nine-point sampled guard stepped straight over that band (2300, then
     //     2342) and could not see it either.
@@ -649,12 +649,12 @@ TEST_CASE("every accept-case capture is measured at every window alignment",
     // costs a few seconds; the alternative has now twice been a wrong number
     // shipped to a user.
     //
-    // The lead-in starts at DETECTION_WINDOW_SAMPLES so the window is already
+    // The lead-in starts at kDetectionWindowSamples so the window is already
     // full when the strike arrives, which is the production condition: the
     // window fills within a second of the stream starting, and the user plucks
     // long after that.
     float band_lo = 0.0f, band_hi = 0.0f;
-    REQUIRE(search_window_for_span(SPAN_MM, &band_lo, &band_hi));
+    REQUIRE(search_window_for_span(kSpanMm, &band_lo, &band_hi));
 
     struct Expect {
         const char* name;
@@ -678,12 +678,12 @@ TEST_CASE("every accept-case capture is measured at every window alignment",
         float worst_end_ratio = 0.0f;
 
         constexpr size_t kBatch = 340;
-        for (size_t lead = BeltListenSession::DETECTION_WINDOW_SAMPLES;
-             lead < BeltListenSession::DETECTION_WINDOW_SAMPLES + kBatch; ++lead) {
+        for (size_t lead = BeltListenSession::kDetectionWindowSamples;
+             lead < BeltListenSession::kDetectionWindowSamples + kBatch; ++lead) {
             ++phases;
             auto live = splice_live_window(fx, lead);
 
-            BeltListenSession s(SPAN_MM, fx.rate_hz);
+            BeltListenSession s(kSpanMm, fx.rate_hz);
             REQUIRE(
                 s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
             std::vector<AccelSample> resolved;
@@ -710,11 +710,11 @@ TEST_CASE("every accept-case capture is measured at every window alignment",
 
             // Read back the concentration push() actually computed, from the
             // spectrum and the frequency it settled on. This is the margin on
-            // MIN_HARMONIC_CONCENTRATION, and it is the quantity that had none
+            // kMinHarmonicConcentration, and it is the quantity that had none
             // left: asserting the accept/reject outcome alone would let the
             // margin erode silently until the next alignment sweep trips.
             const float c = harmonic_concentration(s.last_spectrum(), s.median_hz(),
-                                                   DEFAULT_HARMONICS, band_lo, &s.quiet_spectrum());
+                                                   kDefaultHarmonics, band_lo, &s.quiet_spectrum());
             if (c < worst_concentration) {
                 worst_concentration = c;
                 worst_lead = lead;
@@ -741,15 +741,15 @@ TEST_CASE("every accept-case capture is measured at every window alignment",
                         << "-" << best_onset_rise << ", worst decay rise " << worst_decay_rise
                         << ", worst end ratio " << worst_end_ratio);
         CHECK(measured == phases);
-        CHECK(worst_concentration >= MIN_HARMONIC_CONCENTRATION);
+        CHECK(worst_concentration >= kMinHarmonicConcentration);
         // Asserted against the constants themselves, not against the observed
         // figures: the observed figures belong in the headers as documentation,
         // and pinning them here would fail on any harmless change to the
         // splice. What must not happen is a margin quietly reaching zero, and
         // the INFO above prints all four every time one of them does.
-        CHECK(worst_onset_rise >= PluckDetector::MIN_ONSET_RISE);
-        CHECK(worst_decay_rise <= PluckDetector::MAX_DECAY_RISE);
-        CHECK(worst_end_ratio <= PluckDetector::MAX_DECAY_END_RATIO);
+        CHECK(worst_onset_rise >= PluckDetector::kMinOnsetRise);
+        CHECK(worst_decay_rise <= PluckDetector::kMaxDecayRise);
+        CHECK(worst_end_ratio <= PluckDetector::kMaxDecayEndRatio);
     }
 }
 
@@ -771,7 +771,7 @@ TEST_CASE("every accept-case capture still passes the whole pipeline", "[belt][l
         const auto fx = load_fixture(e.name);
         auto live = splice_live_window(fx);
 
-        BeltListenSession s(SPAN_MM, fx.rate_hz);
+        BeltListenSession s(kSpanMm, fx.rate_hz);
         REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
         stream_through(s, live);
 
@@ -782,12 +782,12 @@ TEST_CASE("every accept-case capture still passes the whole pipeline", "[belt][l
 }
 
 TEST_CASE("the below-gate capture is still rejected", "[belt][listen][golden]") {
-    // Recorded at 7.82x, under MIN_RMS_RATIO. It must stay a reject case - the
+    // Recorded at 7.82x, under kMinRmsRatio. It must stay a reject case - the
     // shape checks are additional evidence, never a way past the energy gate.
     const auto fx = load_fixture("b_belt_82hz_hard_case.csv");
     auto live = splice_live_window(fx);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
     stream_through(s, live);
 
@@ -845,21 +845,21 @@ TEST_CASE("a fan running through the whole session does not become the answer", 
     // this proves the session learns it from the same buffer it learns its
     // floor from, and hands it to both the estimator and the concentration
     // check. With a broadband quiet bed no fixture-based session test reaches
-    // BACKGROUND_PROMINENCE_TOLERANCE at all, so without this the discount is
+    // kBackgroundProminenceTolerance at all, so without this the discount is
     // inert everywhere else in this file.
     //
     // 115 Hz is the reference machine's measured background peak. It sits
     // inside the 77-165 Hz search window and outscores the belt, which is what
     // produced an evening of confident, wrong, mutually contradictory readings.
     auto buf = fan_and_pluck_stream(115.0f, 120.0f, 99.0f, 120.0f, 4000.0f);
-    BeltListenSession s(SPAN_MM, kRate);
+    BeltListenSession s(kSpanMm, kRate);
     listen(s, buf);
 
     // The fan is genuinely prominent in what the session learned, or nothing
     // below means anything.
     REQUIRE(s.quiet_spectrum().valid());
     INFO("prominence at 115 Hz " << s.quiet_spectrum().prominence_at(115.0f));
-    CHECK(s.quiet_spectrum().prominence_at(115.0f) > BACKGROUND_PROMINENCE_TOLERANCE);
+    CHECK(s.quiet_spectrum().prominence_at(115.0f) > kBackgroundProminenceTolerance);
     CHECK(s.quiet_spectrum().weight_at(115.0f) < 1.0f);
 
     REQUIRE(s.accepted_count() >= 1);
@@ -870,9 +870,9 @@ TEST_CASE("a fan running through the whole session does not become the answer", 
     // window, and it returns the fan. Same PSD, two scorings, opposite answers -
     // so this cannot pass by the fan simply being too quiet to matter.
     float lo = 0.0f, hi = 0.0f;
-    REQUIRE(search_window_for_span(SPAN_MM, &lo, &hi));
+    REQUIRE(search_window_for_span(kSpanMm, &lo, &hi));
     REQUIRE_FALSE(s.last_spectrum().empty());
-    const auto blind = estimate_pitch(s.last_spectrum(), lo, hi, DEFAULT_HARMONICS, nullptr);
+    const auto blind = estimate_pitch(s.last_spectrum(), lo, hi, kDefaultHarmonics, nullptr);
     REQUIRE(blind.valid);
     INFO("blind estimate " << blind.frequency_hz);
     CHECK(blind.frequency_hz == Catch::Approx(115.0f).margin(4.0f));
@@ -883,11 +883,11 @@ TEST_CASE("learn_noise_floor learns the quiet spectrum as well as the floor", "[
     // ringing in here. set_noise_floor() answers only the first, and a session
     // set up that way has no background rejection.
     auto buf = pluck_stream(99.0f, 172.0f);
-    BeltListenSession learned(SPAN_MM, kRate);
+    BeltListenSession learned(kSpanMm, kRate);
     REQUIRE(learned.learn_noise_floor(std::vector<AccelSample>(buf.begin(), buf.begin() + 3000)));
     CHECK(learned.quiet_spectrum().valid());
 
-    BeltListenSession scalar_only(SPAN_MM, kRate);
+    BeltListenSession scalar_only(kSpanMm, kRate);
     scalar_only.set_noise_floor(50.0f);
     CHECK_FALSE(scalar_only.quiet_spectrum().valid());
 }
@@ -898,7 +898,7 @@ TEST_CASE("advancing off a belt takes five plucks, not one", "[belt][listen]") {
     // LV_EVENT_CLICKED with no disabled check, so the XML binding that shows
     // the five-pluck rule to a human does not enforce it against a
     // programmatic click. That mattered beyond the UI: Task 12 set
-    // MIN_HARMONIC_CONCENTRATION as low as 0.25 on the argument that the
+    // kMinHarmonicConcentration as low as 0.25 on the argument that the
     // committed number is a median of five, so committing on one would have
     // quietly invalidated it.
     //
@@ -910,9 +910,9 @@ TEST_CASE("advancing off a belt takes five plucks, not one", "[belt][listen]") {
     // genuinely disagree on this input, so a revert to the median-only check
     // fails here.
     const auto fx = load_fixture("a_belt_86hz_3.csv");
-    const auto live = splice_n_plucks(fx, PluckAggregator::COMMIT_AFTER);
+    const auto live = splice_n_plucks(fx, PluckAggregator::kCommitAfter);
 
-    BeltListenSession s(SPAN_MM, fx.rate_hz);
+    BeltListenSession s(kSpanMm, fx.rate_hz);
     REQUIRE(s.learn_noise_floor(std::vector<AccelSample>(live.begin(), live.begin() + 1000)));
 
     constexpr size_t kBatch = 340;
@@ -924,7 +924,7 @@ TEST_CASE("advancing off a belt takes five plucks, not one", "[belt][listen]") {
                          live.begin() + static_cast<long>(off + n));
         s.push(b);
 
-        if (s.accepted_count() < PluckAggregator::COMMIT_AFTER) {
+        if (s.accepted_count() < PluckAggregator::kCommitAfter) {
             INFO("accepted " << s.accepted_count() << " median " << s.median_hz());
             CHECK_FALSE(s.may_advance());
             if (s.median_hz() > 0.0f) {
@@ -933,8 +933,8 @@ TEST_CASE("advancing off a belt takes five plucks, not one", "[belt][listen]") {
         }
     }
 
-    INFO("accepted " << s.accepted_count() << " of " << PluckAggregator::COMMIT_AFTER);
-    REQUIRE(s.accepted_count() == PluckAggregator::COMMIT_AFTER);
+    INFO("accepted " << s.accepted_count() << " of " << PluckAggregator::kCommitAfter);
+    REQUIRE(s.accepted_count() == PluckAggregator::kCommitAfter);
     CHECK(s.may_advance());
     CHECK(batches_with_a_median_but_no_commit > 0);
 }

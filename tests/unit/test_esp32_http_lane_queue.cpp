@@ -35,7 +35,7 @@
 
 using helix::http::BoundedSlotCounter;
 using helix::http::clamp_fetch_cap;
-using helix::http::HARD_CAP_BYTES;
+using helix::http::kHardCapBytes;
 
 TEST_CASE("clamp_fetch_cap enforces the hard ceiling regardless of the request", "[esp32][http]") {
     // Well under the cap — passed through unchanged.
@@ -43,11 +43,11 @@ TEST_CASE("clamp_fetch_cap enforces the hard ceiling regardless of the request",
     REQUIRE(clamp_fetch_cap(100 * 1024) == 100 * 1024);
 
     // Exactly at the cap — unchanged.
-    REQUIRE(clamp_fetch_cap(HARD_CAP_BYTES) == HARD_CAP_BYTES);
+    REQUIRE(clamp_fetch_cap(kHardCapBytes) == kHardCapBytes);
 
     // Over the cap — clamped down, never grows past the ceiling.
-    REQUIRE(clamp_fetch_cap(HARD_CAP_BYTES + 1) == HARD_CAP_BYTES);
-    REQUIRE(clamp_fetch_cap(10 * 1024 * 1024) == HARD_CAP_BYTES);
+    REQUIRE(clamp_fetch_cap(kHardCapBytes + 1) == kHardCapBytes);
+    REQUIRE(clamp_fetch_cap(10 * 1024 * 1024) == kHardCapBytes);
 }
 
 TEST_CASE("clamp_fetch_cap(0, ...) means \"no explicit cap\", not \"zero bytes\"",
@@ -55,7 +55,7 @@ TEST_CASE("clamp_fetch_cap(0, ...) means \"no explicit cap\", not \"zero bytes\"
     // A caller-requested 0 resolves to the hard ceiling — it must NOT mean
     // "fetch nothing" (that would silently break any caller that forgets to
     // set an explicit max_bytes).
-    REQUIRE(clamp_fetch_cap(0) == HARD_CAP_BYTES);
+    REQUIRE(clamp_fetch_cap(0) == kHardCapBytes);
 }
 
 TEST_CASE("BoundedSlotCounter accepts up to max_depth then rejects", "[esp32][http]") {
@@ -100,24 +100,24 @@ TEST_CASE("A submission abandoned after try_acquire() must give its slot back", 
     // to release it itself. Without that, max_depth consecutive spawn failures
     // wedge the lane at "queue full" for the rest of the session even after
     // the condition that blocked the spawn has cleared.
-    constexpr size_t DEPTH = 8; // EspHttpLane::QUEUE_DEPTH, as a literal — see below
-    BoundedSlotCounter slots(DEPTH);
+    constexpr size_t kDepth = 8; // EspHttpLane::kQueueDepth, as a literal — see below
+    BoundedSlotCounter slots(kDepth);
 
-    for (size_t attempt = 0; attempt < DEPTH * 3; ++attempt) {
+    for (size_t attempt = 0; attempt < kDepth * 3; ++attempt) {
         REQUIRE(slots.try_acquire()); // never rejects: every prior attempt gave its slot back
         slots.release();              // the abandon path
         REQUIRE(slots.in_flight() == 0);
     }
 
     // The lane is still fully available afterward — nothing leaked.
-    for (size_t i = 0; i < DEPTH; ++i) {
+    for (size_t i = 0; i < kDepth; ++i) {
         REQUIRE(slots.try_acquire());
     }
     REQUIRE_FALSE(slots.try_acquire());
 }
 
 TEST_CASE("BoundedSlotCounter::max_depth() reports the configured depth", "[esp32][http]") {
-    // 8 matches EspHttpLane::QUEUE_DEPTH (esp_http_lane.h) — kept as a literal
+    // 8 matches EspHttpLane::kQueueDepth (esp_http_lane.h) — kept as a literal
     // here since that header pulls no ESP-IDF includes but is still the
     // IDF-coupled class's home, not this pure-logic test's.
     BoundedSlotCounter slots(8);
@@ -128,24 +128,24 @@ TEST_CASE("BoundedSlotCounter::max_depth() reports the configured depth", "[esp3
 TEST_CASE("initial_buffer_bytes sizes from Content-Length, never past the cap",
           "[esp32][http][lane_buffer]") {
     using helix::http::initial_buffer_bytes;
-    using helix::http::UNKNOWN_LENGTH_START_BYTES;
+    using helix::http::kUnknownLengthStartBytes;
     // A 9 KB thumbnail under a 512 KB cap takes 9 KB, not 512 KB.
-    CHECK(initial_buffer_bytes(HARD_CAP_BYTES, 9274) == 9274);
+    CHECK(initial_buffer_bytes(kHardCapBytes, 9274) == 9274);
     // A 200 KB range answered with its own length.
     CHECK(initial_buffer_bytes(200 * 1024, 200 * 1024) == 200 * 1024);
     // A server ignoring Range reports the whole file: the cap bounds it.
     CHECK(initial_buffer_bytes(200 * 1024, 53472182LL) == 200 * 1024);
     // Unknown length (chunked, or no header) starts small.
-    CHECK(initial_buffer_bytes(HARD_CAP_BYTES, -1) == UNKNOWN_LENGTH_START_BYTES);
-    CHECK(initial_buffer_bytes(HARD_CAP_BYTES, 0) == UNKNOWN_LENGTH_START_BYTES);
+    CHECK(initial_buffer_bytes(kHardCapBytes, -1) == kUnknownLengthStartBytes);
+    CHECK(initial_buffer_bytes(kHardCapBytes, 0) == kUnknownLengthStartBytes);
     CHECK(initial_buffer_bytes(4096, -1) == 4096);
 }
 
 TEST_CASE("next_buffer_bytes doubles and stops at the cap", "[esp32][http][lane_buffer]") {
     using helix::http::next_buffer_bytes;
-    CHECK(next_buffer_bytes(16 * 1024, HARD_CAP_BYTES) == 32 * 1024);
-    CHECK(next_buffer_bytes(300 * 1024, HARD_CAP_BYTES) == HARD_CAP_BYTES);
-    CHECK(next_buffer_bytes(HARD_CAP_BYTES, HARD_CAP_BYTES) == HARD_CAP_BYTES);
+    CHECK(next_buffer_bytes(16 * 1024, kHardCapBytes) == 32 * 1024);
+    CHECK(next_buffer_bytes(300 * 1024, kHardCapBytes) == kHardCapBytes);
+    CHECK(next_buffer_bytes(kHardCapBytes, kHardCapBytes) == kHardCapBytes);
 }
 
 TEST_CASE("try_reserve reports an impossible allocation instead of aborting",
@@ -212,16 +212,16 @@ using helix::http::read_capped_body;
 /// What the network does next: a segment of bytes arriving, a quiet gap, the
 /// end of the body, or a failure, each taking @p ms.
 struct Step {
-    int result;     ///< > 0 bytes arrive, AGAIN a gap with nothing, 0 the end, < 0 failure
+    int result;     ///< > 0 bytes arrive, kAgain a gap with nothing, 0 the end, < 0 failure
     int64_t ms = 1; ///< how long it takes
 };
 
 /// esp_http_client_read() as it behaves: it keeps reading until @p len is
 /// filled, and returns early only on the end of the body, a failure, or a
-/// socket read that waited SOCKET_TIMEOUT_MS with nothing to show.
+/// socket read that waited kSocketTimeoutMs with nothing to show.
 struct FakeTransport {
-    static constexpr int AGAIN = helix::http::TRANSPORT_AGAIN;
-    static constexpr int64_t SOCKET_TIMEOUT_MS = 5000;
+    static constexpr int kAgain = helix::http::kTransportAgain;
+    static constexpr int64_t kSocketTimeoutMs = 5000;
     std::vector<Step> steps;
     size_t at = 0;
     int64_t* clock;
@@ -236,8 +236,8 @@ struct FakeTransport {
             if (at >= steps.size()) {
                 // Past the script the server has gone silent: the socket read
                 // waits out its timeout.
-                *clock += SOCKET_TIMEOUT_MS - quiet;
-                return got ? got : AGAIN;
+                *clock += kSocketTimeoutMs - quiet;
+                return got ? got : kAgain;
             }
             Step& s = steps[at];
             if (s.result > 0) {
@@ -254,11 +254,11 @@ struct FakeTransport {
                 if (got == len) {
                     return got;
                 }
-            } else if (s.result == AGAIN) {
+            } else if (s.result == kAgain) {
                 ++at;
-                if (quiet + s.ms >= SOCKET_TIMEOUT_MS) {
-                    *clock += SOCKET_TIMEOUT_MS - quiet;
-                    return got ? got : AGAIN;
+                if (quiet + s.ms >= kSocketTimeoutMs) {
+                    *clock += kSocketTimeoutMs - quiet;
+                    return got ? got : kAgain;
                 }
                 *clock += s.ms; // a gap the socket read waits through
                 quiet += s.ms;
@@ -277,7 +277,7 @@ struct FakeTransport {
     }
 };
 
-constexpr LaneDeadlines DEADLINES{30000, 10000};
+constexpr LaneDeadlines kDeadlines{30000, 10000};
 
 } // namespace
 
@@ -286,7 +286,7 @@ TEST_CASE("a body read ends when the body does", "[esp32][http][lane_timeout]") 
     FakeTransport t{{{4000}, {4000}, {2000}, {0}}, 0, &now};
     std::string body;
     CHECK(read_capped_body(
-              t, 64 * 1024, 10000, body, [&] { return now; }, DEADLINES, nullptr) == BodyRead::Ok);
+              t, 64 * 1024, 10000, body, [&] { return now; }, kDeadlines, nullptr) == BodyRead::Ok);
     CHECK(body.size() == 10000);
 }
 
@@ -297,11 +297,11 @@ TEST_CASE("a body that stops arriving mid-transfer fails after the no-progress l
     FakeTransport t{{{3000}}, 0, &now};
     std::string body;
     const BodyRead r =
-        read_capped_body(t, 64 * 1024, 9000, body, [&] { return now; }, DEADLINES, nullptr);
+        read_capped_body(t, 64 * 1024, 9000, body, [&] { return now; }, kDeadlines, nullptr);
     CHECK(r == BodyRead::Stalled);
     // Ten seconds of silence, seen at the end of a socket timeout.
     CHECK(now >= 10000);
-    CHECK(now <= 10000 + 2 * FakeTransport::SOCKET_TIMEOUT_MS);
+    CHECK(now <= 10000 + 2 * FakeTransport::kSocketTimeoutMs);
 }
 
 TEST_CASE("a body that trickles in past the overall deadline fails near it",
@@ -311,13 +311,13 @@ TEST_CASE("a body that trickles in past the overall deadline fails near it",
     // timeout, and the 50 KB body would take over six minutes.
     std::vector<Step> trickle;
     for (int i = 0; i < 100; ++i) {
-        trickle.push_back({FakeTransport::AGAIN, 4000});
+        trickle.push_back({FakeTransport::kAgain, 4000});
         trickle.push_back({500, 1});
     }
     FakeTransport t{trickle, 0, &now};
     std::string body;
     CHECK(read_capped_body(
-              t, 64 * 1024, 50000, body, [&] { return now; }, DEADLINES, nullptr) ==
+              t, 64 * 1024, 50000, body, [&] { return now; }, kDeadlines, nullptr) ==
           BodyRead::TimedOut);
     // One bounded read past the deadline at most, not the rest of the body.
     CHECK(now <= 40000);
@@ -328,7 +328,7 @@ TEST_CASE("a cancel lands within one bounded read of a trickling body",
     int64_t now = 0;
     std::vector<Step> trickle;
     for (int i = 0; i < 100; ++i) {
-        trickle.push_back({FakeTransport::AGAIN, 4000});
+        trickle.push_back({FakeTransport::kAgain, 4000});
         trickle.push_back({500, 1});
     }
     FakeTransport t{trickle, 0, &now};
@@ -341,7 +341,7 @@ TEST_CASE("a cancel lands within one bounded read of a trickling body",
         }
         return now;
     };
-    CHECK(read_capped_body(t, 64 * 1024, 50000, body, clock, DEADLINES, &cancelled) ==
+    CHECK(read_capped_body(t, 64 * 1024, 50000, body, clock, kDeadlines, &cancelled) ==
           BodyRead::Cancelled);
     CHECK(now <= 6000 + 10000);
 }
@@ -353,19 +353,19 @@ TEST_CASE("a transport failure, an over-cap body and a cancel each end the read"
 
     FakeTransport failing{{{1000}, {-1}}, 0, &now};
     CHECK(read_capped_body(
-              failing, 64 * 1024, 9000, body, [&] { return now; }, DEADLINES, nullptr) ==
+              failing, 64 * 1024, 9000, body, [&] { return now; }, kDeadlines, nullptr) ==
           BodyRead::ReadFailed);
 
     // A server ignoring Range: the cap fills and more is coming.
     FakeTransport big{std::vector<Step>(10, Step{4096}), 0, &now};
     big.complete_at_end = false;
     CHECK(read_capped_body(
-              big, 8192, -1, body, [&] { return now; }, DEADLINES, nullptr) == BodyRead::OverCap);
+              big, 8192, -1, body, [&] { return now; }, kDeadlines, nullptr) == BodyRead::OverCap);
 
     std::atomic<bool> cancelled{true};
     FakeTransport cancel{{{1000}, {1000}, {0}}, 0, &now};
     CHECK(read_capped_body(
-              cancel, 64 * 1024, 2000, body, [&] { return now; }, DEADLINES, &cancelled) ==
+              cancel, 64 * 1024, 2000, body, [&] { return now; }, kDeadlines, &cancelled) ==
           BodyRead::Cancelled);
     CHECK(cancel.reads == 0); // not one byte more once it is unwanted
 }

@@ -8,6 +8,7 @@
 #include "filament_favorites.h"
 #include "filament_variants.h"
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "sort_small.h"
 #include "text_io.h"
 #include "theme_manager.h"
 #include "ui/ui_widget_helpers.h"
@@ -34,8 +35,8 @@ const std::string kFavoritesVendor = "\x01"
 
 bool FilamentCatalogSelector::callbacks_registered_ = false;
 
-std::map<lv_obj_t*, FilamentCatalogSelector*>& FilamentCatalogSelector::registry() {
-    static std::map<lv_obj_t*, FilamentCatalogSelector*> instances;
+WidgetDataRegistry<FilamentCatalogSelector>& FilamentCatalogSelector::registry() {
+    static WidgetDataRegistry<FilamentCatalogSelector> instances;
     return instances;
 }
 
@@ -43,9 +44,8 @@ FilamentCatalogSelector* FilamentCatalogSelector::from_event(lv_event_t* e) {
     // Walk up from the event target until we hit a registered fragment root.
     auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
     while (obj) {
-        auto it = registry().find(obj);
-        if (it != registry().end()) {
-            return it->second;
+        if (FilamentCatalogSelector* selector = registry().get(obj)) {
+            return selector;
         }
         obj = lv_obj_get_parent(obj);
     }
@@ -117,13 +117,13 @@ void FilamentCatalogSelector::attach(lv_obj_t* fragment_root) {
     detach();
     root_ = fragment_root;
     if (root_) {
-        registry()[root_] = this;
+        registry().set(root_, this);
     }
 }
 
 void FilamentCatalogSelector::detach() {
     if (root_) {
-        registry().erase(root_);
+        registry().take(root_);
         root_ = nullptr;
     }
 }
@@ -347,6 +347,15 @@ void FilamentCatalogSelector::populate_vendor_dropdown() {
         if (!present)
             vendor_order_.push_back(extra);
     }
+    // The slot's own brand is a vendor even when neither the catalog nor the
+    // host lists it: snapping it to Generic would have an untouched Save
+    // rebrand the spool. It lists with no products, so a Save
+    // that keeps it keeps the slot's identity too.
+    if (seed_vendor_ && !seed_vendor_->empty() && !is_favorites_vendor(*seed_vendor_) &&
+        std::none_of(vendor_order_.begin(), vendor_order_.end(),
+                     [&](const std::string& v) { return ieq(v, *seed_vendor_); })) {
+        vendor_order_.push_back(*seed_vendor_);
+    }
     std::string options;
     for (size_t i = 0; i < vendor_order_.size(); ++i) {
         if (i)
@@ -355,13 +364,12 @@ void FilamentCatalogSelector::populate_vendor_dropdown() {
     }
     lv_dropdown_set_options(dd, options.c_str());
 
-    // Seed the vendor to the host-provided brand (case-insensitive) when it
-    // exists in the merged list; otherwise pin "Generic" (index 1, directly
-    // after the Favorites pseudo-vendor). This lets a host opening on an
+    // Seed the vendor to the host-provided brand (case-insensitive), which the
+    // list always holds; with no seed, pin "Generic" (index 1, directly after
+    // the Favorites pseudo-vendor). This lets a host opening on an
     // already-branded slot round-trip the vendor instead of the selector
     // silently snapping it to Generic (which a subsequent Save would then bake
-    // in, dropping the user's saved vendor). A Spoolman-only vendor resolves
-    // here once its name arrives via set_additional_vendors().
+    // in, dropping the user's saved vendor).
     uint32_t seed_idx = 1; // Generic
     if (seed_vendor_ && !seed_vendor_->empty()) {
         for (size_t i = 0; i < vendor_order_.size(); ++i) {
@@ -520,16 +528,16 @@ FilamentCatalogSelector::ordered_products_for(const std::string& vendor,
             if (p && type_allowed(p->type))
                 products.push_back(p);
         }
-        std::sort(products.begin(), products.end(),
-                  [](const helix::printer::EffectiveFilament* a,
-                     const helix::printer::EffectiveFilament* b) {
-                      const std::string na = helix::text_io::to_lower(a->name);
-                      const std::string nb = helix::text_io::to_lower(b->name);
-                      if (na != nb)
-                          return na < nb;
-                      return helix::text_io::to_lower(a->brand) <
-                             helix::text_io::to_lower(b->brand);
-                  });
+        helix::sort_small(products.begin(), products.end(),
+                          [](const helix::printer::EffectiveFilament* a,
+                             const helix::printer::EffectiveFilament* b) {
+                              const std::string na = helix::text_io::to_lower(a->name);
+                              const std::string nb = helix::text_io::to_lower(b->name);
+                              if (na != nb)
+                                  return na < nb;
+                              return helix::text_io::to_lower(a->brand) <
+                                     helix::text_io::to_lower(b->brand);
+                          });
         return products;
     }
 
@@ -544,50 +552,14 @@ FilamentCatalogSelector::ordered_products_for(const std::string& vendor,
             products.push_back(p);
     }
 
+    // Display order is the catalog's shared rule; starred rows then float
+    // above it, the quick-access payoff of starring, keeping that order among
+    // themselves.
+    helix::printer::sort_for_display(products, family);
     const std::set<std::string> starred(favorite_ids.begin(), favorite_ids.end());
-    const std::string family_lc = helix::text_io::to_lower(family);
-    // Variant grouping key: base-type products ("" sorts first) cluster ahead of
-    // variants, and each variant type ("ASA-CF", "ASA-GF") forms its own
-    // contiguous run so a heading reads as base-then-variants rather than one
-    // interleaved alphabetical soup.
-    auto variant_key = [&](const helix::printer::EffectiveFilament* p) -> std::string {
-        std::string type_lc = helix::text_io::to_lower(p->type);
-        return type_lc == family_lc ? std::string{} : type_lc;
-    };
-    // Within a variant run: 0 = the plain material whose name is just the type,
-    // 1 = everything else (alphabetical), 2 = "Support..." (sunk to the bottom,
-    // file order preserved).
-    auto rank_of = [&](const helix::printer::EffectiveFilament* p) -> int {
-        std::string name_lc = helix::text_io::to_lower(p->name);
-        if (name_lc == helix::text_io::to_lower(p->type))
-            return 0;
-        if (name_lc.rfind("support", 0) == 0)
-            return 2;
-        return 1;
-    };
-    std::stable_sort(products.begin(), products.end(),
-                     [&](const helix::printer::EffectiveFilament* a,
-                         const helix::printer::EffectiveFilament* b) {
-                         // Starred rows float above every unstarred run — the
-                         // quick-access payoff of starring — and keep the
-                         // display ranking among themselves.
-                         const bool fa = starred.count(a->id) > 0;
-                         const bool fb = starred.count(b->id) > 0;
-                         if (fa != fb)
-                             return fa;
-                         std::string ka = variant_key(a);
-                         std::string kb = variant_key(b);
-                         if (ka != kb)
-                             return ka < kb;
-                         int ra = rank_of(a);
-                         int rb = rank_of(b);
-                         if (ra != rb)
-                             return ra < rb;
-                         if (ra != 1)
-                             return false; // stable within ranks 0 and 2
-                         return helix::text_io::to_lower(a->name) <
-                                helix::text_io::to_lower(b->name);
-                     });
+    std::stable_partition(
+        products.begin(), products.end(),
+        [&](const helix::printer::EffectiveFilament* p) { return starred.count(p->id) > 0; });
     return products;
 }
 

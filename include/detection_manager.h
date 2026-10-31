@@ -45,8 +45,10 @@ class DetectionManager {
     /// false forever. Hooking add_connected_observer() runs it after every connect.
     void init(helix::IMoonrakerClient* client, helix::PrinterState* state);
 
-    /// (Re)scan printer.objects.list for "defect_detection" and update sources'
-    /// capability flags. Idempotent; safe to call on every reconnect.
+    /// Re-run each source's local capability probe, then hand every source
+    /// this printer's printer.objects.list answer
+    /// (DetectionSource::on_objects_listed). Idempotent; safe to call on every
+    /// reconnect.
     void refresh_capabilities();
 
     /// Take ownership of a source, route its events here, default its policy to
@@ -77,6 +79,38 @@ class DetectionManager {
         return &detection_pause_applicable_subject_;
     }
 
+    /// "A capable source has a switchable pre-print bed check" (integer 0/1),
+    /// bindable from XML to gate the bed-check row.
+    lv_subject_t* subject_bed_check_available() {
+        return &bed_check_available_subject_;
+    }
+
+    /// The bed check's state as the printer last reported or accepted it
+    /// (integer 0/1). Bound two-way by the settings row's toggle.
+    lv_subject_t* subject_bed_check_enabled() {
+        return &bed_check_enabled_subject_;
+    }
+
+    /// 0 while the printer's detection module is switched off as a whole: the
+    /// bed check is then off and its own switch does nothing, so the row greys.
+    lv_subject_t* subject_bed_check_switchable() {
+        return &bed_check_switchable_subject_;
+    }
+
+    /// Switch the printer's bed check. The subject follows at once and goes
+    /// back, with a toast carrying the printer's reason, if the printer
+    /// refuses. @p on_accepted runs on the main thread once it accepts.
+    /// Main thread.
+    /// @return false when no capable source has a bed check, so nothing was sent
+    bool set_bed_check_enabled(bool enabled, std::function<void()> on_accepted = {});
+
+    /// Ask the capable source for the bed check's state and publish it.
+    void refresh_bed_check();
+
+    /// Whether the print is paused because a capable source detected
+    /// something (DetectionSource::explains_current_pause()).
+    bool pause_explained_by_detection() const;
+
     /// Whether the named registered source exposes tuning
     /// (DetectionSource::can_tune()). Lets generic presenters offer a Tune
     /// button without naming any vendor's source id.
@@ -94,8 +128,8 @@ class DetectionManager {
     void reset_for_test();
 
     /// Test seam: feed a printer.objects.list "objects" array directly and apply
-    /// the same capability-detection logic the live probe uses (without a live
-    /// MoonrakerClient). Returns the detected "defect_detection" capability.
+    /// it the way the live probe does (without a live MoonrakerClient).
+    /// Returns any_available() afterwards.
     bool apply_objects_list_for_test(const nlohmann::json& objects);
 
   private:
@@ -103,8 +137,9 @@ class DetectionManager {
 
     void on_event(const DetectionEvent& e);
 
-    /// Apply a resolved capability flag to every source that consumes it.
-    void apply_capability(bool has_defect_detection);
+    /// Hand a printer.objects.list "objects" array to every source, then
+    /// republish availability.
+    void apply_objects_list(const nlohmann::json& objects);
 
     /// Init + register the availability subject on first use; re-init would
     /// wipe observers bound since the first call, so only the flag gates it.
@@ -118,8 +153,16 @@ class DetectionManager {
     /// settings, the first start where a capable source exists.
     void maybe_seed_settings();
 
+    /// The capable source with a bed check, or nullptr.
+    DetectionSource* bed_check_source() const;
+
+    static void show_bed_check_refusal(const std::string& refusal);
+
     lv_subject_t detection_available_subject_{};
     lv_subject_t detection_pause_applicable_subject_{};
+    lv_subject_t bed_check_available_subject_{};
+    lv_subject_t bed_check_enabled_subject_{};
+    lv_subject_t bed_check_switchable_subject_{};
     bool availability_subject_ready_ = false;
 
     helix::IMoonrakerClient* client_ = nullptr;

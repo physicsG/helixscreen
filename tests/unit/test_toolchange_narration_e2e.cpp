@@ -11,14 +11,16 @@
 //   S2 - the LOAD_SWAP step template the sidebar renders includes the
 //        "Brush nozzle" and "Clean nozzle" phases.
 //
-// The router unit test (test_gcode_narration_router.cpp) covers process_line
-// in isolation; on_notify_gcode_response was previously UNTESTED. This file
-// exercises both, plus the template-derived step labels the sidebar consumes.
+// This file exercises process_line and on_notify_gcode_response together, plus
+// the template-derived step labels the sidebar consumes.
 
+#include "ui_ams_sidebar.h"
 #include "ui_step_progress.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_fixtures.h"
+#include "../test_helpers/ams_sidebar_xml.h"
 #include "../test_helpers/gcode_narration_router_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_state.h"
@@ -60,6 +62,37 @@ int current_step() {
 std::string current_detail() {
     const char* s = lv_subject_get_string(AmsState::instance().get_ams_action_detail_subject());
     return s ? std::string(s) : std::string();
+}
+
+// An AFC backend whose action and loaded lane the test sets, so AmsState's
+// backend sync carries an operation's start and end the way a live AFC does
+// (the action arrives through sync_from_backend(), not set_action()).
+class ScriptedAfcBackend : public AmsBackendAfc {
+  public:
+    ScriptedAfcBackend() : AmsBackendAfc(nullptr, nullptr) {}
+
+    AmsSystemInfo get_system_info() const override {
+        AmsSystemInfo info = AmsBackendAfc::get_system_info();
+        info.action = action;
+        info.current_slot = current_slot;
+        return info;
+    }
+
+    AmsAction action = AmsAction::IDLE;
+    int current_slot = -1;
+};
+
+ScriptedAfcBackend* install_scripted_afc_backend() {
+    auto backend = std::make_unique<ScriptedAfcBackend>();
+    auto* raw = backend.get();
+    AmsState::instance().set_backend(std::move(backend));
+    return raw;
+}
+
+void sync_action(ScriptedAfcBackend* backend, AmsAction action) {
+    backend->action = action;
+    AmsState::instance().sync_from_backend();
+    helix::ui::UpdateQueue::instance().drain();
 }
 
 } // namespace
@@ -385,4 +418,218 @@ TEST_CASE_METHOD(LVGLTestFixture,
     ams.set_active_step_operation(StepOperationType::LOAD_SWAP);
     ams.set_narration_phase(-1, "");
     helix::ui::UpdateQueue::instance().drain();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "Toolchange narration - an operation ended by a backend sync clears the phase",
+                 "[ams][afc][narration][stepbar]") {
+    reset_step_baseline();
+    auto* backend = install_scripted_afc_backend();
+    AmsState::instance().sync_from_backend();
+    GcodeNarrationRouter router(nullptr, nullptr);
+
+    sync_action(backend, AmsAction::LOADING);
+    GcodeNarrationRouterTestAccess::feed(router, "lane2 is now loaded in toolhead t:0");
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(current_step() == 7);
+    REQUIRE(current_detail() == std::string("Load complete"));
+
+    // The status line must stop naming the finished operation's last phase.
+    sync_action(backend, AmsAction::IDLE);
+    CHECK(current_step() == -1);
+    CHECK(current_detail() != std::string("Load complete"));
+
+    // The next operation's first narrated phase must not be held behind the
+    // finished one's high-water mark.
+    GcodeNarrationRouterTestAccess::feed(router, "Unloading lane19");
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(current_step() == 2);
+    CHECK(current_detail() == std::string("Unload filament"));
+
+    AmsState::instance().set_narration_phase(-1, "");
+    install_afc_backend();
+}
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "Toolchange narration - a narrated phase follows the operation's template",
+                 "[ams][afc][narration][stepbar]") {
+    reset_step_baseline();
+    auto& ams = AmsState::instance();
+    GcodeNarrationRouter router(nullptr, nullptr);
+
+    SECTION("a phase the current template lacks resolves once the operation is known") {
+        ams.set_active_step_operation(StepOperationType::LOAD_FRESH);
+        GcodeNarrationRouterTestAccess::feed(router, "Unloading lane1");
+        helix::ui::UpdateQueue::instance().drain();
+        REQUIRE(current_step() == -1);
+
+        ams.set_active_step_operation(StepOperationType::LOAD_SWAP);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(current_step() == 2);
+        CHECK(current_detail() == std::string("Unload filament"));
+    }
+
+    SECTION("a narrated phase is re-resolved against the new template") {
+        GcodeNarrationRouterTestAccess::feed(router, "Unloading lane1");
+        helix::ui::UpdateQueue::instance().drain();
+        REQUIRE(current_step() == 2);
+
+        ams.set_active_step_operation(StepOperationType::UNLOAD);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(current_step() == 2);
+        CHECK(current_detail() == std::string("Retract filament"));
+    }
+
+    SECTION("an index with no phase id to re-resolve is dropped") {
+        ams.set_narration_phase(7, "Load complete");
+        ams.set_active_step_operation(StepOperationType::UNLOAD);
+        helix::ui::UpdateQueue::instance().drain();
+        CHECK(current_step() == -1);
+    }
+
+    ams.set_active_step_operation(StepOperationType::LOAD_SWAP);
+    ams.set_narration_phase(-1, "");
+    helix::ui::UpdateQueue::instance().drain();
+}
+
+namespace {
+
+/// The production sidebar over a scripted AFC backend with a lane loaded, so an
+/// externally started operation takes the sidebar's own detection path.
+struct NarratedSidebarFixture : public XMLTestFixture {
+    NarratedSidebarFixture() {
+        // init_subjects(true) is a no-op on an AmsState another case initialized
+        // without XML registration, which leaves the sidebar's bindings unbound.
+        AmsState::instance().deinit_subjects();
+        auto backend = std::make_unique<ScriptedAfcBackend>();
+        backend_ = backend.get();
+        backend_->current_slot = 0;
+        AmsState::instance().set_backend(std::move(backend));
+        AmsState::instance().init_subjects(true);
+        AmsState::instance().set_active_step_operation(StepOperationType::LOAD_SWAP);
+        AmsState::instance().set_narration_phase(-1, "");
+        AmsState::instance().sync_from_backend();
+
+        helix::test::register_ams_sidebar_xml();
+        panel_ = lv_obj_create(test_screen());
+        const char* attrs[] = {"name", "ams_operation_sidebar", nullptr};
+        root_ = static_cast<lv_obj_t*>(lv_xml_create(panel_, "ams_sidebar", attrs));
+        REQUIRE(root_ != nullptr);
+        sidebar_ = helix::ui::AmsOperationSidebar::attach(state(), panel_);
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    ~NarratedSidebarFixture() override {
+        sidebar_.reset();
+        if (panel_ && lv_obj_is_valid(panel_)) {
+            lv_obj_delete(panel_);
+        }
+        AmsState::instance().set_narration_phase(-1, "");
+        AmsState::instance().set_backend(nullptr);
+    }
+
+    [[nodiscard]] std::string status_text() const {
+        lv_obj_t* label = lv_obj_find_by_name(root_, "status_label");
+        REQUIRE(label != nullptr);
+        return lv_label_get_text(label);
+    }
+
+    ScriptedAfcBackend* backend_ = nullptr;
+    std::unique_ptr<helix::ui::AmsOperationSidebar> sidebar_;
+    lv_obj_t* panel_ = nullptr;
+    lv_obj_t* root_ = nullptr;
+};
+
+} // namespace
+
+TEST_CASE_METHOD(NarratedSidebarFixture,
+                 "AMS sidebar keeps the phase an external swap narrated before its bar existed",
+                 "[ams][afc][narration][stepbar][sidebar]") {
+    GcodeNarrationRouter router(nullptr, nullptr);
+
+    // A finished load, ended by the backend going idle.
+    sync_action(backend_, AmsAction::LOADING);
+    GcodeNarrationRouterTestAccess::feed(router, "lane2 is now loaded in toolhead t:0");
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(status_text() == std::string("Load complete"));
+    sync_action(backend_, AmsAction::IDLE);
+    CHECK(status_text() != std::string("Load complete"));
+
+    // AFC narrates the unload a few hundred ms before its action reaches the
+    // sidebar, which only then builds the bar for the operation.
+    GcodeNarrationRouterTestAccess::feed(router, "Unloading lane19");
+    helix::ui::UpdateQueue::instance().drain();
+    sync_action(backend_, AmsAction::UNLOADING);
+
+    CHECK(AmsState::instance().get_active_step_operation() == StepOperationType::LOAD_SWAP);
+    CHECK(current_step() == 2);
+    CHECK(status_text() == std::string("Unload filament"));
+}
+
+TEST_CASE_METHOD(NarratedSidebarFixture, "AMS sidebar starts its own operation from the first step",
+                 "[ams][afc][narration][stepbar][sidebar]") {
+    GcodeNarrationRouter router(nullptr, nullptr);
+
+    // Narration seen while idle belongs to no operation this UI starts.
+    GcodeNarrationRouterTestAccess::feed(router, "Unloading lane19");
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(current_step() == 2);
+
+    sidebar_->start_operation(StepOperationType::LOAD_SWAP, 1);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(current_step() == 0);
+}
+
+namespace {
+
+// An AFC backend fed real AFC-object status frames, so the action AmsState
+// syncs is the one the backend's own parser derives.
+class FramedAfcBackend : public AmsBackendAfc {
+  public:
+    FramedAfcBackend() : AmsBackendAfc(nullptr, nullptr) {}
+
+    void feed(const nlohmann::json& afc) {
+        nlohmann::json params;
+        params["AFC"] = afc;
+        nlohmann::json notification;
+        notification["params"] = nlohmann::json::array({params, 0.0});
+        handle_status_update(notification);
+        AmsState::instance().sync_from_backend();
+        helix::ui::UpdateQueue::instance().drain();
+    }
+};
+
+} // namespace
+
+TEST_CASE_METHOD(LVGLTestFixture,
+                 "Toolchange narration survives AFC's Idle between unload and load",
+                 "[ams][afc][narration][stepbar][toolchange_hold]") {
+    reset_step_baseline();
+    auto framed = std::make_unique<FramedAfcBackend>();
+    auto* backend = framed.get();
+    AmsState::instance().set_backend(std::move(framed));
+    AmsState::instance().sync_from_backend();
+    GcodeNarrationRouter router(nullptr, nullptr);
+
+    backend->feed({{"current_state", "Unloading"}, {"next_lane", "lane2"}});
+    GcodeNarrationRouterTestAccess::feed(router, "// Unloading lane1");
+    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(current_step() == 2);
+
+    // TOOL_UNLOAD's closing Idle, then the heat wait: still one operation.
+    backend->feed({{"current_state", "Idle"}});
+    CHECK(current_step() == 2);
+    CHECK(current_detail() == std::string("Unload filament"));
+
+    backend->feed({{"current_state", "Loading"}});
+    GcodeNarrationRouterTestAccess::feed(router, "// Loading lane2");
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(current_step() == 3);
+
+    // CHANGE_TOOL's finally clears next_lane: the operation really ends.
+    backend->feed({{"current_state", "Idle"}, {"next_lane", nullptr}});
+    CHECK(current_step() == -1);
+
+    AmsState::instance().set_narration_phase(-1, "");
+    install_afc_backend();
 }

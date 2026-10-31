@@ -15,6 +15,7 @@
 #include "../../include/printer_discovery.h"
 #include "../../include/printer_state.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../ui_test_utils.h"
 
 #include <atomic>
@@ -27,25 +28,7 @@
 
 using namespace helix;
 
-// ============================================================================
-// Global LVGL Initialization (called once)
-// ============================================================================
-
 namespace {
-struct LVGLInitializerMPCDetection {
-    LVGLInitializerMPCDetection() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerMPCDetection lvgl_init;
 
 /// Scoped HELIX_MOCK_KALICO override. is_mock_kalico() re-reads the environment on
 /// every printer.objects.query, so setting it around a call is enough — no restart,
@@ -104,7 +87,7 @@ TEST_CASE("PrinterDiscovery::is_kalico() cleared on clear()", "[mpc_detection]")
 // Heater Control Type Query Tests
 // ============================================================================
 
-class MPCDetectionTestFixture {
+class MPCDetectionTestFixture : public LVGLTestFixture {
   public:
     MPCDetectionTestFixture() : mock_client_(MoonrakerClientMock::PrinterType::VORON_24) {
         state_.init_subjects(false);

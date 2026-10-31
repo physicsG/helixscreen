@@ -42,9 +42,9 @@ TEST_CASE("match is zero when there is no reference", "[belt][match]") {
 
 TEST_CASE("the idle hint waits for a real pause", "[belt][match]") {
     CHECK_FALSE(belt_should_show_idle_hint(0));
-    CHECK_FALSE(belt_should_show_idle_hint(IDLE_HINT_MS - 1));
-    CHECK(belt_should_show_idle_hint(IDLE_HINT_MS));
-    CHECK(belt_should_show_idle_hint(IDLE_HINT_MS * 10));
+    CHECK_FALSE(belt_should_show_idle_hint(kIdleHintMs - 1));
+    CHECK(belt_should_show_idle_hint(kIdleHintMs));
+    CHECK(belt_should_show_idle_hint(kIdleHintMs * 10));
 }
 
 TEST_CASE("a delta inside the instrument's resolution reads as matched", "[belt][match]") {
@@ -55,7 +55,7 @@ TEST_CASE("a delta inside the instrument's resolution reads as matched", "[belt]
     CHECK_FALSE(belt_frequencies_match(86.0f, 82.0f));
     CHECK_FALSE(belt_frequencies_match(86.0f, 90.0f));
     // Exactly at the resolution is not resolvable either.
-    CHECK(belt_frequencies_match(86.0f, 86.0f + BELT_RESOLUTION_HZ - 0.01f));
+    CHECK(belt_frequencies_match(86.0f, 86.0f + kBeltResolutionHz - 0.01f));
 }
 
 TEST_CASE("waveform is downsampled to a fixed width", "[belt][livedata]") {
@@ -66,7 +66,7 @@ TEST_CASE("waveform is downsampled to a fixed width", "[belt][livedata]") {
     auto& d = BeltLiveData::instance();
     d.clear();
     d.set_waveform(window);
-    CHECK(d.waveform().size() == BeltLiveData::TRACE_POINTS);
+    CHECK(d.waveform().size() == BeltLiveData::kTracePoints);
 }
 
 TEST_CASE("a short window still produces a trace", "[belt][livedata]") {
@@ -77,7 +77,7 @@ TEST_CASE("a short window still produces a trace", "[belt][livedata]") {
     d.clear();
     d.set_waveform(window);
     CHECK_FALSE(d.waveform().empty());
-    CHECK(d.waveform().size() <= BeltLiveData::TRACE_POINTS);
+    CHECK(d.waveform().size() <= BeltLiveData::kTracePoints);
 }
 
 TEST_CASE("an empty window clears rather than keeping stale data", "[belt][livedata]") {
@@ -109,7 +109,7 @@ TEST_CASE("the waveform keeps the ring-down envelope, not its mean", "[belt][liv
     auto& d = BeltLiveData::instance();
     d.clear();
     d.set_waveform(window);
-    REQUIRE(d.waveform().size() == BeltLiveData::TRACE_POINTS);
+    REQUIRE(d.waveform().size() == BeltLiveData::kTracePoints);
 
     // The loudest bucket must read close to the real amplitude, not to its
     // average. 0.64 * 100 = 64, so the 90 threshold separates the two.
@@ -130,7 +130,7 @@ TEST_CASE("spectrum is downsampled and preserves peaks", "[belt][livedata]") {
     auto& d = BeltLiveData::instance();
     d.clear();
     d.set_spectrum(psd);
-    REQUIRE(d.spectrum().size() == BeltLiveData::TRACE_POINTS);
+    REQUIRE(d.spectrum().size() == BeltLiveData::kTracePoints);
     const float peak = *std::max_element(d.spectrum().begin(), d.spectrum().end());
     CHECK(peak == Catch::Approx(1000.0f));
 }

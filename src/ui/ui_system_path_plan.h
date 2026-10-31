@@ -24,14 +24,14 @@ using fpath::PathPlan;
 
 struct SystemPathData {
     int unit_count = 0;
-    // Unit cards the overview can draw (AMS_MAX_UNITS, shared with AmsState); a unit past this has
+    // Unit cards the overview can draw (kAmsMaxUnits, shared with AmsState); a unit past this has
     // no stem, no hub, and a hub group made only of such units is missing from the plan.
-    static constexpr int MAX_UNITS = helix::AMS_MAX_UNITS;
-    static constexpr int MAX_TOOLS = 16;
+    static constexpr int kMaxUnits = helix::kAmsMaxUnits;
+    static constexpr int kMaxTools = 16;
     // X centre of each unit's card, relative to this canvas's left edge. Pushed
     // by the panel and re-pushed whenever the card row scrolls, so a stem stays
     // under the card it belongs to. Clamped at draw time by unit_stem_x().
-    int32_t unit_x_positions[MAX_UNITS] = {};
+    int32_t unit_x_positions[kMaxUnits] = {};
     int active_unit = -1;             // -1 = none active
     uint32_t active_color = 0x4488FF; // Filament color of active path
     bool filament_loaded = false;     // Whether filament reaches nozzle
@@ -50,11 +50,11 @@ struct SystemPathData {
     bool bypass_has_spool = false;
 
     // Per-unit hub sensor states
-    bool unit_hub_triggered[MAX_UNITS] = {};  // Per-unit hub sensor state
-    bool unit_has_hub_sensor[MAX_UNITS] = {}; // Per-unit hub sensor capability
+    bool unit_hub_triggered[kMaxUnits] = {};  // Per-unit hub sensor state
+    bool unit_has_hub_sensor[kMaxUnits] = {}; // Per-unit hub sensor capability
     // Each unit's furthest-loaded lane: how far it reached and its color.
-    PathSegment unit_lane_segment[MAX_UNITS] = {};
-    uint32_t unit_lane_color[MAX_UNITS] = {};
+    PathSegment unit_lane_segment[kMaxUnits] = {};
+    uint32_t unit_lane_color[kMaxUnits] = {};
 
     // Toolhead sensor state
     bool has_toolhead_sensor = false; // System has a toolhead entry sensor
@@ -68,41 +68,28 @@ struct SystemPathData {
 
     // Per-unit hub (several-toolhead layout). Units carrying the same non-zero
     // group join one hub box; 0 is a unit on a hub of its own.
-    int unit_hub_group[MAX_UNITS] = {};
+    int unit_hub_group[kMaxUnits] = {};
     // Per-unit buffer under that unit's hub, in the same terms as buffer_*.
-    bool unit_has_buffer[MAX_UNITS] = {};
-    int unit_buffer_fault[MAX_UNITS] = {};
-    char unit_buffer_label[MAX_UNITS][8] = {};
+    bool unit_has_buffer[kMaxUnits] = {};
+    int unit_buffer_fault[kMaxUnits] = {};
+    char unit_buffer_label[kMaxUnits][8] = {};
 
     // Per-unit tool routing (mixed topology support)
-    int unit_tool_count[MAX_UNITS] = {}; // Tools per unit (BT=4, OpenAMS=1)
-    int unit_first_tool[MAX_UNITS] = {}; // First tool index for this unit
-    /// Bit t = "this unit actually supplies physical tool first_tool + t".
-    /// Cleared for a tool this unit owns the NOZZLE of but does not feed (an
-    /// MMU-fed toolhead on a toolchanger), so the unit draws no supply line to
-    /// filament it is not supplying. Consulted only once SET: 0 is a real
-    /// answer, for a unit that feeds none of its nozzles, and must not read as
-    /// "never told".
-    uint32_t unit_tool_mask[MAX_UNITS] = {};
-    bool unit_tool_mask_set[MAX_UNITS] = {};
-    int unit_topology[MAX_UNITS] = {};       // 0=LINEAR, 1=HUB, 2=PARALLEL, 3=MIXED
-    bool unit_absent[MAX_UNITS] = {};        // Box not on the bus: column drawn empty
+    int unit_tool_count[kMaxUnits] = {};     // Tools per unit (BT=4, OpenAMS=1)
+    int unit_first_tool[kMaxUnits] = {};     // First tool index for this unit
+    int unit_topology[kMaxUnits] = {};       // 0=LINEAR, 1=HUB, 2=PARALLEL, 3=MIXED
+    bool unit_absent[kMaxUnits] = {};        // Box not on the bus: column drawn empty
     int total_tools = 0;                     // Total tool count across all units
     int active_tool = -1;                    // Currently active tool (-1=none)
     int current_tool = -1;                   // Virtual tool number (slot-based, for label)
-    int tool_virtual_number[MAX_TOOLS] = {}; // Virtual tool labels per physical nozzle
+    int tool_virtual_number[kMaxTools] = {}; // Virtual tool labels per physical nozzle
     bool has_virtual_numbers = false;        // When false, raw physical index is used for labels
     // Letter in front of every toolhead badge number. 'T' = AFC lane alias (the
     // legacy default), 'E' = Klipper extruder identity. See #1229: the two
     // numbering systems disagree, so the letter says which one is on screen.
     char tool_label_prefix = 'T';
-    char tool_labels[MAX_TOOLS][8] = {}; // Pre-formatted "<P>n" strings for deferred draw
+    char tool_labels[kMaxTools][8] = {}; // Pre-formatted "<P>n" strings for deferred draw
     char current_tool_label[8] = {};     // Pre-formatted label for single-nozzle mode
-
-    /// Optional toolhead-tap callback. Unset leaves the canvas passive, which
-    /// is what every panel except the AMS overview wants.
-    void (*toolhead_callback)(int tool_index, void* user_data) = nullptr;
-    void* toolhead_user_data = nullptr;
 
     // Theme-derived colors, read on every draw
     lv_color_t color_idle;
@@ -126,12 +113,12 @@ struct SystemPathData {
     const lv_font_t* label_font = nullptr;
 };
 
-// Vertical layout. The unit stems start at ENTRY_Y_RATIO of the height, and the
+// Vertical layout. The unit stems start at kEntryYRatio of the height, and the
 // toolhead glyphs stand on the GLYPH_BOTTOM line; everything between sits a
 // fixed fraction of the way down that run.
-inline constexpr float ENTRY_Y_RATIO = 0.05f;
-inline constexpr float SINGLE_GLYPH_BOTTOM_RATIO = 0.93f; // the one nozzle
-inline constexpr float MULTI_GLYPH_BOTTOM_RATIO = 0.80f;  // the tool row
+inline constexpr float kEntryYRatio = 0.05f;
+inline constexpr float kSingleGlyphBottomRatio = 0.93f; // the one nozzle
+inline constexpr float kMultiGlyphBottomRatio = 0.80f;  // the tool row
 
 // Per-draw layout shared by the planner and the canvas.
 struct SysLayout {
@@ -151,6 +138,10 @@ struct BypassGeometry {
     int32_t center_x; // hub center (already shifted left when bypass is present)
 };
 BypassGeometry compute_bypass_geometry(const SystemPathData& data, const lv_area_t& obj_coords);
+
+/// @p v clamped into [@p lo, @p hi]. A span too short to hold anything
+/// (@p lo > @p hi) yields its midpoint, never a bound lying past the other.
+int32_t clamp_span(int32_t lo, int32_t v, int32_t hi);
 
 int32_t calc_tool_x(int tool_index, int total_tools, int32_t x_off, int32_t width);
 /// Scale of the toolhead glyphs in the multi-tool row.
@@ -176,7 +167,7 @@ struct HubInfo {
 
 // What the canvas draws on top of the planned tubes.
 struct OverviewBoxes {
-    HubInfo hubs[SystemPathData::MAX_UNITS] = {};
+    HubInfo hubs[SystemPathData::kMaxUnits] = {};
     lv_color_t combiner_bg; // single-tool combiner hub fill
 };
 

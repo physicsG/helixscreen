@@ -20,8 +20,8 @@
 namespace helix {
 
 // Phomemo M110 defaults
-static constexpr uint8_t DEFAULT_SPEED = 0x03;
-static constexpr uint8_t DEFAULT_DENSITY = 0x0A;
+static constexpr uint8_t kDefaultSpeed = 0x03;
+static constexpr uint8_t kDefaultDensity = 0x0A;
 
 PhomemoPrinter::PhomemoPrinter() = default;
 PhomemoPrinter::~PhomemoPrinter() = default;

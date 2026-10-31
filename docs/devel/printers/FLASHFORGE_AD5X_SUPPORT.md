@@ -2,7 +2,7 @@
 
 # FlashForge Adventurer 5X (AD5X) Support
 
-HelixScreen has a dedicated cross-compilation target for the FlashForge Adventurer 5X. The AD5X is a multi-color 3D printer with a 4-channel IFS (Intelligent Filament System). It has its own toolchain and Docker image (`Dockerfile.ad5x`), separate from the Creality K1 series.
+The FlashForge Adventurer 5X is served by the **unified MIPS32 target**: `ad5x` is an alias of `mips`, so it shares one binary, toolchain and release asset with the Creality K1 series and the Creator 5 Pro. The AD5X is a multi-color 3D printer with a 4-channel IFS (Intelligent Filament System).
 
 **Status: Active testing** — prebuilt binaries are included in releases. See [issue #203](https://github.com/prestonbrown/helixscreen/issues/203).
 
@@ -63,16 +63,16 @@ The presence of `/usr/prog/` is used for runtime platform detection (K1 vs AD5X)
 
 ## Build Target
 
-The AD5X has a dedicated build target and toolchain, separate from the Creality K1:
+The AD5X builds with the unified MIPS32 target in `mk/cross.mk` (`mips`, with `k1` and `ad5x` as aliases):
 
 ```bash
-make ad5x-docker          # Build AD5X binary (dedicated MIPS32r5 glibc toolchain)
-make release-ad5x         # Package as helixscreen-ad5x.zip (AD5X release_info.json)
+make ad5x-docker          # alias of mips-docker (helixscreen/toolchain-mips image)
+make release-ad5x         # alias of release-mips; also writes helixscreen-ad5x.zip
 ```
 
-**Toolchain**: Dedicated Docker image (`Dockerfile.ad5x`) with MIPS32r5 glibc cross-compiler, distinct from the K1's musl-based toolchain.
+**Toolchain**: the shared `helixscreen/toolchain-mips` image, `mipsel-k1-linux-musl` (GCC 13.2, musl 1.2.4, `-march=mips32r2 -mnan=2008 -mfp64`). The binary is fully static, so the board's own libc does not matter.
 
-**Platform define**: `-DHELIX_PLATFORM_MIPS`. Runtime detection via `/usr/prog` presence determines platform key (`ad5x` vs `k1`) for update manager asset selection.
+**Platform define**: `-DHELIX_PLATFORM_MIPS` only, so self-update fetches the unified `mips` asset. `release-mips` also publishes the same bytes as `helixscreen-ad5x.zip` and `helixscreen-ad5x-<version>.tar.gz` for binaries and Moonraker configs that ask by the `ad5x` name. The installer classifies a MIPS box with `/usr/data` + `/usr/prog` as `ad5x` (`scripts/lib/installer/platform.sh#detect_platform`).
 
 ## ZMOD Integration
 
@@ -193,7 +193,8 @@ Two avoidance rules come out of the same host-starvation mechanism:
 - **Host work during toolhead motion is hair-trigger.** Forge-X's own regression
   harness had to stop screenshotting during motion to avoid TTC (Forge-X commit
   `46c75cb`, 2026-08-12). This is the external rationale for HelixScreen's print-time
-  IFS poll backoff (5 s → 30 s while printing) —
+  IFS poll backoff (5 s → 30 s while printing), and for the HelixPrint plugin's
+  `vendor_ad5x` push that replaces the poll where installed —
   `docs/devel/FILAMENT_BACKEND_AD5X_IFS.md` § "Polling caution". [upstream-doc,
   Forge-X repo]
 
@@ -270,8 +271,8 @@ sleep cycle. Not reproducible on our internal hardware so there is no code
 fix in place yet.
 
 **Probable root cause:** interaction between `FBIOBLANK FB_BLANK_NORMAL` and
-the Allwinner DE/TCON pipeline — when the framebuffer source is detached
-from the display engine, the DE appears to emit whatever color is latched in
+the Ingenic X2600 display controller — when the framebuffer source is detached
+from the controller, it appears to emit whatever color is latched in
 its default-fill register rather than going fully dark. Because
 `backlight_enable_ioctl` is `false` on AD5X (PWM polarity inversion quirk,
 #95 / #235), the backlight is dimmed via `SET_BRIGHTNESS(0)` only — and on
@@ -282,19 +283,18 @@ Affected cohorts:
 
 | Cohort | Config | Sleep path |
 |--------|--------|-----------|
-| Fresh install / post-#431 preset | `hardware_blank=1`, `sleep_backlight_off=true` | FBIOBLANK + backlight off — DE may emit solid color |
-| Post-wizard (pre-fix) | `hardware_blank=0`, `sleep_backlight_off=false` | Software overlay + backlight on — last frame held |
+| Fresh install / post-#431 preset | `hardware_blank=1`, `sleep_backlight_off=true` | FBIOBLANK + backlight off — display controller may emit solid color |
+| Stale pre-#431 display config not yet migrated | `hardware_blank=0`, `sleep_backlight_off=false` | Software overlay + backlight on — last frame held |
 
 Both have produced user reports of the RGB symptom. The underlying driver
 behavior is the same — LVGL stops invalidating after the overlay draws or
-the FBIOBLANK fires, and the DE pipeline goes quiet.
+the FBIOBLANK fires, and the display controller goes quiet.
 
-**Wizard/preset disagreement (pending fix):** `ui_wizard_printer_identify.cpp`
-force-writes `hardware_blank=0`, `sleep_backlight_off=false`,
-`backlight_enable_ioctl=false` on wizard confirmation for AD5X and CC1,
-overriding the AD5X preset. The wizard should not be doing hardware
-manipulation — this block needs to be removed and a config migration added
-for users who already ran it. See prestonbrown/helixscreen#235,
+**Wizard and preset agree:** `ui_wizard_printer_identify.cpp` writes no
+display settings, so the AD5X preset's values stand. Config migrations v13 and
+v15 (`src/system/config_migrations.cpp#migrate_v14_to_v15`) restore
+`sleep_backlight_off=true`, `hardware_blank=1` on any AD5X config still carrying
+the stale `false` / `0` pair. See prestonbrown/helixscreen#235,
 prestonbrown/helixscreen#431, prestonbrown/helixscreen#303 for history.
 
 **User workarounds** (documented in `docs/user/TROUBLESHOOTING.md`):
@@ -305,7 +305,10 @@ prestonbrown/helixscreen#431, prestonbrown/helixscreen#303 for history.
 
 **Investigation TODO:**
 
-- Collect debug bundles from affected users to confirm cohort split
+- Collect debug bundles from affected users to confirm cohort split (no open
+  issue tracks this symptom; reports go to a
+  [new issue](https://github.com/prestonbrown/helixscreen/issues/new) with the
+  bundle share code)
 - Try reordering in `enter_sleep()`: backlight → 0 *before* `FBIOBLANK`
 - Add `clear_framebuffer(0x00000000)` before creating the software overlay
 - Force `lv_refr_now()` after `create_sleep_overlay()` so there is no
@@ -425,8 +428,8 @@ Zmod has an option to rename slots from 0-indexed (0,1,2,3) to 1-indexed (1,2,3,
 | Backlight | `/dev/disp` ioctl (Allwinner sunxi) | `FBIOBLANK` (standard Linux) |
 | Config path | `/opt/helixscreen/` | `/usr/data/helixscreen/` |
 | Multi-material | No (single extruder) | IFS (4 spools) |
-| Build target | `PLATFORM_TARGET=ad5m` | `PLATFORM_TARGET=ad5x` |
-| Binary | ARM static (glibc sysroot) | MIPS static (glibc) |
+| Build target | `PLATFORM_TARGET=ad5m` | `PLATFORM_TARGET=ad5x` (alias of `mips`) |
+| Binary | ARM static (glibc sysroot) | MIPS32r2 static (musl), shared with the K1 |
 
 ## Known Limitations
 

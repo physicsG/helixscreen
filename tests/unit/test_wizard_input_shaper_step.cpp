@@ -14,6 +14,7 @@
 
 #include "ui_wizard_input_shaper.h"
 
+#include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/printer_state_test_access.h"
 #include "../test_helpers/scoped_runtime_config.h"
 #include "../ui_test_utils.h"
@@ -40,7 +41,10 @@ static lv_subject_t* get_subject_by_name(const char* name) {
 // Test Fixture
 // ============================================================================
 
-class WizardInputShaperStepTestFixture {
+// create() registers the wizard component on first use; it has to register
+// against the theme, or its breakpoint subject_expr is dropped for the rest
+// of the process.
+class WizardInputShaperStepTestFixture : public LVGLUITestFixture {
   public:
     ScopedRuntimeConfig scoped_config_;
 
@@ -49,22 +53,6 @@ class WizardInputShaperStepTestFixture {
         // the global back when the fixture dies rather than leaving it set
         // (#1287).
         get_runtime_config()->test_mode = true;
-
-        // Initialize LVGL (safe version avoids "already initialized" warnings)
-        lv_init_safe();
-
-        // Create a headless display for testing
-        if (!display_created_) {
-            display_ = lv_display_create(480, 320);
-            alignas(64) static lv_color_t buf[480 * 10];
-            lv_display_set_buffers(display_, buf, nullptr, sizeof(buf),
-                                   LV_DISPLAY_RENDER_MODE_PARTIAL);
-            lv_display_set_flush_cb(display_,
-                                    [](lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-                                        lv_display_flush_ready(disp);
-                                    });
-            display_created_ = true;
-        }
 
         // Initialize PrinterState subjects for testing
         PrinterStateTestAccess::reset(state());
@@ -104,13 +92,9 @@ class WizardInputShaperStepTestFixture {
     }
 
   private:
-    static lv_display_t* display_;
-    static bool display_created_;
 };
 
 // Static members
-lv_display_t* WizardInputShaperStepTestFixture::display_ = nullptr;
-bool WizardInputShaperStepTestFixture::display_created_ = false;
 
 // ============================================================================
 // should_skip() Tests
@@ -789,4 +773,240 @@ TEST_CASE_METHOD(WizardInputShaperStepTestFixture, "WizardInputShaperStep - asyn
         REQUIRE(token1.expired());
         REQUIRE(token2.expired());
     }
+}
+
+// ============================================================================
+// Live sweep chart (prestonbrown/helixscreen#1812)
+// ============================================================================
+
+#include "ui_frequency_response_chart.h"
+
+#include "../test_helpers/sweep_preview_fakes.h"
+#include "../test_helpers/wizard_input_shaper_step_test_access.h"
+#include "moonraker_api_mock.h"
+#include "moonraker_client_mock.h"
+#include "resonance_console.h"
+
+#include <cctype>
+
+namespace {
+
+/// The global step on its real screen, its calibrator on the mock printer,
+/// and a manual stream source fed by ConsoleLedFeeder.
+class WizardPreviewFixture : public LVGLUITestFixture {
+  public:
+    explicit WizardPreviewFixture(bool reachable = true)
+        : client_(MoonrakerClientMock::PrinterType::VORON_24) {
+        MoonrakerClientMock::remove_shaper_csvs();
+        PrinterStateTestAccess::reset(get_printer_state());
+        get_printer_state().init_subjects(false);
+        get_printer_state().set_klippy_state_sync(KlippyState::READY);
+        lv_subject_copy_string(get_printer_state().motion_state().get_homed_axes_subject(), "xyz");
+        if (reachable) {
+            api_ = std::make_unique<MoonrakerAPIMock>(client_, get_printer_state());
+        } else {
+            // No HTTP base URL: /server/config fails, so no socket.
+            api_ = std::make_unique<MoonrakerAPI>(client_, get_printer_state());
+        }
+        previous_api_ = get_moonraker_api();
+        set_moonraker_api(api_.get());
+
+        step_ = get_wizard_input_shaper_step();
+        step_->init_subjects();
+        step_->register_callbacks();
+        *step_->get_calibrator() = InputShaperCalibrator(api_.get());
+        WizardInputShaperStepTestAccess::set_preview_source_factory(*step_, manual_factory(log_));
+        screen_ = step_->create(test_screen());
+        REQUIRE(screen_ != nullptr);
+
+        client_.register_method_callback("notify_gcode_response", "wizard_preview",
+                                         [this](const nlohmann::json& msg) {
+                                             const auto line = msg["params"][0].get<std::string>();
+                                             if (const auto hz = parse_testing_frequency(line)) {
+                                                 latest_hz_ = *hz;
+                                             }
+                                         });
+    }
+
+    ~WizardPreviewFixture() override {
+        client_.unregister_method_callback("notify_gcode_response", "wizard_preview");
+        step_->cleanup();
+        WizardInputShaperStepTestAccess::set_preview_source_factory(*step_, nullptr);
+        helix::ui::UpdateQueue::instance().drain();
+        *step_->get_calibrator() = InputShaperCalibrator(previous_api_);
+        step_->set_calibration_complete(false);
+        set_moonraker_api(previous_api_);
+        api_.reset();
+        MoonrakerClientMock::remove_shaper_csvs();
+    }
+
+    void start() {
+        lv_obj_t* btn = lv_obj_find_by_name(screen_, "start_calibration_btn");
+        REQUIRE(btn != nullptr);
+        lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+        helix::ui::UpdateQueue::instance().drain();
+    }
+
+    void tick() {
+        lv_tick_inc(100);
+        lv_timer_handler_safe();
+        helix::ui::UpdateQueue::instance().drain();
+        feeder_.feed(log_, latest_hz_);
+    }
+
+    bool run_until(const std::function<bool()>& done, int max_ticks = 1200) {
+        for (int i = 0; i < max_ticks && !done(); ++i) {
+            tick();
+        }
+        return done();
+    }
+
+    [[nodiscard]] int has_chart() const {
+        return lv_subject_get_int(step_->get_has_chart_subject());
+    }
+
+    [[nodiscard]] std::vector<float> drawn() const {
+        auto* chart = WizardInputShaperStepTestAccess::sweep_chart(*step_).chart();
+        return chart ? ui_frequency_response_chart_get_series_amplitudes(chart, 0)
+                     : std::vector<float>{};
+    }
+
+    /// A finished axis's CSV curve, as the calibrator handed it over.
+    [[nodiscard]] std::vector<float> csv_amps(char axis) {
+        const auto& results = step_->get_calibrator()->get_results();
+        const auto& result = axis == 'X' ? results.x_result : results.y_result;
+        std::vector<float> amps;
+        for (const auto& [f, a] : result.freq_response) {
+            amps.push_back(a);
+        }
+        return amps;
+    }
+
+    MoonrakerClientMock client_;
+    std::unique_ptr<MoonrakerAPI> api_;
+    helix::IMoonrakerAPI* previous_api_ = nullptr;
+    WizardInputShaperStep* step_ = nullptr;
+    lv_obj_t* screen_ = nullptr;
+    helix::calibration::test::SourceLog log_;
+    helix::calibration::test::ConsoleLedFeeder feeder_;
+    float latest_hz_ = 0.0f;
+};
+
+class WizardUnreachableFixture : public WizardPreviewFixture {
+  public:
+    WizardUnreachableFixture() : WizardPreviewFixture(false) {}
+};
+
+} // namespace
+
+TEST_CASE_METHOD(WizardPreviewFixture, "the wizard step draws each axis's live sweep",
+                 "[wizard][input_shaper][preview]") {
+    start();
+    REQUIRE(run_until([&] { return log_.created == 1; }));
+    CHECK(log_.accel_chip == "adxl345");
+    REQUIRE(run_until([&] { return has_chart() == 1; }));
+    const auto& x_points = WizardInputShaperStepTestAccess::sweep_chart(*step_).preview().points();
+    REQUIRE_FALSE(x_points.empty());
+
+    // X's result: its CSV curve replaces the preview, then Y attaches afresh.
+    REQUIRE(run_until([&] { return log_.created == 2; }));
+    CHECK(log_.stopped == 1);
+    REQUIRE(run_until([&] {
+        return has_chart() == 1 &&
+               !WizardInputShaperStepTestAccess::sweep_chart(*step_).preview().points().empty();
+    }));
+
+    REQUIRE(run_until([&] { return step_->is_calibration_complete(); }));
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(log_.stopped == 2);
+    CHECK(has_chart() == 1);
+    const auto y_csv = csv_amps('Y');
+    REQUIRE_FALSE(y_csv.empty());
+    CHECK(drawn() == y_csv);
+
+    step_->cleanup();
+    CHECK(WizardInputShaperStepTestAccess::sweep_chart(*step_).chart() == nullptr);
+    CHECK(has_chart() == 0);
+}
+
+TEST_CASE_METHOD(WizardPreviewFixture, "the wizard step shows X's CSV curve once X finishes",
+                 "[wizard][input_shaper][preview]") {
+    start();
+    REQUIRE(run_until([&] { return step_->get_calibrator()->get_results().has_x(); }));
+    helix::ui::UpdateQueue::instance().drain();
+    // Y has not started sweeping: X's CSV stands in for its preview.
+    REQUIRE(log_.created == 1);
+    CHECK(log_.stopped == 1);
+    CHECK(has_chart() == 1);
+    const auto x_csv = csv_amps('X');
+    REQUIRE_FALSE(x_csv.empty());
+    CHECK(drawn() == x_csv);
+
+    // Y's first sweep line attaches a fresh source reading psd_y.
+    REQUIRE(run_until([&] { return log_.created == 2; }));
+    REQUIRE(run_until([&] {
+        return !WizardInputShaperStepTestAccess::sweep_chart(*step_).preview().points().empty();
+    }));
+    const auto& points = WizardInputShaperStepTestAccess::sweep_chart(*step_).preview().points();
+    // STANDARD stores 200 of the 201-slot grid, so one point may be picked out.
+    const auto curve = drawn();
+    int missing = 0;
+    for (const auto& p : points) {
+        if (p.clean && std::find(curve.begin(), curve.end(), p.psd_y) == curve.end()) {
+            ++missing;
+        }
+    }
+    CHECK(missing <= 1);
+}
+
+TEST_CASE_METHOD(WizardPreviewFixture, "cancelling the wizard's sweep stops the stream",
+                 "[wizard][input_shaper][preview]") {
+    start();
+    REQUIRE(run_until([&] { return has_chart() == 1; }));
+    lv_obj_t* cancel = lv_obj_find_by_name(screen_, "cancel_calibration_btn");
+    REQUIRE(cancel != nullptr);
+    lv_obj_send_event(cancel, LV_EVENT_CLICKED, nullptr);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(log_.created >= 1);
+    CHECK(log_.stopped == log_.created);
+    CHECK(has_chart() == 0);
+}
+
+TEST_CASE_METHOD(WizardUnreachableFixture, "the wizard step runs without klippy's socket",
+                 "[wizard][input_shaper][preview]") {
+    bool ever_shown = false;
+    start();
+    REQUIRE(run_until([&] {
+        ever_shown = ever_shown || has_chart() == 1;
+        return step_->is_calibration_complete();
+    }));
+    CHECK(log_.created == 0);
+    CHECK_FALSE(ever_shown);
+}
+
+TEST_CASE_METHOD(WizardPreviewFixture, "the wizard step streams nothing where its chart is hidden",
+                 "[wizard][input_shaper][preview]") {
+    lv_subject_t* fits = lv_xml_find_subject(lv_xml_component_get_scope("wizard_input_shaper"),
+                                             "wizard_input_shaper_chart_fits");
+    REQUIRE(fits != nullptr);
+    REQUIRE(lv_subject_get_int(fits) == 1);
+    lv_subject_set_int(fits, 0);
+    start();
+    const bool done = run_until([&] { return step_->is_calibration_complete(); });
+    lv_subject_set_int(fits, 1);
+    REQUIRE(done);
+    CHECK(log_.created == 0);
+}
+
+TEST_CASE_METHOD(WizardPreviewFixture, "a sweep error stops the wizard's stream",
+                 "[wizard][input_shaper][preview]") {
+    start();
+    REQUIRE(run_until([&] { return has_chart() == 1; }));
+    REQUIRE(log_.stopped == 0);
+    REQUIRE(lv_subject_get_int(step_->get_active_subject()) == 1);
+    client_.dispatch_gcode_response("!! Move out of range: 0.000 400.000 10.000 [0.000]");
+    REQUIRE(run_until([&] { return lv_subject_get_int(step_->get_active_subject()) == 0; }));
+    CHECK(log_.stopped == log_.created);
+    CHECK(has_chart() == 0);
+    CHECK_FALSE(step_->is_calibration_complete());
 }

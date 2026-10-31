@@ -2,10 +2,12 @@
 
 #pragma once
 
+#include "ui_shaper_sweep_chart.h"
 #include "ui_timer_guard.h"
 
 #include "async_lifetime_guard.h"
 #include "input_shaper_calibrator.h"
+#include "live_sweep_preview.h"
 #include "lvgl/lvgl.h"
 #include "subject_managed_panel.h"
 #include "wizard_step.h"
@@ -207,6 +209,27 @@ class WizardInputShaperStep : public helix::wizard::Step {
         return &calibration_indeterminate_;
     }
 
+    lv_subject_t* get_has_chart_subject() {
+        return &has_chart_;
+    }
+
+    // ========================================================================
+    // Live sweep chart (main thread)
+    // ========================================================================
+
+    /// Ask the printer for klippy's socket and [resonance_tester]; the answer
+    /// lands in preview_facts_ before the noise check finishes.
+    void query_preview_facts();
+    /// Start `axis`'s live curve when live_sweep_target() allows one; the
+    /// previous axis's CSV curve stays up until the new preview draws.
+    void begin_axis_preview(char axis);
+    /// A progress report for the running axis.
+    void on_axis_progress(ShaperCalibrationPhase phase, float freq_hz);
+    /// The axis finished: its CSV curve replaces the preview.
+    void on_axis_result(const InputShaperResult& result);
+    /// Stop the stream and hide the chart host (error, abort).
+    void stop_preview();
+
     /**
      * @brief Show the analysis-phase treatment: spinner on, elapsed "Ns" label
      *
@@ -280,6 +303,8 @@ class WizardInputShaperStep : public helix::wizard::Step {
     lv_obj_t* low_ram_warn_dialog_ = nullptr;
 
   private:
+    friend class WizardInputShaperStepTestAccess;
+
     // Screen instance
     lv_obj_t* screen_root_ = nullptr;
 
@@ -297,6 +322,7 @@ class WizardInputShaperStep : public helix::wizard::Step {
                                          ///< post-completion to keep the Start button hidden.
     lv_subject_t calibration_indeterminate_{}; ///< 1 during the offline analysis phase (no
                                                ///< percent): hides the bar, shows the spinner
+    lv_subject_t has_chart_{};                 ///< 1 while the live chart holds a curve
 
     // String buffers for subjects
     char status_buffer_[128] = "Ready to calibrate";
@@ -304,6 +330,9 @@ class WizardInputShaperStep : public helix::wizard::Step {
     // Analysis-phase elapsed label ("Analyzing data... Ns"), 1 Hz on the
     // virtual clock. Cancel-safe from every teardown path (helper guarantees).
     helix::ui::ElapsedLabelTimer analysis_elapsed_;
+
+    helix::calibration::LiveSweepFacts preview_facts_;
+    helix::ui::ShaperSweepChart sweep_chart_;
 
     // Calibrator instance (owns the calibrator)
     std::unique_ptr<helix::calibration::InputShaperCalibrator> calibrator_;

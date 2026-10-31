@@ -9,6 +9,14 @@
     <lv_obj name="overlay_content"
             width="100%" flex_grow="1" style_pad_top="0" style_pad_left="#space_lg" style_pad_right="#space_lg"
             style_pad_bottom="#space_lg" scrollable="true" flex_flow="column">
+      <!-- Jog-tab arrangement: MotionLayout order (Pad, Arrows, Arrows + Home,
+           Axis Rows). -->
+      <setting_dropdown_row name="row_motion_layout"
+                            label="Layout" icon="view_grid" description="How the Jog tab arranges its buttons"
+                            options="Jog Pad&#10;Arrows&#10;Arrows + Home&#10;Axis Rows"
+                            options_tag="Jog Pad&#10;Arrows&#10;Arrows + Home&#10;Axis Rows"
+                            bind_selected="settings_motion_layout" callback="on_motion_layout_changed"/>
+      <divider_horizontal/>
       <!-- ================================================================== -->
       <!-- JOG SPEED XY -->
       <!-- ================================================================== -->
@@ -92,7 +100,9 @@
               style_pad_top="#space_md" style_pad_bottom="#space_xs" flex_flow="row" style_flex_cross_place="center"
               style_pad_gap="#space_sm">
         <icon src="cursor_move" size="xs" variant="secondary"/>
-        <text_small text="Distance moved per jog button tap"/>
+        <text_small width="0"
+                    text="Distance moved per jog button tap. The arrow layouts offer every distance as a step."
+                    flex_grow="1" long_mode="wrap"/>
       </lv_obj>
       <!-- Each distance row is one tappable setting_value_field carrying the
            row name; the container beside it is unnamed scaffolding. -->
@@ -156,12 +166,24 @@
           <icon src="grid_large" size="sm" variant="secondary"/>
           <lv_obj height="content" style_pad_all="0" scrollable="false" flex_flow="column" style_pad_gap="#space_xxs">
             <text_body text="Bed Map Clearance"/>
-            <text_small text="Bed tab moves lift to this height first"/>
+            <text_small text="Plate moves and presets lift to this height first"/>
           </lv_obj>
         </lv_obj>
         <setting_value_field name="bed_map_clearance_row"
                              value_subject="bed_map_clearance_display" callback="on_motion_field_clicked" user_data="8"/>
       </lv_obj>
+      <divider_horizontal/>
+      <!-- Per-printer. Off removes every Save Z-Offset button and the save step
+           of Z-offset calibration; baby-stepping stays. The switch shows the
+           effective state, so on a toolchanger it starts off (Auto). Hidden on
+           firmware that saves the offset itself, where there is nothing to turn
+           off. #1766 -->
+      <setting_toggle_row name="row_z_offset_save"
+                          label="Save Z-Offset Buttons" icon="axis_z_arrow"
+                          description="Offer to save Z-offset changes to the printer config"
+                          subject="z_offset_save_enabled" callback="on_z_offset_save_toggled">
+        <bind_flag_if_eq subject="z_offset_can_save" flag="hidden" ref_value="0"/>
+      </setting_toggle_row>
       <!-- Spacer to push buttons to bottom -->
       <lv_obj width="100%" flex_grow="1" scrollable="false"/>
     </lv_obj>

@@ -13,10 +13,13 @@
     <prop name="value" type="string" default="0"/>
   </api>
   <view extends="lv_bar"
-        width="100%" height="12" style_bg_color="#overlay_bg" style_bg_opa="255" style_radius="#border_radius"
-        style_border_width="0" min_value="$min_value" max_value="$max_value" value="$value" bind_value="$bind_value"
-        style_bg_color-indicator="#secondary" style_bg_grad_color-indicator="#tertiary"
+        width="100%" height="#progress_bar_height" style_bg_color="#overlay_bg" style_bg_opa="255"
+        style_radius="#border_radius" min_value="$min_value" max_value="$max_value" value="$value"
+        bind_value="$bind_value" style_bg_color-indicator="#secondary" style_bg_grad_color-indicator="#tertiary"
         style_bg_grad_dir-indicator="hor" style_bg_opa-indicator="255" style_radius-indicator="#border_radius">
+    <!-- The track is close to the card under it in both themes; the hairline
+         keeps the unfilled length visible. -->
+    <style name="styles.contrast_edge"/>
     <!-- C++ handles gradient stops dynamically on each draw -->
     <event_cb trigger="draw_main_begin" callback="on_progress_bar_draw"/>
   </view>

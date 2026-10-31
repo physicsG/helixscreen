@@ -216,9 +216,44 @@ own INI store (`/opt/config/mod_data/variables.cfg`), **not** klipper's
 
 ---
 
+## Whether a save is offered at all
+
+Separate from where the offset lives, the user can withhold Z-offset saves per printer
+(#1766): **Settings > Motion > Save Z-Offset Buttons**, stored by `SettingsManager` as
+`z_offset/save_mode` (`include/z_offset_utils.h#SaveMode`: 0 Auto, 1 Show, 2 Hide). The
+toggle writes Show or Hide; nothing writes Auto back.
+
+`helix::zoffset::save_enabled(SaveMode, per_tool_z_offsets)`
+(`include/z_offset_utils.h#"constexpr bool save_enabled(SaveMode mode, bool per_tool_z_offsets)"`) is the one decision. Auto turns saving off where
+`ToolState`'s `per_tool_z_supported` is 1, because a machine-wide save folds the live offset
+into the probe or endstop underneath every tool's offset at once. Every consumer reads the
+result, never the setting:
+
+| Consumer | Effect when off |
+|----------|-----------------|
+| `save_available(SaveAvailability)` | false, so `z_offset_save_available` hides the header, Controls and home-widget saves |
+| `z_offset_save_enabled` subject | 0; the Motion toggle shows it, and the calibration panel's "not saved" note binds to it |
+| `saves_global(SaveAvailability)` | false, so the tool-offset save writes per-tool offsets and leaves the machine-wide babystep alone; when that save still restarts Klipper, `save_dirty_offsets()` re-applies the unsaved live offset once Klipper is READY |
+| `ZOffsetCalibrationPanel::send_accept()` | sends `ACCEPT` without `SAVE_CONFIG`; Klipper holds the result until the next config save |
+| `resolve_z_offset_tune_hint(..., save_enabled)` | a printer that would show `SAVE_ON_CONTROLS` shows `TEMPORARY` (or `TEMPORARY_TOOL_CHANGE`) instead, so Print Tune never points at a Save button that is not there |
+
+The publisher in `src/ui/z_offset_utils.cpp` observes the setting and `per_tool_z_supported`
+and hands the answer to `PrinterProfileState::set_z_offset_save_enabled()` for the tune hint.
+`FIRMWARE_MANAGED` printers ignore the setting: the firmware persists the offset, so there is
+no save to withhold, and the Motion row is hidden while `z_offset_can_save` is 0.
+
+---
+
 ## Related
 
 - `z_offset_calibration_strategy` in the printer database (`docs/devel/PRINTER_MANAGER.md`)
   is a **different** axis: it selects the *calibration* command sequence and whether
   a Save button is offered. A printer can be `firmware_managed` there without having
   a persistence provider here.
+- What Print Tune tells the user is a third answer, `ZOffsetTuneHint`
+  (`src/printer/printer_profile_state.cpp#resolve_z_offset_tune_hint`). It claims
+  "auto-saved by firmware" only for a `firmware_managed` printer whose firmware
+  persists the offset: a latched provider here, or a database row that does not set
+  `"z_offset_persists": false`. The Snapmaker U1 sets it, because its firmware keeps
+  a babystep only until the next tool change or the end of the print
+  (`docs/devel/printers/SNAPMAKER_U1_SUPPORT.md`).

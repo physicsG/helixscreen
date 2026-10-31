@@ -68,6 +68,9 @@ class PluginSettingsOverlay : public OverlayBase {
     /// rule; on refusal restores the row from `b.stored`. No-op when the value
     /// already equals `b.stored` (the text row reports ready and then defocused).
     void on_row_changed(RowBinding& b, lv_obj_t* target);
+    /// Shows a value the plugin changed behind the screen's back (helix.settings.set):
+    /// the row for `key`, if any, takes `value` as its stored state.
+    void show_setting(const std::string& key, const json& value);
     /// Runs the action row's declared callback through the plugin event path.
     void on_row_action(const RowBinding& b);
     /// The navigation close callback's body: tears the widget tree down. The host

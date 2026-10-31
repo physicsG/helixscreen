@@ -58,7 +58,7 @@ class OwnershipFixture : public LVGLTestFixture {
     }
 };
 
-constexpr const char* G28_REJECTION = "Must home axis first";
+constexpr const char* kG28Rejection = "Must home axis first";
 
 /// ensure_homed_then() reads the process-wide PrinterState via
 /// get_printer_state() (it takes no state parameter), so the unhomed answer has
@@ -86,7 +86,7 @@ TEST_CASE_METHOD(OwnershipFixture,
     MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
     MoonrakerAPI api(client, state);
 
-    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, G28_REJECTION, "G28");
+    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kG28Rejection, "G28");
 
     helix::AsyncLifetimeGuard guard;
     bool then_ran = false;
@@ -101,7 +101,7 @@ TEST_CASE_METHOD(OwnershipFixture,
     // The caller promised nothing, so the internal log-and-forward wrapper must
     // not claim the report on its behalf.
     CHECK_FALSE(client.current_send_intent().surfaces_errors);
-    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(G28_REJECTION));
+    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(kG28Rejection));
 }
 
 TEST_CASE_METHOD(OwnershipFixture,
@@ -111,7 +111,7 @@ TEST_CASE_METHOD(OwnershipFixture,
     MoonrakerClientMock client(MoonrakerClientMock::PrinterType::VORON_24);
     MoonrakerAPI api(client, state);
 
-    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, G28_REJECTION, "G28");
+    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kG28Rejection, "G28");
 
     helix::AsyncLifetimeGuard guard;
     std::string seen;
@@ -125,10 +125,10 @@ TEST_CASE_METHOD(OwnershipFixture,
     // double-report. This is the other half of the contract: the fix must not
     // simply hardcode false.
     CHECK(client.current_send_intent().surfaces_errors);
-    CHECK(helix::rpc_error_correlation::was_recently_handled(G28_REJECTION));
+    CHECK(helix::rpc_error_correlation::was_recently_handled(kG28Rejection));
 
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-    CHECK(seen == G28_REJECTION);
+    CHECK(seen == kG28Rejection);
 }
 
 // ============================================================================
@@ -146,10 +146,10 @@ TEST_CASE_METHOD(OwnershipFixture,
 
     helix::printer::AmsBackendCfs backend(&api, nullptr);
 
-    constexpr const char* PAYLOAD_REJECTION = "Extrude below minimum temp";
+    constexpr const char* kPayloadRejection = "Extrude below minimum temp";
     // Scoped to the payload, so the G28 that precedes it (homed_axes is "")
     // still succeeds and the failure lands on the macro itself.
-    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, PAYLOAD_REJECTION,
+    client.force_next_gcode_error(MoonrakerErrorType::JSON_RPC_ERROR, kPayloadRejection,
                                   "BOX_LOAD");
 
     auto err = helix::CfsTestAccess::call_dispatch_action_script(backend, "BOX_LOAD LANE=1");
@@ -165,7 +165,7 @@ TEST_CASE_METHOD(OwnershipFixture,
     const auto& history = client.gcode_script_history();
     REQUIRE(std::find(history.begin(), history.end(), "BOX_LOAD LANE=1") != history.end());
 
-    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(PAYLOAD_REJECTION));
+    CHECK_FALSE(helix::rpc_error_correlation::was_recently_handled(kPayloadRejection));
 }
 
 // ============================================================================

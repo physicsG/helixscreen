@@ -10,6 +10,8 @@
 #include "lua_bindings.h"
 #include "plugin_canvas.h"
 
+#include <filesystem>
+#include <fstream>
 #include <lvgl.h>
 
 #include "../catch_amalgamated.hpp"
@@ -278,23 +280,133 @@ TEST_CASE_METHOD(XMLTestFixture, "the unit cap holds and the list stays usable",
     CHECK(list->units == 1);
 }
 
-TEST_CASE_METHOD(XMLTestFixture, "the canvas count is capped", "[plugin][lua][canvas]") {
+TEST_CASE_METHOD(XMLTestFixture, "a plugin may hold more than eight canvases",
+                 "[plugin][lua][canvas]") {
     BoundRuntime b({&install_canvas_bindings});
     REQUIRE(b.t.run(R"(
         local names = {}
-        for i = 1, 8 do names[i] = helix.canvas("n" .. i) end
+        for i = 1, 12 do
+            names[i] = helix.canvas("n" .. i)
+            names[i]:line(0, 0, i, i)
+            names[i]:commit()
+        end
         again = helix.canvas("n1")
-        names[1]:line(0, 0, 1, 1)
+        again:line(0, 0, 2, 2)
         again:commit()
-        ok, err = pcall(helix.canvas, "n9")
     )"));
-    CHECK(b.t.global("ok") == "false");
-    CHECK(b.t.global("err").find("at most 8 canvases") != std::string::npos);
-    // A repeated name returns the same canvas: the handle from the second call
-    // committed what the first one drew.
+    for (int i = 2; i <= 12; ++i) {
+        const DisplayList* list = canvas_committed("test-plugin__n" + std::to_string(i));
+        REQUIRE(list);
+        CHECK(list->prims.size() == 1);
+    }
+    // A repeated name returns the same canvas, not a thirteenth.
     const DisplayList* list = canvas_committed("test-plugin__n1");
     REQUIRE(list);
     CHECK(list->prims.size() == 1);
+    CHECK_FALSE(b.t.rt->faulted());
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "canvas names count against the memory budget",
+                 "[plugin][lua][canvas]") {
+    LuaRuntime::Limits limits;
+    limits.memory_bytes = 128 * 1024;
+    BoundRuntime b({&install_canvas_bindings}, {}, {}, "", limits);
+    REQUIRE(b.t.run("collectgarbage()"));
+    const size_t before = b.t.rt->memory_used();
+    const std::string name(200, 'x');
+    REQUIRE(b.t.run("c = helix.canvas('" + name + "'); collectgarbage()"));
+    CHECK(b.t.rt->memory_used() >= before + name.size());
+    // Enough distinct canvases run into the budget with the canvas error, not a fault.
+    REQUIRE(b.t.run(R"(
+        held = {}
+        local i = 0
+        repeat
+            i = i + 1
+            ok, err = pcall(helix.canvas, string.rep("y", 400) .. i)
+            if ok then held[i] = true end
+        until not ok or i > 2000
+    )"));
+    CHECK(b.t.global("ok") == "false");
+    CHECK(b.t.global("err").find("helix.canvas: plugin memory budget exceeded") !=
+          std::string::npos);
+    CHECK_FALSE(b.t.rt->faulted());
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "clear gives the bytes back for the same drawing",
+                 "[plugin][lua][canvas]") {
+    LuaRuntime::Limits limits;
+    limits.memory_bytes = 128 * 1024;
+    BoundRuntime b({&install_canvas_bindings}, {}, {}, "", limits);
+    // Draws until the budget refuses; returns how many lines fit.
+    REQUIRE(b.t.run(R"(
+        c = helix.canvas("again")
+        collectgarbage()
+        function fill()
+            local n = 0
+            while true do
+                local ok, e = pcall(c.text, c, 0, 0, string.rep("z", 200))
+                if not ok then last_err = e; return n end
+                n = n + 1
+            end
+        end
+        first = fill()
+        c:clear()
+        collectgarbage()
+        second = fill()
+        -- Lua garbage freed by the collect can only add room.
+        refilled = second >= first
+    )"));
+    CHECK(b.t.global("first") != "0");
+    CHECK(b.t.global("refilled") == "true");
+    CHECK(b.t.global("last_err").find("plugin memory budget exceeded") != std::string::npos);
+    CHECK_FALSE(b.t.rt->faulted());
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "unload releases a plugin's canvases", "[plugin][lua][canvas]") {
+    TempDir tmp;
+    std::filesystem::create_directories(tmp.path / "canvas-fill");
+    std::ofstream(tmp.path / "canvas-fill" / "manifest.json")
+        << R"({"id":"canvas-fill","name":"Canvas Fill","version":"1.0.0","memory_mb":1})";
+    // Fills canvases until the budget refuses and commits each, so the plugin
+    // holds as many canvas bytes as its budget allows.
+    std::ofstream(tmp.path / "canvas-fill" / "main.lua") << R"(
+        filled = 0
+        local i = 0
+        while true do
+            i = i + 1
+            local ok, c = pcall(helix.canvas, "c" .. i)
+            if not ok then break end
+            local drew = true
+            while drew do
+                drew = pcall(c.text, c, 0, 0, string.rep("q", 200))
+                if drew then filled = filled + 1 end
+            end
+            c:commit()
+            if i >= 64 then break end
+        end
+    )";
+    HostRig rig(enabled("canvas-fill", {}));
+    rig.host->load_from(tmp.path.string());
+    REQUIRE(rig.info("canvas-fill")->status == PluginStatus::Loaded);
+    auto filled = [&] {
+        lua_State* L = rig.host->runtime("canvas-fill")->state();
+        lua_getglobal(L, "filled");
+        long v = static_cast<long>(lua_tointeger(L, -1));
+        lua_pop(L, 1);
+        return v;
+    };
+    const long first = filled();
+    REQUIRE(first > 0);
+    REQUIRE(canvas_committed("canvas-fill__c1") != nullptr);
+
+    rig.host->disable("canvas-fill");
+    drain();
+    CHECK(canvas_committed("canvas-fill__c1") == nullptr);
+    REQUIRE(rig.host->enable("canvas-fill"));
+    CHECK(filled() == first);
+    CHECK_FALSE(rig.host->runtime("canvas-fill")->faulted());
+    rig.host->disable("canvas-fill");
+    drain();
 }
 
 TEST_CASE_METHOD(XMLTestFixture, "list bytes count against the memory cap",
@@ -330,7 +442,8 @@ TEST_CASE_METHOD(XMLTestFixture, "list bytes count against the memory cap",
         cap_err = e
     )"));
     CHECK(b.t.global("n") != "0");
-    CHECK(b.t.global("cap_err").find("would exceed the plugin memory cap") != std::string::npos);
+    CHECK(b.t.global("cap_err").find("helix.canvas: plugin memory budget exceeded") !=
+          std::string::npos);
     CHECK_FALSE(b.t.rt->faulted());
 
     // Clearing the pending list hands its bytes back; only the loop's own few
@@ -466,6 +579,46 @@ TEST_CASE_METHOD(DemoRig, "two instances of one canvas name share the slot",
     CHECK(canvas_instance_count("canvas-demo__c") == 1);
     CHECK(canvas_committed("canvas-demo__c") != nullptr);
     lv_refr_now(nullptr);
+}
+
+TEST_CASE_METHOD(XMLTestFixture, "a menu check cannot draw, commit or create a canvas",
+                 "[plugin][lua][canvas][check]") {
+    struct Case {
+        const char* call;
+        const char* lua;
+    };
+    const Case cases[] = {
+        {"canvas:line", "c:line(0, 0, 2, 2)"},
+        {"canvas:polyline", "c:polyline({0, 0, 5, 5})"},
+        {"canvas:rect", "c:rect(0, 0, 2, 2)"},
+        {"canvas:circle", "c:circle(5, 5, 2)"},
+        {"canvas:arc", "c:arc(5, 5, 2, 0, 90)"},
+        {"canvas:text", "c:text(0, 0, 'x')"},
+        {"canvas:clear", "c:clear()"},
+        {"canvas:commit", "c:commit()"},
+        {"canvas:on_size", "c:on_size(function() end)"},
+        {"helix.canvas", "helix.canvas('fresh')"},
+    };
+    for (const auto& c : cases) {
+        INFO(c.lua);
+        BoundRuntime b({&install_ui_bindings, &install_canvas_bindings});
+        REQUIRE(b.t.run(std::string(R"(
+            c = helix.canvas("chk")
+            c:line(0, 0, 1, 1)
+            helix.ui.on("check", function() )") +
+                        c.lua + R"( return true end)
+        )"));
+        helix::LogCapture logs;
+        CHECK_FALSE(call_ui_handler_sync(*b.t.rt, "check", {}, {}));
+        CHECK(logs.has_line_with({c.call, "is not allowed in a menu check"}));
+        CHECK(canvas_committed("test-plugin__chk") == nullptr);
+        CHECK_FALSE(canvas_known("test-plugin__fresh"));
+        REQUIRE(b.t.run("c:commit()"));
+        const DisplayList* list = canvas_committed("test-plugin__chk");
+        REQUIRE(list);
+        CHECK(list->prims.size() == 1); // the line drawn outside the check, and nothing else
+        CHECK_FALSE(b.t.rt->faulted());
+    }
 }
 
 #endif // HELIX_HAS_PLUGINS

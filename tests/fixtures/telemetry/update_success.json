@@ -1,0 +1,13 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "event": "update_success",
+  "from_version": "0.13.4",
+  "platform": "pi",
+  "schema_version": 3,
+  "timestamp": "<timestamp>",
+  "version": "0.14.0"
+}

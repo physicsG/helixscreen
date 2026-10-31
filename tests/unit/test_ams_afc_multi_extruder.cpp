@@ -13,7 +13,7 @@
  * the add-on source on a live BoxTurtle (v1.1.0-4-g2921371).
  *
  * So these tests exercise a shape production never receives. They are kept
- * because `parse_afc_state()` still parses `system` and that parse is genuine on
+ * because `apply_afc_state()` still parses `system` and that parse is genuine on
  * the webhook surface — it carries per-extruder `lane_loaded`, `lanes` and
  * `tool_stn` distances a bare name array cannot — and because it stays
  * authoritative whenever it IS present. But nothing in this file is evidence
@@ -21,10 +21,8 @@
  *
  * The counterpart is what matters: **test_afc_toolchanger_from_status.cpp**
  * drives the same behaviours from the flat top-level `AFC.extruders` array the
- * firmware actually sends. That file is where toolchanger coverage lives; when
- * `AFC_SELECT_TOOL` was dead on hardware (fixed in 6bcfb067b), every test in
- * THIS file was green. See prestonbrown/helixscreen#1200 and #1154 for the
- * fixture-fidelity class of bug.
+ * firmware actually sends. That file is where toolchanger coverage lives. See
+ * prestonbrown/helixscreen#1200 and #1154 for the fixture-fidelity class of bug.
  *
  * Test tags: [ams][afc][multi_extruder], plus [webhook] on the AFC.system tests
  * and [status] on the ones fed a real status frame.
@@ -100,7 +98,7 @@ class AmsBackendAfcMultiExtruderHelper : public AmsBackendAfc {
             slot.global_index = i;
             slot.status = SlotStatus::AVAILABLE;
             slot.mapped_tool = i;
-            slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+            slot.color_rgb = kAmsDefaultSlotColor;
             unit.slots.push_back(slot);
         }
 
@@ -434,13 +432,13 @@ TEST_CASE("AFC.system webhook: bowden actions have correct labels",
 
     for (const auto& action : actions) {
         if (action.id == "bowden_T0") {
-            CHECK(action.label.find("T0") != std::string::npos);
+            CHECK(action.tool_index == 0);
             CHECK(action.section == "setup");
             CHECK(action.type == helix::printer::ActionType::SLIDER);
             CHECK(action.unit == "mm");
         }
         if (action.id == "bowden_T1") {
-            CHECK(action.label.find("T1") != std::string::npos);
+            CHECK(action.tool_index == 1);
             CHECK(action.section == "setup");
             CHECK(action.type == helix::printer::ActionType::SLIDER);
             CHECK(action.unit == "mm");

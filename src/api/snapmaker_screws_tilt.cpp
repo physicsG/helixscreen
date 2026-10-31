@@ -94,7 +94,7 @@ namespace snapmaker {
 namespace screws_tilt {
 
 bool stale_calibration_state(int main_state, const std::string& probe_step) {
-    if (main_state != MAIN_STATE_SCREWS_TILT_ADJUST) {
+    if (main_state != kMainStateScrewsTiltAdjust) {
         return false;
     }
     static const std::array<const char*, 6> kNotRunning = {
@@ -153,14 +153,14 @@ AutoScrewsTiltResults results_from_query(const nlohmann::json& response) {
     const nlohmann::json* status = query_status(response);
     const nlohmann::json* module_status = nullptr;
     if (status) {
-        const auto module = status->find(MODULE_NAME);
+        const auto module = status->find(kModuleName);
         if (module != status->end() && module->is_object()) {
             module_status = &*module;
         }
     }
     if (!module_status) {
         AutoScrewsTiltResults none;
-        none.error = std::string(MODULE_NAME) + ": no status object in query response";
+        none.error = std::string(kModuleName) + ": no status object in query response";
         return none;
     }
 
@@ -169,7 +169,7 @@ AutoScrewsTiltResults results_from_query(const nlohmann::json& response) {
     if (configfile != status->end() && configfile->is_object()) {
         const auto settings = configfile->find("settings");
         if (settings != configfile->end() && settings->is_object()) {
-            const auto section = settings->find(MODULE_NAME);
+            const auto section = settings->find(kModuleName);
             if (section != settings->end() && section->is_object()) {
                 config_section = *section;
             }
@@ -184,17 +184,17 @@ void request_exit(IMoonrakerClient& client) {
     client.send_jsonrpc("printer.objects.query", params, [&client](const json& response) {
         const json* status = query_status(response);
         const std::optional<int> state = status ? main_state_from_status(*status) : std::nullopt;
-        if (!state || *state != MAIN_STATE_SCREWS_TILT_ADJUST) {
+        if (!state || *state != kMainStateScrewsTiltAdjust) {
             return;
         }
         spdlog::info("[AutoScrewsTilt] Leaving the firmware screws-tilt state");
-        client.gcode_script(CMD_EXIT);
+        client.gcode_script(kCmdExit);
     });
 }
 
 void reconcile_on_connect(IMoonrakerClient& client, const nlohmann::json& initial_status) {
     const std::optional<int> held = main_state_from_status(initial_status);
-    if (!held || *held != MAIN_STATE_SCREWS_TILT_ADJUST) {
+    if (!held || *held != kMainStateScrewsTiltAdjust) {
         // The discovery subscription carries machine_state_manager only under
         // mmu_type() == SNAPMAKER, which does not track the screws dialect:
         // a U1 without SnapSwap never subscribes, and this is where that
@@ -208,7 +208,7 @@ void reconcile_on_connect(IMoonrakerClient& client, const nlohmann::json& initia
     // probe_step is not part of the discovery subscription, so read it (and a
     // fresh main_state) now, once, at connect time.
     json params = {{"objects", json::object({{"machine_state_manager", json::array({"main_state"})},
-                                             {MODULE_NAME, json::array({"probe_step"})}})}};
+                                             {kModuleName, json::array({"probe_step"})}})}};
     client.send_jsonrpc("printer.objects.query", params, [&client](const json& response) {
         const json* status = query_status(response);
         if (!status) {
@@ -217,7 +217,7 @@ void reconcile_on_connect(IMoonrakerClient& client, const nlohmann::json& initia
         const std::optional<int> state = main_state_from_status(*status);
 
         std::string probe_step;
-        const auto module = status->find(MODULE_NAME);
+        const auto module = status->find(kModuleName);
         if (module != status->end() && module->is_object()) {
             const auto step = module->find("probe_step");
             if (step != module->end() && step->is_string()) {
@@ -233,12 +233,12 @@ void reconcile_on_connect(IMoonrakerClient& client, const nlohmann::json& initia
         }
         spdlog::info("[AutoScrewsTilt] Clearing a stale screws-tilt state (probe_step={})",
                      probe_step);
-        // CMD_EXIT needs exactly reconcile's own precondition (main_state ==
+        // kCmdExit needs exactly reconcile's own precondition (main_state ==
         // SCREWS_TILT_ADJUST), just re-read above. If the state changed
         // between that read and this send, the macro throws - a benign race
         // the fire-and-forget RPC layer logs; there is nothing to retry
         // against a state we no longer hold.
-        client.gcode_script(CMD_EXIT);
+        client.gcode_script(kCmdExit);
     });
 }
 
@@ -269,7 +269,7 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
 
     void start() {
         spdlog::info("[AutoScrewsTiltCollector] Starting the U1 screws-tilt sequence");
-        send_step(CMD_ENTRY, &AutoScrewsTiltCollector::on_entry_done);
+        send_step(kCmdEntry, &AutoScrewsTiltCollector::on_entry_done);
     }
 
   private:
@@ -277,7 +277,7 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
 
     /// One firmware command of the sequence. Success runs @p next; any
     /// failure ends the run. Each command gets its own full
-    /// CALIBRATION_TIMEOUT_MS, so the sequence spans five budgets, not one
+    /// kCalibrationTimeoutMs, so the sequence spans five budgets, not one
     /// shared one.
     ///
     /// Every failure is terminal here, including TIMEOUT and
@@ -298,11 +298,11 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
             [self, command](const MoonrakerError& err) {
                 self->complete_error(std::string(command) + " failed: " + err.message);
             },
-            MoonrakerAdvancedAPI::CALIBRATION_TIMEOUT_MS);
+            MoonrakerAdvancedAPI::kCalibrationTimeoutMs);
     }
 
     void on_entry_done() {
-        send_step(CMD_HOMING, &AutoScrewsTiltCollector::on_homing_done);
+        send_step(kCmdHoming, &AutoScrewsTiltCollector::on_homing_done);
     }
 
     void on_homing_done() {
@@ -319,10 +319,9 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
     void detect_plate() {
         auto self = shared_from_this();
         api_.execute_gcode(
-            CMD_DETECT_BED_PLATE,
+            kCmdDetectBedPlate,
             [self]() {
-                self->send_step(CMD_PROBE_REFERENCE_POINTS,
-                                &AutoScrewsTiltCollector::on_probe_done);
+                self->send_step(kCmdProbeReferencePoints, &AutoScrewsTiltCollector::on_probe_done);
             },
             [self](const MoonrakerError& err) {
                 if (plate_still_on_bed(err.message)) {
@@ -331,9 +330,9 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
                         "the sheet gives wrong results");
                     return;
                 }
-                self->complete_error(std::string(CMD_DETECT_BED_PLATE) + " failed: " + err.message);
+                self->complete_error(std::string(kCmdDetectBedPlate) + " failed: " + err.message);
             },
-            MoonrakerAdvancedAPI::CALIBRATION_TIMEOUT_MS);
+            MoonrakerAdvancedAPI::kCalibrationTimeoutMs);
     }
 
     void on_probe_done() {
@@ -342,7 +341,7 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
 
     void collect_results() {
         auto self = shared_from_this();
-        json params = {{"objects", json::object({{MODULE_NAME, nullptr},
+        json params = {{"objects", json::object({{kModuleName, nullptr},
                                                  {"configfile", json::array({"settings"})}})}};
         client_.send_jsonrpc(
             "printer.objects.query", params,
@@ -382,7 +381,7 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
         spdlog::error("[AutoScrewsTiltCollector] Error: {}", message);
         request_exit(client_);
         if (on_error_) {
-            on_error_(MoonrakerError::json_rpc_error(MODULE_NAME, message));
+            on_error_(MoonrakerError::json_rpc_error(kModuleName, message));
         }
     }
 
@@ -394,7 +393,7 @@ class AutoScrewsTiltCollector : public std::enable_shared_from_this<AutoScrewsTi
 };
 
 void start_sequence(IMoonrakerClient& client, IMoonrakerAPI& api, ScrewTiltCallback on_success,
-                    std::function<void(const MoonrakerError&)> on_error) {
+                    helix::SharedCallback<void(const MoonrakerError&)> on_error) {
     std::make_shared<AutoScrewsTiltCollector>(client, api, std::move(on_success),
                                               std::move(on_error))
         ->start();

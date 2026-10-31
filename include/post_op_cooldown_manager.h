@@ -6,6 +6,8 @@
 #include "lvgl.h"
 
 #include <atomic>
+#include <string>
+#include <vector>
 
 /**
  * @brief Singleton manager for post-filament-operation heater cooldown
@@ -31,12 +33,17 @@ class PostOpCooldownManager {
     void init();
 
     /// Schedule a cooldown after the configured delay.
-    /// Resets any existing pending timer. Safe to call from any thread.
-    void schedule();
+    /// Restarts the pending timer, which then turns off every heater scheduled
+    /// since it last fired or was cancelled. Safe to call from any thread.
+    /// @param heater Klipper extruder name to turn off; empty for the active one.
+    void schedule(std::string heater = {});
 
     /// Cancel any pending cooldown. Call when user manually heats
     /// or a new filament operation starts.
     void cancel();
+
+    /// Take @p heater out of the pending cooldown, leaving any other heater's.
+    void cancel(std::string heater);
 
     /// Shutdown — cancel timer, release resources. Call during app teardown.
     void shutdown();
@@ -46,6 +53,12 @@ class PostOpCooldownManager {
     /// mutate timer_ from a queued main-thread lambda).
     [[nodiscard]] bool has_pending_timer() const noexcept {
         return timer_ != nullptr;
+    }
+
+    /// The heaters the pending cooldown turns off; "" is the active extruder.
+    /// Test-observability only, read like has_pending_timer().
+    [[nodiscard]] const std::vector<std::string>& pending_heaters() const noexcept {
+        return heaters_;
     }
 
   private:
@@ -58,5 +71,6 @@ class PostOpCooldownManager {
     // PostOpCooldownManager::instance() rather than a captured `this`, so
     // destroying the manager cannot leave the timer holding freed memory.
     lv_timer_t* timer_ = nullptr;
+    std::vector<std::string> heaters_; ///< What timer_ turns off; "" is the active extruder
     std::atomic<bool> initialized_{false};
 };

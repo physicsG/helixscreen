@@ -45,9 +45,11 @@ bool axis_is_homed(const PrinterState& ps, Axis axis) {
     return std::string(axes).find(c) != std::string::npos;
 }
 
-void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::function<void()> then,
-                       std::function<void(const MoonrakerError&)> on_error) {
-    if (toolhead_is_homed(get_printer_state())) {
+void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard,
+                       helix::SharedCallback<void()> then,
+                       helix::SharedCallback<void(const MoonrakerError&)> on_error,
+                       HomingPolicy policy) {
+    if (policy == HomingPolicy::IfNeeded && toolhead_is_homed(get_printer_state())) {
         spdlog::debug("[ensure_homed_then] Already homed, proceeding");
         if (then) {
             then();
@@ -57,7 +59,7 @@ void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::funct
 
     if (!api) {
         spdlog::error(
-            "[ensure_homed_then] Not homed and no IMoonrakerAPI available — cannot send G28");
+            "[ensure_homed_then] Homing needed and no IMoonrakerAPI available — cannot send G28");
         if (on_error) {
             MoonrakerError err;
             err.type = MoonrakerErrorType::CONNECTION_LOST;
@@ -67,7 +69,8 @@ void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::funct
         return;
     }
 
-    spdlog::info("[ensure_homed_then] Not fully homed, sending G28");
+    spdlog::info("[ensure_homed_then] {}, sending G28",
+                 policy == HomingPolicy::Always ? "Homing required" : "Not fully homed");
 
     // Capture the caller's error-reporting intent BEFORE on_error is moved into
     // the wrapper below. The wrapper is non-null for every call — including the
@@ -77,31 +80,32 @@ void ensure_homed_then(IMoonrakerAPI* api, AsyncLifetimeGuard& guard, std::funct
     // include/rpc_error_policy.h.
     const bool caller_surfaces = (on_error != nullptr);
 
-    api->execute_gcode("G28",
-                       guard.bg_cb("ensure_homed_then::g28_done",
-                                   [then = std::move(then)]() {
-                                       spdlog::info("[ensure_homed_then] G28 complete, proceeding");
-                                       // A homing macro can still be moving when G28
-                                       // acks, so idle_timeout reads "Printing". That
-                                       // busy is ours: without this stamp the motion
-                                       // guard refuses the continuation's move as an
-                                       // external operation.
-                                       get_printer_state().app_motion_activity().note_done();
-                                       if (then) {
-                                           then();
-                                       }
-                                   }),
-                       guard.bg_cb("ensure_homed_then::g28_error",
-                                   [on_error = std::move(on_error)](const MoonrakerError& err) {
-                                       spdlog::warn("[ensure_homed_then] G28 failed: {}",
-                                                    err.message);
-                                       if (on_error) {
-                                           on_error(err);
-                                       }
-                                   }),
-                       IMoonrakerAPI::HOMING_TIMEOUT_MS, /*silent=*/false,
-                       /*on_queued=*/nullptr,
-                       /*caller_surfaces_errors=*/caller_surfaces);
+    // A homing macro can still be moving when G28 acks, so idle_timeout reads
+    // "Printing" into the continuation. That episode is ours: without this the
+    // motion guard refuses the continuation's move as an external operation.
+    get_printer_state().app_motion_activity().note_episode_send();
+    api->execute_gcode(
+        "G28",
+        guard.bg_cb("ensure_homed_then::g28_done",
+                    [then = std::move(then)]() {
+                        spdlog::info("[ensure_homed_then] G28 complete, proceeding");
+                        // Restarts the ownership lapse, which a long
+                        // homing macro would otherwise run out.
+                        get_printer_state().app_motion_activity().note_still_active();
+                        if (then) {
+                            then();
+                        }
+                    }),
+        guard.bg_cb("ensure_homed_then::g28_error",
+                    [on_error = std::move(on_error)](const MoonrakerError& err) {
+                        spdlog::warn("[ensure_homed_then] G28 failed: {}", err.message);
+                        if (on_error) {
+                            on_error(err);
+                        }
+                    }),
+        IMoonrakerAPI::kHomingTimeoutMs, /*silent=*/false,
+        /*on_queued=*/nullptr,
+        /*caller_surfaces_errors=*/caller_surfaces);
 }
 
 } // namespace helix

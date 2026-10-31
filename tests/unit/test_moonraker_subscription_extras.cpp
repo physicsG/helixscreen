@@ -35,10 +35,17 @@ class RecordingClient : public MoonrakerClientMock {
     using MoonrakerClientMock::MoonrakerClientMock;
     using MoonrakerClientMock::send_jsonrpc;
 
-    helix::RequestId send_jsonrpc(
-        const std::string& method, const json& params, std::function<void(const json&)> success_cb,
-        std::function<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms, bool silent,
-        std::optional<helix::rpc_error_policy::CallerIntent> intent) override {
+    helix::RequestId
+    send_jsonrpc(const std::string& method, const json& params,
+                 helix::SharedCallback<void(const json&)> success_cb,
+                 helix::SharedCallback<void(const MoonrakerError&)> error_cb, uint32_t timeout_ms,
+                 bool silent,
+                 std::optional<helix::rpc_error_policy::CallerIntent> intent) override {
+        if (method == "printer.objects.list" && objects_list_error) {
+            if (success_cb)
+                success_cb(json{{"error", {{"message", *objects_list_error}}}});
+            return 0;
+        }
         if (method == "printer.objects.subscribe") {
             json objects = params.contains("objects") ? params["objects"] : json::object();
             subscribes.push_back(objects);
@@ -77,11 +84,13 @@ class RecordingClient : public MoonrakerClientMock {
     }
 
     std::vector<json> subscribes;
+    /// When set, printer.objects.list answers with this error message.
+    std::optional<std::string> objects_list_error;
     std::string fail_object;
     MoonrakerError fail_error = MoonrakerError::from_json_rpc(
         json{{"code", 400}, {"message", "bad object"}}, "printer.objects.subscribe");
     bool hold_next_subscribe = false;
-    std::function<void()> held;
+    helix::SharedCallback<void()> held;
     bool done = false;
 };
 
@@ -242,6 +251,28 @@ TEST_CASE("a refused app subscription reports DISCOVERY_FAILED and completes dis
     CHECK(client.discover_real());
     CHECK(client.subscribes.size() == 1);
     CHECK(std::count(events.begin(), events.end(), MoonrakerEventType::DISCOVERY_FAILED) == 1);
+}
+
+TEST_CASE("a failed objects list reports the firmware envelope's message",
+          "[moonraker][subscription][firmware_error_envelope]") {
+    LVGLTestFixture fixture;
+    std::vector<std::string> failures;
+    RecordingClient client(MoonrakerClientMock::PrinterType::VORON_24);
+    client.set_klippy_state(MoonrakerClientMock::KlippyState::READY);
+    client.objects_list_error =
+        R"({"coded": "0003-0522-0002-0008", "oneshot": 0, "msg":"Lost communication with MCU 'e0'"})";
+    client.register_event_handler([&failures](const MoonrakerEvent& e) {
+        if (e.type == MoonrakerEventType::DISCOVERY_FAILED)
+            failures.push_back(e.message);
+    });
+    std::string reported;
+    client.MoonrakerClient::discover_printer(
+        []() {}, [&reported](const std::string& why) { reported = why; });
+    helix::ui::UpdateQueue::instance().drain();
+
+    REQUIRE(failures.size() == 1);
+    CHECK(failures[0] == "Lost communication with MCU 'e0'");
+    CHECK(reported == "Lost communication with MCU 'e0'");
 }
 
 TEST_CASE("a timed-out subscribe with extras falls back without refusing them",

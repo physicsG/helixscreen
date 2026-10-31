@@ -1,10 +1,10 @@
 // Copyright (C) 2025-2026 356C LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "test_helpers/afc_test_access.h"
 #include "ams_backend_afc.h"
 #include "ams_types.h"
 #include "moonraker_api.h"
+#include "test_helpers/afc_test_access.h"
 
 #include "../catch_amalgamated.hpp"
 
@@ -39,7 +39,7 @@ class HubSensorTestHelper : public AmsBackendAfc {
             slot.global_index = i;
             slot.status = SlotStatus::AVAILABLE;
             slot.mapped_tool = i;
-            slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+            slot.color_rgb = kAmsDefaultSlotColor;
             unit.slots.push_back(slot);
         }
 
@@ -121,7 +121,7 @@ TEST_CASE("AmsUnit hub sensor fields default to false", "[ams][hub_sensor]") {
 // AFC per-unit hub sensor — single unit
 // ============================================================================
 
-TEST_CASE("AFC single-unit: parse_afc_hub stores per-hub state", "[ams][hub_sensor][afc]") {
+TEST_CASE("AFC single-unit: apply_hub stores per-hub state", "[ams][hub_sensor][afc]") {
     helix::HubSensorTestHelper helper;
     helper.initialize_test_lanes_with_slots(4);
     helper.set_discovered_hubs({"Turtle_1"});

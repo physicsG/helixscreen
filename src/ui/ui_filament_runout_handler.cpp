@@ -4,6 +4,7 @@
 #include "ui_filament_runout_handler.h"
 
 #include "ui_resume_dispatch.h"
+#include "ui_unload_lane_choice.h"
 #include "ui_update_queue.h"
 
 #include "ams_backend.h"
@@ -12,6 +13,7 @@
 #include "filament_op_execute.h"
 #include "filament_sensor_manager.h"
 #include "i_moonraker_api.h"
+#include "non_filament_pause.h"
 #include "observer_factory.h"
 #include "print_control_buttons.h"
 #include "print_lifecycle_state.h" // For PrintState enum
@@ -28,10 +30,20 @@ namespace helix::ui {
 // ============================================================================
 
 FilamentRunoutHandler::FilamentRunoutHandler(IMoonrakerAPI* api) : api_(api) {
+    // A pause's other cause can arrive after the pause did, by which time the
+    // guidance may already be up for it.
+    helix::non_filament_pause::add_listener(this, [this]() {
+        if (runout_modal_.is_visible()) {
+            spdlog::info("[FilamentRunoutHandler] Pause has a non-filament cause - closing "
+                         "runout guidance");
+            hide_runout_guidance_modal();
+        }
+    });
     spdlog::debug("[FilamentRunoutHandler] Constructed");
 }
 
 FilamentRunoutHandler::~FilamentRunoutHandler() {
+    helix::non_filament_pause::remove_listener(this);
     // lifetime_ destructor calls invalidate() automatically
     spdlog::trace("[FilamentRunoutHandler] Destroyed");
 }
@@ -53,6 +65,7 @@ void FilamentRunoutHandler::on_print_state_changed(::PrintState old_state, ::Pri
         new_state == ::PrintState::Complete || new_state == ::PrintState::Cancelled ||
         new_state == ::PrintState::Error) {
         runout_modal_shown_for_pause_ = false;
+        runout_lane_ = -1;
         user_took_manual_action_ = false;
         hide_runout_guidance_modal();
     }
@@ -73,6 +86,13 @@ void FilamentRunoutHandler::check_and_show_runout_guidance() {
         return;
     }
 
+    // A pause something else already explains (a print-defect detection) is
+    // not a runout, whatever an idle lane's sensor reads.
+    if (helix::non_filament_pause::explained()) {
+        spdlog::info("[FilamentRunoutHandler] Pause has a non-filament cause - no runout guidance");
+        return;
+    }
+
     auto& sensor_mgr = helix::FilamentSensorManager::instance();
 
     // Check if a runout sensor on a LOADED lane shows no filament. Use
@@ -80,7 +100,10 @@ void FilamentRunoutHandler::check_and_show_runout_guidance() {
     // unloaded for a multi-color print) doesn't pop guidance when the print is
     // paused for an unrelated reason. A loaded lane that lost filament still
     // counts.
-    if (sensor_mgr.has_real_runout()) {
+    if (const auto lane = sensor_mgr.real_runout_lane()) {
+        // The lane the runout came from names the head Load and Unload act on,
+        // even after the user's new spool clears the sensor.
+        runout_lane_ = *lane;
         // A runout during pause always asks the user; nothing recovers on its
         // own. A lane sensor reporting filament does not prove it reached the
         // extruder gear (the Snapmaker assist motor stops a few inches short
@@ -283,7 +306,7 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
                 "[FilamentRunoutHandler] Runout cleared externally — auto-closing guidance modal");
             self->hide_runout_guidance_modal();
         },
-        helix::FilamentSensorManager::instance().get_subjects_lifetime());
+        helix::FilamentSensorManager::instance().subjects_lifetime());
 }
 
 // ============================================================================
@@ -293,18 +316,13 @@ void FilamentRunoutHandler::show_runout_guidance_modal() {
 void FilamentRunoutHandler::dispatch_load() {
     spdlog::info("[FilamentRunoutHandler] User chose to load filament after runout");
 
-    // Shared three-tier ladder (AMS backend, then the configured LOAD_FILAMENT
-    // macro, then raw gcode) via execute_filament_load() — the same execution
-    // this dialog and PrintStatusWidget now share. FilamentPanel and
-    // AmsOperationSidebar still answer the same plan_load() decision but each
-    // carry their own independent execution ladder — unconverted follow-up.
-    // Before this the runout dialog only ever reached the backend, and with no
-    // backend it navigated the user to the Filament panel — out from under the
-    // very dialog they were working in.
+    // The shared three-tier ladder (AMS backend, then the configured
+    // LOAD_FILAMENT macro, then raw gcode), which heats the nozzle first when it
+    // needs it. It dispatches in place: navigating would tear this dialog out
+    // from under the user mid-runout.
     AmsBackend* backend = AmsState::instance().get_backend();
-    // The runout is on whatever lane is currently feeding, so that lane is the
-    // target — there is no slot picker under a runout dialog.
-    const int slot = backend ? backend->get_current_slot() : -1;
+    // The runout names its head; there is no slot picker under a runout dialog.
+    const int slot = helix::ui::runout_target_slot(backend, runout_lane_, /*load=*/true);
     helix::ui::execute_filament_load(backend, slot, "[FilamentRunoutHandler]");
 }
 
@@ -317,9 +335,21 @@ void FilamentRunoutHandler::dispatch_unload() {
 
     AmsBackend* backend = AmsState::instance().get_backend();
 
-    // The runout is on whatever lane is currently feeding, so that lane is the
-    // target — there is no slot picker under a runout dialog.
-    const int slot = backend ? backend->get_current_slot() : -1;
+    // The runout names its head; there is no slot picker under a runout dialog.
+    const int slot = helix::ui::runout_target_slot(backend, runout_lane_, /*load=*/false);
+
+    // A backend that cannot name the lane in the toolhead asks first, the same
+    // question the Filament panel and the sidebar ask.
+    if (slot < 0) {
+        lv_obj_t* dialog = runout_modal_.dialog();
+        helix::ui::FilamentOpSurface surface;
+        surface.log_tag = "[FilamentRunoutHandler]";
+        if (helix::ui::ask_lane_then_unload(
+                backend, dialog ? lv_obj_find_by_name(dialog, "btn_unload_filament") : nullptr,
+                surface, lifetime_.token())) {
+            return;
+        }
+    }
 
     // unload_target_is_loaded()'s is_current_slot arm is the whole reason this
     // button works at all here: a runout clears the lane's own sensor while

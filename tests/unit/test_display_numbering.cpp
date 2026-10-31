@@ -9,6 +9,9 @@
 #include "display_numbering.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 
+#include <optional>
+#include <vector>
+
 #include "../catch_amalgamated.hpp"
 
 using namespace helix::ui;
@@ -68,6 +71,15 @@ TEST_CASE("noun_text covers every LaneNoun", "[numbering]") {
     CHECK(noun_text(LaneNoun::Tool) == "Tool");
     CHECK(noun_text(LaneNoun::Feeder) == "Feeder");
     CHECK(noun_text(LaneNoun::Toolhead) == "Toolhead");
+}
+
+TEST_CASE("backup_lane_text names the Endless Spool field in each noun", "[numbering]") {
+    CHECK(backup_lane_text(LaneNoun::Slot) == "Backup Slot");
+    CHECK(backup_lane_text(LaneNoun::Lane) == "Backup Lane");
+    CHECK(backup_lane_text(LaneNoun::Gate) == "Backup Gate");
+    CHECK(backup_lane_text(LaneNoun::Tool) == "Backup Tool");
+    CHECK(backup_lane_text(LaneNoun::Feeder) == "Backup Feeder");
+    CHECK(backup_lane_text(LaneNoun::Toolhead) == "Backup Toolhead");
 }
 
 TEST_CASE("lane_range_label spells a span with the plural noun", "[numbering]") {
@@ -146,19 +158,6 @@ TEST_CASE("is_generated_tool_name separates a gcode identity from a chosen name"
     CHECK_FALSE(is_generated_tool_name("Tool 1"));
 }
 
-TEST_CASE("tool_short_label spells the closed-dropdown tool text", "[numbering]") {
-    // A generated T<n> counts from 1 for display (the gcode spelling stays in
-    // tool_label); a configured name is shown exactly as its owner wrote it.
-    CHECK(tool_short_label("T0", 0) == "1");
-    CHECK(tool_short_label("T15", 14) == "15");
-    CHECK(tool_short_label(tool_label(7), 7) == "8");
-    CHECK(tool_short_label("Left Extruder", 0) == "Left Extruder");
-    CHECK(tool_short_label("t0", 0) == "t0");
-    // No lane selected means no text, whatever the name says.
-    CHECK(tool_short_label("T0", -1).empty());
-    CHECK(tool_short_label("Left Extruder", -1).empty());
-}
-
 TEST_CASE("Feeder and Toolhead compose like every other noun", "[numbering]") {
     // Snapmaker U1 is the one backend where the filament-entry noun and the
     // printing-end noun differ, so both need the ordinary lane_label() path.
@@ -166,4 +165,107 @@ TEST_CASE("Feeder and Toolhead compose like every other noun", "[numbering]") {
     CHECK(lane_label(LaneNoun::Toolhead, 0) == "Toolhead 1");
     CHECK(lane_label(LaneNoun::Feeder, 3) == "Feeder 4");
     CHECK(lane_label(LaneNoun::Toolhead, 3) == "Toolhead 4");
+}
+
+TEST_CASE("tool badges hide when every tool feeds the lane of its own number",
+          "[numbering][tool_badge]") {
+    // Index space: T0 -> slot 0 is identity, though slot 0 displays as lane 1.
+    CHECK(lane_number(0) == 1);
+    CHECK_FALSE(tool_badges_add_information({0, 1, 2, 3}, 4));
+    CHECK_FALSE(tool_badges_add_information({0, 1, 2, 3, 4, 5, 6, 7}, 8));
+    // Fewer tools than lanes: the spare lanes carry no tool, so no badge repeats anything.
+    CHECK_FALSE(tool_badges_add_information({0, 1}, 4));
+}
+
+TEST_CASE("tool badges show when a tool feeds another lane", "[numbering][tool_badge]") {
+    CHECK(tool_badges_add_information({1, 0, 2, 3}, 4));
+    // Off by one in display terms (T0 -> lane 1 shifted to T0 -> slot 1) is a remap.
+    CHECK(tool_badges_add_information({1, 2, 3, 0}, 4));
+    CHECK(tool_badges_add_information({0, 1, 2, 2}, 4));
+    // Only the last tool moved: every entry is checked, not just the first.
+    CHECK(tool_badges_add_information({0, 1, 2, 3, 4, 5, 6, 0}, 8));
+}
+
+TEST_CASE("tool badges show when a tool has no lane", "[numbering][tool_badge]") {
+    CHECK(tool_badges_add_information({0, -1, 2, 3}, 4));
+    // T4 names a lane this system does not have.
+    CHECK(tool_badges_add_information({0, 1, 2, 3, 4}, 4));
+}
+
+TEST_CASE("an empty tool map is not proof of identity", "[numbering][tool_badge]") {
+    CHECK(tool_badges_add_information({}, 4));
+    CHECK(tool_badges_add_information({}, 0));
+}
+
+TEST_CASE("a generated tool name shows its display number beside the G-code name",
+          "[numbering][1769]") {
+    // Klipper and the slicer say T1 for the second tool; the machine says Tool 2.
+    // Where there is room the label carries both, so neither reads as a typo.
+    CHECK(tool_label_in_form(LaneNoun::Tool, "T0", 0, ToolLabelForm::Full) == "Tool 1 (T0)");
+    CHECK(tool_label_in_form(LaneNoun::Tool, "T1", 1, ToolLabelForm::Full) == "Tool 2 (T1)");
+    CHECK(tool_label_in_form(LaneNoun::Tool, "T1", 1, ToolLabelForm::Code) == "T1");
+    CHECK(tool_label_in_form(LaneNoun::Tool, tool_label(11), 11, ToolLabelForm::Code) == "T11");
+}
+
+TEST_CASE("the full tool label speaks the printer's own noun", "[numbering][1769]") {
+    CHECK(tool_label_in_form(LaneNoun::Toolhead, "T2", 2, ToolLabelForm::Full) ==
+          "Toolhead 3 (T2)");
+    CHECK(tool_label_in_form(LaneNoun::Toolhead, "T2", 2, ToolLabelForm::Code) == "T2");
+}
+
+TEST_CASE("a configured tool name is its label, beside its G-code name", "[numbering][1769]") {
+    // "Left" is what the machine is labeled with; the narrow form is the
+    // G-code name it answers to, as for a generated name.
+    CHECK(tool_label_in_form(LaneNoun::Tool, "Left", 0, ToolLabelForm::Full) == "Left (T0)");
+    CHECK(tool_label_in_form(LaneNoun::Tool, "Right", 1, ToolLabelForm::Full) == "Right (T1)");
+    CHECK(tool_label_in_form(LaneNoun::Tool, "Left", 0, ToolLabelForm::Code) == "T0");
+    CHECK(tool_label_in_form(LaneNoun::Tool, "Right", 1, ToolLabelForm::Code) == "T1");
+    // The noun names a position, which a configured name replaces.
+    CHECK(tool_label_in_form(LaneNoun::Toolhead, "Left", 0, ToolLabelForm::Full) == "Left (T0)");
+    // Not the generated spelling: lowercase, or a T with no digits after it.
+    CHECK(tool_label_in_form(LaneNoun::Tool, "t0", 0, ToolLabelForm::Full) == "t0 (T0)");
+    CHECK(tool_label_in_form(LaneNoun::Tool, "t0", 0, ToolLabelForm::Code) == "T0");
+    CHECK(tool_label_in_form(LaneNoun::Tool, "T", 0, ToolLabelForm::Full) == "T (T0)");
+}
+
+TEST_CASE("tool_name_label is the configured name, else the physical position",
+          "[numbering][1769]") {
+    CHECK(tool_name_label(LaneNoun::Tool, "Left", 0) == "Left");
+    CHECK(tool_name_label(LaneNoun::Tool, "T0", 0) == "Tool 1");
+    CHECK(tool_name_label(LaneNoun::Toolhead, "T2", 2) == "Toolhead 3");
+    CHECK(tool_name_label(LaneNoun::Tool, "Left", -1).empty());
+    CHECK(tool_name_label(LaneNoun::Tool, "T0", -1).empty());
+}
+
+TEST_CASE("a tool with no position has no label in any form", "[numbering][1769]") {
+    CHECK(tool_label_in_form(LaneNoun::Tool, "T0", -1, ToolLabelForm::Full).empty());
+    CHECK(tool_label_in_form(LaneNoun::Tool, "T0", -1, ToolLabelForm::Code).empty());
+    CHECK(tool_label_in_form(LaneNoun::Tool, "Left", -1, ToolLabelForm::Full).empty());
+}
+
+TEST_CASE("pick_tool_label_form takes the most informative form that fits", "[numbering][1769]") {
+    std::vector<ToolLabelForm> asked;
+    auto fits_only = [&asked](std::optional<ToolLabelForm> accepted) {
+        asked.clear();
+        return [&asked, accepted](ToolLabelForm f) {
+            asked.push_back(f);
+            return accepted && f == *accepted;
+        };
+    };
+
+    SECTION("room for the full label") {
+        CHECK(pick_tool_label_form([](ToolLabelForm) { return true; }) == ToolLabelForm::Full);
+    }
+    SECTION("only the G-code name fits") {
+        CHECK(pick_tool_label_form(fits_only(ToolLabelForm::Code)) == ToolLabelForm::Code);
+        // Full was tried first and refused; Code was then asked.
+        CHECK(asked == std::vector<ToolLabelForm>{ToolLabelForm::Full, ToolLabelForm::Code});
+    }
+    SECTION("nothing fits: the shortest form, never nothing") {
+        CHECK(pick_tool_label_form(fits_only(std::nullopt)) == ToolLabelForm::Code);
+    }
+    SECTION("the first accepted form wins without asking the rest") {
+        CHECK(pick_tool_label_form(fits_only(ToolLabelForm::Full)) == ToolLabelForm::Full);
+        CHECK(asked == std::vector<ToolLabelForm>{ToolLabelForm::Full});
+    }
 }

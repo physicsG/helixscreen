@@ -16,15 +16,21 @@
 #include "ui_update_queue.h"
 #include "ui_utils.h"
 
+#include "ams_backend.h"
+#include "ams_state.h"
 #include "app_globals.h"
 #include "display_settings_manager.h"
+#include "filament_accounting.h"
+#include "filament_display_name.h"
 #include "format_utils.h"
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
+#include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "observer_factory.h"
 #include "print_history_manager.h"
 #include "printer_state.h"
+#include "spoolman_manager.h"
 #include "static_panel_registry.h"
 #include "text_io.h"
 #include "thumbnail_cache.h"
@@ -43,7 +49,7 @@ using namespace helix;
 using helix::ui::find_required;
 
 // MDI chevron-down symbol for dropdown arrows (replaces FontAwesome LV_SYMBOL_DOWN)
-static const char* MDI_CHEVRON_DOWN = "\xF3\xB0\x85\x80"; // F0140
+static const char* kMdiChevronDown = "\xF3\xB0\x85\x80"; // F0140
 
 // ============================================================================
 // Constructor
@@ -163,11 +169,11 @@ lv_obj_t* HistoryListPanel::create(lv_obj_t* parent) {
         icon_font_name ? lv_xml_get_font(nullptr, icon_font_name) : &mdi_icons_24;
 
     if (filter_status_) {
-        lv_dropdown_set_symbol(filter_status_, MDI_CHEVRON_DOWN);
+        lv_dropdown_set_symbol(filter_status_, kMdiChevronDown);
         lv_obj_set_style_text_font(filter_status_, icon_font, LV_PART_INDICATOR);
     }
     if (sort_dropdown_) {
-        lv_dropdown_set_symbol(sort_dropdown_, MDI_CHEVRON_DOWN);
+        lv_dropdown_set_symbol(sort_dropdown_, kMdiChevronDown);
         lv_obj_set_style_text_font(sort_dropdown_, icon_font, LV_PART_INDICATOR);
     }
 
@@ -345,13 +351,13 @@ void HistoryListPanel::refresh_from_api() {
     has_more_data_ = true;
     load_more_guard_.release();
 
-    spdlog::debug("[{}] Fetching first page of history (limit={})", get_name(), JOBS_PER_PAGE);
+    spdlog::debug("[{}] Fetching first page of history (limit={})", get_name(), kJobsPerPage);
 
     api->history().get_history_list(
-        JOBS_PER_PAGE, // limit - use page size
-        0,             // start - first page
-        0.0,           // since (no filter)
-        0.0,           // before (no filter)
+        kJobsPerPage, // limit - use page size
+        0,            // start - first page
+        0.0,          // since (no filter)
+        0.0,          // before (no filter)
         lifetime_.bg_cb("HistoryListPanel::fetch_history",
                         [this](const std::vector<PrintHistoryJob>& jobs, uint64_t total) {
                             spdlog::info("[{}] Received {} jobs (total: {})", get_name(),
@@ -359,7 +365,7 @@ void HistoryListPanel::refresh_from_api() {
                             jobs_ = jobs;
                             // Moonraker's `count` is this page's size, not the
                             // total: only a short page says there is no more.
-                            has_more_data_ = (jobs.size() == static_cast<size_t>(JOBS_PER_PAGE));
+                            has_more_data_ = (jobs.size() == static_cast<size_t>(kJobsPerPage));
 
                             // Associates timelapse files with jobs, then applies filters.
                             fetch_timelapse_files();
@@ -401,13 +407,13 @@ void HistoryListPanel::load_more() {
     int start_offset = static_cast<int>(jobs_.size());
 
     spdlog::debug("[{}] Loading more jobs (start={}, limit={})", get_name(), start_offset,
-                  JOBS_PER_PAGE);
+                  kJobsPerPage);
 
     api->history().get_history_list(
-        JOBS_PER_PAGE, // limit
-        start_offset,  // start - continue from where we left off
-        0.0,           // since (no filter)
-        0.0,           // before (no filter)
+        kJobsPerPage, // limit
+        start_offset, // start - continue from where we left off
+        0.0,          // since (no filter)
+        0.0,          // before (no filter)
         lifetime_.bg_cb("HistoryListPanel::load_more",
                         [this](const std::vector<PrintHistoryJob>& new_jobs, uint64_t total) {
                             load_more_guard_.release();
@@ -426,8 +432,7 @@ void HistoryListPanel::load_more() {
                             jobs_.insert(jobs_.end(), new_jobs.begin(), new_jobs.end());
 
                             // Only a short page says there is no more.
-                            has_more_data_ =
-                                (new_jobs.size() == static_cast<size_t>(JOBS_PER_PAGE));
+                            has_more_data_ = (new_jobs.size() == static_cast<size_t>(kJobsPerPage));
 
                             // Re-apply filters to the full job list
                             apply_filters_and_sort();
@@ -876,8 +881,12 @@ void HistoryListPanel::init_detail_subjects() {
                               "history_detail_status_icon", subjects_);
     UI_MANAGED_SUBJECT_STRING(detail_status_variant_, detail_status_variant_buf_, "secondary",
                               "history_detail_status_variant", subjects_);
+    UI_MANAGED_SUBJECT_STRING(detail_start_date_, detail_start_date_buf_, "",
+                              "history_detail_start_date", subjects_);
     UI_MANAGED_SUBJECT_STRING(detail_start_time_, detail_start_time_buf_, "",
                               "history_detail_start_time", subjects_);
+    UI_MANAGED_SUBJECT_STRING(detail_end_date_, detail_end_date_buf_, "", "history_detail_end_date",
+                              subjects_);
     UI_MANAGED_SUBJECT_STRING(detail_end_time_, detail_end_time_buf_, "", "history_detail_end_time",
                               subjects_);
     UI_MANAGED_SUBJECT_STRING(detail_duration_, detail_duration_buf_, "", "history_detail_duration",
@@ -899,6 +908,10 @@ void HistoryListPanel::init_detail_subjects() {
     UI_MANAGED_SUBJECT_INT(detail_can_reprint_, 1, "history_detail_can_reprint", subjects_);
     UI_MANAGED_SUBJECT_INT(detail_status_code_, 0, "history_detail_status_code", subjects_);
     UI_MANAGED_SUBJECT_INT(detail_has_timelapse_, 0, "history_detail_has_timelapse", subjects_);
+    UI_MANAGED_SUBJECT_STRING(detail_spools_, detail_spools_buf_, "", "history_detail_spools",
+                              subjects_);
+    UI_MANAGED_SUBJECT_INT(detail_has_spools_, 0, "history_detail_has_spools", subjects_);
+    photo_viewer_.init_subjects(subjects_);
 
     spdlog::debug("[{}] Detail overlay subjects initialized", get_name());
 }
@@ -910,6 +923,7 @@ void HistoryListPanel::show_detail_overlay(const PrintHistoryJob& job) {
 
     // Update subjects with job data first
     update_detail_subjects(job);
+    fetch_spool_usage(job);
 
     // Create overlay if not exists (lazy init)
     if (!detail_overlay_) {
@@ -1014,12 +1028,26 @@ void HistoryListPanel::show_detail_overlay(const PrintHistoryJob& job) {
         }
     }
 
+    photo_viewer_.show_job(job, detail_overlay_);
+
     // Register detail sub-overlay with nullptr lifecycle — managed by HistoryListPanel
     helix::nav::register_overlay(detail_overlay_, nullptr);
 
     // Push the overlay
     helix::nav::push_overlay(detail_overlay_);
     spdlog::info("[{}] Showing detail overlay for: {}", get_name(), job.filename);
+}
+
+// A timestamp of 0 or below is "not recorded": the date reads "-" with no time.
+static void set_date_time_subjects(double timestamp, lv_subject_t* date, lv_subject_t* time) {
+    if (timestamp <= 0) {
+        lv_subject_copy_string(date, "-");
+        lv_subject_copy_string(time, "");
+        return;
+    }
+    const time_t ts = static_cast<time_t>(timestamp);
+    lv_subject_copy_string(date, helix::ui::format_month_day(ts).c_str());
+    lv_subject_copy_string(time, helix::ui::format_time(ts).c_str());
 }
 
 void HistoryListPanel::update_detail_subjects(const PrintHistoryJob& job) {
@@ -1029,17 +1057,10 @@ void HistoryListPanel::update_detail_subjects(const PrintHistoryJob& job) {
     lv_subject_copy_string(&detail_status_icon_, status_to_icon(job.status));
     lv_subject_copy_string(&detail_status_variant_, status_to_variant(job.status));
 
-    // Format timestamps
-    lv_subject_copy_string(&detail_start_time_, job.date_str.c_str());
-
-    // Format end time from end_time timestamp
-    if (job.end_time > 0) {
-        time_t end_ts = static_cast<time_t>(job.end_time);
-        std::string end_str = helix::ui::format_modified_date(end_ts);
-        lv_subject_copy_string(&detail_end_time_, end_str.c_str());
-    } else {
-        lv_subject_copy_string(&detail_end_time_, "-");
-    }
+    // Date and time are separate subjects: the overlay stacks them, since one
+    // line is wider than a metadata column.
+    set_date_time_subjects(job.start_time, &detail_start_date_, &detail_start_time_);
+    set_date_time_subjects(job.end_time, &detail_end_date_, &detail_end_time_);
 
     lv_subject_copy_string(&detail_duration_,
                            helix::format::duration(static_cast<int>(job.print_duration)).c_str());
@@ -1117,6 +1138,56 @@ void HistoryListPanel::update_detail_subjects(const PrintHistoryJob& job) {
                   status_code);
 }
 
+void HistoryListPanel::fetch_spool_usage(const PrintHistoryJob& job) {
+    const uint32_t request = ++detail_spools_request_;
+    lv_subject_copy_string(&detail_spools_, "");
+    lv_subject_set_int(&detail_has_spools_, 0);
+    const PluginFeatureState accounting = get_printer_state().plugin_status_state().plugin_feature(
+        kFilamentAccountingFeature, kFilamentAccountingMinVersion);
+    IMoonrakerClient* client = get_moonraker_client();
+    if (!filament_usage_available(accounting) || client == nullptr || job.job_id.empty()) {
+        return;
+    }
+    // History reuses job ids: the start time keeps a deleted job's record out.
+    nlohmann::json params{{"job_id", job.job_id}};
+    if (job.start_time > 0) {
+        params["start_time"] = job.start_time;
+    }
+    client->send_jsonrpc(
+        kFilamentUsageRpc, params,
+        lifetime_.bg_cb(
+            "HistoryListPanel::spool_usage",
+            [this, request](const nlohmann::json& response) {
+                if (request != detail_spools_request_) {
+                    return;
+                }
+                const nlohmann::json* result = json_util::find_member(response, "result");
+                const std::vector<SpoolUsage> usage =
+                    result ? parse_filament_usage(*result) : std::vector<SpoolUsage>{};
+                if (usage.empty()) {
+                    return;
+                }
+                const AmsBackend* backend = AmsState::instance().get_backend(0);
+                const ui::LaneNoun noun = backend ? backend->lane_noun() : ui::LaneNoun::Slot;
+                const std::string text = describe_spool_usage(
+                    usage,
+                    [](int spool_id) {
+                        const auto identity = SpoolmanManager::find_identity(spool_id);
+                        return identity ? compose_filament_label(identity->vendor,
+                                                                 identity->filament_name,
+                                                                 identity->material)
+                                        : std::string();
+                    },
+                    noun);
+                lv_subject_copy_string(&detail_spools_, text.c_str());
+                lv_subject_set_int(&detail_has_spools_, 1);
+            }),
+        [](const MoonrakerError& err) {
+            spdlog::debug("[HistoryListPanel] No spool record: {}", err.message);
+        },
+        0, /*silent=*/true);
+}
+
 void HistoryListPanel::handle_reprint() {
     if (selected_job_index_ >= filtered_jobs_.size()) {
         spdlog::warn("[{}] Invalid selected job index for reprint", get_name());
@@ -1133,6 +1204,12 @@ void HistoryListPanel::handle_reprint() {
 
     spdlog::info("[{}] Reprint requested for: {}", get_name(), job.filename);
 
+    // Copied out before navigating: a queue drain during the panel switch runs
+    // the pops below inline, and closing the list re-filters filtered_jobs_,
+    // which frees the storage `job` points into.
+    const std::string filename = job.filename;
+    const int archive_plate = job.archive_plate;
+
     // Navigate to the Print Select file detail view (DRY - reuse existing UI)
     // Step 1: Close all history overlays (detail → list → dashboard)
     helix::nav::go_back(); // Close history detail overlay
@@ -1147,10 +1224,10 @@ void HistoryListPanel::handle_reprint() {
         get_print_select_panel(get_printer_state(), get_moonraker_api());
     if (print_panel) {
         // select_file_by_name searches the file list and shows detail view if found
-        if (print_panel->select_file_by_name(job.filename)) {
-            spdlog::info("[{}] Navigated to file details for: {}", get_name(), job.filename);
+        if (print_panel->select_file_by_name(filename, archive_plate)) {
+            spdlog::info("[{}] Navigated to file details for: {}", get_name(), filename);
         } else {
-            spdlog::warn("[{}] File not found in print panel: {}", get_name(), job.filename);
+            spdlog::warn("[{}] File not found in print panel: {}", get_name(), filename);
             ui_notification_warning("File not found in print list");
         }
     } else {
@@ -1201,6 +1278,7 @@ void HistoryListPanel::confirm_delete() {
     const auto& job = filtered_jobs_[selected_job_index_];
     std::string job_id = job.job_id;
     std::string filename = job.filename;
+    PrintHistoryJob deleted = job;
 
     spdlog::info("[{}] Confirming delete for job_id: {}", get_name(), job_id);
 
@@ -1209,9 +1287,10 @@ void HistoryListPanel::confirm_delete() {
         api->history().delete_history_job(
             job_id,
             lifetime_.bg_cb("HistoryListPanel::confirm_delete",
-                            [this, job_id, filename]() {
+                            [this, job_id, filename, deleted]() {
                                 spdlog::info("[{}] Job deleted: {} ({})", get_name(), filename,
                                              job_id);
+                                helix::ui::HistoryPhotoViewer::delete_photos(deleted);
 
                                 // Remove from jobs_ and filtered_jobs_
                                 jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(),
@@ -1287,9 +1366,9 @@ void HistoryListPanel::check_scroll_position() {
     int32_t content_height = lv_obj_get_scroll_bottom(list_content_);
 
     // Load more when within 100px of the bottom
-    constexpr int32_t LOAD_MORE_THRESHOLD = 100;
+    constexpr int32_t kLoadMoreThreshold = 100;
 
-    if (content_height <= LOAD_MORE_THRESHOLD) {
+    if (content_height <= kLoadMoreThreshold) {
         spdlog::debug("[{}] Near bottom (scroll_y={}, remaining={}), loading more...", get_name(),
                       scroll_y, content_height);
         load_more();

@@ -58,11 +58,11 @@ class TestableBufferStatusModal : public BufferStatusModal {
     const char* flow_value() {
         return lv_subject_get_string(&flow_value_subject_);
     }
-    const char* afc_state_value() {
-        return lv_subject_get_string(&afc_state_subject_);
+    const char* buffer_state_value() {
+        return lv_subject_get_string(&state_subject_);
     }
-    const char* afc_distance_value() {
-        return lv_subject_get_string(&afc_distance_subject_);
+    const char* fault_distance_value() {
+        return lv_subject_get_string(&fault_distance_subject_);
     }
 };
 
@@ -75,6 +75,7 @@ static helix::AmsSystemInfo make_hh_info() {
     info.type = helix::AmsType::HAPPY_HARE;
     info.sync_feedback_bias = 0.15f;
     info.espooler_state = "rewind";
+    info.spool_motor = helix::SpoolMotorAction::Rewinding;
     info.sync_drive = true;
     info.clog_detection = 2;
     info.sync_feedback_flow_rate = 95.0f;
@@ -92,6 +93,7 @@ static helix::AmsSystemInfo make_afc_info(int unit_count = 1) {
         bh.fault_detection_enabled = true;
         bh.distance_to_fault = 12.5f;
         bh.state = "Advancing";
+        bh.motion = helix::BufferMotion::Advancing;
         unit.buffer_health = bh;
         info.units.push_back(unit);
     }
@@ -197,6 +199,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal populate HH espooler states
 
     SECTION("rewind") {
         info.espooler_state = "rewind";
+        info.spool_motor = helix::SpoolMotorAction::Rewinding;
         modal.populate(info, 0);
         REQUIRE(modal.show_espooler_value() == 1);
         REQUIRE(std::string(modal.espooler_value()) == "Rewinding");
@@ -204,18 +207,21 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal populate HH espooler states
 
     SECTION("assist") {
         info.espooler_state = "assist";
+        info.spool_motor = helix::SpoolMotorAction::Assisting;
         modal.populate(info, 0);
         REQUIRE(std::string(modal.espooler_value()) == "Assisting");
     }
 
     SECTION("unknown state passes through raw") {
         info.espooler_state = "custom_state";
+        info.spool_motor = helix::SpoolMotorAction::Other;
         modal.populate(info, 0);
         REQUIRE(std::string(modal.espooler_value()) == "custom_state");
     }
 
     SECTION("empty hides row") {
         info.espooler_state = "";
+        info.spool_motor = helix::SpoolMotorAction::None;
         modal.populate(info, 0);
         REQUIRE(modal.show_espooler_value() == 0);
     }
@@ -281,7 +287,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal populate AFC with buffer he
 
     REQUIRE(modal.type_value() == 2);
     REQUIRE(modal.show_meter_value() == 0);
-    REQUIRE(std::string(modal.afc_state_value()) == "Feeding filament forward");
+    REQUIRE(std::string(modal.buffer_state_value()) == "Feeding filament forward");
     REQUIRE(modal.show_distance_value() == 1);
 }
 
@@ -292,26 +298,30 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal populate AFC state translat
 
     SECTION("Advancing") {
         info.units[0].buffer_health->state = "Advancing";
+        info.units[0].buffer_health->motion = helix::BufferMotion::Advancing;
         modal.populate(info, 0);
-        REQUIRE(std::string(modal.afc_state_value()) == "Feeding filament forward");
+        REQUIRE(std::string(modal.buffer_state_value()) == "Feeding filament forward");
     }
 
     SECTION("Trailing") {
         info.units[0].buffer_health->state = "Trailing";
+        info.units[0].buffer_health->motion = helix::BufferMotion::Trailing;
         modal.populate(info, 0);
-        REQUIRE(std::string(modal.afc_state_value()) == "Pulling filament back");
+        REQUIRE(std::string(modal.buffer_state_value()) == "Pulling filament back");
     }
 
     SECTION("unknown state shows raw with prefix") {
         info.units[0].buffer_health->state = "Idle";
+        info.units[0].buffer_health->motion = helix::BufferMotion::Unknown;
         modal.populate(info, 0);
-        REQUIRE(std::string(modal.afc_state_value()) == "State: Idle");
+        REQUIRE(std::string(modal.buffer_state_value()) == "State: Idle");
     }
 
     SECTION("empty state sets empty string") {
         info.units[0].buffer_health->state = "";
+        info.units[0].buffer_health->motion = helix::BufferMotion::Unknown;
         modal.populate(info, 0);
-        REQUIRE(std::string(modal.afc_state_value()) == "");
+        REQUIRE(std::string(modal.buffer_state_value()) == "");
     }
 }
 
@@ -334,7 +344,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal populate AFC no buffer heal
 
     modal.populate(info, 0);
 
-    REQUIRE(std::string(modal.afc_state_value()) == "No buffer data available");
+    REQUIRE(std::string(modal.buffer_state_value()) == "No buffer data available");
     REQUIRE(modal.show_distance_value() == 0);
 }
 
@@ -345,12 +355,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal populate AFC out-of-range u
 
     SECTION("unit index too high") {
         modal.populate(info, 5);
-        REQUIRE(std::string(modal.afc_state_value()) == "No buffer data available");
+        REQUIRE(std::string(modal.buffer_state_value()) == "No buffer data available");
     }
 
     SECTION("no unit reads the first unit's rows") {
         modal.populate(info, -1);
-        REQUIRE(std::string(modal.afc_state_value()) == "Feeding filament forward");
+        REQUIRE(std::string(modal.buffer_state_value()) == "Feeding filament forward");
     }
 }
 
@@ -378,7 +388,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal explains itself on a system
                  "[modals][buffer_status]") {
     // Stock CFS (and AD5X IFS, tool changers, ACE, Snapmaker, QIDI) report no
     // buffer or flow data whatsoever. Every body section in the XML binds hidden
-    // unless buf_type is 1 or 2, so without a message the dialog renders as a
+    // unless buf_type is 1, 2 or 3, so without a message the dialog renders as a
     // title and a button row over an empty box - which is exactly what a K2 Plus
     // owner saw. The modal is reachable from the AMS panel as well as the home
     // tile, so it has to answer for itself rather than lean on the tile's gate.
@@ -483,7 +493,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal draws the meter for an AFC 
         CHECK(modal.show_meter_value() == 1);
         CHECK(std::string(modal.description_value()) == "Balanced");
         // AFC's own rows stay.
-        CHECK(std::string(modal.afc_state_value()) == "Feeding filament forward");
+        CHECK(std::string(modal.buffer_state_value()) == "Feeding filament forward");
         CHECK(modal.show_distance_value() == 1);
     }
 }
@@ -506,7 +516,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
         auto info = make_afc_info();
         modal.populate(info, -1);
         CHECK(modal.type_value() == 2);
-        CHECK(std::string(modal.afc_state_value()) == "Feeding filament forward");
+        CHECK(std::string(modal.buffer_state_value()) == "Feeding filament forward");
         CHECK(modal.show_reading_value() == 0);
     }
 }
@@ -518,8 +528,9 @@ TEST_CASE_METHOD(LVGLTestFixture, "BufferStatusModal all-units view describes th
     info.type = helix::AmsType::AFC;
     info.units[0].buffer_health.reset();
     info.units[1].buffer_health->state = "Trailing";
+    info.units[1].buffer_health->motion = helix::BufferMotion::Trailing;
 
     modal.populate(info, -1);
 
-    REQUIRE(std::string(modal.afc_state_value()) == "Pulling filament back");
+    REQUIRE(std::string(modal.buffer_state_value()) == "Pulling filament back");
 }

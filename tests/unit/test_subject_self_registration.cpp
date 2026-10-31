@@ -18,6 +18,7 @@
 
 #include "../lvgl_test_fixture.h"
 #include "../test_fixtures.h"
+#include "../test_helpers/scoped_subject_registry_isolation.h"
 #include "accel_sensor_manager.h"
 #include "ams_state.h"
 #include "app_globals.h"
@@ -46,6 +47,7 @@ using namespace helix;
 
 TEST_CASE("StaticSubjectRegistry basic operations", "[shutdown][registry]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
 
     SECTION("starts empty") {
         // After fixture setup, registry may have entries from other tests.
@@ -92,6 +94,7 @@ TEST_CASE("StaticSubjectRegistry basic operations", "[shutdown][registry]") {
 
 TEST_CASE("PrinterState self-registers cleanup on init_subjects", "[shutdown][self-register]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
     auto& registry = StaticSubjectRegistry::instance();
     // Deinit the singleton directly to reset its subjects_initialized_ flag,
     // then clear the registry (avoids running stale callbacks from other tests)
@@ -108,6 +111,7 @@ TEST_CASE("PrinterState self-registers cleanup on init_subjects", "[shutdown][se
 
 TEST_CASE("AmsState self-registers cleanup on init_subjects", "[shutdown][self-register]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
     auto& registry = StaticSubjectRegistry::instance();
     AmsState::instance().deinit_subjects();
     registry.clear();
@@ -122,6 +126,7 @@ TEST_CASE("AmsState self-registers cleanup on init_subjects", "[shutdown][self-r
 
 TEST_CASE("ToolState self-registers cleanup on init_subjects", "[shutdown][self-register]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
     auto& registry = StaticSubjectRegistry::instance();
     helix::ToolState::instance().deinit_subjects();
     registry.clear();
@@ -136,6 +141,7 @@ TEST_CASE("ToolState self-registers cleanup on init_subjects", "[shutdown][self-
 
 TEST_CASE("TimelapseState self-registers cleanup on init_subjects", "[shutdown][self-register]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
     auto& registry = StaticSubjectRegistry::instance();
     helix::TimelapseState::instance().deinit_subjects();
     registry.clear();
@@ -151,6 +157,7 @@ TEST_CASE("TimelapseState self-registers cleanup on init_subjects", "[shutdown][
 TEST_CASE("FilamentSensorManager self-registers cleanup on init_subjects",
           "[shutdown][self-register]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
     auto& registry = StaticSubjectRegistry::instance();
     helix::FilamentSensorManager::instance().deinit_subjects();
     registry.clear();
@@ -165,6 +172,7 @@ TEST_CASE("FilamentSensorManager self-registers cleanup on init_subjects",
 
 TEST_CASE("Sensor managers self-register cleanup on init_subjects", "[shutdown][self-register]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
     auto& registry = StaticSubjectRegistry::instance();
     // Deinit each sensor manager directly
     helix::sensors::HumiditySensorManager::instance().deinit_subjects();
@@ -325,6 +333,7 @@ TEST_CASE("A destroyed wizard step withdraws its XML names", "[shutdown][xml_nam
 
 TEST_CASE("AmsState deinit withdraws the ams_-prefixed XML names", "[shutdown][xml_name]") {
     LVGLTestFixture fixture;
+    ScopedSubjectRegistryIsolation isolated;
     AmsState::instance().deinit_subjects();
     AmsState::instance().init_subjects(true);
 

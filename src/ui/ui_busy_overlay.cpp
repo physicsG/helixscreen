@@ -31,10 +31,10 @@ bool g_pending_show = false;         // Show requested but grace period not elap
 std::string g_pending_text;          // Text to show when overlay appears
 
 // Backdrop opacity matches modal system (~70%)
-constexpr uint8_t OVERLAY_BACKDROP_OPACITY = 180;
+constexpr uint8_t kOverlayBackdropOpacity = 180;
 
 // Spacing between spinner and label
-constexpr lv_coord_t SPINNER_LABEL_GAP = 16;
+constexpr lv_coord_t kSpinnerLabelGap = 16;
 
 // Forward declarations
 void create_overlay_internal();
@@ -61,7 +61,7 @@ void create_overlay_internal() {
     lv_obj_t* parent = lv_layer_top();
 
     // Create full-screen backdrop using shared utility
-    g_overlay = helix::ui::create_fullscreen_backdrop(parent, OVERLAY_BACKDROP_OPACITY);
+    g_overlay = helix::ui::create_fullscreen_backdrop(parent, kOverlayBackdropOpacity);
     if (!g_overlay) {
         spdlog::error("[BusyOverlay] Failed to create backdrop");
         g_pending_show = false;
@@ -78,7 +78,7 @@ void create_overlay_internal() {
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(container, SPINNER_LABEL_GAP, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(container, kSpinnerLabelGap, LV_PART_MAIN);
     lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
 
     // Create spinner using XML widget (with fallback to raw LVGL)

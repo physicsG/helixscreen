@@ -31,6 +31,11 @@
     <prop name="min_icon" type="string" default=""/>
     <prop name="max_icon" type="string" default=""/>
     <prop name="disabled" type="string" default=""/>
+    <!-- Tap-to-type: a registered callback turns the value display into a
+         setting_value_field showing value_text, for a range too wide for a slider
+         to land on an exact number. Empty keeps the plain value label. -->
+    <prop name="value_callback" type="string" default=""/>
+    <prop name="value_text" type="string" default=""/>
   </api>
   <styles>
     <style name="label_enabled" text_color="#text"/>
@@ -55,7 +60,7 @@
       <lv_obj height="content"
               flex_flow="row" style_flex_cross_place="center" style_pad_gap="#space_sm" style_pad_all="0"
               scrollable="false">
-        <icon name="row_icon" src="$icon" size="sm" variant="secondary"/>
+        <icon name="row_icon" src="$icon" size="sm" variant="secondary" hidden_if_empty="$icon"/>
         <text_body name="label" text="$label" translation_tag="$label_tag">
           <bind_style name="label_enabled" subject="$disabled" ref_value="0"/>
           <bind_style name="label_disabled" subject="$disabled" ref_value="1"/>
@@ -70,7 +75,9 @@
         </lv_obj>
       </lv_obj>
       <!-- Right side: Current value -->
-      <text_muted name="value_label" text="$value"/>
+      <text_muted name="value_label" text="$value" hidden_if_prop_not_eq="$value_callback|"/>
+      <setting_value_field name="value_field"
+                           value="$value_text" callback="$value_callback" hidden_if_empty="$value_callback"/>
     </lv_obj>
     <!-- Description: hidden on micro/tiny by default -->
     <text_small name="description" width="100%" text="$description" translation_tag="$description_tag" long_mode="wrap">
@@ -82,13 +89,13 @@
             style_pad_right="0" style_pad_gap="#space_sm" scrollable="false">
       <bind_style_if_eq name="slider_micro" subject="ui_breakpoint" ref_value="0"/>
       <bind_style_if_ge name="slider_standard" subject="ui_breakpoint" ref_value="1"/>
-      <icon name="min_icon" src="$min_icon" size="xs" variant="secondary"/>
+      <icon name="min_icon" src="$min_icon" size="xs" variant="secondary" hidden_if_empty="$min_icon"/>
       <lv_slider name="slider" flex_grow="1" min_value="$min" max_value="$max" value="$value">
         <bind_state_if_eq subject="$disabled" state="disabled" ref_value="1"/>
         <event_cb trigger="$trigger" callback="$callback" user_data="$user_data"/>
         <event_cb trigger="$commit_trigger" callback="$commit_callback" user_data="$user_data"/>
       </lv_slider>
-      <icon name="max_icon" src="$max_icon" size="xs" variant="secondary"/>
+      <icon name="max_icon" src="$max_icon" size="xs" variant="secondary" hidden_if_empty="$max_icon"/>
     </lv_obj>
   </view>
 </component>

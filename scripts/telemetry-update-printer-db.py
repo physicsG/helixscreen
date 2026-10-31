@@ -387,6 +387,55 @@ def generate_entry_id(name: str) -> str:
     )
 
 
+MAX_ENTRY_HEURISTICS = 8
+
+
+def build_entry(
+    entry_id: str,
+    name: str,
+    manufacturer: str = "",
+    image: str = "",
+    preset: str = "",
+    heuristics: Optional[list[dict]] = None,
+) -> dict:
+    """Build a printer_database.json entry; blank optional fields are omitted."""
+    entry: dict[str, Any] = {"id": entry_id, "name": name}
+    if manufacturer:
+        entry["manufacturer"] = manufacturer
+    if image:
+        entry["image"] = image
+    if preset:
+        entry["preset"] = preset
+    entry["heuristics"] = list(heuristics) if heuristics else []
+    return entry
+
+
+def cluster_heuristics(cluster: dict, min_confidence: int) -> list[dict]:
+    """A cluster's candidate heuristics at or above min_confidence."""
+    return [
+        h
+        for h in cluster.get("candidate_heuristics", [])
+        if h.get("confidence", 0) >= min_confidence
+    ]
+
+
+def draft_cluster_entry(
+    cluster: dict, db: dict, min_confidence: int = 75, name: str = ""
+) -> dict:
+    """Non-interactive entry for an undetected cluster, with an id unused in db."""
+    bv = cluster.get("build_volume", {})
+    label = name or (
+        f"Unidentified {cluster.get('kinematics', 'unknown')} "
+        f"{bv.get('x', '?')}x{bv.get('y', '?')}x{bv.get('z', '?')}"
+    )
+    base_id = generate_entry_id(label)
+    entry_id, n = base_id, 2
+    while find_entry_by_id(db, entry_id):
+        entry_id, n = f"{base_id}_{n}", n + 1
+    picked = cluster_heuristics(cluster, min_confidence)[:MAX_ENTRY_HEURISTICS]
+    return build_entry(entry_id, label, heuristics=picked)
+
+
 def run_create_new_entries(
     analysis: dict,
     db: dict,
@@ -409,10 +458,8 @@ def run_create_new_entries(
         kin = cluster.get("kinematics", "unknown")
         bv = cluster.get("build_volume", {})
         mcu = cluster.get("mcu", "unknown")
-        heuristics = cluster.get("candidate_heuristics", [])
 
-        # Filter by min_confidence
-        heuristics = [h for h in heuristics if h.get("confidence", 0) >= min_confidence]
+        heuristics = cluster_heuristics(cluster, min_confidence)
 
         print(f"\n{'━' * 60}")
         print(f"  Unidentified Cluster #{cluster_id} ({size} devices)")
@@ -425,7 +472,7 @@ def run_create_new_entries(
 
         if heuristics:
             print(f"\n  Top discriminating objects:")
-            for h in heuristics[:8]:
+            for h in heuristics[:MAX_ENTRY_HEURISTICS]:
                 print(f"    {format_heuristic_short(h)}")
                 print(f"      {h.get('reason', '')}")
 
@@ -461,38 +508,26 @@ def run_create_new_entries(
         selected_heuristics: list[dict] = []
         if heuristics:
             print(f"\n  Include suggested heuristics?")
-            for i, h in enumerate(heuristics[:8]):
+            for i, h in enumerate(heuristics[:MAX_ENTRY_HEURISTICS]):
                 print(f"    [{i + 1}] {format_heuristic_short(h)}")
 
             h_resp = prompt(
-                f"  (a)ll, (1-{min(8, len(heuristics))}) select by number, (n)one\n> "
+                f"  (a)ll, (1-{min(MAX_ENTRY_HEURISTICS, len(heuristics))}) select by number, (n)one\n> "
             )
             if h_resp.lower() == "a":
-                selected_heuristics = list(heuristics[:8])
+                selected_heuristics = list(heuristics[:MAX_ENTRY_HEURISTICS])
             elif h_resp.lower() != "n":
                 for part in h_resp.replace(",", " ").split():
                     try:
                         idx = int(part) - 1
-                        if 0 <= idx < min(8, len(heuristics)):
+                        if 0 <= idx < min(MAX_ENTRY_HEURISTICS, len(heuristics)):
                             selected_heuristics.append(heuristics[idx])
                     except ValueError:
                         pass
 
-        # Build the entry
-        entry: dict[str, Any] = {
-            "id": entry_id,
-            "name": name,
-        }
-        if manufacturer:
-            entry["manufacturer"] = manufacturer
-        if image:
-            entry["image"] = image
-        if preset:
-            entry["preset"] = preset
-        if selected_heuristics:
-            entry["heuristics"] = selected_heuristics
-        else:
-            entry["heuristics"] = []
+        entry = build_entry(
+            entry_id, name, manufacturer, image, preset, selected_heuristics
+        )
 
         db["printers"].append(entry)
         new_entries.append(entry)

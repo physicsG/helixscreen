@@ -21,8 +21,8 @@ flowchart TB
     subgraph COLORS["Colors: theme engine (live-switchable)"]
         TJSON["theme JSON<br/>assets/config/themes/defaults/*.json (18 presets)<br/>16-color ModePalette, dark + light"]
         TM["ThemeManager singleton<br/>src/ui/theme_manager_new.cpp<br/>table of 41 shared lv_style_t (StyleRole)"]
-        WRAP["helix_theme wrapper<br/>src/ui/theme_lvgl_apply.cpp<br/>lv_theme_default first, then layers<br/>shared styles per widget class"]
-        TJSON --> TM --> WRAP
+        kWrap["helix_theme wrapper<br/>src/ui/theme_lvgl_apply.cpp<br/>lv_theme_default first, then layers<br/>shared styles per widget class"]
+        TJSON --> TM --> kWrap
     end
     subgraph SCALE["Scale: tokens + breakpoints"]
         GXML["ui_xml/globals.xml (top level only)<br/>tiered consts: space_md_tiny .. _xxlarge<br/>_light/_dark color pairs, fonts"]
@@ -37,7 +37,7 @@ flowchart TB
         LM --> VD
     end
     USE["widget attribute: style_bg_color=&quot;#card_bg&quot;<br/>style_pad_all=&quot;#space_md&quot;<br/>C++: theme_manager_get_color(&quot;card_bg&quot;)"]
-    WRAP --> USE
+    kWrap --> USE
     RES --> USE
     SEM --> USE
     VD --> USE
@@ -178,6 +178,7 @@ The traps, in rough order of how often they bite:
 - **Overlay geometry is orientation-dependent and applied at push time.** Landscape puts the nav bar on the leading edge; portrait along the bottom ([`ui_xml/navigation_bar.xml`](../../../ui_xml/navigation_bar.xml), bound to `ui_is_portrait`). `ui_set_overlay_geometry()` (`src/ui/overlay_geometry.cpp#ui_set_overlay_geometry`) is the sole writer of an overlay's width (or, in portrait, height and alignment).
 - **`HELIX_THEME` overrides config at load, silently.** The settings.json value is untouched, so a test run with it set is not representative of what the device will load.
 - **Colors written from C++ are the walker's problem; XML token colors are not.** An inline `#token` color or a `<style>` token re-resolves on a switch by itself. A color C++ sets with `lv_obj_set_style_*` survives only if it matches a swap-map entry, so C++ should add a shared style or bind instead of writing palette values.
+- **Never ship a file into the user theme layer.** `config/themes/` is what `load_theme_from_file()` reads ahead of the shipped defaults, and a release copies `config/` into every install, so a theme file there shadows the real default and overwrites the user's own edit of it on update. Shipped themes live only in `assets/config/themes/defaults/`; `.gitignore` keeps `config/themes/*.json` out of the tree. Older installs can still hold the `nord.json` earlier releases put there: `ensure_themes_directory()` deletes it when its SHA-256 matches a shipped copy (`src/ui/theme_loader.cpp#remove_shipped_theme_override`), so a user's own Nord edit survives.
 - **A theme fills 16 fixed slots; it cannot add tokens.** New semantic colors mean new `ModePalette` slots in every theme JSON; reach for an explicit `_light`/`_dark` const pair in top-level XML first, which auto-registers.
 
 ## Going deeper

@@ -1,0 +1,11 @@
+{
+  "description": "An edit for a line the file does not have changes nothing",
+  "edits": [
+    {
+      "line_number": 9,
+      "expect_raw_line": "L9",
+      "action": "comment_out",
+      "args": {}
+    }
+  ]
+}

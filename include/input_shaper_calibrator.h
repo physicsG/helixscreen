@@ -25,7 +25,9 @@
 #include <string>
 
 // Forward declaration
+namespace helix {
 class IMoonrakerAPI;
+}
 struct MoonrakerError;
 
 namespace helix {
@@ -49,7 +51,9 @@ using AccelCheckCallback = std::function<void(float noise_level)>;
 /// Progress during a resonance run. The phase says whether the toolhead is
 /// still sweeping or Klipper has moved on to fitting shapers; it is reported
 /// explicitly because the percentage alone cannot distinguish the two.
-using ProgressCallback = std::function<void(int percent, ShaperCalibrationPhase phase)>;
+/// freq_hz is the sweep's latest "Testing frequency" value while Sweeping, 0 otherwise.
+using ProgressCallback =
+    std::function<void(int percent, ShaperCalibrationPhase phase, float freq_hz)>;
 using ResultCallback = std::function<void(const InputShaperResult& result)>;
 using SuccessCallback = std::function<void()>;
 using ErrorCallback = std::function<void(const std::string& message)>;
@@ -73,7 +77,7 @@ using ErrorCallback = std::function<void(const std::string& message)>;
  *   });
  *
  *   calibrator.run_calibration('X',
- *       [](int pct, ShaperCalibrationPhase phase) { update_progress(pct, phase); },
+ *       [](int pct, ShaperCalibrationPhase phase, float) { update_progress(pct, phase); },
  *       [](const InputShaperResult& r) { show_result(r); },
  *       [](const std::string& err) { show_error(err); });
  * @endcode

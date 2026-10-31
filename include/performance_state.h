@@ -19,7 +19,7 @@ namespace helix {
 namespace perf {
 
 /// Size of the per-metric ring buffer (60 samples × ~1 Hz = ~60 s of history).
-constexpr std::size_t HISTORY_SAMPLES = 60;
+constexpr std::size_t kHistorySamples = 60;
 
 /// Singleton — sibling to PrinterState/AmsState/ToolState.
 class PerformanceState {
@@ -37,10 +37,19 @@ class PerformanceState {
     /// Owns the source. Safe to call multiple times (re-init for reconnect).
     void set_source(std::unique_ptr<IPerformanceSource> source);
 
+    /// A widget that shows the gcodes disk's free space registers for as long as it does,
+    /// so the source spends its disk request only while someone looks at the answer.
+    void add_disk_consumer();
+    void remove_disk_consumer();
+
     /// Read a snapshot of a ring buffer (for sparkline paint). Returns the
     /// buffer in chronological order (oldest first). Returns empty when the
     /// named buffer doesn't exist.
     std::vector<float> read_history(const std::string& name) const;
+
+    /// The subject-name form of an MCU's name: perf_mcu_<safe>_load_pct and the history key
+    /// mcu_<safe>_load_pct.
+    static std::string mcu_safe_name(const std::string& raw);
 
     /// Lifetime token for the perf subjects. Observers of any perf subject
     /// (e.g. HelixSparkline on perf_history_tick) MUST pass this to observe_*()
@@ -65,7 +74,6 @@ class PerformanceState {
     void update_about_summary(const PerfSample& s);
     void update_mcu_subjects(const std::vector<McuStat>& mcus);
     void push_history(const std::string& key, float value);
-    static std::string mcu_safe_name(const std::string& raw);
 
     // ---- Subjects (static set) ----
     SubjectManager subjects_;
@@ -76,6 +84,9 @@ class PerformanceState {
     lv_subject_t s_host_mem_free_mb_{};
     lv_subject_t s_host_mem_pct_used_{};
     lv_subject_t s_host_mem_present_{};
+    lv_subject_t s_host_disk_free_mb_{};
+    lv_subject_t s_host_disk_present_{};
+    lv_subject_t s_host_disk_free_text_{};
     lv_subject_t s_host_throttle_state_{};
     lv_subject_t s_host_throttle_text_{};
     lv_subject_t s_mcu_names_{};
@@ -90,6 +101,7 @@ class PerformanceState {
     char buf_about_summary_[64]{};
     char buf_cpu_text_[48]{};
     char buf_mem_text_[48]{};
+    char buf_disk_text_[48]{};
 
     // ---- Dynamic per-MCU subjects ----
     struct McuSubjects {
@@ -110,9 +122,9 @@ class PerformanceState {
 
     // ---- Ring buffers ----
     struct Ring {
-        std::array<float, HISTORY_SAMPLES> data{};
+        std::array<float, kHistorySamples> data{};
         std::size_t head = 0; ///< index of NEXT write (rolls)
-        std::size_t fill = 0; ///< samples written (clamped to HISTORY_SAMPLES)
+        std::size_t fill = 0; ///< samples written (clamped to kHistorySamples)
     };
     mutable std::mutex history_mu_;
     std::unordered_map<std::string, Ring> history_;
@@ -120,6 +132,7 @@ class PerformanceState {
     // ---- Source ----
     std::unique_ptr<IPerformanceSource> source_;
     AsyncLifetimeGuard lifetime_;
+    int disk_consumers_ = 0;
     bool initialized_ = false;
 };
 

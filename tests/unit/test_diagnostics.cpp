@@ -9,15 +9,21 @@
 // of the three layouts one platform key is serving, does a board with a partial
 // /proc degrade or crash, and does the LAN address leave the machine.
 
+#include "../test_helpers/scoped_env.h"
 #include "platform_info.h"
 #include "system/debug_bundle_collector.h"
 #include "system/diagnostics.h"
-#include "test_helpers/ad5x_layout_fixture.h"
+#include "test_helpers/flashforge_layout_fixture.h"
+#include "test_helpers/scoped_board.h"
 #include "test_helpers/unique_temp_dir.h"
+
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 
 #include "../catch_amalgamated.hpp"
@@ -38,31 +44,6 @@ struct TempDir {
     }
 };
 
-/// Sets an environment variable for the duration of a scope and puts the
-/// previous value (or its absence) back.
-struct EnvGuard {
-    std::string name;
-    bool had_value = false;
-    std::string previous;
-
-    EnvGuard(const char* var, const char* value) : name(var) {
-        if (const char* old = std::getenv(var)) {
-            had_value = true;
-            previous = old;
-        }
-        if (value)
-            ::setenv(var, value, 1);
-        else
-            ::unsetenv(var);
-    }
-    ~EnvGuard() {
-        if (had_value)
-            ::setenv(name.c_str(), previous.c_str(), 1);
-        else
-            ::unsetenv(name.c_str());
-    }
-};
-
 void write_file(const fs::path& p, const std::string& body) {
     std::ofstream(p) << body;
 }
@@ -76,7 +57,7 @@ void write_file(const fs::path& p, const std::string& body) {
 TEST_CASE("diagnostics reports an overridden cache dir, not the platform default",
           "[diagnostics]") {
     TempDir tmp;
-    EnvGuard cache_override("HELIX_CACHE_DIR", tmp.path.c_str());
+    helix::ScopedEnv cache_override("HELIX_CACHE_DIR", tmp.path.c_str());
 
     const auto diag = helix::diagnostics::collect();
 
@@ -86,12 +67,12 @@ TEST_CASE("diagnostics reports an overridden cache dir, not the platform default
 TEST_CASE("diagnostics names the cache rung that won", "[diagnostics]") {
     SECTION("the env override announces itself") {
         TempDir tmp;
-        EnvGuard cache_override("HELIX_CACHE_DIR", tmp.path.c_str());
+        helix::ScopedEnv cache_override("HELIX_CACHE_DIR", tmp.path.c_str());
         REQUIRE(helix::diagnostics::collect().paths.cache_tier == "HELIX_CACHE_DIR");
     }
 
     SECTION("a fall-through rung is not attributed to the override") {
-        EnvGuard cache_override("HELIX_CACHE_DIR", nullptr);
+        helix::ScopedEnv cache_override("HELIX_CACHE_DIR", nullptr);
         REQUIRE(helix::diagnostics::collect().paths.cache_tier != "HELIX_CACHE_DIR");
     }
 }
@@ -99,7 +80,7 @@ TEST_CASE("diagnostics names the cache rung that won", "[diagnostics]") {
 TEST_CASE("collect() reports the cache without creating it", "[diagnostics]") {
     TempDir tmp;
     const fs::path base = tmp.path / "not-yet-mounted";
-    EnvGuard cache_override("HELIX_CACHE_DIR", base.c_str());
+    helix::ScopedEnv cache_override("HELIX_CACHE_DIR", base.c_str());
 
     const auto d = helix::diagnostics::collect();
 
@@ -118,7 +99,7 @@ TEST_CASE("the reported cache path and tier name the same rung", "[diagnostics]"
     // succeed — the split that lets a resolved path and a peeked tier drift.
     const fs::path blocked = tmp.path / "blocked";
     write_file(blocked, "not a directory");
-    EnvGuard cache_override("HELIX_CACHE_DIR", blocked.c_str());
+    helix::ScopedEnv cache_override("HELIX_CACHE_DIR", blocked.c_str());
 
     const auto d = helix::diagnostics::collect();
 
@@ -143,37 +124,42 @@ TEST_CASE("the updater staging dir is a sibling of the install root", "[diagnost
 
 TEST_CASE("the mod flavor separates the layouts one platform key serves", "[diagnostics]") {
     TempDir tmp;
-    const char* flavor = nullptr;
+    auto name_of = [&](const char* layout) {
+        return std::string(helix::flashforge_mod_tree_name(helix::flashforge_mod_tree(
+            helix::test::make_flashforge_layout(tmp.path, layout).string())));
+    };
 
-    SECTION("ZMOD by marker file") {
-        REQUIRE(helix::ad5x_mod_layout_present(
-            helix::test::make_ad5x_layout(tmp.path, "zmod-marker").string(), &flavor));
-        REQUIRE(std::string(flavor) == "ZMOD");
-    }
+    CHECK(name_of("zmod-marker") == "ZMOD");
+    CHECK(name_of("zmod-prog") == "ZMOD");
+    CHECK(name_of("forgex") == "Forge-X");
+    CHECK(name_of("forgex-host") == "Forge-X");
+    CHECK(name_of("plain") == "none");
+}
 
-    SECTION("ZMOD by the FlashForge /usr/prog dir") {
-        REQUIRE(helix::ad5x_mod_layout_present(
-            helix::test::make_ad5x_layout(tmp.path, "zmod-prog").string(), &flavor));
-        REQUIRE(std::string(flavor) == "ZMOD");
-    }
+TEST_CASE("diagnostics names the board", "[diagnostics]") {
+    helix::test::ScopedBoard board(helix::board::Board::Creator5Pro);
+    CHECK(helix::diagnostics::collect().identity.board == "creator5-pro");
+}
 
-    SECTION("Forge-X in-chroot") {
-        REQUIRE(helix::ad5x_mod_layout_present(
-            helix::test::make_ad5x_layout(tmp.path, "forgex").string(), &flavor));
-        REQUIRE(std::string(flavor) == "Forge-X");
-    }
+TEST_CASE("the startup log line names the board", "[diagnostics]") {
+    helix::test::ScopedBoard board(helix::board::Board::Creator5Pro);
+    std::ostringstream captured;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(captured);
+    sink->set_pattern("%v");
+    auto capture = std::make_shared<spdlog::logger>("diag_capture", sink);
+    capture->set_level(spdlog::level::trace);
+    auto original = spdlog::default_logger();
+    spdlog::set_default_logger(capture);
+    helix::diagnostics::log_diagnostics();
+    spdlog::set_default_logger(original);
 
-    SECTION("Forge-X host-side") {
-        REQUIRE(helix::ad5x_mod_layout_present(
-            helix::test::make_ad5x_layout(tmp.path, "forgex-host").string(), &flavor));
-        REQUIRE(std::string(flavor) == "Forge-X");
-    }
+    CHECK(captured.str().find("creator5-pro") != std::string::npos);
+}
 
-    SECTION("a plain host names no mod tree") {
-        REQUIRE_FALSE(helix::ad5x_mod_layout_present(
-            helix::test::make_ad5x_layout(tmp.path, "plain").string(), &flavor));
-        REQUIRE(flavor == nullptr);
-    }
+TEST_CASE("the bundle form carries the board", "[diagnostics]") {
+    helix::diagnostics::Diagnostics d;
+    d.identity.board = "k1";
+    CHECK(helix::DebugBundleCollector::build_diagnostics_info(d)["identity"]["board"] == "k1");
 }
 
 TEST_CASE("collect() reports a mod flavor for every host", "[diagnostics]") {
@@ -263,7 +249,7 @@ TEST_CASE("the bundle form carries the resolved paths and the cache tier", "[dia
     helix::diagnostics::Diagnostics d;
     d.paths.config_dir = "/etc/klipper/config/helixscreen";
     d.paths.cache_dir = "/usr/data/helixscreen-state/cache";
-    d.paths.cache_tier = "MIPS";
+    d.paths.cache_tier = "k1";
     d.identity.platform_key = "mips";
     d.identity.mod_flavor = "Forge-X";
     d.machine.cpu_cores = 4;
@@ -271,7 +257,7 @@ TEST_CASE("the bundle form carries the resolved paths and the cache tier", "[dia
     const auto section = helix::DebugBundleCollector::build_diagnostics_info(d);
 
     REQUIRE(section["paths"]["config_dir"] == "/etc/klipper/config/helixscreen");
-    REQUIRE(section["paths"]["cache_tier"] == "MIPS");
+    REQUIRE(section["paths"]["cache_tier"] == "k1");
     REQUIRE(section["identity"]["platform_key"] == "mips");
     REQUIRE(section["identity"]["mod_flavor"] == "Forge-X");
     REQUIRE(section["machine"]["cpu_cores"] == 4);

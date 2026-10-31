@@ -1,0 +1,17 @@
+{
+  "ams_active": false,
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "estimated_duration_bucket": "1-4hr",
+  "event": "print_start_context",
+  "file_size_bucket": "1-10MB",
+  "has_thumbnail": true,
+  "schema_version": 3,
+  "slicer": "PrusaSlicer",
+  "source": "local",
+  "timestamp": "<timestamp>",
+  "tool_count_used": 1
+}

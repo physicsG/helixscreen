@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The frame-side filament feeder as a state button: outlined with a closed
+     lock while the feeder grips the filament, filled with an open lock while
+     it is released (ams_feeder_open), and a tap toggles it. It sits after
+     Park in the rail and in the picker's footer; its caller sizes it. The
+     label is the action a tap takes ("Open feeder" / "Close feeder") where
+     the cell is wide enough, else "Feeder", else no label at all: the
+     caller's `label_form` subject (FeederLabelForm) says which.
+     Disabled, through moves_machine, while a job holds the machine: the
+     gripper is all that holds the filament. -->
+<component>
+  <api>
+    <!-- 1 where the cell has room for a label under the icon. -->
+    <prop name="two_line" type="string" default="tool_switcher_two_line"/>
+    <!-- FeederLabelForm: 0 the lock alone, 1 "Feeder", 2 the action. -->
+    <prop name="label_form" type="string" default="tool_switcher_feeder_label"/>
+  </api>
+  <styles>
+    <!-- Not inline: an inline bg_opa would outrank the bound open fill. -->
+    <style name="feeder_closed" bg_opa="0"/>
+    <style name="feeder_open" bg_color="#primary" bg_opa="255"/>
+    <style name="feeder_open_text" text_color="#text_on_primary"/>
+    <style name="feeder_disabled" opa="50%"/>
+  </styles>
+  <!-- The widget sizes the label's room by this 2 px border (kFeederBorder). -->
+  <view extends="lv_obj"
+        flex_flow="column" style_flex_main_place="center" style_flex_cross_place="center"
+        style_flex_track_place="center" style_pad_all="0" style_pad_gap="0" style_radius="0" style_border_width="2"
+        style_border_color="#primary" clickable="true" scrollable="false" moves_machine="true">
+    <style name="feeder_closed"/>
+    <style name="styles.press_wash" selector="pressed"/>
+    <style name="feeder_disabled" selector="disabled"/>
+    <bind_style_if_eq name="feeder_open" subject="ams_feeder_open" ref_value="1"/>
+    <icon name="tool_switcher_feeder_icon_closed"
+          src="lock" size="sm" variant="primary" clickable="false" event_bubble="true">
+      <bind_flag_if_eq subject="ams_feeder_open" flag="hidden" ref_value="1"/>
+    </icon>
+    <icon name="tool_switcher_feeder_icon_open"
+          src="lock_open" size="sm" clickable="false" event_bubble="true" style_text_color="#text_on_primary">
+      <bind_flag_if_eq subject="ams_feeder_open" flag="hidden" ref_value="0"/>
+    </icon>
+    <text_small name="tool_switcher_feeder_label"
+                width="content" text="Feeder" style_max_width="100%" style_pad_hor="#space_xxs" long_mode="dots"
+                clickable="false" event_bubble="true">
+      <bind_flag_if cond="${two_line} eq 0 or ${label_form} ne 1" flag="hidden"/>
+      <bind_style_if_eq name="feeder_open_text" subject="ams_feeder_open" ref_value="1"/>
+    </text_small>
+    <text_small name="tool_switcher_feeder_open_label"
+                width="content" text="Open feeder" style_max_width="100%" style_pad_hor="#space_xxs" long_mode="dots"
+                clickable="false" event_bubble="true">
+      <bind_flag_if cond="${two_line} eq 0 or ${label_form} ne 2 or ams_feeder_open eq 1" flag="hidden"/>
+    </text_small>
+    <text_small name="tool_switcher_feeder_close_label"
+                width="content" text="Close feeder" style_max_width="100%" style_pad_hor="#space_xxs" long_mode="dots"
+                clickable="false" event_bubble="true">
+      <bind_flag_if cond="${two_line} eq 0 or ${label_form} ne 2 or ams_feeder_open eq 0" flag="hidden"/>
+      <style name="feeder_open_text"/>
+    </text_small>
+    <event_cb trigger="clicked" callback="tool_switcher_feeder_cb"/>
+  </view>
+</component>

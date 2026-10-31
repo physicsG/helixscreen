@@ -1,0 +1,13 @@
+{
+  "description": "Inject two lines before the first line",
+  "edits": [
+    {
+      "line_number": 1,
+      "expect_raw_line": "L1",
+      "action": "inject_before",
+      "args": {
+        "gcode": "; A\n; B"
+      }
+    }
+  ]
+}

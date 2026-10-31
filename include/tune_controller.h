@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <optional>
 #include <string>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 namespace helix::tune {
 
@@ -26,8 +29,25 @@ void set_speed_percent(IMoonrakerAPI* api, int pct);
 /// Clamp and send M221. No-op when `api` is null. Errors surface via NOTIFY_ERROR.
 void set_flow_percent(IMoonrakerAPI* api, int pct);
 
+/// The Tune overlay's pressure-advance step: one tap is 0.001 of K, two
+/// buttons give 0.005.
+inline constexpr float kPaTuneStep = 0.001f;
+
+/// Clamp and send SET_PRESSURE_ADVANCE for `extruder`. No-op when `api` is
+/// null. The printer's reported pressure_advance is the readback: callers
+/// display that, not the value they asked for. Errors surface via NOTIFY_ERROR.
+void set_pressure_advance(IMoonrakerAPI* api, const std::string& extruder, float k);
+
+/// K from the active-extruder pressure-advance subject (K x 10000), nullopt
+/// while the extruder has not reported one.
+std::optional<float> pressure_advance_from_subject(int value);
+
+/// The readout for that subject: four decimals, or a dash before any report.
+std::string pressure_advance_text(int subject_value);
+
 /// Volumetric flow for a live extruder velocity given in centi-mm/s, the unit
-/// PrinterState publishes it in, through filament of the given diameter.
+/// PrinterState publishes it in, through filament of the given diameter. Never
+/// below 0: a retract reads as no flow.
 double volumetric_flow_mm3_s(int extruder_velocity_centimm_s, float filament_diameter_mm);
 
 struct SpeedFlowText {
@@ -42,5 +62,14 @@ struct SpeedFlowText {
 SpeedFlowText status_speed_flow_text(bool physical_units, int speed_pct, int flow_pct,
                                      int live_velocity_mm_s, int extruder_velocity_centimm_s,
                                      float filament_diameter_mm);
+
+/// The measured toolhead speed, the one format every readout shows: "187 mm/s".
+std::string live_speed_text(int live_velocity_mm_s);
+
+/// A volumetric flow, the one format every readout shows: "12.0 mm³/s".
+std::string live_flow_text(double flow_mm3_s);
+
+/// Both live rates, speed over flow: "187 mm/s\n12.0 mm³/s".
+std::string live_rates_text(int live_velocity_mm_s, double flow_mm3_s);
 
 } // namespace helix::tune

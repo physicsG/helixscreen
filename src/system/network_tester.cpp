@@ -9,6 +9,10 @@
 #include "spdlog/spdlog.h"
 #include "text_io.h"
 
+#ifdef __APPLE__
+#include "system/run_capture.h"
+#endif
+
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -218,21 +222,10 @@ void NetworkTester::report_state(TestState state) {
 std::string NetworkTester::get_default_gateway() {
 #ifdef __APPLE__
     // macOS: Use 'route -n get default' and parse the 'gateway:' line
-    FILE* pipe = popen("route -n get default 2>/dev/null", "r");
-    if (!pipe) {
-        spdlog::error("[NetworkTester] Failed to run 'route' command");
-        return "";
-    }
-
-    std::array<char, 256> buffer;
-    std::string result;
-    while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
-        result += buffer.data();
-    }
-
-    int ret = pclose(pipe);
-    if (ret != 0) {
-        spdlog::warn("[NetworkTester] 'route' command failed with code {}", ret);
+    int exit_code = -1;
+    const std::string result = helix::run_capture("route -n get default 2>/dev/null", exit_code);
+    if (exit_code != 0) {
+        spdlog::warn("[NetworkTester] 'route' command failed with code {}", exit_code);
         return "";
     }
 

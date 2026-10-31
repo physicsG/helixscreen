@@ -10,6 +10,7 @@
 
 #include "ipp_printer.h"
 #include "label_printer_settings.h"
+#include "label_printer_utils.h"
 #include "label_renderer.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "sheet_label_layout.h"
@@ -128,8 +129,7 @@ void IppPrintModal::on_ok() {
 
     // Configure and print via IPP
     static IppPrinter ipp_printer;
-    ipp_printer.set_target(settings.get_printer_address(), settings.get_printer_port(),
-                           "ipp/print");
+    apply_ipp_target(ipp_printer);
     ipp_printer.set_sheet_template(size_idx);
     ipp_printer.set_label_count(count);
     ipp_printer.set_start_position(start);

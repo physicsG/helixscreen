@@ -215,8 +215,8 @@ Switching would mean a purge-length change on hardware nobody here owns: potenti
 longer purges into a finite waste chute, plus the segmented-flush path's measuring-wheel
 blockage detection (`diff_length`) introducing a "nozzle blocked" failure mode the bare flush
 does not have. The upside is only cosmetic (less colour bleed on dark→light swaps). That
-trade needs a K1 + CFS to settle, and is tracked on its own row in
-[Open questions](#open-questions) — now on [A] evidence rather than a guess.
+trade needs a K1 + CFS to settle (report on [#968](https://github.com/prestonbrown/helixscreen/issues/968)),
+and is tracked on its own row in [Open questions](#open-questions) on [A] evidence.
 
 `swap_gcode()` would also need the *outgoing* slot, which it is not currently passed;
 `do_change_tool` has it in `system_info_.current_slot` before overwriting it.
@@ -654,11 +654,13 @@ purge-chute jog calibration exists there. This is why the calibration section ga
 | `material_type` value domain | **Settled [D]**: 6-char code = brand-prefix digit + 5-char catalog id (`000001` Generic PLA, `000003` Generic PETG on a live K1C; K2 `101001` = Creality `01001`). Matches the `cfs` scheme in `assets/filaments.json`. Writeback shipped — see "What this settles for material-type writeback". | Echo confirmation on a write (`BOX_MODIFY_TN_DATA PART=material_type` echoed back in box status) |
 | Does K2's module read `Tnn_map` the same way? | This page is K1-only. The K1 answer is now settled (it does, via `T*`), but K2 ships a different module generation. | Symbol-grep the K2 `.so`, or a live K2 remap test |
 | Should swaps use `BOX_MATERIAL_CHANGE_FLUSH`? | Command and params verified present [A]; the trade is purge length + a new blockage failure mode vs. colour bleed | K1 + CFS hardware |
-| Bed-area shrink (~5 mm Y) for the rear-mount upgrade | Not applied via printer database | Confirmed `position_max` from a CFS-equipped K1 |
+| Bed-area shrink (~5 mm Y) for the rear-mount upgrade | Not applied via printer database. One K1 Max + CFS reports Y `position_max=307.5`, `gcode_position_max=295` (see [Machine geometry](#machine-geometry-from-the-same-log)); the same values from a K1 / K1C without CFS are not captured, so the shrink attributable to the CFS is unknown | `[stepper_y]` from a K1 / K1C with and without CFS, reported on [#968](https://github.com/prestonbrown/helixscreen/issues/968) |
 
-The command surface is now settled from the artifact, but **no behaviour on this page has been
-validated against a running K1 + CFS**, which is why #968 stays open. Nobody on the project
-has that hardware.
+The command surface is settled from the artifact. Calibration choreography and the
+`material_type` encoding are verified against community K1-family + CFS hardware (K1 Max log,
+live K1C tn_data.json); the load, unload and swap sequences are **not yet validated on
+hardware**, which is why [#968](https://github.com/prestonbrown/helixscreen/issues/968) stays
+open. Report results there.
 
 ---
 

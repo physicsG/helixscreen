@@ -8,7 +8,7 @@
  * evaluation mirrors shaper_calibrate.py's _estimate_shaper(): each tap is
  * weighted by a decaying envelope exp(-zeta*omega*(T_last - T_i)) and the
  * magnitude of the weighted tap sum is the transfer at that frequency. The
- * curve is maxed over Klipper's TEST_DAMPING_RATIOS, which is what the
+ * curve is maxed over Klipper's kTestDampingRatios, which is what the
  * firmware writes into a calibration CSV's fitted columns.
  */
 
@@ -24,13 +24,13 @@ namespace calibration {
 namespace {
 
 /// Damping ratios Klipper pessimizes the fitted curve over when writing a
-/// calibration CSV (shaper_calibrate.py TEST_DAMPING_RATIOS). Matching the
+/// calibration CSV (shaper_calibrate.py kTestDampingRatios). Matching the
 /// set is what makes our curves agree with the firmware's column values.
-constexpr std::array<double, 3> TEST_DAMPING_RATIOS = {0.075, 0.1, 0.15};
+constexpr std::array<double, 3> kTestDampingRatios = {0.075, 0.1, 0.15};
 
 /// Vibration tolerance all EI-family shapers derive their taps from
 /// (shaper_defs.py SHAPER_VIBRATION_REDUCTION = 20).
-constexpr double VIBRATION_REDUCTION = 20.0;
+constexpr double kVibrationReduction = 20.0;
 
 /// Input shaper taps: amplitudes A and trigger times T (seconds)
 struct ShaperTaps {
@@ -69,7 +69,7 @@ ShaperTaps mzv_taps(double freq, double zeta) {
 
 /// Port of shaper_defs.py get_ei_shaper()
 ShaperTaps ei_taps(double freq, double zeta) {
-    const double v_tol = 1.0 / VIBRATION_REDUCTION;
+    const double v_tol = 1.0 / kVibrationReduction;
     const double df = std::sqrt(1.0 - zeta * zeta);
     const double k = std::exp(-zeta * M_PI / df);
     const double t_d = 1.0 / (freq * df);
@@ -82,7 +82,7 @@ ShaperTaps ei_taps(double freq, double zeta) {
 
 /// Port of shaper_defs.py get_2hump_ei_shaper()
 ShaperTaps two_hump_ei_taps(double freq, double zeta) {
-    const double v_tol = 1.0 / VIBRATION_REDUCTION;
+    const double v_tol = 1.0 / kVibrationReduction;
     const double df = std::sqrt(1.0 - zeta * zeta);
     const double k = std::exp(-zeta * M_PI / df);
     const double t_d = 1.0 / (freq * df);
@@ -98,7 +98,7 @@ ShaperTaps two_hump_ei_taps(double freq, double zeta) {
 
 /// Port of shaper_defs.py get_3hump_ei_shaper()
 ShaperTaps three_hump_ei_taps(double freq, double zeta) {
-    const double v_tol = 1.0 / VIBRATION_REDUCTION;
+    const double v_tol = 1.0 / kVibrationReduction;
     const double df = std::sqrt(1.0 - zeta * zeta);
     const double k = std::exp(-zeta * M_PI / df);
     const double t_d = 1.0 / (freq * df);
@@ -163,7 +163,7 @@ std::vector<double> shaper_transfer_curve(const std::string& shaper_type, double
         // Pessimize over the test damping ratios, exactly as the firmware's
         // CSV writer does: the reported attenuation is the worst case.
         double worst = 0.0;
-        for (double dr : TEST_DAMPING_RATIOS) {
+        for (double dr : kTestDampingRatios) {
             const double omega = 2.0 * M_PI * f;
             const double damping = dr * omega;
             const double omega_d = omega * std::sqrt(1.0 - dr * dr);
@@ -196,7 +196,7 @@ double residual_vibration_percent(const std::vector<double>& psd,
     for (double p : psd) {
         psd_max = std::max(psd_max, p);
     }
-    const double threshold = psd_max / VIBRATION_REDUCTION;
+    const double threshold = psd_max / kVibrationReduction;
 
     double total = 0.0;
     double residual = 0.0;

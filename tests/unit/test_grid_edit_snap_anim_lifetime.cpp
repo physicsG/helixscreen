@@ -51,7 +51,7 @@ namespace {
 /// commit so a test can take its animation-count baseline with everything else
 /// (notably select_widget()'s infinite selection pulse) already running.
 lv_obj_t* arm_resize(GridEditMode& em, GridEditScene& scene) {
-    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::PAGE_INDEX));
+    em.enter(scene.container, scene.config, static_cast<int>(GridEditScene::kPageIndex));
     em.select_widget(scene.widget);
     REQUIRE(em.selected_widget() == scene.widget);
 
@@ -69,8 +69,8 @@ void commit_snap_resize(GridEditMode& em) {
     // branch; the specific geometry is not what these tests are about. Whole
     // cells rather than one track because "temperature" does not declare
     // supports_half_col, so an odd track count is not a size it can hold.
-    GridEditMode::ResizeResult result{0, 0, GridEditScene::COLSPAN + GridLayout::TRACKS_PER_CELL,
-                                      GridEditScene::ROWSPAN};
+    GridEditMode::ResizeResult result{0, 0, GridEditScene::kColspan + GridLayout::TRACKS_PER_CELL,
+                                      GridEditScene::kRowspan};
     GridEditModeTestAccess::commit_resize(em, result);
     REQUIRE(GridEditModeTestAccess::resize_preview(em) == nullptr);
 }
@@ -256,7 +256,7 @@ TEST_CASE_METHOD(XMLTestFixture,
         content.x1 +
         static_cast<int>(grid_track_origin(m.cell_w, m.gutter, 0) +
                          grid_track_extent(m.cell_w, m.gutter,
-                                           GridEditScene::COLSPAN + GridLayout::TRACKS_PER_CELL));
+                                           GridEditScene::kColspan + GridLayout::TRACKS_PER_CELL));
     lv_obj_t* layer = lv_display_get_layer_top(lv_obj_get_display(scene.container));
     lv_obj_update_layout(layer);
     lv_area_t right;

@@ -69,3 +69,22 @@ TEST_CASE_METHOD(LVGLTestFixture, "icon grid: deleting the grid frees the cells 
     lv_obj_delete(grid);
     REQUIRE(alive.expired());
 }
+
+TEST_CASE_METHOD(LVGLTestFixture, "icon grid: cells are freed after a modal disarms the tree",
+                 "[icon_picker][lifetime]") {
+    // A closing modal nulls user_data on every object in its dialog so nothing
+    // dispatches into a freed owner during the exit animation. The cells must
+    // still free what they own when the tree is deleted afterwards.
+    lv_obj_t* grid = lv_obj_create(test_screen());
+    auto token = std::make_shared<int>(0);
+    std::weak_ptr<int> alive = token;
+    populate_icon_grid(grid, kIcons, 3, "", [token](const char*) {});
+    token.reset();
+    REQUIRE_FALSE(alive.expired());
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(grid); ++i) {
+        lv_obj_set_user_data(lv_obj_get_child(grid, i), nullptr);
+    }
+    lv_obj_delete(grid);
+    CHECK(alive.expired());
+}

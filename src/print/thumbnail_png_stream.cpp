@@ -3,6 +3,8 @@
 
 #include "thumbnail_png_stream.h"
 
+#include "crc32.h"
+
 #include <cstdlib>
 #include <cstring>
 
@@ -10,7 +12,7 @@ namespace helix {
 
 namespace {
 
-constexpr uint8_t SIGNATURE[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+constexpr uint8_t kSignature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
 
 uint32_t be32_at(const uint8_t* p) {
     return (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) | p[3];
@@ -33,27 +35,6 @@ int channels_for(int color_type) {
     }
 }
 
-uint32_t crc32_of(const uint8_t* data, size_t size) {
-    static const auto table = [] {
-        struct Table {
-            uint32_t v[256];
-        } t{};
-        for (uint32_t n = 0; n < 256; ++n) {
-            uint32_t c = n;
-            for (int k = 0; k < 8; ++k) {
-                c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            }
-            t.v[n] = c;
-        }
-        return t;
-    }();
-    uint32_t c = 0xFFFFFFFFu;
-    for (size_t i = 0; i < size; ++i) {
-        c = table.v[(c ^ data[i]) & 0xFF] ^ (c >> 8);
-    }
-    return c ^ 0xFFFFFFFFu;
-}
-
 uint8_t paeth(uint8_t a, uint8_t b, uint8_t c) {
     const int p = a + b - c;
     const int pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
@@ -67,7 +48,7 @@ uint8_t paeth(uint8_t a, uint8_t b, uint8_t c) {
 
 bool read_png_header(const uint8_t* data, size_t size, PngHeader& out) {
     // Signature, then the IHDR chunk: length, "IHDR", 13 bytes of fields.
-    if (!data || size < 8 + 8 + 13 || std::memcmp(data, SIGNATURE, 8) != 0 ||
+    if (!data || size < 8 + 8 + 13 || std::memcmp(data, kSignature, 8) != 0 ||
         std::memcmp(data + 12, "IHDR", 4) != 0) {
         return false;
     }
@@ -81,8 +62,8 @@ bool read_png_header(const uint8_t* data, size_t size, PngHeader& out) {
 }
 
 bool png_thumbnail_supported(const PngHeader& h) {
-    return h.width > 0 && h.height > 0 && h.width <= THUMBNAIL_MAX_SIDE &&
-           h.height <= THUMBNAIL_MAX_SIDE && h.bit_depth == 8 && h.interlace == 0 &&
+    return h.width > 0 && h.height > 0 && h.width <= kThumbnailMaxSide &&
+           h.height <= kThumbnailMaxSide && h.bit_depth == 8 && h.interlace == 0 &&
            channels_for(h.color_type) > 0;
 }
 
@@ -100,7 +81,7 @@ bool for_each_png_idat(const uint8_t* data, size_t size, PngPalette& palette, Pn
         }
         const uint8_t* type = data + at + 4;
         const uint8_t* body = data + at + 8;
-        if (crc32_of(type, len + 4) != be32_at(body + len)) {
+        if (crc32_update(0, type, len + 4) != be32_at(body + len)) {
             return false;
         }
         if (std::memcmp(type, "PLTE", 4) == 0) {

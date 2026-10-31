@@ -48,7 +48,7 @@ struct ActiveMaterial {
  * Temperature resolution per source:
  * - SlotInfo.nozzle_temp_min > 0: use slot temps directly
  * - filament::find_material(slot.material): use DB temps (with user overrides)
- * - Fallback: DEFAULT_LOAD_PREHEAT_TEMP (220°C)
+ * - Fallback: kDefaultLoadPreheatTemp (220°C)
  */
 std::optional<ActiveMaterial> get_active_material();
 

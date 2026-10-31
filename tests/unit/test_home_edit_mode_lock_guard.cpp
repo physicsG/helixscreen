@@ -12,8 +12,8 @@
  * HomePanel::on_home_grid_long_press — so edit mode activated underneath the
  * PIN pad and the user found it once the PIN cleared.
  *
- * DisplayManager::disable_input_briefly() is the root-cause fix
- * (tests/unit/application/test_display_wake_input_gate.cpp). This is the second
+ * DisplayManager::cancel_pointer_presses() is the root-cause fix
+ * (tests/unit/application/test_display_wake_touch_swallow.cpp). This is the second
  * layer: while the screen is locked, edit mode is never a legitimate outcome of
  * a hold, whatever produced the event.
  *

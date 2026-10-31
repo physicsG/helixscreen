@@ -189,7 +189,7 @@ class RangeResponder {
         // Cap the send buffer so a client that stops reading stalls this loop
         // after a bounded amount, instead of letting kernel autotuning buffer
         // the whole body.
-        int sndbuf = SEND_BUFFER;
+        int sndbuf = kSendBuffer;
         ::setsockopt(conn, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
         std::string resp = "HTTP/1.1 " + status + "\r\nContent-Type: text/plain\r\n";
@@ -205,7 +205,7 @@ class RangeResponder {
         // content_written() measures the bytes the client let cross.
         size_t off = 0;
         while (off < content.size()) {
-            size_t n = std::min(BODY_CHUNK, content.size() - off);
+            size_t n = std::min(kBodyChunk, content.size() - off);
             ssize_t w = ::send(conn, content.data() + off, n, MSG_NOSIGNAL);
             if (w <= 0) {
                 return;
@@ -224,8 +224,8 @@ class RangeResponder {
     std::atomic<bool> stop_{false};
     std::thread thread_;
 
-    static constexpr size_t BODY_CHUNK = 16 * 1024;
-    static constexpr int SEND_BUFFER = 32 * 1024;
+    static constexpr size_t kBodyChunk = 16 * 1024;
+    static constexpr int kSendBuffer = 32 * 1024;
 };
 
 struct TransferOutcome {
@@ -266,81 +266,127 @@ struct TransferHarness {
     }
 };
 
-constexpr size_t PAYLOAD_SIZE = 64 * 1024;
-constexpr size_t PARTIAL_BYTES = 4096;
-constexpr size_t TAIL_BYTES = 1024;
+constexpr size_t kPayloadSize = 64 * 1024;
+constexpr size_t kPartialBytes = 4096;
+constexpr size_t kTailBytes = 1024;
 
 // The abort test's payload and wire bound. A client that fails to abort pulls
 // the whole multi-MB body; one that hangs up at max_bytes lets the server push
 // only the abort point plus whatever kernel socket buffers absorbed.
-constexpr size_t BIG_PAYLOAD_SIZE = 4 * 1024 * 1024;
-constexpr size_t WIRE_SLACK = 512 * 1024;
+constexpr size_t kBigPayloadSize = 4 * 1024 * 1024;
+constexpr size_t kWireSlack = 512 * 1024;
 
 } // namespace
 
 TEST_CASE("partial download clamps a Range-ignoring 200 body", "[api][transfer][range]") {
-    const std::string payload = make_payload(PAYLOAD_SIZE);
+    const std::string payload = make_payload(kPayloadSize);
     RangeResponder server(/*honour_range=*/false, payload);
     TransferHarness harness(server.base_url());
 
     const auto out = await([&](auto ok, auto err) {
-        harness.api->download_file_partial("gcodes", "some_file.gcode", PARTIAL_BYTES, ok, err);
+        harness.api->download_file_partial("gcodes", "some_file.gcode", kPartialBytes, ok, err);
     });
 
     REQUIRE(out.ok);
-    REQUIRE(out.body.size() == PARTIAL_BYTES);
-    REQUIRE(out.body == payload.substr(0, PARTIAL_BYTES));
+    REQUIRE(out.body.size() == kPartialBytes);
+    REQUIRE(out.body == payload.substr(0, kPartialBytes));
 }
 
 TEST_CASE("partial download aborts a Range-ignoring 200 at max_bytes", "[api][transfer][range]") {
     // Guard the bound against vacuousness: the payload must dwarf what the
     // server is allowed to push past the abort point.
-    REQUIRE(BIG_PAYLOAD_SIZE > PARTIAL_BYTES + WIRE_SLACK);
-    const std::string payload = make_payload(BIG_PAYLOAD_SIZE);
+    REQUIRE(kBigPayloadSize > kPartialBytes + kWireSlack);
+    const std::string payload = make_payload(kBigPayloadSize);
     RangeResponder server(/*honour_range=*/false, payload);
     TransferHarness harness(server.base_url());
 
     const auto out = await([&](auto ok, auto err) {
-        harness.api->download_file_partial("gcodes", "some_file.gcode", PARTIAL_BYTES, ok, err);
+        harness.api->download_file_partial("gcodes", "some_file.gcode", kPartialBytes, ok, err);
     });
 
     REQUIRE(out.ok);
-    REQUIRE(out.body.size() == PARTIAL_BYTES);
-    REQUIRE(out.body == payload.substr(0, PARTIAL_BYTES));
+    REQUIRE(out.body.size() == kPartialBytes);
+    REQUIRE(out.body == payload.substr(0, kPartialBytes));
 
     // The client must hang up once max_bytes arrived: the server got to push
     // the abort point plus kernel-buffer slack, not the whole file.
     REQUIRE(server.wait_writes_done(2000));
-    REQUIRE(server.content_written() < PARTIAL_BYTES + WIRE_SLACK);
+    REQUIRE(server.content_written() < kPartialBytes + kWireSlack);
 }
 
 TEST_CASE("tail download clamps a Range-ignoring 200 body to the last bytes",
           "[api][transfer][range]") {
-    const std::string payload = make_payload(PAYLOAD_SIZE);
+    const std::string payload = make_payload(kPayloadSize);
     RangeResponder server(/*honour_range=*/false, payload);
     TransferHarness harness(server.base_url());
 
     const auto out = await([&](auto ok, auto err) {
-        harness.api->download_file_tail("gcodes", "some_file.gcode", TAIL_BYTES, ok, err);
+        harness.api->download_file_tail("gcodes", "some_file.gcode", kTailBytes, ok, err);
     });
 
     REQUIRE(out.ok);
-    REQUIRE(out.body.size() == TAIL_BYTES);
-    REQUIRE(out.body == payload.substr(payload.size() - TAIL_BYTES));
+    REQUIRE(out.body.size() == kTailBytes);
+    REQUIRE(out.body == payload.substr(payload.size() - kTailBytes));
 }
 
 TEST_CASE("range-honouring 206 responses pass through unclamped", "[api][transfer][range]") {
-    const std::string payload = make_payload(PAYLOAD_SIZE);
+    const std::string payload = make_payload(kPayloadSize);
     RangeResponder server(/*honour_range=*/true, payload);
     TransferHarness harness(server.base_url());
 
     const auto out = await([&](auto ok, auto err) {
-        harness.api->download_file_partial("gcodes", "some_file.gcode", PARTIAL_BYTES, ok, err);
+        harness.api->download_file_partial("gcodes", "some_file.gcode", kPartialBytes, ok, err);
     });
 
     REQUIRE(out.ok);
-    REQUIRE(out.body.size() == PARTIAL_BYTES);
-    REQUIRE(out.body == payload.substr(0, PARTIAL_BYTES));
+    REQUIRE(out.body.size() == kPartialBytes);
+    REQUIRE(out.body == payload.substr(0, kPartialBytes));
+}
+
+TEST_CASE("a ranged download returns the bytes at the offset whether or not the server slices",
+          "[api][transfer][range]") {
+    const std::string payload = make_payload(kPayloadSize);
+    const bool honour = GENERATE(true, false);
+    CAPTURE(honour);
+    RangeResponder server(honour, payload);
+    TransferHarness harness(server.base_url());
+
+    // Offsets off the payload's 256-byte period, one inside the first body
+    // chunk and one several chunks in, so a skipped or misplaced skip shows.
+    const uint64_t offset = GENERATE(uint64_t{12345}, uint64_t{40001});
+    CAPTURE(offset);
+    const auto out = await([&](auto ok, auto err) {
+        harness.api->download_file_range("gcodes", "a.gcode.3mf", offset, 3000, ok, err);
+    });
+
+    REQUIRE(out.ok);
+    REQUIRE(out.body.size() == 3000);
+    CHECK(out.body == payload.substr(static_cast<size_t>(offset), 3000));
+}
+
+TEST_CASE("a ranged download that runs past the end returns what the file has",
+          "[api][transfer][range]") {
+    const std::string payload = make_payload(kPayloadSize);
+    const bool honour = GENERATE(true, false);
+    CAPTURE(honour);
+    RangeResponder server(honour, payload);
+    TransferHarness harness(server.base_url());
+
+    const auto out = await([&](auto ok, auto err) {
+        harness.api->download_file_range("gcodes", "a.gcode.3mf", kPayloadSize - 100, 1000, ok,
+                                         err);
+    });
+    REQUIRE(out.ok);
+    CHECK(out.body == payload.substr(kPayloadSize - 100));
+}
+
+TEST_CASE("a ranged download of nothing is refused before it is sent", "[api][transfer][range]") {
+    RangeResponder server(true, make_payload(1024));
+    TransferHarness harness(server.base_url());
+    const auto out = await([&](auto ok, auto err) {
+        harness.api->download_file_range("gcodes", "a.gcode.3mf", 10, 0, ok, err);
+    });
+    CHECK_FALSE(out.ok);
 }
 
 TEST_CASE("transfer callbacks run on the executor, not the caller", "[api][transfer][range]") {
@@ -424,7 +470,7 @@ TEST_CASE("thumbnail download stores PNG bytes whatever the server's format",
             std::ofstream old(cache_path, std::ios::binary);
             old << "previous thumbnail";
         }
-        RangeResponder server(false, make_payload(PAYLOAD_SIZE));
+        RangeResponder server(false, make_payload(kPayloadSize));
         TransferHarness harness(server.base_url());
         const auto out = await([&](auto ok, auto err) {
             harness.api->download_thumbnail(".thumbs/a.png", cache_path, ok, err);

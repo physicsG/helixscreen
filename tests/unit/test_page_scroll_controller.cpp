@@ -84,21 +84,21 @@ TEST_CASE_METHOD(LVGLUITestFixture, "PageScrollController clamps the last page t
 
     // Overflow by far less than one page step, so a full-page delta would overshoot
     // the content end and leave dead space below the last row.
-    constexpr int32_t OVERFLOW_PX = 30;
-    lv_obj_set_height(row, lv_obj_get_content_height(c) + OVERFLOW_PX);
+    constexpr int32_t kOverflowPx = 30;
+    lv_obj_set_height(row, lv_obj_get_content_height(c) + kOverflowPx);
     lv_obj_update_layout(c);
-    REQUIRE(lv_obj_get_scroll_bottom(c) == OVERFLOW_PX);
-    REQUIRE(page_scroll_step(lv_obj_get_content_height(c)) > OVERFLOW_PX);
+    REQUIRE(lv_obj_get_scroll_bottom(c) == kOverflowPx);
+    REQUIRE(page_scroll_step(lv_obj_get_content_height(c)) > kOverflowPx);
 
     ctl.page_down();
     lv_obj_update_layout(c);
-    CHECK(lv_obj_get_scroll_y(c) == OVERFLOW_PX); // stopped exactly at the content end
+    CHECK(lv_obj_get_scroll_y(c) == kOverflowPx); // stopped exactly at the content end
     CHECK(lv_obj_get_scroll_bottom(c) == 0);      // no empty space scrolled past the content
 
     // A press against the already-reached end must not move it further.
     ctl.page_down();
     lv_obj_update_layout(c);
-    CHECK(lv_obj_get_scroll_y(c) == OVERFLOW_PX);
+    CHECK(lv_obj_get_scroll_y(c) == kOverflowPx);
 
     // Symmetric on the way back up: the partial last page lands on the content start.
     ctl.page_up();

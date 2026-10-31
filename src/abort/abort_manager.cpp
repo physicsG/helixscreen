@@ -10,6 +10,7 @@
 
 #include "data_root_resolver.h"
 #include "i_moonraker_api.h"
+#include "moonraker_request_tracker.h"
 #include "observer_factory.h"
 #include "printer_recovery_service.h"
 #include "printer_state.h"
@@ -103,7 +104,7 @@ void AbortManager::deinit_subjects() {
 // Public API
 // ============================================================================
 
-void AbortManager::start_abort() {
+void AbortManager::start_abort(Entry entry) {
     // Ignore if already aborting
     if (is_aborting()) {
         spdlog::debug("[AbortManager] Already aborting, ignoring start_abort()");
@@ -117,6 +118,19 @@ void AbortManager::start_abort() {
     {
         std::lock_guard<std::mutex> lock(message_mutex_);
         last_result_message_.clear();
+    }
+
+    if (entry == Entry::Cancel) {
+        spdlog::info("[AbortManager] Caller ended the queue's wait; cancelling directly");
+        set_state(State::SENT_CANCEL);
+        set_progress_message("Stopping print...");
+        send_cancel_print();
+        return;
+    }
+    if (entry == Entry::EmergencyStop) {
+        spdlog::info("[AbortManager] Caller confirmed an emergency stop");
+        escalate_to_estop();
+        return;
     }
 
     // Ask the capability instead of probing: sending HEATER_INTERRUPT to firmware without it
@@ -236,7 +250,7 @@ void AbortManager::try_heater_interrupt() {
     commands_sent_++;
 
     // Start timeout timer (one-shot; guard auto-deletes on reassignment or destruction)
-    auto* t = lv_timer_create(heater_interrupt_timer_cb, HEATER_INTERRUPT_TIMEOUT_MS, this);
+    auto* t = lv_timer_create(heater_interrupt_timer_cb, kHeaterInterruptTimeoutMs, this);
     lv_timer_set_repeat_count(t, 1);
     heater_interrupt_timer_.reset(t);
 
@@ -266,7 +280,7 @@ void AbortManager::start_probe() {
     commands_sent_++;
 
     // Start timeout timer (one-shot)
-    auto* t = lv_timer_create(probe_timer_cb, PROBE_TIMEOUT_MS, this);
+    auto* t = lv_timer_create(probe_timer_cb, kProbeTimeoutMs, this);
     lv_timer_set_repeat_count(t, 1);
     probe_timer_.reset(t);
 
@@ -316,9 +330,9 @@ void AbortManager::send_cancel_print() {
         spdlog::info("[AbortManager] Cancel escalation enabled, timeout: {}ms", timeout_ms);
     } else {
         // Escalation disabled — still create a nudge timer so user gets feedback
-        timeout_ms = CANCEL_NUDGE_MS;
+        timeout_ms = kCancelNudgeMs;
         spdlog::info("[AbortManager] Cancel escalation disabled, nudge timer at {}ms",
-                     CANCEL_NUDGE_MS);
+                     kCancelNudgeMs);
     }
     auto* ct = lv_timer_create(cancel_timer_cb, timeout_ms, this);
     lv_timer_set_repeat_count(ct, 1);
@@ -378,6 +392,10 @@ void AbortManager::send_firmware_restart() {
     set_state(State::SENT_RESTART);
     set_progress_message("Restarting...");
 
+    auto* rt = lv_timer_create(restart_timer_cb, kRestartTimeoutMs, this);
+    lv_timer_set_repeat_count(rt, 1);
+    restart_timer_.reset(rt);
+
     // If no API, just stay in SENT_RESTART state
     // Tests will call on_restart_sent() via AbortManagerTestAccess to progress
     if (!api_) {
@@ -395,13 +413,15 @@ void AbortManager::send_firmware_restart() {
     // through to printer.firmware_restart and behave exactly as before.
     PrinterRecoveryService recovery(api_);
     recovery.recover(
-        lifetime_.bg_cb("AbortManager::restart_ok", [this]() { on_restart_sent(); }),
+        lifetime_.bg_cb("AbortManager::restart_ok",
+                        [this](RecoveryOutcome outcome) { on_restart_sent(outcome); }),
         // Even on error, proceed to wait for reconnect — Klipper may
         // still come back via natural recovery, and if it doesn't the
         // reconnect timer surfaces the recovery dialog so the user has
         // a path forward.
-        lifetime_.bg_cb("AbortManager::restart_err",
-                        [this](const MoonrakerError& /* err */) { on_restart_sent(); }));
+        lifetime_.bg_cb("AbortManager::restart_err", [this](const MoonrakerError& /* err */) {
+            on_restart_sent(RecoveryOutcome::RESTART_ISSUED);
+        }));
 }
 
 void AbortManager::wait_for_reconnect() {
@@ -415,7 +435,7 @@ void AbortManager::wait_for_reconnect() {
     set_progress_message("Restarting...");
 
     // Start reconnect timeout timer (one-shot)
-    auto* rt = lv_timer_create(reconnect_timer_cb, RECONNECT_TIMEOUT_MS, this);
+    auto* rt = lv_timer_create(reconnect_timer_cb, kReconnectTimeoutMs, this);
     lv_timer_set_repeat_count(rt, 1);
     reconnect_timer_.reset(rt);
 
@@ -580,7 +600,7 @@ void AbortManager::on_cancel_success() {
     // Note: cancel_state_observer_ is cleaned up by complete_abort() → cancel_all_timers()
 
     spdlog::info("[AbortManager] printer.print.cancel succeeded");
-    complete_abort("Print cancelled");
+    complete_abort("Print canceled");
 }
 
 void AbortManager::on_cancel_timeout() {
@@ -597,7 +617,7 @@ void AbortManager::on_cancel_timeout() {
         escalate_to_estop();
     } else {
         spdlog::info("[AbortManager] Cancel taking a while, escalation disabled — showing nudge");
-        set_progress_message("Cancelling is taking a while.\nUse E-Stop to stop immediately.");
+        set_progress_message("Canceling is taking a while.\nUse E-Stop to stop immediately.");
     }
 }
 
@@ -610,9 +630,19 @@ void AbortManager::on_estop_sent() {
     send_firmware_restart();
 }
 
-void AbortManager::on_restart_sent() {
+void AbortManager::on_restart_sent(RecoveryOutcome outcome) {
     if (abort_state_ != State::SENT_RESTART) {
         return; // Stale callback
+    }
+    restart_timer_.reset();
+
+    // A verified READY may already have reached the klippy subject, so
+    // wait_for_reconnect()'s SHUTDOWN-then-READY edge would never come.
+    if (outcome == RecoveryOutcome::KLIPPY_READY) {
+        shutdown_recovery_in_progress_.store(false);
+        spdlog::info("[AbortManager] Recovery verified Klippy ready, abort complete");
+        complete_abort("Print aborted. Home before resuming.");
+        return;
     }
 
     spdlog::info("[AbortManager] FIRMWARE_RESTART sent, waiting for reconnect");
@@ -671,7 +701,7 @@ void AbortManager::on_print_state_during_cancel(PrintJobState state) {
                      print_job_state_to_string(state));
 
         // complete_abort() → cancel_all_timers() handles timer + observer cleanup
-        complete_abort("Print cancelled");
+        complete_abort("Print canceled");
         break;
 
     // RAW_PRINT_STATE_OK: still-running arms of the cancel wait; see above.
@@ -716,6 +746,7 @@ void AbortManager::cancel_all_timers() {
     probe_timer_.reset();
     cancel_timer_.reset();
     reconnect_timer_.reset();
+    restart_timer_.reset();
 
     // Also clean up cancel state observer (may be active during SENT_CANCEL)
     cancel_state_observer_.reset();
@@ -809,6 +840,21 @@ void AbortManager::cancel_timer_cb(lv_timer_t* timer) {
     if (self) {
         self->cancel_timer_.release(); // One-shot auto-deleted by LVGL
         self->on_cancel_timeout();
+    }
+}
+
+static_assert(AbortManager::kRestartTimeoutMs >
+                  RecoveryTiming{}.chain_deadline_ms + RecoveryTiming{}.script_timeout_ms +
+                      RecoveryTiming{}.poll_interval_ms +
+                      MoonrakerRequestTracker::kDefaultRequestTimeoutMs,
+              "the restart backstop must outlast the recovery chain's worst case");
+
+void AbortManager::restart_timer_cb(lv_timer_t* timer) {
+    auto* self = static_cast<AbortManager*>(lv_timer_get_user_data(timer));
+    if (self) {
+        self->restart_timer_.release(); // One-shot auto-deleted by LVGL
+        spdlog::warn("[AbortManager] Recovery never reported back after {}ms", kRestartTimeoutMs);
+        self->complete_abort("Abort complete (restart timeout). Check printer status.");
     }
 }
 

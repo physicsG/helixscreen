@@ -43,7 +43,7 @@ class RenderModePinFixture : public LVGLUITestFixture {
         unsetenv("HELIX_GCODE_MODE");
 
         home_widget_ = lv_obj_create(test_screen());
-        lv_obj_t* panels[UI_PANEL_COUNT] = {nullptr};
+        lv_obj_t* panels[kUiPanelCount] = {nullptr};
         panels[static_cast<int>(PanelId::Home)] = home_widget_;
         NavigationManager::instance().set_panels(panels);
     }

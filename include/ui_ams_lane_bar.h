@@ -48,7 +48,7 @@ namespace helix::ui {
  * 8's measured-layout exception), the per-lane rendering stays in the widget.
  */
 void ams_lane_bar_create_range(lv_obj_t* parent, int first_slot_index, int slot_count,
-                               int32_t bar_width, int32_t bar_height);
+                               int32_t bar_width, int32_t bar_height, uint32_t skip_mask = 0);
 
 /**
  * @brief Re-apply create-time sizing to an existing bar.

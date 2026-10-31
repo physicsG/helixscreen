@@ -1,0 +1,164 @@
+{
+  "root": "printer.cfg",
+  "files": [
+    "printer.cfg",
+    "hardware.cfg",
+    "hw/steppers.cfg",
+    "hw/probe.cfg",
+    "conf.d/10-macros.cfg",
+    "conf.d/20-overrides.cfg"
+  ],
+  "sections": {
+    "extruder": "printer.cfg",
+    "gcode_macro PARK": "conf.d/10-macros.cfg",
+    "gcode_macro START_PRINT": "printer.cfg",
+    "mcu": "hardware.cfg",
+    "printer": "printer.cfg",
+    "probe": "conf.d/20-overrides.cfg",
+    "stepper_x": "conf.d/20-overrides.cfg"
+  },
+  "options": {
+    "extruder": {
+      "rotation_distance": {
+        "value": "22.6789511",
+        "file": "printer.cfg",
+        "line": 17,
+        "autosave": false
+      },
+      "nozzle_diameter": {
+        "value": "0.400",
+        "file": "printer.cfg",
+        "line": 18,
+        "autosave": false
+      },
+      "control": {
+        "value": "pid",
+        "file": "printer.cfg",
+        "line": 37,
+        "autosave": true
+      },
+      "pid_kp": {
+        "value": "26.213",
+        "file": "printer.cfg",
+        "line": 38,
+        "autosave": true
+      }
+    },
+    "gcode_macro PARK": {
+      "description": {
+        "value": "Park the head",
+        "file": "conf.d/10-macros.cfg",
+        "line": 2,
+        "autosave": false
+      },
+      "gcode": {
+        "value": "\nG90\n\nG1 X0 Y0",
+        "file": "conf.d/10-macros.cfg",
+        "line": 3,
+        "autosave": false
+      }
+    },
+    "gcode_macro START_PRINT": {
+      "gcode": {
+        "value": "\nG28\n\nG1 Z10 F600",
+        "file": "printer.cfg",
+        "line": 21,
+        "autosave": false
+      }
+    },
+    "input_shaper": {
+      "shaper_type_x": {
+        "value": "mzv",
+        "file": "printer.cfg",
+        "line": 33,
+        "autosave": true
+      },
+      "shaper_freq_x": {
+        "value": "48.2",
+        "file": "printer.cfg",
+        "line": 34,
+        "autosave": true
+      }
+    },
+    "mcu": {
+      "serial": {
+        "value": "/dev/serial/by-id/usb-Klipper_stm32-if00",
+        "file": "hardware.cfg",
+        "line": 3,
+        "autosave": false
+      }
+    },
+    "printer": {
+      "max_velocity": {
+        "value": "300",
+        "file": "printer.cfg",
+        "line": 6,
+        "autosave": false
+      },
+      "max_z_velocity": {
+        "value": "15",
+        "file": "hardware.cfg",
+        "line": 7,
+        "autosave": false
+      },
+      "kinematics": {
+        "value": "corexy",
+        "file": "printer.cfg",
+        "line": 5,
+        "autosave": false
+      },
+      "max_accel": {
+        "value": "5000",
+        "file": "printer.cfg",
+        "line": 27,
+        "autosave": false
+      },
+      "square_corner_velocity": {
+        "value": "5.0",
+        "file": "printer.cfg",
+        "line": 8,
+        "autosave": false
+      }
+    },
+    "probe": {
+      "pin": {
+        "value": "^PB7",
+        "file": "hw/probe.cfg",
+        "line": 2,
+        "autosave": false
+      },
+      "x_offset": {
+        "value": "0",
+        "file": "hw/probe.cfg",
+        "line": 3,
+        "autosave": false
+      },
+      "z_offset": {
+        "value": "1.5",
+        "file": "conf.d/20-overrides.cfg",
+        "line": 2,
+        "autosave": false
+      },
+      "samples": {
+        "value": "3",
+        "file": "printer.cfg",
+        "line": 11,
+        "autosave": false
+      }
+    },
+    "stepper_x": {
+      "step_pin": {
+        "value": "PB13",
+        "file": "hw/steppers.cfg",
+        "line": 3,
+        "autosave": false
+      },
+      "rotation_distance": {
+        "value": "39.8",
+        "file": "conf.d/20-overrides.cfg",
+        "line": 5,
+        "autosave": false
+      }
+    }
+  }
+}

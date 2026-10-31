@@ -10,14 +10,14 @@
 namespace helix::led {
 
 /// Light-button config value meaning "every switchable device".
-constexpr const char* LIGHT_BUTTON_ALL = "all";
+constexpr const char* kLightButtonAll = "all";
 
-constexpr const char* LIGHT_BUTTON_PENDING_PATH = "leds/light_button_pending";
-constexpr const char* AUTO_STATE_STRIPS_PATH = "leds/auto_state/strips";
+constexpr const char* kLightButtonPendingPath = "leds/light_button_pending";
+constexpr const char* kAutoStateStripsPath = "leds/auto_state/strips";
 
 /// Where a saved leds/selected_strips list goes when it stops being user-facing.
 struct SelectionMigration {
-    std::string light_button; ///< device id, LIGHT_BUTTON_ALL, or "" for the chamber light
+    std::string light_button; ///< device id, kLightButtonAll, or "" for the chamber light
     std::vector<std::string> auto_state_strips;
 
     bool operator==(const SelectionMigration& o) const {
@@ -26,18 +26,18 @@ struct SelectionMigration {
 };
 
 /// One selected id: that device. Every @p switchable id selected (extra ids that
-/// are not switchable yet do not count against it): LIGHT_BUTTON_ALL. Anything
+/// are not switchable yet do not count against it): kLightButtonAll. Anything
 /// else leaves the light button on the chamber light. Auto-state keeps @p selected.
 SelectionMigration plan_selection_migration(const std::vector<std::string>& selected,
                                             const std::vector<std::string>& switchable);
 
 /// red, orange, green, cyan, blue, purple, pink
-constexpr uint32_t DEFAULT_COLOR_PRESETS[] = {0xFF4444, 0xFF6B35, 0x66BB6A, 0x00BCD4,
-                                              0x2962FF, 0x9C27B0, 0xFF4081};
+constexpr uint32_t kDefaultColorPresets[] = {0xFF4444, 0xFF6B35, 0x66BB6A, 0x00BCD4,
+                                             0x2962FF, 0x9C27B0, 0xFF4081};
 
-/// Recognised on load so that a list nobody edited becomes DEFAULT_COLOR_PRESETS.
-constexpr uint32_t PRE_1_1_DEFAULT_COLOR_PRESETS[] = {0xFFFFFF, 0xFFD700, 0xFF6B35, 0x4FC3F7,
-                                                      0xFF4444, 0x66BB6A, 0x9C27B0, 0x00BCD4};
+/// Recognised on load so that a list nobody edited becomes kDefaultColorPresets.
+constexpr uint32_t kPre11DefaultColorPresets[] = {0xFFFFFF, 0xFFD700, 0xFF6B35, 0x4FC3F7,
+                                                  0xFF4444, 0x66BB6A, 0x9C27B0, 0x00BCD4};
 
 /// @p saved, unless it is empty or the untouched pre-1.1 default.
 std::vector<uint32_t> migrate_color_presets(const std::vector<uint32_t>& saved);
@@ -50,7 +50,7 @@ std::string resolve_chamber_light(const std::vector<LedStripInfo>& devices,
                                   const std::string& fallback);
 
 /// Device ids a light button whose `led` config is @p key drives. Empty key: the
-/// chamber light. LIGHT_BUTTON_ALL: every switchable device. A switchable id: that
+/// chamber light. kLightButtonAll: every switchable device. A switchable id: that
 /// device. An id that no longer exists: the chamber light.
 std::vector<std::string> resolve_light_targets(const std::string& key,
                                                const std::vector<std::string>& switchable,

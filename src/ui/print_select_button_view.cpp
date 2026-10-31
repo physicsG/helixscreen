@@ -28,6 +28,10 @@ PrintSelectButtonView compute_print_select_button_view(const PrintSelectButtonIn
         return {PrintSelectButtonMode::Print, "Analyzing data..."};
     }
 
+    if (in.file_check_pending) {
+        return {PrintSelectButtonMode::Print, "Checking file…"};
+    }
+
     return {PrintSelectButtonMode::Print, ""};
 }
 

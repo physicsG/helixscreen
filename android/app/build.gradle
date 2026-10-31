@@ -35,6 +35,26 @@ def helixAbis = project.hasProperty('helixAbis')
     ? project.property('helixAbis').split(',')*.trim().findAll { it }
     : ['arm64-v8a', 'armeabi-v7a', 'x86_64']
 
+// -PhelixPrebuiltJniLibs=<dir> packages native libraries compiled by an earlier
+// build instead of running CMake: <dir>/<abi>/*.so, as stripReleaseDebugSymbols
+// lays them out, for exactly the ABIs in helixAbis. release.yml compiles each
+// ABI in a job of its own and packages all of them once with this.
+def prebuiltJniLibs = project.hasProperty('helixPrebuiltJniLibs')
+    ? file(project.property('helixPrebuiltJniLibs'))
+    : null
+if (prebuiltJniLibs != null) {
+    // An ABI missing here would ship an APK that fails to install on that ABI,
+    // and an extra one would ride along in the universal APK.
+    def present = (prebuiltJniLibs.listFiles()?.findAll { it.isDirectory() }*.name ?: []) as Set
+    def missing = helixAbis.findAll { !new File(prebuiltJniLibs, "${it}/libmain.so").isFile() }
+    def extra = present - (helixAbis as Set)
+    if (missing || extra) {
+        throw new GradleException(
+            "helixPrebuiltJniLibs=${prebuiltJniLibs} does not match helixAbis ${helixAbis}: " +
+            "missing libmain.so for ${missing ?: 'none'}, unexpected ABI dirs ${extra ?: 'none'}")
+    }
+}
+
 android {
     namespace "org.helixscreen.app"
     compileSdkVersion 36
@@ -47,14 +67,22 @@ android {
         versionCode vCode  // 1.0.0 → 100000099, 1.1.0-beta.1 → 100100031
         versionName helix_version
 
-        externalNativeBuild {
+        if (prebuiltJniLibs == null) externalNativeBuild {
             cmake {
                 def cmakeArgs = ["-DANDROID_STL=c++_shared"]
                 if (project.hasProperty('useCcache')) {
+                    // ccache refuses every TU that uses the precompiled header
+                    // unless this sloppiness allows it; with it, and the PCH
+                    // built without timestamps (jni/CMakeLists.txt), the cache
+                    // also survives a fresh checkout rebuilding the PCH.
+                    def launcher = "env;CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime;ccache"
                     cmakeArgs += [
-                        "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
-                        "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+                        "-DCMAKE_C_COMPILER_LAUNCHER=${launcher}",
+                        "-DCMAKE_CXX_COMPILER_LAUNCHER=${launcher}"
                     ]
+                }
+                if (project.hasProperty('helixNoDebugInfo')) {
+                    cmakeArgs += ["-DHELIX_NO_DEBUG_INFO=ON"]
                 }
                 if (System.getenv("ANDROID_KEYSTORE_PATH") || project.hasProperty('helixDiagUploads')) {
                     cmakeArgs += ["-DHELIX_DIAGNOSTIC_UPLOADS=ON"]
@@ -99,9 +127,17 @@ android {
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path 'jni/CMakeLists.txt'
+    if (prebuiltJniLibs == null) {
+        externalNativeBuild {
+            cmake {
+                path 'jni/CMakeLists.txt'
+            }
+        }
+    } else {
+        sourceSets {
+            main {
+                jniLibs.srcDirs = [prebuiltJniLibs]
+            }
         }
     }
 
@@ -210,6 +246,7 @@ def nonShippableConfig = [
 def hostOnlyConfig = [
     'helixscreen.service',              // systemd unit
     'refresh-service-units.sh',         // systemd unit maintenance
+    'restore-user-config.sh',           // post-update restore, run by the init script and the unit maintenance
     'ensure-polkit-rule.sh',            // polkit
     'helixscreen-network.pkla',         // polkit
     '99-helixscreen-backlight.rules',   // udev
@@ -217,6 +254,22 @@ def hostOnlyConfig = [
     'helixscreen-k2-procd-shim.sh',     // Creality K2 procd
     'helixscreen-ustreamer-k2.sh'       // Creality K2 camera
 ]
+
+// Fixture trees only the mock printer reads (moonraker_*_mock.cpp). A release APK
+// compiles no mock, and a debug one runs it only when launched with
+// `--ez test true`, where an empty file list is enough. The Linux packages leave
+// the same two out (RELEASE_ASSETS_EXCLUDE in mk/cross.mk).
+def mockOnlyAssets = ['test_gcodes', 'test_timelapse']
+
+// Font sources compiled into libmain.so (FONT_SOURCES in app/jni/CMakeLists.txt).
+// The app reads only the binary faces under fonts/cjk/ at runtime (CjkFontManager),
+// so the C arrays would be dead weight in the APK and in app storage.
+def compiledFontSources = 'fonts/*.c'
+
+// Translation files no locale loads: the merged catalogue and the identity
+// locale's pack. scripts/translation_packs.py is the definition every packager
+// shares; tests/python/test_translation_packs.py fails if this list drifts from it.
+def unloadedTranslationFiles = ['translations.xml', 'en.xml']
 
 // Same globs as regexes, for the post-copy audit below. Only '*' appears in
 // these patterns; everything around it is quoted literally.
@@ -242,8 +295,15 @@ task copyAssets(type: Copy) {
     doFirst {
         stagedAssetDirs.each { it.deleteDir() }
     }
-    from('../../ui_xml') { into 'ui_xml' }
-    from('../../assets') { into 'assets' }
+    from('../../ui_xml') {
+        into 'ui_xml'
+        exclude unloadedTranslationFiles.collect { "translations/${it}" }
+    }
+    from('../../assets') {
+        into 'assets'
+        exclude mockOnlyAssets + mockOnlyAssets.collect { "${it}/**" }
+        exclude compiledFontSources
+    }
     from('../../config') {
         into 'config'
         exclude nonShippableConfig
@@ -299,14 +359,21 @@ task genPackagingManifest(dependsOn: purgeStagedLocalState) {
     inputs.dir(file('../../assets'))
     inputs.dir(file('../../config'))
     outputs.file(manifestOut)
+    inputs.property('mockOnlyAssets', mockOnlyAssets)
     doLast {
         manifestOut.parentFile.mkdirs()
-        manifestOut.withOutputStream { os ->
-            exec {
-                commandLine 'bash', script.absolutePath, projectRoot.absolutePath
-                standardOutput = os
-            }
+        def listing = new ByteArrayOutputStream()
+        exec {
+            commandLine 'bash', script.absolutePath, projectRoot.absolutePath
+            standardOutput = listing
         }
+        // The extractor counts a manifest directory it cannot open as a failed
+        // extraction, so every tree copyAssets leaves out must leave here too.
+        def dropped = mockOnlyAssets.collect { "assets/${it}" }
+        def kept = listing.toString('UTF-8').readLines().findAll { line ->
+            !dropped.any { d -> line == d || line.startsWith(d + '/') }
+        }
+        manifestOut.text = kept.join('\n') + '\n'
     }
 }
 
@@ -332,4 +399,6 @@ preBuild.dependsOn genBuildStamp
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
+    // Play In-App Updates: a Play install announces only what Play will serve it.
+    implementation 'com.google.android.play:app-update:2.1.0'
 }

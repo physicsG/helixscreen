@@ -32,14 +32,14 @@ struct FieldSpec {
 
 /// Indexed by RetractionSettingsOverlay::Field. The distance sliders hold
 /// hundredths of a millimetre, matching the centimm arithmetic below.
-constexpr FieldSpec FIELD_SPECS[] = {
+constexpr FieldSpec kFieldSpecs[] = {
     {"Retract Length", "mm", 100, true},
     {"Retract Speed", "mm/s", 1, false},
     {"Unretract Extra", "mm", 100, true},
     {"Unretract Speed", "mm/s", 1, false},
 };
 
-static_assert(sizeof(FIELD_SPECS) / sizeof(FIELD_SPECS[0]) ==
+static_assert(sizeof(kFieldSpecs) / sizeof(kFieldSpecs[0]) ==
                   static_cast<size_t>(RetractionSettingsOverlay::Field::Count),
               "FIELD_SPECS must have one entry per Field");
 
@@ -49,7 +49,7 @@ bool field_in_range(int raw) {
 
 } // namespace
 
-RetractionSettingsOverlay::RetractionSettingsOverlay(IMoonrakerAPI* api) : api_(api) {}
+RetractionSettingsOverlay::RetractionSettingsOverlay(helix::IMoonrakerAPI* api) : api_(api) {}
 
 RetractionSettingsOverlay::~RetractionSettingsOverlay() {
     // SubjectManager handles LVGL initialization check and cleanup
@@ -279,7 +279,7 @@ void RetractionSettingsOverlay::handle_field_clicked(Field field) {
         return;
     }
 
-    const FieldSpec& spec = FIELD_SPECS[static_cast<size_t>(field)];
+    const FieldSpec& spec = kFieldSpecs[static_cast<size_t>(field)];
     const SliderScale scale{spec.divisor};
     pending_keypad_field_ = field;
 
@@ -314,7 +314,7 @@ void RetractionSettingsOverlay::handle_keypad_value(Field field, double value) {
         return;
     }
 
-    const FieldSpec& spec = FIELD_SPECS[static_cast<size_t>(field)];
+    const FieldSpec& spec = kFieldSpecs[static_cast<size_t>(field)];
     lv_slider_set_value(
         slider,
         SliderScale{spec.divisor}.to_slider_clamped(value, lv_slider_get_min_value(slider),

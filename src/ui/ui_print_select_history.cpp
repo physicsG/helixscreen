@@ -2,14 +2,12 @@
 
 #include "ui_print_select_history.h"
 
+#include "ui_filename_utils.h"
+
 namespace helix::ui {
 
 std::string PrintSelectHistoryIntegration::extract_basename(const std::string& path) {
-    size_t last_slash = path.rfind('/');
-    if (last_slash == std::string::npos) {
-        return path;
-    }
-    return path.substr(last_slash + 1);
+    return helix::gcode::get_filename_basename(path);
 }
 
 void PrintSelectHistoryIntegration::merge_history_into_files(

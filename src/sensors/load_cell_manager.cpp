@@ -3,304 +3,172 @@
 
 #include "load_cell_manager.h"
 
-#include "ui_update_queue.h"
-
 #include "ams_state.h"
 #include "device_display_name.h"
 #include "lane_source_store.h"
 #include "spdlog/spdlog.h"
-#include "static_subject_registry.h"
 
 #include <algorithm>
 #include <optional>
 
-// CRITICAL: Subject updates trigger lv_obj_invalidate() which asserts if called
-// during LVGL rendering. WebSocket callbacks run on libhv's event loop thread,
-// not the main LVGL thread. We must defer subject updates to the main thread
-// via ui_queue_update() to avoid the "Invalidate area not allowed during rendering"
-// assertion.
-
 namespace helix::sensors {
 
-// ============================================================================
-// Singleton
-// ============================================================================
+namespace {
+
+constexpr uint8_t kSpoolWeight = static_cast<uint8_t>(LoadCellRole::SPOOL_WEIGHT);
+
+} // namespace
+
+LoadCellManager::Options LoadCellManager::make_options() {
+    Options o;
+    o.name = "LoadCellManager";
+    o.kinds = {hw::ObjectKind::LoadCell};
+    o.count_subject = "load_cell_count";
+    o.revision_subject = "load_cell_revision";
+    o.settings_section = "load_cell";
+    o.row_toggle = RowToggle::None;
+    o.roles.push_back({kSpoolWeight, "spool_weight", "Spool Weight", /*exclusive=*/true,
+                       /*offered=*/false});
+    return o;
+}
+
+SensorRowView LoadCellManager::row(size_t index) const {
+    SensorRowView view = SensorManager::row(index);
+    const auto all = entries();
+    if (index < all.size()) {
+        view.name = helix::get_display_name(all[index].klipper_name, DeviceType::LOAD_CELL);
+    }
+    return view;
+}
 
 LoadCellManager& LoadCellManager::instance() {
     static LoadCellManager instance;
     return instance;
 }
 
-LoadCellManager::LoadCellManager() = default;
+LoadCellManager::LoadCellManager() : SensorManager(make_options()) {}
 
-LoadCellManager::~LoadCellManager() = default;
+void LoadCellManager::register_subjects(SubjectManager& /*subjects*/) {}
 
-// ============================================================================
-// Discovery, Status and Config
-// ============================================================================
-
-void LoadCellManager::discover(const std::vector<std::string>& klipper_objects) {
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-        spdlog::debug("[LoadCellManager] Discovering load cells from {} objects",
-                      klipper_objects.size());
-
-        std::vector<LoadCellConfig> discovered;
-        for (const auto& klipper_name : klipper_objects) {
-            const auto sensor_name = parse_klipper_name(klipper_name);
-            if (!sensor_name) {
-                continue;
-            }
-
-            // Generate display name
-            std::string display_name = helix::get_display_name(klipper_name, DeviceType::LOAD_CELL);
-
-            LoadCellConfig config(klipper_name, *sensor_name, display_name);
-
-            // Auto-categorize based on sensor name, or whether it is the only load cell.
-            if (sensor_name->find("spool") != std::string::npos || klipper_objects.size() == 1) {
-                config.role = LoadCellRole::SPOOL_WEIGHT;
-                config.priority = 0;
-            } else {
-                config.role = LoadCellRole::NONE;
-                config.priority = 100;
-            }
-
-            spdlog::debug("[LoadCellManager] Discovered sensor: {} (role: {}, priority: {})",
-                          *sensor_name, load_cell_role_to_string(config.role), config.priority);
-            discovered.push_back(std::move(config));
-        }
-        sensors_.reconcile(std::move(discovered));
-
-        // Update sensor count subject
-        if (subjects_initialized_) {
-            lv_subject_set_int(&sensor_count_, static_cast<int>(sensors_.size()));
-        }
-
-        spdlog::debug("[LoadCellManager] Discovered {} load cells", sensors_.size());
-    }
-
-    // Update subjects to reflect new state
-    update_subjects();
-}
-
-void LoadCellManager::update_from_status(const nlohmann::json& status) {
-    bool any_changed = false;
-    auto sync_update_subjects = false;
-
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-        for (const auto& sensor : sensors_) {
-            const std::string& key = sensor.klipper_name;
-
-            if (!status.contains(key)) {
-                continue;
-            }
-
-            const auto& sensor_data = status[key];
-            auto& state = sensors_.state_at(sensor.klipper_name);
-            LoadCellState old_state = state;
-
-            // Field-restricted Moonraker subscriptions send null for fields the
-            // underlying object lacks. Use find() + is_number() so unexpected
-            // nulls (or wrong types during firmware restarts) don't throw
-            // type_error.302 and crash the process.
-            if (auto it = sensor_data.find("force_g"); it != sensor_data.end() && it->is_number()) {
-                state.force_g = std::make_optional(it->get<float>());
-            }
-
-            // Check for state change
-            if (state.force_g && state.force_g != old_state.force_g) {
-                any_changed = true;
-                spdlog::trace("[LoadCellManager] Load cell {} updated: force_g={:.1f}",
-                              sensor.sensor_name, *state.force_g);
-            }
-        }
-
-        if (any_changed) {
-            if (sync_mode_) {
-                spdlog::trace("[LoadCellManager] sync_mode: updating subjects synchronously");
-                sync_update_subjects = true;
-            } else {
-                spdlog::trace("[LoadCellManager] async_mode: deferring via ui_queue_update");
-                auto tok = lifetime_.token();
-                tok.defer("LoadCellManager::update_subjects",
-                          [] { LoadCellManager::instance().update_subjects_on_main_thread(); });
-            }
+const SensorEntry* LoadCellManager::spool_weight_entry_locked() const {
+    for (const auto& entry : entries_locked()) {
+        if (entry.role == kSpoolWeight && entry.available) {
+            return &entry;
         }
     }
-
-    if (sync_update_subjects) {
-        update_subjects();
-    }
+    return nullptr;
 }
-
-void LoadCellManager::load_config(const nlohmann::json& config) {
-    (void)config;
-
-    // Unimplemented.
-}
-
-nlohmann::json LoadCellManager::save_config() const {
-    // Unimplemented.
-
-    return nlohmann::json{};
-}
-
-// ============================================================================
-// Initialization
-// ============================================================================
-
-void LoadCellManager::init_subjects() {
-    if (subjects_initialized_) {
-        return;
-    }
-
-    spdlog::trace("[LoadCellManager] Initializing subjects");
-
-    UI_MANAGED_SUBJECT_INT(sensor_count_, 0, "load_cell_count", subjects_);
-
-    subjects_initialized_ = true;
-
-    // Self-register cleanup — ensures deinit runs before lv_deinit()
-    StaticSubjectRegistry::instance().register_deinit(
-        "LoadCellManager", []() { LoadCellManager::instance().deinit_subjects(); });
-
-    spdlog::trace("[LoadCellManager] Subjects initialized");
-}
-
-void LoadCellManager::deinit_subjects() {
-    if (!subjects_initialized_) {
-        return;
-    }
-
-    spdlog::trace("[LoadCellManager] Deinitializing subjects");
-
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-        // Invalidate lifetime guard FIRST — expires tokens in queued callbacks
-        // so they won't access state after we clear it (L072, L054)
-        lifetime_.invalidate();
-
-        // Clear all collections under mutex to prevent background thread access
-        // to stale iterators during shutdown race
-        sensors_.clear();
-
-        subjects_.deinit_all();
-        subjects_initialized_ = false;
-    }
-
-    spdlog::trace("[LoadCellManager] Subjects deinitialized");
-}
-
-// ============================================================================
-// Sensor Queries
-// ============================================================================
 
 bool LoadCellManager::has_spool_weight_load_cell() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return sensors_.find_by_role(LoadCellRole::SPOOL_WEIGHT) != nullptr;
+    std::lock_guard<std::recursive_mutex> lock(mutex());
+    return spool_weight_entry_locked() != nullptr;
 }
 
-std::vector<LoadCellConfig> LoadCellManager::get_sensors_sorted() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    auto sorted = sensors_.configs();
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
-        if (a.priority != b.priority) {
-            return a.priority < b.priority;
+std::vector<SensorEntry> LoadCellManager::get_sensors_sorted() const {
+    auto sorted = entries();
+    const auto shown = [](const SensorEntry& e) {
+        return helix::get_display_name(e.klipper_name, DeviceType::LOAD_CELL);
+    };
+    std::sort(sorted.begin(), sorted.end(), [&shown](const auto& a, const auto& b) {
+        const bool a_spool = a.role == kSpoolWeight;
+        const bool b_spool = b.role == kSpoolWeight;
+        if (a_spool != b_spool) {
+            return a_spool;
         }
-        return a.display_name < b.display_name;
+        return shown(a) < shown(b);
     });
-
     return sorted;
 }
 
-size_t LoadCellManager::sensor_count() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-    return sensors_.size();
+bool LoadCellManager::parse_status(const nlohmann::json& status) {
+    bool changed = false;
+    for (const auto& entry : entries_locked()) {
+        const auto sensor = status.find(entry.klipper_name);
+        if (sensor == status.end() || !sensor->is_object()) {
+            continue;
+        }
+        // Field-restricted subscriptions send null for fields the object lacks.
+        const auto force = sensor->find("force_g");
+        if (force == sensor->end() || !force->is_number()) {
+            continue;
+        }
+        LoadCellState& state = readings_[entry.klipper_name];
+        const float value = force->get<float>();
+        if (state.force_g != value) {
+            state.force_g = value;
+            changed = true;
+            spdlog::trace("[LoadCellManager] {} force_g={:.1f}", entry.klipper_name, value);
+        }
+    }
+    return changed;
 }
 
-// ============================================================================
-// Testing Support
-// ============================================================================
-
-void LoadCellManager::set_sync_mode(bool enabled) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    sync_mode_ = enabled;
+void LoadCellManager::on_entries_changed() {
+    prune_vanished_locked(readings_);
 }
 
-void LoadCellManager::update_subjects_on_main_thread() {
-    update_subjects();
+void LoadCellManager::on_discovered(const PrinterDiscovery& /*hw*/) {
+    auto& entries = entries_locked();
+    const bool held = std::any_of(entries.begin(), entries.end(),
+                                  [](const SensorEntry& e) { return e.role == kSpoolWeight; });
+    if (held) {
+        return;
+    }
+    // A cell named for a spool, or the only cell, weighs the external spool.
+    const bool only_cell = entries.size() == 1;
+    for (auto& entry : entries) {
+        const auto instance = hw::classify_object(entry.klipper_name).instance;
+        if (only_cell || instance.find("spool") != std::string::npos) {
+            entry.role = kSpoolWeight;
+            spdlog::debug("[LoadCellManager] {} defaults to SPOOL_WEIGHT", entry.klipper_name);
+            return;
+        }
+    }
 }
 
-// ============================================================================
-// Private Helpers
-// ============================================================================
-
-const std::optional<const std::string>
-LoadCellManager::parse_klipper_name(const std::string& klipper_name) const {
-    const std::string load_cell_prefix = "load_cell ";
-
-    if (klipper_name.rfind(load_cell_prefix, 0) == 0) {
-        const auto& sensor_name = klipper_name.substr(load_cell_prefix.length());
-        return std::make_optional(sensor_name);
-    } else if (klipper_name == "load_cell") {
-        return std::make_optional("");
+void LoadCellManager::refresh_subjects() {
+    std::optional<float> spool_weight;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex());
+        if (const auto* entry = spool_weight_entry_locked()) {
+            const auto reading = readings_.find(entry->klipper_name);
+            if (reading != readings_.end()) {
+                spool_weight = reading->second.force_g;
+            }
+        }
     }
 
-    return std::nullopt;
-}
-
-void LoadCellManager::update_subjects() {
-    if (!subjects_initialized_) {
+    if (!spool_weight || *spool_weight < 0) {
         return;
     }
 
-    std::optional<float> spool_weight = std::nullopt;
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-
-        // A transiently unavailable sensor publishes nothing.
-        const auto* state = sensors_.role_state(LoadCellRole::SPOOL_WEIGHT);
-        if (state && state->available) {
-            spool_weight = state->force_g;
-        }
+    auto& ams_state = AmsState::instance();
+    auto spool_info = ams_state.raw_external_spool_info().value_or(SlotInfo{});
+    bool weight_changed = false;
+    if (spool_info.remaining_weight_g == -1) {
+        weight_changed = true;
+    } else {
+        // Only update the value if it changed significantly to avoid frequent UI
+        // redraws due to measurement noise. Different deltas for increasing and
+        // decreasing weight keep the value from flip-flopping.
+        const auto delta = *spool_weight - spool_info.remaining_weight_g;
+        weight_changed = delta <= -0.5 || delta >= 1.0;
     }
-
-    if (spool_weight && *spool_weight >= 0) {
-        auto& ams_state = AmsState::instance();
-        auto spool_info = ams_state.raw_external_spool_info().value_or(SlotInfo{});
-        auto weight_changed = false;
-        if (spool_info.remaining_weight_g == -1) {
-            weight_changed = true;
-        } else {
-            // Only update the value if it changed significantly to
-            // avoid frequent UI redraws due to measurement noise.
-            auto delta = *spool_weight - spool_info.remaining_weight_g;
-            // Avoid flip-flopping by using different deltas for
-            // increasing/decreasing weight.
-            weight_changed = delta <= -0.5 || delta >= 1.0;
-        }
-        if (weight_changed) {
-            spool_info.remaining_weight_g = *spool_weight;
-            ams_state.set_external_spool_info_in_memory(spool_info);
-
-            // Views read the resolved record, where the bypass lane's sources
-            // outrank the raw one; filing the reading as Metered is what lets
-            // it show over a stale user edit.
-            helix::ams::Observation measured(helix::ams::ObservationSource::Metered);
-            measured.remaining_weight_g = *spool_weight;
-            helix::ams::ingest(helix::ams::BYPASS_LANE_ID, measured);
-
-            spdlog::debug("[LoadCellManager] Publishing updated spool weight to AmsState: {} g",
-                          *spool_weight);
-        }
+    if (!weight_changed) {
+        return;
     }
+    spool_info.remaining_weight_g = *spool_weight;
+    ams_state.set_external_spool_info_in_memory(spool_info);
+
+    // Views read the resolved record, where the bypass lane's sources outrank the
+    // raw one; filing the reading as Metered is what lets it show over a stale
+    // user edit.
+    helix::ams::Observation measured(helix::ams::ObservationSource::Metered);
+    measured.remaining_weight_g = *spool_weight;
+    helix::ams::ingest(helix::ams::kBypassLaneId, measured);
+
+    spdlog::debug("[LoadCellManager] Publishing updated spool weight to AmsState: {} g",
+                  *spool_weight);
 }
 
 } // namespace helix::sensors

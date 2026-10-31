@@ -2,9 +2,16 @@
 // Tests for telemetry worker endpoints.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import worker from "../index";
+import worker, { CDN_CRON, LOOP_CRON, configuredFeature, deriveFeatureAdoption, toYesNo } from "../index";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { col } from "../schema";
 import { mapEventToDataPoints } from "../analytics";
+import * as queries from "../queries";
 import { parseRange } from "../queries";
+import { buildReconcileTable, countR2Points, parseEnvValue } from "../../scripts/reconcile";
+import { compareVersions } from "../versions";
+import { compareVersions as dashboardCompareVersions } from "../../../analytics-dashboard/src/utils/chart";
 
 // Mock the executeQuery function so dashboard tests don't hit real Cloudflare API
 vi.mock("../queries", async (importOriginal) => {
@@ -51,6 +58,7 @@ function createMockBucket() {
         key: obj.key,
         size: obj.size,
         uploaded: obj.uploaded,
+        text: async () => obj.body,
         body: new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode(obj.body));
@@ -147,7 +155,12 @@ describe("GET /health", () => {
     const res = await worker.fetch(makeRequest("/health"), createEnv());
     expect(res.status).toBe(200);
     const data = await res.json();
-    expect(data).toEqual({ status: "healthy" });
+    expect(data).toEqual({ status: "healthy", git_sha: "unknown" });
+  });
+
+  it("reports the deployed git sha", async () => {
+    const res = await worker.fetch(makeRequest("/health"), { ...createEnv(), GIT_SHA: "abc1234" });
+    expect(await res.json()).toEqual({ status: "healthy", git_sha: "abc1234" });
   });
 
   it("includes CORS headers", async () => {
@@ -786,7 +799,7 @@ describe("mapEventToDataPoints", () => {
     expect(dp.blobs![1]).toBe("success");
     expect(dp.blobs![2]).toBe("PLA");
     expect(dp.blobs![3]).toBe("0.9.19");
-    expect(dp.blobs).toHaveLength(12);
+    expect(dp.blobs).toHaveLength(14);
     expect(dp.doubles![0]).toBe(3600);
     expect(dp.doubles![1]).toBe(210);
     expect(dp.doubles![2]).toBe(60);
@@ -819,6 +832,26 @@ describe("mapEventToDataPoints", () => {
     expect(dp.doubles).toHaveLength(8);
   });
 
+  it("maps crash app_board into blob8 and keeps the other crash slots", () => {
+    const event = {
+      event: "crash",
+      device_id: "dev-crash",
+      app_version: "1.1.0",
+      signal_name: "SIGSEGV",
+      app_platform: "mips",
+      app_board: "creator5-pro",
+      fault_addr: "0x10",
+    };
+    const dp = mapEventToDataPoints(event)[0];
+    expect(dp.blobs![7]).toBe("creator5-pro");
+    expect(dp.blobs![2]).toBe("SIGSEGV");
+    expect(dp.blobs![3]).toBe("mips");
+    expect(dp.blobs![6]).toBe("0x10");
+    expect(dp.blobs).toHaveLength(12);
+    const old = mapEventToDataPoints({ event: "crash", device_id: "d" })[0];
+    expect(old.blobs![7]).toBe("");
+  });
+
   it("maps session zip_tool into blob10", () => {
     const event = {
       event: "session",
@@ -828,6 +861,24 @@ describe("mapEventToDataPoints", () => {
     const dp = mapEventToDataPoints(event)[0];
     expect(dp.blobs![9]).toBe("python");
     expect(dp.blobs).toHaveLength(12);
+  });
+
+  it("maps session app.board into blob11", () => {
+    const event = {
+      event: "session",
+      device_id: "dev-board",
+      app: { version: "1.1.0", platform: "mips", board: "creator5-pro" },
+    };
+    const dp = mapEventToDataPoints(event)[0];
+    expect(dp.blobs![10]).toBe("creator5-pro");
+    expect(dp.blobs![2]).toBe("mips");
+    expect(dp.blobs).toHaveLength(12);
+  });
+
+  it("leaves session board empty for clients that do not send it", () => {
+    const event = { event: "session", device_id: "dev-old", app: { version: "1.0.5" } };
+    const dp = mapEventToDataPoints(event)[0];
+    expect(dp.blobs![10]).toBe("");
   });
 
   it("leaves session zip_tool empty for clients that do not send it", () => {
@@ -859,7 +910,7 @@ describe("mapEventToDataPoints", () => {
     expect(dp.blobs![5]).toBe("stm32f446");
     expect(dp.blobs![6]).toBe("beacon");
     expect(dp.blobs![7]).toBe("afc");
-    expect(dp.blobs).toHaveLength(12);
+    expect(dp.blobs).toHaveLength(13);
     expect(dp.doubles![3]).toBe(42);
     expect(dp.doubles).toHaveLength(8);
   });
@@ -1207,8 +1258,21 @@ describe("Dashboard endpoints", () => {
       expect(data.active_devices).toBe(0);
       expect(data.total_events).toBe(0);
       expect(data.crash_rate).toBe(0);
-      expect(data.print_success_rate).toBe(0);
+      expect(data.print_success_rate).toBeNull();
       expect(data.events_over_time).toEqual([]);
+    });
+
+    it("reports no print success rate under a filter that excludes print_outcome", async () => {
+      mockExecuteQuery.mockResolvedValue({
+        data: [{ active_devices: 1, total_events: 1, crash_count: 0, session_count: 1, successes: 5, total: 10 }],
+      });
+      const res = await worker.fetch(
+        dashboardRequest("/v1/dashboard/overview?model=Voron"),
+        env,
+      );
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.print_success_rate).toBeNull();
     });
   });
 
@@ -1220,18 +1284,20 @@ describe("Dashboard endpoints", () => {
         .mockResolvedValueOnce({ data: [{ name: "linux-arm", count: 100 }] })
         .mockResolvedValueOnce({ data: [{ name: "0.9.19", count: 80 }] })
         .mockResolvedValueOnce({ data: [{ name: "Voron 2.4", count: 50 }] })
-        .mockResolvedValueOnce({ data: [{ name: "corexy", count: 90 }] });
+        .mockResolvedValueOnce({ data: [{ name: "corexy", count: 90 }] })
+        .mockResolvedValueOnce({ data: [{ name: "btt-octopus", count: 12 }] });
 
       const res = await worker.fetch(
         dashboardRequest("/v1/dashboard/adoption?range=7d"),
         env,
       );
       expect(res.status).toBe(200);
-      const data = await res.json();
+      const data = (await res.json()) as Record<string, unknown>;
       expect(data.platforms).toEqual([{ name: "linux-arm", count: 100 }]);
       expect(data.versions).toEqual([{ name: "0.9.19", count: 80 }]);
       expect(data.printer_models).toEqual([{ name: "Voron 2.4", count: 50 }]);
       expect(data.kinematics).toEqual([{ name: "corexy", count: 90 }]);
+      expect(data.boards).toEqual([{ name: "btt-octopus", count: 12 }]);
     });
   });
 
@@ -1338,6 +1404,381 @@ describe("Dashboard endpoints", () => {
     });
   });
 
+  /** Answers each query by the first rule whose text the SQL contains; anything else is empty. */
+  function mockBySql(rules: Array<[string, Array<Record<string, unknown>>]>) {
+    mockExecuteQuery.mockImplementation(async (_config, sql) => {
+      for (const [needle, data] of rules) if (sql.includes(needle)) return { data };
+      return { data: [] };
+    });
+  }
+
+  // `any`: each test reads its own endpoint's response shape.
+  async function dashboard(path: string): Promise<any> {
+    const res = await worker.fetch(dashboardRequest(path), env);
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  // -- Delta-era endpoints --
+
+  describe("delta-era values", () => {
+    it("engagement is null with a device count until a schema-3 client reports", async () => {
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 0 }]],
+        ["as avg_session_sec", [{ avg_session_sec: 120 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/engagement");
+      expect(data.avg_session_sec).toBeNull();
+      expect(data.delta_era_devices).toBe(0);
+    });
+
+    it("engagement reports the boot-average session once devices report", async () => {
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 3 }]],
+        ["toDate(written_at)", [{ date: "2026-10-14", avg_session_sec: 90 }]],
+        ["as avg_session_sec", [{ avg_session_sec: 120 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/engagement");
+      expect(data.avg_session_sec).toBe(120);
+      expect(data.delta_era_devices).toBe(3);
+      expect(data.session_duration_trend).toEqual([{ date: "2026-10-14", avg_session_sec: 90 }]);
+    });
+
+    it("a resent snapshot reaches the panel totals once", async () => {
+      // AE stores the resend as a second identical row; the dedup subquery
+      // returns the panel once, and the endpoint passes that through.
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 1 }]],
+        ["as total_time_sec", [{ panel: "controls", total_time_sec: 60 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/engagement");
+      expect(data.panel_time).toEqual([{ panel: "controls", total_time_sec: 60 }]);
+      const panelSql = mockExecuteQuery.mock.calls
+        .map((c) => c[1] as string)
+        .find((sql) => sql.includes("as total_time_sec"))!;
+      expect(panelSql).toMatch(/FROM \(\s*SELECT .* GROUP BY \S+, \S+, \S+, \S+\s*\)/s);
+    });
+
+    it("ux insights is null until a schema-3 client reports", async () => {
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 0 }]],
+        ["as avg_session_sec", [{ avg_session_sec: 120 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/ux");
+      expect(data.avg_session_sec).toBeNull();
+      expect(data.delta_era_devices).toBe(0);
+    });
+
+    it("reliability's longest outage is null until a schema-3 client reports", async () => {
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 0 }]],
+        ["as max_disconnect_sec", [{ max_disconnect_sec: 30 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/reliability");
+      expect(data.max_disconnect_sec).toBeNull();
+      expect(data.delta_era_devices).toBe(0);
+    });
+
+    it("reliability reports the longest outage once devices report", async () => {
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 2 }]],
+        ["as max_disconnect_sec", [{ max_disconnect_sec: 30 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/reliability");
+      expect(data.max_disconnect_sec).toBe(30);
+    });
+
+    it("stability carries the device count beside the klippy trend", async () => {
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 4 }]],
+        ["as shutdowns", [{ date: "2026-10-14", errors: 2, shutdowns: 1 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/stability");
+      expect(data.delta_era_devices).toBe(4);
+      expect(data.klippy_trend).toEqual([{ date: "2026-10-14", errors: 2, shutdowns: 1 }]);
+    });
+
+    it("stability lists crash clusters over the range, largest first", async () => {
+      mockBySql([
+        [
+          "as fault",
+          [
+            { sig: "SIGSEGV", fault: "NULL_DEREF", ver: "1.0.5", board: "k1", count: 2, devices: 2 },
+            { sig: "SIGABRT", fault: "", ver: "1.0.4", board: "pi", count: 7, devices: 3 },
+            { sig: "SIGBUS", fault: "", ver: "1.0.4", board: "pi", count: 0, devices: 0 },
+          ],
+        ],
+      ]);
+      const data = await dashboard("/v1/dashboard/stability?range=7d&board=k1,pi");
+      expect(data.crash_clusters).toEqual([
+        { signal: "SIGABRT", fault_code: "", version: "1.0.4", board: "pi", count: 7, devices: 3 },
+        { signal: "SIGSEGV", fault_code: "NULL_DEREF", version: "1.0.5", board: "k1", count: 2, devices: 2 },
+      ]);
+      const sql = mockExecuteQuery.mock.calls.map(([, q]) => q as string).find((q) => q.includes("as fault"))!;
+      expect(sql).toContain("INTERVAL '7' DAY");
+      expect(sql).toContain(`${col("crash", "app_board")} IN ('k1', 'pi')`);
+      expect(sql).toContain("GROUP BY sig, fault, ver, board");
+    });
+
+    it("stability lists error codes per version", async () => {
+      mockBySql([
+        [
+          "GROUP BY category, code, version",
+          [
+            { category: "ui", code: "E1", version: "1.0.4", count: 1, devices: 1 },
+            { category: "net", code: "E2", version: "1.0.5", count: 5, devices: 2 },
+          ],
+        ],
+      ]);
+      const data = await dashboard("/v1/dashboard/stability?platform=pi");
+      expect(data.errors_by_version).toEqual([
+        { category: "net", code: "E2", version: "1.0.5", count: 5, devices: 2 },
+        { category: "ui", code: "E1", version: "1.0.4", count: 1, devices: 1 },
+      ]);
+      const sql = mockExecuteQuery.mock.calls
+        .map(([, q]) => q as string)
+        .find((q) => q.includes("GROUP BY category, code, version"))!;
+      expect(sql).toContain(`${col("error_encountered", "app_version")} as version`);
+      expect(sql).toContain(`${col("error_encountered", "app_platform")} IN ('pi')`);
+    });
+
+    it("features are adoption derived from overlay and widget deltas", async () => {
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 4 }]],
+        ["as overlay_name", [{ id: "fan_control_overlay", devices: 2 }]],
+        ["as widget_id", [{ id: "temperature", devices: 1 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/features");
+      expect(data.delta_era_devices).toBe(4);
+      expect(data.features).toEqual([
+        { id: "fan_control_overlay", devices: 2, adoption_rate: 0.5 },
+        { id: "temperature", devices: 1, adoption_rate: 0.25 },
+      ]);
+      for (const [, sql] of mockExecuteQuery.mock.calls) expect(sql).not.toContain("feature_adoption");
+    });
+
+    it("features report the configured flags beside derived adoption", async () => {
+      const flag = (f: string) => `${col("settings_snapshot", f)} as name`;
+      mockBySql([
+        ["as delta_era_devices", [{ delta_era_devices: 4 }]],
+        [flag("spoolman_configured"), [{ name: "1", count: 1 }, { name: "0", count: 3 }]],
+        [flag("multi_printer"), [{ name: 0, count: 2 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/features");
+      expect(data.configured).toEqual([
+        { id: "spoolman_configured", devices: 1, reported: 4, adoption_rate: 0.25 },
+        { id: "theme_changed", devices: 0, reported: 0, adoption_rate: null },
+        { id: "multi_printer", devices: 0, reported: 2, adoption_rate: 0 },
+      ]);
+    });
+  });
+
+  describe("a filter the delta kinds do not carry", () => {
+    const ENDPOINTS = ["engagement", "ux", "features", "reliability", "stability"];
+
+    it("is named on every delta-era endpoint under model=", async () => {
+      for (const name of ENDPOINTS) {
+        mockBySql([]);
+        const data = await dashboard(`/v1/dashboard/${name}?model=Voron`);
+        expect(data.filter_not_applicable, name).toBe("model");
+      }
+    });
+
+    it("is null with no filter", async () => {
+      for (const name of ENDPOINTS) {
+        mockBySql([]);
+        const data = await dashboard(`/v1/dashboard/${name}`);
+        expect(data.filter_not_applicable, name).toBeNull();
+      }
+    });
+
+    it("is null under board= because every delta kind carries it", async () => {
+      for (const name of ENDPOINTS) {
+        mockBySql([]);
+        expect((await dashboard(`/v1/dashboard/${name}?board=k1`)).filter_not_applicable, name).toBeNull();
+      }
+    });
+  });
+
+  describe("crash rate under a filter that excludes crashes", () => {
+    const crashRows: Array<[string, Array<Record<string, unknown>>]> = [
+      ["as crash_count", [{ crash_count: 0, session_count: 10 }]],
+      ["as session_count", [{ date: "2026-10-14", ver: "1.0.0", platform: "pi", session_count: 10, device_count: 2 }]],
+    ];
+
+    it("overview reads n/a, not 0%", async () => {
+      mockBySql(crashRows);
+      expect((await dashboard("/v1/dashboard/overview?model=Voron")).crash_rate).toBeNull();
+      mockBySql(crashRows);
+      expect((await dashboard("/v1/dashboard/overview?platform=pi")).crash_rate).toBe(0);
+    });
+
+    it("crashes reads n/a on every rate", async () => {
+      mockBySql(crashRows);
+      const data = await dashboard("/v1/dashboard/crashes?model=Voron");
+      expect(data.trailing_14d.rate).toBeNull();
+      expect(data.by_platform.length).toBeGreaterThan(0);
+      for (const p of data.by_platform) expect(p.rate).toBeNull();
+    });
+
+    it("stability's crash rate trend reads n/a", async () => {
+      mockBySql(crashRows);
+      const data = await dashboard("/v1/dashboard/stability?model=Voron");
+      expect(data.crash_rate_trend.length).toBeGreaterThan(0);
+      for (const d of data.crash_rate_trend) expect(d.rate).toBeNull();
+    });
+  });
+
+  describe("a model filter, which crash, error and print rows do not carry", () => {
+    it("health reports n/a crash rates and names the unreported blocks", async () => {
+      mockBySql([
+        ["LIMIT 8", [{ ver: "1.0.4", devices: 10 }]],
+        ["as update_successes", [{ ver: "1.0.4", sessions: 20, crashes: 0, update_failures: 0, update_successes: 0 }]],
+        ["index1 as event", [{ ver: "1.0.4", event: "session", devices: 10 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/health?model=Voron");
+      expect(data.releases[0].cur.devices).toBe(10);
+      expect(data.releases[0].cur.crash_rate).toBeNull();
+      expect(data.releases[0].cur.crash_free).toBeNull();
+      expect(data.not_applicable).toEqual({ crashes: "model", errors: "model", prints: "model", updates: "model" });
+    });
+
+    it("health keeps real crash rates under a filter crashes carry", async () => {
+      mockBySql([
+        ["LIMIT 8", [{ ver: "1.0.4", devices: 10 }]],
+        ["as update_successes", [{ ver: "1.0.4", sessions: 20, crashes: 0, update_failures: 0, update_successes: 0 }]],
+        ["index1 as event", [{ ver: "1.0.4", event: "session", devices: 10 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/health?platform=pi");
+      expect(data.releases[0].cur.crash_rate).toBe(0);
+      expect(data.releases[0].cur.crash_free).toBe(1);
+      expect(data.not_applicable.crashes).toBeNull();
+    });
+
+    it("releases reports n/a crash rates and names the unreported blocks", async () => {
+      mockBySql([
+        ["as update_successes", [{ ver: "1.0.4", sessions: 20, crashes: 0 }]],
+        ["as active_devices", [{ ver: "1.0.4", active_devices: 10 }]],
+      ]);
+      const data = await dashboard("/v1/dashboard/releases?versions=1.0.4&model=Voron");
+      const v = data.versions[0];
+      expect(v.active_devices).toBe(10);
+      expect(v.crash_rate).toBeNull();
+      expect(v.crash_free_devices).toBeNull();
+      expect(data.not_applicable).toEqual({ crashes: "model", prints: "model", updates: "model", performance: "model" });
+    });
+
+    it("stability names crashes and errors as unreported", async () => {
+      mockBySql([]);
+      expect((await dashboard("/v1/dashboard/stability?model=Voron")).not_applicable).toEqual({ crashes: "model", errors: "model" });
+      mockBySql([]);
+      expect((await dashboard("/v1/dashboard/stability?board=k1")).not_applicable).toEqual({ crashes: null, errors: null });
+    });
+
+    it("prints names prints as unreported", async () => {
+      mockBySql([]);
+      expect((await dashboard("/v1/dashboard/prints?model=Voron")).not_applicable).toEqual({ prints: "model" });
+      mockBySql([]);
+      expect((await dashboard("/v1/dashboard/prints")).not_applicable).toEqual({ prints: null });
+    });
+
+    it("devices names the crash and print columns as unreported", async () => {
+      mockBySql([]);
+      expect((await dashboard("/v1/dashboard/devices?model=Voron")).not_applicable).toEqual({ crashes: "model", prints: "model" });
+      mockBySql([]);
+      expect((await dashboard("/v1/dashboard/devices?platform=pi")).not_applicable).toEqual({ crashes: null, prints: null });
+    });
+  });
+
+  // -- GET /v1/dashboard/devices and /device/<id> --
+
+  describe("device endpoints", () => {
+    const ID = "ab".repeat(32);
+
+    it("device page 400s on a bad id before any query", async () => {
+      for (const bad of ["abc", ID.toUpperCase(), ID + "a", "x'%20OR%201=1"]) {
+        const res = await worker.fetch(dashboardRequest(`/v1/dashboard/device/${bad}`), env as never);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "invalid device id" });
+      }
+      expect(mockExecuteQuery).not.toHaveBeenCalled();
+    });
+
+    it("device page requires the admin key", async () => {
+      const res = await worker.fetch(dashboardRequest(`/v1/dashboard/device/${ID}`, "nope"), env as never);
+      expect(res.status).toBe(401);
+    });
+
+    it("device page 404s when the device has no rows", async () => {
+      mockExecuteQuery.mockResolvedValue({ data: [] });
+      const res = await worker.fetch(dashboardRequest(`/v1/dashboard/device/${ID}`), env as never);
+      expect(res.status).toBe(404);
+    });
+
+    it("device page returns the page for canned rows", async () => {
+      mockExecuteQuery
+        .mockResolvedValueOnce({
+          data: [{ timestamp: "2026-10-03 00:00:00", index1: "crash", blob1: ID, blob2: "1.0.0", blob3: "SIGSEGV", double1: 9 }],
+        })
+        .mockResolvedValueOnce({ data: [{ version: "1.0.0", first_seen: "2026-10-01 00:00:00", last_seen: "2026-10-03 00:00:00" }] });
+      const res = await worker.fetch(dashboardRequest(`/v1/dashboard/device/${ID}`), env as never);
+      expect(res.status).toBe(200);
+      const page = (await res.json()) as any;
+      expect(page.device_id).toBe(ID);
+      expect(page.versions).toHaveLength(1);
+      expect(page.timeline[0]).toEqual({
+        timestamp: "2026-10-03 00:00:00",
+        kind: "crash",
+        fields: { app_version: "1.0.0", signal_name: "SIGSEGV", uptime_sec: 9 },
+      });
+      expect(mockExecuteQuery.mock.calls[0][1]).toContain(`blob1 = '${ID}'`);
+    });
+
+    it("device list joins counts and carries the filter into the session queries", async () => {
+      mockExecuteQuery.mockImplementation(async (_c, sql) => {
+        if (sql.includes("argMax")) return { data: [{ device_id: "d1", last_seen: "t", version: "1", platform: "pi", board: "", model: "m", sessions: 2 }] };
+        if (sql.includes("count(DISTINCT")) return { data: [{ total: 12 }] };
+        if (sql.includes("'crash'")) return { data: [{ device_id: "d1", crashes: 4 }] };
+        return { data: [] };
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/devices?platform=pi"), env as never);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.total).toBe(12);
+      expect(body.devices).toEqual([
+        { device_id: "d1", last_seen: "t", version: "1", platform: "pi", board: "", model: "m", sessions: 2, crashes: 4, prints: 0 },
+      ]);
+      const sessionSql = mockExecuteQuery.mock.calls[0][1] as string;
+      expect(sessionSql).toContain(queries.filterFor("session", { platform: "pi" }));
+    });
+  });
+
+  // -- GET /v1/dashboard/health --
+
+  describe("GET /v1/dashboard/health", () => {
+    it("runs top_versions first, then the rest with those versions, and returns all five blocks", async () => {
+      mockExecuteQuery.mockImplementation(async (_c, sql) => {
+        if (sql.includes("LIMIT 8")) return { data: [{ ver: "1.0.4", devices: 10 }] };
+        if (sql.includes("'cdn_fleet_daily'") && sql.includes("LIMIT 1")) return { data: [{ date: "2026-10-14", sources: 7 }] };
+        if (sql.includes("index1 IN ('session', 'crash', 'update_failed'")) {
+          return { data: [{ ver: "1.0.4", sessions: 20, crashes: 1, update_failures: 0, update_successes: 0 }] };
+        }
+        return { data: [] };
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/health?version=1.0.4"), env as never);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(Object.keys(body).sort()).toEqual(["crash_clusters", "data_health", "errors", "fleet", "not_applicable", "releases"]);
+      expect(body.not_applicable).toEqual({ crashes: null, errors: null, prints: null, updates: null });
+      expect(body.releases[0].version).toBe("1.0.4");
+      expect(body.releases[0].cur.crash_rate).toBeCloseTo(0.05);
+      expect(body.fleet.cdn_sources).toBe(7);
+      const sqls = mockExecuteQuery.mock.calls.map((c) => c[1] as string);
+      expect(sqls[0]).toContain("LIMIT 8");
+      expect(sqls.slice(1).some((s) => s.includes("'1.0.4'"))).toBe(true);
+    });
+  });
+
   // -- GET /v1/dashboard/crash-list --
 
   describe("GET /v1/dashboard/crash-list", () => {
@@ -1438,84 +1879,222 @@ describe("Dashboard endpoints", () => {
   // -- GET /v1/dashboard/releases --
 
   describe("GET /v1/dashboard/releases", () => {
-    it("returns release comparison data", async () => {
-      mockExecuteQuery
-        .mockResolvedValueOnce({
-          data: [{ ver: "0.9.19", total_sessions: 200, total_crashes: 4 }],
-        })
-        .mockResolvedValueOnce({
-          data: [{ ver: "0.9.19", active_devices: 50 }],
-        })
-        .mockResolvedValueOnce({
-          data: [{ ver: "0.9.19", print_successes: 88, print_total: 100 }],
-        });
+    // Answers each scorecard query by its shape, so tests do not depend on call order.
+    function scorecardMock(rows: {
+      stats?: unknown[];
+      actives?: unknown[];
+      prints?: unknown[];
+      crashers?: unknown[];
+      frame?: unknown[];
+      rss?: unknown[];
+      adoption?: unknown[];
+      top?: unknown[];
+      sessions?: unknown[];
+    }) {
+      mockExecuteQuery.mockImplementation(async (_c, sql: string) => {
+        if (sql.includes("LIMIT 8")) return { data: rows.top ?? [] };
+        if (sql.includes("argMax") && sql.includes("as model")) return { data: rows.sessions ?? [] };
+        if (sql.includes("as update_successes")) return { data: rows.stats ?? [] };
+        if (sql.includes("as active_devices")) return { data: rows.actives ?? [] };
+        if (sql.includes("as print_successes")) return { data: rows.prints ?? [] };
+        if (sql.includes("as crashing_devices")) return { data: rows.crashers ?? [] };
+        if (sql.includes("as p95_frame_ms")) return { data: rows.frame ?? [] };
+        if (sql.includes("as p95_rss_kb")) return { data: rows.rss ?? [] };
+        if (sql.includes("as devices") && sql.includes("toDate(timestamp) as date")) return { data: rows.adoption ?? [] };
+        return { data: [] };
+      });
+    }
 
-      const res = await worker.fetch(
-        dashboardRequest("/v1/dashboard/releases?versions=v0.9.19"),
-        env,
-      );
+    it("returns release comparison data", async () => {
+      scorecardMock({
+        stats: [{ ver: "0.9.19", sessions: 200, crashes: 4 }],
+        actives: [{ ver: "0.9.19", active_devices: 50 }],
+        prints: [{ ver: "0.9.19", print_successes: 88, print_total: 100 }],
+        crashers: [{ ver: "0.9.19", crashing_devices: 5 }],
+        frame: [{ ver: "0.9.19", p95_frame_ms: 33.4 }],
+        rss: [{ ver: "0.9.19", p95_rss_kb: 90000 }],
+        adoption: [{ date: "2026-10-01", ver: "0.9.19", devices: 12 }],
+      });
+
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases?versions=v0.9.19"), env as never);
       expect(res.status).toBe(200);
-      const data = await res.json();
+      const data = (await res.json()) as any;
       expect(data.versions).toHaveLength(1);
-      expect(data.versions[0].version).toBe("0.9.19");
-      expect(data.versions[0].active_devices).toBe(50);
-      expect(data.versions[0].crash_rate).toBeCloseTo(0.02);
-      expect(data.versions[0].print_success_rate).toBeCloseTo(0.88);
-      expect(data.versions[0].total_sessions).toBe(200);
-      expect(data.versions[0].total_crashes).toBe(4);
-      // Absent update columns must degrade to 0/null, not NaN or undefined —
-      // rows predating the update_* mapping still come back from the dataset.
-      expect(data.versions[0].update_failures).toBe(0);
-      expect(data.versions[0].update_successes).toBe(0);
-      expect(data.versions[0].update_success_rate).toBeNull();
+      const v = data.versions[0];
+      expect(v.version).toBe("0.9.19");
+      expect(v.active_devices).toBe(50);
+      expect(v.crash_rate).toBeCloseTo(0.02);
+      expect(v.crash_free_devices).toBeCloseTo(0.9);
+      expect(v.p95_frame_ms).toBeCloseTo(33.4);
+      expect(v.p95_rss_kb).toBe(90000);
+      expect(v.print_success_rate).toBeCloseTo(0.88);
+      expect(v.total_sessions).toBe(200);
+      expect(v.total_crashes).toBe(4);
+      expect(v.update_failures).toBe(0);
+      expect(v.update_successes).toBe(0);
+      expect(v.update_failure_rate).toBeNull();
+      expect(data.adoption).toEqual([{ date: "2026-10-01", version: "0.9.19", devices: 12 }]);
+    });
+
+    it("attributes prints without a version to each device's session version", async () => {
+      scorecardMock({
+        stats: [{ ver: "0.9.19", sessions: 10 }, { ver: "0.9.18", sessions: 10 }],
+        prints: [
+          { device_id: "a", ver: "", print_successes: 3, print_total: 4 },
+          { device_id: "b", ver: "0.9.18", print_successes: 1, print_total: 2 },
+          { device_id: "z", ver: "", print_successes: 0, print_total: 9 },
+        ],
+        sessions: [{ device_id: "a", model: "K1", ver: "0.9.19" }, { device_id: "b", model: "K1", ver: "0.9.19" }],
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases?versions=0.9.19,0.9.18"), env as never);
+      const rate = Object.fromEntries(((await res.json()) as any).versions.map((v: any) => [v.version, v.print_success_rate]));
+      expect(rate["0.9.19"]).toBeCloseTo(0.75);
+      expect(rate["0.9.18"]).toBeCloseTo(0.5);
+    });
+
+    it("picks the versions itself when the param is absent", async () => {
+      scorecardMock({
+        top: [{ ver: "1.0.4", devices: 9 }],
+        stats: [{ ver: "1.0.4", sessions: 10, crashes: 1 }],
+        actives: [{ ver: "1.0.4", active_devices: 9 }],
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases"), env as never);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as any;
+      expect(data.versions[0].version).toBe("1.0.4");
+      const sqls = mockExecuteQuery.mock.calls.map((c) => c[1] as string);
+      expect(sqls[0]).toContain("LIMIT 8");
+      expect(sqls.slice(1).some((s) => s.includes("'1.0.4'"))).toBe(true);
+    });
+
+    it("reports a null crash rate and crash-free share with no sessions or devices", async () => {
+      scorecardMock({
+        stats: [{ ver: "0.9.18", sessions: 0, crashes: 0 }],
+        actives: [],
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases?versions=v0.9.18"), env as never);
+      expect(res.status).toBe(200);
+      const v = ((await res.json()) as any).versions[0];
+      expect(v.crash_rate).toBeNull();
+      expect(v.crash_free_devices).toBeNull();
+      expect(v.p95_frame_ms).toBeNull();
+      expect(v.p95_rss_kb).toBeNull();
+    });
+
+    it("clamps crash-free devices at 0 when more devices crashed than were active", async () => {
+      scorecardMock({
+        stats: [{ ver: "1.0.0", sessions: 10, crashes: 9 }],
+        actives: [{ ver: "1.0.0", active_devices: 2 }],
+        crashers: [{ ver: "1.0.0", crashing_devices: 5 }],
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases?versions=1.0.0"), env as never);
+      expect(((await res.json()) as any).versions[0].crash_free_devices).toBe(0);
+    });
+
+    it("returns empty lists when no version has sessions", async () => {
+      scorecardMock({ top: [] });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases"), env as never);
+      expect(await res.json()).toEqual({
+        versions: [],
+        adoption: [],
+        not_applicable: { crashes: null, prints: null, updates: null, performance: null },
+      });
+      expect(mockExecuteQuery).toHaveBeenCalledTimes(1);
     });
 
     it("reports self-update health per running version", async () => {
-      mockExecuteQuery
-        .mockResolvedValueOnce({
-          data: [
-            {
-              ver: "0.99.97",
-              total_sessions: 100,
-              total_crashes: 1,
-              update_failures: 9,
-              update_successes: 1,
-            },
-          ],
-        })
-        .mockResolvedValueOnce({ data: [{ ver: "0.99.97", active_devices: 40 }] })
-        .mockResolvedValueOnce({
-          data: [{ ver: "0.99.97", print_successes: 10, print_total: 10 }],
-        });
-
-      const res = await worker.fetch(
-        dashboardRequest("/v1/dashboard/releases?versions=v0.99.97"),
-        env,
-      );
+      scorecardMock({
+        stats: [{ ver: "0.99.97", sessions: 100, crashes: 1, update_failures: 9, update_successes: 1 }],
+        actives: [{ ver: "0.99.97", active_devices: 40 }],
+        prints: [{ ver: "0.99.97", print_successes: 10, print_total: 10 }],
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases?versions=v0.99.97"), env as never);
       expect(res.status).toBe(200);
-      const data = await res.json();
-      // A version that cannot update itself — the helixscreen#993 signature.
+      const data = (await res.json()) as any;
       expect(data.versions[0].update_failures).toBe(9);
       expect(data.versions[0].update_successes).toBe(1);
-      expect(data.versions[0].update_success_rate).toBeCloseTo(0.1);
+      expect(data.versions[0].update_failure_rate).toBeCloseTo(0.9);
     });
 
-    it("requires versions parameter", async () => {
-      const res = await worker.fetch(
-        dashboardRequest("/v1/dashboard/releases"),
-        env,
-      );
-      expect(res.status).toBe(400);
-      const data = await res.json();
-      expect(data.error).toContain("versions parameter required");
+    it("reports a null print success rate for a version with no prints", async () => {
+      scorecardMock({
+        stats: [{ ver: "0.9.18", sessions: 10, crashes: 0 }],
+        actives: [{ ver: "0.9.18", active_devices: 5 }],
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases?versions=v0.9.18"), env as never);
+      expect(((await res.json()) as any).versions[0].print_success_rate).toBeNull();
     });
 
     it("rejects empty versions parameter", async () => {
-      const res = await worker.fetch(
-        dashboardRequest("/v1/dashboard/releases?versions="),
-        env,
-      );
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/releases?versions="), env as never);
       expect(res.status).toBe(400);
+    });
+
+    it("rejects more than 20 versions", async () => {
+      const many = Array.from({ length: 21 }, (_, i) => `1.0.${i}`).join(",");
+      const res = await worker.fetch(dashboardRequest(`/v1/dashboard/releases?versions=${many}`), env as never);
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("GET /v1/dashboard/fleet/retention", () => {
+    it("returns cohorts from per-device first and last days", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      mockExecuteQuery.mockResolvedValue({ data: [{ first_day: today, last_day: today }] });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/fleet/retention"), env as never);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.cohorts).toHaveLength(13);
+      expect(body.cohorts[0].label).toBe("before window");
+      expect(body.cohorts[12].size).toBe(1);
+      expect(mockExecuteQuery.mock.calls[0][1]).toContain("min(toDate(timestamp))");
+    });
+  });
+
+  describe("prints and performance additions", () => {
+    it("prints sums per-device outcomes into models and versions through the session join", async () => {
+      mockExecuteQuery.mockImplementation(async (_c, sql: string) => {
+        if (sql.includes("argMax") && sql.includes("as model")) {
+          return { data: [{ device_id: "a", model: "Voron 2.4", ver: "1.0.0" }, { device_id: "b", model: "Voron 2.4", ver: "1.0.1" }] };
+        }
+        if (sql.includes("as device_id") && sql.includes("as print_successes")) {
+          return { data: [
+            { device_id: "a", ver: "", print_successes: 8, print_total: 10 },
+            { device_id: "b", ver: "1.0.0", print_successes: 2, print_total: 10 },
+            { device_id: "z", ver: "", print_successes: 1, print_total: 4 },
+          ] };
+        }
+        return { data: [] };
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/prints"), env as never);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      const byModel = Object.fromEntries(body.by_model.map((m: any) => [m.model, m]));
+      expect(byModel["Voron 2.4"]).toEqual({ model: "Voron 2.4", successes: 10, total: 20, rate: 0.5 });
+      expect(byModel["Unknown"]).toEqual({ model: "Unknown", successes: 1, total: 4, rate: 0.25 });
+      expect(body.by_version).toEqual([{ version: "1.0.0", successes: 10, total: 20, rate: 0.5 }]);
+    });
+
+    it("performance returns per-platform version and panel breakdowns", async () => {
+      mockExecuteQuery.mockImplementation(async (_c, sql: string) => {
+        if (sql.includes("memory_snapshot") || sql.includes("as avg_rss_kb")) {
+          return { data: [{ platform: "pi", version: "1.0.0", avg_rss_kb: 70000.4 }] };
+        }
+        if (sql.includes("GROUP BY platform, version")) {
+          return { data: [{ platform: "pi", version: "1.0.0", p95_frame_ms: 31.2, devices: 6 }] };
+        }
+        if (sql.includes("GROUP BY platform, panel")) {
+          return { data: [{ platform: "pi", panel: "home", times_worst: 3, avg_p95_ms: 40.6 }] };
+        }
+        return { data: [] };
+      });
+      const res = await worker.fetch(dashboardRequest("/v1/dashboard/performance"), env as never);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.by_platform_version).toEqual([
+        { platform: "pi", version: "1.0.0", p95_frame_ms: 31.2, avg_rss_kb: 70000.4, devices: 6 },
+      ]);
+      expect(body.jankiest_by_platform).toEqual([{ platform: "pi", panel: "home", times_worst: 3, avg_p95_ms: 41 }]);
     });
   });
 
@@ -1531,152 +2110,540 @@ describe("Dashboard endpoints", () => {
   });
 });
 
-// ---------- Backfill endpoint tests ----------
+// ---------- Admin routes that do not exist ----------
 
 describe("POST /v1/admin/backfill", () => {
-  let env: ReturnType<typeof createEnv>;
+  it("returns 404 even for an authenticated request", async () => {
+    const res = await worker.fetch(
+      makeRequest("/v1/admin/backfill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": "test-admin-key" },
+        body: JSON.stringify({ events: [validEvent()] }),
+      }),
+      createEnv(),
+    );
+    expect(res.status).toBe(404);
+  });
+});
 
-  function backfillRequest(body: unknown, apiKey = "test-admin-key") {
-    return makeRequest("/v1/admin/backfill", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": apiKey,
-      },
-      body: JSON.stringify(body),
+// ---------- AE per-kind counts ----------
+
+describe("aeCountsQuery", () => {
+  it("groups by index1 and filters on the given date", () => {
+    const sql = queries.aeCountsQuery("2026-10-12");
+    expect(sql).toContain("toDate(timestamp) = '2026-10-12'");
+    expect(sql).toContain("GROUP BY kind");
+    expect(sql).toContain("count() AS row_count");
+    expect(sql).toContain("sum(_sample_interval) AS weighted");
+    expect(sql).toContain("count(DISTINCT blob1) AS devices");
+    expect(sql).not.toContain("uniqExact");
+  });
+
+  it.each(["2026-10-12'; --", "2026-10-1", "20261012", "", "2026-13-45", "2026-02-30"])(
+    "rejects %j before building any SQL",
+    (bad) => {
+      expect(() => queries.aeCountsQuery(bad)).toThrow();
+    },
+  );
+});
+
+describe("GET /v1/admin/ae-counts", () => {
+  function aeCountsRequest(search: string, apiKey?: string) {
+    return makeRequest(`/v1/admin/ae-counts${search}`, {
+      headers: apiKey ? { "X-API-Key": apiKey } : {},
     });
   }
 
   beforeEach(() => {
-    env = createEnv();
+    mockExecuteQuery.mockReset();
   });
 
-  // -- Auth --
-
-  it("rejects unauthenticated requests", async () => {
-    const req = makeRequest("/v1/admin/backfill", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ events: [] }),
-    });
-    const res = await worker.fetch(req, env);
+  it("rejects a request without the admin key", async () => {
+    const res = await worker.fetch(aeCountsRequest("?date=2026-10-12"), createEnv());
     expect(res.status).toBe(401);
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
   });
 
-  it("rejects INGEST key", async () => {
+  it("rejects the ingest key", async () => {
     const res = await worker.fetch(
-      backfillRequest({ events: [validEvent()] }, "test-ingest-key"),
-      env,
+      aeCountsRequest("?date=2026-10-12", "test-ingest-key"),
+      createEnv(),
     );
     expect(res.status).toBe(401);
   });
 
-  // -- Validation --
+  it.each(["", "?date=nope", "?date=2026-10-12'; --"])(
+    "returns 400 for a bad date (%j)",
+    async (search) => {
+      const res = await worker.fetch(aeCountsRequest(search, "test-admin-key"), createEnv());
+      expect(res.status).toBe(400);
+      expect(mockExecuteQuery).not.toHaveBeenCalled();
+    },
+  );
 
-  it("rejects non-JSON content type", async () => {
-    const req = makeRequest("/v1/admin/backfill", {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/plain",
-        "X-API-Key": "test-admin-key",
-      },
-      body: "not json",
-    });
-    const res = await worker.fetch(req, env);
-    expect(res.status).toBe(400);
-    const data = await res.json();
-    expect(data.error).toContain("application/json");
-  });
-
-  it("rejects invalid JSON", async () => {
-    const req = makeRequest("/v1/admin/backfill", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": "test-admin-key",
-      },
-      body: "not json{{{",
-    });
-    const res = await worker.fetch(req, env);
-    expect(res.status).toBe(400);
-    const data = await res.json();
-    expect(data.error).toContain("Invalid JSON");
-  });
-
-  it("rejects array body (must be object)", async () => {
-    const res = await worker.fetch(backfillRequest([validEvent()]), env);
-    expect(res.status).toBe(400);
-    const data = await res.json();
-    expect(data.error).toContain("object");
-  });
-
-  it("rejects body without events array", async () => {
-    const res = await worker.fetch(backfillRequest({ events: "not array" }), env);
-    expect(res.status).toBe(400);
-    const data = await res.json();
-    expect(data.error).toContain("events must be an array");
-  });
-
-  it("rejects empty events array", async () => {
-    const res = await worker.fetch(backfillRequest({ events: [] }), env);
-    expect(res.status).toBe(400);
-    const data = await res.json();
-    expect(data.error).toContain("empty");
-  });
-
-  it("returns 503 when Analytics Engine is not configured", async () => {
-    const noAnalyticsEnv = createEnv();
-    (noAnalyticsEnv as Record<string, unknown>).TELEMETRY_ANALYTICS = undefined;
+  it("returns the per-kind rows for the date", async () => {
+    mockExecuteQuery.mockResolvedValue({
+      data: [
+        { kind: "session", row_count: 10, weighted: 12, devices: 7 },
+        { kind: "panel_usage", row_count: 40, weighted: 40, devices: 5 },
+      ],
+    } as never);
     const res = await worker.fetch(
-      backfillRequest({ events: [validEvent()] }),
-      noAnalyticsEnv,
+      aeCountsRequest("?date=2026-10-12", "test-admin-key"),
+      createEnv(),
     );
-    expect(res.status).toBe(503);
-    const data = await res.json();
-    expect(data.error).toContain("not configured");
-  });
-
-  // -- Happy path --
-
-  it("writes events to Analytics Engine and returns count", async () => {
-    const events = [
-      { event: "session", device_id: "dev-1", version: "0.9.19" },
-      { event: "crash", device_id: "dev-2", signal_name: "SIGSEGV" },
-      { event: "print_outcome", device_id: "dev-3", outcome: "success" },
-    ];
-    const res = await worker.fetch(backfillRequest({ events }), env);
     expect(res.status).toBe(200);
-    const data = await res.json();
-    expect(data.status).toBe("ok");
-    expect(data.written).toBe(3);
-    expect(env.TELEMETRY_ANALYTICS.writeDataPoint).toHaveBeenCalledTimes(3);
-  });
-
-  it("continues backfilling when individual events fail", async () => {
-    const analytics = createMockAnalyticsEngine();
-    let callCount = 0;
-    analytics.writeDataPoint = vi.fn(() => {
-      callCount++;
-      if (callCount === 2) throw new Error("bad event");
+    expect(await res.json()).toEqual({
+      date: "2026-10-12",
+      kinds: [
+        { kind: "session", rows: 10, weighted: 12, devices: 7 },
+        { kind: "panel_usage", rows: 40, weighted: 40, devices: 5 },
+      ],
     });
-    const failEnv = createEnv({ TELEMETRY_ANALYTICS: analytics });
-
-    const events = [
-      { event: "session", device_id: "dev-1" },
-      { event: "bad", device_id: "dev-2" },
-      { event: "session", device_id: "dev-3" },
-    ];
-    const res = await worker.fetch(backfillRequest({ events }), failEnv);
-    expect(res.status).toBe(200);
-    const data = await res.json();
-    expect(data.written).toBe(2); // 1st and 3rd succeed
-    expect(analytics.writeDataPoint).toHaveBeenCalledTimes(3);
+    expect(mockExecuteQuery.mock.calls[0][1]).toBe(queries.aeCountsQuery("2026-10-12"));
   });
 
-  it("does not write to R2 (backfill is Analytics Engine only)", async () => {
-    const putSpy = vi.spyOn(env.TELEMETRY_BUCKET, "put");
-    const events = [{ event: "session", device_id: "dev-1" }];
-    await worker.fetch(backfillRequest({ events }), env);
-    expect(putSpy).not.toHaveBeenCalled();
+  it("returns 502 when the SQL API fails", async () => {
+    mockExecuteQuery.mockRejectedValue(new Error("SQL API down"));
+    const res = await worker.fetch(
+      aeCountsRequest("?date=2026-10-12", "test-admin-key"),
+      createEnv(),
+    );
+    expect(res.status).toBe(502);
+  });
+});
+
+// ---------- reconcile script ----------
+
+describe("buildReconcileTable", () => {
+  it("joins R2 point counts with AE rows and computes kept%", () => {
+    const table = buildReconcileTable(
+      { session: 10, panel_usage: 4, crash: 2 },
+      [
+        { kind: "session", rows: 9, weighted: 10, devices: 5 },
+        { kind: "panel_usage", rows: 1, weighted: 2, devices: 1 },
+        { kind: "ae_only", rows: 3, weighted: 3, devices: 1 },
+      ],
+    );
+    expect(table).toEqual([
+      { kind: "crash", r2_points: 2, ae_rows: 0, ae_weighted: 0, "kept%": "0.0" },
+      { kind: "panel_usage", r2_points: 4, ae_rows: 1, ae_weighted: 2, "kept%": "50.0" },
+      { kind: "session", r2_points: 10, ae_rows: 9, ae_weighted: 10, "kept%": "100.0" },
+      { kind: "ae_only", r2_points: 0, ae_rows: 3, ae_weighted: 3, "kept%": "n/a" },
+    ]);
+  });
+
+  it("sorts kinds present in R2 alphabetically, then AE-only kinds", () => {
+    const table = buildReconcileTable({ b: 1, a: 1 }, [{ kind: "z", rows: 1, weighted: 1, devices: 1 }]);
+    expect(table.map((r) => r.kind)).toEqual(["a", "b", "z"]);
+  });
+});
+
+describe("parseEnvValue", () => {
+  const text = [
+    "# comment",
+    "OTHER=nope",
+    "HELIX_TELEMETRY_ADMIN_KEY=abc123",
+    "",
+  ].join("\n");
+
+  it("reads a plain KEY=VALUE line, as .env.telemetry is written", () => {
+    expect(parseEnvValue(text, "HELIX_TELEMETRY_ADMIN_KEY")).toBe("abc123");
+  });
+
+  it("accepts export prefix, quotes and CRLF, and the last assignment wins", () => {
+    expect(parseEnvValue('A=1\r\nexport A="two"\r\n', "A")).toBe("two");
+  });
+
+  it("returns undefined for a missing name or a commented-out line", () => {
+    expect(parseEnvValue("# A=1\nB=2", "A")).toBeUndefined();
+  });
+});
+
+describe("countR2Points", () => {
+  it("counts mapped data points per event kind across batches", () => {
+    const counts = countR2Points([
+      [
+        { event: "session", device_id: "d1" },
+        { event: "crash", device_id: "d1", signal_name: "SIGSEGV" },
+      ],
+      [{ event: "session", device_id: "d2" }],
+    ]);
+    expect(counts).toEqual({ session: 2, crash: 1 });
+  });
+
+  it("counts by the AE kind a point lands in, not by the event name", () => {
+    const counts = countR2Points([
+      [
+        { event: "settings_snapshot", device_id: "d1", home_widgets: ["temp", "temp", "fan"] },
+        {
+          event: "panel_usage",
+          device_id: "d1",
+          panel_time_sec: { home: 5, motion: 3 },
+          panel_visits: { home: 1, motion: 1, settings: 2 },
+        },
+        {
+          event: "settings_changes",
+          device_id: "d1",
+          changes: [
+            { setting: "a", old_value: "1", new_value: "2" },
+            { setting: "b", old_value: "x", new_value: "y" },
+          ],
+        },
+      ],
+    ]);
+    expect(counts).toEqual({
+      settings_snapshot: 1,
+      widget_placement: 2,
+      panel_usage: 3,
+      settings_change: 2,
+    });
+  });
+
+  it("tolerates a batch shaped as {events: [...]} and skips non-objects", () => {
+    const counts = countR2Points([{ events: [{ event: "session", device_id: "d1" }, null, 7] }, "junk"]);
+    expect(counts).toEqual({ session: 1 });
+  });
+});
+
+describe("client field names reach the right Analytics Engine slot", () => {
+  it("connection_stability reads total_connected_sec and total_disconnected_sec", () => {
+    const dp = mapEventToDataPoints({
+      event: "connection_stability",
+      device_id: "dev-1",
+      total_connected_sec: 3600,
+      total_disconnected_sec: 120,
+    })[0];
+    expect(dp.doubles![3]).toBe(3600);
+    expect(dp.doubles![4]).toBe(120);
+  });
+
+  it("settings_snapshot reads auto_update_channel and screen_blank_timeout_sec", () => {
+    const dp = mapEventToDataPoints({
+      event: "settings_snapshot",
+      device_id: "dev-1",
+      auto_update_channel: "beta",
+      screen_blank_timeout_sec: 300,
+    })[0];
+    expect(dp.blobs![5]).toBe("beta");
+    expect(dp.doubles![2]).toBe(300);
+  });
+
+  it("print_start_context reads estimated_duration_bucket", () => {
+    const dp = mapEventToDataPoints({
+      event: "print_start_context",
+      device_id: "dev-1",
+      estimated_duration_bucket: "1-4h",
+    })[0];
+    expect(dp.blobs![5]).toBe("1-4h");
+  });
+});
+
+describe("SQL builders", () => {
+  it("never emit uniqExact", () => {
+    const builders = Object.entries(queries).filter(([name]) => /Quer(y|ies)$/.test(name) && name !== "executeQuery" && name !== "aeCountsQuery");
+    expect(builders.length).toBeGreaterThan(10);
+    for (const [name, fn] of builders) {
+      const out =
+        name === "crashListQuery"
+          ? (fn as (d: number, l: number) => string)(30, 10)
+          : name === "updateFailureGroupsQuery"
+            ? (fn as unknown as (w: readonly [number, number]) => string)([0, 7])
+          : name === "releaseScorecardQueries"
+            ? (fn as (v: string[], d: number) => string[])(["1.0.0"], 30)
+            : name === "retentionQuery"
+              ? (fn as () => string)()
+            : name === "deviceQueries"
+              ? (fn as unknown as (id: string) => string[])("0".repeat(64))
+              : (fn as (d: number) => string | string[])(30);
+      for (const sql of Array.isArray(out) ? out : [out]) {
+        expect(sql, name).not.toContain("uniqExact");
+      }
+    }
+  });
+});
+
+describe("toYesNo", () => {
+  it("counts numeric 1 and 0 names as yes and no", () => {
+    const res = { data: [{ name: 1, count: 3 }, { name: 0, count: 1 }] };
+    expect(toYesNo(res, "installed", "not_installed")).toEqual({ installed: 3, not_installed: 1, reported: 4 });
+  });
+
+  it("counts string names the same way", () => {
+    const res = { data: [{ name: "1", count: 2 }, { name: "0", count: 5 }] };
+    expect(toYesNo(res, "local", "remote")).toEqual({ local: 2, remote: 5, reported: 7 });
+  });
+});
+
+describe("compareVersions", () => {
+  // The worker and the dashboard each carry their own comparator; every case
+  // runs against both so the two cannot drift apart.
+  const copies: Array<[string, (a: string, b: string) => number]> = [
+    ["worker", compareVersions],
+    ["dashboard", dashboardCompareVersions],
+  ];
+  // [a, b, sign of compare(a, b)]
+  const cases: Array<[string, string, -1 | 0 | 1]> = [
+    ["1.2.3", "1.2.3", 0],
+    ["1.2", "1.2.0", 0],
+    ["1.10.0", "1.9.0", 1],
+    ["1.0.5", "1.1.0", -1],
+    ["1.1.0-beta.9", "1.1.0-beta.10", -1],
+    ["1.1.0-beta", "1.1.0-beta.1", -1],
+    ["1.1.0-rc", "1.1.0-beta", 1],
+    ["1.1.0-rc.1", "1.1.0-beta.9", 1],
+    ["1.1.0-1", "1.1.0-alpha", -1],
+    ["1.1.0-beta.1", "1.1.0-beta.alpha", -1],
+    ["1.1.0-beta.2", "1.1.0", -1],
+    ["1.0.9", "1.1.0-beta.1", -1],
+    ["v1.2.0", "1.2.0", 0],
+    ["v1.2.0-beta.1", "1.2.0-beta.1", 0],
+    ["1.2.0+build5", "1.2.0", 0],
+    ["1.2.0-beta.1+abc", "1.2.0-beta.1", 0],
+    ["1.2.0-beta.1+abc", "1.2.0-beta.2+aaa", -1],
+  ];
+
+  for (const [name, cmp] of copies) {
+    describe(name, () => {
+      for (const [a, b, want] of cases) {
+        it(`${a} vs ${b} is ${want}`, () => {
+          expect(Math.sign(cmp(a, b))).toBe(want);
+          expect(Math.sign(cmp(b, a))).toBe(-want || 0);
+        });
+      }
+
+      it("sorts a mixed list", () => {
+        const input = ["1.1.0", "1.1.0-beta.10", "1.0.5", "1.1.0-beta.9", "0.99.118"];
+        expect([...input].sort(cmp)).toEqual(["0.99.118", "1.0.5", "1.1.0-beta.9", "1.1.0-beta.10", "1.1.0"]);
+      });
+    });
+  }
+});
+
+describe("configuredFeature", () => {
+  it("is the share of reporting devices with the flag on", () => {
+    expect(configuredFeature("x", { data: [{ name: "1", count: 3 }, { name: "0", count: 1 }] })).toEqual({
+      id: "x",
+      devices: 3,
+      reported: 4,
+      adoption_rate: 0.75,
+    });
+  });
+
+  it("has no rate before any device reports", () => {
+    expect(configuredFeature("x", { data: [] }).adoption_rate).toBeNull();
+  });
+});
+
+describe("deriveFeatureAdoption", () => {
+  it("rates each id against the delta-era devices, highest first", () => {
+    expect(
+      deriveFeatureAdoption([{ id: "a_overlay", devices: 1 }], [{ id: "b", devices: 3 }], 4),
+    ).toEqual([
+      { id: "b", devices: 3, adoption_rate: 0.75 },
+      { id: "a_overlay", devices: 1, adoption_rate: 0.25 },
+    ]);
+  });
+
+  it("is empty before any schema-3 device reports", () => {
+    expect(deriveFeatureAdoption([{ id: "a", devices: 1 }], [], 0)).toEqual([]);
+  });
+
+  it("an id reported as both overlay and widget appears once", () => {
+    expect(deriveFeatureAdoption([{ id: "x", devices: 2 }], [{ id: "x", devices: 3 }], 4)).toEqual([
+      { id: "x", devices: 3, adoption_rate: 0.75 },
+    ]);
+  });
+
+  it("drops empty ids", () => {
+    expect(deriveFeatureAdoption([{ id: "", devices: 2 }], [], 4)).toEqual([]);
+  });
+});
+
+// ---------- Feedback loop: cron dispatch, admin run, report endpoints ----------
+
+describe("feedback loop wiring", () => {
+  const TUESDAY = new Date("2026-10-20T13:00:00Z");
+  const MONDAY = new Date("2026-10-19T13:00:00Z");
+
+  /** Runs scheduled() and settles every promise it handed to waitUntil. */
+  async function runScheduled(cron: string, at: Date, env: unknown) {
+    const waits: Promise<unknown>[] = [];
+    const ctx = { waitUntil: (p: Promise<unknown>) => void waits.push(p), passThroughOnException() {} };
+    await worker.scheduled({ cron, scheduledTime: at.getTime(), noRetry() {} } as never, env as never, ctx as never);
+    return Promise.allSettled(waits);
+  }
+
+  const reportKeys = (env: ReturnType<typeof createEnv>) =>
+    [...env.TELEMETRY_BUCKET._storage.keys()].filter((k) => k.startsWith("reports/"));
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockExecuteQuery.mockReset();
+    mockExecuteQuery.mockResolvedValue({ data: [] });
+  });
+
+  describe("scheduled", () => {
+    it("is scheduled by wrangler.toml for both crons, and nothing else", () => {
+      const toml = readFileSync(resolve(__dirname, "../../wrangler.toml"), "utf8");
+      const line = toml.match(/^\s*crons\s*=\s*\[(.*)\]/m);
+      expect(line).not.toBeNull();
+      const crons = [...line![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+      expect(crons.sort()).toEqual([CDN_CRON, LOOP_CRON].sort());
+    });
+
+    it("runs the daily loop only, on a weekday 13:00 cron", async () => {
+      const env = createEnv();
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+      const settled = await runScheduled(LOOP_CRON, TUESDAY, env);
+      expect(settled.every((s) => s.status === "fulfilled")).toBe(true);
+      expect(mockExecuteQuery).toHaveBeenCalled();
+      expect(reportKeys(env)).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("runs the weekly loop as well on a Monday", async () => {
+      const env = createEnv();
+      await runScheduled(LOOP_CRON, MONDAY, env);
+      expect(reportKeys(env)).toEqual(["reports/2026-W42.json"]);
+    });
+
+    it("still runs the weekly loop when the daily one fails", async () => {
+      const env = createEnv();
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockExecuteQuery.mockRejectedValueOnce(new Error("daily boom"));
+      await runScheduled(LOOP_CRON, MONDAY, env);
+      expect(err.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes("daily run failed"))).toHaveLength(1);
+      expect(reportKeys(env)).toEqual(["reports/2026-W42.json"]);
+    });
+
+    it("logs the run's alertsSent and skipped, as an error when something was skipped", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      await runScheduled(LOOP_CRON, TUESDAY, createEnv());
+      expect(log.mock.calls.map((c) => c.join(" ")).join("\n")).toContain("alertsSent=[]");
+      expect(err).not.toHaveBeenCalled();
+      // Monday's weekly run has no mailer configured, so it skips the email.
+      await runScheduled(LOOP_CRON, MONDAY, createEnv());
+      expect(err.mock.calls.map((c) => c.join(" ")).join("\n")).toContain("email: not configured");
+    });
+
+    it("skips issue sync once, with one line, when the GitHub App is not configured", async () => {
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      await runScheduled(LOOP_CRON, MONDAY, createEnv());
+      const weekly = err.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes("weekly run"));
+      expect(weekly).toHaveLength(1);
+      expect(weekly[0].match(/github: not configured/g)).toHaveLength(1);
+    });
+
+    it("logs a loop failure with console.error and does not throw", async () => {
+      const env = createEnv();
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockExecuteQuery.mockRejectedValue(new Error("analytics down"));
+      const settled = await runScheduled(LOOP_CRON, TUESDAY, env);
+      expect(settled.every((s) => s.status === "fulfilled")).toBe(true);
+      expect(err).toHaveBeenCalled();
+      expect(String(err.mock.calls[0].join(" "))).toContain("analytics down");
+    });
+
+    it("runs the CDN snapshot, not the loop, on the 02:10 cron", async () => {
+      const env = createEnv();
+      const settled = await runScheduled(CDN_CRON, new Date("2026-10-20T02:10:00Z"), env);
+      expect(mockExecuteQuery).not.toHaveBeenCalled();
+      expect(settled).toHaveLength(1);
+      // The snapshot's rejection is left visible to Cloudflare, not swallowed.
+      expect(settled[0]).toMatchObject({ status: "rejected" });
+      expect(String((settled[0] as PromiseRejectedResult).reason)).toContain("CDN fleet snapshot not configured");
+    });
+  });
+
+  describe("POST /v1/admin/loop/run", () => {
+    const post = (qs: string, key: string | null = "test-admin-key") =>
+      makeRequest(`/v1/admin/loop/run${qs}`, { method: "POST", headers: key ? { "X-API-Key": key } : {} });
+
+    it("rejects a missing or wrong key", async () => {
+      expect((await worker.fetch(post("?mode=daily", null), createEnv() as never)).status).toBe(401);
+      expect((await worker.fetch(post("?mode=daily", "nope"), createEnv() as never)).status).toBe(401);
+      expect(mockExecuteQuery).not.toHaveBeenCalled();
+    });
+
+    it("rejects a mode that is not daily or weekly", async () => {
+      const res = await worker.fetch(post("?mode=hourly"), createEnv() as never);
+      expect(res.status).toBe(400);
+    });
+
+    it("treats an absent dry as a dry run and writes nothing", async () => {
+      const env = createEnv();
+      const res = await worker.fetch(post("?mode=weekly"), env as never);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as any;
+      expect(body.mode).toBe("weekly");
+      expect(body.week).toMatch(/^\d{4}-W\d{2}$/);
+      expect(env.TELEMETRY_BUCKET._storage.size).toBe(0);
+    });
+
+    it("writes only when dry=0 is explicit", async () => {
+      const env = createEnv();
+      expect((await worker.fetch(post("?mode=weekly&dry=1"), env as never)).status).toBe(200);
+      expect(env.TELEMETRY_BUCKET._storage.size).toBe(0);
+      expect((await worker.fetch(post("?mode=weekly&dry=0"), env as never)).status).toBe(200);
+      expect(reportKeys(env)).toHaveLength(1);
+    });
+
+    it("returns 502 with the reason when a read fails", async () => {
+      mockExecuteQuery.mockRejectedValue(new Error("analytics down"));
+      const res = await worker.fetch(post("?mode=daily"), createEnv() as never);
+      expect(res.status).toBe(502);
+      expect(((await res.json()) as any).error).toContain("analytics down");
+    });
+
+    it("is 503 when Analytics Engine is not configured", async () => {
+      const env = createEnv({ HELIX_ANALYTICS_READ_TOKEN: "" });
+      expect((await worker.fetch(post("?mode=daily"), env as never)).status).toBe(503);
+    });
+  });
+
+  describe("GET /v1/dashboard/reports", () => {
+    const get = (path: string, key = "test-admin-key") => makeRequest(path, { headers: { "X-API-Key": key } });
+    const seed = (env: ReturnType<typeof createEnv>, week: string, extra = {}) =>
+      env.TELEMETRY_BUCKET.put(`reports/${week}.json`, JSON.stringify({ week, ...extra }));
+
+    it("needs the admin key", async () => {
+      expect((await worker.fetch(get("/v1/dashboard/reports", "nope"), createEnv() as never)).status).toBe(401);
+    });
+
+    it("lists the stored weeks newest first, ignoring other keys", async () => {
+      const env = createEnv();
+      await seed(env, "2026-W41");
+      await seed(env, "2026-W43");
+      await seed(env, "2025-W52");
+      await env.TELEMETRY_BUCKET.put("reports/notes.txt", "x");
+      await env.TELEMETRY_BUCKET.put("loop/state.json", "{}");
+      const res = await worker.fetch(get("/v1/dashboard/reports"), env as never);
+      expect(await res.json()).toEqual({ weeks: ["2026-W43", "2026-W41", "2025-W52"] });
+    });
+
+    it("returns an empty list when nothing is stored", async () => {
+      const res = await worker.fetch(get("/v1/dashboard/reports"), createEnv() as never);
+      expect(await res.json()).toEqual({ weeks: [] });
+    });
+
+    it("returns one stored report", async () => {
+      const env = createEnv();
+      await seed(env, "2026-W42", { findings: [] });
+      const res = await worker.fetch(get("/v1/dashboard/reports/2026-W42"), env as never);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ week: "2026-W42", findings: [] });
+    });
+
+    it.each(["2026-W4", "latest", "2026-W42.json", "..%2Floop", "2026-w42"])("rejects the week %s with 400", async (week) => {
+      const res = await worker.fetch(get(`/v1/dashboard/reports/${week}`), createEnv() as never);
+      expect(res.status).toBe(400);
+    });
+
+    it("is 404 for a well-formed week that is not stored", async () => {
+      const res = await worker.fetch(get("/v1/dashboard/reports/2026-W42"), createEnv() as never);
+      expect(res.status).toBe(404);
+    });
   });
 });

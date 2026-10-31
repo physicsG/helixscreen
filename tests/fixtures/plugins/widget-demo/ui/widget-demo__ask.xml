@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<component>
+  <view extends="lv_obj" width="300" height="160">
+    <lv_label name="widget-demo__ask_text" text="Which one?"/>
+  </view>
+</component>

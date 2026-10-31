@@ -15,6 +15,7 @@
 
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
+#include "moonraker_performance_source.h"
 #include "printer_state.h"
 
 #include <atomic>
@@ -144,10 +145,10 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
     std::atomic<bool> success_called{false};
     std::atomic<bool> error_called{false};
     std::string downloaded_content;
-    constexpr size_t MAX_BYTES = 1000; // Only first 1KB
+    constexpr size_t kMaxBytes = 1000; // Only first 1KB
 
     api_->transfers().download_file_partial(
-        "gcodes", "3DBenchy.gcode", MAX_BYTES,
+        "gcodes", "3DBenchy.gcode", kMaxBytes,
         [&](const std::string& content) {
             downloaded_content = content;
             success_called.store(true);
@@ -157,7 +158,7 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
     REQUIRE(success_called.load());
     REQUIRE_FALSE(error_called.load());
     // Content should be limited to max_bytes
-    REQUIRE(downloaded_content.size() <= MAX_BYTES);
+    REQUIRE(downloaded_content.size() <= kMaxBytes);
     // And should have some content
     REQUIRE(downloaded_content.size() > 0);
 }
@@ -167,7 +168,7 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
                  "[mock][api][download][partial]") {
     std::atomic<bool> success_called{false};
     std::string downloaded_content;
-    constexpr size_t MAX_BYTES = 10 * 1024 * 1024; // 10MB limit (larger than file)
+    constexpr size_t kMaxBytes = 10 * 1024 * 1024; // 10MB limit (larger than file)
 
     // First get full file size
     std::string full_content;
@@ -179,7 +180,7 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
 
     // Now get with large limit - should return full content
     api_->transfers().download_file_partial(
-        "gcodes", "3DBenchy.gcode", MAX_BYTES,
+        "gcodes", "3DBenchy.gcode", kMaxBytes,
         [&](const std::string& content) {
             downloaded_content = content;
             success_called.store(true);
@@ -188,7 +189,7 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
 
     REQUIRE(success_called.load());
     // If file is smaller than limit, we get the whole thing
-    if (full_content.size() < MAX_BYTES) {
+    if (full_content.size() < kMaxBytes) {
         REQUIRE(downloaded_content == full_content);
     }
 }
@@ -219,24 +220,24 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
                  "[mock][api][download][partial]") {
     std::string full_content;
     std::string partial_content;
-    constexpr size_t PARTIAL_SIZE = 500;
+    constexpr size_t kPartialSize = 500;
 
     // Get full file
     api_->transfers().download_file(
         "gcodes", "3DBenchy.gcode", [&](const std::string& content) { full_content = content; },
         [](const MoonrakerError&) {});
 
-    REQUIRE(full_content.size() > PARTIAL_SIZE);
+    REQUIRE(full_content.size() > kPartialSize);
 
     // Get partial file
     api_->transfers().download_file_partial(
-        "gcodes", "3DBenchy.gcode", PARTIAL_SIZE,
+        "gcodes", "3DBenchy.gcode", kPartialSize,
         [&](const std::string& content) { partial_content = content; },
         [](const MoonrakerError&) {});
 
     // Partial should match the beginning of full content
-    REQUIRE(partial_content.size() == PARTIAL_SIZE);
-    REQUIRE(full_content.substr(0, PARTIAL_SIZE) == partial_content);
+    REQUIRE(partial_content.size() == kPartialSize);
+    REQUIRE(full_content.substr(0, kPartialSize) == partial_content);
 }
 
 // ============================================================================
@@ -482,8 +483,48 @@ TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
 
     REQUIRE(success_called.load());
     REQUIRE(received_response.contains("result"));
-    // Result should be an array of files
-    REQUIRE(received_response["result"].is_array());
+    // Moonraker's own shape: entries beside the disk's usage in bytes
+    const json& result = received_response["result"];
+    REQUIRE(result.is_object());
+    REQUIRE(result["files"].is_array());
+    REQUIRE(result["dirs"].is_array());
+    REQUIRE(result["disk_usage"]["total"].get<uint64_t>() > 0);
+    REQUIRE(result["disk_usage"]["free"].get<uint64_t>() <=
+            result["disk_usage"]["total"].get<uint64_t>());
+}
+
+TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,
+                 "MoonrakerClientMock disk usage follows HELIX_MOCK_DISK_FREE_MB and parses",
+                 "[mock][api][files][performance]") {
+    setenv("HELIX_MOCK_DISK_FREE_MB", "300", 1);
+    json response;
+    client_.send_jsonrpc(
+        "server.files.get_directory", {{"path", "gcodes"}}, [&](json r) { response = r; },
+        [](const MoonrakerError&) {});
+    unsetenv("HELIX_MOCK_DISK_FREE_MB");
+
+    const auto usage = helix::perf::MoonrakerPerformanceSource::parse_disk_usage(response);
+    REQUIRE(usage.has_value());
+    CHECK(usage->free_mb == 300);
+    CHECK(usage->total_mb == 29 * 1024);
+}
+
+TEST_CASE_METHOD(MoonrakerAPIMockTestFixture, "MoonrakerClientMock file list keeps its entries",
+                 "[mock][api][files]") {
+    // The gcodes listing the file browser reads must survive the object shape.
+    std::vector<FileInfo> files;
+    bool done = false;
+    api_->files().get_directory(
+        "gcodes", "",
+        [&](const std::vector<FileInfo>& f) {
+            files = f;
+            done = true;
+        },
+        [](const MoonrakerError&) {});
+    REQUIRE(done);
+    for (const auto& f : files) {
+        CHECK_FALSE(f.filename.empty());
+    }
 }
 
 TEST_CASE_METHOD(MoonrakerAPIMockTestFixture,

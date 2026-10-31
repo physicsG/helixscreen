@@ -441,21 +441,75 @@ inline void destroy_static_panels() {
     }
 }
 
+/**
+ * @brief Send @p obj the events a quick tap delivers: SHORT_CLICKED, then CLICKED.
+ *
+ * Taps bind CLICKED, but a synthetic tap delivers what a real one does so a
+ * handler on either event sees it. Stops as soon as a handler deletes @p obj
+ * (a tap that closes its screen).
+ *
+ * @return LV_RESULT_INVALID when @p obj was deleted, else LV_RESULT_OK.
+ */
+inline lv_result_t send_tap(lv_obj_t* obj) {
+    if (lv_obj_send_event(obj, LV_EVENT_SHORT_CLICKED, nullptr) == LV_RESULT_INVALID)
+        return LV_RESULT_INVALID;
+    return lv_obj_send_event(obj, LV_EVENT_CLICKED, nullptr);
+}
+
+/**
+ * @brief End the press @p indev is tracking, so its release is not a tap.
+ *
+ * A hold handler that acts calls this. LVGL sends CLICKED on every release, the
+ * one ending a long press included, and starts the long press on time alone, so
+ * the hold handler is the only place that knows whether the hold meant
+ * something. After this the release sends PRESS_LOST in place of RELEASED and
+ * CLICKED (lib/lvgl/src/indev/lv_indev.c#indev_proc_release), and the rest of
+ * the press scrolls and drags nothing. A hold handler that declines does not
+ * call it, so the press still ends in its tap.
+ */
+inline void end_press(lv_indev_t* indev) {
+    if (indev)
+        lv_indev_wait_release(indev);
+}
+
+/// end_press() for the input device that delivered @p e.
+inline void end_press(lv_event_t* e) {
+    lv_indev_t* indev = e ? lv_event_get_indev(e) : nullptr;
+    end_press(indev ? indev : lv_indev_active());
+}
+
 // ============================================================================
 // Recursive Widget Flag Utilities
 // ============================================================================
 
+/**
+ * @brief Recursively set EVENT_BUBBLE on every descendant of obj, so touch
+ * events (long press, tap) on any of them also reach obj.
+ *
+ * The home grid does this to each page so a hold anywhere on a widget reaches
+ * edit mode. A widget under it whose child stops a tap from reaching the
+ * widget's own tap handler must bind both to the same trigger.
+ */
+inline void set_event_bubble_recursive(lv_obj_t* obj) {
+    uint32_t count = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_obj_t* child = lv_obj_get_child(obj, static_cast<int32_t>(i));
+        lv_obj_add_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
+        set_event_bubble_recursive(child);
+    }
+}
+
 /// Marks an object whose CLICKABLE disable_widget_clicks_recursive() removed,
 /// so enable_widget_clicks_recursive() restores exactly those and leaves an
 /// object that was never clickable alone.
-constexpr lv_obj_flag_t EDIT_CLICK_SUPPRESSED_FLAG = LV_OBJ_FLAG_USER_2;
+constexpr lv_obj_flag_t kEditClickSuppressedFlag = LV_OBJ_FLAG_USER_2;
 
 /**
  * @brief Recursively remove CLICKABLE flag from all descendants of obj
  *
  * Used by edit mode to prevent widget click handlers from firing
  * while grid rearrangement is in progress. Each object it disarms is marked
- * with EDIT_CLICK_SUPPRESSED_FLAG for enable_widget_clicks_recursive().
+ * with kEditClickSuppressedFlag for enable_widget_clicks_recursive().
  *
  * @param obj Parent object whose descendants will have CLICKABLE removed
  */
@@ -469,7 +523,7 @@ inline void disable_widget_clicks_recursive(lv_obj_t* obj) {
             continue;
         if (lv_obj_has_flag(child, LV_OBJ_FLAG_CLICKABLE)) {
             lv_obj_remove_flag(child, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_flag(child, EDIT_CLICK_SUPPRESSED_FLAG);
+            lv_obj_add_flag(child, kEditClickSuppressedFlag);
         }
         disable_widget_clicks_recursive(child);
     }
@@ -489,8 +543,8 @@ inline void enable_widget_clicks_recursive(lv_obj_t* obj) {
         lv_obj_t* child = lv_obj_get_child(obj, static_cast<int32_t>(i));
         if (!child)
             continue;
-        if (lv_obj_has_flag(child, EDIT_CLICK_SUPPRESSED_FLAG)) {
-            lv_obj_remove_flag(child, EDIT_CLICK_SUPPRESSED_FLAG);
+        if (lv_obj_has_flag(child, kEditClickSuppressedFlag)) {
+            lv_obj_remove_flag(child, kEditClickSuppressedFlag);
             lv_obj_add_flag(child, LV_OBJ_FLAG_CLICKABLE);
         }
         enable_widget_clicks_recursive(child);
@@ -577,5 +631,17 @@ void pass_child_overhang(lv_obj_t* obj);
  * above it, after the child's overhang changed or it was shown or hidden.
  */
 void refresh_overhang_chain(lv_obj_t* child);
+
+/**
+ * Stores @p obj in the static pointer @p slot and keeps @p slot from outliving it.
+ *
+ * Deleting an ancestor (a screen, say) frees @p obj without its holder being told. A
+ * pointer left behind then names freed memory, and once the allocator reuses that memory
+ * lv_obj_is_valid() vouches for an unrelated object. The slot is cleared by @p obj's
+ * LV_EVENT_DELETE, and only while it still names the dying object: a deferred delete of
+ * an old object lands after a new one has been stored. Remembering the same object
+ * twice leaves one handler. Pass nullptr to store nullptr.
+ */
+void store_until_deleted(lv_obj_t** slot, lv_obj_t* obj);
 
 } // namespace helix::ui

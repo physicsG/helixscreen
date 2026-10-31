@@ -61,9 +61,9 @@ struct SpoolmanPanelCommitFixture : LVGLTestFixture {
         // Same cross-test contamination guard as ExternalSpoolCommitFixture:
         // Config::init() restores from backups when the config file is
         // missing, so stale backups would leak in.
-        std::filesystem::remove(AppConstants::Update::config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::legacy_config_backup_fallback());
-        std::filesystem::remove(AppConstants::Update::env_backup_fallback());
+        std::filesystem::remove(app_constants::update::config_backup_fallback());
+        std::filesystem::remove(app_constants::update::legacy_config_backup_fallback());
+        std::filesystem::remove(app_constants::update::env_backup_fallback());
 
         Config::get_instance()->init(config_path);
         // Resets the in-memory override too, not just the settings record.

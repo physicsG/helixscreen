@@ -90,13 +90,21 @@ A new consumer of this notification needs to state which axis it filters on befo
 
 **`on_error` is not a claim to report.** Supplying an error callback says the caller wants to *know*; it does not say the user will be *told*. The trailing `caller_surfaces_errors` parameter (default `true`) is the claim, and it must be captured from the caller's own `on_error` **before** any internal wrapper — `execute_gcode()` wraps unconditionally to settle its activity counter, so intent derived afterwards reads our own bookkeeping as a caller promise. Pass `false` when the callback only logs or only resets state: a false claim makes the request tracker record the rejection for cross-channel dedup, `GcodeErrorRouter` then suppresses its report of Klipper's `!!` broadcast, and the failure reaches nobody. The `silent` parameter is a separate axis — it means "no automatic toast from us", never "the user has been told", so it neither records for dedup nor stops the `!!` router. `scripts/check_gcode_error_ownership.py` gates the log-only case at zero. Full contract and the decision matrix: `RPC_ERROR_OWNERSHIP.md`.
 
-**What counts as "an external blocking op" is debounced, not the raw flag.** `idle_timeout.state` reads `"Printing"` while *any* gcode executes, so a printer with housekeeping `delayed_gcode` loops reports it in short bursts forever while sitting idle — bundle L53W5PKG (a Voron Trident running `bedfanloop`, `_AIR_FILTER_TIMER` and AFC `PREP`) logged 632 transitions, the flag high for ~0.7 s out of every 10 s. Each burst made the gate refuse jogs with "Printer is busy — try again in a moment" on an idle printer, roughly 7% of that machine's idle life. `IdleTimeoutBusy` (`include/idle_timeout_busy.h`) requires the flag to hold for `SETTLE` (1 s) before `is_blocking_operation_active()` reports it; the real ops the gate exists for hold it for many seconds. Three consequences worth knowing:
+**What counts as "an external blocking op" is debounced, not the raw flag.** `idle_timeout.state` reads `"Printing"` while *any* gcode executes, so a printer with housekeeping `delayed_gcode` loops reports it in short bursts forever while sitting idle — bundle L53W5PKG (a Voron Trident running `bedfanloop`, `_AIR_FILTER_TIMER` and AFC `PREP`) logged 632 transitions, the flag high for ~0.7 s out of every 10 s. Each burst made the gate refuse jogs with "Printer is busy — try again in a moment" on an idle printer, roughly 7% of that machine's idle life. `IdleTimeoutBusy` (`include/idle_timeout_busy.h`) requires the flag to hold for `kSettle` (1 s) before `is_blocking_operation_active()` reports it; the real ops the gate exists for hold it for many seconds. Three consequences worth knowing:
 
 - **Only the rising edge is debounced.** Clearing takes effect immediately — there is no false negative to protect against on that edge, and making the user wait a second after a homing completes would be its own bug.
-- **A repeated `"Printing"` report does not re-arm the window.** Restarting the settle on every status batch would let a printer that re-sends faster than `SETTLE` never reach the blocking state at all, turning the debounce into a hole in the gate rather than a filter.
+- **A repeated `"Printing"` report does not re-arm the window.** Restarting the settle on every status batch would let a printer that re-sends faster than `kSettle` never reach the blocking state at all, turning the debounce into a hole in the gate rather than a filter.
 - **It must be cleared wherever the subject is.** `idle_timeout` is a delta-only field, so `PrinterCalibrationState::reset_klippy_volatile()` resets it on a Klippy transition (#1129). The debounce caches the same field but is not a subject, so it is cleared there explicitly — miss that and the #1129 wedge returns one layer down, invisible to the subject-level tests.
 
 The raw `get_idle_timeout_printing_subject()` remains the literal Klipper state for display; gates read `idle_timeout_busy()`.
+
+**The busy toast speaks only for an episode the app did not begin.** When a discretionary command goes out during a blocking episode, `execute_gcode()` shows "Printer is busy - your ... will run when it's ready." at most once per episode (`PrinterCalibrationState::claim_busy_queue_toast()`). It stays quiet when the episode is the app's own, because any gcode reads `"Printing"` while it runs: light taps 0.2 s apart each hold the flag for most of a second, enough to keep a settled episode up on an idle printer for as long as the burst lasts. Ownership is decided by `BusyEpisodeOwner` (`include/busy_episode_owner.h`) through `PrinterState::is_busy_episode_app_initiated()`:
+
+- **Every non-silent `execute_gcode()` send is stamped**, before it goes out, into `PrinterState::app_command_episode()`. Silent sends are the app's own housekeeping (`LedAutoState` reacting to a state change) and can follow an external op's start closely, so they never stamp.
+- **An episode is the app's when a stamped send falls in the `kGraceWindow` (2 s) before its start.** The start is when the main thread saw `idle_timeout` go high (`IdleTimeoutBusy::printing_since()`), so a send after it, even by a fraction of a second, is joining someone else's operation and never adopts it. The last `kHistory` (16) send times are kept, because the first ask comes about `kSettle` into the episode after more sends have landed.
+- **Ownership is decided once per episode**, on the first ask, and lapses `kMaxSelfBusy` (30 s) after the latest send, which bounds how long an op that starts mid-burst can pass as the app's.
+
+This is toast attribution only. The blocking-op predicates and the motion refusal never read `app_command_episode()`, so a light tap cannot let a jog through during an external bed mesh or filament op (#1108). Motion has its own owner under the same rule: `AppMotionActivity` keeps a `BusyEpisodeOwner` fed from motion sends alone, and `PrinterState::is_external_blocking_operation_active()` treats an episode those sends began as self-inflicted, so one jog does not refuse the next. It also passes a jog while the previous jog is in flight or acked within the last 2s (`AppMotionActivity::recently_active`). A manual probe session blocks regardless.
 
 Before adding a command to `detail::categorize_gcode_token()` in `gcode_classify.h`, verify every caller that emits it either holds no in-flight counter or passes `on_queued`. Skipping this check is exactly how #1129 happened — a cached `idle_timeout_printing` made the app treat an idle printer as busy, routed a `SET_LED` down the fire-and-forget path, and left the LED in-flight counter pinned for the session. `SET_GCODE_OFFSET` is deliberately excluded from the discretionary set: it CONTROLS a blocking op (z-offset calibration sends it mid-probe), so queuing it behind that op would break calibration.
 
@@ -159,6 +167,25 @@ The submitted lambda runs on a worker thread — callbacks invoked from it are o
 
 **Do NOT:** spawn a raw `std::thread` for HTTP work. If `HttpExecutor::fast()/slow()` don't fit the shape you need, discuss — adding a new lane is preferable to reintroducing unbounded spawning.
 
+### Moonraker API Key
+
+A Moonraker with `force_logins` refuses every request without a credential, trusted address or not, and accepts the printer's API key in an `X-Api-Key` header. The key is the active printer's `moonraker_api_key` setting.
+
+| Piece | Role |
+|-------|------|
+| `include/moonraker_auth.h` | The pure rules: `set_credential()` records the active printer's credential, `key_for()` / `key_for_url()` answer what key a host:port gets, `header_action()` decides Set / Leave / Remove for a request's header. Built for the desktop and the ESP32 firmware alike |
+| `src/application/printer_retarget.cpp#connect_printer` | Records `active_printer_credential()`, built from the same host and port the connection URL uses, before every connect (startup, printer switch, Change Host) |
+| `src/api/moonraker_auth_http.cpp` | Installs `apply_to_request()` as libhv's request hook (`patches/libhv-http-request-hook.patch`), so every libhv HTTP request, sync, async or upload, built from any URL, gets the key when it is bound for that printer |
+| `MoonrakerClient::connect()` | Adds the header to the WebSocket upgrade, which libhv sends without the hook |
+| `EspMoonrakerClient::create_transport()` | The firmware's WebSocket upgrade, through `esp_websocket_client_config_t::headers` |
+| `EspHttpLane::run_one()` | The firmware's HTTP file reads, through `esp_http_client_set_header()` |
+
+**The key goes only to the host and port saved with it.** Moonraker refuses a wrong key even from a trusted address, so a key sent to a different printer (the connection wizard testing a typed address, a CLI override) would break a connection that works without one. Change Host moves a printer entry to a new address and keeps its key, since it is still that printer. A synchronous redirect re-runs the hook, so the key comes off at another host; libhv's async client follows redirects without the hook, and nothing in the app sends HTTP through it. An `X-Api-Key` another caller set for its own service (telemetry) is left alone. The WebSocket upgrade request is created once per `MoonrakerClient` and reused by every connect, so `connect()` erases the previous key before it sets the current one.
+
+**Entering the key.** The Change Host dialog (`src/ui/ui_change_host_modal.cpp`) carries a masked key field beside the host and port, reached from Settings > Connection's Host and API Key rows; Save writes the key with `set_active_printer_api_key()` and reconnects through `connect_printer`. The connection wizard shows the same field when its test answers 401, and records the typed key for the address under test only (`WizardConnectionStep::connect_confirmed`). Test Connection sends the key in its `/server/info` probe, so it tells "needs a key" from "rejected this key" (`MoonrakerConnectionTest::Result::login_required`, `key_sent`). A key that is not 32 hex digits is refused before any request (`moonraker_auth::is_plausible_api_key`).
+
+**A refused login.** When `server.connection.identify` fails with Unauthorized, `MoonrakerDiscoverySequence::stop_for_refused_login` stops discovery, marks `moonraker_auth::unauthorized()` and emits one `LOGIN_REFUSED` event per credential (`set_credential()` clears the mark). The manager shows it as a Login Required prompt whose button opens the key field; the request tracker's generic toast and the file-list and PRINT_START-analysis toasts stay quiet while the mark is set, so that message is not buried.
+
 ### Event System
 
 **Location:** `include/moonraker_events.h`
@@ -177,7 +204,8 @@ enum class MoonrakerEventType {
     KLIPPY_SHUTDOWN,      // Klipper firmware entered shutdown state (M112, thermal, error)
     KLIPPY_READY,         // Klipper firmware ready
     DISCOVERY_FAILED,     // Printer discovery failed
-    REQUEST_TIMEOUT       // JSON-RPC request timed out
+    REQUEST_TIMEOUT,      // JSON-RPC request timed out
+    LOGIN_REFUSED         // Moonraker refused this client's login (once per credential)
 };
 
 struct MoonrakerEvent {
@@ -197,6 +225,26 @@ struct MoonrakerEvent {
 | Otherwise | `ConnectionFailedModal` | The connection-failed prompt. **Reconnect is the primary action** — a dropped Moonraker is usually transient, so retrying is the first button. "Change Address" is secondary and only offered when the configured host is remote: when the printer is known to run HelixScreen itself (`is_moonraker_on_same_host`), the address is not the fault and the prompt is a plain Reconnect alert, since "Change Address" there walks the user into editing a correct `127.0.0.1` while the real problem is a Moonraker service that did not start (`src/ui/ui_change_host_modal.cpp`). |
 
 Recovery events (`KLIPPY_DISCONNECTED`, `KLIPPY_SHUTDOWN`) return before all of this and are suppressible by nothing — a shut-down Klippy needs its dialog whatever is on screen. `KLIPPY_READY` routes to `Ignore` unconditionally: klippy becoming ready is an internal lifecycle event, not a notification; the user-facing completion signal is the `klippy_state` READY observer (the "Printer ready" toast that dismisses the emergency-stop recovery dialog), not this event.
+
+**Moonraker announces a Klippy that started, never one that failed to.** `notify_klippy_ready`
+arrives on success; a startup error (a `printer.cfg` mistake, an MCU that will not answer, K2's
+`key298`) produces no notification at all, and without help the app would read `SHUTDOWN` forever.
+So after `notify_klippy_disconnected` the client polls `printer.info` from its health tick until
+Klippy answers `ready`, `shutdown` or `error`, `notify_klippy_ready` arrives, the socket closes, or
+two minutes pass (`include/moonraker_client.h#KlippyStatePoll`). `startup` and Moonraker's own
+`disconnected` keep it polling. The answer goes through the same webhooks mapping as a status frame
+(`PrinterState::apply_klippy_status()`), so `KlippyState::ERROR` and Klipper's message reach the
+recovery dialog like any other state change, and an answer from before the socket last closed is
+dropped by the Klippy epoch.
+
+`PrinterRecoveryService` (`include/printer_recovery_service.h`) uses the same
+`printer.info` answer to verify a restart instead of trusting that Moonraker accepted it:
+`firmware_restart`, then a poll for `ready`, escalating once to the platform's
+`<install_dir>/bin/helix-recover.sh` (written by `scripts/lib/installer/recovery.sh`) on an `error` or no `ready`, then one more poll after the script. The class
+comment has the whole chain; its bounds are `RecoveryTiming` (one 120 s deadline from `recover()`,
+the script killed at 90 s), and `AbortManager`'s restart backstop is held above that worst case by
+a `static_assert` in `src/abort/abort_manager.cpp`. One chain runs at a time, and a chain whose
+client is destroyed (printer switch, soft restart) ends without calling back.
 
 **`RPC_ERROR` is a fallback, not a report of every failure.** `MoonrakerRequestTracker::route_response()` emits it only when `helix::rpc_error_policy::decide()` finds that nothing else will speak — and for `printer.gcode.script` that is never, because Klipper mirrors the rejection as a `!!` line that `GcodeErrorRouter` reports instead. See `RPC_ERROR_OWNERSHIP.md`.
 
@@ -438,6 +486,9 @@ api->subscribe_notifications(cb);
 
 // Database — use typed wrappers
 api->database_get_item("helix", "spoolman_enabled", on_success, on_error);
+
+// The printer's own screen publishes its home layout under namespace "helix-screen",
+// key "home_layout" (include/home_layout_share.h); see LAYOUT_SYSTEM.md
 
 // G-code — use validated path
 api->execute_gcode("TURN_OFF_HEATERS", nullptr, nullptr);

@@ -11,7 +11,7 @@
          has no inset of its own: the vertical padding above keeps stacked bar rows,
          which fill their height, off its top and bottom edges. -->
     <ams_mini_status name="ams_mini_status_widget" width="100%" card="false" flex_grow="1"/>
-    <text_tiny text="Multi-Filament" style_text_color="#text_muted" style_text_align="center">
+    <text_tiny width="100%" text="Multi-Filament" style_text_color="#text_muted" style_text_align="center">
       <bind_flag_if_eq subject="show_widget_labels" flag="hidden" ref_value="0"/>
     </text_tiny>
   </view>

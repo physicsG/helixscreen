@@ -4,15 +4,16 @@
 <component>
   <!-- Overflow indicator pill used when a file has more tools than fit on
        one row of the FILAMENTS card (e.g. "+3" for three hidden tools). The
-       card caps the chips at what the fixed-height row fits and appends this;
+       card caps the chips at what the fixed-height row fits and shows this;
        without it the extra chips would simply run off the edge with nothing
-       saying so. Count text is set from C++. -->
+       saying so. The count is the card's filament_chip_more_text. -->
   <view name="more_pill"
         extends="lv_obj" height="content" flex_flow="row" style_flex_main_place="center" style_flex_cross_place="center"
         style_pad_left="#space_sm" style_pad_right="#space_sm" style_pad_top="#space_sm" style_pad_bottom="#space_sm"
         style_radius="#space_lg" style_bg_color="#elevated_bg" style_bg_opa="255" style_border_width="0"
         scrollable="false" clickable="false" event_bubble="true">
     <lv_label name="count_label"
-              text="" style_text_font="#font_body" style_text_color="#text_muted" clickable="false" event_bubble="true"/>
+              bind_text="filament_chip_more_text" style_text_font="#font_body" style_text_color="#text_muted"
+              clickable="false" event_bubble="true"/>
   </view>
 </component>

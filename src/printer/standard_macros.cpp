@@ -45,7 +45,7 @@ struct SlotPatterns {
 };
 
 // clang-format off
-const std::vector<SlotPatterns> DETECTION_PATTERNS = {
+const std::vector<SlotPatterns> kDetectionPatterns = {
     // M604 ranks last: it is QIDI's stock load, the macro their own screen
     // drives, and it means nothing in Marlin (which has no M604 at all). A
     // printer that defines a conventionally-named load macro keeps it — this
@@ -90,7 +90,7 @@ const std::vector<SlotPatterns> DETECTION_PATTERNS = {
  * Empty string means no fallback is available.
  */
 // clang-format off
-const std::map<StandardMacroSlot, std::string> FALLBACK_MACROS = {
+const std::map<StandardMacroSlot, std::string> kFallbackMacros = {
     {StandardMacroSlot::LoadFilament,   ""},
     {StandardMacroSlot::UnloadFilament, "HELIX_UNLOAD_FILAMENT"},
     {StandardMacroSlot::Purge,          ""},
@@ -115,7 +115,7 @@ struct SlotMeta {
 };
 
 // clang-format off
-const std::map<StandardMacroSlot, SlotMeta> SLOT_METADATA = {
+const std::map<StandardMacroSlot, SlotMeta> kSlotMetadata = {
     {StandardMacroSlot::LoadFilament,   {"load_filament",   "Load Filament"}},
     {StandardMacroSlot::UnloadFilament, {"unload_filament", "Unload Filament"}},
     {StandardMacroSlot::Purge,          {"purge",           "Purge"}},
@@ -167,10 +167,15 @@ ShippedSequence shipped_sequence_for(const std::string& printer, StandardMacroSl
     case StandardMacroSlot::BedMesh:
         return {PrinterDetector::get_bed_mesh_calibrate_gcode(printer),
                 PrinterDetector::get_bed_mesh_self_prepares(printer)};
+    case StandardMacroSlot::ScrewsTilt:
+        return {PrinterDetector::get_screws_tilt_gcode(printer),
+                PrinterDetector::get_screws_tilt_self_prepares(printer)};
     default:
         return {};
     }
 }
+
+constexpr std::string_view kScrewsTiltBuiltin = "{screws_tilt_builtin}";
 
 /// Replace every @p placeholder in @p script with @p value. Inserted text is never
 /// rescanned, so a value that spells a placeholder is kept verbatim.
@@ -193,6 +198,14 @@ ResolvedMacroScript resolve_macro_script(const StandardMacroInfo& info,
     if (!accept_fallback && source == MacroSource::FALLBACK) {
         return out;
     }
+    if (source == MacroSource::SHIPPED && values.screws_tilt_builtin.empty() &&
+        info.shipped_macro.find(kScrewsTiltBuiltin) != std::string::npos) {
+        // The sequence bypasses a wrapper this printer does not have, so the
+        // command it would wrap is the stock one: the next tier decides.
+        StandardMacroInfo without_shipped = info;
+        without_shipped.shipped_macro.clear();
+        return resolve_macro_script(without_shipped, values, accept_fallback);
+    }
     out.script = info.get_macro();
     out.shipped = source == MacroSource::SHIPPED;
     out.self_prepares = out.shipped && info.shipped_self_prepares;
@@ -201,6 +214,7 @@ ResolvedMacroScript resolve_macro_script(const StandardMacroInfo& info,
 
     // The temperature first: a profile name is free text and may spell a placeholder.
     substitute(out.script, "{bed_temp}", std::to_string(values.bed_temp_c));
+    substitute(out.script, kScrewsTiltBuiltin, values.screws_tilt_builtin);
     substitute(out.script, "{profile_arg}", values.profile_arg);
     return out;
 }
@@ -217,14 +231,14 @@ void StandardMacros::init_slot_definitions() {
         StandardMacroInfo info;
         info.slot = slot;
 
-        auto meta_it = SLOT_METADATA.find(slot);
-        if (meta_it != SLOT_METADATA.end()) {
+        auto meta_it = kSlotMetadata.find(slot);
+        if (meta_it != kSlotMetadata.end()) {
             info.slot_name = meta_it->second.name;
             info.display_name = meta_it->second.display_name;
         }
 
-        auto fallback_it = FALLBACK_MACROS.find(slot);
-        if (fallback_it != FALLBACK_MACROS.end()) {
+        auto fallback_it = kFallbackMacros.find(slot);
+        if (fallback_it != kFallbackMacros.end()) {
             info.fallback_macro = fallback_it->second;
         }
 
@@ -299,7 +313,7 @@ bool StandardMacros::has_configured_macro(StandardMacroSlot slot,
 }
 
 std::optional<StandardMacroSlot> StandardMacros::slot_from_name(const std::string& name) {
-    for (const auto& [slot, meta] : SLOT_METADATA) {
+    for (const auto& [slot, meta] : kSlotMetadata) {
         if (meta.name == name) {
             return slot;
         }
@@ -308,8 +322,8 @@ std::optional<StandardMacroSlot> StandardMacros::slot_from_name(const std::strin
 }
 
 std::string StandardMacros::slot_to_name(StandardMacroSlot slot) {
-    auto it = SLOT_METADATA.find(slot);
-    if (it != SLOT_METADATA.end()) {
+    auto it = kSlotMetadata.find(slot);
+    if (it != kSlotMetadata.end()) {
         return it->second.name;
     }
     return "";
@@ -391,6 +405,21 @@ bool StandardMacros::execute(StandardMacroSlot slot, IMoonrakerAPI* api,
         return false;
     }
 
+    // A shipped tier is a sequence, not a macro name: it is resolved and sent
+    // whole, and a caller's params have nowhere to go in it.
+    bool send_as_script = false;
+    if (info.get_source() == MacroSource::SHIPPED) {
+        helix::MacroScriptValues values;
+        values.screws_tilt_builtin = api->hardware().screws_tilt_builtin();
+        const helix::ResolvedMacroScript resolved = helix::resolve_macro_script(info, values);
+        if (resolved.script.empty()) {
+            spdlog::debug("[StandardMacros] Slot {} resolves to nothing here", info.slot_name);
+            return false;
+        }
+        macro_name = resolved.script;
+        send_as_script = resolved.shipped;
+    }
+
     spdlog::info("[StandardMacros] Executing {} via {}", info.slot_name, macro_name);
     // Callers toast, which is main-thread only, while the printer's answer
     // arrives on the WebSocket thread. A null callback stays
@@ -406,6 +435,12 @@ bool StandardMacros::execute(StandardMacroSlot slot, IMoonrakerAPI* api,
         };
     }
     // suppress_auto_toast is CallerIntent::silent — see rpc_error_policy.h.
+    if (send_as_script) {
+        api->execute_gcode(macro_name, std::move(on_success), std::move(on_error),
+                           timeout_ms > 0 ? timeout_ms : helix::IMoonrakerAPI::kMacroTimeoutMs,
+                           /*silent=*/suppress_auto_toast);
+        return true;
+    }
     api->advanced().execute_macro(macro_name, params, std::move(on_success), std::move(on_error),
                                   timeout_ms, suppress_auto_toast);
     return true;
@@ -423,8 +458,8 @@ void StandardMacros::init(const helix::PrinterDiscovery& hardware,
         slot.shipped_self_prepares = shipped.self_prepares;
 
         // Restore fallback from static definition
-        auto fallback_it = FALLBACK_MACROS.find(slot.slot);
-        if (fallback_it != FALLBACK_MACROS.end()) {
+        auto fallback_it = kFallbackMacros.find(slot.slot);
+        if (fallback_it != kFallbackMacros.end()) {
             slot.fallback_macro = fallback_it->second;
         }
     }
@@ -510,7 +545,7 @@ void StandardMacros::validate_configured(const helix::PrinterDiscovery& hardware
 void StandardMacros::auto_detect(const helix::PrinterDiscovery& hardware) {
     spdlog::debug("[StandardMacros] Running auto-detection on {} macros", hardware.macro_count());
 
-    for (const auto& pattern_def : DETECTION_PATTERNS) {
+    for (const auto& pattern_def : kDetectionPatterns) {
         auto detected = try_detect(hardware, pattern_def.slot, pattern_def.patterns);
         if (!detected.empty()) {
             auto index = static_cast<size_t>(pattern_def.slot);

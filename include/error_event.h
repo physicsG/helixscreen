@@ -26,8 +26,8 @@ enum class ErrorSource {
 
 /// A one-tap fix offered alongside an error, rendered as a button by
 /// RecoveryModalPresenter. Two kinds of producer populate these: the generic
-/// error_classify::classify() for the cases it recognizes by Klipper error code
-/// (key840 "Reset CFS", key298, plus the paused-print Resume/OK fallbacks), and
+/// error_classify::classify() for the codes whose error-table row offers a fix
+/// (printer::klipper_error_classify) plus the paused-print Resume/OK fallbacks, and
 /// the AMS backends' own build_recovery_actions(), which derive a context-aware
 /// set from live hardware state (AFC, Happy Hare, AD5X IFS; QIDI hardcodes a
 /// lone dismiss). An empty list is meaningful, not merely unpopulated — it is
@@ -46,6 +46,9 @@ struct RecoveryAction {
     /// operation that raised the error. False for anything that moves filament
     /// only between the lane and the spool, or that just clears state.
     bool needs_hot_nozzle = false;
+    /// Asked before the gcode is sent, as the body of a confirm titled with
+    /// label; empty sends on the tap.
+    std::string confirm_message;
 };
 
 /// Result of classifying one gcode-response line. Produced by the pure
@@ -66,6 +69,12 @@ struct ErrorEvent {
     std::string code; ///< Klipper error code if any ("key840"), else ""
     std::vector<RecoveryAction> recovery_actions;
     bool sticky = false;
+    /// The firmware refused a command the user just sent, and this event says
+    /// why. The router presents it even when the command's RPC caller recorded
+    /// the same rejection, and that caller hands its own report to the router
+    /// (rpc_error_correlation::report_unless_explained). Each refusal answers a fresh
+    /// command, so it shows again even if the user dismissed an identical one.
+    bool command_refusal = false;
 };
 
 /// Inputs the classifier needs beyond the raw line. Kept as a plain struct

@@ -6,6 +6,7 @@
 #include "ui_utils.h"
 
 #include "lvgl/src/others/translation/lv_translation.h"
+#include "print_start_phase_label.h"
 
 #include <spdlog/spdlog.h>
 
@@ -90,25 +91,14 @@ std::string PrePrintOptionsRenderer::label_key_for(const PrePrintOption& opt) {
         return opt.label_key;
     }
 
-    // Second preference: existing baked-in labels for the original four
-    // mechanical/quality toggles. Phase 4 should replace these with proper
-    // `label_key` entries in printer_database.json.
+    // Second preference: a toggle for a pre-print phase reads as that phase
+    // does everywhere else. The bed mesh row names its variant instead: whether
+    // the mesh is adaptive is set by PrinterState::apply_dynamic_options.
     if (opt.id == "bed_mesh") {
-        // Single toggle relabels when adaptive meshing is available for this
-        // printer (set by PrinterState::apply_dynamic_options). No separate row.
         return opt.adaptive_active ? "Adaptive Bed Mesh" : "Auto Bed Mesh";
     }
-    if (opt.id == "qgl") {
-        return "Quad Gantry Level";
-    }
-    if (opt.id == "z_tilt") {
-        return "Z-Tilt Adjust";
-    }
-    if (opt.id == "nozzle_clean") {
-        return "Clean Nozzle";
-    }
-    if (opt.id == "purge_line") {
-        return "Nozzle Priming";
+    if (const auto phase = helix::print_start_phase_of_option(opt.id)) {
+        return helix::print_start_phase_step_key(*phase);
     }
     if (opt.id == "timelapse") {
         return "Record Timelapse";
@@ -126,9 +116,6 @@ std::string PrePrintOptionsRenderer::label_for(const PrePrintOption& opt) {
 std::string PrePrintOptionsRenderer::default_icon_for(const std::string& id) {
     if (id == "bed_mesh") {
         return "grid_large";
-    }
-    if (id == "shaper_calibrate") {
-        return "sine_wave";
     }
     if (id == "flow_calibrate") {
         return "gauge";

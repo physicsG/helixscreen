@@ -16,11 +16,9 @@
 # The second test's mock matches any sudo-and-chown combination, so a bare
 # "sudo chown" fails it the same as "sudo -n chown" would.
 
-WORKTREE_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-
 setup() {
     load helpers
-    cd "$WORKTREE_ROOT" || return 1
+    cd "$(scratch_tree)" || return 1
 
     SSH_LOG="$BATS_TEST_TMPDIR/ssh.log"
     : > "$SSH_LOG"

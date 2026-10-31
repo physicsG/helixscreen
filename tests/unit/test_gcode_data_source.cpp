@@ -33,7 +33,7 @@ class TempFile {
     std::string path_;
 };
 
-const std::string SAMPLE_GCODE = R"(; Sample G-code
+const std::string kSampleGcode = R"(; Sample G-code
 G28 ; Home
 G1 Z10 F1000
 G1 X50 Y50 F3000
@@ -47,13 +47,13 @@ G1 X50 Y50 E40
 } // namespace
 
 TEST_CASE("FileDataSource basic operations", "[gcode][datasource]") {
-    TempFile temp(SAMPLE_GCODE);
+    TempFile temp(kSampleGcode);
     FileDataSource source(temp.path());
 
     SECTION("opens valid file") {
         REQUIRE(source.is_valid());
         REQUIRE(source.file_size() > 0);
-        REQUIRE(source.file_size() == SAMPLE_GCODE.size());
+        REQUIRE(source.file_size() == kSampleGcode.size());
     }
 
     SECTION("reports correct source name") {
@@ -67,39 +67,39 @@ TEST_CASE("FileDataSource basic operations", "[gcode][datasource]") {
 
     SECTION("reads entire file") {
         auto data = source.read_all();
-        REQUIRE(data.size() == SAMPLE_GCODE.size());
+        REQUIRE(data.size() == kSampleGcode.size());
         std::string content(data.begin(), data.end());
-        REQUIRE(content == SAMPLE_GCODE);
+        REQUIRE(content == kSampleGcode);
     }
 
     SECTION("reads byte range from start") {
         auto data = source.read_range(0, 20);
         REQUIRE(data.size() == 20);
         std::string content(data.begin(), data.end());
-        REQUIRE(content == SAMPLE_GCODE.substr(0, 20));
+        REQUIRE(content == kSampleGcode.substr(0, 20));
     }
 
     SECTION("reads byte range from middle") {
         auto data = source.read_range(10, 15);
         REQUIRE(data.size() == 15);
         std::string content(data.begin(), data.end());
-        REQUIRE(content == SAMPLE_GCODE.substr(10, 15));
+        REQUIRE(content == kSampleGcode.substr(10, 15));
     }
 
     SECTION("clamps read past end of file") {
-        size_t offset = SAMPLE_GCODE.size() - 10;
+        size_t offset = kSampleGcode.size() - 10;
         auto data = source.read_range(offset, 100);
         REQUIRE(data.size() == 10);
     }
 
     SECTION("returns empty for offset past end") {
-        auto data = source.read_range(SAMPLE_GCODE.size() + 100, 10);
+        auto data = source.read_range(kSampleGcode.size() + 100, 10);
         REQUIRE(data.empty());
     }
 }
 
 TEST_CASE("FileDataSource read_line", "[gcode][datasource]") {
-    TempFile temp(SAMPLE_GCODE);
+    TempFile temp(kSampleGcode);
     FileDataSource source(temp.path());
 
     SECTION("reads first line") {
@@ -110,7 +110,7 @@ TEST_CASE("FileDataSource read_line", "[gcode][datasource]") {
 
     SECTION("reads subsequent lines") {
         // Find second line (after first newline)
-        size_t pos = SAMPLE_GCODE.find('\n') + 1;
+        size_t pos = kSampleGcode.find('\n') + 1;
         auto line = source.read_line(pos);
         REQUIRE(line.has_value());
         REQUIRE(*line == "G28 ; Home");
@@ -135,7 +135,7 @@ TEST_CASE("FileDataSource invalid file", "[gcode][datasource]") {
 }
 
 TEST_CASE("FileDataSource move semantics", "[gcode][datasource]") {
-    TempFile temp(SAMPLE_GCODE);
+    TempFile temp(kSampleGcode);
 
     FileDataSource source1(temp.path());
     REQUIRE(source1.is_valid());
@@ -153,14 +153,14 @@ TEST_CASE("FileDataSource move semantics", "[gcode][datasource]") {
 }
 
 TEST_CASE("MemoryDataSource from string", "[gcode][datasource]") {
-    MemoryDataSource source(SAMPLE_GCODE, "test-gcode");
+    MemoryDataSource source(kSampleGcode, "test-gcode");
 
     SECTION("is always valid") {
         REQUIRE(source.is_valid());
     }
 
     SECTION("reports correct size") {
-        REQUIRE(source.file_size() == SAMPLE_GCODE.size());
+        REQUIRE(source.file_size() == kSampleGcode.size());
     }
 
     SECTION("reports source name") {
@@ -174,14 +174,14 @@ TEST_CASE("MemoryDataSource from string", "[gcode][datasource]") {
     SECTION("reads entire content") {
         auto data = source.read_all();
         std::string content(data.begin(), data.end());
-        REQUIRE(content == SAMPLE_GCODE);
+        REQUIRE(content == kSampleGcode);
     }
 
     SECTION("reads byte range") {
         auto data = source.read_range(5, 10);
         REQUIRE(data.size() == 10);
         std::string content(data.begin(), data.end());
-        REQUIRE(content == SAMPLE_GCODE.substr(5, 10));
+        REQUIRE(content == kSampleGcode.substr(5, 10));
     }
 }
 

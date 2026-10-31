@@ -88,7 +88,7 @@ class AfcMessageDedup {
 
     /// A seed file larger than this is corruption, not a record: the store
     /// writes one short line per configured printer.
-    static constexpr size_t MAX_SEED_BYTES = 256 * 1024;
+    static constexpr size_t kMaxSeedBytes = 256 * 1024;
 
     /// The printer the records are keyed by, or "default" when no printer is
     /// active yet.

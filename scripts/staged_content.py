@@ -136,14 +136,19 @@ def catfile_batch(items: Iterable[tuple[str, str]],
             proc.stdin.write(f'{revision}\n'.encode())
             proc.stdin.flush()
             header = proc.stdout.readline().decode('utf-8', 'replace').split()
-            # "<sha> blob <size>" - anything else (missing, a non-blob type)
-            # has no bytes to read and nothing following it to skip.
-            if len(header) < 3 or header[1] != 'blob':
+            # "<sha> <type> <size>" is followed by the object's bytes whatever
+            # its type, so a tree or commit is read past, never yielded.
+            # "<name> missing" and "<name> ambiguous" carry no bytes, and the
+            # name echoed back may itself contain spaces.
+            if header and header[-1] in ('missing', 'ambiguous'):
+                continue
+            if len(header) != 3 or not header[2].isdigit():
                 continue
             size = int(header[2])
             content = proc.stdout.read(size)
-            proc.stdout.read(1)  # trailing newline after each blob
-            yield (label, content.decode('utf-8', 'ignore'))
+            proc.stdout.read(1)  # trailing newline after each object
+            if header[1] == 'blob':
+                yield (label, content.decode('utf-8', 'ignore'))
     finally:
         if proc is not None:
             if proc.stdin is not None and not proc.stdin.closed:
@@ -171,3 +176,29 @@ def staged_files(root: Path | None = None, suffixes: tuple[str, ...] | None = No
     """
     root = root or repo_root()
     yield from read_index_blobs(staged_paths(root, suffixes, diff_filter), root)
+
+
+def tree_files(rev: str | None, prefixes: tuple[str, ...], root: Path | None = None,
+               recursive: bool = True) -> Iterator[tuple[str, str]]:
+    """Yield (path, text) for every file under `prefixes` in a whole tree.
+
+    `rev` None means the tree the commit WILL create: every index entry, read
+    as its staged blob. Otherwise any tree-ish, such as 'HEAD'. A whole-tree
+    gate run from the hook reads this rather than the working tree, so another
+    session's unstaged files never decide a verdict. `recursive=False` keeps
+    only the files directly inside each prefix directory. A rev that does not
+    resolve (HEAD in an empty repository) yields nothing.
+    """
+    root = root or repo_root()
+    dirs = [p.rstrip('/') + '/' for p in prefixes]
+    if rev is None:
+        cmd = ['git', '-C', str(root), 'ls-files', '-z', '--', *dirs]
+        spec = ':{}'
+    else:
+        cmd = ['git', '-C', str(root), 'ls-tree', '-r', '-z', '--name-only', rev, '--', *dirs]
+        spec = rev + ':{}'
+    listing = subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
+    paths = [p for p in listing.split('\0') if p]
+    if not recursive:
+        paths = [p for p in paths if any(p.startswith(d) and '/' not in p[len(d):] for d in dirs)]
+    yield from catfile_batch(((p, spec.format(p)) for p in paths), root)

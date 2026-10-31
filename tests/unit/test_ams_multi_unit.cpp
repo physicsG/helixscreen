@@ -39,7 +39,7 @@ static helix::AmsSystemInfo make_multi_unit_info(const std::vector<int>& slots_p
             slot.global_index = global_offset + s;
             slot.status = helix::SlotStatus::AVAILABLE;
             slot.mapped_tool = global_offset + s;
-            slot.color_rgb = helix::AMS_DEFAULT_SLOT_COLOR;
+            slot.color_rgb = helix::kAmsDefaultSlotColor;
             unit.slots.push_back(slot);
         }
 
@@ -60,14 +60,14 @@ namespace helix {
 /**
  * @brief Test helper for AFC multi-unit parsing
  *
- * Exposes parse_afc_state and initialize_slots for testing multi-unit
+ * Exposes apply_afc_state and initialize_slots for testing multi-unit
  * initialization paths that currently create only 1 unit.
  */
 class AmsBackendAfcMultiUnitHelper : public AmsBackendAfc {
   public:
     AmsBackendAfcMultiUnitHelper() : AmsBackendAfc(nullptr, nullptr) {}
 
-    /// Expose parse_afc_state for testing
+    /// Expose apply_afc_state for testing
     void test_parse_afc_state(const nlohmann::json& data) {
         // Build the full notification format and route through handle_status
         nlohmann::json notification;

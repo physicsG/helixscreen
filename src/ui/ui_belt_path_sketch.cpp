@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ui_belt_path_sketch.h"
 
+#include "ui_belt_path_names.h"
+
 #include "helix-xml/src/xml/lv_xml.h"
 #include "helix-xml/src/xml/lv_xml_parser.h"
 #include "helix-xml/src/xml/lv_xml_widget.h"
@@ -13,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace helix::ui {
 
@@ -62,15 +65,46 @@ void draw_arrow(lv_layer_t* layer, lv_point_precise_t from, lv_point_precise_t t
     }
 }
 
-void draw_label(lv_layer_t* layer, const char* text, lv_color_t color, const lv_font_t* font,
-                lv_area_t area, lv_text_align_t align) {
+void draw_label(lv_obj_t* obj, lv_layer_t* layer, const char* text, lv_color_t color,
+                const lv_font_t* font, lv_area_t area, lv_text_align_t align) {
     lv_draw_label_dsc_t dsc;
     lv_draw_label_dsc_init(&dsc);
+    // Owned by the sketch, so LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS can report the label.
+    dsc.base.obj = obj;
     dsc.text = text;
+    // The draw task runs after this returns; the text may be a caller's temporary.
+    dsc.text_local = 1;
     dsc.color = color;
     dsc.font = font;
     dsc.align = align;
     lv_draw_label(layer, &dsc, &area);
+}
+
+/// @p text cut to one line of @p max_w, ending in "..." when it is wider. A
+/// drawn label has no long mode, so a long name would otherwise wrap across
+/// the diagonals.
+std::string fit_width(const char* text, const lv_font_t* font, int32_t max_w) {
+    const auto width = [font](const std::string& t) {
+        lv_point_t size;
+        lv_text_get_size(&size, t.c_str(), font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        return size.x;
+    };
+    std::string out = text;
+    if (width(out) <= max_w) {
+        return out;
+    }
+    while (!out.empty()) {
+        // Drop one UTF-8 code point: its lead byte and any continuation bytes.
+        size_t cut = out.size() - 1;
+        while (cut > 0 && (static_cast<unsigned char>(out[cut]) & 0xC0) == 0x80) {
+            --cut;
+        }
+        out.erase(cut);
+        if (width(out + "...") <= max_w) {
+            return out + "...";
+        }
+    }
+    return "...";
 }
 
 void on_draw(lv_event_t* e) {
@@ -116,11 +150,21 @@ void on_draw(lv_event_t* e) {
                                frame.y1 + pad + font_h};
     const lv_area_t bottom_row = {frame.x1 + pad, frame.y2 - pad - font_h, frame.x2 - pad,
                                   frame.y2 - pad};
-    draw_label(layer, lv_tr("BACK"), muted, font, top_row, LV_TEXT_ALIGN_CENTER);
-    // Each label sits at the +X end of its own arrow: B's 1,1 diagonal points
-    // up-right, A's 1,-1 diagonal down-right.
-    draw_label(layer, lv_tr("B · 1,1"), b_color, font, top_row, LV_TEXT_ALIGN_RIGHT);
-    draw_label(layer, lv_tr("A · 1,-1"), a_color, font, bottom_row, LV_TEXT_ALIGN_RIGHT);
+    // BACK takes the top row's left end, so B's name has the rest of it.
+    const char* back = lv_tr("BACK");
+    lv_point_t back_size;
+    lv_text_get_size(&back_size, back, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    draw_label(obj, layer, back, muted, font, top_row, LV_TEXT_ALIGN_LEFT);
+    // Each name sits at the +X end of its own arrow: B's 1,1 diagonal points
+    // up-right, A's 1,-1 diagonal down-right. Each stays on one line.
+    const int32_t row_w = lv_area_get_width(&top_row);
+    const std::string b_name =
+        fit_width(belt_path_name(calibration::BeltPath::PATH_B).title.c_str(), font,
+                  row_w - back_size.x - pad);
+    const std::string a_name =
+        fit_width(belt_path_name(calibration::BeltPath::PATH_A).title.c_str(), font, row_w);
+    draw_label(obj, layer, b_name.c_str(), b_color, font, top_row, LV_TEXT_ALIGN_RIGHT);
+    draw_label(obj, layer, a_name.c_str(), a_color, font, bottom_row, LV_TEXT_ALIGN_RIGHT);
 
     // Diagonals through the centre, kept clear of the label rows.
     const float cx = (frame.x1 + frame.x2) / 2.0f;

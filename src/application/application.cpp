@@ -21,7 +21,7 @@
 #include "ui_overlay_timelapse_videos.h"
 #include "ui_update_queue.h"
 
-#include "ams_backend_cfs.h"
+#include "ams_backend.h"
 #include "ams_error_bridge.h"
 #include "app_constants.h"
 #include "asset_manager.h"
@@ -31,6 +31,7 @@
 #include "display_manager.h"
 #include "env_refusal_notice.h"
 #include "environment_config.h"
+#include "fbdev_signal_clear.h"
 #include "gcode_response_routing.h"
 #include "hardware_fingerprint.h"
 #include "hardware_role_registry.h"
@@ -65,6 +66,7 @@
 #include "remote_control_server.h"
 #endif
 #include "audio_settings_manager.h"
+#include "remote_screen_service.h"
 #include "rpc_error_correlation.h"
 #include "screenshot.h"
 #include "sensor_state.h"
@@ -77,7 +79,6 @@
 #include "temperature_history_manager.h"
 #include "thermal_rate_model.h"
 #include "timelapse_state.h"
-#include "timezone_env.h"
 #include "translation_loader.h"
 #include "wizard_config_paths.h"
 
@@ -97,6 +98,8 @@
 #include "ui_fan_control_overlay.h"
 #include "ui_gcode_viewer.h"
 #include "ui_gradient_canvas.h"
+#include "ui_guided_device_flow.h"
+#include "ui_humidity_drop.h"
 #include "ui_icon.h"
 #include "ui_icon_loader.h"
 #include "ui_keyboard_manager.h"
@@ -168,12 +171,14 @@
 
 #include "active_print_media_manager.h"
 #include "android_asset_extractor.h"
+#include "board_identity.h"
 #include "data_root_resolver.h"
 #include "display_settings_manager.h"
+#include "glass_gate.h"
 #include "helix_sparkline.h"
 #include "setting_group.h"
 #include "temperature_service.h"
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 #include "screensaver.h"
 #endif
 #include "display_metrics.h"
@@ -183,12 +188,12 @@
 #include "printer_detector.h"
 #include "safety_settings_manager.h"
 #include "settings_manager.h"
-#include "system/afc_message_dedup.h"
 #include "system/config_trust.h"
 #include "system/crash_handler.h"
 #include "system/crash_history.h"
 #include "system/crash_reporter.h"
 #include "system/diagnostics.h"
+#include "system/lvgl_thread_check.h"
 #include "system/telemetry_manager.h"
 #include "system/update_checker.h"
 #include "system_settings_manager.h"
@@ -286,6 +291,61 @@ std::atomic<bool> s_screenshot_requested{false};
 
 bool s_safe_mode_active = false;
 
+// The --dpi override and the stored UI Scale setting as read at startup. The
+// resize path reuses them, so a setting that "applies after restart" does not
+// sneak in on the first fold.
+int s_user_override_dpi = 0;
+int s_scale_setting = helix::DisplayMetrics::kScaleSettingAutomatic;
+
+/// Measure the drawing surface and decide the UI scale from it.
+///
+/// Android is the one platform whose reported DPI can be trusted: OEMs must
+/// declare it and SDL reads it straight from DisplayMetrics. Every Linux
+/// target is excluded on purpose: a survey of the eight test devices found the
+/// reported physical size wrong or absent on six, including a Pi that reports
+/// the official 7" panel's exact active area for a ~115mm screen.
+helix::ScaleDecision decide_display_scale(lv_display_t* display) {
+    std::optional<double> native_dpi;
+    int native_w = 0, native_h = 0;
+    const int logical_w = lv_display_get_horizontal_resolution(display);
+    const int logical_h = lv_display_get_vertical_resolution(display);
+#ifdef __ANDROID__
+    float ddpi = 0, hdpi = 0, vdpi = 0;
+    if (SDL_GetDisplayDPI(0, &ddpi, &hdpi, &vdpi) == 0 && ddpi > 0) {
+        native_dpi = static_cast<double>(ddpi);
+    }
+    // The SDL driver draws at an integer fraction of the native resolution and
+    // upscales, so the DPI is reported per native pixel while the UI lays out
+    // in logical ones.
+    if (auto* renderer = static_cast<SDL_Renderer*>(lv_sdl_window_get_renderer(display))) {
+        SDL_GetRendererOutputSize(renderer, &native_w, &native_h);
+    }
+    spdlog::info("[Application] Android display DPI: diagonal={:.0f} h={:.0f} v={:.0f}; "
+                 "{}x{} logical, {}x{} native",
+                 ddpi, hdpi, vdpi, logical_w, logical_h, native_w, native_h);
+#endif
+    return helix::DisplayMetrics::decide_scale(s_user_override_dpi, native_dpi, native_w, native_h,
+                                               logical_w, logical_h, helix::board::current(),
+                                               s_scale_setting);
+}
+
+/// Make @p d the process-wide scale: design tokens and fonts read it the next
+/// time theme_manager_refresh_layout_constants() resolves them, and LVGL's own
+/// chrome follows the display DPI.
+void apply_display_scale(lv_display_t* display, const helix::ScaleDecision& d) {
+    helix::DisplayMetrics::set_auto_scale(d.auto_scale);
+    helix::DisplayMetrics::set_active_scale(d.ui_scale);
+    lv_display_set_dpi(display, d.lvgl_dpi);
+    spdlog::info("[Application] Display metrics: dpi={:.0f} (source={}) → ui_scale={:.3f} "
+                 "(auto={:.3f}, setting={}), lvgl_dpi={}",
+                 d.resolved.dpi, helix::dpi_source_name(d.resolved.source), d.ui_scale,
+                 d.auto_scale,
+                 s_scale_setting == helix::DisplayMetrics::kScaleSettingAutomatic
+                     ? std::string("automatic")
+                     : std::to_string(s_scale_setting) + "%",
+                 d.lvgl_dpi);
+}
+
 /**
  * @brief Signal handler for SIGINT/SIGTERM
  *
@@ -303,7 +363,7 @@ bool s_safe_mode_active = false;
  * is written up to 500 ms after a change: a SIGTERM inside that window drops
  * the plugin's latest helix.storage.set calls.
  *
- * Async-signal-safe: only write(2) and _exit(2) used — no spdlog.
+ * Async-signal-safe: raw syscalls and _exit(2) only — no spdlog, no allocation.
  */
 void graceful_quit_signal_handler(int sig) {
     if (sig == SIGTERM) {
@@ -316,6 +376,9 @@ void graceful_quit_signal_handler(int sig) {
         // and HelixScreen refused to boot. unlink(2) is async-signal-safe;
         // the path was cached at startup so nothing is constructed here.
         helix::clear_crash_marker_signal_safe();
+        // Blank the panel, or the last frame shows through a reboot's boot
+        // screen. open/write/close only; a no-op unless fbdev registered it.
+        helix::clear_framebuffer_signal_safe();
 #ifdef HELIX_HAS_PWM_SOUND
         PWMSoundBackend::silence_signal_safe();
 #endif
@@ -409,6 +472,7 @@ int Application::run(int argc, char** argv) {
 #ifdef __ANDROID__
     // Extract APK assets to internal storage before data root resolution
     helix::android_extract_assets_if_needed();
+    helix::android_configure_backup_dirs();
 #endif
 
     // Ensure we're running from the project root
@@ -496,10 +560,27 @@ int Application::run(int argc, char** argv) {
     spdlog::info("[Application] ========================");
     spdlog::info("[Application] HelixScreen {} ({})", helix_version(), helix_git_hash());
 
+    // --test reports every LVGL call made off the LVGL thread, as the unit tests
+    // do; HELIX_LVGL_THREAD_CHECK=abort makes the first one fatal.
+    {
+        using namespace helix::lvgl_thread_check;
+        set_mode(mode_from_env(get_runtime_config()->is_test_mode() ? Mode::Report : Mode::Off));
+    }
+
     // Every path this process uses is chosen by a cascade with a user override
     // on every rung, so the log has to carry the resolved values: a support case
     // on an overridden box cannot be answered from the rules alone.
     helix::diagnostics::log_diagnostics();
+    if (m_screen_size_env) {
+        if (m_screen_size_env_valid) {
+            spdlog::info("[Application] Screen size from HELIX_SCREEN_SIZE: {}x{}", m_screen_width,
+                         m_screen_height);
+        } else {
+            spdlog::warn("[Application] Invalid HELIX_SCREEN_SIZE='{}' — use named size "
+                         "(micro/tiny/small/medium/large/xlarge) or WxH (e.g. 480x400)",
+                         *m_screen_size_env);
+        }
+    }
     spdlog::debug("[Application] Target: {}x{}", m_screen_width, m_screen_height);
     spdlog::debug("[Application] DPI: {}{}", (m_args.dpi > 0 ? m_args.dpi : LV_DPI_DEF),
                   (m_args.dpi > 0 ? " (custom)" : " (default)"));
@@ -631,14 +712,16 @@ int Application::run(int argc, char** argv) {
     }
     helix::CrashHistory::instance().init(user_config_dir);
     m_crash_reporter.init(user_config_dir);
-    // Cross-session seed for AFC's latched message dedup (uninitialized
-    // before this point, which reads as "every message is new").
-    AfcMessageDedup::instance().init(user_config_dir);
+    // Before any backend exists: one built earlier sees none of its saved state.
+    AmsBackend::init_persistent_state(user_config_dir);
 
     // Initialize TelemetryManager (opt-in, default OFF)
     // Note: record_session() is called after m_session.init_panel_subjects() so that
     // SettingsManager subjects are ready and the enabled state can be synced.
     TelemetryManager::instance().init(user_config_dir);
+#if HELIX_ENABLE_SCREENSAVER
+    TelemetryManager::instance().set_screensaver_usage(&ScreensaverManager::instance().usage());
+#endif
 
     // First heap snapshot, before panel construction and XML load. Later
     // snapshots are diffed against this to narrow down which startup phase
@@ -680,7 +763,9 @@ int Application::run(int argc, char** argv) {
     // Backend detection (PWM, ALSA, SDL) is checked by PrinterCapabilitiesState
     // to show sound settings even without a Klipper beeper output_pin.
     SoundManager::instance().initialize();
-    SoundManager::instance().play("startup", SoundPriority::EVENT);
+    if (SoundManager::plays_startup_sound(get_runtime_config()->is_test_mode())) {
+        SoundManager::instance().play("startup", SoundPriority::EVENT);
+    }
 
     // Backend is now picked: seed the backend subjects so the Sound overlay's
     // device-row and Test Tracker bindings resolve correctly. Subjects init
@@ -707,7 +792,7 @@ int Application::run(int argc, char** argv) {
     // overlay construction, and the first synchronous render. Any std::exception
     // escaping here unwinds out of run() into main()'s catch and exits 134,
     // which the watchdog interprets as a deterministic crash and (after
-    // CRASH_LOOP_MAX_CRASHES) shows the recovery dialog. main_loop()'s own
+    // kCrashLoopMaxCrashes) shows the recovery dialog. main_loop()'s own
     // crash guard wraps its iterations but does not cover this pre-loop
     // window — a follow_overlay regression can hit exactly here, in
     // HomePanel::finalize_setup() → set_config(null) (json::type_error::306).
@@ -890,6 +975,10 @@ int Application::run(int argc, char** argv) {
         }
 #endif
 
+        // Phase 14d: Built-in screen server, if the user shares the screen (#1825)
+        helix::RemoteScreenService::instance().init(&m_display->remote_screen());
+        helix::RemoteScreenService::instance().watch_print_state();
+
         // Phase 15: Start memory monitoring (logs at TRACE level, -vvv)
         helix::MemoryMonitor::instance().start(5000);
         helix::MemoryMonitor::instance().set_warning_callback(
@@ -905,7 +994,7 @@ int Application::run(int argc, char** argv) {
         // lives behind one guarded call site below so turning it on later is a
         // single change rather than a refactor.
         {
-            uint32_t hang_ms = helix::MainLoopHangDetector::DEFAULT_THRESHOLD_MS;
+            uint32_t hang_ms = helix::MainLoopHangDetector::kDefaultThresholdMs;
             if (const char* env = std::getenv("HELIX_HANG_THRESHOLD_SEC")) {
                 char* end = nullptr;
                 const long secs = std::strtol(env, &end, 10);
@@ -961,7 +1050,7 @@ int Application::run(int argc, char** argv) {
                 if (level >= helix::MemoryPressureLevel::critical) {
                     helix::ui::queue_update("Application::run", []() {
                         crash_handler::breadcrumb::note("gcode_viewer", "pressure_clear");
-                        ui_gcode_viewer_clear_all_active();
+                        helix::ui::gcode_viewer_clear_all_active();
                     });
                 }
             });
@@ -1101,16 +1190,10 @@ bool Application::parse_args(int argc, char** argv) {
     // HELIX_SCREEN_SIZE: screen size override (alternative to -s flag)
     // Only applies if -s was not passed on the command line
     if (m_screen_width == 0 && m_screen_height == 0) {
-        if (auto size_str = EnvConfig::get_screen_size()) {
-            if (helix::parse_screen_size_string(size_str->c_str(), m_screen_width,
-                                                m_screen_height)) {
-                spdlog::info("[Application] Screen size from HELIX_SCREEN_SIZE: {}x{}",
-                             m_screen_width, m_screen_height);
-            } else {
-                spdlog::warn("[Application] Invalid HELIX_SCREEN_SIZE='{}' — use named size "
-                             "(micro/tiny/small/medium/large/xlarge) or WxH (e.g. 480x400)",
-                             *size_str);
-            }
+        m_screen_size_env = EnvConfig::get_screen_size();
+        if (m_screen_size_env) {
+            m_screen_size_env_valid = helix::parse_screen_size_string(
+                m_screen_size_env->c_str(), m_screen_width, m_screen_height);
         }
     }
 
@@ -1143,8 +1226,8 @@ bool Application::init_config() {
     m_config = Config::get_instance();
 
     // Use separate config file for test mode to avoid conflicts with real printer settings
-    const char* config_path = get_runtime_config()->test_mode ? RuntimeConfig::TEST_CONFIG_PATH
-                                                              : RuntimeConfig::PROD_CONFIG_PATH;
+    const char* config_path = get_runtime_config()->test_mode ? RuntimeConfig::kTestConfigPath
+                                                              : RuntimeConfig::kProdConfigPath;
     spdlog::info("[Application] Using config: {}", config_path);
     m_config->init(config_path);
 
@@ -1173,10 +1256,8 @@ bool Application::init_logging() {
     // the setting and its subject) — idempotent, and by then the value already
     // matches. Without this the log's wall clock jumps mid-startup on any device
     // whose configured zone differs from the host's, which reads as a stall in a
-    // debug bundle (#1218: a 5-hour jump inside a single startup sequence).
-    // Unknown zones are left to glibc, which treats an unparseable TZ as UTC —
-    // the same fallback DisplaySettingsManager applies.
-    helix::timezone_env::apply(m_config->get<std::string>("/display/timezone", "UTC").c_str());
+    // debug bundle (#1218).
+    DisplaySettingsManager::apply_configured_timezone();
 
     LogConfig log_config;
 
@@ -1277,19 +1358,22 @@ bool Application::init_display() {
     DisplayManager::Config config;
     config.width = m_screen_width;
     config.height = m_screen_height;
-    // The first-boot probe's kernel panel_orientation is applied here, as the
-    // configured rotation, so it is in place before the backends create their
-    // input devices and gate the stored touch range on it (#1428).
+    // The first-boot orientation is applied by display init, as the configured
+    // rotation, so it is in place before the backends create their input devices
+    // and gate the stored touch range on it (#1428): the kernel's
+    // panel_orientation here, the board's mount once init knows the framebuffer.
     m_rotation_probe_wanted = rotation_probe_wanted();
-    m_kernel_orientation =
+    const int kernel_orientation =
         m_rotation_probe_wanted ? DisplayBackend::detect_panel_orientation() : -1;
     config.rotation =
-        helix::startup_rotation(m_args.rotation, m_rotation_probe_wanted, m_kernel_orientation);
+        helix::startup_rotation(m_args.rotation, m_rotation_probe_wanted, kernel_orientation);
+    config.first_boot_probe = m_rotation_probe_wanted;
+    config.kernel_orientation = kernel_orientation;
     config.size_was_explicit = m_args.size_was_explicit;
 
     // Get scroll config from settings.json
     config.scroll_throw =
-        m_config->get<int>("/input/scroll_throw", InputSettingsManager::DEFAULT_SCROLL_THROW);
+        m_config->get<int>("/input/scroll_throw", InputSettingsManager::kDefaultScrollThrow);
     config.scroll_limit = m_config->get<int>("/input/scroll_limit", 10);
 
     // Allow headless/VNC operation without a touchscreen
@@ -1358,27 +1442,6 @@ bool Application::init_display() {
     });
 #endif
 
-    // Android is the one platform whose reported DPI can be trusted: OEMs must
-    // declare it and SDL reads it straight from DisplayMetrics. Every Linux
-    // target is excluded on purpose — a survey of the eight test devices found
-    // the reported physical size wrong or absent on six, including a Pi that
-    // reports the official 7" panel's exact active area for a ~115mm screen.
-    std::optional<double> measured_dpi;
-#ifdef __ANDROID__
-    {
-        float ddpi = 0, hdpi = 0, vdpi = 0;
-        if (SDL_GetDisplayDPI(0, &ddpi, &hdpi, &vdpi) == 0) {
-            spdlog::info("[Application] Android display DPI: diagonal={:.0f} h={:.0f} v={:.0f}",
-                         ddpi, hdpi, vdpi);
-            if (ddpi > 0) {
-                measured_dpi = static_cast<double>(ddpi);
-            }
-        }
-        spdlog::info("[Application] Android screen: {}x{} (DPI-aware sizing via SDL)",
-                     m_screen_width, m_screen_height);
-    }
-#endif
-
     // Register LVGL log handler AFTER lv_init() (called inside display->init())
     // Must be after lv_init() because it resets global state and clears callbacks
     helix::logging::register_lvgl_log_handler();
@@ -1398,46 +1461,33 @@ bool Application::init_display() {
     // scale is flat (exactly 1.0) through 225 DPI, which covers every shipping
     // printer measured, so this is an identity everywhere except phone-class
     // panels.
-    const helix::ResolvedDpi resolved = helix::DisplayMetrics::resolve_dpi(
-        m_args.dpi, measured_dpi, helix::platform::current_key());
-    const double auto_scale = helix::DisplayMetrics::ui_scale_for_dpi(resolved.dpi);
-    helix::DisplayMetrics::set_auto_scale(auto_scale);
-
+    //
     // The stored UI Scale setting wins over the measurement, which is the
     // whole point of exposing it: a panel we scale wrongly, or a user who
     // simply wants larger type, has a way out that does not need a rebuild.
     // Config rather than DisplaySettingsManager because this runs inside
-    // init_display(), before that manager's subjects exist — both read the
+    // init_display(), before that manager's subjects exist; both read the
     // same key. `--dpi` stays upstream of this, overriding the measurement
     // that Automatic then follows.
-    const int scale_setting = Config::get_instance()->get<int>(
-        "/display/ui_scale_percent", helix::DisplayMetrics::kScaleSettingAutomatic);
-    const double ui_scale = helix::DisplayMetrics::scale_for_setting(scale_setting, auto_scale);
-    helix::DisplayMetrics::set_active_scale(ui_scale);
-
-    // What LVGL gets is LV_DPI_DEF scaled by the SAME factor — never a
+    //
+    // What LVGL gets is LV_DPI_DEF scaled by the SAME factor, never a
     // kernel-derived number. LVGL turns its DPI into padding via LV_DPX_CALC,
     // so this makes its internal chrome (and the four lv_dpx() call sites in
     // our own code) grow in step with the design tokens theme_manager scales.
     // The two paths are disjoint, so they add rather than compound. At scale
-    // 1.0 this is exactly LV_DPI_DEF, i.e. byte-identical to the previous
-    // behaviour, which is what keeps a lying kernel driver from reaching the
-    // UI at all (a sun4i-drm CB1 reports 23 DPI and would collapse padding to
-    // 1px via LV_DPX's MAX(..,1) floor).
-    int32_t effective_dpi = static_cast<int32_t>(std::lround(LV_DPI_DEF * ui_scale));
-    int32_t pre_set_dpi = lv_display_get_dpi(m_display->display());
-    lv_display_set_dpi(m_display->display(), effective_dpi);
-    spdlog::info("[Application] Display metrics: dpi={:.0f} (source={}) → ui_scale={:.3f} "
-                 "(auto={:.3f}, setting={}), lvgl_dpi={} (was {} before set)",
-                 resolved.dpi, helix::dpi_source_name(resolved.source), ui_scale, auto_scale,
-                 scale_setting == helix::DisplayMetrics::kScaleSettingAutomatic
-                     ? std::string("automatic")
-                     : std::to_string(scale_setting) + "%",
-                 effective_dpi, pre_set_dpi);
+    // 1.0 this is exactly LV_DPI_DEF, which is what keeps a lying kernel
+    // driver from reaching the UI at all (a sun4i-drm CB1 reports 23 DPI and
+    // would collapse padding to 1px via LV_DPX's MAX(..,1) floor).
+    s_user_override_dpi = m_args.dpi;
+    s_scale_setting = Config::get_instance()->get<int>(
+        "/display/ui_scale_percent", helix::DisplayMetrics::kScaleSettingAutomatic);
+    const int32_t pre_set_dpi = lv_display_get_dpi(m_display->display());
+    const helix::ScaleDecision scale = decide_display_scale(m_display->display());
+    apply_display_scale(m_display->display(), scale);
     if (pre_set_dpi < 50 && m_args.dpi == 0) {
         spdlog::warn("[Application] Display reported dpi={} before set — backend lost LV_DPI_DEF "
                      "between create and theme init. Fix-forward applied (forced to {}).",
-                     pre_set_dpi, effective_dpi);
+                     pre_set_dpi, scale.lvgl_dpi);
     }
 
     // Get active screen
@@ -1472,6 +1522,14 @@ bool Application::init_display() {
         // derives ui_is_portrait from LayoutManager::type() (override-aware),
         // so the type must reflect the new geometry before refresh reads it.
         // #1255.
+        // A foldable changes the native-to-logical ratio, and with it the
+        // DPI of the logical pixel, so the scale is decided again before the
+        // tokens and fonts that read it are refreshed.
+        const helix::ScaleDecision scale = decide_display_scale(disp);
+        if (scale.ui_scale != helix::DisplayMetrics::active_scale()) {
+            apply_display_scale(disp, scale);
+        }
+
         layout.init(w, h);
         theme_manager_refresh_layout_constants(disp);
         // Components register with the tokens and layout variant of the moment;
@@ -1584,7 +1642,7 @@ bool Application::rotation_probe_wanted() const {
     // Skip if: CLI rotation set, env var set, already probed, or config already
     // has a /display/rotate key (even if 0 — means user already configured it).
     // HELIX_FORCE_ROTATION_PROBE=1 bypasses all guards (for testing on SDL).
-    if (std::getenv("HELIX_FORCE_ROTATION_PROBE") != nullptr) {
+    if (helix::rotation_probe_forced()) {
         spdlog::info("[Application] Rotation probe forced via HELIX_FORCE_ROTATION_PROBE");
         return true;
     }
@@ -1617,25 +1675,26 @@ void Application::run_rotation_probe_and_layout() {
             int32_t pre_w = m_screen_width;
             int32_t pre_h = m_screen_height;
 
-            // Kernel panel_orientation first. It is informational — the kernel
-            // does NOT rotate the framebuffer — and init_display() has already
-            // applied it, so only the config write remains.
-            const int kernel_orientation = m_kernel_orientation;
-            if (kernel_orientation >= 0) {
+            // A known orientation first: the kernel's panel_orientation (which
+            // is informational, the kernel does NOT rotate the framebuffer) or
+            // the board's mount. init_display() has already applied it, so only
+            // the config write remains.
+            const int known_orientation = m_display->first_boot_orientation();
+            if (known_orientation >= 0) {
                 // Orientation detected (0=Normal, 90, 180, 270).
-                if (kernel_orientation > 0) {
+                if (known_orientation > 0) {
                     spdlog::info("[Application] Auto-detected panel orientation: {}° — "
                                  "applied at display init, saving to config",
-                                 kernel_orientation);
+                                 known_orientation);
                 } else {
                     spdlog::info("[Application] Auto-detected panel orientation: Normal (0°) — "
                                  "no rotation needed, saving to config");
                 }
-                m_config->set("/display/rotate", kernel_orientation);
+                m_config->set("/display/rotate", known_orientation);
                 m_config->set("/display/rotation_probed", true);
                 m_config->save();
             } else {
-                // kernel_orientation == -1: not detected, run interactive probe.
+                // known_orientation == -1: not known, run interactive probe.
                 // Dismiss splash first — the probe renders full-screen UI to the
                 // framebuffer, which is invisible while the splash process is
                 // painting over it and the flush callback is suppressed.
@@ -1692,9 +1751,10 @@ bool Application::register_widgets() {
     ui_severity_card_register();
     ui_dialog_register();
     ui_bed_mesh_register();
-    ui_gcode_viewer_register();
+    helix::ui::gcode_viewer_register();
     ui_gradient_canvas_register();
     helix::ui::register_helix_sparkline_widget();
+    helix::ui::register_humidity_drop_widget();
 
     // Initialize component systems
     ui_component_header_bar_init();
@@ -1718,6 +1778,10 @@ bool Application::register_xml_components() {
     helix::register_xml_components();
     spdlog::debug("[Application] XML components registered");
 
+    // Guided flows must exist before any overlay builds: an action that names an unregistered
+    // flow is refused rather than executed.
+    helix::ui::register_builtin_guided_device_flows();
+
     // Start XML hot reloader if enabled. Default ON for native (non-release)
     // builds so editing XML during dev Just Works; OFF for cross-compiled
     // release targets. Env var HELIX_HOT_RELOAD={0,1} overrides either way.
@@ -1740,12 +1804,8 @@ bool Application::init_translations() {
     // are expected and produce many "language is missing from tag" warnings
     helix::logging::set_suppress_translation_warnings(true);
 
-    // NOTE: lv_i18n (src/generated/lv_i18n_translations.c) was a parallel i18n
-    // subsystem kept alongside LVGL's native lv_translation_* API. It was never
-    // read from — lv_i18n_get_text() has no callers in the tree. Removing the
-    // init/set_locale calls lets LTO strip the ~1 MB of compiled language pack
-    // rodata. All real language switching goes through lv_translation_set_language
-    // and the per-locale XML files loaded below.
+    // All language switching goes through lv_translation_set_language and the
+    // per-locale XML files loaded below.
 
     // Load ONLY the current locale's translations. Parsing the combined
     // translations.xml with all 9 languages at startup burns ~500-700 KB of
@@ -2001,27 +2061,27 @@ int Application::main_loop() {
     bool needs_fb_self_heal =
         m_display->backend() && m_display->backend()->type() == DisplayBackendType::FBDEV;
     uint32_t last_fb_selfheal_tick = start_time;
-    static constexpr uint32_t FB_SELFHEAL_INTERVAL_MS = 10000; // 10 seconds
+    static constexpr uint32_t kFbSelfhealIntervalMs = 10000; // 10 seconds
 
     // Liveness breadcrumb: emits every ~30 s so a crashed session's last moments
     // always show recent activity, even if the user was idle on one panel.
     uint32_t last_tick_crumb = start_time;
-    static constexpr uint32_t TICK_CRUMB_INTERVAL_MS = 30000;
+    static constexpr uint32_t kTickCrumbIntervalMs = 30000;
     uint64_t frame_counter = 0;
 
     // Heap snapshot refresh cadence — cheap, called from the main thread so the
     // crash signal handler can read the cached values without touching
     // non-async-signal-safe APIs (mallinfo, open, lv_mem_monitor).
     uint32_t last_heap_refresh = start_time;
-    static constexpr uint32_t HEAP_REFRESH_INTERVAL_MS = 10000;
+    static constexpr uint32_t kHeapRefreshIntervalMs = 10000;
     crash_handler::refresh_heap_snapshot();
 
     // Failsafe: track invalidation suppression with a hard deadline.
     // If splash handoff doesn't complete within this time, force rendering back on
     // to avoid a permanently black screen.
     uint32_t suppression_start_tick = DisplayManager::get_ticks();
-    static constexpr uint32_t INVALIDATION_FAILSAFE_MS =
-        11000; // Must exceed DISCOVERY_TIMEOUT_MS (8s)
+    static constexpr uint32_t kInvalidationFailsafeMs =
+        11000; // Must exceed kDiscoveryTimeoutMs (8s)
 
     // Configure main loop handler
     helix::application::MainLoopHandler::Config loop_config;
@@ -2032,11 +2092,14 @@ int Application::main_loop() {
     loop_config.benchmark_report_interval_ms = 5000;
     m_loop_handler.init(loop_config, start_time);
 
+    // The glass gate: decided now from stored facts, or probed once after boot settles.
+    helix::ui::glass_gate_start();
+
     // Show one-time post-migration notice before entering the main loop.
     // Splash handoff timing risk on target hardware (AD5M, Pi 3B) is theoretical —
     // verify on real hardware as part of Task 5 manual checks. If it's an issue,
     // move this call after the post-splash refresh block or defer via lv_async_call.
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
     show_screensaver_migration_notice_if_pending();
 #endif
 
@@ -2044,7 +2107,7 @@ int Application::main_loop() {
     // inside lv_timer_handler() (observers, queued UpdateQueue items, LVGL
     // animations, async calls) unwinds the entire stack out of main_loop into
     // main()'s catch and exits 134 — the watchdog interprets this as a crash
-    // and after CRASH_LOOP_MAX_CRASHES same-signature events triggers the
+    // and after kCrashLoopMaxCrashes same-signature events triggers the
     // "HelixScreen Keeps Crashing" recovery dialog (#931). A separate safety
     // net wraps the initial-subscription dispatch path, but queued/observer/
     // timer callbacks inside lv_timer_handler are not yet guarded. Catch +
@@ -2054,8 +2117,8 @@ int Application::main_loop() {
     // catch itself is in a tight retry loop.
     int exception_streak = 0;
     uint32_t streak_window_start = 0;
-    static constexpr int RUNAWAY_THRESHOLD = 5;
-    static constexpr uint32_t RUNAWAY_WINDOW_MS = 30000;
+    static constexpr int kRunawayThreshold = 5;
+    static constexpr uint32_t kRunawayWindowMs = 30000;
 
     // Re-install SIGUSR1 handler right before the main loop. SDL_Init or other
     // mid-startup library init (libdrm-ish, evdev) can reset signal handlers
@@ -2135,7 +2198,7 @@ int Application::main_loop() {
 
             // Periodic full-screen invalidation on fbdev (self-heal kernel console bleed-through)
             if (needs_fb_self_heal &&
-                (current_tick - last_fb_selfheal_tick) >= FB_SELFHEAL_INTERVAL_MS) {
+                (current_tick - last_fb_selfheal_tick) >= kFbSelfhealIntervalMs) {
                 lv_obj_invalidate(lv_screen_active());
                 last_fb_selfheal_tick = current_tick;
             }
@@ -2143,14 +2206,14 @@ int Application::main_loop() {
             // Periodic liveness breadcrumb (counts frames so crash bundles know
             // whether the loop was spinning normally or stalled).
             ++frame_counter;
-            if ((current_tick - last_tick_crumb) >= TICK_CRUMB_INTERVAL_MS) {
+            if ((current_tick - last_tick_crumb) >= kTickCrumbIntervalMs) {
                 crash_handler::breadcrumb::note("tick", "", static_cast<long>(frame_counter));
                 last_tick_crumb = current_tick;
             }
 
             // Refresh cached heap snapshot so any crash within the next window
             // reports recent memory state.
-            if ((current_tick - last_heap_refresh) >= HEAP_REFRESH_INTERVAL_MS) {
+            if ((current_tick - last_heap_refresh) >= kHeapRefreshIntervalMs) {
                 crash_handler::refresh_heap_snapshot();
                 last_heap_refresh = current_tick;
             }
@@ -2216,11 +2279,11 @@ int Application::main_loop() {
             // Failsafe: if invalidation is still suppressed after hard deadline, force it back on.
             // Prevents permanent black screen if splash handoff fails for any reason.
             if (m_splash_invalidation_suppression.active() &&
-                (current_tick - suppression_start_tick) >= INVALIDATION_FAILSAFE_MS) {
+                (current_tick - suppression_start_tick) >= kInvalidationFailsafeMs) {
                 m_splash_invalidation_suppression.end();
                 restore_flush_callback();
                 spdlog::warn("[Application] Invalidation failsafe triggered after {}ms",
-                             INVALIDATION_FAILSAFE_MS);
+                             kInvalidationFailsafeMs);
                 lv_obj_invalidate(lv_screen_active());
             }
 
@@ -2252,8 +2315,8 @@ int Application::main_loop() {
             // closer to the source. Pre-#931, this unwound through main()
             // and exited 134, triggering a watchdog crash loop. Now: log
             // type+what, dump the recent breadcrumb ring, record telemetry,
-            // and continue. If catches pile up faster than RUNAWAY_THRESHOLD
-            // / RUNAWAY_WINDOW_MS, exit cleanly so the watchdog sees a
+            // and continue. If catches pile up faster than kRunawayThreshold
+            // / kRunawayWindowMs, exit cleanly so the watchdog sees a
             // graceful shutdown instead of an infinite throw-catch tight loop.
             const std::string type_name = crash_handler::current_exception_type_name();
             spdlog::error("[Application] Caught exception in main loop: {} ({})", e.what(),
@@ -2270,16 +2333,16 @@ int Application::main_loop() {
             }
 
             uint32_t now_tick = DisplayManager::get_ticks();
-            if (exception_streak == 0 || (now_tick - streak_window_start) > RUNAWAY_WINDOW_MS) {
+            if (exception_streak == 0 || (now_tick - streak_window_start) > kRunawayWindowMs) {
                 streak_window_start = now_tick;
                 exception_streak = 1;
             } else {
                 ++exception_streak;
             }
-            if (exception_streak >= RUNAWAY_THRESHOLD) {
+            if (exception_streak >= kRunawayThreshold) {
                 spdlog::critical("[Application] Runaway exception streak ({} in {}ms) — "
                                  "exiting main loop cleanly to break the throw-catch tight loop",
-                                 exception_streak, RUNAWAY_WINDOW_MS);
+                                 exception_streak, kRunawayWindowMs);
                 break;
             }
 
@@ -2397,7 +2460,7 @@ void Application::on_enter_foreground() {
     spdlog::info("[Application] Foreground resume complete");
 }
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 void Application::show_screensaver_migration_notice_if_pending() {
     auto* cfg = Config::get_instance();
 
@@ -2458,7 +2521,7 @@ void Application::shutdown() {
     helix::WifiLinkMonitor::instance().stop();
 
     // Clean shutdown means no crash loop -- remove the marker file
-    std::filesystem::remove(crash_marker_path());
+    helix::clear_crash_marker(crash_marker_path());
 
     // Crash handler stays installed through teardown so any SIGBUS/SIGSEGV
     // during widget deletion, observer cleanup, or lv_deinit still produces
@@ -2474,6 +2537,7 @@ void Application::shutdown() {
 #ifdef HELIX_ENABLE_REMOTE_CONTROL
     m_remote_control.stop();
 #endif
+    helix::RemoteScreenService::instance().shutdown();
 
     // Stop memory monitor
     helix::MemoryMonitor::instance().stop();

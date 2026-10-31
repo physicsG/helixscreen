@@ -113,12 +113,12 @@ TEST_CASE_METHOD(HelixTestFixture,
 
     // Reassign every slot away from its default so a stale hardcoded list cannot
     // coincidentally match.
-    const std::array<const char*, presets::PRESET_COUNT> reassigned{"ASA", "PC", "PA", "PETG-CF"};
-    for (int i = 0; i < presets::PRESET_COUNT; ++i) {
+    const std::array<const char*, presets::kPresetCount> reassigned{"ASA", "PC", "PA", "PETG-CF"};
+    for (int i = 0; i < presets::kPresetCount; ++i) {
         PresetSlotGuard::assign(i, reassigned[static_cast<size_t>(i)]);
     }
 
-    for (int i = 0; i < presets::PRESET_COUNT; ++i) {
+    for (int i = 0; i < presets::kPresetCount; ++i) {
         const std::string expected = reassigned[static_cast<size_t>(i)];
 
         // The filament panel renders presets::display_label(); the preheat widget
@@ -197,12 +197,12 @@ TEST_CASE_METHOD(HelixTestFixture, "Temp panel presets reflect the user's config
     // The DATA layer covers every configured slot, independently of how many
     // buttons any given screen has room to render. The nozzle/bed/chamber temp
     // panels and the temp graph overlay display only slots 0-2 (a layout
-    // constraint documented in those XML files and in TEMP_GRAPH_VISIBLE_PRESETS);
+    // constraint documented in those XML files and in kTempGraphVisiblePresets);
     // the filament and PID panels display all 4. compute_heater_presets() must
     // populate all of them regardless, so no screen is ever forced to show a
     // stale or zero target for a slot it does have room for.
-    REQUIRE(nozzle.material.size() == static_cast<size_t>(presets::PRESET_COUNT));
-    for (int i = 0; i < presets::PRESET_COUNT; ++i) {
+    REQUIRE(nozzle.material.size() == static_cast<size_t>(presets::kPresetCount));
+    for (int i = 0; i < presets::kPresetCount; ++i) {
         auto mat = filament::find_material(presets::name(i));
         REQUIRE(mat.has_value());
         REQUIRE(nozzle.material[static_cast<size_t>(i)] == mat->nozzle_recommended());
@@ -242,8 +242,8 @@ TEST_CASE_METHOD(HelixTestFixture, "AMS environment fallback uses the unified pr
 
     const auto fallback = helix::ui::AmsEnvironmentOverlay::fallback_comfort_materials();
 
-    REQUIRE(fallback.size() == static_cast<size_t>(presets::PRESET_COUNT));
-    for (int i = 0; i < presets::PRESET_COUNT; ++i) {
+    REQUIRE(fallback.size() == static_cast<size_t>(presets::kPresetCount));
+    for (int i = 0; i < presets::kPresetCount; ++i) {
         REQUIRE(fallback[static_cast<size_t>(i)] == presets::name(i));
     }
 
@@ -266,7 +266,7 @@ TEST_CASE_METHOD(HelixTestFixture,
     REQUIRE(chamber.off == 0);
 
     // Sane: every rung is a usable enclosure temperature and the ladder ascends.
-    for (int i = 0; i < presets::PRESET_COUNT; ++i) {
+    for (int i = 0; i < presets::kPresetCount; ++i) {
         const int v = chamber.material[static_cast<size_t>(i)];
         REQUIRE(v > 0);
         REQUIRE(v <= 80); // chamber keypad ceiling

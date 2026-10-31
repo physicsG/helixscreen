@@ -81,7 +81,7 @@ A container qualifies when all three hold (`src/ui/page_scroll_auto_inject.cpp#q
 The walk then cuts on three things, in this order:
 
 1. **`LV_OBJ_FLAG_HIDDEN`** - do not inject into a stacked or hidden panel.
-2. **`helix::PANEL_WIDGET_TILE_FLAG`** - do not descend into a home widget tile.
+2. **`helix::kPanelWidgetTileFlag`** - do not descend into a home widget tile.
 3. **An already-claimed ancestor** - a qualifying container underneath a managed
    one does not get its own gutter, so gutters never nest. The claim propagates
    across repeated walks over a persistent tree, which matters when you navigate
@@ -205,7 +205,6 @@ your time otherwise:
 |------|--------|
 | `tests/unit/test_page_scroll_math.cpp` | the pure paging step and reach computation |
 | `tests/unit/test_page_scroll_setting.cpp` | the setting round-trips |
-| `tests/unit/test_page_scroll_gutter_component.cpp` | the XML component builds with named up/down buttons |
 | `tests/unit/test_page_scroll_controller.cpp` | attach, padding restore, end-disabling, last-page clamp, container deletion |
 | `tests/unit/test_page_scroll_auto_inject.cpp` | the policy: what qualifies, nesting, the tile cut |
 
@@ -224,7 +223,7 @@ wanted gone.
 ## Related Documentation
 
 - [chapter 09 — Home panel widgets](architecture/09-home-widgets.md) - Panel Widget System, including the
-  `LV_OBJ_FLAG_USER_*` ledger that `PANEL_WIDGET_TILE_FLAG` is part of
+  `LV_OBJ_FLAG_USER_*` ledger that `kPanelWidgetTileFlag` is part of
 - [LAYOUT_SYSTEM.md](LAYOUT_SYSTEM.md) - the home widget grid that sizes tiles
 - [LVGL9_XML_GUIDE.md](LVGL9_XML_GUIDE.md) - `lv_obj` defaults, and why
   `scrollable` is the one this project's theme does not override

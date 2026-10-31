@@ -20,8 +20,10 @@
   <translation tag="Updated just now" de="Soeben aktualisiert"/>
   <translation tag="Updated 1m ago" de="Vor 1 Min. aktualisiert"/>
   <translation tag="Updated %dm ago" de="Vor %d Min. aktualisiert"/>
+  <translation tag="Updated %dh ago" de="Vor %d Std. aktualisiert"/>
   <!-- Status and source line -->
   <translation tag="not configured" de="nicht konfiguriert"/>
   <translation tag="bad data" de="fehlerhafte Daten"/>
+  <translation tag="unreachable" de="nicht erreichbar"/>
   <translation tag="(not set)" de="(nicht gesetzt)"/>
 </translations>

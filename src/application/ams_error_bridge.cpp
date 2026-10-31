@@ -5,10 +5,12 @@
 #include "ui_panel_ams.h"
 
 #include "ams_state.h"
+#include "app_globals.h"
 #include "fault_surface_correlation.h"
 #include "lvgl.h"
 #include "observer_factory.h"
 #include "post_op_cooldown_manager.h"
+#include "printer_state.h"
 
 #include <spdlog/spdlog.h>
 
@@ -34,6 +36,52 @@ void AmsErrorBridge::start() {
         AmsState::instance().get_ams_action_detail_subject(), this,
         [](AmsErrorBridge* self, const char* detail) { self->on_detail_changed(detail); },
         AmsState::instance().get_subjects_lifetime());
+
+    auto& printer = get_printer_state();
+    // RAW_PRINT_STATE_OK: the printer's own pause is what a filament fault
+    // stops the print with.
+    print_state_observer_ = helix::ui::observe<int>(
+        printer.print_state().get_print_state_enum_subject(), this,
+        [](AmsErrorBridge* self, int) { self->evaluate_current_error_with_cause(); },
+        printer.get_subjects_lifetime());
+    stop_reason_observer_ = helix::ui::observe<const char*>(
+        printer.print_state().get_print_stop_reason_subject(), this,
+        [](AmsErrorBridge* self, const char*) { self->evaluate_current_error_with_cause(); },
+        printer.get_subjects_lifetime());
+}
+
+namespace {
+
+bool print_paused() {
+    // RAW_PRINT_STATE_OK: see the print-state observer in AmsErrorBridge::start().
+    return get_printer_state().print_state().get_print_job_state() == PrintJobState::PAUSED;
+}
+
+} // namespace
+
+void AmsErrorBridge::evaluate_current_error_with_cause() {
+    auto& ams = AmsState::instance();
+    ams.refresh_fault_cause();
+    const auto ev = ams.standing_fault();
+    // Outside a pause the ERROR edge in on_action_changed() raises the fault, so
+    // only the pause counts here.
+    const StandingFaultStep step =
+        fault_trigger_.update(ev.has_value(), print_paused(),
+                              /*printing=*/true, !ams.fault_cause().empty());
+    // A fault the user closed stays closed when its cause arrives.
+    if (step == StandingFaultStep::None ||
+        (step == StandingFaultStep::Explain && !presenter_.is_visible())) {
+        return;
+    }
+    // GcodeErrorRouter can have raised the same `!!` already.
+    if (fault_surface_correlation::was_recently_surfaced(ev->detail)) {
+        return;
+    }
+    spdlog::info("[AmsErrorBridge] fault while paused: {}", ev->detail);
+    presenter_.present(*ev);
+    presented_ = true;
+    presented_cause_ = ams.fault_cause();
+    fault_surface_correlation::record_surfaced(ev->detail);
 }
 
 void AmsErrorBridge::on_action_changed(int action) {
@@ -58,12 +106,18 @@ void AmsErrorBridge::on_action_changed(int action) {
         // previously answered one is shown again instead of being swallowed.
         presenter_.forget_handled_fault();
 
-        auto* backend = AmsState::instance().get_backend();
+        auto& ams = AmsState::instance();
+        ams.refresh_fault_cause();
+        auto* backend = ams.get_backend();
+        presented_cause_.clear();
 
-        // Snapshot what the backend was doing. AFC's local action timeout
-        // preserves it as "<detail> (timed out)", which is the only description
-        // of the fault that exists on that path.
-        error_detail_ = backend ? backend->get_system_info().operation_detail : std::string();
+        // The fault's cause, else a snapshot of what the backend was doing. AFC's
+        // local action timeout preserves it as "<detail> (timed out)", which is
+        // the only description of the fault that exists on that path.
+        error_detail_ = ams.fault_cause();
+        if (error_detail_.empty() && backend) {
+            error_detail_ = backend->get_system_info().operation_detail;
+        }
 
         // Last-resort fallback, armed on every ERROR edge and armed BEFORE the
         // early returns for the same reason the cooldown cancel is. It only
@@ -78,19 +132,19 @@ void AmsErrorBridge::on_action_changed(int action) {
         lifetime_.defer("AmsErrorBridge::surface_unhandled_error",
                         [this]() { surface_unhandled_error(); });
 
-        if (!backend)
-            return;
-        auto ev = backend->current_error();
+        auto ev = ams.standing_fault();
         if (ev) {
             spdlog::debug("[AmsErrorBridge] presenting error: {}", ev->detail);
             presenter_.present(*ev);
             presented_ = true;
+            presented_cause_ = ams.fault_cause();
         }
     } else if (!now_error && was_error && presented_) {
         spdlog::debug("[AmsErrorBridge] dismissing error modal (action exited ERROR)");
         presenter_.dismiss();
         presented_ = false;
     }
+    evaluate_current_error_with_cause();
 }
 
 void AmsErrorBridge::on_detail_changed(const char* /*detail*/) {
@@ -105,11 +159,17 @@ void AmsErrorBridge::on_detail_changed(const char* /*detail*/) {
         !presented_) {
         return;
     }
-    auto* backend = AmsState::instance().get_backend();
-    if (!backend) {
+    auto& ams = AmsState::instance();
+    ams.refresh_fault_cause();
+    // A held cause is the fault's text whatever the backend's detail says. The
+    // cause that first explains a fault the user closed leaves it closed; a
+    // different cause from the one shown is a new fault.
+    const std::string cause = ams.fault_cause();
+    if (!cause.empty() && !presenter_.is_visible() &&
+        (presented_cause_.empty() || cause == presented_cause_)) {
         return;
     }
-    auto ev = backend->current_error();
+    auto ev = ams.standing_fault();
     if (!ev) {
         // The fault cleared under our feet before the action subject fell; leave
         // the existing modal and let the falling-edge dismiss handle it.
@@ -123,6 +183,7 @@ void AmsErrorBridge::on_detail_changed(const char* /*detail*/) {
     // the modal without any callback, so every subsequent detail change would
     // otherwise pop the identical dialog straight back up.
     presenter_.present(*ev);
+    presented_cause_ = cause;
     // presented_ stays true: this is the same ERROR episode, and the falling-edge
     // dismiss in on_action_changed still fires when action exits ERROR.
 }

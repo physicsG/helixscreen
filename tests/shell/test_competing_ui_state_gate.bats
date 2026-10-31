@@ -45,6 +45,7 @@ setup() {
     . "$patched"
 
     unset _HELIX_UNINSTALL_SOURCED
+    . "$WORKTREE_ROOT/scripts/lib/installer/common.sh"
     . "$WORKTREE_ROOT/scripts/lib/installer/uninstall.sh"
 
     _is_self_update() { return 1; }

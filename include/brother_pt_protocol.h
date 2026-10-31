@@ -11,7 +11,7 @@
 namespace helix::label {
 
 /// PT raster row: 128 pins = 16 bytes
-static constexpr int BROTHER_PT_RASTER_ROW_BYTES = 16;
+static constexpr int kBrotherPtRasterRowBytes = 16;
 
 /// Parsed status from a Brother PT printer (32-byte response)
 struct BrotherPTMedia {

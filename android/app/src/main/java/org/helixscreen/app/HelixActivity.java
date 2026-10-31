@@ -1,10 +1,14 @@
 package org.helixscreen.app;
 
+import android.content.ActivityNotFoundException;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -15,11 +19,24 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Scanner;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+import com.google.android.gms.tasks.Tasks;
+import com.google.android.play.core.appupdate.AppUpdateInfo;
+import com.google.android.play.core.appupdate.AppUpdateManager;
+import com.google.android.play.core.appupdate.AppUpdateManagerFactory;
+import com.google.android.play.core.appupdate.AppUpdateOptions;
+import com.google.android.play.core.install.model.AppUpdateType;
+import com.google.android.play.core.install.model.UpdateAvailability;
 
 import org.helixscreen.app.BuildConfig;
 import org.libsdl.app.SDLActivity;
@@ -98,6 +115,9 @@ public class HelixActivity extends SDLActivity {
      * only "wake" signal available when the user never touches our surface.
      */
     private static volatile int sResumeSeq = 0;
+
+    /** Keeps printer traffic on the connected Wi-Fi; see {@link WifiBinder}. */
+    private WifiBinder mWifiBinder;
 
     private final Handler mHideHandler = new Handler(Looper.getMainLooper());
     private final Runnable mHideRunnable = new Runnable() {
@@ -371,6 +391,22 @@ public class HelixActivity extends SDLActivity {
     }
 
     @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        mWifiBinder = new WifiBinder(this);
+        mWifiBinder.start();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (mWifiBinder != null) {
+            mWifiBinder.stop();
+            mWifiBinder = null;
+        }
+        super.onDestroy();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         // A resume means the panel is on again — the signal native code uses to
@@ -572,6 +608,101 @@ public class HelixActivity extends SDLActivity {
     }
 
     // =========================================================================
+    // JNI Play update bridge, called from native update checker and About panel
+    // =========================================================================
+
+    private static final int PLAY_UPDATE_REQUEST_CODE = 0x4855;
+
+    /** True when Play reports an update this install can take now. */
+    private static boolean playOffersUpdate(AppUpdateInfo info) {
+        int availability = info.updateAvailability();
+        return availability == UpdateAvailability.UPDATE_AVAILABLE
+                || availability == UpdateAvailability.DEVELOPER_TRIGGERED_UPDATE_IN_PROGRESS;
+    }
+
+    /**
+     * Ask Google Play whether it will serve this device an update. Blocks for up
+     * to timeoutSec, so native code calls it from its update-checker worker
+     * thread; Tasks.await refuses to run on the main thread.
+     *
+     * @return the available versionCode, 0 when Play has no update for this
+     *         device, or -1 when Play could not be asked
+     */
+    public static long queryPlayUpdate(int timeoutSec) {
+        try {
+            Context ctx = SDLActivity.getContext();
+            if (ctx == null) {
+                Log.i("HelixPlayUpdate", "No context for the Play query");
+                return -1;
+            }
+            AppUpdateManager manager = AppUpdateManagerFactory.create(ctx);
+            AppUpdateInfo info =
+                    Tasks.await(manager.getAppUpdateInfo(), timeoutSec, TimeUnit.SECONDS);
+            Log.i("HelixPlayUpdate", "Play availability " + info.updateAvailability()
+                    + ", versionCode " + info.availableVersionCode());
+            return playOffersUpdate(info) ? info.availableVersionCode() : 0;
+        } catch (Exception e) {
+            Log.i("HelixPlayUpdate", "Play query failed: " + errorText(e));
+            return -1;
+        }
+    }
+
+    /**
+     * Start Play's immediate in-app update flow. Play runs the download, install
+     * and restart in its own full-screen UI, so nothing here has to track
+     * progress or finish the install. When Play cannot start the flow, the Play
+     * listing opens instead (marketUrl, or webUrl when no app handles it).
+     *
+     * @return false when there is no activity to start anything from
+     */
+    public static boolean startPlayUpdate(final String marketUrl, final String webUrl) {
+        final Context ctx = SDLActivity.getContext();
+        if (!(ctx instanceof HelixActivity)) return false;
+        final HelixActivity helix = (HelixActivity) ctx;
+        helix.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final AppUpdateManager manager = AppUpdateManagerFactory.create(helix);
+                manager.getAppUpdateInfo()
+                        .addOnSuccessListener(info -> {
+                            try {
+                                if (playOffersUpdate(info)
+                                        && info.isUpdateTypeAllowed(AppUpdateType.IMMEDIATE)
+                                        && manager.startUpdateFlowForResult(info, helix,
+                                                AppUpdateOptions.defaultOptions(
+                                                        AppUpdateType.IMMEDIATE),
+                                                PLAY_UPDATE_REQUEST_CODE)) {
+                                    return;
+                                }
+                                Log.i("HelixPlayUpdate", "Play update flow unavailable"
+                                        + " (availability " + info.updateAvailability() + ")");
+                            } catch (Exception e) {
+                                Log.i("HelixPlayUpdate", "Play update flow failed: " + errorText(e));
+                            }
+                            openPlayListing(helix, marketUrl, webUrl);
+                        })
+                        .addOnFailureListener(e -> {
+                            Log.i("HelixPlayUpdate", "Play query failed: " + errorText(e));
+                            openPlayListing(helix, marketUrl, webUrl);
+                        });
+            }
+        });
+        return true;
+    }
+
+    private static void openPlayListing(Context ctx, String marketUrl, String webUrl) {
+        try {
+            ctx.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(marketUrl)));
+        } catch (ActivityNotFoundException e) {
+            try {
+                ctx.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(webUrl)));
+            } catch (ActivityNotFoundException e2) {
+                Log.w("HelixPlayUpdate", "No app opens the Play listing");
+            }
+        }
+    }
+
+    // =========================================================================
     // JNI HTTPS bridge — called from native crash reporter
     // =========================================================================
 
@@ -647,6 +778,73 @@ public class HelixActivity extends SDLActivity {
             Log.w("HelixHTTPS", "GET failed: " + errorText(e));
             return "0\n" + errorText(e);
         } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    /** Aborts a request at its deadline by disconnecting it from outside. */
+    private static final ScheduledExecutorService HTTP_DEADLINES =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "HelixHttpDeadline");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /**
+     * HTTP(S) GET returning the raw response bytes, for binary bodies such as a
+     * camera snapshot JPEG that cannot round-trip through a Java String.
+     *
+     * timeoutSec bounds the whole request. Connect and read timeouts apply per
+     * phase and per read, so a disconnect scheduled at the deadline also stops a
+     * slow handshake or a server trickling bytes.
+     *
+     * @return The body of a 2xx response no larger than maxBytes, or null on any
+     *         other status, an oversized body, the deadline, or a failure
+     */
+    public static byte[] httpsGetBytes(String url, String userAgent, int timeoutSec,
+                                       int maxBytes) {
+        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSec);
+        HttpURLConnection conn = null;
+        ScheduledFuture<?> abort = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            abort = HTTP_DEADLINES.schedule(conn::disconnect, timeoutSec, TimeUnit.SECONDS);
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(timeoutSec * 1000);
+            conn.setReadTimeout(timeoutSec * 1000);
+            conn.setRequestProperty("User-Agent", userAgent);
+
+            int status = conn.getResponseCode();
+            if (status < 200 || status >= 300) {
+                Log.w("HelixHTTPS", "GET bytes answered " + status);
+                return null;
+            }
+            if (conn.getContentLengthLong() > maxBytes) {
+                Log.w("HelixHTTPS", "GET bytes body over " + maxBytes + " bytes");
+                return null;
+            }
+            try (InputStream in = conn.getInputStream()) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] chunk = new byte[16384];
+                int n;
+                while ((n = in.read(chunk)) != -1) {
+                    if (out.size() + n > maxBytes) {
+                        Log.w("HelixHTTPS", "GET bytes body over " + maxBytes + " bytes");
+                        return null;
+                    }
+                    if (System.nanoTime() > deadline) {
+                        Log.w("HelixHTTPS", "GET bytes passed its " + timeoutSec + "s deadline");
+                        return null;
+                    }
+                    out.write(chunk, 0, n);
+                }
+                return out.toByteArray();
+            }
+        } catch (Exception | OutOfMemoryError e) {
+            Log.w("HelixHTTPS", "GET bytes failed: " + e);
+            return null;
+        } finally {
+            if (abort != null) abort.cancel(false);
             if (conn != null) conn.disconnect();
         }
     }

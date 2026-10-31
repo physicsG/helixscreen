@@ -55,6 +55,26 @@ TEST_CASE("HardwareSnapshot - JSON serialization", "[hardware][validator]") {
         REQUIRE(j["filament_sensors"].size() == 1);
     }
 
+    SECTION("A saved heater that is not a heater object is dropped on load") {
+        // A stored snapshot can list the U1's extruder_offset_calibration as a
+        // heater; it is not one, so it must not read as removed hardware.
+        json j = {{"timestamp", "2025-01-01T12:00:00Z"},
+                  {"heaters",
+                   {"heater_bed", "extruder_offset_calibration", "heater_generic dragonbreath",
+                    "extruder", "extruder1"}},
+                  {"sensors", json::array()},
+                  {"fans", json::array()},
+                  {"leds", json::array()},
+                  {"filament_sensors", json::array()}};
+
+        HardwareSnapshot previous = HardwareSnapshot::from_json(j);
+        REQUIRE(previous.heaters == std::vector<std::string>{"heater_bed",
+                                                             "heater_generic dragonbreath",
+                                                             "extruder", "extruder1"});
+        HardwareSnapshot current = previous;
+        REQUIRE(previous.get_removed(current).empty());
+    }
+
     SECTION("Deserializes from JSON correctly") {
         json j = {{"timestamp", "2025-01-01T12:00:00Z"},
                   {"heaters", {"extruder", "heater_bed"}},
@@ -1077,6 +1097,56 @@ TEST_CASE_METHOD(
     }
 }
 
+TEST_CASE_METHOD(MmuDetectionFixture,
+                 "HardwareValidator - every filament system's expected entry is checked",
+                 "[hardware][validator][mmu]") {
+    client.set_heaters({"extruder", "heater_bed"});
+    client.set_mmu_enabled(false);
+
+    SECTION("INDX present: no warning") {
+        client.set_additional_objects({"indx"});
+        REQUIRE(client.hardware().mmu_type() == AmsType::INDX);
+        setup_config_with_expected({"indx"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        REQUIRE_FALSE(is_missing_in_result(result, "indx"));
+    }
+
+    SECTION("INDX gone: warning") {
+        setup_config_with_expected({"indx"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        REQUIRE(is_missing_in_result(result, "indx"));
+    }
+
+    SECTION("CFS present: no warning") {
+        client.set_additional_objects({"box"});
+        REQUIRE(client.hardware().mmu_type() == AmsType::CFS);
+        setup_config_with_expected({"cfs"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        REQUIRE_FALSE(is_missing_in_result(result, "cfs"));
+    }
+
+    SECTION("CFS gone: warning") {
+        setup_config_with_expected({"cfs"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        REQUIRE(is_missing_in_result(result, "cfs"));
+    }
+
+    SECTION("a tool changer detected from several tools, without klipper-toolchanger") {
+        client.set_additional_objects({"tool T0", "tool T1"});
+        REQUIRE_FALSE(client.hardware().has_tool_changer());
+        REQUIRE(client.hardware().mmu_type() == AmsType::TOOL_CHANGER);
+        setup_config_with_expected({"toolchanger"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        REQUIRE_FALSE(is_missing_in_result(result, "toolchanger"));
+    }
+
+    SECTION("a name no filament system records never warns") {
+        setup_config_with_expected({"box"});
+        auto result = HardwareValidator{}.validate(&config, client.hardware());
+        REQUIRE_FALSE(is_missing_in_result(result, "box"));
+    }
+}
+
 // ============================================================================
 // "None" Sentinel Value Tests
 //
@@ -1677,4 +1747,65 @@ TEST_CASE_METHOD(ExpectedHardwareSuppressFixture,
     // presence requirement, so a name listed in it is never checked for
     // absence — result.expected_missing has nothing to assert here.
     REQUIRE_FALSE(has_newly_discovered(result, "heater_fan chamber_fan"));
+}
+
+namespace {
+// FilamentSensorManager reads the process-wide Config, so the saved sensor goes there.
+void seed_saved_filament_sensors(const std::string& klipper_name) {
+    Config* global = Config::get_instance();
+    global->get_json(global->df() + "filament_sensors") = {
+        {"sensors", json::array({{{"klipper_name", klipper_name},
+                                  {"role", "runout"},
+                                  {"enabled", true},
+                                  {"type", "switch"}}})}};
+}
+
+bool reports_filament_sensor_missing(const HardwareValidationResult& result,
+                                     const std::string& name) {
+    return std::any_of(result.expected_missing.begin(), result.expected_missing.end(),
+                       [&](const HardwareIssue& issue) {
+                           return issue.hardware_type == HardwareType::FILAMENT_SENSOR &&
+                                  issue.hardware_name == name;
+                       });
+}
+} // namespace
+
+TEST_CASE_METHOD(HardwareValidatorConfigFixture,
+                 "a configured filament sensor that disappeared is flagged",
+                 "[hardware][hwvalidate][filament]") {
+    seed_saved_filament_sensors("filament_switch_sensor gone");
+    MoonrakerClientMock client;
+    client.set_heaters({"extruder", "heater_bed"});
+    client.set_filament_sensors({"filament_switch_sensor other"});
+    setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                        {"moonraker_port", 7125},
+                        {"hardware",
+                         {{"optional", json::array()},
+                          {"expected", json::array()},
+                          {"last_snapshot", json::object()}}}});
+
+    HardwareValidator validator;
+    auto result = validator.validate(&config, client.hardware());
+
+    REQUIRE(reports_filament_sensor_missing(result, "filament_switch_sensor gone"));
+}
+
+TEST_CASE_METHOD(HardwareValidatorConfigFixture,
+                 "a configured filament sensor still present is not flagged",
+                 "[hardware][hwvalidate][filament]") {
+    seed_saved_filament_sensors("filament_switch_sensor here");
+    MoonrakerClientMock client;
+    client.set_heaters({"extruder", "heater_bed"});
+    client.set_filament_sensors({"filament_switch_sensor here"});
+    setup_printer_data({{"moonraker_host", "127.0.0.1"},
+                        {"moonraker_port", 7125},
+                        {"hardware",
+                         {{"optional", json::array()},
+                          {"expected", json::array()},
+                          {"last_snapshot", json::object()}}}});
+
+    HardwareValidator validator;
+    auto result = validator.validate(&config, client.hardware());
+
+    REQUIRE_FALSE(reports_filament_sensor_missing(result, "filament_switch_sensor here"));
 }

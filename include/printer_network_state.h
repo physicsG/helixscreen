@@ -23,6 +23,12 @@ enum class KlippyState;
 
 namespace helix {
 
+/// Whether the Moonraker this connection talks to runs on this host. Unknown
+/// until the CONNECTED edge of the current connection settles it, and again
+/// after any other connection edge or a printer switch, so a verdict from an
+/// earlier connection is never read as this one's.
+enum class MoonrakerLocality { Unknown = 0, Local = 1, Remote = 2 };
+
 /**
  * @brief Manages network and connection state subjects for Moonraker connectivity
  *
@@ -32,7 +38,7 @@ namespace helix {
  *
  * Extracted from PrinterState as part of god class decomposition.
  *
- * Subjects (7 total):
+ * Subjects (9 total):
  * - printer_connection_state_ (int) - ConnectionState enum values
  * - printer_connection_message_ (string, 128-byte buffer) - status message
  * - network_status_ (int) - NetworkStatus enum values
@@ -40,6 +46,7 @@ namespace helix {
  * - nav_buttons_enabled_ (int, derived) - 1 when connected AND klippy ready
  * - moonraker_connection_state_ (int, derived) - 1 when Moonraker WebSocket connected
  * - moonraker_is_remote_ (int) - 1 when the connected Moonraker is NOT this host
+ * - moonraker_locality_ (int) - MoonrakerLocality for the current connection
  *
  * Additional state:
  * - was_ever_connected_ (bool) - tracks if ever successfully connected this session
@@ -152,6 +159,9 @@ class PrinterNetworkState {
      */
     void set_moonraker_is_remote_internal(bool remote);
 
+    /// Set the moonraker_locality subject (synchronous, must be on UI thread).
+    void set_moonraker_locality_internal(MoonrakerLocality locality);
+
     // ========================================================================
     // Subject accessors
     // ========================================================================
@@ -190,6 +200,12 @@ class PrinterNetworkState {
     /// Remote-screen verdict (1 = connected Moonraker is not this host; 0 = local/unknown)
     lv_subject_t* get_moonraker_is_remote_subject() {
         return &moonraker_is_remote_;
+    }
+
+    /// Locality verdict for the current connection (MoonrakerLocality: 0 Unknown,
+    /// 1 Local, 2 Remote)
+    lv_subject_t* get_moonraker_locality_subject() {
+        return &moonraker_locality_;
     }
 
     /// Klipper state message (error/shutdown reason from webhooks, e.g. "Max force exceeded...")
@@ -248,6 +264,7 @@ class PrinterNetworkState {
     lv_subject_t nav_buttons_enabled_{};        // Derived: 1 when connected AND klippy ready
     lv_subject_t moonraker_connection_state_{}; // Derived: 1 when Moonraker WebSocket connected
     lv_subject_t moonraker_is_remote_{};        // 1 when connected Moonraker is not this host
+    lv_subject_t moonraker_locality_{};         // MoonrakerLocality for this connection
     lv_subject_t klippy_state_message_seq_{};   // Bumped on every state message change
 
     // String buffer for connection message

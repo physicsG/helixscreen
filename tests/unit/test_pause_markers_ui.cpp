@@ -22,6 +22,7 @@
 #include "ui_pause_markers.h"
 
 #include "../lvgl_test_fixture.h"
+#include "config.h"
 #include "gcode_pause_scan.h"
 #include "printer_state.h"
 
@@ -56,7 +57,9 @@ struct PauseMarkerFixture : public LVGLTestFixture {
 
     void publish(const std::vector<helix::gcode::ScheduledPause>& pauses,
                  helix::gcode::ProgressAxis axis, const std::string& filename) {
-        state_.print_state().set_scheduled_pauses(pauses, axis, filename);
+        state_.print_state().set_pause_scan(std::make_shared<const helix::gcode::PauseScanResult>(
+                                                helix::gcode::PauseScanResult{pauses, {}, axis}),
+                                            filename);
     }
 
     static helix::gcode::ScheduledPause pause_at(float byte_fraction, float slicer_fraction) {
@@ -275,4 +278,77 @@ TEST_CASE_METHOD(PauseMarkerFixture, "Pause markers: arc draws a tick along the 
     CHECK(x_max <= expected + 3);
 
     lv_obj_delete(arc);
+}
+
+TEST_CASE_METHOD(PauseMarkerFixture,
+                 "Pause markers: a runtime layer pause ticks where the file reports that layer",
+                 "[pause_markers][print_status][layer_pause]") {
+    lv_obj_t* bar = make_bar(test_screen(), state_);
+    state_.update_from_status({{"print_stats",
+                                {{"filename", "layers.gcode"},
+                                 {"state", "printing"},
+                                 {"info", {{"current_layer", 3}, {"total_layer", 10}}}}}});
+    lv_draw_buf_t* baseline = take_snapshot(bar);
+    REQUIRE(baseline);
+
+    // Layer 6's report sits at 0.25 on the byte axis and 0.75 on slicer time.
+    auto scan = std::make_shared<const helix::gcode::PauseScanResult>(helix::gcode::PauseScanResult{
+        {}, {{3, 0.1f, 0.3f}, {6, 0.25f, 0.75f}}, helix::gcode::ProgressAxis::BytePosition});
+    state_.print_state().set_pause_scan(scan, "layers.gcode");
+
+    lv_draw_buf_t* unmarked = take_snapshot(bar);
+    CHECK(diff_columns(unmarked, baseline).empty()); // nothing scheduled yet
+    lv_draw_buf_destroy(unmarked);
+
+    lv_area_t coords;
+    lv_obj_get_coords(bar, &coords);
+    const int32_t pad_left = lv_obj_get_style_pad_left(bar, LV_PART_MAIN);
+    const int32_t track =
+        lv_area_get_width(&coords) - pad_left - lv_obj_get_style_pad_right(bar, LV_PART_MAIN);
+
+    // The runtime tick needs no beta features.
+    auto* config = helix::Config::get_instance();
+    REQUIRE(config != nullptr);
+    struct BetaRestore {
+        helix::Config* config;
+        bool prev;
+        ~BetaRestore() {
+            config->set<bool>("/beta_features", prev);
+        }
+    } restore{config, config->get<bool>("/beta_features", false)};
+    config->set<bool>("/beta_features", false);
+
+    SECTION("scheduled layer with a mark draws one tick on the file's axis") {
+        const int v0 = lv_subject_get_int(state_.print_state().get_pause_markers_version_subject());
+        state_.print_state().note_layer_pause_at_layer(6);
+        CHECK(lv_subject_get_int(state_.print_state().get_pause_markers_version_subject()) > v0);
+        REQUIRE(state_.print_state().layer_pause_marker_fraction().has_value());
+        CHECK(*state_.print_state().layer_pause_marker_fraction() == Approx(0.25f));
+
+        lv_draw_buf_t* marked = take_snapshot(bar);
+        const std::vector<int> cols = diff_columns(marked, baseline);
+        lv_draw_buf_destroy(marked);
+        REQUIRE_FALSE(cols.empty());
+        const int expected = snapshot_column_for_abs_x(
+            baseline, bar, coords.x1 + pad_left + static_cast<int32_t>(0.25f * track));
+        CHECK(column_mid(cols) == Approx(expected).margin(3));
+    }
+
+    SECTION("a layer the file never reports draws nothing") {
+        state_.print_state().note_layer_pause_at_layer(8);
+        CHECK(lv_subject_get_int(state_.print_state().get_layer_pause_layer_subject()) == 8);
+        CHECK_FALSE(state_.print_state().layer_pause_marker_fraction().has_value());
+        lv_draw_buf_t* marked = take_snapshot(bar);
+        CHECK(diff_columns(marked, baseline).empty());
+        lv_draw_buf_destroy(marked);
+    }
+
+    SECTION("a scan for another file draws nothing") {
+        state_.print_state().set_pause_scan(scan, "other.gcode");
+        state_.print_state().note_layer_pause_at_layer(6);
+        CHECK_FALSE(state_.print_state().layer_pause_marker_fraction().has_value());
+    }
+
+    lv_draw_buf_destroy(baseline);
+    lv_obj_delete(bar);
 }

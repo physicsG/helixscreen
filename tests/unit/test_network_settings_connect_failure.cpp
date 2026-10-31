@@ -21,6 +21,7 @@
 #include "../lvgl_ui_test_fixture.h"
 #include "../test_helpers/network_settings_overlay_test_access.h"
 #include "../test_helpers/scoped_runtime_config.h"
+#include "../test_helpers/wifi_manager_test_access.h"
 #include "../ui_test_utils.h"
 #include "wifi_backend_mock.h"
 #include "wifi_manager.h"
@@ -107,7 +108,7 @@ TEST_CASE_METHOD(ConnectFailureFixture,
     Access::set_current_ssid(*overlay, kUnknownSsid);
 
     Access::password_connect_clicked(*overlay);
-    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(helix::WiFiManagerTestAccess::settle(*wm));
 
     const std::string shown = label_text(modal, "modal_status");
     // The reason reached the label. Asserting the precondition first: an
@@ -143,7 +144,7 @@ TEST_CASE_METHOD(ConnectFailureFixture,
     Access::hidden_network_modal(*overlay) = modal;
 
     Access::hidden_connect_clicked(*overlay);
-    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(helix::WiFiManagerTestAccess::settle(*wm));
 
     const std::string shown = label_text(modal, "error_label");
     REQUIRE_FALSE(shown.empty());
@@ -192,7 +193,7 @@ TEST_CASE_METHOD(ConnectFailureFixture, "Tapping an open network that fails to j
     REQUIRE(list_row != nullptr);
 
     lv_obj_send_event(list_row, LV_EVENT_CLICKED, nullptr);
-    helix::ui::UpdateQueue::instance().drain();
+    REQUIRE(helix::WiFiManagerTestAccess::settle(*wm));
 
     // An open network opens no modal, so a toast is the only surface. Silence
     // here is a tap that visibly does nothing at all.

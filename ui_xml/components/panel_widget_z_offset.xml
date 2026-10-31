@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+<!-- Copyright (C) 2025-2026 356C LLC -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component>
+  <!--
+    Live Z-offset home widget. ZOffsetWidget publishes z_offset_rung (SizeRung),
+    z_offset_show_save, z_offset_show_steppers, z_offset_show_tool_label, z_offset_status
+    and the value, caption, step and tool texts; everything below binds off them. A tap
+    anywhere that is not a button opens the Tune overlay.
+
+    Rungs: 0 glance (icon above a small value), 2 column (the same, with the unit under it), 1 strip (icon beside a
+    small value), 3 cell (icon and value in a row, caption under it), 4 wide (cell,
+    indicator and Save), 5 full (cell and indicator over the baby-step buttons and Save).
+    Save shows only while z_offset_save_available says there is something to save; the
+    button disables itself while a job holds the machine.
+  -->
+  <styles>
+    <style name="zo_warn" text_color="#warning"/>
+    <style name="zo_font_xs" text_font="#font_xs"/>
+    <style name="zo_font_heading" text_font="#font_heading"/>
+    <style name="zo_stacked" layout="flex" flex_flow="column" flex_main_place="center" flex_cross_place="center"/>
+    <style name="zo_inline" layout="flex" flex_flow="row" flex_main_place="start" flex_cross_place="center"/>
+  </styles>
+  <view name="panel_widget_z_offset"
+        extends="lv_obj" width="100%" height="100%" style_pad_all="#space_xxs" scrollable="false">
+    <event_cb trigger="clicked" callback="z_offset_clicked_cb"/>
+    <pass_through name="z_offset_body"
+                  width="100%" height="100%" flex_flow="column" style_flex_main_place="center"
+                  style_flex_cross_place="center" style_pad_row="#space_xxs" style_pad_column="0">
+      <pass_through name="z_offset_top"
+                    width="100%" flex_grow="1" flex_flow="row" style_flex_main_place="space_evenly"
+                    style_flex_cross_place="center" style_flex_track_place="center" style_pad_column="#space_xs">
+        <pass_through name="z_offset_block"
+                      width="content" height="content" flex_flow="column" style_flex_main_place="center"
+                      style_flex_cross_place="center" style_pad_row="#space_xxs">
+          <pass_through name="z_offset_valuerow"
+                        width="content" height="content" style_pad_row="0" style_pad_column="#space_xs">
+            <bind_style_if name="zo_stacked" cond="z_offset_rung eq 0 or z_offset_rung eq 2"/>
+            <bind_style_if name="zo_inline" cond="z_offset_rung eq 1 or z_offset_rung gt 2"/>
+            <icon name="z_offset_icon"
+                  src="axis_z_arrow" size="xs" variant="muted" clickable="false" event_bubble="true"/>
+            <text_body name="z_offset_value" bind_text="z_offset_value_text" clickable="false" event_bubble="true">
+              <bind_style_if_lt name="zo_font_xs" subject="z_offset_rung" ref_value="3"/>
+              <bind_style_if_ge name="zo_font_heading" subject="z_offset_rung" ref_value="5"/>
+              <bind_style_if_eq name="zo_warn" subject="z_offset_status" ref_value="1"/>
+            </text_body>
+          </pass_through>
+          <text_tiny name="z_offset_unit" text="mm" style_text_color="#text_muted" clickable="false" event_bubble="true">
+            <bind_flag_if_not_eq subject="z_offset_rung" flag="hidden" ref_value="2"/>
+          </text_tiny>
+          <text_tiny name="z_offset_caption"
+                     bind_text="z_offset_caption_text" style_text_color="#text_muted" clickable="false"
+                     event_bubble="true">
+            <bind_flag_if_lt subject="z_offset_rung" flag="hidden" ref_value="3"/>
+          </text_tiny>
+          <text_small name="z_offset_tool"
+                      bind_text="z_offset_tool_text" style_text_color="#text_muted" clickable="false"
+                      event_bubble="true">
+            <bind_flag_if_eq subject="z_offset_show_tool_label" flag="hidden" ref_value="0"/>
+          </text_small>
+        </pass_through>
+        <z_offset_indicator name="z_offset_indicator" height="100%" flex_grow="1">
+          <bind_flag_if_lt subject="z_offset_rung" flag="hidden" ref_value="4"/>
+        </z_offset_indicator>
+        <ui_button name="z_offset_save_wide"
+                   width="#button_height_sm" height="#button_height_sm" variant="success" icon="check" hidden="true"
+                   moves_machine="true">
+          <bind_flag_if cond="z_offset_save_available eq 0 or z_offset_show_save eq 0 or z_offset_rung eq 5"
+                        flag="hidden"/>
+          <event_cb trigger="clicked" callback="z_offset_save_cb"/>
+        </ui_button>
+      </pass_through>
+      <pass_through name="z_offset_steppers"
+                    width="100%" height="content" flex_flow="row" style_flex_main_place="space_between"
+                    style_flex_cross_place="center" style_pad_column="#space_xs">
+        <bind_flag_if_eq subject="z_offset_show_steppers" flag="hidden" ref_value="0"/>
+        <ui_button name="z_offset_closer" width="#button_height_sm" height="#button_height_sm" icon="arrow_down">
+          <event_cb trigger="clicked" callback="z_offset_step_cb" user_data="-1"/>
+        </ui_button>
+        <ui_button name="z_offset_step_chip" width="content" height="#button_height_sm" bind_text="z_offset_step_text">
+          <event_cb trigger="clicked" callback="z_offset_chip_cb"/>
+        </ui_button>
+        <ui_button name="z_offset_farther" width="#button_height_sm" height="#button_height_sm" icon="arrow_up">
+          <event_cb trigger="clicked" callback="z_offset_step_cb" user_data="1"/>
+        </ui_button>
+      </pass_through>
+      <ui_button name="z_offset_save_full"
+                 width="100%" height="#button_height_sm" variant="success" icon="check" text="Save" hidden="true"
+                 moves_machine="true">
+        <bind_flag_if cond="z_offset_save_available eq 0 or z_offset_show_save eq 0 or z_offset_rung ne 5" flag="hidden"/>
+        <event_cb trigger="clicked" callback="z_offset_save_cb"/>
+      </ui_button>
+    </pass_through>
+  </view>
+</component>

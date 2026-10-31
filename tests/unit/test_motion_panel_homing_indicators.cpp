@@ -41,7 +41,7 @@ bool same_color(const lv_color_t& a, const lv_color_t& b) {
 
 TEST_CASE_METHOD(LVGLUITestFixture, "unhomed axes mute their coordinate readouts",
                  "[motion][homed][xml]") {
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
     for (auto& p : panels)
         p = lv_obj_create(lv_screen_active());
     NavigationManager::instance().set_panels(panels.data());

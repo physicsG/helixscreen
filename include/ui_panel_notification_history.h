@@ -7,9 +7,13 @@
 #include "ui_observer_guard.h"
 #include "ui_panel_base.h"
 
+#include "helix/xml/indexed_subject_pool.h"
 #include "subject_managed_panel.h"
 
+#include <functional>
 #include <lvgl.h>
+#include <string>
+#include <vector>
 
 /**
  * @file ui_panel_notification_history.h
@@ -49,7 +53,7 @@ class NotificationHistoryPanel : public PanelBase {
      * @param api Pointer to IMoonrakerAPI (passed to base, not used directly)
      * @param history Reference to NotificationHistory service (defaults to singleton)
      */
-    NotificationHistoryPanel(helix::PrinterState& printer_state, IMoonrakerAPI* api,
+    NotificationHistoryPanel(helix::PrinterState& printer_state, helix::IMoonrakerAPI* api,
                              NotificationHistory& history = NotificationHistory::instance());
 
     ~NotificationHistoryPanel() override;
@@ -97,6 +101,12 @@ class NotificationHistoryPanel : public PanelBase {
      */
     void refresh();
 
+    /// A tap on row @p index: runs that entry's action, if it has one.
+    void handle_item_clicked(size_t index);
+
+    /// The row component's severity index (0 info, 1 success, 2 warning, 3 error).
+    static int severity_index(ToastSeverity severity);
+
   private:
     //
     // === Injected Dependencies ===
@@ -114,6 +124,23 @@ class NotificationHistoryPanel : public PanelBase {
     /// Has entries subject (1 = has entries, 0 = empty)
     lv_subject_t has_entries_subject_{};
 
+    /// Rows the list's <repeat> builds, and each row's fields by index.
+    lv_subject_t row_count_subject_{};
+    helix::xml::IndexedSubjectPool severity_pool_{"notification_row_severity",
+                                                  helix::xml::IndexedSubjectPool::Type::Int};
+    helix::xml::IndexedSubjectPool title_pool_{"notification_row_title",
+                                               helix::xml::IndexedSubjectPool::Type::String, 128};
+    helix::xml::IndexedSubjectPool message_pool_{"notification_row_message",
+                                                 helix::xml::IndexedSubjectPool::Type::String, 256};
+    helix::xml::IndexedSubjectPool has_message_pool_{"notification_row_has_message",
+                                                     helix::xml::IndexedSubjectPool::Type::Int};
+    helix::xml::IndexedSubjectPool time_pool_{"notification_row_time",
+                                              helix::xml::IndexedSubjectPool::Type::String};
+    helix::xml::IndexedSubjectPool has_action_pool_{"notification_row_has_action",
+                                                    helix::xml::IndexedSubjectPool::Type::Int};
+    /// Each shown row's action, by row index; empty for a row without one.
+    std::vector<std::string> row_actions_;
+
     /// Fires refresh() when a notification arrives while the panel is open.
     /// No paired SubjectLifetime: the subject belongs to the NotificationManager
     /// singletons, which outlive the panel (and this observer is reset in
@@ -126,11 +153,6 @@ class NotificationHistoryPanel : public PanelBase {
     //
     // === Private Helpers ===
     //
-
-    /**
-     * @brief Convert ToastSeverity to XML string
-     */
-    static const char* severity_to_string(ToastSeverity severity);
 
     /**
      * @brief Format timestamp as relative time string
@@ -155,28 +177,30 @@ class NotificationHistoryPanel : public PanelBase {
     void handle_history_version_change(int32_t version);
 
     //
-    // === Per-item click context ===
-    //
-
-    /// Stored in event callback user_data (NOT lv_obj user_data, which belongs to
-    /// the XML widget layer — e.g. severity_card uses it for the severity string).
-    /// Freed automatically via LV_EVENT_DELETE callback when the item is destroyed.
-    struct ClickContext {
-        NotificationHistoryPanel* panel;
-        char action[64];
-    };
-
-    //
     // === Static Trampolines ===
     //
 
     static void on_clear_clicked(lv_event_t* e);
 
     // Action dispatch
-    static void on_item_clicked(lv_event_t* e);
-    static void on_item_deleted(lv_event_t* e);
     void dispatch_action(const char* action);
 };
 
 // Global instance accessor (needed by main.cpp)
 NotificationHistoryPanel& get_global_notification_history_panel();
+
+namespace helix::ui {
+
+/// Handler for a history entry's action, for modules the panel cannot name (one
+/// compiled out of a build, or owned per printer session). An action reads
+/// `<id>` or `<id>:<arg>`; the handler registered for `<id>` receives `<arg>`
+/// (empty when there is none), so one handler can tell its own entries apart.
+/// Registering replaces any handler for @p id; an empty @p handler removes it.
+/// Main thread only.
+void set_notification_action_handler(const std::string& id,
+                                     std::function<void(const std::string& arg)> handler);
+
+/// The registered handler for @p action, bound to its argument; empty when none is.
+std::function<void()> notification_action_handler(const std::string& action);
+
+} // namespace helix::ui

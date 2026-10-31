@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "helix_callback.h"
+
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -63,7 +65,7 @@ class StaticPanelRegistry {
      * @param name Panel name for logging
      * @param destroy_fn Function to call during destroy_all()
      */
-    void register_destroy(const char* name, std::function<void()> destroy_fn);
+    void register_destroy(const char* name, helix::Callback<void()> destroy_fn);
 
     /**
      * @brief Hand a still-allocated overlay widget to the destroy_all() caller
@@ -124,7 +126,7 @@ class StaticPanelRegistry {
 
     struct DestroyEntry {
         std::string name;
-        std::function<void()> destroy_fn;
+        helix::Callback<void()> destroy_fn;
     };
 
     std::vector<DestroyEntry> destroyers_;

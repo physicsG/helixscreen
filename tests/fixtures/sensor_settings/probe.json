@@ -1,0 +1,16 @@
+{
+  "sensors": [
+    {
+      "enabled": true,
+      "klipper_name": "probe_eddy_current btt_eddy",
+      "role": "z_probe",
+      "type": "eddy_current"
+    },
+    {
+      "enabled": false,
+      "klipper_name": "bltouch",
+      "role": "none",
+      "type": "bltouch"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+    "type": "filament",
+    "name": "Eryone Silk PLA",
+    "inherits": "Eryone Standard PLA",
+    "instantiation": "true",
+    "filament_id": "EFL941",
+    "filament_type": [
+        "PLA Silk"
+    ],
+    "nozzle_temperature": [
+        "230"
+    ]
+}

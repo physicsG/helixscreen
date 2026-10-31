@@ -45,6 +45,36 @@ static const char* chamber_fault_reason_text(chamber::FaultReason kind) {
     return "";
 }
 
+/// The sentence the user reads for a latched rejection. The fault cause names
+/// the classified fault when the backend reported one.
+static std::string chamber_rejection_text(chamber::CommandRejection kind,
+                                          chamber::RefusalCause cause, const char* fault_text) {
+    switch (kind) {
+    case chamber::CommandRejection::Conflict:
+        return lv_tr("The heater didn't accept the command.");
+    case chamber::CommandRejection::Auth:
+        return lv_tr("The heater did not accept the printer's credentials.");
+    case chamber::CommandRejection::Refused:
+        switch (cause) {
+        case chamber::RefusalCause::TurnedOff:
+            return lv_tr("The heater was turned off at the heater.");
+        case chamber::RefusalCause::Fault:
+            return fault_text && fault_text[0]
+                       ? fmt::format(fmt::runtime(lv_tr("The heater reports a fault: {}.")),
+                                     fault_text)
+                       : std::string(lv_tr("The heater reports a fault."));
+        case chamber::RefusalCause::Inhibited:
+            return lv_tr("The heater is inhibited.");
+        case chamber::RefusalCause::Unspecified:
+            break;
+        }
+        return lv_tr("The heater didn't accept the command.");
+    case chamber::CommandRejection::None:
+        break;
+    }
+    return "";
+}
+
 void PrinterTemperatureState::init_subjects(bool register_xml) {
     if (subjects_initialized_) {
         spdlog::debug("[PrinterTemperatureState] Subjects already initialized, skipping");
@@ -78,6 +108,14 @@ void PrinterTemperatureState::init_subjects(bool register_xml) {
     subjects_.register_subject(&active_extruder_power_, register_xml ? "extruder_power" : nullptr);
     if (register_xml) {
         helix::xml::register_subject_in_current_scope("extruder_power", &active_extruder_power_);
+    }
+
+    lv_subject_init_int(&active_extruder_pa_, -1);
+    subjects_.register_subject(&active_extruder_pa_,
+                               register_xml ? "extruder_pressure_advance" : nullptr);
+    if (register_xml) {
+        helix::xml::register_subject_in_current_scope("extruder_pressure_advance",
+                                                      &active_extruder_pa_);
     }
 
     // Heater duty cycle, whole percent, -1 = the heater reports none.
@@ -132,7 +170,13 @@ void PrinterTemperatureState::init_subjects(bool register_xml) {
     chamber_heater_element_temp_text_lifetime_ = std::make_shared<bool>(true);
     INIT_SUBJECT_STRING(chamber_filter_fan_percent_text, "--", subjects_, register_xml);
     chamber_filter_fan_percent_text_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_heater_command_rejected, 0, subjects_, register_xml);
+    chamber_heater_command_rejected_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_INT(chamber_heater_rejection_seq, 0, subjects_, false);
+    chamber_heater_rejection_seq_lifetime_ = std::make_shared<bool>(true);
+    INIT_SUBJECT_STRING(chamber_heater_rejection_text, "", subjects_, register_xml);
     INIT_SUBJECT_INT(chamber_dryer_active, 0, subjects_, register_xml);
+    INIT_SUBJECT_INT(chamber_dryer_reported, 0, subjects_, register_xml);
     INIT_SUBJECT_STRING(chamber_dryer_text, "", subjects_, register_xml);
 
     // Extruder version subject (bumped when extruder list changes)
@@ -182,6 +226,12 @@ void PrinterTemperatureState::deinit_subjects() {
     if (chamber_heater_offline_lifetime_)
         *chamber_heater_offline_lifetime_ = false;
     chamber_heater_offline_lifetime_.reset();
+    if (chamber_heater_command_rejected_lifetime_)
+        *chamber_heater_command_rejected_lifetime_ = false;
+    chamber_heater_command_rejected_lifetime_.reset();
+    if (chamber_heater_rejection_seq_lifetime_)
+        *chamber_heater_rejection_seq_lifetime_ = false;
+    chamber_heater_rejection_seq_lifetime_.reset();
     if (chamber_heater_externally_controlled_lifetime_)
         *chamber_heater_externally_controlled_lifetime_ = false;
     chamber_heater_externally_controlled_lifetime_.reset();
@@ -237,6 +287,11 @@ void PrinterTemperatureState::deinit_subjects() {
 }
 
 namespace {
+
+/// K as the active pressure-advance subject stores it: x 10000.
+int pa_to_subject(float k) {
+    return static_cast<int>(std::lround(k * 10000.0f));
+}
 
 /// Single extruder: "Nozzle". Multiple: "Nozzle 1", "Nozzle 2", ... in the
 /// current language.
@@ -429,6 +484,17 @@ void PrinterTemperatureState::set_active_extruder(const std::string& name) {
         int new_power = lv_subject_get_int(info.power_subject.get());
         lv_subject_set_int(&active_extruder_power_, new_power);
     }
+    lv_subject_set_int(&active_extruder_pa_,
+                       info.pressure_advance < 0.0f ? -1 : pa_to_subject(info.pressure_advance));
+}
+
+std::optional<float>
+PrinterTemperatureState::extruder_pressure_advance(const std::string& name) const {
+    auto it = extruders_.find(name);
+    if (it == extruders_.end() || it->second.pressure_advance < 0.0f) {
+        return std::nullopt;
+    }
+    return it->second.pressure_advance;
 }
 
 const std::string& PrinterTemperatureState::active_extruder_name() const {
@@ -491,6 +557,20 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
             lv_subject_set_int(info.target_subject.get(), target_deci);
         }
 
+        if (data.contains("pressure_advance") && data["pressure_advance"].is_number()) {
+            info.pressure_advance = data["pressure_advance"].get<float>();
+        }
+
+        if (data.contains("nozzle_diameter") && data["nozzle_diameter"].is_number()) {
+            const double d = data["nozzle_diameter"].get<double>();
+            if (std::isfinite(d) && d > 0.0) {
+                info.nozzle_diameter = d;
+            }
+        }
+        if (data.contains("nozzle_volume_type") && data["nozzle_volume_type"].is_string()) {
+            info.nozzle_volume_type = data["nozzle_volume_type"].get<std::string>();
+        }
+
         publish_power(name, info.power_subject.get());
     }
 
@@ -510,6 +590,11 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
         if (active.contains("target") && active["target"].is_number()) {
             int target_deci = helix::units::json_to_decidegrees(active, "target");
             lv_subject_set_int(&active_extruder_target_, target_deci);
+        }
+
+        if (active.contains("pressure_advance") && active["pressure_advance"].is_number()) {
+            lv_subject_set_int(&active_extruder_pa_,
+                               pa_to_subject(active["pressure_advance"].get<float>()));
         }
     }
 
@@ -660,7 +745,7 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
                     if (*d->device_connected) {
                         chamber_offline_run_ = 0;
                         lv_subject_set_int(&chamber_heater_offline_, 0);
-                    } else if (++chamber_offline_run_ >= CHAMBER_OFFLINE_CONSECUTIVE_REPORTS) {
+                    } else if (++chamber_offline_run_ >= kChamberOfflineConsecutiveReports) {
                         lv_subject_set_int(&chamber_heater_offline_, 1);
                     }
                 }
@@ -672,9 +757,11 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
                 }
                 if (d->drying_active.has_value()) {
                     chamber_dryer_running_ = *d->drying_active;
+                    lv_subject_set_int(&chamber_dryer_reported_, 1);
                 }
                 if (d->drying_remaining_s.has_value()) {
                     chamber_dryer_remaining_s_ = *d->drying_remaining_s;
+                    chamber_dryer_remaining_reported_ = true;
                 }
                 if (d->drying_target_c.has_value()) {
                     chamber_dryer_target_c_ = *d->drying_target_c;
@@ -684,6 +771,13 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
                                   "backend={} detail={}",
                                   backend->id(), *d->link_error);
                 }
+                if (d->wait_active.has_value()) {
+                    chamber_wait_active_ = *d->wait_active;
+                }
+                if (d->wait_target_c.has_value()) {
+                    chamber_wait_target_c_ = *d->wait_target_c;
+                }
+                apply_chamber_rejection(*d, backend->id());
             }
         }
     }
@@ -714,6 +808,8 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
         publish_chamber_dryer();
     }
 
+    release_chamber_rejection_if_target_followed();
+
     // Effective chamber setpoint + control mode: delegate to the single source of
     // truth in ui_temperature_utils so the display and data layers can never
     // diverge. Recomputed on EVERY status update so external sets (Mainsail/
@@ -724,6 +820,86 @@ void PrinterTemperatureState::update_from_status(const nlohmann::json& status) {
         chamber_fan_resting_deci_);
     lv_subject_set_int(&chamber_effective_target_, sp.deci);
     lv_subject_set_int(&chamber_mode_, sp.mode);
+}
+
+// A rejection latches from the first report of one until the device says
+// nothing is outstanding or the heater's target follows the request. The
+// appliance retries a conflict on its own, so a latch that clears within a
+// frame or two is the common case and only the log hears of it.
+void PrinterTemperatureState::apply_chamber_rejection(const chamber::ChamberHeaterDiagnostics& d,
+                                                      std::string_view backend_id) {
+    if (d.rejection_target_c.has_value()) {
+        chamber_rejection_target_c_ = *d.rejection_target_c;
+    }
+    bool new_event = false;
+    if (d.rejection_seq.has_value() && *d.rejection_seq != chamber_rejection_vendor_seq_) {
+        new_event = chamber_rejection_vendor_seq_ >= 0;
+        chamber_rejection_vendor_seq_ = *d.rejection_seq;
+    }
+    if (d.rejection.has_value()) {
+        chamber_rejection_kind_ = *d.rejection;
+        chamber_refusal_cause_ = d.refusal_cause.value_or(chamber::RefusalCause::Unspecified);
+    }
+    if (chamber_rejection_kind_ == chamber::CommandRejection::None) {
+        clear_chamber_rejection();
+        return;
+    }
+    if (!chamber_rejection_latched_ || new_event) {
+        const std::string code = d.rejection_code.value_or("");
+        if (!chamber_rejection_latched_) {
+            spdlog::warn("[PrinterTemperatureState] Chamber heater rejected a target: backend={} "
+                         "code={} seq={} requested={}",
+                         backend_id, code, chamber_rejection_vendor_seq_,
+                         chamber_rejection_target_c_);
+        } else {
+            spdlog::debug("[PrinterTemperatureState] Chamber heater rejected again: backend={} "
+                          "code={} seq={}",
+                          backend_id, code, chamber_rejection_vendor_seq_);
+        }
+        chamber_rejection_latched_ = true;
+        chamber_target_at_rejection_ = lv_subject_get_int(&chamber_target_);
+        lv_subject_set_int(&chamber_heater_rejection_seq_,
+                           lv_subject_get_int(&chamber_heater_rejection_seq_) + 1);
+    }
+    const std::string text =
+        chamber_rejection_text(chamber_rejection_kind_, chamber_refusal_cause_,
+                               lv_subject_get_string(&chamber_heater_fault_reason_text_));
+    if (text != lv_subject_get_string(&chamber_heater_rejection_text_)) {
+        lv_subject_copy_string(&chamber_heater_rejection_text_, text.c_str());
+    }
+    lv_subject_set_int(&chamber_heater_command_rejected_, 1);
+}
+
+// The heater taking a target is the answer a rejection waits for: the one we
+// asked for when the device named it, otherwise any new nonzero target.
+void PrinterTemperatureState::release_chamber_rejection_if_target_followed() {
+    if (!chamber_rejection_latched_) {
+        return;
+    }
+    const int target = lv_subject_get_int(&chamber_target_);
+    if (target <= 0) {
+        return;
+    }
+    const bool followed =
+        !std::isnan(chamber_rejection_target_c_) && chamber_rejection_target_c_ > 0
+            ? std::abs(target - static_cast<int>(std::lround(chamber_rejection_target_c_ * 10))) <=
+                  5
+            : target != chamber_target_at_rejection_;
+    if (followed) {
+        spdlog::info("[PrinterTemperatureState] Chamber heater took target {}°C; rejection cleared",
+                     target / 10.0);
+        chamber_rejection_kind_ = chamber::CommandRejection::None;
+        clear_chamber_rejection();
+    }
+}
+
+void PrinterTemperatureState::clear_chamber_rejection() {
+    if (!chamber_rejection_latched_) {
+        return;
+    }
+    chamber_rejection_latched_ = false;
+    lv_subject_set_int(&chamber_heater_command_rejected_, 0);
+    lv_subject_copy_string(&chamber_heater_rejection_text_, "");
 }
 
 // The actual chamber temperature sits beside the cycle's target: an appliance
@@ -739,6 +915,9 @@ void PrinterTemperatureState::publish_chamber_dryer() {
         return;
     }
     const int current_c = static_cast<int>(std::lround(lv_subject_get_int(&chamber_temp_) / 10.0));
+    // The compact "41/55°C" is deliberate: the chamber card's dryer row is one
+    // line beside a Stop button, and its longest readout ("59/60°C  12:00 left")
+    // ellipsizes at 480x320 with the spaced pair format_temperature_pair() draws.
     std::string text = chamber_dryer_target_c_ > 0
                            ? fmt::format("{}/{}°C", current_c, chamber_dryer_target_c_)
                            : fmt::format("{}°C", current_c);

@@ -27,6 +27,7 @@ else
     # Linux: framebuffer and DRM for embedded, SDL for desktop
     DISPLAY_API_SRCS += src/api/display_backend_fbdev.cpp
     DISPLAY_API_SRCS += src/api/display_backend_drm.cpp
+    DISPLAY_API_SRCS += src/api/gpu_libs.cpp
     DISPLAY_API_SRCS += src/api/drm_rotation_strategy.cpp
     DISPLAY_API_SRCS += src/api/input_device_scanner.cpp
     DISPLAY_API_SRCS += src/api/touch_calibration_wrapper.cpp

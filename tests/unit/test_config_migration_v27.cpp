@@ -91,15 +91,15 @@ TEST_CASE_METHOD(MigrationV27Fixture, "v27 moves a stored 25 to the platform def
                  "[config][migration]") {
     write_and_init(26, 25);
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
-    CHECK(config.get<int>("/input/scroll_throw", -1) == InputSettingsManager::DEFAULT_SCROLL_THROW);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
+    CHECK(config.get<int>("/input/scroll_throw", -1) == InputSettingsManager::kDefaultScrollThrow);
 }
 
 TEST_CASE_METHOD(MigrationV27Fixture, "v27 leaves a user's scroll_throw alone",
                  "[config][migration]") {
     write_and_init(26, 40);
 
-    REQUIRE(config.get<int>("/config_version", 0) == helix::CURRENT_CONFIG_VERSION);
+    REQUIRE(config.get<int>("/config_version", 0) == helix::kCurrentConfigVersion);
     CHECK(config.get<int>("/input/scroll_throw", -1) == 40);
 }
 
@@ -108,7 +108,7 @@ TEST_CASE("v27 leaves a missing scroll_throw missing", "[config][migration]") {
     // migration writes nothing for it.
     json with_input{{"config_version", 26}, {"input", {{"scroll_limit", 10}}}};
     helix::config_detail::run_versioned_migrations(with_input, "");
-    CHECK(with_input["config_version"] == helix::CURRENT_CONFIG_VERSION);
+    CHECK(with_input["config_version"] == helix::kCurrentConfigVersion);
     CHECK_FALSE(with_input["input"].contains("scroll_throw"));
 
     json without_input{{"config_version", 26}};

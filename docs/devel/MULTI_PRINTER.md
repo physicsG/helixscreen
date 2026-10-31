@@ -18,7 +18,7 @@ Key properties:
 
 | File | Purpose |
 |------|---------|
-| `include/config.h` | Config class: `df()`, CRUD methods, `slugify()`, `CURRENT_CONFIG_VERSION` |
+| `include/config.h` | Config class: `df()`, CRUD methods, `slugify()`, `kCurrentConfigVersion` |
 | `src/system/config.cpp` | Config v4 schema, multi-printer CRUD |
 | `src/system/config_migrations.cpp` | `normalize_versionless_document()` |
 | `include/application.h` | `switch_printer()`, `add_printer_via_wizard()`, `cancel_add_printer_wizard()`, soft restart state |
@@ -37,7 +37,7 @@ Key properties:
 | `ui_xml/printer_list_overlay.xml` | Overlay layout (overlay_panel, list container, add button) |
 | `ui_xml/printer_list_item.xml` | Reusable row component (name, check icon, delete button, active state) |
 | `ui_xml/navigation_bar.xml` | Navbar badge (`nav_printer_badge`) gated on the `show_printer_switcher` subject |
-| `ui_xml/printer_manager_overlay.xml` | Section 4: "Manage Printers" button (`pm_manage_printers_btn`) |
+| `ui_xml/printer_manager_overlay.xml` | "Manage Printers" header action button |
 
 ---
 
@@ -94,7 +94,7 @@ The badge appears when `show_printer_switcher` is non-zero.
 ### Structure
 
 <!-- config_version 4 below is illustrative of the v3->v4 migration that introduced
-     the /printers/{id}/ structure, not the current schema head (see CURRENT_CONFIG_VERSION
+     the /printers/{id}/ structure, not the current schema head (see kCurrentConfigVersion
      in config.h). -->
 
 ```json
@@ -234,7 +234,7 @@ Switching printers performs a "soft restart" -- the LVGL display stays alive, bu
 13. Kill all LVGL animations + clear ModalStack
 14. StaticPanelRegistry::destroy_all() (destroys overlay/panel globals, releases ObserverGuards)
 15. Release global observer guards (notification, active print media)
-16. StaticSubjectRegistry::deinit_all() (deinit subjects in LIFO order)
+16. StaticSubjectRegistry::deinit_all(Scope::PrinterSwitch) (LIFO; Process entries stay live, ProcessRunOnSwitch entries run and stay registered)
 16b. Destroy JobQueueState
 17. ObserverGuard::invalidate_all() (mark all guards as stale)
 18. Release MoonrakerManager
@@ -313,6 +313,13 @@ User taps "+ Add Printer" (in PrinterSwitchMenu or PrinterListOverlay)
     9. Clear re-entrancy guard
 ```
 
+After the wizard completes and the connection comes up, a screen reaching a remote Moonraker
+that runs HelixScreen on its own display seeds the new printer's home layout from the layout
+that screen published (`include/home_layout_sync.h#HomeLayoutSync`). The new entry has
+no saved home layout, so the seed applies at the first default resolution, and the user can
+pull it again from the widget catalog. Details in "Layouts shared by the printer's own
+screen" in `LAYOUT_SYSTEM.md`.
+
 ### Cancel Recovery
 
 If the user cancels the wizard:
@@ -374,7 +381,7 @@ if (data["printers"].size() <= 1) {
 Visibility is driven by the `show_printer_switcher` user setting (toggled from
 Settings > Connection > Printers). Entry points:
 - **Navbar printer badge** (`nav_printer_badge`) -- gated on the `show_printer_switcher` subject
-- **Printer Manager > Manage Printers** button (`pm_manage_printers_btn`) -- always present in the Printer Manager overlay
+- **Printer Manager > Manage Printers** header button (`action_button`) -- always present in the Printer Manager overlay
 
 The `show_printer_switcher` setting persists to `/printers/show_printer_switcher` in config
 (default false) and is mirrored into an LVGL subject by `SettingsManager`.
@@ -475,6 +482,14 @@ void MySingleton::init_subjects() {
 
 2. **Implement `deinit_subjects()`** to call `lv_subject_deinit()` on each subject.
 
+   Pick the entry's `StaticSubjectRegistry::Lifetime` by where its init runs. The default,
+   `Printer`, is right when `init_subjects()` runs again on the rebuild path (SubjectInitializer,
+   a widget's `init_subjects` hook, a lazy `ensure_*()` on first use). Subjects created once at boot
+   (component registration in `xml_registration.cpp`, a process-once guard) take `Process`, or a
+   switch removes them for good and every binding to them goes dead. Only XML bindings and C++
+   setters may observe a `Process` subject. Process-once cleanup of per-widget state that observes
+   printer subjects takes `ProcessRunOnSwitch`.
+
 3. If your singleton creates ObserverGuards, they will be safely handled by the `invalidate_all()` epoch during soft restart.
 
 4. If your singleton is a panel/overlay, register with `StaticPanelRegistry` so it is destroyed during teardown step 14.
@@ -534,7 +549,7 @@ The list is repopulated on every `on_activate()` to reflect config changes.
 
 ### PrinterManagerOverlay (Manage Printers Button)
 
-Section 4 of the Printer Manager overlay contains a "Manage Printers" button (`pm_manage_printers_btn`). Clicking it opens the `PrinterListOverlay`.
+The Printer Manager overlay's header bar carries a "Manage Printers" action button (`action_button` in landscape, the icon-only `action_icon_button` in portrait; both call `pm_manage_printers_clicked`). Clicking it opens the `PrinterListOverlay`.
 
 ---
 

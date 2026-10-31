@@ -1,0 +1,12 @@
+{
+  "_attribution": "test fixture",
+  "filaments": [
+    {"id": "acme-pla", "brand": "Acme", "name": "PLA", "type": "PLA", "orca_id": "UNIQUE01"},
+    {"id": "acme-pp", "brand": "Acme", "name": "PP", "type": "PP", "orca_id": "SHARED01"},
+    {"id": "acme-petg-cf", "brand": "Acme", "name": "PETG-CF", "type": "PETG-CF", "orca_id": "SHARED01"},
+    {"id": "acme-abs", "brand": "Acme", "name": "ABS", "type": "ABS", "orca_id": "BUILTIN_ABS"},
+    {"id": "acme-asa", "brand": "Acme", "name": "ASA", "type": "ASA", "orca_id": "BUILTIN_ASA"},
+    {"id": "acme-tpu", "brand": "Acme", "name": "TPU", "type": "TPU", "orca_id": "OVERLAY_TAKEN"},
+    {"id": "acme-pc", "brand": "Acme", "name": "PC", "type": "PC"}
+  ]
+}

@@ -7,8 +7,11 @@
 #include "ui_change_host_modal.h"
 #include "ui_overlay_network_settings.h"
 #include "ui_printer_list_overlay.h"
+#include "ui_settings_screen_sharing.h"
 
 #include "config.h"
+#include "printer_retarget.h"
+#include "utils/network_validation.h"
 
 #include <spdlog/spdlog.h>
 
@@ -24,8 +27,13 @@ std::string ConnectionSettingsOverlay::printer_host_display() {
     if (host.empty()) {
         return "\xe2\x80\x94";
     }
-    const int port = config->get<int>(config->df() + "moonraker_port", 7125);
+    const int port =
+        config->get<int>(config->df() + "moonraker_port", helix::kDefaultMoonrakerPort);
     return host + ":" + std::to_string(port);
+}
+
+std::string ConnectionSettingsOverlay::printer_api_key_display() {
+    return active_printer_credential().api_key.empty() ? lv_tr("Not set") : lv_tr("Configured");
 }
 
 void ConnectionSettingsOverlay::init_subjects() {
@@ -34,6 +42,9 @@ void ConnectionSettingsOverlay::init_subjects() {
         // rather than waiting for ChangeHostModal's completion callback.
         UI_MANAGED_SUBJECT_STRING(printer_host_value_subject_, printer_host_value_buf_,
                                   printer_host_display().c_str(), "printer_host_value", subjects_);
+        UI_MANAGED_SUBJECT_STRING(printer_api_key_value_subject_, printer_api_key_value_buf_,
+                                  printer_api_key_display().c_str(), "printer_api_key_value",
+                                  subjects_);
     });
 }
 
@@ -64,6 +75,11 @@ void ConnectionSettingsOverlay::register_callbacks() {
                  }
              });
          }},
+        {"on_screen_sharing_clicked",
+         [](lv_event_t*) {
+             get_screen_sharing_settings_overlay().show(
+                 get_connection_settings_overlay().parent_screen_);
+         }},
     });
 }
 
@@ -77,6 +93,7 @@ void ConnectionSettingsOverlay::refresh_printer_host() {
         return;
     }
     lv_subject_copy_string(&printer_host_value_subject_, printer_host_display().c_str());
+    lv_subject_copy_string(&printer_api_key_value_subject_, printer_api_key_display().c_str());
 }
 
 } // namespace helix::settings

@@ -8,9 +8,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "screensaver-perf"))
 
+import re  # noqa: E402
+from collections import Counter  # noqa: E402
+
 import ctparse  # noqa: E402
 import flips  # noqa: E402
+import perfstats  # noqa: E402
 import summarize  # noqa: E402
+
+PERF_DIR = REPO_ROOT / "scripts" / "screensaver-perf"
 
 
 def fields_of(line):
@@ -106,3 +112,53 @@ def test_gate_fails_on_an_overflow_a_run_without_samples_or_no_runs():
     assert not summarize.gate_passes(
         runs(samples=[60000, 0], p99_us=[100, 100], max_us=[900, 900], overflow_gt20ms=[0, 0]))
     assert not summarize.gate_passes(runs())
+
+
+def test_percentile_is_the_smallest_value_holding_the_fraction():
+    values = list(range(1, 11))
+    assert perfstats.percentile(values, 0) == 1
+    assert perfstats.percentile(values, .1) == 1
+    assert perfstats.percentile(values, .5) == 5
+    assert perfstats.percentile(values, .9) == 9
+    assert perfstats.percentile(values, .91) == 10
+    assert perfstats.percentile(values, 1) == 10
+    assert perfstats.percentile([], .5) is None
+
+
+def test_list_and_histogram_percentiles_agree_on_the_same_samples():
+    samples = sorted([120, 80, 80, 95, 300, 80, 4000, 95, 110, 95, 95, 2500, 80])
+    counts = Counter(samples)
+    for fraction in (0, .1, .25, .5, .75, .9, .99, .999, 1):
+        assert perfstats.histogram_percentile(counts, 0, fraction) == perfstats.percentile(samples, fraction)
+
+
+def test_histogram_percentile_reports_the_histogram_top_inside_the_overflow():
+    counts = {100: 98}
+    assert perfstats.histogram_percentile(counts, 2, .98) == 100
+    assert perfstats.histogram_percentile(counts, 2, .99) == perfstats.HISTOGRAM_US
+    assert perfstats.histogram_percentile({}, 0, .5) == -1
+
+
+def test_flips_quantiles_use_the_shared_rank_up_percentile():
+    # Gaps of 10, 20, 30 and 40 ms. Half of four gaps is reached at the second, 20 ms.
+    fields = fields_of(flips.flips_line([0.0, 0.010, 0.030, 0.060, 0.100]))
+    assert fields["p50"] == "20.0"
+    assert fields["p10"] == "10.0"
+    assert fields["p90"] == "40.0"
+    assert fields["max"] == "40.0"
+
+
+def test_one_histogram_limit_for_parser_gate_probe_and_cyclictest():
+    assert ctparse.HISTOGRAM_US is perfstats.HISTOGRAM_US
+    probe = (PERF_DIR / "wakeup_probe.c").read_text()
+    assert int(re.search(r"#define HISTOGRAM_US (\d+)", probe).group(1)) == perfstats.HISTOGRAM_US
+    loadgate = (PERF_DIR / "pi3b_loadgate.sh").read_text()
+    assert [int(h) for h in re.findall(r"cyclictest .*-h (\d+)", loadgate)] == [perfstats.HISTOGRAM_US]
+    assert not hasattr(summarize, "MAX_WAKEUP_US")
+
+
+def test_gate_fails_on_a_max_past_the_histogram_with_no_overflow_line():
+    # cyclictest prints Max Latencies before Histogram Overflows, so a cut-off file can carry
+    # the first and not the second.
+    assert not summarize.gate_passes(
+        runs(samples=[60000], p99_us=[100], max_us=[perfstats.HISTOGRAM_US + 5000], overflow_gt20ms=[0]))

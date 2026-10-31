@@ -401,10 +401,10 @@ TEST_CASE("Mock print speedup factor behavior", "[print][speedup][slow]") {
 
     SECTION("speedup is clamped to helix::sim::MIN_SPEED") {
         MoonrakerClientMock mock(MoonrakerClientMock::PrinterType::VORON_24, 0.01);
-        REQUIRE(mock.get_simulation_speedup() == Catch::Approx(helix::sim::MIN_SPEED));
+        REQUIRE(mock.get_simulation_speedup() == Catch::Approx(helix::sim::kMinSpeed));
 
         mock.set_simulation_speedup(-5.0);
-        REQUIRE(mock.get_simulation_speedup() == Catch::Approx(helix::sim::MIN_SPEED));
+        REQUIRE(mock.get_simulation_speedup() == Catch::Approx(helix::sim::kMinSpeed));
     }
 
     SECTION("speedup is clamped to helix::sim::MAX_SPEED") {

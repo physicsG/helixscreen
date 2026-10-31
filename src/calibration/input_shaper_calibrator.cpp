@@ -198,9 +198,10 @@ void InputShaperCalibrator::run_calibration(char axis, ProgressCallback on_progr
     ensure_homed_then(
         api_, *lifetime_,
         [this, normalized_axis, on_progress, on_complete, on_error]() {
-            auto api_progress = [on_progress](int percent, ShaperCalibrationPhase phase) {
+            auto api_progress = [on_progress](int percent, ShaperCalibrationPhase phase,
+                                              float freq_hz) {
                 if (on_progress) {
-                    on_progress(percent, phase);
+                    on_progress(percent, phase, freq_hz);
                 }
             };
 

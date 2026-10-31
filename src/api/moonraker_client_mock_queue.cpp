@@ -70,8 +70,8 @@ void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& reg
     // server.job_queue.status — return current mock queue state
     registry["server.job_queue.status"] =
         []([[maybe_unused]] MoonrakerClientMock* self, [[maybe_unused]] const json& params,
-           std::function<void(const json&)> success_cb,
-           [[maybe_unused]] std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           [[maybe_unused]] helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         json result = build_queue_result();
 
         spdlog::debug("[MoonrakerClientMock] Returning mock job queue: {} jobs ({})",
@@ -86,8 +86,8 @@ void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& reg
     // server.job_queue.start — start processing queue
     registry["server.job_queue.start"] =
         []([[maybe_unused]] MoonrakerClientMock* self, [[maybe_unused]] const json& params,
-           std::function<void(const json&)> success_cb,
-           [[maybe_unused]] std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           [[maybe_unused]] helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         s_mock_queue.queue_state = "ready";
         spdlog::info("[MoonrakerClientMock] Job queue started");
         if (success_cb) {
@@ -99,8 +99,8 @@ void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& reg
     // server.job_queue.pause — pause queue processing
     registry["server.job_queue.pause"] =
         []([[maybe_unused]] MoonrakerClientMock* self, [[maybe_unused]] const json& params,
-           std::function<void(const json&)> success_cb,
-           [[maybe_unused]] std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           [[maybe_unused]] helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         s_mock_queue.queue_state = "paused";
         spdlog::info("[MoonrakerClientMock] Job queue paused");
         if (success_cb) {
@@ -112,8 +112,8 @@ void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& reg
     // server.job_queue.post_job — add job(s) to queue
     registry["server.job_queue.post_job"] =
         []([[maybe_unused]] MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         // Validate input — malformed params are a client bug, report and bail.
         if (!params.contains("filenames") || !params["filenames"].is_array()) {
             if (error_cb) {
@@ -146,8 +146,8 @@ void register_queue_handlers(std::unordered_map<std::string, MethodHandler>& reg
     // server.job_queue.delete_job — remove job(s) from queue
     registry["server.job_queue.delete_job"] =
         []([[maybe_unused]] MoonrakerClientMock* self, const json& params,
-           std::function<void(const json&)> success_cb,
-           std::function<void(const MoonrakerError&)> error_cb) -> bool {
+           helix::SharedCallback<void(const json&)> success_cb,
+           helix::SharedCallback<void(const MoonrakerError&)> error_cb) -> bool {
         if (!params.contains("job_ids") || !params["job_ids"].is_array()) {
             if (error_cb) {
                 MoonrakerError err = MoonrakerError::validation_error(

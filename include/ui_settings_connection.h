@@ -3,10 +3,11 @@
 
 /**
  * @file ui_settings_connection.h
- * @brief Connection settings overlay - network, printers, Moonraker host
+ * @brief Connection settings overlay - printers, network, Moonraker host, screen sharing
  *
  * Owns its row callbacks (on_network_clicked, on_printers_clicked,
- * on_change_host_clicked) and the printer_host_value subject the Host row binds.
+ * on_change_host_clicked, on_screen_sharing_clicked) and the printer_host_value and
+ * printer_api_key_value subjects the Host and API Key rows bind.
  *
  * @pattern Overlay (lazy init)
  * @threading Main thread only
@@ -41,12 +42,17 @@ class ConnectionSettingsOverlay : public OverlayBase {
     /// "host:port" of the configured printer, or an em dash when none is set.
     static std::string printer_host_display();
 
+    /// Whether the configured printer has an API key; never the key itself.
+    static std::string printer_api_key_display();
+
   private:
     void refresh_printer_host();
 
     SubjectManager subjects_;
     lv_subject_t printer_host_value_subject_{};
     char printer_host_value_buf_[96] = {};
+    lv_subject_t printer_api_key_value_subject_{};
+    char printer_api_key_value_buf_[48] = {};
 };
 
 inline ConnectionSettingsOverlay& get_connection_settings_overlay() {

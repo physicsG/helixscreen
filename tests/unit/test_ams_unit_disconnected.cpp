@@ -15,6 +15,7 @@
 #include "ams_state.h"
 #include "ams_types.h"
 #include "helix-xml/src/xml/lv_xml.h"
+#include "theme_manager.h"
 
 #include <lvgl/lvgl.h>
 
@@ -36,16 +37,21 @@ struct UnitShape {
 
 class ConnectionMock : public AmsBackendMock {
   public:
-    explicit ConnectionMock(std::vector<UnitShape> shapes)
-        : AmsBackendMock(static_cast<int>(shapes.size()) * 4), shapes_(std::move(shapes)) {}
+    ConnectionMock(std::vector<UnitShape> shapes, std::string type_name)
+        : AmsBackendMock(static_cast<int>(shapes.size()) * 4), shapes_(std::move(shapes)),
+          type_name_(std::move(type_name)) {}
 
     AmsSystemInfo get_system_info() const override {
         AmsSystemInfo info = AmsBackendMock::get_system_info();
+        if (!type_name_.empty()) {
+            info.type_name = type_name_;
+        }
         info.units.clear();
         for (size_t u = 0; u < shapes_.size(); ++u) {
             AmsUnit unit;
             unit.unit_index = static_cast<int>(u);
-            unit.name = "conn_unit_" + std::to_string(u);
+            // Unit 0 is named the way AFC names an OpenAMS unit, so its logo is color art.
+            unit.name = u == 0 ? "OpenAMS AMS_1" : "conn_unit_" + std::to_string(u);
             unit.slot_count = 4;
             unit.first_slot_global_index = static_cast<int>(u) * 4;
             unit.connected = shapes_[u].connected;
@@ -64,11 +70,13 @@ class ConnectionMock : public AmsBackendMock {
 
   private:
     std::vector<UnitShape> shapes_;
+    std::string type_name_;
 };
 
-void install(std::vector<UnitShape> shapes) {
+/// @p type_name replaces the system's type name when not empty.
+void install(std::vector<UnitShape> shapes, std::string type_name = {}) {
     AmsState::instance().deinit_subjects();
-    auto mock = std::make_unique<ConnectionMock>(std::move(shapes));
+    auto mock = std::make_unique<ConnectionMock>(std::move(shapes), std::move(type_name));
     REQUIRE(mock->start().success());
     AmsState::instance().set_backend(std::move(mock));
     AmsState::instance().init_subjects(true);
@@ -162,4 +170,53 @@ TEST_CASE_METHOD(LVGLUITestFixture, "Every present unit offline is the whole sys
                  "[ams][disconnected]") {
     install({{false, false}, {false, true}});
     CHECK(subject_int("ams_all_units_disconnected") == 1);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "A unit card tints a mono logo and draws a color logo as is",
+                 "[ams][logo]") {
+    install({{true, false}, {true, false}});
+    const std::string absent = AmsState::unit_absent_subject_name(0);
+    const std::string disc = AmsState::unit_disconnected_subject_name(0);
+    const std::string logo_color = AmsState::unit_logo_color_subject_name(0);
+
+    // The card follows its unit's logo subject: 0 is a mono mark, 1 is color art.
+    for (int color : {0, 1}) {
+        INFO("logo_color=" << color);
+        lv_subject_set_int(lv_xml_get_subject(nullptr, logo_color.c_str()), color);
+        const char* attrs[] = {"absent",     absent.c_str(),     "disconnected", disc.c_str(),
+                               "logo_color", logo_color.c_str(), nullptr,        nullptr};
+        auto* card = static_cast<lv_obj_t*>(lv_xml_create(test_screen(), "ams_unit_card", attrs));
+        REQUIRE(card != nullptr);
+        lv_obj_t* logo = lv_obj_find_by_name(card, "unit_logo");
+        REQUIRE(logo != nullptr);
+        const auto opa = lv_obj_get_style_image_recolor_opa(logo, LV_PART_MAIN);
+        if (color == 0) {
+            CHECK(opa == LV_OPA_COVER);
+            CHECK(lv_color_eq(lv_obj_get_style_image_recolor(logo, LV_PART_MAIN),
+                              theme_manager_get_color("text")));
+        } else {
+            CHECK(opa == LV_OPA_TRANSP);
+        }
+        lv_obj_delete(card);
+    }
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "The per-unit logo subject follows the unit's logo",
+                 "[ams][logo]") {
+    install({{true, false}, {true, false}});
+    CHECK(subject_int(AmsState::unit_logo_color_subject_name(0)) == 1); // OpenAMS: color
+    CHECK(subject_int(AmsState::unit_logo_color_subject_name(1)) == 0); // no color art
+    // Past the cap the placeholder reads 0, a tinted mono mark.
+    CHECK(subject_int(AmsState::unit_logo_color_subject_name(AmsState::kMaxUnits)) == 0);
+}
+
+TEST_CASE_METHOD(LVGLUITestFixture, "The system logo subject follows the system's logo art",
+                 "[ams][logo]") {
+    install({{true, false}, {true, false}}, "OpenAMS");
+    CHECK(subject_int("ams_system_logo_color") == 1);
+    CHECK(subject_int("ams_system_has_logo") == 1);
+
+    install({{true, false}, {true, false}}, "AFC");
+    CHECK(subject_int("ams_system_logo_color") == 0);
+    CHECK(subject_int("ams_system_has_logo") == 1);
 }

@@ -4,6 +4,7 @@
 
 #include "ui_panel_input_shaper.h"
 
+#include <chrono>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,6 +37,10 @@ class InputShaperPanelTestAccess {
     /// reaches the terminal callback in about a second instead of 30.
     static void set_save_restart_timeout_ms(InputShaperPanel& p, uint32_t ms) {
         p.save_restart_timeout_ms_ = ms;
+    }
+
+    static void set_restart_poll_interval(InputShaperPanel& p, std::chrono::milliseconds interval) {
+        p.config_editor_.set_restart_poll_interval(interval);
     }
 
     /// Seed one axis exactly as a finished calibration would leave it: the
@@ -101,6 +106,41 @@ struct InputShaperPanelTestAccess {
 
     static const char* quality_description(float vibrations) {
         return InputShaperPanel::get_quality_description(vibrations);
+    }
+
+    // Live sweep chart (MEASURING): the stream source, the printer facts the
+    // gate reads, and the root the chart host is looked up under (the
+    // integration fixture builds the view without create()).
+    static void
+    set_preview_source_factory(InputShaperPanel& p,
+                               helix::calibration::LiveSweepPreview::SourceFactory factory) {
+        p.sweep_chart_.set_source_factory(std::move(factory));
+    }
+
+    static const helix::ui::ShaperSweepChart& sweep_chart(const InputShaperPanel& p) {
+        return p.sweep_chart_;
+    }
+
+    static void set_preview_facts(InputShaperPanel& p, helix::calibration::LiveSweepFacts facts) {
+        p.preview_facts_ = std::move(facts);
+    }
+
+    static void set_overlay_root(InputShaperPanel& p, lv_obj_t* root) {
+        p.overlay_root_ = root;
+    }
+
+    /// The screen rebuild() re-creates the view on; create() normally sets it.
+    static void set_parent_screen(InputShaperPanel& p, lv_obj_t* screen) {
+        p.parent_screen_ = screen;
+    }
+
+    /// An axis's results chart and its raw PSD series.
+    static ui_frequency_response_chart_t* results_chart(const InputShaperPanel& p, char axis) {
+        return axis == 'X' ? p.x_chart_.chart : p.y_chart_.chart;
+    }
+
+    static int raw_series_id(const InputShaperPanel& p, char axis) {
+        return axis == 'X' ? p.x_chart_.raw_series_id : p.y_chart_.raw_series_id;
     }
 };
 

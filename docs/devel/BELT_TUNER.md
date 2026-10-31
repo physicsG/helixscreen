@@ -1,22 +1,24 @@
 # Belt Tuner (pluck-based)
 
-Developer guide for the live belt-tension tuner: the user plucks a belt by hand, the tool
-listens on Klipper's live accelerometer stream, and reports the belt's fundamental
-frequency.
+Developer guide for the pluck-based belt-tension libraries: a belt plucked by hand is
+heard on Klipper's live accelerometer stream, and the belt's fundamental frequency is read
+from the ring-down.
 
-**Panel**: none. These libraries back no UI; Belt Tension is `BELT_TENSION.md`.
-**User guide**: `../user/guide/calibration.md` § Belt Tension
+**Panel**: none. The pluck libraries back no UI, and no user can reach them. The Belt
+Tension screen users see is the driven-sweep comparison in `BELT_TENSION.md`, which shares
+two pieces with this code: `BeltStreamClient` and `evaluate_belt_gate`.
+**User guide**: none.
 
 ---
 
 ## ⚠ Validation status: NOT verified on hardware
 
-**Read this before changing a threshold, before promoting the feature out of beta, and
-before believing a number it prints.**
+**Read this before changing a threshold, before wiring any UI to these libraries, and
+before believing a number they print.**
 
-It is green in CI - 96/96 shards. Its one real-hardware test through its own UI, on a
-Voron 2.4 350 (#1721), failed: a clean audible pluck almost never cleared
-`MIN_RMS_RATIO`, a pluck hard enough to clear it rang as broadband noise, and one belt
+It is green in CI - 96/96 shards. Its one real-hardware test, on a Voron 2.4 350 (#1721),
+failed: a clean audible pluck almost never cleared
+`kMinRmsRatio`, a pluck hard enough to clear it rang as broadband noise, and one belt
 read ~130, ~85 and ~120 Hz across repeats. Everything below is open.
 
 ### The thresholds are circular
@@ -57,14 +59,9 @@ Minimum matrix, agreed with the maintainer:
 ### Known traps when you first run it
 
 - **A soft first pluck producing no response is a threshold, not a hang.**
-  `MIN_DETECTABLE_RATIO` is 5.0, so strikes below 5x the noise floor are dropped
+  `kMinDetectableRatio` is 5.0, so strikes below 5x the noise floor are dropped
   silently rather than surfaced as "pluck harder". That is deliberate - the evidence
-  says nothing below 5x was a pluck at all - but it reads as a dead UI.
-- **Verify the deployed artifact two independent ways.** They fail independently:
-  read make's own exit code from a file (never a trailing `echo`, never a harness
-  notification), **and**
-  `strings build/bin/helix-screen | grep -c HELIX_BELT_CAPTURE_DIR`. That string exists
-  only on this feature, so zero hits means a stale binary whatever the exit code claimed.
+  says nothing below 5x was a pluck at all - but behind a UI it reads as a hang.
 - **Replaying the same capture path twice is a no-op** - LVGL does not notify a string
   subject's observers when the written value equals the current one. Set it to `""`
   between replays.
@@ -86,26 +83,25 @@ Minimum matrix, agreed with the maintainer:
 
 ## Architecture
 
+No panel drives this chain; the unit tests do. Two pieces have users outside it:
+
+- `evaluate_belt_gate()` (`belt_gating.h`) is the Belt Tension panel's Start gate: one
+  ordered predicate chain to one user-facing reason string.
+- `BeltStreamClient` (`belt_stream_client.h`) reads Klipper's UDS webhooks endpoint
+  (`dump_adxl345`), `\x03`-framed JSON, on its own libhv event loop. Klipper serves a second
+  client alongside Moonraker, so this does not disturb the printer. It feeds the live sweep
+  preview (`BELT_TENSION.md` § Live preview) through `IAccelBatchSource`.
+
 ```
-BeltTensionPanel (UI, state machine, XML-bound subjects)
-  |  Gates -> park gantry -> LISTEN per belt -> COMPARE
-  |
-  +-> evaluate_belt_gate()          belt_gating.h
-  |     One ordered predicate chain -> one user-facing reason string.
-  |     Also owns park_y_for_span() and park_x_center().
-  |
-  +-> BeltStreamClient              belt_stream_client.h
-  |     Klipper's UDS webhooks endpoint (dump_adxl345), \x03-framed JSON,
-  |     on its own libhv event loop. Klipper serves a second client
-  |     alongside Moonraker, so this does not disturb the printer.
+BeltStreamClient (accelerometer batches)
   |
   +-> BeltListenSession             belt_listen_session.h
-  |     Owns the live detection window. Applies MIN_DETECTABLE_RATIO,
+  |     Owns the live detection window. Applies kMinDetectableRatio,
   |     hands accepted strikes to the detector, drives the capture writer.
   |
   +-> PluckDetector                 pluck_detector.h
   |     Onset detection, strength gate, temporal-shape gate. Extracts the
-  |     ring-down segment (SKIP_MS past the transient, ANALYZE_MS long).
+  |     ring-down segment (kSkipMs past the transient, kAnalyzeMs long).
   |
   +-> pitch_estimator               pitch_estimator.h
   |     Harmonic product spectrum over the ring-down. Search window derived
@@ -118,16 +114,16 @@ BeltTensionPanel (UI, state machine, XML-bound subjects)
 ```
 
 Supporting units: `BeltCaptureWriter` (`belt_capture.h`, gated on
-`HELIX_BELT_CAPTURE_DIR`), `belt_dsp_probe` (the hardware-speed gate behind
-`HARDWARE_TOO_SLOW`), `KlippyFrameDecoder` (`klippy_frame_decoder.h`),
-`screen_locality` (co-location telemetry), `ui_belt_trace` / `ui_pluck_animation`
-(procedural drawing widgets).
+`HELIX_BELT_CAPTURE_DIR`), `belt_dsp_probe` (`belt_dsp_probe.h`, the time one windowed PSD
+takes, for a hardware-speed gate), `belt_live_data.h` (the match and trace values a display
+would draw), `KlippyFrameDecoder` (`klippy_frame_decoder.h`), and `screen_locality`
+(co-location telemetry).
 
 ## The detection window is not the ring-down
 
 The single easiest mistake in this code. `rms_ratio()`, `passes_gate()` and
 `has_sharp_onset()` operate on the **live detection window**, which includes the onset.
-`extract_ringdown()` returns a *different* buffer that has already decayed for `SKIP_MS`
+`extract_ringdown()` returns a *different* buffer that has already decayed for `kSkipMs`
 or more, and reads several times lower. `PluckWindow` deliberately has no strength field
 so the two cannot be silently swapped - `extract_ringdown()` is static and has no access
 to the window it came from.
@@ -148,15 +144,14 @@ Measured on the reference machine, so these do not need re-testing first:
 - **Stepper energization does not matter.** Motors on vs off: identical. No homed machine
   required.
 - **Z belts are not measurable** from a toolhead accelerometer - four plucks of one Z belt
-  gave 228, 164, 92, 58 Hz, against 5/5 identical on an A/B belt. The dead Z path was
-  deleted rather than wired to a UI; do not restore it.
+  gave 228, 164, 92, 58 Hz, against 5/5 identical on an A/B belt. There is no Z path,
+  and none should be added.
 
 ## Where it is tracked
 
 - GitHub #1303 (accelerometer-based CoreXY belt tension) and #1231 (Beta: Belt Tension -
   finish or drop).
-- `CHANGELOG_1_1_DRAFT.md` carries the release-note entry, flagged unvalidated.
-- `../user/guide/beta-features.md` carries the user-facing status.
+- `CHANGELOG_1_1_DRAFT.md` § Internal lists the libraries as unvalidated, with no user entry.
 
-**Do not promote this out of beta, and do not mark it verified in the 1.1 changelog,
+**Do not wire a UI to these libraries, and do not call them verified in a changelog,
 until the matrix above has actually been run.**

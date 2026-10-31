@@ -71,7 +71,7 @@ _TEST_SEED_SETTINGS: dict = {
     # the settled one a golden expects.
     "display": {
         "animations_enabled": False,
-        # DEFAULT_THEME already resolves to "helixscreen" (theme_loader.h),
+        # kDefaultTheme already resolves to "helixscreen" (theme_loader.h),
         # so this doesn't change behavior today — stated explicitly because
         # it's one of the two settings (with dark_mode) that repaints every
         # pixel in every golden, and a future default change shouldn't be
@@ -185,7 +185,7 @@ class HelixApp:
             config_dir.mkdir(parents=True, exist_ok=True)
             env["HELIX_CONFIG_DIR"] = str(config_dir)
 
-            # Config::init(TEST_CONFIG_PATH) resolves to
+            # Config::init(kTestConfigPath) resolves to
             # "<HELIX_CONFIG_DIR>/settings-test.json" (config.cpp keeps the
             # caller's filename, only redirects the directory). Write our own
             # literal seed (_TEST_SEED_SETTINGS, top of file) rather than

@@ -87,3 +87,21 @@ TEST_CASE_METHOD(TransportRefreshFixture,
         return lv_subject_get_int(&Access::wifi_connected(*overlay)) == 1;
     }));
 }
+
+TEST_CASE_METHOD(TransportRefreshFixture,
+                 "NetworkSettingsOverlay clears its network list without running queued work",
+                 "[network_settings][drain_reentrancy]") {
+    auto wm = make_manager();
+    auto overlay = std::make_unique<NetworkSettingsOverlay>();
+    overlay->init_subjects();
+    overlay->register_callbacks();
+    Access::wifi_manager(*overlay) = wm;
+    REQUIRE(overlay->create(test_screen()) != nullptr);
+
+    bool ran = false;
+    helix::ui::UpdateQueue::instance().queue("test::drain_canary", [&ran]() { ran = true; });
+    Access::clear_network_list(*overlay);
+    CHECK_FALSE(ran);
+    helix::ui::UpdateQueue::instance().drain();
+    CHECK(ran);
+}

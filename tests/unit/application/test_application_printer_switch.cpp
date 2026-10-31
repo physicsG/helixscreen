@@ -58,7 +58,7 @@
 
 namespace {
 
-constexpr const char* PROBE_NAME = "ApplicationPrinterSwitchTestProbe";
+constexpr const char* kProbeName = "ApplicationPrinterSwitchTestProbe";
 
 /**
  * @brief Two-printer config + a per-printer cache-invalidation counter
@@ -87,7 +87,7 @@ class PrinterSwitchFixture : public ApplicationTestFixture {
 
         // Count per-printer cache invalidations without caring who triggers them.
         helix::PrinterCacheRegistry::instance().register_invalidator(
-            PROBE_NAME, [this]() { ++invalidations_; });
+            kProbeName, [this]() { ++invalidations_; });
 
         // ~Application() calls shutdown() unconditionally, which tears down
         // TelemetryManager / UpdateChecker / SoundManager / NavigationManager and the
@@ -101,8 +101,9 @@ class PrinterSwitchFixture : public ApplicationTestFixture {
         // The registry outlives the fixture; the invalidator closes over `this`.
         helix::PrinterCacheRegistry::instance().clear();
         set_wizard_cancel_callback(nullptr);
-        // cancel_add_printer_wizard() defers its teardown through AsyncLifetimeGuard;
-        // that callback closes over app_, so drop it rather than run it.
+        // Queued work closes over app_, so drop it rather than run it. The restart
+        // cancel_add_printer_wizard() posts to the next tick is skipped once app_'s
+        // AsyncLifetimeGuard is gone.
         helix::ui::UpdateQueueTestAccess::discard_pending(helix::ui::UpdateQueue::instance());
     }
 
@@ -315,11 +316,11 @@ TEST_CASE_METHOD(PrinterSwitchFixture,
                  "Application: a new printer scope's first discovery counts as a hardware change "
                  "even when its fingerprint matches the previous printer's",
                  "[application][switch_printer][discovery]") {
-    constexpr size_t SAME_HARDWARE = 0xABCD;
+    constexpr size_t kSameHardware = 0xABCD;
 
-    REQUIRE(ApplicationTestAccess::note_hardware_fingerprint(app_, SAME_HARDWARE));
+    REQUIRE(ApplicationTestAccess::note_hardware_fingerprint(app_, kSameHardware));
     // A reconnect to the same printer with unchanged hardware stays a no-op.
-    REQUIRE_FALSE(ApplicationTestAccess::note_hardware_fingerprint(app_, SAME_HARDWARE));
+    REQUIRE_FALSE(ApplicationTestAccess::note_hardware_fingerprint(app_, kSameHardware));
 
     ApplicationTestAccess::type_mismatch_shown(app_) = true;
     ApplicationTestAccess::hardware_setup_prompt_shown(app_) = true;
@@ -327,7 +328,7 @@ TEST_CASE_METHOD(PrinterSwitchFixture,
 
     ApplicationTestAccess::reset_discovery_session(app_);
 
-    CHECK(ApplicationTestAccess::note_hardware_fingerprint(app_, SAME_HARDWARE));
+    CHECK(ApplicationTestAccess::note_hardware_fingerprint(app_, kSameHardware));
     CHECK_FALSE(ApplicationTestAccess::type_mismatch_shown(app_));
     CHECK_FALSE(ApplicationTestAccess::hardware_setup_prompt_shown(app_));
     CHECK_FALSE(ApplicationTestAccess::targeted_reconfig_shown(app_));
@@ -400,6 +401,8 @@ TEST_CASE_METHOD(PrinterSwitchFixture,
 
     const auto exceptions_before = helix::ui::UpdateQueueTestAccess::callback_exception_count();
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
+    CHECK(events_.empty());
+    lv_timer_handler();
 
     CHECK(helix::ui::UpdateQueueTestAccess::callback_exception_count() == exceptions_before);
     CHECK(events_ == std::vector<std::string>{"teardown", "rebuild", "home"});

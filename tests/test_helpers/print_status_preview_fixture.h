@@ -12,8 +12,9 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/delayed_file_transfers.h"
 #include "../test_helpers/print_status_panel_test_access.h"
-#include "../test_helpers/scoped_env.h"
+#include "../test_helpers/scoped_cache_dir.h"
 #include "../test_helpers/update_queue_test_access.h"
 #include "moonraker_api_mock.h"
 #include "moonraker_client_mock.h"
@@ -35,101 +36,20 @@ namespace print_status_preview_test {
 
 using namespace helix;
 
-/// File transfers that park every download until the test completes it by
-/// path, so two prints' downloads can land in either order.
-class HeldFileTransfers : public MoonrakerFileTransferAPIMock {
-  public:
-    using MoonrakerFileTransferAPIMock::MoonrakerFileTransferAPIMock;
-
-    void download_file_to_path(const std::string& root, const std::string& path,
-                               const std::string& dest_path, StringCallback on_success,
-                               ErrorCallback on_error, ProgressCallback on_progress) override {
-        (void)on_progress;
-        held_.push_back({path, [this, root, path, dest_path, on_success = std::move(on_success),
-                                on_error = std::move(on_error)]() {
-                             MoonrakerFileTransferAPIMock::download_file_to_path(
-                                 root, path, dest_path, on_success, on_error);
-                         }});
-    }
-
-    /// Complete the held download of @p path. False when none is held.
-    bool release(const std::string& path) {
-        for (auto it = held_.begin(); it != held_.end(); ++it) {
-            if (it->path == path) {
-                auto finish = std::move(it->finish);
-                held_.erase(it);
-                finish();
-                return true;
-            }
-        }
-        return false;
-    }
-
-    size_t held_count() const {
-        return held_.size();
-    }
-
-    /// A transport that writes no local copies, as on the ESP32.
-    bool local_copies = true;
-    bool supports_local_copies() const override {
-        return local_copies;
-    }
-
-  private:
-    struct Held {
-        std::string path;
-        std::function<void()> finish;
-    };
-    std::vector<Held> held_;
-};
-
-class HeldTransfersAPIMock : public MoonrakerAPIMock {
-  public:
-    HeldTransfersAPIMock(helix::MoonrakerClient& client, helix::PrinterState& state,
-                         HeldFileTransfers& transfers)
-        : MoonrakerAPIMock(client, state), transfers_(transfers) {}
-
-    MoonrakerFileTransferAPI& transfers() override {
-        return transfers_;
-    }
-
-  private:
-    HeldFileTransfers& transfers_;
-};
-
-/// A cache directory of this fixture's own. A copy left by an earlier load of
-/// the same file takes the panel's cached-file branch, which loads without any
-/// download and so never overlaps with anything.
-struct FreshCacheDir {
-    helix::ScopedEnv restore{"HELIX_CACHE_DIR"};
-    std::filesystem::path dir = std::filesystem::temp_directory_path() /
-                                ("print_status_preview_" + std::to_string(::getpid()));
-
-    FreshCacheDir() {
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
-        std::filesystem::create_directories(dir);
-        ::setenv("HELIX_CACHE_DIR", dir.c_str(), 1);
-    }
-
-    ~FreshCacheDir() {
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
-    }
-};
-
 class PrintStatusPreviewFixture : public LVGLTestFixture {
   public:
     PrintStatusPreviewFixture() : client_(MoonrakerClientMock::PrinterType::VORON_24) {
         // register_xml=false keeps these subjects out of the process-wide XML
         // registry, which outlives this fixture.
         state_.init_subjects(false);
-        api_ = std::make_unique<HeldTransfersAPIMock>(client_, state_, transfers_);
+        // Every download parks until the test completes it by path.
+        transfers_.hold_transfers = true;
+        api_ = std::make_unique<DelayedMoonrakerAPIMock>(client_, state_, transfers_);
         panel_ = std::make_unique<PrintStatusPanel>(state_, api_.get());
 
         // The streaming completion path sizes its 2D renderer from the widget's
         // coords, so the viewer gets a real size.
-        viewer_ = ui_gcode_viewer_create(test_screen());
+        viewer_ = helix::ui::gcode_viewer_create(test_screen());
         REQUIRE(viewer_ != nullptr);
         lv_obj_set_size(viewer_, 240, 240);
         lv_obj_update_layout(viewer_);
@@ -139,7 +59,7 @@ class PrintStatusPreviewFixture : public LVGLTestFixture {
     ~PrintStatusPreviewFixture() override {
         // The viewer's load callback points at the panel, so the viewer goes first.
         PrintStatusPanelTestAccess::set_gcode_viewer(*panel_, nullptr);
-        ui_gcode_viewer_clear(viewer_);
+        helix::ui::gcode_viewer_clear(viewer_);
         lv_obj_delete(viewer_);
         process_lvgl(50);
         panel_.reset();
@@ -227,10 +147,13 @@ class PrintStatusPreviewFixture : public LVGLTestFixture {
         helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
     }
 
-    FreshCacheDir cache_;
+    // A cache directory of this fixture's own. A copy left by an earlier load of
+    // the same file takes the panel's cached-file branch, which loads without any
+    // download and so never overlaps with anything.
+    helix::test::ScopedCacheDir cache_;
     MoonrakerClientMock client_;
     PrinterState state_;
-    HeldFileTransfers transfers_{client_, ""};
+    DelayedFileTransfers transfers_{client_, ""};
     std::unique_ptr<MoonrakerAPIMock> api_;
     std::unique_ptr<PrintStatusPanel> panel_;
     lv_obj_t* viewer_ = nullptr;

@@ -13,19 +13,16 @@
 #include "device_display_name.h"
 #include "favorite_macro_config.h"
 #include "favorite_macro_config_modal.h"
+#include "home_macro_run.h"
 #include "i_moonraker_api.h"
 #include "lvgl/src/others/translation/lv_translation.h"
-#include "macro_executor.h"
-#include "macro_param_cache.h"
-#include "macro_param_defaults.h"
 #include "panel_widget_config.h"
 #include "panel_widget_manager.h"
 #include "panel_widget_registry.h"
 #include "printer_state.h"
-#include "safety_settings_manager.h"
 #include "theme_manager.h"
+#include "tile_color.h"
 
-#include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 
 namespace helix {
@@ -48,70 +45,10 @@ void register_favorite_macro_widgets() {
                              FavoriteMacroConfigModal::tab_appearance_cb);
     lv_xml_register_event_cb(nullptr, "fav_macro_config_tab_options_cb",
                              FavoriteMacroConfigModal::tab_options_cb);
+    lv_xml_register_event_cb(nullptr, "fav_macro_config_color_cb",
+                             FavoriteMacroConfigModal::color_swatch_cb);
 }
 } // namespace helix
-
-namespace {
-
-// File-local helper: single shared MacroParamModal instance.
-// Using one instance avoids s_active_instance_ stomping when two widget slots
-// both try to open param modals (the old code had two separate static locals).
-helix::MacroParamModal& get_shared_param_modal() {
-    static helix::MacroParamModal modal;
-    return modal;
-}
-
-// Widget-independent state (api ptr + macro name + parent screen + the macro's
-// saved defaults) for the after-confirmation dispatch, so those paths never
-// touch the originating widget, which may be destroyed while a dialog is open.
-struct MacroExecCtx {
-    std::string macro_name;
-    IMoonrakerAPI* api;
-    lv_obj_t* parent_screen;
-    helix::MacroParamDefaultRecord defaults;
-};
-
-// After-confirmation dispatch: a free function so it can run from a dialog
-// callback without needing the widget instance to still exist. It is reached
-// after the dangerous-macro dialog, or from a click headed for the param modal,
-// so it never asks "Run X?": the per-widget setting and the Safety toggle do
-// not apply here, and the decision weighs parameters alone.
-void run_macro_after_confirm(MacroExecCtx ctx) {
-    auto cached = helix::MacroParamCache::instance().get(ctx.macro_name);
-
-    helix::MacroRunRequest req;
-    req.prompt_for_params = ctx.defaults.ask_for_params;
-    req.saved_values = ctx.defaults.values;
-
-    const helix::MacroRunDecision decision = helix::decide_macro_run(cached, req);
-
-    if (decision.action == helix::MacroRunAction::Run) {
-        helix::execute_macro_gcode(
-            ctx.api, ctx.macro_name,
-            helix::macro_param_result_from_values(cached.params, decision.params),
-            "[FavoriteMacroWidget]", get_printer_state().get_discovery());
-        return;
-    }
-    if (!ctx.parent_screen) {
-        return;
-    }
-
-    std::string name = ctx.macro_name;
-    IMoonrakerAPI* api = ctx.api;
-    auto on_result = [api, name](const helix::MacroParamResult& result) {
-        helix::execute_macro_gcode(api, name, result, "[FavoriteMacroWidget]",
-                                   get_printer_state().get_discovery());
-    };
-    if (decision.action == helix::MacroRunAction::Prompt) {
-        get_shared_param_modal().show_for_macro(ctx.parent_screen, ctx.macro_name, cached.params,
-                                                std::move(on_result), decision.params);
-    } else {
-        get_shared_param_modal().show_for_unknown_params(ctx.parent_screen, ctx.macro_name,
-                                                         std::move(on_result));
-    }
-}
-
-} // namespace
 
 using namespace helix;
 
@@ -217,6 +154,10 @@ IMoonrakerAPI* FavoriteMacroWidget::get_api() const {
 
 void FavoriteMacroWidget::update_display() {
     bool unconfigured = macro_name_.empty();
+    // A macro tile has no off state: configured is Active.
+    const tile_color::Paint paint =
+        tile_color::paint_for(icon_color_, unconfigured ? tile_color::TileState::Unconfigured
+                                                        : tile_color::TileState::Active);
 
     if (name_label_) {
         if (unconfigured) {
@@ -235,25 +176,19 @@ void FavoriteMacroWidget::update_display() {
             effective_icon = icon_name_.empty() ? "play" : icon_name_.c_str();
         helix::ui::icon::set_source(icon_label_, effective_icon);
 
-        // Apply custom color when configured, muted when unconfigured
-        if (icon_color_ != 0 && !unconfigured) {
+        if (paint == tile_color::Paint::Custom) {
             helix::ui::icon::set_color(icon_label_, lv_color_hex(icon_color_), LV_OPA_COVER);
-        } else if (unconfigured) {
-            helix::ui::icon::set_variant(icon_label_, "secondary");
         } else {
             helix::ui::icon::set_variant(icon_label_, "secondary");
         }
     }
 
-    // Badge background: muted when unconfigured, tinted when configured
     if (icon_badge_) {
-        if (unconfigured) {
-            lv_obj_set_style_bg_color(icon_badge_, theme_manager_get_color("secondary"), 0);
-        } else if (icon_color_ != 0) {
-            lv_obj_set_style_bg_color(icon_badge_, lv_color_hex(icon_color_), 0);
-        } else {
-            lv_obj_set_style_bg_color(icon_badge_, theme_manager_get_color("secondary"), 0);
-        }
+        lv_obj_set_style_bg_color(icon_badge_,
+                                  paint == tile_color::Paint::Custom
+                                      ? lv_color_hex(icon_color_)
+                                      : theme_manager_get_color("secondary"),
+                                  0);
     }
 }
 
@@ -267,92 +202,8 @@ void FavoriteMacroWidget::save_config() {
 }
 
 void FavoriteMacroWidget::fetch_and_execute() {
-    IMoonrakerAPI* api = get_api();
-    if (!api) {
-        spdlog::warn("[FavoriteMacroWidget] No API available");
-        return;
-    }
-
-    auto cached = MacroParamCache::instance().get(macro_name_);
-
-    // Saved defaults: with Require Confirmation? off the widget runs the macro
-    // outright, so it sends the saved values; with it on, ask must also be on
-    // for the param modal to appear.
-    const helix::MacroParamDefaultRecord defaults =
-        helix::MacroParamDefaults::instance().get(macro_name_);
-
-    helix::MacroRunRequest req;
-    req.dangerous = helix::is_dangerous_macro(macro_name_, get_printer_state().get_discovery());
-    req.prompt_for_params = require_confirmation_ && defaults.ask_for_params;
-    req.confirm_plain_run =
-        require_confirmation_ &&
-        helix::SafetySettingsManager::instance().get_macro_require_confirmation();
-    req.saved_values = defaults.values;
-
-    const helix::MacroRunDecision decision = helix::decide_macro_run(cached, req);
-    const helix::MacroRunAction action = decision.action;
-
-    // Dangerous macros always require a confirmation modal: the home-screen tile
-    // is one accidental tap away from EMERGENCY_STOP / FIRMWARE_RESTART (#925).
-    // The per-widget opt-out cannot disarm it.
-    if (action == helix::MacroRunAction::ConfirmDangerous) {
-        if (!parent_screen_) {
-            spdlog::warn("[FavoriteMacroWidget] No parent screen for dangerous-macro confirm");
-            return;
-        }
-        spdlog::warn("[FavoriteMacroWidget] Dangerous macro requested: {}", macro_name_);
-        std::string display = helix::get_display_name(macro_name_, helix::DeviceType::MACRO);
-        std::string msg =
-            fmt::format(lv_tr("{} may cause unintended changes. Are you sure?"), display);
-        // Copies, not `this`: the widget can be destroyed while the dialog is
-        // open, and none of the paths below may touch it.
-        helix::ui::ConfirmOptions opts;
-        opts.on_cancel = [macro_name = macro_name_] {
-            spdlog::debug("[FavoriteMacroWidget] Dangerous macro cancelled: {}", macro_name);
-        };
-        helix::ui::modal_confirm(
-            lv_tr("Run Dangerous Macro?"), msg.c_str(), ::ModalSeverity::Warning, lv_tr("Run"),
-            [macro_name = macro_name_, api, parent = parent_screen_, defaults] {
-                run_macro_after_confirm({macro_name, api, parent, defaults});
-            },
-            opts);
-        return;
-    }
-
-    // One tap runs the macro with no dialog: the per-widget
-    // "Require Confirmation?" opt-out, whose whole point is suppressing the
-    // Settings → Safety confirmation as well as the parameter-entry modal. A
-    // run-confirmation with no parent screen also lands here — a detached
-    // widget cannot hang a dialog, so the run proceeds unconfirmed. Either way
-    // the saved values go with it.
-    if (action == helix::MacroRunAction::Run ||
-        (action == helix::MacroRunAction::ConfirmRun && !parent_screen_)) {
-        helix::execute_macro_gcode(
-            api, macro_name_, helix::macro_param_result_from_values(cached.params, decision.params),
-            "[FavoriteMacroWidget]", get_printer_state().get_discovery());
-        return;
-    }
-
-    // Optional run-confirmation gate (Settings → Safety toggle, default on).
-    // Only applies when running without a param modal. Mirrors MacrosPanel logic.
-    if (action == helix::MacroRunAction::ConfirmRun) {
-        const helix::MacroParamResult params =
-            helix::macro_param_result_from_values(cached.params, decision.params);
-        std::string display = helix::get_display_name(macro_name_, helix::DeviceType::MACRO);
-        std::string msg = fmt::format(lv_tr("Run {}?"), display);
-        helix::ui::modal_confirm(lv_tr("Run Macro?"), msg.c_str(), ::ModalSeverity::Info,
-                                 lv_tr("Run"), [macro_name = macro_name_, api, params] {
-                                     helix::execute_macro_gcode(
-                                         api, macro_name, params, "[FavoriteMacroWidget]",
-                                         get_printer_state().get_discovery());
-                                 });
-        return;
-    }
-
-    // Has params, or params unknown — show the parameter-entry modal, which is
-    // itself the implicit confirmation step (macros registered via Klipper's
-    // register_command report UNKNOWN params and get the same treatment).
-    run_macro_after_confirm({macro_name_, api, parent_screen_, defaults});
+    run_home_macro(get_api(),
+                   {macro_name_, require_confirmation_, parent_screen_, "FavoriteMacroWidget"});
 }
 
 void FavoriteMacroWidget::clicked_cb(lv_event_t* e) {

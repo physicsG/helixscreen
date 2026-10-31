@@ -2,6 +2,7 @@
 
 #include "power_device_widget.h"
 
+#include "ui_callback_helpers.h"
 #include "ui_carousel.h"
 #include "ui_emergency_stop.h"
 #include "ui_error_reporting.h"
@@ -27,6 +28,7 @@
 #include "printer_state.h"
 #include "sensor_state.h"
 #include "theme_manager.h"
+#include "tile_color.h"
 #include "ui/ui_widget_helpers.h"
 
 #include <spdlog/spdlog.h>
@@ -41,13 +43,15 @@ void register_power_device_widget() {
     });
     lv_xml_register_event_cb(nullptr, "power_device_clicked_cb",
                              PowerDeviceWidget::power_device_clicked_cb);
+    lv_xml_register_event_cb(nullptr, "power_device_color_cb", PowerDeviceWidget::color_swatch_cb);
+    tile_color::register_subjects();
 }
 } // namespace helix
 
 namespace {
 
 // Power-related icons for the picker grid
-static const char* const POWER_ICONS[] = {
+static const char* const kPowerIcons[] = {
     // clang-format off
     // Power symbols
     "power_cycle",       "power",              "power_on",            "power_off",
@@ -63,8 +67,8 @@ static const char* const POWER_ICONS[] = {
     "radiator",          "flash",              "electric_switch",
     // clang-format on
 };
-static constexpr size_t POWER_ICON_COUNT = std::size(POWER_ICONS);
-static constexpr const char* DEFAULT_ICON = "power_cycle";
+static constexpr size_t kPowerIconCount = std::size(kPowerIcons);
+static constexpr const char* kDefaultIcon = "power_cycle";
 
 } // namespace
 
@@ -102,9 +106,10 @@ void PowerDeviceWidget::set_config(const nlohmann::json& config) {
     if (config.contains("sensor") && config["sensor"].is_string()) {
         sensor_id_ = config["sensor"].get<std::string>();
     }
-    spdlog::debug("[PowerDeviceWidget] Config: {}={} icon={}", instance_id_,
+    color_ = tile_color::color_from_config(config);
+    spdlog::debug("[PowerDeviceWidget] Config: {}={} icon={} color=0x{:06X}", instance_id_,
                   device_name_.empty() ? "(unconfigured)" : device_name_,
-                  icon_name_.empty() ? DEFAULT_ICON : icon_name_);
+                  icon_name_.empty() ? kDefaultIcon : icon_name_, color_);
     apply_status_presence();
 }
 
@@ -207,43 +212,14 @@ void PowerDeviceWidget::detach() {
 
 void PowerDeviceWidget::update_display(int status) {
     // Status values: 0=off, 1=on, 2=locked, -1=unconfigured
-
-    if (badge_obj_) {
-        switch (status) {
-        case 1: // ON
-            lv_obj_set_style_bg_color(badge_obj_, theme_manager_get_color("danger"), 0);
-            lv_obj_set_style_bg_opa(badge_obj_, 40, 0);
-            break;
-        case 0: // OFF
-        case 2: // LOCKED
-            lv_obj_set_style_bg_color(badge_obj_, theme_manager_get_color("text_muted"), 0);
-            lv_obj_set_style_bg_opa(badge_obj_, 20, 0);
-            break;
-        default: // Unconfigured
-            lv_obj_set_style_bg_color(badge_obj_, theme_manager_get_color("secondary"), 0);
-            lv_obj_set_style_bg_opa(badge_obj_, 20, 0);
-            break;
-        }
-    }
+    last_status_ = status;
+    apply_state_colors(status);
 
     if (icon_obj_) {
         // Apply icon — for paired icons, toggle between on/off variants
-        const char* base_icon = icon_name_.empty() ? DEFAULT_ICON : icon_name_.c_str();
+        const char* base_icon = icon_name_.empty() ? kDefaultIcon : icon_name_.c_str();
         const char* effective_icon = power_resolve_icon_for_state(base_icon, status);
         helix::ui::icon::set_source(icon_obj_, effective_icon);
-
-        switch (status) {
-        case 1:
-            helix::ui::icon::set_variant(icon_obj_, "danger");
-            break;
-        case 0:
-        case 2:
-            helix::ui::icon::set_variant(icon_obj_, "muted");
-            break;
-        default:
-            helix::ui::icon::set_variant(icon_obj_, "secondary");
-            break;
-        }
     }
 
     if (lock_icon_) {
@@ -258,15 +234,12 @@ void PowerDeviceWidget::update_display(int status) {
         switch (status) {
         case 1:
             lv_label_set_text(status_label_, lv_tr("ON"));
-            lv_obj_set_style_text_color(status_label_, theme_manager_get_color("danger"), 0);
             break;
         case 0:
             lv_label_set_text(status_label_, lv_tr("OFF"));
-            lv_obj_set_style_text_color(status_label_, theme_manager_get_color("text_muted"), 0);
             break;
         case 2:
             lv_label_set_text(status_label_, lv_tr("LOCKED"));
-            lv_obj_set_style_text_color(status_label_, theme_manager_get_color("text_muted"), 0);
             break;
         default:
             lv_label_set_text(status_label_, "");
@@ -277,6 +250,49 @@ void PowerDeviceWidget::update_display(int status) {
     if (name_label_ && status == -1) {
         // A tag, not lv_tr() text: the label then re-translates itself.
         lv_label_set_translation_tag(name_label_, "Configure");
+    }
+}
+
+void PowerDeviceWidget::apply_state_colors(int status) {
+    tile_color::TileState state = tile_color::TileState::Unconfigured;
+    if (status == 1) {
+        state = tile_color::TileState::Active;
+    } else if (status == 0) {
+        state = tile_color::TileState::Inactive;
+    } else if (status == 2) {
+        state = tile_color::TileState::Locked;
+    }
+    const tile_color::Paint paint = tile_color::paint_for(color_, state);
+
+    // The state colours: danger while on, muted while off or locked, secondary
+    // while unconfigured. A user colour replaces them on and off only.
+    const char* token = status == 1 ? "danger" : status == -1 ? "secondary" : "text_muted";
+    const char* variant = status == 1 ? "danger" : status == -1 ? "secondary" : "muted";
+    lv_color_t accent = theme_manager_get_color(token);
+    if (paint == tile_color::Paint::Custom) {
+        accent = lv_color_hex(color_);
+    } else if (paint == tile_color::Paint::CustomMuted) {
+        accent = tile_color::muted(lv_color_hex(color_), theme_manager_get_color("text_muted"));
+    }
+
+    if (badge_obj_) {
+        lv_obj_set_style_bg_color(badge_obj_, accent, 0);
+        lv_obj_set_style_bg_opa(badge_obj_, status == 1 ? 40 : 20, 0);
+    }
+
+    if (icon_obj_) {
+        if (paint == tile_color::Paint::Theme) {
+            helix::ui::icon::set_variant(icon_obj_, variant);
+        } else {
+            helix::ui::icon::set_color(icon_obj_, accent, LV_OPA_COVER);
+        }
+    }
+
+    // The state line keeps the muted face while off, so OFF still reads as off.
+    if (status_label_ && status != -1) {
+        lv_obj_set_style_text_color(
+            status_label_,
+            paint == tile_color::Paint::Custom ? accent : theme_manager_get_color(token), 0);
     }
 }
 
@@ -319,7 +335,7 @@ void PowerDeviceWidget::handle_clicked() {
         lv_subject_t* status_subj =
             PowerDeviceState::instance().get_status_subject(device_name_, lt);
         if (status_subj && lv_subject_get_int(status_subj) == 1) {
-            EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::NORMAL);
+            EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::NORMAL);
         }
     }
 
@@ -339,6 +355,16 @@ void PowerDeviceWidget::handle_clicked() {
             token.defer("PowerDeviceWidget::toggle_error",
                         [name]() { NOTIFY_ERROR("Failed to toggle {}", name); });
         });
+}
+
+void PowerDeviceWidget::color_swatch_cb(lv_event_t* e) {
+    LVGL_SAFE_EVENT_CB_BEGIN("[PowerDeviceWidget] color_swatch_cb");
+    const int index = helix::ui::event_user_int(e).value_or(-1);
+    auto* picker = helix::ui::ContextMenu::active_as<DevicePicker>();
+    if (picker && index >= 0 && index < static_cast<int>(tile_color::palette_size())) {
+        picker->owner().select_color(tile_color::palette_at(index));
+    }
+    LVGL_SAFE_EVENT_CB_END();
 }
 
 void PowerDeviceWidget::power_device_clicked_cb(lv_event_t* e) {
@@ -445,9 +471,10 @@ void PowerDeviceWidget::DevicePicker::on_created(lv_obj_t* backdrop) {
                 name == owner_.device_name_, pick_device);
     }
 
-    std::string effective_icon = owner_.icon_name_.empty() ? DEFAULT_ICON : owner_.icon_name_;
-    helix::ui::populate_icon_grid(icon_grid, POWER_ICONS, POWER_ICON_COUNT, effective_icon,
+    std::string effective_icon = owner_.icon_name_.empty() ? kDefaultIcon : owner_.icon_name_;
+    helix::ui::populate_icon_grid(icon_grid, kPowerIcons, kPowerIconCount, effective_icon,
                                   [this](const char* name) { owner_.select_icon(name); });
+    tile_color::publish_palette(owner_.color_);
 
     lv_obj_t* sensor_section =
         helix::ui::find_required(backdrop, "sensor_section", "PowerDeviceWidget");
@@ -464,7 +491,7 @@ void PowerDeviceWidget::DevicePicker::on_created(lv_obj_t* backdrop) {
         add_row(sensor_grid, "picker_chip", "chip_label", lv_tr("None"), "",
                 owner_.sensor_id_.empty(), pick_sensor);
         for (const auto& sid : energy_ids) {
-            auto* info = SensorState::instance().get_sensor_info(sid);
+            const auto info = SensorState::instance().get_sensor_info(sid);
             add_row(sensor_grid, "picker_chip", "chip_label", info ? info->friendly_name : sid, sid,
                     sid == owner_.sensor_id_, pick_sensor);
         }
@@ -482,7 +509,7 @@ void PowerDeviceWidget::DevicePicker::refresh_icon_highlights() {
         return;
     }
     helix::ui::refresh_icon_grid(icon_grid,
-                                 owner_.icon_name_.empty() ? DEFAULT_ICON : owner_.icon_name_);
+                                 owner_.icon_name_.empty() ? kDefaultIcon : owner_.icon_name_);
 }
 
 void PowerDeviceWidget::select_sensor(const std::string& sensor_id) {
@@ -551,12 +578,12 @@ void PowerDeviceWidget::select_device(const std::string& name) {
 void PowerDeviceWidget::select_icon(const std::string& name) {
     // Store the ON variant so update_display can derive the OFF icon from the pair table
     std::string canonical(power_icon_to_on_variant(name.c_str()));
-    icon_name_ = (canonical == DEFAULT_ICON) ? "" : canonical;
+    icon_name_ = (canonical == kDefaultIcon) ? "" : canonical;
     save_config();
 
     // Update the widget icon immediately
     if (icon_obj_) {
-        const char* effective = icon_name_.empty() ? DEFAULT_ICON : icon_name_.c_str();
+        const char* effective = icon_name_.empty() ? kDefaultIcon : icon_name_.c_str();
         helix::ui::icon::set_source(icon_obj_, effective);
     }
 
@@ -566,6 +593,14 @@ void PowerDeviceWidget::select_icon(const std::string& name) {
                  icon_name_.empty() ? "power_cycle (default)" : icon_name_);
 }
 
+void PowerDeviceWidget::select_color(uint32_t rgb) {
+    color_ = rgb;
+    save_config();
+    apply_state_colors(last_status_);
+    tile_color::publish_selection(color_);
+    spdlog::info("[PowerDeviceWidget] {} selected color: 0x{:06X}", instance_id_, color_);
+}
+
 void PowerDeviceWidget::save_config() {
     nlohmann::json config;
     config["device"] = device_name_;
@@ -573,9 +608,11 @@ void PowerDeviceWidget::save_config() {
         config["icon"] = icon_name_;
     if (!sensor_id_.empty())
         config["sensor"] = sensor_id_;
+    if (color_ != 0)
+        config["color"] = color_;
     save_widget_config(config);
     spdlog::debug("[PowerDeviceWidget] Saved config: {}={} icon={} sensor={}", instance_id_,
-                  device_name_, icon_name_.empty() ? DEFAULT_ICON : icon_name_,
+                  device_name_, icon_name_.empty() ? kDefaultIcon : icon_name_,
                   sensor_id_.empty() ? "(none)" : sensor_id_);
 }
 
@@ -634,7 +671,7 @@ void PowerDeviceWidget::handle_all_devices_toggle() {
 
     // Suppress recovery dialog when turning off (devices may have bound_services: klipper)
     if (!new_state) {
-        EmergencyStopOverlay::instance().suppress_recovery_dialog(RecoverySuppression::NORMAL);
+        EmergencyStopOverlay::instance().suppress_recovery_dialog(recovery_suppression::NORMAL);
     }
 
     spdlog::info("[PowerDeviceWidget] {} toggling all selected devices {}", instance_id_, action);
@@ -663,22 +700,13 @@ void PowerDeviceWidget::handle_all_devices_toggle() {
 
 void PowerDeviceWidget::update_all_devices_display(bool any_on) {
     all_power_on_ = any_on;
-
-    if (badge_obj_) {
-        if (any_on) {
-            lv_obj_set_style_bg_color(badge_obj_, theme_manager_get_color("danger"), 0);
-            lv_obj_set_style_bg_opa(badge_obj_, 40, 0);
-        } else {
-            lv_obj_set_style_bg_color(badge_obj_, theme_manager_get_color("text_muted"), 0);
-            lv_obj_set_style_bg_opa(badge_obj_, 20, 0);
-        }
-    }
+    last_status_ = any_on ? 1 : 0;
+    apply_state_colors(last_status_);
 
     if (icon_obj_) {
-        const char* base_icon = icon_name_.empty() ? DEFAULT_ICON : icon_name_.c_str();
+        const char* base_icon = icon_name_.empty() ? kDefaultIcon : icon_name_.c_str();
         const char* effective_icon = power_resolve_icon_for_state(base_icon, any_on ? 1 : 0);
         helix::ui::icon::set_source(icon_obj_, effective_icon);
-        helix::ui::icon::set_variant(icon_obj_, any_on ? "danger" : "muted");
     }
 
     if (lock_icon_) {
@@ -687,8 +715,6 @@ void PowerDeviceWidget::update_all_devices_display(bool any_on) {
 
     if (status_label_) {
         lv_label_set_text(status_label_, any_on ? lv_tr("ON") : lv_tr("OFF"));
-        lv_obj_set_style_text_color(status_label_,
-                                    theme_manager_get_color(any_on ? "danger" : "text_muted"), 0);
     }
 
     if (name_label_) {
@@ -710,7 +736,7 @@ void PowerDeviceWidget::setup_carousel() {
         return;
 
     // Verify sensor exists
-    auto* info = SensorState::instance().get_sensor_info(sensor_id_);
+    const auto info = SensorState::instance().get_sensor_info(sensor_id_);
     if (!info) {
         spdlog::debug("[PowerDeviceWidget] Sensor '{}' not found, skipping carousel", sensor_id_);
         return;

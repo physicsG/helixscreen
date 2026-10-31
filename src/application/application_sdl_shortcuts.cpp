@@ -21,7 +21,7 @@
 #include "runtime_config.h"
 #include "screenshot.h"
 #include "theme_manager.h"
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 #include "screensaver.h"
 #endif
 
@@ -140,7 +140,7 @@ void Application::handle_keyboard_shortcuts() {
             }
         });
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
         // Z key - cycle through screensavers (Off → Toasters → Starfield → Pipes → Off)
         shortcuts.register_key(SDL_SCANCODE_Z, []() {
             auto& mgr = ScreensaverManager::instance();

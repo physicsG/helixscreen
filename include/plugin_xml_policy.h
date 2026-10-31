@@ -26,9 +26,13 @@ namespace helix::plugin {
 ///  - `name` names an object owned by `id` (`check_plugin_xml` skips it on `prop`,
 ///    `style`, `remove_style*` and `bind_style*`, where it names no object);
 ///  - none of those attributes takes a `$prop` value, since a prop default cannot be
-///    checked against the attribute it feeds.
+///    checked against the attribute it feeds;
+///  - with `chrome_props` (the attribute is on the app's dialog chrome, which names its
+///    objects and button targets through props), a `*_name` prop follows the `name`
+///    rule and a `*_user_data` prop the `user_data` rule. On anything else those
+///    suffixes are ordinary props.
 std::optional<std::string> check_plugin_attr(std::string_view id, std::string_view name,
-                                             std::string_view value);
+                                             std::string_view value, bool chrome_props = false);
 
 /// Empty when `xml`, a component file of plugin `id`, references only what a plugin may;
 /// otherwise the first violation, as a sentence. `components` are the component names

@@ -20,6 +20,12 @@
       <text_body name="filename_label"
                  width="100%" bind_text="print_completion_filename" long_mode="dots" style_text_align="center"
                  style_text_color="#text"/>
+      <!-- Why a canceled or failed print ended; hidden when nothing says -->
+      <text_body name="stop_reason_label"
+                 width="100%" bind_text="print_stop_reason" long_mode="wrap" style_text_align="center"
+                 style_text_color="#text_muted">
+        <bind_flag_if_eq subject="print_stop_reason_visible" flag="hidden" ref_value="0"/>
+      </text_body>
       <!-- Stats grid container -->
       <lv_obj name="stats_grid"
               width="100%" height="content" style_pad_all="0" flex_flow="row" style_flex_main_place="center"

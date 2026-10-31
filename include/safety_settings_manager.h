@@ -18,6 +18,7 @@ namespace helix {
  * - cancel_escalation_timeout (dropdown index 0-3 -> 15/30/60/120s)
  * - macro_require_confirmation (0/1)
  * - allow_cold_extrude (0/1)
+ * - tool_change_require_confirmation (0/1)
  * - min_toast_severity (dropdown index 0=All / 1=Warnings & errors / 2=Errors only, #1213)
  *
  * Thread safety: Single-threaded, main LVGL thread only.
@@ -25,6 +26,9 @@ namespace helix {
 class SafetySettingsManager {
   public:
     static SafetySettingsManager& instance();
+
+    /// The static PersistedSetting table this manager is built from.
+    static settings::TableView persisted_table();
 
     // Non-copyable
     SafetySettingsManager(const SafetySettingsManager&) = delete;
@@ -76,6 +80,14 @@ class SafetySettingsManager {
         settings_.set(Key::AllowColdExtrude, allow);
     }
 
+    /** @brief Whether a tap that mounts another tool asks first */
+    bool get_tool_change_require_confirmation() const {
+        return settings_.get_bool(Key::ToolChangeConfirm);
+    }
+    void set_tool_change_require_confirmation(bool require) {
+        settings_.set(Key::ToolChangeConfirm, require);
+    }
+
     /** @brief Get the minimum toast severity index (0=All, 1=Warnings & errors, 2=Errors only) */
     int get_min_toast_severity() const;
 
@@ -112,6 +124,11 @@ class SafetySettingsManager {
         return settings_.subject(Key::AllowColdExtrude);
     }
 
+    /** @brief Tool-change confirmation subject (integer: 0=change immediately, 1=confirm) */
+    lv_subject_t* subject_tool_change_require_confirmation() {
+        return settings_.subject(Key::ToolChangeConfirm);
+    }
+
     /** @brief Minimum toast severity subject (integer: dropdown index 0/1/2, #1213) */
     lv_subject_t* subject_min_toast_severity() {
         return &min_toast_severity_subject_;
@@ -126,6 +143,7 @@ class SafetySettingsManager {
         CancelEscalation,
         MacroConfirm,
         AllowColdExtrude,
+        ToolChangeConfirm,
         COUNT
     };
 

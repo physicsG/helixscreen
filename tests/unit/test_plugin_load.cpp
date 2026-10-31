@@ -73,7 +73,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a loaded plugin registers its subject, compon
     CHECK(lv_xml_get_subject(nullptr, "wp__status") != nullptr);
     CHECK(lv_xml_component_find_scope("wp__panel") != nullptr);
     CHECK(helix::find_widget_def("wp__tile") != nullptr);
-    REQUIRE_FALSE(rig.fake.notify.empty());
+    REQUIRE_FALSE(rig.fake.status.empty());
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "unload removes every registration the plugin made",
@@ -90,7 +90,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "unload removes every registration the plugin 
     CHECK(nothing_registered("wp"));
     CHECK(helix::find_widget_def("wp__tile") == nullptr);
     CHECK(rig.host->runtime("wp") == nullptr);
-    CHECK(rig.fake.notify_unregistered == 1);
+    CHECK(rig.fake.status_unregistered == 1);
     CHECK(rig.fake.object_sets.back().second == json::object());
 }
 
@@ -109,7 +109,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a plugin reloads after it was unloaded", "[pl
 
     rig.host->load_from(tmp.path.string()); // a second full scan reloads cleanly too
     CHECK(rig.info("wp")->status == PluginStatus::Loaded);
-    CHECK(rig.fake.notify_unregistered == 2); // each of the two earlier loads unsubscribed
+    CHECK(rig.fake.status_unregistered == 2); // each of the two earlier loads unsubscribed
 }
 
 TEST_CASE_METHOD(LVGLTestFixture, "a Lua syntax error fails the load and leaves nothing behind",
@@ -138,7 +138,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "a runtime error in main.lua rolls back partia
     CHECK(rig.host->runtime("wp") == nullptr);
     CHECK(nothing_registered("wp"));
     CHECK(helix::find_widget_def("wp__tile") == nullptr);
-    CHECK(rig.fake.notify_unregistered == 1);
+    CHECK(rig.fake.status_unregistered == 1);
 
     // The failed load does not poison a retry once the plugin is fixed.
     write_plugin(tmp.path, "wp", kFullMain, kWidgetManifest);

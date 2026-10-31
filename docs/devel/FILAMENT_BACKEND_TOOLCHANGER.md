@@ -55,8 +55,17 @@ differs - the unmount, which a machine whose tools are plain extruders does not 
 | `status` | string | "ready", "changing", "error", "uninitialized", "initializing" |
 | `tool` | string | Current tool name ("T0") or null |
 | `tool_number` | int | Current tool number (-1 if none) |
-| `tool_numbers` | int[] | All tool numbers [0, 1, 2] |
-| `tool_names` | string[] | All tool names ["T0", "T1", "T2"] |
+| `tool_numbers` | int[] | All tool numbers, ascending [0, 1, 2] |
+| `tool_names` | string[] | Each tool's config section, in `tool_numbers` order ["tool T0", "tool T1", "tool T2"]. Discovery orders the slots by it (below) |
+
+**Tool order.** A slot's index is its Klipper tool number: slot `n` is labelled "T`n`" and selected by
+the name of its `[tool ...]` object, `SELECT_TOOL TOOL="tool <name>"`. The objects list names the tools but not their numbers, so discovery
+sorts them naturally (T2 before T10) and then, once the subscription's first status
+arrives, puts them in `toolchanger.tool_names` order
+(`PrinterDiscovery::order_tools_by_number`). `[tool Right]` numbered 0 therefore takes
+slot 0 ahead of `[tool Left]` numbered 1. Tools with no `tool_number` follow the numbered
+ones. Numbers with gaps (0, 1, 5) still map slot by position: slot 2 mounts the third tool,
+but is labelled `T2`.
 
 **Per-tool** (`tool T{n}`):
 
@@ -74,8 +83,9 @@ differs - the unmount, which a machine whose tools are plain extruders does not 
 
 | Command | Action |
 |---------|--------|
-| `SELECT_TOOL TOOL=T{n}` | Mount specified tool |
-| `UNSELECT_TOOL` | Unmount current tool (park it) |
+| `SELECT_TOOL TOOL="tool <name>"` | Mount the slot's physical tool (what a slot tap sends). `TOOL=` takes the full object name, quoted for its space. `SELECT_TOOL T=<n>` would look `n` up in the table `ASSIGN_TOOL` writes, so a remap left from a mapped print would mount another hot end |
+| `ASSIGN_TOOL TOOL="tool <name>" N=<n>` | Make G-code `T<n>` mount that physical tool (a remap). Keyed on the same full object name |
+| `UNSELECT_TOOL` | Park the current tool (`park_active_tool()`) |
 | `T{n}` | Tool change macro |
 
 ### Initialization states
@@ -109,13 +119,13 @@ non-settled states are easy to get wrong:
 | Feature | Supported | Editable |
 |---------|-----------|----------|
 | Endless Spool | `Unsupported` | No override; inherits the base default |
-| Tool Mapping | Yes | With klipper-toolchanger: `RemapStrategy::Native` - `set_tool_mapping()` emits `ASSIGN_TOOL TOOL=T{n} N={tool}`, so a G-code T-number can point at any physical tool. `parse_toolchanger_state()` resolves `tool_number` back through the forward map. Without it (`tool_commands_.present`, the machine swaps with its own `T<n>` commands): `RemapStrategy::GcodeRewrite` - the job file is rewritten before printing, which needs the HelixPrint plugin. See [the remapper](FILAMENT_MANAGEMENT.md#gcode-tool-remapper) for what that rewrite does and does not move |
+| Tool Mapping | Yes | With klipper-toolchanger: `RemapStrategy::Native` - `set_tool_mapping()` emits `ASSIGN_TOOL TOOL="tool T{n}" N={tool}`, so a G-code T-number can point at any physical tool. `parse_toolchanger_state()` resolves `tool_number` back through the forward map. Without it (`tool_commands_.present`, the machine swaps with its own `T<n>` commands): `RemapStrategy::GcodeRewrite` - the job file is rewritten before printing, which needs the HelixPrint plugin. See [the remapper](FILAMENT_MANAGEMENT.md#gcode-tool-remapper) for what that rewrite does and does not move |
 | Bypass Mode | No | Not applicable - each tool is its own path. [The force override](FILAMENT_MANAGEMENT.md#bypass-visibility-and-the-force-override) shows the external spool for tracking only |
 | Spoolman | Fields only | `spoolman_id`/`spoolman_vendor_id` persist in slot overrides; no toolchanger-specific Spoolman wiring exists in the backend |
 | Slot metadata | Yes | Persisted via `FilamentSlotOverrideStore` (`lane_data`, `T<n>` keys). The firmware supplies none of it, so the store is the sole source - see [FILAMENT_SLOT_METADATA.md](FILAMENT_SLOT_METADATA.md#tool-changer-is-the-odd-one-out) |
 | Auto-Heat on Load | No | -- |
 | Dryer | No | -- |
-| Device Actions | Machine-dependent | None by default. A tool changer with an add-on feeder exposes `open_feeder`/`close_feeder` - see [FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md) |
+| Device Actions | Machine-dependent | None by default. A tool changer with an add-on feeder exposes `open_feeder`/`close_feeder`, and one with a nozzle-clean command `clean_nozzle` - see [FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md) |
 | Operation step bar | Machine-dependent | Suppressed unless the machine reports phases. A plain klipper-toolchanger has only `toolchanger.status == "changing"`, which is not a sequence, so it renders no step bar rather than the legacy Heat/Feed/Purge one - nothing heats, feeds or purges when the whole hot end is swapped. A changer with an add-on phase source gets a real bar; see [FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md) § "The operation step bar" |
 
 ### Discovery Sequence
@@ -125,7 +135,9 @@ Tool names must be provided via `set_discovered_tools()` before calling `start()
 ---
 
 Hotend changers (MedusaHC) run on this backend with add-ons layered on top - see
-[FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md).
+[FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md). A MedusaHC swaps with its own
+`T<n>` / `DROP_TOOL` and maps tools by rewriting the file even where klipper-toolchanger
+runs beside its controller: klipper-toolchanger only mirrors the docks' tool there.
 
 ## Z-Mod on the Creator 5 Pro
 
@@ -269,6 +281,43 @@ edits stay local, as on any tool changer.
   needs both `HEX` and `TYPE` to write without a prompt, so a colour-only edit sends the
   slot's current type and a material-only edit sends its current (snapped) colour.
 
+### Filament feed and unload
+
+Z-Mod's own Load for a head is `CHANGE_TOOL LANE=E<n>`: with the afclite shim present
+(Z-Mod 1.7.4+, `zmod_afclite`) that command heats only the selected head and feeds it,
+verified on a Creator 5 Pro by a contributor (prestonbrown/helixscreen#1779). The Z-Mod
+row builds exactly that command through `toolchanger_addon::resolve_tool_feed()`, and
+`AmsBackendToolChanger::do_load_filament()` sends it. The shim runs `_T_IN_ZCOLOR` itself;
+HelixScreen never calls `_T_IN_ZCOLOR` directly, because its `SLOT` base and `NAPR`
+polarity are not confirmed for the C5 (the plugin is not published, and the AD5X source
+reads the opposite way).
+
+The head-to-lane relation is the **lane name**: head `n` is the shim's `AFC_lane E<n>`.
+Discovery does not read any field that ties a lane to a head (the `lanes[].map` word is
+logged only), so the name is the whole basis. A lane the shim did not publish yields no
+command and the Load is refused; a lane name is never constructed for an object the
+printer lacks.
+
+Without the shim (Z-Mod older than 1.7.4, or no `zmod_afclite` object) there is no feed:
+`head_filament_ops()` answers Load Manual, and Load refuses with that reason and sends
+nothing.
+
+With the feed present the backend answers capability questions the generic code asks:
+`head_filament_ops()` (Load Automatic for every head the shim published a lane for),
+`load_feeds_filament()` (Load is a feed, so a head that reads loaded still accepts it and
+the planner does not swap another in first) and `supports_auto_heat_on_load()` (the shim
+heats the right head, so the UI does not preheat, which would heat the active head).
+Mounting a tool is never a filament op: it is the toolhead tap and the sidebar's Mount,
+which send `_T_IN T=<n>` like every other tool change. Busy and printing refusals are
+unchanged.
+
+There is **no automatic unload** on the Creator 5: the user cuts the filament at the head
+and pulls it out. The row answers `AmsBackend::unload_is_manual()` true, so
+`head_filament_ops()` answers Unload Manual with that reason, and every UI control that
+means "take the filament out" disables or, through `notify_if_filament_op_unavailable()`,
+shows one info toast and sends nothing, heating included. **Park** (`park_active_tool()`)
+is a tool operation: it still sends `_T_OUT`.
+
 ### Mock
 
 `HELIX_MOCK_PRINTER=creator5_zmod` exercises this path against mock hardware: the persona
@@ -306,6 +355,38 @@ macro measures against, how it heats, or where the sensor is — all of that is 
 | Progress | the rpc's completion only: `printer.gcode.script` answers when the macro finishes. The rows fill in as the macro writes, since `ToolState` publishes every offset change, but no row says which tool is under the probe: `toolchanger.tool_number` says which tool is mounted, and the tool the macro measures the others against is mounted without being probed, so mounted and probed differ. Per-tool progress needs the macro to report it |
 | Save | the macro persists nothing; `SAVE_TOOL_PARAMETER` only stages. The panel's Save is the shared `save_dirty_offsets()` path (`src/ui/z_offset_utils.cpp`): re-send SET+SAVE for every dirty axis, then one `SAVE_CONFIG` through `SaveConfigWatch` |
 | Stop | the macro blocks Klipper's gcode queue, so Stop is M112 + `FIRMWARE_RESTART` with the disconnect suppressed as expected; the restart discards the offsets measured so far |
-| Timeout | the rpc ceiling is the panel's own `CALIBRATION_TIMEOUT_MS` (15 min; ~30 s to measure plus heating from cold, per tool, sequentially). Moonraker never times out `printer.gcode.script`, so an expiry while `idle_timeout` still reads Printing is a macro that is still running: the run completes on the busy→idle edge, with one more ceiling as the backstop - `PrintPreparationManager`'s rule for a pre-start macro that outlives its ceiling |
+| Timeout | the rpc ceiling is the panel's own `kCalibrationTimeoutMs` (15 min; ~30 s to measure plus heating from cold, per tool, sequentially). Moonraker never times out `printer.gcode.script`, so an expiry while `idle_timeout` still reads Printing is a macro that is still running: the run completes on the busy→idle edge, with one more ceiling as the backstop - `PrintPreparationManager`'s rule for a pre-start macro that outlives its ceiling |
 | Mock | `HELIX_MOCK_AMS=toolchanger` advertises the macro and simulates the run (see `docs/devel/MOCK_ENVIRONMENT_VARIABLES.md`) |
+
+### Which procedure the entry runs
+
+`tool_offset_calibration::resolve_procedure(hw)` is the one question
+(`include/tool_offset_calibration.h`). It walks a table in
+`src/printer/tool_offset_calibration.cpp`, first match wins, and returns
+`Procedure { kind, name, gcode, flow_id, entry_description }`:
+
+| Row | Detects | Kind | Runs |
+|-----|---------|------|------|
+| Snapmaker nozzle offset (builds with `HELIX_HAS_SNAPMAKER` only) | `snapmaker::nozzle_offset::supported` | `GuidedFlow` | the U1's guided flow |
+| INDX seat by hand | `indx::supports_seat_by_hand` | `GuidedFlow` | the seat-by-hand flow |
+| klipper-toolchanger | `has_tool_changer()` + `CALIBRATE_TOOL_OFFSETS` | `Panel` | the panel above |
+| Changer firmware prompt | a tool changer in any dialect (`has_tool_changer()` or `toolchanger_addon::present()`) + `CALIBRATE_EXTRUDERS` | `PrinterPrompt` | the macro alone |
+
+`supported(hw)` is `kind != None`; `printer_has_tool_offset_cal` and the Advanced row's
+description come from the same struct. `open_tool_offset_cal_panel()`
+(`src/ui/ui_panel_calibration_tool_offset.cpp#open_tool_offset_cal_panel`) switches on the
+kind: a guided flow starts, the panel shows, and a `PrinterPrompt` goes through
+`start_calibration_gcode()` (`src/printer/macro_executor.cpp#start_calibration_gcode`), which
+refuses while `machine_motion_blocked` is set and reports failure the way every macro send
+does.
+
+**The printer prompt.** Z-Mod on the Creator 5 ships `CALIBRATE_EXTRUDERS`, which only opens
+an action:prompt asking the user to remove the build plate; the prompt's OK runs
+`_T_CALIBRATE_EXTRUDERS` for all four heads. Its rpc answers before anything moves, so the
+panel cannot follow it: its completion and result rows would claim a finish that has not
+happened. HelixScreen sends the macro, `ActionPromptManager` renders the printer's prompt,
+and the firmware keeps its own measurements; no progress or rows are shown.
+
+Tests: `[tool_offset_cal]` in `tests/unit/test_tool_offset_calibration.cpp`, including one
+case that walks every row in precedence order. Adding a firmware is one row in that table.
 

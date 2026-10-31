@@ -4,6 +4,7 @@
 #include "ui_observer_guard.h"
 
 #include "async_lifetime_guard.h"
+#include "helix_shared_callback.h"
 #include "led/led_backend.h"
 #include "led/led_devices.h"
 #include "subject_managed_panel.h"
@@ -20,10 +21,10 @@
 
 #include "hv/json.hpp"
 
-class IMoonrakerAPI;
 namespace helix {
+class IMoonrakerAPI;
 class IMoonrakerClient;
-}
+} // namespace helix
 
 namespace helix {
 class PrinterDiscovery;
@@ -73,8 +74,8 @@ class NativeBackend {
     void update_pin_config(const nlohmann::json& config_section);
 
     // Control methods
-    using SuccessCallback = std::function<void()>;
-    using ErrorCallback = std::function<void(const std::string&)>;
+    using SuccessCallback = helix::SharedCallback<void()>;
+    using ErrorCallback = helix::SharedCallback<void(const std::string&)>;
 
     // `on_queued` is the third disposition IMoonrakerAPI::execute_gcode offers:
     // SET_LED is discretionary, so while an external blocking op holds Klipper's
@@ -106,7 +107,7 @@ class NativeBackend {
 
     /// Register/unregister a callback for strip color changes (called on main thread)
     using ColorChangeCallback =
-        std::function<void(const std::string& strip_id, const StripColor& color)>;
+        helix::SharedCallback<void(const std::string& strip_id, const StripColor& color)>;
     void set_color_change_callback(ColorChangeCallback cb) {
         color_change_cb_ = std::move(cb);
     }
@@ -231,7 +232,7 @@ class WledBackend {
     [[nodiscard]] bool has_strip_state(const std::string& strip_id) const;
 
     // Poll Moonraker for current WLED status and update strip_states_
-    void poll_status(std::function<void()> on_complete = nullptr);
+    void poll_status(helix::SharedCallback<void()> on_complete = nullptr);
 
   private:
     /// One wled_set_strip call; -1 leaves brightness or preset unchanged.
@@ -407,15 +408,15 @@ class LedController {
     /// Called on the main thread when a WLED discovery settles (see
     /// wled_discovery_pending()), so the app can re-run whatever waited for the
     /// full device set. Survives deinit().
-    void set_on_wled_settled(std::function<void()> cb) {
+    void set_on_wled_settled(helix::SharedCallback<void()> cb) {
         on_wled_settled_ = std::move(cb);
     }
 
     /// How long a WLED discovery may go unanswered before it counts as settled.
-    static constexpr uint32_t WLED_DISCOVERY_TIMEOUT_MS = 5000;
+    static constexpr uint32_t kWledDiscoveryTimeoutMs = 5000;
 
     /// True from discover_wled_strips() until that discovery settles: strips
-    /// arrive, none are configured, it fails, or WLED_DISCOVERY_TIMEOUT_MS passes.
+    /// arrive, none are configured, it fails, or kWledDiscoveryTimeoutMs passes.
     [[nodiscard]] bool wled_discovery_pending() const {
         return wled_discovery_pending_;
     }
@@ -478,7 +479,7 @@ class LedController {
 
     /// Poll WLED state over Moonraker, then bump led_state_version on the main
     /// thread and run @p on_done there.
-    void refresh_wled_state(std::function<void()> on_done = nullptr);
+    void refresh_wled_state(helix::SharedCallback<void()> on_done = nullptr);
 
     /// The backend that owns @p strip_id; nullopt for an id no backend owns, so
     /// nothing is ever sent to a device that is not there. A "macro:" id is always
@@ -596,7 +597,7 @@ class LedController {
     IMoonrakerAPI* api_ = nullptr;
     IMoonrakerClient* client_ = nullptr;
     helix::AsyncLifetimeGuard lifetime_;
-    std::function<void()> on_wled_settled_;
+    helix::SharedCallback<void()> on_wled_settled_;
     bool wled_discovery_pending_ = false;
     unsigned wled_discovery_gen_ = 0; ///< A late answer or timeout settles only its own discovery
     void settle_wled_discovery(unsigned gen);

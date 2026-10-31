@@ -95,8 +95,11 @@
           <text_tiny name="det_length_hint" text="mm before clog" style_text_color="#text_muted"/>
         </lv_obj>
 
-        <!-- Danger threshold -->
-        <lv_obj width="1" height="content" flex_grow="1" flex_flow="column" style_pad_gap="#space_xs">
+        <!-- Danger threshold. A motion sensor reports a state with no danger
+             band, so the threshold has nothing to move there. -->
+        <lv_obj name="threshold_section"
+                width="1" height="content" flex_grow="1" flex_flow="column" style_pad_gap="#space_xs">
+          <bind_flag_if_eq subject="clog_meter_mode" flag="hidden" ref_value="4"/>
           <lv_obj width="100%" height="content" flex_flow="row" style_flex_main_place="space_between">
             <text_small text="Danger Zone" style_text_color="#text_muted"/>
             <text_small name="threshold_label"

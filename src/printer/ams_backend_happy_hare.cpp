@@ -7,6 +7,7 @@
 #include "ui_update_queue.h"
 
 #include "ams_bypass_policy.h"
+#include "ams_device_action_value.h"
 #include "ams_fault_event.h"
 #include "ams_state.h"
 #include "config.h"
@@ -19,11 +20,12 @@
 #include "lane_legacy_migration.h"
 #include "lane_source_store.h"
 #include "lane_translation.h"
-#include "operation_patterns.h"    // helix::contains_ci
 #include "print_lifecycle_state.h" // job_holds_machine
-#include "printer_state.h"         // PrinterState: mid-print clear guard
+#include "printer_discovery.h"
+#include "printer_state.h" // PrinterState: mid-print clear guard
 #include "settings_manager.h"
 #include "text_io.h"
+#include "translation_loader.h" // TR_NOOP
 
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
@@ -41,8 +43,8 @@ namespace {
 /// The two printer.mmu filament_pos values Happy Hare's own check_if_loaded()
 /// treats as "not loaded" (mmu.py FILAMENT_POS_UNKNOWN / FILAMENT_POS_UNLOADED).
 /// Every other position, including the intermediate ones, is refused.
-constexpr int HAPPY_HARE_POS_UNKNOWN = -1;
-constexpr int HAPPY_HARE_POS_UNLOADED = 0;
+constexpr int kHappyHarePosUnknown = -1;
+constexpr int kHappyHarePosUnloaded = 0;
 
 /// HH's reasons carry raw newlines (it swaps them for ". " only in its own
 /// dialog); one-line UI text needs the same.
@@ -73,11 +75,94 @@ int unit_index_for_gate(const AmsSystemInfo& info, int gate) {
     return -1;
 }
 
+/// Happy Hare's espooler word ("rewind", "assist", "" for idle) as an action.
+SpoolMotorAction hh_spool_motor_action(const std::string& state) {
+    if (state.empty()) {
+        return SpoolMotorAction::None;
+    }
+    if (state == "rewind") {
+        return SpoolMotorAction::Rewinding;
+    }
+    if (state == "assist") {
+        return SpoolMotorAction::Assisting;
+    }
+    return SpoolMotorAction::Other;
+}
+
+/// Happy Hare's sync_feedback_state as the system buffer's motion: nullopt
+/// when sync feedback is absent or "disabled"; "compressed" advances,
+/// "tension" trails, anything else ("neutral") has no direction.
+std::optional<BufferMotion> hh_sync_feedback_motion(const std::string& state) {
+    if (state.empty() || state == "disabled") {
+        return std::nullopt;
+    }
+    if (state == "compressed") {
+        return BufferMotion::Advancing;
+    }
+    if (state == "tension") {
+        return BufferMotion::Trailing;
+    }
+    return BufferMotion::Unknown;
+}
 } // namespace
 
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
+
+nlohmann::json AmsBackendHappyHare::required_status_objects(const helix::PrinterDiscovery& hw) {
+    nlohmann::json objects = nlohmann::json::object();
+    if (hw.mmu_type() != AmsType::HAPPY_HARE) {
+        return objects;
+    }
+    // endless_spool_enabled is the ENABLE bit for endless_spool_groups. Happy Hare
+    // ignores a GROUPS= write while it is 0, so an edit sent without reading it first
+    // fails silently.
+    objects["mmu"] = nlohmann::json::array({"gate",
+                                            "tool",
+                                            "filament",
+                                            "action",
+                                            "reason_for_pause",
+                                            "filament_pos",
+                                            "gate_status",
+                                            "gate_color_rgb",
+                                            "gate_color",
+                                            "gate_material",
+                                            "gate_name",
+                                            "gate_vendor",
+                                            "gate_filament_name",
+                                            "gate_spool_id",
+                                            "gate_temperature",
+                                            "has_bypass",
+                                            "num_units",
+                                            "num_gates",
+                                            "unit_gate_counts",
+                                            "unit",
+                                            "ttg_map",
+                                            "endless_spool_groups",
+                                            "endless_spool_enabled",
+                                            "sensors",
+                                            "bowden_progress",
+                                            "clog_detection_enabled",
+                                            "encoder",
+                                            "flowguard",
+                                            "drying_state",
+                                            "sync_feedback_state",
+                                            "sync_feedback_bias_modelled",
+                                            "sync_feedback_bias_raw",
+                                            "sync_feedback_flow_rate",
+                                            "sync_drive",
+                                            "spoolman_support",
+                                            "pending_spool_id",
+                                            "espooler_active",
+                                            "espooler",
+                                            "tangle_prevention",
+                                            "num_toolchanges",
+                                            "slicer_tool_map",
+                                            "toolchange_purge_volume",
+                                            "leds"});
+    return objects;
+}
 
 AmsBackendHappyHare::AmsBackendHappyHare(IMoonrakerAPI* api, IMoonrakerClient* client)
     : AmsSubscriptionBackend(api, client) {
@@ -136,7 +221,7 @@ void AmsBackendHappyHare::on_started() {
     // subscription is already live. Publish under it so the parse path reads a
     // whole map.
     auto loaded = helix::ams::make_loaded_override_store(api_, "happyhare", get_type(),
-                                                         backend_log_tag(), OVERRIDE_NAMESPACE);
+                                                         backend_log_tag(), kOverrideNamespace);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         override_store_ = std::move(loaded.store);
@@ -173,14 +258,25 @@ AmsSystemInfo AmsBackendHappyHare::get_system_info() const {
 
     auto info = slots_.build_system_info(system_info_);
 
+    // drying_state is one entry per gate across every unit; a short list leaves the
+    // gates past its end Idle.
+    for (auto& unit : info.units) {
+        for (auto& slot : unit.slots) {
+            const int gate = unit.first_slot_global_index + slot.slot_index;
+            if (gate >= 0 && gate < static_cast<int>(gate_drying_states_.size())) {
+                slot.drying_state =
+                    helix::printer::zone_drying_state_from_firmware(gate_drying_states_[gate]);
+            }
+        }
+    }
+
     // Surface per-unit environment data (box heater temp + humidity) so the AMS
     // panel indicator (heat-waves icon, live temp) and the dryer overlay show a
     // reading. Each unit resolves its OWN heater + env sensor: a scalar shared
     // sensor/heater applies to every unit (QIDI Box, common case); a per-gate
     // (EMU) list maps each unit to the object at its first gate, so multi-MMU rigs
-    // with distinct box sensors read correctly. Per-gate *drying control*
-    // (start/stop/countdown) still uses the global dryer model — true per-gate
-    // drying is a separate gap (drying_state array; see apply_mmu_drying_locked).
+    // with distinct box sensors read correctly. Happy Hare keeps one setpoint and one
+    // end-of-cycle clock, so the countdown stays global even where gates dry one by one.
     // Environment is independent of dryer support: a passive enclosure has a sensor and
     // no heater, and a heater reports a temperature with no sensor configured. Each unit
     // below is skipped on its own when it has neither, so no outer gate is needed.
@@ -630,7 +726,7 @@ void AmsBackendHappyHare::apply_gate_appearance_locked(
                 gate_reading_locked(gate).color_rgb = color.rgb;
                 frame.stated_for(gate).color_rgb = color.rgb;
             } else if (color.kind == ams::ColorReadingKind::Cleared) {
-                entry->info.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+                entry->info.color_rgb = kAmsDefaultSlotColor;
                 gate_reading_locked(gate).color_rgb.reset();
                 frame.cleared_for(gate).color_rgb = 0u;
             }
@@ -841,9 +937,12 @@ void AmsBackendHappyHare::apply_mmu_telemetry_locked(const happy_hare::MmuTeleme
         espooler_active_ = system_info_.espooler_state;
         spdlog::trace("[AMS HappyHare] eSpooler state: {}", system_info_.espooler_state);
     }
+    system_info_.spool_motor = hh_spool_motor_action(system_info_.espooler_state);
 
     if (t.sync_feedback_state) {
         system_info_.sync_feedback_state = *t.sync_feedback_state;
+        system_info_.system_buffer_motion =
+            hh_sync_feedback_motion(system_info_.sync_feedback_state);
         spdlog::trace("[AMS HappyHare] Sync feedback: {}", system_info_.sync_feedback_state);
     }
 
@@ -1155,6 +1254,24 @@ void AmsBackendHappyHare::apply_mmu_drying_locked(const happy_hare::DryingDelta&
         }
         gate_drying_states_ = *drying.per_gate;
         dryer_info_.active = any_active;
+        // Once the gates HelixScreen selected have been seen drying, a frame with none of
+        // them queued or active is the cycle ending (complete or cancelled at the
+        // printer), and a later temperature change must not reach them.
+        if (!dry_gates_.empty()) {
+            const bool live = std::any_of(dry_gates_.begin(), dry_gates_.end(), [this](int g) {
+                const auto st = helix::printer::zone_drying_state_from_firmware(
+                    g >= 0 && g < static_cast<int>(gate_drying_states_.size())
+                        ? gate_drying_states_[static_cast<size_t>(g)]
+                        : std::string{});
+                return st == helix::printer::ZoneDryingState::Active ||
+                       st == helix::printer::ZoneDryingState::Queued;
+            });
+            if (live) {
+                dry_gates_seen_live_ = true;
+            } else if (dry_gates_seen_live_) {
+                forget_dry_gates_locked();
+            }
+        }
         spdlog::trace("[AMS HappyHare] Dryer state (array): active={}", any_active);
     }
 }
@@ -1401,7 +1518,7 @@ AmsBackendHappyHare::classify_error(const std::string& raw_line,
 
     const std::string detail = display_reason(reason);
     return helix::make_ams_fault_event(helix::ErrorSource::HAPPY_HARE,
-                                       helix::contains_ci(detail, "runout")
+                                       helix::text_io::contains_ignore_case(detail, "runout")
                                            ? lv_tr("Filament runout")
                                            : lv_tr("Filament System Error"),
                                        detail, recovery_actions_locked(ctx.is_paused));
@@ -1470,20 +1587,11 @@ void AmsBackendHappyHare::sync_narration_step() {
     if (!phase_id)
         return;
 
-    const auto op = AmsState::instance().get_active_step_operation();
-    const auto tmpl = toolchange_phase_template(op);
-    for (size_t k = 0; k < tmpl.size(); ++k) {
-        if (tmpl[k].id == phase_id) {
-            auto tok = lifetime_.token();
-            const int index = static_cast<int>(k);
-            std::string label = tmpl[k].label;
-            tok.defer("AmsBackendHappyHare::sync_narration_step",
-                      [index, label = std::move(label)]() {
-                          AmsState::instance().set_narration_phase(index, label);
-                      });
-            return;
-        }
-    }
+    // Resolved on the main thread, against the operation the step bar holds then.
+    auto tok = lifetime_.token();
+    tok.defer("AmsBackendHappyHare::sync_narration_step", [id = std::string(phase_id)]() {
+        AmsState::instance().apply_narration_phase_id(id);
+    });
 }
 
 const HappyHareGateSensor* AmsBackendHappyHare::gate_sensor(int slot_index) const {
@@ -1607,7 +1715,7 @@ void AmsBackendHappyHare::initialize_slots(int gate_count) {
             slot.global_index = global_offset + i;
             slot.status = SlotStatus::UNKNOWN;
             slot.mapped_tool = global_offset + i;
-            slot.color_rgb = AMS_DEFAULT_SLOT_COLOR;
+            slot.color_rgb = kAmsDefaultSlotColor;
             unit.slots.push_back(slot);
         }
 
@@ -1912,6 +2020,15 @@ void AmsBackendHappyHare::apply_heater_config(const nlohmann::json& settings,
         } else {
             spdlog::warn("[AMS HappyHare] Could not parse heater_max_temp");
         }
+    }
+
+    // heater_default_dry_humidity: v4's unit parameters only. Klipper reports the
+    // configured default too, so a v4 install always carries it.
+    if (const auto humidity = happy_hare::read_config_number(
+            happy_hare::find_config_param(settings, layout, "heater_default_dry_humidity"))) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        dryer_info_.default_humidity_target = *humidity;
+        spdlog::info("[AMS HappyHare] Default drying humidity target: {:.1f}%", *humidity);
     }
 }
 
@@ -2298,9 +2415,9 @@ AmsError AmsBackendHappyHare::dispatch_filament_op(std::string cmd) {
         std::move(cmd), nullptr,
         [this](const MoonrakerError& err) {
             spdlog::error("[AMS HappyHare] Filament operation failed: {}", err.message);
-            emit_event(EVENT_ERROR, err.message);
+            emit_event(kEventError, err.message);
         },
-        IMoonrakerAPI::AMS_OPERATION_TIMEOUT_MS, /*skip_homing=*/false, /*silent=*/true,
+        IMoonrakerAPI::kAmsOperationTimeoutMs, /*skip_homing=*/false, /*silent=*/true,
         // The callback above only logs, so Klipper's `!!` broadcast stays the
         // thing that shows the user why.
         /*caller_surfaces_errors=*/false);
@@ -2607,7 +2724,7 @@ void AmsBackendHappyHare::clear_slot_override(int slot_index) {
         helix::printer::SlotEntry* entry = slots_.get_mut(slot_index);
         clear_override_locked(slot_index, entry ? &entry->info : nullptr);
     }
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 }
 
 void AmsBackendHappyHare::publish_external_spool_lane(const SlotInfo* spool) {
@@ -2677,7 +2794,7 @@ AmsError AmsBackendHappyHare::apply_user_edit(int slot_index, const SlotInfo& in
     std::string old_material;
     std::string old_brand;
     bool v4 = false;
-    uint32_t old_color_rgb = AMS_DEFAULT_SLOT_COLOR;
+    uint32_t old_color_rgb = kAmsDefaultSlotColor;
     SpoolmanMode spoolman_mode = SpoolmanMode::OFF;
     int current_slot = -1;
     {
@@ -2749,7 +2866,7 @@ AmsError AmsBackendHappyHare::apply_user_edit(int slot_index, const SlotInfo& in
             spdlog::warn("[AMS HappyHare] Spoolman pull mode owns the gate map; gate {} "
                          "cleared locally only",
                          slot_index);
-            emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+            emit_event(kEventSlotChanged, std::to_string(slot_index));
             return pull_mode_refusal("Couldn't clear the printer's gate map",
                                      "This printer fills its gates from Spoolman. HelixScreen "
                                      "cleared its own copy; remove the spool in Spoolman.");
@@ -2763,7 +2880,7 @@ AmsError AmsBackendHappyHare::apply_user_edit(int slot_index, const SlotInfo& in
             spdlog::warn("[AMS HappyHare] Clear of gate {} reached us mid-print; firmware "
                          "write skipped",
                          slot_index);
-            emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+            emit_event(kEventSlotChanged, std::to_string(slot_index));
             AmsError skipped(AmsResult::COMMAND_FAILED,
                              "A running print is using this gate; firmware write skipped",
                              lv_tr("Couldn't clear the printer's gate map"),
@@ -2784,7 +2901,7 @@ AmsError AmsBackendHappyHare::apply_user_edit(int slot_index, const SlotInfo& in
             execute_gcode(fmt::format("MMU_TTG_MAP TOOL={} GATE={}", info.mapped_tool, slot_index));
         }
 
-        emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+        emit_event(kEventSlotChanged, std::to_string(slot_index));
         return AmsErrorHelper::success();
     }
 
@@ -2915,11 +3032,11 @@ AmsError AmsBackendHappyHare::apply_user_edit(int slot_index, const SlotInfo& in
     }
 
     // Emit OUTSIDE the lock to avoid deadlock with callbacks
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
 
     if (has_changes && pull_owns_gate_map) {
         return pull_mode_refusal("Couldn't save the printer's gate map",
-                                 "This printer fills its gates from Spoolman. Make colour, "
+                                 "This printer fills its gates from Spoolman. Make color, "
                                  "material and spool changes in Spoolman.");
     }
 
@@ -2956,7 +3073,7 @@ AmsError AmsBackendHappyHare::sync_external_identity(int slot_index, const SlotI
     }
 
     // Emit OUTSIDE the lock to avoid deadlock with callbacks
-    emit_event(EVENT_SLOT_CHANGED, std::to_string(slot_index));
+    emit_event(kEventSlotChanged, std::to_string(slot_index));
     return AmsErrorHelper::success();
 }
 
@@ -3053,7 +3170,7 @@ AmsError AmsBackendHappyHare::enable_bypass() {
         // that flag is set solely from filament == "Loaded" — Happy Hare refuses
         // at every position except UNLOADED and UNKNOWN, so an intermediate
         // position (mid-bowden, mid-unload) has to refuse here too.
-        if (filament_pos_ != HAPPY_HARE_POS_UNLOADED && filament_pos_ != HAPPY_HARE_POS_UNKNOWN) {
+        if (filament_pos_ != kHappyHarePosUnloaded && filament_pos_ != kHappyHarePosUnknown) {
             return AmsError(AmsResult::WRONG_STATE, "Unload filament first",
                             lv_tr("Filament is still loaded. Unload it before enabling bypass."),
                             "");
@@ -3133,7 +3250,16 @@ AmsBackendHappyHare::get_endless_spool_capabilities() const {
         return caps;
     }
     caps.editability = EndlessSpoolEditability::Group;
+    // ENABLE= goes through the same unit-less command, so the switch is offered
+    // where the groups are editable.
+    caps.switchable = true;
     return caps;
+}
+
+AmsError AmsBackendHappyHare::apply_endless_spool_enabled(bool enabled) {
+    // Happy Hare persists the choice itself (mmu_state_enable_endless_spool).
+    return send_endless_spool_switch(std::string("MMU_ENDLESS_SPOOL ENABLE=") +
+                                     (enabled ? "1" : "0") + " QUIET=1");
 }
 
 helix::printer::EndlessSpoolConfig AmsBackendHappyHare::get_endless_spool_config() const {
@@ -3166,8 +3292,8 @@ AmsError AmsBackendHappyHare::apply_endless_spool_backup(int slot_index, int bac
         if (!system_info_.endless_spool_enabled) {
             return AmsError(AmsResult::WRONG_STATE,
                             "MMU_ENDLESS_SPOOL ignores GROUPS while endless spool is disabled",
-                            lv_tr("Endless spool is turned off on this MMU"),
-                            lv_tr("Turn endless spool on, then set the backup gate"));
+                            lv_tr("Endless Spool is turned off on this MMU"),
+                            lv_tr("Turn Endless Spool on, then set the Backup Gate"));
         }
 
         const int n = slots_.slot_count();
@@ -3272,10 +3398,54 @@ std::vector<int> AmsBackendHappyHare::get_tool_mapping() const {
 // Dryer Control (v4 - KMS/EMU hardware)
 // ============================================================================
 
-DryerInfo AmsBackendHappyHare::get_dryer_info(int unit) const {
-    (void)unit; // single-unit
-    std::lock_guard<std::mutex> lock(mutex_);
+bool AmsBackendHappyHare::unit_has_per_gate_heaters_locked(int unit) const {
+    auto per_gate = [](const std::vector<std::string>& heaters) {
+        return std::any_of(heaters.begin(), heaters.end(),
+                           [](const std::string& h) { return !h.empty(); });
+    };
+    if (machine_units_.empty()) {
+        return filament_heater_name_.empty() && per_gate(filament_heaters_);
+    }
+    for (int u = 0; u < static_cast<int>(machine_units_.size()); ++u) {
+        if ((unit < 0 || u == unit) && per_gate(machine_units_[u].filament_heaters)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AmsBackendHappyHare::unit_turns_spools_locked(int unit) const {
+    // printer.mmu.espooler fills a unit with no eSpooler with '' for each of its gates.
+    for (size_t g = 0; g < espooler_per_gate_.size(); ++g) {
+        if (espooler_per_gate_[g].empty()) {
+            continue;
+        }
+        if (unit < 0 || unit_index_for_gate(system_info_, static_cast<int>(g)) == unit) {
+            return true;
+        }
+    }
+    return false;
+}
+
+DryerInfo AmsBackendHappyHare::dryer_capabilities_locked(int unit) const {
     DryerInfo out = dryer_info_;
+    // MMU_HEATER takes HUMIDITY= from Happy Hare 4 on.
+    out.supports_humidity_target = out.supported && is_v4_locked();
+    if (!out.supports_humidity_target) {
+        out.default_humidity_target.reset();
+    }
+    // GATES= picks what heats only where every gate has its own heater; on a shared
+    // enclosure the one heater warms them all whatever the list says. ROTATE=1 needs
+    // that explicit list and an eSpooler to turn the spools.
+    out.supports_gate_selection =
+        out.supported && is_v4_locked() && unit_has_per_gate_heaters_locked(unit);
+    out.supports_rotation = out.supports_gate_selection && unit_turns_spools_locked(unit);
+    return out;
+}
+
+DryerInfo AmsBackendHappyHare::get_dryer_info(int unit) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DryerInfo out = dryer_capabilities_locked(unit);
     if (dry_end_epoch_ > 0) {
         const int remaining = static_cast<int>((dry_end_epoch_ - now_fn_()) / 60);
         out.remaining_min = remaining > 0 ? remaining : 0;
@@ -3320,11 +3490,10 @@ AmsBackendHappyHare::get_environment_zones(int unit) const {
     // and the dryer behind its heater. target_temp_c, duration_min and remaining_min
     // stay global: Happy Hare tracks one setpoint and one end-of-cycle clock, not one
     // per box, so a per-zone value for those would be invented rather than reported.
-    const DryerInfo dryer = get_dryer_info(0);
     for (auto& z : zones) {
         z.unit_index = unit_index_for_gate(info, z.gates.empty() ? -1 : z.gates.front());
         if (!z.heater_name.empty()) {
-            z.dryer = dryer;
+            z.dryer = get_dryer_info(z.unit_index);
             z.dryer.supported = true;
             z.dryer.active = z.state == helix::printer::ZoneDryingState::Active;
             if (auto it = heater_temps.find(z.heater_name); it != heater_temps.end()) {
@@ -3490,9 +3659,42 @@ std::vector<std::string> AmsBackendHappyHare::heater_targets_for_unit(int unit) 
     return targets;
 }
 
+std::vector<std::string>
+AmsBackendHappyHare::heater_targets_for_gates_locked(const std::vector<int>& gates) const {
+    std::map<int, std::vector<int>> by_unit;
+    for (int gate : gates) {
+        const int unit = unit_index_for_gate(system_info_, gate);
+        if (unit < 0) {
+            spdlog::warn("[AMS HappyHare] Gate {} is on no unit, left out of MMU_HEATER", gate);
+            continue;
+        }
+        auto& list = by_unit[unit];
+        if (std::find(list.begin(), list.end(), gate) == list.end()) {
+            list.push_back(gate);
+        }
+    }
+    std::vector<std::string> targets;
+    for (auto& [unit, list] : by_unit) {
+        std::sort(list.begin(), list.end());
+        std::string csv;
+        for (int gate : list) {
+            if (!csv.empty()) {
+                csv += ',';
+            }
+            csv += std::to_string(gate);
+        }
+        targets.push_back(unit_suffix_locked(unit) + " GATES=" + csv);
+    }
+    return targets;
+}
+
 AmsError AmsBackendHappyHare::send_heater_command(const std::string& command, int unit) {
+    return send_heater_command(command, heater_targets_for_unit(unit));
+}
+
+AmsError AmsBackendHappyHare::send_heater_command(const std::string& command,
+                                                  const std::vector<std::string>& targets) {
     AmsError result = AmsErrorHelper::not_supported("No unit with a heater");
-    const auto targets = heater_targets_for_unit(unit);
     for (size_t i = 0; i < targets.size(); ++i) {
         result = execute_gcode(command + targets[i]);
         if (!result.success()) {
@@ -3511,6 +3713,83 @@ AmsError AmsBackendHappyHare::send_heater_command(const std::string& command, in
 
 AmsError AmsBackendHappyHare::start_drying(float temp_c, int duration_min, int fan_pct, int unit) {
     (void)fan_pct; // Happy Hare MMU_HEATER does not accept a FAN parameter
+    return start_drying_cycle(temp_c, duration_min, std::nullopt, unit);
+}
+
+AmsError AmsBackendHappyHare::start_drying_to_humidity(float temp_c, int duration_min,
+                                                       float humidity_pct, int fan_pct, int unit) {
+    (void)fan_pct; // Happy Hare MMU_HEATER does not accept a FAN parameter
+    std::optional<float> target;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target = dryer_capabilities_locked(unit).humidity_target(humidity_pct);
+    }
+    if (!target) {
+        return AmsErrorHelper::not_supported("Dryer humidity target");
+    }
+    return start_drying_cycle(temp_c, duration_min, target, unit);
+}
+
+AmsError AmsBackendHappyHare::start_drying_request(const DryingRequest& request) {
+    if (request.gates.empty() && !request.rotate) {
+        return AmsBackend::start_drying_request(request);
+    }
+
+    std::vector<int> selected;
+    std::optional<float> humidity;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const DryerInfo caps = dryer_capabilities_locked(request.unit);
+        if (!caps.supports_gate_selection) {
+            return AmsErrorHelper::not_supported("Drying selected gates");
+        }
+        if (request.rotate && !caps.supports_rotation) {
+            return AmsErrorHelper::not_supported("Rotating spools while drying");
+        }
+        if (request.humidity_pct) {
+            humidity = caps.humidity_target(*request.humidity_pct);
+        }
+        // ROTATE=1 is refused without an explicit GATES list, so a rotation with no
+        // selection names every gate on the unit.
+        std::vector<int> gates = request.gates;
+        if (gates.empty()) {
+            for (const AmsUnit& u : system_info_.units) {
+                if (u.unit_index == request.unit) {
+                    for (int i = 0; i < u.slot_count; ++i) {
+                        gates.push_back(u.first_slot_global_index + i);
+                    }
+                }
+            }
+        }
+        // Gates on no unit cannot be named in a command; keep the rest, in order.
+        for (int gate : gates) {
+            if (unit_index_for_gate(system_info_, gate) >= 0 &&
+                std::find(selected.begin(), selected.end(), gate) == selected.end()) {
+                selected.push_back(gate);
+            } else if (unit_index_for_gate(system_info_, gate) < 0) {
+                spdlog::warn("[AMS HappyHare] Gate {} is on no unit, left out of MMU_HEATER", gate);
+            }
+        }
+        std::sort(selected.begin(), selected.end());
+    }
+    if (selected.empty()) {
+        return AmsError{AmsResult::WRONG_STATE, "None of the selected gates exist",
+                        "No gate to dry", "Select a gate on this unit."};
+    }
+    (void)request.fan_pct; // Happy Hare MMU_HEATER does not accept a FAN parameter
+    return start_drying_cycle(request.temp_c, request.duration_min, humidity, request.unit,
+                              std::move(selected), request.rotate);
+}
+
+void AmsBackendHappyHare::forget_dry_gates_locked() {
+    dry_gates_.clear();
+    dry_rotate_ = false;
+    dry_gates_seen_live_ = false;
+}
+
+AmsError AmsBackendHappyHare::start_drying_cycle(float temp_c, int duration_min,
+                                                 std::optional<float> humidity_pct, int unit,
+                                                 std::vector<int> gates, bool rotate) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!dryer_info_.supported) {
@@ -3519,20 +3798,43 @@ AmsError AmsBackendHappyHare::start_drying(float temp_c, int duration_min, int f
     }
 
     // Happy Hare uses TIMER= (minutes) not DURATION=, and has no FAN parameter.
-    // send_heater_command() names the unit and its gates; it locks internally,
-    // so it is called with no lock held.
-    const std::string cmd =
-        fmt::format("MMU_HEATER DRY=1 TEMP={:.0f} TIMER={}", temp_c, duration_min);
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        dryer_info_.duration_min = duration_min;
-        dry_end_epoch_ = now_fn_() + static_cast<std::time_t>(duration_min) * 60;
+    // HUMIDITY= ends the cycle early once the box reads at or below it; TIMER still
+    // bounds it. Left out, Happy Hare applies its own heater_default_dry_humidity.
+    std::string cmd = fmt::format("MMU_HEATER DRY=1 TEMP={:.0f} TIMER={}", temp_c, duration_min);
+    if (humidity_pct) {
+        cmd += fmt::format(" HUMIDITY={:.0f}", *humidity_pct);
+    }
+    const bool gate_selection = !gates.empty();
+    if (gate_selection && rotate) {
+        cmd += " ROTATE=1";
     }
 
-    spdlog::info("[AMS HappyHare] Starting dryer: {:.0f}°C for {} min (unit {})", temp_c,
-                 duration_min, unit);
-    return send_heater_command(cmd, unit);
+    // heater_targets_for_unit() locks internally, so it is called with no lock held.
+    std::vector<std::string> targets;
+    if (!gate_selection) {
+        targets = heater_targets_for_unit(unit);
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (gate_selection) {
+            targets = heater_targets_for_gates_locked(gates);
+        }
+        dryer_info_.duration_min = duration_min;
+        dry_end_epoch_ = now_fn_() + static_cast<std::time_t>(duration_min) * 60;
+        dry_humidity_target_ = humidity_pct;
+        forget_dry_gates_locked();
+        if (gate_selection) {
+            dry_gates_ = std::move(gates);
+            dry_rotate_ = rotate;
+        }
+    }
+
+    spdlog::info(
+        "[AMS HappyHare] Starting dryer: {:.0f}°C for {} min, humidity target {} (unit {}{})",
+        temp_c, duration_min,
+        humidity_pct ? fmt::format("{:.0f}%", *humidity_pct) : std::string("none"), unit,
+        gate_selection ? ", selected gates" : "");
+    return send_heater_command(cmd, targets);
 }
 
 AmsError AmsBackendHappyHare::stop_drying(int unit) {
@@ -3542,6 +3844,8 @@ AmsError AmsBackendHappyHare::stop_drying(int unit) {
             return AmsErrorHelper::not_supported("Dryer not available on this hardware");
         }
         dry_end_epoch_ = 0;
+        dry_humidity_target_.reset();
+        forget_dry_gates_locked();
         dryer_info_.active = false;
         dryer_info_.remaining_min = 0;
         dryer_info_.duration_min = 0;
@@ -3549,6 +3853,43 @@ AmsError AmsBackendHappyHare::stop_drying(int unit) {
 
     spdlog::info("[AMS HappyHare] Stopping dryer (unit {})", unit);
     return send_heater_command("MMU_HEATER STOP=1", unit);
+}
+
+AmsError AmsBackendHappyHare::stop_drying_gates(int unit, const std::vector<int>& gates) {
+    if (gates.empty()) {
+        return stop_drying(unit);
+    }
+    std::vector<std::string> targets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!dryer_capabilities_locked(unit).supports_gate_selection) {
+            return AmsErrorHelper::not_supported("Drying selected gates");
+        }
+        targets = heater_targets_for_gates_locked(gates);
+        // A stopped gate leaves the selection, or a later temperature change, which is raw
+        // heater control in Happy Hare, would heat it again outside any cycle.
+        if (!targets.empty() && !dry_gates_.empty()) {
+            dry_gates_.erase(std::remove_if(dry_gates_.begin(), dry_gates_.end(),
+                                            [&gates](int g) {
+                                                return std::find(gates.begin(), gates.end(), g) !=
+                                                       gates.end();
+                                            }),
+                             dry_gates_.end());
+            if (dry_gates_.empty()) {
+                dry_end_epoch_ = 0;
+                dry_humidity_target_.reset();
+                forget_dry_gates_locked();
+            }
+        }
+    }
+    if (targets.empty()) {
+        return AmsError{AmsResult::WRONG_STATE, "None of the selected gates exist",
+                        "No gate to stop", "Select a gate on this unit."};
+    }
+    // The rest of the cycle keeps running, so its clock and targets stay as they are;
+    // the next status frame says which gates are still drying.
+    spdlog::info("[AMS HappyHare] Stopping dryer on selected gates (unit {})", unit);
+    return send_heater_command("MMU_HEATER STOP=1", targets);
 }
 
 AmsError AmsBackendHappyHare::update_drying(float temp_c, int duration_min, int fan_pct, int unit) {
@@ -3562,21 +3903,42 @@ AmsError AmsBackendHappyHare::update_drying(float temp_c, int duration_min, int 
 
     // TIMER is read only on the DRY=1 path and DRY=1 mid-cycle is refused, so moving the
     // clock means a fresh cycle. Carry the running target when only the duration changed.
+    // The restarted cycle keeps the running one's humidity target.
     if (want_duration) {
+        // A gate-selected cycle restarts on the same gates, rotating as it was.
         float target = temp_c;
-        if (!want_temp) {
+        std::optional<float> humidity;
+        std::vector<int> gates;
+        bool rotate = false;
+        {
             std::lock_guard<std::mutex> lock(mutex_);
-            target = dryer_info_.target_temp_c;
+            if (!want_temp) {
+                target = dryer_info_.target_temp_c;
+            }
+            humidity = dry_humidity_target_;
+            gates = dry_gates_;
+            rotate = dry_rotate_;
         }
         auto stopped = stop_drying(unit);
         if (!stopped.success()) {
             return stopped;
         }
-        return start_drying(target, duration_min, fan_pct, unit);
+        return start_drying_cycle(target, duration_min, humidity, unit, std::move(gates), rotate);
     }
 
-    // Temperature alone re-sends the setpoint and leaves the cycle and its timer alone.
-    return send_heater_command(fmt::format("MMU_HEATER TEMP={:.0f}", temp_c), unit);
+    // Temperature alone re-sends the setpoint and leaves the cycle and its timer alone. On
+    // per-gate heaters a TEMP= names the heaters it turns on, so it goes only to the
+    // gates drying.
+    std::vector<std::string> gate_targets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!dry_gates_.empty()) {
+            gate_targets = heater_targets_for_gates_locked(dry_gates_);
+        }
+    }
+    const std::string cmd = fmt::format("MMU_HEATER TEMP={:.0f}", temp_c);
+    return gate_targets.empty() ? send_heater_command(cmd, unit)
+                                : send_heater_command(cmd, gate_targets);
 }
 
 // ============================================================================
@@ -3620,20 +3982,25 @@ std::vector<helix::printer::DeviceAction> AmsBackendHappyHare::get_device_action
         for (auto& a : actions) {
             if (a.id == "spoolman_refresh") {
                 a.enabled = false;
-                a.disable_reason = "Spoolman support is off in Happy Hare";
+                a.disable_reason = TR_NOOP("Spoolman support is off in Happy Hare");
             }
         }
     }
 
-    // If config hasn't loaded yet, disable all non-button actions
-    if (!config_defaults_.loaded) {
+    // Settings whose value comes from the configfile (and is written back with
+    // MMU_TEST_CONFIG) wait for it to load; live commands do not.
+    const bool config_loaded = config_defaults_.loaded;
+    auto config_backed = [](const DeviceAction& a) {
+        return a.type == ActionType::SLIDER || a.id == "sync_to_extruder" ||
+               a.id == "clog_detection";
+    };
+    if (!config_loaded) {
         for (auto& a : actions) {
-            if (a.type != ActionType::BUTTON) {
+            if (config_backed(a)) {
                 a.enabled = false;
-                a.disable_reason = "Loading configuration...";
+                a.disable_reason = TR_NOOP("Loading configuration...");
             }
         }
-        return actions;
     }
 
     // Helper: effective float value (user override > config default)
@@ -3644,6 +4011,11 @@ std::vector<helix::printer::DeviceAction> AmsBackendHappyHare::get_device_action
 
     // Overlay effective values onto actions
     for (auto& a : actions) {
+        // Clog detection's value is the encoder mode the mmu status reports,
+        // which needs no config; only its write waits.
+        if (!config_loaded && config_backed(a) && a.id != "clog_detection") {
+            continue;
+        }
         // --- Speed sliders ---
         if (a.id == "gear_from_buffer_speed") {
             a.current_value = eff_f(user_overrides_.gear_from_buffer_speed,
@@ -3720,87 +4092,37 @@ std::vector<helix::printer::DeviceAction> AmsBackendHappyHare::get_device_action
             a.enabled = false;
             switch (*feature) {
             case happy_hare::UnitFeature::Servo:
-                a.disable_reason = "No unit has a servo";
+                a.disable_reason = TR_NOOP("No unit has a servo");
                 break;
             case happy_hare::UnitFeature::SelectorSpeed:
-                a.disable_reason = "No unit has a moving selector";
+                a.disable_reason = TR_NOOP("No unit has a moving selector");
                 break;
             case happy_hare::UnitFeature::Encoder:
-                a.disable_reason = "No unit has an encoder";
+                a.disable_reason = TR_NOOP("No unit has an encoder");
                 break;
             case happy_hare::UnitFeature::SyncToExtruder:
-                a.disable_reason = "Every unit keeps its filament gripped";
+                a.disable_reason = TR_NOOP("Every unit keeps its filament gripped");
                 break;
             case happy_hare::UnitFeature::FilamentBuffer:
-                a.disable_reason = "No unit has a filament buffer";
+                a.disable_reason = TR_NOOP("No unit has a filament buffer");
                 break;
             }
         } else if ((a.id == "toolhead_sensor_to_nozzle" || a.id == "toolhead_entry_to_extruder") &&
                    !test_config_unit_locked(a.id)) {
             a.enabled = false;
-            a.disable_reason = "No sensor fitted for this distance";
+            a.disable_reason = TR_NOOP("No sensor fitted for this distance");
         }
     }
 
     return actions;
 }
 
-AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id,
-                                                    const std::any& value) {
+AmsError AmsBackendHappyHare::do_execute_device_action(const std::string& action_id,
+                                                       const std::any& value) {
     spdlog::info("[AMS HappyHare] Executing device action: {}", action_id);
 
-    // Helper to extract a typed value from std::any with uniform error handling
-    auto require_string = [&](const char* label) -> std::pair<std::string, AmsError> {
-        if (!value.has_value()) {
-            return {"", AmsError(AmsResult::WRONG_STATE, fmt::format("{} value required", label),
-                                 lv_tr("Missing value"), fmt::format(lv_tr("Select a {}"), label))};
-        }
-        if (const auto* s = std::any_cast<std::string>(&value)) {
-            return {*s, AmsErrorHelper::success()};
-        }
-        return {"", AmsError(AmsResult::WRONG_STATE, fmt::format("Invalid {} type", label),
-                             lv_tr("Invalid value type"),
-                             fmt::format(lv_tr("Select a valid {}"), label))};
-    };
-
-    // Helper to look up an action's min/max range from defaults
-    auto get_action_range = [](const std::string& id) -> std::pair<float, float> {
-        static auto defaults = helix::printer::hh_default_actions();
-        for (const auto& a : defaults) {
-            if (a.id == id)
-                return {a.min_value, a.max_value};
-        }
-        return {-1e6f, 1e6f};
-    };
-
-    // Helper to extract double from std::any (UI sends doubles)
-    auto require_double = [&](const char* label) -> std::pair<double, AmsError> {
-        if (!value.has_value()) {
-            return {0.0,
-                    AmsError(AmsResult::WRONG_STATE, fmt::format("{} value required", label),
-                             lv_tr("Missing value"), fmt::format(lv_tr("Provide a {}"), label))};
-        }
-        if (const auto* d = std::any_cast<double>(&value)) {
-            return {*d, AmsErrorHelper::success()};
-        }
-        return {0.0, AmsError(AmsResult::WRONG_STATE, fmt::format("Invalid {} type", label),
-                              lv_tr("Invalid value type"),
-                              fmt::format(lv_tr("Provide a numeric {}"), label))};
-    };
-
-    // Helper to extract bool from std::any
-    auto require_bool = [&](const char* label) -> std::pair<bool, AmsError> {
-        if (!value.has_value()) {
-            return {false,
-                    AmsError(AmsResult::WRONG_STATE, fmt::format("{} value required", label),
-                             lv_tr("Missing value"), fmt::format(lv_tr("Provide {}"), label))};
-        }
-        if (const auto* b = std::any_cast<bool>(&value)) {
-            return {*b, AmsErrorHelper::success()};
-        }
-        return {false, AmsError(AmsResult::WRONG_STATE, fmt::format("Invalid {} type", label),
-                                lv_tr("Invalid value type"),
-                                fmt::format(lv_tr("Provide a boolean {}"), label))};
+    const auto get_action_range = [](const std::string& id) {
+        return helix::printer::hh_default_action_range(id);
     };
 
     // --- Simple button actions (no value required) ---
@@ -3859,11 +4181,12 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
 
     // Extruder-only moves drive the toolhead extruder, and HH puts no print
     // check on MMU_LOAD/MMU_UNLOAD; an EXTRUDER_ONLY unload forms a tip and
-    // retracts over the part. HH heats the nozzle itself.
+    // retracts over the part, so both are moves_machine and the base refuses
+    // them during a print. HH heats the nozzle itself.
     if (action_id == "load_extruder" || action_id == "unload_extruder") {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            AmsError precondition = check_preconditions(/*requires_toolhead_motion=*/true);
+            AmsError precondition = check_preconditions();
             if (!precondition) {
                 return precondition;
             }
@@ -3882,7 +4205,7 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
 
     // --- LED mode dropdown ---
     if (action_id == "led_mode") {
-        auto [mode, err] = require_string("LED mode");
+        auto [mode, err] = printer::device_action_value<std::string>(value, "LED mode");
         if (!err)
             return err;
         return execute_gcode("MMU_LED EXIT_EFFECT=" + mode);
@@ -3915,7 +4238,7 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
     // clang-format on
     for (const auto& [id, key] : speed_params) {
         if (action_id == id) {
-            auto [speed, err] = require_double("speed");
+            auto [speed, err] = printer::device_action_value<double>(value, "speed");
             if (!err)
                 return err;
             auto [lo, hi] = get_action_range(id);
@@ -3937,7 +4260,7 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
     };
     for (const char* key : toolhead_params) {
         if (action_id == key) {
-            auto [dist, err] = require_double("distance");
+            auto [dist, err] = printer::device_action_value<double>(value, "distance");
             if (!err)
                 return err;
             auto [lo, hi] = get_action_range(key);
@@ -3952,7 +4275,7 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
 
     // --- sync_to_extruder toggle ---
     if (action_id == "sync_to_extruder") {
-        auto [enable, err] = require_bool("sync state");
+        auto [enable, err] = printer::device_action_value<bool>(value, "sync state");
         if (!err)
             return err;
         int val = enable ? 1 : 0;
@@ -3965,7 +4288,7 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
 
     // --- eSpooler mode dropdown ---
     if (action_id == "espooler_mode") {
-        auto [mode, err] = require_string("eSpooler mode");
+        auto [mode, err] = printer::device_action_value<std::string>(value, "eSpooler mode");
         if (!err)
             return err;
         return execute_gcode("MMU_ESPOOLER OPERATION=" + mode);
@@ -3973,7 +4296,8 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
 
     // --- Clog detection dropdown ---
     if (action_id == "clog_detection") {
-        auto [mode_str, err] = require_string("clog detection mode");
+        auto [mode_str, err] =
+            printer::device_action_value<std::string>(value, "clog detection mode");
         if (!err)
             return err;
         int mode_int = 0;
@@ -3990,7 +4314,7 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
 
     // --- Runtime gear-motor sync (live action, distinct from config sync_to_extruder) ---
     if (action_id == "gear_sync") {
-        auto [enable, err] = require_bool("gear sync state");
+        auto [enable, err] = printer::device_action_value<bool>(value, "gear sync state");
         if (!err)
             return err;
         return execute_gcode(enable ? "MMU_SYNC_GEAR_MOTOR SYNC=1" : "MMU_SYNC_GEAR_MOTOR SYNC=0");
@@ -3998,7 +4322,7 @@ AmsError AmsBackendHappyHare::execute_device_action(const std::string& action_id
 
     // --- Motors toggle ---
     if (action_id == "motors_toggle") {
-        auto [enable, err] = require_bool("motor state");
+        auto [enable, err] = printer::device_action_value<bool>(value, "motor state");
         if (!err)
             return err;
         std::string cmd = enable ? "MMU_MOTORS_ON" : "MMU_MOTORS_OFF";

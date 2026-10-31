@@ -8,6 +8,8 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix::label;
+using helix::LabelBitmap;
+using helix::LabelSize;
 
 // ============================================================================
 // Frame building

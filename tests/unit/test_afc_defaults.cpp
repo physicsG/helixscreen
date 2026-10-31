@@ -17,7 +17,7 @@ using namespace helix::printer;
 
 TEST_CASE("AFC default sections count", "[defaults][afc]") {
     auto sections = afc_default_sections();
-    REQUIRE(sections.size() == 7);
+    REQUIRE(sections.size() == 8);
 }
 
 TEST_CASE("AFC default sections have required fields", "[defaults][afc]") {
@@ -55,6 +55,7 @@ TEST_CASE("AFC default sections contain known IDs", "[defaults][afc]") {
     REQUIRE(ids.count("tip_forming") == 1);
     REQUIRE(ids.count("purge") == 1);
     REQUIRE(ids.count("toolhead") == 1);
+    REQUIRE(ids.count("print_prefs") == 1);
 }
 
 TEST_CASE("AFC default sections have unique IDs", "[defaults][afc]") {
@@ -71,7 +72,7 @@ TEST_CASE("AFC default sections have unique IDs", "[defaults][afc]") {
 
 TEST_CASE("AFC default actions count", "[defaults][afc]") {
     auto actions = afc_default_actions();
-    REQUIRE(actions.size() == 26);
+    REQUIRE(actions.size() == 27);
 }
 
 TEST_CASE("AFC default actions have required fields", "[defaults][afc]") {
@@ -119,6 +120,7 @@ TEST_CASE("AFC default actions contain known IDs", "[defaults][afc]") {
     REQUIRE(ids.count("tool_stn") == 1);
     REQUIRE(ids.count("tool_stn_unload") == 1);
     REQUIRE(ids.count("tool_sensor_after_extruder") == 1);
+    REQUIRE(ids.count("unload_at_end") == 1);
 }
 
 TEST_CASE("AFC default actions have unique IDs", "[defaults][afc]") {

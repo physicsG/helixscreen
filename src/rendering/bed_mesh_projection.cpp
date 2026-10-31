@@ -36,9 +36,9 @@ bed_mesh_point_3d_t bed_mesh_projection_project_3d_to_2d(double x, double y, dou
     final_z = view->camera_distance - final_z;
 
     // Safety: Ensure we never divide by zero or negative (object behind camera)
-    constexpr double MIN_CAMERA_Z = 1.0;
-    if (final_z < MIN_CAMERA_Z) {
-        final_z = MIN_CAMERA_Z;
+    constexpr double kMinCameraZ = 1.0;
+    if (final_z < kMinCameraZ) {
+        final_z = kMinCameraZ;
     }
 
     // Step 4: Perspective projection (similar triangles), then the two-finger magnify

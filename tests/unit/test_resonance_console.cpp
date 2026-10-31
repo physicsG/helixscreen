@@ -49,3 +49,72 @@ TEST_CASE("sweep percent follows the configured range", "[resonance_console]") {
     CHECK(sweep_percent(0.0f, cfg) == 0);
     CHECK(sweep_percent(500.0f, cfg) == 100);
 }
+
+TEST_CASE("resonance_tester config reads the first probe point", "[resonance_console][settle]") {
+    const auto parse = [](const char* text) {
+        return parse_resonance_tester_config(nlohmann::json::parse(text));
+    };
+
+    SECTION("configfile's nested array") {
+        auto cfg = parse(R"({"resonance_tester": {"probe_points": [[175.0, 175.0, 20.0]]}})");
+        REQUIRE(cfg.probe_point.has_value());
+        CHECK((*cfg.probe_point)[0] == Catch::Approx(175.0f));
+        CHECK((*cfg.probe_point)[1] == Catch::Approx(175.0f));
+        CHECK((*cfg.probe_point)[2] == Catch::Approx(20.0f));
+    }
+    SECTION("a string, first line only") {
+        auto cfg = parse(R"({"resonance_tester": {"probe_points": "175, 175, 20\n10, 10, 5"}})");
+        REQUIRE(cfg.probe_point.has_value());
+        CHECK((*cfg.probe_point)[0] == Catch::Approx(175.0f));
+        CHECK((*cfg.probe_point)[1] == Catch::Approx(175.0f));
+        CHECK((*cfg.probe_point)[2] == Catch::Approx(20.0f));
+    }
+    SECTION("two coordinates are not a point, and keep the range") {
+        auto cfg = parse(R"({"resonance_tester": {"probe_points": [[1, 2]], "max_freq": 100}})");
+        CHECK_FALSE(cfg.probe_point.has_value());
+        CHECK(cfg.from_printer);
+        CHECK(cfg.max_freq == Catch::Approx(100.0f));
+    }
+    SECTION("an unparseable string") {
+        auto cfg = parse(R"({"resonance_tester": {"probe_points": "abc"}})");
+        CHECK_FALSE(cfg.probe_point.has_value());
+        CHECK(cfg.from_printer);
+    }
+    SECTION("absent") {
+        auto cfg = parse(R"({"resonance_tester": {"min_freq": 5}})");
+        CHECK_FALSE(cfg.probe_point.has_value());
+        CHECK(cfg.from_printer);
+    }
+}
+
+TEST_CASE("resonance_tester config reads the accelerometer chips",
+          "[resonance_console][sweep_preview]") {
+    const auto parse = [](const char* text) {
+        return parse_resonance_tester_config(nlohmann::json::parse(text));
+    };
+
+    auto one = parse(R"({"resonance_tester": {"accel_chip": "adxl345"}})");
+    CHECK(one.accel_chip == "adxl345");
+    CHECK(one.accel_chip_x.empty());
+    CHECK(one.accel_chip_y.empty());
+
+    auto split = parse(
+        R"({"resonance_tester": {"accel_chip_x": " adxl345 hotend ", "accel_chip_y": "lis2dw bed"}})");
+    CHECK(split.accel_chip.empty());
+    CHECK(split.accel_chip_x == "adxl345 hotend");
+    CHECK(split.accel_chip_y == "lis2dw bed");
+
+    auto number = parse(R"({"resonance_tester": {"accel_chip": 7}})");
+    CHECK(number.from_printer);
+    CHECK(number.accel_chip.empty());
+
+    auto none = parse_resonance_tester_config(nlohmann::json::object());
+    CHECK(none.accel_chip.empty());
+    CHECK(none.accel_chip_x.empty());
+    CHECK(none.accel_chip_y.empty());
+
+    auto malformed =
+        parse(R"({"resonance_tester": {"min_freq": "fast", "accel_chip": "adxl345"}})");
+    CHECK_FALSE(malformed.from_printer);
+    CHECK(malformed.accel_chip.empty());
+}

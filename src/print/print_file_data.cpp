@@ -24,6 +24,7 @@ PrintFileData PrintFileData::from_moonraker_file(const FileInfo& file,
     data.is_dir = file.is_dir;
     data.file_size_bytes = file.size;
     data.modified_timestamp = static_cast<time_t>(file.modified);
+    data.modified = file.modified;
     data.thumbnail_path = default_thumbnail;
     data.print_time_minutes = 0;
     data.filament_grams = 0.0f;
@@ -51,6 +52,7 @@ PrintFileData PrintFileData::from_usb_file(const UsbGcodeFile& file,
     data.is_dir = false;
     data.file_size_bytes = file.size_bytes;
     data.modified_timestamp = static_cast<time_t>(file.modified_time);
+    data.modified = static_cast<double>(file.modified_time);
     data.thumbnail_path = default_thumbnail;
 
     // USB files don't have Moonraker metadata

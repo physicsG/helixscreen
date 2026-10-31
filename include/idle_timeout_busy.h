@@ -21,7 +21,7 @@ namespace helix {
  * Duration is the discriminator: the operations the guard exists for (G28,
  * QGL, BED_MESH_CALIBRATE, PROBE_ACCURACY, manual probe, long macros) hold the
  * flag for many seconds, housekeeping bursts for well under one. Requiring the
- * flag to hold for SETTLE before it blocks costs a window at the very start of
+ * flag to hold for kSettle before it blocks costs a window at the very start of
  * a real operation, where a jog can still slip through and get queued behind
  * it — bounded, and narrower than the false-refusal rate it removes.
  *
@@ -39,14 +39,14 @@ class IdleTimeoutBusy {
     using clock = std::chrono::steady_clock;
 
     /// How long idle_timeout must report "Printing" before it counts as blocking.
-    static constexpr std::chrono::milliseconds SETTLE{1000};
+    static constexpr std::chrono::milliseconds kSettle{1000};
 
     /**
      * @brief Report the current idle_timeout "Printing" state.
      *
      * Repeats are idempotent: only a false->true edge (re)starts the settle
      * window. Restarting it on every repeated report would let a printer that
-     * re-sends status faster than SETTLE never reach the blocking state, which
+     * re-sends status faster than kSettle never reach the blocking state, which
      * is a hole in the guard rather than a debounce.
      */
     void set_printing(bool printing, clock::time_point now = clock::now()) {
@@ -56,9 +56,9 @@ class IdleTimeoutBusy {
         printing_ = printing;
     }
 
-    /// True once "Printing" has held continuously for at least SETTLE.
+    /// True once "Printing" has held continuously for at least kSettle.
     [[nodiscard]] bool blocking(clock::time_point now = clock::now()) const {
-        return printing_ && (now - printing_since_) >= SETTLE;
+        return printing_ && (now - printing_since_) >= kSettle;
     }
 
     /// When the current "Printing" episode began; meaningful while printing.

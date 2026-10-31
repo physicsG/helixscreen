@@ -49,7 +49,7 @@ flowchart TD
 
 ## How it works
 
-Five catalogues: the ledger and its ratchet, the duplication debt, the open correctness residue, the structural debt tracked as issues, and the deliberate tolerations. Then the first projects that pay the debt down.
+Six catalogues: the ledger and its ratchet, the duplication debt, the open correctness residue, the vendor names left in generic code, the structural debt tracked as issues, and the deliberate tolerations. Then the first projects that pay the debt down.
 
 ### The imperative-UI ledger and the ratchet
 
@@ -60,7 +60,7 @@ Five catalogues: the ledger and its ratchet, the duplication debt, the open corr
   style          59   → XML style attribute (style_bg_color="#card_bg") or bind_style
   text           83   → bind_text="subject" on the XML element
   visibility    136   → <bind_flag_if_eq subject=... flag="hidden"> or <if cond=...>
-  TOTAL         319
+  kTotal         319
 ```
 
 (verbatim from `python3 scripts/check_imperative_ui.py --summary`; regenerate any number in this section with `--list`). The count is enforced as a ratchet: [`scripts/qc/decl_ui.sh#qc_decl_ui`](../../../scripts/qc/decl_ui.sh) runs the gate with `--max-allowed` set to the baseline, so a change that adds a site past it fails the commit, and a port lowers both the count and the baseline. The baseline can sit a few sites above the live count after ports land; lowering it to the count is a one-line change. The porting epic is prestonbrown/helixscreen#1140.
@@ -162,6 +162,18 @@ One accepted limit is documented in the code rather than here: `request_resync()
 backend's `overrides_` map, which is harmless only while no backend that answers
 `firmware_publishes_lane_identity()` false reads `overrides_` to decide something
 (`include/ams_subscription_backend.h#firmware_publishes_lane_identity`, #1629).
+
+### Vendor names left in generic code
+
+The vendor rule (chapter 06, [`.claude/rules/vendor-abstraction.md`](../../../.claude/rules/vendor-abstraction.md)) is ratcheted like the ledger: [`scripts/check_vendor_branches.py`](../../../scripts/check_vendor_branches.py) counts `HELIX_PLATFORM_<vendor>` conditionals, non-`NONE` `AmsType` compares and board probes in `src/` and `include/`, and [`scripts/vendor_branch_baseline.txt`](../../../scripts/vendor_branch_baseline.txt) holds the per-file counts, which may fall and never rise (`--list` prints every site, `--write-baseline` records a lower one). What remains, and what the gate does not see:
+
+- **`src/printer/printer_discovery_parse.cpp`, four `AmsType` branches.** All in `parse_objects()` (`src/printer/printer_discovery_parse.cpp#parse_objects`): the QIDI Box slot count, and the three yield rules that hand the printer back from an AFC or ACE stand-in (multiACE or PAXX AFC-Lite beside a U1's `filament_detect`, Z-Mod's AFC shim on the Creator 5 changer). Discovery is where detection lives, so these are the closest thing to a border; the debt is that each rule names two systems at once.
+- **`src/system/telemetry_manager.cpp`, three `AmsType` cases.** `build_session_event()` (`src/system/telemetry_manager.cpp#build_session_event`) turns three types into feature strings by hand (`mmu_happy_hare`, `mmu_afc`, `tool_changer`) and gives every other system none. Those strings are a published schema beside the type's `telemetry_slug` in `kAmsTypeTraits`, so moving them into the table must keep them byte-for-byte.
+- **Not counted by the gate:**
+  - The detection policy setting is stored as `detection_policy_u1` (`detection/policy_u1`, `src/system/settings_manager.cpp`), a vendor-named persisted key read by the U1 row of `src/printer/detection_source_table.cpp`.
+  - The U1 defect-code helpers (`kU1DefectExceptionId`, `kind_from_u1_code()`, `kind_from_u1_exception()`) live in the shared [`include/detection_source.h`](../../../include/detection_source.h) rather than beside `U1StockSource`.
+  - `BOX_ERROR_CLEAR` is spelled twice: `kResetBoxAction` in `src/printer/klipper_error_table.cpp` and the CFS backend's `reset_gcode()` in `src/printer/ams_backend_cfs.cpp`.
+- **QIDI Box gaps, not leaks:** no external-spool load with a box attached, and nothing watches `multi_color_controller.operation.is_waiting_user`, so a box operation that stops for the user waits for another client to answer it. Both need a box to verify; [`../FILAMENT_BACKEND_QIDI_BOX.md`](../FILAMENT_BACKEND_QIDI_BOX.md) § "Follow-up Work".
 
 ### Structural debt tracked as issues
 

@@ -29,6 +29,7 @@
 #include "ui_update_queue.h"
 
 #include "../lvgl_test_fixture.h"
+#include "../test_helpers/filament_sensor_manager_test_access.h"
 #include "../test_helpers/post_unload_grace_test_access.h"
 #include "../test_helpers/print_status_panel_test_access.h"
 #include "../test_helpers/print_status_preview_fixture.h"
@@ -59,60 +60,60 @@ using print_status_preview_test::PrintStatusPreviewFixture;
 namespace {
 
 /// Carries scheduled pauses, so its load publishes a non-empty list.
-constexpr const char* PRINT_A = "pause_markers_demo.gcode";
+constexpr const char* kPrintA = "pause_markers_demo.gcode";
 /// Carries none.
-constexpr const char* PRINT_B = "xyz-10mm-calibration-cube.gcode";
+constexpr const char* kPrintB = "xyz-10mm-calibration-cube.gcode";
 
 } // namespace
 
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a gcode load for the current print shows its pause markers",
                  "[print_status][pause_markers][1509][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
-    land(PRINT_A);
+    report_print(kPrintA);
+    start_fetch(kPrintA);
+    land(kPrintA);
 
     REQUIRE_FALSE(state_.print_state().get_scheduled_pauses().empty());
     CHECK(state_.print_state().pause_markers_match_current_file());
-    CHECK(gcode_displayed_file() == PRINT_A);
+    CHECK(gcode_displayed_file() == kPrintA);
 }
 
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a superseded print's gcode load cannot mark the new print",
                  "[print_status][pause_markers][1509][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
+    report_print(kPrintA);
+    start_fetch(kPrintA);
 
     // A is cancelled and B started while A's download is still running.
-    report_print(PRINT_B);
-    start_fetch(PRINT_B);
+    report_print(kPrintB);
+    start_fetch(kPrintB);
 
     SECTION("A lands while B is still downloading") {
-        land_dropped(PRINT_A);
+        land_dropped(kPrintA);
 
         // A's load never reached the viewer: neither print has anything
         // displayed yet, its scan was never published, and the widget itself
         // holds no geometry - not just the panel's own bookkeeping.
         CHECK(state_.print_state().get_scheduled_pauses().empty());
         CHECK(gcode_displayed_file().empty());
-        CHECK_FALSE(ui_gcode_viewer_has_content(viewer_));
+        CHECK_FALSE(helix::ui::gcode_viewer_has_content(viewer_));
 
-        land(PRINT_B);
+        land(kPrintB);
 
-        // B's own load is the only one that ever applied: PRINT_B carries no
+        // B's own load is the only one that ever applied: kPrintB carries no
         // pauses, and its displayed-file name is its own, not A's.
         CHECK(state_.print_state().get_scheduled_pauses().empty());
-        CHECK(gcode_displayed_file() == PRINT_B);
+        CHECK(gcode_displayed_file() == kPrintB);
     }
 
     SECTION("A lands after B has loaded") {
-        land(PRINT_B);
-        CHECK(gcode_displayed_file() == PRINT_B);
+        land(kPrintB);
+        CHECK(gcode_displayed_file() == kPrintB);
         const int version_after_b = pause_markers_version();
-        const char* widget_file_raw = ui_gcode_viewer_get_filename(viewer_);
+        const char* widget_file_raw = helix::ui::gcode_viewer_get_filename(viewer_);
         const std::string widget_file_after_b = widget_file_raw ? widget_file_raw : "";
 
-        land_dropped(PRINT_A);
+        land_dropped(kPrintA);
 
         // A's late load is dropped before it reaches the viewer: B's own
         // geometry and pause markers, published above, are untouched by it -
@@ -120,8 +121,8 @@ TEST_CASE_METHOD(PrintStatusPreviewFixture,
         // the panel's copy of that name.
         CHECK(pause_markers_version() == version_after_b);
         CHECK(state_.print_state().get_scheduled_pauses().empty());
-        CHECK(gcode_displayed_file() == PRINT_B);
-        widget_file_raw = ui_gcode_viewer_get_filename(viewer_);
+        CHECK(gcode_displayed_file() == kPrintB);
+        widget_file_raw = helix::ui::gcode_viewer_get_filename(viewer_);
         CHECK((widget_file_raw ? std::string(widget_file_raw) : std::string()) ==
               widget_file_after_b);
     }
@@ -130,12 +131,12 @@ TEST_CASE_METHOD(PrintStatusPreviewFixture,
 TEST_CASE_METHOD(PrintStatusPreviewFixture,
                  "Print status: a load that goes stale mid-flight is dropped when it is delivered",
                  "[print_status][pause_markers][1509][slow]") {
-    report_print(PRINT_A);
-    start_fetch(PRINT_A);
+    report_print(kPrintA);
+    start_fetch(kPrintA);
 
     // A is still the effective print when its download lands, so the entry
     // check passes and the viewer's own background build actually starts.
-    REQUIRE(transfers_.release(PRINT_A));
+    REQUIRE(transfers_.release(kPrintA));
     drain();
 
     // A's build finished and its result is sitting in the UpdateQueue,
@@ -145,9 +146,9 @@ TEST_CASE_METHOD(PrintStatusPreviewFixture,
     // catch this.
     REQUIRE(wait_for_queued_result(std::chrono::seconds(30)));
 
-    nlohmann::json status = {{"print_stats", {{"filename", PRINT_B}}}};
+    nlohmann::json status = {{"print_stats", {{"filename", kPrintB}}}};
     state_.update_from_status(status);
-    REQUIRE(state_.print_state().get_effective_print_filename() == PRINT_B);
+    REQUIRE(state_.print_state().get_effective_print_filename() == kPrintB);
 
     drain();
 
@@ -157,10 +158,10 @@ TEST_CASE_METHOD(PrintStatusPreviewFixture,
 
 namespace {
 
-constexpr const char* RUNOUT_SENSOR = "filament_switch_sensor runout";
+constexpr const char* kRunoutSensor = "filament_switch_sensor runout";
 /// Uses tools 0-3 across nine layers, so a load of it has a tool scope and a
 /// layer count to impose.
-constexpr const char* STALE_PRINT = "u1_4color_ring.gcode";
+constexpr const char* kStalePrint = "u1_4color_ring.gcode";
 
 /// The panel as a running print sees it: subjects up, the print reported as
 /// printing, and one runout sensor with no filament system, so the print-scoped
@@ -175,11 +176,11 @@ class StaleLoadFixture : public PrintStatusPreviewFixture {
         fsm.init_subjects();
         PostUnloadGraceTestAccess::reset(fsm);
         fsm.set_master_enabled(true);
-        fsm.discover_sensors({RUNOUT_SENSOR});
-        fsm.set_sensor_role(RUNOUT_SENSOR, FilamentSensorRole::RUNOUT);
+        discover_filament_sensors(fsm, {kRunoutSensor});
+        fsm.set_role(kRunoutSensor, static_cast<uint8_t>(FilamentSensorRole::RUNOUT));
         PostUnloadGraceTestAccess::clear_startup_grace(fsm);
         fsm.update_from_status(
-            nlohmann::json{{RUNOUT_SENSOR, {{"filament_detected", true}, {"enabled", true}}}});
+            nlohmann::json{{kRunoutSensor, {{"filament_detected", true}, {"enabled", true}}}});
 
         panel_->init_subjects();
         drain();
@@ -196,7 +197,8 @@ class StaleLoadFixture : public PrintStatusPreviewFixture {
     }
 
     int scoped_runout() {
-        return lv_subject_get_int(FilamentSensorManager::instance().get_scoped_runout_subject());
+        return lv_subject_get_int(FilamentSensorManagerTestAccess::scoped_runout_subject(
+            FilamentSensorManager::instance()));
     }
 
     int layer_total() {
@@ -209,31 +211,31 @@ class StaleLoadFixture : public PrintStatusPreviewFixture {
 TEST_CASE_METHOD(StaleLoadFixture,
                  "Print status: a superseded print's gcode load leaves the new print's state alone",
                  "[print_status][pause_markers][1509][slow]") {
-    report_printing(STALE_PRINT);
-    start_fetch(STALE_PRINT);
+    report_printing(kStalePrint);
+    start_fetch(kStalePrint);
 
     // The stale print is cancelled and B started while its download is running.
-    report_printing(PRINT_B);
-    start_fetch(PRINT_B);
+    report_printing(kPrintB);
+    start_fetch(kPrintB);
 
     // B has no file in the viewer yet: no tools to scope the badge to, and no
     // layer count from metadata.
     REQUIRE(scoped_runout() == -1);
     REQUIRE(layer_total() == 0);
 
-    land_dropped(STALE_PRINT);
+    land_dropped(kStalePrint);
 
     // The stale load is dropped before it reaches the viewer: nothing has
     // been displayed yet, for either print, and the widget itself holds no
     // geometry - not just the panel's own bookkeeping.
     REQUIRE(gcode_displayed_file().empty());
-    CHECK_FALSE(ui_gcode_viewer_has_content(viewer_));
+    CHECK_FALSE(helix::ui::gcode_viewer_has_content(viewer_));
     CHECK(scoped_runout() == -1);
     CHECK(layer_total() == 0);
 
     // B's own load does apply both, so the two checks above are the drop
     // holding the stale load back rather than effects that never run.
-    land(PRINT_B);
+    land(kPrintB);
     CHECK(scoped_runout() == 1);
     CHECK(layer_total() > 0);
 }
@@ -244,17 +246,17 @@ TEST_CASE_METHOD(
     "[print_status][pause_markers][1509][slow]") {
     // The stale print's own load lands while it is still the effective print,
     // so it applies normally: the viewer really does hold its geometry.
-    report_printing(STALE_PRINT);
-    start_fetch(STALE_PRINT);
-    land(STALE_PRINT);
-    REQUIRE(gcode_displayed_file() == STALE_PRINT);
+    report_printing(kStalePrint);
+    start_fetch(kStalePrint);
+    land(kStalePrint);
+    REQUIRE(gcode_displayed_file() == kStalePrint);
     REQUIRE(scoped_runout() == 1);
 
     // The print moves on, but nothing has fetched B's own gcode yet: the
     // viewer's widget still physically holds the stale print's geometry
     // (tools 0-3), even though set_filename() cleared the displayed-file
     // marker to force a reload.
-    report_printing(PRINT_B);
+    report_printing(kPrintB);
     REQUIRE(gcode_displayed_file().empty());
 
     // A runout-sensor edge or an AMS slots_version bump recomputes the badge
@@ -268,7 +270,7 @@ TEST_CASE_METHOD(
     // B's own load does apply the real value once it lands, so the check
     // above is the guard holding the badge back rather than a badge that
     // never updates.
-    start_fetch(PRINT_B);
-    land(PRINT_B);
+    start_fetch(kPrintB);
+    land(kPrintB);
     CHECK(scoped_runout() == 1);
 }

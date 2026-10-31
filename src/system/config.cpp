@@ -4,6 +4,7 @@
 #include "config.h"
 
 #include "completion_alert_mode.h"
+#include "utils/network_validation.h"
 
 #if !defined(HELIX_SPLASH_ONLY) && !defined(HELIX_WATCHDOG)
 #include "system/telemetry_manager.h"
@@ -13,6 +14,7 @@
 #endif
 #include "ui_error_reporting.h"
 
+#include "ams_types.h"
 #include "app_constants.h"
 #include "config_backup.h"
 #include "config_migrations.h"
@@ -46,12 +48,12 @@ namespace tio = helix::text_io;
 
 using namespace helix::config_detail;
 
-using AppConstants::Update::config_backup_fallback;
-using AppConstants::Update::config_backup_primary;
-using AppConstants::Update::env_backup_fallback;
-using AppConstants::Update::env_backup_primary;
-using AppConstants::Update::legacy_config_backup_fallback;
-using AppConstants::Update::legacy_config_backup_primary;
+using app_constants::update::config_backup_fallback;
+using app_constants::update::config_backup_primary;
+using app_constants::update::env_backup_fallback;
+using app_constants::update::env_backup_primary;
+using app_constants::update::legacy_config_backup_fallback;
+using app_constants::update::legacy_config_backup_primary;
 
 Config* Config::instance{NULL};
 
@@ -183,7 +185,7 @@ json get_default_printer_config(const std::string& moonraker_host) {
     return {
         {"moonraker_api_key", false},
         {"moonraker_host", moonraker_host},
-        {"moonraker_port", 7125},
+        {"moonraker_port", helix::kDefaultMoonrakerPort},
         {"heaters", {{"bed", "heater_bed"}, {"hotend", "extruder"}}},
         {"temp_sensors", {{"bed", "heater_bed"}, {"hotend", "extruder"}}},
         {"motion",
@@ -191,6 +193,7 @@ json get_default_printer_config(const std::string& moonraker_host) {
           {"jog_speed_z", 600},
           {"show_actual_position", false},
           {"bed_map_clearance", 5},
+          {"layout", 0},
           {"fine_inner", 0.1f},
           {"fine_outer", 1.0f},
           {"coarse_inner", 1.0f},
@@ -482,7 +485,7 @@ namespace {
 /// Deliberately NOT part of the versioned chain. scripts/lib/installer/
 /// printer_seed.sh writes the root key with setdefault() on --update as well as
 /// on first install, i.e. into configs whose config_version is already stamped at
-/// CURRENT_CONFIG_VERSION, so a `version < N` gate would never see those. This
+/// kCurrentConfigVersion, so a `version < N` gate would never see those. This
 /// runs on every boot instead; the contains() checks make it a no-op once lifted.
 ///
 /// Ordering: init() calls this AFTER run_versioned_migrations(), so
@@ -535,7 +538,7 @@ json get_default_config(const std::string& moonraker_host, bool include_user_pre
     std::string printer_id = "default";
     json printer_data = get_default_printer_config(moonraker_host);
 
-    json config = {{"config_version", CURRENT_CONFIG_VERSION},
+    json config = {{"config_version", kCurrentConfigVersion},
                    {"active_printer_id", printer_id},
                    {"log_path", "/tmp/helixscreen.log"},
                    {"dark_mode", true},
@@ -543,7 +546,7 @@ json get_default_config(const std::string& moonraker_host, bool include_user_pre
                    {"display", get_default_display_config()},
                    {"gcode_viewer", {{"tube_sides", 4}}},
                    {"input",
-                    {{"scroll_throw", helix::input_defaults::SCROLL_THROW},
+                    {{"scroll_throw", helix::input_defaults::kScrollThrow},
                      {"scroll_limit", 10},
                      {"long_press_time", 500},
                      {"touch_device", ""},
@@ -846,7 +849,7 @@ void Config::init(const std::string& config_path) {
             // neither the backup's age (the archive's stored mtime is the
             // release build date, newer than the backup in both cases) nor
             // its richness differs between them.  The installer settles it.
-            // It leaves FRESH_INSTALL_MARKER beside settings.json whenever
+            // It leaves kFreshInstallMarker beside settings.json whenever
             // it kept the packaged config because no user config existed to
             // restore; Moonraker's rmtree() removes the marker and the
             // re-extract does not bring it back, since it is not in the
@@ -854,7 +857,7 @@ void Config::init(const std::string& config_path) {
             // config it shipped beside.
             if (helix::json_util::safe_int(data, "config_version", 0) == 0) {
                 const std::string fresh_marker = hfs::join_path(
-                    hfs::parent_path(path), AppConstants::Update::FRESH_INSTALL_MARKER);
+                    hfs::parent_path(path), app_constants::update::kFreshInstallMarker);
                 const bool installer_kept_it = hfs::exists(fresh_marker);
                 if (installer_kept_it) {
                     spdlog::info("[Config] Packaged config kept - installer marked a fresh "
@@ -896,7 +899,7 @@ void Config::init(const std::string& config_path) {
             run_display_migrations(data);
             json fresh = get_default_config("127.0.0.1", false);
             fresh.merge_patch(data);
-            fresh["config_version"] = CURRENT_CONFIG_VERSION;
+            fresh["config_version"] = kCurrentConfigVersion;
             data = std::move(fresh);
             config_modified = true;
         }
@@ -939,7 +942,7 @@ void Config::init(const std::string& config_path) {
             // from memory whatever the source.
             const std::string snapshot = path + ".pre-migration";
             const bool below_floor =
-                version_before > 0 && version_before < MIN_MIGRATABLE_CONFIG_VERSION;
+                version_before > 0 && version_before < kMinMigratableConfigVersion;
             const bool copy_from_file = data_is_on_disk_doc && storage_->describe() == path;
             // A small partition cannot spare a second copy of settings.json for
             // a manual recovery nobody can perform there. A below-floor document
@@ -949,7 +952,7 @@ void Config::init(const std::string& config_path) {
                 std::remove(snapshot.c_str());
             }
             bool snapshot_kept = false;
-            if (version_before > 0 && version_before < CURRENT_CONFIG_VERSION &&
+            if (version_before > 0 && version_before < kCurrentConfigVersion &&
                 ((copy_from_file && !small) || below_floor) && !read_only_mode_) {
                 // Absent or unreadable parses as discarded, which reads as 0:
                 // nothing worth keeping.
@@ -976,11 +979,11 @@ void Config::init(const std::string& config_path) {
                 // and unstamped, it is retried on the next boot.
                 spdlog::error("[Config] config_version {} is older than this build migrates "
                               "(oldest: {}) and could not be copied to {}; leaving it unmigrated",
-                              version_before, MIN_MIGRATABLE_CONFIG_VERSION, snapshot);
+                              version_before, kMinMigratableConfigVersion, snapshot);
             } else if (below_floor) {
                 spdlog::warn("[Config] config_version {} is older than this build migrates "
                              "(oldest: {}); starting from defaults, previous config kept at {}",
-                             version_before, MIN_MIGRATABLE_CONFIG_VERSION, snapshot);
+                             version_before, kMinMigratableConfigVersion, snapshot);
                 json fresh = get_default_config("127.0.0.1", false);
                 carry_across_migration_floor(data, fresh);
                 data = std::move(fresh);
@@ -1015,7 +1018,7 @@ void Config::init(const std::string& config_path) {
     // from a newer build is exempt: its printers may be in a shape this build
     // does not read, and it is left as written (see run_versioned_migrations).
     const bool from_newer_build =
-        helix::json_util::safe_int(data, "config_version", 0) > CURRENT_CONFIG_VERSION;
+        helix::json_util::safe_int(data, "config_version", 0) > kCurrentConfigVersion;
     if (!from_newer_build) {
         if (!data.contains("printers") || !data["printers"].is_object()) {
             data["printers"] = json::object();
@@ -1101,7 +1104,7 @@ void Config::init(const std::string& config_path) {
 
     // Ensure input section exists with defaults (scroll settings + touch calibration)
     if (!data.contains("input") || !data["input"].is_object()) {
-        data["input"] = {{"scroll_throw", helix::input_defaults::SCROLL_THROW},
+        data["input"] = {{"scroll_throw", helix::input_defaults::kScrollThrow},
                          {"scroll_limit", 10},
                          {"long_press_time", 500},
                          {"touch_device", ""},
@@ -1120,7 +1123,7 @@ void Config::init(const std::string& config_path) {
 
         // Ensure scroll settings exist
         if (!input.contains("scroll_throw")) {
-            input["scroll_throw"] = helix::input_defaults::SCROLL_THROW;
+            input["scroll_throw"] = helix::input_defaults::kScrollThrow;
             config_modified = true;
         }
         if (!input.contains("scroll_limit")) {
@@ -1179,7 +1182,7 @@ void Config::init(const std::string& config_path) {
 
     spdlog::debug("[Config] initialized: moonraker={}:{}",
                   get<std::string>(df() + "moonraker_host", "127.0.0.1"),
-                  get<int>(df() + "moonraker_port", 7125));
+                  get<int>(df() + "moonraker_port", helix::kDefaultMoonrakerPort));
 }
 
 std::string Config::df() const {
@@ -1255,7 +1258,7 @@ std::string Config::find_printer_by_host(const std::string& host, int port) cons
     for (const auto& id : get_printer_ids()) {
         const std::string base = "/printers/" + id + "/";
         if (get<std::string>(base + "moonraker_host", "") == host &&
-            get<int>(base + "moonraker_port", 7125) == port) {
+            get<int>(base + "moonraker_port", helix::kDefaultMoonrakerPort) == port) {
             return id;
         }
     }
@@ -1356,7 +1359,7 @@ void Config::archive_printer(const std::string& printer_id) {
         return;
     }
 
-    snapshot[ARCHIVED_AT_KEY] = next_archive_stamp();
+    snapshot[kArchivedAtKey] = next_archive_stamp();
     // The printer is already gone from /printers, so a malformed archive is
     // replaced rather than losing the snapshot too.
     if (!data.contains("removed_printers") || !data["removed_printers"].is_object()) {
@@ -1378,7 +1381,7 @@ int64_t Config::next_archive_stamp() const {
     // would otherwise stamp a new entry older than the ones it must outlive.
     if (data.contains("removed_printers") && data["removed_printers"].is_object()) {
         for (const auto& [key, val] : data["removed_printers"].items()) {
-            const int64_t existing = helix::json_util::safe_int64(val, ARCHIVED_AT_KEY, 0);
+            const int64_t existing = helix::json_util::safe_int64(val, kArchivedAtKey, 0);
             if (existing >= stamp) {
                 stamp = existing + 1;
             }
@@ -1392,7 +1395,7 @@ void Config::prune_archived_printers() {
         return;
     }
     json& archive = data["removed_printers"];
-    if (archive.size() <= MAX_ARCHIVED_PRINTERS) {
+    if (archive.size() <= kMaxArchivedPrinters) {
         return;
     }
 
@@ -1402,14 +1405,14 @@ void Config::prune_archived_printers() {
     std::vector<std::pair<int64_t, std::string>> by_age;
     by_age.reserve(archive.size());
     for (const auto& [key, val] : archive.items()) {
-        by_age.emplace_back(helix::json_util::safe_int64(val, ARCHIVED_AT_KEY, 0), key);
+        by_age.emplace_back(helix::json_util::safe_int64(val, kArchivedAtKey, 0), key);
     }
     std::sort(by_age.begin(), by_age.end());
 
-    const size_t drop_count = by_age.size() - MAX_ARCHIVED_PRINTERS;
+    const size_t drop_count = by_age.size() - kMaxArchivedPrinters;
     for (size_t i = 0; i < drop_count; i++) {
         spdlog::info("[Config] Pruned archived printer '{}' (keeping {} most recent)",
-                     by_age[i].second, MAX_ARCHIVED_PRINTERS);
+                     by_age[i].second, kMaxArchivedPrinters);
         archive.erase(by_age[i].second);
     }
 }
@@ -1836,10 +1839,11 @@ bool Config::apply_preset_file(const std::string& preset_name) {
             }
         }
 
-        // Migration 4: hardware/expected union. The four AMS keywords are the only
-        // expected entries that can raise an expected_missing warning ("AMS/MMU system
-        // not detected"), so unioning one could invent that warning; every other name
-        // only ever suppresses a false "new hardware" report.
+        // Migration 4: hardware/expected union. A filament system's entry
+        // (ams_type_for_expected_hardware) is the only kind that can raise an
+        // expected_missing warning ("AMS/MMU system not detected"), so unioning one
+        // could invent that warning; every other name only ever suppresses a false
+        // "new hardware" report.
         if (preset_printer.contains("hardware") && preset_printer["hardware"].is_object() &&
             preset_printer["hardware"].contains("expected") &&
             preset_printer["hardware"]["expected"].is_array()) {
@@ -1858,8 +1862,7 @@ bool Config::apply_preset_file(const std::string& preset_name) {
                         continue;
                     }
                     const std::string name = entry.get<std::string>();
-                    if (name.empty() || name == "AFC" || name == "mmu" || name == "toolchanger" ||
-                        name == "ace") {
+                    if (name.empty() || ams_type_for_expected_hardware(name) != AmsType::NONE) {
                         continue;
                     }
                     if (std::find(stored.begin(), stored.end(), entry) == stored.end()) {

@@ -24,6 +24,7 @@
 #include "ui_printer_manager_overlay.h"
 #include "ui_settings_macro_buttons.h"
 #include "ui_settings_motion.h"
+#include "ui_snapmaker_nozzle_offset_overlay.h"
 #include "ui_theme_editor_overlay.h"
 #include "ui_touch_calibration_overlay.h"
 #include "ui_update_queue.h"
@@ -74,7 +75,7 @@ class DestroyOnCloseFixture : public LVGLUITestFixture {
     }
 
     /// Open, pop, check the tree is gone; then reopen and pop again.
-    void expect_rebuilt_on_reopen(const std::function<void()>& open,
+    void expect_rebuilt_on_reopen(const helix::SharedCallback<void()>& open,
                                   const std::function<lv_obj_t*()>& root) {
         for (int round = 0; round < 2; ++round) {
             open();
@@ -91,7 +92,7 @@ class DestroyOnCloseFixture : public LVGLUITestFixture {
         }
     }
 
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels_{};
+    std::array<lv_obj_t*, kUiPanelCount> panels_{};
 };
 
 } // namespace
@@ -162,6 +163,15 @@ TEST_CASE_METHOD(DestroyOnCloseFixture, "Tool Offset Calibration rebuilds its tr
 TEST_CASE_METHOD(DestroyOnCloseFixture, "CFS Chute Calibration rebuilds its tree on reopen",
                  "[overlay_destroy_on_close][cfs_chute]") {
     auto& p = get_cfs_chute_calibration_overlay();
+    expect_rebuilt_on_reopen([&] { REQUIRE(p.show(lv_screen_active())); },
+                             [&] { return p.get_root(); });
+}
+#endif
+
+#if HELIX_HAS_SNAPMAKER
+TEST_CASE_METHOD(DestroyOnCloseFixture, "Toolhead Offset Calibration rebuilds its tree on reopen",
+                 "[overlay_destroy_on_close][nozzle_offset]") {
+    auto& p = get_snapmaker_nozzle_offset_overlay();
     expect_rebuilt_on_reopen([&] { REQUIRE(p.show(lv_screen_active())); },
                              [&] { return p.get_root(); });
 }

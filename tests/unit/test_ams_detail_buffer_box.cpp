@@ -91,6 +91,7 @@ TEST_CASE("buffer box: Happy Hare sync feedback", "[ams][buffer][path]") {
     AmsSystemInfo info;
     info.type = AmsType::HAPPY_HARE;
     info.sync_feedback_state = "tension";
+    info.system_buffer_motion = BufferMotion::Trailing;
     info.sync_feedback_bias = -0.8f;
     const auto box = ams_detail_buffer_box(info, -1);
     CHECK(box.present);
@@ -106,6 +107,7 @@ static AmsSystemInfo sensor_on_unit_1() {
     info.type = AmsType::AFC;
     info.units[0].buffer_health.reset();
     info.units[1].buffer_health->state = "Advancing";
+    info.units[1].buffer_health->motion = BufferMotion::Advancing;
     return info;
 }
 

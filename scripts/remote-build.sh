@@ -57,8 +57,11 @@ MAKE_ARGS=("$@")
 
 # One TCP+SSH handshake for the whole run, reused by every ssh/scp below. On a
 # high-latency link the handshakes cost more than the payload does.
-CTL="${TMPDIR:-/tmp}/helix-rb-%r@%h:%p"
-SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$CTL" -o ControlPersist=60s -o Compression=yes)
+# One master per run: cleanup_ctl ends this run's master, and a shared socket would
+# drop every other run multiplexed on it. Under /tmp rather than TMPDIR: macOS's TMPDIR
+# alone uses half of the 104-byte socket path limit.
+CTL="/tmp/helix-rb-$$-%h-%p"
+SSH_OPTS=(-o ConnectTimeout=10 -o ControlMaster=auto -o "ControlPath=$CTL" -o ControlPersist=60s -o Compression=yes)
 ssh_() { ssh "${SSH_OPTS[@]}" "$@"; }
 cleanup_ctl() { ssh "${SSH_OPTS[@]}" -O exit "$REMOTE_HOST" 2>/dev/null || true; }
 
@@ -87,13 +90,13 @@ trap 'rm -rf "$WORK"; cleanup_ctl' EXIT
 
 # Tracked delta. Submodule gitlinks are excluded — `git apply` cannot act on them
 # and the pins are handled separately above.
-git diff --binary "$BASE" -- . ':(exclude)lib' ':(exclude).claude-recall' \
+git diff --binary "$BASE" -- . ':(exclude)lib' \
     > "$WORK/local.patch" || true
 PATCH_BYTES=$(wc -c < "$WORK/local.patch" | tr -d ' ')
 
 # Untracked files the patch cannot carry (a brand-new test or source file).
 git ls-files --others --exclude-standard \
-    -- . ':(exclude)build' ':(exclude).claude-recall' > "$WORK/untracked.txt"
+    -- . ':(exclude)build' > "$WORK/untracked.txt"
 UNTRACKED_COUNT=$(wc -l < "$WORK/untracked.txt" | tr -d ' ')
 if [[ "$UNTRACKED_COUNT" -gt 0 ]]; then
     tar czf "$WORK/untracked.tgz" -T "$WORK/untracked.txt"
@@ -151,6 +154,13 @@ git rev-parse --verify --quiet $BASE >/dev/null || {
 git reset --quiet --hard $BASE
 git clean -qfd -e build -e .ccache -e $MARKER || true
 
+# A submodule added after this clone was made is registered but never checked
+# out. Initialize only those ('-' in status): an initialized one carries the
+# previous run's patches, and updating it here would fight reapply-patches.
+git submodule status | awk '/^-/ {print \$2}' | while read -r sub; do
+    git submodule update --init --quiet -- "\$sub"
+done
+
 while read -r path sha; do
     [ -n "\$path" ] || continue
     git -C "\$path" fetch --quiet origin 2>/dev/null || true
@@ -176,7 +186,11 @@ if ! tail -1 lib/libhv/hconfig.h 2>/dev/null | grep -q '#endif'; then
         || echo "⚠ libhv configure failed"
 fi
 
-JOBS_ARG="${JOBS:--j\$(nproc)}"
+# No -j unless JOBS names one: the remote's own make then picks it through
+# helix-claim jobs, which reads its jobpool, else its cores bounded by the memory
+# it may use, a container's limit included. A bare core count would ignore that
+# memory.
+JOBS_ARG="${JOBS:-}"
 
 # patches/ is per-branch. Moving this clone between branches leaves the
 # submodules carrying the previous branch's hunks, and the apply guard reads the

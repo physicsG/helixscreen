@@ -1,0 +1,1 @@
+../../../moonraker-plugin/helix_print_conf.sh

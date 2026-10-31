@@ -21,14 +21,9 @@
 
 #include "hv/json.hpp"
 
+namespace helix {
 class IMoonrakerAPI;
-
-namespace helix {
 class IMoonrakerClient;
-}
-using helix::IMoonrakerClient;
-
-namespace helix {
 
 // Forward declaration
 class PrinterDiscovery;
@@ -82,6 +77,10 @@ struct ToolInfo {
     DetectState detect_state = DetectState::UNAVAILABLE;
     int backend_index = -1; ///< Which AMS backend feeds this tool (-1 = direct drive)
     int backend_slot = -1;  ///< Fixed slot in that backend (-1 = any/dynamic)
+    /// This tool's lane is the one seated in its head, whether that head is
+    /// mounted or parked. Where a hub feeds several lanes into one head, it
+    /// says which of them the head holds.
+    bool lane_seated = false;
 
     // Spoolman spool assignment (persisted per-tool)
     int spoolman_id = 0;           ///< Spoolman spool ID (0=not tracked)
@@ -98,6 +97,38 @@ struct ToolInfo {
     }
 };
 
+/// One printing end the carriage can hold. Several tools share a head where
+/// filament lanes feed one extruder through a hub, so a printer can publish
+/// more tools than it has heads.
+struct PhysicalHead {
+    /// The extruder this head heats, or nullopt where its tool names none.
+    std::optional<std::string> extruder_name;
+    /// Every tool that prints through this head, ascending. Never empty.
+    std::vector<int> tool_indices;
+    /// The tool whose lane is seated in this head, or -1 where none is, or
+    /// where more than one claims it and so none can be believed.
+    int seated_tool = -1;
+
+    [[nodiscard]] bool holds_tool(int tool_index) const;
+    /// The tool that stands for this head: @p active_tool when it prints
+    /// through this head, else the tool whose lane is seated in it, else the
+    /// head's lowest tool. Selecting the head sends this tool, so mounting a
+    /// head that is already mounted changes nothing, and mounting a parked one
+    /// keeps the lane it holds instead of swapping filament on the way.
+    [[nodiscard]] int representative_tool(int active_tool) const;
+};
+
+/// The physical heads behind @p tools, ordered by each head's lowest tool.
+/// Tools naming the same extruder share one head; a tool naming none is a head
+/// of its own, since nothing says it shares one. With @p heads_share_heater
+/// every tool is a head of its own even where several name one extruder: they
+/// are separate nozzles driven and heated through it in turn.
+[[nodiscard]] std::vector<PhysicalHead> physical_heads(const std::vector<ToolInfo>& tools,
+                                                       bool heads_share_heater = false);
+
+/// The index into @p heads of the head @p tool_index prints through, or -1.
+[[nodiscard]] int head_index_for_tool(const std::vector<PhysicalHead>& heads, int tool_index);
+
 /// Tool topology sourced from an AMS backend: multiplexing systems (e.g. AFC)
 /// and tool changers both push it. When set, ToolState rebuilds its tool list
 /// from this and ignores extruder enumeration. tool_to_slot[i] is the backend
@@ -109,7 +140,18 @@ struct ToolTopology {
     /// rather than "nothing loaded". True where selecting a slot mounts a tool.
     bool allows_empty_carriage = false;
     std::vector<int> tool_to_slot;
+    /// The extruder each tool's slot feeds, indexed like tool_to_slot. Empty
+    /// where the backend does not say, which leaves the tool the extruder it
+    /// already had.
+    std::vector<std::string> tool_extruder;
+    /// Whether each tool's lane is the one seated in its head, mounted or
+    /// parked, indexed like tool_to_slot. Empty where the backend does not
+    /// say, which leaves no lane seated.
+    std::vector<bool> tool_seated;
     int backend_index = 0; ///< Source backend in AmsState::backends_
+    /// Every tool is its own nozzle, all driven and heated through one extruder
+    /// (AmsBackend::heads_share_heater()).
+    bool heads_share_heater = false;
 };
 
 /// Manages tool information for multi-tool printers (toolchangers, multi-extruder).
@@ -144,6 +186,22 @@ class ToolState {
         return ams_topology_active_;
     }
 
+    /// A backend whose carriage can be empty and which owns no tool table
+    /// decides which head is mounted; -1 is an empty carriage. While set,
+    /// update_from_status() no longer derives the active tool from
+    /// toolhead.extruder or toolchanger.tool_number, which name the last head
+    /// used rather than a mounted one. An index naming no listed tool reads as
+    /// an empty carriage. Must be called from the LVGL/UI thread.
+    void set_backend_active_tool(int index);
+
+    /// Hand the active tool back to the status frame. A no-op when no backend
+    /// owns it. Must be called from the LVGL/UI thread.
+    void clear_backend_active_tool();
+
+    [[nodiscard]] bool backend_owns_active_tool() const {
+        return backend_owns_active_tool_;
+    }
+
     [[nodiscard]] const std::vector<ToolInfo>& tools() const {
         return tools_;
     }
@@ -176,9 +234,43 @@ class ToolState {
         return extruder_count() > 1;
     }
 
+    /// The printing ends behind the tool list (helix::physical_heads()). What
+    /// a surface that draws one control per head counts, where tool_count()
+    /// would draw one per filament lane on a hub-fed rig. Built once per tool
+    /// list: the reference stays valid until the list next changes.
+    [[nodiscard]] const std::vector<PhysicalHead>& physical_heads() const;
+
+    /// The physical heads that name an extruder, in physical_heads() order:
+    /// the ones a heater target can be aimed at. Heads sharing one heater
+    /// count once, through the head that reads it (head_reads_heater()), or
+    /// their lowest while none is mounted.
+    [[nodiscard]] std::vector<PhysicalHead> heated_heads() const;
+
+    /// Whether head @p head_index (into physical_heads()) shows its extruder's
+    /// temperature as its own: it names an extruder, and either its heater is
+    /// its own or it is the mounted head of a shared one. A docked nozzle on a
+    /// shared heater is cold whatever the heater reads.
+    [[nodiscard]] bool head_reads_heater(int head_index) const;
+
+    /// Whether the printer has several physical toolheads: a tool changer or
+    /// more than one hotend. AMS slots feeding one hotend do not count.
+    [[nodiscard]] bool has_multiple_toolheads() const {
+        return physical_heads().size() > 1;
+    }
+
     /// Returns "Nozzle" for single-tool, "Nozzle 1" for multi-tool (active tool),
     /// or the tool's configured Klipper name ("Nozzle Left") when it has one.
     [[nodiscard]] std::string nozzle_label() const;
+
+    /// Whether a nozzle readout must say which nozzle it means: several
+    /// extruders, or several nozzles taking turns on one shared heater. False
+    /// for lanes feeding one hotend, where the loaded lane names no nozzle.
+    [[nodiscard]] bool names_mounted_nozzle() const;
+
+    /// The tools are separate nozzles sharing one extruder and heater.
+    [[nodiscard]] bool heads_share_heater() const {
+        return ams_topology_active_ && heads_share_heater_;
+    }
 
     /// Request a tool change, delegating to AMS backend or falling back to Tn gcode.
     /// Callbacks are invoked asynchronously from the API response.
@@ -187,6 +279,7 @@ class ToolState {
                              std::function<void(const std::string&)> on_error = nullptr);
 
     /// Returns tool name (e.g. "T0") for the given extruder name, or empty if not found.
+    /// Where the tools share one heater it is the mounted tool's, empty with none mounted.
     [[nodiscard]] std::string tool_name_for_extruder(const std::string& extruder_name) const;
 
     /// Returns the extruder name (e.g. "extruder1") tool @p tool_index heats, or
@@ -194,7 +287,8 @@ class ToolState {
     [[nodiscard]] std::string extruder_name_for_tool(int tool_index) const;
 
     /// Returns the tool's physical label (e.g. "Tool 1") for the given extruder
-    /// name, or empty if not found.
+    /// name, or empty if not found. Where the tools share one heater it is the
+    /// mounted tool's, empty with none mounted.
     [[nodiscard]] std::string display_label_for_extruder(const std::string& extruder_name) const;
 
     /// Assign a Spoolman spool to a tool. Persists to local JSON + Moonraker DB.
@@ -379,6 +473,11 @@ class ToolState {
     lv_subject_t any_tool_offset_dirty_{};
 
     std::vector<ToolInfo> tools_;
+    /// physical_heads() of tools_, built on first ask after the list changes.
+    mutable std::optional<std::vector<PhysicalHead>> heads_cache_;
+    /// The extruder heaters init_tools() found, sorted: the names a backend's
+    /// per-tool extruder must be one of to be taken as a Klipper extruder.
+    std::vector<std::string> discovered_extruders_;
     int active_tool_index_ = 0;
     std::string config_dir_ = "config";     ///< Directory for local JSON persistence
     bool config_dir_explicit_ = false;      ///< set_config_dir() pinned it; don't re-derive
@@ -397,6 +496,12 @@ class ToolState {
     bool ams_topology_active_ = false;
     int ams_topology_tool_count_ = 0;
     std::vector<int> ams_topology_tool_to_slot_;
+    std::vector<std::string> ams_topology_tool_extruder_;
+    bool heads_share_heater_ = false;
+
+    // Set by set_backend_active_tool(): the backend, not the status frame,
+    // says which head is mounted.
+    bool backend_owns_active_tool_ = false;
 
     /// Save spool assignments to local JSON file
     void save_spool_json() const;

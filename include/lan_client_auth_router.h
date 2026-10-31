@@ -68,24 +68,21 @@ class LanAuthPromptModal : public Modal {
     void on_cancel() override {
         answer(false);
     }
-    /// Fires however the dialog goes away, including both button paths, so it
-    /// has to distinguish the two - only an unanswered teardown is a dismissal.
-    void on_hide() override {
-        if (!answered_ && on_dismiss_) {
+    /// Only a close no button answered: an unanswered teardown is a dismissal.
+    void on_dismissed() override {
+        if (on_dismiss_) {
             on_dismiss_();
         }
     }
 
   private:
     void answer(bool approve) {
-        answered_ = true;
         if (on_decision_) {
             on_decision_(approve);
         }
-        hide();
+        hide(ModalCloseReason::ButtonPress);
     }
 
-    bool answered_ = false;
     DecisionCallback on_decision_;
     DismissCallback on_dismiss_;
 };

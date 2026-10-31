@@ -6,7 +6,7 @@
 
 namespace helix::ui {
 
-static constexpr const char* DEFAULT_SPOOLMAN_PORT = "7912";
+static constexpr const char* kDefaultSpoolmanPort = "7912";
 
 class SpoolmanSetup {
   public:

@@ -21,12 +21,12 @@ class TileSizing;
 ///
 /// LVGL gives us four user flag bits. Before claiming one, check the ledger:
 ///   USER_1  free
-///   USER_2  ui_utils.h           EDIT_CLICK_SUPPRESSED_FLAG, clicks edit mode took
+///   USER_2  ui_utils.h           kEditClickSuppressedFlag, clicks edit mode took
 ///   USER_3  here                 home panel widget tile
 ///   USER_4  ui_sound_preview_*   suppress the button tap sound
 /// USER_3 deliberately over USER_2: helix-xml's flag_to_enum() maps user_1 and
 /// user_2 for <bind_flag_if_*>, so USER_3 is the one XML cannot reach.
-constexpr lv_obj_flag_t PANEL_WIDGET_TILE_FLAG = LV_OBJ_FLAG_USER_3;
+constexpr lv_obj_flag_t kPanelWidgetTileFlag = LV_OBJ_FLAG_USER_3;
 
 /// Base class for home widget instances: behavior, sizing and lifecycle hooks.
 /// A def with no factory (ams) is created as pure XML with no instance; tiles

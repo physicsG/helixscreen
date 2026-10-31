@@ -5,7 +5,7 @@
  * @brief Visibility gating of the ams_endless_status component.
  *
  * The component has two call sites with different contracts:
- *  - the context menu always shows the line when there is something truthful
+ *  - the spool editor always shows the line when there is something truthful
  *    to say (its job is explaining the greyed backup dropdown), and
  *  - the AMS panel passes hide_when_healthy so the healthy sentence ("will
  *    switch") is not permanently on screen; only attention kinds (Off, Unknown,

@@ -6,10 +6,11 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace helix {
 class PrinterDiscovery;
-class IMoonrakerClient;
+class ITransfersAPI;
 } // namespace helix
 
 /**
@@ -19,17 +20,17 @@ class IMoonrakerClient;
  *
  * Every printer has the internal filament DB's generic material table. Some
  * firmwares additionally carry their own per-vendor, per-sub-type temperature
- * table in firmware and publish it on request through the console: several
- * response lines, one per nozzle config, each a flat Python dict literal —
- * not JSON — prefixed "// " on the response channel, whose keys are spelled
- * {vendor}_{main_type}_{sub_type}_{field}. Those temperatures describe the
- * LOAD and UNLOAD operations, not the printable range: PLA loads at 250°C
- * against a print range nowhere near it, so they are carried as their own
- * fields and never folded into a material's nozzle_min/nozzle_max.
+ * table and keep it in JSON files under a Moonraker file root: one flat object
+ * per nozzle config, whose keys are spelled {vendor}_{main_type}_{sub_type}_{field}.
+ * The files are read over Moonraker's file API, never by asking the firmware to
+ * print the table: its console answer lands in every client's console. Those
+ * temperatures describe the LOAD and UNLOAD operations, not the printable range:
+ * PLA loads at 250°C against a print range nowhere near it, so they are carried
+ * as their own fields and never folded into a material's nozzle_min/nozzle_max.
  *
  * This is the one module that knows which firmwares publish the table and the
- * exact shape of the response. Generic code (the active-material resolver, the
- * discovery sequence) asks the questions below and never names a firmware.
+ * exact shape of its files. Generic code (the active-material resolver, the
+ * discovery steps) asks the questions below and never names a firmware.
  * Adding another one is a row in the provider table in
  * filament_temperature_source.cpp.
  */
@@ -63,32 +64,32 @@ struct FilamentKey {
 /// Whether this firmware publishes its own per-filament temperature table.
 [[nodiscard]] bool firmware_publishes_filament_temperatures(const PrinterDiscovery& hw);
 
-/// The one-line gcode that makes the firmware print its table, or an empty
-/// string when the printer has no such firmware.
-[[nodiscard]] std::string filament_temperature_query_gcode(const PrinterDiscovery& hw);
+/// The Moonraker file root the table files live under, or an empty string when
+/// the printer has no such firmware.
+[[nodiscard]] std::string filament_temperature_root(const PrinterDiscovery& hw);
 
-/// Parse one console response line ("// {...}") into the table it carries.
-/// The response is a flat Python dict literal: single-quoted keys and
-/// strings, True/False booleans, scalar values, keys spelled
-/// {vendor}_{main_type}_{sub_type}_{field} where main_type carries hyphens
-/// and sub_type may carry a space. The parse only accepts that spelling —
-/// any double quote, backslash or boolean-looking word in a non-literal
-/// position means the schema is not what this parser is for, and the answer
-/// is an EMPTY map rather than a corrupted one. Same for input that does not
-/// parse.
+/// The table files, as paths under filament_temperature_root(), in merge order:
+/// a leaf present in an earlier file keeps that file's values. Empty when the
+/// printer has no such firmware.
+[[nodiscard]] std::vector<std::string> filament_temperature_files(const PrinterDiscovery& hw);
+
+/// Parse one table file into the leaves it carries. The file is one flat JSON
+/// object keyed {vendor}_{main_type}_{sub_type}_{field}, where main_type
+/// carries hyphens and sub_type may carry a space. Only the _load_temp and
+/// _unload_temp fields are read; text that does not parse as a JSON object
+/// yields an EMPTY map, never a throw.
 [[nodiscard]] std::map<FilamentKey, FilamentTemperatures>
-parse_filament_temperatures(const std::string& response);
+parse_filament_temperatures(const std::string& json_text);
 
-/// Fold one parsed response line into an accumulating table. The firmware
-/// answers the query with one dict per nozzle config listing overlapping
-/// materials, so capture keeps the union: a leaf already present keeps its
-/// values, and a line lacking a field does not erase what an earlier line
-/// supplied.
+/// Fold one parsed file into an accumulating table. The firmware keeps one
+/// file per nozzle config listing overlapping materials, so capture keeps the
+/// union: a leaf already present keeps its values, and a file lacking a field
+/// does not erase what an earlier file supplied.
 void merge_filament_temperatures(std::map<FilamentKey, FilamentTemperatures>& table,
                                  const std::map<FilamentKey, FilamentTemperatures>& line);
 
-/// Publish the table parsed out of a response, replacing any previous one.
-/// Called from the response thread; safe against concurrent lookups.
+/// Publish a captured table, replacing any previous one. Called from the
+/// transfer thread; safe against concurrent lookups.
 void store_filament_temperatures(const std::map<FilamentKey, FilamentTemperatures>& table);
 
 /// Drop the published table (printer gone, or one without the capability
@@ -111,17 +112,19 @@ void clear_filament_temperatures();
 ///
 /// A spool physically loaded in the machine can sit at step 2 — the status
 /// may name a vendor/sub-type pair the table has no leaf for. nullopt (also
-/// the answer when nothing is published) means "no firmware opinion", never
+/// the answer when nothing is published, or when the table was read from a
+/// printer REST has since moved away from) means "no firmware opinion", never
 /// a temperature of zero.
 [[nodiscard]] std::optional<FilamentTemperatures>
 lookup_filament_temperatures(const SlotInfo& slot);
 
 /// Connect-time capture: drop any previously published table and, when the
-/// printer's firmware publishes one, send the query gcode and read the
-/// response lines back out of the gcode store, merging every line that
-/// parses. The table is static firmware data, so once per connection is
-/// enough. No-ops (keeping the table empty) on a printer without the
-/// capability.
-void capture_on_connect(IMoonrakerClient& client, const PrinterDiscovery& hw);
+/// printer's firmware keeps one, download every table file and publish the
+/// merge of those that parse. A missing or unparseable file is skipped; with
+/// none readable nothing is published and callers fall back to the filament
+/// DB. Nothing is sent to the printer's console. The table is static firmware
+/// data, so once per connection is enough. A reply that lands after REST moved
+/// to another printer is dropped.
+void capture_on_connect(ITransfersAPI& transfers, const PrinterDiscovery& hw);
 
 } // namespace helix::filament_temps

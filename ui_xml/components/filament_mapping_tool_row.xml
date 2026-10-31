@@ -13,16 +13,15 @@
         style_pad_hor="#space_md" style_pad_ver="#space_sm" style_pad_gap="#space_md" style_radius="#space_sm"
         style_bg_color="#elevated_bg" style_bg_opa="255" scrollable="false" clickable="true">
     <style name="styles.press_wash" selector="pressed"/>
-    <!-- Expected (gcode) color swatch. For multi-tool files the Tx label is
-         centered inside it (mirrors the print-details pill). -->
-    <lv_obj name="expected_swatch"
-            width="#space_2xl" height="#space_2xl" style_radius="9999" style_bg_opa="255" style_bg_color="#text_muted"
-            style_border_width="1" style_border_color="#text_muted" style_border_opa="30" style_pad_all="0"
-            scrollable="false" clickable="false" event_bubble="true">
+    <!-- Expected (gcode) colour: a labelled chip, so a rounded rect. For
+         multi-tool files the Tx label is centered on it (mirrors the
+         print-details pill). -->
+    <swatch_paint name="expected_swatch"
+                  width="#space_2xl" height="#space_2xl" style_radius="#border_radius_small" color="#text_muted">
       <lv_label name="tool_label"
                 text="" align="center" hidden="true" style_text_font="#font_body" style_text_color="#text"
                 clickable="false" event_bubble="true"/>
-    </lv_obj>
+    </swatch_paint>
     <!-- File-declared material ("PLA", "PETG" …). Hidden when the file has
          no material metadata. -->
     <lv_label name="material_label"
@@ -38,15 +37,10 @@
             style_pad_ver="#space_sm" style_pad_gap="#space_sm" style_radius="#space_sm" style_bg_color="#card_bg"
             style_bg_opa="255" style_border_width="1" style_border_color="#text_muted" style_border_opa="30"
             scrollable="false" clickable="false" event_bubble="true">
-      <!-- Currently-mapped slot swatch (hidden for Auto/Unmapped). -->
-      <lv_obj name="chosen_swatch"
-              width="#space_2xl" height="#space_2xl" hidden="true" style_radius="9999" style_bg_opa="255"
-              style_bg_color="#text_muted" style_border_width="1" style_border_color="#text_muted" style_border_opa="30"
-              style_pad_all="0" scrollable="false" clickable="false" event_bubble="true"/>
+      <!-- Currently-mapped slot colour (hidden for Auto/Unmapped). -->
+      <color_dot name="chosen_swatch" size="#space_2xl" hidden="true"/>
       <!-- Display text ("Auto", "Unmapped", or the formatted slot label). -->
-      <lv_label name="slot_text"
-                flex_grow="1" text="" long_mode="dots" style_text_font="#font_body" style_text_color="#text"
-                clickable="false" event_bubble="true"/>
+      <text_body name="slot_text" flex_grow="1" text="" long_mode="dots" clickable="false" event_bubble="true"/>
       <!-- Material mismatch / empty-slot warning, shown by C++ when either
            applies. -->
       <lv_label name="trigger_warn"

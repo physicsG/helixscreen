@@ -65,7 +65,10 @@ class ExcludeObjectModal : public Modal {
     }
 
     /**
-     * @brief Set callback to invoke when user cancels exclusion
+     * @brief Set callback to invoke when the dialog closes without Confirm
+     *
+     * Fires once per showing, for the Cancel button, ESC, a backdrop tap, a
+     * hot-reload rebuild and a programmatic hide() alike.
      * @param cb Callback function
      */
     void set_on_cancel(Callback cb) {
@@ -89,11 +92,11 @@ class ExcludeObjectModal : public Modal {
         if (on_confirm_cb_) {
             on_confirm_cb_();
         }
-        hide();
+        hide(ModalCloseReason::ButtonPress);
     }
 
     /**
-     * @brief Called when user clicks Cancel button
+     * @brief Called when user clicks Cancel button, and on ESC
      *
      * Invokes the cancel callback if set, then hides the modal.
      */
@@ -101,7 +104,20 @@ class ExcludeObjectModal : public Modal {
         if (on_cancel_cb_) {
             on_cancel_cb_();
         }
-        hide();
+        hide(ModalCloseReason::ButtonPress);
+    }
+
+    /**
+     * @brief A close no button answered resolves as a cancel
+     *
+     * The caller holds a pending-exclusion guard that only a resolution
+     * clears, so a backdrop tap, hot-reload rebuild or programmatic hide()
+     * must report like Cancel does.
+     */
+    void on_dismissed() override {
+        if (on_cancel_cb_) {
+            on_cancel_cb_();
+        }
     }
 
   private:

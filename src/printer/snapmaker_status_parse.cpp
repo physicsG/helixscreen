@@ -4,8 +4,11 @@
 #include "snapmaker_status_parse.h"
 
 #include "ams_status_json.h"
+#include "json_utils.h"
 #include "lane_translation.h"
 #include "text_io.h"
+
+#include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
 #include <cctype>
@@ -47,17 +50,17 @@ namespace snapmaker {
 
 ExtruderDelta parse_extruder_delta(const nlohmann::json& json) {
     ExtruderDelta d;
-    if (json.contains("state") && json["state"].is_string()) {
-        d.state = json["state"].get<std::string>();
+    if (auto v = ams::read_field<std::string>(json, "state")) {
+        d.state = std::move(*v);
     }
-    if (json.contains("park_pin") && json["park_pin"].is_boolean()) {
-        d.park_pin = json["park_pin"].get<bool>();
+    if (auto v = ams::read_field<bool>(json, "park_pin")) {
+        d.park_pin = *v;
     }
-    if (json.contains("active_pin") && json["active_pin"].is_boolean()) {
-        d.active_pin = json["active_pin"].get<bool>();
+    if (auto v = ams::read_field<bool>(json, "active_pin")) {
+        d.active_pin = *v;
     }
-    if (json.contains("activating_move") && json["activating_move"].is_boolean()) {
-        d.activating_move = json["activating_move"].get<bool>();
+    if (auto v = ams::read_field<bool>(json, "activating_move")) {
+        d.activating_move = *v;
     }
     if (json.contains("extruder_offset") && json["extruder_offset"].is_array()) {
         const auto& arr = json["extruder_offset"];
@@ -67,14 +70,14 @@ ExtruderDelta parse_extruder_delta(const nlohmann::json& json) {
             }
         }
     }
-    if (json.contains("switch_count") && json["switch_count"].is_number()) {
-        d.switch_count = json["switch_count"].get<int>();
+    if (auto v = ams::read_field<int>(json, "switch_count")) {
+        d.switch_count = *v;
     }
-    if (json.contains("retry_count") && json["retry_count"].is_number()) {
-        d.retry_count = json["retry_count"].get<int>();
+    if (auto v = ams::read_field<int>(json, "retry_count")) {
+        d.retry_count = *v;
     }
-    if (json.contains("error_count") && json["error_count"].is_number()) {
-        d.error_count = json["error_count"].get<int>();
+    if (auto v = ams::read_field<int>(json, "error_count")) {
+        d.error_count = *v;
     }
     return d;
 }
@@ -82,55 +85,85 @@ ExtruderDelta parse_extruder_delta(const nlohmann::json& json) {
 SnapmakerRfidInfo parse_rfid_info(const nlohmann::json& json) {
     SnapmakerRfidInfo info;
 
-    if (json.contains("MAIN_TYPE") && json["MAIN_TYPE"].is_string()) {
-        info.main_type = json["MAIN_TYPE"].get<std::string>();
+    if (auto v = ams::read_field<std::string>(json, "MAIN_TYPE")) {
+        info.main_type = std::move(*v);
     }
-    if (json.contains("SUB_TYPE") && json["SUB_TYPE"].is_string()) {
-        info.sub_type = json["SUB_TYPE"].get<std::string>();
+    if (auto v = ams::read_field<std::string>(json, "SUB_TYPE")) {
+        info.sub_type = std::move(*v);
     }
-    if (json.contains("MANUFACTURER") && json["MANUFACTURER"].is_string()) {
-        info.manufacturer = json["MANUFACTURER"].get<std::string>();
+    if (auto v = ams::read_field<std::string>(json, "MANUFACTURER")) {
+        info.manufacturer = std::move(*v);
     }
-    if (json.contains("VENDOR") && json["VENDOR"].is_string()) {
-        info.vendor = json["VENDOR"].get<std::string>();
+    if (auto v = ams::read_field<std::string>(json, "VENDOR")) {
+        info.vendor = std::move(*v);
     }
     if (json.contains("ARGB_COLOR") && json["ARGB_COLOR"].is_number()) {
         // ARGB -> RGB: mask off the alpha byte
         uint32_t argb = json["ARGB_COLOR"].get<uint32_t>();
         info.color_rgb = argb & 0x00FFFFFF;
     }
-    if (json.contains("HOTEND_MIN_TEMP") && json["HOTEND_MIN_TEMP"].is_number()) {
-        info.hotend_min_temp = json["HOTEND_MIN_TEMP"].get<int>();
+    if (auto v = ams::read_field<int>(json, "HOTEND_MIN_TEMP")) {
+        info.hotend_min_temp = *v;
     }
-    if (json.contains("HOTEND_MAX_TEMP") && json["HOTEND_MAX_TEMP"].is_number()) {
-        info.hotend_max_temp = json["HOTEND_MAX_TEMP"].get<int>();
+    if (auto v = ams::read_field<int>(json, "HOTEND_MAX_TEMP")) {
+        info.hotend_max_temp = *v;
     }
-    if (json.contains("BED_TEMP") && json["BED_TEMP"].is_number()) {
-        info.bed_temp = json["BED_TEMP"].get<int>();
+    if (auto v = ams::read_field<int>(json, "BED_TEMP")) {
+        info.bed_temp = *v;
     }
-    if (json.contains("WEIGHT") && json["WEIGHT"].is_number()) {
-        info.weight_g = json["WEIGHT"].get<int>();
+    if (auto v = ams::read_field<int>(json, "WEIGHT")) {
+        info.weight_g = *v;
+    }
+    // COLOR_NUMS counts the RGB_n fields the tag carries; one is the plain
+    // colour ARGB_COLOR already states.
+    const int color_nums = json_util::safe_int(json, "COLOR_NUMS", 1);
+    if (color_nums >= 2) {
+        std::string joined;
+        for (int n = 1; n <= std::min(color_nums, 5); ++n) {
+            const std::string key = "RGB_" + std::to_string(n);
+            const nlohmann::json* rgb = json_util::find_member(json, key.c_str());
+            if (!rgb || !rgb->is_number()) {
+                joined.clear();
+                break;
+            }
+            if (!joined.empty()) {
+                joined += ',';
+            }
+            joined += fmt::format("#{:06X}",
+                                  static_cast<uint32_t>(json_util::as_int64(*rgb)) & 0xFFFFFFu);
+        }
+        info.multi_color_hexes = std::move(joined);
     }
     // CARD_UID is a 4-byte array like [144, 32, 196, 2]. Canonicalize to a
     // comma-joined string so the override system's baseline comparison is a
     // simple string == string check. Empty / missing array stays as empty
     // string (treated as "no tag / unread" by check_hardware_event_clear).
-    if (json.contains("CARD_UID") && json["CARD_UID"].is_array()) {
-        const auto& arr = json["CARD_UID"];
+    const nlohmann::json* card_uid = json_util::find_member(json, "CARD_UID");
+    if (card_uid && card_uid->is_array()) {
         std::string uid;
-        for (size_t i = 0; i < arr.size(); ++i) {
-            if (!arr[i].is_number()) {
+        bool has_card = false;
+        bool readable = true;
+        for (const auto& byte : *card_uid) {
+            if (!byte.is_number()) {
+                readable = false;
                 // If any byte isn't a number, bail out — partial UIDs aren't
                 // safe to compare. Leave info.uid empty so the check is a
                 // no-op for this parse.
                 uid.clear();
                 break;
             }
+            const std::int64_t value = json_util::as_int64(byte);
+            has_card = has_card || value != 0;
             if (!uid.empty())
                 uid.push_back(',');
-            uid += std::to_string(arr[i].get<int>());
+            uid += std::to_string(value);
+        }
+        if (readable) {
+            info.has_card = has_card;
         }
         info.uid = std::move(uid);
+    } else if (card_uid && card_uid->is_number()) {
+        info.has_card = json_util::as_double(*card_uid) != 0.0;
     }
 
     return info;
@@ -238,6 +271,8 @@ PrintTaskConfigDelta parse_print_task_config(const nlohmann::json& status) {
     d.filament_exist = ams::read_indexed<bool, kToolCount>(ptc, "filament_exist");
     d.filament_type = ams::read_indexed<std::string, kToolCount>(ptc, "filament_type");
     d.filament_vendor = ams::read_indexed<std::string, kToolCount>(ptc, "filament_vendor");
+    d.filament_sub_type = ams::read_indexed<std::string, kToolCount>(ptc, "filament_sub_type");
+    d.filament_official = ams::read_indexed<bool, kToolCount>(ptc, "filament_official");
     d.filament_color_rgba = ams::read_indexed<std::string, kToolCount>(ptc, "filament_color_rgba");
     return d;
 }
@@ -287,8 +322,8 @@ StatusDelta parse_status(const nlohmann::json& status, const std::string& batch_
 
     if (status.contains("toolhead") && status["toolhead"].is_object()) {
         const auto& th = status["toolhead"];
-        if (th.contains("extruder") && th["extruder"].is_string()) {
-            d.toolhead_extruder = th["extruder"].get<std::string>();
+        if (auto v = ams::read_field<std::string>(th, "extruder")) {
+            d.toolhead_extruder = std::move(*v);
         }
     }
 

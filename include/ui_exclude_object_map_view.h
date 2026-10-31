@@ -6,6 +6,7 @@
 #include "ui_widget_ref.h"
 
 #include "bed_coord_mapper.h"
+#include "bed_dimensions.h"
 #include "gcode_parser.h"
 
 #include <cmath>
@@ -28,11 +29,16 @@ class PrinterExcludedObjectsState;
 
 namespace helix::ui {
 
+/// Interactive covers a preview card with numbered, tappable objects and a close button.
+/// Mini takes a normal slot in a tile and draws outlines alone: the object being printed
+/// bright, excluded objects faded and hatched, nothing to tap.
+enum class ExcludeMapMode { Interactive, Mini };
+
 class ExcludeObjectMapView {
   public:
     // Canonical value lives on helix::BedCoordMapper; aliased here so existing
-    // ExcludeObjectMapView::MIN_TOUCH_TARGET_PX references keep compiling.
-    static constexpr float MIN_TOUCH_TARGET_PX = helix::BedCoordMapper::MIN_TOUCH_TARGET_PX;
+    // ExcludeObjectMapView::kMinTouchTargetPx references keep compiling.
+    static constexpr float kMinTouchTargetPx = helix::BedCoordMapper::kMinTouchTargetPx;
 
     using PixelRect = helix::PixelRect;
     using CoordMapper = helix::BedCoordMapper;
@@ -44,10 +50,15 @@ class ExcludeObjectMapView {
     ExcludeObjectMapView(const ExcludeObjectMapView&) = delete;
     ExcludeObjectMapView& operator=(const ExcludeObjectMapView&) = delete;
 
-    void create(lv_obj_t* parent, helix::PrinterExcludedObjectsState* state, float bed_w_mm,
-                float bed_h_mm, ObjectTapFn on_object_tapped, ExcludeTapMode tap_mode,
-                const helix::gcode::ParsedGCodeFile* parsed_file = nullptr);
+    void create(lv_obj_t* parent, helix::PrinterExcludedObjectsState* state,
+                const helix::BedDimensions& bed, ObjectTapFn on_object_tapped,
+                ExcludeTapMode tap_mode, const helix::gcode::ParsedGCodeFile* parsed_file = nullptr,
+                ExcludeMapMode mode = ExcludeMapMode::Interactive);
     void destroy();
+
+    /// Rebuild the drawing surface when the plate area's size has changed since it was
+    /// last built, and leave it alone otherwise. A host whose slot is resized calls this.
+    void resize();
 
     [[nodiscard]] lv_obj_t* root() const {
         return root_;
@@ -63,9 +74,12 @@ class ExcludeObjectMapView {
   private:
     friend class ::ExcludeObjectMapViewTestAccess;
 
+    void build_surface();
     void build_object_rects();
     void update_visual_states();
     void draw_first_layer_outlines();
+    /// The bed's 50mm grid and edge, whatever of them falls in view.
+    void draw_bed_reference(lv_layer_t* layer) const;
     void copy_parsed_geometry(const helix::gcode::ParsedGCodeFile* parsed);
     lv_obj_t* create_object_rect(lv_obj_t* parent, const ObjectBadge& badge, const PixelRect& rect);
 
@@ -89,8 +103,18 @@ class ExcludeObjectMapView {
     std::unique_ptr<helix::gcode::ParsedGCodeFile> parsed_objects_;
     std::unordered_map<std::string, std::vector<glm::vec2>> parsed_outlines_;
 
+    ExcludeMapMode mode_{ExcludeMapMode::Interactive};
+
+    // The printer's bed, and the extent the map shows (the objects plus a
+    // margin, else the bed) with its lower-left corner.
+    helix::BedDimensions bed_{helix::kDefaultBedSizeMm, helix::kDefaultBedSizeMm, 0.0f, 0.0f};
     float bed_w_mm_{235.0f};
     float bed_h_mm_{235.0f};
+    float coord_min_x_{0.0f};
+    float coord_min_y_{0.0f};
+    // The plate size the surface was built for.
+    int built_w_{0};
+    int built_h_{0};
 
     std::unique_ptr<CoordMapper> mapper_;
     ObserverGuard excluded_version_obs_;

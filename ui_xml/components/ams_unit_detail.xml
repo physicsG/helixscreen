@@ -28,11 +28,6 @@
     <color name="tray_glass_edge_dark" value="#EBF2FF"/>
     <color name="tray_glass_edge_light" value="#3C5A82"/>
   </consts>
-  <api>
-    <!-- Minimum width of the environment chip. 0 leaves it to its content; a caller that
-         shows the readout at a fixed width passes the token. -->
-    <prop name="env_chip_min_width" type="string" default="0"/>
-  </api>
   <!--
     AMS Unit Detail - Shared spool grid + tray + labels layer structure.
 
@@ -42,21 +37,22 @@
     - "labels_layer": overlay for material labels when 5+ slots overlap
     - "slot_tray": visual "holder" that renders ON TOP of spool bottoms
 
-    Z-order (front to back): labels_layer > badge_layer > slot_tray > slot_grid > tray_back
+    Z-order (front to back): badge_layer > slot_tray > labels_layer > slot_grid
     Badges reparented to badge_layer by ams_detail_update_badges() so they
     render in front of the tray.
 
-    Layout: Row with slot_container (flex_grow) + optional environment indicator.
-    When the indicator is visible, slot_container automatically narrows via flex.
-    C++ reads available_width from lv_obj_get_parent(slot_grid) = slot_container,
-    so slot sizing, overlap, labels, badges, and path canvas all adjust proportionally.
+    Layout: slot_container flex-grows beside the environment pill, which stands
+    against the box's right end; box and pill center as one. C++ reads
+    available_width from
+    lv_obj_get_parent(slot_grid) = slot_container, so slot sizing, overlap,
+    labels, badges, and path canvas all adjust proportionally.
   -->
   <view name="ams_unit_detail"
         extends="lv_obj" width="100%" height="content" style_pad_all="0" style_pad_gap="0" flex_flow="row"
         scrollable="false">
-    <!-- Slot container — holds grid, tray, labels, badges. Flex-grows to fill
-         remaining width after indicator (if visible). Uses width="1" per L066
-         so LVGL flex allocates based on grown width, not content width. -->
+    <!-- Slot container — holds grid, tray, labels and badges. Flex-grows to fill
+         the row beside the pill. Uses width="1" per L066 so LVGL flex
+         allocates based on grown width, not content width. -->
     <lv_obj name="slot_container" width="1" height="content" flex_grow="1" style_pad_all="0" scrollable="false">
       <!-- Slot Grid — back wall of 3D tray drawn via DRAW_MAIN callback on this object -->
       <lv_obj name="slot_grid"
@@ -65,7 +61,7 @@
         <!-- Slots created dynamically by ams_detail_create_slots() -->
       </lv_obj>
       <!-- Labels Layer - renders on top of overlapping slots for 5+ gates -->
-      <lv_obj name="labels_layer" width="100%" height="80" style_pad_all="0" scrollable="false" clickable="false"/>
+      <lv_obj name="labels_layer" width="100%" height="content" style_pad_all="0" scrollable="false" clickable="false"/>
       <!-- Tray - the box's front wall, right side and glass lid, drawn in front of the
            spools. Covers the whole container; ams_detail_update_tray() places the faces. -->
       <lv_obj name="slot_tray"
@@ -74,16 +70,15 @@
       <!-- Badge Layer - slot number badges reparented here to render in front of tray -->
       <lv_obj name="badge_layer" width="100%" height="100%" style_pad_all="0" scrollable="false" clickable="false"/>
     </lv_obj>
-    <!-- Environment indicator (temp/humidity) — hidden when no sensors.
-         Vertical column to the right of spools; its margin is the gap it keeps
-         from the box, so the row reserves box, gap and readout and the unit
-         centers as one. When hidden, slot_container gets full width via flex_grow. -->
-    <ams_environment_indicator name="env_indicator"
-                               style_margin_left="#space_md" style_min_width="$env_chip_min_width"
-                               temp_text="ams_env_ind_detail_temp_text" humidity_text="ams_env_ind_detail_humidity_text"
-                               humidity_status="ams_env_ind_detail_humidity_status"
-                               humidity_visible="ams_env_ind_detail_humidity_visible"
-                               visible="ams_env_ind_detail_visible" drying_active="ams_env_ind_detail_drying_active"
-                               drying_text="ams_env_ind_detail_drying_text"/>
+    <!-- Environment pill (temp/humidity), hidden when the unit has no sensors. It
+         takes its width from the row, so the box narrows to make room, and
+         ams_detail_update_tray() stands it against the box's right end at the
+         box's height. Hidden, it gives the width back. -->
+    <ams_env_pill name="env_indicator"
+                  style_margin_left="#space_xxs" temp_text="ams_env_ind_detail_temp_text"
+                  humidity_text="ams_env_ind_detail_humidity_text" humidity="ams_env_ind_detail_humidity"
+                  humidity_status="ams_env_ind_detail_humidity_status"
+                  humidity_visible="ams_env_ind_detail_humidity_visible" visible="ams_env_ind_detail_visible"
+                  drying_active="ams_env_ind_detail_drying_active" drying_text="ams_env_ind_detail_drying_text"/>
   </view>
 </component>

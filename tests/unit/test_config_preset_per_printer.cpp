@@ -4,14 +4,14 @@
 // #1162: the "preset" marker lived at the config root while every other piece
 // of printer configuration sat under /printers/<id>/. Configuring a second
 // printer overwrote the first printer's marker, and consumers of get_preset()
-// (PanelWidgetConfig::try_populate_from_preset_seed, the wizard's step
+// (PanelWidgetConfig's preset overlay, the wizard's step
 // collapsing in wizard_step_registry.cpp) then read the wrong printer's preset.
 //
 // Storage is per-printer now, with lift_root_preset() in Config::init() moving
 // a legacy root-level marker into the active printer. That lift is deliberately
 // NOT a versioned migration — scripts/lib/installer/printer_seed.sh writes the
 // root key with setdefault() on --update too, into configs whose config_version
-// is already CURRENT_CONFIG_VERSION — so the lift tests below all seed at the
+// is already kCurrentConfigVersion — so the lift tests below all seed at the
 // current version to prove the version gate is not what drives them.
 //
 // Lift tests go through the public Config::init() path (lift_root_preset is a
@@ -42,7 +42,7 @@ class TwoPrinterPresetFixture : public HelixTestFixture {
     Config config;
 
     TwoPrinterPresetFixture() {
-        ConfigTestAccess::data(config) = {{"config_version", CURRENT_CONFIG_VERSION},
+        ConfigTestAccess::data(config) = {{"config_version", kCurrentConfigVersion},
                                           {"active_printer_id", "printer-a"},
                                           {"printers",
                                            {{"printer-a", {{"moonraker_host", "192.168.1.10"}}},
@@ -155,7 +155,7 @@ class RootPresetLiftFixture : public HelixTestFixture {
     static json two_printers(const json& extra_root, const json& printer_b_extra = json::object()) {
         json printer_b = {{"moonraker_host", "192.168.1.11"}, {"wizard_completed", true}};
         printer_b.update(printer_b_extra);
-        json c = {{"config_version", CURRENT_CONFIG_VERSION},
+        json c = {{"config_version", kCurrentConfigVersion},
                   {"active_printer_id", "printer-b"},
                   {"printers",
                    {{"printer-a", {{"moonraker_host", "192.168.1.10"}, {"preset", "ad5m"}}},

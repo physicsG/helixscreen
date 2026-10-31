@@ -16,8 +16,8 @@ namespace {
 
 /// Shared parser for every response that carries the queue (status and
 /// post_job both return `queue_state` + `queued_jobs` in result).
-JobQueueStatus parse_queue_status(const json& response) {
-    JobQueueStatus status;
+helix::JobQueueStatus parse_queue_status(const json& response) {
+    helix::JobQueueStatus status;
     const json* result = helix::json_util::find_member(response, "result");
     if (!result) {
         return status;
@@ -26,7 +26,7 @@ JobQueueStatus parse_queue_status(const json& response) {
     const json* queued_jobs = helix::json_util::find_member(*result, "queued_jobs");
     if (queued_jobs && queued_jobs->is_array()) {
         for (const auto& job : *queued_jobs) {
-            JobQueueEntry entry;
+            helix::JobQueueEntry entry;
             entry.job_id = helix::json_util::safe_string(job, "job_id", "");
             entry.filename = helix::json_util::safe_string(job, "filename", "");
             entry.time_added = helix::json_util::safe_double(job, "time_added", 0.0);
@@ -53,7 +53,7 @@ void MoonrakerQueueAPI::get_queue_status(StatusCallback on_success, ErrorCallbac
     client_.send_jsonrpc(
         "server.job_queue.status", json::object(),
         [on_success](const json& response) {
-            JobQueueStatus status = parse_queue_status(response);
+            helix::JobQueueStatus status = parse_queue_status(response);
             spdlog::debug("[Moonraker API] Job queue: state={}, {} jobs", status.queue_state,
                           status.queued_jobs.size());
             on_success(status);
@@ -98,7 +98,7 @@ void MoonrakerQueueAPI::add_job(const std::string& filename, StatusCallback on_s
     client_.send_jsonrpc(
         "server.job_queue.post_job", params,
         [on_success, filename](const json& response) {
-            JobQueueStatus status = parse_queue_status(response);
+            helix::JobQueueStatus status = parse_queue_status(response);
             spdlog::info("[Moonraker API] Job added to queue: {} ({} jobs now)", filename,
                          status.queued_jobs.size());
             on_success(status);

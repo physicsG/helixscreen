@@ -27,6 +27,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 
 #ifdef __ANDROID__
 #include <SDL.h>
@@ -67,8 +68,8 @@ bool buttonmatrix_button_area(lv_obj_t* obj, uint32_t btn_id, lv_area_t* out) {
 #define LV_KB_BTN(width) static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | (width))
 
 // Animation timing constants
-static constexpr int32_t KEYBOARD_SLIDE_DURATION_MS = 200;
-static constexpr int32_t KEYBOARD_EXIT_DURATION_MS = 150;
+static constexpr int32_t kKeyboardSlideDurationMs = 200;
+static constexpr int32_t kKeyboardExitDurationMs = 150;
 
 // ============================================================================
 // STATIC DATA
@@ -145,9 +146,31 @@ const KeyboardManager::AltCharMapping KeyboardManager::alt_char_map_[] = {
 };
 
 // Improved numeric keyboard with PERIOD
-// The numeric keypad lives in keyboard_layout_provider.cpp with every other
-// layout — it used to be duplicated here, registered against
-// LV_KEYBOARD_MODE_NUMBER and never displayed.
+static const char* const kb_map_num_improved[] = {
+    "1",   "2", "3", ICON_KEYBOARD_CLOSE, "\n",
+    "4",   "5", "6", ICON_CHECK,          "\n",
+    "7",   "8", "9", ICON_BACKSPACE,      "\n",
+    "+/-", "0", ".", ICON_CHEVRON_LEFT,   ICON_CHEVRON_RIGHT,
+    ""};
+
+static const lv_buttonmatrix_ctrl_t kb_ctrl_num_improved[] = {
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(2),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_POPOVER | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CHECKED | 1),
+    static_cast<lv_buttonmatrix_ctrl_t>(LV_BUTTONMATRIX_CTRL_CHECKED | 1)};
 
 // ============================================================================
 // SINGLETON INSTANCE
@@ -371,21 +394,13 @@ void KeyboardManager::apply_keyboard_mode() {
         layout_mode = KEYBOARD_LAYOUT_ALT_SYMBOLS;
         mode_name = "alternative symbols (#+= mode)";
         break;
-    case MODE_NUMERIC:
-        layout_mode = KEYBOARD_LAYOUT_NUMERIC;
-        mode_name = "numeric";
-        break;
     default:
         layout_mode = KEYBOARD_LAYOUT_ALPHA_LC;
         mode_name = "alpha lowercase (fallback)";
         break;
     }
 
-    const char* const* map = keyboard_layout_get_map(layout_mode, caps_lock_);
-    const lv_buttonmatrix_ctrl_t* ctrl_map = keyboard_layout_get_ctrl_map(layout_mode);
-
-    lv_buttonmatrix_set_map(keyboard_, map);
-    lv_buttonmatrix_set_ctrl_map(keyboard_, ctrl_map);
+    keyboard_layout_apply(keyboard_, layout_mode, caps_lock_);
 
     spdlog::debug("[KeyboardManager] Switched to {}", mode_name);
     lv_obj_invalidate(keyboard_);
@@ -439,6 +454,8 @@ void KeyboardManager::textarea_delete_event_cb(lv_event_t* e) {
 }
 
 void KeyboardManager::longpress_event_handler(lv_event_t* e) {
+    // HOLD_DECLINES_OK: the alternates popover picks its character on the release,
+    // so a hold here never ends the press.
     LVGL_SAFE_EVENT_CB_BEGIN("longpress_event_handler");
 
     auto& mgr = KeyboardManager::instance();
@@ -758,56 +775,6 @@ void KeyboardManager::keyboard_event_cb(lv_event_t* e) {
                     lv_textarea_delete_char(mgr.context_textarea_);
                 }
                 spdlog::trace("[KeyboardManager] Backspace");
-
-                // The numeric keypad's four extra keys. They had no handler at
-                // all while that layout was unreachable, so any of them would
-                // have fallen through and typed its own icon bytes.
-            } else if (btn_text && strcmp(btn_text, ICON_CHECK) == 0) {
-                // Confirm — the keypad's stand-in for Enter, which it has no
-                // room for. Fire READY so forms treat it as accepting the field.
-                if (mgr.context_textarea_) {
-                    lv_obj_send_event(mgr.context_textarea_, LV_EVENT_READY, nullptr);
-                }
-                spdlog::debug("[KeyboardManager] Numeric confirm");
-                mgr.hide();
-
-            } else if (btn_text && strcmp(btn_text, ICON_CHEVRON_LEFT) == 0) {
-                if (mgr.context_textarea_) {
-                    lv_textarea_cursor_left(mgr.context_textarea_);
-                }
-                spdlog::trace("[KeyboardManager] Cursor left");
-
-            } else if (btn_text && strcmp(btn_text, ICON_CHEVRON_RIGHT) == 0) {
-                if (mgr.context_textarea_) {
-                    lv_textarea_cursor_right(mgr.context_textarea_);
-                }
-                spdlog::trace("[KeyboardManager] Cursor right");
-
-            } else if (btn_text && strcmp(btn_text, "+/-") == 0) {
-                // Toggle a leading minus. Done by rewriting the text rather than
-                // inserting a character, so it works wherever the cursor happens
-                // to be and can never produce "1-2".
-                if (mgr.context_textarea_) {
-                    const char* cur = lv_textarea_get_text(mgr.context_textarea_);
-                    if (cur != nullptr) {
-                        // Everything read off `cur` happens BEFORE set_text:
-                        // lv_textarea_get_text() returns the label's live
-                        // buffer, and lv_textarea_set_text() frees and
-                        // reallocates it. Reading cur[0] after the set was a
-                        // use-after-free that decided the cursor position.
-                        const bool had_minus = (cur[0] == '-');
-                        std::string next =
-                            had_minus ? std::string(cur + 1) : ("-" + std::string(cur));
-                        // Cursor position is in characters, so dropping or adding
-                        // the sign shifts it by exactly one either way.
-                        const uint32_t pos = lv_textarea_get_cursor_pos(mgr.context_textarea_);
-                        lv_textarea_set_text(mgr.context_textarea_, next.c_str());
-                        lv_textarea_set_cursor_pos(
-                            mgr.context_textarea_,
-                            static_cast<int32_t>(had_minus ? (pos > 0 ? pos - 1 : 0) : pos + 1));
-                    }
-                }
-                spdlog::trace("[KeyboardManager] Sign toggle");
             }
         } else {
             // Regular printing key — insert text into textarea
@@ -839,7 +806,7 @@ namespace {
 /// Largest share of a key's height an alternate-character hint may occupy. Above
 /// roughly a third the glyph starts crowding the key's own centred letter on small
 /// panels; well below it the hint looks lost on a large one.
-constexpr float HINT_MAX_KEY_FRACTION = 0.32f;
+constexpr float kHintMaxKeyFraction = 0.32f;
 
 /// Pick the largest theme font whose glyph fits comfortably on a key of this size.
 ///
@@ -847,13 +814,13 @@ constexpr float HINT_MAX_KEY_FRACTION = 0.32f;
 /// when even the smallest is too big, in which case the caller draws no hint rather
 /// than one that overlaps the key's letter.
 const lv_font_t* pick_hint_font(int32_t btn_h, int32_t btn_w) {
-    static const char* const CANDIDATES[] = {"font_xs", "font_small", "font_body", "font_heading"};
+    static const char* const kCandidates[] = {"font_xs", "font_small", "font_body", "font_heading"};
 
-    const int32_t max_h = static_cast<int32_t>(static_cast<float>(btn_h) * HINT_MAX_KEY_FRACTION);
+    const int32_t max_h = static_cast<int32_t>(static_cast<float>(btn_h) * kHintMaxKeyFraction);
     const lv_font_t* chosen = nullptr;
     const lv_font_t* smallest = nullptr;
 
-    for (const char* token : CANDIDATES) {
+    for (const char* token : kCandidates) {
         const lv_font_t* font = theme_manager_get_font(token);
         if (!font) {
             continue;
@@ -975,7 +942,7 @@ void KeyboardManager::keyboard_draw_alternative_chars(lv_event_t* e) {
                 // from roughly 48x34 at micro to 128x96 at xlarge, so any single font
                 // choice is wrong at one end: font_xs is illegible on a large panel,
                 // while font_small crowds the key's own centred letter on a small one.
-                // Picking the largest font that stays within HINT_MAX_KEY_FRACTION of
+                // Picking the largest font that stays within kHintMaxKeyFraction of
                 // the key height keeps the glyph visually proportional everywhere.
                 const lv_font_t* hint_font =
                     pick_hint_font(lv_area_get_height(&btn_area), lv_area_get_width(&btn_area));
@@ -1031,6 +998,58 @@ bool keyboard_animations_enabled() {
 #else
     return DisplaySettingsManager::instance().get_animations_enabled();
 #endif
+}
+
+// Where a page child is headed: a slide still in flight ends at its target, not
+// at the position it has reached so far.
+int32_t settled_y(lv_obj_t* child) {
+    lv_anim_t* a = lv_anim_get(child, (lv_anim_exec_xcb_t)lv_obj_set_y);
+    return a ? a->end_value : lv_obj_get_y(child);
+}
+
+// How far @p obj still has to move with its page before the page settles.
+int32_t pending_page_slide(lv_obj_t* screen, lv_obj_t* obj) {
+    while (obj && lv_obj_get_parent(obj) != screen) {
+        obj = lv_obj_get_parent(obj);
+    }
+    if (!obj || helix::ui::is_screen_chrome(obj)) {
+        return 0;
+    }
+    return settled_y(obj) - lv_obj_get_y(obj);
+}
+
+// Slides every page child of @p screen (the keyboard and screen chrome stay put)
+// to the y @p target_of returns for it, replacing any slide still in flight.
+void slide_page(lv_obj_t* screen, lv_obj_t* keyboard, lv_anim_path_cb_t path,
+                const std::function<int32_t(lv_obj_t*)>& target_of) {
+    const bool animated = keyboard_animations_enabled();
+    const uint32_t child_count = lv_obj_get_child_count(screen);
+    for (uint32_t i = 0; i < child_count; i++) {
+        lv_obj_t* child = lv_obj_get_child(screen, static_cast<int32_t>(i));
+        // Screen chrome (the navbar E-stop) is placed against the keyboard, not
+        // shifted with the page.
+        if (child == keyboard || helix::ui::is_screen_chrome(child))
+            continue;
+
+        const int32_t target_y = target_of(child);
+        lv_anim_delete(child, (lv_anim_exec_xcb_t)lv_obj_set_y);
+        const int32_t current_y = lv_obj_get_y(child);
+        if (current_y == target_y)
+            continue;
+        if (!animated) {
+            lv_obj_set_y(child, target_y);
+            continue;
+        }
+
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, child);
+        lv_anim_set_values(&a, current_y, target_y);
+        lv_anim_set_time(&a, 200);
+        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
+        lv_anim_set_path_cb(&a, path);
+        lv_anim_start(&a);
+    }
 }
 
 // Which depth treatment the keys get, resolved once: neither the hardware tier
@@ -1216,9 +1235,9 @@ void KeyboardManager::init(lv_obj_t* parent) {
     // transition anims. Passing nullptr instead is a crash: update_obj_state
     // dereferences the descriptor without a NULL check (LoadProhibited on the
     // first key press, on-device).
-    static const lv_style_prop_t NO_TRANSITION_PROPS[] = {LV_STYLE_PROP_INV};
+    static const lv_style_prop_t kNoTransitionProps[] = {LV_STYLE_PROP_INV};
     static lv_style_transition_dsc_t s_no_transition;
-    lv_style_transition_dsc_init(&s_no_transition, NO_TRANSITION_PROPS, lv_anim_path_linear, 0, 0,
+    lv_style_transition_dsc_init(&s_no_transition, kNoTransitionProps, lv_anim_path_linear, 0, 0,
                                  nullptr);
     lv_obj_set_style_transition(keyboard_, &s_no_transition, LV_PART_MAIN);
     lv_obj_set_style_transition(keyboard_, &s_no_transition, LV_PART_MAIN | LV_STATE_PRESSED);
@@ -1243,13 +1262,8 @@ void KeyboardManager::init(lv_obj_t* parent) {
     lv_obj_remove_style(keyboard_, nullptr, LV_PART_ITEMS | LV_STATE_EDITED);
 #endif
 
-    // No lv_keyboard_set_map(LV_KEYBOARD_MODE_NUMBER, ...) here on purpose. The
-    // manager never drives LVGL's own mode table: every layout, the numeric one
-    // included, is applied straight to the button matrix by
-    // apply_keyboard_mode() (MODE_NUMERIC <- keyboard_hint="numeric"), and
-    // nothing ever switches the widget into MODE_NUMBER -- lv_keyboard_def_event_cb
-    // is removed above and only ever toggles TEXT/SPECIAL anyway. A registration
-    // here looked like a second live route to the keypad and was not.
+    lv_keyboard_set_map(keyboard_, LV_KEYBOARD_MODE_NUMBER, kb_map_num_improved,
+                        kb_ctrl_num_improved);
 
     spdlog::debug("[KeyboardManager] Using keyboard with long-press alternatives");
     mode_ = MODE_ALPHA_LC;
@@ -1414,10 +1428,7 @@ void KeyboardManager::show(lv_obj_t* textarea) {
     KeyboardHint hint = ui_text_input_get_keyboard_hint(textarea);
 
     if (hint == KeyboardHint::NUMERIC) {
-        // The digits-only layout, NOT the ?123 page: a field that can only hold
-        // a number has no use for a full symbol set, and offering one invites
-        // input the field then has to reject.
-        mode_ = MODE_NUMERIC;
+        mode_ = MODE_NUMBERS_SYMBOLS;
         spdlog::debug("[KeyboardManager] Using NUMERIC keyboard hint");
     } else {
         mode_ = MODE_ALPHA_LC;
@@ -1445,7 +1456,7 @@ void KeyboardManager::show(lv_obj_t* textarea) {
         lv_anim_init(&slide_anim);
         lv_anim_set_var(&slide_anim, keyboard_);
         lv_anim_set_values(&slide_anim, keyboard_height, 0);
-        lv_anim_set_time(&slide_anim, KEYBOARD_SLIDE_DURATION_MS);
+        lv_anim_set_time(&slide_anim, kKeyboardSlideDurationMs);
         lv_anim_set_path_cb(&slide_anim, lv_anim_path_ease_out);
         lv_anim_set_exec_cb(&slide_anim, [](void* obj, int32_t value) {
             lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), value, LV_PART_MAIN);
@@ -1463,44 +1474,18 @@ void KeyboardManager::show(lv_obj_t* textarea) {
     lv_obj_get_coords(keyboard_, &kb_coords);
     lv_obj_get_coords(textarea, &ta_coords);
 
-    int32_t kb_top = kb_coords.y1;
-    int32_t ta_bottom = ta_coords.y2;
-
+    // Measured where the page is headed: focus moving between fields runs hide()
+    // then show() in one event, so the page may be sliding back down from the
+    // previous field's lift.
     const int32_t padding = 20;
-    int32_t desired_bottom = kb_top - padding;
+    const int32_t desired_bottom = kb_coords.y1 - padding;
+    const int32_t ta_bottom = ta_coords.y2 + pending_page_slide(screen, textarea);
 
     if (ta_bottom > desired_bottom) {
-        int32_t shift_up = ta_bottom - desired_bottom;
-
+        const int32_t shift_up = ta_bottom - desired_bottom;
         spdlog::debug("[KeyboardManager] Shifting screen UP by {} px", shift_up);
-
-        uint32_t child_count = lv_obj_get_child_count(screen);
-        bool animations_enabled = keyboard_animations_enabled();
-
-        for (uint32_t i = 0; i < child_count; i++) {
-            lv_obj_t* child = lv_obj_get_child(screen, static_cast<int32_t>(i));
-            // Screen chrome (the navbar E-stop) is placed against the keyboard, not
-            // shifted with the page.
-            if (child == keyboard_ || helix::ui::is_screen_chrome(child))
-                continue;
-
-            int32_t current_y = lv_obj_get_y(child);
-            int32_t target_y = current_y - shift_up;
-
-            if (!animations_enabled) {
-                lv_obj_set_y(child, target_y);
-                continue;
-            }
-
-            lv_anim_t a;
-            lv_anim_init(&a);
-            lv_anim_set_var(&a, child);
-            lv_anim_set_values(&a, current_y, target_y);
-            lv_anim_set_time(&a, 200);
-            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
-            lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-            lv_anim_start(&a);
-        }
+        slide_page(screen, keyboard_, lv_anim_path_ease_out,
+                   [shift_up](lv_obj_t* child) { return settled_y(child) - shift_up; });
     }
 }
 
@@ -1552,7 +1537,7 @@ void KeyboardManager::hide() {
         lv_anim_init(&slide_anim);
         lv_anim_set_var(&slide_anim, keyboard_);
         lv_anim_set_values(&slide_anim, 0, keyboard_height);
-        lv_anim_set_time(&slide_anim, KEYBOARD_EXIT_DURATION_MS);
+        lv_anim_set_time(&slide_anim, kKeyboardExitDurationMs);
         lv_anim_set_path_cb(&slide_anim, lv_anim_path_ease_in);
         lv_anim_set_exec_cb(&slide_anim, [](void* obj, int32_t value) {
             lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), value, LV_PART_MAIN);
@@ -1567,33 +1552,8 @@ void KeyboardManager::hide() {
         lv_obj_add_flag(keyboard_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    uint32_t child_count = lv_obj_get_child_count(screen);
-    bool animations_enabled = keyboard_animations_enabled();
-
     spdlog::debug("[KeyboardManager] Restoring screen children to y=0");
-
-    for (uint32_t i = 0; i < child_count; i++) {
-        lv_obj_t* child = lv_obj_get_child(screen, static_cast<int32_t>(i));
-        if (child == keyboard_ || helix::ui::is_screen_chrome(child))
-            continue;
-
-        int32_t current_y = lv_obj_get_y(child);
-        if (current_y != 0) {
-            if (!animations_enabled) {
-                lv_obj_set_y(child, 0);
-                continue;
-            }
-
-            lv_anim_t a;
-            lv_anim_init(&a);
-            lv_anim_set_var(&a, child);
-            lv_anim_set_values(&a, current_y, 0);
-            lv_anim_set_time(&a, 200);
-            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
-            lv_anim_set_path_cb(&a, lv_anim_path_ease_in);
-            lv_anim_start(&a);
-        }
-    }
+    slide_page(screen, keyboard_, lv_anim_path_ease_in, [](lv_obj_t*) { return 0; });
 }
 
 bool KeyboardManager::is_visible() const {
@@ -1632,13 +1592,11 @@ void KeyboardManager::reset() {
     spdlog::debug("[KeyboardManager] Resetting state for soft restart");
 
     // Delete keyboard widget (child of m_screen, survives app_layout teardown).
-    // reset() runs from tear_down_printer_state(), which one caller
-    // (cancel_add_printer_wizard) wraps in queue_update — so a synchronous
-    // lv_obj_del here would be one of multiple sync deletes in a single
-    // UpdateQueue batch (with overlay_ + m_app_layout), the #776/[L081] event-list
-    // corruption pattern. Cancel anims first, then defer the delete out of the
-    // batch. safe_delete_deferred() nulls keyboard_ synchronously so init() can
-    // rebuild immediately, and reparents + async-deletes on the next drain.
+    // reset() runs from tear_down_printer_state(), whose callers may be inside an
+    // input event or a queued callback, where several synchronous deletes are the
+    // #776/[L081] event-list corruption pattern. Cancel anims first, then defer the
+    // delete. safe_delete_deferred() nulls keyboard_ synchronously so init() can
+    // rebuild immediately, and reparents + async-deletes it later.
     if (keyboard_) {
         lv_anim_delete(keyboard_, nullptr); // Cancel pending slide animations
         helix::ui::safe_delete_deferred(keyboard_);

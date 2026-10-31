@@ -13,17 +13,9 @@
 #include "../catch_amalgamated.hpp"
 
 // Test fixture for temperature graph tests
-class TempGraphTestFixture {
+class TempGraphTestFixture : public LVGLTestFixture {
   public:
     TempGraphTestFixture() {
-        // Initialize LVGL for testing (safe version avoids "already initialized" warnings)
-        lv_init_safe();
-
-        // Create a display for testing (headless)
-        lv_display_t* disp = lv_display_create(800, 480);
-        alignas(64) static lv_color_t buf1[800 * 10];
-        lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
-
         // Create a screen object to use as parent
         screen = lv_obj_create(NULL);
     }

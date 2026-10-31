@@ -5,7 +5,7 @@
 // and the viewer that measures it are SIBLINGS in one subtree, so teardown can
 // destroy them in either order.
 //
-// ui_gcode_viewer_set_bottom_occluder() registers an LV_EVENT_DELETE handler
+// helix::ui::gcode_viewer_set_bottom_occluder() registers an LV_EVENT_DELETE handler
 // ON the occluder that reaches back INTO the viewer through user_data. That
 // covers the occluder-dies-first order. The other order was unguarded:
 // obj_delete_core (lv_obj_tree.c:761) sends LV_EVENT_DELETE, then clears only
@@ -58,7 +58,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     REQUIRE(parent != nullptr);
 
     // Sibling order mirrors the shipped layouts: viewer first, occluder second.
-    lv_obj_t* viewer = ui_gcode_viewer_create(parent);
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
     lv_obj_t* occluder = lv_obj_create(parent);
     REQUIRE(occluder != nullptr);
@@ -66,7 +66,7 @@ TEST_CASE_METHOD(LVGLTestFixture,
     const uint32_t baseline = lv_obj_get_event_count(occluder);
     const uintptr_t viewer_addr = reinterpret_cast<uintptr_t>(viewer);
 
-    ui_gcode_viewer_set_bottom_occluder(viewer, occluder);
+    helix::ui::gcode_viewer_set_bottom_occluder(viewer, occluder);
     REQUIRE(callbacks_pointing_at(occluder, viewer_addr) == 1);
 
     lv_obj_delete(viewer);
@@ -86,12 +86,12 @@ TEST_CASE_METHOD(LVGLTestFixture,
                  "[gcode_viewer][occluder][lifetime][1347]") {
     lv_obj_t* parent = lv_obj_create(lv_screen_active());
     REQUIRE(parent != nullptr);
-    lv_obj_t* viewer = ui_gcode_viewer_create(parent);
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
     lv_obj_t* occluder = lv_obj_create(parent);
     REQUIRE(occluder != nullptr);
 
-    ui_gcode_viewer_set_bottom_occluder(viewer, occluder);
+    helix::ui::gcode_viewer_set_bottom_occluder(viewer, occluder);
 
     // Reverse order. The occluder's own handler must clear the viewer's stored
     // pointer, or the viewer's delete path below walks freed memory trying to
@@ -106,7 +106,7 @@ TEST_CASE_METHOD(LVGLTestFixture, "gcode viewer: replacing the occluder detaches
                  "[gcode_viewer][occluder][lifetime][1347]") {
     lv_obj_t* parent = lv_obj_create(lv_screen_active());
     REQUIRE(parent != nullptr);
-    lv_obj_t* viewer = ui_gcode_viewer_create(parent);
+    lv_obj_t* viewer = helix::ui::gcode_viewer_create(parent);
     REQUIRE(viewer != nullptr);
     lv_obj_t* first = lv_obj_create(parent);
     lv_obj_t* second = lv_obj_create(parent);
@@ -115,12 +115,12 @@ TEST_CASE_METHOD(LVGLTestFixture, "gcode viewer: replacing the occluder detaches
 
     const uintptr_t viewer_addr = reinterpret_cast<uintptr_t>(viewer);
 
-    ui_gcode_viewer_set_bottom_occluder(viewer, first);
+    helix::ui::gcode_viewer_set_bottom_occluder(viewer, first);
     REQUIRE(callbacks_pointing_at(first, viewer_addr) == 1);
 
     // A strip swapped out must stop reporting, or its later delete clears a
     // reference that now belongs to the replacement.
-    ui_gcode_viewer_set_bottom_occluder(viewer, second);
+    helix::ui::gcode_viewer_set_bottom_occluder(viewer, second);
     CHECK(callbacks_pointing_at(first, viewer_addr) == 0);
     CHECK(callbacks_pointing_at(second, viewer_addr) == 1);
 

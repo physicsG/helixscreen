@@ -5,6 +5,7 @@
 
 #include "display_settings_manager.h"
 #include "format_utils.h"
+#include "i18n_plural.h"
 #include "locale_formats.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 
@@ -13,24 +14,12 @@
 
 namespace helix::ui {
 
-std::string format_layer_progress(int current, int total, bool accurate, int z_centimm) {
-    // "~" marks a count guessed from the progress fraction. Slicer/Moonraker
-    // fields and Z-height-derived layers are both accurate (Mainsail parity).
-    const char* marker = accurate ? "" : "~";
-    char buf[64];
-    if (total > 0) {
-        snprintf(buf, sizeof(buf), "%s %s%d / %d", lv_tr("Layer"), marker, current, total);
-    } else {
-        snprintf(buf, sizeof(buf), "%s %s%d", lv_tr("Layer"), marker, current);
-    }
-
-    std::string out(buf);
-    if (z_centimm > 0) {
-        char z_buf[24];
-        snprintf(z_buf, sizeof(z_buf), " (%.1fmm)", z_centimm / 100.0);
-        out += z_buf;
-    }
-    return out;
+std::string format_layer_z(int z_centimm) {
+    if (z_centimm <= 0)
+        return {};
+    char buf[24];
+    snprintf(buf, sizeof(buf), "· %.1fmm", z_centimm / 100.0);
+    return buf;
 }
 
 std::string format_layer_progress_compact(int current, int total, bool accurate, int z_centimm) {
@@ -43,11 +32,9 @@ std::string format_layer_progress_compact(int current, int total, bool accurate,
     }
 
     std::string out(buf);
-    if (z_centimm > 0) {
-        char z_buf[24];
-        snprintf(z_buf, sizeof(z_buf), " · %.1fmm", z_centimm / 100.0);
-        out += z_buf;
-    }
+    const std::string z = format_layer_z(z_centimm);
+    if (!z.empty())
+        out += " " + z;
     return out;
 }
 
@@ -71,12 +58,8 @@ std::string format_layer_count(uint32_t layer_count) {
     if (layer_count == 0) {
         return helix::format::UNAVAILABLE;
     }
-    char buf[32];
-    if (layer_count == 1) {
-        snprintf(buf, sizeof(buf), "%s", lv_tr("1 layer"));
-    } else {
-        snprintf(buf, sizeof(buf), lv_tr("%u layers"), layer_count);
-    }
+    char buf[48];
+    snprintf(buf, sizeof(buf), tr_plural("1 layer", "%u layers", layer_count), layer_count);
     return std::string(buf);
 }
 
@@ -176,22 +159,33 @@ std::string format_time_with_seconds(const struct tm* tm_info) {
     return result;
 }
 
-std::string format_modified_date(time_t timestamp) {
+// Applies a struct-tm formatter to a timestamp in local time; "Unknown" when
+// the timestamp cannot be converted.
+template <typename Formatter>
+static std::string format_local_time(time_t timestamp, Formatter format) {
     struct tm tm_buf;
-    struct tm* timeinfo = localtime_r(&timestamp, &tm_buf);
+    const struct tm* timeinfo = localtime_r(&timestamp, &tm_buf);
     if (!timeinfo) {
         return "Unknown";
     }
-    return format_localized_modified_date(timeinfo);
+    return format(timeinfo);
+}
+
+std::string format_modified_date(time_t timestamp) {
+    return format_local_time(timestamp, format_localized_modified_date);
 }
 
 std::string format_short_date(time_t timestamp) {
-    struct tm tm_buf;
-    struct tm* timeinfo = localtime_r(&timestamp, &tm_buf);
-    if (!timeinfo) {
-        return "Unknown";
-    }
-    return format_localized_short_date(timeinfo);
+    return format_local_time(timestamp, format_localized_short_date);
+}
+
+std::string format_month_day(time_t timestamp) {
+    return format_local_time(timestamp, format_localized_month_day);
+}
+
+std::string format_time(time_t timestamp) {
+    return format_local_time(timestamp,
+                             [](const struct tm* tm_info) { return format_time(tm_info); });
 }
 
 std::string format_relative_time(uint64_t elapsed_ms) {
@@ -199,29 +193,38 @@ std::string format_relative_time(uint64_t elapsed_ms) {
         return lv_tr("Just now");
     }
     if (elapsed_ms < 3600000) { // < 1 hour
-        uint64_t mins = elapsed_ms / 60000;
-        if (mins == 1) {
-            return lv_tr("1 min ago");
-        }
-        char buf[32];
-        snprintf(buf, sizeof(buf), lv_tr("%lu min ago"), static_cast<unsigned long>(mins));
+        const auto mins = static_cast<unsigned long>(elapsed_ms / 60000);
+        char buf[48];
+        snprintf(buf, sizeof(buf), tr_plural("1 min ago", "%lu min ago", mins), mins);
         return buf;
     }
     if (elapsed_ms < 86400000) { // < 1 day
-        uint64_t hours = elapsed_ms / 3600000;
-        if (hours == 1) {
-            return lv_tr("1 hour ago");
-        }
-        char buf[32];
-        snprintf(buf, sizeof(buf), lv_tr("%lu hours ago"), static_cast<unsigned long>(hours));
+        const auto hours = static_cast<unsigned long>(elapsed_ms / 3600000);
+        char buf[48];
+        snprintf(buf, sizeof(buf), tr_plural("1 hour ago", "%lu hours ago", hours), hours);
         return buf;
     }
-    uint64_t days = elapsed_ms / 86400000;
-    if (days == 1) {
-        return lv_tr("1 day ago");
+    const auto days = static_cast<unsigned long>(elapsed_ms / 86400000);
+    char buf[48];
+    snprintf(buf, sizeof(buf), tr_plural("1 day ago", "%lu days ago", days), days);
+    return buf;
+}
+
+std::string format_uptime(int total_seconds) {
+    constexpr int kSecondsPerDay = 24 * 60 * 60;
+    std::string span;
+    if (total_seconds < 0) {
+        span = "--";
+    } else if (total_seconds < kSecondsPerDay) {
+        span = helix::format::duration(total_seconds);
+    } else {
+        char days_buf[32];
+        snprintf(days_buf, sizeof(days_buf), lv_tr("%dd %dh"), total_seconds / kSecondsPerDay,
+                 (total_seconds % kSecondsPerDay) / 3600);
+        span = days_buf;
     }
-    char buf[32];
-    snprintf(buf, sizeof(buf), lv_tr("%lu days ago"), static_cast<unsigned long>(days));
+    char buf[64];
+    snprintf(buf, sizeof(buf), lv_tr("Up: %s"), span.c_str());
     return buf;
 }
 

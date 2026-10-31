@@ -3,39 +3,41 @@
 
 #pragma once
 
-#ifdef HELIX_ENABLE_SCREENSAVER
+#if HELIX_ENABLE_SCREENSAVER
 
 #include "screensaver_base.h"
 #include "screensaver_motion.h"
 
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <lvgl.h>
 #include <optional>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace helix::screensaver_bounce {
 
 /// Room the sprite must leave on each axis for the bounce to read as a bounce.
-inline constexpr int MIN_RANGE_PX = 48;
+inline constexpr int kMinRangePx = 48;
 
 /// Sprite edge as a fraction of the screen's narrow axis.
-inline constexpr float SPRITE_FRACTION = 0.28f;
+inline constexpr float kSpriteFraction = 0.28f;
 
 /**
  * @brief Longest sprite edge for a screen, or 0 when the screen cannot host a bounce
  *
  * Sized off the narrow axis, then held below what would leave less than
- * MIN_RANGE_PX of travel. 480x320 yields a 90px box over a 390x230 range.
+ * kMinRangePx of travel. 480x320 yields a 90px box over a 390x230 range.
  */
 inline int sprite_size_for(int screen_w, int screen_h) {
     const int narrow = (screen_w < screen_h) ? screen_w : screen_h;
-    int target = static_cast<int>(std::lround(SPRITE_FRACTION * static_cast<float>(narrow)));
+    int target = static_cast<int>(std::lround(kSpriteFraction * static_cast<float>(narrow)));
     if (target > 320) {
         target = 320;
     }
-    const int ceiling = narrow - MIN_RANGE_PX;
+    const int ceiling = narrow - kMinRangePx;
     if (target > ceiling) {
         target = ceiling;
     }
@@ -95,6 +97,17 @@ class BouncingPrinterScreensaver : public helix::ui::SaverBase {
     }
 
   protected:
+    /// LVGL path of the image that bounces on a screen `screen_w` pixels wide
+    virtual std::string sprite_path(int screen_w) const;
+    /// What bounces, for log lines
+    virtual const char* subject_name() const {
+        return "printer";
+    }
+    /// Whether walls change the tint and a corner flashes and throws confetti
+    virtual bool decorated() const {
+        return true;
+    }
+
     /// The sprite is an LVGL image on the overlay; there is no canvas.
     std::optional<lv_color_format_t> canvas_format() const override {
         return std::nullopt;
@@ -103,20 +116,25 @@ class BouncingPrinterScreensaver : public helix::ui::SaverBase {
     void on_frame(uint32_t dt_ms, std::vector<helix::ui::DirtyRect>& dirty) override;
     void on_stop() override;
     size_t ladder_size() const override {
-        return sizeof(LEVEL_PERIODS_MS) / sizeof(LEVEL_PERIODS_MS[0]);
+        return std::size(kLevels);
     }
     uint32_t ladder_period_ms(size_t level) const override {
-        return LEVEL_PERIODS_MS[level];
+        return helix::ui::ladder_period(kLevels, level);
     }
 
   private:
     friend class BounceTestAccess;
 
-    /// Frame period per level: 16 ms with confetti corners, 33 ms with confetti corners, 33 ms
-    /// with the corner flash alone.
-    static constexpr uint32_t LEVEL_PERIODS_MS[] = {helix::ui::SAVER_FAST_PERIOD, 33, 33};
-    /// First level that celebrates a corner with the flash alone.
-    static constexpr size_t FLASH_ONLY_LEVEL = 2;
+    struct Level {
+        uint32_t period_ms; ///< frame period in ms
+        bool confetti;      ///< a corner throws confetti as well as flashing
+    };
+    /// The ladder, most expensive level first.
+    static constexpr Level kLevels[] = {
+        {helix::ui::kSaverFastPeriod, true},
+        {33, true},
+        {33, false},
+    };
 
     /// Decode the active printer image into a persistent draw buffer
     bool decode_sprite();
@@ -163,6 +181,28 @@ class BouncingPrinterScreensaver : public helix::ui::SaverBase {
 
     int color_index_ = 0;
     int corner_flash_ticks_ = 0;
+};
+
+/**
+ * @brief Bouncing Logo screensaver
+ *
+ * The bouncing printer's motion with the HelixScreen logo as the sprite, in its own
+ * colors on plain black: no tint, no corner flash, no confetti.
+ */
+class BouncingLogoScreensaver : public BouncingPrinterScreensaver {
+  public:
+    ScreensaverType type() const override {
+        return ScreensaverType::BOUNCING_LOGO;
+    }
+
+  protected:
+    std::string sprite_path(int screen_w) const override;
+    const char* subject_name() const override {
+        return "logo";
+    }
+    bool decorated() const override {
+        return false;
+    }
 };
 
 } // namespace helix

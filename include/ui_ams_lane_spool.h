@@ -18,7 +18,7 @@ extern "C" {
  * empty-lane placeholder and the error dot. All of it is driven by AmsState's
  * per-slot subjects:
  *
- * - ams_slot_N_lane_state  -> Present (full strength) / Ghosted (GHOST_OPA,
+ * - ams_slot_N_lane_state  -> Present (full strength) / Ghosted (kGhostOpa,
  *   "assigned, not present") / Empty (spool hidden, dashed placeholder)
  * - ams_slot_N_color       -> filament color
  * - ams_slot_N_fill        -> fill level (display_fill_pct encoding, -1 = no
@@ -57,7 +57,12 @@ namespace helix::ui {
 /// Slack the widget's root adds around the spool graphic so the lane badge,
 /// aligned to its corner, is not clipped. A caller laying out a fixed-width
 /// cell around the widget subtracts this to know what is left beside it.
-inline constexpr int32_t AMS_LANE_SPOOL_BADGE_MARGIN_PX = 8;
+inline constexpr int32_t kAmsLaneSpoolBadgeMarginPx = 8;
+
+/// True when /ams/spool_style asks for the pseudo-3D spools (the default),
+/// false for flat concentric rings. Every AMS surface that draws differently
+/// per style asks this, so the setting is read in one place.
+bool ams_spool_style_3d();
 
 /**
  * @brief Point an ams_lane_spool widget at a slot of a backend

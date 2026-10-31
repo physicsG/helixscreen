@@ -35,6 +35,8 @@
 #include "i_moonraker_api.h"
 #include "i_moonraker_client.h"
 #include "json_utils.h"
+#include "klipper_config_includes.h"
+#include "log_redact.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "moonraker_config_manager.h"
 #include "print_lifecycle_state.h"
@@ -42,6 +44,7 @@
 #include "replace_method_callback.h"
 #include "runtime_config.h"
 #include "spdlog/spdlog.h"
+#include "system/child_process.h"
 #include "system/config_trust.h"
 #include "system/helix_paths.h"
 #include "system/log_path_probe.h"
@@ -49,12 +52,17 @@
 #include "system/sha256_util.h"
 #include "system/telemetry_manager.h"
 #include "system/tls_trust.h"
+#include "system_power.h"
+#include "system_settings_manager.h"
 #include "text_io.h"
+#include "utils/network_validation.h"
 
 #include <cctype>
 #ifdef __ANDROID__
+#include "system/android_update_source.h"
 #include "system/http_android.h"
 #endif
+#include "platform_info.h"
 #include "platform_table.h"
 #include "version.h"
 
@@ -67,6 +75,8 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
@@ -87,20 +97,20 @@ using json = nlohmann::json;
 namespace {
 
 /// GitHub API URL for latest release
-constexpr const char* GITHUB_API_URL =
+constexpr const char* kGithubApiUrl =
     "https://api.github.com/repos/prestonbrown/helixscreen/releases/latest";
 
 /// GitHub API URL for all releases (beta channel uses this)
-constexpr const char* GITHUB_RELEASES_URL =
+constexpr const char* kGithubReleasesUrl =
     "https://api.github.com/repos/prestonbrown/helixscreen/releases";
 
 /// HTTP request timeout in seconds
-constexpr int HTTP_TIMEOUT_SECONDS = 30;
+constexpr int kHttpTimeoutSeconds = 30;
 
 /// How long the download worker waits for the LVGL thread to run the queued
 /// restart before doing it itself. Must comfortably exceed one main-loop tick;
 /// the only thing it guards against is a main loop that is no longer running.
-constexpr int RESTART_MARSHAL_TIMEOUT_MS = 5000;
+constexpr int kRestartMarshalTimeoutMs = 5000;
 
 /// Perform an HTTP GET using the best available stack.
 ///
@@ -115,12 +125,12 @@ static std::pair<int, std::string> do_http_get(const std::string& url,
     const std::string ua = HELIX_USER_AGENT;
 
 #ifdef __ANDROID__
-    return helix::android::https_get(url, ua, accept, HTTP_TIMEOUT_SECONDS);
+    return helix::android::https_get(url, ua, accept, kHttpTimeoutSeconds);
 #else
     auto req = std::make_shared<HttpRequest>();
     req->method = HTTP_GET;
     req->url = url;
-    req->timeout = HTTP_TIMEOUT_SECONDS;
+    req->timeout = kHttpTimeoutSeconds;
     req->headers["User-Agent"] = ua;
     if (!accept.empty()) {
         req->headers["Accept"] = accept;
@@ -134,8 +144,8 @@ static std::pair<int, std::string> do_http_get(const std::string& url,
 }
 
 /// Pre-update backup paths (fallback tier, defined in app_constants.h)
-using AppConstants::Update::config_backup_fallback;
-using AppConstants::Update::env_backup_fallback;
+using app_constants::update::config_backup_fallback;
+using app_constants::update::env_backup_fallback;
 
 /**
  * @brief Safely get string value from JSON, handling null
@@ -154,10 +164,76 @@ std::string json_string_or_empty(const json& j, const std::string& key) {
     return "";
 }
 
+/// "'mips' or 'k1'": the keys a lookup tried, for logs and errors.
+std::string describe_asset_keys(const std::vector<std::string>& asset_keys) {
+    std::string out;
+    for (const auto& key : asset_keys) {
+        out += (out.empty() ? "'" : " or '") + key + "'";
+    }
+    return out;
+}
+
+/// This build's release_asset_keys(), on the board it is running on.
+std::vector<std::string> this_build_release_asset_keys() {
+    return helix::platform::release_asset_keys(helix::platform::current_key(),
+                                               helix::board::current());
+}
+
+/// What this build runs on, for the "no build for the ..." refusal. A generic host has no
+/// board name, so its platform's name stands in ("Raspberry Pi").
+std::string this_board_display_name() {
+    const std::string name = helix::board::current_info().display_name;
+    return name.empty() ? helix::platform::display_name(helix::platform::current_key()) : name;
+}
+
+/// Picks @p platform_key's asset out of a GitHub release asset list into
+/// @p info. False, leaving @p info untouched, when the release has none.
+bool select_github_asset(const json& assets, const std::string& platform_key,
+                         UpdateChecker::ReleaseInfo& info) {
+    const std::string zip_name = "helixscreen-" + platform_key + ".zip";
+    const std::string platform_prefix = "helixscreen-" + platform_key + "-";
+    spdlog::info("[UpdateChecker] Platform key: '{}', prefer prefix '{}...tar.gz' else '{}'",
+                 platform_key, platform_prefix, zip_name);
+
+    std::string zip_url;
+    size_t zip_size = 0;
+    for (const auto& asset : assets) {
+        std::string name = asset.value("name", "");
+        // The version's 'v' must sit directly after the platform prefix:
+        // a longer platform key that extends this one (k1-dynamic for k1)
+        // carries the prefix too and must not be selected for the shorter
+        // key. Asset names are helixscreen-<plat>-v<version>.tar.gz.
+        const size_t after_prefix = platform_prefix.size();
+        if (name.size() > after_prefix + 1 && name[after_prefix] == 'v' &&
+            isdigit(static_cast<unsigned char>(name[after_prefix + 1])) &&
+            name.compare(0, after_prefix, platform_prefix) == 0 &&
+            name.find(".tar.gz") != std::string::npos) {
+            info.download_url = asset.value("browser_download_url", "");
+            info.download_bytes = asset.value("size", static_cast<size_t>(0));
+            spdlog::info("[UpdateChecker] Selected asset: {} ({} bytes)", name,
+                         info.download_bytes);
+            return true;
+        }
+        if (zip_url.empty() && name == zip_name) {
+            zip_url = asset.value("browser_download_url", "");
+            zip_size = asset.value("size", static_cast<size_t>(0));
+        }
+    }
+    if (zip_url.empty()) {
+        return false;
+    }
+    info.download_url = zip_url;
+    info.download_bytes = zip_size;
+    spdlog::info("[UpdateChecker] Selected zip asset (no tar.gz present): {} ({} bytes)", zip_name,
+                 info.download_bytes);
+    return true;
+}
+
 /**
  * @brief Parse ReleaseInfo from a GitHub release JSON object (already parsed)
  */
-bool parse_github_release(const json& j, UpdateChecker::ReleaseInfo& info, std::string& error) {
+bool parse_github_release(const json& j, UpdateChecker::ReleaseInfo& info, std::string& error,
+                          const std::vector<std::string>& asset_keys) {
     info.tag_name = json_string_or_empty(j, "tag_name");
     info.release_notes = json_string_or_empty(j, "body");
     info.published_at = json_string_or_empty(j, "published_at");
@@ -182,46 +258,17 @@ bool parse_github_release(const json& j, UpdateChecker::ReleaseInfo& info, std::
     // (mirrors the R2 manifest --include-zip gate). Once telemetry shows
     // v0.99.30 adoption is gone, this preference can flip back to zip.
     if (j.contains("assets") && j["assets"].is_array()) {
-        const std::string platform_key = helix::platform::current_key();
-        const std::string zip_name = "helixscreen-" + platform_key + ".zip";
-        const std::string platform_prefix = "helixscreen-" + platform_key + "-";
-        spdlog::info("[UpdateChecker] Platform key: '{}', prefer prefix '{}...tar.gz' else '{}'",
-                     platform_key, platform_prefix, zip_name);
-
-        std::string zip_url;
-        size_t zip_size = 0;
-        for (const auto& asset : j["assets"]) {
-            std::string name = asset.value("name", "");
-            // The version's 'v' must sit directly after the platform prefix:
-            // a longer platform key that extends this one (k1-dynamic for k1)
-            // carries the prefix too and must not be selected for the shorter
-            // key. Asset names are helixscreen-<plat>-v<version>.tar.gz.
-            const size_t after_prefix = platform_prefix.size();
-            if (name.size() > after_prefix + 1 && name[after_prefix] == 'v' &&
-                isdigit(static_cast<unsigned char>(name[after_prefix + 1])) &&
-                name.compare(0, after_prefix, platform_prefix) == 0 &&
-                name.find(".tar.gz") != std::string::npos) {
-                info.download_url = asset.value("browser_download_url", "");
-                info.download_bytes = asset.value("size", static_cast<size_t>(0));
-                spdlog::info("[UpdateChecker] Selected asset: {} ({} bytes)", name,
-                             info.download_bytes);
+        bool found = false;
+        for (const auto& key : asset_keys) {
+            if (select_github_asset(j["assets"], key, info)) {
+                found = true;
                 break;
             }
-            if (zip_url.empty() && name == zip_name) {
-                zip_url = asset.value("browser_download_url", "");
-                zip_size = asset.value("size", static_cast<size_t>(0));
-            }
-        }
-        if (info.download_url.empty() && !zip_url.empty()) {
-            info.download_url = zip_url;
-            info.download_bytes = zip_size;
-            spdlog::info("[UpdateChecker] Selected zip asset (no tar.gz present): {} ({} bytes)",
-                         zip_name, info.download_bytes);
         }
         // No fallback to arbitrary assets — wrong-platform binaries can brick devices
-        if (info.download_url.empty()) {
-            spdlog::warn("[UpdateChecker] No asset found for platform '{}' in release {}",
-                         platform_key, info.version);
+        if (!found && !asset_keys.empty()) {
+            spdlog::warn("[UpdateChecker] No asset found for platform {} in release {}",
+                         describe_asset_keys(asset_keys), info.version);
         }
     }
 
@@ -312,14 +359,14 @@ std::string fetch_changelog_for_version(const std::string& version) {
  * @param name Tool name (e.g., "tar", "cp", "gunzip")
  * @return Full absolute path if found, bare name as fallback (relies on $PATH)
  */
-constexpr const char* TOOL_SEARCH_DIRS[] = {"/usr/bin", "/bin",           "/usr/sbin",
-                                            "/sbin",    "/usr/local/bin", nullptr};
+constexpr const char* kToolSearchDirs[] = {"/usr/bin", "/bin",           "/usr/sbin",
+                                           "/sbin",    "/usr/local/bin", nullptr};
 
-/// Walk TOOL_SEARCH_DIRS for an executable `name`. Returns absolute path on
+/// Walk kToolSearchDirs for an executable `name`. Returns absolute path on
 /// the first hit, empty string when nothing is found.
 std::string find_tool_path(const std::string& name) {
-    for (int i = 0; TOOL_SEARCH_DIRS[i]; ++i) {
-        std::string path = std::string(TOOL_SEARCH_DIRS[i]) + "/" + name;
+    for (int i = 0; kToolSearchDirs[i]; ++i) {
+        std::string path = std::string(kToolSearchDirs[i]) + "/" + name;
         if (access(path.c_str(), X_OK) == 0) {
             return path;
         }
@@ -555,7 +602,7 @@ int extract_tar_member(const std::string& tarball_path, const std::string& extra
 /// python3 snippet: extract argv[2] from zip argv[1] into argv[3], restoring the
 /// member's unix mode bits (zipfile.extract() drops them) and forcing the exec
 /// bit on bin/* and *.sh so an extracted installer or binary is runnable.
-constexpr const char* PY_EXTRACT_SCRIPT =
+constexpr const char* kPyExtractScript =
     "import os, stat, sys, zipfile\n"
     "zip_path, member, destdir = sys.argv[1], sys.argv[2], sys.argv[3]\n"
     "try:\n"
@@ -632,16 +679,114 @@ std::string strip_version_prefix(const std::string& tag) {
  */
 bool parse_github_release(const std::string& json_str, UpdateChecker::ReleaseInfo& info,
                           std::string& error) {
+    return parse_github_release(json_str, info, error, this_build_release_asset_keys());
+}
+
+bool parse_github_release(const std::string& json_str, UpdateChecker::ReleaseInfo& info,
+                          std::string& error, const std::vector<std::string>& asset_keys) {
     try {
         auto j = json::parse(json_str);
         // :: reaches the anonymous-namespace json overload; unqualified lookup
-        // stops at this namespace and selects the string overload above.
-        return ::parse_github_release(j, info, error);
+        // stops at this namespace and selects the string overloads above.
+        return ::parse_github_release(j, info, error, asset_keys);
     } catch (const json::exception& e) {
         error = std::string("JSON parse error: ") + e.what();
         return false;
     } catch (const std::exception& e) {
         error = std::string("Parse error: ") + e.what();
+        return false;
+    }
+}
+
+bool release_has_build_for(const UpdateChecker::ReleaseInfo& info,
+                           const std::vector<std::string>& asset_keys) {
+    return asset_keys.empty() || !info.download_url.empty();
+}
+
+bool release_has_build_for_this_board(const UpdateChecker::ReleaseInfo& info) {
+    return release_has_build_for(info, this_build_release_asset_keys());
+}
+
+std::string no_build_message(const std::string& version, const std::string& board_name) {
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  lv_tr("v%s has no build for the %s, so it can't be installed here. Pick a "
+                        "channel with a newer release."),
+                  version.c_str(), board_name.c_str());
+    return buf;
+}
+
+CheckOutcome decide_check_outcome(const std::string& installed,
+                                  const UpdateChecker::ReleaseInfo& info) {
+    return decide_check_outcome(installed, info, this_build_release_asset_keys());
+}
+
+CheckOutcome decide_check_outcome(const std::string& installed,
+                                  const UpdateChecker::ReleaseInfo& info,
+                                  const std::vector<std::string>& asset_keys) {
+    CheckOutcome out;
+    switch (compare_channel_version(installed, info.version)) {
+    case ChannelVersionRelation::Older:
+        out.is_downgrade = true;
+        [[fallthrough]];
+    case ChannelVersionRelation::Newer:
+        // A release offered with nothing this board can install is refused up
+        // front, rather than as a dead Install button.
+        if (release_has_build_for(info, asset_keys)) {
+            out.status = UpdateChecker::Status::UpdateAvailable;
+        } else {
+            out.status = UpdateChecker::Status::Error;
+            out.is_downgrade = false;
+        }
+        break;
+    case ChannelVersionRelation::Same:
+    case ChannelVersionRelation::Unknown:
+    default:
+        out.status = UpdateChecker::Status::UpToDate;
+        break;
+    }
+    return out;
+}
+
+bool parse_release_manifest(const std::string& json_str, UpdateChecker::ReleaseInfo& info,
+                            std::string& error, const std::vector<std::string>& asset_keys) {
+    try {
+        auto j = json::parse(json_str);
+
+        info.version = json_string_or_empty(j, "version");
+        if (info.version.empty()) {
+            error = "Missing 'version' field in manifest";
+            return false;
+        }
+
+        info.tag_name = json_string_or_empty(j, "tag");
+        info.release_notes = json_string_or_empty(j, "notes");
+        info.published_at = json_string_or_empty(j, "published_at");
+
+        if (!j.contains("assets") || !j["assets"].is_object() || j["assets"].empty()) {
+            error = "Missing or empty 'assets' in manifest";
+            return false;
+        }
+
+        const auto& assets = j["assets"];
+        for (const auto& key : asset_keys) {
+            if (assets.contains(key)) {
+                spdlog::debug("[UpdateChecker] Manifest asset key: '{}'", key);
+                populate_release_urls_from_manifest(assets[key], info);
+                return true;
+            }
+        }
+        // Same as parse_github_release(): the version is real, the download stays
+        // empty, and the caller decides what a release with no build means.
+        if (asset_keys.empty()) {
+            return true;
+        }
+        spdlog::warn("[UpdateChecker] No asset found for platform {} in manifest {}",
+                     describe_asset_keys(asset_keys), info.version);
+        return true;
+
+    } catch (const json::exception& e) {
+        error = std::string("JSON parse error: ") + e.what();
         return false;
     }
 }
@@ -827,7 +972,9 @@ void UpdateChecker::render_version_text() {
         return;
     case Status::Error:
         snprintf(version_text_buf_, sizeof(version_text_buf_), lv_tr("Error: %s"),
-                 shown_.error.c_str());
+                 shown_.no_build_for_board
+                     ? no_build_message(shown_.version, this_board_display_name()).c_str()
+                     : shown_.error.c_str());
         break;
     case Status::Idle:
         lv_subject_copy_string(&version_text_subject_,
@@ -885,13 +1032,35 @@ std::string UpdateChecker::get_download_error() const {
 // Safety floor: even if the remote claims a tiny size, never accept a
 // candidate dir below this. Small enough to allow CI fixtures to pass while
 // large enough that a near-full embedded device doesn't slip through.
-static constexpr uint64_t DOWNLOAD_SPACE_FLOOR_BYTES = 50ULL * 1024 * 1024;
+static constexpr uint64_t kDownloadSpaceFloorBytes = 50ULL * 1024 * 1024;
 
 // Used when the caller doesn't know the remote size (manifest schemas that
 // omit size/zip_size, or any parse failure). Sized to cover the largest
 // current platform tarball (~75 MB on x86) with ~1.6× safety margin without
 // over-blocking users on tight rootfs. Bump in lockstep if archives grow.
-static constexpr uint64_t DOWNLOAD_SPACE_DEFAULT_BYTES = 120ULL * 1024 * 1024;
+static constexpr uint64_t kDownloadSpaceDefaultBytes = 120ULL * 1024 * 1024;
+
+/// The device's host name and the login it runs under, for scrubbing text bound
+/// for telemetry. From the environment, not getpwuid(): a static glibc build
+/// cannot load NSS.
+static std::vector<std::string> device_identifiers() {
+    std::vector<std::string> ids;
+    char host[256] = {};
+    if (gethostname(host, sizeof(host) - 1) == 0 && host[0])
+        ids.emplace_back(host);
+    for (const char* var : {"USER", "LOGNAME", "SUDO_USER"}) {
+        const char* v = std::getenv(var);
+        if (v && *v && std::string(v) != "root")
+            ids.emplace_back(v);
+    }
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        std::string h(home);
+        const std::string leaf = h.substr(h.find_last_of('/') + 1);
+        if (!leaf.empty() && leaf != "root")
+            ids.push_back(leaf);
+    }
+    return ids;
+}
 
 // The filename used to stage the downloaded archive in TMP_DIR. The name
 // matches whatever format the release URL points at: zips keep a .zip
@@ -904,19 +1073,19 @@ static constexpr uint64_t DOWNLOAD_SPACE_DEFAULT_BYTES = 120ULL * 1024 * 1024;
 // free-space search puts it. On boards whose gcodes root IS the data partition
 // (the AD5M symlinks /data whole into it) a plainly named archive shows up in
 // the user's print-file picker for the whole update.
-static const char* const DOWNLOAD_FILENAME = ".helixscreen-update.tar.gz";
-static const char* const DOWNLOAD_FILENAME_ZIP = ".helixscreen-update.zip";
+static const char* const kDownloadFilename = ".helixscreen-update.tar.gz";
+static const char* const kDownloadFilenameZip = ".helixscreen-update.zip";
 
 uint64_t UpdateChecker::required_download_space_bytes(uint64_t download_bytes) {
     // 20% headroom over the wire size + a small fixed buffer for the .partial
     // tail and filesystem overhead. install.sh runs its own ≥100 MB check
     // before extracting, so we don't need to oversize the staging here.
-    constexpr uint64_t FIXED_BUFFER = 10ULL * 1024 * 1024;
+    constexpr uint64_t kFixedBuffer = 10ULL * 1024 * 1024;
     if (download_bytes == 0) {
-        return DOWNLOAD_SPACE_DEFAULT_BYTES;
+        return kDownloadSpaceDefaultBytes;
     }
-    uint64_t need = (download_bytes * 6 / 5) + FIXED_BUFFER;
-    return need < DOWNLOAD_SPACE_FLOOR_BYTES ? DOWNLOAD_SPACE_FLOOR_BYTES : need;
+    uint64_t need = (download_bytes * 6 / 5) + kFixedBuffer;
+    return need < kDownloadSpaceFloorBytes ? kDownloadSpaceFloorBytes : need;
 }
 
 std::string UpdateChecker::install_failure_detail(const std::vector<std::string>& lines) {
@@ -957,6 +1126,37 @@ std::string UpdateChecker::install_failure_detail(const std::vector<std::string>
     return detail;
 }
 
+std::string
+UpdateChecker::install_failure_telemetry_detail(const std::vector<std::string>& lines,
+                                                const std::vector<std::string>& identifiers) {
+    constexpr size_t kMaxTelemetryDetail = 120;
+    return helix::redact::telemetry_text(install_failure_detail(lines), identifiers,
+                                         kMaxTelemetryDetail);
+}
+
+std::string UpdateChecker::telemetry_release_host(const std::string& host) {
+    static constexpr const char* kReleaseHosts[] = {
+        "releases.helixscreen.org",
+        "dl.helixscreen.org",
+        "helixscreen.org",
+        "github.com",
+        "api.github.com",
+        "codeload.github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "raw.githubusercontent.com",
+    };
+    if (host.empty())
+        return host;
+    std::string lower = host;
+    for (auto& c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* known : kReleaseHosts)
+        if (lower == known)
+            return lower;
+    return "other";
+}
+
 std::string UpdateChecker::service_dest_probe_error(const std::string& init_dir) {
     if (init_dir.empty()) {
         return "";
@@ -983,13 +1183,32 @@ std::string UpdateChecker::service_dest_probe_error(const std::string& init_dir)
     return fmt::format(lv_tr("Error: cannot write the service file in {}"), init_dir);
 }
 
+bool UpdateChecker::service_definition_installed(const std::string& init_dir) {
+    if (init_dir.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(init_dir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (!name.empty() && name[0] != '.' && name.find("helixscreen") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool UpdateChecker::update_writes_service_dest(bool is_root, bool systemd_init) {
+    return is_root && !systemd_init;
+}
+
 std::string UpdateChecker::init_service_dest_dir() {
     // Same resolution order as install.sh's detect_init_system: systemd when
     // it is running, else SysV. Empty means this host has no init destination
     // we know (a dev machine) and the installer's own pre-flight decides.
     struct stat st {};
-    if (stat("/run/systemd/system", &st) == 0 && S_ISDIR(st.st_mode) &&
-        stat("/etc/systemd/system", &st) == 0 && S_ISDIR(st.st_mode)) {
+    if (helix::host_runs_systemd() && stat("/etc/systemd/system", &st) == 0 &&
+        S_ISDIR(st.st_mode)) {
         return "/etc/systemd/system";
     }
     if (stat("/etc/init.d", &st) == 0 && S_ISDIR(st.st_mode)) {
@@ -999,7 +1218,7 @@ std::string UpdateChecker::init_service_dest_dir() {
 }
 
 std::string UpdateChecker::download_filename_for_url(const std::string& url) {
-    return path_is_zip(url) ? DOWNLOAD_FILENAME_ZIP : DOWNLOAD_FILENAME;
+    return path_is_zip(url) ? kDownloadFilenameZip : kDownloadFilename;
 }
 
 namespace {
@@ -1044,19 +1263,19 @@ std::string UpdateChecker::compute_update_staging_dir(const std::string& tarball
     // ALWAYS a dot-prefixed subdir — never the bare dir. TMP_DIR is rm -rf'd on
     // installer cleanup; handing it a bare mount/install dir would wipe live
     // data (past incident wiped a device partition passed as TMP_DIR).
-    static constexpr const char* STAGING_NAME = ".helix-update-staging";
+    static constexpr const char* kStagingName = ".helix-update-staging";
     if (base == "/") {
-        return std::string("/") + STAGING_NAME;
+        return std::string("/") + kStagingName;
     }
-    return base + "/" + STAGING_NAME;
+    return base + "/" + kStagingName;
 }
 
 std::string UpdateChecker::get_download_path(DownloadPathDiag* diag,
                                              uint64_t threshold_bytes) const {
     if (threshold_bytes == 0) {
-        threshold_bytes = DOWNLOAD_SPACE_DEFAULT_BYTES;
-    } else if (threshold_bytes < DOWNLOAD_SPACE_FLOOR_BYTES) {
-        threshold_bytes = DOWNLOAD_SPACE_FLOOR_BYTES;
+        threshold_bytes = kDownloadSpaceDefaultBytes;
+    } else if (threshold_bytes < kDownloadSpaceFloorBytes) {
+        threshold_bytes = kDownloadSpaceFloorBytes;
     }
     // Candidate directories, checked exhaustively — we pick the one with
     // the MOST free space so we don't fill up a tiny tmpfs or crowd out
@@ -1166,7 +1385,7 @@ std::string UpdateChecker::get_download_path(DownloadPathDiag* diag,
     if (best_dir.back() != '/') {
         best_dir += '/';
     }
-    return best_dir + DOWNLOAD_FILENAME;
+    return best_dir + kDownloadFilename;
 }
 
 std::string UpdateChecker::platform_asset_name() {
@@ -1302,6 +1521,18 @@ void UpdateChecker::start_download() {
     if (shutting_down_.load())
         return;
 
+#ifdef HELIX_PLATFORM_X86_DESKTOP
+    // The desktop build never rewrites its own install: Install Update opens the
+    // release page (UpdatesSettingsOverlay), and the installer it would run here
+    // treats every in-app update as the kiosk flavour.
+    spdlog::warn("[UpdateChecker] Download refused: the desktop build updates through its "
+                 "installer, not in-app");
+    report_download_status(DownloadStatus::Error, 0,
+                           lv_tr("Error: This install can't update itself"),
+                           "desktop build: install updates with the installer");
+    return;
+#endif
+
     // Firmware-managed devices own updates via their own package pipeline, and a
     // read-only / non-writable install tree can't be swapped at all. Never
     // self-download/install in either case — it would fight the firmware's setup
@@ -1336,14 +1567,21 @@ void UpdateChecker::start_download() {
     // Fail fast where the installer would refuse anyway: the service
     // definition is the one payload piece that lands on the root filesystem,
     // and on boards whose root overlay is full the installer refuses only
-    // AFTER the app has downloaded the whole archive. Root only — a non-root
-    // app never installs directly, and install.sh's pre-flight under sudo
-    // remains the authority.
+    // AFTER the app has downloaded the whole archive. Only where the update
+    // writes it (update_writes_service_dest); install.sh's pre-flight remains
+    // the authority. A self-update keeps an init script that is already
+    // installed, so with one present a failed probe is only worth a warning.
     {
         auto* rc = get_runtime_config();
-        if (geteuid() == 0 && !(rc && rc->test_mode)) {
-            const std::string failure = service_dest_probe_error(init_service_dest_dir());
-            if (!failure.empty()) {
+        if (update_writes_service_dest(geteuid() == 0, helix::host_runs_systemd()) &&
+            !(rc && rc->test_mode)) {
+            const std::string init_dir = init_service_dest_dir();
+            const std::string failure = service_dest_probe_error(init_dir);
+            if (!failure.empty() && service_definition_installed(init_dir)) {
+                spdlog::warn("[UpdateChecker] {} is full or read-only; continuing, the "
+                             "installed service definition is kept as it is",
+                             init_dir);
+            } else if (!failure.empty()) {
                 spdlog::error("[UpdateChecker] Service destination unwritable, not "
                               "downloading: {}",
                               failure);
@@ -1535,7 +1773,7 @@ void UpdateChecker::do_download() {
     if (path_is_zip(url)) {
         auto slash = download_path.find_last_of('/');
         std::string dir = (slash == std::string::npos) ? "" : download_path.substr(0, slash + 1);
-        download_path = dir + DOWNLOAD_FILENAME_ZIP;
+        download_path = dir + kDownloadFilenameZip;
     }
 
     spdlog::info("[UpdateChecker] Downloading {} to {}", url, download_path);
@@ -1562,7 +1800,8 @@ void UpdateChecker::do_download() {
     };
 
     // Download the file using libhv
-    size_t result = helix::tls::trusted_download(url, download_path, progress_cb);
+    helix::tls::TransferFailure transfer;
+    size_t result = helix::tls::trusted_download(url, download_path, progress_cb, &transfer);
 
     if (shutting_down_.load()) {
         // reap_download_thread() may have detached this thread and shutdown()
@@ -1580,12 +1819,20 @@ void UpdateChecker::do_download() {
     }
 
     if (result == 0) {
-        spdlog::error("[UpdateChecker] Download failed from {}", url);
+        const char* kind = helix::tls::failure_kind_name(transfer.kind);
+        spdlog::error("[UpdateChecker] Download failed from {}: {} (code {}, HTTP {}, host {})",
+                      url, *kind ? kind : "unknown", transfer.code, transfer.http_status,
+                      transfer.host);
         std::remove(download_path.c_str()); // Clean up partial download
         report_download_status(DownloadStatus::Error, 0, lv_tr("Error: Download failed"),
                                "Failed to download update file");
+        TelemetryManager::UpdateFailureDetail detail;
+        detail.transfer_error = kind;
+        detail.transfer_code = transfer.code;
+        detail.host = telemetry_release_host(transfer.host);
         TelemetryManager::instance().record_update_failure("download_failed", version,
-                                                           helix::platform::current_key());
+                                                           helix::platform::current_key(),
+                                                           transfer.http_status, -1, -1, detail);
         return;
     }
 
@@ -1750,7 +1997,7 @@ int UpdateChecker::extract_zip_member(const std::string& zip_path, const std::st
 
     const std::string py_bin = find_tool_path("python3");
     if (!py_bin.empty()) {
-        return safe_exec({py_bin, "-c", PY_EXTRACT_SCRIPT, zip_path, member, extract_dir});
+        return safe_exec({py_bin, "-c", kPyExtractScript, zip_path, member, extract_dir});
     }
 
     spdlog::error("[UpdateChecker] No unzip binary and no python3 — cannot extract '{}'", member);
@@ -1767,7 +2014,7 @@ UpdateChecker::ZipIntegrity UpdateChecker::verify_zip_integrity(const std::strin
         // Code 2 matters on the AD5M, whose python3.7 is built without zlib:
         // ZipFile() raises "Compression requires the (missing) zlib module" for
         // a deflated release zip, which must NOT be read as corruption.
-        static constexpr const char* TEST_SCRIPT =
+        static constexpr const char* kTestScript =
             "import sys\n"
             "try:\n"
             "    import zipfile, zlib\n"
@@ -1780,7 +2027,7 @@ UpdateChecker::ZipIntegrity UpdateChecker::verify_zip_integrity(const std::strin
             "    sys.exit(2)\n"
             "except Exception:\n"
             "    sys.exit(1)\n";
-        int ret = safe_exec({py_bin, "-c", TEST_SCRIPT, zip_path});
+        int ret = safe_exec({py_bin, "-c", kTestScript, zip_path});
         if (ret == 0) {
             return ZipIntegrity::Ok;
         }
@@ -1933,7 +2180,7 @@ void UpdateChecker::do_install(const std::string& tarball_path) {
             const std::string env_bak = env_backup_fallback();
 
             // Ensure fallback dir exists
-            std::string fallback_dir = AppConstants::Update::backup_fallback_dir();
+            std::string fallback_dir = app_constants::update::backup_fallback_dir();
             safe_exec({mkdir_bin, "-p", fallback_dir});
 
             struct stat st {};
@@ -2011,18 +2258,17 @@ void UpdateChecker::do_install(const std::string& tarball_path) {
     // own child processes, all writing during the install window.  5 MB is
     // ~10× the log's worst case and leaves enough room that "passed the
     // probe" means the FS is genuinely healthy, not marginal.
-    constexpr uint64_t MIN_INSTALL_LOG_FREE_BYTES = 5 * 1024 * 1024; // 5 MB
+    constexpr uint64_t kMinInstallLogFreeBytes = 5 * 1024 * 1024; // 5 MB
 
     std::string install_log = "/var/log/helixscreen-install.log";
     {
-        auto probe =
-            helix::system::probe_log_path_writable(install_log, MIN_INSTALL_LOG_FREE_BYTES);
+        auto probe = helix::system::probe_log_path_writable(install_log, kMinInstallLogFreeBytes);
         if (!probe.ok) {
             const std::string fallback = tarball_path + ".install.log";
             flog_warn("[UpdateChecker] {} not writable ({}), falling back to {}", install_log,
                       probe.error, fallback);
             install_log = fallback;
-            probe = helix::system::probe_log_path_writable(install_log, MIN_INSTALL_LOG_FREE_BYTES);
+            probe = helix::system::probe_log_path_writable(install_log, kMinInstallLogFreeBytes);
             if (!probe.ok) {
                 flog_error("[UpdateChecker] fallback log {} also not writable ({}); "
                            "install.sh stdout/stderr will be lost",
@@ -2125,8 +2371,8 @@ void UpdateChecker::do_install(const std::string& tarball_path) {
                 close(log_fd);
 
             constexpr int timeout_seconds = 600;
-            int status = 0;
-            bool exited = false;
+            constexpr auto kPollInterval = std::chrono::milliseconds(200);
+            constexpr auto kTermGrace = std::chrono::milliseconds(500);
 
             static constexpr const char* install_message_keys[] = {
                 "Still working...", "Almost there...", "Just a bit more...",
@@ -2135,45 +2381,53 @@ void UpdateChecker::do_install(const std::string& tarball_path) {
             constexpr int num_messages =
                 sizeof(install_message_keys) / sizeof(install_message_keys[0]);
 
-            for (int elapsed = 0; elapsed < timeout_seconds; ++elapsed) {
-                pid_t result = waitpid(pid, &status, WNOHANG);
-                if (result < 0) {
-                    flog_error("[UpdateChecker] waitpid(install) failed: {} (errno={})",
-                               strerror(errno), errno);
-                    break;
-                }
-                if (result > 0) {
-                    exited = true;
-                    flog_info("[UpdateChecker] install.sh (pid={}) exited after ~{}s", pid,
-                              elapsed);
-                    break;
-                }
-                if (elapsed > 0 && elapsed % 10 == 0) {
-                    flog_info("[UpdateChecker] Still waiting for install.sh pid={} ({}s/{}s)", pid,
-                              elapsed, timeout_seconds);
-                    if (elapsed >= 30) {
-                        int idx = ((elapsed - 30) / 10) % num_messages;
-                        report_download_status(DownloadStatus::Installing, 100,
-                                               lv_tr(install_message_keys[idx]));
+            const auto start = std::chrono::steady_clock::now();
+            const auto elapsed_seconds = [start] {
+                return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                                            std::chrono::steady_clock::now() - start)
+                                            .count());
+            };
+            int last_reported = 0;
+            const ChildWaitResult wait = terminate_and_reap(
+                pid, start + std::chrono::seconds(timeout_seconds), kTermGrace, kPollInterval, [&] {
+                    const int elapsed = elapsed_seconds();
+                    if (elapsed >= last_reported + 10 && elapsed < timeout_seconds) {
+                        last_reported = elapsed - elapsed % 10;
+                        flog_info("[UpdateChecker] Still waiting for install.sh pid={} ({}s/{}s)",
+                                  pid, last_reported, timeout_seconds);
+                        if (last_reported >= 30) {
+                            int idx = ((last_reported - 30) / 10) % num_messages;
+                            report_download_status(DownloadStatus::Installing, 100,
+                                                   lv_tr(install_message_keys[idx]));
+                        }
                     }
-                }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
+                    return true;
+                });
 
-            if (exited) {
+            switch (wait.outcome) {
+            case ChildWaitOutcome::Exited: {
+                const int status = wait.status;
                 bool normal_exit = WIFEXITED(status);
                 bool signaled = WIFSIGNALED(status);
-                ret = normal_exit ? WEXITSTATUS(status) : -1;
+                ret = wait.exit_code();
                 int sig = signaled ? WTERMSIG(status) : 0;
+                flog_info("[UpdateChecker] install.sh (pid={}) exited after ~{}s", pid,
+                          elapsed_seconds());
                 flog_info(
                     "[UpdateChecker] install.sh exit: code={} normal={} signaled={} signal={}", ret,
                     normal_exit, signaled, sig);
-            } else {
+                break;
+            }
+            case ChildWaitOutcome::TimedOut:
+            case ChildWaitOutcome::Cancelled:
                 timed_out = true;
-                flog_error("[UpdateChecker] install.sh timed out after {}s, killing",
-                           timeout_seconds);
-                kill(pid, SIGKILL);
-                waitpid(pid, nullptr, 0); // reap zombie
+                flog_error("[UpdateChecker] install.sh timed out after {}s, {}", timeout_seconds,
+                           wait.killed ? "killed" : "terminated");
+                break;
+            case ChildWaitOutcome::WaitFailed:
+                flog_error("[UpdateChecker] waitpid(install) failed: {} (errno={})",
+                           strerror(wait.wait_errno), wait.wait_errno);
+                break;
             }
         }
 
@@ -2234,8 +2488,11 @@ void UpdateChecker::do_install(const std::string& tarball_path) {
         report_download_status(DownloadStatus::Error, 0, ui_text,
                                "install.sh returned error code " + std::to_string(ret));
         std::string reason = timed_out ? "install_timeout" : "install_failed";
+        TelemetryManager::UpdateFailureDetail telemetry_detail;
+        telemetry_detail.install_detail =
+            install_failure_telemetry_detail(install_lines, device_identifiers());
         TelemetryManager::instance().record_update_failure(
-            reason, version, helix::platform::current_key(), -1, -1, ret);
+            reason, version, helix::platform::current_key(), -1, -1, ret, telemetry_detail);
         return;
     }
 
@@ -2267,7 +2524,7 @@ void UpdateChecker::do_install(const std::string& tarball_path) {
     // Safety net: even if _exit(0) below doesn't execute (e.g., SIGABRT from
     // stale CWD), the watchdog sees the marker and skips the crash dialog.
     {
-        std::string marker = AppConstants::Update::update_restart_marker_path();
+        std::string marker = app_constants::update::update_restart_marker_path();
         std::ofstream ofs(marker);
         if (ofs) {
             spdlog::info("[UpdateChecker] Wrote update restart marker: {}", marker);
@@ -2323,7 +2580,7 @@ void UpdateChecker::finish_install_and_restart(const std::string& install_root,
     // marshalled call has not fired by the deadline, restart from here instead.
     // perform_update_restart() is once-only, so at most one of the two forks.
     const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(RESTART_MARSHAL_TIMEOUT_MS);
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kRestartMarshalTimeoutMs);
     while (!restart_initiated_.load() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -2398,7 +2655,7 @@ void UpdateChecker::handle_external_update_complete() {
 
     // Write restart marker so watchdog knows this exit is expected
     {
-        std::string marker = AppConstants::Update::update_restart_marker_path();
+        std::string marker = app_constants::update::update_restart_marker_path();
         std::ofstream ofs(marker);
         if (ofs) {
             spdlog::info("[UpdateChecker] Wrote update restart marker: {}", marker);
@@ -2446,7 +2703,7 @@ void UpdateChecker::handle_external_update_complete() {
 // ============================================================================
 
 bool UpdateChecker::write_self_restart_sentinel() {
-    const std::string dir = AppConstants::Update::backup_fallback_dir();
+    const std::string dir = app_constants::update::backup_fallback_dir();
     const std::string sentinel = dir + "/self_restart_sentinel";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
@@ -2569,7 +2826,7 @@ void warn_legacy_update_url_keys(Config* config) {
         warned = true;
         spdlog::warn("[UpdateChecker] ignoring /update/dev_url and /update/r2_url in settings.json"
                      " - set r2_url/dev_url in {} instead (owned by root, mode 0644)",
-                     AppConstants::Update::state_dir() + "/update_urls.json");
+                     app_constants::update::state_dir() + "/update_urls.json");
     }
 }
 
@@ -2610,9 +2867,9 @@ void UpdateChecker::check_for_updates(Callback callback) {
     bool dev_channel = (get_channel() == UpdateChannel::Dev);
 
     if (!dev_channel && last_check_time_.time_since_epoch().count() > 0 &&
-        time_since_last < MIN_CHECK_INTERVAL) {
+        time_since_last < kMinCheckInterval) {
         auto minutes_remaining =
-            std::chrono::duration_cast<std::chrono::minutes>(MIN_CHECK_INTERVAL - time_since_last)
+            std::chrono::duration_cast<std::chrono::minutes>(kMinCheckInterval - time_since_last)
                 .count();
         spdlog::debug("[UpdateChecker] Rate limited, {} minutes until next check allowed",
                       minutes_remaining);
@@ -2731,6 +2988,11 @@ void UpdateChecker::clear_cache() {
 }
 
 void UpdateChecker::on_channel_changed() {
+    recheck_for_channel();
+    sync_moonraker_channel();
+}
+
+void UpdateChecker::recheck_for_channel() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         cached_info_.reset();
@@ -2748,7 +3010,6 @@ void UpdateChecker::on_channel_changed() {
 
     spdlog::info("[UpdateChecker] Update channel changed, re-checking");
     check_for_updates();
-    sync_moonraker_channel();
 }
 
 // ============================================================================
@@ -2799,6 +3060,12 @@ void UpdateChecker::do_check() {
             return;
         }
 
+#ifdef __ANDROID__
+        if (report_play_verdict(ok ? info : ReleaseInfo{}, ok ? "" : error)) {
+            return;
+        }
+#endif
+
         if (!ok) {
             spdlog::warn("[UpdateChecker] {}", error);
             report_result(Status::Error, std::nullopt, error);
@@ -2809,35 +3076,7 @@ void UpdateChecker::do_check() {
         std::string current_version = HELIX_VERSION;
         spdlog::debug("[UpdateChecker] Current: {}, Latest: {}", current_version, info.version);
 
-        switch (compare_channel_version(current_version, info.version)) {
-        case ChannelVersionRelation::Newer:
-            info.is_downgrade = false;
-            spdlog::info("[UpdateChecker] Update available: {} -> {}", current_version,
-                         info.version);
-            report_result(Status::UpdateAvailable, info, "");
-            break;
-
-        case ChannelVersionRelation::Older:
-            // The selected channel is behind this install — almost always
-            // because the user just moved from a faster channel back to a
-            // slower one. Offer it, or they are stranded on the old channel's
-            // build with the check reporting "up to date" forever. Flagged so
-            // the auto-check never raises this unprompted and the install path
-            // asks first.
-            info.is_downgrade = true;
-            spdlog::info("[UpdateChecker] Channel is behind: {} -> {} (downgrade offered)",
-                         current_version, info.version);
-            report_result(Status::UpdateAvailable, info, "");
-            break;
-
-        case ChannelVersionRelation::Same:
-        case ChannelVersionRelation::Unknown:
-        default:
-            spdlog::info("[UpdateChecker] Already up to date ({})", current_version);
-            // Pass info even for UpToDate so callbacks (e.g., --release-notes) can access it
-            report_result(Status::UpToDate, info, "");
-            break;
-        }
+        report_fetched_release(std::move(info), current_version);
 
         spdlog::debug("[UpdateChecker] Worker thread finished");
     } catch (const std::exception& e) {
@@ -2849,12 +3088,70 @@ void UpdateChecker::do_check() {
     }
 }
 
+#ifdef __ANDROID__
+bool UpdateChecker::report_play_verdict(ReleaseInfo manifest, const std::string& manifest_error) {
+    namespace android = helix::android;
+    const std::string installer = android::installer_package();
+    android::PlayUpdateQuery play;
+    if (android::installed_by_play(installer)) {
+        play = android::query_play_update(kHttpTimeoutSeconds);
+    }
+    const auto verdict = android::decide_update(installer, play, manifest.version);
+    if (verdict.kind == android::UpdateVerdict::Kind::Manifest) {
+        return false;
+    }
+    if (cancelled_) {
+        spdlog::debug("[UpdateChecker] Check cancelled during Play query");
+        return true;
+    }
+    if (!manifest_error.empty()) {
+        spdlog::info("[UpdateChecker] Manifest unavailable, Google Play decides: {}",
+                     manifest_error);
+    }
+
+    if (verdict.kind == android::UpdateVerdict::Kind::None) {
+        spdlog::info("[UpdateChecker] No update announced for this Play install: {}",
+                     verdict.reason);
+        report_result(Status::UpToDate, std::nullopt, "");
+        return true;
+    }
+
+    ReleaseInfo info;
+    if (verdict.manifest_describes_it) {
+        info = std::move(manifest);
+    } else {
+        info.version = verdict.version;
+        info.tag_name = "v" + verdict.version;
+    }
+    info.is_downgrade = false;
+    spdlog::info("[UpdateChecker] Google Play offers {} -> {}", HELIX_VERSION, info.version);
+    report_result(Status::UpdateAvailable, info, "");
+    return true;
+}
+#endif
+
 // ============================================================================
 // Channel-specific fetch methods
 // ============================================================================
 
 const char* UpdateChecker::moonraker_channel_name(UpdateChannel channel) {
     return channel == UpdateChannel::Stable ? "stable" : "beta";
+}
+
+UpdateChecker::MoonrakerChannelSync
+UpdateChecker::decide_moonraker_channel_sync(const std::string& app, const std::string& conf,
+                                             const std::string& last_synced) {
+    if (conf.empty())
+        return MoonrakerChannelSync::Write;
+    if (app == conf)
+        return MoonrakerChannelSync::RecordOnly;
+    if (!last_synced.empty() && app == last_synced && conf != last_synced) {
+        if (conf == moonraker_channel_name(UpdateChannel::Stable) ||
+            conf == moonraker_channel_name(UpdateChannel::Beta))
+            return MoonrakerChannelSync::Adopt;
+        return MoonrakerChannelSync::Leave;
+    }
+    return MoonrakerChannelSync::Write;
 }
 
 void UpdateChecker::sync_moonraker_channel() {
@@ -2865,6 +3162,21 @@ namespace {
 
 constexpr const char* kMoonrakerConf = "moonraker.conf";
 constexpr const char* kHelixStanza = "update_manager helixscreen";
+/// The stanza channel the app and moonraker.conf last agreed on: the reference that
+/// tells a hand edit of the stanza from a channel change in the app.
+constexpr const char* kSyncedChannelKey = "/update/moonraker_channel";
+
+std::string synced_moonraker_channel() {
+    return Config::get_instance()->get<std::string>(kSyncedChannelKey, "");
+}
+
+void record_synced_moonraker_channel(const std::string& channel) {
+    if (synced_moonraker_channel() == channel)
+        return;
+    auto* config = Config::get_instance();
+    config->set<std::string>(kSyncedChannelKey, channel);
+    config->save();
+}
 
 /// Both name the same directory once `.`, `..`, symlinks and trailing slashes are
 /// resolved. Empty never matches: an unknown directory proves nothing.
@@ -2889,7 +3201,7 @@ void UpdateChecker::sync_moonraker_channel_for(const std::string& install_root) 
     // A remote screen, or a second instance on another channel, would otherwise
     // impose its channel there, and two of them would restart Moonraker in turn.
     std::string host;
-    uint16_t port = 7125;
+    uint16_t port = helix::kDefaultMoonrakerPort;
     if (!helix::diag::split_host_port(api->get_http_base_url(), host, port) ||
         !helix::is_moonraker_on_same_host(host)) {
         spdlog::debug("[UpdateChecker] Moonraker is not on this host; leaving its update "
@@ -2898,6 +3210,7 @@ void UpdateChecker::sync_moonraker_channel_for(const std::string& install_root) 
     }
 
     const std::string want = moonraker_channel_name(get_channel());
+    const std::string last_synced = synced_moonraker_channel();
     // The newest sync wins, and detach() (every printer teardown) also bumps the
     // generation: a new API can reuse the old one's address, so the generation, not
     // the pointer, says this sync is still current.
@@ -2905,46 +3218,111 @@ void UpdateChecker::sync_moonraker_channel_for(const std::string& install_root) 
     // Taken here on the main thread; the transfer callbacks run on background threads.
     auto tok = async_lifetime_.token();
 
-    api->transfers().download_file(
-        "config", kMoonrakerConf,
-        [this, tok, api, want, gen, install_root](const std::string& content) {
+    // A superseded sync (a newer one, or detach() at printer teardown) stops
+    // reading includes as well as writing.
+    helix::system::ConfigDownloadFn download =
+        helix::system::api_config_download(*api, [this, tok, gen]() {
+            return !tok.expired() && gen == moonraker_sync_generation_.load();
+        });
+
+    // The stanza may sit in a file moonraker.conf pulls in with [include], as
+    // mainsail.conf does on some firmware; it is rewritten where Moonraker reads it.
+    helix::system::download_config_include_graph(
+        *api, kMoonrakerConf, "",
+        [this, tok, api, want, last_synced, gen, install_root](
+            const std::set<std::string>&, const std::map<std::string, std::string>& files) {
+            const std::string file = helix::MoonrakerConfigManager::find_section_file(
+                files, kMoonrakerConf, kHelixStanza);
+            if (file.empty()) {
+                spdlog::debug("[UpdateChecker] No [{}] in moonraker.conf or its includes; "
+                              "Moonraker's update channel is not synced",
+                              kHelixStanza);
+                return;
+            }
+            const std::string& content = files.at(file);
             const std::string path =
                 helix::MoonrakerConfigManager::get_section_value(content, kHelixStanza, "path");
             if (!same_directory(path, install_root)) {
-                spdlog::debug("[UpdateChecker] moonraker.conf's helixscreen stanza is for '{}', "
-                              "not this install ({}); leaving it alone",
-                              path, install_root);
+                spdlog::debug("[UpdateChecker] {}'s helixscreen stanza is for '{}', not this "
+                              "install ({}); leaving it alone",
+                              file, path, install_root);
                 return;
+            }
+            const std::string conf_channel =
+                helix::MoonrakerConfigManager::get_section_value(content, kHelixStanza, "channel");
+            switch (decide_moonraker_channel_sync(want, conf_channel, last_synced)) {
+            case MoonrakerChannelSync::Leave:
+                spdlog::warn("[UpdateChecker] {} names update channel '{}', which HelixScreen "
+                             "does not know; leaving it and the app's channel alone",
+                             file, conf_channel);
+                return;
+            case MoonrakerChannelSync::RecordOnly:
+                tok.defer("UpdateChecker::sync_moonraker_channel_record", [this, gen, want]() {
+                    if (gen != moonraker_sync_generation_.load())
+                        return;
+                    record_synced_moonraker_channel(want);
+                });
+                return;
+            case MoonrakerChannelSync::Adopt:
+                tok.defer("UpdateChecker::sync_moonraker_channel_adopt",
+                          [this, gen, file, conf_channel]() {
+                              if (gen != moonraker_sync_generation_.load())
+                                  return;
+                              spdlog::info("[UpdateChecker] {} was set to the {} update channel; "
+                                           "following it",
+                                           file, conf_channel);
+                              adopt_moonraker_channel(conf_channel);
+                          });
+                return;
+            case MoonrakerChannelSync::Write:
+                break;
             }
             std::string updated = helix::MoonrakerConfigManager::set_existing_value(
                 content, kHelixStanza, "channel", want);
             if (updated == content)
                 return;
-            tok.defer("UpdateChecker::sync_moonraker_channel", [this, tok, api, want, gen,
+            tok.defer("UpdateChecker::sync_moonraker_channel", [this, tok, api, want, gen, file,
                                                                 updated]() {
                 if (gen != moonraker_sync_generation_.load())
                     return;
-                spdlog::info("[UpdateChecker] Setting moonraker.conf update channel to {}", want);
+                spdlog::info("[UpdateChecker] Setting {} update channel to {}", file, want);
                 api->transfers().upload_file(
-                    "config", kMoonrakerConf, updated,
-                    [this, tok, api, gen]() {
+                    "config", file, updated,
+                    [this, tok, api, gen, want]() {
                         tok.defer("UpdateChecker::sync_moonraker_channel_restart",
-                                  [this, api, gen]() {
+                                  [this, api, gen, want]() {
                                       if (gen != moonraker_sync_generation_.load())
                                           return;
+                                      record_synced_moonraker_channel(want);
                                       restart_moonraker_for_channel(*api, gen);
                                   });
                     },
-                    [](const MoonrakerError& err) {
-                        spdlog::warn("[UpdateChecker] Could not write moonraker.conf: {}",
-                                     err.message);
+                    [file](const MoonrakerError& err) {
+                        spdlog::warn("[UpdateChecker] Could not write {}: {}", file, err.message);
                     });
             });
         },
-        [](const MoonrakerError& err) {
-            spdlog::debug("[UpdateChecker] No moonraker.conf to sync the channel into: {}",
-                          err.message);
-        });
+        [](const std::string& err) {
+            // A newer sync, or detach(), superseding this one is routine.
+            if (err.find(helix::system::kConfigDownloadNotWanted) != std::string::npos) {
+                spdlog::debug("[UpdateChecker] Superseded channel sync stopped: {}", err);
+                return;
+            }
+            spdlog::info("[UpdateChecker] Could not read moonraker.conf to sync the update "
+                         "channel: {}",
+                         err);
+        },
+        std::move(download));
+}
+
+void UpdateChecker::adopt_moonraker_channel(const std::string& conf_channel) {
+    const UpdateChannel channel = conf_channel == moonraker_channel_name(UpdateChannel::Beta)
+                                      ? UpdateChannel::Beta
+                                      : UpdateChannel::Stable;
+    // Recorded first: the stanza already names this channel, so nothing is written back.
+    record_synced_moonraker_channel(conf_channel);
+    SystemSettingsManager::instance().set_update_channel(static_cast<int>(channel));
+    recheck_for_channel();
 }
 
 void UpdateChecker::restart_moonraker_for_channel(IMoonrakerAPI& api, uint64_t gen) {
@@ -2981,7 +3359,7 @@ void UpdateChecker::restart_moonraker_for_channel(IMoonrakerAPI& api, uint64_t g
                 // The app's websocket drops with it and reconnects on its own; that
                 // rediscovery syncs again, finds the stanza matching, and stops.
                 EmergencyStopOverlay::instance().suppress_recovery_dialog(
-                    RecoverySuppression::LONG);
+                    recovery_suppression::LONG);
                 api_ptr->restart_moonraker(
                     []() {
                         spdlog::info(
@@ -3062,7 +3440,7 @@ std::string UpdateChecker::effective_r2_base_url() {
     // this points, and settings.json sits where the web UI can write it.
     std::string url = helix::config_trust::read_update_urls().r2_url;
     if (url.empty()) {
-        url = DEFAULT_R2_BASE_URL;
+        url = kDefaultR2BaseUrl;
     }
     // Normalize: strip trailing slashes so callers can join with "/<path>".
     while (url.size() > 1 && url.back() == '/') {
@@ -3125,8 +3503,8 @@ void UpdateChecker::dismiss_current_version() {
 // ============================================================================
 
 namespace {
-constexpr const char* UPDATE_RESPONSE_METHOD = "notify_update_response";
-constexpr const char* EXTERNAL_UPDATE_HANDLER = "external_update_restart";
+constexpr const char* kUpdateResponseMethod = "notify_update_response";
+constexpr const char* kExternalUpdateHandler = "external_update_restart";
 
 // notify_update_response params: [{"application":"helixscreen",
 //   "proc_id":N, "message":"...", "complete":true/false}]
@@ -3157,7 +3535,7 @@ void UpdateChecker::on_connected(helix::IMoonrakerClient& client) {
         namespace fs = std::filesystem;
         std::error_code ec;
         std::string sentinel =
-            AppConstants::Update::backup_fallback_dir() + "/self_restart_sentinel";
+            app_constants::update::backup_fallback_dir() + "/self_restart_sentinel";
         if (fs::remove(sentinel, ec)) {
             spdlog::info("[UpdateChecker] Cleaned up self-restart sentinel");
             // Moonraker re-reads release_info.json only on a refresh, and its
@@ -3185,13 +3563,13 @@ void UpdateChecker::on_connected(helix::IMoonrakerClient& client) {
     // Detect when Moonraker finishes updating HelixScreen (e.g. via Mainsail).
     // On SysV platforms (AD5X, AD5M, K1) there is no systemd path watcher,
     // so this WebSocket-based detection is the only restart trigger.
-    replace_method_callback(client, UPDATE_RESPONSE_METHOD, EXTERNAL_UPDATE_HANDLER,
+    replace_method_callback(client, kUpdateResponseMethod, kExternalUpdateHandler,
                             handle_update_response);
 }
 
 void UpdateChecker::detach(helix::IMoonrakerClient& client) {
     ++moonraker_sync_generation_;
-    client.unregister_method_callback(UPDATE_RESPONSE_METHOD, EXTERNAL_UPDATE_HANDLER);
+    client.unregister_method_callback(kUpdateResponseMethod, kExternalUpdateHandler);
 }
 
 void UpdateChecker::start_auto_check() {
@@ -3412,41 +3790,13 @@ bool UpdateChecker::fetch_r2_manifest(const std::string& channel, ReleaseInfo& i
         return false;
     }
 
-    // Parse manifest (same format as dev channel - generated by generate-manifest.sh)
-    try {
-        auto j = json::parse(body);
-
-        info.version = json_string_or_empty(j, "version");
-        if (info.version.empty()) {
-            error = "Missing 'version' field in R2 manifest";
-            return false;
-        }
-
-        info.tag_name = json_string_or_empty(j, "tag");
-        info.release_notes = json_string_or_empty(j, "notes");
-        info.published_at = json_string_or_empty(j, "published_at");
-
-        if (!j.contains("assets") || !j["assets"].is_object() || j["assets"].empty()) {
-            error = "Missing or empty 'assets' in R2 manifest";
-            return false;
-        }
-
-        std::string platform = helix::platform::current_key();
-        const auto& assets = j["assets"];
-        if (!assets.contains(platform)) {
-            error = "No asset for platform '" + platform + "' in R2 manifest";
-            return false;
-        }
-
-        populate_release_urls_from_manifest(assets[platform], info);
-
-        spdlog::debug("[UpdateChecker] R2 manifest parsed: {} ({})", info.version, channel);
-        return true;
-
-    } catch (const json::exception& e) {
-        error = std::string("R2 JSON parse error: ") + e.what();
+    // Same schema as the dev channel manifest (generate-manifest.sh)
+    if (!helix::parse_release_manifest(body, info, error, this_build_release_asset_keys())) {
+        error = "R2 " + error;
         return false;
     }
+    spdlog::debug("[UpdateChecker] R2 manifest parsed: {} ({})", info.version, channel);
+    return true;
 }
 
 bool UpdateChecker::fetch_stable_release(ReleaseInfo& info, std::string& error) {
@@ -3463,8 +3813,8 @@ bool UpdateChecker::fetch_stable_release(ReleaseInfo& info, std::string& error) 
     spdlog::debug("[UpdateChecker] R2 stable fetch failed ({}), falling back to GitHub", r2_error);
     error.clear();
 
-    spdlog::debug("[UpdateChecker] Requesting: {}", GITHUB_API_URL);
-    auto [status, body] = do_http_get(GITHUB_API_URL, "application/vnd.github.v3+json");
+    spdlog::debug("[UpdateChecker] Requesting: {}", kGithubApiUrl);
+    auto [status, body] = do_http_get(kGithubApiUrl, "application/vnd.github.v3+json");
 
     if (cancelled_)
         return false;
@@ -3496,8 +3846,8 @@ bool UpdateChecker::fetch_beta_release(ReleaseInfo& info, std::string& error) {
     spdlog::debug("[UpdateChecker] R2 beta fetch failed ({}), falling back to GitHub", r2_error);
     error.clear();
 
-    spdlog::debug("[UpdateChecker] Requesting (beta): {}", GITHUB_RELEASES_URL);
-    auto [status, body] = do_http_get(GITHUB_RELEASES_URL, "application/vnd.github.v3+json");
+    spdlog::debug("[UpdateChecker] Requesting (beta): {}", kGithubReleasesUrl);
+    auto [status, body] = do_http_get(kGithubReleasesUrl, "application/vnd.github.v3+json");
 
     if (cancelled_)
         return false;
@@ -3521,6 +3871,8 @@ bool UpdateChecker::fetch_beta_release(ReleaseInfo& info, std::string& error) {
             return false;
         }
 
+        const auto asset_keys = this_build_release_asset_keys();
+
         // First pass: find latest prerelease (GitHub returns newest-first)
         for (const auto& rel : releases) {
             if (rel.value("draft", false))
@@ -3528,7 +3880,7 @@ bool UpdateChecker::fetch_beta_release(ReleaseInfo& info, std::string& error) {
             if (!rel.value("prerelease", false))
                 continue;
 
-            if (::parse_github_release(rel, info, error)) {
+            if (::parse_github_release(rel, info, error, asset_keys)) {
                 spdlog::debug("[UpdateChecker] Beta: selected prerelease {}", info.tag_name);
                 return true;
             }
@@ -3538,7 +3890,7 @@ bool UpdateChecker::fetch_beta_release(ReleaseInfo& info, std::string& error) {
         for (const auto& rel : releases) {
             if (rel.value("draft", false))
                 continue;
-            if (::parse_github_release(rel, info, error)) {
+            if (::parse_github_release(rel, info, error, asset_keys)) {
                 spdlog::debug("[UpdateChecker] Beta: no prerelease found, falling back to {}",
                               info.tag_name);
                 return true;
@@ -3586,44 +3938,38 @@ bool UpdateChecker::fetch_dev_release(ReleaseInfo& info, std::string& error) {
             return false;
         }
 
-        // Parse dev manifest
-        try {
-            auto j = json::parse(body);
-
-            info.version = json_string_or_empty(j, "version");
-            if (info.version.empty()) {
-                error = "Missing 'version' field in manifest";
-                return false;
-            }
-
-            info.tag_name = json_string_or_empty(j, "tag");
-            info.release_notes = json_string_or_empty(j, "notes");
-            info.published_at = json_string_or_empty(j, "published_at");
-
-            if (!j.contains("assets") || !j["assets"].is_object() || j["assets"].empty()) {
-                error = "Missing or empty 'assets' in manifest";
-                return false;
-            }
-
-            std::string platform = helix::platform::current_key();
-            const auto& assets = j["assets"];
-            if (!assets.contains(platform)) {
-                error = "No asset for platform '" + platform + "'";
-                return false;
-            }
-
-            populate_release_urls_from_manifest(assets[platform], info);
-
-            return true;
-
-        } catch (const json::exception& e) {
-            error = std::string("JSON parse error: ") + e.what();
-            return false;
-        }
+        return helix::parse_release_manifest(body, info, error, this_build_release_asset_keys());
     }
 
     // No explicit dev_url -- use R2 default
     return fetch_r2_manifest("dev", info, error);
+}
+
+void UpdateChecker::report_fetched_release(ReleaseInfo info, const std::string& current_version) {
+    const auto outcome = helix::decide_check_outcome(current_version, info);
+    info.is_downgrade = outcome.is_downgrade;
+    switch (outcome.status) {
+    case Status::UpdateAvailable:
+        spdlog::info("[UpdateChecker] {}: {} -> {}",
+                     info.is_downgrade ? "Channel is behind (downgrade offered)"
+                                       : "Update available",
+                     current_version, info.version);
+        report_result(Status::UpdateAvailable, info, "");
+        break;
+    case Status::Error:
+        // The user-visible text is composed on the main thread; this one is the
+        // untranslated diagnostic that lands in logs and bundles.
+        spdlog::warn("[UpdateChecker] Release {} has no build for {}", info.version,
+                     describe_asset_keys(this_build_release_asset_keys()));
+        report_result(Status::Error, info,
+                      "no build for " + this_board_display_name() + " in v" + info.version);
+        break;
+    default:
+        spdlog::info("[UpdateChecker] Already up to date ({})", current_version);
+        // Pass info even for UpToDate so callbacks (e.g., --release-notes) can access it
+        report_result(Status::UpToDate, info, "");
+        break;
+    }
 }
 
 void UpdateChecker::report_result(Status status, std::optional<ReleaseInfo> info,
@@ -3671,7 +4017,11 @@ void UpdateChecker::report_result(Status status, std::optional<ReleaseInfo> info
                     render_version_text();
                     lv_subject_copy_string(&new_version_subject_, "");
                 } else if (status == Status::Error) {
-                    shown_ = {status, "", false, error};
+                    // An Error carrying a release means the release is the problem:
+                    // it has no build for this board.
+                    const bool no_build = info && !release_has_build_for_this_board(*info);
+                    shown_ = {status, no_build ? info->version : "", false, no_build ? "" : error,
+                              no_build};
                     render_version_text();
                     lv_subject_copy_string(&new_version_subject_, "");
                 }

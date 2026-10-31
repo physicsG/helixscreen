@@ -12,6 +12,7 @@
 // needs none of it.
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #endif
@@ -160,6 +161,48 @@ std::string extract_host_from_websocket_url(const std::string& url) {
 
     // Return everything before the colon (the host)
     return remainder.substr(0, colon_pos);
+}
+
+std::string canonical_ip(std::string ip) {
+    if (auto pct = ip.find('%'); pct != std::string::npos)
+        ip.resize(pct);
+    if (ip.rfind("::ffff:", 0) == 0 && ip.find('.') != std::string::npos)
+        ip.erase(0, 7);
+    return ip;
+}
+
+std::vector<std::string> local_interface_ips() {
+    std::vector<std::string> ips;
+#if !defined(HELIX_PLATFORM_ESP32)
+    ifaddrs* list = nullptr;
+    if (getifaddrs(&list) != 0)
+        return ips;
+    char buf[NI_MAXHOST];
+    for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr)
+            continue;
+        int family = ifa->ifa_addr->sa_family;
+        if (family != AF_INET && family != AF_INET6)
+            continue;
+        socklen_t len = family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
+        if (getnameinfo(ifa->ifa_addr, len, buf, sizeof(buf), nullptr, 0, NI_NUMERICHOST) == 0)
+            ips.push_back(canonical_ip(buf));
+    }
+    freeifaddrs(list);
+#endif
+    return ips;
+}
+
+std::string select_lan_ipv4(const std::vector<std::string>& ips) {
+    for (const auto& ip : ips) {
+        const bool v4 = ip.find(':') == std::string::npos && ip.find('.') != std::string::npos;
+        if (!v4 || ip.rfind("127.", 0) == 0 || ip.rfind("169.254.", 0) == 0 ||
+            ip.rfind("0.", 0) == 0) {
+            continue;
+        }
+        return ip;
+    }
+    return {};
 }
 
 } // namespace helix

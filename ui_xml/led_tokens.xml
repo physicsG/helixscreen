@@ -22,15 +22,17 @@
     <px name="led_swatch_size_xlarge" value="100"/>
 
     <!-- Gap between swatches, and half of it: each swatch's hit area reaches
-         half the gap to each side, so a row has no dead gaps and no overlap. -->
-    <px name="led_swatch_gap_micro" value="4"/>
-    <px name="led_swatch_gap_tiny" value="2"/>
+         half the gap to each side, so a row has no dead gaps and no overlap.
+         Micro and tiny discs are smaller than the 44px swatch floor on their
+         own, so their hit reach closes the gap to it: 32+2*6 and 36+2*4. -->
+    <px name="led_swatch_gap_micro" value="12"/>
+    <px name="led_swatch_gap_tiny" value="8"/>
     <px name="led_swatch_gap_small" value="8"/>
     <px name="led_swatch_gap_medium" value="8"/>
     <px name="led_swatch_gap_large" value="12"/>
     <px name="led_swatch_gap_xlarge" value="14"/>
-    <px name="led_swatch_gap_half_micro" value="2"/>
-    <px name="led_swatch_gap_half_tiny" value="1"/>
+    <px name="led_swatch_gap_half_micro" value="6"/>
+    <px name="led_swatch_gap_half_tiny" value="4"/>
     <px name="led_swatch_gap_half_small" value="4"/>
     <px name="led_swatch_gap_half_medium" value="4"/>
     <px name="led_swatch_gap_half_large" value="6"/>

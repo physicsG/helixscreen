@@ -1,0 +1,29 @@
+{
+  "app_board": "<build>",
+  "app_platform": "<build>",
+  "app_version": "<build>",
+  "boot_id": "<boot_id>",
+  "device_id": "<device_id>",
+  "dropped_frame_count": 0,
+  "event": "performance_snapshot",
+  "frame_time_p50_ms": 8,
+  "frame_time_p95_ms": 8,
+  "frame_time_p99_ms": 8,
+  "is_shutdown": false,
+  "panels": {
+    "controls": {
+      "frames": 1,
+      "max_ms": 8,
+      "over_budget_pct": 0.0,
+      "p50_ms": 8,
+      "p95_ms": 8,
+      "p99_ms": 8
+    }
+  },
+  "schema_version": 3,
+  "snapshot_seq": 0,
+  "timestamp": "<timestamp>",
+  "total_frame_count": 1,
+  "worst_panel": "controls",
+  "worst_panel_p95_ms": 8
+}

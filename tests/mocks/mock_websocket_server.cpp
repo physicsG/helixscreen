@@ -31,6 +31,7 @@ void MockWebSocketServer::setup_callbacks() {
         connection_count_++;
 
         std::lock_guard<std::mutex> lock(channels_mutex_);
+        last_upgrade_headers_ = req->headers;
         channels_.push_back(channel);
     };
 

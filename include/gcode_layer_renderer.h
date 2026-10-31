@@ -4,6 +4,7 @@
 #pragma once
 
 #include "gcode_color_palette.h"
+#include "gcode_crease_shading.h"
 #include "gcode_parser.h"
 #include "gcode_projection.h"
 #include "gcode_raster.h"
@@ -14,8 +15,11 @@
 
 #include <lvgl/lvgl.h>
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <glm/glm.hpp>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -259,6 +263,20 @@ class GCodeLayerRenderer {
         return depth_shading_.load(std::memory_order_relaxed);
     }
 
+    /// Darken outer walls where the surface creases (gcode_crease_shading.h).
+    /// Part of depth shading: it applies only where that does, and only with
+    /// the outline pass on. Invalidates the cache: the colours are baked in.
+    void set_crease_shading(bool enable) {
+        if (crease_shading_.load(std::memory_order_relaxed) == enable) {
+            return;
+        }
+        crease_shading_.store(enable, std::memory_order_relaxed);
+        invalidate_solid_cache();
+    }
+    bool get_crease_shading() const {
+        return crease_shading_.load(std::memory_order_relaxed);
+    }
+
     /// Enable/disable antialiased strokes, independently of the outline pass.
     /// Invalidates the cache: the geometry has to be redrawn to change.
     void set_antialias_enabled(bool enable) {
@@ -351,6 +369,25 @@ class GCodeLayerRenderer {
      * @return true if background ghost build is in progress
      */
     bool is_ghost_build_running() const;
+
+    /**
+     * @brief Build the ghost now and return when it is finished.
+     *
+     * The same pass the UI runs on its background worker, waited for on the
+     * calling thread. For measurement (`helix-screen bench-gcode`); the UI never
+     * blocks on it. Main thread only, like everything that starts the worker.
+     * @return true when a ghost was built, false when there was nothing to build.
+     */
+    bool build_ghost_blocking();
+
+    /**
+     * @brief The ghost build_ghost_blocking() produced, copied out.
+     *
+     * Rows of ARGB8888 pixels (stride width * 4), before the translucent blit.
+     * Empty when no finished ghost is waiting. For measurement, like
+     * build_ghost_blocking().
+     */
+    std::vector<uint8_t> copy_ghost_pixels(int& width, int& height) const;
 
     /**
      * @brief The viewer's reveal gate: is there real content on the canvas?
@@ -642,6 +679,7 @@ class GCodeLayerRenderer {
     std::atomic<bool> show_extrusions_{true};
     std::atomic<bool> show_supports_{true};
     std::atomic<bool> depth_shading_{true}; // Enabled by default for 3D-like appearance
+    std::atomic<bool> crease_shading_{true};
     /// The silhouette outline pass and the cheap normal-based shading that goes
     /// with it. Measured at ~2ms per cache revalidation on an AD5M.
     std::atomic<bool> ssao_enabled_{true};
@@ -723,6 +761,28 @@ class GCodeLayerRenderer {
     std::vector<SsaoUndoEntry> ssao_undo_;
     bool ssao_cache_valid_ = false;
 
+    /// Wall indexes of the layers around the one being drawn into the cache.
+    /// Layer L reads up to kNeighbourDepth layers each side, and the build
+    /// walks layers upward, so this many slots let each layer's index be built
+    /// once and reused by every layer that reads it.
+    struct CreaseSlot {
+        int layer = -1;
+        crease::WallGrid grid;
+    };
+    std::array<CreaseSlot, 2 * crease::kNeighbourDepth + 1> crease_slots_;
+    /// The layer that already waited one frame for a neighbour to stream in.
+    /// It loads synchronously on its retry, so a slow source delays a layer
+    /// by one frame at most and never stalls the build.
+    int crease_deferred_layer_ = -1;
+
+    /// A streamed layer whose read failed, and how many frames it has been
+    /// retried. A read error can be transient (a busy SD card, a network
+    /// mount), so the layer is retried a few frames before it is skipped; a
+    /// truly unreadable layer must not stall the build.
+    int unreadable_layer_ = -1;
+    int unreadable_retries_ = 0;
+    static constexpr int kMaxUnreadableRetries = 3;
+
     /// Wall time the current progressive cache build started, and whether its
     /// completion has been reported yet.
     ///
@@ -753,35 +813,43 @@ class GCodeLayerRenderer {
 
     // Progressive rendering - render N layers per frame to avoid blocking UI
     // These are defaults; actual values come from config or adaptive adjustment
-    static constexpr int DEFAULT_LAYERS_PER_FRAME = 15;
-    static constexpr int MIN_LAYERS_PER_FRAME = 1;
-    static constexpr int MAX_LAYERS_PER_FRAME = 100;
-    static constexpr int DEFAULT_ADAPTIVE_TARGET_MS = 16; // ~60 FPS
+    static constexpr int kDefaultLayersPerFrame = 15;
+    static constexpr int kMinLayersPerFrame = 1;
+    static constexpr int kMaxLayersPerFrame = 100;
+    static constexpr int kDefaultAdaptiveTargetMs = 16; // ~60 FPS
     // Wall-clock cap on one render_layers_to_cache() batch. The layer count
     // above is sized for cheap full-file lookups, but a streaming miss parses
     // the layer on the calling thread, so a full batch can cost hundreds of
     // milliseconds per frame on a slow board. steady_clock rather than
     // lv_tick_get(): the box must measure real time, including under a test
     // fixture whose lv_tick is virtual.
-    static constexpr int SOLID_BATCH_BUDGET_MS = 8;
+    static constexpr int kSolidBatchBudgetMs = 8;
+    /// What the batch box reads the time from: steady_clock in the app, a
+    /// clock a test controls where a loaded host would otherwise decide how
+    /// many layers one batch reaches.
+    using BatchClock = std::chrono::steady_clock::time_point (*)();
+    static std::chrono::steady_clock::time_point steady_batch_clock() {
+        return std::chrono::steady_clock::now();
+    }
+    BatchClock batch_clock_{&steady_batch_clock};
 
     // Constrained device limits (AD5M, low-RAM embedded < 256MB)
-    static constexpr int CONSTRAINED_START_LPF = 5;
-    static constexpr int CONSTRAINED_MAX_LPF = 15;
-    static constexpr float CONSTRAINED_GROWTH_CAP = 1.3f; // vs 2.0f normal
+    static constexpr int kConstrainedStartLpf = 5;
+    static constexpr int kConstrainedMaxLpf = 15;
+    static constexpr float kConstrainedGrowthCap = 1.3f; // vs 2.0f normal
 
-    int layers_per_frame_{DEFAULT_LAYERS_PER_FRAME}; ///< Current layers per frame (may be adaptive)
-    int config_layers_per_frame_{0};                 ///< Config value (0 = adaptive)
-    int adaptive_target_ms_{DEFAULT_ADAPTIVE_TARGET_MS}; ///< Target render time for adaptive mode
-    uint32_t last_frame_render_ms_{0}; ///< Render time of last frame (for adaptive)
+    int layers_per_frame_{kDefaultLayersPerFrame}; ///< Current layers per frame (may be adaptive)
+    int config_layers_per_frame_{0};               ///< Config value (0 = adaptive)
+    int adaptive_target_ms_{kDefaultAdaptiveTargetMs}; ///< Target render time for adaptive mode
+    uint32_t last_frame_render_ms_{0};                 ///< Render time of last frame (for adaptive)
 
     // Device-aware limits
-    bool is_constrained_device_{false};              ///< True if device has < 256MB RAM
-    int max_layers_per_frame_{MAX_LAYERS_PER_FRAME}; ///< Device-adjusted max (15 on constrained)
+    bool is_constrained_device_{false};            ///< True if device has < 256MB RAM
+    int max_layers_per_frame_{kMaxLayersPerFrame}; ///< Device-adjusted max (15 on constrained)
 
     // Warm-up frames: skip heavy rendering for first N frames to let panel layout complete
-    static constexpr int WARMUP_FRAMES = 2;
-    int warmup_frames_remaining_{WARMUP_FRAMES}; ///< Countdown before heavy render starts
+    static constexpr int kWarmupFrames = 2;
+    int warmup_frames_remaining_{kWarmupFrames}; ///< Countdown before heavy render starts
 
     /// Load config values from settings.json
     void load_config();
@@ -814,6 +882,34 @@ class GCodeLayerRenderer {
 
     // SSAO post-processing, applied to cache_buf_ in place.
     void apply_ssao();
+
+    /// One layer's walk through crease lookups while it draws into the cache.
+    struct CreaseCursor {
+        explicit CreaseCursor(float spacing_mm) : spacer(spacing_mm) {}
+        crease::NeighbourSide below;
+        crease::NeighbourSide above;
+        crease::SampleSpacer spacer;
+        float factor = 1.0f;
+    };
+    /// Fill `cur` with the neighbouring layers' wall indexes for `layer_idx`.
+    /// Returns false when a neighbour is not resident and `allow_load` is
+    /// false: the layer should wait for the next frame.
+    bool prepare_crease_layer(int layer_idx, CreaseCursor& cur, bool allow_load);
+    /// Brightness multiplier for a crease wall drawn `screen_len` pixels long.
+    float crease_shade(const ToolpathSegment& seg, int screen_len, CreaseCursor& cur);
+
+    enum class CreaseFetch : uint8_t { Ready, NotResident, LoadFailed };
+    /// The wall index for `layer`, built on first use while drawing `drawing`.
+    /// Without `allow_load`, a streamed layer that is not resident is
+    /// requested from the prefetch worker and reported NotResident.
+    CreaseFetch crease_grid(int layer, int drawing, bool allow_load, const crease::WallGrid*& out);
+    /// Z of a layer, from the parsed file or the streaming index.
+    float layer_z(int layer) const;
+    /// True when a streamed load of `layer` returned no segments although the
+    /// index counted lines in it: the controller's form of a failed read.
+    bool streamed_read_failed(int layer, const std::vector<ToolpathSegment>* segments) const;
+    /// Forget every wall index: the layers they describe may have changed.
+    void reset_crease_grids();
 
     /// Put every pixel apply_ssao() darkened back the way it was, and forget
     /// them. Safe to call when nothing is recorded. Must run before anything
@@ -880,6 +976,15 @@ class GCodeLayerRenderer {
         bool show_supports = true;
         int line_width = 1;
         int layer_count = 0;
+
+        /// Screen rows the model's Z extent spans in this transform
+        /// (front_view_z_rows()), or 0 when unknown or not a FRONT view. Sets the
+        /// streamed ghost's sampling budget.
+        float model_z_rows = 0.0f;
+
+        /// Ghost samples per row of that extent (ghost_samples_per_z_row()),
+        /// from how fast this board scanned the file's index.
+        int samples_per_z_row = 1;
 
         /// Selection colors. Captured like everything else here because reading
         /// the tokens walks LVGL's const registry, which the worker must not do.

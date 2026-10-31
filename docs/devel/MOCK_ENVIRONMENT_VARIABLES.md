@@ -27,6 +27,36 @@ HELIX_AMS_GATES=8 ./build/bin/helix-screen --test
 HELIX_AMS_GATES=16 ./build/bin/helix-screen --test
 ```
 
+### `HELIX_MOCK_DOOR_OPEN`
+
+Makes every door-named `gcode_button` (`frontDoor`, `topDoor` on the Creator 5 personas, or one added with `HELIX_MOCK_OBJECTS="gcode_button door"`) report `RELEASED`, which a Door input reads as open. Without it door buttons report `PRESSED` (closed); every other button reports `RELEASED`.
+
+| Property | Value |
+|----------|-------|
+| **Values** | any value (presence is what counts) |
+| **Default** | unset (doors closed) |
+| **File** | `src/api/moonraker_client_mock.cpp` |
+
+```bash
+# Exercise the door-open print-start warning and the Inputs section of Settings > Sensors
+HELIX_MOCK_PRINTER=creator5_zmod HELIX_MOCK_DOOR_OPEN=1 ./build/bin/helix-screen --test
+```
+
+### `HELIX_MOCK_WIFI_COUNTRY`
+
+The regulatory country the mock WiFi radio reports at startup, standing in for one the device's own configuration set. With it unset the mock radio is in the world domain, so Network Settings shows the 5 GHz hint.
+
+| Property | Value |
+|----------|-------|
+| **Values** | ISO 3166-1 alpha-2 code (`US`, `de`, ...); anything else reads as unset |
+| **Default** | unset (world) |
+| **File** | `src/api/wifi_backend_mock.cpp` |
+
+```bash
+# A radio the system already set to Germany: shown as current, left alone
+HELIX_MOCK_WIFI_COUNTRY=DE ./build/bin/helix-screen --test
+```
+
 ### `HELIX_MOCK_REMOTE_THUMBS`
 
 Make the mock advertise Moonraker-relative thumbnail paths and fetch them over real HTTP, so `--test` exercises the cold-fetch pipeline instead of short-cutting it.
@@ -55,7 +85,7 @@ Force a hard ceiling on the thumbnail cache so eviction is reachable on demand.
 | **Default** | unset (config `/cache/thumbnail_max_mb`, default 20 MB) |
 | **File** | `src/print/thumbnail_cache.cpp` (`ThumbnailCache` constructor) |
 
-Applied **after** `calculate_dynamic_max_size()` and deliberately not through it: that function clamps its result up to `MIN_CACHE_SIZE` (5 MB), so a small value fed in via config gets raised straight back and eviction still never fires. Setting it below the cache's real usage (~1.7 MB for the mock's file list) makes eviction run every pass.
+Applied **after** `calculate_dynamic_max_size()` and deliberately not through it: that function clamps its result up to `kMinCacheSize` (5 MB), so a small value fed in via config gets raised straight back and eviction still never fires. Setting it below the cache's real usage (~1.7 MB for the mock's file list) makes eviction run every pass.
 
 ```bash
 # Cold fetch with eviction live — the decode-vs-evict interaction from #960
@@ -135,6 +165,64 @@ Make `server.files.metadata` and `server.files.metascan` fail with a 404, as Moo
 
 With metadata unavailable, the UI falls back to reading thumbnails and layer counts straight out of the gcode file, which is the per-file path that #1706 froze. This knob forces that fallback without needing a metadata-less server.
 
+### `HELIX_MOCK_FORCE_LOGINS`
+
+Make `server.connection.identify` fail with `401 Unauthorized`, as a Moonraker with `force_logins` does for a client whose credential it does not accept.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1`, `true`, `yes` or `on` enables; anything else leaves it off |
+| **Default** | unset (identify succeeds) |
+| **File** | `src/api/moonraker_client_mock_server.cpp` |
+
+Discovery stops at the refused identify and the app shows its one Login Required message, with the button that opens the API key field.
+
+```bash
+HELIX_MOCK_FORCE_LOGINS=1 ./build/bin/helix-screen --test -vv
+```
+
+### `HELIX_MOCK_GCODE_DIR`
+
+Add a local directory to the mock printer's gcodes root for the whole run, beside `assets/test_gcodes`: listings, metadata and every transfer see its files.
+
+| Property | Value |
+|----------|-------|
+| **Values** | path to a directory |
+| **Default** | unset (`assets/test_gcodes` alone) |
+| **File** | `include/mock_planted_gcodes.h` |
+
+How a `--test` run gets a sliced `.gcode.3mf` onto the print-select screen without adding it to the shared test directory. What the run uploads (a staged copy of a print) is written there too, so it lists, sizes and downloads back as on a printer.
+
+### `HELIX_MOCK_HELIX_PLUGIN_LINK_DIR`
+
+The `symlink_dir` the mock's `server.helix.status` reports with `HELIX_MOCK_HELIX_PLUGIN=1`: where the plugin links a modified print. A visible name (`helix_print`) is how a plugin installed on a printer whose Klipper skips dot-directories answers, and the app then stages its copies visibly too.
+
+| Property | Value |
+|----------|-------|
+| **Values** | a directory name |
+| **Default** | `.helix_print` |
+| **File** | `src/api/moonraker_client_mock_server.cpp` |
+
+### `HELIX_MOCK_3MF_METADATA`
+
+Make the mock report metadata for `.3mf` files, as a printer that reads `.3mf` archives itself does. By default the mock answers a `.3mf`'s metadata and metascan with a 404, as a stock Moonraker does, and print select reads the archive instead and prints a plate as extracted G-code.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1`, `true`, `yes` or `on` enables |
+| **Default** | unset (`.3mf` metadata 404s) |
+| **File** | `src/api/moonraker_client_mock_files.cpp` |
+
+### `HELIX_MOCK_3MF_CONVERSIONS`
+
+Serve a JSON file as the result of `server.helix.3mf_conversions`, the printer-side `.3mf` converter's provenance (`{"conversions":[{"source", "source_mtime", "source_size", "plate", "output", "state", ...}]}`). Unset, the method is not found, as on a printer without the converter.
+
+| Property | Value |
+|----------|-------|
+| **Values** | path to a JSON file |
+| **Default** | unset (no converter) |
+| **File** | `src/api/moonraker_client_mock_files.cpp` |
+
 ### `HELIX_MOCK_PLUGINS_DIR`
 
 Serve the `config/helixscreen/plugins/` folder of the mock printer from a local directory, so a `--test` run lists and downloads plugins exactly like a printer would.
@@ -156,6 +244,20 @@ The mock answers `printer.objects.subscribe` itself, without the real discovery 
 union subscription; that path is covered by the real-sequence unit tests (the `[subscription]`
 tag).
 
+### `HELIX_MOCK_DISPLAY_MESSAGE`
+
+Start the mock printer with a `display_status.message` (M117) already set, as a printer whose macros left one before the screen connected. It counts as a sent M117: it shows until the next M117 replaces it or a bare `M117` clears it, and it takes precedence over the print-start chatter. Without it, an idle mock publishes no message, and a print's preheat publishes what a typical `PRINT_START` macro shows for each step ("Homing...", "Heating bed...", "Heating nozzle...", "Leveling Gantry...", "Calibrating bed mesh...", "Purging nozzle"; `MoonrakerClientMock::print_start_display_message`).
+
+| Property | Value |
+|----------|-------|
+| **Values** | any text; empty sets nothing |
+| **Default** | unset (no message while idle) |
+| **File** | `src/api/moonraker_client_mock.cpp` |
+
+```bash
+HELIX_MOCK_DISPLAY_MESSAGE="Nozzle wiped, ready" ./build/bin/helix-screen --test -vv
+```
+
 ### `HELIX_MOCK_AUTO_PRINT`
 
 Boot the mock printer straight into an active print so print-gated features can be exercised under `--test` without manually driving a print-start flow.
@@ -165,6 +267,13 @@ Boot the mock printer straight into an active print so print-gated features can 
 | **Values** | `1`, `true`, `yes` or `on` enables; anything else leaves it off |
 | **Default** | unset (no auto-print) |
 | **File** | `src/application/moonraker_manager.cpp` (sets `mock_auto_start_print`); consumed in `src/api/moonraker_client_mock.cpp` |
+
+The simulated print start runs a motors-sync motor sync after homing only when the printer reports the `motors_sync` object:
+
+```bash
+# AWD printer: the print start shows the Motor sync step
+HELIX_MOCK_OBJECTS="motors_sync" HELIX_MOCK_AUTO_PRINT=1 ./build/bin/helix-screen --test --sim-speed 6 -vv
+```
 
 ### `HELIX_MOCK_REPLAY`
 
@@ -197,6 +306,22 @@ The mock client connects over loopback, which always reads as same-host — this
 
 ```bash
 HELIX_MOCK_REMOTE_PRINTER=1 ./build/bin/helix-screen --test -vv
+```
+
+### `HELIX_MOCK_HOME_LAYOUT`
+
+**Published home layout:** Pre-seeds the mock Moonraker database's `helix-screen` / `home_layout` record, the one a printer's own screen publishes its home layout to.
+
+| Property | Value |
+|----------|-------|
+| **Values** | Path to a JSON file holding the published payload (`schema`, `grid`, `main_page_index`, `pages`) |
+| **Default** | unset (no layout published) |
+| **File** | `src/api/moonraker_client_mock.cpp` (constructor); payload shape in `include/home_layout_share.h` |
+
+Pair it with `HELIX_MOCK_REMOTE_PRINTER=1` and a fresh `HELIX_CONFIG_DIR` to watch a new remote client seed its home layout; an unreadable file logs a warning and publishes nothing.
+
+```bash
+HELIX_MOCK_REMOTE_PRINTER=1 HELIX_MOCK_HOME_LAYOUT=/tmp/layout.json ./build/bin/helix-screen --test -vv
 ```
 
 #### Seeing the Adaptive Bed Mesh toggle
@@ -308,13 +433,42 @@ Report the HelixPrint Moonraker plugin as installed.
 
 | Property | Value |
 |----------|-------|
-| Values | `1` = installed, anything else = absent |
+| Values | `1` = installed, `disabled` = installed with `enabled: False`, anything else = absent |
 | Default | absent |
 | Affects | `server.helix.status`, and every surface gated on it |
 
 Absent is the default because it is the state a fresh printer is in, and it is
 what shows the Advanced panel's **Install HelixPrint Plugin** row. Set it to `1`
-to get the **Uninstall** row instead.
+to get the **Uninstall** row instead. `disabled` is a plugin whose
+`[helix_print]` section sets `enabled: False`: the component answers, but it
+serves nothing, so the app reads it as not installed (Install row, install
+prompt), and an install switches it back on.
+
+Installed, the status is in the plugin's current shape: `api: 2` and a `features` map
+whose `convert_3mf` entry owns its switch. With `1` it is `Ready` to
+`plugin_feature("convert_3mf", 1)`; with `disabled` it reports `available: false`
+(`reason: "plugin_disabled"`) and reads `Absent`. `event_journal` follows the same
+pattern, and `server.helix.journal` answers with five events of the last hour (a runout,
+the pause it caused, a shutdown and the job it ended), so the notification history's
+Printer Events button shows the plugin's journal. `HELIX_MOCK_PLR` adds the `plr` entry
+(below). Installed and not `disabled`, it also reports:
+
+| Feature | `enabled` |
+|---------|-----------|
+| `print_hooks` | `helix-screen`/`plugin_features.print_hooks`, off until Settings > Printing writes it. `HELIX_MOCK_PRINT_HOOKS=unavailable` reports it `available: false`, `reason: "load_failed"` |
+| `fit_check_blocks_autostart` | `plugin_features.fit_check_blocks_autostart`, off until Settings > Safety & Alerts writes it |
+| `filament_accounting` | `plugin_features.filament_accounting`, off until Settings > Devices > Spoolman writes it |
+| `storage_auto_cleanup` | `plugin_features.storage_auto_cleanup`, off until Settings > System > Storage writes it |
+| `photos` | on unless `plugin_features.photos` is `false`. `HELIX_MOCK_PHOTOS=unavailable` reports it `available: false`, `reason: "snapshot_unreachable: ..."`, so the screen takes the photos |
+| `file_analysis`, `server_edits`, `config_edit`, `storage` | always on, `Ready` |
+
+The mock reports no `vendor_ad5x` or `vendor_ace` entry, so its AD5X and ACE backends poll as
+they do without the plugin. The mock has no `server.helix.config`, so a config edit falls back
+to the file API. `server.helix.filament_usage` answers a two-spool record for every job.
+`server.helix.storage` answers a fixed breakdown on the mock's gcodes disk, and
+`server.helix.storage_cleanup` of `helix_temp` frees its 412 MB of print copies for the
+rest of the run; any other consumer frees nothing. `HELIX_MOCK_PRINT_PHOTOS` (below) gives the
+newest history job its photos.
 
 The mock answers the absent case with a JSON-RPC error, which is what Moonraker
 does for an endpoint it has no component for. That distinction is the point: a
@@ -325,6 +479,115 @@ in a mock run, including the pre-print options and the G-code rewrite remap.
 ```bash
 ./build/bin/helix-screen --test -vv                          # Install row
 HELIX_MOCK_HELIX_PLUGIN=1 ./build/bin/helix-screen --test -vv # Uninstall row
+HELIX_MOCK_HELIX_PLUGIN=disabled ./build/bin/helix-screen --test -vv # Install row, as absent
+```
+
+### `HELIX_MOCK_PRINT_PHOTOS`
+
+Give the newest mock history job its two camera photos, linked from its
+`auxiliary_data` the way the HelixPrint plugin's `photos` feature links them
+(`.helix_photos/<job>_<start>_layer2.jpg` and `_end.jpg`). Downloading any path
+under `.helix_photos/` serves one of two stock pictures,
+`assets/test_gcodes/mock_print_photo_layer2.jpg` or `mock_print_photo_end.jpg`,
+by the path's kind.
+
+| Property | Value |
+|----------|-------|
+| Values | `1` = on |
+| Default | off |
+| Affects | `server.history.list` (the newest job only), `download_file` under `.helix_photos/` |
+
+The history detail overlay then opens on the end photo with Preview / Layer 2 /
+End tabs. Independent of `HELIX_MOCK_HELIX_PLUGIN`: the history shape is the
+same whoever took the photos.
+
+```bash
+HELIX_MOCK_PRINT_PHOTOS=1 ./build/bin/helix-screen --test -vv   # Advanced > Print History > View Full History > newest job
+```
+
+### `HELIX_MOCK_PLR`
+
+Answer the HelixPrint plugin's power-loss endpoints (`server.helix.plr.status`,
+`plan`, `prepare`, `commit`, `abort`, `discard`), so the GENERIC resume offer and
+wizard run under `--test` ([POWER_LOSS_RECOVERY.md](POWER_LOSS_RECOVERY.md)
+§ "Generic (HelixPrint plugin)"). Needs `HELIX_MOCK_HELIX_PLUGIN=1`; with the
+plugin absent or `disabled` the knob does nothing.
+
+| Property | Value |
+|----------|-------|
+| Values | `generic`, `qidi_print_state` (the status `backend`); anything else = off |
+| Default | off |
+| Affects | `server.helix.status` (`features.plr` ready, version 2), `server.helix.plr.*`, the newest `server.history.list` job (`interrupted`) |
+
+The status reports an eMMC host, a snapshot of `3DBenchy.gcode` at layer 42 saved
+12 minutes ago, and `offer.available: true`, so the offer modal comes up at
+connect. Each `plan` issues a new `plan_id`; `prepare` and `commit` refuse any
+other id (`plr_stale_plan`), and `commit` refuses a missing confirmation
+(`plr_missing_confirmation`). `prepare` sets the bed target to 60°C, emits
+`notify_plr_progress` for `bed_wait` and `nozzle_in_place`, then for `generic`
+`lift`, `nozzle_standby`, `home_xy` (and `position` at tier 1), for
+`qidi_print_state` only `nozzle_standby`, 1.5 s apart, then answers. `commit` emits `z_reference`, `restore`, `bed_wait`,
+`heat_nozzle`, `move_to_resume`, `start` (the plugin's step names),
+starts the mock print of `3DBenchy.gcode` at 42 % and clears the snapshot.
+`discard` clears it too; `abort` keeps it and turns the bed off. The feature's
+`saving` (and the status `saving`) follow a `helix-screen` / `plr_user` record
+written to the mock database, on when none is, so the Settings switch round-trips;
+its `enabled` is `saving` or a snapshot waiting, as the plugin reports it.
+`server.helix.plr.mesh_include` answers from the mock's own include flag,
+with no snapshot involved, so it works without this knob; but the Settings
+mesh-include row shows only while the `plr` feature is present, so driving
+it under `--test` still needs `HELIX_MOCK_HELIX_PLUGIN=1` and this knob set.
+The endpoint's add and remove flip the flag.
+
+### `HELIX_MOCK_PLR_TIER`
+
+| Property | Value |
+|----------|-------|
+| Values | `1`, `2` |
+| Default | `2` |
+
+The tier in the status and the plan: `1` shows the wizard's Z jog step, `2` its
+confirm step, and the plan's `requires` follows (`nozzle_clear` + `z_jogged`, or
+`z_confirmed`).
+
+### `HELIX_MOCK_PLR_WARNINGS`
+
+| Property | Value |
+|----------|-------|
+| Values | comma list of `mesh_unavailable`, `cold_bed`, `layer_start` |
+| Default | none |
+
+Plan warnings. `mesh_unavailable` adds `accept_no_mesh` to `requires`; `cold_bed`
+reports the bed 30°C under its 60°C target, which the app reads as a cold bed and
+asks `accept_cold_bed` for; `layer_start` reports `method: "layer_start"`, the
+wizard's note that the print resumes at the start of the next layer, and adds
+`accept_next_layer` to `requires`.
+
+### `HELIX_MOCK_PLR_FAIL`
+
+| Property | Value |
+|----------|-------|
+| Values | `plan`, `prepare`, `commit`, `plan_background`, `plan_loop`, `no_lift_room` |
+| Default | none |
+
+`plan`, `prepare`, `commit`: that request fails with `plr_klippy_error`, which
+drives the wizard to its Failed step. A failed `prepare` or `commit` makes the
+wizard send `abort`. `plan_background`: `plan` answers `pending`, then
+`notify_plr_plan_ready` carries an `error` (a background scan that failed).
+`plan_loop`: `plan` answers `pending` every time and `plan_ready` carries no error,
+so the wizard's re-request comes back pending again; both end on the Failed step.
+`no_lift_room`: the status withholds the offer with `blocked_by: ["no_lift_room"]`
+(not enough Z headroom to lift clear of the print), so no offer appears.
+
+```bash
+# Offer at connect; tap Resume for the wizard (tier 2)
+HELIX_MOCK_HELIX_PLUGIN=1 HELIX_MOCK_PLR=generic ./build/bin/helix-screen --test -vv
+# Tier 1 with every confirmation the Checks step can ask
+HELIX_MOCK_HELIX_PLUGIN=1 HELIX_MOCK_PLR=generic HELIX_MOCK_PLR_TIER=1 \
+  HELIX_MOCK_PLR_WARNINGS=mesh_unavailable,cold_bed,layer_start ./build/bin/helix-screen --test -vv
+# The Failed step
+HELIX_MOCK_HELIX_PLUGIN=1 HELIX_MOCK_PLR=generic HELIX_MOCK_PLR_FAIL=prepare \
+  ./build/bin/helix-screen --test -vv
 ```
 
 ### `HELIX_MOCK_SKIP_WRAPPERS`
@@ -349,6 +612,28 @@ File: `src/api/moonraker_client_mock_skips.cpp`.
 HELIX_MOCK_SKIP_WRAPPERS=1 ./build/bin/helix-screen --test -vv   # default persona: Voron 2.4
 ```
 
+### `HELIX_MOCK_LAYER_PAUSE`
+
+The client.cfg layer-pause macros (`SET_PAUSE_NEXT_LAYER`, `SET_PAUSE_AT_LAYER`
+and the `SET_PRINT_STATS_INFO` wrapper holding their state), so the Pause at
+Layer modal on the print status panel can be driven under `--test`
+(`include/layer_pause.h`, prestonbrown/helixscreen#1703).
+
+| Property | Value |
+|----------|-------|
+| Values | `0`/`false`/`no`/`off` = absent; anything else, or unset, = present |
+| Default | present |
+| Affects | the objects list, `gcode_macro SET_PRINT_STATS_INFO` status (`pause_next_layer`, `pause_at_layer`), the simulated print (pauses at the scheduled layer), `CANCEL_PRINT` (clears both) |
+
+The macros mirror the client.cfg bodies: `ENABLE` defaults to 1 for
+`SET_PAUSE_NEXT_LAYER`, and to "was `LAYER` given" for `SET_PAUSE_AT_LAYER`.
+Set it to `0` to see the print status panel of a printer without them, where the
+layer readout is not tappable. File: `src/api/moonraker_client_mock_layer_pause.cpp`.
+
+```bash
+HELIX_MOCK_AUTO_PRINT=1 ./build/bin/helix-screen --test --sim-speed 6 -vv   # tap the layer readout
+```
+
 ### `HELIX_MOCK_MOONRAKER_VERSION`
 
 Override the Moonraker version the mock reports in `server.info`.
@@ -359,7 +644,7 @@ Override the Moonraker version the mock reports in `server.info`.
 | Default | `v0.9.3-mock` |
 | Affects | `server.info` -> `moonraker_version`, Settings -> Help & About -> About, and the startup too-old warning |
 
-The default is deliberately above `Application::MIN_MOONRAKER_VERSION` so no
+The default is deliberately above `Application::kMinMoonrakerVersion` so no
 `--test` run trips the warning. Set an older version to reach the warning, which
 is otherwise unreachable in mock:
 
@@ -369,13 +654,30 @@ HELIX_MOCK_MOONRAKER_VERSION=v0.8.0 ./build/bin/helix-screen --test -vv
 
 Confirm via the log: `Moonraker v0.8.0 is older than 0.9.0`.
 
+### `HELIX_MOCK_KLIPPER_VERSION`
+
+Override the Klipper version the mock reports in `printer.info`.
+
+| Property | Value |
+|----------|-------|
+| Values | any version string |
+| Default | `v0.12.0-mock` |
+| Affects | `printer.info` -> `software_version`: the firmware row in Printer Manager and Settings -> Help & About -> About |
+
+A real Kalico build reports a long `git describe` string. With `HELIX_MOCK_KALICO`
+it reproduces the widest firmware row:
+
+```bash
+HELIX_MOCK_KALICO=1 HELIX_MOCK_KLIPPER_VERSION=v2026.07.00-0-g30c65e09-dirty ./build/bin/helix-screen --test -vv
+```
+
 ### `HELIX_MOCK_AMS`
 
 Select the mock AMS topology/type.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `none`, `afc`, `toolchanger` / `tc`, `mixed`, `multi`, `torture`, `stealth`, `vivid`, `ifs`, `htlf`, `snapmaker`, `medusahc` / `medusahc-fork`, `ifs-module`, `cfs`, `openams` |
+| **Values** | `none`, `afc`, `toolchanger` / `tc`, `mixed`, `multi`, `torture`, `stealth`, `vivid`, `ifs`, `htlf`, `snapmaker`, `medusahc` / `medusahc-ktc` / `medusahc-tn`, `ifs-module`, `cfs`, `openams`, `multiace` |
 | **Default** | The persona's own (`helix::mock::effective_mock_ams`): `toolchanger` on `creator5`, `ifs` on `ad5x`, `cfs` on `k2`, `snapmaker` on `snapmaker_u1`; Happy Hare, LINEAR, 4 slots on every other persona |
 | **File** | `src/printer/ams_backend.cpp` |
 
@@ -393,11 +695,44 @@ Select the mock AMS topology/type.
 | `ifs` | 1 | AD5X IFS, 4 slots, LINEAR. Aliases: `ad5x`, `ad5x_ifs` |
 | `htlf_toolchanger` | 2 | AFC HTLF + Toolchanger: 4 HTLF lanes (2 direct, 2 hub→shared extruder) + 3 standalone toolheads. Tests MIXED topology. Aliases: `htlf_tc`, `htlf` |
 | `snapmaker` | 1 | Snapmaker U1, 4 slots, PARALLEL, non-editable mapping. Aliases: `snapswap`, `u1` |
-| `medusahc` | 1 | **MedusaHC hotend changer - mock HARDWARE, real backend.** Irbis3D controller. Aliases: `medusa`, `mhc`. See below |
-| `medusahc-fork` | 1 | MedusaHC as driven by topi314's fork. Alias: `medusa-fork` |
+| `medusahc` | 1 | **MedusaHC hotend changer - mock HARDWARE, real backend.** The stock Irbis3D install: controller + dock sensors, no klipper-toolchanger. Aliases: `medusa`, `mhc`. See below |
+| `medusahc-ktc` | 1 | The same controller with the optional klipper-toolchanger beside it. Alias: `medusa-ktc` |
+| `medusahc-tn` | 1 | A six-tool MedusaHC on the controller alone (topi's machine). Alias: `medusa-tn` |
 | `ifs-module` | 1 | **Standalone AD5X IFS module - mock HARDWARE, real backend.** The Forge-X drop-in's `ifs`/`ifs_materials` objects + stock-named sensors. Aliases: `ifs_module`, `ad5x-module`. See below |
 | `cfs` | 1 | **Creality CFS, K1 stock dialect - mock HARDWARE, real backend.** The stock `box` status object plus the calibration command surface. Alias: `cfs-k1`. See below |
 | `openams` | 1 | **OpenAMS hub - mock HARDWARE, real backend.** Lists and pushes the `oams_manager` status object (4-bay hub unit, FPS lane, groups T0/T1/T2, slot 4 loaded) so real discovery claims OpenAMS and the production `AmsBackendOpenAms` runs. Slots 3 and 4 get ASA identity seeded into `lane_data`; `OPENAMS_UNLOAD` / `OPENAMS_LOAD GROUP=Tn` flip the loaded slot |
+| `multiace` | 1 | **multiACE on a U1 - mock HARDWARE, real backend.** Pushes the U1 feed objects plus the plain `ace` object so real discovery builds the production `AmsBackendMultiAce` and runs it against engine-shaped frames. Pair with `HELIX_MOCK_PRINTER=snapmaker_u1`. See below |
+| `indx` | 1 | **Bondtech INDX - mock HARDWARE, real backend.** Publishes the toolboard module, `save_variables` and Bondtech's macro objects so real discovery builds the production `AmsBackendIndx`. `T<n>` / `CHANGE_TOOL` / `PARK_TOOL` walk park and pickup over a few notifications, and heat is refused with no tool on the head or on a no-hotend tool. See below |
+
+`HELIX_MOCK_AMS=multiace` takes two knobs (read once at start by `MoonrakerClientMock`):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `HELIX_MOCK_MULTIACE_MODE` | `head` | The engine's mode: `head` (each unit a HUB wired to one head) or `multi` (bay s of every unit feeds head s, PARALLEL) |
+| `HELIX_MOCK_MULTIACE_UNITS` | `1` | Connected ACE Pro units, 1-4 |
+
+Head 1 starts routed to ACE 1 bay 1 (a red PLA), and `ACE_LOAD_HEAD HEAD=h [ACE=k SLOT=s]` / `ACE_UNLOAD_HEAD HEAD=h` answer by routing (or clearing) and walking the head's `channel_state` the way multiACE's shadow `filament_feed` does - an unload parks at `preload_finish`. `ACE_DRY` / `ACE_STOP_DRYING` are acknowledged; the dryer state itself is static in the mock. The frame is pinned to the real parser and backend by `tests/unit/test_ams_mock_multiace_parity.cpp` (`[multiace][mock]`).
+
+```bash
+# multiACE, head mode, one unit
+HELIX_MOCK_PRINTER=snapmaker_u1 HELIX_MOCK_AMS=multiace ./build/bin/helix-screen --test
+
+# multi mode, two units: the path canvas draws two PARALLEL units over four heads
+HELIX_MOCK_PRINTER=snapmaker_u1 HELIX_MOCK_AMS=multiace HELIX_MOCK_MULTIACE_MODE=multi \
+HELIX_MOCK_MULTIACE_UNITS=2 ./build/bin/helix-screen --test
+```
+
+`HELIX_MOCK_AMS=indx` takes these knobs (read when the mock builds its object list):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `HELIX_MOCK_INDX_TOOLS` | `6` | Tools, 2-10. The last one is listed in `no_heat_tools` (a pen) |
+| `HELIX_MOCK_INDX_FAULT` | unset | `seat_suspect` (T1 may be half seated), `docks_uncalibrated`, `unrecognized` (no `CHANGE_TOOL`, the "macros not recognized" state), or `kalico` (`[indx]` in configfile only, not in the object list) |
+| `HELIX_MOCK_INDX_SPOOL_MACROS` | off | The #1333 reporter's shape: each `T<n>` declares `spool_id` and its template calls `SET_ACTIVE_SPOOL` |
+
+```bash
+HELIX_MOCK_PRINTER=voron_trident HELIX_MOCK_AMS=indx ./build/bin/helix-screen --test -vv
+```
 
 `HELIX_MOCK_AMS=openams` takes more knobs (all read by `MoonrakerClientMock`):
 
@@ -471,21 +806,82 @@ They imply `--real-ams` (`cli_args.cpp`), so no second flag is needed:
 HELIX_MOCK_AMS=medusahc ./build/bin/helix-screen --test -vv
 ```
 
-The two values map to the two shipping configurations in
-[FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md), so the schema discrimination
-in `read_medusahc()` is exercised at runtime and not only in the unit tests:
+The three values map to the configurations in
+[FILAMENT_BACKEND_MEDUSAHC.md](FILAMENT_BACKEND_MEDUSAHC.md), so detection and the swap
+command route are exercised at runtime and not only in the unit tests:
 
 | Value | Objects | Phase key | Feeder | Step bar |
 |-------|---------|-----------|--------|----------|
-| `medusahc` | `pin_watch io` + `toolchanger` + `tool T0..3` + `medusahc`, `MHC_*` and legacy aliases | `operation`: idle/dropping/picking | `feeder_open` | 4 steps |
-| `medusahc-fork` | `medusahc` alone, forked `state`/`error`/`toolN_docked` schema | `state`: ready/changing | `feeder_open` | 3 steps |
+| `medusahc` | four tools: `pin_watch io` + `medusahc` + `gcode_macro T0..3` + `extruder`..`extruder3`, MHC_macros.cfg's `SET`/`DROP_TOOL`/`OPEN`/`CLOSE`/`CLEAN` and MHC_variables.cfg's `_TOOL_OFFSET`/`_GLOBAL_STATE`, `save_variables`; no `toolchanger` | `operation`: idle/changing/dropping/picking | `feeder_open` | 4 steps |
+| `medusahc-ktc` | as `medusahc`, plus `toolchanger` + `tool T0..3` | as `medusahc` | `feeder_open` | 4 steps |
+| `medusahc-tn` | as `medusahc` with six tools (`T0..5`, `extruder`..`extruder5`) | as `medusahc` | `feeder_open` | 4 steps |
 
-A swap advances through its phases on the simulation thread over ~6s, so they arrive as
-separate status frames rather than collapsing into one update. `SELECT_TOOL`,
-`UNSELECT_TOOL`, `DROP_TOOL`, bare `T<n>` and the feeder macros are all handled.
+Every variant swaps with `T<n>` and parks with `DROP_TOOL`, the machine's own commands.
+
+A swap advances through its phases on the simulation thread over ~7s, so they arrive as
+separate status frames rather than collapsing into one update. `MHC_SET`/`SET`,
+`SELECT_TOOL`, bare `T<n>`, `MHC_DROP`/`_DROP` (parks and leaves the gripper open),
+`DROP_TOOL`/`UNSELECT_TOOL` (parks and re-grips) and the feeder commands are all handled.
+`medusahc` and `medusahc-ktc` carry four tools, `medusahc-tn` six.
+
+The controller's state macros are served too: `gcode_macro _TOOL_OFFSET` (`t<n>_off_x/y/z`,
+written by `SET_GCODE_VARIABLE MACRO=_TOOL_OFFSET`), `save_variables` (written by
+`SAVE_VARIABLE`) and `gcode_macro _GLOBAL_STATE` (`max_tool`, `target_tool`, `error_state`,
+`layer`, `feeder_open`). `MHC_TOOL_OFFSET T=<n>` applies tool `n`'s Z to `gcode_move` (the
+mock models Z only), `MHC_LAYER_SET L=` / `_LAYER_SET L=` sets `medusahc.layer`, and
+`CLEAN` / `MHC_CLEAN` brush the mounted nozzle without changing `operation` (with the head
+empty they answer `MHC_CLEAN: no tool installed`).
+
+Pause and resume follow upstream's [recovery guide](https://github.com/Irbis3D/MedusaHC/blob/main/docs/recovery.md): a failed swap while a print is active
+sets `_GLOBAL_STATE.error_state`, a manual `PAUSE` saves the mounted tool as
+`target_tool`, and `RESUME` while paused runs `MHC_RESUME T=<target_tool>`. That re-picks the
+target (seat the hot ends first, or the pick reads the docks as ambiguous) and continues the
+print once the swap succeeds, and it refuses with `MHC_RESUME: heat T<n> above 190C before
+resuming` while that nozzle is at or below 190C. The mock's secondary nozzles hold fixed
+readings (extruder1 150C, extruder2 248C, extruder3 200C, the rest 25C), so a recovery to T1
+is refused and one to T2 goes through. A manual pause with the target still mounted resumes
+at once. `tests/unit/test_mock_medusahc_controller.cpp` pins these.
+
+A swap's `printer.gcode.script` reply waits for the swap to end, as the controller's
+`_wait_for_tool()` blocks the command: lines after the swap run only then. A failure with no
+print running answers with the controller's message as an error (`MHC_SET: sensors did not
+confirm T<n>`, `MHC_SET: ambiguous sensor state`, `MHC_DROP: ...`) and runs nothing after it;
+during a print the failure pauses it and the reply succeeds, as `_OperationPaused` does. A
+swap command sent while another runs is refused with `MedusaHC is busy: <operation>`.
+Beside klipper-toolchanger (`medusahc-ktc`), `toolchanger.tool_number` follows the docks as
+pin_watch's `sync_toolchanger` keeps it: the docks' tool, -1 when they name none, and left
+alone mid-print.
+
+The controller variants simulate the dock pins and derive `current_tool` from them the
+way Irbis3D's pin_watch extra does: -1 when the toolhead switch is released and every dock seated, a
+tool when the toolhead switch is pressed and exactly that dock is vacant, -2 for anything
+else. `sensor_error` and `last_error` are a separate signal, the controller's latch: an
+operation that fails sets them, and only the next operation clears them, so a hot end put
+back by hand makes `current_tool` definite again while `sensor_error` stays `true`.
 
 The default `mmu` object is suppressed in these modes - it would detect Happy Hare and
 stand a second AMS backend up alongside the changer.
+
+`HELIX_MOCK_MEDUSA_SENSOR_ERROR=1` starts as if a pick of T0 failed before the screen
+connected: T0 is on the carriage with its dock switch still reading seated, so
+`current_tool` is -2, and the controller holds `sensor_error:
+true` with `last_error` set, so the backend raises the changer fault. A swap retried in
+that state fails at once with `MHC_SET: ambiguous sensor state`, as the controller does.
+
+`HELIX_MOCK_MEDUSA_SWAP_FAIL=<n>` makes every pick of tool `n` fail the controller's sensor
+check: the hot end ends on the carriage with its dock switch still pressed, `current_tool`
+-2, `sensor_error: true`, `last_error: "MHC_SET: sensors did not confirm T<n>"`, the gripper
+left open, and a running print paused, as `MHC_ERROR` does.
+`HELIX_MOCK_MEDUSA_REDOCK_S=<s>` then has the simulated user lift that hot end back into its
+dock `s` seconds after a failure (either of the two above): `current_tool` reads -1 and
+`sensor_error` stays latched, the sequence a real user produces.
+`tests/unit/test_toolchanger_medusahc.cpp` (`[medusahc][mock]`) pins all three.
+
+```bash
+# Swap to T2 fails, then the hot end is docked by hand 5s later
+HELIX_MOCK_AMS=medusahc HELIX_MOCK_MEDUSA_SWAP_FAIL=2 HELIX_MOCK_MEDUSA_REDOCK_S=5 \
+    ./build/bin/helix-screen --test -vv
+```
 
 #### `ifs-module` - mock hardware, real backend
 
@@ -504,6 +900,33 @@ registry), with the result published on the next status notification:
 
 ```bash
 HELIX_MOCK_AMS=ifs-module ./build/bin/helix-screen --test -vv
+```
+
+`HELIX_MOCK_IFS_UNACCOUNTED=1` starts it with filament at the toolhead switch and no lane
+in `ifs_loaded`: the state a firmware that lost its loaded-lane record leaves behind. The
+head switch is tracked apart from `ifs_loaded` (`IFS_LOAD`/`T<n>` set it, `IFS_UNLOAD` and
+ejecting the loaded lane clear it), so Unload has to ask which lane is in the head.
+
+Two more variables stage the rest of the unknown-lane states (#1324):
+
+- `HELIX_MOCK_IFS_LANES=<lanes>`: which lanes hold filament, as 1-based digits (`3`,
+  `1,3`, `none`). Default: all four.
+- `HELIX_MOCK_IFS_AT_HUB=<1-4>`: the lane the module's `ifs_at_hub` record names. Default:
+  none. `IFS_LOAD`/`T<n>` set it, `IFS_UNLOAD` and ejecting that lane clear it.
+
+`_IFS_CLEAR_EXTRUDER` empties the toolhead switch and changes no record. A script carrying
+several commands, one per line, runs each.
+
+```bash
+# Unload offers lane 3, the only one holding filament, plus Clear extruder only and Cancel
+HELIX_MOCK_AMS=ifs-module HELIX_MOCK_IFS_UNACCOUNTED=1 HELIX_MOCK_IFS_LANES=3 \
+  ./build/bin/helix-screen --test -vv
+# Unload lists lanes 1, 2 and 4, plus Clear extruder only and Cancel
+HELIX_MOCK_AMS=ifs-module HELIX_MOCK_IFS_UNACCOUNTED=1 HELIX_MOCK_IFS_LANES=1,2,4 \
+  ./build/bin/helix-screen --test -vv
+# Unload sends IFS_UNLOAD SLOT=2 without asking
+HELIX_MOCK_AMS=ifs-module HELIX_MOCK_IFS_UNACCOUNTED=1 HELIX_MOCK_IFS_AT_HUB=2 \
+  ./build/bin/helix-screen --test -vv
 ```
 
 #### `cfs` - mock hardware, real backend
@@ -529,7 +952,14 @@ HELIX_MOCK_PRINTER=k1 HELIX_MOCK_AMS=cfs ./build/bin/helix-screen --test -vv
 
 `HELIX_MOCK_CFS_BOXES` lists the box addresses on the bus, e.g. `1,2,3,4` for a full chain
 or `1,3` for a chain with box 2 off the bus (it shows as an absent unit). Box 1 is always
-present and carries the one spool; the others are empty. Default: box 1 only.
+present and carries the one spool; the others are empty. Default: box 1 only. `none` is a
+K2 with no CFS attached: `box` is still published and every address reads `"None"`, so
+the backend runs external-spool-only and the UI shows no filament system
+(`FILAMENT_BACKEND_CFS.md` § No CFS on the bus):
+
+```bash
+HELIX_MOCK_PRINTER=k2 HELIX_MOCK_CFS_BOXES=none ./build/bin/helix-screen --test -vv
+```
 
 **Multi-extruder and tool testing:** Setting `HELIX_MOCK_AMS=toolchanger` also creates multiple tool definitions and extruders in the mock environment. Multiple extruders (extruder, extruder1, etc.) and tools are auto-discovered from Klipper objects at runtime, so no separate env var is needed to control extruder count. The toolchanger mock provides a complete multi-tool, multi-extruder test environment.
 
@@ -549,13 +979,24 @@ other macro description.
 `HELIX_MOCK_TOOL_CAL_FAIL=<n>` makes tool `n`'s pass fail with the probe tolerance error, for
 the failure path. `tests/unit/test_mock_tool_offset_calibration.cpp` pins it.
 
+**Snapmaker U1 toolhead offset calibration:** the `snapmaker_u1` persona lists the
+`_EXTRUDER_OFFSET_ACTION_*` hook macros, so AMS Management shows **Calibration > Calibrate
+Toolhead Offsets**. Each `EXTRUDER_OFFSET_ACTION_*` command answers about a second later, every
+step but PRESTART is refused with the firmware's coded fault until PRESTART has run, and a
+head's PROBE_CALIBRATE moves its `extruder_offset`, which `printer.objects.query` reports.
+`HELIX_MOCK_NOZZLE_CAL_PLATE_REFUSE=<n>` makes the first `n` plate checks report the PEI sheet
+still on the bed; `HELIX_MOCK_NOZZLE_CAL_FAIL=<n>` fails head `n`'s probe.
+`HELIX_MOCK_NOZZLE_CAL_HELD=1` starts with the state already held, as another screen's run
+would leave it, so the connect-time "End it now?" prompt shows.
+`tests/unit/test_mock_nozzle_offset_calibration.cpp` pins it.
+
 ### `HELIX_MOCK_AMS_STATE`
 
 Select the mock AMS visual scenario.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `idle`, `loading`, `error`, `bypass`, `unaccounted`, `grade`, `blocked`, `disconnected` |
+| **Values** | `idle`, `loading`, `error`, `bypass`, `unaccounted`, `grade`, `blocked`, `disconnected`, `feeder`, `finishes` |
 | **Default** | `idle` (slot 0 loaded, slot 3 empty, others available) |
 | **File** | `src/printer/ams_backend.cpp` |
 
@@ -567,7 +1008,9 @@ Select the mock AMS visual scenario.
 | `bypass` | Bypass mode active |
 | `unaccounted` | Filament at the toolhead that no lane accounts for (drives the print-start gate warning) |
 | `blocked` | Lane 2 reports BLOCKED (jammed) with no error object, the QIDI Box shape: error-red on the lane bar, spool dot and unit card badge |
+| `feeder` | Lane 3's filament waits at its feeder: its entry sensor reads it, its toolhead has not taken it (`PREP`). Shows the PARALLEL entry band with `HELIX_MOCK_AMS=snapmaker` |
 | `disconnected` | The last unit reports itself offline: its overview card ghosts with a "Disconnected" chip, and the detail header carries the chip. With one unit, the AMS panel header does |
+| `finishes` | One lane per swatch finish (silk, marble, sparkle, matte) plus a three-colour silk and a two-colour lane, repeating across the lanes, named for their colours and unlinked from Spoolman: every surface that paints a spool shows each (`docs/devel/COLOR_SWATCHES.md`) |
 | `grade` | Every lane holds `PLA-CF` instead of its usual filament — same compat group, so the mapper routes a PLA tool exactly as before and the print-start **grade** dialog is what fires. All four lanes, not one, because a tool lands on a lane by colour and then by positional fallback over the file's whole palette |
 
 ```bash
@@ -637,6 +1080,45 @@ Speed multiplier for dryer simulation (for faster testing).
 ```bash
 # Run dryer simulation at 10x speed
 HELIX_MOCK_DRYER=1 HELIX_MOCK_DRYER_SPEED=10 ./build/bin/helix-screen --test
+```
+
+### `HELIX_MOCK_DRYER_HUMIDITY_TARGET`
+
+Make the mock dryer take a humidity target, the way a Happy Hare 4 dryer does
+(`DryerInfo::supports_humidity_target`). The environment overlay then shows its
+optional **Target RH** field beside Minutes; unset, the field stays hidden, as on
+Happy Hare 3 and every other dryer. The mock logs the target and runs its normal
+timed cycle.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1` / `true` to enable; `0` / `false` or unset to disable |
+| **Default** | unset (no humidity target) |
+| **File** | `src/printer/ams_backend.cpp` |
+
+```bash
+HELIX_MOCK_DRYER=1 HELIX_MOCK_DRYER_HUMIDITY_TARGET=1 ./build/bin/helix-screen --test
+```
+
+Reach the field from the AMS panel's environment indicator (`ctl demo ams`, then
+`ctl click env_indicator`). Blank, it sends no target and the printer's own
+default applies; the placeholder shows that default when the mock reports one
+(`HELIX_MOCK_DRYER_DEFAULT_HUMIDITY`), else `auto`.
+
+### `HELIX_MOCK_DRYER_DEFAULT_HUMIDITY`
+
+The target, in %RH, the mock dryer reports applying to a start that names none
+(`DryerInfo::default_humidity_target`), the way Happy Hare 4 reports
+`heater_default_dry_humidity`. Only shown with `HELIX_MOCK_DRYER_HUMIDITY_TARGET`.
+
+| Property | Value |
+|----------|-------|
+| **Values** | a positive number, e.g. `25` |
+| **Default** | unset (the field's placeholder reads `auto`) |
+| **File** | `src/printer/ams_backend.cpp` |
+
+```bash
+HELIX_MOCK_DRYER=1 HELIX_MOCK_DRYER_HUMIDITY_TARGET=1 HELIX_MOCK_DRYER_DEFAULT_HUMIDITY=25 ./build/bin/helix-screen --test
 ```
 
 ### `HELIX_MOCK_DRYING`
@@ -773,13 +1255,25 @@ Set the initial state of filament sensors.
 
 | Property | Value |
 |----------|-------|
-| **Values** | `sensor_name:state` (e.g., `fsensor:empty`, `fsensor:detected`) |
+| **Values** | `sensor_name:state`, comma-separated. `state` is `detected`, `empty`, or `disabled` (Klipper reports the sensor stood down, `enabled: false`) |
 | **Default** | Detected |
 | **File** | `src/api/moonraker_client_mock.cpp` |
 
 ```bash
 # Start with empty filament sensor
 HELIX_MOCK_FILAMENT_STATE="fsensor:empty" ./build/bin/helix-screen --test
+```
+
+The Clog Detection tile reading a plain `filament_motion_sensor` (#1823): `HELIX_MOCK_AMS=none`
+keeps the default mock's Happy Hare encoder from outranking the sensor.
+
+```bash
+# OK (armed, filament moving)
+HELIX_MOCK_AMS=none HELIX_MOCK_FILAMENT_SENSORS="motion:encoder" ./build/bin/helix-screen --test
+# Jammed
+HELIX_MOCK_AMS=none HELIX_MOCK_FILAMENT_SENSORS="motion:encoder" HELIX_MOCK_FILAMENT_STATE="encoder:empty" ./build/bin/helix-screen --test
+# Disarmed
+HELIX_MOCK_AMS=none HELIX_MOCK_FILAMENT_SENSORS="motion:encoder" HELIX_MOCK_FILAMENT_STATE="encoder:disabled" ./build/bin/helix-screen --test
 ```
 
 ### `HELIX_FORCE_RUNOUT_MODAL`
@@ -823,7 +1317,7 @@ Select which printer the mock Moonraker client impersonates. Drives the mock's r
 
 | Property | Value |
 |----------|-------|
-| **Values** | see `include/mock_persona.h#PERSONAS`: currently `voron_24`, `voron_trident`, `k1`, `k1max`, `ad5m`, `creator5`, `creator5_zmod`, `generic_corexy`, `generic_bedslinger`, `multi_extruder`, `delta`, `snapmaker_u1`, `cc1`, `ad5x`, `k2`. Matched exactly (case-sensitive); an unrecognised value falls back to `voron_24` with a warning listing the valid ids |
+| **Values** | see `include/mock_persona.h#kPersonas`: currently `voron_24`, `voron_trident`, `k1`, `k1max`, `ad5m`, `creator5`, `creator5_zmod`, `generic_corexy`, `generic_bedslinger`, `multi_extruder`, `delta`, `snapmaker_u1`, `cc1`, `ad5x`, `k2`. Matched exactly (case-sensitive); an unrecognised value falls back to `voron_24` with a warning listing the valid ids |
 | **Default** | `voron_24` (Voron 2.4); unset and empty both select it silently |
 | **File** | `include/mock_persona.h` |
 
@@ -892,7 +1386,12 @@ Cartesian volume, heaters `extruder`..`extruder3` and `heater_bed`, the per-head
 `EXTRUDER_OFFSET_ACTION_PROBE_CALIBRATE_ALL` macros), so detection resolves it to Snapmaker U1
 and applies its preset; no printer type is saved for it. Its default `HELIX_MOCK_AMS` is
 `snapmaker`, the mock Snapmaker simulation. It does not publish `filament_detect`, which
-would make discovery stand up the production Snapmaker backend.
+would make discovery stand up the production Snapmaker backend. It does publish
+`defect_detection`, answering `printer.objects.query` with the module's stored config, whose
+`main_enable` and `clean_bed.enable` follow `DEFECT_DETECTION_CONFIG MAIN_ENABLE=0|1` and
+`CLEAN_BED_ENABLE=0|1`. Its `purifier` reports `power_detected: true`, the top module
+fitted, so the home panel shows the U1's with-top picture; `HELIX_MOCK_ENCLOSURE_TOP=0`
+reports it removed.
 
 The `delta` persona changes the kinematics and hardware only. Its build volume is the same 0-based 250x250x300 box the other generic personas report, not a real delta's centred round bed, so it does not exercise negative coordinates or a round bed mesh.
 
@@ -961,6 +1460,13 @@ stores the slot's Material/HEX: upper-cased when the HEX is one of Z-Mod's 24
 palette colours, snapped to white (`FFFFFF`, palette index 0) when it is not,
 exactly as the firmware does. An unknown `TYPE` is refused with a gcode error.
 
+It also publishes Z-Mod's calibration and chamber air macros. `CALIBRATE_EXTRUDERS`
+answers with the firmware's action:prompt (plate warning, OK/Cancel) and its OK
+(`_T_CALIBRATE_EXTRUDERS`) closes it; `CALIBRATE_VFA T=<n>` narrates a grab and a
+finish line but does not restart (the real macro ends in `SAVE_CONFIG`);
+`AIR_CIRCULATION_INTERNAL` / `_EXTERNAL` / `_STOP` set the four chamber fans to the
+firmware's speeds through the mock's own `SET_FAN_SPEED`.
+
 **Unrecognized values fall back to Voron 2.4** with a warning listing the valid set — they are not fatal. K2 and CC1 have no dedicated mock type yet and hit that fallback.
 
 **Side effect on `settings.json`:** when this variable is set *at all* (even to an invalid value), `MoonrakerManager::init()` clears the saved printer type before detection runs, so a stale "Voron 2.4" from a previous launch cannot win over the env var. `PrinterDetector::auto_detect_and_save()` then re-resolves from the mock's reported identity on every launch. This writes to your config file — expect the persisted printer type to change.
@@ -1017,6 +1523,25 @@ HELIX_MOCK_KINEMATICS=cartesian ./build/bin/helix-screen --test -vv
 The value is passed through verbatim — no validation. A nonsense string simply produces a printer whose kinematics match nothing.
 
 Read once, when the mock is constructed: the simulation thread reports kinematics every tick, and reading the environment there would race a `setenv()` on another thread. Set it before the mock exists.
+
+### `HELIX_MOCK_STEPPER_RESONANCE`
+
+Expose the `stepper_resonance_tester` klippy extra on any persona, so the generic
+Vertical Artifact Compensation row (`helix::stepper_resonance_cal`) can be exercised on a
+printer that is not a Z-Mod Creator 5.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `1` (the extra plus the stock `STEPPER_RESONANCE_FACTORY_CALIBRATE` macro), `bare` (the extra only, so the two `STEPPER_RESONANCE_SEARCH_CALIBRATE` lines are sent), `0` or unset (neither) |
+| **Default** | unset |
+| **File** | `src/api/moonraker_client_mock.cpp` |
+
+The mock accepts the calibration commands without simulating a sweep; the closing
+`SAVE_CONFIG` takes the mock's usual restart path.
+
+```bash
+HELIX_MOCK_STEPPER_RESONANCE=1 ./build/bin/helix-screen --test -vv
+```
 
 ### `HELIX_MOCK_OBJECTS`
 
@@ -1076,6 +1601,25 @@ Latch a fault into every synthesized dragonbreath status frame — the diagnosti
 # Faulted dragonbreath chamber heater
 HELIX_MOCK_OBJECTS="heater_generic dragonbreath dragonbreath output_pin dragonbreath_filter" \
   HELIX_MOCK_DRAGONBREATH_FAULT=1 ./build/bin/helix-screen --test -vv
+```
+
+### `HELIX_MOCK_DRAGONBREATH_REJECT`
+
+Make the appliance turn every chamber target down with this reason code (the glue's
+stable codes: `countermanded`, `fault_latched`, `inhibited`, `auth_failed`,
+`conflict_retries_exhausted`, `heater_busy`, ...). A target arriving by
+`printer.dragonbreath.set_target` or `SET_HEATER_TEMPERATURE` leaves the heater at 0, the
+status object reports `protocol_error`, `protocol_error_code`, `protocol_error_seq` and
+`protocol_error_target`, and the route answers `accepted: false`. Unset, the mock's route
+takes the target and clears any rejection. Pair with the dragonbreath trio; to reach the
+chamber prompt, also replay `tests/fixtures/u1_chamber_stall_replay.json`:
+
+```bash
+HELIX_MOCK_PRINTER=snapmaker_u1 \
+HELIX_MOCK_OBJECTS="heater_generic dragonbreath dragonbreath output_pin dragonbreath_filter" \
+HELIX_MOCK_DRAGONBREATH_REJECT=countermanded \
+HELIX_MOCK_REPLAY=tests/fixtures/u1_chamber_stall_replay.json \
+  ./build/bin/helix-screen --test --sim-speed 6 -vv
 ```
 
 ### `HELIX_MOCK_DRAGONBREATH_OFFLINE`
@@ -1188,7 +1732,7 @@ Force the mock filament unit's environment-sensor mode, overriding the auto-dete
 
 | Property | Value |
 |----------|-------|
-| **Values** | `passive`, `dryer`, `slot`, `emu`, `mixed`, `capped` (lowercased before use). Any other value leaves the unit with **no** environment sensors. |
+| **Values** | `passive`, `dryer`, `slot`, `emu`, `emu_dryer`, `mixed`, `capped` (lowercased before use). Any other value leaves the unit with **no** environment sensors. |
 | **Default** | Unset — auto: `dryer` when `HELIX_MOCK_DRYER` is on, otherwise `passive` |
 | **File** | `src/printer/ams_backend.cpp` (applied via `AmsBackendMock::set_environment_mode`) |
 
@@ -1212,6 +1756,7 @@ presentation branch has something to exercise. They pair with `HELIX_MOCK_AMS=mu
 | `emu` | default single unit | 4 passive lanes | `Tabs` |
 | `mixed` | `HELIX_MOCK_AMS=multi` | 1 heated unit zone + 2 passive lane zones | `List` (capability split) |
 | `capped` | `HELIX_MOCK_AMS=multi` | 2 heated unit zones, one Active one Queued | `Tabs` |
+| `emu_dryer` | default single unit | 4 heated lanes; the dryer takes a lane selection and rotation, lane chips in the overlay and a drying badge on each slot. A cycle is running at start: lane 1 Active, lane 2 Queued, lane 3 Complete | `Tabs` |
 
 ```bash
 # 6-lane EMU rig, forced to the list presentation
@@ -1219,6 +1764,9 @@ HELIX_MOCK_AMS=multi HELIX_MOCK_AMS_ENV=emu ./build/bin/helix-screen --test -vv
 
 # Two heated boxes sharing one heater's worth of power: the second zone queues
 HELIX_MOCK_AMS=multi HELIX_MOCK_AMS_ENV=capped ./build/bin/helix-screen --test -vv
+
+# A heater per lane: pick lanes to dry, watch each slot's drying badge
+HELIX_MOCK_AMS_ENV=emu_dryer ./build/bin/helix-screen --test -vv
 ```
 
 ### `HELIX_MOCK_BUFFER_STATE`
@@ -1290,6 +1838,20 @@ HELIX_MOCK_THROTTLE=freq_capped_prev ./build/bin/helix-screen --test -vv
 
 Applied on every sampler tick, so the flags persist for the whole run rather than firing once.
 
+### `HELIX_MOCK_DISK_FREE_MB`
+
+Set the free space the mock reports for the gcodes disk, so the host-health widget's low-disk warning (below 500 MB) can be seen without filling a disk. Both the mock performance sampler and the mock Moonraker client's `server.files.get_directory` answer read it.
+
+| Property | Value |
+|----------|-------|
+| **Values** | A whole number of megabytes, capped at the 29 GB mock disk |
+| **Default** | Unset: 18 GB free of 29 GB |
+| **Files** | `include/mock_disk_usage.h`, `src/system/mock_performance_source.cpp`, `src/api/moonraker_client_mock_files.cpp` |
+
+```bash
+HELIX_MOCK_DISK_FREE_MB=300 ./build/bin/helix-screen --test -vv
+```
+
 ### `INPUT_SHAPER_DEMO_KALICO`
 
 Swap the input-shaper panel's injected demo results for a Kalico-shaped shaper list. Kalico reports smooth shapers (`smooth_zv`, `smooth_mzv`, `smooth_ei`, `smooth_2hump_ei`, `smooth_zvd_ei`, `smooth_si`) alongside the discrete ones; stock Klipper reports five discrete shapers only. Used for screenshots and for checking that the recommendation UI handles the longer list.
@@ -1310,7 +1872,7 @@ INPUT_SHAPER_DEMO_KALICO=1 ./build/bin/helix-screen --test -vv &
 
 ### `HELIX_MOCK_BELT_A_HZ`
 
-Set belt path A's simulated resonance peak (Hz) in the mock's `TEST_RESONANCES` simulation. Path A is the `AXIS=1,-1` diagonal (Voron/Shake&Tune naming). Re-measuring a path walks its peak toward the other path's by up to 4 Hz per run, so the tuning loop converges the way cranking a belt tensioner does.
+Set belt path A's simulated resonance peak (Hz) in the mock's `TEST_RESONANCES` simulation. Path A is the `AXIS=1,-1` diagonal (Voron/Shake&Tune naming). Re-measuring a path with a full sweep, while no tune script is set, walks its peak toward the other path's by up to 4 Hz per run, so the tuning loop converges the way cranking a belt tensioner does.
 
 | Property | Value |
 |----------|-------|
@@ -1337,6 +1899,53 @@ Set belt path B's simulated resonance peak (Hz), the `AXIS=1,1` diagonal. Read o
 # A stiff A belt and a loose B belt
 HELIX_MOCK_BELT_A_HZ=115 HELIX_MOCK_BELT_B_HZ=95 ./build/bin/helix-screen --test --sim-speed 6 -vv
 ```
+
+### `HELIX_MOCK_BELT_TUNE_SCRIPT`
+
+Script one belt path's peak across the guided tuning loop. A path's first sweep reads its seeded peak (`HELIX_MOCK_BELT_A_HZ` / `_B_HZ`); every sweep of the named path after that, full or windowed (`TEST_RESONANCES ... FREQ_START= FREQ_END=`), plays the next value in the list, and the last value holds once the list runs out. So the calibration turn's full sweeps and the narrow rounds after it can all be scripted. While either path has a script, no sweep applies the re-measure walk described under `HELIX_MOCK_BELT_A_HZ`. The CSV always spans the configured range, as Klipper's does. Read once at mock construction. An empty or non-numeric item is skipped with a warning, and a prefix other than `A:` or `B:` drops the whole value.
+
+Without a script the walk runs on full re-measures, so a plain `--test` run still registers the calibration turn: A's 110 Hz and B's 98 Hz walk to 106 and 102 on the calibration sweep.
+
+| Property | Value |
+|----------|-------|
+| **Values** | `<A\|B>:<hz>,<hz>,...`; the item `flat` writes a featureless curve (noise floor, no peak) for that sweep, which reaches the no-peak round |
+| **Default** | unset: sweeps after the first walk the peaks as `HELIX_MOCK_BELT_A_HZ` describes |
+| **File** | `src/api/moonraker_client_mock.cpp` (`apply_belt_tune_script`, `dispatch_test_resonances_response`) |
+
+```bash
+# B: the calibration sweep barely moves (98.3), a second turn registers (102.1),
+# then the narrow rounds climb toward A (110 Hz)
+HELIX_MOCK_BELT_TUNE_SCRIPT="B:98.3,102.1,102.1,105.0,108.5,109.9" ./build/bin/helix-screen --test --sim-speed 6 -vv
+
+# B's second sweep finds no peak
+HELIX_MOCK_BELT_TUNE_SCRIPT="B:flat,104" ./build/bin/helix-screen --test --sim-speed 6 -vv
+```
+
+### Live sweep preview under `--test`
+
+No variable switches this on: under `--test` the live sweep charts (Input Shaper panel and
+wizard step, Belt Tension) are fed by the mock printer's own accelerometer stream, so the
+whole path from the loop thread to the chart runs without hardware.
+
+- **The stream.** `MockAccelBatchSource` (`include/accel_batch_source_mock.h`) plays a synthetic
+  sweep (`SweepSynth`) through the callbacks klippy's dump endpoint feeds, on a private
+  libhv loop thread, one batch per `kBatchIntervalMs` of wall time. `make_accel_batch_source`
+  picks it when `RuntimeConfig::should_mock_moonraker()`; the mock's
+  `MoonrakerClientMock::make_accel_batch_source` hands it the response of the sweep it
+  started last. The stream's ramp starts `kDriveLeadS` after the stream, as a real one
+  trails the console line the preview attaches on.
+- **The response.** It matches the CSV the mock writes for the same sweep, so the swap to
+  the CSV curve is seamless. Belt paths follow `HELIX_MOCK_BELT_A_HZ` / `_B_HZ` (and the
+  tune script); `SHAPER_CALIBRATE` peaks at 53.8 Hz (X) and 48.2 Hz (Y).
+- **Pacing.** `--sim-speed` scales the stream (stream seconds per wall second) and the
+  console lines together, so the two stay in step at any factor. Check the preview at 4-10x, as for
+  any active sweep.
+- **Realtime shaper sweep.** `SHAPER_CALIBRATE` plays one `Testing frequency` line per whole
+  Hz at the belt sweep's cadence when `MoonrakerClientMock::set_shaper_sweep_realtime` is on,
+  which `MoonrakerManager` sets for the app. Unit tests keep the compact 20-line transcript.
+- **Failure modes.** `HELIX_MOCK_BELT_FAIL=stall` and the other modes end the console
+  transcript as before, and the preview stops with the run. `HELIX_SWEEP_PREVIEW_OFF=1`
+  (`ENVIRONMENT_VARIABLES.md`) removes the preview under `--test` too.
 
 ### `HELIX_MOCK_BELT_FAIL`
 

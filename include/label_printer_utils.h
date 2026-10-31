@@ -10,8 +10,11 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 namespace helix {
+
+class IppPrinter;
 
 /// Print a spool label using the configured printer backend.
 /// Handles backend selection, USB device scanning with fallback, and error reporting.
@@ -28,6 +31,40 @@ void print_spool_label(const SpoolInfo& spool, PrintCallback callback);
 /// "Print failed". Result is already run through lv_tr() and safe to show
 /// directly in a toast.
 std::string friendly_label_printer_error(const std::string& raw);
+
+/// Persist a printer picked from network discovery: address, port (631 for an IPP
+/// printer with no SRV port), protocol ("raw" or "ipp") and its IPP resource path.
+void save_discovered_network_printer(const DiscoveredPrinter& printer, const std::string& protocol);
+
+/// A discovered network printer as the settings page ranks it: best candidate first.
+struct RankedNetworkPrinter {
+    std::string ip_address;
+    std::string protocol; ///< "raw" or "ipp"
+};
+
+/// What the settings page does with a fresh discovery list.
+struct DiscoveredPrinterPick {
+    int select = -1; ///< index to save as the printer, or -1 to keep the saved one
+    int show = -1;   ///< index the dropdown shows, or -1 when the saved printer is not listed
+};
+
+/**
+ * Decide which discovered printer to save and which to show. Raw and IPP discovery
+ * report separately, in either order, so an automatic pick is revisited whenever a
+ * better-ranked printer appears; a printer the user chose is never replaced.
+ *
+ * @param ranked         discovered printers, best candidate first
+ * @param saved_ip       saved printer address ("" when none)
+ * @param saved_protocol saved printer protocol
+ * @param may_auto_pick  true while no printer is saved or the saved one was picked automatically
+ */
+DiscoveredPrinterPick pick_discovered_printer(const std::vector<RankedNetworkPrinter>& ranked,
+                                              const std::string& saved_ip,
+                                              const std::string& saved_protocol,
+                                              bool may_auto_pick);
+
+/// Point an IPP printer at the configured address, port and resource path.
+void apply_ipp_target(IppPrinter& printer);
 
 /**
  * Score how likely a discovered printer is to be a label printer.

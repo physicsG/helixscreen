@@ -61,6 +61,9 @@ const DisplayList* canvas_committed(const std::string& name);
 std::pair<int32_t, int32_t> canvas_size(const std::string& name);
 /// Live plugin_canvas instances named `name`.
 size_t canvas_instance_count(const std::string& name);
+/// True while anything holds `name`: a live instance, a committed list, or the
+/// size listener a plugin's helix.canvas(name) registers.
+bool canvas_known(const std::string& name);
 /// Called (main thread, synchronously, from the size event) when an instance of `name`
 /// reports a content size different from the last one. An empty function removes it.
 /// The listener must not enter Lua; it defers.

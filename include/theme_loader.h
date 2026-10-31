@@ -19,7 +19,7 @@
 namespace helix {
 
 /// Default theme filename (without .json extension)
-constexpr const char* DEFAULT_THEME = "helixscreen";
+constexpr const char* kDefaultTheme = "helixscreen";
 
 /**
  * @brief Mode support for themes
@@ -160,6 +160,17 @@ std::vector<ThemeInfo> discover_themes(const std::string& themes_dir);
  * @return true if directory is ready, false on error
  */
 bool ensure_themes_directory(const std::string& themes_dir);
+
+/**
+ * @brief Delete a nord.json in the user themes directory that a release shipped there
+ *
+ * Matched by content hash against every copy a release put in the user layer, so a
+ * user's own Nord edit is kept. ensure_themes_directory() calls this.
+ *
+ * @param themes_dir Path to the user themes directory
+ * @return true if the file was a shipped copy and was removed
+ */
+bool remove_shipped_theme_override(const std::string& themes_dir);
 
 /**
  * @brief Get themes directory path (user overrides)

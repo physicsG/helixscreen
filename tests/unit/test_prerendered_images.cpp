@@ -258,9 +258,9 @@ TEST_CASE("Prerendered image edge cases", "[assets][edge]") {
 //   bytes 4-7: compressed size
 //   bytes 8-11: decompressed size
 
-static constexpr uint8_t LVGL_MAGIC = 0x19;
-static constexpr uint16_t LVGL_FLAG_COMPRESSED = 0x08;
-static constexpr uint32_t LVGL_COMPRESS_LZ4 = 2;
+static constexpr uint8_t kLvglMagic = 0x19;
+static constexpr uint16_t kLvglFlagCompressed = 0x08;
+static constexpr uint32_t kLvglCompressLz4 = 2;
 
 struct LvglBinHeader {
     uint8_t magic;
@@ -287,7 +287,7 @@ static bool read_bin_header(const std::string& path, LvglBinHeader& hdr, LvglCom
     if (!f.good())
         return false;
 
-    if (hdr.flags & LVGL_FLAG_COMPRESSED) {
+    if (hdr.flags & kLvglFlagCompressed) {
         f.read(reinterpret_cast<char*>(&comp), sizeof(comp));
         if (!f.good())
             return false;
@@ -317,16 +317,16 @@ TEST_CASE("LZ4-compressed prerendered images have valid headers", "[assets][lz4]
             LvglCompressBlock comp{};
             INFO("File: " << entry.path().filename().string());
             REQUIRE(read_bin_header(entry.path().string(), hdr, comp));
-            REQUIRE(hdr.magic == LVGL_MAGIC);
+            REQUIRE(hdr.magic == kLvglMagic);
 
-            if ((hdr.flags & LVGL_FLAG_COMPRESSED) == 0) {
+            if ((hdr.flags & kLvglFlagCompressed) == 0) {
                 // Stale or regenerated-without-compression file; warn but don't fail
                 WARN("Uncompressed .bin (stale build artifact?): "
                      << entry.path().filename().string());
                 continue;
             }
 
-            REQUIRE(comp.method == LVGL_COMPRESS_LZ4);
+            REQUIRE(comp.method == kLvglCompressLz4);
             REQUIRE(comp.compressed_size > 0);
             REQUIRE(comp.decompressed_size > comp.compressed_size);
             REQUIRE(hdr.w > 0);
@@ -352,16 +352,16 @@ TEST_CASE("LZ4-compressed prerendered images have valid headers", "[assets][lz4]
             LvglCompressBlock comp{};
             INFO("File: " << entry.path().filename().string());
             REQUIRE(read_bin_header(entry.path().string(), hdr, comp));
-            REQUIRE(hdr.magic == LVGL_MAGIC);
+            REQUIRE(hdr.magic == kLvglMagic);
 
-            if ((hdr.flags & LVGL_FLAG_COMPRESSED) == 0) {
+            if ((hdr.flags & kLvglFlagCompressed) == 0) {
                 // Stale or regenerated-without-compression file; warn but don't fail
                 WARN("Uncompressed .bin (stale build artifact?): "
                      << entry.path().filename().string());
                 continue;
             }
 
-            REQUIRE(comp.method == LVGL_COMPRESS_LZ4);
+            REQUIRE(comp.method == kLvglCompressLz4);
             REQUIRE(comp.compressed_size > 0);
             REQUIRE(comp.decompressed_size > comp.compressed_size);
             checked++;

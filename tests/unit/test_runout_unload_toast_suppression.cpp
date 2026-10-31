@@ -28,13 +28,11 @@
  * the warning must STILL fire. A suppression that also blinds the genuine runout
  * has not fixed anything.
  *
- * Toasts are observed through the notification hooks in tests/ui_test_utils.h.
- * The production notification layer is REPLACED by log-only stubs in the test
- * binary, so NotificationHistory and PendingStartupWarnings are both unreachable
- * from a unit test and would silently capture nothing — which would make every
- * suppression assertion below vacuously true. The hooks are the supported
- * observation point, and they separate WARNING from INFO for us, so "I
- * suppressed the wrong toast" fails on severity as well as on text.
+ * Toasts are observed through the notification hooks in tests/ui_test_utils.h,
+ * which see every notification raised before the toast threshold or the
+ * pre-init startup queue decide how it is shown. They separate WARNING from
+ * INFO for us, so "I suppressed the wrong toast" fails on severity as well as
+ * on text.
  */
 
 #include "ui_manual_pull_prompt.h"
@@ -42,6 +40,7 @@
 
 #include "../lvgl_test_fixture.h"
 #include "../test_helpers/ams_state_test_access.h"
+#include "../test_helpers/filament_sensor_manager_test_access.h"
 #include "../test_helpers/post_unload_grace_test_access.h"
 #include "../ui_test_utils.h"
 #include "ams_state.h"
@@ -65,20 +64,20 @@ namespace {
 
 /// The one sensor both surfaces watch. TOOLHEAD-roled, because that is the role
 /// ui_manual_pull_prompt's subject (filament_toolhead_detected) tracks.
-constexpr const char* TOOLHEAD_SENSOR = "filament_switch_sensor toolhead_sensor";
+constexpr const char* kToolheadSensor = "filament_switch_sensor toolhead_sensor";
 
 /// Substring of the FilamentSensorManager warning. The full text is prefixed
 /// with the role's display name, so match on the invariant half.
-constexpr const char* REMOVED_WARNING = "Filament removed";
+constexpr const char* kRemovedWarning = "Filament removed";
 /// Substring of the manual-pull hint (ui_manual_pull_prompt.cpp).
-constexpr const char* MANUAL_PULL_HINT = "clear of the toolhead";
+constexpr const char* kManualPullHint = "clear of the toolhead";
 
 nlohmann::json toolhead_status(bool detected) {
-    return nlohmann::json{{TOOLHEAD_SENSOR, {{"filament_detected", detected}, {"enabled", true}}}};
+    return nlohmann::json{{kToolheadSensor, {{"filament_detected", detected}, {"enabled", true}}}};
 }
 
-/// RAII capture of the two toast severities in play, through the hooks the
-/// notification stubs call (tests/ui_test_utils.h). Severity is kept separate on
+/// RAII capture of the two toast severities in play, through the notification
+/// hooks (tests/ui_test_utils.h). Severity is kept separate on
 /// purpose: the warning and the hint fire on the same sensor edge, so proving
 /// the right one survived means proving WHICH one did.
 class ToastCapture {
@@ -140,8 +139,8 @@ class UnloadToastFixture : public LVGLTestFixture {
         fsm.init_subjects();
         PostUnloadGraceTestAccess::reset(fsm);
         fsm.set_master_enabled(true);
-        fsm.discover_sensors({TOOLHEAD_SENSOR});
-        fsm.set_sensor_role(TOOLHEAD_SENSOR, FilamentSensorRole::TOOLHEAD);
+        discover_filament_sensors(fsm, {kToolheadSensor});
+        fsm.set_role(kToolheadSensor, static_cast<uint8_t>(FilamentSensorRole::TOOLHEAD));
 
         // Filament present. The prompt only arms when the sensor currently SEES
         // filament, so this baseline has to land before arm_manual_pull_prompt().
@@ -181,7 +180,7 @@ TEST_CASE_METHOD(UnloadToastFixture, "A genuine runout still raises the Filament
     ToastCapture toasts;
     pull_filament();
 
-    CHECK(toasts.warnings_containing(REMOVED_WARNING) == 1);
+    CHECK(toasts.warnings_containing(kRemovedWarning) == 1);
 }
 
 TEST_CASE_METHOD(UnloadToastFixture,
@@ -200,10 +199,10 @@ TEST_CASE_METHOD(UnloadToastFixture,
     pull_filament();
 
     // The warning is the noise — gone.
-    CHECK(toasts.warnings_containing(REMOVED_WARNING) == 0);
+    CHECK(toasts.warnings_containing(kRemovedWarning) == 0);
     // The hint is the point — still there, exactly once. Both fire on the SAME
     // edge, so a suppression that caught the wrong one fails right here.
-    CHECK(toasts.infos_containing(MANUAL_PULL_HINT) == 1);
+    CHECK(toasts.infos_containing(kManualPullHint) == 1);
 
     // And the toast only PEEKED: the idle runout modal is the sole consumer and
     // its one shot is still unspent.
@@ -223,7 +222,7 @@ TEST_CASE_METHOD(UnloadToastFixture, "An expired grace stops suppressing the war
     ToastCapture toasts;
     pull_filament();
 
-    CHECK(toasts.warnings_containing(REMOVED_WARNING) == 1);
+    CHECK(toasts.warnings_containing(kRemovedWarning) == 1);
 }
 
 TEST_CASE_METHOD(UnloadToastFixture, "Filament INSERTED is still announced during the grace",

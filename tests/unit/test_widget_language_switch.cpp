@@ -12,7 +12,6 @@
 #include "ui_breakpoint.h"
 #include "ui_carousel.h"
 #include "ui_language_refresh.h"
-#include "ui_print_light_timelapse.h"
 #include "ui_update_queue.h"
 
 #include "../lvgl_ui_test_fixture.h"
@@ -305,7 +304,7 @@ TEST_CASE_METHOD(LanguageSwitchFixture,
     CHECK(std::string(lv_label_get_text(sensor_name)) == lv_tr("Select sensor"));
 }
 
-// Tool labels, extruder names and the current-tool label are translated where
+// Tool labels and extruder names are translated where
 // the printer layer discovers the hardware, not by any widget.
 TEST_CASE_METHOD(LanguageSwitchFixture,
                  "discovered tool and extruder names re-translate on a language switch",
@@ -316,17 +315,14 @@ TEST_CASE_METHOD(LanguageSwitchFixture,
     helix::ui::init_ams_tool_text_observers();
     helix::ui::init_language_refresh();
     lv_subject_set_int(ams.get_current_tool_subject(), 1);
-    helix::ui::refresh_ams_tool_text();
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
     auto& tools = ToolState::instance();
     const std::string tool_en = tools.tools()[1].display_label;
     const std::string nozzle_en =
         state().temperature_state().extruders().at("extruder1").display_name;
-    const std::string current_en = lv_subject_get_string(ams.get_current_tool_text_subject());
     REQUIRE(tool_en == helix::ui::lane_label(helix::ui::active_tool_noun(), 1));
     REQUIRE(nozzle_en == "Nozzle 2");
-    REQUIRE(current_en == tool_en);
     const int version = lv_subject_get_int(tools.get_tools_version_subject());
 
     SystemSettingsManager::instance().set_language("ru");
@@ -339,11 +335,6 @@ TEST_CASE_METHOD(LanguageSwitchFixture,
     CHECK(lv_subject_get_int(tools.get_tools_version_subject()) > version);
     CHECK(state().temperature_state().extruders().at("extruder1").display_name ==
           std::string(lv_tr("Nozzle")) + " 2");
-    // Whichever tool is current once the switch has resynced the backend.
-    const int current = lv_subject_get_int(ams.get_current_tool_subject());
-    REQUIRE(current >= 0);
-    CHECK(std::string(lv_subject_get_string(ams.get_current_tool_text_subject())) ==
-          helix::ui::lane_label(helix::ui::active_tool_noun(), current));
 }
 
 namespace helix {
@@ -410,21 +401,4 @@ TEST_CASE_METHOD(LanguageSwitchFixture, "AMS status texts re-translate on a lang
               .rfind(lv_tr("Clog Auto"), 0) == 0);
 
     ams.set_backend(nullptr);
-}
-
-// The print-status timelapse button's On/Off is formatted into a subject buffer.
-TEST_CASE_METHOD(LanguageSwitchFixture, "the print-status timelapse label re-translates",
-                 "[i18n][timelapse]") {
-    PrintLightTimelapseControls controls;
-    controls.init_subjects();
-    lv_subject_t* label = lv_xml_get_subject(nullptr, "timelapse_button_label");
-    REQUIRE(label != nullptr);
-    CHECK(std::string(lv_subject_get_string(label)) == "Off");
-
-    SystemSettingsManager::instance().set_language("ru");
-    helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-    REQUIRE(std::string(lv_tr("Off")) != "Off");
-    CHECK(std::string(lv_subject_get_string(label)) == lv_tr("Off"));
-
-    controls.deinit_subjects();
 }

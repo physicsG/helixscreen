@@ -95,3 +95,13 @@ TEST_CASE_METHOD(LVGLTestFixture, "HTTP epoch: only a new base URL starts a new 
     api.set_http_base_url("http://10.0.0.2:7125");
     CHECK(helix::http_epoch::current() != first);
 }
+
+TEST_CASE("HTTP epoch: a switched reply with no error callback is dropped", "[http_epoch][1874]") {
+    bool landed = false;
+    auto guarded = helix::http_epoch::guard_reply(
+        helix::SharedCallback<void(int)>([&landed](int) { landed = true; }),
+        helix::SharedCallback<void(const MoonrakerError&)>{}, "test_request");
+    helix::http_epoch::advance();
+    REQUIRE_NOTHROW(guarded(1));
+    CHECK_FALSE(landed);
+}

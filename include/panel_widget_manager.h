@@ -37,7 +37,7 @@ using WidgetReuseMap = std::unordered_map<std::string, std::unique_ptr<PanelWidg
 
 /// Appended to a widget id in compute_visible_widget_ids() while its hardware
 /// gate reads 0, so a gate flip changes the page's id list.
-inline constexpr char GATED_ID_SUFFIX[] = "~gated";
+inline constexpr char kGatedIdSuffix[] = "~gated";
 
 /// A placed widget's footprint on the grid, in tracks, as the card background
 /// pass reads it.
@@ -108,6 +108,15 @@ class PanelWidgetManager {
         shared_resources_.erase(type_tag<T>());
     }
 
+    /// Remove T's slot only while it still names `owner`. An owner about to free
+    /// its object empties the slot first, and leaves alone a slot a newer owner
+    /// has taken since.
+    template <typename T> void unregister_shared_resource(const T* owner) {
+        auto it = shared_resources_.find(type_tag<T>());
+        if (it != shared_resources_.end() && it->second.get() == static_cast<const void*>(owner))
+            shared_resources_.erase(it);
+    }
+
     void clear_shared_resources();
 
     // -- Per-panel rebuild callbacks --
@@ -139,6 +148,16 @@ class PanelWidgetManager {
                                                                lv_obj_t* container,
                                                                int page_index = 0,
                                                                WidgetReuseMap reuse = {});
+
+    /// Re-resolve @p panel_id's unedited default layout on the grid it was last
+    /// stamped for when a capability it consults has changed. Only while the
+    /// printer is CONNECTED and Klipper READY: a teardown or retarget zeroes
+    /// capability subjects, and that is not a reason to reshuffle the panel.
+    /// Returns true when it rewrote the arrangement, so the caller rebuilds
+    /// even if the visible widget list is unchanged. populate_widgets() runs
+    /// this first. A pending home default is a seed point too: a layout the
+    /// printer's own screen published replaces it here, before it is applied.
+    bool refresh_live_default(const std::string& panel_id);
 
     /// Compute which widget IDs would be visible for a panel without creating
     /// any LVGL objects. Used to short-circuit rebuilds when the list is unchanged.
@@ -203,10 +222,17 @@ class PanelWidgetManager {
     // -- Gate observers --
 
     /// Observe every hardware gate subject so that widgets appear/disappear
-    /// when capabilities change. Calls rebuild_cb on change. @p panel_id only
+    /// when capabilities change, every subject the default layout table
+    /// consults, and the printer connection and Klipper state that decide when
+    /// a live default may re-resolve. Calls rebuild_cb on change. @p panel_id only
     /// keys the registration: any surface listing gated widgets (the home panel,
     /// the widget catalog) holds its own under a distinct key.
     void setup_gate_observers(const std::string& panel_id, RebuildCallback rebuild_cb);
+
+    /// Every subject setup_gate_observers() watches: the registry gates, the
+    /// default layout table's subjects, @p overlay's (a preset seed, null for
+    /// none) and the connection pair. Sorted, unique.
+    static std::vector<std::string> gate_subject_names(const nlohmann::json& overlay);
 
     /// Release gate observers for a panel (call during deinit/shutdown). Safe to
     /// call after the manager is destroyed: a process-lifetime panel can outlive

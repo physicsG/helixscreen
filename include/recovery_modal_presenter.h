@@ -3,16 +3,18 @@
 
 #pragma once
 
-#include "action_prompt_manager.h" // PromptData / PromptButton
-#include "action_prompt_modal.h"   // helix::ui::ActionPromptModal
+#include "async_lifetime_guard.h"
 #include "error_event.h"
 #include "lvgl.h"
+#include "recovery_fault_modal.h"
 
 #include <memory>
 #include <string>
 #include <vector>
 
+namespace helix {
 class IMoonrakerAPI;
+}
 
 // Forward declaration so the presenter can grant white-box test access.
 struct RecoveryModalPresenterTestAccess;
@@ -82,6 +84,11 @@ class RecoveryModalPresenter {
     /// taps a recovery button.
     void on_recovery_tapped(const std::string& gcode);
 
+    /// The tap's work once any confirm is answered: preheat first when
+    /// @p needs_hot_nozzle and the nozzle is cold, else send.
+    void continue_recovery(const std::string& gcode, const std::string& tag,
+                           const std::string& label, bool needs_hot_nozzle);
+
     /// Send @p gcode to the printer with the recovery error/toast handling.
     void dispatch_recovery(const std::string& gcode, const std::string& tag);
 
@@ -111,15 +118,15 @@ class RecoveryModalPresenter {
     static void preheat_timer_cb(lv_timer_t* timer);
 
     IMoonrakerAPI* api_;
-    std::unique_ptr<helix::ui::ActionPromptModal> modal_;
+    std::unique_ptr<helix::ui::RecoveryFaultModal> modal_;
     std::string shown_detail_;
     std::vector<helix::RecoveryAction> active_actions_;
 
     // === The user's answer to the fault currently being shown ===
     //
-    // A dismiss-only event carries one {"OK", ""} action; ActionPromptModal
+    // A dismiss-only event carries one {"OK", ""} action; RecoveryFaultModal
     // treats an empty gcode as "close and send nothing", so the tap never
-    // reaches our gcode callback. Nothing else in this class can see that the
+    // reaches our action callback. Nothing else in this class can see that the
     // user said "I've read it", which is why the modal's dismiss callback
     // reports every close this class did not make, rather than the dedup below
     // inferring it from is_visible(): visibility is false for a hide we
@@ -139,6 +146,9 @@ class RecoveryModalPresenter {
     /// clock keeps the bound honest when the main loop stalls.
     int32_t polls_remaining_ = 0;
     uint32_t preheat_budget_ms_;
+
+    /// Gates a recovery confirm's callbacks; last, so it expires first.
+    helix::AsyncLifetimeGuard lifetime_;
 };
 
 } // namespace helix::ui

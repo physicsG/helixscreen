@@ -138,11 +138,11 @@ bool is_default_cooldown_gcode(const std::string& gcode);
  * ```
  */
 /// Current config schema version — bump when adding new migrations
-static constexpr int CURRENT_CONFIG_VERSION = 27;
+static constexpr int kCurrentConfigVersion = 31;
 /// Oldest config_version still migrated. Config::init() sets a document stamped
-/// 1 .. MIN_MIGRATABLE_CONFIG_VERSION-1 aside and starts from defaults; version 0
+/// 1 .. kMinMigratableConfigVersion-1 aside and starts from defaults; version 0
 /// is a shipped preset and is still migrated.
-static constexpr int MIN_MIGRATABLE_CONFIG_VERSION = 9;
+static constexpr int kMinMigratableConfigVersion = 9;
 
 class Config {
   private:
@@ -180,7 +180,7 @@ class Config {
     /// backwards-stepping clock.
     int64_t next_archive_stamp() const;
 
-    /// Drop the oldest /removed_printers entries beyond MAX_ARCHIVED_PRINTERS
+    /// Drop the oldest /removed_printers entries beyond kMaxArchivedPrinters
     void prune_archived_printers();
 
     /// Warn that the value at @p json_ptr could not be read as the requested
@@ -237,7 +237,7 @@ class Config {
      * effective path (the --test banner) resolve it the same way init() does
      * instead of printing the unresolved compile-time constant.
      *
-     * @param config_path Default path, e.g. RuntimeConfig::TEST_CONFIG_PATH
+     * @param config_path Default path, e.g. RuntimeConfig::kTestConfigPath
      * @return @p config_path when HELIX_CONFIG_DIR is unset or empty
      */
     static std::string resolve_path(const std::string& config_path);
@@ -635,8 +635,8 @@ class Config {
      * Prefer this over remove_printer() anywhere the removal is not an explicit
      * user action.
      *
-     * Each snapshot is stamped with ARCHIVED_AT_KEY and the archive is trimmed
-     * to the MAX_ARCHIVED_PRINTERS most recent entries.
+     * Each snapshot is stamped with kArchivedAtKey and the archive is trimmed
+     * to the kMaxArchivedPrinters most recent entries.
      *
      * @param printer_id Slug ID of the printer to archive
      */
@@ -645,11 +645,11 @@ class Config {
     /// How many archived printers /removed_printers keeps. Nothing reads the
     /// archive back yet, so it is pure insurance — an unbounded one would grow
     /// settings.json (and every rolling backup of it) without limit.
-    static constexpr size_t MAX_ARCHIVED_PRINTERS = 5;
+    static constexpr size_t kMaxArchivedPrinters = 5;
 
     /// Epoch-seconds field stamped into each /removed_printers entry, used to
     /// decide which entries are the oldest when pruning.
-    static constexpr const char* ARCHIVED_AT_KEY = "archived_at";
+    static constexpr const char* kArchivedAtKey = "archived_at";
 
     /**
      * @brief Get singleton instance

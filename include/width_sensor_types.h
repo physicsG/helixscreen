@@ -21,21 +21,6 @@ enum class WidthSensorType {
     HALL = 2,      ///< Hall effect based sensor
 };
 
-/// @brief Configuration for a width sensor
-struct WidthSensorConfig {
-    std::string klipper_name; ///< Full Klipper name (e.g., "tsl1401cl_filament_width_sensor")
-    std::string sensor_name;  ///< Short name (e.g., "tsl1401cl")
-    WidthSensorType type = WidthSensorType::TSL1401CL;
-    WidthSensorRole role = WidthSensorRole::NONE;
-    bool enabled = true;
-
-    WidthSensorConfig() = default;
-
-    WidthSensorConfig(std::string klipper_name_, std::string sensor_name_, WidthSensorType type_)
-        : klipper_name(std::move(klipper_name_)), sensor_name(std::move(sensor_name_)),
-          type(type_) {}
-};
-
 /// @brief Runtime state for a width sensor
 struct WidthSensorState {
     float diameter = 0.0f;  ///< Measured filament diameter in mm

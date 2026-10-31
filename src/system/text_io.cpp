@@ -184,25 +184,27 @@ bool LineReader::next(std::string& line) {
     return !line.empty();
 }
 
-std::optional<double> parse_double(std::string_view s) {
+namespace {
+
+// "+1.5" reads as 1.5; "+-1" and "++1" stay invalid.
+std::string_view without_plus(std::string_view s) {
     if (s.size() > 1 && s[0] == '+' && s[1] != '-' && s[1] != '+') {
         s.remove_prefix(1);
     }
+    return s;
+}
+
+} // namespace
+
+std::optional<double> detail::parse_double_strtod(std::string_view s) {
+    s = without_plus(s);
     if (s.empty()) {
         return std::nullopt;
     }
-#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
-    double value = 0.0;
-    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
-    if (ec != std::errc{} || ptr != s.data() + s.size()) {
-        return std::nullopt;
-    }
-    return value;
-#else
-    // libc++ without floating-point from_chars (macOS dev builds). strtod reads the
-    // active LC_NUMERIC decimal point, so the input's '.' is mapped onto that point,
-    // and a ',' is refused outright: this grammar has no ',' decimal form, in any locale.
-    // The checks below hold it to the same strict whole-view contract.
+    // strtod reads the active LC_NUMERIC decimal point, so the input's '.' is mapped
+    // onto that point, and a ',' is refused outright: this grammar has no ',' decimal
+    // form, in any locale. The checks below hold it to the same strict whole-view
+    // contract as from_chars.
     if (std::isspace(static_cast<unsigned char>(s[0]))) {
         return std::nullopt;
     }
@@ -220,10 +222,29 @@ std::optional<double> parse_double(std::string_view s) {
     char* end = nullptr;
     errno = 0;
     double value = std::strtod(buf.c_str(), &end);
-    if (end != buf.c_str() + buf.size() || (errno == ERANGE && std::isinf(value))) {
+    // ERANGE also flags a subnormal result, which from_chars accepts; from_chars
+    // refuses only a magnitude that overflows or rounds to zero.
+    if (end != buf.c_str() + buf.size() ||
+        (errno == ERANGE && (std::isinf(value) || value == 0.0))) {
         return std::nullopt;
     }
     return value;
+}
+
+std::optional<double> parse_double(std::string_view s) {
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L && !HELIX_PLATFORM_ESP32
+    s = without_plus(s);
+    if (s.empty()) {
+        return std::nullopt;
+    }
+    double value = 0.0;
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), value);
+    if (ec != std::errc{} || ptr != s.data() + s.size()) {
+        return std::nullopt;
+    }
+    return value;
+#else
+    return detail::parse_double_strtod(s);
 #endif
 }
 

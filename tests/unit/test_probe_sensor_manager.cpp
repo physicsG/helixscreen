@@ -3,25 +3,25 @@
 
 /**
  * @file test_probe_sensor_manager.cpp
- * @brief Unit tests for ProbeSensorManager
- *
- * Tests cover:
- * - Type helpers (role/type string conversion)
- * - Sensor discovery from Klipper object names (probe, bltouch, smart_effector, probe_eddy_current)
- * - Role assignment (Z_PROBE)
- * - State updates from Moonraker status JSON
- * - Subject value correctness for UI binding
- * - Config persistence
+ * @brief ProbeSensorManager on the SensorManager base: discovery from objects and
+ *        config sections, the single-probe Z_PROBE default, status parsing, the
+ *        per-type subscriptions, the z_offset seed and the persisted settings shape.
  */
 
+#include "../lvgl_test_fixture.h"
+#include "../test_helpers/golden_json.h"
+#include "../test_helpers/sensor_manager_test_access.h"
 #include "../test_helpers/update_queue_test_access.h"
-#include "../ui_test_utils.h"
 #include "config.h"
+#include "hardware_object_table.h"
+#include "printer_detector.h"
+#include "printer_discovery.h"
 #include "probe_sensor_manager.h"
 #include "probe_sensor_types.h"
 
 #include <spdlog/spdlog.h>
 
+#include <fstream>
 #include <vector>
 
 #include "../catch_amalgamated.hpp"
@@ -30,61 +30,59 @@ using namespace helix;
 using namespace helix::sensors;
 using json = nlohmann::json;
 
-// ============================================================================
-// Test Access
-// ============================================================================
-
 namespace helix::sensors {
 class ProbeSensorManagerTestAccess {
   public:
     static void reset(ProbeSensorManager& obj) {
-        std::lock_guard<std::recursive_mutex> lock(obj.mutex_);
-        obj.sensors_.clear();
-        obj.sync_mode_ = true;
-        // Reset subject values but keep subjects initialized
-        if (obj.subjects_initialized_) {
-            lv_subject_set_int(&obj.sensor_count_, 0);
-            lv_subject_set_int(&obj.probe_triggered_, -1);
-            lv_subject_set_int(&obj.probe_last_z_, -1);
-            lv_subject_set_int(&obj.probe_z_offset_, -1);
+        SensorManagerTestAccess::reconcile(obj, {});
+        std::lock_guard<std::recursive_mutex> lock(obj.mutex());
+        obj.readings_.clear();
+        obj.type_override_ = ProbeSensorType::STANDARD;
+        obj.set_sync_mode(true);
+        if (obj.subjects_initialized()) {
+            lv_subject_set_int(&obj.z_offset_, -1);
         }
+    }
+
+    /// Reading of the enabled, available Z_PROBE holder.
+    static std::optional<ProbeSensorState> z_probe_reading(ProbeSensorManager& obj) {
+        std::lock_guard<std::recursive_mutex> lock(obj.mutex());
+        const auto* reading = obj.z_probe_reading_locked();
+        return reading ? std::optional<ProbeSensorState>(*reading) : std::nullopt;
     }
 };
 } // namespace helix::sensors
 
-// ============================================================================
-// Test Fixture
-// ============================================================================
+namespace {
 
-class ProbeSensorTestFixture {
+constexpr uint8_t kNone = static_cast<uint8_t>(ProbeSensorRole::NONE);
+constexpr uint8_t kZProbe = static_cast<uint8_t>(ProbeSensorRole::Z_PROBE);
+
+/// Objects as printer.objects.list reports them, config sections as configfile.config does.
+PrinterDiscovery discovery_of(const std::vector<std::string>& objects,
+                              const json& config = json::object()) {
+    PrinterDiscovery hw;
+    hw.parse_objects(json(objects));
+    hw.parse_config_keys(config);
+    return hw;
+}
+
+json& probe_slot() {
+    Config* cfg = Config::get_instance();
+    return cfg->get_json(cfg->df() + "probe_sensors");
+}
+
+class ProbeSensorTestFixture : public LVGLTestFixture {
   public:
-    ProbeSensorTestFixture() {
-        // Initialize LVGL (safe version avoids "already initialized" warnings)
-        lv_init_safe();
-
-        // Create a headless display for testing
-        if (!display_created_) {
-            display_ = lv_display_create(480, 320);
-            alignas(64) static lv_color_t buf[480 * 10];
-            lv_display_set_buffers(display_, buf, nullptr, sizeof(buf),
-                                   LV_DISPLAY_RENDER_MODE_PARTIAL);
-            lv_display_set_flush_cb(display_,
-                                    [](lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
-                                        lv_display_flush_ready(disp);
-                                    });
-            display_created_ = true;
-        }
-
-        // Initialize subjects (idempotent)
+    ProbeSensorTestFixture() : saved_slot_(probe_slot()) {
+        probe_slot() = json::object();
         mgr().init_subjects();
-
-        // Reset state for test isolation
         ProbeSensorManagerTestAccess::reset(mgr());
     }
 
-    ~ProbeSensorTestFixture() {
-        // Reset after each test
+    ~ProbeSensorTestFixture() override {
         ProbeSensorManagerTestAccess::reset(mgr());
+        probe_slot() = saved_slot_;
     }
 
   protected:
@@ -92,15 +90,34 @@ class ProbeSensorTestFixture {
         return ProbeSensorManager::instance();
     }
 
-    // Helper to discover standard test sensors
-    // Uses two specific (non-STANDARD) types to avoid deduplication logic
-    // that removes generic "probe" entries when specific types exist.
-    void discover_test_sensors() {
-        std::vector<std::string> sensors = {"bltouch", "smart_effector"};
-        mgr().discover(sensors);
+    void discover(const std::vector<std::string>& objects, const json& config = json::object()) {
+        mgr().discover(discovery_of(objects, config));
     }
 
-    // Helper to simulate Moonraker status update
+    // Two specific (non-STANDARD) types, so no alias dedup applies and no single-probe
+    // default is assigned.
+    void discover_test_sensors() {
+        discover({"bltouch", "smart_effector"});
+    }
+
+    void set_role(const std::string& klipper_name, ProbeSensorRole role) {
+        mgr().set_role(klipper_name, static_cast<uint8_t>(role));
+    }
+
+    uint8_t role_of(const std::string& klipper_name) {
+        SensorEntry e;
+        REQUIRE(mgr().find(klipper_name, e));
+        return e.role;
+    }
+
+    std::optional<ProbeSensorState> z_state() {
+        return ProbeSensorManagerTestAccess::z_probe_reading(mgr());
+    }
+
+    int z_offset_subject() {
+        return lv_subject_get_int(mgr().get_probe_z_offset_subject());
+    }
+
     void update_sensor_state(const std::string& klipper_name, float last_z_result) {
         json status;
         status[klipper_name]["last_z_result"] = last_z_result;
@@ -108,13 +125,10 @@ class ProbeSensorTestFixture {
     }
 
   private:
-    static lv_display_t* display_;
-    static bool display_created_;
+    json saved_slot_;
 };
 
-// Static members
-lv_display_t* ProbeSensorTestFixture::display_ = nullptr;
-bool ProbeSensorTestFixture::display_created_ = false;
+} // namespace
 
 // ============================================================================
 // Type Helper Tests (probe_sensor_types.h)
@@ -198,11 +212,9 @@ TEST_CASE("Probe type string conversions - new types", "[probe][types]") {
 // ============================================================================
 
 TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[probe][discovery]") {
-    SECTION("Discovers standard probe") {
-        std::vector<std::string> sensors = {"probe"};
-        mgr().discover(sensors);
+    SECTION("Discovers standard probe and makes it the Z probe") {
+        discover({"probe"});
 
-        REQUIRE(mgr().has_sensors());
         REQUIRE(mgr().sensor_count() == 1);
 
         auto configs = mgr().get_sensors();
@@ -211,13 +223,11 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[pro
         REQUIRE(configs[0].sensor_name == "probe");
         REQUIRE(configs[0].type == ProbeSensorType::STANDARD);
         REQUIRE(configs[0].enabled == true);
-        // Role starts as NONE — auto-assign happens in load_config_from_file()
-        REQUIRE(configs[0].role == ProbeSensorRole::NONE);
+        REQUIRE(configs[0].role == ProbeSensorRole::Z_PROBE);
     }
 
     SECTION("Discovers BLTouch probe") {
-        std::vector<std::string> sensors = {"bltouch"};
-        mgr().discover(sensors);
+        discover({"bltouch"});
 
         REQUIRE(mgr().sensor_count() == 1);
 
@@ -228,8 +238,7 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[pro
     }
 
     SECTION("Discovers Smart Effector probe") {
-        std::vector<std::string> sensors = {"smart_effector"};
-        mgr().discover(sensors);
+        discover({"smart_effector"});
 
         REQUIRE(mgr().sensor_count() == 1);
 
@@ -240,8 +249,7 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[pro
     }
 
     SECTION("Discovers Eddy Current probe with name parameter") {
-        std::vector<std::string> sensors = {"probe_eddy_current btt"};
-        mgr().discover(sensors);
+        discover({"probe_eddy_current btt"});
 
         REQUIRE(mgr().sensor_count() == 1);
 
@@ -251,10 +259,8 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[pro
         REQUIRE(configs[0].type == ProbeSensorType::EDDY_CURRENT);
     }
 
-    SECTION("Discovers multiple probe types") {
-        std::vector<std::string> sensors = {"bltouch", "smart_effector",
-                                            "probe_eddy_current scanner"};
-        mgr().discover(sensors);
+    SECTION("Discovers multiple probe types and assigns no default role") {
+        discover({"bltouch", "smart_effector", "probe_eddy_current scanner"});
 
         REQUIRE(mgr().sensor_count() == 3);
 
@@ -263,11 +269,13 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[pro
         REQUIRE(configs[1].type == ProbeSensorType::SMART_EFFECTOR);
         REQUIRE(configs[2].type == ProbeSensorType::EDDY_CURRENT);
         REQUIRE(configs[2].sensor_name == "scanner");
+        for (const auto& c : configs) {
+            REQUIRE(c.role == ProbeSensorRole::NONE);
+        }
     }
 
     SECTION("Standard probe removed when specific type present") {
-        std::vector<std::string> sensors = {"probe", "bltouch"};
-        mgr().discover(sensors);
+        discover({"probe", "bltouch"});
 
         REQUIRE(mgr().sensor_count() == 1);
         auto configs = mgr().get_sensors();
@@ -275,9 +283,8 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[pro
     }
 
     SECTION("Ignores unrelated objects") {
-        std::vector<std::string> sensors = {"probe", "filament_switch_sensor runout",
-                                            "temperature_sensor chamber", "extruder"};
-        mgr().discover(sensors);
+        discover(
+            {"probe", "filament_switch_sensor runout", "temperature_sensor chamber", "extruder"});
 
         REQUIRE(mgr().sensor_count() == 1);
         REQUIRE(mgr().get_sensors()[0].klipper_name == "probe");
@@ -287,30 +294,27 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery", "[pro
         discover_test_sensors();
         REQUIRE(mgr().sensor_count() == 2);
 
-        mgr().discover({});
+        discover({});
         REQUIRE(mgr().sensor_count() == 0);
-        REQUIRE_FALSE(mgr().has_sensors());
     }
 
     SECTION("Re-discovery replaces sensor list") {
-        std::vector<std::string> sensors1 = {"probe"};
-        mgr().discover(sensors1);
+        discover({"probe"});
         REQUIRE(mgr().get_sensors()[0].klipper_name == "probe");
 
-        std::vector<std::string> sensors2 = {"bltouch"};
-        mgr().discover(sensors2);
+        discover({"bltouch"});
         REQUIRE(mgr().sensor_count() == 1);
         REQUIRE(mgr().get_sensors()[0].klipper_name == "bltouch");
     }
 
     SECTION("Sensor count subject is updated") {
-        lv_subject_t* count_subject = mgr().get_sensor_count_subject();
+        lv_subject_t* count_subject = mgr().count_subject();
         REQUIRE(lv_subject_get_int(count_subject) == 0);
 
         discover_test_sensors();
         REQUIRE(lv_subject_get_int(count_subject) == 2);
 
-        mgr().discover({});
+        discover({});
         REQUIRE(lv_subject_get_int(count_subject) == 0);
     }
 }
@@ -323,44 +327,28 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - role assignment",
     discover_test_sensors();
 
     SECTION("Can set Z_PROBE role") {
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
-
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.klipper_name == "bltouch"; });
-        REQUIRE(it != configs.end());
-        REQUIRE(it->role == ProbeSensorRole::Z_PROBE);
+        set_role("bltouch", ProbeSensorRole::Z_PROBE);
+        REQUIRE(role_of("bltouch") == kZProbe);
     }
 
     SECTION("Role assignment is unique - assigning same role clears previous") {
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
-        mgr().set_sensor_role("smart_effector", ProbeSensorRole::Z_PROBE);
+        set_role("bltouch", ProbeSensorRole::Z_PROBE);
+        set_role("smart_effector", ProbeSensorRole::Z_PROBE);
 
-        auto configs = mgr().get_sensors();
-
-        auto bltouch_it = std::find_if(configs.begin(), configs.end(),
-                                       [](const auto& c) { return c.klipper_name == "bltouch"; });
-        REQUIRE(bltouch_it->role == ProbeSensorRole::NONE);
-
-        auto smart_it = std::find_if(configs.begin(), configs.end(), [](const auto& c) {
-            return c.klipper_name == "smart_effector";
-        });
-        REQUIRE(smart_it->role == ProbeSensorRole::Z_PROBE);
+        REQUIRE(role_of("bltouch") == kNone);
+        REQUIRE(role_of("smart_effector") == kZProbe);
     }
 
     SECTION("Can assign NONE without affecting other sensors") {
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
+        set_role("bltouch", ProbeSensorRole::Z_PROBE);
+        set_role("bltouch", ProbeSensorRole::NONE);
 
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::NONE);
-
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.klipper_name == "bltouch"; });
-        REQUIRE(it->role == ProbeSensorRole::NONE);
+        REQUIRE(role_of("bltouch") == kNone);
+        REQUIRE(role_of("smart_effector") == kNone);
     }
 
     SECTION("Assigning role to unknown sensor does nothing") {
-        mgr().set_sensor_role("nonexistent_sensor", ProbeSensorRole::Z_PROBE);
+        set_role("nonexistent_sensor", ProbeSensorRole::Z_PROBE);
 
         for (const auto& config : mgr().get_sensors()) {
             REQUIRE(config.role == ProbeSensorRole::NONE);
@@ -374,10 +362,10 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - role assignment",
 
 TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - state updates", "[probe][state]") {
     discover_test_sensors();
-    mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
+    set_role("bltouch", ProbeSensorRole::Z_PROBE);
 
     SECTION("Parses last_z_result and last_query from status JSON") {
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
+        auto state = z_state();
         REQUIRE(state.has_value());
         REQUIRE(state->last_z_result == 0.0f);
         REQUIRE_FALSE(state->triggered);
@@ -387,7 +375,7 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - state updates", "
         status["bltouch"]["last_query"] = true;
         mgr().update_from_status(status);
 
-        state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
+        state = z_state();
         REQUIRE(state->last_z_result == Catch::Approx(0.125f));
         REQUIRE(state->triggered);
     }
@@ -396,11 +384,11 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - state updates", "
         json status;
         status["bltouch"]["last_query"] = 1;
         mgr().update_from_status(status);
-        REQUIRE(mgr().get_sensor_state(ProbeSensorRole::Z_PROBE)->triggered);
+        REQUIRE(z_state()->triggered);
 
         status["bltouch"]["last_query"] = 0;
         mgr().update_from_status(status);
-        REQUIRE_FALSE(mgr().get_sensor_state(ProbeSensorRole::Z_PROBE)->triggered);
+        REQUIRE_FALSE(z_state()->triggered);
     }
 
     SECTION("A null or absent last_query keeps the previous value") {
@@ -411,31 +399,30 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - state updates", "
         json null_status;
         null_status["bltouch"]["last_query"] = nullptr;
         mgr().update_from_status(null_status);
-        REQUIRE(mgr().get_sensor_state(ProbeSensorRole::Z_PROBE)->triggered);
+        REQUIRE(z_state()->triggered);
 
         json absent;
         absent["bltouch"]["last_z_result"] = 0.2f;
         mgr().update_from_status(absent);
-        REQUIRE(mgr().get_sensor_state(ProbeSensorRole::Z_PROBE)->triggered);
+        REQUIRE(z_state()->triggered);
     }
 
     SECTION("A numeric z_offset updates the seed, a null one keeps it") {
-        json config;
-        config["bltouch"] = {{"z_offset", "-1.850"}};
-        mgr().discover_from_config(config);
+        discover({"bltouch", "smart_effector"}, json{{"bltouch", {{"z_offset", "-1.850"}}}});
+        set_role("bltouch", ProbeSensorRole::Z_PROBE);
 
         json null_status;
         null_status["bltouch"]["z_offset"] = nullptr;
         mgr().update_from_status(null_status);
-        REQUIRE(mgr().get_sensor_state(ProbeSensorRole::Z_PROBE)->z_offset ==
-                Catch::Approx(-1.850f));
+        REQUIRE(z_state()->z_offset == Catch::Approx(-1.850f));
 
         // Creality K1's Z_OFFSET_APPLY_PROBE moves it live, without a restart.
         json status;
         status["bltouch"]["z_offset"] = -0.5f;
         mgr().update_from_status(status);
-        REQUIRE(mgr().get_sensor_state(ProbeSensorRole::Z_PROBE)->z_offset == Catch::Approx(-0.5f));
-        REQUIRE(lv_subject_get_int(mgr().get_probe_z_offset_subject()) == -500);
+        REQUIRE(z_state()->z_offset == Catch::Approx(-0.5f));
+        REQUIRE(z_offset_subject() == -500);
+        REQUIRE(mgr().get_z_offset() == Catch::Approx(-0.5f));
     }
 
     SECTION("Status update for unknown sensor is ignored") {
@@ -444,13 +431,13 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - state updates", "
         mgr().update_from_status(status);
 
         REQUIRE(mgr().sensor_count() == 2);
+        REQUIRE(z_state()->last_z_result == 0.0f);
     }
 
     SECTION("Empty status update is handled") {
-        json status = json::object();
-        mgr().update_from_status(status);
+        mgr().update_from_status(json::object());
 
-        REQUIRE(mgr().has_sensors());
+        REQUIRE(mgr().sensor_count() == 2);
     }
 }
 
@@ -458,59 +445,34 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - state updates", "
 // Subject Value Tests
 // ============================================================================
 
-TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - subject values",
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - z_offset subject",
                  "[probe][subjects]") {
     discover_test_sensors();
 
-    SECTION("Probe triggered subject shows -1 when no sensor assigned to role") {
-        REQUIRE(lv_subject_get_int(mgr().get_probe_triggered_subject()) == -1);
+    SECTION("Shows -1 when no sensor holds Z_PROBE") {
+        REQUIRE(z_offset_subject() == -1);
+        REQUIRE(mgr().get_z_offset() == 0.0f);
     }
 
-    SECTION("Last Z result subject shows -1 when no sensor assigned to role") {
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == -1);
-    }
-
-    SECTION("Z offset subject shows -1 when no sensor assigned") {
-        REQUIRE(lv_subject_get_int(mgr().get_probe_z_offset_subject()) == -1);
-    }
-
-    SECTION("Last Z result subject updates correctly (value x 1000 = microns)") {
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
-
-        // After assignment, should show 0 since state defaults to 0.0
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == 0);
-
-        // Update state with last_z_result = 0.125mm = 125 microns
-        update_sensor_state("bltouch", 0.125f);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == 125);
-
-        // Update with different value
-        update_sensor_state("bltouch", 0.250f);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == 250);
-    }
-
-    SECTION("Probe triggered subject follows last_query (QUERY_PROBE result)") {
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_triggered_subject()) == 0);
+    SECTION("Follows the holder in microns") {
+        set_role("bltouch", ProbeSensorRole::Z_PROBE);
+        REQUIRE(z_offset_subject() == 0);
 
         json status;
-        status["bltouch"]["last_query"] = true;
+        status["bltouch"]["z_offset"] = -0.125f;
         mgr().update_from_status(status);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_triggered_subject()) == 1);
-
-        status["bltouch"]["last_query"] = false;
-        mgr().update_from_status(status);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_triggered_subject()) == 0);
+        REQUIRE(z_offset_subject() == -125);
     }
 
-    SECTION("Subjects show -1 when sensor disabled") {
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
-        update_sensor_state("bltouch", 0.125f);
+    SECTION("Shows -1 when the holder is disabled") {
+        set_role("bltouch", ProbeSensorRole::Z_PROBE);
+        json status;
+        status["bltouch"]["z_offset"] = -0.125f;
+        mgr().update_from_status(status);
 
-        mgr().set_sensor_enabled("bltouch", false);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_triggered_subject()) == -1);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == -1);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_z_offset_subject()) == -1);
+        mgr().set_enabled("bltouch", false);
+        REQUIRE(z_offset_subject() == -1);
+        REQUIRE_FALSE(z_state().has_value());
     }
 }
 
@@ -518,66 +480,44 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - subject values",
 // Config Persistence Tests
 // ============================================================================
 
-TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - config persistence",
+namespace {
+json load_probe_fixture() {
+    std::ifstream in(helix::test::golden_path("sensor_settings", "probe"));
+    REQUIRE(in.good());
+    json j = json::parse(in, nullptr, false);
+    REQUIRE_FALSE(j.is_discarded());
+    return j;
+}
+} // namespace
+
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - saved config reads back",
+                 "[probe][config]") {
+    const json fixture = load_probe_fixture();
+
+    discover({"probe_eddy_current btt_eddy", "bltouch"});
+    probe_slot() = fixture;
+    mgr().load_settings();
+    CHECK(role_of("probe_eddy_current btt_eddy") == kZProbe);
+    CHECK(role_of("bltouch") == kNone);
+    SensorEntry bltouch;
+    REQUIRE(mgr().find("bltouch", bltouch));
+    CHECK_FALSE(bltouch.enabled);
+
+    probe_slot() = json::object();
+    mgr().save_settings();
+    INFO("expected " << fixture.dump());
+    CHECK(probe_slot().dump() == fixture.dump());
+}
+
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - unknown saved sensor is ignored",
                  "[probe][config]") {
     discover_test_sensors();
+    probe_slot() = json{
+        {"sensors", json::array({json{{"klipper_name", "unknown_sensor"}, {"role", "z_probe"}}})}};
+    mgr().load_settings();
 
-    SECTION("save_config returns JSON with role assignments") {
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
-
-        json config = mgr().save_config();
-
-        REQUIRE(config.is_object());
-        REQUIRE(config.contains("sensors"));
-        REQUIRE(config["sensors"].is_array());
-        REQUIRE(config["sensors"].size() == 2);
-
-        bool found_bltouch = false;
-        for (const auto& sensor : config["sensors"]) {
-            if (sensor["klipper_name"] == "bltouch") {
-                REQUIRE(sensor["role"] == "z_probe");
-                found_bltouch = true;
-            }
-        }
-        REQUIRE(found_bltouch);
-    }
-
-    SECTION("load_config restores role assignments") {
-        // Set up config JSON
-        json config;
-        json sensors_array = json::array();
-        json sensor1;
-        sensor1["klipper_name"] = "bltouch";
-        sensor1["role"] = "z_probe";
-        sensor1["enabled"] = true;
-        sensors_array.push_back(sensor1);
-        config["sensors"] = sensors_array;
-
-        mgr().load_config(config);
-
-        auto configs = mgr().get_sensors();
-        auto it = std::find_if(configs.begin(), configs.end(),
-                               [](const auto& c) { return c.klipper_name == "bltouch"; });
-        REQUIRE(it != configs.end());
-        REQUIRE(it->role == ProbeSensorRole::Z_PROBE);
-    }
-
-    SECTION("load_config with unknown sensor is handled gracefully") {
-        json config;
-        json sensors_array = json::array();
-        json sensor1;
-        sensor1["klipper_name"] = "unknown_sensor";
-        sensor1["role"] = "z_probe";
-        sensors_array.push_back(sensor1);
-        config["sensors"] = sensors_array;
-
-        // Should not crash
-        mgr().load_config(config);
-
-        // Existing sensors should be unaffected
-        for (const auto& sensor : mgr().get_sensors()) {
-            REQUIRE(sensor.role == ProbeSensorRole::NONE);
-        }
+    for (const auto& sensor : mgr().get_sensors()) {
+        REQUIRE(sensor.role == ProbeSensorRole::NONE);
     }
 }
 
@@ -586,35 +526,22 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - config persistenc
 // ============================================================================
 
 TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - edge cases", "[probe][edge]") {
-    SECTION("get_sensor_state returns nullopt for unassigned role") {
+    SECTION("No state for an unassigned role") {
         discover_test_sensors();
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
-        REQUIRE_FALSE(state.has_value());
+        REQUIRE_FALSE(z_state().has_value());
     }
 
-    SECTION("get_sensor_state returns nullopt for NONE role") {
+    SECTION("The holder is read only while enabled") {
         discover_test_sensors();
-        auto state = mgr().get_sensor_state(ProbeSensorRole::NONE);
-        REQUIRE_FALSE(state.has_value());
-    }
+        set_role("bltouch", ProbeSensorRole::Z_PROBE);
+        REQUIRE(z_state().has_value());
 
-    SECTION("is_sensor_available checks role assignment and enabled") {
-        discover_test_sensors();
-        REQUIRE_FALSE(mgr().is_sensor_available(ProbeSensorRole::Z_PROBE));
-
-        mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
-        REQUIRE(mgr().is_sensor_available(ProbeSensorRole::Z_PROBE));
-
-        mgr().set_sensor_enabled("bltouch", false);
-        REQUIRE_FALSE(mgr().is_sensor_available(ProbeSensorRole::Z_PROBE));
+        mgr().set_enabled("bltouch", false);
+        REQUIRE_FALSE(z_state().has_value());
     }
 
     SECTION("Eddy current probe without name parameter is ignored") {
-        // "probe_eddy_current" needs a name parameter
-        std::vector<std::string> sensors = {"probe_eddy_current"};
-        mgr().discover(sensors);
-
-        // Should not discover (needs a name like "probe_eddy_current btt")
+        discover({"probe_eddy_current"});
         REQUIRE(mgr().sensor_count() == 0);
     }
 }
@@ -626,9 +553,8 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - edge cases", "[pr
 TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery of new probe types",
                  "[probe][discovery]") {
     SECTION("Discovers cartographer object") {
-        std::vector<std::string> objects = {"cartographer"};
-        mgr().discover(objects);
-        REQUIRE(mgr().has_sensors());
+        discover({"cartographer"});
+        REQUIRE(mgr().sensor_count() == 1);
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].type == ProbeSensorType::CARTOGRAPHER);
         REQUIRE(configs[0].sensor_name == "cartographer");
@@ -636,59 +562,78 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery of new 
     }
 
     SECTION("Discovers beacon object") {
-        std::vector<std::string> objects = {"beacon"};
-        mgr().discover(objects);
-        REQUIRE(mgr().has_sensors());
+        discover({"beacon"});
+        REQUIRE(mgr().sensor_count() == 1);
         auto configs = mgr().get_sensors();
         REQUIRE(configs[0].type == ProbeSensorType::BEACON);
         REQUIRE(configs[0].sensor_name == "beacon");
         REQUIRE(configs[0].klipper_name == "beacon");
     }
 
-    SECTION("Discovers eddy current as cartographer when cartographer object also present") {
-        std::vector<std::string> objects = {"probe_eddy_current carto", "cartographer"};
-        mgr().discover(objects);
-        REQUIRE(mgr().sensor_count() >= 1);
-        auto configs = mgr().get_sensors();
-        bool found_carto = false;
-        for (const auto& c : configs) {
-            if (c.type == ProbeSensorType::CARTOGRAPHER)
-                found_carto = true;
-        }
-        REQUIRE(found_carto);
+    SECTION("Eddy object beside a cartographer collapses to the cartographer") {
+        discover({"probe_eddy_current carto", "cartographer"});
+        REQUIRE(mgr().sensor_count() == 1);
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::CARTOGRAPHER);
     }
 
-    SECTION("Discovers eddy current as beacon when beacon object also present") {
-        std::vector<std::string> objects = {"probe_eddy_current beacon_probe", "beacon"};
-        mgr().discover(objects);
-        auto configs = mgr().get_sensors();
-        bool found_beacon = false;
-        for (const auto& c : configs) {
-            if (c.type == ProbeSensorType::BEACON)
-                found_beacon = true;
-        }
-        REQUIRE(found_beacon);
+    SECTION("Eddy object beside a beacon collapses to the beacon") {
+        discover({"probe_eddy_current beacon_probe", "beacon"});
+        REQUIRE(mgr().sensor_count() == 1);
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::BEACON);
     }
 
     SECTION("Plain eddy current without companion stays EDDY_CURRENT") {
-        std::vector<std::string> objects = {"probe_eddy_current btt"};
-        mgr().discover(objects);
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs[0].type == ProbeSensorType::EDDY_CURRENT);
+        discover({"probe_eddy_current btt"});
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::EDDY_CURRENT);
     }
 
     SECTION("Cartographer with eddy current deduplicates to single sensor") {
-        std::vector<std::string> objects = {"probe_eddy_current carto", "cartographer", "probe"};
-        mgr().discover(objects);
+        discover({"probe_eddy_current carto", "cartographer", "probe"});
         REQUIRE(mgr().sensor_count() == 1);
         REQUIRE(mgr().get_sensors()[0].klipper_name == "cartographer");
     }
 
     SECTION("Beacon with eddy current deduplicates to single sensor") {
-        std::vector<std::string> objects = {"beacon", "probe_eddy_current beacon_probe", "probe"};
-        mgr().discover(objects);
+        discover({"beacon", "probe_eddy_current beacon_probe", "probe"});
         REQUIRE(mgr().sensor_count() == 1);
         REQUIRE(mgr().get_sensors()[0].klipper_name == "beacon");
+    }
+}
+
+// ============================================================================
+// Config-only probe sections
+// ============================================================================
+
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - config-only probe sections",
+                 "[probe][discovery][config]") {
+    SECTION("load_cell_probe beside the probe object types it and feeds its z_offset") {
+        discover({"probe"}, json{{"load_cell_probe", {{"z_offset", "-0.185"}}}});
+        REQUIRE(mgr().sensor_count() == 1);
+        auto configs = mgr().get_sensors();
+        REQUIRE(configs[0].klipper_name == "probe");
+        REQUIRE(configs[0].type == ProbeSensorType::LOADCELL);
+        REQUIRE(configs[0].role == ProbeSensorRole::Z_PROBE);
+        REQUIRE(z_state()->z_offset == Catch::Approx(-0.185f));
+    }
+
+    SECTION("dockable_probe beside the probe object is not a second sensor") {
+        discover({"probe"}, json{{"dockable_probe", {{"z_offset", "1.0"}}}});
+        REQUIRE(mgr().sensor_count() == 1);
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::STANDARD);
+        REQUIRE(z_state()->z_offset == Catch::Approx(1.0f));
+    }
+
+    SECTION("a probe section of its own wins over an alias section") {
+        discover({"probe"}, json{{"probe", {{"z_offset", "-2.0"}}},
+                                 {"dockable_probe", {{"z_offset", "1.0"}}}});
+        REQUIRE(z_state()->z_offset == Catch::Approx(-2.0f));
+    }
+
+    SECTION("with no probe object the section is the sensor") {
+        discover({}, json{{"load_cell_probe", {{"z_offset", "0.5"}}}});
+        REQUIRE(mgr().sensor_count() == 1);
+        REQUIRE(mgr().get_sensors()[0].klipper_name == "load_cell_probe");
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::LOADCELL);
     }
 }
 
@@ -699,35 +644,83 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery of new 
 TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - macro-based probe detection",
                  "[probe][discovery][macros]") {
     SECTION("Detects Klicky from ATTACH_PROBE/DOCK_PROBE macros") {
-        std::vector<std::string> objects = {"probe", "gcode_macro ATTACH_PROBE",
-                                            "gcode_macro DOCK_PROBE"};
-        mgr().discover(objects);
+        discover({"probe", "gcode_macro ATTACH_PROBE", "gcode_macro DOCK_PROBE"});
         auto configs = mgr().get_sensors();
         REQUIRE(configs.size() == 1);
         REQUIRE(configs[0].type == ProbeSensorType::KLICKY);
     }
 
     SECTION("Detects Klicky from alternate macro names") {
-        std::vector<std::string> objects = {"probe", "gcode_macro _Probe_Deploy",
-                                            "gcode_macro _Probe_Stow"};
-        mgr().discover(objects);
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs[0].type == ProbeSensorType::KLICKY);
+        discover({"probe", "gcode_macro _Probe_Deploy", "gcode_macro _Probe_Stow"});
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::KLICKY);
     }
 
     SECTION("Standard probe without Klicky macros stays STANDARD") {
-        std::vector<std::string> objects = {"probe"};
-        mgr().discover(objects);
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs[0].type == ProbeSensorType::STANDARD);
+        discover({"probe"});
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::STANDARD);
     }
 
     SECTION("Standard probe with unrelated macros stays STANDARD") {
-        std::vector<std::string> objects = {"probe", "gcode_macro START_PRINT",
-                                            "gcode_macro END_PRINT"};
-        mgr().discover(objects);
-        auto configs = mgr().get_sensors();
-        REQUIRE(configs[0].type == ProbeSensorType::STANDARD);
+        discover({"probe", "gcode_macro START_PRINT", "gcode_macro END_PRINT"});
+        REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::STANDARD);
+    }
+}
+
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - probe type override",
+                 "[probe][discovery]") {
+    discover({"probe"});
+    mgr().set_probe_type_override(ProbeSensorType::PRTOUCH_V2);
+    REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::PRTOUCH_V2);
+
+    // A typed probe is not overridden again.
+    mgr().set_probe_type_override(ProbeSensorType::TAP);
+    REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::PRTOUCH_V2);
+}
+
+// PrinterState sets the override once per printer type, so it must outlive the
+// configfile pass's second discover(), which re-derives types from object names.
+TEST_CASE_METHOD(ProbeSensorTestFixture,
+                 "ProbeSensorManager - probe type override survives rediscovery",
+                 "[probe][discovery]") {
+    discover({"probe"});
+    mgr().set_probe_type_override(ProbeSensorType::PRTOUCH_V2);
+    REQUIRE(mgr().get_sensors()[0].type == ProbeSensorType::PRTOUCH_V2);
+
+    rediscover_from_config(discovery_of({"probe"}, json{{"probe", {{"z_offset", "0.1"}}}}));
+    CHECK(mgr().get_sensors()[0].type == ProbeSensorType::PRTOUCH_V2);
+
+    // A printer type without one clears it for the next discovery.
+    mgr().set_probe_type_override(ProbeSensorType::STANDARD);
+    discover({"probe"});
+    CHECK(mgr().get_sensors()[0].type == ProbeSensorType::STANDARD);
+}
+
+// PrinterState::set_printer_type_internal's override, from a database entry.
+TEST_CASE_METHOD(ProbeSensorTestFixture,
+                 "ProbeSensorManager - a k2-improvements K2 keeps the probe it reports",
+                 "[probe][discovery][k2improvements]") {
+    for (const char* printer :
+         {"Creality K2 Plus (k2-improvements)", "Creality K2 Pro (k2-improvements)"}) {
+        CAPTURE(printer);
+        const std::string db_type = PrinterDetector::get_probe_type(printer);
+        REQUIRE_FALSE(db_type.empty());
+        auto apply_database_override = [&] {
+            mgr().set_probe_type_override(probe_type_from_string(db_type));
+        };
+
+        // The mod run without Cartographer leaves PRTouch behind a plain probe,
+        // typed as the stock K2 entries type it.
+        discover({"probe", "prtouch_v3"});
+        apply_database_override();
+        REQUIRE(mgr().get_sensors().size() == 1);
+        CHECK(mgr().get_sensors()[0].type == ProbeSensorType::STANDARD);
+
+        ProbeSensorManagerTestAccess::reset(mgr());
+        discover({"cartographer"});
+        apply_database_override();
+        REQUIRE(mgr().get_sensors().size() == 1);
+        CHECK(mgr().get_sensors()[0].type == ProbeSensorType::CARTOGRAPHER);
+        ProbeSensorManagerTestAccess::reset(mgr());
     }
 }
 
@@ -753,23 +746,18 @@ TEST_CASE("Probe type display strings", "[probe][types]") {
 
 TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - null fields in status",
                  "[probe][state][loadcell]") {
-    std::vector<std::string> objects = {"probe"};
-    mgr().discover(objects);
-    mgr().set_sensor_role("probe", ProbeSensorRole::Z_PROBE);
+    discover({"probe"}, json{{"probe", {{"z_offset", "-0.250"}}}});
 
     SECTION("Null z_offset does not overwrite the config-seeded value") {
-        json config;
-        config["probe"] = {{"z_offset", "-0.250"}};
-        mgr().discover_from_config(config);
-
         json null_status;
         null_status["probe"]["last_z_result"] = 0.1f;
         null_status["probe"]["z_offset"] = nullptr;
         mgr().update_from_status(null_status);
 
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
+        auto state = z_state();
         REQUIRE(state->z_offset == Catch::Approx(-0.25f));
         REQUIRE(state->last_z_result == Catch::Approx(0.1f));
+        REQUIRE(z_offset_subject() == -250);
     }
 
     SECTION("Null last_z_result does not overwrite existing value") {
@@ -781,8 +769,7 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - null fields in st
         null_status["probe"]["last_z_result"] = nullptr;
         mgr().update_from_status(null_status);
 
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
-        REQUIRE(state->last_z_result == Catch::Approx(0.5f));
+        REQUIRE(z_state()->last_z_result == Catch::Approx(0.5f));
     }
 }
 
@@ -793,9 +780,9 @@ TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - null fields in st
 TEST_CASE_METHOD(ProbeSensorTestFixture,
                  "ProbeSensorManager - Cartographer reads the probe object it registers",
                  "[probe][state][cartographer]") {
-    mgr().discover({"probe", "cartographer"});
+    discover({"probe", "cartographer"});
     REQUIRE(mgr().sensor_count() == 1);
-    mgr().set_sensor_role("cartographer", ProbeSensorRole::Z_PROBE);
+    REQUIRE(role_of("cartographer") == kZProbe);
 
     // The cartographer object nests last_z_result per mode; the flat keys live
     // on the probe object.
@@ -804,122 +791,141 @@ TEST_CASE_METHOD(ProbeSensorTestFixture,
     status["probe"] = {{"name", "cartographer"}, {"last_query", 1}, {"last_z_result", -0.425}};
     mgr().update_from_status(status);
 
-    auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
+    auto state = z_state();
     REQUIRE(state->last_z_result == Catch::Approx(-0.425f));
     REQUIRE(state->triggered);
-    REQUIRE(lv_subject_get_int(mgr().get_probe_triggered_subject()) == 1);
 }
 
 // ============================================================================
-// discover_from_config Tests
+// Subscriptions
 // ============================================================================
 
-TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discover_from_config seeds z_offset",
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - extra_subscriptions per type",
+                 "[probe][subscription]") {
+    const auto subs_of = [&](const std::vector<std::string>& objects) {
+        return mgr().extra_subscriptions(discovery_of(objects));
+    };
+    const json full = json::array({"last_query", "last_z_result", "z_offset"});
+    const json no_query = json::array({"last_z_result", "z_offset"});
+
+    CHECK(subs_of({"bltouch"}) == json{{"bltouch", full}});
+    CHECK(subs_of({"beacon"}) == json{{"beacon", no_query}});
+    CHECK(subs_of({"probe_eddy_current btt"}) == json{{"probe_eddy_current btt", no_query}});
+    CHECK(subs_of({"probe", "cartographer"}) == json{{"probe", full}});
+    CHECK(subs_of({"bltouch", "probe"}) == json{{"bltouch", full}});
+    CHECK(subs_of({"probe_eddy_current carto", "probe", "cartographer"}) == json{{"probe", full}});
+    CHECK(subs_of({"extruder", "gcode_macro X"}) == json::object());
+
+    // Config-only sections are not Klipper objects: nothing to subscribe.
+    CHECK(mgr().extra_subscriptions(discovery_of({}, json{{"dockable_probe", json::object()}})) ==
+          json::object());
+}
+
+// ============================================================================
+// z_offset seeding from the configfile
+// ============================================================================
+
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - discovery seeds z_offset",
                  "[probe][discovery][config]") {
-    std::vector<std::string> objects = {"probe"};
-    mgr().discover(objects);
-    mgr().set_sensor_role("probe", ProbeSensorRole::Z_PROBE);
-
     SECTION("Seeds z_offset from config string value") {
-        json config;
-        config["probe"] = {{"z_offset", "-0.250"}};
-        mgr().discover_from_config(config);
+        discover({"probe"}, json{{"probe", {{"z_offset", "-0.250"}}}});
 
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
-        REQUIRE(state->z_offset == Catch::Approx(-0.25f));
-        REQUIRE(lv_subject_get_int(mgr().get_probe_z_offset_subject()) == -250);
+        REQUIRE(z_state()->z_offset == Catch::Approx(-0.25f));
+        REQUIRE(z_offset_subject() == -250);
     }
 
     SECTION("Seeds z_offset from config numeric value") {
-        json config;
-        config["probe"] = {{"z_offset", -1.5f}};
-        mgr().discover_from_config(config);
-
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
-        REQUIRE(state->z_offset == Catch::Approx(-1.5f));
+        discover({"probe"}, json{{"probe", {{"z_offset", -1.5f}}}});
+        REQUIRE(z_state()->z_offset == Catch::Approx(-1.5f));
     }
 
-    SECTION("Ignores config for unknown sensor") {
-        json config;
-        config["unknown_sensor"] = {{"z_offset", "-0.5"}};
-        mgr().discover_from_config(config);
-
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
-        REQUIRE(state->z_offset == Catch::Approx(0.0f));
+    SECTION("A non-numeric z_offset seeds nothing") {
+        discover({"probe"}, json{{"probe", {{"z_offset", "oops"}}}});
+        REQUIRE(z_state()->z_offset == 0.0f);
     }
 
-    SECTION("Config-seeded z_offset survives null status update") {
-        json config;
-        config["probe"] = {{"z_offset", "-0.250"}};
-        mgr().discover_from_config(config);
+    SECTION("Ignores config for another sensor") {
+        discover({"probe"}, json{{"unknown_sensor", {{"z_offset", "-0.5"}}}});
+        REQUIRE(z_state()->z_offset == 0.0f);
+    }
 
-        // Null z_offset status should not overwrite config-seeded value
+    SECTION("A probe whose status reports a null z_offset still shows the configured offset") {
+        discover({"probe"}, json{{"probe", {{"z_offset", "-0.250"}}}});
+
         json status;
         status["probe"]["last_z_result"] = 0.0f;
         status["probe"]["z_offset"] = nullptr;
         mgr().update_from_status(status);
 
-        auto state = mgr().get_sensor_state(ProbeSensorRole::Z_PROBE);
-        REQUIRE(state->z_offset == Catch::Approx(-0.25f));
+        REQUIRE(z_state()->z_offset == Catch::Approx(-0.25f));
+        REQUIRE(z_offset_subject() == -250);
+        REQUIRE(mgr().get_z_offset() == Catch::Approx(-0.25f));
     }
 }
 
-// A deferral queued before deinit_subjects() must not land on the subjects a
-// later init_subjects() creates.
-TEST_CASE_METHOD(ProbeSensorTestFixture,
-                 "ProbeSensorManager - deferred update dropped after deinit", "[probe][lifetime]") {
+// Outside sync mode a status update reaches the subject only through the queue,
+// and a deferral queued before deinit_subjects() is dropped.
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - status refresh is deferred",
+                 "[probe][lifetime]") {
     discover_test_sensors();
-    mgr().set_sensor_role("bltouch", ProbeSensorRole::Z_PROBE);
+    set_role("bltouch", ProbeSensorRole::Z_PROBE);
     mgr().set_sync_mode(false);
 
-    update_sensor_state("bltouch", 0.25f);
-    mgr().deinit_subjects();
-    mgr().init_subjects();
+    const auto offset_status = [](float z_offset) {
+        json status;
+        status["bltouch"]["z_offset"] = z_offset;
+        return status;
+    };
+    mgr().update_from_status(offset_status(0.25f));
+    REQUIRE(z_offset_subject() == 0);
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-    REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == -1);
+    REQUIRE(z_offset_subject() == 250);
 
-    update_sensor_state("bltouch", 0.5f);
+    mgr().update_from_status(offset_status(0.5f));
+    mgr().deinit_subjects();
     helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
-    REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == 500);
+    mgr().init_subjects();
     mgr().set_sync_mode(true);
+    REQUIRE(z_offset_subject() == -1);
 }
+
+// ============================================================================
+// Single probe is the Z probe
+// ============================================================================
 
 // Klipper's bltouch/smart_effector/probe_eddy_current, Beacon and Cartographer all
 // register the generic probe object beside their own. The pair is one probe, so a fresh
 // install gets Z_PROBE without anyone picking it.
 TEST_CASE_METHOD(ProbeSensorTestFixture,
                  "ProbeSensorManager - alias objects still auto-assign Z_PROBE", "[probe][roles]") {
-    Config::get_instance()->get_json(Config::get_instance()->df() + "probe_sensors") =
-        nlohmann::json::object();
-
     SECTION("bltouch plus its probe alias") {
-        mgr().discover({"bltouch", "probe"});
-        mgr().load_config_from_file();
+        discover({"bltouch", "probe"});
+        mgr().load_settings();
         REQUIRE(mgr().get_sensors()[0].klipper_name == "bltouch");
         update_sensor_state("bltouch", 0.1f);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == 100);
+        REQUIRE(z_state()->last_z_result == Catch::Approx(0.1f));
     }
 
     SECTION("cartographer plus an eddy object and its probe object") {
-        mgr().discover({"probe", "probe_eddy_current carto", "cartographer"});
-        mgr().load_config_from_file();
+        discover({"probe", "probe_eddy_current carto", "cartographer"});
+        mgr().load_settings();
         update_sensor_state("probe", -0.4f);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == -400);
+        REQUIRE(z_state()->last_z_result == Catch::Approx(-0.4f));
     }
 
-    SECTION("plain probe alone") {
-        mgr().discover({"probe"});
-        mgr().load_config_from_file();
+    SECTION("plain probe alone, with no settings saved") {
+        discover({"probe"});
+        mgr().load_settings();
+        REQUIRE(role_of("probe") == kZProbe);
         update_sensor_state("probe", 0.25f);
-        REQUIRE(lv_subject_get_int(mgr().get_probe_last_z_subject()) == 250);
+        REQUIRE(z_state()->last_z_result == Catch::Approx(0.25f));
     }
 
     SECTION("a saved explicit role still wins") {
-        Config::get_instance()->get_json(Config::get_instance()->df() + "probe_sensors") =
-            nlohmann::json{{"sensors", nlohmann::json::array({{{"klipper_name", "smart_effector"},
-                                                               {"role", "z_probe"}}})}};
-        mgr().discover({"bltouch", "smart_effector", "probe"});
-        mgr().load_config_from_file();
+        probe_slot() = json{
+            {"sensors", json::array({{{"klipper_name", "smart_effector"}, {"role", "z_probe"}}})}};
+        discover({"bltouch", "smart_effector", "probe"});
+        mgr().load_settings();
         auto configs = mgr().get_sensors();
         REQUIRE(configs.size() == 2);
         for (const auto& c : configs) {
@@ -928,6 +934,48 @@ TEST_CASE_METHOD(ProbeSensorTestFixture,
         }
     }
 
-    Config::get_instance()->get_json(Config::get_instance()->df() + "probe_sensors") =
-        nlohmann::json::object();
+    SECTION("a saved role of none on a single probe stays none") {
+        probe_slot() = json{{"sensors", json::array({{{"klipper_name", "probe"},
+                                                      {"role", "none"},
+                                                      {"enabled", true},
+                                                      {"type", "standard"}}})}};
+        discover({"probe"});
+        REQUIRE(role_of("probe") == kZProbe);
+        mgr().load_settings();
+        REQUIRE(role_of("probe") == kNone);
+        REQUIRE_FALSE(z_state().has_value());
+    }
+
+    SECTION("a saved role of none survives the configfile pass and the next save") {
+        probe_slot() = json{{"sensors", json::array({{{"enabled", true},
+                                                      {"klipper_name", "probe"},
+                                                      {"role", "none"},
+                                                      {"type", "standard"}}})}};
+        const std::string saved = probe_slot().dump();
+        // Connect: discover, then saved settings.
+        discover({"probe"});
+        mgr().load_settings();
+        REQUIRE(role_of("probe") == kNone);
+
+        // configfile.config arrives and the config-reading managers discover again.
+        rediscover_from_config(discovery_of({"probe"}, json{{"probe", {{"z_offset", "-0.250"}}}}));
+        CHECK(role_of("probe") == kNone);
+        CHECK(z_offset_subject() == -1);
+
+        // Any Settings edit saves every manager's settings.
+        mgr().save_settings();
+        CHECK(probe_slot().dump() == saved);
+    }
+}
+
+// An object with no instance in its name reads as its type, its Klipper name below.
+TEST_CASE_METHOD(ProbeSensorTestFixture, "ProbeSensorManager - rows are named by type",
+                 "[probe][sensors]") {
+    discover({"bltouch"});
+    const auto view = mgr().row(0);
+    CHECK(view.name == "BLTouch");
+    CHECK(view.detail == "bltouch");
+    // The role is text only: no dropdown, the held role shown as its label.
+    CHECK(view.role_count == 0);
+    CHECK(view.held_role_label == "Z Probe");
 }

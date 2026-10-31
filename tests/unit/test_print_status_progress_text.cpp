@@ -10,6 +10,7 @@
 
 #include "../test_helpers/print_status_panel_fixture.h"
 #include "print_progress_text.h"
+#include "tune_controller.h"
 
 #include <string>
 
@@ -38,10 +39,27 @@ TEST_CASE_METHOD(PrintStatusPanelFixture,
     CHECK(subject_text("print_elapsed") == "1h 02m");
 }
 
-TEST_CASE_METHOD(PrintStatusPanelFixture, "Print status: speed text follows the speed factor",
+TEST_CASE_METHOD(PrintStatusPanelFixture,
+                 "Print status: speed chip shows the live toolhead speed and volumetric flow",
                  "[print_status][progress_text]") {
-    state().update_from_status({{"gcode_move", {{"speed_factor", 1.5}}}});
+    state().update_from_status({{"motion_report", {{"live_velocity", 187.4}}}});
     helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(50); // the chip update is coalesced onto a timer
 
-    CHECK(subject_text("print_speed_text") == "150%");
+    CHECK(subject_text("ps_chip_speed_flow_text") == "187 mm/s\n0.0 mm\xC2\xB3/s");
+
+    // 5 mm/s of 1.75 mm filament; the extruder moving alone updates the chip.
+    state().update_from_status({{"motion_report", {{"live_extruder_velocity", 5.0}}}});
+    helix::ui::UpdateQueue::instance().drain();
+    process_lvgl(50);
+
+    CHECK(subject_text("ps_chip_speed_flow_text") == "187 mm/s\n12.0 mm\xC2\xB3/s");
+}
+
+TEST_CASE_METHOD(PrintStatusPanelFixture,
+                 "Print status: the speed text before any reading uses the live rates format",
+                 "[print_status][progress_text]") {
+    PrintLifecycleState lifecycle;
+    helix::ui::PrintProgressText text(state(), lifecycle);
+    CHECK(std::string(text.speed_text()) == helix::tune::live_rates_text(0, 0.0));
 }

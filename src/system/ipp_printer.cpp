@@ -8,7 +8,7 @@
 #include "ui_update_queue.h"
 
 #include "http_executor.h"
-#include "hv/requests.h"
+#include "hv/HttpClient.h"
 #include "ipp_protocol.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "pwg_raster.h"
@@ -17,7 +17,47 @@
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
+
 namespace helix {
+
+namespace ipp {
+
+std::shared_ptr<HttpResponse> post_request(const std::string& host, uint16_t port,
+                                           const std::string& resource_path,
+                                           const std::vector<uint8_t>& body, int timeout_s) {
+    auto req = std::make_shared<HttpRequest>();
+    req->method = HTTP_POST;
+    req->url = fmt::format("http://{}:{}/{}", host, port, resource_path);
+    req->timeout = timeout_s;
+    req->SetHeader("Content-Type", "application/ipp");
+    req->body.assign(reinterpret_cast<const char*>(body.data()), body.size());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
+    auto resp = std::make_shared<HttpResponse>();
+    hv::HttpClient client;
+    if (client.send(req.get(), resp.get()) != 0) {
+        return nullptr;
+    }
+    // 101 Switching Protocols is a final answer to an Upgrade, not an interim one.
+    // libhv has no per-read timeout for recvResponse(): each read keeps the socket
+    // receive timeout send() left behind, at most timeout_s, so a printer that
+    // stalls after an interim response holds this thread under 2 * timeout_s.
+    while (resp->status_code >= 100 && resp->status_code < 200 &&
+           resp->status_code != HTTP_STATUS_SWITCHING_PROTOCOLS) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            spdlog::error("IPP Printer: no final response within {}s", timeout_s);
+            return nullptr;
+        }
+        spdlog::debug("IPP Printer: skipping interim HTTP {}", static_cast<int>(resp->status_code));
+        if (client.recvResponse(resp.get()) != 0) {
+            return nullptr;
+        }
+    }
+    return resp;
+}
+
+} // namespace ipp
 
 IppPrinter::IppPrinter() = default;
 IppPrinter::~IppPrinter() = default;
@@ -30,7 +70,7 @@ void IppPrinter::set_target(const std::string& host, uint16_t port,
                             const std::string& resource_path) {
     host_ = host;
     port_ = port;
-    resource_path_ = resource_path;
+    resource_path_ = ipp::normalize_resource_path(resource_path);
 }
 
 void IppPrinter::set_sheet_template(int index) {
@@ -125,13 +165,14 @@ void IppPrinter::print(const LabelBitmap& bitmap, const LabelSize& size, PrintCa
             params.bits_per_color = 8;
             params.bits_per_pixel = 8;
             params.num_colors = 1;
+            auto media_keyword = label::get_pwg_media_keyword(paper_size);
+            params.page_size_name = media_keyword;
 
             auto pwg_data = helix::pwg::generate(page_bitmap, params);
             spdlog::info("IPP Printer: generated {} bytes of PWG Raster data", pwg_data.size());
 
             // Build IPP request
             auto printer_uri = ipp::make_printer_uri(host, port, resource_path);
-            auto media_keyword = label::get_pwg_media_keyword(paper_size);
 
             auto request = ipp::build_print_job(printer_uri, "HelixScreen Label",
                                                 "image/pwg-raster", media_keyword);
@@ -144,17 +185,7 @@ void IppPrinter::print(const LabelBitmap& bitmap, const LabelSize& size, PrintCa
             auto ipp_body = request.encode_with_data(pwg_data);
             spdlog::debug("IPP Printer: encoded IPP request: {} bytes total", ipp_body.size());
 
-            // HTTP POST via libhv
-            auto url = fmt::format("http://{}:{}/{}", host, port, resource_path);
-
-            auto req = std::make_shared<HttpRequest>();
-            req->method = HTTP_POST;
-            req->url = url;
-            req->timeout = 30;
-            req->SetHeader("Content-Type", "application/ipp");
-            req->body.assign(reinterpret_cast<const char*>(ipp_body.data()), ipp_body.size());
-
-            auto resp = requests::request(req);
+            auto resp = ipp::post_request(host, port, resource_path, ipp_body, 30);
 
             if (resp == nullptr) {
                 fail(TR_NOOP("Connection failed to {}:{}"), host, port);

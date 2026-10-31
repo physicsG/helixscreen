@@ -10,6 +10,9 @@
      "description": "A two-cell test tile", "component": "widget-demo__wide",
      "colspan": 2, "rowspan": 1}
   ],
+  "menu_items": [
+    {"id": "inspect", "menu": "print_file", "label": "Inspect file", "handler": "inspect"}
+  ],
   "settings": [
     {"key": "enabled", "type": "bool", "label": "Enabled", "default": true},
     {"key": "step", "type": "int", "label": "Step", "min": 1, "max": 20, "default": 5},

@@ -7,9 +7,9 @@
 #include "ui_nav.h"
 #include "ui_panel_common.h"
 
+#include "callout_layout.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "panel_widgets/callout_chip.h"
-#include "panel_widgets/callout_layout.h"
 #include "printer_image_manager.h"
 #include "printer_images.h"
 #include "theme_manager.h"
@@ -29,7 +29,7 @@ using helix::ui::find_required;
 std::optional<ImageTagTarget> displayed_image_tag_target() {
     ImageTagTarget t;
     t.path = PrinterImageManager::instance().get_displayed_image_path(
-        PrinterImages::current_screen_width());
+        printer_images::current_screen_width());
     t.key = printer_image_region_key(t.path);
     lv_image_header_t hdr;
     if (t.key.empty() || lv_image_decoder_get_info(t.path.c_str(), &hdr) != LV_RESULT_OK)
@@ -163,7 +163,7 @@ void PrinterImageTaggerOverlay::refresh() {
     const std::string text = session_.done()
                                  ? prompt_text(p)
                                  : fmt::format("{} ({}/{})", prompt_text(p), session_.step() + 1,
-                                               ImageTagSession::PROMPT_COUNT);
+                                               ImageTagSession::kPromptCount);
     lv_subject_copy_string(&prompt_subject_, text.c_str());
     lv_subject_set_int(&reviewing_subject_, session_.done() ? 1 : 0);
     lv_subject_set_int(&can_skip_subject_, session_.can_skip() ? 1 : 0);

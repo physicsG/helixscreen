@@ -10,8 +10,8 @@
     - history_detail_status: Status text (Completed/Failed/Cancelled)
     - history_detail_status_icon: MDI icon name (check-circle/alert-circle/cancel)
     - history_detail_status_variant: Theme variant (success/error/warning)
-    - history_detail_start_time: Formatted start timestamp
-    - history_detail_end_time: Formatted end timestamp
+    - history_detail_start_date / history_detail_start_time: Start date and time of day
+    - history_detail_end_date / history_detail_end_time: End date and time of day ("-" and "" when unrecorded)
     - history_detail_duration: Formatted duration
     - history_detail_layers: Layer count string
     - history_detail_layer_height: Layer height string
@@ -22,6 +22,12 @@
     - history_detail_can_reprint: 1 if file exists, 0 otherwise
     - history_detail_thumbnail: Path to thumbnail image (may be empty)
     - history_detail_has_timelapse: 1 if timelapse available, 0 otherwise
+    - history_detail_spools: The job's per-spool lines, newline-joined
+    - history_detail_has_spools: 1 when the plugin reported the job's spools
+    Camera photos (HistoryPhotoViewer):
+    - history_detail_has_layer_photo / history_detail_has_end_photo: 1 if the job has that photo
+    - history_detail_photo_view: 0 preview, 1 photo after layer 2, 2 photo at the end
+    - history_detail_photo_state: 0 loading, 1 shown, 2 failed
   -->
   <view name="history_detail_overlay" extends="overlay_panel" title="Print Details">
     <!-- Content Area - Horizontal split -->
@@ -49,6 +55,57 @@
           <lv_image name="thumbnail_image"
                     width="100%" height="100%" hidden="true" align="center" inner_align="contain"
                     style_translate_y="#preview_offset_y"/>
+          <!-- A camera photo of the job over the preview: history_detail_photo_view
+               1 = after layer 2, 2 = at the end; state 0 loading, 1 shown, 2 failed -->
+          <lv_obj name="photo_layer"
+                  width="100%" height="100%" style_pad_all="0" style_radius="0" style_bg_color="#card_bg"
+                  style_bg_opa="255" style_border_width="0" align="center" scrollable="false" flex_flow="column"
+                  style_flex_main_place="center" style_flex_cross_place="center">
+            <bind_flag_if_eq subject="history_detail_photo_view" flag="hidden" ref_value="0"/>
+            <lv_image name="photo_image" width="100%" flex_grow="1" inner_align="contain">
+              <bind_flag_if_not_eq subject="history_detail_photo_state" flag="hidden" ref_value="1"/>
+            </lv_image>
+            <text_small name="photo_loading" text="Loading photo">
+              <bind_flag_if_not_eq subject="history_detail_photo_state" flag="hidden" ref_value="0"/>
+            </text_small>
+            <lv_obj name="photo_failed"
+                    width="content" height="content" style_pad_all="0" style_bg_opa="0" style_border_width="0"
+                    scrollable="false" flex_flow="column" style_flex_cross_place="center" style_pad_gap="#space_sm">
+              <bind_flag_if_not_eq subject="history_detail_photo_state" flag="hidden" ref_value="2"/>
+              <icon src="image_broken_variant" size="lg" variant="secondary"/>
+              <text_small text="Photo unavailable"/>
+            </lv_obj>
+          </lv_obj>
+          <!-- What the card shows: the slicer preview or one of the job's photos -->
+          <lv_obj name="photo_tabs"
+                  width="100%" height="content" align="top_mid" style_pad_all="#space_xs" style_pad_gap="#space_xs"
+                  style_radius="#border_radius" style_bg_color="#card_bg" style_bg_opa="220" style_border_width="0"
+                  scrollable="false" flex_flow="row" style_translate_y="#space_sm">
+            <bind_flag_if cond="history_detail_has_layer_photo eq 0 and history_detail_has_end_photo eq 0" flag="hidden"/>
+            <ui_button name="photo_tab_preview"
+                       height="#button_height_sm" flex_grow="1" style_pad_hor="#space_sm" text="Preview" variant="ghost"
+                       focusable="false" click_focusable="false">
+              <style name="styles.chip_idle"/>
+              <bind_style_if_eq name="styles.chip_active" subject="history_detail_photo_view" ref_value="0"/>
+              <event_cb trigger="clicked" callback="history_detail_photo_view" user_data="0"/>
+            </ui_button>
+            <ui_button name="photo_tab_layer"
+                       height="#button_height_sm" flex_grow="1" style_pad_hor="#space_sm" text="Layer 2" variant="ghost"
+                       focusable="false" click_focusable="false">
+              <style name="styles.chip_idle"/>
+              <bind_style_if_eq name="styles.chip_active" subject="history_detail_photo_view" ref_value="1"/>
+              <bind_flag_if_eq subject="history_detail_has_layer_photo" flag="hidden" ref_value="0"/>
+              <event_cb trigger="clicked" callback="history_detail_photo_view" user_data="1"/>
+            </ui_button>
+            <ui_button name="photo_tab_end"
+                       height="#button_height_sm" flex_grow="1" style_pad_hor="#space_sm" text="End" variant="ghost"
+                       focusable="false" click_focusable="false">
+              <style name="styles.chip_idle"/>
+              <bind_style_if_eq name="styles.chip_active" subject="history_detail_photo_view" ref_value="2"/>
+              <bind_flag_if_eq subject="history_detail_has_end_photo" flag="hidden" ref_value="0"/>
+              <event_cb trigger="clicked" callback="history_detail_photo_view" user_data="2"/>
+            </ui_button>
+          </lv_obj>
           <!-- Metadata clip - content-sized, hides top rounded corners of inner overlay -->
           <lv_obj name="filename_clip"
                   width="100%" height="content" style_radius="0" style_pad_all="0" align="bottom_mid" scrollable="false">
@@ -94,16 +151,25 @@
         <lv_obj name="metadata_grid"
                 width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs"
                 scrollable="false">
-          <!-- Row 1: Started | Ended | Duration -->
+          <!-- Row 1: Started | Ended | Duration. Date and time stack: a column is
+               narrower than "Oct 21 11:10 PM" from 800x480 down. -->
           <lv_obj width="100%"
                   height="content" style_pad_all="0" flex_flow="row" style_pad_gap="#space_sm" scrollable="false">
             <lv_obj flex_grow="1" style_pad_all="0" flex_flow="column" scrollable="false">
               <text_small text="Started"/>
-              <text_body name="start_time_label" bind_text="history_detail_start_time"/>
+              <lv_obj width="100%"
+                      height="content" style_pad_all="0" style_pad_gap="0" flex_flow="column" scrollable="false">
+                <text_body name="start_date_label" bind_text="history_detail_start_date"/>
+                <text_body name="start_time_label" bind_text="history_detail_start_time"/>
+              </lv_obj>
             </lv_obj>
             <lv_obj flex_grow="1" style_pad_all="0" flex_flow="column" scrollable="false">
               <text_small text="Ended"/>
-              <text_body name="end_time_label" bind_text="history_detail_end_time"/>
+              <lv_obj width="100%"
+                      height="content" style_pad_all="0" style_pad_gap="0" flex_flow="column" scrollable="false">
+                <text_body name="end_date_label" bind_text="history_detail_end_date"/>
+                <text_body name="end_time_label" bind_text="history_detail_end_time"/>
+              </lv_obj>
             </lv_obj>
             <lv_obj flex_grow="1" style_pad_all="0" flex_flow="column" scrollable="false">
               <text_small text="Duration"/>
@@ -160,6 +226,15 @@
                      width="100%" height="#button_height_sm" text="View Timelapse" variant="secondary">
             <event_cb trigger="clicked" callback="history_detail_view_timelapse"/>
           </ui_button>
+        </lv_obj>
+        <!-- Spools the job used, from the HelixPrint plugin's record -->
+        <lv_obj name="spools_section"
+                width="100%" height="content" style_pad_all="0" flex_flow="column" style_pad_gap="#space_xs"
+                scrollable="false">
+          <bind_flag_if_eq subject="history_detail_has_spools" flag="hidden" ref_value="0"/>
+          <text_small text="Spools"/>
+          <text_small name="spools_label"
+                      width="100%" bind_text="history_detail_spools" long_mode="wrap" style_text_color="#text"/>
         </lv_obj>
         <!-- Spacer to push buttons to bottom -->
         <lv_obj width="100%" flex_grow="1" scrollable="false"/>

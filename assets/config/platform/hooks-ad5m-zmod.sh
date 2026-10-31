@@ -98,6 +98,18 @@ platform_pre_start() {
     mkdir -p "/opt/config/mod_data/log" 2>/dev/null || true
 
     touch /tmp/helixscreen_active
+
+    # Z-Mod restarts the UI on every Klipper start by killing it by name and
+    # running its own S80helixscreen, which calls this hook and then reads any
+    # live PID in /var/run/helixscreen.pid as "already running". That PID is
+    # our launcher, which outlives the kill while its exit trap runs, so the
+    # restart would return early and leave no UI. Wait (bounded) for an
+    # exiting launcher to go; a healthy one answers at once. LAUNCHER is set by
+    # the init script that sources this file; inside the launcher it is unset.
+    if [ -n "${LAUNCHER:-}" ] && [ -x "$LAUNCHER" ]; then
+        "$LAUNCHER" --wait-for-predecessor || true
+        export HELIX_PREDECESSOR_WAITED="${HELIX_PREDECESSOR_WAITED:-1}"
+    fi
 }
 
 # Post-stop cleanup: remove the active flag.

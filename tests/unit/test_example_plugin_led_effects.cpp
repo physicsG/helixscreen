@@ -28,7 +28,7 @@ namespace {
 /// matches the conditions the temp-spark cases run under.
 class LedFx : public XMLTestFixture {
   public:
-    std::array<lv_obj_t*, UI_PANEL_COUNT> panels{};
+    std::array<lv_obj_t*, kUiPanelCount> panels{};
 
     LedFx() {
         DisplaySettingsManager::instance().set_animations_enabled(false);
@@ -60,7 +60,7 @@ int int_subject(const char* name) {
 
 /// Answers every pending call request with the queried state of one effect.
 void answer_query(HostRig& rig, size_t& next, const std::string& effect, bool on) {
-    const json value{{"status", json{{"led_effect " + effect, {{"enabled", on}}}}}};
+    const json value = query_reply({{"led_effect " + effect, {{"enabled", on}}}});
     while (next < rig.fake.requests.size()) {
         auto& r = rig.fake.requests[next++];
         if (r.kind == "call")
@@ -69,13 +69,11 @@ void answer_query(HostRig& rig, size_t& next, const std::string& effect, bool on
     drain();
 }
 
-/// Delivers one object delta through the backend's notify_status_update handler.
+/// Delivers one object delta through the backend's status handlers.
 void deliver_delta(HostRig& rig, const std::string& effect, bool on) {
-    const json msg{
-        {"params", json::array({json{{"led_effect " + effect, {{"enabled", on}}}}, 0.0})}};
-    for (auto& [method, handler] : rig.fake.notify)
-        if (method == "notify_status_update")
-            handler(msg);
+    const json msg = delta_frame({{"led_effect " + effect, {{"enabled", on}}}});
+    for (auto& handler : rig.fake.status)
+        handler(msg);
     drain();
 }
 

@@ -473,9 +473,9 @@ TEST_CASE("ring_capacity_for_ram scales with the machine", "[logging][config][ri
 
 namespace {
 
-constexpr const char* ENV_DEST = "HELIX_LOG_DEST";
-constexpr const char* ENV_LEVEL = "HELIX_LOG_LEVEL";
-constexpr const char* ENV_FILE = "HELIX_LOG_FILE";
+constexpr const char* kEnvDest = "HELIX_LOG_DEST";
+constexpr const char* kEnvLevel = "HELIX_LOG_LEVEL";
+constexpr const char* kEnvFile = "HELIX_LOG_FILE";
 
 } // namespace
 
@@ -512,32 +512,32 @@ TEST_CASE("is_valid_log_level matches the --log-level accepted set", "[logging][
 
 TEST_CASE("log_env_override reads a valid variable", "[logging][config][1249]") {
     SECTION("destination") {
-        ScopedEnv env(ENV_DEST, "file");
-        REQUIRE(log_env_override(ENV_DEST, &is_valid_log_target, log_target_accepted_values()) ==
+        ScopedEnv env(kEnvDest, "file");
+        REQUIRE(log_env_override(kEnvDest, &is_valid_log_target, log_target_accepted_values()) ==
                 "file");
     }
     SECTION("level") {
-        ScopedEnv env(ENV_LEVEL, "debug");
-        REQUIRE(log_env_override(ENV_LEVEL, &is_valid_log_level, log_level_accepted_values()) ==
+        ScopedEnv env(kEnvLevel, "debug");
+        REQUIRE(log_env_override(kEnvLevel, &is_valid_log_level, log_level_accepted_values()) ==
                 "debug");
     }
     SECTION("a path takes no validator — any non-empty string is accepted") {
-        ScopedEnv env(ENV_FILE, "/opt/config/mod_data/log/helix.log");
-        REQUIRE(log_env_override(ENV_FILE, nullptr, nullptr) ==
+        ScopedEnv env(kEnvFile, "/opt/config/mod_data/log/helix.log");
+        REQUIRE(log_env_override(kEnvFile, nullptr, nullptr) ==
                 "/opt/config/mod_data/log/helix.log");
     }
 }
 
 TEST_CASE("log_env_override yields empty when unset or blank", "[logging][config][1249]") {
     SECTION("unset") {
-        ScopedEnv env(ENV_DEST, nullptr);
+        ScopedEnv env(kEnvDest, nullptr);
         REQUIRE(
-            log_env_override(ENV_DEST, &is_valid_log_target, log_target_accepted_values()).empty());
+            log_env_override(kEnvDest, &is_valid_log_target, log_target_accepted_values()).empty());
     }
     SECTION("set to the empty string — helixscreen.env ships `#HELIX_LOG_FILE=` commented "
             "out, but a user can uncomment it with no value") {
-        ScopedEnv env(ENV_FILE, "");
-        REQUIRE(log_env_override(ENV_FILE, nullptr, nullptr).empty());
+        ScopedEnv env(kEnvFile, "");
+        REQUIRE(log_env_override(kEnvFile, nullptr, nullptr).empty());
     }
 }
 
@@ -547,23 +547,23 @@ TEST_CASE("log_env_override drops an invalid value instead of aborting",
     // typo, nobody is at a prompt to fix it. The value is dropped (with a
     // warning) so the caller falls through to the next precedence level.
     SECTION("destination") {
-        ScopedEnv env(ENV_DEST, "sysloge");
+        ScopedEnv env(kEnvDest, "sysloge");
         std::string got;
         REQUIRE_NOTHROW(
-            got = log_env_override(ENV_DEST, &is_valid_log_target, log_target_accepted_values()));
+            got = log_env_override(kEnvDest, &is_valid_log_target, log_target_accepted_values()));
         REQUIRE(got.empty());
     }
     SECTION("level") {
-        ScopedEnv env(ENV_LEVEL, "louder");
+        ScopedEnv env(kEnvLevel, "louder");
         std::string got;
         REQUIRE_NOTHROW(
-            got = log_env_override(ENV_LEVEL, &is_valid_log_level, log_level_accepted_values()));
+            got = log_env_override(kEnvLevel, &is_valid_log_level, log_level_accepted_values()));
         REQUIRE(got.empty());
     }
     SECTION("a rejected value must not leak into parse_log_target as Auto-by-accident") {
-        ScopedEnv env(ENV_DEST, "nonsense");
+        ScopedEnv env(kEnvDest, "nonsense");
         const std::string from_env =
-            log_env_override(ENV_DEST, &is_valid_log_target, log_target_accepted_values());
+            log_env_override(kEnvDest, &is_valid_log_target, log_target_accepted_values());
         // Falls through to the config tier, which here says "file".
         REQUIRE(resolve_log_setting("", from_env, "file") == "file");
         REQUIRE(parse_log_target(resolve_log_setting("", from_env, "file")) == LogTarget::File);
@@ -593,12 +593,12 @@ TEST_CASE("resolve_log_setting: CLI > env > config", "[logging][config][1249]") 
 TEST_CASE("end-to-end precedence for the ZMOD hook configuration", "[logging][config][1249]") {
     // hooks-ad5m-zmod.sh exports HELIX_LOG_DEST=file plus a path under
     // /opt/config, which is where ZMOD's TAR_CONFIG archiver actually looks.
-    ScopedEnv dest(ENV_DEST, "file");
-    ScopedEnv file(ENV_FILE, "/opt/config/mod_data/log/helix.log");
+    ScopedEnv dest(kEnvDest, "file");
+    ScopedEnv file(kEnvFile, "/opt/config/mod_data/log/helix.log");
 
     const std::string env_dest =
-        log_env_override(ENV_DEST, &is_valid_log_target, log_target_accepted_values());
-    const std::string env_file = log_env_override(ENV_FILE, nullptr, nullptr);
+        log_env_override(kEnvDest, &is_valid_log_target, log_target_accepted_values());
+    const std::string env_file = log_env_override(kEnvFile, nullptr, nullptr);
 
     SECTION("with no CLI flags and no config, the hook's values are what apply") {
         REQUIRE(parse_log_target(resolve_log_setting("", env_dest, "auto")) == LogTarget::File);

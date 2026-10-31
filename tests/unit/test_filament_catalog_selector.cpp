@@ -74,13 +74,14 @@ TEST_CASE_METHOD(XMLTestFixture,
 
     FilamentCatalogSelector sel;
     sel.attach(root);
-    // Seed the vendor to a brand absent from the bundled catalog. Without the
-    // additional-vendor merge the seed can't resolve, so it snaps to Generic.
+    // Seed the vendor to a brand absent from the bundled catalog. The seed is
+    // the slot's own brand, so it lists itself before any merge arrives.
     sel.configure(std::nullopt, std::nullopt, std::string("PolyTerra"));
     sel.populate();
-    REQUIRE(sel.current_vendor() == "Generic"); // not in the catalog yet
+    REQUIRE(sel.current_vendor() == "PolyTerra");
 
-    // The host supplies the live (e.g. Spoolman) vendor list; the seed resolves.
+    // The host supplies the live (e.g. Spoolman) vendor list; the seed still
+    // resolves.
     sel.set_additional_vendors({"PolyTerra"});
     CHECK(sel.current_vendor() == "PolyTerra");
 
@@ -261,8 +262,7 @@ TEST_CASE_METHOD(XMLTestFixture, "preselect_on_change leaves an empty product li
     sel.detach();
 }
 
-TEST_CASE_METHOD(XMLTestFixture,
-                 "product list ranks the plain material first and Support materials last",
+TEST_CASE_METHOD(XMLTestFixture, "product list follows the catalog display order",
                  "[filament_picker][catalog_selector][ordering]") {
     lv_obj_t* root = make_fragment();
     REQUIRE(root != nullptr);
@@ -274,27 +274,17 @@ TEST_CASE_METHOD(XMLTestFixture,
     REQUIRE(sel.current_vendor() == "Generic");
     REQUIRE(sel.current_type() == "PLA");
 
-    // Within the base-type (type == "PLA") run, display order must put the plain
-    // "PLA" first, sink "Support for PLA" to the end, and sort the rest
-    // alphabetically. Products of the family's VARIANT types (Glow PLA, PLA+,
-    // PLA-CF, PLA-GF, SILK, Wood PLA...) follow as their own runs after the
-    // whole base-type run, each run keyed by its type so the heading reads
-    // base-then-variants rather than one interleaved alphabetical soup.
-    //
-    // The decorative PLAs each carry their own type (type == name) because they
-    // are distinct filament_database.h rows; display_family() strips the
-    // decorative affix so they land under the PLA heading as single-product runs.
-    // "PLA+" is the catalog's trailing-plus grade product: display_family()
-    // strips the '+' the same way it strips "-CF"/"-GF", so it groups here too
-    // rather than getting its own heading. Its variant-run key is the raw type
-    // string "PLA+", which sorts by ASCII before "PLA-CF"/"PLA-GF" because '+'
-    // (0x2B) is less than '-' (0x2D) — same alphabetical-by-type rule as every
-    // other variant run, not a special case.
+    // The catalog's shared display order (sort_for_display): the product named
+    // exactly the family first, then names extending it with no space (PLA+,
+    // PLA-CF, PLA-GF), then the base-type run with "Support for PLA" last, then
+    // each variant type's own run. The decorative PLAs carry their own type, so
+    // display_family() files them under PLA as single-product runs; rPLA files
+    // there as the Recycled variant.
     auto names = sel.product_names_for_test();
-    REQUIRE(names == std::vector<std::string>{"PLA", "PLA High Speed", "PLA Matte", "PLA Silk",
-                                              "Support for PLA", "Glow PLA", "Marble PLA",
-                                              "Matte PLA", "Metal PLA", "PLA+", "PLA-CF", "PLA-GF",
-                                              "Silk PLA", "Wood PLA"});
+    REQUIRE(names == std::vector<std::string>{"PLA", "PLA+", "PLA-CF", "PLA-GF", "PLA High Speed",
+                                              "PLA Matte", "PLA Silk", "Support for PLA",
+                                              "Glow PLA", "Marble PLA", "Matte PLA", "Metal PLA",
+                                              "rPLA", "Silk PLA", "Wood PLA"});
 
     sel.detach();
 }
@@ -353,11 +343,9 @@ TEST_CASE_METHOD(XMLTestFixture, "preselect_first checks the first product but k
     sel.detach();
 }
 
-// preselect_first() can only ever pick ordered_products_for().front(). Every
-// SUNLU PLA product shares variant_key "" and rank 1, so the tiebreak is
-// lowercased-name alphabetical and "PLA Marble" always wins — which is exactly
-// how a saved "PLA+ 2.0" came back as "PLA Marble" (bundle TDQCCQB3). Seeding
-// by the stored catalog id is the only thing that can land on the right row.
+// preselect_first() can only ever pick ordered_products_for().front(), which for
+// SUNLU PLA is "PLA+". Seeding by the stored catalog id is the only thing that
+// can land on any other row, such as a saved "PLA+ 2.0" (bundle TDQCCQB3).
 TEST_CASE_METHOD(XMLTestFixture, "preselect_product_id lands on the exact product, not the first",
                  "[filament_picker][catalog_selector][preselect]") {
     lv_obj_t* root = make_fragment();
@@ -375,7 +363,7 @@ TEST_CASE_METHOD(XMLTestFixture, "preselect_product_id lands on the exact produc
     REQUIRE(sel.highlighted() != nullptr);
     REQUIRE(sel.current_vendor() == "SUNLU");
     REQUIRE(sel.current_type() == "PLA");
-    CHECK(sel.product_names_for_test().front() == "PLA Marble");
+    CHECK(sel.product_names_for_test().front() == "PLA+");
 
     // Now the real assertion: the id seed must reach a NON-first product.
     CHECK(sel.preselect_product_id("sunlu-pla-plus-2-0"));

@@ -6,6 +6,8 @@
 #include "ams_types.h"
 #include "bed_drying.h"
 #include "lvgl/lvgl.h"
+#include "maintenance_meters.h"
+#include "mount_feed_sequence.h"
 #include "persisted_setting.h"
 #include "subject_managed_panel.h"
 
@@ -24,6 +26,14 @@ enum class JogMode;
 
 /** @brief Z movement style override (Auto=detect from kinematics, or force) */
 enum class ZMovementStyle { AUTO = 0, BED_MOVES = 1, NOZZLE_MOVES = 2 };
+
+/// Motion panel Jog-tab arrangement. Pad is the circular two-ring pad with a
+/// Z column; Arrows and ArrowsHome are arrow keys with one shared step
+/// selector (home buttons beside the arrows, or in the centre of each cross);
+/// AxisRows gives each axis a row of minus/plus buttons at the jog mode's two
+/// distances.
+enum class MotionLayout { Pad = 0, Arrows = 1, ArrowsHome = 2, AxisRows = 3 };
+inline constexpr int kMotionLayoutCount = 4;
 
 /** @brief Toolhead rendering style (Auto=detect from printer type, or force) */
 enum class ToolheadStyle {
@@ -51,8 +61,8 @@ enum class ConsoleFilterScope {
 
 /// Range of the Bed-tab clearance setting, in whole mm; shared by the
 /// persisted table and the settings keypad.
-inline constexpr int BED_MAP_CLEARANCE_MIN_MM = 1;
-inline constexpr int BED_MAP_CLEARANCE_MAX_MM = 50;
+inline constexpr int kBedMapClearanceMinMm = 1;
+inline constexpr int kBedMapClearanceMaxMm = 50;
 
 /**
  * @brief Application settings manager with reactive UI binding
@@ -81,6 +91,9 @@ class SettingsManager {
      * @return Reference to global SettingsManager
      */
     static SettingsManager& instance();
+
+    /// The static PersistedSetting table this manager is built from.
+    static settings::TableView persisted_table();
 
     // Prevent copying
     SettingsManager(const SettingsManager&) = delete;
@@ -152,6 +165,18 @@ class SettingsManager {
     bool clear_bed_drying_record();
 
     // =========================================================================
+    // MAINTENANCE METERS
+    // =========================================================================
+
+    /// The maintenance meters saved in the printer section @p printer_prefix (a
+    /// Config::df() value); nullopt when none was ever saved there.
+    std::optional<helix::maintenance::State>
+    get_maintenance_record(const std::string& printer_prefix) const;
+    /// Written and saved at once. False when the save failed.
+    bool set_maintenance_record(const std::string& printer_prefix,
+                                const helix::maintenance::State& state);
+
+    // =========================================================================
     // CHAMBER ASSIGNMENT (owned by SettingsManager — sensor/heater override)
     // =========================================================================
 
@@ -178,6 +203,12 @@ class SettingsManager {
 
     /** @brief Set the tool-changer feeder CLOSE macro and persist */
     void set_feeder_close_macro(const std::string& value);
+
+    /** @brief How far a mount-to-feed load purges past the nozzle, in mm */
+    int get_mount_feed_purge_mm() const;
+
+    /** @brief Set the mount-to-feed purge length (clamped to 0..kMaxPurgeMm) and persist */
+    void set_mount_feed_purge_mm(int mm);
 
     /** @brief Get the ACE bypass ON macro ("auto" = detected default) */
     std::string get_ace_bypass_on_macro() const;
@@ -288,7 +319,7 @@ class SettingsManager {
     }
 
     /** @brief Height in mm below which a Bed-tab move lifts Z before it
-     *  travels (default 5, range BED_MAP_CLEARANCE_MIN_MM-BED_MAP_CLEARANCE_MAX_MM) */
+     *  travels (default 5, range kBedMapClearanceMinMm-kBedMapClearanceMaxMm) */
     int get_bed_map_clearance_mm() const {
         return settings_.get(Key::BedMapClearance);
     }
@@ -296,6 +327,21 @@ class SettingsManager {
     /** @brief Set the Bed-tab clearance height in mm (clamped, persisted) */
     void set_bed_map_clearance_mm(int mm) {
         settings_.set(Key::BedMapClearance, mm);
+    }
+
+    /** @brief Motion panel Jog-tab layout (default Pad) */
+    MotionLayout get_motion_layout() const {
+        return static_cast<MotionLayout>(settings_.get(Key::MotionLayout));
+    }
+
+    /** @brief Set the motion panel Jog-tab layout (clamped, persisted) */
+    void set_motion_layout(MotionLayout layout) {
+        settings_.set(Key::MotionLayout, static_cast<int>(layout));
+    }
+
+    /** @brief Motion layout subject (integer, MotionLayout values) */
+    lv_subject_t* subject_motion_layout() {
+        return settings_.subject(Key::MotionLayout);
     }
 
     // =========================================================================
@@ -322,37 +368,37 @@ class SettingsManager {
     void reset_jog_distances();
 
     // =========================================================================
-    // QIDI BOX EJECT (owned by SettingsManager — persisted per-printer)
+    // LANE EJECT (owned by SettingsManager — persisted per-printer)
     // =========================================================================
 
-    /** @brief Get QIDI Box eject distance magnitude in mm (default 878, range 100-2000) */
-    int get_qidi_eject_distance() const {
-        return settings_.get(Key::QidiEjectDistance);
+    /** @brief Lane eject distance magnitude in mm; 0 (the default) = the backend's own */
+    int get_ams_eject_distance() const {
+        return settings_.get(Key::AmsEjectDistance);
     }
 
-    /** @brief Set QIDI Box eject distance magnitude in mm (clamped 100-2000, persisted) */
-    void set_qidi_eject_distance(int mm) {
-        settings_.set(Key::QidiEjectDistance, mm);
+    /** @brief Set the lane eject distance magnitude in mm (clamped 0-2000, persisted) */
+    void set_ams_eject_distance(int mm) {
+        settings_.set(Key::AmsEjectDistance, mm);
     }
 
-    /** @brief QIDI eject distance subject (integer: mm) for UI binding */
-    lv_subject_t* subject_qidi_eject_distance() {
-        return settings_.subject(Key::QidiEjectDistance);
+    /** @brief Lane eject distance subject (integer: mm) */
+    lv_subject_t* subject_ams_eject_distance() {
+        return settings_.subject(Key::AmsEjectDistance);
     }
 
-    /** @brief Get QIDI Box eject velocity in mm/s (default 100, range 10-300) */
-    int get_qidi_eject_velocity() const {
-        return settings_.get(Key::QidiEjectVelocity);
+    /** @brief Lane eject velocity in mm/s; 0 (the default) = the backend's own */
+    int get_ams_eject_velocity() const {
+        return settings_.get(Key::AmsEjectVelocity);
     }
 
-    /** @brief Set QIDI Box eject velocity in mm/s (clamped 10-300, persisted) */
-    void set_qidi_eject_velocity(int mm_per_sec) {
-        settings_.set(Key::QidiEjectVelocity, mm_per_sec);
+    /** @brief Set the lane eject velocity in mm/s (clamped 0-300, persisted) */
+    void set_ams_eject_velocity(int mm_per_sec) {
+        settings_.set(Key::AmsEjectVelocity, mm_per_sec);
     }
 
-    /** @brief QIDI eject velocity subject (integer: mm/s) for UI binding */
-    lv_subject_t* subject_qidi_eject_velocity() {
-        return settings_.subject(Key::QidiEjectVelocity);
+    /** @brief Lane eject velocity subject (integer: mm/s) */
+    lv_subject_t* subject_ams_eject_velocity() {
+        return settings_.subject(Key::AmsEjectVelocity);
     }
 
     // =========================================================================
@@ -454,26 +500,70 @@ class SettingsManager {
     // =========================================================================
 
     /**
-     * @brief Get whether AFC unloads filament from the toolhead after a print.
+     * @brief Whether the filament system unloads the toolhead when a print ends,
+     * on systems where that is the user's end-of-print macros' choice (AFC).
      *
-     * AFC behavior depends on the user's end-of-print macros: some retract
-     * filament out of the extruder, leaving the toolhead empty by design,
-     * others leave it loaded. When enabled, the pre-print runout warning is
-     * suppressed (an empty toolhead is expected, not a fault). Default false.
+     * Some end macros retract filament out of the extruder, leaving the
+     * toolhead empty by design, others leave it loaded. When enabled, the
+     * pre-print runout warning is suppressed (an empty toolhead is expected,
+     * not a fault). Default false.
      */
-    bool get_afc_unload_after_print() const {
-        return settings_.get_bool(Key::AfcUnloadAfterPrint);
+    bool get_unload_after_print() const {
+        return settings_.get_bool(Key::UnloadAfterPrint);
     }
 
-    /** @brief Set whether AFC unloads filament from the toolhead after a print */
-    void set_afc_unload_after_print(bool enabled) {
-        settings_.set(Key::AfcUnloadAfterPrint, enabled);
+    /** @brief Set whether the toolhead is unloaded when a print ends */
+    void set_unload_after_print(bool enabled) {
+        settings_.set(Key::UnloadAfterPrint, enabled);
     }
 
-    /** @brief AFC unload-after-print subject (integer: 0=off, 1=on) */
-    lv_subject_t* subject_afc_unload_after_print() {
-        return settings_.subject(Key::AfcUnloadAfterPrint);
+    /** @brief Unload-after-print subject (integer: 0=off, 1=on) */
+    lv_subject_t* subject_unload_after_print() {
+        return settings_.subject(Key::UnloadAfterPrint);
     }
+
+    // =========================================================================
+    // END-OF-PRINT UNLOAD PER TOOL (per-printer; for firmware that forgets it)
+    // =========================================================================
+
+    /**
+     * @brief Which tools unload their filament when a print ends, bit N = tool N.
+     *
+     * For firmware that takes this as a per-print option and clears it when
+     * each print ends: the choice is kept here and the filament backend sends
+     * it ahead of every print. Default 0 (no tool unloads).
+     */
+    int get_end_of_print_unload_tools() const {
+        return settings_.get(Key::EndOfPrintUnloadTools);
+    }
+
+    /** @brief Replace the whole end-of-print unload mask */
+    void set_end_of_print_unload_tools(int mask) {
+        settings_.set(Key::EndOfPrintUnloadTools, mask);
+    }
+
+    /** @brief Whether @p tool unloads when a print ends; false outside the mask's range */
+    bool get_end_of_print_unload_tool(int tool) const {
+        return tool >= 0 && tool < kEndOfPrintUnloadMaxTools &&
+               (get_end_of_print_unload_tools() & (1 << tool)) != 0;
+    }
+
+    /** @brief Set one tool's bit, leaving the others as stored; ignores a tool out of range */
+    void set_end_of_print_unload_tool(int tool, bool unload) {
+        if (tool < 0 || tool >= kEndOfPrintUnloadMaxTools) {
+            return;
+        }
+        const int mask = get_end_of_print_unload_tools();
+        set_end_of_print_unload_tools(unload ? (mask | (1 << tool)) : (mask & ~(1 << tool)));
+    }
+
+    /** @brief End-of-print unload mask subject (integer bitmask) */
+    lv_subject_t* subject_end_of_print_unload_tools() {
+        return settings_.subject(Key::EndOfPrintUnloadTools);
+    }
+
+    /// Tools the end-of-print unload mask can name (its row's maximum is 255).
+    static constexpr int kEndOfPrintUnloadMaxTools = 8;
 
     /**
      * @brief Whether to show the bypass spool even when bypass is disengaged.
@@ -520,6 +610,27 @@ class SettingsManager {
     /** @brief Keep-spool-info-on-eject subject (integer: 0=off, 1=on) */
     lv_subject_t* subject_ams_keep_spool_info_on_eject() {
         return settings_.subject(Key::AmsKeepSpoolInfoOnEject);
+    }
+
+    /**
+     * @brief Link a lane to the Spoolman spool its tag names when the spool is seated.
+     *
+     * Read by AmsState's tag-link pass, which acts only on backends whose tags
+     * can name a spool (AmsBackend::tags_name_spoolman_spools()). Default on.
+     * Per-printer setting.
+     */
+    bool get_ams_tag_links_spoolman() const {
+        return settings_.get_bool(Key::AmsTagLinksSpoolman);
+    }
+
+    /** @brief Set whether a tag naming a Spoolman spool links its lane */
+    void set_ams_tag_links_spoolman(bool enabled) {
+        settings_.set(Key::AmsTagLinksSpoolman, enabled);
+    }
+
+    /** @brief Tag-links-Spoolman subject (integer: 0=off, 1=on) */
+    lv_subject_t* subject_ams_tag_links_spoolman() {
+        return settings_.subject(Key::AmsTagLinksSpoolman);
     }
 
     /**
@@ -754,6 +865,39 @@ class SettingsManager {
     }
 
     // =========================================================================
+    // Z-OFFSET SAVE (per-printer; the decision lives in helix::zoffset)
+    // =========================================================================
+
+    /// Whether the app offers to persist the Z offset on this printer, as a
+    /// helix::zoffset::SaveMode: 0=Auto, 1=Show, 2=Hide. Read it through
+    /// helix::zoffset::save_enabled(), which resolves Auto.
+    int get_z_offset_save_mode() const {
+        return settings_.get(Key::ZOffsetSaveMode);
+    }
+    void set_z_offset_save_mode(int mode) {
+        settings_.set(Key::ZOffsetSaveMode, mode);
+    }
+    lv_subject_t* subject_z_offset_save_mode() {
+        return settings_.subject(Key::ZOffsetSaveMode);
+    }
+
+    // =========================================================================
+    // BELT NAMES (per-printer; the names live in helix::ui::belt_path_name)
+    // =========================================================================
+
+    /// Which physical belt each Belt Tension path is, as a
+    /// helix::calibration::BeltLayout (0 = not set).
+    int get_belt_layout() const {
+        return settings_.get(Key::BeltLayout);
+    }
+    void set_belt_layout(int layout) {
+        settings_.set(Key::BeltLayout, layout);
+    }
+    lv_subject_t* subject_belt_layout() {
+        return settings_.subject(Key::BeltLayout);
+    }
+
+    // =========================================================================
     // BARCODE SCANNER (owned by SettingsManager — manual device selection)
     // =========================================================================
 
@@ -806,15 +950,18 @@ class SettingsManager {
         JogSpeedZ,
         MotionShowActualPosition,
         BedMapClearance,
-        QidiEjectDistance,
-        QidiEjectVelocity,
+        MotionLayout,
+        AmsEjectDistance,
+        AmsEjectVelocity,
         ToolheadStyle,
         ShowPrinterSwitcher,
         ShowWidgetLabels,
         AutoColorMap,
-        AfcUnloadAfterPrint,
+        UnloadAfterPrint,
+        EndOfPrintUnloadTools,
         AmsAlwaysShowBypassSpool,
         AmsKeepSpoolInfoOnEject,
+        AmsTagLinksSpoolman,
         AmsForceBypassControls,
         FilamentAutoCooldown,
         FilamentAutoOpenEditor,
@@ -823,6 +970,8 @@ class SettingsManager {
         DetectionEnabled,
         DetectionPauseOnDetect,
         DetectionPolicyU1,
+        ZOffsetSaveMode,
+        BeltLayout,
         COUNT
     };
     settings::PersistedSettings<Key, static_cast<size_t>(Key::COUNT)> settings_;
@@ -840,6 +989,7 @@ class SettingsManager {
     std::string chamber_heater_assignment_{"auto"};
     std::string feeder_open_macro_{"auto"};
     std::string feeder_close_macro_{"auto"};
+    int mount_feed_purge_mm_ = helix::mount_feed::kDefaultPurgeMm; ///< Loaded in init_subjects()
     std::string ace_bypass_on_macro_{"auto"};
     std::string ace_bypass_off_macro_{"auto"};
     std::string chamber_sensor_assignment_{"auto"};

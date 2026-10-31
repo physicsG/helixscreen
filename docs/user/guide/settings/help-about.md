@@ -47,6 +47,7 @@ Sends the HelixScreen team what they need to look into a problem you're having.
 - **System details**: operating system, hardware and screen size.
 - **Crash data**: the crash report, if HelixScreen crashed.
 - **Crash history**: earlier crash reports and their GitHub issue numbers, so support can spot repeat problems.
+- **Printer events**: the same list as **Printer Events** in the notification history (shutdowns and their reasons, printer errors, pauses, how prints ended), so support sees what led up to the problem.
 - **Device ID**: a doubly scrambled ID used only to match up telemetry. It doesn't identify you.
 
 Before anything is uploaded, HelixScreen removes passwords, API keys and tokens, webhook URLs (Discord, Slack, Telegram, Pushover, ntfy, IFTTT), usernames and passwords inside URLs, email addresses and MAC addresses.
@@ -105,7 +106,7 @@ Tap **Current Version** seven times in **Settings > Help & About > About**. A me
 With beta features on:
 
 - The **Update Channel** menu in [Updates](updates.md#update-channel) gains a third choice, **Dev**.
-- More rows appear on the Advanced screen (Tool Offsets, Belt Tension; some only on printers whose hardware supports them).
+- HelixScreen offers to install the [HelixPrint plugin](../helixprint-plugin.md) when your printer does not have it.
 
 Tap seven more times to turn them off again. See [Beta Features](../beta-features.md) for the full list.
 

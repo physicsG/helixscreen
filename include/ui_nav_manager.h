@@ -376,7 +376,7 @@ class NavigationManager {
     /**
      * @brief Register panel widgets for show/hide management
      *
-     * @param panels Array of panel widgets (size: UI_PANEL_COUNT)
+     * @param panels Array of panel widgets (size: kUiPanelCount)
      */
     void set_panels(lv_obj_t** panels);
 
@@ -841,8 +841,8 @@ class NavigationManager {
     bool main_panel_deactivated_for_overlay_ = false;
 
     // Animation constants
-    static constexpr uint32_t OVERLAY_ANIM_DURATION_MS = 200;
-    static constexpr int32_t OVERLAY_SLIDE_OFFSET = 400;
+    static constexpr uint32_t kOverlayAnimDurationMs = 200;
+    static constexpr int32_t kOverlaySlideOffset = 400;
 
     // Subject management via RAII
     SubjectManager subjects_;

@@ -6,6 +6,7 @@
 #include "ui_error_reporting.h"
 #include "ui_event_safety.h"
 #include "ui_subject_registry.h"
+#include "ui_text.h"
 #include "ui_wizard.h"
 
 #include "app_globals.h"
@@ -478,7 +479,7 @@ lv_obj_t* WizardPrinterIdentifyStep::create(lv_obj_t* parent) {
         int selected = lv_subject_get_int(&printer_type_selected_);
         // Resolve name from filtered list, then look up image by name
         std::string name = PrinterDetector::get_list_name_at(selected, detected_kinematics_);
-        std::string image_path = PrinterImages::get_image_path_for_name(name);
+        std::string image_path = printer_images::get_image_path_for_name(name);
         lv_image_set_src(printer_preview_image_, image_path.c_str());
         spdlog::debug("[{}] Preview image configured: {}", get_name(), image_path);
     } else {
@@ -558,7 +559,7 @@ void WizardPrinterIdentifyStep::cleanup() {
                 // user quits) previously came back with all of them gone and no
                 // in-app way to revisit a mis-detected pick. Mark it provisional;
                 // it becomes authoritative only when wizard_completed flips.
-                config->set<bool>(config->df() + helix::WIZARD_PRESET_PROVISIONAL, true);
+                config->set<bool>(config->df() + helix::kWizardPresetProvisional, true);
                 // Keep the current run collapsing the now-redundant steps.
                 helix::wizard_mark_preset_applied_this_session();
             }
@@ -795,6 +796,7 @@ void WizardPrinterIdentifyStep::populate_vendor_tiles() {
         // Width is the tile's content width so the dots mode has a bound.
         lv_obj_set_width(label, lv_pct(100));
         lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+        helix::ui::label_hold_one_line(label);
         lv_obj_set_style_text_font(label, theme_manager_get_font("font_body"), LV_PART_MAIN);
         lv_obj_set_style_text_color(label, theme_manager_get_color("text"), LV_PART_MAIN);
 
@@ -958,7 +960,7 @@ void WizardPrinterIdentifyStep::on_printer_type_item_clicked(lv_event_t* e) {
 
         // Update printer preview image (resolve name from filtered list)
         if (self->printer_preview_image_) {
-            std::string image_path = PrinterImages::get_image_path_for_name(names[index]);
+            std::string image_path = printer_images::get_image_path_for_name(names[index]);
             lv_image_set_src(self->printer_preview_image_, image_path.c_str());
             spdlog::debug("[{}] Preview image updated: {}", self->get_name(), image_path);
         }

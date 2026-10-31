@@ -27,19 +27,19 @@ TimelapseState& TimelapseState::instance() {
 }
 
 namespace {
-constexpr const char* TIMELAPSE_EVENT_METHOD = "notify_timelapse_event";
-constexpr const char* TIMELAPSE_HANDLER = "timelapse_state";
+constexpr const char* kTimelapseEventMethod = "notify_timelapse_event";
+constexpr const char* kTimelapseHandler = "timelapse_state";
 } // namespace
 
 void TimelapseState::attach(IMoonrakerClient& client) {
-    replace_method_callback(client, TIMELAPSE_EVENT_METHOD, TIMELAPSE_HANDLER,
+    replace_method_callback(client, kTimelapseEventMethod, kTimelapseHandler,
                             [](const nlohmann::json& data) {
                                 TimelapseState::instance().handle_timelapse_event(data);
                             });
 }
 
 void TimelapseState::detach(IMoonrakerClient& client) {
-    client.unregister_method_callback(TIMELAPSE_EVENT_METHOD, TIMELAPSE_HANDLER);
+    client.unregister_method_callback(kTimelapseEventMethod, kTimelapseHandler);
 }
 
 void TimelapseState::init_subjects(bool register_xml) {

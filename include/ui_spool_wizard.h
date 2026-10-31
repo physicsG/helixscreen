@@ -297,7 +297,8 @@ class SpoolWizardOverlay : public OverlayBase {
     lv_subject_t filaments_loading_subject_{};
     lv_subject_t can_create_vendor_subject_{};
     lv_subject_t summary_color_subject_{};
-    lv_subject_t summary_edge_subject_{};
+    lv_subject_t summary_colors_subject_{};
+    lv_subject_t summary_finish_subject_{};
     lv_subject_t catalog_available_subject_{};
     lv_subject_t catalog_state_subject_{};
     lv_subject_t catalog_count_subject_{};
@@ -307,13 +308,17 @@ class SpoolWizardOverlay : public OverlayBase {
         "spool_db_result_detail", helix::xml::IndexedSubjectPool::Type::String, 128};
     helix::xml::IndexedSubjectPool catalog_colors_{"spool_db_result_color",
                                                    helix::xml::IndexedSubjectPool::Type::Color};
-    helix::xml::IndexedSubjectPool catalog_edges_{"spool_db_result_edge",
-                                                  helix::xml::IndexedSubjectPool::Type::Int};
+    helix::xml::IndexedSubjectPool catalog_multi_{
+        "spool_db_result_colors", helix::xml::IndexedSubjectPool::Type::String, 128};
+    helix::xml::IndexedSubjectPool catalog_finish_{
+        "spool_db_result_finish", helix::xml::IndexedSubjectPool::Type::String, 128};
 
     // ========== String buffers for subjects ==========
     char step_label_buf_[64] = {};
     char selected_vendor_name_buf_[128] = {};
     char summary_vendor_buf_[128] = {};
+    char summary_colors_buf_[128] = {};
+    char summary_finish_buf_[128] = {};
     char summary_filament_buf_[128] = {};
 
     // ========== Vendor step state ==========

@@ -110,6 +110,9 @@ Discarded input sections
  .bss.app_elf_sha256_str
                 0x3fc9d280        0xa esp-idf/esp_app_format/libesp_app_format.a(esp_app_desc.c.obj)
  .bss.lv_global 0x3fc9d290      0x64c esp-idf/lvgl/liblvgl.a(lv_init.c.obj)
+ *fill*         0x3fc9d8dc        0x4 
+ .bss._ZN12_GLOBAL__N_16s_rowsE
+                0x3fc9d8e0      0xa80 esp-idf/helixapp/libhelixapp.a(dryer_widget.cpp.obj)
  .bss._ZZN5helix2ui5fpath12_GLOBAL__N_112plan_scratchEvE4plan
                 0x3fcb90f0     0x37d0 esp-idf/helixapp/libhelixapp.a(ui_filament_path_topology.cpp.obj)
 
@@ -137,6 +140,16 @@ def test_internal_dram_over_its_ceiling_fails_and_names_the_largest_statics(tmp_
     assert largest < next(i for i, l in enumerate(lines) if "lv_global" in l)
     assert "huge.cpp.obj" not in r.stderr
     assert "HELIX_PSRAM_BSS" in r.stderr
+
+
+def test_an_input_after_alignment_fill_is_listed(tmp_path):
+    # A *fill* line ends in whitespace, so a pattern allowed to cross the newline reads
+    # the next input's wrapped name as the fill's object and never lists that input.
+    r = run(tmp_path, 100, 200, dram_map(0x5800), dram_bss_max_bytes=0x5000,
+            dram_data_max_bytes=0x200)
+    rows = next(l for l in r.stderr.splitlines() if "s_rowsE" in l)
+    assert "2688" in rows and "dryer_widget.cpp.obj" in rows
+    assert "*fill*" not in r.stderr
 
 
 def test_internal_dram_data_has_its_own_ceiling(tmp_path):

@@ -50,7 +50,7 @@ SpoolmanSetup::build_spoolman_config_entries(const std::string& host, const std:
 
 std::pair<std::string, std::string> SpoolmanSetup::parse_url_components(const std::string& url) {
     if (url.empty()) {
-        return {"", DEFAULT_SPOOLMAN_PORT};
+        return {"", kDefaultSpoolmanPort};
     }
 
     std::string working = url;
@@ -71,7 +71,7 @@ std::pair<std::string, std::string> SpoolmanSetup::parse_url_components(const st
     auto colon_pos = working.rfind(':');
     if (colon_pos == std::string::npos) {
         // No port in URL — return host with default port
-        return {working, DEFAULT_SPOOLMAN_PORT};
+        return {working, kDefaultSpoolmanPort};
     }
 
     std::string host = working.substr(0, colon_pos);
@@ -79,7 +79,7 @@ std::pair<std::string, std::string> SpoolmanSetup::parse_url_components(const st
 
     // Validate the extracted port; fall back to default if invalid
     if (!validate_port(port_part)) {
-        return {host, DEFAULT_SPOOLMAN_PORT};
+        return {host, kDefaultSpoolmanPort};
     }
 
     return {host, port_part};

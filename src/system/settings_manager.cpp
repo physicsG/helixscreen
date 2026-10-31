@@ -9,15 +9,19 @@
 #include "ams_state.h"
 #include "app_globals.h"
 #include "audio_settings_manager.h"
+#include "belt_tension_types.h"
 #include "config.h"
 #include "display_settings_manager.h"
+#include "helix_psram_attr.h"
 #include "i_moonraker_client.h"
 #include "input_settings_manager.h"
 #include "json_utils.h"
 #include "lvgl/src/others/translation/lv_translation.h"
 #include "material_settings_manager.h"
+#include "mount_feed_sequence.h"
 #include "printer_detector.h"
 #include "printer_state.h"
+#include "remote_screen_settings_manager.h"
 #include "runtime_config.h"
 #include "safety_settings_manager.h"
 #include "spdlog/spdlog.h"
@@ -28,6 +32,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 using namespace helix;
 
@@ -37,7 +42,7 @@ using namespace helix;
 // entries in the same order, so a style the DB auto-detects (K1/K2) or
 // pins (Default) is also selectable by hand.
 // Map dropdown index → ToolheadStyle enum value (production dropdown)
-static constexpr helix::ToolheadStyle DROPDOWN_TO_STYLE[] = {
+static constexpr helix::ToolheadStyle kDropdownToStyle[] = {
     helix::ToolheadStyle::AUTO,          // 0: Auto
     helix::ToolheadStyle::DEFAULT,       // 1: Default (Bambu-like)
     helix::ToolheadStyle::A4T,           // 2: A4T
@@ -47,11 +52,11 @@ static constexpr helix::ToolheadStyle DROPDOWN_TO_STYLE[] = {
     helix::ToolheadStyle::CREALITY_K1,   // 6: Creality K1
     helix::ToolheadStyle::CREALITY_K2,   // 7: Creality K2
 };
-static constexpr int DROPDOWN_COUNT =
-    static_cast<int>(sizeof(DROPDOWN_TO_STYLE) / sizeof(DROPDOWN_TO_STYLE[0]));
+static constexpr int kDropdownCount =
+    static_cast<int>(sizeof(kDropdownToStyle) / sizeof(kDropdownToStyle[0]));
 
 // Debug dropdown: indices map directly to enum values (0=Auto, 1=Default, ...)
-static constexpr helix::ToolheadStyle DROPDOWN_TO_STYLE_DEBUG[] = {
+static constexpr helix::ToolheadStyle kDropdownToStyleDebug[] = {
     helix::ToolheadStyle::AUTO,          // 0
     helix::ToolheadStyle::DEFAULT,       // 1
     helix::ToolheadStyle::A4T,           // 2
@@ -61,15 +66,15 @@ static constexpr helix::ToolheadStyle DROPDOWN_TO_STYLE_DEBUG[] = {
     helix::ToolheadStyle::CREALITY_K1,   // 6
     helix::ToolheadStyle::CREALITY_K2,   // 7
 };
-static constexpr int DROPDOWN_DEBUG_COUNT =
-    static_cast<int>(sizeof(DROPDOWN_TO_STYLE_DEBUG) / sizeof(DROPDOWN_TO_STYLE_DEBUG[0]));
+static constexpr int kDropdownDebugCount =
+    static_cast<int>(sizeof(kDropdownToStyleDebug) / sizeof(kDropdownToStyleDebug[0]));
 
 // Convert ToolheadStyle enum to dropdown index
 static int style_to_dropdown_index(helix::ToolheadStyle style) {
     auto* rc = get_runtime_config();
     bool debug = rc && rc->test_mode;
-    int count = debug ? DROPDOWN_DEBUG_COUNT : DROPDOWN_COUNT;
-    const auto* table = debug ? DROPDOWN_TO_STYLE_DEBUG : DROPDOWN_TO_STYLE;
+    int count = debug ? kDropdownDebugCount : kDropdownCount;
+    const auto* table = debug ? kDropdownToStyleDebug : kDropdownToStyle;
     for (int i = 0; i < count; i++) {
         if (table[i] == style)
             return i;
@@ -115,7 +120,8 @@ static constexpr settings::PersistedSetting SETTINGS[] = {
     {"settings_z_movement_style", "z_movement_style", Scope::PerPrinter, false, 0, 0, 2,
      "z_movement_style"},
     // bed_drying::EnclosureStyle: 0=Auto, 1=Enclosed, 2=Open
-    {"settings_enclosure_style", "enclosure_style", Scope::PerPrinter, false, 0, 0, 2, nullptr},
+    {"settings_enclosure_style", "enclosure_style", Scope::PerPrinter, false, 0, 0, 2,
+     "enclosure_style"},
     // mm/s
     {"settings_extrude_speed", "filament/extrude_speed", Scope::PerPrinter, false, 5, 1, 50,
      "extrude_speed"},
@@ -129,40 +135,55 @@ static constexpr settings::PersistedSetting SETTINGS[] = {
      0, 0, 1, "show_actual_position"},
     // Bed tab: mm below which a move lifts Z before travelling
     {"settings_bed_map_clearance", "motion/bed_map_clearance", Scope::PerPrinter, false, 5,
-     BED_MAP_CLEARANCE_MIN_MM, BED_MAP_CLEARANCE_MAX_MM, "bed_map_clearance"},
-    // QIDI Box eject distance magnitude in mm, negated when assembled into FORCE_MOVE
-    {"settings_qidi_eject_distance", "ams/qidi_eject_distance", Scope::PerPrinter, false, 878, 100,
-     2000, "qidi_eject_distance"},
-    // mm/s
-    {"settings_qidi_eject_velocity", "ams/qidi_eject_velocity", Scope::PerPrinter, false, 100, 10,
-     300, "qidi_eject_velocity"},
+     kBedMapClearanceMinMm, kBedMapClearanceMaxMm, "bed_map_clearance"},
+    // MotionLayout: 0=Pad, 1=Arrows, 2=ArrowsHome, 3=AxisRows
+    {"settings_motion_layout", "motion/layout", Scope::PerPrinter, false, 0, 0,
+     kMotionLayoutCount - 1, "motion_layout"},
+    // Lane eject distance magnitude in mm, negated when the backend assembles its
+    // eject move. 0 = not chosen: the backend ejecting the lane supplies its own
+    // default and range. The telemetry keys keep the analytics series' original names.
+    {"settings_ams_eject_distance", "ams/eject_distance", Scope::PerPrinter, false, 0, 0, 2000,
+     "qidi_eject_distance"},
+    // mm/s, 0 = the backend's default
+    {"settings_ams_eject_velocity", "ams/eject_velocity", Scope::PerPrinter, false, 0, 0, 300,
+     "qidi_eject_velocity"},
     // Per-printer: AUTO resolves from this printer's type, so the manual
     // override follows the same printer.
     {"settings_toolhead_style", "appearance/toolhead_style", Scope::PerPrinter, false, 0, 0, 7,
      "toolhead_style"},
     {"show_printer_switcher", "/printers/show_printer_switcher", Scope::Global, true, 0, 0, 1,
-     nullptr},
-    {"show_widget_labels", "/appearance/show_widget_labels", Scope::Global, true, 0, 0, 1, nullptr},
+     "show_printer_switcher"},
+    {"show_widget_labels", "/appearance/show_widget_labels", Scope::Global, true, 0, 0, 1,
+     "show_widget_labels"},
     // Off: positional filament mapping
-    {"auto_color_map", "filament/auto_color_map", Scope::PerPrinter, true, 0, 0, 1, nullptr},
-    {"afc_unload_after_print", "ams/afc_unload_after_print", Scope::PerPrinter, true, 0, 0, 1,
-     nullptr},
+    {"auto_color_map", "filament/auto_color_map", Scope::PerPrinter, true, 0, 0, 1,
+     "auto_color_map"},
+    // The telemetry key keeps the analytics series' original name.
+    {"unload_after_print", "ams/unload_after_print", Scope::PerPrinter, true, 0, 0, 1,
+     "afc_unload_after_print"},
+    // Bit N = tool N unloads when a print ends.
+    {"end_of_print_unload_tools", "ams/end_of_print_unload_tools", Scope::PerPrinter, false, 0, 0,
+     255, "end_of_print_unload_tools"},
     // #1229
     {"ams_always_show_bypass_spool", "ams/always_show_bypass_spool", Scope::PerPrinter, true, 0, 0,
-     1, nullptr},
+     1, "ams_always_show_bypass_spool"},
     // On: retention is the designed behavior
     {"ams_keep_spool_info_on_eject", "ams/keep_spool_info_on_eject", Scope::PerPrinter, true, 1, 0,
-     1, nullptr},
+     1, "ams_keep_spool_info_on_eject"},
+    {"ams_tag_links_spoolman", "ams/tag_links_spoolman", Scope::PerPrinter, true, 1, 0, 1,
+     "ams_tag_links_spoolman"},
     {"ams_force_bypass_controls", "ams/force_bypass_controls", Scope::PerPrinter, true, 0, 0, 1,
-     nullptr},
+     "ams_force_bypass_controls"},
     // Filament systems that run their own cooldown (AFC) want ours off.
-    {"filament_auto_cooldown", "filament/auto_cooldown", Scope::PerPrinter, true, 1, 0, 1, nullptr},
+    {"filament_auto_cooldown", "filament/auto_cooldown", Scope::PerPrinter, true, 1, 0, 1,
+     "filament_auto_cooldown"},
     // #1335. Off: a popup the user did not ask for is opt-in.
     {"filament_auto_open_editor", "filament/auto_open_editor", Scope::PerPrinter, true, 0, 0, 1,
-     nullptr},
-    {"console_filter_temps", "/console/filter_temps", Scope::Global, true, 1, 0, 1, nullptr},
+     "filament_auto_open_editor"},
+    {"console_filter_temps", "/console/filter_temps", Scope::Global, true, 1, 0, 1,
+     "console_filter_temps"},
     {"console_filter_firmware_noise", "/console/filter_firmware_noise", Scope::Global, true, 1, 0,
-     1, nullptr},
+     1, "console_filter_firmware_noise"},
     {"detection_enabled", "/detection/enabled", Scope::Global, true, 1, 0, 1, "detection_enabled"},
     // Off = warn only for prints HelixScreen pauses; a firmware-paused print
     // always gets the response modal.
@@ -172,11 +193,23 @@ static constexpr settings::PersistedSetting SETTINGS[] = {
     // Per-printer: the detector only exists on the U1.
     {"detection_policy_u1", "detection/policy_u1", Scope::PerPrinter, false, 2, 0, 2,
      "detection_policy_u1"},
+    // helix::zoffset::SaveMode: 0=Auto (off when each tool keeps its own Z
+    // offset), 1=Show, 2=Hide. #1766
+    {"settings_z_offset_save_mode", "z_offset/save_mode", Scope::PerPrinter, false, 0, 0, 2,
+     "z_offset_save_mode"},
+    // helix::calibration::BeltLayout: 0=not set, 1=A left, 2=A right, 3=A upper,
+    // 4=A lower. Per-printer: belt routing is the machine's.
+    {"settings_belt_layout", "belt_tension/layout", Scope::PerPrinter, false, 0, 0,
+     helix::calibration::kBeltLayoutCount - 1, "belt_layout"},
 };
 
 SettingsManager& SettingsManager::instance() {
-    static SettingsManager instance;
+    static HELIX_PSRAM_BSS SettingsManager instance;
     return instance;
+}
+
+settings::TableView SettingsManager::persisted_table() {
+    return {SETTINGS, std::size(SETTINGS)};
 }
 
 SettingsManager::SettingsManager() : settings_(SETTINGS) {
@@ -199,6 +232,7 @@ void SettingsManager::init_subjects() {
     InputSettingsManager::instance().init_subjects();
     AudioSettingsManager::instance().init_subjects();
     SafetySettingsManager::instance().init_subjects();
+    RemoteScreenSettingsManager::instance().init_subjects();
     MaterialSettingsManager::instance().init();
 
     settings_.init(subjects_);
@@ -223,12 +257,15 @@ void SettingsManager::init_subjects() {
     feeder_open_macro_ = config->get<std::string>(config->df() + wizard::FEEDER_OPEN_MACRO, "auto");
     feeder_close_macro_ =
         config->get<std::string>(config->df() + wizard::FEEDER_CLOSE_MACRO, "auto");
+    mount_feed_purge_mm_ = std::clamp(config->get<int>(config->df() + wizard::kMountFeedPurgeMm,
+                                                       helix::mount_feed::kDefaultPurgeMm),
+                                      0, helix::mount_feed::kMaxPurgeMm);
 
     // ACE bypass macro overrides (default: "auto" = detected default).
     ace_bypass_on_macro_ =
-        config->get<std::string>(config->df() + wizard::ACE_BYPASS_ON_MACRO, "auto");
+        config->get<std::string>(config->df() + wizard::kAceBypassOnMacro, "auto");
     ace_bypass_off_macro_ =
-        config->get<std::string>(config->df() + wizard::ACE_BYPASS_OFF_MACRO, "auto");
+        config->get<std::string>(config->df() + wizard::kAceBypassOffMacro, "auto");
 
     // Load scanner device selection. Global: the scanner is plugged into the
     // host running HelixScreen, not into any one printer.
@@ -266,9 +303,9 @@ void SettingsManager::load_jog_distances() {
     // Jog step distances (Fine/Coarse/Turbo x inner/outer, mm). Read on every
     // jog rather than bound to a widget, so a cache is enough; the settings
     // overlay re-reads on open.
-    static_assert(JOG_MODE_COUNT == 3, "jog_distances_ cache is sized for three modes");
+    static_assert(kJogModeCount == 3, "jog_distances_ cache is sized for three modes");
     Config* config = Config::get_instance();
-    for (int m = 0; m < JOG_MODE_COUNT; ++m) {
+    for (int m = 0; m < kJogModeCount; ++m) {
         const JogMode mode = static_cast<JogMode>(m);
         for (int outer = 0; outer < 2; ++outer) {
             float mm = config->get<float>(config->df() + jog_distance_key(mode, outer),
@@ -369,6 +406,31 @@ bool SettingsManager::clear_bed_drying_record() {
 }
 
 // =============================================================================
+// MAINTENANCE METERS
+// =============================================================================
+
+std::optional<helix::maintenance::State>
+SettingsManager::get_maintenance_record(const std::string& printer_prefix) const {
+    Config* config = Config::get_instance();
+    const json j = config->get<json>(printer_prefix + "maintenance", json());
+    if (!j.is_object()) {
+        return std::nullopt;
+    }
+    return helix::maintenance::from_json(j);
+}
+
+bool SettingsManager::set_maintenance_record(const std::string& printer_prefix,
+                                             const helix::maintenance::State& state) {
+    Config* config = Config::get_instance();
+    config->set<json>(printer_prefix + "maintenance", helix::maintenance::to_json(state));
+    if (!config->save()) {
+        spdlog::error("[SettingsManager] Could not save the maintenance meters");
+        return false;
+    }
+    return true;
+}
+
+// =============================================================================
 // TOOLHEAD STYLE
 // =============================================================================
 
@@ -428,8 +490,8 @@ int SettingsManager::toolhead_style_to_dropdown_index(ToolheadStyle style) {
 ToolheadStyle SettingsManager::dropdown_index_to_toolhead_style(int index) {
     auto* rc = get_runtime_config();
     bool debug = rc && rc->test_mode;
-    int count = debug ? DROPDOWN_DEBUG_COUNT : DROPDOWN_COUNT;
-    const auto* table = debug ? DROPDOWN_TO_STYLE_DEBUG : DROPDOWN_TO_STYLE;
+    int count = debug ? kDropdownDebugCount : kDropdownCount;
+    const auto* table = debug ? kDropdownToStyleDebug : kDropdownToStyle;
     if (index < 0 || index >= count)
         return ToolheadStyle::AUTO;
     return table[index];
@@ -467,7 +529,7 @@ void SettingsManager::set_jog_distance(JogMode mode, bool outer, float mm) {
 }
 
 void SettingsManager::reset_jog_distances() {
-    for (int m = 0; m < JOG_MODE_COUNT; ++m) {
+    for (int m = 0; m < kJogModeCount; ++m) {
         const JogMode mode = static_cast<JogMode>(m);
         for (int outer = 0; outer < 2; ++outer)
             set_jog_distance(mode, outer, jog_distance_default(mode, outer));
@@ -525,37 +587,37 @@ void write_console_filter_layer(const char* leaf, ConsoleFilterScope scope,
     config->save();
 }
 
-constexpr const char* FILTER_USER_ADD_LEAF = "filter_user_add";
-constexpr const char* FILTER_USER_REMOVE_LEAF = "filter_user_remove";
+constexpr const char* kFilterUserAddLeaf = "filter_user_add";
+constexpr const char* kFilterUserRemoveLeaf = "filter_user_remove";
 
 } // namespace
 
 std::vector<std::string> SettingsManager::get_console_filter_user_add() const {
-    return merged_console_filter(FILTER_USER_ADD_LEAF);
+    return merged_console_filter(kFilterUserAddLeaf);
 }
 
 std::vector<std::string> SettingsManager::get_console_filter_user_remove() const {
-    return merged_console_filter(FILTER_USER_REMOVE_LEAF);
+    return merged_console_filter(kFilterUserRemoveLeaf);
 }
 
 std::vector<std::string>
 SettingsManager::get_console_filter_user_add(ConsoleFilterScope scope) const {
-    return read_console_filter_layer(FILTER_USER_ADD_LEAF, scope);
+    return read_console_filter_layer(kFilterUserAddLeaf, scope);
 }
 
 std::vector<std::string>
 SettingsManager::get_console_filter_user_remove(ConsoleFilterScope scope) const {
-    return read_console_filter_layer(FILTER_USER_REMOVE_LEAF, scope);
+    return read_console_filter_layer(kFilterUserRemoveLeaf, scope);
 }
 
 void SettingsManager::set_console_filter_user_add(const std::vector<std::string>& patterns,
                                                   ConsoleFilterScope scope) {
-    write_console_filter_layer(FILTER_USER_ADD_LEAF, scope, patterns);
+    write_console_filter_layer(kFilterUserAddLeaf, scope, patterns);
 }
 
 void SettingsManager::set_console_filter_user_remove(const std::vector<std::string>& patterns,
                                                      ConsoleFilterScope scope) {
-    write_console_filter_layer(FILTER_USER_REMOVE_LEAF, scope, patterns);
+    write_console_filter_layer(kFilterUserRemoveLeaf, scope, patterns);
 }
 
 // ============================================================================
@@ -617,7 +679,7 @@ std::optional<SlotInfo> SettingsManager::get_external_spool_info() const {
     info.global_index = -2;
     info.color_rgb =
         static_cast<uint32_t>(config->get<int>(config->df() + "filament/external_spool/color_rgb",
-                                               static_cast<int>(AMS_DEFAULT_SLOT_COLOR)));
+                                               static_cast<int>(kAmsDefaultSlotColor)));
     info.material = config->get<std::string>(config->df() + "filament/external_spool/material", "");
     info.brand = config->get<std::string>(config->df() + "filament/external_spool/brand", "");
     // The external spool has no lane_data record, so this get/set pair is its
@@ -695,7 +757,7 @@ void SettingsManager::set_ace_bypass_on_macro(const std::string& value) {
     ace_bypass_on_macro_ = value;
     spdlog::info("[SettingsManager] set_ace_bypass_on_macro({})", value);
     Config* config = Config::get_instance();
-    config->set<std::string>(config->df() + wizard::ACE_BYPASS_ON_MACRO, value);
+    config->set<std::string>(config->df() + wizard::kAceBypassOnMacro, value);
     config->save();
 }
 
@@ -707,7 +769,7 @@ void SettingsManager::set_ace_bypass_off_macro(const std::string& value) {
     ace_bypass_off_macro_ = value;
     spdlog::info("[SettingsManager] set_ace_bypass_off_macro({})", value);
     Config* config = Config::get_instance();
-    config->set<std::string>(config->df() + wizard::ACE_BYPASS_OFF_MACRO, value);
+    config->set<std::string>(config->df() + wizard::kAceBypassOffMacro, value);
     config->save();
 }
 
@@ -716,6 +778,18 @@ void SettingsManager::set_feeder_close_macro(const std::string& value) {
     spdlog::info("[SettingsManager] set_feeder_close_macro({})", value);
     Config* config = Config::get_instance();
     config->set<std::string>(config->df() + wizard::FEEDER_CLOSE_MACRO, value);
+    config->save();
+}
+
+int SettingsManager::get_mount_feed_purge_mm() const {
+    return mount_feed_purge_mm_;
+}
+
+void SettingsManager::set_mount_feed_purge_mm(int mm) {
+    mount_feed_purge_mm_ = std::clamp(mm, 0, helix::mount_feed::kMaxPurgeMm);
+    spdlog::info("[SettingsManager] set_mount_feed_purge_mm({})", mount_feed_purge_mm_);
+    Config* config = Config::get_instance();
+    config->set<int>(config->df() + wizard::kMountFeedPurgeMm, mount_feed_purge_mm_);
     config->save();
 }
 

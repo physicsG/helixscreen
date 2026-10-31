@@ -19,9 +19,11 @@
 #include "../../include/moonraker_file_api.h"
 #include "../../include/ui_print_select_usb_source.h"
 #include "../../lvgl/lvgl.h"
+#include "../lvgl_test_fixture.h"
 #include "../test_helpers/moonraker_file_api_test_access.h"
 #include "../test_helpers/scoped_env.h"
 #include "../test_helpers/scoped_try_reserve_failure.h"
+#include "../test_helpers/update_queue_test_access.h"
 #include "../ui_test_utils.h"
 
 #include <atomic>
@@ -31,26 +33,6 @@
 #include "../catch_amalgamated.hpp"
 
 using namespace helix;
-// ============================================================================
-// Global LVGL Initialization (called once)
-// ============================================================================
-
-namespace {
-struct LVGLInitializerMetadataUSB {
-    LVGLInitializerMetadataUSB() {
-        static bool initialized = false;
-        if (!initialized) {
-            lv_init_safe();
-            lv_display_t* disp = lv_display_create(800, 480);
-            alignas(64) static lv_color_t buf[800 * 10];
-            lv_display_set_buffers(disp, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
-            initialized = true;
-        }
-    }
-};
-
-static LVGLInitializerMetadataUSB lvgl_init;
-} // namespace
 
 // ============================================================================
 // Test Fixtures
@@ -59,7 +41,7 @@ static LVGLInitializerMetadataUSB lvgl_init;
 /**
  * @brief Test fixture for MoonrakerAPI metadata operations
  */
-class MetadataAPITestFixture {
+class MetadataAPITestFixture : public LVGLTestFixture {
   public:
     MetadataAPITestFixture() : mock_client(MoonrakerClientMock::PrinterType::VORON_24) {
         // Initialize printer state
@@ -78,7 +60,7 @@ class MetadataAPITestFixture {
     ~MetadataAPITestFixture() {
         // Drain while `state` is still alive — discover_printer() in the ctor
         // leaves PrinterCapabilitiesState's deferred setters queued (#1166).
-        helix::ui::UpdateQueue::instance().drain();
+        helix::ui::UpdateQueueTestAccess::drain_all(helix::ui::UpdateQueue::instance());
 
         mock_client.stop_temperature_simulation();
         mock_client.disconnect();
@@ -325,6 +307,40 @@ TEST_CASE_METHOD(MetadataAPITestFixture, "Metadata sent as JSON strings still pa
     CHECK(m.first_layer_height == Catch::Approx(0.25));
     CHECK(m.object_height == Catch::Approx(12.5));
     CHECK(m.estimated_time == Catch::Approx(600.0));
+}
+
+TEST_CASE_METHOD(MetadataAPITestFixture, "Metadata carries the slicer's nozzle diameter",
+                 "[metadata][api][plugin_fitcheck]") {
+    MetadataParseProbe probe(mock_client);
+    json response;
+    response["result"] = {{"filename", "part.gcode"}, {"nozzle_diameter", 0.6}};
+    CHECK(probe.parse_file_metadata(response).nozzle_diameter == Catch::Approx(0.6));
+
+    // A file that states none reads as 0, the fit check's "unknown".
+    response["result"].erase("nozzle_diameter");
+    CHECK(probe.parse_file_metadata(response).nozzle_diameter == 0.0);
+}
+
+TEST_CASE_METHOD(MetadataAPITestFixture,
+                 "Metadata carries per-extruder nozzles and flow types where a fork adds them",
+                 "[metadata][api][plugin_fitcheck]") {
+    MetadataParseProbe probe(mock_client);
+    json response;
+    response["result"] = {{"filename", "part.gcode"},
+                          {"nozzle_diameter", 0.2},
+                          {"nozzle_diameter_list", {0.2, 0.4, "0.4", 0.6}},
+                          {"filament_volume_type", {"standard", "high_flow", nullptr, "Standard"}}};
+    FileMetadata m = probe.parse_file_metadata(response);
+    CHECK(m.nozzle_diameter_list == std::vector<double>{0.2, 0.4, 0.4, 0.6});
+    CHECK(m.filament_volume_types ==
+          std::vector<std::string>{"standard", "high_flow", "", "Standard"});
+
+    // A list with an entry that is no diameter says nothing; absent fields read empty.
+    response["result"]["nozzle_diameter_list"] = {0.4, "x"};
+    response["result"].erase("filament_volume_type");
+    m = probe.parse_file_metadata(response);
+    CHECK(m.nozzle_diameter_list.empty());
+    CHECK(m.filament_volume_types.empty());
 }
 
 TEST_CASE_METHOD(MetadataAPITestFixture, "Integer metadata sent as JSON strings still parses",

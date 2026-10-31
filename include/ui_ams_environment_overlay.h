@@ -18,6 +18,7 @@
 #include "ui_observer_guard.h"
 
 #include "ams_environment_zone.h"
+#include "display_numbering.h"
 #include "helix/xml/indexed_subject_pool.h"
 #include "overlay_base.h"
 #include "static_panel_registry.h"
@@ -106,6 +107,12 @@ class AmsEnvironmentOverlay : public OverlayBase {
     /// Zones the selector offers; 0 when no selector is shown.
     [[nodiscard]] size_t zone_count() const;
 
+    /// Toggle the gate chip at @p index in or out of the drying selection. The last
+    /// selected chip stays selected: a cycle needs at least one gate.
+    void toggle_dry_gate(size_t index);
+    /// Toggle spool rotation for the next start.
+    void toggle_dry_rotate();
+
     /**
      * @brief Refresh overlay data from backend
      */
@@ -140,14 +147,15 @@ class AmsEnvironmentOverlay : public OverlayBase {
     /// Start or stop drying on the shown zone's unit.
     void handle_start_stop();
 
-    /// Arm or disarm humidity-controlled drying on the shown zone's unit.
-    static void on_auto_dry_toggled(lv_event_t* e);
-
     /// Which of the two dryer inputs a keypad session is filling.
-    enum class DryerField { Temperature, Duration };
+    enum class DryerField { Temperature, Duration, HumidityTarget };
 
     /// Open the numeric keypad over one input, ranged by what the shown box accepts.
     void show_dryer_keypad(DryerField field);
+    /// Show, in the blank humidity target field, the target a start without one gets.
+    void publish_humidity_target_placeholder(const DryerInfo& dryer);
+    /// The text field @p field edits.
+    [[nodiscard]] lv_obj_t* dryer_input(DryerField field) const;
     /// Write a confirmed keypad value back into its input.
     void apply_dryer_keypad_value(DryerField field, float value);
     static void on_dryer_keypad_confirmed(float value, void* user_data);
@@ -163,6 +171,12 @@ class AmsEnvironmentOverlay : public OverlayBase {
 
     /// Push the selected zone's values into the detail subjects.
     void publish_selected_zone();
+    /// Offer a chip per heated gate on the acting unit when its dryer takes a gate
+    /// selection, and the rotate chip when it can turn spools; none otherwise.
+    void publish_dry_gates();
+    /// The gates a start or stop names: empty while every offered gate is selected, so
+    /// the dryer gets exactly the command it gets with no selection at all.
+    [[nodiscard]] std::vector<int> selected_dry_gates() const;
     /// Fill the tab pools and publish the count, populate-before-count.
     void rebuild_tabs();
     /// Restore the dryer temp/duration inputs from the last remembered values.
@@ -204,6 +218,7 @@ class AmsEnvironmentOverlay : public OverlayBase {
     lv_obj_t* preset_dropdown_ = nullptr;
     lv_obj_t* temp_input_ = nullptr;
     lv_obj_t* duration_input_ = nullptr;
+    lv_obj_t* humidity_target_input_ = nullptr; ///< Blank = the printer's default target
 
     // === Subjects (managed by SubjectManager) ===
 
@@ -222,12 +237,15 @@ class AmsEnvironmentOverlay : public OverlayBase {
     /// and the Material Comfort strip, both of which need a real reading to say
     /// anything true. Per-overlay rather than the shown unit's
     /// ams_env_ind_<i>_humidity_visible so it cannot answer for the wrong unit.
+    lv_subject_t humidity_subject_{}; ///< tenths of %RH for the drop; -1 = no reading
     lv_subject_t humidity_visible_subject_{};
 
     lv_subject_t title_text_subject_{};
     char title_text_buf_[96] = {};
 
     lv_subject_t dryer_visible_subject_{};
+    /// 1 when the shown zone's dryer takes a humidity target
+    lv_subject_t humidity_target_visible_subject_{};
     lv_subject_t no_dryer_visible_subject_{};
     lv_subject_t drying_active_subject_{};
 
@@ -236,11 +254,11 @@ class AmsEnvironmentOverlay : public OverlayBase {
 
     lv_subject_t drying_progress_subject_{};
 
-    static constexpr int MAX_COMFORT_ROWS = 4;
-    lv_subject_t comfort_visible_[MAX_COMFORT_ROWS] = {};
-    lv_subject_t comfort_status_[MAX_COMFORT_ROWS] = {}; ///< 0=OK, 1=Marginal, 2=Too humid
-    lv_subject_t comfort_text_[MAX_COMFORT_ROWS] = {};
-    char comfort_text_buf_[MAX_COMFORT_ROWS][96] = {};
+    static constexpr int kMaxComfortRows = 4;
+    lv_subject_t comfort_visible_[kMaxComfortRows] = {};
+    lv_subject_t comfort_status_[kMaxComfortRows] = {}; ///< 0=OK, 1=Marginal, 2=Too humid
+    lv_subject_t comfort_text_[kMaxComfortRows] = {};
+    char comfort_text_buf_[kMaxComfortRows][96] = {};
 
     lv_subject_t start_stop_text_subject_{};
     char start_stop_text_buf_[32] = {};
@@ -248,13 +266,6 @@ class AmsEnvironmentOverlay : public OverlayBase {
     lv_subject_t preset_text_subject_{};
     char preset_text_buf_[64] = {};
 
-    /// Humidity-controlled drying. A separate capability from the dryer itself —
-    /// a backend can have one without the other — so it carries its own
-    /// visibility rather than riding on dryer_visible_subject_.
-    lv_subject_t auto_dry_visible_subject_{};
-    lv_subject_t auto_dry_on_subject_{};
-    lv_subject_t auto_dry_text_subject_{};
-    char auto_dry_text_buf_[96] = {};
     /// Zone selector + per-zone ceiling. "env_zone_" prefix; the pools are
     /// distinct from Task 7's overview overlay, which uses "zone_ov_".
     lv_subject_t zone_count_subject_{};
@@ -286,7 +297,27 @@ class AmsEnvironmentOverlay : public OverlayBase {
                                                    helix::xml::IndexedSubjectPool::Type::Int};
     helix::xml::IndexedSubjectPool tab_active_pool_{"env_zone_tab_active",
                                                     helix::xml::IndexedSubjectPool::Type::Int};
+
+    /// Gate chips: the acting unit's heated gates on a dryer that takes a gate
+    /// selection. Every chip starts selected each time the overlay is shown, which
+    /// is the whole unit, the start the dryer gets with no selection.
+    std::vector<int> dry_gates_;
+    std::vector<int> deselected_dry_gates_;
+    bool dry_rotate_ = false;
+    lv_subject_t dry_gate_count_subject_{};
+    lv_subject_t dry_rotate_visible_subject_{};
+    lv_subject_t dry_rotate_on_subject_{};
+    lv_subject_t dry_rotate_label_subject_{};
+    char dry_rotate_label_buf_[32] = {};
+    helix::xml::IndexedSubjectPool dry_gate_label_pool_{
+        "env_dry_gate_label", helix::xml::IndexedSubjectPool::Type::String};
+    helix::xml::IndexedSubjectPool dry_gate_selected_pool_{
+        "env_dry_gate_selected", helix::xml::IndexedSubjectPool::Type::Int};
 };
+
+/// The notice for a Stop that applied to some of a dryer's lanes only: "Stopped drying
+/// Gate 2, Gate 3", in the system's own lane noun.
+[[nodiscard]] std::string stopped_lanes_text(const std::vector<int>& gates, LaneNoun noun);
 
 inline AmsEnvironmentOverlay& get_ams_environment_overlay() {
     return lazy_global<AmsEnvironmentOverlay>("AmsEnvironmentOverlay");

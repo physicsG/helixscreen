@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace helix::redact {
 
@@ -91,6 +92,23 @@ enum class IpScope {
  */
 IpScope ip_scope(std::string_view addr);
 
+/// The finer classification ip_scope() folds into Local/Global, for callers that
+/// must tell a LAN peer from a loopback, CGNAT or multicast one.
+enum class IpClass {
+    NotAnIp,
+    Unspecified, ///< 0.0.0.0/8, ::
+    Loopback,    ///< 127/8, ::1
+    Private,     ///< 10/8, 172.16/12, 192.168/16
+    LinkLocal,   ///< 169.254/16, fe80::/10
+    SharedCgnat, ///< 100.64/10: carrier NAT, and the range Tailscale assigns
+    UniqueLocal, ///< fc00::/7
+    Multicast,   ///< 224/4 and above, ff00::/8
+    Global,
+};
+
+/// Classify a single IP literal; same input rules as ip_scope().
+IpClass ip_class(std::string_view addr);
+
 /**
  * @brief Reduce a routable IP address to a non-identifying token.
  *
@@ -117,6 +135,26 @@ std::string ip(std::string_view addr);
  * address is matched, the suffix is left alone.
  */
 std::string ips_in_text(std::string_view text);
+
+/**
+ * @brief Free text made safe for anonymous telemetry.
+ *
+ * @param text        One line, such as the installer's error line.
+ * @param identifiers The device's own names (host name, login), each replaced by
+ *                    `<id>` wherever it stands as a whole word. Entries shorter
+ *                    than two characters are ignored.
+ * @param max_len     Byte cap, applied last, on a UTF-8 boundary and never inside
+ *                    a placeholder.
+ * @return @p text with every IP literal (private ones too) replaced by `<ip>`, a
+ *         URL by `<url>`, `user@host` by `<user@host>`, an absolute or `~/` path by
+ *         `<path>`, and a dotted host name by `<host>`. A dotted name whose last
+ *         label is a known file extension (`install.sh`, `settings.json`) stays.
+ *
+ * Stricter than ips_in_text(): telemetry is aggregated across devices, so a
+ * per-boot token buys nothing there and a private address is still topology.
+ */
+std::string telemetry_text(std::string_view text, const std::vector<std::string>& identifiers,
+                           size_t max_len);
 
 /**
  * @brief Deterministic variants that take an explicit salt.
